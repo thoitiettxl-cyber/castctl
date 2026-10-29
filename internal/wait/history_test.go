@@ -189,3 +189,37 @@ func TestHistoryReplies(t *testing.T) {
 		t.Error("read error must propagate")
 	}
 }
+
+func TestReadWindowRetryScope(t *testing.T) {
+	ctx := context.Background()
+	// A transport error is retried once (two attempts total),
+	// then the second attempt's success wins.
+	h := &scriptHistory{byLimit: map[int][]historyResp{
+		200: {{err: errTransport}, {events: []any{userEv(42)}, hasMore: false}},
+	}}
+	events, _, err := readWindow(ctx, h, 200)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("retried read = (%v, %v), want 1 event", events, err)
+	}
+	if got := len(h.calls); got != 2 {
+		t.Errorf("calls = %d, want 2 (one retry)", got)
+	}
+	// An AuthError is fatal: no retry, one attempt.
+	h2 := &scriptHistory{def: historyResp{err: conn.NewAuthError("expired")}}
+	if _, _, err := readWindow(ctx, h2, 200); err == nil {
+		t.Fatal("AuthError must propagate")
+	}
+	if got := len(h2.calls); got != 1 {
+		t.Errorf("calls = %d, want 1 (no retry on fatal)", got)
+	}
+	// A cancelled context is fatal too: no retry.
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	h3 := &scriptHistory{def: historyResp{err: errTransport}}
+	if _, _, err := readWindow(cancelled, h3, 200); err == nil {
+		t.Fatal("cancelled read must propagate")
+	}
+	if got := len(h3.calls); got != 1 {
+		t.Errorf("calls = %d, want 1 (no retry when cancelled)", got)
+	}
+}

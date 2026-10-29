@@ -388,4 +388,8 @@ PR #5 merges, on PR3's commands framework) owns these:
 - Approval claim coordination between a monitor and a turn
   (the 15 s in-flight claim wait): a driver/monitor concern,
   not part of `AutoApprover`.
+- The auto-approve stderr lines (`auto-approved ...` /
+  `SKIPPED` / `FAILED`): logged by the CLI wiring from
+  `Result.AutoApproved` / `Result.AutoApproveErrors`; the wait
+  core has no logger.
 - Anything needing PR3's commands framework.

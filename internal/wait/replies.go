@@ -7,6 +7,7 @@ package wait
 import (
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -82,11 +83,15 @@ func IsSelfReferential(ev Event) (selfRef bool, level string, matched string) {
 // replies: events after afterSeq (and at or below upto when
 // given), oldest-first, keeping only completed message.assistant
 // events that are not self-referential, deduped by (seq,
-// message_id), and kept only when they carry text, unanswered
-// widgets, or media. It also returns the seqs of text-bearing
-// assistant events dropped for lacking payload status
-// "completed": the caller logs those (a status-less partial must
-// be visible when a wait reports no reply).
+// message_id), and kept when the RAW text is non-empty (before
+// cleaning), or when they carry unanswered widgets or media. The
+// keep decision tests the raw text, as Python does: a
+// marker-only or whitespace-only reply is kept, with the cleaned
+// text (possibly "") in the reply. Non-string text fields are
+// skipped (see firstText). It also returns the seqs of
+// text-bearing assistant events dropped for lacking payload
+// status "completed": the caller logs those (a status-less
+// partial must be visible when a wait reports no reply).
 //
 // Filter order matters and is preserved: seq window, literal
 // event_name (no event/type fallback), exact case-sensitive
@@ -120,15 +125,16 @@ func RepliesAfter(events []any, afterSeq int64, upto *int64) (replies []Reply, d
 			continue
 		}
 		mid := idKey(firstTruthy(p["message_id"], ev["message_id"]))
-		key := [2]string{intKey(seq), mid}
+		key := [2]string{strconv.FormatInt(seq, 10), mid}
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
-		text := CleanText(firstText(p["display_text"], p["content"], ev["display_text"]))
+		rawText := firstText(p["display_text"], p["content"], ev["display_text"])
+		text := CleanText(rawText)
 		widgets := OpenWidgets(ev)
 		hasMedia := EventHasMedia(ev)
-		if text == "" && len(widgets) == 0 && !hasMedia {
+		if rawText == "" && len(widgets) == 0 && !hasMedia {
 			continue
 		}
 		r := Reply{Seq: seq, MessageID: mid, Text: text, Media: hasMedia}
@@ -154,30 +160,6 @@ func firstTruthy(vs ...any) any {
 		}
 	}
 	return nil
-}
-
-func intKey(seq int64) string {
-	// Render without fmt: the dedupe key only needs to be
-	// injective over int64, which the decimal form is.
-	if seq == 0 {
-		return "0"
-	}
-	neg := seq < 0
-	if neg {
-		seq = -seq
-	}
-	var buf [20]byte
-	i := len(buf)
-	for seq > 0 {
-		i--
-		buf[i] = byte('0' + seq%10)
-		seq /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
 }
 
 // OpenWidgets returns the unanswered hatch widgets in ev: only

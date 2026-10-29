@@ -5,10 +5,12 @@
 package wait
 
 import (
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/thoitiettxl-cyber/muse-cli/go/internal/approvals"
+	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
 )
 
 // taskEv builds a task.status event. count nil means the field is
@@ -40,11 +42,11 @@ func TestVocabularies(t *testing.T) {
 	// 1 + 3 + 6 + 6 = 16 distinct strings. (The survey doc says
 	// 14; the code sets sum to 16, verified by executing the
 	// Python sets.)
-	if len(Done) != 1 || len(Failed) != 3 || len(SuspectDone) != 6 || len(SuspectFailed) != 6 || len(Terminal) != 16 {
+	if len(done) != 1 || len(failed) != 3 || len(suspectDone) != 6 || len(suspectFailed) != 6 || len(terminal) != 16 {
 		t.Errorf("vocabulary sizes: done=%d failed=%d suspectDone=%d suspectFailed=%d terminal=%d",
-			len(Done), len(Failed), len(SuspectDone), len(SuspectFailed), len(Terminal))
+			len(done), len(failed), len(suspectDone), len(suspectFailed), len(terminal))
 	}
-	if Terminal["running"] || Terminal["queued"] || Terminal["error "] {
+	if terminal["running"] || terminal["queued"] || terminal["error "] {
 		t.Error("non-terminal strings must not be in TERMINAL")
 	}
 }
@@ -535,9 +537,9 @@ func TestFeedApprovalsRecentDecisions(t *testing.T) {
 	// With an approver, a recently decided approval is not
 	// re-offered and, when nothing is left, the wait continues.
 	called := false
-	w := New("", WithApprover(func(items []approvals.DescribedApproval) ([]string, error) {
+	w := New("", WithApprover(func(items []approvals.DescribedApproval) approvals.ApprovalResult {
 		called = true
-		return nil, nil
+		return approvals.ApprovalResult{}
 	}))
 	recent := []any{map[string]any{"approval_id": "A", "decision": "allow_always"}}
 	if out := w.Feed(approvalEv([]any{appr("A")}, recent)); out != nil {
@@ -556,9 +558,9 @@ func TestFeedApprovalsRecentDecisions(t *testing.T) {
 
 func TestFeedApprovalsApprover(t *testing.T) {
 	calls := 0
-	approver := func(items []approvals.DescribedApproval) ([]string, error) {
+	approver := func(items []approvals.DescribedApproval) approvals.ApprovalResult {
 		calls++
-		return []string{"A"}, nil
+		return approvals.ApprovalResult{Handled: []string{"A"}}
 	}
 	w := New("", WithApprover(approver))
 	if out := w.Feed(approvalEv([]any{appr("A"), appr("B")}, nil)); out == nil || len(out.Approvals) != 1 {
@@ -571,8 +573,8 @@ func TestFeedApprovalsApprover(t *testing.T) {
 		t.Errorf("approver calls = %d", calls)
 	}
 	// All handled: keep waiting.
-	w2 := New("", WithApprover(func(items []approvals.DescribedApproval) ([]string, error) {
-		return []string{"A"}, nil
+	w2 := New("", WithApprover(func(items []approvals.DescribedApproval) approvals.ApprovalResult {
+		return approvals.ApprovalResult{Handled: []string{"A"}}
 	}))
 	if out := w2.Feed(approvalEv([]any{appr("A")}, nil)); out != nil {
 		t.Fatalf("all handled = %v", out)
@@ -584,10 +586,10 @@ func TestFeedApprovalsApprover(t *testing.T) {
 
 func TestFeedApprovalsApproverRaises(t *testing.T) {
 	calls := 0
-	approver := func(items []approvals.DescribedApproval) ([]string, error) {
+	approver := func(items []approvals.DescribedApproval) approvals.ApprovalResult {
 		calls++
 		// Partial decisions made before the raise are lost.
-		return []string{"A"}, errBoom
+		return approvals.ApprovalResult{Handled: []string{"A"}, Err: errBoom}
 	}
 	w := New("", WithApprover(approver))
 	out := w.Feed(approvalEv([]any{appr("A")}, nil))
@@ -616,9 +618,9 @@ func (e errString) Error() string { return string(e) }
 
 func TestFeedApprovalsNilIDNeverOfferedButEndsWait(t *testing.T) {
 	called := false
-	approver := func(items []approvals.DescribedApproval) ([]string, error) {
+	approver := func(items []approvals.DescribedApproval) approvals.ApprovalResult {
 		called = true
-		return nil, nil
+		return approvals.ApprovalResult{}
 	}
 	w := New("", WithApprover(approver))
 	pend := []any{map[string]any{"display": map[string]any{"summary_title": "X"}}}
@@ -664,5 +666,112 @@ func TestFeedApprovalsPendingFallback(t *testing.T) {
 	}}
 	if out := w2.Feed(ev2); out != nil {
 		t.Fatalf("empty pending_approvals must not fall back: %v", out)
+	}
+}
+
+func TestFeedApprovalsDuplicateIDsDedupedFirstWins(t *testing.T) {
+	var offered [][]approvals.DescribedApproval
+	approver := func(items []approvals.DescribedApproval) approvals.ApprovalResult {
+		offered = append(offered, items)
+		return approvals.ApprovalResult{}
+	}
+	w := New("", WithApprover(approver))
+	out := w.Feed(approvalEv([]any{appr("A"), appr("A"), appr("B"), appr("B")}, nil))
+	if out == nil || out.Kind != KindApproval || len(out.Approvals) != 2 {
+		t.Fatalf("duplicate snapshot = %v, want 2 approvals", out)
+	}
+	if len(offered) != 1 || len(offered[0]) != 2 {
+		t.Fatalf("offered = %v, want one call with [A B]", offered)
+	}
+	if *offered[0][0].ApprovalID != "A" || *offered[0][1].ApprovalID != "B" {
+		t.Errorf("offered ids = %v %v, want A B", offered[0][0].ApprovalID, offered[0][1].ApprovalID)
+	}
+}
+
+func TestFeedApprovalsNilIDsNotDeduped(t *testing.T) {
+	// Nil-id descriptions carry no id to dedupe on: both are
+	// reported, and neither is offered to the approver.
+	called := false
+	w := New("", WithApprover(func(items []approvals.DescribedApproval) approvals.ApprovalResult {
+		called = true
+		return approvals.ApprovalResult{}
+	}))
+	pend := []any{
+		map[string]any{"display": map[string]any{"summary_title": "X"}},
+		map[string]any{"display": map[string]any{"summary_title": "Y"}},
+	}
+	out := w.Feed(approvalEv(pend, nil))
+	if called {
+		t.Error("nil-id approvals must never be offered")
+	}
+	if out == nil || out.Kind != KindApproval || len(out.Approvals) != 2 {
+		t.Fatalf("nil-id snapshot = %v, want 2 approvals", out)
+	}
+}
+
+func TestFeedApprovalsAuthErrorIsFatal(t *testing.T) {
+	authErr := conn.NewAuthError("expired")
+	w := New("", WithApprover(func(items []approvals.DescribedApproval) approvals.ApprovalResult {
+		return approvals.ApprovalResult{Err: authErr}
+	}))
+	out := w.Feed(approvalEv([]any{appr("A")}, nil))
+	if out != nil {
+		t.Fatalf("fatal approver error must set no result: %v", out)
+	}
+	if w.FatalErr() == nil {
+		t.Fatal("FatalErr must be set")
+	}
+	var gotAuth *conn.AuthError
+	if !errors.As(w.FatalErr(), &gotAuth) {
+		t.Errorf("FatalErr = %v, want an AuthError", w.FatalErr())
+	}
+	if w.approverFailed["A"] {
+		t.Error("fatal ids must not be marked approver-failed")
+	}
+}
+
+func TestFeedApprovalsAccumulatesRecords(t *testing.T) {
+	rec := approvals.ApprovedRecord{ApprovalID: "A", Decision: approvals.Forever}
+	appErr := &approvals.ApproveError{ApprovalID: "B", Err: errBoom}
+	w := New("", WithApprover(func(items []approvals.DescribedApproval) approvals.ApprovalResult {
+		return approvals.ApprovalResult{
+			Approved: []approvals.ApprovedRecord{rec},
+			Errors:   []*approvals.ApproveError{appErr},
+		}
+	}))
+	w.Feed(approvalEv([]any{appr("A"), appr("B")}, nil))
+	if got := w.ApprovedRecords(); len(got) != 1 || got[0].ApprovalID != "A" {
+		t.Errorf("ApprovedRecords = %v", got)
+	}
+	if got := w.ApproveErrors(); len(got) != 1 || got[0].ApprovalID != "B" {
+		t.Errorf("ApproveErrors = %v", got)
+	}
+}
+
+func TestWaiterZeroValueUsable(t *testing.T) {
+	var w Waiter
+	w.Feed(taskEv("running", "R", "R", 0, nil))
+	out := w.Feed(taskEv("completed", "R", "R", 0, nil))
+	if out == nil || out.Kind != KindDone || out.Detail != "completed" {
+		t.Fatalf("zero-value waiter = %v, want done/completed", out)
+	}
+	var w2 Waiter
+	out2 := w2.Feed(approvalEv([]any{appr("A")}, nil))
+	if out2 == nil || out2.Kind != KindApproval {
+		t.Fatalf("zero-value waiter approvals = %v, want approval", out2)
+	}
+}
+
+func TestResultDeepCopiesApprovalOptions(t *testing.T) {
+	w := New("")
+	w.Feed(approvalEv([]any{appr("A", approvals.Forever)}, nil))
+	r1 := w.Result()
+	if len(r1.Approvals) != 1 || len(r1.Approvals[0].Options) != 1 {
+		t.Fatalf("result = %v", r1)
+	}
+	r1.Approvals[0].Options[0] = "mutated"
+	r2 := w.Result()
+	if r2.Approvals[0].Options[0] != approvals.Forever {
+		t.Errorf("second Result Options = %v, want [%q] (mutation leaked)", r2.Approvals[0].Options, approvals.Forever)
 	}
 }

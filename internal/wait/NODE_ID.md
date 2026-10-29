@@ -8,7 +8,13 @@ preserve the Python (0.6.1) behavior exactly:
 - Source: the profile's `config.json`, key `node_id`.
 - Precedence on load: file value > `MUSE_NODE_ID` env var >
   generate `crypto/rand` 8 bytes as 16 lowercase hex chars and
-  persist (migration/create paths only — never on a read-only load).
+  persist. Python `load_config` (cli.py:151-175) persists
+  whenever it generates: `changed=True` triggers `json.dump`
+  on ANY load call, including read-only wait paths. Only the
+  env-var fill avoids the write (it sets the value without
+  setting `changed`). Never writing on a read is PR3's
+  deliberate change from Python — label it as such wherever
+  the rule is stated; do not present it as Python's behavior.
 - Scope: one value per profile, reused verbatim on EVERY
   `chat.stream` body for that profile, across turns, sessions,
   processes, and reconnects. No per-turn, per-session, or
@@ -19,8 +25,12 @@ preserve the Python (0.6.1) behavior exactly:
   the per-request `x-request-id` (fresh UUID). Never substitute one
   for another.
 - It is part of the connection identity
-  `(cookies_file, vm_id, node_id, outbound_tag, outbound_hash)`:
-  changing it drops the warm connection (reload semantics).
+  `(cookies_file, vm_id, node_id)`: changing it drops the warm
+  connection (reload semantics). The 5-tuple
+  `(cookies_file, vm_id, node_id, outbound_tag, outbound_hash)`
+  is PR3-only (`internal/conn/gateway.go:66-72` there); this
+  base's `conn.Identity` is the triple
+  (`internal/conn/gateway.go:60-72` here).
 - `tempNodeID()` (ephemeral, in-memory, never written) exists ONLY
   for the handshake-only `profile test` when a profile has no
   persisted value. It MUST NEVER be used for a real `chat.stream`.
@@ -33,7 +43,7 @@ already travels as part of the connection identity:
 `CookiesFile` and `VMID` (`internal/conn/gateway.go`). The wait
 core adds no generation, persistence, or rotation anywhere:
 
-- `RunnerConfig.NodeID` is caller-supplied and carried through to
+- `Config.NodeID` is caller-supplied and carried through to
   `Result.NodeID`. The Runner never generates it, never persists
   it, never rotates it, and never sends it: the wait core has no
   send path (see SEAMS.md). An empty `NodeID` means the caller

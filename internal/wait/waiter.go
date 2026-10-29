@@ -5,9 +5,8 @@
 package wait
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,23 +19,47 @@ import (
 // history proof. All comparisons happen after lower-casing in
 // TaskStatusInfo; " completed " (with spaces) does not match, and
 // no stripping is done anywhere.
+//
+// The maps are unexported: they are mutable package state, and no
+// caller outside this package may rewrite the decision
+// vocabulary. Callers use IsDoneStatus, IsFailedStatus, and
+// IsTerminalStatus.
 var (
-	// Done holds the proven-done status.
-	Done = map[string]bool{"completed": true}
-	// Failed holds the proven-failed statuses, retained from the
+	// done holds the proven-done status.
+	done = map[string]bool{"completed": true}
+	// failed holds the proven-failed statuses, retained from the
 	// pre-existing cancel flow.
-	Failed = map[string]bool{"interrupted": true, "cancelled": true, "canceled": true}
-	// SuspectDone holds suspect done-like statuses.
-	SuspectDone = map[string]bool{"idle": true, "complete": true, "done": true, "finished": true, "succeeded": true, "success": true}
-	// SuspectFailed holds suspect failed-like statuses.
-	SuspectFailed = map[string]bool{"failed": true, "failure": true, "error": true, "errored": true, "aborted": true, "timed_out": true}
-	// Terminal is the union of all four sets (16 distinct strings).
-	Terminal = map[string]bool{
+	failed = map[string]bool{"interrupted": true, "cancelled": true, "canceled": true}
+	// suspectDone holds suspect done-like statuses.
+	suspectDone = map[string]bool{"idle": true, "complete": true, "done": true, "finished": true, "succeeded": true, "success": true}
+	// suspectFailed holds suspect failed-like statuses.
+	suspectFailed = map[string]bool{"failed": true, "failure": true, "error": true, "errored": true, "aborted": true, "timed_out": true}
+	// terminal is the union of all four sets (16 distinct strings).
+	terminal = map[string]bool{
 		"completed": true, "interrupted": true, "cancelled": true, "canceled": true,
 		"idle": true, "complete": true, "done": true, "finished": true, "succeeded": true, "success": true,
 		"failed": true, "failure": true, "error": true, "errored": true, "aborted": true, "timed_out": true,
 	}
 )
+
+// IsDoneStatus reports whether s is the proven-done status.
+func IsDoneStatus(s string) bool { return done[s] }
+
+// IsFailedStatus reports whether s is a proven-failed status.
+func IsFailedStatus(s string) bool { return failed[s] }
+
+// IsTerminalStatus reports whether s is any terminal-vocabulary
+// string, proven or suspect.
+func IsTerminalStatus(s string) bool { return terminal[s] }
+
+// IsSuspectDoneStatus reports whether s is a suspect done-like
+// status: terminal vocabulary, but proven only with history.
+func IsSuspectDoneStatus(s string) bool { return suspectDone[s] }
+
+// IsSuspectFailedStatus reports whether s is a suspect
+// failed-like status: terminal vocabulary, but proven only
+// with history.
+func IsSuspectFailedStatus(s string) bool { return suspectFailed[s] }
 
 // Outcome is a decided turn end: KindDone or KindFailed with Detail
 // set to the terminal status string, or KindApproval with
@@ -186,10 +209,16 @@ type Waiter struct {
 	runningSeq        *int64
 	afterSeq          *int64
 	boundaryDerived   bool
+	fatalErr          error
+	approvedRecords   []approvals.ApprovedRecord
+	approveErrors     []*approvals.ApproveError
 }
 
 // New builds a Waiter scoped to thread ("" means unscoped: the
-// payload is_thread rule applies).
+// payload is_thread rule applies). The zero value is also
+// usable: Feed lazily initializes the maps and the clock, so a
+// Waiter built without New behaves identically; New exists so
+// options can be supplied. A nil *Waiter is not usable.
 func New(thread string, opts ...Option) *Waiter {
 	w := &Waiter{
 		thread:         thread,
@@ -204,6 +233,24 @@ func New(thread string, opts ...Option) *Waiter {
 	return w
 }
 
+// ensureInit lazily initializes the maps and clock a zero-value
+// Waiter lacks, so Feed on a zero value never panics on a nil
+// map write or a nil clock call.
+func (w *Waiter) ensureInit() {
+	if w.handled == nil {
+		w.handled = map[string]bool{}
+	}
+	if w.offered == nil {
+		w.offered = map[string]bool{}
+	}
+	if w.approverFailed == nil {
+		w.approverFailed = map[string]bool{}
+	}
+	if w.now == nil {
+		w.now = time.Now
+	}
+}
+
 // Thread returns the scope thread.
 func (w *Waiter) Thread() string { return w.thread }
 
@@ -212,7 +259,11 @@ func (w *Waiter) RequireRunning() bool { return w.requireRunning }
 
 // Result returns the decided outcome, or nil while waiting. The
 // returned Outcome is a copy; mutating it does not affect the
-// Waiter.
+// Waiter. Approval option lists are deep-copied too: the Options
+// slice of each described approval is cloned, so a caller
+// mutating a returned Options cannot corrupt the stored result
+// (the sharing is terminal-only otherwise, but the clone is
+// trivial and removes the aliasing entirely).
 func (w *Waiter) Result() *Outcome {
 	if w.result == nil {
 		return nil
@@ -220,8 +271,32 @@ func (w *Waiter) Result() *Outcome {
 	cp := *w.result
 	if w.result.Approvals != nil {
 		cp.Approvals = append([]approvals.DescribedApproval(nil), w.result.Approvals...)
+		for i := range cp.Approvals {
+			cp.Approvals[i].Options = slices.Clone(w.result.Approvals[i].Options)
+		}
 	}
 	return &cp
+}
+
+// FatalErr returns the fatal error the approver reported, if
+// any: an AuthError from decide, which must end the wait as an
+// error rather than as an approval result for a human. The
+// driver checks it after every Feed and surfaces it; Feed
+// itself sets no result when the approver fails fatally.
+func (w *Waiter) FatalErr() error { return w.fatalErr }
+
+// ApprovedRecords returns the auto-approved records accumulated
+// across approver calls, in offer order. The driver copies them
+// into the Result.
+func (w *Waiter) ApprovedRecords() []approvals.ApprovedRecord {
+	return append([]approvals.ApprovedRecord(nil), w.approvedRecords...)
+}
+
+// ApproveErrors returns the auto-approve error records
+// accumulated across approver calls, in offer order. The driver
+// copies them into the Result.
+func (w *Waiter) ApproveErrors() []*approvals.ApproveError {
+	return append([]*approvals.ApproveError(nil), w.approveErrors...)
 }
 
 // SeenRunning reports whether a root-confirmed running for the
@@ -346,6 +421,7 @@ func pendingApprovals(ev Event) []any {
 // steps. Once a result is set (deviation D1), Feed is a no-op
 // returning the existing result.
 func (w *Waiter) Feed(ev Event) *Outcome {
+	w.ensureInit()
 	if w.result != nil {
 		return w.Result()
 	}
@@ -386,7 +462,7 @@ func (w *Waiter) Feed(ev Event) *Outcome {
 		w.status = &s
 		return nil
 	}
-	if !Terminal[s] {
+	if !terminal[s] {
 		return nil
 	}
 	// Foreign root: teaches nothing, status not updated. (The
@@ -403,10 +479,10 @@ func (w *Waiter) Feed(ev Event) *Outcome {
 		w.storeIgnored(s, "missing_root", ev)
 		return nil
 	}
-	if Done[s] || Failed[s] {
+	if done[s] || failed[s] {
 		if w.seenRunning {
 			w.result = &Outcome{Kind: KindFailed, Detail: s}
-			if Done[s] {
+			if done[s] {
 				w.result.Kind = KindDone
 			}
 			return w.Result()
@@ -433,6 +509,19 @@ func (w *Waiter) storeIgnored(s, reason string, ev Event) {
 }
 
 // feedApprovals runs the approval path of Feed.
+//
+// Duplicate approval ids in one snapshot are deduped first-wins:
+// only the first non-expired description of an id is offered or
+// reported, so one duplicated id can never be decided twice from
+// one snapshot. Nil-id descriptions carry no id to dedupe on and
+// are all kept (they are never offered to the approver).
+//
+// A fatal approver error (an AuthError from decide) sets
+// fatalErr and no result: the driver surfaces it as an error
+// instead of ending the wait as needs_approval. Any other
+// approver error marks every offered id approver-failed, as
+// before. Approved and error records from the approver call are
+// accumulated for the driver to report.
 func (w *Waiter) feedApprovals(ev Event, pend []any) *Outcome {
 	p := payload(ev)
 	recent := map[string]bool{}
@@ -448,14 +537,22 @@ func (w *Waiter) feedApprovals(ev Event, pend []any) *Outcome {
 		}
 	}
 	described := make([]approvals.DescribedApproval, 0, len(pend))
+	seenIDs := map[string]bool{}
 	for _, a := range pend {
 		d := approvals.DescribeApproval(a)
 		if recent[derefID(d.ApprovalID)] {
 			w.handled[derefID(d.ApprovalID)] = true
 		}
-		if !w.expired(d) {
-			described = append(described, d)
+		if w.expired(d) {
+			continue
 		}
+		if id := derefID(d.ApprovalID); id != "" {
+			if seenIDs[id] {
+				continue
+			}
+			seenIDs[id] = true
+		}
+		described = append(described, d)
 	}
 	if w.approver != nil {
 		var fresh []approvals.DescribedApproval
@@ -470,8 +567,21 @@ func (w *Waiter) feedApprovals(ev Event, pend []any) *Outcome {
 			for _, d := range fresh {
 				w.offered[derefID(d.ApprovalID)] = true
 			}
-			handled, err := w.approver(fresh)
-			if err != nil {
+			res := w.approver(fresh)
+			w.approvedRecords = append(w.approvedRecords, res.Approved...)
+			w.approveErrors = append(w.approveErrors, res.Errors...)
+			if res.Err != nil {
+				if isAuthError(res.Err) {
+					// Decide is not idempotent: a lost
+					// reply must never be re-decided
+					// blindly, and an expired login must
+					// never become exit 4. The driver
+					// ends the wait with this error; the
+					// offered ids are NOT marked
+					// approver-failed.
+					w.fatalErr = res.Err
+					return nil
+				}
 				// Decide is not idempotent: a lost reply
 				// must never be re-decided blindly. All
 				// offered ids go to approver_failed and
@@ -481,7 +591,7 @@ func (w *Waiter) feedApprovals(ev Event, pend []any) *Outcome {
 					w.approverFailed[derefID(d.ApprovalID)] = true
 				}
 			} else {
-				for _, id := range handled {
+				for _, id := range res.Handled {
 					w.handled[id] = true
 				}
 			}
@@ -540,25 +650,11 @@ func isNumeric(v any) bool {
 
 // FeedRecord parses one NDJSON record (a JSON object) and feeds
 // it. Unparseable input and non-object JSON change no state and
-// return nil, as in Python.
+// return nil, as in Python. Decoding is decodeRecord's job (see
+// events.go); this method only feeds the decoded event.
 func (w *Waiter) FeedRecord(record []byte) *Outcome {
-	record = bytes.TrimSpace(record)
-	if len(record) == 0 {
-		return nil
-	}
-	dec := json.NewDecoder(bytes.NewReader(record))
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return nil
-	}
-	// Trailing data after one JSON value is unparseable input.
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
-		return nil
-	}
-	ev, ok := v.(map[string]any)
-	if !ok {
+	ev := decodeRecord(record)
+	if ev == nil {
 		return nil
 	}
 	return w.Feed(ev)
@@ -577,7 +673,7 @@ func (w *Waiter) Settle(replies []Reply) *Outcome {
 	if w.boundaryUnknown {
 		return nil
 	}
-	if w.ignoredReason == "subagents" || Failed[s] {
+	if w.ignoredReason == "subagents" || failed[s] {
 		return nil
 	}
 	if len(replies) == 0 {
@@ -585,7 +681,7 @@ func (w *Waiter) Settle(replies []Reply) *Outcome {
 	}
 	w.clearIgnored()
 	kind := KindDone
-	if SuspectFailed[s] {
+	if suspectFailed[s] {
 		kind = KindFailed
 	}
 	w.result = &Outcome{Kind: kind, Detail: s}
@@ -601,7 +697,7 @@ func (w *Waiter) Settle(replies []Reply) *Outcome {
 // stream seqs and history seqs are different namespaces.
 func (w *Waiter) AcceptReplayedFailed(latestUserSeq *int64) *Outcome {
 	s, ok := w.IgnoredTerminal()
-	if w.result != nil || !ok || !Failed[s] {
+	if w.result != nil || !ok || !failed[s] {
 		return nil
 	}
 	if w.boundaryUnknown || w.ignoredReason != "" {

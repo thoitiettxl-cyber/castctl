@@ -5,7 +5,9 @@
 package wait
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 )
 
 // Event is one decoded history/stream record: a JSON object. The
@@ -15,6 +17,34 @@ import (
 // UseNumber, or as float64/int64 from other decoders; the helpers
 // below accept every numeric shape.
 type Event = map[string]any
+
+// decodeRecord decodes one NDJSON record into an Event, or nil
+// when the record is empty, unparseable, not an object, or
+// followed by trailing data after one JSON value. It is the ONE
+// NDJSON decoder for the package: both the Waiter (FeedRecord)
+// and the Runner use it, so the trailing-data rule is defined
+// and tested exactly once, here.
+func decodeRecord(record []byte) Event {
+	record = bytes.TrimSpace(record)
+	if len(record) == 0 {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(record))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		return nil
+	}
+	ev, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return ev
+}
 
 // payload returns the event's payload dict, or an empty dict when
 // the payload is absent or not a dict. A non-dict payload is
@@ -192,7 +222,13 @@ func idKey(v any) string {
 }
 
 // firstText returns the first non-empty string among the values,
-// mirroring Python's `or` chain over display_text/content fields.
+// mirroring Python's `or` chain over display_text/content fields,
+// except for one deliberate strictness: a non-string value is
+// skipped, never taken as text. Python's `or` chain would take
+// the first truthy value of any type; the server always sends
+// strings in these fields, and a non-string carries no display
+// text. Callers that need Python's stringify-everything rule
+// (task status) use stringifyStatus instead.
 func firstText(vs ...any) string {
 	for _, v := range vs {
 		if s, ok := v.(string); ok && s != "" {

@@ -19,8 +19,12 @@ package approvals
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
+
+	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
 )
 
 // Forever is Muse's "forever" / "Always allow" choice.
@@ -223,11 +227,27 @@ func ChooseAutoDecision(d DescribedApproval, autoApprove, allowOnce bool) (strin
 	return "", false
 }
 
-// Approver decides new pending approvals and returns the ids it
-// handled. It is called synchronously by the wait core; an error
-// return means the approver failed, and every id it was offered in
-// that call is never offered again.
-type Approver func(items []DescribedApproval) ([]string, error)
+// Approver decides new pending approvals. It returns what it
+// handled, the approved and error records for the driver to
+// report, and a fatal error when the call itself failed: every
+// id it was offered in a failed call is never offered again by
+// the waiter, and a fatal AuthError (Err unwraps to
+// *conn.AuthError) ends the wait as an error instead. It is
+// called synchronously by the wait core.
+type Approver func(items []DescribedApproval) ApprovalResult
+
+// ApprovalResult is what an Approver returns: the ids it
+// handled, the approved records, the error records (skips and
+// failed decides, in item order), and a fatal error. Err is set
+// only when the call failed as a whole: an AuthError from any
+// decide, or the first error when nothing was handled. Approved
+// and Errors are reported even when Err is set.
+type ApprovalResult struct {
+	Handled  []string
+	Approved []ApprovedRecord
+	Errors   []*ApproveError
+	Err      error
+}
 
 // Decider performs one egress.approval.decide call. It must be
 // called at most once per approval: AutoApprover never retries it.
@@ -271,26 +291,78 @@ func (e *ApproveError) Unwrap() error { return e.Err }
 //
 // A connector failure before any decide records an error for every
 // item and returns no handled ids.
+//
+// Concurrency contract: an AutoApprover is safe for concurrent
+// use, with claim semantics. The first Approve call to present an
+// id claims it: the Decider runs at most once per id for the
+// AutoApprover's lifetime, and a concurrent or later presentation
+// of the same id is skipped silently (no re-decide, no warning).
+// A failed decide still claims the id — Decide is not idempotent,
+// and a failed or lost reply must never be re-decided blindly; the
+// error is returned and the caller must surface it. The mutex
+// guards only the warned/decided sets and is never held across a
+// decide call, so unrelated ids still decide in parallel.
+//
+// Lifetime: warned and decided persist for the AutoApprover's
+// lifetime. Create one AutoApprover per wait, as the wait's caller
+// does; sharing one across waits would suppress re-warnings and
+// re-decides for ids seen in an earlier wait.
+//
+// AutoApprover never writes to stderr. The Python helper prints
+// auto-approved/skipped/failed lines; in Go the caller owns
+// stderr and logs the Approved/Error records the wait Result
+// carries (see ApprovalResult and the wait Result fields). The
+// core has no logger, and inventing one here would split the
+// logging home.
 type AutoApprover struct {
 	connect   func(ctx context.Context) (Decider, func(), error)
 	allowOnce bool
+	mu        sync.Mutex
 	warned    map[string]bool
+	decided   map[string]bool
 }
 
 // NewAutoApprover builds an AutoApprover. Connect opens one fresh
 // connection and returns its Decider plus a close function; the
 // close function runs even when deciding fails, and is never
 // called when Connect itself fails.
+//
+// The zero value is usable once Connect is set (there is no
+// setter: build with NewAutoApprover in practice); with a nil
+// Connect, Approve records a connect error for every item
+// instead of panicking.
 func NewAutoApprover(connect func(ctx context.Context) (Decider, func(), error), allowOnce bool) *AutoApprover {
-	return &AutoApprover{connect: connect, allowOnce: allowOnce, warned: map[string]bool{}}
+	return &AutoApprover{connect: connect, allowOnce: allowOnce, warned: map[string]bool{}, decided: map[string]bool{}}
 }
 
 // Approve decides items. It returns the handled ids, the approved
 // records, and the errors, in item order. A Decider is invoked at
-// most once per item in this call, and never for an item with no
-// decision.
+// most once per id for the AutoApprover's lifetime (see the claim
+// semantics on AutoApprover), and never for an item with no
+// decision. A nil receiver records an error for every item.
 func (a *AutoApprover) Approve(ctx context.Context, items []DescribedApproval) (handled []string, approved []ApprovedRecord, errs []*ApproveError) {
-	decide, closeConn, err := a.connect(ctx)
+	if a == nil {
+		for _, item := range items {
+			errs = append(errs, a.errFor(item, "", errors.New("approvals: nil AutoApprover")))
+		}
+		return nil, nil, errs
+	}
+	a.mu.Lock()
+	if a.warned == nil {
+		a.warned = map[string]bool{}
+	}
+	if a.decided == nil {
+		a.decided = map[string]bool{}
+	}
+	connect := a.connect
+	a.mu.Unlock()
+	if connect == nil {
+		for _, item := range items {
+			errs = append(errs, a.errFor(item, "", errors.New("approvals: no Connect")))
+		}
+		return nil, nil, errs
+	}
+	decide, closeConn, err := connect(ctx)
 	if err != nil {
 		for _, item := range items {
 			errs = append(errs, a.errFor(item, "", err))
@@ -308,14 +380,37 @@ func (a *AutoApprover) Approve(ctx context.Context, items []DescribedApproval) (
 			Decision:   decision,
 		}
 		if !ok {
-			if id := deref(item.ApprovalID); !a.warned[id] {
-				a.warned[id] = true
+			a.mu.Lock()
+			alreadyWarned := a.warned[deref(item.ApprovalID)]
+			if !alreadyWarned {
+				a.warned[deref(item.ApprovalID)] = true
+			}
+			a.mu.Unlock()
+			if !alreadyWarned {
 				errs = append(errs, a.errFor(item, "", fmt.Errorf("no forever option (offers %v)", item.Options)))
 			}
 			continue
 		}
+		if id := deref(item.ApprovalID); id != "" {
+			a.mu.Lock()
+			claimed := a.decided[id]
+			if !claimed {
+				a.decided[id] = true
+			}
+			a.mu.Unlock()
+			if claimed {
+				continue
+			}
+		}
 		if err := decide(ctx, item, decision); err != nil {
 			errs = append(errs, a.errFor(item, decision, err))
+			if isAuthError(err) {
+				// Auth is gone: deciding further items
+				// on this connection is pointless, and
+				// the caller must surface the AuthError
+				// rather than collect more failures.
+				break
+			}
 			continue
 		}
 		approved = append(approved, rec)
@@ -325,21 +420,59 @@ func (a *AutoApprover) Approve(ctx context.Context, items []DescribedApproval) (
 }
 
 // AsApprover adapts this AutoApprover to the wait core's Approver
-// shape, deciding on a background context. An error return marks
-// every offered id as approver-failed in the waiter, so the
-// connection error surfaces once as an approval result for a
-// human rather than being retried.
+// shape.
+//
+// Context contract (deliberate): the decide RPC runs on
+// context.Background(), NOT on the wait's context. Cancelling
+// the wait mid-RPC could lose the reply and invite a
+// double-decide of a non-idempotent call; a lost reply is the
+// worse hazard. The RPC itself is bounded by the gateway /
+// connector timeout, and the wait still ends after the approver
+// returns — the background context only detaches this one call
+// from wait cancellation, it does not let the wait run on.
+//
+// An AuthError from any decide (or from Connect) is returned
+// unwrapped as ApprovalResult.Err, so the waiter ends the wait
+// with it instead of converting it to an exit-4 approval
+// result. Any other failure surfaces as Err only when nothing
+// was handled, as before: the waiter then marks the offered ids
+// approver-failed instead of silently leaving them undecided on
+// every snapshot. Approved and error records are always
+// carried in the result for the driver to report; nothing is
+// logged here (see AutoApprover).
 func (a *AutoApprover) AsApprover() Approver {
-	return func(items []DescribedApproval) ([]string, error) {
-		handled, _, errs := a.Approve(context.Background(), items)
+	return func(items []DescribedApproval) ApprovalResult {
+		handled, approved, errs := a.Approve(context.Background(), items)
+		res := ApprovalResult{Handled: handled, Approved: approved, Errors: errs}
+		for _, e := range errs {
+			if authErr := authErrorOf(e); authErr != nil {
+				res.Err = authErr
+				return res
+			}
+		}
 		if len(errs) > 0 && len(handled) == 0 && len(items) > 0 {
 			// Surface the first failure so the waiter records the
 			// offered ids as approver-failed instead of silently
 			// leaving them undecided on every snapshot.
-			return handled, errs[0]
+			res.Err = errs[0]
 		}
-		return handled, nil
+		return res
 	}
+}
+
+// authErrorOf returns the *conn.AuthError wrapped in e, if any.
+func authErrorOf(e *ApproveError) *conn.AuthError {
+	var authErr *conn.AuthError
+	if e != nil && errors.As(e, &authErr) {
+		return authErr
+	}
+	return nil
+}
+
+// isAuthError reports whether err wraps a *conn.AuthError.
+func isAuthError(err error) bool {
+	var authErr *conn.AuthError
+	return errors.As(err, &authErr)
 }
 
 func (a *AutoApprover) errFor(item DescribedApproval, decision string, err error) *ApproveError {

@@ -33,8 +33,21 @@ once and reused for the whole session.
   contains, or is contained in, the sent text) on a MONOTONIC
   deadline (`send --ack-timeout`, default 30 s). No ack → the
   `send` exit 5 path (delivery failure, not a wait outcome).
-  The ack poll uses fresh connections and never closes the
-  stream connection early: no raw fire-and-forget.
+  The ack poll is `deliver`'s job (cli.py:973-1010): it calls
+  `gw.call_json("chat.history", ...)` on the SAME gateway that
+  sent the message — not fresh connections — and it never
+  closes the stream connection early: no raw fire-and-forget.
+  `Chat.send` (chat.py:95-117) does NO ack poll at all: it
+  opens the stream, then polls `new_replies` on a wall-clock
+  deadline. Exit 5 belongs to `cmd_send` / `_send_finish`
+  (cli.py:1036-1039) only; there is no exit-5 path in the
+  REPL's send.
+- DESIGN CHANGE (flagged explicitly, not a port of
+  `Chat.send`): if the Go REPL acks before waiting, it follows
+  `deliver`, not `Chat.send` — `Chat.send` never acks. The
+  ack-before-wait shape is a deliberate change from the
+  interactive `Chat` behavior, chosen so the REPL knows the
+  message landed before it waits for the turn.
 
 ## Waiting for the reply
 

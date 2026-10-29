@@ -8,7 +8,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
 )
 
 func strp(s string) *string { return &s }
@@ -198,13 +202,18 @@ func TestAutoApproverDecidesEachAtMostOnce(t *testing.T) {
 	if calls["a1"] != 1 || calls["a2"] != 0 {
 		t.Errorf("decide calls = %v, want a1:1 a2:0", calls)
 	}
-	// Second call: the skip warning fires once per id.
-	_, _, errs2 := aa.Approve(context.Background(), items)
-	if len(errs2) != 0 {
-		t.Errorf("second Approve errs = %v, want none (warned once)", errs2)
+	// Second call: a1 is already claimed (decided once per
+	// AutoApprover lifetime) and the a2 skip warning fired
+	// once already: no re-decide, no new errors.
+	handled2, _, errs2 := aa.Approve(context.Background(), items)
+	if len(handled2) != 0 || len(errs2) != 0 {
+		t.Errorf("second Approve = handled %v errs %v, want none", handled2, errs2)
 	}
-	if calls["a1"] != 2 {
-		t.Errorf("decide calls after second Approve = %v, want a1:2 (one per Approve call)", calls)
+	if calls["a1"] != 1 {
+		t.Errorf("decide calls after second Approve = %v, want a1:1 (claimed, never re-decided)", calls)
+	}
+	if calls["a2"] != 0 {
+		t.Errorf("decide calls after second Approve = %v, want a2:0", calls)
 	}
 }
 
@@ -253,5 +262,148 @@ func TestAutoApproverAllowOnceFallback(t *testing.T) {
 	})
 	if len(handled) != 1 || len(decided) != 1 || decided[0] != Once {
 		t.Errorf("handled=%v decided=%v", handled, decided)
+	}
+}
+
+func TestAutoApproverConcurrentSameIDDecidesOnce(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	decide := func(ctx context.Context, a DescribedApproval, decision string) error {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+		return nil
+	}
+	aa := NewAutoApprover(func(ctx context.Context) (Decider, func(), error) {
+		return decide, func() {}, nil
+	}, false)
+	item := DescribedApproval{ApprovalID: strp("a1"), Options: []string{Forever}}
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			aa.Approve(context.Background(), []DescribedApproval{item})
+		}()
+	}
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Errorf("concurrent decide calls = %d, want 1", calls)
+	}
+}
+
+func TestAutoApproverDuplicateIDsInOneCallDecideOnce(t *testing.T) {
+	calls := 0
+	aa := NewAutoApprover(func(ctx context.Context) (Decider, func(), error) {
+		return func(ctx context.Context, a DescribedApproval, decision string) error {
+			calls++
+			return nil
+		}, func() {}, nil
+	}, false)
+	item := DescribedApproval{ApprovalID: strp("a1"), Options: []string{Forever}}
+	handled, _, _ := aa.Approve(context.Background(), []DescribedApproval{item, item})
+	if calls != 1 {
+		t.Errorf("decide calls = %d, want 1", calls)
+	}
+	if len(handled) != 1 {
+		t.Errorf("handled = %v, want [a1] once", handled)
+	}
+}
+
+func TestAutoApproverSequentialSecondCallSkipsDecided(t *testing.T) {
+	calls := 0
+	aa := NewAutoApprover(func(ctx context.Context) (Decider, func(), error) {
+		return func(ctx context.Context, a DescribedApproval, decision string) error {
+			calls++
+			return nil
+		}, func() {}, nil
+	}, false)
+	item := DescribedApproval{ApprovalID: strp("a1"), Options: []string{Forever}}
+	aa.Approve(context.Background(), []DescribedApproval{item})
+	handled, _, errs := aa.Approve(context.Background(), []DescribedApproval{item})
+	if calls != 1 {
+		t.Errorf("decide calls = %d, want 1", calls)
+	}
+	if len(handled) != 0 || len(errs) != 0 {
+		t.Errorf("second Approve = handled %v errs %v, want none", handled, errs)
+	}
+}
+
+func TestAutoApproverFailedDecideClaimsID(t *testing.T) {
+	calls := 0
+	aa := NewAutoApprover(func(ctx context.Context) (Decider, func(), error) {
+		return func(ctx context.Context, a DescribedApproval, decision string) error {
+			calls++
+			return errors.New("gateway down")
+		}, func() {}, nil
+	}, false)
+	item := DescribedApproval{ApprovalID: strp("a1"), Options: []string{Forever}}
+	aa.Approve(context.Background(), []DescribedApproval{item})
+	_, _, errs := aa.Approve(context.Background(), []DescribedApproval{item})
+	if calls != 1 {
+		t.Errorf("decide calls = %d, want 1 (a failed decide still claims the id)", calls)
+	}
+	if len(errs) != 0 {
+		t.Errorf("second Approve errs = %v, want none (claimed)", errs)
+	}
+}
+
+func TestAutoApproverAuthErrorPropagatesAndStops(t *testing.T) {
+	authErr := conn.NewAuthError("expired")
+	decided := []string{}
+	aa := NewAutoApprover(func(ctx context.Context) (Decider, func(), error) {
+		return func(ctx context.Context, a DescribedApproval, decision string) error {
+			decided = append(decided, deref(a.ApprovalID))
+			return authErr
+		}, func() {}, nil
+	}, false)
+	items := []DescribedApproval{
+		{ApprovalID: strp("a1"), Options: []string{Forever}},
+		{ApprovalID: strp("a2"), Options: []string{Forever}},
+	}
+	_, _, errs := aa.Approve(context.Background(), items)
+	if len(decided) != 1 || decided[0] != "a1" {
+		t.Errorf("decided = %v, want [a1] only (AuthError stops the call)", decided)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("errs = %v, want 1", errs)
+	}
+	var gotAuth *conn.AuthError
+	if !errors.As(errs[0], &gotAuth) {
+		t.Errorf("err = %v, want an AuthError", errs[0])
+	}
+	// AsApprover surfaces the AuthError unwrapped as the
+	// fatal result error.
+	res := aa.AsApprover()(items)
+	var resAuth *conn.AuthError
+	if !errors.As(res.Err, &resAuth) {
+		t.Errorf("AsApprover Err = %v, want an AuthError", res.Err)
+	}
+	// A fresh approver whose Connect fails with AuthError
+	// surfaces it the same way.
+	aa2 := NewAutoApprover(func(ctx context.Context) (Decider, func(), error) {
+		return nil, nil, authErr
+	}, false)
+	res2 := aa2.AsApprover()(items)
+	if !errors.As(res2.Err, &resAuth) {
+		t.Errorf("connect-AuthError Err = %v, want an AuthError", res2.Err)
+	}
+}
+
+func TestAutoApproverZeroAndNilGuards(t *testing.T) {
+	// Zero value with no Connect: errors, no panic.
+	var aa AutoApprover
+	_, _, errs := aa.Approve(context.Background(), []DescribedApproval{{ApprovalID: strp("a1")}})
+	if len(errs) != 1 {
+		t.Fatalf("zero-value errs = %v, want 1", errs)
+	}
+	// Nil receiver: errors, no panic.
+	var nilAA *AutoApprover
+	_, _, errs = nilAA.Approve(context.Background(), []DescribedApproval{{ApprovalID: strp("a1")}})
+	if len(errs) != 1 {
+		t.Fatalf("nil-receiver errs = %v, want 1", errs)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // WaitPhrases is the complete waiting-phrase vocabulary from
@@ -56,26 +57,53 @@ var WaitPhrases = []string{
 // Safety regex, verbatim from wait.py (case-insensitive).
 var safetyRe = regexp.MustCompile(`(?i)(?:safety check|kiểm tra an toàn|cơ chế an toàn|tripped .{0,30}safety|refus(?:e|ed) to (?:run|do|continue)|từ chối (?:chạy|làm))`)
 
-// Gate prefix regex: everything up to and including the
-// separator whitespace after ":" or "=". The negative lookahead
-// `(?!none\b)` in the Python pattern has no RE2 equivalent, so
-// the remainder check is done by hand in gateMatches (see below);
+// Gate prefix: the literal "gate"/"policy" + optional
+// separator + "question(s)". The whitespace around the ":"/"="
+// separator is NOT in the regex: RE2 \s is ASCII-only, while
+// Python's \s is Unicode, so gateMatches consumes the separator
+// whitespace by hand with unicode.IsSpace (see below). The
+// negative lookahead `(?!none\b)` in the Python pattern has no
+// RE2 equivalent, so the remainder check is also done by hand;
 // the two together are exactly the Python rule.
-var gatePrefixRe = regexp.MustCompile(`(?i)(?:gate|policy)[ _-]?questions?\s*[:=]\s*`)
+var gatePrefixRe = regexp.MustCompile(`(?i)(?:gate|policy)[ _-]?questions?`)
 
 // gateMatches implements the Python gate regex
 // `(gate|policy)[ _-]?questions?\s*[:=]\s*(?!none\b)\S`.
-// For each prefix match, the remainder must start with a
-// non-whitespace character that is not the word "none":
-// "gate questions: none" and "gate questions: none of these"
-// do not match, while "gate questions: nonetheless" does.
+// For each prefix match, Unicode whitespace is skipped, a ":"
+// or "=" separator is required, more Unicode whitespace is
+// skipped, and the remainder must start with a non-whitespace
+// character that is not the word "none": "gate questions: none"
+// and "gate questions: none of these" do not match, while "gate
+// questions: nonetheless" does. Unicode spaces count as \s on
+// both sides of the separator: "gate questions:\u00a0none" and
+// "gate questions:\vnone" do not match, exactly as in Python,
+// where \s* consumes the space and \S then fails.
 func gateMatches(t string) bool {
 	for _, loc := range gatePrefixRe.FindAllStringIndex(t, -1) {
 		rest := t[loc[1]:]
-		if rest == "" {
+		i := 0
+		for i < len(rest) {
+			r, size := utf8.DecodeRuneInString(rest[i:])
+			if !unicode.IsSpace(r) {
+				break
+			}
+			i += size
+		}
+		if i >= len(rest) || (rest[i] != ':' && rest[i] != '=') {
 			continue
 		}
-		if startsWithNoneWord(rest) {
+		i++
+		for i < len(rest) {
+			r, size := utf8.DecodeRuneInString(rest[i:])
+			if !unicode.IsSpace(r) {
+				break
+			}
+			i += size
+		}
+		if i >= len(rest) {
+			continue
+		}
+		if startsWithNoneWord(rest[i:]) {
 			continue
 		}
 		return true

@@ -248,3 +248,44 @@ func TestUserAck(t *testing.T) {
 }
 
 func strptr(s string) *string { return &s }
+
+func TestRepliesAfterMarkerOnlyAndWhitespaceKept(t *testing.T) {
+	// The keep decision tests the RAW text, as Python does: a
+	// marker-only reply, a whitespace-only reply, and a real
+	// reply are all kept (3 entries); the cleaned text of the
+	// first two is "".
+	events := []any{
+		asst(10, "completed", "[[hatch_widget:q1]]", nil),
+		asst(11, "completed", "   ", nil),
+		asst(12, "completed", "hello", nil),
+	}
+	replies, _ := RepliesAfter(events, 0, nil)
+	if len(replies) != 3 {
+		t.Fatalf("replies = %+v, want 3", replies)
+	}
+	if replies[0].Text != "" || replies[1].Text != "" || replies[2].Text != "hello" {
+		t.Errorf("texts = %q %q %q, want \"\" \"\" \"hello\"", replies[0].Text, replies[1].Text, replies[2].Text)
+	}
+}
+
+func TestRepliesAfterNegativeSeqs(t *testing.T) {
+	// Dedupe keys render seqs exactly, including negatives:
+	// two events at the same negative seq with the same id
+	// dedupe to one, and different ids are both kept. The
+	// seq rendering itself is strconv.FormatInt (the old
+	// hand-rolled renderer overflowed on math.MinInt64, which
+	// no afterSeq can admit through the seq filter — traced,
+	// not observable here).
+	events := []any{
+		asst(-5, "completed", "one", map[string]any{"message_id": "m1"}),
+		asst(-5, "completed", "one again", map[string]any{"message_id": "m1"}),
+		asst(-5, "completed", "two", map[string]any{"message_id": "m2"}),
+	}
+	replies, _ := RepliesAfter(events, -10, nil)
+	if len(replies) != 2 {
+		t.Fatalf("replies = %+v, want 2 (one, two)", replies)
+	}
+	if replies[0].Text != "one" || replies[1].Text != "two" {
+		t.Errorf("texts = %q %q", replies[0].Text, replies[1].Text)
+	}
+}

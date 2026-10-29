@@ -5,12 +5,10 @@
 package wait
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -55,22 +53,47 @@ const (
 // closes it after use. conn.Gateway satisfies this interface;
 // SharedConn.Close is a no-op, so closing a shared connection is
 // safe.
+//
+// The OnRecord and ShouldStop callbacks in SubscribeOptions are
+// invoked serially, on the goroutine that called SubscribeRaw:
+// the Runner's callbacks assume single-goroutine access and no
+// other goroutine feeds the Waiter.
 type Subscriber interface {
 	SubscribeRaw(ctx context.Context, method string, opts conn.SubscribeOptions) ([][]byte, error)
 	Close() error
 }
 
+// conn.Gateway must satisfy Subscriber: the Runner's Dial
+// closures return gateways, and this assertion fails the build
+// if the Gateway contract ever drifts from the narrowed one.
+var _ Subscriber = (conn.Gateway)(nil)
+
 // Config configures a Runner. Zero values take the defaults
 // above; a negative duration disables that timer (watchdog,
-// safety-net cadence). Timeout <= 0 means DefaultTimeout.
-// HistoryLimits nil means DefaultHistoryLimits. Clock nil means
-// the real clock.
+// safety-net cadence) for RecheckAfter and CheckEvery only. Every
+// other negative duration is clamped to its default in NewRunner:
+// a negative budget or pause is a misconfiguration, not a
+// disable. Timeout <= 0 means DefaultTimeout.
+// HistoryLimits nil or empty means DefaultHistoryLimits
+// (cloned: the Runner never aliases the shared slice). Clock nil
+// means the real clock.
+//
+// There is no OnlineGrace field: the 3 s online-idle grace is a
+// fixed protocol constant (DefaultOnlineGrace), not a
+// caller-tunable timer.
 //
 // NodeID is the caller-supplied stable per-profile identity (see
 // NODE_ID.md). The Runner carries it, never generates, persists
 // or rotates it, and never sends it: the send path (deferred
 // wiring) reads it from the Result. An empty NodeID means the
 // caller supplied none; the Runner invents nothing.
+//
+// Approver is the wait core's Approver func. The records its
+// calls produce (approved + errors) are accumulated by the
+// Waiter and copied into Result.AutoApproved /
+// Result.AutoApproveErrors. The Runner has no logger and writes
+// nothing to stderr: the caller (the CLI wiring) logs those
+// records from the Result.
 type Config struct {
 	Thread           string
 	NodeID           string
@@ -96,21 +119,30 @@ type Config struct {
 
 // Result is the wait's endgame result, mirroring the Python
 // result dict. Empty strings mean "none" (no status was ever
-// stored, no final text, no input reason).
+// stored, no final text, no input reason). Status is the
+// Waiter's last stored status (running or terminal) regardless
+// of kind — including KindApproval, where Python reports
+// w.status too. AutoApproved and AutoApproveErrors carry the
+// auto-approve records (Python's auto_approved /
+// auto_approve_errors) when an approver ran; they are empty
+// otherwise. The caller logs them to stderr: the Runner has no
+// logger and the core never writes to stderr.
 type Result struct {
-	Kind             Kind
-	Outcome          string
-	Status           string
-	AfterSeq         int64
-	FinalText        string
-	Replies          []Reply
-	FinalReadFailed  bool
-	Note             string
-	Approvals        []approvals.DescribedApproval
-	NeedsInputReason string
-	Question         string
-	ExitCode         int
-	NodeID           string
+	Kind              Kind
+	Outcome           string
+	Status            string
+	AfterSeq          int64
+	FinalText         string
+	Replies           []Reply
+	FinalReadFailed   bool
+	Note              string
+	Approvals         []approvals.DescribedApproval
+	NeedsInputReason  string
+	Question          string
+	ExitCode          int
+	NodeID            string
+	AutoApproved      []approvals.ApprovedRecord
+	AutoApproveErrors []*approvals.ApproveError
 }
 
 var errHistoryRead = errors.New("wait: history read failed")
@@ -188,8 +220,30 @@ func NewRunner(cfg Config) (*Runner, error) {
 	if cfg.LagPoll == 0 {
 		cfg.LagPoll = DefaultLagPoll
 	}
-	if cfg.HistoryLimits == nil {
-		cfg.HistoryLimits = DefaultHistoryLimits
+	if cfg.StateCheckBudget < 0 {
+		cfg.StateCheckBudget = DefaultStateCheckBudget
+	}
+	if cfg.ReconnectBudget < 0 {
+		cfg.ReconnectBudget = DefaultReconnectBudget
+	}
+	if cfg.ResubPause < 0 {
+		cfg.ResubPause = DefaultResubPause
+	}
+	if cfg.FinalReadFloor < 0 {
+		cfg.FinalReadFloor = DefaultFinalReadFloor
+	}
+	if cfg.LagWindow < 0 {
+		cfg.LagWindow = DefaultLagWindow
+	}
+	if cfg.LagPoll < 0 {
+		cfg.LagPoll = DefaultLagPoll
+	}
+	// A nil or explicitly empty HistoryLimits means "unset":
+	// an empty slice would otherwise disable every history
+	// proof (no windows to read). Clone so the Runner never
+	// aliases the shared default slice.
+	if len(cfg.HistoryLimits) == 0 {
+		cfg.HistoryLimits = slices.Clone(DefaultHistoryLimits)
 	}
 	r := &Runner{cfg: cfg, clock: cfg.Clock}
 	r.waiter = New(cfg.Thread, WithApprover(cfg.Approver))
@@ -308,12 +362,32 @@ func (r *Runner) subscribeOnce(ctx context.Context) error {
 	}
 	sub, err := r.cfg.Dial(ctx)
 	if err != nil {
-		if isAuthError(err) || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if isAuthError(err) {
 			return err
 		}
 		r.failures++
 		return r.noteFailure(ctx)
 	}
+	if sub == nil {
+		// A Dial that returns (nil, nil) is a transport
+		// failure, never a panic: resubscribe with backoff
+		// like any other failed dial. (A typed nil inside a
+		// non-nil interface is out of scope: the Dial
+		// contract is to return a usable Subscriber or an
+		// error.)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		r.failures++
+		return r.noteFailure(ctx)
+	}
+	// Close is deferred, not called after SubscribeRaw: a
+	// panic in SubscribeRaw must not skip the close Python's
+	// finally guarantees.
+	defer func() { _ = sub.Close() }()
 	opts := conn.SubscribeOptions{
 		Body:           r.subscribeBody(),
 		MaxRecords:     1000000000,
@@ -323,9 +397,11 @@ func (r *Runner) subscribeOnce(ctx context.Context) error {
 		ShouldStop:     r.shouldStop(ctx),
 	}
 	_, subErr := sub.SubscribeRaw(ctx, "chat.subscribe", opts)
-	_ = sub.Close()
 	if subErr != nil {
-		if isAuthError(subErr) || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if isAuthError(subErr) {
 			return subErr
 		}
 		r.failures++
@@ -352,9 +428,13 @@ func (r *Runner) onRecord(ctx context.Context) func([]byte) bool {
 		if r.waiter.Result() != nil {
 			return true
 		}
-		ev := parseRecord(record)
+		ev := decodeRecord(record)
 		if ev != nil {
 			r.waiter.Feed(ev)
+			if ferr := r.waiter.FatalErr(); ferr != nil {
+				r.pendingErr = ferr
+				return true
+			}
 			r.ratchet()
 			if r.waiter.Result() != nil {
 				return true
@@ -480,6 +560,13 @@ func (r *Runner) noteFailure(ctx context.Context) error {
 // next record retries. A FAILED terminal is proved by user-seq
 // equality only (no replies are read); any other terminal is
 // proved by replies.
+//
+// The throttle key is the terminal plus its ignored reason,
+// not the terminal alone as in Python: when the reason clears
+// (the F8 re-arm), the settle gates change, so the proof is
+// re-attempted instead of waiting for a new terminal or a
+// server check. The extra read is outcome-equivalent — Settle
+// still applies every gate — it only settles sooner.
 func (r *Runner) trySettle(ctx context.Context) error {
 	ignored, ok := r.waiter.IgnoredTerminal()
 	if !ok {
@@ -513,7 +600,7 @@ func (r *Runner) trySettle(ctx context.Context) error {
 func (r *Runner) settlePending(ctx context.Context, pending string) error {
 	hctx, cancel := r.historyCtx(ctx, 100*time.Millisecond, nil)
 	defer cancel()
-	if Failed[pending] {
+	if failed[pending] {
 		latest, found, err := LatestUserSeq(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
 		if err != nil {
 			if isAuthError(err) || ctx.Err() != nil {
@@ -546,7 +633,10 @@ func (r *Runner) settlePending(ctx context.Context, pending string) error {
 // (the server replays task.status), feeds the last scoped
 // task.status event, ratchets, and settles it like a live one.
 // A failed check is silent except for AuthError, which
-// propagates. No network I/O happens while applying: the state
+// propagates — and except for a transient history-read failure
+// in the settle, which is swallowed exactly as trySettle
+// swallows it: only AuthError and context errors propagate from
+// the settle. No network I/O happens while applying: the state
 // read and the history read complete before the Waiter is fed
 // or settled.
 func (r *Runner) checkState(ctx context.Context) error {
@@ -560,6 +650,15 @@ func (r *Runner) checkState(ctx context.Context) error {
 		}
 		return nil
 	}
+	if sub == nil {
+		// (nil, nil) from Dial is a silent transport
+		// failure here, as in subscribeOnce: never a panic.
+		return nil
+	}
+	// Close is deferred, not called after SubscribeRaw: a
+	// panic in SubscribeRaw must not skip the close Python's
+	// finally guarantees.
+	defer func() { _ = sub.Close() }()
 	var found []Event
 	opts := conn.SubscribeOptions{
 		Body:           r.subscribeBody(),
@@ -567,7 +666,7 @@ func (r *Runner) checkState(ctx context.Context) error {
 		IdleTimeout:    budget,
 		OverallTimeout: budget,
 		OnRecord: func(record []byte) bool {
-			if ev := parseRecord(record); ev != nil {
+			if ev := decodeRecord(record); ev != nil {
 				if TaskStatusInfo(ev, r.cfg.Thread) != nil {
 					found = append(found, ev)
 				}
@@ -577,7 +676,6 @@ func (r *Runner) checkState(ctx context.Context) error {
 		ShouldStop: func() bool { return cctx.Err() != nil },
 	}
 	_, subErr := sub.SubscribeRaw(cctx, "chat.subscribe", opts)
-	_ = sub.Close()
 	if subErr != nil {
 		if isAuthError(subErr) {
 			return subErr
@@ -594,6 +692,9 @@ func (r *Runner) checkState(ctx context.Context) error {
 	}
 	if r.waiter.Result() == nil {
 		r.waiter.Feed(ev)
+		if ferr := r.waiter.FatalErr(); ferr != nil {
+			return ferr
+		}
 		r.ratchet()
 	}
 	if running {
@@ -603,7 +704,13 @@ func (r *Runner) checkState(ctx context.Context) error {
 	if !ok || r.waiter.Result() != nil {
 		return nil
 	}
-	return r.settlePending(ctx, pending)
+	if err := r.settlePending(ctx, pending); err != nil {
+		if errors.Is(err, errHistoryRead) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // historyCtx bounds one history read: at least floor, and at
@@ -640,7 +747,7 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 		detail = status
 	}
 	if kind == KindTimeout {
-		if ignored, ok := r.waiter.IgnoredTerminal(); ok && Failed[ignored] {
+		if ignored, ok := r.waiter.IgnoredTerminal(); ok && failed[ignored] {
 			hctx, cancel := r.historyCtx(ctx, r.cfg.FinalReadFloor, nil)
 			latest, found, err := LatestUserSeq(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
 			cancel()
@@ -718,6 +825,14 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 		// the Python result construction.
 		note = "could not read the final replies; run `muse-cli wait` again"
 	}
+	if kind == KindApproval {
+		// An approval Outcome carries no Detail; the status
+		// is the Waiter's last stored status, as Python
+		// reports w.status regardless of kind.
+		if status, ok := r.waiter.Status(); ok {
+			detail = status
+		}
+	}
 	outcome := OutcomeOf(kind, replies)
 	res := &Result{
 		Kind:            kind,
@@ -736,6 +851,10 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 	if out := r.waiter.Result(); out != nil && out.Kind == KindApproval {
 		res.Approvals = out.Approvals
 	}
+	// Auto-approve records, for the caller to log to stderr
+	// from (the core never logs): empty when no approver ran.
+	res.AutoApproved = r.waiter.ApprovedRecords()
+	res.AutoApproveErrors = r.waiter.ApproveErrors()
 	if outcome == "needs_input" && len(replies) > 0 {
 		last := replies[len(replies)-1]
 		if len(last.Widgets) > 0 {
@@ -751,28 +870,4 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 func isAuthError(err error) bool {
 	var authErr *conn.AuthError
 	return errors.As(err, &authErr)
-}
-
-// parseRecord decodes one NDJSON record into an Event, or nil
-// when the record is unparseable or not an object.
-func parseRecord(record []byte) Event {
-	record = bytes.TrimSpace(record)
-	if len(record) == 0 {
-		return nil
-	}
-	dec := json.NewDecoder(bytes.NewReader(record))
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return nil
-	}
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
-		return nil
-	}
-	ev, ok := v.(map[string]any)
-	if !ok {
-		return nil
-	}
-	return ev
 }

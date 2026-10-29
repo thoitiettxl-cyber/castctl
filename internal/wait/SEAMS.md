@@ -11,7 +11,7 @@ the live contracts are the Go interfaces in `runner.go`
 The wait core takes its connection from the caller and never
 dials itself:
 
-- `RunnerConfig.Dial(ctx) (Subscriber, error)` — one fresh
+- `Config.Dial(ctx) (Subscriber, error)` — one fresh
   subscription per call. The driver builds the connection
   through the profile's outbound Dialer (see §2) and returns a
   `Subscriber` (satisfied by `conn.Gateway`'s `SubscribeRaw` +
@@ -22,14 +22,17 @@ dials itself:
   replacement (e.g. via `Muse.Live` / `Connect` / `SharedConn`
   in `internal/conn`); the Runner never inspects or replaces a
   connection.
-- `RunnerConfig.History HistoryReader` — history reads. See §4.
-- `RunnerConfig.Approver *approvals.AutoApprover` (nil = no
-  auto-approve). The approver's `Connect` is likewise
+- `Config.History HistoryReader` — history reads. See §4.
+- `Config.Approver approvals.Approver` (nil = no
+  auto-approve). The approver returns an `ApprovalResult`
+  (handled ids, approved/error records, fatal error); the
+  Runner surfaces the records in `Result` (see §1 and
+  `runner.go`). The approver's `Connect` is likewise
   caller-supplied; the Runner never dials for it either.
-- `RunnerConfig.NodeID` — caller-supplied stable identity,
+- `Config.NodeID` — caller-supplied stable identity,
   carried through to `Result`. The wait core never generates,
   persists, or rotates it. See NODE_ID.md.
-- `RunnerConfig.UserStop func() bool`, `Recheck func()` —
+- `Config.UserStop func() bool`, `Recheck func()` —
   caller callbacks for user interrupt and interactive recheck.
   Both default to no-ops.
 
@@ -82,11 +85,11 @@ the caps in `internal/wait`.
 
 ## 4. History adapter (wiring PR)
 
-`HistoryReader` returns events plus `hasMore`:
+`HistoryReader` is the live interface in `history.go`:
 
 ```go
 type HistoryReader interface {
-    Read(ctx context.Context, limit int) (events []json.RawMessage, hasMore bool, err error)
+    ReadHistory(ctx context.Context, limit int) (events []any, hasMore bool, err error)
 }
 ```
 
@@ -117,17 +120,35 @@ the wiring PR resolves the profile and hands the Runner its
   capture on `SubscribeRaw` records; the Runner never needs
   frame-level access. No gateway extension was needed.
 - G2 (terminal predicate is wait-level): implemented in
-  `wait.TaskStatusInfo` + `Done`/`Failed` vocabularies; the
-  S3 predicate shape is pinned in `gateway_test.go` against
-  `gateway.EndedWithoutTerminal`.
+  `wait.TaskStatusInfo` + the unexported done/failed
+  vocabularies (`IsDoneStatus`/`IsFailedStatus` accessors).
+  The Runner never calls `gateway.EndedWithoutTerminal`: S3
+  is a helper over already-gathered records, and no
+  production code on this branch calls it. The real
+  predicate shape — a root-confirmed DONE/FAILED
+  task.status only after a root-confirmed running was seen
+  for the learned root — is pinned as a helper-level test in
+  `gateway_test.go` (stateful predicate over the records,
+  including the completed-before-running and foreign-root
+  negatives), alongside the Runner-driving tests that prove
+  the Runner itself ends on DONE-after-running. Do not cite
+  the helper test as Runner evidence: it proves the
+  predicate shape, not the Runner's use of it.
 - G3/G4 (fake clock / clock seam): the Runner uses its own
   `Clock` interface (`clock.go`, monotonic only) plus
   `testing/synctest` in `runner_test.go`; the gateway's clock
   seam was mirrored, not duplicated. The base `FakeClock`
-  ticker `Stop()` race was not reused.
+  ticker `Stop()` race was not reused. Clock seams are split
+  by design: the Runner's Clock and the gateway's clock seam
+  are separate; no shared clock seam exists on this base.
 - G5 (keep-alive): default OFF, no wiring; the Runner never
-  touches keep-alive. `UseKeepAlive: true` must stay absent
-  from any wait-path `SubscribeOptions`.
+  touches keep-alive. `SubscribeOptions` on this base has no
+  keep-alive field at all (keep-alive lives on the concrete
+  gateway type only, default OFF); `runner_test.go` pins the
+  option shape the Runner builds (no `OnOpen`, no `Route`,
+  keep-alive unreachable through the options). No
+  `UseKeepAlive` field must appear in any wait-path
+  `SubscribeOptions`.
 - G6 (SubscribeRaw conflates end reasons / discards records
   on error): worked around — `OnRecord` capture + explicit
   `ShouldStop` (watchdog / online grace / deadline) + the
@@ -165,6 +186,18 @@ the wiring PR resolves the profile and hands the Runner its
   iteration/check, closed after use) rather than Python's
   per-iteration `conn(cfg)` plus per-read fresh connections.
   The caller owns connection freshness/replacement.
+- D5: the settle throttle key is the ignored terminal plus its
+  ignored reason, not the terminal alone as in Python. When
+  the reason clears (the F8 re-arm) the proof is re-attempted
+  instead of waiting for a new terminal or a server check;
+  outcome-equivalent, one extra history read at most (see
+  `trySettle` in `runner.go`).
+- D6: auto-approve stderr lines have no Go equivalent in the
+  core: Python's helper prints `auto-approved ...` /
+  `SKIPPED` / `FAILED` lines to stderr, but the Runner has no
+  logger. The records are carried in `Result.AutoApproved` /
+  `Result.AutoApproveErrors` and the CLI wiring owns
+  printing/logging them from there.
 
 ## 8. Deferred wiring (exact list)
 
@@ -173,5 +206,10 @@ CLI command wiring (`wait` / `send --wait` / `send
 the chat REPL code (design in CHAT-REPL-DESIGN.md); the
 `HistoryReader` production adapter (§4); profile resolution
 and `node_id` origin (§5, NODE_ID.md); Telegram wiring
-(PR5); `update` command; anything needing PR3's commands
-framework. See `go/README.md` for the same list.
+(PR5); `update` command; approval claim coordination between
+a monitor and a turn (the 15 s in-flight claim wait: a
+driver/monitor concern, not part of `AutoApprover`); the
+auto-approve stderr lines (logged by the CLI wiring from
+`Result.AutoApproved` / `Result.AutoApproveErrors`, see §7
+D6); anything needing PR3's commands framework. See
+`go/README.md` for the same list.

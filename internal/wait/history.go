@@ -26,17 +26,24 @@ type HistoryReader interface {
 }
 
 // DefaultHistoryLimits is the window growth for history reads:
-// 200, then 500, then 1000 events.
+// 200, then 500, then 1000 events. It is shared read-only state:
+// NewRunner clones it on use, and no code in this package
+// mutates it.
 var DefaultHistoryLimits = []int{200, 500, 1000}
 
 // DeriveBoundary derives the boundary for a standalone wait:
 // the last message.user seq in history. It returns the boundary,
-// whether it is known, and that it was derived. A boundary of 0
-// with known=true means genuinely empty history (or history with
-// no user event and no more pages), not a failure. When every
-// window read fails, the boundary is unknown (0, false): settle
-// and accept are disabled until a live root running clears the
-// flag. Each window read is retried once on a transport error.
+// whether it is known, and that it was derived. The derived flag
+// is true in every return, including the unknown-boundary one:
+// (0, false, true) means "no window read ever succeeded, so the
+// boundary is unknown" — derived records that a derivation was
+// attempted (the standalone-wait mode), not that it succeeded.
+// A boundary of 0 with known=true means genuinely empty history
+// (or history with no user event and no more pages), not a
+// failure. When every window read fails, the boundary is unknown
+// (0, false): settle and accept are disabled until a live root
+// running clears the flag. Each window read is retried once on a
+// transport error (see readWindow).
 //
 // Errors: an AuthError (or a cancelled context) propagates; any
 // other read error fails that window and the next window is
@@ -118,6 +125,15 @@ func LatestUserSeq(ctx context.Context, r HistoryReader, limits []int, afterSeq 
 // window does not yet reach the boundary. A read error
 // propagates: the caller retries at its own level (the final
 // read gets two attempts).
+//
+// Edge: a window with events but no mappable seq (all events
+// non-maps, or maps without a numeric seq) yields upto=0, which
+// caps RepliesAfter at seq 0 and drops every reply. Python
+// yields upto=None (no cap) only for the all-non-map window;
+// for maps without a seq Python also yields 0. The all-non-map
+// case is unobservable for well-formed server history, and the
+// Go behavior is kept as-is and documented here rather than
+// special-cased.
 func HistoryReplies(ctx context.Context, r HistoryReader, limits []int, afterSeq int64) ([]Reply, error) {
 	var lastEvents []any
 	var lastUpto *int64
@@ -145,8 +161,12 @@ func HistoryReplies(ctx context.Context, r HistoryReader, limits []int, afterSeq
 }
 
 // readWindow reads one window with one retry on a transport
-// error (two attempts total). A fatal error is returned at once
-// without a retry.
+// error (two attempts total). The retry scope is exactly the
+// non-fatal errors: any error that is not an AuthError and not a
+// dead context — the Go equivalent of Python's transport tuple
+// (GatewayError, TimeoutError, ConnectionError, OSError), which
+// is all derive_after_seq retries. A fatal error is returned at
+// once without a retry, and so is a success.
 func readWindow(ctx context.Context, r HistoryReader, limit int) ([]any, bool, error) {
 	events, hasMore, err := r.ReadHistory(ctx, limit)
 	if err == nil || isFatalHistoryErr(ctx, err) {

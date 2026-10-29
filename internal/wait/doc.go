@@ -33,7 +33,7 @@
 //   - The Waiter never dials, never reads history, and never
 //     generates a node_id. The caller supplies the connection
 //     (a conn.Gateway behind the Subscriber interface) and the
-//     stable per-profile node_id (RunnerConfig.NodeID); the
+//     stable per-profile node_id (Config.NodeID); the
 //     Waiter only consumes events. See NODE_ID.md.
 //
 // Deliberate deviations from bare-Waiter Python, each identical

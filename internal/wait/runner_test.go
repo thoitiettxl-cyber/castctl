@@ -39,11 +39,14 @@ type fakeSubscriber struct {
 	calls       int
 	checkCalls  int
 	closed      int
+	loopOpts    conn.SubscribeOptions
+	checkOpts   conn.SubscribeOptions
 }
 
 func (f *fakeSubscriber) SubscribeRaw(ctx context.Context, method string, opts conn.SubscribeOptions) ([][]byte, error) {
 	if opts.MaxRecords == 50 {
 		f.checkCalls++
+		f.checkOpts = opts
 		for _, rec := range f.checkScript {
 			if opts.OnRecord != nil && opts.OnRecord(rec) {
 				break
@@ -52,6 +55,7 @@ func (f *fakeSubscriber) SubscribeRaw(ctx context.Context, method string, opts c
 		return nil, nil
 	}
 	f.calls++
+	f.loopOpts = opts
 	if f.loopErr != nil {
 		err := f.loopErr
 		f.loopErr = nil
@@ -511,4 +515,297 @@ func TestRunnerExplicitBoundaryNeverAcceptsReplayedFailed(t *testing.T) {
 			t.Errorf("explicit boundary must keep waiting: res = %+v", res)
 		}
 	})
+}
+
+// stormSubscriber fails every loop subscribe with a transport
+// error but serves state checks, so a reconnect storm reaches
+// checkState.
+type stormSubscriber struct {
+	checkScript [][]byte
+	loopErr     error
+	checkCalls  int
+	closed      int
+}
+
+func (f *stormSubscriber) SubscribeRaw(ctx context.Context, method string, opts conn.SubscribeOptions) ([][]byte, error) {
+	if opts.MaxRecords == 50 {
+		f.checkCalls++
+		for _, rec := range f.checkScript {
+			if opts.OnRecord != nil && opts.OnRecord(rec) {
+				break
+			}
+		}
+		return nil, nil
+	}
+	return nil, f.loopErr
+}
+
+func (f *stormSubscriber) Close() error {
+	f.closed++
+	return nil
+}
+
+func TestRunnerCheckStateSwallowsHistoryReadFailure(t *testing.T) {
+	// Reconnect storm -> checkState -> ignored terminal ->
+	// transient history failure. Pre-fix, checkState returned
+	// the settle error and Run aborted with it; post-fix the
+	// failure is swallowed like trySettle swallows it, and
+	// the wait runs to its timeout instead.
+	synctest.Test(t, func(t *testing.T) {
+		sub := &stormSubscriber{
+			checkScript: [][]byte{
+				recordJSON(taskEv("completed", "R", "R", 180, nil)),
+			},
+			loopErr: errTransport,
+		}
+		hist := &queueHistory{resps: []historyResp{
+			historyOK([]any{userEv(100)}),
+			{err: errTransport},
+		}}
+		r, err := NewRunner(Config{
+			Timeout:         60 * time.Second,
+			ReconnectBudget: 5 * time.Second,
+			Dial: func(ctx context.Context) (Subscriber, error) {
+				return sub, nil
+			},
+			History: hist,
+		})
+		if err != nil {
+			t.Fatalf("NewRunner: %v", err)
+		}
+		res, err := r.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v, want no error (history failure swallowed in checkState)", err)
+		}
+		if res.Kind != KindTimeout || res.ExitCode != 124 {
+			t.Errorf("res = %+v, want timeout/124", res)
+		}
+		if sub.checkCalls == 0 {
+			t.Error("storm never reached checkState")
+		}
+	})
+}
+
+func TestRunnerApprovalStatusUsesWaiterStatus(t *testing.T) {
+	// An approval outcome reports the Waiter's last stored
+	// status (Python: res["status"] = w.status regardless of
+	// kind), not the approval Outcome's empty Detail.
+	synctest.Test(t, func(t *testing.T) {
+		sub := &fakeSubscriber{loopScript: [][]byte{
+			recordJSON(taskEv("running", "R", "R", 120, nil)),
+			recordJSON(approvalEv([]any{appr("A")}, nil)),
+		}}
+		hist := &queueHistory{resps: []historyResp{
+			historyOK([]any{userEv(100)}),
+		}}
+		res := runRunner(t, Config{Timeout: 60 * time.Second, Dial: sub.dial, History: hist})
+		if res.Kind != KindApproval || res.ExitCode != 4 {
+			t.Errorf("res = %+v, want approval/4", res)
+		}
+		if res.Status != "running" {
+			t.Errorf("Status = %q, want %q", res.Status, "running")
+		}
+	})
+}
+
+func TestRunnerPlumbsAutoApproveRecords(t *testing.T) {
+	// A decides A (forever); B offers only allow_once with the
+	// fallback off, so it is skipped. Both records land in
+	// the Result for the caller to log to stderr.
+	synctest.Test(t, func(t *testing.T) {
+		aa := approvals.NewAutoApprover(func(ctx context.Context) (approvals.Decider, func(), error) {
+			return func(ctx context.Context, a approvals.DescribedApproval, decision string) error {
+				return nil
+			}, func() {}, nil
+		}, false)
+		sub := &fakeSubscriber{loopScript: [][]byte{
+			recordJSON(approvalEv([]any{appr("A", approvals.Forever), appr("B", approvals.Once)}, nil)),
+		}}
+		hist := &queueHistory{resps: []historyResp{historyOK([]any{userEv(100)})}}
+		res := runRunner(t, Config{
+			Timeout:  60 * time.Second,
+			Dial:     sub.dial,
+			History:  hist,
+			Approver: aa.AsApprover(),
+		})
+		if res.Kind != KindApproval || res.ExitCode != 4 {
+			t.Errorf("res = %+v, want approval/4", res)
+		}
+		if len(res.AutoApproved) != 1 || res.AutoApproved[0].ApprovalID != "A" ||
+			res.AutoApproved[0].Decision != approvals.Forever {
+			t.Errorf("AutoApproved = %+v, want [A allow_always]", res.AutoApproved)
+		}
+		if len(res.AutoApproveErrors) != 1 || res.AutoApproveErrors[0].ApprovalID != "B" {
+			t.Errorf("AutoApproveErrors = %+v, want [B skip]", res.AutoApproveErrors)
+		}
+	})
+}
+
+func TestRunnerApproverAuthErrorPropagates(t *testing.T) {
+	// A decide-time AuthError ends the wait as an error, not
+	// as exit 4.
+	synctest.Test(t, func(t *testing.T) {
+		aa := approvals.NewAutoApprover(func(ctx context.Context) (approvals.Decider, func(), error) {
+			return func(ctx context.Context, a approvals.DescribedApproval, decision string) error {
+				return conn.NewAuthError("expired")
+			}, func() {}, nil
+		}, false)
+		sub := &fakeSubscriber{loopScript: [][]byte{
+			recordJSON(approvalEv([]any{appr("A", approvals.Forever)}, nil)),
+		}}
+		hist := &queueHistory{resps: []historyResp{historyOK([]any{userEv(100)})}}
+		r, err := NewRunner(Config{
+			Timeout:  60 * time.Second,
+			Dial:     sub.dial,
+			History:  hist,
+			Approver: aa.AsApprover(),
+		})
+		if err != nil {
+			t.Fatalf("NewRunner: %v", err)
+		}
+		_, err = r.Run(context.Background())
+		var authErr *conn.AuthError
+		if !errors.As(err, &authErr) {
+			t.Errorf("err = %v, want AuthError, not an exit-4 result", err)
+		}
+	})
+}
+
+func TestRunnerNilSubscriberIsTransportFailure(t *testing.T) {
+	// Dial returning (nil, nil) must never panic: it is a
+	// transport failure, resubscribed with backoff until the
+	// deadline.
+	synctest.Test(t, func(t *testing.T) {
+		hist := &queueHistory{resps: []historyResp{historyOK([]any{userEv(100)})}}
+		r, err := NewRunner(Config{
+			Timeout: 5 * time.Second,
+			Dial: func(ctx context.Context) (Subscriber, error) {
+				return nil, nil
+			},
+			History: hist,
+		})
+		if err != nil {
+			t.Fatalf("NewRunner: %v", err)
+		}
+		res, err := r.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v, want no error", err)
+		}
+		if res.Kind != KindTimeout || res.ExitCode != 124 {
+			t.Errorf("res = %+v, want timeout/124", res)
+		}
+	})
+}
+
+func TestRunnerEmptyHistoryLimitsUseDefaults(t *testing.T) {
+	// An explicitly empty HistoryLimits is unset, not "no
+	// windows": the boundary is derived from the defaults.
+	synctest.Test(t, func(t *testing.T) {
+		sub := &fakeSubscriber{loopScript: [][]byte{
+			recordJSON(taskEv("running", "R", "R", 120, nil)),
+			recordJSON(taskEv("completed", "R", "R", 180, nil)),
+		}}
+		hist := &queueHistory{resps: []historyResp{
+			historyOK([]any{userEv(100)}),
+			historyOK([]any{userEv(100), asst(150, "completed", "done", nil)}),
+		}}
+		res := runRunner(t, Config{
+			Timeout:       60 * time.Second,
+			Dial:          sub.dial,
+			History:       hist,
+			HistoryLimits: []int{},
+		})
+		if res.Kind != KindDone || res.FinalText != "done" || res.AfterSeq != 100 {
+			t.Errorf("res = %+v, want done with boundary 100", res)
+		}
+	})
+}
+
+func TestRunnerSubscribeOptionsNoKeepAlive(t *testing.T) {
+	// G5/S10 pin: the Runner builds SubscribeOptions with no
+	// keep-alive mechanism reachable through them — this
+	// base's SubscribeOptions has no keep-alive field, and
+	// the Runner sets no OnOpen/Route either. The options
+	// below are the complete shape the Runner may build.
+	synctest.Test(t, func(t *testing.T) {
+		sub := &fakeSubscriber{
+			loopScript: [][]byte{
+				recordJSON(taskEv("running", "R", "R", 120, nil)),
+			},
+			checkScript: [][]byte{
+				recordJSON(taskEv("running", "R", "R", 120, nil)),
+			},
+		}
+		hist := &queueHistory{resps: []historyResp{historyOK([]any{userEv(100)})}}
+		_ = runRunner(t, Config{
+			Timeout:    130 * time.Second,
+			CheckEvery: 60 * time.Second,
+			Dial:       sub.dial,
+			History:    hist,
+		})
+		if sub.loopOpts.OnOpen != nil || sub.loopOpts.Route != nil {
+			t.Errorf("loop opts = %+v, want no OnOpen/Route", sub.loopOpts)
+		}
+		if sub.loopOpts.MaxRecords != 1000000000 {
+			t.Errorf("loop MaxRecords = %d", sub.loopOpts.MaxRecords)
+		}
+		if sub.checkOpts.OnOpen != nil || sub.checkOpts.Route != nil {
+			t.Errorf("check opts = %+v, want no OnOpen/Route", sub.checkOpts)
+		}
+		if sub.checkOpts.MaxRecords != 50 {
+			t.Errorf("check MaxRecords = %d, want 50", sub.checkOpts.MaxRecords)
+		}
+	})
+}
+
+func TestNewRunnerClampsNegativeDurations(t *testing.T) {
+	r, err := NewRunner(Config{
+		Dial:             (&fakeSubscriber{}).dial,
+		History:          &queueHistory{resps: []historyResp{historyOK(nil)}},
+		Timeout:          -1,
+		StateCheckBudget: -1,
+		ReconnectBudget:  -1,
+		ResubPause:       -1,
+		FinalReadFloor:   -1,
+		LagWindow:        -1,
+		LagPoll:          -1,
+		RecheckAfter:     -1,
+		CheckEvery:       -1,
+	})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	if r.cfg.Timeout != DefaultTimeout {
+		t.Errorf("Timeout = %v, want %v", r.cfg.Timeout, DefaultTimeout)
+	}
+	if r.cfg.StateCheckBudget != DefaultStateCheckBudget {
+		t.Errorf("StateCheckBudget = %v, want %v", r.cfg.StateCheckBudget, DefaultStateCheckBudget)
+	}
+	if r.cfg.ReconnectBudget != DefaultReconnectBudget {
+		t.Errorf("ReconnectBudget = %v, want %v", r.cfg.ReconnectBudget, DefaultReconnectBudget)
+	}
+	if r.cfg.ResubPause != DefaultResubPause {
+		t.Errorf("ResubPause = %v, want %v", r.cfg.ResubPause, DefaultResubPause)
+	}
+	if r.cfg.FinalReadFloor != DefaultFinalReadFloor {
+		t.Errorf("FinalReadFloor = %v, want %v", r.cfg.FinalReadFloor, DefaultFinalReadFloor)
+	}
+	if r.cfg.LagWindow != DefaultLagWindow {
+		t.Errorf("LagWindow = %v, want %v", r.cfg.LagWindow, DefaultLagWindow)
+	}
+	if r.cfg.LagPoll != DefaultLagPoll {
+		t.Errorf("LagPoll = %v, want %v", r.cfg.LagPoll, DefaultLagPoll)
+	}
+	// RecheckAfter/CheckEvery keep negative = disable.
+	if r.cfg.RecheckAfter != -1 || r.cfg.CheckEvery != -1 {
+		t.Errorf("RecheckAfter/CheckEvery = %v/%v, want -1/-1 (disable)", r.cfg.RecheckAfter, r.cfg.CheckEvery)
+	}
+	// HistoryLimits defaults are cloned, not aliased.
+	if len(r.cfg.HistoryLimits) != len(DefaultHistoryLimits) {
+		t.Fatalf("HistoryLimits = %v, want %v", r.cfg.HistoryLimits, DefaultHistoryLimits)
+	}
+	r.cfg.HistoryLimits[0] = 999
+	if DefaultHistoryLimits[0] == 999 {
+		t.Error("mutating the Runner's limits must not mutate DefaultHistoryLimits")
+	}
 }

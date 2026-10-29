@@ -71,36 +71,61 @@ func TestGatewaySubscribeFeedsWaiter(t *testing.T) {
 	}
 }
 
-// TestEndedWithoutTerminalPredicate proves the S3 predicate
-// shape the Runner relies on: EndedWithoutTerminal over records
-// gathered from a clean SubscribeRaw end, with the wait-level
-// terminal predicate (root task.status DONE after running),
-// not the S3 test's substring probe.
+// TestEndedWithoutTerminalPredicate pins the real wait-level
+// terminal predicate shape as a HELPER-LEVEL test only: it
+// proves what counts as "terminal" over gathered records, not
+// that the Runner uses EndedWithoutTerminal — the Runner never
+// calls it (see SEAMS.md §6 G2). The predicate is stateful over
+// the record order: a root-confirmed DONE/FAILED task.status
+// counts only after a root-confirmed running was seen for the
+// learned root (first root wins). A terminal before any running,
+// a suspect string, and a foreign-root terminal do not count.
 func TestEndedWithoutTerminalPredicate(t *testing.T) {
-	terminal := func(rec []byte) bool {
-		ev := parseRecord(rec)
-		if ev == nil {
-			return false
+	terminal := func() func([]byte) bool {
+		seenRunning := false
+		var root string
+		return func(rec []byte) bool {
+			ev := decodeRecord(rec)
+			if ev == nil {
+				return false
+			}
+			info := TaskStatusInfo(ev, "")
+			if info == nil || !info.HasStatus {
+				return false
+			}
+			if info.Status == "running" && info.RootConfirmed {
+				if !seenRunning {
+					seenRunning = true
+					root = info.RootAgentID
+				}
+				return false
+			}
+			if !seenRunning || !info.RootConfirmed || info.RootAgentID != root {
+				return false
+			}
+			return IsDoneStatus(info.Status) || IsFailedStatus(info.Status)
 		}
-		info := TaskStatusInfo(ev, "")
-		return info != nil && info.HasStatus && (Done[info.Status] || Failed[info.Status])
 	}
-	plain := [][]byte{[]byte(`{"event":"task.status","payload":{"status":"running","root_agent_id":"R","agent_id":"R"}}`)}
-	if !gateway.EndedWithoutTerminal(plain, terminal) {
+	running := []byte(`{"event":"task.status","payload":{"status":"running","root_agent_id":"R","agent_id":"R"}}`)
+	completed := []byte(`{"event":"task.status","payload":{"status":"completed","root_agent_id":"R","agent_id":"R"}}`)
+	foreign := []byte(`{"event":"task.status","payload":{"status":"completed","root_agent_id":"R2","agent_id":"R2"}}`)
+	suspect := []byte(`{"event":"task.status","payload":{"status":"idle","root_agent_id":"R","agent_id":"R"}}`)
+	if !gateway.EndedWithoutTerminal([][]byte{running}, terminal()) {
 		t.Error("running-only records must end without terminal")
 	}
-	withTerminal := append(append([][]byte{}, plain...),
-		[]byte(`{"event":"task.status","payload":{"status":"completed","root_agent_id":"R","agent_id":"R"}}`))
-	if gateway.EndedWithoutTerminal(withTerminal, terminal) {
-		t.Error("records with a DONE task.status must have a terminal")
+	if gateway.EndedWithoutTerminal([][]byte{running, completed}, terminal()) {
+		t.Error("DONE after running must count as a terminal")
 	}
-	// A suspect string is not a terminal for this predicate.
-	suspect := append(append([][]byte{}, plain...),
-		[]byte(`{"event":"task.status","payload":{"status":"idle","root_agent_id":"R","agent_id":"R"}}`))
-	if !gateway.EndedWithoutTerminal(suspect, terminal) {
+	if !gateway.EndedWithoutTerminal([][]byte{completed}, terminal()) {
+		t.Error("DONE before any running must not count as a terminal")
+	}
+	if !gateway.EndedWithoutTerminal([][]byte{running, suspect}, terminal()) {
 		t.Error("suspect strings must not count as terminal")
 	}
-	if !gateway.EndedWithoutTerminal(plain, nil) {
+	if !gateway.EndedWithoutTerminal([][]byte{running, foreign}, terminal()) {
+		t.Error("foreign-root DONE must not count as a terminal")
+	}
+	if !gateway.EndedWithoutTerminal([][]byte{running}, nil) {
 		t.Error("nil predicate must report no terminal")
 	}
 }
