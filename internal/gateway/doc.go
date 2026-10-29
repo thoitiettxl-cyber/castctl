@@ -252,7 +252,9 @@
 //     BEFORE the outer outbound (a detour created after the
 //     outer outbound cannot repair the refusal). Doc only:
 //     no behaviour change in this package.
-//   - Deferred (Boss decision, stay unimplemented): auth import
-//     command, paste fallback for auth export, bot hot reload,
-//     jitter. Release (local build script, no Actions) is PR5.
+//   - Deferred (Boss decision, stay unimplemented): paste
+//     fallback for auth export, bot hot reload, jitter. Release
+//     (local build script, no Actions) is PR5. The `auth import`
+//     command is implemented (stdin-only cookie import; see
+//     internal/commands/authimport.go).
 package gateway

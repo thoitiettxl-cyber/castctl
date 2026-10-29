@@ -67,7 +67,7 @@ func init() {
 	registerFlags("wake", "wake", nil)
 }
 
-// cmdAuth dispatches auth subcommands: list and export.
+// cmdAuth dispatches auth subcommands: list, export and import.
 func cmdAuth(ctx context.Context, env *Env, g *globalOpts, args []string) error {
 	if len(args) == 0 {
 		fmt.Fprintln(env.stderr(), "muse-cli: the following arguments are required: subcommand")
@@ -82,8 +82,10 @@ func cmdAuth(ctx context.Context, env *Env, g *globalOpts, args []string) error 
 		return cmdAuthList(ctx, env, g, args[1:])
 	case "export":
 		return cmdAuthExport(ctx, env, g, args[1:])
+	case "import":
+		return cmdAuthImport(ctx, env, g, args[1:])
 	default:
-		fmt.Fprintf(env.stderr(), "muse-cli: argument subcommand: invalid choice: %q (choose from list, export)\n", args[0])
+		fmt.Fprintf(env.stderr(), "muse-cli: argument subcommand: invalid choice: %q (choose from list, export, import)\n", args[0])
 		return errCode(2, nil)
 	}
 }
