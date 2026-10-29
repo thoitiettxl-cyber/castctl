@@ -1,16 +1,22 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Licensed under the GNU General Public License v3.0 or later.
+
 package gateway
 
 import (
 	"regexp"
+
+	"github.com/thoitiettxl-cyber/muse-cli/go/internal/redact"
 )
 
 // redactErrorString strips credentials from an error string
-// (item (c), Boss-approved for PR2; gateway-local re-implementation
-// of the redactSessionProxyInString pattern — nothing copied
-// verbatim). It removes:
+// (item (c), Boss-approved for PR2). The URL-userinfo step is the
+// shared string-level redactor from internal/redact
+// (RedactURLUserinfo): it replaces userinfo in any embedded URL
+// with "<redacted>", keeping scheme, host and path. The remaining
+// steps are gateway-local:
 //
-//   - URL userinfo (user:password@host, or user@host) in any URL
-//     embedded in the string, keeping scheme, host and path;
 //   - values of token-like query parameters (auth_token,
 //     access_token, token, hatch_token, session);
 //   - values of cookie-like fragments (hatch_sess, datr, session);
@@ -18,12 +24,11 @@ import (
 //
 // Everything else is left byte-identical, so server payload text
 // that carries no credential survives redaction. The PR3
-// unification (one shared redaction helper) is a separate,
-// carried item; until then this package keeps its own copy and
-// does NOT import internal/profile.
+// unification (one shared redaction helper for the key-based
+// helpers) is a separate, carried item; until then this package
+// keeps its own query/cookie/Bearer patterns and does NOT import
+// internal/profile.
 var (
-	reURLUserinfo = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@`)
-	reURLUser     = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s@]+@`)
 	reQueryToken  = regexp.MustCompile(`(?i)([?&](?:auth_token|access_token|hatch_token|token|session)=)[^&\s]*`)
 	reCookieToken = regexp.MustCompile(`(?i)\b(hatch_sess|datr|session)=[^;\s]*`)
 	reBearer      = regexp.MustCompile(`(?i)(Authorization:\s*Bearer\s+)\S+`)
@@ -33,8 +38,7 @@ func redactErrorString(s string) string {
 	if s == "" {
 		return s
 	}
-	s = reURLUserinfo.ReplaceAllString(s, "${1}[redacted]@")
-	s = reURLUser.ReplaceAllString(s, "${1}[redacted]@")
+	s = redact.RedactURLUserinfo(s)
 	s = reQueryToken.ReplaceAllString(s, "${1}[redacted]")
 	s = reCookieToken.ReplaceAllString(s, "${1}=[redacted]")
 	s = reBearer.ReplaceAllString(s, "${1}[redacted]")

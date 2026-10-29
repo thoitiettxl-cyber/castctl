@@ -1,9 +1,15 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Licensed under the GNU General Public License v3.0 or later.
+
 package outbound
 
 import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/sagernet/sing-box/option"
 )
 
 // All key material in this file is the literal placeholder "<redacted>".
@@ -194,13 +200,57 @@ func TestRedactEndpoint(t *testing.T) {
 	_ = opts
 }
 
+func TestRedactEndpointURLUserinfo(t *testing.T) {
+	// Exercises the generic redactValue string path of
+	// RedactEndpoint with map options: a non-secret string value
+	// carrying a URL must have its userinfo redacted, a secret-key
+	// value is replaced wholesale, and a plain email value is
+	// left unchanged.
+	ep := option.Endpoint{
+		Type: "http",
+		Tag:  "h",
+		Options: map[string]any{
+			"proxy_url":   "http://user:s3cret@127.0.0.1:8080",
+			"private_key": "FAKE-KEY-VALUE",
+			"note":        "bob@example.com",
+		},
+	}
+	redacted, err := RedactEndpoint(ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(redacted)
+	if strings.Contains(out, "s3cret") || strings.Contains(out, "FAKE-KEY-VALUE") {
+		t.Errorf("redacted output leaks a secret: %s", out)
+	}
+	if !strings.Contains(out, `"proxy_url":"http://<redacted>@127.0.0.1:8080"`) {
+		t.Errorf("proxy_url userinfo not redacted: %s", out)
+	}
+	if !strings.Contains(out, `"private_key":"<redacted>"`) {
+		t.Errorf("private_key not redacted: %s", out)
+	}
+	if !strings.Contains(out, `"note":"bob@example.com"`) {
+		t.Errorf("plain email value was mangled: %s", out)
+	}
+}
+
 func TestParseRealWireGuardConfRuntime(t *testing.T) {
 	// Reads the real conf ONLY at runtime, in-process. Asserts shape
 	// only; logs counts/families only; never logs key values or file
 	// bytes. Skips when the file is absent/unreadable.
-	data, err := os.ReadFile(os.ExpandEnv("$HOME/.config/muse-cli/secrets/wg-proton-usca420.conf"))
+	//
+	// The conf path comes from MUSE_CLI_WG_CONF_PATH when set, and
+	// defaults to ~/.config/muse-cli/secrets/wg-proton-usca420.conf
+	// when unset (or empty). A different conf named by the env var
+	// gets the same shape-only assertions and redaction rules.
+	// The path itself is not secret, so the skip reason names it.
+	confPath := os.Getenv("MUSE_CLI_WG_CONF_PATH")
+	if confPath == "" {
+		confPath = os.ExpandEnv("$HOME/.config/muse-cli/secrets/wg-proton-usca420.conf")
+	}
+	data, err := os.ReadFile(confPath)
 	if err != nil {
-		t.Skip("real wireguard conf unavailable")
+		t.Skipf("real wireguard conf unavailable at %s: %v", confPath, err)
 	}
 	opts, err := ParseWireGuardConf(data)
 	if err != nil {

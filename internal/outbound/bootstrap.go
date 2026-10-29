@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Licensed under the GNU General Public License v3.0 or later.
+
 package outbound
 
 import (
@@ -23,6 +27,16 @@ import (
 // error, never a silent fallback. The lookup is debug-logged with the
 // hostname and the address count only — never the resolved values —
 // and no secret is ever involved.
+//
+// Fail-closed boundary, precisely: bootstrap applies only to the DNS
+// server's own hostname, resolved once before that server can be
+// used. Every other lookup goes through the configured DNS server
+// and the outbound/detour that server is configured with; DNS
+// failure is an error, and there is no system-resolver fallback for
+// any other host. RECOMMENDATION: configure DNS servers by IP
+// address. An IP-address server needs no bootstrap lookup at all
+// (the DNS package leaves non-domain server addresses untouched),
+// so the system resolver is never consulted.
 func BootstrapLookup(ctx context.Context, host string) ([]netip.Addr, error) {
 	if host == "" {
 		return nil, errors.New("outbound: bootstrap lookup with empty host")

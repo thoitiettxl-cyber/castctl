@@ -1,4 +1,12 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Licensed under the GNU General Public License v3.0 or later.
+
 package profile
+
+import (
+	"github.com/thoitiettxl-cyber/muse-cli/go/internal/redact"
+)
 
 // secretKeys are JSON field names whose values are replaced with
 // "<redacted>" by RedactJSON/RedactProfile/RedactOutboundJSON. The list
@@ -83,6 +91,14 @@ func redactValue(v any) any {
 			out[i] = redactValue(elem)
 		}
 		return out
+	case string:
+		// Any string value, whatever its key, has URL userinfo
+		// redacted by the shared string-level redactor. Key-based
+		// redaction above is untouched: a secret-key value is
+		// replaced wholesale before reaching here, and a
+		// non-secret string keeps everything except its URL
+		// userinfo.
+		return redact.RedactURLUserinfo(t)
 	default:
 		return v
 	}

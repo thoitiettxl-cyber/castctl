@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Licensed under the GNU General Public License v3.0 or later.
+
 // Package gatewaytest is the fake-gateway harness for gateway
 // tests and for PR5 differential testing: a loopback server that
 // speaks the real wire protocol (WebSocket upgrade + Noise XX

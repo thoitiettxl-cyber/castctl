@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Licensed under the GNU General Public License v3.0 or later.
+
 // Package gateway implements conn.Gateway: the HTTPS auth chain, the
 // WebSocket/Noise-XX transport, protobuf framing, unary calls,
 // subscriptions, downloads, the Next.js subscription-action (usage)

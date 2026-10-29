@@ -64,3 +64,23 @@ original Python copies, byte-identical (sha256-pinned by test).
 
 Never hand-edit the `.pb.go` files: every message and enum must come
 from the generator.
+
+## SPDX header on generated files
+
+The committed `.pb.go` files carry the same SPDX header as every other
+`.go` file under `go/`:
+
+```text
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Licensed under the GNU General Public License v3.0 or later.
+```
+
+`protoc-gen-go` does not emit that header, so `generate.sh` injects
+it deterministically into the two copied-back files on every
+regeneration (idempotently: a file already starting with the header
+is left untouched), before the `gofmt` check. `go/spdx_test.go`
+enforces the header on every `.go` file including the generated
+ones, with no exemption — if a regeneration drops the header, the
+suite fails by design. Do not hand-edit a `.pb.go` file to add or
+restore the header; re-run `generate.sh` instead.

@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Licensed under the GNU General Public License v3.0 or later.
+
 package profile
 
 import (
@@ -134,6 +138,58 @@ func TestRedactJSONInvalidInput(t *testing.T) {
 	t.Parallel()
 	if _, err := RedactJSON([]byte(`{oops`)); err == nil {
 		t.Error("RedactJSON(invalid) = nil error; want error")
+	}
+}
+
+func TestRedactJSONURLUserinfoInAnyStringValue(t *testing.T) {
+	t.Parallel()
+	// "description" / "note" / "endpoint_url" are not secret keys:
+	// key-based redaction must leave them alone, but the shared
+	// string-level redactor must still strip URL userinfo from
+	// their values, at any nesting depth.
+	input := `{"description":"see https://user:s3cret@host.example/x and socks5://bob@two.example:1080","nested":{"endpoint_url":"https://alice:pw@api.example/path"},"list":["https://carol@three.example/x","plain https://example.com/path"],"email":"bob@example.com","server":"https://example.com:8443/path"}`
+	out, err := RedactJSON([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, leaked := range []string{"s3cret", "alice:pw", "carol@"} {
+		if strings.Contains(s, leaked) {
+			t.Errorf("redacted output leaks %q: %s", leaked, s)
+		}
+	}
+	for _, want := range []string{
+		`"description": "see https://<redacted>@host.example/x and socks5://<redacted>@two.example:1080"`,
+		`"endpoint_url": "https://<redacted>@api.example/path"`,
+		`"https://<redacted>@three.example/x"`,
+		`"email": "bob@example.com"`,
+		`"server": "https://example.com:8443/path"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("redacted output missing %s:\n%s", want, s)
+		}
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		t.Fatalf("redacted output is not JSON: %v: %s", err, s)
+	}
+}
+
+func TestRedactOutboundJSONURLUserinfo(t *testing.T) {
+	t.Parallel()
+	out, err := RedactOutboundJSON([]byte(`{"type":"http","tag":"h","proxy_url":"http://user:s3cret@127.0.0.1:8080","note":"bob@example.com","password":"` + fakeSecret + `"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if strings.Contains(s, "s3cret") || strings.Contains(s, fakeSecret) {
+		t.Errorf("redacted output leaks a secret: %s", s)
+	}
+	if !strings.Contains(s, `"proxy_url": "http://<redacted>@127.0.0.1:8080"`) {
+		t.Errorf("proxy_url userinfo not redacted: %s", s)
+	}
+	if !strings.Contains(s, `"note": "bob@example.com"`) {
+		t.Errorf("plain email value was mangled: %s", s)
 	}
 }
 

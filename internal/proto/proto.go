@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Licensed under the GNU General Public License v3.0 or later.
+
 // Package proto holds the generated protobuf types for the Noise
 // transport and the service envelope, plus the verbatim embedded data
 // files the gateway code needs: the original FileDescriptorProto

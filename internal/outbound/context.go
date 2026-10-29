@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Licensed under the GNU General Public License v3.0 or later.
+
 // Package outbound builds and owns sing-box outbounds and endpoints
 // for one muse-cli profile, and exposes the single Dialer through which
 // all of that profile's network traffic flows.

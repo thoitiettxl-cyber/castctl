@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Licensed under the GNU General Public License v3.0 or later.
+
 // Command muse-cli is the Go port of muse-cli (Python 0.6.1).
 //
 // PR1 scope: --version / --help and a read-only config load for the

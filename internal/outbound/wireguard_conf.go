@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Licensed under the GNU General Public License v3.0 or later.
+
 package outbound
 
 import (
@@ -12,6 +16,8 @@ import (
 
 	"github.com/sagernet/sing-box/option"
 	badoption "github.com/sagernet/sing/common/json/badoption"
+
+	"github.com/thoitiettxl-cyber/muse-cli/go/internal/redact"
 )
 
 // WireGuard conf converter: wg-quick .conf -> sing-box 1.14
@@ -312,10 +318,21 @@ func redactValue(v any) {
 				value[key] = RedactedPlaceholder
 				continue
 			}
+			// Any string value, whatever its key, has URL
+			// userinfo redacted by the shared string-level
+			// redactor. The key-based logic above is untouched.
+			if s, ok := child.(string); ok {
+				value[key] = redact.RedactURLUserinfo(s)
+				continue
+			}
 			redactValue(child)
 		}
 	case []any:
-		for _, child := range value {
+		for i, child := range value {
+			if s, ok := child.(string); ok {
+				value[i] = redact.RedactURLUserinfo(s)
+				continue
+			}
 			redactValue(child)
 		}
 	}

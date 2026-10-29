@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Licensed under the GNU General Public License v3.0 or later.
+
 package gateway
 
 import (
@@ -568,7 +572,7 @@ func TestDialFailureIsFailClosedAndTransient(t *testing.T) {
 	if strings.Contains(err.Error(), "s3cretpass") {
 		t.Errorf("dial error leaks credential: %q", err.Error())
 	}
-	if !strings.Contains(err.Error(), "[redacted]") {
+	if !strings.Contains(err.Error(), "<redacted>") {
 		t.Errorf("dial error not redacted: %q", err.Error())
 	}
 	var connErr *conn.ConnectionError
@@ -762,11 +766,11 @@ func TestRedactErrorString(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{
 			"dial socks5://user:s3cret@proxy.invalid:1080: refused",
-			"dial socks5://[redacted]@proxy.invalid:1080: refused",
+			"dial socks5://<redacted>@proxy.invalid:1080: refused",
 		},
 		{
 			"get https://bob@host.example/x failed",
-			"get https://[redacted]@host.example/x failed",
+			"get https://<redacted>@host.example/x failed",
 		},
 		{
 			"wss://hatch.metaaivm.com/v1/noise?vm_id=v1&auth_token=tok123 failed",
@@ -783,6 +787,14 @@ func TestRedactErrorString(t *testing.T) {
 		{
 			"plain error, no credentials, https://example.com/path?q=1",
 			"plain error, no credentials, https://example.com/path?q=1",
+		},
+		{
+			"a https://user:pass@one.example/x and socks5://bob@two.example:1080 end",
+			"a https://<redacted>@one.example/x and socks5://<redacted>@two.example:1080 end",
+		},
+		{
+			"contact bob@example.com for help",
+			"contact bob@example.com for help",
 		},
 		{"", ""},
 	}

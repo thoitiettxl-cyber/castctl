@@ -68,6 +68,23 @@ go build -o "$WORK/compile" compile.go
 # --- copy only the generated files back -----------------------------------
 cp "$WORK/out/internal/proto/noise_transport.pb.go" \
 	"$WORK/out/internal/proto/noise_envelope.pb.go" "$OUT_DIR/"
+
+# --- inject the SPDX header into the generated files ---------------------
+# protoc-gen-go emits no licence header. The SPDX header is injected
+# here, on every regeneration, so the committed .pb.go files always
+# carry it and go/spdx_test.go keeps passing. Idempotent: a file
+# already starting with the header is left untouched. Never hand-edit
+# a .pb.go file to add or restore the header; re-run this script.
+for f in "$OUT_DIR/noise_transport.pb.go" "$OUT_DIR/noise_envelope.pb.go"; do
+	if [ "$(head -n 1 "$f")" != "// Copyright (c) 2026 muse-cli contributors" ]; then
+		{
+			printf '%s\n' "// Copyright (c) 2026 muse-cli contributors" "// SPDX-License-Identifier: GPL-3.0-or-later" "// Licensed under the GNU General Public License v3.0 or later." ""
+			cat "$f"
+		} > "$WORK/spdx.tmp"
+		mv "$WORK/spdx.tmp" "$f"
+	fi
+done
+
 if [ -n "$(gofmt -l "$OUT_DIR/noise_transport.pb.go" "$OUT_DIR/noise_envelope.pb.go")" ]; then
 	echo "generate.sh: generated files are not gofmt-clean" >&2
 	exit 1

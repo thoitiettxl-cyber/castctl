@@ -1,5 +1,9 @@
 //go:build ignore
 
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Licensed under the GNU General Public License v3.0 or later.
+
 // Command compile is the protoc replacement for regenerating
 // internal/proto: it compiles .proto files with
 // github.com/bufbuild/protocompile (pure Go, the compiler that powers
