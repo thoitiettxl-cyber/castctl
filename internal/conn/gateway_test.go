@@ -10,10 +10,11 @@ import (
 
 // Compile-time interface satisfaction: the frozen consumer contract.
 var (
-	_ Gateway = (*fakeGateway)(nil)
-	_ Leaser  = (*fakeGateway)(nil)
-	_ Gateway = (*SharedConn)(nil)
-	_ Leaser  = (*SharedConn)(nil)
+	_ Gateway          = (*fakeGateway)(nil)
+	_ Leaser           = (*fakeGateway)(nil)
+	_ Gateway          = (*SharedConn)(nil)
+	_ Leaser           = (*SharedConn)(nil)
+	_ generationBumper = (*fakeGateway)(nil)
 )
 
 func TestConfigIdentity(t *testing.T) {
@@ -26,6 +27,26 @@ func TestConfigIdentity(t *testing.T) {
 	c := Config{CookiesFile: "/other", VMID: "v", NodeID: "n"}
 	if a.Identity() == c.Identity() {
 		t.Fatal("different cookies_file values share an identity")
+	}
+	// S7: the outbound identity is part of Identity. Identical
+	// outbound fields compare equal; either field differing
+	// makes the identities differ, so a Reload comparison sees
+	// the change and resets.
+	d := Config{CookiesFile: "/c", VMID: "v", NodeID: "n", OutboundTag: "t1", OutboundHash: "h1"}
+	e := Config{CookiesFile: "/c", VMID: "v", NodeID: "n", OutboundTag: "t1", OutboundHash: "h1"}
+	if d.Identity() != e.Identity() {
+		t.Fatalf("identical outbound identities differ: %+v vs %+v", d.Identity(), e.Identity())
+	}
+	if d.Identity() == a.Identity() {
+		t.Fatal("a config with an outbound identity shares the identity of one without")
+	}
+	tagOnly := Config{CookiesFile: "/c", VMID: "v", NodeID: "n", OutboundTag: "t2", OutboundHash: "h1"}
+	if d.Identity() == tagOnly.Identity() {
+		t.Fatal("different outbound tags share an identity")
+	}
+	hashOnly := Config{CookiesFile: "/c", VMID: "v", NodeID: "n", OutboundTag: "t1", OutboundHash: "h2"}
+	if d.Identity() == hashOnly.Identity() {
+		t.Fatal("different outbound hashes share an identity")
 	}
 }
 

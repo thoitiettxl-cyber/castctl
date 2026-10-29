@@ -171,8 +171,9 @@ func (m *Muse) Connects() int64 { return m.connects.Load() }
 func (m *Muse) Drops() int64 { return m.drops.Load() }
 
 // Reload re-reads the profile Config and resets the shared
-// connection when the identity (cookies_file, vm_id, node_id)
-// changed (Python reload). With no ReloadFunc it returns the Config
+// connection when the identity (cookies_file, vm_id, node_id,
+// outbound_tag, outbound_hash) changed (Python reload, extended
+// with the S7 outbound identity). With no ReloadFunc it returns the Config
 // Muse was built with. A reload error returns the previous Config
 // and the error, and never resets.
 func (m *Muse) Reload() (Config, error) {
@@ -473,6 +474,15 @@ func (m *Muse) Live(ctx context.Context, cfg *Config) (Gateway, error) {
 	} else {
 		m.mu.Unlock()
 	}
+	// S6: the detached gateway (if any) is being replaced. Bump
+	// its generation exactly once, before opening the new
+	// connection, so frames queued for it never leak into a new
+	// turn. This is the only bump on this path: a gateway dropped
+	// by the stale probe above was already bumped by Drop, and
+	// in that case old is nil here (Drop cleared the slot).
+	if old != nil {
+		bumpGeneration(old)
+	}
 	t0 := time.Now()
 	gw, err := m.open(ctx, effective)
 	if err != nil {
@@ -533,7 +543,10 @@ func (m *Muse) Connect(ctx context.Context, cfg *Config) (Gateway, error) {
 }
 
 // Drop forgets a connection that failed its heartbeat; the next call
-// reconnects. The gateway is closed outside the shared lock.
+// reconnects. The gateway is closed outside the shared lock. S6: the
+// dropped gateway's generation is bumped exactly once, before Close,
+// so its queued frames cannot leak into a new turn; a gateway
+// without the bump hook is closed unbumped, without error.
 func (m *Muse) Drop(g Gateway) {
 	m.mu.Lock()
 	if m.shared == g {
@@ -542,11 +555,14 @@ func (m *Muse) Drop(g Gateway) {
 	}
 	m.mu.Unlock()
 	m.markDown(errHeartbeatFailed, false)
+	bumpGeneration(g)
 	_ = g.Close()
 }
 
 // Adopt uses an already-open connection as the shared one, closing
 // the previous shared connection (outside the lock) when it differs.
+// S6: the replaced gateway's generation is bumped exactly once,
+// before Close; re-adopting the same gateway bumps nothing.
 func (m *Muse) Adopt(gw Gateway) {
 	m.mu.Lock()
 	old := m.shared
@@ -554,6 +570,7 @@ func (m *Muse) Adopt(gw Gateway) {
 	m.mu.Unlock()
 	m.connects.Add(1)
 	if old != nil && old != gw {
+		bumpGeneration(old)
 		_ = old.Close()
 	}
 }
@@ -570,13 +587,15 @@ func (m *Muse) Warm(ctx context.Context) {
 }
 
 // Reset drops the shared connection (new cookies/profile). The old
-// gateway is closed outside the lock.
+// gateway is closed outside the lock. S6: its generation is bumped
+// exactly once, before Close, like every other replacement path.
 func (m *Muse) Reset() {
 	m.mu.Lock()
 	old := m.shared
 	m.shared = nil
 	m.mu.Unlock()
 	if old != nil {
+		bumpGeneration(old)
 		_ = old.Close()
 	}
 }

@@ -56,12 +56,19 @@ const (
 
 // Identity is the part of a profile that identifies a connection:
 // when any field changes, the warm connection belongs to another
-// profile or VM and must be dropped (see Muse.Reload). It mirrors the
-// (cookies_file, vm_id, node_id) triple in Python's Muse.reload.
+// profile, VM, or outbound and must be dropped (see Muse.Reload).
+// It mirrors the (cookies_file, vm_id, node_id) triple in Python's
+// Muse.reload, extended (S7) with the outbound identity
+// (outbound_tag, outbound_hash): changing a profile's outbound
+// forces a reconnect, exactly like changing its cookies or VM.
+// OutboundHash is an opaque digest of the outbound JSON, computed
+// by Phase-2 wiring — never a secret value itself (see Config).
 type Identity struct {
-	CookiesFile string
-	VMID        string
-	NodeID      string
+	CookiesFile  string
+	VMID         string
+	NodeID       string
+	OutboundTag  string
+	OutboundHash string
 }
 
 // Config is what a Connector receives: the identity of the profile to
@@ -69,16 +76,38 @@ type Identity struct {
 // the concrete Connector closure (built by internal/gateway wiring)
 // captures the outbound Dialer and resolves cookies itself from
 // CookiesFile. Wiring code maps a profile.Profile onto Config by
-// copying CookiesFile, VMID and NodeID.
+// copying CookiesFile, VMID, NodeID, OutboundTag and OutboundHash.
+//
+// OutboundTag and OutboundHash are identities, not secrets: the tag
+// names the outbound the profile dials through, and the hash is an
+// opaque digest of that outbound's serialised JSON, computed by the
+// wiring (Phase 2) — this package never computes, parses, or
+// validates it, and never treats it as secret material. Conn
+// compares the two fields byte-for-byte as given: identical
+// outbound identity means "same connection target", any difference
+// means "reconnect". It is the wiring's job to compute the hash so
+// that two different outbound JSONs never share one (tag, hash)
+// pair; conn cannot detect a hash the wiring failed to update.
 type Config struct {
-	CookiesFile string
-	VMID        string
-	NodeID      string
+	CookiesFile  string
+	VMID         string
+	NodeID       string
+	OutboundTag  string
+	OutboundHash string
 }
 
-// Identity returns the connection identity of this Config.
+// Identity returns the connection identity of this Config: the
+// (cookies_file, vm_id, node_id, outbound_tag, outbound_hash)
+// 5-tuple. Two Configs have the same Identity exactly when all
+// five fields are equal.
 func (c Config) Identity() Identity {
-	return Identity{CookiesFile: c.CookiesFile, VMID: c.VMID, NodeID: c.NodeID}
+	return Identity{
+		CookiesFile:  c.CookiesFile,
+		VMID:         c.VMID,
+		NodeID:       c.NodeID,
+		OutboundTag:  c.OutboundTag,
+		OutboundHash: c.OutboundHash,
+	}
 }
 
 // Connector opens one gateway connection for cfg. It is the Go form of
@@ -321,4 +350,64 @@ type Gateway interface {
 type Leaser interface {
 	// Lease returns the no-op-close view of this gateway.
 	Lease() Gateway
+}
+
+// generationBumper is the optional S6 hook by which a replaced
+// gateway is moved to a new generation, so frames already queued
+// for its old generation are dropped by the gateway's demux
+// instead of leaking into a new turn (see
+// internal/gateway/generation.go and stream.go: next() drops
+// frames tagged with a generation older than the current one).
+//
+// The hook is OPTIONAL and deliberately NOT part of the Gateway
+// interface: a Gateway that does not implement it is accepted
+// without error, and bumpGeneration below is then a no-op. The
+// method set is BumpGeneration's set — no arguments, no results —
+// with the name exported, because a cross-package type assertion
+// can never match an unexported method.
+//
+// The production gateway DOES implement this interface:
+// internal/gateway's BumpGeneration() is exported
+// (func (g *Gateway) BumpGeneration(), generation.go:51), and
+// conn's Drop/Adopt/Live/Reset paths bump the gateway being
+// replaced through this interface, so the generation filtering
+// is live, not inert — generation.go documents that within the
+// gateway package no production path bumps the generation (the
+// bump is driven from outside, by conn), and the gateway
+// package's doc (doc.go:195) confirms the export has landed and
+// conn already calls it. An unexported alias,
+// bumpGeneration(), remains in generation.go for in-package
+// callers (tests) and delegates to BumpGeneration, so there is
+// exactly one bump implementation. If the export ever changes
+// signature, this interface must be updated to match it, or the
+// bump silently stays a no-op. Do NOT add BumpGeneration to
+// the Gateway interface: shareability and generation-bumping
+// are separate concerns, and a Gateway that cannot bump must
+// remain a valid Gateway.
+type generationBumper interface {
+	BumpGeneration()
+}
+
+// bumpGeneration moves g to a new generation when g implements
+// generationBumper, and does nothing otherwise (nil gateway, or a
+// gateway without the hook). It never fails and never panics on a
+// nil Gateway; a typed-nil gateway whose BumpGeneration dereferences
+// nil behaves like any other nil-receiver Gateway call and is the
+// caller's bug, not this helper's. Callers invoke it exactly once
+// per replacement, outside every conn lock and before Close, so a
+// bump can never deadlock on the shared slot or run after the
+// gateway is closed.
+//
+// This bump is DISTINCT from Muse's heartbeat generation (hbGen in
+// conn.go, StartHeartbeat/runTick): hbGen invalidates stale
+// heartbeat loops, this one invalidates stale demuxed frames. The
+// S6 bump never reads or writes hbGen, so heartbeat restart
+// semantics are unchanged.
+func bumpGeneration(g Gateway) {
+	if g == nil {
+		return
+	}
+	if b, ok := g.(generationBumper); ok {
+		b.BumpGeneration()
+	}
 }

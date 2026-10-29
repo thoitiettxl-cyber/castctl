@@ -22,6 +22,7 @@ type fakeGateway struct {
 	pingErr     error
 	pingCalls   int
 	closeCalls  int
+	bumpCalls   int
 	closed      bool
 	callFn      func(method string, opts RequestOptions) (any, error)
 	requestFn   func(method string, opts RequestOptions) ([]byte, error)
@@ -77,6 +78,24 @@ func (f *fakeGateway) closeCallsCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.closeCalls
+}
+
+// BumpGeneration implements the S6 generationBumper hook: it only
+// counts calls. The fake is deliberately ahead of the production
+// gateway here — internal/gateway exposes only the unexported
+// bumpGeneration, so the real gateway does not satisfy this
+// interface today and conn's bump is a no-op for it. The count
+// proves conn calls the hook exactly once per replacement.
+func (f *fakeGateway) BumpGeneration() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bumpCalls++
+}
+
+func (f *fakeGateway) bumpCallsCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.bumpCalls
 }
 
 func (f *fakeGateway) countOf(method string) int {

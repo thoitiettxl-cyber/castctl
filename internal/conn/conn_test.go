@@ -54,10 +54,36 @@ func TestBoundedConnectTimeoutClosesLateGatewayExactlyOnce(t *testing.T) {
 	// Port of test_bounded_connect_never_returns_a_closed_gateway:
 	// a late gateway is either claimed (never closed by the worker)
 	// or timed out (closed exactly once), never both.
+	//
+	// The timeout is deterministic: the connector blocks on a
+	// channel the test releases only after BoundedConnect returns,
+	// so the timeout fires for a structural reason, not because a
+	// 15ms sleep happens to outlast a 10ms timer. That 5ms margin
+	// was eaten by the -race scheduler: in BoundedConnect the
+	// worker goroutine is spawned before the timer is created, so
+	// the sleep starts first and timer delivery can lag it by
+	// more than 5ms, letting the connector win the select and
+	// return the gateway with no error. The 5s fallback below
+	// never fires on the correct path (release comes at ~10ms);
+	// it only bounds the wait if BoundedConnect stops enforcing
+	// its timeout, in which case the connector returns the
+	// gateway and the TimeoutError assertion below fails instead
+	// of hanging the test.
 	for i := 0; i < 30; i++ {
 		gw := newFakeGateway()
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		releaseConnector := func() {
+			releaseOnce.Do(func() { close(release) })
+		}
+		// Unblock a stranded worker if an assertion below fails;
+		// the explicit release before the Close poll is the normal path.
+		defer releaseConnector()
 		slow := func(_ context.Context, _ Config) (Gateway, error) {
-			time.Sleep(15 * time.Millisecond)
+			select {
+			case <-release:
+			case <-time.After(5 * time.Second):
+			}
 			return gw, nil
 		}
 		_, err := BoundedConnect(context.Background(), slow, Config{}, 10*time.Millisecond)
@@ -68,6 +94,7 @@ func TestBoundedConnectTimeoutClosesLateGatewayExactlyOnce(t *testing.T) {
 		if !errors.As(err, &te) {
 			t.Fatalf("iteration %d: error = %v, want *TimeoutError", i, err)
 		}
+		releaseConnector()
 		deadline := time.Now().Add(200 * time.Millisecond)
 		for gw.closeCallsCount() == 0 && time.Now().Before(deadline) {
 			time.Sleep(time.Millisecond)
@@ -432,6 +459,185 @@ func TestDropAdoptWarmReset(t *testing.T) {
 	}
 }
 
+// TestDropAdoptResetBumpGenerationExactlyOnce covers S6 for the
+// Drop/Adopt/Reset paths: each replacement bumps the replaced
+// gateway exactly once, and adopting the same gateway (or adopting
+// onto an empty slot) bumps nothing.
+func TestDropAdoptResetBumpGenerationExactlyOnce(t *testing.T) {
+	t.Parallel()
+	m := New(connectorReturning(newFakeGateway()), WithConfig(Config{}))
+
+	first := newFakeGateway()
+	m.Adopt(first)
+	if first.bumpCallsCount() != 0 {
+		t.Fatalf("Adopt onto an empty slot bumped the gateway %d times, want 0", first.bumpCallsCount())
+	}
+	second := newFakeGateway()
+	m.Adopt(second)
+	if got := first.bumpCallsCount(); got != 1 {
+		t.Fatalf("adopted-away gateway bump calls = %d, want exactly 1", got)
+	}
+	if second.bumpCallsCount() != 0 {
+		t.Fatalf("newly adopted gateway bump calls = %d, want 0", second.bumpCallsCount())
+	}
+	m.Adopt(second)
+	if got := second.bumpCallsCount(); got != 0 {
+		t.Fatalf("re-adopting the same gateway bumped it %d times, want 0", got)
+	}
+	m.Drop(second)
+	if got := second.bumpCallsCount(); got != 1 {
+		t.Fatalf("dropped gateway bump calls = %d, want exactly 1", got)
+	}
+	if second.closeCallsCount() != 1 {
+		t.Fatalf("dropped gateway Close calls = %d, want 1", second.closeCallsCount())
+	}
+
+	third := newFakeGateway()
+	m.Adopt(third)
+	if third.bumpCallsCount() != 0 {
+		t.Fatalf("adopted gateway bump calls = %d before Reset, want 0", third.bumpCallsCount())
+	}
+	m.Reset()
+	if got := third.bumpCallsCount(); got != 1 {
+		t.Fatalf("reset gateway bump calls = %d, want exactly 1", got)
+	}
+	m.Reset() // empty slot: no panic, nothing to bump
+}
+
+// TestLiveReplacementBumpsGenerationExactlyOnce covers S6 for the
+// Live replacement path, including the double-bump guard: a
+// gateway dropped by the failed stale probe is bumped by Drop and
+// must NOT be bumped again when Live detaches it (old is nil
+// there). A reused fresh gateway is never bumped.
+func TestLiveReplacementBumpsGenerationExactlyOnce(t *testing.T) {
+	t.Parallel()
+	t.Run("dead shared gateway", func(t *testing.T) {
+		old := newFakeGateway()
+		old.setAlive(false)
+		old.setDead(errors.New("dead"))
+		fresh := newFakeGateway()
+		m := New(connectorReturning(fresh), WithConfig(Config{}))
+		m.shared = old
+		got, err := m.Live(context.Background(), nil)
+		if err != nil {
+			t.Fatalf("Live() error = %v", err)
+		}
+		if got != Gateway(fresh) {
+			t.Fatalf("Live() returned a different gateway")
+		}
+		if n := old.bumpCallsCount(); n != 1 {
+			t.Fatalf("replaced gateway bump calls = %d, want exactly 1", n)
+		}
+		if old.closeCallsCount() != 1 {
+			t.Fatalf("replaced gateway Close calls = %d, want 1", old.closeCallsCount())
+		}
+		if fresh.bumpCallsCount() != 0 {
+			t.Fatalf("replacement gateway bump calls = %d, want 0", fresh.bumpCallsCount())
+		}
+	})
+	t.Run("failed stale probe", func(t *testing.T) {
+		oldStamp := time.Now().Add(-1000 * time.Second)
+		stale := newFakeGateway()
+		stale.setStamps(oldStamp, oldStamp)
+		stale.setPingErr(&TimeoutError{Message: "no response for connection.ping"})
+		replacement := newFakeGateway()
+		m := New(connectorReturning(replacement), WithConfig(Config{}))
+		m.shared = stale
+		got, err := m.Live(context.Background(), nil)
+		if err != nil {
+			t.Fatalf("Live() error = %v", err)
+		}
+		if got != Gateway(replacement) {
+			t.Fatalf("Live() did not install the replacement after a failed probe")
+		}
+		if n := stale.bumpCallsCount(); n != 1 {
+			t.Fatalf("probe-dropped gateway bump calls = %d, want exactly 1 (Drop once, no second bump in Live)", n)
+		}
+		if stale.closeCallsCount() != 1 {
+			t.Fatalf("probe-dropped gateway Close calls = %d, want 1", stale.closeCallsCount())
+		}
+	})
+	t.Run("fresh gateway reused", func(t *testing.T) {
+		gw := newFakeGateway() // stamps are time.Now(): fresh
+		m := New(connectorReturning(gw), WithConfig(Config{}))
+		m.shared = gw
+		got, err := m.Live(context.Background(), nil)
+		if err != nil {
+			t.Fatalf("Live() error = %v", err)
+		}
+		if got != Gateway(gw) {
+			t.Fatalf("Live() returned a different gateway")
+		}
+		if n := gw.bumpCallsCount(); n != 0 {
+			t.Fatalf("reused gateway bump calls = %d, want 0", n)
+		}
+	})
+}
+
+// noBumpGateway is a Gateway that deliberately implements neither
+// Leaser nor the S6 generationBumper hook: it embeds the Gateway
+// interface so every Gateway method forwards to the wrapped
+// gateway and adds nothing. Replacement paths must accept it
+// without error and still close it.
+type noBumpGateway struct{ Gateway }
+
+// TestReplacementWithoutBumpHookIsAccepted proves the S6 hook is
+// optional: a gateway without BumpGeneration (like the production
+// gateway today, whose bump is unexported) is dropped, adopted
+// away, reset, and replaced by Live without error, and is still
+// closed exactly once on each path.
+func TestReplacementWithoutBumpHookIsAccepted(t *testing.T) {
+	t.Parallel()
+	bumpGeneration(nil) // a nil gateway is a no-op, never a panic
+
+	plain := newFakeGateway()
+	wrapped := &noBumpGateway{Gateway: plain}
+	if _, ok := Gateway(wrapped).(generationBumper); ok {
+		t.Fatal("noBumpGateway unexpectedly implements generationBumper; the negative case is void")
+	}
+	if _, ok := Gateway(plain).(generationBumper); !ok {
+		t.Fatal("fakeGateway does not implement generationBumper; the positive case is void")
+	}
+
+	m := New(connectorReturning(newFakeGateway()), WithConfig(Config{}))
+	m.Adopt(wrapped)
+	other := newFakeGateway()
+	m.Adopt(other) // replaces wrapped: no bump, still closed
+	if plain.closeCallsCount() != 1 {
+		t.Fatalf("replaced no-hook gateway Close calls = %d, want 1", plain.closeCallsCount())
+	}
+
+	dropped := newFakeGateway()
+	m.Drop(&noBumpGateway{Gateway: dropped})
+	if dropped.closeCallsCount() != 1 {
+		t.Fatalf("dropped no-hook gateway Close calls = %d, want 1", dropped.closeCallsCount())
+	}
+
+	reset := newFakeGateway()
+	m.shared = &noBumpGateway{Gateway: reset}
+	m.Reset()
+	if reset.closeCallsCount() != 1 {
+		t.Fatalf("reset no-hook gateway Close calls = %d, want 1", reset.closeCallsCount())
+	}
+
+	dead := newFakeGateway()
+	dead.setAlive(false)
+	dead.setDead(errors.New("dead"))
+	fresh := newFakeGateway()
+	m2 := New(connectorReturning(fresh), WithConfig(Config{}))
+	m2.shared = &noBumpGateway{Gateway: dead}
+	got, err := m2.Live(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Live() error = %v", err)
+	}
+	if got != Gateway(fresh) {
+		t.Fatalf("Live() returned a different gateway")
+	}
+	if dead.closeCallsCount() != 1 {
+		t.Fatalf("replaced no-hook gateway Close calls = %d, want 1", dead.closeCallsCount())
+	}
+}
+
 func TestReloadResetsOnlyOnIdentityChange(t *testing.T) {
 	t.Parallel()
 	gw := newFakeGateway()
@@ -464,6 +670,58 @@ func TestReloadResetsOnlyOnIdentityChange(t *testing.T) {
 	}
 	// Only cookies_file changing also resets; vm_id/node_id alone do not
 	// need a separate test: the Identity comparison covers all three.
+
+	// S7: an outbound-only change resets, an identical outbound
+	// does not. Each case re-installs a fresh gateway, because the
+	// previous reset cleared the shared slot.
+	current = Config{CookiesFile: "/c2", VMID: "vm1", NodeID: "n1", OutboundTag: "t1", OutboundHash: "h1"}
+	gwOut := newFakeGateway()
+	m.shared = gwOut
+	got, err = m.Reload()
+	if err != nil || got != current {
+		t.Fatalf("Reload() = (%v, %v), want (%v, nil)", got, err, current)
+	}
+	if gwOut.closeCallsCount() != 1 {
+		t.Fatalf("gateway Close calls after adding an outbound identity = %d, want 1", gwOut.closeCallsCount())
+	}
+
+	current = Config{CookiesFile: "/c2", VMID: "vm1", NodeID: "n1", OutboundTag: "t2", OutboundHash: "h1"}
+	gwTag := newFakeGateway()
+	m.shared = gwTag
+	got, err = m.Reload()
+	if err != nil || got != current {
+		t.Fatalf("Reload() = (%v, %v), want (%v, nil)", got, err, current)
+	}
+	if gwTag.closeCallsCount() != 1 {
+		t.Fatalf("gateway Close calls after an outbound-tag-only change = %d, want 1", gwTag.closeCallsCount())
+	}
+
+	current = Config{CookiesFile: "/c2", VMID: "vm1", NodeID: "n1", OutboundTag: "t2", OutboundHash: "h2"}
+	gwHash := newFakeGateway()
+	m.shared = gwHash
+	got, err = m.Reload()
+	if err != nil || got != current {
+		t.Fatalf("Reload() = (%v, %v), want (%v, nil)", got, err, current)
+	}
+	if gwHash.closeCallsCount() != 1 {
+		t.Fatalf("gateway Close calls after an outbound-hash-only change = %d, want 1", gwHash.closeCallsCount())
+	}
+	m.mu.RLock()
+	shared = m.shared
+	m.mu.RUnlock()
+	if shared != nil {
+		t.Fatalf("shared after outbound-change Reload = %v, want nil", shared)
+	}
+
+	gwSame := newFakeGateway()
+	m.shared = gwSame
+	got, err = m.Reload()
+	if err != nil || got != current {
+		t.Fatalf("Reload() = (%v, %v), want (%v, nil)", got, err, current)
+	}
+	if gwSame.closeCallsCount() != 0 {
+		t.Fatalf("gateway closed on an identical outbound identity")
+	}
 }
 
 func TestReloadWithoutReloadFuncKeepsConfig(t *testing.T) {
