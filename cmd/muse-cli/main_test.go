@@ -6,19 +6,27 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/thoitiettxl-cyber/muse-cli/go/internal/commands"
 )
 
-func noEnv(string) (string, bool) { return "", false }
-
+// runMain drives the real dispatch with a hermetic HOME: the config
+// location resolves under t.TempDir via the process environment
+// (t.Setenv), never the real ~/.config.
 func runMain(t *testing.T, home string, args ...string) (int, string, string) {
 	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("MUSE_CLI_CONFIG", "")
+	t.Setenv("MUSE_CLI_PROFILE", "")
 	var out, errb bytes.Buffer
-	code := run(args, noEnv, &out, &errb, home)
+	code := commands.Run(context.Background(), args, &commands.Env{Stdout: &out, Stderr: &errb})
 	return code, out.String(), errb.String()
 }
 
@@ -27,11 +35,15 @@ func TestVersionAndHelp(t *testing.T) {
 	if code, out, _ := runMain(t, home, "--version"); code != 0 || strings.TrimSpace(out) != "muse-cli 0.6.1" {
 		t.Fatalf("--version: code=%d out=%q", code, out)
 	}
-	if code, out, _ := runMain(t, home, "--help"); code != 0 || !strings.Contains(out, "Usage: muse-cli") {
+	if code, out, _ := runMain(t, home, "--help"); code != 0 || !strings.Contains(out, "muse-cli") {
 		t.Fatalf("--help: code=%d out=%q", code, out)
 	}
-	if code, out, _ := runMain(t, home, "-h"); code != 0 || !strings.Contains(out, "Usage: muse-cli") {
+	if code, out, _ := runMain(t, home, "-h"); code != 0 || !strings.Contains(out, "muse-cli") {
 		t.Fatalf("-h: code=%d out=%q", code, out)
+	}
+	// Help mentions the config-location contract.
+	if _, out, _ := runMain(t, home, "--help"); !strings.Contains(out, "--config") || !strings.Contains(out, "MUSE_CLI_CONFIG") || !strings.Contains(out, "XDG") {
+		t.Fatalf("--help must mention --config, MUSE_CLI_CONFIG and XDG: %q", out)
 	}
 }
 
@@ -44,41 +56,40 @@ func TestArgparseShapeRejections(t *testing.T) {
 	}
 }
 
-func TestUnknownFlagAndPositionalExit2(t *testing.T) {
+func TestUnknownAndDeferredCommandsExit2(t *testing.T) {
 	home := t.TempDir()
-	if code, _, _ := runMain(t, home, "--bogus"); code != 2 {
+	if code, _, errb := runMain(t, home, "--bogus"); code != 2 {
 		t.Fatalf("unknown flag: code=%d, want 2", code)
+	} else if errb == "" {
+		t.Fatalf("unknown flag: empty stderr")
 	}
-	if code, _, _ := runMain(t, home, "send"); code != 2 {
-		t.Fatalf("positional arg: code=%d, want 2", code)
+	// Deferred commands name their PR; unknown commands do not.
+	if code, _, errb := runMain(t, home, "send"); code != 2 || !strings.Contains(errb, "PR4") {
+		t.Fatalf("send: code=%d err=%q, want 2 + PR4", code, errb)
+	}
+	if code, _, errb := runMain(t, home, "telegram"); code != 2 || !strings.Contains(errb, "PR5") {
+		t.Fatalf("telegram: code=%d err=%q, want 2 + PR5", code, errb)
+	}
+	if code, _, errb := runMain(t, home, "frobnicate"); code != 2 || strings.Contains(errb, "is not implemented in the Go port yet") {
+		t.Fatalf("unknown command: code=%d err=%q, want 2 without a deferred message", code, errb)
 	}
 }
 
-func TestConfigLoadNoConfigDefaults(t *testing.T) {
+func TestBareInvocationIsDeferredChat(t *testing.T) {
 	home := t.TempDir()
-	code, out, _ := runMain(t, home)
-	if code != 0 {
-		t.Fatalf("code=%d, want 0", code)
+	code, _, errb := runMain(t, home)
+	if code != 2 || !strings.Contains(errb, "chat") || !strings.Contains(errb, "PR4") {
+		t.Fatalf("bare: code=%d err=%q, want deferred-chat message + PR4", code, errb)
 	}
-	var s summary
-	if err := json.Unmarshal([]byte(out), &s); err != nil {
-		t.Fatalf("unmarshal: %v (out=%q)", err, out)
-	}
-	if s.Profile != "default" || s.Source != "none" || s.ConfigFound {
-		t.Fatalf("summary=%+v, want default/none/not-found", s)
-	}
-	if strings.Contains(out, "vm_id") || strings.Contains(out, "node_id") || strings.Contains(out, "subscription_action_id") {
-		t.Fatalf("output must never contain secret/id fields: %q", out)
-	}
-	// Read-only: no files created under the fake home.
+	// Nothing is read or written under the fake home.
 	var names []string
 	_ = filepath.Walk(home, func(p string, _ os.FileInfo, _ error) error { names = append(names, p); return nil })
 	if len(names) != 1 {
-		t.Fatalf("load wrote files: %v", names)
+		t.Fatalf("bare invocation touched the home dir: %v", names)
 	}
 }
 
-func TestConfigLoadSingleFile(t *testing.T) {
+func TestProfileListLoadsSingleFile(t *testing.T) {
 	home := t.TempDir()
 	base := filepath.Join(home, ".config", "muse-cli")
 	if err := os.MkdirAll(base, 0o755); err != nil {
@@ -88,23 +99,26 @@ func TestConfigLoadSingleFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(base, "config.json"), []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	code, out, _ := runMain(t, home)
+	code, out, _ := runMain(t, home, "profile", "list")
 	if code != 0 {
-		t.Fatalf("code=%d, want 0", code)
+		t.Fatalf("code=%d, want 0 (out=%q)", code, out)
 	}
-	var s summary
-	if err := json.Unmarshal([]byte(out), &s); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	var list struct {
+		Active string `json:"active"`
+		Source string `json:"source"`
 	}
-	if s.Profile != "default" || s.Source != "single" || !s.ConfigFound || s.AutoApprove != "always" || !s.AutoAllowOnce {
-		t.Fatalf("summary=%+v", s)
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		t.Fatalf("unmarshal: %v (out=%q)", err, out)
 	}
-	if s.OutboundKind != "tag" || s.OutboundTag != "proxy" || s.OutboundType != "socks" {
-		t.Fatalf("outbound=%+v, want tag/proxy/socks", s)
+	if list.Active != "default" || list.Source != "single" {
+		t.Fatalf("list=%+v, want default/single", list)
+	}
+	if strings.Contains(out, "vm_id") || strings.Contains(out, "node_id") || strings.Contains(out, "subscription_action_id") {
+		t.Fatalf("output must never contain secret/id fields: %q", out)
 	}
 }
 
-func TestConfigLoadUnparseableExits2(t *testing.T) {
+func TestProfileListUnparseableExits2(t *testing.T) {
 	home := t.TempDir()
 	base := filepath.Join(home, ".config", "muse-cli")
 	if err := os.MkdirAll(base, 0o755); err != nil {
@@ -113,7 +127,7 @@ func TestConfigLoadUnparseableExits2(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(base, "config.json"), []byte(`{"profiles":{},"bogus":1}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, _, _ := runMain(t, home); code != 2 {
+	if code, _, _ := runMain(t, home, "profile", "list"); code != 2 {
 		t.Fatalf("code=%d, want 2", code)
 	}
 }

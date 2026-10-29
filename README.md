@@ -38,16 +38,21 @@ worktree): `default_chrome_server_name_and_alpn_passthrough`,
 stub TLS implementation rejects. This is expected, not a regression: run
 the canonical tagged command above.
 
-## Binary sizes (PR1 measurements)
+## Binary sizes (PR3 measurements, linux/amd64)
 
-Measured in PR1, not re-measured in PR2:
+Measured in PR3, same flags as PR1:
 `CGO_ENABLED=0`, `-trimpath`, `-ldflags '-s -w -buildid='`.
+The command tree now imports the full command packages (PR1
+measured a version/help-only binary: 34,574,460 / 38,985,852 /
+43,053,180 for the same three tag sets).
 
 | Tag set | Size (bytes) |
 | --- | --- |
-| `with_utls` | 34,574,460 |
-| `with_utls,with_quic,with_wireguard` (+quic+wireguard) | 38,985,852 |
-| `with_utls,with_quic,with_wireguard,with_gvisor` (+gvisor) | 43,053,180 |
+| `with_utls` | 35,782,780 |
+| `with_utls,with_quic,with_wireguard` (+quic+wireguard) | 40,153,212 |
+| `with_utls,with_quic,with_wireguard,with_gvisor` (+gvisor) | 44,220,540 |
+
+No size budget is set; the numbers are recorded only.
 
 ## Bootstrap DNS lookup
 
@@ -94,8 +99,235 @@ build tags). The generated `*.pb.go` files get the same header from
 `internal/proto/generate/README.md`. A test (`go/spdx_test.go`)
 fails the suite if any `.go` file lacks the header.
 
-## CLI surface
+## CLI surface (PR3)
 
-`cmd/muse-cli` currently exposes only `--version` / `--help` and a
-read-only config load. PR2 adds the gateway library (`internal/gateway`
-and related packages); it adds no new CLI commands.
+`cmd/muse-cli` dispatches through `internal/commands` with a
+hand-rolled parser mirroring Python argparse (help text, errors,
+exit 2 for bad usage). Every command honours the global flags
+`--profile NAME` and `--config PATH` (see Config location below),
+`--version` prints `muse-cli <version>`, and `--help` works globally
+and per command.
+
+Implemented in PR3 (Python 0.6.1 contract: flags, JSON shapes, exit
+codes):
+
+| Group | Commands |
+| --- | --- |
+| Status & subscription | `status`, `usage`, `invite`, `redeem` |
+| Chat history | `threads`, `history`, `files`, `download`, `watch` |
+| Feed | `feed`, `feed-status`, `feed-react`, `feed-prompt` |
+| Goals & ideas | `goals`, `goal`, `ideas`, `idea`, `idea-exec` |
+| Inbox | `unread`, `seen` |
+| Sessions & control | `session-start`, `session-rename`, `session-pin`, `session-unpin`, `session-archive`, `session-unarchive`, `session-delete`, `stop`, `wake` |
+| Low level | `raw` |
+| Sandbox filesystem | `fs ls`, `fs tree`, `fs stat`, `fs cat`, `fs get`, `fs find`, `fs put`, `fs write`, `fs edit`, `fs mkdir`, `fs mv`, `fs rm` |
+| Auth & profiles | `auth list`, `auth export` (guidance-only, exit 1), `profile list`, `profile show`, `profile add`, `profile rm`, `profile set-outbound`, `profile set-fingerprint`, `profile set-tls-engine`, `profile test`, `config migrate` |
+
+Deferred (the parser names the PR; `--help` still works):
+
+| Commands | Lands in |
+| --- | --- |
+| `send`, `wait`, `approvals`, `approve`, `deny`, `auto-approve`, bare invocation (chat REPL) | PR4 |
+| `telegram` (+ subcommands), `update` | PR5 |
+
+`auth import` is approved but ships after PR3. No new login flow is
+implemented in PR3 (no native endpoint login, no relay, no
+device-code/QR, no paste-login); `auth export` only prints manual
+guidance and exits 1 without writing anything.
+
+`auth list` fails closed when any profile config is unparseable:
+it returns the config error instead of listing. Python 0.6.1 is
+lenient here — `list_profiles` shows defaults for a profile whose
+config it cannot parse — while the Go profile package fails closed
+on a corrupt config and `auth list` does not second-guess it.
+
+Read commands do not start the 25 s heartbeat: Python starts it only
+on the wait/send/bot paths, and the Go port matches that (heartbeat
+belongs to PR4/PR5). A failed authentication never exits 0: auth
+failures print a one-line JSON object with a `type` field on stderr
+(`cookies_missing`, `session_unavailable`, `auth_check_failed`,
+`hatch_token_failed`, `auth_failed`) and exit 2; gateway failures
+exit 3; timeouts exit 4; `download` exits 3 on any row error.
+
+## Config location
+
+Precedence, highest first:
+
+1. `--config PATH` (a file, not a directory; empty is an error).
+2. `MUSE_CLI_CONFIG` (empty counts as unset).
+3. The OS user config directory (`os.UserConfigDir()`, i.e. XDG on
+   Linux): `<dir>/muse-cli/config.json`. A relative
+   `XDG_CONFIG_HOME` warns on stderr and falls back to the default;
+   an empty one falls back silently.
+
+The directory containing the resolved `config.json` is `CONFIG_DIR`
+for the whole invocation: `config.json.lock`, `profiles/<name>/`,
+the default cookies file, `chat.json`, telegram files, and the global
+`update.json` all live under it. A relative `--config` path is
+resolved against the current directory (no tilde expansion);
+the config file is opened through a symlink with standard open
+semantics, and `CONFIG_DIR` is the cleaned as-given directory:
+symlinks are NOT resolved. A missing explicit `--config` file exits 2, except
+`config migrate` (which may create it with `--write`, and whose
+dry run plans from a legacy-only layout). `--profile` resolution
+inside the resolved home is unchanged: `--profile` flag, then
+`MUSE_CLI_PROFILE`, then `default_profile`, then `"default"`.
+
+Per-key relative paths inside a profile config: only `cookies_file`
+is resolved, relative to `CONFIG_DIR`; an absolute value is kept
+as-is. `vm_id`, `node_id`, `subscription_action_id`,
+`auto_approve`, `auto_allow_once`, `default_profile`,
+`fingerprint`, and `tls_engine` are not paths. The `outbound`,
+`outbounds`, `endpoints`, and `dns` objects are opaque sing-box
+configuration passed through verbatim: path-like fields inside
+them (if any) are resolved by sing-box relative to the working
+directory, not to `CONFIG_DIR`. This differs from Python 0.6.1,
+which keeps `cookies_file` as-is (resolved against the working
+directory when opened); the Go resolution is deliberate.
+
+Single-file `auto_approve` rejects any value outside `always`/`off`
+— including `on` — with a config error, while the legacy layout
+coerces `on` to `off`.
+
+Examples:
+
+```sh
+muse-cli --config /etc/muse-cli/config.json status
+MUSE_CLI_CONFIG=~/work/muse-cli/config.json muse-cli threads
+muse-cli profile show --config ./local/config.json
+```
+
+## Profile isolation
+
+One `outbound.Manager`, one `dns.Client`, and one Dialer per profile
+per invocation: `defaultBuildRuntime` constructs all three fresh on
+every call and closes them in reverse order when the command ends.
+There is no package-level or shared Manager/Dialer/DNS state in
+`internal/commands` — the only package-level values are immutable
+registries (the command table, flag definitions, help texts)
+populated once by `init()` and read-only afterwards, plus one
+fresh-per-call random `tempNodeID` that is never written to disk.
+Inline outbounds without a tag are auto-tagged `profile:<name>`, so
+each profile's inline stack lives in its own tag namespace; the
+synthetic direct outbound is the fixed tag `muse-cli-dialer`. The
+isolation itself comes from the per-Manager registries — each
+Manager builds its outbound, endpoint, and DNS-transport
+registries on a fresh registry context — not from tag names: the
+`profile:<name>` auto-tag and the `muse-cli-dialer` synthetic tag
+are naming conventions inside that registry, not the isolation
+mechanism. No
+ambient proxy detection exists anywhere in the commands layer:
+proxy environment variables are read only when the user explicitly
+passes `profile add --outbound-from-env`, and that read itself lives
+in the profile library (`profile.OutboundFromEnv`), never in command
+dispatch. The concurrent two-stack isolation proof (two
+Managers/Dialers live at once, distinct egress) lives with the
+isolation writer in `internal/outbound`/`internal/dns`; this package
+only guarantees the fresh-per-invocation construction it rests on.
+
+## Fingerprint and TLS engine (hold)
+
+`fingerprint` (chrome, firefox, ios, safari; default chrome) and
+`tls_engine` (cronet, stdlib, utls; default utls) are **stored and
+validated only** in PR3. The runtime is unchanged: gateway TLS stays
+uTLS Chrome, and the WebSocket stays gorilla + uTLS. No cronet code
+is wired. The default is `utls` on every platform; `cronet` is an
+opt-in build flavour for later (tag `with_cronet` plus a
+hash-verified sidecar), only after a direct probe matches or comes
+close to real Chrome of the same version. The `random`/`randomized`
+uTLS preset exists in sing-box but is rejected: it is never accepted
+as a fingerprint value. `profile test` reports the stored
+fingerprint and the User-Agent used. Both are recorded-only
+values: the result carries a `note` field stating that the
+runtime always uses uTLS chrome until the TLS engine decision
+lands.
+
+Background: sing-box v1.14.4 documents uTLS as "Not Recommended"
+(repeated fingerprinting vulnerabilities; it cannot really
+replicate BoringSSL/NSS and lacks maintenance). Do not rely on uTLS
+long-term and do not lock later fingerprint work on it; the
+per-profile `tls_engine` setting exists so the engine can change
+without changing stored profiles.
+
+## Login-browser local inbound (binding constraint for a later PR)
+
+Record only: PR3 builds no local-inbound or browser code. A later PR
+(the screencast login flow) that runs a login browser MUST satisfy
+all of the following — they are a binding constraint on that PR, not
+an aspiration:
+
+- The browser's local inbound binds `127.0.0.1` on an OS-assigned
+  port (`:0`): a fresh listener, per profile AND per session.
+- The inbound carries AUTH: a random username and password generated
+  per session, so another profile — or another process on the same
+  machine — cannot use the listener.
+- The listener is closed when the session ends.
+- Never a fixed port, never `0.0.0.0`.
+
+No code in this PR implements, assumes, or depends on such an
+inbound.
+
+## Platforms
+
+Portable code only: paths come from `os.UserConfigDir()` plus the
+config-location rules above; no hard-coded home directory, launcher,
+agent-browser, or sandbox paths. The port targets Debian/server
+Linux, rooted Android (Termux/KernelSU, arm64), Windows, and macOS.
+No browser is assumed: the screencast-login browser dependency is
+optional and runtime-detected, and the no-browser fallback is
+`auth import` (after PR3).
+
+Cross-compile matrix, measured in PR3 (compile-only, no execution;
+`CGO_ENABLED=0 go build -trimpath -ldflags '-s -w -buildid='
+./cmd/muse-cli`, Go 1.27.3). All ten combinations compile.
+
+| Target | `with_utls` (bytes) | Canonical 4 tags (bytes) |
+| --- | --- | --- |
+| linux/amd64 | 35,782,780 | 44,220,540 |
+| linux/arm64 | 33,226,876 | 41,156,732 |
+| android/arm64 | 37,552,386 | 46,465,282 |
+| windows/amd64 | 35,538,944 | 43,959,296 |
+| darwin/arm64 | 32,602,898 | 40,906,098 |
+
+Canonical tags: `with_utls,with_quic,with_wireguard,with_gvisor`.
+An untagged linux/amd64 build also compiles (35,545,212 bytes);
+its TLS subtests fail by design (uTLS needs `with_utls`). No
+target-specific feature gap was found at compile time beyond the
+tag-gated ones: WireGuard endpoints need `with_gvisor` (a stub
+returns a clear error without it), QUIC transports need
+`with_quic`, uTLS needs `with_utls`. Execution on non-linux
+targets is untested.
+
+Guarded writes fail closed on Windows: flock is unsupported off
+unix (`flock_other.go` always errors), so `profile add`, `profile
+rm`, `profile set-*`, and `config migrate --write` fail there
+instead of running unlocked. Cross-compilation for Windows
+requires COMPILE only; reads and `config migrate` dry-runs still
+work, since they take no lock.
+
+## Gateway frame reassembly caps
+
+Deliberate Go-only fail-closed hardening ordered by Boss, NOT
+parity — Python 0.6.1 has no cap: `join_chunks`
+(`gateway.py:83-93` in the read-only 0.6.1 copy) grows an unbounded
+`_partial` dict, and `download_file` joins every frame of a request
+with no total bound. One reassembled message is capped at
+`MaxReassembledSize` (64 MiB — 16x the 4 MiB `fs.read` window in
+`fs.py:16`, over 3x the 20 MiB Telegram download cap in
+`tgapi.py:20`, above the 49 MiB upload cap in `tgapi.py:19`), and
+at most `MaxUnfinishedGroups` (16) unfinished `chunk_id` groups are
+held (the single sequential reader normally holds exactly 1; 16 is
+16x headroom for interleaved sends). One group holds at most
+`MaxPiecesPerGroup` (32768) distinct pieces: the size cap counts
+bytes, so it cannot bound a group of empty (size 0) pieces, and
+the piece-count cap is what makes it effective (29.3x the 1119
+full-size pieces a 64 MiB message needs at `SendPiece` chunking;
+see `framing.go` for the computation). Exceeding the size cap fails
+with a typed `*ReassemblySizeError`, exceeding the groups cap
+with a typed `*TooManyUnfinishedGroupsError`, and exceeding the
+piece-count cap with a typed `*TooManyPiecesError`; either way the group
+is discarded and the reader keeps reading, so other streams on the
+same gateway keep working. A chunk_id carries no stream id until
+it reassembles, so with several streams open the error reaches
+all of them; the single-stream case is exact. (Source:
+`internal/gateway/doc.go`.)
