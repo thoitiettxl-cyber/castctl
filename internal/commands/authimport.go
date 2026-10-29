@@ -42,10 +42,11 @@ type authImportResult struct {
 //
 // The command cannot panic on hostile input: every helper below is
 // total over arbitrary byte strings (the only panics possible would
-// come from a nil Env, which Run already guards). This tree has no
-// CLI-boundary recover yet (PR4 owns it, R2 decision); until this
-// branch merges after PR4 or rebases onto it, the recover is a
-// merge-order dependency, not a property of this command.
+// come from a nil Env, which Run already guards). The CLI-boundary
+// recover exists in Run (R2 decision): a panic anywhere on the
+// dispatch path converts to exit 2 with a redacted error message
+// and no secret-bearing stack, wired via Run -> runInner -> the
+// command table -> cmdAuthImport.
 func cmdAuthImport(_ context.Context, env *Env, g *globalOpts, args []string) error {
 	ap := &argParser{defs: nil, helpText: authImportHelpText, prog: "muse-cli auth import"}
 	p, helpShown, err := ap.parse(args, env.stdout())
