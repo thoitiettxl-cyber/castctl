@@ -327,14 +327,15 @@ export function MainLayout() {
       <div className="top-gradient-blur" aria-hidden="true" />
 
       <header className="main-header">
-        <button
+        <Button
           type="button"
+          variant="ghost"
           className="sidebar-toggle-floating"
           aria-label={isCollapsed ? t('sidebar.expand') : t('sidebar.collapse')}
           onClick={toggleCollapse}
         >
           {isCollapsed ? headerIcons.chevronRight : headerIcons.chevronLeft}
-        </button>
+        </Button>
         <div className="mobile-sidebar-actions">
           <Button
             className="mobile-menu-btn"
@@ -362,9 +363,10 @@ export function MainLayout() {
             {languageMenuOpen && (
               <div className="language-menu-popover" role="menu" aria-label={t('language.switch')}>
                 {LANGUAGE_ORDER.map((lang: Language) => (
-                  <button
+                  <Button
                     key={lang}
                     type="button"
+                    variant="plain"
                     role="menuitemradio"
                     aria-checked={language === lang}
                     className={`language-menu-option ${language === lang ? 'active' : ''}`}
@@ -375,7 +377,7 @@ export function MainLayout() {
                   >
                     <span>{t(LANGUAGE_LABEL_KEYS[lang])}</span>
                     {language === lang && <span className="language-menu-check">✓</span>}
-                  </button>
+                  </Button>
                 ))}
               </div>
             )}
@@ -401,9 +403,10 @@ export function MainLayout() {
             {themeMenuOpen && (
               <div className="theme-menu-popover" role="menu" aria-label={t('theme.switch')}>
                 {THEME_CARDS.map((tc) => (
-                  <button
+                  <Button
                     key={tc.key}
                     type="button"
+                    variant="plain"
                     role="menuitemradio"
                     aria-checked={theme === tc.key}
                     className={`theme-card ${theme === tc.key ? 'active' : ''}`}
@@ -447,7 +450,7 @@ export function MainLayout() {
                       </div>
                     </div>
                     <span className="theme-card-label">{t(tc.labelKey)}</span>
-                  </button>
+                  </Button>
                 ))}
               </div>
             )}
@@ -465,8 +468,9 @@ export function MainLayout() {
       </header>
 
       <div className="main-body">
-        <button
+        <Button
           type="button"
+          variant="plain"
           aria-label={t('sidebar.toggle_collapse')}
           className={`sidebar-backdrop ${isMobileOpen ? 'visible' : ''}`}
           onClick={closeMobile}

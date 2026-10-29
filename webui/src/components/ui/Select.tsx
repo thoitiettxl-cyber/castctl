@@ -11,6 +11,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { IconChevronDown } from './icons';
+import { Button } from './Button';
 import styles from './Select.module.scss';
 
 export interface SelectOption {
@@ -291,10 +292,11 @@ export function Select({
           const active = opt.value === value;
           const highlighted = index === resolvedHighlightedIndex;
           return (
-            <button
+            <Button
               key={opt.value}
               id={`${selectId}-option-${index}`}
               type="button"
+              variant="plain"
               role="option"
               aria-selected={active}
               className={`${styles.option} ${active ? styles.optionActive : ''} ${highlighted ? styles.optionHighlighted : ''}`.trim()}
@@ -303,7 +305,7 @@ export function Select({
               onClick={() => commitSelection(index)}
             >
               {opt.label}
-            </button>
+            </Button>
           );
         })}
       </div>
@@ -315,10 +317,11 @@ export function Select({
         className={`${styles.wrap} ${fullWidth ? styles.wrapFullWidth : ''} ${className ?? ''}`}
         ref={wrapRef}
       >
-        <button
+        <Button
           id={selectId}
           ref={triggerRef}
           type="button"
+          variant="plain"
           className={`${styles.trigger} ${size === 'sm' ? styles.triggerSm : ''}`.trim()}
           onClick={disabled ? undefined : () => setOpen((prev) => !prev)}
           onKeyDown={handleKeyDown}
@@ -342,7 +345,7 @@ export function Select({
           <span className={styles.triggerIcon} aria-hidden="true">
             <IconChevronDown size={14} />
           </span>
-        </button>
+        </Button>
       </div>
       {dropdown &&
         (typeof document === 'undefined' ? dropdown : createPortal(dropdown, document.body))}

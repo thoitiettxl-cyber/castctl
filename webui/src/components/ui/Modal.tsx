@@ -10,6 +10,7 @@ import {
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { IconX } from './icons';
+import { Button } from './Button';
 import { FOCUSABLE_SELECTOR, lockScroll, unlockScroll } from './scrollLock';
 
 interface ModalProps {
@@ -191,16 +192,17 @@ export function Modal({
         aria-labelledby={title ? titleId : undefined}
         tabIndex={-1}
       >
-        <button
+        <Button
           ref={closeButtonRef}
           type="button"
+          variant="plain"
           className="modal-close-floating"
           onClick={closeDisabled ? undefined : handleClose}
           aria-label={t('common.close')}
           disabled={closeDisabled}
         >
           <IconX size={20} />
-        </button>
+        </Button>
         <div className="modal-header">
           <div className="modal-title" id={title ? titleId : undefined}>
             {title}
