@@ -1,0 +1,177 @@
+# Integration seams — how the wait core is wired in
+
+Status: SEAMS ONLY. No dead code on this branch: the interface
+sketches below are documentation (code blocks in this file), and
+the live contracts are the Go interfaces in `runner.go`
+(`Subscriber`, `HistoryReader`), `waiter.go` (`Decider` use via
+`approvals.AutoApprover`), and `approvals.go` (`Approver`).
+
+## 1. The driver contract (live, implemented)
+
+The wait core takes its connection from the caller and never
+dials itself:
+
+- `RunnerConfig.Dial(ctx) (Subscriber, error)` — one fresh
+  subscription per call. The driver builds the connection
+  through the profile's outbound Dialer (see §2) and returns a
+  `Subscriber` (satisfied by `conn.Gateway`'s `SubscribeRaw` +
+  `Close`). The Runner closes each subscription it dialed, and
+  never closes anything it did not dial. A check call gets its
+  own fresh `Dial` + close, mirroring Python's per-read fresh
+  connections. The caller owns connection freshness and
+  replacement (e.g. via `Muse.Live` / `Connect` / `SharedConn`
+  in `internal/conn`); the Runner never inspects or replaces a
+  connection.
+- `RunnerConfig.History HistoryReader` — history reads. See §4.
+- `RunnerConfig.Approver *approvals.AutoApprover` (nil = no
+  auto-approve). The approver's `Connect` is likewise
+  caller-supplied; the Runner never dials for it either.
+- `RunnerConfig.NodeID` — caller-supplied stable identity,
+  carried through to `Result`. The wait core never generates,
+  persists, or rotates it. See NODE_ID.md.
+- `RunnerConfig.UserStop func() bool`, `Recheck func()` —
+  caller callbacks for user interrupt and interactive recheck.
+  Both default to no-ops.
+
+## 2. Outbound Dialer seam (wiring PR)
+
+Proxy invariant (holds end to end): ALL network traffic goes
+through the profile's outbound Dialer, fail-closed. The wait
+core never reads proxy environment variables, never dials
+direct, and never holds an outbound itself.
+
+Sketch of the wiring PR's driver (not code on this branch):
+
+```go
+// The profile's outbound is built once per command run by the
+// commands framework (PR3). The gateway connector is built
+// over that outbound's DialContext; every Dial call below
+// therefore inherits the profile outbound, fail-closed.
+dial := func(ctx context.Context) (wait.Subscriber, error) {
+    return connector(ctx, conn.Config{...}) // returns conn.Gateway
+}
+runner, _ := wait.NewRunner(wait.Config{Dial: dial, History: hist, ...})
+```
+
+Rules for the wiring PR: the Dial closure must fail (return
+the error) when the outbound is absent/misconfigured — never
+fall back to a direct dial; the Runner treats a Dial error as a
+transport failure (resubscribe with backoff, AuthError fatal);
+a `Subscriber` that dials itself outside the closure is a bug.
+
+## 3. PR3 reassembly caps — constraints, not references
+
+PR3 (`feat/go-port-pr3`, reference only — read-only worktree
+`~/workspace/muse-cli-go-port-pr3`, do not edit, do not
+import) caps gateway reassembly in
+`internal/gateway/framing.go`:
+
+- `MaxReassembledSize = 64 << 20` (64 MiB) per message,
+- `MaxUnfinishedGroups = 16` concurrent chunk groups,
+- `MaxPiecesPerGroup = 32768` distinct pieces per group,
+  with typed errors on violation.
+
+On THIS base (`feat/go-port`, PR2) there are NO reassembly
+caps (only `SendPiece = 60000`). The wait core therefore
+references no cap symbol and imports no PR3 API; it consumes
+records the gateway already reassembled, so the caps bind the
+gateway layer, not the wait layer. After PR3 merges, the
+wiring PR inherits the caps for free through the gateway; the
+wait core needs no change. Do not re-implement or duplicate
+the caps in `internal/wait`.
+
+## 4. History adapter (wiring PR)
+
+`HistoryReader` returns events plus `hasMore`:
+
+```go
+type HistoryReader interface {
+    Read(ctx context.Context, limit int) (events []json.RawMessage, hasMore bool, err error)
+}
+```
+
+The production adapter (wiring PR) calls `CallJSON` with the
+`chat.history` envelope and extracts `has_more` from the
+response. `conn.Muse.History` (this base) drops `has_more`,
+so it CANNOT back this interface alone — do not wire it
+directly; the adapter must read the envelope. The adapter
+must propagate `AuthError` unwrapped (the Runner treats it
+as fatal everywhere) and must honor the passed context
+deadline (the Runner budgets every history read).
+
+## 5. Config-location rules (PR3, reference only)
+
+PR3 `internal/profile/configlocation.go` resolves the config
+location as: explicit `--config` flag > `MUSE_CLI_CONFIG` env
+(non-empty) > `os.UserConfigDir`-derived home (`XDG` /
+`%APPDATA%`; a relative `XDG_CONFIG_HOME` is ignored with a
+warning). Cookie/secret paths are relative to the config dir.
+Read-only loads never generate `node_id` (see NODE_ID.md).
+The wait core resolves no config location and reads no files;
+the wiring PR resolves the profile and hands the Runner its
+`node_id`, outbound, and history adapter.
+
+## 6. Gap disposition (G1–G10, from base-interfaces.md)
+
+- G1 (no per-frame reader): worked around — `OnRecord`
+  capture on `SubscribeRaw` records; the Runner never needs
+  frame-level access. No gateway extension was needed.
+- G2 (terminal predicate is wait-level): implemented in
+  `wait.TaskStatusInfo` + `Done`/`Failed` vocabularies; the
+  S3 predicate shape is pinned in `gateway_test.go` against
+  `gateway.EndedWithoutTerminal`.
+- G3/G4 (fake clock / clock seam): the Runner uses its own
+  `Clock` interface (`clock.go`, monotonic only) plus
+  `testing/synctest` in `runner_test.go`; the gateway's clock
+  seam was mirrored, not duplicated. The base `FakeClock`
+  ticker `Stop()` race was not reused.
+- G5 (keep-alive): default OFF, no wiring; the Runner never
+  touches keep-alive. `UseKeepAlive: true` must stay absent
+  from any wait-path `SubscribeOptions`.
+- G6 (SubscribeRaw conflates end reasons / discards records
+  on error): worked around — `OnRecord` capture + explicit
+  `ShouldStop` (watchdog / online grace / deadline) + the
+  Runner's own end-reason handling. No gateway change.
+- G7 (generation / reconnect storm): the Runner resubscribes
+  with backoff and runs at most one bounded state check after
+  30 s of reconnect failures; it never re-sends a stream.
+- G8 (retry classification): Runner rule — `Dial`/`SubscribeRaw`
+  transport errors resubscribe (fresh connection, never a
+  re-send); `AuthError` propagates as fatal; history-read
+  errors are read failures (settle retries once, final read
+  flips to fail-closed 124); outer-context cancellation
+  propagates. A sent `chat.stream` is never re-sent, by any
+  caller, for any reason.
+- G9 (`server_check` / `stop_now`): built on the same two
+  seams — a short `Dial` + subscribe for the state check, and
+  `HistoryReader` for the user-seq proof. No new interface.
+- G10 (harness): the PR2 `gatewaytest` harness was reused
+  as-is (`gateway_test.go`); no extension was required.
+
+## 7. Deviations from the Python driver shape (documented)
+
+- D1: the state machine itself refuses to overwrite a set
+  result (Python's guard was driver-level only). Identical
+  under any driver; no driver code may rely on overwriting.
+- D2: state checks run synchronously between subscribe
+  batches instead of on a concurrent check thread behind a
+  lock; settle attempts happen at batch boundaries and on
+  each newly-ignored terminal, throttled to one history read
+  per terminal value per iteration.
+- D3: `RepliesAfter` skips non-object events instead of
+  failing while sorting; `FeedRecord` rejects trailing data
+  after one JSON value. Unobservable for well-formed records.
+- D4: the Runner takes ONE `Dial` func (fresh connection per
+  iteration/check, closed after use) rather than Python's
+  per-iteration `conn(cfg)` plus per-read fresh connections.
+  The caller owns connection freshness/replacement.
+
+## 8. Deferred wiring (exact list)
+
+CLI command wiring (`wait` / `send --wait` / `send
+--until-done`); the send path (`chat.stream` + ack poll);
+the chat REPL code (design in CHAT-REPL-DESIGN.md); the
+`HistoryReader` production adapter (§4); profile resolution
+and `node_id` origin (§5, NODE_ID.md); Telegram wiring
+(PR5); `update` command; anything needing PR3's commands
+framework. See `go/README.md` for the same list.

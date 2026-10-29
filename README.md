@@ -341,3 +341,51 @@ same gateway keep working. A chunk_id carries no stream id until
 it reassembles, so with several streams open the error reaches
 all of them; the single-stream case is exact. (Source:
 `internal/gateway/doc.go`.)
+
+## Wait core and approvals (PR4 prep)
+
+`internal/wait` is a verbatim port of Python `wait.py` turn-end
+detection (spec: `~/workspace/tmp/pr4prep-research/wait-semantics.md`):
+DONE/FAILED/suspect vocabularies, root-learning, ignored-terminal
+settle, replayed-failed accept, `RepliesAfter` self-referential
+filtering + widget/media rules, `NeedsInputReason` with all 34
+waiting phrases, exits 0/2/4/124, watchdog/recheck/final-read
+bounds, fail-closed 124 on final-read failure, monotonic
+deadlines everywhere. `internal/approvals` is the pure port of
+the shared `choose_auto_decision` (forever if offered, else
+allow-once only with the fallback on; never `options[0]` /
+session / today) plus `AutoApprover` (fresh connection per
+`Approve` call, decide at most once per item, never retries
+`egress.approval.decide`). Both packages are tested against
+the PR2 `gatewaytest` fake harness and `testing/synctest`;
+timing tests use a fake clock, never wall-clock sleeps.
+
+Package docs: `internal/wait/NODE_ID.md` (stable per-profile
+`node_id` decision), `internal/wait/CHAT-REPL-DESIGN.md`
+(design only — the REPL needs PR3's commands framework),
+`internal/wait/SEAMS.md` (driver contract, outbound Dialer
+seam, PR3 cap/config constraints, gap disposition G1–G10,
+documented deviations D1–D4).
+
+## Deferred wiring (exact list)
+
+Deliberately NOT wired on this branch — the wiring PR (after
+PR #5 merges, on PR3's commands framework) owns these:
+
+- CLI command wiring: `wait`, `send --wait`, `send --until-done`
+  (and their flags: `--after-seq`, `--timeout`, `--auto-approve`,
+  `--auto-allow-once`).
+- The send path: `chat.stream` body + delivery-ack poll
+  (`user_ack`, exit 5 on no ack).
+- The chat REPL code (design in
+  `internal/wait/CHAT-REPL-DESIGN.md`).
+- The `HistoryReader` production adapter (reads `has_more`
+  from the `chat.history` envelope; `conn.Muse.History` drops
+  it and cannot back the interface alone).
+- Profile resolution and `node_id` origin (PR3 config-location
+  rules; read-only loads never generate `node_id`).
+- Telegram wiring (PR5) and the `update` command.
+- Approval claim coordination between a monitor and a turn
+  (the 15 s in-flight claim wait): a driver/monitor concern,
+  not part of `AutoApprover`.
+- Anything needing PR3's commands framework.
