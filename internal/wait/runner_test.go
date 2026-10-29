@@ -1170,16 +1170,14 @@ func TestRunnerFinishCancelDuringLagReadReturnsCtxErr(t *testing.T) {
 	// ctx.Err(), never a result — via the post-lag check when
 	// the read returns replies, via the lag sleep's ctx.Done()
 	// select when it returns an empty window. The final
-	// guard in isolation is not pinned by these probes (any
-	// cancel ordered before it is caught by the earlier
-	// checks too); its position — immediately before
-	// `return res, nil`, with nothing between but the branch
-	// — is verified by inspection. The one ordering no
-	// existing seam can express, a cancel landing in the tail
-	// after the post-lag check with no read left to inject it
-	// through (the tail performs no I/O and no hookable
-	// call), is governed by the linearization point above;
-	// no production hook was added to express it. The
+	// guard in isolation is pinned by
+	// TestRunnerFinishFinalGuardReturnsCtxErr, which cancels
+	// ctx from the beforeFinalGuard hook immediately before
+	// the guard — an ordering no earlier check can observe,
+	// because the tail performs no I/O and no hookable call
+	// after the post-lag check. A cancel landing after the
+	// guard's read still linearizes after the return; see
+	// the linearization paragraph in finish. The
 	// final-read and last-chance orderings are pinned by
 	// TestRunnerFinishFinalReadSuccessAfterCancelReturnsCtxErr,
 	// TestRunnerFinishFinalReadErrorAfterCancelReturnsCtxErr,
@@ -1247,6 +1245,91 @@ func TestRunnerFinishCancelDuringLagReadReturnsCtxErr(t *testing.T) {
 			}
 			if calls != 2 || extraReads != 0 {
 				t.Errorf("history reads = %d (%d extra), want exactly 2 (final read + lag-loop read)", calls, extraReads)
+			}
+		})
+	}
+}
+
+func TestRunnerFinishFinalGuardReturnsCtxErr(t *testing.T) {
+	// The final guard in finish is pinned in isolation: the
+	// beforeFinalGuard hook cancels ctx immediately before
+	// the guard, an ordering no earlier ctx check in finish
+	// can observe (the tail performs no I/O after the
+	// post-lag check). With the guard deleted, the cancel
+	// case below returns the Done result; with the guard
+	// present it returns ctx.Err(). The no-cancel case proves
+	// the hook itself neither masks a success nor fires
+	// spuriously: the guard must not observe a cancellation
+	// that never happened.
+	cases := []struct {
+		name   string
+		cancel bool
+	}{
+		{name: "cancel before final guard returns ctx err", cancel: true},
+		{name: "no cancel returns done result", cancel: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sub := &fakeSubscriber{loopScript: [][]byte{
+				recordJSON(taskEv("running", "R", "R", 120, nil)),
+				recordJSON(taskEv("completed", "R", "R", 180, nil)),
+			}}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			calls := 0
+			fired := 0
+			var gotCtx context.Context
+			hist := &scriptedHistory{fn: func(ctx context.Context, limit int) ([]any, bool, error) {
+				calls++
+				return []any{userEv(100), asst(150, "completed", "late", nil)}, false, nil
+			}}
+			r, err := NewRunner(Config{
+				Timeout:     60 * time.Second,
+				HasAfterSeq: true,
+				AfterSeq:    100,
+				Dial:        sub.dial,
+				History:     hist,
+				beforeFinalGuard: func(hookCtx context.Context) {
+					fired++
+					gotCtx = hookCtx
+					if tc.cancel {
+						cancel()
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("NewRunner: %v", err)
+			}
+			res, err := r.Run(ctx)
+			if gotCtx != ctx {
+				t.Errorf("hook ctx = %v, want the ctx passed to Run", gotCtx)
+			}
+			if fired != 1 {
+				t.Errorf("hook fired %d times, want exactly 1", fired)
+			}
+			if calls != 1 {
+				t.Errorf("history reads = %d, want exactly 1 (final read; no lag read)", calls)
+			}
+			if tc.cancel {
+				if !errors.Is(err, context.Canceled) {
+					t.Errorf("Run err = %v (res = %+v), want context.Canceled, never a Done result", err, res)
+				}
+				if res != nil {
+					t.Errorf("res = %+v, want nil on cancellation", res)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Run err = %v, want nil", err)
+			}
+			if res == nil {
+				t.Fatalf("res = nil, want a Done result")
+			}
+			if res.Kind != KindDone {
+				t.Errorf("res.Kind = %v, want KindDone", res.Kind)
+			}
+			if res.Outcome != "done" || res.ExitCode != 0 {
+				t.Errorf("res.Outcome = %q, res.ExitCode = %d, want \"done\"/0", res.Outcome, res.ExitCode)
 			}
 		})
 	}

@@ -151,6 +151,14 @@ type Config struct {
 	Clock            Clock
 	Dial             func(ctx context.Context) (Subscriber, error)
 	History          HistoryReader
+
+	// beforeFinalGuard is a test-only hook, invoked synchronously
+	// on the Runner's goroutine immediately before the final
+	// guard in finish, with finish's ctx. It is unexported so no
+	// caller outside this package can set it, and it is nil in
+	// production. A test sets it in the Config literal before
+	// NewRunner and must not mutate it after Run starts.
+	beforeFinalGuard func(ctx context.Context)
 }
 
 // Result is the wait's endgame result, mirroring the Python
@@ -950,8 +958,12 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 	// TestRunnerFinishCancelDuringLagReadReturnsCtxErr and
 	// the final-read/last-chance cancel tests; this guard's
 	// position, immediately before `return res, nil` with
-	// nothing between but the branch, is verified by
-	// inspection.
+	// nothing between but the beforeFinalGuard invocation
+	// and the branch, is pinned deterministically by
+	// TestRunnerFinishFinalGuardReturnsCtxErr.
+	if r.cfg.beforeFinalGuard != nil {
+		r.cfg.beforeFinalGuard(ctx)
+	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
