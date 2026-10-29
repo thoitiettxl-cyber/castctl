@@ -115,13 +115,17 @@ covered by the write-only guarantee as stated.
 
 - **Unknown future keys (Go-set-first rule).** A key not in the Go
   37-key set is protected only if it sits in a header map or its
-  value carries URL userinfo. Anything else relies on Go parse-time
-  strictness: unknown fields in sing-box option objects are rejected
-  by the parser, so an unredacted unknown secret field cannot be
-  stored — but it also cannot be displayed, because display requires
-  a parseable document. New keys are added in Go first, then
-  mirrored in the mock — never mock-only, never by substring
-  matching.
+  value carries URL userinfo. In the dev mock, anything else is NOT
+  rejected: the mock has no sing-box strict parser, so an unknown
+  key outside a header map whose value carries no URL userinfo has
+  its literal value stored and served verbatim on read.
+  Go-backend strict parsing is the real control and is
+  unpinned/carried for Go PR6: the Go backend MUST reject unknown
+  fields in sing-box option objects, so an unredacted unknown
+  secret field cannot be stored there — but it also cannot be
+  displayed, because display requires a parseable document. New
+  keys are added in Go first, then mirrored in the mock — never
+  mock-only, never by substring matching.
 - **D2 parity boundary.** `?token=` / fragment / Bearer secrets
   inside plain string values are displayed verbatim except for
   userinfo scrub. Go's structured redactor deliberately does not
@@ -131,8 +135,19 @@ covered by the write-only guarantee as stated.
   secret-key set. The Go backend's strict parsing is the real
   control; the mock approximates it by rejecting any object key
   with leading/trailing whitespace anywhere in the submitted
-  document (`400 validation_failed`, path only, no write). Key
+  document (`400 validation_failed`, path only, no write). The
+  mock rejects exactly the JavaScript `String.prototype.trim()`
+  set (`key !== key.trim()`, `dev-mocks/configStore.ts`):
+  U+0009–U+000D, U+0020, U+00A0, U+1680, U+2000–U+200A, U+2028,
+  U+2029, U+202F, U+205F, U+3000, U+FEFF. That set is wider than
+  the Go RE2 `\s` set it approximates (`[\t\n\f\r ]` only: NBSP,
+  VT, NEL, and U+3000 are NOT `\s`; NEL is in neither set). Key
   matching itself stays lowercase-exact.
+- **Key-name echo in rejection paths.** Rejection and error
+  messages name JSON paths only, never values — but key names
+  appear inside those paths, including a whitespace-padded key
+  name verbatim (e.g. the padded key in the path of a
+  whitespace-key rejection). Values are never echoed.
 - **Primitive string-array reorder (F2 residual).** A reorder of a
   string array (no identity keys exist on primitives) that shifts a
   userinfo-kept string onto a different position is
@@ -145,7 +160,12 @@ covered by the write-only guarantee as stated.
   back to positional merge: a reorder there restores positionally
   and can cross-attach. Elements in the surveyed schema carry at
   least one identity key; a future keyless element type reopens
-  this residual.
+  this residual. An element whose only identity key is `address`
+  carrying a URL-userinfo span (with `port`, when present, still
+  compared) has no identity check left on the address itself for a
+  host edit — the userinfo splice governs it — but any other
+  identity key present in the stored element, such as `tag`/`type`,
+  must still match, so a change to one still rejects.
 - **Sentinel literal at a non-secret position (R-A).** The text
   `<redacted>` at a present non-secret position is an ordinary
   literal value and may persist in the stored document. The
