@@ -8,15 +8,53 @@ first). One Go binary (CGO_ENABLED=1, GLIBC 2.17 baseline). All network traffic 
 that profile's outbound (sing-box). The web UI is a single-file React app
 embedded in the binary; see "Web UI" below.
 
-Module layout (Go, after the migration from muse-cli): `internal/source/muse`,
-`internal/publish/<platform>`, `internal/profile`, `internal/outbound`,
-`internal/webui`. Binary: `castctl`. Env vars: `CASTCTL_CONFIG`,
+Core + plugins: see "Core + plugins" below. The earlier layout
+(`internal/source/muse`, `internal/publish/<platform>`) is superseded;
+it is not the layout. Binary: `castctl`. Env vars: `CASTCTL_CONFIG`,
 `CASTCTL_PROFILE`, `CASTCTL_WEBUI_KEY`.
+
+Migration is planned, not done: the `go/` tree moves to the castctl
+root keeping only `go/` history, the Go module becomes
+`github.com/thoitiettxl-cyber/castctl`, the binary stays `castctl`,
+and `go/` is deleted from muse-cli with a README pointer. It starts
+only after the web-UI and docs work merges.
+
+## Core + plugins
+
+castctl is core + plugins, following CLIProxyAPI's plugin model exactly:
+the same loader approach, ABI/contract style, plugins directory layout,
+and store/install flow, adapted only for the per-profile proxy/cookies
+handoff to plugins (never raw WireGuard keys). CLIProxyAPI's config
+schema uses `plugins.enabled` (global) and
+`plugins.configs.<id>.enabled` (per-plugin); castctl follows the model
+exactly, adopting the same toggles.
+
+Core is profiles, per-profile outbound (sing-box), the cookie/session
+store and keeper, config, the web UI, and Telegram. Screencast login
+stays in core. Each platform is a plugin: castctl-muse first, then
+castctl-facebook, castctl-tiktok, and castctl-youtube. Whether a
+capability is built in or shipped as a plugin is a packaging choice.
+
+Plugins are trusted and in-process, with no sandbox, exactly like
+CLIProxyAPI, and only first-party CLIs (BQ1, closed). BQ2–BQ5 are
+parked until just before plugin implementation, after the migration.
+The red-team findings B1, B2, and B4–B10 are parked; B3 is dropped.
+The plugin design draft is rationale only: at implementation start it
+is condensed to an implementable spec of under 20 KB mirroring
+CLIProxyAPI, pointing to the draft for rationale. This docs change
+does not condense it.
 
 ## Platforms
 
 castctl is a general tool, not VM-only. Supported run targets: Linux only — linux/amd64 and linux/arm64 (Debian/server Linux host). No VM assumptions: no hard-coded paths,
 no launcher, no agent-browser, no sandbox.
+
+This supersedes the earlier five-target / `_no-plugin` plan: release
+targets are Linux only (above), with `CGO_ENABLED=1`, a GLIBC 2.17
+baseline (manylinux2014), and plugin support. There are no
+`_no-plugin`, Android, Windows, or macOS builds. The release-builds
+work is a separate PR planned after the migration, reusing
+CLIProxyAPI's release.yaml.
 
 Config location: `--config`, then `CASTCTL_CONFIG`, then `XDG_CONFIG_HOME`, via `os.UserConfigDir` semantics.
 
@@ -34,7 +72,7 @@ fakes, no live hosts).
 Profiles must never interfere with each other through the sing-box
 stack. This is a HARD invariant: a violation is a bug, and enforcement
 is by test, not by convention. It applies from PR3 on (in the `go/`
-tree pre-migration) and in castctl after migration, to every command,
+tree in muse-cli, on `feat/go-port`, pre-migration) and in castctl after migration, to every command,
 the Telegram bot, the web UI, the session keeper, and the screencast
 login flow.
 
@@ -108,3 +146,6 @@ and never bundled. The screencast Login page is behind a build-time flag
 (`VITE_ENABLE_SCREENCAST_LOGIN`, default off). Build/serve/mock
 instructions: docs/development.md. Native-login bundle research (PARKED):
 docs/research/native-login-bundle-analysis.md.
+
+Secrets in config are write-only under the [secrets write-only contract](../webui/SECRETS-CONTRACT.md),
+which the Go server MUST implement server-side (see docs/security.md).
