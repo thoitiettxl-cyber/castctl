@@ -597,10 +597,10 @@ func TestFeedApprovalsApproverRaises(t *testing.T) {
 	if out == nil || out.Kind != KindApproval {
 		t.Fatalf("raise result = %v", out)
 	}
-	if w.handled["A"] {
+	if w.handled[approvalKey{present: true, id: "A"}] {
 		t.Error("partial decision before a raise must not be recorded handled")
 	}
-	if !w.approverFailed["A"] {
+	if !w.approverFailed[approvalKey{present: true, id: "A"}] {
 		t.Error("raised id must be in approver_failed")
 	}
 	// The id is never offered again: the approver is not called
@@ -631,6 +631,47 @@ func TestFeedApprovalsNilIDNeverOfferedButEndsWait(t *testing.T) {
 	}
 	if out == nil || out.Kind != KindApproval || len(out.Approvals) != 1 {
 		t.Fatalf("nil-id approval must still end the wait: %v", out)
+	}
+}
+
+func TestFeedApprovalsNilIDNotSwallowedByHandledEmptyID(t *testing.T) {
+	// A handled present "" id must not swallow a nil-id
+	// approval: nil and "" are different keys. Pre-fix both
+	// collapsed to "" in the handled map, so the nil-id
+	// approval vanished from the left filter.
+	approver := func(items []approvals.DescribedApproval) approvals.ApprovalResult {
+		return approvals.ApprovalResult{Handled: []string{""}}
+	}
+	nilPend := []any{map[string]any{"display": map[string]any{"summary_title": "X"}}}
+	w := New("", WithApprover(approver))
+	// Snapshot 1: the "" approval is handled; keep waiting.
+	if out := w.Feed(approvalEv([]any{appr("")}, nil)); out != nil {
+		t.Fatalf("handled empty id = %v, want nil (keep waiting)", out)
+	}
+	// Snapshot 2: a nil-id-only snapshot must still surface.
+	out := w.Feed(approvalEv(nilPend, nil))
+	if out == nil || out.Kind != KindApproval || len(out.Approvals) != 1 {
+		t.Fatalf("nil-id after handled empty id = %v, want one KindApproval", out)
+	}
+	if out.Approvals[0].ApprovalID != nil {
+		t.Errorf("surfaced approval id = %v, want nil", out.Approvals[0].ApprovalID)
+	}
+	// Same snapshot: "" handled + nil-id present together.
+	w2 := New("", WithApprover(approver))
+	out = w2.Feed(approvalEv([]any{appr(""), map[string]any{"display": map[string]any{"summary_title": "Y"}}}, nil))
+	if out == nil || out.Kind != KindApproval || len(out.Approvals) != 1 {
+		t.Fatalf("mixed snapshot = %v, want only the nil-id approval", out)
+	}
+	if out.Approvals[0].ApprovalID != nil {
+		t.Errorf("mixed snapshot approval id = %v, want nil", out.Approvals[0].ApprovalID)
+	}
+	// Regression: a second "" snapshot stays swallowed.
+	w3 := New("", WithApprover(approver))
+	if out := w3.Feed(approvalEv([]any{appr("")}, nil)); out != nil {
+		t.Fatalf("handled empty id = %v, want nil (keep waiting)", out)
+	}
+	if out := w3.Feed(approvalEv([]any{appr("")}, nil)); out != nil {
+		t.Fatalf("second empty-id snapshot = %v, want nil (still handled)", out)
 	}
 }
 
@@ -769,7 +810,7 @@ func TestFeedApprovalsAuthErrorIsFatal(t *testing.T) {
 	if !errors.As(w.FatalErr(), &gotAuth) {
 		t.Errorf("FatalErr = %v, want an AuthError", w.FatalErr())
 	}
-	if w.approverFailed["A"] {
+	if w.approverFailed[approvalKey{present: true, id: "A"}] {
 		t.Error("fatal ids must not be marked approver-failed")
 	}
 }

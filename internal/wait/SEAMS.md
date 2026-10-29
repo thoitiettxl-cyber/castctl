@@ -36,6 +36,14 @@ dials itself:
 - `Config.UserStop func() bool`, `Recheck func()` —
   caller callbacks for user interrupt and interactive recheck.
   Both default to no-ops.
+- Subscriber panic contract: a `Subscriber` MUST NOT panic.
+  The Runner calls `SubscribeRaw` and `Close` synchronously
+  with no recover, so a panic from a contract-violating
+  Subscriber propagates out of `Run` today. The CLI boundary
+  (wiring step) will add a recover converting a panic into
+  exit 2 with a redacted error and no secret-bearing stack;
+  no recover exists on this path until wiring lands. See the
+  `Subscriber` doc in `runner.go`.
 
 ## 2. Outbound Dialer seam (wiring PR)
 
@@ -211,14 +219,14 @@ the wiring PR resolves the profile and hands the Runner its
   unwrapped as `ApprovalResult.Err`, the Waiter records it as
   fatal, and the Runner returns it as an error (exit 2),
   matching `_run_wait`'s outer contract that AuthError is
-  re-raised, never swallowed (`cli.py:1254-1267`).
+  re-raised, never swallowed (`cli.py:1254-1274`).
   Deliberate: an expired login must never become exit 4
   needs_approval, which would hide the re-login need behind
   a human step. Pinned by `TestRunnerApproverAuthErrorPropagates`.
 - D8: cancellation during the endgame propagates `ctx.Err()`,
   never a Done result. Python has no context:
   KeyboardInterrupt is a BaseException that `_run_wait`'s
-  `except Exception` never catches (`cli.py:1254-1267`), so
+  `except Exception` never catches (`cli.py:1254-1274`), so
   an interrupt during the endgame propagates out of the wait
   instead of becoming a result. Go's context cancellation is
   the analogue: `finish()` returns `ctx.Err()` when the
@@ -226,6 +234,24 @@ the wiring PR resolves the profile and hands the Runner its
   whose reader returns `ctx.Err()`. Pinned by
   `TestRunnerLagWindowCancelReturnsCtxErr` and
   `TestRunnerLagPollCtxErrReturnsCtxErr`.
+- D9: `Settle` and `AcceptReplayedFailed` take no context, by
+  design. The Waiter is a context-free synchronous state
+  machine (one goroutine, no I/O); threading a context into
+  its methods would leak Runner concerns into the seam and
+  change the exported Waiter API the wiring PR consumes.
+  Cancellation containment therefore lives in the Runner,
+  which owns the context: `settlePending` checks `ctx.Err()`
+  before applying either proof, `finish()`'s last-chance
+  proof is contained by the final-read ctx checks plus the
+  final guard before the result return, and `Run` checks
+  `ctx.Err()` after the loop before calling `finish()`. The
+  only production call sites are `settlePending` and
+  `finish()`'s last-chance proof (both in `runner.go`); a
+  future caller applying `Settle`/`AcceptReplayedFailed`
+  outside the Runner must check cancellation itself — the
+  Waiter cannot know. Pinned by
+  `TestRunnerSettlePendingCancelledSuccessReturnsCtxErr` and
+  the `TestRunnerFinish*CtxErr` tests.
 
 ## 8. Deferred wiring (exact list)
 

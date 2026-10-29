@@ -64,6 +64,15 @@ const (
 // interface) is treated as a transport failure, never a panic
 // (see isNilSubscriber); a Dial that returns a non-nil
 // Subscriber must honor Close and SubscribeRaw on it.
+//
+// Panic contract: a Subscriber MUST NOT panic. The Runner
+// calls SubscribeRaw and Close synchronously with no recover
+// anywhere on the path, so a panic from a contract-violating
+// Subscriber propagates out of Run today. The CLI boundary
+// (wiring step, not this package) will add a recover
+// converting a panic into exit 2 with a redacted error and no
+// secret-bearing stack; until wiring lands, no recover exists
+// on this path by design, and none is added here.
 type Subscriber interface {
 	SubscribeRaw(ctx context.Context, method string, opts conn.SubscribeOptions) ([][]byte, error)
 	Close() error
@@ -620,9 +629,12 @@ func (r *Runner) trySettle(ctx context.Context) error {
 // settlePending proves one captured pending terminal with fresh
 // history reads, re-checking that the same terminal is still
 // pending before applying. It returns errHistoryRead (wrapped)
-// when a history read fails, an AuthError when auth failed, or
-// nil when the proof was attempted (whether or not it
-// accepted).
+// when a history read fails, an AuthError when auth failed,
+// ctx.Err() when the context died before the proof was applied,
+// or nil when the proof was attempted (whether or not it
+// accepted). A successful proof is never applied after
+// cancellation: the ctx check sits immediately before each
+// apply site, so a cancelled wait settles nothing.
 func (r *Runner) settlePending(ctx context.Context, pending string) error {
 	hctx, cancel := r.historyCtx(ctx, 100*time.Millisecond, nil)
 	defer cancel()
@@ -640,6 +652,9 @@ func (r *Runner) settlePending(ctx context.Context, pending string) error {
 		if !found {
 			return nil
 		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if term, ok := r.waiter.IgnoredTerminal(); ok && term == pending && r.waiter.Result() == nil {
 			r.waiter.AcceptReplayedFailed(&latest)
 		}
@@ -654,6 +669,9 @@ func (r *Runner) settlePending(ctx context.Context, pending string) error {
 			return err
 		}
 		return fmt.Errorf("%w: %w", errHistoryRead, err)
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 	if term, ok := r.waiter.IgnoredTerminal(); ok && term == pending && r.waiter.Result() == nil {
 		r.waiter.Settle(replies)
@@ -785,7 +803,10 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 			latest, found, err := LatestUserSeq(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
 			cancel()
 			if err != nil {
-				if isAuthError(err) || ctx.Err() != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				if isAuthError(err) {
 					return nil, err
 				}
 				// A read failure leaves the timeout standing.
@@ -804,11 +825,20 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 		rs, err := HistoryReplies(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
 		cancel()
 		if err == nil {
+			// A read that succeeded after cancellation
+			// must not become a result: the wait is dead,
+			// whatever the reader returned.
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			replies = rs
 			finalReadFailed = false
 			break
 		}
-		if isAuthError(err) || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if isAuthError(err) {
 			return nil, err
 		}
 		finalReadFailed = true
@@ -906,6 +936,15 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 			res.NeedsInputReason = NeedsInputReason(last.Text)
 		}
 		res.Question = QuestionOf(last.Text)
+	}
+	// Final guard: cancellation landing anywhere during the
+	// endgame — including between the post-lag check above and
+	// this return — propagates instead of becoming a result.
+	// The window between this check and the return is a single
+	// branch; it cannot be closed further, only narrowed to
+	// here. Pinned by TestRunnerFinishCancelRaceProbe.
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
 	return res, nil
 }

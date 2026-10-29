@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -1003,4 +1004,324 @@ func TestNewRunnerClampsNegativeDurations(t *testing.T) {
 	if DefaultHistoryLimits()[0] == 999 {
 		t.Error("mutating the Runner's limits must not mutate DefaultHistoryLimits")
 	}
+}
+
+// cancelOnReadHistory cancels ctx on a chosen read, then
+// returns its scripted result: a reader that reports success
+// (or a transport error) after cancellation.
+type cancelOnReadHistory struct {
+	cancelAt int
+	cancel   context.CancelFunc
+	calls    int
+	events   []any
+	err      error
+}
+
+func (h *cancelOnReadHistory) ReadHistory(ctx context.Context, limit int) ([]any, bool, error) {
+	h.calls++
+	if h.calls == h.cancelAt {
+		h.cancel()
+	}
+	if h.err != nil {
+		return nil, false, h.err
+	}
+	return h.events, false, nil
+}
+
+func TestRunnerFinishFinalReadSuccessAfterCancelReturnsCtxErr(t *testing.T) {
+	// A final read returning replies after cancellation must
+	// end the wait with ctx.Err(), never Done/0: the success
+	// path of finish had no ctx check. The reader cancels the
+	// parent ctx mid-read and still returns replies.
+	sub := &fakeSubscriber{loopScript: [][]byte{
+		recordJSON(taskEv("running", "R", "R", 120, nil)),
+		recordJSON(taskEv("completed", "R", "R", 180, nil)),
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hist := &cancelOnReadHistory{
+		cancelAt: 1,
+		cancel:   cancel,
+		events:   []any{userEv(100), asst(150, "completed", "late", nil)},
+	}
+	r, err := NewRunner(Config{
+		Timeout:     60 * time.Second,
+		HasAfterSeq: true,
+		AfterSeq:    100,
+		Dial:        sub.dial,
+		History:     hist,
+	})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	res, err := r.Run(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Run err = %v (res = %+v), want context.Canceled, never a Done result", err, res)
+	}
+	if res != nil {
+		t.Errorf("res = %+v, want nil on cancellation", res)
+	}
+}
+
+func TestRunnerFinishLastChanceProofErrorAfterCancelReturnsCtxErr(t *testing.T) {
+	// A last-chance FAILED proof whose reader returns a
+	// transport error after cancellation must end the wait
+	// with ctx.Err(), not the reader's error. The first
+	// history read is trySettle's (empty window, no proof);
+	// the cancel lands on the second read, inside finish's
+	// last-chance proof. The short timeout reaches finish
+	// without waiting out the default 600 s deadline.
+	sub := &fakeSubscriber{loopScript: [][]byte{
+		recordJSON(taskEv("interrupted", "R", "R", 180, nil)),
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hist := &cancelOnReadHistory{cancelAt: 2, cancel: cancel, err: errTransport}
+	// Call 1 (trySettle) sees an empty window; call 2
+	// (finish) cancels and errors. queueHistory-style
+	// scripting is local: wrap the cancelling reader so the
+	// first call returns empty without cancelling.
+	first := true
+	scripted := &scriptedHistory{fn: func(ctx context.Context, limit int) ([]any, bool, error) {
+		if first {
+			first = false
+			return []any{}, false, nil
+		}
+		return hist.ReadHistory(ctx, limit)
+	}}
+	// cancelOnReadHistory counts its own calls: align it so
+	// its first (and only relevant) call is the finish read.
+	hist.cancelAt = 1
+	r, err := NewRunner(Config{
+		Timeout:     200 * time.Millisecond,
+		ResubPause:  time.Millisecond,
+		HasAfterSeq: true,
+		AfterSeq:    200,
+		Dial:        sub.dial,
+		History:     scripted,
+	})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	res, err := r.Run(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Run err = %v (res = %+v), want context.Canceled, not the reader's transport error", err, res)
+	}
+	if res != nil {
+		t.Errorf("res = %+v, want nil on cancellation", res)
+	}
+}
+
+// scriptedHistory serves one scripted ReadHistory function.
+type scriptedHistory struct {
+	fn func(ctx context.Context, limit int) ([]any, bool, error)
+}
+
+func (h *scriptedHistory) ReadHistory(ctx context.Context, limit int) ([]any, bool, error) {
+	return h.fn(ctx, limit)
+}
+
+func TestRunnerFinishFinalReadErrorAfterCancelReturnsCtxErr(t *testing.T) {
+	// A final read returning a transport error after
+	// cancellation must end the wait with ctx.Err(), not the
+	// reader's error.
+	sub := &fakeSubscriber{loopScript: [][]byte{
+		recordJSON(taskEv("running", "R", "R", 120, nil)),
+		recordJSON(taskEv("completed", "R", "R", 180, nil)),
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hist := &cancelOnReadHistory{cancelAt: 1, cancel: cancel, err: errTransport}
+	r, err := NewRunner(Config{
+		Timeout:     60 * time.Second,
+		HasAfterSeq: true,
+		AfterSeq:    100,
+		Dial:        sub.dial,
+		History:     hist,
+	})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	res, err := r.Run(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Run err = %v (res = %+v), want context.Canceled, not the reader's transport error", err, res)
+	}
+	if res != nil {
+		t.Errorf("res = %+v, want nil on cancellation", res)
+	}
+}
+
+func TestRunnerFinishCancelRaceProbe(t *testing.T) {
+	// Adversarial probe for the finish TOCTOU: cancellation
+	// landing between finish's post-lag ctx check and the
+	// result return must never yield Done/0. The canceller
+	// BUSY-WAITS to a swept target time (no Sleep, no channel
+	// wakeup latency) so cancels spread uniformly across the
+	// endgame instead of clustering after the return: a
+	// spinning canceller armed from inside the history reader
+	// was measured INSENSITIVE (identical hit rates with the
+	// final guard present and removed — its reaction was
+	// slower than the whole check-to-return tail, so every
+	// hit was a late cancel), and Sleep/channel cancellers
+	// never won the race at all on this VM. A hit counts
+	// only when the cancel fired before Run returned
+	// (target time < return time): cancels that land after
+	// the return are legitimate, not TOCTOU hits. 300
+	// iterations, 0 Done hits allowed. Characterization,
+	// measured 2026-10-29: with BOTH endgame checks (the
+	// post-lag check and the final guard) removed, this probe
+	// goes red at 1-2 hits per ~250 timed cancels, matching
+	// the reviewer's ~2-3%; with either check present it
+	// stays green, because the checks are redundant in
+	// series and the last one dominates. The probe therefore
+	// pins the endgame checks as a group, not the final
+	// guard in isolation: goroutine-scheduling jitter on
+	// this VM is microseconds, the residual window after
+	// the final guard is a single branch (~10ns), and no
+	// timing probe here can isolate a window that narrow.
+	// The guard's narrowing is verified by inspection (the
+	// check sits immediately before `return res, nil` with
+	// nothing between them but the branch itself).
+	const iterations = 300
+	hits := 0
+	timed := 0
+	for i := 0; i < iterations; i++ {
+		sub := &fakeSubscriber{loopScript: [][]byte{
+			recordJSON(taskEv("running", "R", "R", 120, nil)),
+			recordJSON(taskEv("completed", "R", "R", 180, nil)),
+		}}
+		hist := &scriptedHistory{fn: func(ctx context.Context, limit int) ([]any, bool, error) {
+			return []any{userEv(100)}, false, nil
+		}}
+		ctx, cancel := context.WithCancel(context.Background())
+		var target atomic.Int64 // unix nanos
+		var firedAt atomic.Int64
+		var start atomic.Bool
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for !start.Load() && ctx.Err() == nil {
+			}
+			tgt := time.Unix(0, target.Load())
+			for time.Now().Before(tgt) && ctx.Err() == nil {
+			}
+			cancel()
+			firedAt.Store(time.Now().UnixNano())
+		}()
+		r, err := NewRunner(Config{
+			Timeout:     60 * time.Second,
+			HasAfterSeq: true,
+			AfterSeq:    100,
+			LagWindow:   time.Microsecond,
+			LagPoll:     time.Microsecond,
+			Dial:        sub.dial,
+			History:     hist,
+		})
+		if err != nil {
+			cancel()
+			<-done
+			t.Fatalf("NewRunner: %v", err)
+		}
+		// Sweep 0-60us in 1us steps: the endgame (subscribe
+		// + final read + 1us lag + tail) sits inside this
+		// band on this VM, so cancels land before, during,
+		// and after the check-to-return window.
+		delay := time.Duration(i%61) * time.Microsecond
+		t0 := time.Now()
+		target.Store(t0.Add(delay).UnixNano())
+		start.Store(true)
+		res, err := r.Run(ctx)
+		tRet := time.Now()
+		cancel()
+		<-done
+		// A hit counts only when the cancel ACTUALLY fired
+		// before Run returned: the target time is intent,
+		// firedAt is fact, and on this VM the canceller
+		// goroutine routinely starts microseconds late, so
+		// target < return does not prove the cancel was in
+		// flight during the wait.
+		if time.Unix(0, firedAt.Load()).Before(tRet) {
+			timed++
+			if err == nil && res != nil && res.Kind == KindDone {
+				hits++
+			}
+		}
+	}
+	t.Logf("timed cancels = %d/300", timed)
+	if timed < 50 {
+		t.Fatalf("timed cancels = %d/300, too few to exercise the race (endgame faster than the sweep band)", timed)
+	}
+	if hits != 0 {
+		t.Errorf("Done/0 hits = %d/%d timed, want 0: cancellation during finish must never become a Done result", hits, timed)
+	}
+}
+
+func TestRunnerSettlePendingCancelledSuccessReturnsCtxErr(t *testing.T) {
+	// settlePending must return ctx.Err() with NO outcome
+	// applied when the context is cancelled, on both the
+	// replies path and the failed-terminal path. A
+	// pre-cancelled context with a successful proof currently
+	// settles the waiter.
+	setup := func(status string, events []any) *Runner {
+		t.Helper()
+		sub := &fakeSubscriber{}
+		hist := &queueHistory{resps: []historyResp{historyOK(events)}}
+		r, err := NewRunner(Config{Timeout: 60 * time.Second, Dial: sub.dial, History: hist})
+		if err != nil {
+			t.Fatalf("NewRunner: %v", err)
+		}
+		r.waiter.Feed(taskEv(status, "R", "R", 180, nil))
+		if term, ok := r.waiter.IgnoredTerminal(); !ok || term != status {
+			t.Fatalf("ignored terminal = %q, %v, want %q", term, ok, status)
+		}
+		return r
+	}
+	t.Run("replies path", func(t *testing.T) {
+		r := setup("idle", []any{userEv(100), asst(150, "completed", "settled", nil)})
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := r.settlePending(ctx, "idle"); !errors.Is(err, context.Canceled) {
+			t.Errorf("settlePending err = %v, want context.Canceled", err)
+		}
+		if out := r.waiter.Result(); out != nil {
+			t.Errorf("waiter result = %+v, want nil (no outcome applied after cancel)", out)
+		}
+		if _, ok := r.waiter.IgnoredTerminal(); !ok {
+			t.Error("ignored terminal must still be pending after a cancelled settle")
+		}
+		// Baseline: the same proof without cancellation
+		// still settles.
+		r2 := setup("idle", []any{userEv(100), asst(150, "completed", "settled", nil)})
+		if err := r2.settlePending(context.Background(), "idle"); err != nil {
+			t.Fatalf("live settlePending err = %v", err)
+		}
+		if out := r2.waiter.Result(); out == nil || out.Kind != KindDone {
+			t.Errorf("live settle result = %+v, want KindDone", out)
+		}
+	})
+	t.Run("failed path", func(t *testing.T) {
+		r := setup("interrupted", []any{userEv(200)})
+		r.waiter.SetBoundary(200, false, true)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := r.settlePending(ctx, "interrupted"); !errors.Is(err, context.Canceled) {
+			t.Errorf("settlePending err = %v, want context.Canceled", err)
+		}
+		if out := r.waiter.Result(); out != nil {
+			t.Errorf("waiter result = %+v, want nil (no outcome applied after cancel)", out)
+		}
+		if _, ok := r.waiter.IgnoredTerminal(); !ok {
+			t.Error("ignored terminal must still be pending after a cancelled settle")
+		}
+		// Baseline: the same proof without cancellation
+		// still settles.
+		r2 := setup("interrupted", []any{userEv(200)})
+		r2.waiter.SetBoundary(200, false, true)
+		if err := r2.settlePending(context.Background(), "interrupted"); err != nil {
+			t.Fatalf("live settlePending err = %v", err)
+		}
+		if out := r2.waiter.Result(); out == nil || out.Kind != KindFailed {
+			t.Errorf("live settle result = %+v, want KindFailed", out)
+		}
+	})
 }

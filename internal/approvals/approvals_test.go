@@ -449,3 +449,45 @@ func TestAutoApproverZeroAndNilGuards(t *testing.T) {
 		t.Fatalf("nil-receiver errs = %v, want 1", errs)
 	}
 }
+
+func TestAutoApproverWarnedDistinguishesNilAndEmptyID(t *testing.T) {
+	// A skipped nil-id approval and a skipped "" approval are
+	// different warnings: each keeps its own
+	// auto_approve_errors entry. Pre-fix both shared the ""
+	// warned key, so the second skip in any order produced no
+	// error entry.
+	nilItem := DescribedApproval{Options: []string{"deny"}}
+	emptyItem := DescribedApproval{ApprovalID: strp(""), Options: []string{"deny"}}
+	newApprover := func(t *testing.T) *AutoApprover {
+		t.Helper()
+		decide := func(ctx context.Context, a DescribedApproval, decision string) error {
+			t.Errorf("decide must never run for a skipped approval: %+v", a)
+			return nil
+		}
+		return NewAutoApprover(func(ctx context.Context) (Decider, func(), error) {
+			return decide, func() {}, nil
+		}, false)
+	}
+	tests := []struct {
+		name  string
+		calls [][]DescribedApproval
+	}{
+		{name: "nil then empty in one call", calls: [][]DescribedApproval{{nilItem, emptyItem}}},
+		{name: "empty then nil in one call", calls: [][]DescribedApproval{{emptyItem, nilItem}}},
+		{name: "nil then empty across calls", calls: [][]DescribedApproval{{nilItem}, {emptyItem}}},
+		{name: "empty then nil across calls", calls: [][]DescribedApproval{{emptyItem}, {nilItem}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			aa := newApprover(t)
+			totalErrs := 0
+			for _, items := range tt.calls {
+				_, _, errs := aa.Approve(context.Background(), items)
+				totalErrs += len(errs)
+			}
+			if totalErrs != 2 {
+				t.Errorf("skip errors = %d, want 2 (one warning per distinct id)", totalErrs)
+			}
+		})
+	}
+}

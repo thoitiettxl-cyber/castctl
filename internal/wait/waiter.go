@@ -193,9 +193,9 @@ type Waiter struct {
 	requireRunning    bool
 	approver          approvals.Approver
 	now               func() time.Time
-	handled           map[string]bool
-	offered           map[string]bool
-	approverFailed    map[string]bool
+	handled           map[approvalKey]bool
+	offered           map[approvalKey]bool
+	approverFailed    map[approvalKey]bool
 	seenRunning       bool
 	result            *Outcome
 	status            *string
@@ -222,9 +222,9 @@ func New(thread string, opts ...Option) *Waiter {
 	w := &Waiter{
 		thread:         thread,
 		now:            time.Now,
-		handled:        map[string]bool{},
-		offered:        map[string]bool{},
-		approverFailed: map[string]bool{},
+		handled:        map[approvalKey]bool{},
+		offered:        map[approvalKey]bool{},
+		approverFailed: map[approvalKey]bool{},
 	}
 	for _, opt := range opts {
 		opt(w)
@@ -237,13 +237,13 @@ func New(thread string, opts ...Option) *Waiter {
 // map write or a nil clock call.
 func (w *Waiter) ensureInit() {
 	if w.handled == nil {
-		w.handled = map[string]bool{}
+		w.handled = map[approvalKey]bool{}
 	}
 	if w.offered == nil {
-		w.offered = map[string]bool{}
+		w.offered = map[approvalKey]bool{}
 	}
 	if w.approverFailed == nil {
-		w.approverFailed = map[string]bool{}
+		w.approverFailed = map[approvalKey]bool{}
 	}
 	if w.now == nil {
 		w.now = time.Now
@@ -553,8 +553,8 @@ func (w *Waiter) feedApprovals(ev Event, pend []any) *Outcome {
 	seenIDs := map[string]bool{}
 	for _, a := range pend {
 		d := approvals.DescribeApproval(a)
-		if recent[derefID(d.ApprovalID)] {
-			w.handled[derefID(d.ApprovalID)] = true
+		if d.ApprovalID != nil && recent[*d.ApprovalID] {
+			w.handled[keyOf(d.ApprovalID)] = true
 		}
 		if w.expired(d) {
 			continue
@@ -575,7 +575,7 @@ func (w *Waiter) feedApprovals(ev Event, pend []any) *Outcome {
 	if w.approver != nil {
 		var fresh []approvals.DescribedApproval
 		for _, d := range described {
-			id := derefID(d.ApprovalID)
+			id := keyOf(d.ApprovalID)
 			if d.ApprovalID == nil || w.offered[id] || w.approverFailed[id] || w.handled[id] {
 				continue
 			}
@@ -583,7 +583,7 @@ func (w *Waiter) feedApprovals(ev Event, pend []any) *Outcome {
 		}
 		if len(fresh) > 0 {
 			for _, d := range fresh {
-				w.offered[derefID(d.ApprovalID)] = true
+				w.offered[keyOf(d.ApprovalID)] = true
 			}
 			res := w.approver(fresh)
 			w.approvedRecords = append(w.approvedRecords, res.Approved...)
@@ -606,17 +606,23 @@ func (w *Waiter) feedApprovals(ev Event, pend []any) *Outcome {
 				// none is recorded handled, even if the
 				// approver decided some before raising.
 				for _, d := range fresh {
-					w.approverFailed[derefID(d.ApprovalID)] = true
+					w.approverFailed[keyOf(d.ApprovalID)] = true
 				}
 			} else {
 				for _, id := range res.Handled {
-					w.handled[id] = true
+					// Handled ids are bare strings by
+					// contract, and the approver only
+					// ever handles ids it was offered:
+					// offered ids are always present, so
+					// a handled string always keys the
+					// present entry, never the nil one.
+					w.handled[approvalKey{present: true, id: id}] = true
 				}
 			}
 		}
 		var left []approvals.DescribedApproval
 		for _, d := range described {
-			if !w.handled[derefID(d.ApprovalID)] {
+			if !w.handled[keyOf(d.ApprovalID)] {
 				left = append(left, d)
 			}
 		}
@@ -632,11 +638,23 @@ func (w *Waiter) feedApprovals(ev Event, pend []any) *Outcome {
 	return w.Result()
 }
 
-func derefID(id *string) string {
+// approvalKey identifies one approval id, distinguishing a nil
+// ApprovalID (no id to dedupe, offer, or record) from a present
+// empty-string id. The two must never share a map entry: keying
+// by the bare id string let a handled "" approval swallow a
+// nil-id approval, which then never reached a human.
+type approvalKey struct {
+	present bool
+	id      string
+}
+
+// keyOf maps an ApprovalID pointer to its key: absent maps to
+// the zero key, present (including "") maps to itself.
+func keyOf(id *string) approvalKey {
 	if id == nil {
-		return ""
+		return approvalKey{}
 	}
-	return *id
+	return approvalKey{present: true, id: *id}
 }
 
 // countIsZero reports whether a subagent count equals exactly 0.

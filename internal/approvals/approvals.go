@@ -353,8 +353,28 @@ type AutoApprover struct {
 	connect   func(ctx context.Context) (Decider, func(), error)
 	allowOnce bool
 	mu        sync.Mutex
-	warned    map[string]bool
-	decided   map[string]bool
+	// warned is keyed by (present, id): a nil ApprovalID and a
+	// present "" id warn independently. decided stays
+	// string-keyed: it is written only under ApprovalID != nil
+	// (see Approve), so no nil id can ever claim it.
+	warned  map[approvalKey]bool
+	decided map[string]bool
+}
+
+// approvalKey identifies one approval id, distinguishing a nil
+// ApprovalID (no id) from a present empty-string id — the same
+// distinction as the wait package's key type, duplicated
+// because the type is unexported in both packages.
+type approvalKey struct {
+	present bool
+	id      string
+}
+
+func keyOf(id *string) approvalKey {
+	if id == nil {
+		return approvalKey{}
+	}
+	return approvalKey{present: true, id: *id}
 }
 
 // NewAutoApprover builds an AutoApprover. Connect opens one fresh
@@ -367,7 +387,7 @@ type AutoApprover struct {
 // Connect, Approve records a connect error for every item
 // instead of panicking.
 func NewAutoApprover(connect func(ctx context.Context) (Decider, func(), error), allowOnce bool) *AutoApprover {
-	return &AutoApprover{connect: connect, allowOnce: allowOnce, warned: map[string]bool{}, decided: map[string]bool{}}
+	return &AutoApprover{connect: connect, allowOnce: allowOnce, warned: map[approvalKey]bool{}, decided: map[string]bool{}}
 }
 
 // Approve decides items. It returns the handled ids, the approved
@@ -384,7 +404,7 @@ func (a *AutoApprover) Approve(ctx context.Context, items []DescribedApproval) (
 	}
 	a.mu.Lock()
 	if a.warned == nil {
-		a.warned = map[string]bool{}
+		a.warned = map[approvalKey]bool{}
 	}
 	if a.decided == nil {
 		a.decided = map[string]bool{}
@@ -416,9 +436,10 @@ func (a *AutoApprover) Approve(ctx context.Context, items []DescribedApproval) (
 		}
 		if !ok {
 			a.mu.Lock()
-			alreadyWarned := a.warned[deref(item.ApprovalID)]
+			key := keyOf(item.ApprovalID)
+			alreadyWarned := a.warned[key]
 			if !alreadyWarned {
-				a.warned[deref(item.ApprovalID)] = true
+				a.warned[key] = true
 			}
 			a.mu.Unlock()
 			if !alreadyWarned {
@@ -453,6 +474,10 @@ func (a *AutoApprover) Approve(ctx context.Context, items []DescribedApproval) (
 			continue
 		}
 		approved = append(approved, rec)
+		// Handled is a bare-string list by contract, not a
+		// key: deref here is a display value, and the
+		// waiter keys it present (it never offers a nil-id
+		// item, so "" here always means the present "" id).
 		handled = append(handled, deref(item.ApprovalID))
 	}
 	return handled, approved, errs
