@@ -11,6 +11,7 @@ import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { Modal } from '@/components/ui/Modal';
+import { Select } from '@/components/ui/Select';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import {
   Table,
@@ -390,14 +391,16 @@ export function ProfileDetailPage() {
           </div>
           <div>
             <label htmlFor="cookie-format">{t('profiles.login_card.format')}</label>{' '}
-            <select
+            <Select
               id="cookie-format"
               value={format}
-              onChange={(event) => setFormat(event.target.value as 'text' | 'file')}
-            >
-              <option value="text">{t('profiles.login_card.format_text')}</option>
-              <option value="file">{t('profiles.login_card.format_file')}</option>
-            </select>
+              options={[
+                { value: 'text', label: t('profiles.login_card.format_text') },
+                { value: 'file', label: t('profiles.login_card.format_file') },
+              ]}
+              onChange={(value) => setFormat(value as 'text' | 'file')}
+              ariaLabel={t('profiles.login_card.format')}
+            />
           </div>
           <div>
             <label htmlFor="cookie-upload">{t('profiles.login_card.upload')}</label>{' '}

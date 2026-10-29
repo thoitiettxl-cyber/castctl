@@ -18,6 +18,12 @@ import {
   telegramFixture,
 } from './fixtures.ts';
 
+import {
+  appendLiveLogEntries,
+  filterLogEntriesByLevel,
+  type MockLogEntry,
+} from './liveLogs.ts';
+
 const ok = (res: Connect.ServerResponse, data: unknown) => {
   res.statusCode = 200;
   res.setHeader('Content-Type', 'application/json');
@@ -29,6 +35,23 @@ const err = (res: Connect.ServerResponse, status: number, type: string, message:
   res.setHeader('Content-Type', 'application/json');
   res.end(JSON.stringify({ error: { type, message } }));
 };
+
+// Live log ring (dev-server lifetime only; a server restart reseeds
+// it from the fixture). The FIRST GET /logs returns the fixture
+// verbatim so the initial page load is stable; every later GET —
+// i.e. every 5s poll tick, Refresh, or level-filter fetch — appends
+// exactly one new entry before responding, through this same
+// handler LogsPage polls. No timer: the poll IS the clock, so the
+// page can never observe entries arriving faster than it polls.
+let liveLogEntries: MockLogEntry[] = [...logsFixture];
+let liveLogNextIndex = 0;
+let liveLogPollCount = 0;
+
+function resetLiveLogs() {
+  liveLogEntries = [...logsFixture];
+  liveLogNextIndex = 0;
+  liveLogPollCount = 0;
+}
 
 export function registerMockApi(middlewares: Connect.Server) {
   middlewares.use('/api/v1', (req, res, next) => {
@@ -123,9 +146,20 @@ export function registerMockApi(middlewares: Connect.Server) {
       if (method === 'GET' && path === '/settings/telegram') return ok(res, telegramFixture);
       if (method === 'PUT' && path === '/settings/telegram') return ok(res, telegramFixture);
       if (method === 'GET' && path === '/logs') {
-        return ok(res, { entries: logsFixture, next_cursor: null, more: false });
+        liveLogPollCount += 1;
+        if (liveLogPollCount > 1) {
+          liveLogEntries = appendLiveLogEntries(liveLogEntries, 1, liveLogNextIndex);
+          liveLogNextIndex += 1;
+        }
+        const filtered = filterLogEntriesByLevel(liveLogEntries, url.searchParams.get('level') ?? undefined);
+        const limit = Number(url.searchParams.get('limit'));
+        const entries = Number.isFinite(limit) && limit > 0 ? filtered.slice(-limit) : filtered;
+        return ok(res, { entries, next_cursor: null, more: false });
       }
-      if (method === 'DELETE' && path === '/logs') return ok(res, { cleared: true });
+      if (method === 'DELETE' && path === '/logs') {
+        resetLiveLogs();
+        return ok(res, { cleared: true });
+      }
       next();
     });
   });

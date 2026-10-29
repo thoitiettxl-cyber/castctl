@@ -4,7 +4,7 @@ import { logsApi } from '@/services/api';
 import type { LogEntry } from '@/types';
 import { copyToClipboard } from '@/utils/clipboard';
 import { getErrorMessage } from '@/utils/helpers';
-import { AUTO_SCROLL_THRESHOLD_PX, isNearBottom } from './autoScroll';
+import { AUTO_SCROLL_THRESHOLD_PX, isNearBottom, pinTargetOnArrival } from './autoScroll';
 import { useInterval } from '@/hooks/useInterval';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -118,9 +118,21 @@ export function LogsPage() {
   // smooth scrolling: a 5s poll must not animate, and a programmatic
   // smooth scroll would fight the user's own scrolling.
   useLayoutEffect(() => {
-    if (!following || entries.length === 0) return;
+    if (entries.length === 0) return;
     const container = scrollRef.current;
-    if (container) container.scrollTop = container.scrollHeight;
+    if (!container) return;
+    // pinTargetOnArrival returns the new bottom while following and
+    // null while scrolled up, so an arrival never jumps a user who
+    // scrolled away. See autoScroll.ts.
+    const target = pinTargetOnArrival(
+      {
+        scrollTop: container.scrollTop,
+        scrollHeight: container.scrollHeight,
+        clientHeight: container.clientHeight,
+      },
+      following,
+    );
+    if (target !== null) container.scrollTop = target;
   }, [entries, following]);
 
   const handleAutoRefreshChange = (next: boolean) => {

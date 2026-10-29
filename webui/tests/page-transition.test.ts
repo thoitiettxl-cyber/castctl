@@ -32,11 +32,11 @@ describe('pageTransitionReducer', () => {
     expect(next.isAnimating).toBe(true);
     expect(next.pending).toBeNull();
     expect(next.layers).toEqual([
-      { key: 'k-profiles', location: profiles, status: 'exiting' },
-      { key: 'k-login', location: loginBrowser, status: 'current' },
+      { key: 'k-profiles:/profiles', location: profiles, status: 'exiting' },
+      { key: 'k-login:/login-browser', location: loginBrowser, status: 'current' },
     ]);
     expect(next.settledLayers).toEqual([
-      { key: 'k-login', location: loginBrowser, status: 'current' },
+      { key: 'k-login:/login-browser', location: loginBrowser, status: 'current' },
     ]);
   });
 
@@ -87,11 +87,11 @@ describe('pageTransitionReducer', () => {
     expect(next.isAnimating).toBe(true);
     expect(next.pending).toBeNull();
     expect(next.layers).toEqual([
-      { key: 'k-login', location: loginBrowser, status: 'exiting' },
-      { key: 'k-config', location: config, status: 'current' },
+      { key: 'k-login:/login-browser', location: loginBrowser, status: 'exiting' },
+      { key: 'k-config:/config', location: config, status: 'current' },
     ]);
     expect(next.settledLayers).toEqual([
-      { key: 'k-config', location: config, status: 'current' },
+      { key: 'k-config:/config', location: config, status: 'current' },
     ]);
   });
 
@@ -107,7 +107,7 @@ describe('pageTransitionReducer', () => {
     const next = pageTransitionReducer(animating, { type: 'finish' });
 
     expect(next).toEqual({
-      layers: [{ key: 'k-login', location: loginBrowser, status: 'current' }],
+      layers: [{ key: 'k-login:/login-browser', location: loginBrowser, status: 'current' }],
       isAnimating: false,
       settledLayers: null,
       pending: null,
@@ -192,7 +192,7 @@ describe('pageTransitionReducer', () => {
 
     expect(next.layers.at(-1)?.location).toEqual(system);
     expect(next.settledLayers).toEqual([
-      { key: 'k-system', location: system, status: 'current' },
+      { key: 'k-system:/system', location: system, status: 'current' },
     ]);
   });
 
@@ -217,7 +217,7 @@ describe('pageTransitionReducer', () => {
     const finished = pageTransitionReducer(next, { type: 'finish' });
     expect(finished.isAnimating).toBe(false);
     expect(finished.layers).toEqual([
-      { key: 'k-login', location: loginBrowser, status: 'current' },
+      { key: 'k-login:/login-browser', location: loginBrowser, status: 'current' },
     ]);
   });
 
@@ -231,12 +231,12 @@ describe('pageTransitionReducer', () => {
       shouldSkipExitLayer: false,
     });
     expect(animating.layers).toEqual([
-      { key: 'k-profiles', location: profiles, status: 'exiting' },
-      { key: 'k-login', location: loginBrowser, status: 'current' },
+      { key: 'k-profiles:/profiles', location: profiles, status: 'exiting' },
+      { key: 'k-login:/login-browser', location: loginBrowser, status: 'current' },
     ]);
     expect(animating.settledLayers).toEqual([
-      { key: 'k-profiles', location: profiles, status: 'stacked' },
-      { key: 'k-login', location: loginBrowser, status: 'current' },
+      { key: 'k-profiles:/profiles', location: profiles, status: 'stacked' },
+      { key: 'k-login:/login-browser', location: loginBrowser, status: 'current' },
     ]);
     const finished = pageTransitionReducer(animating, { type: 'finish' });
     expect(finished.layers).toEqual(animating.settledLayers);

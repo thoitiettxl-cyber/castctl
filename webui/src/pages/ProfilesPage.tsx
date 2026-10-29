@@ -11,6 +11,7 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { Input } from '@/components/ui/Input';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { Modal } from '@/components/ui/Modal';
+import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
 import {
   Table,
   TableBody,
@@ -164,14 +165,11 @@ export function ProfilesPage() {
             onChange={(event) => setOutbound(event.target.value)}
           />
           <div>
-            <label>
-              <input
-                type="checkbox"
-                checked={setDefault}
-                onChange={(event) => setSetDefault(event.target.checked)}
-              />{' '}
-              {t('profiles.list.set_default')}
-            </label>
+            <SelectionCheckbox
+              checked={setDefault}
+              onChange={setSetDefault}
+              label={t('profiles.list.set_default')}
+            />
           </div>
           <Button type="submit" loading={submitting} disabled={!name.trim()}>
             {t('profiles.list.add')}

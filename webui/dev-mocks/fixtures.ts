@@ -4,22 +4,9 @@
  * Secrets are redacted placeholders only — never real values.
  */
 
-export const CASTCTL_MOCK_FIXTURE = 'CASTCTL_MOCK_FIXTURE';
+import { deriveConfigSource } from './configSource.ts';
 
-export const statusFixture = {
-  version: '0.1.0-dev',
-  go_version: 'go1.27.3',
-  singbox_version: 'v1.14.4',
-  listen_addr: '127.0.0.1:8317',
-  remote_exposure: false,
-  config_path: '~/.config/castctl/config.json',
-  config_source: 'single-file',
-  default_profile: 'muse01',
-  profile_count: 3,
-  outbound_count: 3,
-  endpoint_count: 1,
-  bundle_sha256: 'CASTCTL_MOCK_FIXTURE',
-};
+export const CASTCTL_MOCK_FIXTURE = 'CASTCTL_MOCK_FIXTURE';
 
 export const profilesFixture = [
   {
@@ -50,6 +37,27 @@ export const profilesFixture = [
     dir: '~/.config/castctl/profiles/legacy-note',
   },
 ];
+
+// Aggregate config layout, DERIVED from profilesFixture (see
+// configSource.ts) — never hard-coded separately. Two single-file
+// profiles + one legacy profile => 'mixed', so the dashboard legacy
+// warning and the config source agree. Changing a profile's `source`
+// above automatically moves this aggregate (and configFixture.source
+// below) with it.
+export const statusFixture = {
+  version: '0.1.0-dev',
+  go_version: 'go1.27.3',
+  singbox_version: 'v1.14.4',
+  listen_addr: '127.0.0.1:8317',
+  remote_exposure: false,
+  config_path: '~/.config/castctl/config.json',
+  config_source: deriveConfigSource(profilesFixture.map((p) => p.source)),
+  default_profile: 'muse01',
+  profile_count: 3,
+  outbound_count: 3,
+  endpoint_count: 1,
+  bundle_sha256: 'CASTCTL_MOCK_FIXTURE',
+};
 
 export const profileDetailFixture = {
   name: 'muse01',
@@ -108,7 +116,9 @@ export const configFixture = {
     2,
   ),
   sha256: 'CASTCTL_MOCK_FIXTURE',
-  source: 'single-file',
+  // Same derived aggregate as statusFixture.config_source: the
+  // config layout is 'mixed' while a legacy profile remains.
+  source: deriveConfigSource(profilesFixture.map((p) => p.source)),
 };
 
 export const dnsFixture = {

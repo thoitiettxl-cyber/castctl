@@ -508,6 +508,16 @@
     border-radius: 7px;
     box-shadow: none;
     flex-shrink: 0;
+    // Fork brand is a <span> "C", not upstream's <img> logo: give it the
+    // tile from the existing castctl favicon (dark tile, light letter) so
+    // the letter does not render as bare text. No new brand invented.
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: #151412;
+    color: #f6f4f1;
+    font-size: 15px;
+    font-weight: 800;
   }
 
   .sidebar-brand-text {

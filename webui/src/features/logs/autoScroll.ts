@@ -34,3 +34,22 @@ export function isNearBottom(
   if (scrollHeight <= clientHeight) return true;
   return scrollHeight - scrollTop - clientHeight <= thresholdPx;
 }
+
+/**
+ * Scroll target to apply after new entries render, or `null` for
+ * "do not move". While following, the target is the new bottom
+ * (scrollHeight): the view stays pinned as entries arrive. While the
+ * user has scrolled up (following off), it is `null`: an arrival must
+ * NOT jump the view, and the user's scrollTop is left untouched.
+ * `LogsPage` calls this from its layout effect on every entries
+ * change; the following flag itself comes from `isNearBottom` on
+ * scroll events (scroll up clears it, scroll-to-bottom restores it)
+ * and from re-enabling auto-refresh.
+ */
+export function pinTargetOnArrival(
+  metrics: ScrollMetrics,
+  following: boolean,
+): number | null {
+  if (!following) return null;
+  return metrics.scrollHeight;
+}

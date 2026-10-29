@@ -27,6 +27,41 @@ export function usePageTransitionLayer() {
 }
 
 /**
+ * Layer identity. Must NOT be `location.key` alone: every history entry
+ * the router did not stamp (initial load, external goto, Back to the
+ * initial entry, `location.hash =`) carries the same fallback key
+ * `"default"` (react-router history.ts: `state.key || "default"`), so
+ * two layers in one transition stack would share a React key and the
+ * current/exiting refs would collide. The route path disambiguates:
+ * layers coexisting in a stack always denote different routes.
+ */
+export function pageTransitionLayerKey(location: Location): string {
+  return `${location.key}:${location.pathname}${location.search}${location.hash}`;
+}
+
+/**
+ * Route identity for transition purposes. A location key is NOT route
+ * identity: unrelated external navigations share the fallback key
+ * `"default"`, and treating key equality as "same route" drops every
+ * hashchange-driven navigation after the first. What makes two
+ * locations the same route is the path they render (pathname + search
+ * + hash); the key is ignored.
+ */
+export function isSameRouteLocation(
+  location: Location,
+  current: PageTransitionLayer | Location | undefined,
+): boolean {
+  if (!current) return false;
+  const currentLocation =
+    'location' in current ? current.location : (current as Location);
+  return (
+    location.pathname === currentLocation.pathname &&
+    location.search === currentLocation.search &&
+    location.hash === currentLocation.hash
+  );
+}
+
+/**
  * One rendered page in the transition stack. `location` is frozen at the
  * moment the navigation started: `<Routes location={layer.location}>`
  * renders the page that was current then, not the live router location.
@@ -71,7 +106,7 @@ export function createInitialPageTransitionState(
   location: Location,
 ): PageTransitionState {
   return {
-    layers: [{ key: location.key, location, status: 'current' }],
+    layers: [{ key: pageTransitionLayerKey(location), location, status: 'current' }],
     isAnimating: false,
     settledLayers: null,
     pending: null,
@@ -93,7 +128,11 @@ function buildTransitionLayers(
     .filter((_, idx) => idx !== resolvedCurrentIndex)
     .map((layer): PageTransitionLayer => ({ ...layer, status: 'stacked' }));
 
-  const nextCurrent: PageTransitionLayer = { key: location.key, location, status: 'current' };
+  const nextCurrent: PageTransitionLayer = {
+    key: pageTransitionLayerKey(location),
+    location,
+    status: 'current',
+  };
 
   if (!previousCurrent) {
     return { layers: [nextCurrent], settled: [nextCurrent] };
@@ -109,7 +148,9 @@ function buildTransitionLayers(
       };
     }
 
-    const targetIndex = prev.findIndex((layer) => layer.key === location.key);
+    const targetIndex = prev.findIndex(
+      (layer) => layer.key === pageTransitionLayerKey(location),
+    );
     if (targetIndex !== -1) {
       const targetStack: PageTransitionLayer[] = prev
         .slice(0, targetIndex + 1)
@@ -151,9 +192,7 @@ function isSameRoute(
   location: Location,
   current: PageTransitionLayer | undefined,
 ): boolean {
-  return (
-    location.key === current?.key || location.pathname === current?.location.pathname
-  );
+  return isSameRouteLocation(location, current);
 }
 
 /**

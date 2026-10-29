@@ -5,6 +5,7 @@ import { NotificationContainer } from '@/components/common/NotificationContainer
 import { ConfirmationModal } from '@/components/common/ConfirmationModal';
 import { MainLayout } from '@/components/layout/MainLayout';
 import { ProtectedRoute } from '@/router/ProtectedRoute';
+import { installHashHistorySync } from '@/router/hashHistorySync';
 import { useLanguageStore, useThemeStore } from '@/stores';
 
 function RootShell() {
@@ -52,6 +53,13 @@ function App() {
   useEffect(() => {
     document.documentElement.lang = language;
   }, [language]);
+
+  // Router wiring only: adopt same-document fragment navigations that
+  // reach the browser as `hashchange` without a `popstate` (consecutive
+  // external gotos, `location.hash =`, Back/Forward between unstamped
+  // entries). See src/router/hashHistorySync.ts. No-op when popstate
+  // already synced the router, and never adds a history entry.
+  useEffect(() => installHashHistorySync(router, window), []);
 
   return <RouterProvider router={router} />;
 }
