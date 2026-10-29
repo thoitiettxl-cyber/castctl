@@ -411,10 +411,9 @@ func pendingApprovals(ev Event) []any {
 		return nil
 	}
 	p := payload(ev)
-	pend, ok := p["pending_approvals"]
+	pend := p["pending_approvals"]
 	if pend == nil {
-		pend, ok = p["pending"]
-		_ = ok
+		pend = p["pending"]
 	}
 	list, ok := pend.([]any)
 	if !ok {
