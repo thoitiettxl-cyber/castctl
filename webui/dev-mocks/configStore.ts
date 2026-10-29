@@ -26,6 +26,7 @@ import {
   storedConfigDocument,
 } from './fixtures.ts';
 import {
+  findSentinelAtSecretPosition,
   mergeConfig,
   redactValue,
   SentinelRejectionError,
@@ -113,13 +114,69 @@ function conflictError(): StoreError {
   };
 }
 
+/** The staleness guard, evaluated before any body parsing or shape checks (R8 precedence: stale hash + invalid JSON is a 409, not a 400). Returns the conflict error, or null when the hash is current. */
+function hashGuardError(baseSha256: unknown): StoreError | null {
+  if (typeof baseSha256 !== 'string' || baseSha256 !== currentHash()) return conflictError();
+  return null;
+}
+
+/** Rejection carrying the JSON path of a whitespace-padded key (path only, never a value). */
+class WhitespaceKeyError extends Error {
+  readonly path: string;
+
+  constructor(path: string) {
+    super('Object key has leading or trailing whitespace');
+    this.name = 'WhitespaceKeyError';
+    this.path = path;
+  }
+}
+
+/**
+ * Find the first object key with leading/trailing whitespace anywhere
+ * in the submitted document, or null. This is a mock approximation
+ * of Go strict parsing: a key such as `" password "` does not match
+ * the secret-key set (lowercase-exact, no trim), so without this
+ * check it would leak end-to-end in the mock. The Go backend's
+ * strict parser rejects unknown fields and is the real control;
+ * the mock rejects here, fail-closed, with a path-only error and
+ * no write. Key matching itself stays lowercase-exact — this is a
+ * validation rule, not a matcher change.
+ */
+function findWhitespaceKey(value: unknown, path: string): string | null {
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index++) {
+      const found = findWhitespaceKey(value[index], `${path}[${index}]`);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  if (typeof value === 'object' && value !== null) {
+    for (const [key, child] of Object.entries(value)) {
+      const childPath = path === '' ? key : `${path}.${key}`;
+      if (key !== key.trim()) return childPath;
+      const found = findWhitespaceKey(child, childPath);
+      if (found !== null) return found;
+    }
+  }
+  return null;
+}
+
+function whitespaceError(path: string): StoreError {
+  return {
+    status: 400,
+    type: 'validation_failed',
+    message: `Invalid configuration at ${path}`,
+  };
+}
+
 /** Guard -> parse -> merge -> validate merged -> write -> hash. Shared by PUT /config and PUT /dns. */
 function saveMerged(
   baseSha256: unknown,
   merge: (stored: Record<string, unknown>) => unknown,
 ): StoreResult<{ sha256: string }> {
-  if (typeof baseSha256 !== 'string' || baseSha256 !== currentHash()) {
-    return { ok: false, error: conflictError() };
+  const guard = hashGuardError(baseSha256);
+  if (guard !== null) {
+    return { ok: false, error: guard };
   }
   const stored = storedDocument();
   let merged: unknown;
@@ -136,10 +193,20 @@ function saveMerged(
         },
       };
     }
+    if (err instanceof WhitespaceKeyError) {
+      return { ok: false, error: whitespaceError(err.path) };
+    }
     throw err;
   }
   const violation = findStructuralViolation(merged);
   if (violation !== null) return { ok: false, error: validationError(violation) };
+  // R8 assertion (defence in depth: the merge must already exclude
+  // sentinels from secret positions): refuse the write rather than
+  // persist a sentinel at a secret/header position.
+  const leakedSentinel = findSentinelAtSecretPosition(merged);
+  if (leakedSentinel !== null) {
+    return { ok: false, error: validationError(leakedSentinel) };
+  }
   storedBytes = stringifyConfigDocument(merged);
   return { ok: true, data: { sha256: currentHash() } };
 }
@@ -156,6 +223,11 @@ export function handlePutConfig(body: {
   content?: unknown;
   base_sha256?: unknown;
 }): StoreResult<{ sha256: string }> {
+  // Guard first: a stale hash is a 409 even when the body is invalid JSON.
+  const guard = hashGuardError(body.base_sha256);
+  if (guard !== null) {
+    return { ok: false, error: guard };
+  }
   if (typeof body.content !== 'string') {
     return { ok: false, error: validationError('') };
   }
@@ -168,7 +240,11 @@ export function handlePutConfig(body: {
       error: { status: 400, type: 'validation_failed', message: 'Invalid JSON in submitted config' },
     };
   }
-  return saveMerged(body.base_sha256, (stored) => mergeConfig(stored, submitted));
+  return saveMerged(body.base_sha256, (stored) => {
+    const whitespacePath = findWhitespaceKey(submitted, '');
+    if (whitespacePath !== null) throw new WhitespaceKeyError(whitespacePath);
+    return mergeConfig(stored, submitted);
+  });
 }
 
 export function handleValidateConfig(body: {
@@ -180,6 +256,10 @@ export function handleValidateConfig(body: {
     submitted = JSON.parse(body.content) as unknown;
   } catch {
     return { valid: false, errors: ['Invalid JSON in submitted config'] };
+  }
+  const whitespacePath = findWhitespaceKey(submitted, '');
+  if (whitespacePath !== null) {
+    return { valid: false, errors: [whitespaceError(whitespacePath).message] };
   }
   let merged: unknown;
   try {
@@ -216,11 +296,18 @@ export function handlePutDns(body: {
   dns?: unknown;
   base_sha256?: unknown;
 }): StoreResult<{ sha256: string }> {
+  // Guard first: a stale hash is a 409 even when the body is malformed.
+  const guard = hashGuardError(body.base_sha256);
+  if (guard !== null) {
+    return { ok: false, error: guard };
+  }
   if (typeof body.dns !== 'object' || body.dns === null || Array.isArray(body.dns)) {
     return { ok: false, error: validationError('dns') };
   }
   const submittedDns = body.dns;
   return saveMerged(body.base_sha256, (stored) => {
+    const whitespacePath = findWhitespaceKey(submittedDns, '');
+    if (whitespacePath !== null) throw new WhitespaceKeyError(whitespacePath);
     const storedDns = stored.dns;
     const storedSection =
       typeof storedDns === 'object' && storedDns !== null && !Array.isArray(storedDns)

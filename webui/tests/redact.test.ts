@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   REDACTED_SENTINEL,
   SentinelRejectionError,
+  findSentinelAtSecretPosition,
   isSecretKey,
   mergeConfig,
   redactURLUserinfo,
@@ -455,5 +456,290 @@ describe('diff safety (C2)', () => {
     expect(lines.every((line) => !line.text.includes('FAKE-SECRET-PW'))).toBe(true);
     // The sentinel line itself is unchanged context, not a deletion.
     expect(lines.some((line) => line.text.includes(REDACTED_SENTINEL))).toBe(true);
+  });
+});
+
+describe('type-change sentinel smuggle (F1)', () => {
+  it('rejects string -> object with a sentinel nested in the new value', () => {
+    expect(() =>
+      mergeConfig(
+        { password: 'FAKE-SECRET-PW' },
+        { password: { nested: REDACTED_SENTINEL } },
+      ),
+    ).toThrow(SentinelRejectionError);
+  });
+
+  it('rejects string -> array with a sentinel nested in the new value', () => {
+    expect(() =>
+      mergeConfig({ password: 'FAKE-SECRET-PW' }, { password: [REDACTED_SENTINEL] }),
+    ).toThrow(SentinelRejectionError);
+  });
+
+  it('rejects object -> array with a sentinel nested in the new value', () => {
+    expect(() =>
+      mergeConfig(
+        { outbounds: [{ tag: 'hyst', type: 'hysteria2', obfs: { type: 'salamander', password: 'FAKE-SECRET-OBFS' } }] },
+        { outbounds: [{ tag: 'hyst', type: 'hysteria2', obfs: [REDACTED_SENTINEL] }] },
+      ),
+    ).toThrow(SentinelRejectionError);
+  });
+
+  it('still allows a type change with no sentinel nested inside', () => {
+    expect(mergeConfig({ password: 'FAKE-SECRET-PW' }, { password: 42 })).toEqual({ password: 42 });
+    expect(mergeConfig({ password: 'FAKE-SECRET-PW' }, { password: { nested: 'literal' } })).toEqual({
+      password: { nested: 'literal' },
+    });
+  });
+});
+
+describe('R8 assertion helper (F1b)', () => {
+  it('finds a sentinel at a secret position, nested or in a header map', () => {
+    expect(findSentinelAtSecretPosition({ password: REDACTED_SENTINEL })).toBe('password');
+    expect(findSentinelAtSecretPosition({ obfs: { password: REDACTED_SENTINEL } })).toBe(
+      'obfs.password',
+    );
+    expect(findSentinelAtSecretPosition({ headers: { 'X-A': REDACTED_SENTINEL } })).toBe(
+      'headers.X-A',
+    );
+    expect(findSentinelAtSecretPosition({ client_key: [REDACTED_SENTINEL] })).toBe(
+      'client_key[0]',
+    );
+    expect(findSentinelAtSecretPosition({ headers: REDACTED_SENTINEL })).toBe('headers');
+  });
+
+  it('does not report a sentinel at a present non-secret position', () => {
+    expect(findSentinelAtSecretPosition({ note: REDACTED_SENTINEL })).toBe(null);
+    expect(findSentinelAtSecretPosition({ note: { text: REDACTED_SENTINEL } })).toBe(null);
+    expect(findSentinelAtSecretPosition({ password: 'FAKE-SECRET-PW' })).toBe(null);
+  });
+});
+
+describe('userinfo-only identity guard (F2)', () => {
+  const stored = {
+    outbounds: [
+      { tag: 'a', type: 'http', proxy_url: 'https://FAKE-USER-A:FAKE-PASS-A@proxy-a.example/' },
+      { tag: 'b', type: 'http', proxy_url: 'https://FAKE-USER-B:FAKE-PASS-B@proxy-b.example/' },
+    ],
+  };
+
+  it('rejects swapping two outbounds whose only secrets are URL userinfo', () => {
+    const swapped = {
+      outbounds: [
+        { tag: 'b', type: 'http', proxy_url: 'https://<redacted>@proxy-b.example/' },
+        { tag: 'a', type: 'http', proxy_url: 'https://<redacted>@proxy-a.example/' },
+      ],
+    };
+    expect(() => mergeConfig(stored, swapped)).toThrow(SentinelRejectionError);
+  });
+
+  it('rejects a tag rename when the only secret is URL userinfo', () => {
+    const renamed = {
+      outbounds: [{ tag: 'renamed', type: 'http', proxy_url: 'https://<redacted>@proxy-a.example/' }],
+    };
+    expect(() => mergeConfig({ outbounds: [stored.outbounds[0]] }, renamed)).toThrow(
+      SentinelRejectionError,
+    );
+  });
+
+  it('allows the same swap when the userinfos are re-entered literally', () => {
+    const reentered = {
+      outbounds: [
+        { tag: 'b', type: 'http', proxy_url: 'https://FAKE-USER-B:FAKE-PASS-B@proxy-b.example/' },
+        { tag: 'a', type: 'http', proxy_url: 'https://FAKE-USER-A:FAKE-PASS-A@proxy-a.example/' },
+      ],
+    };
+    expect(mergeConfig(stored, reentered)).toEqual(reentered);
+  });
+});
+
+describe('multi-URL userinfo fail-closed (F3)', () => {
+  const storedUrl =
+    'https://FAKE-USER-A:FAKE-PASS-A@host-a.example/x https://FAKE-USER-B:FAKE-PASS-B@host-b.example/y';
+
+  it('rejects an edited multi-URL string carrying sentinel segments', () => {
+    expect(() =>
+      mergeConfig(
+        { proxy_url: storedUrl },
+        { proxy_url: 'https://<redacted>@host-a.example/x https://<redacted>@host-c.example/y' },
+      ),
+    ).toThrow(SentinelRejectionError);
+  });
+
+  it('rejects a second URL added with a sentinel userinfo', () => {
+    expect(() =>
+      mergeConfig(
+        { proxy_url: 'https://FAKE-USER-A:FAKE-PASS-A@host-a.example/x' },
+        {
+          proxy_url:
+            'https://<redacted>@host-a.example/x https://<redacted>@host-b.example/y',
+        },
+      ),
+    ).toThrow(SentinelRejectionError);
+  });
+
+  it('keeps the stored value for an untouched multi-URL redacted view', () => {
+    const merged = mergeConfig(
+      { proxy_url: storedUrl },
+      { proxy_url: redactURLUserinfo(storedUrl) },
+    ) as { proxy_url: string };
+    expect(merged.proxy_url).toBe(storedUrl);
+  });
+
+  it('still splices the single-span case', () => {
+    const merged = mergeConfig(
+      { proxy_url: 'https://FAKE-USER-A:FAKE-PASS-A@host-a.example/x' },
+      { proxy_url: 'https://<redacted>@host-c.example/x' },
+    ) as { proxy_url: string };
+    expect(merged.proxy_url).toBe('https://FAKE-USER-A:FAKE-PASS-A@host-c.example/x');
+  });
+});
+
+describe('header-map wholesale, Go mirror (F4)', () => {
+  it('replaces number, bool, object, and array header values with the marker wholesale', () => {
+    expect(redactValue({ headers: { 'X-N': 42 } })).toEqual({ headers: { 'X-N': REDACTED_SENTINEL } });
+    expect(redactValue({ headers: { 'X-B': true } })).toEqual({ headers: { 'X-B': REDACTED_SENTINEL } });
+    expect(redactValue({ headers: { 'X-O': { nested: 'FAKE-SECRET-VALUE' } } })).toEqual({
+      headers: { 'X-O': REDACTED_SENTINEL },
+    });
+    expect(redactValue({ headers: { 'X-A': ['FAKE-SECRET-VALUE'] } })).toEqual({
+      headers: { 'X-A': REDACTED_SENTINEL },
+    });
+    expect(redactValue({ extra_headers: { 'X-A': ['a', 'b'] } })).toEqual({
+      extra_headers: { 'X-A': REDACTED_SENTINEL },
+    });
+  });
+
+  it('keeps nil nil and still replaces string values with the marker', () => {
+    expect(redactValue({ headers: null })).toEqual({ headers: null });
+    expect(redactValue({ headers: 'FAKE-SECRET-VALUE' })).toEqual({
+      headers: REDACTED_SENTINEL,
+    });
+    expect(redactValue({ headers: { 'X-S': 'kept-text' } })).toEqual({
+      headers: { 'X-S': REDACTED_SENTINEL },
+    });
+  });
+});
+
+describe('extended array identity keys (F5)', () => {
+  it('rejects swapping users[] elements distinguished only by username', () => {
+    const stored = {
+      users: [
+        { username: 'FAKE-USER-A', password: 'FAKE-SECRET-PW-A' },
+        { username: 'FAKE-USER-B', password: 'FAKE-SECRET-PW-B' },
+      ],
+    };
+    const swapped = {
+      users: [
+        { username: 'FAKE-USER-B', password: REDACTED_SENTINEL },
+        { username: 'FAKE-USER-A', password: REDACTED_SENTINEL },
+      ],
+    };
+    expect(() => mergeConfig(stored, swapped)).toThrow(SentinelRejectionError);
+  });
+
+  it('rejects swapping WireGuard peers[] distinguished only by address/port', () => {
+    const stored = {
+      peers: [
+        { address: '203.0.113.10', port: 51820, public_key: 'FAKE-PUB-A', pre_shared_key: 'FAKE-PSK-A' },
+        { address: '203.0.113.11', port: 51821, public_key: 'FAKE-PUB-B', pre_shared_key: 'FAKE-PSK-B' },
+      ],
+    };
+    const swapped = {
+      peers: [
+        { address: '203.0.113.11', port: 51821, public_key: REDACTED_SENTINEL, pre_shared_key: REDACTED_SENTINEL },
+        { address: '203.0.113.10', port: 51820, public_key: REDACTED_SENTINEL, pre_shared_key: REDACTED_SENTINEL },
+      ],
+    };
+    expect(() => mergeConfig(stored, swapped)).toThrow(SentinelRejectionError);
+  });
+
+  it('rejects swapping elements distinguished only by name', () => {
+    const stored = {
+      items: [
+        { name: 'first', token: 'FAKE-SECRET-A' },
+        { name: 'second', token: 'FAKE-SECRET-B' },
+      ],
+    };
+    const swapped = {
+      items: [
+        { name: 'second', token: REDACTED_SENTINEL },
+        { name: 'first', token: REDACTED_SENTINEL },
+      ],
+    };
+    expect(() => mergeConfig(stored, swapped)).toThrow(SentinelRejectionError);
+  });
+
+  it('still rejects tag/type changes when a secret is restored (F5 keeps R4)', () => {
+    expect(() =>
+      mergeConfig(
+        { outbounds: [{ tag: 'a', type: 'trojan', password: 'FAKE-SECRET-PW' }] },
+        { outbounds: [{ tag: 'a', type: 'vless', password: REDACTED_SENTINEL }] },
+      ),
+    ).toThrow(SentinelRejectionError);
+  });
+
+  it('falls back to positional merge when the stored element has no identity key (documented residual)', () => {
+    const stored = {
+      items: [{ password: 'FAKE-SECRET-PW-A' }, { password: 'FAKE-SECRET-PW-B' }],
+    };
+    const swapped = {
+      items: [{ password: REDACTED_SENTINEL }, { password: REDACTED_SENTINEL }],
+    };
+    // No identity key exists to distinguish the elements, so the
+    // merge restores positionally. This is the documented R-D
+    // fallback residual, pinned here so it stays a conscious choice.
+    expect(mergeConfig(stored, swapped)).toEqual(stored);
+  });
+});
+
+describe('userinfo regex parity: explicit ASCII whitespace class (F8.2)', () => {
+  it('scrubs a userinfo containing NBSP or vertical tab, like Go RE2 \\s', () => {
+    expect(redactURLUserinfo('https://us\u00a0er:pass@host.example/x')).toBe(
+      'https://<redacted>@host.example/x',
+    );
+    expect(redactURLUserinfo('https://us\u000ber:pass@host.example/x')).toBe(
+      'https://<redacted>@host.example/x',
+    );
+  });
+
+  it('leaves a userinfo containing a space or tab unscrubbed, like Go', () => {
+    expect(redactURLUserinfo('https://us er:pass@host.example/x')).toBe(
+      'https://us er:pass@host.example/x',
+    );
+    expect(redactURLUserinfo('https://us	er:pass@host.example/x')).toBe(
+      'https://us	er:pass@host.example/x',
+    );
+  });
+});
+
+describe('insert/delete shifting a sentinel onto a different element (F8.4)', () => {
+  it('rejects an insert that shifts a sentinel onto the next element', () => {
+    const stored = {
+      outbounds: [
+        { tag: 'a', type: 'trojan', password: 'FAKE-SECRET-PW-A' },
+        { tag: 'b', type: 'trojan', password: 'FAKE-SECRET-PW-B' },
+      ],
+    };
+    const inserted = {
+      outbounds: [
+        { tag: 'new', type: 'trojan', password: 'FAKE-SECRET-PW-NEW' },
+        { tag: 'a', type: 'trojan', password: REDACTED_SENTINEL },
+        { tag: 'b', type: 'trojan', password: REDACTED_SENTINEL },
+      ],
+    };
+    expect(() => mergeConfig(stored, inserted)).toThrow(SentinelRejectionError);
+  });
+
+  it('rejects a delete that shifts a sentinel onto the previous element', () => {
+    const stored = {
+      outbounds: [
+        { tag: 'a', type: 'trojan', password: 'FAKE-SECRET-PW-A' },
+        { tag: 'b', type: 'trojan', password: 'FAKE-SECRET-PW-B' },
+      ],
+    };
+    const deleted = {
+      outbounds: [{ tag: 'b', type: 'trojan', password: REDACTED_SENTINEL }],
+    };
+    expect(() => mergeConfig(stored, deleted)).toThrow(SentinelRejectionError);
   });
 });

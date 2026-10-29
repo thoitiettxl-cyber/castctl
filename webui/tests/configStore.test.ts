@@ -274,17 +274,28 @@ describe('fixture coverage: every surveyed shape, all redacted (§E.4 #13)', () 
       'outbounds.12.extra_headers.Authorization',
       'outbounds.13.client_key_password',
       'outbounds.13.mca_key',
+      'outbounds.13.mca_key_password',
+      'outbounds.13.submission_key',
+      'outbounds.13.client_key',
+      'outbounds.13.client_certificate',
       'outbounds.13.cookie',
       'outbounds.13.secret',
       'outbounds.14.static_key',
       'outbounds.14.client_key',
+      'outbounds.14.client_certificate',
       'outbounds.15.mesh_psk',
       'outbounds.16.tls.client_key',
       'outbounds.16.tls.certificate',
+      'outbounds.16.tls.key',
       'outbounds.16.tls.acme.dns01_challenge.api_token',
+      'outbounds.16.tls.acme.dns01_challenge.access_key_secret',
+      'outbounds.16.tls.acme.dns01_challenge.security_token',
+      'outbounds.16.tls.acme.dns01_challenge.zone_token',
       'outbounds.16.tls.acme.external_account.mac_key',
       'outbounds.16.tls.certificate_provider.account_key',
+      'outbounds.16.tls.certificate_provider.origin_ca_key',
       'outbounds.16.users.0.password',
+      'outbounds.16.users.1.password',
       'outbounds.16.headers.Authorization',
       'endpoints.0.private_key',
       'endpoints.0.peers.0.public_key',
@@ -368,5 +379,151 @@ describe('legacy entry untouched by config saves (D3)', () => {
     expect(snapshotLegacyProfileEntry()).toEqual(beforeLegacy);
     expect(legacyProfileEntryFixture).toEqual(beforeFixture);
     expect(JSON.stringify(legacyProfileEntryFixture)).toContain('FAKE-SECRET-LEGACY-VM-ID');
+  });
+});
+
+describe('type-change sentinel smuggle through the handler (F1)', () => {
+  it('refuses the write and leaves stored bytes unchanged for every type change', () => {
+    const mutations: Array<{
+      name: string;
+      mutate: (doc: Record<string, unknown>) => void;
+    }> = [
+      {
+        name: 'string -> object',
+        mutate: (doc) => {
+          const trojan = (doc.outbounds as Record<string, unknown>[]).find(
+            (o) => o.tag === 'trojan-1',
+          ) as Record<string, unknown>;
+          trojan.password = { nested: REDACTED_SENTINEL };
+        },
+      },
+      {
+        name: 'string -> array',
+        mutate: (doc) => {
+          const trojan = (doc.outbounds as Record<string, unknown>[]).find(
+            (o) => o.tag === 'trojan-1',
+          ) as Record<string, unknown>;
+          trojan.password = [REDACTED_SENTINEL];
+        },
+      },
+      {
+        name: 'object -> array',
+        mutate: (doc) => {
+          const hysteria = (doc.outbounds as Record<string, unknown>[]).find(
+            (o) => o.tag === 'hysteria2-1',
+          ) as Record<string, unknown>;
+          hysteria.obfs = [REDACTED_SENTINEL];
+        },
+      },
+    ];
+    for (const { name, mutate } of mutations) {
+      const before = currentConfig();
+      const edited = JSON.parse(before.content) as Record<string, unknown>;
+      mutate(edited);
+      const result = handlePutConfig({ content: JSON.stringify(edited), base_sha256: before.sha256 });
+      expect(result.ok, name).toBe(false);
+      if (!result.ok) {
+        expect(result.error.status, name).toBe(400);
+        expect(result.error.type, name).toBe('validation_failed');
+        expect(result.error.message, name).not.toContain('FAKE');
+      }
+      expect(currentConfig(), name).toEqual(before);
+      resetConfigStore();
+    }
+  });
+});
+
+describe('whitespace-padded keys rejected (F6, mock strict-parse approximation)', () => {
+  it.each([' password ', '\tpassword', 'password\n'])(
+    'rejects a %j secret key and writes nothing',
+    (paddedKey) => {
+      const before = currentConfig();
+      const edited = JSON.parse(before.content) as Record<string, unknown>;
+      const first = (edited.outbounds as Record<string, unknown>[])[0];
+      first[paddedKey] = 'FAKE-SECRET-WS-VALUE';
+      const result = handlePutConfig({ content: JSON.stringify(edited), base_sha256: before.sha256 });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.status).toBe(400);
+        expect(result.error.type).toBe('validation_failed');
+        expect(result.error.message).not.toContain('FAKE-SECRET-WS-VALUE');
+      }
+      expect(currentConfig()).toEqual(before);
+    },
+  );
+
+  it('rejects a whitespace-padded key inside the dns section', () => {
+    const before = currentConfig();
+    const dns = handleGetDns();
+    const editedDns = JSON.parse(JSON.stringify(dns.dns)) as Record<string, unknown>;
+    const servers = editedDns.servers as Record<string, unknown>[];
+    servers[0][' password '] = 'FAKE-SECRET-WS-VALUE';
+    const result = handlePutDns({ dns: editedDns, base_sha256: dns.sha256 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.status).toBe(400);
+      expect(result.error.type).toBe('validation_failed');
+    }
+    expect(currentConfig()).toEqual(before);
+  });
+
+  it('leaves normal keys unaffected', () => {
+    const before = currentConfig();
+    const edited = JSON.parse(before.content) as Record<string, unknown>;
+    edited.default_profile = 'work';
+    const first = (edited.outbounds as Record<string, unknown>[])[0];
+    first.note = 'plain note with internal spaces is fine';
+    const result = handlePutConfig({ content: JSON.stringify(edited), base_sha256: before.sha256 });
+    expect(result.ok).toBe(true);
+    expect(
+      ((JSON.parse(currentConfig().content) as Record<string, unknown>).outbounds as Record<
+        string,
+        unknown
+      >[])[0].note,
+    ).toBe('plain note with internal spaces is fine');
+  });
+});
+
+describe('verbatim redacted-view save is a no-op (F7d)', () => {
+  it('submitting the redacted view verbatim leaves the hash byte-identical', () => {
+    const before = currentConfig();
+    const result = handlePutConfig({ content: before.content, base_sha256: before.sha256 });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.sha256).toBe(before.sha256);
+    }
+    expect(currentConfig()).toEqual(before);
+  });
+});
+
+describe('hash-guard precedence over body errors (F8.1)', () => {
+  it('stale hash + invalid JSON returns 409, not 400', () => {
+    const before = currentConfig();
+    const result = handlePutConfig({ content: '{oops', base_sha256: '0'.repeat(64) });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.status).toBe(409);
+      expect(result.error.type).toBe('config_changed');
+    }
+    expect(currentConfig()).toEqual(before);
+  });
+
+  it('stale hash + non-string content returns 409, not 400', () => {
+    const before = currentConfig();
+    const result = handlePutConfig({ content: 123, base_sha256: '0'.repeat(64) });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.status).toBe(409);
+    expect(currentConfig()).toEqual(before);
+  });
+
+  it('stale hash + malformed DNS body returns 409, not 400', () => {
+    const before = currentConfig();
+    const result = handlePutDns({ dns: 'not-an-object', base_sha256: '0'.repeat(64) });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.status).toBe(409);
+      expect(result.error.type).toBe('config_changed');
+    }
+    expect(currentConfig()).toEqual(before);
   });
 });

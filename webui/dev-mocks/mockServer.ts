@@ -92,7 +92,16 @@ export function registerMockApi(middlewares: Connect.Server) {
       body += chunk.toString();
     });
     req.on('end', () => {
-      const json = body ? (JSON.parse(body) as Record<string, unknown>) : {};
+      // A malformed body must never throw out of the handler (which
+      // would hang or crash the dev server) and must never be echoed:
+      // fail closed with a generic, path-free 400.
+      let json: Record<string, unknown>;
+      try {
+        json = body ? (JSON.parse(body) as Record<string, unknown>) : {};
+      } catch {
+        err(res, 400, 'validation_failed', 'Invalid JSON in request body');
+        return;
+      }
 
       if (method === 'GET' && path === '/status') return ok(res, statusFixture);
       if (method === 'GET' && path === '/profiles') return ok(res, profilesFixture);
