@@ -5,9 +5,15 @@
  */
 import type { Connect } from 'vite';
 import {
-  configFixture,
-  dnsFixture,
+  handleGetConfig,
+  handleGetDns,
+  handlePutConfig,
+  handlePutDns,
+  handleValidateConfig,
+} from './configStore.ts';
+import {
   endpointsFixture,
+  legacyProfileEntryFixture,
   loginStatusFixture,
   logsFixture,
   outboundsFixture,
@@ -17,6 +23,7 @@ import {
   statusFixture,
   telegramFixture,
 } from './fixtures.ts';
+import { redactValue } from './redact.ts';
 
 import {
   appendLiveLogEntries,
@@ -53,6 +60,22 @@ function resetLiveLogs() {
   liveLogPollCount = 0;
 }
 
+/** Stored-form entry for a profile; the legacy profile's entry lives outside config.json (D3). */
+function storedEntryFor(name: string): Record<string, unknown> {
+  return name === 'legacy-note'
+    ? (legacyProfileEntryFixture as unknown as Record<string, unknown>)
+    : (profileDetailFixture.entry as unknown as Record<string, unknown>);
+}
+
+/** Profile detail as served: entry redacted (C3), never the stored form. */
+function servedProfileDetail(name: string) {
+  return { ...profileDetailFixture, name, entry: redactValue(storedEntryFor(name)) };
+}
+
+/** Redacted wg-quick import preview (C6): keys never shown as values. */
+export const ENDPOINT_IMPORT_PREVIEW =
+  '[Interface]\nAddress = 10.2.0.2/32\n# secrets redacted';
+
 export function registerMockApi(middlewares: Connect.Server) {
   middlewares.use('/api/v1', (req, res, next) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -81,12 +104,12 @@ export function registerMockApi(middlewares: Connect.Server) {
       if (profileMatch) {
         const name = decodeURIComponent(profileMatch[1]);
         const rest = profileMatch[2];
-        if (rest === '' && method === 'GET') return ok(res, { ...profileDetailFixture, name });
+        if (rest === '' && method === 'GET') return ok(res, servedProfileDetail(name));
         if (rest === '' && method === 'PATCH') {
           return ok(res, {
             ...profileDetailFixture,
             name,
-            entry: { ...profileDetailFixture.entry, ...(json as Record<string, unknown>) },
+            entry: redactValue({ ...storedEntryFor(name), ...(json as Record<string, unknown>) }),
           });
         }
         if (rest === '' && method === 'DELETE') {
@@ -103,7 +126,7 @@ export function registerMockApi(middlewares: Connect.Server) {
         if (rest === '/test' && method === 'POST') return ok(res, { ...profileTestFixture, profile: name });
         if (rest === '/set-default' && method === 'POST') return ok(res, { default_profile: name });
         if (rest === '/rename' && method === 'POST') {
-          return ok(res, { ...profileDetailFixture, name: String(json.to ?? name) });
+          return ok(res, servedProfileDetail(String(json.to ?? name)));
         }
       }
       if (method === 'GET' && path === '/outbounds') return ok(res, outboundsFixture);
@@ -131,18 +154,27 @@ export function registerMockApi(middlewares: Connect.Server) {
       if (method === 'GET' && path === '/endpoints') return ok(res, endpointsFixture);
       if (method === 'POST' && path === '/endpoints/import') {
         if (json.save === true) return ok(res, endpointsFixture[0]);
-        return ok(res, { preview: '[Interface]\nAddress = 10.2.0.2/32\n# secrets redacted' });
+        return ok(res, { preview: ENDPOINT_IMPORT_PREVIEW });
       }
       const endpointMatch = path.match(/^\/endpoints\/([^/]+)$/);
       if (endpointMatch) {
         if (method === 'GET') return ok(res, endpointsFixture[0]);
         if (method === 'DELETE') return ok(res, { deleted: true });
       }
-      if (method === 'GET' && path === '/config') return ok(res, configFixture);
-      if (method === 'PUT' && path === '/config') return ok(res, { sha256: 'CASTCTL_MOCK_FIXTURE' });
-      if (method === 'POST' && path === '/config/validate') return ok(res, { valid: true, errors: [] });
-      if (method === 'GET' && path === '/dns') return ok(res, dnsFixture);
-      if (method === 'PUT' && path === '/dns') return ok(res, {});
+      if (method === 'GET' && path === '/config') return ok(res, handleGetConfig());
+      if (method === 'PUT' && path === '/config') {
+        const result = handlePutConfig(json as { content?: unknown; base_sha256?: unknown });
+        if (result.ok) return ok(res, result.data);
+        return err(res, result.error.status, result.error.type, result.error.message);
+      }
+      if (method === 'POST' && path === '/config/validate')
+        return ok(res, handleValidateConfig(json as { content?: unknown }));
+      if (method === 'GET' && path === '/dns') return ok(res, handleGetDns());
+      if (method === 'PUT' && path === '/dns') {
+        const result = handlePutDns(json as { dns?: unknown; base_sha256?: unknown });
+        if (result.ok) return ok(res, result.data);
+        return err(res, result.error.status, result.error.type, result.error.message);
+      }
       if (method === 'GET' && path === '/settings/telegram') return ok(res, telegramFixture);
       if (method === 'PUT' && path === '/settings/telegram') return ok(res, telegramFixture);
       if (method === 'GET' && path === '/logs') {

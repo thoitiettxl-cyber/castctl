@@ -104,8 +104,15 @@ export const configApi = {
 };
 
 export const dnsApi = {
-  get: (signal?: AbortSignal) => apiGet<{ dns: Record<string, unknown> }>('/dns', signal),
-  save: (body: { dns: Record<string, unknown> }) => apiPut<unknown>('/dns', body),
+  // D1 contract extension (Fix 1, see webui/SECRETS-CONTRACT.md): GET
+  // returns the redacted DNS slice WITH the stored-file sha256, and PUT
+  // accepts {dns, base_sha256} with the same 409 config_changed guard
+  // as PUT /config, merging against the stored dns section. The Go
+  // backend must implement the same contract server-side (Go PR6).
+  get: (signal?: AbortSignal) =>
+    apiGet<{ dns: Record<string, unknown>; sha256: string }>('/dns', signal),
+  save: (body: { dns: Record<string, unknown>; base_sha256: string }) =>
+    apiPut<{ sha256: string }>('/dns', body),
 };
 
 export const settingsApi = {

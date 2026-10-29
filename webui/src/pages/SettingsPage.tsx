@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { dnsApi, settingsApi } from '@/services/api';
+import type { ApiError } from '@/types';
 import { getErrorMessage, isRecord } from '@/utils/helpers';
 import { useNotificationStore } from '@/stores';
 import { Button } from '@/components/ui/Button';
@@ -14,6 +15,7 @@ export function SettingsPage() {
   const showNotification = useNotificationStore((state) => state.showNotification);
 
   const [dnsText, setDnsText] = useState('');
+  const [dnsBaseSha, setDnsBaseSha] = useState('');
   const [dnsLoaded, setDnsLoaded] = useState(false);
   const [dnsError, setDnsError] = useState('');
   const [dnsSaving, setDnsSaving] = useState(false);
@@ -35,6 +37,7 @@ export function SettingsPage() {
     try {
       const result = await dnsApi.get();
       setDnsText(JSON.stringify(result.dns, null, 2));
+      setDnsBaseSha(result.sha256);
       setDnsLoaded(true);
     } catch (err) {
       setDnsError(getErrorMessage(err, t('common.error')));
@@ -79,9 +82,14 @@ export function SettingsPage() {
     }
     setDnsSaving(true);
     try {
-      await dnsApi.save({ dns: parsed });
+      const result = await dnsApi.save({ dns: parsed, base_sha256: dnsBaseSha });
+      setDnsBaseSha(result.sha256);
       showNotification(t('settings.saved'), 'success');
     } catch (err) {
+      // 409 config_changed: the stored file moved under us. Reload the
+      // fresh redacted slice, discarding the failed edit (including any
+      // secret the user typed into it); never auto-reapply it.
+      if ((err as ApiError).status === 409) await loadDns();
       showNotification(getErrorMessage(err, t('notification.save_failed')), 'error');
     } finally {
       setDnsSaving(false);
