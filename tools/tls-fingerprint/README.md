@@ -33,14 +33,16 @@ sidecar means exit 2, no silent fallback. PR3 stays storage-only.
 
 - Go >= 1.25.5 (tlsprobe was built with Go 1.27.3).
 - For `cronetprobe`: a clone of `github.com/sagernet/cronet-go` at
-  HEAD `049f2909701ca088c9569f6b303bba5376a2b2ff` (2026-09-12), placed as
-  a SIBLING of this checkout (the `replace` in `cronetprobe/go.mod`
-  points at `../cronet-go`):
+  HEAD `049f2909701ca088c9569f6b303bba5376a2b2ff` (2026-09-12), placed at
+  `tools/tls-fingerprint/cronet-go`. The `replace` in `cronetprobe/go.mod`
+  points at `../cronet-go`, which resolves RELATIVE TO the `cronetprobe/`
+  directory — not relative to the repo root. Cloning it as a sibling of
+  the repo checkout does NOT work. From the repo root:
 
 ```sh
-git clone https://github.com/sagernet/cronet-go.git ../cronet-go
-git -C ../cronet-go checkout 049f2909701ca088c9569f6b303bba5376a2b2ff
-git -C ../cronet-go rev-parse HEAD   # must print the hash above
+git clone https://github.com/sagernet/cronet-go.git tools/tls-fingerprint/cronet-go
+git -C tools/tls-fingerprint/cronet-go checkout 049f2909701ca088c9569f6b303bba5376a2b2ff
+git -C tools/tls-fingerprint/cronet-go rev-parse HEAD   # must print the hash above
 ```
 
 ## Build commands (exact) and expected hashes
@@ -48,19 +50,24 @@ git -C ../cronet-go rev-parse HEAD   # must print the hash above
 ```sh
 # tlsprobe — reproducible static build:
 cd tools/tls-fingerprint/tlsprobe
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -buildvcs=false -trimpath \
   -ldflags '-s -w -buildid=' -tags with_utls -o tlsprobe-linux-amd64 .
 sha256sum tlsprobe-linux-amd64
 # expect: 5e0a2daac5e64acac46906e4cc945f58d707933cedb3357d802a97735be3e220
 # size: 11,427,964 bytes. Go 1.27.3, sing-box v1.14.4, utls v1.8.7.
 # The with_utls tag is REQUIRED: without it sing-box's uTLS client is a stub.
+# -buildvcs=false is REQUIRED for reproducibility: without it, building
+# from a git checkout stamps vcs info (vcs.modified=true on a dirty tree),
+# which changes the hash (observed: 6ca10d96… for tlsprobe).
 
 # cronetprobe — unmodified rebuild (proxy dialer, VM artifact only):
 cd tools/tls-fingerprint/cronetprobe
-CGO_ENABLED=0 go build -tags with_purego -trimpath \
+CGO_ENABLED=0 go build -buildvcs=false -tags with_purego -trimpath \
   -ldflags '-s -w -buildid=' -o cronetprobe .
 sha256sum cronetprobe
 # expect: 456b2f1dda38fe398c69d31e5e57dde3f985d629d412404ed350b44256cbcedb
+# size: 7,102,691 bytes. -buildvcs=false is REQUIRED here too (without it
+# a checkout build hashed 35f8d9ce… — vcs stamping, not a code difference).
 # size: 7,102,691 bytes. (The evaluation scratch build hashed
 # f270cdd6d53e0f3b0e5165350b3543ec2827be2121ebd190c71035f758df228e:
 # identical code, but its replace directive pointed at an absolute VM
@@ -141,7 +148,7 @@ directory):
 
 ```sh
 cd tools/tls-fingerprint/cronetprobe
-CGO_ENABLED=0 go build -tags with_purego -trimpath \
+CGO_ENABLED=0 go build -buildvcs=false -tags with_purego -trimpath \
   -ldflags '-s -w -buildid=' -o cronetprobe .
 cp cronetprobe /tmp/cronet-eval/probe/
 cd /tmp/cronet-eval/probe && ./cronetprobe
