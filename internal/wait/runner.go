@@ -937,12 +937,21 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 		}
 		res.Question = QuestionOf(last.Text)
 	}
-	// Final guard: cancellation landing anywhere during the
-	// endgame — including between the post-lag check above and
-	// this return — propagates instead of becoming a result.
-	// The window between this check and the return is a single
-	// branch; it cannot be closed further, only narrowed to
-	// here. Pinned by TestRunnerFinishCancelRaceProbe.
+	// Final guard: this check is the linearization point of
+	// the endgame. A cancel that lands after this read
+	// linearizes after the return, so no check-then-return
+	// sequence can demand zero Done/0 outcomes under
+	// arbitrary scheduling: preemption between this read and
+	// the return stretches the single-branch window
+	// arbitrarily. Cancellation ordered before this read —
+	// injected synchronously during any history read,
+	// including the lag loop — always yields ctx.Err(),
+	// pinned deterministically by
+	// TestRunnerFinishCancelDuringLagReadReturnsCtxErr and
+	// the final-read/last-chance cancel tests; this guard's
+	// position, immediately before `return res, nil` with
+	// nothing between but the branch, is verified by
+	// inspection.
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}

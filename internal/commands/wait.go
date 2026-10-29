@@ -757,8 +757,8 @@ type sendBaseJSON struct {
 
 // sendWaitJSON is the full send result after waiting, in Python's
 // key order: head, outcome, status, final_text, replies, approvals?,
-// auto_approved?, auto_approve_errors?, widgets?, needs_input_reason?,
-// question?, reply?, downloads?, download_error?, note?.
+// auto_approved?, auto_approve_errors?, widgets?, question?,
+// needs_input_reason?, reply?, downloads?, download_error?, note?.
 type sendWaitJSON struct {
 	sendBaseJSON
 	Outcome           string             `json:"outcome"`

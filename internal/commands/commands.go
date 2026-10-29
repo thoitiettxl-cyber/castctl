@@ -276,11 +276,13 @@ func classifyConnError(err error) error {
 		return nil
 	}
 	// A cookies file that cannot be read (missing, permissions)
-	// surfaces from the connector as a wrapped I/O error, not an
-	// AuthError (gateway.LoadCookies documents this). The wrapper
-	// marker "read cookies file" is the gateway's own: during a
-	// connect, the cookies file is the only file read, so this
-	// maps exactly to cookies_missing.
+	// surfaces from the connector as an AuthError: the
+	// connector converts a LoadCookies read failure into one
+	// whose message keeps the "read cookies file" marker.
+	// This substring branch is retained as a backstop — both
+	// it and the AuthError branch below classify the failure
+	// as cookies_missing, since during a connect the cookies
+	// file is the only file read.
 	if strings.Contains(err.Error(), "read cookies file") {
 		return &typedAuthError{Code: 2, Type: "cookies_missing", Err: err}
 	}

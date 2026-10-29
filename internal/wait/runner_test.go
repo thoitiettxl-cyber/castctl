@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -1151,108 +1150,105 @@ func TestRunnerFinishFinalReadErrorAfterCancelReturnsCtxErr(t *testing.T) {
 	}
 }
 
-func TestRunnerFinishCancelRaceProbe(t *testing.T) {
-	// Adversarial probe for the finish TOCTOU: cancellation
-	// landing between finish's post-lag ctx check and the
-	// result return must never yield Done/0. The canceller
-	// BUSY-WAITS to a swept target time (no Sleep, no channel
-	// wakeup latency) so cancels spread uniformly across the
-	// endgame instead of clustering after the return: a
-	// spinning canceller armed from inside the history reader
-	// was measured INSENSITIVE (identical hit rates with the
-	// final guard present and removed — its reaction was
-	// slower than the whole check-to-return tail, so every
-	// hit was a late cancel), and Sleep/channel cancellers
-	// never won the race at all on this VM. A hit counts
-	// only when the cancel fired before Run returned
-	// (target time < return time): cancels that land after
-	// the return are legitimate, not TOCTOU hits. 300
-	// iterations, 0 Done hits allowed. Characterization,
-	// measured 2026-10-29: with BOTH endgame checks (the
-	// post-lag check and the final guard) removed, this probe
-	// goes red at 1-2 hits per ~250 timed cancels, matching
-	// the reviewer's ~2-3%; with either check present it
-	// stays green, because the checks are redundant in
-	// series and the last one dominates. The probe therefore
-	// pins the endgame checks as a group, not the final
-	// guard in isolation: goroutine-scheduling jitter on
-	// this VM is microseconds, the residual window after
-	// the final guard is a single branch (~10ns), and no
-	// timing probe here can isolate a window that narrow.
-	// The guard's narrowing is verified by inspection (the
-	// check sits immediately before `return res, nil` with
-	// nothing between them but the branch itself).
-	const iterations = 300
-	hits := 0
-	timed := 0
-	for i := 0; i < iterations; i++ {
-		sub := &fakeSubscriber{loopScript: [][]byte{
-			recordJSON(taskEv("running", "R", "R", 120, nil)),
-			recordJSON(taskEv("completed", "R", "R", 180, nil)),
-		}}
-		hist := &scriptedHistory{fn: func(ctx context.Context, limit int) ([]any, bool, error) {
-			return []any{userEv(100)}, false, nil
-		}}
-		ctx, cancel := context.WithCancel(context.Background())
-		var target atomic.Int64 // unix nanos
-		var firedAt atomic.Int64
-		var start atomic.Bool
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			for !start.Load() && ctx.Err() == nil {
+func TestRunnerFinishCancelDuringLagReadReturnsCtxErr(t *testing.T) {
+	// Linearization semantics of finish's endgame, pinned
+	// deterministically. The final guard in finish is the
+	// linearization point of the endgame: a cancel that lands
+	// after the guard's ctx.Err() read linearizes after the
+	// return, so no check-then-return sequence can demand
+	// zero Done/0 outcomes under arbitrary scheduling —
+	// goroutine preemption between the guard read and the
+	// return stretches the single-branch window arbitrarily
+	// (measured: 1 Done/0 hit per 201 timed cancels under
+	// parallel-package load). The timing-sweep probe that
+	// asserted 0 hits, TestRunnerFinishCancelRaceProbe, was
+	// therefore removed: it asserted something unachievable
+	// in this API shape. These subtests pin instead every
+	// ordering the existing seams can express synchronously:
+	// a cancel injected during a lag-loop read precedes both
+	// the post-lag check and the final guard and must yield
+	// ctx.Err(), never a result — via the post-lag check when
+	// the read returns replies, via the lag sleep's ctx.Done()
+	// select when it returns an empty window. The final
+	// guard in isolation is not pinned by these probes (any
+	// cancel ordered before it is caught by the earlier
+	// checks too); its position — immediately before
+	// `return res, nil`, with nothing between but the branch
+	// — is verified by inspection. The one ordering no
+	// existing seam can express, a cancel landing in the tail
+	// after the post-lag check with no read left to inject it
+	// through (the tail performs no I/O and no hookable
+	// call), is governed by the linearization point above;
+	// no production hook was added to express it. The
+	// final-read and last-chance orderings are pinned by
+	// TestRunnerFinishFinalReadSuccessAfterCancelReturnsCtxErr,
+	// TestRunnerFinishFinalReadErrorAfterCancelReturnsCtxErr,
+	// and TestRunnerFinishLastChanceProofErrorAfterCancelReturnsCtxErr.
+	cancelCases := []struct {
+		name   string
+		events []any // returned by the lag-loop read (call 2)
+	}{
+		{
+			name:   "replies returned",
+			events: []any{userEv(100), asst(150, "completed", "late", nil)},
+		},
+		{
+			name:   "empty window",
+			events: []any{},
+		},
+	}
+	for _, tc := range cancelCases {
+		t.Run(tc.name, func(t *testing.T) {
+			sub := &fakeSubscriber{loopScript: [][]byte{
+				recordJSON(taskEv("running", "R", "R", 120, nil)),
+				recordJSON(taskEv("completed", "R", "R", 180, nil)),
+			}}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			calls := 0
+			extraReads := 0
+			hist := &scriptedHistory{fn: func(ctx context.Context, limit int) ([]any, bool, error) {
+				calls++
+				switch calls {
+				case 1:
+					// Final read: empty, so finish
+					// enters the lag window.
+					return []any{}, false, nil
+				case 2:
+					// Lag-loop read: cancel
+					// synchronously, before the
+					// post-lag check and the final
+					// guard can read the context.
+					cancel()
+					return tc.events, false, nil
+				default:
+					extraReads++
+					return []any{}, false, nil
+				}
+			}}
+			r, err := NewRunner(Config{
+				Timeout:     60 * time.Second,
+				HasAfterSeq: true,
+				AfterSeq:    100,
+				LagWindow:   60 * time.Second,
+				LagPoll:     time.Millisecond,
+				Dial:        sub.dial,
+				History:     hist,
+			})
+			if err != nil {
+				t.Fatalf("NewRunner: %v", err)
 			}
-			tgt := time.Unix(0, target.Load())
-			for time.Now().Before(tgt) && ctx.Err() == nil {
+			res, err := r.Run(ctx)
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("Run err = %v (res = %+v), want context.Canceled", err, res)
 			}
-			cancel()
-			firedAt.Store(time.Now().UnixNano())
-		}()
-		r, err := NewRunner(Config{
-			Timeout:     60 * time.Second,
-			HasAfterSeq: true,
-			AfterSeq:    100,
-			LagWindow:   time.Microsecond,
-			LagPoll:     time.Microsecond,
-			Dial:        sub.dial,
-			History:     hist,
+			if res != nil {
+				t.Errorf("res = %+v, want nil on cancellation", res)
+			}
+			if calls != 2 || extraReads != 0 {
+				t.Errorf("history reads = %d (%d extra), want exactly 2 (final read + lag-loop read)", calls, extraReads)
+			}
 		})
-		if err != nil {
-			cancel()
-			<-done
-			t.Fatalf("NewRunner: %v", err)
-		}
-		// Sweep 0-60us in 1us steps: the endgame (subscribe
-		// + final read + 1us lag + tail) sits inside this
-		// band on this VM, so cancels land before, during,
-		// and after the check-to-return window.
-		delay := time.Duration(i%61) * time.Microsecond
-		t0 := time.Now()
-		target.Store(t0.Add(delay).UnixNano())
-		start.Store(true)
-		res, err := r.Run(ctx)
-		tRet := time.Now()
-		cancel()
-		<-done
-		// A hit counts only when the cancel ACTUALLY fired
-		// before Run returned: the target time is intent,
-		// firedAt is fact, and on this VM the canceller
-		// goroutine routinely starts microseconds late, so
-		// target < return does not prove the cancel was in
-		// flight during the wait.
-		if time.Unix(0, firedAt.Load()).Before(tRet) {
-			timed++
-			if err == nil && res != nil && res.Kind == KindDone {
-				hits++
-			}
-		}
-	}
-	t.Logf("timed cancels = %d/300", timed)
-	if timed < 50 {
-		t.Fatalf("timed cancels = %d/300, too few to exercise the race (endgame faster than the sweep band)", timed)
-	}
-	if hits != 0 {
-		t.Errorf("Done/0 hits = %d/%d timed, want 0: cancellation during finish must never become a Done result", hits, timed)
 	}
 }
 
