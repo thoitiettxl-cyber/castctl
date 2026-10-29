@@ -28,10 +28,10 @@ Global options:
   --version        print "muse-cli <version>" and exit.
   --help, -h       print this help and exit.
 
-Commands (PR3 implements the read/profile/filesystem surface; send,
-wait, approvals and the chat REPL are carried to PR4, telegram and
-update to PR5):
-  status, usage, invite, redeem, threads, history, files, download,
+Commands (PR4 wired send, wait, approvals and the chat REPL;
+telegram and update are carried to PR5):
+  chat, status, usage, invite, redeem, threads, history, send, wait,
+  approvals, approve, auto-approve, deny, files, download,
   watch, feed, feed-status, feed-react, feed-prompt, goals, goal,
   ideas, idea, idea-exec, unread, seen, session-start,
   session-rename, session-pin, session-unpin, session-archive,
@@ -418,4 +418,104 @@ never deletes or edits the old files). An already-migrated config
 exits 0; a differing single config refuses with exit 2. Only
 "config migrate --write" may create a missing explicit --config
 file.
+`
+
+const waitHelpText = `usage: muse-cli wait [--thread ID] [--after-seq N] [--timeout SECONDS] [--json] [--require-running] [--auto-approve|--no-auto-approve] [--auto-allow-once|--no-auto-allow-once]
+
+Block until the agent's turn ends. Exit 0 turn done, 2 failed,
+4 needs a human (a question or a pending approval), 124 timeout.
+
+options:
+  --thread ID    side chat session id (default: the main chat).
+  --after-seq N  only replies after this seq (default: read the
+                 boundary from history).
+  --timeout SECONDS
+                 give up after this long (default 600).
+  --json         print the result as JSON.
+  --require-running
+                 ignore an already-finished status until a new run
+                 starts (accepted; no live effect in this port).
+  --auto-approve approve pending approvals with allow_always and
+                 keep waiting (per-call override of the profile
+                 setting and MUSE_AUTO_APPROVE).
+  --no-auto-approve
+                 stop with exit 4 on approvals even if auto-approve
+                 is on.
+  --auto-allow-once
+                 when auto-approve is on, approve approvals with no
+                 forever option with allow_once and keep waiting.
+  --no-auto-allow-once
+                 leave approvals with no forever option for a human.
+`
+
+const sendHelpText = `usage: muse-cli send TEXT [--thread ID] [--wait SECONDS] [--until-done] [--text] [--ack-timeout SECONDS] [--download DIR] [--json] [--auto-approve|--no-auto-approve] [--auto-allow-once|--no-auto-allow-once]
+
+Send the agent a message and wait for the turn. Exits 5 when no
+delivery ack arrives within --ack-timeout; otherwise the wait
+exit codes apply (0 done, 2 failed, 4 needs a human, 124 timeout).
+
+options:
+  --thread ID    side chat session id (default: the main chat).
+  --wait SECONDS wait this long for the turn (default 90; 0 means
+                 return once delivered).
+  --until-done   wait up to 24h instead of --wait.
+  --text         print the reply as plain text instead of JSON.
+  --ack-timeout SECONDS
+                 give up waiting for the delivery ack after this
+                 long (default 30).
+  --download DIR also save files (images/videos) from the turn's
+                 replies into DIR.
+  --json         print the result as JSON.
+  --auto-approve, --no-auto-approve, --auto-allow-once,
+  --no-auto-allow-once
+                 as in muse-cli wait.
+`
+
+const approvalsHelpText = `usage: muse-cli approvals [--recent] [--raw] [--approve-all]
+
+List pending approvals (network access etc.) as JSON.
+
+options:
+  --recent       also list recent decisions.
+  --raw          print the whole egress.approvals result as JSON.
+  --approve-all  approve every pending approval with allow_always
+                 (skips approvals with no forever option).
+`
+
+const approveHelpText = `usage: muse-cli approve [ID] [--all] [--once|--session|--today|--always]
+
+Approve a pending request, or every pending approval with --all.
+The decision defaults to allow_once.
+
+options:
+  --all          approve every pending approval.
+  --once         allow_once (default).
+  --session      allow_session.
+  --today        allow_today.
+  --always       allow_always.
+`
+
+const denyHelpText = `usage: muse-cli deny ID [--always]
+
+Deny a pending request.
+
+options:
+  --always       deny_always instead of deny.
+`
+
+const autoApproveHelpText = `usage: muse-cli auto-approve [on|always|off|status] [once on|off|status]
+
+Let wait/send approve every approval with allow_always (on|off|
+status); once on|off controls the allow_once fallback. With no
+arguments, or status, prints the resolved settings as JSON.
+Settings persist in the active profile's single config file.
+
+Precedence per toggle: per-call flag, MUSE_AUTO_APPROVE /
+MUSE_AUTO_ALLOW_ONCE, config. Defaults off.
+`
+
+const chatHelpUsageText = `usage: muse-cli chat
+
+Interactive chat (the default with no command). Type /help for
+commands, /exit to quit.
 `

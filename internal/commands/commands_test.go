@@ -138,8 +138,7 @@ func TestDeferredCommands(t *testing.T) {
 	_, configFile := testHome(t, "")
 	env := &Env{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Getenv: mapGetenv(map[string]string{"MUSE_CLI_CONFIG": configFile})}
 	cases := map[string]string{
-		"send": "PR4", "wait": "PR4", "approvals": "PR4", "approve": "PR4",
-		"deny": "PR4", "auto-approve": "PR4", "telegram": "PR5", "update": "PR5",
+		"telegram": "PR5", "update": "PR5",
 	}
 	for cmd, pr := range cases {
 		out, errb := &bytes.Buffer{}, &bytes.Buffer{}
@@ -152,17 +151,20 @@ func TestDeferredCommands(t *testing.T) {
 	// --help still exits 0 for deferred commands.
 	out, errb := &bytes.Buffer{}, &bytes.Buffer{}
 	env.Stdout, env.Stderr = out, errb
+	if code := Run(context.Background(), []string{"telegram", "--help"}, env); code != 0 {
+		t.Errorf("telegram --help: code=%d, want 0", code)
+	}
+	if !strings.Contains(out.String(), "PR5") {
+		t.Errorf("telegram --help: %q, want PR5 note", out.String())
+	}
+	// Wired PR4 commands no longer carry a deferred note.
+	out, errb = &bytes.Buffer{}, &bytes.Buffer{}
+	env.Stdout, env.Stderr = out, errb
 	if code := Run(context.Background(), []string{"send", "--help"}, env); code != 0 {
 		t.Errorf("send --help: code=%d, want 0", code)
 	}
-	if !strings.Contains(out.String(), "PR4") {
-		t.Errorf("send --help: %q, want PR4 note", out.String())
-	}
-	// Bare invocation is the carried chat REPL.
-	out, errb = &bytes.Buffer{}, &bytes.Buffer{}
-	env.Stdout, env.Stderr = out, errb
-	if code := Run(context.Background(), nil, env); code != 2 || !strings.Contains(errb.String(), "chat") {
-		t.Errorf("bare: code=%d err=%q, want deferred chat", code, errb.String())
+	if strings.Contains(out.String(), "PR4") || !strings.Contains(out.String(), "usage: muse-cli send") {
+		t.Errorf("send --help: %q, want usage without a PR4 note", out.String())
 	}
 	// Truly unknown commands are distinguished from deferred ones.
 	out, errb = &bytes.Buffer{}, &bytes.Buffer{}

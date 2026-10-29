@@ -659,15 +659,8 @@ type globalOpts struct {
 // deferredTable; unknown names are rejected, never guessed.
 var commandTable = map[string]*commandSpec{}
 var deferredTable = map[string]string{
-	"send":         "PR4",
-	"wait":         "PR4",
-	"approvals":    "PR4",
-	"approve":      "PR4",
-	"deny":         "PR4",
-	"auto-approve": "PR4",
-	"telegram":     "PR5",
-	"update":       "PR5",
-	"chat":         "PR4",
+	"telegram": "PR5",
+	"update":   "PR5",
 }
 
 func registerCommand(spec *commandSpec) {
@@ -678,8 +671,9 @@ func registerCommand(spec *commandSpec) {
 // sorting only for the unknown-choice message is wrong; use a
 // fixed order list instead.
 var commandOrder = []string{
-	"status", "usage", "invite", "redeem", "threads", "history", "files",
-	"download", "watch", "feed", "feed-status", "feed-react", "feed-prompt",
+	"chat", "status", "usage", "invite", "redeem", "threads", "history",
+	"send", "wait", "approvals", "approve", "auto-approve", "deny",
+	"files", "download", "watch", "feed", "feed-status", "feed-react", "feed-prompt",
 	"goals", "goal", "ideas", "idea", "idea-exec", "unread", "seen",
 	"session-start", "session-rename", "session-pin", "session-unpin",
 	"session-archive", "session-unarchive", "session-delete", "stop", "wake",
@@ -691,7 +685,23 @@ var commandOrder = []string{
 // Global flags (--profile/--config/--version/--help) are pre-scanned
 // sequentially, mirroring Python's prescan + argparse: --help/--version
 // act when reached, before profile validation.
-func Run(ctx context.Context, args []string, env *Env) int {
+//
+// Panic contract (R2 decision): a panic anywhere on the dispatch
+// path converts to exit 2 with a redacted error message and no
+// stack trace. The panic value is printed through the redactor, so
+// no secret-bearing stack ever reaches output; non-panic behaviour
+// and exit codes are unchanged.
+func Run(ctx context.Context, args []string, env *Env) (code int) {
+	defer func() {
+		if r := recover(); r != nil {
+			code = 2
+			fmt.Fprintf(env.stderr(), "muse-cli: panic: %s\n", redact.String(fmt.Sprint(r)))
+		}
+	}()
+	return runInner(ctx, args, env)
+}
+
+func runInner(ctx context.Context, args []string, env *Env) int {
 	if env == nil {
 		env = &Env{}
 	}
@@ -700,9 +710,8 @@ func Run(ctx context.Context, args []string, env *Env) int {
 		return code
 	}
 	if cmdName == "" {
-		// Bare invocation = chat in Python; carried to PR4.
-		fmt.Fprintln(env.stderr(), "chat is not implemented in the Go port yet (carried to PR4: the interactive REPL needs the wait/turn-end machinery in wait.py; see chat.py).")
-		return 2
+		// Bare invocation = chat in Python.
+		cmdName, cmdArgs = "chat", nil
 	}
 	if pr, ok := deferredTable[cmdName]; ok {
 		if hasHelpToken(cmdArgs) {

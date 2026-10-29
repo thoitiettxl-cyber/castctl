@@ -25,7 +25,7 @@ The loop needs `-timeout 30m`: the full-package 50x run took 648s, past
 the default 10-minute `go test` timeout.
 
 ```sh
-go test -race -count=50 -shuffle=on -timeout 30m -v ./internal/gateway/
+go test -race -count=50 -shuffle=on -timeout 30m -tags with_utls,with_quic,with_wireguard,with_gvisor -v ./internal/gateway/
 ```
 
 ## Build tags
@@ -287,17 +287,17 @@ No browser is assumed: the screencast-login browser dependency is
 optional and runtime-detected, and the no-browser fallback is
 `auth import` (after PR3).
 
-Cross-compile matrix, measured in PR3 (compile-only, no execution;
+Cross-compile matrix, measured in PR4 (compile-only, no execution;
 `CGO_ENABLED=0 go build -trimpath -ldflags '-s -w -buildid='
 ./cmd/muse-cli`, Go 1.27.3). All ten combinations compile.
 
 | Target | `with_utls` (bytes) | Canonical 4 tags (bytes) |
 | --- | --- | --- |
-| linux/amd64 | 35,782,780 | 44,220,540 |
-| linux/arm64 | 33,226,876 | 41,156,732 |
-| android/arm64 | 37,552,386 | 46,465,282 |
-| windows/amd64 | 35,538,944 | 43,959,296 |
-| darwin/arm64 | 32,602,898 | 40,906,098 |
+| linux/amd64 | 36,028,540 | 44,466,300 |
+| linux/arm64 | 33,423,484 | 41,418,876 |
+| android/arm64 | 37,748,994 | 46,727,426 |
+| windows/amd64 | 35,787,776 | 44,209,152 |
+| darwin/arm64 | 32,841,298 | 41,144,498 |
 
 Canonical tags: `with_utls,with_quic,with_wireguard,with_gvisor`.
 An untagged linux/amd64 build also compiles (35,545,212 bytes);
@@ -369,27 +369,18 @@ documented deviations D1–D4).
 
 ## Deferred wiring (exact list)
 
-Deliberately NOT wired on this branch — the wiring PR (after
-PR #5 merges, on PR3's commands framework) owns these:
+Deliberately NOT wired on this branch. PR4 wired, on PR3's commands
+framework: `wait`, `send` (with `--wait` / `--until-done`), the
+`chat.stream` + delivery-ack send path, the `HistoryReader`
+production adapter, profile resolution + `node_id` origin wiring,
+the chat REPL, `approvals` / `approve` / `deny` / `auto-approve`,
+the auto-approve stderr lines, and the CLI-boundary panic recover
+(panic on the dispatch path → exit 2, redacted, no stack trace).
 
-- CLI command wiring: `wait`, `send --wait`, `send --until-done`
-  (and their flags: `--after-seq`, `--timeout`, `--auto-approve`,
-  `--auto-allow-once`).
-- The send path: `chat.stream` body + delivery-ack poll
-  (`user_ack`, exit 5 on no ack).
-- The chat REPL code (design in
-  `internal/wait/CHAT-REPL-DESIGN.md`).
-- The `HistoryReader` production adapter (reads `has_more`
-  from the `chat.history` envelope; `conn.Muse.History` drops
-  it and cannot back the interface alone).
-- Profile resolution and `node_id` origin (PR3 config-location
-  rules; read-only loads never generate `node_id`).
+Still deferred:
+
 - Telegram wiring (PR5) and the `update` command.
 - Approval claim coordination between a monitor and a turn
   (the 15 s in-flight claim wait): a driver/monitor concern,
-  not part of `AutoApprover`.
-- The auto-approve stderr lines (`auto-approved ...` /
-  `SKIPPED` / `FAILED`): logged by the CLI wiring from
-  `Result.AutoApproved` / `Result.AutoApproveErrors`; the wait
-  core has no logger.
+  not part of `AutoApprover`; PR5 Telegram territory.
 - Anything needing PR3's commands framework.

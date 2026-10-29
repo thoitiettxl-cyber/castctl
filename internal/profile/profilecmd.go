@@ -529,6 +529,79 @@ func setOutboundInList(cfg *SingleConfig, ob option.Outbound, raw []byte) {
 	cfg.rawOutbounds = append(cfg.rawOutbounds, raw)
 }
 
+// SetAutoApprove sets a profile's auto_approve value ("always" or
+// "off") through the same flock+sha256 guarded writer as the other
+// profile commands. The profile must already exist in the single
+// file; a legacy layout is never written back to. This is the
+// persistent writer behind `auto-approve on|off`.
+func SetAutoApprove(baseDir, name, value string) (*Profile, error) {
+	if _, err := ValidateProfileName(name); err != nil {
+		return nil, err
+	}
+	if value != "always" && value != "off" {
+		return nil, newConfigErrorf("auto_approve must be \"always\" or \"off\", not %q", value)
+	}
+	state, err := LoadConfigState(baseDir)
+	if err != nil {
+		return nil, err
+	}
+	if !state.Found {
+		return nil, newConfigError("auto-approve only modifies single-file entries; no single config file exists (run config migrate first)")
+	}
+	if _, ok := state.Config.Profiles[name]; !ok {
+		return nil, newConfigErrorf("profile %q does not exist in the single config file", name)
+	}
+	var updated *Profile
+	err = UpdateSingleConfig(baseDir, func(cfg *SingleConfig) error {
+		p, ok := cfg.Profiles[name]
+		if !ok {
+			return newConfigErrorf("profile %q does not exist in the single config file", name)
+		}
+		p.AutoApprove = value
+		updated = p.clone()
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+// SetAutoAllowOnce sets a profile's auto_allow_once fallback toggle
+// through the same flock+sha256 guarded writer as the other profile
+// commands. The profile must already exist in the single file; a
+// legacy layout is never written back to. This is the persistent
+// writer behind `auto-approve once on|off`.
+func SetAutoAllowOnce(baseDir, name string, value bool) (*Profile, error) {
+	if _, err := ValidateProfileName(name); err != nil {
+		return nil, err
+	}
+	state, err := LoadConfigState(baseDir)
+	if err != nil {
+		return nil, err
+	}
+	if !state.Found {
+		return nil, newConfigError("auto-approve only modifies single-file entries; no single config file exists (run config migrate first)")
+	}
+	if _, ok := state.Config.Profiles[name]; !ok {
+		return nil, newConfigErrorf("profile %q does not exist in the single config file", name)
+	}
+	var updated *Profile
+	err = UpdateSingleConfig(baseDir, func(cfg *SingleConfig) error {
+		p, ok := cfg.Profiles[name]
+		if !ok {
+			return newConfigErrorf("profile %q does not exist in the single config file", name)
+		}
+		p.AutoAllowOnce = value
+		updated = p.clone()
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
 // setEndpointInList replaces the endpoint with the same tag, or
 // appends it, keeping cfg.Endpoints and cfg.rawEndpoints in sync.
 func setEndpointInList(cfg *SingleConfig, ep option.Endpoint, raw []byte) {

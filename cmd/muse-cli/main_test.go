@@ -26,7 +26,7 @@ func runMain(t *testing.T, home string, args ...string) (int, string, string) {
 	t.Setenv("MUSE_CLI_CONFIG", "")
 	t.Setenv("MUSE_CLI_PROFILE", "")
 	var out, errb bytes.Buffer
-	code := commands.Run(context.Background(), args, &commands.Env{Stdout: &out, Stderr: &errb})
+	code := commands.Run(context.Background(), args, &commands.Env{Stdout: &out, Stderr: &errb, Stdin: strings.NewReader("")})
 	return code, out.String(), errb.String()
 }
 
@@ -64,8 +64,10 @@ func TestUnknownAndDeferredCommandsExit2(t *testing.T) {
 		t.Fatalf("unknown flag: empty stderr")
 	}
 	// Deferred commands name their PR; unknown commands do not.
-	if code, _, errb := runMain(t, home, "send"); code != 2 || !strings.Contains(errb, "PR4") {
-		t.Fatalf("send: code=%d err=%q, want 2 + PR4", code, errb)
+	// "send" is wired (PR4): bare "send" fails on the missing TEXT
+	// positional with exit 2, with no deferred note.
+	if code, _, errb := runMain(t, home, "send"); code != 2 || strings.Contains(errb, "is not implemented in the Go port yet") {
+		t.Fatalf("send: code=%d err=%q, want 2 without a deferred message", code, errb)
 	}
 	if code, _, errb := runMain(t, home, "telegram"); code != 2 || !strings.Contains(errb, "PR5") {
 		t.Fatalf("telegram: code=%d err=%q, want 2 + PR5", code, errb)
@@ -75,13 +77,14 @@ func TestUnknownAndDeferredCommandsExit2(t *testing.T) {
 	}
 }
 
-func TestBareInvocationIsDeferredChat(t *testing.T) {
+func TestBareInvocationRunsChat(t *testing.T) {
 	home := t.TempDir()
-	code, _, errb := runMain(t, home)
-	if code != 2 || !strings.Contains(errb, "chat") || !strings.Contains(errb, "PR4") {
-		t.Fatalf("bare: code=%d err=%q, want deferred-chat message + PR4", code, errb)
+	code, out, errb := runMain(t, home)
+	if code != 2 || !strings.Contains(out, "Can't sign in") || !strings.Contains(out, "cookie export is not available") || !strings.Contains(errb, "cookies_missing") {
+		t.Fatalf("bare: code=%d out=%q err=%q, want chat sign-in failure", code, out, errb)
 	}
-	// Nothing is read or written under the fake home.
+	// Nothing is read or written under the fake home: the REPL
+	// fails at connect, before any state file or config write.
 	var names []string
 	_ = filepath.Walk(home, func(p string, _ os.FileInfo, _ error) error { names = append(names, p); return nil })
 	if len(names) != 1 {
