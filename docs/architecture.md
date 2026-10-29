@@ -4,7 +4,7 @@
 
 castctl is a general content-pipeline control tool: content sources (first:
 Muse) feed publishers (later: Facebook, TikTok, YouTube, via official APIs
-first). One static Go binary. All network traffic of a profile goes through
+first). One Go binary (CGO_ENABLED=1, GLIBC 2.17 baseline). All network traffic of a profile goes through
 that profile's outbound (sing-box). The web UI is a single-file React app
 embedded in the binary; see "Web UI" below.
 
@@ -15,41 +15,19 @@ Module layout (Go, after the migration from muse-cli): `internal/source/muse`,
 
 ## Platforms
 
-castctl is a general tool, not VM-only. Supported run targets: a
-Debian/server Linux host, a rooted Android phone (Termux or a KernelSU
-module, arm64), Windows, and macOS. No VM assumptions: no hard-coded paths,
+castctl is a general tool, not VM-only. Supported run targets: Linux only — linux/amd64 and linux/arm64 (Debian/server Linux host). No VM assumptions: no hard-coded paths,
 no launcher, no agent-browser, no sandbox.
 
-Config location: `--config`, then `CASTCTL_CONFIG`, then `XDG_CONFIG_HOME`
-(Linux) / `%APPDATA%` (Windows) / Application Support (macOS), via
-`os.UserConfigDir` semantics.
-
-Cross-compile targets, compile-checked every PR: linux/amd64,
-linux/arm64, android/arm64, windows/amd64, darwin/arm64; build tags must
-compile on each, and per-target feature gaps (e.g. cronet) are documented
-in the table below. Maintain the table as features land.
+Config location: `--config`, then `CASTCTL_CONFIG`, then `XDG_CONFIG_HOME`, via `os.UserConfigDir` semantics.
 
 Screencast login: the browser dependency is optional and detected at
 runtime (system Chromium or a configured path); with no browser, fall back
-to `auth import` with a clear message. On Android, plan for logging in from
-another device's web UI against castctl's `--listen` server.
+to `auth import` with a clear message. Plan for logging in from another device's web UI (e.g. a phone browser) against castctl's `--listen` server.
 
 The web UI must work from a phone browser against castctl on another host
 (`--listen` + token + HTTPS/tunnel guidance, see docs/security.md). Tests
 must not depend on the developer VM's environment (hermetic: temp dirs,
 fakes, no live hosts).
-
-### Per-target feature gaps
-
-| Feature | linux/amd64 | linux/arm64 | android/arm64 | windows/amd64 | darwin/arm64 |
-|---|---|---|---|---|---|
-| Static Go binary | yes | yes | yes | yes | yes |
-| Web UI embed (single-file) | yes | yes | yes | yes | yes |
-| cronet TLS engine | TBD | TBD | TBD | TBD | TBD |
-| Screencast login (browser-optional, runtime detection) | TBD | TBD | TBD (remote-UI login from another device) | TBD | TBD |
-
-`TBD` = pending the TLS-engine evaluation (cronet) or the screencast-login
-design approval; do not invent values — update the cell when measured.
 
 ## Web UI
 
