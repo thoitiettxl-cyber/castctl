@@ -7,7 +7,7 @@ migration; this file covers the web UI until then.)
 
 ## Web UI
 
-Prerequisites: Bun 1.4.3, Node v24 (both verified on the dev VM).
+Prerequisites: Bun 1.4.3, Node v24.
 
 ```sh
 cd webui
