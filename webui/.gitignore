@@ -1,0 +1,7 @@
+node_modules/
+.DS_Store
+*.local
+# Build output is ignored EXCEPT the committed production single-file
+# bundle dist/index.html (rebuilt by `bun run build`, mocks off).
+dist/*
+!dist/index.html

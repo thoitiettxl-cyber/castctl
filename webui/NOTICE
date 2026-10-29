@@ -1,0 +1,50 @@
+# NOTICE — castctl web UI
+
+## Fork statement
+
+The castctl web UI (`webui/`) is a fork of the frontend of
+[router-for-me/Cli-Proxy-API-Management-Center](https://github.com/router-for-me/Cli-Proxy-API-Management-Center)
+at commit `64b4f5aed19b8f791eb21eb9e785ea379ea05b44` (2026-10-26), licensed
+under the MIT License reproduced verbatim below.
+
+Kept from upstream (adapted only where noted): the React + TypeScript +
+Vite build, `vite-plugin-singlefile` single-file output, theme and layout
+styles (including the mobile off-canvas sidebar mechanism), shared UI
+components (Button, Card, Table, Modal, Input, ToggleSwitch, EmptyState,
+NotificationContainer, PageTransition), the i18next mechanism, the
+CodeMirror editor integration, and the diff-before-save pattern.
+
+Replaced for castctl: all pages (Dashboard, Profiles, Outbounds,
+Endpoints, Config Editor, Logs, System, Settings, Login, screencast
+Login shell), the API client (now a fetch wrapper against castctl's own
+`/api/v1`, no axios), the auth store (sessionStorage token, no obfuscated
+persistent storage), all locale strings (English + Vietnamese only), and
+all branding (castctl).
+
+Removed: the upstream provider/OAuth/quota/plugin domain (pages, stores,
+services, hooks, utils), the upstream test suite (replaced by vitest
+tests in `webui/tests/`), and upstream branding assets.
+
+## Upstream license (MIT, verbatim)
+
+MIT License
+
+Copyright (c) 2026 Router-For.ME
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
