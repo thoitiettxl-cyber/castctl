@@ -401,7 +401,7 @@ func TestReassemblerFeed(t *testing.T) {
 		if groups, bytesHeld := heldState(r); groups != 0 || bytesHeld != 0 {
 			t.Errorf("held state after all groups complete = (%d groups, %d bytes), want (0, 0)", groups, bytesHeld)
 		}
-		got, ok, err = r.feed(framePtrs(33, 0, 2, []byte("d")))
+		_, ok, err = r.feed(framePtrs(33, 0, 2, []byte("d")))
 		if err != nil || ok {
 			t.Fatalf("new group after slots freed: ok=%v err=%v", ok, err)
 		}

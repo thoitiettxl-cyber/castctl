@@ -101,13 +101,7 @@ type Config struct {
 // 5-tuple. Two Configs have the same Identity exactly when all
 // five fields are equal.
 func (c Config) Identity() Identity {
-	return Identity{
-		CookiesFile:  c.CookiesFile,
-		VMID:         c.VMID,
-		NodeID:       c.NodeID,
-		OutboundTag:  c.OutboundTag,
-		OutboundHash: c.OutboundHash,
-	}
+	return Identity(c)
 }
 
 // Connector opens one gateway connection for cfg. It is the Go form of

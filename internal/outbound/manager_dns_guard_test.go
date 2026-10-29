@@ -210,7 +210,7 @@ func createRawOutboundErr(t *testing.T, m *Manager, raw string) error {
 // recovered here (and its stack logged) so a hazard probe fails
 // the test instead of crashing the suite; reply is the first two
 // bytes read from the echo server ("ok" on success).
-func dialEchoRecovered(t *testing.T, m *Manager, tag string, port int) (panicked any, err error, reply string) {
+func dialEchoRecovered(t *testing.T, m *Manager, tag string, port int) (panicked any, reply string, err error) {
 	t.Helper()
 	d, derr := m.Dialer(tag)
 	if derr != nil {
@@ -226,24 +226,24 @@ func dialEchoRecovered(t *testing.T, m *Manager, tag string, port int) (panicked
 	}()
 	conn, err := d.DialContext(ctx, "tcp", "127.0.0.1", uint16(port))
 	if err != nil {
-		return nil, err, ""
+		return nil, "", err
 	}
 	defer conn.Close()
 	if _, err := conn.Write([]byte("ping")); err != nil {
-		return nil, err, ""
+		return nil, "", err
 	}
 	buf := make([]byte, 4)
 	if _, err := conn.Read(buf); err != nil {
-		return nil, err, ""
+		return nil, "", err
 	}
-	return nil, nil, string(buf[:2])
+	return nil, string(buf[:2]), nil
 }
 
 // dialEchoOK asserts an end-to-end dial through tag reaches the
 // fake echo server: no panic, no error, reply "ok".
 func dialEchoOK(t *testing.T, m *Manager, tag string, port int) {
 	t.Helper()
-	panicked, err, reply := dialEchoRecovered(t, m, tag, port)
+	panicked, reply, err := dialEchoRecovered(t, m, tag, port)
 	if panicked != nil {
 		t.Fatalf("dial through %s panicked: %v", tag, panicked)
 	}

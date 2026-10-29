@@ -200,8 +200,8 @@ func TestProtocolQUICWithoutTagIsStubError(t *testing.T) {
 	// Without with_quic, hysteria2/tuic registrations are stubs that
 	// return ErrQUICNotIncluded at construction.
 	cases := []string{
-		fmt.Sprintf(`{"type":"hysteria2","tag":"h2","server":"127.0.0.1","server_port":443,"password":"FAKE"}`),
-		fmt.Sprintf(`{"type":"tuic","tag":"tuic","server":"127.0.0.1","server_port":443,"uuid":"123e4567-e89b-12d3-a456-426614174000","password":"FAKE"}`),
+		`{"type":"hysteria2","tag":"h2","server":"127.0.0.1","server_port":443,"password":"FAKE"}`,
+		`{"type":"tuic","tag":"tuic","server":"127.0.0.1","server_port":443,"uuid":"123e4567-e89b-12d3-a456-426614174000","password":"FAKE"}`,
 	}
 	for _, raw := range cases {
 		m := newTestManager(t)

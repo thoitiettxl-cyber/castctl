@@ -57,9 +57,7 @@ func MediaPath(ref any) (string, error) {
 		rel = u.EscapedPath()
 	}
 	rel = strings.TrimLeft(rel, "/")
-	if strings.HasPrefix(rel, "media/raw/") {
-		rel = rel[len("media/raw/"):]
-	}
+	rel = strings.TrimPrefix(rel, "media/raw/")
 	if unq, err := url.PathUnescape(rel); err == nil {
 		rel = unq
 	}

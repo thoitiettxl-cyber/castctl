@@ -409,6 +409,12 @@ func (g *Gateway) Close() error {
 		done := make(chan struct{})
 		go func() {
 			g.ioMu.Lock()
+			// The empty critical section is the wait itself:
+			// Lock blocks until the in-flight write releases
+			// ioMu, so Unlock firing (and done closing) means
+			// no write is in flight; the 2s select below
+			// bounds the wait.
+			//lint:ignore SA2001 empty critical section is intentional: acquiring ioMu waits for the in-flight write to finish
 			g.ioMu.Unlock()
 			close(done)
 		}()

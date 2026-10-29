@@ -99,9 +99,7 @@ func New(gw Gateway) *FS {
 func Norm(p string) (string, error) {
 	s := strings.TrimSpace(p)
 	s = strings.ReplaceAll(s, "\\", "/")
-	if strings.HasPrefix(s, "sandbox://") {
-		s = s[len("sandbox://"):]
-	}
+	s = strings.TrimPrefix(s, "sandbox://")
 	s = strings.TrimLeft(posixpath.Clean("/"+s), "/")
 	if s == "." {
 		s = ""
