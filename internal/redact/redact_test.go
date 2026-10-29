@@ -104,6 +104,26 @@ func TestRedactURLUserinfo(t *testing.T) {
 			want: "https://<redacted>@host.example/x",
 		},
 		{
+			name: "bare url with userinfo and no path",
+			in:   "https://user:pass@host.example",
+			want: "https://<redacted>@host.example",
+		},
+		{
+			name: "userinfo before query only",
+			in:   "https://user:pass@host.example?next=1",
+			want: "https://<redacted>@host.example?next=1",
+		},
+		{
+			name: "userinfo before fragment only",
+			in:   "https://user:pass@host.example#frag",
+			want: "https://<redacted>@host.example#frag",
+		},
+		{
+			name: "scheme with plus dot hyphen",
+			in:   "my+scheme.v2://user@host.example/x",
+			want: "my+scheme.v2://<redacted>@host.example/x",
+		},
+		{
 			name: "empty string",
 			in:   "",
 			want: "",

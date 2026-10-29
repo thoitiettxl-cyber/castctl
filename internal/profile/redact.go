@@ -8,56 +8,18 @@ import (
 	"github.com/thoitiettxl-cyber/muse-cli/go/internal/redact"
 )
 
-// secretKeys are JSON field names whose values are replaced with
-// "<redacted>" by RedactJSON/RedactProfile/RedactOutboundJSON. The list
-// is the delta's show-serialisation list (password, private_key,
-// public_key, pre_shared_key, uuid, short_id, token, certificate, key,
-// obfs, users[].password — the last via the generic walk), plus
-// "secret" and "cookie": sing-box option objects carry those names for
-// genuinely secret material (OpenConnect token secret, OpenConnect
-// session cookie), and redacting them can only hide auth material,
-// never config structure. The profile identifiers vm_id, node_id, and
-// subscription_action_id are ALSO redacted here: display output must
-// never print them (review finding B1). The remaining names cover
-// secret fields in the sing-box 1.14.4 schema that the delta list
-// missed: snell "psk", ssh "private_key_passphrase", hysteria
-// "auth"/"auth_str", tailscale "auth_key", openvpn "auth".
-var secretKeys = map[string]bool{
-	"password":               true,
-	"private_key":            true,
-	"public_key":             true,
-	"pre_shared_key":         true,
-	"uuid":                   true,
-	"short_id":               true,
-	"token":                  true,
-	"certificate":            true,
-	"key":                    true,
-	"obfs":                   true,
-	"secret":                 true,
-	"cookie":                 true,
-	"vm_id":                  true,
-	"node_id":                true,
-	"subscription_action_id": true,
-	"psk":                    true,
-	"private_key_passphrase": true,
-	"auth":                   true,
-	"auth_str":               true,
-	"auth_key":               true,
-}
-
-const redactedMarker = "<redacted>"
-
 // RedactJSON redacts every secret field in serialised JSON, operating
 // on the decoded ordered value so field order is preserved, and
 // re-encodes with indent 2. Secret values are replaced wholesale,
-// whatever their JSON type (string, object, or array). It never echoes
-// secret values into errors.
+// whatever their JSON type (string, object, or array), by
+// redact.Value; every other string value keeps everything except
+// embedded URL userinfo. It never echoes secret values into errors.
 func RedactJSON(data []byte) ([]byte, error) {
 	v, err := decodeOrderedJSON(data)
 	if err != nil {
 		return nil, err
 	}
-	return encodeOrderedJSONIndent(redactValue(v), 2)
+	return encodeOrderedJSONIndent(redact.Value(v), 2)
 }
 
 // RedactOutboundJSON redacts one serialised outbound/endpoint object.
@@ -70,46 +32,15 @@ func RedactOutboundJSON(data []byte) ([]byte, error) {
 	if _, ok := v.(*orderedObject); !ok {
 		return nil, newConfigError("outbound json must be an object")
 	}
-	return encodeOrderedJSONIndent(redactValue(v), 2)
-}
-
-func redactValue(v any) any {
-	switch t := v.(type) {
-	case *orderedObject:
-		out := newOrderedObject()
-		for _, k := range t.keys {
-			if secretKeys[k] {
-				out.set(k, redactedMarker)
-				continue
-			}
-			out.set(k, redactValue(t.values[k]))
-		}
-		return out
-	case []any:
-		out := make([]any, len(t))
-		for i, elem := range t {
-			out[i] = redactValue(elem)
-		}
-		return out
-	case string:
-		// Any string value, whatever its key, has URL userinfo
-		// redacted by the shared string-level redactor. Key-based
-		// redaction above is untouched: a secret-key value is
-		// replaced wholesale before reaching here, and a
-		// non-secret string keeps everything except its URL
-		// userinfo.
-		return redact.RedactURLUserinfo(t)
-	default:
-		return v
-	}
+	return encodeOrderedJSONIndent(redact.Value(v), 2)
 }
 
 // RedactProfile renders a profile as redacted JSON (indent 2) for
 // display: identity fields and paths are kept, the inline outbound is
 // redacted, a tag reference is kept as a bare tag string, and a direct
 // profile omits the outbound key. vm_id, node_id, and
-// subscription_action_id are redacted (they are in secretKeys):
-// display output must never print them.
+// subscription_action_id are redacted by redact.Value (they are in
+// its secret-key set): display output must never print them.
 func RedactProfile(p *Profile) ([]byte, error) {
 	if p == nil {
 		return nil, newConfigError("cannot redact nil profile")
@@ -127,7 +58,26 @@ func RedactProfile(p *Profile) ([]byte, error) {
 	for _, k := range entry.keys {
 		out.set(k, entry.values[k])
 	}
-	return encodeOrderedJSONIndent(redactValue(out), 2)
+	// Display always shows the recorded identity settings with
+	// their effective values, even when the key is absent from the
+	// file (buildProfileEntry omits absent keys so a save never
+	// writes a default back). Neither value is a secret.
+	// RedactConfig stays file-faithful and does not inject.
+	if _, ok := out.get("fingerprint"); !ok {
+		fp := p.Fingerprint
+		if fp == "" {
+			fp = DefaultFingerprint
+		}
+		out.set("fingerprint", fp)
+	}
+	if _, ok := out.get("tls_engine"); !ok {
+		te := p.TLSEngine
+		if te == "" {
+			te = DefaultTLSEngine
+		}
+		out.set("tls_engine", te)
+	}
+	return encodeOrderedJSONIndent(redact.Value(out), 2)
 }
 
 // RedactConfig renders a whole SingleConfig as redacted JSON (indent 2).
@@ -142,5 +92,47 @@ func RedactConfig(cfg *SingleConfig) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return encodeOrderedJSONIndent(redactValue(root), 2)
+	return encodeOrderedJSONIndent(redact.Value(root), 2)
+}
+
+// The OrderedMap methods below let redact.Value redact
+// *orderedObject values (including ones nested inside slices)
+// without redact importing this package, which would be an import
+// cycle: this package imports redact. They are pure accessors over
+// the ordered object's keys and values; they change no other
+// behaviour of the type. redact.Value builds its result into a
+// fresh *orderedObject via NewOrderedMap, so redaction never
+// mutates the decoded input.
+
+// OrderedKeys returns the object's keys in insertion order.
+func (o *orderedObject) OrderedKeys() []string {
+	if o == nil {
+		return nil
+	}
+	keys := make([]string, len(o.keys))
+	copy(keys, o.keys)
+	return keys
+}
+
+// OrderedGet returns the value stored under key.
+func (o *orderedObject) OrderedGet(key string) (any, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.get(key)
+}
+
+// OrderedSet stores value under key, appending the key to the order
+// on first set.
+func (o *orderedObject) OrderedSet(key string, value any) {
+	if o == nil {
+		return
+	}
+	o.set(key, value)
+}
+
+// NewOrderedMap returns an empty *orderedObject as a
+// redact.OrderedMap.
+func (o *orderedObject) NewOrderedMap() redact.OrderedMap {
+	return newOrderedObject()
 }
