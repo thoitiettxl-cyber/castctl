@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	pb "github.com/thoitiettxl-cyber/muse-cli/go/internal/proto"
@@ -161,6 +162,122 @@ func TestJoinChunks(t *testing.T) {
 			t.Fatal("returned payload aliases input")
 		}
 	})
+	t.Run("out of range indices are kept in sorted order", func(t *testing.T) {
+		// Python join_chunks joins sorted(parts), including
+		// indices >= total_chunks; it never inserts empty
+		// bytes for missing slots.
+		partial := map[int64]map[uint32][]byte{}
+		if _, ok := joinChunks(partial, framePtrs(5, 5, 3, []byte("C"))); ok {
+			t.Fatal("complete with one of three pieces")
+		}
+		if _, ok := joinChunks(partial, framePtrs(5, 0, 3, []byte("A"))); ok {
+			t.Fatal("complete with two of three pieces")
+		}
+		got, ok := joinChunks(partial, framePtrs(5, 1, 3, []byte("B")))
+		if !ok || string(got) != "ABC" {
+			t.Fatalf("join indices {0,1,5} total=3 = %q ok=%v, want ABC true", got, ok)
+		}
+	})
+	t.Run("all indices out of range are joined", func(t *testing.T) {
+		partial := map[int64]map[uint32][]byte{}
+		if _, ok := joinChunks(partial, framePtrs(6, 6, 2, []byte("B"))); ok {
+			t.Fatal("complete with one of two pieces")
+		}
+		got, ok := joinChunks(partial, framePtrs(6, 5, 2, []byte("A")))
+		if !ok || string(got) != "AB" {
+			t.Fatalf("join indices {5,6} total=2 = %q ok=%v, want AB true", got, ok)
+		}
+	})
+	t.Run("duplicate index overwrites", func(t *testing.T) {
+		// Same-group overwrite before completion: feed index
+		// 1 twice, then index 0 completes the group; the
+		// second piece for index 1 wins.
+		partial := map[int64]map[uint32][]byte{}
+		if _, ok := joinChunks(partial, framePtrs(8, 1, 2, []byte("stale"))); ok {
+			t.Fatal("complete with one of two pieces")
+		}
+		if _, ok := joinChunks(partial, framePtrs(8, 1, 2, []byte("B"))); ok {
+			t.Fatal("complete with one distinct index")
+		}
+		got, ok := joinChunks(partial, framePtrs(8, 0, 2, []byte("A")))
+		if !ok || string(got) != "AB" {
+			t.Fatalf("join with overwritten index 1 = %q ok=%v, want AB true", got, ok)
+		}
+	})
+	t.Run("empty payload pieces complete empty", func(t *testing.T) {
+		partial := map[int64]map[uint32][]byte{}
+		if _, ok := joinChunks(partial, framePtrs(9, 0, 2, []byte{})); ok {
+			t.Fatal("complete with one of two pieces")
+		}
+		got, ok := joinChunks(partial, framePtrs(9, 1, 2, nil))
+		if !ok || len(got) != 0 {
+			t.Fatalf("join empty pieces = %q ok=%v, want empty true", got, ok)
+		}
+	})
+	t.Run("boundary splits round trip", func(t *testing.T) {
+		for _, size := range []int{60000, 60001, 120001} {
+			data := make([]byte, size)
+			for i := range data {
+				data[i] = byte(i % 251)
+			}
+			pieces := splitPieces(data)
+			partial := map[int64]map[uint32][]byte{}
+			var got []byte
+			var ok bool
+			for i, p := range pieces {
+				got, ok = joinChunks(partial, framePtrs(10, uint32(i), uint32(len(pieces)), p))
+			}
+			if !ok || !bytes.Equal(got, data) {
+				t.Fatalf("round trip size %d: ok=%v len=%d, want %d", size, ok, len(got), size)
+			}
+		}
+	})
+}
+
+// TestJoinChunksLargeTotalSmallHeap (F1): a server-controlled
+// total_chunks must never preallocate total*SendPiece bytes.
+// 20000 empty pieces (old code: 1.2GB capacity for 0 payload bytes)
+// must complete with small allocation. HeapAlloc does NOT count
+// very large backing arrays on this runtime (measured: a 300MB
+// make() left HeapAlloc unchanged), so the assertion uses
+// cumulative TotalAlloc plus the returned slice's capacity, both
+// of which separate the old 1.2GB preallocation from the new
+// payload-sized join by orders of magnitude.
+func TestJoinChunksLargeTotalSmallHeap(t *testing.T) {
+	const total = 20000
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	partial := map[int64]map[uint32][]byte{}
+	var got []byte
+	var ok bool
+	for i := uint32(0); i < total; i++ {
+		got, ok = joinChunks(partial, framePtrs(11, i, total, []byte{}))
+		if ok && i != total-1 {
+			t.Fatalf("complete early at piece %d", i)
+		}
+	}
+	if !ok {
+		t.Fatal("large-total group never completed")
+	}
+	if len(got) != 0 {
+		t.Fatalf("joined output len = %d, want 0", len(got))
+	}
+	if len(partial) != 0 {
+		t.Fatalf("partial not cleaned: %d groups left", len(partial))
+	}
+	if cap(got) > 1<<20 {
+		t.Errorf("joined capacity = %d, want < 1MB for 0 payload bytes (capacity must not scale with total_chunks)", cap(got))
+	}
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	// Generous bound: the accumulator holds 20000 map entries of
+	// empty slices (~a few MB at most). The old preallocation was
+	// 1.2GB; anything under 100MB proves capacity is not sized by
+	// total*SendPiece.
+	delta := int64(after.TotalAlloc) - int64(before.TotalAlloc)
+	if delta > 100<<20 {
+		t.Errorf("allocated bytes = %d, want < 100MB for 20000 empty pieces", delta)
+	}
 }
 
 func TestSplitPieces(t *testing.T) {

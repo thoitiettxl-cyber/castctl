@@ -364,6 +364,51 @@ func TestSubscribeRawOtherErrorsNotRetried(t *testing.T) {
 	}
 }
 
+// TestSubscribeRawAuthErrorWrappedInConnectionDownNotRetried (F4):
+// an AuthError wrapped in a ConnectionDown must propagate at once,
+// like retryCall — the ConnectionDown retry must check AuthError
+// first, on both the reconnect path and the subscribe path.
+func TestSubscribeRawAuthErrorWrappedInConnectionDownNotRetried(t *testing.T) {
+	t.Parallel()
+	t.Run("gateway subscribe returns wrapped auth error", func(t *testing.T) {
+		t.Parallel()
+		gw := newFakeGateway()
+		attempts := 0
+		gw.subscribeFn = func(method string, opts SubscribeOptions) ([][]byte, error) {
+			attempts++
+			return nil, NewConnectionDown(NewAuthError("expired"))
+		}
+		m := New(connectorReturning(gw), WithConfig(Config{}))
+		sc := &SharedConn{muse: m}
+		_, err := sc.SubscribeRaw(context.Background(), "chat.subscribe", SubscribeOptions{})
+		var ae *AuthError
+		if !errors.As(err, &ae) {
+			t.Fatalf("SubscribeRaw() error = %v, want *AuthError", err)
+		}
+		if attempts != 1 {
+			t.Fatalf("subscribe attempts = %d, want 1 (AuthError never retried)", attempts)
+		}
+	})
+	t.Run("connector returns wrapped auth error", func(t *testing.T) {
+		t.Parallel()
+		connects := 0
+		connector := func(_ context.Context, _ Config) (Gateway, error) {
+			connects++
+			return nil, NewConnectionDown(NewAuthError("expired"))
+		}
+		m := New(connector, WithConfig(Config{}))
+		sc := &SharedConn{muse: m}
+		_, err := sc.SubscribeRaw(context.Background(), "chat.subscribe", SubscribeOptions{})
+		var ae *AuthError
+		if !errors.As(err, &ae) {
+			t.Fatalf("SubscribeRaw() error = %v, want *AuthError", err)
+		}
+		if connects != 1 {
+			t.Fatalf("connector attempts = %d, want 1 (AuthError never retried)", connects)
+		}
+	})
+}
+
 func TestSharedConnLeaseAndCloseNoop(t *testing.T) {
 	t.Parallel()
 	gw := newFakeGateway()

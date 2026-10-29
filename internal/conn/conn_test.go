@@ -6,6 +6,7 @@ package conn
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -578,6 +579,45 @@ func TestMuseHistorySortsBySeq(t *testing.T) {
 		texts = append(texts, ev.(map[string]any)["text"].(string))
 	}
 	want := []string{"no-seq", "a", "b", "c"}
+	for i := range want {
+		if texts[i] != want[i] {
+			t.Fatalf("History() order = %v, want %v", texts, want)
+		}
+	}
+}
+
+func TestMuseHistorySortsBySeqJSONNumber(t *testing.T) {
+	t.Parallel()
+	gw := newFakeGateway()
+	gw.callFn = func(method string, opts RequestOptions) (any, error) {
+		if method != "chat.history" {
+			t.Errorf("unexpected method %q", method)
+		}
+		// decodeJSONValue uses UseNumber, so seq arrives as
+		// json.Number in production; the sort must handle it.
+		return map[string]any{"chat_events": []any{
+			map[string]any{"seq": json.Number("9"), "text": "c"},
+			map[string]any{"text": "no-seq"},
+			map[string]any{"seq": json.Number("3"), "text": "a"},
+			map[string]any{"seq": json.Number("5"), "text": "b"},
+			map[string]any{"seq": json.Number("not-a-number"), "text": "bad-seq"},
+		}}, nil
+	}
+	m := New(connectorReturning(gw), WithConfig(Config{}))
+	evs, err := m.History(context.Background(), "sess", 20)
+	if err != nil {
+		t.Fatalf("History() error = %v", err)
+	}
+	if len(evs) != 5 {
+		t.Fatalf("History() returned %d events, want 5", len(evs))
+	}
+	texts := make([]string, 0, 5)
+	for _, ev := range evs {
+		texts = append(texts, ev.(map[string]any)["text"].(string))
+	}
+	// Missing seq and unparseable seq both sort as 0, stably
+	// before seq 3; the numbered events follow in seq order.
+	want := []string{"no-seq", "bad-seq", "a", "b", "c"}
 	for i := range want {
 		if texts[i] != want[i] {
 			t.Fatalf("History() order = %v, want %v", texts, want)

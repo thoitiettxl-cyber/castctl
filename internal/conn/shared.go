@@ -296,6 +296,13 @@ func (s *SharedConn) SubscribeRaw(ctx context.Context, method string, opts Subsc
 		}
 		g, err := s.gw(ctx)
 		if err != nil {
+			// AuthError first, mirroring retryCall: an
+			// AuthError wrapped in a ConnectionDown must
+			// propagate at once, never retry.
+			var ae *AuthError
+			if errors.As(err, &ae) {
+				return nil, err
+			}
 			var down *ConnectionDown
 			if errors.As(err, &down) && attempt < MaxSubscribeAttempts-1 {
 				lastErr = err
@@ -306,6 +313,10 @@ func (s *SharedConn) SubscribeRaw(ctx context.Context, method string, opts Subsc
 		records, err := g.SubscribeRaw(ctx, method, opts)
 		if err == nil {
 			return records, nil
+		}
+		var ae *AuthError
+		if errors.As(err, &ae) {
+			return nil, err
 		}
 		var down *ConnectionDown
 		if errors.As(err, &down) && attempt < MaxSubscribeAttempts-1 {

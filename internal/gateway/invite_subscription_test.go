@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
 	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway/gatewaytest"
@@ -358,4 +359,43 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(digits)
+}
+
+// TestSubscriptionTransportErrorsAreRedactedAndChained (F6): the
+// subscription.go transport paths (fetchText, callAction) must
+// return errors through the same redaction wrapper doHatch uses:
+// the printed text must not contain the credential (boolean
+// checks only — the token value is never logged), while
+// errors.As must still find the underlying cause.
+func TestSubscriptionTransportErrorsAreRedactedAndChained(t *testing.T) {
+	sentinel := errors.New("sentinel transport failure")
+	client := &http.Client{Transport: gatewaytest.RoundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("proxy dial: Bearer abcdefgh12345678: %w", sentinel)
+	})}
+	ctx := context.Background()
+
+	_, err := fetchText(ctx, client, "https://muse.ai/settings", http.Header{}, time.Second)
+	if err == nil {
+		t.Fatal("fetchText transport error = nil")
+	}
+	if strings.Contains(err.Error(), "abcdefgh12345678") {
+		t.Errorf("fetchText error leaks the token: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "[redacted]") {
+		t.Errorf("fetchText error = %q, want the token redacted", err.Error())
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("fetchText error chain = %v, want errors.As to find the sentinel", err)
+	}
+
+	_, err = callAction(ctx, client, fakeCookie, "actionid12345678901234", nil, "https://muse.ai/settings")
+	if err == nil {
+		t.Fatal("callAction transport error = nil")
+	}
+	if strings.Contains(err.Error(), "abcdefgh12345678") {
+		t.Errorf("callAction error leaks the token: %q", err.Error())
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("callAction error chain = %v, want errors.As to find the sentinel", err)
+	}
 }

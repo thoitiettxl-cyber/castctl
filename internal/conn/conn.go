@@ -6,6 +6,7 @@ package conn
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -661,6 +662,14 @@ func eventSeq(ev any) int64 {
 		return int64(v)
 	case uint64:
 		return int64(v)
+	case json.Number:
+		// decodeJSONValue uses UseNumber, so seq arrives as
+		// json.Number in production; an unparseable number
+		// sorts as 0, like a missing seq.
+		if n, err := v.Int64(); err == nil {
+			return n
+		}
+		return 0
 	default:
 		return 0
 	}

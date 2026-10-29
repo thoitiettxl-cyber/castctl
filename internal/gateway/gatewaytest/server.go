@@ -110,9 +110,13 @@ type Server struct {
 	wsConns  map[*websocket.Conn]bool
 	requests []RequestRecord
 	resets   int
-	pongs    []string
-	pings    []string
-	wg       sync.WaitGroup
+	// resetServices records, in arrival order, the ServiceRequest
+	// service of every reset frame received (B1 pinning: a
+	// CancelStream reset must ride the stream's own service).
+	resetServices []pb.ServiceType
+	pongs         []string
+	pings         []string
+	wg            sync.WaitGroup
 }
 
 // NewServer starts a fake gateway serving handler on 127.0.0.1:0.
@@ -157,6 +161,14 @@ func (s *Server) ResetCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.resets
+}
+
+// ResetServices returns the ServiceRequest services of the reset
+// frames received so far, in arrival order.
+func (s *Server) ResetServices() []pb.ServiceType {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]pb.ServiceType(nil), s.resetServices...)
 }
 
 // Close stops the server and closes all live connections (the
@@ -316,6 +328,7 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 			if _, isReset := sf.Kind.(*pb.ServiceFrame_Reset_); isReset {
 				s.mu.Lock()
 				s.resets++
+				s.resetServices = append(s.resetServices, sr.GetService())
 				s.mu.Unlock()
 			}
 			continue

@@ -7,6 +7,7 @@ package gateway
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"slices"
 
 	pb "github.com/thoitiettxl-cyber/muse-cli/go/internal/proto"
 	"google.golang.org/protobuf/proto"
@@ -24,9 +25,18 @@ const SendPiece = 60000
 // total_chunks <= 1 returns its payload immediately, without
 // touching the accumulator — exactly gateway.py join_chunks
 // (total = ntf.total_chunks or 1; total <= 1 returns immediately).
-// Completed chunk groups are joined in chunk_index order. The
-// accumulator is owned by the single reader goroutine; callers must
-// not share it across goroutines.
+//
+// The join is a faithful port of Python's join_chunks: pieces are
+// keyed by chunk_index in a map (a duplicate index overwrites the
+// earlier piece), the group completes when the number of DISTINCT
+// indices reaches total_chunks, and the payload is the pieces
+// joined in SORTED chunk_index order — including indices >=
+// total_chunks, which Python keeps, and with no empty bytes
+// inserted for missing slots. Capacity is sized by the sum of the
+// received piece lengths, never by total_chunks*SendPiece: a
+// server-controlled total_chunks must not be able to force a
+// huge preallocation (F1). The accumulator is owned by the single
+// reader goroutine; callers must not share it across goroutines.
 func joinChunks(partial map[int64]map[uint32][]byte, frame *pb.NoiseTransportFrame) ([]byte, bool) {
 	total := frame.GetTotalChunks()
 	if total <= 1 {
@@ -42,9 +52,18 @@ func joinChunks(partial map[int64]map[uint32][]byte, frame *pb.NoiseTransportFra
 		return nil, false
 	}
 	delete(partial, frame.GetChunkId())
-	out := make([]byte, 0, int(total)*SendPiece)
-	for i := uint32(0); i < total; i++ {
-		out = append(out, parts[i]...)
+	keys := make([]uint32, 0, len(parts))
+	for k := range parts {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	size := 0
+	for _, p := range parts {
+		size += len(p)
+	}
+	out := make([]byte, 0, size)
+	for _, k := range keys {
+		out = append(out, parts[k]...)
 	}
 	return out, true
 }

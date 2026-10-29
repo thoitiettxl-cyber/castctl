@@ -724,6 +724,55 @@ func TestE2EStreamIDsIncrement(t *testing.T) {
 	}
 }
 
+// TestE2ECancelStreamUsesStoredService (B1): the CANCELLED reset
+// must ride the service stored at open() for the stream, not the
+// hardcoded daemon service — and an unknown stream id defaults to
+// daemon.
+func TestE2ECancelStreamUsesStoredService(t *testing.T) {
+	s := startE2E(t, jsonOKHandler(`{}`))
+	defer s.cleanup()
+	ctx := context.Background()
+	cases := []struct {
+		method string
+		want   pb.ServiceType
+	}{
+		{"egress.approvals", pb.ServiceType_SERVICE_SENTINEL},
+		{"custom_connectors.list", pb.ServiceType_SERVICE_AUTHD},
+		{"vault.luks_status", pb.ServiceType_SERVICE_VAULT},
+	}
+	for _, tc := range cases {
+		sid, err := s.gw.OpenStream(ctx, tc.method, conn.OpenStreamOptions{Track: true})
+		if err != nil {
+			t.Fatalf("OpenStream(%s): %v", tc.method, err)
+		}
+		if err := s.gw.CancelStream(ctx, sid); err != nil {
+			t.Fatalf("CancelStream(%s): %v", tc.method, err)
+		}
+	}
+	// Unknown stream id: no stored service, daemon default.
+	if err := s.gw.CancelStream(ctx, 9999); err != nil {
+		t.Fatalf("CancelStream(unknown): %v", err)
+	}
+	want := []pb.ServiceType{
+		pb.ServiceType_SERVICE_SENTINEL,
+		pb.ServiceType_SERVICE_AUTHD,
+		pb.ServiceType_SERVICE_VAULT,
+		pb.ServiceType_SERVICE_DAEMON,
+	}
+	pollUntil(t, 5*time.Second, "server resets on stored services", func() bool {
+		return len(s.server.ResetServices()) >= len(want)
+	})
+	got := s.server.ResetServices()
+	if len(got) != len(want) {
+		t.Fatalf("reset services = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("reset %d service = %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
 func TestE2EHandshakeTimeout(t *testing.T) {
 	// A listener that accepts TCP but never completes a WebSocket
 	// upgrade must fail the dial fast (gorilla handshake error),

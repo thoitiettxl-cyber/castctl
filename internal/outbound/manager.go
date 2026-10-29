@@ -8,6 +8,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -140,6 +142,25 @@ func (m *Manager) RegisterDNSRouter(router adapter.DNSRouter) {
 // ("use WireGuard endpoint instead"), so the error here names the
 // endpoint form directly.
 //
+// Nil-router guard (F3, fail-closed): sing-box's resolve dialer
+// captures the DNS router from the registry context at outbound
+// construction time (common/dialer.NewResolveDialer) and
+// dereferences it on the first domain dial (common/dialer/
+// resolve.go:103, d.router.Lookup). With no DNS router registered
+// that dial PANICS with a nil dereference — and registering a
+// router after CreateOutbound cannot repair the already-captured
+// nil. CreateOutbound therefore refuses, with a clean error, any
+// outbound whose Server is a domain (not an IP literal) when no
+// DNS router is registered in the context at creation time.
+// PR3 WIRING RULE: call RegisterDNS/RegisterDNSRouter BEFORE
+// CreateOutbound for every domain-server outbound. IP-server
+// outbounds never touch the resolve dialer and are unaffected.
+// The check is deliberately conservative: any domain Server
+// requires a router at creation, even if a detour might have
+// resolved it another way — failing closed here is cheaper than a
+// panic at dial time, and the wiring rule makes the requirement
+// explicit.
+//
 // Enum validation: `enum:` struct tags are NOT validated at parse
 // time (W-PROFILE finding). Invalid enum values are therefore
 // rejected (or not) by the registry constructors themselves; the
@@ -158,10 +179,47 @@ func (m *Manager) CreateOutbound(ctx context.Context, tag, outboundType string, 
 	if strings.EqualFold(outboundType, "wireguard") {
 		return fmt.Errorf("outbound: %q is not an outbound type in sing-box 1.14: declare a wireguard endpoint and reference its tag instead", outboundType)
 	}
+	if server, isDomain := domainServer(options); isDomain {
+		if service.FromContext[adapter.DNSRouter](m.registryContext()) == nil {
+			return fmt.Errorf("outbound: create %s[%s]: domain server %q requires a DNS router: call RegisterDNS/RegisterDNSRouter before CreateOutbound (sing-box captures the DNS router at construction; registering later does not repair it)", outboundType, tag, server)
+		}
+	}
 	if err := m.outbounds.Create(m.registryContext(), m.router, m.logger, tag, outboundType, options); err != nil {
 		return fmt.Errorf("outbound: create %s[%s]: %w", outboundType, tag, err)
 	}
 	return nil
+}
+
+// domainServer reports the outbound's Server address and whether it
+// is a domain (needs resolution) rather than an IP literal. The
+// sing-box outbound option structs all carry the remote address in
+// a top-level Server string field; types without one (direct,
+// selector, urltest, ...) report no server. An empty server is not
+// a domain: construction/dial errors for it stay sing-box's. A
+// bracketed IPv6 literal ("[::1]") parses as an IP, not a domain.
+func domainServer(options any) (string, bool) {
+	v := reflect.ValueOf(options)
+	for v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return "", false
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return "", false
+	}
+	f := v.FieldByName("Server")
+	if !f.IsValid() || f.Kind() != reflect.String {
+		return "", false
+	}
+	server := f.String()
+	if server == "" {
+		return "", false
+	}
+	if _, err := netip.ParseAddr(strings.Trim(server, "[]")); err == nil {
+		return "", false
+	}
+	return server, true
 }
 
 // CreateEndpoint creates one endpoint from its registry type and

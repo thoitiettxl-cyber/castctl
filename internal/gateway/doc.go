@@ -57,6 +57,42 @@
 //   - String bodies are sent verbatim (conn.RequestOptions contract);
 //     Python json.dumps a str body. Map/slice bodies are JSON-encoded
 //     in both.
+//   - Auth-chain classification divergences from gateway.py,
+//     DELIBERATE and fail-fast (F5 — do not "fix" without a
+//     differential-test decision; PR3/PR5 reviewers must see
+//     them here, not rediscover them):
+//     1. FetchAccessToken / FetchHatchToken, HTTP 200 with a
+//     non-JSON body or a JSON body missing its key: Go returns
+//     *conn.AuthError ("auth/check returned non-JSON or
+//     missing access_token" / "hatch/token returned non-JSON
+//     or missing token"). Python raises the RAW exception
+//     from `r.json()["access_token"]` / `["token"]`: a
+//     ValueError (JSONDecodeError) for non-JSON, a KeyError
+//     for a missing key. (FetchSessionInfo is NOT divergent
+//     here: Python maps non-JSON to AuthError and a missing
+//     vm_id to GatewayError, and Go does the same.)
+//     2. FetchSessionInfo, HTTP 200 with `{"vm_id": null}`:
+//     Python's `"vm_id" in info` is true, so it returns the
+//     info and the vm_id flows on as None, rendered "None"
+//     in f-strings (e.g. the hatch/token vmAddress). Go
+//     returns success with VMID = fmt.Sprintf("%v", nil) =
+//     "<nil>", which flows on verbatim into the same
+//     vmAddress. Same shape (success with a bogus id),
+//     different bogus id.
+//     3. FetchAccessToken / FetchHatchToken, HTTP 200 with a
+//     non-object JSON body (e.g. a JSON array) or a
+//     non-string token value: Go's decodeJSONObject rejects
+//     the non-object (AuthError, as in (1)), and a present
+//     non-string token fails the string assertion, so the
+//     token reads as "" and Go returns AuthError ("missing
+//     access_token"/"missing token"). Python indexes the
+//     array (TypeError, raw) or returns the non-string value
+//     as-is, which is only coerced by an f-string at header
+//     construction and then fails downstream as a 401.
+//     In all three cases Go fails earlier and with a typed
+//     AuthError where Python fails later or with a raw
+//     exception; no caller in this package depends on the
+//     Python behaviour.
 //   - _write has no 10-100ms AGAIN backoff loop: gorilla's
 //     WriteMessage is atomic under a 15s write deadline, which
 //     provides the same bound without spinning.
@@ -89,7 +125,10 @@
 //     explicit ping/pong/close handlers; pongs go through
 //     gorilla WriteControl, bypassing the gateway ioMu (gorilla
 //     serializes all writes on its own mutex, so a pong waits at
-//     most for one in-flight frame). Client-initiated keep-alive
+//     most for one in-flight frame). Ping/pong control deadlines
+//     are WriteDeadline (15s, F8): a shorter pong deadline could
+//     expire while gorilla's write mutex is held by a legitimate
+//     data write and kill the reader. Client-initiated keep-alive
 //     (StartKeepAlive) is opt-in only, never started by the
 //     Connector; its ticker comes from the Clock seam. Whether
 //     the real gateway sends pings / libcurl auto-replied is
@@ -154,13 +193,15 @@
 //     egress.approval.decide rule.
 //   - Outbound nil-router guard: dialling a domain-server
 //     outbound through an outbound Manager without
-//     RegisterDNS/RegisterDNSRouter reportedly panics with a
-//     nil dereference in sing-box common/dialer (see the PR2
+//     RegisterDNS/RegisterDNSRouter panics with a nil
+//     dereference in sing-box common/dialer (see the PR2
 //     report for the coordinator-verified evidence). This
 //     package never builds a Manager/DNS client/Dialer — it
-//     only consumes OutboundDialer — so the guard or the
-//     registration ordering belongs to outbound/PR3 wiring,
-//     not here.
+//     only consumes OutboundDialer — so the guard lives in
+//     outbound.Manager.CreateOutbound (F3): a domain-server
+//     outbound created without a registered DNS router is
+//     refused with a clean error, and PR3 wiring must call
+//     RegisterDNS/RegisterDNSRouter BEFORE CreateOutbound.
 //   - Deferred (Boss decision, stay unimplemented): auth import
 //     command, paste fallback for auth export, bot hot reload,
 //     jitter. Release (local build script, no Actions) is PR5.

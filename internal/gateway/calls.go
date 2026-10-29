@@ -56,11 +56,12 @@ func (g *Gateway) OpenStream(ctx context.Context, method string, opts conn.OpenS
 }
 
 // CancelStream ends a stream opened by OpenStream: it forgets the
-// stream and sends the CANCELLED reset when the gateway is alive.
-// It is a no-op for an unknown stream ID and never returns
+// stream and sends the CANCELLED reset on the service stored for
+// the stream at open() time (daemon when the stream id is
+// unknown). It is a no-op for an unknown stream ID and never returns
 // *ConnectionDown.
 func (g *Gateway) CancelStream(ctx context.Context, streamID int64) error {
-	g.cancelStream(streamID, pb.ServiceType_SERVICE_DAEMON)
+	g.cancelStreamFor(streamID)
 	return nil
 }
 

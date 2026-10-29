@@ -94,11 +94,21 @@ func PhaseOf(err error) (Phase, bool) {
 
 // phaseForOpenErr maps an error from open() to a phase: a
 // ConnectionDown means the pre-send check failed (nothing
-// written); any other open error means the send was attempted and
-// the frame may be on the wire.
+// written), and a *ValidationError means the failure was raised
+// before sendEnvelope (unknown method, unencodable body) — no
+// byte hit the wire, so both are PhaseNotSent. Any other open
+// error means the send was attempted and the frame may be on the
+// wire, so it is PhaseSentNoReply (the conservative
+// classification; open() cannot distinguish a marshal failure
+// from a send failure, and a marshal failure is unreachable in
+// practice for a frame built from already-encoded bytes).
 func phaseForOpenErr(err error) Phase {
 	var down *conn.ConnectionDown
 	if errors.As(err, &down) {
+		return PhaseNotSent
+	}
+	var ve *ValidationError
+	if errors.As(err, &ve) {
 		return PhaseNotSent
 	}
 	return PhaseSentNoReply

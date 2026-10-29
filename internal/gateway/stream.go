@@ -68,10 +68,18 @@ var errQueueEmpty = errors.New("gateway: stream queue empty")
 // get waits for one item until deadline, or until ctx is done. It
 // returns (item, nil), (zero, errQueueEmpty) on deadline expiry, or
 // (zero, ctx.Err()) when ctx ends first. Frames tagged with a
-// generation older than generation (when both are non-zero) are
-// dropped: they belong to a replaced gateway incarnation (S6).
-// Error items are never dropped.
-func (q *streamQueue) get(ctx context.Context, deadline time.Time, generation uint64) (queuedItem, error) {
+// generation OLDER than the current generation are dropped: they
+// belong to a replaced gateway incarnation (S6). Error items are
+// never dropped.
+//
+// generation is a provider, re-read on every wait iteration —
+// never a snapshot taken at entry: a bump that lands while the
+// wait is in flight must not strand the waiter dropping the new
+// incarnation's frames (F7). Only strictly older generations are
+// dropped, so a frame tagged with a newer generation than the
+// provider's current value is delivered. A nil provider, or a
+// zero current/item generation, disables filtering.
+func (q *streamQueue) get(ctx context.Context, deadline time.Time, generation func() uint64) (queuedItem, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	// Wake the waiter when ctx ends, without holding the lock in
@@ -89,7 +97,11 @@ func (q *streamQueue) get(ctx context.Context, deadline time.Time, generation ui
 		if len(q.items) > 0 {
 			item := q.items[0]
 			q.items = q.items[1:]
-			if item.frame != nil && generation != 0 && item.generation != 0 && item.generation != generation {
+			var current uint64
+			if generation != nil {
+				current = generation()
+			}
+			if item.frame != nil && current != 0 && item.generation != 0 && item.generation < current {
 				continue
 			}
 			return item, nil
@@ -282,7 +294,7 @@ func (g *Gateway) next(ctx context.Context, sid int64, timeout time.Duration) (*
 		// been delivered yet when Dead is already set).
 		return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway connection is down: %w", g.Dead())}
 	}
-	item, err := q.get(ctx, time.Now().Add(timeout), g.currentGeneration())
+	item, err := q.get(ctx, time.Now().Add(timeout), g.currentGeneration)
 	if err != nil {
 		return nil, err
 	}
@@ -308,6 +320,28 @@ func (g *Gateway) cancelStream(sid int64, service pb.ServiceType) {
 		return
 	}
 	_ = g.sendEnvelope(service, frameBytes)
+}
+
+// serviceFor returns the service stored for sid at open() time, or
+// false when the stream was never opened (or was already
+// forgotten). The read happens before forget: cancelStream
+// deletes the entry, so callers must read first.
+func (g *Gateway) serviceFor(sid int64) (pb.ServiceType, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	svc, ok := g.services[sid]
+	return svc, ok
+}
+
+// cancelStreamFor forgets a stream and sends its CANCELLED reset
+// on the service stored at open(); an unknown stream id defaults
+// to daemon, as Python's _cancel(service=0) does.
+func (g *Gateway) cancelStreamFor(sid int64) {
+	svc, ok := g.serviceFor(sid)
+	if !ok {
+		svc = pb.ServiceType_SERVICE_DAEMON
+	}
+	g.cancelStream(sid, svc)
 }
 
 // --- conn.Gateway state methods --------------------------------------

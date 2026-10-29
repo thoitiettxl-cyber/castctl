@@ -81,7 +81,10 @@ func encodeBody(body any) ([]byte, error) {
 	default:
 		out, err := json.Marshal(body)
 		if err != nil {
-			return nil, fmt.Errorf("gateway: encode body: %w", err)
+			// An unencodable body is a caller-side validation
+			// failure raised before anything is sent, so it
+			// is a *ValidationError (NB-R2: PhaseNotSent).
+			return nil, &ValidationError{Message: fmt.Sprintf("encode body: %v", err)}
 		}
 		return out, nil
 	}

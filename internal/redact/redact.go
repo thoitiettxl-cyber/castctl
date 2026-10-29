@@ -17,8 +17,15 @@ package redact
 import "regexp"
 
 var (
-	reURLUserinfo = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@`)
-	reURLUser     = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s@]+@`)
+	// reURLUserinfo matches a URL's userinfo greedily to the LAST
+	// '@' before the first '/', '?', or '#' after "://": a
+	// password may itself contain '@' (NB-R1), and only the last
+	// '@' in the authority delimits the userinfo from the host.
+	// The userinfo itself must be non-empty and contain no
+	// whitespace, slash, '?' or '#', so an empty userinfo
+	// ("scheme://@host"), a plain email with no scheme, and an
+	// '@' in a path/query/fragment are all left unchanged.
+	reURLUserinfo = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s?#]+@`)
 )
 
 // RedactURLUserinfo replaces the userinfo of every URL embedded in s
@@ -30,9 +37,9 @@ var (
 //
 // Boundary (precise): only a `scheme://...@` pattern is redacted,
 // where scheme matches `[a-z][a-z0-9+.-]*` (case-insensitive, the
-// original scheme spelling is preserved) and the userinfo contains
-// no whitespace, slash, or `@` before the delimiting `@`. In
-// particular:
+// original scheme spelling is preserved) and the userinfo is the
+// run up to the LAST `@` before the first `/`, `?`, or `#` after
+// `://`, containing no whitespace. In particular:
 //
 //   - a URL without userinfo is returned unchanged;
 //   - plain email-like text with no scheme ("user@example.com",
@@ -55,7 +62,5 @@ func RedactURLUserinfo(s string) string {
 	if s == "" {
 		return s
 	}
-	s = reURLUserinfo.ReplaceAllString(s, "${1}<redacted>@")
-	s = reURLUser.ReplaceAllString(s, "${1}<redacted>@")
-	return s
+	return reURLUserinfo.ReplaceAllString(s, "${1}<redacted>@")
 }

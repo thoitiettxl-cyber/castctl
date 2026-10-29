@@ -320,9 +320,12 @@ type blockingWSConn struct {
 	writeBlocked chan struct{}
 	blockedOnce  sync.Once
 	controls     []string
-	pingHandler  func(string) error
-	pongHandler  func(string) error
-	closeHandler func(int, string) error
+	// controlDeadlines records the deadline passed to each
+	// WriteControl call, in the same order as controls (F8).
+	controlDeadlines []time.Time
+	pingHandler      func(string) error
+	pongHandler      func(string) error
+	closeHandler     func(int, string) error
 }
 
 func newBlockingWSConn() *blockingWSConn {
@@ -359,9 +362,10 @@ func (c *blockingWSConn) Close() error {
 	return nil
 }
 
-func (c *blockingWSConn) WriteControl(messageType int, data []byte, _ time.Time) error {
+func (c *blockingWSConn) WriteControl(messageType int, data []byte, deadline time.Time) error {
 	c.mu.Lock()
 	c.controls = append(c.controls, fmt.Sprintf("%d:%s", messageType, data))
+	c.controlDeadlines = append(c.controlDeadlines, deadline)
 	c.mu.Unlock()
 	return nil
 }
@@ -369,6 +373,37 @@ func (c *blockingWSConn) WriteControl(messageType int, data []byte, _ time.Time)
 func (c *blockingWSConn) SetPingHandler(h func(string) error)       { c.pingHandler = h }
 func (c *blockingWSConn) SetPongHandler(h func(string) error)       { c.pongHandler = h }
 func (c *blockingWSConn) SetCloseHandler(h func(int, string) error) { c.closeHandler = h }
+
+// TestPongDeadlineMatchesWriteDeadline (F8): the pong
+// WriteControl deadline must match the data-write deadline
+// (WriteDeadline, 15s). A 5s pong deadline can expire while
+// gorilla's single write mutex is held by a legitimate data
+// write, killing the reader; aligning the deadlines means a
+// slow-but-progressing write cannot kill it.
+func TestPongDeadlineMatchesWriteDeadline(t *testing.T) {
+	fake := newBlockingWSConn()
+	routes, err := DefaultRoutes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := newGateway(fake, nil, nil, routes, nil)
+	defer func() { _ = gw.Close() }()
+	if err := fake.pingHandler("p1"); err != nil {
+		t.Fatalf("ping handler: %v", err)
+	}
+	fake.mu.Lock()
+	deadlines := append([]time.Time(nil), fake.controlDeadlines...)
+	fake.mu.Unlock()
+	if len(deadlines) != 1 {
+		t.Fatalf("control deadlines = %d, want 1 (one pong)", len(deadlines))
+	}
+	// The deadline is computed as now+WriteDeadline at handler
+	// time; allow 2s of scheduling slack on either side.
+	remaining := time.Until(deadlines[0])
+	if remaining < WriteDeadline-2*time.Second || remaining > WriteDeadline+2*time.Second {
+		t.Errorf("pong deadline in %v, want about %v", remaining, WriteDeadline)
+	}
+}
 
 func TestControlPongBypassesBlockedDataWrite(t *testing.T) {
 	fake := newBlockingWSConn()
@@ -436,14 +471,14 @@ func TestGenerationFilteringAtQueue(t *testing.T) {
 	}
 	q.put(queuedItem{frame: frame("stale"), generation: 1})
 	q.put(queuedItem{frame: frame("fresh"), generation: 2})
-	item, err := q.get(context.Background(), time.Now().Add(2*time.Second), 2)
+	item, err := q.get(context.Background(), time.Now().Add(2*time.Second), func() uint64 { return 2 })
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	if got := string(item.frame.GetResponse().GetBody()); got != "fresh" {
 		t.Errorf("get returned body %q, want %q (stale generation dropped)", got, "fresh")
 	}
-	_, err = q.get(context.Background(), time.Now().Add(100*time.Millisecond), 2)
+	_, err = q.get(context.Background(), time.Now().Add(100*time.Millisecond), func() uint64 { return 2 })
 	if !errors.Is(err, errQueueEmpty) {
 		t.Errorf("second get err = %v, want errQueueEmpty", err)
 	}
@@ -481,6 +516,58 @@ func TestGenerationUniquePerGatewayAndBumpDropsStale(t *testing.T) {
 	}
 	if got := string(sf.GetResponse().GetBody()); got != "current" {
 		t.Errorf("next returned body %q, want %q", got, "current")
+	}
+}
+
+// TestGenerationNewerFrameDeliveredAfterBumpDuringWait (F7): a
+// frame tagged with a NEWER generation than the one next()
+// snapshotted at entry must be delivered, not dropped, when the
+// generation bumps while the wait is in flight; an older-generation
+// frame queued ahead of it must still be dropped.
+func TestGenerationNewerFrameDeliveredAfterBumpDuringWait(t *testing.T) {
+	s := startE2E(t, jsonOKHandler(`{}`))
+	defer s.cleanup()
+	g := concreteGateway(t, s.gw)
+	const sid = int64(43)
+	frame := func(body string) *pb.ServiceFrame {
+		return &pb.ServiceFrame{StreamId: sid, Kind: &pb.ServiceFrame_Response{Response: &pb.ApplicationResponse{Status: 200, Body: []byte(body), EndBody: true}}}
+	}
+	q := newStreamQueue()
+	genBefore := g.Generation()
+	// Stale frame from the pre-bump generation, queued before
+	// next() starts: it must be dropped once next() waits past
+	// the bump below.
+	q.put(queuedItem{frame: frame("stale"), generation: genBefore})
+	g.bumpGeneration()
+	g.mu.Lock()
+	g.streams[sid] = q
+	g.mu.Unlock()
+	defer g.forget(sid)
+
+	type result struct {
+		sf  *pb.ServiceFrame
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		sf, err := g.next(context.Background(), sid, 5*time.Second)
+		done <- result{sf, err}
+	}()
+	// Let next() enter its wait, then bump the generation again
+	// and deliver a frame tagged with the new generation.
+	time.Sleep(100 * time.Millisecond)
+	g.bumpGeneration()
+	q.put(queuedItem{frame: frame("fresh"), generation: g.Generation()})
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("next: %v (newer-generation frame dropped during wait)", r.err)
+		}
+		if got := string(r.sf.GetResponse().GetBody()); got != "fresh" {
+			t.Errorf("next returned body %q, want %q", got, "fresh")
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("next did not return after a newer-generation frame arrived")
 	}
 }
 
@@ -783,6 +870,26 @@ func TestRedactErrorString(t *testing.T) {
 		{
 			"Authorization: Bearer sekrit-token-here",
 			"Authorization: Bearer [redacted]",
+		},
+		{
+			"dial failed: Bearer abcdefgh12345678",
+			"dial failed: Bearer [redacted]",
+		},
+		{
+			"error: bearer ABCDEFGH12345678 in plain text",
+			"error: bearer [redacted] in plain text",
+		},
+		{
+			"redirect https://host.example/x#auth_token=abcdefgh12345678",
+			"redirect https://host.example/x#auth_token=[redacted]",
+		},
+		{
+			`{"hatch_sess":"abcdefgh12345678","other":1}`,
+			`{"hatch_sess":"[redacted]","other":1}`,
+		},
+		{
+			`{"session": "abcdefgh12345678"}`,
+			`{"session": "[redacted]"}`,
 		},
 		{
 			"plain error, no credentials, https://example.com/path?q=1",

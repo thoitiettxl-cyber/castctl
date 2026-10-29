@@ -29,6 +29,21 @@ func TestRedactURLUserinfo(t *testing.T) {
 			want: "https://<redacted>@host.example/x",
 		},
 		{
+			name: "password containing an at sign",
+			in:   "https://user:p@ss@host.example/x",
+			want: "https://<redacted>@host.example/x",
+		},
+		{
+			name: "password containing two at signs",
+			in:   "https://u:a@b@c@host.example/x",
+			want: "https://<redacted>@host.example/x",
+		},
+		{
+			name: "at sign in query or fragment does not extend userinfo",
+			in:   "https://user:pass@host.example/x?next=a@b#frag@c",
+			want: "https://<redacted>@host.example/x?next=a@b#frag@c",
+		},
+		{
 			name: "empty user with password",
 			in:   "https://:pass@host.example/x",
 			want: "https://<redacted>@host.example/x",

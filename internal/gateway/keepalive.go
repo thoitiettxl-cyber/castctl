@@ -22,6 +22,25 @@ import (
 // sendEnvelope. The close handler records the close code/reason
 // on the gateway (see LastClose, used by ErrConnectionLost).
 //
+// Control-write deadline (F8 decision): ping/pong WriteControl
+// calls use WriteDeadline (15s), the same bound as a data
+// WriteMessage. gorilla's WriteControl blocks on the single
+// connection write mutex until its deadline; a data write may
+// legitimately hold that mutex for up to the 15s write deadline,
+// so a shorter pong deadline (the previous 5s) could expire while
+// the socket was merely slow, and the ping-handler error would
+// kill the reader goroutine. Aligning the deadlines means a
+// slow-but-progressing write cannot kill the reader; a truly
+// stuck socket still fails at 15s, like a data write. The close
+// echo keeps its short 2s deadline: its failure is ignored, so it
+// cannot kill the reader. No slow-socket dynamic probe was run
+// for this decision (chưa kiểm chứng: a fake slow socket plus a
+// real gorilla conn measuring pong latency under a blocked
+// WriteMessage); the reasoning rests on gorilla's WriteControl
+// source (it waits on c.mu with a deadline-derived timer) and
+// the existing bypass test, whose fake WriteControl ignores
+// deadlines and therefore cannot measure this.
+//
 // Whether the real gateway sends pings, and whether libcurl
 // auto-replied to them in Python, is [UNVERIFIED]: it is a
 // live-phase measurement (frame log, no secrets), not a claim
@@ -53,7 +72,7 @@ func (g *Gateway) installControlHandlers(cc controlConn) {
 		g.lastPingAt = g.clk().Now()
 		g.lastPingData = appData
 		g.mu.Unlock()
-		err := cc.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5*time.Second))
+		err := cc.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(WriteDeadline))
 		if err == websocket.ErrCloseSent {
 			return nil
 		}
@@ -135,7 +154,7 @@ func (g *Gateway) StartKeepAlive(ctx context.Context, interval time.Duration) {
 				if g.isClosed() {
 					return
 				}
-				if err := cc.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second)); err != nil {
+				if err := cc.WriteControl(websocket.PingMessage, nil, time.Now().Add(WriteDeadline)); err != nil {
 					return
 				}
 				g.mu.Lock()

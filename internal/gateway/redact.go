@@ -18,9 +18,13 @@ import (
 // steps are gateway-local:
 //
 //   - values of token-like query parameters (auth_token,
-//     access_token, token, hatch_token, session);
-//   - values of cookie-like fragments (hatch_sess, datr, session);
-//   - Bearer tokens after an "Authorization:" label.
+//     access_token, token, hatch_token, session), including the
+//     same keys in a URL fragment (#auth_token=...);
+//   - values of cookie-like fragments (hatch_sess, datr, session),
+//     including JSON form ({"hatch_sess":"..."});
+//   - Bearer tokens after an "Authorization:" label, and bare
+//     `Bearer <token>` values with no label (token-like values
+//     only, so prose is untouched).
 //
 // Everything else is left byte-identical, so server payload text
 // that carries no credential survives redaction. The PR3
@@ -29,9 +33,18 @@ import (
 // keeps its own query/cookie/Bearer patterns and does NOT import
 // internal/profile.
 var (
-	reQueryToken  = regexp.MustCompile(`(?i)([?&](?:auth_token|access_token|hatch_token|token|session)=)[^&\s]*`)
-	reCookieToken = regexp.MustCompile(`(?i)\b(hatch_sess|datr|session)=[^;\s]*`)
-	reBearer      = regexp.MustCompile(`(?i)(Authorization:\s*Bearer\s+)\S+`)
+	reQueryToken    = regexp.MustCompile(`(?i)([?&](?:auth_token|access_token|hatch_token|token|session)=)[^&\s]*`)
+	reFragmentToken = regexp.MustCompile(`(?i)(#(?:auth_token|access_token|hatch_token|token|session)=)[^&\s]*`)
+	reCookieToken   = regexp.MustCompile(`(?i)\b(hatch_sess|datr|session)=[^;\s]*`)
+	reJSONCookie    = regexp.MustCompile(`(?i)("(?:hatch_sess|datr|session)"\s*:\s*")[^"]*`)
+	reBearer        = regexp.MustCompile(`(?i)(Authorization:\s*Bearer\s+)\S+`)
+	// reBareBearer matches a Bearer token with no "Authorization:"
+	// label. The token must look token-like (at least 8 chars from
+	// the base64/URL-safe alphabet) so ordinary prose ("the bearer
+	// of bad news") is never redacted. It runs after reBearer, so
+	// an already-redacted "[redacted]" value (brackets are outside
+	// the alphabet) is left alone.
+	reBareBearer = regexp.MustCompile(`(?i)\b(Bearer\s+)[A-Za-z0-9_\-.~+/=]{8,}`)
 )
 
 func redactErrorString(s string) string {
@@ -40,8 +53,11 @@ func redactErrorString(s string) string {
 	}
 	s = redact.RedactURLUserinfo(s)
 	s = reQueryToken.ReplaceAllString(s, "${1}[redacted]")
+	s = reFragmentToken.ReplaceAllString(s, "${1}[redacted]")
 	s = reCookieToken.ReplaceAllString(s, "${1}=[redacted]")
+	s = reJSONCookie.ReplaceAllString(s, "${1}[redacted]")
 	s = reBearer.ReplaceAllString(s, "${1}[redacted]")
+	s = reBareBearer.ReplaceAllString(s, "${1}[redacted]")
 	return s
 }
 
