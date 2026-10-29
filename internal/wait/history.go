@@ -7,6 +7,7 @@ package wait
 import (
 	"context"
 	"errors"
+	"slices"
 
 	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
 )
@@ -21,23 +22,50 @@ import (
 // A HistoryReader must fail closed: a transport error is an
 // error, never an empty window. History reads use fresh
 // connections in Python; the adapter owns that choice.
+//
+// Deadline contract: a HistoryReader must honor the passed
+// context. When the context is done it must return promptly
+// with ctx.Err() (or an error wrapping it) and never block
+// past the deadline; the Runner budgets every read through
+// the context and treats a dead context as cancellation
+// regardless of the error a non-conforming reader returns
+// (settlePending prefers ctx.Err() over any read error when
+// the context is dead). A reader that ignores the deadline
+// and returns a transport error after cancellation is
+// non-conforming: the Runner still ends the wait correctly,
+// but the error it surfaces is the cancellation, not the
+// reader's error.
 type HistoryReader interface {
 	ReadHistory(ctx context.Context, limit int) (events []any, hasMore bool, err error)
 }
 
-// DefaultHistoryLimits is the window growth for history reads:
-// 200, then 500, then 1000 events. It is shared read-only state:
-// NewRunner clones it on use, and no code in this package
-// mutates it.
-var DefaultHistoryLimits = []int{200, 500, 1000}
+// defaultHistoryLimits is the window growth for history reads:
+// 200, then 500, then 1000 events. It is unexported mutable
+// state: no caller outside this package may rewrite it.
+// DefaultHistoryLimits returns a copy; NewRunner takes its
+// working limits from a copy too, so no Runner ever aliases
+// the shared slice.
+var defaultHistoryLimits = []int{200, 500, 1000}
+
+// DefaultHistoryLimits returns a copy of the default history
+// window growth. Mutating the returned slice does not affect
+// later Runners.
+func DefaultHistoryLimits() []int {
+	return slices.Clone(defaultHistoryLimits)
+}
 
 // DeriveBoundary derives the boundary for a standalone wait:
 // the last message.user seq in history. It returns the boundary,
 // whether it is known, and that it was derived. The derived flag
-// is true in every return, including the unknown-boundary one:
-// (0, false, true) means "no window read ever succeeded, so the
-// boundary is unknown" — derived records that a derivation was
-// attempted (the standalone-wait mode), not that it succeeded.
+// is true in every non-error return, including the
+// unknown-boundary one: (0, false, true) means "no window read
+// ever succeeded, so the boundary is unknown" — derived records
+// that a derivation was attempted (the standalone-wait mode),
+// not that it succeeded. On a fatal error (an AuthError, or a
+// cancelled context) the return is (0, false, false, err):
+// derived is false there because no boundary was derived at
+// all, and the caller must not use the triple — the Runner
+// returns the error at once without touching it.
 // A boundary of 0 with known=true means genuinely empty history
 // (or history with no user event and no more pages), not a
 // failure. When every window read fails, the boundary is unknown

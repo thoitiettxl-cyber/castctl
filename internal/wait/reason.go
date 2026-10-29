@@ -6,18 +6,22 @@ package wait
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 )
 
-// WaitPhrases is the complete waiting-phrase vocabulary from
+// waitPhrases is the complete waiting-phrase vocabulary from
 // wait.py, in list order: 21 Vietnamese + 13 English = 34. Order
 // decides which phrase is named in the returned reason when
 // several match; the outcome is the same regardless. Matching is
 // substring on the cleaned, lower-cased text, with no word
 // boundaries.
-var WaitPhrases = []string{
+//
+// The vocabulary is unexported mutable state: no caller outside
+// this package may rewrite it. WaitPhrases returns a copy.
+var waitPhrases = []string{
 	"chờ boss",
 	"chờ bạn",
 	"tôi chờ",
@@ -52,6 +56,13 @@ var WaitPhrases = []string{
 	"shall i",
 	"which do you prefer",
 	"your call",
+}
+
+// WaitPhrases returns a copy of the waiting-phrase vocabulary,
+// in list order. Mutating the returned slice does not affect
+// matching.
+func WaitPhrases() []string {
+	return slices.Clone(waitPhrases)
 }
 
 // Safety regex, verbatim from wait.py (case-insensitive).
@@ -145,7 +156,7 @@ func NeedsInputReason(text string) string {
 		return "stopped by a safety check"
 	}
 	low := strings.ToLower(t)
-	for _, ph := range WaitPhrases {
+	for _, ph := range waitPhrases {
 		if strings.Contains(low, ph) {
 			return "waiting phrase: '" + ph + "'"
 		}

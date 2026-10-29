@@ -393,6 +393,48 @@ func TestAutoApproverAuthErrorPropagatesAndStops(t *testing.T) {
 	}
 }
 
+func TestAutoApproverEmptyIDClaimedOnce(t *testing.T) {
+	// An empty-string id is still a present id (ApprovalID !=
+	// nil): two "" items in one Approve must decide once, like
+	// any other duplicated id.
+	calls := 0
+	aa := NewAutoApprover(func(ctx context.Context) (Decider, func(), error) {
+		return func(ctx context.Context, a DescribedApproval, decision string) error {
+			calls++
+			return nil
+		}, func() {}, nil
+	}, false)
+	item := DescribedApproval{ApprovalID: strp(""), Options: []string{Forever}}
+	handled, _, _ := aa.Approve(context.Background(), []DescribedApproval{item, item})
+	if calls != 1 {
+		t.Errorf("decide calls = %d, want 1 (\"\" is a present id, claimed once)", calls)
+	}
+	if len(handled) != 1 || handled[0] != "" {
+		t.Errorf("handled = %q, want [\"\"] once", handled)
+	}
+}
+
+func TestDescribedApprovalClone(t *testing.T) {
+	// Clone deep-copies every pointer field and Options:
+	// mutating the clone must not touch the original.
+	orig := DescribedApproval{
+		ApprovalID: strp("A"), Title: strp("T"), Question: strp("Q"),
+		Kind: strp("K"), Scope: strp("S"), Why: strp("W"),
+		ExpiresAtMS: func() *float64 { f := float64(7); return &f }(),
+		Options:     []string{Forever},
+	}
+	cp := orig.Clone()
+	*cp.ApprovalID, *cp.Title, *cp.Question = "m", "m", "m"
+	*cp.Kind, *cp.Scope, *cp.Why = "m", "m", "m"
+	*cp.ExpiresAtMS = 0
+	cp.Options[0] = "m"
+	if deref(orig.ApprovalID) != "A" || deref(orig.Title) != "T" || deref(orig.Question) != "Q" ||
+		deref(orig.Kind) != "K" || deref(orig.Scope) != "S" || deref(orig.Why) != "W" ||
+		orig.ExpiresAtMS == nil || *orig.ExpiresAtMS != 7 || len(orig.Options) != 1 || orig.Options[0] != Forever {
+		t.Errorf("original mutated by clone: %v", flatDescribed(orig))
+	}
+}
+
 func TestAutoApproverZeroAndNilGuards(t *testing.T) {
 	// Zero value with no Connect: errors, no panic.
 	var aa AutoApprover

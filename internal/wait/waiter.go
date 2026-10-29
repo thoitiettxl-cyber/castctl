@@ -6,7 +6,6 @@ package wait
 
 import (
 	"encoding/json"
-	"slices"
 	"strings"
 	"time"
 
@@ -258,12 +257,11 @@ func (w *Waiter) Thread() string { return w.thread }
 func (w *Waiter) RequireRunning() bool { return w.requireRunning }
 
 // Result returns the decided outcome, or nil while waiting. The
-// returned Outcome is a copy; mutating it does not affect the
-// Waiter. Approval option lists are deep-copied too: the Options
-// slice of each described approval is cloned, so a caller
-// mutating a returned Options cannot corrupt the stored result
-// (the sharing is terminal-only otherwise, but the clone is
-// trivial and removes the aliasing entirely).
+// returned Outcome is a deep copy; mutating it does not affect
+// the Waiter. Each described approval is cloned (all seven
+// pointer fields get fresh allocations, and the Options slice
+// is cloned), so a caller mutating a returned approval cannot
+// corrupt the stored result.
 func (w *Waiter) Result() *Outcome {
 	if w.result == nil {
 		return nil
@@ -272,7 +270,7 @@ func (w *Waiter) Result() *Outcome {
 	if w.result.Approvals != nil {
 		cp.Approvals = append([]approvals.DescribedApproval(nil), w.result.Approvals...)
 		for i := range cp.Approvals {
-			cp.Approvals[i].Options = slices.Clone(w.result.Approvals[i].Options)
+			cp.Approvals[i] = cp.Approvals[i].Clone()
 		}
 	}
 	return &cp
@@ -294,9 +292,22 @@ func (w *Waiter) ApprovedRecords() []approvals.ApprovedRecord {
 
 // ApproveErrors returns the auto-approve error records
 // accumulated across approver calls, in offer order. The driver
-// copies them into the Result.
+// copies them into the Result. Each record is a copy: mutating
+// a returned record does not affect the Waiter. The Err values
+// are shared — errors are immutable by convention, and cloning
+// them would break errors.As identity — so only the record
+// struct is copied, never the error chain.
 func (w *Waiter) ApproveErrors() []*approvals.ApproveError {
-	return append([]*approvals.ApproveError(nil), w.approveErrors...)
+	out := make([]*approvals.ApproveError, 0, len(w.approveErrors))
+	for _, e := range w.approveErrors {
+		if e == nil {
+			out = append(out, nil)
+			continue
+		}
+		cp := *e
+		out = append(out, &cp)
+	}
+	return out
 }
 
 // SeenRunning reports whether a root-confirmed running for the
@@ -513,8 +524,10 @@ func (w *Waiter) storeIgnored(s, reason string, ev Event) {
 // Duplicate approval ids in one snapshot are deduped first-wins:
 // only the first non-expired description of an id is offered or
 // reported, so one duplicated id can never be decided twice from
-// one snapshot. Nil-id descriptions carry no id to dedupe on and
-// are all kept (they are never offered to the approver).
+// one snapshot. An id is present iff ApprovalID is non-nil: the
+// empty string dedupes like any other id. Nil-id descriptions
+// carry no id to dedupe on and are all kept (they are never
+// offered to the approver).
 //
 // A fatal approver error (an AuthError from decide) sets
 // fatalErr and no result: the driver surfaces it as an error
@@ -546,7 +559,12 @@ func (w *Waiter) feedApprovals(ev Event, pend []any) *Outcome {
 		if w.expired(d) {
 			continue
 		}
-		if id := derefID(d.ApprovalID); id != "" {
+		if d.ApprovalID != nil {
+			// An id is present iff the pointer is non-nil:
+			// the empty string dedupes first-wins like any
+			// other id. Only a nil id carries nothing to
+			// dedupe on.
+			id := *d.ApprovalID
 			if seenIDs[id] {
 				continue
 			}

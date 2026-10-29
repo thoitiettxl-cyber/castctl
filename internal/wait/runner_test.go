@@ -496,6 +496,130 @@ func TestRunnerLagWindow(t *testing.T) {
 	})
 }
 
+func TestRunnerLagWindowCancelReturnsCtxErr(t *testing.T) {
+	// Cancelling during the lag window must end the wait with
+	// the context error, never a Done/0 result: Python's
+	// KeyboardInterrupt is a BaseException that _run_wait never
+	// converts into a result, and ctx cancellation is its Go
+	// analogue. Pre-fix the lag loop swallowed the cancel and
+	// reported Done.
+	synctest.Test(t, func(t *testing.T) {
+		sub := &fakeSubscriber{loopScript: [][]byte{
+			recordJSON(taskEv("running", "R", "R", 120, nil)),
+			recordJSON(taskEv("completed", "R", "R", 180, nil)),
+		}}
+		hist := &queueHistory{resps: []historyResp{
+			historyOK([]any{userEv(100)}),
+			historyOK([]any{userEv(100)}),
+			historyOK([]any{userEv(100)}),
+		}}
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			cancel()
+		}()
+		r, err := NewRunner(Config{
+			Timeout:   60 * time.Second,
+			LagWindow: 2 * time.Second,
+			LagPoll:   250 * time.Millisecond,
+			Dial:      sub.dial,
+			History:   hist,
+		})
+		if err != nil {
+			t.Fatalf("NewRunner: %v", err)
+		}
+		res, err := r.Run(ctx)
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Run err = %v (res = %+v), want context.Canceled, never a Done result", err, res)
+		}
+		if res != nil {
+			t.Errorf("res = %+v, want nil on cancellation", res)
+		}
+	})
+}
+
+// cancelPollHistory serves two OK windows (boundary + final
+// read), then blocks on the passed context and returns its
+// error: a lag poll whose reader honors cancellation.
+type cancelPollHistory struct {
+	calls int
+}
+
+func (h *cancelPollHistory) ReadHistory(ctx context.Context, limit int) ([]any, bool, error) {
+	h.calls++
+	if h.calls <= 2 {
+		return []any{userEv(100)}, false, nil
+	}
+	<-ctx.Done()
+	return nil, false, ctx.Err()
+}
+
+func TestRunnerLagPollCtxErrReturnsCtxErr(t *testing.T) {
+	// A lag poll whose reader returns ctx.Err() (cancel fired
+	// while the poll was in flight) must end the wait with
+	// ctx.Err(), never a Done result.
+	synctest.Test(t, func(t *testing.T) {
+		sub := &fakeSubscriber{loopScript: [][]byte{
+			recordJSON(taskEv("running", "R", "R", 120, nil)),
+			recordJSON(taskEv("completed", "R", "R", 180, nil)),
+		}}
+		hist := &cancelPollHistory{}
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			cancel()
+		}()
+		r, err := NewRunner(Config{
+			Timeout:   60 * time.Second,
+			LagWindow: 2 * time.Second,
+			LagPoll:   250 * time.Millisecond,
+			Dial:      sub.dial,
+			History:   hist,
+		})
+		if err != nil {
+			t.Fatalf("NewRunner: %v", err)
+		}
+		res, err := r.Run(ctx)
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Run err = %v (res = %+v), want context.Canceled, never a Done result", err, res)
+		}
+		if res != nil {
+			t.Errorf("res = %+v, want nil on cancellation", res)
+		}
+	})
+}
+
+func TestRunnerSettlePendingPrefersCtxErr(t *testing.T) {
+	// A non-conforming HistoryReader that returns a transport
+	// error after the context died must not mask the
+	// cancellation: settlePending returns ctx.Err(), on both
+	// the replies path and the failed-terminal path.
+	setup := func(status string) *Runner {
+		t.Helper()
+		sub := &fakeSubscriber{}
+		hist := &queueHistory{resps: []historyResp{{err: errTransport}}}
+		r, err := NewRunner(Config{Timeout: 60 * time.Second, Dial: sub.dial, History: hist})
+		if err != nil {
+			t.Fatalf("NewRunner: %v", err)
+		}
+		r.waiter.Feed(taskEv(status, "R", "R", 180, nil))
+		if term, ok := r.waiter.IgnoredTerminal(); !ok || term != status {
+			t.Fatalf("ignored terminal = %q, %v, want %q", term, ok, status)
+		}
+		return r
+	}
+	for _, status := range []string{"idle", "interrupted"} {
+		t.Run(status, func(t *testing.T) {
+			r := setup(status)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if err := r.settlePending(ctx, status); !errors.Is(err, context.Canceled) {
+				t.Errorf("settlePending err = %v, want context.Canceled (ctx.Err() wins over the transport error)", err)
+			}
+		})
+	}
+}
+
 func TestRunnerExplicitBoundaryNeverAcceptsReplayedFailed(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		sub := &fakeSubscriber{loopScript: [][]byte{
@@ -697,6 +821,77 @@ func TestRunnerNilSubscriberIsTransportFailure(t *testing.T) {
 	})
 }
 
+func TestIsNilSubscriber(t *testing.T) {
+	var nilFake *fakeSubscriber
+	var nilStorm *stormSubscriber
+	tests := []struct {
+		name string
+		sub  Subscriber
+		want bool
+	}{
+		{"nil interface", nil, true},
+		{"typed nil fakeSubscriber", nilFake, true},
+		{"typed nil stormSubscriber", nilStorm, true},
+		{"live subscriber", &fakeSubscriber{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isNilSubscriber(tt.sub); got != tt.want {
+				t.Errorf("isNilSubscriber = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunnerTypedNilSubscriberIsTransportFailure(t *testing.T) {
+	// Dial returning a typed-nil Subscriber (a nil pointer
+	// inside the interface) must never panic: it is a
+	// transport failure, resubscribed with backoff until the
+	// deadline, exactly like (nil, nil).
+	synctest.Test(t, func(t *testing.T) {
+		var nilSub *fakeSubscriber
+		hist := &queueHistory{resps: []historyResp{historyOK([]any{userEv(100)})}}
+		r, err := NewRunner(Config{
+			Timeout: 5 * time.Second,
+			Dial: func(ctx context.Context) (Subscriber, error) {
+				return nilSub, nil
+			},
+			History: hist,
+		})
+		if err != nil {
+			t.Fatalf("NewRunner: %v", err)
+		}
+		res, err := r.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v, want no error", err)
+		}
+		if res.Kind != KindTimeout || res.ExitCode != 124 {
+			t.Errorf("res = %+v, want timeout/124", res)
+		}
+	})
+}
+
+func TestRunnerCheckStateTypedNilSubscriber(t *testing.T) {
+	// checkState's Dial returning a typed-nil Subscriber must
+	// fail silently (no panic, nil error), like (nil, nil).
+	var nilSub *fakeSubscriber
+	hist := &queueHistory{resps: []historyResp{historyOK([]any{userEv(100)})}}
+	r, err := NewRunner(Config{
+		Timeout: 60 * time.Second,
+		Dial: func(ctx context.Context) (Subscriber, error) {
+			return nilSub, nil
+		},
+		History: hist,
+	})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	r.deadline = r.clock.Now().Add(time.Minute)
+	if err := r.checkState(context.Background()); err != nil {
+		t.Errorf("checkState = %v, want nil (typed-nil Subscriber is a silent transport failure)", err)
+	}
+}
+
 func TestRunnerEmptyHistoryLimitsUseDefaults(t *testing.T) {
 	// An explicitly empty HistoryLimits is unset, not "no
 	// windows": the boundary is derived from the defaults.
@@ -800,12 +995,12 @@ func TestNewRunnerClampsNegativeDurations(t *testing.T) {
 	if r.cfg.RecheckAfter != -1 || r.cfg.CheckEvery != -1 {
 		t.Errorf("RecheckAfter/CheckEvery = %v/%v, want -1/-1 (disable)", r.cfg.RecheckAfter, r.cfg.CheckEvery)
 	}
-	// HistoryLimits defaults are cloned, not aliased.
-	if len(r.cfg.HistoryLimits) != len(DefaultHistoryLimits) {
-		t.Fatalf("HistoryLimits = %v, want %v", r.cfg.HistoryLimits, DefaultHistoryLimits)
+	// HistoryLimits defaults are a fresh copy per Runner.
+	if len(r.cfg.HistoryLimits) != len(DefaultHistoryLimits()) {
+		t.Fatalf("HistoryLimits = %v, want %v", r.cfg.HistoryLimits, DefaultHistoryLimits())
 	}
 	r.cfg.HistoryLimits[0] = 999
-	if DefaultHistoryLimits[0] == 999 {
+	if DefaultHistoryLimits()[0] == 999 {
 		t.Error("mutating the Runner's limits must not mutate DefaultHistoryLimits")
 	}
 }

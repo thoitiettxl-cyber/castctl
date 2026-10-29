@@ -9,20 +9,34 @@ import (
 )
 
 func TestWaitPhrasesCount(t *testing.T) {
-	if len(WaitPhrases) != 34 {
-		t.Fatalf("wait phrases = %d, want 34", len(WaitPhrases))
+	phrases := WaitPhrases()
+	if len(phrases) != 34 {
+		t.Fatalf("wait phrases = %d, want 34", len(phrases))
 	}
 	// Every phrase is exercised by NeedsInputReason below; here
 	// pin the exact list order (order decides the named phrase).
 	wantFirst := "chờ boss"
 	wantLast := "your call"
-	if WaitPhrases[0] != wantFirst || WaitPhrases[33] != wantLast {
-		t.Errorf("first=%q last=%q", WaitPhrases[0], WaitPhrases[33])
+	if phrases[0] != wantFirst || phrases[33] != wantLast {
+		t.Errorf("first=%q last=%q", phrases[0], phrases[33])
+	}
+}
+
+func TestWaitPhrasesAccessorReturnsCopy(t *testing.T) {
+	// The accessor returns a fresh copy: mutating it must
+	// neither corrupt the vocabulary nor change matching.
+	got := WaitPhrases()
+	got[0] = "mutated"
+	if again := WaitPhrases(); again[0] != "chờ boss" {
+		t.Errorf("second accessor call = %q, want %q (mutation leaked)", again[0], "chờ boss")
+	}
+	if got := NeedsInputReason("Done. chờ boss now"); got != "waiting phrase: 'chờ boss'" {
+		t.Errorf("NeedsInputReason after mutation = %q, want the waiting phrase", got)
 	}
 }
 
 func TestNeedsInputReasonAllPhrases(t *testing.T) {
-	for _, ph := range WaitPhrases {
+	for _, ph := range WaitPhrases() {
 		text := "Done. " + ph + " now"
 		// Phrases ending in "?" already end the text with a
 		// question; the phrase rule still wins over the tail

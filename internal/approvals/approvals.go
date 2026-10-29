@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -180,7 +181,35 @@ func expiresAtMS(v any) *float64 {
 	return &f
 }
 
-// OffersForever reports whether the approval can be decided with
+// Clone returns a deep copy of d: every pointer field points
+// at a new allocation holding the same value, and Options is
+// cloned. A DescribedApproval handed across a result boundary
+// must be cloned, so a caller mutating the copy can never
+// corrupt the stored description.
+func (d DescribedApproval) Clone() DescribedApproval {
+	cp := d
+	cp.ApprovalID = cloneStringPtr(d.ApprovalID)
+	cp.Title = cloneStringPtr(d.Title)
+	cp.Question = cloneStringPtr(d.Question)
+	cp.Kind = cloneStringPtr(d.Kind)
+	cp.Scope = cloneStringPtr(d.Scope)
+	cp.Why = cloneStringPtr(d.Why)
+	if d.ExpiresAtMS != nil {
+		v := *d.ExpiresAtMS
+		cp.ExpiresAtMS = &v
+	}
+	cp.Options = slices.Clone(d.Options)
+	return cp
+}
+
+func cloneStringPtr(s *string) *string {
+	if s == nil {
+		return nil
+	}
+	v := *s
+	return &v
+}
+
 // the forever choice. Approvals that list no options (older
 // servers) are assumed to accept it.
 func OffersForever(d DescribedApproval) bool {
@@ -297,6 +326,12 @@ func (e *ApproveError) Unwrap() error { return e.Err }
 // id claims it: the Decider runs at most once per id for the
 // AutoApprover's lifetime, and a concurrent or later presentation
 // of the same id is skipped silently (no re-decide, no warning).
+// An id is present iff the description's ApprovalID pointer is
+// non-nil: the empty string claims like any other id. Parity
+// note: Python's make_auto_approver has no claim set (only the
+// Waiter's offered set gates re-offers); the decided set is a
+// Go-only lifetime guard, stricter by design, so a lost reply
+// can never be re-decided through a reused approver either.
 // A failed decide still claims the id — Decide is not idempotent,
 // and a failed or lost reply must never be re-decided blindly; the
 // error is returned and the caller must surface it. The mutex
@@ -391,7 +426,11 @@ func (a *AutoApprover) Approve(ctx context.Context, items []DescribedApproval) (
 			}
 			continue
 		}
-		if id := deref(item.ApprovalID); id != "" {
+		if item.ApprovalID != nil {
+			// An id is present iff the pointer is non-nil: the
+			// empty string is a present id and claims like
+			// any other. Only a nil id carries no claim.
+			id := *item.ApprovalID
 			a.mu.Lock()
 			claimed := a.decided[id]
 			if !claimed {

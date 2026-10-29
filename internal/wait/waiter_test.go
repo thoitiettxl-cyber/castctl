@@ -5,6 +5,7 @@
 package wait
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -709,6 +710,49 @@ func TestFeedApprovalsNilIDsNotDeduped(t *testing.T) {
 	}
 }
 
+func TestFeedApprovalsEmptyIDsDedupedFirstWins(t *testing.T) {
+	// "" is a present id: two "" descriptions in one snapshot
+	// dedupe first-wins, are offered/decided at most once, and
+	// are not re-offered on a later snapshot. The first
+	// description's options pin the decision.
+	decided := []string{}
+	decideCalls := 0
+	aa := approvals.NewAutoApprover(func(ctx context.Context) (approvals.Decider, func(), error) {
+		return func(ctx context.Context, a approvals.DescribedApproval, decision string) error {
+			decideCalls++
+			decided = append(decided, decision)
+			return nil
+		}, func() {}, nil
+	}, false)
+	w := New("", WithApprover(aa.AsApprover()))
+	first := map[string]any{
+		"approval_id":      "",
+		"display":          map[string]any{"summary_title": "first"},
+		"decision_options": []any{map[string]any{"kind": "allow_always"}},
+	}
+	second := map[string]any{
+		"approval_id":      "",
+		"display":          map[string]any{"summary_title": "second"},
+		"decision_options": []any{map[string]any{"kind": "allow_always"}, map[string]any{"kind": "allow_once"}},
+	}
+	snap := approvalEv([]any{first, second}, nil)
+	if out := w.Feed(snap); out != nil {
+		t.Fatalf("handled \"\" snapshot = %v, want nil (keep waiting)", out)
+	}
+	if decideCalls != 1 || len(decided) != 1 || decided[0] != approvals.Forever {
+		t.Fatalf("decide calls = %d decided = %v, want 1 call with allow_always (first wins)", decideCalls, decided)
+	}
+	if recs := w.ApprovedRecords(); len(recs) != 1 || recs[0].Title != "first" {
+		t.Errorf("approved records = %v, want the first description", recs)
+	}
+	if out := w.Feed(snap); out != nil {
+		t.Fatalf("second \"\" snapshot = %v, want nil", out)
+	}
+	if decideCalls != 1 {
+		t.Errorf("decide calls after second snapshot = %d, want 1 (never re-decided)", decideCalls)
+	}
+}
+
 func TestFeedApprovalsAuthErrorIsFatal(t *testing.T) {
 	authErr := conn.NewAuthError("expired")
 	w := New("", WithApprover(func(items []approvals.DescribedApproval) approvals.ApprovalResult {
@@ -773,5 +817,64 @@ func TestResultDeepCopiesApprovalOptions(t *testing.T) {
 	r2 := w.Result()
 	if r2.Approvals[0].Options[0] != approvals.Forever {
 		t.Errorf("second Result Options = %v, want [%q] (mutation leaked)", r2.Approvals[0].Options, approvals.Forever)
+	}
+}
+
+func TestResultDeepCopiesApprovalPointerFields(t *testing.T) {
+	// All seven pointer fields must be deep-copied: mutating
+	// *Title/*ApprovalID (or any other) on a returned Result
+	// must not corrupt the Waiter's stored description.
+	w := New("")
+	pend := map[string]any{
+		"approval_id": "A",
+		"display": map[string]any{
+			"summary_title":     "T",
+			"short_explanation": "W",
+			"permission_question": map[string]any{
+				"text": "Q", "kind": "K", "scope": "S",
+			},
+		},
+		"request_expires_at_ms": float64(4102444800000),
+	}
+	w.Feed(approvalEv([]any{pend}, nil))
+	r1 := w.Result()
+	if len(r1.Approvals) != 1 {
+		t.Fatalf("result = %v", r1)
+	}
+	d := &r1.Approvals[0]
+	if d.ApprovalID == nil || d.Title == nil || d.Question == nil || d.Kind == nil ||
+		d.Scope == nil || d.Why == nil || d.ExpiresAtMS == nil {
+		t.Fatalf("approval pointers = %+v, want all seven non-nil", d)
+	}
+	*d.ApprovalID, *d.Title, *d.Question = "mutated", "mutated", "mutated"
+	*d.Kind, *d.Scope, *d.Why = "mutated", "mutated", "mutated"
+	*d.ExpiresAtMS = 0
+	r2 := w.Result()
+	got := r2.Approvals[0]
+	if *got.ApprovalID != "A" || *got.Title != "T" || *got.Question != "Q" ||
+		*got.Kind != "K" || *got.Scope != "S" || *got.Why != "W" ||
+		*got.ExpiresAtMS != float64(4102444800000) {
+		t.Errorf("second Result approval = %+v (fields %q %q %q %q %q %q %v), want the stored values (mutation leaked)",
+			got, *got.ApprovalID, *got.Title, *got.Question, *got.Kind, *got.Scope, *got.Why, *got.ExpiresAtMS)
+	}
+}
+
+func TestApproveErrorsReturnsCopies(t *testing.T) {
+	// ApproveErrors clones each record: mutating a returned
+	// record must not corrupt the Waiter's stored errors.
+	appErr := &approvals.ApproveError{ApprovalID: "B", Title: "T", Err: errBoom}
+	w := New("", WithApprover(func(items []approvals.DescribedApproval) approvals.ApprovalResult {
+		return approvals.ApprovalResult{Errors: []*approvals.ApproveError{appErr}}
+	}))
+	w.Feed(approvalEv([]any{appr("A"), appr("B")}, nil))
+	got1 := w.ApproveErrors()
+	if len(got1) != 1 {
+		t.Fatalf("ApproveErrors = %v", got1)
+	}
+	got1[0].Title = "mutated"
+	got1[0].ApprovalID = "mutated"
+	got2 := w.ApproveErrors()
+	if got2[0].Title != "T" || got2[0].ApprovalID != "B" {
+		t.Errorf("second ApproveErrors = %+v, want the stored record (mutation leaked)", got2[0])
 	}
 }

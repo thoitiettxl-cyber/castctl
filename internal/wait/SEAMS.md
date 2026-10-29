@@ -3,8 +3,9 @@
 Status: SEAMS ONLY. No dead code on this branch: the interface
 sketches below are documentation (code blocks in this file), and
 the live contracts are the Go interfaces in `runner.go`
-(`Subscriber`, `HistoryReader`), `waiter.go` (`Decider` use via
-`approvals.AutoApprover`), and `approvals.go` (`Approver`).
+(`Subscriber`), `history.go` (`HistoryReader`), and
+`approvals.go` (`Approver`, `Decider`); `waiter.go` consumes
+`Approver` via `WithApprover` and defines no seam of its own.
 
 ## 1. The driver contract (live, implemented)
 
@@ -198,6 +199,33 @@ the wiring PR resolves the profile and hands the Runner its
   logger. The records are carried in `Result.AutoApproved` /
   `Result.AutoApproveErrors` and the CLI wiring owns
   printing/logging them from there.
+- D7: a decide-time AuthError is fatal in Go, not exit 4. In
+  Python the bare Waiter catches every approver exception
+  (`wait.py:292-297`, `except Exception`), including AuthError
+  (a `RuntimeError`, `gateway.py:52`): `make_auto_approver`
+  catches only `(GatewayError, TimeoutError)` around the
+  decide call, so an AuthError from decide reaches the
+  Waiter's catch, the ids go to `approver_failed`, and the
+  wait ends as `("approval", ...)` for a human: exit 4. Go's
+  `AutoApprover.AsApprover` instead returns the AuthError
+  unwrapped as `ApprovalResult.Err`, the Waiter records it as
+  fatal, and the Runner returns it as an error (exit 2),
+  matching `_run_wait`'s outer contract that AuthError is
+  re-raised, never swallowed (`cli.py:1254-1267`).
+  Deliberate: an expired login must never become exit 4
+  needs_approval, which would hide the re-login need behind
+  a human step. Pinned by `TestRunnerApproverAuthErrorPropagates`.
+- D8: cancellation during the endgame propagates `ctx.Err()`,
+  never a Done result. Python has no context:
+  KeyboardInterrupt is a BaseException that `_run_wait`'s
+  `except Exception` never catches (`cli.py:1254-1267`), so
+  an interrupt during the endgame propagates out of the wait
+  instead of becoming a result. Go's context cancellation is
+  the analogue: `finish()` returns `ctx.Err()` when the
+  context dies during the lag window, including a lag poll
+  whose reader returns `ctx.Err()`. Pinned by
+  `TestRunnerLagWindowCancelReturnsCtxErr` and
+  `TestRunnerLagPollCtxErrReturnsCtxErr`.
 
 ## 8. Deferred wiring (exact list)
 

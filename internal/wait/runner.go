@@ -8,7 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
+	"reflect"
 	"strings"
 	"time"
 
@@ -58,6 +58,12 @@ const (
 // invoked serially, on the goroutine that called SubscribeRaw:
 // the Runner's callbacks assume single-goroutine access and no
 // other goroutine feeds the Waiter.
+//
+// Dial contract: Dial must return a usable Subscriber or an
+// error. A nil Subscriber (nil, or a typed nil inside the
+// interface) is treated as a transport failure, never a panic
+// (see isNilSubscriber); a Dial that returns a non-nil
+// Subscriber must honor Close and SubscribeRaw on it.
 type Subscriber interface {
 	SubscribeRaw(ctx context.Context, method string, opts conn.SubscribeOptions) ([][]byte, error)
 	Close() error
@@ -68,15 +74,36 @@ type Subscriber interface {
 // if the Gateway contract ever drifts from the narrowed one.
 var _ Subscriber = (conn.Gateway)(nil)
 
+// isNilSubscriber reports whether s is nil or holds a nil
+// value: a typed-nil pointer inside the Subscriber interface
+// (a Dial returning (*fakeGateway)(nil), say) compares non-nil
+// against the interface, and only reflection sees through it.
+// The Runner treats such a Subscriber as a transport failure,
+// never a panic. Dial's contract is to return a usable
+// Subscriber or an error; this guard is the fail-closed backstop
+// for a Dial that breaks it.
+func isNilSubscriber(s Subscriber) bool {
+	if s == nil {
+		return true
+	}
+	v := reflect.ValueOf(s)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
 // Config configures a Runner. Zero values take the defaults
 // above; a negative duration disables that timer (watchdog,
 // safety-net cadence) for RecheckAfter and CheckEvery only. Every
 // other negative duration is clamped to its default in NewRunner:
 // a negative budget or pause is a misconfiguration, not a
 // disable. Timeout <= 0 means DefaultTimeout.
-// HistoryLimits nil or empty means DefaultHistoryLimits
-// (cloned: the Runner never aliases the shared slice). Clock nil
-// means the real clock.
+// HistoryLimits nil or empty means DefaultHistoryLimits()
+// (a fresh copy per Runner: the Runner never aliases the shared
+// defaults). Clock nil means the real clock.
 //
 // There is no OnlineGrace field: the 3 s online-idle grace is a
 // fixed protocol constant (DefaultOnlineGrace), not a
@@ -240,10 +267,11 @@ func NewRunner(cfg Config) (*Runner, error) {
 	}
 	// A nil or explicitly empty HistoryLimits means "unset":
 	// an empty slice would otherwise disable every history
-	// proof (no windows to read). Clone so the Runner never
-	// aliases the shared default slice.
+	// proof (no windows to read). DefaultHistoryLimits
+	// returns a fresh copy, so the Runner never aliases the
+	// shared defaults.
 	if len(cfg.HistoryLimits) == 0 {
-		cfg.HistoryLimits = slices.Clone(DefaultHistoryLimits)
+		cfg.HistoryLimits = DefaultHistoryLimits()
 	}
 	r := &Runner{cfg: cfg, clock: cfg.Clock}
 	r.waiter = New(cfg.Thread, WithApprover(cfg.Approver))
@@ -371,13 +399,11 @@ func (r *Runner) subscribeOnce(ctx context.Context) error {
 		r.failures++
 		return r.noteFailure(ctx)
 	}
-	if sub == nil {
-		// A Dial that returns (nil, nil) is a transport
+	if isNilSubscriber(sub) {
+		// A Dial that returns a nil Subscriber (nil, or a
+		// typed nil inside the interface) is a transport
 		// failure, never a panic: resubscribe with backoff
-		// like any other failed dial. (A typed nil inside a
-		// non-nil interface is out of scope: the Dial
-		// contract is to return a usable Subscriber or an
-		// error.)
+		// like any other failed dial.
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -603,7 +629,10 @@ func (r *Runner) settlePending(ctx context.Context, pending string) error {
 	if failed[pending] {
 		latest, found, err := LatestUserSeq(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
 		if err != nil {
-			if isAuthError(err) || ctx.Err() != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if isAuthError(err) {
 				return err
 			}
 			return fmt.Errorf("%w: %w", errHistoryRead, err)
@@ -618,7 +647,10 @@ func (r *Runner) settlePending(ctx context.Context, pending string) error {
 	}
 	replies, err := HistoryReplies(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
 	if err != nil {
-		if isAuthError(err) || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if isAuthError(err) {
 			return err
 		}
 		return fmt.Errorf("%w: %w", errHistoryRead, err)
@@ -650,9 +682,10 @@ func (r *Runner) checkState(ctx context.Context) error {
 		}
 		return nil
 	}
-	if sub == nil {
-		// (nil, nil) from Dial is a silent transport
-		// failure here, as in subscribeOnce: never a panic.
+	if isNilSubscriber(sub) {
+		// (nil, nil) — or a typed nil — from Dial is a
+		// silent transport failure here, as in
+		// subscribeOnce: never a panic.
 		return nil
 	}
 	// Close is deferred, not called after SubscribeRaw: a
@@ -791,7 +824,11 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 			select {
 			case <-r.clock.After(poll):
 			case <-ctx.Done():
-				remaining = 0
+				// Cancellation during the endgame
+				// propagates, as Python's BaseException
+				// does out of _run_wait: never a Done/0
+				// result for a wait the caller stopped.
+				return nil, ctx.Err()
 			}
 			if remaining <= 0 || ctx.Err() != nil {
 				break
@@ -801,6 +838,9 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 			rs, err := HistoryReplies(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
 			cancel()
 			if err != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
 				// A failed poll ends the window without
 				// failing the done result.
 				break
@@ -809,6 +849,9 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 			if len(replies) > 0 {
 				break
 			}
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
 	}
 	if finalReadFailed && kind == KindDone {

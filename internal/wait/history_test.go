@@ -39,6 +39,16 @@ func (h *scriptHistory) ReadHistory(ctx context.Context, limit int) ([]any, bool
 
 var errTransport = errors.New("transport down")
 
+func TestDefaultHistoryLimitsAccessorReturnsCopy(t *testing.T) {
+	// The accessor returns a fresh copy: mutating it must not
+	// change the defaults the next Runner gets.
+	got := DefaultHistoryLimits()
+	got[0] = 999
+	if again := DefaultHistoryLimits(); len(again) != 3 || again[0] != 200 {
+		t.Errorf("second accessor call = %v, want [200 500 1000] (mutation leaked)", again)
+	}
+}
+
 // userEv builds a message.user history event.
 func userEv(seq int) Event {
 	return Event{"event_name": "message.user", "seq": seq, "payload": map[string]any{"display_text": "hi"}}
