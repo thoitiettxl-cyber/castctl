@@ -46,7 +46,7 @@ fingerprint and tls_engine settings are recorded only: the runtime
 stays on the uTLS chrome fingerprint (see "profile set-fingerprint
 --help"). No browser is assumed: the screencast-login browser
 dependency is optional and runtime-detected, and no-browser setups
-fall back to auth import (a later PR).
+fall back to auth import.
 `
 
 // deferredHelpText prints a short help stub for a deferred command:
@@ -278,9 +278,10 @@ mv, rm. Run "muse-cli fs <subcommand> --help" for per-subcommand help.
 const authHelpText = `usage: muse-cli auth <subcommand> [options]
 
 Authentication helpers. "auth export" prints guidance only (exit 1,
-no writes): no new login flow is implemented in this port yet.
+no writes). "auth import" reads cookies from stdin and writes the
+active profile's cookies.txt (see "muse-cli auth import --help").
 
-Subcommands: list, export. Run "muse-cli auth <subcommand> --help"
+Subcommands: list, export, import. Run "muse-cli auth <subcommand> --help"
 for per-subcommand help.
 `
 
@@ -298,6 +299,27 @@ const authExportHelpText = `usage: muse-cli auth export
 
 Print guidance for exporting cookies from a signed-in browser.
 Guidance only: exit 1, writes nothing, opens no browser.
+`
+
+const authImportHelpText = `usage: muse-cli auth import
+
+Read cookies from stdin and write them to the active profile's
+cookies.txt file, replacing its previous contents (kept as
+cookies.txt.bak). Stdin only: cookies are never taken from argv.
+No network request is made; run "muse-cli status" afterwards to
+check the login.
+
+Accepted input forms (hatch_sess is required, with a non-empty value):
+
+  one-line:  hatch_sess=VALUE; other_name=other_value
+             (pairs separated by "; ")
+  Netscape:  a tab-separated cookie jar, one cookie per line
+             (domain, flag, path, secure, expires, name, value)
+  JSON:      {"cookies": {"hatch_sess": "VALUE", ...}} or a flat
+             {"hatch_sess": "VALUE", ...} object
+
+The input is stored verbatim (after line-ending normalisation),
+with a single trailing newline. The file mode is 600.
 `
 
 const profileHelpText = `usage: muse-cli profile <subcommand> [options]

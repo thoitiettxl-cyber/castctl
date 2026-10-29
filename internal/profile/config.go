@@ -1088,31 +1088,45 @@ func SaveSingleConfig(baseDir string, cfg *SingleConfig) error {
 	return err
 }
 
+// writeTempFile writes data to a new temp file in dir (mode perm, set
+// before writing) and syncs it. The caller owns the returned name and
+// must remove or rename it.
+func writeTempFile(dir string, data []byte, perm os.FileMode) (string, error) {
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return "", err
+	}
+	tmpName := tmp.Name()
+	fail := func(err error) (string, error) {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return "", err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		return fail(err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return "", err
+	}
+	return tmpName, nil
+}
+
 // writeFileAtomic writes data to a temp file in the same directory
 // (mode perm, set before writing) and renames it over path.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	tmpName, err := writeTempFile(dir, data, perm)
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
-	if err := tmp.Chmod(perm); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return err
 	}

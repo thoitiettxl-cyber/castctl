@@ -131,7 +131,7 @@ codes):
 | Sessions & control | `session-start`, `session-rename`, `session-pin`, `session-unpin`, `session-archive`, `session-unarchive`, `session-delete`, `stop`, `wake` |
 | Low level | `raw` |
 | Sandbox filesystem | `fs ls`, `fs tree`, `fs stat`, `fs cat`, `fs get`, `fs find`, `fs put`, `fs write`, `fs edit`, `fs mkdir`, `fs mv`, `fs rm` |
-| Auth & profiles | `auth list`, `auth export` (guidance-only, exit 1), `profile list`, `profile show`, `profile add`, `profile rm`, `profile set-outbound`, `profile set-fingerprint`, `profile set-tls-engine`, `profile test`, `config migrate` |
+| Auth & profiles | `auth list`, `auth import` (stdin only, see below), `auth export` (guidance-only, exit 1), `profile list`, `profile show`, `profile add`, `profile rm`, `profile set-outbound`, `profile set-fingerprint`, `profile set-tls-engine`, `profile test`, `config migrate` |
 
 Deferred (the parser names the PR; `--help` still works):
 
@@ -140,10 +140,26 @@ Deferred (the parser names the PR; `--help` still works):
 | `send`, `wait`, `approvals`, `approve`, `deny`, `auto-approve`, bare invocation (chat REPL) | PR4 |
 | `telegram` (+ subcommands), `update` | PR5 |
 
-`auth import` is approved but ships after PR3. No new login flow is
-implemented in PR3 (no native endpoint login, no relay, no
-device-code/QR, no paste-login); `auth export` only prints manual
-guidance and exits 1 without writing anything.
+`auth import` is implemented (added after PR3): `muse-cli auth import
+[--profile NAME] < cookies.txt` reads cookies from stdin only and
+replaces the active profile's cookies file. It accepts the three
+forms `ParseCookies` parses (one-line `a=b; c=d`, Netscape jar, JSON
+object), requires a parsed `hatch_sess` pair with a non-empty value,
+and stores the input verbatim after CRLF/CR line-ending
+normalisation, with a single trailing newline. The write is atomic
+(temp file + rename) with the previous file kept as `cookies.txt.bak`;
+both files are mode 0600. All import failures exit 2 and write
+nothing; success prints value-free JSON
+(`{"ok": true, "profile": ..., "cookies_file": ..., "backup": ...}`).
+Import makes no network request (validate with `muse-cli status`
+afterwards) and never creates a config entry. Concurrent imports are
+last-writer-wins with no lock. No other new login flow is implemented
+(no native endpoint login, no relay, no device-code/QR, no
+paste-login); `auth export` only prints manual guidance and exits 1
+without writing anything. Note: this branch has no CLI-boundary
+panic recover yet (PR4 owns it, R2 decision); `auth import` merges
+after PR4 or rebases onto it, and is written to never panic on
+hostile stdin in the meantime.
 
 `auth list` fails closed when any profile config is unparseable:
 it returns the config error instead of listing. Python 0.6.1 is
@@ -285,7 +301,7 @@ agent-browser, or sandbox paths. The port targets Debian/server
 Linux, rooted Android (Termux/KernelSU, arm64), Windows, and macOS.
 No browser is assumed: the screencast-login browser dependency is
 optional and runtime-detected, and the no-browser fallback is
-`auth import` (after PR3).
+`auth import`.
 
 Cross-compile matrix, measured in PR3 (compile-only, no execution;
 `CGO_ENABLED=0 go build -trimpath -ldflags '-s -w -buildid='
