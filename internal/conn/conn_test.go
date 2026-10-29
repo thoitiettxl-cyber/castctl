@@ -961,6 +961,13 @@ func TestHeartbeatStopDuringTickExitsOldLoop(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("heartbeat tick never started")
 	}
+	// Snapshot the old loop's done channel BEFORE the stop: the
+	// restart below overwrites hbDone, so this is the only way
+	// to observe the old loop's exit afterwards.
+	oldDone := m.heartbeatDone()
+	if oldDone == nil {
+		t.Fatal("no heartbeat loop running after its tick started")
+	}
 	start := time.Now()
 	m.StopHeartbeat() // bounded by HeartbeatStopTimeout (6s); tick releases below
 	if elapsed := time.Since(start); elapsed > HeartbeatStopTimeout+time.Second {
@@ -970,15 +977,21 @@ func TestHeartbeatStopDuringTickExitsOldLoop(t *testing.T) {
 	// exit on ITS stop channel once the tick returns, not strand.
 	m.StartHeartbeat(20 * time.Millisecond)
 	close(release)
-	deadline := time.Now().Add(3 * time.Second)
-	for m.heartbeatRunning() && time.Now().Before(deadline) {
-		// The restarted loop is running; the old loop's done channel
-		// is internal, so observe via a short settle + no second
-		// concurrent tick: hbTickFn's once-guard means a stranded old
-		// loop would block in the same tick again, which is fine as
-		// long as StopHeartbeat below returns promptly.
-		time.Sleep(10 * time.Millisecond)
-		break
+	// The old loop's done channel must close once its tick
+	// returns: the tick returns at once on the closed release
+	// channel, and the loop's next select sees its closed stop
+	// channel. No 6s floor applies on this path, so 3s is
+	// scheduling slack only. This replaces the previous settle
+	// loop, which observed heartbeatRunning() — the NEW loop —
+	// and broke unconditionally, asserting nothing about the
+	// old loop. No bound in this test is changed: the 49s
+	// event that motivated this assertion was never reproduced
+	// (see the commit message), and no bound below 49s would
+	// address it.
+	select {
+	case <-oldDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("old heartbeat loop did not exit within 3s of its tick returning")
 	}
 	m.StopHeartbeat()
 	if elapsed := time.Since(start); elapsed > 8*time.Second {

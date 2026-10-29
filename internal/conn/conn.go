@@ -732,6 +732,18 @@ func (m *Muse) heartbeatRunning() bool {
 	return m.hbRunning
 }
 
+// heartbeatDone returns the done channel of the currently running
+// heartbeat loop, or nil if none is running. A test snapshots it
+// before a stop+restart to observe THAT loop's exit: the restart
+// overwrites hbDone, so the old loop's channel is unobservable
+// afterwards except through a snapshot taken earlier.
+// Test seam (white-box tests); production code does not need it.
+func (m *Muse) heartbeatDone() chan struct{} {
+	m.hbMu.Lock()
+	defer m.hbMu.Unlock()
+	return m.hbDone
+}
+
 // StartHeartbeat starts the heartbeat goroutine, restarting it when
 // it died and after a stop: a goroutine reference alone never proves
 // it is alive, and a stop from an earlier run must not kill the new
