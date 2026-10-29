@@ -117,8 +117,10 @@ func normaliseImportInput(raw []byte) (string, error) {
 // accepted forms (via ParseCookies semantics, unmodified) and the
 // hatch_sess rule (D4): a parsed pair with the exact name
 // hatch_sess and a non-empty value, in whichever form the input
-// parsed as. It returns an errCode(2) error with a fixed message
-// that never echoes input bytes.
+// parsed as — for JSON input the value must be a non-empty string
+// (D4-CLARIFICATION, see jsonHasHatchPair). It returns an
+// errCode(2) error with a fixed message that never echoes input
+// bytes.
 func validateImportInput(normalised string) error {
 	if normalised == "" {
 		return errCode(2, errors.New("no cookies on stdin"))
@@ -139,7 +141,10 @@ func validateImportInput(normalised string) error {
 // the Netscape jar. Checking the rendered header string would be
 // wrong: a hatch_sess mention inside another cookie's value would
 // false-pass, and a value containing ";" would split mid-value.
-// Each branch therefore inspects its own parsed pairs.
+// Each branch therefore inspects its own parsed pairs. Comment
+// lines are excluded from consideration entirely: neither the
+// qualifying-line scan nor the fallback may count a hatch_sess
+// mention in a `#` line.
 func importHasHatchSess(raw string) bool {
 	if strings.HasPrefix(raw, "{") {
 		if decided, ok := importJSONHasHatchSess(raw); decided {
@@ -149,11 +154,26 @@ func importHasHatchSess(raw string) bool {
 	if strings.Contains(raw, "hatch_sess=") || strings.Contains(raw, "datr=") {
 		for _, line := range strings.Split(raw, "\n") {
 			line = strings.TrimSpace(line)
-			if line != "" && !strings.HasPrefix(line, "#") && strings.Contains(line, "=") && strings.Contains(line, ";") {
+			if line != "" && !isImportCommentLine(line) && !isJarRowLine(line) && strings.Contains(line, "=") && strings.Contains(line, ";") {
 				return lineHasHatchPair(line)
 			}
 		}
-		return lineHasHatchPair(strings.Join(strings.Fields(raw), " "))
+		// No qualifying line: parse strict pairs from the
+		// flattened non-comment, non-jar lines only. A `#`
+		// mention must not produce a pair, and a jar row's
+		// value column must not be scanned as a pair: jar rows
+		// are evaluated only by the jar branch (column 6), and
+		// splitting the flattened text on ";" only (never on
+		// whitespace) means a jar value such as hatch_sess=FAKE
+		// stays inside a segment whose name is not hatch_sess.
+		var kept []string
+		for _, line := range strings.Split(raw, "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" && !isImportCommentLine(line) && !isJarRowLine(line) {
+				kept = append(kept, line)
+			}
+		}
+		return fallbackHasHatchPair(strings.Join(kept, " "))
 	}
 	for _, line := range strings.Split(raw, "\n") {
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -198,20 +218,60 @@ func importJSONHasHatchSess(raw string) (decided bool, ok bool) {
 }
 
 // jsonHasHatchPair reports whether m holds hatch_sess with a
-// non-empty value under ParseCookies rendering: a string counts
-// only when non-blank, null counts as absent, and numbers, bools,
-// and nested values count (they render as a non-empty literal).
-// Duplicate keys collapse last-wins in the decoded map, matching
-// ParseCookies.
+// non-empty STRING value (D4-CLARIFICATION): only a non-blank
+// string counts. Numbers, booleans, arrays, objects, and null do
+// NOT count, even though ParseCookies would render them as
+// non-empty literals — the import check is deliberately stricter
+// than the shared loader, so junk JSON cannot clobber working
+// cookies. Duplicate keys collapse last-wins in the decoded map,
+// matching ParseCookies.
 func jsonHasHatchPair(m map[string]any) bool {
 	v, ok := m["hatch_sess"]
-	if !ok || v == nil {
+	if !ok {
 		return false
 	}
-	if s, isStr := v.(string); isStr {
-		return strings.TrimSpace(s) != ""
+	s, isStr := v.(string)
+	return isStr && strings.TrimSpace(s) != ""
+}
+
+// isImportCommentLine reports whether line is a comment line: a
+// `#` first after surrounding whitespace (and an optional BOM at
+// the start of the input, which TrimSpace does not strip). Comment
+// lines are excluded from the hatch check entirely.
+func isImportCommentLine(line string) bool {
+	line = strings.TrimSpace(line)
+	line = strings.TrimPrefix(line, "\ufeff")
+	return strings.HasPrefix(line, "#")
+}
+
+// isJarRowLine reports whether line is shaped like a Netscape jar
+// row: at least seven tab-separated columns, the same threshold
+// the jar branch uses. Jar rows are evaluated only by that branch
+// (column 6); they must never be pair-scanned as one-line input,
+// even when a value column contains ";" or "hatch_sess=".
+func isJarRowLine(line string) bool {
+	return len(strings.Split(line, "\t")) >= 7
+}
+
+// fallbackHasHatchPair checks the flattened no-qualifying-line
+// text for a hatch_sess pair, strictly: split on ";", split each
+// segment on its first "=", trim the name, and require the exact
+// name hatch_sess with a non-blank value. Whitespace is not a pair
+// separator here: a flattened jar row must not yield a pair from
+// its value column. A leading BOM is stripped for the check only,
+// matching lineHasHatchPair.
+func fallbackHasHatchPair(s string) bool {
+	s = strings.TrimPrefix(s, "\ufeff")
+	for _, seg := range strings.Split(s, ";") {
+		name, value, found := strings.Cut(seg, "=")
+		if !found {
+			continue
+		}
+		if strings.TrimSpace(name) == "hatch_sess" && strings.TrimSpace(value) != "" {
+			return true
+		}
 	}
-	return true
+	return false
 }
 
 // lineHasHatchPair checks one one-line-form string for a

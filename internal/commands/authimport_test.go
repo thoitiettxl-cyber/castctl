@@ -137,6 +137,9 @@ func TestAuthImportOneLinePositive(t *testing.T) {
 		// verbatim (D1), so a later read re-parses the same way.
 		{"multi-line first wins", "hatch_sess=FAKE; datr=FAKE\nsecond=line; x=1\n", "hatch_sess=FAKE; datr=FAKE\nsecond=line; x=1\n"},
 		{"value with equals", "hatch_sess=FAKE==; other=1", "hatch_sess=FAKE==; other=1\n"},
+		// A comment line never counts, but a real qualifying line
+		// after it does.
+		{"comment line then hatch line", "# note\nhatch_sess=FAKE; datr=FAKE", "# note\nhatch_sess=FAKE; datr=FAKE\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -160,6 +163,10 @@ func TestAuthImportOneLineNegative(t *testing.T) {
 		{"hatch only in a value", "other=hatch_sess; x=1"},
 		{"random text", "hello world"},
 		{"no pairs", "just some words here"},
+		// R1: a hatch_sess mention in a comment line never counts,
+		// with or without a following non-hatch pair.
+		{"comment only hatch", "# hatch_sess=FAKE\n"},
+		{"comment hatch plus pair", "# hatch_sess=FAKE\nfoo=bar\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -211,6 +218,11 @@ func TestAuthImportJarNegative(t *testing.T) {
 		{"empty hatch at EOF", row("hatch_sess", "") + "\n"},
 		{"datr only", row("datr", "FAKE") + "\n"},
 		{"no hatch row", row("other", "FAKE") + "\n"},
+		// R1: a hatch_sess mention in a comment line, or as another
+		// cookie's jar value, never counts.
+		{"comment hatch plus datr row", "# hatch_sess=FAKE\n" + row("datr", "FAKE") + "\n"},
+		{"jar value mentions hatch", row("other", "hatch_sess=FAKE") + "\n"},
+		{"jar value with semicolon hatch", row("other", "x;hatch_sess=FAKE") + "\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -229,8 +241,6 @@ func TestAuthImportJSONPositive(t *testing.T) {
 		{"nested", `{"cookies": {"hatch_sess": "FAKE", "datr": "FAKE"}}`, "{\"cookies\": {\"hatch_sess\": \"FAKE\", \"datr\": \"FAKE\"}}\n"},
 		{"flat", `{"hatch_sess": "FAKE", "other": "FAKE"}`, "{\"hatch_sess\": \"FAKE\", \"other\": \"FAKE\"}\n"},
 		{"nested non-scalar sibling", `{"cookies": {"hatch_sess": "FAKE", "obj": {"y": 1}}}`, "{\"cookies\": {\"hatch_sess\": \"FAKE\", \"obj\": {\"y\": 1}}}\n"},
-		{"numeric hatch value", `{"hatch_sess": 42}`, "{\"hatch_sess\": 42}\n"},
-		{"bool hatch value", `{"hatch_sess": true}`, "{\"hatch_sess\": true}\n"},
 		{"trailing whitespace", "  {\"hatch_sess\": \"FAKE\"}  \n", "{\"hatch_sess\": \"FAKE\"}\n"},
 		{"cookies non-object with top hatch", `{"cookies": "abc", "hatch_sess": "FAKE"}`, "{\"cookies\": \"abc\", \"hatch_sess\": \"FAKE\"}\n"},
 		{"value with semicolon", `{"hatch_sess": "a;b=c"}`, "{\"hatch_sess\": \"a;b=c\"}\n"},
@@ -254,6 +264,25 @@ func TestAuthImportJSONNegative(t *testing.T) {
 		{"empty hatch string", `{"hatch_sess": ""}`},
 		{"whitespace hatch string", `{"hatch_sess": "  "}`},
 		{"null hatch", `{"hatch_sess": null}`},
+		// D4-CLARIFICATION: only a non-empty STRING counts. Numbers,
+		// bools, arrays, and objects do not, flat or nested.
+		{"number zero hatch", `{"hatch_sess": 0}`},
+		{"number hatch", `{"hatch_sess": 123}`},
+		{"float hatch", `{"hatch_sess": 1.50}`},
+		{"bool true hatch", `{"hatch_sess": true}`},
+		{"bool false hatch", `{"hatch_sess": false}`},
+		{"array hatch", `{"hatch_sess": ["FAKE"]}`},
+		{"empty array hatch", `{"hatch_sess": []}`},
+		{"object hatch", `{"hatch_sess": {"nested": "FAKE"}}`},
+		{"empty object hatch", `{"hatch_sess": {}}`},
+		{"nested number hatch", `{"cookies": {"hatch_sess": 0}}`},
+		{"nested bool hatch", `{"cookies": {"hatch_sess": false}}`},
+		{"nested number 123 hatch", `{"cookies": {"hatch_sess": 123}}`},
+		{"nested array hatch", `{"cookies": {"hatch_sess": ["FAKE"]}}`},
+		{"nested object hatch", `{"cookies": {"hatch_sess": {"nested": "FAKE"}}}`},
+		{"wrong case hatch", `{"Hatch_Sess": "FAKE"}`},
+		{"wrong case nested hatch", `{"cookies": {"HATCH_SESS": "FAKE"}}`},
+		{"hatch under wrong nesting", `{"data": {"hatch_sess": "FAKE"}}`},
 		{"hatch only in a value", `{"note": "hatch_sess"}`},
 		{"hatch only in a nested key", `{"cookies": {"note": "hatch_sess"}}`},
 		{"invalid JSON no jar", `{not json`},
@@ -344,10 +373,14 @@ func TestAuthImportDifferentialFixtures(t *testing.T) {
 		{"case_sensitive", "Hatch_Sess=FAKE; datr=FAKE", 2, ""},
 		// §7 single_no_semi: lone hatch_sess=x loads via the fallback.
 		{"single_no_semi", "hatch_sess=FAKE\n", 0, "hatch_sess=FAKE\n"},
-		// §7 comment_only_hatch: the fallback flattens comment text.
-		{"comment_only_hatch", "# hatch_sess=FAKE; y=1\nfoo\tbar\n", 0, "# hatch_sess=FAKE; y=1\nfoo\tbar\n"},
-		// §7 numbers: Python str() normalises; import stores verbatim.
-		{"json_numbers", `{"hatch_sess": 1.50, "b": 1e20}`, 0, "{\"hatch_sess\": 1.50, \"b\": 1e20}\n"},
+		// §7 comment_only_hatch: the fallback used to flatten comment
+		// text; comment lines are now excluded entirely (R1), so
+		// a comment-only hatch mention rejects.
+		{"comment_only_hatch", "# hatch_sess=FAKE; y=1\nfoo\tbar\n", 2, ""},
+		// §7 numbers: ParseCookies renders numbers, but the import
+		// check is string-only (D4-CLARIFICATION, R2), so this
+		// rejects.
+		{"json_numbers", `{"hatch_sess": 1.50, "b": 1e20}`, 2, ""},
 		// §7 nested values: Python renders repr; import stores verbatim.
 		{"json_nested", `{"cookies": {"obj": {"y": 1, "x": 2}, "hatch_sess": "FAKE"}}`, 0, "{\"cookies\": {\"obj\": {\"y\": 1, \"x\": 2}, \"hatch_sess\": \"FAKE\"}}\n"},
 		// §7 json_dup: duplicate keys collapse, last wins (verbatim store
@@ -740,10 +773,32 @@ func TestImportHasHatchSessAdversarial(t *testing.T) {
 		{"json flat", `{"hatch_sess": "FAKE"}`, true},
 		{"json empty string", `{"hatch_sess": ""}`, false},
 		{"json null", `{"hatch_sess": null}`, false},
-		{"json number zero", `{"hatch_sess": 0}`, true},
+		{"json number zero", `{"hatch_sess": 0}`, false},
+		{"json bool true", `{"hatch_sess": true}`, false},
+		{"json bool false", `{"hatch_sess": false}`, false},
+		{"json number", `{"hatch_sess": 123}`, false},
+		{"json array", `{"hatch_sess": ["FAKE"]}`, false},
+		{"json object", `{"hatch_sess": {"nested": "FAKE"}}`, false},
+		{"json nested number zero", `{"cookies": {"hatch_sess": 0}}`, false},
+		{"json nested bool", `{"cookies": {"hatch_sess": true}}`, false},
+		{"json nested array", `{"cookies": {"hatch_sess": ["FAKE"]}}`, false},
+		{"json nested object", `{"cookies": {"hatch_sess": {"nested": "FAKE"}}}`, false},
 		{"first line wins", "a=1; b=2\nhatch_sess=FAKE; y=3", false},
 		{"fallback flattened", "hatch_sess=FAKE\nother=1", true},
 		{"comment skipped", "# hatch_sess=FAKE; y=1\na=1; b=2", false},
+		// R1 repros: comment mentions and jar values never count.
+		{"comment only hatch", "# hatch_sess=FAKE\n", false},
+		{"comment hatch plus pair", "# hatch_sess=FAKE\nfoo=bar\n", false},
+		{"comment hatch plus jar datr row", "# hatch_sess=FAKE\n.muse.ai\tTRUE\t/\tTRUE\t0\tdatr\tFAKE", false},
+		{"jar value mentions hatch", ".muse.ai\tTRUE\t/\tTRUE\t0\tother\thatch_sess=FAKE", false},
+		{"jar value semicolon hatch segment", ".muse.ai\tTRUE\t/\tTRUE\t0\tother\tx;hatch_sess=FAKE", false},
+		{"jar value semicolon hatch pair", ".muse.ai\tTRUE\t/\tTRUE\t0\tother\tprefix; hatch_sess=FAKE", false},
+		{"bom comment hatch", "\ufeff# hatch_sess=FAKE; y=1\nfoo=bar\n", false},
+		// Controls: a real line after a comment still counts, and a
+		// comment-only line does not hide a later jar row (no
+		// hatch_sess= trigger in the header line itself).
+		{"comment then hatch line", "# hatch_sess=FAKE\nhatch_sess=FAKE; x=1", true},
+		{"comment then jar hatch row", "# Netscape HTTP Cookie File\n.muse.ai\tTRUE\t/\tTRUE\t0\thatch_sess\tFAKE", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

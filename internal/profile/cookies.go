@@ -29,10 +29,14 @@ import (
 // existing destination to .bak, then rename the temp file into
 // place. A failure before the final rename leaves the previous
 // file untouched (or, if the backup rename already happened, in
-// .bak). Both the cookies file and .bak end at mode 0600: the
-// cookies file via the temp file's mode, .bak via an explicit
-// chmod after the rename (a rename alone would keep the previous
-// file's mode). No previous file means no .bak and backup=false.
+// .bak). Both the cookies file and .bak end at mode 0600, except
+// when the previous file was a symlink to an existing file: then
+// .bak remains that symlink (the explicit chmod is skipped, so
+// the symlink's target keeps its mode and content untouched) and
+// only the new cookies file ends at 0600. The cookies file gets
+// its mode via the temp file, .bak via an explicit chmod after
+// the rename (a rename alone would keep the previous file's
+// mode). No previous file means no .bak and backup=false.
 // Concurrent imports are last-writer-wins: each write is atomic
 // (rename), there is no torn file, and no lock is taken — the
 // flock+sha256 guard protects config.json only and does not apply
