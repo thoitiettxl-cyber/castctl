@@ -2,11 +2,11 @@ package profile
 
 import (
 	"context"
-	"sync"
 
-	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/option"
 	singjson "github.com/sagernet/sing/common/json"
+
+	"github.com/thoitiettxl-cyber/muse-cli/go/internal/outbound"
 )
 
 // OutboundKind classifies how a profile selects its outbound.
@@ -73,21 +73,17 @@ func (r OutboundRef) InlineOutbound() (*option.Outbound, error) {
 // option.Outbound/Endpoint/DNSOptions parse through the registry instead
 // of any hand-written schema copy.
 //
-// The context is built once and shared: include.Context is NOT safe to
-// call concurrently (its QUIC stub registration assigns the
-// package-global naive.ConfigureHTTP3ListenerFunc), and -race flags
-// concurrent builds. The registries themselves are safe for concurrent
-// reads (CreateOptions takes the registry lock).
-var (
-	singCtxOnce sync.Once
-	singCtx     context.Context
-)
-
+// NB9 unification: this delegates to outbound.RegistryContext, the
+// single process-global include.Context construction. include.Context
+// is NOT safe to call concurrently (its QUIC stub registration
+// assigns the package-global naive.ConfigureHTTP3ListenerFunc), and
+// -race flags concurrent builds, so there must be exactly one call
+// site; the registries themselves are safe for concurrent reads
+// (CreateOptions takes the registry lock). This package must not
+// build its own include.Context, and internal/outbound must not
+// import this package (no cycle).
 func singContext() context.Context {
-	singCtxOnce.Do(func() {
-		singCtx = include.Context(context.Background())
-	})
-	return singCtx
+	return outbound.RegistryContext()
 }
 
 // parseOutbound parses one outbound object with sing-box's own

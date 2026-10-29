@@ -219,28 +219,31 @@ func (m *Manager) Default() adapter.Outbound {
 // PostStart, and Started over the endpoint and outbound managers, in
 // the same order box.Box uses. A second Start is an error. Start after
 // Close fails because the scope is closed.
+//
+// The started flag is set only after every stage succeeds, under the
+// mutex that guards it, and Start holds that mutex for the whole stage
+// loop: a concurrent Close cannot cancel the scope mid-start and leave
+// the manager observable as started with unstarted outbounds, and a
+// failed Start leaves started false (the caller should Close to
+// release any partially started stage).
 func (m *Manager) Start() error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.started {
-		m.mu.Unlock()
 		return errors.New("outbound: Start called twice")
 	}
 	if m.closed {
-		m.mu.Unlock()
 		return errors.New("outbound: Start called after Close")
 	}
-	m.started = true
-	scope := m.scope
-	m.mu.Unlock()
-
 	for _, stage := range adapter.ListStartStages {
-		if err := scope.Start("endpoint", m.endpoints, stage); err != nil {
+		if err := m.scope.Start("endpoint", m.endpoints, stage); err != nil {
 			return fmt.Errorf("outbound: start endpoint manager (%s): %w", stage, err)
 		}
-		if err := scope.Start("outbound", m.outbounds, stage); err != nil {
+		if err := m.scope.Start("outbound", m.outbounds, stage); err != nil {
 			return fmt.Errorf("outbound: start outbound manager (%s): %w", stage, err)
 		}
 	}
+	m.started = true
 	return nil
 }
 

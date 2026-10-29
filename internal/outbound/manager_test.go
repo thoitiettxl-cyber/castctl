@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -143,6 +144,26 @@ func TestManagerCreateAndLifecycle(t *testing.T) {
 		}
 	})
 
+	t.Run("failed start does not mark the manager started", func(t *testing.T) {
+		m := newTestManager(t)
+		out := parseOutbound(t, m, `{"type":"direct","tag":"direct"}`)
+		if err := m.CreateOutbound(context.Background(), out.Tag, out.Type, out.Options); err != nil {
+			t.Fatal(err)
+		}
+		// Simulate a stage failure the way a racing Close causes one:
+		// closing the lifecycle scope cancels its context, so every
+		// Scope.Start stage returns an error.
+		if err := m.scope.Close(); err != nil {
+			t.Fatalf("closing scope: %v", err)
+		}
+		if err := m.Start(); err == nil {
+			t.Fatal("Start with a closed scope = nil, want error")
+		}
+		if m.started {
+			t.Error("Start failed but started is true: the flag must be set only after all start stages succeed")
+		}
+	})
+
 	t.Run("default is the first outbound created", func(t *testing.T) {
 		m := newTestManager(t)
 		out := parseOutbound(t, m, `{"type":"direct","tag":"direct"}`)
@@ -158,6 +179,56 @@ func TestManagerCreateAndLifecycle(t *testing.T) {
 		m := newTestManager(t)
 		var _ adapter.OutboundManager = m.OutboundManager()
 	})
+}
+
+func TestManagerConcurrentStartClose(t *testing.T) {
+	// NB10: Start, Close and Dialer racing must leave the manager in a
+	// terminal state — the started flag must reflect the actual Start
+	// outcome, never "started" when Start failed or Close won the race.
+	// Run with -race: the flag is guarded by the same mutex that
+	// serializes Start/Close.
+	for iter := 0; iter < 16; iter++ {
+		m, err := NewManager(context.Background(), log.NewNOPFactory().NewLogger("test"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := parseOutbound(t, m, `{"type":"direct","tag":"direct"}`)
+		if err := m.CreateOutbound(context.Background(), out.Tag, out.Type, out.Options); err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		var startErr error
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			startErr = m.Start()
+		}()
+		for j := 0; j < 4; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_ = m.Close()
+			}()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, _ = m.Dialer("direct")
+			}()
+		}
+		wg.Wait()
+		if startErr == nil && !m.started {
+			t.Errorf("iter %d: Start returned nil but started is false", iter)
+		}
+		if startErr != nil && m.started {
+			t.Errorf("iter %d: Start returned %v but started is true: a failed or pre-empted Start must not leave the manager started", iter, startErr)
+		}
+		if err := m.Start(); err == nil {
+			t.Fatalf("iter %d: Start after concurrent Start/Close = nil, want error", iter)
+		} else if !strings.Contains(err.Error(), "Start called") {
+			t.Errorf("iter %d: second Start error = %v, want a Start-called error", iter, err)
+		}
+		_ = m.Close()
+	}
 }
 
 func TestManagerConcurrentNewContext(t *testing.T) {

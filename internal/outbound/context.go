@@ -41,12 +41,22 @@ import (
 // (measured by W-PROFILE, 2026-10-28). With with_quic the same global
 // is assigned at package init instead, but the once rule is kept for
 // every tag set: one call per process, always.
+//
+// RegistryContext is the ONLY include.Context call site in the Go
+// port: internal/profile parses option.Outbound/Endpoint/DNSOptions
+// through it (see profile singContext, NB9 unification), so both
+// packages derive from the same underlying global registry instead
+// of each building its own.
 var (
 	registryOnce sync.Once
 	registryCtx  context.Context
 )
 
-func globalRegistryContext() context.Context {
+// RegistryContext returns the process-global sing-box registry
+// context, built exactly once. Callers must treat the registry as
+// read-only (NewContext clones it per caller before registering
+// services); the returned context itself is uncancelled.
+func RegistryContext() context.Context {
 	registryOnce.Do(func() {
 		registryCtx = include.Context(context.Background())
 	})
@@ -71,7 +81,7 @@ func NewContext(ctx context.Context) context.Context {
 	if service.RegistryFromContext(ctx) != nil {
 		return ctx
 	}
-	global := service.RegistryFromContext(globalRegistryContext())
+	global := service.RegistryFromContext(RegistryContext())
 	return service.ContextWithRegistry(ctx, global.Clone())
 }
 
