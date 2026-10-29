@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package ingress_rev_proxy;
+
+// Recreated from the VERIFIED FileDescriptorProto in desc0.bin
+// (sha256 5479a20cd5a9bf817c2a7ba4eec56b354d8576f565d9096fd2a3a8223e820d00).
+// Original descriptor has NO go_package option; the go_package below is
+// added solely so protoc-gen-go can generate code. It does not affect
+// wire bytes of NoiseTransportFrame.
+option go_package = "github.com/thoitiettxl-cyber/muse-cli/go/internal/proto;proto";
+
+message NoiseTransportFrame {
+  optional int64 chunk_id = 1;
+  optional uint32 chunk_index = 2;
+  optional uint32 total_chunks = 3;
+  optional bytes payload = 4;
+}
