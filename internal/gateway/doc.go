@@ -41,9 +41,9 @@
 // a log line, or a fixture in this package; fixtures use the fake
 // cookie hatch_sess=FAKE only.
 //
-// WebSocket library: gorilla/websocket v1.5.3, chosen by probe (see
-// /tmp/ws-probe, probe evidence in the PR2 report): both
-// coder/websocket v1.8.14 and gorilla passed a binary echo over a
+// WebSocket library: gorilla/websocket v1.5.3, chosen by probe
+// (probe evidence in the PR2 report): both coder/websocket v1.8.14
+// and gorilla passed a binary echo over a
 // pre-handshaked TLS conn returned by a fake outbound dialer, and
 // gorilla's websocket.NewClient on the same pre-TLS conn failed
 // with "tls: first record does not look like a TLS handshake",
@@ -135,8 +135,10 @@
 //     [UNVERIFIED] — a live-phase measurement, not claimed here.
 //   - S6 generation-tagged demux (generation.go): frames carry
 //     the gateway generation; next() drops stale generations.
-//     No production path bumps the generation today (see the
-//     conn-side proposal below).
+//     BumpGeneration() (exported, PR3, exact method set
+//     conn's generationBumper asserts) moves the generation
+//     forward; conn's Drop/Adopt/Live/Reset paths bump it.
+//     No path inside this package bumps it.
 //   - S9 IsTransient (transient.go): the one gateway-side
 //     transient classifier. conn.SharedConn's retryCall is NOT
 //     changed here (see the unification proposal below).
@@ -150,12 +152,11 @@
 //     Close. NEVER chat.cancel. One root ctx per invocation
 //     (signal.NotifyContext) is cmd/PR4 wiring, not this
 //     package's.
-//   - (a) Error-string redaction (redact.go): gateway-local
-//     re-implementation of the redactSessionProxyInString
-//     pattern (nothing copied verbatim); it strips URL userinfo,
-//     token query params, cookie fragments, and Bearer tokens
-//     from error text. The PR3 unification into one shared
-//     helper is a carried item, not done here.
+//   - (a) Error-string redaction (redact.go): redactErrorString
+//     delegates to the shared helper internal/redact.String
+//     (PR3 unification, done): URL userinfo, token query
+//     params, cookie fragments, and Bearer tokens, with the
+//     markers pinned by tests in both packages.
 //   - (b) Per-phase timeouts (timings.go, connector.go): WS
 //     upgrade (WSUpgradeTimeout) and Noise handshake
 //     (HandshakeTimeout) are separate bounds with separately
@@ -166,15 +167,41 @@
 //     dialer (see the PR2 report for the go-doc evidence).
 //   - (c) TLS session cache: see the go-doc finding recorded in
 //     the PR2 report; no cache is enabled or configured here.
+//   - Frame reassembly caps (framing.go, PR3; DELIBERATE
+//     GO-ONLY FAIL-CLOSED HARDENING ORDERED BY BOSS, NOT
+//     PARITY — Python 0.6.1 has no cap: join_chunks,
+//     gateway.py:83-93 in the read-only 0.6.1 copy, grows an
+//     unbounded _partial dict, and download_file joins every
+//     frame of a request with no total bound): one reassembled
+//     message is capped at MaxReassembledSize (64 MiB — 16x
+//     the 4 MiB fs.read window in fs.py:16, over 3x the 20 MiB
+//     Telegram download cap in tgapi.py:20, above the 49 MiB
+//     upload cap in tgapi.py:19), and at most
+//     MaxUnfinishedGroups (16) unfinished chunk_id groups are
+//     held (the single sequential reader normally holds
+//     exactly 1; 16 is 16x headroom for interleaved sends),
+//     and one group holds at most MaxPiecesPerGroup (32768)
+//     distinct pieces: the size cap alone cannot bound a
+//     group of empty pieces (size 0), so the piece-count cap
+//     is what makes it effective — see framing.go for the
+//     headroom computation.
+//     Exceeding the size cap fails with a typed
+//     *ReassemblySizeError, exceeding the groups cap with
+//     a typed *TooManyUnfinishedGroupsError, and exceeding
+//     the piece-count cap with a typed *TooManyPiecesError;
+//     either way the group is discarded and the reader keeps
+//     reading, so other streams on the same gateway keep
+//     working. A chunk_id carries no stream id until it
+//     reassembles, so with several streams open the error
+//     reaches all of them
+//     (see deliverToOpenStreams); the single-stream case is
+//     exact.
 //
 // Recorded proposals (NOT implemented here; conn/outbound/cmd
-// are out of scope for this package):
-//   - S6 conn-side: Muse.Drop/Adopt and the Live replacement
-//     path (internal/conn/conn.go) should bump the generation
-//     of the gateway being replaced (via a type assertion to
-//     an interface exposing bumpGeneration), so subscribers
-//     holding old queues never see stale frames leak into a
-//     new turn.
+// are out of scope for this package). S6 is NOT in this list:
+// the gateway-side export (BumpGeneration, generation.go,
+// PR3) has landed, and conn's Drop/Adopt/Live/Reset bump
+// paths already call it through generationBumper.
 //   - S7 reconnect key: conn.Config (CookiesFile, VMID, NodeID)
 //     must gain OutboundTag + OutboundHash (hash of the
 //     outbound JSON as serialised by profile/outbound); the
@@ -191,17 +218,40 @@
 //     and is a behaviour change needing approval; it must also
 //     keep the safe-to-repeat gate and the never-retry
 //     egress.approval.decide rule.
-//   - Outbound nil-router guard: dialling a domain-server
-//     outbound through an outbound Manager without
-//     RegisterDNS/RegisterDNSRouter panics with a nil
-//     dereference in sing-box common/dialer (see the PR2
-//     report for the coordinator-verified evidence). This
-//     package never builds a Manager/DNS client/Dialer — it
-//     only consumes OutboundDialer — so the guard lives in
-//     outbound.Manager.CreateOutbound (F3): a domain-server
+//   - Outbound nil-router guard (F3) with the detour
+//     exception: dialling a domain-server outbound through an
+//     outbound Manager without a registered DNS router panics
+//     with a nil dereference in sing-box v1.14.4
+//     common/dialer/resolve.go:103 (d.router.Lookup, captured
+//     at construction by NewResolveDialer, resolve.go:46-63).
+//     This package never builds a Manager/DNS client/Dialer —
+//     it only consumes OutboundDialer — so the guard lives in
+//     outbound.Manager.CreateOutbound: a domain-server
 //     outbound created without a registered DNS router is
-//     refused with a clean error, and PR3 wiring must call
-//     RegisterDNS/RegisterDNSRouter BEFORE CreateOutbound.
+//     refused with a clean error, EXCEPT a proven
+//     self-resolving detour chain, which is safe WITHOUT a DNS
+//     router: every link of the detour chain is an http or
+//     socks5 (empty version defaults to 5) outbound with no
+//     domain_resolver, recursing to a terminal http/socks5
+//     outbound with an IP-literal server and no detour; a
+//     selector/urltest link qualifies only when EVERY member
+//     (Outbounds plus selector Default) qualifies. Probed
+//     end-to-end by the outbound writer (loopback fakes, no
+//     network; dial succeeds, no panic, no DNS router) for
+//     http/socks5 chains including two hops and an
+//     all-qualifying selector; urltest shares the selector
+//     logic but was NOT probed end-to-end (logic-only
+//     allowance). DISPROVEN (panic): a direct detour, a
+//     socks4 detour, and the reverse chain (an IP-server
+//     outbound whose detour is itself domain-server). Two
+//     wiring rules are INVIOLABLE: (1) call
+//     RegisterDNS/RegisterDNSRouter BEFORE CreateOutbound for
+//     every domain-server outbound that does not qualify for
+//     the detour exception (a late router cannot repair the
+//     already-captured nil); (2) create the detour chain
+//     BEFORE the outer outbound (a detour created after the
+//     outer outbound cannot repair the refusal). Doc only:
+//     no behaviour change in this package.
 //   - Deferred (Boss decision, stay unimplemented): auth import
 //     command, paste fallback for auth export, bot hot reload,
 //     jitter. Release (local build script, no Actions) is PR5.

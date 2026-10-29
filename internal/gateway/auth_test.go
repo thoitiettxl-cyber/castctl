@@ -7,6 +7,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -14,6 +15,12 @@ import (
 	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
 	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway/gatewaytest"
 )
+
+// roundTripFunc adapts a function to http.RoundTripper for tests
+// that must serve a canned body for a fixed production URL.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 const fakeCookie = "hatch_sess=FAKE; datr=FAKE"
 
@@ -71,6 +78,45 @@ func TestFetchSessionInfo(t *testing.T) {
 		}
 		if !strings.Contains(ge.Payload, "VM unavailable") {
 			t.Errorf("payload = %q", ge.Payload)
+		}
+	})
+	t.Run("null vm_id is GatewayError not AuthError", func(t *testing.T) {
+		for _, body := range []string{
+			`{"status":"unavailable","vm_id":null}`,
+			`{"status":"unavailable","vm_id":42}`,
+		} {
+			// FetchSessionInfo targets the fixed muse.ai URL, so
+			// route it through a transport that serves body for
+			// any request.
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(body)),
+				}, nil
+			})}
+			info, err := FetchSessionInfo(ctx, client, fakeCookie)
+			if err == nil {
+				t.Fatalf("body %s: nil error, want GatewayError (info %+v)", body, info)
+			}
+			var ge *conn.GatewayError
+			if !errors.As(err, &ge) {
+				t.Fatalf("body %s: err = %T (%v), want *GatewayError", body, err, err)
+			}
+			if ge.Status != -1 {
+				t.Errorf("body %s: status = %d, want -1", body, ge.Status)
+			}
+			if !strings.Contains(ge.Payload, "VM unavailable") {
+				t.Errorf("body %s: payload = %q, want VM unavailable", body, ge.Payload)
+			}
+			// The payload repr of the info map may render the
+			// null as <nil> (Python renders None); the bug was
+			// the null becoming the VM id, which the
+			// GatewayError return (no SessionInfo) precludes.
+			var ae *conn.AuthError
+			if errors.As(err, &ae) {
+				t.Fatalf("body %s: GatewayError also matches AuthError", body)
+			}
 		}
 	})
 	t.Run("headers", func(t *testing.T) {

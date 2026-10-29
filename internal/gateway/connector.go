@@ -40,6 +40,11 @@ type connectorConfig struct {
 	clock        Clock
 	wsTimeout    time.Duration
 	noiseTimeout time.Duration
+	// reassembler is the frame reassembler for built gateways.
+	// Nil means the production caps. Tests construct a
+	// connectorConfig literal with a small-limit reassembler
+	// to exercise cap behaviour through the full connector.
+	reassembler *reassembler
 }
 
 // WithWebSocketSecure sets whether the WebSocket dial is TLS
@@ -177,7 +182,7 @@ func dialGateway(ctx context.Context, dialer OutboundDialer, wsURL string, secur
 		return nil, err
 	}
 	noiseMS := time.Since(noiseStart).Milliseconds()
-	gw := newGateway(ws, sendCS, recvCS, routes, cfg.clock)
+	gw := newGateway(ws, sendCS, recvCS, routes, cfg.clock, cfg.reassembler)
 	gw.mu.Lock()
 	gw.timings = HandshakeTimings{DialMS: dialMS, WSMS: wsMS, NoiseMS: noiseMS, DNSMS: -1, TLSMS: -1}
 	gw.mu.Unlock()

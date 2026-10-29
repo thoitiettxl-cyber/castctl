@@ -120,7 +120,16 @@ func FetchSessionInfo(ctx context.Context, client *http.Client, cookies string) 
 	if !ok {
 		return SessionInfo{}, &conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("VM unavailable (%v); retry shortly or `MUSE_VM_ID=<id> muse-cli wake`", info))}
 	}
-	return SessionInfo{VMID: fmt.Sprintf("%v", rawVM), Raw: info}, nil
+	vmID, ok := rawVM.(string)
+	if !ok {
+		// JSON null (or any non-string) vm_id is the missing-VM
+		// case, not a string: Python's `"vm_id" not in info`
+		// branch is about absence, and a null vm_id means the
+		// same thing — the VM is down/restarting. Formatting
+		// it with %v would yield "<nil>" as a bogus VM id.
+		return SessionInfo{}, &conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("VM unavailable (%v); retry shortly or `MUSE_VM_ID=<id> muse-cli wake`", info))}
+	}
+	return SessionInfo{VMID: vmID, Raw: info}, nil
 }
 
 // FetchAccessToken exchanges cookies for an access token: POST

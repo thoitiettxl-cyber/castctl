@@ -200,6 +200,95 @@ func TestConnectionLostMidStream(t *testing.T) {
 	}
 }
 
+// inFlightSendWSConn is a wsConn whose first WriteMessage blocks
+// until released, while ReadMessage fails with EOF as soon as the
+// socket is closed. It pins the interleaving behind the
+// TestConnectionLostMidStream flake (1 failure in 50 runs):
+// the reader classifying a death while a send is still in
+// flight, before the writer's post-write bookkeeping runs.
+type inFlightSendWSConn struct {
+	readDone     chan struct{}
+	writeStarted chan struct{}
+	writeRelease chan struct{}
+	startOnce    sync.Once
+	closeOnce    sync.Once
+}
+
+func newInFlightSendWSConn() *inFlightSendWSConn {
+	return &inFlightSendWSConn{
+		readDone:     make(chan struct{}),
+		writeStarted: make(chan struct{}),
+		writeRelease: make(chan struct{}),
+	}
+}
+
+func (c *inFlightSendWSConn) ReadMessage() (int, []byte, error) {
+	<-c.readDone
+	return 0, nil, io.EOF
+}
+
+func (c *inFlightSendWSConn) WriteMessage(_ int, _ []byte) error {
+	c.startOnce.Do(func() { close(c.writeStarted) })
+	<-c.writeRelease
+	return nil
+}
+
+func (c *inFlightSendWSConn) SetWriteDeadline(time.Time) error { return nil }
+func (c *inFlightSendWSConn) SetReadDeadline(time.Time) error  { return nil }
+
+func (c *inFlightSendWSConn) Close() error {
+	c.closeOnce.Do(func() { close(c.readDone) })
+	return nil
+}
+
+// TestConnectionLostWhileSendInFlightIsNotNotSent (deterministic
+// regression for the TestConnectionLostMidStream flake): a death
+// classified while the first frame's write is still in flight
+// must never be NotSent. sentAny is marked before the first
+// write, so the classification sees the attempted send even
+// though writeWS has not returned. With the old post-write mark
+// this test fails deterministically: fail() runs while
+// sentAny is still false.
+func TestConnectionLostWhileSendInFlightIsNotNotSent(t *testing.T) {
+	iSend, iRecv, _, _ := handshakePair(t, []byte{})
+	routes, err := DefaultRoutes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := newInFlightSendWSConn()
+	gw := newGateway(fake, iSend, iRecv, routes, nil, nil)
+	release := sync.OnceFunc(func() { close(fake.writeRelease) })
+	defer release()
+	defer func() { _ = gw.Close() }()
+
+	sendDone := make(chan error, 1)
+	go func() { sendDone <- gw.sendEnvelope(pb.ServiceType_SERVICE_DAEMON, []byte("frame")) }()
+	select {
+	case <-fake.writeStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sendEnvelope did not reach WriteMessage")
+	}
+	// Kill the reader while the write is still in flight.
+	_ = fake.Close()
+	pollUntil(t, 5*time.Second, "gateway death while send in flight", func() bool { return gw.Dead() != nil })
+	lost, ok := AsConnectionLost(gw.Dead())
+	if !ok {
+		t.Fatalf("Dead() is not ErrConnectionLost: %v", gw.Dead())
+	}
+	if lost.NotSent {
+		t.Error("NotSent = true, want false (a send was in flight when the reader died)")
+	}
+	release()
+	select {
+	case err := <-sendDone:
+		if err != nil {
+			t.Errorf("sendEnvelope after release: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("sendEnvelope did not return after the write was released")
+	}
+}
+
 func TestCleanClose1000IsNotConnectionLost(t *testing.T) {
 	s := startE2E(t, jsonOKHandler(`{}`))
 	defer s.cleanup()
@@ -386,7 +475,7 @@ func TestPongDeadlineMatchesWriteDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gw := newGateway(fake, nil, nil, routes, nil)
+	gw := newGateway(fake, nil, nil, routes, nil, nil)
 	defer func() { _ = gw.Close() }()
 	if err := fake.pingHandler("p1"); err != nil {
 		t.Fatalf("ping handler: %v", err)
@@ -411,7 +500,7 @@ func TestControlPongBypassesBlockedDataWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gw := newGateway(fake, nil, nil, routes, nil)
+	gw := newGateway(fake, nil, nil, routes, nil, nil)
 	release := sync.OnceFunc(func() { close(fake.writeGate) })
 	defer func() {
 		release()
@@ -503,8 +592,21 @@ func TestGenerationUniquePerGatewayAndBumpDropsStale(t *testing.T) {
 	frame := func(body string) *pb.ServiceFrame {
 		return &pb.ServiceFrame{StreamId: sid, Kind: &pb.ServiceFrame_Response{Response: &pb.ApplicationResponse{Status: 200, Body: []byte(body), EndBody: true}}}
 	}
+	// The bump goes through the EXPORTED BumpGeneration()
+	// (S6 hook): conn reaches it by a cross-package type
+	// assertion, so the test asserts the interface shape
+	// conn asserts — BumpGeneration() with no arguments and
+	// no results — and proves end-to-end that a frame from
+	// the pre-bump generation is dropped by next().
+	type generationBumper interface{ BumpGeneration() }
+	if _, ok := interface{}(g1).(generationBumper); !ok {
+		t.Fatal("Gateway does not satisfy the BumpGeneration() interface conn's generationBumper asserts")
+	}
 	q.put(queuedItem{frame: frame("stale"), generation: genBefore})
-	g1.bumpGeneration()
+	g1.BumpGeneration()
+	if g1.Generation() == genBefore {
+		t.Fatalf("Generation() = %d after BumpGeneration(), want a new generation", g1.Generation())
+	}
 	q.put(queuedItem{frame: frame("current"), generation: g1.Generation()})
 	g1.mu.Lock()
 	g1.streams[sid] = q
@@ -733,7 +835,7 @@ func TestCloseWaitsUseFakeClock(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock := NewFakeClock(time.Unix(2000, 0))
-	gw := newGateway(fake, nil, nil, routes, clock)
+	gw := newGateway(fake, nil, nil, routes, clock, nil)
 	gw.ioMu.Lock()
 	closed := make(chan error, 1)
 	go func() { closed <- gw.Close() }()

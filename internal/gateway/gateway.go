@@ -63,7 +63,7 @@ type Gateway struct {
 	dead       error
 	lastUsed   time.Time
 	lastRecv   time.Time
-	partial    map[int64]map[uint32][]byte // reader goroutine only
+	partial    *reassembler // reader goroutine only
 	readerDone chan struct{}
 	closeOnce  sync.Once
 
@@ -99,11 +99,17 @@ var (
 
 // newGateway builds a Gateway over an established, Noise-handshaked
 // WebSocket connection and starts its single reader goroutine.
-// clock may be nil for the real clock. When ws implements
-// controlConn, ping/pong/close handlers are installed (S4/S5).
-func newGateway(ws wsConn, sendCS, recvCS *noise.CipherState, routes *RouteTable, clock Clock) *Gateway {
+// clock may be nil for the real clock. reas may be nil for the
+// production reassembly caps; tests pass a small-limit
+// reassembler to exercise cap behaviour without megabytes of
+// wire traffic. When ws implements controlConn, ping/pong/close
+// handlers are installed (S4/S5).
+func newGateway(ws wsConn, sendCS, recvCS *noise.CipherState, routes *RouteTable, clock Clock, reas *reassembler) *Gateway {
 	if clock == nil {
 		clock = realClock{}
+	}
+	if reas == nil {
+		reas = newReassembler()
 	}
 	now := time.Now()
 	g := &Gateway{
@@ -117,7 +123,7 @@ func newGateway(ws wsConn, sendCS, recvCS *noise.CipherState, routes *RouteTable
 		nextStream: 1,
 		lastUsed:   now,
 		lastRecv:   now,
-		partial:    make(map[int64]map[uint32][]byte),
+		partial:    reas,
 		readerDone: make(chan struct{}),
 		generation: gatewayGenerations.Add(1),
 	}
@@ -225,8 +231,13 @@ func readBounded(ws wsConn, timeout time.Duration) ([]byte, error) {
 
 // readLoop is the single reader goroutine: it decrypts and
 // demultiplexes frames into per-stream queues until the connection
-// closes or a fatal error arrives. A panic here is recorded via
-// Dead, never allowed to crash the process.
+// closes or a fatal error arrives. A reassembly cap failure
+// (*ReassemblySizeError, *TooManyUnfinishedGroupsError, or
+// *TooManyPiecesError) is NOT
+// fatal: the offending group is already discarded, the error is
+// delivered to the open streams, and the reader keeps reading,
+// so other streams on the same gateway keep working. A panic
+// here is recorded via Dead, never allowed to crash the process.
 func (g *Gateway) readLoop() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -240,6 +251,10 @@ func (g *Gateway) readLoop() {
 		}
 		sf, err := g.readFrame()
 		if err != nil {
+			if isReassemblyCapError(err) {
+				g.deliverToOpenStreams(err)
+				continue
+			}
 			g.fail(err)
 			return
 		}
@@ -275,7 +290,16 @@ func (g *Gateway) readFrame() (*pb.ServiceFrame, error) {
 		if err := proto.Unmarshal(pt, &ntf); err != nil {
 			return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway transport frame parse failed: %w", err)}
 		}
-		payload, complete := joinChunks(g.partial, &ntf)
+		payload, complete, err := g.partial.feed(&ntf)
+		if err != nil {
+			// A cap failure is a stream failure, not a
+			// gateway failure: return it unwrapped so
+			// readLoop can tell it from a fatal error.
+			// The group is already discarded; remaining
+			// pieces for its chunk_id are dropped by the
+			// reassembler's rejected set.
+			return nil, err
+		}
 		if !complete {
 			continue
 		}
@@ -313,6 +337,31 @@ func (g *Gateway) fail(err error) {
 	g.mu.Unlock()
 	for _, q := range queues {
 		q.put(queuedItem{err: deliver})
+	}
+}
+
+// deliverToOpenStreams delivers a non-fatal reader error (a
+// reassembly cap error) to every currently open stream queue and
+// leaves the gateway alive: Dead stays nil and the reader keeps
+// reading. Attribution limit, documented honestly: a chunk_id
+// carries no stream id until its group reassembles, so the
+// reader cannot know which stream the discarded group belonged
+// to. With one stream open — the normal Request/Subscribe case,
+// and the case the cap tests pin — the delivery is exact. With
+// several streams open, all of them receive the error: failing
+// an innocent concurrent stream with a typed, retryable
+// transport error is the safe direction (it never hangs, and
+// SharedConn retries it when the method is safe to repeat),
+// while a stream opened after the failure is unaffected.
+func (g *Gateway) deliverToOpenStreams(err error) {
+	g.mu.Lock()
+	queues := make([]*streamQueue, 0, len(g.streams))
+	for _, q := range g.streams {
+		queues = append(queues, q)
+	}
+	g.mu.Unlock()
+	for _, q := range queues {
+		q.put(queuedItem{err: err})
 	}
 }
 
@@ -363,16 +412,33 @@ func (g *Gateway) sendEnvelope(service pb.ServiceType, frameBytes []byte) error 
 		if err != nil {
 			return &conn.ConnectionError{Err: fmt.Errorf("gateway encrypt failed: %w", err)}
 		}
+		if idx == 0 {
+			// Mark the send BEFORE the first write, not
+			// after it: the reader can classify a death
+			// (ErrConnectionLost.NotSent, S2) the moment
+			// the peer answers, and the peer can only
+			// answer bytes that are already on the wire —
+			// so a post-write mark loses the race whenever
+			// the writer is descheduled between writeWS
+			// returning and the mark landing, and a frame
+			// that was sent and answered is misclassified
+			// as NotSent (flake: TestConnectionLostMidStream
+			// 1/50). Marking before the write is the
+			// conservative direction: a write that then
+			// fails may report sent-though-unsent, which
+			// can only suppress a re-send, never cause
+			// one (the same conservatism as
+			// phaseForOpenErr). Marshal/encrypt failures
+			// above still leave sentAny false: no byte was
+			// attempted. The mark is taken under g.mu, as
+			// classifyDeadLocked reads it under g.mu.
+			g.mu.Lock()
+			g.sentAny = true
+			g.mu.Unlock()
+		}
 		if err := g.writeWS(ct); err != nil {
 			return err
 		}
-		// The first piece that reaches the socket means bytes
-		// were sent: a later failure is SentNoReply, never
-		// NotSent (S1), and a reader death after this point
-		// is a loss, not a pre-send failure (S2).
-		g.mu.Lock()
-		g.sentAny = true
-		g.mu.Unlock()
 	}
 	return nil
 }

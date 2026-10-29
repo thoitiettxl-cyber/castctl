@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -830,4 +831,150 @@ func (d *addrDialer) WebSocketDial(ctx context.Context, network, host string, po
 func (d *addrDialer) HTTPClient() *http.Client {
 	auth := &gatewaytest.CannedAuth{VMID: "vm-x", AccessToken: "AT", HatchToken: "HT"}
 	return &http.Client{Transport: gatewaytest.HandlerRoundTripper(auth)}
+}
+
+// withTestReassembler is a test-only ConnectorOption that sets the
+// frame reassembler (and its caps) for gateways built by the
+// connector. Production connectors always use the defaults.
+func withTestReassembler(r *reassembler) ConnectorOption {
+	return func(c *connectorConfig) { c.reassembler = r }
+}
+
+// TestE2EReassemblyCapFailsStreamNotGateway: a frame over the
+// reassembly cap fails the affected Request with a typed
+// *ReassemblySizeError and NO partial payload, the gateway
+// stays alive (Dead()==nil), the failed group's reassembly
+// state is released, and a second request on the same gateway
+// completes with its own state released too. Small test caps
+// (64 bytes) stand in for the 64 MiB production cap so the
+// behaviour is exercisable without megabytes of wire traffic;
+// the cap is above one ordinary response frame (~36 bytes of
+// reassembled ServiceResponse/ServiceFrame for the ping reply
+// below) and below the oversized frame (~80 bytes);
+// the cap values themselves are pinned in TestReassemblerFeed.
+func TestE2EReassemblyCapFailsStreamNotGateway(t *testing.T) {
+	var n atomic.Int64
+	server, err := gatewaytest.NewServer(gatewaytest.HandlerFunc(func(req *pb.ApplicationRequest, service pb.ServiceType) gatewaytest.Response {
+		if n.Add(1) == 1 {
+			// One chunk frame whose reassembled payload
+			// (65 data bytes plus framing) exceeds the
+			// 64-byte test cap in a single transport piece.
+			return gatewaytest.Response{Frames: []*pb.ServiceFrame{
+				gatewaytest.ChunkFrame(0, []byte(strings.Repeat("x", 65)), false),
+			}}
+		}
+		return gatewaytest.Response{Frames: []*pb.ServiceFrame{
+			gatewaytest.ResponseFrame(0, 200, []byte(`{"ok":true,"result":{}}`), true),
+		}}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	auth := &gatewaytest.CannedAuth{VMID: "vm-test", AccessToken: "AT-FAKE", HatchToken: "HT-FAKE"}
+	dialer := gatewaytest.NewFakeDialer(server, auth)
+	cookiesFile := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(cookiesFile, []byte(fakeCookie), 0o600); err != nil {
+		t.Fatalf("write cookies: %v", err)
+	}
+	connector := NewConnector(dialer, WithWebSocketSecure(false), withTestReassembler(newReassemblerWithLimits(64, 4)))
+	gw, err := connector(context.Background(), conn.Config{CookiesFile: cookiesFile, VMID: "vm-test"})
+	if err != nil {
+		t.Fatalf("connector: %v", err)
+	}
+	defer gw.Close()
+	ctx := context.Background()
+	heldState := func() (groups, bytesHeld int) {
+		r := concreteGateway(t, gw).partial
+		groups = len(r.groups)
+		for _, g := range r.groups {
+			bytesHeld += g.size
+		}
+		return groups, bytesHeld
+	}
+	payload, err := gw.Request(ctx, "connection.ping", conn.RequestOptions{Body: map[string]any{"presence": "away"}, Timeout: 5 * time.Second})
+	if err == nil {
+		t.Fatal("oversized request: nil error, want *ReassemblySizeError")
+	}
+	if len(payload) != 0 {
+		t.Errorf("oversized request returned %d payload bytes, want no partial delivery", len(payload))
+	}
+	var sizeErr *ReassemblySizeError
+	if !errors.As(err, &sizeErr) {
+		t.Fatalf("oversized request error = %T (%v), want *ReassemblySizeError", err, err)
+	}
+	var groupsErr *TooManyUnfinishedGroupsError
+	if errors.As(err, &groupsErr) {
+		t.Errorf("size-cap error also matches *TooManyUnfinishedGroupsError")
+	}
+	if !gw.Alive() || gw.Dead() != nil {
+		t.Errorf("gateway alive=%v dead=%v after cap failure: want alive with nil Dead (no gateway-wide death)", gw.Alive(), gw.Dead())
+	}
+	// The failed stream's reassembly state is released.
+	if groups, bytesHeld := heldState(); groups != 0 || bytesHeld != 0 {
+		t.Errorf("held state after cap failure = (%d groups, %d bytes), want (0, 0)", groups, bytesHeld)
+	}
+	// The same gateway serves the next request normally.
+	if _, err := gw.CallJSON(ctx, "connection.ping", conn.RequestOptions{Body: map[string]any{"presence": "away"}}); err != nil {
+		t.Fatalf("request after cap failure: %v", err)
+	}
+	// Completion also releases its state: no leak.
+	if groups, bytesHeld := heldState(); groups != 0 || bytesHeld != 0 {
+		t.Errorf("held state after completion = (%d groups, %d bytes), want (0, 0)", groups, bytesHeld)
+	}
+}
+
+// TestE2ESubscribeReassemblyCapDeliversNoRecords: a subscription
+// whose first frame exceeds the reassembly cap fails typed with
+// no record delivered — neither through the returned slice nor
+// through OnRecord (no partial delivery) — and the gateway
+// stays alive for the next call.
+func TestE2ESubscribeReassemblyCapDeliversNoRecords(t *testing.T) {
+	server, err := gatewaytest.NewServer(gatewaytest.HandlerFunc(func(req *pb.ApplicationRequest, service pb.ServiceType) gatewaytest.Response {
+		// One chunk frame carrying a would-be record line,
+		// oversized as a single reassembled frame.
+		return gatewaytest.Response{Frames: []*pb.ServiceFrame{
+			gatewaytest.ChunkFrame(0, []byte(strings.Repeat("x", 65)+"\n"), false),
+		}}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	auth := &gatewaytest.CannedAuth{VMID: "vm-test", AccessToken: "AT-FAKE", HatchToken: "HT-FAKE"}
+	dialer := gatewaytest.NewFakeDialer(server, auth)
+	cookiesFile := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(cookiesFile, []byte(fakeCookie), 0o600); err != nil {
+		t.Fatalf("write cookies: %v", err)
+	}
+	connector := NewConnector(dialer, WithWebSocketSecure(false), withTestReassembler(newReassemblerWithLimits(64, 4)))
+	gw, err := connector(context.Background(), conn.Config{CookiesFile: cookiesFile, VMID: "vm-test"})
+	if err != nil {
+		t.Fatalf("connector: %v", err)
+	}
+	defer gw.Close()
+	var onRecordCalls int
+	records, err := gw.SubscribeRaw(context.Background(), "chat.subscribe", conn.SubscribeOptions{
+		IdleTimeout: 2 * time.Second, OverallTimeout: 5 * time.Second,
+		OnRecord: func(rec []byte) bool {
+			onRecordCalls++
+			return false
+		},
+	})
+	if err == nil {
+		t.Fatal("oversized subscribe: nil error, want *ReassemblySizeError")
+	}
+	if len(records) != 0 {
+		t.Errorf("oversized subscribe returned %d records, want none (no partial delivery)", len(records))
+	}
+	if onRecordCalls != 0 {
+		t.Errorf("OnRecord called %d times, want 0 (no partial delivery)", onRecordCalls)
+	}
+	var sizeErr *ReassemblySizeError
+	if !errors.As(err, &sizeErr) {
+		t.Fatalf("oversized subscribe error = %T (%v), want *ReassemblySizeError", err, err)
+	}
+	if !gw.Alive() || gw.Dead() != nil {
+		t.Errorf("gateway alive=%v dead=%v after cap failure: want alive with nil Dead", gw.Alive(), gw.Dead())
+	}
 }

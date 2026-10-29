@@ -22,6 +22,17 @@ import (
 // rule (see doc.go for the recorded unification proposal — conn
 // code is not changed here).
 //
+// PR3 verdict: DO NOT unify. Replacing retryCall's type check
+// with IsTransient would narrow safe-method ConnectionError
+// retries (EINVAL, plain-closed, close 1006, decrypt/parse and
+// permanent-DNS causes are retried today, transient=false) and
+// would make ConnectionDown classification cause-dependent.
+// The decision table pinning the divergence is
+// TestIsTransientUnificationDiverges (transient_test.go); any
+// future unification needs explicit approval for that narrowing
+// and must keep the ConnectionDown branch and the
+// safe-to-repeat gate byte-identical in behaviour.
+//
 // Transient: EOF / unexpected EOF, ECONNRESET, ECONNREFUSED,
 // ECONNABORTED, ETIMEDOUT, EHOSTUNREACH, ENETUNREACH, EPIPE,
 // network timeouts (net.Error Timeout, including os.ErrDeadlineExceeded),

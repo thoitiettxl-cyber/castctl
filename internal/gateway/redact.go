@@ -5,60 +5,23 @@
 package gateway
 
 import (
-	"regexp"
-
 	"github.com/thoitiettxl-cyber/muse-cli/go/internal/redact"
 )
 
 // redactErrorString strips credentials from an error string
-// (item (c), Boss-approved for PR2). The URL-userinfo step is the
-// shared string-level redactor from internal/redact
-// (RedactURLUserinfo): it replaces userinfo in any embedded URL
-// with "<redacted>", keeping scheme, host and path. The remaining
-// steps are gateway-local:
-//
-//   - values of token-like query parameters (auth_token,
-//     access_token, token, hatch_token, session), including the
-//     same keys in a URL fragment (#auth_token=...);
-//   - values of cookie-like fragments (hatch_sess, datr, session),
-//     including JSON form ({"hatch_sess":"..."});
-//   - Bearer tokens after an "Authorization:" label, and bare
-//     `Bearer <token>` values with no label (token-like values
-//     only, so prose is untouched).
-//
-// Everything else is left byte-identical, so server payload text
-// that carries no credential survives redaction. The PR3
-// unification (one shared redaction helper for the key-based
-// helpers) is a separate, carried item; until then this package
-// keeps its own query/cookie/Bearer patterns and does NOT import
-// internal/profile.
-var (
-	reQueryToken    = regexp.MustCompile(`(?i)([?&](?:auth_token|access_token|hatch_token|token|session)=)[^&\s]*`)
-	reFragmentToken = regexp.MustCompile(`(?i)(#(?:auth_token|access_token|hatch_token|token|session)=)[^&\s]*`)
-	reCookieToken   = regexp.MustCompile(`(?i)\b(hatch_sess|datr|session)=[^;\s]*`)
-	reJSONCookie    = regexp.MustCompile(`(?i)("(?:hatch_sess|datr|session)"\s*:\s*")[^"]*`)
-	reBearer        = regexp.MustCompile(`(?i)(Authorization:\s*Bearer\s+)\S+`)
-	// reBareBearer matches a Bearer token with no "Authorization:"
-	// label. The token must look token-like (at least 8 chars from
-	// the base64/URL-safe alphabet) so ordinary prose ("the bearer
-	// of bad news") is never redacted. It runs after reBearer, so
-	// an already-redacted "[redacted]" value (brackets are outside
-	// the alphabet) is left alone.
-	reBareBearer = regexp.MustCompile(`(?i)\b(Bearer\s+)[A-Za-z0-9_\-.~+/=]{8,}`)
-)
-
+// (item (c), Boss-approved for PR2). It is the shared string
+// redactor from internal/redact (redact.String): URL userinfo
+// ("<redacted>"), token-like query/fragment parameters,
+// cookie-like fragments (including JSON form), and Bearer
+// tokens (labelled or bare, token-like values only, so prose
+// is untouched). Everything else is left byte-identical, so
+// server payload text that carries no credential survives
+// redaction. The patterns live in internal/redact only — this
+// package keeps no copy, so the two sites cannot drift apart.
+// Behaviour is pinned by TestRedactErrorString in this package
+// and by TestString in internal/redact.
 func redactErrorString(s string) string {
-	if s == "" {
-		return s
-	}
-	s = redact.RedactURLUserinfo(s)
-	s = reQueryToken.ReplaceAllString(s, "${1}[redacted]")
-	s = reFragmentToken.ReplaceAllString(s, "${1}[redacted]")
-	s = reCookieToken.ReplaceAllString(s, "${1}=[redacted]")
-	s = reJSONCookie.ReplaceAllString(s, "${1}[redacted]")
-	s = reBearer.ReplaceAllString(s, "${1}[redacted]")
-	s = reBareBearer.ReplaceAllString(s, "${1}[redacted]")
-	return s
+	return redact.String(s)
 }
 
 // redactedError wraps an error so its printed form is redacted

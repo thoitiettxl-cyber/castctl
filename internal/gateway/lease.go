@@ -20,11 +20,19 @@ func parseURL(raw string) (*url.URL, error) {
 
 // redactURL returns a URL string safe for errors and logs: the
 // auth_token query value (and any other query value) is replaced
-// with "[redacted]". Only the scheme/host/path shape is kept.
+// with "[redacted]", and any userinfo (username/password) is
+// replaced with "[redacted]". Only the scheme/host/path shape is
+// kept. The WS URL never carries userinfo in production (the
+// auth token travels as a query value); redacting userinfo is
+// defence in depth, so a token-bearing URL can never leak
+// through an error or log line if one ever appears.
 func redactURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "[unparseable url]"
+	}
+	if u.User != nil {
+		u.User = url.User("[redacted]")
 	}
 	q := u.Query()
 	for k := range q {

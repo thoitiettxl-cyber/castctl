@@ -29,7 +29,12 @@ import (
 // AsConnectionLost to recover this type.
 type ErrConnectionLost struct {
 	// NotSent is true only when the gateway died before any
-	// frame was ever sent on it.
+	// frame send was attempted on it. A send that was
+	// attempted but failed counts as sent: the frame may
+	// already be on the wire, and the reader can classify
+	// the death before the writer's post-write bookkeeping
+	// runs, so only a pre-write mark is race-free (see
+	// sendEnvelope).
 	NotSent bool
 	// StreamIDs are the streams that were open when the
 	// connection died.

@@ -171,7 +171,7 @@ func TestParseCookies(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{"json cookies dict", `{"cookies": {"hatch_sess": "FAKE", "datr": "FAKE2"}}`, "", false},
+		{"json cookies dict", `{"cookies": {"hatch_sess": "FAKE", "datr": "FAKE2"}}`, "hatch_sess=FAKE; datr=FAKE2", false},
 		{"json flat", `{"hatch_sess": "FAKE"}`, "hatch_sess=FAKE", false},
 		{"one line", "hatch_sess=FAKE; datr=FAKE2", "hatch_sess=FAKE; datr=FAKE2", false},
 		{"multi line pick", "hatch_sess=FAKE; datr=X\n# comment\nother=1; x=2", "hatch_sess=FAKE; datr=X", false},
@@ -194,21 +194,6 @@ func TestParseCookies(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("ParseCookies: %v", err)
-			}
-			if tc.name == "json cookies dict" {
-				// Map order is unspecified; assert as a set.
-				parts := strings.Split(got, "; ")
-				if len(parts) != 2 {
-					t.Fatalf("got %q", got)
-				}
-				seen := map[string]bool{}
-				for _, p := range parts {
-					seen[p] = true
-				}
-				if !seen["hatch_sess=FAKE"] || !seen["datr=FAKE2"] {
-					t.Fatalf("got %q", got)
-				}
-				return
 			}
 			if got != tc.want {
 				t.Errorf("ParseCookies = %q, want %q", got, tc.want)
