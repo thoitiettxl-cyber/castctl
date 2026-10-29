@@ -39,10 +39,10 @@ dials itself:
 - Subscriber panic contract: a `Subscriber` MUST NOT panic.
   The Runner calls `SubscribeRaw` and `Close` synchronously
   with no recover, so a panic from a contract-violating
-  Subscriber propagates out of `Run` today. The CLI boundary
-  (wiring step) will add a recover converting a panic into
-  exit 2 with a redacted error and no secret-bearing stack;
-  no recover exists on this path until wiring lands. See the
+  Subscriber propagates out of `Run`. The CLI-boundary recover
+  exists in Run (R2 decision): a panic anywhere on the dispatch
+  path converts to exit 2 with a redacted error message and no
+  secret-bearing stack, so the CLI path is covered by it. See the
   `Subscriber` doc in `runner.go`.
 
 ## 2. Outbound Dialer seam (wiring PR)

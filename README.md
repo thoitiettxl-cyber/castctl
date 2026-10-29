@@ -156,10 +156,10 @@ afterwards) and never creates a config entry. Concurrent imports are
 last-writer-wins with no lock. No other new login flow is implemented
 (no native endpoint login, no relay, no device-code/QR, no
 paste-login); `auth export` only prints manual guidance and exits 1
-without writing anything. Note: this branch has no CLI-boundary
-panic recover yet (PR4 owns it, R2 decision); `auth import` merges
-after PR4 or rebases onto it, and is written to never panic on
-hostile stdin in the meantime.
+without writing anything. The CLI-boundary recover exists in
+Run (R2 decision): a panic anywhere on the dispatch path converts
+to exit 2 with a redacted error message and no secret-bearing
+stack; `auth import` is written to never panic on hostile stdin.
 
 `auth list` fails closed when any profile config is unparseable:
 it returns the config error instead of listing. Python 0.6.1 is
@@ -390,8 +390,7 @@ framework: `wait`, `send` (with `--wait` / `--until-done`), the
 `chat.stream` + delivery-ack send path, the `HistoryReader`
 production adapter, profile resolution + `node_id` origin wiring,
 the chat REPL, `approvals` / `approve` / `deny` / `auto-approve`,
-the auto-approve stderr lines, and the CLI-boundary panic recover
-(panic on the dispatch path → exit 2, redacted, no stack trace).
+and the auto-approve stderr lines.
 
 Still deferred:
 

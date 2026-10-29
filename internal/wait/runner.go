@@ -67,12 +67,13 @@ const (
 //
 // Panic contract: a Subscriber MUST NOT panic. The Runner
 // calls SubscribeRaw and Close synchronously with no recover
-// anywhere on the path, so a panic from a contract-violating
-// Subscriber propagates out of Run today. The CLI boundary
-// (wiring step, not this package) will add a recover
-// converting a panic into exit 2 with a redacted error and no
-// secret-bearing stack; until wiring lands, no recover exists
-// on this path by design, and none is added here.
+// in this package, so a panic from a contract-violating
+// Subscriber propagates out of `Run`. The CLI-boundary recover
+// exists in Run (R2 decision): a panic anywhere on the dispatch
+// path converts to exit 2 with a redacted error message and no
+// secret-bearing stack, so the CLI path is covered by it; the
+// recover is in the CLI boundary (wiring step, not this
+// package), and none is added here.
 type Subscriber interface {
 	SubscribeRaw(ctx context.Context, method string, opts conn.SubscribeOptions) ([][]byte, error)
 	Close() error
