@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNotificationStore } from '@/stores';
+import { Button } from '@/components/ui/Button';
 import { IconAlertTriangle, IconCheckCircle2, IconInfo, IconX } from '@/components/ui/icons';
 import { NOTIFICATION_DURATION_MS } from '@/utils/constants';
 import type { Notification } from '@/types';
@@ -105,15 +106,16 @@ function NotificationCard({
         <span className={styles.srOnly}>{t(`notification.type_${type}`)}: </span>
         {message}
       </div>
-      <button
+      <Button
         type="button"
+        variant="plain"
         className={styles.closeButton}
         onClick={(event) => dismiss(event.detail === 0)}
         disabled={isExiting}
         aria-label={t('common.close')}
       >
         <IconX size={16} />
-      </button>
+      </Button>
     </div>
   );
 }

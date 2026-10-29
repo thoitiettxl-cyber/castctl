@@ -10,6 +10,7 @@ import {
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { IconX } from '../icons';
+import { Button } from '../Button';
 import { FOCUSABLE_SELECTOR, lockScroll, unlockScroll } from '../scrollLock';
 import styles from './Sheet.module.scss';
 
@@ -223,16 +224,17 @@ export function Sheet({
         tabIndex={-1}
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <button
+        <Button
           ref={closeBtnRef}
           type="button"
+          variant="plain"
           className={styles.closeBtn}
           onClick={closeDisabled ? undefined : handleClose}
           disabled={closeDisabled}
           aria-label={t('common.close')}
         >
           <IconX size={18} />
-        </button>
+        </Button>
         {(eyebrow || title || description) && (
           <div className={styles.header}>
             {eyebrow ? <div className={styles.eyebrow}>{eyebrow}</div> : null}
