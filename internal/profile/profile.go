@@ -60,7 +60,11 @@ func ResolveProfile(flag *string) (string, error) {
 	return ResolveProfileName(flag, os.LookupEnv)
 }
 
-// BaseDir returns ~/.config/muse-cli for the given home directory.
+// BaseDir returns the $HOME-based default config directory
+// (Join(home, ".config", "muse-cli")) for the given home directory.
+// It is the fallback constructor used only when a relative
+// XDG_CONFIG_HOME is caught by ResolveConfigLocation; the primary
+// default comes from userConfigDir (os.UserConfigDir semantics).
 func BaseDir(home string) string {
 	return filepath.Join(home, ".config", "muse-cli")
 }
@@ -171,6 +175,15 @@ const (
 // resolved absolute path after defaulting and coercion. AutoApprove is
 // normalised to "always" or "off". Outbound is direct when no outbound
 // key is present.
+//
+// Fingerprint and TLSEngine are RECORDED in PR3 (storage + data
+// validation + display only). Their EFFECT takes place only after
+// the fingerprint-engine evaluation decision (pending); today all
+// traffic uses uTLS chrome regardless of these values. Do NOT adopt
+// "random"/"randomized" presets. Fingerprint defaults to "chrome"
+// and TLSEngine to "utls" when the key is absent; the presence flags
+// record whether the key was written in the file, so a save never
+// writes a default back into a file that did not carry the key.
 type Profile struct {
 	Name                 string
 	Dir                  string
@@ -182,6 +195,8 @@ type Profile struct {
 	AutoApprove          string
 	AutoAllowOnce        bool
 	SubscriptionActionID string
+	Fingerprint          string
+	TLSEngine            string
 	Outbound             OutboundRef
 	Source               Source
 	// Exists reports whether the profile directory exists on disk.
@@ -190,8 +205,10 @@ type Profile struct {
 	// (single-file entry or legacy file).
 	ConfigFound bool
 
-	vmIDPresent   bool
-	nodeIDPresent bool
+	vmIDPresent        bool
+	nodeIDPresent      bool
+	fingerprintPresent bool
+	tlsEnginePresent   bool
 }
 
 // clone returns a shallow copy; the Outbound Raw slice is shared but

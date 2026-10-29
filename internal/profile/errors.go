@@ -13,14 +13,85 @@
 // file side effects.
 //
 // All functions that touch the filesystem take the config base directory
-// (usually ~/.config/muse-cli) as a parameter; library code never calls
-// os.UserHomeDir. Callers resolve the home directory and pass it in via
+// (usually the UserConfigDir-derived home) as a parameter; library
+// code never calls os.UserHomeDir, except ResolveConfigLocation's
+// HOME fallback (os.UserHomeDir) when HOME is absent from the getenv
+// it was given. Callers resolve the home directory and pass it in via
 // BaseDir. No network access happens in this package.
+//
+// Concurrent writes: see guard.go. Guarded writes serialise through an
+// in-process mutex plus an flock on config.json.lock, and the checked
+// paths (ConfigState.Save, UpdateSingleConfig) additionally refuse
+// with ErrConcurrentChange when the file's sha256 changed since the
+// load. SaveSingleConfig takes the lock but does NOT hash-check: it is
+// the write path for Migrate and for callers with no prior read.
+//
+// Config location (Requirement A, portable per the PLATFORMS
+// clarification): ResolveConfigLocation (configlocation.go)
+// resolves the config file once per invocation: explicit FILE path
+// (--config flag value, else MUSE_CLI_CONFIG) > the
+// os.UserConfigDir()-derived home (Join(userConfigDir, "muse-cli")).
+// A relative XDG_CONFIG_HOME (Unix) is caught, warned about, and
+// falls back to the computed $HOME-based default; any other
+// user-config-dir error with no usable home is a clear error, never
+// a silent fallback. The resolved file's directory becomes
+// CONFIG_DIR for the whole invocation; every derived path comes
+// from it. Symlinks are not resolved for display paths; relative
+// explicit paths are CWD-relative with no tilde expansion. Phase 2
+// must call ConfigLocation.RequirePresent for every command except
+// `config migrate --write`, which alone may create a missing
+// explicit file.
+//
+// Per-key path resolution (config file keys; survey of Python 0.6.1
+// cli.py:32-260 and the PR1 profile code, 2026-10-29):
+//
+//   - cookies_file (single-file profile entry and legacy flat
+//     config): a relative value resolves under the config file's
+//     directory (the resolved CONFIG_DIR); an absolute value is
+//     honoured as-is. The named-profile coercion (a named profile
+//     cannot borrow another profile's login when the value points
+//     inside the config dir) applies within the resolved dir.
+//     Python 0.6.1 did NOT resolve this key (the value was kept
+//     as-is, so a relative value meant CWD-relative at open
+//     time); the Go delta rule (resolve under the config dir)
+//     predates Requirement A and is unchanged — only the base
+//     moved from the default home to the resolved dir.
+//   - vm_id, node_id, subscription_action_id, auto_approve,
+//     auto_allow_once, default_profile, fingerprint, tls_engine:
+//     not paths; no resolution is performed.
+//   - outbound / outbounds / endpoints / dns: opaque sing-box
+//     option objects, parsed by sing-box's own registry and
+//     stored as raw JSON. Path-like fields inside them (tls
+//     certificate_path, client_certificate_path, key_path; ssh
+//     private_key_path; openvpn/openconnect certificate, key,
+//     crl and static-key paths; tailscale config_path; any other
+//     *_path) are passed through VERBATIM. This package never
+//     rewrites them, so a relative value resolves the way
+//     sing-box resolves it (process working directory), NOT
+//     relative to the config file's directory. Rewriting them
+//     would need a hand-written copy of the sing-box schema,
+//     which the delta forbids. Users with a custom --config
+//     location must use absolute paths inside outbound objects.
+//   - Derived filesystem paths (all from the resolved CONFIG_DIR):
+//     config.json, config.json.lock, profiles/<name>/config.json
+//     (legacy), profiles/<name>/cookies.txt (default),
+//     profiles/<name>/chat.json, and — for consumers in other
+//     packages — the active profile's telegram.json and
+//     telegram-state.json (via Profile.Dir) and update.json
+//     (config-global: under CONFIG_DIR, never per-profile, and
+//     never pinned to the default home once a custom location
+//     is resolved; no derivation for update.json exists in this
+//     package yet).
+//
+// Fingerprint/tls_engine recording: see fingerprint.go. The values
+// are stored, data-validated, and displayed only; they have no
+// effect on traffic in PR3 (fingerprint-engine evaluation pending).
 package profile
 
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 )
 
 // Error is a typed error carrying an exit code so cmd can map errors
@@ -54,6 +125,10 @@ var (
 	// ErrRefuseOverwrite is the sentinel for migrate refusing to overwrite
 	// a different existing single config file.
 	ErrRefuseOverwrite = &Error{Code: 2, Kind: "refuse_overwrite", Message: "profile: refuse to overwrite existing single config"}
+	// ErrConcurrentChange is the sentinel for a guarded write refused
+	// because config.json changed since it was loaded (see guard.go).
+	// The caller retries the whole command.
+	ErrConcurrentChange = &Error{Code: 2, Kind: "concurrent_change", Message: "profile: config changed concurrently"}
 )
 
 // ExitCode maps an error to a process exit code: 0 for nil, the typed
@@ -98,4 +173,13 @@ func newAuthError(msg string) *Error {
 
 func newRefuseError(msg string) *Error {
 	return &Error{Code: 2, Kind: "refuse_overwrite", Message: "profile: " + msg, Cause: ErrRefuseOverwrite}
+}
+
+func newConcurrentChangeError(baseDir string) *Error {
+	return &Error{
+		Code:    2,
+		Kind:    "concurrent_change",
+		Message: fmt.Sprintf("profile: config changed concurrently, retry: %s", filepath.Join(baseDir, "config.json")),
+		Cause:   ErrConcurrentChange,
+	}
 }

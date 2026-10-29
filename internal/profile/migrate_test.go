@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -353,4 +354,237 @@ func TestMigrateEmptyBase(t *testing.T) {
 	if _, ok := doc["profiles"]; !ok {
 		t.Errorf("migrated config missing profiles: %v", doc)
 	}
+}
+
+// TestMigrateSingleFileOnlyIdempotent (NB4) pins migrate idempotency
+// when profiles exist ONLY in the single file, with no legacy layout
+// on disk: no profiles/ directory, no flat legacy config. A dry-run
+// and a write must both report already-migrated, twice in a row, with
+// no error and no rewrite. The single files below are in the canonical
+// form Migrate itself writes (explicit cookies_file, node_id,
+// auto_approve, auto_allow_once), so parsed-equal must mean
+// byte-equal after canonicalisation.
+func TestMigrateSingleFileOnlyIdempotent(t *testing.T) {
+	t.Parallel()
+	cookies := func(base, name string) string {
+		if name == DefaultProfileName {
+			return filepath.Join(base, "cookies.txt")
+		}
+		return filepath.Join(base, "profiles", name, "cookies.txt")
+	}
+	cases := []struct {
+		name string
+		file func(base string) string
+	}{
+		{
+			name: "non-default profile only",
+			file: func(base string) string {
+				return `{"default_profile":"muse01","profiles":{"muse01":{"cookies_file":` + quoteJSON(cookies(base, "muse01")) + `,"node_id":"MUSE01-NODE","auto_approve":"off","auto_allow_once":false}}}`
+			},
+		},
+		{
+			name: "default profile plus outbounds and endpoints",
+			file: func(base string) string {
+				return `{"profiles":{"default":{"cookies_file":` + quoteJSON(cookies(base, "default")) + `,"node_id":"MAIN-NODE","auto_approve":"always","auto_allow_once":false}},"outbounds":[` + validOutbounds["socks"] + `],"endpoints":[` + validOutbounds["wireguard-ep"] + `]}`
+			},
+		},
+		{
+			name: "two single-only profiles, one tagged one direct",
+			file: func(base string) string {
+				return `{"default_profile":"p1","profiles":{"p1":{"cookies_file":` + quoteJSON(cookies(base, "p1")) + `,"node_id":"N1","auto_approve":"off","auto_allow_once":false,"outbound":"proxy-sg"},"p2":{"cookies_file":` + quoteJSON(cookies(base, "p2")) + `,"node_id":"N2","auto_approve":"off","auto_allow_once":true}},"outbounds":[` + validOutbounds["socks"] + `]}`
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			base := BaseDir(home)
+			path := filepath.Join(base, "config.json")
+			writeFile(t, path, tc.file(base), 0o600)
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			st1, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, write := range []bool{false, true, false, true} {
+				result, err := Migrate(base, write)
+				if err != nil {
+					t.Fatalf("Migrate(write=%v) error: %v (result %+v)", write, err, result)
+				}
+				if result.Migrated {
+					t.Errorf("Migrate(write=%v) Migrated=true; want false (already-migrated)", write)
+				}
+				if result.Reason != "already-migrated" {
+					t.Errorf("Migrate(write=%v) Reason=%q; want already-migrated", write, result.Reason)
+				}
+				if result.WouldWrite {
+					t.Errorf("Migrate(write=%v) WouldWrite=true; want false", write)
+				}
+				if !result.ExistingSingleConfig {
+					t.Errorf("Migrate(write=%v) ExistingSingleConfig=false; want true", write)
+				}
+				if len(result.Generated) != 0 {
+					t.Errorf("Migrate(write=%v) Generated=%v; want none (dry-run and write never invent node_id for an already-migrated file)", write, result.Generated)
+				}
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(before) != string(after) {
+				t.Errorf("migrate rewrote the single file:\nbefore: %s\nafter: %s", before, after)
+			}
+			st2, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !st1.ModTime().Equal(st2.ModTime()) {
+				t.Error("migrate rewrote the file; want no write (mtime changed)")
+			}
+		})
+	}
+}
+
+func TestMigrateConcurrentWritesExactlyOneWins(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	base := BaseDir(home)
+	writeFile(t, filepath.Join(base, "config.json"), `{"auto_approve":"always","node_id":"MAIN-NODE"}`, 0o600)
+	writeFile(t, filepath.Join(base, "profiles", "work", "config.json"), `{"auto_approve":"off"}`, 0o600)
+
+	// RT-2: before the lock-across-decide+write fix, several
+	// of these runs both exited 0 with different generated
+	// node_ids (measured 4 wins out of 8 in the probe).
+	const n = 8
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	results := make([]*MigrateResult, n)
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			results[i], errs[i] = Migrate(base, true)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	wins := 0
+	for i := 0; i < n; i++ {
+		if errs[i] != nil {
+			t.Errorf("migrate %d: %v", i, errs[i])
+		}
+		if results[i] == nil {
+			t.Errorf("migrate %d: nil result", i)
+			continue
+		}
+		if results[i].Migrated {
+			wins++
+			if len(results[i].Generated) != 1 || results[i].Generated[0] != "work" {
+				t.Errorf("migrate %d: Generated = %v; want [work]", i, results[i].Generated)
+			}
+		} else if results[i].Reason != "already-migrated" {
+			t.Errorf("migrate %d: migrated=false reason=%q; want already-migrated", i, results[i].Reason)
+		}
+	}
+	if wins != 1 {
+		t.Errorf("migrate wins = %d; want exactly 1", wins)
+	}
+	// The winner's generated id is the one persisted: a
+	// further migrate reports already-migrated and the file
+	// is byte-stable.
+	cfg, _, err := LoadSingleConfig(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeID := cfg.Profiles["work"].NodeID
+	if len(nodeID) != 16 || !isHex(nodeID) {
+		t.Errorf("final work node_id = %q; want 16 hex chars", nodeID)
+	}
+	before, err := os.ReadFile(filepath.Join(base, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := Migrate(base, true)
+	if err != nil {
+		t.Fatalf("follow-up migrate: %v", err)
+	}
+	if again.Migrated || again.Reason != "already-migrated" {
+		t.Errorf("follow-up migrate = %+v; want already-migrated", again)
+	}
+	after, err := os.ReadFile(filepath.Join(base, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Error("follow-up migrate rewrote the file; the winner's ids must already be persisted")
+	}
+}
+
+// TestMigrateConcurrentWithAddProfile pins the other half of
+// RT-2: a `profile add` racing the FIRST `migrate --write` on
+// an empty base must survive, whichever order the lock
+// serialises them in. Before the fix, migrate's stale-candidate
+// SaveSingleConfig could overwrite the add's write, losing the
+// added profile while both commands reported success. (A
+// legacy-only profile pending beside an existing single file is
+// refuse-overwrite by the pre-existing one-shot design, so the
+// race that can clobber an add is the first-write race on an
+// empty base, where AddProfile is allowed.)
+func TestMigrateConcurrentWithAddProfile(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	base := BaseDir(home)
+	// Empty base: no files at all.
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var migrateErr, addErr error
+	var migrateResult *MigrateResult
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		migrateResult, migrateErr = Migrate(base, true)
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		_, addErr = AddProfile(base, "work", AddProfileOptions{})
+	}()
+	close(start)
+	wg.Wait()
+	if migrateErr != nil {
+		t.Fatalf("Migrate: %v", migrateErr)
+	}
+	if migrateResult == nil {
+		t.Fatal("Migrate: nil result")
+	}
+	if addErr != nil {
+		t.Fatalf("AddProfile: %v", addErr)
+	}
+	cfg, _, err := LoadSingleConfig(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	work, ok := cfg.Profiles["work"]
+	if !ok {
+		t.Fatalf("final config missing profile %q (clobbered by migrate): %v", "work", cfg.ProfileNames())
+	}
+	if len(work.NodeID) != 16 || !isHex(work.NodeID) {
+		t.Errorf("work node_id = %q; want 16 hex chars", work.NodeID)
+	}
+}
+
+func quoteJSON(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
 }

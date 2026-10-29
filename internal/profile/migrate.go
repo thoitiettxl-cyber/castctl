@@ -9,13 +9,16 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 )
 
 // MigrateProfile is one profile in a MigrateResult.
 type MigrateProfile struct {
 	Name string `json:"name"`
-	// Source is "legacy" for profiles built from the old layout.
+	// Source is "legacy" for profiles built from the old layout and
+	// "single" for profiles carried over verbatim from an existing
+	// single file (NB4: single-file-only profiles).
 	Source string `json:"source"`
 	// CookiesFile is the resolved cookies file path.
 	CookiesFile string `json:"cookies_file"`
@@ -60,9 +63,17 @@ type MigrateResult struct {
 //
 //   - A second run over identical parsed content returns
 //     {migrated:false, reason:"already-migrated"} with no error.
+//     Profiles present only in the single file (no legacy layout),
+//     and the file's outbounds/endpoints/dns/default_profile, are
+//     carried over verbatim (NB4), so a single-file-only layout is
+//     already-migrated on the first run too; comparison happens
+//     before any node_id generation.
 //   - A different existing single file is a refuse-overwrite error:
 //     migrate is one-shot and has no --overwrite; later profiles are
 //     added via profile-add, not migrate.
+//   - Fingerprint and tls_engine values present in a profile entry
+//     or legacy file are preserved verbatim; absent keys stay at
+//     their defaults (and stay absent in the written file).
 //   - A missing node_id is generated with crypto/rand (16 hex chars)
 //     only in write mode, listed in Generated, and never written back
 //     to old files.
@@ -78,6 +89,34 @@ func Migrate(baseDir string, write bool) (*MigrateResult, error) {
 		Errors:   []string{},
 	}
 
+	// Write mode holds the config lock across the WHOLE
+	// decide+write (RT-2): the already-migrated/refuse
+	// decision, the node_id generation, and the write all
+	// happen under one lock acquisition, re-reading the
+	// current single file under the lock. Without this, two
+	// concurrent `migrate --write` runs both decided on the
+	// absent file, both generated different node_ids, and
+	// both exited 0 with the last write winning — the other
+	// run reported ids that were never persisted — and a
+	// concurrent `profile add` could be clobbered by the
+	// stale-candidate write. Under the lock the second
+	// migrate re-reads the file the first one wrote and
+	// reports already-migrated, and an add serialises either
+	// before (carried over verbatim, NB4) or after the
+	// migrate. The write below therefore uses
+	// writeSingleConfigLocked directly: SaveSingleConfig
+	// would re-acquire the lock and deadlock. Migrate must
+	// not be called from inside an UpdateSingleConfig update
+	// function (the lock is already held there). Dry-run
+	// takes no lock: it reads only.
+	if write {
+		release, err := lockConfigDir(baseDir)
+		if err != nil {
+			return result, err
+		}
+		defer release()
+	}
+
 	existing, existingIsSingle, malformedErr, err := readExistingSingle(baseDir)
 	if err != nil {
 		return result, err
@@ -91,7 +130,21 @@ func Migrate(baseDir string, write bool) (*MigrateResult, error) {
 	}
 	sort.Strings(names[1:])
 
+	// NB4: when a single file already exists it wins wholly. Its
+	// entries are carried over verbatim (cloned) first, including
+	// profiles present ONLY in the single file: DiscoverProfileNames
+	// only sees directories, so single-only names never appear in
+	// `names` and were previously dropped, making every second run
+	// refuse-overwrite. Legacy files are then consulted ONLY for
+	// profiles absent from the single file.
 	candidateProfiles := []*Profile{}
+	fromSingle := make(map[string]bool)
+	if existingIsSingle {
+		for _, name := range singleFirstNames(existing.ProfileNames()) {
+			candidateProfiles = append(candidateProfiles, existing.Profiles[name].clone())
+			fromSingle[name] = true
+		}
+	}
 	profileErrors := []string{}
 	for _, name := range names {
 		paths, perr := ProfilePaths(baseDir, name)
@@ -106,18 +159,17 @@ func Migrate(baseDir string, write bool) (*MigrateResult, error) {
 			profileErrors = append(profileErrors, malformedErr.Error())
 			continue
 		}
-		// The base config.json is the single file when one exists; the
-		// default profile has no separate legacy file in that case, so
-		// its candidate entry is the existing single-file entry itself
-		// (otherwise a second run could never compare equal: the
-		// legacy default settings no longer exist on disk).
-		if existingIsSingle && name == DefaultProfileName {
-			if entry, ok := existing.Profiles[DefaultProfileName]; ok {
-				candidateProfiles = append(candidateProfiles, entry.clone())
-			} else {
-				candidateProfiles = append(candidateProfiles, defaultProfile(paths))
+		if existingIsSingle {
+			if fromSingle[name] {
+				continue
 			}
-			continue
+			if name == DefaultProfileName {
+				// The base config.json IS the single file; the
+				// default profile has no separate legacy file,
+				// and it is absent from the single file, so
+				// there is no default entry to carry over.
+				continue
+			}
 		}
 		p, perr := migrateLegacyProfile(baseDir, name, paths)
 		if perr != nil {
@@ -127,21 +179,13 @@ func Migrate(baseDir string, write bool) (*MigrateResult, error) {
 		candidateProfiles = append(candidateProfiles, p)
 	}
 
-	// Reuse node_ids from the existing single file for overlapping
-	// profiles so a plain second run compares equal (fresh random
-	// node_ids would otherwise differ every run).
-	if existingIsSingle {
-		for _, p := range candidateProfiles {
-			if entry, ok := existing.Profiles[p.Name]; ok && entry.NodeID != "" {
-				p.NodeID = entry.NodeID
-				p.nodeIDPresent = true
-			}
-		}
-	}
-
-	// Generate missing node_ids only in write mode.
+	// Generate missing node_ids only in write mode and only when
+	// there is no existing single file: an already-migrated file is
+	// compared verbatim (NB4) before any generation, so a second run
+	// never invents an id for a profile already in the single file,
+	// and a refused run never reports ids it did not write.
 	generated := []string{}
-	if write {
+	if write && !existingIsSingle {
 		for _, p := range candidateProfiles {
 			if !p.nodeIDPresent || p.NodeID == "" {
 				id, gerr := generateNodeID()
@@ -159,12 +203,8 @@ func Migrate(baseDir string, write bool) (*MigrateResult, error) {
 	// candidate file itself reuses the existing value verbatim (even
 	// when absent) so comparison against an existing file is exact.
 	effectiveDefault := DefaultProfileName
-	candidateDefault := DefaultProfileName
-	if existingIsSingle {
-		candidateDefault = existing.DefaultProfile
-		if existing.DefaultProfile != "" {
-			effectiveDefault = existing.DefaultProfile
-		}
+	if existingIsSingle && existing.DefaultProfile != "" {
+		effectiveDefault = existing.DefaultProfile
 	}
 	result.DefaultProfile = effectiveDefault
 	generatedSet := make(map[string]bool, len(generated))
@@ -172,9 +212,13 @@ func Migrate(baseDir string, write bool) (*MigrateResult, error) {
 		generatedSet[g] = true
 	}
 	for _, p := range candidateProfiles {
+		source := "legacy"
+		if fromSingle[p.Name] {
+			source = "single"
+		}
 		mp := MigrateProfile{
 			Name:            p.Name,
-			Source:          "legacy",
+			Source:          source,
 			CookiesFile:     p.CookiesFile,
 			Outbound:        nil,
 			Warnings:        migrateWarnings(p, write, generatedSet),
@@ -191,12 +235,25 @@ func Migrate(baseDir string, write bool) (*MigrateResult, error) {
 		return result, newConfigErrorf("migrate: %d profile error(s)", len(profileErrors))
 	}
 
-	candidate := &SingleConfig{
-		DefaultProfile: candidateDefault,
-		Profiles:       make(map[string]*Profile),
-	}
-	for _, p := range candidateProfiles {
-		candidate.Profiles[p.Name] = p
+	var candidate *SingleConfig
+	if existingIsSingle {
+		// Carry the existing file's outbounds, endpoints, dns, and
+		// default_profile verbatim (NB4); only legacy-only profiles
+		// are added.
+		candidate = cloneSingleConfig(existing)
+		for _, p := range candidateProfiles {
+			if !fromSingle[p.Name] {
+				candidate.Profiles[p.Name] = p
+			}
+		}
+	} else {
+		candidate = &SingleConfig{
+			DefaultProfile: DefaultProfileName,
+			Profiles:       make(map[string]*Profile),
+		}
+		for _, p := range candidateProfiles {
+			candidate.Profiles[p.Name] = p
+		}
 	}
 
 	if existingIsSingle {
@@ -216,7 +273,9 @@ func Migrate(baseDir string, write bool) (*MigrateResult, error) {
 		result.WouldWrite = true
 		return result, nil
 	}
-	if err := SaveSingleConfig(baseDir, candidate); err != nil {
+	// The config lock is held (acquired above): write under
+	// it, without re-locking via SaveSingleConfig.
+	if _, err := writeSingleConfigLocked(baseDir, candidate); err != nil {
 		return result, err
 	}
 	result.Migrated = true
@@ -260,6 +319,8 @@ func defaultProfile(paths Paths) *Profile {
 		CookiesFile: paths.Cookies,
 		ChatFile:    paths.Chat,
 		AutoApprove: "off",
+		Fingerprint: DefaultFingerprint,
+		TLSEngine:   DefaultTLSEngine,
 		Source:      SourceLegacy,
 		Outbound:    OutboundRef{Kind: OutboundDirect, Type: "direct"},
 	}
@@ -333,4 +394,53 @@ func canonicalSingleBytes(cfg *SingleConfig) ([]byte, error) {
 		return nil, err
 	}
 	return encodeOrderedJSONIndent(root, 2)
+}
+
+// cloneSingleConfig returns a deep copy of cfg: profile entries are
+// cloned, outbound/endpoint lists and raw JSON slices are copied, so
+// mutating the clone never affects the original.
+func cloneSingleConfig(cfg *SingleConfig) *SingleConfig {
+	if cfg == nil {
+		return nil
+	}
+	out := *cfg
+	out.Profiles = make(map[string]*Profile, len(cfg.Profiles))
+	for name, p := range cfg.Profiles {
+		out.Profiles[name] = p.clone()
+	}
+	out.Outbounds = slices.Clone(cfg.Outbounds)
+	out.Endpoints = slices.Clone(cfg.Endpoints)
+	out.rawOutbounds = copyRawList(cfg.rawOutbounds)
+	out.rawEndpoints = copyRawList(cfg.rawEndpoints)
+	if len(cfg.rawDNS) > 0 {
+		out.rawDNS = append([]byte{}, cfg.rawDNS...)
+	} else {
+		out.rawDNS = nil
+	}
+	out.rawProfiles = make(map[string][]byte, len(cfg.rawProfiles))
+	for name, raw := range cfg.rawProfiles {
+		out.rawProfiles[name] = append([]byte{}, raw...)
+	}
+	if cfg.DNS != nil {
+		dnsCopy := *cfg.DNS
+		out.DNS = &dnsCopy
+	}
+	return &out
+}
+
+// singleFirstNames returns names with "default" first and the rest in
+// their given (sorted) order, matching DiscoverProfileNames order.
+func singleFirstNames(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if n == DefaultProfileName {
+			out = append(out, n)
+		}
+	}
+	for _, n := range names {
+		if n != DefaultProfileName {
+			out = append(out, n)
+		}
+	}
+	return out
 }

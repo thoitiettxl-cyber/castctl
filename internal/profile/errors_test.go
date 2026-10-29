@@ -6,6 +6,7 @@ package profile
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -43,7 +44,7 @@ func TestErrorMessagesDoNotLeakSecrets(t *testing.T) {
 	// A config carrying a secret plus an unknown field must fail, and the
 	// error must not echo the secret.
 	data := `{"profiles":{"p":{"outbound":{"type":"socks","tag":"x","server":"127.0.0.1","server_port":1080,"password":"` + secret + `","bogus_field_xyz":1}}}}`
-	_, err := ParseSingleConfig([]byte(data), "/tmp/nonexistent-base")
+	_, err := ParseSingleConfig([]byte(data), filepath.Join(t.TempDir(), "nonexistent-base"))
 	if err == nil {
 		t.Fatal("ParseSingleConfig = nil error; want error for unknown field")
 	}

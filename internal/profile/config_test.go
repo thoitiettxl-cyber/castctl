@@ -288,6 +288,64 @@ func TestParseSingleConfigTagRules(t *testing.T) {
 	}
 }
 
+// TestParseSingleConfigDirectAndInvalidOutbound pins the explicit
+// "direct" form and Invalid-never-Inherit (CLIProxyAPI idea 3): every
+// invalid outbound form is an error, never silently inherited from
+// env or any other source, even with proxy env vars set.
+func TestParseSingleConfigDirectAndInvalidOutbound(t *testing.T) {
+	// No t.Parallel: t.Setenv below forbids it.
+	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy"} {
+		t.Setenv(name, "http://env-proxy.invalid:8080")
+	}
+
+	// Explicit "direct" parses as direct, even when an outbound is
+	// tagged "direct" (the string is never a tag reference).
+	cfg, err := ParseSingleConfig([]byte(singleFileJSON(
+		`{"p":{"outbound":"direct"}}`,
+		`[`+validOutbounds["direct"]+`]`, "", "")), "/base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := cfg.Profiles["p"].Outbound
+	if ref.Kind != OutboundDirect || ref.Type != "direct" || !ref.IsDirect() {
+		t.Errorf("direct ref = %+v; want direct/direct", ref)
+	}
+	// A saved direct profile omits the outbound key, like an absent
+	// outbound key.
+	base := BaseDir(t.TempDir())
+	if err := SaveSingleConfig(base, cfg); err != nil {
+		t.Fatal(err)
+	}
+	doc := readJSONFile(t, filepath.Join(base, "config.json"))
+	profiles, _ := doc["profiles"].(map[string]any)
+	if _, ok := profiles["p"].(map[string]any)["outbound"]; ok {
+		t.Errorf("saved direct profile has outbound key: %v", doc)
+	}
+
+	invalid := map[string]string{
+		"outbound number":                 `{"profiles":{"p":{"outbound":42}}}`,
+		"outbound bool":                   `{"profiles":{"p":{"outbound":true}}}`,
+		"outbound null":                   `{"profiles":{"p":{"outbound":null}}}`,
+		"outbound array":                  `{"profiles":{"p":{"outbound":[]}}}`,
+		"outbound empty string":           `{"profiles":{"p":{"outbound":""}}}`,
+		"outbound whitespace":             `{"profiles":{"p":{"outbound":" "}}}`,
+		"outbound unknown type":           `{"profiles":{"p":{"outbound":{"type":"bogus-xyz","tag":"x"}}}}`,
+		"outbound no type":                `{"profiles":{"p":{"outbound":{"tag":"x"}}}}`,
+		"outbound dangling":               `{"profiles":{"p":{"outbound":"ghost-tag"}}}`,
+		"outbound tag number":             `{"profiles":{"p":{"outbound":{"type":"direct","tag":42}}}}`,
+		"outbound empty tag":              `{"profiles":{"p":{"outbound":{"type":"direct","tag":""}}}}`,
+		"outbound duplicate tag":          singleFileJSON(`{"p":{"outbound":{"type":"socks","tag":"proxy-sg","server":"127.0.0.1","server_port":1080}}}`, `[`+validOutbounds["socks"]+`]`, "", ""),
+		"outbound duplicate endpoint tag": singleFileJSON(`{"p":{"outbound":"proxy-sg"}}`, `[`+validOutbounds["socks"]+`]`, `[{"type":"wireguard","tag":"proxy-sg","address":["10.0.0.2/32"],"private_key":"FAKE-K"}]`, ""),
+	}
+	for name, data := range invalid {
+		if _, err := ParseSingleConfig([]byte(data), "/base"); err == nil {
+			t.Errorf("ParseSingleConfig(%s) = nil error; want error (invalid outbound must never inherit)", name)
+		} else if ExitCode(err) != 2 {
+			t.Errorf("ParseSingleConfig(%s) ExitCode = %d; want 2", name, ExitCode(err))
+		}
+	}
+}
+
 func TestParseSingleConfigCookiesKeyRejected(t *testing.T) {
 	t.Parallel()
 	cases := []string{
@@ -415,14 +473,15 @@ func TestLoadProfileCoercion(t *testing.T) {
 		t.Errorf("coerced CookiesFile = %q; want own file", p.CookiesFile)
 	}
 	// A cookies_file outside the base dir is kept (Python keeps it).
+	outside := filepath.Join(t.TempDir(), "outside-cookies.txt")
 	workDir2 := filepath.Join(base, "profiles", "other")
 	writeFile(t, filepath.Join(workDir2, "config.json"),
-		`{"cookies_file":"/tmp/outside-cookies.txt","node_id":"n1"}`, 0o600)
+		`{"cookies_file":"`+outside+`","node_id":"n1"}`, 0o600)
 	p2, err := LoadProfile(base, "other", lookupEnv(map[string]string{}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p2.CookiesFile != "/tmp/outside-cookies.txt" {
+	if p2.CookiesFile != outside {
 		t.Errorf("outside CookiesFile = %q; want kept", p2.CookiesFile)
 	}
 	// Relative cookies_file resolves under the base dir, then coercion applies.

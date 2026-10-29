@@ -126,6 +126,8 @@ var profileKeys = map[string]bool{
 	"auto_approve":           true,
 	"auto_allow_once":        true,
 	"subscription_action_id": true,
+	"fingerprint":            true,
+	"tls_engine":             true,
 	"outbound":               true,
 }
 
@@ -267,6 +269,9 @@ func ParseSingleConfig(data []byte, baseDir string) (*SingleConfig, error) {
 	if err := validateTagGraph(cfg); err != nil {
 		return nil, err
 	}
+	if err := validateWireGuardPrivateKeys(cfg); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
@@ -293,6 +298,8 @@ func parseProfileEntry(name string, obj *orderedObject, baseDir string) (*Profil
 		CookiesFile: paths.Cookies,
 		ChatFile:    paths.Chat,
 		AutoApprove: "off",
+		Fingerprint: DefaultFingerprint,
+		TLSEngine:   DefaultTLSEngine,
 		Source:      SourceSingle,
 		ConfigFound: true,
 		Outbound:    OutboundRef{Kind: OutboundDirect, Type: "direct"},
@@ -348,13 +355,45 @@ func parseProfileEntry(name string, obj *orderedObject, baseDir string) (*Profil
 		}
 		p.SubscriptionActionID = s
 	}
+	if v, ok := obj.get("fingerprint"); ok {
+		s, ok := v.(string)
+		if !ok {
+			return nil, newConfigErrorf("profile %q: fingerprint must be a string", name)
+		}
+		if err := validateFingerprintValue(s); err != nil {
+			return nil, newConfigErrorf("profile %q: %v", name, err)
+		}
+		p.Fingerprint = s
+		p.fingerprintPresent = true
+	}
+	if v, ok := obj.get("tls_engine"); ok {
+		s, ok := v.(string)
+		if !ok {
+			return nil, newConfigErrorf("profile %q: tls_engine must be a string", name)
+		}
+		if err := validateTLSEngineValue(s); err != nil {
+			return nil, newConfigErrorf("profile %q: %v", name, err)
+		}
+		p.TLSEngine = s
+		p.tlsEnginePresent = true
+	}
 	if v, ok := obj.get("outbound"); ok {
 		switch t := v.(type) {
 		case string:
 			if strings.TrimSpace(t) == "" {
 				return nil, newConfigErrorf("profile %q: outbound tag must not be empty", name)
 			}
-			p.Outbound = OutboundRef{Kind: OutboundTag, Tag: t}
+			// "direct" is the explicit direct form (CLIProxyAPI
+			// idea 3): it is always direct, never a tag reference,
+			// even if an outbound is tagged "direct". Any other
+			// string is a tag reference resolved by
+			// validateTagGraph; an invalid value is an error here,
+			// never inherited from env or any other source.
+			if t == "direct" {
+				p.Outbound = OutboundRef{Kind: OutboundDirect, Type: "direct"}
+			} else {
+				p.Outbound = OutboundRef{Kind: OutboundTag, Tag: t}
+			}
 		case *orderedObject:
 			raw, err := rawOf(t)
 			if err != nil {
@@ -576,6 +615,10 @@ func LoadSingleConfig(baseDir string) (*SingleConfig, bool, error) {
 }
 
 // legacySettings is the flat per-profile config shape from cli.py.
+// fingerprint/tls_engine are validated strictly in BOTH strict and
+// non-strict modes (unlike the other settings, whose wrong-typed
+// values are coerced when strict is false): an invalid recorded
+// identity value is never silently reinterpreted.
 type legacySettings struct {
 	cookiesFile          string
 	cookiesFilePresent   bool
@@ -586,6 +629,10 @@ type legacySettings struct {
 	autoApprove          string
 	autoAllowOnce        bool
 	subscriptionActionID string
+	fingerprint          string
+	fingerprintPresent   bool
+	tlsEngine            string
+	tlsEnginePresent     bool
 }
 
 // parseLegacyConfig parses a flat legacy config.json. When strict is
@@ -627,6 +674,26 @@ func parseLegacyConfig(data []byte, strict bool) (*legacySettings, error) {
 	}
 	if s.subscriptionActionID, _, err = getString("subscription_action_id"); err != nil {
 		return nil, err
+	}
+	if v, ok := raw["fingerprint"]; ok {
+		var str string
+		if err := json.Unmarshal(v, &str); err != nil {
+			return nil, newConfigError("fingerprint must be a string")
+		}
+		if err := validateFingerprintValue(str); err != nil {
+			return nil, newConfigError(err.Error())
+		}
+		s.fingerprint, s.fingerprintPresent = str, true
+	}
+	if v, ok := raw["tls_engine"]; ok {
+		var str string
+		if err := json.Unmarshal(v, &str); err != nil {
+			return nil, newConfigError("tls_engine must be a string")
+		}
+		if err := validateTLSEngineValue(str); err != nil {
+			return nil, newConfigError(err.Error())
+		}
+		s.tlsEngine, s.tlsEnginePresent = str, true
 	}
 	if v, ok := raw["auto_approve"]; ok {
 		var str string
@@ -680,6 +747,8 @@ func applyLegacy(name string, paths Paths, s *legacySettings, baseDir string) *P
 		AutoApprove:          s.autoApprove,
 		AutoAllowOnce:        s.autoAllowOnce,
 		SubscriptionActionID: s.subscriptionActionID,
+		Fingerprint:          DefaultFingerprint,
+		TLSEngine:            DefaultTLSEngine,
 		Source:               SourceLegacy,
 		ConfigFound:          true,
 		Outbound:             OutboundRef{Kind: OutboundDirect, Type: "direct"},
@@ -694,6 +763,14 @@ func applyLegacy(name string, paths Paths, s *legacySettings, baseDir string) *P
 	if s.nodeIDPresent {
 		p.NodeID = s.nodeID
 		p.nodeIDPresent = true
+	}
+	if s.fingerprintPresent {
+		p.Fingerprint = s.fingerprint
+		p.fingerprintPresent = true
+	}
+	if s.tlsEnginePresent {
+		p.TLSEngine = s.tlsEngine
+		p.tlsEnginePresent = true
 	}
 	return p
 }
@@ -762,6 +839,8 @@ func LoadProfile(baseDir, name string, getenv func(string) (string, bool)) (*Pro
 			CookiesFile: paths.Cookies,
 			ChatFile:    paths.Chat,
 			AutoApprove: "off",
+			Fingerprint: DefaultFingerprint,
+			TLSEngine:   DefaultTLSEngine,
 			Source:      SourceNone,
 			Outbound:    OutboundRef{Kind: OutboundDirect, Type: "direct"},
 		}
@@ -927,7 +1006,13 @@ func decodeRawList(raws [][]byte) ([]any, error) {
 // buildProfileEntry renders one profile entry: cookies_file is always
 // written (resolved), auto_approve/auto_allow_once always written,
 // optional identifiers only when non-empty, outbound as an inline
-// object, a tag string, or omitted for direct.
+// object, a tag string, or omitted for direct. fingerprint and
+// tls_engine are written only when the key was present in the file
+// the profile was loaded from, or when the loaded value differs
+// from the default: an absent key stays absent (its effective value
+// is the default) so a save never writes a default back into a file
+// that did not carry the key. RedactProfile injects the effective
+// values for display; see redact.go.
 func buildProfileEntry(p *Profile) (*orderedObject, error) {
 	entry := newOrderedObject()
 	entry.set("cookies_file", p.CookiesFile)
@@ -945,6 +1030,20 @@ func buildProfileEntry(p *Profile) (*orderedObject, error) {
 	entry.set("auto_allow_once", p.AutoAllowOnce)
 	if p.SubscriptionActionID != "" {
 		entry.set("subscription_action_id", p.SubscriptionActionID)
+	}
+	fp := p.Fingerprint
+	if fp == "" {
+		fp = DefaultFingerprint
+	}
+	if p.fingerprintPresent || fp != DefaultFingerprint {
+		entry.set("fingerprint", fp)
+	}
+	te := p.TLSEngine
+	if te == "" {
+		te = DefaultTLSEngine
+	}
+	if p.tlsEnginePresent || te != DefaultTLSEngine {
+		entry.set("tls_engine", te)
 	}
 	switch p.Outbound.Kind {
 	case OutboundTag:
@@ -975,26 +1074,22 @@ func buildProfileEntry(p *Profile) (*orderedObject, error) {
 
 // SaveSingleConfig writes cfg to baseDir/config.json atomically
 // (temp file in the same directory + rename), mode 0600, JSON indent 2.
-// It creates the base directory if needed.
+// It creates the base directory if needed. It takes the config lock
+// (see guard.go) but does NOT check the file's hash: callers that
+// loaded the config first must use ConfigState.Save or
+// UpdateSingleConfig instead, so a concurrent change is refused
+// rather than overwritten.
 func SaveSingleConfig(baseDir string, cfg *SingleConfig) error {
 	if cfg == nil {
 		return newConfigError("cannot save nil config")
 	}
-	if cfg.Profiles == nil {
-		cfg.Profiles = make(map[string]*Profile)
-	}
-	root, err := buildSingleFileOrdered(cfg)
+	release, err := lockConfigDir(baseDir)
 	if err != nil {
 		return err
 	}
-	data, err := encodeOrderedJSONIndent(root, 2)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(baseDir, 0o755); err != nil {
-		return err
-	}
-	return writeFileAtomic(filepath.Join(baseDir, "config.json"), data, 0o600)
+	defer release()
+	_, err = writeSingleConfigLocked(baseDir, cfg)
+	return err
 }
 
 // writeFileAtomic writes data to a temp file in the same directory
