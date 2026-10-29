@@ -265,20 +265,16 @@ func WireGuardConfToEndpoint(data []byte, tag string) (option.Endpoint, error) {
 }
 
 // RedactedPlaceholder is the value every secret field is replaced with
-// by RedactEndpoint.
-const RedactedPlaceholder = "<redacted>"
-
-var redactedKeys = map[string]bool{
-	"private_key":    true,
-	"public_key":     true,
-	"pre_shared_key": true,
-}
+// by RedactEndpoint. It aliases redact.Marker so the marker lives in
+// exactly one place.
+const RedactedPlaceholder = redact.Marker
 
 // RedactEndpoint marshals an endpoint's options and returns a JSON
 // object {type, tag, options} with every secret field replaced by
-// "<redacted>". It is implemented inside internal/outbound so the
-// package stays disjoint from internal/profile. The input endpoint
-// is never logged and its secret fields never appear in the output.
+// "<redacted>". The key set and the string redaction are
+// redact.Value's: this package keeps no local copy of either, and
+// still does not import internal/profile. The input endpoint is
+// never logged and its secret fields never appear in the output.
 func RedactEndpoint(ep option.Endpoint) ([]byte, error) {
 	if ep.Options == nil {
 		return nil, errors.New("outbound: cannot redact an endpoint with no options")
@@ -291,11 +287,14 @@ func RedactEndpoint(ep option.Endpoint) ([]byte, error) {
 	if err := json.Unmarshal(raw, &options); err != nil {
 		return nil, fmt.Errorf("outbound: redact endpoint: %w", err)
 	}
-	redactValue(options)
+	redactedOptions, ok := redact.Value(options).(map[string]any)
+	if !ok {
+		return nil, errors.New("outbound: redact endpoint: redacted options are not an object")
+	}
 	envelope := map[string]any{
 		"type":    ep.Type,
 		"tag":     ep.Tag,
-		"options": options,
+		"options": redactedOptions,
 	}
 	// Encoder with HTML escaping disabled: encoding/json would turn
 	// "<redacted>" into "\u003credacted\u003e", which breaks the
@@ -308,32 +307,4 @@ func RedactEndpoint(ep option.Endpoint) ([]byte, error) {
 		return nil, fmt.Errorf("outbound: redact endpoint: %w", err)
 	}
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
-}
-
-func redactValue(v any) {
-	switch value := v.(type) {
-	case map[string]any:
-		for key, child := range value {
-			if redactedKeys[key] {
-				value[key] = RedactedPlaceholder
-				continue
-			}
-			// Any string value, whatever its key, has URL
-			// userinfo redacted by the shared string-level
-			// redactor. The key-based logic above is untouched.
-			if s, ok := child.(string); ok {
-				value[key] = redact.RedactURLUserinfo(s)
-				continue
-			}
-			redactValue(child)
-		}
-	case []any:
-		for i, child := range value {
-			if s, ok := child.(string); ok {
-				value[i] = redact.RedactURLUserinfo(s)
-				continue
-			}
-			redactValue(child)
-		}
-	}
 }

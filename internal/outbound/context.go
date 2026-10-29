@@ -26,6 +26,20 @@
 // ALL_PROXY, or NO_PROXY (any case) to build dialers implicitly;
 // "direct" stays truly direct. --outbound-from-env is a PR3 profile
 // command and is not implemented here.
+//
+// F3 nil-router guard (see Manager.CreateOutbound): a domain-server
+// outbound created with no DNS router registered panics inside
+// sing-box on its first domain dial (nil DNS router dereference),
+// so CreateOutbound refuses it fail-closed — except for detour
+// chains PROVEN to forward the domain server address verbatim to
+// a remote proxy (http/socks5/selector/urltest chains terminating
+// in an IP-server forwarder, created detour-first). Wiring rules,
+// both inviolable: RegisterDNS/RegisterDNSRouter BEFORE
+// CreateOutbound for every other domain-server outbound, and the
+// detour chain BEFORE the outer outbound. The guard comment in
+// manager.go records the probe evidence and the limits (other
+// protocols, socks 4a, endpoint detours and the ListenPacket path
+// stay refused, [UNVERIFIED]).
 package outbound
 
 import (

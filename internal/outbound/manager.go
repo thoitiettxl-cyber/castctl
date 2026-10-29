@@ -45,6 +45,14 @@ type Manager struct {
 	mu      sync.Mutex
 	started bool
 	closed  bool
+
+	// created records the detour-chain metadata of every outbound
+	// created through CreateOutbound, keyed by tag. The F3 detour
+	// exception reads it to decide whether a domain-server
+	// outbound's detour chain self-resolves; it is guarded by mu
+	// and only ever written on a successful creation, so a tag
+	// recorded here always names a live outbound.
+	created map[string]chainInfo
 }
 
 // NewManager builds the managers on a fresh registry context (see
@@ -79,6 +87,7 @@ func NewManager(ctx context.Context, logger log.ContextLogger) (*Manager, error)
 		endpoints: endpoints,
 		outbounds: outbounds,
 		scope:     adapter.NewScope(ctx, logger),
+		created:   make(map[string]chainInfo),
 	}
 	return m, nil
 }
@@ -144,22 +153,84 @@ func (m *Manager) RegisterDNSRouter(router adapter.DNSRouter) {
 //
 // Nil-router guard (F3, fail-closed): sing-box's resolve dialer
 // captures the DNS router from the registry context at outbound
-// construction time (common/dialer.NewResolveDialer) and
-// dereferences it on the first domain dial (common/dialer/
-// resolve.go:103, d.router.Lookup). With no DNS router registered
-// that dial PANICS with a nil dereference — and registering a
-// router after CreateOutbound cannot repair the already-captured
-// nil. CreateOutbound therefore refuses, with a clean error, any
-// outbound whose Server is a domain (not an IP literal) when no
-// DNS router is registered in the context at creation time.
-// PR3 WIRING RULE: call RegisterDNS/RegisterDNSRouter BEFORE
-// CreateOutbound for every domain-server outbound. IP-server
-// outbounds never touch the resolve dialer and are unaffected.
-// The check is deliberately conservative: any domain Server
-// requires a router at creation, even if a detour might have
-// resolved it another way — failing closed here is cheaper than a
-// panic at dial time, and the wiring rule makes the requirement
-// explicit.
+// construction time (common/dialer.NewResolveDialer, resolve.go:46-63)
+// and dereferences it on the first domain dial (resolve.go:103,
+// d.router.Lookup; the same dereference is at resolve.go:123,
+// :151 and :174 for the packet/parallel paths). With no DNS router
+// registered that dial PANICS with a nil dereference — and
+// registering a router after CreateOutbound cannot repair the
+// already-captured nil. CreateOutbound therefore refuses, with a
+// clean error, any outbound whose Server is a domain (not an IP
+// literal) when no DNS router is registered in the context at
+// creation time — EXCEPT the proven self-resolving detour chains
+// below.
+//
+// WIRING RULE (inviolable, Phase-2 wiring must not miss it):
+// call RegisterDNS/RegisterDNSRouter BEFORE CreateOutbound for
+// every domain-server outbound that does not qualify for the
+// detour exception. IP-server outbounds never touch the resolve
+// dialer and are unaffected.
+//
+// Detour exception — DECISION (probed 2026-10-29 against the real
+// sing-box constructors, loopback fakes only, no network; evidence
+// pinned by the detour tests in manager_dns_guard_test.go):
+// sing-box wraps the resolve dialer only when there is no detour,
+// or when a domain_resolver is set (common/dialer/dialer.go:65).
+// A domain-server outbound WITH a detour and WITHOUT a
+// domain_resolver therefore dials its server by delegating the
+// domain destination to the detour outbound, which may forward it
+// verbatim to a remote proxy that resolves it — no local DNS
+// router is ever dereferenced. That is PROVEN end-to-end (dial
+// succeeds, reply "ok", no panic, no DNS router) for: http and
+// socks5 outbounds whose detour chain terminates in a socks5 or
+// http outbound with an IP-literal server, including a two-hop
+// chain and a selector whose every member is such a chain.
+// It is DISPROVEN (nil-dereference panic, recovered in the probe)
+// for: a non-empty direct detour (the direct outbound's own
+// resolve dialer, resolve.go:103 via protocol/direct/outbound.go),
+// a socks version-4 detour (protocol/socks/outbound.go:87,
+// h.dnsRouter.Lookup), and the reverse chain (an IP-server
+// outbound whose detour is itself a domain-server outbound, which
+// panics at resolve.go:103 when dialled). A detour plus a
+// domain_resolver fails cleanly at construction instead ("domain
+// resolver not found"), and a missing detour fails cleanly at
+// Start ("dependency not found"); neither panics. Urltest was not
+// probed end-to-end; it shares the selector group logic in the
+// walk below, so it is allowed on the same all-members rule, but
+// that allowance is logic-only, not probe evidence.
+//
+// The exception is therefore deliberately narrow — an allow-list,
+// not a general "has a detour" rule. A domain-server outbound
+// without a registered DNS router is allowed ONLY when every
+// link of its detour chain, as recorded at creation time, is:
+//   - an http or socks (version 5, or empty which defaults to 5)
+//     outbound with no domain_resolver, whose detour (if any) is
+//     itself allowed, terminating in an http/socks outbound with
+//     an IP-literal server and no detour; or
+//   - a selector/urltest outbound whose EVERY member (Outbounds
+//     plus selector Default) is allowed — selection is dynamic,
+//     so one unproven member is enough to refuse.
+//
+// Anything else — direct, socks4/4a, any other protocol, an
+// endpoint tag, a detour not yet created, a cycle, a
+// domain_resolver on any link — is refused. The detour chain
+// must therefore be created BEFORE the outer outbound (a second
+// ordering rule, alongside RegisterDNS-before-CreateOutbound):
+// a detour created after the outer outbound cannot repair the
+// refusal, exactly as a late router cannot repair a refused
+// creation.
+//
+// LIMITS, recorded honestly: only http/socks5/selector chains
+// were probed end-to-end. Other proxy protocols as detours
+// (trojan, vmess, vless, shadowsocks, hysteria, naive, ...),
+// socks version 4a, endpoint detours, urltest end-to-end, and
+// the ListenPacket path through a detour chain are [UNVERIFIED]
+// and stay refused — refusing a chain that would have worked
+// costs a DNS configuration; allowing a chain that panics
+// costs the process. TLS options on a chain link do not add a
+// lookup (the TLS dialer wraps the detour dialer), but a TLS
+// handshake through a detour chain was not probed end-to-end
+// either.
 //
 // Enum validation: `enum:` struct tags are NOT validated at parse
 // time (W-PROFILE finding). Invalid enum values are therefore
@@ -179,40 +250,49 @@ func (m *Manager) CreateOutbound(ctx context.Context, tag, outboundType string, 
 	if strings.EqualFold(outboundType, "wireguard") {
 		return fmt.Errorf("outbound: %q is not an outbound type in sing-box 1.14: declare a wireguard endpoint and reference its tag instead", outboundType)
 	}
-	if server, isDomain := domainServer(options); isDomain {
-		if service.FromContext[adapter.DNSRouter](m.registryContext()) == nil {
-			return fmt.Errorf("outbound: create %s[%s]: domain server %q requires a DNS router: call RegisterDNS/RegisterDNSRouter before CreateOutbound (sing-box captures the DNS router at construction; registering later does not repair it)", outboundType, tag, server)
+	if info := describeOutbound(outboundType, options); info.serverIsDomain {
+		if service.FromContext[adapter.DNSRouter](m.registryContext()) == nil && !m.allowsDomainServerWithoutRouter(info) {
+			return fmt.Errorf("outbound: create %s[%s]: domain server %q requires a DNS router: call RegisterDNS/RegisterDNSRouter before CreateOutbound (sing-box captures the DNS router at construction; registering later does not repair it), or create a self-resolving detour chain first (socks5/http/selector/urltest only, detour before the outer outbound)", outboundType, tag, info.server)
 		}
 	}
 	if err := m.outbounds.Create(m.registryContext(), m.router, m.logger, tag, outboundType, options); err != nil {
 		return fmt.Errorf("outbound: create %s[%s]: %w", outboundType, tag, err)
 	}
+	m.mu.Lock()
+	m.created[tag] = describeOutbound(outboundType, options)
+	m.mu.Unlock()
 	return nil
 }
 
-// domainServer reports the outbound's Server address and whether it
-// is a domain (needs resolution) rather than an IP literal. The
-// sing-box outbound option structs all carry the remote address in
-// a top-level Server string field; types without one (direct,
-// selector, urltest, ...) report no server. An empty server is not
-// a domain: construction/dial errors for it stay sing-box's. A
-// bracketed IPv6 literal ("[::1]") parses as an IP, not a domain.
-func domainServer(options any) (string, bool) {
+// serverString reports the outbound's Server address string
+// ("" when the options carry none). domainServer reports the
+// same address and whether it is a domain (needs resolution)
+// rather than an IP literal. The sing-box outbound option structs
+// all carry the remote address in a top-level Server string
+// field; types without one (direct, selector, urltest, ...)
+// report no server. An empty server is not a domain:
+// construction/dial errors for it stay sing-box's. A bracketed
+// IPv6 literal ("[::1]") parses as an IP, not a domain.
+func serverString(options any) string {
 	v := reflect.ValueOf(options)
 	for v.Kind() == reflect.Pointer {
 		if v.IsNil() {
-			return "", false
+			return ""
 		}
 		v = v.Elem()
 	}
 	if v.Kind() != reflect.Struct {
-		return "", false
+		return ""
 	}
-	f := v.FieldByName("Server")
+	f := findField(v, "Server")
 	if !f.IsValid() || f.Kind() != reflect.String {
-		return "", false
+		return ""
 	}
-	server := f.String()
+	return f.String()
+}
+
+func domainServer(options any) (string, bool) {
+	server := serverString(options)
 	if server == "" {
 		return "", false
 	}
@@ -220,6 +300,174 @@ func domainServer(options any) (string, bool) {
 		return "", false
 	}
 	return server, true
+}
+
+// chainInfo is the detour-relevant summary of one outbound's
+// options, recorded at creation time for the F3 detour exception.
+// Only scalars are kept: the options value itself is never retained,
+// so later mutation of a caller's options value cannot change a
+// recorded chain.
+type chainInfo struct {
+	typ            string // outbound type as passed to CreateOutbound, lowercased
+	server         string
+	serverIsDomain bool
+	detour         string
+	domainResolver string // DomainResolver.Server, "" when no domain_resolver
+	version        string // socks Version, "" when absent (defaults to 5)
+	members        []string
+	deflt          string // selector Default
+}
+
+// describeOutbound extracts a chainInfo from an outbound's options
+// value by reflection: the sing-box option structs carry Server,
+// Detour, DomainResolver, Version and Outbounds in embedded structs
+// (DialerOptions/ServerOptions), so the fields are found by name
+// through promotion. Unknown option shapes yield a zero-valued
+// info, which the detour exception treats as "not self-resolving".
+func describeOutbound(outboundType string, options any) chainInfo {
+	info := chainInfo{typ: strings.ToLower(outboundType)}
+	info.server = serverString(options)
+	_, info.serverIsDomain = domainServer(options)
+	v := reflect.ValueOf(options)
+	for v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return info
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return info
+	}
+	if f := findField(v, "Detour"); f.IsValid() && f.Kind() == reflect.String {
+		info.detour = f.String()
+	}
+	if f := findField(v, "Version"); f.IsValid() && f.Kind() == reflect.String {
+		info.version = f.String()
+	}
+	if f := findField(v, "DomainResolver"); f.IsValid() {
+		for f.Kind() == reflect.Pointer {
+			if f.IsNil() {
+				break
+			}
+			f = f.Elem()
+		}
+		if f.Kind() == reflect.Struct {
+			if sf := f.FieldByName("Server"); sf.IsValid() && sf.Kind() == reflect.String {
+				info.domainResolver = sf.String()
+			}
+		}
+	}
+	if f := findField(v, "Outbounds"); f.IsValid() && f.Kind() == reflect.Slice {
+		for i := 0; i < f.Len(); i++ {
+			if e := f.Index(i); e.Kind() == reflect.String {
+				info.members = append(info.members, e.String())
+			}
+		}
+	}
+	if f := findField(v, "Default"); f.IsValid() && f.Kind() == reflect.String {
+		info.deflt = f.String()
+	}
+	return info
+}
+
+// findField returns the struct field named name, following
+// promotion through anonymous embedded structs. FieldByName
+// already promotes, so the recursion is only a backstop for
+// doubly-embedded fields; it never descends into named fields.
+func findField(v reflect.Value, name string) reflect.Value {
+	if !v.IsValid() || v.Kind() != reflect.Struct {
+		return reflect.Value{}
+	}
+	if f := v.FieldByName(name); f.IsValid() {
+		return f
+	}
+	t := v.Type()
+	for i := 0; i < v.NumField(); i++ {
+		if !t.Field(i).Anonymous {
+			continue
+		}
+		f := v.Field(i)
+		for f.Kind() == reflect.Pointer {
+			if f.IsNil() {
+				break
+			}
+			f = f.Elem()
+		}
+		if f.Kind() == reflect.Struct {
+			if r := findField(f, name); r.IsValid() {
+				return r
+			}
+		}
+	}
+	return reflect.Value{}
+}
+
+// allowsDomainServerWithoutRouter is the F3 detour exception: it
+// reports whether a domain-server outbound (described by info, not
+// yet created) may be created with no DNS router because its
+// detour chain provably forwards the domain server address
+// verbatim to a remote proxy. The outer outbound must itself be
+// an http or socks5 forwarder with no domain_resolver; the chain
+// walk (chainSelfResolvesLocked) then decides the rest. Anything
+// unproven returns false: refusal is the safe direction.
+func (m *Manager) allowsDomainServerWithoutRouter(info chainInfo) bool {
+	if info.domainResolver != "" || info.detour == "" {
+		return false
+	}
+	switch info.typ {
+	case "http":
+	case "socks":
+		if info.version != "" && info.version != "5" {
+			return false
+		}
+	default:
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.chainSelfResolvesLocked(info.detour, map[string]bool{})
+}
+
+// chainSelfResolvesLocked reports whether dialling a domain
+// destination through the already-created outbound with tag can
+// never dereference a nil DNS router. The caller must hold m.mu.
+// path is the set of tags on the current walk (cycle guard); a
+// tag already on the path, a missing tag, a domain_resolver on
+// any link, or a type outside the proven allow-list all return
+// false. Selector/urltest members are all required to qualify,
+// because group selection is dynamic.
+func (m *Manager) chainSelfResolvesLocked(tag string, path map[string]bool) bool {
+	info, ok := m.created[tag]
+	if !ok || path[tag] || info.domainResolver != "" {
+		return false
+	}
+	path[tag] = true
+	defer delete(path, tag)
+	switch info.typ {
+	case "socks":
+		if info.version != "" && info.version != "5" {
+			return false
+		}
+	case "http":
+	case "selector", "urltest":
+		seen := 0
+		for _, member := range append(append([]string{}, info.members...), info.deflt) {
+			if member == "" {
+				continue
+			}
+			seen++
+			if !m.chainSelfResolvesLocked(member, path) {
+				return false
+			}
+		}
+		return seen > 0
+	default:
+		return false
+	}
+	if info.detour == "" {
+		return info.server != "" && !info.serverIsDomain
+	}
+	return m.chainSelfResolvesLocked(info.detour, path)
 }
 
 // CreateEndpoint creates one endpoint from its registry type and
