@@ -411,7 +411,7 @@ func TestSendDeliversAndWaits(t *testing.T) {
 		},
 		subscribe: [][]byte{append(taskRecord("running"), taskRecord("completed")...)},
 	}
-	code, out, errb := runWired(t, home, h, "send", "hello", "--json", "--wait", "10", "--ack-timeout", "5")
+	code, out, errb := runWired(t, home, h, "send", "hello", "--wait", "10", "--ack-timeout", "5")
 	if code != 0 {
 		t.Fatalf("send: code=%d out=%q err=%q", code, out, errb)
 	}
@@ -466,7 +466,7 @@ func TestSendNoWait(t *testing.T) {
 			historyBody(userEv(100, "old"), userEv(110, "hello")),
 		},
 	}
-	code, out, errb := runWired(t, home, h, "send", "hello", "--json", "--wait", "0", "--ack-timeout", "5")
+	code, out, errb := runWired(t, home, h, "send", "hello", "--wait", "0", "--ack-timeout", "5")
 	if code != 0 {
 		t.Fatalf("send --wait 0: code=%d out=%q err=%q", code, out, errb)
 	}
@@ -487,7 +487,7 @@ func TestSendNoAckExit5(t *testing.T) {
 	h := &scriptedHandler{
 		history: []string{historyBody(userEv(100, "old"))},
 	}
-	code, out, errb := runWired(t, home, h, "send", "hello", "--json", "--wait", "10", "--ack-timeout", "1")
+	code, out, errb := runWired(t, home, h, "send", "hello", "--wait", "10", "--ack-timeout", "1")
 	if code != 5 {
 		t.Fatalf("send no-ack: code=%d, want 5 (out=%q err=%q)", code, out, errb)
 	}
@@ -514,7 +514,7 @@ func TestSendThreadScope(t *testing.T) {
 			historyBody(userEv(100, "old"), userEv(110, "hello")),
 		},
 	}
-	code, _, errb := runWired(t, home, h, "send", "hello", "--json", "--wait", "0", "--thread", "s-thread", "--ack-timeout", "5")
+	code, _, errb := runWired(t, home, h, "send", "hello", "--wait", "0", "--thread", "s-thread", "--ack-timeout", "5")
 	if code != 0 {
 		t.Fatalf("send --thread: code=%d err=%q", code, errb)
 	}
@@ -536,7 +536,7 @@ func TestSendNodeIDOrigins(t *testing.T) {
 				historyBody(userEv(100, "old"), userEv(110, "hello")),
 			},
 		}
-		code, _, errb := runWired(t, home, h, "send", "hello", "--json", "--wait", "0", "--ack-timeout", "5")
+		code, _, errb := runWired(t, home, h, "send", "hello", "--wait", "0", "--ack-timeout", "5")
 		if code != 0 {
 			t.Fatalf("send: code=%d err=%q", code, errb)
 		}
@@ -573,7 +573,7 @@ func TestSendNodeIDOrigins(t *testing.T) {
 				historyBody(userEv(100, "old"), userEv(110, "hello")),
 			},
 		}
-		if code, _, errb := runWired(t, home, h2, "send", "hello", "--json", "--wait", "0", "--ack-timeout", "5"); code != 0 {
+		if code, _, errb := runWired(t, home, h2, "send", "hello", "--wait", "0", "--ack-timeout", "5"); code != 0 {
 			t.Fatalf("second send: code=%d err=%q", code, errb)
 		}
 		var streamBody2 map[string]any
@@ -591,7 +591,7 @@ func TestSendNodeIDOrigins(t *testing.T) {
 				historyBody(userEv(100, "old"), userEv(110, "hello")),
 			},
 		}
-		code, _, errb := runWired(t, home, h, "send", "hello", "--json", "--wait", "0", "--ack-timeout", "5")
+		code, _, errb := runWired(t, home, h, "send", "hello", "--wait", "0", "--ack-timeout", "5")
 		if code != 0 {
 			t.Fatalf("send: code=%d err=%q", code, errb)
 		}
@@ -614,7 +614,7 @@ func TestSendNodeIDOrigins(t *testing.T) {
 			},
 		}
 		before, _ := os.ReadFile(filepath.Join(home, ".config", "muse-cli", "config.json"))
-		code, _, errb := runWired(t, home, h, "send", "hello", "--json", "--wait", "0", "--ack-timeout", "5")
+		code, _, errb := runWired(t, home, h, "send", "hello", "--wait", "0", "--ack-timeout", "5")
 		if code != 0 {
 			t.Fatalf("send: code=%d err=%q", code, errb)
 		}
@@ -637,7 +637,7 @@ func TestSendNodeIDOrigins(t *testing.T) {
 				historyBody(userEv(100, "old"), userEv(110, "hello")),
 			},
 		}
-		code, _, errb := runWired(t, home, h, "send", "hello", "--json", "--wait", "0", "--ack-timeout", "5")
+		code, _, errb := runWired(t, home, h, "send", "hello", "--wait", "0", "--ack-timeout", "5")
 		if code != 0 {
 			t.Fatalf("send: code=%d err=%q", code, errb)
 		}
@@ -1056,5 +1056,204 @@ func TestRecoverConvertsBuildPanic(t *testing.T) {
 	}
 	if strings.Contains(errb.String(), "goroutine") {
 		t.Errorf("stderr carries a stack trace: %q", errb.String())
+	}
+}
+
+// F3: Python's send parser has no --json; the flag must be
+// rejected with exit 2, not silently ignored.
+func TestSendJSONFlagRejected(t *testing.T) {
+	home := fakeHome(t, defaultSingleConfig)
+	h := &scriptedHandler{}
+	if code, _, errb := runWired(t, home, h, "send", "hello", "--json", "--wait", "0", "--ack-timeout", "1"); code != 2 {
+		t.Fatalf("send --json: code=%d, want 2 (err=%q)", code, errb)
+	}
+}
+
+// F2: Python's `or` fallback — an empty first key falls through
+// to the second (r.get("pending_approvals") or r.get("pending")).
+func TestPendingApprovalsEmptyFallsThrough(t *testing.T) {
+	home := fakeHome(t, defaultSingleConfig)
+	h := &scriptedHandler{approvals: `{"pending_approvals":[],"pending":[` + approvalA + `]}`}
+	code, out, errb := runWired(t, home, h, "approvals")
+	if code != 0 {
+		t.Fatalf("approvals: code=%d out=%q err=%q", code, out, errb)
+	}
+	var res map[string]any
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	pending, _ := res["pending"].([]any)
+	if len(pending) != 1 {
+		t.Fatalf("pending = %v, want the fallback list with 1 item", res["pending"])
+	}
+	a0, _ := pending[0].(map[string]any)
+	if a0["approval_id"] != "A" {
+		t.Errorf("pending row = %v, want approval A", a0)
+	}
+}
+
+func TestRecentApprovalsEmptyFallsThrough(t *testing.T) {
+	home := fakeHome(t, defaultSingleConfig)
+	h := &scriptedHandler{recent: `{"recent_approvals":[],"recent":[{"approval_id":"R1","display":{"summary_title":"T","permission_question":{"text":"Q?","kind":"browse","scope":"example.com"}},"decision":"allow_once"}]}`}
+	code, out, errb := runWired(t, home, h, "approvals", "--recent")
+	if code != 0 {
+		t.Fatalf("approvals --recent: code=%d out=%q err=%q", code, out, errb)
+	}
+	var res map[string]any
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	recent, _ := res["recent"].([]any)
+	if len(recent) != 1 {
+		t.Fatalf("recent = %v, want the fallback list with 1 item", res["recent"])
+	}
+	r0, _ := recent[0].(map[string]any)
+	if r0["approval_id"] != "R1" {
+		t.Errorf("recent row = %v, want R1", r0)
+	}
+}
+
+// M1: a timeout with no known task status reports status null,
+// like Python's w.status (None), in both wait and send results.
+func TestWaitTimeoutStatusNull(t *testing.T) {
+	home := fakeHome(t, defaultSingleConfig)
+	h := &scriptedHandler{
+		history:   []string{historyBody()},
+		subscribe: [][]byte{[]byte("{\"event\":\"unknown.thing\",\"payload\":{}}\n")},
+	}
+	code, out, errb := runWired(t, home, h, "wait", "--json", "--timeout", "1")
+	if code != 124 {
+		t.Fatalf("wait timeout: code=%d, want 124 (out=%q err=%q)", code, out, errb)
+	}
+	var res map[string]any
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := res["status"]; !ok {
+		t.Errorf("timeout result lacks the status key: %q", out)
+	} else if res["status"] != nil {
+		t.Errorf("timeout result status = %v, want null", res["status"])
+	}
+}
+
+func TestSendWaitTimeoutStatusNull(t *testing.T) {
+	home := fakeHome(t, defaultSingleConfig)
+	h := &scriptedHandler{
+		history: []string{
+			historyBody(userEv(100, "old")),
+			historyBody(userEv(100, "old")),
+			historyBody(userEv(100, "old"), userEv(110, "hello")),
+			historyBody(userEv(100, "old"), userEv(110, "hello")),
+		},
+		// No task.status record is ever seen, so the timeout has
+		// no known status (unlike a "running" batch, which
+		// correctly reports status "running").
+		subscribe: [][]byte{[]byte("{\"event\":\"unknown.thing\",\"payload\":{}}\n")},
+	}
+	code, out, errb := runWired(t, home, h, "send", "hello", "--wait", "1", "--ack-timeout", "5")
+	if code != 124 {
+		t.Fatalf("send wait timeout: code=%d, want 124 (out=%q err=%q)", code, out, errb)
+	}
+	var res map[string]any
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := res["status"]; !ok {
+		t.Errorf("send timeout result lacks the status key: %q", out)
+	} else if res["status"] != nil {
+		t.Errorf("send timeout result status = %v, want null", res["status"])
+	}
+}
+
+// M2: approve-all rows collapse absent fields to null, like
+// Python's describe_approval/.get() rows.
+func TestApproveAllNullFields(t *testing.T) {
+	home := fakeHome(t, defaultSingleConfig)
+	bare := `{"approval_id":"N","decision_options":[{"kind":"allow_always"}]}`
+	h := &scriptedHandler{approvals: `{"pending":[` + bare + `]}`, decide: `{"ok":true}`}
+	code, out, errb := runWired(t, home, h, "approvals", "--approve-all")
+	if code != 0 {
+		t.Fatalf("approve-all: code=%d out=%q err=%q", code, out, errb)
+	}
+	var res map[string]any
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	approved, _ := res["approved"].([]any)
+	if len(approved) != 1 {
+		t.Fatalf("approved = %v, want 1", res["approved"])
+	}
+	row, _ := approved[0].(map[string]any)
+	if row["approval_id"] != "N" || row["decision"] != "allow_always" {
+		t.Errorf("approved row = %v", row)
+	}
+	for _, k := range []string{"title", "kind", "scope"} {
+		if _, ok := row[k]; !ok {
+			t.Errorf("approved row lacks %q: %v", k, row)
+		} else if row[k] != nil {
+			t.Errorf("approved row %q = %v, want null", k, row[k])
+		}
+	}
+	if h.decideCalls != 1 {
+		t.Fatalf("decide calls = %d, want 1", h.decideCalls)
+	}
+}
+
+// M2: auto_approve_errors rows collapse an absent decision (and
+// absent kind/scope) to null; the SKIPPED case has no decision.
+func TestWaitAutoApproveErrorsNullDecision(t *testing.T) {
+	home := fakeHome(t, `{"default_profile":"default","profiles":{"default":{"auto_approve":"always"}}}`)
+	onceOnly := `{"approval_id":"B","display":{"summary_title":"Once only"},"decision_options":[{"kind":"allow_once"}]}`
+	h := &scriptedHandler{
+		history:   []string{historyBody(userEv(100, "hi"))},
+		subscribe: [][]byte{append(taskRecord("running"), approvalRecord(onceOnly)...)},
+	}
+	code, out, errb := runWired(t, home, h, "wait", "--json", "--timeout", "10")
+	if code != 4 {
+		t.Fatalf("wait no-forever approval: code=%d, want 4 (out=%q err=%q)", code, out, errb)
+	}
+	var res map[string]any
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	errs, _ := res["auto_approve_errors"].([]any)
+	if len(errs) != 1 {
+		t.Fatalf("auto_approve_errors = %v, want 1", res["auto_approve_errors"])
+	}
+	row, _ := errs[0].(map[string]any)
+	if row["approval_id"] != "B" || row["title"] != "Once only" {
+		t.Errorf("error row = %v", row)
+	}
+	for _, k := range []string{"decision", "kind", "scope"} {
+		if _, ok := row[k]; !ok {
+			t.Errorf("error row lacks %q: %v", k, row)
+		} else if row[k] != nil {
+			t.Errorf("error row %q = %v, want null", k, row[k])
+		}
+	}
+	if h.decideCalls != 0 {
+		t.Fatalf("decide calls = %d, want 0 (no forever option, fallback off)", h.decideCalls)
+	}
+}
+
+// R1 constraint: a plain transport failure is still a timeout
+// (124), never an auth failure (2). Only the cookies-file class
+// — now typed AuthError at the connector — exits 2.
+func TestWaitNetworkDownStillTimeout124(t *testing.T) {
+	home := fakeHome(t, defaultSingleConfig)
+	muse := conn.New(func(ctx context.Context, cfg conn.Config) (conn.Gateway, error) {
+		return nil, errors.New("dial tcp 127.0.0.1:1: connect: connection refused")
+	})
+	rt := &commands.Runtime{Muse: muse}
+	code, out, _ := runWithRuntime(t, home, rt, nil, "wait", "--json", "--timeout", "2")
+	if code != 124 {
+		t.Fatalf("wait network down: code=%d, want 124 (out=%q)", code, out)
+	}
+	var res map[string]any
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if res["outcome"] != "timeout" {
+		t.Errorf("outcome = %v, want timeout", res["outcome"])
 	}
 }

@@ -448,7 +448,7 @@ options:
                  leave approvals with no forever option for a human.
 `
 
-const sendHelpText = `usage: muse-cli send TEXT [--thread ID] [--wait SECONDS] [--until-done] [--text] [--ack-timeout SECONDS] [--download DIR] [--json] [--auto-approve|--no-auto-approve] [--auto-allow-once|--no-auto-allow-once]
+const sendHelpText = `usage: muse-cli send TEXT [--thread ID] [--wait SECONDS] [--until-done] [--text] [--ack-timeout SECONDS] [--download DIR] [--auto-approve|--no-auto-approve] [--auto-allow-once|--no-auto-allow-once]
 
 Send the agent a message and wait for the turn. Exits 5 when no
 delivery ack arrives within --ack-timeout; otherwise the wait
@@ -465,7 +465,6 @@ options:
                  long (default 30).
   --download DIR also save files (images/videos) from the turn's
                  replies into DIR.
-  --json         print the result as JSON.
   --auto-approve, --no-auto-approve, --auto-allow-once,
   --no-auto-allow-once
                  as in muse-cli wait.

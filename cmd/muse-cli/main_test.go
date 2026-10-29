@@ -134,3 +134,31 @@ func TestProfileListUnparseableExits2(t *testing.T) {
 		t.Fatalf("code=%d, want 2", code)
 	}
 }
+
+// R1: with no cookies file at all, wait must exit 2 (auth error),
+// like Python 0.6.1 — never 124. The connector used to surface
+// the missing file as a plain I/O error, which the Runner retried
+// until the deadline and reported as a timeout.
+func TestWaitNoCookiesExits2(t *testing.T) {
+	home := t.TempDir()
+	code, _, errb := runMain(t, home, "wait", "--timeout", "1")
+	if code != 2 {
+		t.Fatalf("wait with no cookies: code=%d, want 2 (err=%q)", code, errb)
+	}
+	if !strings.Contains(strings.ToLower(errb), "cookies") {
+		t.Errorf("stderr = %q, want a cookies auth error", errb)
+	}
+}
+
+// R1 (send path): a missing cookies file fails the connect before
+// any wait, so send exits 2 too.
+func TestSendNoCookiesExits2(t *testing.T) {
+	home := t.TempDir()
+	code, _, errb := runMain(t, home, "send", "hello", "--wait", "1")
+	if code != 2 {
+		t.Fatalf("send with no cookies: code=%d, want 2 (err=%q)", code, errb)
+	}
+	if !strings.Contains(strings.ToLower(errb), "cookies") {
+		t.Errorf("stderr = %q, want a cookies auth error", errb)
+	}
+}

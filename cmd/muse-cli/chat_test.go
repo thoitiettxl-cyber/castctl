@@ -249,3 +249,25 @@ func TestChatLoginPrintsGuidance(t *testing.T) {
 		t.Errorf("/login must not claim a sign-in when no cookies were saved:\n%s", out)
 	}
 }
+
+// R1 (REPL path): with no cookies file, the REPL's eager connect
+// fails as an auth failure and exits 2 with the sign-in guidance
+// instead of dropping into a prompt that cannot work.
+func TestChatNoCookiesExits2(t *testing.T) {
+	home := t.TempDir()
+	base := filepath.Join(home, ".config", "muse-cli")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "config.json"), []byte(defaultSingleConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := &scriptedHandler{history: []string{historyBody()}}
+	code, out, _ := runChat(t, home, h, []string{"/exit"})
+	if code != 2 {
+		t.Fatalf("chat with no cookies: code=%d, want 2 (out=%q)", code, out)
+	}
+	if !strings.Contains(out, "Can't sign in") {
+		t.Errorf("output lacks the sign-in guidance:\n%s", out)
+	}
+}

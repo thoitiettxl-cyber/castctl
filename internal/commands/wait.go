@@ -47,8 +47,8 @@ func init() {
 
 	registerFlags("wait", "wait [--thread ID] [--after-seq N] [--timeout SECONDS] [--json] [--require-running] [--auto-approve|--no-auto-approve] [--auto-allow-once|--no-auto-allow-once]",
 		[]flagDef{strFlag("thread"), {name: "after-seq", kind: flagInt}, intFlag("timeout", 0, 600), boolFlag("json"), boolFlag("require-running"), boolFlag("auto-approve"), boolFlag("no-auto-approve"), boolFlag("auto-allow-once"), boolFlag("no-auto-allow-once")})
-	registerFlags("send", "send TEXT [--thread ID] [--wait SECONDS] [--until-done] [--text] [--ack-timeout SECONDS] [--download DIR] [--json] [--auto-approve|--no-auto-approve] [--auto-allow-once|--no-auto-allow-once]",
-		[]flagDef{strFlag("thread"), intFlag("wait", 0, 90), boolFlag("until-done"), boolFlag("text"), intFlag("ack-timeout", 0, 30), strFlag("download"), boolFlag("json"), boolFlag("auto-approve"), boolFlag("no-auto-approve"), boolFlag("auto-allow-once"), boolFlag("no-auto-allow-once")})
+	registerFlags("send", "send TEXT [--thread ID] [--wait SECONDS] [--until-done] [--text] [--ack-timeout SECONDS] [--download DIR] [--auto-approve|--no-auto-approve] [--auto-allow-once|--no-auto-allow-once]",
+		[]flagDef{strFlag("thread"), intFlag("wait", 0, 90), boolFlag("until-done"), boolFlag("text"), intFlag("ack-timeout", 0, 30), strFlag("download"), boolFlag("auto-approve"), boolFlag("no-auto-approve"), boolFlag("auto-allow-once"), boolFlag("no-auto-allow-once")})
 	registerFlags("approvals", "approvals [--recent] [--raw] [--approve-all]",
 		[]flagDef{boolFlag("recent"), boolFlag("raw"), boolFlag("approve-all")})
 	registerFlags("approve", "approve [ID] [--all] [--once|--session|--today|--always]",
@@ -421,20 +421,20 @@ func toApprovalsJSON(list []approvals.DescribedApproval) []approvalJSON {
 }
 
 type approvedJSON struct {
-	ApprovalID string `json:"approval_id"`
-	Title      string `json:"title"`
-	Kind       string `json:"kind"`
-	Scope      string `json:"scope"`
-	Decision   string `json:"decision"`
+	ApprovalID *string `json:"approval_id"`
+	Title      *string `json:"title"`
+	Kind       *string `json:"kind"`
+	Scope      *string `json:"scope"`
+	Decision   *string `json:"decision"`
 }
 
 type approveErrorJSON struct {
-	ApprovalID string `json:"approval_id"`
-	Title      string `json:"title"`
-	Kind       string `json:"kind"`
-	Scope      string `json:"scope"`
-	Decision   string `json:"decision"`
-	Error      string `json:"error"`
+	ApprovalID *string `json:"approval_id"`
+	Title      *string `json:"title"`
+	Kind       *string `json:"kind"`
+	Scope      *string `json:"scope"`
+	Decision   *string `json:"decision"`
+	Error      string  `json:"error"`
 }
 
 // waitResultJSON is the wait/send result dict, in Python's key
@@ -443,7 +443,7 @@ type approveErrorJSON struct {
 // auto_approve_errors?, widgets?, needs_input_reason?, question?.
 type waitResultJSON struct {
 	Outcome           string             `json:"outcome"`
-	Status            string             `json:"status"`
+	Status            *string            `json:"status"`
 	AfterSeq          int64              `json:"after_seq"`
 	FinalText         *string            `json:"final_text"`
 	Replies           []replyJSON        `json:"replies"`
@@ -460,7 +460,7 @@ type waitResultJSON struct {
 func toWaitResultJSON(res *wait.Result, autoApproveEnabled bool) waitResultJSON {
 	out := waitResultJSON{
 		Outcome:  res.Outcome,
-		Status:   res.Status,
+		Status:   strPtrOrNil(res.Status),
 		AfterSeq: res.AfterSeq,
 		Replies:  toRepliesJSON(res.Replies),
 	}
@@ -482,7 +482,7 @@ func toWaitResultJSON(res *wait.Result, autoApproveEnabled bool) waitResultJSON 
 		approved := make([]approvedJSON, 0, len(res.AutoApproved))
 		for _, rec := range res.AutoApproved {
 			approved = append(approved, approvedJSON{
-				ApprovalID: rec.ApprovalID, Title: rec.Title, Kind: rec.Kind, Scope: rec.Scope, Decision: rec.Decision,
+				ApprovalID: strPtrOrNil(rec.ApprovalID), Title: strPtrOrNil(rec.Title), Kind: strPtrOrNil(rec.Kind), Scope: strPtrOrNil(rec.Scope), Decision: strPtrOrNil(rec.Decision),
 			})
 		}
 		out.AutoApproved = &approved
@@ -497,7 +497,7 @@ func toWaitResultJSON(res *wait.Result, autoApproveEnabled bool) waitResultJSON 
 				errText = e.Err.Error()
 			}
 			out.AutoApproveErrors = append(out.AutoApproveErrors, approveErrorJSON{
-				ApprovalID: e.ApprovalID, Title: e.Title, Kind: e.Kind, Scope: e.Scope, Decision: e.Decision, Error: errText,
+				ApprovalID: strPtrOrNil(e.ApprovalID), Title: strPtrOrNil(e.Title), Kind: strPtrOrNil(e.Kind), Scope: strPtrOrNil(e.Scope), Decision: strPtrOrNil(e.Decision), Error: errText,
 			})
 		}
 	}
@@ -769,8 +769,8 @@ type sendWaitJSON struct {
 	AutoApproved      *[]approvedJSON    `json:"auto_approved,omitempty"`
 	AutoApproveErrors []approveErrorJSON `json:"auto_approve_errors,omitempty"`
 	Widgets           *[]widgetJSON      `json:"widgets,omitempty"`
-	NeedsInputReason  *string            `json:"needs_input_reason,omitempty"`
 	Question          *string            `json:"question,omitempty"`
+	NeedsInputReason  *string            `json:"needs_input_reason,omitempty"`
 	Reply             *sendReplyJSON     `json:"reply,omitempty"`
 	Downloads         []shared.SaveRow   `json:"downloads,omitempty"`
 	DownloadError     string             `json:"download_error,omitempty"`
@@ -852,8 +852,7 @@ func cmdSend(ctx context.Context, env *Env, g *globalOpts, args []string) error 
 		waitJSON := toWaitResultJSON(res, enabled)
 		result := sendWaitJSON{sendBaseJSON: base}
 		result.Outcome = waitJSON.Outcome
-		status := waitJSON.Status
-		result.Status = &status
+		result.Status = waitJSON.Status
 		result.FinalText = waitJSON.FinalText
 		result.Replies = waitJSON.Replies
 		result.Approvals = waitJSON.Approvals
@@ -941,7 +940,10 @@ func pendingApprovals(ctx context.Context, rt *Runtime) (any, []any, error) {
 		return nil, nil, fmt.Errorf("gateway: egress.approvals result is not an object: %T", v)
 	}
 	var pend []any
-	if p, ok := m["pending_approvals"].([]any); ok && p != nil {
+	// Python `or` semantics: an empty first list falls through
+	// to the fallback key (r.get("pending_approvals") or
+	// r.get("pending") or []).
+	if p, ok := m["pending_approvals"].([]any); ok && len(p) > 0 {
 		pend = p
 	} else if p, ok := m["pending"].([]any); ok {
 		pend = p
@@ -986,11 +988,11 @@ func approveAll(ctx context.Context, env *Env, rt *Runtime, decision string) ([]
 			return nil, err
 		}
 		row := approvedJSON{
-			ApprovalID: derefStr(d.ApprovalID), Title: derefStr(d.Title),
-			Kind: derefStr(d.Kind), Scope: derefStr(d.Scope), Decision: decision,
+			ApprovalID: strPtrOrNil(derefStr(d.ApprovalID)), Title: strPtrOrNil(derefStr(d.Title)),
+			Kind: strPtrOrNil(derefStr(d.Kind)), Scope: strPtrOrNil(derefStr(d.Scope)), Decision: strPtrOrNil(decision),
 		}
 		done = append(done, row)
-		fmt.Fprintf(env.stderr(), "approved %s (%s): %s [%s %s]\n", row.ApprovalID, decision, row.Title, row.Kind, row.Scope)
+		fmt.Fprintf(env.stderr(), "approved %s (%s): %s [%s %s]\n", derefStr(row.ApprovalID), decision, derefStr(row.Title), derefStr(row.Kind), derefStr(row.Scope))
 	}
 	return done, nil
 }
@@ -1038,7 +1040,7 @@ func cmdApprovals(ctx context.Context, env *Env, g *globalOpts, args []string) e
 		if p.bool("recent") {
 			m, _ := raw.(map[string]any)
 			var recent []any
-			if r, ok := m["recent_approvals"].([]any); ok && r != nil {
+			if r, ok := m["recent_approvals"].([]any); ok && len(r) > 0 {
 				recent = r
 			} else if r, ok := m["recent"].([]any); ok {
 				recent = r

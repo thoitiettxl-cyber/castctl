@@ -132,7 +132,23 @@ func NewConnector(dialer OutboundDialer, opts ...ConnectorOption) conn.Connector
 	return func(ctx context.Context, c conn.Config) (conn.Gateway, error) {
 		cookies, err := LoadCookies(c.CookiesFile)
 		if err != nil {
-			return nil, err
+			var authErr *conn.AuthError
+			if errors.As(err, &authErr) {
+				return nil, err
+			}
+			// A cookies file that cannot be read (missing,
+			// permissions) is an auth failure, not a transport
+			// error: the conn contract requires connectors to
+			// return *AuthError for auth failures so callers
+			// (the wait Runner, the shared-connection retry)
+			// treat it as fatal instead of retrying it into a
+			// timeout. LoadCookies keeps its own plain-error
+			// contract; the typing happens here, where the
+			// failure enters the connection machinery. The
+			// message names the file so the commands taxonomy
+			// maps it to cookies_missing, and keeps the
+			// underlying read error for diagnosis.
+			return nil, conn.NewAuthError(fmt.Sprintf("no cookies at %s: %v", c.CookiesFile, err))
 		}
 		httpClient := dialer.HTTPClient()
 		vmID := c.VMID

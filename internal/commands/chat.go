@@ -353,6 +353,12 @@ func (s *chatSession) handle(ctx context.Context, line string) error {
 			}
 			return err
 		}
+		// NOTE: unreachable today — deliver.AuthExport always
+		// returns *ExportError, so the branch above always
+		// returns first. If a real cookie export ever lands,
+		// this branch must reconnect like Python
+		// (chat.py:176-179) before printing: claiming a
+		// sign-in with no live connection would lie.
 		fmt.Fprintln(s.env.stdout(), "Signed in.")
 	default:
 		fmt.Fprintln(s.env.stdout(), "Unknown command. Type /help.")
@@ -407,11 +413,12 @@ func cmdChat(ctx context.Context, env *Env, g *globalOpts, args []string) error 
 		// instead of dropping into a prompt that cannot work.
 		gw, err := rt.Muse.Connect(ctx, nil)
 		if err != nil {
-			// The connector surfaces a missing cookies file as a
-			// wrapped I/O error, not an AuthError; the
-			// classifyConnError taxonomy is the auth check, as
-			// at dispatch. Only auth failures print the sign-in
-			// guidance; other connect errors surface typed.
+			// The connector returns *conn.AuthError for auth
+			// failures (including a missing/unreadable
+			// cookies file); the classifyConnError taxonomy
+			// is the auth check, as at dispatch. Only auth
+			// failures print the sign-in guidance; other
+			// connect errors surface typed.
 			if _, ok := classifyConnError(err).(*typedAuthError); ok {
 				fmt.Fprintf(env.stdout(), "Can't sign in to muse.ai: %s\n", err.Error())
 				if exportErr := deliver.AuthExport(); exportErr != nil {
