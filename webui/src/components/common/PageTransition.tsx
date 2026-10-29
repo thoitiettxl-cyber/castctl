@@ -1,11 +1,14 @@
-import { ReactNode, useCallback, useLayoutEffect, useRef, useState } from 'react';
+import { ReactNode, useCallback, useLayoutEffect, useReducer, useRef } from 'react';
 import { useLocation, type Location } from 'react-router-dom';
 import { animate } from 'motion/mini';
 import type { AnimationPlaybackControlsWithThen } from 'motion-dom';
 import {
   PAGE_TRANSITION_LAYER_CONTEXT_VALUES,
   PageTransitionLayerContext,
-  type LayerStatus,
+  createInitialPageTransitionState,
+  pageTransitionReducer,
+  type TransitionDirection,
+  type TransitionVariant,
 } from './PageTransitionLayer';
 import './PageTransition.scss';
 
@@ -22,6 +25,11 @@ const VERTICAL_EXIT_DURATION = 0.22;
 const VERTICAL_ENTER_DISTANCE = 28;
 const VERTICAL_EXIT_DISTANCE = 12;
 const REDUCED_MOTION_DURATION = 0.15;
+// Upper bound for any transition above (longest: iOS 0.44s) plus margin.
+// Completion must not depend solely on motion's `finished` promise: it
+// never settles once an animation was stopped, which would strand
+// isAnimating=true (new layer at opacity 0, old layer visible) forever.
+const TRANSITION_COMPLETION_WATCHDOG_MS = 1000;
 
 const IOS_TRANSITION_DURATION = 0.44;
 const IOS_ENTER_FROM_X_PERCENT = 100;
@@ -55,16 +63,6 @@ const clearLayerStyles = (element: HTMLElement | null) => {
   element.style.removeProperty('box-shadow');
 };
 
-type Layer = {
-  key: string;
-  location: Location;
-  status: LayerStatus;
-};
-
-type TransitionDirection = 'forward' | 'backward';
-
-type TransitionVariant = 'vertical' | 'ios';
-
 export function PageTransition({
   render,
   getRouteOrder,
@@ -79,16 +77,13 @@ export function PageTransition({
   const exitScrollOffsetRef = useRef(0);
   const enterScrollOffsetRef = useRef(0);
   const scrollPositionsRef = useRef(new Map<string, number>());
-  const nextLayersRef = useRef<Layer[] | null>(null);
 
-  const [isAnimating, setIsAnimating] = useState(false);
-  const [layers, setLayers] = useState<Layer[]>(() => [
-    {
-      key: location.key,
-      location,
-      status: 'current',
-    },
-  ]);
+  const [transitionState, dispatchTransition] = useReducer(
+    pageTransitionReducer,
+    location,
+    createInitialPageTransitionState,
+  );
+  const { layers, isAnimating } = transitionState;
   const currentLayer =
     layers.find((layer) => layer.status === 'current') ?? layers[layers.length - 1];
   const currentLayerKey = currentLayer?.key ?? location.key;
@@ -150,66 +145,15 @@ export function PageTransition({
       return fromSegments[0] === toSegments[0] && toSegments.length === 1;
     })();
 
-    setLayers((prev) => {
-      const variant = transitionVariantRef.current;
-      const direction = transitionDirectionRef.current;
-      const previousCurrentIndex = prev.findIndex((layer) => layer.status === 'current');
-      const resolvedCurrentIndex =
-        previousCurrentIndex >= 0 ? previousCurrentIndex : prev.length - 1;
-      const previousCurrent = prev[resolvedCurrentIndex];
-      const previousStack: Layer[] = prev
-        .filter((_, idx) => idx !== resolvedCurrentIndex)
-        .map((layer): Layer => ({ ...layer, status: 'stacked' }));
-
-      const nextCurrent: Layer = { key: location.key, location, status: 'current' };
-
-      if (!previousCurrent) {
-        nextLayersRef.current = [nextCurrent];
-        return [nextCurrent];
-      }
-
-      if (variant === 'ios') {
-        if (direction === 'forward') {
-          const exitingLayer: Layer = { ...previousCurrent, status: 'exiting' };
-          const stackedLayer: Layer = { ...previousCurrent, status: 'stacked' };
-
-          nextLayersRef.current = [...previousStack, stackedLayer, nextCurrent];
-          return [...previousStack, exitingLayer, nextCurrent];
-        }
-
-        const targetIndex = prev.findIndex((layer) => layer.key === location.key);
-        if (targetIndex !== -1) {
-          const targetStack: Layer[] = prev.slice(0, targetIndex + 1).map((layer, idx): Layer => {
-            const isTarget = idx === targetIndex;
-            return {
-              ...layer,
-              location: isTarget ? location : layer.location,
-              status: isTarget ? 'current' : 'stacked',
-            };
-          });
-
-          if (shouldSkipExitLayer) {
-            nextLayersRef.current = targetStack;
-            return targetStack;
-          }
-
-          const exitingLayer: Layer = { ...previousCurrent, status: 'exiting' };
-          nextLayersRef.current = targetStack;
-          return [...targetStack, exitingLayer];
-        }
-      }
-
-      if (shouldSkipExitLayer) {
-        nextLayersRef.current = [nextCurrent];
-        return [nextCurrent];
-      }
-
-      const exitingLayer: Layer = { ...previousCurrent, status: 'exiting' };
-
-      nextLayersRef.current = [nextCurrent];
-      return [exitingLayer, nextCurrent];
+    // The reducer records this navigation as pending when a transition is
+    // already animating, instead of dropping it; `finish` starts it.
+    dispatchTransition({
+      type: 'navigate',
+      location,
+      variant: nextVariant,
+      direction: nextDirection,
+      shouldSkipExitLayer,
     });
-    setIsAnimating(true);
   }, [
     isAnimating,
     location,
@@ -221,11 +165,11 @@ export function PageTransition({
     layers,
   ]);
 
-  // Run Motion animation when animating starts
+  // Run Motion animation when animating starts. Re-runs when the current
+  // layer changes so a pending navigation started by `finish` gets its
+  // own animation and completion registration.
   useLayoutEffect(() => {
     if (!isAnimating) return;
-
-    if (!currentLayerRef.current) return;
 
     const currentLayerEl = currentLayerRef.current;
     const exitingLayerEl = exitingLayerRef.current;
@@ -254,14 +198,20 @@ export function PageTransition({
       if (completed) return;
       completed = true;
 
-      const nextLayers = nextLayersRef.current;
-      nextLayersRef.current = null;
-      setLayers((prev) => nextLayers ?? prev.filter((layer) => layer.status !== 'exiting'));
-      setIsAnimating(false);
+      // The reducer collapses to the settled layers and starts a pending
+      // navigation, if one was recorded while animating.
+      dispatchTransition({ type: 'finish' });
 
       clearLayerStyles(currentLayerEl);
       clearLayerStyles(exitingLayerEl);
     };
+
+    // No element to animate: collapse the stack instead of stranding
+    // isAnimating=true with no completion path.
+    if (!currentLayerEl) {
+      completeTransition();
+      return;
+    }
 
     if (reduceMotion) {
       // Accessibility: skip spatial motion entirely, fall back to a quick crossfade.
@@ -398,13 +348,29 @@ export function PageTransition({
         if (cancelled) return;
         completeTransition();
       });
+      // Watchdog: motion's `finished` never settles once an animation
+      // was stopped, and a paused animation timeline may never finish.
+      // Bound completion so a stalled transition can never strand the
+      // new layer at opacity 0 with the old layer visible.
+      const watchdogId = setTimeout(() => {
+        if (cancelled) return;
+        completeTransition();
+      }, TRANSITION_COMPLETION_WATCHDOG_MS);
+      const cleanupAnimations = () => {
+        clearTimeout(watchdogId);
+        activeAnimations.forEach((animation) => animation.stop());
+      };
+      return () => {
+        cancelled = true;
+        cleanupAnimations();
+      };
     }
 
     return () => {
       cancelled = true;
       activeAnimations.forEach((animation) => animation.stop());
     };
-  }, [isAnimating, resolveScrollContainer]);
+  }, [isAnimating, resolveScrollContainer, currentLayerKey]);
 
   return (
     <div className={`page-transition${isAnimating ? ' page-transition--animating' : ''}`}>

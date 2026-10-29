@@ -19,7 +19,7 @@ export function ScreencastLoginPage() {
     typeof __CASTCTL_USE_MOCKS__ !== 'undefined' && __CASTCTL_USE_MOCKS__;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 860 }}>
+    <div className="page-root" style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 860 }}>
       <Card title={t('screencast_login.title')}>
         <p style={{ marginTop: 0 }}>{t('screencast_login.intro')}</p>
         <p>{t('screencast_login.remote_note')}</p>

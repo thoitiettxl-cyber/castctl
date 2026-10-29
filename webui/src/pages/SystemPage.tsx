@@ -74,7 +74,7 @@ export function SystemPage() {
 
   if (failed || !status) {
     return (
-      <Card title={t('system.title')}>
+      <Card title={t('system.title')} className="page-root">
         <p style={{ marginTop: 0 }}>{t('common.error')}</p>
         <Button variant="secondary" onClick={refresh}>
           {t('common.retry')}
@@ -90,7 +90,7 @@ export function SystemPage() {
       : bundleHash;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div className="page-root" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <h1 style={{ margin: 0 }}>{t('system.title')}</h1>
       <Card
         title={t('system.versions.title')}

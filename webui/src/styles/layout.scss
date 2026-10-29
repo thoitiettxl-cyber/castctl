@@ -16,6 +16,7 @@
   position: relative;
   display: flex;
   flex-direction: column;
+  min-width: 0;
   min-height: 100vh;
   height: 100vh;
   overflow: hidden;
@@ -369,6 +370,8 @@
   display: flex;
   flex: 1;
   gap: 0;
+  min-width: 0;
+  max-width: 100%;
   min-height: 0;
   height: 100vh;
   padding: 0;
@@ -785,6 +788,8 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
+  width: 100%;
+  max-width: 100%;
   height: 100vh;
   overflow-y: auto;
   scrollbar-gutter: stable;
@@ -805,7 +810,15 @@
 }
 
 .main-content {
-  flex: 1 0 auto;
+  // flex-shrink was 0: with flex-basis auto the main column sized itself
+  // to the widest descendant's max-content (the profiles table, ~799px)
+  // and refused to shrink to a 390px viewport, so overflow-x: hidden
+  // clipped the right ~54% of the page with no scroll container.
+  // flex: 1 1 auto + min-width: 0 lets it shrink to the viewport; wide
+  // tables then scroll inside their own table scroll container (.scroll).
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
   min-height: 100%;
   padding: 70px clamp(20px, 3vw, 48px) 40px;
   display: flex;
@@ -834,6 +847,32 @@
       gap: 0;
       background: var(--bg-secondary);
     }
+  }
+}
+
+// 390px containment chain, continued: .page-transition and its layer are
+// flex-column items between .main-content and the page root. Without
+// min-width: 0 / max-width: 100% a wide table's max-content propagates
+// through them and re-expands .main-content. These rules live here only
+// because PageTransition.scss is owned by another writer for this fix;
+// the canonical home for them is PageTransition.scss (same declarations,
+// on .page-transition and .page-transition__layer) — the coordinator may
+// move them there and delete this block.
+.page-transition {
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+}
+
+.page-transition__layer {
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+
+  // The page root element: a flex item of the layer, same clamp.
+  > * {
+    min-width: 0;
+    max-width: 100%;
   }
 }
 

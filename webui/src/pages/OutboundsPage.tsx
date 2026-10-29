@@ -61,7 +61,7 @@ export function OutboundsPage() {
 
   if (failed) {
     return (
-      <Card title={t('outbounds.list.title')}>
+      <Card title={t('outbounds.list.title')} className="page-root">
         <p style={{ marginTop: 0 }}>{t('common.error')}</p>
         <Button variant="secondary" onClick={refresh}>
           {t('common.retry')}
@@ -73,6 +73,7 @@ export function OutboundsPage() {
   return (
     <Card
       title={t('outbounds.list.title')}
+      className="page-root"
       extra={
         <Button variant="secondary" size="sm" onClick={refresh}>
           {t('common.refresh')}

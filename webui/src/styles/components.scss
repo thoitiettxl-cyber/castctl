@@ -6,6 +6,8 @@
   align-items: center;
   justify-content: center;
   gap: $spacing-sm;
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid transparent;
   border-radius: $radius-md;
   padding: 10px 14px;
@@ -87,6 +89,8 @@
 .input,
 textarea {
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--border-color);
   border-radius: $radius-md;
   padding: 10px 12px;
@@ -107,6 +111,8 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: $spacing-xs;
+  min-width: 0;
+  max-width: 100%;
   margin-bottom: $spacing-md;
 
   label {
@@ -120,12 +126,45 @@ textarea {
   }
 }
 
+// Wrapper around an <input> inside Input.tsx (position: relative for the
+// right-side element). Clamped so a long input never widens its card.
+.input-wrap {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .card {
   background-color: var(--bg-primary);
   border: 1px solid var(--border-color);
   border-radius: $radius-lg;
   box-shadow: var(--shadow);
   padding: $spacing-lg;
+  min-width: 0;
+  max-width: 100%;
+}
+
+// Page-level root element inside .page-transition__layer: a flex item,
+// so min-width: 0 is what lets the layer shrink below a wide table's
+// max-content instead of stretching the whole page to table width.
+.page-root {
+  min-width: 0;
+  max-width: 100%;
+}
+
+// Horizontal scroll container for content that must keep its intrinsic
+// width (e.g. the JSON <pre> on ProfileDetailPage): scrolls in place
+// instead of widening the card.
+.scroll-x {
+  overflow-x: auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+// Login card: a flex item of the centred login root. Capped at the
+// viewport so the form's min-width can never push it past 390px.
+.login-card {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .card-header {
@@ -158,6 +197,9 @@ textarea {
   font-size: 13px;
   border: 1px solid var(--border-color);
   margin-bottom: $spacing-md;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 
   // 确保后续内容换行显示
   + * {
@@ -443,11 +485,20 @@ textarea {
   justify-content: space-between;
   gap: $spacing-md;
   align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
 
   .empty-content {
     display: flex;
     align-items: center;
     gap: $spacing-md;
+    min-width: 0;
+    flex: 1 1 auto;
+
+    > div {
+      min-width: 0;
+    }
   }
 
   .empty-icon {
@@ -473,11 +524,18 @@ textarea {
   .empty-title {
     font-weight: 700;
     color: var(--text-primary);
+    overflow-wrap: anywhere;
   }
 
   .empty-desc {
     color: var(--text-secondary);
     margin-top: 4px;
+    overflow-wrap: anywhere;
+  }
+
+  .empty-action {
+    min-width: 0;
+    flex-shrink: 0;
   }
 
   .empty-action .btn > span {
@@ -542,6 +600,8 @@ textarea {
   border-radius: $radius-md;
   padding: $spacing-sm $spacing-md;
   color: $error-color;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .stack {

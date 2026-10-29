@@ -61,7 +61,10 @@ export function LoginPage() {
       }}
     >
       <Card title={t('login.title')} className="login-card">
-        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 'min(420px, calc(100vw - 32px))' }}>
+        {/* Form min-width: 420px on desktop; on narrow screens the viewport
+            minus root padding (32px) + card padding (48px), so the card
+            never exceeds a 390px viewport. */}
+        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 'min(420px, calc(100vw - 80px))' }}>
           <p style={{ margin: 0 }}>{t('login.subtitle')}</p>
           <Input
             label={t('login.token_label')}

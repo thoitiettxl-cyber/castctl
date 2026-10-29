@@ -6,10 +6,17 @@
   border-radius: var(--radius-md);
   overflow: hidden;
   background: var(--bg-primary);
+  // Clamp the wrapper to its card: without min-width: 0 / max-width: 100%
+  // the table's max-content width propagates up through the page chain
+  // and widens the whole page. The table itself scrolls inside .scroll.
+  min-width: 0;
+  max-width: 100%;
 }
 
 .scroll {
   overflow-x: auto;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .table {

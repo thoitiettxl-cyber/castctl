@@ -142,7 +142,7 @@ export function SettingsPage() {
 
   if (!dnsLoaded && !telegramLoaded && !dnsError && !telegramError) {
     return (
-      <div>
+      <div className="page-root">
         <h1>{t('settings.title')}</h1>
         <LoadingSpinner />
         <p>{t('common.loading')}</p>
@@ -151,7 +151,7 @@ export function SettingsPage() {
   }
 
   return (
-    <div>
+    <div className="page-root">
       <h1>{t('settings.title')}</h1>
 
       <Card title={t('settings.dns.title')}>

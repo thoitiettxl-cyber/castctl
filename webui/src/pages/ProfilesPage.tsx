@@ -138,7 +138,7 @@ export function ProfilesPage() {
   const hasLegacy = profiles.some((p) => p.source === 'legacy');
 
   return (
-    <div>
+    <div className="page-root">
       <h1>{t('profiles.list.title')}</h1>
       {error && <p>{error}</p>}
       {hasLegacy && <p role="alert">{t('dashboard.legacy_warning')}</p>}

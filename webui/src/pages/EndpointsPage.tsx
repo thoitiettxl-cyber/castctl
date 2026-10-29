@@ -63,7 +63,7 @@ export function EndpointsPage() {
 
   if (failed) {
     return (
-      <Card title={t('endpoints.list.title')}>
+      <Card title={t('endpoints.list.title')} className="page-root">
         <p style={{ marginTop: 0 }}>{t('common.error')}</p>
         <Button variant="secondary" onClick={refresh}>
           {t('common.retry')}
@@ -73,7 +73,7 @@ export function EndpointsPage() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div className="page-root" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <Card
         title={t('endpoints.list.title')}
         extra={

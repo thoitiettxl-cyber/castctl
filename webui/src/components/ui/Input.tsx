@@ -26,7 +26,7 @@ export function Input({
   return (
     <div className="form-group">
       {label && <label htmlFor={inputId}>{label}</label>}
-      <div style={{ position: 'relative' }}>
+      <div className="input-wrap" style={{ position: 'relative' }}>
         <input
           id={inputId}
           className={`input ${className}`.trim()}

@@ -107,7 +107,7 @@ export function DashboardPage() {
 
   if (loading && !status) {
     return (
-      <div>
+      <div className="page-root">
         <h1>{t('dashboard.title')}</h1>
         <LoadingSpinner />
         <p>{t('common.loading')}</p>
@@ -116,7 +116,7 @@ export function DashboardPage() {
   }
 
   return (
-    <div>
+    <div className="page-root">
       <h1>{t('dashboard.title')}</h1>
       {error && <p>{error}</p>}
       {status?.remote_exposure && <p role="alert">{t('dashboard.remote_banner')}</p>}

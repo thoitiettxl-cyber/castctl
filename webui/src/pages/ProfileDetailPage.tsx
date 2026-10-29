@@ -218,7 +218,7 @@ export function ProfileDetailPage() {
 
   if (loading && !detail) {
     return (
-      <div>
+      <div className="page-root">
         <LoadingSpinner />
         <p>{t('common.loading')}</p>
       </div>
@@ -227,7 +227,7 @@ export function ProfileDetailPage() {
 
   if (!profileName || (!detail && error)) {
     return (
-      <div>
+      <div className="page-root">
         <Link to="/profiles">{t('profiles.detail.back')}</Link>
         <p>{error || t('common.error')}</p>
       </div>
@@ -235,7 +235,7 @@ export function ProfileDetailPage() {
   }
 
   return (
-    <div>
+    <div className="page-root">
       <Link to="/profiles">{t('profiles.detail.back')}</Link>
       <h1>
         {t('profiles.detail.title')}: {profileName}
@@ -290,7 +290,7 @@ export function ProfileDetailPage() {
           </Card>
 
           <Card title={t('profiles.detail.entry')}>
-            <div style={{ overflowX: 'auto' }}>
+            <div className="scroll-x" style={{ overflowX: 'auto' }}>
               <pre>{JSON.stringify(detail.entry, null, 2)}</pre>
             </div>
           </Card>

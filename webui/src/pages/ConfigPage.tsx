@@ -7,7 +7,8 @@ import type { ApiError } from '@/types';
 import { diffStats, lineDiff, type DiffLine } from '@/utils/diff';
 import { getErrorMessage } from '@/utils/helpers';
 import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard';
-import { useNotificationStore } from '@/stores';
+import { useNotificationStore, useThemeStore } from '@/stores';
+import { codemirrorDarkTheme } from '@/utils/codemirrorTheme';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
@@ -56,6 +57,12 @@ function DiffView({ lines }: { lines: DiffLine[] }) {
 export function ConfigPage() {
   const { t } = useTranslation();
   const showNotification = useNotificationStore((state) => state.showNotification);
+  // Single source of truth for the app theme (useThemeStore): resolvedTheme
+  // is 'dark' exactly when the app is dark — including Auto following the
+  // OS via the store's matchMedia listener — and 'light' for light/white
+  // (white normalises to light in the store), so the editor follows OS
+  // changes without a reload and no second matchMedia is needed here.
+  const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const [baseContent, setBaseContent] = useState<string | null>(null);
   const [baseSha, setBaseSha] = useState('');
   const [source, setSource] = useState('');
@@ -211,6 +218,7 @@ export function ConfigPage() {
               value={content}
               height="60vh"
               extensions={JSON_EXTENSIONS}
+              theme={resolvedTheme === 'dark' ? codemirrorDarkTheme : 'light'}
               editable={!saving}
               onChange={(value) => {
                 setContent(value);
