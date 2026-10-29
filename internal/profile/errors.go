@@ -167,10 +167,6 @@ func newInvalidProfileError(name string) *Error {
 	}
 }
 
-func newAuthError(msg string) *Error {
-	return &Error{Code: 2, Kind: "auth", Message: "profile: " + msg, Cause: ErrAuth}
-}
-
 func newRefuseError(msg string) *Error {
 	return &Error{Code: 2, Kind: "refuse_overwrite", Message: "profile: " + msg, Cause: ErrRefuseOverwrite}
 }

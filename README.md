@@ -18,6 +18,16 @@ Canonical test command (with all feature tags, race detection on):
 go test -race -tags with_utls,with_quic,with_wireguard,with_gvisor ./...
 ```
 
+### Flake loop
+
+Repeat the gateway package 50 times with shuffling when hunting flakes.
+The loop needs `-timeout 30m`: the full-package 50x run took 648s, past
+the default 10-minute `go test` timeout.
+
+```sh
+go test -race -count=50 -shuffle=on -timeout 30m -v ./internal/gateway/
+```
+
 ## Build tags
 
 | Tag | Effect |

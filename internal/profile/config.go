@@ -395,17 +395,13 @@ func parseProfileEntry(name string, obj *orderedObject, baseDir string) (*Profil
 				p.Outbound = OutboundRef{Kind: OutboundTag, Tag: t}
 			}
 		case *orderedObject:
-			raw, err := rawOf(t)
-			if err != nil {
-				return nil, err
-			}
 			// Auto-tag before parsing so the parsed object and the
 			// stored raw JSON agree.
 			tagged, tag, err := ensureInlineTag(t, "profile:"+name)
 			if err != nil {
 				return nil, err
 			}
-			raw = tagged
+			raw := tagged
 			ob, err := parseOutbound(raw)
 			if err != nil {
 				return nil, err

@@ -52,7 +52,7 @@ type PromptFunc func(prompt string) (string, error)
 
 // Env carries the process environment a command run needs, injectable
 // for hermetic tests. A zero Env is usable: stdout/stderr default to
-// os.Stdout/os.Stderr, stdin to os.Stdin, getenv to os.LookupEnv, and
+// os.Stdout/os.Stderr, stdin to os.Stdin, lookupEnv to os.LookupEnv, and
 // Prompt to the stdin default.
 type Env struct {
 	Stdout io.Writer
@@ -112,11 +112,6 @@ func (e *Env) lookupEnv(key string) (string, bool) {
 		return e.Getenv(key)
 	}
 	return os.LookupEnv(key)
-}
-
-func (e *Env) getenv(key string) string {
-	v, _ := e.lookupEnv(key)
-	return v
 }
 
 // prompt reads one line through the injected PromptFunc, or the
@@ -329,16 +324,6 @@ func writeJSON(w io.Writer, v any) error {
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
-}
-
-// writeJSONLine writes v as one compact JSON line, HTML unescaped.
-func writeJSONLine(w io.Writer, v any) error {
-	b, err := marshalJSONLine(v)
-	if err != nil {
-		return err
-	}
-	_, err = w.Write(append(b, '\n'))
-	return err
 }
 
 func marshalJSONLine(v any) ([]byte, error) {
@@ -689,17 +674,9 @@ func registerCommand(spec *commandSpec) {
 	commandTable[spec.name] = spec
 }
 
-func sortedCommandNames() []string {
-	names := make([]string, 0, len(commandTable))
-	for n := range commandTable {
-		names = append(names, n)
-	}
-	// Deterministic order: keep the argparse registration order by
-	// sorting only for the unknown-choice message is wrong; use a
-	// fixed order list instead.
-	return commandOrder
-}
-
+// Deterministic order: keep the argparse registration order by
+// sorting only for the unknown-choice message is wrong; use a
+// fixed order list instead.
 var commandOrder = []string{
 	"status", "usage", "invite", "redeem", "threads", "history", "files",
 	"download", "watch", "feed", "feed-status", "feed-react", "feed-prompt",
@@ -737,7 +714,7 @@ func Run(ctx context.Context, args []string, env *Env) int {
 	}
 	spec, ok := commandTable[cmdName]
 	if !ok {
-		fmt.Fprintf(env.stderr(), "muse-cli: argument cmd: invalid choice: %q (choose from %s)\n", cmdName, strings.Join(sortedCommandNames(), ", "))
+		fmt.Fprintf(env.stderr(), "muse-cli: argument cmd: invalid choice: %q (choose from %s)\n", cmdName, strings.Join(commandOrder, ", "))
 		fmt.Fprint(env.stderr(), globalHelpText)
 		return 2
 	}

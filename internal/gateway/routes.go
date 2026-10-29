@@ -13,14 +13,6 @@ import (
 	pb "github.com/thoitiettxl-cyber/muse-cli/go/internal/proto"
 )
 
-// Service IDs, ported verbatim from gateway.py SERVICE_IDS.
-const (
-	serviceDaemon   = 0
-	serviceSentinel = 1
-	serviceVault    = 2
-	serviceAuthd    = 3
-)
-
 // serviceID maps a route's service name to its ServiceType value.
 // Unknown or absent names map to daemon (0), exactly as
 // SERVICE_IDS.get(route.get("service", "daemon"), 0) does.

@@ -655,12 +655,6 @@ func writeRedactedProfile(env *Env, prof *profile.Profile) error {
 // profile test
 // ---------------------------------------------------------------------
 
-type testPhase struct {
-	OK    bool   `json:"ok"`
-	MS    int64  `json:"ms"`
-	Error string `json:"error,omitempty"`
-}
-
 type dnsPhase struct {
 	OK        bool     `json:"ok"`
 	MS        int64    `json:"ms"`
