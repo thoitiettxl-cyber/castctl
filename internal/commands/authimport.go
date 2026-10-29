@@ -162,10 +162,10 @@ func importHasHatchSess(raw string) bool {
 		// flattened non-comment, non-jar lines only. A `#`
 		// mention must not produce a pair, and a jar row's
 		// value column must not be scanned as a pair: jar rows
-		// are evaluated only by the jar branch (column 6), and
-		// splitting the flattened text on ";" only (never on
-		// whitespace) means a jar value such as hatch_sess=FAKE
-		// stays inside a segment whose name is not hatch_sess.
+		// are evaluated only by the jar branch (column 6); the
+		// fallback scans the kept text as whitespace-separated
+		// tokens, so a hatch_sess mention inside an excluded
+		// line never reaches it.
 		var kept []string
 		for _, line := range strings.Split(raw, "\n") {
 			line = strings.TrimSpace(line)
@@ -254,20 +254,26 @@ func isJarRowLine(line string) bool {
 }
 
 // fallbackHasHatchPair checks the flattened no-qualifying-line
-// text for a hatch_sess pair, strictly: split on ";", split each
-// segment on its first "=", trim the name, and require the exact
-// name hatch_sess with a non-blank value. Whitespace is not a pair
-// separator here: a flattened jar row must not yield a pair from
-// its value column. A leading BOM is stripped for the check only,
-// matching lineHasHatchPair.
+// text for a hatch_sess pair, with token semantics matching the
+// loader: split the text into whitespace-separated fields
+// (strings.Fields) and accept iff some field is exactly
+// "hatch_sess=" plus a non-empty remainder containing no ";".
+// A name split from its "=" by whitespace therefore never counts
+// (the fields "hatch_sess" and "=FAKE" match nothing), and an
+// empty value cannot borrow the next field. A ";" inside the
+// remainder is fail-closed: the field is not a clean token pair.
+// The caller supplies only comment-excluded, jar-excluded kept
+// lines, so comment/jar mentions never reach this scan. A leading
+// BOM is stripped for the check only, matching lineHasHatchPair.
 func fallbackHasHatchPair(s string) bool {
 	s = strings.TrimPrefix(s, "\ufeff")
-	for _, seg := range strings.Split(s, ";") {
-		name, value, found := strings.Cut(seg, "=")
-		if !found {
+	const prefix = "hatch_sess="
+	for _, field := range strings.Fields(s) {
+		if !strings.HasPrefix(field, prefix) {
 			continue
 		}
-		if strings.TrimSpace(name) == "hatch_sess" && strings.TrimSpace(value) != "" {
+		remainder := field[len(prefix):]
+		if remainder != "" && !strings.ContainsRune(remainder, ';') {
 			return true
 		}
 	}

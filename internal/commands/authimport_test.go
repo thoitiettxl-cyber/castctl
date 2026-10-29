@@ -785,6 +785,20 @@ func TestImportHasHatchSessAdversarial(t *testing.T) {
 		{"json nested object", `{"cookies": {"hatch_sess": {"nested": "FAKE"}}}`, false},
 		{"first line wins", "a=1; b=2\nhatch_sess=FAKE; y=3", false},
 		{"fallback flattened", "hatch_sess=FAKE\nother=1", true},
+		// R2 (fix round 2): a hatch_sess name split from its "="
+		// by whitespace never yields a pair in the loaded
+		// header, so the fallback must not pretend it does.
+		// N1b-N4b reject: the name/equals/value are separate
+		// whitespace fields, or the value is empty and would
+		// borrow the next line.
+		{"fallback space before equals N1b", "hatch_sess =FAKE\ndatr=x", false},
+		{"fallback tab before equals N2b", "hatch_sess\t=FAKE\ndatr=x", false},
+		{"fallback newline before equals N3b", "hatch_sess\n=FAKE\ndatr=x", false},
+		{"fallback empty value borrows next line N4b", "hatch_sess=\ndatr=x", false},
+		// Preserves: a clean hatch_sess= token in the fallback
+		// text counts, wherever it sits among other fields.
+		{"fallback hatch second field", "x=1 hatch_sess=FAKE", true},
+		{"fallback hatch after pair", "foo=bar hatch_sess=FAKE", true},
 		{"comment skipped", "# hatch_sess=FAKE; y=1\na=1; b=2", false},
 		// R1 repros: comment mentions and jar values never count.
 		{"comment only hatch", "# hatch_sess=FAKE\n", false},
@@ -804,6 +818,95 @@ func TestImportHasHatchSessAdversarial(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := importHasHatchSess(tc.input); got != tc.want {
 				t.Errorf("importHasHatchSess(%q)=%v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFallbackHasHatchPairTokenSemantics exercises the fallback
+// check directly, on the flattened kept text it receives: token
+// semantics over whitespace-separated fields. A field counts only
+// when it is exactly "hatch_sess=" plus a non-empty remainder with
+// no ";".
+func TestFallbackHasHatchPairTokenSemantics(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"exact token", "hatch_sess=FAKE", true},
+		{"token plus field", "hatch_sess=FAKE other=1", true},
+		{"token second", "x=1 hatch_sess=FAKE", true},
+		{"token after pair", "foo=bar hatch_sess=FAKE", true},
+		{"token newline separated", "hatch_sess=FAKE\nother=1", true},
+		{"bom token", "\ufeffhatch_sess=FAKE", true},
+		{"empty remainder", "hatch_sess=", false},
+		{"empty remainder plus field", "hatch_sess= datr=x", false},
+		{"space before equals", "hatch_sess =FAKE datr=x", false},
+		{"tab before equals", "hatch_sess\t=FAKE datr=x", false},
+		{"name alone", "hatch_sess =FAKE", false},
+		{"newline before equals", "hatch_sess\n=FAKE datr=x", false},
+		{"substring name", "xhatch_sess=FAKE", false},
+		{"suffixed name", "hatch_sess2=FAKE", false},
+		{"wrong case", "Hatch_Sess=FAKE", false},
+		{"in value only", "other=hatch_sess=FAKE", false},
+		// Stray ";" fields are fail-closed: a ";" inside the
+		// remainder means the field is not a clean token pair,
+		// so it must not count even though a ";"-split scan
+		// would see "hatch_sess=FA" in it.
+		{"semicolon in remainder", "hatch_sess=FA;KE", false},
+		{"trailing semicolon remainder", "hatch_sess=FAKE;", false},
+		{"semicolon remainder plus field", "hatch_sess=FA;KE other=1", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := fallbackHasHatchPair(tc.input); got != tc.want {
+				t.Errorf("fallbackHasHatchPair(%q)=%v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAuthImportFallbackTokenSemantics is the binary-level
+// (Run/runImport) counterpart of the token-semantics cases: exit 2
+// with no write on rejection, exit 0 with the verbatim store on
+// acceptance.
+func TestAuthImportFallbackTokenSemantics(t *testing.T) {
+	row := func(name, value string) string {
+		return ".muse.ai\tTRUE\t/\tTRUE\t0\t" + name + "\t" + value
+	}
+	cases := []struct {
+		name       string
+		input      string
+		wantCode   int
+		wantStored string
+	}{
+		// R2 N1b-N4b: whitespace-split name/equals/value reject.
+		{"N1b space before equals", "hatch_sess =FAKE\ndatr=x", 2, ""},
+		{"N2b tab before equals", "hatch_sess\t=FAKE\ndatr=x", 2, ""},
+		{"N3b newline before equals", "hatch_sess\n=FAKE\ndatr=x", 2, ""},
+		{"N4b empty value borrows next line", "hatch_sess=\ndatr=x", 2, ""},
+		// Preserves: clean tokens accept.
+		{"preserve hatch first line", "hatch_sess=FAKE\nother=1", 0, "hatch_sess=FAKE\nother=1\n"},
+		{"preserve hatch second field", "x=1 hatch_sess=FAKE", 0, "x=1 hatch_sess=FAKE\n"},
+		{"preserve hatch after pair", "foo=bar hatch_sess=FAKE", 0, "foo=bar hatch_sess=FAKE\n"},
+		// R1 regression: comment/jar mentions still reject.
+		{"R1 comment only hatch", "# hatch_sess=FAKE\n", 2, ""},
+		{"R1 comment hatch plus pair", "# hatch_sess=FAKE\nfoo=bar\n", 2, ""},
+		{"R1 comment hatch plus jar datr row", "# hatch_sess=FAKE\n" + row("datr", "FAKE") + "\n", 2, ""},
+		{"R1 jar value mentions hatch", row("other", "hatch_sess=FAKE") + "\n", 2, ""},
+		{"R1 jar value semicolon hatch", row("other", "x;hatch_sess=FAKE") + "\n", 2, ""},
+		// R2 regression: string-only JSON still rejects.
+		{"R2 JSON number zero", `{"hatch_sess": 0}`, 2, ""},
+		{"R2 JSON bool false", `{"hatch_sess": false}`, 2, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home, cfg := importHome(t, importDefaultConfig)
+			if tc.wantCode == 0 {
+				checkImportSuccess(t, home, cfg, tc.input, tc.wantStored)
+			} else {
+				checkImportFailure(t, home, cfg, tc.input)
 			}
 		})
 	}
