@@ -181,13 +181,15 @@ func retryCall[T any](ctx context.Context, s *SharedConn, what string, safeFor f
 				return zero, err
 			}
 			attempt++
-			// Debug, with a 1-based attempt counter. The error
-			// is redacted at this site (SafeString strips
-			// every query value, including vm_id, which
-			// redact.String leaves): a retryable error may
-			// embed a URL, and this line must be safe through
-			// ANY slog logger, not only the bridge handler.
-			m.logger.Debug("reconnect failed; retrying", "what", what, "attempt", attempt, "err", logging.SafeString(err.Error()))
+			// Debug (above trace), with a 1-based attempt
+			// counter. The error is summarised at this
+			// site (SummarizeErr: status + class + length
+			// for a body-carrying error, SafeString text
+			// otherwise): a retryable error may embed a
+			// URL or a server body, and this line must be
+			// safe through ANY slog logger, not only the
+			// bridge handler.
+			m.logger.Debug("reconnect failed; retrying", "what", what, "attempt", attempt, "err", logging.SummarizeErr(err))
 		} else {
 			result, err := fn(ctx, g)
 			if err == nil {
@@ -204,7 +206,7 @@ func retryCall[T any](ctx context.Context, s *SharedConn, what string, safeFor f
 				return zero, err
 			}
 			attempt++
-			m.logger.Debug("retrying on a new connection", "what", what, "attempt", attempt, "err", logging.SafeString(err.Error()))
+			m.logger.Debug("retrying on a new connection", "what", what, "attempt", attempt, "err", logging.SummarizeErr(err))
 		}
 		if !sleepOrDone(ctx, pause) {
 			return zero, ctx.Err()

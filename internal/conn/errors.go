@@ -36,6 +36,23 @@ func (e *AuthError) Error() string {
 	return "conn: " + e.Message
 }
 
+// LogSummary renders the error for log lines ABOVE trace: the
+// error class plus the length of the message carried by the
+// error, and no message bytes at all. AuthError carries no
+// separate status field or body-length field (its message
+// embeds the endpoint and status in prose), so the summary
+// carries the class and the message length; the full redacted
+// message is available only at trace (see logging's
+// SafeErrForLevel). This satisfies the logging.LogSummary
+// interface structurally — logging must not import conn
+// (conn imports logging), so no shared interface type exists.
+func (e *AuthError) LogSummary() string {
+	if e == nil {
+		return "conn: auth_failed message_length=0"
+	}
+	return fmt.Sprintf("conn: auth_failed message_length=%d", len(e.Message))
+}
+
 // GatewayError reports a server-side failure: a non-2xx status, a
 // stream reset, a non-JSON or {"ok":false} response. Status is the
 // HTTP-like status, or -1 when there is none (reset, non-JSON).
@@ -51,6 +68,21 @@ type GatewayError struct {
 
 func (e *GatewayError) Error() string {
 	return fmt.Sprintf("conn: gateway status=%d payload=%q", e.Status, e.Payload)
+}
+
+// LogSummary renders the error for log lines ABOVE trace: the
+// status code, the error class, and the length of the payload
+// carried by the error (the redacted, truncated payload — the
+// error types retain no wire length), and no payload bytes at
+// all. The full redacted payload is available only at trace
+// (see logging's SafeErrForLevel). This satisfies the
+// logging.LogSummary interface structurally; see AuthError's
+// LogSummary for why no shared interface type exists.
+func (e *GatewayError) LogSummary() string {
+	if e == nil {
+		return "conn: gateway status=0 body_length=0"
+	}
+	return fmt.Sprintf("conn: gateway status=%d body_length=%d", e.Status, len(e.Payload))
 }
 
 // ConnectionDown reports that the connection was already down when a

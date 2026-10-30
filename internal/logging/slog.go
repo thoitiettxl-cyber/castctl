@@ -80,6 +80,7 @@ func singLevel(level slog.Level) singlog.Level {
 }
 
 func (h *slogHandler) Handle(ctx context.Context, r slog.Record) error {
+	level := singLevel(r.Level)
 	msg := SafeString(r.Message)
 	attrs := append([]slog.Attr{}, h.attrs...)
 	r.Attrs(func(a slog.Attr) bool {
@@ -91,24 +92,27 @@ func (h *slogHandler) Handle(ctx context.Context, r slog.Record) error {
 		for _, g := range h.groups {
 			key = g + "." + key
 		}
-		msg += " " + SafeString(key) + "=" + safeAttrValue(a.Value)
+		msg += " " + SafeString(key) + "=" + safeAttrValue(a.Value, level)
 	}
-	Emit(h.logger, ctx, singLevel(r.Level), msg)
+	Emit(h.logger, ctx, level, msg)
 	return nil
 }
 
-// safeAttrValue renders one slog value for a log line. Errors use
-// SafeErr; strings use SafeString; everything else is formatted
-// then passed through SafeString so a secret-bearing %v cannot
-// cross the boundary raw. Groups are flattened by slog before
-// Handle for record attrs; WithGroup keys are prefixed in Handle.
-func safeAttrValue(v slog.Value) string {
+// safeAttrValue renders one slog value for a log line at level.
+// Errors use the level-gated rendering (SafeErrForLevel): above
+// trace a body-carrying error becomes status + class + length
+// only, at trace the redacted-then-truncated body. Strings use
+// SafeString; everything else is formatted then passed through
+// SafeString so a secret-bearing %v cannot cross the boundary
+// raw. Groups are flattened by slog before Handle for record
+// attrs; WithGroup keys are prefixed in Handle.
+func safeAttrValue(v slog.Value, level singlog.Level) string {
 	switch v.Kind() {
 	case slog.KindLogValuer:
-		return safeAttrValue(v.Resolve())
+		return safeAttrValue(v.Resolve(), level)
 	case slog.KindAny, slog.KindGroup:
 		if err, ok := v.Any().(error); ok && err != nil {
-			return SafeErr(err)
+			return SafeErrForLevel(err, level)
 		}
 	}
 	return SafeString(fmt.Sprint(v.Any()))

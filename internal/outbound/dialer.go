@@ -103,9 +103,10 @@ func withConnID(ctx context.Context) context.Context { return ConnIDContext(ctx)
 // logDialStart / logDialDone emit the dial events at Debug through
 // the Dialer's logger, on the connection-ID context. Fields are
 // dialling metadata only: network, bare host (SafeHost rejects
-// URL-shaped hosts), port, and — on failure — the redacted error
-// text. No URL, header, cookie, token, or options value is ever
-// included.
+// URL-shaped hosts), port, and — on failure — the summarised
+// error (SummarizeErr: status + class + length for a
+// body-carrying error). No URL, header, cookie, token, options
+// value, or server body byte is ever included.
 func (d *Dialer) logDialStart(ctx context.Context, network, host string, port uint16) {
 	logging.Emit(d.logger, ctx, log.LevelDebug,
 		"event=dial_start network="+network+" host="+logging.SafeHost(host)+" port="+strconv.Itoa(int(port)))
@@ -114,7 +115,7 @@ func (d *Dialer) logDialStart(ctx context.Context, network, host string, port ui
 func (d *Dialer) logDialDone(ctx context.Context, network, host string, port uint16, err error) {
 	msg := "event=dial_done network=" + network + " host=" + logging.SafeHost(host) + " port=" + strconv.Itoa(int(port))
 	if err != nil {
-		msg += " err=" + logging.SafeErr(err)
+		msg += " err=" + logging.SummarizeErr(err)
 	}
 	logging.Emit(d.logger, ctx, log.LevelDebug, msg)
 }
@@ -182,7 +183,7 @@ func (d *Dialer) DialTLS(ctx context.Context, network, host string, port uint16,
 		// a TLS failure is visible without double-counting
 		// the dial.
 		logging.Emit(d.logger, ctx, log.LevelDebug,
-			"event=tls_handshake_failed network="+network+" host="+logging.SafeHost(host)+" port="+strconv.Itoa(int(port))+" err="+logging.SafeErr(err))
+			"event=tls_handshake_failed network="+network+" host="+logging.SafeHost(host)+" port="+strconv.Itoa(int(port))+" err="+logging.SummarizeErr(err))
 		_ = raw.Close()
 		return nil, err
 	}

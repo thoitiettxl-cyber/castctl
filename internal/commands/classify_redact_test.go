@@ -54,6 +54,16 @@ func TestClassifyErrorTwelveShapes(t *testing.T) {
 		{"bare-auth-equals", "auth=" + authVal, []string{authVal}, ""},
 		{"bare-secret-equals", "secret=" + secretVal, []string{secretVal}, ""},
 		{"double-quote-JSON-token (derived)", `{"token": "` + tokenVal + `"}`, []string{tokenVal}, ""},
+		// Loop 4 (b): the remaining quote combinations, incl.
+		// the loop-3 survivor (double key, single value).
+		{"json-double-single", `{"token": '` + tokenVal + `'}`, []string{tokenVal}, ""},
+		{"json-single-double", `{'token': "` + tokenVal + `"}`, []string{tokenVal}, ""},
+		// Loop 4 (c): observation shapes through all 3 paths.
+		{"json-unicode-escaped-key", `{"tok\u0065n": "` + tokenVal + `"}`, []string{tokenVal}, ""},
+		{"json-numeric-value", `{"token": 987654321}`, []string{"987654321"}, ""},
+		{"pct-encoded-key", "%61uth_token=" + tokenVal, []string{tokenVal}, ""},
+		{"pct-encoded-key-equals", "%61uth_token%3D" + tokenVal, []string{tokenVal}, ""},
+		{"digitless-fragment", "see #LOGFIXCLIFRAG-abcdef", []string{"LOGFIXCLIFRAG-abcdef"}, ""},
 		{"bare-keyvalue-token (derived)", "token=" + tokenVal, []string{tokenVal}, ""},
 		{"bearer (derived)", "Authorization: Bearer " + bearerVal, []string{bearerVal}, ""},
 	}

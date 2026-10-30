@@ -213,15 +213,20 @@ func (m *Muse) Config() (Config, error) {
 	return m.Reload()
 }
 
-// slogErr renders an error for a slog line, redacted at the
+// slogErr renders an error for a slog line, summarised at the
 // producer (the retryCall precedent in shared.go): the line
 // must be safe through ANY slog logger, not only the bridge
-// handler. A nil error renders as "".
+// handler, and every slogErr call site logs above trace
+// (Info/Warn), so a body-carrying error renders as status +
+// class + length only (logging.SummarizeErr), never as body
+// bytes. The full redacted body is available only at trace
+// through the bridge handler's level-gated rendering. A nil
+// error renders as "".
 func slogErr(err error) string {
 	if err == nil {
 		return ""
 	}
-	return logging.SafeString(err.Error())
+	return logging.SummarizeErr(err)
 }
 
 // slogPanic renders a recovered panic value for a slog line,

@@ -265,7 +265,7 @@ func TestSafeErrNilAndPlain(t *testing.T) {
 // shapes from the loop-2 red-team A4 drive through SafeString.
 // Shapes 1-9 survived the loop-2 boundary; shapes 10-12 are
 // the ones the drive already showed stripped, derived here
-// from the code paths that strip them (reJSONSecret,
+// from the code paths that strip them (redactJSONSecrets,
 // reKeyValue, redact.String Bearer) because no loop-2 report
 // file survives in ~/workspace/tmp/logging/ to recover their
 // exact spellings from — they are named explicitly, not
@@ -351,5 +351,228 @@ func TestSafeStringTwelveServerShapes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSafeStringJSONQuoteCombinations (loop 4, (b)): all four
+// key/value quote combinations must be stripped by ONE mechanism.
+// The double-key/single-value form is the loop-3 survivor:
+// {"token": 'VAL'} survived SafeString in all three paths.
+// Non-secret JSON values survive byte-identical, and the key
+// label survives with the value replaced.
+func TestSafeStringJSONQuoteCombinations(t *testing.T) {
+	t.Parallel()
+	const val = "LOGFIX-QUOTECOMB-83af10"
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"double-double", `{"token": "` + val + `"}`},
+		{"single-single", `{'token': '` + val + `'}`},
+		{"double-single", `{"token": '` + val + `'}`},
+		{"single-double", `{'token': "` + val + `"}`},
+		{"double-single-spaces", `{ "token" : '` + val + `' }`},
+		{"single-double-spaces", `{ 'token' : "` + val + `" }`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SafeString(tc.input)
+			if strings.Contains(got, val) {
+				t.Errorf("SafeString(%q) = %q, want fixture value absent", tc.input, got)
+			}
+			if !strings.Contains(got, "[redacted]") {
+				t.Errorf("SafeString(%q) = %q, want a [redacted] marker", tc.input, got)
+			}
+			if !strings.Contains(got, "token") {
+				t.Errorf("SafeString(%q) = %q, want the key label to survive", tc.input, got)
+			}
+		})
+	}
+	if got := SafeString(`{"name": "Alice", 'city': 'Lisbon'}`); got != `{"name": "Alice", 'city': 'Lisbon'}` {
+		t.Errorf("non-secret JSON changed: %q", got)
+	}
+	// A value carrying the other quote type must still be
+	// stripped in full: the value ends at its own closing
+	// quote, not at an embedded apostrophe.
+	if got := SafeString(`{"token": "LOGFIX-APOS-77d4e9don't"}`); strings.Contains(got, "LOGFIX-APOS-77d4e9") || strings.Contains(got, "don't") {
+		t.Errorf("apostrophe value not stripped in full: %q", got)
+	}
+}
+
+// TestSafeStringUnicodeEscapedKeys (loop 4, (c)(i)): a key whose
+// secret word is spelled with \u escapes must be recognised:
+// the escapes are decoded before the vocabulary match. A
+// non-secret escaped key survives byte-identical.
+func TestSafeStringUnicodeEscapedKeys(t *testing.T) {
+	t.Parallel()
+	const val = "LOGFIX-UNIESC-22d9f0"
+	cases := []string{
+		`{"tok\u0065n": "` + val + `"}`,
+		`{"\u0074oken": "` + val + `"}`,
+		`{"tok\u0065\u006e": "` + val + `"}`,
+		`{"TOK\u0045N": "` + val + `"}`,
+		`{'tok\u0065n': '` + val + `'}`,
+	}
+	for _, in := range cases {
+		if got := SafeString(in); strings.Contains(got, val) {
+			t.Errorf("SafeString(%q) = %q, want fixture value absent", in, got)
+		}
+	}
+	if in := `{"na\u006de": "Alice"}`; SafeString(in) != in {
+		t.Errorf("non-secret escaped key changed: SafeString(%q) = %q", in, SafeString(in))
+	}
+}
+
+// TestSafeStringJSONScalarValues (loop 4, (c)(ii)): a
+// secret-keyed JSON value of non-string type must be redacted.
+// Covered: string, integer, float, negative, exponent,
+// boolean, null. A non-secret numeric value survives.
+func TestSafeStringJSONScalarValues(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		input  string
+		absent string
+	}{
+		{"string", `{"token": "LOGFIX-SCALAR-83af10"}`, "LOGFIX-SCALAR-83af10"},
+		{"integer", `{"token": 987654321}`, "987654321"},
+		{"float", `{"token": 98765.4321}`, "98765.4321"},
+		{"negative", `{"token": -987654321}`, "-987654321"},
+		{"exponent", `{"token": 9.876e8}`, "9.876e8"},
+		{"bool-true", `{"token": true}`, "true"},
+		{"bool-false", `{"secret": false}`, "false"},
+		{"null", `{"token": null}`, "null"},
+		{"numeric-single-quote", `{'token': 987654321}`, "987654321"},
+		{"numeric-publicKey-prefix", `{"publicKey": 98765432109}`, "98765432109"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SafeString(tc.input)
+			if strings.Contains(got, tc.absent) {
+				t.Errorf("SafeString(%q) = %q, want %q absent", tc.input, got, tc.absent)
+			}
+			if !strings.Contains(got, "[redacted]") && tc.name != "numeric-publicKey-prefix" {
+				t.Errorf("SafeString(%q) = %q, want a [redacted] marker", tc.input, got)
+			}
+		})
+	}
+	if got := SafeString(`{"publicKey": 98765432109}`); !strings.Contains(got, "98765432") || strings.Contains(got, "98765432109") {
+		t.Errorf("publicKey numeric value = %q, want the first-8-chars prefix only", got)
+	}
+	if in := `{"count": 42, "ratio": 1.5}`; SafeString(in) != in {
+		t.Errorf("non-secret numeric JSON changed: %q", SafeString(in))
+	}
+}
+
+// TestSafeStringDigitlessFragments (loop 4, (c)(iii)): bare
+// fragment handling must not depend on a digit floor. The rule
+// (see safe.go): any bare fragment of 4+ fragment characters
+// is stripped, digit or not. Fragments shorter than 4 are
+// ordinary anchors/issue refs and survive.
+func TestSafeStringDigitlessFragments(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		input  string
+		absent string
+	}{
+		{"digitless-long", "see #LOGFIXFRAG-abcdef", "LOGFIXFRAG-abcdef"},
+		{"digitless-mixed", "see #abcdef-ghijkl", "abcdef-ghijkl"},
+		{"digit-long", "see #LOGFIXFRAG-123456", "LOGFIXFRAG-123456"},
+		{"digitless-url", "https://example.invalid/reset#LOGFIXFRAG-abcdef", "LOGFIXFRAG-abcdef"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SafeString(tc.input)
+			if strings.Contains(got, tc.absent) {
+				t.Errorf("SafeString(%q) = %q, want %q absent", tc.input, got, tc.absent)
+			}
+			if !strings.Contains(got, "#[redacted]") && !strings.Contains(got, "#%5Bredacted%5D") {
+				t.Errorf("SafeString(%q) = %q, want a redacted fragment marker", tc.input, got)
+			}
+		})
+	}
+	if in := "see #abc and issue #42"; SafeString(in) != in {
+		t.Errorf("short fragments changed: SafeString(%q) = %q", in, SafeString(in))
+	}
+}
+
+// TestSafeStringPercentEncodedKeyNames (loop 4, (c)(iv)):
+// percent-encoded key names must be decoded before matching,
+// and an encoded equals separator must be recognised, in bare
+// key=value and colon forms alike. A non-secret encoded key
+// survives byte-identical.
+func TestSafeStringPercentEncodedKeyNames(t *testing.T) {
+	t.Parallel()
+	const val = "LOGFIX-PCTKEY-51bc07"
+	cases := []string{
+		"%61uth_token=" + val,
+		"%61uth_token%3D" + val,
+		"%61uth_token%253D" + val,
+		"auth_token%3D" + val,
+		"auth%5Ftoken=" + val,
+		"%74oken=" + val,
+		"%74oken%3D" + val,
+		"%74oken%3A " + val,
+		"%70assword=" + val,
+	}
+	for _, in := range cases {
+		if got := SafeString(in); strings.Contains(got, val) {
+			t.Errorf("SafeString(%q) = %q, want fixture value absent", in, got)
+		}
+	}
+	if in := "%6Eext=/ok"; SafeString(in) != in {
+		t.Errorf("non-secret encoded key changed: SafeString(%q) = %q", in, SafeString(in))
+	}
+}
+
+// TestSafeStringEscapedQuoteJSON (loop 4, (b)/(d)): a JSON pair
+// inside a %q-escaped payload (GatewayError.Error() renders
+// its payload %q, so the pair appears as {\"token\": ...})
+// must be stripped like the unescaped form. The same scanner
+// handles both; the escaped form must not leak through the
+// error-string path.
+func TestSafeStringEscapedQuoteJSON(t *testing.T) {
+	t.Parallel()
+	const val = "LOGFIX-ESCQ-83af10"
+	cases := []string{
+		`conn: gateway status=500 payload="{\"token\": \"` + val + `\"}"`,
+		`conn: gateway status=500 payload="{\"token\": '` + val + `'}"`,
+		`{"tok\u0065n": \"` + val + `\"}`,
+		`payload="{\"token\": 987654321}"`,
+	}
+	for _, in := range cases {
+		got := SafeString(in)
+		if strings.Contains(got, val) || strings.Contains(got, "987654321") {
+			t.Errorf("SafeString(%q) = %q, want the secret value absent", in, got)
+		}
+		if !strings.Contains(got, "[redacted]") {
+			t.Errorf("SafeString(%q) = %q, want a [redacted] marker", in, got)
+		}
+	}
+	if in := `payload="{\"name\": \"Alice\"}"`; SafeString(in) != in {
+		t.Errorf("non-secret escaped JSON changed: SafeString(%q) = %q", in, SafeString(in))
+	}
+}
+
+// TestSafeStringIdempotentUserinfoURL (loop 4, (a)): SafeString
+// is idempotent even for a URL whose userinfo it already
+// redacted: the "[redacted]" marker's angle brackets make
+// url.Parse fail, and a second pass must keep the host, not
+// collapse the URL to [redacted-url]. (The Emit + sink
+// writer apply SafeString twice to every line.)
+func TestSafeStringIdempotentUserinfoURL(t *testing.T) {
+	t.Parallel()
+	in := "see https://user:s3cret@example.com/x?auth_token=tok123"
+	once := SafeString(in)
+	if !strings.Contains(once, "example.com") {
+		t.Fatalf("first pass %q, want the host to survive", once)
+	}
+	if strings.Contains(once, "s3cret") || strings.Contains(once, "tok123") {
+		t.Fatalf("first pass %q leaks fixture values", once)
+	}
+	twice := SafeString(once)
+	if once != twice {
+		t.Errorf("SafeString not idempotent for a userinfo URL:\n once: %q\ntwice: %q", once, twice)
 	}
 }

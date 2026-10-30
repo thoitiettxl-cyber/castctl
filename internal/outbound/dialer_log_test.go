@@ -28,8 +28,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 )
 
@@ -416,5 +420,62 @@ func TestDialerTLSSuccessSingleDialDone(t *testing.T) {
 		if n := strings.Count(got, want.marker); n != want.n {
 			t.Errorf("%s lines = %d, want %d:\n%s", want.marker, n, want.n, got)
 		}
+	}
+}
+
+// errOutbound is a fake adapter.Outbound that always fails the
+// dial with a caller-supplied error, so the dial_done line can
+// be driven with a server-body-carrying error. Method set
+// mirrors recordingOutbound in helpers_test.go.
+type errOutbound struct{ err error }
+
+var _ adapter.Outbound = (*errOutbound)(nil)
+
+func (f *errOutbound) Type() string           { return "fake" }
+func (f *errOutbound) Tag() string            { return "fake" }
+func (f *errOutbound) Network() []string      { return []string{N.NetworkTCP} }
+func (f *errOutbound) Dependencies() []string { return nil }
+
+func (f *errOutbound) DialContext(ctx context.Context, network string, dest M.Socksaddr) (net.Conn, error) {
+	return nil, f.err
+}
+
+func (f *errOutbound) ListenPacket(ctx context.Context, dest M.Socksaddr) (net.PacketConn, error) {
+	return nil, fmt.Errorf("fake: ListenPacket not implemented")
+}
+
+// TestDialDoneAboveTraceSummarizesGatewayError (loop 4, (d)):
+// a dial failure carrying a GatewayError (server body text)
+// must reach the debug dial_done line as status + class +
+// body length only — no body bytes at a level above trace.
+func TestDialDoneAboveTraceSummarizesGatewayError(t *testing.T) {
+	var buf bytes.Buffer
+	h, err := logging.NewFactory(context.Background(), logging.Settings{Level: "debug"}, &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	payload := "plain body words BODYFIX-9d2e41 with no secret label"
+	gwErr := &conn.GatewayError{Status: 500, Payload: payload}
+	d := NewDialerWithLogger(&errOutbound{err: gwErr}, nil, option.OutboundTLSOptions{}, h.Logger("outbound"))
+	_, err = d.DialContext(context.Background(), "tcp", "127.0.0.1", 1080)
+	if err == nil {
+		t.Fatal("DialContext = nil, want the fake GatewayError")
+	}
+	got := stripANSIForTest(buf.String())
+	var done string
+	for _, line := range strings.Split(strings.TrimRight(got, "\n"), "\n") {
+		if strings.Contains(line, "event=dial_done") {
+			done = line
+		}
+	}
+	if done == "" {
+		t.Fatalf("no dial_done line in capture %q", got)
+	}
+	if strings.Contains(done, "BODYFIX-9d2e41") || strings.Contains(done, "plain body words") {
+		t.Errorf("dial_done line %q carries server body bytes above trace", done)
+	}
+	if !strings.Contains(done, "status=500") || !strings.Contains(done, "body_length=52") {
+		t.Errorf("dial_done line %q, want status=500 and body_length=52 (status + class + length only)", done)
 	}
 }
