@@ -220,7 +220,9 @@ warning is printed telling the user to move it. Nothing is moved,
 copied, or deleted automatically. This applies only to the default
 location: an explicit `--config` or `CASTCTL_CONFIG` still wins.
 The legacy per-profile file layout inside the directory is a
-separate matter: it is refused, never read — run
+separate matter: profile loading refuses any layout containing
+a legacy per-profile file, for every profile name (see
+`docs/config.md` for the exact boundary) — run
 `castctl config migrate --write` first (see `docs/config.md`).
 
 Per-key relative paths inside a profile config: only `cookies_file`

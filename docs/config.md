@@ -7,8 +7,8 @@ via `os.UserConfigDir` semantics. When the `castctl` home does not
 exist but the pre-migration `muse-cli` home does, the old home is
 used with a one-line warning; nothing is moved or deleted (the
 directory fallback — the config *directory* only; see
-[Migration](#migration) for the per-profile file layout, which is
-refused, never read).
+[Migration](#migration) for the per-profile file layout, which
+profile loading refuses (only `config migrate` reads it)).
 
 ## Single-file schema
 
@@ -181,10 +181,17 @@ then, the only `dns` section is the interim global one above.
 
 ## Migration
 
-The legacy per-profile layout — flat `config.json` files
-(`config.json` at the config dir, `profiles/<name>/config.json`)
-— is **refused, never read**. Any command that loads a profile
-from an unmigrated layout exits 2 with:
+The legacy per-profile layout — flat `config.json` files in
+three shapes: `config.json` at the config dir (when no single
+file exists), `profiles/<name>/config.json` for any named
+profile, and `profiles/default/config.json` — is **refused by
+profile loading, never read** by it. The refusal is
+layout-wide: `LoadProfile` exits 2 for EVERY profile name,
+including a name with a single-file entry and a ghost name
+with no file of its own, whenever ANY legacy file exists
+anywhere in the layout — for example, a single file holding
+`default` plus a leftover `profiles/work/config.json` refuses
+even a load of `zzz`. The error is:
 
 ```
 profile: legacy layout found at "<path>"; run `castctl config migrate --write` first
@@ -195,6 +202,18 @@ path only — never file contents, cookie/token/key values, or
 identifiers. The old files are never deleted or modified by any
 command; they are the backup. Migrate itself is the only reader
 of legacy files, deliberately, through a migrate-only parser.
+
+On top of the `LoadProfile` refusal, the CLI's own guards
+refuse two more shapes: `profile show` for a name with no
+single-file entry, no own config file, and no profile
+directory exits 2 ("does not exist"), and `profile add`
+refuses when no single file exists and any legacy file is
+present, or when the added name's own legacy file exists
+(`profiles/default/config.json` counts as `default`'s own
+legacy file). Only when a name has no single-file entry AND
+no legacy file exists anywhere in the layout does
+`LoadProfile` synthesise defaults — a bare profile directory
+with no config file still synthesises.
 
 Procedure:
 
