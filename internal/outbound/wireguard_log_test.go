@@ -28,17 +28,67 @@ import (
 	"context"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	badoption "github.com/sagernet/sing/common/json/badoption"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 )
 
-func wgWiredManager(t *testing.T, buf *bytes.Buffer) *Manager {
+// syncCapture is a mutex-guarded capture buffer. Sing-box
+// device goroutines write through the factory writer
+// concurrently with the test's reads; a plain bytes.Buffer
+// races there (loop-2 verifier: DATA RACE in
+// safeWriter.Write vs Buffer.String under -race). Every
+// access here is serialised, so a read always sees a
+// consistent snapshot and -race stays clean.
+type syncCapture struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (c *syncCapture) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.Write(p)
+}
+
+func (c *syncCapture) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
+}
+
+// drainCapture waits until the capture is quiescent — two
+// successive snapshots 50ms apart identical — up to 2s, and
+// returns the final snapshot. Device goroutines emit
+// asynchronously after Start returns and after Close, so a
+// read taken immediately after Close can miss trailing
+// lines; quiescence (not a fixed sleep, and never an
+// unsynchronised read) is what makes the snapshot complete.
+func drainCapture(t *testing.T, c *syncCapture) string {
 	t.Helper()
-	h, err := logging.NewFactory(context.Background(), logging.Settings{Level: "trace"}, buf)
+	prev := c.String()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+		cur := c.String()
+		if cur == prev {
+			return cur
+		}
+		prev = cur
+	}
+	return c.String()
+}
+
+func wgWiredManager(t *testing.T) (*Manager, *logging.Handle, *syncCapture) {
+	t.Helper()
+	cap := &syncCapture{}
+	h, err := logging.NewFactory(context.Background(), logging.Settings{Level: "trace"}, cap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +102,7 @@ func wgWiredManager(t *testing.T, buf *bytes.Buffer) *Manager {
 	if err := m.CreateOutbound(context.Background(), out.Tag, out.Type, out.Options); err != nil {
 		t.Fatal(err)
 	}
-	return m
+	return m, h, cap
 }
 
 // TestWireGuardInvalidKeyErrorCarriesNoKey: an invalid private
@@ -61,8 +111,7 @@ func wgWiredManager(t *testing.T, buf *bytes.Buffer) *Manager {
 // must carry no key material — the decode error passes through
 // the manager's WrapErr boundary on its way out.
 func TestWireGuardInvalidKeyErrorCarriesNoKey(t *testing.T) {
-	var buf bytes.Buffer
-	m := wgWiredManager(t, &buf)
+	m, h, cap := wgWiredManager(t)
 	opts := &option.WireGuardEndpointOptions{
 		PrivateKey: "LOGFIX-WGPRIV-6e19d0",
 		Address: badoption.Listable[netip.Prefix]{
@@ -90,8 +139,23 @@ func TestWireGuardInvalidKeyErrorCarriesNoKey(t *testing.T) {
 	if strings.Contains(err.Error(), "LOGFIX-WGPRIV-6e19d0") {
 		t.Errorf("error contains the fixture private key: %v", err)
 	}
-	if strings.Contains(buf.String(), "LOGFIX-WGPRIV-6e19d0") {
-		t.Errorf("capture contains the fixture private key:\n%s", buf.String())
+	// The decode failure emits NOTHING through the factory
+	// (measured: capture length 0 after Close) — scanning an
+	// empty capture for the key would pass vacuously. A probe
+	// line through the same factory proves the capture is
+	// live, so the scan below examines real bytes; the decode
+	// assertions above (not the probe) are the evidence about
+	// the key rejection itself.
+	logging.Emit(h.Logger("castctl"), context.Background(), log.LevelInfo, "invalid-key-capture-probe")
+	got := drainCapture(t, cap)
+	if got == "" {
+		t.Fatal("capture empty after the probe line: positive control failed (suppression, not redaction)")
+	}
+	if !strings.Contains(got, "invalid-key-capture-probe") {
+		t.Errorf("capture %q, want the probe line (proves the capture path was exercised)", got)
+	}
+	if strings.Contains(got, "LOGFIX-WGPRIV-6e19d0") {
+		t.Errorf("capture contains the fixture private key:\n%s", got)
 	}
 }
 
@@ -103,8 +167,7 @@ func TestWireGuardInvalidKeyErrorCarriesNoKey(t *testing.T) {
 // rule. Keys here are freshly generated per test run, never
 // fixtures and never secrets.
 func TestWireGuardDeviceLinesCarryNoFullKey(t *testing.T) {
-	var buf bytes.Buffer
-	m := wgWiredManager(t, &buf)
+	m, _, cap := wgWiredManager(t)
 	priv := generateWGKey(t)
 	pub := generateWGKey(t)
 	opts := &option.WireGuardEndpointOptions{
@@ -131,7 +194,7 @@ func TestWireGuardDeviceLinesCarryNoFullKey(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	_ = m.Close()
-	got := buf.String()
+	got := drainCapture(t, cap)
 	if got == "" {
 		t.Fatal("capture empty: the device lines never reached the factory (positive control failed)")
 	}
