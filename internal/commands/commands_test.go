@@ -332,6 +332,10 @@ func TestConfigLocationXDGEdgeCases(t *testing.T) {
 
 func TestTypedAuthErrors(t *testing.T) {
 	// Auth-check failure (401) -> typed JSON, exit 2, never 0.
+	// The configs here carry NO log block and no --log-level
+	// flag is given, so logging is OFF (Boss decision, loop 3)
+	// and stderr carries only the typed JSON: whole-stderr
+	// parsing applies (see wholeStderrJSON).
 	auth := &gatewaytest.CannedAuth{VMID: "vm-test", AccessToken: "AT", HatchToken: "HT", AuthCheckStatus: 401}
 	server, err := gatewaytest.NewServer(gatewaytest.JSONHandler(200, []byte(`{"ok":true,"result":{}}`)))
 	if err != nil {
@@ -353,7 +357,7 @@ func TestTypedAuthErrors(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("auth-check 401: code=%d, want 2 (out=%q err=%q)", code, out.String(), errb.String())
 	}
-	typed := lastStderrJSON(t, errb)
+	typed := wholeStderrJSON(t, errb)
 	if typed["type"] != "auth_check_failed" {
 		t.Errorf("type=%q, want auth_check_failed", typed["type"])
 	}
@@ -374,7 +378,7 @@ func TestTypedAuthErrors(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("missing cookies: code=%d, want 2", code)
 	}
-	typed = lastStderrJSON(t, errb)
+	typed = wholeStderrJSON(t, errb)
 	if typed["type"] != "cookies_missing" {
 		t.Errorf("missing cookies: type=%v err=%q", typed, errb.String())
 	}
@@ -393,21 +397,84 @@ func TestTypedAuthErrors(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("no vm_id: code=%d, want 2 (err=%q)", code, errb.String())
 	}
-	typed = lastStderrJSON(t, errb)
+	typed = wholeStderrJSON(t, errb)
 	if typed["type"] != "session_unavailable" {
 		t.Errorf("no vm_id: type=%v err=%q", typed, errb.String())
 	}
 }
 
+// wholeStderrJSON parses the WHOLE stderr buffer as the typed
+// JSON error. This is the logging-OFF contract (Boss decision,
+// loop 3): when the config has NO log block and no --log-level
+// flag was given, logging is off and stderr carries ONLY the
+// typed JSON, as before the log block existed. A test that
+// parses whole stderr while logging is on, or last-line while
+// logging is off, is a defect: the two cases are pinned
+// separately (see TestTypedJSONLastLineWhenStderrLogging).
+func wholeStderrJSON(t *testing.T, errb *bytes.Buffer) map[string]string {
+	t.Helper()
+	if errb.Len() == 0 {
+		t.Fatal("stderr empty, want the typed JSON error")
+	}
+	var typed map[string]string
+	if err := json.Unmarshal(errb.Bytes(), &typed); err != nil {
+		t.Fatalf("whole stderr is not typed JSON: %q: %v", errb.String(), err)
+	}
+	return typed
+}
+
+// TestTypedJSONLastLineWhenStderrLogging: when a log block
+// EXISTS with stderr output, log lines precede the error on
+// stderr and the typed JSON is the LAST line, intact —
+// documented in docs/config.md. Whole-stderr parsing must
+// FAIL here (log lines are present), and last-line parsing
+// must succeed: the two contracts are distinguished, not
+// conflated.
+func TestTypedJSONLastLineWhenStderrLogging(t *testing.T) {
+	auth := &gatewaytest.CannedAuth{VMID: "vm-test", AccessToken: "AT", HatchToken: "HT", AuthCheckStatus: 401}
+	server, err := gatewaytest.NewServer(gatewaytest.JSONHandler(200, []byte(`{"ok":true,"result":{}}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close() }()
+	dialer := gatewaytest.NewFakeDialer(server, auth)
+	_, configFile := testHome(t, `{"default_profile":"default","profiles":{"default":{}},"log":{"level":"trace","output":"stderr"}}`)
+	out, errb := &bytes.Buffer{}, &bytes.Buffer{}
+	env := &Env{
+		Stdout: out, Stderr: errb,
+		Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile}),
+		NewConnector: func(d gateway.OutboundDialer, opts ...gateway.ConnectorOption) conn.Connector {
+			return gateway.NewConnector(dialer, gateway.WithWebSocketSecure(false))
+		},
+		HTTPClient: func() *http.Client { return dialer.HTTPClient() },
+	}
+	code := Run(context.Background(), []string{"status"}, env)
+	if code != 2 {
+		t.Fatalf("auth-check 401 with stderr logging: code=%d, want 2 (out=%q err=%q)", code, out.String(), errb.String())
+	}
+	lines := strings.Split(strings.TrimRight(errb.String(), "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("stderr has %d line(s), want log lines before the typed JSON: %q", len(lines), errb.String())
+	}
+	var whole map[string]string
+	if err := json.Unmarshal(errb.Bytes(), &whole); err == nil {
+		t.Errorf("whole stderr parses as JSON %v, want log lines to precede the typed JSON: %q", whole, errb.String())
+	}
+	typed := lastStderrJSON(t, errb)
+	if typed["type"] != "auth_check_failed" {
+		t.Errorf("type=%q, want auth_check_failed", typed["type"])
+	}
+	if strings.Contains(errb.String(), "FAKE") {
+		t.Errorf("stderr leaked a cookie value: %q", errb.String())
+	}
+}
+
 // lastStderrJSON parses the LAST line of a stderr buffer as the
-// typed JSON error. Stderr is a log stream at the sing-box
-// default level (trace): debug dns_source/outbound_chain events
-// precede the error on stderr. The typed JSON is the last line,
-// intact — that is the contract consumers can rely on. (With
-// the old warn default the log lines were suppressed and
-// whole-stderr parsing happened to work; Correction #2's
-// sing-box-identical defaults changed that premise. See the
-// loop-2 report.)
+// typed JSON error. It applies ONLY when logging is on with
+// stderr output (a log block exists, or --log-level was given):
+// log lines precede the error, and the typed JSON stays the
+// last line, intact. When logging is off, stderr carries only
+// the JSON and wholeStderrJSON applies instead.
 func lastStderrJSON(t *testing.T, errb *bytes.Buffer) map[string]string {
 	t.Helper()
 	lines := strings.Split(strings.TrimRight(errb.String(), "\n"), "\n")

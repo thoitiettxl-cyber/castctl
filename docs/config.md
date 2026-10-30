@@ -58,14 +58,25 @@ directory with no config file is *not* a legacy layout.
 ## The `log` section
 
 The top-level `log` block configures castctl's logging, following
-sing-box's `LogOptions` semantics exactly (see `docs/provenance.md` §1 for
-the upstream citations). One resolved level governs every
-emission — sing-box's own logs and castctl's own events — through
-a single factory. The block is optional; all four fields are
-optional. An absent block, or an absent field, means the
-sing-box default below: castctl imposes no default of its own,
-and there is no hardcoded default log path — the user sets
-`output` freely, or leaves it empty for stderr.
+sing-box's `LogOptions` semantics exactly WHEN THE BLOCK IS
+PRESENT (see `docs/provenance.md` §1 for the upstream
+citations). One resolved level governs every emission —
+sing-box's own logs and castctl's own events — through a single
+factory. The block is optional; all four fields are optional.
+An absent field means the sing-box default below. An absent
+BLOCK is different: see the off-gate rule below. There is no
+hardcoded default log path — the user sets `output` freely, or
+leaves it empty for stderr.
+
+**Off-gate (castctl rule on top of sing-box defaults, Boss
+decision 2026-10-30):** when the config has NO `log` block AND
+no `--log-level` flag was given, logging is OFF: stderr carries
+only the typed JSON error, exactly as before the `log` block
+existed, and no log file is written. A present block — including
+an empty `{}` block — turns logging ON at sing-box defaults
+(level `trace`, output stderr). `--log-level` with no block
+also turns logging ON, at that level with stderr output. A
+block with `"disabled": true` stays off even with `--log-level`.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
@@ -74,10 +85,19 @@ and there is no hardcoded default log path — the user sets
 | `output` | string | `""` (stderr) | `""` or `"stderr"` writes to stderr; `"stdout"` writes to stdout; any other string is a file path, opened for append. |
 | `timestamp` | bool | `false` | Timestamp format, sing-box style: console output carries a full timestamp when `true` and a relative elapsed-seconds prefix when `false`; file output carries no timestamp when `false` and a full timestamp when `true`. |
 
-Precedence: the `--log-level LEVEL` global CLI flag beats the
-config block, which beats the sing-box default (`trace`). An invalid
-`--log-level` value exits 2 and never echoes the value. There is
-no `--verbose`/`--debug` flag.
+Precedence, when logging is on: the `--log-level LEVEL` global
+CLI flag beats the config block, which beats the sing-box
+default (`trace`). An invalid `--log-level` value exits 2 and
+never echoes the value. There is no `--verbose`/`--debug` flag.
+
+**Typed JSON on stderr:** error output is one JSON line
+(`{"type": ..., "error": ...}`) written after every log line.
+When logging is OFF (no block, no flag) it is the only stderr
+line, so whole-stderr JSON parsing works. When logging is ON
+with stderr output, log lines precede it and the JSON stays the
+LAST stderr line, intact — that last-line rule is the contract
+consumers can rely on in that case. When log output is a file,
+stderr carries only the JSON.
 
 File output: castctl owns log-file creation — files are created
 with mode `0600` and appended to (never truncated); a
@@ -89,12 +109,15 @@ sing-box's default (coloured level labels on a terminal); there
 is no `disable_color` field in the schema.
 
 The only path guard: the factory refuses (exit 2, before
-opening) a log output whose resolved path equals castctl's own
-config file or any of its cookies files — including through a
-symlinked alias, since the comparison is on resolved paths.
-There are no other path restrictions: symlinks to other targets
-and non-regular files are not refused. A refused output is a
-startup error; the protected file is left untouched.
+opening, and re-checked after opening) a log output whose file
+IDENTITY equals castctl's own config file or any of its cookies
+files — identity means the symlink-resolved location and the
+file's dev/ino, so hardlinks and symlinks to not-yet-existing
+targets are refused too. There are no other path restrictions:
+symlinks to other targets and non-regular files are not
+refused. A refused output is a startup error; the protected
+file is left untouched, and a file the factory did not create
+is never chmodded.
 
 Secrets: log lines never carry cookies, tokens, URLs with query
 credentials, WireGuard keys, or header values. Secret-bearing

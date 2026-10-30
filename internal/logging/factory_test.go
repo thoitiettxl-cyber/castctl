@@ -754,3 +754,25 @@ func TestFactoryRefusedPathsByIdentity(t *testing.T) {
 	}
 	refusedOutput("symlink-existing-config", alias)
 }
+
+// TestFactoryInvalidLevelNeverEchoes: a bogus level handed to
+// the factory (programmatic construction; the production paths
+// validate first) must fail with a FIXED message that never
+// echoes the supplied value — sing-box's ParseLevel error
+// embeds the value verbatim ("unknown log level: <value>",
+// log/level.go:57), and a pasted secret must never surface
+// through it.
+func TestFactoryInvalidLevelNeverEchoes(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	_, err := NewFactory(context.Background(), Settings{Level: "LOGFIX-LEVEL-9d2e41"}, &buf)
+	if err == nil {
+		t.Fatal("NewFactory(bogus level) = nil, want error")
+	}
+	if strings.Contains(err.Error(), "LOGFIX-LEVEL-9d2e41") {
+		t.Errorf("factory error %q echoes the supplied level value", err.Error())
+	}
+	if !strings.Contains(err.Error(), "unknown log level") {
+		t.Errorf("factory error %q, want the fixed unknown-level message", err.Error())
+	}
+}

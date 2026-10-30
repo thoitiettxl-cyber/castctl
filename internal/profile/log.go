@@ -18,7 +18,7 @@ package profile
 //
 // Defaults are IDENTICAL to sing-box's (github.com/sagernet/
 // sing-box v1.14.4, verified from module source; no default is
-// imposed by castctl):
+// imposed by castctl) WHEN A LOG BLOCK IS PRESENT:
 //
 //   - Level: empty means trace (log/log.go:67-69: an empty
 //     level SetLevels LevelTrace; a set level goes through
@@ -46,6 +46,17 @@ package profile
 //     (json:"-", option/options.go:75); it is NOT a config key and
 //     is rejected as unknown. Console colour follows sing-box's
 //     default (colours on for console, plain for files).
+//
+// CASTCTL GATE (Boss decision 2026-10-30, superseding the
+// loop-2 last-line narrowing): when the config has NO log
+// block AND no --log-level flag was given, logging is OFF
+// (Disabled true) — stderr carries only the typed JSON error,
+// as before the log block existed. This gate sits ON TOP of
+// sing-box defaults: sing-box alone would log at trace. A
+// present block — INCLUDING an empty {} block — follows
+// sing-box defaults exactly, and --log-level with no block
+// turns logging ON at that level (output stderr). Presence
+// is the nil/non-nil Log pointer; parse preserves it.
 //
 // Resolution is pure (ResolveProfileDNS is the pattern): it reads
 // only its inputs, never the filesystem, never mutates. Precedence
@@ -137,19 +148,26 @@ func parseLogBlock(v any) (*LogConfig, error) {
 }
 
 // ResolveLogSettings returns the effective log settings for one
-// invocation: CLI override > config block > sing-box defaults
-// (level trace, output "" = stderr, timestamp false, disabled
-// false). cliLevel is honoured only when cliSet is true; a
-// set-but-empty CLI level is an error (an empty level must never
-// mean "no filtering"). A "warning" level (CLI or config)
-// normalises to "warn". An unset Output stays "": the factory
-// treats "" as stderr, exactly as sing-box does. No resolved
-// value is ever echoed in an error: an invalid level reports
-// the fixed expected list only, exactly like the --log-level
-// CLI path.
+// invocation. The castctl gate (see the file header) comes
+// first: an ABSENT log block with no CLI flag means logging
+// OFF (Disabled true), regardless of sing-box's trace default.
+// A PRESENT block (including an empty {} block) follows
+// sing-box defaults (level trace, output "" = stderr,
+// timestamp false, disabled false). Precedence is CLI >
+// config block > sing-box default. cliLevel is honoured only
+// when cliSet is true; a set-but-empty CLI level is an error
+// (an empty level must never mean "no filtering"). A CLI flag
+// turns logging ON when no block exists, but never clears a
+// present block's disabled:true. A "warning" level (CLI or
+// config) normalises to "warn". An unset Output stays "": the
+// factory treats "" as stderr, exactly as sing-box does. No
+// resolved value is ever echoed in an error: an invalid level
+// reports the fixed expected list only, exactly like the
+// --log-level CLI path.
 func ResolveLogSettings(single *SingleConfig, cliLevel string, cliSet bool) (LogConfig, error) {
-	out := LogConfig{Level: "trace"}
-	if single != nil && single.Log != nil {
+	blockPresent := single != nil && single.Log != nil
+	out := LogConfig{Disabled: !blockPresent, Level: "trace"}
+	if blockPresent {
 		out = *single.Log
 		if out.Level == "" {
 			out.Level = "trace"
@@ -160,6 +178,9 @@ func ResolveLogSettings(single *SingleConfig, cliLevel string, cliSet bool) (Log
 			return LogConfig{}, newConfigError("invalid --log-level value")
 		}
 		out.Level = cliLevel
+		if !blockPresent {
+			out.Disabled = false
+		}
 	}
 	if out.Level == "warning" {
 		out.Level = "warn"

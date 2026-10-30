@@ -611,3 +611,65 @@ func TestRuntimeLogRefusedPaths(t *testing.T) {
 		})
 	}
 }
+
+// TestRuntimeLoggingOffByDefault: a config with NO log block and
+// no --log-level flag emits NOTHING on stderr (Boss decision,
+// loop 3: the castctl off-gate), while the lookup still
+// succeeds — proving silence is the gate, not a broken lookup.
+func TestRuntimeLoggingOffByDefault(t *testing.T) {
+	srv := startFakeDNSServerCmd(t)
+	rt, _, errb := loggedRuntime(t, srv, dnsConfigJSONNoLog(srv.port, "", ""), nil)
+	lookupGatewayTest(t, rt)
+	_ = rt.Close()
+	if srv.queryCount() == 0 {
+		t.Fatal("fake DNS server saw no queries; the lookup did not run")
+	}
+	if errb.Len() != 0 {
+		t.Errorf("stderr %q, want empty when no log block and no --log-level flag", errb.String())
+	}
+}
+
+// TestRuntimeEmptyLogBlockTurnsLoggingOn: an empty {} log block
+// is PRESENT, so sing-box defaults apply (trace/stderr) and the
+// dns_source event appears — the absent-vs-present-empty
+// distinction, end to end.
+func TestRuntimeEmptyLogBlockTurnsLoggingOn(t *testing.T) {
+	srv := startFakeDNSServerCmd(t)
+	rt, _, errb := loggedRuntime(t, srv, dnsConfigJSON(srv.port, `{}`, "", ""), nil)
+	lookupGatewayTest(t, rt)
+	_ = rt.Close()
+	if !strings.Contains(stripANSICmd(errb.String()), "event=dns_source") {
+		t.Errorf("empty-block capture %q, want the dns_source event visible", errb.String())
+	}
+}
+
+// TestRuntimeCLILevelTurnsLoggingOnWhenAbsent: --log-level with
+// no log block turns logging ON at that level (output stderr
+// per the sing-box empty-output default).
+func TestRuntimeCLILevelTurnsLoggingOnWhenAbsent(t *testing.T) {
+	srv := startFakeDNSServerCmd(t)
+	env := &Env{LogLevelOverride: "trace", LogLevelSet: true}
+	rt, _, errb := loggedRuntime(t, srv, dnsConfigJSONNoLog(srv.port, "", ""), env)
+	lookupGatewayTest(t, rt)
+	_ = rt.Close()
+	if !strings.Contains(stripANSICmd(errb.String()), "event=dns_source") {
+		t.Errorf("CLI-trace capture %q, want the dns_source event visible", errb.String())
+	}
+}
+
+// dnsConfigJSONNoLog is dnsConfigJSON without the log block:
+// the off-gate case. The DNS detour/comment contract is the
+// same as dnsConfigJSON's.
+func dnsConfigJSONNoLog(port int, extraProfiles string, outbounds string) string {
+	dnsBlock := fmt.Sprintf(`{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":%d,"detour":"castctl-direct:default"}],"final":"dns1"}`, port)
+	profiles := `{"default":{"dns":` + dnsBlock + `}}`
+	if extraProfiles != "" {
+		profiles = `{"default":{"dns":` + dnsBlock + `},` + extraProfiles + `}`
+	}
+	cfg := `{"profiles":` + profiles
+	if outbounds != "" {
+		cfg += `,"outbounds":` + outbounds
+	}
+	cfg += `}`
+	return cfg
+}

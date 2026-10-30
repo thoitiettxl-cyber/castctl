@@ -121,7 +121,14 @@ func NewFactory(ctx context.Context, s Settings, stderr io.Writer) (*Handle, err
 	}
 	level, err := singlog.ParseLevel(levelName)
 	if err != nil {
-		return nil, err
+		// Never echo the supplied level: sing-box's
+		// ParseLevel error embeds it verbatim ("unknown log
+		// level: <value>", log/level.go:57), and a pasted
+		// secret must never surface through it. The
+		// production paths validate first, so this fires
+		// only for programmatic construction — the fixed
+		// message is the whole contract.
+		return nil, errors.New("logging: unknown log level (expected trace, debug, info, warn, warning, error, fatal, or panic)")
 	}
 	var writer io.Writer
 	var file *os.File

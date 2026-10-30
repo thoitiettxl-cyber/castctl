@@ -10,10 +10,12 @@ package profile
 // buildSingleFileOrdered / cloneSingleConfig behaviour for a `log`
 // block. What the red run catches: the block rejected as an unknown
 // top-level key (config.go singleTopLevelKeys has no "log" entry),
-// defaults not applied (absent block must mean sing-box's
-// empty-level-means-trace and empty-output-means-stderr), CLI
-// precedence inverted, and config migrate silently dropping the
-// block (clone/render field-by-field carriers).
+// the off-gate missed (an absent block with no --log-level flag
+// must mean logging OFF, not sing-box's trace default), the
+// absent-vs-present-empty distinction lost (an empty {} block
+// turns logging ON at sing-box defaults), CLI precedence
+// inverted, and config migrate silently dropping the block
+// (clone/render field-by-field carriers).
 
 import (
 	"encoding/json"
@@ -133,8 +135,10 @@ func TestResolveLogSettings(t *testing.T) {
 		want    LogConfig
 		wantErr bool
 	}{
-		{"absent block", nil, "", false, LogConfig{Disabled: false, Level: "trace", Output: "", Timestamp: false}, false},
-		{"absent block, nil single", nilSingle(), "", false, LogConfig{Disabled: false, Level: "trace", Output: "", Timestamp: false}, false},
+		{"absent block", nil, "", false, LogConfig{Disabled: true, Level: "trace", Output: "", Timestamp: false}, false},
+		{"absent block, nil single", nilSingle(), "", false, LogConfig{Disabled: true, Level: "trace", Output: "", Timestamp: false}, false},
+		{"empty block present turns logging on", configWithLog(LogConfig{}), "", false, LogConfig{Disabled: false, Level: "trace", Output: "", Timestamp: false}, false},
+		{"explicit disabled:false block", configWithLog(LogConfig{Disabled: false}), "", false, LogConfig{Disabled: false, Level: "trace", Output: "", Timestamp: false}, false},
 		{"config level", configWithLog(LogConfig{Level: "debug", Output: "stderr"}), "", false, LogConfig{Level: "debug", Output: "stderr"}, false},
 		{"warning alias normalises", configWithLog(LogConfig{Level: "warning"}), "", false, LogConfig{Level: "warn", Output: ""}, false},
 		{"CLI beats config upward", configWithLog(LogConfig{Level: "error"}), "trace", true, LogConfig{Level: "trace", Output: ""}, false},
@@ -174,6 +178,53 @@ func nilSingle() *SingleConfig { return nil }
 
 func configWithLog(l LogConfig) *SingleConfig {
 	return &SingleConfig{Profiles: map[string]*Profile{}, Log: &l}
+}
+
+// TestLogBlockEmptyObjectPresent: an empty {} log block is
+// PRESENT, distinct from an absent block. Parse keeps it
+// non-nil, and resolution turns logging ON at sing-box
+// defaults — the absent-vs-present-empty distinction the
+// off-gate depends on.
+func TestLogBlockEmptyObjectPresent(t *testing.T) {
+	t.Parallel()
+	cfg := logJSON(t, `{}`)
+	if cfg.Log == nil {
+		t.Fatal("Log is nil for an empty {} block; want non-nil (presence matters)")
+	}
+	if *cfg.Log != (LogConfig{}) {
+		t.Errorf("Log = %+v; want the zero block", *cfg.Log)
+	}
+	resolved, err := ResolveLogSettings(cfg, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Disabled {
+		t.Errorf("ResolveLogSettings(empty block) = %+v, want logging ON (Disabled false)", resolved)
+	}
+	if resolved.Level != "trace" {
+		t.Errorf("ResolveLogSettings(empty block) level = %q, want trace (sing-box default)", resolved.Level)
+	}
+	// Absent block, same call shape: logging OFF.
+	absent := logJSONAbsent(t)
+	resolved, err = ResolveLogSettings(absent, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resolved.Disabled {
+		t.Errorf("ResolveLogSettings(absent block) = %+v, want logging OFF (Disabled true)", resolved)
+	}
+}
+
+func logJSONAbsent(t *testing.T) *SingleConfig {
+	t.Helper()
+	cfg, err := ParseSingleConfig([]byte(`{"profiles":{"default":{}}}`), "/base")
+	if err != nil {
+		t.Fatalf("ParseSingleConfig(absent log) = %v", err)
+	}
+	if cfg.Log != nil {
+		t.Fatalf("Log = %+v for an absent block; want nil", *cfg.Log)
+	}
+	return cfg
 }
 
 // TestLogBlockSaveRoundTrip: a config WITH a log block keeps it

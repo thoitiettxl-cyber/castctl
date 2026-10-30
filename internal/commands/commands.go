@@ -787,6 +787,13 @@ func runInner(ctx context.Context, args []string, env *Env) int {
 		if errors.Is(err, errHelpShown) {
 			return 0
 		}
+		// Typed-JSON ordering contract (docs/config.md): the
+		// error text is written to stderr AFTER every log
+		// line, so when logging is ON with stderr output the
+		// typed JSON is the LAST stderr line, intact; when
+		// logging is OFF (no log block, no --log-level flag)
+		// it is the ONLY stderr line. Nothing may write to
+		// stderr after this point in the error path.
 		code, text := classifyError(err)
 		if text != "" {
 			fmt.Fprintln(env.stderr(), text)

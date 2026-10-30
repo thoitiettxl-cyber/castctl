@@ -190,12 +190,18 @@ func defaultBuildRuntime(ctx context.Context, loc *profile.ConfigLocation, prof 
 		return nil, err
 	}
 
-	// Logging: resolve the level once (CLI override > config >
-	// warn) and build the single factory that governs every
-	// emission below — sing-box's and castctl's. The factory is
-	// closed last (prepended to closeFuncs, which run in
-	// reverse order), so log lines emitted during shutdown of
-	// the other components are not lost.
+	// Logging: resolve the settings once and build the single
+	// factory that governs every emission below — sing-box's
+	// and castctl's. Resolution is CLI > config > sing-box
+	// default WHEN LOGGING IS ON; when the config has no log
+	// block and no --log-level flag was given, logging is OFF
+	// (the castctl off-gate in profile.ResolveLogSettings) and
+	// stderr carries only the typed JSON error. A present
+	// block — including an empty {} block — follows sing-box
+	// defaults exactly. The factory is closed last (prepended
+	// to closeFuncs, which run in reverse order), so log lines
+	// emitted during shutdown of the other components are not
+	// lost.
 	var cliLevel string
 	var cliSet bool
 	var stderrWriter io.Writer
@@ -211,8 +217,8 @@ func defaultBuildRuntime(ctx context.Context, loc *profile.ConfigLocation, prof 
 	// is the user's file path, used verbatim. The factory
 	// refuses to open the config file or any cookies file as
 	// the log output — the ONLY path guard (minimal A7 check);
-	// refused paths are compared on resolved/canonical form
-	// by the factory.
+	// the factory compares FILE IDENTITY (resolved path and
+	// dev/ino, re-checked after open), not path strings.
 	logHandle, err := logging.NewFactory(ctx, logging.Settings{
 		Disabled:  settings.Disabled,
 		Level:     settings.Level,
