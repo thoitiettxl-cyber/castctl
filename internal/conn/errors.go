@@ -19,9 +19,18 @@ import (
 // transport error type, or the pass-through contract breaks.
 //
 // This mirrors Python's gateway.AuthError.
+//
+// Loop 5 (allowlist rule): Message is an allowlist summary ONLY
+// (endpoint, status, body length, content-type, parsed enum
+// fields) — never server body bytes. Producers construct it
+// through the gateway's allowlist summary; Error() renders it
+// verbatim, and every output rendering (classifyError, logs)
+// uses LogSummary instead, so even a Message built elsewhere
+// cannot leak body bytes through an output path.
 type AuthError struct {
 	// Message is the human-readable cause. It must not contain a
-	// cookie, token, or auth-bearing URL.
+	// cookie, token, or auth-bearing URL — and, under the
+	// loop-5 allowlist rule, no server body bytes either.
 	Message string
 }
 
@@ -36,16 +45,16 @@ func (e *AuthError) Error() string {
 	return "conn: " + e.Message
 }
 
-// LogSummary renders the error for log lines ABOVE trace: the
-// error class plus the length of the message carried by the
-// error, and no message bytes at all. AuthError carries no
-// separate status field or body-length field (its message
-// embeds the endpoint and status in prose), so the summary
-// carries the class and the message length; the full redacted
-// message is available only at trace (see logging's
-// SafeErrForLevel). This satisfies the logging.LogSummary
-// interface structurally — logging must not import conn
-// (conn imports logging), so no shared interface type exists.
+// LogSummary renders the error for log lines at EVERY level
+// including trace (loop-5 ruling: no body bytes at trace
+// either): the error class plus the length of the message
+// carried by the error, and no message bytes at all.
+// AuthError carries no separate status field or body-length
+// field (its message embeds the endpoint and status in prose),
+// so the summary carries the class and the message length.
+// This satisfies the logging.LogSummary interface
+// structurally — logging must not import conn (conn imports
+// logging), so no shared interface type exists.
 func (e *AuthError) LogSummary() string {
 	if e == nil {
 		return "conn: auth_failed message_length=0"
@@ -56,33 +65,115 @@ func (e *AuthError) LogSummary() string {
 // GatewayError reports a server-side failure: a non-2xx status, a
 // stream reset, a non-JSON or {"ok":false} response. Status is the
 // HTTP-like status, or -1 when there is none (reset, non-JSON).
-// Payload is the server payload, truncated by the gateway to 500
-// bytes before construction (Python: payload[:500]); it must never
-// contain a credential.
 //
-// This mirrors Python's gateway.GatewayError(status, payload).
+// Loop 5 (allowlist rule): Payload is an allowlist SUMMARY
+// string only (class label, body length, content-type, parsed
+// enum fields) — never raw server body bytes. Producers build
+// it through the gateway's allowlist summary. Payload is
+// internal state: it is NEVER rendered. The only renderings
+// are Error() and LogSummary(), both allowlist summaries.
+// BodyLength is the wire byte length of the body summarized,
+// when the producer knows it; 0 means unknown and renderers
+// fall back to len(Payload). ContentType is the validated
+// media type (parameters stripped) when known, "" when not.
+// ErrorCode is a validated short error enum parsed by key
+// from a known response schema, "" when none was extracted.
+// ContentType/ErrorCode are validated AGAIN at render time:
+// a value that fails the allowlist shape is omitted, so a
+// hand-built struct cannot smuggle body text into a rendering.
+//
+// This mirrors Python's gateway.GatewayError(status, payload);
+// Python parity on the raw payload bytes is EXPLICITLY WAIVED
+// by the loop-5 ruling (only the bytes are removed — the
+// status, the error kind, and retry semantics are unchanged).
 type GatewayError struct {
-	Status  int
-	Payload string
+	Status      int
+	Payload     string
+	BodyLength  int
+	ContentType string
+	ErrorCode   string
+}
+
+// bodyLength is the length renderers report: the known wire
+// length when the producer recorded one, else the stored
+// summary length (the pre-loop-5 behaviour for direct
+// constructions, which set Payload to the body itself).
+func (e *GatewayError) bodyLength() int {
+	if e.BodyLength > 0 {
+		return e.BodyLength
+	}
+	return len(e.Payload)
+}
+
+// isAllowlistEnum reports whether s is an emittable enum
+// value: 1-64 runes of letters, digits, underscore, dot, or
+// hyphen — the same shape the gateway's allowlist extraction
+// enforces at construction (see internal/gateway/summary.go).
+func isAllowlistEnum(s string) bool {
+	n := 0
+	for _, r := range s {
+		n++
+		if n > 64 {
+			return false
+		}
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '.' || r == '-') {
+			return false
+		}
+	}
+	return n > 0
+}
+
+// isAllowlistContentType reports whether s is an emittable
+// media type: type/subtype, each 1-64 token characters, no
+// parameters, no whitespace, no controls.
+func isAllowlistContentType(s string) bool {
+	slash := -1
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '/' {
+			if slash >= 0 {
+				return false
+			}
+			slash = i
+			continue
+		}
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '!' || c == '#' || c == '$' || c == '&' || c == '^' || c == '_' || c == '.' || c == '+' || c == '-' || c == '|' || c == '~') {
+			return false
+		}
+	}
+	if slash <= 0 || slash >= len(s)-1 || len(s) > 129 {
+		return false
+	}
+	return true
 }
 
 func (e *GatewayError) Error() string {
-	return fmt.Sprintf("conn: gateway status=%d payload=%q", e.Status, e.Payload)
+	if e == nil {
+		return "conn: gateway status=0 body_length=0"
+	}
+	out := fmt.Sprintf("conn: gateway status=%d body_length=%d", e.Status, e.bodyLength())
+	if isAllowlistContentType(e.ContentType) {
+		out += " content_type=" + e.ContentType
+	}
+	if isAllowlistEnum(e.ErrorCode) {
+		out += " error=" + e.ErrorCode
+	}
+	return out
 }
 
-// LogSummary renders the error for log lines ABOVE trace: the
-// status code, the error class, and the length of the payload
-// carried by the error (the redacted, truncated payload — the
-// error types retain no wire length), and no payload bytes at
-// all. The full redacted payload is available only at trace
-// (see logging's SafeErrForLevel). This satisfies the
-// logging.LogSummary interface structurally; see AuthError's
-// LogSummary for why no shared interface type exists.
+// LogSummary renders the error for log lines at EVERY level
+// including trace (loop-5 ruling): the status code, the error
+// class, the body length, and the validated content-type /
+// error-enum fields when present — and no payload bytes at
+// all. It is identical to Error() by construction: both are
+// the allowlist summary. This satisfies the logging.LogSummary
+// interface structurally; see AuthError's LogSummary for why
+// no shared interface type exists.
 func (e *GatewayError) LogSummary() string {
 	if e == nil {
 		return "conn: gateway status=0 body_length=0"
 	}
-	return fmt.Sprintf("conn: gateway status=%d body_length=%d", e.Status, len(e.Payload))
+	return e.Error()
 }
 
 // ConnectionDown reports that the connection was already down when a

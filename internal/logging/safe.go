@@ -61,8 +61,13 @@ var reURL = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"']+`)
 // keys in JSON forms (double- and single-quoted). It covers
 // snake_case and camelCase spellings alike: a server that
 // answers {"privateKey": ...} is the same leak as one that
-// answers {"private_key": ...}.
-const secretKeyVocab = `password|token|secret|private_key|public_key|privateKey|publicKey|cookie|auth|vm_id|node_id|credential|passwd|apiKey|secretKey|sessionKey|clientSecret`
+// answers {"private_key": ...}. The loop-5 listed vocabulary
+// is included verbatim (session_key, api_key, access_key,
+// preshared_key, pre_shared_key, private-key, bearer,
+// x-api-key, session, hatch_sess, datr); any snake_case key
+// ending in _key is covered separately by
+// hasSnakeKeySuffix, not by this list.
+const secretKeyVocab = `password|token|secret|private_key|public_key|privateKey|publicKey|cookie|auth|vm_id|node_id|credential|passwd|apiKey|secretKey|sessionKey|clientSecret|api_key|session_key|access_key|preshared_key|pre_shared_key|private-key|bearer|x-api-key|session|hatch_sess|datr`
 
 // redactJSONSecrets is the ONE mechanism that strips
 // secret-keyed JSON values in free-form text, for every
@@ -93,6 +98,33 @@ const secretKeyVocab = `password|token|secret|private_key|public_key|privateKey|
 // — the scanner recurses into it, so nested secret pairs
 // inside it are still stripped.
 var reSecretKeyVocab = regexp.MustCompile(`(?i)(?:` + secretKeyVocab + `)`)
+
+// hasSnakeKeySuffix reports whether key is a snake_case key
+// ending in _key (loop-5 listed vocabulary, the *_key form):
+// lower-cased, letters/digits/underscores only, at least one
+// character before the final _key. "encryption_key" and
+// "signing_key" match; "monkey", "key", and camelCase
+// "myKey" do not.
+func hasSnakeKeySuffix(key string) bool {
+	lower := strings.ToLower(key)
+	if len(lower) <= 4 || !strings.HasSuffix(lower, "_key") {
+		return false
+	}
+	for _, r := range lower[:len(lower)-4] {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// isSecretJSONKey reports whether a decoded JSON key is
+// secret-looking: the substring vocabulary, or any snake_case
+// *_key suffix. The decoded form (escapes resolved) is
+// matched; the caller's output keeps the original key text.
+func isSecretJSONKey(decoded string) bool {
+	return reSecretKeyVocab.MatchString(decoded) || hasSnakeKeySuffix(decoded)
+}
 
 // reJSONScalar matches a JSON number (integer, float, exponent,
 // negative) for the scalar-value rule in redactJSONSecrets.
@@ -268,7 +300,7 @@ func tryEscapedPair(s string, i int, q byte) (end int, out string, consumed bool
 		return 0, "", false
 	}
 	decoded := decodeQuotedKey(keyRaw)
-	secret := reSecretKeyVocab.MatchString(decoded)
+	secret := isSecretJSONKey(decoded)
 	public := isPublicKeyLabel(strings.ToLower(decoded))
 	if s[j] == '\\' && j+1 < len(s) && s[j+1] == q {
 		vEnd, valRaw, vok := scanEscapedQuoted(s, j, q)
@@ -396,7 +428,7 @@ func redactJSONSecrets(s string) string {
 			continue
 		}
 		decoded := decodeQuotedKey(keyRaw)
-		secret := reSecretKeyVocab.MatchString(decoded)
+		secret := isSecretJSONKey(decoded)
 		public := isPublicKeyLabel(strings.ToLower(decoded))
 		vq := s[j]
 		if vq == '"' || vq == '\'' {
@@ -477,27 +509,55 @@ func redactJSONSecrets(s string) string {
 // free-form text: key=value fragments and key: value pairs.
 // It is the reKeyValue vocabulary widened with the bare
 // labels auth, secret, credential, and api_key, which carry
-// no suffix to match on.
-const secretLabelVocab = `private_key|privateKey|public_key|publicKey|preshared_key|pre_shared_key|password|passwd|auth_token|access_token|hatch_token|api_token|session_key|secret_key|client_secret|token|session|cookie|auth|secret|credential|api_key|apiKey|apikey|vm_id|node_id`
+// no suffix to match on. The loop-5 listed vocabulary is
+// included verbatim (access_key, bearer, x-api-key,
+// private-key, hatch_sess, datr); any snake_case *_key label
+// in colon/equals form is covered by the generic _key
+// alternative in reKeyColon/reKeyValue, not by this list.
+const secretLabelVocab = `private_key|privateKey|public_key|publicKey|preshared_key|pre_shared_key|password|passwd|auth_token|access_token|hatch_token|api_token|session_key|secret_key|client_secret|token|session|cookie|auth|secret|credential|api_key|apiKey|apikey|vm_id|node_id|access_key|bearer|x-api-key|private-key|hatch_sess|datr`
 
 // reKeyColon matches a bare label: value pair in free-form
 // text (private_key: ..., token: ...) — the colon spelling of
 // the key=value fragment. Quoted keys (JSON forms) do not
 // match: the quote sits between the label and the colon, and
-// those forms are handled by redactJSONSecrets first.
-var reKeyColon = regexp.MustCompile(`(?i)\b(` + secretLabelVocab + `)\s*:\s*["']?([^\s,;\"'}]+)["']?`)
+// those forms are handled by redactJSONSecrets first. The
+// trailing alternative matches any snake_case label ending
+// in _key (loop-5 listed *_key form).
+var reKeyColon = regexp.MustCompile(`(?i)\b((?:` + secretLabelVocab + `)|[A-Za-z0-9_]*_key)\s*:\s*["']?([^\s,;\"'}]+)["']?`)
 
 // reKeyValue matches a bare key=value fragment in free-form text
 // for the secret vocabulary (vm_id, node_id, private key,
 // preshared key, password, token-like keys, session, cookie,
-// plus the bare labels auth, secret, credential, api_key).
-// The label is kept, the value is replaced. This is the free-text
-// analogue of redact.Value's key rule; it runs AFTER
-// redact.String so already redacted values (brackets outside the
-// value alphabet) stay put. public_key is NOT in this pattern:
-// it is handled by rePublicKey first, which keeps the first 8
-// characters instead of redacting wholesale.
-var reKeyValue = regexp.MustCompile(`(?i)\b(vm_id|node_id|private_key|privateKey|preshared_key|pre_shared_key|password|passwd|auth_token|access_token|hatch_token|api_token|session_key|secret_key|client_secret|token|session|cookie|auth|secret|credential|api_key|apiKey|apikey)\s*=\s*[^\s;&,]*`)
+// plus the bare labels auth, secret, credential, api_key, and
+// the loop-5 listed access_key, bearer, x-api-key,
+// private-key, hatch_sess, datr). The trailing alternative
+// matches any snake_case label ending in _key. The label is
+// kept, the value is replaced. This is the free-text analogue
+// of redact.Value's key rule; it runs AFTER redact.String so
+// already redacted values (brackets outside the value
+// alphabet) stay put. public_key is NOT in this pattern's
+// wholesale branch: it is handled by rePublicKey first, which
+// keeps the first 8 characters instead of redacting wholesale,
+// and redactKeyValueMatch leaves a public_key match
+// unchanged for the same reason.
+var reKeyValue = regexp.MustCompile(`(?i)\b((?:vm_id|node_id|private_key|privateKey|preshared_key|pre_shared_key|password|passwd|auth_token|access_token|hatch_token|api_token|session_key|secret_key|client_secret|token|session|cookie|auth|secret|credential|api_key|apiKey|apikey|access_key|bearer|x-api-key|private-key|hatch_sess|datr)|[A-Za-z0-9_]*_key)\s*=\s*[^\s;&,]*`)
+
+// redactKeyValueMatch redacts one bare key=value fragment: the
+// label survives, the value becomes [redacted] — except a
+// public_key label, which rePublicKey already shortened and
+// which must survive unchanged here.
+func redactKeyValueMatch(m string) string {
+	loc := reKeyValue.FindStringSubmatchIndex(m)
+	if loc == nil || len(loc) < 4 {
+		return m
+	}
+	label := m[loc[2]:loc[3]]
+	lower := strings.ToLower(label)
+	if lower == "public_key" || lower == "publickey" {
+		return m
+	}
+	return label + "=[redacted]"
+}
 
 // rePublicKey matches a bare public_key=value fragment (either
 // spelling). The
@@ -521,7 +581,7 @@ var reBareBasic = regexp.MustCompile(`(?i)\b(basic\s+)([A-Za-z0-9_+\-/=]{8,})`)
 // double-encoded). url.Parse decodes %3D into the key, so the
 // URL pass cannot see the separator; this pass catches the
 // bare form (and any %3D the URL pass left behind).
-var rePctQuery = regexp.MustCompile(`(?i)([?&][A-Za-z0-9_.\-]*(?:token|secret|auth|session|cookie|credential|password|passwd|key)[A-Za-z0-9_.\-]*)(?:%253d|%3d)[^\s&;,'"]*`)
+var rePctQuery = regexp.MustCompile(`(?i)([?&][A-Za-z0-9_.\-]*(?:token|secret|auth|session|cookie|credential|password|passwd|key|bearer|datr|hatch_sess)[A-Za-z0-9_.\-]*)(?:%253d|%3d)[^\s&;,'"]*`)
 
 // reBareFragment matches a bare URL fragment value: #<token>
 // with no key, in free-form text. The rule is length-only: any
@@ -542,11 +602,15 @@ var secretLabelList = strings.Split(secretLabelVocab, "|")
 
 // isSecretPctLabel reports whether decoded (a percent/escape
 // decoded label word) carries a secret-vocabulary label at the
-// start or after a separator character (_, ., -). A label
-// buried mid-word (xauth_token) is not one: the downstream
-// key=value/colon patterns would not match it either, so
-// normalising it would claim a redaction that never happens.
+// start or after a separator character (_, ., -), or is a
+// snake_case *_key label. A label buried mid-word (xauth_token)
+// is not one: the downstream key=value/colon patterns would
+// not match it either, so normalising it would claim a
+// redaction that never happens.
 func isSecretPctLabel(decoded string) bool {
+	if hasSnakeKeySuffix(decoded) {
+		return true
+	}
 	lower := strings.ToLower(decoded)
 	for _, label := range secretLabelList {
 		ll := strings.ToLower(label)
@@ -784,6 +848,17 @@ func redactBareFragmentMatch(m string) string {
 	return "#[redacted]"
 }
 
+// SafeString is the BACKSTOP only (loop 5): the primary
+// control is never emitting untrusted body text at all (see
+// level.go and the gateway's allowlist summary). SafeString
+// strips labelled credentials in free-form text that reaches
+// it anyway, including the loop-5 listed vocabulary
+// (session_key, api_key, access_key, any snake_case *_key,
+// private-key, bearer, x-api-key, preshared_key,
+// pre_shared_key, session/hatch_sess/datr in JSON,
+// single-quote, colon, and equals forms). No further scanner
+// rework is done here: a shape outside the listed vocabulary
+// is the producer's fault, not this function's.
 func SafeString(s string) string {
 	if s == "" {
 		return s
@@ -801,7 +876,7 @@ func SafeString(s string) string {
 		}
 		return m[:loc[4]] + wgKeyPrefix(m[loc[4]:loc[5]])
 	})
-	s = reKeyValue.ReplaceAllString(s, `${1}=[redacted]`)
+	s = reKeyValue.ReplaceAllStringFunc(s, redactKeyValueMatch)
 	s = reAuthBasic.ReplaceAllString(s, `${1}[redacted]`)
 	s = reBareBasic.ReplaceAllStringFunc(s, redactBareBasicMatch)
 	s = reBareFragment.ReplaceAllStringFunc(s, redactBareFragmentMatch)

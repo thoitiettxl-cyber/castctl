@@ -301,7 +301,12 @@ func dialWebSocket(ctx context.Context, dialer OutboundDialer, wsURL string, sec
 		// before redaction wrapping. No event when no
 		// parseable status exists.
 		emitHandshakeStatus(ctx, logger, resp, err)
-		return nil, dialMS, wsMS, &conn.ConnectionError{Err: fmt.Errorf("gateway: websocket handshake: %w", redactErr(err))}
+		// The returned error renders the validated status
+		// only (newHandshakeFailureError); the gorilla
+		// error text, which may embed the peer status
+		// line, never reaches an output path, while its
+		// chain stays reachable for classification.
+		return nil, dialMS, wsMS, &conn.ConnectionError{Err: newHandshakeFailureError(resp, err)}
 	}
 	emitHandshakeStatus(ctx, logger, resp, nil)
 	return ws, dialMS, wsMS, nil

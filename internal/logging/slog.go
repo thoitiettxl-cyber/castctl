@@ -27,8 +27,9 @@ import (
 //
 // Redaction — what this handler actually guarantees: every
 // attr value and the message pass SafeString (errors via
-// SafeErr, which redacts only the error's top-level Error()
-// text, not the wrapped chain). SafeString strips labelled
+// SafeErrForLevel, which renders the allowlist summary at
+// EVERY level including trace under the loop-5 ruling — no
+// body bytes at trace either). SafeString strips labelled
 // secret forms only: URL userinfo and every query value and
 // fragment of a URL-like substring, cookie/token/Bearer/Basic
 // credentials, JSON values under secret-looking keys
@@ -99,12 +100,12 @@ func (h *slogHandler) Handle(ctx context.Context, r slog.Record) error {
 }
 
 // safeAttrValue renders one slog value for a log line at level.
-// Errors use the level-gated rendering (SafeErrForLevel): above
-// trace a body-carrying error becomes status + class + length
-// only, at trace the redacted-then-truncated body. Strings use
-// SafeString; everything else is formatted then passed through
-// SafeString so a secret-bearing %v cannot cross the boundary
-// raw. Groups are flattened by slog before Handle for record
+// Errors use the allowlist rendering (SafeErrForLevel): at
+// every level including trace, a body-carrying error becomes
+// status + class + length only. Strings use SafeString;
+// everything else is formatted then passed through SafeString
+// so a secret-bearing %v cannot cross the boundary raw.
+// Groups are flattened by slog before Handle for record
 // attrs; WithGroup keys are prefixed in Handle.
 func safeAttrValue(v slog.Value, level singlog.Level) string {
 	switch v.Kind() {

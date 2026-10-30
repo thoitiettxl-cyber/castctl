@@ -317,7 +317,18 @@ func FetchSubscription(ctx context.Context, client *http.Client, cookies string,
 		} else {
 			errVal = res
 		}
-		return nil, "", &conn.GatewayError{Status: -1, Payload: redactFreeText(fmt.Sprintf("%s failed: %v", SubscriptionActionName, errVal))}
+		// The "error" value is peer-controlled: only an
+		// enum-shaped string parsed by key may be emitted
+		// (see summary.go). A non-map result has no keys
+		// to parse, so nothing is extracted from it. The
+		// RSC body length is not retained by callAction,
+		// so no body_length field is emitted here.
+		errMap, _ := errVal.(map[string]any)
+		if errMap == nil && ok {
+			errMap = sub
+		}
+		sum := summarizeBody("fetchSubscriptionAction failed", nil, "", errMap, "error")
+		return nil, "", gatewayErrorFromSummary(-1, sum)
 	}
 	subMap, ok := sub["subscription"].(map[string]any)
 	if !ok {

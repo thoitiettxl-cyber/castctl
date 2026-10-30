@@ -242,10 +242,13 @@ func (g *Gateway) readLoop() {
 	defer func() {
 		if r := recover(); r != nil {
 			// The panic value is arbitrary caller/peer text:
-			// redact it at the producer with the strict
-			// free-text boundary, before it enters an
-			// error that conn log lines will print.
-			g.fail(&conn.ConnectionError{Err: fmt.Errorf("gateway: reader panic: %s", redactFreeText(fmt.Sprint(r)))})
+			// never embed it. The recorded error carries
+			// the class and the panic text's byte length
+			// only (loop-5 allowlist rule); conn log lines
+			// render it as a summary, and the panic value
+			// itself is not retained anywhere.
+			panicText := fmt.Sprint(r)
+			g.fail(&conn.ConnectionError{Err: fmt.Errorf("gateway: reader panic (panic_length=%d)", len(panicText))})
 		}
 		close(g.readerDone)
 	}()

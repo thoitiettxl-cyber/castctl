@@ -129,7 +129,11 @@ func (g *Gateway) Request(ctx context.Context, method string, opts conn.RequestO
 			}
 		case *pb.ServiceFrame_Reset_:
 			ended = true
-			loopErr = &conn.GatewayError{Status: -1, Payload: redactFreeText(fmt.Sprintf("stream reset %d: %s", kind.Reset_.GetCode(), kind.Reset_.GetReason()))}
+			// The reset reason is peer-controlled free text:
+			// the error carries the reset code and the
+			// reason's length only, never the reason bytes
+			// (loop-5 allowlist rule).
+			loopErr = gatewayErrorFromSummary(-1, resetSummary(int32(kind.Reset_.GetCode()), kind.Reset_.GetReason()))
 		default:
 			// An inbound request frame (or no kind) is
 			// ignored, as Python's WhichOneof fall-through
@@ -162,7 +166,11 @@ func (g *Gateway) Request(ctx context.Context, method string, opts conn.RequestO
 	}
 	payload := bytes.Join(chunks, nil)
 	if *status < 200 || *status >= 300 {
-		return nil, withPhase(&conn.GatewayError{Status: int(*status), Payload: redactTruncatePayload(payload, 500)}, PhaseStreaming)
+		// WebSocket frames carry no content-type; the
+		// allowlist is status + length only. The raw
+		// payload bytes are never stored in the error.
+		sum := summarizeBody("gateway error response", payload, "", nil)
+		return nil, withPhase(gatewayErrorFromSummary(int(*status), sum), PhaseStreaming)
 	}
 	return payload, nil
 }
@@ -182,15 +190,17 @@ func (g *Gateway) CallJSON(ctx context.Context, method string, opts conn.Request
 	}
 	d, err := decodeJSONValue(raw)
 	if err != nil {
-		// Redact the full response first, then truncate:
-		// truncating the raw head first can leave a secret
-		// fragment too short for the redaction floors.
-		head := redactTruncatePayload(raw, 200)
-		return nil, withPhase(&conn.GatewayError{Status: -1, Payload: redactFreeText(fmt.Sprintf("non-JSON response: %q", head))}, PhaseStreaming)
+		// Non-JSON response: the allowlist summary only
+		// (body length), never the response head bytes.
+		sum := summarizeBody("non-JSON response", raw, "", nil)
+		return nil, withPhase(gatewayErrorFromSummary(-1, sum), PhaseStreaming)
 	}
 	if m, ok := d.(map[string]any); ok {
 		if okVal, isBool := m["ok"].(bool); isBool && !okVal {
-			return nil, withPhase(&conn.GatewayError{Status: -1, Payload: redactFreeText(fmt.Sprintf("api error: %v", m["error"]))}, PhaseStreaming)
+			// {"ok":false}: only the "error" field, parsed
+			// by key and enum-gated, may be emitted.
+			sum := summarizeBody("api error", raw, "", m, "error")
+			return nil, withPhase(gatewayErrorFromSummary(-1, sum), PhaseStreaming)
 		}
 		if result, present := m["result"]; present {
 			return result, nil

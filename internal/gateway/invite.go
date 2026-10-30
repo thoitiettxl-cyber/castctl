@@ -28,7 +28,7 @@ var inviteCodePattern = regexp.MustCompile(`^[A-Z0-9]{6,16}$`)
 // Read-only: it never POSTs (the POST creates a code, which is
 // account-state-changing).
 func FetchInvite(ctx context.Context, client *http.Client, cookies string) (map[string]any, error) {
-	status, data, _, err := doHatch(ctx, client, http.MethodGet, "https://muse.ai/api/hatch/invite", hatchHeaders(cookies, ""), nil)
+	status, data, hdr, err := doHatch(ctx, client, http.MethodGet, "https://muse.ai/api/hatch/invite", hatchHeaders(cookies, ""), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -36,17 +36,19 @@ func FetchInvite(ctx context.Context, client *http.Client, cookies string) (map[
 		return nil, conn.NewAuthError(fmt.Sprintf("api/hatch/invite -> %d (cookies expired? re-export)", status))
 	}
 	if status != 200 {
-		return nil, &conn.GatewayError{Status: status, Payload: redactTruncateText(string(data), 200)}
+		sum := summarizeBody(fmt.Sprintf("api/hatch/invite -> %d", status), data, hdr.Get("Content-Type"), nil)
+		return nil, gatewayErrorFromSummary(status, sum)
 	}
 	d, err := decodeJSONObject(data)
 	if err != nil {
 		// Distinguish non-JSON from a JSON non-dict, as Python
 		// does (different messages, both GatewayError -1).
 		if _, jerr := decodeJSONValue(data); jerr != nil {
-			return nil, &conn.GatewayError{Status: -1, Payload: fmt.Sprintf("api/hatch/invite returned non-JSON (%q)", redactTruncateText(string(data), 80))}
+			sum := summarizeBody("api/hatch/invite returned non-JSON", data, hdr.Get("Content-Type"), nil)
+			return nil, gatewayErrorFromSummary(-1, sum)
 		}
 		v, _ := decodeJSONValue(data)
-		return nil, &conn.GatewayError{Status: -1, Payload: fmt.Sprintf("api/hatch/invite returned %T", v)}
+		return nil, gatewayErrorFromSummary(-1, summarizeBody(fmt.Sprintf("api/hatch/invite returned %T", v), data, hdr.Get("Content-Type"), nil))
 	}
 	return d, nil
 }
@@ -59,7 +61,7 @@ func FetchInvite(ctx context.Context, client *http.Client, cookies string) (map[
 func CreateInvite(ctx context.Context, client *http.Client, cookies string) (map[string]any, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	status, data, _, err := doHatch(ctx, client, http.MethodPost, "https://muse.ai/api/hatch/invite", hatchHeaders(cookies, ""), []byte{})
+	status, data, hdr, err := doHatch(ctx, client, http.MethodPost, "https://muse.ai/api/hatch/invite", hatchHeaders(cookies, ""), []byte{})
 	if err != nil {
 		return nil, err
 	}
@@ -67,11 +69,13 @@ func CreateInvite(ctx context.Context, client *http.Client, cookies string) (map
 		return nil, conn.NewAuthError(fmt.Sprintf("api/hatch/invite POST -> %d (cookies expired? re-export)", status))
 	}
 	if status != 200 {
-		return nil, &conn.GatewayError{Status: status, Payload: redactTruncateText(string(data), 200)}
+		sum := summarizeBody(fmt.Sprintf("api/hatch/invite POST -> %d", status), data, hdr.Get("Content-Type"), nil)
+		return nil, gatewayErrorFromSummary(status, sum)
 	}
 	d, err := decodeJSONObject(data)
 	if err != nil {
-		return nil, &conn.GatewayError{Status: -1, Payload: fmt.Sprintf("api/hatch/invite POST returned non-JSON (%q)", redactTruncateText(string(data), 80))}
+		sum := summarizeBody("api/hatch/invite POST returned non-JSON", data, hdr.Get("Content-Type"), nil)
+		return nil, gatewayErrorFromSummary(-1, sum)
 	}
 	return d, nil
 }
@@ -98,7 +102,7 @@ func RedeemInviteCode(ctx context.Context, client *http.Client, cookies, code st
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	status, data, _, err := doHatch(ctx, client, http.MethodPost, "https://muse.ai/api/hatch/invite-code/redeem", hatchHeaders(cookies, ""), payload)
+	status, data, hdr, err := doHatch(ctx, client, http.MethodPost, "https://muse.ai/api/hatch/invite-code/redeem", hatchHeaders(cookies, ""), payload)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -107,7 +111,11 @@ func RedeemInviteCode(ctx context.Context, client *http.Client, cookies, code st
 	}
 	body, jerr := decodeJSONValue(data)
 	if jerr != nil {
-		body = map[string]any{"success": false, "reason": "unknown", "detail": redactTruncateText(string(data), 200)}
+		// Non-JSON body: the detail field carries the
+		// allowlist summary only, never body bytes (the
+		// redeem command prints detail on stdout).
+		sum := summarizeBody("non-JSON response", data, hdr.Get("Content-Type"), nil)
+		body = map[string]any{"success": false, "reason": "unknown", "detail": sum.text}
 	}
 	return status, body, nil
 }

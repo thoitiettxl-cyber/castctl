@@ -15,6 +15,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -67,6 +68,36 @@ func TestClassifyErrorAllowlist(t *testing.T) {
 	}
 	if _, text := classifyError(ae); !strings.Contains(text, "auth_failed") {
 		t.Errorf("auth text %q, want the auth_failed class", text)
+	}
+}
+
+func TestPanicSummaryAllowlist(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		r    any
+	}{
+		{"string marker", "plain panic words " + cliAllowlistMarker},
+		{"gateway error", &conn.GatewayError{Status: 500, Payload: "plain body words " + cliAllowlistMarker}},
+		{"auth error", conn.NewAuthError("hatch/token -> 403 plain body words " + cliAllowlistMarker)},
+		{"plain error", errors.New("plain panic words " + cliAllowlistMarker)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := panicSummary(tc.r)
+			if got == "" {
+				t.Fatal("panicSummary empty: positive control failed")
+			}
+			if strings.Contains(got, cliAllowlistMarker) || strings.Contains(got, "plain body words") || strings.Contains(got, "plain panic words") {
+				t.Errorf("panicSummary(%#v) = %q carries panic/body bytes", tc.r, got)
+			}
+		})
+	}
+	if got := panicSummary("x"); !strings.Contains(got, "panic_length=1") {
+		t.Errorf("panicSummary(string) = %q, want panic_length", got)
+	}
+	if got := panicSummary(&conn.GatewayError{Status: 500, Payload: "x"}); !strings.Contains(got, "status=500") {
+		t.Errorf("panicSummary(GatewayError) = %q, want the gateway summary", got)
 	}
 }
 

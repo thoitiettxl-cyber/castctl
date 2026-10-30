@@ -17,8 +17,8 @@ import (
 
 	"github.com/thoitiettxl-cyber/castctl/internal/approvals"
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
-	"github.com/thoitiettxl-cyber/castctl/internal/redact"
 	"github.com/thoitiettxl-cyber/castctl/internal/shared"
 	"github.com/thoitiettxl-cyber/castctl/internal/wait"
 )
@@ -304,7 +304,7 @@ func executeWait(ctx context.Context, env *Env, rt *Runtime, prof *profile.Profi
 		if ctx.Err() != nil {
 			return nil, false, err
 		}
-		fmt.Fprintf(env.stderr(), "castctl: wait: unexpected error (%s); reporting timeout\n", redact.String(err.Error()))
+		fmt.Fprintf(env.stderr(), "castctl: wait: unexpected error (%s); reporting timeout\n", logging.SummarizeErr(err))
 		afterSeq := int64(0)
 		if args.afterSeq != nil {
 			afterSeq = *args.afterSeq
@@ -335,7 +335,9 @@ func logAutoApproved(w io.Writer, res *wait.Result) {
 		}
 		underlying := ""
 		if e.Err != nil {
-			underlying = e.Err.Error()
+			// Error text only: a decision error may wrap a
+			// body-carrying gateway error (loop-5 rule).
+			underlying = logging.SummarizeErr(e.Err)
 		}
 		if e.Decision == "" {
 			fmt.Fprintf(w, "auto-approve SKIPPED %s: %s [%s %s]\n", e.ApprovalID, underlying, e.Kind, e.Scope)
@@ -498,7 +500,7 @@ func toWaitResultJSON(res *wait.Result, autoApproveEnabled bool) waitResultJSON 
 			}
 			errText := ""
 			if e.Err != nil {
-				errText = e.Err.Error()
+				errText = logging.SummarizeErr(e.Err)
 			}
 			out.AutoApproveErrors = append(out.AutoApproveErrors, approveErrorJSON{
 				ApprovalID: strPtrOrNil(e.ApprovalID), Title: strPtrOrNil(e.Title), Kind: strPtrOrNil(e.Kind), Scope: strPtrOrNil(e.Scope), Decision: strPtrOrNil(e.Decision), Error: errText,
@@ -924,7 +926,7 @@ func sendDownloadStep(ctx context.Context, rt *Runtime, thread string, userSeq i
 		if errors.As(err, &authErr) || ctx.Err() != nil {
 			return err
 		}
-		result.DownloadError = redact.String(err.Error())
+		result.DownloadError = logging.SummarizeErr(err)
 		return nil
 	}
 	return nil

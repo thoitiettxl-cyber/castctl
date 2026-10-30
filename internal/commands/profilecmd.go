@@ -19,9 +19,9 @@ import (
 
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 	"github.com/thoitiettxl-cyber/castctl/internal/outbound"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
-	"github.com/thoitiettxl-cyber/castctl/internal/redact"
 
 	singjson "github.com/sagernet/sing/common/json"
 )
@@ -959,10 +959,12 @@ func fetchEgressIP(ctx context.Context, client *http.Client) (string, error) {
 	}
 	ip := strings.TrimSpace(string(body))
 	if ip == "" || strings.ContainsAny(ip, " \t\r\n") {
-		return "", fmt.Errorf("egress check: unexpected ipify body %q", ip)
+		// The ipify body is peer text: report its length
+		// only, never its bytes (loop-5 allowlist rule).
+		return "", fmt.Errorf("egress check: unexpected ipify body body_length=%d", len(body))
 	}
 	if _, err := netip.ParseAddr(ip); err != nil {
-		return "", fmt.Errorf("egress check: ipify returned %q, not an IP address", ip)
+		return "", fmt.Errorf("egress check: ipify response is not an IP address body_length=%d", len(body))
 	}
 	return ip, nil
 }
@@ -1046,11 +1048,13 @@ func cmdConfigMigrate(ctx context.Context, env *Env, g *globalOpts, args []strin
 // small helpers (kept in this file to avoid import cycles in tests)
 // ---------------------------------------------------------------------
 
-// redactMessage renders an error for profile-test output: redacted,
-// single-line, never carrying a cookie value.
+// redactMessage renders an error for profile-test output: the
+// allowlist summary for a body-carrying error (loop-5 rule),
+// SafeString text otherwise. It never carries a cookie value
+// or server body bytes.
 func redactMessage(err error) string {
 	if err == nil {
 		return ""
 	}
-	return redact.String(err.Error())
+	return logging.SummarizeErr(err)
 }

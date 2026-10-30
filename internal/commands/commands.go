@@ -35,7 +35,6 @@ import (
 	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
 	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
-	"github.com/thoitiettxl-cyber/castctl/internal/redact"
 )
 
 // Version is the Go port version, mirroring the Python 0.6.1 contract
@@ -230,19 +229,22 @@ func (e *typedAuthError) Error() string {
 func (e *typedAuthError) Unwrap() error { return e.Err }
 
 // classifyError maps an error to (exit code, stderr text). Plain
-// errors print "castctl: <redacted message>"; typed auth errors
-// print one JSON line. The Python exit-code contract is preserved:
+// errors print "castctl: <summary>"; typed auth errors print
+// one JSON line. The Python exit-code contract is preserved:
 // AuthError 2, GatewayError 3, ValueError-equivalent 2, TimeoutError
 // 4, everything else 1, signal cancellation 130.
 //
-// Every message passes the STRONG redaction boundary
-// (logging.SafeString), not redact.String alone: server text
-// reaching this path unredacted (a 403 body, a gateway payload)
-// must be stripped in every spelling SafeString covers
-// (camelCase JSON, colon forms, Basic, percent-encoded
-// separators, bare fragments, bare auth/secret labels). The
-// ExportError guidance carries only placeholders and passes
-// the same boundary.
+// Loop 5 (allowlist rule): the stderr text NEVER carries
+// server/peer body bytes, at any level of wrapping. Every
+// branch renders through logging.SummarizeErr: a
+// body-carrying error in the chain renders as its LogSummary
+// (status + class + length + validated fields), and every
+// other error renders through the SafeString backstop.
+// GatewayError/AuthError Error() renderings are themselves
+// summaries since loop 5, so even a wrapper type without
+// Unwrap (cmdError, typedAuthError) cannot leak body bytes
+// through the fallback. The ExportError guidance carries
+// only placeholders and keeps its SafeString rendering.
 func classifyError(err error) (int, string) {
 	if err == nil {
 		return 0, ""
@@ -254,64 +256,81 @@ func classifyError(err error) (int, string) {
 	}
 	var typed *typedAuthError
 	if errors.As(err, &typed) {
-		msg := logging.SafeString(typed.Err.Error())
+		msg := logging.SummarizeErr(err)
 		b, _ := json.Marshal(map[string]string{"type": typed.Type, "error": msg})
 		return typed.Code, string(b)
 	}
 	var ce *cmdError
 	if errors.As(err, &ce) {
 		if ce.Type != "" {
-			msg := logging.SafeString(ce.Error())
+			msg := logging.SummarizeErr(err)
 			b, _ := json.Marshal(map[string]string{"type": ce.Type, "error": msg})
 			return ce.Code, string(b)
 		}
 		if msg := ce.Error(); msg != "" {
-			return ce.Code, "castctl: " + logging.SafeString(msg)
+			return ce.Code, "castctl: " + logging.SummarizeErr(err)
 		}
 		return ce.Code, ""
 	}
 	var auth *conn.AuthError
 	if errors.As(err, &auth) {
-		msg := logging.SafeString(auth.Error())
+		msg := logging.SummarizeErr(err)
 		b, _ := json.Marshal(map[string]string{"type": "auth_failed", "error": msg})
 		return 2, string(b)
 	}
 	var gw *conn.GatewayError
 	if errors.As(err, &gw) {
-		return 3, "castctl: " + logging.SafeString(gw.Error())
+		return 3, "castctl: " + logging.SummarizeErr(err)
 	}
 	var reassembly *gateway.ReassemblySizeError
 	if errors.As(err, &reassembly) {
-		return 3, "castctl: " + logging.SafeString(reassembly.Error())
+		return 3, "castctl: " + logging.SummarizeErr(err)
 	}
 	var tooMany *gateway.TooManyUnfinishedGroupsError
 	if errors.As(err, &tooMany) {
-		return 3, "castctl: " + logging.SafeString(tooMany.Error())
+		return 3, "castctl: " + logging.SummarizeErr(err)
 	}
 	var timeout *conn.TimeoutError
 	if errors.As(err, &timeout) {
-		return 4, "castctl: " + logging.SafeString(timeout.Error())
+		return 4, "castctl: " + logging.SummarizeErr(err)
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return 4, "castctl: timeout: " + logging.SafeString(err.Error())
+		return 4, "castctl: timeout: " + logging.SummarizeErr(err)
 	}
 	if errors.Is(err, context.Canceled) {
 		return 130, ""
 	}
 	var perr *profile.Error
 	if errors.As(err, &perr) {
-		return profile.ExitCode(err), "castctl: " + logging.SafeString(perr.Error())
+		return profile.ExitCode(err), "castctl: " + logging.SummarizeErr(err)
 	}
 	var verr *gateway.ValidationError
 	if errors.As(err, &verr) {
-		return 2, "castctl: " + logging.SafeString(verr.Error())
+		return 2, "castctl: " + logging.SummarizeErr(err)
 	}
 	// Errors carrying their own exit code (profile errors not typed
 	// above, deliver errors) keep it; everything else is 1.
 	if ec, ok := err.(interface{ ExitCode() int }); ok {
-		return ec.ExitCode(), "castctl: " + logging.SafeString(err.Error())
+		return ec.ExitCode(), "castctl: " + logging.SummarizeErr(err)
 	}
-	return 1, "castctl: " + logging.SafeString(err.Error())
+	return 1, "castctl: " + logging.SummarizeErr(err)
+}
+
+// panicSummary renders a recovered panic value for the CLI
+// panic line on stderr (loop-5 allowlist rule): NEVER the
+// value's text. A panic value that is (or wraps) a
+// body-carrying error renders as that error's LogSummary;
+// any other value renders as its type and byte length only.
+// This replaces the old redact.String rendering, which
+// passed plain body words through verbatim.
+func panicSummary(r any) string {
+	if err, ok := r.(error); ok && err != nil {
+		var s interface{ LogSummary() string }
+		if errors.As(err, &s) {
+			return "panic: " + s.LogSummary()
+		}
+	}
+	return fmt.Sprintf("panic: type=%T panic_length=%d", r, len(fmt.Sprint(r)))
 }
 
 // classifyConnError wraps a failure from conn.Muse calls (connect,
@@ -739,15 +758,16 @@ var commandOrder = []string{
 // act when reached, before profile validation.
 //
 // Panic contract (R2 decision): a panic anywhere on the dispatch
-// path converts to exit 2 with a redacted error message and no
-// stack trace. The panic value is printed through the redactor, so
-// no secret-bearing stack ever reaches output; non-panic behaviour
+// path converts to exit 2 with a summary message and no stack
+// trace. The panic value is rendered by panicSummary (class +
+// length only, never the value's text), so no secret-bearing
+// stack or peer text ever reaches output; non-panic behaviour
 // and exit codes are unchanged.
 func Run(ctx context.Context, args []string, env *Env) (code int) {
 	defer func() {
 		if r := recover(); r != nil {
 			code = 2
-			fmt.Fprintf(env.stderr(), "castctl: panic: %s\n", redact.String(fmt.Sprint(r)))
+			fmt.Fprintf(env.stderr(), "castctl: %s\n", panicSummary(r))
 		}
 	}()
 	return runInner(ctx, args, env)

@@ -20,6 +20,7 @@ import (
 
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 	"github.com/thoitiettxl-cyber/castctl/internal/deliver"
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
 	"github.com/thoitiettxl-cyber/castctl/internal/shared"
 )
@@ -420,7 +421,7 @@ func cmdChat(ctx context.Context, env *Env, g *globalOpts, args []string) error 
 			// failures print the sign-in guidance; other
 			// connect errors surface typed.
 			if _, ok := classifyConnError(err).(*typedAuthError); ok {
-				fmt.Fprintf(env.stdout(), "Can't sign in to muse.ai: %s\n", err.Error())
+				fmt.Fprintf(env.stdout(), "Can't sign in to muse.ai: %s\n", logging.SummarizeErr(err))
 				if exportErr := deliver.AuthExport(); exportErr != nil {
 					var export *deliver.ExportError
 					if errors.As(exportErr, &export) {
@@ -467,7 +468,7 @@ func cmdChat(ctx context.Context, env *Env, g *globalOpts, args []string) error 
 					fmt.Fprintln(env.stdout(), "Your login expired. Type /login to sign in again.")
 					continue
 				}
-				fmt.Fprintf(env.stdout(), "Connection problem (%s). Reconnected; please try again.\n", runErr.Error())
+				fmt.Fprintf(env.stdout(), "Connection problem (%s). Reconnected; please try again.\n", logging.SummarizeErr(runErr))
 				rt.Muse.Close()
 			}
 		}

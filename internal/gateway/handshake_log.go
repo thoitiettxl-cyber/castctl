@@ -18,6 +18,43 @@ import (
 // into the log.
 var malformedStatusRe = regexp.MustCompile(`malformed HTTP status code "([^"]*)"`)
 
+// handshakeFailureError renders a WebSocket handshake failure
+// for output without peer text (loop-5 allowlist rule): the
+// validated status token or numeric status code only, or a
+// fixed message when no parseable status exists. The original
+// error chain is preserved via Unwrap, so classification
+// (errors.As / IsTransient) is unchanged — only the rendered
+// text is summarised. A gorilla handshake error's text may
+// embed the peer's status line verbatim; it must never reach
+// an error string, a log line, or stderr output.
+type handshakeFailureError struct {
+	err      error
+	token    string
+	kind     string
+	hasToken bool
+}
+
+func (e *handshakeFailureError) Error() string {
+	if e.hasToken {
+		return "gateway: websocket handshake: " + e.kind + "=" + e.token
+	}
+	return "gateway: websocket handshake failed"
+}
+
+func (e *handshakeFailureError) Unwrap() error { return e.err }
+
+// newHandshakeFailureError builds the handshake-failure error
+// from gorilla's raw result, before any redaction wrapping:
+// the status token is extracted from the raw result only
+// (handshakeStatusToken), never from redacted text.
+func newHandshakeFailureError(resp *http.Response, err error) error {
+	token, kind, ok := handshakeStatusToken(resp, err)
+	if !ok {
+		return &handshakeFailureError{err: err}
+	}
+	return &handshakeFailureError{err: err, token: token, kind: kind, hasToken: true}
+}
+
 // handshakeStatusToken derives the loggable status from a
 // WebSocket upgrade result. A non-nil response wins with its
 // numeric status code; otherwise the error text is scanned for

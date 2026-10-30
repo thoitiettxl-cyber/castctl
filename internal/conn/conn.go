@@ -216,12 +216,10 @@ func (m *Muse) Config() (Config, error) {
 // slogErr renders an error for a slog line, summarised at the
 // producer (the retryCall precedent in shared.go): the line
 // must be safe through ANY slog logger, not only the bridge
-// handler, and every slogErr call site logs above trace
-// (Info/Warn), so a body-carrying error renders as status +
-// class + length only (logging.SummarizeErr), never as body
-// bytes. The full redacted body is available only at trace
-// through the bridge handler's level-gated rendering. A nil
-// error renders as "".
+// handler, and every slogErr call site logs at Info/Warn, so a
+// body-carrying error renders as status + class + length only (logging.SummarizeErr), never as body
+// bytes. Under the loop-5 ruling the same summary applies at
+// trace too. A nil error renders as "".
 func slogErr(err error) string {
 	if err == nil {
 		return ""
@@ -229,10 +227,30 @@ func slogErr(err error) string {
 	return logging.SummarizeErr(err)
 }
 
-// slogPanic renders a recovered panic value for a slog line,
-// redacted at the producer: a panic value is arbitrary text.
+// slogPanic renders a recovered panic value for a slog line
+// under the loop-5 allowlist rule: NEVER verbatim. A panic
+// value that is (or wraps) a body-carrying error renders as
+// that error's LogSummary; any other panic value renders as
+// its type and byte length only — never its text, which is
+// arbitrary (possibly peer/server) text. A nil panic value
+// renders as a fixed string.
 func slogPanic(r any) string {
-	return logging.SafeString(fmt.Sprint(r))
+	if err, ok := r.(error); ok && err != nil {
+		var s panicLogSummary
+		if errors.As(err, &s) {
+			return s.LogSummary()
+		}
+	}
+	return fmt.Sprintf("panic type=%T panic_length=%d", r, len(fmt.Sprint(r)))
+}
+
+// panicLogSummary is the structural LogSummary contract, as
+// in logging (conn cannot import logging's interface without
+// a cycle in the other direction — logging defines its own
+// copy; both are satisfied by conn.GatewayError and
+// conn.AuthError).
+type panicLogSummary interface {
+	LogSummary() string
 }
 
 // markDown records that the gateway is down. failedConnect counts

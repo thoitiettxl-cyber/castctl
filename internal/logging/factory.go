@@ -420,9 +420,9 @@ func (h *Handle) SlogLogger(tag string) *slog.Logger {
 // safe fields (tags, enums, protocol strings, parsed status
 // tokens, counts); Emit is defence in depth, not a licence to
 // pass URLs, headers, or options objects. A caller composing
-// error text into a line above trace must use SummarizeErr
-// for the error (status + class + length only for a
-// body-carrying error): Emit cannot tell body bytes from prose
+// error text into a line at ANY level including trace must use
+// SummarizeErr for the error (status + class + length only for
+// a body-carrying error): Emit cannot tell body bytes from prose
 // in a pre-composed string, and SafeString alone strips only
 // labelled secrets, not arbitrary body text.
 func Emit(logger singlog.ContextLogger, ctx context.Context, level singlog.Level, msg string) {

@@ -51,7 +51,12 @@ func assertNoMarker(t *testing.T, what, got string) {
 
 func TestAllowlistSessionNonJSON(t *testing.T) {
 	body := markerBody()
-	_, err := FetchSessionInfo(context.Background(), straddleBodyClient(200, body), fakeCookie)
+	client := &http.Client{Transport: gatewaytest.HandlerRoundTripper(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, body)
+	}))}
+	_, err := FetchSessionInfo(context.Background(), client, fakeCookie)
 	var ae *conn.AuthError
 	if !errors.As(err, &ae) {
 		t.Fatalf("err = %T (%v), want *conn.AuthError", err, err)

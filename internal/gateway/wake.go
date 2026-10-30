@@ -38,10 +38,11 @@ const wakeTimeout = 15 * time.Second
 // numbers decode as json.Number, per decodeJSONValue) when the
 // response parses as JSON, nil when the response body is empty
 // (Python wake_vm: `resp.json() if resp.text else None`, so an
-// empty body is JSON null, not ""), and otherwise the raw
-// response text truncated to 300 bytes. The truncation is in bytes, not runes
-// or characters, matching Python's resp.text[:300] as specified
-// for this port, so it may split a multi-byte rune.
+// empty body is JSON null, not ""), and otherwise the allowlist
+// summary string (status/length/content-type) — never the raw
+// response text (loop-5 ruling; no production reader exists
+// for the non-JSON form today, and the summary keeps the
+// surface closed if one appears).
 //
 // The call is bounded by wakeTimeout via context.WithTimeout.
 // WithTimeout never extends a caller deadline: an earlier caller
@@ -58,7 +59,7 @@ func WakeVM(ctx context.Context, client *http.Client, cookies, accessToken, vmID
 	}
 	ctx, cancel := context.WithTimeout(ctx, wakeTimeout)
 	defer cancel()
-	status, data, _, err := doHatch(ctx, client, http.MethodPost, wakeURL, hatchHeaders(cookies, accessToken), payload)
+	status, data, hdr, err := doHatch(ctx, client, http.MethodPost, wakeURL, hatchHeaders(cookies, accessToken), payload)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -68,16 +69,8 @@ func WakeVM(ctx context.Context, client *http.Client, cookies, accessToken, vmID
 	}
 	v, jerr := decodeJSONValue(data)
 	if jerr != nil {
-		// Redact the full body first, then truncate to 300
-		// bytes: truncating the raw body first can leave a
-		// secret fragment too short for the redaction
-		// floors. The byte cut (which may split a multi-byte
-		// rune, as documented above) is unchanged.
-		text := redactFreeText(string(data))
-		if len(text) > 300 {
-			text = text[:300]
-		}
-		return status, text, nil
+		sum := summarizeBody("non-JSON response", data, hdr.Get("Content-Type"), nil)
+		return status, sum.text, nil
 	}
 	return status, v, nil
 }

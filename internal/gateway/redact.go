@@ -10,43 +10,25 @@ import (
 )
 
 // redactFreeText strips credentials from peer/server-controlled
-// free text (a WebSocket close reason, a panic value, a server
-// payload) using the logging boundary, which is STRICTER than
-// redact.String: it also strips every query value of a URL
-// (including vm_id and unknown keys), JSON values under
-// secret-looking keys, and bare secret key=value fragments.
-// redactErrorString's redact.String semantics are pinned by
-// gateway tests (vm_id survives it) and are kept for error
-// chains; free text that may reach a log line gets the
-// stricter boundary at the producer, before it is stored in
-// an error or a struct field.
+// free text (a WebSocket close reason) using the logging
+// boundary, which is STRICTER than redact.String: it also
+// strips every query value of a URL (including vm_id and
+// unknown keys), JSON values under secret-looking keys, and
+// bare secret key=value fragments.
+//
+// Loop 5: redactFreeText is NOT a licence to emit peer text.
+// It survives only for STORED close-reason text (keepalive /
+// lost.go), which has no output path in production —
+// ErrConnectionLost.Error() does not include the reason and
+// no production code prints LastClose/CloseReason. Every
+// EMITTED peer/server text goes through the allowlist
+// summary (summary.go) instead; the old redact-then-
+// truncate helpers are gone with the loop-4 trace allowance.
 func redactFreeText(s string) string {
 	return logging.SafeString(s)
 }
 
-// redactTruncateText redacts the FULL text first (SafeString),
-// then truncates the redacted text to n runes. The order is
-// load-bearing: truncating first can leave a fragment of a
-// secret too short for the redaction floors (a bare fragment
-// under 16 characters, a Basic tail under 8) or a shape no
-// pattern matches once cut (a label split by the cut). Every
-// call site that truncates server response text must use
-// this helper (or redactTruncatePayload), never
-// truncateText/truncatePayload on raw text.
-func redactTruncateText(text string, n int) string {
-	return truncateText(redactFreeText(text), n)
-}
-
-// redactTruncatePayload is redactTruncateText for byte
-// payloads: redact the full payload first, then truncate to
-// n bytes with UTF-8 validation, mirroring Python's
-// payload[:n].decode("utf-8", "replace").
-func redactTruncatePayload(payload []byte, n int) string {
-	return truncatePayload([]byte(redactFreeText(string(payload))), n)
-}
-
-// redactErrorString strips credentials from an error string
-// (item (c), Boss-approved for PR2). It is the shared string
+// redactErrorString strips credentials from an error string// (item (c), Boss-approved for PR2). It is the shared string
 // redactor from internal/redact (redact.String): URL userinfo
 // ("<redacted>"), token-like query/fragment parameters,
 // cookie-like fragments (including JSON form), and Bearer
