@@ -95,6 +95,14 @@ type Env struct {
 	// Logger, when non-nil, is passed to conn.Muse. Nil means
 	// slog.Default().
 	Logger *slog.Logger
+	// LogLevelOverride, when LogLevelSet, is the --log-level value
+	// from the global pre-scan. runInner sets both from
+	// globalOpts before dispatch; defaultBuildRuntime reads them
+	// as the CLI tier of log precedence (CLI > config block >
+	// default warn). Test BuildRuntime overrides read the same
+	// fields; production never sets them directly.
+	LogLevelOverride string
+	LogLevelSet      bool
 	// ConnectorOpts are appended to gateway.NewConnector options when
 	// the default runtime is built. Tests use them to inject a fake
 	// dialer; production passes none.
@@ -680,10 +688,12 @@ type commandSpec struct {
 }
 
 type globalOpts struct {
-	profileFlag string
-	profileSet  bool
-	configFlag  string
-	configSet   bool
+	profileFlag  string
+	profileSet   bool
+	configFlag   string
+	configSet    bool
+	logLevelFlag string
+	logLevelSet  bool
 }
 
 // commandTable is the full PR3 surface. Deferred commands are in
@@ -740,6 +750,10 @@ func runInner(ctx context.Context, args []string, env *Env) int {
 	if done {
 		return code
 	}
+	// Thread the global --log-level override into the Env the
+	// runtime builder reads (the only global flag that affects
+	// runtime behaviour, not just location/profile resolution).
+	env.LogLevelOverride, env.LogLevelSet = g.logLevelFlag, g.logLevelSet
 	if cmdName == "" {
 		// Bare invocation = chat in Python.
 		cmdName, cmdArgs = "chat", nil
@@ -837,9 +851,31 @@ func scanGlobal(args []string, env *Env) (*globalOpts, string, []string, int, bo
 			}
 		case strings.HasPrefix(tok, "--"):
 			// Unabbreviated unknown global flag; allow unambiguous
-			// prefixes of --profile/--config/--help/--version.
+			// prefixes of --profile/--config/--help/--version/
+			// --log-level.
 			name := strings.TrimPrefix(strings.SplitN(tok, "=", 2)[0], "--")
-			if strings.HasPrefix("profile", name) || strings.HasPrefix("config", name) {
+			if strings.HasPrefix("log-level", name) && name != "" {
+				// --log-level: same value rules as --profile/
+				// --config, then spelling validation. The
+				// supplied value is never echoed: it could be
+				// a secret pasted by mistake.
+				var val string
+				if strings.Contains(tok, "=") {
+					val = strings.SplitN(tok, "=", 2)[1]
+				} else {
+					if i+1 >= len(args) || (strings.HasPrefix(args[i+1], "-") && args[i+1] != "-") {
+						fmt.Fprintf(env.stderr(), "castctl: argument --log-level: expected one argument\n")
+						return g, "", nil, 2, true
+					}
+					i++
+					val = args[i]
+				}
+				if !profile.ValidLogLevel(val) {
+					fmt.Fprintf(env.stderr(), "castctl: argument --log-level: invalid log level (expected trace, debug, info, warn, warning, error, fatal, or panic)\n")
+					return g, "", nil, 2, true
+				}
+				g.logLevelFlag, g.logLevelSet = val, true
+			} else if strings.HasPrefix("profile", name) || strings.HasPrefix("config", name) {
 				// Treat as the full flag with the same value rules.
 				isProfile := strings.HasPrefix("profile", name)
 				var val string

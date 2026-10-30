@@ -35,10 +35,16 @@ type SingleConfig struct {
 	// (import-path wiring is a follow-up).
 	WireGuardDNS map[string][]string
 
+	// Log is the top-level "log" block (nil when absent; see
+	// internal/profile/log.go). Absence is preserved on save:
+	// defaults are runtime-only and never written back.
+	Log *LogConfig
+
 	rawOutbounds    [][]byte
 	rawEndpoints    [][]byte
 	rawDNS          []byte
 	rawWireGuardDNS []byte
+	rawLog          []byte
 	rawProfiles     map[string][]byte
 }
 
@@ -139,6 +145,7 @@ var singleTopLevelKeys = map[string]bool{
 	"endpoints":       true,
 	"dns":             true,
 	"wireguard_dns":   true,
+	"log":             true,
 }
 
 var profileKeys = map[string]bool{
@@ -280,6 +287,18 @@ func ParseSingleConfig(data []byte, baseDir string) (*SingleConfig, error) {
 		}
 		cfg.WireGuardDNS = wgDNS
 		cfg.rawWireGuardDNS = raw
+	}
+	if v, ok := obj.get("log"); ok {
+		raw, err := rawOf(v)
+		if err != nil {
+			return nil, err
+		}
+		logCfg, err := parseLogBlock(v)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Log = logCfg
+		cfg.rawLog = raw
 	}
 
 	for _, name := range profilesObj.keys {
@@ -1235,6 +1254,20 @@ func buildSingleFileOrdered(cfg *SingleConfig) (*orderedObject, error) {
 			return nil, err
 		}
 		root.set("wireguard_dns", v)
+	}
+	if len(cfg.rawLog) > 0 {
+		v, err := decodeOrderedJSON(cfg.rawLog)
+		if err != nil {
+			return nil, err
+		}
+		root.set("log", v)
+	} else if cfg.Log != nil {
+		entry := newOrderedObject()
+		entry.set("disabled", cfg.Log.Disabled)
+		entry.set("level", cfg.Log.Level)
+		entry.set("output", cfg.Log.Output)
+		entry.set("timestamp", cfg.Log.Timestamp)
+		root.set("log", entry)
 	}
 	return root, nil
 }
