@@ -68,10 +68,16 @@ func WakeVM(ctx context.Context, client *http.Client, cookies, accessToken, vmID
 	}
 	v, jerr := decodeJSONValue(data)
 	if jerr != nil {
-		if len(data) > 300 {
-			data = data[:300]
+		// Redact the full body first, then truncate to 300
+		// bytes: truncating the raw body first can leave a
+		// secret fragment too short for the redaction
+		// floors. The byte cut (which may split a multi-byte
+		// rune, as documented above) is unchanged.
+		text := redactFreeText(string(data))
+		if len(text) > 300 {
+			text = text[:300]
 		}
-		return status, string(data), nil
+		return status, text, nil
 	}
 	return status, v, nil
 }

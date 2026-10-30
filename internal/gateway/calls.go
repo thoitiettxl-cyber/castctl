@@ -162,7 +162,7 @@ func (g *Gateway) Request(ctx context.Context, method string, opts conn.RequestO
 	}
 	payload := bytes.Join(chunks, nil)
 	if *status < 200 || *status >= 300 {
-		return nil, withPhase(&conn.GatewayError{Status: int(*status), Payload: redactFreeText(truncatePayload(payload, 500))}, PhaseStreaming)
+		return nil, withPhase(&conn.GatewayError{Status: int(*status), Payload: redactTruncatePayload(payload, 500)}, PhaseStreaming)
 	}
 	return payload, nil
 }
@@ -182,11 +182,11 @@ func (g *Gateway) CallJSON(ctx context.Context, method string, opts conn.Request
 	}
 	d, err := decodeJSONValue(raw)
 	if err != nil {
-		head := raw
-		if len(head) > 200 {
-			head = head[:200]
-		}
-		return nil, withPhase(&conn.GatewayError{Status: -1, Payload: redactFreeText(fmt.Sprintf("non-JSON response: %q", string(head)))}, PhaseStreaming)
+		// Redact the full response first, then truncate:
+		// truncating the raw head first can leave a secret
+		// fragment too short for the redaction floors.
+		head := redactTruncatePayload(raw, 200)
+		return nil, withPhase(&conn.GatewayError{Status: -1, Payload: redactFreeText(fmt.Sprintf("non-JSON response: %q", head))}, PhaseStreaming)
 	}
 	if m, ok := d.(map[string]any); ok {
 		if okVal, isBool := m["ok"].(bool); isBool && !okVal {

@@ -108,7 +108,7 @@ func FetchSessionInfo(ctx context.Context, client *http.Client, cookies string) 
 	}
 	raw, err := decodeJSONValue(data)
 	if err != nil {
-		return SessionInfo{}, conn.NewAuthError(redactFreeText(fmt.Sprintf("api/session returned non-JSON (%q)", truncateText(string(data), 80))))
+		return SessionInfo{}, conn.NewAuthError(fmt.Sprintf("api/session returned non-JSON (%q)", redactTruncateText(string(data), 80)))
 	}
 	info, ok := raw.(map[string]any)
 	if !ok {
@@ -140,7 +140,7 @@ func FetchAccessToken(ctx context.Context, client *http.Client, cookies string) 
 		return "", err
 	}
 	if status != 200 {
-		return "", conn.NewAuthError(redactFreeText(fmt.Sprintf("auth/check -> %d %s (cookies expired? re-export)", status, truncateText(string(data), 120))))
+		return "", conn.NewAuthError(fmt.Sprintf("auth/check -> %d %s (cookies expired? re-export)", status, redactTruncateText(string(data), 120)))
 	}
 	d, err := decodeJSONObject(data)
 	if err != nil {
@@ -169,7 +169,7 @@ func FetchHatchToken(ctx context.Context, client *http.Client, cookies, accessTo
 		return "", err
 	}
 	if status != 200 {
-		return "", conn.NewAuthError(redactFreeText(fmt.Sprintf("hatch/token -> %d %s", status, truncateText(string(data), 160))))
+		return "", conn.NewAuthError(fmt.Sprintf("hatch/token -> %d %s", status, redactTruncateText(string(data), 160)))
 	}
 	d, err := decodeJSONObject(data)
 	if err != nil {

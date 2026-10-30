@@ -195,3 +195,93 @@ func TestFetchHatchToken403ShapesRedacted(t *testing.T) {
 		})
 	}
 }
+
+// TestFetchHatchToken403QuoteCombinations (loop 4, (b)): all
+// four JSON quote combinations through the real FetchHatchToken
+// 403 path. The double-key/single-value form is the loop-3
+// survivor and must be stripped here, not only in SafeString.
+func TestFetchHatchToken403QuoteCombinations(t *testing.T) {
+	t.Parallel()
+	const val = "LOGFIX-GWQUOTE-83af10"
+	shapes := []struct {
+		name string
+		body string
+	}{
+		{"double-double", `{"token": "` + val + `"}`},
+		{"single-single", `{'token': '` + val + `'}`},
+		{"double-single", `{"token": '` + val + `'}`},
+		{"single-double", `{'token': "` + val + `"}`},
+	}
+	for _, sh := range shapes {
+		t.Run(sh.name, func(t *testing.T) {
+			handler := gatewaytest.HandlerRoundTripper(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(403)
+				_, _ = w.Write([]byte(sh.body))
+			}))
+			client := &http.Client{Transport: handler}
+			_, err := FetchHatchToken(context.Background(), client, fakeCookie, "AT", "vm-1")
+			if err == nil {
+				t.Fatal("FetchHatchToken(403) = nil, want an AuthError")
+			}
+			var ae *conn.AuthError
+			if !errors.As(err, &ae) {
+				t.Fatalf("err = %T, want *conn.AuthError", err)
+			}
+			got := err.Error()
+			if !strings.Contains(got, "403") {
+				t.Errorf("error %q, want the 403 status (proves the fake body entered the path)", got)
+			}
+			if strings.Contains(got, val) {
+				t.Errorf("FetchHatchToken error %q contains fixture value %q", got, val)
+			}
+			if !strings.Contains(got, "[redacted]") {
+				t.Errorf("FetchHatchToken error %q, want a [redacted] marker", got)
+			}
+		})
+	}
+}
+
+// TestFetchHatchToken403ObservationShapes (loop 4, (c)): the
+// four observation shapes through the real FetchHatchToken 403
+// path: unicode-escaped key, numeric JSON value, digitless
+// fragment, percent-encoded key name.
+func TestFetchHatchToken403ObservationShapes(t *testing.T) {
+	t.Parallel()
+	shapes := []struct {
+		name      string
+		body      string
+		forbidden []string
+	}{
+		{"unicode-escaped-key", `{"tok\u0065n": "LOGFIX-GWUNI-22d9f0"}`, []string{"LOGFIX-GWUNI-22d9f0"}},
+		{"numeric-value", `{"token": 987654321}`, []string{"987654321"}},
+		{"digitless-fragment", "see #LOGFIXGWFRAG-abcdef", []string{"LOGFIXGWFRAG-abcdef"}},
+		{"pct-encoded-key", "%61uth_token=LOGFIX-GWPCTKEY-51bc07", []string{"LOGFIX-GWPCTKEY-51bc07"}},
+		{"pct-encoded-key-equals", "%61uth_token%3DLOGFIX-GWPCTKEY-51bc07", []string{"LOGFIX-GWPCTKEY-51bc07"}},
+	}
+	for _, sh := range shapes {
+		t.Run(sh.name, func(t *testing.T) {
+			handler := gatewaytest.HandlerRoundTripper(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(403)
+				_, _ = w.Write([]byte(sh.body))
+			}))
+			client := &http.Client{Transport: handler}
+			_, err := FetchHatchToken(context.Background(), client, fakeCookie, "AT", "vm-1")
+			if err == nil {
+				t.Fatal("FetchHatchToken(403) = nil, want an AuthError")
+			}
+			var ae *conn.AuthError
+			if !errors.As(err, &ae) {
+				t.Fatalf("err = %T, want *conn.AuthError", err)
+			}
+			got := err.Error()
+			if !strings.Contains(got, "403") {
+				t.Errorf("error %q, want the 403 status (proves the fake body entered the path)", got)
+			}
+			for _, v := range sh.forbidden {
+				if strings.Contains(got, v) {
+					t.Errorf("FetchHatchToken error %q contains fixture value %q", got, v)
+				}
+			}
+		})
+	}
+}

@@ -24,6 +24,27 @@ func redactFreeText(s string) string {
 	return logging.SafeString(s)
 }
 
+// redactTruncateText redacts the FULL text first (SafeString),
+// then truncates the redacted text to n runes. The order is
+// load-bearing: truncating first can leave a fragment of a
+// secret too short for the redaction floors (a bare fragment
+// under 16 characters, a Basic tail under 8) or a shape no
+// pattern matches once cut (a label split by the cut). Every
+// call site that truncates server response text must use
+// this helper (or redactTruncatePayload), never
+// truncateText/truncatePayload on raw text.
+func redactTruncateText(text string, n int) string {
+	return truncateText(redactFreeText(text), n)
+}
+
+// redactTruncatePayload is redactTruncateText for byte
+// payloads: redact the full payload first, then truncate to
+// n bytes with UTF-8 validation, mirroring Python's
+// payload[:n].decode("utf-8", "replace").
+func redactTruncatePayload(payload []byte, n int) string {
+	return truncatePayload([]byte(redactFreeText(string(payload))), n)
+}
+
 // redactErrorString strips credentials from an error string
 // (item (c), Boss-approved for PR2). It is the shared string
 // redactor from internal/redact (redact.String): URL userinfo
