@@ -211,8 +211,22 @@ func dialGateway(ctx context.Context, dialer OutboundDialer, wsURL string, secur
 // NetDialTLSContext returns that conn. gorilla's
 // websocket.NewClient must NEVER be used here: on a pre-TLS conn
 // it attempts a second TLS handshake and fails (probe evidence:
-// "tls: first record does not look like a TLS handshake"). No
-// ALPN is pinned here; TLS details belong to the outbound Dialer.
+// "tls: first record does not look like a TLS handshake").
+// ALPN is pinned to ["http/1.1"] for THIS dial only, and only
+// here: gorilla writes an HTTP/1.1 upgrade and parses the reply
+// as HTTP/1.1, so negotiating h2 (offered first by the uTLS
+// Chrome preset) can never upgrade — the conn would speak h2
+// while gorilla speaks HTTP/1.1. The pin is WS-dial-scoped: it
+// is passed as the WebSocketDial TLS options, never set in
+// GatewayTLSOptions, so the HTTPS auth chain (which legitimately
+// negotiates h2) is untouched. Trade-off, recorded deliberately:
+// the WebSocket ClientHello ALPN then differs from a real Chrome
+// hello (["h2", "http/1.1"]) and from the profile's HTTPS
+// fingerprint — fingerprint consistency is sacrificed for the
+// WS HTTP/1.1 requirement, which gorilla cannot meet any other
+// way. The pin does not claim to fix any particular live peer:
+// a peer that answers with a plaintext error line still fails
+// with the same error (see ws_handshake_test.go).
 // The upgrade is bounded separately by wsTimeout (item (b)). It
 // returns the connection plus the dial and upgrade durations in
 // milliseconds. Dial errors are redacted for safe logging (item
@@ -223,7 +237,7 @@ func dialWebSocket(ctx context.Context, dialer OutboundDialer, wsURL string, sec
 		return nil, 0, 0, err
 	}
 	dialStart := time.Now()
-	raw, err := dialer.WebSocketDial(ctx, "tcp", host, port, secure, option.OutboundTLSOptions{})
+	raw, err := dialer.WebSocketDial(ctx, "tcp", host, port, secure, option.OutboundTLSOptions{Enabled: true, ALPN: []string{"http/1.1"}})
 	dialMS := time.Since(dialStart).Milliseconds()
 	if err != nil {
 		if ctx.Err() != nil {

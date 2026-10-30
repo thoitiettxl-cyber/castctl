@@ -20,13 +20,18 @@ import (
 // UTLS block is left disabled (reality then fails inside sing-box,
 // which requires uTLS). The caller's options are never mutated.
 //
-// ALPN is deliberately NOT pinned here: it passes through from the
-// profile's TLS options / sing-box defaults. The h2-vs-http/1.1
-// question is OPEN (sing-box uTLS appends "http/1.1" after a lone
-// "h2"; see UTLSClientConfig.SetNextProtos in sing-box common/tls).
-// Whether the real gateway negotiates h2 or http/1.1 under the chrome
-// fingerprint is decided by the operator's direct (non-proxied) TLS
-// probe, not by assumption in this code.
+// ALPN is deliberately NOT pinned here, in GatewayTLSOptions: it
+// passes through from the profile's TLS options / sing-box
+// defaults, so the HTTPS auth chain may still negotiate h2. That
+// does not mean the gateway path is unpinned: the WebSocket dial
+// pins ALPN to ["http/1.1"] at its own call site
+// (internal/gateway/connector.go:240) because gorilla speaks
+// HTTP/1.1 only. For non-WS traffic the h2-vs-http/1.1 question
+// is OPEN (sing-box uTLS appends "http/1.1" after a lone "h2";
+// see UTLSClientConfig.SetNextProtos in sing-box common/tls);
+// whether it negotiates h2 or http/1.1 under the chrome
+// fingerprint is decided by the profile options and the peer,
+// not by assumption in this code.
 func GatewayTLSOptions(opts option.OutboundTLSOptions) option.OutboundTLSOptions {
 	effective := opts
 	switch {
