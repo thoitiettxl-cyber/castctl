@@ -52,10 +52,31 @@ import (
 // A profile that already carries its own dns block, or that
 // resolves WireGuard DNS through its tunnel (branch 2, which
 // an own block would shadow), also refuses: distributing onto
-// either would change behaviour silently.
+// either would change behaviour silently. When no non-nil
+// profile would receive a block (zero profiles, or every
+// profile entry nil), the run refuses instead of deleting the
+// top-level section without distributing it.
 func distributeTopLevelDNS(candidate *SingleConfig, baseDir string) (distributed bool, refusal string, err error) {
 	if candidate == nil || candidate.DNS == nil {
 		return false, "", nil
+	}
+	// No-recipient guard (F1): distribution that would delete
+	// the top-level section while no profile receives a copy
+	// is a silent deletion, not a distribution. Refuse
+	// all-or-nothing, before the empty-section guard below
+	// (which names a profile and therefore needs a recipient
+	// to exist) and before any mutation or validation: with
+	// only nil entries, validation itself cannot run safely.
+	hasRecipient := false
+	for _, name := range candidate.ProfileNames() {
+		if candidate.Profiles[name] != nil {
+			hasRecipient = true
+			break
+		}
+	}
+	if !hasRecipient {
+		refusal = "dns distribution refused: top-level dns section is present but no profile would receive a distributed dns block (no non-nil profile entries); refusing to delete the section without distributing it (see docs/config.md)"
+		return false, refusal, newConfigError(refusal)
 	}
 	if len(candidate.DNS.Servers) == 0 && len(candidate.Profiles) > 0 {
 		refusal = fmt.Sprintf("dns distribution refused: profile %q: top-level dns section has no servers; refusing to distribute an empty dns section (see docs/config.md)", candidate.ProfileNames()[0])

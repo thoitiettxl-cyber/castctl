@@ -496,9 +496,10 @@ func MigrateFrom(sourceDir, destDir string, write bool) (*MigrateResult, error) 
 		// exactly the dns move, nothing else). A differing
 		// config falls through to refuse-overwrite below, with
 		// no distribution attempted. A distribution refusal
-		// (unreachable detour, WireGuard-shadowed profile, or
-		// an invalid distributed candidate) is an error: the
-		// whole run refuses, exit 2, nothing is written.
+		// (no profile to receive a block, unreachable detour,
+		// WireGuard-shadowed profile, or an invalid distributed
+		// candidate) is an error: the whole run refuses,
+		// exit 2, nothing is written.
 		if candidate.DNS != nil {
 			otherwiseMigrated, cerr := configsEqual(stripDNS(existing), stripDNS(candidate))
 			if cerr != nil {
