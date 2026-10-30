@@ -1768,6 +1768,105 @@ func TestMigrateFromCrossDirCollision(t *testing.T) {
 	})
 }
 
+// TestSameDirResolvesSymlinks (R6): sameDir compares directories
+// after resolving symlinks, so an alias of a directory counts as
+// the same directory. A path that cannot be resolved (dangling
+// symlink, missing directory) is treated as different — fail-open
+// to cross-dir logic, never a crash, never a false same.
+func TestSameDirResolvesSymlinks(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	real := filepath.Join(home, "castctl")
+	if err := os.MkdirAll(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(home, "link")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(home, "other")
+	if err := os.MkdirAll(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dangling := filepath.Join(home, "dangling")
+	if err := os.Symlink(filepath.Join(home, "no-such-dir"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	if !sameDir(alias, real) || !sameDir(real, alias) {
+		t.Error("symlink alias of a directory must compare same")
+	}
+	if !sameDir(real, real) {
+		t.Error("a directory must compare same with itself")
+	}
+	if sameDir(real, other) {
+		t.Error("two different directories must not compare same")
+	}
+	if sameDir(dangling, real) || sameDir(real, dangling) {
+		t.Error("a dangling symlink must compare different (fail-open)")
+	}
+	if sameDir(filepath.Join(home, "missing-a"), filepath.Join(home, "missing-b")) {
+		t.Error("two different missing paths must not compare same")
+	}
+}
+
+// TestMigrateFromSymlinkAlias (R6): --from naming the destination
+// through a symlink takes same-dir behaviour: the default skip
+// applies (a present single file is already-migrated, not a
+// legacy source to parse), and a write lands in the real
+// directory with destination-spelled paths.
+func TestMigrateFromSymlinkAlias(t *testing.T) {
+	t.Parallel()
+
+	t.Run("single present is already-migrated", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		dest := filepath.Join(home, "castctl")
+		writeFile(t, filepath.Join(dest, "config.json"), `{"profiles":{"default":{"node_id":"N1","vm_id":"V1","auto_approve":"off","auto_allow_once":false}}}`, 0o600)
+		alias := filepath.Join(home, "link")
+		if err := os.Symlink(dest, alias); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := os.ReadFile(filepath.Join(dest, "config.json"))
+		for _, write := range []bool{false, true} {
+			result, err := MigrateFrom(alias, dest, write)
+			if err != nil {
+				t.Fatalf("MigrateFrom(alias, write=%v) err = %v; want already-migrated", write, err)
+			}
+			if result.Reason != "already-migrated" || result.Migrated {
+				t.Errorf("MigrateFrom(alias, write=%v) = %+v; want already-migrated", write, result)
+			}
+		}
+		after, _ := os.ReadFile(filepath.Join(dest, "config.json"))
+		if string(after) != string(before) {
+			t.Error("alias migrate rewrote the destination config")
+		}
+	})
+
+	t.Run("legacy write uses destination spelling", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		dest := filepath.Join(home, "castctl")
+		writeFile(t, filepath.Join(dest, "config.json"), `{"auto_approve":"always","node_id":"MAIN-NODE","vm_id":"FAKE-VM"}`, 0o600)
+		alias := filepath.Join(home, "link")
+		if err := os.Symlink(dest, alias); err != nil {
+			t.Fatal(err)
+		}
+		result, err := MigrateFrom(alias, dest, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Migrated {
+			t.Fatalf("MigrateFrom(alias) = %+v; want migrated", result)
+		}
+		doc := readJSONFile(t, filepath.Join(dest, "config.json"))
+		profiles, _ := doc["profiles"].(map[string]any)
+		def, _ := profiles["default"].(map[string]any)
+		if got, _ := def["cookies_file"].(string); got != filepath.Join(dest, "cookies.txt") {
+			t.Errorf("written cookies_file = %q; want destination spelling %q", got, filepath.Join(dest, "cookies.txt"))
+		}
+	})
+}
+
 func TestMigrateCarriesExistingDNSVerbatim(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()

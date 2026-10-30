@@ -447,7 +447,8 @@ default config directory when no --config is given); the source
 directory is never written. Without --from, source and
 destination are the --config file's directory. A missing source
 directory exits 2. When --from names the destination directory
-itself, behaviour is exactly as without --from.
+itself, including through a symlink, behaviour is exactly as
+without --from.
 
 When the existing single config has no "dns" section and every
 profile shares one outbound tag, --write also authors the interim

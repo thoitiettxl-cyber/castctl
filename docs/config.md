@@ -230,8 +230,14 @@ stay in the source as the backup. Cookies files stay in the
 source too: migrated entries point at them by absolute path.
 A missing source directory exits 2 and writes nothing anywhere.
 Refuse-overwrite applies at the destination. When `--from`
-names the destination directory itself, behaviour is exactly
-the in-directory behaviour above. The dry-run plan reports
+names the destination directory itself, including through a
+symlink, behaviour is exactly the in-directory behaviour above:
+source and destination are one directory, and the run writes
+the single config to that directory as usual. The
+source-never-written guarantee applies only when `--from`
+resolves to a different directory than the destination; when
+either path cannot be resolved, the two are treated as
+different directories. The dry-run plan reports
 `source_dir` and `destination_dir` (paths only, no file
 contents) and writes nothing to either directory.
 

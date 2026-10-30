@@ -764,6 +764,32 @@ func TestConfigMigrateFromCollision(t *testing.T) {
 	}
 }
 
+// TestConfigMigrateFromSymlinkAlias (R6): --from naming the
+// destination directory through a symlink behaves exactly as
+// without --from: a present single file is already-migrated.
+func TestConfigMigrateFromSymlinkAlias(t *testing.T) {
+	home := t.TempDir()
+	destDir := filepath.Join(home, "castctl")
+	if err := os.MkdirAll(destDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	destFile := filepath.Join(destDir, "config.json")
+	if err := os.WriteFile(destFile, []byte(`{"profiles":{"default":{"node_id":"N1","vm_id":"V1","auto_approve":"off","auto_allow_once":false}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(home, "link")
+	if err := os.Symlink(destDir, alias); err != nil {
+		t.Fatal(err)
+	}
+	env, out, errb := profileEnv(t, destFile)
+	if code := runProfile(t, env, out, errb, destFile, "config", "migrate", "--from", alias); code != 0 {
+		t.Fatalf("migrate --from <symlink alias>: code=%d, want 0; err=%q out=%q", code, errb.String(), out.String())
+	}
+	if !strings.Contains(out.String(), "already-migrated") {
+		t.Errorf("migrate --from <symlink alias>: %q; want already-migrated", out.String())
+	}
+}
+
 func TestDefaultPathRegression(t *testing.T) {
 	// Under a controlled XDG_CONFIG_HOME, the default config path
 	// is Join(UserConfigDir(), "castctl", "config.json"): a missing

@@ -128,9 +128,10 @@ func Migrate(baseDir string, write bool) (*MigrateResult, error) {
 // is read-only: it is never written, locked, or modified in any way,
 // and legacy files there keep serving as the backup. The destination
 // holds the config lock in write mode, the refuse-overwrite decision,
-// and the atomic 0600 write. When sourceDir == destDir (compared by
-// cleaned absolute path) behaviour is exactly Migrate's. When they
-// differ, the source directory must exist and be a directory, else
+// and the atomic 0600 write. When sourceDir == destDir (compared
+// after resolving symlinks, so a symlink alias of the destination
+// counts as the destination itself) behaviour is exactly Migrate's.
+// When they differ, the source directory must exist and be a directory, else
 // the run is an exit-2 error that writes nothing; a single-format
 // file in the source is not copied — the strict legacy parser
 // refuses it as a profile error, like any other non-legacy source
@@ -151,6 +152,15 @@ func MigrateFrom(sourceDir, destDir string, write bool) (*MigrateResult, error) 
 		result.SourceDir = destDir
 	}
 	same := sameDir(sourceDir, destDir)
+	if same {
+		// An alias spelling of the destination takes same-dir
+		// behaviour exactly: every later path (discovery,
+		// cookies defaults, the written config) uses the
+		// destination spelling, so the run is byte-identical
+		// to one invoked without --from.
+		sourceDir = destDir
+		result.SourceDir = destDir
+	}
 	if !same {
 		info, serr := os.Stat(sourceDir)
 		if serr != nil {
@@ -480,19 +490,33 @@ func MigrateFrom(sourceDir, destDir string, write bool) (*MigrateResult, error) 
 	return result, nil
 }
 
-// sameDir reports whether two directory paths name the same directory,
-// compared by cleaned absolute path. Symlinked aliases of one
-// directory compare unequal; that is safe (the source is read-only
-// and the destination write lands in the same physical directory
-// either way), and no symlink resolution is attempted on a
-// destination that may not exist yet.
+// sameDir reports whether two directory paths name the same
+// directory, compared by absolute path after resolving symlinks:
+// a symlink alias of a directory compares same as the directory
+// itself. When either path cannot be resolved (dangling symlink,
+// missing directory), its cleaned absolute path is compared
+// instead: resolution failure treats the directories as different
+// (fail-open to cross-dir logic), never as same, and never a
+// crash. No symlink resolution is attempted beyond the two paths
+// themselves.
 func sameDir(a, b string) bool {
 	absA, errA := filepath.Abs(a)
-	absB, errB := filepath.Abs(b)
-	if errA != nil || errB != nil {
-		return filepath.Clean(a) == filepath.Clean(b)
+	if errA != nil {
+		absA = a
 	}
-	return filepath.Clean(absA) == filepath.Clean(absB)
+	absB, errB := filepath.Abs(b)
+	if errB != nil {
+		absB = b
+	}
+	absA = filepath.Clean(absA)
+	absB = filepath.Clean(absB)
+	if resolved, err := filepath.EvalSymlinks(absA); err == nil {
+		absA = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(absB); err == nil {
+		absB = resolved
+	}
+	return absA == absB
 }
 
 // readExistingSingle reads baseDir/config.json if present. It returns
