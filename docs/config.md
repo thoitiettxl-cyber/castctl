@@ -136,7 +136,13 @@ error class, body length (byte count — when the producer
 knows the wire length: a known 0-byte body renders
 `body_length=0`, while an unknown length renders no
 `body_length` field at all, never the length of the summary
-text), content-type (media type, parameters dropped), and specific known-safe fields
+text; the subscription server-action call's 401/403 branch is
+an unknown-length case — it reads the body, capped at 4 MiB,
+before checking the status, then discards it and returns 0
+with the length marked unknown (the read length is discarded);
+no summary is rendered from this branch at all — the error is
+a status-only AuthError, returned immediately — so no
+`body_length` is reported from that branch), content-type (media type, parameters dropped), and specific known-safe fields
 parsed by key from known Muse response schemas — the `error`
 field of the `{"ok":false,"error":...}` / `{"success":...,
 "error":...}` envelopes, the `status` field of the
@@ -154,20 +160,43 @@ payload bytes is waived; error-kind classification and retry
 semantics are unchanged.)
 
 The `approveAll` / `logAutoApproved` stderr lines are
-structural, not redacted prose: they emit no peer free text
-at all. An approval title renders as `title_length` only
+structural in their approval fields, not redacted prose: the
+title, options, id, decision, kind, and scope slots emit no
+peer free text at all. An approval title renders as `title_length` only
 (the title's BYTE length, the same byte convention as
 `body_length`); offered decision options render as
-`option_count` only (the number of options); an approval id
+`option_count` only (the number of options), and only on skip
+renderings — the `approveAll` skipped line and the skip-error
+`underlying` slot on the `SKIPPED` / `FAILED` lines — the
+auto-approved lines carry no options slot, only `title_length`; an approval id
 renders only if it is 1–64 runes of `[A-Za-z0-9_-]`,
 else `[omitted]`; a decision renders only if it is one of
 `allow_always`, `allow_once`, `allow_session`,
 `allow_today`, else `[omitted]`; a kind renders only if it
 is one of `browse`, `network_access`, `shell`, else
 `[omitted]`; a scope always renders `[omitted]` (it is an
-unconstrained host string, so no enum set exists). The
-SafeString backstop is not the control on these lines and
-is unchanged. JSON stdout data output is unaffected: it
+unconstrained host string, so no enum set exists). Carve-out:
+the `SKIPPED` and `FAILED` lines in `logAutoApproved` also carry
+an `underlying` slot for the decide error, and that slot is NOT
+structural. For a skip error (no forever option offered) it
+renders structurally as `no forever option option_count=N`; for
+any other decide error it renders via the settled `SummarizeErr`
+rule: the `LogSummary` of the first error in the chain that
+implements it — a `GatewayError` renders its body allowlist
+summary; an `AuthError` renders `conn: auth_failed
+message_length=N` only; a `ConnectionError` renders its
+cause's `LogSummary` when the cause has one, otherwise
+`conn: connection error error_length=N` (bare `conn:
+connection error` with no cause); a close-summary error
+renders `gateway: websocket closed (close_code=N
+reason_length=N)` — and an error with no `LogSummary` in the
+chain renders via SafeString). Nothing here
+implies `underlying` is structural. The
+SafeString backstop is not the control on the structural slots
+and is unchanged; on the `underlying` slot it remains the
+rendering for errors with no `LogSummary` in the chain, via
+`SummarizeErr`.
+JSON stdout data output is unaffected: it
 still carries the full title, options, id, kind, scope,
 and decision.
 
@@ -178,12 +207,48 @@ with NBSP (U+00A0) -- e.g. `{"token"<NBSP>: "..."}` -- bypasses
 SafeString's quoted-key scan. (O2) Wider Unicode spaces
 (U+2009, U+3000, U+202F) between a label and its separator
 bypass the closed separator set. (O3) A `public_key` label
-separated by NBSP bypasses the listed vocabulary. None of
-these shapes can leak through the `approveAll` /
-`logAutoApproved` stderr lines above, because those lines
-emit no peer free text at all (only lengths, counts, gated
-ids, and enum members). What would settle each shape is a
-future explicit decision about whether SafeString's scanner
+separated by NBSP in the `=` form (`public_key<NBSP>=...`)
+bypasses the listed vocabulary: `rePublicKey` allows only
+ASCII whitespace around `=`, so the NBSP form misses it, and
+the `reKeyValue` fallback leaves a `public_key` label
+unchanged. The `:` form does not bypass: `reKeyColon`'s closed
+separator set includes NBSP, so `public_key<NBSP>: ...` is
+caught and reduced to the `wgKeyPrefix` form (the first 8
+runes of the value, plus an ellipsis when the value is longer
+than 8 runes; a value of 8 or fewer runes is returned
+unchanged). (O4) An escaped-quote
+JSON pair — e.g. `{\"token\": \"...\"}` — whose quoted key or
+value string itself contains an unescaped literal newline or
+carriage return reached by the scan bypasses SafeString's
+escaped-quote scan, which fails on a literal newline or
+carriage return at a scan position inside a quoted string
+while the plain-quote scan tolerates a literal newline inside
+the string — so the pair is left verbatim. A newline or
+carriage return consumed as the second byte of a backslash
+escape pair does not defeat the scan (the scan consumes a
+backslash plus the next byte regardless, so the newline
+check, which applies only at a scan position, never sees the
+second byte). Separator
+newlines do not trigger this: newlines between the key and
+the colon, or between the colon and the value, are skipped
+before the colon/value scan, so a separator newline alone
+does not defeat the pair. `%q` cannot create this condition:
+it escapes a literal newline to the two-byte sequence `\n`.
+That is not a redaction guarantee: an unescaped literal
+newline is sufficient, not necessary, for the bypass — a
+`%q` rendering of text that already contains escaped quotes
+is a separate route that doubles the backslashes and leaves
+that escaped-quoted pair verbatim, secret included, with no
+newline anywhere, while other parts of the same rendering,
+such as a `token:` pair, still redact. None of these shapes
+can leak through
+the structural slots of the `approveAll` / `logAutoApproved`
+stderr lines above, because those slots emit no peer free text
+at all (only lengths, counts, gated ids, and enum members).
+That statement does not cover the `underlying` slot on the
+`SKIPPED` / `FAILED` lines, which renders via `SummarizeErr`
+(see above). What would settle each shape is a future explicit
+decision about whether SafeString's scanner
 should be extended to cover it; no scanner change is made
 or implied here, and no claim is made that the shapes are
 fixed elsewhere.
@@ -192,8 +257,17 @@ The events castctl emits at debug/trace
 are: `dns_source` (resolved DNS source + first server tag),
 `outbound_chain` (profile + detour-chain tags), dial
 start/done with a per-connection ID, `tls_alpn` (negotiated
-protocol string only), `ws_handshake` (parsed status code or
-token only), and retries (attempt counter + summarised error).
+protocol string only), `ws_handshake` (only the parsed
+handshake status: a 3-digit code as `status_code` (from a
+response) or `status_token` (from a malformed status line); a
+numeric response code whose decimal length is not 3 renders
+as its length only under `status_code_length`; a malformed-
+status token that is token-shaped — ASCII letters, digits,
+`.`, `_`, `-` only — but not a 3-digit code renders as its
+length only under `status_token_length`; no token at all
+for a shape-invalid, empty, or absent token, in which case no
+event line is emitted and the failure error renders a fixed
+message), and retries (attempt counter + summarised error).
 
 `config migrate` carries an existing `log` block into the new
 file verbatim and never invents one: a migrated file without a
