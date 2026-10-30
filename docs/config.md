@@ -757,11 +757,18 @@ of migrate.
     instead of silently changing the effective resolver;
   - a server detour is unreachable from its profile's
     outbound (never silently rewritten to the own tag);
+  - no profile would receive a distributed block: the file
+    carries a top-level `dns` section but has zero profiles,
+    so distribution would delete the section without
+    distributing it; the run refuses instead of silently
+    deleting it;
   - the distributed candidate fails validation (duplicate
-    server tags, a `final` naming no server, an empty
-    section, or a WireGuard key-sharing failure): the
-    candidate is validated exactly as a hand-written file
-    before any write.
+    server tags, a `final` naming no server, a `hosts` or
+    `fakeip` server, or a WireGuard key-sharing failure):
+    the candidate is validated exactly as a hand-written
+    file before any write. An empty section (`{}`) refuses
+    via an explicit guard before distribution, not via
+    this validation step.
 - **Idempotent.** A second run on a distributed file
   reports `already-migrated`, writes nothing, and leaves
   the file byte-identical. A config with no top-level

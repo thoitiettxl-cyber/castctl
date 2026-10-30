@@ -6,6 +6,7 @@ package profile
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sagernet/sing-box/option"
 )
@@ -178,7 +179,7 @@ func distributeTopLevelDNS(candidate *SingleConfig, baseDir string) (distributed
 		}
 		parsed, perr := parseDNS(raw)
 		if perr != nil {
-			refusal = fmt.Sprintf("dns distribution refused: profile %q: distributed dns block does not parse: %v", name, perr)
+			refusal = fmt.Sprintf("dns distribution refused: profile %q: distributed dns block does not parse: %s", name, stripErrorPrefix(perr))
 			return false, refusal, newConfigError(refusal)
 		}
 		pending[name] = pendingBlock{raw: raw, parsed: parsed}
@@ -249,10 +250,21 @@ func distributeTopLevelDNS(candidate *SingleConfig, baseDir string) (distributed
 	}
 	if err := validate(); err != nil {
 		restore()
-		refusal = fmt.Sprintf("dns distribution refused: %v", err)
+		refusal = fmt.Sprintf("dns distribution refused: %s", stripErrorPrefix(err))
 		return false, refusal, newConfigError(refusal)
 	}
 	return true, "", nil
+}
+
+// stripErrorPrefix removes the standard "profile: " error prefix
+// from an embedded validation or parse error, so a distribution
+// refusal quoting it does not read "profile: profile ...".
+// Only one leading prefix is removed, and only when present;
+// errors without the prefix pass through unchanged. Local to
+// this file's refusal rendering: shared error formatting is
+// untouched.
+func stripErrorPrefix(err error) string {
+	return strings.TrimPrefix(err.Error(), "profile: ")
 }
 
 // carriesDetour reports whether parsed DNS server options carry

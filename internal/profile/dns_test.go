@@ -445,6 +445,72 @@ func TestWireGuardDNSMapParseAndSave(t *testing.T) {
 	}
 }
 
+// TestWireGuardKeySharingGlobalVsDistributedDifferential (F5f,
+// loop 2, TEST-ONLY): the same WireGuard key-sharing fixture
+// must give the same accept/reject verdict in the global form
+// (top-level dns detour) and in the distributed form (the
+// per-profile block distribution would write). The fail-closed
+// direction is what matters: whenever the global form rejects,
+// the distributed form must reject too, with the key-sharing
+// error, never echoing the key value. Validation semantics are
+// NOT changed to force equivalence.
+func TestWireGuardKeySharingGlobalVsDistributedDifferential(t *testing.T) {
+	ep := func(tag, key string) string {
+		return `{"type":"wireguard","tag":"` + tag + `","address":["10.0.0.2/32"],"private_key":"` + key + `","peers":[{"address":"203.0.113.10","port":51820,"public_key":"FAKE-PUBKEY","allowed_ips":["0.0.0.0/0"]}]}`
+	}
+	outbounds := `[{"type":"selector","tag":"sel","outbounds":["wg-a","wg-b"]}]`
+	for _, tc := range []struct {
+		name   string
+		keyA   string
+		keyB   string
+		reject bool
+	}{
+		{name: "shared key rejects both forms", keyA: "FAKE-KEY", keyB: "FAKE-KEY", reject: true},
+		{name: "distinct keys accept both forms", keyA: "FAKE-KEY-A", keyB: "FAKE-KEY-B", reject: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoints := `[` + ep("wg-a", tc.keyA) + `,` + ep("wg-b", tc.keyB) + `]`
+			global := singleFileJSON(
+				`{"alpha":{"outbound":"sel"}}`,
+				outbounds, endpoints,
+				`{"servers":[{"tag":"gdns","type":"tcp","server":"127.0.0.1","server_port":5354,"detour":"wg-a"}],"final":"gdns"}`,
+			)
+			distributed := singleFileJSON(
+				`{"alpha":{"outbound":"sel","dns":{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353,"detour":"wg-a"}],"final":"dns1"}}}`,
+				outbounds, endpoints, "",
+			)
+			for _, form := range []struct {
+				name string
+				data string
+			}{
+				{name: "global", data: global},
+				{name: "distributed", data: distributed},
+			} {
+				_, err := ParseSingleConfig([]byte(form.data), "/base")
+				if tc.reject && err == nil {
+					t.Errorf("%s form must reject the shared-key fixture, got nil error", form.name)
+					continue
+				}
+				if !tc.reject && err != nil {
+					t.Errorf("%s form must accept the distinct-key fixture, got: %v", form.name, err)
+					continue
+				}
+				if tc.reject {
+					msg := err.Error()
+					for _, want := range []string{"wireguard private key shared", "alpha", "dns", "wg-a", "wg-b"} {
+						if !strings.Contains(msg, want) {
+							t.Errorf("%s form error = %q; want it to name %q", form.name, msg, want)
+						}
+					}
+					if strings.Contains(msg, tc.keyA) {
+						t.Errorf("%s form error echoes the private key value", form.name)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestPerProfileDNSWireGuardKeySharing(t *testing.T) {
 	// Same key via the profile's outbound (wg-a) and its own dns
 	// detour (wg-b) is an error naming the profile and "dns".

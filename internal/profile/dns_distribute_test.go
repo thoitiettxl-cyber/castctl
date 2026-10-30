@@ -797,3 +797,111 @@ func TestMigrateDistributeSelectorMemberOtherInlineDetourRefuses(t *testing.T) {
 		t.Error("refused migrate rewrote the file")
 	}
 }
+
+// TestMigrateDistributeDetourChainKeep (F5b, loop 2): a detour
+// reachable only through another outbound's `detour` field is
+// kept verbatim, like a selector-member detour.
+func TestMigrateDistributeDetourChainKeep(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	base := BaseDir(home)
+	otherSocks := `{"type":"socks","tag":"proxy-other","server":"127.0.0.1","server_port":1081,"version":"5"}`
+	chain := `{"type":"socks","tag":"chain","server":"127.0.0.1","server_port":1080,"version":"5","detour":"proxy-other"}`
+	path := writeDistributedFixture(t, base,
+		`{"p1":{"outbound":"chain"}}`,
+		`[`+chain+`,`+otherSocks+`]`, "",
+		`{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353,"detour":"proxy-other"}],"final":"dns1"}`)
+	if _, err := Migrate(base, true); err != nil {
+		t.Fatal(err)
+	}
+	servers := dnsServers(t, profileDNSDoc(t, path, "p1"))
+	if servers[0]["detour"] != "proxy-other" {
+		t.Errorf("detour = %v; want proxy-other kept verbatim (reachable only through chain's detour field)", servers[0]["detour"])
+	}
+}
+
+// TestMigrateDistributeRefusalHasNoDoubledProfilePrefix (F5c,
+// loop 2): a validation-path refusal must not read
+// "profile: profile ...": the embedded validation error's
+// standard "profile: " prefix must be stripped once when it is
+// quoted inside the distribution refusal.
+func TestMigrateDistributeRefusalHasNoDoubledProfilePrefix(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	base := BaseDir(home)
+	path := writeDistributedFixture(t, base,
+		`{"p1":{"outbound":"proxy-sg"}}`,
+		`[`+fakeSocksOutbound+`]`, "",
+		`{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353},{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5354}],"final":"dns1"}`)
+	before, _ := os.ReadFile(path)
+	result, err := Migrate(base, true)
+	if err == nil {
+		t.Fatalf("duplicate server tags must refuse distribution, got result %+v", result)
+	}
+	if result == nil || result.DNSDistributionRefusal == "" {
+		t.Fatalf("refusal = %+v; want a recorded distribution refusal", result)
+	}
+	for _, s := range []string{result.DNSDistributionRefusal, err.Error()} {
+		if strings.Contains(s, "profile: profile") {
+			t.Errorf("refusal string = %q; want no doubled \"profile: profile\" prefix", s)
+		}
+	}
+	if !strings.Contains(result.DNSDistributionRefusal, `"p1"`) ||
+		!strings.Contains(result.DNSDistributionRefusal, "duplicate") {
+		t.Errorf("refusal = %q; want it to still name profile p1 and the duplicate-tag failure", result.DNSDistributionRefusal)
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Error("refused migrate rewrote the file")
+	}
+}
+
+// TestDistributeSkipsNilProfileEntryInGuards (F5d, loop 2):
+// the c22b818 nil-profile skip, pinned at the distribution
+// function like the existing-block guard. A nil entry among
+// real profiles must be skipped by the guard loops: with a
+// real profile carrying its own dns block, distribution
+// refuses naming that profile, never panics on the nil entry,
+// and leaves both entries untouched. (Parsed configs cannot
+// produce nil entries, so no Migrate-level form of this test
+// exists; the full mixed success path is NOT pinned here —
+// validateTagGraph and the save encoding dereference profile
+// entries, so a nil entry mixed with a distributable profile
+// cannot reach the validation gate. See the writer report.)
+func TestDistributeSkipsNilProfileEntryInGuards(t *testing.T) {
+	t.Parallel()
+	cfg, err := ParseSingleConfig([]byte(singleFileJSON(
+		`{"muse01":{"outbound":"proxy-sg","dns":{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353,"detour":"proxy-sg"}],"final":"dns1"}}}`,
+		`[`+fakeSocksOutbound+`]`, "", "",
+	)), "/base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Profiles["ghost"] = nil
+	globalRaw := []byte(`{"servers":[{"tag":"gdns","type":"tcp","server":"127.0.0.1","server_port":5354,"detour":"proxy-sg"}],"final":"gdns"}`)
+	global, err := parseDNS(globalRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DNS = global
+	cfg.rawDNS = globalRaw
+	distributed, refusal, derr := distributeTopLevelDNS(cfg, "/base")
+	if derr == nil {
+		t.Fatalf("distributeTopLevelDNS with an existing own block must refuse, got distributed=%v refusal=%q", distributed, refusal)
+	}
+	if !strings.Contains(refusal, `"muse01"`) {
+		t.Errorf("refusal = %q; want it to name profile muse01", refusal)
+	}
+	if distributed {
+		t.Error("distributed = true on refusal; want false")
+	}
+	if cfg.Profiles["ghost"] != nil {
+		t.Error("refused distribution materialised the nil profile entry")
+	}
+	if cfg.Profiles["muse01"].DNS.Servers[0].Tag != "dns1" {
+		t.Error("refused distribution mutated the existing own block")
+	}
+	if cfg.DNS != global {
+		t.Error("refused distribution removed the top-level dns section")
+	}
+}
