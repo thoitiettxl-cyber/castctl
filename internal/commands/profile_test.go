@@ -712,6 +712,25 @@ func TestConfigMigrateFrom(t *testing.T) {
 // directory whose legacy profile differs from the destination
 // entry of the same name exits 2 naming both locations, and
 // writes nothing anywhere (dry-run or --write).
+// TestConfigMigrateFromEmpty (R8): an empty --from value is a
+// usage error like every other flag error: exit 2, including a
+// whitespace-only value (trimmed empty).
+func TestConfigMigrateFromEmpty(t *testing.T) {
+	home := t.TempDir()
+	destFile := filepath.Join(home, "castctl", "config.json")
+	env, out, errb := profileEnv(t, destFile)
+	for _, val := range []string{"", "   "} {
+		out.Reset()
+		errb.Reset()
+		if code := runProfile(t, env, out, errb, destFile, "config", "migrate", "--from", val); code != 2 {
+			t.Fatalf("migrate --from %q: code=%d, want 2; err=%q out=%q", val, code, errb.String(), out.String())
+		}
+		if !strings.Contains(errb.String()+out.String(), "--from requires a non-empty directory") {
+			t.Errorf("migrate --from %q output %q; want the usage message", val, errb.String()+out.String())
+		}
+	}
+}
+
 func TestConfigMigrateFromCollision(t *testing.T) {
 	home := t.TempDir()
 	src := filepath.Join(home, "muse-cli")

@@ -1008,7 +1008,7 @@ func cmdConfigMigrate(ctx context.Context, env *Env, g *globalOpts, args []strin
 	if p.strIsSet("from") {
 		sourceDir = strings.TrimSpace(p.str("from"))
 		if sourceDir == "" {
-			return usageErr(fmt.Errorf("--from requires a non-empty directory"))
+			return usageErr(&parserError{msg: "--from requires a non-empty directory"})
 		}
 		if abs, aerr := filepath.Abs(sourceDir); aerr == nil {
 			sourceDir = abs
