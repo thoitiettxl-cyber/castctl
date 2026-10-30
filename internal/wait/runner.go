@@ -47,9 +47,19 @@ const (
 	// quiet (redesign decision D3). A settle proof that finds no
 	// reply is retried at this cadence, driven by the monotonic
 	// clock, so a late reply never waits for a count-0 event or
-	// a server replay. Each re-poll spends at most one history
-	// proof, bounded by historyCtx like every other read.
+	// a server replay. The cadence is a hard gate (see
+	// settlePending): at most one proof per interval, whatever
+	// the terminal flapping or read failures do, plus at most
+	// one proof per subscribe iteration from the per-iteration
+	// throttle. Each proof spends at most one history proof
+	// (≤3 window reads), bounded by historyCtx like every
+	// other read.
 	DefaultSettlePollInterval = 5 * time.Second
+	// minSettlePollInterval is the floor for a caller-supplied
+	// SettlePollInterval: a cadence below the per-read floor
+	// (100ms, see historyCtx) cannot pace anything, so positive
+	// values below it clamp up to it (loop-2 safety N3).
+	minSettlePollInterval = 100 * time.Millisecond
 	// DefaultTimeout is the wait --timeout default.
 	DefaultTimeout = 600 * time.Second
 )
@@ -157,7 +167,8 @@ type Config struct {
 	// ignored terminal (see DefaultSettlePollInterval). Zero
 	// takes the default; a negative value is clamped to the
 	// default, never a disable: disabling the re-poll would
-	// reintroduce the quiet-stream stall.
+	// reintroduce the quiet-stream stall. A positive value
+	// below minSettlePollInterval clamps up to the floor.
 	SettlePollInterval time.Duration
 	HistoryLimits      []int
 	Approver           approvals.Approver
@@ -237,11 +248,15 @@ type Runner struct {
 	settleTried    bool
 	settleKey      string
 	pendingErr     error
-	// lastSettleAttempt is the monotonic time the last settle
-	// proof started (or was evaluated and skipped as
-	// gate-forbidden). The settle re-poll (shouldStop) measures
-	// the cadence from it.
-	lastSettleAttempt time.Time
+	// lastSettleProof is the monotonic time the last settle
+	// proof started a history read. The settle re-poll
+	// (shouldStop) and the interval gate (settlePending)
+	// measure from it. It is stamped only when a proof
+	// actually reads: evaluations skipped for an unknown
+	// boundary stamp nothing, so they neither delay the
+	// first real proof nor churn resubscribes. Zero means
+	// no proof has read yet.
+	lastSettleProof time.Time
 }
 
 // NewRunner validates cfg and builds the Runner. Dial and
@@ -307,6 +322,9 @@ func NewRunner(cfg Config) (*Runner, error) {
 	}
 	if cfg.SettlePollInterval < 0 {
 		cfg.SettlePollInterval = DefaultSettlePollInterval
+	}
+	if cfg.SettlePollInterval > 0 && cfg.SettlePollInterval < minSettlePollInterval {
+		cfg.SettlePollInterval = minSettlePollInterval
 	}
 	// A nil or explicitly empty HistoryLimits means "unset":
 	// an empty slice would otherwise disable every history
@@ -593,12 +611,14 @@ func (r *Runner) shouldStop(ctx context.Context) func() bool {
 		// when a held terminal's proof is due, so the loop
 		// re-proves it against history instead of waiting for
 		// a new record, a count-0 event, or a server replay.
-		// No terminal held, or no proof ever attempted, means
-		// no re-poll: lastSettleAttempt is stamped by every
-		// settlePending evaluation, so the cadence measures
-		// from the last attempt, never from the wait start.
-		if _, ok := r.waiter.IgnoredTerminal(); ok && r.cfg.SettlePollInterval > 0 &&
-			r.clock.Now().Sub(r.lastSettleAttempt) >= r.cfg.SettlePollInterval {
+		// No terminal held, no proof ever read, or an unknown
+		// boundary means no re-poll: the cadence measures
+		// from the last proof that read, never from the wait
+		// start, and a proof the gates forbid gains nothing
+		// from ending the subscription early.
+		if _, ok := r.waiter.IgnoredTerminal(); ok && !r.waiter.BoundaryUnknown() &&
+			!r.lastSettleProof.IsZero() && r.cfg.SettlePollInterval > 0 &&
+			r.clock.Now().Sub(r.lastSettleProof) >= r.cfg.SettlePollInterval {
 			return true
 		}
 		return false
@@ -663,9 +683,11 @@ func (r *Runner) noteFailure(ctx context.Context) error {
 }
 
 // trySettle attempts one history proof for the current ignored
-// terminal, throttled to one read per terminal value per
-// subscribe iteration. A failed read resets the throttle so the
-// next record retries. A FAILED terminal is proved by user-seq
+// terminal, throttled to one attempt per terminal value per
+// subscribe iteration. A failed read does NOT reset the
+// throttle: the interval gate in settlePending bounds retries
+// (loop-2 F8), so a failing reader is re-proved at the cadence,
+// not once per record. A FAILED terminal is proved by user-seq
 // equality only (no replies are read); any other terminal is
 // proved by replies.
 //
@@ -674,7 +696,9 @@ func (r *Runner) noteFailure(ctx context.Context) error {
 // (the F8 re-arm), the settle gates change, so the proof is
 // re-attempted instead of waiting for a new terminal or a
 // server check. The extra read is outcome-equivalent — Settle
-// still applies every gate — it only settles sooner.
+// still applies every gate — it only settles sooner. The key
+// change never bypasses the interval gate: flapping terminals
+// prove at most once per interval.
 func (r *Runner) trySettle(ctx context.Context) error {
 	ignored, ok := r.waiter.IgnoredTerminal()
 	if !ok {
@@ -691,7 +715,6 @@ func (r *Runner) trySettle(ctx context.Context) error {
 	r.settleTried = true
 	if err := r.settlePending(ctx, ignored); err != nil {
 		if errors.Is(err, errHistoryRead) {
-			r.settleTried = false
 			return nil
 		}
 		return err
@@ -709,7 +732,23 @@ func (r *Runner) trySettle(ctx context.Context) error {
 // cancellation: the ctx check sits immediately before each
 // apply site, so a cancelled wait settles nothing.
 func (r *Runner) settlePending(ctx context.Context, pending string) error {
-	r.lastSettleAttempt = r.clock.Now()
+	// No proof starts past the deadline (loop-2 F9): the
+	// endgame's final read follows at once, bounded by its own
+	// floor. A proof that starts just before the deadline may
+	// still overshoot it by at most the historyCtx floor per
+	// window read (100ms, ≤3 reads per proof).
+	if !r.clock.Now().Before(r.deadline) {
+		return nil
+	}
+	// Interval gate (loop-2 F8): at most one proof per
+	// SettlePollInterval, whatever the terminal flapping or
+	// read failures do. A key change or a failed read never
+	// bypasses it; only a proof that never read yet (zero
+	// stamp) starts immediately. The gate lives here, not in
+	// trySettle, so the checkState path is gated too.
+	if !r.lastSettleProof.IsZero() && r.clock.Now().Sub(r.lastSettleProof) < r.cfg.SettlePollInterval {
+		return nil
+	}
 	// No history read is spent on a proof the gates already
 	// forbid: with an unknown boundary neither Settle nor
 	// AcceptReplayedFailed can accept, so the attempt is
@@ -719,6 +758,9 @@ func (r *Runner) settlePending(ctx context.Context, pending string) error {
 	if r.waiter.BoundaryUnknown() {
 		return nil
 	}
+	// Stamp before reading: this proof counts against the
+	// cadence whether it succeeds or fails.
+	r.lastSettleProof = r.clock.Now()
 	hctx, cancel := r.historyCtx(ctx, 100*time.Millisecond, nil)
 	defer cancel()
 	if failed[pending] {
@@ -773,6 +815,12 @@ func (r *Runner) settlePending(ctx context.Context, pending string) error {
 // read and the history read complete before the Waiter is fed
 // or settled.
 func (r *Runner) checkState(ctx context.Context) error {
+	// No state check starts past the deadline (loop-2 F9):
+	// noteFailure reaches here unguarded, so the guard lives
+	// here, not at the call sites.
+	if !r.clock.Now().Before(r.deadline) {
+		return nil
+	}
 	budget := r.cfg.StateCheckBudget
 	cctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
