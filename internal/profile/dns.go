@@ -31,9 +31,9 @@ import (
 //     so the shadowing is observable.
 //  3. The top-level "dns" section, compat fallback for one cycle
 //     only (DNSSourceGlobalCompat), with a warning telling the
-//     operator to distribute it into profile entries by hand
-//     (never pointing at `config migrate`, which does not
-//     distribute for single configs). It applies ONLY when no
+//     operator to distribute it into profile entries with
+//     `config migrate --write` (which distributes for single
+//     configs since G4). It applies ONLY when no
 //     per-profile dns
 //     exists; coexistence of a profile block and a top-level
 //     section is a parse-time error (G1), and the warning cycle
@@ -181,7 +181,7 @@ func ResolveProfileDNS(prof *Profile, single *SingleConfig) (*ResolvedDNS, error
 		}
 		warning := ""
 		if single.DNS != nil {
-			warning = fmt.Sprintf("castctl: top-level dns section is ignored for profile %q: WireGuard DNS takes precedence; distribute the top-level section into profile entries by hand (see docs/config.md)", prof.Name)
+			warning = fmt.Sprintf("castctl: top-level dns section is ignored for profile %q: WireGuard DNS takes precedence; remove the top-level dns section by hand (see docs/config.md)", prof.Name)
 		}
 		return &ResolvedDNS{Options: opts, Source: DNSSourceWireGuard, Warning: warning}, nil
 	}
@@ -198,7 +198,7 @@ func ResolveProfileDNS(prof *Profile, single *SingleConfig) (*ResolvedDNS, error
 		return &ResolvedDNS{
 			Options: opts,
 			Source:  DNSSourceGlobalCompat,
-			Warning: "castctl: top-level dns section is deprecated and will become an error in a later release: distribute it into profile entries by hand (see docs/config.md)",
+			Warning: "castctl: top-level dns section is deprecated and will become an error in a later release: run \"config migrate --write\" to distribute it into profile entries (see docs/config.md)",
 		}, nil
 	}
 	// (4) Synthesised DoH default.
@@ -323,11 +323,20 @@ func wireGuardDNSForProfile(prof *Profile, single *SingleConfig) (string, []stri
 // reachableTagsForProfile returns the tag set a profile's own dns
 // detours may name: the profile's outbound tag (or inline tag),
 // every tag reachable from it through detour chains and
-// selector/urltest member lists, plus — for direct profiles
-// only — the profile's synthesised direct tag. Tags of other
-// profiles' inline outbounds are NOT reachable (they are never
-// walked from this profile's seed), which is what makes the
-// check per-profile rather than global.
+// selector/urltest member lists that names a global outbound or
+// endpoint node, plus — for direct profiles only — the profile's
+// synthesised direct tag. A queued tag that resolves to no global
+// node — a dangling tag, or another profile's inline outbound tag
+// reached only as a group member or detour target — is NOT
+// reachable: the runtime creates only global nodes, the profile's
+// own inline outbound, and the synthesised direct outbound in
+// this profile's manager (see createOutbounds in
+// internal/commands/runtime.go, which materialises the own
+// inline outbound under its tag), so a detour naming such a tag would
+// fail closed at runtime ("outbound detour not found").
+// Dangling tags are already rejected by validateTagGraph before
+// this runs; the exclusion is what keeps other profiles' inline
+// tags out of the set in every case.
 func reachableTagsForProfile(cfg *SingleConfig, p *Profile) map[string]bool {
 	outboundsByTag := make(map[string]option.Outbound, len(cfg.Outbounds))
 	for _, ob := range cfg.Outbounds {
@@ -336,6 +345,28 @@ func reachableTagsForProfile(cfg *SingleConfig, p *Profile) map[string]bool {
 	endpointsByTag := make(map[string]option.Endpoint, len(cfg.Endpoints))
 	for _, ep := range cfg.Endpoints {
 		endpointsByTag[ep.Tag] = ep
+	}
+	// ownInline is the profile's own inline outbound tag: not a
+	// global node, but created in this profile's own manager,
+	// so it stays reachable. synth is the direct profile's
+	// synthesised tag, likewise created at runtime.
+	ownInline := ""
+	if p.Outbound.Kind == OutboundInline {
+		ownInline = p.Outbound.Tag
+	}
+	synth := ""
+	if p.Outbound.Kind == OutboundDirect {
+		synth = SynthesizedDirectTag(p.Name)
+	}
+	isNode := func(tag string) bool {
+		if tag == ownInline || tag == synth {
+			return true
+		}
+		if _, ok := outboundsByTag[tag]; ok {
+			return true
+		}
+		_, ok := endpointsByTag[tag]
+		return ok
 	}
 	reachable := make(map[string]bool)
 	var queue []string
@@ -354,6 +385,12 @@ func reachableTagsForProfile(cfg *SingleConfig, p *Profile) map[string]bool {
 		tag := queue[0]
 		queue = queue[1:]
 		if reachable[tag] {
+			continue
+		}
+		if !isNode(tag) {
+			// Unresolved or foreign-inline tag: never
+			// reachable, and nothing expands from it (it
+			// names no global node).
 			continue
 		}
 		reachable[tag] = true

@@ -5,8 +5,8 @@
 package profile
 
 // Per-profile DNS: parse, save round-trip, validation, and
-// resolver precedence (own > WireGuard-imported > DoH default >
-// global-compat fallback). All fixtures are fake; no live config
+// resolver precedence (own > WireGuard-imported >
+// global-compat fallback > DoH default). All fixtures are fake; no live config
 // is read. Secrets below are FAKE placeholders only.
 
 import (
@@ -89,6 +89,22 @@ func TestPerProfileDNSCrossProfileDetourRejected(t *testing.T) {
 	)
 	if _, err := ParseSingleConfig([]byte(data), "/base"); err == nil {
 		t.Fatal("per-profile dns detour naming another profile's inline tag must be rejected, got nil error")
+	}
+}
+
+func TestPerProfileDNSSelectorMemberOtherInlineDetourRejected(t *testing.T) {
+	// F2 (loop 2, RED first): the same cross-profile detour,
+	// reached only as a selector member of the profile's own
+	// outbound, must also be rejected. The member tag resolves
+	// to no global node (it is another profile's inline
+	// outbound), so it must not enter the reachable set merely
+	// by being queued as a member.
+	data := singleFileJSON(
+		`{"a":{"outbound":"sel","dns":{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353,"detour":"profile:b"}],"final":"dns1"}},"b":{"outbound":{"type":"socks","tag":"profile:b","server":"127.0.0.1","server_port":1082,"version":"5"}}}`,
+		`[{"type":"socks","tag":"proxy-sg","server":"127.0.0.1","server_port":1080,"version":"5"},{"type":"selector","tag":"sel","outbounds":["proxy-sg","profile:b"]}]`, "", "",
+	)
+	if _, err := ParseSingleConfig([]byte(data), "/base"); err == nil {
+		t.Fatal("per-profile dns detour naming another profile's inline tag via a selector member must be rejected, got nil error")
 	}
 }
 
@@ -181,10 +197,8 @@ func TestResolveProfileDNSPrecedence(t *testing.T) {
 	}
 
 	// (iv) Global-compat fallback only when no per-profile dns
-	// exists, with a warning telling the operator to
-	// distribute by hand — never pointing at `config migrate`,
-	// which reports already-migrated (a no-op) for single
-	// configs and does not distribute.
+	// exists, with a warning naming `config migrate --write`
+	// as the distributing tool (since G4).
 	cfg3, err := ParseSingleConfig([]byte(singleFileJSON(
 		`{"muse01":{"outbound":"proxy-sg"}}`,
 		`[`+fakeSocksOutbound+`]`, "",
@@ -200,8 +214,44 @@ func TestResolveProfileDNSPrecedence(t *testing.T) {
 	if res.Source != DNSSourceGlobalCompat || res.Options.Servers[0].Tag != "gdns" {
 		t.Fatalf("compat branch: source=%q server=%q, want global-compat/gdns", res.Source, res.Options.Servers[0].Tag)
 	}
-	if !strings.Contains(res.Warning, "by hand") || strings.Contains(res.Warning, "config migrate") {
-		t.Fatalf("compat warning = %q, want 'by hand' and no 'config migrate' pointer", res.Warning)
+	if !strings.Contains(res.Warning, "config migrate") || strings.Contains(res.Warning, "by hand") {
+		t.Fatalf("compat warning = %q, want a 'config migrate' pointer and no 'by hand'", res.Warning)
+	}
+}
+
+func TestResolveProfileDNSNoWarningForPerProfileOnly(t *testing.T) {
+	// ResolveProfileDNS sets Warning only when the legacy
+	// (top-level) form is present: a per-profile-only config
+	// resolves silently, as does a config with no resolver
+	// at all (synthesised default). The warning itself is
+	// printed only when a runtime is built (see
+	// internal/commands/runtime.go), never on read paths
+	// such as profile show/list.
+	cfg, err := ParseSingleConfig([]byte(singleFileJSON(
+		`{"muse01":{"outbound":"proxy-sg","dns":{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353,"detour":"proxy-sg"}],"final":"dns1"}}}`,
+		`[`+fakeSocksOutbound+`]`, "", "",
+	)), "/base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := ResolveProfileDNS(cfg.Profiles["muse01"], cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Source != DNSSourceProfile || res.Warning != "" {
+		t.Fatalf("per-profile-only: source=%q warning=%q; want profile and no warning", res.Source, res.Warning)
+	}
+
+	cfg2, err := ParseSingleConfig([]byte(`{"profiles":{"default":{}}}`), "/base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = ResolveProfileDNS(cfg2.Profiles["default"], cfg2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Source != DNSSourceDefault || res.Warning != "" {
+		t.Fatalf("no-resolver: source=%q warning=%q; want default and no warning", res.Source, res.Warning)
 	}
 }
 
@@ -291,11 +341,13 @@ func TestWireGuardBranchWarnsWhenGlobalSectionShadowed(t *testing.T) {
 	if res.Source != DNSSourceWireGuard {
 		t.Fatalf("WG branch: source=%q, want wireguard", res.Source)
 	}
-	if res.Warning == "" || !strings.Contains(res.Warning, "top-level dns") {
-		t.Fatalf("WG branch warning = %q, want it to name the shadowed top-level dns section", res.Warning)
+	if res.Warning == "" || !strings.Contains(res.Warning, "top-level dns") ||
+		!strings.Contains(res.Warning, "WireGuard DNS takes precedence") ||
+		!strings.Contains(res.Warning, "by hand") || strings.Contains(res.Warning, "config migrate") {
+		t.Fatalf("WG branch warning = %q, want it to name the shadowed top-level dns section, note WireGuard precedence, and direct hand-removal without prescribing config migrate", res.Warning)
 	}
 	// A non-WG profile in the same file still gets the compat
-	// warning as before (new by-hand wording).
+	// warning as before (naming `config migrate --write`).
 	res, err = ResolveProfileDNS(cfg.Profiles["other"], cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -303,8 +355,8 @@ func TestWireGuardBranchWarnsWhenGlobalSectionShadowed(t *testing.T) {
 	if res.Source != DNSSourceGlobalCompat {
 		t.Fatalf("non-WG branch: source=%q, want global-compat", res.Source)
 	}
-	if !strings.Contains(res.Warning, "by hand") || strings.Contains(res.Warning, "config migrate") {
-		t.Fatalf("compat warning = %q, want 'by hand' and no 'config migrate' pointer", res.Warning)
+	if !strings.Contains(res.Warning, "config migrate") || strings.Contains(res.Warning, "by hand") {
+		t.Fatalf("compat warning = %q, want a 'config migrate' pointer and no 'by hand'", res.Warning)
 	}
 }
 
@@ -393,6 +445,72 @@ func TestWireGuardDNSMapParseAndSave(t *testing.T) {
 	}
 }
 
+// TestWireGuardKeySharingGlobalVsDistributedDifferential (F5f,
+// loop 2, TEST-ONLY): the same WireGuard key-sharing fixture
+// must give the same accept/reject verdict in the global form
+// (top-level dns detour) and in the distributed form (the
+// per-profile block distribution would write). The fail-closed
+// direction is what matters: whenever the global form rejects,
+// the distributed form must reject too, with the key-sharing
+// error, never echoing the key value. Validation semantics are
+// NOT changed to force equivalence.
+func TestWireGuardKeySharingGlobalVsDistributedDifferential(t *testing.T) {
+	ep := func(tag, key string) string {
+		return `{"type":"wireguard","tag":"` + tag + `","address":["10.0.0.2/32"],"private_key":"` + key + `","peers":[{"address":"203.0.113.10","port":51820,"public_key":"FAKE-PUBKEY","allowed_ips":["0.0.0.0/0"]}]}`
+	}
+	outbounds := `[{"type":"selector","tag":"sel","outbounds":["wg-a","wg-b"]}]`
+	for _, tc := range []struct {
+		name   string
+		keyA   string
+		keyB   string
+		reject bool
+	}{
+		{name: "shared key rejects both forms", keyA: "FAKE-KEY", keyB: "FAKE-KEY", reject: true},
+		{name: "distinct keys accept both forms", keyA: "FAKE-KEY-A", keyB: "FAKE-KEY-B", reject: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoints := `[` + ep("wg-a", tc.keyA) + `,` + ep("wg-b", tc.keyB) + `]`
+			global := singleFileJSON(
+				`{"alpha":{"outbound":"sel"}}`,
+				outbounds, endpoints,
+				`{"servers":[{"tag":"gdns","type":"tcp","server":"127.0.0.1","server_port":5354,"detour":"wg-a"}],"final":"gdns"}`,
+			)
+			distributed := singleFileJSON(
+				`{"alpha":{"outbound":"sel","dns":{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353,"detour":"wg-a"}],"final":"dns1"}}}`,
+				outbounds, endpoints, "",
+			)
+			for _, form := range []struct {
+				name string
+				data string
+			}{
+				{name: "global", data: global},
+				{name: "distributed", data: distributed},
+			} {
+				_, err := ParseSingleConfig([]byte(form.data), "/base")
+				if tc.reject && err == nil {
+					t.Errorf("%s form must reject the shared-key fixture, got nil error", form.name)
+					continue
+				}
+				if !tc.reject && err != nil {
+					t.Errorf("%s form must accept the distinct-key fixture, got: %v", form.name, err)
+					continue
+				}
+				if tc.reject {
+					msg := err.Error()
+					for _, want := range []string{"wireguard private key shared", "alpha", "dns", "wg-a", "wg-b"} {
+						if !strings.Contains(msg, want) {
+							t.Errorf("%s form error = %q; want it to name %q", form.name, msg, want)
+						}
+					}
+					if strings.Contains(msg, tc.keyA) {
+						t.Errorf("%s form error echoes the private key value", form.name)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestPerProfileDNSWireGuardKeySharing(t *testing.T) {
 	// Same key via the profile's outbound (wg-a) and its own dns
 	// detour (wg-b) is an error naming the profile and "dns".
@@ -439,4 +557,29 @@ func cfgWithNoWG(t *testing.T, cfg *SingleConfig) *SingleConfig {
 	out := *cfg
 	out.WireGuardDNS = nil
 	return &out
+}
+
+// TestCompatWarningTextVerbatim (N-b, loop 3): the compat
+// warning text (dns.go:201) is pinned VERBATIM, not just by
+// presence/trigger — a wording drift that re-prescribes a
+// refusing action or drops the distributing tool must fail
+// here. The text itself is unchanged by loop 3.
+func TestCompatWarningTextVerbatim(t *testing.T) {
+	t.Parallel()
+	cfg, err := ParseSingleConfig([]byte(singleFileJSON(
+		`{"muse01":{"outbound":"proxy-sg"}}`,
+		`[`+fakeSocksOutbound+`]`, "",
+		`{"servers":[{"tag":"gdns","type":"tcp","server":"127.0.0.1","server_port":5354,"detour":"proxy-sg"}],"final":"gdns"}`,
+	)), "/base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := ResolveProfileDNS(cfg.Profiles["muse01"], cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `castctl: top-level dns section is deprecated and will become an error in a later release: run "config migrate --write" to distribute it into profile entries (see docs/config.md)`
+	if res.Warning != want {
+		t.Errorf("compat warning = %q; want verbatim %q", res.Warning, want)
+	}
 }

@@ -469,6 +469,56 @@ func TestTypedJSONLastLineWhenStderrLogging(t *testing.T) {
 	}
 }
 
+// TestTypedJSONLastLineWithLegacyDNSWarning: a failing command
+// with the legacy (top-level) dns form present and logging OFF
+// still leaves the typed JSON as the LAST stderr line, intact —
+// the compat warning precedes it on stderr (same raw channel,
+// printed during runtime build, before dispatch prints the
+// error). Whole-stderr JSON parsing does NOT hold in this
+// combination (pre-existing tension, preserved by G4: the
+// warning channel is unchanged); only the last-line contract
+// holds. This test pins the last-line behaviour and documents
+// the whole-stderr gap explicitly, so a future channel change
+// must decide it deliberately.
+func TestTypedJSONLastLineWithLegacyDNSWarning(t *testing.T) {
+	auth := &gatewaytest.CannedAuth{VMID: "vm-test", AccessToken: "AT", HatchToken: "HT", AuthCheckStatus: 401}
+	server, err := gatewaytest.NewServer(gatewaytest.JSONHandler(200, []byte(`{"ok":true,"result":{}}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close() }()
+	dialer := gatewaytest.NewFakeDialer(server, auth)
+	_, configFile := testHome(t, `{"default_profile":"default","profiles":{"default":{}},"dns":{"servers":[{"tag":"gdns","type":"https","server":"1.1.1.1","server_port":443,"path":"/dns-query"}],"final":"gdns"}}`)
+	out, errb := &bytes.Buffer{}, &bytes.Buffer{}
+	env := &Env{
+		Stdout: out, Stderr: errb,
+		Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile}),
+		NewConnector: func(d gateway.OutboundDialer, opts ...gateway.ConnectorOption) conn.Connector {
+			return gateway.NewConnector(dialer, gateway.WithWebSocketSecure(false))
+		},
+		HTTPClient: func() *http.Client { return dialer.HTTPClient() },
+	}
+	code := Run(context.Background(), []string{"status"}, env)
+	if code != 2 {
+		t.Fatalf("auth-check 401 with legacy dns: code=%d, want 2 (out=%q err=%q)", code, out.String(), errb.String())
+	}
+	lines := strings.Split(strings.TrimRight(errb.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("stderr has %d line(s), want exactly warning + typed JSON: %q", len(lines), errb.String())
+	}
+	if !strings.Contains(lines[0], "top-level dns") || !strings.Contains(lines[0], "config migrate") {
+		t.Errorf("first stderr line = %q; want the compat warning naming config migrate", lines[0])
+	}
+	typed := lastStderrJSON(t, errb)
+	if typed["type"] != "auth_check_failed" {
+		t.Errorf("type=%q, want auth_check_failed", typed["type"])
+	}
+	var whole map[string]string
+	if err := json.Unmarshal(errb.Bytes(), &whole); err == nil {
+		t.Errorf("whole stderr parses as JSON %v; want the warning line to precede the JSON (last-line contract only): %q", whole, errb.String())
+	}
+}
+
 // lastStderrJSON parses the LAST line of a stderr buffer as the
 // typed JSON error. It applies ONLY when logging is on with
 // stderr output (a log block exists, or --log-level was given):

@@ -389,7 +389,9 @@ func logRefusedPaths(loc *profile.ConfigLocation, prof *profile.Profile, single 
 const dialerOutboundTag = "castctl-dialer"
 
 // createOutbounds creates endpoints first, then outbounds in
-// detour-first topological order. The guard rejection from
+// detour-first topological order, then the active profile's
+// own inline outbound (when it has one), the explicit direct
+// outbound, and the synthesised direct detour target. The guard rejection from
 // CreateOutbound (domain-server outbound without a DNS router, or a
 // detour cycle/missing detour) surfaces as exit 2 with a clear
 // message; this wiring never silently reorders past the guard, it
@@ -483,6 +485,36 @@ func createOutbounds(ctx context.Context, mgr *outbound.Manager, single *profile
 			return errCode(2, err)
 		}
 		created["direct"] = true
+	}
+	// The active profile's own inline outbound (R2): created in
+	// this profile's manager only, under its tag
+	// (profile:<name>), after the global outbounds and the
+	// plain "direct" outbound it may detour through, and
+	// before DNS Start (the caller starts DNS after this
+	// function returns). Before this step no InlineOutbound()
+	// call site existed in the runtime path, so an inline
+	// profile's own dns detour — and its dialer — named an
+	// outbound that was never created, and every inline
+	// profile failed closed at DNS Start. Other profiles'
+	// inline outbounds are never created here: only the
+	// active profile's manager holds its own. A tag already
+	// taken by a config outbound or endpoint fails loudly,
+	// like the synthesised-tag collision below: silently
+	// skipping would let the detour dial the wrong outbound.
+	if prof != nil && prof.Outbound.Kind == profile.OutboundInline {
+		ob, err := prof.Outbound.InlineOutbound()
+		if err != nil {
+			return errCode(2, err)
+		}
+		if ob != nil {
+			if created[ob.Tag] {
+				return errCode(2, fmt.Errorf("inline outbound tag %q for profile %q is already taken by a config outbound or endpoint; rename the tag", ob.Tag, prof.Name))
+			}
+			if err := mgr.CreateOutbound(ctx, ob.Tag, ob.Type, ob.Options); err != nil {
+				return errCode(2, err)
+			}
+			created[ob.Tag] = true
+		}
 	}
 	// Runtime-only per-profile direct detour target for the
 	// active profile's DNS (direct-profile default DoH, or an

@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/sagernet/sing-box/option"
 )
@@ -54,9 +55,11 @@ type MigrateResult struct {
 	WouldWrite bool `json:"would_write"`
 	// Migrated reports whether this call wrote the single file.
 	Migrated bool `json:"migrated"`
-	// Reason is "already-migrated", "refuse-overwrite", or
+	// Reason is "already-migrated", "refuse-overwrite",
 	// "dns-authored" (a run that wrote only the interim dns section
-	// onto an otherwise already-migrated config) when applicable.
+	// onto an otherwise already-migrated config), or
+	// "dns-distributed" (a run that distributed the top-level dns
+	// section into profile entries and removed it) when applicable.
 	Reason               string           `json:"reason,omitempty"`
 	DefaultProfile       string           `json:"default_profile"`
 	Profiles             []MigrateProfile `json:"profiles"`
@@ -77,6 +80,19 @@ type MigrateResult struct {
 	// succeeds and writes no dns section. Empty when a dns section
 	// was carried verbatim, authored, or not applicable.
 	DNSRefusal string `json:"dns_refusal,omitempty"`
+	// DNSDistributed reports that this run distributed the
+	// top-level dns section into every profile's own dns block
+	// and removed the top-level key (see distributeTopLevelDNS).
+	// It is set only when a legacy top-level section was
+	// present and distribution succeeded.
+	DNSDistributed bool `json:"dns_distributed,omitempty"`
+	// DNSDistributionRefusal records why distribution of the
+	// top-level dns section refused, naming the profile and the
+	// failing field/tag. Unlike DNSRefusal it accompanies a
+	// returned error: a refused distribution writes nothing
+	// and exits 2. Empty when distribution succeeded or was
+	// not applicable.
+	DNSDistributionRefusal string `json:"dns_distribution_refusal,omitempty"`
 }
 
 // Migrate migrates the legacy layout in baseDir into baseDir's
@@ -119,6 +135,21 @@ func Migrate(baseDir string, write bool) (*MigrateResult, error) {
 //     legacy migration is always direct-only, so it always
 //     records a refusal: there is no outbound tag to detour
 //     through until an outbound is supplied separately.
+//   - DNS distribution (G4): when the existing single file
+//     carries a top-level dns section, distributeTopLevelDNS
+//     copies it verbatim into every profile's own dns block
+//     (detours filled/kept/refused per profile) and removes
+//     the top-level key in the same atomic write, again only
+//     onto an otherwise already-migrated config. A refusal
+//     (unreachable detour, WireGuard-shadowed profile, invalid
+//     distributed candidate) is an error: exit 2, nothing is
+//     written, and the refusal is recorded in
+//     DNSDistributionRefusal.
+//   - A fresh migration over a destination file with no
+//     "profiles" key that carries single-format sections in
+//     single-config shape (see refuseSingleFormatBaseFile)
+//     refuses with exit 2 and writes nothing, instead of
+//     overwriting the file and deleting those sections.
 //   - Migrate reads files only: it does not consult MUSE_VM_ID /
 //     MUSE_NODE_ID (env fill happens at Load time), and touches no
 //     telegram or update files.
@@ -462,6 +493,48 @@ func MigrateFrom(sourceDir, destDir string, write bool) (*MigrateResult, error) 
 	}
 
 	if existingIsSingle {
+		// G4 distribution: when the existing file carries a
+		// top-level dns section, distribute it verbatim into
+		// every profile's own dns block and remove the top-level
+		// key in the same atomic write — but only onto a config
+		// that is otherwise already-migrated (the
+		// authorInterimDNS gate: the distribution diff must be
+		// exactly the dns move, nothing else). A differing
+		// config falls through to refuse-overwrite below, with
+		// no distribution attempted. A distribution refusal
+		// (no profile to receive a block, unreachable detour,
+		// WireGuard-shadowed profile, or an invalid distributed
+		// candidate) is an error: the whole run refuses,
+		// exit 2, nothing is written.
+		if candidate.DNS != nil {
+			otherwiseMigrated, cerr := configsEqual(stripDNS(existing), stripDNS(candidate))
+			if cerr != nil {
+				return result, cerr
+			}
+			if otherwiseMigrated {
+				distributed, distRefusal, distErr := distributeTopLevelDNS(candidate, destDir)
+				if distErr != nil {
+					result.DNSDistributionRefusal = distRefusal
+					return result, distErr
+				}
+				if distributed {
+					result.DNSDistributed = true
+					if !write {
+						result.WouldWrite = true
+						return result, nil
+					}
+					// The config lock is held (acquired
+					// above): write under it, without
+					// re-locking via SaveSingleConfig.
+					if _, err := writeSingleConfigLocked(destDir, candidate); err != nil {
+						return result, err
+					}
+					result.Migrated = true
+					result.Reason = "dns-distributed"
+					return result, nil
+				}
+			}
+		}
 		// DNS extension: author the interim global section only
 		// onto an otherwise already-migrated config (see
 		// authorInterimDNS). A differing config refuses below
@@ -495,10 +568,34 @@ func MigrateFrom(sourceDir, destDir string, write bool) (*MigrateResult, error) 
 		return result, newRefuseError("existing single config differs from what migrate would write; refusing to overwrite (no --overwrite in this design)")
 	}
 
-	// No existing single file: a fresh migration. Its profiles are
-	// always direct-only (legacy files carry no outbound), so no
+	// No existing single file: a fresh migration. A
+	// profiles-absent destination file carrying single-format
+	// sections is refused first (R1 guard): overwriting it
+	// would silently delete those sections, and no later
+	// step re-reads them. Its profiles are always
+	// direct-only (legacy files carry no outbound), so no
 	// dns section can be authored; record the refusal and write
 	// the migration without one.
+	if refusal, gerr := refuseSingleFormatBaseFile(destDir); gerr != nil {
+		result.Errors = append(result.Errors, refusal)
+		// The node_id generation above ran in memory only and
+		// nothing is written on this refusal: never report an
+		// id as generated (the RT-2 rule — a reported id must
+		// be a persisted id). Dry-run results carry no
+		// generated claim, so this scrub is a no-op there.
+		result.Generated = nil
+		for i := range result.Profiles {
+			result.Profiles[i].NodeIDGenerated = false
+			kept := result.Profiles[i].Warnings[:0]
+			for _, w := range result.Profiles[i].Warnings {
+				if w != "node_id generated" {
+					kept = append(kept, w)
+				}
+			}
+			result.Profiles[i].Warnings = kept
+		}
+		return result, gerr
+	}
 	if _, refusing, ok := singleDNSDetour(candidate); !ok && refusing != "" {
 		result.DNSRefusal = fmt.Sprintf("dns section not authored: profile %q has no outbound tag for a dns detour (direct-only); add an outbound and re-run config migrate, or add a dns section by hand (see docs/config.md)", refusing)
 	}
@@ -575,6 +672,139 @@ func readExistingSingle(baseDir string) (*SingleConfig, bool, error, error) {
 		return nil, true, nil, err
 	}
 	return cfg, true, nil, nil
+}
+
+// singleFormatKeys returns the top-level keys in data whose values
+// have the single-config shape for that key, in canonical order.
+// data must be a JSON object without a "profiles" key; callers
+// check the marker first (HasProfilesMarker). Shape, not key
+// presence alone, triggers: a legacy file never carries these
+// keys in single-config shape, while a hand-written
+// single-format file that lost its "profiles" key does.
+// Unshaped values (a string "dns", an empty outbounds array, an
+// outbound object without a "type") are left to the legacy
+// path exactly as before — the guard refuses only state it can
+// prove is single-format, so no legitimate legacy migration is
+// affected.
+func singleFormatKeys(data []byte) []string {
+	obj, err := decodeOrderedObject(data)
+	if err != nil {
+		return nil
+	}
+	var keys []string
+	if v, ok := obj.get("dns"); ok {
+		if _, isObj := v.(*orderedObject); isObj {
+			keys = append(keys, "dns")
+		}
+	}
+	for _, key := range []string{"outbounds", "endpoints"} {
+		if v, ok := obj.get(key); ok {
+			if arr, isArr := v.([]any); isArr && len(arr) > 0 && allOutboundShaped(arr) {
+				keys = append(keys, key)
+			}
+		}
+	}
+	if v, ok := obj.get("wireguard_dns"); ok {
+		if m, isObj := v.(*orderedObject); isObj && len(m.keys) > 0 && allStringArrays(m) {
+			keys = append(keys, "wireguard_dns")
+		}
+	}
+	if v, ok := obj.get("log"); ok {
+		if m, isObj := v.(*orderedObject); isObj && len(m.keys) > 0 && allLogKeys(m) {
+			keys = append(keys, "log")
+		}
+	}
+	if v, ok := obj.get("default_profile"); ok {
+		if _, isStr := v.(string); isStr {
+			keys = append(keys, "default_profile")
+		}
+	}
+	return keys
+}
+
+// allOutboundShaped reports whether every element is an object
+// carrying a non-empty string "type": the outbound/endpoint
+// object shape. An object without a type parses nowhere as an
+// outbound, so it is not shaped state.
+func allOutboundShaped(arr []any) bool {
+	for _, elem := range arr {
+		obj, ok := elem.(*orderedObject)
+		if !ok {
+			return false
+		}
+		t, ok := obj.get("type")
+		if !ok {
+			return false
+		}
+		s, ok := t.(string)
+		if !ok || s == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// allStringArrays reports whether every value in m is an array
+// of strings: the wireguard_dns map shape.
+func allStringArrays(m *orderedObject) bool {
+	for _, k := range m.keys {
+		arr, ok := m.values[k].([]any)
+		if !ok {
+			return false
+		}
+		for _, elem := range arr {
+			if _, ok := elem.(string); !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// allLogKeys reports whether every key in m is one of the four
+// log-block keys: the log section shape (see internal/profile/log.go).
+func allLogKeys(m *orderedObject) bool {
+	for _, k := range m.keys {
+		switch k {
+		case "disabled", "level", "output", "timestamp":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// refuseSingleFormatBaseFile refuses a fresh migration when the
+// destination config.json is a profiles-absent file carrying
+// single-format sections (R1): a fresh migration would
+// overwrite it with a synthetic profile set, silently deleting
+// those sections — the exact loss the red-team fixture
+// proved, directed by the legacy-layout error text. It returns
+// ("", nil) when the file is absent, unparseable (the existing
+// malformed path handles that), carries a "profiles" key (the
+// single path handles that), or carries no shaped
+// single-format section (a genuine legacy file, which keeps
+// migrating). The refusal names keys/fields only, never values.
+func refuseSingleFormatBaseFile(destDir string) (string, error) {
+	path := filepath.Join(destDir, "config.json")
+	data, err := readRegularFile(path)
+	if err != nil {
+		return "", nil
+	}
+	marker, err := HasProfilesMarker(data)
+	if err != nil || marker {
+		return "", nil
+	}
+	keys := singleFormatKeys(data)
+	if len(keys) == 0 {
+		return "", nil
+	}
+	quoted := make([]string, len(keys))
+	for i, k := range keys {
+		quoted[i] = fmt.Sprintf("%q", k)
+	}
+	refusal := fmt.Sprintf("migrate: destination config file %q carries single-format section(s) %s but no \"profiles\" key; refusing to overwrite it with a fresh migration (add a \"profiles\" object so the file parses as a single config, or remove the sections by hand first, see docs/config.md)", path, strings.Join(quoted, ", "))
+	return refusal, newConfigError(refusal)
 }
 
 func defaultProfile(paths Paths) *Profile {
@@ -945,9 +1175,9 @@ func detourTagForProfile(cfg *SingleConfig, p *Profile) string {
 // section is the gated default only: one DoH server (https,
 // IP-literal 1.1.1.1, no bootstrap hostname, path /dns-query)
 // through the shared detour. It is global and single-profile-only
-// by construction: the final model is a per-profile dns block
-// (later PR), and this section is distributed into profile
-// entries by `config migrate` there. Authoring is validated with
+// by construction: the final model is a per-profile dns block,
+// and this section is distributed into profile entries by
+// `config migrate` (G4: distributeTopLevelDNS). Authoring is validated with
 // the same checks a hand-written section faces (validateTagGraph
 // plus the WireGuard key-sharing check); a validation failure
 // falls back to no section with the refusal recorded, never to a

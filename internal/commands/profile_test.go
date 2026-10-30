@@ -7,6 +7,7 @@ package commands
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -510,6 +511,130 @@ func TestConfigMigrate(t *testing.T) {
 	if !strings.Contains(out.String(), `"source": "single"`) {
 		t.Errorf("list after migrate: %q", out.String())
 	}
+}
+
+// TestConfigMigrateDistributesDNS (G4): dry-run plans the
+// distribution, --write lands it (top-level section removed,
+// per-profile blocks with filled detours), and a second run is
+// already-migrated. The migrate help names distribution.
+func TestConfigMigrateDistributesDNS(t *testing.T) {
+	home, configFile := testHome(t, `{"profiles":{"p1":{"outbound":"proxy-sg"},"p2":{}},"outbounds":[{"type":"socks","tag":"proxy-sg","server":"127.0.0.1","server_port":1080,"version":"5"}],"dns":{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353}],"final":"dns1"}}`)
+	_ = home
+	env, out, errb := profileEnv(t, configFile)
+	before, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if code := runProfile(t, env, out, errb, configFile, "config", "migrate"); code != 0 {
+		t.Fatalf("migrate dry-run: code=%d err=%q", code, errb.String())
+	}
+	if !strings.Contains(out.String(), `"dns_distributed": true`) || !strings.Contains(out.String(), `"would_write": true`) {
+		t.Errorf("migrate dry-run plan: %q", out.String())
+	}
+	afterDry, _ := os.ReadFile(configFile)
+	if string(before) != string(afterDry) {
+		t.Error("dry-run modified the file")
+	}
+
+	if code := runProfile(t, env, out, errb, configFile, "config", "migrate", "--write"); code != 0 {
+		t.Fatalf("migrate --write: code=%d err=%q", code, errb.String())
+	}
+	if !strings.Contains(out.String(), `"reason": "dns-distributed"`) {
+		t.Errorf("migrate --write: %q", out.String())
+	}
+	doc := readJSONFileVia(t, configFile)
+	if _, ok := doc["dns"]; ok {
+		t.Errorf("distributed config still carries a top-level dns section: %v", doc)
+	}
+	profiles, _ := doc["profiles"].(map[string]any)
+	for name, want := range map[string]string{"p1": "proxy-sg", "p2": "castctl-direct:p2"} {
+		entry, _ := profiles[name].(map[string]any)
+		dnsDoc, _ := entry["dns"].(map[string]any)
+		servers, _ := dnsDoc["servers"].([]any)
+		if len(servers) != 1 {
+			t.Fatalf("profile %q servers = %v; want 1", name, dnsDoc["servers"])
+		}
+		server, _ := servers[0].(map[string]any)
+		if server["detour"] != want {
+			t.Errorf("profile %q detour = %v; want %q", name, server["detour"], want)
+		}
+	}
+
+	if code := runProfile(t, env, out, errb, configFile, "config", "migrate"); code != 0 {
+		t.Fatalf("migrate again: code=%d err=%q", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "already-migrated") {
+		t.Errorf("second migrate: %q", out.String())
+	}
+
+	if code := runProfile(t, env, out, errb, configFile, "config", "migrate", "--help"); code != 0 {
+		t.Fatalf("migrate --help: code=%d err=%q", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "distributes it into every profile") {
+		t.Errorf("migrate --help: %q", out.String())
+	}
+}
+
+// TestProfileShowListSilentWithLegacyDNS (F3, loop 2): the
+// compat warning fires only when a runtime is built. Read-only
+// commands over a legacy-form file print 0 bytes on stderr:
+// neither `profile list` nor `profile show` emits the warning.
+func TestProfileShowListSilentWithLegacyDNS(t *testing.T) {
+	_, configFile := testHome(t, `{"profiles":{"p1":{"outbound":"proxy-sg"}},"outbounds":[{"type":"socks","tag":"proxy-sg","server":"127.0.0.1","server_port":1080,"version":"5"}],"dns":{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353,"detour":"proxy-sg"}],"final":"dns1"}}`)
+	env, out, errb := profileEnv(t, configFile)
+
+	if code := runProfile(t, env, out, errb, configFile, "profile", "list"); code != 0 {
+		t.Fatalf("profile list: code=%d err=%q", code, errb.String())
+	}
+	if errb.Len() != 0 {
+		t.Errorf("profile list stderr = %q; want 0 bytes (no compat warning on read paths)", errb.String())
+	}
+	if code := runProfile(t, env, out, errb, configFile, "profile", "show", "p1"); code != 0 {
+		t.Fatalf("profile show p1: code=%d err=%q", code, errb.String())
+	}
+	if errb.Len() != 0 {
+		t.Errorf("profile show stderr = %q; want 0 bytes (no compat warning on read paths)", errb.String())
+	}
+}
+
+// TestConfigMigrateZeroProfilesRefuses (F1, loop 2, CLI
+// level): zero profiles + a top-level dns section refuses
+// through the CLI too (exit 2, plan JSON carries the
+// refusal, file byte-identical), in both dry-run and --write.
+func TestConfigMigrateZeroProfilesRefuses(t *testing.T) {
+	_, configFile := testHome(t, `{"profiles":{},"outbounds":[{"type":"socks","tag":"proxy-sg","server":"127.0.0.1","server_port":1080,"version":"5"}],"dns":{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353}],"final":"dns1"}}`)
+	env, out, errb := profileEnv(t, configFile)
+	before, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"config", "migrate"}, {"config", "migrate", "--write"}} {
+		if code := runProfile(t, env, out, errb, configFile, args...); code != 2 {
+			t.Fatalf("migrate %v: code=%d, want 2; out=%q err=%q", args, code, out.String(), errb.String())
+		}
+		if !strings.Contains(out.String(), `"dns_distribution_refusal"`) ||
+			!strings.Contains(out.String(), "no profile") {
+			t.Errorf("migrate %v plan: %q; want dns_distribution_refusal naming that no profile would receive a block", args, out.String())
+		}
+		after, _ := os.ReadFile(configFile)
+		if string(before) != string(after) {
+			t.Errorf("migrate %v rewrote the file on refusal", args)
+		}
+	}
+}
+
+func readJSONFileVia(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	return doc
 }
 
 // TestConfigMigrateFrom (--from): the source dir is read, the
