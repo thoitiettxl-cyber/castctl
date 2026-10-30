@@ -2,8 +2,20 @@
 
 ## Go
 
-Build, test, release: local script only, no CI. (Details land with the Go
-migration; this file covers the web UI until then.)
+Build, test, release: local script only, no CI. From the repo root:
+
+```sh
+go build ./...
+go vet ./...
+go test -race -tags with_utls,with_quic,with_wireguard,with_gvisor ./...
+```
+
+The tagged race command above is canonical: an untagged
+`go test ./internal/outbound/` fails 4 TLS subtests by design (uTLS
+needs `with_utls`). See README.md for the build-tag table, the flake
+loop, and the PR3 binary-size measurements. Release builds are a
+separate PR (Linux amd64/arm64, `CGO_ENABLED=1`, GLIBC 2.17);
+see docs/architecture.md.
 
 ## Web UI
 

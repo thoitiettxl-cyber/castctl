@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package hatch.noise;
+
+// Recreated from the VERIFIED FileDescriptorProto in desc1.bin
+// (sha256 5ea3f209386a4d47d28ee06473a2defad35536725bf2d3d847d31b04ec1a8868).
+// Enum value names are the VERIFIED names (SERVICE_DAEMON etc.), NOT the
+// shortened names in the plan table. Original descriptor has NO go_package
+// option; the go_package below is added solely for protoc-gen-go. It does
+// not affect wire bytes.
+option go_package = "github.com/thoitiettxl-cyber/castctl/internal/proto;proto";
+
+enum ServiceType {
+  SERVICE_DAEMON = 0;
+  SERVICE_SENTINEL = 1;
+  SERVICE_VAULT = 2;
+  SERVICE_AUTHD = 3;
+}
+
+message ServiceRequest {
+  ServiceType service = 1;
+  bytes payload = 2;
+}
+
+message ServiceResponse {
+  bytes payload = 1;
+}
+
+message ServiceFrame {
+  int64 stream_id = 1;
+  oneof kind {
+    ApplicationRequest request = 2;
+    ApplicationResponse response = 3;
+    BodyChunk body_chunk = 4;
+    Reset reset = 5;
+  }
+}
+
+message Header {
+  string key = 1;
+  string value = 2;
+}
+
+message ApplicationRequest {
+  string verb = 1;
+  string path = 2;
+  repeated Header headers = 3;
+  bytes body = 4;
+  bool end_body = 5;
+}
+
+message ApplicationResponse {
+  int32 status = 1;
+  repeated Header headers = 2;
+  bytes body = 3;
+  bool end_body = 4;
+}
+
+message BodyChunk {
+  bytes data = 1;
+  bool end_body = 2;
+}
+
+message Reset {
+  enum Code {
+    CODE_UNSPECIFIED = 0;
+    CANCELLED = 1;
+    TIMEOUT = 2;
+    PROTOCOL_ERROR = 3;
+    REFUSED_STREAM = 4;
+    INTERNAL_ERROR = 5;
+    SERVICE_UNAVAILABLE = 6;
+  }
+  Code code = 1;
+  string reason = 2;
+}
