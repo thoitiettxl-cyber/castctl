@@ -54,9 +54,11 @@ type MigrateResult struct {
 	WouldWrite bool `json:"would_write"`
 	// Migrated reports whether this call wrote the single file.
 	Migrated bool `json:"migrated"`
-	// Reason is "already-migrated", "refuse-overwrite", or
+	// Reason is "already-migrated", "refuse-overwrite",
 	// "dns-authored" (a run that wrote only the interim dns section
-	// onto an otherwise already-migrated config) when applicable.
+	// onto an otherwise already-migrated config), or
+	// "dns-distributed" (a run that distributed the top-level dns
+	// section into profile entries and removed it) when applicable.
 	Reason               string           `json:"reason,omitempty"`
 	DefaultProfile       string           `json:"default_profile"`
 	Profiles             []MigrateProfile `json:"profiles"`
@@ -77,6 +79,19 @@ type MigrateResult struct {
 	// succeeds and writes no dns section. Empty when a dns section
 	// was carried verbatim, authored, or not applicable.
 	DNSRefusal string `json:"dns_refusal,omitempty"`
+	// DNSDistributed reports that this run distributed the
+	// top-level dns section into every profile's own dns block
+	// and removed the top-level key (see distributeTopLevelDNS).
+	// It is set only when a legacy top-level section was
+	// present and distribution succeeded.
+	DNSDistributed bool `json:"dns_distributed,omitempty"`
+	// DNSDistributionRefusal records why distribution of the
+	// top-level dns section refused, naming the profile and the
+	// failing field/tag. Unlike DNSRefusal it accompanies a
+	// returned error: a refused distribution writes nothing
+	// and exits 2. Empty when distribution succeeded or was
+	// not applicable.
+	DNSDistributionRefusal string `json:"dns_distribution_refusal,omitempty"`
 }
 
 // Migrate migrates the legacy layout in baseDir into baseDir's
@@ -119,6 +134,16 @@ func Migrate(baseDir string, write bool) (*MigrateResult, error) {
 //     legacy migration is always direct-only, so it always
 //     records a refusal: there is no outbound tag to detour
 //     through until an outbound is supplied separately.
+//   - DNS distribution (G4): when the existing single file
+//     carries a top-level dns section, distributeTopLevelDNS
+//     copies it verbatim into every profile's own dns block
+//     (detours filled/kept/refused per profile) and removes
+//     the top-level key in the same atomic write, again only
+//     onto an otherwise already-migrated config. A refusal
+//     (unreachable detour, WireGuard-shadowed profile, invalid
+//     distributed candidate) is an error: exit 2, nothing is
+//     written, and the refusal is recorded in
+//     DNSDistributionRefusal.
 //   - Migrate reads files only: it does not consult MUSE_VM_ID /
 //     MUSE_NODE_ID (env fill happens at Load time), and touches no
 //     telegram or update files.
@@ -462,6 +487,47 @@ func MigrateFrom(sourceDir, destDir string, write bool) (*MigrateResult, error) 
 	}
 
 	if existingIsSingle {
+		// G4 distribution: when the existing file carries a
+		// top-level dns section, distribute it verbatim into
+		// every profile's own dns block and remove the top-level
+		// key in the same atomic write — but only onto a config
+		// that is otherwise already-migrated (the
+		// authorInterimDNS gate: the distribution diff must be
+		// exactly the dns move, nothing else). A differing
+		// config falls through to refuse-overwrite below, with
+		// no distribution attempted. A distribution refusal
+		// (unreachable detour, WireGuard-shadowed profile, or
+		// an invalid distributed candidate) is an error: the
+		// whole run refuses, exit 2, nothing is written.
+		if candidate.DNS != nil {
+			otherwiseMigrated, cerr := configsEqual(stripDNS(existing), stripDNS(candidate))
+			if cerr != nil {
+				return result, cerr
+			}
+			if otherwiseMigrated {
+				distributed, distRefusal, distErr := distributeTopLevelDNS(candidate, destDir)
+				if distErr != nil {
+					result.DNSDistributionRefusal = distRefusal
+					return result, distErr
+				}
+				if distributed {
+					result.DNSDistributed = true
+					if !write {
+						result.WouldWrite = true
+						return result, nil
+					}
+					// The config lock is held (acquired
+					// above): write under it, without
+					// re-locking via SaveSingleConfig.
+					if _, err := writeSingleConfigLocked(destDir, candidate); err != nil {
+						return result, err
+					}
+					result.Migrated = true
+					result.Reason = "dns-distributed"
+					return result, nil
+				}
+			}
+		}
 		// DNS extension: author the interim global section only
 		// onto an otherwise already-migrated config (see
 		// authorInterimDNS). A differing config refuses below
