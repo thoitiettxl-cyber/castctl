@@ -133,7 +133,171 @@ func TestWaitRedesignT4ApprovalEndsWait(t *testing.T) {
 	})
 }
 
-// T4 (pin, needs-input): a Done turn whose LAST reply carries an
+// T5 (RED): held terminal, quiet stream, late reply — the reported
+// bug. A root completed held for subagents, no further stream event,
+// and the reply lands in history after the first settle proof.
+// Required: KindDone / exit 0 / replies [11], decided by a
+// history re-poll, without any count-0 event or server replay.
+func TestWaitRedesignT5HeldTerminalQuietStreamLateReply(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sub := &fakeSubscriber{
+			block: true,
+			loopScript: [][]byte{
+				recordJSON(taskEv("running", "R", "R", 120, nil)),
+				recordJSON(taskEv("completed", "R", "R", 180, 2)),
+			},
+		}
+		hist := &queueHistory{resps: []historyResp{
+			historyOK([]any{userEv(10)}),
+			historyOK([]any{userEv(10)}),
+			historyOK([]any{userEv(10), asst(11, "completed", "main's reply", nil)}),
+		}}
+		res := runRunner(t, Config{
+			Timeout:      600 * time.Second,
+			RecheckAfter: 20 * time.Second,
+			CheckEvery:   60 * time.Second,
+			Dial:         sub.dial,
+			History:      hist,
+		})
+		if res.Kind != KindDone || res.Outcome != "done" || res.ExitCode != 0 {
+			t.Errorf("res = %+v, want KindDone/done/0", res)
+		}
+		if len(res.Replies) != 1 || res.Replies[0].Seq != 11 || res.FinalText != "main's reply" {
+			t.Errorf("res = %+v, want reply [11]", res)
+		}
+		// Derivation + first (empty) settle + re-poll settle +
+		// final read: exactly 4 history reads.
+		if hist.calls != 4 {
+			t.Errorf("history calls = %d, want 4", hist.calls)
+		}
+	})
+}
+
+// T6 (RED): suspect terminal, reply lands after a too-early
+// settle, no new stream record. Required: the re-poll finds the
+// reply and decides KindDone within the stated bound, with the
+// history-read count asserted.
+func TestWaitRedesignT6SuspectTerminalLateReply(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sub := &fakeSubscriber{
+			block: true,
+			loopScript: [][]byte{
+				recordJSON(taskEv("running", "R", "R", 120, nil)),
+				recordJSON(taskEv("idle", "R", "R", 180, nil)),
+			},
+		}
+		hist := &queueHistory{resps: []historyResp{
+			historyOK([]any{userEv(10)}),
+			historyOK([]any{userEv(10)}),
+			historyOK([]any{userEv(10), asst(11, "completed", "late reply", nil)}),
+		}}
+		res := runRunner(t, Config{
+			Timeout:      600 * time.Second,
+			RecheckAfter: 20 * time.Second,
+			CheckEvery:   60 * time.Second,
+			Dial:         sub.dial,
+			History:      hist,
+		})
+		if res.Kind != KindDone || res.ExitCode != 0 {
+			t.Errorf("res = %+v, want KindDone/0", res)
+		}
+		if len(res.Replies) != 1 || res.Replies[0].Seq != 11 {
+			t.Errorf("res = %+v, want reply [11]", res)
+		}
+		if hist.calls != 4 {
+			t.Errorf("history calls = %d, want 4 (derivation + 2 settle proofs + final read)", hist.calls)
+		}
+	})
+}
+
+// T7 (RED, documented-limit branch): history window exhaustion.
+// The reply sits older than the largest window's oldest event, so
+// no window ever contains it. Required: the loss is VISIBLE —
+// the final read reports exhaustion in the result note instead
+// of silently exiting 0 with no replies and no note.
+func TestWaitRedesignT7WindowExhaustionIsVisible(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sub := &fakeSubscriber{loopScript: [][]byte{
+			recordJSON(taskEv("running", "R", "R", 120, nil)),
+			recordJSON(taskEv("completed", "R", "R", 180, nil)),
+		}}
+		// Every window is exhausted (has_more) and holds only
+		// user events: the reply at an older seq never appears
+		// in any window, so the final read finds no replies.
+		window := func() historyResp {
+			return historyResp{events: []any{
+				userEv(50),
+				userEv(30),
+			}, hasMore: true}
+		}
+		hist := &scriptHistory{
+			byLimit: map[int][]historyResp{
+				200:  {window()},
+				500:  {window()},
+				1000: {window()},
+			},
+			def: window(),
+		}
+		res := runRunner(t, Config{
+			Timeout:       60 * time.Second,
+			AfterSeq:      10,
+			HasAfterSeq:   true,
+			HistoryLimits: []int{200, 500, 1000},
+			Dial:          sub.dial,
+			History:       hist,
+		})
+		if res.Kind != KindDone || res.ExitCode != 0 {
+			t.Errorf("res = %+v, want KindDone/0 (the terminal itself is proven)", res)
+		}
+		if len(res.Replies) != 0 {
+			t.Errorf("replies = %+v, want none (reply is beyond the window)", res.Replies)
+		}
+		wantNote := "history window exhausted at 1000 events; older replies may be missed; run `castctl wait` again"
+		if res.Note != wantNote {
+			t.Errorf("note = %q, want %q", res.Note, wantNote)
+		}
+	})
+}
+
+// T8 (pin, D1 first form): an absent active_subagent_count still
+// decides Done directly, and the final read collects both replies
+// that are already in history at decision time. Replies landing
+// after the final read are out of scope for this turn (stated
+// limit, not a silent claim).
+func TestWaitRedesignT8AbsentCountDecidesDirectly(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sub := &fakeSubscriber{loopScript: [][]byte{
+			recordJSON(taskEv("running", "R", "R", 120, nil)),
+			recordJSON(taskEv("completed", "R", "R", 180, nil)),
+		}}
+		hist := &queueHistory{resps: []historyResp{
+			historyOK([]any{userEv(10)}),
+			historyOK([]any{
+				userEv(10),
+				asst(11, "completed", "subagent work", nil),
+				asst(12, "completed", "main's reply", nil),
+			}),
+		}}
+		res := runRunner(t, Config{
+			Timeout: 60 * time.Second,
+			Dial:    sub.dial,
+			History: hist,
+		})
+		if res.Kind != KindDone || res.ExitCode != 0 {
+			t.Errorf("res = %+v, want KindDone/0", res)
+		}
+		if len(res.Replies) != 2 || res.Replies[0].Seq != 11 || res.Replies[1].Seq != 12 {
+			t.Errorf("replies = %+v, want [11 12]", res.Replies)
+		}
+		if res.FinalText != "main's reply" {
+			t.Errorf("FinalText = %q", res.FinalText)
+		}
+		if hist.calls != 2 {
+			t.Errorf("history calls = %d, want 2 (derivation + final read, no settle)", hist.calls)
+		}
+	})
+}
+
 // unanswered widget is needs_input / exit 4.
 func TestWaitRedesignT4NeedsInputWidget(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
