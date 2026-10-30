@@ -363,19 +363,19 @@ What was taken (mapping, upstream `release.yaml` line → castctl
 
 - Linux glibc docker build shape: upstream L235–369 (manylinux
   images, official Go tarball in-container, `CGO_ENABLED=1`,
-  `-buildvcs=false`) → castctl `release.yaml:104–234` (same
+  `-buildvcs=false`) → castctl `release.yaml:171–326` (same
   runners and image names; `go-version-file: go.mod` on the host,
   tarball version derived from `go.mod` in-container).
-- GLIBC gate: upstream L309–317 → castctl `release.yaml:200–210`,
+- GLIBC gate: upstream L309–317 → castctl `release.yaml:288–301`,
   plus a fail-closed delta (empty version list exits 1).
 - No-plugin static build + no-interpreter gate: upstream L371–488
   (build L429–431, gate L433–437) → castctl
-  `release.yaml:236–327`, plus an explicit pass echo.
+  `release.yaml:327–452`, plus an explicit pass echo.
 - Archive naming pattern: upstream L285/L425 → castctl
-  `release.yaml:220` / `:301` (`castctl_<ver>_linux_<arch>.tar.gz`
+  `release.yaml:311` / `:403` (`castctl_<ver>_linux_<arch>.tar.gz`
   and `..._no-plugin.tar.gz`, `<arch>` = `amd64`/`arm64`).
 - Checksums ordering: upstream L716 (`sha256sum … | sort -k2`) ->
-  castctl `release.yaml:371`.
+  castctl `release.yaml:504`.
 - Release-notes asset wording: upstream heredoc L36–48 → README.md
   "Release assets" section (castctl names/assets; FreeBSD
   paragraph dropped; no blank line between the two Linux bullets,
@@ -386,26 +386,26 @@ Deviations (each with castctl evidence):
 - (a) `workflow_dispatch` dry-run: upstream has no
   `workflow_dispatch` (trigger L3–7 is tag push only). Castctl
   adds `publish` (choice none/draft/prerelease, default none) +
-  `tag_name` inputs (`release.yaml:40–52`); the shared publish
-  predicate (`release.yaml:61`, `:226`, `:319`, `:338`) gates
-  every publish step, and a `prepare` job (`release.yaml:58–102`)
+  `tag_name` inputs (`release.yaml:42–53`); the shared publish
+  predicate (`release.yaml:80`, `:317`, `:443`, `:462`) gates
+  every publish step, and a `prepare` job (`release.yaml:77–169`)
   creates the release idempotently before any upload.
 - (b) Zero artifact storage: upstream uses
   `actions/upload-artifact` (L186/L322/L441/L642) and
   `actions/download-artifact` (L700). Castctl has neither string
   in `.github/workflows/`; uploads use `gh release upload
   --clobber` and the checksums job downloads via `gh release
-  download` (`release.yaml:362`).
+  download` (`release.yaml:495`).
 - (c) Checksums job is success-only: upstream
   `publish-checksums` uses `if: always()` (L693). Castctl
   requires both build jobs `result == 'success'`
-  (`release.yaml:338`) plus an exact-4 archive count check
-  (`release.yaml:363–369`).
+  (`release.yaml:462`) plus an exact-4 archive count check
+  (`release.yaml:498–503`).
 - (d) Go version: upstream pins `1.26.10` (L14). Castctl uses
   `go-version-file: go.mod` (`go 1.27.3`, `go.mod:3`).
 - (e) Asset token `arm64`, not upstream `aarch64` (upstream
   matrix L251/L384); the manylinux image name stays `aarch64`
-  (`release.yaml:127`) because that is the image's real name.
+  (`release.yaml:194`) because that is the image's real name.
 - (f) Added `-trimpath` and canonical tags
   `with_utls,with_quic,with_wireguard,with_gvisor` (upstream has
   neither); `-X` paths point at
@@ -421,7 +421,7 @@ Deviations (each with castctl evidence):
 - (h) Archive file set: upstream ships `LICENSE README.md
   README_CN.md config.example.yaml` (L180/L320/L439/L640).
   Castctl ships `LICENSE` + `LICENSE.sing-box` + `README.md`
-  (`release.yaml:222–223` / `:315–316`); there is no `README_CN.md` or
+  (`release.yaml:312–314` / `:438–440`); there is no `README_CN.md` or
   `config.example.yaml` in this repo.
 - (i) No NOTICE change in this PR: no new upstream is introduced
   (CLIProxyAPI is already this §2; sing-box is already in
