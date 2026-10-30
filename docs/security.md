@@ -11,3 +11,10 @@ never values. Secrets are never printed, logged, or committed.
 The full contract is the [secrets write-only contract](../webui/SECRETS-CONTRACT.md).
 The Go server MUST implement the same redaction, sentinel
 keep-on-save, and merge contract server-side (Go PR6).
+
+## `--listen` + token + HTTPS/tunnel guidance
+
+The web UI listens on localhost only by default (`127.0.0.1`, port
+`8317` by default, configurable via `--port`). Non-loopback access
+requires `--listen` and a token (`CASTCTL_WEBUI_KEY`). Use HTTPS or a
+tunnel for non-loopback access.

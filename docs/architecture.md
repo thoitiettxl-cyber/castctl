@@ -24,21 +24,25 @@ only after the web-UI and docs work merges.
 castctl is core + plugins, following CLIProxyAPI's plugin model exactly:
 the same loader approach, ABI/contract style, plugins directory layout,
 and store/install flow, adapted only for the per-profile proxy/cookies
-handoff to plugins (never raw WireGuard keys). CLIProxyAPI's config
-schema uses `plugins.enabled` (global) and
-`plugins.configs.<id>.enabled` (per-plugin); castctl follows the model
-exactly, adopting the same toggles.
+handoff to plugins (never raw WireGuard keys). Plugins MUST send all
+network traffic through the per-profile dialer that core provides, and
+never dial directly, since without a sandbox they could otherwise bypass
+the profile's outbound. CLIProxyAPI's config schema uses
+`plugins.enabled` (global) and `plugins.configs.<id>.enabled`
+(per-plugin); castctl follows the model exactly, adopting the same
+toggles. The plugin toggles (`plugins.enabled` and
+`plugins.configs.<id>.enabled`) are changed through the Management API
+and the web UI.
 
 Core is profiles, per-profile outbound (sing-box), the cookie/session
 store and keeper, config, the web UI, and Telegram. Screencast login
 stays in core. Each platform is a plugin: castctl-muse first, then
-castctl-facebook, castctl-tiktok, and castctl-youtube. Whether a
-capability is built in or shipped as a plugin is a packaging choice.
+castctl-facebook, castctl-tiktok, and castctl-youtube.
 
 Plugins are trusted and in-process, with no sandbox, exactly like
 CLIProxyAPI, and only first-party CLIs (BQ1, closed). BQ2–BQ5 are
 parked until just before plugin implementation, after the migration.
-The red-team findings B1, B2, and B4–B10 are parked; B3 is dropped.
+The red-team findings B1, B2, B3, and B4–B10 are parked.
 The plugin design draft is rationale only: at implementation start it
 is condensed to an implementable spec of under 20 KB mirroring
 CLIProxyAPI, pointing to the draft for rationale. This docs change
@@ -71,8 +75,9 @@ fakes, no live hosts).
 
 Profiles must never interfere with each other through the sing-box
 stack. This is a HARD invariant: a violation is a bug, and enforcement
-is by test, not by convention. It applies from PR3 on (in the `go/`
-tree in muse-cli, on `feat/go-port`, pre-migration) and in castctl after migration, to every command,
+is by test, not by convention. It applies in the `go/` tree in
+muse-cli, on `feat/go-port`, pre-migration, and in castctl after
+migration, to every command,
 the Telegram bot, the web UI, the session keeper, and the screencast
 login flow.
 
