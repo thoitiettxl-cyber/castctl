@@ -435,7 +435,10 @@ direct profiles only — the profile's synthesised direct tag
 (below). A detour naming another profile's inline outbound, a
 dangling tag, a duplicate server tag within the block, or a
 `final` naming no server tag in the same block are all errors.
-Server tags are scoped per profile: two profiles may both use
+The runtime creates the active profile's own inline outbound
+in its own manager under its tag, so an own-inline detour
+resolves at DNS Start; other profiles' inline outbounds are
+never created there. Server tags are scoped per profile: two profiles may both use
 tag `dns1` with no collision.
 
 **Precedence** for the active profile, in order
@@ -450,7 +453,12 @@ tag `dns1` with no collision.
    warning). The warning directs the operator to remove the
    top-level section by hand: distribution with
    `config migrate --write` refuses while the profile
-   resolves WireGuard DNS (see below).
+   resolves WireGuard DNS (see below). Removing the section
+   by hand also changes every non-WireGuard profile's
+   resolver: those profiles stop using the compat section
+   and fall through to the synthesised default (item 4) —
+   the section's servers are not preserved for them unless
+   they were distributed into per-profile blocks first.
 3. Else the top-level `dns` section, compat fallback for one
    cycle, with a one-line stderr warning telling the operator
    to run `config migrate --write` to distribute it into
@@ -599,6 +607,11 @@ atomically under a config lock held across decide+write (mode
 backup; `.bak` exists only for cookies files); refuse-overwrite
 — an existing single file that differs from the migration
 result refuses with exit 2 (there is no `--overwrite`);
+a base file with no `profiles` key that carries single-format
+sections (`dns`, `outbounds`, `endpoints`, `wireguard_dns`,
+`log`, or `default_profile` in single-config shape) refuses
+a fresh migration with exit 2 and is left unchanged, instead
+of being overwritten with the sections deleted (see below);
 idempotent — re-running after a successful migration reports
 `already-migrated`; all-or-nothing — any profile error aborts
 the whole migration and nothing is written; existing
@@ -609,6 +622,23 @@ section is distributed into profile entries instead (see
 no outbound is ever
 invented; `node_id` is generated only on `--write` when no
 single file exists yet.
+
+A base `config.json` with no `profiles` key is normally a
+legacy flat file and migrates as one — but when it carries
+single-format sections in single-config shape (an object
+`dns` section, an `outbounds`/`endpoints` array of objects
+each carrying a `type`, a `wireguard_dns` object of string
+arrays, a `log` object of log-block keys, or a string
+`default_profile`), a fresh migration would overwrite it and
+delete those sections. That shape refuses instead (exit 2,
+file unchanged, in dry-run and `--write`, at the destination
+under `--from` too): add a `profiles` object so the file
+parses as a single config, or remove the sections by hand
+first. Unshaped values (a string `dns`, an empty `outbounds`
+array, an outbound object without a `type`) keep the legacy
+path, as before; a file with a `profiles` key, including an
+empty `profiles: {}`, takes the single-file path, where the
+zero-profile distribution refusal applies instead.
 
 ### Migrating from a different directory (`--from`)
 
@@ -758,10 +788,14 @@ of migrate.
   - a server detour is unreachable from its profile's
     outbound (never silently rewritten to the own tag);
   - no profile would receive a distributed block: the file
-    carries a top-level `dns` section but has zero profiles,
+    carries a top-level `dns` section but has zero profiles
+    with a `profiles` key present (an empty `profiles: {}`),
     so distribution would delete the section without
     distributing it; the run refuses instead of silently
-    deleting it;
+    deleting it. A file with no `profiles` key at all never
+    reaches distribution: a single-format base file is
+    refused by the fresh-migration guard above, and a
+    genuine legacy file migrates as a legacy file;
   - the distributed candidate fails validation (duplicate
     server tags, a `final` naming no server, a `hosts` or
     `fakeip` server, or a WireGuard key-sharing failure):

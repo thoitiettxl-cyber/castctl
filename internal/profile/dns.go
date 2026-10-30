@@ -330,7 +330,9 @@ func wireGuardDNSForProfile(prof *Profile, single *SingleConfig) (string, []stri
 // reached only as a group member or detour target — is NOT
 // reachable: the runtime creates only global nodes, the profile's
 // own inline outbound, and the synthesised direct outbound in
-// this profile's manager, so a detour naming such a tag would
+// this profile's manager (see createOutbounds in
+// internal/commands/runtime.go, which materialises the own
+// inline outbound under its tag), so a detour naming such a tag would
 // fail closed at runtime ("outbound detour not found").
 // Dangling tags are already rejected by validateTagGraph before
 // this runs; the exclusion is what keeps other profiles' inline
