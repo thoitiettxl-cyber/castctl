@@ -55,6 +55,56 @@
 //     data after one JSON value. Both are unobservable for
 //     well-formed server records.
 //
+// Wait redesign (2026-10-30): turn-end rules added on top of the
+// port, each decided explicitly against muse-cli 0.6.1 as the
+// differential reference and proved by the T1–T18 tests in
+// wait_redesign_test.go:
+//
+//   - A terminal held for "subagents" settles on a history reply
+//     proof, without waiting for a count-0 event or a server
+//     replay. This deliberately diverges from 0.6.1, which
+//     refuses the subagents reason in settle outright: the two
+//     signals together — a stored root terminal plus a
+//     completed reply in history after the boundary — release a
+//     wait the live stream left held on a quiet stream. The
+//     reply filter does not attribute replies to main vs
+//     subagent (no agent fields are read anywhere in replies.go),
+//     so a subagent's own completed reply can release the hold;
+//     that residual is carried, not hidden, pending live
+//     capture of real history shapes.
+//   - Settle proofs re-poll on a clock cadence
+//     (DefaultSettlePollInterval, 5s) while a terminal is held:
+//     the Runner ends a quiet subscription when a proof is due
+//     and re-proves after each subscribe batch, so a reply
+//     landing seconds after a too-early proof is caught within
+//     one interval plus one resubscribe pause. Proofs are
+//     throttled as before, spend no read while the boundary is
+//     unknown, and never start past the deadline.
+//   - Boundary derivation runs under the wait deadline: a dead
+//     history endpoint cannot consume wall time past a short
+//     --timeout before any subscription starts. Expiry during
+//     derivation yields an unknown boundary and a KindTimeout
+//     result, never an error return; AuthError still propagates.
+//   - History window exhaustion is visible: when has_more is
+//     still true at the largest window, the final read reports
+//     it in the result note instead of silently returning an
+//     empty reply list. The 1000-event window bound itself is
+//     unchanged and documented as a limit.
+//   - Kept unchanged, deliberately: an absent
+//     active_subagent_count still decides Done directly (the
+//     0.6.1 rule; whether the server always populates the count
+//     is unproven from code alone); checkState still feeds only
+//     the last replayed status; there is still no persisted
+//     cursor, no follow/until-idle/next-reply mode, no
+//     no-timeout mode, and no wait-level liveness output; exit
+//     codes are unchanged (auth errors surface as exit 2 at the
+//     CLI boundary, never as 124 or a retry loop).
+//   - The send path's boundary is proved, never fallen back:
+//     deliverSend fails the send before sending when the
+//     pre-send baseline history read fails, instead of falling
+//     back to baseline 0 and letting the ack poll match an
+//     older turn's identical text (the reply-reuse bug).
+//
 // What the server does with node_id is unknown: see NODE_ID.md.
 // The chat REPL is design-only: see CHAT-REPL-DESIGN.md. How
 // the wait/send paths take the profile outbound, the PR3

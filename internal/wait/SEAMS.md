@@ -185,9 +185,10 @@ the wiring PR resolves the profile and hands the Runner its
   under any driver; no driver code may rely on overwriting.
 - D2: state checks run synchronously between subscribe
   batches instead of on a concurrent check thread behind a
-  lock; settle attempts happen at batch boundaries and on
-  each newly-ignored terminal, throttled to one history read
-  per terminal value per iteration.
+  lock; settle attempts happen at batch boundaries, on each
+  newly-ignored terminal, and on the settle re-poll cadence
+  (D11), throttled to one history read per terminal value per
+  subscribe iteration.
 - D3: `RepliesAfter` skips non-object events instead of
   failing while sorting; `FeedRecord` rejects trailing data
   after one JSON value. Unobservable for well-formed records.
@@ -252,6 +253,98 @@ the wiring PR resolves the profile and hands the Runner its
   Waiter cannot know. Pinned by
   `TestRunnerSettlePendingCancelledSuccessReturnsCtxErr` and
   the `TestRunnerFinish*CtxErr` tests.
+- D10: `Settle` accepts a terminal held for `"subagents"` on a
+  history reply proof (wait redesign, 2026-10-30). 0.6.1
+  refuses the subagents reason outright; the Go rule releases
+  a quiet-stream hold on the two-signal proof (stored root
+  terminal + reply after the boundary). FAILED terminals still
+  never settle here. Pinned by `TestWaitRedesignT5*` (Runner
+  level) and `TestWaitRedesignT9ReleaseSignals` (Waiter level).
+- D11: settle re-poll (wait redesign, 2026-10-30).
+  `Config.SettlePollInterval` (default 5s, never disable-able)
+  bounds the delay between a too-early proof and its retry:
+  `shouldStop` ends a quiet subscription when a proof is due,
+  and the Runner re-proves after each subscribe batch that
+  delivered no record. No read is spent while the boundary is
+  unknown (the gates forbid every proof), and no proof starts
+  past the deadline. Pinned by `TestWaitRedesignT5/T6/T12`.
+- D12: boundary derivation runs under the wait deadline (wait
+  redesign, 2026-10-30). A deadline expiry during derivation
+  yields an unknown boundary and a KindTimeout result; an
+  AuthError still propagates and a dead caller context still
+  returns the caller's error. Pinned by
+  `TestWaitRedesignT13BlockingHistoryTerminatesAtDeadline`.
+- D13: `HistoryReplies` reports window exhaustion (wait
+  redesign, 2026-10-30): a third return value, true when
+  `has_more` is still true at the largest limit. The Runner's
+  finish turns exhaustion on the final read into a result
+  note; settle proofs ignore it (a partial window's replies
+  are still real replies). Pinned by
+  `TestWaitRedesignT7WindowExhaustionIsVisible` and the
+  extended `TestHistoryReplies`.
+- D14: `deliverSend` (in `internal/commands/wait.go`) fails the
+  send before sending when the pre-send baseline history read
+  fails (wait redesign, 2026-10-30). No baseline-0 fallback,
+  so the substring ack (`UserAck`) can only match above a
+  proved baseline. Pinned by
+  `TestDeliverSendBaselineReadFailureFailsBeforeSend`.
+
+## 9. Wait-redesign gap disposition (probe-A G1–G10)
+
+Numbering is probe A's (`A-go-wait-today.md` / the Phase-1 R1
+report), NOT §6's driver gaps. "Closed" means a test proves the
+new behaviour on scripted streams; server-behaviour unknowns
+stay [UNVERIFIED] until Boss's live capture settles them — no
+fixture here is a real captured stream.
+
+- A-G1 (settle single-attempt per iteration): CLOSED for the
+  quiet-stream delay — the D11 re-poll bounds re-proof to one
+  interval plus one resubscribe pause (T5/T6/T12). The
+  per-iteration throttle itself is kept.
+- A-G2 (subagents holdback release): CLOSED for the
+  quiet-stream case — D10 reply proof releases the hold
+  (T5/T9). Release still depends on a reply existing in
+  history; a hold with no reply in history waits to the
+  deadline, as before.
+- A-G3 (checkState last-only): CARRIED deliberately — the
+  last-only rule matches 0.6.1 and replay order/content is
+  [UNVERIFIED]. Pinned by T10, including the
+  subagent-filtered last event.
+- A-G4 (no reply attribution): CARRIED — no agent fields are
+  read in the reply filter, and whether real
+  `message.assistant` events carry them is [UNVERIFIED]
+  (needs live capture). T17 pins the non-attribution rule.
+  Consequence: a subagent's completed reply can release a
+  subagents hold (D10) and can appear in Replies.
+- A-G5 (narrow/Done-only lag window): PARTLY CLOSED — the
+  re-poll (D11) now catches late replies for held/suspect
+  terminals before the endgame, so the lag window is no
+  longer the only late-reply path. The lag window itself
+  (2s, Done-only, empty-replies-only) is unchanged, and no
+  lag window exists on the timeout path.
+- A-G6 (absent count trusted): CARRIED deliberately — the
+  0.6.1 rule is kept; whether the server always populates
+  `active_subagent_count` on root terminals is [UNVERIFIED].
+  Pinned by T8 (first form: direct Done + final-read
+  collection).
+- A-G7 (no resume/cursor/persistence): CARRIED — no store was
+  added. Restart recovery is history re-derivation only, with
+  its stated limits. No test claims otherwise.
+- A-G8 (always-on time limit, no modes): CARRIED — single
+  overall deadline (default 600s) kept; no follow/until-idle/
+  next-reply/no-timeout mode was added. T11 does not exist;
+  single-turn exit after the first turn is pinned by the
+  existing `TestRunnerLiveDone`.
+- A-G9 (silence while waiting): CARRIED — the Runner still
+  writes nothing while waiting. The re-poll bounds the
+  decision latency after a reply lands; it is not liveness
+  output.
+- A-G10 (boundary/window edges): PARTLY CLOSED — window
+  exhaustion is now visible via the finish note (D13/T7);
+  the 1000-event window bound, the last-window-only rule,
+  and the `upto` cap are unchanged and documented as limits.
+  Boundary suppression on unknown boundary is unchanged
+  (T3).
 
 ## 8. Deferred wiring (exact list)
 

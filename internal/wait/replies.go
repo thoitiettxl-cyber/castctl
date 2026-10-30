@@ -291,6 +291,13 @@ func EventHasMedia(ev Event) bool {
 // text, and returns its seq. A nil text matches the first user
 // event above the baseline. No status or self-reference check is
 // applied here.
+//
+// The substring match is trusted ONLY above a proved baseline:
+// the caller must have read the baseline from history
+// successfully before sending (deliverSend fails the send when
+// that read fails, never falling back to 0). Above a proved
+// baseline the first match is the just-sent message's own seq;
+// above a stale 0 it could be an older turn's.
 func UserAck(events []any, baseline int64, text *string) (int64, bool) {
 	sorted := append([]any(nil), events...)
 	sort.SliceStable(sorted, func(i, j int) bool {
