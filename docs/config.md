@@ -205,15 +205,50 @@ castctl config migrate --write    # migrate atomically (mode 0600)
 
 Properties (all tested): dry-run by default; `--write` writes
 atomically under a config lock held across decide+write (mode
-0600, `.bak` kept); refuse-overwrite — an existing single file
-that differs from the migration result refuses with exit 2
-(there is no `--overwrite`); idempotent — re-running after a
-successful migration reports `already-migrated`; all-or-nothing
-— any profile error aborts the whole migration and nothing is
-written; existing single-file `outbounds`, `endpoints`, `dns`,
-and `default_profile` are carried verbatim; no outbound is ever
+0600, temp file + rename; no `.bak` file is kept for
+`config.json` — the old files are left untouched and are the
+backup; `.bak` exists only for cookies files); refuse-overwrite
+— an existing single file that differs from the migration
+result refuses with exit 2 (there is no `--overwrite`);
+idempotent — re-running after a successful migration reports
+`already-migrated`; all-or-nothing — any profile error aborts
+the whole migration and nothing is written; existing
+single-file `outbounds`, `endpoints`, `dns`, and
+`default_profile` are carried verbatim; no outbound is ever
 invented; `node_id` is generated only on `--write` when no
 single file exists yet.
+
+### Migrating from a different directory (`--from`)
+
+`--from <dir>` separates the migration source from the
+destination: legacy profiles are read ONLY from `<dir>`, and the
+single config is written ONLY to the `--config` file's directory
+(or the default config directory when no `--config` is given).
+The source directory is never written, locked, or modified in
+any way — verify this by hash before and after; the old files
+stay in the source as the backup. Cookies files stay in the
+source too: migrated entries point at them by absolute path.
+A missing source directory exits 2 and writes nothing anywhere.
+Refuse-overwrite applies at the destination. When `--from`
+names the destination directory itself, behaviour is exactly
+the in-directory behaviour above. The dry-run plan reports
+`source_dir` and `destination_dir` (paths only, no file
+contents) and writes nothing to either directory.
+
+```sh
+castctl --config ~/.config/castctl/config.json config migrate --from ~/.config/muse-cli            # dry-run: plan only
+castctl --config ~/.config/castctl/config.json config migrate --from ~/.config/muse-cli --write     # migrate into the new directory
+```
+
+Note on the `source` label in the plan: migrate enumerates
+profiles by directory discovery and reports every profile it
+builds from the old layout as `source: "legacy"` — including a
+profile whose directory holds no config file at all (defaults
+only). That label is a discovery label, not a finding that a
+legacy config file exists: the load refusal and the
+`profile add` block fire only on an actual legacy config file
+(a flat base `config.json` without the `profiles` marker, or a
+`profiles/<name>/config.json`), never on a bare directory alone.
 
 ### DNS authoring by `config migrate`
 
@@ -243,7 +278,11 @@ why in `dns_refusal` (JSON field; also shown by the command),
 naming the profile: a direct-only profile has no outbound tag
 to detour through — a fresh legacy migration is always
 direct-only, so it always records a refusal and migrates
-without a `dns` section. The migration itself still succeeds.
+without a `dns` section. A tag that resolves to a direct
+outbound (in `outbounds`, `endpoints`, or an inline profile
+outbound) counts the same way: naming it as a detour would
+write a config sing-box refuses at runtime, so it records a
+refusal instead. The migration itself still succeeds.
 A differing single config still refuses to overwrite, with no
 authoring attempted. An existing `dns` section is carried
 verbatim, never rewritten. Authoring is validated with the
@@ -270,10 +309,10 @@ this order:
    with detour = the profile's outbound.
 
 `local` is **never** the default: it is explicit-only. A
-`local` server queries the system resolver — on
-systemd-resolved hosts that bypasses the tunnel via D-Bus
-unless the resolver is reached through the detour, and live
-traversal of `local`+detour is [UNVERIFIED until live proof].
+`local` server queries the system resolver — [UNVERIFIED until
+live proof: on systemd-resolved hosts that may bypass the
+tunnel via D-Bus unless the resolver is reached through the
+detour, and live traversal of `local`+detour is unproven].
 The gated model documents `prefer_go=false` for `local`
 servers (the Go resolver path stays off). Until the
 per-profile PR lands with live proof, prefer an explicit
