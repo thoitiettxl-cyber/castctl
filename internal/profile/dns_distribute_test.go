@@ -974,6 +974,9 @@ func TestMigrateProfilesAbsentSingleFormatShapes(t *testing.T) {
 		{"default_profile", `{"default_profile":"work"}`},
 		{"empty dns object", `{"dns":{}}`},
 		{"dns with servers", `{"dns":{"servers":[{"tag":"d1","type":"tcp","server":"127.0.0.1","server_port":5353}],"final":"d1"}}`},
+		{"mixed outbounds", `{"outbounds":[{"type":"direct","tag":"d"},{"tag":"px"}]}`},
+		{"mixed endpoints", `{"endpoints":[{"type":"wireguard","tag":"wg1"},{"tag":"px"}]}`},
+		{"mixed wireguard_dns", `{"wireguard_dns":{"wg1":["10.2.0.1",123]}}`},
 	}
 	for _, tc := range refusing {
 		t.Run(tc.name+"/refuses", func(t *testing.T) {
@@ -1025,6 +1028,56 @@ func TestMigrateProfilesAbsentSingleFormatShapes(t *testing.T) {
 				t.Errorf("migrated file has no profiles key: %v", doc)
 			}
 		})
+	}
+}
+
+// TestMigrateRefusesMixedOutboundsSingleFormatBaseFile: a
+// profiles-absent base file whose outbounds array mixes one
+// shaped outbound with one unshaped object must refuse in both
+// modes, exit 2, byte-identical — the shaped element must not
+// be deleted by a fresh migration.
+func TestMigrateRefusesMixedOutboundsSingleFormatBaseFile(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	base := BaseDir(home)
+	doc := `{"outbounds":[{"type":"direct","tag":"d"},{"tag":"px"}]}`
+	path := filepath.Join(base, "config.json")
+	writeFile(t, path, doc, 0o600)
+	before, _ := os.ReadFile(path)
+	for _, write := range []bool{false, true} {
+		result, err := Migrate(base, write)
+		if err == nil {
+			t.Fatalf("Migrate(write=%v) over a mixed outbounds file must refuse, got result %+v", write, result)
+		}
+		if ExitCode(err) != 2 {
+			t.Errorf("Migrate(write=%v) exit code = %d; want 2", write, ExitCode(err))
+		}
+		if result == nil || result.Migrated || result.WouldWrite {
+			t.Errorf("Migrate(write=%v) result = %+v; want no write reported", write, result)
+		}
+		// The in-memory node_id generated for the candidate
+		// must never be reported: nothing was written, so no
+		// id was persisted (RT-2 rule).
+		if len(result.Generated) != 0 {
+			t.Errorf("Migrate(write=%v) generated = %v; want none on a refused run", write, result.Generated)
+		}
+		for _, mp := range result.Profiles {
+			if mp.NodeIDGenerated {
+				t.Errorf("Migrate(write=%v) profile %q reports node_id_generated; want false on a refused run", write, mp.Name)
+			}
+			for _, w := range mp.Warnings {
+				if w == "node_id generated" {
+					t.Errorf("Migrate(write=%v) profile %q warning %q; want no generated claim on a refused run", write, mp.Name, w)
+				}
+			}
+		}
+		if !strings.Contains(err.Error(), `"profiles"`) || !strings.Contains(err.Error(), `"outbounds"`) {
+			t.Errorf("refusal = %q; want it to name the missing profiles key and the outbounds section at risk", err.Error())
+		}
+		after, _ := os.ReadFile(path)
+		if string(before) != string(after) {
+			t.Errorf("Migrate(write=%v) rewrote the file on refusal", write)
+		}
 	}
 }
 
