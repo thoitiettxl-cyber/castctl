@@ -123,13 +123,25 @@ Secrets: log lines never carry cookies, tokens, URLs with query
 credentials, WireGuard keys, or header values. Secret-bearing
 fields are excluded from log emissions by construction, and
 every free-form log field passes a redaction boundary
-(`internal/logging`). Server response bodies are redacted
-before any truncation (redact the full text, then cut), so a
-secret fragment straddling a truncation cut cannot survive
-below a redaction floor. Above trace, an error carrying a
-server body renders in logs as status code + error class +
-body length only; the redacted-then-truncated body appears
-only at trace level. The events castctl emits at debug/trace
+(`internal/logging`). Server response bodies are never
+emitted anywhere — not in log lines at any level including
+trace, not in stderr typed JSON, not in error strings, and
+not in panic renderings. Instead, an error carrying a server
+body renders as an allowlist summary only: status code,
+error class, body length (byte count), content-type (media
+type, parameters dropped), and specific known-safe fields
+parsed by key from known Muse response schemas — the `error`
+field of the `{"ok":false,"error":...}` / `{"success":...,
+"error":...}` envelopes, the `status` field of the
+`/api/session` body, and the `reason` field of the redeem
+response (see `internal/gateway/summary.go`). No other body
+key is ever emitted. Each extracted value is capped at 64
+runes, still passed through the SafeString backstop, and a
+value over the cap is replaced by `[omitted]` — never emitted
+truncated. The trace level gets the same summary; there is
+no trace allowance for body bytes. (Python parity on raw
+payload bytes is waived; error-kind classification and retry
+semantics are unchanged.) The events castctl emits at debug/trace
 are: `dns_source` (resolved DNS source + first server tag),
 `outbound_chain` (profile + detour-chain tags), dial
 start/done with a per-connection ID, `tls_alpn` (negotiated
