@@ -29,29 +29,65 @@ docs/provenance.md §2.
 
 Documented, NOT run here: Docker/podman/buildah are absent on the
 VM where this PR was written, so the steps below were not executed
-there. On a machine with Docker, from the repo root (Go version
-from `go.mod`, currently `1.27.3`):
+there. On a machine with Docker, from the repo root, the commands
+below mirror `.github/workflows/release.yaml` (`build-linux-glibc`,
+`linux-amd64` leg): the same environment variables, the same
+stamping flags, the same stamping verification, the same `readelf`
+guard, and the GLIBC gate copied from the workflow's inner script
+— if the workflow gate changes, this block must change with it.
+The version stamped here is a local placeholder, not a release
+version:
 
 ```sh
+TARGET="linux-amd64" GOARCH="amd64" \
+  RELEASE_VERSION="0.0.0-local-$(git rev-parse --short HEAD)" \
+  COMMIT="$(git rev-parse --short HEAD)" \
+  BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  GO_VERSION="$(sed -n 's/^go \([0-9.]*\)$/\1/p' go.mod)"
+rm -rf "dist/${TARGET}"
+mkdir -p "dist/${TARGET}/archive"
 docker run --rm -v "$PWD:/src" -w /src \
-  -e GO_VERSION="$(sed -n 's/^go \([0-9.]*\)$/\1/p' go.mod)" \
+  -e TARGET -e GO_VERSION -e GOARCH -e RELEASE_VERSION -e COMMIT -e BUILD_DATE \
   quay.io/pypa/manylinux2014_x86_64 bash -euo pipefail -c '
-    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
-    rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tar.gz
+    archive_dir="dist/${TARGET}/archive"
+    go_archive="go${GO_VERSION}.linux-${GOARCH}.tar.gz"
+    curl -fsSL "https://go.dev/dl/${go_archive}" -o "/tmp/${go_archive}"
+    rm -rf /usr/local/go
+    tar -C /usr/local -xzf "/tmp/${go_archive}"
     export PATH="/usr/local/go/bin:${PATH}"
-    CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildvcs=false -trimpath \
+    CGO_ENABLED=1 GOOS=linux GOARCH="${GOARCH}" go build -buildvcs=false -trimpath \
       -tags with_utls,with_quic,with_wireguard,with_gvisor \
-      -ldflags="-s -w -X github.com/thoitiettxl-cyber/castctl/internal/commands.Version=0.6.1" \
-      -o /tmp/castctl ./cmd/castctl/
-    readelf --version-info /tmp/castctl
+      -ldflags="-s -w -X github.com/thoitiettxl-cyber/castctl/internal/commands.Version=${RELEASE_VERSION} -X github.com/thoitiettxl-cyber/castctl/internal/commands.Commit=${COMMIT} -X github.com/thoitiettxl-cyber/castctl/internal/commands.BuildDate=${BUILD_DATE}" \
+      -o "$archive_dir/castctl" ./cmd/castctl/
+    version_output="$("$archive_dir/castctl" --version)"
+    if ! printf "%s\n" "${version_output}" | grep -Fq "castctl ${RELEASE_VERSION} (${COMMIT} "; then
+      echo "stamping verification failed: got ${version_output}, expected castctl ${RELEASE_VERSION} (${COMMIT} ...)" >&2
+      exit 1
+    fi
+    echo "stamping verified: ${version_output}"
+    command -v readelf >/dev/null || { echo "readelf not found in container" >&2; exit 1; }
+    glibc_versions="$(readelf --version-info "$archive_dir/castctl" | sed -n "s/.*Name: GLIBC_\([0-9.]*\).*/\1/p" | sort -Vu)"
+    if [[ -z "${glibc_versions}" ]]; then
+      echo "glibc gate: no GLIBC versions found in binary (expected a dynamic glibc link)" >&2
+      exit 1
+    fi
+    printf "GLIBC versions:\n%s\n" "${glibc_versions}"
+    max_glibc="$(printf "%s\n" "${glibc_versions}" | sort -V | tail -n 1)"
+    if [[ "$(printf "2.17\n%s\n" "${max_glibc}" | sort -V | tail -n 1)" != "2.17" ]]; then
+      printf "linux ${GOARCH} binary requires GLIBC_%s, expected GLIBC_2.17 or older\n" "${max_glibc}" >&2
+      exit 1
+    fi
   '
+test -s LICENSE && test -s LICENSE.sing-box && test -s README.md
+cp LICENSE LICENSE.sing-box README.md "dist/${TARGET}/archive/"
+tar -C "dist/${TARGET}/archive" -czf "dist/castctl_${RELEASE_VERSION}_linux_amd64.tar.gz" castctl LICENSE LICENSE.sing-box README.md
 ```
 
-The GLIBC gate in the release workflow fails the build unless the
-maximum `GLIBC_x.y` in the binary is 2.17 or older (and fails if no
-GLIBC version is found at all). A local compile-only cross-build
-without Docker does not prove the gate: the host toolchain's glibc
-baseline differs from manylinux2014.
+The GLIBC gate above fails the build unless the maximum `GLIBC_x.y`
+in the binary is 2.17 or older (and fails if no GLIBC version is
+found at all, or if `readelf` is absent). A local compile-only
+cross-build without Docker does not prove the gate: the host
+toolchain's glibc baseline differs from manylinux2014.
 
 ## Web UI
 

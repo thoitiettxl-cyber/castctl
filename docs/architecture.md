@@ -56,11 +56,12 @@ castctl is a general tool, not VM-only. Supported run targets: Linux only — li
 no launcher, no agent-browser, no sandbox.
 
 This supersedes the earlier five-target plan: release targets are
-Linux only (above). The default build uses `CGO_ENABLED=1`, a GLIBC
-2.17 baseline (manylinux2014), and plugin support; each
+Linux only (above). The default build is dynamically linked
+(`CGO_ENABLED=1`) on a GLIBC 2.17 baseline (manylinux2014); each
 architecture also ships a `_no-plugin` static build
-(`CGO_ENABLED=0`, no dynamic library plugins). There are no
-Android, Windows, or macOS builds. Release builds are produced by
+(`CGO_ENABLED=0`). The plugin loader is not implemented, so
+neither build loads plugins. There are no Android, Windows, or
+macOS builds. Release builds are produced by
 `.github/workflows/release.yaml`, adapted from CLIProxyAPI's
 release.yaml (see docs/provenance.md §2).
 

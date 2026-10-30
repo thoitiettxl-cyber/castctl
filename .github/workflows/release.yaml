@@ -1,8 +1,9 @@
 # Release builds: Linux amd64/arm64, glibc + _no-plugin static.
 #
 # Publication rule (the single shared predicate, written out literally
-# at EVERY publish site below — release creation, every `gh release
-# upload`, the checksums upload):
+# at release creation, at every `gh release upload` step, and at the
+# checksums job: the checksums upload step itself carries only
+# `if: success()` and is gated by its job's `if:`):
 #
 #   github.ref_type == 'tag'
 #   || (github.event_name == 'workflow_dispatch' && inputs.publish != 'none')
@@ -54,6 +55,24 @@ on:
 permissions:
   contents: write
 
+# `gh` needs repository context: it resolves the repository from
+# GH_REPO when the workspace has no `.git`. The prepare and
+# checksums jobs also run actions/checkout, which provides the same
+# context from the git remote; both routes are kept so neither job
+# depends on exactly one of them.
+env:
+  GH_REPO: ${{ github.repository }}
+
+# Serialize publish runs to the same effective tag so concurrent
+# runs cannot interleave --clobber uploads and checksums downloads.
+# Effective tag: the pushed tag on a tag push; inputs.tag_name on a
+# dispatch publish. Dry runs (publish=none, or an empty tag_name)
+# fall back to a per-run group so they never queue behind, or
+# block, a real publish run.
+concurrency:
+  group: "release-${{ github.ref_type == 'tag' && github.ref_name || github.event_name == 'workflow_dispatch' && inputs.publish != 'none' && inputs.tag_name || format('dry-run-{0}-{1}', github.ref_name, github.run_id) }}"
+  cancel-in-progress: false
+
 jobs:
   prepare:
     name: prepare release
@@ -62,6 +81,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
       - name: Derive release tag
         id: tag
         shell: bash
@@ -91,15 +111,47 @@ jobs:
           PUBLISH_MODE: ${{ steps.tag.outputs.mode }}
         run: |
           set -euo pipefail
-          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            echo "release ${RELEASE_TAG} already exists; reusing (uploads use --clobber)"
+          if existing="$(gh release view "${RELEASE_TAG}" --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"' 2>/dev/null)"; then
+            read -r is_draft is_prerelease <<< "${existing}"
+            # Reuse only on an exact mode match; a mismatch fails
+            # closed instead of silently mutating a release of a
+            # different kind (e.g. --clobber uploads onto a published
+            # release from a draft dispatch).
+            case "${PUBLISH_MODE}" in
+              draft)
+                if [[ "${is_draft}" != "true" ]]; then
+                  echo "release ${RELEASE_TAG} already exists but is not a draft (isDraft=${is_draft}, isPrerelease=${is_prerelease}); refusing to reuse it for a draft publish" >&2
+                  exit 1
+                fi
+                ;;
+              prerelease)
+                if [[ "${is_prerelease}" != "true" || "${is_draft}" == "true" ]]; then
+                  echo "release ${RELEASE_TAG} already exists but is not a prerelease (isDraft=${is_draft}, isPrerelease=${is_prerelease}); refusing to reuse it for a prerelease publish" >&2
+                  exit 1
+                fi
+                ;;
+              release)
+                if [[ "${is_draft}" == "true" || "${is_prerelease}" == "true" ]]; then
+                  echo "release ${RELEASE_TAG} already exists but is not a published release (isDraft=${is_draft}, isPrerelease=${is_prerelease}); refusing to reuse it for a tag-push publish" >&2
+                  exit 1
+                fi
+                ;;
+              *)
+                echo "unknown PUBLISH_MODE: ${PUBLISH_MODE}" >&2
+                exit 1
+                ;;
+            esac
+            echo "release ${RELEASE_TAG} already exists with matching mode (isDraft=${is_draft}, isPrerelease=${is_prerelease}); reusing (uploads use --clobber)"
             exit 0
           fi
           flags=()
           if [[ "${PUBLISH_MODE}" == "draft" ]]; then flags+=(--draft); fi
           if [[ "${PUBLISH_MODE}" == "prerelease" ]]; then flags+=(--prerelease); fi
           # Tag push => neither flag => full release.
-          gh release create "${RELEASE_TAG}" --title "${RELEASE_TAG}" --generate-notes "${flags[@]}"
+          # --target pins a newly created tag to the dispatched
+          # commit; without it gh creates the tag from the default
+          # branch's HEAD instead.
+          gh release create "${RELEASE_TAG}" --target "${GITHUB_SHA}" --title "${RELEASE_TAG}" --generate-notes "${flags[@]}"
 
   build-linux-glibc:
     name: build linux-${{ matrix.goarch }} glibc
@@ -153,6 +205,17 @@ jobs:
             RELEASE_VERSION="0.0.0-dispatch-$(git rev-parse --short HEAD)"
             RELEASE_TAG=""
           fi
+          # Defense in depth: repeat prepare's tag-format validation
+          # for the effective tag. The dry-run branch sets
+          # RELEASE_TAG="" and must NOT be validated (an empty
+          # tag_name with publish=none takes the dry-run version
+          # path above).
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "invalid release tag: ${RELEASE_TAG} (expected vX.Y.Z[-suffix])" >&2
+              exit 1
+            fi
+          fi
           {
             echo "RELEASE_VERSION=${RELEASE_VERSION}"
             echo "RELEASE_TAG=${RELEASE_TAG}"
@@ -197,6 +260,19 @@ jobs:
                 -tags with_utls,with_quic,with_wireguard,with_gvisor \
                 -ldflags="-s -w -X github.com/thoitiettxl-cyber/castctl/internal/commands.Version=${RELEASE_VERSION} -X github.com/thoitiettxl-cyber/castctl/internal/commands.Commit=${COMMIT} -X github.com/thoitiettxl-cyber/castctl/internal/commands.BuildDate=${BUILD_DATE}" \
                 -o "$archive_dir/castctl" ./cmd/castctl/
+              # Stamping verification: `go build -X` to a nonexistent
+              # var exits 0 and silently drops the assignment, so
+              # verify the stamped version and commit in the
+              # just-built binary before any gate or upload.
+              version_output="$("$archive_dir/castctl" --version)"
+              if ! printf "%s\n" "${version_output}" | grep -Fq "castctl ${RELEASE_VERSION} (${COMMIT} "; then
+                echo "stamping verification failed: got ${version_output}, expected castctl ${RELEASE_VERSION} (${COMMIT} ...)" >&2
+                exit 1
+              fi
+              echo "stamping verified: ${version_output}"
+              # readelf must exist: without it the gate below would
+              # silently pass on an empty version list.
+              command -v readelf >/dev/null || { echo "readelf not found in container" >&2; exit 1; }
               glibc_versions="$(readelf --version-info "$archive_dir/castctl" | sed -n "s/.*Name: GLIBC_\([0-9.]*\).*/\1/p" | sort -Vu)"
               if [[ -z "${glibc_versions}" ]]; then
                 echo "glibc gate: no GLIBC versions found in binary (expected a dynamic glibc link)" >&2
@@ -280,6 +356,17 @@ jobs:
             RELEASE_VERSION="0.0.0-dispatch-$(git rev-parse --short HEAD)"
             RELEASE_TAG=""
           fi
+          # Defense in depth: repeat prepare's tag-format validation
+          # for the effective tag. The dry-run branch sets
+          # RELEASE_TAG="" and must NOT be validated (an empty
+          # tag_name with publish=none takes the dry-run version
+          # path above).
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "invalid release tag: ${RELEASE_TAG} (expected vX.Y.Z[-suffix])" >&2
+              exit 1
+            fi
+          fi
           {
             echo "RELEASE_VERSION=${RELEASE_VERSION}"
             echo "RELEASE_TAG=${RELEASE_TAG}"
@@ -305,6 +392,28 @@ jobs:
             -tags with_utls,with_quic,with_wireguard,with_gvisor \
             -ldflags="-s -w -X github.com/thoitiettxl-cyber/castctl/internal/commands.Version=${RELEASE_VERSION} -X github.com/thoitiettxl-cyber/castctl/internal/commands.Commit=${COMMIT} -X github.com/thoitiettxl-cyber/castctl/internal/commands.BuildDate=${BUILD_DATE}" \
             -o "$archive_dir/castctl" ./cmd/castctl/
+          # Stamping verification: `go build -X` to a nonexistent var
+          # exits 0 and silently drops the assignment, so verify the
+          # stamped values in the just-built binary before the gate
+          # and tar. The amd64 leg runs natively; the arm64 leg is
+          # cross-built on an amd64 runner and cannot execute, so it
+          # checks the stamped strings in the binary instead.
+          if [[ "${GOARCH}" == "amd64" ]]; then
+            version_output="$("$archive_dir/castctl" --version)"
+            if ! printf "%s\n" "${version_output}" | grep -Fq "castctl ${RELEASE_VERSION} (${COMMIT} "; then
+              echo "stamping verification failed: got ${version_output}, expected castctl ${RELEASE_VERSION} (${COMMIT} ...)" >&2
+              exit 1
+            fi
+            echo "stamping verified: ${version_output}"
+          else
+            command -v strings >/dev/null || { echo "strings not found" >&2; exit 1; }
+            if ! strings "$archive_dir/castctl" | grep -Fq "${RELEASE_VERSION}" || ! strings "$archive_dir/castctl" | grep -Fq "${COMMIT}"; then
+              echo "stamping verification failed: strings in binary do not contain ${RELEASE_VERSION} and ${COMMIT}" >&2
+              exit 1
+            fi
+            echo "stamping verified via strings: ${RELEASE_VERSION} ${COMMIT}"
+          fi
+          command -v readelf >/dev/null || { echo "readelf not found" >&2; exit 1; }
           if readelf -l "$archive_dir/castctl" | grep -q 'Requesting program interpreter'; then
             readelf -l "$archive_dir/castctl" >&2
             echo "no-plugin linux binary must not require a dynamic interpreter" >&2
@@ -339,16 +448,25 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
       - name: Derive release tag
         id: tag
         shell: bash
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            echo "tag=${GITHUB_REF_NAME}" >> "${GITHUB_OUTPUT}"
+            RELEASE_TAG="${GITHUB_REF_NAME}"
           else
-            echo "tag=${INPUT_TAG_NAME}" >> "${GITHUB_OUTPUT}"
+            RELEASE_TAG="${INPUT_TAG_NAME}"
           fi
+          # Same tag-format validation as prepare (defense in depth;
+          # this job only runs on the publish path, so a dry run
+          # never reaches this check).
+          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "invalid release tag: ${RELEASE_TAG} (expected vX.Y.Z[-suffix])" >&2
+            exit 1
+          fi
+          echo "tag=${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
         env:
           INPUT_TAG_NAME: ${{ inputs.tag_name }}
       - name: Download release assets and write sorted checksums
@@ -362,7 +480,7 @@ jobs:
           gh release download "${RELEASE_TAG}" --pattern 'castctl_*.tar.gz' --dir dist
           # Fail-closed count check: exactly the 4 archives. The count
           # catches partial sets that a bare download success would not.
-          count="$(ls dist/castctl_*.tar.gz 2>/dev/null | wc -l)"
+          count="$(ls dist/castctl_*.tar.gz 2>/dev/null | wc -l || true)"
           if [[ "${count}" != "4" ]]; then
             echo "expected 4 release archives, found ${count}" >&2
             ls -la dist/ >&2
