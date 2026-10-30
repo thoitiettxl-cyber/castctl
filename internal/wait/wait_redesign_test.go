@@ -171,9 +171,10 @@ func TestWaitRedesignT5HeldTerminalQuietStreamLateReply(t *testing.T) {
 			t.Errorf("res = %+v, want reply [11]", res)
 		}
 		// Derivation + first (empty) settle + re-poll settle +
-		// final read: exactly 4 history reads.
-		if hist.calls != 4 {
-			t.Errorf("history calls = %d, want 4", hist.calls)
+		// final read + newest-user re-check: exactly 5 history
+		// reads.
+		if hist.calls != 5 {
+			t.Errorf("history calls = %d, want 5", hist.calls)
 		}
 	})
 }
@@ -209,8 +210,8 @@ func TestWaitRedesignT6SuspectTerminalLateReply(t *testing.T) {
 		if len(res.Replies) != 1 || res.Replies[0].Seq != 11 {
 			t.Errorf("res = %+v, want reply [11]", res)
 		}
-		if hist.calls != 4 {
-			t.Errorf("history calls = %d, want 4 (derivation + 2 settle proofs + final read)", hist.calls)
+		if hist.calls != 5 {
+			t.Errorf("history calls = %d, want 5 (derivation + 2 settle proofs + final read + re-check)", hist.calls)
 		}
 	})
 }
@@ -297,8 +298,8 @@ func TestWaitRedesignT8AbsentCountDecidesDirectly(t *testing.T) {
 		if res.FinalText != "main's reply" {
 			t.Errorf("FinalText = %q", res.FinalText)
 		}
-		if hist.calls != 2 {
-			t.Errorf("history calls = %d, want 2 (derivation + final read, no settle)", hist.calls)
+		if hist.calls != 3 {
+			t.Errorf("history calls = %d, want 3 (derivation + final read + re-check, no settle)", hist.calls)
 		}
 	})
 }

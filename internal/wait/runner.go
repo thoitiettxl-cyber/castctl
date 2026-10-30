@@ -257,6 +257,12 @@ type Runner struct {
 	// first real proof nor churn resubscribes. Zero means
 	// no proof has read yet.
 	lastSettleProof time.Time
+	// proofReplies holds the replies of the last successful
+	// settle proof, if any: the evidence the turn was decided
+	// on. finish reconciles the final read against it
+	// (loop-2 F3): a proof reply the final read no longer
+	// contains is reported, with a note, never silently lost.
+	proofReplies []Reply
 }
 
 // NewRunner validates cfg and builds the Runner. Dial and
@@ -799,7 +805,9 @@ func (r *Runner) settlePending(ctx context.Context, pending string) error {
 		return ctx.Err()
 	}
 	if term, ok := r.waiter.IgnoredTerminal(); ok && term == pending && r.waiter.Result() == nil {
-		r.waiter.Settle(replies)
+		if out := r.waiter.Settle(replies); out != nil {
+			r.proofReplies = append([]Reply(nil), replies...)
+		}
 	}
 	return nil
 }
@@ -1003,9 +1011,18 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
-				// A failed poll ends the window without
-				// failing the done result.
-				break
+				if isAuthError(err) {
+					// Auth in the lag window is fatal,
+					// never a silent Done (loop-2 F5):
+					// an expired login must surface as
+					// exit 2, not success.
+					return nil, err
+				}
+				// A transient poll failure no longer ends
+				// the window: keep polling until it
+				// expires, so one bad read cannot kill a
+				// just-landed reply.
+				continue
 			}
 			replies = rs
 			if len(replies) > 0 {
@@ -1014,6 +1031,62 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+	}
+	// Endgame reconciliation (loop-2 F3/F4): the final read
+	// must agree with the settle proof and with the awaited
+	// turn. A newer user message in history starts a follow-up
+	// turn, so replies after it are not this turn's; and a
+	// proof reply the final read no longer contains is the
+	// settled evidence, reported with a note rather than
+	// silently dropped. The newest-user re-check is best
+	// effort on a transport failure (the reads stand
+	// unverified); auth and cancellation propagate. It costs
+	// at most one LatestUserSeq proof (≤3 window reads,
+	// 100ms floor each) and runs only when there is something
+	// to reconcile.
+	reconcileNote := ""
+	if !finalReadFailed && !r.waiter.BoundaryUnknown() && (len(replies) > 0 || len(r.proofReplies) > 0) {
+		newestUser, haveNewestUser := int64(0), false
+		hctx, cancel := r.historyCtx(ctx, 100*time.Millisecond, nil)
+		latest, found, err := LatestUserSeq(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
+		cancel()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if isAuthError(err) {
+				return nil, err
+			}
+		} else if found {
+			newestUser, haveNewestUser = latest, true
+		}
+		withinTurn := func(rs []Reply) []Reply {
+			if !haveNewestUser || newestUser <= r.afterSeq {
+				return rs
+			}
+			kept := rs[:0]
+			// Reuse the backing array: the dropped tail is
+			// never read again (replies is reassigned).
+			for _, rp := range rs {
+				if rp.Seq <= newestUser {
+					kept = append(kept, rp)
+				}
+			}
+			return kept
+		}
+		if len(replies) > 0 {
+			filtered := withinTurn(replies)
+			if len(filtered) < len(replies) {
+				reconcileNote = "replies after a newer user message were excluded"
+			}
+			replies = filtered
+		}
+		if len(replies) == 0 && len(r.proofReplies) > 0 {
+			if restored := withinTurn(append([]Reply(nil), r.proofReplies...)); len(restored) > 0 {
+				replies = restored
+				reconcileNote = "final read missed the settle proof reply; reporting the proof reply"
+			}
 		}
 	}
 	if finalReadFailed && kind == KindDone {
@@ -1040,6 +1113,12 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 		// The final-read note wins over the boundary note, as in
 		// the Python result construction.
 		note = "could not read the final replies; run `castctl wait` again"
+	}
+	if reconcileNote != "" && !finalReadFailed && !r.waiter.BoundaryUnknown() {
+		// Reconciliation is more specific than exhaustion: the
+		// proof/follow-up note wins over the window note, but
+		// never over the boundary/final-read notes above.
+		note = reconcileNote
 	}
 	if kind == KindApproval {
 		// An approval Outcome carries no Detail; the status
