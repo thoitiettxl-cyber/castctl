@@ -4,7 +4,7 @@ Read this first, then only the docs you need.
 
 - Architecture & module layout: docs/architecture.md
 - Config (config.json, --config, CASTCTL_CONFIG, XDG): docs/config.md
-- Build, test, release (local script, no CI): docs/development.md
+- Build, test, release (GitHub Actions test + release workflows; local Docker reproduction): docs/development.md
 - Providers (sources: muse; publishers: facebook, tiktok, youtube): docs/providers.md
 - Security rules: docs/security.md
 - Provenance & upstream attribution: docs/provenance.md

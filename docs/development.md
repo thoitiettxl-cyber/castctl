@@ -19,8 +19,9 @@ CI: `.github/workflows/test.yaml` runs `go test -race` untagged and
 with `with_utls` on pull requests and pushes to `main`; it does
 not run the full canonical tag set. `.github/workflows/release.yaml`
 builds the Linux amd64/arm64 release archives (glibc + `_no-plugin`)
-on tag push and on `workflow_dispatch` (default: dry-run — builds
-and gates only, publishes nothing). Release assets publish straight
+on tag push, on `workflow_dispatch` (default: dry-run — builds
+and gates only, publishes nothing), and on pull requests targeting
+`main` (builds and gates only, publish forced none). Release assets publish straight
 to a public GitHub Release with `gh release upload`; the workflows
 never use Actions artifact storage. See docs/architecture.md and
 docs/provenance.md §2.
@@ -43,6 +44,7 @@ TARGET="linux-amd64" GOARCH="amd64" \
   RELEASE_VERSION="0.0.0-local-$(git rev-parse --short HEAD)" \
   COMMIT="$(git rev-parse --short HEAD)" \
   BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)" \
   GO_VERSION="$(sed -n 's/^go \([0-9.]*\)$/\1/p' go.mod)"
 rm -rf "dist/${TARGET}"
 mkdir -p "dist/${TARGET}/archive"
@@ -78,9 +80,9 @@ docker run --rm -v "$PWD:/src" -w /src \
       exit 1
     fi
   '
-test -s LICENSE && test -s LICENSE.sing-box && test -s README.md
-cp LICENSE LICENSE.sing-box README.md "dist/${TARGET}/archive/"
-tar -C "dist/${TARGET}/archive" -czf "dist/castctl_${RELEASE_VERSION}_linux_amd64.tar.gz" castctl LICENSE LICENSE.sing-box README.md
+test -s LICENSE && test -s LICENSE.sing-box && test -s NOTICE && test -s README.md
+cp LICENSE LICENSE.sing-box NOTICE README.md "dist/${TARGET}/archive/"
+tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 -C "dist/${TARGET}/archive" -czf "dist/castctl_${RELEASE_VERSION}_linux_amd64.tar.gz" castctl LICENSE LICENSE.sing-box NOTICE README.md
 ```
 
 The GLIBC gate above fails the build unless the maximum `GLIBC_x.y`

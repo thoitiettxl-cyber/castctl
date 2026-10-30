@@ -350,7 +350,7 @@ macOS builds.
 - `castctl_<version>_linux_<arch>_no-plugin.tar.gz` is the portable Linux build for musl-based or older systems such as OpenWrt: statically linked (`CGO_ENABLED=0`). The plugin loader is not implemented, so it does not load plugins either.
 
 `<arch>` is `amd64` or `arm64`. Each archive contains the `castctl`
-binary plus `LICENSE`, `LICENSE.sing-box`, and `README.md`. When all
+binary plus `LICENSE`, `LICENSE.sing-box`, `NOTICE`, and `README.md`. When all
 four builds succeed, the release also carries a `checksums.txt`
 (SHA-256, sorted by file name) covering the four archives; it is
 uploaded by the checksums job after the builds, so a release whose

@@ -14,6 +14,13 @@
 # run, every publish step is skipped. Supplying `tag_name` alone,
 # without `publish != 'none'`, publishes nothing.
 #
+# A pull_request run publishes NOTHING: github.event_name is
+# 'pull_request', so the second disjunct is false, and
+# github.ref_type is 'branch' on a PR, so the first disjunct is
+# false too. Builds and gates still run (the build jobs' if:
+# treats a skipped prepare as a dry run); every release-creation
+# and upload step is skipped by the same predicate.
+#
 # `permissions: contents: write` is static and cannot be conditioned
 # on the event or inputs. It grants the token the capability; the
 # `if:` conditions are the enforcement. Do not cite permissions as
@@ -32,12 +39,14 @@
 # asset token `arm64` (never `aarch64`); `-trimpath` and canonical
 # build tags added; no model-catalog refresh (castctl has none);
 # no FreeBSD/hosted jobs; archives carry LICENSE + LICENSE.sing-box
-# + README.md; checksums are a single success-only final job.
+# + NOTICE + README.md; checksums are a single success-only final job.
 name: release
 
 on:
   push:
     tags: ['*']
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       publish:
@@ -81,7 +90,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Derive release tag
         id: tag
         shell: bash
@@ -193,10 +202,10 @@ jobs:
             asset_arch: arm64
             image: quay.io/pypa/manylinux2014_aarch64
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           # Go module/build cache only. Cache is NOT artifact storage:
@@ -207,6 +216,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # inputs.* exist only on workflow_dispatch (and
+          # workflow_call, which this workflow has no trigger
+          # for). On any other event they expand empty; force
+          # the dry-run values explicitly instead of relying on
+          # that empty expansion plus the -n check in the elif
+          # below.
+          if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]]; then
+            INPUT_PUBLISH="none"
+            INPUT_TAG_NAME=""
+          fi
+          # Reproducible-archive mtime: the commit time of HEAD
+          # (fetch-depth: 0 in both build jobs, so the history
+          # is present). No SOURCE_DATE_EPOCH is set anywhere
+          # in the repo or by the runner; derive it, do not
+          # invent it. Fail closed if it is not numeric.
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"
+          if [[ ! "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]; then
+            echo "could not derive SOURCE_DATE_EPOCH from commit time" >&2
+            exit 1
+          fi
+          echo "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" >> "${GITHUB_ENV}"
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             RELEASE_VERSION="${GITHUB_REF_NAME#v}"
             RELEASE_TAG="${GITHUB_REF_NAME}"
@@ -309,9 +339,9 @@ jobs:
           set -euo pipefail
           archive_dir="dist/${TARGET}/archive"
           archive_name="castctl_${RELEASE_VERSION}_linux_${ASSET_ARCH}.tar.gz"
-          test -s LICENSE && test -s LICENSE.sing-box && test -s README.md
-          cp LICENSE LICENSE.sing-box README.md "$archive_dir/"
-          tar -C "$archive_dir" -czf "dist/$archive_name" castctl LICENSE LICENSE.sing-box README.md
+          test -s LICENSE && test -s LICENSE.sing-box && test -s NOTICE && test -s README.md
+          cp LICENSE LICENSE.sing-box NOTICE README.md "$archive_dir/"
+          tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 -C "$archive_dir" -czf "dist/$archive_name" castctl LICENSE LICENSE.sing-box NOTICE README.md
           echo "ARCHIVE_NAME=${archive_name}" >> "${GITHUB_ENV}"
       - name: Upload release asset
         if: ${{ success() && (github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.publish != 'none')) }}
@@ -344,10 +374,10 @@ jobs:
             goarch: arm64
             asset_arch: arm64
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           # Go module/build cache only. Cache is NOT artifact storage:
@@ -358,6 +388,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # inputs.* exist only on workflow_dispatch (and
+          # workflow_call, which this workflow has no trigger
+          # for). On any other event they expand empty; force
+          # the dry-run values explicitly instead of relying on
+          # that empty expansion plus the -n check in the elif
+          # below.
+          if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]]; then
+            INPUT_PUBLISH="none"
+            INPUT_TAG_NAME=""
+          fi
+          # Reproducible-archive mtime: the commit time of HEAD
+          # (fetch-depth: 0 in both build jobs, so the history
+          # is present). No SOURCE_DATE_EPOCH is set anywhere
+          # in the repo or by the runner; derive it, do not
+          # invent it. Fail closed if it is not numeric.
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"
+          if [[ ! "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]; then
+            echo "could not derive SOURCE_DATE_EPOCH from commit time" >&2
+            exit 1
+          fi
+          echo "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" >> "${GITHUB_ENV}"
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             RELEASE_VERSION="${GITHUB_REF_NAME#v}"
             RELEASE_TAG="${GITHUB_REF_NAME}"
@@ -435,9 +486,9 @@ jobs:
             exit 1
           fi
           echo "no-plugin gate passed: no program interpreter requested"
-          test -s LICENSE && test -s LICENSE.sing-box && test -s README.md
-          cp LICENSE LICENSE.sing-box README.md "$archive_dir/"
-          tar -C "$archive_dir" -czf "dist/$archive_name" castctl LICENSE LICENSE.sing-box README.md
+          test -s LICENSE && test -s LICENSE.sing-box && test -s NOTICE && test -s README.md
+          cp LICENSE LICENSE.sing-box NOTICE README.md "$archive_dir/"
+          tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 -C "$archive_dir" -czf "dist/$archive_name" castctl LICENSE LICENSE.sing-box NOTICE README.md
           echo "ARCHIVE_NAME=${archive_name}" >> "${GITHUB_ENV}"
       - name: Upload release asset
         if: ${{ success() && (github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.publish != 'none')) }}
@@ -463,7 +514,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Derive release tag
         id: tag
         shell: bash
