@@ -89,10 +89,10 @@ func TestDeliverSendBaselineReadFailureFailsBeforeSend(t *testing.T) {
 	}
 }
 
-// D13 positive case: with a proved baseline, the ack is the
-// just-sent message's own seq — the first user event above the
-// baseline — never an older one.
-func TestDeliverSendProvedBaselineAcksOwnMessage(t *testing.T) {
+// D13 positive case: with a two-window baseline read before
+// sending, the ack is the just-sent message's own seq — the
+// first user event above the baseline — never an older one.
+func TestDeliverSendTwoWindowBaselineAcksOwnMessage(t *testing.T) {
 	gw := &deliverFakeGateway{
 		baselineEvents: []any{userHistoryEvent(9, "earlier")},
 		confirmEvents:  []any{userHistoryEvent(9, "earlier")},

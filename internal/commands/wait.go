@@ -818,12 +818,13 @@ func eventSeq(raw any) int64 {
 // never re-sent. The node_id is sent verbatim with an empty
 // capabilities object, exactly as Python's deliver().
 func deliverSend(ctx context.Context, gw conn.Gateway, prof *profile.Profile, text, thread string, ackTimeout time.Duration) (*int64, int64, error) {
-	// The baseline MUST be proved: it is the max seq in history
-	// before this message is sent, and the ack poll only trusts
-	// user events above it. A failed baseline read fails the
-	// send before anything is sent — falling back to baseline 0
-	// would let the poll match an older turn's identical text
-	// and return its seq as this turn's boundary, resurfacing
+	// The baseline MUST be read successfully before sending:
+	// it is the max seq in history before this message is
+	// sent, and the ack poll only trusts user events above
+	// it. A failed baseline read fails the send before
+	// anything is sent — falling back to baseline 0 would
+	// let the poll match an older turn's identical text and
+	// return its seq as this turn's boundary, resurfacing
 	// the previous turn's replies as this turn's (the
 	// reply-reuse bug). No retry is assumed here: this path
 	// calls the leased gateway directly, and the connector's
@@ -952,7 +953,9 @@ type sendNoWaitJSON struct {
 // buildSendWaitJSON copies a wait result into the send result
 // shape. The wait result's note is copied, except that the
 // timeout note keeps precedence (loop-2 safety D-1): a timed-out
-// send reports the re-run hint, not the wait's note.
+// send reports the re-run hint, not the wait's note. The
+// timeout hint is JSON-only: send text mode prints the wait
+// note via printWaitTail and never sees this hint.
 func buildSendWaitJSON(base sendBaseJSON, waitJSON waitResultJSON, res *wait.Result, waitSeconds int64, userSeq int64) sendWaitJSON {
 	result := sendWaitJSON{sendBaseJSON: base}
 	result.Outcome = waitJSON.Outcome

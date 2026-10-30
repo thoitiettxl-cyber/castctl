@@ -266,8 +266,11 @@ D11(a)→D12, D11(e)→D13, D13→D14.
   existence-only (loop-2 F2): a reply identifiably shaped as
   a subagent's (agent_id and root_agent_id both present and
   different) never counts alone; an unattributed reply still
-  counts (fail-open on absence, U-A2/U-A6 carried). FAILED
-  terminals still never settle here. Pinned by
+  counts (fail-open on absence, U-A2/U-A6 carried).
+  Attribution is recorded only from payload-level string
+  fields: a non-string, agent-only, root-only, empty-string,
+  event-level, or metadata-nested id counts as unattributed.
+  FAILED terminals still never settle here. Pinned by
   `TestWaitRedesignT5*` (Runner level) and
   `TestWaitRedesignT9ReleaseSignals` (Waiter level), plus the
   loop-2 F2 tests.
@@ -283,9 +286,12 @@ D11(a)→D12, D11(e)→D13, D13→D14.
   subscribe iteration. No settle proof spends a read while
   the boundary is unknown (the gates forbid every proof; the
   endgame final read and derivation do read with an unknown
-  boundary, as before), and no settle proof starts past the
-  deadline (loop-2 F9; overshoot bounded by the 100ms
-  historyCtx floor per window read). Pinned by
+  boundary, as before), and no settlePending/checkState proof
+  starts past the deadline (loop-2 F9; overshoot bounded by
+  the 100ms historyCtx floor per window read). The finish
+  endgame is excepted: its last-chance FAILED proof, final
+  read, lag window, and reconciliation re-check run after
+  the deadline on floor budgets, by design. Pinned by
   `TestWaitRedesignT5/T6/T12` and the loop-2 F8/F9 tests.
   Exact read counts are fixture-specific, not general bounds.
 - D12: boundary derivation runs under the wait deadline (wait
@@ -302,22 +308,43 @@ D11(a)→D12, D11(e)→D13, D13→D14.
   `has_more` is still true at the largest limit. The Runner's
   finish turns exhaustion on the final read into a result
   note; settle proofs ignore it (a partial window's replies
-  are still real replies). Replies accumulate across windows
+  are still real replies), and the settle-time exhaustion
+  flag is discarded by design — only final-read exhaustion
+  surfaces a note. When the final read fails,
+  reconciliation is skipped and the settle proof is lost to
+  the fail-closed KindTimeout with only the generic
+  final-read note (a stated exception to the "never silently
+  lost" rule). Replies accumulate across windows
   (loop-2 F7): a reply seen in any window is reported, and an
-  empty window never discards earlier replies. Pinned by
+  empty window never discards earlier replies. Dedupe is
+  first-wins (same seq+message_id, different text: the first
+  window's text stands). `HistoryReplies` has no internal
+  cap on the window count — the bound lives in the caller's
+  limits (three by default) — and `DeriveBoundary`'s
+  seen-max fallback can install a boundary from a non-user
+  event's seq; all-empty windows with `has_more` yield
+  known-0. The reconciliation re-check trusts newest-first
+  windows the same way the send baseline does
+  (`LatestUserSeq` stops scanning at the boundary), so U-A8
+  conditions the F4 turn check too. Pinned by
   `TestWaitRedesignT7WindowExhaustionIsVisible`, the extended
   `TestHistoryReplies`, and the loop-2 F7 tests.
 - D14: `deliverSend` (in `internal/commands/wait.go`) fails the
   send before sending when either of its two baseline history
   reads (limit=1 plus a limit=20 confirming read, loop-2 F10)
   fails. No baseline-0 fallback, so the substring ack
-  (`UserAck`) can only match above a proved baseline. No
-  ordering contract for chat.history windows is stated in
-  this tree, so the two-window baseline narrows but does not
-  close the stale-baseline hole, and an interleaved identical
-  message can still win the first-match race; both residuals
-  are carried. `UserAck` refuses an empty needle. Pinned by
-  `TestDeliverSendBaselineReadFailureFailsBeforeSend` and
+  (`UserAck`) can only match above the two-window baseline
+  read successfully before sending. No ordering contract
+  for chat.history windows is stated in this tree, so the
+  two-window baseline narrows but does not close the
+  stale-baseline hole, and an interleaved identical message
+  can still win the first-match race; both residuals are
+  carried. `UserAck` refuses an empty needle. The send
+  timeout re-run hint is JSON-only: `buildSendWaitJSON`
+  replaces the wait note on timeout, while send text mode
+  prints only the wait note via `printWaitTail`. Pinned by
+  `TestDeliverSendBaselineReadFailureFailsBeforeSend`,
+  `TestDeliverSendTwoWindowBaselineAcksOwnMessage`, and
   the loop-2 F10 tests.
 
 ## 8. Deferred wiring (exact list)
@@ -362,9 +389,13 @@ fixture here is a real captured stream.
   proof excludes identifiably-subagent replies (loop-2 F2),
   but the final reply list stays unattributed and whether
   real `message.assistant` events carry agent fields is
-  [UNVERIFIED] (needs live capture). T17 pins the
-  non-exclusion rule for the filter; an unattributed reply
-  can still release a hold and appear in Replies.
+  [UNVERIFIED] (needs live capture). Attribution is
+  recorded only from payload-level string fields; a
+  non-string, agent-only, root-only, empty-string,
+  event-level, or metadata-nested id counts as
+  unattributed. T17 pins the non-exclusion rule for the
+  filter; an unattributed reply can still release a hold
+  and appear in Replies.
 - A-G5 (narrow/Done-only lag window): PARTLY CLOSED — the
   re-poll (D11) now catches late replies for held/suspect
   terminals before the endgame, so the lag window is no
@@ -397,6 +428,14 @@ fixture here is a real captured stream.
   discard earlier data (loop-2 F7); the 1000-event window
   bound is unchanged and documented as a limit. The
   endgame reconciles the final read against the settle
-  proof and the awaited turn (loop-2 F3/F4). Boundary
+  proof and the awaited turn (loop-2 F3/F4, loop-3 H1:
+  missing proof replies are restored into an empty or a
+  non-empty final read). Two stated exceptions bound the
+  visibility claim: the settle-time exhaustion flag is
+  discarded (only final-read exhaustion surfaces a note),
+  and a failed final read skips reconciliation. Dedupe is
+  first-wins, `HistoryReplies` has no internal window-count
+  cap (the bound lives in the caller's limits), and the
+  F4 re-check trusts newest-first windows (U-A8). Boundary
   suppression on unknown boundary is unchanged (T3).
 

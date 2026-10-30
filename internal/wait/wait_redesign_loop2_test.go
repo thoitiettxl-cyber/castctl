@@ -597,7 +597,7 @@ func TestLoop2SettlePendingDoesNotStartPastDeadline(t *testing.T) {
 		t.Errorf("settlePending past deadline err = %v, want nil (no proof started)", err)
 	}
 	if hist.calls != 0 {
-		t.Errorf("history calls = %d, want 0 (no proof starts past the deadline)", hist.calls)
+		t.Errorf("history calls = %d, want 0 (no settlePending proof starts past the deadline)", hist.calls)
 	}
 }
 

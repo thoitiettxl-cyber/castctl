@@ -5,7 +5,9 @@
 package wait
 
 // Red/green tests for the wait redesign (overnight item 3).
-// Numbering follows phase1-r3-seams-tests-docs.md §2 (T1–T18).
+// Numbering follows phase1-r3-seams-tests-docs.md §2 (T1–T17;
+// there is no T11 or T18 test function — T11's single-turn pin
+// is TestRunnerLiveDone in runner_test.go).
 // T1–T4 are pins: they must stay green on the pre-redesign code
 // and after it. T5–T7 are RED demonstrations: they fail on the
 // pre-redesign code and pass only with the new semantics. T8 is
@@ -448,8 +450,9 @@ func TestWaitRedesignT10CheckStateStaleLastEvent(t *testing.T) {
 // at the deadline, with a finite, exactly-counted number of
 // reads: 6 derivation attempts (3 windows x 1 retry) + 0 settle
 // proofs (a live running never clears the unknown-boundary
-// flag, so no proof spends a read) + 2 final reads. No proof
-// starts past the deadline.
+// flag, so no proof spends a read) + 2 final reads. No
+// settlePending proof starts past the deadline (the 2 final
+// reads are finish endgame reads, floor-bounded by design).
 func TestWaitRedesignT12NeverSucceedingHistoryTerminates(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		sub := &fakeSubscriber{

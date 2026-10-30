@@ -79,8 +79,9 @@ func DefaultHistoryLimits() []int {
 // later window. An empty window with has_more and larger windows
 // still to try is skipped, not terminal — the larger window is
 // read. An empty window that ends the scan returns the max seq
-// seen in any earlier window instead of 0, so a shifting empty
-// window cannot erase earlier evidence. A non-empty window that
+// seen in any earlier window instead of 0 (which may be a
+// non-user event's seq), so a shifting empty window cannot erase
+// earlier evidence. A non-empty window that
 // closes (has_more false) with no user event still returns 0:
 // a complete snapshot with no user event means no boundary.
 //
@@ -125,7 +126,11 @@ func DeriveBoundary(ctx context.Context, r HistoryReader, limits []int) (afterSe
 	}
 	// Exhaustion: all windows succeeded, has_more still true at
 	// the largest limit, no user event. Fall back to the max seq
-	// seen in any successful window.
+	// seen in any successful window — which may be a non-user
+	// event's seq. All-empty windows with has_more still true
+	// at the largest limit yield known-0 (seenMax 0, known
+	// true), not unknown: every window succeeded and closed
+	// empty.
 	return seenMax, true, true, nil
 }
 
@@ -134,11 +139,14 @@ func DeriveBoundary(ctx context.Context, r HistoryReader, limits []int) (afterSe
 // windows stop early when has_more is false, when a window is
 // empty and no larger window remains, or when the window already
 // reaches the boundary (its oldest seq is at or below afterSeq).
-// An empty window with has_more and larger windows still to try
-// is skipped, not terminal (loop-2 F7). The seen max accumulates
-// across windows before the early-return checks. A read error
-// fails the attempt and propagates to the caller, which treats
-// it as a failed read (never as proof).
+// That last stop trusts newest-first window ordering (U-A8):
+// the same unproven ordering the send baseline relies on, and
+// it conditions the F4 turn check in finish as well as the
+// baseline. An empty window with has_more and larger windows
+// still to try is skipped, not terminal (loop-2 F7). The seen
+// max accumulates across windows before the early-return checks.
+// A read error fails the attempt and propagates to the caller,
+// which treats it as a failed read (never as proof).
 func LatestUserSeq(ctx context.Context, r HistoryReader, limits []int, afterSeq int64) (int64, bool, error) {
 	seen := int64(0)
 	found := false
@@ -170,7 +178,11 @@ func LatestUserSeq(ctx context.Context, r HistoryReader, limits []int, afterSeq 
 
 // HistoryReplies returns this turn's final replies from history:
 // replies accumulated across every window read, deduped by
-// (seq, message_id), oldest-first (loop-2 F7). A reply seen in
+// (seq, message_id), oldest-first (loop-2 F7). Dedupe is
+// first-wins: the same (seq, message_id) with different text
+// across windows keeps the first window's text. HistoryReplies
+// has no internal cap on the number of windows read: the bound
+// lives in the caller's limits (three by default). A reply seen in
 // any window is real and is reported even when a later window's
 // slice does not contain it: windows are newest-N reads taken
 // at different instants, and a later slice never un-proves an

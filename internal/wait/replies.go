@@ -18,7 +18,11 @@ import (
 // agent identity when the event states it as strings; they are
 // recorded, never invented, and are used only by the settle
 // proof (Settle) — the final reply list is unattributed, as
-// before. Whether real history events carry these fields is
+// before. Attribution is recorded only from payload-level
+// string fields: a non-string, agent-only, root-only,
+// empty-string, event-level, or metadata-nested id leaves the
+// reply unattributed (fail-open, within the stated residual).
+// Whether real history events carry these fields is
 // [UNVERIFIED] pending live capture (U-A2).
 type Reply struct {
 	Seq         int64
@@ -318,18 +322,19 @@ func EventHasMedia(ev Event) bool {
 // ack any event. No status or self-reference check is applied
 // here.
 //
-// The substring match is trusted ONLY above a proved baseline:
-// the caller must have read the baseline from history
-// successfully before sending (deliverSend fails the send when
-// that read fails, never falling back to 0). Above a proved
-// baseline the first match is the just-sent message's own seq;
-// above a stale 0 it could be an older turn's. The baseline
-// itself is two windows, not one (see deliverSend): no
-// ordering contract for chat.history windows is stated
-// anywhere in this tree, so a single limit=1 read cannot prove
-// the newest seq, and an interleaved identical message from
-// another client can still win the first-match race (carried
-// residual, RT13d).
+// The substring match is trusted ONLY above a baseline read
+// successfully before sending: the caller must have read the
+// baseline from history successfully before sending
+// (deliverSend fails the send when that read fails, never
+// falling back to 0). Above a two-window baseline the first
+// match is the just-sent message's own seq; above a stale 0
+// it could be an older turn's. The baseline itself is two
+// windows, not one (see deliverSend): no ordering contract
+// for chat.history windows is stated anywhere in this tree,
+// so a single limit=1 read cannot establish the newest seq,
+// and an interleaved identical message from another client
+// can still win the first-match race (carried residual,
+// RT13d).
 func UserAck(events []any, baseline int64, text *string) (int64, bool) {
 	if text != nil && strings.TrimSpace(*text) == "" {
 		return 0, false

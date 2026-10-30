@@ -59,8 +59,10 @@
 //
 // Wait redesign (2026-10-30): turn-end rules added on top of the
 // port, each decided explicitly against muse-cli 0.6.1 as the
-// differential reference and proved by the T1–T18 tests in
-// wait_redesign_test.go:
+// differential reference and proved by the T1–T17 tests in
+// wait_redesign_test.go (no T11/T18 test function exists;
+// T11's single-turn pin is TestRunnerLiveDone in
+// runner_test.go):
 //
 //   - A terminal held for "subagents" settles on a history reply
 //     proof, without waiting for a count-0 event or a server
@@ -72,10 +74,14 @@
 //     proof is not existence-only (loop-2 F2): a reply
 //     identifiably shaped as a subagent's (agent_id and
 //     root_agent_id both present and different) never counts
-//     as proof alone. Residual, carried: an unattributed reply
-//     (identity fields absent) can still release the hold, and
-//     can appear in Replies; whether real history events carry
-//     the fields is unproven from code alone (U-A2/U-A6).
+//     as proof alone. Attribution is recorded only from
+//     payload-level string fields: a non-string, agent-only,
+//     root-only, empty-string, event-level, or
+//     metadata-nested id counts as unattributed. Residual,
+//     carried: an unattributed reply (identity fields absent)
+//     can still release the hold, and can appear in Replies;
+//     whether real history events carry the fields is
+//     unproven from code alone (U-A2/U-A6).
 //   - Settle proofs re-poll on a clock cadence
 //     (DefaultSettlePollInterval, 5s) while a terminal is held:
 //     the Runner ends a quiet subscription when a proof is due
@@ -85,11 +91,14 @@
 //     interval (a terminal change or a failed read never
 //     bypasses the gate), and at most one proof per subscribe
 //     iteration. Proofs spend no read while the boundary is
-//     unknown, and no settle proof starts past the deadline
-//     (a proof starting just before it may overshoot by at
-//     most 100ms per window read, ≤3 reads). Exact read counts
-//     in the T5/T6/T12 tests are fixture-specific, not general
-//     bounds.
+//     unknown, and no settlePending/checkState proof starts
+//     past the deadline (a proof starting just before it may
+//     overshoot by at most 100ms per window read, ≤3 reads).
+//     The finish endgame is excepted: its last-chance FAILED
+//     proof, final read, lag window, and reconciliation
+//     re-check run after the deadline on floor budgets, by
+//     design. Exact read counts in the T5/T6/T12 tests are
+//     fixture-specific, not general bounds.
 //   - Boundary derivation runs under the wait deadline: a dead
 //     history endpoint cannot consume wall time past a short
 //     --timeout before any subscription starts. Expiry during
@@ -107,13 +116,23 @@
 //     1000-event window bound itself is unchanged and
 //     documented as a limit.
 //   - The endgame reconciles the final read against the settle
-//     proof and the awaited turn (loop-2 F3/F4): replies after
-//     a newer user message are excluded as a follow-up turn's,
-//     and a proof reply the final read no longer contains is
-//     reported from the proof, with a note in either case. A
-//     replayed FAILED terminal is accepted on the same
-//     user-seq proof for explicit and derived boundaries
-//     alike, including when held for "subagents" (loop-2 F6).
+//     proof and the awaited turn (loop-2 F3/F4, loop-3 H1):
+//     replies after a newer user message are excluded as a
+//     follow-up turn's, and a proof reply the final read no
+//     longer contains is reported from the proof — into an
+//     empty or a non-empty final read, deduped and
+//     within-turn filtered — with a note in either case
+//     (the restore note wins over the exclusion note when
+//     both apply). Except when the final read fails, when
+//     reconciliation is skipped and the proof is lost to
+//     the fail-closed KindTimeout. The reconciliation
+//     re-check trusts newest-first windows the same way the
+//     send baseline does: LatestUserSeq stops scanning when
+//     a window reaches the boundary, so U-A8 conditions
+//     this check too. A replayed FAILED terminal is
+//     accepted on the same user-seq proof for explicit and
+//     derived boundaries alike, including when held for
+//     "subagents" (loop-2 F6).
 //   - The lag window propagates AuthError instead of reporting
 //     Done, and a transient poll failure keeps polling until
 //     the window expires (loop-2 F5).
@@ -126,17 +145,20 @@
 //     the last replayed status; there is still no persisted
 //     cursor, no follow/until-idle/next-reply mode, no
 //     no-timeout mode, and no wait-level liveness output; exit
-//     codes are unchanged (auth errors surface as exit 2 at the
-//     CLI boundary, never as 124 or a retry loop).
-//   - The send path's boundary is proved, never fallen back:
-//     deliverSend fails the send before sending when either of
-//     its two baseline history reads (limit=1 plus a limit=20
-//     confirming read) fails, instead of falling back to
-//     baseline 0 and letting the ack poll match an older
-//     turn's identical text (the reply-reuse bug). No ordering
-//     contract for chat.history windows is stated in this tree,
-//     so the two-window baseline narrows but does not close
-//     the stale-baseline hole, and an interleaved identical
+//     codes are unchanged (auth errors surface as exit 2 at
+//     the wait/send CLI boundary — the REPL catches auth by
+//     design and returns to the prompt with a sign-in hint —
+//     never as 124 or a retry loop).
+//   - The send path's baseline is read successfully before
+//     sending, never fallen back to 0: deliverSend fails the
+//     send before sending when either of its two baseline
+//     history reads (limit=1 plus a limit=20 confirming read)
+//     fails, instead of falling back to baseline 0 and
+//     letting the ack poll match an older turn's identical
+//     text (the reply-reuse bug). No ordering contract for
+//     chat.history windows is stated in this tree, so the
+//     two-window baseline narrows but does not close the
+//     stale-baseline hole, and an interleaved identical
 //     message from another client can still win the
 //     first-match race; both residuals are carried.
 //
