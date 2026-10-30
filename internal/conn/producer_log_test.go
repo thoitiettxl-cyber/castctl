@@ -69,5 +69,18 @@ func TestCallNoticeLogsRedactedPanic(t *testing.T) {
 	if !strings.Contains(got, "panicked") {
 		t.Fatalf("capture %q, want the panicked-notice line (producer not reached)", got)
 	}
-	assertConnProducerRedacted(t, got)
+	// Loop 5: the panic renders as type + length only —
+	// no fixture value, no [redacted] marker (nothing is
+	// emitted to redact).
+	if got == "" {
+		t.Fatal("capture empty: positive control failed")
+	}
+	for _, v := range []string{connProducerVMID, connProducerToken} {
+		if strings.Contains(got, v) {
+			t.Errorf("capture contains fixture value %q:\n%s", v, got)
+		}
+	}
+	if !strings.Contains(got, "panic_length=") {
+		t.Errorf("capture %q, want the panic summary", got)
+	}
 }

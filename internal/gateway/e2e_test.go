@@ -205,17 +205,22 @@ func TestE2ERequestErrors(t *testing.T) {
 		if !errors.As(err, &ge) {
 			t.Fatalf("err = %T (%v)", err, err)
 		}
-		if ge.Status != 404 || ge.Payload != "not found here" {
+		// Loop 5: no body bytes in Payload or Error();
+		// the wire length is recorded instead.
+		if ge.Status != 404 || ge.BodyLength != len("not found here") {
 			t.Errorf("GatewayError = %+v", ge)
 		}
+		if strings.Contains(ge.Payload, "not found here") || strings.Contains(ge.Error(), "not found here") {
+			t.Errorf("GatewayError carries body bytes: payload=%q error=%q", ge.Payload, ge.Error())
+		}
 	})
-	t.Run("status payload truncated to 500", func(t *testing.T) {
+	t.Run("status payload wire length recorded", func(t *testing.T) {
 		s := startE2E(t, gatewaytest.JSONHandler(500, []byte(strings.Repeat("e", 900))))
 		defer s.cleanup()
 		_, err := s.gw.Request(context.Background(), "sessions.list", conn.RequestOptions{})
 		var ge *conn.GatewayError
-		if !errors.As(err, &ge) || len(ge.Payload) != 500 {
-			t.Fatalf("err = %T (%v)", err, err)
+		if !errors.As(err, &ge) || ge.BodyLength != 900 {
+			t.Fatalf("err = %T (%v), want GatewayError with BodyLength 900", err, err)
 		}
 	})
 	t.Run("reset", func(t *testing.T) {
@@ -225,8 +230,11 @@ func TestE2ERequestErrors(t *testing.T) {
 		defer s.cleanup()
 		_, err := s.gw.Request(context.Background(), "sessions.list", conn.RequestOptions{})
 		var ge *conn.GatewayError
-		if !errors.As(err, &ge) || ge.Status != -1 || !strings.Contains(ge.Payload, "stream reset 5: boom") {
-			t.Fatalf("err = %T (%v)", err, err)
+		if !errors.As(err, &ge) || ge.Status != -1 || !strings.Contains(ge.Payload, "stream reset; code=5; reason_length=4") {
+			t.Fatalf("err = %T (%v), want GatewayError with the reset summary", err, err)
+		}
+		if strings.Contains(ge.Payload, "boom") || strings.Contains(ge.Error(), "boom") {
+			t.Errorf("GatewayError carries the reset reason bytes: payload=%q error=%q", ge.Payload, ge.Error())
 		}
 	})
 	t.Run("non-JSON call_json", func(t *testing.T) {

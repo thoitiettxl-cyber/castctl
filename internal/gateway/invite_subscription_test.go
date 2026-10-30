@@ -67,8 +67,11 @@ func TestFetchInviteErrors(t *testing.T) {
 			if !errors.As(err, &ge) {
 				t.Fatalf("err = %T, want GatewayError", err)
 			}
-			if ge.Status != 500 || len(ge.Payload) != 200 {
-				t.Errorf("status=%d payload len=%d", ge.Status, len(ge.Payload))
+			if ge.Status != 500 || ge.BodyLength != 300 {
+				t.Errorf("status=%d BodyLength=%d, want 500/300 (wire length, not truncation)", ge.Status, ge.BodyLength)
+			}
+			if strings.Contains(ge.Payload, "x") {
+				t.Errorf("Payload = %q carries body bytes", ge.Payload)
 			}
 		}},
 		{"non-json", 200, `not json`, func(t *testing.T, err error) {
@@ -320,8 +323,8 @@ func TestFetchSubscription(t *testing.T) {
 		})
 		_, _, err := FetchSubscription(ctx, muxClient(mux), fakeCookie, SubscriptionOptions{ActionID: "id12345678901234567890", Page: "https://muse.ai/settings"})
 		var ge *conn.GatewayError
-		if !errors.As(err, &ge) || !strings.Contains(ge.Payload, "boom") {
-			t.Fatalf("err = %T (%v)", err, err)
+		if !errors.As(err, &ge) || !strings.Contains(ge.Payload, "error=boom") {
+			t.Fatalf("err = %T (%v), want GatewayError with the parsed error enum", err, err)
 		}
 	})
 }

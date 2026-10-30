@@ -1021,8 +1021,8 @@ func TestRecoverConvertsSubscriberPanic(t *testing.T) {
 	if strings.Contains(errb, "PANICSECRET") {
 		t.Errorf("stderr leaks the panic's secret value: %q", errb)
 	}
-	if !strings.Contains(errb, "[redacted]") {
-		t.Errorf("stderr = %q, want the secret value redacted", errb)
+	if !strings.Contains(errb, "panic_length=") {
+		t.Errorf("stderr = %q, want the panic summary (type + length, never the value)", errb)
 	}
 	if strings.Contains(errb, "goroutine") || strings.Contains(errb, ".go:") {
 		t.Errorf("stderr carries a stack trace: %q", errb)
@@ -1051,8 +1051,8 @@ func TestRecoverConvertsBuildPanic(t *testing.T) {
 	if strings.Contains(errb.String(), "BUILDSECRET") {
 		t.Errorf("stderr leaks the panic's secret value: %q", errb.String())
 	}
-	if !strings.Contains(errb.String(), "[redacted]") {
-		t.Errorf("stderr = %q, want the secret value redacted", errb.String())
+	if !strings.Contains(errb.String(), "panic_length=") {
+		t.Errorf("stderr = %q, want the panic summary (type + length, never the value)", errb.String())
 	}
 	if strings.Contains(errb.String(), "goroutine") {
 		t.Errorf("stderr carries a stack trace: %q", errb.String())

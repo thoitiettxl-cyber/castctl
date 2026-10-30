@@ -1029,11 +1029,16 @@ func TestStatusErrorPayloadIsRedacted(t *testing.T) {
 	if !errors.As(err, &gwErr) {
 		t.Fatalf("error type: %T, want *conn.GatewayError", err)
 	}
-	if strings.Contains(gwErr.Payload, "s3cret") || strings.Contains(gwErr.Payload, "tok123") {
-		t.Errorf("GatewayError payload leaks credentials: %q", gwErr.Payload)
+	if strings.Contains(gwErr.Payload, "s3cret") || strings.Contains(gwErr.Payload, "tok123") || strings.Contains(gwErr.Payload, "example.com") {
+		t.Errorf("GatewayError payload carries body bytes: %q", gwErr.Payload)
 	}
-	if !strings.Contains(gwErr.Payload, "example.com") {
-		t.Errorf("GatewayError payload over-redacted: %q", gwErr.Payload)
+	if strings.Contains(gwErr.Error(), "s3cret") || strings.Contains(gwErr.Error(), "tok123") || strings.Contains(gwErr.Error(), "example.com") {
+		t.Errorf("GatewayError error string carries body bytes: %q", gwErr.Error())
+	}
+	// Loop 5: no body bytes survive at all — the host is not
+	// an allowlisted field. The wire length is recorded.
+	if gwErr.BodyLength != len(`see https://user:s3cret@example.com/x?auth_token=tok123`) {
+		t.Errorf("BodyLength = %d, want the wire body length", gwErr.BodyLength)
 	}
 }
 

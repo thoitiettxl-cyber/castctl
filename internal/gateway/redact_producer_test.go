@@ -11,11 +11,15 @@ package gateway
 // redact.String, under which a vm_id query value survives
 // (pinned by TestRedactErrorString). Fixture values actually
 // enter each producer under test; captures assert absence plus
-// a marker. The reader-panic producer (gateway.go:248) uses the
-// same redactFreeText call on an arbitrary panic value; it is
-// not driven here — a panic in the reader loop cannot be
-// triggered hermetically without a corrupt frame stream — and
-// is recorded as unexercised in the loop-2 report.
+// a marker. Loop 5: server-payload producers no longer redact
+// at all — they emit the allowlist summary instead (see
+// TestServerPayloadRedactedAtProducer and the allowlist
+// tests); only the stored CloseReason still uses
+// redactFreeText, and it has no output path. The reader-panic
+// producer (gateway.go) likewise emits class + length only;
+// it is not driven here — a panic in the reader loop cannot
+// be triggered hermetically without a corrupt frame stream —
+// and is recorded as unexercised, as in the loop-2 report.
 
 import (
 	"context"
@@ -96,8 +100,11 @@ func TestClassifyConnectionLostCloseReasonRedacted(t *testing.T) {
 
 // TestServerPayloadRedactedAtProducer: a 500 server payload
 // carrying fixture values, driven through the real E2E gateway
-// (the calls.go:165 GatewayError construction), must carry no
-// fixture value in its printed form, while the host survives.
+// (the calls.go GatewayError construction), must carry no
+// fixture value in any rendering, while the allowlist fields
+// (status, wire body length) are present. Loop 5 supersedes
+// the old host-survival expectation: no body bytes survive
+// at all, redacted or otherwise.
 func TestServerPayloadRedactedAtProducer(t *testing.T) {
 	payload := []byte(`see ` + producerFixtureURL() + ` and {"password": "` + producerPW + `"}`)
 	s := startE2E(t, gatewaytest.HandlerFunc(func(req *pb.ApplicationRequest, service pb.ServiceType) gatewaytest.Response {
@@ -114,9 +121,16 @@ func TestServerPayloadRedactedAtProducer(t *testing.T) {
 	if !errors.As(err, &gwErr) {
 		t.Fatalf("error type: %T, want *conn.GatewayError", err)
 	}
-	assertProducerRedacted(t, gwErr.Payload)
-	if !strings.Contains(gwErr.Payload, "gateway.example.invalid") {
-		t.Errorf("payload over-redacted: %q", gwErr.Payload)
+	for _, v := range []string{producerVMID, producerToken, producerPW, "gateway.example.invalid"} {
+		if strings.Contains(gwErr.Payload, v) || strings.Contains(gwErr.Error(), v) || strings.Contains(gwErr.LogSummary(), v) {
+			t.Errorf("error rendering carries fixture/host value %q: payload=%q error=%q", v, gwErr.Payload, gwErr.Error())
+		}
+	}
+	if gwErr.Status != 500 || gwErr.BodyLength != len(payload) {
+		t.Errorf("GatewayError status=%d BodyLength=%d, want 500/%d", gwErr.Status, gwErr.BodyLength, len(payload))
+	}
+	if !strings.Contains(gwErr.Error(), "body_length=") {
+		t.Errorf("GatewayError.Error() = %q, want body_length", gwErr.Error())
 	}
 }
 
@@ -124,11 +138,13 @@ func TestServerPayloadRedactedAtProducer(t *testing.T) {
 // server-text shapes through the real FetchHatchToken 403
 // path: a hermetic fake gateway returns 403 with the shape as
 // the body, and the AuthError text must carry no full fixture
-// value. Bodies stay well under FetchHatchToken's 160-rune
-// truncation so truncation can never explain an absence. The
-// publicKey shape keeps the first-8-chars prefix rule. Shape
-// names and forms match TestSafeStringTwelveServerShapes;
-// shapes 10-12 are the derived already-stripped ones, named
+// value. Bodies stay well under FetchHatchToken's old
+// 160-rune truncation so truncation can never explain an
+// absence. Loop 5 supersedes the publicKey prefix rule here:
+// the error carries the allowlist summary only, so no value
+// bytes survive — not even the 8-char prefix. Shape names
+// and forms match TestSafeStringTwelveServerShapes; shapes
+// 10-12 are the derived already-stripped ones, named
 // explicitly there.
 func TestFetchHatchToken403ShapesRedacted(t *testing.T) {
 	t.Parallel()
@@ -152,7 +168,7 @@ func TestFetchHatchToken403ShapesRedacted(t *testing.T) {
 		wantPrefix string
 	}{
 		{"camelCase-privateKey-JSON", `{"privateKey": "` + privVal + `"}`, []string{privVal}, ""},
-		{"camelCase-publicKey-JSON", `{"publicKey": "` + pubVal + `"}`, []string{pubVal}, pubVal[:8]},
+		{"camelCase-publicKey-JSON", `{"publicKey": "` + pubVal + `"}`, []string{pubVal}, ""},
 		{"colon-form", "private_key: " + colonVal, []string{colonVal}, ""},
 		{"single-quote-JSON", `{'token': '` + singleVal + `'}`, []string{singleVal}, ""},
 		{"authorization-basic", "Authorization: Basic " + basicVal, []string{basicVal}, ""},
@@ -234,8 +250,8 @@ func TestFetchHatchToken403QuoteCombinations(t *testing.T) {
 			if strings.Contains(got, val) {
 				t.Errorf("FetchHatchToken error %q contains fixture value %q", got, val)
 			}
-			if !strings.Contains(got, "[redacted]") {
-				t.Errorf("FetchHatchToken error %q, want a [redacted] marker", got)
+			if !strings.Contains(got, "body_length=") {
+				t.Errorf("FetchHatchToken error %q, want the allowlist body_length (proves the body entered the path)", got)
 			}
 		})
 	}

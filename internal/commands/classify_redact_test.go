@@ -69,15 +69,20 @@ func TestClassifyErrorTwelveShapes(t *testing.T) {
 	}
 	for _, sh := range shapes {
 		t.Run(sh.name, func(t *testing.T) {
-			check := func(label, text string, wantJSON bool) {
+			// wantPrefix applies to the plain and typed
+			// paths only: the AuthError path renders the
+			// loop-5 allowlist summary (class + length),
+			// which carries no value bytes at all — not
+			// even the public-key prefix.
+			check := func(label, text string, wantJSON bool, wantPrefix string) {
 				t.Helper()
 				for _, v := range sh.forbidden {
 					if strings.Contains(text, v) {
 						t.Errorf("%s classifyError text %q contains fixture value %q", label, text, v)
 					}
 				}
-				if sh.wantPrefix != "" && !strings.Contains(text, sh.wantPrefix) {
-					t.Errorf("%s classifyError text %q, want the 8-char public-key prefix %q present", label, text, sh.wantPrefix)
+				if wantPrefix != "" && !strings.Contains(text, wantPrefix) {
+					t.Errorf("%s classifyError text %q, want the 8-char public-key prefix %q present", label, text, wantPrefix)
 				}
 				if wantJSON {
 					var decoded map[string]string
@@ -91,19 +96,19 @@ func TestClassifyErrorTwelveShapes(t *testing.T) {
 			if code != 1 {
 				t.Errorf("plain classifyError code = %d, want 1", code)
 			}
-			check("plain", text, false)
+			check("plain", text, false, sh.wantPrefix)
 			// Typed auth error: one JSON line.
 			code, text = classifyError(&typedAuthError{Code: 2, Type: "auth_failed", Err: errors.New(sh.input)})
 			if code != 2 {
 				t.Errorf("typed classifyError code = %d, want 2", code)
 			}
-			check("typed", text, true)
+			check("typed", text, true, sh.wantPrefix)
 			// conn.AuthError: one JSON line, exit 2.
 			code, text = classifyError(conn.NewAuthError(sh.input))
 			if code != 2 {
 				t.Errorf("auth classifyError code = %d, want 2", code)
 			}
-			check("auth", text, true)
+			check("auth", text, true, "")
 		})
 	}
 }
