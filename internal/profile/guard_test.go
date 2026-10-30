@@ -11,8 +11,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func writeTestConfig(t *testing.T, base string, profiles map[string]*Profile) {
@@ -169,18 +172,93 @@ func TestConfigStateAbsentCreatedDeleted(t *testing.T) {
 func TestLoadConfigStateLegacyAndMalformed(t *testing.T) {
 	t.Parallel()
 	base := BaseDir(t.TempDir())
-	writeFile(t, filepath.Join(base, "config.json"), `{"auto_approve":"always","node_id":"N1"}`, 0o600)
+	legacyPath := filepath.Join(base, "config.json")
+	writeFile(t, legacyPath, `{"auto_approve":"always","node_id":"N1"}`, 0o600)
 	state, err := LoadConfigState(base)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The legacy-flat state is kept deliberately (Q6): Exists
+	// without Found is exactly "unmigrated legacy file". The
+	// write-path guards (refuseUnmigrated) branch on it, and
+	// LoadProfile — not LoadConfigState — is the refusal point.
 	if state.Found || !state.Exists || state.Config != nil || state.SHA256 == "" {
 		t.Fatalf("legacy state = %+v; want Found=false Exists=true Config=nil SHA256 set", state)
+	}
+	if _, err := LoadProfile(base, "default", lookupEnv(map[string]string{})); !errors.Is(err, ErrLegacyLayout) {
+		t.Fatalf("LoadProfile over legacy-flat file = %v; want ErrLegacyLayout refusal", err)
 	}
 
 	writeFile(t, filepath.Join(base, "config.json"), `{not json`, 0o600)
 	if _, err := LoadConfigState(base); err == nil {
 		t.Error("malformed single file: LoadConfigState = nil error; want error, never silent fallback")
+	}
+}
+
+// TestLoadConfigStateRefusesFIFO (R3): readConfigState must
+// Stat/type-guard before opening baseDir/config.json. A FIFO (or a
+// symlink to one) at the base path must be an exit-2 error naming
+// the path, promptly — never a hang on open.
+func TestLoadConfigStateRefusesFIFO(t *testing.T) {
+	t.Parallel()
+
+	runPrompt := func(t *testing.T, base string) error {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() {
+			_, err := LoadConfigState(base)
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(5 * time.Second):
+			t.Fatal("LoadConfigState hung; want a prompt exit-2 error")
+			return nil
+		}
+	}
+
+	fifoBase := BaseDir(t.TempDir())
+	fifoPath := filepath.Join(fifoBase, "config.json")
+	if err := os.MkdirAll(fifoBase, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(fifoPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := runPrompt(t, fifoBase)
+	if err == nil {
+		t.Fatal("LoadConfigState over a FIFO = nil error; want exit 2")
+	}
+	if ExitCode(err) != 2 {
+		t.Errorf("LoadConfigState over a FIFO ExitCode = %d; want 2", ExitCode(err))
+	}
+	if !strings.Contains(err.Error(), fifoPath) {
+		t.Errorf("LoadConfigState error = %q; want it to name %q", err.Error(), fifoPath)
+	}
+
+	// Symlink to a FIFO (Stat follows symlinks).
+	linkBase := BaseDir(t.TempDir())
+	realFIFO := filepath.Join(t.TempDir(), "real-fifo")
+	if err := syscall.Mkfifo(realFIFO, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(linkBase, "config.json")
+	if err := os.MkdirAll(linkBase, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realFIFO, linkPath); err != nil {
+		t.Fatal(err)
+	}
+	err = runPrompt(t, linkBase)
+	if err == nil {
+		t.Fatal("LoadConfigState over a symlink-to-FIFO = nil error; want exit 2")
+	}
+	if ExitCode(err) != 2 {
+		t.Errorf("LoadConfigState over a symlink-to-FIFO ExitCode = %d; want 2", ExitCode(err))
+	}
+	if !strings.Contains(err.Error(), linkPath) {
+		t.Errorf("LoadConfigState error = %q; want it to name %q", err.Error(), linkPath)
 	}
 }
 

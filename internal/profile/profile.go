@@ -131,12 +131,21 @@ func EnsureProfileDir(baseDir, name string) (Paths, error) {
 // DiscoverProfileNames returns "default" first, then the sorted names of
 // valid-slug directories under base/profiles, mirroring list_profiles
 // (cli.py). Invalid names, files, and a missing profiles directory are
-// skipped. The active profile is not appended here; callers that need
+// skipped. A symlinked profile directory IS followed: DirEntry.IsDir
+// is false for a symlink to a directory, so a bare IsDir check would
+// silently drop every symlinked legacy profile from migration and
+// from the legacy-layout scan. An unresolvable symlink holds no
+// config and is skipped here; migrate itself fails loudly on it
+// (see MigrateFrom), so it never vanishes silently from a
+// migration. The active profile is not appended here; callers that need
 // the Python behaviour (list the active profile even if not on disk)
-// add it themselves.
+// add it themselves. Directory discovery only: it reads no config
+// file. Migrate uses it to enumerate the profiles a legacy layout
+// may hold; LoadProfile never reads a legacy file it names.
 func DiscoverProfileNames(baseDir string) ([]string, error) {
 	names := []string{DefaultProfileName}
-	entries, err := os.ReadDir(filepath.Join(baseDir, "profiles"))
+	profilesDir := filepath.Join(baseDir, "profiles")
+	entries, err := os.ReadDir(profilesDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return names, nil
@@ -144,7 +153,13 @@ func DiscoverProfileNames(baseDir string) ([]string, error) {
 		return nil, newConfigErrorf("list profiles: %v", err)
 	}
 	for _, e := range entries {
-		if !e.IsDir() {
+		isDir := e.IsDir()
+		if !isDir && e.Type()&os.ModeSymlink != 0 {
+			if st, serr := os.Stat(filepath.Join(profilesDir, e.Name())); serr == nil && st.IsDir() {
+				isDir = true
+			}
+		}
+		if !isDir {
 			continue
 		}
 		if _, err := ValidateProfileName(e.Name()); err != nil {
@@ -165,7 +180,9 @@ type Source string
 const (
 	// SourceSingle means settings came from the single-file config.json.
 	SourceSingle Source = "single"
-	// SourceLegacy means settings came from the profile's own legacy config.json.
+	// SourceLegacy means the profile was built from a legacy
+	// per-profile config file by Migrate (migrate-only). LoadProfile
+	// never returns it: a legacy file on disk is refused instead.
 	SourceLegacy Source = "legacy"
 	// SourceNone means no config file was found; defaults apply.
 	SourceNone Source = "none"
@@ -202,7 +219,7 @@ type Profile struct {
 	// Exists reports whether the profile directory exists on disk.
 	Exists bool
 	// ConfigFound reports whether settings came from a config file
-	// (single-file entry or legacy file).
+	// (a single-file entry; a legacy file is refused, never a source).
 	ConfigFound bool
 
 	vmIDPresent        bool

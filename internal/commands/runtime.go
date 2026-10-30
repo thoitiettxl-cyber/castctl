@@ -130,7 +130,7 @@ func requireCookiesFile(p *profile.Profile) error {
 // come from profile.OutboundIdentityForConfig when a single config
 // exists, so edits to the referenced object change the identity;
 // OutboundIdentity (fixed-shape hash) is only the fallback for
-// legacy layouts without a single config file.
+// invocations without a single config file (SourceNone profile).
 func connectorConfig(prof *profile.Profile, single *profile.SingleConfig) (conn.Config, error) {
 	tag, hash, err := identityForProfile(prof, single)
 	if err != nil {
@@ -314,26 +314,15 @@ func createOutbounds(ctx context.Context, mgr *outbound.Manager, single *profile
 			}
 			created[ob.Tag] = true
 		}
-	} else {
-		// Legacy layout: the profile's own outbound is the only
-		// one. An inline object is created under its tag; a tag
-		// reference has nowhere to resolve from and is refused.
-		switch prof.Outbound.Kind {
-		case profile.OutboundInline:
-			ob, err := prof.Outbound.InlineOutbound()
-			if err != nil {
-				return errCode(2, err)
-			}
-			if ob != nil {
-				if err := mgr.CreateOutbound(ctx, ob.Tag, ob.Type, ob.Options); err != nil {
-					return errCode(2, err)
-				}
-				created[ob.Tag] = true
-			}
-		case profile.OutboundTag:
-			return errCodef(2, "profile %q references outbound tag %q, but no single config file exists: run `castctl config migrate --write` first", prof.Name, prof.Outbound.Tag)
-		}
 	}
+	// No single config file means no config-defined outbounds:
+	// the profile is SourceNone (direct), and the explicit
+	// "direct" outbound below is its only outbound. A load for a
+	// name without a single-file entry in a layout containing any
+	// legacy file never reaches here: LoadProfile refuses it
+	// layout-wide for such names before the runtime is built, so
+	// no legacy file is ever read here. A name WITH a
+	// single-file entry loads wholly and does reach here.
 	// Synthetic dialer outbound for direct endpoint references,
 	// created BEFORE Start (see defaultBuildRuntime).
 	if tag, _, err := identityForProfile(prof, single); err == nil {

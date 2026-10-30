@@ -166,7 +166,6 @@ func cmdProfileList(ctx context.Context, env *Env, g *globalOpts, args []string)
 		ordered = append(ordered, active.Name)
 	}
 	rows := make([]profileListRow, 0, len(ordered))
-	hasSingle, hasLegacy := false, false
 	for _, name := range ordered {
 		prof, err := profile.LoadProfile(loc.ConfigDir, name, env.lookupEnv)
 		if err != nil {
@@ -185,22 +184,12 @@ func cmdProfileList(ctx context.Context, env *Env, g *globalOpts, args []string)
 		row.Outbound.Type = prof.Outbound.Type
 		row.Outbound.Tag = prof.Outbound.Tag
 		rows = append(rows, row)
-		switch prof.Source {
-		case profile.SourceSingle:
-			hasSingle = true
-		case profile.SourceLegacy:
-			hasLegacy = true
-		}
 	}
+	// The aggregate source is single when a single file exists,
+	// else none. A legacy layout never reaches the aggregation:
+	// LoadProfile refuses it above (whole-command error).
 	source := "none"
-	switch {
-	case single != nil && hasLegacy:
-		source = "mixed"
-	case single != nil:
-		source = "single"
-	case hasLegacy:
-		source = "legacy"
-	case hasSingle:
+	if single != nil {
 		source = "single"
 	}
 	defaultProfile := "default"
@@ -325,6 +314,12 @@ func explicitProfileSelected(g *globalOpts, env *Env, positional bool) bool {
 }
 
 func profileExists(baseDir string, single *profile.SingleConfig, name string) bool {
+	// Existence counts a single-file entry, a per-profile config
+	// file, or a bare profile directory (kept deliberately: the
+	// directory is the profile's home, and LoadProfile
+	// synthesises SourceNone defaults for it). A legacy config
+	// file counts as existence here, but LoadProfile refuses to
+	// read it, so this check never silently loads one.
 	if single != nil {
 		if _, ok := single.Profiles[name]; ok {
 			return true
@@ -989,7 +984,7 @@ func cmdConfig(ctx context.Context, env *Env, g *globalOpts, args []string) erro
 }
 
 func cmdConfigMigrate(ctx context.Context, env *Env, g *globalOpts, args []string) error {
-	ap := &argParser{defs: []flagDef{{name: "write", kind: flagBool}}, helpText: configMigrateHelpText, prog: "castctl config migrate"}
+	ap := &argParser{defs: []flagDef{{name: "write", kind: flagBool}, {name: "from", kind: flagString}}, helpText: configMigrateHelpText, prog: "castctl config migrate"}
 	p, helpShown, err := ap.parse(args, env.stdout())
 	if err != nil {
 		if pe, ok := err.(*parserError); ok {
@@ -1005,16 +1000,34 @@ func cmdConfigMigrate(ctx context.Context, env *Env, g *globalOpts, args []strin
 		return usageErr(err)
 	}
 	write := p.bool("write")
-	// Only --write may create a missing explicit file: the dry
-	// run is gated by RequirePresent like every other command
-	// (see ConfigLocation.RequirePresent: dry-run does NOT
-	// bypass the gate). A missing non-explicit file is the
-	// normal pre-migration state and passes the gate.
-	loc, err := resolveConfig(g, env, write)
+	// --from names the legacy source directory; the destination
+	// is the --config file's directory (or the default config
+	// directory). A relative --from value is working-directory
+	// relative, like --config. An empty --from is a usage error.
+	sourceDir := ""
+	if p.strIsSet("from") {
+		sourceDir = strings.TrimSpace(p.str("from"))
+		if sourceDir == "" {
+			return usageErr(&parserError{msg: "--from requires a non-empty directory"})
+		}
+		if abs, aerr := filepath.Abs(sourceDir); aerr == nil {
+			sourceDir = abs
+		}
+	}
+	// Only --write may create a missing explicit file, except
+	// with --from: a missing destination file is the normal
+	// pre-migration state for a new directory, so a --from
+	// dry-run is not gated by RequirePresent either. A missing
+	// non-explicit file is the normal pre-migration state and
+	// passes the gate.
+	loc, err := resolveConfig(g, env, write || sourceDir != "")
 	if err != nil {
 		return err
 	}
-	result, err := profile.Migrate(loc.ConfigDir, write)
+	if sourceDir == "" {
+		sourceDir = loc.ConfigDir
+	}
+	result, err := profile.MigrateFrom(sourceDir, loc.ConfigDir, write)
 	if result != nil {
 		if werr := writeJSON(env.stdout(), result); werr != nil {
 			return werr

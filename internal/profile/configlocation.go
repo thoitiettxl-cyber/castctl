@@ -34,7 +34,8 @@ import (
 //
 // The resolved config file's directory becomes CONFIG_DIR for the
 // whole invocation: every derived path (single-file config.json,
-// the config.json.lock, legacy fallback files, profiles/<name>/,
+// the config.json.lock, unmigrated legacy files (refused by
+// LoadProfile, read only by Migrate), profiles/<name>/,
 // cookies_file defaults, chat.json, and — for consumers in other
 // packages — telegram.json, telegram-state.json and update.json)
 // comes from it. This package has no derivation that hardcodes a
@@ -176,7 +177,10 @@ func ResolveConfigLocationWithEnv(explicitPath string) (*ConfigLocation, error) 
 // call Migrate(loc.ConfigDir, true) directly with no RequirePresent
 // gate — Migrate treats a missing file as an empty layout and
 // writes the single file at the resolved location. (Migrate dry-run
-// does NOT bypass the gate: only --write creates.)
+// does NOT bypass the gate: only --write creates — except a
+// `config migrate --from` dry-run, whose destination is a new
+// directory by design, so a missing destination file is the normal
+// pre-migration state there too.)
 func (loc *ConfigLocation) RequirePresent() error {
 	if loc == nil {
 		return newConfigError("cannot check a nil config location")

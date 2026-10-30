@@ -341,7 +341,7 @@ stored (see "profile set-fingerprint --help" and
 const profileListHelpText = `usage: castctl profile list
 
 List profiles as JSON: {"active", "default_profile", "source",
-"profiles": [...]}. "source" is single, legacy, mixed or none.
+"profiles": [...]}. "source" is single or none.
 `
 
 const profileShowHelpText = `usage: castctl profile show [NAME]
@@ -431,7 +431,7 @@ Config maintenance. Subcommands: migrate. Run
 "castctl config <subcommand> --help" for per-subcommand help.
 `
 
-const configMigrateHelpText = `usage: castctl config migrate [--write]
+const configMigrateHelpText = `usage: castctl config migrate [--write] [--from <dir>]
 
 Migrate legacy per-profile config files into the single
 config.json. Dry-run by default: prints the JSON plan and writes
@@ -440,6 +440,21 @@ never deletes or edits the old files). An already-migrated config
 exits 0; a differing single config refuses with exit 2. Only
 "config migrate --write" may create a missing explicit --config
 file.
+
+--from <dir> reads legacy profiles ONLY from <dir> and writes
+the single config ONLY to the --config file's directory (or the
+default config directory when no --config is given); the source
+directory is never written. Without --from, source and
+destination are the --config file's directory. A missing source
+directory exits 2. When --from names the destination directory
+itself, including through a symlink, behaviour is exactly as
+without --from.
+
+When the existing single config has no "dns" section and every
+profile shares one outbound tag, --write also authors the interim
+global "dns" section (DoH to 1.1.1.1 through that tag; see
+docs/config.md). Otherwise no "dns" section is written and the
+result reports why in "dns_refusal".
 `
 
 const waitHelpText = `usage: castctl wait [--thread ID] [--after-seq N] [--timeout SECONDS] [--json] [--require-running] [--auto-approve|--no-auto-approve] [--auto-allow-once|--no-auto-allow-once]

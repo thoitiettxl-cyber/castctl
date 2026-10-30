@@ -119,6 +119,89 @@ Castctl mappings (`VERIFIED` except as tagged):
   construction. `[PARTLY VERIFIED — import level only; file contents
   not read in detail.]`
 
+Outbound dialability for the interim-DNS detour walk (loop 4) —
+VERIFIED against the pinned module-cache source (no upstream code
+copied; the walker is castctl's own static model of the upstream
+runtime below, so NOTICE is unchanged). The question the walker
+answers is: if migrate authors a dns detour to this tag, can a DNS
+query dial through it? Upstream, a dns server detour resolves
+through `common/dialer/detour.go:57` (`DetourDialer.init`) and
+`:80` (`DialContext`): the init fails only when the detour tag
+is missing or when the immediate target is an empty direct
+outbound (`:72`, "detour to an empty direct outbound makes no
+sense"); otherwise dialing delegates to the target's own
+`DialContext`. The walker mirrors that: it follows `detour`
+fields first, then decides per target type. Castctl mapping:
+`internal/profile/migrate.go:808` (`detourNodeCanDial`),
+`:776` (`selectorSelected`), `:902` (`detourTagForProfile`).
+
+- `block`: never dials. Upstream
+  `protocol/block/outbound.go:34` (`DialContext`) always returns
+  `syscall.EPERM` (and `ListenPacket` likewise). Walker: `false`.
+- `bridge`: never dials TCP/UDP. Upstream
+  `protocol/bridge/outbound.go:128` (`DialContext`) always errors
+  ("only L3 traffic is supported by bridge"). Walker: `false`.
+- `direct`: dials, except as a detour target when empty, and
+  except loopback-to-TUN-range destinations. Upstream
+  `protocol/direct/outbound.go:52` (`NewOutbound`) forces
+  `UDPFragmentDefault` true and `:269` (`IsEmpty`) compares
+  against exactly that value; the field is `json:"-"` in
+  `option/outbound.go`, so a parsed config can never set it and
+  parsed-zero is exactly upstream-empty — the walker's zero
+  comparison is upstream's check, not an approximation.
+- `selector`: dials ONLY its selected member. Upstream
+  `protocol/group/selector.go:162` (`DialContext`) dials
+  `selected`, and `:79` (`Start`) selects cache-file, then
+  `Default`, then the first member. Castctl registers no
+  `CacheFile` service (`internal/outbound/context.go:110`
+  `services()`), so in castctl runtime the selection is exactly
+  Default-or-first, which is what `selectorSelected` walks. A
+  Default naming a non-member, or an empty member list, is an
+  upstream `Start` error ("default outbound not found",
+  "missing tags"), so the walker returns `false`.
+- `socks` and every other proxy type: dials through its own
+  client/dialer, or through its `detour` chain (walked first).
+  Upstream e.g. `protocol/socks/outbound.go` (`DialContext`)
+  delegates to its client, whose dialer is a `DetourDialer` when
+  a detour is set (`common/dialer/dialer.go:52`). Walker:
+  default `true`, after following the detour.
+- Endpoints (e.g. WireGuard): valid detour targets. Upstream
+  `adapter/outbound/manager.go:153` (`Outbound`) falls back to
+  the endpoint manager, and e.g.
+  `transport/wireguard/endpoint.go:267` (`DialContext`) dials
+  through the tunnel device. Walker: resolved by
+  `lookupDetourNode` and default `true` (live WG dial validity
+  stays [UNVERIFIED], as before).
+- `dns` outbound: no walker case, deliberately. Upstream
+  `protocol/dns/outbound.go:38` (`DialContext`) always returns
+  `os.ErrInvalid`, but the case is unreachable anyway: sing-box
+  1.14.4 rejects a `dns` outbound at parse time
+  (`option/outbound.go:45`, removed in 1.13.0).
+
+Walker-specific deviations (dialability only), each with castctl
+evidence:
+
+- `urltest` is refused as a detour target in castctl even
+  though sing-box proper would dial its best-tested member
+  (upstream `protocol/group/urltest.go:169` `DialContext` selects
+  by URL test). Upstream `urltest` Start requires a URL test
+  history storage service (`protocol/group/urltest.go:253`,
+  "missing URL test history storage"), upstream `box` registers
+  one (`box.go:166-167`), but castctl's manager context never
+  does (`internal/outbound/context.go:110` `services()` lists
+  Router, NetworkManager, OutboundManager, EndpointManager, and
+  DNSTransportManager only), so a urltest outbound cannot start
+  in castctl runtime at all. Refusal is the castctl-faithful
+  answer; the upstream behavior is recorded here, not claimed.
+- `direct` carrying a `detour` field is rejected at upstream
+  construction (`protocol/direct/outbound.go:55`, "`detour` is
+  not supported in direct context"), so such a config fails
+  castctl runtime construction regardless of dns authoring and
+  the walker's answer for it is moot. The walker still follows
+  the detour field (preserving the pinned round-2 chain tests);
+  rejecting direct-with-detour at config validation time is a
+  follow-up, not done in this loop.
+
 Deviations from upstream, each with castctl evidence:
 
 1. No `box.Box`. Upstream sing-box normally runs as a full box

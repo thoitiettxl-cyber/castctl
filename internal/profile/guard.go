@@ -68,13 +68,17 @@ type ConfigState struct {
 	Found bool
 	// Exists reports whether config.json existed at load in any
 	// form (single file or legacy-flat). Found implies Exists.
+	// Exists without Found is exactly the unmigrated legacy-flat
+	// state: LoadProfile refuses it, and the write-path guards
+	// (refuseUnmigrated) branch on it.
 	Exists bool
 	// SHA256 is the lowercase hex sha256 of the raw bytes read at
 	// load, or "" when the file was absent.
 	SHA256 string
 	// Config is the parsed single file when Found, nil otherwise.
 	// A legacy-flat file leaves Config nil: callers must not treat
-	// a nil Config as an empty single file.
+	// a nil Config as an empty single file, and must not write
+	// over the legacy file without the refuseUnmigrated guard.
 	Config *SingleConfig
 
 	baseDir string
@@ -83,7 +87,10 @@ type ConfigState struct {
 // LoadConfigState reads baseDir/config.json once and records its
 // sha256. It returns Found=false when the file is absent or is a
 // legacy-flat config, and an error when a single file is present but
-// unparseable (never a silent fallback). It takes no lock.
+// unparseable (never a silent fallback). Found=false with
+// Exists=true is the unmigrated legacy-flat state, kept deliberately:
+// the write-path guards branch on it, and LoadProfile — not this
+// function — refuses legacy reads. It takes no lock.
 func LoadConfigState(baseDir string) (*ConfigState, error) {
 	state, _, err := readConfigState(baseDir)
 	return state, err
@@ -94,7 +101,7 @@ func LoadConfigState(baseDir string) (*ConfigState, error) {
 func readConfigState(baseDir string) (*ConfigState, []byte, error) {
 	state := &ConfigState{baseDir: baseDir}
 	path := filepath.Join(baseDir, "config.json")
-	data, err := os.ReadFile(path)
+	data, err := readRegularFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return state, nil, nil
@@ -198,7 +205,9 @@ func UpdateSingleConfig(baseDir string, update func(cfg *SingleConfig) error) er
 	// Re-read under the lock: the only way the bytes changed since
 	// the load is a writer that bypassed the lock (e.g. an editor
 	// writing in place). Refuse rather than overwrite its change.
-	current, err := os.ReadFile(filepath.Join(baseDir, "config.json"))
+	// The re-read is Stat/type-guarded like every other config.json
+	// read: a FIFO swapped in for the file must not hang the write.
+	current, err := readRegularFile(filepath.Join(baseDir, "config.json"))
 	if err != nil && !os.IsNotExist(err) {
 		return newConfigErrorf("read config: %v", err)
 	}

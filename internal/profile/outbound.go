@@ -145,10 +145,11 @@ func detourOf(options any) string {
 	return ""
 }
 
-// referencedTags returns outbound tags referenced inside parsed options
-// that are not detours: selector/urltest member lists and defaults.
-func referencedTags(ob option.Outbound) []string {
-	switch opts := ob.Options.(type) {
+// groupMembers returns outbound tags referenced inside parsed
+// options that are not detours: selector/urltest member lists and
+// the selector default. Other option types reference no members.
+func groupMembers(options any) []string {
+	switch opts := options.(type) {
 	case *option.SelectorOutboundOptions:
 		out := append([]string{}, opts.Outbounds...)
 		if opts.Default != "" {
@@ -160,4 +161,10 @@ func referencedTags(ob option.Outbound) []string {
 	default:
 		return nil
 	}
+}
+
+// referencedTags returns outbound tags referenced inside parsed options
+// that are not detours: selector/urltest member lists and defaults.
+func referencedTags(ob option.Outbound) []string {
+	return groupMembers(ob.Options)
 }

@@ -852,7 +852,8 @@ func scanGlobal(args []string, env *Env) (*globalOpts, string, []string, int, bo
 
 // resolveConfig resolves the config location for one invocation and
 // enforces the basename + presence rules. allowMissingCreate is true
-// only for `config migrate --write`.
+// only for `config migrate --write` and `config migrate --from`
+// (whose destination may be a new directory).
 func resolveConfig(g *globalOpts, env *Env, allowMissingCreate bool) (*profile.ConfigLocation, error) {
 	if g.configSet && strings.TrimSpace(g.configFlag) == "" {
 		return nil, errCodef(2, "--config requires a non-empty path")

@@ -14,7 +14,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/gateway/gatewaytest"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
@@ -397,6 +399,59 @@ func TestProfileListRejectsSharedWireGuardPrivateKey(t *testing.T) {
 	}
 }
 
+func TestProfileListRefusesLegacyLayout(t *testing.T) {
+	// The library-level refusal surfaces at the CLI as exit 2,
+	// naming the migration step and the legacy file path, with
+	// no file contents in the output.
+	home := t.TempDir()
+	configFile := filepath.Join(home, "config.json")
+	if err := os.WriteFile(configFile, []byte(`{"auto_approve":"always","node_id":"LEGACY-NODE"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, out, errb := profileEnv(t, configFile)
+	if code := runProfile(t, env, out, errb, configFile, "profile", "list"); code != 2 {
+		t.Fatalf("profile list over legacy layout: code=%d, want 2; err=%q out=%q", code, errb.String(), out.String())
+	}
+	if !strings.Contains(errb.String(), "castctl config migrate --write") || !strings.Contains(errb.String(), configFile) {
+		t.Errorf("profile list error = %q; want migration step + %q", errb.String(), configFile)
+	}
+	if strings.Contains(errb.String(), "LEGACY-NODE") || strings.Contains(out.String(), "LEGACY-NODE") {
+		t.Errorf("legacy file contents leaked: err=%q out=%q", errb.String(), out.String())
+	}
+	if code := runProfile(t, env, out, errb, configFile, "profile", "show"); code != 2 {
+		t.Fatalf("profile show over legacy layout: code=%d, want 2; err=%q", code, errb.String())
+	}
+}
+
+// TestProfileListShowBareDirectoryOnly (F5): a bare profile
+// directory with no config file is not a legacy layout. Under the
+// default (non-explicit) config location, profile list and profile
+// show exit 0 and report the synthesised defaults.
+func TestProfileListShowBareDirectoryOnly(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(home, "xdg")
+	baseDir := filepath.Join(xdg, "castctl")
+	if err := os.MkdirAll(filepath.Join(baseDir, "profiles", "work"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	env, out, errb := profileEnv(t, "")
+	env.Getenv = mapGetenv(map[string]string{"XDG_CONFIG_HOME": xdg, "HOME": home})
+	runDefault := func(args ...string) int {
+		out.Reset()
+		errb.Reset()
+		return Run(context.Background(), args, env)
+	}
+	if code := runDefault("profile", "list"); code != 0 {
+		t.Fatalf("list over bare-directory-only layout: code=%d, want 0; err=%q", code, errb.String())
+	}
+	if !strings.Contains(out.String(), `"source": "none"`) {
+		t.Errorf("list: %q; want source none", out.String())
+	}
+	if code := runDefault("profile", "show", "work"); code != 0 {
+		t.Fatalf("show work over bare directory: code=%d, want 0; err=%q", code, errb.String())
+	}
+}
+
 func TestConfigMigrate(t *testing.T) {
 	home := t.TempDir()
 	// The legacy layout lives under the DEFAULT config home
@@ -454,6 +509,303 @@ func TestConfigMigrate(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `"source": "single"`) {
 		t.Errorf("list after migrate: %q", out.String())
+	}
+}
+
+// TestConfigMigrateFrom (--from): the source dir is read, the
+// destination is the --config file's directory, and the source is
+// never written. A dry-run against a missing destination file
+// still shows the plan (the missing destination is the normal
+// pre-migration state for a new directory).
+// TestCommandsRefuseBaseFIFO (R3): a FIFO at the base config.json
+// path must make profile show, config migrate (dry-run), and
+// profile add fail with exit 2 promptly — never hang (timeout 124
+// in the red-team repro). Each command runs in a goroutine with a
+// 5s guard so a hang fails the test instead of the suite.
+func TestCommandsRefuseBaseFIFO(t *testing.T) {
+	home := t.TempDir()
+	configFile := filepath.Join(home, "config.json")
+	if err := syscall.Mkfifo(configFile, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, out, errb := profileEnv(t, configFile)
+
+	runPrompt := func(t *testing.T, args ...string) int {
+		t.Helper()
+		done := make(chan int, 1)
+		go func() {
+			done <- runProfile(t, env, out, errb, configFile, args...)
+		}()
+		select {
+		case code := <-done:
+			return code
+		case <-time.After(5 * time.Second):
+			t.Fatalf("command %v hung over a FIFO config path; want a prompt exit 2", args)
+			return -1
+		}
+	}
+
+	if code := runPrompt(t, "profile", "show"); code != 2 {
+		t.Fatalf("profile show over a FIFO: code=%d, want 2; err=%q", code, errb.String())
+	}
+	if code := runPrompt(t, "config", "migrate"); code != 2 {
+		t.Fatalf("config migrate over a FIFO: code=%d, want 2; err=%q", code, errb.String())
+	}
+	if code := runPrompt(t, "profile", "add", "work"); code != 2 {
+		t.Fatalf("profile add over a FIFO: code=%d, want 2; err=%q", code, errb.String())
+	}
+}
+
+// TestProfileShowGhostRefusesLeftoverLegacyWithSingleFile (R1):
+// with a single file present and a leftover legacy file for
+// another profile, showing a ghost active profile exits 2 naming
+// the leftover file (the LoadProfile refusal fires at the CLI
+// layer too) — not a "does not exist" synthesis. With no legacy
+// file anywhere, listing a ghost active profile synthesises it.
+func TestProfileShowGhostRefusesLeftoverLegacyWithSingleFile(t *testing.T) {
+	home := t.TempDir()
+	configFile := filepath.Join(home, "config.json")
+	if err := os.WriteFile(configFile, []byte(`{"profiles":{"default":{"node_id":"N1"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	leftover := filepath.Join(home, "profiles", "work", "config.json")
+	if err := os.MkdirAll(filepath.Dir(leftover), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(leftover, []byte(`{"node_id":"WORK-NODE"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, out, errb := profileEnv(t, configFile)
+	// The ghost is the ACTIVE profile: resolving it must refuse
+	// (LoadProfile itself), not synthesise over the leftover file.
+	env.Getenv = mapGetenv(map[string]string{"CASTCTL_PROFILE": "ghost"})
+	if code := runProfile(t, env, out, errb, configFile, "profile", "show"); code != 2 {
+		t.Fatalf("profile show ghost over single+leftover: code=%d, want 2; out=%q err=%q", code, out.String(), errb.String())
+	}
+	if !strings.Contains(errb.String(), leftover) || !strings.Contains(errb.String(), "config migrate --write") {
+		t.Errorf("profile show ghost error = %q; want it to name the leftover file and the migration step", errb.String())
+	}
+
+	// Control: no legacy file anywhere — a ghost active profile
+	// synthesises and lists fine.
+	cleanHome := t.TempDir()
+	cleanFile := filepath.Join(cleanHome, "config.json")
+	if err := os.WriteFile(cleanFile, []byte(`{"profiles":{"default":{"node_id":"N1"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cleanEnv, cleanOut, cleanErrb := profileEnv(t, cleanFile)
+	cleanEnv.Getenv = mapGetenv(map[string]string{"CASTCTL_PROFILE": "ghost"})
+	if code := runProfile(t, cleanEnv, cleanOut, cleanErrb, cleanFile, "profile", "list"); code != 0 {
+		t.Fatalf("profile list over clean single file with ghost active: code=%d, want 0; err=%q", code, cleanErrb.String())
+	}
+	if !strings.Contains(cleanOut.String(), "ghost") {
+		t.Errorf("profile list output = %q; want the synthesised ghost profile listed", cleanOut.String())
+	}
+}
+
+// TestCommandsRefuseStrayDefaultLegacyFile (R4): legacy settings in
+// profiles/default/config.json with no base config.json —
+// `profile show` and `profile list` exit 2 naming the stray file
+// instead of synthesising defaults. The default config location is
+// used (via XDG_CONFIG_HOME): an explicit --config pointing at a
+// missing file is gated by RequirePresent before any load happens,
+// so it cannot exercise the refusal.
+func TestCommandsRefuseStrayDefaultLegacyFile(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(home, "xdg")
+	stray := filepath.Join(xdg, "castctl", "profiles", "default", "config.json")
+	if err := os.MkdirAll(filepath.Dir(stray), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stray, []byte(`{"auto_approve":"always","node_id":"STRAY-NODE"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, errb := &bytes.Buffer{}, &bytes.Buffer{}
+	env := &Env{Stdout: out, Stderr: errb, Getenv: mapGetenv(map[string]string{
+		"XDG_CONFIG_HOME": xdg,
+		"HOME":            home,
+	})}
+	run := func(args ...string) int {
+		out.Reset()
+		errb.Reset()
+		return Run(context.Background(), args, env)
+	}
+	if code := run("profile", "show"); code != 2 {
+		t.Fatalf("profile show over stray-only layout: code=%d, want 2; out=%q err=%q", code, out.String(), errb.String())
+	}
+	if !strings.Contains(errb.String(), stray) {
+		t.Errorf("profile show error = %q; want it to name the stray file %q", errb.String(), stray)
+	}
+	if code := run("profile", "list"); code != 2 {
+		t.Fatalf("profile list over stray-only layout: code=%d, want 2; out=%q err=%q", code, out.String(), errb.String())
+	}
+	if !strings.Contains(errb.String(), stray) {
+		t.Errorf("profile list error = %q; want it to name the stray file %q", errb.String(), stray)
+	}
+}
+
+func TestConfigMigrateFrom(t *testing.T) {
+	home := t.TempDir()
+	src := filepath.Join(home, "muse-cli")
+	if err := os.MkdirAll(filepath.Join(src, "profiles", "muse01"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "config.json"), []byte(`{"auto_approve":"always","node_id":"MAIN-NODE"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "profiles", "muse01", "config.json"), []byte(`{"auto_approve":"off","node_id":"MUSE01-NODE"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srcBefore, _ := os.ReadFile(filepath.Join(src, "config.json"))
+	destFile := filepath.Join(home, "castctl", "config.json")
+	env, out, errb := profileEnv(t, destFile)
+
+	// Dry-run: plan shown, destination still missing, source untouched.
+	if code := runProfile(t, env, out, errb, destFile, "config", "migrate", "--from", src); code != 0 {
+		t.Fatalf("migrate --from dry-run: code=%d err=%q", code, errb.String())
+	}
+	if _, err := os.Stat(destFile); err == nil {
+		t.Error("dry run wrote the destination config")
+	}
+	if !strings.Contains(out.String(), `"would_write": true`) || !strings.Contains(out.String(), "muse01") {
+		t.Errorf("migrate --from plan: %q", out.String())
+	}
+	srcAfter, _ := os.ReadFile(filepath.Join(src, "config.json"))
+	if string(srcAfter) != string(srcBefore) {
+		t.Error("dry run modified the source file")
+	}
+
+	// --write: destination created, mode 0600, source untouched.
+	if code := runProfile(t, env, out, errb, destFile, "config", "migrate", "--from", src, "--write"); code != 0 {
+		t.Fatalf("migrate --from --write: code=%d err=%q", code, errb.String())
+	}
+	info, err := os.Stat(destFile)
+	if err != nil {
+		t.Fatalf("migrate --from --write did not create the destination: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("destination mode = %o; want 600", info.Mode().Perm())
+	}
+	if code := runProfile(t, env, out, errb, destFile, "profile", "list"); code != 0 {
+		t.Fatalf("list after --from migrate: code=%d err=%q", code, errb.String())
+	}
+	if !strings.Contains(out.String(), `"source": "single"`) || !strings.Contains(out.String(), "muse01") {
+		t.Errorf("list after --from migrate: %q", out.String())
+	}
+
+	// Missing source dir exits 2 and writes nothing.
+	missing := filepath.Join(home, "no-such-dir")
+	if code := runProfile(t, env, out, errb, destFile, "config", "migrate", "--from", missing); code != 2 {
+		t.Fatalf("migrate --from missing source: code=%d, want 2; err=%q", code, errb.String())
+	}
+
+	// Help names the flag.
+	if code := runProfile(t, env, out, errb, destFile, "config", "migrate", "--help"); code != 0 {
+		t.Fatalf("migrate --help: code=%d", code)
+	}
+	if !strings.Contains(out.String(), "--from") {
+		t.Errorf("migrate help: %q; want --from documented", out.String())
+	}
+}
+
+// TestConfigMigrateFromCollision (R5): --from a different
+// directory whose legacy profile differs from the destination
+// entry of the same name exits 2 naming both locations, and
+// writes nothing anywhere (dry-run or --write).
+// TestConfigMigrateFromEmpty (R8): an empty --from value is a
+// usage error like every other flag error: exit 2, including a
+// whitespace-only value (trimmed empty).
+func TestConfigMigrateFromEmpty(t *testing.T) {
+	home := t.TempDir()
+	destFile := filepath.Join(home, "castctl", "config.json")
+	env, out, errb := profileEnv(t, destFile)
+	for _, val := range []string{"", "   "} {
+		out.Reset()
+		errb.Reset()
+		if code := runProfile(t, env, out, errb, destFile, "config", "migrate", "--from", val); code != 2 {
+			t.Fatalf("migrate --from %q: code=%d, want 2; err=%q out=%q", val, code, errb.String(), out.String())
+		}
+		if !strings.Contains(errb.String()+out.String(), "--from requires a non-empty directory") {
+			t.Errorf("migrate --from %q output %q; want the usage message", val, errb.String()+out.String())
+		}
+	}
+}
+
+func TestConfigMigrateFromCollision(t *testing.T) {
+	home := t.TempDir()
+	src := filepath.Join(home, "muse-cli")
+	if err := os.MkdirAll(filepath.Join(src, "profiles", "work"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	srcFile := filepath.Join(src, "profiles", "work", "config.json")
+	if err := os.WriteFile(srcFile, []byte(`{"auto_approve":"always","node_id":"SRC-NODE","vm_id":"SRC-VM"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A matching source base file / destination default entry, so
+	// only the colliding "work" profile decides the outcome.
+	if err := os.WriteFile(filepath.Join(src, "config.json"), []byte(`{"auto_approve":"off","node_id":"BASE-NODE","vm_id":"BASE-VM"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	destFile := filepath.Join(home, "castctl", "config.json")
+	if err := os.MkdirAll(filepath.Dir(destFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destFile, []byte(`{"profiles":{"default":{"node_id":"BASE-NODE","vm_id":"BASE-VM","auto_approve":"off","auto_allow_once":false},"work":{"node_id":"DEST-NODE","vm_id":"DEST-VM","auto_approve":"off","auto_allow_once":false}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srcBefore, _ := os.ReadFile(srcFile)
+	destBefore, _ := os.ReadFile(destFile)
+	env, out, errb := profileEnv(t, destFile)
+
+	for _, args := range [][]string{
+		{"config", "migrate", "--from", src},
+		{"config", "migrate", "--from", src, "--write"},
+	} {
+		out.Reset()
+		errb.Reset()
+		if code := runProfile(t, env, out, errb, destFile, args...); code != 2 {
+			t.Fatalf("migrate --from collision %v: code=%d, want 2; err=%q out=%q", args, code, errb.String(), out.String())
+		}
+		combined := errb.String() + out.String()
+		for _, want := range []string{`"work"`, srcFile, destFile} {
+			if !strings.Contains(combined, want) {
+				t.Errorf("migrate --from collision %v output %q; want it to name %q", args, combined, want)
+			}
+		}
+	}
+	srcAfter, _ := os.ReadFile(srcFile)
+	if string(srcAfter) != string(srcBefore) {
+		t.Error("collision migrate modified the source file")
+	}
+	destAfter, _ := os.ReadFile(destFile)
+	if string(destAfter) != string(destBefore) {
+		t.Error("collision migrate modified the destination file")
+	}
+}
+
+// TestConfigMigrateFromSymlinkAlias (R6): --from naming the
+// destination directory through a symlink behaves exactly as
+// without --from: a present single file is already-migrated.
+func TestConfigMigrateFromSymlinkAlias(t *testing.T) {
+	home := t.TempDir()
+	destDir := filepath.Join(home, "castctl")
+	if err := os.MkdirAll(destDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	destFile := filepath.Join(destDir, "config.json")
+	if err := os.WriteFile(destFile, []byte(`{"profiles":{"default":{"node_id":"N1","vm_id":"V1","auto_approve":"off","auto_allow_once":false}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(home, "link")
+	if err := os.Symlink(destDir, alias); err != nil {
+		t.Fatal(err)
+	}
+	env, out, errb := profileEnv(t, destFile)
+	if code := runProfile(t, env, out, errb, destFile, "config", "migrate", "--from", alias); code != 0 {
+		t.Fatalf("migrate --from <symlink alias>: code=%d, want 0; err=%q out=%q", code, errb.String(), out.String())
+	}
+	if !strings.Contains(out.String(), "already-migrated") {
+		t.Errorf("migrate --from <symlink alias>: %q; want already-migrated", out.String())
 	}
 }
 
