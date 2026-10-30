@@ -218,6 +218,9 @@ directory becomes `CONFIG_DIR` for the invocation and a one-line
 warning is printed telling the user to move it. Nothing is moved,
 copied, or deleted automatically. This applies only to the default
 location: an explicit `--config` or `CASTCTL_CONFIG` still wins.
+The legacy per-profile file layout inside the directory is a
+separate matter: it is refused, never read — run
+`castctl config migrate --write` first (see `docs/config.md`).
 
 Per-key relative paths inside a profile config: only `cookies_file`
 is resolved, relative to `CONFIG_DIR`; an absolute value is kept
@@ -232,8 +235,7 @@ which keeps `cookies_file` as-is (resolved against the working
 directory when opened); the Go resolution is deliberate.
 
 Single-file `auto_approve` rejects any value outside `always`/`off`
-— including `on` — with a config error, while the legacy layout
-coerces `on` to `off`.
+— including `on` — with a config error.
 
 Examples:
 

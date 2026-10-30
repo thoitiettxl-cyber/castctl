@@ -588,3 +588,284 @@ func quoteJSON(s string) string {
 	}
 	return string(b)
 }
+
+// TestMigrateAuthorsDNSWhenSingleDetourServesAllProfiles pins the
+// `config migrate` dns extension (INTERIM global section only): when
+// the candidate config has no dns section and every profile shares
+// one outbound tag, migrate authors the gated default DoH section
+// (https to 1.1.1.1, IP-literal, detour = the shared tag). The
+// extension fires only on a run that would otherwise be
+// already-migrated, so it never rewrites a differing single file
+// and never invents a section for a fresh legacy migration.
+func TestMigrateAuthorsDNSWhenSingleDetourServesAllProfiles(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	base := BaseDir(home)
+	cookies := func(name string) string {
+		if name == DefaultProfileName {
+			return filepath.Join(base, "cookies.txt")
+		}
+		return filepath.Join(base, "profiles", name, "cookies.txt")
+	}
+	entry := func(name string) string {
+		return `{"cookies_file":` + quoteJSON(cookies(name)) + `,"node_id":"N1","auto_approve":"off","auto_allow_once":false,"outbound":"proxy-sg"}`
+	}
+	path := filepath.Join(base, "config.json")
+	writeFile(t, path, `{"profiles":{"p1":`+entry("p1")+`,"p2":`+entry("p2")+`},"outbounds":[`+validOutbounds["socks"]+`]}`, 0o600)
+	before, _ := os.ReadFile(path)
+	st1, _ := os.Stat(path)
+
+	// Dry-run authors nothing but reports that it would.
+	dry, err := Migrate(base, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dry.WouldWrite || !dry.DNSAuthored || dry.DNSRefusal != "" {
+		t.Errorf("dry-run = %+v; want would_write + dns_authored, no refusal", dry)
+	}
+	if dry.Reason == "already-migrated" {
+		t.Error("dry-run Reason = already-migrated; want none (a dns section would be written)")
+	}
+	afterDry, _ := os.ReadFile(path)
+	if string(before) != string(afterDry) {
+		t.Error("dry-run modified the file")
+	}
+
+	// --write authors the section atomically, mode 0600.
+	written, err := Migrate(base, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !written.Migrated || written.Reason != "dns-authored" || !written.DNSAuthored {
+		t.Errorf("write = %+v; want migrated + dns-authored", written)
+	}
+	if mode := fileMode(t, path); mode != 0o600 {
+		t.Errorf("migrated config mode = %o; want 600", mode)
+	}
+	assertAuthoredDNS(t, base)
+
+	// A further run is already-migrated: the authored section is
+	// carried verbatim, never re-authored, and the file is untouched.
+	st2, _ := os.Stat(path)
+	again, err := Migrate(base, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Migrated || again.Reason != "already-migrated" || again.DNSAuthored {
+		t.Errorf("second run = %+v; want already-migrated, no re-authoring", again)
+	}
+	st3, _ := os.Stat(path)
+	if !st2.ModTime().Equal(st3.ModTime()) {
+		t.Error("second run rewrote the file; want no write")
+	}
+	_ = st1
+}
+
+// assertAuthoredDNS checks the authored section field by field
+// against independent literals: exactly the gated default shape,
+// nothing invented beyond it.
+func assertAuthoredDNS(t *testing.T, base string) {
+	t.Helper()
+	cfg, found, err := LoadSingleConfig(base)
+	if err != nil || !found {
+		t.Fatalf("LoadSingleConfig = found=%v err=%v; want the authored file to load", found, err)
+	}
+	dnsOpts, err := cfg.ParsedDNS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dnsOpts == nil || len(dnsOpts.Servers) != 1 {
+		t.Fatalf("authored dns servers = %+v; want exactly 1", dnsOpts)
+	}
+	srv := dnsOpts.Servers[0]
+	if srv.Tag != "castctl-doh" || srv.Type != "https" {
+		t.Errorf("authored server = tag %q type %q; want castctl-doh/https", srv.Tag, srv.Type)
+	}
+	// The raw JSON is the shape that lands on disk: verify the
+	// literal fields through a re-parse of the file bytes.
+	data, err := os.ReadFile(filepath.Join(base, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	dnsDoc, _ := doc["dns"].(map[string]any)
+	servers, _ := dnsDoc["servers"].([]any)
+	if len(servers) != 1 {
+		t.Fatalf("dns section in file = %v; want 1 server", dnsDoc)
+	}
+	server, _ := servers[0].(map[string]any)
+	if server["server"] != "1.1.1.1" || server["server_port"] != float64(443) ||
+		server["detour"] != "proxy-sg" || server["path"] != "/dns-query" {
+		t.Errorf("authored server JSON = %v; want https 1.1.1.1:443 detour proxy-sg path /dns-query", server)
+	}
+	if dnsDoc["final"] != "castctl-doh" {
+		t.Errorf("authored final = %v; want castctl-doh", dnsDoc["final"])
+	}
+}
+
+func TestMigrateDNSRefusalDirectOnly(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	base := BaseDir(home)
+	writeFile(t, filepath.Join(base, "config.json"), `{"auto_approve":"always","node_id":"MAIN-NODE"}`, 0o600)
+	writeFile(t, filepath.Join(base, "profiles", "work", "config.json"), `{"auto_approve":"off"}`, 0o600)
+
+	// A fresh legacy migration has no outbound tag to detour
+	// through: migrate succeeds and writes NO dns section, but
+	// records the refusal naming the first direct-only profile.
+	dry, err := Migrate(base, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dry.WouldWrite || dry.DNSAuthored || !strings.Contains(dry.DNSRefusal, `"default"`) {
+		t.Errorf("dry-run = %+v; want would_write, no authoring, refusal naming \"default\"", dry)
+	}
+	written, err := Migrate(base, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !written.Migrated || written.DNSAuthored || !strings.Contains(written.DNSRefusal, `"default"`) {
+		t.Errorf("write = %+v; want migrated, no authoring, refusal naming \"default\"", written)
+	}
+	doc := readJSONFile(t, filepath.Join(base, "config.json"))
+	if _, ok := doc["dns"]; ok {
+		t.Errorf("migrated config gained a dns section: %v", doc)
+	}
+	// The refusal persists on the already-migrated re-run: the
+	// config is still direct-only with no detour to author for.
+	again, err := Migrate(base, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Reason != "already-migrated" || !strings.Contains(again.DNSRefusal, `"default"`) {
+		t.Errorf("re-run = %+v; want already-migrated + refusal naming \"default\"", again)
+	}
+}
+
+func TestMigrateDNSRefusalMultiDetour(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	base := BaseDir(home)
+	otherSocks := `{"type":"socks","tag":"proxy-other","server":"127.0.0.1","server_port":1081,"version":"5"}`
+	entry := func(name, tag string) string {
+		cookies := filepath.Join(base, "profiles", name, "cookies.txt")
+		return `{"cookies_file":` + quoteJSON(cookies) + `,"node_id":"N1","auto_approve":"off","auto_allow_once":false,"outbound":"` + tag + `"}`
+	}
+	path := filepath.Join(base, "config.json")
+	writeFile(t, path, `{"profiles":{"p1":`+entry("p1", "proxy-sg")+`,"p2":`+entry("p2", "proxy-other")+`},"outbounds":[`+validOutbounds["socks"]+`,`+otherSocks+`]}`, 0o600)
+	before, _ := os.ReadFile(path)
+	st1, _ := os.Stat(path)
+
+	// Two different detours: no invented multi-detour section.
+	// The run stays already-migrated and the file is untouched.
+	for _, write := range []bool{false, true} {
+		result, err := Migrate(base, write)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Migrated || result.Reason != "already-migrated" || result.DNSAuthored {
+			t.Errorf("Migrate(write=%v) = %+v; want already-migrated, no authoring", write, result)
+		}
+		if !strings.Contains(result.DNSRefusal, `"p2"`) {
+			t.Errorf("Migrate(write=%v) DNSRefusal = %q; want it to name \"p2\"", write, result.DNSRefusal)
+		}
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Error("multi-detour migrate rewrote the file")
+	}
+	st2, _ := os.Stat(path)
+	if !st1.ModTime().Equal(st2.ModTime()) {
+		t.Error("multi-detour migrate rewrote the file; want no write (mtime changed)")
+	}
+}
+
+func TestMigrateCarriesExistingDNSVerbatim(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	base := BaseDir(home)
+	cookies := filepath.Join(base, "profiles", "p1", "cookies.txt")
+	entry := `{"cookies_file":` + quoteJSON(cookies) + `,"node_id":"N1","auto_approve":"off","auto_allow_once":false,"outbound":"proxy-sg"}`
+	dnsJSON := `{"servers":[{"type":"https","tag":"dns-remote","server":"1.1.1.1","server_port":443,"path":"/dns-query","detour":"proxy-sg"}],"final":"dns-remote"}`
+	path := filepath.Join(base, "config.json")
+	writeFile(t, path, `{"profiles":{"p1":`+entry+`},"outbounds":[`+validOutbounds["socks"]+`],"dns":`+dnsJSON+`}`, 0o600)
+	before, _ := os.ReadFile(path)
+
+	result, err := Migrate(base, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Migrated || result.Reason != "already-migrated" || result.DNSAuthored || result.DNSRefusal != "" {
+		t.Errorf("migrate over existing dns = %+v; want already-migrated, verbatim carryover", result)
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Errorf("migrate rewrote the file with an existing dns section:\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
+func TestMigrateAuthorsDNSInlineAndEndpointDetours(t *testing.T) {
+	t.Parallel()
+	t.Run("inline outbound detour", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		base := BaseDir(home)
+		cookies := filepath.Join(base, "profiles", "p1", "cookies.txt")
+		inline := `{"type":"socks","server":"127.0.0.1","server_port":1080,"version":"5"}`
+		entry := `{"cookies_file":` + quoteJSON(cookies) + `,"node_id":"N1","auto_approve":"off","auto_allow_once":false,"outbound":` + inline + `}`
+		writeFile(t, filepath.Join(base, "config.json"), `{"profiles":{"p1":`+entry+`}}`, 0o600)
+		result, err := Migrate(base, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Migrated || !result.DNSAuthored {
+			t.Fatalf("inline-detour migrate = %+v; want migrated + dns authored", result)
+		}
+		cfg, _, err := LoadSingleConfig(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dnsOpts, err := cfg.ParsedDNS()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(dnsOpts.Servers) != 1 {
+			t.Fatalf("authored servers = %+v; want 1", dnsOpts.Servers)
+		}
+		if got := detourOf(dnsOpts.Servers[0].Options); got != "profile:p1" {
+			t.Errorf("authored detour = %q; want profile:p1 (the inline auto-tag)", got)
+		}
+	})
+	t.Run("endpoint detour", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		base := BaseDir(home)
+		cookies := filepath.Join(base, "profiles", "p1", "cookies.txt")
+		entry := `{"cookies_file":` + quoteJSON(cookies) + `,"node_id":"N1","auto_approve":"off","auto_allow_once":false,"outbound":"wg-home"}`
+		writeFile(t, filepath.Join(base, "config.json"), `{"profiles":{"p1":`+entry+`},"endpoints":[`+validOutbounds["wireguard-ep"]+`]}`, 0o600)
+		result, err := Migrate(base, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Migrated || !result.DNSAuthored {
+			t.Fatalf("endpoint-detour migrate = %+v; want migrated + dns authored", result)
+		}
+		cfg, _, err := LoadSingleConfig(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dnsOpts, err := cfg.ParsedDNS()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(dnsOpts.Servers) != 1 {
+			t.Fatalf("authored servers = %+v; want 1", dnsOpts.Servers)
+		}
+		if got := detourOf(dnsOpts.Servers[0].Options); got != "wg-home" {
+			t.Errorf("authored detour = %q; want wg-home (the endpoint tag)", got)
+		}
+	})
+}

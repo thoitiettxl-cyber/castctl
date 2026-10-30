@@ -62,7 +62,7 @@ baseline (manylinux2014), and plugin support. There are no
 work is a separate PR planned after the migration, reusing
 CLIProxyAPI's release.yaml.
 
-Config location: `--config`, then `CASTCTL_CONFIG`, then `XDG_CONFIG_HOME`, via `os.UserConfigDir` semantics. Legacy fallback: when the `castctl` home does not exist but the pre-migration `muse-cli` home does, the old home is used with a one-line warning; nothing is moved or deleted (see README.md).
+Config location: `--config`, then `CASTCTL_CONFIG`, then `XDG_CONFIG_HOME`, via `os.UserConfigDir` semantics. Directory fallback: when the `castctl` home does not exist but the pre-migration `muse-cli` home does, the old home is used with a one-line warning; nothing is moved or deleted (see README.md).
 
 Screencast login: the browser dependency is optional and detected at
 runtime (system Chromium or a configured path); with no browser, fall back
