@@ -558,3 +558,28 @@ func cfgWithNoWG(t *testing.T, cfg *SingleConfig) *SingleConfig {
 	out.WireGuardDNS = nil
 	return &out
 }
+
+// TestCompatWarningTextVerbatim (N-b, loop 3): the compat
+// warning text (dns.go:201) is pinned VERBATIM, not just by
+// presence/trigger — a wording drift that re-prescribes a
+// refusing action or drops the distributing tool must fail
+// here. The text itself is unchanged by loop 3.
+func TestCompatWarningTextVerbatim(t *testing.T) {
+	t.Parallel()
+	cfg, err := ParseSingleConfig([]byte(singleFileJSON(
+		`{"muse01":{"outbound":"proxy-sg"}}`,
+		`[`+fakeSocksOutbound+`]`, "",
+		`{"servers":[{"tag":"gdns","type":"tcp","server":"127.0.0.1","server_port":5354,"detour":"proxy-sg"}],"final":"gdns"}`,
+	)), "/base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := ResolveProfileDNS(cfg.Profiles["muse01"], cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `castctl: top-level dns section is deprecated and will become an error in a later release: run "config migrate --write" to distribute it into profile entries (see docs/config.md)`
+	if res.Warning != want {
+		t.Errorf("compat warning = %q; want verbatim %q", res.Warning, want)
+	}
+}

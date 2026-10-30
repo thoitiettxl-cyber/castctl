@@ -905,3 +905,176 @@ func TestDistributeSkipsNilProfileEntryInGuards(t *testing.T) {
 		t.Error("refused distribution removed the top-level dns section")
 	}
 }
+
+// TestMigrateRefusesProfilesAbsentSingleFormatBaseFile (R1,
+// loop 3, RED first): the red-team fixture — a base file with
+// outbounds + a dns section and NO profiles key — must refuse
+// in both modes, exit 2, byte-identical. Before the guard the
+// fresh-migration path overwrote it with a synthetic direct
+// profile, deleting the dns section and the outbounds.
+func TestMigrateRefusesProfilesAbsentSingleFormatBaseFile(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	base := BaseDir(home)
+	doc := `{"outbounds":[` + fakeSocksOutbound + `],"dns":{"servers":[{"tag":"rt2dns","type":"tcp","server":"127.0.0.99","server_port":5599}],"final":"rt2dns"}}`
+	path := filepath.Join(base, "config.json")
+	writeFile(t, path, doc, 0o600)
+	before, _ := os.ReadFile(path)
+	for _, write := range []bool{false, true} {
+		result, err := Migrate(base, write)
+		if err == nil {
+			t.Fatalf("Migrate(write=%v) over a profiles-absent single-format file must refuse, got result %+v", write, result)
+		}
+		if ExitCode(err) != 2 {
+			t.Errorf("Migrate(write=%v) exit code = %d; want 2", write, ExitCode(err))
+		}
+		if result == nil || result.Migrated || result.WouldWrite {
+			t.Errorf("Migrate(write=%v) result = %+v; want no write reported", write, result)
+		}
+		if !strings.Contains(err.Error(), `"profiles"`) || !strings.Contains(err.Error(), `"dns"`) || !strings.Contains(err.Error(), `"outbounds"`) {
+			t.Errorf("refusal = %q; want it to name the missing profiles key and the dns/outbounds sections at risk", err.Error())
+		}
+		after, _ := os.ReadFile(path)
+		if string(before) != string(after) {
+			t.Errorf("Migrate(write=%v) rewrote the file on refusal", write)
+		}
+	}
+}
+
+// TestMigrateProfilesAbsentSingleFormatShapes (R1, loop 3,
+// RED first): the guard discriminates by SHAPE — each
+// well-shaped single-format section in a profiles-absent file
+// refuses a dry-run and leaves the file unchanged — while
+// genuinely legacy files and non-shaped junk keep migrating.
+// The dns:{} case refuses: an object is the section shape, and
+// an empty section is a section (loop-2 empty guard); an empty
+// outbounds array carries nothing and does not refuse.
+func TestMigrateProfilesAbsentSingleFormatShapes(t *testing.T) {
+	t.Parallel()
+	refusing := []struct{ name, doc string }{
+		{"endpoints", `{"endpoints":[{"type":"wireguard","tag":"wg1"}]}`},
+		{"wireguard_dns", `{"wireguard_dns":{"wg1":["10.2.0.1"]}}`},
+		{"log", `{"log":{"level":"warning"}}`},
+		{"default_profile", `{"default_profile":"work"}`},
+		{"empty dns object", `{"dns":{}}`},
+		{"dns with servers", `{"dns":{"servers":[{"tag":"d1","type":"tcp","server":"127.0.0.1","server_port":5353}],"final":"d1"}}`},
+	}
+	for _, tc := range refusing {
+		t.Run(tc.name+"/refuses", func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			base := BaseDir(home)
+			path := filepath.Join(base, "config.json")
+			writeFile(t, path, tc.doc, 0o600)
+			before, _ := os.ReadFile(path)
+			_, err := Migrate(base, false)
+			if err == nil {
+				t.Fatalf("Migrate dry-run over %s must refuse, got nil error", tc.name)
+			}
+			if ExitCode(err) != 2 {
+				t.Errorf("exit code = %d; want 2", ExitCode(err))
+			}
+			after, _ := os.ReadFile(path)
+			if string(before) != string(after) {
+				t.Error("refused dry-run rewrote the file")
+			}
+		})
+	}
+	// An outbound object without a "type" is NOT a shaped
+	// outbound (see the migrating control below): shape, not
+	// key presence alone, triggers the guard.
+	migrating := []struct{ name, doc string }{
+		{"legacy only", `{"auto_approve":"always","node_id":"N1"}`},
+		{"empty outbounds array", `{"outbounds":[]}`},
+		{"non-shaped keys", `{"dns":"junk","outbounds":"junk"}`},
+		{"outbound object without type", `{"outbounds":[{"tag":"px"}]}`},
+		{"empty file object", `{}`},
+	}
+	for _, tc := range migrating {
+		t.Run(tc.name+"/migrates", func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			base := BaseDir(home)
+			path := filepath.Join(base, "config.json")
+			writeFile(t, path, tc.doc, 0o600)
+			result, err := Migrate(base, true)
+			if err != nil {
+				t.Fatalf("Migrate --write over %s must succeed (legacy path), got %v", tc.name, err)
+			}
+			if !result.Migrated {
+				t.Errorf("Migrate --write over %s = %+v; want migrated", tc.name, result)
+			}
+			doc := readJSONFile(t, path)
+			if _, ok := doc["profiles"]; !ok {
+				t.Errorf("migrated file has no profiles key: %v", doc)
+			}
+		})
+	}
+}
+
+// TestMigrateFromRefusesProfilesAbsentSingleFormatDestination
+// (R1, loop 3, RED first): the guard protects the DESTINATION
+// file under --from too — a single-format destination is
+// refused, unchanged, and the source directory is untouched.
+func TestMigrateFromRefusesProfilesAbsentSingleFormatDestination(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	src := filepath.Join(home, "muse-cli")
+	writeFile(t, filepath.Join(src, "config.json"), `{"auto_approve":"always","node_id":"MAIN-NODE"}`, 0o600)
+	srcBefore, _ := os.ReadFile(filepath.Join(src, "config.json"))
+	dest := filepath.Join(home, "castctl")
+	destDoc := `{"outbounds":[` + fakeSocksOutbound + `],"dns":{"servers":[{"tag":"rt2dns","type":"tcp","server":"127.0.0.99","server_port":5599}],"final":"rt2dns"}}`
+	destPath := filepath.Join(dest, "config.json")
+	writeFile(t, destPath, destDoc, 0o600)
+	destBefore, _ := os.ReadFile(destPath)
+	result, err := MigrateFrom(src, dest, true)
+	if err == nil {
+		t.Fatalf("MigrateFrom over a profiles-absent single-format destination must refuse, got result %+v", result)
+	}
+	if ExitCode(err) != 2 {
+		t.Errorf("exit code = %d; want 2", ExitCode(err))
+	}
+	if after, _ := os.ReadFile(destPath); string(destBefore) != string(after) {
+		t.Error("refused --from migrate rewrote the destination file")
+	}
+	if after, _ := os.ReadFile(filepath.Join(src, "config.json")); string(srcBefore) != string(after) {
+		t.Error("refused --from migrate modified the source file")
+	}
+}
+
+// TestDistributeParseErrorRefusalHasSingleProfilePrefix (N-a,
+// loop 3, RED first): the PARSE-error strip site
+// (dns_distribute.go:182) must render one "profile: " prefix
+// like the validation site (:253, pinned in loop 2). The
+// candidate is hand-built: a valid parsed section whose
+// preserved raw bytes carry an unparseable server type, so
+// only the re-parse fails.
+func TestDistributeParseErrorRefusalHasSingleProfilePrefix(t *testing.T) {
+	t.Parallel()
+	cfg, err := ParseSingleConfig([]byte(singleFileJSON(
+		`{"p1":{"outbound":"proxy-sg"}}`,
+		`[`+fakeSocksOutbound+`]`, "",
+		`{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353}],"final":"dns1"}`,
+	)), "/base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	savedDNS := cfg.DNS
+	cfg.rawDNS = []byte(`{"servers":[{"tag":"dns1","type":"bogus-type","server":"127.0.0.1","server_port":5353}],"final":"dns1"}`)
+	distributed, refusal, derr := distributeTopLevelDNS(cfg, "/base")
+	if derr == nil {
+		t.Fatalf("distributeTopLevelDNS with an unparseable raw section must refuse, got distributed=%v refusal=%q", distributed, refusal)
+	}
+	if distributed {
+		t.Error("distributed = true on refusal; want false")
+	}
+	if !strings.Contains(refusal, "does not parse") || !strings.Contains(refusal, "parse dns") {
+		t.Errorf("refusal = %q; want it to report the parse failure", refusal)
+	}
+	if strings.Contains(refusal, "does not parse: profile:") {
+		t.Errorf("refusal = %q; want the embedded parse error's profile: prefix stripped once", refusal)
+	}
+	if cfg.DNS != savedDNS {
+		t.Error("refused distribution removed the top-level dns section from the candidate")
+	}
+}
