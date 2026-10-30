@@ -30,7 +30,7 @@ import (
 type scriptedHandler struct {
 	mu sync.Mutex
 
-	history   []string // chat.history bodies, in call order; the last repeats.
+	history []string // chat.history bodies, in call order; the last repeats.
 	// Send tests script two identical pre-send bodies: deliverSend
 	// reads the baseline twice (limit=1, then a limit=20 confirming
 	// read) before sending, so the post-send body must be third.
