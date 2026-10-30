@@ -1,0 +1,123 @@
+NOTICE — castctl
+
+This file records the upstream works that castctl is built from, links
+against, or studied. It lists attribution and license names only. How
+each item maps to the castctl tree, with file and line references on
+both sides, is recorded in docs/provenance.md, which is the detailed
+record; this file is the summary. When porting new behavior from an
+upstream, update docs/provenance.md and this file in the same PR
+(see AGENTS.md, rule 6).
+
+Scope boundary: section (b) lists load-bearing linked dependencies
+only. It is not a complete inventory of every transitive module in
+go.mod/go.sum or every package in webui/bun.lock. A complete,
+tool-generated license inventory is the release PR's scope. The
+licenses of the npm packages bundled into webui/dist/index.html were
+not checked for this file; that gap is recorded in
+docs/provenance.md.
+
+(a) Copied or adapted code and assets in this tree
+
+1. Cli-Proxy-API-Management-Center web UI fork — webui/
+
+   Upstream: github.com/router-for-me/Cli-Proxy-API-Management-Center,
+   commit 64b4f5aed19b8f791eb21eb9e785ea379ea05b44 (2026-10-26).
+   License: MIT, Copyright (c) 2026 Router-For.ME.
+
+   Measured at castctl main 1a738947ed6df8e8ae3ed7aa6704ef5ae2d2beaa
+   against the upstream commit: 659 upstream files, 131 files under
+   webui/, 95 same-path files of which 58 are byte-identical and 37
+   differ (adapted), 36 fork-added files, 564 upstream-only files
+   (removed in the fork). The committed bundle webui/dist/index.html
+   contains upstream-derived code and is covered by this entry.
+   Attribution is also recorded in webui/NOTICE, and the upstream
+   license text is preserved verbatim in webui/LICENSE.upstream
+   (byte-identical to the upstream LICENSE).
+
+2. Noise descriptors and routes — internal/proto/desc0.bin,
+   internal/proto/desc1.bin, internal/proto/routes.json
+
+   Upstream: github.com/thoitiettxl-cyber/muse-cli, main at
+   b4dd8f5896f0217a5bf9abab1a942782969164cd (version 0.6.1).
+   License: MIT, Copyright (c) 2026 Nik Ships.
+
+   The three files are byte-identical to the upstream copies:
+   desc0.bin sha256
+   5479a20cd5a9bf817c2a7ba4eec56b354d8576f565d9096fd2a3a8223e820d00,
+   desc1.bin sha256
+   5ea3f209386a4d47d28ee06473a2defad35536725bf2d3d847d31b04ec1a8868,
+   routes.json sha256
+   f13e7ec63548edd9319b655be1ffc88e3580f19b4f4f016aaec63d553ed5f033.
+   The .proto files recreated from these descriptors live in
+   internal/proto/generate/.
+
+   Nothing else in this tree is copied upstream code. In particular,
+   no sing-box, CLIProxyAPI, go-telegram/bot, utls, or Noise-spec
+   source is copied into the tree.
+
+(b) Linked dependencies (load-bearing only)
+
+- github.com/sagernet/sing-box v1.14.4 — GPL-3.0-or-later, plus the
+  extra sentence in its LICENSE: "In addition, no derivative work
+  may use the name or imply association with this application
+  without prior consent." (LICENSE sha256
+  650d5e3b99a446fb38e820fa87a49562e0c79eab868fff58618ac487a58e554c.)
+  Used as a library and as the config schema; no sing-box source is
+  copied. Castctl itself is licensed GPL-3.0-or-later (see LICENSE).
+- github.com/sagernet/sing
+  v0.9.7-0.20261023115459-5dc452e537bf — GPL-3.0-or-later.
+- github.com/sagernet/sing-tun
+  v0.9.7-0.20261023115432-040db71fcd33 — GPL-3.0-or-later.
+- github.com/sagernet/cronet-go
+  v0.0.0-20260912104727-0d28acc44093 — GPL-3.0-or-later. Present in
+  the module graph only (indirect, via sing-box); no castctl code
+  uses it. The pseudo-version resolves to commit
+  0d28acc44093df24b2526dea3d6ffefd6b0a54f0 ("Generate all package",
+  2026-09-12), which sits on the upstream `go` branch, not on main.
+- github.com/metacubex/utls v1.8.7 — BSD-3-Clause-style template
+  text (the LICENSE file carries the three-clause redistribution
+  text but no license identifier). Reached only through sing-box;
+  no castctl code imports it directly.
+- github.com/flynn/noise v1.1.0 — BSD-3-Clause-style template text
+  (same caveat as utls: full LICENSE text read, no identifier in
+  the file).
+- github.com/gorilla/websocket v1.5.3 — BSD-3-Clause-style
+  template text (same caveat).
+- github.com/miekg/dns v1.1.72 — BSD 3-Clause License (named in
+  the LICENSE file).
+- google.golang.org/protobuf v1.36.11 — BSD-3-Clause-style
+  template text (same caveat).
+- go.uber.org/goleak v1.3.0 — MIT. Test-only: imported only from
+  *_test.go files.
+- github.com/bufbuild/protocompile v0.14.1 — Apache License 2.0.
+  Build-time only, in the nested internal/proto/generate module;
+  not linked into the castctl binary.
+
+(c) Studied only — no code taken
+
+Each item below was studied, and no code was taken from it. Do not
+mistake these influences for vendored code.
+
+1. CLIProxyAPI (github.com/router-for-me/CLIProxyAPI,
+   commit 90c447d3a8727d115aa7552ec93ce023736ed492) — plugin
+   loader/ABI pattern and plugin config toggles:
+   studied, no code taken. License name: MIT.
+2. go-telegram/bot (github.com/go-telegram/bot,
+   commit f53bfe55a30bb6d0c54327a4233e60d5bccb5604) — evaluated as a
+   candidate Telegram library for a future PR:
+   studied, no code taken; not imported. License name: MIT.
+3. cronet-go opt-in design — the evaluated TLS-engine option of a
+   future `with_cronet` build flavour plus a hash-verified sidecar;
+   studied, no code taken. (The cronet-go library itself is listed
+   in (b) as graph-only.)
+4. muse-cli 0.6.1 behavioral reference
+   (github.com/thoitiettxl-cyber/muse-cli) — differential reference
+   for gateway framing, the exit-code/JSON contract, Telegram caps,
+   and node-ID rules; behavior reimplemented:
+   studied, no code taken.
+   (The byte-identical descriptor assets are listed in (a).)
+   License name: MIT.
+5. Noise protocol, XX pattern — the public Noise specification's
+   handshake pattern, as implemented through the flynn/noise library
+   listed in (b); studied, no code taken; no specification text
+   copied. License name: not applicable (specification, not code).

@@ -1,0 +1,631 @@
+# Provenance
+
+This file records where castctl's behavior, code, and assets come
+from: which upstream works were copied, linked, or studied, and
+exactly where each mapping lives in this tree and in the upstream.
+Every factual sentence here is traceable to a file and line inspected
+at a verified commit. The short summary for attribution and license
+names is the root `NOTICE`; this file is the detailed record.
+
+Base commit for all castctl `file:line` citations in this file:
+`1a738947ed6df8e8ae3ed7aa6704ef5ae2d2beaa` (main), re-verified via
+`git ls-remote` immediately before this file was written. If a
+citation no longer matches the tree, the tree wins and this file
+must be updated in the same PR as the change that moved it (see
+§10).
+
+## Status tags
+
+- `VERIFIED` — both sides inspected, with `file:line` on each side.
+- `[DOCS-ONLY]` — only a docs or comment sentence supports the claim;
+  no code behind it was inspected.
+- `[DESIGN-ONLY]` — a design doc or plan only; no code in the tree.
+- `[UNVERIFIED]` — not inspected; the sentence says so.
+- `[NOT FOUND]` — searched, absent.
+
+## Scope boundary
+
+This file covers load-bearing upstreams only: code or assets in the
+tree, libraries the binary links (directly or through sing-box), and
+designs the architecture docs explicitly follow. It is not a complete
+inventory of every transitive module in `go.mod`/`go.sum` or every
+package in `webui/bun.lock`. A complete, tool-generated license
+inventory is the release PR's scope; until it exists, no sentence
+here claims completeness. The npm dependency licenses bundled into
+`webui/dist/index.html` were not checked (see §4, carried gap).
+
+License-name caveat: four LICENSE files in the Go module cache
+(flynn/noise, gorilla/websocket, protobuf, utls) contain the
+three-clause redistribution-conditions-plus-disclaimer text but no
+license identifier string anywhere in the file. The full text of
+each was read. This file therefore calls them "BSD-3-Clause-style
+template text" rather than asserting the SPDX identifier
+`BSD-3-Clause` unqualified. The miekg/dns LICENSE names
+"BSD 3-Clause License" on line 1, and the goleak LICENSE names
+"The MIT License (MIT)" on line 1; those two are stated without the
+caveat.
+
+## 1. sing-box v1.14.4 — VERIFIED (linked library + config schema, no copied code)
+
+Upstream: `github.com/sagernet/sing-box`, tag `v1.14.4`, commit
+`c005f35300ce76427dc285481ec5695f5b179cd2` (verified with
+`git describe --tags` in a research clone at that commit).
+License: GPL-3.0-or-later plus an extra sentence. The 17-line
+`LICENSE` in the module cache
+(`github.com/sagernet/sing-box@v1.14.4/LICENSE`, sha256
+`650d5e3b99a446fb38e820fa87a49562e0c79eab868fff58618ac487a58e554c`)
+reads "Copyright (C) 2022 by nekohasekai", states the GPL-3.0 terms,
+and adds: "In addition, no derivative work may use the name or imply
+association with this application without prior consent." The extra
+sentence exists only in sing-box's LICENSE: the `sagernet/sing`,
+`sing-tun`, and `cronet-go` LICENSE files carry the same GPL-3.0
+opening with zero occurrences of "In addition" (verified by grep).
+The sing-box LICENSE text is not copied into the castctl tree.
+
+Pinned version: `go.mod:1` declares module
+`github.com/thoitiettxl-cyber/castctl`, `go 1.27.3`, with a direct
+require of `github.com/sagernet/sing-box v1.14.4`.
+
+What was taken: sing-box as a library, not copied source. 39 files
+in the tree import `sagernet/sing-box` (counted with
+`git grep -l`). Packages used include `adapter`, `adapter/endpoint`,
+`adapter/outbound`, `dns`, `include`, `log`, `option`, and
+`common/tls`. The `option.Outbound` / `option.Endpoint` /
+`option.DNSOptions` types are the config schema: upstream
+`option/outbound.go:22-28` defines `_Outbound` and `Outbound`;
+castctl `internal/profile/config.go:25` declares
+`Outbounds []option.Outbound`, `config.go:46-48` re-parses them in
+`ParsedOutbounds`, and `internal/profile/outbound.go:10` imports
+`sing-box/option`. Upstream `option/tls.go:107,134` defines
+`OutboundTLSOptions` with a `UTLS` field; upstream
+`option/dns.go:26` defines `DNSOptions`; upstream
+`include/registry.go:48` defines `Context` and `:80` defines
+`OutboundRegistry`.
+
+Castctl mappings (all `VERIFIED`):
+
+- `internal/outbound/context.go:54-79` — `registryOnce` guards the
+  single process-global `include.Context()` call site
+  (`RegistryContext`, `sync.Once`-guarded; the `!with_quic`
+  global-mutation hazard is documented at `context.go:55-62`).
+- `internal/outbound/manager.go:16-21` — imports `adapter/endpoint`,
+  `adapter/outbound`, `dns`, `log`, `option`, and `sing/service`,
+  building registry-only managers; no `box.Box` is involved.
+- `internal/outbound/router_stub.go:18-32` — `stubRouter`
+  implementing `adapter.Router` (upstream `adapter/router.go:18`
+  defines the `Router` interface) for outbound-only operation.
+- `internal/outbound/tls.go:30-41` — `GatewayTLSOptions` built from
+  `option.OutboundTLSOptions`; the default uTLS fingerprint is
+  `"chrome"`, and ALPN is deliberately not pinned.
+- `internal/dns/client.go:5-6` — package doc: builds a profile DNS
+  client on sing-box `dns.Router` + `dns.TransportManager` from
+  `option.DNSOptions`.
+- `internal/profile/fingerprint.go:40,45` —
+  `DefaultFingerprint = "chrome"`, `DefaultTLSEngine = "utls"`;
+  valid fingerprints are chrome/firefox/ios/safari and valid engines
+  are cronet/stdlib/utls.
+- `internal/outbound/wireguard_conf.go:17-18` and
+  `internal/outbound/router_stub.go:13-15` import `sing-box/option`
+  and `sing/common/*` respectively for WireGuard endpoint
+  construction. `[PARTLY VERIFIED — import level only; file contents
+  not read in detail.]`
+
+Deviations from upstream, each with castctl evidence:
+
+1. No `box.Box`. Upstream sing-box normally runs as a full box
+   (inbounds + routing + DNS). Castctl builds registry-only managers
+   plus a stub Router and never constructs a box
+   (`manager.go:16-21`, `router_stub.go:18-32`, `context.go:79`).
+2. Per-profile isolation (hard invariant). One outbound stack per
+   profile; registries, managers, routers, DNS clients, and dialers
+   are built per profile and shared data is immutable-only
+   (`docs/architecture.md:73-100`). Caveat: `architecture.md:83`
+   still phrases this as "one sing-box box instance per profile, or
+   unique tags per profile" while the code uses registry-only
+   managers; do not quote that sentence as describing the code
+   without this caveat.
+3. Fail-closed, no implicit direct fallback, no env-proxy shim
+   (`context.go:6-7` package doc: no `http.DefaultClient`, no
+   `net.Dial`, no system-resolver lookup except the single
+   `BootstrapLookup` site).
+4. uTLS fingerprint pinned to `chrome`; `random`/`randomized`
+   rejected. Upstream `common/tls/utls_client.go:371-396`
+   (`uTLSClientHelloID`) accepts `""` (Chrome_Auto), `chrome`,
+   `firefox`, `edge`, `safari`, `360`, `qq`, `ios`, `android`,
+   `random`, and `randomized`. Castctl accepts only
+   chrome/firefox/ios/safari and rejects `random`/`randomized`
+   (`fingerprint.go:40,45`, `tls.go:36-38`).
+5. ALPN not pinned in `GatewayTLSOptions` (deliberate; `tls.go`
+   comment). `[VERIFIED — comment evidence only.]`
+
+Not taken: no sing-box source file is copied into the tree (no
+vendored `sing-box` directory; grep shows imports only). Inbounds,
+routing rules, and the box lifecycle are unused by design.
+
+## 2. CLIProxyAPI @90c447d — DESIGN-ONLY (studied, no code taken)
+
+Upstream: `github.com/router-for-me/CLIProxyAPI`, commit
+`90c447d3a8727d115aa7552ec93ce023736ed492` (research-clone HEAD,
+verified against `git ls-remote`). License name: MIT (LICENSE at
+that commit reads "MIT License / Copyright (c) 2025-2005.9 Luis
+Pater / Copyright (c) 2025.9-present Router-For.ME" — the
+"2025-2005.9" line is verbatim upstream text, not a typo to fix).
+
+What was taken: nothing in code. Verified by grep: zero
+`go-plugin` / `hashicorp` plugin-loader imports in any castctl
+`.go` file (only `hashicorp/yamux` appears, as an indirect entry in
+`go.sum`, pulled by another dependency — not a plugin loader);
+zero `pluginhost`, zero `sdk/pluginabi` in the tree. The only
+castctl-side artefacts are docs and comments. This item is
+DESIGN-ONLY: studied, no code taken.
+
+Castctl mapping (docs/comments only — `[DESIGN-ONLY]`):
+
+- `docs/architecture.md:21-47` — "Core + plugins" section: castctl
+  follows CLIProxyAPI's plugin model; toggles `plugins.enabled` +
+  `plugins.configs.<id>.enabled` (`architecture.md:30-33`) are
+  "changed through the Management API and the web UI"; "Plugins are
+  trusted and in-process, with no sandbox, exactly like
+  CLIProxyAPI, and only first-party CLIs (BQ1, closed). BQ2–B5 are
+  parked… The plugin design draft is rationale only."
+  (`architecture.md:41-47`).
+- Idea comments only: `internal/gateway/doc.go:107`,
+  `internal/gateway/lost.go:19`, `internal/gateway/phase.go:15`,
+  `internal/outbound/failclosed_test.go:27`,
+  `internal/profile/config.go:386`, `internal/profile/config_test.go:292`,
+  `internal/profile/envproxy.go:28,43`,
+  `internal/profile/guard.go:15`, `internal/profile/identity.go:14`.
+
+Upstream files studied (inspected at `90c447d`):
+`internal/pluginhost/abi.go` (`pluginHostABIVersion`,
+`pluginClient` interface with `Call(ctx, method, request []byte)`,
+`pluginLoader` interface with `Open(file, host)`),
+`internal/pluginhost/loader_unix.go`, `loader_windows.go`,
+`loader_unsupported.go`, and
+`internal/config/config_types.go:28-52` (`PluginsConfig` struct:
+`Enabled`, `Dir`, `StoreSources`, `StoreAuth`, `AuthRevision`,
+`Configs map[string]PluginInstanceConfig`; `PluginInstanceConfig`:
+`Enabled *bool`, `Priority`, `Raw yaml.Node`).
+
+Config-schema caveat (must be worded exactly this way): castctl's
+docs claim the *same* toggles (`plugins.enabled`,
+`plugins.configs.<id>.enabled`). That claim is true only for the two
+toggle names. Upstream's `PluginsConfig` additionally has `dir`,
+`store-sources`, `store-auth`, `auth-revision`, and per-instance
+`priority` plus raw-YAML preservation — castctl has no config
+struct for these (no `plugins` key exists in
+`internal/profile/config.go`). Status: `[DOCS-ONLY]` for the
+toggles; `[NOT FOUND]` for any wider schema adoption. The full
+schema is a parked BQ2–B5 matter.
+
+Deviations (design-level, all `[DESIGN-ONLY]`): (a) per-profile
+proxy + cookies handoff to plugins, never raw WireGuard keys
+(`architecture.md:21-47`); (b) plugins must use core's per-profile
+dialer, never dial directly (`architecture.md:21-47`); (c) trusted
+in-process, no sandbox (BQ1 closed) — the same as CLIProxyAPI, so
+not a deviation from upstream, but a deliberate departure from the
+generic plugin-sandbox expectation; record it as "same as upstream,
+deliberate". Red-team findings B1–B10 and BQ2–B5 are parked
+(`architecture.md:43-44`); B3 stays parked. None of them is
+described here as resolved.
+
+Release-matrix mapping: `[DESIGN-ONLY]` — no `.github/` exists in
+the castctl tree. Upstream's release workflow was surveyed in a
+separate probe; the release design is the release PR's scope, not
+this file's.
+
+## 3. Cli-Proxy-API-Management-Center (web UI fork) @64b4f5a — VERIFIED (copied + adapted code/assets in the tree)
+
+Upstream: `github.com/router-for-me/Cli-Proxy-API-Management-Center`,
+commit `64b4f5aed19b8f791eb21eb9e785ea379ea05b44` (research-clone
+HEAD, verified against the remote; log message "docs(readme):
+remove APIMart sponsor sections and assets", dated 2026-10-26,
+verified from the clone log). License: MIT — upstream `LICENSE`
+("MIT License / Copyright (c) 2026 Router-For.ME") is byte-identical
+to `webui/LICENSE.upstream` (`cmp` exit 0). `webui/NOTICE` (50
+lines) states the fork at `64b4f5a…`, the MIT license, and
+kept/replaced/removed lists, consistent with the diff measured
+below. Do not edit `webui/NOTICE` or `webui/LICENSE.upstream` in
+the course of provenance work; they are part of the fork's
+attribution.
+
+Measurement (regenerated for this file with `git ls-files` on both
+sides plus `cmp` per same-path file; method: list upstream files,
+list `webui/` files with the prefix stripped, intersect, compare
+each same-path pair byte-for-byte):
+
+- Upstream research clone: 659 files. Castctl `webui/`: 131 files.
+- Same-path files: 95, of which byte-identical: 58, adapted (same
+  path, differs): 37.
+- Fork-added (castctl-only): 36. Upstream-only (removed): 564.
+- 95 + 36 = 131; 95 + 564 = 659; 58 + 37 = 95.
+
+An earlier probe reported 89 / 56 / 33 / 35 / 570 for the same
+quantities; the recount above is the one that reconciles with both
+file lists, and it supersedes the earlier numbers for this file.
+The locale counts below were recomputed with the same method and
+agree with the earlier probe.
+
+Byte-identical (58, including): `.prettierrc`,
+`eslint.config.js`, most `components/ui/*`, hooks, styles,
+`tsconfig*.json`, utils.
+
+Adapted (37, key ones with what changed; castctl side at the paths
+shown, upstream side at the same path at `64b4f5a`):
+
+- `src/App.tsx` (upstream 59 lines → castctl 67 lines),
+  `src/components/layout/MainLayout.tsx` (1216 → 536 lines —
+  upstream provider/sidebar complexity removed).
+- `src/components/ui/Button.tsx` — adds the `plain` variant
+  (castctl `Button.tsx:7`: `ButtonVariant` includes `'plain'`) plus
+  ref forwarding; upstream `Button.tsx:7,15,26` has no `plain`
+  variant and no ref forwarding.
+- `src/components/ui/{Modal,Select,Sheet,Table}.tsx` — tweaks
+  (Select trigger, Modal scrim, Sheet).
+- `src/pages/LogsPage.tsx`, `LoginPage.tsx`, `SystemPage.tsx` —
+  trimmed to castctl's scope.
+- `src/services/api/client.ts` (272 → 124 lines) — fetch wrapper
+  vs upstream axios (upstream `client.ts:6,26` imports and creates
+  an axios instance; castctl `client.ts:69` calls `fetch`), `/api/v1`
+  prefix, sessionStorage token; zero axios in the castctl file.
+- `src/stores/useAuthStore.ts` (253 → 58 lines).
+- `vite.config.ts` — adds a mock-API plugin + `__CASTCTL_*`
+  defines; the single-file plugin (`vite-plugin-singlefile`) is
+  kept.
+- `index.html` — lang zh-CN → en, title → `castctl`, new favicon.
+- `package.json` — name `castctl-webui`, version 0.1.0; deps drop
+  axios, yaml, @codemirror/lang-yaml, merge, @noble/hashes and add
+  @codemirror/lang-json, @codemirror/search, @codemirror/state,
+  @codemirror/view, jsdom, vitest; shared: react, zustand, i18next,
+  motion, react-router-dom, @uiw/react-codemirror,
+  vite-plugin-singlefile.
+- `src/i18n/index.ts`, constants, language, styles, types,
+  `.gitignore`, `bun.lock` (604 → 794 lines).
+
+Locales (rewritten, not verbatim): castctl `en`/`vi` JSON files
+have 21 top-level keys each; upstream `en.json` has 43. Top-level
+key overlap: 14 shared (`common`, `connection`, `dashboard`,
+`header`, `language`, `login`, `logs`, `nav`, `nav_groups`,
+`nav_meta`, `notification`, `sidebar`, `theme`, `title`); 7
+castctl-only (`config`, `endpoints`, `outbounds`, `profiles`,
+`screencast_login`, `settings`, `system`); 29 upstream-only (all
+`*_quota`, `oauth_*`, `plugin_*`, `providersPage`, etc.). Per-string
+overlap was not checked: say "keys overlap, values rewritten /
+trimmed — string-level diff `[UNVERIFIED]`", never that the shared
+keys' strings are identical. (Upstream locale files are
+`en.json`, `zh-CN.json`, `zh-TW.json`, `ru.json`, `vi.json`,
+`ko.json`; only `en.json` was compared key-by-key.)
+
+Fork-added (36, including): `LICENSE.upstream`, `NOTICE`,
+`SECRETS-CONTRACT.md`, `dev-mocks/*` (6 files),
+`dist/index.html` (committed built bundle — it contains
+upstream-derived JS and is covered by the root NOTICE entry for
+this fork), pages (`ConfigPage`, `DashboardPage`, `EndpointsPage`,
+`OutboundsPage`, `ProfileDetailPage`, `ProfilesPage`,
+`ScreencastLoginPage`, `SettingsPage`), `hashHistorySync.ts`,
+`useNavigationStore.ts`, `codemirrorTheme.ts`, `diff.ts`,
+`features/logs/autoScroll.ts`, and the `tests/*` files.
+
+Removed (564 upstream-only): all `features/*` provider/OAuth/quota/
+plugin pages, assets/icons, most services/stores/utils, and the
+upstream test suite. The upstream domain (multi-provider OAuth,
+quotas, plugin store) is entirely absent from the fork.
+
+Deviations: all pages replaced with castctl's own
+(profiles/outbounds/endpoints/config/screencast); API client
+rewritten (fetch, `/api/v1`, write-only secrets per
+`SECRETS-CONTRACT.md`); auth store simplified (sessionStorage
+token); branding removed (title `castctl`, new favicon); i18n en+vi
+only; tests replaced by vitest + jsdom; `dist/index.html`
+committed.
+
+Carried gap: the licenses of the npm packages bundled into
+`webui/dist/index.html` were not checked. No license-checking tool
+(`go-licenses`, `syft`, `trivy`, `license-checker`) is present on
+the VM, there is no `webui/node_modules` directory, and installing
+packages to run such a check was out of scope. The fork's NOTICE
+covers the forked *source*; the bundled npm dependencies are a
+separate question for the release PR. Do not claim their licenses
+here until that check exists.
+
+## 4. muse-cli 0.6.1 Python reference — VERIFIED (behavioral reference only; plus byte-identical descriptor assets)
+
+Upstream/reference: `github.com/thoitiettxl-cyber/muse-cli`, main
+at `b4dd8f5896f0217a5bf9abab1a942782969164cd`.
+`src/muse_cli/__init__.py:3` reads `__version__ = "0.6.1"`.
+License: MIT ("MIT License / Copyright (c) 2026 Nik Ships", from
+the upstream LICENSE). Python is frozen at 0.6.1: no Python PRs or
+fixes; 0.6.1 is the differential reference for the Go port.
+
+Nature of the mapping: behavioral reference, not code reuse. The Go
+tree reimplements the Python behavior; no Python code is copied.
+`README.md:7` states the behavioral-reference relationship.
+
+Castctl mappings (file:line, both sides re-read unless tagged):
+
+- Version/contract: `internal/commands/commands.go:664`
+  (`"telegram": "PR5"` deferred table) and
+  `internal/commands/commands_test.go:141,157-158` (PR5 note
+  asserted); exit-code/JSON contract per `README.md:131`.
+  `[DOCS-ONLY]` for the README contract sentence itself.
+- Gateway framing: `internal/gateway/framing.go:27-28,36` and
+  `internal/gateway/doc.go:172-173` cite Python `gateway.py:83-93`
+  `join_chunks` — re-read and confirmed: `join_chunks(partial,
+  ntf)` feeds one `NoiseTransportFrame`, returns the full payload
+  once complete, `parts[i]` joined in `chunk_index` order,
+  unbounded accumulation. Deviation (intentional, documented):
+  Go caps accumulation (bounded, `README.md:331-332`); Python is
+  unbounded. Status `VERIFIED`.
+- Telegram caps: `internal/gateway/doc.go:178` and
+  `framing.go:41` cite `tgapi.py:20` — re-read and confirmed:
+  `DOWNLOAD_LIMIT = 20 * 1024 * 1024`. `tgapi.py:15-19` also
+  re-read (`API`, `TEXT_LIMIT 4096`, `CHUNK 3800`,
+  `CAPTION_LIMIT 1024`, `UPLOAD_LIMIT` 49 MiB).
+- Node ID: `internal/wait/NODE_ID.md:6,120` cites
+  `cli.py:151-175` — partially re-read: `cli.py:151-160` shows
+  `load_config()` with the named-profile cookie rule ("A named
+  profile never borrows another profile's login");
+  `MUSE_NODE_ID` env precedence at `cli.py:167-168`. Lines
+  161-166 and 169-175 were not re-read: cite the range as
+  `[PARTLY VERIFIED — 151-160, 167-168 read]`.
+- Wait/approvals: `internal/approvals/approvals.go:6` cites
+  `wait.py`; `internal/gateway/clock.go:17` and `framing.go:27-28`
+  cite `gateway.py`/`conn.py`. Python line ranges for these
+  citations were not re-read: `[DOCS-ONLY]` at line level; the
+  file-level correspondence is `VERIFIED` (the files exist in both
+  trees).
+
+Byte-identical assets (copied data, `VERIFIED` by sha256 on both
+sides): `internal/proto/desc0.bin`,
+`internal/proto/desc1.bin`, and `internal/proto/routes.json` are
+byte-identical to `src/muse_cli/desc0.bin`, `desc1.bin`, and
+`routes.json` in the muse-cli clone (sha256
+`5479a20cd5a9bf817c2a7ba4eec56b354d8576f565d9096fd2a3a8223e820d00`,
+`5ea3f209386a4d47d28ee06473a2defad35536725bf2d3d847d31b04ec1a8868`,
+`f13e7ec63548edd9319b655be1ffc88e3580f19b4f4f016aaec63d553ed5f033`
+respectively; recomputed for this file). `internal/proto/proto.go:8,17,32,38`
+documents the verbatim embeds and the `routes.json` fidelity rules.
+These three files are (a)-list NOTICE items (copied assets), not
+library dependencies. Note the paths: after the go/-to-root
+migration the assets live at `internal/proto/`, not
+`internal/proto/generate/`.
+
+Deviations from 0.6.1 (all `VERIFIED` in tree): bounded
+`join_chunks` caps (above); legacy-config fallback (castctl-only,
+`ResolveConfigLocation` — read the old `~/.config/muse-cli` dir,
+log a one-line notice, never auto-move/delete; `README.md:216`,
+`docs/architecture.md:62`); `CASTCTL_CONFIG`/`CASTCTL_PROFILE`
+renames with `MUSE_AUTO_*`/`MUSE_NODE_ID`/`MUSE_VM_ID` kept;
+GPL-3.0 headers (`SPDX-License-Identifier: GPL-3.0-or-later`,
+"Copyright (C) 2026 muse-cli contributors") on Go files.
+
+## 5. go-telegram/bot @f53bfe5 — DESIGN-ONLY (studied, no code taken)
+
+Upstream: `github.com/go-telegram/bot`, commit
+`f53bfe55a30bb6d0c54327a4233e60d5bccb5604` (verified three ways:
+`git ls-remote` HEAD/main tip, two research clones' rev-parse —
+all identical). License name: MIT (LICENSE head at that commit:
+"MIT License / Copyright (c) 2022 negasus").
+
+Castctl side: absent. `go-telegram/bot` grep count is 0 in `go.mod`
+and `go.sum`, and zero `.go` files import it. Telegram in castctl
+is a stub only: `internal/commands/commands.go:664`
+(`"telegram": "PR5"`) plus help text, asserted in
+`internal/commands/commands_test.go:157-158`. Status:
+DESIGN-ONLY. Never claim code reuse: this library was evaluated
+as a candidate for a future PR and a decision was deferred to
+that PR; it is studied, no code taken. No evaluation conditions
+are enumerated here, and no out-of-tree plan file is cited.
+
+## 6. cronet-go — EVALUATED-NOT-WIRED (graph-only; no code, no tag)
+
+Upstream: `github.com/sagernet/cronet-go`. License:
+GPL-3.0-or-later — the module-cache LICENSE carries the same
+nekohasekai GPL-3.0-or-later opening as `sagernet/sing`, with no
+"In addition" sentence (grep count 0, verified).
+
+Version in the castctl graph: pseudo-version
+`v0.0.0-20260912104727-0d28acc44093`, plus ~30 `lib/*` platform
+submodules, all `// indirect` in `go.mod` (`go.mod:95-96` for the
+root and `all` modules; 31 `cronet-go` lines in total). The
+pseudo-version was resolved read-only for this file from a
+temporary blobless clone (removed afterwards): it is commit
+`0d28acc44093df24b2526dea3d6ffefd6b0a54f0`, "Generate all package",
+2026-09-12 10:47:27 UTC — the timestamp matches the pseudo-version
+exactly. That commit sits on the upstream `go` branch; it is not
+an ancestor of the upstream main HEAD
+(`049f2909701ca088c9569f6b303bba5376a2b2ff`). State the
+pseudo-version verbatim alongside the resolved commit; do not
+present the commit as a main-branch commit.
+
+Castctl side: zero `cronet-go` imports in `.go` files; zero
+`with_cronet` hits in `.go` files (the tag name appears only in
+`README.md:281`). Mentions are limited to `go.mod` indirect lines,
+`go.sum`, `README.md:277-286` (default `utls` on every platform;
+`cronet` an opt-in build flavour for later: tag `with_cronet` plus
+a hash-verified sidecar, only after a direct probe matches or comes
+close to real Chrome of the same version),
+`internal/commands/help.go:373,377,408,412` (TLS-engine storage
+strings), and `internal/profile/fingerprint.go:45` (valid-engines
+list includes `cronet`).
+
+Status: EVALUATED-NOT-WIRED. It is in the module graph
+(transitive, via sing-box's cronet support), so for NOTICE it
+belongs in (b) with the explicit "present in the dependency graph,
+no castctl code uses it" qualifier — not in (a). The opt-in
+*design* belongs in (c): studied, no code taken. Do not list it
+as a used library.
+
+Decisions (all `[DOCS-ONLY]` except the storage-only code):
+default `utls` on every platform (`fingerprint.go:45`,
+`README.md:277-286`); `random` never; cronet opt-in requires the
+`with_cronet` tag + hash-verified sidecar + a direct probe matching
+real Chrome.
+
+## 7. utls (metacubex/utls) — VERIFIED (transitive use via sing-box; no direct import)
+
+Upstream: `github.com/metacubex/utls`, tag `v1.8.7`, commit
+`f7d52c22f3a8d2f510ad1470f75cb6c3fe26aa37` (verified via
+`git ls-remote --tags`). License: BSD-3-Clause-style template text
+— the module-cache LICENSE (27 lines, read in full) carries the
+three-clause text ("Copyright (c) 2009 The Go Authors", conditions
+plus disclaimer) with no license identifier; see the caveat at the
+top of this file. Version in the castctl graph: `v1.8.7`,
+`// indirect` in `go.mod` (`go.mod:81`); no direct require.
+
+Castctl side: no direct `metacubex/utls` import in any `.go` file.
+The single mention is a comment,
+`internal/outbound/isolation_test.go:29` (citing upstream
+`handshake_client.go:423` and `:1095` — those upstream line numbers
+were not verified: `[UNVERIFIED]`). uTLS reaches castctl only
+through sing-box `common/tls` + `option.OutboundUTLSOptions`:
+upstream `common/tls/reality_client.go:1,41` carries the
+`with_utls` build tag and imports `metacubex/utls`.
+
+Castctl mappings (`VERIFIED`): `internal/outbound/tls.go:36-38`
+(`GatewayTLSOptions` defaults `Fingerprint: "chrome"`);
+`internal/profile/fingerprint.go:40,45` (defaults + valid sets);
+`README.md:277-286` (fingerprint/TLS-engine hold section).
+
+Deviations (`VERIFIED`, same as §1 deviation 4): castctl pins
+`chrome` and rejects `random`/`randomized`; upstream accepts
+`""` → Chrome_Auto, `random`, `randomized`, plus `edge`/`360`/`qq`/
+`android`, which castctl's valid set excludes. Castctl also
+deliberately does not pin ALPN (`tls.go` comment). The fingerprint
+preset names (`chrome`, `firefox`, …) are sing-box/utls vocabulary
+adopted as config values — record them as such, not as copied code.
+
+Status: `VERIFIED` as transitive. For NOTICE: (b) linked
+dependency (via sing-box), not (a).
+
+## 8. Noise — VERIFIED (flynn/noise library + Python-derived descriptors; not a Noise-spec repo)
+
+The Noise *library* is `github.com/flynn/noise`. The wire
+*descriptors* come from muse-cli Python, not from any Noise repo
+(§4). No sing-box Noise package is involved.
+
+flynn/noise: direct require `github.com/flynn/noise v1.1.0`. Tag
+`v1.1.0` = commit `4d9f71cd4ba1fe81415efac312664ccc4bc79b46` =
+HEAD (verified via `git ls-remote --tags` and HEAD). License:
+BSD-3-Clause-style template text — the module-cache LICENSE (29
+lines, read in full) reads "Flynn® is a trademark of Prime
+Directive, Inc. / Copyright (c) 2015 Prime Directive, Inc." plus
+the three-clause text, with no license identifier; see the caveat
+at the top of this file.
+
+Castctl mapping (`VERIFIED`): `internal/gateway/gateway.go:148-155`
+(read in full): `noise.NewCipherSuite(noise.DH25519,
+noise.CipherAESGCM, noise.HashSHA256)`,
+`noise.NewHandshakeState(noise.Config{Pattern: noise.HandshakeXX,
+Initiator: true, StaticKeypair: <fresh ephemeral>})`, empty
+payloads in all three messages, 20s handshake timeout; the comment
+at `gateway.go:137-145` states "the msg2 payload is accepted at ANY
+length and ignored — never asserted to be empty." Also
+`internal/gateway/noise_test.go:12,82` (comment: tests run
+"against the flynn/noise version used by the product code" —
+version pinning by test).
+
+Descriptors / protos (`VERIFIED`, source = muse-cli Python):
+`internal/proto/generate/noise_envelope.proto` (package
+`hatch.noise`, "recreated from verified FileDescriptorProto in
+`desc1.bin`", sha256 `5ea3f209…`) and `noise_transport.proto`
+(package `ingress_rev_proxy`, from `desc0.bin`, sha256
+`5479a20c…`); `go_package` added solely for `protoc-gen-go`, wire
+bytes unaffected. `desc0.bin`/`desc1.bin`/`routes.json` are
+byte-identical to the muse-cli Python copies (§4). Generation:
+nested module `internal/proto/generate/go.mod` requires
+`bufbuild/protocompile v0.14.1`, `protobuf v1.36.12`, `x/sync
+v0.8.0` (indirect); the main module pins `protobuf v1.36.11` —
+promotion to 1.36.12 is a recorded job in the generate README, not
+done. Generation entry points `compile.go` / `generate.sh` exist;
+contents not read in detail: `[PARTLY VERIFIED]`.
+
+Deviations: (a) msg2 payload ignored at any length (deliberate,
+`gateway.go:137-145` comment; the Python behavior it mirrors was
+not re-read at line level: `[DOCS-ONLY]` for the Python side);
+(b) bounded chunk reassembly vs Python unbounded (§4); (c)
+`go_package` option added (wire-neutral, stated in the `.proto`
+comments). No deviation from the Noise XX pattern itself:
+DH25519/AESGCM/SHA256 + XX + initiator role is the library's
+standard usage. The XX pattern as a studied design is a (c) NOTICE
+item: studied, no code taken; the pattern itself is a public
+specification, not copied text.
+
+Status: `VERIFIED`.
+
+## 9. Direct-dependency table (main module, go.mod at the base commit; licenses read from module-cache LICENSE files)
+
+| Module | Version | License (as read) | In-tree code? |
+|---|---|---|---|
+| `github.com/flynn/noise` | `v1.1.0` | BSD-3-Clause-style template text | Yes — `internal/gateway/gateway.go` |
+| `github.com/gorilla/websocket` | `v1.5.3` | BSD-3-Clause-style template text | Yes — WebSocket transport (`internal/gateway`, `internal/conn`) — import-level verified; exact call sites not enumerated |
+| `github.com/miekg/dns` | `v1.1.72` | BSD 3-Clause License (named in file) | Yes — DNS (via `internal/dns`, sing-box DNS stack) — import-level verified |
+| `github.com/sagernet/sing` | `v0.9.7-0.20261023115459-5dc452e537bf` | GPL-3.0-or-later (no extra sentence) | Yes — `sing/common/json`, `sing/common/network`, `sing/service` (import-level verified: `internal/profile/outbound.go`, `internal/outbound/router_stub.go`, `internal/outbound/wireguard_conf.go`) |
+| `github.com/sagernet/sing-box` | `v1.14.4` | GPL-3.0-or-later + name/association sentence (§1) | Yes — 39 files (§1) |
+| `github.com/sagernet/sing-tun` | `v0.9.7-0.20261023115432-040db71fcd33` | GPL-3.0-or-later (no extra sentence) | Yes — `internal/outbound/router_stub.go:13` imports `sing-tun` (import-level verified) |
+| `go.uber.org/goleak` | `v1.3.0` | MIT License (named in file) | Test-only — verified: imported only from `internal/approvals/main_test.go:10`, `internal/conn/main_test.go:10`, `internal/gateway/main_test.go:10`, `internal/wait/main_test.go:10` |
+| `google.golang.org/protobuf` | `v1.36.11` | BSD-3-Clause-style template text | Yes — generated `.pb.go` runtime |
+
+Indirect but load-bearing (from the `go.mod` indirect block;
+licenses read from the module cache):
+
+| Module | Version | License (as read) | Note |
+|---|---|---|---|
+| `github.com/metacubex/utls` | `v1.8.7` | BSD-3-Clause-style template text | Via sing-box `common/tls` (§7) |
+| `github.com/sagernet/cronet-go` (+ ~30 `lib/*` submodules) | `v0.0.0-20260912104727-0d28acc44093` | GPL-3.0-or-later (no extra sentence) | In graph only; no code uses it (§6); pseudo-version commit resolved read-only to `0d28acc44093df24b2526dea3d6ffefd6b0a54f0` on the upstream `go` branch |
+| All other indirect modules (quic-go, wireguard-go, gvisor, x/*, etc.) | per `go.mod`/`go.sum` | NOT CHECKED | Full inventory needs a license-inventory tool — release PR's scope. Do not claim a complete list. |
+
+Nested module (`internal/proto/generate/go.mod`):
+`bufbuild/protocompile v0.14.1` — Apache License 2.0 (named in
+the file header, read); `google.golang.org/protobuf v1.36.12`
+(same BSD-template text as above, assumed the same file —
+`[NOT RE-READ]`); `golang.org/x/sync v0.8.0` (indirect) — license
+`[NOT CHECKED]`.
+
+JS dependencies (`webui/package.json` + `bun.lock`, 794 lockfile
+lines): licenses NOT CHECKED (see §3, carried gap). The direct
+dependencies are named in `webui/package.json` (react, zustand,
+i18next, motion, react-router-dom, @uiw/react-codemirror, the
+@codemirror packages, vite + vite-plugin-singlefile, vitest,
+jsdom, and the dev tooling listed there); no license is asserted
+for any of them here.
+
+## 10. Maintenance rule
+
+When porting new behavior from an upstream, update this file and
+`NOTICE` in the same PR (AGENTS.md, rule 6). Record a new upstream
+with all of the following, or say explicitly which part is
+missing and why:
+
+1. Upstream repository + the exact commit inspected (full hash),
+   verified against the remote — never a version string alone, and
+   never an asserted commit that was not inspected.
+2. The license name as read from the upstream LICENSE file (full
+   text read for template texts that carry no identifier; say so
+   when the file names no license).
+3. The mapping, with `file:line` on both sides (castctl + upstream
+   commit), or an explicit `DESIGN-ONLY` / `DOCS-ONLY` /
+   `[NOT FOUND]` tag when there is no code on one side.
+4. The category: (a) copied/adapted code or assets in the tree,
+   (b) linked dependency, or (c) studied only, with "studied, no
+   code taken" wording for every (c) item so a reader cannot
+   mistake a design influence for vendored code.
+5. Deviations from the upstream, each with castctl evidence, and
+   anything deliberately not taken.
+
+## Carried items (unresolved at the time of writing)
+
+- npm license check: not run — no license-checking tool present,
+  no `node_modules`, no installs performed. The release PR owns
+  it. Until then, `webui/dist/index.html`'s bundled npm licenses
+  are unknown; only the forked source is covered.
+- Full indirect-dependency license inventory: not generated —
+  release PR's scope (needs a license-inventory tool).
+- String-level locale diff (fork vs upstream shared keys):
+  `[UNVERIFIED]` — only top-level key overlap was compared.
+- Upstream `handshake_client.go:423/:1095` line numbers cited in
+  `internal/outbound/isolation_test.go:29`: `[UNVERIFIED]`.
+- `wireguard_conf.go` / `dialer.go` contents and `generate.sh` /
+  `compile.go` contents: import/existence level only.
+- Python `wait.py` / `conn.py` / `chat.py` line-level citation
+  checks: not done; file-level correspondence only (§4).
