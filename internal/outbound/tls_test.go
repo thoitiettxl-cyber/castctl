@@ -73,6 +73,7 @@ func TestBuildTLSConfig(t *testing.T) {
 	})
 
 	t.Run("default chrome server name and alpn passthrough", func(t *testing.T) {
+		skipUnlessUTLS(t)
 		cfg, effective, err := BuildTLSConfig(ctx, testLogger(), "gateway.test", option.OutboundTLSOptions{
 			Enabled:    true,
 			ServerName: "gateway.test",
@@ -99,6 +100,7 @@ func TestBuildTLSConfig(t *testing.T) {
 	})
 
 	t.Run("server name falls back to server address", func(t *testing.T) {
+		skipUnlessUTLS(t)
 		cfg, _, err := BuildTLSConfig(ctx, testLogger(), "fallback.test", option.OutboundTLSOptions{Enabled: true})
 		if err != nil {
 			t.Fatalf("BuildTLSConfig = %v", err)
@@ -119,6 +121,7 @@ func TestBuildTLSConfig(t *testing.T) {
 	})
 
 	t.Run("reality options pass through untouched", func(t *testing.T) {
+		skipUnlessUTLS(t)
 		key := make([]byte, 32)
 		if _, err := rand.Read(key); err != nil {
 			t.Fatal(err)
@@ -175,6 +178,7 @@ func TestBuildTLSConfig(t *testing.T) {
 	})
 
 	t.Run("handshake against fake tls server", func(t *testing.T) {
+		skipUnlessUTLS(t)
 		addr := startFakeTLSServer(t)
 		cfg, _, err := BuildTLSConfig(ctx, testLogger(), "gateway.test", option.OutboundTLSOptions{
 			Enabled:  true,

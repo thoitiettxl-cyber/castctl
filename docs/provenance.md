@@ -202,6 +202,52 @@ evidence:
   rejecting direct-with-detour at config validation time is a
   follow-up, not done in this loop.
 
+Gate-2 clearance for per-profile DNS (this PR) — VERIFIED
+against the pinned module-cache source, plus a measured test
+(no upstream code copied; NOTICE unchanged). The problem: a
+direct profile's default DoH must detour, but sing-box
+rejects a detour to an empty direct outbound. Upstream:
+`common/dialer/detour.go:29-35` (`NewDetour`), `:57-78`
+(`DetourDialer.init`, lazy via `sync.Once` in `Dialer()`):
+missing tag → `outbound detour not found: <tag>` (`:63`);
+`!defaultOutbound && !disableEmptyDirectCheck` and the target
+implements `DirectDialer` (`:15-17`, `IsEmpty() bool`) and
+`IsEmpty()` is true → `:72` (`detour to an empty direct
+outbound makes no sense`). Emptiness: `protocol/direct/
+outbound.go:52-77` (`NewOutbound` forces `UDPFragmentDefault`
+true; `isEmpty` is `DeepEqual(DialerOptions,
+{DialerOptions:{UDPFragmentDefault: true}})`), `:269-271`
+(`IsEmpty()`). The gate fires at transport Start, not at
+construction: every DNS transport's `Start` calls
+`dialer.InitializeDetour` (`dns/transport/tcp.go:83-88`,
+`tls.go:93`, `udp.go:87`, `https.go:157`, `quic/http3.go:146`,
+`quic/quic.go:87`). The only switch that disables the check,
+`DisableEmptyDirectCheck`, is `json:"-"` on the HTTP-client
+options struct (`option/http.go:37`), forwarded only through
+`common/dialer/dialer.go:26,52` and `common/httpclient/
+client.go:25`; no DNS transport sets it
+(`dns/transport_dialer.go:11-24` builds `dialer.Options`
+with only `Context`, `Options`, `DirectResolver` /
+`RemoteIsDomain`), and castctl's `dns.New` exposes no such
+knob — so the clearance cannot be a flag flip. Castctl's
+clearance: a runtime-only, per-profile direct outbound
+(`castctl-direct:<profile>`) made non-empty by exactly one
+explicit dialer field, `UDPFragment=false` (which affects only
+UDP packet dialing through that outbound; the DoH default is
+TCP/TLS, so it changes no dialing behaviour there), created
+only in the active profile's own manager before DNS Start.
+Castctl mapping: `internal/commands/runtime.go`
+(`SynthesizedDirectOutbound`, `createOutbounds` synthesised
+tag), `internal/profile/dns.go` (`SynthesizedDirectTag`,
+`ResolveProfileDNS`). Measured proof:
+`internal/dns/gate2_test.go` — empty-direct detour fails at
+`client.Start()` with `dns: start transport manager (start):
+start dns-transport: start dns/tcp[dns1]: detour to an empty
+direct outbound makes no sense`; the synthesised non-empty
+direct detour starts and resolves. No guard is weakened: the
+plain `"direct"` outbound stays empty and a detour naming it
+still fails as above.
+
 Deviations from upstream, each with castctl evidence:
 
 1. No `box.Box`. Upstream sing-box normally runs as a full box

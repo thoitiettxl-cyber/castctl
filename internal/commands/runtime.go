@@ -37,7 +37,7 @@ type Runtime struct {
 	Location *profile.ConfigLocation
 	Single   *profile.SingleConfig // nil when no single config file exists
 	Manager  *outbound.Manager
-	DNS      *dns.Client // nil when the config has no DNS section
+	DNS      *dns.Client // nil when no single config file exists (no resolver); with a single config file a resolver is always built (own, WireGuard, global-compat, or synthesised default)
 	Dialer   *outbound.Dialer
 	Muse     *conn.Muse
 
@@ -195,14 +195,27 @@ func defaultBuildRuntime(ctx context.Context, loc *profile.ConfigLocation, prof 
 	rt.closeFuncs = append(rt.closeFuncs, func() error { return mgr.Close() })
 
 	// DNS: build and register BEFORE creating outbounds.
+	// The resolver is per-profile (profile.ResolveProfileDNS):
+	// own block, WireGuard-imported servers, global-compat
+	// fallback, or the synthesised DoH default. Synthesised
+	// runtime defaults are never written into the config file.
+	// The synthesised direct tag (direct profiles' default, or
+	// an own block detouring to it) is created in
+	// createOutbounds below, before dnsClient.Start(), so the
+	// detour resolves by Start time (detour init is lazy).
 	var dnsClient *dns.Client
+	var synthDirectTag string
 	if single != nil {
-		dnsOpts, err := single.ParsedDNS()
+		resolved, err := profile.ResolveProfileDNS(prof, single)
 		if err != nil {
 			return fail(errCode(2, err))
 		}
-		if dnsOpts != nil {
-			dnsClient, err = dns.New(mgr.Context(), *dnsOpts, mgr.OutboundManager())
+		synthDirectTag = resolved.SynthesizedDirectTag
+		if resolved.Warning != "" && env != nil {
+			fmt.Fprintln(env.stderr(), resolved.Warning)
+		}
+		if resolved.Options != nil {
+			dnsClient, err = dns.New(mgr.Context(), *resolved.Options, mgr.OutboundManager())
 			if err != nil {
 				return fail(errCode(2, err))
 			}
@@ -213,7 +226,7 @@ func defaultBuildRuntime(ctx context.Context, loc *profile.ConfigLocation, prof 
 	}
 
 	// Endpoints and outbounds, detour-first (topological order).
-	if err := createOutbounds(ctx, mgr, single, prof); err != nil {
+	if err := createOutbounds(ctx, mgr, single, prof, synthDirectTag); err != nil {
 		return fail(err)
 	}
 
@@ -283,7 +296,34 @@ const dialerOutboundTag = "castctl-dialer"
 // outbound carries the "direct" tag, an explicit direct outbound is
 // created: the manager refuses an implicit direct fallback, but an
 // explicit one created here is deliberate and visible.
-func createOutbounds(ctx context.Context, mgr *outbound.Manager, single *profile.SingleConfig, prof *profile.Profile) error {
+// SynthesizedDirectOutbound builds the runtime-only direct
+// outbound used as a DNS detour target for a direct profile.
+// Gate-2 clearance (NOT a guard weakening): sing-box rejects a
+// detour to an EMPTY direct outbound at transport Start
+// (common/dialer/detour.go:69-76, sing-box v1.14.4: IsEmpty is
+// computed in protocol/direct/outbound.go:75-77 as
+// DeepEqual(DialerOptions, {UDPFragmentDefault: true})), and no
+// DNS transport dialer sets DisableEmptyDirectCheck, so the only
+// in-API clearance is a non-empty direct target. This outbound
+// is made non-empty by exactly one explicit field,
+// UDPFragment=false. That field affects only UDP packet dialing
+// through this outbound; the outbound carries DNS-detour traffic
+// only (never profile traffic, which dials through "direct"),
+// and for the DoH default (TCP/TLS) it changes no dialing
+// behaviour at all. The plain "direct" outbound is left empty,
+// so a detour naming "direct" still fails exactly as before
+// (pinned by internal/dns/gate2_test.go). The tag is
+// per-profile (profile.SynthesizedDirectTag), created only in
+// the active profile's own manager, so it cannot leak DNS
+// between profiles.
+func SynthesizedDirectOutbound() *option.DirectOutboundOptions {
+	udpFragment := false
+	opts := &option.DirectOutboundOptions{}
+	opts.UDPFragment = &udpFragment
+	return opts
+}
+
+func createOutbounds(ctx context.Context, mgr *outbound.Manager, single *profile.SingleConfig, prof *profile.Profile, synthDirectTag string) error {
 	created := map[string]bool{}
 	if single != nil {
 		endpoints, err := single.ParsedEndpoints()
@@ -342,6 +382,28 @@ func createOutbounds(ctx context.Context, mgr *outbound.Manager, single *profile
 			return errCode(2, err)
 		}
 		created["direct"] = true
+	}
+	// Runtime-only per-profile direct detour target for the
+	// active profile's DNS (direct-profile default DoH, or an
+	// own dns block detouring to it). Created after the plain
+	// "direct" outbound and before dnsClient.Start() (the caller
+	// starts DNS after this function returns), so the detour
+	// resolves at Start. Never a config tag: validation accepts
+	// it only as a direct profile's own reachable detour, and
+	// parse time rejects any config tag carrying the reserved
+	// castctl-direct: prefix. Defence in depth: if the tag is
+	// nevertheless already taken (e.g. a SingleConfig built
+	// without going through parse), FAIL LOUDLY — never silently
+	// skip creation and let the DNS detour dial the colliding
+	// config outbound.
+	if synthDirectTag != "" {
+		if created[synthDirectTag] {
+			return errCode(2, fmt.Errorf("synthesised direct outbound tag %q is already taken by a config outbound or endpoint; the castctl-direct: prefix is reserved, rename the config tag", synthDirectTag))
+		}
+		if err := mgr.CreateOutbound(ctx, synthDirectTag, "direct", SynthesizedDirectOutbound()); err != nil {
+			return errCode(2, err)
+		}
+		created[synthDirectTag] = true
 	}
 	return nil
 }

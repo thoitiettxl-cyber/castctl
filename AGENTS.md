@@ -16,3 +16,10 @@ Hard rules:
 4. Work on branches, open PRs; main is protected. Tags v* are admin-only.
 5. Update the matching docs/* file in the same PR as the code.
 6. When porting new behavior from an upstream, update `docs/provenance.md` and `NOTICE` in the same PR.
+
+Core roadmap order (Boss-decided, each step its own PR, gated):
+Step A migration → legacy-removal → per-profile DNS → release
+builds → wait redesign → Telegram bot native in core → session
+keeper + screencast login → E2E test pass of the whole core →
+plugin loader, then extract castctl-muse. No plugin code before
+the E2E pass.

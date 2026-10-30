@@ -25,11 +25,21 @@ type SingleConfig struct {
 	Outbounds      []option.Outbound
 	Endpoints      []option.Endpoint
 	DNS            *option.DNSOptions
+	// WireGuardDNS is castctl-side (not sing-box) state: endpoint
+	// tag -> DNS servers read by precedence branch (ii) in
+	// ResolveProfileDNS. It is hand-written/preserved state,
+	// stored under the top-level "wireguard_dns" key and
+	// preserved verbatim on save like the other raw sections;
+	// no production caller yet wires the
+	// outbound.ParseWireGuardConfWithDNS capture into it
+	// (import-path wiring is a follow-up).
+	WireGuardDNS map[string][]string
 
-	rawOutbounds [][]byte
-	rawEndpoints [][]byte
-	rawDNS       []byte
-	rawProfiles  map[string][]byte
+	rawOutbounds    [][]byte
+	rawEndpoints    [][]byte
+	rawDNS          []byte
+	rawWireGuardDNS []byte
+	rawProfiles     map[string][]byte
 }
 
 // ProfileNames returns the profile names in sorted order.
@@ -101,6 +111,17 @@ func (c *SingleConfig) RawDNS() []byte {
 	return out
 }
 
+// RawWireGuardDNS returns a defensive copy of the stored
+// wireguard_dns JSON, or nil.
+func (c *SingleConfig) RawWireGuardDNS() []byte {
+	if len(c.rawWireGuardDNS) == 0 {
+		return nil
+	}
+	out := make([]byte, len(c.rawWireGuardDNS))
+	copy(out, c.rawWireGuardDNS)
+	return out
+}
+
 func copyRawList(in [][]byte) [][]byte {
 	out := make([][]byte, len(in))
 	for i, raw := range in {
@@ -117,6 +138,7 @@ var singleTopLevelKeys = map[string]bool{
 	"outbounds":       true,
 	"endpoints":       true,
 	"dns":             true,
+	"wireguard_dns":   true,
 }
 
 var profileKeys = map[string]bool{
@@ -129,6 +151,7 @@ var profileKeys = map[string]bool{
 	"fingerprint":            true,
 	"tls_engine":             true,
 	"outbound":               true,
+	"dns":                    true,
 }
 
 // HasProfilesMarker reports whether data is a JSON object containing a
@@ -246,6 +269,18 @@ func ParseSingleConfig(data []byte, baseDir string) (*SingleConfig, error) {
 		cfg.DNS = dns
 		cfg.rawDNS = raw
 	}
+	if v, ok := obj.get("wireguard_dns"); ok {
+		raw, err := rawOf(v)
+		if err != nil {
+			return nil, err
+		}
+		wgDNS, err := parseWireGuardDNSMap(v)
+		if err != nil {
+			return nil, err
+		}
+		cfg.WireGuardDNS = wgDNS
+		cfg.rawWireGuardDNS = raw
+	}
 
 	for _, name := range profilesObj.keys {
 		if _, err := ValidateProfileName(name); err != nil {
@@ -269,6 +304,21 @@ func ParseSingleConfig(data []byte, baseDir string) (*SingleConfig, error) {
 	}
 
 	if err := validateTagGraph(cfg); err != nil {
+		return nil, err
+	}
+	// G1 coexistence: a profile dns block and a top-level dns
+	// section together are an error, never a silent shadowing.
+	if cfg.DNS != nil {
+		for _, name := range cfg.ProfileNames() {
+			if p := cfg.Profiles[name]; p != nil && p.dnsPresent {
+				return nil, newConfigErrorf("profile %q has a per-profile dns block and the file has a top-level dns section: remove the top-level dns section (distribute it into profile entries by hand first, see docs/config.md)", name)
+			}
+		}
+	}
+	if err := validateProfileDNS(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateWireGuardDNS(cfg); err != nil {
 		return nil, err
 	}
 	if err := validateWireGuardPrivateKeys(cfg); err != nil {
@@ -379,6 +429,19 @@ func parseProfileEntry(name string, obj *orderedObject, baseDir string) (*Profil
 		p.TLSEngine = s
 		p.tlsEnginePresent = true
 	}
+	if v, ok := obj.get("dns"); ok {
+		raw, err := rawOf(v)
+		if err != nil {
+			return nil, err
+		}
+		dns, err := parseDNS(raw)
+		if err != nil {
+			return nil, newConfigErrorf("profile %q: %v", name, err)
+		}
+		p.DNS = dns
+		p.rawDNS = raw
+		p.dnsPresent = true
+	}
 	if v, ok := obj.get("outbound"); ok {
 		switch t := v.(type) {
 		case string:
@@ -474,7 +537,34 @@ func parseAutoAllowOnceValue(v any) (bool, error) {
 // validateTagGraph enforces one tag namespace across outbounds,
 // endpoints, and inline profile outbounds; resolves tag references and
 // detour/selector references; and rejects dangling references.
+// It also enforces the synthesised-direct reservation: any config
+// tag carrying the castctl-direct: prefix is rejected here, so the
+// reservation holds on every path that validates (parse and the
+// profile-mutation commands), not just on the parse path.
 func validateTagGraph(cfg *SingleConfig) error {
+	reserve := func(tag, kind string) error {
+		if IsReservedSynthesizedTag(tag) {
+			return newConfigErrorf("tag %q (%s) is reserved for castctl's synthesised direct outbounds (castctl-direct:<profile>); rename the tag", tag, kind)
+		}
+		return nil
+	}
+	for _, ob := range cfg.Outbounds {
+		if err := reserve(ob.Tag, "outbound"); err != nil {
+			return err
+		}
+	}
+	for _, ep := range cfg.Endpoints {
+		if err := reserve(ep.Tag, "endpoint"); err != nil {
+			return err
+		}
+	}
+	for name, p := range cfg.Profiles {
+		if p.Outbound.Kind == OutboundInline {
+			if err := reserve(p.Outbound.Tag, "inline outbound for profile "+name); err != nil {
+				return err
+			}
+		}
+	}
 	tags := make(map[string]string) // tag -> "outbound" | "endpoint" | "inline"
 	for _, ob := range cfg.Outbounds {
 		if prev, dup := tags[ob.Tag]; dup {
@@ -1129,6 +1219,23 @@ func buildSingleFileOrdered(cfg *SingleConfig) (*orderedObject, error) {
 		}
 		root.set("dns", v)
 	}
+	if len(cfg.rawWireGuardDNS) > 0 {
+		v, err := decodeOrderedJSON(cfg.rawWireGuardDNS)
+		if err != nil {
+			return nil, err
+		}
+		root.set("wireguard_dns", v)
+	} else if len(cfg.WireGuardDNS) > 0 {
+		raw, err := json.Marshal(cfg.WireGuardDNS)
+		if err != nil {
+			return nil, err
+		}
+		v, err := decodeOrderedJSON(raw)
+		if err != nil {
+			return nil, err
+		}
+		root.set("wireguard_dns", v)
+	}
 	return root, nil
 }
 
@@ -1185,6 +1292,29 @@ func buildProfileEntry(p *Profile) (*orderedObject, error) {
 	}
 	if p.tlsEnginePresent || te != DefaultTLSEngine {
 		entry.set("tls_engine", te)
+	}
+	// Per-profile dns, presence-gated like fingerprint/tls_engine:
+	// an absent key stays absent (the runtime synthesises the
+	// default instead of writing it back), and a present key is
+	// preserved verbatim from its raw JSON.
+	if p.dnsPresent {
+		if len(p.rawDNS) > 0 {
+			v, err := decodeOrderedJSON(p.rawDNS)
+			if err != nil {
+				return nil, err
+			}
+			entry.set("dns", v)
+		} else if p.DNS != nil {
+			raw, err := marshalSing(p.DNS)
+			if err != nil {
+				return nil, err
+			}
+			v, err := decodeOrderedJSON(raw)
+			if err != nil {
+				return nil, err
+			}
+			entry.set("dns", v)
+		}
 	}
 	switch p.Outbound.Kind {
 	case OutboundTag:
