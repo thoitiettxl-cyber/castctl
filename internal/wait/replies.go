@@ -106,8 +106,10 @@ func IsSelfReferential(ev Event) (selfRef bool, level string, matched string) {
 // text (possibly "") in the reply. Non-string text fields are
 // skipped (see firstText). It also returns the seqs of
 // text-bearing assistant events dropped for lacking payload
-// status "completed": the caller logs those (a status-less
-// partial must be visible when a wait reports no reply).
+// status "completed". HistoryReplies discards those seqs: the
+// core has no log sink, so a status-less partial that costs a
+// wait its reply is a pre-existing visibility gap, stated here
+// rather than claimed logged.
 //
 // Filter order matters and is preserved: seq window, literal
 // event_name (no event/type fallback), exact case-sensitive

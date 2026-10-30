@@ -174,8 +174,10 @@ func TestLatestUserSeq(t *testing.T) {
 
 func TestHistoryReplies(t *testing.T) {
 	ctx := context.Background()
-	// Window grows while has_more and oldest > afterSeq; the last
-	// window's replies win, capped at its newest seq.
+	// Window grows while has_more and oldest > afterSeq; replies
+	// accumulate across windows (loop-2 F7): the 150 reply seen
+	// in the first window is reported even though the closing
+	// window's slice does not contain it.
 	h := &scriptHistory{byLimit: map[int][]historyResp{
 		200: {{events: []any{asst(150, "completed", "too new", nil)}, hasMore: true}},
 		500: {{events: []any{asst(120, "completed", "reply", nil), asst(90, "completed", "old", nil)}, hasMore: false}},
@@ -187,8 +189,8 @@ func TestHistoryReplies(t *testing.T) {
 	if exhausted {
 		t.Error("exhausted must be false when the windows close")
 	}
-	if len(replies) != 1 || replies[0].Seq != 120 || replies[0].Text != "reply" {
-		t.Errorf("replies = %+v", replies)
+	if len(replies) != 2 || replies[0].Seq != 120 || replies[0].Text != "reply" || replies[1].Seq != 150 || replies[1].Text != "too new" {
+		t.Errorf("replies = %+v, want [120 150] accumulated across windows", replies)
 	}
 	// Empty window: no replies, no upper bound beyond afterSeq.
 	h2 := &scriptHistory{def: historyResp{events: []any{}, hasMore: false}}
