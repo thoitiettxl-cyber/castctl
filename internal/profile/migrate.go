@@ -681,12 +681,15 @@ func readExistingSingle(baseDir string) (*SingleConfig, bool, error, error) {
 // presence alone, triggers: a legacy file never carries these
 // keys in single-config shape, while a hand-written
 // single-format file that lost its "profiles" key does. For the
-// array sections the rule is existential: a single shaped
-// element proves the section is single-format, even alongside
-// unshaped elements.
+// array sections and the log object the rule is existential:
+// a single shaped element, or a single log-block key, proves
+// the section is single-format, even alongside unshaped
+// elements or keys.
 // Unshaped values (a string "dns", an empty outbounds array, an
 // array with no shaped outbound, a wireguard_dns map with no
-// string in any value array) are left to the legacy path
+// string in any value array, a log object with no log-block
+// key — including an empty log object, which carries no keys
+// or values to lose) are left to the legacy path
 // exactly as before — the guard refuses only state it can
 // prove is single-format, so no legitimate legacy migration is
 // affected.
@@ -714,7 +717,7 @@ func singleFormatKeys(data []byte) []string {
 		}
 	}
 	if v, ok := obj.get("log"); ok {
-		if m, isObj := v.(*orderedObject); isObj && len(m.keys) > 0 && allLogKeys(m) {
+		if m, isObj := v.(*orderedObject); isObj && len(m.keys) > 0 && anyLogKey(m) {
 			keys = append(keys, "log")
 		}
 	}
@@ -768,17 +771,19 @@ func anyStringArray(m *orderedObject) bool {
 	return false
 }
 
-// allLogKeys reports whether every key in m is one of the four
+// anyLogKey reports whether any key in m is one of the four
 // log-block keys: the log section shape (see internal/profile/log.go).
-func allLogKeys(m *orderedObject) bool {
+// A single log-block key proves the object carries single-format
+// state, even alongside unknown keys; an object with no
+// log-block key carries none.
+func anyLogKey(m *orderedObject) bool {
 	for _, k := range m.keys {
 		switch k {
 		case "disabled", "level", "output", "timestamp":
-		default:
-			return false
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 // refuseSingleFormatBaseFile refuses a fresh migration when the

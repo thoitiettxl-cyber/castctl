@@ -629,7 +629,8 @@ single-format sections in single-config shape (an object
 `dns` section, an `outbounds`/`endpoints` array with any
 element an object carrying a non-empty string `type`, a
 `wireguard_dns` object with any value array containing any
-string, a `log` object whose keys are all log-block keys, or
+string, a `log` object with any key a log-block key
+(`disabled`, `level`, `output`, `timestamp`), or
 a string `default_profile`), a fresh migration would
 overwrite it and delete those sections. That shape refuses
 instead (exit 2, file unchanged, in dry-run and `--write`,
@@ -638,11 +639,15 @@ object so the file parses as a single config, or remove the
 sections by hand first. Unshaped values (a string `dns`, an
 empty `outbounds` array, an array with no shaped outbound
 such as a lone outbound object without a `type`, a
-`wireguard_dns` object with no string in any value array)
-keep the legacy path, as before; a `log` object mixing a
-log-block key with any other key also keeps the legacy path,
-because the `log` check quantifies over keys, not array
-elements. A file with a `profiles` key, including an empty
+`wireguard_dns` object with no string in any value array, a
+`log` object with no log-block key) keep the legacy path, as
+before. An empty `log` object (`{}`) also keeps the legacy
+path: it carries no keys or values, so there is no shaped
+state to lose — the same empty-section reasoning as an empty
+`outbounds` array. A `log` object mixing a log-block key
+with any other key now refuses, because the `log` check is
+existential over keys: one log-block key proves the section
+is single-format. A file with a `profiles` key, including an empty
 `profiles: {}`, takes the single-file path, where the
 zero-profile distribution refusal applies instead.
 
