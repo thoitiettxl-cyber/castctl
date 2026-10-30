@@ -9,12 +9,12 @@ import { Button } from '../src/components/ui/Button';
  * on the plain assertions (btn classes + wrapper span). See
  * ~/workspace/tmp/webui-buttons/red-first.log.
  *
- * Rendering uses react-dom/server (an existing dependency). There is no
- * DOM/render infra in this repo (no jsdom, no Testing Library), so no
- * test here can prove a ref lands on a live DOM node: the ref test below
- * only proves passing a ref renders without error. DOM attachment is
- * proved by the in-repo tsc probe (red-first.log) and carried to live
- * verification by the parent.
+ * Rendering uses react-dom/server (an existing dependency). jsdom is
+ * now a devDependency, and webui/tests/button-ref-dom.test.tsx proves
+ * a ref lands on a real DOM button (per-file jsdom environment) — but
+ * no test in THIS file can prove that: the ref test below only proves
+ * passing a ref renders without error. This file's tests remain
+ * SSR/markup assertions.
  */
 describe('Button variant="plain" (E2)', () => {
   it('renders no btn classes and only the caller className', () => {
