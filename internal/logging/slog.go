@@ -29,10 +29,12 @@ import (
 // attr value and the message pass SafeString (errors via
 // SafeErr, which redacts only the error's top-level Error()
 // text, not the wrapped chain). SafeString strips labelled
-// secret forms only: URL userinfo and every query value of a
-// URL-like substring, cookie/token/Bearer fragments, JSON
-// values under secret-looking keys, and bare key=value
-// fragments under the secret vocabulary (see safe.go). It
+// secret forms only: URL userinfo and every query value and
+// fragment of a URL-like substring, cookie/token/Bearer/Basic
+// credentials, JSON values under secret-looking keys
+// (double- and single-quoted, snake_case and camelCase), and
+// bare key=value and key: value fragments under the secret
+// vocabulary (see safe.go). It
 // does NOT strip a bare, unlabelled secret — a lone key, a
 // lone header value, a lone token with no label — because no
 // pattern distinguishes such a value from ordinary text.

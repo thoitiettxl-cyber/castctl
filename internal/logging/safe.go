@@ -57,31 +57,89 @@ import (
 // five named keys, the logging boundary trusts no query key.
 var reURL = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"']+`)
 
+// secretKeyVocab is the substring vocabulary for secret-looking
+// keys in JSON forms (double- and single-quoted). It covers
+// snake_case and camelCase spellings alike: a server that
+// answers {"privateKey": ...} is the same leak as one that
+// answers {"private_key": ...}.
+const secretKeyVocab = `password|token|secret|private_key|public_key|privateKey|publicKey|cookie|auth|vm_id|node_id|credential|passwd|apiKey|secretKey|sessionKey|clientSecret`
+
 // reJSONSecret matches a JSON string value under a secret-looking
 // key in free-form text: "key": "value". The key match is a
 // substring match over the secret vocabulary (password, token,
-// secret, key, cookie, auth, vm_id, node_id, credential, passwd),
+// secret, key, cookie, auth, vm_id, node_id, credential, passwd,
+// plus camelCase forms),
 // deliberately broader than redact.Value's exact-key rule: this
 // runs on unstructured text where a key may carry a prefix or
 // suffix, and over-redacting a log line is safe while leaking one
 // is not. Non-secret string values are left byte-identical.
-var reJSONSecret = regexp.MustCompile(`(?i)("(?:[^"]*(?:password|token|secret|private_key|public_key|cookie|auth|vm_id|node_id|credential|passwd)[^"]*)"\s*:\s*")[^"]*`)
+var reJSONSecret = regexp.MustCompile(`(?i)("(?:[^"]*(?:` + secretKeyVocab + `)[^"]*)"\s*:\s*")[^"]*`)
+
+// reJSONSecretSingle is the single-quoted analogue: a server
+// answering {'token': '...'} leaks exactly like the
+// double-quoted form. The key and the value quote may each be
+// single or double; the closing quote survives the match, so
+// the replacement leaves it in place.
+var reJSONSecretSingle = regexp.MustCompile(`(?i)('(?:[^']*(?:` + secretKeyVocab + `)[^']*)'\s*:\s*['"])[^'"]*`)
+
+// secretLabelVocab is the vocabulary for bare label forms in
+// free-form text: key=value fragments and key: value pairs.
+// It is the reKeyValue vocabulary widened with the bare
+// labels auth, secret, credential, and api_key, which carry
+// no suffix to match on.
+const secretLabelVocab = `private_key|privateKey|public_key|publicKey|preshared_key|pre_shared_key|password|passwd|auth_token|access_token|hatch_token|api_token|session_key|secret_key|client_secret|token|session|cookie|auth|secret|credential|api_key|apiKey|apikey|vm_id|node_id`
+
+// reKeyColon matches a bare label: value pair in free-form
+// text (private_key: ..., token: ...) — the colon spelling of
+// the key=value fragment. Quoted keys (JSON forms) do not
+// match: the quote sits between the label and the colon, and
+// those forms are handled by reJSONSecret/reJSONSecretSingle
+// first.
+var reKeyColon = regexp.MustCompile(`(?i)\b(` + secretLabelVocab + `)\s*:\s*["']?([^\s,;\"'}]+)["']?`)
 
 // reKeyValue matches a bare key=value fragment in free-form text
 // for the secret vocabulary (vm_id, node_id, private key,
-// preshared key, password, token-like keys, session, cookie).
+// preshared key, password, token-like keys, session, cookie,
+// plus the bare labels auth, secret, credential, api_key).
 // The label is kept, the value is replaced. This is the free-text
 // analogue of redact.Value's key rule; it runs AFTER
 // redact.String so already redacted values (brackets outside the
 // value alphabet) stay put. public_key is NOT in this pattern:
 // it is handled by rePublicKey first, which keeps the first 8
 // characters instead of redacting wholesale.
-var reKeyValue = regexp.MustCompile(`(?i)\b(vm_id|node_id|private_key|preshared_key|pre_shared_key|password|passwd|auth_token|access_token|hatch_token|api_token|token|session|cookie)\s*=\s*[^\s;&,]*`)
+var reKeyValue = regexp.MustCompile(`(?i)\b(vm_id|node_id|private_key|privateKey|preshared_key|pre_shared_key|password|passwd|auth_token|access_token|hatch_token|api_token|session_key|secret_key|client_secret|token|session|cookie|auth|secret|credential|api_key|apiKey|apikey)\s*=\s*[^\s;&,]*`)
 
-// rePublicKey matches a bare public_key=value fragment. The
+// rePublicKey matches a bare public_key=value fragment (either
+// spelling). The
 // value is shortened to its first 8 characters plus an
 // ellipsis, never logged in full (see the package doc).
-var rePublicKey = regexp.MustCompile(`(?i)\b(public_key)\s*=\s*([^\s;&,]*)`)
+var rePublicKey = regexp.MustCompile(`(?i)\b(public_?key)\s*=\s*([^\s;&,]*)`)
+
+// reAuthBasic matches a labelled Basic credential:
+// Authorization: Basic <value> (or Proxy-Authorization).
+// redact.String handles Bearer only; Basic is the same leak.
+var reAuthBasic = regexp.MustCompile(`(?i)((?:proxy-)?authorization:\s*basic\s+)\S+`)
+
+// reBareBasic matches an unlabelled Basic credential. The token
+// must look base64-like (at least 8 characters) AND contain a
+// digit, so ordinary prose ("basic training") is never
+// redacted; the digit check lives in redactBareBasicMatch.
+var reBareBasic = regexp.MustCompile(`(?i)\b(basic\s+)([A-Za-z0-9_+\-/=]{8,})`)
+
+// rePctQuery matches a percent-encoded query separator in
+// free-form text: ?auth_token%3D<value> (or %253D,
+// double-encoded). url.Parse decodes %3D into the key, so the
+// URL pass cannot see the separator; this pass catches the
+// bare form (and any %3D the URL pass left behind).
+var rePctQuery = regexp.MustCompile(`(?i)([?&][A-Za-z0-9_.\-]*(?:token|secret|auth|session|cookie|credential|password|passwd|key)[A-Za-z0-9_.\-]*)(?:%253d|%3d)[^\s&;,'"]*`)
+
+// reBareFragment matches a bare URL fragment value: #<token>
+// with no key, in free-form text. The token must be at least
+// 16 characters and contain a digit (see
+// redactBareFragmentMatch), so ordinary hashtags and short
+// anchors survive. URL fragments inside a scheme:// URL are
+// handled by redactURLAllQuery first.
+var reBareFragment = regexp.MustCompile(`#[A-Za-z0-9_\-./=]{16,}`)
 
 // reWGPeer matches the sing-box device logger's abbreviated peer
 // form, peer(ABCD…WXYZ): four characters, an ellipsis, four
@@ -102,14 +160,17 @@ func wgKeyPrefix(key string) string {
 }
 
 // SafeString strips credentials from a free-form string for
-// logging: every query value of every URL-like substring first
-// (URL parsing must see the raw userinfo/query, before
-// redact.String rewrites them into unparseable forms), then
-// redact.String (URL userinfo, named token query keys, cookie
-// fragments, Bearer tokens), then secret-keyed JSON string values,
-// then bare secret key=value fragments. It is idempotent.
-// Ordinary prose, hostnames, and non-secret fields survive
-// byte-identical.
+// logging: every query value and fragment of every URL-like
+// substring first (URL parsing must see the raw userinfo/query,
+// before redact.String rewrites them into unparseable forms),
+// then percent-encoded query separators, then redact.String
+// (URL userinfo, named token query keys, cookie fragments,
+// Bearer tokens), then secret-keyed JSON string values
+// (double- and single-quoted, snake_case and camelCase),
+// then bare secret label: value pairs, bare secret key=value
+// fragments, Basic credentials, and bare #fragment values. It
+// is idempotent. Ordinary prose, hostnames, and non-secret
+// fields survive byte-identical.
 // redactJSONSecretMatch redacts one secret-keyed JSON string
 // value matched by reJSONSecret. The label and spacing survive
 // byte-identical; the value becomes [redacted] — except a
@@ -125,10 +186,79 @@ func redactJSONSecretMatch(m string) string {
 	prefix := m[:loc[3]]
 	key := strings.ToLower(m[loc[2]:loc[3]])
 	value := m[loc[3]:]
-	if strings.Contains(key, "public_key") && !strings.Contains(key, "private_key") {
+	if isPublicKeyLabel(key) {
 		return prefix + wgKeyPrefix(value)
 	}
 	return prefix + "[redacted]"
+}
+
+// redactJSONSecretSingleMatch is redactJSONSecretMatch for the
+// single-quoted form: same prefix rule, same wholesale rule.
+func redactJSONSecretSingleMatch(m string) string {
+	loc := reJSONSecretSingle.FindStringSubmatchIndex(m)
+	if loc == nil || len(loc) < 4 {
+		return "[redacted]"
+	}
+	prefix := m[:loc[3]]
+	key := strings.ToLower(m[loc[2]:loc[3]])
+	value := m[loc[3]:]
+	if isPublicKeyLabel(key) {
+		return prefix + wgKeyPrefix(value)
+	}
+	return prefix + "[redacted]"
+}
+
+// isPublicKeyLabel reports whether a lower-cased key denotes a
+// WireGuard public key (either spelling), excluding the
+// private-key spellings, which contain "private".
+func isPublicKeyLabel(key string) bool {
+	if strings.Contains(key, "private_key") || strings.Contains(key, "privatekey") {
+		return false
+	}
+	return strings.Contains(key, "public_key") || strings.Contains(key, "publickey")
+}
+
+// redactColonSecretMatch redacts one bare label: value pair.
+// The label survives with normalised ": " spacing; a public-key
+// label keeps its first-8-char prefix, every other label
+// redacts wholesale.
+func redactColonSecretMatch(m string) string {
+	loc := reKeyColon.FindStringSubmatchIndex(m)
+	if loc == nil || len(loc) < 6 {
+		return m
+	}
+	label := m[loc[2]:loc[3]]
+	value := m[loc[4]:loc[5]]
+	lower := strings.ToLower(label)
+	if lower == "public_key" || lower == "publickey" {
+		return label + ": " + wgKeyPrefix(value)
+	}
+	return label + ": [redacted]"
+}
+
+// redactBareBasicMatch redacts an unlabelled Basic credential
+// only when the token contains a digit (base64 credentials
+// do; prose words do not). The label spelling survives.
+func redactBareBasicMatch(m string) string {
+	loc := reBareBasic.FindStringSubmatchIndex(m)
+	if loc == nil || len(loc) < 6 {
+		return m
+	}
+	if !strings.ContainsAny(m[loc[4]:loc[5]], "0123456789") {
+		return m
+	}
+	return m[:loc[3]] + "[redacted]"
+}
+
+// redactBareFragmentMatch redacts a bare #fragment value only
+// when it contains a digit: a bare fragment carrying a token
+// (a reset link, a hash) is a credential; a word hashtag is
+// not.
+func redactBareFragmentMatch(m string) string {
+	if !strings.ContainsAny(m, "0123456789") {
+		return m
+	}
+	return "#[redacted]"
 }
 
 func SafeString(s string) string {
@@ -136,8 +266,11 @@ func SafeString(s string) string {
 		return s
 	}
 	s = reURL.ReplaceAllStringFunc(s, redactURLAllQuery)
+	s = rePctQuery.ReplaceAllString(s, `${1}=[redacted]`)
 	s = redact.String(s)
 	s = reJSONSecret.ReplaceAllStringFunc(s, redactJSONSecretMatch)
+	s = reJSONSecretSingle.ReplaceAllStringFunc(s, redactJSONSecretSingleMatch)
+	s = reKeyColon.ReplaceAllStringFunc(s, redactColonSecretMatch)
 	s = rePublicKey.ReplaceAllStringFunc(s, func(m string) string {
 		loc := rePublicKey.FindStringSubmatchIndex(m)
 		if loc == nil || len(loc) < 6 {
@@ -146,17 +279,25 @@ func SafeString(s string) string {
 		return m[:loc[4]] + wgKeyPrefix(m[loc[4]:loc[5]])
 	})
 	s = reKeyValue.ReplaceAllString(s, `${1}=[redacted]`)
+	s = reAuthBasic.ReplaceAllString(s, `${1}[redacted]`)
+	s = reBareBasic.ReplaceAllStringFunc(s, redactBareBasicMatch)
+	s = reBareFragment.ReplaceAllStringFunc(s, redactBareFragmentMatch)
 	s = reWGPeer.ReplaceAllString(s, `peer($1…)`)
 	return s
 }
 
 // redactURLAllQuery returns raw with every query value replaced by
-// [redacted], userinfo replaced by [redacted], and a key-bearing
-// fragment replaced by [redacted]. Scheme/host/path survive. The
-// query is rebuilt by hand (not Values.Encode) so the marker stays
-// the literal "[redacted]" instead of its percent-encoded form. An
-// unparseable URL is replaced wholesale: a log line must never
-// carry a half-parsed credential-bearing string.
+// [redacted], userinfo replaced by [redacted], and any fragment
+// replaced by [redacted] (a fragment carries credentials as
+// readily as a query value; a bare #token has no key to match
+// on). Scheme/host/path survive. The query is rebuilt by hand
+// (not Values.Encode) so the marker stays the literal
+// "[redacted]" instead of its percent-encoded form. A query
+// separator may be a literal "=" or a percent-encoded "%3D"
+// (or double-encoded "%253D"): url.Parse decodes "%3D" into
+// the key, so the separator is found on the raw query text
+// before decoding. An unparseable URL is replaced wholesale: a
+// log line must never carry a half-parsed credential-bearing string.
 func redactURLAllQuery(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -171,10 +312,21 @@ func redactURLAllQuery(raw string) string {
 		// sorted order for determinism).
 		keys := make([]string, 0)
 		seen := map[string]bool{}
-		for k := range u.Query() {
-			if !seen[k] {
-				seen[k] = true
-				keys = append(keys, k)
+		for _, seg := range strings.Split(u.RawQuery, "&") {
+			if seg == "" {
+				continue
+			}
+			keyPart := seg
+			if idx := querySepIndex(seg); idx >= 0 {
+				keyPart = seg[:idx]
+			}
+			key, err := url.QueryUnescape(keyPart)
+			if err != nil {
+				key = keyPart
+			}
+			if !seen[key] {
+				seen[key] = true
+				keys = append(keys, key)
 			}
 		}
 		sort.Strings(keys)
@@ -184,10 +336,28 @@ func redactURLAllQuery(raw string) string {
 		}
 		u.RawQuery = strings.Join(parts, "&")
 	}
-	if strings.Contains(u.Fragment, "=") {
+	if u.Fragment != "" {
 		u.Fragment = "[redacted]"
 	}
 	return u.String()
+}
+
+// querySepIndex returns the index of the first query separator
+// in one raw query segment: a literal "=", a percent-encoded
+// "%3D", or a double-encoded "%253D". -1 when the segment has
+// no separator (a bare key, whose value is empty).
+func querySepIndex(seg string) int {
+	best := -1
+	if idx := strings.IndexByte(seg, '='); idx >= 0 {
+		best = idx
+	}
+	lower := strings.ToLower(seg)
+	for _, sep := range []string{"%253d", "%3d"} {
+		if idx := strings.Index(lower, sep); idx >= 0 && (best < 0 || idx < best) {
+			best = idx
+		}
+	}
+	return best
 }
 
 // reHostSafe matches a bare host:port host component — a DNS

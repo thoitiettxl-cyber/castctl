@@ -260,3 +260,96 @@ func TestSafeErrNilAndPlain(t *testing.T) {
 	err := errors.New("handshake: wss://gateway.example.invalid/v1/noise?vm_id=" + fixVMID + "&auth_token=" + fixHatchToken)
 	assertNoFixture(t, SafeErr(err))
 }
+
+// TestSafeStringTwelveServerShapes drives the 12 server-text
+// shapes from the loop-2 red-team A4 drive through SafeString.
+// Shapes 1-9 survived the loop-2 boundary; shapes 10-12 are
+// the ones the drive already showed stripped, derived here
+// from the code paths that strip them (reJSONSecret,
+// reKeyValue, redact.String Bearer) because no loop-2 report
+// file survives in ~/workspace/tmp/logging/ to recover their
+// exact spellings from — they are named explicitly, not
+// invented as new shapes. Every shape's expected value is a
+// literal fixture below, never recomputed from SafeString.
+// The publicKey shapes keep the first-8-chars prefix rule:
+// the FULL value must be absent, the prefix may survive.
+func TestSafeStringTwelveServerShapes(t *testing.T) {
+	t.Parallel()
+	const (
+		colonVal  = "LOGFIX-COLON-2c6e88"
+		singleVal = "LOGFIX-SINGLE-51bc07"
+		basicVal  = "QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
+		pctVal    = "LOGFIX-PCT-83af10"
+		fragVal   = "LOGFIX-FRAG-9d2e41"
+		authVal   = "LOGFIX-AUTH-77d4e9"
+		secretVal = "LOGFIX-SECRET-22d9f0"
+	)
+	shapes := []struct {
+		name       string
+		inputs     []string
+		forbidden  []string // full values that must be absent
+		wantPrefix string   // first-8 prefix allowed to survive, else ""
+		wantMarker bool     // a [redacted] marker must appear
+	}{
+		{"camelCase-privateKey-JSON",
+			[]string{`{"privateKey": "` + fixWGPriv + `"}`},
+			[]string{fixWGPriv}, "", true},
+		{"camelCase-publicKey-JSON",
+			[]string{`{"publicKey": "` + fixWGPub + `"}`},
+			[]string{fixWGPub}, fixWGPub[:8], false},
+		{"colon-form",
+			[]string{"private_key: " + colonVal, "privateKey: " + colonVal},
+			[]string{colonVal}, "", true},
+		{"single-quote-JSON",
+			[]string{`{'token': '` + singleVal + `'}`},
+			[]string{singleVal}, "", true},
+		{"authorization-basic",
+			[]string{"Authorization: Basic " + basicVal, "Basic " + basicVal + " rejected"},
+			[]string{basicVal}, "", true},
+		{"percent-encoded-equals-query",
+			[]string{"https://example.invalid/cb?auth_token%3D" + pctVal, "?auth_token%3D" + pctVal},
+			[]string{pctVal}, "", true},
+		{"bare-fragment",
+			[]string{"https://example.invalid/reset#" + fragVal, "see #" + fragVal},
+			[]string{fragVal}, "", false},
+		{"bare-auth-equals",
+			[]string{"auth=" + authVal},
+			[]string{authVal}, "", true},
+		{"bare-secret-equals",
+			[]string{"secret=" + secretVal, "api_key=" + secretVal},
+			[]string{secretVal}, "", true},
+		{"double-quote-JSON-token (derived: already stripped)",
+			[]string{`{"token": "` + fixAccessToken + `"}`},
+			[]string{fixAccessToken}, "", true},
+		{"bare-keyvalue-token (derived: already stripped)",
+			[]string{"token=" + fixAccessToken},
+			[]string{fixAccessToken}, "", true},
+		{"bearer (derived: already stripped)",
+			[]string{"Authorization: Bearer " + fixBearerVal},
+			[]string{fixBearerVal}, "", true},
+	}
+	for _, sh := range shapes {
+		t.Run(sh.name, func(t *testing.T) {
+			for _, in := range sh.inputs {
+				got := SafeString(in)
+				for _, v := range sh.forbidden {
+					if strings.Contains(got, v) {
+						t.Errorf("SafeString(%q) = %q, want full value %q absent", in, got, v)
+					}
+				}
+				if sh.wantPrefix != "" && !strings.Contains(got, sh.wantPrefix) {
+					t.Errorf("SafeString(%q) = %q, want the 8-char public-key prefix %q present", in, got, sh.wantPrefix)
+				}
+				if sh.wantMarker && !strings.Contains(got, "[redacted]") {
+					t.Errorf("SafeString(%q) = %q, want a [redacted] marker", in, got)
+				}
+				// Fragment marker: a URL fragment is
+				// percent-encoded by url.String, so the
+				// marker may appear in either spelling.
+				if sh.name == "bare-fragment" && !strings.Contains(got, "#[redacted]") && !strings.Contains(got, "#%5Bredacted%5D") {
+					t.Errorf("SafeString(%q) = %q, want a redacted fragment marker", in, got)
+				}
+			}
+		})
+	}
+}

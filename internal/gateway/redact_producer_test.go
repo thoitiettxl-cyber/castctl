@@ -20,6 +20,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -116,5 +117,81 @@ func TestServerPayloadRedactedAtProducer(t *testing.T) {
 	assertProducerRedacted(t, gwErr.Payload)
 	if !strings.Contains(gwErr.Payload, "gateway.example.invalid") {
 		t.Errorf("payload over-redacted: %q", gwErr.Payload)
+	}
+}
+
+// TestFetchHatchToken403ShapesRedacted drives the same 12
+// server-text shapes through the real FetchHatchToken 403
+// path: a hermetic fake gateway returns 403 with the shape as
+// the body, and the AuthError text must carry no full fixture
+// value. Bodies stay well under FetchHatchToken's 160-rune
+// truncation so truncation can never explain an absence. The
+// publicKey shape keeps the first-8-chars prefix rule. Shape
+// names and forms match TestSafeStringTwelveServerShapes;
+// shapes 10-12 are the derived already-stripped ones, named
+// explicitly there.
+func TestFetchHatchToken403ShapesRedacted(t *testing.T) {
+	t.Parallel()
+	const (
+		colonVal  = "LOGFIX-GWCOLON-2c6e88"
+		singleVal = "LOGFIX-GWSINGLE-51bc07"
+		basicVal  = "QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
+		pctVal    = "LOGFIX-GWPCT-83af10"
+		fragVal   = "LOGFIX-GWFRAG-9d2e41"
+		authVal   = "LOGFIX-GWAUTH-77d4e9"
+		secretVal = "LOGFIX-GWSECRET-22d9f0"
+		privVal   = "LOGFIX-GWPRIV-6e19d0"
+		pubVal    = "LOGFIX-GWPUB-4b77c2"
+		tokenVal  = "LOGFIX-GWAT-83af10"
+		bearerVal = "LOGFIX-GWBEARER-1a8f33"
+	)
+	shapes := []struct {
+		name       string
+		body       string
+		forbidden  []string
+		wantPrefix string
+	}{
+		{"camelCase-privateKey-JSON", `{"privateKey": "` + privVal + `"}`, []string{privVal}, ""},
+		{"camelCase-publicKey-JSON", `{"publicKey": "` + pubVal + `"}`, []string{pubVal}, pubVal[:8]},
+		{"colon-form", "private_key: " + colonVal, []string{colonVal}, ""},
+		{"single-quote-JSON", `{'token': '` + singleVal + `'}`, []string{singleVal}, ""},
+		{"authorization-basic", "Authorization: Basic " + basicVal, []string{basicVal}, ""},
+		{"percent-encoded-equals-query", "https://example.invalid/cb?auth_token%3D" + pctVal, []string{pctVal}, ""},
+		{"bare-fragment", "https://example.invalid/reset#" + fragVal, []string{fragVal}, ""},
+		{"bare-auth-equals", "auth=" + authVal, []string{authVal}, ""},
+		{"bare-secret-equals", "secret=" + secretVal, []string{secretVal}, ""},
+		{"double-quote-JSON-token (derived)", `{"token": "` + tokenVal + `"}`, []string{tokenVal}, ""},
+		{"bare-keyvalue-token (derived)", "token=" + tokenVal, []string{tokenVal}, ""},
+		{"bearer (derived)", "Authorization: Bearer " + bearerVal, []string{bearerVal}, ""},
+	}
+	for _, sh := range shapes {
+		t.Run(sh.name, func(t *testing.T) {
+			body := sh.body
+			handler := gatewaytest.HandlerRoundTripper(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(403)
+				_, _ = w.Write([]byte(body))
+			}))
+			client := &http.Client{Transport: handler}
+			_, err := FetchHatchToken(context.Background(), client, fakeCookie, "AT", "vm-1")
+			if err == nil {
+				t.Fatal("FetchHatchToken(403) = nil, want an AuthError")
+			}
+			var ae *conn.AuthError
+			if !errors.As(err, &ae) {
+				t.Fatalf("err = %T, want *conn.AuthError", err)
+			}
+			got := err.Error()
+			if !strings.Contains(got, "403") {
+				t.Errorf("error %q, want the 403 status (proves the fake body entered the path)", got)
+			}
+			for _, v := range sh.forbidden {
+				if strings.Contains(got, v) {
+					t.Errorf("FetchHatchToken error %q contains fixture value %q", got, v)
+				}
+			}
+			if sh.wantPrefix != "" && !strings.Contains(got, sh.wantPrefix) {
+				t.Errorf("FetchHatchToken error %q, want the 8-char public-key prefix %q present", got, sh.wantPrefix)
+			}
+		})
 	}
 }

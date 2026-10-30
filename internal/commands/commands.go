@@ -33,6 +33,7 @@ import (
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 	"github.com/thoitiettxl-cyber/castctl/internal/deliver"
 	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
 	"github.com/thoitiettxl-cyber/castctl/internal/redact"
 )
@@ -233,6 +234,15 @@ func (e *typedAuthError) Unwrap() error { return e.Err }
 // print one JSON line. The Python exit-code contract is preserved:
 // AuthError 2, GatewayError 3, ValueError-equivalent 2, TimeoutError
 // 4, everything else 1, signal cancellation 130.
+//
+// Every message passes the STRONG redaction boundary
+// (logging.SafeString), not redact.String alone: server text
+// reaching this path unredacted (a 403 body, a gateway payload)
+// must be stripped in every spelling SafeString covers
+// (camelCase JSON, colon forms, Basic, percent-encoded
+// separators, bare fragments, bare auth/secret labels). The
+// ExportError guidance carries only placeholders and passes
+// the same boundary.
 func classifyError(err error) (int, string) {
 	if err == nil {
 		return 0, ""
@@ -240,68 +250,68 @@ func classifyError(err error) (int, string) {
 	var export *deliver.ExportError
 	if errors.As(err, &export) {
 		// Guidance-only, exit 1, guidance text verbatim.
-		return export.ExitCode(), redact.String(export.Error())
+		return export.ExitCode(), logging.SafeString(export.Error())
 	}
 	var typed *typedAuthError
 	if errors.As(err, &typed) {
-		msg := redact.String(typed.Err.Error())
+		msg := logging.SafeString(typed.Err.Error())
 		b, _ := json.Marshal(map[string]string{"type": typed.Type, "error": msg})
 		return typed.Code, string(b)
 	}
 	var ce *cmdError
 	if errors.As(err, &ce) {
 		if ce.Type != "" {
-			msg := redact.String(ce.Error())
+			msg := logging.SafeString(ce.Error())
 			b, _ := json.Marshal(map[string]string{"type": ce.Type, "error": msg})
 			return ce.Code, string(b)
 		}
 		if msg := ce.Error(); msg != "" {
-			return ce.Code, "castctl: " + redact.String(msg)
+			return ce.Code, "castctl: " + logging.SafeString(msg)
 		}
 		return ce.Code, ""
 	}
 	var auth *conn.AuthError
 	if errors.As(err, &auth) {
-		msg := redact.String(auth.Error())
+		msg := logging.SafeString(auth.Error())
 		b, _ := json.Marshal(map[string]string{"type": "auth_failed", "error": msg})
 		return 2, string(b)
 	}
 	var gw *conn.GatewayError
 	if errors.As(err, &gw) {
-		return 3, "castctl: " + redact.String(gw.Error())
+		return 3, "castctl: " + logging.SafeString(gw.Error())
 	}
 	var reassembly *gateway.ReassemblySizeError
 	if errors.As(err, &reassembly) {
-		return 3, "castctl: " + redact.String(reassembly.Error())
+		return 3, "castctl: " + logging.SafeString(reassembly.Error())
 	}
 	var tooMany *gateway.TooManyUnfinishedGroupsError
 	if errors.As(err, &tooMany) {
-		return 3, "castctl: " + redact.String(tooMany.Error())
+		return 3, "castctl: " + logging.SafeString(tooMany.Error())
 	}
 	var timeout *conn.TimeoutError
 	if errors.As(err, &timeout) {
-		return 4, "castctl: " + redact.String(timeout.Error())
+		return 4, "castctl: " + logging.SafeString(timeout.Error())
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return 4, "castctl: timeout: " + redact.String(err.Error())
+		return 4, "castctl: timeout: " + logging.SafeString(err.Error())
 	}
 	if errors.Is(err, context.Canceled) {
 		return 130, ""
 	}
 	var perr *profile.Error
 	if errors.As(err, &perr) {
-		return profile.ExitCode(err), "castctl: " + redact.String(perr.Error())
+		return profile.ExitCode(err), "castctl: " + logging.SafeString(perr.Error())
 	}
 	var verr *gateway.ValidationError
 	if errors.As(err, &verr) {
-		return 2, "castctl: " + redact.String(verr.Error())
+		return 2, "castctl: " + logging.SafeString(verr.Error())
 	}
 	// Errors carrying their own exit code (profile errors not typed
 	// above, deliver errors) keep it; everything else is 1.
 	if ec, ok := err.(interface{ ExitCode() int }); ok {
-		return ec.ExitCode(), "castctl: " + redact.String(err.Error())
+		return ec.ExitCode(), "castctl: " + logging.SafeString(err.Error())
 	}
-	return 1, "castctl: " + redact.String(err.Error())
+	return 1, "castctl: " + logging.SafeString(err.Error())
 }
 
 // classifyConnError wraps a failure from conn.Muse calls (connect,
