@@ -338,8 +338,23 @@ optional and runtime-detected, and the no-browser fallback is
 `auth import`.
 
 Release targets are Linux only: `linux/amd64` and `linux/arm64`,
-`CGO_ENABLED=1` on a GLIBC 2.17 (manylinux2014) baseline, with
-plugin support. There are no Android, Windows, or macOS builds.
+dynamically linked (`CGO_ENABLED=1`) on a GLIBC 2.17 (manylinux2014)
+baseline. Each architecture also ships a `_no-plugin` static build
+(see Release assets below). The plugin loader is not implemented,
+so neither build loads plugins. There are no Android, Windows, or
+macOS builds.
+
+### Release assets
+
+- `castctl_<version>_linux_<arch>.tar.gz` is the default Linux build: dynamically linked against glibc, built against a GLIBC 2.17 baseline. The plugin loader is not implemented, so it does not load plugins.
+- `castctl_<version>_linux_<arch>_no-plugin.tar.gz` is the portable Linux build for musl-based or older systems such as OpenWrt: statically linked (`CGO_ENABLED=0`). The plugin loader is not implemented, so it does not load plugins either.
+
+`<arch>` is `amd64` or `arm64`. Each archive contains the `castctl`
+binary plus `LICENSE`, `LICENSE.sing-box`, `NOTICE`, and `README.md`. When all
+four builds succeed, the release also carries a `checksums.txt`
+(SHA-256, sorted by file name) covering the four archives; it is
+uploaded by the checksums job after the builds, so a release whose
+builds fail may lack it.
 
 ## Gateway frame reassembly caps
 

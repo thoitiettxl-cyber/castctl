@@ -40,7 +40,36 @@ import (
 // Version is the Go port version, mirroring the Python 0.6.1 contract
 // it ports. The canonical source is go/cmd/castctl/main.go; tests pin
 // the --version output format "castctl <version>".
-const Version = "0.6.1"
+//
+// Version, Commit, and BuildDate are vars (not consts) so release
+// builds can stamp them with go build -X:
+//
+//	-X github.com/thoitiettxl-cyber/castctl/internal/commands.Version=...
+//	-X github.com/thoitiettxl-cyber/castctl/internal/commands.Commit=...
+//	-X github.com/thoitiettxl-cyber/castctl/internal/commands.BuildDate=...
+//
+// Defaults keep the pinned output "castctl 0.6.1": Commit and
+// BuildDate are empty unless stamped, and versionString() then
+// returns the bare version.
+var Version = "0.6.1"
+
+// Commit is the stamped source commit (short hash) of a release
+// build, empty for unstamped builds.
+var Commit = ""
+
+// BuildDate is the stamped UTC build date (RFC 3339) of a release
+// build, empty for unstamped builds.
+var BuildDate = ""
+
+// versionString returns the --version payload: the bare version by
+// default, with commit and build date appended in parentheses when
+// stamped (e.g. "0.6.1 (abc1234 2026-10-30T12:00:00Z)").
+func versionString() string {
+	if Commit == "" && BuildDate == "" {
+		return Version
+	}
+	return Version + " (" + strings.TrimSpace(Commit+" "+BuildDate) + ")"
+}
 
 // PromptFunc is the injectable prompt seam (item 15). The default
 // reads one line from stdin. Tests inject fake answers; production
@@ -779,7 +808,7 @@ func scanGlobal(args []string, env *Env) (*globalOpts, string, []string, int, bo
 				fmt.Fprintf(env.stderr(), "castctl: argument --version: ignored explicit argument %q\n", strings.SplitN(tok, "=", 2)[1])
 				return g, "", nil, 2, true
 			}
-			fmt.Fprintf(env.stdout(), "castctl %s\n", Version)
+			fmt.Fprintf(env.stdout(), "castctl %s\n", versionString())
 			return g, "", nil, 0, true
 		case tok == "--help" || tok == "-h" || tok == "--hel":
 			fmt.Fprint(env.stdout(), globalHelpText)
@@ -833,7 +862,7 @@ func scanGlobal(args []string, env *Env) (*globalOpts, string, []string, int, bo
 				fmt.Fprint(env.stdout(), globalHelpText)
 				return g, "", nil, 0, true
 			} else if strings.HasPrefix("version", name) {
-				fmt.Fprintf(env.stdout(), "castctl %s\n", Version)
+				fmt.Fprintf(env.stdout(), "castctl %s\n", versionString())
 				return g, "", nil, 0, true
 			} else {
 				fmt.Fprintf(env.stderr(), "castctl: unrecognized argument: %s\n", tok)

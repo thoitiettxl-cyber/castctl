@@ -1,0 +1,56 @@
+# Tests: `go test -race` untagged AND with `with_utls`.
+#
+# This is deliberately narrower than the canonical command in
+# docs/development.md (`go test -race -tags
+# with_utls,with_quic,with_wireguard,with_gvisor ./...`): the
+# `with_quic` / `with_wireguard` / `with_gvisor` tag-gated tests do
+# not run here. Extending the matrix is a separate decision.
+# The untagged leg passes by design: without `with_utls`, the 6
+# uTLS subtests skip (see README.md).
+#
+# No artifact steps of any kind in this file: test logs are the
+# output. `setup-go` caching below uses the Actions cache for Go
+# modules and the build cache; cache is NOT artifact storage.
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: go test -race (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tag: ''
+            label: untagged
+          - tag: 'with_utls'
+            label: with_utls
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          # Go module/build cache only. Cache is NOT artifact storage:
+          # nothing is stored as a downloadable run artifact.
+          cache: true
+      - name: go test -race
+        shell: bash
+        env:
+          TAGS: ${{ matrix.tag }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${TAGS}" ]]; then
+            go test -race -tags "${TAGS}" ./...
+          else
+            go test -race ./...
+          fi

@@ -306,6 +306,12 @@ with the effective source shown (`profile` / `wireguard` /
 profile's outbound. A profile whose outbound is down must not
 break another profile's `profile test`.
 
+[UNVERIFIED-LIVE: sandbox blocks raw TCP] DNS live traversal is
+NOT proven. The sandbox intercepts raw outbound TCP, so the
+earlier `profile test` failure is not evidence against
+castctl/config. Outside-sandbox live proof is deferred to the
+end-to-end core test step; `other_tcp` is NOT flipped.
+
 ## Migration
 
 The legacy per-profile layout — flat `config.json` files in

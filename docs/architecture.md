@@ -55,12 +55,15 @@ deliberately not taken are recorded in docs/provenance.md §2.
 castctl is a general tool, not VM-only. Supported run targets: Linux only — linux/amd64 and linux/arm64 (Debian/server Linux host). No VM assumptions: no hard-coded paths,
 no launcher, no agent-browser, no sandbox.
 
-This supersedes the earlier five-target / `_no-plugin` plan: release
-targets are Linux only (above), with `CGO_ENABLED=1`, a GLIBC 2.17
-baseline (manylinux2014), and plugin support. There are no
-`_no-plugin`, Android, Windows, or macOS builds. The release-builds
-work is a separate PR planned after the migration, reusing
-CLIProxyAPI's release.yaml.
+This supersedes the earlier five-target plan: release targets are
+Linux only (above). The default build is dynamically linked
+(`CGO_ENABLED=1`) on a GLIBC 2.17 baseline (manylinux2014); each
+architecture also ships a `_no-plugin` static build
+(`CGO_ENABLED=0`). The plugin loader is not implemented, so
+neither build loads plugins. There are no Android, Windows, or
+macOS builds. Release builds are produced by
+`.github/workflows/release.yaml`, adapted from CLIProxyAPI's
+release.yaml (see docs/provenance.md §2).
 
 Config location: `--config`, then `CASTCTL_CONFIG`, then `XDG_CONFIG_HOME`, via `os.UserConfigDir` semantics. Directory fallback: when the `castctl` home does not exist but the pre-migration `muse-cli` home does, the old home is used with a one-line warning; nothing is moved or deleted (see README.md).
 
