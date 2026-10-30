@@ -174,12 +174,13 @@ func (e *Env) buildRuntime(ctx context.Context, loc *profile.ConfigLocation, pro
 }
 
 // newConnector builds the gateway connector for a dialer, honouring
-// the Env test hook.
-func (e *Env) newConnector(dialer gateway.OutboundDialer) conn.Connector {
+// the Env test hook. Extra options come first so ConnectorOpts
+// (the test hook) can override them.
+func (e *Env) newConnector(dialer gateway.OutboundDialer, extra ...gateway.ConnectorOption) conn.Connector {
 	if e.NewConnector != nil {
-		return e.NewConnector(dialer, e.ConnectorOpts...)
+		return e.NewConnector(dialer, append(extra, e.ConnectorOpts...)...)
 	}
-	return gateway.NewConnector(dialer, e.ConnectorOpts...)
+	return gateway.NewConnector(dialer, append(extra, e.ConnectorOpts...)...)
 }
 
 // cmdError is an error with a fixed exit code. Handlers return it for

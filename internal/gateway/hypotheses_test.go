@@ -1095,7 +1095,7 @@ func TestWSUpgradeTimeoutIsSeparate(t *testing.T) {
 		}
 	}()
 	start := time.Now()
-	_, _, _, err = dialWebSocket(context.Background(), &tcpDialer{addr: ln.Addr().String()}, "ws://127.0.0.1/v1/noise", false, 200*time.Millisecond)
+	_, _, _, err = dialWebSocket(context.Background(), &tcpDialer{addr: ln.Addr().String()}, "ws://127.0.0.1/v1/noise", false, 200*time.Millisecond, nil)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("dialWebSocket against a silent listener: nil error")
@@ -1129,7 +1129,7 @@ func TestNoiseHandshakeTimeoutIsSeparate(t *testing.T) {
 	defer srv.Close()
 	addr := strings.TrimPrefix(srv.URL, "http://")
 	start := time.Now()
-	ws, _, _, err := dialWebSocket(context.Background(), &tcpDialer{addr: addr}, "ws://"+addr+"/v1/noise", false, 5*time.Second)
+	ws, _, _, err := dialWebSocket(context.Background(), &tcpDialer{addr: addr}, "ws://"+addr+"/v1/noise", false, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("dialWebSocket: %v", err)
 	}

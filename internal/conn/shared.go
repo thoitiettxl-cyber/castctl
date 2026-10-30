@@ -9,6 +9,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 )
 
 // readMethods is the explicit set of POST reads known to be safe to
@@ -167,6 +169,7 @@ func retryCall[T any](ctx context.Context, s *SharedConn, what string, safeFor f
 		budget = dl
 	}
 	pause := RetryPauseInitial
+	attempt := 0
 	for {
 		g, err := s.gw(ctx)
 		if err != nil {
@@ -177,7 +180,14 @@ func retryCall[T any](ctx context.Context, s *SharedConn, what string, safeFor f
 			if time.Now().Add(pause).After(budget) {
 				return zero, err
 			}
-			m.logger.Info("reconnect failed; retrying", "what", what, "err", err)
+			attempt++
+			// Debug, with a 1-based attempt counter. The error
+			// is redacted at this site (SafeString strips
+			// every query value, including vm_id, which
+			// redact.String leaves): a retryable error may
+			// embed a URL, and this line must be safe through
+			// ANY slog logger, not only the bridge handler.
+			m.logger.Debug("reconnect failed; retrying", "what", what, "attempt", attempt, "err", logging.SafeString(err.Error()))
 		} else {
 			result, err := fn(ctx, g)
 			if err == nil {
@@ -193,7 +203,8 @@ func retryCall[T any](ctx context.Context, s *SharedConn, what string, safeFor f
 			if !retryable || time.Now().Add(pause).After(budget) {
 				return zero, err
 			}
-			m.logger.Info("retrying on a new connection", "what", what, "err", err)
+			attempt++
+			m.logger.Debug("retrying on a new connection", "what", what, "attempt", attempt, "err", logging.SafeString(err.Error()))
 		}
 		if !sleepOrDone(ctx, pause) {
 			return zero, ctx.Err()

@@ -190,6 +190,20 @@ func TestSafeStringIdempotent(t *testing.T) {
 	assertNoFixture(t, twice)
 }
 
+// TestSafeHost pins the host-shape rule for dial events.
+func TestSafeHost(t *testing.T) {
+	for _, h := range []string{"gateway.test", "127.0.0.1", "[::1]", "proxy-sg.example.invalid", "a-b_c.example"} {
+		if got := SafeHost(h); got != h {
+			t.Errorf("SafeHost(%q) = %q, want unchanged", h, got)
+		}
+	}
+	for _, h := range []string{"", "https://gateway.example.invalid/v1/noise?vm_id=" + fixVMID, "host?token=" + fixHatchToken, "user:pass@host", "ho st", "a=b"} {
+		if got := SafeHost(h); got != "[redacted]" {
+			t.Errorf("SafeHost(%q) = %q, want [redacted]", h, got)
+		}
+	}
+}
+
 // TestSafeErrNilAndPlain: nil stays empty; a plain error keeps its
 // text; a fixture-bearing error is stripped the same way.
 func TestSafeErrNilAndPlain(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/netip"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 	"github.com/thoitiettxl-cyber/castctl/internal/dns"
 	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 	"github.com/thoitiettxl-cyber/castctl/internal/outbound"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
 
@@ -169,9 +171,10 @@ func identityForProfile(prof *profile.Profile, single *profile.SingleConfig) (st
 // is started: Python starts its heartbeat only on the wait/send/
 // Telegram paths, never on the unary read commands this package
 // implements, and conn.Muse.Close stops the heartbeat when it is
-// running. Sing-box internal logs are discarded (NOP factory) so
-// command output stays clean JSON/text; sing-box failures surface
-// as returned errors.
+// running. Sing-box internal logs and castctl's own events go
+// through the one resolved log factory (config `log` block,
+// overridden by --log-level); sing-box failures also surface as
+// returned errors.
 func defaultBuildRuntime(ctx context.Context, loc *profile.ConfigLocation, prof *profile.Profile, env *Env) (*Runtime, error) {
 	single, found, err := profile.LoadSingleConfig(loc.ConfigDir)
 	if err != nil {
@@ -187,9 +190,37 @@ func defaultBuildRuntime(ctx context.Context, loc *profile.ConfigLocation, prof 
 		return nil, err
 	}
 
-	mgr, err := outbound.NewManager(ctx, log.NewNOPFactory().NewLogger("castctl"))
+	// Logging: resolve the level once (CLI override > config >
+	// warn) and build the single factory that governs every
+	// emission below — sing-box's and castctl's. The factory is
+	// closed last (prepended to closeFuncs, which run in
+	// reverse order), so log lines emitted during shutdown of
+	// the other components are not lost.
+	var cliLevel string
+	var cliSet bool
+	var stderrWriter io.Writer
+	if env != nil {
+		cliLevel, cliSet = env.LogLevelOverride, env.LogLevelSet
+		stderrWriter = env.stderr()
+	}
+	settings, err := profile.ResolveLogSettings(single, cliLevel, cliSet)
 	if err != nil {
 		return nil, errCode(2, err)
+	}
+	logHandle, err := logging.NewFactory(ctx, logging.Settings{
+		Disabled:  settings.Disabled,
+		Level:     settings.Level,
+		Output:    settings.Output,
+		Timestamp: settings.Timestamp,
+	}, stderrWriter)
+	if err != nil {
+		return nil, errCode(2, err)
+	}
+	rt.closeFuncs = append([]func() error{func() error { return logHandle.Close() }}, rt.closeFuncs...)
+
+	mgr, err := outbound.NewManager(ctx, logHandle.Logger("castctl"))
+	if err != nil {
+		return fail(errCode(2, err))
 	}
 	rt.Manager = mgr
 	rt.closeFuncs = append(rt.closeFuncs, func() error { return mgr.Close() })
@@ -215,19 +246,40 @@ func defaultBuildRuntime(ctx context.Context, loc *profile.ConfigLocation, prof 
 			fmt.Fprintln(env.stderr(), resolved.Warning)
 		}
 		if resolved.Options != nil {
-			dnsClient, err = dns.New(mgr.Context(), *resolved.Options, mgr.OutboundManager())
+			dnsClient, err = dns.New(mgr.Context(), *resolved.Options, mgr.OutboundManager(), dns.WithLogFactory(logHandle.Factory))
 			if err != nil {
 				return fail(errCode(2, err))
 			}
 			rt.DNS = dnsClient
 			rt.closeFuncs = append(rt.closeFuncs, func() error { return dnsClient.Close() })
 			mgr.RegisterDNS(dnsClient.Router(), dnsClient.TransportManager())
+			// DNS source chosen, at debug: the resolved source
+			// and the first server's tag only — never the raw
+			// options (which may carry credentials/detours).
+			serverTag := "none"
+			if len(resolved.Options.Servers) > 0 {
+				serverTag = resolved.Options.Servers[0].Tag
+				if serverTag == "" {
+					serverTag = "unnamed"
+				}
+			}
+			logging.Emit(logHandle.Logger("castctl"), context.Background(), log.LevelDebug,
+				"event=dns_source source="+string(resolved.Source)+" server="+serverTag)
 		}
 	}
 
 	// Endpoints and outbounds, detour-first (topological order).
 	if err := createOutbounds(ctx, mgr, single, prof, synthDirectTag); err != nil {
 		return fail(err)
+	}
+
+	// Outbound chain, at debug: the resolved detour chain for
+	// the active profile, tags only (the same shape `profile
+	// test` prints). Emitted only when the identity resolves;
+	// a failure here is reported by the dialer setup below.
+	if tag, _, err := identityForProfile(prof, single); err == nil {
+		logging.Emit(logHandle.Logger("castctl"), context.Background(), log.LevelDebug,
+			"event=outbound_chain profile="+prof.Name+" chain="+strings.Join(detourChain(single, tag), ","))
 	}
 
 	// DNS lifecycle before the manager lifecycle (the order used by
@@ -269,12 +321,16 @@ func defaultBuildRuntime(ctx context.Context, loc *profile.ConfigLocation, prof 
 	if env.HTTPClient != nil {
 		rt.httpClientOverride = env.HTTPClient()
 	}
-	connector := env.newConnector(dialer)
+	connector := env.newConnector(dialer, gateway.WithLogger(logHandle.Logger("gateway")))
 	var muse *conn.Muse
 	if env.Logger != nil {
 		muse = conn.New(connector, conn.WithConfig(cfg), conn.WithLogger(env.Logger))
 	} else {
-		muse = conn.New(connector, conn.WithConfig(cfg))
+		// The slog world is bridged through the same factory:
+		// conn's debug/info lines are filtered by the one
+		// resolved level, and every line passes the SafeString
+		// boundary in the bridge handler.
+		muse = conn.New(connector, conn.WithConfig(cfg), conn.WithLogger(logHandle.SlogLogger("castctl")))
 	}
 	rt.Muse = muse
 	rt.closeFuncs = append(rt.closeFuncs, func() error { muse.Close(); return nil })

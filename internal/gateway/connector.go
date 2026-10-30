@@ -14,8 +14,10 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 )
 
 // OutboundDialer is the minimal dial surface the Connector needs
@@ -40,6 +42,11 @@ type connectorConfig struct {
 	clock        Clock
 	wsTimeout    time.Duration
 	noiseTimeout time.Duration
+	// logger is the sing-box context logger for the gateway
+	// handshake event (default: NOP). It is set by WithLogger
+	// from the runtime's resolved log factory; the event line
+	// carries the parsed status only, never the URL or headers.
+	logger log.ContextLogger
 	// reassembler is the frame reassembler for built gateways.
 	// Nil means the production caps. Tests construct a
 	// connectorConfig literal with a small-limit reassembler
@@ -74,6 +81,14 @@ func WithWSURL(fn func(vmID, hatchToken string) string) ConnectorOption {
 // real clock; tests inject a fake clock.
 func WithClock(c Clock) ConnectorOption {
 	return func(cfg *connectorConfig) { cfg.clock = c }
+}
+
+// WithLogger sets the context logger for the WebSocket
+// handshake event (default: NOP logger, so existing callers
+// that never set it emit nothing). The logger comes from the
+// runtime's resolved log factory.
+func WithLogger(logger log.ContextLogger) ConnectorOption {
+	return func(cfg *connectorConfig) { cfg.logger = logger }
 }
 
 // WithWSUpgradeTimeout bounds the WebSocket upgrade separately
@@ -187,7 +202,7 @@ func dialGateway(ctx context.Context, dialer OutboundDialer, wsURL string, secur
 	if err != nil {
 		return nil, err
 	}
-	ws, dialMS, wsMS, err := dialWebSocket(ctx, dialer, wsURL, secure, cfg.wsTimeout)
+	ws, dialMS, wsMS, err := dialWebSocket(ctx, dialer, wsURL, secure, cfg.wsTimeout, cfg.logger)
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +246,7 @@ func dialGateway(ctx context.Context, dialer OutboundDialer, wsURL string, secur
 // returns the connection plus the dial and upgrade durations in
 // milliseconds. Dial errors are redacted for safe logging (item
 // (c)) while keeping the original error chain.
-func dialWebSocket(ctx context.Context, dialer OutboundDialer, wsURL string, secure bool, wsTimeout time.Duration) (wsConn, int64, int64, error) {
+func dialWebSocket(ctx context.Context, dialer OutboundDialer, wsURL string, secure bool, wsTimeout time.Duration, logger log.ContextLogger) (wsConn, int64, int64, error) {
 	host, port, err := splitWSURL(wsURL)
 	if err != nil {
 		return nil, 0, 0, err
@@ -261,16 +276,38 @@ func dialWebSocket(ctx context.Context, dialer OutboundDialer, wsURL string, sec
 	header.Set("User-Agent", UserAgent)
 	header.Set("Origin", "https://muse.ai")
 	upgradeStart := time.Now()
-	ws, _, err := d.DialContext(ctx, wsURL, header)
+	ws, resp, err := d.DialContext(ctx, wsURL, header)
 	wsMS := time.Since(upgradeStart).Milliseconds()
 	if err != nil {
 		_ = raw.Close()
 		if ctx.Err() != nil {
 			return nil, dialMS, wsMS, ctx.Err()
 		}
+		// Handshake event, at debug, on the dial ctx (so a
+		// Dialer-minted connection ID prefixes it): the parsed
+		// status ONLY, derived from the raw gorilla result
+		// before redaction wrapping. No event when no
+		// parseable status exists.
+		emitHandshakeStatus(ctx, logger, resp, err)
 		return nil, dialMS, wsMS, &conn.ConnectionError{Err: fmt.Errorf("gateway: websocket handshake: %w", redactErr(err))}
 	}
+	emitHandshakeStatus(ctx, logger, resp, nil)
 	return ws, dialMS, wsMS, nil
+}
+
+// emitHandshakeStatus logs one debug line carrying only the
+// parsed handshake status (numeric code, or a validated token).
+// A nil logger is a no-op; the line passes the SafeString
+// boundary in logging.Emit.
+func emitHandshakeStatus(ctx context.Context, logger log.ContextLogger, resp *http.Response, err error) {
+	if logger == nil {
+		return
+	}
+	token, kind, ok := handshakeStatusToken(resp, err)
+	if !ok {
+		return
+	}
+	logging.Emit(logger, ctx, log.LevelDebug, "event=ws_handshake "+kind+"="+token)
 }
 
 // splitWSURL extracts the host and port from a ws(s) URL, applying

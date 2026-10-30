@@ -124,7 +124,23 @@ func redactURLAllQuery(raw string) string {
 	return u.String()
 }
 
-// SafeErr returns the log-safe text of err, or "" for a nil error.
+// reHostSafe matches a bare host:port host component — a DNS
+// name, an IPv4 literal, or a bracketed IPv6 literal. Anything
+// else (a URL, a query string, userinfo, whitespace, a key=value
+// fragment) is not a host and must never be logged as one.
+var reHostSafe = regexp.MustCompile(`^[A-Za-z0-9._:\[\]-]+$`)
+
+// SafeHost returns host unchanged when it is a bare host, or
+// "[redacted]" when it is not host-shaped (a URL, query string,
+// or other caller-supplied text smuggled into a host field). Dial
+// events log destinations; this keeps a URL-shaped host from
+// leaking query credentials through a host field.
+func SafeHost(host string) string {
+	if host != "" && reHostSafe.MatchString(host) {
+		return host
+	}
+	return "[redacted]"
+}
 // It is SafeString applied to err.Error(): the error chain is not
 // logged, only the (redacted) top-level text. Callers that need an
 // error's type for a log field must classify with errors.As and

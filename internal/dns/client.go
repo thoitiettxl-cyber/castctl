@@ -33,6 +33,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/service"
 
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 	"github.com/thoitiettxl-cyber/castctl/internal/outbound"
 )
 
@@ -45,8 +46,9 @@ type BootstrapFunc func(ctx context.Context, host string) ([]netip.Addr, error)
 type ClientOption func(*clientOptions)
 
 type clientOptions struct {
-	logFactory log.Factory
-	bootstrap  BootstrapFunc
+	logFactory   log.Factory
+	bootstrap    BootstrapFunc
+	bootstrapSet bool
 }
 
 // WithLogFactory sets the log factory (default: a NOP factory).
@@ -55,9 +57,11 @@ func WithLogFactory(factory log.Factory) ClientOption {
 }
 
 // WithBootstrap sets the bootstrap function used for DNS server
-// hostnames (default: outbound.BootstrapLookup).
+// hostnames (default: outbound.BootstrapLookup, routed through the
+// log factory's slog logger). An explicit nil bootstrap is still
+// an error; callers that want the default pass no option.
 func WithBootstrap(fn BootstrapFunc) ClientOption {
-	return func(o *clientOptions) { o.bootstrap = fn }
+	return func(o *clientOptions) { o.bootstrap = fn; o.bootstrapSet = true }
 }
 
 // Client is a started/stopped DNS client. It is safe for concurrent
@@ -90,10 +94,18 @@ type Client struct {
 func New(ctx context.Context, opts option.DNSOptions, outboundMgr adapter.OutboundManager, options ...ClientOption) (*Client, error) {
 	cfg := clientOptions{
 		logFactory: log.NewNOPFactory(),
-		bootstrap:  outbound.BootstrapLookup,
 	}
 	for _, opt := range options {
 		opt(&cfg)
+	}
+	if !cfg.bootstrapSet {
+		// Default bootstrap: the system-resolver lookup, logged
+		// through the wired factory's slog bridge so its line
+		// obeys the resolved level (with a NOP factory the
+		// bridge discards it, as before).
+		cfg.bootstrap = func(bctx context.Context, host string) ([]netip.Addr, error) {
+			return outbound.BootstrapLookupWithLogger(bctx, host, logging.NewSlogLogger(cfg.logFactory, "dns"))
+		}
 	}
 	if len(opts.Servers) == 0 {
 		return nil, errors.New("dns: no DNS servers configured: refusing to fall back to the system resolver")

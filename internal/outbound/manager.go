@@ -586,5 +586,5 @@ func (m *Manager) Dialer(tag string) (*Dialer, error) {
 	if router := service.FromContext[adapter.DNSRouter](m.registryContext()); router != nil {
 		resolver = router
 	}
-	return NewDialer(outbound, resolver, option.OutboundTLSOptions{}), nil
+	return NewDialerWithLogger(outbound, resolver, option.OutboundTLSOptions{}, m.logger), nil
 }
