@@ -301,11 +301,12 @@ func dialWebSocket(ctx context.Context, dialer OutboundDialer, wsURL string, sec
 		// before redaction wrapping. No event when no
 		// parseable status exists.
 		emitHandshakeStatus(ctx, logger, resp, err)
-		// The returned error renders the validated status
-		// only (newHandshakeFailureError); the gorilla
+		// The returned error renders the validated 3-digit
+		// status only (newHandshakeFailureError); the gorilla
 		// error text, which may embed the peer status
-		// line, never reaches an output path, while its
-		// chain stays reachable for classification.
+		// line, never reaches an output path — only the
+		// derived code (or the token length) does — while
+		// its chain stays reachable for classification.
 		return nil, dialMS, wsMS, &conn.ConnectionError{Err: newHandshakeFailureError(resp, err)}
 	}
 	emitHandshakeStatus(ctx, logger, resp, nil)
@@ -313,7 +314,7 @@ func dialWebSocket(ctx context.Context, dialer OutboundDialer, wsURL string, sec
 }
 
 // emitHandshakeStatus logs one debug line carrying only the
-// parsed handshake status (numeric code, or a validated token).
+// parsed handshake status (a 3-digit code, or a token length).
 // A nil logger is a no-op; the line passes the SafeString
 // boundary in logging.Emit.
 func emitHandshakeStatus(ctx context.Context, logger log.ContextLogger, resp *http.Response, err error) {

@@ -12,21 +12,25 @@ import (
 
 // malformedStatusRe extracts the status token from gorilla's
 // "malformed HTTP status code" error. The token is the ONLY part
-// of a malformed status line that may be logged: it is validated
-// token-shaped (short, no spaces/slashes) so a peer-controlled
-// status line cannot smuggle a URL, header value, or credential
-// into the log.
+// of a malformed status line that may be summarised: it is
+// validated token-shaped (short, no spaces/slashes) so a
+// peer-controlled status line cannot smuggle a URL, header
+// value, or credential into the log, and only a 3-digit code
+// is ever emitted as a token (loop 7, item R4) — anything
+// else renders as its length only.
 var malformedStatusRe = regexp.MustCompile(`malformed HTTP status code "([^"]*)"`)
 
 // handshakeFailureError renders a WebSocket handshake failure
 // for output without peer text (loop-5 allowlist rule): the
-// validated status token or numeric status code only, or a
-// fixed message when no parseable status exists. The original
-// error chain is preserved via Unwrap, so classification
-// (errors.As / IsTransient) is unchanged — only the rendered
-// text is summarised. A gorilla handshake error's text may
-// embed the peer's status line verbatim; it must never reach
-// an error string, a log line, or stderr output.
+// validated 3-digit status code (or the token length, when
+// the token is not a 3-digit code) only, or a fixed message
+// when no parseable status exists. The original error chain
+// is preserved via Unwrap, so classification (errors.As /
+// IsTransient) is unchanged — only the rendered text is
+// summarised. A gorilla handshake error's text may embed the
+// peer's status line verbatim; that TEXT never reaches an
+// error string, a log line, or stderr output — only the
+// derived code/length does.
 type handshakeFailureError struct {
 	err      error
 	token    string
@@ -55,17 +59,47 @@ func newHandshakeFailureError(resp *http.Response, err error) error {
 	return &handshakeFailureError{err: err, token: token, kind: kind, hasToken: true}
 }
 
+// isThreeDigitCode reports whether s is exactly three ASCII
+// digits: the only token shape emitted as a status token.
+func isThreeDigitCode(s string) bool {
+	if len(s) != 3 {
+		return false
+	}
+	for i := 0; i < 3; i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// tokenShapeRe matches a token-shaped fragment: ASCII
+// letters, digits, dot, underscore, or hyphen, of any
+// length. Such a fragment is summarised by its length only,
+// never emitted — its bytes are peer-controlled text, and
+// only a 3-digit code is a status.
+var tokenShapeRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
 // handshakeStatusToken derives the loggable status from a
 // WebSocket upgrade result. A non-nil response wins with its
-// numeric status code; otherwise the error text is scanned for
-// the malformed-status-code pattern and the token is accepted
-// only if it matches ^[A-Za-z0-9._-]{1,32}$. Anything else
-// returns ok=false: no event is emitted. resp and err are the
-// RAW gorilla results, before any redaction wrapping — the
-// extractor sees the status line shape, never a URL or header.
+// numeric status code when it is a 3-digit code, else with
+// the code's length. Otherwise the error text is scanned for
+// the malformed-status-code pattern: a 3-digit token is
+// returned as a status_token; a token-shaped but
+// non-conforming token (non-numeric, wrong length) is
+// returned as its length under status_token_length, never
+// its bytes. Anything else returns ok=false: no event is
+// emitted and the failure error renders the fixed message.
+// resp and err are the RAW gorilla results, before any
+// redaction wrapping — the extractor sees the status line
+// shape, never a URL or header.
 func handshakeStatusToken(resp *http.Response, err error) (token, kind string, ok bool) {
 	if resp != nil {
-		return strconv.Itoa(resp.StatusCode), "status_code", true
+		code := strconv.Itoa(resp.StatusCode)
+		if isThreeDigitCode(code) {
+			return code, "status_code", true
+		}
+		return strconv.Itoa(len(code)), "status_code_length", true
 	}
 	if err == nil {
 		return "", "", false
@@ -75,13 +109,14 @@ func handshakeStatusToken(resp *http.Response, err error) (token, kind string, o
 		return "", "", false
 	}
 	token = m[1]
-	if len(token) == 0 || len(token) > 32 {
+	if len(token) == 0 {
 		return "", "", false
 	}
-	for _, r := range token {
-		if !(r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
-			return "", "", false
-		}
+	if isThreeDigitCode(token) {
+		return token, "status_token", true
 	}
-	return token, "status_token", true
+	if tokenShapeRe.MatchString(token) {
+		return strconv.Itoa(len(token)), "status_token_length", true
+	}
+	return "", "", false
 }

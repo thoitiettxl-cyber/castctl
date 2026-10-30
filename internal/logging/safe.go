@@ -133,16 +133,16 @@ var reJSONScalar = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0
 // scanQuoted returns the index just past the closing quote of
 // the quoted string starting at s[start] (quote q), and the raw
 // inner content. Backslash escapes consume two bytes, so an
-// escaped quote does not close the string; a literal newline
-// or the end of input fails the scan, leaving the text to be
-// copied verbatim by the caller.
+// escaped quote does not close the string. A literal newline
+// inside the string is part of the value, not a terminator
+// (loop 7, item R2): peer text may embed newlines, and failing
+// the scan on one left the secret value verbatim. Only the
+// end of input fails the scan, leaving the text to be copied
+// verbatim by the caller.
 func scanQuoted(s string, start int, q byte) (end int, inner string, ok bool) {
 	i := start + 1
 	for i < len(s) {
 		c := s[i]
-		if c == '\n' || c == '\r' {
-			return 0, "", false
-		}
 		if c == '\\' {
 			if i+1 >= len(s) {
 				return 0, "", false
@@ -516,6 +516,27 @@ func redactJSONSecrets(s string) string {
 // alternative in reKeyColon/reKeyValue, not by this list.
 const secretLabelVocab = `private_key|privateKey|public_key|publicKey|preshared_key|pre_shared_key|password|passwd|auth_token|access_token|hatch_token|api_token|session_key|secret_key|client_secret|token|session|cookie|auth|secret|credential|api_key|apiKey|apikey|vm_id|node_id|access_key|bearer|x-api-key|private-key|hatch_sess|datr`
 
+// sepClass is the separator character class for the bare
+// label forms reKeyColon and reKeyValue (loop 7, item R2).
+// The set is CLOSED and enumerated exactly:
+//
+//	U+0009 TAB, U+000A LF, U+000B VT, U+000C FF, U+000D CR,
+//	U+0020 SPACE, U+00A0 NBSP, U+2003 EM SPACE.
+//
+// Evidence: the five ASCII members are Go RE2 \s (the class
+// the patterns used before); VT, NBSP, and EM SPACE are the
+// loop-6 proven bypasses — a separator on the LABEL side of
+// `=`/`:` (`token` + NBSP/EM SPACE/VT + `=` + value) survived
+// SafeString because \s matches none of the three. Other
+// Unicode spaces (U+1680, U+2000–U+2002, U+2004–U+200A,
+// U+202F, U+205F, U+3000) are NOT in this set and are not
+// covered; see the loop-7 report observation. The value
+// character classes ([^\s...]) are deliberately unchanged:
+// a value spanning a Unicode space must still be consumed
+// whole and redacted, not cut at the space with its tail
+// left behind.
+const sepClass = "[\t\n\v\f\r \u00A0\u2003]"
+
 // reKeyColon matches a bare label: value pair in free-form
 // text (private_key: ..., token: ...) — the colon spelling of
 // the key=value fragment. Quoted keys (JSON forms) do not
@@ -523,7 +544,7 @@ const secretLabelVocab = `private_key|privateKey|public_key|publicKey|preshared_
 // those forms are handled by redactJSONSecrets first. The
 // trailing alternative matches any snake_case label ending
 // in _key (loop-5 listed *_key form).
-var reKeyColon = regexp.MustCompile(`(?i)\b((?:` + secretLabelVocab + `)|[A-Za-z0-9_]*_key)\s*:\s*["']?([^\s,;\"'}]+)["']?`)
+var reKeyColon = regexp.MustCompile(`(?i)\b((?:` + secretLabelVocab + `)|[A-Za-z0-9_]*_key)` + sepClass + `*:` + sepClass + `*["']?([^\s,;\"'}]+)["']?`)
 
 // reKeyValue matches a bare key=value fragment in free-form text
 // for the secret vocabulary (vm_id, node_id, private key,
@@ -540,7 +561,7 @@ var reKeyColon = regexp.MustCompile(`(?i)\b((?:` + secretLabelVocab + `)|[A-Za-z
 // keeps the first 8 characters instead of redacting wholesale,
 // and redactKeyValueMatch leaves a public_key match
 // unchanged for the same reason.
-var reKeyValue = regexp.MustCompile(`(?i)\b((?:vm_id|node_id|private_key|privateKey|preshared_key|pre_shared_key|password|passwd|auth_token|access_token|hatch_token|api_token|session_key|secret_key|client_secret|token|session|cookie|auth|secret|credential|api_key|apiKey|apikey|access_key|bearer|x-api-key|private-key|hatch_sess|datr)|[A-Za-z0-9_]*_key)\s*=\s*[^\s;&,]*`)
+var reKeyValue = regexp.MustCompile(`(?i)\b((?:vm_id|node_id|private_key|privateKey|preshared_key|pre_shared_key|password|passwd|auth_token|access_token|hatch_token|api_token|session_key|secret_key|client_secret|token|session|cookie|auth|secret|credential|api_key|apiKey|apikey|access_key|bearer|x-api-key|private-key|hatch_sess|datr)|[A-Za-z0-9_]*_key)` + sepClass + `*=` + sepClass + `*[^\s;&,]*`)
 
 // redactKeyValueMatch redacts one bare key=value fragment: the
 // label survives, the value becomes [redacted] — except a

@@ -322,14 +322,21 @@ func executeWait(ctx context.Context, env *Env, rt *Runtime, prof *profile.Profi
 	return res, approveResolved.Enabled, nil
 }
 
-// safeTitle renders a peer approval title for a stderr status
-// line (loop 6, item 5): SafeString FIRST (labelled secrets
-// stripped), then the SafeString output capped at 64 runes.
-// The order matters: capping the raw title first could cut a
-// secret label in half and leave its value exposed past the
-// cap, and SafeString alone leaves long peer prose uncapped.
-func safeTitle(title string) string {
-	safe := logging.SafeString(title)
+// safeField renders one unconstrained server string for a
+// single-line stderr status line (loop 7, items R1/S2):
+// SafeString FIRST (labelled secrets stripped), then
+// newlines neutralised so no field can split the line,
+// then the result capped at 64 runes. The order matters:
+// capping the raw field first could cut a secret label in
+// half and leave its value exposed past the cap, and
+// SafeString alone leaves long peer prose uncapped and
+// newlines intact. It applies to ApprovalID, Decision,
+// Kind, Scope, Title, and decision-option values alike:
+// all are unconstrained server strings (no enum validation
+// in approvals.go), so none may reach stderr ungated.
+func safeField(s string) string {
+	safe := logging.SafeString(s)
+	safe = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(safe)
 	r := []rune(safe)
 	if len(r) > 64 {
 		return string(r[:64])
@@ -337,12 +344,34 @@ func safeTitle(title string) string {
 	return safe
 }
 
+// safeTitle renders a peer approval title for a stderr status
+// line (loop 6, item 5): the safeField rendering — SafeString,
+// newline-neutralised, capped at 64 runes.
+func safeTitle(title string) string {
+	return safeField(title)
+}
+
+// safeOptions renders decision-option values for a stderr
+// status line (loop 7, item S2): each option is an
+// unconstrained server string, gated like any other field.
+// A nil slice stays nil, so %v still renders "[]".
+func safeOptions(opts []string) []string {
+	if opts == nil {
+		return nil
+	}
+	out := make([]string, len(opts))
+	for i, o := range opts {
+		out[i] = safeField(o)
+	}
+	return out
+}
+
 // logAutoApproved prints the auto-approve stderr lines for a Result
 // (SEAMS.md D6): one line per approved record and per error, in
 // result order. The core never logs; the caller owns stderr.
 func logAutoApproved(w io.Writer, res *wait.Result) {
 	for _, rec := range res.AutoApproved {
-		fmt.Fprintf(w, "auto-approved %s (%s): %s [%s %s]\n", rec.ApprovalID, rec.Decision, safeTitle(rec.Title), rec.Kind, rec.Scope)
+		fmt.Fprintf(w, "auto-approved %s (%s): %s [%s %s]\n", safeField(rec.ApprovalID), safeField(rec.Decision), safeTitle(rec.Title), safeField(rec.Kind), safeField(rec.Scope))
 	}
 	for _, e := range res.AutoApproveErrors {
 		if e == nil {
@@ -355,9 +384,9 @@ func logAutoApproved(w io.Writer, res *wait.Result) {
 			underlying = logging.SummarizeErr(e.Err)
 		}
 		if e.Decision == "" {
-			fmt.Fprintf(w, "auto-approve SKIPPED %s: %s [%s %s]\n", e.ApprovalID, underlying, e.Kind, e.Scope)
+			fmt.Fprintf(w, "auto-approve SKIPPED %s: %s [%s %s]\n", safeField(e.ApprovalID), underlying, safeField(e.Kind), safeField(e.Scope))
 		} else {
-			fmt.Fprintf(w, "auto-approve FAILED %s: %s\n", e.ApprovalID, underlying)
+			fmt.Fprintf(w, "auto-approve FAILED %s: %s\n", safeField(e.ApprovalID), underlying)
 		}
 	}
 }
@@ -1002,7 +1031,7 @@ func approveAll(ctx context.Context, env *Env, rt *Runtime, decision string) ([]
 	for _, item := range pend {
 		d := approvals.DescribeApproval(item)
 		if decision == approvals.Forever && !approvals.OffersForever(d) {
-			fmt.Fprintf(env.stderr(), "skipped %s: no forever option %v\n", derefStr(d.ApprovalID), d.Options)
+			fmt.Fprintf(env.stderr(), "skipped %s: no forever option %v\n", safeField(derefStr(d.ApprovalID)), safeOptions(d.Options))
 			continue
 		}
 		if _, err := decideApproval(ctx, rt, derefStr(d.ApprovalID), decision); err != nil {
@@ -1013,7 +1042,7 @@ func approveAll(ctx context.Context, env *Env, rt *Runtime, decision string) ([]
 			Kind: strPtrOrNil(derefStr(d.Kind)), Scope: strPtrOrNil(derefStr(d.Scope)), Decision: strPtrOrNil(decision),
 		}
 		done = append(done, row)
-		fmt.Fprintf(env.stderr(), "approved %s (%s): %s [%s %s]\n", derefStr(row.ApprovalID), decision, derefStr(row.Title), derefStr(row.Kind), derefStr(row.Scope))
+		fmt.Fprintf(env.stderr(), "approved %s (%s): %s [%s %s]\n", safeField(derefStr(row.ApprovalID)), safeField(decision), safeTitle(derefStr(row.Title)), safeField(derefStr(row.Kind)), safeField(derefStr(row.Scope)))
 	}
 	return done, nil
 }

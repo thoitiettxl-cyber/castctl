@@ -6,9 +6,10 @@ package gateway
 
 // Loop-5 handshake-failure tests: a WebSocket handshake
 // failure's rendered error must carry only the validated
-// status token (or a fixed message) — never peer status-line
-// text — while the original error chain stays reachable for
-// classification (errors.As / IsTransient).
+// 3-digit status code (or a token length, or a fixed message)
+// — never peer status-line text — while the original error
+// chain stays reachable for classification (errors.As /
+// IsTransient).
 
 import (
 	"errors"

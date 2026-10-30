@@ -5,8 +5,8 @@
 package gateway
 
 // Gateway handshake-event tests: dialWebSocket must emit ONE
-// debug line carrying ONLY the parsed status (a numeric status
-// code, or a validated status token) — never the raw status line,
+// debug line carrying ONLY the parsed status (a 3-digit
+// status code, or a token length) — never the raw status line,
 // never the URL (which carries vm_id + auth_token), never header
 // values, never the full gorilla error. Shapes that carry no
 // parseable status emit NOTHING.

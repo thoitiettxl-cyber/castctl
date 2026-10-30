@@ -78,14 +78,16 @@ func ParseRSCResult(text string) any {
 }
 
 // callAction posts one server-action call and returns the parsed
-// RSC result, the wire byte length of the RSC body it parsed (0
-// when no 200 x-component response was read), and an error. The
-// body length is threaded through so error summaries can report
-// the wire length (loop 6, item 6b) instead of mislabelling the
+// RSC result, the wire byte length of the RSC body it parsed (the
+// wire length of the body it READ on the non-200 /
+// non-x-component branch too — loop 7, item T1 — and 0 only
+// when no body was read at all), and an error. The body length
+// is threaded through so error summaries can report the wire
+// length (loop 6, item 6b) instead of mislabelling the
 // summary-text length as the body length. A 401/403 is an
 // AuthError. A non-200 status or a response without x-component in
-// its content type returns (nil, 0, nil): most likely a stale action
-// id, and the caller tries the next id. Transport errors are
+// its content type returns (nil, len(data), nil): most likely a
+// stale action id, and the caller tries the next id. Transport errors are
 // returned as a typed summary, like doHatch (transport.go).
 func callAction(ctx context.Context, client *http.Client, cookies, actionID string, args any, page string) (any, int, error) {
 	body, err := json.Marshal(args)
@@ -116,7 +118,7 @@ func callAction(ctx context.Context, client *http.Client, cookies, actionID stri
 		return nil, 0, conn.NewAuthError(fmt.Sprintf("server action -> %d (cookies expired? re-export)", resp.StatusCode))
 	}
 	if resp.StatusCode != 200 || !strings.Contains(resp.Header.Get("Content-Type"), "x-component") {
-		return nil, 0, nil
+		return nil, len(data), nil
 	}
 	return ParseRSCResult(string(data)), len(data), nil
 }
