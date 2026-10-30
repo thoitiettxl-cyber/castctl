@@ -397,6 +397,30 @@ func TestProfileListRejectsSharedWireGuardPrivateKey(t *testing.T) {
 	}
 }
 
+func TestProfileListRefusesLegacyLayout(t *testing.T) {
+	// The library-level refusal surfaces at the CLI as exit 2,
+	// naming the migration step and the legacy file path, with
+	// no file contents in the output.
+	home := t.TempDir()
+	configFile := filepath.Join(home, "config.json")
+	if err := os.WriteFile(configFile, []byte(`{"auto_approve":"always","node_id":"LEGACY-NODE"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, out, errb := profileEnv(t, configFile)
+	if code := runProfile(t, env, out, errb, configFile, "profile", "list"); code != 2 {
+		t.Fatalf("profile list over legacy layout: code=%d, want 2; err=%q out=%q", code, errb.String(), out.String())
+	}
+	if !strings.Contains(errb.String(), "castctl config migrate --write") || !strings.Contains(errb.String(), configFile) {
+		t.Errorf("profile list error = %q; want migration step + %q", errb.String(), configFile)
+	}
+	if strings.Contains(errb.String(), "LEGACY-NODE") || strings.Contains(out.String(), "LEGACY-NODE") {
+		t.Errorf("legacy file contents leaked: err=%q out=%q", errb.String(), out.String())
+	}
+	if code := runProfile(t, env, out, errb, configFile, "profile", "show"); code != 2 {
+		t.Fatalf("profile show over legacy layout: code=%d, want 2; err=%q", code, errb.String())
+	}
+}
+
 func TestConfigMigrate(t *testing.T) {
 	home := t.TempDir()
 	// The legacy layout lives under the DEFAULT config home

@@ -68,13 +68,17 @@ type ConfigState struct {
 	Found bool
 	// Exists reports whether config.json existed at load in any
 	// form (single file or legacy-flat). Found implies Exists.
+	// Exists without Found is exactly the unmigrated legacy-flat
+	// state: LoadProfile refuses it, and the write-path guards
+	// (refuseUnmigrated) branch on it.
 	Exists bool
 	// SHA256 is the lowercase hex sha256 of the raw bytes read at
 	// load, or "" when the file was absent.
 	SHA256 string
 	// Config is the parsed single file when Found, nil otherwise.
 	// A legacy-flat file leaves Config nil: callers must not treat
-	// a nil Config as an empty single file.
+	// a nil Config as an empty single file, and must not write
+	// over the legacy file without the refuseUnmigrated guard.
 	Config *SingleConfig
 
 	baseDir string
@@ -83,7 +87,10 @@ type ConfigState struct {
 // LoadConfigState reads baseDir/config.json once and records its
 // sha256. It returns Found=false when the file is absent or is a
 // legacy-flat config, and an error when a single file is present but
-// unparseable (never a silent fallback). It takes no lock.
+// unparseable (never a silent fallback). Found=false with
+// Exists=true is the unmigrated legacy-flat state, kept deliberately:
+// the write-path guards branch on it, and LoadProfile — not this
+// function — refuses legacy reads. It takes no lock.
 func LoadConfigState(baseDir string) (*ConfigState, error) {
 	state, _, err := readConfigState(baseDir)
 	return state, err

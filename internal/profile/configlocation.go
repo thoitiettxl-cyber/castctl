@@ -34,7 +34,8 @@ import (
 //
 // The resolved config file's directory becomes CONFIG_DIR for the
 // whole invocation: every derived path (single-file config.json,
-// the config.json.lock, legacy fallback files, profiles/<name>/,
+// the config.json.lock, unmigrated legacy files (refused by
+// LoadProfile, read only by Migrate), profiles/<name>/,
 // cookies_file defaults, chat.json, and — for consumers in other
 // packages — telegram.json, telegram-state.json and update.json)
 // comes from it. This package has no derivation that hardcodes a

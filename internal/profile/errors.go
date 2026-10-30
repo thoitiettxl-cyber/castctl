@@ -3,7 +3,7 @@
 // Licensed under the GNU General Public License v3.0 or later.
 
 // Package profile implements profile resolution, the single-file
-// config.json format, legacy layout reading, config migration, cookie
+// config.json format, legacy layout refusal, config migration, cookie
 // parsing, auto-approve precedence, and secret redaction for castctl.
 //
 // Load is read-only: unlike the Python load_config (cli.py:151-188), Load
@@ -45,8 +45,9 @@
 // Per-key path resolution (config file keys; survey of Python 0.6.1
 // cli.py:32-260 and the PR1 profile code, 2026-10-29):
 //
-//   - cookies_file (single-file profile entry and legacy flat
-//     config): a relative value resolves under the config file's
+//   - cookies_file (single-file profile entry; the migrate-only
+//     legacy parser in config.go reads the same key from a flat
+//     legacy file): a relative value resolves under the config file's
 //     directory (the resolved CONFIG_DIR); an absolute value is
 //     honoured as-is. The named-profile coercion (a named profile
 //     cannot borrow another profile's login when the value points
@@ -74,7 +75,8 @@
 //     location must use absolute paths inside outbound objects.
 //   - Derived filesystem paths (all from the resolved CONFIG_DIR):
 //     config.json, config.json.lock, profiles/<name>/config.json
-//     (legacy), profiles/<name>/cookies.txt (default),
+//     (an unmigrated legacy file: refused by LoadProfile, read only
+//     by Migrate), profiles/<name>/cookies.txt (default),
 //     profiles/<name>/chat.json, and — for consumers in other
 //     packages — the active profile's telegram.json and
 //     telegram-state.json (via Profile.Dir) and update.json
@@ -109,7 +111,8 @@ type Error struct {
 func (e *Error) Error() string { return e.Message }
 
 // Unwrap exposes the sentinel cause (ErrInvalidProfile, ErrConfigParse,
-// ErrAuth, or ErrRefuseOverwrite) for errors.Is.
+// ErrAuth, ErrRefuseOverwrite, ErrLegacyLayout, or ErrConcurrentChange)
+// for errors.Is.
 func (e *Error) Unwrap() error { return e.Cause }
 
 // ExitCode returns the process exit code for this error.
@@ -129,6 +132,12 @@ var (
 	// because config.json changed since it was loaded (see guard.go).
 	// The caller retries the whole command.
 	ErrConcurrentChange = &Error{Code: 2, Kind: "concurrent_change", Message: "profile: config changed concurrently"}
+	// ErrLegacyLayout is the sentinel for refusing to read an
+	// unmigrated legacy per-profile config file. LoadProfile is the
+	// only producer; Migrate never produces it (it reads legacy
+	// files deliberately). The refusal names the migration command
+	// and the legacy file path, never file contents or secret values.
+	ErrLegacyLayout = &Error{Code: 2, Kind: "legacy_layout", Message: "profile: legacy layout found; run `castctl config migrate --write` first"}
 )
 
 // ExitCode maps an error to a process exit code: 0 for nil, the typed
@@ -177,5 +186,18 @@ func newConcurrentChangeError(baseDir string) *Error {
 		Kind:    "concurrent_change",
 		Message: fmt.Sprintf("profile: config changed concurrently, retry: %s", filepath.Join(baseDir, "config.json")),
 		Cause:   ErrConcurrentChange,
+	}
+}
+
+// newLegacyLayoutError builds the legacy-layout refusal: exit 2,
+// Kind "legacy_layout", Cause ErrLegacyLayout. The message names
+// the migration command and the legacy file PATH only — never the
+// file's contents and never cookie/token/key/vm_id/node_id values.
+func newLegacyLayoutError(legacyPath string) *Error {
+	return &Error{
+		Code:    2,
+		Kind:    "legacy_layout",
+		Message: fmt.Sprintf("profile: legacy layout found at %q; run `castctl config migrate --write` first", legacyPath),
+		Cause:   ErrLegacyLayout,
 	}
 }

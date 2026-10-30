@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/deliver"
@@ -26,9 +27,9 @@ func writeTestFile(t *testing.T, path, content string, perm os.FileMode) {
 func TestListProfiles(t *testing.T) {
 	base := t.TempDir()
 	// Default profile: directory exists, non-empty cookies file,
-	// config sets auto_approve always.
+	// single-file entry sets auto_approve always.
 	writeTestFile(t, filepath.Join(base, "cookies.txt"), "hatch_sess=FAKE; datr=FAKE", 0o600)
-	writeTestFile(t, filepath.Join(base, "config.json"), `{"auto_approve": "always"}`, 0o600)
+	writeTestFile(t, filepath.Join(base, "config.json"), `{"profiles":{"default":{"auto_approve": "always"}}}`, 0o600)
 	// Named profile "work": directory exists, empty cookies file.
 	writeTestFile(t, filepath.Join(base, "profiles", "work", "cookies.txt"), "", 0o600)
 	// Invalid entries under profiles/ are skipped by discovery:
@@ -58,6 +59,22 @@ func TestListProfiles(t *testing.T) {
 		if list.Profiles[i] != w {
 			t.Errorf("Profiles[%d] = %+v, want %+v", i, list.Profiles[i], w)
 		}
+	}
+}
+
+func TestListProfilesRefusesLegacyLayout(t *testing.T) {
+	// Whole-list error (Q8): one unmigrated legacy file refuses
+	// the entire auth list, naming the migration step. No
+	// skip-with-warning, no partial rows.
+	base := t.TempDir()
+	legacyPath := filepath.Join(base, "config.json")
+	writeTestFile(t, legacyPath, `{"auto_approve": "always"}`, 0o600)
+	_, err := deliver.ListProfiles(base, "default")
+	if err == nil {
+		t.Fatal("ListProfiles over legacy layout = nil error; want refusal")
+	}
+	if !strings.Contains(err.Error(), "castctl config migrate --write") || !strings.Contains(err.Error(), legacyPath) {
+		t.Errorf("ListProfiles error = %q; want it to name the migration step and %q", err.Error(), legacyPath)
 	}
 }
 

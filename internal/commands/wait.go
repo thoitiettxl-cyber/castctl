@@ -96,9 +96,10 @@ func parseAutoToggles(p *parsed) (autoToggles, error) {
 // ensureNodeID resolves the stable per-profile node_id (NODE_ID.md):
 // file > MUSE_NODE_ID env > generate (16 hex chars) + persist. A
 // generated id is persisted only into a single-file entry for this
-// profile; legacy layouts and profiles absent from the single file
-// keep the generated id in memory only (never-write-on-read: the
-// legacy file is never rewritten). The value is sent verbatim on
+// profile; profiles absent from the single file keep the generated
+// id in memory only (never-write-on-read). A legacy layout never
+// reaches here: LoadProfile refuses it before ensureNodeID runs,
+// so no legacy file is ever rewritten. The value is sent verbatim on
 // every chat.stream; it is never validated, matching Python.
 func ensureNodeID(loc *profile.ConfigLocation, prof *profile.Profile, getenv func(string) (string, bool)) error {
 	if prof.NodeID != "" {

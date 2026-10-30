@@ -169,13 +169,21 @@ func TestConfigStateAbsentCreatedDeleted(t *testing.T) {
 func TestLoadConfigStateLegacyAndMalformed(t *testing.T) {
 	t.Parallel()
 	base := BaseDir(t.TempDir())
-	writeFile(t, filepath.Join(base, "config.json"), `{"auto_approve":"always","node_id":"N1"}`, 0o600)
+	legacyPath := filepath.Join(base, "config.json")
+	writeFile(t, legacyPath, `{"auto_approve":"always","node_id":"N1"}`, 0o600)
 	state, err := LoadConfigState(base)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The legacy-flat state is kept deliberately (Q6): Exists
+	// without Found is exactly "unmigrated legacy file". The
+	// write-path guards (refuseUnmigrated) branch on it, and
+	// LoadProfile — not LoadConfigState — is the refusal point.
 	if state.Found || !state.Exists || state.Config != nil || state.SHA256 == "" {
 		t.Fatalf("legacy state = %+v; want Found=false Exists=true Config=nil SHA256 set", state)
+	}
+	if _, err := LoadProfile(base, "default", lookupEnv(map[string]string{})); !errors.Is(err, ErrLegacyLayout) {
+		t.Fatalf("LoadProfile over legacy-flat file = %v; want ErrLegacyLayout refusal", err)
 	}
 
 	writeFile(t, filepath.Join(base, "config.json"), `{not json`, 0o600)

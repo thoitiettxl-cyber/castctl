@@ -125,36 +125,36 @@ func TestFingerprintParseInvalid(t *testing.T) {
 
 func TestFingerprintLegacy(t *testing.T) {
 	t.Parallel()
-	// Present values in a legacy flat config load verbatim.
+	// Present values in a single-file entry load verbatim.
 	home := t.TempDir()
-	legacy := BaseDir(home)
-	writeFile(t, filepath.Join(legacy, "config.json"), `{"fingerprint":"ios","tls_engine":"stdlib"}`, 0o600)
-	p, err := LoadProfile(legacy, "default", lookupEnv(map[string]string{}))
+	base := BaseDir(home)
+	writeFile(t, filepath.Join(base, "config.json"), `{"profiles":{"default":{"fingerprint":"ios","tls_engine":"stdlib"}}}`, 0o600)
+	p, err := LoadProfile(base, "default", lookupEnv(map[string]string{}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if p.Fingerprint != "ios" || p.TLSEngine != "stdlib" {
-		t.Fatalf("legacy = %s/%s, want ios/stdlib", p.Fingerprint, p.TLSEngine)
+		t.Fatalf("single-file entry = %s/%s, want ios/stdlib", p.Fingerprint, p.TLSEngine)
 	}
 	// Absent keys default.
 	home2 := t.TempDir()
-	legacy2 := BaseDir(home2)
-	writeFile(t, filepath.Join(legacy2, "config.json"), `{"auto_approve":"off"}`, 0o600)
-	p, err = LoadProfile(legacy2, "default", lookupEnv(map[string]string{}))
+	base2 := BaseDir(home2)
+	writeFile(t, filepath.Join(base2, "config.json"), `{"profiles":{"default":{"auto_approve":"off"}}}`, 0o600)
+	p, err = LoadProfile(base2, "default", lookupEnv(map[string]string{}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if p.Fingerprint != "chrome" || p.TLSEngine != "utls" {
-		t.Fatalf("legacy defaults = %s/%s, want chrome/utls", p.Fingerprint, p.TLSEngine)
+		t.Fatalf("single-file defaults = %s/%s, want chrome/utls", p.Fingerprint, p.TLSEngine)
 	}
-	// Invalid values error even on the non-strict (LoadProfile)
-	// path, and wrong types too: recorded identity is never
-	// silently reinterpreted.
+	// Invalid values error even on the LoadProfile path, and
+	// wrong types too: recorded identity is never silently
+	// reinterpreted.
 	for _, raw := range []string{`{"fingerprint":"random"}`, `{"tls_engine":"bogus"}`, `{"fingerprint":42}`, `{"tls_engine":true}`} {
 		home3 := t.TempDir()
-		legacy3 := BaseDir(home3)
-		writeFile(t, filepath.Join(legacy3, "config.json"), raw, 0o600)
-		if _, err := LoadProfile(legacy3, "default", lookupEnv(map[string]string{})); err == nil {
+		base3 := BaseDir(home3)
+		writeFile(t, filepath.Join(base3, "config.json"), `{"profiles":{"default":`+raw+`}}`, 0o600)
+		if _, err := LoadProfile(base3, "default", lookupEnv(map[string]string{})); err == nil {
 			t.Fatalf("LoadProfile %s: want error", raw)
 		} else if ExitCode(err) != 2 {
 			t.Fatalf("LoadProfile %s: ExitCode = %d, want 2", raw, ExitCode(err))

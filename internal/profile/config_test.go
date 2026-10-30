@@ -6,6 +6,7 @@ package profile
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -402,58 +403,80 @@ func TestHasProfilesMarker(t *testing.T) {
 	}
 }
 
-func TestLoadProfileLegacyAndSingle(t *testing.T) {
+func TestLoadProfileLegacyRefuses(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()
 	base := BaseDir(home)
 
-	// Legacy default: flat config, env fills vm_id only when absent.
-	writeFile(t, filepath.Join(base, "config.json"), `{"auto_approve":"always","node_id":"LEGACY-NODE"}`, 0o600)
-	p, err := LoadProfile(base, "default", lookupEnv(map[string]string{"MUSE_VM_ID": "FAKE-VM"}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Source != SourceLegacy || p.AutoApprove != "always" || p.NodeID != "LEGACY-NODE" || p.VMID != "FAKE-VM" {
-		t.Errorf("legacy default = %+v; want legacy/always/LEGACY-NODE/FAKE-VM", p)
-	}
-	if !p.ConfigFound {
-		t.Error("legacy default ConfigFound = false; want true")
-	}
+	// A legacy flat config is refused, never read: the error names
+	// the migration step and the legacy file path, and never the
+	// file's contents.
+	legacyPath := filepath.Join(base, "config.json")
+	writeFile(t, legacyPath, `{"auto_approve":"always","node_id":"LEGACY-NODE"}`, 0o600)
+	_, err := LoadProfile(base, "default", lookupEnv(map[string]string{"MUSE_VM_ID": "FAKE-VM"}))
+	assertLegacyRefusal(t, err, legacyPath, "LEGACY-NODE", "FAKE-VM")
 
-	// Load must not write: node_id absent + no env => stays empty, file untouched.
-	home2 := t.TempDir()
-	base2 := BaseDir(home2)
-	writeFile(t, filepath.Join(base2, "config.json"), `{"auto_approve":"off"}`, 0o600)
-	before, _ := os.ReadFile(filepath.Join(base2, "config.json"))
-	p2, err := LoadProfile(base2, "default", lookupEnv(map[string]string{}))
-	if err != nil {
-		t.Fatal(err)
+	// Refusal leaves the file untouched and generates nothing.
+	before, _ := os.ReadFile(legacyPath)
+	if _, err := LoadProfile(base, "default", lookupEnv(map[string]string{})); err == nil {
+		t.Fatal("second legacy load = nil error; want refusal")
 	}
-	if p2.NodeID != "" {
-		t.Errorf("Load generated node_id %q; Load must be read-only", p2.NodeID)
-	}
-	after, _ := os.ReadFile(filepath.Join(base2, "config.json"))
+	after, _ := os.ReadFile(legacyPath)
 	if string(before) != string(after) {
-		t.Error("Load modified config.json; want read-only")
+		t.Error("refused Load modified config.json; want read-only")
 	}
 
-	// Legacy named profile: fresh defaults, no borrowing from default.
-	p3, err := LoadProfile(base, "work", lookupEnv(map[string]string{}))
+	// A legacy named-profile file is refused naming its own path.
+	namedPath := filepath.Join(base, "profiles", "work", "config.json")
+	writeFile(t, namedPath, `{"auto_approve":"always","node_id":"WORK-NODE"}`, 0o600)
+	_, err = LoadProfile(base, "work", lookupEnv(map[string]string{}))
+	assertLegacyRefusal(t, err, namedPath, "WORK-NODE")
+
+	// Loading a fresh profile (no files at all) still synthesises
+	// SourceNone defaults and creates nothing.
+	p3, err := LoadProfile(base, "fresh", lookupEnv(map[string]string{}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if p3.AutoApprove != "off" || p3.Source != SourceNone || p3.ConfigFound {
 		t.Errorf("fresh named = %+v; want off/none/not-found", p3)
 	}
-	if p3.CookiesFile != filepath.Join(base, "profiles", "work", "cookies.txt") {
+	if p3.CookiesFile != filepath.Join(base, "profiles", "fresh", "cookies.txt") {
 		t.Errorf("fresh named CookiesFile = %q", p3.CookiesFile)
 	}
-	if p3.Dir != filepath.Join(base, "profiles", "work") {
+	if p3.Dir != filepath.Join(base, "profiles", "fresh") {
 		t.Errorf("fresh named Dir = %q", p3.Dir)
 	}
-	// Loading a fresh profile creates nothing.
-	if _, err := os.Stat(filepath.Join(base, "profiles")); !os.IsNotExist(err) {
-		t.Error("Load created profiles dir; want no side effects")
+	if _, err := os.Stat(filepath.Join(base, "profiles", "fresh")); !os.IsNotExist(err) {
+		t.Error("Load created the fresh profile dir; want no side effects")
+	}
+}
+
+// assertLegacyRefusal checks the legacy-layout refusal contract:
+// exit 2, errors.Is ErrLegacyLayout, names the migration command
+// and the legacy file path, and never leaks file contents or
+// environment values.
+func assertLegacyRefusal(t *testing.T, err error, legacyPath string, forbidden ...string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("LoadProfile(%q) = nil error; want legacy-layout refusal", legacyPath)
+	}
+	if !errors.Is(err, ErrLegacyLayout) {
+		t.Errorf("LoadProfile(%q) error = %v; want errors.Is ErrLegacyLayout", legacyPath, err)
+	}
+	if ExitCode(err) != 2 {
+		t.Errorf("LoadProfile(%q) ExitCode = %d; want 2", legacyPath, ExitCode(err))
+	}
+	if !strings.Contains(err.Error(), "castctl config migrate --write") {
+		t.Errorf("refusal %q does not name `castctl config migrate --write`", err.Error())
+	}
+	if !strings.Contains(err.Error(), legacyPath) {
+		t.Errorf("refusal %q does not name the legacy file path %q", err.Error(), legacyPath)
+	}
+	for _, s := range forbidden {
+		if s != "" && strings.Contains(err.Error(), s) {
+			t.Errorf("refusal %q leaks forbidden value %q", err.Error(), s)
+		}
 	}
 }
 
@@ -463,8 +486,8 @@ func TestLoadProfileCoercion(t *testing.T) {
 	base := BaseDir(home)
 	// Copied config pointing inside the base dir is coerced to the profile's own file.
 	workDir := filepath.Join(base, "profiles", "work")
-	writeFile(t, filepath.Join(workDir, "config.json"),
-		`{"cookies_file":`+quote(filepath.Join(base, "cookies.txt"))+`,"node_id":"n1"}`, 0o600)
+	writeFile(t, filepath.Join(base, "config.json"),
+		`{"profiles":{"work":{"cookies_file":`+quote(filepath.Join(base, "cookies.txt"))+`,"node_id":"n1"}}}`, 0o600)
 	p, err := LoadProfile(base, "work", lookupEnv(map[string]string{}))
 	if err != nil {
 		t.Fatal(err)
@@ -474,9 +497,8 @@ func TestLoadProfileCoercion(t *testing.T) {
 	}
 	// A cookies_file outside the base dir is kept (Python keeps it).
 	outside := filepath.Join(t.TempDir(), "outside-cookies.txt")
-	workDir2 := filepath.Join(base, "profiles", "other")
-	writeFile(t, filepath.Join(workDir2, "config.json"),
-		`{"cookies_file":"`+outside+`","node_id":"n1"}`, 0o600)
+	writeFile(t, filepath.Join(base, "config.json"),
+		`{"profiles":{"work":{"cookies_file":"`+outside+`","node_id":"n1"},"other":{"cookies_file":"`+outside+`","node_id":"n1"}}}`, 0o600)
 	p2, err := LoadProfile(base, "other", lookupEnv(map[string]string{}))
 	if err != nil {
 		t.Fatal(err)
@@ -485,14 +507,13 @@ func TestLoadProfileCoercion(t *testing.T) {
 		t.Errorf("outside CookiesFile = %q; want kept", p2.CookiesFile)
 	}
 	// Relative cookies_file resolves under the base dir, then coercion applies.
-	workDir3 := filepath.Join(base, "profiles", "rel")
-	writeFile(t, filepath.Join(workDir3, "config.json"),
-		`{"cookies_file":"cookies.txt","node_id":"n1"}`, 0o600)
+	writeFile(t, filepath.Join(base, "config.json"),
+		`{"profiles":{"rel":{"cookies_file":"cookies.txt","node_id":"n1"}}}`, 0o600)
 	p3, err := LoadProfile(base, "rel", lookupEnv(map[string]string{}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p3.CookiesFile != filepath.Join(workDir3, "cookies.txt") {
+	if p3.CookiesFile != filepath.Join(base, "profiles", "rel", "cookies.txt") {
 		t.Errorf("relative CookiesFile = %q; want own file via base resolution", p3.CookiesFile)
 	}
 }
@@ -522,16 +543,13 @@ func TestLoadProfileSingleFileWinsNoMerge(t *testing.T) {
 		t.Errorf("single profile ConfigFile = %q; want single file", p.ConfigFile)
 	}
 
-	// Fallback: profile absent from single file loads from its legacy file.
-	writeFile(t, filepath.Join(base, "profiles", "alt", "config.json"),
+	// Refusal: a profile absent from the single file whose legacy
+	// file still exists is refused, never read.
+	altPath := filepath.Join(base, "profiles", "alt", "config.json")
+	writeFile(t, altPath,
 		`{"auto_approve":"always","node_id":"ALT-NODE"}`, 0o600)
-	p2, err := LoadProfile(base, "alt", lookupEnv(map[string]string{}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p2.Source != SourceLegacy || p2.AutoApprove != "always" || p2.NodeID != "ALT-NODE" {
-		t.Errorf("fallback profile = %+v; want legacy/always/ALT-NODE", p2)
-	}
+	_, err = LoadProfile(base, "alt", lookupEnv(map[string]string{}))
+	assertLegacyRefusal(t, err, altPath, "ALT-NODE")
 
 	// Unparseable single file: error, NO silent fallback to legacy.
 	writeFile(t, filepath.Join(base, "config.json"), `{"profiles":`, 0o600)
@@ -589,14 +607,15 @@ func TestResolveActiveProfile(t *testing.T) {
 	if err != nil || p.Name != "muse01" {
 		t.Errorf("flag with dangling default_profile = %+v, %v; want muse01", p, err)
 	}
-	// default_profile naming a legacy-only profile is not dangling.
-	writeFile(t, filepath.Join(base, "profiles", "legacyone", "config.json"), `{"node_id":"L1"}`, 0o600)
+	// default_profile naming a legacy-only profile is refused:
+	// the profile exists as a directory, but its settings live
+	// only in an unmigrated legacy file.
+	legacyOnePath := filepath.Join(base, "profiles", "legacyone", "config.json")
+	writeFile(t, legacyOnePath, `{"node_id":"L1"}`, 0o600)
 	writeFile(t, filepath.Join(base, "config.json"),
 		`{"default_profile":"legacyone","profiles":{"muse01":{"node_id":"N1"}}}`, 0o600)
-	p, err = ResolveActiveProfile(base, nil, lookupEnv(map[string]string{}))
-	if err != nil || p.Name != "legacyone" || p.Source != SourceLegacy {
-		t.Errorf("legacy default_profile = %+v, %v; want legacyone/legacy", p, err)
-	}
+	_, err = ResolveActiveProfile(base, nil, lookupEnv(map[string]string{}))
+	assertLegacyRefusal(t, err, legacyOnePath, "L1")
 }
 
 func TestSaveSingleConfig(t *testing.T) {

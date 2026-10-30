@@ -166,7 +166,6 @@ func cmdProfileList(ctx context.Context, env *Env, g *globalOpts, args []string)
 		ordered = append(ordered, active.Name)
 	}
 	rows := make([]profileListRow, 0, len(ordered))
-	hasSingle, hasLegacy := false, false
 	for _, name := range ordered {
 		prof, err := profile.LoadProfile(loc.ConfigDir, name, env.lookupEnv)
 		if err != nil {
@@ -185,22 +184,12 @@ func cmdProfileList(ctx context.Context, env *Env, g *globalOpts, args []string)
 		row.Outbound.Type = prof.Outbound.Type
 		row.Outbound.Tag = prof.Outbound.Tag
 		rows = append(rows, row)
-		switch prof.Source {
-		case profile.SourceSingle:
-			hasSingle = true
-		case profile.SourceLegacy:
-			hasLegacy = true
-		}
 	}
+	// The aggregate source is single when a single file exists,
+	// else none. A legacy layout never reaches the aggregation:
+	// LoadProfile refuses it above (whole-command error).
 	source := "none"
-	switch {
-	case single != nil && hasLegacy:
-		source = "mixed"
-	case single != nil:
-		source = "single"
-	case hasLegacy:
-		source = "legacy"
-	case hasSingle:
+	if single != nil {
 		source = "single"
 	}
 	defaultProfile := "default"
@@ -325,6 +314,12 @@ func explicitProfileSelected(g *globalOpts, env *Env, positional bool) bool {
 }
 
 func profileExists(baseDir string, single *profile.SingleConfig, name string) bool {
+	// Existence counts a single-file entry, a per-profile config
+	// file, or a bare profile directory (kept deliberately: the
+	// directory is the profile's home, and LoadProfile
+	// synthesises SourceNone defaults for it). A legacy config
+	// file counts as existence here, but LoadProfile refuses to
+	// read it, so this check never silently loads one.
 	if single != nil {
 		if _, ok := single.Profiles[name]; ok {
 			return true

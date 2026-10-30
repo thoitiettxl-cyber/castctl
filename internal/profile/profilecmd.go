@@ -154,8 +154,14 @@ func AddProfile(baseDir, name string, opts AddProfileOptions) (*Profile, error) 
 }
 
 // refuseUnmigrated returns a "run config migrate first" error when
-// no single file exists and the old layout is present. When a single
-// file exists the old files are mere fallbacks and adding is fine.
+// no single file exists and the old layout is present. It is kept
+// deliberately alongside the LoadProfile refusal: LoadProfile
+// refuses READS of legacy files, while this guards WRITES —
+// including the named-only case (legacy profile directories with
+// no base config file), where no LoadProfile call would fire for
+// the new name being added. When a single file exists, leftover
+// legacy files are never read (LoadProfile refuses them) and
+// adding is fine.
 func refuseUnmigrated(baseDir string) error {
 	state, err := LoadConfigState(baseDir)
 	if err != nil {
@@ -178,7 +184,7 @@ func refuseUnmigrated(baseDir string) error {
 		return nil
 	}
 	// A file exists but is not a single file: it is the legacy-flat
-	// default config.
+	// default config, unmigrated.
 	return newConfigError("the old layout exists unmigrated; run config migrate first")
 }
 

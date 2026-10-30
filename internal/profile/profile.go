@@ -133,7 +133,9 @@ func EnsureProfileDir(baseDir, name string) (Paths, error) {
 // (cli.py). Invalid names, files, and a missing profiles directory are
 // skipped. The active profile is not appended here; callers that need
 // the Python behaviour (list the active profile even if not on disk)
-// add it themselves.
+// add it themselves. Directory discovery only: it reads no config
+// file. Migrate uses it to enumerate the profiles a legacy layout
+// may hold; LoadProfile never reads a legacy file it names.
 func DiscoverProfileNames(baseDir string) ([]string, error) {
 	names := []string{DefaultProfileName}
 	entries, err := os.ReadDir(filepath.Join(baseDir, "profiles"))
@@ -165,7 +167,9 @@ type Source string
 const (
 	// SourceSingle means settings came from the single-file config.json.
 	SourceSingle Source = "single"
-	// SourceLegacy means settings came from the profile's own legacy config.json.
+	// SourceLegacy means the profile was built from a legacy
+	// per-profile config file by Migrate (migrate-only). LoadProfile
+	// never returns it: a legacy file on disk is refused instead.
 	SourceLegacy Source = "legacy"
 	// SourceNone means no config file was found; defaults apply.
 	SourceNone Source = "none"
@@ -202,7 +206,7 @@ type Profile struct {
 	// Exists reports whether the profile directory exists on disk.
 	Exists bool
 	// ConfigFound reports whether settings came from a config file
-	// (single-file entry or legacy file).
+	// (a single-file entry; a legacy file is refused, never a source).
 	ConfigFound bool
 
 	vmIDPresent        bool
