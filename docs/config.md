@@ -234,11 +234,13 @@ the colon, or between the colon and the value, are skipped
 before the colon/value scan, so a separator newline alone
 does not defeat the pair. `%q` cannot create this condition:
 it escapes a literal newline to the two-byte sequence `\n`.
-That is not a redaction guarantee: a `%q` rendering of text
-that already contains escaped quotes doubles the backslashes,
-and the resulting text is left verbatim, secret included — O4
-needs free-form text already containing literal escaped
-quotes plus an unescaped literal newline reached by the scan. None of these shapes
+That is not a redaction guarantee: an unescaped literal
+newline is sufficient, not necessary, for the bypass — a
+`%q` rendering of text that already contains escaped quotes
+is a separate route that doubles the backslashes and leaves
+that escaped-quoted pair verbatim, secret included, with no
+newline anywhere, while other parts of the same rendering,
+such as a Bearer token or a `token:` pair, still redact. None of these shapes
 can leak through
 the structural slots of the `approveAll` / `logAutoApproved`
 stderr lines above, because those slots emit no peer free text
