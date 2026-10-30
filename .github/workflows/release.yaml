@@ -111,7 +111,22 @@ jobs:
           PUBLISH_MODE: ${{ steps.tag.outputs.mode }}
         run: |
           set -euo pipefail
+          # Validate the publish mode before any gh call: an
+          # out-of-choice value must fail closed on both the
+          # reuse and the create path, never fall through to a
+          # full published release.
+          case "${PUBLISH_MODE}" in
+            draft|prerelease|release) ;;
+            *)
+              echo "unknown PUBLISH_MODE: ${PUBLISH_MODE}" >&2
+              exit 1
+              ;;
+          esac
           if existing="$(gh release view "${RELEASE_TAG}" --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"' 2>/dev/null)"; then
+            if [[ ! "${existing}" =~ ^(true|false)\ (true|false)$ ]]; then
+              echo "unexpected gh release view output for ${RELEASE_TAG}; refusing to reuse release" >&2
+              exit 1
+            fi
             read -r is_draft is_prerelease <<< "${existing}"
             # Reuse only on an exact mode match; a mismatch fails
             # closed instead of silently mutating a release of a
@@ -131,7 +146,7 @@ jobs:
                 fi
                 ;;
               release)
-                if [[ "${is_draft}" == "true" || "${is_prerelease}" == "true" ]]; then
+                if [[ "${is_draft}" != "false" || "${is_prerelease}" != "false" ]]; then
                   echo "release ${RELEASE_TAG} already exists but is not a published release (isDraft=${is_draft}, isPrerelease=${is_prerelease}); refusing to reuse it for a tag-push publish" >&2
                   exit 1
                 fi
@@ -407,11 +422,11 @@ jobs:
             echo "stamping verified: ${version_output}"
           else
             command -v strings >/dev/null || { echo "strings not found" >&2; exit 1; }
-            if ! strings "$archive_dir/castctl" | grep -Fq "${RELEASE_VERSION}" || ! strings "$archive_dir/castctl" | grep -Fq "${COMMIT}"; then
-              echo "stamping verification failed: strings in binary do not contain ${RELEASE_VERSION} and ${COMMIT}" >&2
+            if ! strings "$archive_dir/castctl" | grep -Fq "${RELEASE_VERSION}" || ! strings "$archive_dir/castctl" | grep -Fq "${COMMIT}" || ! strings "$archive_dir/castctl" | grep -Fq "${BUILD_DATE}"; then
+              echo "stamping verification failed: strings in binary do not contain ${RELEASE_VERSION}, ${COMMIT} and ${BUILD_DATE}" >&2
               exit 1
             fi
-            echo "stamping verified via strings: ${RELEASE_VERSION} ${COMMIT}"
+            echo "stamping verified via strings: ${RELEASE_VERSION} ${COMMIT} ${BUILD_DATE}"
           fi
           command -v readelf >/dev/null || { echo "readelf not found" >&2; exit 1; }
           if readelf -l "$archive_dir/castctl" | grep -q 'Requesting program interpreter'; then
