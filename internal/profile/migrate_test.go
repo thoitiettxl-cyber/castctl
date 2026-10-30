@@ -1754,6 +1754,38 @@ func TestMigrateFromCrossDirCollision(t *testing.T) {
 		writeFile(t, filepath.Join(dest, "config.json"), single(`"default":`+entry("SAME-NODE", "SAME-VM", "off")), 0o600)
 		assertAlreadyMigrated(t, src, dest)
 	})
+	t.Run("single-format source colliding", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		src := filepath.Join(home, "muse-cli")
+		dest := filepath.Join(home, "castctl")
+		seedMatchingBase(t, src, dest)
+		// A single-format file in the source is not copied: the
+		// strict legacy parser refuses it. Before the R5 fix
+		// this colliding position skipped the file silently
+		// (never parsed); now it errors and writes nothing.
+		// (The parse error names the problem, not both
+		// locations — that is the pre-existing parse-error
+		// shape, distinct from the differing-settings refusal.)
+		writeFile(t, filepath.Join(src, "profiles", "work", "config.json"), `{"profiles":{"work":{"node_id":"X"}}}`, 0o600)
+		writeFile(t, filepath.Join(dest, "config.json"), single(`"default":`+entry("BASE-NODE", "BASE-VM", "off")+`,"work":`+entry("DEST-NODE", "DEST-VM", "off")), 0o600)
+		srcBefore := snapshotDir(t, src)
+		destBefore, _ := os.ReadFile(filepath.Join(dest, "config.json"))
+		for _, write := range []bool{false, true} {
+			result, err := MigrateFrom(src, dest, write)
+			if err == nil {
+				t.Fatalf("MigrateFrom(write=%v) err = nil; want a profile error for the single-format source", write)
+			}
+			if !strings.Contains(strings.Join(result.Errors, "\n"), `"profiles" key does not belong`) {
+				t.Errorf("MigrateFrom(write=%v) errors = %q; want the strict-parser refusal", write, strings.Join(result.Errors, "\n"))
+			}
+		}
+		assertSameSnapshot(t, srcBefore, snapshotDir(t, src))
+		destAfter, _ := os.ReadFile(filepath.Join(dest, "config.json"))
+		if string(destAfter) != string(destBefore) {
+			t.Error("refused migrate rewrote the destination config")
+		}
+	})
 	t.Run("bare source dir silent", func(t *testing.T) {
 		t.Parallel()
 		home := t.TempDir()
