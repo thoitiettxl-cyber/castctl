@@ -132,8 +132,11 @@ opt-in raw dumps are data output the user explicitly
 requested, not error/diagnostic/log emissions, and are out
 of scope for this rule.) Instead, an error carrying a server
 body renders as an allowlist summary only: status code,
-error class, body length (byte count), content-type (media
-type, parameters dropped), and specific known-safe fields
+error class, body length (byte count — when the producer
+knows the wire length: a known 0-byte body renders
+`body_length=0`, while an unknown length renders no
+`body_length` field at all, never the length of the summary
+text), content-type (media type, parameters dropped), and specific known-safe fields
 parsed by key from known Muse response schemas — the `error`
 field of the `{"ok":false,"error":...}` / `{"success":...,
 "error":...}` envelopes, the `status` field of the
@@ -148,7 +151,44 @@ value over the cap is replaced by `[omitted]` — never emitted
 truncated. The trace level gets the same summary; there is
 no trace allowance for body bytes. (Python parity on raw
 payload bytes is waived; error-kind classification and retry
-semantics are unchanged.) The events castctl emits at debug/trace
+semantics are unchanged.)
+
+The `approveAll` / `logAutoApproved` stderr lines are
+structural, not redacted prose: they emit no peer free text
+at all. An approval title renders as `title_length` only
+(the title's BYTE length, the same byte convention as
+`body_length`); offered decision options render as
+`option_count` only (the number of options); an approval id
+renders only if it is 1–64 runes of `[A-Za-z0-9_-]`,
+else `[omitted]`; a decision renders only if it is one of
+`allow_always`, `allow_once`, `allow_session`,
+`allow_today`, else `[omitted]`; a kind renders only if it
+is one of `browse`, `network_access`, `shell`, else
+`[omitted]`; a scope always renders `[omitted]` (it is an
+unconstrained host string, so no enum set exists). The
+SafeString backstop is not the control on these lines and
+is unchanged. JSON stdout data output is unaffected: it
+still carries the full title, options, id, kind, scope,
+and decision.
+
+Recorded backlog (NOT fixed): four SafeString bypass shapes
+were observed in earlier loops and are carried here as a
+record, not a fix. (O1) A JSON pair whose colon is spaced
+with NBSP (U+00A0) -- e.g. `{"token"<NBSP>: "..."}` -- bypasses
+SafeString's quoted-key scan. (O2) Wider Unicode spaces
+(U+2009, U+3000, U+202F) between a label and its separator
+bypass the closed separator set. (O3) A `public_key` label
+separated by NBSP bypasses the listed vocabulary. None of
+these shapes can leak through the `approveAll` /
+`logAutoApproved` stderr lines above, because those lines
+emit no peer free text at all (only lengths, counts, gated
+ids, and enum members). What would settle each shape is a
+future explicit decision about whether SafeString's scanner
+should be extended to cover it; no scanner change is made
+or implied here, and no claim is made that the shapes are
+fixed elsewhere.
+
+The events castctl emits at debug/trace
 are: `dns_source` (resolved DNS source + first server tag),
 `outbound_chain` (profile + detour-chain tags), dial
 start/done with a per-connection ID, `tls_alpn` (negotiated
