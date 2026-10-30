@@ -47,6 +47,9 @@ is condensed to an implementable spec of under 20 KB mirroring
 CLIProxyAPI, pointing to the draft for rationale. This docs change
 does not condense it.
 
+The upstream sources for the plugin model, the toggles, and what was
+deliberately not taken are recorded in docs/provenance.md §2.
+
 ## Platforms
 
 castctl is a general tool, not VM-only. Supported run targets: Linux only — linux/amd64 and linux/arm64 (Debian/server Linux host). No VM assumptions: no hard-coded paths,
@@ -153,3 +156,6 @@ docs/research/native-login-bundle-analysis.md.
 
 Secrets in config are write-only under the [secrets write-only contract](../webui/SECRETS-CONTRACT.md),
 which the Go server MUST implement server-side (see docs/security.md).
+
+The web UI fork's upstream commit, the measured file diff, and what
+was kept, adapted, or removed are recorded in docs/provenance.md §3.
