@@ -631,7 +631,7 @@ func TestRunnerSettlePendingPrefersCtxErr(t *testing.T) {
 	}
 }
 
-func TestRunnerExplicitBoundaryNeverAcceptsReplayedFailed(t *testing.T) {
+func TestRunnerExplicitBoundaryAcceptsReplayedFailed(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		sub := &fakeSubscriber{loopScript: [][]byte{
 			recordJSON(taskEv("interrupted", "R", "R", 180, nil)),
@@ -646,8 +646,8 @@ func TestRunnerExplicitBoundaryNeverAcceptsReplayedFailed(t *testing.T) {
 			Dial:        sub.dial,
 			History:     hist,
 		})
-		if res.Kind != KindTimeout || res.ExitCode != 124 {
-			t.Errorf("explicit boundary must keep waiting: res = %+v", res)
+		if res.Kind != KindFailed || res.ExitCode != 2 {
+			t.Errorf("explicit boundary + replayed failed: res = %+v, want KindFailed/2 (parity with derived boundaries, loop-2 F6)", res)
 		}
 	})
 }

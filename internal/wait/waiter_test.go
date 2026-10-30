@@ -423,7 +423,13 @@ func TestAcceptReplayedFailedTable(t *testing.T) {
 		{"newer user rejects", nil, seq(201), false},
 		{"older user rejects", nil, seq(199), false},
 		{"nil latest rejects", nil, nil, false},
-		{"explicit boundary rejects", func(w *Waiter) { w.SetBoundary(200, false, false) }, seq(200), false},
+		{"explicit boundary accepts", func(w *Waiter) { w.SetBoundary(200, false, false) }, seq(200), true},
+		{"subagents reason accepts", func(w *Waiter) {
+			w2 := New("")
+			w2.Feed(taskEv("interrupted", "R", "R", 0, 2))
+			w2.SetBoundary(200, false, true)
+			*w = *w2
+		}, seq(200), true},
 		{"nil after_seq rejects", func(w *Waiter) { w.SetBoundary(200, false, true); w.afterSeq = nil }, seq(200), false},
 		{"missing_root rejects", func(w *Waiter) {
 			w2 := New("")
