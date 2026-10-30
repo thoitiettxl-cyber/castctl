@@ -680,10 +680,14 @@ func readExistingSingle(baseDir string) (*SingleConfig, bool, error, error) {
 // check the marker first (HasProfilesMarker). Shape, not key
 // presence alone, triggers: a legacy file never carries these
 // keys in single-config shape, while a hand-written
-// single-format file that lost its "profiles" key does.
+// single-format file that lost its "profiles" key does. For the
+// array sections the rule is existential: a single shaped
+// element proves the section is single-format, even alongside
+// unshaped elements.
 // Unshaped values (a string "dns", an empty outbounds array, an
-// outbound object without a "type") are left to the legacy
-// path exactly as before — the guard refuses only state it can
+// array with no shaped outbound, a wireguard_dns map with no
+// string in any value array) are left to the legacy path
+// exactly as before — the guard refuses only state it can
 // prove is single-format, so no legitimate legacy migration is
 // affected.
 func singleFormatKeys(data []byte) []string {
@@ -699,13 +703,13 @@ func singleFormatKeys(data []byte) []string {
 	}
 	for _, key := range []string{"outbounds", "endpoints"} {
 		if v, ok := obj.get(key); ok {
-			if arr, isArr := v.([]any); isArr && len(arr) > 0 && allOutboundShaped(arr) {
+			if arr, isArr := v.([]any); isArr && len(arr) > 0 && anyOutboundShaped(arr) {
 				keys = append(keys, key)
 			}
 		}
 	}
 	if v, ok := obj.get("wireguard_dns"); ok {
-		if m, isObj := v.(*orderedObject); isObj && len(m.keys) > 0 && allStringArrays(m) {
+		if m, isObj := v.(*orderedObject); isObj && len(m.keys) > 0 && anyStringArray(m) {
 			keys = append(keys, "wireguard_dns")
 		}
 	}
@@ -722,43 +726,46 @@ func singleFormatKeys(data []byte) []string {
 	return keys
 }
 
-// allOutboundShaped reports whether every element is an object
+// anyOutboundShaped reports whether any element is an object
 // carrying a non-empty string "type": the outbound/endpoint
-// object shape. An object without a type parses nowhere as an
-// outbound, so it is not shaped state.
-func allOutboundShaped(arr []any) bool {
+// object shape. A single shaped element proves the array
+// carries single-format state, even alongside unshaped
+// elements; an object without a type is not shaped state.
+func anyOutboundShaped(arr []any) bool {
 	for _, elem := range arr {
 		obj, ok := elem.(*orderedObject)
 		if !ok {
-			return false
+			continue
 		}
 		t, ok := obj.get("type")
 		if !ok {
-			return false
+			continue
 		}
 		s, ok := t.(string)
-		if !ok || s == "" {
-			return false
+		if ok && s != "" {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
-// allStringArrays reports whether every value in m is an array
-// of strings: the wireguard_dns map shape.
-func allStringArrays(m *orderedObject) bool {
+// anyStringArray reports whether any value in m is an array
+// containing at least one string: the wireguard_dns map shape.
+// A single string in any value array proves the map carries
+// single-format state, even alongside unshaped values.
+func anyStringArray(m *orderedObject) bool {
 	for _, k := range m.keys {
 		arr, ok := m.values[k].([]any)
 		if !ok {
-			return false
+			continue
 		}
 		for _, elem := range arr {
-			if _, ok := elem.(string); !ok {
-				return false
+			if _, ok := elem.(string); ok {
+				return true
 			}
 		}
 	}
-	return true
+	return false
 }
 
 // allLogKeys reports whether every key in m is one of the four

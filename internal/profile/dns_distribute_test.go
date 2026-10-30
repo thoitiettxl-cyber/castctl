@@ -1000,8 +1000,10 @@ func TestMigrateProfilesAbsentSingleFormatShapes(t *testing.T) {
 		})
 	}
 	// An outbound object without a "type" is NOT a shaped
-	// outbound (see the migrating control below): shape, not
-	// key presence alone, triggers the guard.
+	// outbound, so an array with no shaped outbound (see the
+	// migrating control below) does not trigger the guard:
+	// shape, not key presence alone, triggers it — but one
+	// shaped element in a mixed array does.
 	migrating := []struct{ name, doc string }{
 		{"legacy only", `{"auto_approve":"always","node_id":"N1"}`},
 		{"empty outbounds array", `{"outbounds":[]}`},

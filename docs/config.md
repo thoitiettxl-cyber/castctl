@@ -626,18 +626,24 @@ single file exists yet.
 A base `config.json` with no `profiles` key is normally a
 legacy flat file and migrates as one — but when it carries
 single-format sections in single-config shape (an object
-`dns` section, an `outbounds`/`endpoints` array of objects
-each carrying a `type`, a `wireguard_dns` object of string
-arrays, a `log` object of log-block keys, or a string
-`default_profile`), a fresh migration would overwrite it and
-delete those sections. That shape refuses instead (exit 2,
-file unchanged, in dry-run and `--write`, at the destination
-under `--from` too): add a `profiles` object so the file
-parses as a single config, or remove the sections by hand
-first. Unshaped values (a string `dns`, an empty `outbounds`
-array, an outbound object without a `type`) keep the legacy
-path, as before; a file with a `profiles` key, including an
-empty `profiles: {}`, takes the single-file path, where the
+`dns` section, an `outbounds`/`endpoints` array with any
+element an object carrying a non-empty string `type`, a
+`wireguard_dns` object with any value array containing any
+string, a `log` object whose keys are all log-block keys, or
+a string `default_profile`), a fresh migration would
+overwrite it and delete those sections. That shape refuses
+instead (exit 2, file unchanged, in dry-run and `--write`,
+at the destination under `--from` too): add a `profiles`
+object so the file parses as a single config, or remove the
+sections by hand first. Unshaped values (a string `dns`, an
+empty `outbounds` array, an array with no shaped outbound
+such as a lone outbound object without a `type`, a
+`wireguard_dns` object with no string in any value array)
+keep the legacy path, as before; a `log` object mixing a
+log-block key with any other key also keeps the legacy path,
+because the `log` check quantifies over keys, not array
+elements. A file with a `profiles` key, including an empty
+`profiles: {}`, takes the single-file path, where the
 zero-profile distribution refusal applies instead.
 
 ### Migrating from a different directory (`--from`)
