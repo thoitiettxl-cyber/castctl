@@ -440,10 +440,14 @@ func TestRunnerSafetyNetCheckSettles(t *testing.T) {
 	})
 }
 
-func TestRunnerRatchet(t *testing.T) {
+func TestRunnerStreamSeqNeverRatchetsBoundary(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		// Boundary unknown (history always fails), then a live
-		// root running ratchets after_seq to the running seq.
+		// root running carries stream seq 300. The stream seq
+		// must NEVER become the history boundary (loop-2 F1):
+		// the turn decides Done on the proven terminal, but
+		// the reply in the final read is suppressed with the
+		// boundary-unknown note and AfterSeq stays 0.
 		sub := &fakeSubscriber{loopScript: [][]byte{
 			recordJSON(taskEv("running", "R", "R", 300, nil)),
 			recordJSON(taskEv("completed", "R", "R", 400, nil)),
@@ -462,8 +466,15 @@ func TestRunnerRatchet(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
-		if res.Kind != KindDone || res.AfterSeq != 300 || res.FinalText != "ratcheted" {
-			t.Errorf("res = %+v", res)
+		if res.Kind != KindDone || res.AfterSeq != 0 || res.FinalText != "" {
+			t.Errorf("res = %+v, want KindDone with AfterSeq 0 and no final text", res)
+		}
+		if len(res.Replies) != 0 {
+			t.Errorf("replies = %+v, want none (boundary unknown suppresses replies)", res.Replies)
+		}
+		wantNote := "turn-end boundary unknown: history could not be read, so no replies are reported; run `castctl wait` again"
+		if res.Note != wantNote {
+			t.Errorf("note = %q, want %q", res.Note, wantNote)
 		}
 	})
 }

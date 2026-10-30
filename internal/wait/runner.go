@@ -357,11 +357,13 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 			if ctx.Err() != nil {
 				return nil, err
 			}
-			if dctx.Err() != nil {
-				afterSeq, known, derived = 0, false, false
-			} else {
-				return nil, err
-			}
+			// Any other derivation error with a live caller
+			// context can only be the deadline expiring:
+			// DeriveBoundary returns an error solely for a
+			// fatal error (AuthError, handled above, or a
+			// dead context, handled above). The boundary is
+			// unknown and the wait times out below.
+			afterSeq, known, derived = 0, false, false
 		}
 		r.afterSeq = afterSeq
 		r.boundaryKnown = known
@@ -543,7 +545,6 @@ func (r *Runner) onRecord(ctx context.Context) func([]byte) bool {
 				r.pendingErr = ferr
 				return true
 			}
-			r.ratchet()
 			if r.waiter.Result() != nil {
 				return true
 			}
@@ -644,19 +645,6 @@ func recordName(ev Event) string {
 	return ""
 }
 
-// ratchet moves the boundary up to the first live root running
-// seq when the boundary was never read. One-way only; a no-op
-// once the boundary was read.
-func (r *Runner) ratchet() {
-	if r.boundaryKnown {
-		return
-	}
-	if seq, ok := r.waiter.RunningSeq(); ok && seq > r.afterSeq {
-		r.afterSeq = seq
-		r.waiter.SetAfterSeq(seq)
-	}
-}
-
 // noteFailure accounts one failed resubscribe. After
 // ReconnectBudget of failures it runs one bounded state check
 // instead of storming until the deadline, then resets the storm
@@ -725,8 +713,9 @@ func (r *Runner) settlePending(ctx context.Context, pending string) error {
 	// No history read is spent on a proof the gates already
 	// forbid: with an unknown boundary neither Settle nor
 	// AcceptReplayedFailed can accept, so the attempt is
-	// evaluated and skipped. (A live root running clears the
-	// flag in Feed before any later attempt.)
+	// evaluated and skipped. The flag is never cleared by a
+	// live event (loop-2 F1): only a successful derivation
+	// or an explicit boundary makes it known.
 	if r.waiter.BoundaryUnknown() {
 		return nil
 	}
@@ -775,7 +764,7 @@ func (r *Runner) settlePending(ctx context.Context, pending string) error {
 
 // checkState reads the turn state on its own short subscription
 // (the server replays task.status), feeds the last scoped
-// task.status event, ratchets, and settles it like a live one.
+// task.status event, and settles it like a live one.
 // A failed check is silent except for AuthError, which
 // propagates — and except for a transient history-read failure
 // in the settle, which is swallowed exactly as trySettle
@@ -840,7 +829,6 @@ func (r *Runner) checkState(ctx context.Context) error {
 		if ferr := r.waiter.FatalErr(); ferr != nil {
 			return ferr
 		}
-		r.ratchet()
 	}
 	if running {
 		r.lastProgress = r.clock.Now()

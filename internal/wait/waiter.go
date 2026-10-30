@@ -205,7 +205,6 @@ type Waiter struct {
 	ignoredTermHasSeq bool
 	rootID            *string
 	boundaryUnknown   bool
-	runningSeq        *int64
 	afterSeq          *int64
 	boundaryDerived   bool
 	fatalErr          error
@@ -351,15 +350,6 @@ func (w *Waiter) RootID() (string, bool) {
 // BoundaryUnknown reports whether the history boundary is unreadable.
 func (w *Waiter) BoundaryUnknown() bool { return w.boundaryUnknown }
 
-// RunningSeq returns the seq of the first root-confirmed running,
-// if the record carried a numeric one.
-func (w *Waiter) RunningSeq() (int64, bool) {
-	if w.runningSeq == nil {
-		return 0, false
-	}
-	return *w.runningSeq, true
-}
-
 // AfterSeq returns the wait's boundary seq, if set.
 func (w *Waiter) AfterSeq() (int64, bool) {
 	if w.afterSeq == nil {
@@ -378,15 +368,6 @@ func (w *Waiter) SetBoundary(afterSeq int64, unknown, derived bool) {
 	w.afterSeq = &afterSeq
 	w.boundaryUnknown = unknown
 	w.boundaryDerived = derived
-}
-
-// SetAfterSeq moves the boundary seq (the ratchet: a live root
-// running ratchets after_seq up when the boundary was never
-// read). It never moves the boundary backwards.
-func (w *Waiter) SetAfterSeq(seq int64) {
-	if w.afterSeq == nil || seq > *w.afterSeq {
-		w.afterSeq = &seq
-	}
 }
 
 // expired reports whether a described approval is past its
@@ -462,11 +443,11 @@ func (w *Waiter) Feed(ev Event) *Outcome {
 				w.ignoredReason = ""
 				w.ignoredTermSeq = 0
 				w.ignoredTermHasSeq = false
-				w.boundaryUnknown = false
-				if w.runningSeq == nil && hasSeq(ev) {
-					seq := seqOf(ev)
-					w.runningSeq = &seq
-				}
+				// A live running teaches nothing about the
+				// history boundary: stream seqs and history
+				// seqs are different namespaces (loop-2
+				// F1), so it neither clears the
+				// unknown-boundary flag nor moves afterSeq.
 			}
 		}
 		w.status = &s

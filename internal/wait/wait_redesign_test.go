@@ -444,10 +444,10 @@ func TestWaitRedesignT10CheckStateStaleLastEvent(t *testing.T) {
 
 // T12 (D11): a never-succeeding history reader still terminates
 // at the deadline, with a finite, exactly-counted number of
-// reads: 6 derivation attempts (3 windows x 1 retry) + 2 settle
-// proofs (the live running clears the unknown-boundary flag, so
-// the proofs run) + 2 final reads. No proof starts past the
-// deadline.
+// reads: 6 derivation attempts (3 windows x 1 retry) + 0 settle
+// proofs (a live running never clears the unknown-boundary
+// flag, so no proof spends a read) + 2 final reads. No proof
+// starts past the deadline.
 func TestWaitRedesignT12NeverSucceedingHistoryTerminates(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		sub := &fakeSubscriber{
@@ -471,8 +471,8 @@ func TestWaitRedesignT12NeverSucceedingHistoryTerminates(t *testing.T) {
 		if res.Note != "could not read the final replies; run `castctl wait` again" {
 			t.Errorf("note = %q", res.Note)
 		}
-		if hist.calls != 10 {
-			t.Errorf("history calls = %d, want 10 (6 derivation + 2 settle + 2 final)", hist.calls)
+		if hist.calls != 8 {
+			t.Errorf("history calls = %d, want 8 (6 derivation + 0 settle + 2 final)", hist.calls)
 		}
 	})
 }

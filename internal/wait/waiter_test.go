@@ -290,8 +290,13 @@ func TestFeedTraceI(t *testing.T) {
 	if out := w.FeedRecord([]byte(`{"event":"task.status","seq":120,"payload":{"status":"running","root_agent_id":"R","agent_id":"R"}}`)); out != nil {
 		t.Fatalf("running record = %v", out)
 	}
-	if seq, ok := w.RunningSeq(); !ok || seq != 120 {
-		t.Errorf("running_seq=%d ok=%v, want 120", seq, ok)
+	// A running record teaches SeenRunning only: its stream seq
+	// is never stored as boundary evidence (loop-2 F1).
+	if !w.SeenRunning() {
+		t.Error("running record must set SeenRunning")
+	}
+	if _, ok := w.AfterSeq(); ok {
+		t.Error("running record must not install a boundary seq")
 	}
 }
 
