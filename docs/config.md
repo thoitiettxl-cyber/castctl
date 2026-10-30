@@ -165,9 +165,10 @@ title, options, id, decision, kind, and scope slots emit no
 peer free text at all. An approval title renders as `title_length` only
 (the title's BYTE length, the same byte convention as
 `body_length`); offered decision options render as
-`option_count` only (the number of options), and only where a
-skip error is rendered — the auto-approved lines carry no
-options slot, only `title_length`; an approval id
+`option_count` only (the number of options), and only on skip
+renderings — the `approveAll` skipped line and the skip-error
+`underlying` slot on the `SKIPPED` / `FAILED` lines — the
+auto-approved lines carry no options slot, only `title_length`; an approval id
 renders only if it is 1–64 runes of `[A-Za-z0-9_-]`,
 else `[omitted]`; a decision renders only if it is one of
 `allow_always`, `allow_once`, `allow_session`,
@@ -180,11 +181,16 @@ an `underlying` slot for the decide error, and that slot is NOT
 structural. For a skip error (no forever option offered) it
 renders structurally as `no forever option option_count=N`; for
 any other decide error it renders via the settled `SummarizeErr`
-rule (the first `LogSummary` in the error chain — the body
-allowlist summary for a `GatewayError`, or, for an `AuthError`
-in the chain, its own `LogSummary`, class + `message_length`
-only, not the body allowlist summary — otherwise the SafeString
-rendering of the error text). Nothing here
+rule: the `LogSummary` of the first error in the chain that
+implements it — a `GatewayError` renders its body allowlist
+summary; an `AuthError` renders `conn: auth_failed
+message_length=N` only; a `ConnectionError` renders its
+cause's `LogSummary` when the cause has one, otherwise
+`conn: connection error error_length=N` (bare `conn:
+connection error` with no cause); a close-summary error
+renders `gateway: websocket closed (close_code=N
+reason_length=N)` — and an error with no `LogSummary` in the
+chain renders via SafeString). Nothing here
 implies `underlying` is structural. The
 SafeString backstop is not the control on the structural slots
 and is unchanged; on the `underlying` slot it remains the
@@ -207,21 +213,32 @@ ASCII whitespace around `=`, so the NBSP form misses it, and
 the `reKeyValue` fallback leaves a `public_key` label
 unchanged. The `:` form does not bypass: `reKeyColon`'s closed
 separator set includes NBSP, so `public_key<NBSP>: ...` is
-caught and shortened to the key prefix. (O4) An escaped-quote
+caught and reduced to the `wgKeyPrefix` form (the first 8
+runes of the value, plus an ellipsis when the value is longer
+than 8 runes; a value of 8 or fewer runes is returned
+unchanged). (O4) An escaped-quote
 JSON pair — e.g. `{\"token\": \"...\"}` — whose quoted key or
-value string itself contains a literal newline or carriage
-return bypasses SafeString's escaped-quote scan, which fails
-on a literal newline or carriage return inside a quoted
-string while the plain-quote scan tolerates a literal newline
-inside the string — so the pair is left verbatim. Separator
+value string itself contains an unescaped literal newline or
+carriage return reached by the scan bypasses SafeString's
+escaped-quote scan, which fails on a literal newline or
+carriage return at a scan position inside a quoted string
+while the plain-quote scan tolerates a literal newline inside
+the string — so the pair is left verbatim. A newline or
+carriage return consumed as the second byte of a backslash
+escape pair does not defeat the scan (the scan consumes a
+backslash plus the next byte regardless, so the newline
+check, which applies only at a scan position, never sees the
+second byte). Separator
 newlines do not trigger this: newlines between the key and
 the colon, or between the colon and the value, are skipped
 before the colon/value scan, so a separator newline alone
-does not defeat the pair. No single `%q` rendering can
-trigger it either: `%q` escapes a literal newline to the
-two-byte sequence `\n`, which the scan consumes as an escape
-pair — O4 needs free-form text already containing literal
-escaped quotes plus a literal newline. None of these shapes
+does not defeat the pair. `%q` cannot create this condition:
+it escapes a literal newline to the two-byte sequence `\n`.
+That is not a redaction guarantee: a `%q` rendering of text
+that already contains escaped quotes doubles the backslashes,
+and the resulting text is left verbatim, secret included — O4
+needs free-form text already containing literal escaped
+quotes plus an unescaped literal newline reached by the scan. None of these shapes
 can leak through
 the structural slots of the `approveAll` / `logAutoApproved`
 stderr lines above, because those slots emit no peer free text
