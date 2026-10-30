@@ -1835,6 +1835,84 @@ func TestMigrateFromSymlinkedProfileDir(t *testing.T) {
 	})
 }
 
+// TestMigrateFromSymlinkedProfileFile (loop 4, fix round 2): a
+// profiles/<name> symlink resolving to a REGULAR FILE (not a
+// directory) must fail loudly, naming the path, and write nothing —
+// it must never be silently dropped, and a profiles/default
+// symlink-to-file must never be replaced by a synthetic default.
+func TestMigrateFromSymlinkedProfileFile(t *testing.T) {
+	t.Parallel()
+	t.Run("symlink-to-file profile fails loudly", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		src := filepath.Join(home, "muse-cli")
+		writeFile(t, filepath.Join(src, "config.json"), `{"auto_approve":"always","node_id":"MAIN-NODE"}`, 0o600)
+		fileTarget := filepath.Join(home, "workfile.json")
+		writeFile(t, fileTarget, `{"auto_approve":"off","node_id":"FILE-NODE"}`, 0o600)
+		if err := os.MkdirAll(filepath.Join(src, "profiles"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		linkPath := filepath.Join(src, "profiles", "work")
+		if err := os.Symlink(fileTarget, linkPath); err != nil {
+			t.Fatal(err)
+		}
+		dest := filepath.Join(home, "castctl")
+		result, err := MigrateFrom(src, dest, true)
+		if err == nil {
+			t.Fatal("MigrateFrom with a symlink-to-file profile = nil error; want a failure naming the path")
+		}
+		if ExitCode(err) != 2 {
+			t.Errorf("MigrateFrom error ExitCode = %d; want 2", ExitCode(err))
+		}
+		joined := ""
+		if result != nil {
+			joined = strings.Join(result.Errors, "\n")
+		}
+		if !strings.Contains(joined, linkPath) {
+			t.Errorf("MigrateFrom errors = %q; want one naming %q", joined, linkPath)
+		}
+		if _, serr := os.Stat(filepath.Join(dest, "config.json")); !os.IsNotExist(serr) {
+			t.Errorf("destination config written (stat err = %v); want nothing written on failure", serr)
+		}
+	})
+	t.Run("symlink-to-file default fails loudly, no synthetic default", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		src := filepath.Join(home, "muse-cli")
+		// No node_id in the base: pre-fix this run would write a
+		// synthetic default with a generated node_id, discarding
+		// the file's content.
+		writeFile(t, filepath.Join(src, "config.json"), `{"auto_approve":"always"}`, 0o600)
+		fileTarget := filepath.Join(home, "deffile.json")
+		writeFile(t, fileTarget, `{"auto_approve":"off","node_id":"FILE-NODE"}`, 0o600)
+		if err := os.MkdirAll(filepath.Join(src, "profiles"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		linkPath := filepath.Join(src, "profiles", "default")
+		if err := os.Symlink(fileTarget, linkPath); err != nil {
+			t.Fatal(err)
+		}
+		dest := filepath.Join(home, "castctl")
+		result, err := MigrateFrom(src, dest, true)
+		if err == nil {
+			t.Fatal("MigrateFrom with a symlink-to-file default = nil error; want a failure naming the path")
+		}
+		if ExitCode(err) != 2 {
+			t.Errorf("MigrateFrom error ExitCode = %d; want 2", ExitCode(err))
+		}
+		joined := ""
+		if result != nil {
+			joined = strings.Join(result.Errors, "\n")
+		}
+		if !strings.Contains(joined, linkPath) {
+			t.Errorf("MigrateFrom errors = %q; want one naming %q", joined, linkPath)
+		}
+		if _, serr := os.Stat(filepath.Join(dest, "config.json")); !os.IsNotExist(serr) {
+			t.Errorf("destination config written (stat err = %v); want no synthetic default written", serr)
+		}
+	})
+}
+
 // TestMigrateFromSourceUntouchedHash (loop 4, Boss --from test iv):
 // the source directory must be untouched by a --from --write, proven
 // by pre/post sha256 of every source file, identical file set, and

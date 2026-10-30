@@ -260,8 +260,18 @@ func MigrateFrom(sourceDir, destDir string, write bool) (*MigrateResult, error) 
 			if e.Type()&os.ModeSymlink == 0 {
 				continue
 			}
-			if _, serr := os.Stat(filepath.Join(sourceDir, "profiles", e.Name())); serr != nil {
-				profileErrors = append(profileErrors, fmt.Sprintf("symlinked profile dir %q cannot be resolved: %v; migrate cannot read it (remove it or restore its target)", filepath.Join(sourceDir, "profiles", e.Name()), serr))
+			linkPath := filepath.Join(sourceDir, "profiles", e.Name())
+			if st, serr := os.Stat(linkPath); serr != nil {
+				profileErrors = append(profileErrors, fmt.Sprintf("symlinked profile dir %q cannot be resolved: %v; migrate cannot read it (remove it or restore its target)", linkPath, serr))
+			} else if !st.IsDir() {
+				// A symlink resolving to a regular file (not a
+				// directory) holds no profile directory to read,
+				// but it must not vanish silently either:
+				// discovery requires IsDir, so without this
+				// check the entry would be dropped with rc=0
+				// (and a profiles/default link would be
+				// replaced by a synthetic default).
+				profileErrors = append(profileErrors, fmt.Sprintf("symlinked profile dir %q is not a directory (it resolves to a non-directory); migrate cannot read it as a profile directory (remove it or restore it to a directory)", linkPath))
 			}
 		}
 	}
