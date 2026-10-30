@@ -339,7 +339,19 @@ optional and runtime-detected, and the no-browser fallback is
 
 Release targets are Linux only: `linux/amd64` and `linux/arm64`,
 `CGO_ENABLED=1` on a GLIBC 2.17 (manylinux2014) baseline, with
-plugin support. There are no Android, Windows, or macOS builds.
+plugin support. Each architecture also ships a `_no-plugin`
+static build (see Release assets below). There are no Android,
+Windows, or macOS builds.
+
+### Release assets
+
+- `castctl_<version>_linux_<arch>.tar.gz` is the default Linux build. It supports dynamic library plugins and is built against a GLIBC 2.17 baseline.
+- `castctl_<version>_linux_<arch>_no-plugin.tar.gz` is the portable Linux build for musl-based or older systems such as OpenWrt. It does not support dynamic library plugins.
+
+`<arch>` is `amd64` or `arm64`. Each archive contains the `castctl`
+binary plus `LICENSE`, `LICENSE.sing-box`, and `README.md`. Every
+release also carries a `checksums.txt` (SHA-256, sorted by file
+name) covering the four archives.
 
 ## Gateway frame reassembly caps
 

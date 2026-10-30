@@ -25,11 +25,10 @@ import (
 	"github.com/thoitiettxl-cyber/castctl/internal/commands"
 )
 
-// Version mirrors src/muse_cli/__init__.py __version__ (0.6.1). The
-// Python package is the version source of truth; PR5 packaging may
-// generate this value instead of hard-coding it. The commands
+// The version lives in internal/commands (Version/Commit/BuildDate
+// vars, stamped by release builds via go build -X). There is no
+// const alias here: a const cannot alias a var, and the commands
 // package owns the printed form "castctl <version>".
-const Version = commands.Version
 
 func main() {
 	// SIGINT cancels in-flight network work; commands map a

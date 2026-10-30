@@ -2,7 +2,7 @@
 
 ## Go
 
-Build, test, release: local script only, no CI. From the repo root:
+Build and test from the repo root:
 
 ```sh
 go build ./...
@@ -10,12 +10,48 @@ go vet ./...
 go test -race -tags with_utls,with_quic,with_wireguard,with_gvisor ./...
 ```
 
-The tagged race command above is canonical: an untagged
-`go test ./internal/outbound/` fails 4 TLS subtests by design (uTLS
-needs `with_utls`). See README.md for the build-tag table, the flake
-loop, and the PR3 binary-size measurements. Release builds are a
-separate PR (Linux amd64/arm64, `CGO_ENABLED=1`, GLIBC 2.17);
-see docs/architecture.md.
+The tagged race command above is canonical. The untagged suite is
+fully green: without `with_utls`, 6 uTLS subtests skip by design
+(see README.md for the build-tag table, the flake loop, and the
+PR3 binary-size measurements).
+
+CI: `.github/workflows/test.yaml` runs `go test -race` untagged and
+with `with_utls` on pull requests and pushes to `main`; it does
+not run the full canonical tag set. `.github/workflows/release.yaml`
+builds the Linux amd64/arm64 release archives (glibc + `_no-plugin`)
+on tag push and on `workflow_dispatch` (default: dry-run — builds
+and gates only, publishes nothing). Release assets publish straight
+to a public GitHub Release with `gh release upload`; the workflows
+never use Actions artifact storage. See docs/architecture.md and
+docs/provenance.md §2.
+
+### Local reproduction of the glibc release build
+
+Documented, NOT run here: Docker/podman/buildah are absent on the
+VM where this PR was written, so the steps below were not executed
+there. On a machine with Docker, from the repo root (Go version
+from `go.mod`, currently `1.27.3`):
+
+```sh
+docker run --rm -v "$PWD:/src" -w /src \
+  -e GO_VERSION="$(sed -n 's/^go \([0-9.]*\)$/\1/p' go.mod)" \
+  quay.io/pypa/manylinux2014_x86_64 bash -euo pipefail -c '
+    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
+    rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tar.gz
+    export PATH="/usr/local/go/bin:${PATH}"
+    CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildvcs=false -trimpath \
+      -tags with_utls,with_quic,with_wireguard,with_gvisor \
+      -ldflags="-s -w -X github.com/thoitiettxl-cyber/castctl/internal/commands.Version=0.6.1" \
+      -o /tmp/castctl ./cmd/castctl/
+    readelf --version-info /tmp/castctl
+  '
+```
+
+The GLIBC gate in the release workflow fails the build unless the
+maximum `GLIBC_x.y` in the binary is 2.17 or older (and fails if no
+GLIBC version is found at all). A local compile-only cross-build
+without Docker does not prove the gate: the host toolchain's glibc
+baseline differs from manylinux2014.
 
 ## Web UI
 

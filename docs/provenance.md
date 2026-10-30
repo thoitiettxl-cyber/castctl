@@ -347,10 +347,88 @@ deliberate". Red-team findings B1–B10 and BQ2–B5 are parked
 (`architecture.md:42-44`); B3 stays parked. None of them is
 described here as resolved.
 
-Release-matrix mapping: `[DESIGN-ONLY]` — no `.github/` exists in
-the castctl tree. Upstream's release workflow was surveyed in a
-separate probe; the release design is the release PR's scope, not
-this file's.
+Release workflow adaptation: VERIFIED (adapted YAML in the tree;
+the plugin-design part of this section stays `[DESIGN-ONLY]`).
+Upstream file `.github/workflows/release.yaml` at the same pinned
+commit `90c447d3a8727d115aa7552ec93ce023736ed492`, re-verified
+against `git ls-remote` at PR time: 717 lines, sha256
+`a6cf031dbfee1650f2832b292248257f1806cf5b0836ce171c60a3f546ec1b34`.
+The earlier reference note's 1071-line numbering for this file is
+stale and must not be cited. License name: MIT, as read at the
+§2 head. Category: (c) studied, with workflow YAML adapted (no Go
+code taken from upstream for this item).
+
+What was taken (mapping, upstream `release.yaml` line → castctl
+`.github/workflows/release.yaml` line):
+
+- Linux glibc docker build shape: upstream L235–369 (manylinux
+  images, official Go tarball in-container, `CGO_ENABLED=1`,
+  `-buildvcs=false`) → castctl `release.yaml:104–234` (same
+  runners and image names; `go-version-file: go.mod` on the host,
+  tarball version derived from `go.mod` in-container).
+- GLIBC gate: upstream L309–317 → castctl `release.yaml:200–210`,
+  plus a fail-closed delta (empty version list exits 1).
+- No-plugin static build + no-interpreter gate: upstream L371–488
+  (build L429–431, gate L433–437) → castctl
+  `release.yaml:236–327`, plus an explicit pass echo.
+- Archive naming pattern: upstream L285/L425 → castctl
+  `release.yaml:220` / `:301` (`castctl_<ver>_linux_<arch>.tar.gz`
+  and `..._no-plugin.tar.gz`, `<arch>` = `amd64`/`arm64`).
+- Checksums ordering: upstream L716 (`sha256sum … | sort -k2`) ->
+  castctl `release.yaml:371`.
+- Release-notes asset wording: upstream heredoc L36–48 → README.md
+  "Release assets" section (castctl names/assets; FreeBSD
+  paragraph dropped; no blank line between the two Linux bullets,
+  as upstream). No other upstream release-notes assembly was taken.
+
+Deviations (each with castctl evidence):
+
+- (a) `workflow_dispatch` dry-run: upstream has no
+  `workflow_dispatch` (trigger L3–7 is tag push only). Castctl
+  adds `publish` (choice none/draft/prerelease, default none) +
+  `tag_name` inputs (`release.yaml:40–52`); the shared publish
+  predicate (`release.yaml:61`, `:226`, `:319`, `:338`) gates
+  every publish step, and a `prepare` job (`release.yaml:58–102`)
+  creates the release idempotently before any upload.
+- (b) Zero artifact storage: upstream uses
+  `actions/upload-artifact` (L186/L322/L441/L642) and
+  `actions/download-artifact` (L700). Castctl has neither string
+  in `.github/workflows/`; uploads use `gh release upload
+  --clobber` and the checksums job downloads via `gh release
+  download` (`release.yaml:362`).
+- (c) Checksums job is success-only: upstream
+  `publish-checksums` uses `if: always()` (L693). Castctl
+  requires both build jobs `result == 'success'`
+  (`release.yaml:338`) plus an exact-4 archive count check
+  (`release.yaml:363–369`).
+- (d) Go version: upstream pins `1.26.10` (L14). Castctl uses
+  `go-version-file: go.mod` (`go 1.27.3`, `go.mod:3`).
+- (e) Asset token `arm64`, not upstream `aarch64` (upstream
+  matrix L251/L384); the manylinux image name stays `aarch64`
+  (`release.yaml:127`) because that is the image's real name.
+- (f) Added `-trimpath` and canonical tags
+  `with_utls,with_quic,with_wireguard,with_gvisor` (upstream has
+  neither); `-X` paths point at
+  `github.com/thoitiettxl-cyber/castctl/internal/commands.Version/Commit/BuildDate`
+  (vars added in this PR), not upstream's `main.*` paths
+  (upstream L305–307/L429–431), which cannot work here because
+  the castctl vars live in `internal/commands`.
+- (g) Dropped: model-catalog refresh step (upstream L136/L263/
+  L395/L522; castctl has no model catalog), FreeBSD/hosted jobs
+  (upstream L94–233/L490–689; this PR ships Linux only), and
+  upstream's per-job checksums refresh (racy re-uploads; replaced
+  by the single final checksums job).
+- (h) Archive file set: upstream ships `LICENSE README.md
+  README_CN.md config.example.yaml` (L180/L320/L439/L640).
+  Castctl ships `LICENSE` + `LICENSE.sing-box` + `README.md`
+  (`release.yaml:222–223` / `:315–316`); there is no `README_CN.md` or
+  `config.example.yaml` in this repo.
+- (i) No NOTICE change in this PR: no new upstream is introduced
+  (CLIProxyAPI is already this §2; sing-box is already in
+  NOTICE, whose recorded LICENSE sha256 the committed
+  `LICENSE.sing-box` matches). The test workflow
+  (`.github/workflows/test.yaml`) is castctl-original, not
+  adapted from upstream.
 
 ## 3. Cli-Proxy-API-Management-Center (web UI fork) @64b4f5a — VERIFIED (copied + adapted code/assets in the tree)
 
