@@ -40,7 +40,10 @@ func quotePython(s, safe string) string {
 // media/raw/ is stripped once; the remainder is unquoted, ".."
 // segments and empty paths are rejected, and the result is
 // re-quoted with "/" safe. Bad input returns *ValidationError
-// (Python ValueError).
+// (Python ValueError). The error carries ONLY the kind and the
+// ref's byte length (loop 6, item 4): the ref is peer-controlled
+// (a resource dict from a server response), so its text must
+// never reach an error string.
 func MediaPath(ref any) (string, error) {
 	s, ok := mediaRefString(ref)
 	if !ok {
@@ -52,7 +55,7 @@ func MediaPath(ref any) (string, error) {
 	} else if strings.HasPrefix(rel, "https://") || strings.HasPrefix(rel, "http://") {
 		u, err := url.Parse(rel)
 		if err != nil {
-			return "", &ValidationError{Message: fmt.Sprintf("bad sandbox path: %q", s)}
+			return "", &ValidationError{Message: fmt.Sprintf("bad sandbox path: ref_length=%d", len(s))}
 		}
 		rel = u.EscapedPath()
 	}
@@ -62,11 +65,11 @@ func MediaPath(ref any) (string, error) {
 		rel = unq
 	}
 	if rel == "" {
-		return "", &ValidationError{Message: fmt.Sprintf("bad sandbox path: %q", s)}
+		return "", &ValidationError{Message: fmt.Sprintf("bad sandbox path: ref_length=%d", len(s))}
 	}
 	for _, seg := range strings.Split(rel, "/") {
 		if seg == ".." {
-			return "", &ValidationError{Message: fmt.Sprintf("bad sandbox path: %q", s)}
+			return "", &ValidationError{Message: fmt.Sprintf("bad sandbox path: ref_length=%d", len(s))}
 		}
 	}
 	return "/media/raw/" + quotePython(rel, "/"), nil

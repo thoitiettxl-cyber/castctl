@@ -16,7 +16,7 @@ profile loading refuses (only `config migrate` reads it)).
 
 ## Single-file schema
 
-Top-level keys (exactly these six; unknown keys are rejected):
+Top-level keys (exactly these seven; unknown keys are rejected):
 
 | Key | Value |
 |---|---|
@@ -26,6 +26,7 @@ Top-level keys (exactly these six; unknown keys are rejected):
 | `endpoints` | array of sing-box endpoint objects (e.g. WireGuard, tag-addressed) |
 | `dns` | object: the interim global DNS section (below, compat fallback only) |
 | `wireguard_dns` | object: endpoint tag → array of DNS server addresses read by branch 2 (see [Per-profile DNS](#per-profile-dns)); castctl-side state, not a sing-box field — hand-written/preserved, not imported: no import-path wiring from a wg-quick `DNS=` line exists yet (follow-up) |
+| `log` | object: logging settings (see [The `log` section](#the-log-section)) |
 
 A profile entry accepts exactly these ten keys (unknown keys
 are rejected — see [Per-profile DNS](#per-profile-dns)):
@@ -53,6 +54,150 @@ A profile with no entry in `profiles` and no config file of its
 own still exists (its directory is its home) and loads with
 defaults (`SourceNone`, direct, `auto_approve` off). A profile
 directory with no config file is *not* a legacy layout.
+
+## The `log` section
+
+The top-level `log` block configures castctl's logging, following
+sing-box's `LogOptions` semantics exactly WHEN THE BLOCK IS
+PRESENT (see `docs/provenance.md` §1 for the upstream
+citations). One resolved level governs every emission —
+sing-box's own logs and castctl's own events — through a single
+factory. The block is optional; all four fields are optional.
+An absent field means the sing-box default below. An absent
+BLOCK is different: see the off-gate rule below. There is no
+hardcoded default log path — the user sets `output` freely, or
+leaves it empty for stderr.
+
+**Off-gate (castctl rule on top of sing-box defaults, Boss
+decision 2026-10-30):** when the config has NO `log` block AND
+no `--log-level` flag was given, logging is OFF: stderr carries
+only the typed JSON error, exactly as before the `log` block
+existed, and no log file is written. A present block — including
+an empty `{}` block — turns logging ON at sing-box defaults
+(level `trace`, output stderr). `--log-level` with no block
+also turns logging ON, at that level with stderr output. A
+block with `"disabled": true` stays off even with `--log-level`.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `disabled` | bool | `false` | `true` suppresses ALL log output (castctl and sing-box), including fatal/panic lines. Normal command output (stdout JSON/text) and config errors are unaffected. |
+| `level` | string | `"trace"` | One of `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `panic`. sing-box's `"warning"` spelling is accepted as an alias for `warn`. Any other value (including `"TRACE"`) is a config error (exit 2), and the value is never echoed. An empty level means trace, exactly as sing-box parses it. |
+| `output` | string | `""` (stderr) | `""` or `"stderr"` writes to stderr; `"stdout"` writes to stdout; any other string is a file path, opened for append. |
+| `timestamp` | bool | `false` | Timestamp format, sing-box style: console output carries a full timestamp when `true` and a relative elapsed-seconds prefix when `false`; file output carries no timestamp when `false` and a full timestamp when `true`. |
+
+Precedence, when logging is on: the `--log-level LEVEL` global
+CLI flag beats the config block, which beats the sing-box
+default (`trace`). An invalid `--log-level` value exits 2 and
+never echoes the value. There is no `--verbose`/`--debug` flag.
+
+**Typed JSON on stderr:** error output is one JSON line
+(`{"type": ..., "error": ...}`) written after every log line.
+When logging is OFF (no block, no flag) it is the only stderr
+line, so whole-stderr JSON parsing works. When logging is ON
+with stderr output, log lines precede it and the JSON stays the
+LAST stderr line, intact — that last-line rule is the contract
+consumers can rely on in that case. When log output is a file,
+stderr carries only the JSON.
+
+File output: castctl owns log-file creation — files are created
+with mode `0600` and appended to (never truncated); a
+pre-existing file is appended to without any chmod (castctl
+never changes the mode of a file it did not create). Parent
+directories are not created; an uncreatable path is a startup
+error (exit 2). There is no log rotation. Console colour follows
+sing-box's default (coloured level labels on a terminal); there
+is no `disable_color` field in the schema.
+
+The only path guard: the factory refuses (exit 2, before
+opening, and re-checked after opening) a log output whose file
+IDENTITY equals castctl's own config file or any of its cookies
+files — identity means the symlink-resolved location and the
+file's dev/ino, so hardlinks and symlinks to not-yet-existing
+targets are refused too. There are no other path restrictions:
+symlinks to other targets and non-regular files are not
+refused. A refused output is a startup error; the protected
+file is left untouched, and a file the factory did not create
+is never chmodded.
+
+Secrets: log lines never carry cookies, tokens, URLs with query
+credentials, WireGuard keys, or header values. Secret-bearing
+fields are excluded from log emissions by construction, and
+every free-form log field passes a redaction boundary
+(`internal/logging`). Server response bodies are never
+emitted in any error, diagnostic, or log emission — not in log
+lines at any level including trace, not in stderr typed JSON,
+not in error strings, and not in panic renderings. (Chat
+replies, history, watch rows, raw and wake output, and
+opt-in raw dumps are data output the user explicitly
+requested, not error/diagnostic/log emissions, and are out
+of scope for this rule.) Instead, an error carrying a server
+body renders as an allowlist summary only: status code,
+error class, body length (byte count — when the producer
+knows the wire length: a known 0-byte body renders
+`body_length=0`, while an unknown length renders no
+`body_length` field at all, never the length of the summary
+text), content-type (media type, parameters dropped), and specific known-safe fields
+parsed by key from known Muse response schemas — the `error`
+field of the `{"ok":false,"error":...}` / `{"success":...,
+"error":...}` envelopes, the `status` field of the
+`/api/session` body (extracted only inside the summary
+builder), and the `reason` field of the redeem response
+(retained in the closed list, although no current producer
+extracts it through the summary builder — the exact
+producers are documented in `internal/gateway/summary.go`).
+No other body key is ever emitted. Each extracted value is capped at 64
+runes, still passed through the SafeString backstop, and a
+value over the cap is replaced by `[omitted]` — never emitted
+truncated. The trace level gets the same summary; there is
+no trace allowance for body bytes. (Python parity on raw
+payload bytes is waived; error-kind classification and retry
+semantics are unchanged.)
+
+The `approveAll` / `logAutoApproved` stderr lines are
+structural, not redacted prose: they emit no peer free text
+at all. An approval title renders as `title_length` only
+(the title's BYTE length, the same byte convention as
+`body_length`); offered decision options render as
+`option_count` only (the number of options); an approval id
+renders only if it is 1–64 runes of `[A-Za-z0-9_-]`,
+else `[omitted]`; a decision renders only if it is one of
+`allow_always`, `allow_once`, `allow_session`,
+`allow_today`, else `[omitted]`; a kind renders only if it
+is one of `browse`, `network_access`, `shell`, else
+`[omitted]`; a scope always renders `[omitted]` (it is an
+unconstrained host string, so no enum set exists). The
+SafeString backstop is not the control on these lines and
+is unchanged. JSON stdout data output is unaffected: it
+still carries the full title, options, id, kind, scope,
+and decision.
+
+Recorded backlog (NOT fixed): four SafeString bypass shapes
+were observed in earlier loops and are carried here as a
+record, not a fix. (O1) A JSON pair whose colon is spaced
+with NBSP (U+00A0) -- e.g. `{"token"<NBSP>: "..."}` -- bypasses
+SafeString's quoted-key scan. (O2) Wider Unicode spaces
+(U+2009, U+3000, U+202F) between a label and its separator
+bypass the closed separator set. (O3) A `public_key` label
+separated by NBSP bypasses the listed vocabulary. None of
+these shapes can leak through the `approveAll` /
+`logAutoApproved` stderr lines above, because those lines
+emit no peer free text at all (only lengths, counts, gated
+ids, and enum members). What would settle each shape is a
+future explicit decision about whether SafeString's scanner
+should be extended to cover it; no scanner change is made
+or implied here, and no claim is made that the shapes are
+fixed elsewhere.
+
+The events castctl emits at debug/trace
+are: `dns_source` (resolved DNS source + first server tag),
+`outbound_chain` (profile + detour-chain tags), dial
+start/done with a per-connection ID, `tls_alpn` (negotiated
+protocol string only), `ws_handshake` (parsed status code or
+token only), and retries (attempt counter + summarised error).
+
+`config migrate` carries an existing `log` block into the new
+file verbatim and never invents one: a migrated file without a
+`log` block stays without one.
 
 ## The `dns` section — INTERIM, GLOBAL, COMPAT-ONLY
 

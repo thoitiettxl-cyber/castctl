@@ -12,6 +12,8 @@ import (
 	"net"
 	"net/netip"
 	"time"
+
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 )
 
 // BootstrapLookup is the SINGLE system-resolver call site in the Go
@@ -38,6 +40,19 @@ import (
 // (the DNS package leaves non-domain server addresses untouched),
 // so the system resolver is never consulted.
 func BootstrapLookup(ctx context.Context, host string) ([]netip.Addr, error) {
+	return BootstrapLookupWithLogger(ctx, host, slog.Default())
+}
+
+// BootstrapLookupWithLogger is BootstrapLookup with the slog
+// logger supplied by the caller: the DNS client passes the
+// factory-routed bridge logger so the lookup line obeys the
+// resolved log level. A nil logger falls back to slog.Default().
+// The logged fields are the host and the address COUNT only —
+// never the resolved addresses themselves.
+func BootstrapLookupWithLogger(ctx context.Context, host string, logger *slog.Logger) ([]netip.Addr, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	if host == "" {
 		return nil, errors.New("outbound: bootstrap lookup with empty host")
 	}
@@ -59,6 +74,8 @@ func BootstrapLookup(ctx context.Context, host string) ([]netip.Addr, error) {
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("outbound: bootstrap lookup for %s returned no addresses", host)
 	}
-	slog.Debug("outbound bootstrap lookup", "host", host, "addresses", len(addrs))
+	// SafeHost: the host is config text; a URL-shaped host must
+	// never reach the log line with query credentials.
+	logger.Debug("outbound bootstrap lookup", "host", logging.SafeHost(host), "addresses", len(addrs))
 	return addrs, nil
 }

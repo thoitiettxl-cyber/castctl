@@ -11,11 +11,14 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 )
 
 // ErrNoResolver is returned when a domain destination is dialled (or
@@ -48,14 +51,73 @@ type Dialer struct {
 
 // NewDialer builds a Dialer around outbound. resolver may be nil; in
 // that case domain dials and Resolve fail with ErrNoResolver while IP
-// dials still work.
+// dials still work. The Dialer's logger is the NOP factory logger:
+// sing-box TLS internals still receive it, but no castctl dial event
+// is emitted. Production dialers come from Manager.Dialer, which
+// passes the manager's (factory-wired) logger.
 func NewDialer(outbound adapter.Outbound, resolver HostResolver, tlsOptions option.OutboundTLSOptions) *Dialer {
+	return NewDialerWithLogger(outbound, resolver, tlsOptions, nil)
+}
+
+// NewDialerWithLogger builds a Dialer with an explicit logger. A
+// nil logger means the NOP factory logger (the NewDialer
+// behaviour). The logger receives the dial start/done events and
+// the TLS ALPN event, each on a context carrying the connection
+// ID minted for that dial (see withConnID).
+func NewDialerWithLogger(outbound adapter.Outbound, resolver HostResolver, tlsOptions option.OutboundTLSOptions, logger log.ContextLogger) *Dialer {
+	if logger == nil {
+		logger = log.NewNOPFactory().NewLogger("outbound")
+	}
 	return &Dialer{
 		outbound:   outbound,
 		resolver:   resolver,
 		tlsOptions: tlsOptions,
-		logger:     log.NewNOPFactory().NewLogger("outbound"),
+		logger:     logger,
 	}
+}
+
+// ConnIDContext returns ctx carrying a sing-box connection ID
+// (log.ContextWithNewID, log/id.go:16-30), minting one only when
+// ctx carries none. The ID is a random uint32 rendered by the
+// sing-box formatter as "[id elapsed]" on every *Context log line
+// for the connection — including sing-box's own lines logged with
+// the same ctx. It is an opaque correlation token, never derived
+// from cookies, tokens, or keys, and it is stable across the
+// DialContext -> DialTLS legs of one connection because each leg
+// reuses an ID already present instead of minting a new one.
+// The gateway calls it in dialWebSocket BEFORE WebSocketDial so
+// the ws_handshake line shares the Dialer's ID: the Dialer
+// reuses the ID already on the context instead of minting a
+// second one. Minting here (rather than inside the Dialer with
+// no way out) is the thread that carries one ID across the
+// dial_start, tls_alpn, and ws_handshake lines.
+func ConnIDContext(ctx context.Context) context.Context {
+	if _, ok := log.IDFromContext(ctx); ok {
+		return ctx
+	}
+	return log.ContextWithNewID(ctx)
+}
+
+func withConnID(ctx context.Context) context.Context { return ConnIDContext(ctx) }
+
+// logDialStart / logDialDone emit the dial events at Debug through
+// the Dialer's logger, on the connection-ID context. Fields are
+// dialling metadata only: network, bare host (SafeHost rejects
+// URL-shaped hosts), port, and — on failure — the summarised
+// error (SummarizeErr: status + class + length for a
+// body-carrying error). No URL, header, cookie, token, options
+// value, or server body byte is ever included.
+func (d *Dialer) logDialStart(ctx context.Context, network, host string, port uint16) {
+	logging.Emit(d.logger, ctx, log.LevelDebug,
+		"event=dial_start network="+network+" host="+logging.SafeHost(host)+" port="+strconv.Itoa(int(port)))
+}
+
+func (d *Dialer) logDialDone(ctx context.Context, network, host string, port uint16, err error) {
+	msg := "event=dial_done network=" + network + " host=" + logging.SafeHost(host) + " port=" + strconv.Itoa(int(port))
+	if err != nil {
+		msg += " err=" + logging.SummarizeErr(err)
+	}
+	logging.Emit(d.logger, ctx, log.LevelDebug, msg)
 }
 
 // DialContext dials network ("tcp" or "udp") to host:port through the
@@ -63,11 +125,16 @@ func NewDialer(outbound adapter.Outbound, resolver HostResolver, tlsOptions opti
 // ErrNoResolver before the outbound is touched. The caller's context
 // deadline bounds the dial; no additional timeout is imposed here.
 func (d *Dialer) DialContext(ctx context.Context, network, host string, port uint16) (net.Conn, error) {
+	ctx = withConnID(ctx)
+	d.logDialStart(ctx, network, host, port)
 	dest := Socksaddr(host, port)
 	if dest.IsDomain() && d.resolver == nil {
-		return nil, fmt.Errorf("%w: %s", ErrNoResolver, host)
+		err := fmt.Errorf("%w: %s", ErrNoResolver, host)
+		d.logDialDone(ctx, network, host, port, err)
+		return nil, err
 	}
 	conn, err := d.outbound.DialContext(ctx, network, dest)
+	d.logDialDone(ctx, network, host, port, err)
 	if err != nil {
 		return nil, err
 	}
@@ -92,6 +159,7 @@ func (d *Dialer) Resolve(ctx context.Context, domain string) ([]netip.Addr, erro
 // GatewayTLSOptions applies. On handshake failure the raw connection
 // is closed and the error returned.
 func (d *Dialer) DialTLS(ctx context.Context, network, host string, port uint16, tlsOptions option.OutboundTLSOptions) (net.Conn, error) {
+	ctx = withConnID(ctx)
 	effective := tlsOptions
 	if !effective.Enabled {
 		effective = d.tlsOptions
@@ -107,8 +175,27 @@ func (d *Dialer) DialTLS(ctx context.Context, network, host string, port uint16,
 	}
 	tlsConn, err := HandshakeTLS(ctx, raw, config)
 	if err != nil {
+		// Exactly ONE dial_done per dial: DialContext already
+		// emitted it for the TCP leg (successfully, before
+		// the handshake). A second dial_done here would
+		// claim the dial both succeeded and failed. The
+		// handshake failure gets its own event instead, so
+		// a TLS failure is visible without double-counting
+		// the dial.
+		logging.Emit(d.logger, ctx, log.LevelDebug,
+			"event=tls_handshake_failed network="+network+" host="+logging.SafeHost(host)+" port="+strconv.Itoa(int(port))+" err="+logging.SummarizeErr(err))
 		_ = raw.Close()
 		return nil, err
+	}
+	// ALPN event, captured at the junction where the typed
+	// sing-box tls.Conn is still in hand (HandshakeTLS returns
+	// it; DialTLS's net.Conn return erases the type). The
+	// negotiated protocol string ONLY — never the offered list
+	// (uTLS appends "http/1.1" after a lone "h2", so offered
+	// != negotiated). Fail-closed: an empty negotiated protocol
+	// (none negotiated) emits no event, never a guessed value.
+	if proto := tlsConn.ConnectionState().NegotiatedProtocol; proto != "" {
+		logging.Emit(d.logger, ctx, log.LevelDebug, "event=tls_alpn alpn="+logging.SafeString(proto))
 	}
 	return tlsConn, nil
 }

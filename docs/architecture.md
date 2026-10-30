@@ -50,6 +50,8 @@ does not condense it.
 The upstream sources for the plugin model, the toggles, and what was
 deliberately not taken are recorded in docs/provenance.md §2.
 
+Castctl stays one config.json whose schema grows by adding top-level modular blocks, sing-box style (log, dns, outbounds, profiles, later telegram/keeper), each block optional with sing-box-like defaults, and blocks reference each other by tag (profile -> outbound tag, dns server -> detour tag) rather than duplicating settings; there are no hidden hardcoded paths or rigid defaults, and every new feature is a new block or field, not a separate file.
+
 ## Platforms
 
 castctl is a general tool, not VM-only. Supported run targets: Linux only — linux/amd64 and linux/arm64 (Debian/server Linux host). No VM assumptions: no hard-coded paths,

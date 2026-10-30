@@ -25,6 +25,14 @@ Global options:
                    for the whole invocation (profiles, cookies, chat
                    state). A relative --config path is relative to the
                    current directory; no tilde expansion is performed.
+  --log-level LEVEL
+                   log level for this invocation: trace, debug, info,
+                   warn, error, fatal, or panic ("warning" is accepted
+                   as an alias for warn). Precedence: --log-level,
+                   then the "log" block in config.json, then the
+                   sing-box default (trace, stderr). An invalid level
+                   exits 2. See
+                   "Log" in docs/config.md.
   --version        print "castctl <version>" and exit.
   --help, -h       print this help and exit.
 

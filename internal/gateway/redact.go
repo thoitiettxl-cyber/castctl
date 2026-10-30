@@ -5,11 +5,35 @@
 package gateway
 
 import (
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 	"github.com/thoitiettxl-cyber/castctl/internal/redact"
 )
 
-// redactErrorString strips credentials from an error string
-// (item (c), Boss-approved for PR2). It is the shared string
+// redactFreeText strips credentials from peer/server-controlled
+// free text (a WebSocket close reason) using the logging
+// boundary, which is STRICTER than redact.String: it also
+// strips every query value of a URL (including vm_id and
+// unknown keys), JSON values under secret-looking keys, and
+// bare secret key=value fragments.
+//
+// Loop 5: redactFreeText is NOT a licence to emit peer text.
+// It survives only for STORED close-reason text (keepalive /
+// lost.go), which has no output path in production —
+// ErrConnectionLost.Error() does not include the reason and
+// no production code prints LastClose/CloseReason. Every
+// EMITTED peer/server text goes through the allowlist
+// summary (summary.go) instead; the old redact-then-
+// truncate helpers are gone with the loop-4 trace allowance.
+// Loop 6, item 6f: the stored close reason, and the raw
+// stored ping/pong payloads (LastPing/LastPong, not even
+// SafeString'd), are documented latent state at their sites
+// in keepalive.go/lost.go; the no-rendering invariant is
+// pinned by the loop-6 close/ping tests.
+func redactFreeText(s string) string {
+	return logging.SafeString(s)
+}
+
+// redactErrorString strips credentials from an error string// (item (c), Boss-approved for PR2). It is the shared string
 // redactor from internal/redact (redact.String): URL userinfo
 // ("<redacted>"), token-like query/fragment parameters,
 // cookie-like fragments (including JSON form), and Bearer

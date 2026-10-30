@@ -1044,6 +1044,15 @@ func cloneSingleConfig(cfg *SingleConfig) *SingleConfig {
 	} else {
 		out.rawWireGuardDNS = nil
 	}
+	if len(cfg.rawLog) > 0 {
+		out.rawLog = append([]byte{}, cfg.rawLog...)
+	} else {
+		out.rawLog = nil
+	}
+	if cfg.Log != nil {
+		logCopy := *cfg.Log
+		out.Log = &logCopy
+	}
 	if len(cfg.WireGuardDNS) > 0 {
 		out.WireGuardDNS = make(map[string][]string, len(cfg.WireGuardDNS))
 		for tag, servers := range cfg.WireGuardDNS {

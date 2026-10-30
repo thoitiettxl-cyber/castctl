@@ -67,8 +67,11 @@ func TestFetchInviteErrors(t *testing.T) {
 			if !errors.As(err, &ge) {
 				t.Fatalf("err = %T, want GatewayError", err)
 			}
-			if ge.Status != 500 || len(ge.Payload) != 200 {
-				t.Errorf("status=%d payload len=%d", ge.Status, len(ge.Payload))
+			if ge.Status != 500 || ge.BodyLength != 300 {
+				t.Errorf("status=%d BodyLength=%d, want 500/300 (wire length, not truncation)", ge.Status, ge.BodyLength)
+			}
+			if strings.Contains(ge.Payload, "x") {
+				t.Errorf("Payload = %q carries body bytes", ge.Payload)
 			}
 		}},
 		{"non-json", 200, `not json`, func(t *testing.T, err error) {
@@ -320,8 +323,8 @@ func TestFetchSubscription(t *testing.T) {
 		})
 		_, _, err := FetchSubscription(ctx, muxClient(mux), fakeCookie, SubscriptionOptions{ActionID: "id12345678901234567890", Page: "https://muse.ai/settings"})
 		var ge *conn.GatewayError
-		if !errors.As(err, &ge) || !strings.Contains(ge.Payload, "boom") {
-			t.Fatalf("err = %T (%v)", err, err)
+		if !errors.As(err, &ge) || !strings.Contains(ge.Payload, "error=boom") {
+			t.Fatalf("err = %T (%v), want GatewayError with the parsed error enum", err, err)
 		}
 	})
 }
@@ -363,10 +366,11 @@ func itoa(n int) string {
 
 // TestSubscriptionTransportErrorsAreRedactedAndChained (F6): the
 // subscription.go transport paths (fetchText, callAction) must
-// return errors through the same redaction wrapper doHatch uses:
-// the printed text must not contain the credential (boolean
-// checks only — the token value is never logged), while
-// errors.As must still find the underlying cause.
+// return errors as typed summaries (loop 6, item 2): the printed
+// text carries no peer/credential bytes at all (operation, class,
+// kind only), while errors.Is must still find the underlying
+// cause. The loop-4 redactErr rendering (a "[redacted]" marker
+// in the text) is superseded by the typed summary.
 func TestSubscriptionTransportErrorsAreRedactedAndChained(t *testing.T) {
 	sentinel := errors.New("sentinel transport failure")
 	client := &http.Client{Transport: gatewaytest.RoundTripperFunc(func(*http.Request) (*http.Response, error) {
@@ -381,19 +385,25 @@ func TestSubscriptionTransportErrorsAreRedactedAndChained(t *testing.T) {
 	if strings.Contains(err.Error(), "abcdefgh12345678") {
 		t.Errorf("fetchText error leaks the token: %q", err.Error())
 	}
-	if !strings.Contains(err.Error(), "[redacted]") {
-		t.Errorf("fetchText error = %q, want the token redacted", err.Error())
+	if !strings.Contains(err.Error(), "class=") || !strings.Contains(err.Error(), "kind=") {
+		t.Errorf("fetchText error = %q, want the typed-summary fields", err.Error())
 	}
 	if !errors.Is(err, sentinel) {
-		t.Errorf("fetchText error chain = %v, want errors.As to find the sentinel", err)
+		t.Errorf("fetchText error chain = %v, want errors.Is to find the sentinel", err)
 	}
 
-	_, err = callAction(ctx, client, fakeCookie, "actionid12345678901234", nil, "https://muse.ai/settings")
+	_, _, known, err := callAction(ctx, client, fakeCookie, "actionid12345678901234", nil, "https://muse.ai/settings")
 	if err == nil {
 		t.Fatal("callAction transport error = nil")
 	}
+	if known {
+		t.Errorf("callAction transport error reports a known length: no body was read")
+	}
 	if strings.Contains(err.Error(), "abcdefgh12345678") {
 		t.Errorf("callAction error leaks the token: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "class=") || !strings.Contains(err.Error(), "kind=") {
+		t.Errorf("callAction error = %q, want the typed-summary fields", err.Error())
 	}
 	if !errors.Is(err, sentinel) {
 		t.Errorf("callAction error chain = %v, want errors.As to find the sentinel", err)

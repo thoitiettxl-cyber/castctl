@@ -59,6 +59,7 @@ import (
 	"testing"
 	"time"
 
+	singlog "github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
@@ -411,7 +412,7 @@ func TestDialWebSocketHandshakeShapes(t *testing.T) {
 			wsURL := scheme + "://" + srv.addr() + "/v1/noise?vm_id=FAKEVM&auth_token=FAKETOKEN"
 
 			start := time.Now()
-			ws, _, _, err := dialWebSocket(t.Context(), dialer, wsURL, tc.secure, tc.wsTimeout)
+			ws, _, _, err := dialWebSocket(t.Context(), dialer, wsURL, tc.secure, tc.wsTimeout, singlog.NewNOPFactory().NewLogger("gateway"))
 			elapsed := time.Since(start)
 			// Close a successful ws conn before waiting for the
 			// server: the 101 script holds its copy until the

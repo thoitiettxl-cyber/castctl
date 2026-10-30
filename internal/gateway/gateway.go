@@ -148,7 +148,7 @@ func noiseHandshake(ws wsConn, timeout time.Duration) (sendCS, recvCS *noise.Cip
 	cs := noise.NewCipherSuite(noise.DH25519, noise.CipherAESGCM, noise.HashSHA256)
 	static, err := cs.GenerateKeypair(rand.Reader)
 	if err != nil {
-		return nil, nil, &conn.ConnectionError{Err: fmt.Errorf("gateway: generate noise keypair: %w", err)}
+		return nil, nil, &conn.ConnectionError{Err: fmt.Errorf("gateway: generate noise keypair: %w", redactErr(err))}
 	}
 	hs, err := noise.NewHandshakeState(noise.Config{
 		CipherSuite:   cs,
@@ -157,11 +157,11 @@ func noiseHandshake(ws wsConn, timeout time.Duration) (sendCS, recvCS *noise.Cip
 		StaticKeypair: static,
 	})
 	if err != nil {
-		return nil, nil, &conn.ConnectionError{Err: fmt.Errorf("gateway: noise handshake state: %w", err)}
+		return nil, nil, &conn.ConnectionError{Err: fmt.Errorf("gateway: noise handshake state: %w", redactErr(err))}
 	}
 	msg1, _, _, err := hs.WriteMessage(nil, []byte{})
 	if err != nil {
-		return nil, nil, &conn.ConnectionError{Err: fmt.Errorf("gateway: noise msg1: %w", err)}
+		return nil, nil, &conn.ConnectionError{Err: fmt.Errorf("gateway: noise msg1: %w", redactErr(err))}
 	}
 	if err := writeBounded(ws, msg1, timeout); err != nil {
 		return nil, nil, err
@@ -172,11 +172,11 @@ func noiseHandshake(ws wsConn, timeout time.Duration) (sendCS, recvCS *noise.Cip
 	}
 	// The payload is deliberately ignored at any length.
 	if _, _, _, err := hs.ReadMessage(nil, msg2); err != nil {
-		return nil, nil, &conn.ConnectionError{Err: fmt.Errorf("gateway: noise msg2: %w", err)}
+		return nil, nil, &conn.ConnectionError{Err: fmt.Errorf("gateway: noise msg2: %w", redactErr(err))}
 	}
 	msg3, cs1, cs2, err := hs.WriteMessage(nil, []byte{})
 	if err != nil {
-		return nil, nil, &conn.ConnectionError{Err: fmt.Errorf("gateway: noise msg3: %w", err)}
+		return nil, nil, &conn.ConnectionError{Err: fmt.Errorf("gateway: noise msg3: %w", redactErr(err))}
 	}
 	if cs1 == nil || cs2 == nil {
 		return nil, nil, &conn.ConnectionError{Err: errors.New("gateway: noise handshake did not split into transport states")}
@@ -192,7 +192,7 @@ func noiseHandshake(ws wsConn, timeout time.Duration) (sendCS, recvCS *noise.Cip
 // ConnectionError.
 func writeBounded(ws wsConn, data []byte, timeout time.Duration) error {
 	if err := ws.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
-		return &conn.ConnectionError{Err: fmt.Errorf("gateway handshake send failed: %w", err)}
+		return &conn.ConnectionError{Err: fmt.Errorf("gateway handshake send failed: %w", redactErr(err))}
 	}
 	err := ws.WriteMessage(websocket.BinaryMessage, data)
 	_ = ws.SetWriteDeadline(time.Time{})
@@ -200,7 +200,7 @@ func writeBounded(ws wsConn, data []byte, timeout time.Duration) error {
 		if ne, ok := err.(net.Error); ok && ne.Timeout() {
 			return &conn.TimeoutError{Message: fmt.Sprintf("gateway handshake send: no progress in %ds", int(timeout.Seconds()))}
 		}
-		return &conn.ConnectionError{Err: fmt.Errorf("gateway handshake send failed: %w", err)}
+		return &conn.ConnectionError{Err: fmt.Errorf("gateway handshake send failed: %w", summarizeCloseError(redactErr(err)))}
 	}
 	return nil
 }
@@ -211,7 +211,7 @@ func writeBounded(ws wsConn, data []byte, timeout time.Duration) error {
 // ConnectionError.
 func readBounded(ws wsConn, timeout time.Duration) ([]byte, error) {
 	if err := ws.SetReadDeadline(time.Now().Add(timeout)); err != nil {
-		return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway handshake receive failed: %w", err)}
+		return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway handshake receive failed: %w", redactErr(err))}
 	}
 	_, data, err := ws.ReadMessage()
 	_ = ws.SetReadDeadline(time.Time{})
@@ -220,9 +220,9 @@ func readBounded(ws wsConn, timeout time.Duration) ([]byte, error) {
 			return nil, &conn.TimeoutError{Message: fmt.Sprintf("gateway handshake: no answer in %ds", int(timeout.Seconds()))}
 		}
 		if websocket.IsCloseError(err) {
-			return nil, &conn.ConnectionError{Err: errors.New("gateway closed the websocket during the handshake")}
+			return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway closed the websocket during the handshake: %w", summarizeCloseError(err))}
 		}
-		return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway handshake failed: %w", err)}
+		return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway handshake failed: %w", summarizeCloseError(redactErr(err)))}
 	}
 	return data, nil
 }
@@ -241,7 +241,14 @@ func readBounded(ws wsConn, timeout time.Duration) ([]byte, error) {
 func (g *Gateway) readLoop() {
 	defer func() {
 		if r := recover(); r != nil {
-			g.fail(&conn.ConnectionError{Err: fmt.Errorf("gateway: reader panic: %v", r)})
+			// The panic value is arbitrary caller/peer text:
+			// never embed it. The recorded error carries
+			// the class and the panic text's byte length
+			// only (loop-5 allowlist rule); conn log lines
+			// render it as a summary, and the panic value
+			// itself is not retained anywhere.
+			panicText := fmt.Sprint(r)
+			g.fail(&conn.ConnectionError{Err: fmt.Errorf("gateway: reader panic (panic_length=%d)", len(panicText))})
 		}
 		close(g.readerDone)
 	}()
@@ -280,15 +287,15 @@ func (g *Gateway) readFrame() (*pb.ServiceFrame, error) {
 			if g.isClosed() {
 				return nil, &conn.ConnectionError{Err: errors.New("gateway connection closed")}
 			}
-			return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway receive failed: %w", err)}
+			return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway receive failed: %w", summarizeCloseError(redactErr(err)))}
 		}
 		pt, err := g.recvCS.Decrypt(nil, nil, data)
 		if err != nil {
-			return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway decrypt failed: %w", err)}
+			return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway decrypt failed: %w", redactErr(err))}
 		}
 		var ntf pb.NoiseTransportFrame
 		if err := proto.Unmarshal(pt, &ntf); err != nil {
-			return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway transport frame parse failed: %w", err)}
+			return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway transport frame parse failed: %w", redactErr(err))}
 		}
 		payload, complete, err := g.partial.feed(&ntf)
 		if err != nil {
@@ -305,11 +312,11 @@ func (g *Gateway) readFrame() (*pb.ServiceFrame, error) {
 		}
 		var sr pb.ServiceResponse
 		if err := proto.Unmarshal(payload, &sr); err != nil {
-			return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway service response parse failed: %w", err)}
+			return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway service response parse failed: %w", redactErr(err))}
 		}
 		var sf pb.ServiceFrame
 		if err := proto.Unmarshal(sr.GetPayload(), &sf); err != nil {
-			return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway service frame parse failed: %w", err)}
+			return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway service frame parse failed: %w", redactErr(err))}
 		}
 		return &sf, nil
 	}
@@ -374,7 +381,7 @@ func (g *Gateway) writeWS(data []byte) error {
 	g.ioMu.Lock()
 	defer g.ioMu.Unlock()
 	if err := g.ws.SetWriteDeadline(time.Now().Add(WriteDeadline)); err != nil {
-		return &conn.ConnectionError{Err: fmt.Errorf("gateway send failed: %w", err)}
+		return &conn.ConnectionError{Err: fmt.Errorf("gateway send failed: %w", redactErr(err))}
 	}
 	err := g.ws.WriteMessage(websocket.BinaryMessage, data)
 	_ = g.ws.SetWriteDeadline(time.Time{})
@@ -382,7 +389,7 @@ func (g *Gateway) writeWS(data []byte) error {
 		if ne, ok := err.(net.Error); ok && ne.Timeout() {
 			return &conn.ConnectionError{Err: errors.New("gateway send timed out")}
 		}
-		return &conn.ConnectionError{Err: fmt.Errorf("gateway send failed: %w", err)}
+		return &conn.ConnectionError{Err: fmt.Errorf("gateway send failed: %w", summarizeCloseError(redactErr(err)))}
 	}
 	return nil
 }
@@ -394,11 +401,11 @@ func (g *Gateway) writeWS(data []byte) error {
 func (g *Gateway) sendEnvelope(service pb.ServiceType, frameBytes []byte) error {
 	outer, err := proto.Marshal(&pb.ServiceRequest{Service: service, Payload: frameBytes})
 	if err != nil {
-		return &conn.ConnectionError{Err: fmt.Errorf("gateway: marshal service request: %w", err)}
+		return &conn.ConnectionError{Err: fmt.Errorf("gateway: marshal service request: %w", redactErr(err))}
 	}
 	chunkID, err := newChunkID()
 	if err != nil {
-		return &conn.ConnectionError{Err: fmt.Errorf("gateway: chunk id: %w", err)}
+		return &conn.ConnectionError{Err: fmt.Errorf("gateway: chunk id: %w", redactErr(err))}
 	}
 	pieces := splitPieces(outer)
 	g.sendMu.Lock()
@@ -406,11 +413,11 @@ func (g *Gateway) sendEnvelope(service pb.ServiceType, frameBytes []byte) error 
 	for idx, piece := range pieces {
 		frBytes, err := marshalTransportFrame(chunkID, uint32(idx), uint32(len(pieces)), piece)
 		if err != nil {
-			return &conn.ConnectionError{Err: fmt.Errorf("gateway: marshal transport frame: %w", err)}
+			return &conn.ConnectionError{Err: fmt.Errorf("gateway: marshal transport frame: %w", redactErr(err))}
 		}
 		ct, err := g.sendCS.Encrypt(nil, nil, frBytes)
 		if err != nil {
-			return &conn.ConnectionError{Err: fmt.Errorf("gateway encrypt failed: %w", err)}
+			return &conn.ConnectionError{Err: fmt.Errorf("gateway encrypt failed: %w", redactErr(err))}
 		}
 		if idx == 0 {
 			// Mark the send BEFORE the first write, not

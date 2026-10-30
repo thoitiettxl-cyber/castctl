@@ -113,8 +113,13 @@ func TestWakeVMNonJSONTruncated(t *testing.T) {
 	if !ok {
 		t.Fatalf("body = %#v, want string", body)
 	}
-	if len(got) != 300 || got != text[:300] {
-		t.Errorf("body = %q (len %d), want first 300 bytes", got, len(got))
+	// Loop 5: the non-JSON form is the allowlist summary
+	// (body length + content-type), never the raw text.
+	if strings.Contains(got, text) {
+		t.Errorf("body = %q carries the raw response text", got)
+	}
+	if !strings.Contains(got, "body_length=400") || !strings.Contains(got, "content_type=text/plain") {
+		t.Errorf("body = %q, want body_length + content_type", got)
 	}
 }
 

@@ -761,8 +761,16 @@ func TestDialFailureIsFailClosedAndTransient(t *testing.T) {
 	if strings.Contains(err.Error(), "s3cretpass") {
 		t.Errorf("dial error leaks credential: %q", err.Error())
 	}
-	if !strings.Contains(err.Error(), "<redacted>") {
-		t.Errorf("dial error not redacted: %q", err.Error())
+	// Loop 6, item 2: the dial error renders as a typed
+	// summary (operation, class, kind) — no URL, credential,
+	// or other transport text at all. The loop-4 redactErr
+	// rendering (a "<redacted>" marker inside the URL text)
+	// is superseded by the summary.
+	if strings.Contains(err.Error(), "proxy.invalid") || strings.Contains(err.Error(), "socks5://") {
+		t.Errorf("dial error carries transport text: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "class=network") || !strings.Contains(err.Error(), "kind=connection_refused") {
+		t.Errorf("dial error = %q, want the typed summary (class=network kind=connection_refused)", err.Error())
 	}
 	var connErr *conn.ConnectionError
 	if !errors.As(err, &connErr) {
@@ -1029,11 +1037,16 @@ func TestStatusErrorPayloadIsRedacted(t *testing.T) {
 	if !errors.As(err, &gwErr) {
 		t.Fatalf("error type: %T, want *conn.GatewayError", err)
 	}
-	if strings.Contains(gwErr.Payload, "s3cret") || strings.Contains(gwErr.Payload, "tok123") {
-		t.Errorf("GatewayError payload leaks credentials: %q", gwErr.Payload)
+	if strings.Contains(gwErr.Payload, "s3cret") || strings.Contains(gwErr.Payload, "tok123") || strings.Contains(gwErr.Payload, "example.com") {
+		t.Errorf("GatewayError payload carries body bytes: %q", gwErr.Payload)
 	}
-	if !strings.Contains(gwErr.Payload, "example.com") {
-		t.Errorf("GatewayError payload over-redacted: %q", gwErr.Payload)
+	if strings.Contains(gwErr.Error(), "s3cret") || strings.Contains(gwErr.Error(), "tok123") || strings.Contains(gwErr.Error(), "example.com") {
+		t.Errorf("GatewayError error string carries body bytes: %q", gwErr.Error())
+	}
+	// Loop 5: no body bytes survive at all — the host is not
+	// an allowlisted field. The wire length is recorded.
+	if gwErr.BodyLength != len(`see https://user:s3cret@example.com/x?auth_token=tok123`) {
+		t.Errorf("BodyLength = %d, want the wire body length", gwErr.BodyLength)
 	}
 }
 
@@ -1095,7 +1108,7 @@ func TestWSUpgradeTimeoutIsSeparate(t *testing.T) {
 		}
 	}()
 	start := time.Now()
-	_, _, _, err = dialWebSocket(context.Background(), &tcpDialer{addr: ln.Addr().String()}, "ws://127.0.0.1/v1/noise", false, 200*time.Millisecond)
+	_, _, _, err = dialWebSocket(context.Background(), &tcpDialer{addr: ln.Addr().String()}, "ws://127.0.0.1/v1/noise", false, 200*time.Millisecond, nil)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("dialWebSocket against a silent listener: nil error")
@@ -1129,7 +1142,7 @@ func TestNoiseHandshakeTimeoutIsSeparate(t *testing.T) {
 	defer srv.Close()
 	addr := strings.TrimPrefix(srv.URL, "http://")
 	start := time.Now()
-	ws, _, _, err := dialWebSocket(context.Background(), &tcpDialer{addr: addr}, "ws://"+addr+"/v1/noise", false, 5*time.Second)
+	ws, _, _, err := dialWebSocket(context.Background(), &tcpDialer{addr: addr}, "ws://"+addr+"/v1/noise", false, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("dialWebSocket: %v", err)
 	}

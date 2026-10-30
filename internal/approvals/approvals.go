@@ -282,6 +282,23 @@ type ApprovalResult struct {
 // called at most once per approval: AutoApprover never retries it.
 type Decider func(ctx context.Context, approval DescribedApproval, decision string) error
 
+// noForeverError reports a skip: no forever option was
+// offered. Error() preserves the offers list verbatim —
+// callers and the JSON data rendering (which summarises the
+// error) keep the exact pre-loop-8 text. OptionCount exposes
+// ONLY the number of offered options, for the structural
+// stderr rendering in logAutoApproved (loop 8): option
+// labels never reach stderr, only the count.
+type noForeverError struct{ options []string }
+
+func (e *noForeverError) Error() string {
+	return fmt.Sprintf("no forever option (offers %v)", e.options)
+}
+
+// OptionCount reports how many decision options were
+// offered to the skipped approval.
+func (e *noForeverError) OptionCount() int { return len(e.options) }
+
 // ApprovedRecord is one successful auto-approval, in the shape the
 // result object reports.
 type ApprovedRecord struct {
@@ -443,7 +460,7 @@ func (a *AutoApprover) Approve(ctx context.Context, items []DescribedApproval) (
 			}
 			a.mu.Unlock()
 			if !alreadyWarned {
-				errs = append(errs, a.errFor(item, "", fmt.Errorf("no forever option (offers %v)", item.Options)))
+				errs = append(errs, a.errFor(item, "", &noForeverError{options: slices.Clone(item.Options)}))
 			}
 			continue
 		}

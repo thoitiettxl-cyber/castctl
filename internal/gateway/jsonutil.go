@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
 )
 
 // ValidationError is the typed equivalent of Python's ValueError for
@@ -140,24 +139,4 @@ func pythonStr(v any) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
-}
-
-// truncatePayload truncates a payload to n bytes and decodes it as
-// UTF-8 with replacement characters, mirroring Python's
-// payload[:500].decode("utf-8", "replace").
-func truncatePayload(payload []byte, n int) string {
-	if len(payload) > n {
-		payload = payload[:n]
-	}
-	return strings.ToValidUTF8(string(payload), "�")
-}
-
-// truncateText truncates text to n runes, mirroring Python's
-// text[:120] slicing on str.
-func truncateText(text string, n int) string {
-	r := []rune(text)
-	if len(r) > n {
-		r = r[:n]
-	}
-	return string(r)
 }

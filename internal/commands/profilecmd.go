@@ -6,22 +6,26 @@ package commands
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/netip"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 	"github.com/thoitiettxl-cyber/castctl/internal/outbound"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
-	"github.com/thoitiettxl-cyber/castctl/internal/redact"
 
 	singjson "github.com/sagernet/sing/common/json"
 )
@@ -937,6 +941,119 @@ func outboundTypeOf(prof *profile.Profile) string {
 	return ""
 }
 
+// egressTransportError is the commands-side equivalent of
+// gateway.transportError (loop 7, item S1): a transport
+// failure rendered as a typed summary — operation, error
+// class, and net-error kind only, never peer text. Go's HTTP
+// stack embeds the offending wire bytes in its errors (a
+// malformed header line, a malformed status line), and the
+// unwrapped *url.Error returned by client.Do passed that text
+// through redactMessage/SummarizeErr verbatim. The original
+// error stays reachable through Unwrap, so classification is
+// unchanged; only the rendered text is summarised.
+type egressTransportError struct {
+	op    string
+	class string
+	kind  string
+	err   error
+}
+
+func (e *egressTransportError) Error() string {
+	return fmt.Sprintf("egress check: %s failed (class=%s kind=%s)", e.op, e.class, e.kind)
+}
+
+// Unwrap exposes the original transport error for classification.
+func (e *egressTransportError) Unwrap() error { return e.err }
+
+// wrapEgressTransportError wraps a transport error in its typed
+// summary. A nil error stays nil.
+func wrapEgressTransportError(err error) error {
+	if err == nil {
+		return nil
+	}
+	class, kind := classifyEgressTransportError(err)
+	return &egressTransportError{op: "GET api64.ipify.org", class: class, kind: kind, err: err}
+}
+
+// classifyEgressTransportError mirrors
+// gateway.classifyTransportError: the class/kind labels and
+// the check order are the same, and must stay in sync with
+// it. Classification is from the error's TYPE only — never
+// from its text, which may embed peer bytes.
+func classifyEgressTransportError(err error) (class, kind string) {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "canceled", "context"
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, os.ErrDeadlineExceeded):
+		return "timeout", "deadline"
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return "timeout", "net_timeout"
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		if dnsErr.IsTimeout {
+			return "dns", "dns_timeout"
+		}
+		return "dns", "dns"
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return "network", egressOpErrorKind(opErr.Op)
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return egressErrnoClassKind(errno)
+	}
+	var protoErr textproto.ProtocolError
+	if errors.As(err, &protoErr) {
+		return "transport", "response_parse"
+	}
+	var recErrPtr *tls.RecordHeaderError
+	if errors.As(err, &recErrPtr) {
+		return "tls", "tls"
+	}
+	var certErrPtr *tls.CertificateVerificationError
+	if errors.As(err, &certErrPtr) {
+		return "tls", "tls"
+	}
+	if errors.As(err, &ne) {
+		return "network", "net_error"
+	}
+	return "transport", "unknown"
+}
+
+// egressOpErrorKind reduces a *net.OpError Op to a stable kind label.
+func egressOpErrorKind(op string) string {
+	switch op {
+	case "dial", "read", "write", "accept", "listen", "connect":
+		return op
+	default:
+		return "network_op"
+	}
+}
+
+// egressErrnoClassKind maps a syscall errno to (class, kind).
+func egressErrnoClassKind(errno syscall.Errno) (string, string) {
+	switch errno {
+	case syscall.ETIMEDOUT:
+		return "timeout", "etimedout"
+	case syscall.ECONNREFUSED:
+		return "network", "connection_refused"
+	case syscall.ECONNRESET:
+		return "network", "connection_reset"
+	case syscall.EPIPE:
+		return "network", "broken_pipe"
+	case syscall.EHOSTUNREACH:
+		return "network", "host_unreachable"
+	case syscall.ENETUNREACH:
+		return "network", "network_unreachable"
+	default:
+		return "network", "syscall"
+	}
+}
+
 // fetchEgressIP GETs the ipify endpoint through the outbound and
 // returns the trimmed body. The exact URL is read from the plan
 // delta: https://api64.ipify.org.
@@ -947,7 +1064,7 @@ func fetchEgressIP(ctx context.Context, client *http.Client) (string, error) {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", wrapEgressTransportError(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 200 {
@@ -959,10 +1076,12 @@ func fetchEgressIP(ctx context.Context, client *http.Client) (string, error) {
 	}
 	ip := strings.TrimSpace(string(body))
 	if ip == "" || strings.ContainsAny(ip, " \t\r\n") {
-		return "", fmt.Errorf("egress check: unexpected ipify body %q", ip)
+		// The ipify body is peer text: report its length
+		// only, never its bytes (loop-5 allowlist rule).
+		return "", fmt.Errorf("egress check: unexpected ipify body body_length=%d", len(body))
 	}
 	if _, err := netip.ParseAddr(ip); err != nil {
-		return "", fmt.Errorf("egress check: ipify returned %q, not an IP address", ip)
+		return "", fmt.Errorf("egress check: ipify response is not an IP address body_length=%d", len(body))
 	}
 	return ip, nil
 }
@@ -1046,11 +1165,13 @@ func cmdConfigMigrate(ctx context.Context, env *Env, g *globalOpts, args []strin
 // small helpers (kept in this file to avoid import cycles in tests)
 // ---------------------------------------------------------------------
 
-// redactMessage renders an error for profile-test output: redacted,
-// single-line, never carrying a cookie value.
+// redactMessage renders an error for profile-test output: the
+// allowlist summary for a body-carrying error (loop-5 rule),
+// SafeString text otherwise. It never carries a cookie value
+// or server body bytes.
 func redactMessage(err error) string {
 	if err == nil {
 		return ""
 	}
-	return redact.String(err.Error())
+	return logging.SummarizeErr(err)
 }

@@ -28,7 +28,7 @@ var inviteCodePattern = regexp.MustCompile(`^[A-Z0-9]{6,16}$`)
 // Read-only: it never POSTs (the POST creates a code, which is
 // account-state-changing).
 func FetchInvite(ctx context.Context, client *http.Client, cookies string) (map[string]any, error) {
-	status, data, _, err := doHatch(ctx, client, http.MethodGet, "https://muse.ai/api/hatch/invite", hatchHeaders(cookies, ""), nil)
+	status, data, hdr, err := doHatch(ctx, client, http.MethodGet, "https://muse.ai/api/hatch/invite", hatchHeaders(cookies, ""), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -36,17 +36,19 @@ func FetchInvite(ctx context.Context, client *http.Client, cookies string) (map[
 		return nil, conn.NewAuthError(fmt.Sprintf("api/hatch/invite -> %d (cookies expired? re-export)", status))
 	}
 	if status != 200 {
-		return nil, &conn.GatewayError{Status: status, Payload: redactErrorString(truncateText(string(data), 200))}
+		sum := summarizeBody(fmt.Sprintf("api/hatch/invite -> %d", status), data, hdr.Get("Content-Type"), nil)
+		return nil, gatewayErrorFromSummary(status, sum)
 	}
 	d, err := decodeJSONObject(data)
 	if err != nil {
 		// Distinguish non-JSON from a JSON non-dict, as Python
 		// does (different messages, both GatewayError -1).
 		if _, jerr := decodeJSONValue(data); jerr != nil {
-			return nil, &conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("api/hatch/invite returned non-JSON (%q)", truncateText(string(data), 80)))}
+			sum := summarizeBody("api/hatch/invite returned non-JSON", data, hdr.Get("Content-Type"), nil)
+			return nil, gatewayErrorFromSummary(-1, sum)
 		}
 		v, _ := decodeJSONValue(data)
-		return nil, &conn.GatewayError{Status: -1, Payload: fmt.Sprintf("api/hatch/invite returned %T", v)}
+		return nil, gatewayErrorFromSummary(-1, summarizeBody(fmt.Sprintf("api/hatch/invite returned %T", v), data, hdr.Get("Content-Type"), nil))
 	}
 	return d, nil
 }
@@ -59,7 +61,7 @@ func FetchInvite(ctx context.Context, client *http.Client, cookies string) (map[
 func CreateInvite(ctx context.Context, client *http.Client, cookies string) (map[string]any, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	status, data, _, err := doHatch(ctx, client, http.MethodPost, "https://muse.ai/api/hatch/invite", hatchHeaders(cookies, ""), []byte{})
+	status, data, hdr, err := doHatch(ctx, client, http.MethodPost, "https://muse.ai/api/hatch/invite", hatchHeaders(cookies, ""), []byte{})
 	if err != nil {
 		return nil, err
 	}
@@ -67,11 +69,13 @@ func CreateInvite(ctx context.Context, client *http.Client, cookies string) (map
 		return nil, conn.NewAuthError(fmt.Sprintf("api/hatch/invite POST -> %d (cookies expired? re-export)", status))
 	}
 	if status != 200 {
-		return nil, &conn.GatewayError{Status: status, Payload: redactErrorString(truncateText(string(data), 200))}
+		sum := summarizeBody(fmt.Sprintf("api/hatch/invite POST -> %d", status), data, hdr.Get("Content-Type"), nil)
+		return nil, gatewayErrorFromSummary(status, sum)
 	}
 	d, err := decodeJSONObject(data)
 	if err != nil {
-		return nil, &conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("api/hatch/invite POST returned non-JSON (%q)", truncateText(string(data), 80)))}
+		sum := summarizeBody("api/hatch/invite POST returned non-JSON", data, hdr.Get("Content-Type"), nil)
+		return nil, gatewayErrorFromSummary(-1, sum)
 	}
 	return d, nil
 }
@@ -84,6 +88,13 @@ func CreateInvite(ctx context.Context, client *http.Client, cookies string) (map
 // is returned with its body, exactly as Python returns
 // (http_status, body). A non-JSON body becomes
 // {"success":false,"reason":"unknown","detail":...}.
+// A JSON body on the failure path (success is not true) is
+// filtered to the allowlist only (loop 6, item 3): the
+// "success", "reason", and "detail" keys survive, with
+// reason/detail enum-gated (a free-text, numeric, composite,
+// or over-cap value becomes "[omitted]", never emitted); every
+// other key is dropped. A success body is data and passes
+// through untouched.
 func RedeemInviteCode(ctx context.Context, client *http.Client, cookies, code string) (int, any, error) {
 	// strings.TrimSpace + ToUpper over ASCII letters: TrimSpace
 	// strips Unicode whitespace as Python's strip() does for the
@@ -98,7 +109,7 @@ func RedeemInviteCode(ctx context.Context, client *http.Client, cookies, code st
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	status, data, _, err := doHatch(ctx, client, http.MethodPost, "https://muse.ai/api/hatch/invite-code/redeem", hatchHeaders(cookies, ""), payload)
+	status, data, hdr, err := doHatch(ctx, client, http.MethodPost, "https://muse.ai/api/hatch/invite-code/redeem", hatchHeaders(cookies, ""), payload)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -107,9 +118,37 @@ func RedeemInviteCode(ctx context.Context, client *http.Client, cookies, code st
 	}
 	body, jerr := decodeJSONValue(data)
 	if jerr != nil {
-		body = map[string]any{"success": false, "reason": "unknown", "detail": truncateText(string(data), 200)}
+		// Non-JSON body: the detail field carries the
+		// allowlist summary only, never body bytes (the
+		// redeem command prints detail on stdout).
+		sum := summarizeBody("non-JSON response", data, hdr.Get("Content-Type"), nil)
+		body = map[string]any{"success": false, "reason": "unknown", "detail": sum.text}
+	} else if m, ok := body.(map[string]any); ok {
+		if success, _ := m["success"].(bool); !success {
+			body = filterRedeemFailureBody(m)
+		}
 	}
 	return status, body, nil
+}
+
+// filterRedeemFailureBody reduces a JSON failure body to the
+// closed allowlist: "success" (false), "reason", and "detail",
+// with reason/detail passed through the allowlist extraction
+// (enum-gated, capped, SafeString'd; anything else becomes
+// "[omitted]"). A missing "reason" becomes the constant
+// "unknown", as in the non-JSON branch; a missing "detail"
+// stays missing.
+func filterRedeemFailureBody(m map[string]any) map[string]any {
+	out := map[string]any{"success": false}
+	if v, ok := m["reason"]; ok {
+		out["reason"] = gateAllowlistValue(v)
+	} else {
+		out["reason"] = "unknown"
+	}
+	if v, ok := m["detail"]; ok {
+		out["detail"] = gateAllowlistValue(v)
+	}
+	return out
 }
 
 func trimSpaceASCII(s string) string {

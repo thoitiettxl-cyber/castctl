@@ -77,15 +77,25 @@ func ParseRSCResult(text string) any {
 	return head
 }
 
-// callAction posts one server-action call. A 401/403 is an
-// AuthError. A non-200 status or a response without x-component in
-// its content type returns (nil, nil): most likely a stale action
-// id, and the caller tries the next id. Transport errors are
-// returned through redactErr, like doHatch.
-func callAction(ctx context.Context, client *http.Client, cookies, actionID string, args any, page string) (any, error) {
+// callAction posts one server-action call and returns the parsed
+// RSC result, the wire byte length of the RSC body it parsed (the
+// wire length of the body it READ on the non-200 /
+// non-x-component branch too — loop 7, item T1), whether that
+// length is known (loop 8, F1: true whenever a body was read,
+// including a 0-byte body; false when no body was read at all,
+// so a known 0 is distinguishable from "unknown"), and an
+// error. The body length is threaded through so error summaries
+// can report the wire length (loop 6, item 6b) instead of
+// mislabelling the summary-text length as the body length. A
+// 401/403 is an AuthError. A non-200 status or a response
+// without x-component in its content type returns
+// (nil, len(data), true, nil): most likely a stale action id,
+// and the caller tries the next id. Transport errors are
+// returned as a typed summary, like doHatch (transport.go).
+func callAction(ctx context.Context, client *http.Client, cookies, actionID string, args any, page string) (any, int, bool, error) {
 	body, err := json.Marshal(args)
 	if err != nil {
-		return nil, err
+		return nil, 0, false, err
 	}
 	h := hatchHeaders(cookies, "")
 	h.Set("Accept", "text/x-component")
@@ -95,25 +105,25 @@ func callAction(ctx context.Context, client *http.Client, cookies, actionID stri
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, page, bytes.NewReader(body))
 	if err != nil {
-		return nil, redactErr(err)
+		return nil, 0, false, redactErr(err)
 	}
 	req.Header = h
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, redactErr(err)
+		return nil, 0, false, wrapTransportError(transportOp(http.MethodPost, page), err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return nil, redactErr(err)
+		return nil, 0, false, wrapTransportError(transportOp(http.MethodPost, page), err)
 	}
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		return nil, conn.NewAuthError(fmt.Sprintf("server action -> %d (cookies expired? re-export)", resp.StatusCode))
+		return nil, 0, false, conn.NewAuthError(fmt.Sprintf("server action -> %d (cookies expired? re-export)", resp.StatusCode))
 	}
 	if resp.StatusCode != 200 || !strings.Contains(resp.Header.Get("Content-Type"), "x-component") {
-		return nil, nil
+		return nil, len(data), true, nil
 	}
-	return ParseRSCResult(string(data)), nil
+	return ParseRSCResult(string(data)), len(data), true, nil
 }
 
 // FindActionID scans the web app's JS chunks for a server action's
@@ -167,9 +177,9 @@ func FindActionID(ctx context.Context, client *http.Client, cookies, name, page 
 }
 
 // fetchText GETs one URL and returns its body as text.
-// Transport errors are returned wrapped in the redaction wrapper
-// (redactErr), like doHatch: the chain is preserved for
-// errors.As/Is, the printed text is credential-free.
+// Transport errors are returned as a typed summary, like
+// doHatch (transport.go): the chain is preserved for
+// errors.As/Is, the printed text carries no peer bytes.
 func fetchText(ctx context.Context, client *http.Client, url string, headers http.Header, timeout time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -180,12 +190,12 @@ func fetchText(ctx context.Context, client *http.Client, url string, headers htt
 	req.Header = headers
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", redactErr(err)
+		return "", wrapTransportError(transportOp(http.MethodGet, url), err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return "", redactErr(err)
+		return "", wrapTransportError(transportOp(http.MethodGet, url), err)
 	}
 	return string(data), nil
 }
@@ -272,6 +282,8 @@ func FetchSubscription(ctx context.Context, client *http.Client, cookies string,
 	candidates = append(candidates, DefaultSubscriptionActionID)
 	var res any
 	var aid string
+	var resLen int
+	var resLenKnown bool
 	for _, cand := range candidates {
 		if cand == "" {
 			continue
@@ -286,12 +298,12 @@ func FetchSubscription(ctx context.Context, client *http.Client, cookies string,
 			continue
 		}
 		tried = append(tried, cand)
-		r, err := callAction(ctx, client, cookies, cand, args, page)
+		r, n, known, err := callAction(ctx, client, cookies, cand, args, page)
 		if err != nil {
 			return nil, "", err
 		}
 		if r != nil {
-			res, aid = r, cand
+			res, aid, resLen, resLenKnown = r, cand, n, known
 			break
 		}
 	}
@@ -303,11 +315,11 @@ func FetchSubscription(ctx context.Context, client *http.Client, cookies string,
 		if found == "" {
 			return nil, "", &conn.GatewayError{Status: -1, Payload: fmt.Sprintf("could not find %s in the web app bundle", SubscriptionActionName)}
 		}
-		r, err := callAction(ctx, client, cookies, found, args, page)
+		r, n, known, err := callAction(ctx, client, cookies, found, args, page)
 		if err != nil {
 			return nil, "", err
 		}
-		res, aid = r, found
+		res, aid, resLen, resLenKnown = r, found, n, known
 	}
 	sub, ok := res.(map[string]any)
 	if !ok || sub["success"] != true || sub["subscription"] == nil {
@@ -317,7 +329,21 @@ func FetchSubscription(ctx context.Context, client *http.Client, cookies string,
 		} else {
 			errVal = res
 		}
-		return nil, "", &conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("%s failed: %v", SubscriptionActionName, errVal))}
+		// The "error" value is peer-controlled: only an
+		// enum-shaped string parsed by key may be emitted
+		// (see summary.go). A non-map result has no keys
+		// to parse, so nothing is extracted from it. The
+		// summary reports the wire RSC body length threaded
+		// through callAction with its known flag, never the
+		// summary-text length (loop 6, item 6b; loop 8, F1:
+		// a known 0 renders body_length=0, an unknown
+		// length renders no body_length field).
+		errMap, _ := errVal.(map[string]any)
+		if errMap == nil && ok {
+			errMap = sub
+		}
+		sum := summarizeParsedBody("fetchSubscriptionAction failed", resLen, resLenKnown, errMap, "error")
+		return nil, "", gatewayErrorFromSummary(-1, sum)
 	}
 	subMap, ok := sub["subscription"].(map[string]any)
 	if !ok {

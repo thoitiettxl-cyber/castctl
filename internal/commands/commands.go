@@ -33,8 +33,8 @@ import (
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 	"github.com/thoitiettxl-cyber/castctl/internal/deliver"
 	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
-	"github.com/thoitiettxl-cyber/castctl/internal/redact"
 )
 
 // Version is the Go port version, mirroring the Python 0.6.1 contract
@@ -95,6 +95,14 @@ type Env struct {
 	// Logger, when non-nil, is passed to conn.Muse. Nil means
 	// slog.Default().
 	Logger *slog.Logger
+	// LogLevelOverride, when LogLevelSet, is the --log-level value
+	// from the global pre-scan. runInner sets both from
+	// globalOpts before dispatch; defaultBuildRuntime reads them
+	// as the CLI tier of log precedence (CLI > config block >
+	// default: sing-box's empty level means trace). Test BuildRuntime overrides read the same
+	// fields; production never sets them directly.
+	LogLevelOverride string
+	LogLevelSet      bool
 	// ConnectorOpts are appended to gateway.NewConnector options when
 	// the default runtime is built. Tests use them to inject a fake
 	// dialer; production passes none.
@@ -166,12 +174,13 @@ func (e *Env) buildRuntime(ctx context.Context, loc *profile.ConfigLocation, pro
 }
 
 // newConnector builds the gateway connector for a dialer, honouring
-// the Env test hook.
-func (e *Env) newConnector(dialer gateway.OutboundDialer) conn.Connector {
+// the Env test hook. Extra options come first so ConnectorOpts
+// (the test hook) can override them.
+func (e *Env) newConnector(dialer gateway.OutboundDialer, extra ...gateway.ConnectorOption) conn.Connector {
 	if e.NewConnector != nil {
-		return e.NewConnector(dialer, e.ConnectorOpts...)
+		return e.NewConnector(dialer, append(extra, e.ConnectorOpts...)...)
 	}
-	return gateway.NewConnector(dialer, e.ConnectorOpts...)
+	return gateway.NewConnector(dialer, append(extra, e.ConnectorOpts...)...)
 }
 
 // cmdError is an error with a fixed exit code. Handlers return it for
@@ -220,10 +229,32 @@ func (e *typedAuthError) Error() string {
 func (e *typedAuthError) Unwrap() error { return e.Err }
 
 // classifyError maps an error to (exit code, stderr text). Plain
-// errors print "castctl: <redacted message>"; typed auth errors
-// print one JSON line. The Python exit-code contract is preserved:
+// errors print "castctl: <summary>"; typed auth errors print
+// one JSON line. The Python exit-code contract is preserved:
 // AuthError 2, GatewayError 3, ValueError-equivalent 2, TimeoutError
 // 4, everything else 1, signal cancellation 130.
+//
+// Loop 5 (allowlist rule): the stderr text NEVER carries
+// server/peer body bytes, at any level of wrapping. Every
+// branch renders through logging.SummarizeErr — EXCEPT the
+// ExportError guidance branch, which renders guidance text
+// through the SafeString backstop only (guidance carries no
+// body bytes by construction; see below). A body-carrying
+// error in the chain renders as its LogSummary (status +
+// class + length + validated fields), and every other error
+// renders through the SafeString backstop.
+// GatewayError.Error() is itself a summary since loop 5.
+// AuthError.Error() is NOT: it renders Message verbatim, and
+// its safety rests on producers building Message from
+// allowlist summaries/constants only. SummarizeErr finds the
+// inner error's LogSummary through the wrappers' Unwrap
+// chains (cmdError and typedAuthError both unwrap); a wrapper
+// that hid the chain would fall back to SafeString over the
+// verbatim Message, so no new wrapper type may hide an
+// AuthError/GatewayError chain. The boundary is pinned by
+// TestLoop6ClassifyErrorAuthBoundary (loop 6, item 6d). The
+// ExportError guidance carries only placeholders and keeps
+// its SafeString rendering.
 func classifyError(err error) (int, string) {
 	if err == nil {
 		return 0, ""
@@ -231,68 +262,85 @@ func classifyError(err error) (int, string) {
 	var export *deliver.ExportError
 	if errors.As(err, &export) {
 		// Guidance-only, exit 1, guidance text verbatim.
-		return export.ExitCode(), redact.String(export.Error())
+		return export.ExitCode(), logging.SafeString(export.Error())
 	}
 	var typed *typedAuthError
 	if errors.As(err, &typed) {
-		msg := redact.String(typed.Err.Error())
+		msg := logging.SummarizeErr(err)
 		b, _ := json.Marshal(map[string]string{"type": typed.Type, "error": msg})
 		return typed.Code, string(b)
 	}
 	var ce *cmdError
 	if errors.As(err, &ce) {
 		if ce.Type != "" {
-			msg := redact.String(ce.Error())
+			msg := logging.SummarizeErr(err)
 			b, _ := json.Marshal(map[string]string{"type": ce.Type, "error": msg})
 			return ce.Code, string(b)
 		}
 		if msg := ce.Error(); msg != "" {
-			return ce.Code, "castctl: " + redact.String(msg)
+			return ce.Code, "castctl: " + logging.SummarizeErr(err)
 		}
 		return ce.Code, ""
 	}
 	var auth *conn.AuthError
 	if errors.As(err, &auth) {
-		msg := redact.String(auth.Error())
+		msg := logging.SummarizeErr(err)
 		b, _ := json.Marshal(map[string]string{"type": "auth_failed", "error": msg})
 		return 2, string(b)
 	}
 	var gw *conn.GatewayError
 	if errors.As(err, &gw) {
-		return 3, "castctl: " + redact.String(gw.Error())
+		return 3, "castctl: " + logging.SummarizeErr(err)
 	}
 	var reassembly *gateway.ReassemblySizeError
 	if errors.As(err, &reassembly) {
-		return 3, "castctl: " + redact.String(reassembly.Error())
+		return 3, "castctl: " + logging.SummarizeErr(err)
 	}
 	var tooMany *gateway.TooManyUnfinishedGroupsError
 	if errors.As(err, &tooMany) {
-		return 3, "castctl: " + redact.String(tooMany.Error())
+		return 3, "castctl: " + logging.SummarizeErr(err)
 	}
 	var timeout *conn.TimeoutError
 	if errors.As(err, &timeout) {
-		return 4, "castctl: " + redact.String(timeout.Error())
+		return 4, "castctl: " + logging.SummarizeErr(err)
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return 4, "castctl: timeout: " + redact.String(err.Error())
+		return 4, "castctl: timeout: " + logging.SummarizeErr(err)
 	}
 	if errors.Is(err, context.Canceled) {
 		return 130, ""
 	}
 	var perr *profile.Error
 	if errors.As(err, &perr) {
-		return profile.ExitCode(err), "castctl: " + redact.String(perr.Error())
+		return profile.ExitCode(err), "castctl: " + logging.SummarizeErr(err)
 	}
 	var verr *gateway.ValidationError
 	if errors.As(err, &verr) {
-		return 2, "castctl: " + redact.String(verr.Error())
+		return 2, "castctl: " + logging.SummarizeErr(err)
 	}
 	// Errors carrying their own exit code (profile errors not typed
 	// above, deliver errors) keep it; everything else is 1.
 	if ec, ok := err.(interface{ ExitCode() int }); ok {
-		return ec.ExitCode(), "castctl: " + redact.String(err.Error())
+		return ec.ExitCode(), "castctl: " + logging.SummarizeErr(err)
 	}
-	return 1, "castctl: " + redact.String(err.Error())
+	return 1, "castctl: " + logging.SummarizeErr(err)
+}
+
+// panicSummary renders a recovered panic value for the CLI
+// panic line on stderr (loop-5 allowlist rule): NEVER the
+// value's text. A panic value that is (or wraps) a
+// body-carrying error renders as that error's LogSummary;
+// any other value renders as its type and byte length only.
+// This replaces the old redact.String rendering, which
+// passed plain body words through verbatim.
+func panicSummary(r any) string {
+	if err, ok := r.(error); ok && err != nil {
+		var s interface{ LogSummary() string }
+		if errors.As(err, &s) {
+			return "panic: " + s.LogSummary()
+		}
+	}
+	return fmt.Sprintf("panic: type=%T panic_length=%d", r, len(fmt.Sprint(r)))
 }
 
 // classifyConnError wraps a failure from conn.Muse calls (connect,
@@ -680,10 +728,12 @@ type commandSpec struct {
 }
 
 type globalOpts struct {
-	profileFlag string
-	profileSet  bool
-	configFlag  string
-	configSet   bool
+	profileFlag  string
+	profileSet   bool
+	configFlag   string
+	configSet    bool
+	logLevelFlag string
+	logLevelSet  bool
 }
 
 // commandTable is the full PR3 surface. Deferred commands are in
@@ -718,15 +768,16 @@ var commandOrder = []string{
 // act when reached, before profile validation.
 //
 // Panic contract (R2 decision): a panic anywhere on the dispatch
-// path converts to exit 2 with a redacted error message and no
-// stack trace. The panic value is printed through the redactor, so
-// no secret-bearing stack ever reaches output; non-panic behaviour
+// path converts to exit 2 with a summary message and no stack
+// trace. The panic value is rendered by panicSummary (class +
+// length only, never the value's text), so no secret-bearing
+// stack or peer text ever reaches output; non-panic behaviour
 // and exit codes are unchanged.
 func Run(ctx context.Context, args []string, env *Env) (code int) {
 	defer func() {
 		if r := recover(); r != nil {
 			code = 2
-			fmt.Fprintf(env.stderr(), "castctl: panic: %s\n", redact.String(fmt.Sprint(r)))
+			fmt.Fprintf(env.stderr(), "castctl: %s\n", panicSummary(r))
 		}
 	}()
 	return runInner(ctx, args, env)
@@ -740,6 +791,10 @@ func runInner(ctx context.Context, args []string, env *Env) int {
 	if done {
 		return code
 	}
+	// Thread the global --log-level override into the Env the
+	// runtime builder reads (the only global flag that affects
+	// runtime behaviour, not just location/profile resolution).
+	env.LogLevelOverride, env.LogLevelSet = g.logLevelFlag, g.logLevelSet
 	if cmdName == "" {
 		// Bare invocation = chat in Python.
 		cmdName, cmdArgs = "chat", nil
@@ -762,6 +817,13 @@ func runInner(ctx context.Context, args []string, env *Env) int {
 		if errors.Is(err, errHelpShown) {
 			return 0
 		}
+		// Typed-JSON ordering contract (docs/config.md): the
+		// error text is written to stderr AFTER every log
+		// line, so when logging is ON with stderr output the
+		// typed JSON is the LAST stderr line, intact; when
+		// logging is OFF (no log block, no --log-level flag)
+		// it is the ONLY stderr line. Nothing may write to
+		// stderr after this point in the error path.
 		code, text := classifyError(err)
 		if text != "" {
 			fmt.Fprintln(env.stderr(), text)
@@ -837,9 +899,31 @@ func scanGlobal(args []string, env *Env) (*globalOpts, string, []string, int, bo
 			}
 		case strings.HasPrefix(tok, "--"):
 			// Unabbreviated unknown global flag; allow unambiguous
-			// prefixes of --profile/--config/--help/--version.
+			// prefixes of --profile/--config/--help/--version/
+			// --log-level.
 			name := strings.TrimPrefix(strings.SplitN(tok, "=", 2)[0], "--")
-			if strings.HasPrefix("profile", name) || strings.HasPrefix("config", name) {
+			if strings.HasPrefix("log-level", name) && name != "" {
+				// --log-level: same value rules as --profile/
+				// --config, then spelling validation. The
+				// supplied value is never echoed: it could be
+				// a secret pasted by mistake.
+				var val string
+				if strings.Contains(tok, "=") {
+					val = strings.SplitN(tok, "=", 2)[1]
+				} else {
+					if i+1 >= len(args) || (strings.HasPrefix(args[i+1], "-") && args[i+1] != "-") {
+						fmt.Fprintf(env.stderr(), "castctl: argument --log-level: expected one argument\n")
+						return g, "", nil, 2, true
+					}
+					i++
+					val = args[i]
+				}
+				if !profile.ValidLogLevel(val) {
+					fmt.Fprintf(env.stderr(), "castctl: argument --log-level: invalid log level (expected trace, debug, info, warn, warning, error, fatal, or panic)\n")
+					return g, "", nil, 2, true
+				}
+				g.logLevelFlag, g.logLevelSet = val, true
+			} else if strings.HasPrefix("profile", name) || strings.HasPrefix("config", name) {
 				// Treat as the full flag with the same value rules.
 				isProfile := strings.HasPrefix("profile", name)
 				var val string

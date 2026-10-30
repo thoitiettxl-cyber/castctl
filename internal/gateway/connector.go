@@ -14,8 +14,11 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
+	"github.com/thoitiettxl-cyber/castctl/internal/outbound"
 )
 
 // OutboundDialer is the minimal dial surface the Connector needs
@@ -40,6 +43,11 @@ type connectorConfig struct {
 	clock        Clock
 	wsTimeout    time.Duration
 	noiseTimeout time.Duration
+	// logger is the sing-box context logger for the gateway
+	// handshake event (default: NOP). It is set by WithLogger
+	// from the runtime's resolved log factory; the event line
+	// carries the parsed status only, never the URL or headers.
+	logger log.ContextLogger
 	// reassembler is the frame reassembler for built gateways.
 	// Nil means the production caps. Tests construct a
 	// connectorConfig literal with a small-limit reassembler
@@ -74,6 +82,14 @@ func WithWSURL(fn func(vmID, hatchToken string) string) ConnectorOption {
 // real clock; tests inject a fake clock.
 func WithClock(c Clock) ConnectorOption {
 	return func(cfg *connectorConfig) { cfg.clock = c }
+}
+
+// WithLogger sets the context logger for the WebSocket
+// handshake event (default: NOP logger, so existing callers
+// that never set it emit nothing). The logger comes from the
+// runtime's resolved log factory.
+func WithLogger(logger log.ContextLogger) ConnectorOption {
+	return func(cfg *connectorConfig) { cfg.logger = logger }
 }
 
 // WithWSUpgradeTimeout bounds the WebSocket upgrade separately
@@ -187,7 +203,7 @@ func dialGateway(ctx context.Context, dialer OutboundDialer, wsURL string, secur
 	if err != nil {
 		return nil, err
 	}
-	ws, dialMS, wsMS, err := dialWebSocket(ctx, dialer, wsURL, secure, cfg.wsTimeout)
+	ws, dialMS, wsMS, err := dialWebSocket(ctx, dialer, wsURL, secure, cfg.wsTimeout, cfg.logger)
 	if err != nil {
 		return nil, err
 	}
@@ -231,11 +247,20 @@ func dialGateway(ctx context.Context, dialer OutboundDialer, wsURL string, secur
 // returns the connection plus the dial and upgrade durations in
 // milliseconds. Dial errors are redacted for safe logging (item
 // (c)) while keeping the original error chain.
-func dialWebSocket(ctx context.Context, dialer OutboundDialer, wsURL string, secure bool, wsTimeout time.Duration) (wsConn, int64, int64, error) {
+func dialWebSocket(ctx context.Context, dialer OutboundDialer, wsURL string, secure bool, wsTimeout time.Duration, logger log.ContextLogger) (wsConn, int64, int64, error) {
 	host, port, err := splitWSURL(wsURL)
 	if err != nil {
 		return nil, 0, 0, err
 	}
+	// One connection ID for the whole dial: mint (or reuse) it
+	// HERE, before WebSocketDial, so the Dialer reuses this ID
+	// for its dial_start/tls_alpn lines (Dialer.ConnIDContext
+	// never mints over an ID already present) and the
+	// ws_handshake line below, emitted on this same ctx,
+	// carries the identical ID. Minting inside the Dialer
+	// alone could never reach this function: the Dialer
+	// returns only the conn, never its context.
+	ctx = outbound.ConnIDContext(ctx)
 	dialStart := time.Now()
 	raw, err := dialer.WebSocketDial(ctx, "tcp", host, port, secure, option.OutboundTLSOptions{Enabled: true, ALPN: []string{"http/1.1"}})
 	dialMS := time.Since(dialStart).Milliseconds()
@@ -243,7 +268,7 @@ func dialWebSocket(ctx context.Context, dialer OutboundDialer, wsURL string, sec
 		if ctx.Err() != nil {
 			return nil, dialMS, 0, ctx.Err()
 		}
-		return nil, dialMS, 0, &conn.ConnectionError{Err: fmt.Errorf("gateway: websocket dial: %w", redactErr(err))}
+		return nil, dialMS, 0, &conn.ConnectionError{Err: fmt.Errorf("gateway: websocket dial: %w", wrapTransportError("websocket dial", err))}
 	}
 	var used atomic.Bool
 	take := func(_ context.Context, _, _ string) (net.Conn, error) {
@@ -261,16 +286,46 @@ func dialWebSocket(ctx context.Context, dialer OutboundDialer, wsURL string, sec
 	header.Set("User-Agent", UserAgent)
 	header.Set("Origin", "https://muse.ai")
 	upgradeStart := time.Now()
-	ws, _, err := d.DialContext(ctx, wsURL, header)
+	ws, resp, err := d.DialContext(ctx, wsURL, header)
 	wsMS := time.Since(upgradeStart).Milliseconds()
 	if err != nil {
 		_ = raw.Close()
 		if ctx.Err() != nil {
 			return nil, dialMS, wsMS, ctx.Err()
 		}
-		return nil, dialMS, wsMS, &conn.ConnectionError{Err: fmt.Errorf("gateway: websocket handshake: %w", redactErr(err))}
+		// Handshake event, at debug, on the dial ctx: the
+		// ctx carries the connection ID minted above and
+		// shared with the Dialer, so this line's ID prefix
+		// matches the dial_start/tls_alpn lines. The parsed
+		// status ONLY, derived from the raw gorilla result
+		// before redaction wrapping. No event when no
+		// parseable status exists.
+		emitHandshakeStatus(ctx, logger, resp, err)
+		// The returned error renders the validated 3-digit
+		// status only (newHandshakeFailureError); the gorilla
+		// error text, which may embed the peer status
+		// line, never reaches an output path — only the
+		// derived code (or the token length) does — while
+		// its chain stays reachable for classification.
+		return nil, dialMS, wsMS, &conn.ConnectionError{Err: newHandshakeFailureError(resp, err)}
 	}
+	emitHandshakeStatus(ctx, logger, resp, nil)
 	return ws, dialMS, wsMS, nil
+}
+
+// emitHandshakeStatus logs one debug line carrying only the
+// parsed handshake status (a 3-digit code, or a token length).
+// A nil logger is a no-op; the line passes the SafeString
+// boundary in logging.Emit.
+func emitHandshakeStatus(ctx context.Context, logger log.ContextLogger, resp *http.Response, err error) {
+	if logger == nil {
+		return
+	}
+	token, kind, ok := handshakeStatusToken(resp, err)
+	if !ok {
+		return
+	}
+	logging.Emit(logger, ctx, log.LevelDebug, "event=ws_handshake "+kind+"="+token)
 }
 
 // splitWSURL extracts the host and port from a ws(s) URL, applying
