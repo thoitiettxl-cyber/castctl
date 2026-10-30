@@ -240,7 +240,7 @@ newline is sufficient, not necessary, for the bypass — a
 is a separate route that doubles the backslashes and leaves
 that escaped-quoted pair verbatim, secret included, with no
 newline anywhere, while other parts of the same rendering,
-such as a Bearer token or a `token:` pair, still redact. None of these shapes
+such as a `token:` pair, still redact. None of these shapes
 can leak through
 the structural slots of the `approveAll` / `logAutoApproved`
 stderr lines above, because those slots emit no peer free text
