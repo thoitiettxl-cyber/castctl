@@ -1,0 +1,1134 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Licensed under the GNU General Public License v3.0 or later.
+
+package profile
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/sagernet/sing-box/option"
+)
+
+// SingleConfig is the parsed single-file config.json. Profiles are keyed
+// by name; Outbounds/Endpoints/DNS hold sing-box's own parsed option
+// types, with the original JSON preserved in raw* for faithful
+// re-encoding on save.
+type SingleConfig struct {
+	DefaultProfile string
+	Profiles       map[string]*Profile
+	Outbounds      []option.Outbound
+	Endpoints      []option.Endpoint
+	DNS            *option.DNSOptions
+
+	rawOutbounds [][]byte
+	rawEndpoints [][]byte
+	rawDNS       []byte
+	rawProfiles  map[string][]byte
+}
+
+// ProfileNames returns the profile names in sorted order.
+func (c *SingleConfig) ProfileNames() []string {
+	names := make([]string, 0, len(c.Profiles))
+	for name := range c.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ParsedOutbounds re-parses the stored outbound JSON and returns fresh
+// option.Outbound values.
+func (c *SingleConfig) ParsedOutbounds() ([]option.Outbound, error) {
+	out := make([]option.Outbound, 0, len(c.rawOutbounds))
+	for _, raw := range c.rawOutbounds {
+		ob, err := parseOutbound(raw)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ob)
+	}
+	if len(c.rawOutbounds) == 0 && len(c.Outbounds) > 0 {
+		return append([]option.Outbound{}, c.Outbounds...), nil
+	}
+	return out, nil
+}
+
+// ParsedEndpoints re-parses the stored endpoint JSON and returns fresh
+// option.Endpoint values.
+func (c *SingleConfig) ParsedEndpoints() ([]option.Endpoint, error) {
+	out := make([]option.Endpoint, 0, len(c.rawEndpoints))
+	for _, raw := range c.rawEndpoints {
+		ep, err := parseEndpoint(raw)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ep)
+	}
+	if len(c.rawEndpoints) == 0 && len(c.Endpoints) > 0 {
+		return append([]option.Endpoint{}, c.Endpoints...), nil
+	}
+	return out, nil
+}
+
+// ParsedDNS re-parses the stored dns JSON, or returns nil when the file
+// has no dns section.
+func (c *SingleConfig) ParsedDNS() (*option.DNSOptions, error) {
+	if len(c.rawDNS) == 0 {
+		return c.DNS, nil
+	}
+	return parseDNS(c.rawDNS)
+}
+
+// RawOutbounds returns defensive copies of the stored outbound JSON.
+func (c *SingleConfig) RawOutbounds() [][]byte { return copyRawList(c.rawOutbounds) }
+
+// RawEndpoints returns defensive copies of the stored endpoint JSON.
+func (c *SingleConfig) RawEndpoints() [][]byte { return copyRawList(c.rawEndpoints) }
+
+// RawDNS returns a defensive copy of the stored dns JSON, or nil.
+func (c *SingleConfig) RawDNS() []byte {
+	if len(c.rawDNS) == 0 {
+		return nil
+	}
+	out := make([]byte, len(c.rawDNS))
+	copy(out, c.rawDNS)
+	return out
+}
+
+func copyRawList(in [][]byte) [][]byte {
+	out := make([][]byte, len(in))
+	for i, raw := range in {
+		cp := make([]byte, len(raw))
+		copy(cp, raw)
+		out[i] = cp
+	}
+	return out
+}
+
+var singleTopLevelKeys = map[string]bool{
+	"default_profile": true,
+	"profiles":        true,
+	"outbounds":       true,
+	"endpoints":       true,
+	"dns":             true,
+}
+
+var profileKeys = map[string]bool{
+	"cookies_file":           true,
+	"vm_id":                  true,
+	"node_id":                true,
+	"auto_approve":           true,
+	"auto_allow_once":        true,
+	"subscription_action_id": true,
+	"fingerprint":            true,
+	"tls_engine":             true,
+	"outbound":               true,
+}
+
+// HasProfilesMarker reports whether data is a JSON object containing a
+// "profiles" key (any value). A present-but-invalid "profiles" value
+// still counts as the marker so callers surface a parse error instead
+// of silently falling back to the legacy layout.
+func HasProfilesMarker(data []byte) (bool, error) {
+	obj, err := decodeOrderedObject(data)
+	if err != nil {
+		return false, err
+	}
+	return obj.has("profiles"), nil
+}
+
+// ParseSingleConfig parses a single-file config.json. baseDir is used
+// only to resolve relative cookies_file paths and to fill profile paths;
+// no files are read. Cookies inline are rejected: a "cookies"/"cookie"
+// key at the top level or directly in a profile entry is an error. (A
+// "cookie" field inside a sing-box options object, e.g. OpenConnect
+// endpoints, is legitimate and is NOT rejected; badjson strictness
+// rejects any other unknown field inside option objects.)
+func ParseSingleConfig(data []byte, baseDir string) (*SingleConfig, error) {
+	obj, err := decodeOrderedObject(data)
+	if err != nil {
+		return nil, err
+	}
+	for _, k := range obj.keys {
+		if k == "cookies" || k == "cookie" {
+			return nil, newConfigError("cookies must stay in a separate cookies file, never inline in config.json")
+		}
+		if !singleTopLevelKeys[k] {
+			return nil, newConfigErrorf("unknown top-level config key %q", k)
+		}
+	}
+	cfg := &SingleConfig{
+		Profiles:    make(map[string]*Profile),
+		rawProfiles: make(map[string][]byte),
+	}
+	if v, ok := obj.get("default_profile"); ok {
+		name, ok := v.(string)
+		if !ok {
+			return nil, newConfigError("default_profile must be a string")
+		}
+		if _, err := ValidateProfileName(name); err != nil {
+			return nil, err
+		}
+		cfg.DefaultProfile = name
+	}
+	profilesVal, ok := obj.get("profiles")
+	if !ok {
+		return nil, newConfigError("single config requires a \"profiles\" object")
+	}
+	profilesObj, ok := profilesVal.(*orderedObject)
+	if !ok {
+		return nil, newConfigError("\"profiles\" must be an object")
+	}
+
+	// Outbounds and endpoints first: profiles may reference their tags.
+	if v, ok := obj.get("outbounds"); ok {
+		arr, ok := v.([]any)
+		if !ok {
+			return nil, newConfigError("\"outbounds\" must be an array")
+		}
+		for _, elem := range arr {
+			raw, err := rawOf(elem)
+			if err != nil {
+				return nil, err
+			}
+			ob, err := parseOutbound(raw)
+			if err != nil {
+				return nil, err
+			}
+			if ob.Tag == "" {
+				return nil, newConfigError("outbound in \"outbounds\" must have a tag")
+			}
+			cfg.Outbounds = append(cfg.Outbounds, ob)
+			cfg.rawOutbounds = append(cfg.rawOutbounds, raw)
+		}
+	}
+	if v, ok := obj.get("endpoints"); ok {
+		arr, ok := v.([]any)
+		if !ok {
+			return nil, newConfigError("\"endpoints\" must be an array")
+		}
+		for _, elem := range arr {
+			raw, err := rawOf(elem)
+			if err != nil {
+				return nil, err
+			}
+			ep, err := parseEndpoint(raw)
+			if err != nil {
+				return nil, err
+			}
+			if ep.Tag == "" {
+				return nil, newConfigError("endpoint in \"endpoints\" must have a tag")
+			}
+			if wg, ok := ep.Options.(*option.WireGuardEndpointOptions); ok && wg.System {
+				return nil, newConfigError("wireguard endpoint \"system\": true is not supported; use userspace wireguard only")
+			}
+			cfg.Endpoints = append(cfg.Endpoints, ep)
+			cfg.rawEndpoints = append(cfg.rawEndpoints, raw)
+		}
+	}
+	if v, ok := obj.get("dns"); ok {
+		raw, err := rawOf(v)
+		if err != nil {
+			return nil, err
+		}
+		dns, err := parseDNS(raw)
+		if err != nil {
+			return nil, err
+		}
+		cfg.DNS = dns
+		cfg.rawDNS = raw
+	}
+
+	for _, name := range profilesObj.keys {
+		if _, err := ValidateProfileName(name); err != nil {
+			return nil, err
+		}
+		entryVal := profilesObj.values[name]
+		entryObj, ok := entryVal.(*orderedObject)
+		if !ok {
+			return nil, newConfigErrorf("profile %q must be an object", name)
+		}
+		raw, err := rawOf(entryVal)
+		if err != nil {
+			return nil, err
+		}
+		p, err := parseProfileEntry(name, entryObj, baseDir)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Profiles[name] = p
+		cfg.rawProfiles[name] = raw
+	}
+
+	if err := validateTagGraph(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateWireGuardPrivateKeys(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// parseProfileEntry parses one profile entry object. The outbound object,
+// when present, is parsed through sing-box and auto-tagged
+// "profile:<name>" when its tag is absent.
+func parseProfileEntry(name string, obj *orderedObject, baseDir string) (*Profile, error) {
+	for _, k := range obj.keys {
+		if k == "cookies" || k == "cookie" {
+			return nil, newConfigErrorf("profile %q: cookies must stay in a separate cookies file, never inline in config.json", name)
+		}
+		if !profileKeys[k] {
+			return nil, newConfigErrorf("profile %q: unknown key %q", name, k)
+		}
+	}
+	paths, err := ProfilePaths(baseDir, name)
+	if err != nil {
+		return nil, err
+	}
+	p := &Profile{
+		Name:        name,
+		Dir:         paths.Dir,
+		ConfigFile:  filepath.Join(baseDir, "config.json"),
+		CookiesFile: paths.Cookies,
+		ChatFile:    paths.Chat,
+		AutoApprove: "off",
+		Fingerprint: DefaultFingerprint,
+		TLSEngine:   DefaultTLSEngine,
+		Source:      SourceSingle,
+		ConfigFound: true,
+		Outbound:    OutboundRef{Kind: OutboundDirect, Type: "direct"},
+	}
+	if v, ok := obj.get("cookies_file"); ok {
+		s, ok := v.(string)
+		if !ok {
+			return nil, newConfigErrorf("profile %q: cookies_file must be a string", name)
+		}
+		p.CookiesFile = resolveCookiesFile(baseDir, paths, s, name != DefaultProfileName)
+	}
+	if v, ok := obj.get("vm_id"); ok {
+		s, ok := v.(string)
+		if !ok {
+			return nil, newConfigErrorf("profile %q: vm_id must be a string", name)
+		}
+		p.VMID = s
+		p.vmIDPresent = true
+	}
+	if v, ok := obj.get("node_id"); ok {
+		s, ok := v.(string)
+		if !ok {
+			return nil, newConfigErrorf("profile %q: node_id must be a string", name)
+		}
+		p.NodeID = s
+		p.nodeIDPresent = true
+	}
+	if v, ok := obj.get("auto_approve"); ok {
+		s, ok := v.(string)
+		if !ok {
+			return nil, newConfigErrorf("profile %q: auto_approve must be a string", name)
+		}
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "always":
+			p.AutoApprove = "always"
+		case "off":
+			p.AutoApprove = "off"
+		default:
+			return nil, newConfigErrorf("profile %q: auto_approve must be \"always\" or \"off\"", name)
+		}
+	}
+	if v, ok := obj.get("auto_allow_once"); ok {
+		b, err := parseAutoAllowOnceValue(v)
+		if err != nil {
+			return nil, newConfigErrorf("profile %q: %v", name, err)
+		}
+		p.AutoAllowOnce = b
+	}
+	if v, ok := obj.get("subscription_action_id"); ok {
+		s, ok := v.(string)
+		if !ok {
+			return nil, newConfigErrorf("profile %q: subscription_action_id must be a string", name)
+		}
+		p.SubscriptionActionID = s
+	}
+	if v, ok := obj.get("fingerprint"); ok {
+		s, ok := v.(string)
+		if !ok {
+			return nil, newConfigErrorf("profile %q: fingerprint must be a string", name)
+		}
+		if err := validateFingerprintValue(s); err != nil {
+			return nil, newConfigErrorf("profile %q: %v", name, err)
+		}
+		p.Fingerprint = s
+		p.fingerprintPresent = true
+	}
+	if v, ok := obj.get("tls_engine"); ok {
+		s, ok := v.(string)
+		if !ok {
+			return nil, newConfigErrorf("profile %q: tls_engine must be a string", name)
+		}
+		if err := validateTLSEngineValue(s); err != nil {
+			return nil, newConfigErrorf("profile %q: %v", name, err)
+		}
+		p.TLSEngine = s
+		p.tlsEnginePresent = true
+	}
+	if v, ok := obj.get("outbound"); ok {
+		switch t := v.(type) {
+		case string:
+			if strings.TrimSpace(t) == "" {
+				return nil, newConfigErrorf("profile %q: outbound tag must not be empty", name)
+			}
+			// "direct" is the explicit direct form (CLIProxyAPI
+			// idea 3): it is always direct, never a tag reference,
+			// even if an outbound is tagged "direct". Any other
+			// string is a tag reference resolved by
+			// validateTagGraph; an invalid value is an error here,
+			// never inherited from env or any other source.
+			if t == "direct" {
+				p.Outbound = OutboundRef{Kind: OutboundDirect, Type: "direct"}
+			} else {
+				p.Outbound = OutboundRef{Kind: OutboundTag, Tag: t}
+			}
+		case *orderedObject:
+			// Auto-tag before parsing so the parsed object and the
+			// stored raw JSON agree.
+			tagged, tag, err := ensureInlineTag(t, "profile:"+name)
+			if err != nil {
+				return nil, err
+			}
+			raw := tagged
+			ob, err := parseOutbound(raw)
+			if err != nil {
+				return nil, err
+			}
+			p.Outbound = OutboundRef{Kind: OutboundInline, Tag: ob.Tag, Type: ob.Type, Raw: raw, parsed: &ob}
+			_ = tag
+		default:
+			return nil, newConfigErrorf("profile %q: outbound must be a tag string or an object", name)
+		}
+	}
+	return p, nil
+}
+
+// ensureInlineTag returns the outbound object JSON with a tag set,
+// inserting "tag" right after "type" when it was absent.
+func ensureInlineTag(obj *orderedObject, autoTag string) ([]byte, string, error) {
+	if v, ok := obj.get("tag"); ok {
+		s, ok := v.(string)
+		if !ok {
+			return nil, "", newConfigError("outbound tag must be a string")
+		}
+		if strings.TrimSpace(s) == "" {
+			return nil, "", newConfigError("outbound tag must not be empty")
+		}
+		raw, err := rawOf(obj)
+		return raw, s, err
+	}
+	out := newOrderedObject()
+	inserted := false
+	for _, k := range obj.keys {
+		out.set(k, obj.values[k])
+		if k == "type" && !inserted {
+			out.set("tag", autoTag)
+			inserted = true
+		}
+	}
+	if !inserted {
+		// No "type" key (parse will reject it); put the tag first.
+		withTag := newOrderedObject()
+		withTag.set("tag", autoTag)
+		for _, k := range obj.keys {
+			withTag.set(k, obj.values[k])
+		}
+		out = withTag
+	}
+	raw, err := rawOf(out)
+	return raw, autoTag, err
+}
+
+// parseAutoAllowOnceValue accepts a bool or an on/off word, mirroring
+// Python's auto_allow_once_setting config handling.
+func parseAutoAllowOnceValue(v any) (bool, error) {
+	if b, ok := v.(bool); ok {
+		return b, nil
+	}
+	if s, ok := v.(string); ok {
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "on", "1", "true", "yes", "always":
+			return true, nil
+		case "off", "0", "false", "no", "never", "":
+			return false, nil
+		}
+		return false, fmt.Errorf("auto_allow_once must be a boolean or an on/off word")
+	}
+	return false, fmt.Errorf("auto_allow_once must be a boolean or an on/off word")
+}
+
+// validateTagGraph enforces one tag namespace across outbounds,
+// endpoints, and inline profile outbounds; resolves tag references and
+// detour/selector references; and rejects dangling references.
+func validateTagGraph(cfg *SingleConfig) error {
+	tags := make(map[string]string) // tag -> "outbound" | "endpoint" | "inline"
+	for _, ob := range cfg.Outbounds {
+		if prev, dup := tags[ob.Tag]; dup {
+			return newConfigErrorf("duplicate outbound tag %q (already %s)", ob.Tag, prev)
+		}
+		tags[ob.Tag] = "outbound"
+	}
+	for _, ep := range cfg.Endpoints {
+		if prev, dup := tags[ep.Tag]; dup {
+			return newConfigErrorf("duplicate tag %q (already %s)", ep.Tag, prev)
+		}
+		tags[ep.Tag] = "endpoint"
+	}
+	for name, p := range cfg.Profiles {
+		if p.Outbound.Kind == OutboundInline {
+			if prev, dup := tags[p.Outbound.Tag]; dup {
+				return newConfigErrorf("duplicate tag %q for profile %q (already %s)", p.Outbound.Tag, name, prev)
+			}
+			tags[p.Outbound.Tag] = "inline"
+		}
+	}
+	require := func(tag, what string) error {
+		if _, ok := tags[tag]; !ok {
+			return newConfigErrorf("dangling reference: %s %q does not exist", what, tag)
+		}
+		return nil
+	}
+	for name, p := range cfg.Profiles {
+		if p.Outbound.Kind == OutboundTag {
+			from, ok := tags[p.Outbound.Tag]
+			if !ok {
+				return newConfigErrorf("profile %q: outbound tag %q does not exist", name, p.Outbound.Tag)
+			}
+			p.Outbound.From = from
+			// Resolve the referenced type.
+			for _, ob := range cfg.Outbounds {
+				if ob.Tag == p.Outbound.Tag {
+					p.Outbound.Type = ob.Type
+				}
+			}
+			for _, ep := range cfg.Endpoints {
+				if ep.Tag == p.Outbound.Tag {
+					p.Outbound.Type = ep.Type
+				}
+			}
+		}
+	}
+	for _, ob := range cfg.Outbounds {
+		if d := detourOf(ob.Options); d != "" {
+			if err := require(d, "detour"); err != nil {
+				return newConfigErrorf("outbound %q: %v", ob.Tag, err)
+			}
+		}
+		for _, ref := range referencedTags(ob) {
+			if err := require(ref, "outbound"); err != nil {
+				return newConfigErrorf("outbound %q: %v", ob.Tag, err)
+			}
+		}
+	}
+	for _, ep := range cfg.Endpoints {
+		if d := detourOf(ep.Options); d != "" {
+			if err := require(d, "detour"); err != nil {
+				return newConfigErrorf("endpoint %q: %v", ep.Tag, err)
+			}
+		}
+	}
+	if cfg.DNS != nil {
+		serverTags := make(map[string]bool)
+		for _, srv := range cfg.DNS.Servers {
+			serverTags[srv.Tag] = true
+			if d := detourOf(srv.Options); d != "" {
+				if err := require(d, "detour"); err != nil {
+					return newConfigErrorf("dns server %q: %v", srv.Tag, err)
+				}
+			}
+		}
+		if cfg.DNS.Final != "" && !serverTags[cfg.DNS.Final] {
+			return newConfigErrorf("dns final %q does not match any dns server tag", cfg.DNS.Final)
+		}
+	}
+	return nil
+}
+
+// resolveCookiesFile resolves a cookies_file value: relative paths
+// resolve under baseDir (delta rule); a named profile whose value points
+// inside the base dir but at another profile's file is coerced to its
+// own cookies file (cli.py:151-188). An empty value means the default.
+func resolveCookiesFile(baseDir string, paths Paths, value string, named bool) string {
+	if strings.TrimSpace(value) == "" {
+		return paths.Cookies
+	}
+	resolved := value
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(baseDir, resolved)
+	}
+	resolved = filepath.Clean(resolved)
+	if named && resolved != paths.Cookies && isInsideDir(resolved, baseDir) {
+		return paths.Cookies
+	}
+	return resolved
+}
+
+func isInsideDir(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// LoadSingleConfig loads the single-file config if baseDir/config.json
+// exists and carries the "profiles" marker. It returns found=false when
+// the file is absent or is a legacy flat config. An unparseable single
+// file is an error, never a silent fallback.
+func LoadSingleConfig(baseDir string) (*SingleConfig, bool, error) {
+	path := filepath.Join(baseDir, "config.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, newConfigErrorf("read config: %v", err)
+	}
+	marker, err := HasProfilesMarker(data)
+	if err != nil {
+		return nil, false, err
+	}
+	if !marker {
+		return nil, false, nil
+	}
+	cfg, err := ParseSingleConfig(data, baseDir)
+	if err != nil {
+		return nil, false, err
+	}
+	return cfg, true, nil
+}
+
+// legacySettings is the flat per-profile config shape from cli.py.
+// fingerprint/tls_engine are validated strictly in BOTH strict and
+// non-strict modes (unlike the other settings, whose wrong-typed
+// values are coerced when strict is false): an invalid recorded
+// identity value is never silently reinterpreted.
+type legacySettings struct {
+	cookiesFile          string
+	cookiesFilePresent   bool
+	vmID                 string
+	vmIDPresent          bool
+	nodeID               string
+	nodeIDPresent        bool
+	autoApprove          string
+	autoAllowOnce        bool
+	subscriptionActionID string
+	fingerprint          string
+	fingerprintPresent   bool
+	tlsEngine            string
+	tlsEnginePresent     bool
+}
+
+// parseLegacyConfig parses a flat legacy config.json. When strict is
+// true, wrong-typed settings are errors (used by Migrate, which must
+// not silently reinterpret a corrupt file); when false, values are
+// coerced the way Python's load_config effectively treats them.
+func parseLegacyConfig(data []byte, strict bool) (*legacySettings, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, newConfigErrorf("parse legacy config: %v", err)
+	}
+	if _, ok := raw["profiles"]; ok {
+		return nil, newConfigError("\"profiles\" key does not belong in a legacy per-profile config")
+	}
+	s := &legacySettings{autoApprove: "off"}
+	getString := func(key string) (string, bool, error) {
+		v, ok := raw[key]
+		if !ok {
+			return "", false, nil
+		}
+		var str string
+		if err := json.Unmarshal(v, &str); err != nil {
+			if strict {
+				return "", false, newConfigErrorf("%s must be a string", key)
+			}
+			return "", false, nil
+		}
+		return str, true, nil
+	}
+	var err error
+	if s.cookiesFile, s.cookiesFilePresent, err = getString("cookies_file"); err != nil {
+		return nil, err
+	}
+	if s.vmID, s.vmIDPresent, err = getString("vm_id"); err != nil {
+		return nil, err
+	}
+	if s.nodeID, s.nodeIDPresent, err = getString("node_id"); err != nil {
+		return nil, err
+	}
+	if s.subscriptionActionID, _, err = getString("subscription_action_id"); err != nil {
+		return nil, err
+	}
+	if v, ok := raw["fingerprint"]; ok {
+		var str string
+		if err := json.Unmarshal(v, &str); err != nil {
+			return nil, newConfigError("fingerprint must be a string")
+		}
+		if err := validateFingerprintValue(str); err != nil {
+			return nil, newConfigError(err.Error())
+		}
+		s.fingerprint, s.fingerprintPresent = str, true
+	}
+	if v, ok := raw["tls_engine"]; ok {
+		var str string
+		if err := json.Unmarshal(v, &str); err != nil {
+			return nil, newConfigError("tls_engine must be a string")
+		}
+		if err := validateTLSEngineValue(str); err != nil {
+			return nil, newConfigError(err.Error())
+		}
+		s.tlsEngine, s.tlsEnginePresent = str, true
+	}
+	if v, ok := raw["auto_approve"]; ok {
+		var str string
+		if err := json.Unmarshal(v, &str); err == nil {
+			switch strings.ToLower(strings.TrimSpace(str)) {
+			case "always":
+				s.autoApprove = "always"
+			default:
+				s.autoApprove = "off"
+			}
+		} else if strict {
+			return nil, newConfigError("auto_approve must be a string")
+		} else {
+			// Python: str(value) compared to "always"; a non-string
+			// never equals it.
+			s.autoApprove = "off"
+		}
+	}
+	if v, ok := raw["auto_allow_once"]; ok {
+		var b bool
+		if err := json.Unmarshal(v, &b); err == nil {
+			s.autoAllowOnce = b
+		} else {
+			var str string
+			if err := json.Unmarshal(v, &str); err == nil {
+				parsed, perr := parseAutoAllowOnceValue(str)
+				if perr != nil {
+					if strict {
+						return nil, newConfigError("auto_allow_once must be a boolean or an on/off word")
+					}
+					s.autoAllowOnce = false
+				} else {
+					s.autoAllowOnce = parsed
+				}
+			} else if strict {
+				return nil, newConfigError("auto_allow_once must be a boolean or an on/off word")
+			}
+		}
+	}
+	return s, nil
+}
+
+// applyLegacy builds a Profile from legacy settings for the given paths.
+func applyLegacy(name string, paths Paths, s *legacySettings, baseDir string) *Profile {
+	p := &Profile{
+		Name:                 name,
+		Dir:                  paths.Dir,
+		ConfigFile:           paths.Config,
+		CookiesFile:          paths.Cookies,
+		ChatFile:             paths.Chat,
+		AutoApprove:          s.autoApprove,
+		AutoAllowOnce:        s.autoAllowOnce,
+		SubscriptionActionID: s.subscriptionActionID,
+		Fingerprint:          DefaultFingerprint,
+		TLSEngine:            DefaultTLSEngine,
+		Source:               SourceLegacy,
+		ConfigFound:          true,
+		Outbound:             OutboundRef{Kind: OutboundDirect, Type: "direct"},
+	}
+	if s.cookiesFilePresent {
+		p.CookiesFile = resolveCookiesFile(baseDir, paths, s.cookiesFile, name != DefaultProfileName)
+	}
+	if s.vmIDPresent {
+		p.VMID = s.vmID
+		p.vmIDPresent = true
+	}
+	if s.nodeIDPresent {
+		p.NodeID = s.nodeID
+		p.nodeIDPresent = true
+	}
+	if s.fingerprintPresent {
+		p.Fingerprint = s.fingerprint
+		p.fingerprintPresent = true
+	}
+	if s.tlsEnginePresent {
+		p.TLSEngine = s.tlsEngine
+		p.tlsEnginePresent = true
+	}
+	return p
+}
+
+// applyEnvFill fills vm_id/node_id from the environment only when the
+// key was absent from the config file (cli.py:151-188). It never
+// overrides a present key, and never writes anything.
+func applyEnvFill(p *Profile, getenv func(string) (string, bool)) {
+	if getenv == nil {
+		return
+	}
+	if !p.vmIDPresent {
+		if v, ok := getenv("MUSE_VM_ID"); ok && v != "" {
+			p.VMID = v
+		}
+	}
+	if !p.nodeIDPresent {
+		if v, ok := getenv("MUSE_NODE_ID"); ok && v != "" {
+			p.NodeID = v
+		}
+	}
+}
+
+// LoadProfile loads one profile's settings. It is strictly read-only:
+// it creates no files and never generates a node_id (see the package
+// doc). Precedence: a single-file entry wins wholly over the legacy
+// file (never per-key merge); the legacy file is a fallback only for
+// profiles absent from the single file. An unparseable single file is
+// an error with no silent fallback.
+func LoadProfile(baseDir, name string, getenv func(string) (string, bool)) (*Profile, error) {
+	paths, err := ProfilePaths(baseDir, name)
+	if err != nil {
+		return nil, err
+	}
+	single, found, err := LoadSingleConfig(baseDir)
+	if err != nil {
+		return nil, err
+	}
+	var p *Profile
+	if found {
+		if entry, ok := single.Profiles[name]; ok {
+			p = entry.clone()
+		}
+	}
+	if p == nil {
+		// The base config.json is the single file when one was found;
+		// the default profile has no separate legacy file in that case.
+		if !(found && name == DefaultProfileName) {
+			data, rerr := os.ReadFile(paths.Config)
+			if rerr == nil {
+				s, perr := parseLegacyConfig(data, false)
+				if perr != nil {
+					return nil, perr
+				}
+				p = applyLegacy(name, paths, s, baseDir)
+			} else if !os.IsNotExist(rerr) {
+				return nil, newConfigErrorf("read config: %v", rerr)
+			}
+		}
+	}
+	if p == nil {
+		p = &Profile{
+			Name:        name,
+			Dir:         paths.Dir,
+			ConfigFile:  paths.Config,
+			CookiesFile: paths.Cookies,
+			ChatFile:    paths.Chat,
+			AutoApprove: "off",
+			Fingerprint: DefaultFingerprint,
+			TLSEngine:   DefaultTLSEngine,
+			Source:      SourceNone,
+			Outbound:    OutboundRef{Kind: OutboundDirect, Type: "direct"},
+		}
+	}
+	if st, serr := os.Stat(paths.Dir); serr == nil && st.IsDir() {
+		p.Exists = true
+	}
+	applyEnvFill(p, getenv)
+	return p, nil
+}
+
+// LoadProfileWithEnv is LoadProfile using the process environment.
+func LoadProfileWithEnv(baseDir, name string) (*Profile, error) {
+	return LoadProfile(baseDir, name, os.LookupEnv)
+}
+
+// ResolveActiveProfile resolves the active profile: --profile flag >
+// MUSE_CLI_PROFILE > default_profile (single file) > "default". A
+// default_profile naming a profile that exists nowhere is an error; an
+// explicit flag or env name bypasses default_profile entirely.
+func ResolveActiveProfile(baseDir string, flag *string, getenv func(string) (string, bool)) (*Profile, error) {
+	if flag != nil {
+		name, err := ResolveProfileName(flag, getenv)
+		if err != nil {
+			return nil, err
+		}
+		return LoadProfile(baseDir, name, getenv)
+	}
+	if getenv != nil {
+		if env, ok := getenv(ProfileEnv); ok && strings.TrimSpace(env) != "" {
+			name, err := ValidateProfileName(strings.TrimSpace(env))
+			if err != nil {
+				return nil, err
+			}
+			return LoadProfile(baseDir, name, getenv)
+		}
+	}
+	single, found, err := LoadSingleConfig(baseDir)
+	if err != nil {
+		return nil, err
+	}
+	if found && single.DefaultProfile != "" {
+		name := single.DefaultProfile
+		if !profileExists(baseDir, name, single) {
+			return nil, newConfigErrorf("default_profile %q does not exist", name)
+		}
+		return LoadProfile(baseDir, name, getenv)
+	}
+	return LoadProfile(baseDir, DefaultProfileName, getenv)
+}
+
+func profileExists(baseDir, name string, single *SingleConfig) bool {
+	if single != nil {
+		if _, ok := single.Profiles[name]; ok {
+			return true
+		}
+	}
+	paths, err := ProfilePaths(baseDir, name)
+	if err != nil {
+		return false
+	}
+	if _, err := os.Stat(paths.Config); err == nil {
+		return true
+	}
+	if st, err := os.Stat(paths.Dir); err == nil && st.IsDir() {
+		return true
+	}
+	return false
+}
+
+// buildSingleFileOrdered renders a SingleConfig as an ordered JSON
+// value with keys in the delta order: default_profile, profiles
+// (sorted), outbounds, endpoints, dns.
+func buildSingleFileOrdered(cfg *SingleConfig) (*orderedObject, error) {
+	root := newOrderedObject()
+	if cfg.DefaultProfile != "" {
+		root.set("default_profile", cfg.DefaultProfile)
+	}
+	profilesObj := newOrderedObject()
+	for _, name := range cfg.ProfileNames() {
+		p := cfg.Profiles[name]
+		entry, err := buildProfileEntry(p)
+		if err != nil {
+			return nil, err
+		}
+		profilesObj.set(name, entry)
+	}
+	root.set("profiles", profilesObj)
+	if len(cfg.rawOutbounds) > 0 {
+		arr, err := decodeRawList(cfg.rawOutbounds)
+		if err != nil {
+			return nil, err
+		}
+		root.set("outbounds", arr)
+	} else if len(cfg.Outbounds) > 0 {
+		arr := make([]any, 0, len(cfg.Outbounds))
+		for i := range cfg.Outbounds {
+			raw, err := marshalSing(&cfg.Outbounds[i])
+			if err != nil {
+				return nil, err
+			}
+			v, err := decodeOrderedJSON(raw)
+			if err != nil {
+				return nil, err
+			}
+			arr = append(arr, v)
+		}
+		root.set("outbounds", arr)
+	}
+	if len(cfg.rawEndpoints) > 0 {
+		arr, err := decodeRawList(cfg.rawEndpoints)
+		if err != nil {
+			return nil, err
+		}
+		root.set("endpoints", arr)
+	} else if len(cfg.Endpoints) > 0 {
+		arr := make([]any, 0, len(cfg.Endpoints))
+		for i := range cfg.Endpoints {
+			raw, err := marshalSing(&cfg.Endpoints[i])
+			if err != nil {
+				return nil, err
+			}
+			v, err := decodeOrderedJSON(raw)
+			if err != nil {
+				return nil, err
+			}
+			arr = append(arr, v)
+		}
+		root.set("endpoints", arr)
+	}
+	if len(cfg.rawDNS) > 0 {
+		v, err := decodeOrderedJSON(cfg.rawDNS)
+		if err != nil {
+			return nil, err
+		}
+		root.set("dns", v)
+	} else if cfg.DNS != nil {
+		raw, err := marshalSing(cfg.DNS)
+		if err != nil {
+			return nil, err
+		}
+		v, err := decodeOrderedJSON(raw)
+		if err != nil {
+			return nil, err
+		}
+		root.set("dns", v)
+	}
+	return root, nil
+}
+
+func decodeRawList(raws [][]byte) ([]any, error) {
+	arr := make([]any, 0, len(raws))
+	for _, raw := range raws {
+		v, err := decodeOrderedJSON(raw)
+		if err != nil {
+			return nil, err
+		}
+		arr = append(arr, v)
+	}
+	return arr, nil
+}
+
+// buildProfileEntry renders one profile entry: cookies_file is always
+// written (resolved), auto_approve/auto_allow_once always written,
+// optional identifiers only when non-empty, outbound as an inline
+// object, a tag string, or omitted for direct. fingerprint and
+// tls_engine are written only when the key was present in the file
+// the profile was loaded from, or when the loaded value differs
+// from the default: an absent key stays absent (its effective value
+// is the default) so a save never writes a default back into a file
+// that did not carry the key. RedactProfile injects the effective
+// values for display; see redact.go.
+func buildProfileEntry(p *Profile) (*orderedObject, error) {
+	entry := newOrderedObject()
+	entry.set("cookies_file", p.CookiesFile)
+	if p.VMID != "" {
+		entry.set("vm_id", p.VMID)
+	}
+	if p.NodeID != "" {
+		entry.set("node_id", p.NodeID)
+	}
+	autoApprove := "off"
+	if strings.ToLower(strings.TrimSpace(p.AutoApprove)) == "always" {
+		autoApprove = "always"
+	}
+	entry.set("auto_approve", autoApprove)
+	entry.set("auto_allow_once", p.AutoAllowOnce)
+	if p.SubscriptionActionID != "" {
+		entry.set("subscription_action_id", p.SubscriptionActionID)
+	}
+	fp := p.Fingerprint
+	if fp == "" {
+		fp = DefaultFingerprint
+	}
+	if p.fingerprintPresent || fp != DefaultFingerprint {
+		entry.set("fingerprint", fp)
+	}
+	te := p.TLSEngine
+	if te == "" {
+		te = DefaultTLSEngine
+	}
+	if p.tlsEnginePresent || te != DefaultTLSEngine {
+		entry.set("tls_engine", te)
+	}
+	switch p.Outbound.Kind {
+	case OutboundTag:
+		if p.Outbound.Tag != "" {
+			entry.set("outbound", p.Outbound.Tag)
+		}
+	case OutboundInline:
+		raw := p.Outbound.RawJSON()
+		if len(raw) == 0 && p.Outbound.parsed != nil {
+			var err error
+			raw, err = marshalSing(p.Outbound.parsed)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if len(raw) > 0 {
+			v, err := decodeOrderedJSON(raw)
+			if err != nil {
+				return nil, err
+			}
+			entry.set("outbound", v)
+		}
+	case OutboundDirect:
+		// No outbound key means direct; omit.
+	}
+	return entry, nil
+}
+
+// SaveSingleConfig writes cfg to baseDir/config.json atomically
+// (temp file in the same directory + rename), mode 0600, JSON indent 2.
+// It creates the base directory if needed. It takes the config lock
+// (see guard.go) but does NOT check the file's hash: callers that
+// loaded the config first must use ConfigState.Save or
+// UpdateSingleConfig instead, so a concurrent change is refused
+// rather than overwritten.
+func SaveSingleConfig(baseDir string, cfg *SingleConfig) error {
+	if cfg == nil {
+		return newConfigError("cannot save nil config")
+	}
+	release, err := lockConfigDir(baseDir)
+	if err != nil {
+		return err
+	}
+	defer release()
+	_, err = writeSingleConfigLocked(baseDir, cfg)
+	return err
+}
+
+// writeTempFile writes data to a new temp file in dir (mode perm, set
+// before writing) and syncs it. The caller owns the returned name and
+// must remove or rename it.
+func writeTempFile(dir string, data []byte, perm os.FileMode) (string, error) {
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return "", err
+	}
+	tmpName := tmp.Name()
+	fail := func(err error) (string, error) {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return "", err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		return fail(err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return "", err
+	}
+	return tmpName, nil
+}
+
+// writeFileAtomic writes data to a temp file in the same directory
+// (mode perm, set before writing) and renames it over path.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmpName, err := writeTempFile(dir, data, perm)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmpName) }()
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	return nil
+}
