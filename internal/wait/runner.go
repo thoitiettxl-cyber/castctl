@@ -742,8 +742,10 @@ func (r *Runner) settlePending(ctx context.Context, pending string) error {
 	// endgame's final read follows at once, bounded by its own
 	// floor. A proof that starts just before the deadline may
 	// still overshoot it by at most the historyCtx floor per
-	// window read (100ms, ≤3 reads per proof).
-	if !r.clock.Now().Before(r.deadline) {
+	// window read (100ms, ≤3 reads per proof). A zero deadline
+	// means Run never set one (a direct call in tests): the
+	// guard does not fire.
+	if !r.deadline.IsZero() && !r.clock.Now().Before(r.deadline) {
 		return nil
 	}
 	// Interval gate (loop-2 F8): at most one proof per
@@ -765,8 +767,16 @@ func (r *Runner) settlePending(ctx context.Context, pending string) error {
 		return nil
 	}
 	// Stamp before reading: this proof counts against the
-	// cadence whether it succeeds or fails.
+	// cadence whether it succeeds or fails. A proof cut short
+	// by context death does not consume cadence: the stamp is
+	// cleared on any return with a dead context, so a later
+	// live attempt is not gated by a dead one.
 	r.lastSettleProof = r.clock.Now()
+	defer func() {
+		if ctx.Err() != nil {
+			r.lastSettleProof = time.Time{}
+		}
+	}()
 	hctx, cancel := r.historyCtx(ctx, 100*time.Millisecond, nil)
 	defer cancel()
 	if failed[pending] {
@@ -825,8 +835,9 @@ func (r *Runner) settlePending(ctx context.Context, pending string) error {
 func (r *Runner) checkState(ctx context.Context) error {
 	// No state check starts past the deadline (loop-2 F9):
 	// noteFailure reaches here unguarded, so the guard lives
-	// here, not at the call sites.
-	if !r.clock.Now().Before(r.deadline) {
+	// here, not at the call sites. A zero deadline means Run
+	// never set one (a direct call in tests): no guard.
+	if !r.deadline.IsZero() && !r.clock.Now().Before(r.deadline) {
 		return nil
 	}
 	budget := r.cfg.StateCheckBudget

@@ -1324,8 +1324,8 @@ func TestRunnerFinishFinalGuardReturnsCtxErr(t *testing.T) {
 			if fired != 1 {
 				t.Errorf("hook fired %d times, want exactly 1", fired)
 			}
-			if calls != 1 {
-				t.Errorf("history reads = %d, want exactly 1 (final read; no lag read)", calls)
+			if calls != 2 {
+				t.Errorf("history reads = %d, want exactly 2 (final read + newest-user re-check; no lag read)", calls)
 			}
 			if tc.cancel {
 				if !errors.Is(err, context.Canceled) {

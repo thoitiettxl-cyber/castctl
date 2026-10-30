@@ -74,8 +74,8 @@ func TestWaitRedesignT2ExplicitBoundaryNeverRatchets(t *testing.T) {
 		if len(res.Replies) != 1 || res.Replies[0].Seq != 11 {
 			t.Errorf("replies = %+v, want [11] only", res.Replies)
 		}
-		if hist.calls != 1 {
-			t.Errorf("history calls = %d, want 1 (final read only, no derivation)", hist.calls)
+		if hist.calls != 2 {
+			t.Errorf("history calls = %d, want 2 (final read + newest-user re-check, no derivation)", hist.calls)
 		}
 	})
 }
