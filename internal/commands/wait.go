@@ -669,7 +669,12 @@ func widgetOptionsStr(options any) string {
 }
 
 // printWaitTail prints the question / approval / summary tail shared
-// by `wait` text mode and the REPL display.
+// by `wait` text mode and the REPL display. The result note, when
+// present, is printed to stderr in both modes: it is the only
+// channel (besides --json) by which window exhaustion and the
+// endgame reconciliation reach the user. Every note value is a
+// fixed template plus at most integers (see finish and cmdSend),
+// never peer text, so the structural stderr rule is preserved.
 func printWaitTail(w io.Writer, errW io.Writer, res *wait.Result, summary bool) {
 	if res.Outcome == "needs_input" && res.Question != "" {
 		fmt.Fprintf(w, "NEEDS INPUT (%s): %s\n", res.NeedsInputReason, res.Question)
@@ -679,6 +684,9 @@ func printWaitTail(w io.Writer, errW io.Writer, res *wait.Result, summary bool) 
 		if derefStr(a.Why) != "" {
 			fmt.Fprintf(w, "  why: %s\n", derefStr(a.Why))
 		}
+	}
+	if res.Note != "" {
+		fmt.Fprintf(errW, "note: %s\n", res.Note)
 	}
 	if summary {
 		fmt.Fprintf(errW, "-- %s (status=%s)\n", res.Outcome, res.Status)
@@ -817,15 +825,37 @@ func deliverSend(ctx context.Context, gw conn.Gateway, prof *profile.Profile, te
 	// would let the poll match an older turn's identical text
 	// and return its seq as this turn's boundary, resurfacing
 	// the previous turn's replies as this turn's (the
-	// reply-reuse bug). The read itself is already boundedly
-	// retried by the connector (chat.history is a safe GET);
-	// no second attempt is made here, because the message has
-	// not been sent yet and failing is safe.
+	// reply-reuse bug). No retry is assumed here: this path
+	// calls the leased gateway directly, and the connector's
+	// bounded retry (SharedConn retryCall) covers only
+	// connection-down/connection-error for safe reads, never a
+	// GatewayError/TimeoutError — so a failed read fails the
+	// send, which is safe because the message has not been
+	// sent yet.
+	//
+	// Two windows, not one (loop-2 F10): a single limit=1 read
+	// cannot prove the newest seq, because no statement in
+	// this tree guarantees newest-first or newest-N ordering
+	// for chat.history windows. A second, wider (limit=20)
+	// read cross-checks it, and the baseline is the max seq
+	// seen across both. Residual, carried: if both windows
+	// return stale or empty data for events that exist, the
+	// baseline can still be stale — no client-side read can
+	// prove freshness against a history endpoint that hides
+	// existing events — and an interleaved identical message
+	// from another client can still win the first-match race.
 	events, err := callHistoryEvents(ctx, gw, 1, thread)
 	if err != nil {
 		return nil, 0, err
 	}
 	baseline := maxSeq(events)
+	confirm, err := callHistoryEvents(ctx, gw, 20, thread)
+	if err != nil {
+		return nil, 0, err
+	}
+	if m := maxSeq(confirm); m > baseline {
+		baseline = m
+	}
 	params := map[string]any{
 		"items":        []any{map[string]any{"type": "text", "text": text}},
 		"node_id":      prof.NodeID,
@@ -919,6 +949,37 @@ type sendNoWaitJSON struct {
 	Note string `json:"note,omitempty"`
 }
 
+// buildSendWaitJSON copies a wait result into the send result
+// shape. The wait result's note is copied, except that the
+// timeout note keeps precedence (loop-2 safety D-1): a timed-out
+// send reports the re-run hint, not the wait's note.
+func buildSendWaitJSON(base sendBaseJSON, waitJSON waitResultJSON, res *wait.Result, waitSeconds int64, userSeq int64) sendWaitJSON {
+	result := sendWaitJSON{sendBaseJSON: base}
+	result.Outcome = waitJSON.Outcome
+	result.Status = waitJSON.Status
+	result.FinalText = waitJSON.FinalText
+	result.Replies = waitJSON.Replies
+	result.Approvals = waitJSON.Approvals
+	result.AutoApproved = waitJSON.AutoApproved
+	result.AutoApproveErrors = waitJSON.AutoApproveErrors
+	result.Widgets = waitJSON.Widgets
+	result.NeedsInputReason = waitJSON.NeedsInputReason
+	result.Question = waitJSON.Question
+	if len(res.Replies) > 0 {
+		last := res.Replies[len(res.Replies)-1]
+		result.Reply = &sendReplyJSON{
+			Seq: last.Seq, Role: "message.assistant",
+			MessageID: strPtrOrNil(last.MessageID), Text: last.Text,
+		}
+	}
+	if res.Outcome == "timeout" {
+		result.Note = fmt.Sprintf("turn not finished within %ds; run `castctl wait --after-seq %d`", waitSeconds, userSeq)
+	} else {
+		result.Note = waitJSON.Note
+	}
+	return result
+}
+
 func cmdSend(ctx context.Context, env *Env, g *globalOpts, args []string) error {
 	p, err := parseOrHelp(commandTable["send"], args, env)
 	if err != nil {
@@ -978,31 +1039,11 @@ func cmdSend(ctx context.Context, env *Env, g *globalOpts, args []string) error 
 			return err
 		}
 		waitJSON := toWaitResultJSON(res, enabled)
-		result := sendWaitJSON{sendBaseJSON: base}
-		result.Outcome = waitJSON.Outcome
-		result.Status = waitJSON.Status
-		result.FinalText = waitJSON.FinalText
-		result.Replies = waitJSON.Replies
-		result.Approvals = waitJSON.Approvals
-		result.AutoApproved = waitJSON.AutoApproved
-		result.AutoApproveErrors = waitJSON.AutoApproveErrors
-		result.Widgets = waitJSON.Widgets
-		result.NeedsInputReason = waitJSON.NeedsInputReason
-		result.Question = waitJSON.Question
-		if len(res.Replies) > 0 {
-			last := res.Replies[len(res.Replies)-1]
-			result.Reply = &sendReplyJSON{
-				Seq: last.Seq, Role: "message.assistant",
-				MessageID: strPtrOrNil(last.MessageID), Text: last.Text,
-			}
-		}
+		result := buildSendWaitJSON(base, waitJSON, res, waitSeconds, *userSeq)
 		if p.str("download") != "" && len(res.Replies) > 0 {
 			if err := sendDownloadStep(ctx, rt, thread, *userSeq, p.str("download"), &result); err != nil {
 				return err
 			}
-		}
-		if res.Outcome == "timeout" {
-			result.Note = fmt.Sprintf("turn not finished within %ds; run `castctl wait --after-seq %d`", waitSeconds, *userSeq)
 		}
 		if p.bool("text") {
 			fmt.Fprintf(env.stdout(), "user_seq=%d\n", *userSeq)

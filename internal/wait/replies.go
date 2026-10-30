@@ -313,16 +313,27 @@ func EventHasMedia(ev Event) bool {
 // UserAck finds the first (lowest-seq) message.user event above
 // baseline whose text contains, or is contained in, the sent
 // text, and returns its seq. A nil text matches the first user
-// event above the baseline. No status or self-reference check is
-// applied here.
+// event above the baseline. An empty or whitespace-only text
+// matches nothing (loop-2 F10/RT13c): an empty needle must not
+// ack any event. No status or self-reference check is applied
+// here.
 //
 // The substring match is trusted ONLY above a proved baseline:
 // the caller must have read the baseline from history
 // successfully before sending (deliverSend fails the send when
 // that read fails, never falling back to 0). Above a proved
 // baseline the first match is the just-sent message's own seq;
-// above a stale 0 it could be an older turn's.
+// above a stale 0 it could be an older turn's. The baseline
+// itself is two windows, not one (see deliverSend): no
+// ordering contract for chat.history windows is stated
+// anywhere in this tree, so a single limit=1 read cannot prove
+// the newest seq, and an interleaved identical message from
+// another client can still win the first-match race (carried
+// residual, RT13d).
 func UserAck(events []any, baseline int64, text *string) (int64, bool) {
+	if text != nil && strings.TrimSpace(*text) == "" {
+		return 0, false
+	}
 	sorted := append([]any(nil), events...)
 	sort.SliceStable(sorted, func(i, j int) bool {
 		return seqOf(eventMap(sorted[i])) < seqOf(eventMap(sorted[j]))

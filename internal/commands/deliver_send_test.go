@@ -15,14 +15,16 @@ import (
 )
 
 // deliverFakeGateway scripts chat.history + chat.stream for
-// deliverSend: the first history call is the pre-send baseline
-// read (baselineEvents, or baselineErr); later calls are ack
-// polls (pollEvents). It embeds conn.Gateway so only the two
-// methods deliverSend uses need bodies.
+// deliverSend, routed by LIMIT: limit=1 is the first baseline
+// read (baselineEvents, or baselineErr), limit=20 the
+// confirming read (confirmEvents), any other limit an ack poll
+// (pollEvents). It embeds conn.Gateway so only the two methods
+// deliverSend uses need bodies.
 type deliverFakeGateway struct {
 	conn.Gateway
 	baselineErr    error
 	baselineEvents []any
+	confirmEvents  []any
 	pollEvents     []any
 	historyCalls   int
 	openStreams    int
@@ -33,13 +35,21 @@ func (f *deliverFakeGateway) CallJSON(ctx context.Context, method string, opts c
 		return nil, errors.New("unexpected method " + method)
 	}
 	f.historyCalls++
-	if f.historyCalls == 1 {
+	limit := 0
+	if body, ok := opts.Body.(map[string]any); ok {
+		limit, _ = body["limit"].(int)
+	}
+	switch limit {
+	case 1:
 		if f.baselineErr != nil {
 			return nil, f.baselineErr
 		}
 		return map[string]any{"chat_events": f.baselineEvents}, nil
+	case 20:
+		return map[string]any{"chat_events": f.confirmEvents}, nil
+	default:
+		return map[string]any{"chat_events": f.pollEvents}, nil
 	}
-	return map[string]any{"chat_events": f.pollEvents}, nil
 }
 
 func (f *deliverFakeGateway) OpenStream(ctx context.Context, method string, opts conn.OpenStreamOptions) (int64, error) {
@@ -85,6 +95,7 @@ func TestDeliverSendBaselineReadFailureFailsBeforeSend(t *testing.T) {
 func TestDeliverSendProvedBaselineAcksOwnMessage(t *testing.T) {
 	gw := &deliverFakeGateway{
 		baselineEvents: []any{userHistoryEvent(9, "earlier")},
+		confirmEvents:  []any{userHistoryEvent(9, "earlier")},
 		pollEvents:     []any{userHistoryEvent(9, "earlier"), userHistoryEvent(10, "hello")},
 	}
 	prof := &profile.Profile{NodeID: "node-1"}
