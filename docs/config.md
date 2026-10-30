@@ -138,9 +138,11 @@ knows the wire length: a known 0-byte body renders
 `body_length` field at all, never the length of the summary
 text; the subscription server-action call's 401/403 branch is
 an unknown-length case — it reads the body, capped at 4 MiB,
-before checking the status, then discards it and returns length
-0 with the length marked unknown, so no `body_length` is
-reported from that branch), content-type (media type, parameters dropped), and specific known-safe fields
+before checking the status, then discards it and returns 0
+with the length marked unknown (the read length is discarded);
+no summary is rendered from this branch at all — the error is
+a status-only AuthError, returned immediately — so no
+`body_length` is reported from that branch), content-type (media type, parameters dropped), and specific known-safe fields
 parsed by key from known Muse response schemas — the `error`
 field of the `{"ok":false,"error":...}` / `{"success":...,
 "error":...}` envelopes, the `status` field of the
@@ -163,7 +165,9 @@ title, options, id, decision, kind, and scope slots emit no
 peer free text at all. An approval title renders as `title_length` only
 (the title's BYTE length, the same byte convention as
 `body_length`); offered decision options render as
-`option_count` only (the number of options); an approval id
+`option_count` only (the number of options), and only where a
+skip error is rendered — the auto-approved lines carry no
+options slot, only `title_length`; an approval id
 renders only if it is 1–64 runes of `[A-Za-z0-9_-]`,
 else `[omitted]`; a decision renders only if it is one of
 `allow_always`, `allow_once`, `allow_session`,
@@ -176,12 +180,16 @@ an `underlying` slot for the decide error, and that slot is NOT
 structural. For a skip error (no forever option offered) it
 renders structurally as `no forever option option_count=N`; for
 any other decide error it renders via the settled `SummarizeErr`
-rule (an allowlist summary for a body-carrying error, otherwise
-the SafeString rendering of the error text). Nothing here
+rule (the first `LogSummary` in the error chain — the body
+allowlist summary for a `GatewayError`, or, for an `AuthError`
+in the chain, its own `LogSummary`, class + `message_length`
+only, not the body allowlist summary — otherwise the SafeString
+rendering of the error text). Nothing here
 implies `underlying` is structural. The
 SafeString backstop is not the control on the structural slots
 and is unchanged; on the `underlying` slot it remains the
-rendering for errors that carry no body, via `SummarizeErr`.
+rendering for errors with no `LogSummary` in the chain, via
+`SummarizeErr`.
 JSON stdout data output is unaffected: it
 still carries the full title, options, id, kind, scope,
 and decision.
@@ -193,13 +201,28 @@ with NBSP (U+00A0) -- e.g. `{"token"<NBSP>: "..."}` -- bypasses
 SafeString's quoted-key scan. (O2) Wider Unicode spaces
 (U+2009, U+3000, U+202F) between a label and its separator
 bypass the closed separator set. (O3) A `public_key` label
-separated by NBSP bypasses the listed vocabulary. (O4) An
-escaped-quote JSON pair (as `%q` produces, e.g.
-`{\"token\": \"...\"}`) spanning a literal newline or carriage
+separated by NBSP in the `=` form (`public_key<NBSP>=...`)
+bypasses the listed vocabulary: `rePublicKey` allows only
+ASCII whitespace around `=`, so the NBSP form misses it, and
+the `reKeyValue` fallback leaves a `public_key` label
+unchanged. The `:` form does not bypass: `reKeyColon`'s closed
+separator set includes NBSP, so `public_key<NBSP>: ...` is
+caught and shortened to the key prefix. (O4) An escaped-quote
+JSON pair — e.g. `{\"token\": \"...\"}` — whose quoted key or
+value string itself contains a literal newline or carriage
 return bypasses SafeString's escaped-quote scan, which fails
-on a literal newline or carriage return inside the pair while
-the plain-quote scan was fixed for newlines in loop 7 — so the
-pair is left verbatim. None of these shapes can leak through
+on a literal newline or carriage return inside a quoted
+string while the plain-quote scan tolerates a literal newline
+inside the string — so the pair is left verbatim. Separator
+newlines do not trigger this: newlines between the key and
+the colon, or between the colon and the value, are skipped
+before the colon/value scan, so a separator newline alone
+does not defeat the pair. No single `%q` rendering can
+trigger it either: `%q` escapes a literal newline to the
+two-byte sequence `\n`, which the scan consumes as an escape
+pair — O4 needs free-form text already containing literal
+escaped quotes plus a literal newline. None of these shapes
+can leak through
 the structural slots of the `approveAll` / `logAutoApproved`
 stderr lines above, because those slots emit no peer free text
 at all (only lengths, counts, gated ids, and enum members).
@@ -218,9 +241,11 @@ start/done with a per-connection ID, `tls_alpn` (negotiated
 protocol string only), `ws_handshake` (only the parsed
 handshake status: a 3-digit code as `status_code` (from a
 response) or `status_token` (from a malformed status line); a
-token-shaped but non-conforming value — ASCII letters, digits,
-`.`, `_`, `-` only — as its length only under
-`status_code_length` / `status_token_length`; no token at all
+numeric response code whose decimal length is not 3 renders
+as its length only under `status_code_length`; a malformed-
+status token that is token-shaped — ASCII letters, digits,
+`.`, `_`, `-` only — but not a 3-digit code renders as its
+length only under `status_token_length`; no token at all
 for a shape-invalid, empty, or absent token, in which case no
 event line is emitted and the failure error renders a fixed
 message), and retries (attempt counter + summarised error).
