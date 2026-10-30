@@ -31,7 +31,7 @@ func TestLoop7CallActionNon200ReturnsWireLength(t *testing.T) {
 				w.WriteHeader(tc.status)
 				_, _ = w.Write([]byte(tc.body))
 			})
-			r, n, err := callAction(context.Background(), muxClient(mux), fakeCookie, "actionid12345678901234", nil, "https://muse.ai/settings")
+			r, n, known, err := callAction(context.Background(), muxClient(mux), fakeCookie, "actionid12345678901234", nil, "https://muse.ai/settings")
 			if err != nil {
 				t.Fatalf("callAction: %v", err)
 			}
@@ -40,6 +40,9 @@ func TestLoop7CallActionNon200ReturnsWireLength(t *testing.T) {
 			}
 			if n != len(tc.body) {
 				t.Errorf("callAction length = %d, want the wire length %d", n, len(tc.body))
+			}
+			if !known {
+				t.Errorf("callAction known = false, want true: the %d-byte body was read", n)
 			}
 		})
 	}

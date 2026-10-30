@@ -44,3 +44,27 @@ func TestLoop8GatewayErrorUnknownLengthOmitsField(t *testing.T) {
 		t.Errorf("Error() = %q, LogSummary() = %q, want the renderings identical", ge.Error(), ge.LogSummary())
 	}
 }
+
+// TestLoop8GatewayErrorKnownLength renders the known flag:
+// a known length (including a known 0) appears as
+// body_length=N in both renderings, identically.
+func TestLoop8GatewayErrorKnownLength(t *testing.T) {
+	cases := []struct {
+		name   string
+		ge     *GatewayError
+		length string
+	}{
+		{"known 52", &GatewayError{Status: 500, Payload: "summary text", BodyLength: 52, BodyLengthKnown: true}, "body_length=52"},
+		{"known 0", &GatewayError{Status: 500, Payload: "summary text", BodyLength: 0, BodyLengthKnown: true}, "body_length=0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(tc.ge.Error(), tc.length) || !strings.Contains(tc.ge.LogSummary(), tc.length) {
+				t.Errorf("Error() = %q, LogSummary() = %q, want %s in both", tc.ge.Error(), tc.ge.LogSummary(), tc.length)
+			}
+			if tc.ge.Error() != tc.ge.LogSummary() {
+				t.Errorf("Error() = %q, LogSummary() = %q, want the renderings identical", tc.ge.Error(), tc.ge.LogSummary())
+			}
+		})
+	}
+}

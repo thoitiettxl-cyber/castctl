@@ -35,7 +35,7 @@ func TestLoop6SaveResourcesRowError(t *testing.T) {
 	dir := t.TempDir()
 	// (a) A GatewayError carrying body bytes in its Payload:
 	// the row renders the allowlist summary only.
-	dl := &loop6Downloader{err: &conn.GatewayError{Status: 500, Payload: "plain body words " + loop6Marker, BodyLength: 52}}
+	dl := &loop6Downloader{err: &conn.GatewayError{Status: 500, Payload: "plain body words " + loop6Marker, BodyLength: 52, BodyLengthKnown: true}}
 	rows, err := SaveResources(context.Background(), dl, []Resource{{Path: "sandbox://workspace/a.txt", Kind: "video"}}, dir, false)
 	if err != nil {
 		t.Fatal(err)

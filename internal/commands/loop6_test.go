@@ -15,18 +15,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/approvals"
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
-	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 	"github.com/thoitiettxl-cyber/castctl/internal/wait"
 )
 
@@ -111,12 +110,13 @@ func TestLoop6RedeemCommandSuccessUntouched(t *testing.T) {
 }
 
 // --- (5) logAutoApproved title gating -----------------------------------
+// Loop 8 SUPERSEDES the SafeString/64-rune-cap rendering: the
+// title renders as title_length only. The same hostile fixture
+// (labelled secret + 100-char tail) now pins the structural
+// line exactly; no title byte reaches stderr.
 
 func TestLoop6LogAutoApprovedTitle(t *testing.T) {
-	// A labelled secret early in the title (SafeString must
-	// strip the value) plus a long tail (the 64-rune cap must
-	// cut it): neither the secret nor the tail may reach stderr.
-	secret := "LOOP6SECRET9x4k2"
+	secret := loop6Marker
 	title := "token=" + secret + " " + strings.Repeat("abcdefghij", 10)
 	res := &wait.Result{
 		AutoApproved: []approvals.ApprovedRecord{
@@ -132,30 +132,20 @@ func TestLoop6LogAutoApprovedTitle(t *testing.T) {
 	if strings.Contains(out, secret) {
 		t.Errorf("logAutoApproved output = %q, carries the labelled secret value", out)
 	}
-	if !strings.Contains(out, "[redacted]") {
-		t.Errorf("logAutoApproved output = %q, want the SafeString redaction marker", out)
+	want := fmt.Sprintf("auto-approved A1 (allow_once): title_length=%d [shell [omitted]]\n", len(title))
+	if out != want {
+		t.Errorf("logAutoApproved output = %q, want %q", out, want)
 	}
-	// The title segment (between ": " and " [") is at most 64
-	// runes of the SafeString output.
-	line := strings.TrimRight(out, "\n")
-	seg := line[strings.Index(line, ": ")+2 : strings.LastIndex(line, " [")]
-	if utf8.RuneCountInString(seg) > 64 {
-		t.Errorf("title segment is %d runes, want at most 64: %q", utf8.RuneCountInString(seg), seg)
-	}
-	if seg != string([]rune(logging.SafeString(title))[:64]) {
-		t.Errorf("title segment = %q, want the first 64 runes of the SafeString output", seg)
-	}
-	// A plain long title is capped too, with no other change.
+	// A plain long title renders the same structural form.
 	plain := strings.Repeat("abcdefghij", 10)
 	res2 := &wait.Result{AutoApproved: []approvals.ApprovedRecord{
 		{ApprovalID: "A2", Title: plain, Kind: "shell", Scope: "test", Decision: "allow_once"},
 	}}
 	buf.Reset()
 	logAutoApproved(&buf, res2)
-	line2 := strings.TrimRight(buf.String(), "\n")
-	seg2 := line2[strings.Index(line2, ": ")+2 : strings.LastIndex(line2, " [")]
-	if utf8.RuneCountInString(seg2) != 64 {
-		t.Errorf("plain title segment is %d runes, want exactly 64: %q", utf8.RuneCountInString(seg2), seg2)
+	want2 := fmt.Sprintf("auto-approved A2 (allow_once): title_length=%d [shell [omitted]]\n", len(plain))
+	if buf.String() != want2 {
+		t.Errorf("logAutoApproved output = %q, want %q", buf.String(), want2)
 	}
 }
 

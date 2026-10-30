@@ -322,56 +322,117 @@ func executeWait(ctx context.Context, env *Env, rt *Runtime, prof *profile.Profi
 	return res, approveResolved.Enabled, nil
 }
 
-// safeField renders one unconstrained server string for a
-// single-line stderr status line (loop 7, items R1/S2):
-// SafeString FIRST (labelled secrets stripped), then
-// newlines neutralised so no field can split the line,
-// then the result capped at 64 runes. The order matters:
-// capping the raw field first could cut a secret label in
-// half and leave its value exposed past the cap, and
-// SafeString alone leaves long peer prose uncapped and
-// newlines intact. It applies to ApprovalID, Decision,
-// Kind, Scope, Title, and decision-option values alike:
-// all are unconstrained server strings (no enum validation
-// in approvals.go), so none may reach stderr ungated.
-func safeField(s string) string {
-	safe := logging.SafeString(s)
-	safe = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(safe)
-	r := []rune(safe)
-	if len(r) > 64 {
-		return string(r[:64])
+// Structural stderr rendering (loop 8, Boss ruling 2026-10-30
+// 12:21): the approveAll / logAutoApproved stderr lines emit
+// NO peer free text at all. SafeString is NOT the control
+// here — it stays untouched as a backstop elsewhere — the
+// control is structural: no title, label, or id byte is ever
+// passed to these renderings.
+//
+//   - Title: title_length only, the BYTE length of the title
+//     (len in Go bytes — the same byte convention as the
+//     allowlist body_length). No title byte of any kind is
+//     emitted, so label-fragmentation, Unicode-space, and
+//     newline shapes in a title cannot leak (loop-7 F2 and
+//     the O1–O3 backlog shapes are defeated structurally).
+//   - Option labels: option_count only, the number of
+//     offered decision options. No label byte is emitted.
+//   - ApprovalID: emitted only when it matches the strict id
+//     gate (structuralApprovalID). approvals.go treats the
+//     id as an opaque string with NO format validation, and
+//     no id format is documented anywhere in this tree —
+//     the ids in the tree's fixtures are short ASCII
+//     alphanumerics ("A1", "SKIP1", "ap1"). The gate is
+//     therefore a conservative structural bound, not a
+//     claim about the server's format: 1–64 runes of
+//     [A-Za-z0-9_-]. Anything else renders [omitted],
+//     fail-closed. JSON data output carries the full id
+//     unchanged.
+//   - Decision: emitted only when it is one of the four
+//     decisions castctl itself can send — allow_always,
+//     allow_once, allow_session, allow_today (the set
+//     approveDecision builds at wait.go, plus the
+//     Forever/Once constants in approvals.go). "deny" is a
+//     server-offered option kind, never a decision these
+//     flows send, so it renders [omitted]; options are
+//     covered by option_count. Anything else renders
+//     [omitted].
+//   - Kind: emitted only when it is one of the three
+//     permission-question kind values observed anywhere in
+//     this tree's approval fixtures — browse,
+//     network_access, shell. approvals.go enforces NO
+//     finite kind set (it copies the server string
+//     verbatim), so this allowlist is the observed set
+//     only: any other kind renders [omitted], fail-closed.
+//     JSON data output carries the full kind unchanged.
+//   - Scope: ALWAYS [omitted]. Scope is an unconstrained
+//     host/scope string (DescribeApproval takes it from
+//     the permission question's scope or the Host detail
+//     row; fixtures show "example.com", "x.com",
+//     "host.example"), so no finite enum set exists to
+//     allowlist. The allowlist is empty by evidence, not
+//     by omission. JSON data output carries it unchanged.
+//
+// The exact field names are title_length and option_count.
+// JSON stdout data output is UNCHANGED by this rule: it
+// still carries the full title, options, id, kind, scope,
+// and decision fields.
+func structuralApprovalID(id string) string {
+	n := 0
+	for _, r := range id {
+		n++
+		if n > 64 {
+			return "[omitted]"
+		}
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+			return "[omitted]"
+		}
 	}
-	return safe
+	if n == 0 {
+		return "[omitted]"
+	}
+	return id
 }
 
-// safeTitle renders a peer approval title for a stderr status
-// line (loop 6, item 5): the safeField rendering — SafeString,
-// newline-neutralised, capped at 64 runes.
-func safeTitle(title string) string {
-	return safeField(title)
+// structuralDecisions is the exact set of decisions castctl
+// can send (see the structural-rendering comment above).
+var structuralDecisions = map[string]bool{
+	"allow_always":  true,
+	"allow_once":    true,
+	"allow_session": true,
+	"allow_today":   true,
 }
 
-// safeOptions renders decision-option values for a stderr
-// status line (loop 7, item S2): each option is an
-// unconstrained server string, gated like any other field.
-// A nil slice stays nil, so %v still renders "[]".
-func safeOptions(opts []string) []string {
-	if opts == nil {
-		return nil
-	}
-	out := make([]string, len(opts))
-	for i, o := range opts {
-		out[i] = safeField(o)
-	}
-	return out
+// structuralKinds is the observed permission-question kind
+// set (see the structural-rendering comment above).
+var structuralKinds = map[string]bool{
+	"browse":         true,
+	"network_access": true,
+	"shell":          true,
 }
+
+func structuralEnum(s string, allowed map[string]bool) string {
+	if allowed[s] {
+		return s
+	}
+	return "[omitted]"
+}
+
+func structuralDecision(s string) string { return structuralEnum(s, structuralDecisions) }
+func structuralKind(s string) string     { return structuralEnum(s, structuralKinds) }
+
+// structuralScope always renders [omitted]: Scope has no
+// finite enum set (see the structural-rendering comment
+// above). The parameter is kept so call sites stay uniform.
+func structuralScope(_ string) string { return "[omitted]" }
 
 // logAutoApproved prints the auto-approve stderr lines for a Result
 // (SEAMS.md D6): one line per approved record and per error, in
 // result order. The core never logs; the caller owns stderr.
+// Every line is structural (see above): no peer free text.
 func logAutoApproved(w io.Writer, res *wait.Result) {
 	for _, rec := range res.AutoApproved {
-		fmt.Fprintf(w, "auto-approved %s (%s): %s [%s %s]\n", safeField(rec.ApprovalID), safeField(rec.Decision), safeTitle(rec.Title), safeField(rec.Kind), safeField(rec.Scope))
+		fmt.Fprintf(w, "auto-approved %s (%s): title_length=%d [%s %s]\n", structuralApprovalID(rec.ApprovalID), structuralDecision(rec.Decision), len(rec.Title), structuralKind(rec.Kind), structuralScope(rec.Scope))
 	}
 	for _, e := range res.AutoApproveErrors {
 		if e == nil {
@@ -379,14 +440,21 @@ func logAutoApproved(w io.Writer, res *wait.Result) {
 		}
 		underlying := ""
 		if e.Err != nil {
-			// Error text only: a decision error may wrap a
-			// body-carrying gateway error (loop-5 rule).
-			underlying = logging.SummarizeErr(e.Err)
+			// A skip error renders structurally (option
+			// count only — the offers list never reaches
+			// stderr); any other decide error renders by
+			// the settled SummarizeErr rule (loop 5/6).
+			var skipErr interface{ OptionCount() int }
+			if errors.As(e.Err, &skipErr) {
+				underlying = fmt.Sprintf("no forever option option_count=%d", skipErr.OptionCount())
+			} else {
+				underlying = logging.SummarizeErr(e.Err)
+			}
 		}
 		if e.Decision == "" {
-			fmt.Fprintf(w, "auto-approve SKIPPED %s: %s [%s %s]\n", safeField(e.ApprovalID), underlying, safeField(e.Kind), safeField(e.Scope))
+			fmt.Fprintf(w, "auto-approve SKIPPED %s: %s [%s %s]\n", structuralApprovalID(e.ApprovalID), underlying, structuralKind(e.Kind), structuralScope(e.Scope))
 		} else {
-			fmt.Fprintf(w, "auto-approve FAILED %s: %s\n", safeField(e.ApprovalID), underlying)
+			fmt.Fprintf(w, "auto-approve FAILED %s: %s\n", structuralApprovalID(e.ApprovalID), underlying)
 		}
 	}
 }
@@ -1031,7 +1099,7 @@ func approveAll(ctx context.Context, env *Env, rt *Runtime, decision string) ([]
 	for _, item := range pend {
 		d := approvals.DescribeApproval(item)
 		if decision == approvals.Forever && !approvals.OffersForever(d) {
-			fmt.Fprintf(env.stderr(), "skipped %s: no forever option %v\n", safeField(derefStr(d.ApprovalID)), safeOptions(d.Options))
+			fmt.Fprintf(env.stderr(), "skipped %s: no forever option option_count=%d\n", structuralApprovalID(derefStr(d.ApprovalID)), len(d.Options))
 			continue
 		}
 		if _, err := decideApproval(ctx, rt, derefStr(d.ApprovalID), decision); err != nil {
@@ -1042,7 +1110,7 @@ func approveAll(ctx context.Context, env *Env, rt *Runtime, decision string) ([]
 			Kind: strPtrOrNil(derefStr(d.Kind)), Scope: strPtrOrNil(derefStr(d.Scope)), Decision: strPtrOrNil(decision),
 		}
 		done = append(done, row)
-		fmt.Fprintf(env.stderr(), "approved %s (%s): %s [%s %s]\n", safeField(derefStr(row.ApprovalID)), safeField(decision), safeTitle(derefStr(row.Title)), safeField(derefStr(row.Kind)), safeField(derefStr(row.Scope)))
+		fmt.Fprintf(env.stderr(), "approved %s (%s): title_length=%d [%s %s]\n", structuralApprovalID(derefStr(row.ApprovalID)), structuralDecision(decision), len(derefStr(row.Title)), structuralKind(derefStr(row.Kind)), structuralScope(derefStr(row.Scope)))
 	}
 	return done, nil
 }

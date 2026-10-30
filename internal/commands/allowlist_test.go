@@ -30,7 +30,7 @@ const cliAllowlistMarker = "ALLOW5CLI-9d2e41"
 
 func TestClassifyErrorAllowlist(t *testing.T) {
 	t.Parallel()
-	gw := &conn.GatewayError{Status: 500, Payload: "plain body words " + cliAllowlistMarker}
+	gw := &conn.GatewayError{Status: 500, Payload: "plain body words " + cliAllowlistMarker, BodyLength: len("plain body words " + cliAllowlistMarker), BodyLengthKnown: true}
 	ae := conn.NewAuthError("hatch/token -> 403 plain body words " + cliAllowlistMarker)
 	cases := []struct {
 		name     string

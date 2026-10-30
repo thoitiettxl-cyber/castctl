@@ -196,8 +196,8 @@ func TestLoop8LogAutoApprovedSkipStructural(t *testing.T) {
 	if strings.Contains(out, "offers [") {
 		t.Errorf("SKIPPED line = %q, carries the offers list", out)
 	}
-	if !strings.Contains(out, "option_count=1") {
-		t.Errorf("SKIPPED line = %q, want option_count=1", out)
+	if !strings.Contains(out, "option_count=2") {
+		t.Errorf("SKIPPED line = %q, want option_count=2", out)
 	}
 	if strings.Count(out, "\n") != 1 {
 		t.Errorf("SKIPPED line = %q, want exactly 1 line", out)

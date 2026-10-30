@@ -6,7 +6,9 @@ package commands
 
 // Loop-7 tests (RED): fetchEgressIP transport summary (S1),
 // approveAll stderr gating (S2), logAutoApproved sibling-field
-// gating (R1), and the separator/newline title path (R2).
+// gating (R1). (R2, the separator/newline title path, is
+// SUPERSEDED by loop 8's structural rendering; see the note
+// at the end of this file.)
 
 import (
 	"bufio"
@@ -19,7 +21,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/approvals"
 	"github.com/thoitiettxl-cyber/castctl/internal/wait"
@@ -156,18 +157,19 @@ func TestLoop7ApproveAllStderrGated(t *testing.T) {
 	if strings.Contains(stderr, tail) {
 		t.Errorf("stderr %q carries the full 80-char title tail", stderr)
 	}
-	if !strings.Contains(stderr, "[redacted]") {
-		t.Errorf("stderr %q, want the SafeString redaction marker", stderr)
+	// Loop 8 SUPERSEDES the SafeString/64-rune-cap rendering:
+	// both lines are structural now — option_count only for
+	// the skip, title_length only for the approval. (The
+	// fixture nests permission_question at the top level,
+	// which DescribeApproval does not read, so Kind/Scope
+	// are empty here and render [omitted] like any other
+	// non-enum value.)
+	// Title: "token="(6) + marker(17) + " "(1) + tail(80) = 104 bytes.
+	if !strings.Contains(stderr, "skipped SKIP1: no forever option option_count=2\n") {
+		t.Errorf("stderr %q, want the structural skipped line", stderr)
 	}
-	// The approved line's title segment is capped at 64 runes.
-	for _, line := range strings.Split(strings.TrimRight(stderr, "\n"), "\n") {
-		if !strings.HasPrefix(line, "approved ") {
-			continue
-		}
-		seg := line[strings.Index(line, ": ")+2 : strings.LastIndex(line, " [")]
-		if utf8.RuneCountInString(seg) > 64 {
-			t.Errorf("approved title segment is %d runes, want at most 64: %q", utf8.RuneCountInString(seg), seg)
-		}
+	if !strings.Contains(stderr, "approved OK1 (allow_always): title_length=104 [[omitted] [omitted]]\n") {
+		t.Errorf("stderr %q, want the structural approved line", stderr)
 	}
 	// Stdout JSON is data output and is NOT gated: the raw
 	// title and options survive there byte-identical.
@@ -181,8 +183,10 @@ func TestLoop7ApproveAllStderrGated(t *testing.T) {
 
 func TestLoop7LogAutoApprovedSiblingFields(t *testing.T) {
 	// Every sibling field carries a newline (line-splitting)
-	// and a labelled secret; each must be gated like the
-	// title: SafeString + 64-rune cap, newlines neutralised.
+	// and a labelled secret. Loop 8 SUPERSEDES the
+	// SafeString/64-rune-cap gating: every field renders
+	// structurally now (id/enum gates, title_length), so no
+	// field byte can split a line or smuggle a secret.
 	longTail := strings.Repeat("z", 100) + "TAILMARK7"
 	rec := approvals.ApprovedRecord{
 		ApprovalID: "A1\ntoken=" + loop7Marker + longTail,
@@ -211,11 +215,10 @@ func TestLoop7LogAutoApprovedSiblingFields(t *testing.T) {
 	if strings.Contains(out, "TAILMARK7") {
 		t.Errorf("logAutoApproved output = %q, carries an over-cap field tail", out)
 	}
-	if strings.Count(out, "\n") != 2 {
-		t.Errorf("logAutoApproved output has %d lines, want exactly 2 (no field may split a line):\n%q", strings.Count(out, "\n"), out)
-	}
-	if !strings.Contains(out, "[redacted]") {
-		t.Errorf("logAutoApproved output = %q, want the SafeString redaction marker", out)
+	want := "auto-approved [omitted] ([omitted]): title_length=11 [[omitted] [omitted]]\n" +
+		"auto-approve SKIPPED [omitted]: plain decision error [[omitted] [omitted]]\n"
+	if out != want {
+		t.Errorf("logAutoApproved output = %q, want %q", out, want)
 	}
 	// The FAILED line gates its ApprovalID too.
 	fail := &approvals.ApproveError{
@@ -230,50 +233,12 @@ func TestLoop7LogAutoApprovedSiblingFields(t *testing.T) {
 	if strings.Contains(out2, loop7Marker) || strings.Contains(out2, "TAILMARK7") {
 		t.Errorf("FAILED line = %q, carries the ungated ApprovalID", out2)
 	}
-	if strings.Count(out2, "\n") != 1 {
-		t.Errorf("FAILED line has %d lines, want exactly 1: %q", strings.Count(out2, "\n"), out2)
+	if out2 != "auto-approve FAILED [omitted]: plain decision error\n" {
+		t.Errorf("FAILED line = %q, want the structural FAILED line", out2)
 	}
 }
 
-// --- (R2) title path: separators + newlines -------------------------------
-
-func TestLoop7SafeTitleSeparators(t *testing.T) {
-	// The 6 loop-6 separator shapes: NBSP (U+00A0), EM SPACE
-	// (U+2003), and vertical tab between the label and the
-	// separator, in both the equals and the colon spelling.
-	// A 7th/8th shape drives a literal newline inside a JSON
-	// string value (scanQuoted must survive it).
-	shapes := []struct {
-		name string
-		in   string
-	}{
-		{name: "nbsp-equals", in: "token\u00A0=" + loop7Marker},
-		{name: "emspace-equals", in: "token\u2003=" + loop7Marker},
-		{name: "vtab-equals", in: "token\v=" + loop7Marker},
-		{name: "nbsp-colon", in: "token\u00A0:" + loop7Marker},
-		{name: "emspace-colon", in: "token\u2003:" + loop7Marker},
-		{name: "vtab-colon", in: "token\v:" + loop7Marker},
-		{name: "json-newline-double", in: `{"token": "` + loop7Marker + "\nTAIL\"}"},
-		{name: "json-newline-single", in: `{'token': '` + loop7Marker + "\nTAIL'}"},
-	}
-	for _, tc := range shapes {
-		t.Run(tc.name, func(t *testing.T) {
-			got := safeTitle(tc.in)
-			if got == "" {
-				t.Fatalf("safeTitle(%q) is empty: positive control failed", tc.in)
-			}
-			if strings.Contains(got, loop7Marker) {
-				t.Errorf("safeTitle(%q) = %q, carries the secret value", tc.in, got)
-			}
-			if !strings.Contains(got, "[redacted]") {
-				t.Errorf("safeTitle(%q) = %q, want the [redacted] marker", tc.in, got)
-			}
-		})
-	}
-	// Positive control through the same seam: a plain title
-	// survives byte-identical, and the SafeString output is
-	// what gets capped (checked by the loop-6 title test).
-	if got := safeTitle("plain title"); got != "plain title" {
-		t.Errorf("safeTitle(plain) = %q, want it unchanged", got)
-	}
-}
+// --- (R2) SUPERSEDED by loop 8 ------------------------------------------
+// safeTitle is gone: titles render as title_length only, so the
+// separator/newline shapes are driven through logAutoApproved
+// in loop8_test.go (TestLoop8LogAutoApprovedTitleShapes).

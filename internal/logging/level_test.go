@@ -35,7 +35,7 @@ const levelBodyPayload = "plain body words BODYFIX-9d2e41 with no secret label" 
 // and the errors.As walk through wrappers.
 func TestSummarizeErr(t *testing.T) {
 	t.Parallel()
-	gw := &conn.GatewayError{Status: 500, Payload: levelBodyPayload}
+	gw := &conn.GatewayError{Status: 500, Payload: levelBodyPayload, BodyLength: 52, BodyLengthKnown: true}
 	if got := logging.SummarizeErr(gw); got != "conn: gateway status=500 body_length=52" {
 		t.Errorf("SummarizeErr(GatewayError) = %q, want the status/class/length literal", got)
 	}
@@ -66,7 +66,8 @@ func TestSummarizeErr(t *testing.T) {
 // redacted-then-truncated body).
 func TestSafeErrForLevel(t *testing.T) {
 	t.Parallel()
-	gw := &conn.GatewayError{Status: 500, Payload: `{"token": "LOGFIX-LEVEL-83af10"} and ` + strings.Repeat("tailword ", 200)}
+	payload := `{"token": "LOGFIX-LEVEL-83af10"} and ` + strings.Repeat("tailword ", 200)
+	gw := &conn.GatewayError{Status: 500, Payload: payload, BodyLength: len(payload), BodyLengthKnown: true}
 	for _, level := range []singlog.Level{singlog.LevelTrace, singlog.LevelDebug, singlog.LevelInfo, singlog.LevelWarn, singlog.LevelError} {
 		got := logging.SafeErrForLevel(gw, level)
 		if strings.Contains(got, "tailword") || strings.Contains(got, "LOGFIX-LEVEL") {
@@ -89,7 +90,7 @@ func TestSlogBridgeAboveTraceSummarizesBody(t *testing.T) {
 	}
 	defer h.Close()
 	logger := h.SlogLogger("castctl")
-	gw := &conn.GatewayError{Status: 500, Payload: levelBodyPayload}
+	gw := &conn.GatewayError{Status: 500, Payload: levelBodyPayload, BodyLength: 52, BodyLengthKnown: true}
 	logger.Info("gateway probe", "err", gw)
 	got := buf.String()
 	if got == "" {
@@ -117,7 +118,7 @@ func TestSlogBridgeTraceSummarizesBody(t *testing.T) {
 	defer h.Close()
 	logger := h.SlogLogger("castctl")
 	payload := `{"token": "LOGFIX-LEVELTRACE-83af10"} and ` + strings.Repeat("tailword ", 200)
-	gw := &conn.GatewayError{Status: 500, Payload: payload}
+	gw := &conn.GatewayError{Status: 500, Payload: payload, BodyLength: len(payload), BodyLengthKnown: true}
 	logger.Log(context.Background(), slog.LevelDebug-4, "trace-body-probe", "err", gw)
 	got := buf.String()
 	if !strings.Contains(got, "trace-body-probe") {

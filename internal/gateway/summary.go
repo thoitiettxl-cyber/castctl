@@ -190,11 +190,13 @@ func summarizeContentType(raw string) string {
 }
 
 // bodySummary is one allowlist summary: the text for a
-// Payload/Message/detail field, the wire body length, and
-// the structured fields for GatewayError rendering.
+// Payload/Message/detail field, the wire body length, whether
+// that length is known (loop 8, F1), and the structured
+// fields for GatewayError rendering.
 type bodySummary struct {
 	text        string
 	length      int
+	lengthKnown bool
 	contentType string
 	errorCode   string
 }
@@ -202,28 +204,33 @@ type bodySummary struct {
 // gatewayErrorFromSummary builds a *conn.GatewayError from an
 // allowlist summary: the Payload is the summary text only
 // (never body bytes), BodyLength is the wire length the
-// summary measured (0 when unknown — renderers fall back to
-// the summary length), and the validated content-type /
-// error-enum fields ride along for rendering.
+// summary measured, and BodyLengthKnown records whether the
+// summary knew the length at all — renderers omit the
+// body_length field entirely when it is unknown (loop 8,
+// F1), never falling back to the summary-text length. The
+// validated content-type / error-enum fields ride along for
+// rendering.
 func gatewayErrorFromSummary(status int, sum bodySummary) *conn.GatewayError {
 	return &conn.GatewayError{
-		Status:      status,
-		Payload:     sum.text,
-		BodyLength:  sum.length,
-		ContentType: sum.contentType,
-		ErrorCode:   sum.errorCode,
+		Status:          status,
+		Payload:         sum.text,
+		BodyLength:      sum.length,
+		BodyLengthKnown: sum.lengthKnown,
+		ContentType:     sum.contentType,
+		ErrorCode:       sum.errorCode,
 	}
 }
 
 // resetSummary builds the allowlist summary for a stream
 // reset frame: the reset code (a number) and the byte length
 // of the peer-controlled reason — never the reason bytes.
-// length is the reason length, so renderers report the size
-// of the summarized peer text.
+// length is the reason length, and it IS known (the reason
+// was measured), so renderers report body_length for it.
 func resetSummary(code int32, reason string) bodySummary {
 	return bodySummary{
-		text:   fmt.Sprintf("stream reset; code=%d; reason_length=%d", code, len(reason)),
-		length: len(reason),
+		text:        fmt.Sprintf("stream reset; code=%d; reason_length=%d", code, len(reason)),
+		length:      len(reason),
+		lengthKnown: true,
 	}
 }
 
@@ -246,17 +253,21 @@ func summarizeBody(label string, data []byte, rawContentType string, decoded map
 // bytes are not retained (the RSC case in FetchSubscription):
 // body_length is always the wire length threaded through
 // callAction, never the summary-text length (loop 6,
-// item 6b).
-func summarizeParsedBody(label string, bodyLen int, decoded map[string]any, keys ...string) bodySummary {
-	return summarizeFields(label, bodyLen, true, "", decoded, keys...)
+// item 6b). bodyLenKnown is callAction's explicit flag: a
+// known 0-byte body renders body_length=0, an unknown
+// length renders no body_length field (loop 8, F1).
+func summarizeParsedBody(label string, bodyLen int, bodyLenKnown bool, decoded map[string]any, keys ...string) bodySummary {
+	return summarizeFields(label, bodyLen, bodyLenKnown, "", decoded, keys...)
 }
 
 // summarizeFields is the shared allowlist-summary builder:
-// the class label, the wire body length (when known), the
-// validated content-type, and the parsed-by-key fields.
+// the class label, the wire body length (when known —
+// emitLength IS the known flag), the validated content-type,
+// and the parsed-by-key fields.
 func summarizeFields(label string, length int, emitLength bool, rawContentType string, decoded map[string]any, keys ...string) bodySummary {
 	var s bodySummary
 	s.length = length
+	s.lengthKnown = emitLength
 	var b strings.Builder
 	b.WriteString(label)
 	if emitLength {

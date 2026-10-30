@@ -82,9 +82,12 @@ func (e *AuthError) LogSummary() string {
 // internal state: it is NEVER rendered. The only renderings
 // are Error() and LogSummary(), both allowlist summaries.
 // BodyLength is the wire byte length of the body summarized,
-// when the producer knows it; 0 means unknown and renderers
-// fall back to len(Payload). ContentType is the validated
-// media type (parameters stripped) when known, "" when not.
+// when the producer knows it; BodyLengthKnown says whether
+// BodyLength is known at all (loop 8, F1): a known 0-byte
+// body renders body_length=0, while an unknown length
+// renders NO body_length field — never the length of the
+// summary text. ContentType is the validated media type
+// (parameters stripped) when known, "" when not.
 // ErrorCode is a validated short error enum parsed by key
 // from a known response schema, "" when none was extracted.
 // ContentType/ErrorCode are validated AGAIN at render time:
@@ -96,22 +99,24 @@ func (e *AuthError) LogSummary() string {
 // by the loop-5 ruling (only the bytes are removed — the
 // status, the error kind, and retry semantics are unchanged).
 type GatewayError struct {
-	Status      int
-	Payload     string
-	BodyLength  int
-	ContentType string
-	ErrorCode   string
+	Status          int
+	Payload         string
+	BodyLength      int
+	BodyLengthKnown bool
+	ContentType     string
+	ErrorCode       string
 }
 
-// bodyLength is the length renderers report: the known wire
-// length when the producer recorded one, else the stored
-// summary length (the pre-loop-5 behaviour for direct
-// constructions, which set Payload to the body itself).
-func (e *GatewayError) bodyLength() int {
-	if e.BodyLength > 0 {
-		return e.BodyLength
+// lengthField renders the body_length field for Error() /
+// LogSummary(): " body_length=N" when the wire length is
+// known (including a known 0), "" when it is unknown. There
+// is no fallback to the summary-text length (loop 8, F1):
+// an unknown length is absent, not mislabelled.
+func (e *GatewayError) lengthField() string {
+	if e.BodyLengthKnown {
+		return fmt.Sprintf(" body_length=%d", e.BodyLength)
 	}
-	return len(e.Payload)
+	return ""
 }
 
 // isAllowlistEnum reports whether s is an emittable enum
@@ -165,7 +170,7 @@ func (e *GatewayError) Error() string {
 	if e == nil {
 		return "conn: gateway status=0 body_length=0"
 	}
-	out := fmt.Sprintf("conn: gateway status=%d body_length=%d", e.Status, e.bodyLength())
+	out := fmt.Sprintf("conn: gateway status=%d", e.Status) + e.lengthField()
 	if isAllowlistContentType(e.ContentType) {
 		out += " content_type=" + e.ContentType
 	}
@@ -177,7 +182,8 @@ func (e *GatewayError) Error() string {
 
 // LogSummary renders the error for log lines at EVERY level
 // including trace (loop-5 ruling): the status code, the error
-// class, the body length, and the validated content-type /
+// class, the body length when known (no field when unknown —
+// loop 8, F1), and the validated content-type /
 // error-enum fields when present — and no payload bytes at
 // all. It is identical to Error() by construction: both are
 // the allowlist summary. This satisfies the logging.LogSummary

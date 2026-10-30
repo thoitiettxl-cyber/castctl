@@ -27,7 +27,8 @@ const allowlistTraceMarker = "ALLOW5TRACE-9d2e41"
 // no body bytes, redacted or otherwise.
 func TestSafeErrForLevelTraceIsSummary(t *testing.T) {
 	t.Parallel()
-	gw := &conn.GatewayError{Status: 500, Payload: "plain body words " + allowlistTraceMarker}
+	payload := "plain body words " + allowlistTraceMarker
+	gw := &conn.GatewayError{Status: 500, Payload: payload, BodyLength: len(payload), BodyLengthKnown: true}
 	for _, level := range []singlog.Level{singlog.LevelTrace, singlog.LevelDebug, singlog.LevelInfo, singlog.LevelWarn, singlog.LevelError} {
 		got := logging.SafeErrForLevel(gw, level)
 		if strings.Contains(got, allowlistTraceMarker) || strings.Contains(got, "plain body words") {

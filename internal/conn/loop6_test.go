@@ -30,7 +30,7 @@ func TestLoop6ConnectionErrorLogSummary(t *testing.T) {
 		t.Errorf("SummarizeErr(ConnectionError) = %q, want %q", sum, want)
 	}
 	// Inner summaries still win through the wrapper.
-	inner := &GatewayError{Status: 500, Payload: "summary text", BodyLength: 52}
+	inner := &GatewayError{Status: 500, Payload: "summary text", BodyLength: 52, BodyLengthKnown: true}
 	if got := logging.SummarizeErr(&ConnectionError{Err: inner}); got != inner.LogSummary() {
 		t.Errorf("SummarizeErr(ConnectionError wrapping GatewayError) = %q, want the inner summary %q", got, inner.LogSummary())
 	}
@@ -51,7 +51,7 @@ func TestLoop6ContentTypeCapAlignment(t *testing.T) {
 	if len([]rune(over)) != 65 {
 		t.Fatalf("fixture length = %d runes, want 65", len([]rune(over)))
 	}
-	ge := &GatewayError{Status: 500, BodyLength: 10, ContentType: over}
+	ge := &GatewayError{Status: 500, BodyLength: 10, BodyLengthKnown: true, ContentType: over}
 	if strings.Contains(ge.Error(), over) {
 		t.Errorf("GatewayError.Error() = %q, emits an over-cap content-type", ge.Error())
 	}
@@ -59,14 +59,14 @@ func TestLoop6ContentTypeCapAlignment(t *testing.T) {
 		t.Errorf("GatewayError.Error() = %q, want body_length=10", ge.Error())
 	}
 	at := strings.Repeat("b", 59) + "/json" // 64 runes
-	ge2 := &GatewayError{Status: 500, BodyLength: 10, ContentType: at}
+	ge2 := &GatewayError{Status: 500, BodyLength: 10, BodyLengthKnown: true, ContentType: at}
 	if !strings.Contains(ge2.Error(), "content_type="+at) {
 		t.Errorf("GatewayError.Error() = %q, want the at-cap content-type emitted", ge2.Error())
 	}
 	// A 100-rune media type is omitted too (the old 129-byte
 	// render-time bound would have emitted it).
 	long := strings.Repeat("c", 95) + "/json"
-	ge3 := &GatewayError{Status: 500, BodyLength: 10, ContentType: long}
+	ge3 := &GatewayError{Status: 500, BodyLength: 10, BodyLengthKnown: true, ContentType: long}
 	if strings.Contains(ge3.Error(), long) {
 		t.Errorf("GatewayError.Error() = %q, emits a 100-rune content-type", ge3.Error())
 	}

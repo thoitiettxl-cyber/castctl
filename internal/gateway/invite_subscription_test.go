@@ -392,9 +392,12 @@ func TestSubscriptionTransportErrorsAreRedactedAndChained(t *testing.T) {
 		t.Errorf("fetchText error chain = %v, want errors.Is to find the sentinel", err)
 	}
 
-	_, _, err = callAction(ctx, client, fakeCookie, "actionid12345678901234", nil, "https://muse.ai/settings")
+	_, _, known, err := callAction(ctx, client, fakeCookie, "actionid12345678901234", nil, "https://muse.ai/settings")
 	if err == nil {
 		t.Fatal("callAction transport error = nil")
+	}
+	if known {
+		t.Errorf("callAction transport error reports a known length: no body was read")
 	}
 	if strings.Contains(err.Error(), "abcdefgh12345678") {
 		t.Errorf("callAction error leaks the token: %q", err.Error())

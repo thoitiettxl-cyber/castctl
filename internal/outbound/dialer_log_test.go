@@ -456,7 +456,7 @@ func TestDialDoneAboveTraceSummarizesGatewayError(t *testing.T) {
 	}
 	defer h.Close()
 	payload := "plain body words BODYFIX-9d2e41 with no secret label"
-	gwErr := &conn.GatewayError{Status: 500, Payload: payload}
+	gwErr := &conn.GatewayError{Status: 500, Payload: payload, BodyLength: len(payload), BodyLengthKnown: true}
 	d := NewDialerWithLogger(&errOutbound{err: gwErr}, nil, option.OutboundTLSOptions{}, h.Logger("outbound"))
 	_, err = d.DialContext(context.Background(), "tcp", "127.0.0.1", 1080)
 	if err == nil {
