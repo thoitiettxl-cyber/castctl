@@ -708,6 +708,62 @@ func TestConfigMigrateFrom(t *testing.T) {
 	}
 }
 
+// TestConfigMigrateFromCollision (R5): --from a different
+// directory whose legacy profile differs from the destination
+// entry of the same name exits 2 naming both locations, and
+// writes nothing anywhere (dry-run or --write).
+func TestConfigMigrateFromCollision(t *testing.T) {
+	home := t.TempDir()
+	src := filepath.Join(home, "muse-cli")
+	if err := os.MkdirAll(filepath.Join(src, "profiles", "work"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	srcFile := filepath.Join(src, "profiles", "work", "config.json")
+	if err := os.WriteFile(srcFile, []byte(`{"auto_approve":"always","node_id":"SRC-NODE","vm_id":"SRC-VM"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A matching source base file / destination default entry, so
+	// only the colliding "work" profile decides the outcome.
+	if err := os.WriteFile(filepath.Join(src, "config.json"), []byte(`{"auto_approve":"off","node_id":"BASE-NODE","vm_id":"BASE-VM"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	destFile := filepath.Join(home, "castctl", "config.json")
+	if err := os.MkdirAll(filepath.Dir(destFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destFile, []byte(`{"profiles":{"default":{"node_id":"BASE-NODE","vm_id":"BASE-VM","auto_approve":"off","auto_allow_once":false},"work":{"node_id":"DEST-NODE","vm_id":"DEST-VM","auto_approve":"off","auto_allow_once":false}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srcBefore, _ := os.ReadFile(srcFile)
+	destBefore, _ := os.ReadFile(destFile)
+	env, out, errb := profileEnv(t, destFile)
+
+	for _, args := range [][]string{
+		{"config", "migrate", "--from", src},
+		{"config", "migrate", "--from", src, "--write"},
+	} {
+		out.Reset()
+		errb.Reset()
+		if code := runProfile(t, env, out, errb, destFile, args...); code != 2 {
+			t.Fatalf("migrate --from collision %v: code=%d, want 2; err=%q out=%q", args, code, errb.String(), out.String())
+		}
+		combined := errb.String() + out.String()
+		for _, want := range []string{`"work"`, srcFile, destFile} {
+			if !strings.Contains(combined, want) {
+				t.Errorf("migrate --from collision %v output %q; want it to name %q", args, combined, want)
+			}
+		}
+	}
+	srcAfter, _ := os.ReadFile(srcFile)
+	if string(srcAfter) != string(srcBefore) {
+		t.Error("collision migrate modified the source file")
+	}
+	destAfter, _ := os.ReadFile(destFile)
+	if string(destAfter) != string(destBefore) {
+		t.Error("collision migrate modified the destination file")
+	}
+}
+
 func TestDefaultPathRegression(t *testing.T) {
 	// Under a controlled XDG_CONFIG_HOME, the default config path
 	// is Join(UserConfigDir(), "castctl", "config.json"): a missing

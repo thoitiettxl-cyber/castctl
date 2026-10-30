@@ -1649,6 +1649,125 @@ func TestMigrateDNSRefusalDetourChains(t *testing.T) {
 	})
 }
 
+// TestMigrateFromCrossDirCollision (R5): with --from naming a
+// DIFFERENT directory, a source legacy profile whose settings
+// differ from the destination single-file entry of the same name
+// must REFUSE (naming the profile and both locations), never
+// silently report already-migrated. A byte-identical source entry
+// stands as already-migrated. A bare source directory with no
+// config file for the name stays silent (nothing to compare).
+// Same-dir behaviour is unchanged (NB4 skip) — see
+// TestMigrateStrayDefaultLegacyFile and the NB4 tests.
+func TestMigrateFromCrossDirCollision(t *testing.T) {
+	t.Parallel()
+	entry := func(node, vm, approve string) string {
+		return `{"node_id":` + quoteJSON(node) + `,"vm_id":` + quoteJSON(vm) + `,"auto_approve":` + quoteJSON(approve) + `,"auto_allow_once":false}`
+	}
+	single := func(entries string) string {
+		return `{"profiles":{` + entries + `}}`
+	}
+	assertRefusal := func(t *testing.T, src, dest string, name string, srcFile, destFile string) {
+		t.Helper()
+		srcBefore := snapshotDir(t, src)
+		destBefore, _ := os.ReadFile(filepath.Join(dest, "config.json"))
+		for _, write := range []bool{false, true} {
+			result, err := MigrateFrom(src, dest, write)
+			if err == nil {
+				t.Fatalf("MigrateFrom(write=%v) err = nil; want a profile error for %q", write, name)
+			}
+			joined := strings.Join(result.Errors, "\n")
+			for _, want := range []string{`"` + name + `"`, srcFile, destFile} {
+				if !strings.Contains(joined, want) {
+					t.Errorf("MigrateFrom(write=%v) errors = %q; want it to name %q", write, joined, want)
+				}
+			}
+		}
+		assertSameSnapshot(t, srcBefore, snapshotDir(t, src))
+		destAfter, _ := os.ReadFile(filepath.Join(dest, "config.json"))
+		if string(destAfter) != string(destBefore) {
+			t.Error("refused migrate rewrote the destination config")
+		}
+	}
+	assertAlreadyMigrated := func(t *testing.T, src, dest string) {
+		t.Helper()
+		destBefore, _ := os.ReadFile(filepath.Join(dest, "config.json"))
+		for _, write := range []bool{false, true} {
+			result, err := MigrateFrom(src, dest, write)
+			if err != nil {
+				t.Fatalf("MigrateFrom(write=%v) err = %v; want already-migrated", write, err)
+			}
+			if result.Reason != "already-migrated" || result.Migrated {
+				t.Errorf("MigrateFrom(write=%v) = %+v; want already-migrated, not migrated", write, result)
+			}
+		}
+		destAfter, _ := os.ReadFile(filepath.Join(dest, "config.json"))
+		if string(destAfter) != string(destBefore) {
+			t.Error("already-migrated migrate rewrote the destination config")
+		}
+	}
+	// Every fixture below seeds a source base file whose settings
+	// match the destination default entry, so the default profile
+	// never varies: only the colliding named profile (or the
+	// default entry itself, in the default subtests) decides.
+	seedMatchingBase := func(t *testing.T, src, dest string) {
+		t.Helper()
+		writeFile(t, filepath.Join(src, "config.json"), `{"auto_approve":"off","node_id":"BASE-NODE","vm_id":"BASE-VM"}`, 0o600)
+		writeFile(t, filepath.Join(dest, "config.json"), single(`"default":`+entry("BASE-NODE", "BASE-VM", "off")), 0o600)
+	}
+
+	t.Run("default differing", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		src := filepath.Join(home, "muse-cli")
+		dest := filepath.Join(home, "castctl")
+		writeFile(t, filepath.Join(src, "config.json"), `{"auto_approve":"always","node_id":"SRC-NODE","vm_id":"SRC-VM"}`, 0o600)
+		writeFile(t, filepath.Join(dest, "config.json"), single(`"default":`+entry("DEST-NODE", "DEST-VM", "off")), 0o600)
+		assertRefusal(t, src, dest, "default", filepath.Join(src, "config.json"), filepath.Join(dest, "config.json"))
+	})
+	t.Run("named differing", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		src := filepath.Join(home, "muse-cli")
+		dest := filepath.Join(home, "castctl")
+		seedMatchingBase(t, src, dest)
+		writeFile(t, filepath.Join(src, "profiles", "work", "config.json"), `{"auto_approve":"always","node_id":"SRC-NODE","vm_id":"SRC-VM"}`, 0o600)
+		// Replace the destination single with default + work entries.
+		writeFile(t, filepath.Join(dest, "config.json"), single(`"default":`+entry("BASE-NODE", "BASE-VM", "off")+`,"work":`+entry("DEST-NODE", "DEST-VM", "off")), 0o600)
+		assertRefusal(t, src, dest, "work", filepath.Join(src, "profiles", "work", "config.json"), filepath.Join(dest, "config.json"))
+	})
+	t.Run("named identical", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		src := filepath.Join(home, "muse-cli")
+		dest := filepath.Join(home, "castctl")
+		seedMatchingBase(t, src, dest)
+		writeFile(t, filepath.Join(src, "profiles", "work", "config.json"), `{"auto_approve":"off","node_id":"SAME-NODE","vm_id":"SAME-VM"}`, 0o600)
+		writeFile(t, filepath.Join(dest, "config.json"), single(`"default":`+entry("BASE-NODE", "BASE-VM", "off")+`,"work":`+entry("SAME-NODE", "SAME-VM", "off")), 0o600)
+		assertAlreadyMigrated(t, src, dest)
+	})
+	t.Run("default identical", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		src := filepath.Join(home, "muse-cli")
+		dest := filepath.Join(home, "castctl")
+		writeFile(t, filepath.Join(src, "config.json"), `{"auto_approve":"off","node_id":"SAME-NODE","vm_id":"SAME-VM"}`, 0o600)
+		writeFile(t, filepath.Join(dest, "config.json"), single(`"default":`+entry("SAME-NODE", "SAME-VM", "off")), 0o600)
+		assertAlreadyMigrated(t, src, dest)
+	})
+	t.Run("bare source dir silent", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		src := filepath.Join(home, "muse-cli")
+		dest := filepath.Join(home, "castctl")
+		seedMatchingBase(t, src, dest)
+		if err := os.MkdirAll(filepath.Join(src, "profiles", "work"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(dest, "config.json"), single(`"default":`+entry("BASE-NODE", "BASE-VM", "off")+`,"work":`+entry("DEST-NODE", "DEST-VM", "off")), 0o600)
+		assertAlreadyMigrated(t, src, dest)
+	})
+}
+
 func TestMigrateCarriesExistingDNSVerbatim(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()

@@ -225,8 +225,11 @@ func MigrateFrom(sourceDir, destDir string, write bool) (*MigrateResult, error) 
 	// profiles present ONLY in the single file: DiscoverProfileNames
 	// only sees directories, so single-only names never appear in
 	// `names` and were previously dropped, making every second run
-	// refuse-overwrite. Legacy files are then consulted ONLY for
-	// profiles absent from the single file.
+	// refuse-overwrite. Legacy files are then consulted only for
+	// profiles absent from the single file — except cross-dir
+	// (--from): a source legacy file for a name already in the
+	// single file is still read and compared (identical stands,
+	// differing refuses; see the fromSingle branch below).
 	candidateProfiles := []*Profile{}
 	fromSingle := make(map[string]bool)
 	if existingIsSingle {
@@ -299,6 +302,31 @@ func MigrateFrom(sourceDir, destDir string, write bool) (*MigrateResult, error) 
 		}
 		if existingIsSingle {
 			if fromSingle[name] {
+				if !same && configPathExists(paths.Config) {
+					// Cross-dir collision: the source holds
+					// a legacy file for a name the
+					// destination already has. Identical
+					// settings stand as already-migrated;
+					// differing settings refuse, naming
+					// the profile and both locations — never
+					// a silent skip, which would drop the
+					// source settings without a trace. A
+					// bare source directory with no config
+					// file for the name has nothing to
+					// compare and stays silent. Same-dir
+					// behaviour is unchanged (NB4): the
+					// single file wins wholly, without
+					// reading the legacy file.
+					srcProfile, serr := migrateLegacyProfile(sourceDir, name, paths)
+					if serr != nil {
+						profileErrors = append(profileErrors, serr.Error())
+						continue
+					}
+					if !legacyProfileSettingsEqual(srcProfile, existing.Profiles[name]) {
+						profileErrors = append(profileErrors, fmt.Sprintf("profile %q differs between source legacy file %q and destination config %q; refusing to overwrite", name, paths.Config, filepath.Join(destDir, "config.json")))
+						continue
+					}
+				}
 				continue
 			}
 			if name == DefaultProfileName && same {
