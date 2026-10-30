@@ -249,6 +249,22 @@ func MigrateFrom(sourceDir, destDir string, write bool) (*MigrateResult, error) 
 		}
 	}
 	profileErrors := []string{}
+	// A symlinked profile directory whose target cannot be resolved
+	// holds no readable legacy file, but it must not vanish silently
+	// from a migration: fail the run naming the path, so the
+	// operator removes it or restores its target. (Discovery above
+	// skips it; only the migration step fails loudly, so list/load
+	// stay lenient about stale links.)
+	if entries, rerr := os.ReadDir(filepath.Join(sourceDir, "profiles")); rerr == nil {
+		for _, e := range entries {
+			if e.Type()&os.ModeSymlink == 0 {
+				continue
+			}
+			if _, serr := os.Stat(filepath.Join(sourceDir, "profiles", e.Name())); serr != nil {
+				profileErrors = append(profileErrors, fmt.Sprintf("symlinked profile dir %q cannot be resolved: %v; migrate cannot read it (remove it or restore its target)", filepath.Join(sourceDir, "profiles", e.Name()), serr))
+			}
+		}
+	}
 	for _, name := range names {
 		paths, perr := ProfilePaths(sourceDir, name)
 		if perr != nil {
@@ -676,8 +692,8 @@ const interimDNSServerTag = "castctl-doh"
 // reference, its endpoint tag reference, or its inline outbound's
 // tag — except when detourTagForProfile finds no usable detour
 // chain for it (direct-only, or a chain terminating in an empty
-// direct outbound, an empty group, or a urltest), which carries no
-// detour tag at all. The runtime "direct" outbound is synthesised at runtime
+// direct outbound, an empty group, a urltest, a block, or a
+// bridge), which carries no detour tag at all. The runtime "direct" outbound is synthesised at runtime
 // (createOutbounds) and the synthetic "castctl-dialer" exists only
 // for direct endpoint references; neither is a config tag, so
 // neither can be a detour here (validateTagGraph would reject
@@ -746,19 +762,49 @@ func lookupDetourNode(cfg *SingleConfig, tag string) (detourNode, bool) {
 	return detourNode{}, false
 }
 
+// selectorSelected returns the one member upstream dials for a
+// selector: its Default when set, else its first member
+// (sing-box v1.14.4 protocol/group/selector.go: selector Start
+// prefers a cache-file selection, then Default, then the first
+// member, and DialContext dials only the selected member). Castctl
+// registers no CacheFile service (internal/outbound/context.go
+// services()), so in castctl runtime the selection is exactly
+// Default-or-first. A Default naming a non-member, or an empty
+// member list, selects nothing: upstream Start errors in both
+// cases ("default outbound not found", "missing tags"), so the
+// selector is unusable here.
+func selectorSelected(options any) (string, bool) {
+	opts, ok := options.(*option.SelectorOutboundOptions)
+	if !ok || len(opts.Outbounds) == 0 {
+		return "", false
+	}
+	if opts.Default != "" {
+		for _, m := range opts.Outbounds {
+			if m == opts.Default {
+				return m, true
+			}
+		}
+		return "", false
+	}
+	return opts.Outbounds[0], true
+}
+
 // detourNodeCanDial reports whether dialing through node can ever
-// succeed, walking detour fields and selector member lists
+// succeed, walking detour fields and selector selected members
 // recursively (visiting guards detour cycles: a cycle can never
 // dial, so it is unusable). asDetourTarget distinguishes the two
 // ways a node is reached: as a DETOUR target (DetourDialer.init
 // refuses an empty direct outbound) or as a node dialed through
 // directly (a selector dials its selected member directly, with
 // no empty-direct check — so a direct member dials fine even
-// though it cannot itself serve as a detour target). A node is
-// usable when at least one resolution path terminates in a usable
-// target; it is unusable when every path terminates in an empty
-// direct outbound (as a detour target), an empty selector, a
-// dangling tag, or a urltest node.
+// though it cannot itself serve as a detour target). The per-type
+// answers below match sing-box v1.14.4 upstream (see
+// docs/provenance.md §1, outbound-dialability mapping); the two
+// castctl-runtime deviations are urltest (unstartable here, see
+// its case) and direct-with-detour (rejected at construction
+// upstream, so a walker answer for it is moot — the walk still
+// follows the detour field, and the config fails at runtime
+// construction regardless of dns authoring).
 func detourNodeCanDial(cfg *SingleConfig, node detourNode, visiting map[string]bool, asDetourTarget bool) bool {
 	if node.tag != "" {
 		if visiting[node.tag] {
@@ -785,7 +831,12 @@ func detourNodeCanDial(cfg *SingleConfig, node detourNode, visiting map[string]b
 		// directly, a direct outbound always dials; a direct
 		// outbound carrying any dialer option (a bind address,
 		// a routing mark, …) is non-empty and serves as a detour
-		// target too.
+		// target too. The castctl comparison below is exactly
+		// upstream's: upstream forces UDPFragmentDefault true
+		// before comparing (protocol/direct/outbound.go
+		// NewOutbound + IsEmpty), and that field is json:"-"
+		// (option/outbound.go), so a parsed config can never set
+		// it — parsed-zero is exactly upstream-empty.
 		if asDetourTarget {
 			if w, ok := node.options.(option.DialerOptionsWrapper); ok {
 				return !reflect.DeepEqual(w.TakeDialerOptions(), option.DialerOptions{})
@@ -794,30 +845,42 @@ func detourNodeCanDial(cfg *SingleConfig, node detourNode, visiting map[string]b
 		}
 		return true
 	case "selector":
-		members := groupMembers(node.options)
-		if len(members) == 0 {
+		// Upstream DialContext dials ONLY the selected member
+		// (protocol/group/selector.go DialContext + Start), so
+		// the walk follows that one member — never "any member
+		// dials". The selected member is dialed directly, not as
+		// a detour target.
+		selected, ok := selectorSelected(node.options)
+		if !ok {
 			return false
 		}
-		for _, m := range members {
-			target, ok := lookupDetourNode(cfg, m)
-			if !ok {
-				continue
-			}
-			// Members are dialed directly, not as detour targets.
-			if detourNodeCanDial(cfg, target, visiting, false) {
-				return true
-			}
+		target, ok := lookupDetourNode(cfg, selected)
+		if !ok {
+			return false
 		}
-		return false
+		return detourNodeCanDial(cfg, target, visiting, false)
 	case "urltest":
-		// Unusable in this Manager regardless of members: the
-		// urltest adapter's Start requires a URL test history
-		// storage service, which castctl never registers
-		// ("missing URL test history storage"), and dialing an
-		// unstarted urltest group dereferences a nil group.
-		// This refuses every detour whose dial target IS a
-		// urltest; a selector may still route around a urltest
-		// member through another member (see the selector case).
+		// Unusable in castctl runtime regardless of members:
+		// upstream urltest Start requires a URL test history
+		// storage service (protocol/group/urltest.go
+		// NewURLTestGroup: nil history is "missing URL test
+		// history storage"), upstream box registers one (box.go),
+		// but castctl's manager context never does
+		// (internal/outbound/context.go services()), so a urltest
+		// outbound cannot start here at all. This refuses every
+		// detour whose dial target IS a urltest. (In sing-box
+		// proper, urltest would dial its best-tested member; the
+		// castctl deviation is recorded in docs/provenance.md.)
+		return false
+	case "block", "bridge":
+		// Never dial, upstream: block DialContext always returns
+		// EPERM (protocol/block/outbound.go DialContext), and
+		// bridge DialContext always errors ("only L3 traffic is
+		// supported by bridge", protocol/bridge/outbound.go
+		// DialContext). A dns detour through either can never
+		// carry a query. (A dns outbound needs no case: sing-box
+		// 1.14.4 rejects it at parse time, option/outbound.go,
+		// so the walker never sees one.)
 		return false
 	default:
 		// Any other outbound/endpoint type dials through its
@@ -829,12 +892,12 @@ func detourNodeCanDial(cfg *SingleConfig, node detourNode, visiting map[string]b
 
 // detourTagForProfile returns the tag a dns detour for p would name,
 // or "" when p is direct-only or every detour chain from p
-// terminates unusably (empty direct, empty group, dangling tag, or
-// urltest) — authoring a detour to such a target writes a config
-// sing-box refuses at runtime, so no dns section may be authored
-// for it. Detour chains are walked through detour fields and
-// selector/urltest member lists with a cycle guard; a tag that
-// resolves to nothing is returned as-is and left for
+// terminates unusably (empty direct, empty group, dangling tag,
+// urltest, block, or bridge) — authoring a detour to such a target
+// writes a config sing-box refuses at runtime, so no dns section
+// may be authored for it. Detour chains are walked through detour
+// fields and selector selected members with a cycle guard; a tag
+// that resolves to nothing is returned as-is and left for
 // validateTagGraph to reject as dangling.
 func detourTagForProfile(cfg *SingleConfig, p *Profile) string {
 	if p == nil {

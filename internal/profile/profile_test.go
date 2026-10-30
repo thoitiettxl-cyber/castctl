@@ -202,3 +202,39 @@ func TestDiscoverProfileNames(t *testing.T) {
 		t.Errorf("DiscoverProfileNames(missing) = %v, %v; want [default], nil", names, err)
 	}
 }
+
+// TestDiscoverProfileNamesFollowsSymlinkedDir (loop 4): a symlinked
+// profiles/<name> directory is a profile directory, not a file to
+// skip: DirEntry.IsDir is false for symlink-to-dir, so discovery
+// must follow the link. An unresolvable symlink holds no config and
+// is skipped by discovery (migrate itself fails loudly on it; see
+// TestMigrateFromSymlinkedProfileDir).
+func TestDiscoverProfileNamesFollowsSymlinkedDir(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	base := BaseDir(home)
+	realWork := filepath.Join(home, "elsewhere", "work")
+	writeFile(t, filepath.Join(realWork, "config.json"), `{"node_id":"WORK-NODE"}`, 0o600)
+	if err := os.MkdirAll(filepath.Join(base, "profiles"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realWork, filepath.Join(base, "profiles", "work")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "no-such-dir"), filepath.Join(base, "profiles", "stale")); err != nil {
+		t.Fatal(err)
+	}
+	names, err := DiscoverProfileNames(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"default", "work"}
+	if len(names) != len(want) {
+		t.Fatalf("DiscoverProfileNames = %v; want %v", names, want)
+	}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Errorf("DiscoverProfileNames = %v; want %v", names, want)
+		}
+	}
+}

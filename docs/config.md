@@ -185,13 +185,15 @@ The legacy per-profile layout — flat `config.json` files in
 three shapes: `config.json` at the config dir (when no single
 file exists), `profiles/<name>/config.json` for any named
 profile, and `profiles/default/config.json` — is **refused by
-profile loading, never read** by it. The refusal is
-layout-wide: `LoadProfile` exits 2 for EVERY profile name,
-including a name with a single-file entry and a ghost name
-with no file of its own, whenever ANY legacy file exists
-anywhere in the layout — for example, a single file holding
-`default` plus a leftover `profiles/work/config.json` refuses
-even a load of `zzz`. The error is:
+profile loading, never read** by it. The refusal fires ONLY
+for names WITHOUT a single-file entry, and for those it is
+layout-wide: `LoadProfile` exits 2 for such a name — including
+a ghost name with no file of its own — whenever ANY legacy
+file exists anywhere in the layout — for example, a single
+file holding `default` plus a leftover
+`profiles/work/config.json` refuses even a load of `zzz` (no
+entry). A name WITH a single-file entry loads wholly from
+that entry, unaffected by leftover legacy files. The error is:
 
 ```
 profile: legacy layout found at "<path>"; run `castctl config migrate --write` first

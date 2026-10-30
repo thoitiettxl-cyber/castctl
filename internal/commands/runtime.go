@@ -317,10 +317,12 @@ func createOutbounds(ctx context.Context, mgr *outbound.Manager, single *profile
 	}
 	// No single config file means no config-defined outbounds:
 	// the profile is SourceNone (direct), and the explicit
-	// "direct" outbound below is its only outbound. A layout
-	// containing any legacy file never reaches here: LoadProfile
-	// refuses it layout-wide (for every profile name) before the
-	// runtime is built, so no legacy file is ever read here.
+	// "direct" outbound below is its only outbound. A load for a
+	// name without a single-file entry in a layout containing any
+	// legacy file never reaches here: LoadProfile refuses it
+	// layout-wide for such names before the runtime is built, so
+	// no legacy file is ever read here. A name WITH a
+	// single-file entry loads wholly and does reach here.
 	// Synthetic dialer outbound for direct endpoint references,
 	// created BEFORE Start (see defaultBuildRuntime).
 	if tag, _, err := identityForProfile(prof, single); err == nil {

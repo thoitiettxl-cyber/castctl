@@ -75,6 +75,14 @@ func keysOf(m map[string][]byte) []string {
 	return keys
 }
 
+func keysOfStr(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // TestMigrateFromCrossDir (--from): migration reads legacy profiles
 // ONLY from the source dir and writes the single config ONLY to the
 // destination dir. The source is never written (byte-for-byte
@@ -1134,11 +1142,13 @@ func TestMigrateStrayDefaultLegacyFile(t *testing.T) {
 
 // TestDetourTagForProfileWalksDetourChains (R2): detourTagForProfile
 // must walk detour chains (with a cycle guard) through detour
-// fields and selector/urltest member lists, and refuse authoring
-// ("") when EVERY resolution path terminates in an empty direct
-// outbound, an empty group, or an unusable urltest detour.
-// Authoring is kept when at least one path terminates in a usable
-// non-direct outbound.
+// fields and selector selected members, and refuse authoring ("")
+// when the chain terminates in an empty direct outbound, an empty
+// group, or an unusable urltest/block/bridge detour. Authoring is
+// kept when the chain terminates in a usable outbound. (Loop 4:
+// selector semantics changed from "any member dials" to upstream
+// "selected member dials" — see
+// TestDetourTagForProfileSelectorSelectedAndNonDialingTypes.)
 func TestDetourTagForProfileWalksDetourChains(t *testing.T) {
 	t.Parallel()
 	socks := func(tag, detour string) string {
@@ -1218,9 +1228,13 @@ func TestDetourTagForProfileWalksDetourChains(t *testing.T) {
 		"selector-direct-only": "sel-direct",
 		"selector-mixed":       "sel-mixed",
 		// Selector over urltest-only members: refuse (urltest
-		// unusable in this Manager); with a usable member: keep.
+		// unusable in this Manager). Selector over a urltest
+		// first member plus a usable member: refuse too (loop 4):
+		// upstream dials only the SELECTED member (default, else
+		// first), and the first member here is the unusable
+		// urltest — "any member dials" is not the rule.
 		"selector-urltest-only":  "",
-		"selector-urltest-mixed": "sel-ut-mix",
+		"selector-urltest-mixed": "",
 		// (iv) urltest detours: refuse regardless of members.
 		"urltest-direct": "",
 		"urltest-socks":  "",
@@ -1647,6 +1661,222 @@ func TestMigrateDNSRefusalDetourChains(t *testing.T) {
 			t.Errorf("authored detour = %q; want \"outer\" (the profile's outbound tag, chain and all)", detourOf(dnsOpts.Servers[0].Options))
 		}
 	})
+}
+
+// TestMigrateDNSRefusalBlockOutbounds (loop 4): a dns detour through
+// a block outbound can never dial (upstream block DialContext always
+// returns EPERM), so migrate must author no dns section when the
+// profile's outbound (a) IS an inline block, (b) is a selector whose
+// ONLY member is block, or (c) is a socks outbound whose detour is
+// block. Each case asserts no dns section is written/authored.
+func TestMigrateDNSRefusalBlockOutbounds(t *testing.T) {
+	t.Parallel()
+	assertNoAuthoring := func(t *testing.T, base, refusing string) {
+		t.Helper()
+		before, _ := os.ReadFile(filepath.Join(base, "config.json"))
+		for _, write := range []bool{false, true} {
+			result, err := Migrate(base, write)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Migrated || result.DNSAuthored || result.Reason != "already-migrated" {
+				t.Errorf("Migrate(write=%v) = %+v; want already-migrated, no authoring", write, result)
+			}
+			if !strings.Contains(result.DNSRefusal, `"`+refusing+`"`) {
+				t.Errorf("Migrate(write=%v) DNSRefusal = %q; want it to name %q", write, result.DNSRefusal, refusing)
+			}
+		}
+		after, _ := os.ReadFile(filepath.Join(base, "config.json"))
+		if string(after) != string(before) {
+			t.Error("migrate rewrote the file; want no write")
+		}
+		if doc := readJSONFile(t, filepath.Join(base, "config.json")); func() bool { _, ok := doc["dns"]; return ok }() {
+			t.Errorf("migrated config gained a dns section: %v", doc)
+		}
+	}
+	profile := func(outbound string) string {
+		return `{"profiles":{"p1":{"node_id":"N1","auto_approve":"off","auto_allow_once":false,"outbound":` + outbound + `}}}`
+	}
+	docWithOutbounds := func(outbound, outbounds string) string {
+		return `{"profiles":{"p1":{"node_id":"N1","auto_approve":"off","auto_allow_once":false,"outbound":` + outbound + `}},"outbounds":[` + outbounds + `]}`
+	}
+	t.Run("inline block", func(t *testing.T) {
+		t.Parallel()
+		base := BaseDir(t.TempDir())
+		writeFile(t, filepath.Join(base, "config.json"),
+			profile(`{"type":"block"}`), 0o600)
+		assertNoAuthoring(t, base, "p1")
+	})
+	t.Run("selector whose only member is block", func(t *testing.T) {
+		t.Parallel()
+		base := BaseDir(t.TempDir())
+		writeFile(t, filepath.Join(base, "config.json"),
+			docWithOutbounds(`"sel"`, `{"type":"block","tag":"blk"},{"type":"selector","tag":"sel","outbounds":["blk"]}`), 0o600)
+		assertNoAuthoring(t, base, "p1")
+	})
+	t.Run("socks detouring to block", func(t *testing.T) {
+		t.Parallel()
+		base := BaseDir(t.TempDir())
+		writeFile(t, filepath.Join(base, "config.json"),
+			docWithOutbounds(`"sg"`, `{"type":"socks","tag":"sg","server":"127.0.0.1","server_port":1080,"version":"5","detour":"blk"},{"type":"block","tag":"blk"}`), 0o600)
+		assertNoAuthoring(t, base, "p1")
+	})
+}
+
+// TestDetourTagForProfileSelectorSelectedAndNonDialingTypes (loop 4):
+// upstream selector DialContext dials ONLY its selected member
+// (default, else first member), so a selector is dialable only when
+// its SELECTED member is — not when any member is. Upstream block
+// and bridge outbounds never dial (DialContext always errors), so
+// neither may serve as a dns detour target. (A dns outbound needs
+// no walker case: sing-box 1.14.4 rejects it at parse time,
+// option/outbound.go:45, so the walker never sees one.)
+func TestDetourTagForProfileSelectorSelectedAndNonDialingTypes(t *testing.T) {
+	t.Parallel()
+	doc := `{"profiles":{
+		"sel-def-block":{"node_id":"N1","outbound":"sel-db"},
+		"sel-def-socks":{"node_id":"N1","outbound":"sel-ds"},
+		"sel-first-block":{"node_id":"N1","outbound":"sel-fb"},
+		"bridge-tag":{"node_id":"N1","outbound":"br1"},
+		"block-tag":{"node_id":"N1","outbound":"blk"}
+	},"outbounds":[
+		{"type":"block","tag":"blk"},
+		{"type":"socks","tag":"sg","server":"127.0.0.1","server_port":1080,"version":"5"},
+		{"type":"selector","tag":"sel-db","outbounds":["blk","sg"],"default":"blk"},
+		{"type":"selector","tag":"sel-ds","outbounds":["blk","sg"],"default":"sg"},
+		{"type":"selector","tag":"sel-fb","outbounds":["blk","sg"]},
+		{"type":"bridge","tag":"br1"}
+	]}`
+	cfg, err := ParseSingleConfig([]byte(doc), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		// Selected member is block: refuse, even though socks is a member.
+		"sel-def-block": "",
+		// Selected member is socks: keep, even though block is first.
+		"sel-def-socks": "sel-ds",
+		// No default: first member is block: refuse.
+		"sel-first-block": "",
+		"bridge-tag":      "",
+		"block-tag":       "",
+	}
+	for name, wantTag := range want {
+		if got := detourTagForProfile(cfg, cfg.Profiles[name]); got != wantTag {
+			t.Errorf("detourTagForProfile(%q) = %q; want %q", name, got, wantTag)
+		}
+	}
+}
+
+// TestMigrateFromSymlinkedProfileDir (loop 4): a symlinked
+// profiles/<name> directory holding a legacy config.json must
+// migrate like a real directory, never silently dropped.
+func TestMigrateFromSymlinkedProfileDir(t *testing.T) {
+	t.Parallel()
+	t.Run("symlinked profile migrates", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		src := filepath.Join(home, "muse-cli")
+		realWork := filepath.Join(home, "elsewhere", "work")
+		writeFile(t, filepath.Join(src, "config.json"), `{"auto_approve":"always","node_id":"MAIN-NODE"}`, 0o600)
+		writeFile(t, filepath.Join(realWork, "config.json"), `{"auto_approve":"off","node_id":"WORK-NODE"}`, 0o600)
+		if err := os.MkdirAll(filepath.Join(src, "profiles"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(realWork, filepath.Join(src, "profiles", "work")); err != nil {
+			t.Fatal(err)
+		}
+		dest := filepath.Join(home, "castctl")
+		written, err := MigrateFrom(src, dest, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !written.Migrated {
+			t.Fatalf("MigrateFrom = %+v; want migrated", written)
+		}
+		cfg, found, err := LoadSingleConfig(dest)
+		if err != nil || !found {
+			t.Fatalf("LoadSingleConfig(dest) = found=%v err=%v", found, err)
+		}
+		work, ok := cfg.Profiles["work"]
+		if !ok {
+			t.Fatalf("destination profiles = %v; want work migrated", cfg.ProfileNames())
+		}
+		if work.NodeID != "WORK-NODE" {
+			t.Errorf("work node_id = %q; want WORK-NODE", work.NodeID)
+		}
+	})
+	t.Run("unresolvable symlinked profile fails loudly", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		src := filepath.Join(home, "muse-cli")
+		writeFile(t, filepath.Join(src, "config.json"), `{"auto_approve":"always","node_id":"MAIN-NODE"}`, 0o600)
+		if err := os.MkdirAll(filepath.Join(src, "profiles"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(home, "no-such-dir"), filepath.Join(src, "profiles", "stale")); err != nil {
+			t.Fatal(err)
+		}
+		dest := filepath.Join(home, "castctl")
+		result, err := MigrateFrom(src, dest, true)
+		if err == nil {
+			t.Fatal("MigrateFrom with an unresolvable symlinked profile = nil error; want a failure naming the path")
+		}
+		// The CLI prints the result JSON (including Errors) before
+		// returning the generic count error, so the path surfaces
+		// through result.Errors, not err itself.
+		joined := ""
+		if result != nil {
+			joined = strings.Join(result.Errors, "\n")
+		}
+		if !strings.Contains(joined, "stale") {
+			t.Errorf("MigrateFrom errors = %q; want one naming the symlinked profile path", joined)
+		}
+	})
+}
+
+// TestMigrateFromSourceUntouchedHash (loop 4, Boss --from test iv):
+// the source directory must be untouched by a --from --write, proven
+// by pre/post sha256 of every source file, identical file set, and
+// identical modes (not just identical bytes).
+func TestMigrateFromSourceUntouchedHash(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	src := filepath.Join(home, "muse-cli")
+	writeFile(t, filepath.Join(src, "config.json"), `{"auto_approve":"always","node_id":"MAIN-NODE","vm_id":"FAKE-VM"}`, 0o600)
+	writeFile(t, filepath.Join(src, "cookies.txt"), "hatch_sess=FAKE-SESS\n", 0o600)
+	writeFile(t, filepath.Join(src, "profiles", "muse01", "config.json"), `{"auto_approve":"off","node_id":"MUSE01-NODE"}`, 0o640)
+	writeFile(t, filepath.Join(src, "profiles", "muse01", "cookies.txt"), "hatch_sess=FAKE-MUSE01\n", 0o600)
+	snapshot := func() map[string]string {
+		out := map[string]string{}
+		_ = filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return err
+			}
+			rel, _ := filepath.Rel(src, path)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			out[rel] = sha256Hex(data) + "|" + info.Mode().String()
+			return nil
+		})
+		return out
+	}
+	before := snapshot()
+	dest := filepath.Join(home, "castctl")
+	if _, err := MigrateFrom(src, dest, true); err != nil {
+		t.Fatal(err)
+	}
+	after := snapshot()
+	if len(before) != len(after) {
+		t.Fatalf("source file sets differ: before %v, after %v", keysOfStr(before), keysOfStr(after))
+	}
+	for rel, want := range before {
+		if after[rel] != want {
+			t.Errorf("source file %q changed (sha256|mode): before %q, after %q", rel, want, after[rel])
+		}
+	}
 }
 
 // TestMigrateFromCrossDirCollision (R5): with --from naming a
