@@ -95,6 +95,28 @@ describe('Button existing variants (regression guards)', () => {
     expect(markup).toContain('><span>Label</span></button>');
   });
 
+  it('secondary still forwards type="button" and wraps children in one span', () => {
+    const markup = renderToStaticMarkup(
+      <Button type="button" variant="secondary">
+        Label
+      </Button>
+    );
+    expect(markup).toContain('type="button"');
+    expect(markup).toContain('btn btn-secondary');
+    expect(markup).toContain('><span>Label</span></button>');
+  });
+
+  it('secondary with loading still forwards type="button" and forces disabled', () => {
+    const markup = renderToStaticMarkup(
+      <Button type="button" variant="secondary" loading>
+        Label
+      </Button>
+    );
+    expect(markup).toContain('type="button"');
+    expect(markup).toContain('disabled=""');
+    expect(markup).toContain('loading-spinner');
+  });
+
   it('default variant is still primary', () => {
     const markup = renderToStaticMarkup(<Button type="button">Label</Button>);
     expect(markup).toContain('btn btn-primary');
