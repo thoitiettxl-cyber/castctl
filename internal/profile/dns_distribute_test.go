@@ -606,3 +606,194 @@ func TestMigrateDistributeResultJSONShape(t *testing.T) {
 		t.Errorf("dry-run JSON = %s; want no dns_distribution_refusal on success", raw)
 	}
 }
+
+// TestMigrateDistributeZeroProfilesRefuses (F1a, loop 2, RED
+// first): a non-empty top-level dns section with zero profiles
+// must refuse, never silently delete the section. Both dry-run
+// and --write refuse with exit 2 and leave the file
+// byte-identical.
+func TestMigrateDistributeZeroProfilesRefuses(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	base := BaseDir(home)
+	path := writeDistributedFixture(t, base,
+		`{}`,
+		`[`+fakeSocksOutbound+`]`, "", distributedGlobalDNS)
+	before, _ := os.ReadFile(path)
+	for _, write := range []bool{false, true} {
+		result, err := Migrate(base, write)
+		if err == nil {
+			t.Fatalf("Migrate(write=%v) over zero profiles + a dns section must refuse, got result %+v", write, result)
+		}
+		if ExitCode(err) != 2 {
+			t.Errorf("Migrate(write=%v) exit code = %d; want 2", write, ExitCode(err))
+		}
+		if result == nil || result.DNSDistributed {
+			t.Errorf("Migrate(write=%v) result = %+v; want no distribution reported", write, result)
+		}
+		if result == nil || result.DNSDistributionRefusal == "" ||
+			!strings.Contains(result.DNSDistributionRefusal, "no profile") {
+			t.Errorf("Migrate(write=%v) refusal = %+v; want a recorded refusal naming that no profile would receive a block", write, result)
+		}
+		after, _ := os.ReadFile(path)
+		if string(before) != string(after) {
+			t.Errorf("Migrate(write=%v) rewrote the file on refusal", write)
+		}
+	}
+}
+
+// TestMigrateDistributeZeroProfilesEmptySectionRefuses (F1b,
+// loop 2, RED first): an empty ({}) top-level dns section with
+// zero profiles must refuse too — the empty-section guard must
+// not be the only guard, and no-profile deletion must not slip
+// past it.
+func TestMigrateDistributeZeroProfilesEmptySectionRefuses(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	base := BaseDir(home)
+	path := writeDistributedFixture(t, base,
+		`{}`,
+		`[`+fakeSocksOutbound+`]`, "", `{}`)
+	before, _ := os.ReadFile(path)
+	result, err := Migrate(base, true)
+	if err == nil {
+		t.Fatalf("distributing an empty dns section over zero profiles must refuse, got result %+v", result)
+	}
+	if ExitCode(err) != 2 {
+		t.Errorf("refusal exit code = %d; want 2", ExitCode(err))
+	}
+	if result == nil || result.DNSDistributionRefusal == "" {
+		t.Errorf("refusal = %+v; want a recorded distribution refusal", result)
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Error("refused migrate rewrote the file")
+	}
+}
+
+// TestMigrateZeroProfilesNoDNSSectionIsNoop (F1c, loop 2, RED
+// first): zero profiles and NO top-level dns section keeps the
+// existing no-op behaviour — already-migrated, no refusal, no
+// write.
+func TestMigrateZeroProfilesNoDNSSectionIsNoop(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	base := BaseDir(home)
+	path := writeDistributedFixture(t, base,
+		`{}`,
+		`[`+fakeSocksOutbound+`]`, "", "")
+	before, _ := os.ReadFile(path)
+	result, err := Migrate(base, true)
+	if err != nil {
+		t.Fatalf("zero profiles with no dns section must be a no-op, got error %v (result %+v)", err, result)
+	}
+	if result.Migrated || result.Reason != "already-migrated" || result.DNSDistributed || result.DNSDistributionRefusal != "" {
+		t.Errorf("no-op Migrate = %+v; want already-migrated, no distribution, no refusal", result)
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Error("no-op migrate rewrote the file")
+	}
+}
+
+// TestDistributeRefusesAllNilProfileEntries (F1d, loop 2, RED
+// first): when every profile entry is nil, no profile would
+// receive a block, so distribution must refuse at the function
+// level and leave the candidate's dns section untouched.
+// Parsed configs cannot produce nil entries (see the F5d test),
+// so this guard is pinned at the distribution function itself,
+// like the existing-block guard.
+func TestDistributeRefusesAllNilProfileEntries(t *testing.T) {
+	t.Parallel()
+	globalRaw := []byte(`{"servers":[{"tag":"gdns","type":"tcp","server":"127.0.0.1","server_port":5353,"detour":"proxy-sg"}],"final":"gdns"}`)
+	global, err := parseDNS(globalRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &SingleConfig{
+		Profiles: map[string]*Profile{"ghost": nil},
+		DNS:      global,
+		rawDNS:   globalRaw,
+	}
+	distributed, refusal, derr := distributeTopLevelDNS(cfg, "/base")
+	if derr == nil {
+		t.Fatalf("distributeTopLevelDNS with only nil profile entries must refuse, got distributed=%v refusal=%q", distributed, refusal)
+	}
+	if ExitCode(derr) != 2 {
+		t.Errorf("refusal exit code = %d; want 2", ExitCode(derr))
+	}
+	if refusal == "" || !strings.Contains(refusal, "no profile") {
+		t.Errorf("refusal = %q; want it to name that no profile would receive a block", refusal)
+	}
+	if distributed {
+		t.Error("distributed = true on refusal; want false")
+	}
+	if cfg.DNS != global || string(cfg.rawDNS) != string(globalRaw) {
+		t.Error("refused distribution mutated or removed the top-level dns section")
+	}
+	if cfg.Profiles["ghost"] != nil {
+		t.Error("refused distribution materialised the nil profile entry")
+	}
+}
+
+// TestMigrateDistributeSingleProfile (F1e, loop 2, RED first):
+// one real profile + a section distributes as before — the
+// no-recipient guard must not refuse a config that has a
+// recipient.
+func TestMigrateDistributeSingleProfile(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	base := BaseDir(home)
+	path := writeDistributedFixture(t, base,
+		`{"p1":{"outbound":"proxy-sg"}}`,
+		`[`+fakeSocksOutbound+`]`, "", distributedGlobalDNS)
+	written, err := Migrate(base, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !written.Migrated || written.Reason != "dns-distributed" || !written.DNSDistributed {
+		t.Errorf("write = %+v; want migrated + dns-distributed + dns_distributed", written)
+	}
+	doc := readJSONFile(t, path)
+	if _, ok := doc["dns"]; ok {
+		t.Errorf("distributed config still carries a top-level dns section: %v", doc)
+	}
+	servers := dnsServers(t, profileDNSDoc(t, path, "p1"))
+	if servers[0]["detour"] != "proxy-sg" {
+		t.Errorf("profile p1 detour = %v; want proxy-sg", servers[0]["detour"])
+	}
+}
+
+// TestMigrateDistributeSelectorMemberOtherInlineDetourRefuses
+// (F2, loop 2, RED first): a detour naming another profile's
+// inline outbound, reached only as a selector member, must
+// refuse distribution. The tag resolves to no global node, so
+// it is not in the profile's reachable set; keeping it would
+// write a file that fails closed at runtime ("outbound detour
+// not found").
+func TestMigrateDistributeSelectorMemberOtherInlineDetourRefuses(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	base := BaseDir(home)
+	selector := `{"type":"selector","tag":"sel","outbounds":["proxy-sg","profile:b"]}`
+	path := writeDistributedFixture(t, base,
+		`{"a":{"outbound":"sel"},"b":{"outbound":{"type":"socks","tag":"profile:b","server":"127.0.0.1","server_port":1082,"version":"5"}}}`,
+		`[`+fakeSocksOutbound+`,`+selector+`]`, "",
+		`{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353,"detour":"profile:b"}],"final":"dns1"}`)
+	before, _ := os.ReadFile(path)
+	result, err := Migrate(base, true)
+	if err == nil {
+		t.Fatalf("distribution of a detour naming another profile's inline outbound must refuse, got result %+v", result)
+	}
+	if ExitCode(err) != 2 {
+		t.Errorf("refusal exit code = %d; want 2", ExitCode(err))
+	}
+	if result == nil || !strings.Contains(result.DNSDistributionRefusal, `"a"`) ||
+		!strings.Contains(result.DNSDistributionRefusal, "profile:b") {
+		t.Errorf("refusal = %+v; want it to name profile a and detour profile:b", result)
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Error("refused migrate rewrote the file")
+	}
+}

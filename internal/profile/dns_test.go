@@ -92,6 +92,22 @@ func TestPerProfileDNSCrossProfileDetourRejected(t *testing.T) {
 	}
 }
 
+func TestPerProfileDNSSelectorMemberOtherInlineDetourRejected(t *testing.T) {
+	// F2 (loop 2, RED first): the same cross-profile detour,
+	// reached only as a selector member of the profile's own
+	// outbound, must also be rejected. The member tag resolves
+	// to no global node (it is another profile's inline
+	// outbound), so it must not enter the reachable set merely
+	// by being queued as a member.
+	data := singleFileJSON(
+		`{"a":{"outbound":"sel","dns":{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353,"detour":"profile:b"}],"final":"dns1"}},"b":{"outbound":{"type":"socks","tag":"profile:b","server":"127.0.0.1","server_port":1082,"version":"5"}}}`,
+		`[{"type":"socks","tag":"proxy-sg","server":"127.0.0.1","server_port":1080,"version":"5"},{"type":"selector","tag":"sel","outbounds":["proxy-sg","profile:b"]}]`, "", "",
+	)
+	if _, err := ParseSingleConfig([]byte(data), "/base"); err == nil {
+		t.Fatal("per-profile dns detour naming another profile's inline tag via a selector member must be rejected, got nil error")
+	}
+}
+
 func TestPerProfileDNSCoexistenceRejected(t *testing.T) {
 	data := singleFileJSON(
 		`{"muse01":{"outbound":"proxy-sg","dns":{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353,"detour":"proxy-sg"}],"final":"dns1"}}}`,
