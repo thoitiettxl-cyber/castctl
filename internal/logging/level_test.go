@@ -60,26 +60,17 @@ func TestSummarizeErr(t *testing.T) {
 	}
 }
 
-// TestSafeErrForLevel: trace renders the redacted body
-// (truncated to 500 runes after redaction); every level above
-// trace renders the summary only.
+// TestSafeErrForLevel: at EVERY level including trace, an
+// error carrying a body renders the summary only (loop-5
+// ruling supersedes the loop-4 trace allowance for the
+// redacted-then-truncated body).
 func TestSafeErrForLevel(t *testing.T) {
 	t.Parallel()
 	gw := &conn.GatewayError{Status: 500, Payload: `{"token": "LOGFIX-LEVEL-83af10"} and ` + strings.Repeat("tailword ", 200)}
-	trace := logging.SafeErrForLevel(gw, singlog.LevelTrace)
-	if strings.Contains(trace, "LOGFIX-LEVEL-83af10") {
-		t.Errorf("trace rendering %q contains the fixture value", trace)
-	}
-	if !strings.Contains(trace, "[redacted]") {
-		t.Errorf("trace rendering %q, want a [redacted] marker", trace)
-	}
-	if len([]rune(trace)) > 520 {
-		t.Errorf("trace rendering is %d runes, want the redacted-then-truncated bound (<=520)", len([]rune(trace)))
-	}
-	for _, level := range []singlog.Level{singlog.LevelDebug, singlog.LevelInfo, singlog.LevelWarn, singlog.LevelError} {
+	for _, level := range []singlog.Level{singlog.LevelTrace, singlog.LevelDebug, singlog.LevelInfo, singlog.LevelWarn, singlog.LevelError} {
 		got := logging.SafeErrForLevel(gw, level)
 		if strings.Contains(got, "tailword") || strings.Contains(got, "LOGFIX-LEVEL") {
-			t.Errorf("level %v rendering %q carries body bytes above trace", level, got)
+			t.Errorf("level %v rendering %q carries body bytes", level, got)
 		}
 		if !strings.Contains(got, "status=500") || !strings.Contains(got, "body_length=") {
 			t.Errorf("level %v rendering %q, want status + class + length only", level, got)
@@ -112,12 +103,12 @@ func TestSlogBridgeAboveTraceSummarizesBody(t *testing.T) {
 	}
 }
 
-// TestSlogBridgeTraceShowsRedactedTruncatedBody drives the same
-// shape through the bridge at trace level (a slog level below
-// Debug maps to sing-box trace): the captured line carries the
-// redacted-then-truncated body, bounded in length, with the
-// fixture value absent.
-func TestSlogBridgeTraceShowsRedactedTruncatedBody(t *testing.T) {
+// TestSlogBridgeTraceSummarizesBody drives the same shape
+// through the bridge at trace level (a slog level below Debug
+// maps to sing-box trace): the captured line carries the
+// allowlist summary, exactly as above trace — no body bytes
+// at trace either (loop-5 ruling).
+func TestSlogBridgeTraceSummarizesBody(t *testing.T) {
 	var buf bytes.Buffer
 	h, err := logging.NewFactory(context.Background(), logging.Settings{Level: "trace"}, &buf)
 	if err != nil {
@@ -132,14 +123,11 @@ func TestSlogBridgeTraceShowsRedactedTruncatedBody(t *testing.T) {
 	if !strings.Contains(got, "trace-body-probe") {
 		t.Fatalf("capture %q, want the trace probe line (level mapping or suppression?)", got)
 	}
-	if strings.Contains(got, "LOGFIX-LEVELTRACE-83af10") {
-		t.Errorf("trace capture contains the fixture value")
+	if strings.Contains(got, "LOGFIX-LEVELTRACE-83af10") || strings.Contains(got, "tailword") {
+		t.Errorf("trace capture %q carries body bytes", got)
 	}
-	if !strings.Contains(got, "[redacted]") {
-		t.Errorf("trace capture %q, want a [redacted] marker", got)
-	}
-	if len(got) > 700 {
-		t.Errorf("trace capture is %d bytes, want the redacted-then-truncated body bounded (<=700)", len(got))
+	if !strings.Contains(got, "status=500") || !strings.Contains(got, "body_length=") {
+		t.Errorf("trace capture %q, want status + class + length only", got)
 	}
 }
 
