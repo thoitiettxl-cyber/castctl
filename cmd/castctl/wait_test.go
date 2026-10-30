@@ -30,7 +30,10 @@ import (
 type scriptedHandler struct {
 	mu sync.Mutex
 
-	history   []string // chat.history bodies, in call order; the last repeats
+	history   []string // chat.history bodies, in call order; the last repeats.
+	// Send tests script two identical pre-send bodies: deliverSend
+	// reads the baseline twice (limit=1, then a limit=20 confirming
+	// read) before sending, so the post-send body must be third.
 	subscribe [][]byte // chat.subscribe record batches, in call order; the last repeats
 	approvals string   // egress.approvals body
 	recent    string   // egress.approvals body for --recent
@@ -463,6 +466,7 @@ func TestSendNoWait(t *testing.T) {
 	h := &scriptedHandler{
 		history: []string{
 			historyBody(userEv(100, "old")),
+			historyBody(userEv(100, "old")),
 			historyBody(userEv(100, "old"), userEv(110, "hello")),
 		},
 	}
@@ -511,6 +515,7 @@ func TestSendThreadScope(t *testing.T) {
 	h := &scriptedHandler{
 		history: []string{
 			historyBody(userEv(100, "old")),
+			historyBody(userEv(100, "old")),
 			historyBody(userEv(100, "old"), userEv(110, "hello")),
 		},
 	}
@@ -532,6 +537,7 @@ func TestSendNodeIDOrigins(t *testing.T) {
 		home := fakeHome(t, defaultSingleConfig)
 		h := &scriptedHandler{
 			history: []string{
+				historyBody(userEv(100, "old")),
 				historyBody(userEv(100, "old")),
 				historyBody(userEv(100, "old"), userEv(110, "hello")),
 			},
@@ -570,6 +576,7 @@ func TestSendNodeIDOrigins(t *testing.T) {
 		h2 := &scriptedHandler{
 			history: []string{
 				historyBody(userEv(100, "old")),
+				historyBody(userEv(100, "old")),
 				historyBody(userEv(100, "old"), userEv(110, "hello")),
 			},
 		}
@@ -587,6 +594,7 @@ func TestSendNodeIDOrigins(t *testing.T) {
 		t.Setenv("MUSE_NODE_ID", "env-node-123")
 		h := &scriptedHandler{
 			history: []string{
+				historyBody(userEv(100, "old")),
 				historyBody(userEv(100, "old")),
 				historyBody(userEv(100, "old"), userEv(110, "hello")),
 			},
@@ -609,6 +617,7 @@ func TestSendNodeIDOrigins(t *testing.T) {
 		home := fakeHome(t, `{"default_profile":"default","profiles":{"default":{"node_id":"file-node-9"}}}`)
 		h := &scriptedHandler{
 			history: []string{
+				historyBody(userEv(100, "old")),
 				historyBody(userEv(100, "old")),
 				historyBody(userEv(100, "old"), userEv(110, "hello")),
 			},
@@ -633,6 +642,7 @@ func TestSendNodeIDOrigins(t *testing.T) {
 		t.Setenv("MUSE_NODE_ID", "has space")
 		h := &scriptedHandler{
 			history: []string{
+				historyBody(userEv(100, "old")),
 				historyBody(userEv(100, "old")),
 				historyBody(userEv(100, "old"), userEv(110, "hello")),
 			},
