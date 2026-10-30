@@ -700,6 +700,17 @@ func (w *Waiter) FeedRecord(record []byte) *Outcome {
 // on any failure the terminal is kept. On success the ignored
 // terminal is cleared and the result maps SUSPECT_FAILED to
 // failed, anything else stored to done.
+//
+// A terminal held for "subagents" settles on a reply proof too
+// (redesign decision D2, deliberate deviation from muse-cli
+// 0.6.1, which refuses the subagents reason outright): the two
+// signals together — a stored root terminal plus a completed
+// reply in history after the boundary — release a wait the live
+// stream left held on a quiet stream. The reply filter does not
+// attribute replies to main vs subagent (see doc.go), so a
+// subagent's own completed reply can release the hold; that
+// residual is carried, not hidden. FAILED terminals never settle
+// here: they take the replayed-failed path only.
 func (w *Waiter) Settle(replies []Reply) *Outcome {
 	s, ok := w.IgnoredTerminal()
 	if w.result != nil || !ok {
@@ -708,7 +719,7 @@ func (w *Waiter) Settle(replies []Reply) *Outcome {
 	if w.boundaryUnknown {
 		return nil
 	}
-	if w.ignoredReason == "subagents" || failed[s] {
+	if failed[s] {
 		return nil
 	}
 	if len(replies) == 0 {

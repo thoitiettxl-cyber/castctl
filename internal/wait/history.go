@@ -154,6 +154,15 @@ func LatestUserSeq(ctx context.Context, r HistoryReader, limits []int, afterSeq 
 // propagates: the caller retries at its own level (the final
 // read gets two attempts).
 //
+// Exhausted reports window exhaustion: has_more was still true
+// at the largest limit, so events older than the window —
+// including replies — were never seen. The caller must make the
+// loss visible (the finish note) instead of silently reporting
+// an empty reply list: exhaustion is a bound, not a proof of
+// "no replies". Exhausted is false when the windows close
+// (empty window, has_more false, or the window reaches the
+// boundary) or when no window was read.
+//
 // Edge: a window with events but no mappable seq (all events
 // non-maps, or maps without a numeric seq) yields upto=0, which
 // caps RepliesAfter at seq 0 and drops every reply. Python
@@ -162,13 +171,14 @@ func LatestUserSeq(ctx context.Context, r HistoryReader, limits []int, afterSeq 
 // case is unobservable for well-formed server history, and the
 // Go behavior is kept as-is and documented here rather than
 // special-cased.
-func HistoryReplies(ctx context.Context, r HistoryReader, limits []int, afterSeq int64) ([]Reply, error) {
+func HistoryReplies(ctx context.Context, r HistoryReader, limits []int, afterSeq int64) ([]Reply, bool, error) {
 	var lastEvents []any
 	var lastUpto *int64
-	for _, limit := range limits {
+	exhausted := false
+	for i, limit := range limits {
 		events, hasMore, err := r.ReadHistory(ctx, limit)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		lastEvents = events
 		if len(events) == 0 {
@@ -183,9 +193,12 @@ func HistoryReplies(ctx context.Context, r HistoryReader, limits []int, afterSeq
 		if oldestSeq(events) <= afterSeq {
 			break
 		}
+		if i == len(limits)-1 {
+			exhausted = true
+		}
 	}
 	replies, _ := RepliesAfter(lastEvents, afterSeq, lastUpto)
-	return replies, nil
+	return replies, exhausted, nil
 }
 
 // readWindow reads one window with one retry on a transport

@@ -180,22 +180,34 @@ func TestHistoryReplies(t *testing.T) {
 		200: {{events: []any{asst(150, "completed", "too new", nil)}, hasMore: true}},
 		500: {{events: []any{asst(120, "completed", "reply", nil), asst(90, "completed", "old", nil)}, hasMore: false}},
 	}}
-	replies, err := HistoryReplies(ctx, h, []int{200, 500}, 100)
+	replies, exhausted, err := HistoryReplies(ctx, h, []int{200, 500}, 100)
 	if err != nil {
 		t.Fatalf("err = %v", err)
+	}
+	if exhausted {
+		t.Error("exhausted must be false when the windows close")
 	}
 	if len(replies) != 1 || replies[0].Seq != 120 || replies[0].Text != "reply" {
 		t.Errorf("replies = %+v", replies)
 	}
 	// Empty window: no replies, no upper bound beyond afterSeq.
 	h2 := &scriptHistory{def: historyResp{events: []any{}, hasMore: false}}
-	replies, err = HistoryReplies(ctx, h2, []int{200}, 100)
-	if err != nil || len(replies) != 0 {
-		t.Errorf("replies = %+v err=%v", replies, err)
+	replies, exhausted, err = HistoryReplies(ctx, h2, []int{200}, 100)
+	if err != nil || len(replies) != 0 || exhausted {
+		t.Errorf("replies = %+v err=%v exhausted=%v", replies, err, exhausted)
+	}
+	// Exhaustion: has_more still true at the largest limit.
+	h4 := &scriptHistory{byLimit: map[int][]historyResp{
+		200: {{events: []any{userEv(150)}, hasMore: true}},
+		500: {{events: []any{userEv(150)}, hasMore: true}},
+	}}
+	replies, exhausted, err = HistoryReplies(ctx, h4, []int{200, 500}, 100)
+	if err != nil || len(replies) != 0 || !exhausted {
+		t.Errorf("replies = %+v err=%v exhausted=%v, want exhausted=true", replies, err, exhausted)
 	}
 	// Error propagates for the caller to retry.
 	h3 := &scriptHistory{def: historyResp{err: errTransport}}
-	if _, err := HistoryReplies(ctx, h3, []int{200}, 100); err == nil {
+	if _, _, err := HistoryReplies(ctx, h3, []int{200}, 100); err == nil {
 		t.Error("read error must propagate")
 	}
 }

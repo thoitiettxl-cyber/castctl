@@ -42,6 +42,14 @@ const (
 	// DefaultCheckEvery is the safety-net cadence: an
 	// unconditional server state check.
 	DefaultCheckEvery = 60 * time.Second
+	// DefaultSettlePollInterval is how often a held ignored
+	// terminal is re-proved against history while the stream is
+	// quiet (redesign decision D3). A settle proof that finds no
+	// reply is retried at this cadence, driven by the monotonic
+	// clock, so a late reply never waits for a count-0 event or
+	// a server replay. Each re-poll spends at most one history
+	// proof, bounded by historyCtx like every other read.
+	DefaultSettlePollInterval = 5 * time.Second
 	// DefaultTimeout is the wait --timeout default.
 	DefaultTimeout = 600 * time.Second
 )
@@ -145,13 +153,19 @@ type Config struct {
 	FinalReadFloor   time.Duration
 	LagWindow        time.Duration
 	LagPoll          time.Duration
-	HistoryLimits    []int
-	Approver         approvals.Approver
-	Recheck          func() bool
-	UserStop         func() bool
-	Clock            Clock
-	Dial             func(ctx context.Context) (Subscriber, error)
-	History          HistoryReader
+	// SettlePollInterval is the re-poll cadence for a held
+	// ignored terminal (see DefaultSettlePollInterval). Zero
+	// takes the default; a negative value is clamped to the
+	// default, never a disable: disabling the re-poll would
+	// reintroduce the quiet-stream stall.
+	SettlePollInterval time.Duration
+	HistoryLimits      []int
+	Approver           approvals.Approver
+	Recheck            func() bool
+	UserStop           func() bool
+	Clock              Clock
+	Dial               func(ctx context.Context) (Subscriber, error)
+	History            HistoryReader
 
 	// beforeFinalGuard is a test-only hook, invoked synchronously
 	// on the Runner's goroutine immediately before the final
@@ -223,6 +237,11 @@ type Runner struct {
 	settleTried    bool
 	settleKey      string
 	pendingErr     error
+	// lastSettleAttempt is the monotonic time the last settle
+	// proof started (or was evaluated and skipped as
+	// gate-forbidden). The settle re-poll (shouldStop) measures
+	// the cadence from it.
+	lastSettleAttempt time.Time
 }
 
 // NewRunner validates cfg and builds the Runner. Dial and
@@ -265,6 +284,9 @@ func NewRunner(cfg Config) (*Runner, error) {
 	if cfg.LagPoll == 0 {
 		cfg.LagPoll = DefaultLagPoll
 	}
+	if cfg.SettlePollInterval == 0 {
+		cfg.SettlePollInterval = DefaultSettlePollInterval
+	}
 	if cfg.StateCheckBudget < 0 {
 		cfg.StateCheckBudget = DefaultStateCheckBudget
 	}
@@ -282,6 +304,9 @@ func NewRunner(cfg Config) (*Runner, error) {
 	}
 	if cfg.LagPoll < 0 {
 		cfg.LagPoll = DefaultLagPoll
+	}
+	if cfg.SettlePollInterval < 0 {
+		cfg.SettlePollInterval = DefaultSettlePollInterval
 	}
 	// A nil or explicitly empty HistoryLimits means "unset":
 	// an empty slice would otherwise disable every history
@@ -312,9 +337,31 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 		r.boundaryKnown = true
 		r.waiter.SetBoundary(r.afterSeq, false, false)
 	} else {
-		afterSeq, known, derived, err := DeriveBoundary(ctx, r.cfg.History, r.cfg.HistoryLimits)
+		// Boundary derivation runs under the wait deadline:
+		// the deadline is computed above but the caller's ctx
+		// carries no deadline of its own, and an unbounded
+		// derivation could otherwise consume wall time past a
+		// short --timeout before any subscription starts. A
+		// deadline expiry during derivation is not an error
+		// return: the boundary is unknown, the loop below does
+		// not run, and finish yields KindTimeout. An AuthError
+		// still propagates, and a dead caller ctx still
+		// returns the caller's error.
+		dctx, cancel := context.WithDeadline(ctx, r.deadline)
+		afterSeq, known, derived, err := DeriveBoundary(dctx, r.cfg.History, r.cfg.HistoryLimits)
+		cancel()
 		if err != nil {
-			return nil, err
+			if isAuthError(err) {
+				return nil, err
+			}
+			if ctx.Err() != nil {
+				return nil, err
+			}
+			if dctx.Err() != nil {
+				afterSeq, known, derived = 0, false, false
+			} else {
+				return nil, err
+			}
 		}
 		r.afterSeq = afterSeq
 		r.boundaryKnown = known
@@ -351,6 +398,21 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 		r.onlineArmed = false
 		if err := r.subscribeOnce(ctx); err != nil {
 			return nil, err
+		}
+		if r.pendingErr != nil {
+			return nil, r.pendingErr
+		}
+		// Post-batch settle (redesign decision D3): a subscribe
+		// iteration that delivered no record — a quiet stream,
+		// or a resubscribe the server did not replay — must
+		// still re-prove a held terminal. trySettle is a no-op
+		// when no terminal is held, and the per-iteration
+		// throttle keeps a record-fed attempt from being
+		// repeated at this point in the same iteration.
+		if r.waiter.Result() == nil && !r.settleTried {
+			if err := r.trySettle(ctx); err != nil {
+				return nil, err
+			}
 		}
 		if r.pendingErr != nil {
 			return nil, r.pendingErr
@@ -524,6 +586,18 @@ func (r *Runner) shouldStop(ctx context.Context) func() bool {
 		if r.cfg.CheckEvery > 0 && r.clock.Now().Sub(r.lastCheck) > r.cfg.CheckEvery {
 			return true
 		}
+		// Settle re-poll (redesign decision D3): end the stream
+		// when a held terminal's proof is due, so the loop
+		// re-proves it against history instead of waiting for
+		// a new record, a count-0 event, or a server replay.
+		// No terminal held, or no proof ever attempted, means
+		// no re-poll: lastSettleAttempt is stamped by every
+		// settlePending evaluation, so the cadence measures
+		// from the last attempt, never from the wait start.
+		if _, ok := r.waiter.IgnoredTerminal(); ok && r.cfg.SettlePollInterval > 0 &&
+			r.clock.Now().Sub(r.lastSettleAttempt) >= r.cfg.SettlePollInterval {
+			return true
+		}
 		return false
 	}
 }
@@ -645,6 +719,15 @@ func (r *Runner) trySettle(ctx context.Context) error {
 // cancellation: the ctx check sits immediately before each
 // apply site, so a cancelled wait settles nothing.
 func (r *Runner) settlePending(ctx context.Context, pending string) error {
+	r.lastSettleAttempt = r.clock.Now()
+	// No history read is spent on a proof the gates already
+	// forbid: with an unknown boundary neither Settle nor
+	// AcceptReplayedFailed can accept, so the attempt is
+	// evaluated and skipped. (A live root running clears the
+	// flag in Feed before any later attempt.)
+	if r.waiter.BoundaryUnknown() {
+		return nil
+	}
 	hctx, cancel := r.historyCtx(ctx, 100*time.Millisecond, nil)
 	defer cancel()
 	if failed[pending] {
@@ -669,7 +752,7 @@ func (r *Runner) settlePending(ctx context.Context, pending string) error {
 		}
 		return nil
 	}
-	replies, err := HistoryReplies(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
+	replies, _, err := HistoryReplies(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -829,9 +912,10 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 	}
 	var replies []Reply
 	finalReadFailed := false
+	finalExhausted := false
 	for attempt := 0; attempt < 2; attempt++ {
 		hctx, cancel := r.historyCtx(ctx, r.cfg.FinalReadFloor, nil)
-		rs, err := HistoryReplies(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
+		rs, exhausted, err := HistoryReplies(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
 		cancel()
 		if err == nil {
 			// A read that succeeded after cancellation
@@ -841,6 +925,7 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 				return nil, ctx.Err()
 			}
 			replies = rs
+			finalExhausted = exhausted
 			finalReadFailed = false
 			break
 		}
@@ -874,7 +959,7 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 			}
 			capDur := remaining
 			hctx, cancel := r.historyCtx(ctx, 100*time.Millisecond, &capDur)
-			rs, err := HistoryReplies(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
+			rs, _, err := HistoryReplies(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
 			cancel()
 			if err != nil {
 				if ctx.Err() != nil {
@@ -898,6 +983,17 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 		detail, _ = r.waiter.Status()
 	}
 	note := ""
+	if finalExhausted && !r.waiter.BoundaryUnknown() {
+		// Window exhaustion is visible, never silent: the
+		// window bound may have hidden older replies. The
+		// boundary-unknown and final-read-failed notes below
+		// win over it when they apply.
+		largest := 0
+		if n := len(r.cfg.HistoryLimits); n > 0 {
+			largest = r.cfg.HistoryLimits[n-1]
+		}
+		note = fmt.Sprintf("history window exhausted at %d events; older replies may be missed; run `castctl wait` again", largest)
+	}
 	if r.waiter.BoundaryUnknown() {
 		replies = nil
 		note = "turn-end boundary unknown: history could not be read, so no replies are reported; run `castctl wait` again"
