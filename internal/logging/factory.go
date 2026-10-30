@@ -211,48 +211,167 @@ func (s *safeWriter) Write(p []byte) (int, error) {
 // create.
 //
 // The ONLY guard is the minimal A7 check: refuse, before
-// opening, when the path EQUALS a refused path (castctl's own
-// config file or a cookies file). Equality is checked on
-// resolved/canonical paths, so a symlinked alias of the
-// config file is still refused; that resolution is part of
-// the guard, not an extra restriction. There are NO other
-// path restrictions: symlinks to other targets and
-// non-regular files are NOT refused (Boss correction #2).
-// A path that cannot be resolved (e.g. a not-yet-existing
-// file) is compared by its absolute, cleaned form.
+// opening, when the output file's IDENTITY equals a refused
+// file's identity (castctl's own config file or a cookies
+// file). Identity is the resolved path AND the file's
+// dev/ino: a hardlink to a refused file shares its inode
+// while its path differs, and a symlink to a not-yet-existing
+// refused target resolves (through its parent directory) to
+// the refused location. After opening, the identity is
+// RE-CHECKED against freshly collected refused identities
+// via fstat, and the open is refused (file closed, no line
+// written) if the opened file is a refused file — this closes
+// the check-then-open swap window as far as an identity check
+// can. There are NO other path restrictions: symlinks to
+// other targets and non-regular files are NOT refused (Boss
+// correction #2).
 func openLogFile(path string, refused []string) (*os.File, error) {
-	resolved, err := resolveLogPath(path)
+	outID, ok := collectFileIdentity(path)
+	if !ok {
+		return nil, errors.New("logging: cannot resolve log output path")
+	}
+	refusedIDs := collectRefusedIdentities(refused)
+	for _, id := range refusedIDs {
+		if identitiesEqual(outID, id) {
+			return nil, errRefusedLogOutput
+		}
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, err
 	}
+	// Re-check after open: a swap between the check above and
+	// the open that redirected the path at a refused file is
+	// caught here, before any line is written. Refused
+	// identities are collected fresh (a refused file created
+	// or replaced in the window is seen as it now is), and
+	// the opened file's own fstat identity is compared too.
+	if fi, statErr := f.Stat(); statErr == nil {
+		freshRefused := collectRefusedIdentities(refused)
+		outID2, ok2 := collectFileIdentity(path)
+		for _, id := range freshRefused {
+			if id.info != nil && os.SameFile(fi, id.info) {
+				_ = f.Close()
+				return nil, errRefusedLogOutput
+			}
+			if ok2 && identitiesEqual(outID2, id) {
+				_ = f.Close()
+				return nil, errRefusedLogOutput
+			}
+		}
+	} else {
+		_ = f.Close()
+		return nil, statErr
+	}
+	return f, nil
+}
+
+// errRefusedLogOutput is the fixed refusal error: it names no
+// path, so a refused output never echoes a config/cookies path.
+var errRefusedLogOutput = errors.New("logging: refusing to open a protected file as the log output")
+
+// fileIdentity is one path's identity for the A7 guard: its
+// symlink-resolved location plus, when the file exists, its
+// os.FileInfo (dev/ino comparison via os.SameFile).
+type fileIdentity struct {
+	resolved string
+	info     os.FileInfo
+}
+
+// collectFileIdentity resolves path and stats the resolved
+// location. It reports false only when the path cannot be
+// resolved at all (a symlink cycle); an absent file resolves
+// fine (info is nil) via its parent directory.
+func collectFileIdentity(path string) (fileIdentity, bool) {
+	resolved, err := resolveLogPath(path)
+	if err != nil {
+		return fileIdentity{}, false
+	}
+	id := fileIdentity{resolved: resolved}
+	if fi, err := os.Stat(resolved); err == nil {
+		id.info = fi
+	}
+	return id, true
+}
+
+// collectRefusedIdentities resolves every non-empty refused
+// path; an unresolvable entry is skipped (it cannot be proven
+// identical, and the output path's own resolution failure
+// already fails closed above).
+func collectRefusedIdentities(refused []string) []fileIdentity {
+	var out []fileIdentity
 	for _, r := range refused {
 		if r == "" {
 			continue
 		}
-		rresolved, err := resolveLogPath(r)
-		if err != nil {
-			continue
-		}
-		if resolved == rresolved {
-			return nil, errors.New("logging: refusing to open a protected file as the log output")
+		if id, ok := collectFileIdentity(r); ok {
+			out = append(out, id)
 		}
 	}
-	return os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	return out
+}
+
+// identitiesEqual reports whether two identities denote the
+// same file: the same resolved location (covers an absent
+// target, which has no inode yet), or the same existing file
+// by dev/ino (covers hardlinks, whose paths differ).
+func identitiesEqual(a, b fileIdentity) bool {
+	if a.resolved != "" && a.resolved == b.resolved {
+		return true
+	}
+	return a.info != nil && b.info != nil && os.SameFile(a.info, b.info)
 }
 
 // resolveLogPath returns the canonical form of path for
-// equality comparison: the absolute path with symlinks
-// evaluated when the path exists, otherwise the absolute
-// cleaned path.
+// identity comparison: symlinks are resolved component by
+// component, including a final symlink whose target does not
+// exist yet — the longest existing prefix is resolved and
+// the remainder appended, so a symlink to an absent target
+// resolves to the target's location instead of to the link's
+// own path. A symlink cycle is an error (fail closed).
 func resolveLogPath(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
 	}
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+	return resolveIdentity(abs, 0)
+}
+
+func resolveIdentity(cur string, depth int) (string, error) {
+	if depth > 40 {
+		return "", errors.New("logging: too many symlinks resolving log path")
+	}
+	fi, err := os.Lstat(cur)
+	if err != nil {
+		// Absent: resolve the parent, then append the base
+		// name. The parent chain terminates at the root,
+		// which always exists.
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return cur, nil
+		}
+		resolvedParent, err := resolveIdentity(parent, depth+1)
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(resolvedParent, filepath.Base(cur)), nil
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(cur)
+		if err != nil {
+			return cur, nil
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(cur), target)
+		}
+		return resolveIdentity(filepath.Clean(target), depth+1)
+	}
+	// Exists and is not itself a symlink: EvalSymlinks
+	// resolves any symlinked ancestors.
+	if resolved, err := filepath.EvalSymlinks(cur); err == nil {
 		return resolved, nil
 	}
-	return abs, nil
+	return cur, nil
 }
 
 // Close closes the factory and, for file output, the log file.

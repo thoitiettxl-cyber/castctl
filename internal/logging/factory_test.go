@@ -656,3 +656,101 @@ func TestFactoryOutputStdout(t *testing.T) {
 		t.Errorf("stdout capture %q, want the probe line", data)
 	}
 }
+
+// TestFactoryRefusedPathsByIdentity: the A7 guard compares FILE
+// IDENTITY (dev/ino), not resolved path strings. A hardlink to a
+// refused file shares its inode while its path differs, and a
+// symlink to a not-yet-existing refused target resolves (through
+// the parent directory) to the refused location while EvalSymlinks
+// on either side fails. Both bypasses must be refused BEFORE any
+// line is written, leaving the protected files byte- and
+// mode-identical. All paths are scratch fixtures under t.TempDir;
+// the refused cookies path in the absent-target case does not
+// exist before the call and must not be created by it.
+func TestFactoryRefusedPathsByIdentity(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	cookiePath := filepath.Join(dir, "cookies.txt")
+	origConfig := "FIXTURE-CONFIG\n"
+	origCookie := "FIXTURE-COOKIE\n"
+	if err := os.WriteFile(configPath, []byte(origConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cookiePath, []byte(origCookie), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refused := []string{configPath, cookiePath}
+
+	assertProtected := func() {
+		t.Helper()
+		for p, want := range map[string]string{configPath: origConfig, cookiePath: origCookie} {
+			data, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != want {
+				t.Errorf("protected file %s = %q, want untouched %q", p, data, want)
+			}
+			info, err := os.Stat(p)
+			if err != nil || info.Mode().Perm() != 0o600 {
+				t.Errorf("protected file %s mode = %v, want 0600 untouched", p, info)
+			}
+		}
+	}
+	// refusedOutput asserts NewFactory errors for out, and that
+	// emitting through a factory (if one were returned) could not
+	// have happened: the error alone is the guard.
+	refusedOutput := func(name, out string) {
+		t.Helper()
+		var buf bytes.Buffer
+		if _, err := NewFactory(context.Background(), Settings{Level: "trace", Output: out, Refused: refused}, &buf); err == nil {
+			t.Errorf("NewFactory(Output=%s %q) = nil, want error", name, out)
+			return
+		}
+		assertProtected()
+	}
+
+	// Direct equality (already covered by TestFactoryRefusedPaths;
+	// repeated here so this test alone covers all five shapes).
+	refusedOutput("direct-config", configPath)
+
+	// Hardlink to the config file: same inode, different path.
+	hardConfig := filepath.Join(dir, "hard-config.json")
+	if err := os.Link(configPath, hardConfig); err != nil {
+		t.Fatal(err)
+	}
+	refusedOutput("hardlink-config", hardConfig)
+	// Hardlink to the cookies file.
+	hardCookie := filepath.Join(dir, "hard-cookies.txt")
+	if err := os.Link(cookiePath, hardCookie); err != nil {
+		t.Fatal(err)
+	}
+	refusedOutput("hardlink-cookies", hardCookie)
+
+	// Symlink to an ABSENT cookies target: the refused path does
+	// not exist yet; the link must still be refused, and the
+	// target must not be created.
+	absentTarget := filepath.Join(dir, "cookies-absent.txt")
+	absentLink := filepath.Join(dir, "absent-link.txt")
+	if err := os.Symlink(absentTarget, absentLink); err != nil {
+		t.Fatal(err)
+	}
+	refusedAbsent := []string{configPath, absentTarget}
+	var buf bytes.Buffer
+	if _, err := NewFactory(context.Background(), Settings{Level: "trace", Output: absentLink, Refused: refusedAbsent}, &buf); err == nil {
+		t.Error("NewFactory(Output=symlink-to-absent-cookies-target) = nil, want error")
+	}
+	if _, err := os.Lstat(absentTarget); err == nil {
+		t.Errorf("absent refused target %s was created by the refused open", absentTarget)
+	}
+	assertProtected()
+
+	// Symlink to the EXISTING config file (path-string guard
+	// already catches this; identity must catch it too).
+	alias := filepath.Join(dir, "alias2.json")
+	if err := os.Symlink(configPath, alias); err != nil {
+		t.Fatal(err)
+	}
+	refusedOutput("symlink-existing-config", alias)
+}
