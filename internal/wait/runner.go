@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -260,8 +261,13 @@ type Runner struct {
 	// proofReplies holds the replies of the last successful
 	// settle proof, if any: the evidence the turn was decided
 	// on. finish reconciles the final read against it
-	// (loop-2 F3): a proof reply the final read no longer
-	// contains is reported, with a note, never silently lost.
+	// (loop-2 F3, loop-3 H1): a proof reply the final read
+	// no longer contains is reported, with a note, never
+	// silently lost — except when the final read itself
+	// fails: reconciliation is then skipped and the proof is
+	// lost to the fail-closed KindTimeout, with only the
+	// generic final-read note (a stated exception, not a
+	// silent loss).
 	proofReplies []Reply
 }
 
@@ -435,8 +441,9 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 		// when no terminal is held, and the per-iteration
 		// throttle keeps a record-fed attempt from being
 		// repeated at this point in the same iteration. No
-		// proof starts past the deadline: the endgame's final
-		// read follows at once.
+		// settlePending proof starts past the deadline: the
+		// endgame's final read follows at once (endgame
+		// reads are floor-bounded, not deadline-guarded).
 		if r.waiter.Result() == nil && !r.settleTried && r.clock.Now().Before(r.deadline) {
 			if err := r.trySettle(ctx); err != nil {
 				return nil, err
@@ -742,13 +749,15 @@ func (r *Runner) trySettle(ctx context.Context) error {
 // when they settle the turn, are captured as proofReplies for
 // the endgame reconciliation in finish.
 func (r *Runner) settlePending(ctx context.Context, pending string) error {
-	// No proof starts past the deadline (loop-2 F9): the
-	// endgame's final read follows at once, bounded by its own
-	// floor. A proof that starts just before the deadline may
-	// still overshoot it by at most the historyCtx floor per
-	// window read (100ms, ≤3 reads per proof). A zero deadline
-	// means Run never set one (a direct call in tests): the
-	// guard does not fire.
+	// No settlePending proof starts past the deadline
+	// (loop-2 F9; the finish endgame is excepted — its
+	// reads run after the deadline on floor budgets, by
+	// design): the endgame's final read follows at once,
+	// bounded by its own floor. A proof that starts just
+	// before the deadline may still overshoot it by at most
+	// the historyCtx floor per window read (100ms, ≤3 reads
+	// per proof). A zero deadline means Run never set one
+	// (a direct call in tests): the guard does not fire.
 	if !r.deadline.IsZero() && !r.clock.Now().Before(r.deadline) {
 		return nil
 	}
@@ -840,7 +849,10 @@ func (r *Runner) checkState(ctx context.Context) error {
 	// No state check starts past the deadline (loop-2 F9):
 	// noteFailure reaches here unguarded, so the guard lives
 	// here, not at the call sites. A zero deadline means Run
-	// never set one (a direct call in tests): no guard.
+	// never set one (a direct call in tests): no guard. The
+	// finish endgame is not a state check and is excepted:
+	// its reads run after the deadline on floor budgets, by
+	// design.
 	if !r.deadline.IsZero() && !r.clock.Now().Before(r.deadline) {
 		return nil
 	}
@@ -941,7 +953,11 @@ func (r *Runner) historyCtx(ctx context.Context, floor time.Duration, cap *time.
 // reconciliation against the settle proof and the awaited turn,
 // fail-closed 124, boundary suppression, then the result object.
 // The boundary-unknown rule follows the code, not the comment: kind
-// is unchanged, only replies are suppressed.
+// is unchanged, only replies are suppressed. The endgame reads
+// run after the wait deadline by design, on floor budgets
+// (FinalReadFloor, lag window, 100ms re-check floor): the
+// deadline guards in settlePending/checkState cover
+// settle-pending and state-check proofs only, never finish.
 func (r *Runner) finish(ctx context.Context) (*Result, error) {
 	kind := KindTimeout
 	detail := ""
@@ -1055,12 +1071,16 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 	// turn, so replies after it are not this turn's; and a
 	// proof reply the final read no longer contains is the
 	// settled evidence, reported with a note rather than
-	// silently dropped. The newest-user re-check is best
-	// effort on a transport failure (the reads stand
-	// unverified); auth and cancellation propagate. It costs
-	// at most one LatestUserSeq proof (≤3 window reads,
-	// 100ms floor each) and runs only when there is something
-	// to reconcile.
+	// silently dropped, whether the final read is empty or
+	// not (loop-3 H1). When the final read fails,
+	// reconciliation is skipped entirely (see the guard
+	// below): the proof is then lost to the fail-closed
+	// KindTimeout, a stated exception. The newest-user
+	// re-check is best effort on a transport failure (the
+	// reads stand unverified); auth and cancellation
+	// propagate. It costs at most one LatestUserSeq proof
+	// (≤3 window reads, 100ms floor each) and runs only when
+	// there is something to reconcile.
 	reconcileNote := ""
 	if !finalReadFailed && !r.waiter.BoundaryUnknown() && (len(replies) > 0 || len(r.proofReplies) > 0) {
 		newestUser, haveNewestUser := int64(0), false
@@ -1091,18 +1111,63 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 			}
 			return kept
 		}
+		excludedFollowUp := false
 		if len(replies) > 0 {
 			filtered := withinTurn(replies)
-			if len(filtered) < len(replies) {
-				reconcileNote = "replies after a newer user message were excluded"
-			}
+			excludedFollowUp = len(filtered) < len(replies)
 			replies = filtered
 		}
-		if len(replies) == 0 && len(r.proofReplies) > 0 {
-			if restored := withinTurn(append([]Reply(nil), r.proofReplies...)); len(restored) > 0 {
-				replies = restored
-				reconcileNote = "final read missed the settle proof reply; reporting the proof reply"
+		// Restore missing proof replies into the final read
+		// whether it is empty or not (loop-3 H1): a proof
+		// reply the final read no longer contains is the
+		// settled evidence and is reported, never silently
+		// dropped — restoring only into an empty final read
+		// let the F2 gate be bypassed in the outcome
+		// whenever the final read retained any reply.
+		// Restored replies are within-turn filtered and
+		// deduped by (seq, message_id) against the final
+		// read (the final read's text wins on a key
+		// collision), then merged oldest-first. Note
+		// precedence, single-note design: the restore note
+		// wins over the follow-up-exclusion note when both
+		// apply — the exclusion is visible in the reply
+		// list itself (the follow-up replies are absent),
+		// while a restored reply would otherwise be
+		// unexplained. The exclusion note survives only
+		// when nothing was restored.
+		restoredAny := false
+		if len(r.proofReplies) > 0 {
+			var missing []Reply
+			for _, rp := range withinTurn(append([]Reply(nil), r.proofReplies...)) {
+				present := false
+				for _, kept := range replies {
+					if kept.Seq == rp.Seq && kept.MessageID == rp.MessageID {
+						present = true
+						break
+					}
+				}
+				if !present {
+					missing = append(missing, rp)
+				}
 			}
+			if len(missing) > 0 {
+				replies = append(replies, missing...)
+				slices.SortStableFunc(replies, func(a, b Reply) int {
+					if a.Seq < b.Seq {
+						return -1
+					}
+					if a.Seq > b.Seq {
+						return 1
+					}
+					return 0
+				})
+				restoredAny = true
+			}
+		}
+		if restoredAny {
+			reconcileNote = "final read missed the settle proof reply; reporting the proof reply"
+		} else if excludedFollowUp {
+			reconcileNote = "replies after a newer user message were excluded"
 		}
 	}
 	if finalReadFailed && kind == KindDone {
