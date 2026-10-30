@@ -1334,19 +1334,37 @@ func TestMigrateAuthorsDNSWhenSingleDetourServesAllProfiles(t *testing.T) {
 	}
 	assertAuthoredDNS(t, base)
 
-	// A further run is already-migrated: the authored section is
-	// carried verbatim, never re-authored, and the file is untouched.
+	// A further run distributes the authored section (G4):
+	// the top-level section moves into profile entries and
+	// is removed. A third run is already-migrated: the
+	// distributed file is untouched, never re-authored.
 	st2, _ := os.Stat(path)
 	again, err := Migrate(base, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if again.Migrated || again.Reason != "already-migrated" || again.DNSAuthored {
-		t.Errorf("second run = %+v; want already-migrated, no re-authoring", again)
+	if !again.Migrated || again.Reason != "dns-distributed" || !again.DNSDistributed || again.DNSAuthored {
+		t.Errorf("second run = %+v; want migrated + dns-distributed, no re-authoring", again)
 	}
 	st3, _ := os.Stat(path)
-	if !st2.ModTime().Equal(st3.ModTime()) {
-		t.Error("second run rewrote the file; want no write")
+	if st2.ModTime().Equal(st3.ModTime()) {
+		t.Error("second run did not rewrite the file; want the distribution write")
+	}
+	distributedBytes, _ := os.ReadFile(path)
+	third, err := Migrate(base, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Migrated || third.Reason != "already-migrated" || third.DNSDistributed || third.DNSAuthored {
+		t.Errorf("third run = %+v; want already-migrated, no distribution, no re-authoring", third)
+	}
+	st4, _ := os.Stat(path)
+	if !st3.ModTime().Equal(st4.ModTime()) {
+		t.Error("third run rewrote the file; want no write")
+	}
+	afterThird, _ := os.ReadFile(path)
+	if string(distributedBytes) != string(afterThird) {
+		t.Error("third run changed the distributed file bytes")
 	}
 	_ = st1
 }
@@ -2207,7 +2225,13 @@ func TestMigrateFromSymlinkAlias(t *testing.T) {
 	})
 }
 
-func TestMigrateCarriesExistingDNSVerbatim(t *testing.T) {
+func TestMigrateDistributesExistingDNSSection(t *testing.T) {
+	// G4 supersedes verbatim carryover for the top-level dns
+	// section: `config migrate` distributes an existing
+	// section into profile entries and removes the top-level
+	// key (see distributeTopLevelDNS). Other sections are
+	// still carried verbatim. Dry-run reports the
+	// distribution and writes nothing.
 	t.Parallel()
 	home := t.TempDir()
 	base := BaseDir(home)
@@ -2218,16 +2242,44 @@ func TestMigrateCarriesExistingDNSVerbatim(t *testing.T) {
 	writeFile(t, path, `{"profiles":{"p1":`+entry+`},"outbounds":[`+validOutbounds["socks"]+`],"dns":`+dnsJSON+`}`, 0o600)
 	before, _ := os.ReadFile(path)
 
+	dry, err := Migrate(base, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dry.WouldWrite || !dry.DNSDistributed {
+		t.Errorf("dry-run over existing dns = %+v; want would_write + dns_distributed", dry)
+	}
+	afterDry, _ := os.ReadFile(path)
+	if string(before) != string(afterDry) {
+		t.Error("dry-run modified the file")
+	}
+
 	result, err := Migrate(base, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Migrated || result.Reason != "already-migrated" || result.DNSAuthored || result.DNSRefusal != "" {
-		t.Errorf("migrate over existing dns = %+v; want already-migrated, verbatim carryover", result)
+	if !result.Migrated || result.Reason != "dns-distributed" || !result.DNSDistributed || result.DNSAuthored {
+		t.Errorf("migrate over existing dns = %+v; want migrated + dns-distributed, no authoring", result)
 	}
-	after, _ := os.ReadFile(path)
-	if string(before) != string(after) {
-		t.Errorf("migrate rewrote the file with an existing dns section:\nbefore: %s\nafter: %s", before, after)
+	cfg, found, err := LoadSingleConfig(base)
+	if err != nil || !found {
+		t.Fatalf("LoadSingleConfig = found=%v err=%v; want the distributed file to load", found, err)
+	}
+	if cfg.DNS != nil {
+		t.Error("distributed config still carries a top-level dns section")
+	}
+	opts, err := cfg.Profiles["p1"].ParsedDNS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opts.Servers) != 1 || opts.Servers[0].Tag != "dns-remote" || opts.Final != "dns-remote" {
+		t.Fatalf("distributed dns = %+v; want one server dns-remote, final dns-remote", opts)
+	}
+	if d := detourOf(opts.Servers[0].Options); d != "proxy-sg" {
+		t.Errorf("distributed detour = %q; want proxy-sg kept", d)
+	}
+	if len(cfg.Outbounds) != 1 || cfg.Outbounds[0].Tag != "proxy-sg" {
+		t.Errorf("outbounds = %+v; want the socks outbound carried verbatim", cfg.Outbounds)
 	}
 }
 
