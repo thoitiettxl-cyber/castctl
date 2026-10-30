@@ -975,6 +975,7 @@ func TestMigrateProfilesAbsentSingleFormatShapes(t *testing.T) {
 		{"empty dns object", `{"dns":{}}`},
 		{"dns with servers", `{"dns":{"servers":[{"tag":"d1","type":"tcp","server":"127.0.0.1","server_port":5353}],"final":"d1"}}`},
 		{"mixed outbounds", `{"outbounds":[{"type":"direct","tag":"d"},{"tag":"px"}]}`},
+		{"mixed outbounds, unshaped first", `{"outbounds":[{"tag":"px"},{"type":"direct","tag":"d"}]}`},
 		{"mixed endpoints", `{"endpoints":[{"type":"wireguard","tag":"wg1"},{"tag":"px"}]}`},
 		{"mixed wireguard_dns", `{"wireguard_dns":{"wg1":["10.2.0.1",123]}}`},
 	}
@@ -1009,6 +1010,7 @@ func TestMigrateProfilesAbsentSingleFormatShapes(t *testing.T) {
 		{"empty outbounds array", `{"outbounds":[]}`},
 		{"non-shaped keys", `{"dns":"junk","outbounds":"junk"}`},
 		{"outbound object without type", `{"outbounds":[{"tag":"px"}]}`},
+		{"empty log object", `{"log":{}}`},
 		{"empty file object", `{}`},
 	}
 	for _, tc := range migrating {
@@ -1080,6 +1082,146 @@ func TestMigrateRefusesMixedOutboundsSingleFormatBaseFile(t *testing.T) {
 		if string(before) != string(after) {
 			t.Errorf("Migrate(write=%v) rewrote the file on refusal", write)
 		}
+	}
+}
+
+// TestMigrateRefusesMixedLogSingleFormatBaseFile: a
+// profiles-absent base file whose log object mixes a log-block
+// key with an unknown key must refuse in both modes, exit 2,
+// byte-identical — the log-block key must not be deleted by a
+// fresh migration. Covers one log-block key plus an unknown
+// key, and all four log-block keys plus an unknown key.
+func TestMigrateRefusesMixedLogSingleFormatBaseFile(t *testing.T) {
+	t.Parallel()
+	docs := []struct{ name, doc string }{
+		{"one log-block key plus unknown", `{"log":{"level":"warning","bogus":1}}`},
+		{"all four log-block keys plus unknown", `{"log":{"disabled":false,"level":"warning","output":"stdout","timestamp":true,"bogus":1}}`},
+	}
+	for _, tc := range docs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			base := BaseDir(home)
+			path := filepath.Join(base, "config.json")
+			writeFile(t, path, tc.doc, 0o600)
+			before, _ := os.ReadFile(path)
+			for _, write := range []bool{false, true} {
+				result, err := Migrate(base, write)
+				if err == nil {
+					t.Fatalf("Migrate(write=%v) over a mixed log file must refuse, got result %+v", write, result)
+				}
+				if ExitCode(err) != 2 {
+					t.Errorf("Migrate(write=%v) exit code = %d; want 2", write, ExitCode(err))
+				}
+				if result == nil || result.Migrated || result.WouldWrite {
+					t.Errorf("Migrate(write=%v) result = %+v; want no write reported", write, result)
+				}
+				// The in-memory node_id generated for the candidate
+				// must never be reported: nothing was written, so no
+				// id was persisted (RT-2 rule).
+				if len(result.Generated) != 0 {
+					t.Errorf("Migrate(write=%v) generated = %v; want none on a refused run", write, result.Generated)
+				}
+				for _, mp := range result.Profiles {
+					if mp.NodeIDGenerated {
+						t.Errorf("Migrate(write=%v) profile %q reports node_id_generated; want false on a refused run", write, mp.Name)
+					}
+					for _, w := range mp.Warnings {
+						if w == "node_id generated" {
+							t.Errorf("Migrate(write=%v) profile %q warning %q; want no generated claim on a refused run", write, mp.Name, w)
+						}
+					}
+				}
+				if !strings.Contains(err.Error(), `"profiles"`) || !strings.Contains(err.Error(), `"log"`) {
+					t.Errorf("refusal = %q; want it to name the missing profiles key and the log section at risk", err.Error())
+				}
+				after, _ := os.ReadFile(path)
+				if string(before) != string(after) {
+					t.Errorf("Migrate(write=%v) rewrote the file on refusal", write)
+				}
+			}
+		})
+	}
+}
+
+// TestMigrateRefusesMixedWireguardDNSSingleFormatBaseFile: a
+// profiles-absent base file whose wireguard_dns map mixes a
+// string value with a non-string value must refuse in both
+// modes, exit 2, byte-identical — the string entry must not be
+// deleted by a fresh migration.
+func TestMigrateRefusesMixedWireguardDNSSingleFormatBaseFile(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	base := BaseDir(home)
+	doc := `{"wireguard_dns":{"wg1":["10.2.0.1",123]}}`
+	path := filepath.Join(base, "config.json")
+	writeFile(t, path, doc, 0o600)
+	before, _ := os.ReadFile(path)
+	for _, write := range []bool{false, true} {
+		result, err := Migrate(base, write)
+		if err == nil {
+			t.Fatalf("Migrate(write=%v) over a mixed wireguard_dns file must refuse, got result %+v", write, result)
+		}
+		if ExitCode(err) != 2 {
+			t.Errorf("Migrate(write=%v) exit code = %d; want 2", write, ExitCode(err))
+		}
+		if result == nil || result.Migrated || result.WouldWrite {
+			t.Errorf("Migrate(write=%v) result = %+v; want no write reported", write, result)
+		}
+		if len(result.Generated) != 0 {
+			t.Errorf("Migrate(write=%v) generated = %v; want none on a refused run", write, result.Generated)
+		}
+		for _, mp := range result.Profiles {
+			if mp.NodeIDGenerated {
+				t.Errorf("Migrate(write=%v) profile %q reports node_id_generated; want false on a refused run", write, mp.Name)
+			}
+			for _, w := range mp.Warnings {
+				if w == "node_id generated" {
+					t.Errorf("Migrate(write=%v) profile %q warning %q; want no generated claim on a refused run", write, mp.Name, w)
+				}
+			}
+		}
+		if !strings.Contains(err.Error(), `"profiles"`) || !strings.Contains(err.Error(), `"wireguard_dns"`) {
+			t.Errorf("refusal = %q; want it to name the missing profiles key and the wireguard_dns section at risk", err.Error())
+		}
+		after, _ := os.ReadFile(path)
+		if string(before) != string(after) {
+			t.Errorf("Migrate(write=%v) rewrote the file on refusal", write)
+		}
+	}
+}
+
+// TestMigrateFromRefusesMixedLogSingleFormatDestination
+// (R1): the guard protects the DESTINATION file under --from
+// too — a destination whose log object mixes a log-block key
+// with an unknown key is refused, unchanged, and the source
+// directory is untouched.
+func TestMigrateFromRefusesMixedLogSingleFormatDestination(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	src := filepath.Join(home, "muse-cli")
+	writeFile(t, filepath.Join(src, "config.json"), `{"auto_approve":"always","node_id":"MAIN-NODE"}`, 0o600)
+	srcBefore, _ := os.ReadFile(filepath.Join(src, "config.json"))
+	dest := filepath.Join(home, "castctl")
+	destDoc := `{"log":{"level":"warning","bogus":1}}`
+	destPath := filepath.Join(dest, "config.json")
+	writeFile(t, destPath, destDoc, 0o600)
+	destBefore, _ := os.ReadFile(destPath)
+	result, err := MigrateFrom(src, dest, true)
+	if err == nil {
+		t.Fatalf("MigrateFrom over a mixed-log destination must refuse, got result %+v", result)
+	}
+	if ExitCode(err) != 2 {
+		t.Errorf("exit code = %d; want 2", ExitCode(err))
+	}
+	if !strings.Contains(err.Error(), `"profiles"`) || !strings.Contains(err.Error(), `"log"`) {
+		t.Errorf("refusal = %q; want it to name the missing profiles key and the log section at risk", err.Error())
+	}
+	if after, _ := os.ReadFile(destPath); string(destBefore) != string(after) {
+		t.Error("refused --from migrate rewrote the destination file")
+	}
+	if after, _ := os.ReadFile(filepath.Join(src, "config.json")); string(srcBefore) != string(after) {
+		t.Error("refused --from migrate modified the source file")
 	}
 }
 
