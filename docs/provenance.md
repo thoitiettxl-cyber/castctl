@@ -310,12 +310,17 @@ and the level gate `level <= f.level`, with Fatal exiting the
 process and Panic panicking; `log/id.go:9-30` defines
 `ContextWithNewID`/`IDFromContext` (a random uint32 carried in
 the context). Upstream `log/nop.go` is the NOP factory.
-Castctl deviations from sing-box defaults, all deliberate and
-documented in `docs/config.md`: default level warn (not trace),
-`"stdout"` rejected, log files created by castctl at mode 0600
-(sing-box's observable factory opens files at 0644,
-`log/observable.go:79`), and `DisableColor` not exposed in the
-schema. Mechanism: castctl does NOT call `log.New` (its
+Castctl deviations from sing-box, all deliberate and documented
+in `docs/config.md`: log files are created by castctl at mode
+0600 (sing-box's observable factory opens files at 0644,
+`log/observable.go:79`), a pre-existing log file is never
+chmodded, the factory refuses a log output equal to castctl's
+own config/cookie files (no such guard exists upstream), every
+formatted line passes the redaction boundary at the writer
+(upstream has no redaction), and `DisableColor` is not exposed
+in the schema. Defaults are sing-box's own (empty level means
+trace, empty output means stderr, `"stdout"` accepted) — no
+castctl-imposed level or path default exists. Mechanism: castctl does NOT call `log.New` (its
 `"stderr"` branch writes the real `os.Stderr` unconditionally
 and its file path opens at 0644 on `Start()`); it calls
 `log.NewDefaultFactory` with a caller-supplied writer and owns

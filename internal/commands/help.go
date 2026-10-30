@@ -30,7 +30,8 @@ Global options:
                    warn, error, fatal, or panic ("warning" is accepted
                    as an alias for warn). Precedence: --log-level,
                    then the "log" block in config.json, then the
-                   default warn. An invalid level exits 2. See
+                   sing-box default (trace, stderr). An invalid level
+                   exits 2. See
                    "Log" in docs/config.md.
   --version        print "castctl <version>" and exit.
   --help, -h       print this help and exit.

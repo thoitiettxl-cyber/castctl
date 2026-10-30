@@ -58,32 +58,43 @@ directory with no config file is *not* a legacy layout.
 ## The `log` section
 
 The top-level `log` block configures castctl's logging, following
-sing-box's `LogOptions` semantics (see `docs/provenance.md` §1 for
+sing-box's `LogOptions` semantics exactly (see `docs/provenance.md` §1 for
 the upstream citations). One resolved level governs every
 emission — sing-box's own logs and castctl's own events — through
-a single factory. All four fields are optional; an absent block
-means the defaults below.
+a single factory. The block is optional; all four fields are
+optional. An absent block, or an absent field, means the
+sing-box default below: castctl imposes no default of its own,
+and there is no hardcoded default log path — the user sets
+`output` freely, or leaves it empty for stderr.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `disabled` | bool | `false` | `true` suppresses ALL log output (castctl and sing-box), including fatal/panic lines. Normal command output (stdout JSON/text) and config errors are unaffected. |
-| `level` | string | `"warn"` | One of `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `panic`. sing-box's `"warning"` spelling is accepted as an alias for `warn`. Any other value (including `"TRACE"`) is a config error (exit 2). |
-| `output` | string | `"stderr"` | `""` or `"stderr"` writes to stderr; any other string is a file path, opened for append. `"stdout"` is rejected (exit 2): log output must never mix with command output on stdout. |
+| `level` | string | `"trace"` | One of `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `panic`. sing-box's `"warning"` spelling is accepted as an alias for `warn`. Any other value (including `"TRACE"`) is a config error (exit 2), and the value is never echoed. An empty level means trace, exactly as sing-box parses it. |
+| `output` | string | `""` (stderr) | `""` or `"stderr"` writes to stderr; `"stdout"` writes to stdout; any other string is a file path, opened for append. |
 | `timestamp` | bool | `false` | Timestamp format, sing-box style: console output carries a full timestamp when `true` and a relative elapsed-seconds prefix when `false`; file output carries no timestamp when `false` and a full timestamp when `true`. |
 
 Precedence: the `--log-level LEVEL` global CLI flag beats the
-config block, which beats the default (`warn`). An invalid
+config block, which beats the sing-box default (`trace`). An invalid
 `--log-level` value exits 2 and never echoes the value. There is
 no `--verbose`/`--debug` flag.
 
 File output: castctl owns log-file creation — files are created
-with mode `0600`, appended to (never truncated), and a
-pre-existing looser file is narrowed to `0600` (a stricter mode
-is never widened). Parent directories are not created; an
-uncreatable path is a startup error (exit 2). There is no log
-rotation. Console colour follows sing-box's default (coloured
-level labels on a terminal); there is no `disable_color` field
-in the schema.
+with mode `0600` and appended to (never truncated); a
+pre-existing file is appended to without any chmod (castctl
+never changes the mode of a file it did not create). Parent
+directories are not created; an uncreatable path is a startup
+error (exit 2). There is no log rotation. Console colour follows
+sing-box's default (coloured level labels on a terminal); there
+is no `disable_color` field in the schema.
+
+The only path guard: the factory refuses (exit 2, before
+opening) a log output whose resolved path equals castctl's own
+config file or any of its cookies files — including through a
+symlinked alias, since the comparison is on resolved paths.
+There are no other path restrictions: symlinks to other targets
+and non-regular files are not refused. A refused output is a
+startup error; the protected file is left untouched.
 
 Secrets: log lines never carry cookies, tokens, URLs with query
 credentials, WireGuard keys, or header values. Secret-bearing
