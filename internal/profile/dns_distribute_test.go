@@ -931,6 +931,22 @@ func TestMigrateRefusesProfilesAbsentSingleFormatBaseFile(t *testing.T) {
 		if result == nil || result.Migrated || result.WouldWrite {
 			t.Errorf("Migrate(write=%v) result = %+v; want no write reported", write, result)
 		}
+		// The in-memory node_id generated for the candidate
+		// must never be reported: nothing was written, so no
+		// id was persisted (RT-2 rule).
+		if len(result.Generated) != 0 {
+			t.Errorf("Migrate(write=%v) generated = %v; want none on a refused run", write, result.Generated)
+		}
+		for _, mp := range result.Profiles {
+			if mp.NodeIDGenerated {
+				t.Errorf("Migrate(write=%v) profile %q reports node_id_generated; want false on a refused run", write, mp.Name)
+			}
+			for _, w := range mp.Warnings {
+				if w == "node_id generated" {
+					t.Errorf("Migrate(write=%v) profile %q warning %q; want no generated claim on a refused run", write, mp.Name, w)
+				}
+			}
+		}
 		if !strings.Contains(err.Error(), `"profiles"`) || !strings.Contains(err.Error(), `"dns"`) || !strings.Contains(err.Error(), `"outbounds"`) {
 			t.Errorf("refusal = %q; want it to name the missing profiles key and the dns/outbounds sections at risk", err.Error())
 		}

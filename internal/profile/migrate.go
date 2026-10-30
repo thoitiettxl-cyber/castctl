@@ -578,6 +578,22 @@ func MigrateFrom(sourceDir, destDir string, write bool) (*MigrateResult, error) 
 	// the migration without one.
 	if refusal, gerr := refuseSingleFormatBaseFile(destDir); gerr != nil {
 		result.Errors = append(result.Errors, refusal)
+		// The node_id generation above ran in memory only and
+		// nothing is written on this refusal: never report an
+		// id as generated (the RT-2 rule — a reported id must
+		// be a persisted id). Dry-run results carry no
+		// generated claim, so this scrub is a no-op there.
+		result.Generated = nil
+		for i := range result.Profiles {
+			result.Profiles[i].NodeIDGenerated = false
+			kept := result.Profiles[i].Warnings[:0]
+			for _, w := range result.Profiles[i].Warnings {
+				if w != "node_id generated" {
+					kept = append(kept, w)
+				}
+			}
+			result.Profiles[i].Warnings = kept
+		}
 		return result, gerr
 	}
 	if _, refusing, ok := singleDNSDetour(candidate); !ok && refusing != "" {
