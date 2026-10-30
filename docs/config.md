@@ -123,12 +123,18 @@ Secrets: log lines never carry cookies, tokens, URLs with query
 credentials, WireGuard keys, or header values. Secret-bearing
 fields are excluded from log emissions by construction, and
 every free-form log field passes a redaction boundary
-(`internal/logging`). The events castctl emits at debug/trace
+(`internal/logging`). Server response bodies are redacted
+before any truncation (redact the full text, then cut), so a
+secret fragment straddling a truncation cut cannot survive
+below a redaction floor. Above trace, an error carrying a
+server body renders in logs as status code + error class +
+body length only; the redacted-then-truncated body appears
+only at trace level. The events castctl emits at debug/trace
 are: `dns_source` (resolved DNS source + first server tag),
 `outbound_chain` (profile + detour-chain tags), dial
 start/done with a per-connection ID, `tls_alpn` (negotiated
 protocol string only), `ws_handshake` (parsed status code or
-token only), and retries (attempt counter + redacted error).
+token only), and retries (attempt counter + summarised error).
 
 `config migrate` carries an existing `log` block into the new
 file verbatim and never invents one: a migrated file without a
