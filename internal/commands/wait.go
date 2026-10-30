@@ -810,12 +810,22 @@ func eventSeq(raw any) int64 {
 // never re-sent. The node_id is sent verbatim with an empty
 // capabilities object, exactly as Python's deliver().
 func deliverSend(ctx context.Context, gw conn.Gateway, prof *profile.Profile, text, thread string, ackTimeout time.Duration) (*int64, int64, error) {
-	baseline := int64(0)
-	if events, err := callHistoryEvents(ctx, gw, 1, thread); err == nil {
-		baseline = maxSeq(events)
-	} else if !swallowableHistoryError(err) {
+	// The baseline MUST be proved: it is the max seq in history
+	// before this message is sent, and the ack poll only trusts
+	// user events above it. A failed baseline read fails the
+	// send before anything is sent — falling back to baseline 0
+	// would let the poll match an older turn's identical text
+	// and return its seq as this turn's boundary, resurfacing
+	// the previous turn's replies as this turn's (the
+	// reply-reuse bug). The read itself is already boundedly
+	// retried by the connector (chat.history is a safe GET);
+	// no second attempt is made here, because the message has
+	// not been sent yet and failing is safe.
+	events, err := callHistoryEvents(ctx, gw, 1, thread)
+	if err != nil {
 		return nil, 0, err
 	}
+	baseline := maxSeq(events)
 	params := map[string]any{
 		"items":        []any{map[string]any{"type": "text", "text": text}},
 		"node_id":      prof.NodeID,
