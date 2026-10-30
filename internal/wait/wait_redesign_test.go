@@ -693,11 +693,12 @@ func TestWaitRedesignT16RepliesFromHistoryOnly(t *testing.T) {
 }
 
 // T17 replacement (D6 non-attribution pin): the reply filter
-// reads NO agent/root fields. History events carrying
+// does not EXCLUDE by agent/root fields. History events carrying
 // agent_id/root_agent_id/active_subagent_count shapes —
-// subagent-shaped or main-shaped — are returned alike; the
-// filter neither excludes nor orders by them. Attribution
-// itself stays [UNVERIFIED] pending live capture (U-A2/U-A6).
+// subagent-shaped or main-shaped — are returned alike by
+// RepliesAfter; the identity fields are recorded on the Reply
+// for the Settle proof only (loop-2 F2). Attribution itself
+// stays [UNVERIFIED] pending live capture (U-A2/U-A6).
 func TestWaitRedesignT17NoAttributionInReplyFilter(t *testing.T) {
 	subagentShaped := asst(11, "completed", "subagent-shaped", map[string]any{
 		"agent_id": "S", "root_agent_id": "R", "active_subagent_count": 1,

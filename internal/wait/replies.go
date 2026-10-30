@@ -14,13 +14,29 @@ import (
 // Reply is one final assistant reply after the boundary: the
 // oldest-first, deduped, cleaned text of a completed
 // message.assistant event, kept only when it has text, unanswered
-// widgets, or media.
+// widgets, or media. AgentID/RootAgentID carry the payload's
+// agent identity when the event states it as strings; they are
+// recorded, never invented, and are used only by the settle
+// proof (Settle) — the final reply list is unattributed, as
+// before. Whether real history events carry these fields is
+// [UNVERIFIED] pending live capture (U-A2).
 type Reply struct {
-	Seq       int64
-	MessageID string
-	Text      string
-	Widgets   []Widget
-	Media     bool
+	Seq         int64
+	MessageID   string
+	Text        string
+	Widgets     []Widget
+	Media       bool
+	AgentID     string
+	RootAgentID string
+}
+
+// SubagentShaped reports whether the reply is identifiably a
+// subagent's: both identity fields are present as strings and
+// differ. An event with absent or non-string fields is not
+// identifiably subagent-shaped; it counts as unattributed,
+// never as proof of subagent origin.
+func (r Reply) SubagentShaped() bool {
+	return r.AgentID != "" && r.RootAgentID != "" && r.AgentID != r.RootAgentID
 }
 
 // Widget is one unanswered hatch widget carried by a reply.
@@ -138,6 +154,12 @@ func RepliesAfter(events []any, afterSeq int64, upto *int64) (replies []Reply, d
 			continue
 		}
 		r := Reply{Seq: seq, MessageID: mid, Text: text, Media: hasMedia}
+		if agentID, ok := p["agent_id"].(string); ok {
+			r.AgentID = agentID
+		}
+		if rootID, ok := p["root_agent_id"].(string); ok {
+			r.RootAgentID = rootID
+		}
 		if len(widgets) > 0 {
 			r.Widgets = widgets
 		}
