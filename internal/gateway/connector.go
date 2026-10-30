@@ -18,6 +18,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 	"github.com/thoitiettxl-cyber/castctl/internal/logging"
+	"github.com/thoitiettxl-cyber/castctl/internal/outbound"
 )
 
 // OutboundDialer is the minimal dial surface the Connector needs
@@ -251,6 +252,15 @@ func dialWebSocket(ctx context.Context, dialer OutboundDialer, wsURL string, sec
 	if err != nil {
 		return nil, 0, 0, err
 	}
+	// One connection ID for the whole dial: mint (or reuse) it
+	// HERE, before WebSocketDial, so the Dialer reuses this ID
+	// for its dial_start/tls_alpn lines (Dialer.ConnIDContext
+	// never mints over an ID already present) and the
+	// ws_handshake line below, emitted on this same ctx,
+	// carries the identical ID. Minting inside the Dialer
+	// alone could never reach this function: the Dialer
+	// returns only the conn, never its context.
+	ctx = outbound.ConnIDContext(ctx)
 	dialStart := time.Now()
 	raw, err := dialer.WebSocketDial(ctx, "tcp", host, port, secure, option.OutboundTLSOptions{Enabled: true, ALPN: []string{"http/1.1"}})
 	dialMS := time.Since(dialStart).Milliseconds()
@@ -283,8 +293,10 @@ func dialWebSocket(ctx context.Context, dialer OutboundDialer, wsURL string, sec
 		if ctx.Err() != nil {
 			return nil, dialMS, wsMS, ctx.Err()
 		}
-		// Handshake event, at debug, on the dial ctx (so a
-		// Dialer-minted connection ID prefixes it): the parsed
+		// Handshake event, at debug, on the dial ctx: the
+		// ctx carries the connection ID minted above and
+		// shared with the Dialer, so this line's ID prefix
+		// matches the dial_start/tls_alpn lines. The parsed
 		// status ONLY, derived from the raw gorilla result
 		// before redaction wrapping. No event when no
 		// parseable status exists.

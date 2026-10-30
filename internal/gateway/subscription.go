@@ -317,7 +317,7 @@ func FetchSubscription(ctx context.Context, client *http.Client, cookies string,
 		} else {
 			errVal = res
 		}
-		return nil, "", &conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("%s failed: %v", SubscriptionActionName, errVal))}
+		return nil, "", &conn.GatewayError{Status: -1, Payload: redactFreeText(fmt.Sprintf("%s failed: %v", SubscriptionActionName, errVal))}
 	}
 	subMap, ok := sub["subscription"].(map[string]any)
 	if !ok {

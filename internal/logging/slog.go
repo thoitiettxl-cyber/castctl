@@ -25,12 +25,23 @@ import (
 // at construction (castctl never calls SetLevel after construction,
 // so the captured value cannot drift from the factory's gate).
 //
-// Redaction: EVERY attr value passes SafeString (errors via
-// SafeErr); the message passes SafeString too. Field exclusion by
-// construction still applies at the call sites — no call site may
-// pass a URL, header map, cookie, token, or options object as an
-// attr — but a secret-bearing error string reaching a call site
-// cannot cross this handler unredacted.
+// Redaction — what this handler actually guarantees: every
+// attr value and the message pass SafeString (errors via
+// SafeErr, which redacts only the error's top-level Error()
+// text, not the wrapped chain). SafeString strips labelled
+// secret forms only: URL userinfo and every query value of a
+// URL-like substring, cookie/token/Bearer fragments, JSON
+// values under secret-looking keys, and bare key=value
+// fragments under the secret vocabulary (see safe.go). It
+// does NOT strip a bare, unlabelled secret — a lone key, a
+// lone header value, a lone token with no label — because no
+// pattern distinguishes such a value from ordinary text.
+// Field exclusion by construction still applies at the call
+// sites: no call site may pass a URL, header map, cookie,
+// token, options object, or bare secret as an attr. This
+// handler is defence in depth for secret-bearing error
+// strings that reach a call site; it is not a guarantee that
+// any string can cross it safely.
 type slogHandler struct {
 	logger   singlog.ContextLogger
 	maxLevel singlog.Level

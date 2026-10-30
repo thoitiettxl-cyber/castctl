@@ -146,16 +146,16 @@ func New(ctx context.Context, opts option.DNSOptions, outboundMgr adapter.Outbou
 			tag = fmt.Sprintf("%d", i)
 		}
 		if err := tm.Create(derived, logger, tag, server.Type, server.Options); err != nil {
-			return nil, fmt.Errorf("dns: create transport %s[%s]: %w", server.Type, tag, err)
+			return nil, logging.WrapErr(fmt.Errorf("dns: create transport %s[%s]: %w", server.Type, tag, err))
 		}
 	}
 
 	router, err := dns.NewRouter(derived, cfg.logFactory, opts)
 	if err != nil {
-		return nil, fmt.Errorf("dns: create router: %w", err)
+		return nil, logging.WrapErr(fmt.Errorf("dns: create router: %w", err))
 	}
 	if err := router.Initialize(opts.Rules); err != nil {
-		return nil, fmt.Errorf("dns: initialize router: %w", err)
+		return nil, logging.WrapErr(fmt.Errorf("dns: initialize router: %w", err))
 	}
 	derived = service.ContextWith[adapter.DNSRouter](derived, router)
 
@@ -185,10 +185,10 @@ func (c *Client) Start() error {
 
 	for _, stage := range adapter.ListStartStages {
 		if err := scope.Start("dns-transport", c.tm, stage); err != nil {
-			return fmt.Errorf("dns: start transport manager (%s): %w", stage, err)
+			return logging.WrapErr(fmt.Errorf("dns: start transport manager (%s): %w", stage, err))
 		}
 		if err := scope.Start("dns-router", c.router, stage); err != nil {
-			return fmt.Errorf("dns: start router (%s): %w", stage, err)
+			return logging.WrapErr(fmt.Errorf("dns: start router (%s): %w", stage, err))
 		}
 	}
 	return nil

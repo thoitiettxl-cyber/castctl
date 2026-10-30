@@ -99,7 +99,7 @@ type Env struct {
 	// from the global pre-scan. runInner sets both from
 	// globalOpts before dispatch; defaultBuildRuntime reads them
 	// as the CLI tier of log precedence (CLI > config block >
-	// default warn). Test BuildRuntime overrides read the same
+	// default: sing-box's empty level means trace). Test BuildRuntime overrides read the same
 	// fields; production never sets them directly.
 	LogLevelOverride string
 	LogLevelSet      bool

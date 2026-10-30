@@ -207,11 +207,18 @@ func defaultBuildRuntime(ctx context.Context, loc *profile.ConfigLocation, prof 
 	if err != nil {
 		return nil, errCode(2, err)
 	}
+	// Output "" means stderr (sing-box default); a set output
+	// is the user's file path, used verbatim. The factory
+	// refuses to open the config file or any cookies file as
+	// the log output — the ONLY path guard (minimal A7 check);
+	// refused paths are compared on resolved/canonical form
+	// by the factory.
 	logHandle, err := logging.NewFactory(ctx, logging.Settings{
 		Disabled:  settings.Disabled,
 		Level:     settings.Level,
 		Output:    settings.Output,
 		Timestamp: settings.Timestamp,
+		Refused:   logRefusedPaths(loc, prof, single),
 	}, stderrWriter)
 	if err != nil {
 		return nil, errCode(2, err)
@@ -335,6 +342,38 @@ func defaultBuildRuntime(ctx context.Context, loc *profile.ConfigLocation, prof 
 	rt.Muse = muse
 	rt.closeFuncs = append(rt.closeFuncs, func() error { muse.Close(); return nil })
 	return rt, nil
+}
+
+// logRefusedPaths returns the paths the log factory must never
+// open as the log output: the resolved config file and every
+// profile's cookies file in the loaded config (plus the active
+// profile's, which may come from a legacy layout with no single
+// config). This is the whole A7 guard: equality against these
+// paths, on resolved/canonical form, checked by the factory
+// before opening. No other path is refused.
+func logRefusedPaths(loc *profile.ConfigLocation, prof *profile.Profile, single *profile.SingleConfig) []string {
+	var out []string
+	if loc != nil && loc.ConfigFile != "" {
+		out = append(out, loc.ConfigFile)
+	}
+	seen := map[string]bool{}
+	add := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	if prof != nil {
+		add(prof.CookiesFile)
+	}
+	if single != nil {
+		for _, p := range single.Profiles {
+			if p != nil {
+				add(p.CookiesFile)
+			}
+		}
+	}
+	return out
 }
 
 // dialerOutboundTag is the tag of the synthetic direct outbound

@@ -86,8 +86,12 @@ func (g *Gateway) installControlHandlers(cc controlConn) {
 		return nil
 	})
 	cc.SetCloseHandler(func(code int, text string) error {
+		// The close reason is peer-controlled free text: redact
+		// it at the producer, before it is stored (it reaches
+		// ErrConnectionLost.CloseReason and LastClose, and
+		// from there any log line that prints the loss).
 		g.mu.Lock()
-		g.closeCode, g.closeReason, g.closeSeen = code, text, true
+		g.closeCode, g.closeReason, g.closeSeen = code, redactFreeText(text), true
 		g.mu.Unlock()
 		// Echo the close frame, as the default gorilla handler
 		// does; errors (socket already gone) are ignored.

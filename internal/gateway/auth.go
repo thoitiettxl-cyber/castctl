@@ -108,17 +108,17 @@ func FetchSessionInfo(ctx context.Context, client *http.Client, cookies string) 
 	}
 	raw, err := decodeJSONValue(data)
 	if err != nil {
-		return SessionInfo{}, conn.NewAuthError(redactErrorString(fmt.Sprintf("api/session returned non-JSON (%q)", truncateText(string(data), 80))))
+		return SessionInfo{}, conn.NewAuthError(redactFreeText(fmt.Sprintf("api/session returned non-JSON (%q)", truncateText(string(data), 80))))
 	}
 	info, ok := raw.(map[string]any)
 	if !ok {
 		// Python: "vm_id" not in a non-dict body is also the
 		// VM-unavailable case, not an auth failure.
-		return SessionInfo{}, &conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("VM unavailable (%v); retry shortly or `MUSE_VM_ID=<id> castctl wake`", raw))}
+		return SessionInfo{}, &conn.GatewayError{Status: -1, Payload: redactFreeText(fmt.Sprintf("VM unavailable (%v); retry shortly or `MUSE_VM_ID=<id> castctl wake`", raw))}
 	}
 	rawVM, ok := info["vm_id"]
 	if !ok {
-		return SessionInfo{}, &conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("VM unavailable (%v); retry shortly or `MUSE_VM_ID=<id> castctl wake`", info))}
+		return SessionInfo{}, &conn.GatewayError{Status: -1, Payload: redactFreeText(fmt.Sprintf("VM unavailable (%v); retry shortly or `MUSE_VM_ID=<id> castctl wake`", info))}
 	}
 	vmID, ok := rawVM.(string)
 	if !ok {
@@ -127,7 +127,7 @@ func FetchSessionInfo(ctx context.Context, client *http.Client, cookies string) 
 		// branch is about absence, and a null vm_id means the
 		// same thing — the VM is down/restarting. Formatting
 		// it with %v would yield "<nil>" as a bogus VM id.
-		return SessionInfo{}, &conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("VM unavailable (%v); retry shortly or `MUSE_VM_ID=<id> castctl wake`", info))}
+		return SessionInfo{}, &conn.GatewayError{Status: -1, Payload: redactFreeText(fmt.Sprintf("VM unavailable (%v); retry shortly or `MUSE_VM_ID=<id> castctl wake`", info))}
 	}
 	return SessionInfo{VMID: vmID, Raw: info}, nil
 }
@@ -140,7 +140,7 @@ func FetchAccessToken(ctx context.Context, client *http.Client, cookies string) 
 		return "", err
 	}
 	if status != 200 {
-		return "", conn.NewAuthError(redactErrorString(fmt.Sprintf("auth/check -> %d %s (cookies expired? re-export)", status, truncateText(string(data), 120))))
+		return "", conn.NewAuthError(redactFreeText(fmt.Sprintf("auth/check -> %d %s (cookies expired? re-export)", status, truncateText(string(data), 120))))
 	}
 	d, err := decodeJSONObject(data)
 	if err != nil {
@@ -169,7 +169,7 @@ func FetchHatchToken(ctx context.Context, client *http.Client, cookies, accessTo
 		return "", err
 	}
 	if status != 200 {
-		return "", conn.NewAuthError(redactErrorString(fmt.Sprintf("hatch/token -> %d %s", status, truncateText(string(data), 160))))
+		return "", conn.NewAuthError(redactFreeText(fmt.Sprintf("hatch/token -> %d %s", status, truncateText(string(data), 160))))
 	}
 	d, err := decodeJSONObject(data)
 	if err != nil {

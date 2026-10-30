@@ -5,8 +5,24 @@
 package gateway
 
 import (
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 	"github.com/thoitiettxl-cyber/castctl/internal/redact"
 )
+
+// redactFreeText strips credentials from peer/server-controlled
+// free text (a WebSocket close reason, a panic value, a server
+// payload) using the logging boundary, which is STRICTER than
+// redact.String: it also strips every query value of a URL
+// (including vm_id and unknown keys), JSON values under
+// secret-looking keys, and bare secret key=value fragments.
+// redactErrorString's redact.String semantics are pinned by
+// gateway tests (vm_id survives it) and are kept for error
+// chains; free text that may reach a log line gets the
+// stricter boundary at the producer, before it is stored in
+// an error or a struct field.
+func redactFreeText(s string) string {
+	return logging.SafeString(s)
+}
 
 // redactErrorString strips credentials from an error string
 // (item (c), Boss-approved for PR2). It is the shared string

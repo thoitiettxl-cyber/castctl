@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 )
 
 // Muse is the shared warm gateway connection for one profile, ported
@@ -211,6 +213,23 @@ func (m *Muse) Config() (Config, error) {
 	return m.Reload()
 }
 
+// slogErr renders an error for a slog line, redacted at the
+// producer (the retryCall precedent in shared.go): the line
+// must be safe through ANY slog logger, not only the bridge
+// handler. A nil error renders as "".
+func slogErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	return logging.SafeString(err.Error())
+}
+
+// slogPanic renders a recovered panic value for a slog line,
+// redacted at the producer: a panic value is arbitrary text.
+func slogPanic(r any) string {
+	return logging.SafeString(fmt.Sprint(r))
+}
+
 // markDown records that the gateway is down. failedConnect counts
 // toward DownFails, coalesced by FailSpacing: several goroutines
 // failing at the same moment count as one attempt. OnDown fires at
@@ -241,7 +260,7 @@ func (m *Muse) markDown(err error, failedConnect bool) {
 		return
 	}
 	downFor := time.Since(since)
-	m.logger.Warn("gateway down", "seconds", int64(downFor/time.Second), "failed_reconnects", fails, "err", err)
+	m.logger.Warn("gateway down", "seconds", int64(downFor/time.Second), "failed_reconnects", fails, "err", slogErr(err))
 	if m.onDown != nil {
 		callNotice(func() { m.onDown(err, downFor) }, m.logger, "down notice")
 	}
@@ -270,7 +289,7 @@ func (m *Muse) markUp() {
 func callNotice(fn func(), logger *slog.Logger, what string) {
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Warn(what+" panicked", "panic", r)
+			logger.Warn(what+" panicked", "panic", slogPanic(r))
 		}
 	}()
 	fn()
@@ -413,7 +432,7 @@ func (m *Muse) probeStale(ctx context.Context, g Gateway) bool {
 	pingCtx, cancel := context.WithTimeout(ctx, StalePingTimeout)
 	defer cancel()
 	if _, err := g.Ping(pingCtx, StalePingTimeout); err != nil {
-		m.logger.Info("gateway liveness probe failed; reconnecting", "err", err)
+		m.logger.Info("gateway liveness probe failed; reconnecting", "err", slogErr(err))
 		return false
 	}
 	return true
@@ -470,7 +489,7 @@ func (m *Muse) Live(ctx context.Context, cfg *Config) (Gateway, error) {
 		}
 		m.mu.Unlock()
 		m.markDown(dead, false)
-		m.logger.Info("gateway connection dropped; reconnecting", "err", dead)
+		m.logger.Info("gateway connection dropped; reconnecting", "err", slogErr(dead))
 	} else {
 		m.mu.Unlock()
 	}
@@ -580,7 +599,7 @@ func (m *Muse) Adopt(gw Gateway) {
 func (m *Muse) Warm(ctx context.Context) {
 	g, err := m.Connect(ctx, nil)
 	if err != nil {
-		m.logger.Warn("gateway warm-up failed", "err", err)
+		m.logger.Warn("gateway warm-up failed", "err", slogErr(err))
 		return
 	}
 	_ = g.Close()
@@ -811,7 +830,7 @@ func (m *Muse) heartbeatLoop(gen int, interval time.Duration, stop, done chan st
 func (m *Muse) runTick(gen int, interval time.Duration, stop chan struct{}) (restarted bool) {
 	defer func() {
 		if r := recover(); r != nil {
-			m.logger.Warn("heartbeat tick panicked; restarting", "panic", r)
+			m.logger.Warn("heartbeat tick panicked; restarting", "panic", slogPanic(r))
 			m.hbMu.Lock()
 			current := m.hbGen == gen && m.hbRunning
 			if current {
@@ -851,7 +870,7 @@ func (m *Muse) hbTick(interval time.Duration) {
 			return // never connected yet: the first call opens it
 		}
 		if _, err := m.Live(context.Background(), nil); err != nil {
-			m.logger.Info("gateway reconnect failed", "err", err)
+			m.logger.Info("gateway reconnect failed", "err", slogErr(err))
 		}
 		return
 	}
@@ -868,10 +887,10 @@ func (m *Muse) hbTick(interval time.Duration) {
 	pingCtx, cancel := context.WithTimeout(context.Background(), HeartbeatPingTimeout)
 	defer cancel()
 	if _, err := g.Ping(pingCtx, HeartbeatPingTimeout); err != nil {
-		m.logger.Info("gateway heartbeat failed; reconnecting", "err", err)
+		m.logger.Info("gateway heartbeat failed; reconnecting", "err", slogErr(err))
 		m.Drop(g)
 		if _, err := m.Live(context.Background(), nil); err != nil {
-			m.logger.Info("gateway reconnect failed", "err", err)
+			m.logger.Info("gateway reconnect failed", "err", slogErr(err))
 		}
 	}
 }

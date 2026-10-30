@@ -16,18 +16,32 @@ package profile
 // log/log.go:22-71) except where Boss decided otherwise — each
 // deviation is marked below and in docs/config.md:
 //
-//   - Default level is "warn" (Boss). Sing-box's empty level means
-//     trace (log/log.go:67-69); castctl sets warn explicitly and
-//     never passes an empty level to the factory.
-//   - "warning" is accepted as an alias for "warn", as sing-box's
-//     ParseLevel does (log/level.go:40-58); ResolveLogSettings
-//     normalises it to "warn". No other spelling is accepted;
-//     levels are case-sensitive, exactly as ParseLevel requires.
-//   - Output accepts "" (stderr), "stderr", and file paths ONLY.
-//     "stdout" is rejected: Boss named file path or stderr only.
-//     Sing-box additionally accepts "stdout" (log/log.go:40-41);
-//     that shape is a deliberate deviation, documented in
-//     docs/config.md.
+// Defaults are IDENTICAL to sing-box's (github.com/sagernet/
+// sing-box v1.14.4, verified from module source; no default is
+// imposed by castctl):
+//
+//   - Level: empty means trace (log/log.go:67-69: an empty
+//     level SetLevels LevelTrace; a set level goes through
+//     ParseLevel). "warning" is accepted as an alias for
+//     "warn", as ParseLevel does (log/level.go:40-58);
+//     ResolveLogSettings normalises it to "warn". No other
+//     spelling is accepted; levels are case-sensitive,
+//     exactly as ParseLevel requires.
+//   - Output: "" means stderr (log/log.go:32-36: the default
+//     writer, else os.Stderr); "stderr" means stderr
+//     (:38-39); "stdout" means stdout (:40-41); any other
+//     string is a file path, opened for append at Start
+//     (:42-45, log/observable.go:79). There is no hardcoded
+//     default log path: the user sets output freely, or
+//     leaves it empty for stderr.
+//   - Timestamp: false (log/log.go:46-52): file output carries
+//     no timestamp, console output carries a relative
+//     elapsed-seconds prefix; true adds the full timestamp
+//     in both cases (log/format.go:96-125).
+//   - Disabled: false. Disabled:true returns the NOP factory
+//     before level parsing or file creation (log/log.go:
+//     25-27), so a disabled block with a bogus level still
+//     constructs and emits nothing.
 //   - DisableColor is a sing-box programmatic-only field
 //     (json:"-", option/options.go:75); it is NOT a config key and
 //     is rejected as unknown. Console colour follows sing-box's
@@ -35,7 +49,7 @@ package profile
 //
 // Resolution is pure (ResolveProfileDNS is the pattern): it reads
 // only its inputs, never the filesystem, never mutates. Precedence
-// is CLI > config block > default warn. An absent block is NOT
+// is CLI > config block > sing-box default. An absent block is NOT
 // written back on save: parse keeps Log nil, and the render branch
 // emits nothing, so defaults stay runtime-only (the same
 // presence-flag precedent as fingerprint/tls_engine).
@@ -94,7 +108,10 @@ func parseLogBlock(v any) (*LogConfig, error) {
 				return nil, newConfigError(`"log.level" must be a string`)
 			}
 			if s == "" || !validLogLevel(s) {
-				return nil, newConfigErrorf("unknown log level %q", s)
+				// The supplied value is never echoed: it
+				// could be a secret pasted by mistake (the
+				// same rule as the --log-level CLI path).
+				return nil, newConfigError("unknown log level (expected trace, debug, info, warn, warning, error, fatal, or panic)")
 			}
 			cfg.Level = s
 		case "output":
@@ -102,9 +119,9 @@ func parseLogBlock(v any) (*LogConfig, error) {
 			if !ok {
 				return nil, newConfigError(`"log.output" must be a string`)
 			}
-			if s == "stdout" {
-				return nil, newConfigError(`"log.output" must be a file path or "stderr"; "stdout" is not accepted`)
-			}
+			// "stdout" is accepted, exactly as sing-box
+			// parses it (log/log.go:40-41); "" means stderr,
+			// any other string is a file path.
 			cfg.Output = s
 		case "timestamp":
 			b, ok := val.(bool)
@@ -120,21 +137,22 @@ func parseLogBlock(v any) (*LogConfig, error) {
 }
 
 // ResolveLogSettings returns the effective log settings for one
-// invocation: CLI override > config block > defaults (level warn,
-// output stderr, timestamp false, disabled false). cliLevel is
-// honoured only when cliSet is true; a set-but-empty CLI level is
-// an error (an empty level must never mean "no filtering"). A
-// "warning" level (CLI or config) normalises to "warn". The
-// returned Output is canonicalised: "" becomes "stderr".
+// invocation: CLI override > config block > sing-box defaults
+// (level trace, output "" = stderr, timestamp false, disabled
+// false). cliLevel is honoured only when cliSet is true; a
+// set-but-empty CLI level is an error (an empty level must never
+// mean "no filtering"). A "warning" level (CLI or config)
+// normalises to "warn". An unset Output stays "": the factory
+// treats "" as stderr, exactly as sing-box does. No resolved
+// value is ever echoed in an error: an invalid level reports
+// the fixed expected list only, exactly like the --log-level
+// CLI path.
 func ResolveLogSettings(single *SingleConfig, cliLevel string, cliSet bool) (LogConfig, error) {
-	out := LogConfig{Level: "warn", Output: "stderr"}
+	out := LogConfig{Level: "trace"}
 	if single != nil && single.Log != nil {
 		out = *single.Log
 		if out.Level == "" {
-			out.Level = "warn"
-		}
-		if out.Output == "" {
-			out.Output = "stderr"
+			out.Level = "trace"
 		}
 	}
 	if cliSet {
@@ -147,13 +165,10 @@ func ResolveLogSettings(single *SingleConfig, cliLevel string, cliSet bool) (Log
 		out.Level = "warn"
 	}
 	if !validLogLevel(out.Level) {
-		return LogConfig{}, newConfigErrorf("unknown log level %q", out.Level)
-	}
-	if out.Output == "stdout" {
-		return LogConfig{}, newConfigError(`"log.output" must be a file path or "stderr"; "stdout" is not accepted`)
+		return LogConfig{}, newConfigError("unknown log level (expected trace, debug, info, warn, warning, error, fatal, or panic)")
 	}
 	if strings.TrimSpace(out.Output) == "" {
-		out.Output = "stderr"
+		out.Output = ""
 	}
 	return out, nil
 }

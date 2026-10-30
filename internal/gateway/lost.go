@@ -79,7 +79,11 @@ func classifyConnectionLost(err error) (closeCode int, closeReason string, ok bo
 	var ce *websocket.CloseError
 	if errors.As(err, &ce) {
 		if ce.Code == websocket.CloseAbnormalClosure {
-			return ce.Code, ce.Text, true
+			// ce.Text is peer-controlled free text (the
+			// close frame's reason); redact it at the
+			// producer, like the recorded close reason in
+			// keepalive.go.
+			return ce.Code, redactFreeText(ce.Text), true
 		}
 		return 0, "", false
 	}

@@ -36,14 +36,14 @@ func FetchInvite(ctx context.Context, client *http.Client, cookies string) (map[
 		return nil, conn.NewAuthError(fmt.Sprintf("api/hatch/invite -> %d (cookies expired? re-export)", status))
 	}
 	if status != 200 {
-		return nil, &conn.GatewayError{Status: status, Payload: redactErrorString(truncateText(string(data), 200))}
+		return nil, &conn.GatewayError{Status: status, Payload: redactFreeText(truncateText(string(data), 200))}
 	}
 	d, err := decodeJSONObject(data)
 	if err != nil {
 		// Distinguish non-JSON from a JSON non-dict, as Python
 		// does (different messages, both GatewayError -1).
 		if _, jerr := decodeJSONValue(data); jerr != nil {
-			return nil, &conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("api/hatch/invite returned non-JSON (%q)", truncateText(string(data), 80)))}
+			return nil, &conn.GatewayError{Status: -1, Payload: redactFreeText(fmt.Sprintf("api/hatch/invite returned non-JSON (%q)", truncateText(string(data), 80)))}
 		}
 		v, _ := decodeJSONValue(data)
 		return nil, &conn.GatewayError{Status: -1, Payload: fmt.Sprintf("api/hatch/invite returned %T", v)}
@@ -67,11 +67,11 @@ func CreateInvite(ctx context.Context, client *http.Client, cookies string) (map
 		return nil, conn.NewAuthError(fmt.Sprintf("api/hatch/invite POST -> %d (cookies expired? re-export)", status))
 	}
 	if status != 200 {
-		return nil, &conn.GatewayError{Status: status, Payload: redactErrorString(truncateText(string(data), 200))}
+		return nil, &conn.GatewayError{Status: status, Payload: redactFreeText(truncateText(string(data), 200))}
 	}
 	d, err := decodeJSONObject(data)
 	if err != nil {
-		return nil, &conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("api/hatch/invite POST returned non-JSON (%q)", truncateText(string(data), 80)))}
+		return nil, &conn.GatewayError{Status: -1, Payload: redactFreeText(fmt.Sprintf("api/hatch/invite POST returned non-JSON (%q)", truncateText(string(data), 80)))}
 	}
 	return d, nil
 }

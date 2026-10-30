@@ -76,7 +76,7 @@ func NewDialerWithLogger(outbound adapter.Outbound, resolver HostResolver, tlsOp
 	}
 }
 
-// withConnID returns ctx carrying a sing-box connection ID
+// ConnIDContext returns ctx carrying a sing-box connection ID
 // (log.ContextWithNewID, log/id.go:16-30), minting one only when
 // ctx carries none. The ID is a random uint32 rendered by the
 // sing-box formatter as "[id elapsed]" on every *Context log line
@@ -85,12 +85,20 @@ func NewDialerWithLogger(outbound adapter.Outbound, resolver HostResolver, tlsOp
 // from cookies, tokens, or keys, and it is stable across the
 // DialContext -> DialTLS legs of one connection because each leg
 // reuses an ID already present instead of minting a new one.
-func withConnID(ctx context.Context) context.Context {
+// The gateway calls it in dialWebSocket BEFORE WebSocketDial so
+// the ws_handshake line shares the Dialer's ID: the Dialer
+// reuses the ID already on the context instead of minting a
+// second one. Minting here (rather than inside the Dialer with
+// no way out) is the thread that carries one ID across the
+// dial_start, tls_alpn, and ws_handshake lines.
+func ConnIDContext(ctx context.Context) context.Context {
 	if _, ok := log.IDFromContext(ctx); ok {
 		return ctx
 	}
 	return log.ContextWithNewID(ctx)
 }
+
+func withConnID(ctx context.Context) context.Context { return ConnIDContext(ctx) }
 
 // logDialStart / logDialDone emit the dial events at Debug through
 // the Dialer's logger, on the connection-ID context. Fields are
@@ -166,7 +174,15 @@ func (d *Dialer) DialTLS(ctx context.Context, network, host string, port uint16,
 	}
 	tlsConn, err := HandshakeTLS(ctx, raw, config)
 	if err != nil {
-		d.logDialDone(ctx, network, host, port, err)
+		// Exactly ONE dial_done per dial: DialContext already
+		// emitted it for the TCP leg (successfully, before
+		// the handshake). A second dial_done here would
+		// claim the dial both succeeded and failed. The
+		// handshake failure gets its own event instead, so
+		// a TLS failure is visible without double-counting
+		// the dial.
+		logging.Emit(d.logger, ctx, log.LevelDebug,
+			"event=tls_handshake_failed network="+network+" host="+logging.SafeHost(host)+" port="+strconv.Itoa(int(port))+" err="+logging.SafeErr(err))
 		_ = raw.Close()
 		return nil, err
 	}

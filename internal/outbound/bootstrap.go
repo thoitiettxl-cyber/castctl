@@ -12,6 +12,8 @@ import (
 	"net"
 	"net/netip"
 	"time"
+
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 )
 
 // BootstrapLookup is the SINGLE system-resolver call site in the Go
@@ -72,6 +74,8 @@ func BootstrapLookupWithLogger(ctx context.Context, host string, logger *slog.Lo
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("outbound: bootstrap lookup for %s returned no addresses", host)
 	}
-	logger.Debug("outbound bootstrap lookup", "host", host, "addresses", len(addrs))
+	// SafeHost: the host is config text; a URL-shaped host must
+	// never reach the log line with query credentials.
+	logger.Debug("outbound bootstrap lookup", "host", logging.SafeHost(host), "addresses", len(addrs))
 	return addrs, nil
 }

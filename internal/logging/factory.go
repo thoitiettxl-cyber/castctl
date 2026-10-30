@@ -6,9 +6,11 @@ package logging
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -19,13 +21,19 @@ import (
 // the output of profile.ResolveLogSettings, translated into this
 // package's own type so logging never imports the config parser.
 // Level is one of trace/debug/info/warn/error/fatal/panic (or
-// "warning", normalised by the caller); "" means the default warn.
-// Output is "stderr" or a file path.
+// "warning", normalised by the caller); "" means sing-box's
+// default, trace (log/log.go:67-69). Output follows sing-box
+// exactly (log/log.go:32-45): "" or "stderr" means the supplied
+// stderr writer, "stdout" means the real stdout, any other
+// string is a file path. Refused lists absolute paths the
+// factory must never open as a log file (the config file and
+// cookies files, supplied by the runtime); see openLogFile.
 type Settings struct {
 	Disabled  bool
 	Level     string
 	Output    string
 	Timestamp bool
+	Refused   []string
 }
 
 // singBoxTimestampFormat is the hard-coded layout sing-box's log
@@ -56,16 +64,20 @@ type Handle struct {
 //   - File creation is owned by castctl, not by the factory's
 //     Start(): sing-box opens a path output itself at Start() with
 //     mode 0644 (log/observable.go:79). Castctl must create the
-//     file 0600 (and narrow a pre-existing looser file), so the
-//     factory is built with log.NewDefaultFactory
-//     (log/observable.go:45-52) taking the already-opened *os.File
-//     as its writer and an empty file path — Start() then opens
-//     nothing. The formatter flags replicate log.New's exactly
+//     file 0600, so the factory is built with
+//     log.NewDefaultFactory (log/observable.go:45-52) taking
+//     the already-opened *os.File as its writer and an empty
+//     file path — Start() then opens nothing. A pre-existing
+//     file that passes the openLogFile guard is appended to
+//     WITHOUT any chmod: castctl never changes the mode of a
+//     file it did not create. The formatter flags replicate
+//     log.New's exactly
 //     (log/log.go:46-52): DisableColors for files, DisableTimestamp
 //     only for files when timestamp is false, FullTimestamp from
 //     the setting, the same TimestampFormat literal, and a
 //     non-zero BaseTime (time.Now() at construction) anchoring the
 //     relative console prefix.
+//
 //   - Console output is likewise built through NewDefaultFactory
 //     with the caller's writer (Env stderr in production, a buffer
 //     in tests). log.New's "stderr" branch writes to the real
@@ -73,6 +85,17 @@ type Handle struct {
 //     bypass hermetic capture and mix logs into command output
 //     streams the caller owns. The writer is the only difference;
 //     level, timestamp, and colour semantics are sing-box's.
+//
+//   - Redaction at the sink: every formatted line passes
+//     SafeString in the writer itself (safeWriter, below), so
+//     sing-box's own emissions — which reach the writer
+//     directly, never through logging.Emit — cannot bypass
+//     the redaction boundary. Castctl's own lines are
+//     redacted twice (at Emit and here); SafeString is
+//     idempotent, so that is harmless. The sink sees one
+//     Write per formatted line (sing-box log/observable.go
+//     writes one formatted []byte per entry), which is what
+//     makes per-chunk redaction complete here.
 //
 // Disabled mirrors sing-box (log/log.go:25-27): the NOP factory is
 // returned before any level parsing or file creation, so a
@@ -92,7 +115,9 @@ func NewFactory(ctx context.Context, s Settings, stderr io.Writer) (*Handle, err
 	}
 	levelName := s.Level
 	if levelName == "" {
-		levelName = "warn"
+		// Sing-box default: an empty level means trace
+		// (log/log.go:67-69), not warn, not info.
+		levelName = "trace"
 	}
 	level, err := singlog.ParseLevel(levelName)
 	if err != nil {
@@ -107,9 +132,11 @@ func NewFactory(ctx context.Context, s Settings, stderr io.Writer) (*Handle, err
 		if writer == nil {
 			writer = os.Stderr
 		}
+	case "stdout":
+		writer = os.Stdout
 	default:
 		isFile = true
-		f, err := openLogFile(s.Output)
+		f, err := openLogFile(s.Output, s.Refused)
 		if err != nil {
 			return nil, err
 		}
@@ -130,7 +157,7 @@ func NewFactory(ctx context.Context, s Settings, stderr io.Writer) (*Handle, err
 	// caller writer (a test buffer) is not — serialise every
 	// write here so one formatted line is never interleaved
 	// with another, whatever the caller passes.
-	factory := singlog.NewDefaultFactory(ctx, formatter, &lockedWriter{w: writer}, "", nil, false)
+	factory := singlog.NewDefaultFactory(ctx, formatter, &lockedWriter{w: &safeWriter{w: writer}}, "", nil, false)
 	factory.SetLevel(level)
 	if err := factory.Start(); err != nil {
 		if file != nil {
@@ -155,28 +182,77 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	return l.w.Write(p)
 }
 
+// safeWriter is the redaction sink: every chunk (one formatted
+// log line, per the sing-box writer contract) passes SafeString
+// before reaching the underlying writer, so no line — castctl's
+// or sing-box's — can carry a labelled secret to the log
+// destination. It reports the original length on success: the
+// caller (sing-box) discards write results, and a redacted line
+// is shorter than its input without being a short write.
+type safeWriter struct {
+	w io.Writer
+}
+
+func (s *safeWriter) Write(p []byte) (int, error) {
+	redacted := SafeString(string(p))
+	if _, err := io.WriteString(s.w, redacted); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
 // openLogFile opens path for append/create/write-only with mode
-// 0600, then narrows a pre-existing looser file to 0600. It never
-// truncates, never creates parent directories (sing-box creates
-// none either), and never widens a stricter mode: only group/other
-// permission bits trigger narrowing.
-func openLogFile(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+// 0600 on creation (sing-box opens its path output with
+// O_APPEND|O_CREATE|O_WRONLY, log/observable.go:79; castctl
+// differs only in the 0600 creation mode). It never truncates
+// and never creates parent directories (sing-box creates none
+// either). A pre-existing file is appended to WITHOUT any
+// chmod: castctl never changes the mode of a file it did not
+// create.
+//
+// The ONLY guard is the minimal A7 check: refuse, before
+// opening, when the path EQUALS a refused path (castctl's own
+// config file or a cookies file). Equality is checked on
+// resolved/canonical paths, so a symlinked alias of the
+// config file is still refused; that resolution is part of
+// the guard, not an extra restriction. There are NO other
+// path restrictions: symlinks to other targets and
+// non-regular files are NOT refused (Boss correction #2).
+// A path that cannot be resolved (e.g. a not-yet-existing
+// file) is compared by its absolute, cleaned form.
+func openLogFile(path string, refused []string) (*os.File, error) {
+	resolved, err := resolveLogPath(path)
 	if err != nil {
 		return nil, err
 	}
-	info, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		if err := f.Chmod(0o600); err != nil {
-			_ = f.Close()
-			return nil, err
+	for _, r := range refused {
+		if r == "" {
+			continue
+		}
+		rresolved, err := resolveLogPath(r)
+		if err != nil {
+			continue
+		}
+		if resolved == rresolved {
+			return nil, errors.New("logging: refusing to open a protected file as the log output")
 		}
 	}
-	return f, nil
+	return os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+}
+
+// resolveLogPath returns the canonical form of path for
+// equality comparison: the absolute path with symlinks
+// evaluated when the path exists, otherwise the absolute
+// cleaned path.
+func resolveLogPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved, nil
+	}
+	return abs, nil
 }
 
 // Close closes the factory and, for file output, the log file.

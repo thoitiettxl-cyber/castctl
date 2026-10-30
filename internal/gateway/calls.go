@@ -129,7 +129,7 @@ func (g *Gateway) Request(ctx context.Context, method string, opts conn.RequestO
 			}
 		case *pb.ServiceFrame_Reset_:
 			ended = true
-			loopErr = &conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("stream reset %d: %s", kind.Reset_.GetCode(), kind.Reset_.GetReason()))}
+			loopErr = &conn.GatewayError{Status: -1, Payload: redactFreeText(fmt.Sprintf("stream reset %d: %s", kind.Reset_.GetCode(), kind.Reset_.GetReason()))}
 		default:
 			// An inbound request frame (or no kind) is
 			// ignored, as Python's WhichOneof fall-through
@@ -162,7 +162,7 @@ func (g *Gateway) Request(ctx context.Context, method string, opts conn.RequestO
 	}
 	payload := bytes.Join(chunks, nil)
 	if *status < 200 || *status >= 300 {
-		return nil, withPhase(&conn.GatewayError{Status: int(*status), Payload: redactErrorString(truncatePayload(payload, 500))}, PhaseStreaming)
+		return nil, withPhase(&conn.GatewayError{Status: int(*status), Payload: redactFreeText(truncatePayload(payload, 500))}, PhaseStreaming)
 	}
 	return payload, nil
 }
@@ -186,11 +186,11 @@ func (g *Gateway) CallJSON(ctx context.Context, method string, opts conn.Request
 		if len(head) > 200 {
 			head = head[:200]
 		}
-		return nil, withPhase(&conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("non-JSON response: %q", string(head)))}, PhaseStreaming)
+		return nil, withPhase(&conn.GatewayError{Status: -1, Payload: redactFreeText(fmt.Sprintf("non-JSON response: %q", string(head)))}, PhaseStreaming)
 	}
 	if m, ok := d.(map[string]any); ok {
 		if okVal, isBool := m["ok"].(bool); isBool && !okVal {
-			return nil, withPhase(&conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("api error: %v", m["error"]))}, PhaseStreaming)
+			return nil, withPhase(&conn.GatewayError{Status: -1, Payload: redactFreeText(fmt.Sprintf("api error: %v", m["error"]))}, PhaseStreaming)
 		}
 		if result, present := m["result"]; present {
 			return result, nil

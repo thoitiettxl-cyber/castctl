@@ -20,6 +20,8 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/service"
+
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 )
 
 // Manager owns the sing-box outbound and endpoint managers for one
@@ -256,7 +258,7 @@ func (m *Manager) CreateOutbound(ctx context.Context, tag, outboundType string, 
 		}
 	}
 	if err := m.outbounds.Create(m.registryContext(), m.router, m.logger, tag, outboundType, options); err != nil {
-		return fmt.Errorf("outbound: create %s[%s]: %w", outboundType, tag, err)
+		return logging.WrapErr(fmt.Errorf("outbound: create %s[%s]: %w", outboundType, tag, err))
 	}
 	m.mu.Lock()
 	m.created[tag] = describeOutbound(outboundType, options)
@@ -487,7 +489,7 @@ func (m *Manager) CreateEndpoint(ctx context.Context, tag, endpointType string, 
 		}
 	}
 	if err := m.endpoints.Create(m.registryContext(), m.router, m.logger, tag, endpointType, options); err != nil {
-		return fmt.Errorf("outbound: create endpoint %s[%s]: %w", endpointType, tag, err)
+		return logging.WrapErr(fmt.Errorf("outbound: create endpoint %s[%s]: %w", endpointType, tag, err))
 	}
 	return nil
 }
@@ -547,10 +549,13 @@ func (m *Manager) Start() error {
 	}
 	for _, stage := range adapter.ListStartStages {
 		if err := m.scope.Start("endpoint", m.endpoints, stage); err != nil {
-			return fmt.Errorf("outbound: start endpoint manager (%s): %w", stage, err)
+			// Sing-box start errors may embed config material
+			// (e.g. the WireGuard IpcSet error); wrap at the
+			// boundary so the printed text is redacted.
+			return logging.WrapErr(fmt.Errorf("outbound: start endpoint manager (%s): %w", stage, err))
 		}
 		if err := m.scope.Start("outbound", m.outbounds, stage); err != nil {
-			return fmt.Errorf("outbound: start outbound manager (%s): %w", stage, err)
+			return logging.WrapErr(fmt.Errorf("outbound: start outbound manager (%s): %w", stage, err))
 		}
 	}
 	m.started = true
