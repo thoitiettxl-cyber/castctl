@@ -177,7 +177,10 @@ func ResolveConfigLocationWithEnv(explicitPath string) (*ConfigLocation, error) 
 // call Migrate(loc.ConfigDir, true) directly with no RequirePresent
 // gate — Migrate treats a missing file as an empty layout and
 // writes the single file at the resolved location. (Migrate dry-run
-// does NOT bypass the gate: only --write creates.)
+// does NOT bypass the gate: only --write creates — except a
+// `config migrate --from` dry-run, whose destination is a new
+// directory by design, so a missing destination file is the normal
+// pre-migration state there too.)
 func (loc *ConfigLocation) RequirePresent() error {
 	if loc == nil {
 		return newConfigError("cannot check a nil config location")

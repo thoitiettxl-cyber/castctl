@@ -41,6 +41,11 @@ type MigrateProfile struct {
 // a refuse-overwrite produces a non-nil error, but the result still
 // lists the good profiles that would migrate.
 type MigrateResult struct {
+	// SourceDir is the directory legacy profiles were read from.
+	SourceDir string `json:"source_dir"`
+	// DestinationDir is the directory the single config was (or
+	// would be) written to.
+	DestinationDir string `json:"destination_dir"`
 	// WouldWrite reports whether a dry-run would write a file. False
 	// after migration (already-migrated) and when overwriting is refused.
 	WouldWrite bool `json:"would_write"`
@@ -71,8 +76,14 @@ type MigrateResult struct {
 	DNSRefusal string `json:"dns_refusal,omitempty"`
 }
 
-// Migrate implements `config migrate` as a library function (cmd wiring
-// is the coordinator's). With write=false it is a dry-run: it prints
+// Migrate migrates the legacy layout in baseDir into baseDir's
+// single config. It is MigrateFrom with source == destination.
+func Migrate(baseDir string, write bool) (*MigrateResult, error) {
+	return MigrateFrom(baseDir, baseDir, write)
+}
+
+// MigrateFrom implements `config migrate` as a library function.
+// With write=false it is a dry-run: it prints
 // nothing and writes no files. With write=true it writes the single
 // file atomically (0600) and never deletes or modifies any old file.
 //
@@ -108,10 +119,46 @@ type MigrateResult struct {
 //   - Migrate reads files only: it does not consult MUSE_VM_ID /
 //     MUSE_NODE_ID (env fill happens at Load time), and touches no
 //     telegram or update files.
-func Migrate(baseDir string, write bool) (*MigrateResult, error) {
+//
+// MigrateFrom migrates legacy profiles from sourceDir into the single
+// config in destDir (`config migrate --from`). The source directory
+// is read-only: it is never written, locked, or modified in any way,
+// and legacy files there keep serving as the backup. The destination
+// holds the config lock in write mode, the refuse-overwrite decision,
+// and the atomic 0600 write. When sourceDir == destDir (compared by
+// cleaned absolute path) behaviour is exactly Migrate's. When they
+// differ, the source directory must exist and be a directory, else
+// the run is an exit-2 error that writes nothing; a single-format
+// file in the source is not copied — the strict legacy parser
+// refuses it as a profile error, like any other non-legacy source
+// content. Cookies files stay where they are: migrated entries point
+// at the source cookies files by absolute path.
+func MigrateFrom(sourceDir, destDir string, write bool) (*MigrateResult, error) {
 	result := &MigrateResult{
-		Profiles: []MigrateProfile{},
-		Errors:   []string{},
+		SourceDir:      sourceDir,
+		DestinationDir: destDir,
+		Profiles:       []MigrateProfile{},
+		Errors:         []string{},
+	}
+	if destDir == "" {
+		return result, newConfigError("migrate: destination directory must not be empty")
+	}
+	if sourceDir == "" {
+		sourceDir = destDir
+		result.SourceDir = destDir
+	}
+	same := sameDir(sourceDir, destDir)
+	if !same {
+		info, serr := os.Stat(sourceDir)
+		if serr != nil {
+			if os.IsNotExist(serr) {
+				return result, newConfigErrorf("migrate: source directory %q does not exist", sourceDir)
+			}
+			return result, newConfigErrorf("migrate: cannot stat source directory %q: %v", sourceDir, serr)
+		}
+		if !info.IsDir() {
+			return result, newConfigErrorf("migrate: source %q is not a directory", sourceDir)
+		}
 	}
 
 	// Write mode holds the config lock across the WHOLE
@@ -133,23 +180,29 @@ func Migrate(baseDir string, write bool) (*MigrateResult, error) {
 	// would re-acquire the lock and deadlock. Migrate must
 	// not be called from inside an UpdateSingleConfig update
 	// function (the lock is already held there). Dry-run
-	// takes no lock: it reads only.
+	// takes no lock: it reads only. The lock is always the
+	// DESTINATION's: the source is read-only and needs none.
 	if write {
-		release, err := lockConfigDir(baseDir)
+		release, err := lockConfigDir(destDir)
 		if err != nil {
 			return result, err
 		}
 		defer release()
 	}
 
-	existing, existingIsSingle, malformedErr, err := readExistingSingle(baseDir)
+	existing, existingIsSingle, malformedErr, err := readExistingSingle(destDir)
 	if err != nil {
 		return result, err
+	}
+	if malformedErr != nil && !same {
+		// A malformed destination file is not a legacy source
+		// profile error: refuse to overwrite it blindly.
+		return result, malformedErr
 	}
 	result.ExistingSingleConfig = existingIsSingle
 
 	// Discover legacy profiles: default first, then sorted dir names.
-	names, err := DiscoverProfileNames(baseDir)
+	names, err := DiscoverProfileNames(sourceDir)
 	if err != nil {
 		return result, err
 	}
@@ -172,15 +225,18 @@ func Migrate(baseDir string, write bool) (*MigrateResult, error) {
 	}
 	profileErrors := []string{}
 	for _, name := range names {
-		paths, perr := ProfilePaths(baseDir, name)
+		paths, perr := ProfilePaths(sourceDir, name)
 		if perr != nil {
 			profileErrors = append(profileErrors, perr.Error())
 			continue
 		}
-		if malformedErr != nil && name == DefaultProfileName {
+		if malformedErr != nil && same && name == DefaultProfileName {
 			// The base config.json is malformed JSON: record it once
 			// as the default profile's error; do not re-read it as a
-			// legacy file.
+			// legacy file. (Only when source == destination: the
+			// malformed file IS the source base file. A malformed
+			// destination file with a separate source is refused
+			// above, before discovery.)
 			profileErrors = append(profileErrors, malformedErr.Error())
 			continue
 		}
@@ -188,15 +244,18 @@ func Migrate(baseDir string, write bool) (*MigrateResult, error) {
 			if fromSingle[name] {
 				continue
 			}
-			if name == DefaultProfileName {
+			if name == DefaultProfileName && same {
 				// The base config.json IS the single file; the
 				// default profile has no separate legacy file,
 				// and it is absent from the single file, so
 				// there is no default entry to carry over.
+				// With a separate source dir, the source base
+				// file IS a separate legacy file and migrates
+				// like any named profile (no skip).
 				continue
 			}
 		}
-		p, perr := migrateLegacyProfile(baseDir, name, paths)
+		p, perr := migrateLegacyProfile(sourceDir, name, paths)
 		if perr != nil {
 			profileErrors = append(profileErrors, perr.Error())
 			continue
@@ -296,7 +355,7 @@ func Migrate(baseDir string, write bool) (*MigrateResult, error) {
 			}
 			// The config lock is held (acquired above): write
 			// under it, without re-locking via SaveSingleConfig.
-			if _, err := writeSingleConfigLocked(baseDir, candidate); err != nil {
+			if _, err := writeSingleConfigLocked(destDir, candidate); err != nil {
 				return result, err
 			}
 			result.Migrated = true
@@ -329,11 +388,26 @@ func Migrate(baseDir string, write bool) (*MigrateResult, error) {
 	}
 	// The config lock is held (acquired above): write under
 	// it, without re-locking via SaveSingleConfig.
-	if _, err := writeSingleConfigLocked(baseDir, candidate); err != nil {
+	if _, err := writeSingleConfigLocked(destDir, candidate); err != nil {
 		return result, err
 	}
 	result.Migrated = true
 	return result, nil
+}
+
+// sameDir reports whether two directory paths name the same directory,
+// compared by cleaned absolute path. Symlinked aliases of one
+// directory compare unequal; that is safe (the source is read-only
+// and the destination write lands in the same physical directory
+// either way), and no symlink resolution is attempted on a
+// destination that may not exist yet.
+func sameDir(a, b string) bool {
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	return filepath.Clean(absA) == filepath.Clean(absB)
 }
 
 // readExistingSingle reads baseDir/config.json if present. It returns

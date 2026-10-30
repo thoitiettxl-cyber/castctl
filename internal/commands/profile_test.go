@@ -510,6 +510,75 @@ func TestConfigMigrate(t *testing.T) {
 	}
 }
 
+// TestConfigMigrateFrom (--from): the source dir is read, the
+// destination is the --config file's directory, and the source is
+// never written. A dry-run against a missing destination file
+// still shows the plan (the missing destination is the normal
+// pre-migration state for a new directory).
+func TestConfigMigrateFrom(t *testing.T) {
+	home := t.TempDir()
+	src := filepath.Join(home, "muse-cli")
+	if err := os.MkdirAll(filepath.Join(src, "profiles", "muse01"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "config.json"), []byte(`{"auto_approve":"always","node_id":"MAIN-NODE"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "profiles", "muse01", "config.json"), []byte(`{"auto_approve":"off","node_id":"MUSE01-NODE"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srcBefore, _ := os.ReadFile(filepath.Join(src, "config.json"))
+	destFile := filepath.Join(home, "castctl", "config.json")
+	env, out, errb := profileEnv(t, destFile)
+
+	// Dry-run: plan shown, destination still missing, source untouched.
+	if code := runProfile(t, env, out, errb, destFile, "config", "migrate", "--from", src); code != 0 {
+		t.Fatalf("migrate --from dry-run: code=%d err=%q", code, errb.String())
+	}
+	if _, err := os.Stat(destFile); err == nil {
+		t.Error("dry run wrote the destination config")
+	}
+	if !strings.Contains(out.String(), `"would_write": true`) || !strings.Contains(out.String(), "muse01") {
+		t.Errorf("migrate --from plan: %q", out.String())
+	}
+	srcAfter, _ := os.ReadFile(filepath.Join(src, "config.json"))
+	if string(srcAfter) != string(srcBefore) {
+		t.Error("dry run modified the source file")
+	}
+
+	// --write: destination created, mode 0600, source untouched.
+	if code := runProfile(t, env, out, errb, destFile, "config", "migrate", "--from", src, "--write"); code != 0 {
+		t.Fatalf("migrate --from --write: code=%d err=%q", code, errb.String())
+	}
+	info, err := os.Stat(destFile)
+	if err != nil {
+		t.Fatalf("migrate --from --write did not create the destination: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("destination mode = %o; want 600", info.Mode().Perm())
+	}
+	if code := runProfile(t, env, out, errb, destFile, "profile", "list"); code != 0 {
+		t.Fatalf("list after --from migrate: code=%d err=%q", code, errb.String())
+	}
+	if !strings.Contains(out.String(), `"source": "single"`) || !strings.Contains(out.String(), "muse01") {
+		t.Errorf("list after --from migrate: %q", out.String())
+	}
+
+	// Missing source dir exits 2 and writes nothing.
+	missing := filepath.Join(home, "no-such-dir")
+	if code := runProfile(t, env, out, errb, destFile, "config", "migrate", "--from", missing); code != 2 {
+		t.Fatalf("migrate --from missing source: code=%d, want 2; err=%q", code, errb.String())
+	}
+
+	// Help names the flag.
+	if code := runProfile(t, env, out, errb, destFile, "config", "migrate", "--help"); code != 0 {
+		t.Fatalf("migrate --help: code=%d", code)
+	}
+	if !strings.Contains(out.String(), "--from") {
+		t.Errorf("migrate help: %q; want --from documented", out.String())
+	}
+}
+
 func TestDefaultPathRegression(t *testing.T) {
 	// Under a controlled XDG_CONFIG_HOME, the default config path
 	// is Join(UserConfigDir(), "castctl", "config.json"): a missing

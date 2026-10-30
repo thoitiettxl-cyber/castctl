@@ -431,7 +431,7 @@ Config maintenance. Subcommands: migrate. Run
 "castctl config <subcommand> --help" for per-subcommand help.
 `
 
-const configMigrateHelpText = `usage: castctl config migrate [--write]
+const configMigrateHelpText = `usage: castctl config migrate [--write] [--from <dir>]
 
 Migrate legacy per-profile config files into the single
 config.json. Dry-run by default: prints the JSON plan and writes
@@ -440,6 +440,14 @@ never deletes or edits the old files). An already-migrated config
 exits 0; a differing single config refuses with exit 2. Only
 "config migrate --write" may create a missing explicit --config
 file.
+
+--from <dir> reads legacy profiles ONLY from <dir> and writes
+the single config ONLY to the --config file's directory (or the
+default config directory when no --config is given); the source
+directory is never written. Without --from, source and
+destination are the --config file's directory. A missing source
+directory exits 2. When --from names the destination directory
+itself, behaviour is exactly as without --from.
 
 When the existing single config has no "dns" section and every
 profile shares one outbound tag, --write also authors the interim

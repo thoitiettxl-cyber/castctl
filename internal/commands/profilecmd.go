@@ -984,7 +984,7 @@ func cmdConfig(ctx context.Context, env *Env, g *globalOpts, args []string) erro
 }
 
 func cmdConfigMigrate(ctx context.Context, env *Env, g *globalOpts, args []string) error {
-	ap := &argParser{defs: []flagDef{{name: "write", kind: flagBool}}, helpText: configMigrateHelpText, prog: "castctl config migrate"}
+	ap := &argParser{defs: []flagDef{{name: "write", kind: flagBool}, {name: "from", kind: flagString}}, helpText: configMigrateHelpText, prog: "castctl config migrate"}
 	p, helpShown, err := ap.parse(args, env.stdout())
 	if err != nil {
 		if pe, ok := err.(*parserError); ok {
@@ -1000,16 +1000,34 @@ func cmdConfigMigrate(ctx context.Context, env *Env, g *globalOpts, args []strin
 		return usageErr(err)
 	}
 	write := p.bool("write")
-	// Only --write may create a missing explicit file: the dry
-	// run is gated by RequirePresent like every other command
-	// (see ConfigLocation.RequirePresent: dry-run does NOT
-	// bypass the gate). A missing non-explicit file is the
-	// normal pre-migration state and passes the gate.
-	loc, err := resolveConfig(g, env, write)
+	// --from names the legacy source directory; the destination
+	// is the --config file's directory (or the default config
+	// directory). A relative --from value is working-directory
+	// relative, like --config. An empty --from is a usage error.
+	sourceDir := ""
+	if p.strIsSet("from") {
+		sourceDir = strings.TrimSpace(p.str("from"))
+		if sourceDir == "" {
+			return usageErr(fmt.Errorf("--from requires a non-empty directory"))
+		}
+		if abs, aerr := filepath.Abs(sourceDir); aerr == nil {
+			sourceDir = abs
+		}
+	}
+	// Only --write may create a missing explicit file, except
+	// with --from: a missing destination file is the normal
+	// pre-migration state for a new directory, so a --from
+	// dry-run is not gated by RequirePresent either. A missing
+	// non-explicit file is the normal pre-migration state and
+	// passes the gate.
+	loc, err := resolveConfig(g, env, write || sourceDir != "")
 	if err != nil {
 		return err
 	}
-	result, err := profile.Migrate(loc.ConfigDir, write)
+	if sourceDir == "" {
+		sourceDir = loc.ConfigDir
+	}
+	result, err := profile.MigrateFrom(sourceDir, loc.ConfigDir, write)
 	if result != nil {
 		if werr := writeJSON(env.stdout(), result); werr != nil {
 			return werr

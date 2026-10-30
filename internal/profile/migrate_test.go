@@ -6,6 +6,7 @@ package profile
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,6 +43,234 @@ func snapshotDir(t *testing.T, dir string) map[string][]byte {
 		return nil
 	})
 	return out
+}
+
+// assertSameSnapshot fails unless two directory snapshots hold
+// exactly the same files with exactly the same bytes.
+func assertSameSnapshot(t *testing.T, before, after map[string][]byte) {
+	t.Helper()
+	if len(before) != len(after) {
+		t.Fatalf("snapshot file sets differ: before %v, after %v", keysOf(before), keysOf(after))
+	}
+	for rel, data := range before {
+		got, ok := after[rel]
+		if !ok {
+			t.Fatalf("snapshot lost file %q", rel)
+		}
+		if string(got) != string(data) {
+			t.Fatalf("snapshot file %q changed bytes", rel)
+		}
+	}
+}
+
+func keysOf(m map[string][]byte) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// TestMigrateFromCrossDir (--from): migration reads legacy profiles
+// ONLY from the source dir and writes the single config ONLY to the
+// destination dir. The source is never written (byte-for-byte
+// identical, including after --write); the destination write is
+// atomic mode 0600; refuse-overwrite applies at the destination;
+// a dry-run writes nothing anywhere; a missing source dir is an
+// exit-2 error; source == destination behaves exactly like Migrate.
+func TestMigrateFromCrossDir(t *testing.T) {
+	t.Parallel()
+	seedSource := func(t *testing.T, home string) string {
+		t.Helper()
+		src := filepath.Join(home, "muse-cli")
+		writeFile(t, filepath.Join(src, "config.json"), `{"auto_approve":"always","node_id":"MAIN-NODE","vm_id":"FAKE-VM"}`, 0o600)
+		writeFile(t, filepath.Join(src, "cookies.txt"), "hatch_sess=FAKE-SESS\n", 0o600)
+		writeFile(t, filepath.Join(src, "profiles", "muse01", "config.json"), `{"auto_approve":"off","node_id":"MUSE01-NODE"}`, 0o600)
+		writeFile(t, filepath.Join(src, "profiles", "muse01", "cookies.txt"), "hatch_sess=FAKE-MUSE01\n", 0o600)
+		return src
+	}
+	namesOf := func(result *MigrateResult) []string {
+		names := make([]string, 0, len(result.Profiles))
+		for _, p := range result.Profiles {
+			names = append(names, p.Name)
+		}
+		return names
+	}
+
+	t.Run("cross-dir dry-run then write", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		src := seedSource(t, home)
+		dest := filepath.Join(home, "castctl")
+		before := snapshotDir(t, src)
+
+		// Dry-run: plan for both profiles, nothing written anywhere.
+		dry, err := MigrateFrom(src, dest, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !dry.WouldWrite || dry.Migrated {
+			t.Errorf("dry-run = %+v; want would_write, not migrated", dry)
+		}
+		if got := namesOf(dry); len(got) != 2 || got[0] != "default" || got[1] != "muse01" {
+			t.Errorf("dry-run profiles = %v; want [default muse01]", got)
+		}
+		for _, p := range dry.Profiles {
+			if p.Source != "legacy" {
+				t.Errorf("dry-run profile %q source = %q; want legacy", p.Name, p.Source)
+			}
+		}
+		if _, err := os.Stat(dest); !os.IsNotExist(err) {
+			t.Errorf("dry-run created the destination dir: stat err = %v", err)
+		}
+		assertSameSnapshot(t, before, snapshotDir(t, src))
+
+		// --write: single config lands in the destination, mode 0600.
+		written, err := MigrateFrom(src, dest, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !written.Migrated {
+			t.Errorf("write = %+v; want migrated", written)
+		}
+		destFile := filepath.Join(dest, "config.json")
+		if mode := fileMode(t, destFile); mode != 0o600 {
+			t.Errorf("destination config mode = %o; want 600", mode)
+		}
+		cfg, found, err := LoadSingleConfig(dest)
+		if err != nil || !found {
+			t.Fatalf("LoadSingleConfig(dest) = found=%v err=%v", found, err)
+		}
+		if len(cfg.Profiles) != 2 {
+			t.Fatalf("destination profiles = %v; want default + muse01", cfg.ProfileNames())
+		}
+		// Cookies stay in the source dir; the migrated entries
+		// point at them by absolute path.
+		if cfg.Profiles["default"].CookiesFile != filepath.Join(src, "cookies.txt") {
+			t.Errorf("default cookies_file = %q; want the source cookies file", cfg.Profiles["default"].CookiesFile)
+		}
+		if cfg.Profiles["muse01"].CookiesFile != filepath.Join(src, "profiles", "muse01", "cookies.txt") {
+			t.Errorf("muse01 cookies_file = %q; want the source cookies file", cfg.Profiles["muse01"].CookiesFile)
+		}
+		// The source is untouched byte-for-byte, including --write.
+		assertSameSnapshot(t, before, snapshotDir(t, src))
+
+		// A second write is already-migrated and rewrites nothing.
+		st1, _ := os.Stat(destFile)
+		again, err := MigrateFrom(src, dest, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if again.Migrated || again.Reason != "already-migrated" {
+			t.Errorf("second run = %+v; want already-migrated", again)
+		}
+		st2, _ := os.Stat(destFile)
+		if !st1.ModTime().Equal(st2.ModTime()) {
+			t.Error("second run rewrote the destination file; want no write")
+		}
+	})
+
+	t.Run("refuse-overwrite at destination", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		src := seedSource(t, home)
+		dest := filepath.Join(home, "castctl")
+		destFile := filepath.Join(dest, "config.json")
+		writeFile(t, destFile, `{"default_profile":"other","profiles":{"other":{"node_id":"OTHER-NODE"}}}`, 0o600)
+		beforeDest, _ := os.ReadFile(destFile)
+		beforeSrc := snapshotDir(t, src)
+		_, err := MigrateFrom(src, dest, true)
+		if err == nil {
+			t.Fatal("MigrateFrom over a differing destination single config = nil error; want refuse-overwrite")
+		}
+		if !errors.Is(err, ErrRefuseOverwrite) {
+			t.Errorf("MigrateFrom error = %v; want errors.Is ErrRefuseOverwrite", err)
+		}
+		if ExitCode(err) != 2 {
+			t.Errorf("MigrateFrom ExitCode = %d; want 2", ExitCode(err))
+		}
+		afterDest, _ := os.ReadFile(destFile)
+		if string(afterDest) != string(beforeDest) {
+			t.Error("refused MigrateFrom modified the destination file")
+		}
+		assertSameSnapshot(t, beforeSrc, snapshotDir(t, src))
+	})
+
+	t.Run("existing destination single refuses additions", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		src := seedSource(t, home)
+		dest := filepath.Join(home, "castctl")
+		destFile := filepath.Join(dest, "config.json")
+		writeFile(t, destFile,
+			`{"profiles":{"existing":{"node_id":"EXISTING-NODE"}},"outbounds":[`+validOutbounds["socks"]+`]}`, 0o600)
+		beforeDest, _ := os.ReadFile(destFile)
+		beforeSrc := snapshotDir(t, src)
+		// The one-shot contract applies at the destination too:
+		// a differing existing single file refuses, even though
+		// the source holds profiles the destination lacks. The
+		// operator adds them via profile-add, not migrate.
+		_, err := MigrateFrom(src, dest, true)
+		if err == nil {
+			t.Fatal("MigrateFrom over a differing destination single config = nil error; want refuse-overwrite")
+		}
+		if !errors.Is(err, ErrRefuseOverwrite) {
+			t.Errorf("MigrateFrom error = %v; want errors.Is ErrRefuseOverwrite", err)
+		}
+		afterDest, _ := os.ReadFile(destFile)
+		if string(afterDest) != string(beforeDest) {
+			t.Error("refused MigrateFrom modified the destination file")
+		}
+		assertSameSnapshot(t, beforeSrc, snapshotDir(t, src))
+	})
+
+	t.Run("missing source dir", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		dest := filepath.Join(home, "castctl")
+		for _, write := range []bool{false, true} {
+			_, err := MigrateFrom(filepath.Join(home, "no-such-dir"), dest, write)
+			if err == nil {
+				t.Fatalf("MigrateFrom(missing source, write=%v) = nil error; want exit 2", write)
+			}
+			if ExitCode(err) != 2 {
+				t.Errorf("MigrateFrom(missing source, write=%v) ExitCode = %d; want 2", write, ExitCode(err))
+			}
+		}
+		if _, err := os.Stat(dest); !os.IsNotExist(err) {
+			t.Errorf("missing-source run created the destination: stat err = %v", err)
+		}
+	})
+
+	t.Run("source is a file", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		fileSrc := filepath.Join(home, "not-a-dir")
+		writeFile(t, fileSrc, `{}`, 0o600)
+		if _, err := MigrateFrom(fileSrc, filepath.Join(home, "castctl"), false); err == nil {
+			t.Fatal("MigrateFrom(file source) = nil error; want exit 2")
+		} else if ExitCode(err) != 2 {
+			t.Errorf("MigrateFrom(file source) ExitCode = %d; want 2", ExitCode(err))
+		}
+	})
+
+	t.Run("source equals destination behaves as today", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		base := seedSource(t, home)
+		dry, err := MigrateFrom(base, base, false)
+		if err != nil || !dry.WouldWrite {
+			t.Fatalf("same-dir dry-run = %+v, %v; want would_write", dry, err)
+		}
+		written, err := MigrateFrom(base, base, true)
+		if err != nil || !written.Migrated {
+			t.Fatalf("same-dir write = %+v, %v; want migrated", written, err)
+		}
+		again, err := MigrateFrom(base, base, false)
+		if err != nil || again.Reason != "already-migrated" {
+			t.Fatalf("same-dir re-run = %+v, %v; want already-migrated", again, err)
+		}
+	})
 }
 
 func TestMigrateDryRun(t *testing.T) {

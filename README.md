@@ -208,7 +208,8 @@ the config file is opened through a symlink with standard open
 semantics, and `CONFIG_DIR` is the cleaned as-given directory:
 symlinks are NOT resolved. A missing explicit `--config` file exits 2, except
 `config migrate` (which may create it with `--write`, and whose
-dry run plans from a legacy-only layout). `--profile` resolution
+dry run plans from a legacy-only layout, or from a `--from`
+source into a new destination). `--profile` resolution
 inside the resolved home is unchanged: `--profile` flag, then
 `CASTCTL_PROFILE`, then `default_profile`, then `"default"`.
 
