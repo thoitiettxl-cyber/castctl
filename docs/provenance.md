@@ -7,9 +7,14 @@ Every factual sentence here is traceable to a file and line inspected
 at a verified commit. The short summary for attribution and license
 names is the root `NOTICE`; this file is the detailed record.
 
-Base commit for all castctl `file:line` citations in this file:
-`1a738947ed6df8e8ae3ed7aa6704ef5ae2d2beaa` (main), re-verified via
-`git ls-remote` immediately before this file was written. If a
+Castctl `file:line` citations in this file refer to the tree at
+the head of the commit carrying this file, unless a citation says
+otherwise. The measurements were taken against base commit
+`1a738947ed6df8e8ae3ed7aa6704ef5ae2d2beaa` (main); the only cited
+file that moved between the base and the head is
+`docs/architecture.md` (three lines inserted before
+`## Platforms`), and every `docs/architecture.md` citation below
+was re-anchored to the head line numbers. If a
 citation no longer matches the tree, the tree wins and this file
 must be updated in the same PR as the change that moved it (see
 §10).
@@ -34,13 +39,17 @@ inventory is the release PR's scope; until it exists, no sentence
 here claims completeness. The npm dependency licenses bundled into
 `webui/dist/index.html` were not checked (see §4, carried gap).
 
-License-name caveat: four LICENSE files in the Go module cache
-(flynn/noise, gorilla/websocket, protobuf, utls) contain the
-three-clause redistribution-conditions-plus-disclaimer text but no
-license identifier string anywhere in the file. The full text of
-each was read. This file therefore calls them "BSD-3-Clause-style
-template text" rather than asserting the SPDX identifier
-`BSD-3-Clause` unqualified. The miekg/dns LICENSE names
+License-name caveat: three LICENSE files in the Go module cache
+(flynn/noise, protobuf, utls) contain the three-clause
+redistribution-conditions-plus-disclaimer text but no license
+identifier string anywhere in the file. A fourth,
+gorilla/websocket (22 lines), contains only two redistribution
+conditions plus the disclaimer, and likewise no license
+identifier string anywhere in the file. This file therefore
+calls the first three "BSD-3-Clause-style template text" and
+gorilla/websocket "BSD-2-Clause-style template text", rather
+than asserting the SPDX identifier `BSD-3-Clause` or
+`BSD-2-Clause` unqualified. The miekg/dns LICENSE names
 "BSD 3-Clause License" on line 1, and the goleak LICENSE names
 "The MIT License (MIT)" on line 1; those two are stated without the
 caveat.
@@ -82,13 +91,13 @@ castctl `internal/profile/config.go:25` declares
 `include/registry.go:48` defines `Context` and `:80` defines
 `OutboundRegistry`.
 
-Castctl mappings (all `VERIFIED`):
+Castctl mappings (`VERIFIED` except as tagged):
 
 - `internal/outbound/context.go:54-79` — `registryOnce` guards the
   single process-global `include.Context()` call site
   (`RegistryContext`, `sync.Once`-guarded; the `!with_quic`
   global-mutation hazard is documented at `context.go:55-62`).
-- `internal/outbound/manager.go:16-21` — imports `adapter/endpoint`,
+- `internal/outbound/manager.go:16-22` — imports `adapter/endpoint`,
   `adapter/outbound`, `dns`, `log`, `option`, and `sing/service`,
   building registry-only managers; no `box.Box` is involved.
 - `internal/outbound/router_stub.go:18-32` — `stubRouter`
@@ -100,7 +109,7 @@ Castctl mappings (all `VERIFIED`):
 - `internal/dns/client.go:5-6` — package doc: builds a profile DNS
   client on sing-box `dns.Router` + `dns.TransportManager` from
   `option.DNSOptions`.
-- `internal/profile/fingerprint.go:40,45` —
+- `internal/profile/fingerprint.go:37,40,44,45` —
   `DefaultFingerprint = "chrome"`, `DefaultTLSEngine = "utls"`;
   valid fingerprints are chrome/firefox/ios/safari and valid engines
   are cronet/stdlib/utls.
@@ -115,17 +124,17 @@ Deviations from upstream, each with castctl evidence:
 1. No `box.Box`. Upstream sing-box normally runs as a full box
    (inbounds + routing + DNS). Castctl builds registry-only managers
    plus a stub Router and never constructs a box
-   (`manager.go:16-21`, `router_stub.go:18-32`, `context.go:79`).
+   (`manager.go:16-22`, `router_stub.go:18-32`, `context.go:79`).
 2. Per-profile isolation (hard invariant). One outbound stack per
    profile; registries, managers, routers, DNS clients, and dialers
    are built per profile and shared data is immutable-only
-   (`docs/architecture.md:73-100`). Caveat: `architecture.md:83`
+   (`docs/architecture.md:76-103`). Caveat: `architecture.md:86-87`
    still phrases this as "one sing-box box instance per profile, or
    unique tags per profile" while the code uses registry-only
    managers; do not quote that sentence as describing the code
    without this caveat.
 3. Fail-closed, no implicit direct fallback, no env-proxy shim
-   (`context.go:6-7` package doc: no `http.DefaultClient`, no
+   (`context.go:9-12` package doc: no `http.DefaultClient`, no
    `net.Dial`, no system-resolver lookup except the single
    `BootstrapLookup` site).
 4. uTLS fingerprint pinned to `chrome`; `random`/`randomized`
@@ -134,7 +143,7 @@ Deviations from upstream, each with castctl evidence:
    `firefox`, `edge`, `safari`, `360`, `qq`, `ios`, `android`,
    `random`, and `randomized`. Castctl accepts only
    chrome/firefox/ios/safari and rejects `random`/`randomized`
-   (`fingerprint.go:40,45`, `tls.go:36-38`).
+   (`fingerprint.go:37,40,44,45`, `tls.go:36-38`).
 5. ALPN not pinned in `GatewayTLSOptions` (deliberate; `tls.go`
    comment). `[VERIFIED — comment evidence only.]`
 
@@ -161,14 +170,14 @@ DESIGN-ONLY: studied, no code taken.
 
 Castctl mapping (docs/comments only — `[DESIGN-ONLY]`):
 
-- `docs/architecture.md:21-47` — "Core + plugins" section: castctl
+- `docs/architecture.md:21-48` — "Core + plugins" section: castctl
   follows CLIProxyAPI's plugin model; toggles `plugins.enabled` +
-  `plugins.configs.<id>.enabled` (`architecture.md:30-33`) are
+  `plugins.configs.<id>.enabled` (`architecture.md:30-34`) are
   "changed through the Management API and the web UI"; "Plugins are
   trusted and in-process, with no sandbox, exactly like
   CLIProxyAPI, and only first-party CLIs (BQ1, closed). BQ2–B5 are
   parked… The plugin design draft is rationale only."
-  (`architecture.md:41-47`).
+  (`architecture.md:41-48`).
 - Idea comments only: `internal/gateway/doc.go:107`,
   `internal/gateway/lost.go:19`, `internal/gateway/phase.go:15`,
   `internal/outbound/failclosed_test.go:27`,
@@ -200,8 +209,8 @@ schema is a parked BQ2–B5 matter.
 
 Deviations (design-level, all `[DESIGN-ONLY]`): (a) per-profile
 proxy + cookies handoff to plugins, never raw WireGuard keys
-(`architecture.md:21-47`); (b) plugins must use core's per-profile
-dialer, never dial directly (`architecture.md:21-47`); (c) trusted
+(`architecture.md:21-48`); (b) plugins must use core's per-profile
+dialer, never dial directly (`architecture.md:21-48`); (c) trusted
 in-process, no sandbox (BQ1 closed) — the same as CLIProxyAPI, so
 not a deviation from upstream, but a deliberate departure from the
 generic plugin-sandbox expectation; record it as "same as upstream,
@@ -260,10 +269,14 @@ shown, upstream side at the same path at `64b4f5a`):
   (castctl `Button.tsx:7`: `ButtonVariant` includes `'plain'`) plus
   ref forwarding; upstream `Button.tsx:7,15,26` has no `plain`
   variant and no ref forwarding.
-- `src/components/ui/{Modal,Select,Sheet,Table}.tsx` — tweaks
-  (Select trigger, Modal scrim, Sheet).
-- `src/pages/LogsPage.tsx`, `LoginPage.tsx`, `SystemPage.tsx` —
-  trimmed to castctl's scope.
+- `src/components/ui/Modal.tsx`, `Select.tsx`, `Sheet/Sheet.tsx` —
+  tweaks (Select trigger, Modal scrim, Sheet);
+  `Table/Table.tsx` is byte-identical, and the adapted Table file
+  is `Table/Table.module.scss`.
+- `src/features/logs/LogsPage.tsx`, `src/pages/LoginPage.tsx`,
+  `src/pages/SystemPage.tsx` — trimmed to castctl's scope.
+  (Upstream `src/pages/LogsPage.tsx` is only a one-line re-export
+  of the features file; it does not exist on the castctl side.)
 - `src/services/api/client.ts` (272 → 124 lines) — fetch wrapper
   vs upstream axios (upstream `client.ts:6,26` imports and creates
   an axios instance; castctl `client.ts:69` calls `fetch`), `/api/v1`
@@ -394,7 +407,7 @@ Deviations from 0.6.1 (all `VERIFIED` in tree): bounded
 `join_chunks` caps (above); legacy-config fallback (castctl-only,
 `ResolveConfigLocation` — read the old `~/.config/muse-cli` dir,
 log a one-line notice, never auto-move/delete; `README.md:216`,
-`docs/architecture.md:62`); `CASTCTL_CONFIG`/`CASTCTL_PROFILE`
+`docs/architecture.md:65`); `CASTCTL_CONFIG`/`CASTCTL_PROFILE`
 renames with `MUSE_AUTO_*`/`MUSE_NODE_ID`/`MUSE_VM_ID` kept;
 GPL-3.0 headers (`SPDX-License-Identifier: GPL-3.0-or-later`,
 "Copyright (C) 2026 muse-cli contributors") on Go files.
@@ -484,7 +497,7 @@ upstream `common/tls/reality_client.go:1,41` carries the
 
 Castctl mappings (`VERIFIED`): `internal/outbound/tls.go:36-38`
 (`GatewayTLSOptions` defaults `Fingerprint: "chrome"`);
-`internal/profile/fingerprint.go:40,45` (defaults + valid sets);
+`internal/profile/fingerprint.go:37,40,44,45` (defaults + valid sets);
 `README.md:277-286` (fingerprint/TLS-engine hold section).
 
 Deviations (`VERIFIED`, same as §1 deviation 4): castctl pins
@@ -513,7 +526,7 @@ Directive, Inc. / Copyright (c) 2015 Prime Directive, Inc." plus
 the three-clause text, with no license identifier; see the caveat
 at the top of this file.
 
-Castctl mapping (`VERIFIED`): `internal/gateway/gateway.go:148-155`
+Castctl mapping (`VERIFIED`): `internal/gateway/gateway.go:24,148-158`
 (read in full): `noise.NewCipherSuite(noise.DH25519,
 noise.CipherAESGCM, noise.HashSHA256)`,
 `noise.NewHandshakeState(noise.Config{Pattern: noise.HandshakeXX,
@@ -558,9 +571,9 @@ Status: `VERIFIED`.
 | Module | Version | License (as read) | In-tree code? |
 |---|---|---|---|
 | `github.com/flynn/noise` | `v1.1.0` | BSD-3-Clause-style template text | Yes — `internal/gateway/gateway.go` |
-| `github.com/gorilla/websocket` | `v1.5.3` | BSD-3-Clause-style template text | Yes — WebSocket transport (`internal/gateway`, `internal/conn`) — import-level verified; exact call sites not enumerated |
+| `github.com/gorilla/websocket` | `v1.5.3` | BSD-2-Clause-style template text | Yes — WebSocket transport (`internal/gateway` only: `connector.go:16`, `gateway.go:16`, `keepalive.go:11`, `lost.go:14`) — import-level verified; exact call sites not enumerated |
 | `github.com/miekg/dns` | `v1.1.72` | BSD 3-Clause License (named in file) | Yes — DNS (via `internal/dns`, sing-box DNS stack) — import-level verified |
-| `github.com/sagernet/sing` | `v0.9.7-0.20261023115459-5dc452e537bf` | GPL-3.0-or-later (no extra sentence) | Yes — `sing/common/json`, `sing/common/network`, `sing/service` (import-level verified: `internal/profile/outbound.go`, `internal/outbound/router_stub.go`, `internal/outbound/wireguard_conf.go`) |
+| `github.com/sagernet/sing` | `v0.9.7-0.20261023115459-5dc452e537bf` | GPL-3.0-or-later (no extra sentence) | Yes — `sing/common/json`, `sing/common/network`, `sing/service` (import-level verified: `sing/common/json` in `internal/profile/outbound.go:11` and `internal/outbound/wireguard_conf.go:18`; `sing/common/network` in `internal/outbound/router_stub.go:15`; `sing/service` in `internal/dns/client.go:34`, `internal/outbound/context.go:51`, `internal/outbound/manager.go:22`) |
 | `github.com/sagernet/sing-box` | `v1.14.4` | GPL-3.0-or-later + name/association sentence (§1) | Yes — 39 files (§1) |
 | `github.com/sagernet/sing-tun` | `v0.9.7-0.20261023115432-040db71fcd33` | GPL-3.0-or-later (no extra sentence) | Yes — `internal/outbound/router_stub.go:13` imports `sing-tun` (import-level verified) |
 | `go.uber.org/goleak` | `v1.3.0` | MIT License (named in file) | Test-only — verified: imported only from `internal/approvals/main_test.go:10`, `internal/conn/main_test.go:10`, `internal/gateway/main_test.go:10`, `internal/wait/main_test.go:10` |

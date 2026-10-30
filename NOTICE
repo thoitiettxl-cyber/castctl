@@ -81,8 +81,9 @@ docs/provenance.md.
 - github.com/flynn/noise v1.1.0 — BSD-3-Clause-style template text
   (same caveat as utls: full LICENSE text read, no identifier in
   the file).
-- github.com/gorilla/websocket v1.5.3 — BSD-3-Clause-style
-  template text (same caveat).
+- github.com/gorilla/websocket v1.5.3 — BSD-2-Clause-style
+  template text (LICENSE file, 22 lines: two redistribution
+  conditions plus disclaimer, no license identifier in the file).
 - github.com/miekg/dns v1.1.72 — BSD 3-Clause License (named in
   the LICENSE file).
 - google.golang.org/protobuf v1.36.11 — BSD-3-Clause-style
