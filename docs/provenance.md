@@ -215,7 +215,7 @@ in-process, no sandbox (BQ1 closed) — the same as CLIProxyAPI, so
 not a deviation from upstream, but a deliberate departure from the
 generic plugin-sandbox expectation; record it as "same as upstream,
 deliberate". Red-team findings B1–B10 and BQ2–B5 are parked
-(`architecture.md:43-44`); B3 stays parked. None of them is
+(`architecture.md:42-44`); B3 stays parked. None of them is
 described here as resolved.
 
 Release-matrix mapping: `[DESIGN-ONLY]` — no `.github/` exists in
@@ -267,8 +267,10 @@ shown, upstream side at the same path at `64b4f5a`):
   upstream provider/sidebar complexity removed).
 - `src/components/ui/Button.tsx` — adds the `plain` variant
   (castctl `Button.tsx:7`: `ButtonVariant` includes `'plain'`) plus
-  ref forwarding; upstream `Button.tsx:7,15,26` has no `plain`
-  variant and no ref forwarding.
+  ref forwarding (castctl `Button.tsx:15`:
+  `ref?: Ref<HTMLButtonElement>`); upstream `Button.tsx:3` defines
+  `ButtonVariant` without `'plain'`, and no line in the file
+  contains `plain`, `forwardRef`, or `Ref` (whole-file grep).
 - `src/components/ui/Modal.tsx`, `Select.tsx`, `Sheet/Sheet.tsx` —
   tweaks (Select trigger, Modal scrim, Sheet);
   `Table/Table.tsx` is byte-identical, and the adapted Table file
@@ -532,7 +534,7 @@ noise.CipherAESGCM, noise.HashSHA256)`,
 `noise.NewHandshakeState(noise.Config{Pattern: noise.HandshakeXX,
 Initiator: true, StaticKeypair: <fresh ephemeral>})`, empty
 payloads in all three messages, 20s handshake timeout; the comment
-at `gateway.go:137-145` states "the msg2 payload is accepted at ANY
+at `gateway.go:137-146` states "the msg2 payload is accepted at ANY
 length and ignored — never asserted to be empty." Also
 `internal/gateway/noise_test.go:12,82` (comment: tests run
 "against the flynn/noise version used by the product code" —
@@ -554,7 +556,7 @@ done. Generation entry points `compile.go` / `generate.sh` exist;
 contents not read in detail: `[PARTLY VERIFIED]`.
 
 Deviations: (a) msg2 payload ignored at any length (deliberate,
-`gateway.go:137-145` comment; the Python behavior it mirrors was
+`gateway.go:137-146` comment; the Python behavior it mirrors was
 not re-read at line level: `[DOCS-ONLY]` for the Python side);
 (b) bounded chunk reassembly vs Python unbounded (§4); (c)
 `go_package` option added (wire-neutral, stated in the `.proto`
@@ -564,7 +566,7 @@ standard usage. The XX pattern as a studied design is a (c) NOTICE
 item: studied, no code taken; the pattern itself is a public
 specification, not copied text.
 
-Status: `VERIFIED`.
+Status: `VERIFIED` except as tagged.
 
 ## 9. Direct-dependency table (main module, go.mod at the base commit; licenses read from module-cache LICENSE files)
 
