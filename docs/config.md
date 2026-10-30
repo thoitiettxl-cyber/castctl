@@ -16,7 +16,7 @@ profile loading refuses (only `config migrate` reads it)).
 
 ## Single-file schema
 
-Top-level keys (exactly these six; unknown keys are rejected):
+Top-level keys (exactly these seven; unknown keys are rejected):
 
 | Key | Value |
 |---|---|
@@ -26,6 +26,7 @@ Top-level keys (exactly these six; unknown keys are rejected):
 | `endpoints` | array of sing-box endpoint objects (e.g. WireGuard, tag-addressed) |
 | `dns` | object: the interim global DNS section (below, compat fallback only) |
 | `wireguard_dns` | object: endpoint tag → array of DNS server addresses read by branch 2 (see [Per-profile DNS](#per-profile-dns)); castctl-side state, not a sing-box field — hand-written/preserved, not imported: no import-path wiring from a wg-quick `DNS=` line exists yet (follow-up) |
+| `log` | object: logging settings (see [The `log` section](#the-log-section)) |
 
 A profile entry accepts exactly these ten keys (unknown keys
 are rejected — see [Per-profile DNS](#per-profile-dns)):
@@ -53,6 +54,51 @@ A profile with no entry in `profiles` and no config file of its
 own still exists (its directory is its home) and loads with
 defaults (`SourceNone`, direct, `auto_approve` off). A profile
 directory with no config file is *not* a legacy layout.
+
+## The `log` section
+
+The top-level `log` block configures castctl's logging, following
+sing-box's `LogOptions` semantics (see `docs/provenance.md` §1 for
+the upstream citations). One resolved level governs every
+emission — sing-box's own logs and castctl's own events — through
+a single factory. All four fields are optional; an absent block
+means the defaults below.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `disabled` | bool | `false` | `true` suppresses ALL log output (castctl and sing-box), including fatal/panic lines. Normal command output (stdout JSON/text) and config errors are unaffected. |
+| `level` | string | `"warn"` | One of `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `panic`. sing-box's `"warning"` spelling is accepted as an alias for `warn`. Any other value (including `"TRACE"`) is a config error (exit 2). |
+| `output` | string | `"stderr"` | `""` or `"stderr"` writes to stderr; any other string is a file path, opened for append. `"stdout"` is rejected (exit 2): log output must never mix with command output on stdout. |
+| `timestamp` | bool | `false` | Timestamp format, sing-box style: console output carries a full timestamp when `true` and a relative elapsed-seconds prefix when `false`; file output carries no timestamp when `false` and a full timestamp when `true`. |
+
+Precedence: the `--log-level LEVEL` global CLI flag beats the
+config block, which beats the default (`warn`). An invalid
+`--log-level` value exits 2 and never echoes the value. There is
+no `--verbose`/`--debug` flag.
+
+File output: castctl owns log-file creation — files are created
+with mode `0600`, appended to (never truncated), and a
+pre-existing looser file is narrowed to `0600` (a stricter mode
+is never widened). Parent directories are not created; an
+uncreatable path is a startup error (exit 2). There is no log
+rotation. Console colour follows sing-box's default (coloured
+level labels on a terminal); there is no `disable_color` field
+in the schema.
+
+Secrets: log lines never carry cookies, tokens, URLs with query
+credentials, WireGuard keys, or header values. Secret-bearing
+fields are excluded from log emissions by construction, and
+every free-form log field passes a redaction boundary
+(`internal/logging`). The events castctl emits at debug/trace
+are: `dns_source` (resolved DNS source + first server tag),
+`outbound_chain` (profile + detour-chain tags), dial
+start/done with a per-connection ID, `tls_alpn` (negotiated
+protocol string only), `ws_handshake` (parsed status code or
+token only), and retries (attempt counter + redacted error).
+
+`config migrate` carries an existing `log` block into the new
+file verbatim and never invents one: a migrated file without a
+`log` block stays without one.
 
 ## The `dns` section — INTERIM, GLOBAL, COMPAT-ONLY
 

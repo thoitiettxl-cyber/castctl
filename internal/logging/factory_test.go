@@ -27,7 +27,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	singlog "github.com/sagernet/sing-box/log"
@@ -431,4 +433,41 @@ func TestSlogBridgeFilteringAndRedaction(t *testing.T) {
 	got = stripANSI(buf.String())
 	assertContains(t, got, "slog-error-probe")
 	assertNotContains(t, got, "slog-warn-probe")
+}
+
+// TestFactoryConcurrentWrites: sing-box emits from parallel
+// goroutines with no writer lock of its own, so the factory must
+// serialise writes itself. Concurrent Emit calls into a plain
+// buffer must produce whole lines only (no interleaving), and
+// must not trip the race detector. Red run: two goroutines
+// writing to the shared buffer race in bytes.Buffer.
+func TestFactoryConcurrentWrites(t *testing.T) {
+	var buf bytes.Buffer
+	handle, err := NewFactory(context.Background(), Settings{Level: "trace", Output: "stderr"}, &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = handle.Close() }()
+	logger := handle.Logger("conc")
+	const goroutines, perGoroutine = 8, 25
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < perGoroutine; i++ {
+				Emit(logger, context.Background(), singlog.LevelInfo, "event=conc g="+strconv.Itoa(g)+" i="+strconv.Itoa(i))
+			}
+		}(g)
+	}
+	wg.Wait()
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != goroutines*perGoroutine {
+		t.Fatalf("got %d lines, want %d:\n%s", len(lines), goroutines*perGoroutine, buf.String())
+	}
+	for _, line := range lines {
+		if strings.Count(line, "event=conc") != 1 {
+			t.Errorf("interleaved line: %q", line)
+		}
+	}
 }

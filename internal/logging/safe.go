@@ -141,6 +141,7 @@ func SafeHost(host string) string {
 	}
 	return "[redacted]"
 }
+
 // It is SafeString applied to err.Error(): the error chain is not
 // logged, only the (redacted) top-level text. Callers that need an
 // error's type for a log field must classify with errors.As and

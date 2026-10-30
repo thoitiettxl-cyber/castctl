@@ -286,6 +286,48 @@ Not taken: no sing-box source file is copied into the tree (no
 vendored `sing-box` directory; grep shows imports only). Inbounds,
 routing rules, and the box lifecycle are unused by design.
 
+Log package (wired by the logging PR; library API only, no copied
+code). Upstream `log/log.go:22-71` defines `New`: `Disabled`
+returns the NOP factory before level parsing (`:25-27`); the
+output switch (`:32-45`) maps `""` to the default writer, and
+`"stderr"`, `"stdout"`, or a file path; the formatter
+(`:46-52`) sets `DisableColors: DisableColor || filePath != ""`,
+`DisableTimestamp: !Timestamp && filePath != ""`,
+`FullTimestamp: Timestamp`, and the literal timestamp format
+`"-0700 2006-01-02 15:04:05"`; an empty level becomes
+`LevelTrace` (`:67-69`) and an unknown level errors with
+`"parse log level"` (`:61-65`). Upstream `log/level.go:7-17`
+defines the levels Panic=0..Trace=6 and `ParseLevel` (`:40-58`)
+is case-sensitive, accepting `"warn"` and `"warning"` for Warn.
+Upstream `log/format.go:96-125` renders console output with a
+full timestamp when timestamp is on and a relative
+elapsed-seconds prefix (`LEVEL[SSSS] `) when off, and file
+output with no timestamp when off; connection IDs appear as
+`[<id> <elapsed>]` after the level/timestamp prefix
+(`format.go:51-58,127-141`). Upstream
+`log/observable.go:45-100,149-196` defines `NewDefaultFactory`
+and the level gate `level <= f.level`, with Fatal exiting the
+process and Panic panicking; `log/id.go:9-30` defines
+`ContextWithNewID`/`IDFromContext` (a random uint32 carried in
+the context). Upstream `log/nop.go` is the NOP factory.
+Castctl deviations from sing-box defaults, all deliberate and
+documented in `docs/config.md`: default level warn (not trace),
+`"stdout"` rejected, log files created by castctl at mode 0600
+(sing-box's observable factory opens files at 0644,
+`log/observable.go:79`), and `DisableColor` not exposed in the
+schema. Mechanism: castctl does NOT call `log.New` (its
+`"stderr"` branch writes the real `os.Stderr` unconditionally
+and its file path opens at 0644 on `Start()`); it calls
+`log.NewDefaultFactory` with a caller-supplied writer and owns
+file creation itself (`internal/logging/factory.go`), keeping
+sing-box's level, timestamp, colour, and ID formatting
+unchanged. `internal/outbound/tls.go` reads
+`NegotiatedProtocol` from sing-box's typed `tls.Conn`
+(`common/tls` exposes `ConnectionState()`); uTLS appends
+`http/1.1` after a lone `h2` offer
+(`common/tls/utls_client.go:66-71`), so the logged ALPN is the
+negotiated string only, never the offered list.
+
 Follow-ups from the gateway WebSocket ALPN pin (unexamined,
 unresolved, no code — recorded here, not implemented):
 

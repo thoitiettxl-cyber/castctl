@@ -123,7 +123,14 @@ func NewFactory(ctx context.Context, s Settings, stderr io.Writer) (*Handle, err
 		FullTimestamp:    s.Timestamp,
 		TimestampFormat:  singBoxTimestampFormat,
 	}
-	factory := singlog.NewDefaultFactory(ctx, formatter, writer, "", nil, false)
+	// Sing-box's factory writes to its writer from concurrent
+	// goroutines with no lock of its own (observable.go:155
+	// calls writer.Write directly): the writer must be safe for
+	// concurrent use. os.Stderr and *os.File are; an arbitrary
+	// caller writer (a test buffer) is not — serialise every
+	// write here so one formatted line is never interleaved
+	// with another, whatever the caller passes.
+	factory := singlog.NewDefaultFactory(ctx, formatter, &lockedWriter{w: writer}, "", nil, false)
 	factory.SetLevel(level)
 	if err := factory.Start(); err != nil {
 		if file != nil {
@@ -132,6 +139,20 @@ func NewFactory(ctx context.Context, s Settings, stderr io.Writer) (*Handle, err
 		return nil, err
 	}
 	return &Handle{Factory: factory, level: level, file: file}, nil
+}
+
+// lockedWriter serialises concurrent writes to an underlying
+// writer. One Write call is one formatted log line; the mutex
+// keeps lines whole when sing-box emits from parallel goroutines.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
 
 // openLogFile opens path for append/create/write-only with mode
