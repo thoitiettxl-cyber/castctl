@@ -7,8 +7,10 @@ import '../src/i18n';
 
 /**
  * Behaviour guards for the converted controls that can render under
- * react-dom/server (no DOM infra in this repo: no jsdom, no Testing
- * Library). These assert the converted <Button> adds no btn chrome and
+ * react-dom/server. jsdom is now a devDependency, and
+ * webui/tests/button-ref-dom.test.tsx proves ref attachment to a real
+ * DOM button (per-file jsdom environment); this file's own tests remain
+ * SSR/markup assertions (no Testing Library). These assert the converted <Button> adds no btn chrome and
  * no wrapper span, and that type="button" + aria/disabled forwarding
  * survive conversion.
  *
@@ -17,7 +19,7 @@ import '../src/i18n';
  * MainLayout sites S2–S5 and the NotificationContainer site S1 (router /
  * store shells). Those are covered by the Button contract tests in
  * button.test.tsx, the verbatim diff, and the Floor grep proof.
- * Click/keyboard behaviour is not exercised: there is no DOM to click in.
+ * Click/keyboard behaviour is not exercised here.
  */
 describe('converted Select trigger (S8, in-form site)', () => {
   it('renders type="button", no btn classes, both child spans direct', () => {

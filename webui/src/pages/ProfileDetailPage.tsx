@@ -414,10 +414,10 @@ export function ProfileDetailPage() {
           <Button type="submit" loading={importing} disabled={!cookies.trim()}>
             {t('profiles.login_card.import_button')}
           </Button>{' '}
-          <Button variant="secondary" loading={restoring} onClick={() => void handleRestore()}>
+          <Button type="button" variant="secondary" loading={restoring} onClick={() => void handleRestore()}>
             {t('profiles.login_card.restore')}
           </Button>{' '}
-          <Button variant="secondary" onClick={() => void handleCheckAgain()}>
+          <Button type="button" variant="secondary" onClick={() => void handleCheckAgain()}>
             {t('profiles.login_card.check_again')}
           </Button>
         </form>

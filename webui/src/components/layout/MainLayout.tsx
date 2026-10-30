@@ -329,7 +329,7 @@ export function MainLayout() {
       <header className="main-header">
         <Button
           type="button"
-          variant="ghost"
+          variant="plain"
           className="sidebar-toggle-floating"
           aria-label={isCollapsed ? t('sidebar.expand') : t('sidebar.collapse')}
           onClick={toggleCollapse}
