@@ -43,11 +43,21 @@ func TestHandshakeFailureErrorAllowlist(t *testing.T) {
 	if !errors.Is(err, raw) {
 		t.Errorf("handshake error does not unwrap to the original error")
 	}
-	// A validated token IS emitted.
-	tokErr := errors.New(`websocket: malformed HTTP status code "error"`)
+	// A validated 3-digit token IS emitted; a token-shaped
+	// non-numeric token renders as its length only (loop 7,
+	// item R4), never its bytes.
+	tokErr := errors.New(`websocket: malformed HTTP status code "502"`)
 	tok := newHandshakeFailureError(nil, tokErr)
-	if !strings.Contains(tok.Error(), "error") {
-		t.Errorf("handshake error %q, want the validated status token", tok.Error())
+	if !strings.Contains(tok.Error(), "status_token=502") {
+		t.Errorf("handshake error %q, want the validated 3-digit status token", tok.Error())
+	}
+	wordErr := errors.New(`websocket: malformed HTTP status code "error"`)
+	word := newHandshakeFailureError(nil, wordErr)
+	if strings.Contains(word.Error(), "status_token=error") {
+		t.Errorf("handshake error %q carries the non-numeric token bytes", word.Error())
+	}
+	if !strings.Contains(word.Error(), "status_token_length=5") {
+		t.Errorf("handshake error %q, want the token length only", word.Error())
 	}
 	// A numeric response status is emitted as a code.
 	resp := &http.Response{StatusCode: 403}

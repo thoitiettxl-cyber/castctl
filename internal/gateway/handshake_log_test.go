@@ -69,7 +69,10 @@ func hsScanFixtures(t *testing.T, capture string) {
 // TestHandshakeStatusToken is the pure-extractor table: the
 // extractor is the ONLY place a status token is derived, and it
 // must fail closed on anything that is not a numeric code or a
-// short token-shaped fragment.
+// short token-shaped fragment. Only a 3-DIGIT code is ever
+// emitted as a token (loop 7, item R4): a token-shaped,
+// non-numeric, or over-long token renders as its LENGTH only,
+// never its bytes.
 func TestHandshakeStatusToken(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -82,15 +85,19 @@ func TestHandshakeStatusToken(t *testing.T) {
 		{name: "101", resp: &http.Response{StatusCode: 101}, token: "101", kind: "status_code", ok: true},
 		{name: "502", resp: &http.Response{StatusCode: 502}, token: "502", kind: "status_code", ok: true},
 		{name: "resp-wins-over-err", resp: &http.Response{StatusCode: 502}, err: errors.New(`malformed HTTP status code "error"`), token: "502", kind: "status_code", ok: true},
-		{name: "malformed-error", err: errors.New(`malformed HTTP status code "error"`), token: "error", kind: "status_token", ok: true},
-		{name: "malformed-abc", err: errors.New(`malformed HTTP status code "abc"`), token: "abc", kind: "status_token", ok: true},
-		{name: "wrapped-malformed", err: errors.New(`read: malformed HTTP status code "error": boom`), token: "error", kind: "status_token", ok: true},
+		{name: "malformed-3digit", err: errors.New(`malformed HTTP status code "502"`), token: "502", kind: "status_token", ok: true},
+		{name: "malformed-error", err: errors.New(`malformed HTTP status code "error"`), token: "5", kind: "status_token_length", ok: true},
+		{name: "malformed-abc", err: errors.New(`malformed HTTP status code "abc"`), token: "3", kind: "status_token_length", ok: true},
+		{name: "malformed-2digit", err: errors.New(`malformed HTTP status code "42"`), token: "2", kind: "status_token_length", ok: true},
+		{name: "malformed-4digit", err: errors.New(`malformed HTTP status code "1234"`), token: "4", kind: "status_token_length", ok: true},
+		{name: "malformed-alnum", err: errors.New(`malformed HTTP status code "12a"`), token: "3", kind: "status_token_length", ok: true},
+		{name: "malformed-too-long", err: errors.New(`malformed HTTP status code "` + strings.Repeat("x", 33) + `"`), token: "33", kind: "status_token_length", ok: true},
+		{name: "wrapped-malformed", err: errors.New(`read: malformed HTTP status code "error": boom`), token: "5", kind: "status_token_length", ok: true},
 		{name: "malformed-response-shape", err: errors.New(`malformed HTTP response "error"`), ok: false},
 		{name: "bad-handshake", err: errors.New("websocket: bad handshake"), ok: false},
 		{name: "eof", err: errors.New("unexpected EOF"), ok: false},
 		{name: "token-with-space", err: errors.New(`malformed HTTP status code "a b"`), ok: false},
 		{name: "token-with-slash", err: errors.New(`malformed HTTP status code "a/b"`), ok: false},
-		{name: "token-too-long", err: errors.New(`malformed HTTP status code "` + strings.Repeat("x", 33) + `"`), ok: false},
 		{name: "nil-nil", ok: false},
 		{name: "empty-token", err: errors.New(`malformed HTTP status code ""`), ok: false},
 	}
@@ -116,8 +123,8 @@ func TestDialWebSocketHandshakeEvent(t *testing.T) {
 	}{
 		{name: "101", kind: script101, wsTimeout: 2 * time.Second, wantLine: "event=ws_handshake status_code=101"},
 		{name: "well-formed-502", kind: scriptWellFormed502, wsTimeout: 2 * time.Second, wantLine: "event=ws_handshake status_code=502"},
-		{name: "plaintext-error", kind: scriptPlaintextError, wsTimeout: 2 * time.Second, wantLine: "event=ws_handshake status_token=error"},
-		{name: "bad-code", kind: scriptBadCode, wsTimeout: 2 * time.Second, wantLine: "event=ws_handshake status_token=abc"},
+		{name: "plaintext-error", kind: scriptPlaintextError, wsTimeout: 2 * time.Second, wantLine: "event=ws_handshake status_token_length=5"},
+		{name: "bad-code", kind: scriptBadCode, wsTimeout: 2 * time.Second, wantLine: "event=ws_handshake status_token_length=3"},
 		{name: "no-space", kind: scriptNoSpace, wsTimeout: 2 * time.Second, wantLine: ""},
 		{name: "immediate-close", kind: scriptImmediateClose, wsTimeout: 2 * time.Second, wantLine: ""},
 		{name: "silent", kind: scriptSilent, wsTimeout: 200 * time.Millisecond, wantLine: ""},

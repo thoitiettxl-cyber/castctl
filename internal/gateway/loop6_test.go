@@ -341,6 +341,42 @@ func TestLoop6SubscriptionBodyLength(t *testing.T) {
 	if !strings.Contains(ge.Error(), fmt.Sprintf("body_length=%d", len(rsc))) {
 		t.Errorf("GatewayError.Error() = %q, want body_length=%d", ge.Error(), len(rsc))
 	}
+
+	// Loop 7 (T1): the same wire-length contract on the
+	// non-200 / non-x-component branch. Every POST answers
+	// 500 with a fixed plain-text body; the scan finds an id
+	// whose call also answers 500, so the failure summary is
+	// built from the 500 wire length. The Payload text, the
+	// rendered error, and the wire length must all agree.
+	body500 := "server exploded " + loop6Marker
+	mux := http.NewServeMux()
+	mux.HandleFunc("/settings", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`<script src="/_next/static/chunks/abc.js"></script>`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(500)
+		_, _ = w.Write([]byte(body500))
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`createServerReference)("abcdef1234567890abcdef",{},"fetchSubscriptionAction")`))
+	})
+	_, _, err = FetchSubscription(context.Background(), muxClient(mux), fakeCookie, SubscriptionOptions{Page: "https://muse.ai/settings"})
+	var ge500 *conn.GatewayError
+	if !errors.As(err, &ge500) {
+		t.Fatalf("500 branch: err = %T (%v), want *conn.GatewayError", err, err)
+	}
+	assertNoLoop6Marker(t, "500 GatewayError.Payload", ge500.Payload)
+	if ge500.BodyLength != len(body500) {
+		t.Errorf("500 branch: BodyLength = %d, want the wire length %d (never 0, never the summary-text length %d)", ge500.BodyLength, len(body500), len(ge500.Payload))
+	}
+	if !strings.Contains(ge500.Payload, fmt.Sprintf("body_length=%d", len(body500))) {
+		t.Errorf("500 branch: Payload = %q, want body_length=%d", ge500.Payload, len(body500))
+	}
+	if !strings.Contains(ge500.Error(), fmt.Sprintf("body_length=%d", len(body500))) {
+		t.Errorf("500 branch: GatewayError.Error() = %q, want body_length=%d", ge500.Error(), len(body500))
+	}
 }
 
 func TestLoop6VMUnavailableGuidance(t *testing.T) {

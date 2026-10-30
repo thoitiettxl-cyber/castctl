@@ -11,6 +11,8 @@ package shared
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -74,5 +76,31 @@ func TestLoop6SaveResourcesRowError(t *testing.T) {
 	m, ok := ref.(map[string]any)
 	if !ok || m["path"] != "sandbox://workspace/c.txt" {
 		t.Errorf("downloadRef = %#v, want the resource dict", ref)
+	}
+	// (d) Loop 7 (V1, distinguishing case): a ConnectionError
+	// wrapping PLAIN prose. GatewayError.Error() and the
+	// MediaPath ValidationError are already summaries, so
+	// (a) and (b) pass even if the row rendered
+	// err.Error() directly — they cannot distinguish the
+	// SummarizeErr rendering from a neutered one. This case
+	// can: SummarizeErr renders error_length only, while
+	// err.Error() would carry the prose verbatim.
+	prose := "plain prose " + loop6Marker
+	dl3 := &loop6Downloader{err: &conn.ConnectionError{Err: errors.New(prose)}}
+	rows3, err := SaveResources(context.Background(), dl3, []Resource{{Path: "sandbox://workspace/d.txt", Kind: "video"}}, dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows3) != 1 {
+		t.Fatalf("len(rows3) = %d, want 1", len(rows3))
+	}
+	if rows3[0].Error == "" {
+		t.Fatal("row.Error is empty: positive control failed")
+	}
+	if strings.Contains(rows3[0].Error, loop6Marker) || strings.Contains(rows3[0].Error, "plain prose") {
+		t.Errorf("row.Error = %q, carries the wrapped prose", rows3[0].Error)
+	}
+	if !strings.Contains(rows3[0].Error, fmt.Sprintf("error_length=%d", len(prose))) {
+		t.Errorf("row.Error = %q, want error_length=%d", rows3[0].Error, len(prose))
 	}
 }

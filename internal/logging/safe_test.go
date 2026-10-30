@@ -576,3 +576,67 @@ func TestSafeStringIdempotentUserinfoURL(t *testing.T) {
 		t.Errorf("SafeString not idempotent for a userinfo URL:\n once: %q\ntwice: %q", once, twice)
 	}
 }
+
+// TestSafeStringLoop7Separators (loop 7, item R2): the
+// separator between a secret label and its `=`/`:` must cover
+// NBSP (U+00A0), EM SPACE (U+2003), and vertical tab, on the
+// label side as well as the value side. The loop-6 bypass was
+// the label-side separator: `token\u00A0=SECRET` survived
+// because Go's \s does not match those characters.
+func TestSafeStringLoop7Separators(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "nbsp-equals-before", in: "token\u00A0=LOGFIX-SEP-1", want: "token=[redacted]"},
+		{name: "emspace-equals-before", in: "token\u2003=LOGFIX-SEP-2", want: "token=[redacted]"},
+		{name: "vtab-equals-before", in: "token\v=LOGFIX-SEP-3", want: "token=[redacted]"},
+		{name: "nbsp-colon-before", in: "token\u00A0:LOGFIX-SEP-4", want: "token: [redacted]"},
+		{name: "emspace-colon-before", in: "token\u2003:LOGFIX-SEP-5", want: "token: [redacted]"},
+		{name: "vtab-colon-before", in: "token\v:LOGFIX-SEP-6", want: "token: [redacted]"},
+		{name: "nbsp-equals-after", in: "token=\u00A0LOGFIX-SEP-7", want: "token=[redacted]"},
+		{name: "emspace-colon-after", in: "token:\u2003LOGFIX-SEP-8", want: "token: [redacted]"},
+		{name: "plain-equals", in: "token=LOGFIX-SEP-9", want: "token=[redacted]"},
+		{name: "plain-colon", in: "token: LOGFIX-SEP-10", want: "token: [redacted]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SafeString(tc.in); got != tc.want {
+				t.Errorf("SafeString(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+	// Non-secret prose carrying the same characters survives
+	// byte-identical: the wider separator class must not
+	// over-redact ordinary text.
+	if in := "hello\u00A0world and a\u2003b"; SafeString(in) != in {
+		t.Errorf("SafeString(%q) = %q, want it unchanged", in, SafeString(in))
+	}
+}
+
+// TestSafeStringLoop7NewlineJSONValue (loop 7, item R2):
+// scanQuoted must survive a literal newline inside a JSON
+// string value, so a secret value spanning lines is still
+// stripped instead of copied verbatim.
+func TestSafeStringLoop7NewlineJSONValue(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "double-quoted", in: "{\"token\": \"LOGFIX-NL-1\nTAIL\"}", want: "{\"token\": \"[redacted]\"}"},
+		{name: "single-quoted", in: "{'token': 'LOGFIX-NL-2\nTAIL'}", want: "{'token': '[redacted]'}"},
+		{name: "newline-in-key", in: "{\"tok\nen\": \"x\"}", want: "{\"tok\nen\": \"x\"}"},
+		{name: "non-secret-newline", in: "{\"name\": \"Alice\nBob\"}", want: "{\"name\": \"Alice\nBob\"}"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SafeString(tc.in); got != tc.want {
+				t.Errorf("SafeString(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
