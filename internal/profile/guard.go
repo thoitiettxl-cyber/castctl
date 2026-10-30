@@ -101,7 +101,7 @@ func LoadConfigState(baseDir string) (*ConfigState, error) {
 func readConfigState(baseDir string) (*ConfigState, []byte, error) {
 	state := &ConfigState{baseDir: baseDir}
 	path := filepath.Join(baseDir, "config.json")
-	data, err := os.ReadFile(path)
+	data, err := readRegularFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return state, nil, nil
@@ -205,7 +205,9 @@ func UpdateSingleConfig(baseDir string, update func(cfg *SingleConfig) error) er
 	// Re-read under the lock: the only way the bytes changed since
 	// the load is a writer that bypassed the lock (e.g. an editor
 	// writing in place). Refuse rather than overwrite its change.
-	current, err := os.ReadFile(filepath.Join(baseDir, "config.json"))
+	// The re-read is Stat/type-guarded like every other config.json
+	// read: a FIFO swapped in for the file must not hang the write.
+	current, err := readRegularFile(filepath.Join(baseDir, "config.json"))
 	if err != nil && !os.IsNotExist(err) {
 		return newConfigErrorf("read config: %v", err)
 	}

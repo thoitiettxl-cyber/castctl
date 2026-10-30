@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func readJSONFile(t *testing.T, path string) map[string]any {
@@ -826,6 +828,139 @@ func quoteJSON(s string) string {
 // extension fires only on a run that would otherwise be
 // already-migrated, so it never rewrites a differing single file
 // and never invents a section for a fresh legacy migration.
+// TestMigrateRefusesNonRegularFiles (R3): migrateLegacyProfile and
+// readExistingSingle must Stat/type-guard before opening a
+// config.json path. A FIFO at a named profile path must make a
+// migrate dry-run fail promptly with a profile error naming the
+// profile (never hang); a FIFO or symlink-to-FIFO at the base
+// path must make it fail promptly with an exit-2 error naming the
+// path. A directory at a named path keeps its exit-2 error.
+func TestMigrateRefusesNonRegularFiles(t *testing.T) {
+	t.Parallel()
+
+	runMigratePrompt := func(t *testing.T, base string) (*MigrateResult, error) {
+		t.Helper()
+		type outcome struct {
+			result *MigrateResult
+			err    error
+		}
+		done := make(chan outcome, 1)
+		go func() {
+			result, err := Migrate(base, false)
+			done <- outcome{result, err}
+		}()
+		select {
+		case o := <-done:
+			return o.result, o.err
+		case <-time.After(5 * time.Second):
+			t.Fatal("Migrate hung; want a prompt exit-2 error")
+			return nil, nil
+		}
+	}
+
+	// FIFO at a named profile path: profile error, promptly.
+	fifoBase := BaseDir(t.TempDir())
+	fifoPath := filepath.Join(fifoBase, "profiles", "work", "config.json")
+	if err := os.MkdirAll(filepath.Dir(fifoPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(fifoPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := runMigratePrompt(t, fifoBase)
+	if err == nil {
+		t.Fatalf("Migrate over a named FIFO = nil error; want a profile error")
+	}
+	if ExitCode(err) != 2 {
+		t.Errorf("Migrate over a named FIFO ExitCode = %d; want 2", ExitCode(err))
+	}
+	if result == nil || len(result.Errors) == 0 || !strings.Contains(strings.Join(result.Errors, " "), "work") {
+		t.Errorf("Migrate over a named FIFO errors = %v; want a profile error naming \"work\"", result.Errors)
+	}
+
+	// Symlink to a FIFO at a named profile path: same, promptly.
+	linkBase := BaseDir(t.TempDir())
+	realFIFO := filepath.Join(t.TempDir(), "real-fifo")
+	if err := syscall.Mkfifo(realFIFO, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(linkBase, "profiles", "work", "config.json")
+	if err := os.MkdirAll(filepath.Dir(linkPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realFIFO, linkPath); err != nil {
+		t.Fatal(err)
+	}
+	result, err = runMigratePrompt(t, linkBase)
+	if err == nil {
+		t.Fatalf("Migrate over a symlink-to-FIFO named path = nil error; want a profile error")
+	}
+	if ExitCode(err) != 2 {
+		t.Errorf("Migrate over a symlink-to-FIFO named path ExitCode = %d; want 2", ExitCode(err))
+	}
+	if result == nil || len(result.Errors) == 0 || !strings.Contains(strings.Join(result.Errors, " "), "work") {
+		t.Errorf("Migrate over a symlink-to-FIFO named path errors = %v; want a profile error naming \"work\"", result.Errors)
+	}
+
+	// FIFO at the base path: exit-2 error naming the path, promptly.
+	baseFIFO := BaseDir(t.TempDir())
+	baseFIFOPath := filepath.Join(baseFIFO, "config.json")
+	if err := os.MkdirAll(baseFIFO, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(baseFIFOPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = runMigratePrompt(t, baseFIFO)
+	if err == nil {
+		t.Fatal("Migrate over a base FIFO = nil error; want exit 2")
+	}
+	if ExitCode(err) != 2 {
+		t.Errorf("Migrate over a base FIFO ExitCode = %d; want 2", ExitCode(err))
+	}
+	if !strings.Contains(err.Error(), baseFIFOPath) {
+		t.Errorf("Migrate over a base FIFO error = %q; want it to name %q", err.Error(), baseFIFOPath)
+	}
+
+	// Symlink to a FIFO at the base path: same, promptly.
+	baseLink := BaseDir(t.TempDir())
+	realBaseFIFO := filepath.Join(t.TempDir(), "real-base-fifo")
+	if err := syscall.Mkfifo(realBaseFIFO, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	baseLinkPath := filepath.Join(baseLink, "config.json")
+	if err := os.MkdirAll(baseLink, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realBaseFIFO, baseLinkPath); err != nil {
+		t.Fatal(err)
+	}
+	_, err = runMigratePrompt(t, baseLink)
+	if err == nil {
+		t.Fatal("Migrate over a symlink-to-FIFO base path = nil error; want exit 2")
+	}
+	if ExitCode(err) != 2 {
+		t.Errorf("Migrate over a symlink-to-FIFO base path ExitCode = %d; want 2", ExitCode(err))
+	}
+	if !strings.Contains(err.Error(), baseLinkPath) {
+		t.Errorf("Migrate over a symlink-to-FIFO base path error = %q; want it to name %q", err.Error(), baseLinkPath)
+	}
+
+	// Directory at a named path: exit-2 error, preserved.
+	dirBase := BaseDir(t.TempDir())
+	dirPath := filepath.Join(dirBase, "profiles", "work", "config.json")
+	if err := os.MkdirAll(dirPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err = runMigratePrompt(t, dirBase)
+	if err == nil {
+		t.Fatal("Migrate over a directory named path = nil error; want exit 2")
+	}
+	if ExitCode(err) != 2 {
+		t.Errorf("Migrate over a directory named path ExitCode = %d; want 2", ExitCode(err))
+	}
+}
+
 func TestMigrateAuthorsDNSWhenSingleDetourServesAllProfiles(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()

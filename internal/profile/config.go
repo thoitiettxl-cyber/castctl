@@ -585,6 +585,26 @@ func isInsideDir(path, dir string) bool {
 	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+// readRegularFile reads path only after os.Stat confirms it is a
+// regular file (following symlinks, like os.ReadFile): a FIFO,
+// socket, or device at the path is an error naming the path without
+// ever opening it, so a read can never block on a FIFO, and a
+// directory is refused the same way. Callers keep their existing
+// error wrapping (including the IsNotExist branches).
+func readRegularFile(path string) ([]byte, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		if st.IsDir() {
+			return nil, fmt.Errorf("config path %q is a directory, not a file", path)
+		}
+		return nil, fmt.Errorf("config path %q is not a regular file", path)
+	}
+	return os.ReadFile(path)
+}
+
 // LoadSingleConfig loads the single-file config if baseDir/config.json
 // exists and carries the "profiles" marker. It returns found=false when
 // the file is absent or is a legacy flat config. A legacy-flat file is
@@ -595,7 +615,7 @@ func isInsideDir(path, dir string) bool {
 // An unparseable single file is an error, never a silent fallback.
 func LoadSingleConfig(baseDir string) (*SingleConfig, bool, error) {
 	path := filepath.Join(baseDir, "config.json")
-	data, err := os.ReadFile(path)
+	data, err := readRegularFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, false, nil

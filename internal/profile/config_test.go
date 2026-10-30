@@ -575,6 +575,87 @@ func TestLoadProfileLegacyPathFIFOAndDirectory(t *testing.T) {
 	}
 }
 
+// TestLoadSingleConfigRefusesNonRegularFile (R3): LoadSingleConfig
+// must Stat/type-guard before opening baseDir/config.json. A FIFO
+// (or a symlink to one) at the base path must be an exit-2 error
+// naming the path, promptly — never a hang on open. A directory at
+// the path keeps its exit-2 directory error.
+func TestLoadSingleConfigRefusesNonRegularFile(t *testing.T) {
+	t.Parallel()
+
+	runPrompt := func(t *testing.T, base string) error {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() {
+			_, _, err := LoadSingleConfig(base)
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(5 * time.Second):
+			t.Fatal("LoadSingleConfig hung; want a prompt exit-2 error")
+			return nil
+		}
+	}
+	assertNonRegular := func(t *testing.T, base, path string) {
+		t.Helper()
+		err := runPrompt(t, base)
+		if err == nil {
+			t.Fatalf("LoadSingleConfig over %q = nil error; want exit 2", path)
+		}
+		if ExitCode(err) != 2 {
+			t.Errorf("LoadSingleConfig over %q ExitCode = %d; want 2", path, ExitCode(err))
+		}
+		if !strings.Contains(err.Error(), path) {
+			t.Errorf("LoadSingleConfig error = %q; want it to name %q", err.Error(), path)
+		}
+	}
+
+	// FIFO at the base path.
+	fifoBase := BaseDir(t.TempDir())
+	fifoPath := filepath.Join(fifoBase, "config.json")
+	if err := os.MkdirAll(fifoBase, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(fifoPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertNonRegular(t, fifoBase, fifoPath)
+
+	// Symlink to a FIFO at the base path (Stat follows symlinks).
+	linkBase := BaseDir(t.TempDir())
+	realFIFO := filepath.Join(t.TempDir(), "real-fifo")
+	if err := syscall.Mkfifo(realFIFO, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(linkBase, "config.json")
+	if err := os.MkdirAll(linkBase, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realFIFO, linkPath); err != nil {
+		t.Fatal(err)
+	}
+	assertNonRegular(t, linkBase, linkPath)
+
+	// Directory at the base path: exit-2 directory error, preserved.
+	dirBase := BaseDir(t.TempDir())
+	dirPath := filepath.Join(dirBase, "config.json")
+	if err := os.MkdirAll(dirPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := runPrompt(t, dirBase)
+	if err == nil {
+		t.Fatal("LoadSingleConfig over a directory config path = nil error; want exit 2")
+	}
+	if ExitCode(err) != 2 {
+		t.Errorf("directory config path ExitCode = %d; want 2", ExitCode(err))
+	}
+	if !strings.Contains(err.Error(), "directory") {
+		t.Errorf("directory config path error = %q; want it to say the path is a directory", err.Error())
+	}
+}
+
 // assertLegacyRefusal checks the legacy-layout refusal contract:
 // exit 2, errors.Is ErrLegacyLayout, names the migration command
 // and the legacy file path, and never leaks file contents or

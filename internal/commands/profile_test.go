@@ -14,7 +14,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/gateway/gatewaytest"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
@@ -515,6 +517,45 @@ func TestConfigMigrate(t *testing.T) {
 // never written. A dry-run against a missing destination file
 // still shows the plan (the missing destination is the normal
 // pre-migration state for a new directory).
+// TestCommandsRefuseBaseFIFO (R3): a FIFO at the base config.json
+// path must make profile show, config migrate (dry-run), and
+// profile add fail with exit 2 promptly — never hang (timeout 124
+// in the red-team repro). Each command runs in a goroutine with a
+// 5s guard so a hang fails the test instead of the suite.
+func TestCommandsRefuseBaseFIFO(t *testing.T) {
+	home := t.TempDir()
+	configFile := filepath.Join(home, "config.json")
+	if err := syscall.Mkfifo(configFile, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, out, errb := profileEnv(t, configFile)
+
+	runPrompt := func(t *testing.T, args ...string) int {
+		t.Helper()
+		done := make(chan int, 1)
+		go func() {
+			done <- runProfile(t, env, out, errb, configFile, args...)
+		}()
+		select {
+		case code := <-done:
+			return code
+		case <-time.After(5 * time.Second):
+			t.Fatalf("command %v hung over a FIFO config path; want a prompt exit 2", args)
+			return -1
+		}
+	}
+
+	if code := runPrompt(t, "profile", "show"); code != 2 {
+		t.Fatalf("profile show over a FIFO: code=%d, want 2; err=%q", code, errb.String())
+	}
+	if code := runPrompt(t, "config", "migrate"); code != 2 {
+		t.Fatalf("config migrate over a FIFO: code=%d, want 2; err=%q", code, errb.String())
+	}
+	if code := runPrompt(t, "profile", "add", "work"); code != 2 {
+		t.Fatalf("profile add over a FIFO: code=%d, want 2; err=%q", code, errb.String())
+	}
+}
+
 func TestConfigMigrateFrom(t *testing.T) {
 	home := t.TempDir()
 	src := filepath.Join(home, "muse-cli")

@@ -421,7 +421,7 @@ func sameDir(a, b string) bool {
 // base file" this way.
 func readExistingSingle(baseDir string) (*SingleConfig, bool, error, error) {
 	path := filepath.Join(baseDir, "config.json")
-	data, err := os.ReadFile(path)
+	data, err := readRegularFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, false, nil, nil
@@ -463,7 +463,7 @@ func defaultProfile(paths Paths) *Profile {
 // reader of legacy files (through parseLegacyConfig strict mode and
 // applyLegacy); LoadProfile refuses legacy files instead.
 func migrateLegacyProfile(baseDir, name string, paths Paths) (*Profile, error) {
-	data, err := os.ReadFile(paths.Config)
+	data, err := readRegularFile(paths.Config)
 	if err != nil {
 		if os.IsNotExist(err) {
 			p := defaultProfile(paths)
