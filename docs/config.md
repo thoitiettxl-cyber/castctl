@@ -124,18 +124,25 @@ credentials, WireGuard keys, or header values. Secret-bearing
 fields are excluded from log emissions by construction, and
 every free-form log field passes a redaction boundary
 (`internal/logging`). Server response bodies are never
-emitted anywhere — not in log lines at any level including
-trace, not in stderr typed JSON, not in error strings, and
-not in panic renderings. Instead, an error carrying a server
+emitted in any error, diagnostic, or log emission — not in log
+lines at any level including trace, not in stderr typed JSON,
+not in error strings, and not in panic renderings. (Chat
+replies, history, watch rows, raw and wake output, and
+opt-in raw dumps are data output the user explicitly
+requested, not error/diagnostic/log emissions, and are out
+of scope for this rule.) Instead, an error carrying a server
 body renders as an allowlist summary only: status code,
 error class, body length (byte count), content-type (media
 type, parameters dropped), and specific known-safe fields
 parsed by key from known Muse response schemas — the `error`
 field of the `{"ok":false,"error":...}` / `{"success":...,
 "error":...}` envelopes, the `status` field of the
-`/api/session` body, and the `reason` field of the redeem
-response (see `internal/gateway/summary.go`). No other body
-key is ever emitted. Each extracted value is capped at 64
+`/api/session` body (extracted only inside the summary
+builder), and the `reason` field of the redeem response
+(retained in the closed list, although no current producer
+extracts it through the summary builder — the exact
+producers are documented in `internal/gateway/summary.go`).
+No other body key is ever emitted. Each extracted value is capped at 64
 runes, still passed through the SafeString backstop, and a
 value over the cap is replaced by `[omitted]` — never emitted
 truncated. The trace level gets the same summary; there is
