@@ -173,6 +173,7 @@ func TestDialerHTTPClient(t *testing.T) {
 	})
 
 	t.Run("https through dialer tls uses insecure fake server", func(t *testing.T) {
+		skipUnlessUTLS(t)
 		addr := startFakeTLSServer(t)
 		m := newTestManager(t)
 		out := parseOutbound(t, m, `{"type":"direct","tag":"direct"}`)
@@ -250,6 +251,7 @@ func TestDialerWebSocketDial(t *testing.T) {
 	})
 
 	t.Run("secure websocket dial handshakes tls", func(t *testing.T) {
+		skipUnlessUTLS(t)
 		addr := startFakeTLSServer(t)
 		host, portStr, err := net.SplitHostPort(addr)
 		if err != nil {

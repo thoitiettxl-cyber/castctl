@@ -61,7 +61,7 @@ func TestCreateOutboundsSocksDetourToWireGuardEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = mgr.Close() }()
-	if err := createOutbounds(context.Background(), mgr, single, prof); err != nil {
+	if err := createOutbounds(context.Background(), mgr, single, prof, ""); err != nil {
 		t.Fatalf("createOutbounds(socks->wireguard detour) = %v, want nil", err)
 	}
 	if _, ok := mgr.Outbound("px"); !ok {

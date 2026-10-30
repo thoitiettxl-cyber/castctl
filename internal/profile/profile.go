@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sagernet/sing-box/option"
 )
 
 // DefaultProfileName is the name of the original layout profile.
@@ -214,8 +216,14 @@ type Profile struct {
 	SubscriptionActionID string
 	Fingerprint          string
 	TLSEngine            string
-	Outbound             OutboundRef
-	Source               Source
+	// DNS is the profile's own parsed dns block, or nil when the
+	// entry carries no "dns" key. Like Fingerprint/TLSEngine it
+	// is storage + validation + display only: the runtime picks
+	// the effective resolver via ResolveProfileDNS, which also
+	// covers the WireGuard-imported and synthesised defaults.
+	DNS      *option.DNSOptions
+	Outbound OutboundRef
+	Source   Source
 	// Exists reports whether the profile directory exists on disk.
 	Exists bool
 	// ConfigFound reports whether settings came from a config file
@@ -226,14 +234,56 @@ type Profile struct {
 	nodeIDPresent      bool
 	fingerprintPresent bool
 	tlsEnginePresent   bool
+	// rawDNS preserves the profile entry's "dns" JSON verbatim
+	// for faithful re-encoding on save; dnsPresent records that
+	// the key was written in the file, so a save never invents
+	// a dns block for a profile that did not carry one.
+	rawDNS     []byte
+	dnsPresent bool
 }
 
 // clone returns a shallow copy; the Outbound Raw slice is shared but
 // RawJSON returns a defensive copy and InlineOutbound re-parses.
+// The dns raw JSON is copied defensively (like SingleConfig's
+// rawDNS in cloneSingleConfig) so mutating a clone's saved form
+// never affects the original; the parsed DNS value is shared
+// read-only, as for the global section.
 func (p *Profile) clone() *Profile {
 	if p == nil {
 		return nil
 	}
 	cp := *p
+	if len(p.rawDNS) > 0 {
+		cp.rawDNS = append([]byte{}, p.rawDNS...)
+	}
 	return &cp
+}
+
+// ParsedDNS re-parses the stored per-profile dns JSON, or returns
+// nil when the entry has no dns block. It mirrors
+// SingleConfig.ParsedDNS.
+func (p *Profile) ParsedDNS() (*option.DNSOptions, error) {
+	if p == nil {
+		return nil, nil
+	}
+	if len(p.rawDNS) == 0 {
+		return p.DNS, nil
+	}
+	return parseDNS(p.rawDNS)
+}
+
+// RawDNS returns a defensive copy of the stored per-profile dns
+// JSON, or nil.
+func (p *Profile) RawDNS() []byte {
+	if p == nil || len(p.rawDNS) == 0 {
+		return nil
+	}
+	out := make([]byte, len(p.rawDNS))
+	copy(out, p.rawDNS)
+	return out
+}
+
+// HasDNS reports whether the profile entry carried a "dns" key.
+func (p *Profile) HasDNS() bool {
+	return p != nil && p.dnsPresent
 }

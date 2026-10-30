@@ -1,9 +1,13 @@
 # Config
 
 Single-file config: one `config.json` holding every profile, plus
-shared `outbounds`, `endpoints`, and (interim, global) `dns`.
+shared `outbounds`, `endpoints`, per-profile `dns`, and the
+(interim, global-compat) top-level `dns` and `wireguard_dns`
+sections below.
 Location: `--config`, then `CASTCTL_CONFIG`, then `XDG_CONFIG_HOME`
-via `os.UserConfigDir` semantics. When the `castctl` home does not
+via `os.UserConfigDir` semantics. An explicit `--config` path must
+name a `config.json` file (a directory, or a file with another
+basename, is an error — see the `--config` help text). When the `castctl` home does not
 exist but the pre-migration `muse-cli` home does, the old home is
 used with a one-line warning; nothing is moved or deleted (the
 directory fallback — the config *directory* only; see
@@ -12,7 +16,7 @@ profile loading refuses (only `config migrate` reads it)).
 
 ## Single-file schema
 
-Top-level keys (exactly these five; unknown keys are rejected):
+Top-level keys (exactly these six; unknown keys are rejected):
 
 | Key | Value |
 |---|---|
@@ -20,10 +24,11 @@ Top-level keys (exactly these five; unknown keys are rejected):
 | `profiles` | object: profile name → profile entry (below) |
 | `outbounds` | array of sing-box outbound objects (shared, tag-addressed) |
 | `endpoints` | array of sing-box endpoint objects (e.g. WireGuard, tag-addressed) |
-| `dns` | object: the interim global DNS section (below) |
+| `dns` | object: the interim global DNS section (below, compat fallback only) |
+| `wireguard_dns` | object: endpoint tag → array of DNS server addresses imported from that endpoint's wg-quick `DNS=` line (see [Per-profile DNS](#per-profile-dns)); castctl-side state, not a sing-box field |
 
-A profile entry accepts exactly these nine keys (unknown keys,
-including `dns`, are rejected — see [Per-profile DNS](#per-profile-dns)):
+A profile entry accepts exactly these ten keys (unknown keys
+are rejected — see [Per-profile DNS](#per-profile-dns)):
 
 | Key | Value |
 |---|---|
@@ -36,6 +41,7 @@ including `dns`, are rejected — see [Per-profile DNS](#per-profile-dns)):
 | `fingerprint` | string (browser fingerprint preset name) |
 | `tls_engine` | string (`utls`, `cronet`, …; storage-only in the current build) |
 | `outbound` | string tag (shared outbound/endpoint), an inline outbound object, or absent (= direct) |
+| `dns` | object: the profile's own DNS section, parsed exactly like the top-level section (see [Per-profile DNS](#per-profile-dns)) |
 
 Strictness: the file is parsed strictly — unknown fields anywhere
 in the config are rejected, including inside `dns` servers and
@@ -48,18 +54,21 @@ own still exists (its directory is its home) and loads with
 defaults (`SourceNone`, direct, `auto_approve` off). A profile
 directory with no config file is *not* a legacy layout.
 
-## The `dns` section — INTERIM, GLOBAL, SINGLE-PROFILE-ONLY
+## The `dns` section — INTERIM, GLOBAL, COMPAT-ONLY
 
-> **INTERIM.** The current `dns` section is global: one section
-> serves every profile in the file. That is an interim shape only.
-> The final model is a per-profile `dns` block inside each profile
-> entry (see [Per-profile DNS](#per-profile-dns)). Do not design
+> **INTERIM.** The top-level `dns` section is global: one section
+> serves every profile in the file. That is a compat fallback
+> only, kept for one cycle (see [Per-profile DNS](#per-profile-dns)
+> for the implemented model and the precedence order). Do not design
 > multi-profile DNS behaviour around the global section: it cannot
 > express per-profile resolvers, and a later migration will
 > distribute it into profile entries (verbatim where a profile
 > already has one, rewrite/refuse where it does not fit — gated
-> decision G4). Hand-writing a global section for a multi-profile
-> file means every profile shares one resolver and one detour.
+> decision G4). A profile entry carrying its own `dns` block and
+> a file carrying a top-level `dns` section together are a config
+> error (exit 2): the two are never silently shadowed. The
+> compat cycle ends in a hard error in a later PR (documented
+> future step, not yet implemented).
 
 The section is parsed by sing-box (v1.14) `option.DNSOptions`.
 No field is required at parse level; an empty section (`{}`) is
@@ -105,7 +114,10 @@ outbound/endpoint tag DNS traffic travels through; it must
 resolve to a tag in the config's tag namespace (shared
 `outbounds`, `endpoints`, or an inline profile outbound — the
 runtime-only `"direct"` outbound and the synthetic
-`"castctl-dialer"` are NOT valid detour tags).
+`"castctl-dialer"` are NOT valid detour tags, except for the
+per-profile synthesised direct tag, which is valid only as its
+own direct profile's detour — see
+[Per-profile DNS](#per-profile-dns)).
 
 Per-type fields:
 
@@ -150,34 +162,136 @@ match-all; verify against a live run before relying on it.
 
 ### Semantics (current build)
 
-- **No `dns` section → no DNS client.** Domain destinations
-  fail closed with `outbound: no DNS resolver registered`
-  (`ErrNoResolver`); IP-literal destinations still work. There
-  is no silent fallback to the system resolver.
+- **No single config file → no DNS client.** Domain
+  destinations fail closed with `outbound: no DNS resolver
+  registered` (`ErrNoResolver`); IP-literal destinations still
+  work. There is no silent fallback to the system resolver.
+  With a single config file, a resolver is always built: a
+  profile with no resolver of its own gets the synthesised
+  default (see [Per-profile DNS](#per-profile-dns)), never a
+  nil client.
 - **Empty `servers` list → construction error** (`dns: no DNS
   servers configured: refusing to fall back to the system
-  resolver`).
+  resolver`). An explicitly present but empty per-profile
+  `"dns": {}` is the same construction error, never a silent
+  synthesis: presence distinguishes "configured badly" (error)
+  from "configured nothing" (synthesised default).
 - DNS is built and registered before outbounds, and started
   before the outbound manager starts; one DNS client per
-  invocation/profile.
+  invocation/profile, with a per-client cache and per-manager
+  detour resolution (no cross-profile cache/pool sharing).
 - **Bootstrap is the sole system-resolver use.** A remote
   server addressed by domain name is bootstrapped through the
   system resolver so its address can be dialled through the
   detour. IP-literal servers need no bootstrap. `local`,
   `hosts`, and `fakeip` servers are unaffected by bootstrap.
-- **WireGuard key-sharing check includes global dns detours.**
+- **WireGuard key-sharing check includes dns detours.**
   A dns server whose detour is a WireGuard endpoint participates
   in the same private-key comparison as profile outbounds: two
   profiles (or a profile and the dns section) sharing one
-  WireGuard private key are rejected.
+  WireGuard private key are rejected. Per-profile dns detours
+  are checked per profile: a profile's own dns detour sharing a
+  key with that profile's outbound (through a different tag) is
+  an error naming the profile and `dns`; a dns detour naming
+  the profile's own endpoint tag is one config, not an error.
 
 ## Per-profile DNS
 
-Not in this build. A `dns` key inside a profile entry is
-rejected (unknown profile key). The per-profile model — a `dns`
-block per profile, with the gated default precedence below —
-lands in a later PR, with live proof, before release. Until
-then, the only `dns` section is the interim global one above.
+A `dns` block inside a profile entry is the profile's own
+resolver. It parses exactly like the top-level section
+(sing-box `option.DNSOptions`, strict), is preserved verbatim
+on save, and is shown by `profile show` (via the profile entry
+rendering) and by `profile test` Phase 1 (first server tag plus
+the source below).
+
+**Validation (parse time, exit 2).** Each server's `detour`
+must be non-empty (G2: an empty detour would dial the DNS
+server directly, outside the profile's outbound) and must lie
+in the owning profile's reachable set: the profile's outbound
+tag (or inline tag), every tag reachable from it through
+detour chains and selector/urltest member lists, plus — for
+direct profiles only — the profile's synthesised direct tag
+(below). A detour naming another profile's inline outbound, a
+dangling tag, a duplicate server tag within the block, or a
+`final` naming no server tag in the same block are all errors.
+Server tags are scoped per profile: two profiles may both use
+tag `dns1` with no collision.
+
+**Precedence** for the active profile, in order
+(`profile.ResolveProfileDNS`):
+
+1. The profile's own `dns` block.
+2. Else the WireGuard endpoint's imported-config DNS servers,
+   reached through that tunnel (see below).
+3. Else the top-level `dns` section, compat fallback for one
+   cycle, with a one-line stderr warning naming the migration
+   step (`castctl config migrate --write`). Compat sits
+   before the default deliberately: a config migrated by the
+   removal PR carries an authored global section that must keep
+   working for one cycle, and the warning must be observable
+   (if the synthesised default always won, the compat branch
+   could never fire). This ordering differs from the pre-gate
+   design doc §3.3, which ordered synthesis before the global
+   fallback; that order would make compat dead code.
+4. Else the synthesised default: DoH to 1.1.1.1 (`https`,
+   IP-literal, no bootstrap), with detour = the profile's
+   outbound. It applies only when the file carries no resolver
+   at all. Synthesised defaults are runtime-only and are never
+   written into the config file.
+
+**The synthesis mechanism, named explicitly.** For a direct
+profile there is no config tag to detour to, and sing-box
+rejects a detour to an empty direct outbound at transport
+Start (`detour to an empty direct outbound makes no sense`).
+The runtime therefore synthesises, per profile, a tagged
+direct outbound named `castctl-direct:<profile>` — created in
+`createOutbounds` (after the plain `"direct"` outbound, before
+DNS Start, so the detour resolves by Start time) and only in
+the active profile's own manager. It is made non-empty by
+exactly one explicit dialer field, `udp_fragment: false`
+(`SynthesizedDirectOutbound`): that field affects only UDP
+packet dialing through this outbound, which carries
+DNS-detour traffic only (never profile traffic, which dials
+through `"direct"`), and for the DoH default (TCP/TLS) it
+changes no dialing behaviour. No sing-box guard is weakened:
+`DisableEmptyDirectCheck` is never set (it is `json:"-"` and
+no DNS transport dialer sets it), the plain `"direct"`
+outbound stays empty, and a detour naming `"direct"` still
+fails exactly as before (pinned by
+`internal/dns/gate2_test.go`). A direct profile's own `dns`
+block may also detour to its synthesised tag; that is the
+only way a hand-written block detours to a direct outbound.
+
+**WireGuard-imported DNS (branch 2).** `wg-quick DNS=` has no
+field in sing-box's `WireGuardEndpointOptions`, so it is
+captured separately: `outbound.ParseWireGuardConfWithDNS`
+returns the server list alongside the endpoint, and castctl
+stores it under the top-level `wireguard_dns` key (endpoint
+tag → server addresses; each key must name a WireGuard
+endpoint in the same file). Branch 2 builds one `udp` server
+(port 53) per imported address, all detouring through that
+endpoint tag. The legacy `ParseWireGuardConf` entry point
+still drops `DNS=`, preserving its contract.
+
+**`local` is never the default: explicit-only.** A hand-written
+`local` server keeps sing-box's default `prefer_go=false`.
+[UNVERIFIED until live proof: on systemd-resolved hosts, when
+the system resolver reports `SystemdResolved` and `prefer_go`
+is false, queries go via D-Bus to `org.freedesktop.resolve1`,
+NOT through the detour — so `local`+detour leak-freedom is not
+claimed here, and live traversal of `local`+detour is unproven.
+Prefer an explicit `https`/`tls` server with a detour over
+`local` until live proof exists.] `local` has no hermetic
+fake-upstream test (it reads the OS resolver config); the
+fake-upstream tests prove the `tcp` detour mechanism, not
+`local`.
+
+**Live proof (post-merge, not claimed from fake-upstream
+tests).** For each profile: `profile test` Phase 1 `ok: true`
+with the effective source shown (`profile` / `wireguard` /
+`global-compat` / `default`), plus a real lookup through the
+profile's outbound. A profile whose outbound is down must not
+break another profile's `profile test`.
 
 ## Migration
 
@@ -204,6 +318,13 @@ path only — never file contents, cookie/token/key values, or
 identifiers. The old files are never deleted or modified by any
 command; they are the backup. Migrate itself is the only reader
 of legacy files, deliberately, through a migrate-only parser.
+
+Symlink-to-file loud fail: a `profiles/<name>` entry that is a
+symlink resolving to a regular file fails loudly (exit 2,
+naming the path) and writes nothing — it is never silently
+dropped and never replaced by a synthetic default (pinned by
+`TestMigrateFromSymlinkedProfileFile`). A symlinked profile
+*directory* is followed, not dropped.
 
 On top of the `LoadProfile` refusal, the CLI's own guards
 refuse two more shapes: `profile show` for a name with no
@@ -316,31 +437,27 @@ verbatim, never rewritten. Authoring is validated with the
 same checks a hand-written section faces; a validation failure
 records a refusal instead of writing an invalid config.
 
-## Gated default precedence (future model — NOT current behaviour)
+## Default precedence (implemented model)
 
-The following precedence is the gated, decided model for the
-per-profile DNS PR. **It is not implemented today**: today, no
-`dns` section means no resolver (fail-closed, above). Do not
-describe this precedence as current behaviour.
-
-When a profile has no explicit resolver, the default resolver
-is synthesised at runtime (never written into the config), in
-this order:
-
-1. The profile's own `dns` block (per-profile model; later PR).
-2. Else the WireGuard endpoint's imported-config DNS servers,
-   reached through that tunnel. WireGuard `DNS=` import capture
-   is NOT implemented in this PR and is carried to the
-   per-profile PR — docs must not claim it exists.
-3. Else DoH to 1.1.1.1 (`https`, IP-literal, no bootstrap),
-   with detour = the profile's outbound.
+The gated model is implemented as described in
+[Per-profile DNS](#per-profile-dns): own block, then
+WireGuard-imported DNS, then the top-level section (compat
+fallback, one cycle, with warning), then the synthesised DoH
+default to 1.1.1.1 (`https`, IP-literal, no bootstrap) with
+detour = the profile's outbound (for direct profiles, the
+synthesised `castctl-direct:<profile>` outbound — see the
+synthesis mechanism in [Per-profile DNS](#per-profile-dns)).
+Synthesised defaults are runtime-only and are never written
+into the config file.
 
 `local` is **never** the default: it is explicit-only. A
 `local` server queries the system resolver — [UNVERIFIED until
 live proof: on systemd-resolved hosts that may bypass the
 tunnel via D-Bus unless the resolver is reached through the
 detour, and live traversal of `local`+detour is unproven].
-The gated model documents `prefer_go=false` for `local`
-servers (the Go resolver path stays off). Until the
-per-profile PR lands with live proof, prefer an explicit
-`https`/`tls` server with a detour over `local`.
+The model documents `prefer_go=false` for `local` servers
+(the Go resolver path stays off). Until live proof exists,
+prefer an explicit `https`/`tls` server with a detour over
+`local`. Live proof of DoH-via-detour on the real migrated
+config is a post-merge step (see [Per-profile DNS](#per-profile-dns));
+fake-upstream tests do not claim it.

@@ -960,6 +960,15 @@ func authorInterimDNS(candidate, existing *SingleConfig) (authored bool, refusal
 	if candidate == nil || candidate.DNS != nil || len(candidate.rawDNS) > 0 {
 		return false, ""
 	}
+	// Per-profile DNS (G1 coexistence): authoring a global
+	// section onto a config where any profile already carries
+	// its own dns block would produce a file the loader
+	// rejects, so refuse instead of writing it.
+	for _, name := range candidate.ProfileNames() {
+		if p := candidate.Profiles[name]; p != nil && p.dnsPresent {
+			return false, fmt.Sprintf("dns section not authored: profile %q already has a per-profile dns block; a top-level dns section would conflict (see docs/config.md)", name)
+		}
+	}
 	if existing != nil {
 		equal, err := configsEqual(stripDNS(existing), stripDNS(candidate))
 		if err != nil || !equal {
@@ -1029,6 +1038,19 @@ func cloneSingleConfig(cfg *SingleConfig) *SingleConfig {
 		out.rawDNS = append([]byte{}, cfg.rawDNS...)
 	} else {
 		out.rawDNS = nil
+	}
+	if len(cfg.rawWireGuardDNS) > 0 {
+		out.rawWireGuardDNS = append([]byte{}, cfg.rawWireGuardDNS...)
+	} else {
+		out.rawWireGuardDNS = nil
+	}
+	if len(cfg.WireGuardDNS) > 0 {
+		out.WireGuardDNS = make(map[string][]string, len(cfg.WireGuardDNS))
+		for tag, servers := range cfg.WireGuardDNS {
+			out.WireGuardDNS[tag] = append([]string{}, servers...)
+		}
+	} else {
+		out.WireGuardDNS = nil
 	}
 	out.rawProfiles = make(map[string][]byte, len(cfg.rawProfiles))
 	for name, raw := range cfg.rawProfiles {

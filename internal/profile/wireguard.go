@@ -35,6 +35,14 @@ import (
 // (same tag) is not an error: that is one endpoint config, not
 // two configs carrying the same key.
 //
+// Per-profile dns sections are checked the same way, scoped per
+// profile: a profile's own dns detour key compared against that
+// profile's outbound key (different tags, same key = error naming
+// the profile and "dns"; same tag = one config, not an error),
+// and the profile's dns endpoints merged into its cross-profile
+// set, so a dns detour in one profile sharing a key with another
+// profile's outbound is still a cross-profile violation.
+//
 // Key comparison is canonical: two different base64 strings can
 // decode to the same 32-byte key (padding-bit variants), so keys
 // that both base64-decode (StdEncoding, as sing-box does) compare
@@ -97,7 +105,36 @@ func validateWireGuardPrivateKeys(cfg *SingleConfig) error {
 		if p == nil {
 			continue
 		}
-		for _, tag := range wireGuardEndpointsForProfile(p, endpointsByTag, outboundsByTag) {
+		ownTags := wireGuardEndpointsForProfile(p, endpointsByTag, outboundsByTag)
+		dnsTags := profileDNSWireGuardEndpoints(p, endpointsByTag, outboundsByTag)
+		// Own dns detour vs own outbound: same key through two
+		// different tags is the sharing violation; the same tag
+		// is one config and is not an error.
+		ownByKey := make(map[string]string)
+		for _, tag := range ownTags {
+			ep := endpointsByTag[tag]
+			key, ok := wireGuardPrivateKey(ep)
+			if !ok || key == "" {
+				continue
+			}
+			ownByKey[canonicalWireGuardKey(key)] = tag
+		}
+		for _, tag := range dnsTags {
+			ep := endpointsByTag[tag]
+			key, ok := wireGuardPrivateKey(ep)
+			if !ok || key == "" {
+				continue
+			}
+			canonical := canonicalWireGuardKey(key)
+			if ownTag, dup := ownByKey[canonical]; dup && ownTag != tag {
+				return newConfigErrorf("wireguard private key shared by profile %q and the dns detour (endpoints %q and %q); each profile must use a distinct wireguard private key", name, ownTag, tag)
+			}
+		}
+		// Cross-profile check over the union of the profile's
+		// outbound and own-dns endpoints; the global-dns check
+		// runs against the union too, so a global detour key
+		// shared with a per-profile dns detour is still caught.
+		for _, tag := range append(append([]string{}, ownTags...), dnsTags...) {
 			ep := endpointsByTag[tag]
 			key, ok := wireGuardPrivateKey(ep)
 			if !ok || key == "" {

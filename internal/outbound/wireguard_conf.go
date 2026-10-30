@@ -41,18 +41,52 @@ import (
 // (the interface name is the file name, not file content); Reserved
 // is nil (no wg-quick field maps to it).
 //
-// NOT mapped: wg-quick DNS= has NO field in the schema — it is
-// ignored and recorded, not invented. DialerOptions.DomainResolver
-// takes a DNS server tag, not a DNS IP list, so it is not a mapping
-// for DNS= either. Unknown keys (PostUp, SaveConfig, ...) are
-// ignored.
+// DNS= captured separately: wg-quick DNS= has NO field in the
+// schema — it is not a mapping for any WireGuardEndpointOptions
+// field (DialerOptions.DomainResolver takes a DNS server tag, not
+// a DNS IP list). ParseWireGuardConfWithDNS returns the DNS server
+// list alongside the endpoint; castctl stores it as the
+// "wireguard_dns" config state that precedence branch (ii) reads
+// (see internal/profile.ResolveProfileDNS). The legacy
+// ParseWireGuardConf entry point still drops DNS=, preserving its
+// contract for existing callers. Unknown keys (PostUp,
+// SaveConfig, ...) are ignored.
 //
 // The converter never starts a device, dials UDP, or handshakes.
 // Key strings are NOT validated as key material: fixtures use the
 // literal placeholder "<redacted>", which must parse. Parse errors
 // never contain key values.
+//
+// WireGuardConfParsed is the result of parsing a wg-quick conf:
+// the sing-box endpoint options plus the captured DNS servers
+// (empty when the conf has no DNS= line).
+type WireGuardConfParsed struct {
+	Endpoint   option.WireGuardEndpointOptions
+	DNSServers []string
+}
+
+// ParseWireGuardConfWithDNS parses a wg-quick conf, capturing the
+// [Interface] DNS= server list (comma-separated; surrounding
+// whitespace ignored) alongside the endpoint options.
+func ParseWireGuardConfWithDNS(data []byte) (WireGuardConfParsed, error) {
+	opts, dnsServers, err := parseWireGuardConf(data)
+	if err != nil {
+		return WireGuardConfParsed{}, err
+	}
+	return WireGuardConfParsed{Endpoint: opts, DNSServers: dnsServers}, nil
+}
+
+// ParseWireGuardConf parses a wg-quick conf into sing-box endpoint
+// options. It preserves its historical contract: DNS= is dropped
+// (use ParseWireGuardConfWithDNS to capture it).
 func ParseWireGuardConf(data []byte) (option.WireGuardEndpointOptions, error) {
+	opts, _, err := parseWireGuardConf(data)
+	return opts, err
+}
+
+func parseWireGuardConf(data []byte) (option.WireGuardEndpointOptions, []string, error) {
 	var opts option.WireGuardEndpointOptions
+	var dnsServers []string
 	var currentPeer *option.WireGuardPeer
 	seenInterface := false
 	unknownSection := false
@@ -71,7 +105,7 @@ func ParseWireGuardConf(data []byte) (option.WireGuardEndpointOptions, error) {
 		}
 		if strings.HasPrefix(line, "[") {
 			if !strings.HasSuffix(line, "]") {
-				return opts, fmt.Errorf("outbound: wireguard conf line %d: malformed section header", lineno+1)
+				return opts, nil, fmt.Errorf("outbound: wireguard conf line %d: malformed section header", lineno+1)
 			}
 			section := strings.ToLower(strings.TrimSpace(line[1 : len(line)-1]))
 			switch section {
@@ -95,47 +129,47 @@ func ParseWireGuardConf(data []byte) (option.WireGuardEndpointOptions, error) {
 		}
 		key, value, ok := strings.Cut(line, "=")
 		if !ok {
-			return opts, fmt.Errorf("outbound: wireguard conf line %d: expected key = value", lineno+1)
+			return opts, nil, fmt.Errorf("outbound: wireguard conf line %d: expected key = value", lineno+1)
 		}
 		if unknownSection {
-			return opts, fmt.Errorf("outbound: wireguard conf line %d: key in unknown section", lineno+1)
+			return opts, nil, fmt.Errorf("outbound: wireguard conf line %d: key in unknown section", lineno+1)
 		}
 		key = strings.ToLower(strings.TrimSpace(key))
 		value = strings.TrimSpace(value)
 		if currentPeer != nil {
 			if err := parsePeerField(currentPeer, key, value); err != nil {
-				return opts, fmt.Errorf("outbound: wireguard conf line %d: %w", lineno+1, err)
+				return opts, nil, fmt.Errorf("outbound: wireguard conf line %d: %w", lineno+1, err)
 			}
 			continue
 		}
 		if !seenInterface {
-			return opts, fmt.Errorf("outbound: wireguard conf line %d: key outside [Interface]", lineno+1)
+			return opts, nil, fmt.Errorf("outbound: wireguard conf line %d: key outside [Interface]", lineno+1)
 		}
-		if err := parseInterfaceField(&opts, key, value); err != nil {
-			return opts, fmt.Errorf("outbound: wireguard conf line %d: %w", lineno+1, err)
+		if err := parseInterfaceField(&opts, &dnsServers, key, value); err != nil {
+			return opts, nil, fmt.Errorf("outbound: wireguard conf line %d: %w", lineno+1, err)
 		}
 	}
 	flushPeer()
 
 	if !seenInterface {
-		return opts, errors.New("outbound: wireguard conf has no [Interface] section")
+		return opts, nil, errors.New("outbound: wireguard conf has no [Interface] section")
 	}
 	if opts.PrivateKey == "" {
-		return opts, errors.New("outbound: wireguard conf [Interface] is missing PrivateKey")
+		return opts, nil, errors.New("outbound: wireguard conf [Interface] is missing PrivateKey")
 	}
 	for i := range opts.Peers {
 		peer := &opts.Peers[i]
 		if peer.PublicKey == "" {
-			return opts, fmt.Errorf("outbound: wireguard conf peer %d is missing PublicKey", i+1)
+			return opts, nil, fmt.Errorf("outbound: wireguard conf peer %d is missing PublicKey", i+1)
 		}
 		if peer.Address == "" {
-			return opts, fmt.Errorf("outbound: wireguard conf peer %d is missing Endpoint", i+1)
+			return opts, nil, fmt.Errorf("outbound: wireguard conf peer %d is missing Endpoint", i+1)
 		}
 	}
-	return opts, nil
+	return opts, dnsServers, nil
 }
 
-func parseInterfaceField(opts *option.WireGuardEndpointOptions, key, value string) error {
+func parseInterfaceField(opts *option.WireGuardEndpointOptions, dnsServers *[]string, key, value string) error {
 	switch key {
 	case "privatekey":
 		opts.PrivateKey = value
@@ -158,8 +192,16 @@ func parseInterfaceField(opts *option.WireGuardEndpointOptions, key, value strin
 		}
 		opts.MTU = uint32(mtu)
 	case "dns":
-		// No field in the schema. Ignored by design; see the
-		// package-level mapping note above.
+		// No field in the schema: captured into dnsServers
+		// instead (see the package-level mapping note). The
+		// value is comma-separated; empty items are skipped.
+		for _, item := range strings.Split(value, ",") {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			*dnsServers = append(*dnsServers, strings.Fields(item)...)
+		}
 	}
 	return nil
 }
@@ -262,6 +304,20 @@ func WireGuardConfToEndpoint(data []byte, tag string) (option.Endpoint, error) {
 		Tag:     tag,
 		Options: &opts,
 	}, nil
+}
+
+// WireGuardConfToEndpointWithDNS is WireGuardConfToEndpoint plus
+// the captured DNS= server list (empty when the conf has none).
+func WireGuardConfToEndpointWithDNS(data []byte, tag string) (option.Endpoint, []string, error) {
+	parsed, err := ParseWireGuardConfWithDNS(data)
+	if err != nil {
+		return option.Endpoint{}, nil, err
+	}
+	return option.Endpoint{
+		Type:    "wireguard",
+		Tag:     tag,
+		Options: &parsed.Endpoint,
+	}, parsed.DNSServers, nil
 }
 
 // RedactedPlaceholder is the value every secret field is replaced with

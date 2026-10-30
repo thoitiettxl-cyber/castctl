@@ -42,21 +42,27 @@ go test -race -count=50 -shuffle=on -timeout 30m -tags with_utls,with_quic,with_
 
 | Tag | Effect |
 | --- | --- |
-| `with_utls` | Enables uTLS (Chrome fingerprint) for gateway TLS. Required: without it, the untagged build fails 4 TLS subtests **by design** (see below). |
+| `with_utls` | Enables uTLS (Chrome fingerprint) for gateway TLS. Without it, 6 subtests that construct a uTLS client are skipped **by design** (see below); the untagged suite is fully green. |
 | `with_quic` | Enables QUIC transports (Hysteria/Hysteria2/TUIC/naive HTTP/3). |
 | `with_wireguard` | Enables WireGuard endpoints. |
 | `with_gvisor` | **Required** for WireGuard endpoints. Without it, `transport/wireguard/device_stack_stub.go` (`//go:build !with_gvisor`, sing-box v1.14.4) returns `tun.ErrGVisorNotIncluded` from both stack-device constructors. |
 
-### Untagged build: 4 TLS subtests fail by design
+### Untagged build: 6 uTLS subtests skip by design
 
-Running `go test ./internal/outbound/` without `with_utls` fails exactly
-these 4 subtests of `TestBuildTLSConfig` (verified 2026-10-29 in the PR2
-worktree): `default_chrome_server_name_and_alpn_passthrough`,
+Running `go test ./internal/outbound/` without `with_utls` skips exactly
+these 6 subtests (via the `skipUnlessUTLS` helper pair), which build a
+uTLS client that the stub TLS implementation rejects — 4 subtests of
+`TestBuildTLSConfig`: `default_chrome_server_name_and_alpn_passthrough`,
 `server_name_falls_back_to_server_address`,
 `reality_options_pass_through_untouched`, and
-`handshake_against_fake_tls_server`. They build a uTLS config, which the
-stub TLS implementation rejects. This is expected, not a regression: run
-the canonical tagged command above.
+`handshake_against_fake_tls_server`; plus 2 dialer subtests:
+`https_through_dialer_tls_uses_insecure_fake_server` (of
+`TestDialerHTTPClient`) and `secure_websocket_dial_handshakes_tls` (of
+`TestDialerWebSocketDial`). The error-expecting TLS subtests (e.g.
+`unknown_fingerprint_is_an_error`, `reality_without_utls_is_an_error`)
+still run untagged, because the stub error is the behaviour they pin.
+This is expected, not a regression: run the canonical tagged command
+above for full coverage.
 
 ## Binary sizes (PR3 measurements, linux/amd64)
 
@@ -262,7 +268,10 @@ populated once by `init()` and read-only afterwards, plus one
 fresh-per-call random `tempNodeID` that is never written to disk.
 Inline outbounds without a tag are auto-tagged `profile:<name>`, so
 each profile's inline stack lives in its own tag namespace; the
-synthetic direct outbound is the fixed tag `castctl-dialer`. The
+synthetic direct outbound for endpoint-tag profiles is the fixed tag
+`castctl-dialer`, and the synthesised DNS-detour direct outbound for
+a direct profile is the per-profile tag `castctl-direct:<name>` (see
+docs/config.md, Per-profile DNS, for the gate-2 mechanism). The
 isolation itself comes from the per-Manager registries — each
 Manager builds its outbound, endpoint, and DNS-transport
 registries on a fresh registry context — not from tag names: the

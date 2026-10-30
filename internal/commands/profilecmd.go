@@ -654,6 +654,7 @@ type dnsPhase struct {
 	OK        bool     `json:"ok"`
 	MS        int64    `json:"ms"`
 	Server    string   `json:"server,omitempty"`
+	Source    string   `json:"source,omitempty"`
 	Addresses []string `json:"addresses,omitempty"`
 	Error     string   `json:"error,omitempty"`
 }
@@ -798,8 +799,13 @@ func cmdProfileTest(ctx context.Context, env *Env, g *globalOpts, args []string)
 			dnsRes.Addresses = append(dnsRes.Addresses, a.String())
 		}
 		if single != nil {
-			if dnsOpts, derr := single.ParsedDNS(); derr == nil && dnsOpts != nil && len(dnsOpts.Servers) > 0 {
-				dnsRes.Server = dnsOpts.Servers[0].Tag
+			// Effective per-profile resolver, not the first
+			// global server: the source names which precedence
+			// branch produced it (profile / wireguard /
+			// global-compat / default).
+			if resolved, derr := profile.ResolveProfileDNS(prof, single); derr == nil && resolved != nil && resolved.Options != nil && len(resolved.Options.Servers) > 0 {
+				dnsRes.Server = resolved.Options.Servers[0].Tag
+				dnsRes.Source = string(resolved.Source)
 			}
 		}
 	}
