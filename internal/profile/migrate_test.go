@@ -783,6 +783,108 @@ func TestMigrateDNSRefusalMultiDetour(t *testing.T) {
 	}
 }
 
+// TestMigrateDNSRefusalDirectTaggedDetour (F2): a detour tag that
+// resolves to a direct outbound must not be authored into a dns
+// section — sing-box rejects a detour to an empty direct outbound
+// at runtime, so authoring it writes a config the same binary then
+// refuses. Tag references are resolved through outbounds, endpoints,
+// and inline profile outbounds; a tag resolving to a non-direct
+// outbound still authors (control).
+func TestMigrateDNSRefusalDirectTaggedDetour(t *testing.T) {
+	t.Parallel()
+	directOutbound := `{"type":"direct","tag":"proxy-direct"}`
+	writeSingle := func(base, doc string) string {
+		path := filepath.Join(base, "config.json")
+		writeFile(t, path, doc, 0o600)
+		before, _ := os.ReadFile(path)
+		return string(before)
+	}
+	assertNoAuthoring := func(t *testing.T, base, before, refusing string) {
+		t.Helper()
+		for _, write := range []bool{false, true} {
+			result, err := Migrate(base, write)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Migrated || result.DNSAuthored || result.Reason != "already-migrated" {
+				t.Errorf("Migrate(write=%v) = %+v; want already-migrated, no authoring", write, result)
+			}
+			if !strings.Contains(result.DNSRefusal, `"`+refusing+`"`) {
+				t.Errorf("Migrate(write=%v) DNSRefusal = %q; want it to name %q", write, result.DNSRefusal, refusing)
+			}
+		}
+		after, _ := os.ReadFile(filepath.Join(base, "config.json"))
+		if string(after) != before {
+			t.Errorf("migrate rewrote the file:\nbefore: %s\nafter: %s", before, after)
+		}
+		if doc := readJSONFile(t, filepath.Join(base, "config.json")); func() bool { _, ok := doc["dns"]; return ok }() {
+			t.Errorf("migrated config gained a dns section: %v", doc)
+		}
+	}
+
+	t.Run("tag to direct outbound", func(t *testing.T) {
+		t.Parallel()
+		base := BaseDir(t.TempDir())
+		before := writeSingle(base, `{"profiles":{"p1":{"node_id":"N1","auto_approve":"off","auto_allow_once":false,"outbound":"proxy-direct"}},"outbounds":[`+directOutbound+`]}`)
+		assertNoAuthoring(t, base, before, "p1")
+	})
+
+	t.Run("tag to inline direct outbound", func(t *testing.T) {
+		t.Parallel()
+		base := BaseDir(t.TempDir())
+		before := writeSingle(base, `{"profiles":{"p1":{"node_id":"N1","auto_approve":"off","auto_allow_once":false,"outbound":"profile:p2"},"p2":{"node_id":"N2","auto_approve":"off","auto_allow_once":false,"outbound":{"type":"direct"}}}}`)
+		assertNoAuthoring(t, base, before, "p1")
+	})
+
+	t.Run("tag to socks outbound still authors", func(t *testing.T) {
+		t.Parallel()
+		base := BaseDir(t.TempDir())
+		path := filepath.Join(base, "config.json")
+		writeFile(t, path, `{"profiles":{"p1":{"node_id":"N1","auto_approve":"off","auto_allow_once":false,"outbound":"proxy-sg"}},"outbounds":[`+validOutbounds["socks"]+`]}`, 0o600)
+		result, err := Migrate(base, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Migrated || !result.DNSAuthored {
+			t.Fatalf("socks-detour migrate = %+v; want migrated + dns authored", result)
+		}
+		assertAuthoredDNS(t, base)
+	})
+}
+
+// TestDetourTagForProfileResolvesDirectTags pins the resolution
+// rule directly: tag references to direct outbounds (list, endpoint,
+// or inline) yield no detour; tag references to non-direct targets
+// and inline non-direct outbounds yield their tag.
+func TestDetourTagForProfileResolvesDirectTags(t *testing.T) {
+	t.Parallel()
+	doc := `{"profiles":{
+		"tagged-direct":{"node_id":"N1","outbound":"proxy-direct"},
+		"tagged-socks":{"node_id":"N1","outbound":"proxy-sg"},
+		"tagged-inline-direct":{"node_id":"N1","outbound":"profile:inline-direct"},
+		"inline-direct":{"node_id":"N1","outbound":{"type":"direct"}},
+		"inline-socks":{"node_id":"N1","outbound":{"type":"socks","server":"127.0.0.1","server_port":1080,"version":"5"}},
+		"direct-kind":{"node_id":"N1","outbound":"direct"}
+	},"outbounds":[{"type":"direct","tag":"proxy-direct"},` + validOutbounds["socks"] + `]}`
+	cfg, err := ParseSingleConfig([]byte(doc), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"tagged-direct":        "",
+		"tagged-socks":         "proxy-sg",
+		"tagged-inline-direct": "",
+		"inline-direct":        "",
+		"inline-socks":         "profile:inline-socks",
+		"direct-kind":          "",
+	}
+	for name, wantTag := range want {
+		if got := detourTagForProfile(cfg, cfg.Profiles[name]); got != wantTag {
+			t.Errorf("detourTagForProfile(%q) = %q; want %q", name, got, wantTag)
+		}
+	}
+}
+
 func TestMigrateCarriesExistingDNSVerbatim(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()

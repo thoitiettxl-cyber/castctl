@@ -462,9 +462,9 @@ const interimDNSServerTag = "castctl-doh"
 // singleDNSDetour returns the one detour tag every profile in cfg
 // routes through. A profile's detour tag is its outbound tag
 // reference, its endpoint tag reference, or its inline outbound's
-// tag — except an inline direct outbound, which has no tag to
-// detour through: a direct-only profile carries no detour tag at
-// all. The runtime "direct" outbound is synthesised at runtime
+// tag — except when the resolved target is a direct outbound, which
+// has no tag a detour can use: a direct-only profile carries no
+// detour tag at all. The runtime "direct" outbound is synthesised at runtime
 // (createOutbounds) and the synthetic "castctl-dialer" exists only
 // for direct endpoint references; neither is a config tag, so
 // neither can be a detour here (validateTagGraph would reject
@@ -479,7 +479,7 @@ func singleDNSDetour(cfg *SingleConfig) (detour, refusing string, ok bool) {
 	}
 	for _, name := range cfg.ProfileNames() {
 		p := cfg.Profiles[name]
-		tag := detourTagForProfile(p)
+		tag := detourTagForProfile(cfg, p)
 		if detour == "" {
 			if tag == "" {
 				return "", name, false
@@ -496,12 +496,46 @@ func singleDNSDetour(cfg *SingleConfig) (detour, refusing string, ok bool) {
 
 // detourTagForProfile returns the tag a dns detour for p would name,
 // or "" when p is direct-only (no config tag exists for its outbound).
-func detourTagForProfile(p *Profile) string {
+// A tag reference is resolved against cfg's outbounds, endpoints, and
+// inline profile outbounds: when the resolved target is a direct
+// outbound, "" is returned — a detour naming an empty direct outbound
+// is runtime-invalid (sing-box refuses it), so no dns section may be
+// authored for it. A tag that resolves to a selector/urltest outbound
+// is returned as-is (its member list is not consulted); a tag that
+// resolves to nothing is also returned as-is and left for
+// validateTagGraph to reject as dangling.
+func detourTagForProfile(cfg *SingleConfig, p *Profile) string {
 	if p == nil {
 		return ""
 	}
 	switch p.Outbound.Kind {
 	case OutboundTag:
+		if cfg != nil {
+			for _, ob := range cfg.Outbounds {
+				if ob.Tag == p.Outbound.Tag {
+					if ob.Type == "direct" {
+						return ""
+					}
+					return p.Outbound.Tag
+				}
+			}
+			for _, ep := range cfg.Endpoints {
+				if ep.Tag == p.Outbound.Tag {
+					if ep.Type == "direct" {
+						return ""
+					}
+					return p.Outbound.Tag
+				}
+			}
+			for _, other := range cfg.Profiles {
+				if other.Outbound.Kind == OutboundInline && other.Outbound.Tag == p.Outbound.Tag {
+					if other.Outbound.Type == "direct" {
+						return ""
+					}
+					return p.Outbound.Tag
+				}
+			}
+		}
 		return p.Outbound.Tag
 	case OutboundInline:
 		// An inline direct outbound is direct-only: its tag (if
