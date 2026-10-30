@@ -208,6 +208,15 @@ func MigrateFrom(sourceDir, destDir string, write bool) (*MigrateResult, error) 
 	}
 	sort.Strings(names[1:])
 
+	// profiles/default/config.json is a legacy file for the
+	// default profile (R4): directory discovery skips a directory
+	// named "default", so its presence is detected explicitly
+	// (Stat only; the read guard in migrateLegacyProfile refuses
+	// a non-regular file without opening it).
+	strayPath := strayDefaultLegacyPath(sourceDir)
+	_, strayStatErr := os.Stat(strayPath)
+	strayPresent := strayStatErr == nil
+
 	// NB4: when a single file already exists it wins wholly. Its
 	// entries are carried over verbatim (cloned) first, including
 	// profiles present ONLY in the single file: DiscoverProfileNames
@@ -238,6 +247,51 @@ func MigrateFrom(sourceDir, destDir string, write bool) (*MigrateResult, error) 
 			// destination file with a separate source is refused
 			// above, before discovery.)
 			profileErrors = append(profileErrors, malformedErr.Error())
+			continue
+		}
+		if name == DefaultProfileName && strayPresent {
+			// The stray default legacy file migrates like any
+			// named legacy file: its settings become the default
+			// entry. It is never silently dropped.
+			strayDir := filepath.Dir(strayPath)
+			strayPaths := Paths{
+				Dir:     strayDir,
+				Config:  strayPath,
+				Cookies: filepath.Join(strayDir, "cookies.txt"),
+				Chat:    filepath.Join(strayDir, "chat.json"),
+			}
+			strayProfile, serr := migrateLegacyProfile(sourceDir, name, strayPaths)
+			if serr != nil {
+				profileErrors = append(profileErrors, serr.Error())
+				continue
+			}
+			// A legacy base file as well means two legacy files
+			// claim the default profile: refuse naming both
+			// instead of choosing one. (When source == destination
+			// and a single file exists, the base file IS the single
+			// file, so it does not count here.)
+			baseLegacy := false
+			if !(same && existingIsSingle) {
+				if configPathExists(filepath.Join(sourceDir, "config.json")) {
+					baseLegacy = true
+				}
+			}
+			if baseLegacy {
+				profileErrors = append(profileErrors, fmt.Sprintf("profile %q has two legacy config files: %q and %q; refusing to choose between them (remove one, or migrate one by hand)", name, filepath.Join(sourceDir, "config.json"), strayPath))
+				continue
+			}
+			if existingIsSingle && fromSingle[name] {
+				// The destination already has a default entry:
+				// identical settings stand as already-migrated;
+				// differing settings are a collision naming
+				// both locations, never a silent skip.
+				if legacyProfileSettingsEqual(strayProfile, existing.Profiles[name]) {
+					continue
+				}
+				profileErrors = append(profileErrors, fmt.Sprintf("profile %q differs between source legacy file %q and destination config %q; refusing to overwrite", name, strayPath, filepath.Join(destDir, "config.json")))
+				continue
+			}
+			candidateProfiles = append(candidateProfiles, strayProfile)
 			continue
 		}
 		if existingIsSingle {
@@ -477,6 +531,35 @@ func migrateLegacyProfile(baseDir, name string, paths Paths) (*Profile, error) {
 		return nil, err
 	}
 	return applyLegacy(name, paths, s, baseDir), nil
+}
+
+// legacyProfileSettingsEqual compares the settings a legacy file
+// carries (cookies_file, vm_id, node_id, auto_approve,
+// auto_allow_once, subscription_action_id, fingerprint,
+// tls_engine) between a profile built from a legacy file and a
+// single-file entry. The outbound is excluded: a legacy file never
+// carries one, and a destination entry's outbound is preserved
+// verbatim either way. Cookies files compare equal when literally
+// equal, or when both are the profile's own default cookies path
+// (the same "no cookies_file key" state in different directories).
+func legacyProfileSettingsEqual(a, b *Profile) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	// Cookies files compare equal when literally equal, or when
+	// both are the profile's own default cookies path (the same
+	// "no cookies_file key" state in different directories).
+	cookiesEqual := a.CookiesFile == b.CookiesFile ||
+		(a.CookiesFile == filepath.Join(a.Dir, "cookies.txt") &&
+			b.CookiesFile == filepath.Join(b.Dir, "cookies.txt"))
+	return cookiesEqual &&
+		a.VMID == b.VMID &&
+		a.NodeID == b.NodeID &&
+		a.AutoApprove == b.AutoApprove &&
+		a.AutoAllowOnce == b.AutoAllowOnce &&
+		a.SubscriptionActionID == b.SubscriptionActionID &&
+		a.Fingerprint == b.Fingerprint &&
+		a.TLSEngine == b.TLSEngine
 }
 
 func migrateWarnings(p *Profile, write bool, generatedSet map[string]bool) []string {

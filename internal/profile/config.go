@@ -832,17 +832,38 @@ func configPathExists(path string) bool {
 	return err == nil && !st.IsDir()
 }
 
-// findLegacyConfigFile returns the first legacy config file in
-// baseDir: the flat base config.json, then any
-// profiles/<name>/config.json in sorted profile-name order, skipping
-// exclude (the caller has already checked that name's own file). It
-// uses os.Stat only: no file is opened, so a FIFO cannot hang the
-// scan, and a bare directory (no config file) never counts. It
-// reports ("", false, nil) when no legacy config file exists.
-func findLegacyConfigFile(baseDir, exclude string) (string, bool, error) {
-	basePath := filepath.Join(baseDir, "config.json")
-	if configPathExists(basePath) {
-		return basePath, true, nil
+// strayDefaultLegacyPath is profiles/default/config.json: the
+// default profile's stray legacy file. The default profile's own
+// config path is the base config.json, so this file is never the
+// default profile's own file — it is a legacy file for every
+// purpose (refusal scan, LoadProfile default check, migrate
+// discovery) and must never be skipped as "the default entry".
+// DiscoverProfileNames skips a directory named "default" under
+// profiles/, so this path is invisible to directory discovery and
+// is checked explicitly wherever legacy files are scanned.
+func strayDefaultLegacyPath(baseDir string) string {
+	return filepath.Join(baseDir, "profiles", DefaultProfileName, "config.json")
+}
+
+// scanLegacyConfigFile returns the first legacy config file in
+// baseDir: the flat base config.json (only when includeBase — the
+// base file IS the single file when one was found, and must not
+// count then), then profiles/default/config.json, then any
+// profiles/<name>/config.json in sorted profile-name order,
+// skipping exclude (the caller has already checked that name's own
+// file). It uses os.Stat only: no file is opened, so a FIFO cannot
+// hang the scan, and a bare directory (no config file) never
+// counts. It reports ("", false, nil) when no legacy config file
+// exists.
+func scanLegacyConfigFile(baseDir, exclude string, includeBase bool) (string, bool, error) {
+	if includeBase {
+		basePath := filepath.Join(baseDir, "config.json")
+		if configPathExists(basePath) {
+			return basePath, true, nil
+		}
+	}
+	if stray := strayDefaultLegacyPath(baseDir); configPathExists(stray) {
+		return stray, true, nil
 	}
 	names, err := DiscoverProfileNames(baseDir)
 	if err != nil {
@@ -863,21 +884,32 @@ func findLegacyConfigFile(baseDir, exclude string) (string, bool, error) {
 	return "", false, nil
 }
 
+// findLegacyConfigFile returns the first legacy config file in
+// baseDir, including the flat base config.json. See
+// scanLegacyConfigFile.
+func findLegacyConfigFile(baseDir, exclude string) (string, bool, error) {
+	return scanLegacyConfigFile(baseDir, exclude, true)
+}
+
 // LoadProfile loads one profile's settings. It is strictly read-only:
 // it creates no files and never generates a node_id (see the package
 // doc). Precedence: a single-file entry wins wholly (never per-key
-// merge). A profile absent from the single file whose legacy file
-// still exists is REFUSED with ErrLegacyLayout naming
-// `castctl config migrate --write` and the legacy file path — the
-// legacy layout is never read silently, and Migrate is the only
-// path that reads legacy files. The refusal is layout-wide: when
-// no single file exists, ANY legacy config file in the layout
-// refuses EVERY profile name, including names with no file of
-// their own (a ghost name must not synthesise defaults over an
-// unmigrated layout). A profile with no entry anywhere, in a
-// layout with no legacy file at all, synthesises defaults
-// (SourceNone). An unparseable single file is an error with no
-// silent fallback.
+// merge). A name with no single-file entry is REFUSED with
+// ErrLegacyLayout naming `castctl config migrate --write` and the
+// legacy file path when ANY legacy config file exists anywhere in
+// the layout: the name's own file, another profile's file, the flat
+// base file (when no single file exists), or
+// profiles/default/config.json. The refusal is layout-wide: it
+// fires for ghost names with no file of their own, and it fires
+// even when a single file exists (the base file is the single file
+// then, so it does not itself count — named files and the stray
+// default file still do). LoadProfile itself refuses; the CLI
+// existence/identity guards (profileExists, refuseUnmigrated) only
+// add write-path and explicit-name checks on top. A name with no
+// entry anywhere, in a layout with no legacy file at all,
+// synthesises defaults (SourceNone). An unparseable single file is
+// an error with no silent fallback. Migrate is the only path that
+// reads legacy files.
 func LoadProfile(baseDir, name string, getenv func(string) (string, bool)) (*Profile, error) {
 	paths, err := ProfilePaths(baseDir, name)
 	if err != nil {
@@ -895,7 +927,10 @@ func LoadProfile(baseDir, name string, getenv func(string) (string, bool)) (*Pro
 	}
 	if p == nil {
 		// The base config.json is the single file when one was found;
-		// the default profile has no separate legacy file in that case.
+		// the default profile has no separate legacy file in that
+		// case, so the own-file check is skipped for it — but the
+		// layout-wide scan below still runs, so leftover named
+		// legacy files refuse even the default name.
 		// Otherwise, an existing per-profile config file is an
 		// unmigrated legacy file: refuse it (ErrLegacyLayout) instead
 		// of reading it. The file's contents are never parsed here;
@@ -912,15 +947,22 @@ func LoadProfile(baseDir, name string, getenv func(string) (string, bool)) (*Pro
 			} else if !os.IsNotExist(serr) {
 				return nil, newConfigErrorf("read config: %v", serr)
 			}
-			if !found {
-				legacyPath, ok, ferr := findLegacyConfigFile(baseDir, name)
-				if ferr != nil {
-					return nil, ferr
-				}
-				if ok {
-					return nil, newLegacyLayoutError(legacyPath)
-				}
-			}
+		}
+		// Layout-wide refusal: when the name has no single-file
+		// entry, ANY legacy config file anywhere in the layout
+		// refuses the name — including a ghost name with no file
+		// of its own, and including when a single file exists
+		// (the base file is excluded from the scan then, since it
+		// IS the single file; named files and
+		// profiles/default/config.json still count). Only a layout
+		// with no legacy file at all synthesises SourceNone
+		// defaults below.
+		legacyPath, ok, ferr := scanLegacyConfigFile(baseDir, name, !found)
+		if ferr != nil {
+			return nil, ferr
+		}
+		if ok {
+			return nil, newLegacyLayoutError(legacyPath)
 		}
 	}
 	if p == nil {

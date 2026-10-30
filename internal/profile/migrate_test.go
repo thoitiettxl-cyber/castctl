@@ -961,6 +961,175 @@ func TestMigrateRefusesNonRegularFiles(t *testing.T) {
 	}
 }
 
+// TestMigrateStrayDefaultLegacyFile (R4): profiles/default/config.json
+// migrates like any named legacy file: its settings become the
+// default profile entry. On collision with a base-file default
+// entry it refuses naming the collision instead of silently
+// dropping either file.
+func TestMigrateStrayDefaultLegacyFile(t *testing.T) {
+	t.Parallel()
+
+	strayJSON := `{"auto_approve":"always","node_id":"STRAY-NODE","vm_id":"STRAY-VM","fingerprint":"firefox","tls_engine":"stdlib"}`
+
+	// Stray file only: --write carries its settings into the
+	// default entry; the stray file stays on disk untouched.
+	t.Run("stray only migrates as default", func(t *testing.T) {
+		t.Parallel()
+		base := BaseDir(t.TempDir())
+		stray := filepath.Join(base, "profiles", "default", "config.json")
+		writeFile(t, stray, strayJSON, 0o600)
+		before, _ := os.ReadFile(stray)
+		result, err := Migrate(base, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Migrated {
+			t.Fatalf("Migrate over stray-only layout = %+v; want migrated", result)
+		}
+		cfg, found, err := LoadSingleConfig(base)
+		if err != nil || !found {
+			t.Fatalf("LoadSingleConfig = found=%v err=%v", found, err)
+		}
+		def := cfg.Profiles["default"]
+		if def == nil {
+			t.Fatal("migrated config has no default entry; want the stray file's settings")
+		}
+		if def.VMID != "STRAY-VM" || def.NodeID != "STRAY-NODE" || def.AutoApprove != "always" ||
+			def.Fingerprint != "firefox" || def.TLSEngine != "stdlib" {
+			t.Errorf("migrated default = %+v; want the stray file's settings", def)
+		}
+		after, _ := os.ReadFile(stray)
+		if string(before) != string(after) {
+			t.Error("migrate modified the stray legacy file; want it untouched")
+		}
+	})
+
+	// Stray file + legacy-flat base file: both claim the default
+	// profile. Refuse naming both paths; write nothing.
+	t.Run("stray plus base legacy collides", func(t *testing.T) {
+		t.Parallel()
+		base := BaseDir(t.TempDir())
+		basePath := filepath.Join(base, "config.json")
+		writeFile(t, basePath, `{"auto_approve":"off","node_id":"BASE-NODE"}`, 0o600)
+		stray := filepath.Join(base, "profiles", "default", "config.json")
+		writeFile(t, stray, strayJSON, 0o600)
+		before, _ := os.ReadFile(basePath)
+		result, err := Migrate(base, true)
+		if err == nil {
+			t.Fatal("Migrate over stray+base legacy = nil error; want a collision refusal")
+		}
+		if ExitCode(err) != 2 {
+			t.Errorf("collision ExitCode = %d; want 2", ExitCode(err))
+		}
+		if result == nil || len(result.Errors) == 0 ||
+			!strings.Contains(strings.Join(result.Errors, " "), basePath) ||
+			!strings.Contains(strings.Join(result.Errors, " "), stray) {
+			t.Errorf("collision errors = %v; want one naming both legacy files", result.Errors)
+		}
+		if result != nil && result.Migrated {
+			t.Error("collision run migrated; want nothing written")
+		}
+		after, _ := os.ReadFile(basePath)
+		if string(before) != string(after) {
+			t.Error("refused migrate modified the base file")
+		}
+	})
+
+	// Stray file + existing single file without a default entry:
+	// the stray settings join the candidate, so the candidate
+	// differs from the existing file and migrate refuses to
+	// overwrite (the one-shot rule) instead of silently dropping
+	// the stray file. The destination is untouched and the result
+	// lists the stray profile as a legacy source.
+	t.Run("stray against existing single refuses overwrite", func(t *testing.T) {
+		t.Parallel()
+		base := BaseDir(t.TempDir())
+		destPath := filepath.Join(base, "config.json")
+		writeFile(t, destPath, `{"profiles":{"work":{"node_id":"W1"}}}`, 0o600)
+		before, _ := os.ReadFile(destPath)
+		stray := filepath.Join(base, "profiles", "default", "config.json")
+		writeFile(t, stray, strayJSON, 0o600)
+		result, err := Migrate(base, true)
+		if err == nil {
+			t.Fatal("Migrate over stray + existing single = nil error; want refuse-overwrite")
+		}
+		if ExitCode(err) != 2 {
+			t.Errorf("refuse-overwrite ExitCode = %d; want 2", ExitCode(err))
+		}
+		if result == nil || result.Migrated {
+			t.Error("refused migrate reported Migrated; want nothing written")
+		}
+		found := false
+		for _, p := range result.Profiles {
+			if p.Name == "default" && p.Source == "legacy" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("migrate result profiles = %+v; want the stray default listed as legacy", result.Profiles)
+		}
+		after, _ := os.ReadFile(destPath)
+		if string(before) != string(after) {
+			t.Error("refused migrate modified the destination file")
+		}
+	})
+
+	// Cross-dir: stray file against a destination single file
+	// with a DIFFERING default entry refuses, naming the
+	// collision (source stray path + destination config path).
+	t.Run("cross-dir stray differing from destination entry collides", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		src := filepath.Join(home, "muse-cli")
+		stray := filepath.Join(src, "profiles", "default", "config.json")
+		writeFile(t, stray, strayJSON, 0o600)
+		dest := filepath.Join(home, "castctl")
+		destPath := filepath.Join(dest, "config.json")
+		writeFile(t, destPath, `{"profiles":{"default":{"node_id":"OTHER-NODE","auto_approve":"off","auto_allow_once":false}}}`, 0o600)
+		before, _ := os.ReadFile(destPath)
+		result, err := MigrateFrom(src, dest, true)
+		if err == nil {
+			t.Fatal("cross-dir migrate over differing stray = nil error; want a collision refusal")
+		}
+		if ExitCode(err) != 2 {
+			t.Errorf("collision ExitCode = %d; want 2", ExitCode(err))
+		}
+		if result == nil || len(result.Errors) == 0 ||
+			!strings.Contains(strings.Join(result.Errors, " "), stray) ||
+			!strings.Contains(strings.Join(result.Errors, " "), destPath) {
+			t.Errorf("collision errors = %v; want one naming the stray file and the destination config", result.Errors)
+		}
+		if result != nil && result.Migrated {
+			t.Error("collision run migrated; want nothing written")
+		}
+		after, _ := os.ReadFile(destPath)
+		if string(before) != string(after) {
+			t.Error("refused migrate modified the destination file")
+		}
+	})
+
+	// Cross-dir: stray file identical in settings to the
+	// destination default entry stands as already-migrated.
+	t.Run("cross-dir stray identical to destination entry is already-migrated", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		src := filepath.Join(home, "muse-cli")
+		strayCookies := filepath.Join(src, "profiles", "default", "cookies.txt")
+		stray := filepath.Join(src, "profiles", "default", "config.json")
+		writeFile(t, stray, `{"cookies_file":`+quoteJSON(strayCookies)+`,"auto_approve":"always","node_id":"STRAY-NODE","vm_id":"STRAY-VM","fingerprint":"firefox","tls_engine":"stdlib"}`, 0o600)
+		dest := filepath.Join(home, "castctl")
+		destPath := filepath.Join(dest, "config.json")
+		writeFile(t, destPath, `{"profiles":{"default":{"cookies_file":`+quoteJSON(strayCookies)+`,"auto_approve":"always","node_id":"STRAY-NODE","vm_id":"STRAY-VM","auto_allow_once":false,"fingerprint":"firefox","tls_engine":"stdlib"}}}`, 0o600)
+		result, err := MigrateFrom(src, dest, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Migrated || result.Reason != "already-migrated" {
+			t.Errorf("identical stray collision = %+v; want already-migrated", result)
+		}
+	})
+}
+
 func TestMigrateAuthorsDNSWhenSingleDetourServesAllProfiles(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()

@@ -91,6 +91,13 @@ func AddProfile(baseDir, name string, opts AddProfileOptions) (*Profile, error) 
 		if name != DefaultProfileName && legacyProfileExists(paths) {
 			return newConfigErrorf("profile %q already exists in the old layout; run config migrate first", name)
 		}
+		if name == DefaultProfileName && configPathExists(strayDefaultLegacyPath(baseDir)) {
+			// profiles/default/config.json is the default
+			// profile's legacy file (its own config path is the
+			// base file, which is the single file here): adding
+			// "default" would silently shadow it.
+			return newConfigErrorf("profile %q already exists in the old layout; run config migrate first", name)
+		}
 		nodeID, err := generateNodeID()
 		if err != nil {
 			return err

@@ -556,6 +556,94 @@ func TestCommandsRefuseBaseFIFO(t *testing.T) {
 	}
 }
 
+// TestProfileShowGhostRefusesLeftoverLegacyWithSingleFile (R1):
+// with a single file present and a leftover legacy file for
+// another profile, showing a ghost active profile exits 2 naming
+// the leftover file (the LoadProfile refusal fires at the CLI
+// layer too) — not a "does not exist" synthesis. With no legacy
+// file anywhere, listing a ghost active profile synthesises it.
+func TestProfileShowGhostRefusesLeftoverLegacyWithSingleFile(t *testing.T) {
+	home := t.TempDir()
+	configFile := filepath.Join(home, "config.json")
+	if err := os.WriteFile(configFile, []byte(`{"profiles":{"default":{"node_id":"N1"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	leftover := filepath.Join(home, "profiles", "work", "config.json")
+	if err := os.MkdirAll(filepath.Dir(leftover), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(leftover, []byte(`{"node_id":"WORK-NODE"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, out, errb := profileEnv(t, configFile)
+	// The ghost is the ACTIVE profile: resolving it must refuse
+	// (LoadProfile itself), not synthesise over the leftover file.
+	env.Getenv = mapGetenv(map[string]string{"CASTCTL_PROFILE": "ghost"})
+	if code := runProfile(t, env, out, errb, configFile, "profile", "show"); code != 2 {
+		t.Fatalf("profile show ghost over single+leftover: code=%d, want 2; out=%q err=%q", code, out.String(), errb.String())
+	}
+	if !strings.Contains(errb.String(), leftover) || !strings.Contains(errb.String(), "config migrate --write") {
+		t.Errorf("profile show ghost error = %q; want it to name the leftover file and the migration step", errb.String())
+	}
+
+	// Control: no legacy file anywhere — a ghost active profile
+	// synthesises and lists fine.
+	cleanHome := t.TempDir()
+	cleanFile := filepath.Join(cleanHome, "config.json")
+	if err := os.WriteFile(cleanFile, []byte(`{"profiles":{"default":{"node_id":"N1"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cleanEnv, cleanOut, cleanErrb := profileEnv(t, cleanFile)
+	cleanEnv.Getenv = mapGetenv(map[string]string{"CASTCTL_PROFILE": "ghost"})
+	if code := runProfile(t, cleanEnv, cleanOut, cleanErrb, cleanFile, "profile", "list"); code != 0 {
+		t.Fatalf("profile list over clean single file with ghost active: code=%d, want 0; err=%q", code, cleanErrb.String())
+	}
+	if !strings.Contains(cleanOut.String(), "ghost") {
+		t.Errorf("profile list output = %q; want the synthesised ghost profile listed", cleanOut.String())
+	}
+}
+
+// TestCommandsRefuseStrayDefaultLegacyFile (R4): legacy settings in
+// profiles/default/config.json with no base config.json —
+// `profile show` and `profile list` exit 2 naming the stray file
+// instead of synthesising defaults. The default config location is
+// used (via XDG_CONFIG_HOME): an explicit --config pointing at a
+// missing file is gated by RequirePresent before any load happens,
+// so it cannot exercise the refusal.
+func TestCommandsRefuseStrayDefaultLegacyFile(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(home, "xdg")
+	stray := filepath.Join(xdg, "castctl", "profiles", "default", "config.json")
+	if err := os.MkdirAll(filepath.Dir(stray), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stray, []byte(`{"auto_approve":"always","node_id":"STRAY-NODE"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, errb := &bytes.Buffer{}, &bytes.Buffer{}
+	env := &Env{Stdout: out, Stderr: errb, Getenv: mapGetenv(map[string]string{
+		"XDG_CONFIG_HOME": xdg,
+		"HOME":            home,
+	})}
+	run := func(args ...string) int {
+		out.Reset()
+		errb.Reset()
+		return Run(context.Background(), args, env)
+	}
+	if code := run("profile", "show"); code != 2 {
+		t.Fatalf("profile show over stray-only layout: code=%d, want 2; out=%q err=%q", code, out.String(), errb.String())
+	}
+	if !strings.Contains(errb.String(), stray) {
+		t.Errorf("profile show error = %q; want it to name the stray file %q", errb.String(), stray)
+	}
+	if code := run("profile", "list"); code != 2 {
+		t.Fatalf("profile list over stray-only layout: code=%d, want 2; out=%q err=%q", code, out.String(), errb.String())
+	}
+	if !strings.Contains(errb.String(), stray) {
+		t.Errorf("profile list error = %q; want it to name the stray file %q", errb.String(), stray)
+	}
+}
+
 func TestConfigMigrateFrom(t *testing.T) {
 	home := t.TempDir()
 	src := filepath.Join(home, "muse-cli")
