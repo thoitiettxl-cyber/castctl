@@ -396,11 +396,14 @@ deadlines everywhere. The wait redesign (2026-10-30)
 deliberately diverges from a verbatim port in five places,
 documented in `internal/wait/doc.go` and
 `internal/wait/SEAMS.md` §7 (D10–D14): a subagents-held
-terminal settles on a history reply proof; settle proofs
-re-poll every 5s on a quiet stream; boundary derivation runs
-under the wait deadline; history window exhaustion is reported
-in the result note; and `send` fails before sending when its
-baseline history read fails. The provenance claim above stands
+terminal settles on a history reply proof (excluding replies
+identifiably shaped as a subagent's); settle proofs re-poll
+every 5s on a quiet stream, gated to at most one proof per
+interval; boundary derivation runs under the wait deadline,
+and no live event installs a boundary; history window
+exhaustion is reported in the result note, with replies
+accumulated across windows; and `send` fails before sending
+when either of its two baseline history reads fails. The provenance claim above stands
 for the ported rules; the divergences are deliberate
 deviations, not silent edits to history. Server behaviours the
 redesign does not assume (count-0-after-drain events,

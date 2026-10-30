@@ -7,8 +7,9 @@ package wait
 // Red/green tests for the wait redesign (overnight item 3).
 // Numbering follows phase1-r3-seams-tests-docs.md §2 (T1–T18).
 // T1–T4 are pins: they must stay green on the pre-redesign code
-// and after it. T5–T8 are RED demonstrations: they fail on the
-// pre-redesign code and pass only with the new semantics.
+// and after it. T5–T7 are RED demonstrations: they fail on the
+// pre-redesign code and pass only with the new semantics. T8 is
+// a pin (green before and after).
 
 import (
 	"context"

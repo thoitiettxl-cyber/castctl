@@ -734,9 +734,13 @@ func (r *Runner) trySettle(ctx context.Context) error {
 // when a history read fails, an AuthError when auth failed,
 // ctx.Err() when the context died before the proof was applied,
 // or nil when the proof was attempted (whether or not it
-// accepted). A successful proof is never applied after
+// accepted), skipped as gate-forbidden, or not started because
+// the deadline passed. A successful proof is never applied after
 // cancellation: the ctx check sits immediately before each
-// apply site, so a cancelled wait settles nothing.
+// apply site, so a cancelled wait settles nothing. A proof that
+// reads is interval-gated (see the gate below) and its replies,
+// when they settle the turn, are captured as proofReplies for
+// the endgame reconciliation in finish.
 func (r *Runner) settlePending(ctx context.Context, pending string) error {
 	// No proof starts past the deadline (loop-2 F9): the
 	// endgame's final read follows at once, bounded by its own
@@ -933,9 +937,10 @@ func (r *Runner) historyCtx(ctx context.Context, floor time.Duration, cap *time.
 }
 
 // finish runs the endgame in order: last-chance FAILED proof,
-// final history read (two attempts), lag window, fail-closed
-// 124, boundary suppression, then the result object. The
-// boundary-unknown rule follows the code, not the comment: kind
+// final history read (two attempts), lag window, endgame
+// reconciliation against the settle proof and the awaited turn,
+// fail-closed 124, boundary suppression, then the result object.
+// The boundary-unknown rule follows the code, not the comment: kind
 // is unchanged, only replies are suppressed.
 func (r *Runner) finish(ctx context.Context) (*Result, error) {
 	kind := KindTimeout
