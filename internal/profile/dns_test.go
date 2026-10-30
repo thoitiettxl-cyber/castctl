@@ -5,8 +5,8 @@
 package profile
 
 // Per-profile DNS: parse, save round-trip, validation, and
-// resolver precedence (own > WireGuard-imported > DoH default >
-// global-compat fallback). All fixtures are fake; no live config
+// resolver precedence (own > WireGuard-imported >
+// global-compat fallback > DoH default). All fixtures are fake; no live config
 // is read. Secrets below are FAKE placeholders only.
 
 import (
@@ -181,10 +181,8 @@ func TestResolveProfileDNSPrecedence(t *testing.T) {
 	}
 
 	// (iv) Global-compat fallback only when no per-profile dns
-	// exists, with a warning telling the operator to
-	// distribute by hand — never pointing at `config migrate`,
-	// which reports already-migrated (a no-op) for single
-	// configs and does not distribute.
+	// exists, with a warning naming `config migrate --write`
+	// as the distributing tool (since G4).
 	cfg3, err := ParseSingleConfig([]byte(singleFileJSON(
 		`{"muse01":{"outbound":"proxy-sg"}}`,
 		`[`+fakeSocksOutbound+`]`, "",
@@ -200,8 +198,41 @@ func TestResolveProfileDNSPrecedence(t *testing.T) {
 	if res.Source != DNSSourceGlobalCompat || res.Options.Servers[0].Tag != "gdns" {
 		t.Fatalf("compat branch: source=%q server=%q, want global-compat/gdns", res.Source, res.Options.Servers[0].Tag)
 	}
-	if !strings.Contains(res.Warning, "by hand") || strings.Contains(res.Warning, "config migrate") {
-		t.Fatalf("compat warning = %q, want 'by hand' and no 'config migrate' pointer", res.Warning)
+	if !strings.Contains(res.Warning, "config migrate") || strings.Contains(res.Warning, "by hand") {
+		t.Fatalf("compat warning = %q, want a 'config migrate' pointer and no 'by hand'", res.Warning)
+	}
+}
+
+func TestResolveProfileDNSNoWarningForPerProfileOnly(t *testing.T) {
+	// The deprecation warning fires exactly when the legacy
+	// (top-level) form is present: a per-profile-only config
+	// resolves silently, as does a config with no resolver
+	// at all (synthesised default).
+	cfg, err := ParseSingleConfig([]byte(singleFileJSON(
+		`{"muse01":{"outbound":"proxy-sg","dns":{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353,"detour":"proxy-sg"}],"final":"dns1"}}}`,
+		`[`+fakeSocksOutbound+`]`, "", "",
+	)), "/base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := ResolveProfileDNS(cfg.Profiles["muse01"], cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Source != DNSSourceProfile || res.Warning != "" {
+		t.Fatalf("per-profile-only: source=%q warning=%q; want profile and no warning", res.Source, res.Warning)
+	}
+
+	cfg2, err := ParseSingleConfig([]byte(`{"profiles":{"default":{}}}`), "/base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = ResolveProfileDNS(cfg2.Profiles["default"], cfg2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Source != DNSSourceDefault || res.Warning != "" {
+		t.Fatalf("no-resolver: source=%q warning=%q; want default and no warning", res.Source, res.Warning)
 	}
 }
 
@@ -291,11 +322,12 @@ func TestWireGuardBranchWarnsWhenGlobalSectionShadowed(t *testing.T) {
 	if res.Source != DNSSourceWireGuard {
 		t.Fatalf("WG branch: source=%q, want wireguard", res.Source)
 	}
-	if res.Warning == "" || !strings.Contains(res.Warning, "top-level dns") {
-		t.Fatalf("WG branch warning = %q, want it to name the shadowed top-level dns section", res.Warning)
+	if res.Warning == "" || !strings.Contains(res.Warning, "top-level dns") ||
+		!strings.Contains(res.Warning, "config migrate") || strings.Contains(res.Warning, "by hand") {
+		t.Fatalf("WG branch warning = %q, want it to name the shadowed top-level dns section and point at 'config migrate'", res.Warning)
 	}
 	// A non-WG profile in the same file still gets the compat
-	// warning as before (new by-hand wording).
+	// warning as before (naming `config migrate --write`).
 	res, err = ResolveProfileDNS(cfg.Profiles["other"], cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -303,8 +335,8 @@ func TestWireGuardBranchWarnsWhenGlobalSectionShadowed(t *testing.T) {
 	if res.Source != DNSSourceGlobalCompat {
 		t.Fatalf("non-WG branch: source=%q, want global-compat", res.Source)
 	}
-	if !strings.Contains(res.Warning, "by hand") || strings.Contains(res.Warning, "config migrate") {
-		t.Fatalf("compat warning = %q, want 'by hand' and no 'config migrate' pointer", res.Warning)
+	if !strings.Contains(res.Warning, "config migrate") || strings.Contains(res.Warning, "by hand") {
+		t.Fatalf("compat warning = %q, want a 'config migrate' pointer and no 'by hand'", res.Warning)
 	}
 }
 

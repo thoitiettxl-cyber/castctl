@@ -31,9 +31,9 @@ import (
 //     so the shadowing is observable.
 //  3. The top-level "dns" section, compat fallback for one cycle
 //     only (DNSSourceGlobalCompat), with a warning telling the
-//     operator to distribute it into profile entries by hand
-//     (never pointing at `config migrate`, which does not
-//     distribute for single configs). It applies ONLY when no
+//     operator to distribute it into profile entries with
+//     `config migrate --write` (which distributes for single
+//     configs since G4). It applies ONLY when no
 //     per-profile dns
 //     exists; coexistence of a profile block and a top-level
 //     section is a parse-time error (G1), and the warning cycle
@@ -181,7 +181,7 @@ func ResolveProfileDNS(prof *Profile, single *SingleConfig) (*ResolvedDNS, error
 		}
 		warning := ""
 		if single.DNS != nil {
-			warning = fmt.Sprintf("castctl: top-level dns section is ignored for profile %q: WireGuard DNS takes precedence; distribute the top-level section into profile entries by hand (see docs/config.md)", prof.Name)
+			warning = fmt.Sprintf("castctl: top-level dns section is ignored for profile %q: WireGuard DNS takes precedence; run \"config migrate --write\" to distribute the top-level section into profile entries (see docs/config.md)", prof.Name)
 		}
 		return &ResolvedDNS{Options: opts, Source: DNSSourceWireGuard, Warning: warning}, nil
 	}
@@ -198,7 +198,7 @@ func ResolveProfileDNS(prof *Profile, single *SingleConfig) (*ResolvedDNS, error
 		return &ResolvedDNS{
 			Options: opts,
 			Source:  DNSSourceGlobalCompat,
-			Warning: "castctl: top-level dns section is deprecated and will become an error in a later release: distribute it into profile entries by hand (see docs/config.md)",
+			Warning: "castctl: top-level dns section is deprecated and will become an error in a later release: run \"config migrate --write\" to distribute it into profile entries (see docs/config.md)",
 		}, nil
 	}
 	// (4) Synthesised DoH default.

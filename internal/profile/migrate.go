@@ -1011,9 +1011,9 @@ func detourTagForProfile(cfg *SingleConfig, p *Profile) string {
 // section is the gated default only: one DoH server (https,
 // IP-literal 1.1.1.1, no bootstrap hostname, path /dns-query)
 // through the shared detour. It is global and single-profile-only
-// by construction: the final model is a per-profile dns block
-// (later PR), and this section is distributed into profile
-// entries by `config migrate` there. Authoring is validated with
+// by construction: the final model is a per-profile dns block,
+// and this section is distributed into profile entries by
+// `config migrate` (G4: distributeTopLevelDNS). Authoring is validated with
 // the same checks a hand-written section faces (validateTagGraph
 // plus the WireGuard key-sharing check); a validation failure
 // falls back to no section with the refusal recorded, never to a

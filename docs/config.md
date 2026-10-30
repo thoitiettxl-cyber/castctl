@@ -280,10 +280,12 @@ file verbatim and never invents one: a migrated file without a
 > only, kept for one cycle (see [Per-profile DNS](#per-profile-dns)
 > for the implemented model and the precedence order). Do not design
 > multi-profile DNS behaviour around the global section: it cannot
-> express per-profile resolvers, and a later migration will
-> distribute it into profile entries (verbatim where a profile
-> already has one, rewrite/refuse where it does not fit — gated
-> decision G4). A profile entry carrying its own `dns` block and
+> express per-profile resolvers. `config migrate` distributes it
+> into profile entries (verbatim copy per profile, detours
+> filled/kept/refused per profile — gated decision G4, see
+> [DNS distribution by `config migrate`](#dns-distribution-by-config-migrate))
+> and removes the top-level section in the same write. A profile
+> entry carrying its own `dns` block and
 > a file carrying a top-level `dns` section together are a config
 > error (exit 2): the two are never silently shadowed. The
 > compat cycle ends in a hard error in a later PR (documented
@@ -448,9 +450,9 @@ tag `dns1` with no collision.
    warning).
 3. Else the top-level `dns` section, compat fallback for one
    cycle, with a one-line stderr warning telling the operator
-   to distribute it into profile entries by hand (`config
-   migrate` does not distribute for single configs and must
-   not be pointed at as the distributor). Compat sits
+   to run `config migrate --write` to distribute it into
+   profile entries (see [DNS distribution by `config
+   migrate`](#dns-distribution-by-config-migrate)). Compat sits
    before the default deliberately: a config migrated by the
    removal PR carries an authored global section that must keep
    working for one cycle, and the warning must be observable
@@ -593,8 +595,11 @@ result refuses with exit 2 (there is no `--overwrite`);
 idempotent — re-running after a successful migration reports
 `already-migrated`; all-or-nothing — any profile error aborts
 the whole migration and nothing is written; existing
-single-file `outbounds`, `endpoints`, `dns`, and
-`default_profile` are carried verbatim; no outbound is ever
+single-file `outbounds`, `endpoints`, and
+`default_profile` are carried verbatim, and a top-level `dns`
+section is distributed into profile entries instead (see
+[DNS distribution by `config migrate`](#dns-distribution-by-config-migrate));
+no outbound is ever
 invented; `node_id` is generated only on `--write` when no
 single file exists yet.
 
@@ -670,10 +675,95 @@ outbound) counts the same way: naming it as a detour would
 write a config sing-box refuses at runtime, so it records a
 refusal instead. The migration itself still succeeds.
 A differing single config still refuses to overwrite, with no
-authoring attempted. An existing `dns` section is carried
-verbatim, never rewritten. Authoring is validated with the
+authoring attempted. An existing `dns` section is never
+authored over: it is handled by distribution below. Authoring
+is validated with the
 same checks a hand-written section faces; a validation failure
 records a refusal instead of writing an invalid config.
+
+### DNS distribution by `config migrate`
+
+When the existing single config carries a top-level `dns`
+section, `config migrate` distributes it into every profile's
+own `dns` block and removes the top-level section in the same
+atomic write (mode 0600, under the config lock). Dry-run by
+default: the plan reports `dns_distributed` and writes
+nothing; `--write` performs the distribution. No new
+subcommand, flag, or config key: the surface stays
+`config migrate [--write] [--from <dir>]`, and distribution
+works through `--from` on the destination file like the rest
+of migrate.
+
+- **Only** onto a config that is otherwise already migrated
+  (the existing single file, ignoring `dns`, equals the
+  migration result): the distribution diff must be exactly
+  the dns move. A pending legacy profile addition keeps the
+  run at refuse-overwrite, with no distribution attempted.
+- **Verbatim copy.** The whole top-level `dns` value is
+  copied field-for-field into each profile: `servers`,
+  `rules`, `final`, `reverse_mapping`, and all client
+  options (`strategy`, `timeout`, cache options, `client_subnet`,
+  …). Server tags, `final`, and rule `server` references are
+  scoped per block, so identical tags in every profile do
+  not collide and no renaming is needed. `wireguard_dns`
+  and `log` are untouched.
+- **Detour mapping, per profile** (sing-box tag refs: a
+  server's `detour` names an outbound/endpoint tag). Every
+  distributed dialer-carrying server carries an explicit
+  `detour`; an omitted detour would dial directly, outside
+  the profile's outbound, never through it:
+  - empty/missing detour → filled with the profile's own
+    detour tag: its outbound tag, its inline outbound tag
+    (`profile:<name>`), or the synthesised
+    `castctl-direct:<profile>` tag for a direct profile;
+  - detour equal to the profile's own tag → kept verbatim;
+  - detour reachable from the profile's outbound (through
+    detour chains and selector/urltest members) but
+    different from the own tag → kept verbatim; rewriting
+    it would silently reroute DNS onto another tunnel;
+  - any other detour → the whole run refuses (below).
+  `hosts`/`fakeip` servers carry no detour field and are
+  copied untouched; a per-profile block cannot express a
+  detour-less server (G2), so a section containing one
+  refuses distribution (below) rather than distributing a
+  block the loader rejects.
+- **Removal.** The top-level `dns` key is removed in the
+  same write. Keeping it alongside any per-profile block
+  would make the file unparseable (G1, exit 2 on every
+  load), so copy-without-removal is not an end state. The
+  pre-distribution file survives only in the operator's
+  backup: no `.bak` is kept for `config.json`, as with all
+  migrate writes. After distribution the compat warning
+  stops firing for that file, because no top-level section
+  remains.
+- **Refusals (all-or-nothing, exit 2, nothing written).**
+  The result records the reason in
+  `dns_distribution_refusal`, naming the profile and the
+  field/tag (never values from the dns block):
+  - a profile already has its own `dns` block (in practice
+    this state cannot be loaded at all: top-level + any
+    per-profile block is a G1 parse error, exit 2, before
+    migrate runs);
+  - a profile resolves WireGuard DNS through its tunnel
+    (`wireguard_dns` state): an own block would outrank
+    WireGuard DNS and shadow it, so distribution refuses
+    instead of silently changing the effective resolver;
+  - a server detour is unreachable from its profile's
+    outbound (never silently rewritten to the own tag);
+  - the distributed candidate fails validation (duplicate
+    server tags, a `final` naming no server, an empty
+    section, or a WireGuard key-sharing failure): the
+    candidate is validated exactly as a hand-written file
+    before any write.
+- **Idempotent.** A second run on a distributed file
+  reports `already-migrated`, writes nothing, and leaves
+  the file byte-identical. A config with no top-level
+  section is a no-op for distribution.
+
+Live traversal of a distributed block (a real lookup through
+each profile's outbound) is [UNVERIFIED-LIVE: sandbox blocks
+raw TCP]; fake-upstream tests prove the detour mechanism
+only (see [Per-profile DNS](#per-profile-dns)).
 
 ## Default precedence (implemented model)
 

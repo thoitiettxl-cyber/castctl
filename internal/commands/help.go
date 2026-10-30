@@ -463,6 +463,14 @@ profile shares one outbound tag, --write also authors the interim
 global "dns" section (DoH to 1.1.1.1 through that tag; see
 docs/config.md). Otherwise no "dns" section is written and the
 result reports why in "dns_refusal".
+
+When the existing single config HAS a top-level "dns" section,
+--write distributes it into every profile's own "dns" block
+(verbatim copy; empty detours filled with the profile's own
+detour tag, own/reachable detours kept, unreachable detours
+refuse with exit 2) and removes the top-level section in the
+same atomic write; dry-run reports "dns_distributed" and
+writes nothing. See docs/config.md.
 `
 
 const waitHelpText = `usage: castctl wait [--thread ID] [--after-seq N] [--timeout SECONDS] [--json] [--require-running] [--auto-approve|--no-auto-approve] [--auto-allow-once|--no-auto-allow-once]
