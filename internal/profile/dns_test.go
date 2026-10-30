@@ -220,10 +220,13 @@ func TestResolveProfileDNSPrecedence(t *testing.T) {
 }
 
 func TestResolveProfileDNSNoWarningForPerProfileOnly(t *testing.T) {
-	// The deprecation warning fires exactly when the legacy
+	// ResolveProfileDNS sets Warning only when the legacy
 	// (top-level) form is present: a per-profile-only config
 	// resolves silently, as does a config with no resolver
-	// at all (synthesised default).
+	// at all (synthesised default). The warning itself is
+	// printed only when a runtime is built (see
+	// internal/commands/runtime.go), never on read paths
+	// such as profile show/list.
 	cfg, err := ParseSingleConfig([]byte(singleFileJSON(
 		`{"muse01":{"outbound":"proxy-sg","dns":{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353,"detour":"proxy-sg"}],"final":"dns1"}}}`,
 		`[`+fakeSocksOutbound+`]`, "", "",
@@ -339,8 +342,9 @@ func TestWireGuardBranchWarnsWhenGlobalSectionShadowed(t *testing.T) {
 		t.Fatalf("WG branch: source=%q, want wireguard", res.Source)
 	}
 	if res.Warning == "" || !strings.Contains(res.Warning, "top-level dns") ||
-		!strings.Contains(res.Warning, "config migrate") || strings.Contains(res.Warning, "by hand") {
-		t.Fatalf("WG branch warning = %q, want it to name the shadowed top-level dns section and point at 'config migrate'", res.Warning)
+		!strings.Contains(res.Warning, "WireGuard DNS takes precedence") ||
+		!strings.Contains(res.Warning, "by hand") || strings.Contains(res.Warning, "config migrate") {
+		t.Fatalf("WG branch warning = %q, want it to name the shadowed top-level dns section, note WireGuard precedence, and direct hand-removal without prescribing config migrate", res.Warning)
 	}
 	// A non-WG profile in the same file still gets the compat
 	// warning as before (naming `config migrate --write`).

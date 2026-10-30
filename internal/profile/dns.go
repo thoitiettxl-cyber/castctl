@@ -181,7 +181,7 @@ func ResolveProfileDNS(prof *Profile, single *SingleConfig) (*ResolvedDNS, error
 		}
 		warning := ""
 		if single.DNS != nil {
-			warning = fmt.Sprintf("castctl: top-level dns section is ignored for profile %q: WireGuard DNS takes precedence; run \"config migrate --write\" to distribute the top-level section into profile entries (see docs/config.md)", prof.Name)
+			warning = fmt.Sprintf("castctl: top-level dns section is ignored for profile %q: WireGuard DNS takes precedence; remove the top-level dns section by hand (see docs/config.md)", prof.Name)
 		}
 		return &ResolvedDNS{Options: opts, Source: DNSSourceWireGuard, Warning: warning}, nil
 	}

@@ -447,12 +447,19 @@ tag `dns1` with no collision.
    below). When this branch fires while a top-level `dns`
    section is present, the section is shadowed, and a one-line
    stderr warning says so (same channel as the compat
-   warning).
+   warning). The warning directs the operator to remove the
+   top-level section by hand: distribution with
+   `config migrate --write` refuses while the profile
+   resolves WireGuard DNS (see below).
 3. Else the top-level `dns` section, compat fallback for one
    cycle, with a one-line stderr warning telling the operator
    to run `config migrate --write` to distribute it into
    profile entries (see [DNS distribution by `config
-   migrate`](#dns-distribution-by-config-migrate)). Compat sits
+   migrate`](#dns-distribution-by-config-migrate)). The
+   warning is printed only when a runtime is built for the
+   profile; read-only commands such as `profile show` and
+   `profile list` print nothing on stderr for the legacy
+   form. Compat sits
    before the default deliberately: a config migrated by the
    removal PR carries an authored global section that must keep
    working for one cycle, and the warning must be observable
@@ -733,9 +740,9 @@ of migrate.
   load), so copy-without-removal is not an end state. The
   pre-distribution file survives only in the operator's
   backup: no `.bak` is kept for `config.json`, as with all
-  migrate writes. After distribution the compat warning
-  stops firing for that file, because no top-level section
-  remains.
+  migrate writes. After distribution the compat warning no
+  longer fires when a runtime is built for that file,
+  because no top-level section remains.
 - **Refusals (all-or-nothing, exit 2, nothing written).**
   The result records the reason in
   `dns_distribution_refusal`, naming the profile and the

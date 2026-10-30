@@ -576,6 +576,54 @@ func TestConfigMigrateDistributesDNS(t *testing.T) {
 	}
 }
 
+// TestProfileShowListSilentWithLegacyDNS (F3, loop 2): the
+// compat warning fires only when a runtime is built. Read-only
+// commands over a legacy-form file print 0 bytes on stderr:
+// neither `profile list` nor `profile show` emits the warning.
+func TestProfileShowListSilentWithLegacyDNS(t *testing.T) {
+	_, configFile := testHome(t, `{"profiles":{"p1":{"outbound":"proxy-sg"}},"outbounds":[{"type":"socks","tag":"proxy-sg","server":"127.0.0.1","server_port":1080,"version":"5"}],"dns":{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353,"detour":"proxy-sg"}],"final":"dns1"}}`)
+	env, out, errb := profileEnv(t, configFile)
+
+	if code := runProfile(t, env, out, errb, configFile, "profile", "list"); code != 0 {
+		t.Fatalf("profile list: code=%d err=%q", code, errb.String())
+	}
+	if errb.Len() != 0 {
+		t.Errorf("profile list stderr = %q; want 0 bytes (no compat warning on read paths)", errb.String())
+	}
+	if code := runProfile(t, env, out, errb, configFile, "profile", "show", "p1"); code != 0 {
+		t.Fatalf("profile show p1: code=%d err=%q", code, errb.String())
+	}
+	if errb.Len() != 0 {
+		t.Errorf("profile show stderr = %q; want 0 bytes (no compat warning on read paths)", errb.String())
+	}
+}
+
+// TestConfigMigrateZeroProfilesRefuses (F1, loop 2, CLI
+// level): zero profiles + a top-level dns section refuses
+// through the CLI too (exit 2, plan JSON carries the
+// refusal, file byte-identical), in both dry-run and --write.
+func TestConfigMigrateZeroProfilesRefuses(t *testing.T) {
+	_, configFile := testHome(t, `{"profiles":{},"outbounds":[{"type":"socks","tag":"proxy-sg","server":"127.0.0.1","server_port":1080,"version":"5"}],"dns":{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353}],"final":"dns1"}}`)
+	env, out, errb := profileEnv(t, configFile)
+	before, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"config", "migrate"}, {"config", "migrate", "--write"}} {
+		if code := runProfile(t, env, out, errb, configFile, args...); code != 2 {
+			t.Fatalf("migrate %v: code=%d, want 2; out=%q err=%q", args, code, out.String(), errb.String())
+		}
+		if !strings.Contains(out.String(), `"dns_distribution_refusal"`) ||
+			!strings.Contains(out.String(), "no profile") {
+			t.Errorf("migrate %v plan: %q; want dns_distribution_refusal naming that no profile would receive a block", args, out.String())
+		}
+		after, _ := os.ReadFile(configFile)
+		if string(before) != string(after) {
+			t.Errorf("migrate %v rewrote the file on refusal", args)
+		}
+	}
+}
+
 func readJSONFileVia(t *testing.T, path string) map[string]any {
 	t.Helper()
 	data, err := os.ReadFile(path)
