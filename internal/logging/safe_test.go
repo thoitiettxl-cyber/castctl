@@ -157,9 +157,53 @@ func TestSafeStringJSONSecretFragment(t *testing.T) {
 func TestSafeStringKeyValueFragment(t *testing.T) {
 	in := "private_key=" + fixWGPriv + " public_key=" + fixWGPub + " api_token=" + fixHeaderVal
 	got := SafeString(in)
-	assertNoFixture(t, got)
-	if !strings.Contains(got, "private_key=[redacted]") || !strings.Contains(got, "public_key=[redacted]") {
-		t.Errorf("SafeString(%q) = %q, want WG key labels with [redacted] values", in, got)
+	// The full public key must be absent, but its FIRST 8
+	// CHARS survive as the peer prefix (Boss rule); the
+	// private key is redacted wholesale.
+	if strings.Contains(got, fixWGPub) {
+		t.Errorf("SafeString(%q) = %q, want the full public key absent", in, got)
+	}
+	if strings.Contains(got, fixWGPriv) {
+		t.Errorf("SafeString(%q) = %q, want the private key absent", in, got)
+	}
+	if !strings.Contains(got, "private_key=[redacted]") {
+		t.Errorf("SafeString(%q) = %q, want private_key=[redacted]", in, got)
+	}
+	if !strings.Contains(got, "public_key="+fixWGPub[:8]) {
+		t.Errorf("SafeString(%q) = %q, want public_key=<first 8 chars>", in, got)
+	}
+	if strings.Contains(got, fixHeaderVal) {
+		t.Errorf("SafeString(%q) = %q, want the api_token value absent", in, got)
+	}
+}
+
+// TestSafeStringWGPublicKeyForms: the 8-char prefix rule in
+// every shape a public key can reach a log line — JSON value,
+// bare key=value, and the sing-box device logger's abbreviated
+// peer(ABCD…WXYZ) form (which keeps only the first four chars
+// plus the ellipsis: the suffix half is key material too).
+func TestSafeStringWGPublicKeyForms(t *testing.T) {
+	prefix := fixWGPub[:8]
+	jsonIn := `{"public_key": "` + fixWGPub + `", "private_key": "` + fixWGPriv + `"}`
+	got := SafeString(jsonIn)
+	if strings.Contains(got, fixWGPub) || strings.Contains(got, fixWGPriv) {
+		t.Errorf("SafeString(%q) = %q, want both full keys absent", jsonIn, got)
+	}
+	if !strings.Contains(got, prefix) {
+		t.Errorf("SafeString(%q) = %q, want the 8-char prefix present", jsonIn, got)
+	}
+	if !strings.Contains(got, `"private_key": "[redacted]"`) {
+		t.Errorf("SafeString(%q) = %q, want private_key wholesale-redacted", jsonIn, got)
+	}
+	// peer(ABCD…WXYZ): first four + ellipsis survive, the
+	// last four must not.
+	peer := "peer(" + fixWGPub[:4] + "…" + fixWGPub[len(fixWGPub)-4:] + ") created"
+	got = SafeString(peer)
+	if strings.Contains(got, fixWGPub[len(fixWGPub)-4:]) && strings.Contains(got, "peer(") {
+		t.Errorf("SafeString(%q) = %q, want the peer suffix half stripped", peer, got)
+	}
+	if !strings.Contains(got, "peer("+fixWGPub[:4]+"…") {
+		t.Errorf("SafeString(%q) = %q, want peer(<first 4>…)", peer, got)
 	}
 }
 

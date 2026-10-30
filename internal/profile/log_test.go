@@ -10,10 +10,10 @@ package profile
 // buildSingleFileOrdered / cloneSingleConfig behaviour for a `log`
 // block. What the red run catches: the block rejected as an unknown
 // top-level key (config.go singleTopLevelKeys has no "log" entry),
-// defaults not applied (absent block must mean warn/stderr, NOT
-// sing-box's empty-level-means-trace), CLI precedence inverted,
-// and config migrate silently dropping the block (clone/render
-// field-by-field carriers).
+// defaults not applied (absent block must mean sing-box's
+// empty-level-means-trace and empty-output-means-stderr), CLI
+// precedence inverted, and config migrate silently dropping the
+// block (clone/render field-by-field carriers).
 
 import (
 	"encoding/json"
@@ -68,6 +68,12 @@ func TestParseLogBlockValid(t *testing.T) {
 	if cfg.Log.Output != "/tmp/castctl.log" {
 		t.Errorf("output = %q; want verbatim path", cfg.Log.Output)
 	}
+	// "stdout" is accepted, exactly as sing-box parses it
+	// (log/log.go:40-41); it names the real stdout, not a file.
+	cfg = logJSON(t, `{"output":"stdout"}`)
+	if cfg.Log.Output != "stdout" {
+		t.Errorf("output = %q; want stdout accepted", cfg.Log.Output)
+	}
 }
 
 func quoteStr(s string) string {
@@ -86,10 +92,10 @@ func TestParseLogBlockInvalid(t *testing.T) {
 		`{"profiles":{"default":{}},"log":{"disabled":"yes"}}`,  // wrong type
 		`{"profiles":{"default":{}},"log":{"timestamp":1}}`,     // wrong type
 		`{"profiles":{"default":{}},"log":{"output":42}}`,       // wrong type
-		`{"profiles":{"default":{}},"log":{"output":"stdout"}}`, // stdout rejected: file path or stderr only
-		// NOTE: "STDERR" is NOT rejected: sing-box matches "stderr"
+		// NOTE: "STDERR" is NOT special: sing-box matches "stderr"
 		// exactly and treats any other string as a file path, so
-		// "STDERR" names a file. Only "stdout" is special-rejected.
+		// "STDERR" names a file. "stdout" is accepted (see
+		// TestParseLogBlockValid), not rejected.
 		`{"profiles":{"default":{}},"log":{"rotation":true}}`,      // unknown key inside log
 		`{"profiles":{"default":{}},"log":{"disable_color":true}}`, // DisableColor is not a config key
 		`{"profiles":{"default":{}},"log":{"disabled":false,"bogus":1}}`,
@@ -127,20 +133,20 @@ func TestResolveLogSettings(t *testing.T) {
 		want    LogConfig
 		wantErr bool
 	}{
-		{"absent block", nil, "", false, LogConfig{Disabled: false, Level: "warn", Output: "stderr", Timestamp: false}, false},
-		{"absent block, nil single", nilSingle(), "", false, LogConfig{Disabled: false, Level: "warn", Output: "stderr", Timestamp: false}, false},
+		{"absent block", nil, "", false, LogConfig{Disabled: false, Level: "trace", Output: "", Timestamp: false}, false},
+		{"absent block, nil single", nilSingle(), "", false, LogConfig{Disabled: false, Level: "trace", Output: "", Timestamp: false}, false},
 		{"config level", configWithLog(LogConfig{Level: "debug", Output: "stderr"}), "", false, LogConfig{Level: "debug", Output: "stderr"}, false},
-		{"warning alias normalises", configWithLog(LogConfig{Level: "warning"}), "", false, LogConfig{Level: "warn", Output: "stderr"}, false},
-		{"CLI beats config upward", configWithLog(LogConfig{Level: "error"}), "trace", true, LogConfig{Level: "trace", Output: "stderr"}, false},
-		{"CLI beats config downward", configWithLog(LogConfig{Level: "debug"}), "warn", true, LogConfig{Level: "warn", Output: "stderr"}, false},
-		{"CLI only", nil, "info", true, LogConfig{Level: "info", Output: "stderr"}, false},
-		{"config disabled kept", configWithLog(LogConfig{Disabled: true, Level: "trace"}), "", false, LogConfig{Disabled: true, Level: "trace", Output: "stderr"}, false},
-		{"CLI does not clear disabled", configWithLog(LogConfig{Disabled: true, Level: "trace"}), "debug", true, LogConfig{Disabled: true, Level: "debug", Output: "stderr"}, false},
+		{"warning alias normalises", configWithLog(LogConfig{Level: "warning"}), "", false, LogConfig{Level: "warn", Output: ""}, false},
+		{"CLI beats config upward", configWithLog(LogConfig{Level: "error"}), "trace", true, LogConfig{Level: "trace", Output: ""}, false},
+		{"CLI beats config downward", configWithLog(LogConfig{Level: "debug"}), "warn", true, LogConfig{Level: "warn", Output: ""}, false},
+		{"CLI only", nil, "info", true, LogConfig{Level: "info", Output: ""}, false},
+		{"config disabled kept", configWithLog(LogConfig{Disabled: true, Level: "trace"}), "", false, LogConfig{Disabled: true, Level: "trace", Output: ""}, false},
+		{"CLI does not clear disabled", configWithLog(LogConfig{Disabled: true, Level: "trace"}), "debug", true, LogConfig{Disabled: true, Level: "debug", Output: ""}, false},
 		{"config file output kept", configWithLog(LogConfig{Level: "info", Output: "/tmp/x.log", Timestamp: true}), "", false, LogConfig{Level: "info", Output: "/tmp/x.log", Timestamp: true}, false},
+		{"stdout in config accepted at resolve", configWithLog(LogConfig{Level: "debug", Output: "stdout"}), "", false, LogConfig{Level: "debug", Output: "stdout"}, false},
 		{"invalid CLI level", configWithLog(LogConfig{Level: "debug"}), "verbose", true, LogConfig{}, true},
 		{"empty CLI level", nil, "", true, LogConfig{}, true},
 		{"invalid config level", configWithLog(LogConfig{Level: "bogus"}), "", false, LogConfig{}, true},
-		{"stdout in config rejected at resolve", configWithLog(LogConfig{Level: "debug", Output: "stdout"}), "", false, LogConfig{}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -262,5 +268,63 @@ func TestCloneSingleConfigCarriesLog(t *testing.T) {
 	}
 	if strings.Contains(string(raw2), `"log"`) {
 		t.Errorf("rendered log-less clone gained a log block: %s", raw2)
+	}
+}
+
+// TestParseLogBlockRealConfigShape: the exact shape from a real
+// sing-box config — level "warning", an absolute output path,
+// timestamp true — must parse and resolve. The output path here
+// is a SCRATCH path under t.TempDir only: never a live config
+// path, never the real path from that config.
+func TestParseLogBlockRealConfigShape(t *testing.T) {
+	t.Parallel()
+	outPath := filepath.Join(t.TempDir(), "sing-box.log")
+	raw := `{"profiles":{"default":{}},"log":{"level":"warning","output":` + quoteStr(outPath) + `,"timestamp":true}}`
+	cfg, err := ParseSingleConfig([]byte(raw), "/base")
+	if err != nil {
+		t.Fatalf("ParseSingleConfig(real shape) = %v", err)
+	}
+	if cfg.Log == nil || cfg.Log.Level != "warning" || cfg.Log.Output != outPath || !cfg.Log.Timestamp {
+		t.Fatalf("Log = %+v; want {warning %s true}", cfg.Log, outPath)
+	}
+	resolved, err := ResolveLogSettings(cfg, "", false)
+	if err != nil {
+		t.Fatalf("ResolveLogSettings(real shape) = %v", err)
+	}
+	if resolved.Level != "warn" || resolved.Output != outPath || !resolved.Timestamp {
+		t.Errorf("resolved = %+v; want {warn %s true}", resolved, outPath)
+	}
+}
+
+// TestLogBlockInvalidLevelEchoesNothing: an invalid level value
+// must never appear in the error, on either the config path or
+// the resolve path — the value could be a secret pasted by
+// mistake. The fixture value actually enters the parse/resolve
+// (it is the level under test), and the error text is scanned
+// for it verbatim.
+func TestLogBlockInvalidLevelEchoesNothing(t *testing.T) {
+	t.Parallel()
+	fixture := "LOGFIX-LEVEL-9d2e41"
+	data := `{"profiles":{"default":{}},"log":{"level":` + quoteStr(fixture) + `}}`
+	_, err := ParseSingleConfig([]byte(data), "/base")
+	if err == nil {
+		t.Fatal("ParseSingleConfig(invalid level) = nil, want error")
+	}
+	if ExitCode(err) != 2 {
+		t.Errorf("exit code = %d, want 2", ExitCode(err))
+	}
+	if strings.Contains(err.Error(), fixture) {
+		t.Errorf("config-path error echoes the invalid level: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "trace") {
+		t.Errorf("config-path error %q, want the fixed expected-level list", err.Error())
+	}
+
+	_, err = ResolveLogSettings(configWithLog(LogConfig{Level: fixture}), "", false)
+	if err == nil {
+		t.Fatal("ResolveLogSettings(invalid level) = nil, want error")
+	}
+	if strings.Contains(err.Error(), fixture) {
+		t.Errorf("resolve-path error echoes the invalid level: %q", err.Error())
 	}
 }

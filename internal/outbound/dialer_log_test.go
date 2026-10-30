@@ -157,10 +157,23 @@ func TestDialerNoIDWithoutWiredLogger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = conn.Close()
-	// No assertion on output is possible here (NOP discards);
-	// the test passes by completing the dial without logging.
-	// The wiring assertion lives in TestDialerConnectionIDs.
+	defer conn.Close()
+	// The dial must genuinely complete (write + read the echo
+	// reply): a dial that errored out would prove nothing about
+	// the NOP logger, and no-output cannot be asserted on a
+	// logger that discards by construction. The wiring
+	// assertion lives in TestDialerConnectionIDs.
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	reply := make([]byte, 16)
+	n, err := conn.Read(reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		t.Fatal("dial completed but the echo reply was empty")
+	}
 }
 
 // TestDialerALPNEvent clones the junction pattern of
@@ -288,5 +301,120 @@ func TestDialerNoALPNEventOnPlaintext(t *testing.T) {
 	_ = conn.Close()
 	if strings.Contains(buf.String(), "event=tls_alpn") {
 		t.Errorf("plaintext dial produced a tls_alpn event: %q", buf.String())
+	}
+}
+
+// TestDialerTLSHandshakeFailureSingleDialDone: a TLS handshake
+// failure must emit exactly ONE dial_done (the TCP leg, which
+// succeeded) plus exactly one tls_handshake_failed — never a
+// second dial_done claiming the dial both succeeded and failed.
+// Drives the real Dialer.DialTLS against a plaintext loopback
+// server, so the handshake genuinely fails on the wire.
+func TestDialerTLSHandshakeFailureSingleDialDone(t *testing.T) {
+	skipUnlessUTLS(t)
+	_, tcpPort := startFakeTCP(t)
+	var buf bytes.Buffer
+	m := wiredManager(t, &buf, "trace")
+	out := parseOutbound(t, m, `{"type":"direct","tag":"direct"}`)
+	if err := m.CreateOutbound(context.Background(), out.Tag, out.Type, out.Options); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Start(); err != nil {
+		t.Fatal(err)
+	}
+	d, err := m.Dialer("direct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = d.DialTLS(ctx, "tcp", "127.0.0.1", uint16(tcpPort), option.OutboundTLSOptions{Enabled: true, Insecure: true, ALPN: []string{"http/1.1"}})
+	if err == nil {
+		t.Fatal("DialTLS against a plaintext server = nil, want a handshake error")
+	}
+	got := stripANSIForTest(buf.String())
+	if n := strings.Count(got, "event=dial_done"); n != 1 {
+		t.Errorf("dial_done lines = %d, want exactly 1:\n%s", n, got)
+	}
+	if n := strings.Count(got, "event=tls_handshake_failed"); n != 1 {
+		t.Errorf("tls_handshake_failed lines = %d, want exactly 1:\n%s", n, got)
+	}
+	if strings.Count(got, "event=dial_start") != 1 {
+		t.Errorf("dial_start lines, want exactly 1:\n%s", got)
+	}
+}
+
+// TestDialerTLSSuccessSingleDialDone: the success leg of the
+// same rule — one dial_start, one dial_done, one tls_alpn, no
+// tls_handshake_failed — against a real loopback TLS server.
+func TestDialerTLSSuccessSingleDialDone(t *testing.T) {
+	skipUnlessUTLS(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	cert := alpnOfferTestCert(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		raw, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer raw.Close()
+		tc := tls.Server(raw, &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			NextProtos:   []string{"http/1.1"},
+		})
+		if err := tc.Handshake(); err != nil {
+			return
+		}
+		_, _ = tc.Write([]byte("ok"))
+		_, _ = ioDiscard(tc)
+	}()
+
+	var buf bytes.Buffer
+	m := wiredManager(t, &buf, "trace")
+	out := parseOutbound(t, m, `{"type":"direct","tag":"direct"}`)
+	if err := m.CreateOutbound(context.Background(), out.Tag, out.Type, out.Options); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Start(); err != nil {
+		t.Fatal(err)
+	}
+	d, err := m.Dialer("direct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, portStr, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var port int
+	if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := d.DialTLS(ctx, "tcp", host, uint16(port), option.OutboundTLSOptions{Enabled: true, Insecure: true, ALPN: []string{"http/1.1"}})
+	if err != nil {
+		t.Fatalf("DialTLS: %v", err)
+	}
+	_ = conn.Close()
+	<-done
+	got := stripANSIForTest(buf.String())
+	for _, want := range []struct {
+		marker string
+		n      int
+	}{
+		{"event=dial_start", 1},
+		{"event=dial_done", 1},
+		{"event=tls_alpn alpn=http/1.1", 1},
+		{"event=tls_handshake_failed", 0},
+	} {
+		if n := strings.Count(got, want.marker); n != want.n {
+			t.Errorf("%s lines = %d, want %d:\n%s", want.marker, n, want.n, got)
+		}
 	}
 }

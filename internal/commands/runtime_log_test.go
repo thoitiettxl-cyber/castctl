@@ -486,15 +486,25 @@ func quoteJSON(s string) string {
 // TestRuntimeHardRuleCapture drives fixture-loaded configs
 // through succeeding AND failing operations at trace level and
 // scans the WHOLE capture (stderr and file) for every fixture
-// value. The fixtures: a socks username/password and a proxy URL
-// userinfo/password in the outbound JSON, plus the DNS server
-// tag. Sing-box's own lines are in the capture too — the scan
-// catches an unenumerated sing-box line echoing config material
-// without needing its name.
+// value that ENTERS this process: the socks username/password,
+// which sing-box sends in the SOCKS5 handshake to the fake
+// server (the fake reads both fields, so they genuinely travel
+// through the outbound). The other fixture kinds do NOT enter
+// this runtime path and are deliberately NOT scanned here —
+// scanning them would be hollow. Each enters elsewhere, with
+// its own measured capture: session/datr/token/vm_id through
+// the slog bridge (internal/logging/factory_test.go,
+// TestSlogBridgeFilteringAndRedaction), the WS URL with
+// vm_id+auth_token through dialWebSocket (internal/gateway),
+// WG private/public keys through SafeString and the sink test
+// (internal/logging/safe_test.go, factory_test.go
+// TestFactorySinkRedactsSingBoxLines). Sing-box's own lines
+// are in the capture too — the scan catches an unenumerated
+// sing-box line echoing config material without needing its
+// name.
 func TestRuntimeHardRuleCapture(t *testing.T) {
 	fixtures := []string{
-		"LOGFIX-USER-55aa01", "LOGFIX-PW-31c7aa", "LOGFIX-SESS-9d2e41",
-		"LOGFIX-HT-2c6e88", "LOGFIX-VMID-22d9f0", "LOGFIX-WGPRIV-6e19d0",
+		"LOGFIX-USER-55aa01", "LOGFIX-PW-31c7aa",
 	}
 	scan := func(t *testing.T, capture, path string) {
 		t.Helper()
@@ -548,4 +558,56 @@ func TestRuntimeHardRuleCapture(t *testing.T) {
 		t.Fatal(err)
 	}
 	scan(t, string(data), "file")
+}
+
+// TestRuntimeLogRefusedPaths drives defaultBuildRuntime
+// against a scratch home whose config names the home's own
+// config/cookies file as the log output, and asserts the
+// refusal (exit 2, before opening) and the untouched protected
+// file. Scratch config locations only, never live paths.
+func TestRuntimeLogRefusedPaths(t *testing.T) {
+	for _, pick := range []string{"config", "cookies"} {
+		t.Run(pick, func(t *testing.T) {
+			home := t.TempDir()
+			configFile := filepath.Join(home, "config.json")
+			cookieFile := filepath.Join(home, "cookies.txt")
+			protected := configFile
+			if pick == "cookies" {
+				protected = cookieFile
+			}
+			origConfig := `{"profiles":{"default":{}},"log":{"level":"trace","output":` + quoteJSON(protected) + `}}`
+			if err := os.WriteFile(configFile, []byte(origConfig), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(cookieFile, []byte(fakeCookie), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			env := &Env{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+			env.Getenv = mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile})
+			prof, err := profile.LoadProfile(home, "default", env.Getenv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			loc := &profile.ConfigLocation{ConfigFile: configFile, ConfigDir: home, Explicit: true}
+			rt, err := defaultBuildRuntime(context.Background(), loc, prof, env)
+			if err == nil {
+				_ = rt.Close()
+				t.Fatalf("defaultBuildRuntime(output=%s) = nil, want refusal", protected)
+			}
+			if !strings.Contains(err.Error(), "refusing") {
+				t.Errorf("error %q, want the refusal message", err.Error())
+			}
+			data, err := os.ReadFile(protected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := origConfig
+			if pick == "cookies" {
+				want = fakeCookie
+			}
+			if string(data) != want {
+				t.Errorf("protected file = %q, want untouched %q", data, want)
+			}
+		})
+	}
 }

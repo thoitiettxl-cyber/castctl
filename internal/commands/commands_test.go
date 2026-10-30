@@ -353,10 +353,7 @@ func TestTypedAuthErrors(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("auth-check 401: code=%d, want 2 (out=%q err=%q)", code, out.String(), errb.String())
 	}
-	var typed map[string]string
-	if err := json.Unmarshal([]byte(strings.TrimSpace(errb.String())), &typed); err != nil {
-		t.Fatalf("stderr is not typed JSON: %q: %v", errb.String(), err)
-	}
+	typed := lastStderrJSON(t, errb)
 	if typed["type"] != "auth_check_failed" {
 		t.Errorf("type=%q, want auth_check_failed", typed["type"])
 	}
@@ -377,7 +374,8 @@ func TestTypedAuthErrors(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("missing cookies: code=%d, want 2", code)
 	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(errb.String())), &typed); err != nil || typed["type"] != "cookies_missing" {
+	typed = lastStderrJSON(t, errb)
+	if typed["type"] != "cookies_missing" {
 		t.Errorf("missing cookies: type=%v err=%q", typed, errb.String())
 	}
 
@@ -395,9 +393,32 @@ func TestTypedAuthErrors(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("no vm_id: code=%d, want 2 (err=%q)", code, errb.String())
 	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(errb.String())), &typed); err != nil || typed["type"] != "session_unavailable" {
+	typed = lastStderrJSON(t, errb)
+	if typed["type"] != "session_unavailable" {
 		t.Errorf("no vm_id: type=%v err=%q", typed, errb.String())
 	}
+}
+
+// lastStderrJSON parses the LAST line of a stderr buffer as the
+// typed JSON error. Stderr is a log stream at the sing-box
+// default level (trace): debug dns_source/outbound_chain events
+// precede the error on stderr. The typed JSON is the last line,
+// intact — that is the contract consumers can rely on. (With
+// the old warn default the log lines were suppressed and
+// whole-stderr parsing happened to work; Correction #2's
+// sing-box-identical defaults changed that premise. See the
+// loop-2 report.)
+func lastStderrJSON(t *testing.T, errb *bytes.Buffer) map[string]string {
+	t.Helper()
+	lines := strings.Split(strings.TrimRight(errb.String(), "\n"), "\n")
+	if len(lines) == 0 || lines[len(lines)-1] == "" {
+		t.Fatalf("stderr empty, want the typed JSON error")
+	}
+	var typed map[string]string
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &typed); err != nil {
+		t.Fatalf("last stderr line is not typed JSON: %q: %v", errb.String(), err)
+	}
+	return typed
 }
 
 func TestPromptSeam(t *testing.T) {

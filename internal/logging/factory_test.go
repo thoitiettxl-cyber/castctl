@@ -24,6 +24,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -77,7 +78,7 @@ func TestFactoryLevelFiltering(t *testing.T) {
 		{"trace", "trace", []string{"level-probe-trace", "level-probe-debug", "level-probe-info", "level-probe-warn", "level-probe-error"}, nil},
 		{"error", "error", []string{"level-probe-error"}, []string{"level-probe-warn", "level-probe-info", "level-probe-debug"}},
 		{"info", "info", []string{"level-probe-info", "level-probe-warn", "level-probe-error"}, []string{"level-probe-debug", "level-probe-trace"}},
-		{"default empty means warn", "", []string{"level-probe-warn", "level-probe-error"}, []string{"level-probe-debug", "level-probe-trace"}},
+		{"default empty means trace", "", []string{"level-probe-trace", "level-probe-debug", "level-probe-info", "level-probe-warn", "level-probe-error"}, nil},
 		{"warning alias", "warning", []string{"level-probe-warn", "level-probe-error"}, []string{"level-probe-debug", "level-probe-trace"}},
 	}
 	for _, tc := range cases {
@@ -279,10 +280,16 @@ func TestFactoryFileMode(t *testing.T) {
 		t.Errorf("log file %q, want it to contain the probe line", data)
 	}
 
-	// Pre-existing looser file: narrowed to 0600, content
-	// appended (never truncated), mode never widened.
+	// Pre-existing file: appended (never truncated) WITHOUT any
+	// chmod — castctl never changes the mode of a file it did
+	// not create. The mode recorded before opening must be the
+	// mode observed after, whatever it was.
 	path2 := filepath.Join(t.TempDir(), "existing.log")
 	if err := os.WriteFile(path2, []byte("prior line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path2)
+	if err != nil {
 		t.Fatal(err)
 	}
 	h, err = NewFactory(context.Background(), Settings{Level: "info", Output: path2}, &buf)
@@ -295,8 +302,8 @@ func TestFactoryFileMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
-		t.Errorf("pre-existing log file mode = %o, want narrowed to 0600", info.Mode().Perm())
+	if info.Mode().Perm() != before.Mode().Perm() {
+		t.Errorf("pre-existing log file mode = %o, want unchanged %o (never chmod a foreign file)", info.Mode().Perm(), before.Mode().Perm())
 	}
 	data, err = os.ReadFile(path2)
 	if err != nil {
@@ -469,5 +476,183 @@ func TestFactoryConcurrentWrites(t *testing.T) {
 		if strings.Count(line, "event=conc") != 1 {
 			t.Errorf("interleaved line: %q", line)
 		}
+	}
+}
+
+// TestFactoryRefusedPaths: the minimal A7 guard — refuse, BEFORE
+// opening, when the resolved output equals a refused path (the
+// config file or a cookies file), including through a symlinked
+// alias. The protected files must be byte- and mode-identical
+// afterwards. Symlinks to ordinary targets and non-regular files
+// are NOT refused (Boss correction #2): they open and receive
+// lines. All paths are scratch fixtures under t.TempDir.
+func TestFactoryRefusedPaths(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	cookiePath := filepath.Join(dir, "cookies.txt")
+	origConfig := "FIXTURE-CONFIG\n"
+	origCookie := "FIXTURE-COOKIE\n"
+	if err := os.WriteFile(configPath, []byte(origConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cookiePath, []byte(origCookie), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refused := []string{configPath, cookiePath}
+
+	// Direct equality: refused before open.
+	for _, out := range []string{configPath, cookiePath} {
+		if _, err := NewFactory(context.Background(), Settings{Level: "trace", Output: out, Refused: refused}, &buf); err == nil {
+			t.Errorf("NewFactory(Output=%q, refused) = nil, want error", out)
+		}
+	}
+	for _, p := range []string{configPath, cookiePath} {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := origConfig
+		if p == cookiePath {
+			want = origCookie
+		}
+		if string(data) != want {
+			t.Errorf("protected file %s = %q, want untouched %q", p, data, want)
+		}
+		if info, err := os.Stat(p); err != nil || info.Mode().Perm() != 0o600 {
+			t.Errorf("protected file %s mode = %v, want 0600 untouched", p, info)
+		}
+	}
+
+	// Symlinked alias of the config file: still refused (the
+	// guard compares resolved/canonical paths).
+	alias := filepath.Join(dir, "alias.json")
+	if err := os.Symlink(configPath, alias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewFactory(context.Background(), Settings{Level: "trace", Output: alias, Refused: refused}, &buf); err == nil {
+		t.Error("NewFactory(Output=symlink-to-config) = nil, want error")
+	}
+	data, _ := os.ReadFile(configPath)
+	if string(data) != origConfig {
+		t.Errorf("config via alias = %q, want untouched", data)
+	}
+
+	// Symlink to an ORDINARY target: NOT refused; the line
+	// lands in the target through the link.
+	target := filepath.Join(dir, "ordinary.log")
+	if err := os.WriteFile(target, []byte("prior\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.log")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	h, err := NewFactory(context.Background(), Settings{Level: "info", Output: link, Refused: refused}, &buf)
+	if err != nil {
+		t.Fatalf("NewFactory(Output=symlink-to-ordinary) = %v, want success", err)
+	}
+	h.Logger("castctl").Info("symlink-target-probe")
+	h.Close()
+	data, _ = os.ReadFile(target)
+	if !strings.Contains(string(data), "symlink-target-probe") {
+		t.Errorf("symlink target %q, want the probe line", data)
+	}
+
+	// Non-regular file: NOT refused on that basis. /dev/null is
+	// the portable character device; skip where it does not
+	// exist (Windows).
+	if _, err := os.Stat("/dev/null"); err == nil {
+		h, err := NewFactory(context.Background(), Settings{Level: "info", Output: "/dev/null", Refused: refused}, &buf)
+		if err != nil {
+			t.Errorf("NewFactory(Output=/dev/null) = %v, want success (non-regular is not refused)", err)
+		} else {
+			h.Logger("castctl").Info("devnull-probe")
+			h.Close()
+		}
+	}
+}
+
+// TestFactorySinkRedactsSingBoxLines: a line emitted through the
+// sing-box logger WITHOUT going through logging.Emit — exactly
+// how sing-box's own WG/DNS/TLS emissions reach the factory —
+// must still be redacted, because the writer itself (safeWriter)
+// applies SafeString. The fixture URL actually enters the call;
+// the capture is scanned for every fixture value, on both the
+// stderr buffer and a file destination.
+func TestFactorySinkRedactsSingBoxLines(t *testing.T) {
+	t.Parallel()
+	line := "wireguard: setup failed: wss://gateway.example.invalid/v1/noise?vm_id=" + fixVMID + "&auth_token=" + fixHatchToken + " private_key=" + fixWGPriv + " public_key=" + fixWGPub
+	scan := func(t *testing.T, got, where string) {
+		t.Helper()
+		if got == "" {
+			t.Fatalf("%s capture empty: positive control failed", where)
+		}
+		for _, v := range []string{fixVMID, fixHatchToken, fixWGPriv, fixWGPub} {
+			if strings.Contains(got, v) {
+				t.Errorf("%s capture contains fixture value %q: %q", where, v, got)
+			}
+		}
+		if !strings.Contains(got, "[redacted]") {
+			t.Errorf("%s capture %q, want a [redacted] marker (positive control)", where, got)
+		}
+		// WG public key: at most the 8-char prefix may survive.
+		if !strings.Contains(got, "public_key="+fixWGPub[:8]) {
+			t.Errorf("%s capture %q, want the 8-char public-key prefix", where, got)
+		}
+	}
+
+	var buf bytes.Buffer
+	h, err := NewFactory(context.Background(), Settings{Level: "trace"}, &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Logger("wireguard").DebugContext(context.Background(), line)
+	h.Close()
+	scan(t, stripANSI(buf.String()), "stderr")
+
+	path := filepath.Join(t.TempDir(), "sink.log")
+	h, err = NewFactory(context.Background(), Settings{Level: "trace", Output: path}, &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Logger("wireguard").DebugContext(context.Background(), line)
+	h.Close()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan(t, string(data), "file")
+}
+
+// TestFactoryOutputStdout: "stdout" names the real stdout
+// (sing-box log/log.go:40-41). The factory must write the line
+// to the process stdout — captured here by swapping os.Stdout
+// for a pipe for the duration of the emission.
+func TestFactoryOutputStdout(t *testing.T) {
+	t.Parallel()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+	var buf bytes.Buffer
+	h, err := NewFactory(context.Background(), Settings{Level: "info", Output: "stdout"}, &buf)
+	if err != nil {
+		t.Fatalf("NewFactory(Output=stdout) = %v", err)
+	}
+	h.Logger("castctl").Info("stdout-probe")
+	h.Close()
+	_ = w.Close()
+	os.Stdout = old
+	data, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "stdout-probe") {
+		t.Errorf("stdout capture %q, want the probe line", data)
 	}
 }

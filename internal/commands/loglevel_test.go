@@ -160,3 +160,30 @@ func TestGlobalHelpMentionsLogLevel(t *testing.T) {
 		t.Error("globalHelpText does not document the default level")
 	}
 }
+
+// TestScanGlobalLogLevelEchoesNothing: the CLI invalid-level
+// path must never echo the supplied value (it could be a secret
+// pasted by mistake) — the config path has the same rule, pinned
+// in internal/profile. The fixture value actually enters
+// scanGlobal as the flag value; stderr is scanned for it.
+func TestScanGlobalLogLevelEchoesNothing(t *testing.T) {
+	t.Parallel()
+	fixture := "LOGFIX-LEVEL-9d2e41"
+	for _, args := range [][]string{
+		{"--log-level", fixture, "profile", "list"},
+		{"--log-level=" + fixture, "profile", "list"},
+	} {
+		env := scanEnv()
+		_, _, _, code, done := scanGlobal(args, env)
+		if !done || code != 2 {
+			t.Fatalf("scanGlobal(%v) done=%v code=%d, want done code 2", args, done, code)
+		}
+		stderr := env.Stderr.(*bytes.Buffer).String()
+		if strings.Contains(stderr, fixture) {
+			t.Errorf("stderr echoes the invalid level: %q", stderr)
+		}
+		if !strings.Contains(stderr, "argument --log-level") {
+			t.Errorf("stderr %q, want the fixed invalid-level message", stderr)
+		}
+	}
+}
