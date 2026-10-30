@@ -966,6 +966,9 @@ func TestNewRunnerClampsNegativeDurations(t *testing.T) {
 		LagPoll:          -1,
 		RecheckAfter:     -1,
 		CheckEvery:       -1,
+		// SettlePollInterval is never disable-able: a negative
+		// value clamps to the default like the other budgets.
+		SettlePollInterval: -1,
 	})
 	if err != nil {
 		t.Fatalf("NewRunner: %v", err)
@@ -994,6 +997,9 @@ func TestNewRunnerClampsNegativeDurations(t *testing.T) {
 	// RecheckAfter/CheckEvery keep negative = disable.
 	if r.cfg.RecheckAfter != -1 || r.cfg.CheckEvery != -1 {
 		t.Errorf("RecheckAfter/CheckEvery = %v/%v, want -1/-1 (disable)", r.cfg.RecheckAfter, r.cfg.CheckEvery)
+	}
+	if r.cfg.SettlePollInterval != DefaultSettlePollInterval {
+		t.Errorf("SettlePollInterval = %v, want %v (negative clamps, never disables)", r.cfg.SettlePollInterval, DefaultSettlePollInterval)
 	}
 	// HistoryLimits defaults are a fresh copy per Runner.
 	if len(r.cfg.HistoryLimits) != len(DefaultHistoryLimits()) {

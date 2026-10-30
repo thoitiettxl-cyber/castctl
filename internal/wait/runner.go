@@ -408,8 +408,10 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 		// still re-prove a held terminal. trySettle is a no-op
 		// when no terminal is held, and the per-iteration
 		// throttle keeps a record-fed attempt from being
-		// repeated at this point in the same iteration.
-		if r.waiter.Result() == nil && !r.settleTried {
+		// repeated at this point in the same iteration. No
+		// proof starts past the deadline: the endgame's final
+		// read follows at once.
+		if r.waiter.Result() == nil && !r.settleTried && r.clock.Now().Before(r.deadline) {
 			if err := r.trySettle(ctx); err != nil {
 				return nil, err
 			}

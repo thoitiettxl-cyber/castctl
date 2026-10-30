@@ -11,9 +11,14 @@ package wait
 // pre-redesign code and pass only with the new semantics.
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/thoitiettxl-cyber/castctl/internal/approvals"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // T1 (pin): derived boundary is the last message.user seq.
@@ -322,4 +327,413 @@ func TestWaitRedesignT4NeedsInputWidget(t *testing.T) {
 			t.Errorf("NeedsInputReason = %q, want widget", res.NeedsInputReason)
 		}
 	})
+}
+
+// T9 (D2 release signals): a held "subagents" terminal is released
+// by (a) a count-0 root event re-arming it, then a reply proof;
+// (b) a reply proof alone, without any re-arm (the D2 change);
+// (c) never by a subagent's own count-0 event; (d) a fresh root
+// running clears the hold entirely.
+func TestWaitRedesignT9ReleaseSignals(t *testing.T) {
+	// (a) Re-arm, then settle: suspect-failed held for subagents.
+	w := New("")
+	w.Feed(taskEv("running", "R", "R", 0, nil))
+	w.Feed(taskEv("failed", "R", "R", 0, 2))
+	if w.IgnoredReason() != "subagents" {
+		t.Fatalf("(a) reason=%q", w.IgnoredReason())
+	}
+	w.Feed(taskEv("queued", "R", "R", 0, 0))
+	if w.IgnoredReason() != "" {
+		t.Fatalf("(a) count-0 must re-arm, reason=%q", w.IgnoredReason())
+	}
+	if out := w.Settle([]Reply{{Seq: 1, Text: "x"}}); out == nil || out.Kind != KindFailed {
+		t.Fatalf("(a) settle after re-arm = %v", out)
+	}
+	// (b) Reply proof alone, reason still "subagents".
+	w2 := New("")
+	w2.Feed(taskEv("running", "R", "R", 0, nil))
+	w2.Feed(taskEv("completed", "R", "R", 0, 2))
+	if w2.IgnoredReason() != "subagents" {
+		t.Fatalf("(b) reason=%q", w2.IgnoredReason())
+	}
+	if out := w2.Settle([]Reply{{Seq: 1, Text: "x"}}); out == nil || out.Kind != KindDone {
+		t.Fatalf("(b) settle while held = %v, want Done", out)
+	}
+	// (c) A subagent's own count-0 event must not re-arm.
+	w3 := New("")
+	w3.Feed(taskEv("running", "R", "R", 0, nil))
+	w3.Feed(taskEv("completed", "R", "R", 0, 2))
+	w3.Feed(taskEv("queued", "R", "S", 0, 0))
+	if w3.IgnoredReason() != "subagents" {
+		t.Fatalf("(c) subagent count-0 must not re-arm, reason=%q", w3.IgnoredReason())
+	}
+	if out := w3.Settle(nil); out != nil {
+		t.Fatalf("(c) settle with no replies = %v", out)
+	}
+	// (d) A fresh root running clears the hold entirely.
+	w4 := New("")
+	w4.Feed(taskEv("running", "R", "R", 0, nil))
+	w4.Feed(taskEv("completed", "R", "R", 0, 2))
+	w4.Feed(taskEv("running", "R", "R", 0, nil))
+	if _, ok := w4.IgnoredTerminal(); ok {
+		t.Fatal("(d) fresh running must clear the held terminal")
+	}
+	if w4.IgnoredReason() != "" {
+		t.Fatalf("(d) reason=%q", w4.IgnoredReason())
+	}
+}
+
+// T10 (D9 keep last-only): checkState feeds only the LAST
+// replayed status. A replay of [running, completed] with no
+// replies in history must NOT decide Done — the running that
+// would prove it is discarded — so the wait times out.
+func TestWaitRedesignT10CheckStateFeedsLastOnly(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sub := &fakeSubscriber{checkScript: [][]byte{
+			recordJSON(taskEv("running", "R", "R", 120, nil)),
+			recordJSON(taskEv("completed", "R", "R", 180, nil)),
+		}}
+		hist := &queueHistory{resps: []historyResp{
+			historyOK([]any{userEv(100)}),
+		}}
+		res := runRunner(t, Config{
+			Timeout:      30 * time.Second,
+			RecheckAfter: -1,
+			CheckEvery:   5 * time.Second,
+			Dial:         sub.dial,
+			History:      hist,
+		})
+		if res.Kind != KindTimeout || res.ExitCode != 124 {
+			t.Errorf("res = %+v, want KindTimeout/124 (last-only discards the running)", res)
+		}
+		if res.Status != "completed" {
+			t.Errorf("Status = %q, want the last replayed status", res.Status)
+		}
+	})
+}
+
+// T10 stale-last-event variant: a batch ending on a
+// subagent-filtered event feeds the last COLLECTED status
+// (the subagent event is invisible to TaskStatusInfo), with
+// the same timeout outcome.
+func TestWaitRedesignT10CheckStateStaleLastEvent(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sub := &fakeSubscriber{checkScript: [][]byte{
+			recordJSON(taskEv("running", "R", "R", 120, nil)),
+			recordJSON(taskEv("completed", "R", "R", 180, nil)),
+			recordJSON(taskEv("queued", "R", "S", 0, 0)),
+		}}
+		hist := &queueHistory{resps: []historyResp{
+			historyOK([]any{userEv(100)}),
+		}}
+		res := runRunner(t, Config{
+			Timeout:      30 * time.Second,
+			RecheckAfter: -1,
+			CheckEvery:   5 * time.Second,
+			Dial:         sub.dial,
+			History:      hist,
+		})
+		if res.Kind != KindTimeout || res.ExitCode != 124 {
+			t.Errorf("res = %+v, want KindTimeout/124", res)
+		}
+		if res.Status != "completed" {
+			t.Errorf("Status = %q, want completed (subagent event teaches nothing)", res.Status)
+		}
+	})
+}
+
+// T12 (D11): a never-succeeding history reader still terminates
+// at the deadline, with a finite, exactly-counted number of
+// reads: 6 derivation attempts (3 windows x 1 retry) + 2 settle
+// proofs (the live running clears the unknown-boundary flag, so
+// the proofs run) + 2 final reads. No proof starts past the
+// deadline.
+func TestWaitRedesignT12NeverSucceedingHistoryTerminates(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sub := &fakeSubscriber{
+			block: true,
+			loopScript: [][]byte{
+				recordJSON(taskEv("running", "R", "R", 120, nil)),
+				recordJSON(taskEv("completed", "R", "R", 180, 2)),
+			},
+		}
+		hist := &queueHistory{resps: []historyResp{{err: errTransport}}}
+		res := runRunner(t, Config{
+			Timeout:      10 * time.Second,
+			RecheckAfter: -1,
+			CheckEvery:   -1,
+			Dial:         sub.dial,
+			History:      hist,
+		})
+		if res.Kind != KindTimeout || res.ExitCode != 124 || !res.FinalReadFailed {
+			t.Errorf("res = %+v", res)
+		}
+		if res.Note != "could not read the final replies; run `castctl wait` again" {
+			t.Errorf("note = %q", res.Note)
+		}
+		if hist.calls != 10 {
+			t.Errorf("history calls = %d, want 10 (6 derivation + 2 settle + 2 final)", hist.calls)
+		}
+	})
+}
+
+// T13 (meta-test, deaf stream): a stream that never delivers a
+// stopping record, with empty history, must still return at the
+// deadline. A synctest deadlock here is a FAIL.
+func TestWaitRedesignT13DeafStreamTerminates(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sub := &fakeSubscriber{block: true}
+		hist := &queueHistory{resps: []historyResp{
+			historyOK([]any{userEv(100)}),
+		}}
+		res := runRunner(t, Config{
+			Timeout:      120 * time.Second,
+			RecheckAfter: 20 * time.Second,
+			CheckEvery:   60 * time.Second,
+			Dial:         sub.dial,
+			History:      hist,
+		})
+		if res.Kind != KindTimeout || res.ExitCode != 124 {
+			t.Errorf("res = %+v", res)
+		}
+		if sub.calls < 2 {
+			t.Errorf("subscribe calls = %d, want resubscribes until the deadline", sub.calls)
+		}
+		if hist.calls != 2 {
+			t.Errorf("history calls = %d, want 2 (derivation + final read)", hist.calls)
+		}
+	})
+}
+
+// blockHistory honours its context: it blocks until the context
+// is done, then returns the context error. A reader that ignored
+// the deadline would hang this test (synctest deadlock = FAIL).
+type blockHistory struct{ calls int }
+
+func (h *blockHistory) ReadHistory(ctx context.Context, limit int) ([]any, bool, error) {
+	h.calls++
+	<-ctx.Done()
+	return nil, false, ctx.Err()
+}
+
+// T13 (meta-test, blocking reader + derivation deadline): a
+// history reader that blocks until its context dies must not
+// stall derivation past the wait deadline. Derivation runs
+// under the deadline (1 call), the endgame spends two floored
+// final reads (2 calls), and Run returns KindTimeout.
+func TestWaitRedesignT13BlockingHistoryTerminatesAtDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sub := &fakeSubscriber{}
+		hist := &blockHistory{}
+		r, err := NewRunner(Config{
+			Timeout:        10 * time.Second,
+			FinalReadFloor: 1 * time.Second,
+			Dial:           sub.dial,
+			History:        hist,
+		})
+		if err != nil {
+			t.Fatalf("NewRunner: %v", err)
+		}
+		res, err := r.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v, want a KindTimeout result, not an error", err)
+		}
+		if res.Kind != KindTimeout || res.ExitCode != 124 {
+			t.Errorf("res = %+v", res)
+		}
+		if hist.calls != 3 {
+			t.Errorf("history calls = %d, want 3 (1 derivation + 2 final)", hist.calls)
+		}
+	})
+}
+
+// T14 (auth, derivation): an AuthError during boundary
+// derivation propagates unwrapped, with exactly one attempt
+// (no retry on a fatal error).
+func TestWaitRedesignT14AuthInDerivationPropagates(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		hist := &scriptHistory{def: historyResp{err: conn.NewAuthError("expired")}}
+		sub := &fakeSubscriber{}
+		r, err := NewRunner(Config{Timeout: 60 * time.Second, Dial: sub.dial, History: hist})
+		if err != nil {
+			t.Fatalf("NewRunner: %v", err)
+		}
+		_, err = r.Run(context.Background())
+		var authErr *conn.AuthError
+		if !errors.As(err, &authErr) {
+			t.Errorf("err = %v, want AuthError", err)
+		}
+		if len(hist.calls) != 1 {
+			t.Errorf("history calls = %v, want exactly 1 (no retry)", hist.calls)
+		}
+	})
+}
+
+// T14 (auth, settle): an AuthError during a settle proof
+// propagates unwrapped, with exactly one derivation read and
+// one settle read.
+func TestWaitRedesignT14AuthInSettlePropagates(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sub := &fakeSubscriber{loopScript: [][]byte{
+			recordJSON(taskEv("running", "R", "R", 120, nil)),
+			recordJSON(taskEv("idle", "R", "R", 180, nil)),
+		}}
+		hist := &scriptHistory{
+			byLimit: map[int][]historyResp{
+				200: {
+					historyOK([]any{userEv(100)}),
+					{err: conn.NewAuthError("expired")},
+				},
+			},
+			def: historyResp{err: conn.NewAuthError("expired")},
+		}
+		r, err := NewRunner(Config{Timeout: 60 * time.Second, Dial: sub.dial, History: hist})
+		if err != nil {
+			t.Fatalf("NewRunner: %v", err)
+		}
+		_, err = r.Run(context.Background())
+		var authErr *conn.AuthError
+		if !errors.As(err, &authErr) {
+			t.Errorf("err = %v, want AuthError", err)
+		}
+		if len(hist.calls) != 2 {
+			t.Errorf("history calls = %v, want 2 (derivation + settle)", hist.calls)
+		}
+	})
+}
+
+// T14 (auth, subscribe): an AuthError from SubscribeRaw
+// propagates unwrapped after exactly one subscribe attempt
+// (no resubscribe storm).
+func TestWaitRedesignT14AuthInSubscribePropagates(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sub := &fakeSubscriber{loopErr: conn.NewAuthError("expired")}
+		hist := &queueHistory{resps: []historyResp{historyOK([]any{userEv(100)})}}
+		r, err := NewRunner(Config{Timeout: 60 * time.Second, Dial: sub.dial, History: hist})
+		if err != nil {
+			t.Fatalf("NewRunner: %v", err)
+		}
+		_, err = r.Run(context.Background())
+		var authErr *conn.AuthError
+		if !errors.As(err, &authErr) {
+			t.Errorf("err = %v, want AuthError", err)
+		}
+		if sub.calls != 1 {
+			t.Errorf("subscribe calls = %d, want 1 (no retry loop)", sub.calls)
+		}
+	})
+}
+
+// T14 (auth, approver): a decide-time AuthError is raised
+// exactly once — the approver is never re-offered the id after
+// a fatal error. (The propagation itself is pinned by
+// TestRunnerApproverAuthErrorPropagates; this pins the
+// no-retry count.)
+func TestWaitRedesignT14AuthApproverDecidedOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		decides := 0
+		aa := approvals.NewAutoApprover(func(ctx context.Context) (approvals.Decider, func(), error) {
+			return func(ctx context.Context, a approvals.DescribedApproval, decision string) error {
+				decides++
+				return conn.NewAuthError("expired")
+			}, func() {}, nil
+		}, false)
+		sub := &fakeSubscriber{loopScript: [][]byte{
+			recordJSON(approvalEv([]any{appr("A", approvals.Forever)}, nil)),
+		}}
+		hist := &queueHistory{resps: []historyResp{historyOK([]any{userEv(100)})}}
+		r, err := NewRunner(Config{
+			Timeout:  60 * time.Second,
+			Dial:     sub.dial,
+			History:  hist,
+			Approver: aa.AsApprover(),
+		})
+		if err != nil {
+			t.Fatalf("NewRunner: %v", err)
+		}
+		_, err = r.Run(context.Background())
+		var authErr *conn.AuthError
+		if !errors.As(err, &authErr) {
+			t.Errorf("err = %v, want AuthError", err)
+		}
+		if decides != 1 {
+			t.Errorf("decides = %d, want 1 (no retry loop)", decides)
+		}
+	})
+}
+
+// T16 (pin): replies come from HISTORY ONLY. A well-formed
+// completed message.assistant event delivered live, and
+// delta.* events alone, never appear in Replies and never
+// decide the turn.
+func TestWaitRedesignT16RepliesFromHistoryOnly(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sub := &fakeSubscriber{loopScript: [][]byte{
+			recordJSON(asst(150, "completed", "live text must never surface", nil)),
+			recordJSON(Event{"event": "delta.text_append", "payload": map[string]any{"text": "partial"}}),
+			recordJSON(taskEv("running", "R", "R", 120, nil)),
+			recordJSON(taskEv("completed", "R", "R", 180, nil)),
+		}}
+		hist := &queueHistory{resps: []historyResp{
+			historyOK([]any{userEv(100)}),
+			historyOK([]any{userEv(100)}),
+		}}
+		res := runRunner(t, Config{
+			Timeout: 60 * time.Second,
+			Dial:    sub.dial,
+			History: hist,
+		})
+		if res.Kind != KindDone || res.ExitCode != 0 {
+			t.Errorf("res = %+v", res)
+		}
+		if len(res.Replies) != 0 || res.FinalText != "" {
+			t.Errorf("replies = %+v FinalText = %q, want none (history was empty)", res.Replies, res.FinalText)
+		}
+	})
+}
+
+// T17 replacement (D6 non-attribution pin): the reply filter
+// reads NO agent/root fields. History events carrying
+// agent_id/root_agent_id/active_subagent_count shapes —
+// subagent-shaped or main-shaped — are returned alike; the
+// filter neither excludes nor orders by them. Attribution
+// itself stays [UNVERIFIED] pending live capture (U-A2/U-A6).
+func TestWaitRedesignT17NoAttributionInReplyFilter(t *testing.T) {
+	subagentShaped := asst(11, "completed", "subagent-shaped", map[string]any{
+		"agent_id": "S", "root_agent_id": "R", "active_subagent_count": 1,
+	})
+	mainShaped := asst(12, "completed", "main-shaped", map[string]any{
+		"agent_id": "R", "root_agent_id": "R",
+	})
+	replies, _ := RepliesAfter([]any{mainShaped, subagentShaped}, 10, nil)
+	if len(replies) != 2 || replies[0].Seq != 11 || replies[1].Seq != 12 {
+		t.Errorf("replies = %+v, want both events in seq order, unattributed", replies)
+	}
+}
+
+// SettlePollInterval defaulting: zero takes the default, a
+// negative value is clamped to the default (never a disable),
+// and an explicit value is preserved.
+func TestWaitRedesignSettlePollIntervalDefaults(t *testing.T) {
+	newCfg := func(interval time.Duration) Config {
+		return Config{
+			Dial:               (&fakeSubscriber{}).dial,
+			History:            &queueHistory{resps: []historyResp{historyOK(nil)}},
+			SettlePollInterval: interval,
+		}
+	}
+	r, err := NewRunner(newCfg(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.cfg.SettlePollInterval != DefaultSettlePollInterval {
+		t.Errorf("zero interval = %v, want %v", r.cfg.SettlePollInterval, DefaultSettlePollInterval)
+	}
+	r, err = NewRunner(newCfg(2 * time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.cfg.SettlePollInterval != 2*time.Second {
+		t.Errorf("explicit interval = %v, want 2s", r.cfg.SettlePollInterval)
+	}
 }
