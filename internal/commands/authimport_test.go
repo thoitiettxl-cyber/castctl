@@ -34,7 +34,7 @@ func importHome(t *testing.T, configJSON string) (string, string) {
 	return home, configFile
 }
 
-// runImport runs `muse-cli --config <cfg> auth import ...` with stdin
+// runImport runs `castctl --config <cfg> auth import ...` with stdin
 // and an injected getenv map. It returns the exit code and the
 // captured stdout/stderr.
 func runImport(t *testing.T, cfg string, stdin io.Reader, getenv map[string]string, args ...string) (int, string, string) {
@@ -498,7 +498,7 @@ func TestAuthImportProfileResolution(t *testing.T) {
 
 	t.Run("env profile", func(t *testing.T) {
 		home, cfg := importHome(t, `{"default_profile":"default","profiles":{"default":{},"work":{}}}`)
-		code, out, errb := runImport(t, cfg, strings.NewReader("hatch_sess=FAKE"), map[string]string{"MUSE_CLI_PROFILE": "work"})
+		code, out, errb := runImport(t, cfg, strings.NewReader("hatch_sess=FAKE"), map[string]string{"CASTCTL_PROFILE": "work"})
 		if code != 0 {
 			t.Fatalf("code=%d, want 0 (stderr=%q)", code, errb)
 		}
@@ -630,7 +630,7 @@ func TestAuthImportNoConfigFile(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d, want 0 (stderr=%q)", code, errb.String())
 	}
-	dest := filepath.Join(home, "muse-cli", "cookies.txt")
+	dest := filepath.Join(home, "castctl", "cookies.txt")
 	res := importResult(t, out.String())
 	if res["cookies_file"] != dest {
 		t.Errorf("JSON=%v, want cookies_file %s", res, dest)
@@ -638,7 +638,7 @@ func TestAuthImportNoConfigFile(t *testing.T) {
 	if got := importFileBytes(t, dest); string(got) != "hatch_sess=FAKE\n" {
 		t.Errorf("cookies=%q", got)
 	}
-	assertImportAbsent(t, filepath.Join(home, "muse-cli", "config.json"))
+	assertImportAbsent(t, filepath.Join(home, "castctl", "config.json"))
 }
 
 func TestAuthImportHostileStdin(t *testing.T) {

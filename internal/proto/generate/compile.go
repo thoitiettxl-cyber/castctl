@@ -13,7 +13,7 @@
 //
 // This file carries a //go:build ignore tag and lives in its own nested
 // module (see go.mod in this directory), so the main module never sees
-// the protocompile dependency and `go test ./...` from go/ does not
+// the protocompile dependency and `go test ./...` from the repo root does not
 // build it. Run it only through generate.sh, which builds it in a clean
 // copy under /tmp. It writes no product code by itself.
 package main

@@ -10,7 +10,7 @@ package deliver
 // in this build.
 const ExportGuidance = `cookie export is not available in this build: no automatic cookie extraction is implemented yet.
 
-Log in at https://muse.ai/ in your browser, leave the tab open, and run "muse-cli auth export" again after a cookie source exists.
+Log in at https://muse.ai/ in your browser, leave the tab open, and run "castctl auth export" again after a cookie source exists.
 
 Copy the login by hand instead:
   1. In your browser, open https://muse.ai/ and log in.
@@ -19,7 +19,7 @@ Copy the login by hand instead:
        hatch_sess=VALUE; other_name=other_value
      hatch_sess is required. Separate cookies with "; ".
   4. Set the file mode to 600.
-  5. Run "muse-cli status" to check the login.
+  5. Run "castctl status" to check the login.
 
 No file was written or changed.`
 

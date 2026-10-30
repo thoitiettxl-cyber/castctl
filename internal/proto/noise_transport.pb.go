@@ -108,7 +108,7 @@ const file_noise_transport_proto_rawDesc = "" +
 	"\f_chunk_indexB\x0f\n" +
 	"\r_total_chunksB\n" +
 	"\n" +
-	"\b_payloadB?Z=github.com/thoitiettxl-cyber/muse-cli/go/internal/proto;protob\x06proto3"
+	"\b_payloadB;Z9github.com/thoitiettxl-cyber/castctl/internal/proto;protob\x06proto3"
 
 var (
 	file_noise_transport_proto_rawDescOnce sync.Once

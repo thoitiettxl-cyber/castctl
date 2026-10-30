@@ -13,7 +13,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // UserAgent is the Chrome/153 Mac user agent Python sends on every
@@ -114,11 +114,11 @@ func FetchSessionInfo(ctx context.Context, client *http.Client, cookies string) 
 	if !ok {
 		// Python: "vm_id" not in a non-dict body is also the
 		// VM-unavailable case, not an auth failure.
-		return SessionInfo{}, &conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("VM unavailable (%v); retry shortly or `MUSE_VM_ID=<id> muse-cli wake`", raw))}
+		return SessionInfo{}, &conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("VM unavailable (%v); retry shortly or `MUSE_VM_ID=<id> castctl wake`", raw))}
 	}
 	rawVM, ok := info["vm_id"]
 	if !ok {
-		return SessionInfo{}, &conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("VM unavailable (%v); retry shortly or `MUSE_VM_ID=<id> muse-cli wake`", info))}
+		return SessionInfo{}, &conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("VM unavailable (%v); retry shortly or `MUSE_VM_ID=<id> castctl wake`", info))}
 	}
 	vmID, ok := rawVM.(string)
 	if !ok {
@@ -127,7 +127,7 @@ func FetchSessionInfo(ctx context.Context, client *http.Client, cookies string) 
 		// branch is about absence, and a null vm_id means the
 		// same thing — the VM is down/restarting. Formatting
 		// it with %v would yield "<nil>" as a bogus VM id.
-		return SessionInfo{}, &conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("VM unavailable (%v); retry shortly or `MUSE_VM_ID=<id> muse-cli wake`", info))}
+		return SessionInfo{}, &conn.GatewayError{Status: -1, Payload: redactErrorString(fmt.Sprintf("VM unavailable (%v); retry shortly or `MUSE_VM_ID=<id> castctl wake`", info))}
 	}
 	return SessionInfo{VMID: vmID, Raw: info}, nil
 }

@@ -17,11 +17,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/outbound"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/profile"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/redact"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
+	"github.com/thoitiettxl-cyber/castctl/internal/outbound"
+	"github.com/thoitiettxl-cyber/castctl/internal/profile"
+	"github.com/thoitiettxl-cyber/castctl/internal/redact"
 
 	singjson "github.com/sagernet/sing/common/json"
 )
@@ -47,7 +47,7 @@ var profileSubcommands = []string{"list", "show", "add", "rm", "set-outbound", "
 
 func cmdProfile(ctx context.Context, env *Env, g *globalOpts, args []string) error {
 	if len(args) == 0 {
-		fmt.Fprintln(env.stderr(), "muse-cli: the following arguments are required: subcommand")
+		fmt.Fprintln(env.stderr(), "castctl: the following arguments are required: subcommand")
 		fmt.Fprint(env.stderr(), profileHelpText)
 		return errCode(2, nil)
 	}
@@ -72,17 +72,17 @@ func cmdProfile(ctx context.Context, env *Env, g *globalOpts, args []string) err
 	case "test":
 		return cmdProfileTest(ctx, env, g, args[1:])
 	default:
-		fmt.Fprintf(env.stderr(), "muse-cli: argument subcommand: invalid choice: %q (choose from %s)\n", args[0], strings.Join(profileSubcommands, ", "))
+		fmt.Fprintf(env.stderr(), "castctl: argument subcommand: invalid choice: %q (choose from %s)\n", args[0], strings.Join(profileSubcommands, ", "))
 		return errCode(2, nil)
 	}
 }
 
 func profileParse(sub string, args []string, env *Env, defs []flagDef, helpText string) (*parsed, error) {
-	ap := &argParser{defs: defs, helpText: helpText, prog: "muse-cli profile " + sub}
+	ap := &argParser{defs: defs, helpText: helpText, prog: "castctl profile " + sub}
 	p, helpShown, err := ap.parse(args, env.stdout())
 	if err != nil {
 		if pe, ok := err.(*parserError); ok {
-			fmt.Fprintf(env.stderr(), "muse-cli: %s\n", pe.msg)
+			fmt.Fprintf(env.stderr(), "castctl: %s\n", pe.msg)
 			return nil, errCode(2, pe)
 		}
 		return nil, err
@@ -256,7 +256,7 @@ func cmdProfileShow(ctx context.Context, env *Env, g *globalOpts, args []string)
 	}
 	// The existence check applies whenever the name was
 	// explicitly selected — a positional, the --profile flag,
-	// or MUSE_CLI_PROFILE — not only for a positional. An
+	// or CASTCTL_PROFILE — not only for a positional. An
 	// implicitly resolved name (default_profile/"default" with
 	// no config yet) may still synthesise a default profile.
 	if explicitProfileSelected(g, env, explicit) && !profileExists(loc.ConfigDir, single, name) {
@@ -310,7 +310,7 @@ func cmdProfileShow(ctx context.Context, env *Env, g *globalOpts, args []string)
 
 // explicitProfileSelected reports whether the resolved profile
 // name was explicitly selected: a positional argument, the
-// --profile flag, or a non-empty MUSE_CLI_PROFILE. Implicitly
+// --profile flag, or a non-empty CASTCTL_PROFILE. Implicitly
 // resolved names (default_profile, then "default") are not
 // explicit: with no config file yet they may synthesise a
 // default profile instead of failing.
@@ -511,7 +511,7 @@ func cmdProfileAdd(ctx context.Context, env *Env, g *globalOpts, args []string) 
 // scratch result never masks a real write. The scratch profile is
 // discarded; only validation errors are returned.
 func prevalidateAddOutbound(baseDir, name string, opts profile.AddProfileOptions, outboundData []byte) error {
-	scratch, err := os.MkdirTemp("", "muse-cli-profile-add-*")
+	scratch, err := os.MkdirTemp("", "castctl-profile-add-*")
 	if err != nil {
 		return err
 	}
@@ -744,7 +744,7 @@ func cmdProfileTest(ctx context.Context, env *Env, g *globalOpts, args []string)
 	// Fail fast on an explicitly named profile that does not
 	// exist, before LoadProfile can synthesise a SourceNone
 	// default and the phases run against it. The check covers
-	// a positional, the --profile flag, and MUSE_CLI_PROFILE,
+	// a positional, the --profile flag, and CASTCTL_PROFILE,
 	// exactly like `profile show`.
 	if explicitProfileSelected(g, env, explicitName) && !profileExists(loc.ConfigDir, single, name) {
 		return errCodef(2, "profile %q does not exist", name)
@@ -972,7 +972,7 @@ func fetchEgressIP(ctx context.Context, client *http.Client) (string, error) {
 
 func cmdConfig(ctx context.Context, env *Env, g *globalOpts, args []string) error {
 	if len(args) == 0 {
-		fmt.Fprintln(env.stderr(), "muse-cli: the following arguments are required: subcommand")
+		fmt.Fprintln(env.stderr(), "castctl: the following arguments are required: subcommand")
 		fmt.Fprint(env.stderr(), configHelpText)
 		return errCode(2, nil)
 	}
@@ -983,17 +983,17 @@ func cmdConfig(ctx context.Context, env *Env, g *globalOpts, args []string) erro
 	case "migrate":
 		return cmdConfigMigrate(ctx, env, g, args[1:])
 	default:
-		fmt.Fprintf(env.stderr(), "muse-cli: argument subcommand: invalid choice: %q (choose from migrate)\n", args[0])
+		fmt.Fprintf(env.stderr(), "castctl: argument subcommand: invalid choice: %q (choose from migrate)\n", args[0])
 		return errCode(2, nil)
 	}
 }
 
 func cmdConfigMigrate(ctx context.Context, env *Env, g *globalOpts, args []string) error {
-	ap := &argParser{defs: []flagDef{{name: "write", kind: flagBool}}, helpText: configMigrateHelpText, prog: "muse-cli config migrate"}
+	ap := &argParser{defs: []flagDef{{name: "write", kind: flagBool}}, helpText: configMigrateHelpText, prog: "castctl config migrate"}
 	p, helpShown, err := ap.parse(args, env.stdout())
 	if err != nil {
 		if pe, ok := err.(*parserError); ok {
-			fmt.Fprintf(env.stderr(), "muse-cli: %s\n", pe.msg)
+			fmt.Fprintf(env.stderr(), "castctl: %s\n", pe.msg)
 			return errCode(2, pe)
 		}
 		return err

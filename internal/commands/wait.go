@@ -15,12 +15,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/approvals"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/profile"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/redact"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/shared"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/wait"
+	"github.com/thoitiettxl-cyber/castctl/internal/approvals"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/profile"
+	"github.com/thoitiettxl-cyber/castctl/internal/redact"
+	"github.com/thoitiettxl-cyber/castctl/internal/shared"
+	"github.com/thoitiettxl-cyber/castctl/internal/wait"
 )
 
 // PR4 wiring: wait, send, approvals, approve, deny and auto-approve.
@@ -300,7 +300,7 @@ func executeWait(ctx context.Context, env *Env, rt *Runtime, prof *profile.Profi
 		if ctx.Err() != nil {
 			return nil, false, err
 		}
-		fmt.Fprintf(env.stderr(), "muse-cli: wait: unexpected error (%s); reporting timeout\n", redact.String(err.Error()))
+		fmt.Fprintf(env.stderr(), "castctl: wait: unexpected error (%s); reporting timeout\n", redact.String(err.Error()))
 		afterSeq := int64(0)
 		if args.afterSeq != nil {
 			afterSeq = *args.afterSeq
@@ -310,7 +310,7 @@ func executeWait(ctx context.Context, env *Env, rt *Runtime, prof *profile.Profi
 			Outcome:  "timeout",
 			AfterSeq: afterSeq,
 			Replies:  []wait.Reply{},
-			Note:     "wait failed internally; run `muse-cli wait` again",
+			Note:     "wait failed internally; run `castctl wait` again",
 			ExitCode: wait.ExitTimeout,
 		}, approveResolved.Enabled, nil
 	}
@@ -822,7 +822,7 @@ func cmdSend(ctx context.Context, env *Env, g *globalOpts, args []string) error 
 		base := sendBaseJSON{Sent: true, Delivered: userSeq != nil, UserSeq: userSeq, Stream: streamID}
 		if userSeq == nil {
 			result := sendNoWaitJSON{sendBaseJSON: base}
-			result.Note = fmt.Sprintf("no delivery ack within %ds; check `muse-cli history`", int(ackTimeout.Seconds()))
+			result.Note = fmt.Sprintf("no delivery ack within %ds; check `castctl history`", int(ackTimeout.Seconds()))
 			if err := writeJSON(env.stdout(), result); err != nil {
 				return err
 			}
@@ -874,7 +874,7 @@ func cmdSend(ctx context.Context, env *Env, g *globalOpts, args []string) error 
 			}
 		}
 		if res.Outcome == "timeout" {
-			result.Note = fmt.Sprintf("turn not finished within %ds; run `muse-cli wait --after-seq %d`", waitSeconds, *userSeq)
+			result.Note = fmt.Sprintf("turn not finished within %ds; run `castctl wait --after-seq %d`", waitSeconds, *userSeq)
 		}
 		if p.bool("text") {
 			fmt.Fprintf(env.stdout(), "user_seq=%d\n", *userSeq)

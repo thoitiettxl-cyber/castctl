@@ -12,7 +12,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	pb "github.com/thoitiettxl-cyber/muse-cli/go/internal/proto"
+	pb "github.com/thoitiettxl-cyber/castctl/internal/proto"
 )
 
 //go:embed testdata/vectors/*.bin

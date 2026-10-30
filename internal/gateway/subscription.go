@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // Subscription / usage via the Next.js server action

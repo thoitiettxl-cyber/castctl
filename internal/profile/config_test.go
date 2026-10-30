@@ -360,7 +360,7 @@ func TestParseSingleConfigCookiesKeyRejected(t *testing.T) {
 		}
 	}
 	// Legitimate sing-box `cookie` field inside an OpenConnect endpoint is
-	// NOT a muse-cli inline-cookies key and must be accepted.
+	// NOT a castctl inline-cookies key and must be accepted.
 	data := singleFileJSON(`{"p":{"outbound":"oc"}}`, "", `[{"type":"openconnect","tag":"oc","server":"203.0.113.23","cookie":"FAKE-OC-COOKIE"}]`, "")
 	if _, err := ParseSingleConfig([]byte(data), "/base"); err != nil {
 		t.Errorf("openconnect endpoint cookie rejected: %v", err)
@@ -556,7 +556,7 @@ func TestResolveActiveProfile(t *testing.T) {
 	if err != nil || p.Name != "work" {
 		t.Errorf("flag resolve = %+v, %v; want work", p, err)
 	}
-	p, err = ResolveActiveProfile(base, nil, lookupEnv(map[string]string{"MUSE_CLI_PROFILE": "envname"}))
+	p, err = ResolveActiveProfile(base, nil, lookupEnv(map[string]string{"CASTCTL_PROFILE": "envname"}))
 	if err != nil || p.Name != "envname" {
 		t.Errorf("env resolve = %+v, %v; want envname", p, err)
 	}

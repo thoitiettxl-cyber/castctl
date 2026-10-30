@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway/gatewaytest"
-	pb "github.com/thoitiettxl-cyber/muse-cli/go/internal/proto"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway/gatewaytest"
+	pb "github.com/thoitiettxl-cyber/castctl/internal/proto"
 )
 
 func TestStatusCommand(t *testing.T) {
@@ -49,7 +49,7 @@ func TestStatusWithProfileVMIDSkipsSessionInfo(t *testing.T) {
 		"/chat/unread-count": `0`,
 		"/api/identity":      `{}`,
 	}), nil)
-	s.env.Getenv = mapGetenv(map[string]string{"MUSE_CLI_CONFIG": configFile})
+	s.env.Getenv = mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile})
 	if code := s.run("status"); code != 0 {
 		t.Fatalf("status: code=%d err=%q", code, s.errb.String())
 	}

@@ -9,8 +9,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/deliver"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/deliver"
 )
 
 // fakeGateway records the method and options of each CallJSON and

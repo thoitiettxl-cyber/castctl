@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // countingGateway is a minimal conn.Gateway for SharedConn retry

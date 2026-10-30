@@ -5,7 +5,7 @@
 package gateway
 
 import (
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/redact"
+	"github.com/thoitiettxl-cyber/castctl/internal/redact"
 )
 
 // redactErrorString strips credentials from an error string

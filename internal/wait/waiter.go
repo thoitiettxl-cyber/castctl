@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/approvals"
+	"github.com/thoitiettxl-cyber/castctl/internal/approvals"
 )
 
 // Terminal vocabularies, verbatim from wait.py. Only "completed"

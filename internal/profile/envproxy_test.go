@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/sagernet/sing-box/option"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/redact"
+	"github.com/thoitiettxl-cyber/castctl/internal/redact"
 )
 
 var proxyEnvNames = []string{

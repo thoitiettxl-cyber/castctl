@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/deliver"
+	"github.com/thoitiettxl-cyber/castctl/internal/deliver"
 )
 
 func writeTestFile(t *testing.T, path, content string, perm os.FileMode) {

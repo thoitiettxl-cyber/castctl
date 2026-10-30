@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/deliver"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway"
+	"github.com/thoitiettxl-cyber/castctl/internal/deliver"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
 )
 
 const fakeCookies = "hatch_sess=FAKE; datr=FAKE"

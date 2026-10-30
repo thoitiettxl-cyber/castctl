@@ -1,4 +1,4 @@
-module github.com/thoitiettxl-cyber/muse-cli/go/internal/proto/generate
+module github.com/thoitiettxl-cyber/castctl/internal/proto/generate
 
 go 1.27.3
 

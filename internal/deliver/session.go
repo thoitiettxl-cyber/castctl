@@ -8,7 +8,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // SessionOpKind is one session operation, named after the

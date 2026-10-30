@@ -14,11 +14,11 @@ import (
 	"path"
 	"strings"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/fsclient"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/fsclient"
 )
 
-const fsLsHelpText = `usage: muse-cli fs ls [PATH] [-l] [-a] [--json]
+const fsLsHelpText = `usage: castctl fs ls [PATH] [-l] [-a] [--json]
 
 List a folder (default: System Files root).
 
@@ -28,7 +28,7 @@ options:
   --json       print the entries as JSON instead of names.
 `
 
-const fsTreeHelpText = `usage: muse-cli fs tree [PATH] [--depth N] [-a] [--json]
+const fsTreeHelpText = `usage: castctl fs tree [PATH] [--depth N] [-a] [--json]
 
 Recursive listing.
 
@@ -38,12 +38,12 @@ options:
   --json       print [{"path": ..., **entry}] as JSON instead of text.
 `
 
-const fsStatHelpText = `usage: muse-cli fs stat PATH
+const fsStatHelpText = `usage: castctl fs stat PATH
 
 Print file/folder metadata as JSON.
 `
 
-const fsCatHelpText = `usage: muse-cli fs cat PATH [--max-bytes N] [--binary]
+const fsCatHelpText = `usage: castctl fs cat PATH [--max-bytes N] [--binary]
 
 Print a file to stdout. A NUL byte in the first 8192 bytes without
 --binary refuses with exit 1.
@@ -53,7 +53,7 @@ options:
   --binary       allow binary output.
 `
 
-const fsGetHelpText = `usage: muse-cli fs get PATH [-o DIR] [-r]
+const fsGetHelpText = `usage: castctl fs get PATH [-o DIR] [-r]
 
 Download a file (or a folder with -r) into DIR.
 
@@ -62,7 +62,7 @@ options:
   -r, --recursive    download folders recursively.
 `
 
-const fsFindHelpText = `usage: muse-cli fs find NAME [--limit N]
+const fsFindHelpText = `usage: castctl fs find NAME [--limit N]
 
 Search by name substring. Prints the matching entries as JSON.
 
@@ -70,7 +70,7 @@ options:
   --limit N    maximum results.
 `
 
-const fsPutHelpText = `usage: muse-cli fs put LOCAL REMOTE [-r] [-n]
+const fsPutHelpText = `usage: castctl fs put LOCAL REMOTE [-r] [-n]
 
 Upload a local file (or folder with -r) to a remote path.
 
@@ -79,7 +79,7 @@ options:
   -n, --no-clobber   refuse to overwrite an existing remote file.
 `
 
-const fsWriteHelpText = `usage: muse-cli fs write REMOTE [--append] [-n]
+const fsWriteHelpText = `usage: castctl fs write REMOTE [--append] [-n]
 
 Write stdin to a remote file. --append reads the old content first
 and overwrites with old+new (one full write; chunking is owned by
@@ -90,7 +90,7 @@ options:
   -n, --no-clobber  refuse to overwrite an existing remote file.
 `
 
-const fsEditHelpText = `usage: muse-cli fs edit REMOTE [--replace OLD NEW]...
+const fsEditHelpText = `usage: castctl fs edit REMOTE [--replace OLD NEW]...
 
 Edit a remote file: apply --replace pairs in order (repeatable), or
 open $VISUAL/$EDITOR (default vi) when no --replace is given. An
@@ -101,12 +101,12 @@ options:
   --replace OLD NEW  replace every occurrence of OLD with NEW.
 `
 
-const fsMkdirHelpText = `usage: muse-cli fs mkdir PATH
+const fsMkdirHelpText = `usage: castctl fs mkdir PATH
 
 Create a folder, with parents. Prints the result as JSON.
 `
 
-const fsMvHelpText = `usage: muse-cli fs mv SRC DST [-f]
+const fsMvHelpText = `usage: castctl fs mv SRC DST [-f]
 
 Move/rename a remote path.
 
@@ -114,7 +114,7 @@ options:
   -f, --force    overwrite the destination.
 `
 
-const fsRmHelpText = `usage: muse-cli fs rm PATH [-r] [--yes]
+const fsRmHelpText = `usage: castctl fs rm PATH [-r] [--yes]
 
 Delete a remote path. Refuses without --yes, before connecting.
 
@@ -140,7 +140,7 @@ func init() {
 // --help after the subcommand prints that subcommand's help.
 func cmdFS(ctx context.Context, env *Env, g *globalOpts, args []string) error {
 	if len(args) == 0 {
-		fmt.Fprintln(env.stderr(), "muse-cli: the following arguments are required: subcommand")
+		fmt.Fprintln(env.stderr(), "castctl: the following arguments are required: subcommand")
 		fmt.Fprint(env.stderr(), fsHelpText)
 		return errCode(2, nil)
 	}
@@ -176,7 +176,7 @@ func cmdFS(ctx context.Context, env *Env, g *globalOpts, args []string) error {
 	case "rm":
 		return fsRm(ctx, env, g, rest)
 	default:
-		fmt.Fprintf(env.stderr(), "muse-cli: argument subcommand: invalid choice: %q (choose from %s)\n", sub, strings.Join(fsSubcommands, ", "))
+		fmt.Fprintf(env.stderr(), "castctl: argument subcommand: invalid choice: %q (choose from %s)\n", sub, strings.Join(fsSubcommands, ", "))
 		return errCode(2, nil)
 	}
 }
@@ -195,12 +195,12 @@ func runFS(ctx context.Context, env *Env, g *globalOpts, fn func(*fsclient.FS) e
 
 func fsParse(sub string, args []string, env *Env) (*parsed, error) {
 	defs, helpText := fsDefs(sub)
-	ap := &argParser{defs: defs, helpText: helpText, prog: "muse-cli fs " + sub}
+	ap := &argParser{defs: defs, helpText: helpText, prog: "castctl fs " + sub}
 	p, helpShown, err := ap.parse(args, env.stdout())
 	if err != nil {
 		if pe, ok := err.(*parserError); ok {
-			fmt.Fprintf(env.stderr(), "muse-cli: %s\n", pe.msg)
-			fmt.Fprintf(env.stderr(), "usage: muse-cli fs %s\n", sub)
+			fmt.Fprintf(env.stderr(), "castctl: %s\n", pe.msg)
+			fmt.Fprintf(env.stderr(), "usage: castctl fs %s\n", sub)
 			return nil, errCode(2, pe)
 		}
 		return nil, err

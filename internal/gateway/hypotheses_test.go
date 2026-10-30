@@ -23,9 +23,9 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/sagernet/sing-box/option"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway/gatewaytest"
-	pb "github.com/thoitiettxl-cyber/muse-cli/go/internal/proto"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway/gatewaytest"
+	pb "github.com/thoitiettxl-cyber/castctl/internal/proto"
 )
 
 // concreteGateway returns the *Gateway behind a conn.Gateway

@@ -33,7 +33,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/service"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/outbound"
+	"github.com/thoitiettxl-cyber/castctl/internal/outbound"
 )
 
 // BootstrapFunc resolves a DNS server's own hostname. It is injected

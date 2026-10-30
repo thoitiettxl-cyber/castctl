@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/approvals"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/wait"
+	"github.com/thoitiettxl-cyber/castctl/internal/approvals"
+	"github.com/thoitiettxl-cyber/castctl/internal/wait"
 )
 
 // F1: in send results, question precedes needs_input_reason

@@ -11,8 +11,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
-	pb "github.com/thoitiettxl-cyber/muse-cli/go/internal/proto"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	pb "github.com/thoitiettxl-cyber/castctl/internal/proto"
 )
 
 // DefaultRequestTimeout bounds one unary call when the caller

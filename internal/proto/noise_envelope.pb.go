@@ -706,7 +706,7 @@ const file_noise_envelope_proto_rawDesc = "" +
 	"\x0eSERVICE_DAEMON\x10\x00\x12\x14\n" +
 	"\x10SERVICE_SENTINEL\x10\x01\x12\x11\n" +
 	"\rSERVICE_VAULT\x10\x02\x12\x11\n" +
-	"\rSERVICE_AUTHD\x10\x03B?Z=github.com/thoitiettxl-cyber/muse-cli/go/internal/proto;protob\x06proto3"
+	"\rSERVICE_AUTHD\x10\x03B;Z9github.com/thoitiettxl-cyber/castctl/internal/proto;protob\x06proto3"
 
 var (
 	file_noise_envelope_proto_rawDescOnce sync.Once

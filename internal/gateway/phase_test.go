@@ -9,7 +9,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // TestPhaseForOpenErr (NB-R2): errors raised before sendEnvelope

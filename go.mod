@@ -1,4 +1,4 @@
-module github.com/thoitiettxl-cyber/muse-cli/go
+module github.com/thoitiettxl-cyber/castctl
 
 go 1.27.3
 

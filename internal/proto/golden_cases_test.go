@@ -10,7 +10,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	pb "github.com/thoitiettxl-cyber/muse-cli/go/internal/proto"
+	pb "github.com/thoitiettxl-cyber/castctl/internal/proto"
 )
 
 // Builders for the same 58 golden cases the PR0 probe built on both

@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway/gatewaytest"
-	pb "github.com/thoitiettxl-cyber/muse-cli/go/internal/proto"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway/gatewaytest"
+	pb "github.com/thoitiettxl-cyber/castctl/internal/proto"
 )
 
 // fakeFS is an in-memory sandbox filesystem served over the fake

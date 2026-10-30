@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Licensed under the GNU General Public License v3.0 or later.
 
-// Command muse-cli is the Go port of muse-cli (Python 0.6.1).
+// Command castctl is the Go port of muse-cli (Python 0.6.1).
 //
 // All command parsing, runtime wiring and output live in
 // internal/commands; this package only wires the process
@@ -22,13 +22,13 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/commands"
+	"github.com/thoitiettxl-cyber/castctl/internal/commands"
 )
 
 // Version mirrors src/muse_cli/__init__.py __version__ (0.6.1). The
 // Python package is the version source of truth; PR5 packaging may
 // generate this value instead of hard-coding it. The commands
-// package owns the printed form "muse-cli <version>".
+// package owns the printed form "castctl <version>".
 const Version = commands.Version
 
 func main() {

@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // Phase records how far a gateway call got before it failed

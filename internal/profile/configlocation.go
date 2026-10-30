@@ -17,15 +17,18 @@ import (
 // resolution per the PLATFORMS clarification).
 //
 // Precedence, highest first: an explicit config FILE path (the
-// --config flag value, else MUSE_CLI_CONFIG) > the
-// os.UserConfigDir()-derived home (Join(userConfigDir, "muse-cli")).
+// --config flag value, else CASTCTL_CONFIG) > the
+// os.UserConfigDir()-derived home (Join(userConfigDir, "castctl")).
+// Legacy fallback: when the "castctl" home does not exist but the
+// pre-migration "muse-cli" home does, the old home is used with a
+// one-line warning; nothing is moved or deleted.
 // The default home follows os.UserConfigDir semantics exactly:
 // XDG_CONFIG_HOME on Linux/Unix, %APPDATA% on Windows, and
 // ~/Library/Application Support on macOS; see userConfigDir. A
 // relative XDG_CONFIG_HOME is an error in os.UserConfigDir on Unix:
 // the resolver catches that one case, warns visibly, and falls back
 // to the computed $HOME-based default (Join(home, ".config",
-// "muse-cli") from the HOME env). Any other user-config-dir error
+// "castctl") from the HOME env). Any other user-config-dir error
 // with no usable home is a clear error (exit 2 at the CLI), never a
 // silent fallback to a hardcoded path.
 //
@@ -67,7 +70,7 @@ type ConfigLocation struct {
 	// the whole invocation.
 	ConfigDir string
 	// Explicit reports whether the location came from an explicit
-	// path: the flag parameter or MUSE_CLI_CONFIG. False for
+	// path: the flag parameter or CASTCTL_CONFIG. False for
 	// UserConfigDir-derived locations.
 	Explicit bool
 	// Warnings lists non-fatal observations for the CLI layer to
@@ -89,14 +92,19 @@ type ConfigLocation struct {
 //     means the caller passed nothing: it is NOT an error here —
 //     the CLI layer rejects an empty --config flag value with
 //     exit 2 before calling this function.
-//   - else MUSE_CLI_CONFIG, when set and non-empty (empty means
+//   - else CASTCTL_CONFIG, when set and non-empty (empty means
 //     unset, ignored silently), used the same way as explicitPath.
 //   - else the UserConfigDir-derived home: Join(userConfigDir,
-//     "muse-cli"), where userConfigDir follows os.UserConfigDir
+//     "castctl"), where userConfigDir follows os.UserConfigDir
 //     semantics through getenv (see userConfigDir). A relative
 //     XDG_CONFIG_HOME (Unix) is ignored with a warning, falling
 //     back to the computed $HOME-based default; any other
 //     user-config-dir error is returned as-is (exit 2 at the CLI).
+//     Legacy fallback: if the "castctl" directory does not exist
+//     but the pre-migration "muse-cli" directory does, the old
+//     directory is used for this invocation with a one-line
+//     warning telling the user to move it; nothing is moved,
+//     copied, or deleted (see below).
 //
 // An explicit path naming a directory is an error. An explicit path
 // that does not exist is NOT an error from this function: the
@@ -106,7 +114,7 @@ func ResolveConfigLocation(explicitPath string, getenv func(string) (string, boo
 	if strings.TrimSpace(explicitPath) != "" {
 		return resolveExplicitPath(explicitPath)
 	}
-	if v, ok := configLookupEnv(getenv, "MUSE_CLI_CONFIG"); ok && strings.TrimSpace(v) != "" {
+	if v, ok := configLookupEnv(getenv, "CASTCTL_CONFIG"); ok && strings.TrimSpace(v) != "" {
 		return resolveExplicitPath(v)
 	}
 	var warnings []string
@@ -119,14 +127,32 @@ func ResolveConfigLocation(explicitPath string, getenv func(string) (string, boo
 				return nil, newConfigErrorf("cannot determine config directory: XDG_CONFIG_HOME is relative and no home directory is available: %v", herr)
 			}
 			warnings = append(warnings, fmt.Sprintf("XDG_CONFIG_HOME %q is relative; using the default config location", relErr.value))
-			// BaseDir already includes the trailing "muse-cli";
+			// BaseDir already includes the trailing "castctl";
 			// dir here is the user config dir, so take its parent.
 			dir = filepath.Dir(BaseDir(home))
 		} else {
 			return nil, newConfigErrorf("cannot determine config directory: %v", err)
 		}
 	}
-	configDir := filepath.Join(dir, "muse-cli")
+	configDir := filepath.Join(dir, "castctl")
+	// Legacy directory fallback (migration, Boss order): if the
+	// new default directory does not exist but the pre-migration
+	// "muse-cli" directory does, read from the old directory for
+	// this invocation and warn once, telling the user to move it.
+	// Nothing is moved, copied, or deleted: the old directory
+	// simply becomes CONFIG_DIR, so reads and writes stay
+	// co-located there. Explicit locations never reach this code
+	// (they return above), so an explicit --config /
+	// CASTCTL_CONFIG path is never redirected to the old
+	// directory, and a missing explicit file still exits 2 via
+	// RequirePresent.
+	if isMissingDir(configDir) {
+		legacyDir := filepath.Join(dir, "muse-cli")
+		if isExistingDir(legacyDir) {
+			warnings = append(warnings, fmt.Sprintf("legacy config directory %q found; reading config from there. Move it to %q to use the new location", legacyDir, configDir))
+			configDir = legacyDir
+		}
+	}
 	return &ConfigLocation{
 		ConfigFile: filepath.Join(configDir, "config.json"),
 		ConfigDir:  configDir,
@@ -266,6 +292,20 @@ func configLookupEnv(getenv func(string) (string, bool), key string) (string, bo
 		return getenv(key)
 	}
 	return os.LookupEnv(key)
+}
+
+// isMissingDir reports whether path does not exist. Any other stat
+// error is treated as "not missing": resolution proceeds with the
+// new directory and the underlying operation surfaces the error.
+func isMissingDir(path string) bool {
+	_, err := os.Stat(path)
+	return err != nil && os.IsNotExist(err)
+}
+
+// isExistingDir reports whether path exists and is a directory.
+func isExistingDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // configHomeDir returns $HOME through getenv, falling back to

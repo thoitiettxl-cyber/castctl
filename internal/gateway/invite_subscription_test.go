@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway/gatewaytest"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway/gatewaytest"
 )
 
 // muxClient builds an *http.Client serving requests through mux in memory.

@@ -12,7 +12,7 @@ import (
 	"syscall"
 
 	"github.com/gorilla/websocket"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // ErrConnectionLost reports that the transport died mid-flight

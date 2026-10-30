@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/commands"
+	"github.com/thoitiettxl-cyber/castctl/internal/commands"
 )
 
 // runMain drives the real dispatch with a hermetic HOME: the config
@@ -23,8 +23,8 @@ func runMain(t *testing.T, home string, args ...string) (int, string, string) {
 	t.Helper()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("MUSE_CLI_CONFIG", "")
-	t.Setenv("MUSE_CLI_PROFILE", "")
+	t.Setenv("CASTCTL_CONFIG", "")
+	t.Setenv("CASTCTL_PROFILE", "")
 	var out, errb bytes.Buffer
 	code := commands.Run(context.Background(), args, &commands.Env{Stdout: &out, Stderr: &errb, Stdin: strings.NewReader("")})
 	return code, out.String(), errb.String()
@@ -32,18 +32,18 @@ func runMain(t *testing.T, home string, args ...string) (int, string, string) {
 
 func TestVersionAndHelp(t *testing.T) {
 	home := t.TempDir()
-	if code, out, _ := runMain(t, home, "--version"); code != 0 || strings.TrimSpace(out) != "muse-cli 0.6.1" {
+	if code, out, _ := runMain(t, home, "--version"); code != 0 || strings.TrimSpace(out) != "castctl 0.6.1" {
 		t.Fatalf("--version: code=%d out=%q", code, out)
 	}
-	if code, out, _ := runMain(t, home, "--help"); code != 0 || !strings.Contains(out, "muse-cli") {
+	if code, out, _ := runMain(t, home, "--help"); code != 0 || !strings.Contains(out, "castctl") {
 		t.Fatalf("--help: code=%d out=%q", code, out)
 	}
-	if code, out, _ := runMain(t, home, "-h"); code != 0 || !strings.Contains(out, "muse-cli") {
+	if code, out, _ := runMain(t, home, "-h"); code != 0 || !strings.Contains(out, "castctl") {
 		t.Fatalf("-h: code=%d out=%q", code, out)
 	}
 	// Help mentions the config-location contract.
-	if _, out, _ := runMain(t, home, "--help"); !strings.Contains(out, "--config") || !strings.Contains(out, "MUSE_CLI_CONFIG") || !strings.Contains(out, "XDG") {
-		t.Fatalf("--help must mention --config, MUSE_CLI_CONFIG and XDG: %q", out)
+	if _, out, _ := runMain(t, home, "--help"); !strings.Contains(out, "--config") || !strings.Contains(out, "CASTCTL_CONFIG") || !strings.Contains(out, "XDG") {
+		t.Fatalf("--help must mention --config, CASTCTL_CONFIG and XDG: %q", out)
 	}
 }
 
@@ -94,7 +94,7 @@ func TestBareInvocationRunsChat(t *testing.T) {
 
 func TestProfileListLoadsSingleFile(t *testing.T) {
 	home := t.TempDir()
-	base := filepath.Join(home, ".config", "muse-cli")
+	base := filepath.Join(home, ".config", "castctl")
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestProfileListLoadsSingleFile(t *testing.T) {
 
 func TestProfileListUnparseableExits2(t *testing.T) {
 	home := t.TempDir()
-	base := filepath.Join(home, ".config", "muse-cli")
+	base := filepath.Join(home, ".config", "castctl")
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -16,9 +16,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway/gatewaytest"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/profile"
-	pb "github.com/thoitiettxl-cyber/muse-cli/go/internal/proto"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway/gatewaytest"
+	"github.com/thoitiettxl-cyber/castctl/internal/profile"
+	pb "github.com/thoitiettxl-cyber/castctl/internal/proto"
 )
 
 // profileEnv runs commands with --config against a temp home; the
@@ -201,15 +201,15 @@ func TestProfileShowGhost(t *testing.T) {
 	if code := runProfile(t, env, out, errb, configFile, "--profile", "default", "profile", "show"); code != 0 {
 		t.Fatalf("--profile default show: code=%d, want 0; err=%q", code, errb.String())
 	}
-	// MUSE_CLI_PROFILE=ghost: the env-selected name is explicit
+	// CASTCTL_PROFILE=ghost: the env-selected name is explicit
 	// too, so the same check applies.
-	env.Getenv = mapGetenv(map[string]string{"MUSE_CLI_PROFILE": "ghost"})
+	env.Getenv = mapGetenv(map[string]string{"CASTCTL_PROFILE": "ghost"})
 	if code := runProfile(t, env, out, errb, configFile, "profile", "show"); code != 2 {
-		t.Fatalf("MUSE_CLI_PROFILE=ghost show: code=%d, want 2", code)
+		t.Fatalf("CASTCTL_PROFILE=ghost show: code=%d, want 2", code)
 	}
-	env.Getenv = mapGetenv(map[string]string{"MUSE_CLI_PROFILE": "default"})
+	env.Getenv = mapGetenv(map[string]string{"CASTCTL_PROFILE": "default"})
 	if code := runProfile(t, env, out, errb, configFile, "profile", "show"); code != 0 {
-		t.Fatalf("MUSE_CLI_PROFILE=default show: code=%d, want 0; err=%q", code, errb.String())
+		t.Fatalf("CASTCTL_PROFILE=default show: code=%d, want 0; err=%q", code, errb.String())
 	}
 }
 
@@ -404,7 +404,7 @@ func TestConfigMigrate(t *testing.T) {
 	// --config: a dry run against a missing EXPLICIT file exits
 	// 2 (see TestConfigMigrateMissingExplicitDryRun).
 	xdg := filepath.Join(home, "xdg")
-	baseDir := filepath.Join(xdg, "muse-cli")
+	baseDir := filepath.Join(xdg, "castctl")
 	legacyDir := filepath.Join(baseDir, "profiles", "default")
 	if err := os.MkdirAll(legacyDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -459,7 +459,7 @@ func TestConfigMigrate(t *testing.T) {
 
 func TestDefaultPathRegression(t *testing.T) {
 	// Under a controlled XDG_CONFIG_HOME, the default config path
-	// is Join(UserConfigDir(), "muse-cli", "config.json"): a missing
+	// is Join(UserConfigDir(), "castctl", "config.json"): a missing
 	// default file is not an error for a read-only command, and
 	// --config dir still exits 2. The default home holds no config,
 	// so profile list must fail as "no config" rather than read a
@@ -477,14 +477,14 @@ func TestDefaultPathRegression(t *testing.T) {
 	// A missing default config is not an error: list reports the
 	// "none" source with the default profile (not existing). The
 	// profile dir must be under the controlled XDG home, proving
-	// the default path is Join(UserConfigDir(), "muse-cli").
+	// the default path is Join(UserConfigDir(), "castctl").
 	if code != 0 {
 		t.Fatalf("no-config default: code=%d err=%q, want 0", code, errb.String())
 	}
 	if !strings.Contains(out.String(), `"source": "none"`) {
 		t.Errorf("list: %q", out.String())
 	}
-	if !strings.Contains(out.String(), filepath.Join(xdg, "muse-cli")) {
+	if !strings.Contains(out.String(), filepath.Join(xdg, "castctl")) {
 		t.Errorf("profile dir should be under the XDG home: %q", out.String())
 	}
 }

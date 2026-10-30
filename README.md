@@ -212,6 +212,13 @@ dry run plans from a legacy-only layout). `--profile` resolution
 inside the resolved home is unchanged: `--profile` flag, then
 `CASTCTL_PROFILE`, then `default_profile`, then `"default"`.
 
+Legacy directory fallback: if the default `<dir>/castctl`
+directory does not exist but `<dir>/muse-cli` does, the old
+directory becomes `CONFIG_DIR` for the invocation and a one-line
+warning is printed telling the user to move it. Nothing is moved,
+copied, or deleted automatically. This applies only to the default
+location: an explicit `--config` or `CASTCTL_CONFIG` still wins.
+
 Per-key relative paths inside a profile config: only `cookies_file`
 is resolved, relative to `CONFIG_DIR`; an absolute value is kept
 as-is. `vm_id`, `node_id`, `subscription_action_id`,

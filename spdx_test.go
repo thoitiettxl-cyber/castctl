@@ -3,7 +3,7 @@
 // Licensed under the GNU General Public License v3.0 or later.
 
 // TestSPDXHeaders enforces the licence-header rule for the whole Go
-// port: EVERY .go file under go/ must carry the SPDX header below at
+// port: EVERY .go file under the repo root must carry the SPDX header below at
 // the top, after any build-tag block. Build-tag lines (//go:build,
 // // +build) stay first, followed by one blank line, then the header,
 // then one blank line, then the rest of the file.

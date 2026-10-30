@@ -13,8 +13,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/profile"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
+	"github.com/thoitiettxl-cyber/castctl/internal/profile"
 )
 
 // authImportResult is the success output of `auth import`: value-free
@@ -27,7 +27,7 @@ type authImportResult struct {
 	Backup      bool   `json:"backup"`
 }
 
-// cmdAuthImport implements `muse-cli auth import`: read cookies from
+// cmdAuthImport implements `castctl auth import`: read cookies from
 // stdin, validate them, and replace the active profile's cookies
 // file. It is offline: it uses only resolveConfig/resolveActive and
 // never the network runtime path, so no runtime, DNS, or connection
@@ -48,11 +48,11 @@ type authImportResult struct {
 // and no secret-bearing stack, wired via Run -> runInner -> the
 // command table -> cmdAuthImport.
 func cmdAuthImport(_ context.Context, env *Env, g *globalOpts, args []string) error {
-	ap := &argParser{defs: nil, helpText: authImportHelpText, prog: "muse-cli auth import"}
+	ap := &argParser{defs: nil, helpText: authImportHelpText, prog: "castctl auth import"}
 	p, helpShown, err := ap.parse(args, env.stdout())
 	if err != nil {
 		if pe, ok := err.(*parserError); ok {
-			fmt.Fprintf(env.stderr(), "muse-cli: %s\n", pe.msg)
+			fmt.Fprintf(env.stderr(), "castctl: %s\n", pe.msg)
 			return errCode(2, pe)
 		}
 		return err

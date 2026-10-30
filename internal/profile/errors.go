@@ -4,7 +4,7 @@
 
 // Package profile implements profile resolution, the single-file
 // config.json format, legacy layout reading, config migration, cookie
-// parsing, auto-approve precedence, and secret redaction for muse-cli.
+// parsing, auto-approve precedence, and secret redaction for castctl.
 //
 // Load is read-only: unlike the Python load_config (cli.py:151-188), Load
 // never generates or writes a node_id. Node_id generation happens only in
@@ -29,8 +29,8 @@
 // Config location (Requirement A, portable per the PLATFORMS
 // clarification): ResolveConfigLocation (configlocation.go)
 // resolves the config file once per invocation: explicit FILE path
-// (--config flag value, else MUSE_CLI_CONFIG) > the
-// os.UserConfigDir()-derived home (Join(userConfigDir, "muse-cli")).
+// (--config flag value, else CASTCTL_CONFIG) > the
+// os.UserConfigDir()-derived home (Join(userConfigDir, "castctl")).
 // A relative XDG_CONFIG_HOME (Unix) is caught, warned about, and
 // falls back to the computed $HOME-based default; any other
 // user-config-dir error with no usable home is a clear error, never

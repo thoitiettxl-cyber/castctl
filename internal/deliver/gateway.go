@@ -7,7 +7,7 @@ package deliver
 import (
 	"context"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // Gateway is the minimal gateway surface this package needs: one

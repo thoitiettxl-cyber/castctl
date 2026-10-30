@@ -239,14 +239,14 @@ func TestParseRealWireGuardConfRuntime(t *testing.T) {
 	// only; logs counts/families only; never logs key values or file
 	// bytes. Skips when the file is absent/unreadable.
 	//
-	// The conf path comes from MUSE_CLI_WG_CONF_PATH when set, and
-	// defaults to ~/.config/muse-cli/secrets/wg-proton-usca420.conf
+	// The conf path comes from CASTCTL_WG_CONF_PATH when set, and
+	// defaults to ~/.config/castctl/secrets/wg-proton-usca420.conf
 	// when unset (or empty). A different conf named by the env var
 	// gets the same shape-only assertions and redaction rules.
 	// The path itself is not secret, so the skip reason names it.
-	confPath := os.Getenv("MUSE_CLI_WG_CONF_PATH")
+	confPath := os.Getenv("CASTCTL_WG_CONF_PATH")
 	if confPath == "" {
-		confPath = os.ExpandEnv("$HOME/.config/muse-cli/secrets/wg-proton-usca420.conf")
+		confPath = os.ExpandEnv("$HOME/.config/castctl/secrets/wg-proton-usca420.conf")
 	}
 	data, err := os.ReadFile(confPath)
 	if err != nil {

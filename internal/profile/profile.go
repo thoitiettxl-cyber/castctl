@@ -14,7 +14,7 @@ import (
 const DefaultProfileName = "default"
 
 // ProfileEnv is the environment variable naming the active profile.
-const ProfileEnv = "MUSE_CLI_PROFILE"
+const ProfileEnv = "CASTCTL_PROFILE"
 
 // ValidateProfileName returns name if it matches the Python regex
 // ^(?!\.)[A-Za-z0-9._-]{1,64}(?<!\.)$ (cli.py:37), else an
@@ -61,12 +61,12 @@ func ResolveProfile(flag *string) (string, error) {
 }
 
 // BaseDir returns the $HOME-based default config directory
-// (Join(home, ".config", "muse-cli")) for the given home directory.
+// (Join(home, ".config", "castctl")) for the given home directory.
 // It is the fallback constructor used only when a relative
 // XDG_CONFIG_HOME is caught by ResolveConfigLocation; the primary
 // default comes from userConfigDir (os.UserConfigDir semantics).
 func BaseDir(home string) string {
-	return filepath.Join(home, ".config", "muse-cli")
+	return filepath.Join(home, ".config", "castctl")
 }
 
 // Paths holds the filesystem locations for one profile.

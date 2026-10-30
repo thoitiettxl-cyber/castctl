@@ -1,6 +1,6 @@
 #!/bin/sh
 # Regenerate noise_transport.pb.go and noise_envelope.pb.go into
-# go/internal/proto/ from the .proto sources in this directory.
+# internal/proto/ from the .proto sources in this directory.
 #
 # Route (no protoc, no buf on the VM):
 #   protocompile v0.14.1 (pure Go, pinned in this directory's go.mod)
@@ -61,7 +61,7 @@ mkdir -p "$WORK/out" "$WORK/desc"
 cd "$WORK"
 go build -o "$WORK/compile" compile.go
 "$WORK/compile" -proto-dir "$WORK" -plugin "$PLUGIN" -out "$WORK/out" \
-	-strip-prefix "github.com/thoitiettxl-cyber/muse-cli/go/" \
+	-strip-prefix "github.com/thoitiettxl-cyber/castctl/" \
 	-desc-out "$WORK/desc" \
 	noise_transport.proto noise_envelope.proto
 
@@ -72,7 +72,7 @@ cp "$WORK/out/internal/proto/noise_transport.pb.go" \
 # --- inject the SPDX header into the generated files ---------------------
 # protoc-gen-go emits no licence header. The SPDX header is injected
 # here, on every regeneration, so the committed .pb.go files always
-# carry it and go/spdx_test.go keeps passing. Idempotent: a file
+# carry it and spdx_test.go keeps passing. Idempotent: a file
 # already starting with the header is left untouched. Never hand-edit
 # a .pb.go file to add or restore the header; re-run this script.
 for f in "$OUT_DIR/noise_transport.pb.go" "$OUT_DIR/noise_envelope.pb.go"; do
@@ -92,4 +92,4 @@ fi
 echo "wrote:"
 sha256sum "$OUT_DIR/noise_transport.pb.go" "$OUT_DIR/noise_envelope.pb.go"
 echo "compiled descriptors (comparison only, NOT committed): $WORK/desc"
-echo "regeneration done; verify with: go test -race -tags with_utls,with_quic,with_wireguard,with_gvisor ./internal/proto/ (from go/)"
+echo "regeneration done; verify with: go test -race -tags with_utls,with_quic,with_wireguard,with_gvisor ./internal/proto/ (from the repo root)"

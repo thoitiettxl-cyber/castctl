@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/profile"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/shared"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
+	"github.com/thoitiettxl-cyber/castctl/internal/profile"
+	"github.com/thoitiettxl-cyber/castctl/internal/shared"
 )
 
 func init() {
@@ -247,7 +247,7 @@ func printInviteText(w io.Writer, s shared.InviteSummary) {
 			fmt.Fprintf(w, "Uses left: %d%s\n", *s.UsesRemaining, extra)
 		}
 	} else {
-		fmt.Fprintf(w, "Invite code: none yet (state %s). Open Invite friends in the muse.ai app once, or run `muse-cli invite --create`.\n", ptrStr(s.State))
+		fmt.Fprintf(w, "Invite code: none yet (state %s). Open Invite friends in the muse.ai app once, or run `castctl invite --create`.\n", ptrStr(s.State))
 	}
 	if s.Reward != nil {
 		parts := []string{}

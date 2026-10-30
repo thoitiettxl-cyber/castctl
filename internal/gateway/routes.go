@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
-	pb "github.com/thoitiettxl-cyber/muse-cli/go/internal/proto"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	pb "github.com/thoitiettxl-cyber/castctl/internal/proto"
 )
 
 // serviceID maps a route's service name to its ServiceType value.

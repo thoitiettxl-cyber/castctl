@@ -12,7 +12,7 @@ import (
 	"os"
 	"syscall"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // IsTransient classifies an error as a transient transport

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Licensed under the GNU General Public License v3.0 or later.
 
-// Package commands implements the muse-cli command surface for the Go
+// Package commands implements the castctl command surface for the Go
 // port (muse-cli 0.6.1 contract): a hand-rolled parser mirroring
 // argparse help/errors/exit 2, a single runtime-wiring path, and
 // dispatch to the read, filesystem, profile and deliver-backed
@@ -30,16 +30,16 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/deliver"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/profile"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/redact"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/deliver"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
+	"github.com/thoitiettxl-cyber/castctl/internal/profile"
+	"github.com/thoitiettxl-cyber/castctl/internal/redact"
 )
 
 // Version is the Go port version, mirroring the Python 0.6.1 contract
-// it ports. The canonical source is go/cmd/muse-cli/main.go; tests pin
-// the --version output format "muse-cli <version>".
+// it ports. The canonical source is go/cmd/castctl/main.go; tests pin
+// the --version output format "castctl <version>".
 const Version = "0.6.1"
 
 // PromptFunc is the injectable prompt seam (item 15). The default
@@ -191,7 +191,7 @@ func (e *typedAuthError) Error() string {
 func (e *typedAuthError) Unwrap() error { return e.Err }
 
 // classifyError maps an error to (exit code, stderr text). Plain
-// errors print "muse-cli: <redacted message>"; typed auth errors
+// errors print "castctl: <redacted message>"; typed auth errors
 // print one JSON line. The Python exit-code contract is preserved:
 // AuthError 2, GatewayError 3, ValueError-equivalent 2, TimeoutError
 // 4, everything else 1, signal cancellation 130.
@@ -218,7 +218,7 @@ func classifyError(err error) (int, string) {
 			return ce.Code, string(b)
 		}
 		if msg := ce.Error(); msg != "" {
-			return ce.Code, "muse-cli: " + redact.String(msg)
+			return ce.Code, "castctl: " + redact.String(msg)
 		}
 		return ce.Code, ""
 	}
@@ -230,40 +230,40 @@ func classifyError(err error) (int, string) {
 	}
 	var gw *conn.GatewayError
 	if errors.As(err, &gw) {
-		return 3, "muse-cli: " + redact.String(gw.Error())
+		return 3, "castctl: " + redact.String(gw.Error())
 	}
 	var reassembly *gateway.ReassemblySizeError
 	if errors.As(err, &reassembly) {
-		return 3, "muse-cli: " + redact.String(reassembly.Error())
+		return 3, "castctl: " + redact.String(reassembly.Error())
 	}
 	var tooMany *gateway.TooManyUnfinishedGroupsError
 	if errors.As(err, &tooMany) {
-		return 3, "muse-cli: " + redact.String(tooMany.Error())
+		return 3, "castctl: " + redact.String(tooMany.Error())
 	}
 	var timeout *conn.TimeoutError
 	if errors.As(err, &timeout) {
-		return 4, "muse-cli: " + redact.String(timeout.Error())
+		return 4, "castctl: " + redact.String(timeout.Error())
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return 4, "muse-cli: timeout: " + redact.String(err.Error())
+		return 4, "castctl: timeout: " + redact.String(err.Error())
 	}
 	if errors.Is(err, context.Canceled) {
 		return 130, ""
 	}
 	var perr *profile.Error
 	if errors.As(err, &perr) {
-		return profile.ExitCode(err), "muse-cli: " + redact.String(perr.Error())
+		return profile.ExitCode(err), "castctl: " + redact.String(perr.Error())
 	}
 	var verr *gateway.ValidationError
 	if errors.As(err, &verr) {
-		return 2, "muse-cli: " + redact.String(verr.Error())
+		return 2, "castctl: " + redact.String(verr.Error())
 	}
 	// Errors carrying their own exit code (profile errors not typed
 	// above, deliver errors) keep it; everything else is 1.
 	if ec, ok := err.(interface{ ExitCode() int }); ok {
-		return ec.ExitCode(), "muse-cli: " + redact.String(err.Error())
+		return ec.ExitCode(), "castctl: " + redact.String(err.Error())
 	}
-	return 1, "muse-cli: " + redact.String(err.Error())
+	return 1, "castctl: " + redact.String(err.Error())
 }
 
 // classifyConnError wraps a failure from conn.Muse calls (connect,
@@ -426,7 +426,7 @@ func (e *parserError) Error() string { return e.msg }
 type argParser struct {
 	defs     []flagDef
 	helpText string
-	prog     string // e.g. "muse-cli fs ls"
+	prog     string // e.g. "castctl fs ls"
 }
 
 func (ap *argParser) findLong(name string) (flagDef, bool) {
@@ -697,7 +697,7 @@ func Run(ctx context.Context, args []string, env *Env) (code int) {
 	defer func() {
 		if r := recover(); r != nil {
 			code = 2
-			fmt.Fprintf(env.stderr(), "muse-cli: panic: %s\n", redact.String(fmt.Sprint(r)))
+			fmt.Fprintf(env.stderr(), "castctl: panic: %s\n", redact.String(fmt.Sprint(r)))
 		}
 	}()
 	return runInner(ctx, args, env)
@@ -725,7 +725,7 @@ func runInner(ctx context.Context, args []string, env *Env) int {
 	}
 	spec, ok := commandTable[cmdName]
 	if !ok {
-		fmt.Fprintf(env.stderr(), "muse-cli: argument cmd: invalid choice: %q (choose from %s)\n", cmdName, strings.Join(commandOrder, ", "))
+		fmt.Fprintf(env.stderr(), "castctl: argument cmd: invalid choice: %q (choose from %s)\n", cmdName, strings.Join(commandOrder, ", "))
 		fmt.Fprint(env.stderr(), globalHelpText)
 		return 2
 	}
@@ -776,10 +776,10 @@ func scanGlobal(args []string, env *Env) (*globalOpts, string, []string, int, bo
 			// rejected by the existing PR1 behaviour (pinned by
 			// main tests). Keep the rejection here.
 			if strings.Contains(tok, "=") {
-				fmt.Fprintf(env.stderr(), "muse-cli: argument --version: ignored explicit argument %q\n", strings.SplitN(tok, "=", 2)[1])
+				fmt.Fprintf(env.stderr(), "castctl: argument --version: ignored explicit argument %q\n", strings.SplitN(tok, "=", 2)[1])
 				return g, "", nil, 2, true
 			}
-			fmt.Fprintf(env.stdout(), "muse-cli %s\n", Version)
+			fmt.Fprintf(env.stdout(), "castctl %s\n", Version)
 			return g, "", nil, 0, true
 		case tok == "--help" || tok == "-h" || tok == "--hel":
 			fmt.Fprint(env.stdout(), globalHelpText)
@@ -795,7 +795,7 @@ func scanGlobal(args []string, env *Env) (*globalOpts, string, []string, int, bo
 					if !isProfile {
 						name = "--config"
 					}
-					fmt.Fprintf(env.stderr(), "muse-cli: argument %s: expected one argument\n", name)
+					fmt.Fprintf(env.stderr(), "castctl: argument %s: expected one argument\n", name)
 					return g, "", nil, 2, true
 				}
 				i++
@@ -818,7 +818,7 @@ func scanGlobal(args []string, env *Env) (*globalOpts, string, []string, int, bo
 					val = strings.SplitN(tok, "=", 2)[1]
 				} else {
 					if i+1 >= len(args) || (strings.HasPrefix(args[i+1], "-") && args[i+1] != "-") {
-						fmt.Fprintf(env.stderr(), "muse-cli: argument --%s: expected one argument\n", name)
+						fmt.Fprintf(env.stderr(), "castctl: argument --%s: expected one argument\n", name)
 						return g, "", nil, 2, true
 					}
 					i++
@@ -833,14 +833,14 @@ func scanGlobal(args []string, env *Env) (*globalOpts, string, []string, int, bo
 				fmt.Fprint(env.stdout(), globalHelpText)
 				return g, "", nil, 0, true
 			} else if strings.HasPrefix("version", name) {
-				fmt.Fprintf(env.stdout(), "muse-cli %s\n", Version)
+				fmt.Fprintf(env.stdout(), "castctl %s\n", Version)
 				return g, "", nil, 0, true
 			} else {
-				fmt.Fprintf(env.stderr(), "muse-cli: unrecognized argument: %s\n", tok)
+				fmt.Fprintf(env.stderr(), "castctl: unrecognized argument: %s\n", tok)
 				return g, "", nil, 2, true
 			}
 		case strings.HasPrefix(tok, "-") && len(tok) > 1 && tok != "-":
-			fmt.Fprintf(env.stderr(), "muse-cli: unrecognized argument: %s\n", tok)
+			fmt.Fprintf(env.stderr(), "castctl: unrecognized argument: %s\n", tok)
 			return g, "", nil, 2, true
 		default:
 			return g, tok, args[i+1:], 0, false
@@ -866,7 +866,7 @@ func resolveConfig(g *globalOpts, env *Env, allowMissingCreate bool) (*profile.C
 		return nil, err
 	}
 	for _, w := range loc.Warnings {
-		fmt.Fprintf(env.stderr(), "muse-cli: warning: %s\n", w)
+		fmt.Fprintf(env.stderr(), "castctl: warning: %s\n", w)
 	}
 	if filepath.Base(loc.ConfigFile) != "config.json" {
 		return nil, errCodef(2, "--config path %q must name a config.json file", loc.ConfigFile)
@@ -881,7 +881,7 @@ func resolveConfig(g *globalOpts, env *Env, allowMissingCreate bool) (*profile.C
 
 // resolveActive resolves the active profile within the resolved
 // config location. A flag value is used only when the flag was set;
-// otherwise ResolveActiveProfile reads MUSE_CLI_PROFILE,
+// otherwise ResolveActiveProfile reads CASTCTL_PROFILE,
 // default_profile, then "default".
 func resolveActive(loc *profile.ConfigLocation, g *globalOpts, env *Env) (*profile.Profile, error) {
 	var flag *string
@@ -911,12 +911,12 @@ func runWithProfile(ctx context.Context, env *Env, g *globalOpts, fn func(*profi
 var errHelpShown = errors.New("help shown")
 
 func parseOrHelp(spec *commandSpec, args []string, env *Env) (*parsed, error) {
-	ap := &argParser{defs: specDefs(spec), helpText: spec.helpText, prog: "muse-cli " + spec.name}
+	ap := &argParser{defs: specDefs(spec), helpText: spec.helpText, prog: "castctl " + spec.name}
 	p, helpShown, err := ap.parse(args, env.stdout())
 	if err != nil {
 		if pe, ok := err.(*parserError); ok {
-			fmt.Fprintf(env.stderr(), "muse-cli: %s\n", pe.msg)
-			fmt.Fprintf(env.stderr(), "usage: muse-cli %s\n", usageLine(spec))
+			fmt.Fprintf(env.stderr(), "castctl: %s\n", pe.msg)
+			fmt.Fprintf(env.stderr(), "usage: castctl %s\n", usageLine(spec))
 			return nil, errCode(2, pe)
 		}
 		return nil, err

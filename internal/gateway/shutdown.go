@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	pb "github.com/thoitiettxl-cyber/muse-cli/go/internal/proto"
+	pb "github.com/thoitiettxl-cyber/castctl/internal/proto"
 )
 
 // CloseBound bounds the best-effort reset sends in Shutdown: 2s,

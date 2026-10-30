@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/approvals"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/approvals"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // Timing defaults, verbatim from cli.py (seconds unless noted).
@@ -900,12 +900,12 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 	note := ""
 	if r.waiter.BoundaryUnknown() {
 		replies = nil
-		note = "turn-end boundary unknown: history could not be read, so no replies are reported; run `muse-cli wait` again"
+		note = "turn-end boundary unknown: history could not be read, so no replies are reported; run `castctl wait` again"
 	}
 	if finalReadFailed {
 		// The final-read note wins over the boundary note, as in
 		// the Python result construction.
-		note = "could not read the final replies; run `muse-cli wait` again"
+		note = "could not read the final replies; run `castctl wait` again"
 	}
 	if kind == KindApproval {
 		// An approval Outcome carries no Detail; the status

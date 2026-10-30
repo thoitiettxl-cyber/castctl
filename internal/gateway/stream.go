@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
-	pb "github.com/thoitiettxl-cyber/muse-cli/go/internal/proto"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	pb "github.com/thoitiettxl-cyber/castctl/internal/proto"
 	"google.golang.org/protobuf/proto"
 )
 

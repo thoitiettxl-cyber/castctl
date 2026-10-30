@@ -9,7 +9,7 @@ import (
 	"errors"
 	"slices"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // HistoryReader reads one chat.history window. Events are decoded

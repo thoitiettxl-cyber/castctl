@@ -19,7 +19,7 @@ import (
 	"github.com/sagernet/sing/common/json"
 	"github.com/sagernet/sing/service"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/outbound"
+	"github.com/thoitiettxl-cyber/castctl/internal/outbound"
 )
 
 // Per-profile isolation, bullet 1: two FULL stacks (Manager + DNS +

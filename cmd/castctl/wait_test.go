@@ -16,12 +16,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/commands"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway/gatewaytest"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/profile"
-	pb "github.com/thoitiettxl-cyber/muse-cli/go/internal/proto"
+	"github.com/thoitiettxl-cyber/castctl/internal/commands"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway/gatewaytest"
+	"github.com/thoitiettxl-cyber/castctl/internal/profile"
+	pb "github.com/thoitiettxl-cyber/castctl/internal/proto"
 )
 
 // scriptedHandler answers gateway methods from per-test scripts. It
@@ -105,7 +105,7 @@ func (h *scriptedHandler) Handle(req *pb.ApplicationRequest, service pb.ServiceT
 func fakeHome(t *testing.T, cfgJSON string) string {
 	t.Helper()
 	home := t.TempDir()
-	base := filepath.Join(home, ".config", "muse-cli")
+	base := filepath.Join(home, ".config", "castctl")
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -128,8 +128,8 @@ func runWired(t *testing.T, home string, handler *scriptedHandler, args ...strin
 	t.Helper()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("MUSE_CLI_CONFIG", "")
-	t.Setenv("MUSE_CLI_PROFILE", "")
+	t.Setenv("CASTCTL_CONFIG", "")
+	t.Setenv("CASTCTL_PROFILE", "")
 	server, err := gatewaytest.NewServer(handler)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -553,7 +553,7 @@ func TestSendNodeIDOrigins(t *testing.T) {
 				t.Fatalf("generated node_id = %q, want lowercase hex", nodeID)
 			}
 		}
-		raw, err := os.ReadFile(filepath.Join(home, ".config", "muse-cli", "config.json"))
+		raw, err := os.ReadFile(filepath.Join(home, ".config", "castctl", "config.json"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -600,7 +600,7 @@ func TestSendNodeIDOrigins(t *testing.T) {
 		if streamBody["node_id"] != "env-node-123" {
 			t.Errorf("node_id = %v, want env-node-123", streamBody["node_id"])
 		}
-		raw, _ := os.ReadFile(filepath.Join(home, ".config", "muse-cli", "config.json"))
+		raw, _ := os.ReadFile(filepath.Join(home, ".config", "castctl", "config.json"))
 		if strings.Contains(string(raw), "node_id") {
 			t.Errorf("env node_id must not be persisted: %s", raw)
 		}
@@ -613,7 +613,7 @@ func TestSendNodeIDOrigins(t *testing.T) {
 				historyBody(userEv(100, "old"), userEv(110, "hello")),
 			},
 		}
-		before, _ := os.ReadFile(filepath.Join(home, ".config", "muse-cli", "config.json"))
+		before, _ := os.ReadFile(filepath.Join(home, ".config", "castctl", "config.json"))
 		code, _, errb := runWired(t, home, h, "send", "hello", "--wait", "0", "--ack-timeout", "5")
 		if code != 0 {
 			t.Fatalf("send: code=%d err=%q", code, errb)
@@ -623,7 +623,7 @@ func TestSendNodeIDOrigins(t *testing.T) {
 		if streamBody["node_id"] != "file-node-9" {
 			t.Errorf("node_id = %v, want file-node-9", streamBody["node_id"])
 		}
-		after, _ := os.ReadFile(filepath.Join(home, ".config", "muse-cli", "config.json"))
+		after, _ := os.ReadFile(filepath.Join(home, ".config", "castctl", "config.json"))
 		if string(before) != string(after) {
 			t.Errorf("config file must not be rewritten when node_id is present:\nbefore %s\nafter %s", before, after)
 		}
@@ -853,7 +853,7 @@ func TestAutoApproveStatusAndToggles(t *testing.T) {
 	if res["auto_approve"] != "always" || res["auto_allow_once"] != true {
 		t.Errorf("status = %v", res)
 	}
-	if res["source"] != "config "+filepath.Join(home, ".config", "muse-cli", "config.json") || !strings.HasPrefix(res["once_source"].(string), "config ") {
+	if res["source"] != "config "+filepath.Join(home, ".config", "castctl", "config.json") || !strings.HasPrefix(res["once_source"].(string), "config ") {
 		t.Errorf("sources = %v/%v, want config paths", res["source"], res["once_source"])
 	}
 	if res["config"] != "always" || res["once_config"] != true {
@@ -863,7 +863,7 @@ func TestAutoApproveStatusAndToggles(t *testing.T) {
 	if code, _, errb := runWired(t, home, h, "auto-approve", "off"); code != 0 {
 		t.Fatalf("auto-approve off: code=%d err=%q", code, errb)
 	}
-	raw, _ := os.ReadFile(filepath.Join(home, ".config", "muse-cli", "config.json"))
+	raw, _ := os.ReadFile(filepath.Join(home, ".config", "castctl", "config.json"))
 	if !strings.Contains(string(raw), `"auto_approve": "off"`) {
 		t.Errorf("config after off: %s", raw)
 	}
@@ -880,7 +880,7 @@ func TestAutoApproveStatusAndToggles(t *testing.T) {
 	if code, _, errb := runWired(t, home, h, "auto-approve", "once", "off"); code != 0 {
 		t.Fatalf("auto-approve once off: code=%d err=%q", code, errb)
 	}
-	raw, _ = os.ReadFile(filepath.Join(home, ".config", "muse-cli", "config.json"))
+	raw, _ = os.ReadFile(filepath.Join(home, ".config", "castctl", "config.json"))
 	if !strings.Contains(string(raw), `"auto_allow_once": false`) {
 		t.Errorf("config after once off: %s", raw)
 	}
@@ -986,8 +986,8 @@ func runWithRuntime(t *testing.T, home string, rt *commands.Runtime, rtErr error
 	t.Helper()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("MUSE_CLI_CONFIG", "")
-	t.Setenv("MUSE_CLI_PROFILE", "")
+	t.Setenv("CASTCTL_CONFIG", "")
+	t.Setenv("CASTCTL_PROFILE", "")
 	var out, errb bytes.Buffer
 	env := &commands.Env{
 		Stdout: &out,
@@ -1033,8 +1033,8 @@ func TestRecoverConvertsBuildPanic(t *testing.T) {
 	home := fakeHome(t, defaultSingleConfig)
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("MUSE_CLI_CONFIG", "")
-	t.Setenv("MUSE_CLI_PROFILE", "")
+	t.Setenv("CASTCTL_CONFIG", "")
+	t.Setenv("CASTCTL_PROFILE", "")
 	var out, errb bytes.Buffer
 	env := &commands.Env{
 		Stdout: &out,

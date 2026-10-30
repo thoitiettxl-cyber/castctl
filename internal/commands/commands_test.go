@@ -15,10 +15,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway/gatewaytest"
-	pb "github.com/thoitiettxl-cyber/muse-cli/go/internal/proto"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway/gatewaytest"
+	pb "github.com/thoitiettxl-cyber/castctl/internal/proto"
 )
 
 const fakeCookie = "hatch_sess=FAKE; datr=FAKE"
@@ -91,7 +91,7 @@ func newFakeStack(t *testing.T, handler gatewaytest.Handler, httpExtra http.Hand
 	env := &Env{
 		Stdout: out,
 		Stderr: errb,
-		Getenv: mapGetenv(map[string]string{"MUSE_CLI_CONFIG": configFile}),
+		Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile}),
 		// The connector hook ignores the real dialer and uses the
 		// fake one: the Noise handshake runs against the fake
 		// server on loopback, never the live gateway.
@@ -136,7 +136,7 @@ func mustJSON(t *testing.T, data []byte, v any) {
 
 func TestDeferredCommands(t *testing.T) {
 	_, configFile := testHome(t, "")
-	env := &Env{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Getenv: mapGetenv(map[string]string{"MUSE_CLI_CONFIG": configFile})}
+	env := &Env{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile})}
 	cases := map[string]string{
 		"telegram": "PR5", "update": "PR5",
 	}
@@ -163,7 +163,7 @@ func TestDeferredCommands(t *testing.T) {
 	if code := Run(context.Background(), []string{"send", "--help"}, env); code != 0 {
 		t.Errorf("send --help: code=%d, want 0", code)
 	}
-	if strings.Contains(out.String(), "PR4") || !strings.Contains(out.String(), "usage: muse-cli send") {
+	if strings.Contains(out.String(), "PR4") || !strings.Contains(out.String(), "usage: castctl send") {
 		t.Errorf("send --help: %q, want usage without a PR4 note", out.String())
 	}
 	// Truly unknown commands are distinguished from deferred ones.
@@ -200,11 +200,11 @@ func TestParserRejections(t *testing.T) {
 func TestHelpMentions(t *testing.T) {
 	_, configFile := testHome(t, "")
 	out, errb := &bytes.Buffer{}, &bytes.Buffer{}
-	env := &Env{Stdout: out, Stderr: errb, Getenv: mapGetenv(map[string]string{"MUSE_CLI_CONFIG": configFile})}
+	env := &Env{Stdout: out, Stderr: errb, Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile})}
 	if code := Run(context.Background(), []string{"--help"}, env); code != 0 {
 		t.Fatalf("--help: code=%d", code)
 	}
-	for _, want := range []string{"--config", "MUSE_CLI_CONFIG", "XDG", "fingerprint", "tls_engine", "browser"} {
+	for _, want := range []string{"--config", "CASTCTL_CONFIG", "XDG", "fingerprint", "tls_engine", "browser"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("global help missing %q", want)
 		}
@@ -229,7 +229,7 @@ func TestHelpMentions(t *testing.T) {
 func TestConfigLocationPrecedence(t *testing.T) {
 	home := t.TempDir()
 	// Three candidate homes: default (XDG), env, flag.
-	defaultDir := filepath.Join(home, "xdg", "muse-cli")
+	defaultDir := filepath.Join(home, "xdg", "castctl")
 	envDir := filepath.Join(home, "envdir")
 	flagDir := filepath.Join(home, "flagdir")
 	for _, dir := range []string{defaultDir, envDir, flagDir} {
@@ -258,12 +258,12 @@ func TestConfigLocationPrecedence(t *testing.T) {
 		t.Errorf("XDG home not used: %q", out)
 	}
 	// Env beats XDG.
-	code, out, _ = runWith(t, map[string]string{"XDG_CONFIG_HOME": filepath.Join(home, "xdg"), "HOME": home, "MUSE_CLI_CONFIG": filepath.Join(envDir, "config.json")}, "profile", "show")
+	code, out, _ = runWith(t, map[string]string{"XDG_CONFIG_HOME": filepath.Join(home, "xdg"), "HOME": home, "CASTCTL_CONFIG": filepath.Join(envDir, "config.json")}, "profile", "show")
 	if code != 0 || !strings.Contains(out, filepath.Join(envDir, "cookies.txt")) {
 		t.Errorf("env-beats-XDG: code=%d out=%q", code, out)
 	}
 	// Flag beats env.
-	code, out, _ = runWith(t, map[string]string{"XDG_CONFIG_HOME": filepath.Join(home, "xdg"), "HOME": home, "MUSE_CLI_CONFIG": filepath.Join(envDir, "config.json")}, "--config", filepath.Join(flagDir, "config.json"), "profile", "show")
+	code, out, _ = runWith(t, map[string]string{"XDG_CONFIG_HOME": filepath.Join(home, "xdg"), "HOME": home, "CASTCTL_CONFIG": filepath.Join(envDir, "config.json")}, "--config", filepath.Join(flagDir, "config.json"), "profile", "show")
 	if code != 0 || !strings.Contains(out, filepath.Join(flagDir, "cookies.txt")) {
 		t.Errorf("flag-beats-env: code=%d out=%q", code, out)
 	}
@@ -298,12 +298,12 @@ func TestConfigLocationXDGEdgeCases(t *testing.T) {
 	if !strings.Contains(errb, "warning") {
 		t.Errorf("relative XDG: no warning on stderr: %q", errb)
 	}
-	if !strings.Contains(out, filepath.Join(home, ".config", "muse-cli", "cookies.txt")) {
+	if !strings.Contains(out, filepath.Join(home, ".config", "castctl", "cookies.txt")) {
 		t.Errorf("relative XDG: fallback not used: %q", out)
 	}
 	// Empty XDG_CONFIG_HOME means default.
 	code, out, _ = runShow(map[string]string{"XDG_CONFIG_HOME": "", "HOME": home})
-	if code != 0 || !strings.Contains(out, filepath.Join(home, ".config", "muse-cli", "cookies.txt")) {
+	if code != 0 || !strings.Contains(out, filepath.Join(home, ".config", "castctl", "cookies.txt")) {
 		t.Errorf("empty XDG: code=%d out=%q", code, out)
 	}
 	// Relative explicit --config resolves under the CWD.
@@ -343,7 +343,7 @@ func TestTypedAuthErrors(t *testing.T) {
 	out, errb := &bytes.Buffer{}, &bytes.Buffer{}
 	env := &Env{
 		Stdout: out, Stderr: errb,
-		Getenv: mapGetenv(map[string]string{"MUSE_CLI_CONFIG": configFile}),
+		Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile}),
 		NewConnector: func(d gateway.OutboundDialer, opts ...gateway.ConnectorOption) conn.Connector {
 			return gateway.NewConnector(dialer, gateway.WithWebSocketSecure(false))
 		},
@@ -372,7 +372,7 @@ func TestTypedAuthErrors(t *testing.T) {
 	}
 	out.Reset()
 	errb.Reset()
-	env.Getenv = mapGetenv(map[string]string{"MUSE_CLI_CONFIG": configFile2})
+	env.Getenv = mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile2})
 	code = Run(context.Background(), []string{"status"}, env)
 	if code != 2 {
 		t.Fatalf("missing cookies: code=%d, want 2", code)
@@ -388,7 +388,7 @@ func TestTypedAuthErrors(t *testing.T) {
 		return gateway.NewConnector(dialer2, gateway.WithWebSocketSecure(false))
 	}
 	env.HTTPClient = func() *http.Client { return dialer2.HTTPClient() }
-	env.Getenv = mapGetenv(map[string]string{"MUSE_CLI_CONFIG": configFile})
+	env.Getenv = mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile})
 	out.Reset()
 	errb.Reset()
 	code = Run(context.Background(), []string{"status"}, env)

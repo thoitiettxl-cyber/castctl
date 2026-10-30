@@ -17,7 +17,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 	badoption "github.com/sagernet/sing/common/json/badoption"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/redact"
+	"github.com/thoitiettxl-cyber/castctl/internal/redact"
 )
 
 // WireGuard conf converter: wg-quick .conf -> sing-box 1.14

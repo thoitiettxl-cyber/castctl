@@ -8,9 +8,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/deliver"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/deliver"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
 )
 
 func init() {
@@ -70,7 +70,7 @@ func init() {
 // cmdAuth dispatches auth subcommands: list, export and import.
 func cmdAuth(ctx context.Context, env *Env, g *globalOpts, args []string) error {
 	if len(args) == 0 {
-		fmt.Fprintln(env.stderr(), "muse-cli: the following arguments are required: subcommand")
+		fmt.Fprintln(env.stderr(), "castctl: the following arguments are required: subcommand")
 		fmt.Fprint(env.stderr(), authHelpText)
 		return errCode(2, nil)
 	}
@@ -85,17 +85,17 @@ func cmdAuth(ctx context.Context, env *Env, g *globalOpts, args []string) error 
 	case "import":
 		return cmdAuthImport(ctx, env, g, args[1:])
 	default:
-		fmt.Fprintf(env.stderr(), "muse-cli: argument subcommand: invalid choice: %q (choose from list, export, import)\n", args[0])
+		fmt.Fprintf(env.stderr(), "castctl: argument subcommand: invalid choice: %q (choose from list, export, import)\n", args[0])
 		return errCode(2, nil)
 	}
 }
 
 func cmdAuthList(ctx context.Context, env *Env, g *globalOpts, args []string) error {
-	ap := &argParser{defs: []flagDef{{name: "json", kind: flagBool}}, helpText: authListHelpText, prog: "muse-cli auth list"}
+	ap := &argParser{defs: []flagDef{{name: "json", kind: flagBool}}, helpText: authListHelpText, prog: "castctl auth list"}
 	p, helpShown, err := ap.parse(args, env.stdout())
 	if err != nil {
 		if pe, ok := err.(*parserError); ok {
-			fmt.Fprintf(env.stderr(), "muse-cli: %s\n", pe.msg)
+			fmt.Fprintf(env.stderr(), "castctl: %s\n", pe.msg)
 			return errCode(2, pe)
 		}
 		return err
@@ -126,11 +126,11 @@ func cmdAuthList(ctx context.Context, env *Env, g *globalOpts, args []string) er
 }
 
 func cmdAuthExport(ctx context.Context, env *Env, g *globalOpts, args []string) error {
-	ap := &argParser{defs: nil, helpText: authExportHelpText, prog: "muse-cli auth export"}
+	ap := &argParser{defs: nil, helpText: authExportHelpText, prog: "castctl auth export"}
 	_, helpShown, err := ap.parse(args, env.stdout())
 	if err != nil {
 		if pe, ok := err.(*parserError); ok {
-			fmt.Fprintf(env.stderr(), "muse-cli: %s\n", pe.msg)
+			fmt.Fprintf(env.stderr(), "castctl: %s\n", pe.msg)
 			return errCode(2, pe)
 		}
 		return err

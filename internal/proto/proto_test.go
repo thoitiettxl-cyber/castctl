@@ -15,7 +15,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
 
-	pb "github.com/thoitiettxl-cyber/muse-cli/go/internal/proto"
+	pb "github.com/thoitiettxl-cyber/castctl/internal/proto"
 )
 
 func sha256Hex(b []byte) string {

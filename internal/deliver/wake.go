@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
 )
 
 // WakeTimeout bounds the wake POST itself: 15s in Python

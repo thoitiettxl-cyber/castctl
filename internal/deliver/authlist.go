@@ -10,7 +10,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/profile"
+	"github.com/thoitiettxl-cyber/castctl/internal/profile"
 )
 
 // ProfileRow is one row of the `auth list` output, ported from

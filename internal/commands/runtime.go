@@ -17,11 +17,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/dns"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/outbound"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/profile"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/dns"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
+	"github.com/thoitiettxl-cyber/castctl/internal/outbound"
+	"github.com/thoitiettxl-cyber/castctl/internal/profile"
 
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -116,7 +116,7 @@ func requireCookiesFile(p *profile.Profile) error {
 	info, err := os.Stat(p.CookiesFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &typedAuthError{Code: 2, Type: "cookies_missing", Err: fmt.Errorf("no cookies at %s (run `muse-cli auth export` for guidance)", p.CookiesFile)}
+			return &typedAuthError{Code: 2, Type: "cookies_missing", Err: fmt.Errorf("no cookies at %s (run `castctl auth export` for guidance)", p.CookiesFile)}
 		}
 		return &typedAuthError{Code: 2, Type: "cookies_missing", Err: err}
 	}
@@ -187,7 +187,7 @@ func defaultBuildRuntime(ctx context.Context, loc *profile.ConfigLocation, prof 
 		return nil, err
 	}
 
-	mgr, err := outbound.NewManager(ctx, log.NewNOPFactory().NewLogger("muse-cli"))
+	mgr, err := outbound.NewManager(ctx, log.NewNOPFactory().NewLogger("castctl"))
 	if err != nil {
 		return nil, errCode(2, err)
 	}
@@ -272,7 +272,7 @@ func defaultBuildRuntime(ctx context.Context, loc *profile.ConfigLocation, prof 
 // created when a profile's outbound reference is an endpoint tag
 // (e.g. wireguard): endpoints cannot be dialled directly, only via
 // an outbound that detours to them.
-const dialerOutboundTag = "muse-cli-dialer"
+const dialerOutboundTag = "castctl-dialer"
 
 // createOutbounds creates endpoints first, then outbounds in
 // detour-first topological order. The guard rejection from
@@ -331,7 +331,7 @@ func createOutbounds(ctx context.Context, mgr *outbound.Manager, single *profile
 				created[ob.Tag] = true
 			}
 		case profile.OutboundTag:
-			return errCodef(2, "profile %q references outbound tag %q, but no single config file exists: run `muse-cli config migrate --write` first", prof.Name, prof.Outbound.Tag)
+			return errCodef(2, "profile %q references outbound tag %q, but no single config file exists: run `castctl config migrate --write` first", prof.Name, prof.Outbound.Tag)
 		}
 	}
 	// Synthetic dialer outbound for direct endpoint references,

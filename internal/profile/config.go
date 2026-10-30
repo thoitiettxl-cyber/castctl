@@ -854,7 +854,7 @@ func LoadProfileWithEnv(baseDir, name string) (*Profile, error) {
 }
 
 // ResolveActiveProfile resolves the active profile: --profile flag >
-// MUSE_CLI_PROFILE > default_profile (single file) > "default". A
+// CASTCTL_PROFILE > default_profile (single file) > "default". A
 // default_profile naming a profile that exists nowhere is an error; an
 // explicit flag or env name bypasses default_profile entirely.
 func ResolveActiveProfile(baseDir string, flag *string, getenv func(string) (string, bool)) (*Profile, error) {

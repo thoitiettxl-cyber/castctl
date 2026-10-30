@@ -5,7 +5,7 @@
 package profile
 
 import (
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/redact"
+	"github.com/thoitiettxl-cyber/castctl/internal/redact"
 )
 
 // RedactJSON redacts every secret field in serialised JSON, operating

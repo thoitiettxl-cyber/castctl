@@ -40,7 +40,7 @@ func TestResolveConfigLocationPrecedence(t *testing.T) {
 	paramPath := filepath.Join(t.TempDir(), "param", "config.json")
 
 	// Injected-environment precedence only: every case here is
-	// decided by the explicit parameter or MUSE_CLI_CONFIG, or by
+	// decided by the explicit parameter or CASTCTL_CONFIG, or by
 	// an absolute XDG_CONFIG_HOME. Default-home and relative-XDG
 	// cases live in the process-environment tests below, where
 	// expectations come from os.UserConfigDir() itself.
@@ -57,12 +57,12 @@ func TestResolveConfigLocationPrecedence(t *testing.T) {
 		{
 			name:     "XDG alone",
 			env:      map[string]string{"HOME": home, "XDG_CONFIG_HOME": xdg},
-			wantFile: filepath.Join(xdg, "muse-cli", "config.json"),
-			wantDir:  filepath.Join(xdg, "muse-cli"),
+			wantFile: filepath.Join(xdg, "castctl", "config.json"),
+			wantDir:  filepath.Join(xdg, "castctl"),
 		},
 		{
 			name:     "env alone",
-			env:      map[string]string{"HOME": home, "MUSE_CLI_CONFIG": envPath},
+			env:      map[string]string{"HOME": home, "CASTCTL_CONFIG": envPath},
 			wantFile: envPath, wantDir: filepath.Dir(envPath), wantExpl: true,
 		},
 		{
@@ -74,7 +74,7 @@ func TestResolveConfigLocationPrecedence(t *testing.T) {
 		{
 			name:     "explicit beats env",
 			explicit: paramPath,
-			env:      map[string]string{"HOME": home, "MUSE_CLI_CONFIG": envPath},
+			env:      map[string]string{"HOME": home, "CASTCTL_CONFIG": envPath},
 			wantFile: paramPath, wantDir: filepath.Dir(paramPath), wantExpl: true,
 		},
 		{
@@ -85,13 +85,13 @@ func TestResolveConfigLocationPrecedence(t *testing.T) {
 		},
 		{
 			name:     "env beats XDG",
-			env:      map[string]string{"HOME": home, "MUSE_CLI_CONFIG": envPath, "XDG_CONFIG_HOME": xdg},
+			env:      map[string]string{"HOME": home, "CASTCTL_CONFIG": envPath, "XDG_CONFIG_HOME": xdg},
 			wantFile: envPath, wantDir: filepath.Dir(envPath), wantExpl: true,
 		},
 		{
 			name:     "empty explicit falls through to env",
 			explicit: "",
-			env:      map[string]string{"HOME": home, "MUSE_CLI_CONFIG": envPath},
+			env:      map[string]string{"HOME": home, "CASTCTL_CONFIG": envPath},
 			wantFile: envPath, wantDir: filepath.Dir(envPath), wantExpl: true,
 		},
 		{
@@ -102,14 +102,14 @@ func TestResolveConfigLocationPrecedence(t *testing.T) {
 		},
 		{
 			name:    "env is a directory",
-			env:     map[string]string{"HOME": home, "MUSE_CLI_CONFIG": home},
+			env:     map[string]string{"HOME": home, "CASTCTL_CONFIG": home},
 			wantErr: true,
 		},
 		{
 			name:     "empty env falls through to XDG",
-			env:      map[string]string{"HOME": home, "MUSE_CLI_CONFIG": "", "XDG_CONFIG_HOME": xdg},
-			wantFile: filepath.Join(xdg, "muse-cli", "config.json"),
-			wantDir:  filepath.Join(xdg, "muse-cli"),
+			env:      map[string]string{"HOME": home, "CASTCTL_CONFIG": "", "XDG_CONFIG_HOME": xdg},
+			wantFile: filepath.Join(xdg, "castctl", "config.json"),
+			wantDir:  filepath.Join(xdg, "castctl"),
 		},
 		{
 			name:     "tilde is not expanded",
@@ -159,7 +159,7 @@ func TestResolveConfigLocationFromProcessEnv(t *testing.T) {
 	envPath := filepath.Join(t.TempDir(), "env", "config.json")
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", xdg)
-	t.Setenv("MUSE_CLI_CONFIG", envPath)
+	t.Setenv("CASTCTL_CONFIG", envPath)
 
 	// Env beats XDG through the real process environment.
 	loc, err := ResolveConfigLocationWithEnv("")
@@ -184,15 +184,15 @@ func TestResolveConfigLocationDefaultRegression(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("MUSE_CLI_CONFIG", "")
+	t.Setenv("CASTCTL_CONFIG", "")
 	loc, err := ResolveConfigLocationWithEnv("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The default is Join(os.UserConfigDir(), "muse-cli") under the
+	// The default is Join(os.UserConfigDir(), "castctl") under the
 	// controlled environment — computed from the platform API, never
 	// from a hardcoded home path.
-	wantDir := filepath.Join(mustUserConfigDir(t), "muse-cli")
+	wantDir := filepath.Join(mustUserConfigDir(t), "castctl")
 	if loc.ConfigDir != wantDir {
 		t.Fatalf("ConfigDir = %q, want %q (os.UserConfigDir-derived)", loc.ConfigDir, wantDir)
 	}
@@ -212,13 +212,13 @@ func TestResolveConfigLocationXDGFromProcessEnv(t *testing.T) {
 	xdg := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", xdg)
-	t.Setenv("MUSE_CLI_CONFIG", "")
+	t.Setenv("CASTCTL_CONFIG", "")
 	loc, err := ResolveConfigLocationWithEnv("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantDir := filepath.Join(mustUserConfigDir(t), "muse-cli")
-	if loc.ConfigDir != wantDir || wantDir != filepath.Join(xdg, "muse-cli") {
+	wantDir := filepath.Join(mustUserConfigDir(t), "castctl")
+	if loc.ConfigDir != wantDir || wantDir != filepath.Join(xdg, "castctl") {
 		t.Fatalf("ConfigDir = %q, want os.UserConfigDir-derived %q", loc.ConfigDir, wantDir)
 	}
 	if loc.Explicit {
@@ -230,12 +230,12 @@ func TestResolveConfigLocationXDGEmptyFromProcessEnv(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("MUSE_CLI_CONFIG", "")
+	t.Setenv("CASTCTL_CONFIG", "")
 	loc, err := ResolveConfigLocationWithEnv("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loc.ConfigDir != filepath.Join(mustUserConfigDir(t), "muse-cli") {
+	if loc.ConfigDir != filepath.Join(mustUserConfigDir(t), "castctl") {
 		t.Fatalf("ConfigDir = %q, want the os.UserConfigDir-derived default", loc.ConfigDir)
 	}
 }
@@ -244,7 +244,7 @@ func TestResolveConfigLocationXDGRelativeFromProcessEnv(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "rel/xdg")
-	t.Setenv("MUSE_CLI_CONFIG", "")
+	t.Setenv("CASTCTL_CONFIG", "")
 	loc, err := ResolveConfigLocationWithEnv("")
 	if err != nil {
 		t.Fatal(err)
@@ -266,12 +266,12 @@ func TestResolveConfigLocationXDGRootFromProcessEnv(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "/")
-	t.Setenv("MUSE_CLI_CONFIG", "")
+	t.Setenv("CASTCTL_CONFIG", "")
 	loc, err := ResolveConfigLocationWithEnv("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantDir := filepath.Join(mustUserConfigDir(t), "muse-cli")
+	wantDir := filepath.Join(mustUserConfigDir(t), "castctl")
 	if loc.ConfigDir != wantDir {
 		t.Fatalf("ConfigDir = %q, want %q (XDG root treated literally)", loc.ConfigDir, wantDir)
 	}
@@ -280,7 +280,7 @@ func TestResolveConfigLocationXDGRootFromProcessEnv(t *testing.T) {
 func TestResolveConfigLocationNoUsableHome(t *testing.T) {
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("MUSE_CLI_CONFIG", "")
+	t.Setenv("CASTCTL_CONFIG", "")
 	_, err := ResolveConfigLocationWithEnv("")
 	if err == nil {
 		t.Fatal("ResolveConfigLocation = nil error, want an error with no usable home")
@@ -296,7 +296,7 @@ func TestResolveConfigLocationNoUsableHome(t *testing.T) {
 func TestResolveConfigLocationRelativeXDGNoHome(t *testing.T) {
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "rel/xdg")
-	t.Setenv("MUSE_CLI_CONFIG", "")
+	t.Setenv("CASTCTL_CONFIG", "")
 	_, err := ResolveConfigLocationWithEnv("")
 	if err == nil {
 		t.Fatal("ResolveConfigLocation = nil error, want an error (relative XDG, no home for the fallback)")
@@ -485,17 +485,17 @@ func TestProfileResolutionUnchangedInCustomHome(t *testing.T) {
 	if p.Name != "work" {
 		t.Fatalf("active = %q, want work via default_profile", p.Name)
 	}
-	// MUSE_CLI_PROFILE wins over default_profile.
-	p, err = ResolveActiveProfile(base, nil, lookupEnv(map[string]string{"MUSE_CLI_PROFILE": "default"}))
+	// CASTCTL_PROFILE wins over default_profile.
+	p, err = ResolveActiveProfile(base, nil, lookupEnv(map[string]string{"CASTCTL_PROFILE": "default"}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if p.Name != "default" {
-		t.Fatalf("active = %q, want default via MUSE_CLI_PROFILE", p.Name)
+		t.Fatalf("active = %q, want default via CASTCTL_PROFILE", p.Name)
 	}
 	// --profile flag wins over both.
 	flag := "work"
-	p, err = ResolveActiveProfile(base, &flag, lookupEnv(map[string]string{"MUSE_CLI_PROFILE": "default"}))
+	p, err = ResolveActiveProfile(base, &flag, lookupEnv(map[string]string{"CASTCTL_PROFILE": "default"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,4 +506,182 @@ func TestProfileResolutionUnchangedInCustomHome(t *testing.T) {
 	if p.Dir != filepath.Join(base, "profiles", "work") {
 		t.Fatalf("Dir = %q, want the custom-dir profile dir", p.Dir)
 	}
+}
+
+// TestResolveConfigLocationLegacyFallback pins the migration
+// fallback (Boss order): when the new default "castctl" directory
+// does not exist but the pre-migration "muse-cli" directory does,
+// resolution reads from the old directory and warns once, telling
+// the user to move it. Nothing is moved, copied, or deleted by
+// resolution itself, and writes stay co-located in the old
+// directory (it becomes CONFIG_DIR). Explicit locations never fall
+// back. All directories here are temp dirs under the injected
+// environment; the real user config home is never touched.
+func TestResolveConfigLocationLegacyFallback(t *testing.T) {
+	snapshot := func(t *testing.T, dir string) map[string][]byte {
+		t.Helper()
+		out := map[string][]byte{}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				t.Fatalf("unexpected subdirectory %q in legacy snapshot", e.Name())
+			}
+			data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out[e.Name()] = data
+		}
+		return out
+	}
+	eqSnapshot := func(t *testing.T, want, got map[string][]byte) {
+		t.Helper()
+		if len(want) != len(got) {
+			t.Fatalf("legacy contents changed: want %d file(s), got %d", len(want), len(got))
+		}
+		for name, wantData := range want {
+			gotData, ok := got[name]
+			if !ok || string(gotData) != string(wantData) {
+				t.Fatalf("legacy file %q changed", name)
+			}
+		}
+	}
+
+	t.Run("fallback used with warning, old dir untouched", func(t *testing.T) {
+		xdg := t.TempDir()
+		legacyDir := filepath.Join(xdg, "muse-cli")
+		if err := os.MkdirAll(legacyDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		mustStatConfig(t, filepath.Join(legacyDir, "config.json"))
+		if err := os.WriteFile(filepath.Join(legacyDir, "cookies.txt"), []byte("hatch_sess=placeholder\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		before := snapshot(t, legacyDir)
+
+		loc, err := ResolveConfigLocation("", lookupEnv(map[string]string{"HOME": t.TempDir(), "XDG_CONFIG_HOME": xdg}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loc.ConfigDir != legacyDir {
+			t.Fatalf("ConfigDir = %q, want legacy dir %q", loc.ConfigDir, legacyDir)
+		}
+		if loc.ConfigFile != filepath.Join(legacyDir, "config.json") {
+			t.Fatalf("ConfigFile = %q, want %q", loc.ConfigFile, filepath.Join(legacyDir, "config.json"))
+		}
+		if loc.Explicit {
+			t.Fatal("Explicit = true, want false for a default-location fallback")
+		}
+		if len(loc.Warnings) != 1 || !strings.Contains(loc.Warnings[0], "legacy") || !strings.Contains(loc.Warnings[0], legacyDir) || !strings.Contains(loc.Warnings[0], filepath.Join(xdg, "castctl")) {
+			t.Fatalf("Warnings = %v, want one legacy warning naming both directories", loc.Warnings)
+		}
+		if strings.Contains(loc.Warnings[0], "\n") {
+			t.Fatalf("warning is not one line: %q", loc.Warnings[0])
+		}
+		// Resolution created nothing in the new location and
+		// changed nothing in the old one.
+		if _, err := os.Stat(filepath.Join(xdg, "castctl")); !os.IsNotExist(err) {
+			t.Fatalf("new config dir was created by resolution: %v", err)
+		}
+		eqSnapshot(t, before, snapshot(t, legacyDir))
+	})
+
+	t.Run("new dir wins when present", func(t *testing.T) {
+		xdg := t.TempDir()
+		newDir := filepath.Join(xdg, "castctl")
+		legacyDir := filepath.Join(xdg, "muse-cli")
+		if err := os.MkdirAll(newDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(legacyDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		loc, err := ResolveConfigLocation("", lookupEnv(map[string]string{"HOME": t.TempDir(), "XDG_CONFIG_HOME": xdg}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loc.ConfigDir != newDir {
+			t.Fatalf("ConfigDir = %q, want new dir %q", loc.ConfigDir, newDir)
+		}
+		if len(loc.Warnings) != 0 {
+			t.Fatalf("Warnings = %v, want none when the new dir exists", loc.Warnings)
+		}
+	})
+
+	t.Run("neither present resolves to new dir", func(t *testing.T) {
+		xdg := t.TempDir()
+		loc, err := ResolveConfigLocation("", lookupEnv(map[string]string{"HOME": t.TempDir(), "XDG_CONFIG_HOME": xdg}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loc.ConfigDir != filepath.Join(xdg, "castctl") {
+			t.Fatalf("ConfigDir = %q, want %q", loc.ConfigDir, filepath.Join(xdg, "castctl"))
+		}
+		if len(loc.Warnings) != 0 {
+			t.Fatalf("Warnings = %v, want none", loc.Warnings)
+		}
+		if _, err := os.Stat(filepath.Join(xdg, "castctl")); !os.IsNotExist(err) {
+			t.Fatalf("resolution created the new dir: %v", err)
+		}
+	})
+
+	t.Run("explicit path never falls back", func(t *testing.T) {
+		xdg := t.TempDir()
+		legacyDir := filepath.Join(xdg, "muse-cli")
+		if err := os.MkdirAll(legacyDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		explicit := filepath.Join(t.TempDir(), "explicit", "config.json")
+		loc, err := ResolveConfigLocation(explicit, lookupEnv(map[string]string{"HOME": t.TempDir(), "XDG_CONFIG_HOME": xdg}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loc.ConfigFile != explicit || !loc.Explicit {
+			t.Fatalf("ConfigFile = %q Explicit = %v, want %q true", loc.ConfigFile, loc.Explicit, explicit)
+		}
+		if len(loc.Warnings) != 0 {
+			t.Fatalf("Warnings = %v, want none for an explicit location", loc.Warnings)
+		}
+	})
+
+	t.Run("legacy path that is a file does not fall back", func(t *testing.T) {
+		xdg := t.TempDir()
+		if err := os.WriteFile(filepath.Join(xdg, "muse-cli"), []byte("not a dir"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		loc, err := ResolveConfigLocation("", lookupEnv(map[string]string{"HOME": t.TempDir(), "XDG_CONFIG_HOME": xdg}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loc.ConfigDir != filepath.Join(xdg, "castctl") {
+			t.Fatalf("ConfigDir = %q, want new dir", loc.ConfigDir)
+		}
+		if len(loc.Warnings) != 0 {
+			t.Fatalf("Warnings = %v, want none", loc.Warnings)
+		}
+	})
+
+	t.Run("writes after fallback stay in the old dir", func(t *testing.T) {
+		xdg := t.TempDir()
+		legacyDir := filepath.Join(xdg, "muse-cli")
+		if err := os.MkdirAll(legacyDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		loc, err := ResolveConfigLocation("", lookupEnv(map[string]string{"HOME": t.TempDir(), "XDG_CONFIG_HOME": xdg}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := SaveSingleConfig(loc.ConfigDir, &SingleConfig{Profiles: map[string]*Profile{}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(legacyDir, "config.json")); err != nil {
+			t.Fatalf("config.json was not written to the legacy dir: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(xdg, "castctl")); !os.IsNotExist(err) {
+			t.Fatalf("write created the new dir: %v", err)
+		}
+	})
 }

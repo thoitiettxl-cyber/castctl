@@ -12,8 +12,8 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing/service"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/outbound"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/profile"
+	"github.com/thoitiettxl-cyber/castctl/internal/outbound"
+	"github.com/thoitiettxl-cyber/castctl/internal/profile"
 )
 
 // TestRegistryContextSharedWithProfile pins the NB9 unification from

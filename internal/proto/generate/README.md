@@ -47,7 +47,7 @@ names):
 ## Regenerate
 
 ```sh
-cd go/internal/proto/generate
+cd internal/proto/generate
 ./generate.sh [PATH-TO-protoc-gen-go]
 ```
 
@@ -68,7 +68,7 @@ from the generator.
 ## SPDX header on generated files
 
 The committed `.pb.go` files carry the same SPDX header as every other
-`.go` file under `go/`:
+`.go` file under the repo root:
 
 ```text
 // Copyright (c) 2026 muse-cli contributors
@@ -79,7 +79,7 @@ The committed `.pb.go` files carry the same SPDX header as every other
 `protoc-gen-go` does not emit that header, so `generate.sh` injects
 it deterministically into the two copied-back files on every
 regeneration (idempotently: a file already starting with the header
-is left untouched), before the `gofmt` check. `go/spdx_test.go`
+is left untouched), before the `gofmt` check. `spdx_test.go`
 enforces the header on every `.go` file including the generated
 ones, with no exemption — if a regeneration drops the header, the
 suite fails by design. Do not hand-edit a `.pb.go` file to add or

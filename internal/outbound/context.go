@@ -3,7 +3,7 @@
 // Licensed under the GNU General Public License v3.0 or later.
 
 // Package outbound builds and owns sing-box outbounds and endpoints
-// for one muse-cli profile, and exposes the single Dialer through which
+// for one castctl profile, and exposes the single Dialer through which
 // all of that profile's network traffic flows.
 //
 // Fail-closed invariant: every network call of a profile goes through

@@ -14,10 +14,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/commands"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/gateway/gatewaytest"
+	"github.com/thoitiettxl-cyber/castctl/internal/commands"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway/gatewaytest"
 )
 
 // runChat runs the chat command against a fake gateway with a
@@ -27,8 +27,8 @@ func runChat(t *testing.T, home string, handler *scriptedHandler, lines []string
 	t.Helper()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("MUSE_CLI_CONFIG", "")
-	t.Setenv("MUSE_CLI_PROFILE", "")
+	t.Setenv("CASTCTL_CONFIG", "")
+	t.Setenv("CASTCTL_PROFILE", "")
 	server, err := gatewaytest.NewServer(handler)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -61,7 +61,7 @@ func runChat(t *testing.T, home string, handler *scriptedHandler, lines []string
 }
 
 func chatStateFile(home string) string {
-	return filepath.Join(home, ".config", "muse-cli", "chat.json")
+	return filepath.Join(home, ".config", "castctl", "chat.json")
 }
 
 func TestChatHelpAndExit(t *testing.T) {
@@ -255,7 +255,7 @@ func TestChatLoginPrintsGuidance(t *testing.T) {
 // instead of dropping into a prompt that cannot work.
 func TestChatNoCookiesExits2(t *testing.T) {
 	home := t.TempDir()
-	base := filepath.Join(home, ".config", "muse-cli")
+	base := filepath.Join(home, ".config", "castctl")
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		t.Fatal(err)
 	}

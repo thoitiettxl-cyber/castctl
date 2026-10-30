@@ -64,7 +64,7 @@ func EditInEditor(ctx context.Context, data []byte, suffix string) ([]byte, erro
 	if len(argv) == 0 {
 		return nil, fmt.Errorf("fsclient: empty editor command")
 	}
-	tmp, err := os.CreateTemp("", "muse-cli-edit-*"+suffix)
+	tmp, err := os.CreateTemp("", "castctl-edit-*"+suffix)
 	if err != nil {
 		return nil, fmt.Errorf("fsclient: create temp file: %w", err)
 	}

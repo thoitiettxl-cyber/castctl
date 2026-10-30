@@ -13,7 +13,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // Port of test_media.py EventResourcesTest, plus the resource-list,

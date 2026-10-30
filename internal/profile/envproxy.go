@@ -12,7 +12,7 @@ import (
 	"strings"
 
 	"github.com/sagernet/sing-box/option"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/redact"
+	"github.com/thoitiettxl-cyber/castctl/internal/redact"
 )
 
 // EnvProxyOutboundTag is the tag of the outbound OutboundFromEnv

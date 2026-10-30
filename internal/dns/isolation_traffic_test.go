@@ -23,7 +23,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/json"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/outbound"
+	"github.com/thoitiettxl-cyber/castctl/internal/outbound"
 )
 
 // Per-profile isolation, bullets 3 and 5: two stacks through

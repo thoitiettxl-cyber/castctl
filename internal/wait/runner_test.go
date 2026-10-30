@@ -12,8 +12,8 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/approvals"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/approvals"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // recordJSON encodes one event as an NDJSON record line.
@@ -232,7 +232,7 @@ func TestRunnerFailClosed124(t *testing.T) {
 		if res.Kind != KindTimeout || res.ExitCode != 124 || !res.FinalReadFailed {
 			t.Errorf("res = %+v", res)
 		}
-		if res.Note != "could not read the final replies; run `muse-cli wait` again" {
+		if res.Note != "could not read the final replies; run `castctl wait` again" {
 			t.Errorf("note = %q", res.Note)
 		}
 	})
@@ -261,7 +261,7 @@ func TestRunnerBoundaryUnknownSuppressesReplies(t *testing.T) {
 		if len(res.Replies) != 0 {
 			t.Errorf("replies must be suppressed, got %+v", res.Replies)
 		}
-		wantNote := "turn-end boundary unknown: history could not be read, so no replies are reported; run `muse-cli wait` again"
+		wantNote := "turn-end boundary unknown: history could not be read, so no replies are reported; run `castctl wait` again"
 		if res.Note != wantNote {
 			t.Errorf("note = %q", res.Note)
 		}

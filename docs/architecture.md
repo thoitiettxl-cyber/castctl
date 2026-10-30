@@ -13,11 +13,10 @@ Core + plugins: see "Core + plugins" below. The earlier layout
 it is not the layout. Binary: `castctl`. Env vars: `CASTCTL_CONFIG`,
 `CASTCTL_PROFILE`, `CASTCTL_WEBUI_KEY`.
 
-Migration is planned, not done: the `go/` tree moves to the castctl
-root keeping only `go/` history, the Go module becomes
-`github.com/thoitiettxl-cyber/castctl`, the binary stays `castctl`,
-and `go/` is deleted from muse-cli with a README pointer. It starts
-only after the web-UI and docs work merges.
+Migration done: the `go/` tree moved to the castctl
+root keeping only `go/` history, the Go module became
+`github.com/thoitiettxl-cyber/castctl`, and the binary is `castctl`.
+Deleting `go/` from muse-cli with a README pointer is a separate PR.
 
 ## Core + plugins
 
@@ -60,7 +59,7 @@ baseline (manylinux2014), and plugin support. There are no
 work is a separate PR planned after the migration, reusing
 CLIProxyAPI's release.yaml.
 
-Config location: `--config`, then `CASTCTL_CONFIG`, then `XDG_CONFIG_HOME`, via `os.UserConfigDir` semantics.
+Config location: `--config`, then `CASTCTL_CONFIG`, then `XDG_CONFIG_HOME`, via `os.UserConfigDir` semantics. Legacy fallback: when the `castctl` home does not exist but the pre-migration `muse-cli` home does, the old home is used with a one-line warning; nothing is moved or deleted (see README.md).
 
 Screencast login: the browser dependency is optional and detected at
 runtime (system Chromium or a configured path); with no browser, fall back
@@ -75,9 +74,9 @@ fakes, no live hosts).
 
 Profiles must never interfere with each other through the sing-box
 stack. This is a HARD invariant: a violation is a bug, and enforcement
-is by test, not by convention. It applies in the `go/` tree in
-muse-cli, on `feat/go-port`, pre-migration, and in castctl after
-migration, to every command,
+is by test, not by convention. It applied in the `go/` tree in
+muse-cli, on `feat/go-port`, pre-migration, and applies in castctl
+now that the migration has landed, to every command,
 the Telegram bot, the web UI, the session keeper, and the screencast
 login flow.
 

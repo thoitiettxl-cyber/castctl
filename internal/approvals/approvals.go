@@ -25,7 +25,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // Forever is Muse's "forever" / "Always allow" choice.

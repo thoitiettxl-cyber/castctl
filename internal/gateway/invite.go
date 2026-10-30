@@ -12,7 +12,7 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // Invite endpoints (gateway.py fetch_invite / create_invite /

@@ -15,7 +15,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // sandboxRe matches a sandbox:// link inside free text, ported

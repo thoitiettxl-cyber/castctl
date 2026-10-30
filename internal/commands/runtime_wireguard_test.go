@@ -16,8 +16,8 @@ import (
 
 	"github.com/sagernet/sing-box/log"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/outbound"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/profile"
+	"github.com/thoitiettxl-cyber/castctl/internal/outbound"
+	"github.com/thoitiettxl-cyber/castctl/internal/profile"
 )
 
 // TestCreateOutboundsSocksDetourToWireGuardEndpoint pins RT-F8: a
@@ -56,7 +56,7 @@ func TestCreateOutboundsSocksDetourToWireGuardEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mgr, err := outbound.NewManager(context.Background(), log.NewNOPFactory().NewLogger("muse-cli"))
+	mgr, err := outbound.NewManager(context.Background(), log.NewNOPFactory().NewLogger("castctl"))
 	if err != nil {
 		t.Fatal(err)
 	}

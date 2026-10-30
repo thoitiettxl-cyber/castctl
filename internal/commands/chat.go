@@ -18,10 +18,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/deliver"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/profile"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/shared"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/deliver"
+	"github.com/thoitiettxl-cyber/castctl/internal/profile"
+	"github.com/thoitiettxl-cyber/castctl/internal/shared"
 )
 
 // The chat REPL, ported from chat.py per CHAT-REPL-DESIGN.md: the
@@ -49,7 +49,7 @@ const (
   /main           switch to your main chat
   /new [title]    start a new conversation
   /history [N]    read the last N messages here (default 10)
-  /login          save your muse.ai login from Chrome again (same as ` + "`muse-cli auth export`" + `)
+  /login          save your muse.ai login from Chrome again (same as ` + "`castctl auth export`" + `)
   /exit           quit (Ctrl+C works too)`
 )
 
@@ -299,7 +299,7 @@ func (s *chatSession) sendOne(ctx context.Context, text string) error {
 		return err
 	}
 	if userSeq == nil {
-		fmt.Fprintln(s.env.stdout(), "no delivery ack within 30s; check `muse-cli history`")
+		fmt.Fprintln(s.env.stdout(), "no delivery ack within 30s; check `castctl history`")
 		return nil
 	}
 	fmt.Fprintln(s.env.stdout(), "Muse is thinking...")

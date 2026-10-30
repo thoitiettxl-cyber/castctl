@@ -114,7 +114,7 @@ deadline (the Runner budgets every history read).
 ## 5. Config-location rules (PR3, reference only)
 
 PR3 `internal/profile/configlocation.go` resolves the config
-location as: explicit `--config` flag > `MUSE_CLI_CONFIG` env
+location as: explicit `--config` flag > `CASTCTL_CONFIG` env
 (non-empty) > `os.UserConfigDir`-derived home (`XDG` /
 `%APPDATA%`; a relative `XDG_CONFIG_HOME` is ignored with a
 warning). Cookie/secret paths are relative to the config dir.
@@ -266,4 +266,4 @@ driver/monitor concern, not part of `AutoApprover`); the
 auto-approve stderr lines (logged by the CLI wiring from
 `Result.AutoApproved` / `Result.AutoApproveErrors`, see §7
 D6); anything needing PR3's commands framework. See
-`go/README.md` for the same list.
+`README.md` for the same list.

@@ -15,7 +15,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/sagernet/sing-box/option"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // OutboundDialer is the minimal dial surface the Connector needs

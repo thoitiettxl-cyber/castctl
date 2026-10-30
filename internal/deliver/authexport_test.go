@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/deliver"
+	"github.com/thoitiettxl-cyber/castctl/internal/deliver"
 )
 
 func TestAuthExport(t *testing.T) {

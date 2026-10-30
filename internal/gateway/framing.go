@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"slices"
 
-	pb "github.com/thoitiettxl-cyber/muse-cli/go/internal/proto"
+	pb "github.com/thoitiettxl-cyber/castctl/internal/proto"
 	"google.golang.org/protobuf/proto"
 )
 

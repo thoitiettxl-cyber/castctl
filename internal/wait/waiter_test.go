@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/approvals"
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/approvals"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // taskEv builds a task.status event. count nil means the field is

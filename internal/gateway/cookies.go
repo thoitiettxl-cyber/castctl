@@ -11,7 +11,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/thoitiettxl-cyber/muse-cli/go/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
 
 // LoadCookies reads a cookies file and returns the Cookie header
