@@ -236,10 +236,13 @@ func (e *typedAuthError) Unwrap() error { return e.Err }
 //
 // Loop 5 (allowlist rule): the stderr text NEVER carries
 // server/peer body bytes, at any level of wrapping. Every
-// branch renders through logging.SummarizeErr: a
-// body-carrying error in the chain renders as its LogSummary
-// (status + class + length + validated fields), and every
-// other error renders through the SafeString backstop.
+// branch renders through logging.SummarizeErr — EXCEPT the
+// ExportError guidance branch, which renders guidance text
+// through the SafeString backstop only (guidance carries no
+// body bytes by construction; see below). A body-carrying
+// error in the chain renders as its LogSummary (status +
+// class + length + validated fields), and every other error
+// renders through the SafeString backstop.
 // GatewayError.Error() is itself a summary since loop 5.
 // AuthError.Error() is NOT: it renders Message verbatim, and
 // its safety rests on producers building Message from

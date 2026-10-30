@@ -40,27 +40,31 @@ import (
 //     (calls.go:202) — CallJSON does not read the value
 //     anywhere else — and by FetchSubscription for the
 //     {"success":..., "error": ...} result, whose "error"
-//     value FetchSubscription reads at subscription.go:316
-//     (the only read of an allowlisted value outside
-//     summarizeBody) and passes to summarizeBody at :330.
-//     Emitted ONLY as a short error enum (see isEnumValue);
-//     a free-text, numeric, composite, or over-cap value
-//     becomes the placeholder.
+//     value FetchSubscription reads at subscription.go:324
+//     and passes to summarizeBody at :339. (Other code
+//     reads allowlisted keys outside summarizeBody too —
+//     see "reason" below — so this is not the only such
+//     read; it is the only "error"-key read outside
+//     summarizeBody.) Emitted ONLY as a short error enum
+//     (see isEnumValue); a free-text, numeric, composite,
+//     or over-cap value becomes the placeholder.
 //   - "status": extracted ONLY inside summarizeBody, when
 //     FetchSessionInfo passes the "status" key with the
-//     decoded /api/session map (auth.go:129,139).
+//     decoded /api/session map (auth.go:141,151).
 //     FetchSessionInfo never reads info["status"] directly
-//     and no production code branches on the value.
+//     (auth.go:139 reads info["vm_id"], not "status") and
+//     no production code branches on the value.
 //     Emitted as body_status=, enum-gated the same way.
 //   - "reason": RETAINED in the closed list, but no current
 //     producer passes it to summarizeBody (the only keys
 //     passed anywhere are "error" and "status"). The redeem
-//     command reads bodyMap["reason"] for its data-output
-//     failure line (read.go:310, out of scope for error
-//     renderings), RedeemInviteCode constructs "unknown"
-//     for non-JSON bodies (invite.go), and redeem failure
-//     bodies are enum-gated through gateAllowlistValue by
-//     filterRedeemFailureBody (invite.go). If a future
+//     command reads bodyMap["reason"] and bodyMap["detail"]
+//     for its data-output failure line (read.go:318,319,
+//     out of scope for error renderings),
+//     RedeemInviteCode constructs "unknown" for non-JSON
+//     bodies (invite.go:125), and redeem failure bodies
+//     are enum-gated through gateAllowlistValue by
+//     filterRedeemFailureBody (invite.go:141). If a future
 //     producer passes "reason" to summarizeBody it will be
 //     enum-gated the same way.
 //

@@ -164,7 +164,9 @@ func TestLoop6LogAutoApprovedTitle(t *testing.T) {
 func TestLoop6ClassifyErrorAuthBoundary(t *testing.T) {
 	// Even an AuthError whose Message was built with body bytes
 	// (a producer slip) must never reach stderr through
-	// classifyError: every branch renders through SummarizeErr.
+	// classifyError: the AuthError branch renders through
+	// SummarizeErr (the ExportError guidance branch is the
+	// only branch that does not; see classifyError).
 	auth := conn.NewAuthError("plain body words " + loop6Marker)
 	code, text := classifyError(auth)
 	if code != 2 {
