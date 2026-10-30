@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 )
 
 // sandboxRe matches a sandbox:// link inside free text, ported
@@ -291,7 +292,13 @@ func SaveResources(ctx context.Context, dl Downloader, resources []Resource, dir
 			if errors.As(err, &authErr) {
 				return nil, err
 			}
-			row.Error = err.Error()
+			// The row's error field is an ERROR rendering
+			// (loop 6, item 4): the allowlist summary only,
+			// never the untrusted ref or body bytes. A
+			// MediaPath ValidationError already carries
+			// kind + length; a GatewayError renders as its
+			// summary through SummarizeErr.
+			row.Error = logging.SummarizeErr(err)
 			rows = append(rows, row)
 			continue
 		}

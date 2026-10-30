@@ -366,10 +366,11 @@ func itoa(n int) string {
 
 // TestSubscriptionTransportErrorsAreRedactedAndChained (F6): the
 // subscription.go transport paths (fetchText, callAction) must
-// return errors through the same redaction wrapper doHatch uses:
-// the printed text must not contain the credential (boolean
-// checks only — the token value is never logged), while
-// errors.As must still find the underlying cause.
+// return errors as typed summaries (loop 6, item 2): the printed
+// text carries no peer/credential bytes at all (operation, class,
+// kind only), while errors.Is must still find the underlying
+// cause. The loop-4 redactErr rendering (a "[redacted]" marker
+// in the text) is superseded by the typed summary.
 func TestSubscriptionTransportErrorsAreRedactedAndChained(t *testing.T) {
 	sentinel := errors.New("sentinel transport failure")
 	client := &http.Client{Transport: gatewaytest.RoundTripperFunc(func(*http.Request) (*http.Response, error) {
@@ -384,19 +385,22 @@ func TestSubscriptionTransportErrorsAreRedactedAndChained(t *testing.T) {
 	if strings.Contains(err.Error(), "abcdefgh12345678") {
 		t.Errorf("fetchText error leaks the token: %q", err.Error())
 	}
-	if !strings.Contains(err.Error(), "[redacted]") {
-		t.Errorf("fetchText error = %q, want the token redacted", err.Error())
+	if !strings.Contains(err.Error(), "class=") || !strings.Contains(err.Error(), "kind=") {
+		t.Errorf("fetchText error = %q, want the typed-summary fields", err.Error())
 	}
 	if !errors.Is(err, sentinel) {
-		t.Errorf("fetchText error chain = %v, want errors.As to find the sentinel", err)
+		t.Errorf("fetchText error chain = %v, want errors.Is to find the sentinel", err)
 	}
 
-	_, err = callAction(ctx, client, fakeCookie, "actionid12345678901234", nil, "https://muse.ai/settings")
+	_, _, err = callAction(ctx, client, fakeCookie, "actionid12345678901234", nil, "https://muse.ai/settings")
 	if err == nil {
 		t.Fatal("callAction transport error = nil")
 	}
 	if strings.Contains(err.Error(), "abcdefgh12345678") {
 		t.Errorf("callAction error leaks the token: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "class=") || !strings.Contains(err.Error(), "kind=") {
+		t.Errorf("callAction error = %q, want the typed-summary fields", err.Error())
 	}
 	if !errors.Is(err, sentinel) {
 		t.Errorf("callAction error chain = %v, want errors.As to find the sentinel", err)

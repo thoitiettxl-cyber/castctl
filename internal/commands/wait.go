@@ -322,12 +322,27 @@ func executeWait(ctx context.Context, env *Env, rt *Runtime, prof *profile.Profi
 	return res, approveResolved.Enabled, nil
 }
 
+// safeTitle renders a peer approval title for a stderr status
+// line (loop 6, item 5): SafeString FIRST (labelled secrets
+// stripped), then the SafeString output capped at 64 runes.
+// The order matters: capping the raw title first could cut a
+// secret label in half and leave its value exposed past the
+// cap, and SafeString alone leaves long peer prose uncapped.
+func safeTitle(title string) string {
+	safe := logging.SafeString(title)
+	r := []rune(safe)
+	if len(r) > 64 {
+		return string(r[:64])
+	}
+	return safe
+}
+
 // logAutoApproved prints the auto-approve stderr lines for a Result
 // (SEAMS.md D6): one line per approved record and per error, in
 // result order. The core never logs; the caller owns stderr.
 func logAutoApproved(w io.Writer, res *wait.Result) {
 	for _, rec := range res.AutoApproved {
-		fmt.Fprintf(w, "auto-approved %s (%s): %s [%s %s]\n", rec.ApprovalID, rec.Decision, rec.Title, rec.Kind, rec.Scope)
+		fmt.Fprintf(w, "auto-approved %s (%s): %s [%s %s]\n", rec.ApprovalID, rec.Decision, safeTitle(rec.Title), rec.Kind, rec.Scope)
 	}
 	for _, e := range res.AutoApproveErrors {
 		if e == nil {

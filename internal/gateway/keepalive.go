@@ -90,6 +90,22 @@ func (g *Gateway) installControlHandlers(cc controlConn) {
 		// it at the producer, before it is stored (it reaches
 		// ErrConnectionLost.CloseReason and LastClose, and
 		// from there any log line that prints the loss).
+		// Loop 6, item 6f — LATENT STORED STATE, documented
+		// explicitly: the stored reason is the SafeString'd
+		// prose, NOT a summary (code + length). It is never
+		// rendered: ErrConnectionLost.Error() renders the
+		// Cause only, SummarizeErr renders the Cause's
+		// LogSummary, and no production code reads
+		// LastClose() or CloseReason for output (verified
+		// by grep at loop 6; only classifyDeadLocked and
+		// tests touch them). Gating the stored value to
+		// summary form would change the LastClose contract
+		// pinned by TestCleanClose1000IsNotConnectionLost,
+		// so the stored form stays and the no-rendering
+		// invariant is pinned by the loop-6 close tests
+		// instead. Any future reader of LastClose or
+		// CloseReason must summary-render it before
+		// emitting it.
 		g.mu.Lock()
 		g.closeCode, g.closeReason, g.closeSeen = code, redactFreeText(text), true
 		g.mu.Unlock()
@@ -101,7 +117,11 @@ func (g *Gateway) installControlHandlers(cc controlConn) {
 }
 
 // LastPing returns when the last ping frame arrived and its
-// payload, or the zero time when none has arrived.
+// payload, or the zero time when none has arrived. The payload
+// is stored RAW (peer-controlled bytes, not even SafeString'd):
+// this is a test-only observation surface — no production code
+// reads LastPing or LastPong, and the payload must never be
+// emitted. Pinned by TestLoop6StoredPingNeverRendered.
 func (g *Gateway) LastPing() (time.Time, string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -109,7 +129,9 @@ func (g *Gateway) LastPing() (time.Time, string) {
 }
 
 // LastPong returns when the last pong frame arrived and its
-// payload, or the zero time when none has arrived.
+// payload, or the zero time when none has arrived. Same latent
+// state as LastPing: raw stored payload, test-only surface,
+// never emitted.
 func (g *Gateway) LastPong() (time.Time, string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -118,6 +140,9 @@ func (g *Gateway) LastPong() (time.Time, string) {
 
 // LastClose returns the close code and reason recorded by the
 // close handler, and whether a close frame was received at all.
+// The reason is the SafeString'd peer prose (see the close
+// handler): latent stored state, never rendered by any
+// production path — see the handler comment for the invariant.
 // A peer that vanishes without a close frame leaves ok=false;
 // ErrConnectionLost then carries the EOF/ECONNRESET/1006
 // classification instead.

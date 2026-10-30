@@ -200,7 +200,7 @@ func writeBounded(ws wsConn, data []byte, timeout time.Duration) error {
 		if ne, ok := err.(net.Error); ok && ne.Timeout() {
 			return &conn.TimeoutError{Message: fmt.Sprintf("gateway handshake send: no progress in %ds", int(timeout.Seconds()))}
 		}
-		return &conn.ConnectionError{Err: fmt.Errorf("gateway handshake send failed: %w", redactErr(err))}
+		return &conn.ConnectionError{Err: fmt.Errorf("gateway handshake send failed: %w", summarizeCloseError(redactErr(err)))}
 	}
 	return nil
 }
@@ -220,9 +220,9 @@ func readBounded(ws wsConn, timeout time.Duration) ([]byte, error) {
 			return nil, &conn.TimeoutError{Message: fmt.Sprintf("gateway handshake: no answer in %ds", int(timeout.Seconds()))}
 		}
 		if websocket.IsCloseError(err) {
-			return nil, &conn.ConnectionError{Err: errors.New("gateway closed the websocket during the handshake")}
+			return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway closed the websocket during the handshake: %w", summarizeCloseError(err))}
 		}
-		return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway handshake failed: %w", redactErr(err))}
+		return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway handshake failed: %w", summarizeCloseError(redactErr(err)))}
 	}
 	return data, nil
 }
@@ -287,7 +287,7 @@ func (g *Gateway) readFrame() (*pb.ServiceFrame, error) {
 			if g.isClosed() {
 				return nil, &conn.ConnectionError{Err: errors.New("gateway connection closed")}
 			}
-			return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway receive failed: %w", redactErr(err))}
+			return nil, &conn.ConnectionError{Err: fmt.Errorf("gateway receive failed: %w", summarizeCloseError(redactErr(err)))}
 		}
 		pt, err := g.recvCS.Decrypt(nil, nil, data)
 		if err != nil {
@@ -389,7 +389,7 @@ func (g *Gateway) writeWS(data []byte) error {
 		if ne, ok := err.(net.Error); ok && ne.Timeout() {
 			return &conn.ConnectionError{Err: errors.New("gateway send timed out")}
 		}
-		return &conn.ConnectionError{Err: fmt.Errorf("gateway send failed: %w", redactErr(err))}
+		return &conn.ConnectionError{Err: fmt.Errorf("gateway send failed: %w", summarizeCloseError(redactErr(err)))}
 	}
 	return nil
 }

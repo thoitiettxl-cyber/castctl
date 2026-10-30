@@ -297,6 +297,14 @@ func cmdRedeem(ctx context.Context, env *Env, g *globalOpts, args []string) erro
 		}
 		success, _ := bodyMap["success"].(bool)
 		if p.bool("json") {
+			// On the error path --json emits only allowlisted
+			// keys (loop 6, item 3): the producer already
+			// enum-gates reason/detail, and this gate drops
+			// every other key. Success output is data and is
+			// not gated.
+			if !success {
+				bodyMap = redeemErrorBody(bodyMap)
+			}
 			if err := writeMergedJSON(env.stdout(), status, bodyMap); err != nil {
 				return err
 			}
@@ -317,6 +325,20 @@ func cmdRedeem(ctx context.Context, env *Env, g *globalOpts, args []string) erro
 		}
 		return nil
 	})
+}
+
+// redeemErrorBody reduces a redeem failure body to the
+// allowlisted keys for --json output on the error path:
+// success, reason, and detail only. Values pass through as
+// the producer produced them (enum-gated at the producer).
+func redeemErrorBody(body map[string]any) map[string]any {
+	out := map[string]any{}
+	for _, k := range []string{"success", "reason", "detail"} {
+		if v, ok := body[k]; ok {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // writeMergedJSON writes {"status": status, **body} with status

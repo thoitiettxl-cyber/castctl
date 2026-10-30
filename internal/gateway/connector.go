@@ -268,7 +268,7 @@ func dialWebSocket(ctx context.Context, dialer OutboundDialer, wsURL string, sec
 		if ctx.Err() != nil {
 			return nil, dialMS, 0, ctx.Err()
 		}
-		return nil, dialMS, 0, &conn.ConnectionError{Err: fmt.Errorf("gateway: websocket dial: %w", redactErr(err))}
+		return nil, dialMS, 0, &conn.ConnectionError{Err: fmt.Errorf("gateway: websocket dial: %w", wrapTransportError("websocket dial", err))}
 	}
 	var used atomic.Bool
 	take := func(_ context.Context, _, _ string) (net.Conn, error) {

@@ -30,9 +30,9 @@ const wakeTimeout = 15 * time.Second
 //
 // A non-2xx status is NOT an error: status and the parsed body are
 // returned and err is nil. Only transport errors (including the
-// timeout below) are returned as err, wrapped for safe printing
-// by doHatch (redactErr), with the original chain preserved for
-// errors.Is/errors.As.
+// timeout below) are returned as err, as the typed transport
+// summary produced by doHatch (transport.go), with the original
+// chain preserved for errors.Is/errors.As.
 //
 // The body is the parsed JSON value (object, array, or scalar;
 // numbers decode as json.Number, per decodeJSONValue) when the

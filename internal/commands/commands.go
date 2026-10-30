@@ -240,11 +240,18 @@ func (e *typedAuthError) Unwrap() error { return e.Err }
 // body-carrying error in the chain renders as its LogSummary
 // (status + class + length + validated fields), and every
 // other error renders through the SafeString backstop.
-// GatewayError/AuthError Error() renderings are themselves
-// summaries since loop 5, so even a wrapper type without
-// Unwrap (cmdError, typedAuthError) cannot leak body bytes
-// through the fallback. The ExportError guidance carries
-// only placeholders and keeps its SafeString rendering.
+// GatewayError.Error() is itself a summary since loop 5.
+// AuthError.Error() is NOT: it renders Message verbatim, and
+// its safety rests on producers building Message from
+// allowlist summaries/constants only. SummarizeErr finds the
+// inner error's LogSummary through the wrappers' Unwrap
+// chains (cmdError and typedAuthError both unwrap); a wrapper
+// that hid the chain would fall back to SafeString over the
+// verbatim Message, so no new wrapper type may hide an
+// AuthError/GatewayError chain. The boundary is pinned by
+// TestLoop6ClassifyErrorAuthBoundary (loop 6, item 6d). The
+// ExportError guidance carries only placeholders and keeps
+// its SafeString rendering.
 func classifyError(err error) (int, string) {
 	if err == nil {
 		return 0, ""

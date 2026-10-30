@@ -31,30 +31,48 @@ import (
 //     Muse response schemas, each length-capped AND passed
 //     through SafeString.
 //
-// The parsed-by-key list is CLOSED and evidence-based — a
-// key is extracted only if this codebase actually reads it
-// from a real Muse response:
+// The parsed-by-key list is CLOSED. The three keys, and
+// exactly how each is used in this tree (loop 6, item 6e —
+// the earlier citations overstated two of them):
 //
-//   - "error": the {"ok":false, "error": ...} envelope read
-//     by CallJSON (calls.go) and the {"success":...,
-//     "error": ...} result read by FetchSubscription
-//     (subscription.go). Emitted ONLY as a short error enum
-//     (see isEnumValue); a free-text, numeric, composite, or
-//     over-cap value becomes the placeholder.
-//   - "status": the {"status":"unavailable", ...} body of
-//     GET /api/session read by FetchSessionInfo (auth.go;
-//     the "unavailable" value is in the code comment there).
+//   - "error": passed by key to summarizeBody by CallJSON
+//     for the {"ok":false, "error": ...} envelope
+//     (calls.go:202) — CallJSON does not read the value
+//     anywhere else — and by FetchSubscription for the
+//     {"success":..., "error": ...} result, whose "error"
+//     value FetchSubscription reads at subscription.go:316
+//     (the only read of an allowlisted value outside
+//     summarizeBody) and passes to summarizeBody at :330.
+//     Emitted ONLY as a short error enum (see isEnumValue);
+//     a free-text, numeric, composite, or over-cap value
+//     becomes the placeholder.
+//   - "status": extracted ONLY inside summarizeBody, when
+//     FetchSessionInfo passes the "status" key with the
+//     decoded /api/session map (auth.go:129,139).
+//     FetchSessionInfo never reads info["status"] directly
+//     and no production code branches on the value.
 //     Emitted as body_status=, enum-gated the same way.
-//   - "reason": the {"reason": ...} field of the redeem
-//     response read by the redeem command (read.go) and
-//     constructed as "unknown" by RedeemInviteCode
-//     (invite.go). Enum-gated the same way.
+//   - "reason": RETAINED in the closed list, but no current
+//     producer passes it to summarizeBody (the only keys
+//     passed anywhere are "error" and "status"). The redeem
+//     command reads bodyMap["reason"] for its data-output
+//     failure line (read.go:310, out of scope for error
+//     renderings), RedeemInviteCode constructs "unknown"
+//     for non-JSON bodies (invite.go), and redeem failure
+//     bodies are enum-gated through gateAllowlistValue by
+//     filterRedeemFailureBody (invite.go). If a future
+//     producer passes "reason" to summarizeBody it will be
+//     enum-gated the same way.
 //
-// NO other key is ever extracted — in particular "detail",
-// "message", and "code" are never emitted, even when they
-// hold short strings: no code in this tree reads them as an
-// error signal from a Muse response, so emitting them would
-// be inventing a schema. Unknown keys are never emitted.
+// NO other key is ever extracted by summarizeBody — in
+// particular "detail", "message", and "code" are never
+// extracted here, even when they hold short strings: no
+// code in this tree reads them as an error signal from a
+// Muse response, so emitting them would be inventing a
+// schema. (The one exception outside summarizeBody is the
+// redeem filter, which enum-gates a "detail" value through
+// gateAllowlistValue — free-text detail is replaced by the
+// placeholder, never emitted.) Unknown keys are never emitted.
 //
 // A parsed value that is long or free-text by nature is
 // NEVER emitted, truncated or otherwise: the cap is a
@@ -105,6 +123,18 @@ func isEnumValue(s string) bool {
 	return n > 0
 }
 
+// gateAllowlistValue renders one allowlisted value: an
+// emittable short enum passes through SafeString; anything
+// else (free text, numeric, composite, over cap) becomes the
+// placeholder, never emitted truncated.
+func gateAllowlistValue(v any) string {
+	s, ok := v.(string)
+	if !ok || !isEnumValue(s) {
+		return allowlistOmitted
+	}
+	return logging.SafeString(s)
+}
+
 // extractAllowlistField extracts one allowlisted field from
 // a decoded response map. found=false means the key is not
 // in the closed list or is absent from the map: nothing is
@@ -124,11 +154,7 @@ func extractAllowlistField(decoded map[string]any, key string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	s, ok := v.(string)
-	if !ok || !isEnumValue(s) {
-		return allowlistOmitted, true
-	}
-	return logging.SafeString(s), true
+	return gateAllowlistValue(v), true
 }
 
 // summarizeContentType reduces a raw Content-Type header
@@ -208,12 +234,29 @@ func resetSummary(code int32, reason string) bodySummary {
 // keys names the allowlisted keys to extract from it
 // (unknown keys are ignored by extractAllowlistField).
 func summarizeBody(label string, data []byte, rawContentType string, decoded map[string]any, keys ...string) bodySummary {
+	return summarizeFields(label, len(data), data != nil, rawContentType, decoded, keys...)
+}
+
+// summarizeParsedBody builds the allowlist summary for a
+// parsed result whose wire body length is known but whose
+// bytes are not retained (the RSC case in FetchSubscription):
+// body_length is always the wire length threaded through
+// callAction, never the summary-text length (loop 6,
+// item 6b).
+func summarizeParsedBody(label string, bodyLen int, decoded map[string]any, keys ...string) bodySummary {
+	return summarizeFields(label, bodyLen, true, "", decoded, keys...)
+}
+
+// summarizeFields is the shared allowlist-summary builder:
+// the class label, the wire body length (when known), the
+// validated content-type, and the parsed-by-key fields.
+func summarizeFields(label string, length int, emitLength bool, rawContentType string, decoded map[string]any, keys ...string) bodySummary {
 	var s bodySummary
-	s.length = len(data)
+	s.length = length
 	var b strings.Builder
 	b.WriteString(label)
-	if data != nil {
-		fmt.Fprintf(&b, "; body_length=%d", len(data))
+	if emitLength {
+		fmt.Fprintf(&b, "; body_length=%d", length)
 	}
 	if rawContentType != "" {
 		ct := summarizeContentType(rawContentType)

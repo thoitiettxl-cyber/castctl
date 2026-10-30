@@ -88,6 +88,13 @@ func CreateInvite(ctx context.Context, client *http.Client, cookies string) (map
 // is returned with its body, exactly as Python returns
 // (http_status, body). A non-JSON body becomes
 // {"success":false,"reason":"unknown","detail":...}.
+// A JSON body on the failure path (success is not true) is
+// filtered to the allowlist only (loop 6, item 3): the
+// "success", "reason", and "detail" keys survive, with
+// reason/detail enum-gated (a free-text, numeric, composite,
+// or over-cap value becomes "[omitted]", never emitted); every
+// other key is dropped. A success body is data and passes
+// through untouched.
 func RedeemInviteCode(ctx context.Context, client *http.Client, cookies, code string) (int, any, error) {
 	// strings.TrimSpace + ToUpper over ASCII letters: TrimSpace
 	// strips Unicode whitespace as Python's strip() does for the
@@ -116,8 +123,32 @@ func RedeemInviteCode(ctx context.Context, client *http.Client, cookies, code st
 		// redeem command prints detail on stdout).
 		sum := summarizeBody("non-JSON response", data, hdr.Get("Content-Type"), nil)
 		body = map[string]any{"success": false, "reason": "unknown", "detail": sum.text}
+	} else if m, ok := body.(map[string]any); ok {
+		if success, _ := m["success"].(bool); !success {
+			body = filterRedeemFailureBody(m)
+		}
 	}
 	return status, body, nil
+}
+
+// filterRedeemFailureBody reduces a JSON failure body to the
+// closed allowlist: "success" (false), "reason", and "detail",
+// with reason/detail passed through the allowlist extraction
+// (enum-gated, capped, SafeString'd; anything else becomes
+// "[omitted]"). A missing "reason" becomes the constant
+// "unknown", as in the non-JSON branch; a missing "detail"
+// stays missing.
+func filterRedeemFailureBody(m map[string]any) map[string]any {
+	out := map[string]any{"success": false}
+	if v, ok := m["reason"]; ok {
+		out["reason"] = gateAllowlistValue(v)
+	} else {
+		out["reason"] = "unknown"
+	}
+	if v, ok := m["detail"]; ok {
+		out["detail"] = gateAllowlistValue(v)
+	}
+	return out
 }
 
 func trimSpaceASCII(s string) string {

@@ -24,6 +24,11 @@ import (
 // EMITTED peer/server text goes through the allowlist
 // summary (summary.go) instead; the old redact-then-
 // truncate helpers are gone with the loop-4 trace allowance.
+// Loop 6, item 6f: the stored close reason, and the raw
+// stored ping/pong payloads (LastPing/LastPong, not even
+// SafeString'd), are documented latent state at their sites
+// in keepalive.go/lost.go; the no-rendering invariant is
+// pinned by the loop-6 close/ping tests.
 func redactFreeText(s string) string {
 	return logging.SafeString(s)
 }

@@ -23,10 +23,19 @@ import (
 // Loop 5 (allowlist rule): Message is an allowlist summary ONLY
 // (endpoint, status, body length, content-type, parsed enum
 // fields) — never server body bytes. Producers construct it
-// through the gateway's allowlist summary; Error() renders it
-// verbatim, and every output rendering (classifyError, logs)
-// uses LogSummary instead, so even a Message built elsewhere
-// cannot leak body bytes through an output path.
+// through the gateway's allowlist summary or from constants.
+// Error() renders Message VERBATIM: it is not itself a
+// summary, and a Message built elsewhere with body bytes
+// WOULD leak through a direct Error() print. Safety rests on
+// both halves: producer discipline (allowlist summaries /
+// constants only) AND every output rendering (classifyError,
+// logs) going through logging.SummarizeErr, which prefers
+// LogSummary (class + message length, no message bytes)
+// whenever the AuthError is reachable in the error chain.
+// Direct printing of an AuthError is forbidden; the CLI
+// boundary is pinned by TestLoop6ClassifyErrorAuthBoundary
+// (loop 6, item 6d), which drives a marker-carrying Message
+// through classifyError and asserts marker-free output.
 type AuthError struct {
 	// Message is the human-readable cause. It must not contain a
 	// cookie, token, or auth-bearing URL — and, under the
@@ -124,8 +133,13 @@ func isAllowlistEnum(s string) bool {
 }
 
 // isAllowlistContentType reports whether s is an emittable
-// media type: type/subtype, each 1-64 token characters, no
-// parameters, no whitespace, no controls.
+// media type: type/subtype, each side token characters, no
+// parameters, no whitespace, no controls, and at most 64 runes
+// in total — the SAME cap the gateway's construction-side
+// validation enforces (loop 6, item 6a: one cap everywhere;
+// the old 129-byte render-time bound would have emitted a
+// 65–129 byte media type the constructor had replaced with
+// the placeholder).
 func isAllowlistContentType(s string) bool {
 	slash := -1
 	for i := 0; i < len(s); i++ {
@@ -141,7 +155,7 @@ func isAllowlistContentType(s string) bool {
 			return false
 		}
 	}
-	if slash <= 0 || slash >= len(s)-1 || len(s) > 129 {
+	if slash <= 0 || slash >= len(s)-1 || len([]rune(s)) > 64 {
 		return false
 	}
 	return true
@@ -228,6 +242,30 @@ func (e *ConnectionError) Error() string {
 		return "conn: connection error"
 	}
 	return fmt.Sprintf("conn: connection error: %v", e.Err)
+}
+
+// LogSummary renders the error for log lines at EVERY level
+// including trace (loop-6 ruling, item 1): a body-carrying
+// error in the chain renders as its LogSummary, and every
+// other cause renders as the class plus the byte length of
+// its text only — never the cause's prose, which may be
+// peer-controlled (a WebSocket close reason reaches this
+// type through the gateway reader). This satisfies the
+// logging.LogSummary interface structurally; see
+// AuthError's LogSummary for why no shared interface type
+// exists. Error() is unchanged: it still renders the cause
+// for callers that need it, and producers that wrap
+// peer-controlled causes (the gateway's close summary) keep
+// Error() marker-free too.
+func (e *ConnectionError) LogSummary() string {
+	if e == nil || e.Err == nil {
+		return "conn: connection error"
+	}
+	var s interface{ LogSummary() string }
+	if errors.As(e.Err, &s) {
+		return s.LogSummary()
+	}
+	return fmt.Sprintf("conn: connection error error_length=%d", len(e.Err.Error()))
 }
 
 // Unwrap exposes the underlying cause for errors.Is/As.

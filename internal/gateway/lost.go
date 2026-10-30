@@ -41,7 +41,13 @@ type ErrConnectionLost struct {
 	StreamIDs []int64
 	// CloseCode/CloseReason are the WebSocket close code and
 	// reason recorded by the close handler, when the peer sent
-	// a close frame (0/"", false, when it did not).
+	// a close frame (0/"", false, when it did not). CloseReason
+	// is LATENT STORED STATE (loop 6, item 6f): the SafeString'd
+	// peer prose, not a summary. It is NEVER rendered:
+	// Error() below renders the Cause only, and no production
+	// code reads this field for output. Any future reader
+	// must summary-render it (code + reason length) before
+	// emitting it.
 	CloseCode   int
 	CloseReason string
 	CloseSeen   bool
@@ -66,6 +72,42 @@ func AsConnectionLost(err error) (*ErrConnectionLost, bool) {
 		return lost, true
 	}
 	return nil, false
+}
+
+// closeSummaryError wraps a *websocket.CloseError so its printed
+// form carries only the close code and the reason's byte length —
+// never the reason text, which is peer-controlled free text (loop
+// 6, item 1). The original error stays reachable through Unwrap,
+// so errors.As still finds *websocket.CloseError and the S2 loss
+// classification (classifyConnectionLost) is unchanged. It
+// satisfies the LogSummary contract structurally, so
+// logging.SummarizeErr renders the summary through any wrapper,
+// including *conn.ConnectionError.
+type closeSummaryError struct {
+	err       error // the original error chain carrying the CloseError
+	code      int
+	reasonLen int
+}
+
+func (e *closeSummaryError) Error() string {
+	return fmt.Sprintf("gateway: websocket closed (close_code=%d reason_length=%d)", e.code, e.reasonLen)
+}
+
+// LogSummary renders the close summary for log lines at every level.
+func (e *closeSummaryError) LogSummary() string { return e.Error() }
+
+// Unwrap exposes the original error chain for classification.
+func (e *closeSummaryError) Unwrap() error { return e.err }
+
+// summarizeCloseError replaces an error chain carrying a
+// *websocket.CloseError with a closeSummaryError. Any other error
+// is returned unchanged.
+func summarizeCloseError(err error) error {
+	var ce *websocket.CloseError
+	if errors.As(err, &ce) {
+		return &closeSummaryError{err: err, code: ce.Code, reasonLen: len(ce.Text)}
+	}
+	return err
 }
 
 // classifyConnectionLost inspects a reader error and reports

@@ -49,10 +49,13 @@ func hatchHeaders(cookies, accessToken string) http.Header {
 
 // doHatch performs one muse.ai HTTPS request with an AuthTimeout
 // bound (the caller's earlier deadline still wins) and returns the
-// status code and body bytes. Transport errors are returned
-// wrapped in a redaction wrapper (redactErr): the original error
-// chain is preserved for errors.As/Is classification, but the
-// printed text has credentials stripped. The callers classify
+// status code and body bytes. Transport errors are returned as a
+// typed summary (transport.go): operation, error class, and
+// net-error kind only — Go's HTTP stack embeds wire bytes in its
+// error text, so the old redactErr fallback leaked peer bytes
+// into output. The original error chain is preserved for
+// errors.As/Is classification, but the printed text is the
+// summary. The callers classify
 // them (auth helpers map them to AuthError only where Python
 // would fail the same way — a network failure reaching
 // fetch_session_info in Python raises the raw curl error, but
@@ -74,14 +77,14 @@ func doHatch(ctx context.Context, client *http.Client, method, url string, heade
 	req.Header = headers
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, nil, nil, redactErr(err)
+		return 0, nil, nil, wrapTransportError(transportOp(method, url), err)
 	}
 	defer resp.Body.Close()
 	// Responses are small JSON/RSC bodies; cap the read so a
 	// hostile server cannot grow memory without bound.
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return 0, nil, nil, redactErr(err)
+		return 0, nil, nil, wrapTransportError(transportOp(method, url), err)
 	}
 	return resp.StatusCode, data, resp.Header, nil
 }
@@ -92,6 +95,15 @@ type SessionInfo struct {
 	VMID string
 	Raw  map[string]any
 }
+
+// vmUnavailableLabel is the class label for a session response
+// that carries no usable vm_id. The wake guidance is a CONSTANT
+// (never body-derived): loop 5 dropped it with the raw body
+// text, but the ruling did not require dropping it, so it is
+// restored here (loop 6, item 6c). The CLI's
+// session_unavailable classification keys on the "VM
+// unavailable" prefix.
+const vmUnavailableLabel = "VM unavailable; retry shortly or `MUSE_VM_ID=<id> castctl wake`"
 
 // FetchSessionInfo discovers the assigned personal VM: GET
 // /api/session. A non-200 status is an AuthError (cookies
@@ -121,12 +133,12 @@ func FetchSessionInfo(ctx context.Context, client *http.Client, cookies string) 
 	if !ok {
 		// Python: "vm_id" not in a non-dict body is also the
 		// VM-unavailable case, not an auth failure.
-		sum := summarizeBody("VM unavailable", data, hdr.Get("Content-Type"), nil)
+		sum := summarizeBody(vmUnavailableLabel, data, hdr.Get("Content-Type"), nil)
 		return SessionInfo{}, gatewayErrorFromSummary(-1, sum)
 	}
 	rawVM, ok := info["vm_id"]
 	if !ok {
-		sum := summarizeBody("VM unavailable", data, hdr.Get("Content-Type"), info, "status")
+		sum := summarizeBody(vmUnavailableLabel, data, hdr.Get("Content-Type"), info, "status")
 		return SessionInfo{}, gatewayErrorFromSummary(-1, sum)
 	}
 	vmID, ok := rawVM.(string)
@@ -136,7 +148,7 @@ func FetchSessionInfo(ctx context.Context, client *http.Client, cookies string) 
 		// branch is about absence, and a null vm_id means the
 		// same thing — the VM is down/restarting. Formatting
 		// it with %v would yield "<nil>" as a bogus VM id.
-		sum := summarizeBody("VM unavailable", data, hdr.Get("Content-Type"), info, "status")
+		sum := summarizeBody(vmUnavailableLabel, data, hdr.Get("Content-Type"), info, "status")
 		return SessionInfo{}, gatewayErrorFromSummary(-1, sum)
 	}
 	return SessionInfo{VMID: vmID, Raw: info}, nil

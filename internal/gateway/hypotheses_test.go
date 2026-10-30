@@ -761,8 +761,16 @@ func TestDialFailureIsFailClosedAndTransient(t *testing.T) {
 	if strings.Contains(err.Error(), "s3cretpass") {
 		t.Errorf("dial error leaks credential: %q", err.Error())
 	}
-	if !strings.Contains(err.Error(), "<redacted>") {
-		t.Errorf("dial error not redacted: %q", err.Error())
+	// Loop 6, item 2: the dial error renders as a typed
+	// summary (operation, class, kind) — no URL, credential,
+	// or other transport text at all. The loop-4 redactErr
+	// rendering (a "<redacted>" marker inside the URL text)
+	// is superseded by the summary.
+	if strings.Contains(err.Error(), "proxy.invalid") || strings.Contains(err.Error(), "socks5://") {
+		t.Errorf("dial error carries transport text: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "class=network") || !strings.Contains(err.Error(), "kind=connection_refused") {
+		t.Errorf("dial error = %q, want the typed summary (class=network kind=connection_refused)", err.Error())
 	}
 	var connErr *conn.ConnectionError
 	if !errors.As(err, &connErr) {
