@@ -26,11 +26,13 @@ type SingleConfig struct {
 	Endpoints      []option.Endpoint
 	DNS            *option.DNSOptions
 	// WireGuardDNS is castctl-side (not sing-box) state: endpoint
-	// tag -> DNS servers imported from that endpoint's wg-quick
-	// DNS= line, captured by outbound.ParseWireGuardConfWithDNS.
-	// It feeds precedence branch (ii) in ResolveProfileDNS. It is
-	// stored under the top-level "wireguard_dns" key, preserved
-	// verbatim on save like the other raw sections.
+	// tag -> DNS servers read by precedence branch (ii) in
+	// ResolveProfileDNS. It is hand-written/preserved state,
+	// stored under the top-level "wireguard_dns" key and
+	// preserved verbatim on save like the other raw sections;
+	// no production caller yet wires the
+	// outbound.ParseWireGuardConfWithDNS capture into it
+	// (import-path wiring is a follow-up).
 	WireGuardDNS map[string][]string
 
 	rawOutbounds    [][]byte
@@ -309,7 +311,7 @@ func ParseSingleConfig(data []byte, baseDir string) (*SingleConfig, error) {
 	if cfg.DNS != nil {
 		for _, name := range cfg.ProfileNames() {
 			if p := cfg.Profiles[name]; p != nil && p.dnsPresent {
-				return nil, newConfigErrorf("profile %q has a per-profile dns block and the file has a top-level dns section: remove the top-level dns section (run `castctl config migrate --write` after distributing it, see docs/config.md)", name)
+				return nil, newConfigErrorf("profile %q has a per-profile dns block and the file has a top-level dns section: remove the top-level dns section (distribute it into profile entries by hand first, see docs/config.md)", name)
 			}
 		}
 	}
@@ -535,7 +537,34 @@ func parseAutoAllowOnceValue(v any) (bool, error) {
 // validateTagGraph enforces one tag namespace across outbounds,
 // endpoints, and inline profile outbounds; resolves tag references and
 // detour/selector references; and rejects dangling references.
+// It also enforces the synthesised-direct reservation: any config
+// tag carrying the castctl-direct: prefix is rejected here, so the
+// reservation holds on every path that validates (parse and the
+// profile-mutation commands), not just on the parse path.
 func validateTagGraph(cfg *SingleConfig) error {
+	reserve := func(tag, kind string) error {
+		if IsReservedSynthesizedTag(tag) {
+			return newConfigErrorf("tag %q (%s) is reserved for castctl's synthesised direct outbounds (castctl-direct:<profile>); rename the tag", tag, kind)
+		}
+		return nil
+	}
+	for _, ob := range cfg.Outbounds {
+		if err := reserve(ob.Tag, "outbound"); err != nil {
+			return err
+		}
+	}
+	for _, ep := range cfg.Endpoints {
+		if err := reserve(ep.Tag, "endpoint"); err != nil {
+			return err
+		}
+	}
+	for name, p := range cfg.Profiles {
+		if p.Outbound.Kind == OutboundInline {
+			if err := reserve(p.Outbound.Tag, "inline outbound for profile "+name); err != nil {
+				return err
+			}
+		}
+	}
 	tags := make(map[string]string) // tag -> "outbound" | "endpoint" | "inline"
 	for _, ob := range cfg.Outbounds {
 		if prev, dup := tags[ob.Tag]; dup {

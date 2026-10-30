@@ -102,6 +102,8 @@ func TestPerProfileDNSCoexistenceRejected(t *testing.T) {
 		t.Fatal("profile dns + top-level dns coexistence must exit 2 (G1), got nil error")
 	} else if ExitCode(err) != 2 {
 		t.Fatalf("coexistence error exit code = %d, want 2", ExitCode(err))
+	} else if !strings.Contains(err.Error(), "by hand") || strings.Contains(err.Error(), "config migrate") {
+		t.Fatalf("coexistence error = %v, want 'by hand' and no 'config migrate' pointer", err)
 	}
 }
 
@@ -179,7 +181,10 @@ func TestResolveProfileDNSPrecedence(t *testing.T) {
 	}
 
 	// (iv) Global-compat fallback only when no per-profile dns
-	// exists, with a warning naming the migration step.
+	// exists, with a warning telling the operator to
+	// distribute by hand — never pointing at `config migrate`,
+	// which reports already-migrated (a no-op) for single
+	// configs and does not distribute.
 	cfg3, err := ParseSingleConfig([]byte(singleFileJSON(
 		`{"muse01":{"outbound":"proxy-sg"}}`,
 		`[`+fakeSocksOutbound+`]`, "",
@@ -195,8 +200,142 @@ func TestResolveProfileDNSPrecedence(t *testing.T) {
 	if res.Source != DNSSourceGlobalCompat || res.Options.Servers[0].Tag != "gdns" {
 		t.Fatalf("compat branch: source=%q server=%q, want global-compat/gdns", res.Source, res.Options.Servers[0].Tag)
 	}
-	if !strings.Contains(res.Warning, "config migrate") {
-		t.Fatalf("compat warning = %q, want it to name the migration step", res.Warning)
+	if !strings.Contains(res.Warning, "by hand") || strings.Contains(res.Warning, "config migrate") {
+		t.Fatalf("compat warning = %q, want 'by hand' and no 'config migrate' pointer", res.Warning)
+	}
+}
+
+func TestSynthesizedDirectTagReserved(t *testing.T) {
+	// The synthesised tag castctl-direct:<profile> is reserved:
+	// no config outbound, endpoint, or inline outbound may carry
+	// it, or the synthesised DoH default would detour through a
+	// config-defined outbound instead of the direct path.
+	collidingWG := `{"type":"wireguard","tag":"castctl-direct:alice","address":["10.0.0.2/32"],"private_key":"FAKE-PRIVKEY","peers":[{"address":"203.0.113.10","port":51820,"public_key":"FAKE-PUBKEY","allowed_ips":["0.0.0.0/0"]}]}`
+	cases := []struct {
+		name string
+		data string
+	}{
+		{
+			name: "endpoint collision",
+			data: singleFileJSON(`{"alice":{}}`, "", `[`+collidingWG+`]`, ""),
+		},
+		{
+			name: "socks outbound collision",
+			data: singleFileJSON(`{"alice":{}}`, `[{"type":"socks","tag":"castctl-direct:alice","server":"127.0.0.1","server_port":1080,"version":"5"}]`, "", ""),
+		},
+		{
+			name: "inline outbound collision",
+			data: singleFileJSON(`{"alice":{"outbound":{"type":"socks","tag":"castctl-direct:alice","server":"127.0.0.1","server_port":1080,"version":"5"}}}`, "", "", ""),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseSingleConfig([]byte(tc.data), "/base")
+			if err == nil {
+				t.Fatal("config tag castctl-direct:alice must be rejected, got nil error")
+			}
+			for _, want := range []string{"castctl-direct:alice", "reserved"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %v, want it to name %q", err, want)
+				}
+			}
+			if ExitCode(err) != 2 {
+				t.Errorf("ExitCode = %d, want 2", ExitCode(err))
+			}
+		})
+	}
+}
+
+func TestSynthesizedDirectTagKeySharingCollision(t *testing.T) {
+	// Direct profile alice + a colliding endpoint sharing a key
+	// with another profile's endpoint: the reservation must fail
+	// the config at parse, before any key-sharing or runtime
+	// lookup could dial the colliding outbound.
+	ep := func(tag, key string) string {
+		return `{"type":"wireguard","tag":"` + tag + `","address":["10.0.0.2/32"],"private_key":"` + key + `","peers":[{"address":"203.0.113.10","port":51820,"public_key":"FAKE-PUBKEY","allowed_ips":["0.0.0.0/0"]}]}`
+	}
+	data := singleFileJSON(
+		`{"alice":{},"beta":{"outbound":"wg-b"}}`, "",
+		`[`+ep("castctl-direct:alice", "FAKE-KEY")+`,`+ep("wg-b", "FAKE-KEY")+`]`, "",
+	)
+	_, err := ParseSingleConfig([]byte(data), "/base")
+	if err == nil {
+		t.Fatal("colliding endpoint tag must be rejected, got nil error")
+	}
+	if !strings.Contains(err.Error(), "castctl-direct:alice") || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("error = %v, want it to name the reserved colliding tag", err)
+	}
+	if strings.Contains(err.Error(), "FAKE-KEY") {
+		t.Error("error contains the private key value")
+	}
+}
+
+func TestWireGuardBranchWarnsWhenGlobalSectionShadowed(t *testing.T) {
+	// WG branch shadowing a PRESENT global section must be
+	// observable: a warning on the same stderr channel as the
+	// compat warning (ResolvedDNS.Warning, printed by the
+	// runtime), never written into the config file.
+	cfg, err := ParseSingleConfig([]byte(singleFileJSON(
+		`{"muse01":{"outbound":"wg-home"},"other":{"outbound":"proxy-sg"}}`,
+		`[`+fakeSocksOutbound+`]`, `[`+fakeWGEndpoint+`]`,
+		`{"servers":[{"tag":"gdns","type":"tcp","server":"127.0.0.1","server_port":5354,"detour":"proxy-sg"}],"final":"gdns"}`,
+	)), "/base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.WireGuardDNS = map[string][]string{"wg-home": {"10.2.0.1"}}
+	res, err := ResolveProfileDNS(cfg.Profiles["muse01"], cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Source != DNSSourceWireGuard {
+		t.Fatalf("WG branch: source=%q, want wireguard", res.Source)
+	}
+	if res.Warning == "" || !strings.Contains(res.Warning, "top-level dns") {
+		t.Fatalf("WG branch warning = %q, want it to name the shadowed top-level dns section", res.Warning)
+	}
+	// A non-WG profile in the same file still gets the compat
+	// warning as before (new by-hand wording).
+	res, err = ResolveProfileDNS(cfg.Profiles["other"], cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Source != DNSSourceGlobalCompat {
+		t.Fatalf("non-WG branch: source=%q, want global-compat", res.Source)
+	}
+	if !strings.Contains(res.Warning, "by hand") || strings.Contains(res.Warning, "config migrate") {
+		t.Fatalf("compat warning = %q, want 'by hand' and no 'config migrate' pointer", res.Warning)
+	}
+}
+
+func TestPerProfileDNSWireGuardKeySharingReachable(t *testing.T) {
+	// Reachable second tag: alpha's outbound is a selector over
+	// wg-a and wg-b (same fake key), and its own dns detours to
+	// wg-a — reachable, so the failure must be the key-sharing
+	// error itself, not an earlier dangling-reference refusal.
+	ep := func(tag, key string) string {
+		return `{"type":"wireguard","tag":"` + tag + `","address":["10.0.0.2/32"],"private_key":"` + key + `","peers":[{"address":"203.0.113.10","port":51820,"public_key":"FAKE-PUBKEY","allowed_ips":["0.0.0.0/0"]}]}`
+	}
+	data := singleFileJSON(
+		`{"alpha":{"outbound":"sel","dns":{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353,"detour":"wg-a"}],"final":"dns1"}}}`,
+		`[{"type":"selector","tag":"sel","outbounds":["wg-a","wg-b"]}]`,
+		`[`+ep("wg-a", "FAKE-KEY")+`,`+ep("wg-b", "FAKE-KEY")+`]`, "",
+	)
+	_, err := ParseSingleConfig([]byte(data), "/base")
+	if err == nil {
+		t.Fatal("reachable dns detour sharing a WireGuard key with the profile outbound must be rejected, got nil error")
+	}
+	msg := err.Error()
+	for _, want := range []string{"wireguard private key shared", "alpha", "dns", "wg-a", "wg-b"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error = %q, want it to name %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "dangling") {
+		t.Errorf("error = %q, want the key-sharing error, not a dangling-reference refusal", msg)
+	}
+	if strings.Contains(msg, "FAKE-KEY") {
+		t.Error("error contains the private key value")
 	}
 }
 

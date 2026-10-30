@@ -16,14 +16,25 @@ import (
 //
 // Precedence, in order, for the active profile:
 //  1. The profile's own "dns" block (DNSSourceProfile).
-//  2. The WireGuard endpoint's imported-config DNS servers, reached
-//     through that tunnel (DNSSourceWireGuard). The servers come
-//     from SingleConfig.WireGuardDNS, keyed by endpoint tag; that
-//     map is populated from wg-quick DNS= lines captured by
-//     outbound.ParseWireGuardConfWithDNS (see internal/outbound).
+//  2. The WireGuard endpoint's DNS servers, reached through
+//     that tunnel (DNSSourceWireGuard). The servers come from
+//     SingleConfig.WireGuardDNS, keyed by endpoint tag: that map
+//     is hand-written/preserved castctl-side state. The parser
+//     outbound.ParseWireGuardConfWithDNS can capture wg-quick
+//     DNS= lines, but no production caller wires that capture
+//     into wireguard_dns yet — import-path wiring is a
+//     follow-up, so branch (ii) must not be described as
+//     "imported from the wg-quick DNS= line" as a present-tense
+//     fact. When branch (ii) fires while a top-level dns section
+//     is present, the section is shadowed, and ResolveProfileDNS
+//     sets Warning (same stderr channel as the compat warning)
+//     so the shadowing is observable.
 //  3. The top-level "dns" section, compat fallback for one cycle
-//     only (DNSSourceGlobalCompat), with a warning naming the
-//     migration step. It applies ONLY when no per-profile dns
+//     only (DNSSourceGlobalCompat), with a warning telling the
+//     operator to distribute it into profile entries by hand
+//     (never pointing at `config migrate`, which does not
+//     distribute for single configs). It applies ONLY when no
+//     per-profile dns
 //     exists; coexistence of a profile block and a top-level
 //     section is a parse-time error (G1), and the warning cycle
 //     ends in a hard error in a later PR (documented, not yet
@@ -72,7 +83,8 @@ type DNSSource string
 const (
 	// DNSSourceProfile is the profile's own "dns" block.
 	DNSSourceProfile DNSSource = "profile"
-	// DNSSourceWireGuard is WireGuard-imported DNS servers.
+	// DNSSourceWireGuard is WireGuard DNS servers (from
+	// wireguard_dns state).
 	DNSSourceWireGuard DNSSource = "wireguard"
 	// DNSSourceDefault is the synthesised DoH default.
 	DNSSourceDefault DNSSource = "default"
@@ -86,8 +98,9 @@ const (
 type ResolvedDNS struct {
 	Options *option.DNSOptions
 	Source  DNSSource
-	// Warning is set only for the global-compat branch; the
-	// caller prints it once on stderr.
+	// Warning is set for the global-compat branch and for the
+	// WireGuard branch when it shadows a present top-level dns
+	// section; the caller prints it once on stderr.
 	Warning string
 	// SynthesizedDirectTag is the runtime-only direct outbound
 	// tag the detour names, or "" when the resolution detours
@@ -97,18 +110,34 @@ type ResolvedDNS struct {
 }
 
 // defaultDNSServerTag is the tag of the single server in the
-// synthesised default and WireGuard-imported resolvers.
+// synthesised default and WireGuard resolvers.
 const defaultDNSServerTag = "castctl-doh"
+
+// SynthesizedDirectTagPrefix is reserved: no config outbound,
+// endpoint, or inline outbound tag may carry it (enforced by
+// validateTagGraph). The reservation is what keeps the
+// synthesised tag collision-free: a config tag equal to a
+// profile's synthesised tag would otherwise capture the
+// default DoH detour, and createOutbounds would silently skip
+// creating the synthesised outbound.
+const SynthesizedDirectTagPrefix = "castctl-direct:"
+
+// IsReservedSynthesizedTag reports whether a config tag carries
+// the reserved synthesised-direct prefix.
+func IsReservedSynthesizedTag(tag string) bool {
+	return strings.HasPrefix(tag, SynthesizedDirectTagPrefix)
+}
 
 // SynthesizedDirectTag returns the runtime-only tag of the
 // per-profile direct outbound synthesised for a direct profile's
 // default DNS detour. It is deterministic from the profile name
 // (profile names admit only [A-Za-z0-9._-]), never collides with
-// a config tag namespace entry (config tags cannot be mistaken
-// for it: validation treats it as reachable only for its own
-// profile), and is never written into the config file.
+// a config tag namespace entry (config tags carrying the
+// reserved prefix are rejected at parse time, and validation
+// treats it as reachable only for its own profile), and is never
+// written into the config file.
 func SynthesizedDirectTag(profileName string) string {
-	return "castctl-direct:" + profileName
+	return SynthesizedDirectTagPrefix + profileName
 }
 
 // ResolveProfileDNS resolves the active profile's effective DNS
@@ -126,7 +155,7 @@ func ResolveProfileDNS(prof *Profile, single *SingleConfig) (*ResolvedDNS, error
 	// (1) Own block.
 	if prof.dnsPresent {
 		if single.DNS != nil {
-			return nil, newConfigErrorf("profile %q has both a per-profile dns block and a top-level dns section: remove the top-level dns section (run `castctl config migrate --write` after distributing it, see docs/config.md)", prof.Name)
+			return nil, newConfigErrorf("profile %q has both a per-profile dns block and a top-level dns section: remove the top-level dns section (distribute it into profile entries by hand first, see docs/config.md)", prof.Name)
 		}
 		opts, err := prof.ParsedDNS()
 		if err != nil {
@@ -140,13 +169,21 @@ func ResolveProfileDNS(prof *Profile, single *SingleConfig) (*ResolvedDNS, error
 		}
 		return &ResolvedDNS{Options: opts, Source: DNSSourceProfile, SynthesizedDirectTag: synth}, nil
 	}
-	// (2) WireGuard-imported DNS through the profile's tunnel.
+	// (2) WireGuard DNS through the profile's tunnel. When a
+	// top-level dns section is also present, this branch
+	// shadows it: set the warning so the shadowing is
+	// observable on stderr (same channel as the compat
+	// warning), never silently.
 	if tag, servers, ok := wireGuardDNSForProfile(prof, single); ok {
 		opts, err := buildWireGuardDNSOptions(tag, servers)
 		if err != nil {
 			return nil, err
 		}
-		return &ResolvedDNS{Options: opts, Source: DNSSourceWireGuard}, nil
+		warning := ""
+		if single.DNS != nil {
+			warning = fmt.Sprintf("castctl: top-level dns section is ignored for profile %q: WireGuard DNS takes precedence; distribute the top-level section into profile entries by hand (see docs/config.md)", prof.Name)
+		}
+		return &ResolvedDNS{Options: opts, Source: DNSSourceWireGuard, Warning: warning}, nil
 	}
 	// (3) Global-compat fallback, before the default (see the
 	// package header for why compat precedes synthesis: a
@@ -161,7 +198,7 @@ func ResolveProfileDNS(prof *Profile, single *SingleConfig) (*ResolvedDNS, error
 		return &ResolvedDNS{
 			Options: opts,
 			Source:  DNSSourceGlobalCompat,
-			Warning: "castctl: top-level dns section is deprecated and will become an error in a later release: distribute it into profile entries with `castctl config migrate --write` (see docs/config.md)",
+			Warning: "castctl: top-level dns section is deprecated and will become an error in a later release: distribute it into profile entries by hand (see docs/config.md)",
 		}, nil
 	}
 	// (4) Synthesised DoH default.
@@ -204,7 +241,7 @@ func buildDefaultDNSOptions(detour string) (*option.DNSOptions, error) {
 	return parseDNS(raw)
 }
 
-// buildWireGuardDNSOptions builds one udp server per imported DNS
+// buildWireGuardDNSOptions builds one udp server per listed DNS
 // address, all detouring through the WireGuard endpoint tag. Port
 // 53 is sing-box's default for udp servers; the addresses are
 // validated at config parse (see validateWireGuardDNS), so no
@@ -232,10 +269,10 @@ func buildWireGuardDNSOptions(endpointTag string, servers []string) (*option.DNS
 }
 
 // wireGuardDNSForProfile returns the WireGuard endpoint tag and
-// imported DNS servers for the profile's tunnel, when the
-// profile's outbound resolves (directly, or one detour hop
-// through an outbound) to a WireGuard endpoint that carries
-// imported DNS servers in single.WireGuardDNS.
+// DNS servers for the profile's tunnel, when the profile's
+// outbound resolves (directly, or one detour hop through an
+// outbound) to a WireGuard endpoint that carries DNS servers in
+// single.WireGuardDNS.
 func wireGuardDNSForProfile(prof *Profile, single *SingleConfig) (string, []string, bool) {
 	if single == nil || len(single.WireGuardDNS) == 0 {
 		return "", nil, false

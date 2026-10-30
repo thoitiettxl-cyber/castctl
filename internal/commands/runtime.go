@@ -389,8 +389,17 @@ func createOutbounds(ctx context.Context, mgr *outbound.Manager, single *profile
 	// "direct" outbound and before dnsClient.Start() (the caller
 	// starts DNS after this function returns), so the detour
 	// resolves at Start. Never a config tag: validation accepts
-	// it only as a direct profile's own reachable detour.
-	if synthDirectTag != "" && !created[synthDirectTag] {
+	// it only as a direct profile's own reachable detour, and
+	// parse time rejects any config tag carrying the reserved
+	// castctl-direct: prefix. Defence in depth: if the tag is
+	// nevertheless already taken (e.g. a SingleConfig built
+	// without going through parse), FAIL LOUDLY — never silently
+	// skip creation and let the DNS detour dial the colliding
+	// config outbound.
+	if synthDirectTag != "" {
+		if created[synthDirectTag] {
+			return errCode(2, fmt.Errorf("synthesised direct outbound tag %q is already taken by a config outbound or endpoint; the castctl-direct: prefix is reserved, rename the config tag", synthDirectTag))
+		}
 		if err := mgr.CreateOutbound(ctx, synthDirectTag, "direct", SynthesizedDirectOutbound()); err != nil {
 			return errCode(2, err)
 		}

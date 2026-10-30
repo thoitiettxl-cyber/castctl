@@ -25,7 +25,7 @@ Top-level keys (exactly these six; unknown keys are rejected):
 | `outbounds` | array of sing-box outbound objects (shared, tag-addressed) |
 | `endpoints` | array of sing-box endpoint objects (e.g. WireGuard, tag-addressed) |
 | `dns` | object: the interim global DNS section (below, compat fallback only) |
-| `wireguard_dns` | object: endpoint tag → array of DNS server addresses imported from that endpoint's wg-quick `DNS=` line (see [Per-profile DNS](#per-profile-dns)); castctl-side state, not a sing-box field |
+| `wireguard_dns` | object: endpoint tag → array of DNS server addresses read by branch 2 (see [Per-profile DNS](#per-profile-dns)); castctl-side state, not a sing-box field — hand-written/preserved, not imported: no import-path wiring from a wg-quick `DNS=` line exists yet (follow-up) |
 
 A profile entry accepts exactly these ten keys (unknown keys
 are rejected — see [Per-profile DNS](#per-profile-dns)):
@@ -221,11 +221,17 @@ tag `dns1` with no collision.
 (`profile.ResolveProfileDNS`):
 
 1. The profile's own `dns` block.
-2. Else the WireGuard endpoint's imported-config DNS servers,
-   reached through that tunnel (see below).
+2. Else the WireGuard endpoint's DNS servers from the
+   `wireguard_dns` state, reached through that tunnel (see
+   below). When this branch fires while a top-level `dns`
+   section is present, the section is shadowed, and a one-line
+   stderr warning says so (same channel as the compat
+   warning).
 3. Else the top-level `dns` section, compat fallback for one
-   cycle, with a one-line stderr warning naming the migration
-   step (`castctl config migrate --write`). Compat sits
+   cycle, with a one-line stderr warning telling the operator
+   to distribute it into profile entries by hand (`config
+   migrate` does not distribute for single configs and must
+   not be pointed at as the distributor). Compat sits
    before the default deliberately: a config migrated by the
    removal PR carries an authored global section that must keep
    working for one cycle, and the warning must be observable
@@ -261,17 +267,24 @@ fails exactly as before (pinned by
 `internal/dns/gate2_test.go`). A direct profile's own `dns`
 block may also detour to its synthesised tag; that is the
 only way a hand-written block detours to a direct outbound.
+The `castctl-direct:` prefix is reserved: any config
+outbound, endpoint, or inline outbound tag carrying it is a
+parse-time error (exit 2), and `createOutbounds` fails loudly
+if the synthesised tag is already taken, so a config tag can
+never capture the default DoH detour.
 
-**WireGuard-imported DNS (branch 2).** `wg-quick DNS=` has no
-field in sing-box's `WireGuardEndpointOptions`, so it is
-captured separately: `outbound.ParseWireGuardConfWithDNS`
-returns the server list alongside the endpoint, and castctl
-stores it under the top-level `wireguard_dns` key (endpoint
-tag → server addresses; each key must name a WireGuard
-endpoint in the same file). Branch 2 builds one `udp` server
-(port 53) per imported address, all detouring through that
-endpoint tag. The legacy `ParseWireGuardConf` entry point
-still drops `DNS=`, preserving its contract.
+**WireGuard DNS (branch 2).** `wg-quick DNS=` has no field in
+sing-box's `WireGuardEndpointOptions`. Branch 2 reads the
+top-level `wireguard_dns` key (endpoint tag → server
+addresses; each key must name a WireGuard endpoint in the same
+file) — hand-written/preserved castctl-side state, NOT an
+import: `outbound.ParseWireGuardConfWithDNS` can capture
+`DNS=` from a wg-quick conf, but no production caller wires
+that capture into `wireguard_dns` yet (import-path wiring is
+a follow-up). Branch 2 builds one `udp` server (port 53) per
+listed address, all detouring through that endpoint tag. The
+legacy `ParseWireGuardConf` entry point still drops `DNS=`,
+preserving its contract.
 
 **`local` is never the default: explicit-only.** A hand-written
 `local` server keeps sing-box's default `prefer_go=false`.
@@ -441,7 +454,7 @@ records a refusal instead of writing an invalid config.
 
 The gated model is implemented as described in
 [Per-profile DNS](#per-profile-dns): own block, then
-WireGuard-imported DNS, then the top-level section (compat
+WireGuard DNS (from `wireguard_dns` state), then the top-level section (compat
 fallback, one cycle, with warning), then the synthesised DoH
 default to 1.1.1.1 (`https`, IP-literal, no bootstrap) with
 detour = the profile's outbound (for direct profiles, the
