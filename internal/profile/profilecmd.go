@@ -157,9 +157,9 @@ func AddProfile(baseDir, name string, opts AddProfileOptions) (*Profile, error) 
 // no single file exists and the old layout is present. It is kept
 // deliberately alongside the LoadProfile refusal: LoadProfile
 // refuses READS of legacy files, while this guards WRITES —
-// including the named-only case (legacy profile directories with
-// no base config file), where no LoadProfile call would fire for
-// the new name being added. When a single file exists, leftover
+// including the named-only case (legacy config files under
+// profiles/ with no base config file), where no LoadProfile call
+// would fire for the new name being added. When a single file exists, leftover
 // legacy files are never read (LoadProfile refuses them) and
 // adding is fine.
 func refuseUnmigrated(baseDir string) error {
@@ -171,14 +171,15 @@ func refuseUnmigrated(baseDir string) error {
 		return nil
 	}
 	if !state.Exists {
-		// No base config at all: also refuse when named legacy
-		// profiles exist (their base config was never the single
-		// file, so Exists above says nothing about them).
-		names, err := DiscoverProfileNames(baseDir)
-		if err != nil {
+		// No base config at all: refuse only when an actual
+		// legacy config FILE exists somewhere in the layout
+		// (their base config was never the single file, so
+		// Exists above says nothing about them). A bare profile
+		// directory with no config file is not a legacy layout
+		// and does not block adding.
+		if _, ok, err := findLegacyConfigFile(baseDir, ""); err != nil {
 			return err
-		}
-		if len(names) > 1 {
+		} else if ok {
 			return newConfigError("the old layout exists unmigrated; run config migrate first")
 		}
 		return nil
@@ -188,18 +189,14 @@ func refuseUnmigrated(baseDir string) error {
 	return newConfigError("the old layout exists unmigrated; run config migrate first")
 }
 
-// legacyProfileExists reports whether a legacy config file or
-// directory exists for paths (a named profile's own files). The
-// default profile's config path is the base config.json itself, so
-// callers must not use this for "default" when a single file exists.
+// legacyProfileExists reports whether an actual legacy config FILE
+// exists for paths (a named profile's own config file). A bare
+// directory with no config file is NOT a legacy profile: it counts
+// as the profile's home, never as an unmigrated layout. The default
+// profile's config path is the base config.json itself, so callers
+// must not use this for "default" when a single file exists.
 func legacyProfileExists(paths Paths) bool {
-	if _, err := os.Stat(paths.Config); err == nil {
-		return true
-	}
-	if st, err := os.Stat(paths.Dir); err == nil && st.IsDir() {
-		return true
-	}
-	return false
+	return configPathExists(paths.Config)
 }
 
 // RemoveProfileResult is the outcome of RemoveProfile.

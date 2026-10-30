@@ -802,6 +802,47 @@ func applyEnvFill(p *Profile, getenv func(string) (string, bool)) {
 	}
 }
 
+// configPathExists reports whether path exists and is not a
+// directory. It uses os.Stat deliberately: Stat follows symlinks
+// (like the os.ReadFile it replaces for existence checks) but never
+// opens the file, so a FIFO at the path cannot hang the check, and
+// only existence and type are observed — never contents.
+func configPathExists(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && !st.IsDir()
+}
+
+// findLegacyConfigFile returns the first legacy config file in
+// baseDir: the flat base config.json, then any
+// profiles/<name>/config.json in sorted profile-name order, skipping
+// exclude (the caller has already checked that name's own file). It
+// uses os.Stat only: no file is opened, so a FIFO cannot hang the
+// scan, and a bare directory (no config file) never counts. It
+// reports ("", false, nil) when no legacy config file exists.
+func findLegacyConfigFile(baseDir, exclude string) (string, bool, error) {
+	basePath := filepath.Join(baseDir, "config.json")
+	if configPathExists(basePath) {
+		return basePath, true, nil
+	}
+	names, err := DiscoverProfileNames(baseDir)
+	if err != nil {
+		return "", false, err
+	}
+	for _, name := range names {
+		if name == DefaultProfileName || name == exclude {
+			continue
+		}
+		paths, err := ProfilePaths(baseDir, name)
+		if err != nil {
+			continue
+		}
+		if configPathExists(paths.Config) {
+			return paths.Config, true, nil
+		}
+	}
+	return "", false, nil
+}
+
 // LoadProfile loads one profile's settings. It is strictly read-only:
 // it creates no files and never generates a node_id (see the package
 // doc). Precedence: a single-file entry wins wholly (never per-key
@@ -809,9 +850,14 @@ func applyEnvFill(p *Profile, getenv func(string) (string, bool)) {
 // still exists is REFUSED with ErrLegacyLayout naming
 // `castctl config migrate --write` and the legacy file path — the
 // legacy layout is never read silently, and Migrate is the only
-// path that reads legacy files. A profile with no entry anywhere
-// synthesises defaults (SourceNone). An unparseable single file is
-// an error with no silent fallback.
+// path that reads legacy files. The refusal is layout-wide: when
+// no single file exists, ANY legacy config file in the layout
+// refuses EVERY profile name, including names with no file of
+// their own (a ghost name must not synthesise defaults over an
+// unmigrated layout). A profile with no entry anywhere, in a
+// layout with no legacy file at all, synthesises defaults
+// (SourceNone). An unparseable single file is an error with no
+// silent fallback.
 func LoadProfile(baseDir, name string, getenv func(string) (string, bool)) (*Profile, error) {
 	paths, err := ProfilePaths(baseDir, name)
 	if err != nil {
@@ -834,11 +880,26 @@ func LoadProfile(baseDir, name string, getenv func(string) (string, bool)) (*Pro
 		// unmigrated legacy file: refuse it (ErrLegacyLayout) instead
 		// of reading it. The file's contents are never parsed here;
 		// only its existence is checked, and only its path is named.
+		// Existence is checked with os.Stat, not os.ReadFile: opening
+		// a FIFO to read it would hang. A directory at the path is
+		// a config error, not a legacy layout.
 		if !(found && name == DefaultProfileName) {
-			if _, rerr := os.ReadFile(paths.Config); rerr == nil {
+			if st, serr := os.Stat(paths.Config); serr == nil {
+				if st.IsDir() {
+					return nil, newConfigErrorf("config path %q is a directory, not a file", paths.Config)
+				}
 				return nil, newLegacyLayoutError(paths.Config)
-			} else if !os.IsNotExist(rerr) {
-				return nil, newConfigErrorf("read config: %v", rerr)
+			} else if !os.IsNotExist(serr) {
+				return nil, newConfigErrorf("read config: %v", serr)
+			}
+			if !found {
+				legacyPath, ok, ferr := findLegacyConfigFile(baseDir, name)
+				if ferr != nil {
+					return nil, ferr
+				}
+				if ok {
+					return nil, newLegacyLayoutError(legacyPath)
+				}
 			}
 		}
 	}

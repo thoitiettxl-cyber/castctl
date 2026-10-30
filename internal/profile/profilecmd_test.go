@@ -216,6 +216,46 @@ func TestAddProfileRefusesUnmigrated(t *testing.T) {
 	}
 }
 
+// TestAddProfileBareDirectoryOnlySucceeds (F5): a bare profile
+// directory with NO config file is not a legacy layout. Adding a
+// profile must succeed, and legacyProfileExists must report false
+// for a bare directory (true only for an actual config file).
+func TestAddProfileBareDirectoryOnlySucceeds(t *testing.T) {
+	t.Parallel()
+	base := BaseDir(t.TempDir())
+	bareDir := filepath.Join(base, "profiles", "work")
+	if err := os.MkdirAll(bareDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := ProfilePaths(base, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyProfileExists(paths) {
+		t.Error("legacyProfileExists(bare dir) = true; want false (no config file)")
+	}
+	if _, err := AddProfile(base, "new", AddProfileOptions{}); err != nil {
+		t.Errorf("AddProfile over bare-directory-only layout = %v; want success", err)
+	}
+	if _, err := AddProfile(base, "work", AddProfileOptions{}); err != nil {
+		t.Errorf("AddProfile(work) over its own bare directory = %v; want success", err)
+	}
+	// Control: an actual legacy config file still blocks the add
+	// and is reported by legacyProfileExists.
+	base2 := BaseDir(t.TempDir())
+	writeFile(t, filepath.Join(base2, "profiles", "work", "config.json"), `{"node_id":"W1"}`, 0o600)
+	paths2, err := ProfilePaths(base2, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !legacyProfileExists(paths2) {
+		t.Error("legacyProfileExists(config file) = false; want true")
+	}
+	if _, err := AddProfile(base2, "new", AddProfileOptions{}); err == nil || !strings.Contains(err.Error(), "run config migrate first") {
+		t.Errorf("AddProfile over legacy file = %v; want 'run config migrate first'", err)
+	}
+}
+
 func TestRemoveProfile(t *testing.T) {
 	t.Parallel()
 	base := BaseDir(t.TempDir())

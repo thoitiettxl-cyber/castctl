@@ -421,6 +421,35 @@ func TestProfileListRefusesLegacyLayout(t *testing.T) {
 	}
 }
 
+// TestProfileListShowBareDirectoryOnly (F5): a bare profile
+// directory with no config file is not a legacy layout. Under the
+// default (non-explicit) config location, profile list and profile
+// show exit 0 and report the synthesised defaults.
+func TestProfileListShowBareDirectoryOnly(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(home, "xdg")
+	baseDir := filepath.Join(xdg, "castctl")
+	if err := os.MkdirAll(filepath.Join(baseDir, "profiles", "work"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	env, out, errb := profileEnv(t, "")
+	env.Getenv = mapGetenv(map[string]string{"XDG_CONFIG_HOME": xdg, "HOME": home})
+	runDefault := func(args ...string) int {
+		out.Reset()
+		errb.Reset()
+		return Run(context.Background(), args, env)
+	}
+	if code := runDefault("profile", "list"); code != 0 {
+		t.Fatalf("list over bare-directory-only layout: code=%d, want 0; err=%q", code, errb.String())
+	}
+	if !strings.Contains(out.String(), `"source": "none"`) {
+		t.Errorf("list: %q; want source none", out.String())
+	}
+	if code := runDefault("profile", "show", "work"); code != 0 {
+		t.Fatalf("show work over bare directory: code=%d, want 0; err=%q", code, errb.String())
+	}
+}
+
 func TestConfigMigrate(t *testing.T) {
 	home := t.TempDir()
 	// The legacy layout lives under the DEFAULT config home
