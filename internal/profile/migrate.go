@@ -11,8 +11,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
+
+	"github.com/sagernet/sing-box/option"
 )
 
 // MigrateProfile is one profile in a MigrateResult.
@@ -619,8 +622,9 @@ const interimDNSServerTag = "castctl-doh"
 // singleDNSDetour returns the one detour tag every profile in cfg
 // routes through. A profile's detour tag is its outbound tag
 // reference, its endpoint tag reference, or its inline outbound's
-// tag — except when the resolved target is a direct outbound, which
-// has no tag a detour can use: a direct-only profile carries no
+// tag — except when detourTagForProfile finds no usable detour
+// chain for it (direct-only, or a chain terminating in an empty
+// direct outbound, an empty group, or a urltest), which carries no
 // detour tag at all. The runtime "direct" outbound is synthesised at runtime
 // (createOutbounds) and the synthetic "castctl-dialer" exists only
 // for direct endpoint references; neither is a config tag, so
@@ -651,15 +655,134 @@ func singleDNSDetour(cfg *SingleConfig) (detour, refusing string, ok bool) {
 	return detour, "", true
 }
 
+// detourNode is one outbound/endpoint/inline node in the tag graph,
+// resolved by tag for detour-chain walking.
+type detourNode struct {
+	tag     string
+	typ     string
+	options any
+}
+
+// lookupDetourNode resolves tag to its node: an outbound, an
+// endpoint, or another profile's inline outbound. A tag that
+// resolves to nothing is not found; the caller decides whether
+// that is a dangling reference (left for validateTagGraph) or an
+// unusable path.
+func lookupDetourNode(cfg *SingleConfig, tag string) (detourNode, bool) {
+	if cfg == nil {
+		return detourNode{}, false
+	}
+	for _, ob := range cfg.Outbounds {
+		if ob.Tag == tag {
+			return detourNode{tag: tag, typ: ob.Type, options: ob.Options}, true
+		}
+	}
+	for _, ep := range cfg.Endpoints {
+		if ep.Tag == tag {
+			return detourNode{tag: tag, typ: ep.Type, options: ep.Options}, true
+		}
+	}
+	for _, p := range cfg.Profiles {
+		if p.Outbound.Kind == OutboundInline && p.Outbound.Tag == tag {
+			ob, err := p.Outbound.InlineOutbound()
+			if err != nil || ob == nil {
+				return detourNode{}, false
+			}
+			return detourNode{tag: tag, typ: ob.Type, options: ob.Options}, true
+		}
+	}
+	return detourNode{}, false
+}
+
+// detourNodeCanDial reports whether dialing through node can ever
+// succeed, walking detour fields and selector member lists
+// recursively (visiting guards detour cycles: a cycle can never
+// dial, so it is unusable). asDetourTarget distinguishes the two
+// ways a node is reached: as a DETOUR target (DetourDialer.init
+// refuses an empty direct outbound) or as a node dialed through
+// directly (a selector dials its selected member directly, with
+// no empty-direct check — so a direct member dials fine even
+// though it cannot itself serve as a detour target). A node is
+// usable when at least one resolution path terminates in a usable
+// target; it is unusable when every path terminates in an empty
+// direct outbound (as a detour target), an empty selector, a
+// dangling tag, or a urltest node.
+func detourNodeCanDial(cfg *SingleConfig, node detourNode, visiting map[string]bool, asDetourTarget bool) bool {
+	if node.tag != "" {
+		if visiting[node.tag] {
+			return false
+		}
+		visiting[node.tag] = true
+		defer delete(visiting, node.tag)
+	}
+	// A detour field takes precedence: dialing goes through the
+	// detour target first, and the detour target is always
+	// reached as a detour target (its own DetourDialer.init runs).
+	if d := detourOf(node.options); d != "" {
+		target, ok := lookupDetourNode(cfg, d)
+		if !ok {
+			return false
+		}
+		return detourNodeCanDial(cfg, target, visiting, true)
+	}
+	switch node.typ {
+	case "direct":
+		// As a detour target, empty means zero DialerOptions (sing-box
+		// protocol/direct IsEmpty: DeepEqual against the zero
+		// value) and the detour is refused. Dialed through
+		// directly, a direct outbound always dials; a direct
+		// outbound carrying any dialer option (a bind address,
+		// a routing mark, …) is non-empty and serves as a detour
+		// target too.
+		if asDetourTarget {
+			if w, ok := node.options.(option.DialerOptionsWrapper); ok {
+				return !reflect.DeepEqual(w.TakeDialerOptions(), option.DialerOptions{})
+			}
+			return false
+		}
+		return true
+	case "selector":
+		members := groupMembers(node.options)
+		if len(members) == 0 {
+			return false
+		}
+		for _, m := range members {
+			target, ok := lookupDetourNode(cfg, m)
+			if !ok {
+				continue
+			}
+			// Members are dialed directly, not as detour targets.
+			if detourNodeCanDial(cfg, target, visiting, false) {
+				return true
+			}
+		}
+		return false
+	case "urltest":
+		// Unusable in this Manager regardless of members: the
+		// urltest adapter's Start requires a URL test history
+		// storage service, which castctl never registers
+		// ("missing URL test history storage"), and dialing an
+		// unstarted urltest group dereferences a nil group.
+		// This refuses every detour whose dial target IS a
+		// urltest; a selector may still route around a urltest
+		// member through another member (see the selector case).
+		return false
+	default:
+		// Any other outbound/endpoint type dials through its
+		// own transport. Endpoint (e.g. WireGuard) dial validity
+		// is [UNVERIFIED]: the tag is kept, not claimed proven.
+		return true
+	}
+}
+
 // detourTagForProfile returns the tag a dns detour for p would name,
-// or "" when p is direct-only (no config tag exists for its outbound).
-// A tag reference is resolved against cfg's outbounds, endpoints, and
-// inline profile outbounds: when the resolved target is a direct
-// outbound, "" is returned — a detour naming an empty direct outbound
-// is runtime-invalid (sing-box refuses it), so no dns section may be
-// authored for it. A tag that resolves to a selector/urltest outbound
-// is returned as-is (its member list is not consulted); a tag that
-// resolves to nothing is also returned as-is and left for
+// or "" when p is direct-only or every detour chain from p
+// terminates unusably (empty direct, empty group, dangling tag, or
+// urltest) — authoring a detour to such a target writes a config
+// sing-box refuses at runtime, so no dns section may be authored
+// for it. Detour chains are walked through detour fields and
+// selector/urltest member lists with a cycle guard; a tag that
+// resolves to nothing is returned as-is and left for
 // validateTagGraph to reject as dangling.
 func detourTagForProfile(cfg *SingleConfig, p *Profile) string {
 	if p == nil {
@@ -667,41 +790,24 @@ func detourTagForProfile(cfg *SingleConfig, p *Profile) string {
 	}
 	switch p.Outbound.Kind {
 	case OutboundTag:
-		if cfg != nil {
-			for _, ob := range cfg.Outbounds {
-				if ob.Tag == p.Outbound.Tag {
-					if ob.Type == "direct" {
-						return ""
-					}
-					return p.Outbound.Tag
-				}
-			}
-			for _, ep := range cfg.Endpoints {
-				if ep.Tag == p.Outbound.Tag {
-					if ep.Type == "direct" {
-						return ""
-					}
-					return p.Outbound.Tag
-				}
-			}
-			for _, other := range cfg.Profiles {
-				if other.Outbound.Kind == OutboundInline && other.Outbound.Tag == p.Outbound.Tag {
-					if other.Outbound.Type == "direct" {
-						return ""
-					}
-					return p.Outbound.Tag
-				}
-			}
+		node, ok := lookupDetourNode(cfg, p.Outbound.Tag)
+		if !ok {
+			return p.Outbound.Tag
 		}
-		return p.Outbound.Tag
+		if detourNodeCanDial(cfg, node, map[string]bool{}, true) {
+			return p.Outbound.Tag
+		}
+		return ""
 	case OutboundInline:
-		// An inline direct outbound is direct-only: its tag (if
-		// any) names an empty direct outbound, which sing-box
-		// refuses as a detour. Treat it as no detour.
-		if p.Outbound.Type == "direct" {
-			return ""
+		ob, err := p.Outbound.InlineOutbound()
+		if err != nil || ob == nil {
+			return p.Outbound.Tag
 		}
-		return p.Outbound.Tag
+		node := detourNode{tag: p.Outbound.Tag, typ: ob.Type, options: ob.Options}
+		if detourNodeCanDial(cfg, node, map[string]bool{}, true) {
+			return p.Outbound.Tag
+		}
+		return ""
 	default:
 		return ""
 	}

@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sagernet/sing-box/option"
 )
 
 func readJSONFile(t *testing.T, path string) map[string]any {
@@ -1130,6 +1132,147 @@ func TestMigrateStrayDefaultLegacyFile(t *testing.T) {
 	})
 }
 
+// TestDetourTagForProfileWalksDetourChains (R2): detourTagForProfile
+// must walk detour chains (with a cycle guard) through detour
+// fields and selector/urltest member lists, and refuse authoring
+// ("") when EVERY resolution path terminates in an empty direct
+// outbound, an empty group, or an unusable urltest detour.
+// Authoring is kept when at least one path terminates in a usable
+// non-direct outbound.
+func TestDetourTagForProfileWalksDetourChains(t *testing.T) {
+	t.Parallel()
+	socks := func(tag, detour string) string {
+		d := ""
+		if detour != "" {
+			d = `,"detour":` + quoteJSON(detour)
+		}
+		return `{"type":"socks","tag":` + quoteJSON(tag) + `,"server":"127.0.0.1","server_port":1080,"version":"5"` + d + `}`
+	}
+	direct := func(tag, detour string) string {
+		d := ""
+		if detour != "" {
+			d = `,"detour":` + quoteJSON(detour)
+		}
+		return `{"type":"direct","tag":` + quoteJSON(tag) + d + `}`
+	}
+	selector := func(tag string, members ...string) string {
+		parts := make([]string, 0, len(members))
+		for _, m := range members {
+			parts = append(parts, quoteJSON(m))
+		}
+		return `{"type":"selector","tag":` + quoteJSON(tag) + `,"outbounds":[` + strings.Join(parts, ",") + `]}`
+	}
+	urltest := func(tag string, members ...string) string {
+		parts := make([]string, 0, len(members))
+		for _, m := range members {
+			parts = append(parts, quoteJSON(m))
+		}
+		return `{"type":"urltest","tag":` + quoteJSON(tag) + `,"outbounds":[` + strings.Join(parts, ",") + `],"url":"http://127.0.0.1/","interval":"60s"}`
+	}
+	doc := `{"profiles":{
+		"chain-empty":{"node_id":"N1","outbound":"outer"},
+		"chain-live":{"node_id":"N1","outbound":"outer-live"},
+		"chain-inner":{"node_id":"N1","outbound":"inner-live"},
+		"inline-chain":{"node_id":"N1","outbound":{"type":"socks","server":"127.0.0.1","server_port":1080,"version":"5","detour":"proxy-direct"}},
+		"empty-selector":{"node_id":"N1","outbound":"sel-empty"},
+		"selector-direct-only":{"node_id":"N1","outbound":"sel-direct"},
+		"selector-mixed":{"node_id":"N1","outbound":"sel-mixed"},
+		"selector-urltest-only":{"node_id":"N1","outbound":"sel-ut"},
+		"selector-urltest-mixed":{"node_id":"N1","outbound":"sel-ut-mix"},
+		"urltest-direct":{"node_id":"N1","outbound":"ut-direct"},
+		"urltest-socks":{"node_id":"N1","outbound":"ut-socks"},
+		"cycle":{"node_id":"N1","outbound":"cyc-a"},
+		"chain-via-selector":{"node_id":"N1","outbound":"outer-sel"},
+		"bound-direct":{"node_id":"N1","outbound":"bound"},
+		"wg-chain":{"node_id":"N1","outbound":"wg-chain"}
+	},"outbounds":[
+		` + socks("outer", "inner") + `,` + direct("inner", "proxy-direct") + `,` + direct("proxy-direct", "") + `,
+		` + socks("outer-live", "inner-live") + `,` + direct("inner-live", "proxy-sg") + `,
+		` + selector("sel-empty") + `,
+		` + selector("sel-direct", "proxy-direct") + `,
+		` + selector("sel-mixed", "proxy-direct", "proxy-sg") + `,
+		` + selector("sel-ut", "ut-socks") + `,
+		` + selector("sel-ut-mix", "ut-socks", "proxy-sg") + `,
+		` + urltest("ut-direct", "proxy-direct") + `,
+		` + urltest("ut-socks", "proxy-sg") + `,
+		` + socks("cyc-a", "cyc-b") + `,` + socks("cyc-b", "cyc-a") + `,
+		` + socks("outer-sel", "sel-direct") + `,
+		` + `{"type":"direct","tag":"bound","bind_interface":"eth0"}` + `,
+		` + validOutbounds["socks"] + `
+	],"endpoints":[` + strings.Replace(validOutbounds["wireguard-ep"], `"tag":"wg-home"`, `"tag":"wg-chain","detour":"proxy-direct"`, 1) + `]}`
+	cfg, err := ParseSingleConfig([]byte(doc), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		// (i) chain outer -> inner(direct) -> empty direct: refuse.
+		"chain-empty": "",
+		// Chain through a non-empty direct (detour to socks): keep.
+		"chain-live":  "outer-live",
+		"chain-inner": "inner-live",
+		// (ii) inline socks detouring to an empty direct: refuse.
+		"inline-chain": "",
+		// (iii) empty selector: refuse.
+		"empty-selector": "",
+		// Selector over direct-only / mixed members: keep (dial ok).
+		"selector-direct-only": "sel-direct",
+		"selector-mixed":       "sel-mixed",
+		// Selector over urltest-only members: refuse (urltest
+		// unusable in this Manager); with a usable member: keep.
+		"selector-urltest-only":  "",
+		"selector-urltest-mixed": "sel-ut-mix",
+		// (iv) urltest detours: refuse regardless of members.
+		"urltest-direct": "",
+		"urltest-socks":  "",
+		// Detour cycle: refuse, never loop.
+		"cycle": "",
+		// Chain through a selector with a direct member: keep.
+		"chain-via-selector": "outer-sel",
+		// Direct with a non-detour dialer option is non-empty: keep.
+		"bound-direct": "bound",
+		// WireGuard endpoint detouring to an empty direct: refuse
+		// (chain-walking only; WG dial validity is [UNVERIFIED]).
+		"wg-chain": "",
+	}
+	for name, wantTag := range want {
+		if got := detourTagForProfile(cfg, cfg.Profiles[name]); got != wantTag {
+			t.Errorf("detourTagForProfile(%q) = %q; want %q", name, got, wantTag)
+		}
+	}
+}
+
+// TestDetourTagForProfileDanglingTags (R2): a starting tag that
+// resolves to nothing is returned as-is and left for
+// validateTagGraph to reject as dangling. A dangling member inside
+// a selector is not a usable path: a selector whose only member
+// dangles refuses authoring. (Hand-built configs: the parser
+// rejects dangling references, so these shapes cannot be built
+// through ParseSingleConfig.)
+func TestDetourTagForProfileDanglingTags(t *testing.T) {
+	t.Parallel()
+
+	dangling := &SingleConfig{
+		Profiles: map[string]*Profile{
+			"p": {Name: "p", Outbound: OutboundRef{Kind: OutboundTag, Tag: "ghost"}},
+		},
+	}
+	if got := detourTagForProfile(dangling, dangling.Profiles["p"]); got != "ghost" {
+		t.Errorf("dangling start tag = %q; want %q (left for validateTagGraph)", got, "ghost")
+	}
+
+	selDangle := &SingleConfig{
+		Profiles: map[string]*Profile{
+			"p": {Name: "p", Outbound: OutboundRef{Kind: OutboundTag, Tag: "sel-dangle"}},
+		},
+		Outbounds: []option.Outbound{
+			{Type: "selector", Tag: "sel-dangle", Options: &option.SelectorOutboundOptions{Outbounds: []string{"ghost"}}},
+		},
+	}
+	if got := detourTagForProfile(selDangle, selDangle.Profiles["p"]); got != "" {
+		t.Errorf("selector with only a dangling member = %q; want \"\"", got)
+	}
+}
+
 func TestMigrateAuthorsDNSWhenSingleDetourServesAllProfiles(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()
@@ -1416,6 +1559,94 @@ func TestDetourTagForProfileResolvesDirectTags(t *testing.T) {
 			t.Errorf("detourTagForProfile(%q) = %q; want %q", name, got, wantTag)
 		}
 	}
+}
+
+// TestMigrateDNSRefusalDetourChains (R2): detour chains that
+// terminate in an empty direct outbound, an empty selector, or a
+// urltest must not be authored into a dns section — migrate
+// records the refusal naming the profile and writes no section.
+// A chain through a non-empty direct still authors (control).
+func TestMigrateDNSRefusalDetourChains(t *testing.T) {
+	t.Parallel()
+	assertNoAuthoring := func(t *testing.T, base, refusing string) {
+		t.Helper()
+		before, _ := os.ReadFile(filepath.Join(base, "config.json"))
+		for _, write := range []bool{false, true} {
+			result, err := Migrate(base, write)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Migrated || result.DNSAuthored || result.Reason != "already-migrated" {
+				t.Errorf("Migrate(write=%v) = %+v; want already-migrated, no authoring", write, result)
+			}
+			if !strings.Contains(result.DNSRefusal, `"`+refusing+`"`) {
+				t.Errorf("Migrate(write=%v) DNSRefusal = %q; want it to name %q", write, result.DNSRefusal, refusing)
+			}
+		}
+		after, _ := os.ReadFile(filepath.Join(base, "config.json"))
+		if string(after) != string(before) {
+			t.Error("migrate rewrote the file; want no write")
+		}
+		if doc := readJSONFile(t, filepath.Join(base, "config.json")); func() bool { _, ok := doc["dns"]; return ok }() {
+			t.Errorf("migrated config gained a dns section: %v", doc)
+		}
+	}
+	socks := func(tag, detour string) string {
+		return `{"type":"socks","tag":"` + tag + `","server":"127.0.0.1","server_port":1080,"version":"5","detour":"` + detour + `"}`
+	}
+	direct := func(tag, detour string) string {
+		d := ""
+		if detour != "" {
+			d = `,"detour":"` + detour + `"`
+		}
+		return `{"type":"direct","tag":"` + tag + `"` + d + `}`
+	}
+
+	t.Run("chain to empty direct", func(t *testing.T) {
+		t.Parallel()
+		base := BaseDir(t.TempDir())
+		writeFile(t, filepath.Join(base, "config.json"),
+			`{"profiles":{"p1":{"node_id":"N1","auto_approve":"off","auto_allow_once":false,"outbound":"outer"}},"outbounds":[`+socks("outer", "inner")+`,`+direct("inner", "proxy-direct")+`,`+direct("proxy-direct", "")+`]}`, 0o600)
+		assertNoAuthoring(t, base, "p1")
+	})
+	t.Run("empty selector", func(t *testing.T) {
+		t.Parallel()
+		base := BaseDir(t.TempDir())
+		writeFile(t, filepath.Join(base, "config.json"),
+			`{"profiles":{"p1":{"node_id":"N1","auto_approve":"off","auto_allow_once":false,"outbound":"sel"}},"outbounds":[{"type":"selector","tag":"sel","outbounds":[]}]}`, 0o600)
+		assertNoAuthoring(t, base, "p1")
+	})
+	t.Run("urltest over socks", func(t *testing.T) {
+		t.Parallel()
+		base := BaseDir(t.TempDir())
+		writeFile(t, filepath.Join(base, "config.json"),
+			`{"profiles":{"p1":{"node_id":"N1","auto_approve":"off","auto_allow_once":false,"outbound":"ut"}},"outbounds":[{"type":"urltest","tag":"ut","outbounds":["proxy-sg"],"url":"http://127.0.0.1/","interval":"60s"},`+validOutbounds["socks"]+`]}`, 0o600)
+		assertNoAuthoring(t, base, "p1")
+	})
+	t.Run("chain through non-empty direct still authors", func(t *testing.T) {
+		t.Parallel()
+		base := BaseDir(t.TempDir())
+		writeFile(t, filepath.Join(base, "config.json"),
+			`{"profiles":{"p1":{"node_id":"N1","auto_approve":"off","auto_allow_once":false,"outbound":"outer"}},"outbounds":[`+socks("outer", "inner")+`,`+direct("inner", "proxy-sg")+`,`+validOutbounds["socks"]+`]}`, 0o600)
+		result, err := Migrate(base, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Migrated || !result.DNSAuthored {
+			t.Fatalf("chain-through-direct migrate = %+v; want migrated + dns authored", result)
+		}
+		cfg, found, err := LoadSingleConfig(base)
+		if err != nil || !found {
+			t.Fatalf("LoadSingleConfig = found=%v err=%v", found, err)
+		}
+		dnsOpts, err := cfg.ParsedDNS()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(dnsOpts.Servers) != 1 || detourOf(dnsOpts.Servers[0].Options) != "outer" {
+			t.Errorf("authored detour = %q; want \"outer\" (the profile's outbound tag, chain and all)", detourOf(dnsOpts.Servers[0].Options))
+		}
+	})
 }
 
 func TestMigrateCarriesExistingDNSVerbatim(t *testing.T) {
