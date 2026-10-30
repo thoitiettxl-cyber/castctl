@@ -102,6 +102,9 @@ func distributeTopLevelDNS(candidate *SingleConfig, baseDir string) (distributed
 	pending := make(map[string]pendingBlock, len(candidate.Profiles))
 	for _, name := range candidate.ProfileNames() {
 		p := candidate.Profiles[name]
+		if p == nil {
+			continue
+		}
 		ownDetour, _ := defaultDetourForProfile(p, candidate)
 		reachable := reachableTagsForProfile(candidate, p)
 		decoded, derr := decodeOrderedJSON(globalRaw)
