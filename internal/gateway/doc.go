@@ -49,9 +49,13 @@
 // with "tls: first record does not look like a TLS handshake",
 // reproducing the PR0 double-handshake lesson. The product code
 // therefore uses Dialer + NetDialTLSContext only, never NewClient.
-// The ALPN question (h2 vs http/1.1) stays OPEN: no ALPN is pinned
-// in this package; TLS (and any ALPN) is the outbound Dialer's
-// business, decided by sing-box/uTLS configuration, not here.
+// ALPN is pinned to ["http/1.1"] for the WebSocket dial only
+// (connector.go): gorilla speaks HTTP/1.1 only, so the uTLS
+// Chrome preset's h2-first offer must not be allowed to select
+// h2 for this conn. The pin is WS-scoped — GatewayTLSOptions
+// still pins no ALPN, and the HTTPS auth chain still negotiates
+// h2. Trade-off: the WebSocket ClientHello ALPN differs from a
+// real Chrome hello and from the profile's HTTPS fingerprint.
 //
 // Known deviations from gateway.py, each deliberate and recorded:
 //   - String bodies are sent verbatim (conn.RequestOptions contract);

@@ -103,9 +103,13 @@ Castctl mappings (`VERIFIED` except as tagged):
 - `internal/outbound/router_stub.go:18-32` — `stubRouter`
   implementing `adapter.Router` (upstream `adapter/router.go:18`
   defines the `Router` interface) for outbound-only operation.
-- `internal/outbound/tls.go:30-41` — `GatewayTLSOptions` built from
+- `internal/outbound/tls.go:35-46` — `GatewayTLSOptions` built from
   `option.OutboundTLSOptions`; the default uTLS fingerprint is
-  `"chrome"`, and ALPN is deliberately not pinned.
+  `"chrome"`, and ALPN is deliberately not pinned in
+  `GatewayTLSOptions`. (The gateway WebSocket dial separately pins
+  ALPN to `["http/1.1"]` at its own call site,
+  `internal/gateway/connector.go:240`; the HTTPS auth chain is
+  untouched.)
 - `internal/dns/client.go:5-6` — package doc: builds a profile DNS
   client on sing-box `dns.Router` + `dns.TransportManager` from
   `option.DNSOptions`.
@@ -272,13 +276,39 @@ Deviations from upstream, each with castctl evidence:
    `firefox`, `edge`, `safari`, `360`, `qq`, `ios`, `android`,
    `random`, and `randomized`. Castctl accepts only
    chrome/firefox/ios/safari and rejects `random`/`randomized`
-   (`fingerprint.go:37,40,44,45`, `tls.go:36-38`).
+   (`fingerprint.go:37,40,44,45`, `tls.go:41-43`).
 5. ALPN not pinned in `GatewayTLSOptions` (deliberate; `tls.go`
-   comment). `[VERIFIED — comment evidence only.]`
+   comment) — this is about `GatewayTLSOptions` only. The gateway
+   WebSocket dial separately pins ALPN to `["http/1.1"]` at
+   `internal/gateway/connector.go:240`. `[VERIFIED — comment evidence only.]`
 
 Not taken: no sing-box source file is copied into the tree (no
 vendored `sing-box` directory; grep shows imports only). Inbounds,
 routing rules, and the box lifecycle are unused by design.
+
+Follow-ups from the gateway WebSocket ALPN pin (unexamined,
+unresolved, no code — recorded here, not implemented):
+
+- ALPS chimera: the pin rewrites only the ALPN extension of the
+  uTLS Chrome_133 preset hello. The same preset also advertises
+  ALPS for h2, which the pin leaves untouched, so the post-fix
+  WebSocket hello carries ALPN `["http/1.1"]` alongside ALPS `h2`
+  and the rest of the Chrome_133 hello. Whether any peer or
+  middlebox rejects or misroutes such a hello is unexamined.
+  What would settle it: a full ClientHello extension capture of
+  the pinned hello (loopback or live) plus live behaviour
+  evidence.
+- DialTLS fallback contract: passing `Enabled: true` in the
+  WebSocket TLS options short-circuits the `DialTLS` fallback to
+  the Dialer's stored TLS options (`internal/outbound/dialer.go`
+  fallback), so any TLS options stored on the Dialer are dropped
+  for the WebSocket dial. Today this has no live effect (the only
+  production `NewDialer` call passes empty TLS options), but the
+  seam contract is undocumented and untested for non-empty
+  Dialer options. What would settle it: a decision (merge the pin
+  into the Dialer's options, or document that WebSocket options
+  are standalone) plus a test driving the junction with
+  non-empty Dialer options.
 
 ## 2. CLIProxyAPI @90c447d — DESIGN-ONLY (studied, no code taken)
 
@@ -716,7 +746,7 @@ through sing-box `common/tls` + `option.OutboundUTLSOptions`:
 upstream `common/tls/reality_client.go:1,41` carries the
 `with_utls` build tag and imports `metacubex/utls`.
 
-Castctl mappings (`VERIFIED`): `internal/outbound/tls.go:36-38`
+Castctl mappings (`VERIFIED`): `internal/outbound/tls.go:41-43`
 (`GatewayTLSOptions` defaults `Fingerprint: "chrome"`);
 `internal/profile/fingerprint.go:37,40,44,45` (defaults + valid sets);
 `README.md:277-286` (fingerprint/TLS-engine hold section).
@@ -724,8 +754,10 @@ Castctl mappings (`VERIFIED`): `internal/outbound/tls.go:36-38`
 Deviations (`VERIFIED`, same as §1 deviation 4): castctl pins
 `chrome` and rejects `random`/`randomized`; upstream accepts
 `""` → Chrome_Auto, `random`, `randomized`, plus `edge`/`360`/`qq`/
-`android`, which castctl's valid set excludes. Castctl also
-deliberately does not pin ALPN (`tls.go` comment). The fingerprint
+`android`, which castctl's valid set excludes. Castctl's
+`GatewayTLSOptions` deliberately does not pin ALPN (`tls.go`
+comment); the gateway WebSocket dial separately pins ALPN to
+`["http/1.1"]` at `internal/gateway/connector.go:240`. The fingerprint
 preset names (`chrome`, `firefox`, …) are sing-box/utls vocabulary
 adopted as config values — record them as such, not as copied code.
 
