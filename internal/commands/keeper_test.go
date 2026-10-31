@@ -521,12 +521,17 @@ func TestKeeperRunFactoryFailureSurfaced(t *testing.T) {
 	}
 }
 
-// TestKeeperCheckContinuesAfterTransient (loop-2 red-team
-// N20): a transient error on one entry must not skip the
-// remaining entries: every entry prints its JSON object, and
-// the typed error still surfaces. RED on the old code: one
-// JSON object, second entry never ticked.
-func TestKeeperCheckContinuesAfterTransient(t *testing.T) {
+// TestKeeperCheckPrintsAllEntriesWhenFirstStops: check
+// prints one JSON object per selected entry even when an
+// early entry stops. Characterization test: this held on the
+// old code too for stopped outcomes — it guards the entry
+// loop against regressions from the N20 rework (continue
+// past a transient-error return). The transient-error return
+// itself has no fast commands-level regression test: reaching
+// it requires minute-scale backoff sleeps under RealClock,
+// so that path is verified by inspection of the loop change,
+// recorded in the loop-2 report.
+func TestKeeperCheckPrintsAllEntriesWhenFirstStops(t *testing.T) {
 	t.Parallel()
 	config := `{"default_profile":"default","profiles":{"default":{},"muse01":{}},` +
 		`"telegram":{"profile":"muse01","token":"` + keeperTestToken + `","allowed_user_ids":[111],"auto_approve":true},` +
@@ -535,7 +540,7 @@ func TestKeeperCheckContinuesAfterTransient(t *testing.T) {
 	env, out, errb, _ := keeperTestEnv(t, config, fake)
 	code := Run(context.Background(), []string{"keeper", "check"}, env)
 	if code != 3 {
-		t.Fatalf("check transient: code=%d, want 3 (GatewayError); stderr=%q out=%q", code, errb.String(), out.String())
+		t.Fatalf("check stopped entries: code=%d, want 3; stderr=%q out=%q", code, errb.String(), out.String())
 	}
 	lines := strings.Count(out.String(), `"tag":`)
 	if lines != 2 {
