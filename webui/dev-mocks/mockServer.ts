@@ -2,6 +2,15 @@
  * Answers every /api/v1 endpoint from fixtures. Bearer check: any
  * non-empty Authorization header is accepted; missing → 401, so the
  * login/logout flow behaves like the real server. Never bundled.
+ *
+ * DIVERGENCES from the Go server (dev-only, deliberate): auth
+ * accepts any non-empty token (Go compares SHA-256 + constant
+ * time against the configured token); PATCH profile shallow-merges
+ * the body onto the stored entry (Go merges only the allowlisted
+ * fingerprint/outbound fields through the guarded save); login
+ * import returns verified:true with a fake vm_id_prefix (Go
+ * returns verified:false — no live verification — and a null
+ * prefix). The PR body lists these divergences.
  */
 import type { Connect } from 'vite';
 import {
@@ -110,6 +119,10 @@ export function registerMockApi(middlewares: Connect.Server) {
         const rest = profileMatch[2];
         if (rest === '' && method === 'GET') return ok(res, servedProfileDetail(name));
         if (rest === '' && method === 'PATCH') {
+          // DIVERGENCE: shallow-merge of the body onto the stored
+          // entry. The Go handler merges only fingerprint/outbound
+          // through the guarded save; the mock keeps the shape
+          // for dev editing.
           return ok(res, {
             ...profileDetailFixture,
             name,
@@ -124,6 +137,10 @@ export function registerMockApi(middlewares: Connect.Server) {
         }
         if (rest === '/login/status' && method === 'GET') return ok(res, loginStatusFixture);
         if (rest === '/login/import' && method === 'POST') {
+          // DIVERGENCE: the Go server returns verified:false
+          // (no live verification) with a null vm_id_prefix;
+          // the mock returns a fake verified result so the dev
+          // login flow can be exercised end to end.
           return ok(res, { saved: true, verified: true, vm_id_prefix: 'vm_9f2c' });
         }
         if (rest === '/login/restore' && method === 'POST') return ok(res, { restored: true });

@@ -67,7 +67,7 @@ export function resetConfigStore(): void {
 function findStructuralViolation(doc: unknown): string | null {
   if (typeof doc !== 'object' || doc === null || Array.isArray(doc)) return '';
   const record = doc as Record<string, unknown>;
-  const topLevelKeys = ['default_profile', 'profiles', 'outbounds', 'endpoints', 'dns', 'log', 'telegram', 'keeper', 'webui'];
+  const topLevelKeys = ['default_profile', 'profiles', 'outbounds', 'endpoints', 'dns', 'wireguard_dns', 'log', 'telegram', 'keeper', 'webui'];
   for (const key of Object.keys(record)) {
     if (!topLevelKeys.includes(key)) return key;
   }

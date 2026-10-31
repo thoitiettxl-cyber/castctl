@@ -519,7 +519,9 @@ present block only, and are re-validated loopback-only; both
 flags together are an error.
 
 The effective token is `CASTCTL_WEBUI_KEY` when set (non-empty,
-exact value, no trimming), else the block's `token`. With
+exact value, no trimming), else the block's `token`. A
+whitespace-only `CASTCTL_WEBUI_KEY` counts as unset (it could
+never authenticate, since the token is compared exactly). With
 neither set, `webui serve` fails closed (exit 2) and never
 starts unauthenticated. The token is never printed, logged, or
 returned: the startup line names the listen address only, and
@@ -533,10 +535,13 @@ token. See `castctl webui serve --help` and
 The block is stored verbatim in the 0600 file like any other
 block (raw preservation on save); write-only is an API-layer
 property: GET endpoints return redacted views, and the token can
-only be set or replaced, never read back. Remote access is
-loopback-only by design: reach the server from another device
-through an SSH tunnel forwarding the loopback port, never by
-binding a non-loopback address.
+only be set or replaced, never read back. Note the first-save
+reorder caveat that applies to every web UI save: the first
+web UI save may reorder keys within sections; semantics are
+preserved.
+Remote access is loopback-only by design: reach the server from
+another device through an SSH tunnel forwarding the loopback
+port, never by binding a non-loopback address.
 
 ## The `dns` section — INTERIM, GLOBAL, COMPAT-ONLY
 

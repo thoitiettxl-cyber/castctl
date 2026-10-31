@@ -161,6 +161,16 @@ describe('structural validation of the merged document (R8)', () => {
     expect(currentConfig()).toEqual(before);
   });
 
+  it('accepts a document with the wireguard_dns top-level key (L2-F7)', () => {
+    const before = currentConfig();
+    const edited = JSON.parse(before.content) as Record<string, unknown>;
+    edited.wireguard_dns = { 'wg-home': ['10.0.0.2'] };
+    expect(handleValidateConfig({ content: JSON.stringify(edited) })).toEqual({ valid: true, errors: [] });
+    const result = handlePutConfig({ content: JSON.stringify(edited), base_sha256: before.sha256 });
+    expect(result.ok).toBe(true);
+    expect(currentConfig()).not.toEqual(before);
+  });
+
   it('validate endpoint dry-runs the merge without writing', () => {
     const before = currentConfig();
     const edited = JSON.parse(before.content) as Record<string, unknown>;

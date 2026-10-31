@@ -260,8 +260,18 @@ interface MergeResult {
  * result never aliases the input.
  */
 function adoptNew(submitted: unknown, path: string): MergeResult {
-  if (typeof submitted === 'string' && submitted === REDACTED_SENTINEL) {
-    throw new SentinelRejectionError(path);
+  if (typeof submitted === 'string') {
+    if (submitted === REDACTED_SENTINEL) {
+      throw new SentinelRejectionError(path);
+    }
+    // A userinfo span that merely contains the sentinel is
+    // rejected here too (same rule as the merge string
+    // branch): it must never be stored verbatim.
+    for (const span of userinfoSpans(submitted)) {
+      if (span.userinfo !== REDACTED_SENTINEL && span.userinfo.includes(REDACTED_SENTINEL)) {
+        throw new SentinelRejectionError(path);
+      }
+    }
   }
   if (Array.isArray(submitted)) {
     return {
@@ -475,6 +485,16 @@ function mergeNode(
       (storedSpans.length !== 1 || submittedSpans.length !== 1)
     ) {
       throw new SentinelRejectionError(path);
+    }
+    // A span that merely CONTAINS the sentinel (e.g.
+    // "user:<redacted>") is neither the exact sentinel splice
+    // nor a clean new literal: it could carry a live secret
+    // pasted by mistake past the redaction boundary. Reject
+    // it (mirrors Go merge.go).
+    for (const span of submittedSpans) {
+      if (span.userinfo !== REDACTED_SENTINEL && span.userinfo.includes(REDACTED_SENTINEL)) {
+        throw new SentinelRejectionError(path);
+      }
     }
     const spliced = spliceUserinfo(stored, submitted);
     // A splice restores the stored userinfo into the edited string,

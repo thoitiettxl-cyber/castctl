@@ -368,6 +368,16 @@ describe('userinfo splice and tampered sentinel (R6-R7)', () => {
     expect(removed.proxy_url).not.toContain('FAKE-USERINFO');
   });
 
+  it('rejects a userinfo span containing the sentinel without equaling it (N3)', () => {
+    const stored = { proxy_url: storedUrl };
+    expect(() =>
+      mergeConfig(stored, { proxy_url: 'https://user:<redacted>@proxy.example.com:8080/path?q=1' }),
+    ).toThrow(SentinelRejectionError);
+    expect(() =>
+      mergeConfig({ keep: 'yes' }, { keep: 'yes', proxy_url: 'https://user:<redacted>@proxy.example.com:8080/path' }),
+    ).toThrow(SentinelRejectionError);
+  });
+
   it('treats a tampered sentinel as a literal, never restoring the old secret (R7)', () => {
     const stored = { password: 'FAKE-SECRET-PW' };
     for (const tampered of ['<redacted>!', 'prefix<redacted>', '<REDACTED>', ' <redacted> ']) {
