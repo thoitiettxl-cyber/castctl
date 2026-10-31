@@ -260,7 +260,7 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		startOffset = size
+		startOffset = 0
 		if size > maxLogReadBytes {
 			startOffset = size - maxLogReadBytes
 		}

@@ -66,6 +66,7 @@ type screencastSession struct {
 	profile   string
 	expiresAt time.Time
 	live      bool
+	consumed  bool
 }
 
 func newSessionRegistry() *sessionRegistry {
@@ -83,12 +84,19 @@ func (r *sessionRegistry) mint(profileName string) (string, error) {
 	token := hex.EncodeToString(raw[:])
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	now := time.Now()
+	// Prune expired unconsumed tokens (bounded map; the live
+	// check below is what enforces one session per profile).
+	for tok, sess := range r.sessions {
+		if !sess.live && now.After(sess.expiresAt) {
+			delete(r.sessions, tok)
+		}
+	}
 	if existing, ok := r.byProfile[profileName]; ok {
 		if sess, ok := r.sessions[existing]; ok && sess.live {
 			return "", errScreencastBusy
 		}
 	}
-	now := time.Now()
 	r.sessions[token] = &screencastSession{token: token, profile: profileName, expiresAt: now.Add(screencastSessionTTL)}
 	return token, nil
 }
@@ -104,10 +112,22 @@ func (r *sessionRegistry) consume(token string) (string, error) {
 	if !ok {
 		return "", errSessionUnknown
 	}
-	delete(r.sessions, token)
-	if time.Now().After(sess.expiresAt) {
+	if sess.consumed {
+		// Single-use: a replayed token is unknown, even
+		// while its session is live (the busy branch below
+		// is for a DIFFERENT token for the same profile).
 		return "", errSessionUnknown
 	}
+	if time.Now().After(sess.expiresAt) {
+		// Expired: drop it so a later mint is not blocked
+		// by a stale byProfile entry (none exists for an
+		// unconsumed token, but be explicit).
+		delete(r.sessions, token)
+		return "", errSessionUnknown
+	}
+	sess.consumed = true
+	// Kept in the map while live: mint()'s busy check reads
+	// it through byProfile. release() removes both entries.
 	if existing, ok := r.byProfile[sess.profile]; ok {
 		if other, ok := r.sessions[existing]; ok && other.live {
 			return "", errScreencastBusy
