@@ -264,7 +264,7 @@ func validateKeeperBrowserURL(raw string) error {
 	if u.User != nil {
 		return fmt.Errorf("must not carry userinfo")
 	}
-	if u.RawQuery != "" || u.Fragment != "" {
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return fmt.Errorf("must not carry a query or fragment")
 	}
 	if u.Scheme != "http" && u.Scheme != "ws" {
@@ -294,16 +294,20 @@ func validateKeeperBrowserURL(raw string) error {
 }
 
 // canonicalBrowserURL renders the duplicate-browser dedup key
-// for a validated browser URL: scheme, normalized host, port,
-// and path. Spelling variants of one endpoint — trailing
-// slash, host case, "localhost" case, IPv6 bracketing —
-// canonicalise to one key, so two entries cannot share a
-// browser by spelling it differently. The stored entry
-// Browser value is NOT rewritten: only the dedup key is
-// canonical. "localhost" and "127.0.0.1" are deliberately
-// NOT merged: which loopback address localhost resolves to
-// is resolver-dependent, and merging them would assert an
-// identity the config did not state.
+// for a validated browser URL: normalized host, port, and
+// path. The scheme is NOT part of the key: http:// and ws://
+// spellings denote the same DevTools endpoint (the discovery
+// URL vs the direct WebSocket URL), so they canonicalise to
+// one key and two entries cannot share a browser by spelling
+// it with the other scheme. Spelling variants of one
+// endpoint — trailing slash, host case, "localhost" case,
+// IPv6 bracketing — canonicalise to one key, so two entries
+// cannot share a browser by spelling it differently. The
+// stored entry Browser value is NOT rewritten: only the
+// dedup key is canonical. "localhost" and "127.0.0.1" are
+// deliberately NOT merged: which loopback address localhost
+// resolves to is resolver-dependent, and merging them would
+// assert an identity the config did not state.
 func canonicalBrowserURL(raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -318,7 +322,7 @@ func canonicalBrowserURL(raw string) (string, error) {
 	}
 	port, _ := strconv.Atoi(u.Port())
 	path := strings.TrimSuffix(u.Path, "/")
-	return fmt.Sprintf("%s://%s:%d%s", u.Scheme, host, port, path), nil
+	return fmt.Sprintf("%s:%d%s", host, port, path), nil
 }
 
 // canonicalBrowser is canonicalBrowserURL with a raw-string

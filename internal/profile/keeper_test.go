@@ -284,6 +284,12 @@ func TestParseKeeperBlockDuplicateBrowserSpellings(t *testing.T) {
 		{"http://localhost:9226/", "http://LOCALHOST:9226"},
 		{"http://[::1]:9226/", "http://[0:0:0:0:0:0:0:1]:9226/"},
 		{"ws://127.0.0.1:9226/devtools/browser/X", "ws://127.0.0.1:9226/devtools/browser/X/"},
+		// Micro-loop R2-2: the scheme is not part of the dedup
+		// key — http:// (discovery URL) and ws:// (direct
+		// WebSocket URL) spellings of one endpoint dedup.
+		{"http://127.0.0.1:9226/", "ws://127.0.0.1:9226"},
+		{"http://127.0.0.1:9226", "ws://127.0.0.1:9226/"},
+		{"http://127.0.0.1:9226/devtools/browser/FAKE", "ws://127.0.0.1:9226/devtools/browser/FAKE/"},
 	}
 	for _, p := range pairs {
 		keeper := `[{"tag": "k1", "profile": "muse01", "browser": ` + quoteForTest(p[0]) + `}, {"tag": "k2", "profile": "muse02", "browser": ` + quoteForTest(p[1]) + `}]`
@@ -291,11 +297,19 @@ func TestParseKeeperBlockDuplicateBrowserSpellings(t *testing.T) {
 			t.Fatalf("browsers %q and %q accepted as different; want duplicate-browser error", p[0], p[1])
 		}
 	}
-	// Distinct ports stay distinct; localhost and 127.0.0.1
-	// are NOT merged (resolver-dependent identity).
-	keeper := `[{"tag": "k1", "profile": "muse01", "browser": "http://127.0.0.1:9226/"}, {"tag": "k2", "profile": "muse02", "browser": "http://localhost:9226/"}]`
-	if _, err := ParseSingleConfig([]byte(keeperTestConfig(t, keeper)), t.TempDir()); err != nil {
-		t.Fatalf("localhost vs 127.0.0.1 wrongly merged: %v", err)
+	// Distinct entries stay distinct: localhost and 127.0.0.1
+	// are NOT merged (resolver-dependent identity), and
+	// distinct browser-target paths stay distinct even across
+	// schemes (the scheme is dropped from the key, the path
+	// is not).
+	for _, p := range [][2]string{
+		{"http://127.0.0.1:9226/", "http://localhost:9226/"},
+		{"http://127.0.0.1:9226/devtools/browser/A", "ws://127.0.0.1:9226/devtools/browser/B"},
+	} {
+		keeper := `[{"tag": "k1", "profile": "muse01", "browser": ` + quoteForTest(p[0]) + `}, {"tag": "k2", "profile": "muse02", "browser": ` + quoteForTest(p[1]) + `}]`
+		if _, err := ParseSingleConfig([]byte(keeperTestConfig(t, keeper)), t.TempDir()); err != nil {
+			t.Fatalf("browsers %q and %q wrongly merged: %v", p[0], p[1], err)
+		}
 	}
 }
 
@@ -317,7 +331,7 @@ func TestParseKeeperBlockIntervalCap(t *testing.T) {
 // TestParseKeeperBlockBrowserQueryRejected: a CDP URL with a
 // query or fragment is a config error.
 func TestParseKeeperBlockBrowserQueryRejected(t *testing.T) {
-	for _, u := range []string{"http://127.0.0.1:9226/?x=1", "http://127.0.0.1:9226/#frag"} {
+	for _, u := range []string{"http://127.0.0.1:9226/?x=1", "http://127.0.0.1:9226/#frag", "http://127.0.0.1:9226/?", "http://127.0.0.1:9226?"} {
 		keeper := `[{"tag": "k", "profile": "muse01", "browser": ` + quoteForTest(u) + `}]`
 		if _, err := ParseSingleConfig([]byte(keeperTestConfig(t, keeper)), t.TempDir()); err == nil {
 			t.Fatalf("browser URL %q accepted; want config error", u)
