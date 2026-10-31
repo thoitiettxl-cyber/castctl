@@ -1291,9 +1291,19 @@ func cloneSingleConfig(cfg *SingleConfig) *SingleConfig {
 	} else {
 		out.rawLog = nil
 	}
+	if len(cfg.rawTelegram) > 0 {
+		out.rawTelegram = append([]byte{}, cfg.rawTelegram...)
+	} else {
+		out.rawTelegram = nil
+	}
 	if cfg.Log != nil {
 		logCopy := *cfg.Log
 		out.Log = &logCopy
+	}
+	if cfg.Telegram != nil {
+		tgCopy := *cfg.Telegram
+		tgCopy.AllowedUserIDs = append([]int64{}, cfg.Telegram.AllowedUserIDs...)
+		out.Telegram = &tgCopy
 	}
 	if len(cfg.WireGuardDNS) > 0 {
 		out.WireGuardDNS = make(map[string][]string, len(cfg.WireGuardDNS))

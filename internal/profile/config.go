@@ -40,11 +40,17 @@ type SingleConfig struct {
 	// defaults are runtime-only and never written back.
 	Log *LogConfig
 
+	// Telegram is the top-level "telegram" block (nil when absent;
+	// see internal/profile/telegram.go). Absence is preserved on
+	// save and means the bot is off.
+	Telegram *TelegramConfig
+
 	rawOutbounds    [][]byte
 	rawEndpoints    [][]byte
 	rawDNS          []byte
 	rawWireGuardDNS []byte
 	rawLog          []byte
+	rawTelegram     []byte
 	rawProfiles     map[string][]byte
 }
 
@@ -146,6 +152,7 @@ var singleTopLevelKeys = map[string]bool{
 	"dns":             true,
 	"wireguard_dns":   true,
 	"log":             true,
+	"telegram":        true,
 }
 
 var profileKeys = map[string]bool{
@@ -300,6 +307,18 @@ func ParseSingleConfig(data []byte, baseDir string) (*SingleConfig, error) {
 		cfg.Log = logCfg
 		cfg.rawLog = raw
 	}
+	if v, ok := obj.get("telegram"); ok {
+		raw, err := rawOf(v)
+		if err != nil {
+			return nil, err
+		}
+		tgCfg, err := parseTelegramBlock(v)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Telegram = tgCfg
+		cfg.rawTelegram = raw
+	}
 
 	for _, name := range profilesObj.keys {
 		if _, err := ValidateProfileName(name); err != nil {
@@ -341,6 +360,9 @@ func ParseSingleConfig(data []byte, baseDir string) (*SingleConfig, error) {
 		return nil, err
 	}
 	if err := validateWireGuardPrivateKeys(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateTelegram(cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -1268,6 +1290,25 @@ func buildSingleFileOrdered(cfg *SingleConfig) (*orderedObject, error) {
 		entry.set("output", cfg.Log.Output)
 		entry.set("timestamp", cfg.Log.Timestamp)
 		root.set("log", entry)
+	}
+	if len(cfg.rawTelegram) > 0 {
+		v, err := decodeOrderedJSON(cfg.rawTelegram)
+		if err != nil {
+			return nil, err
+		}
+		root.set("telegram", v)
+	} else if cfg.Telegram != nil {
+		entry := newOrderedObject()
+		entry.set("profile", cfg.Telegram.Profile)
+		entry.set("token", cfg.Telegram.Token)
+		ids := make([]any, 0, len(cfg.Telegram.AllowedUserIDs))
+		for _, id := range cfg.Telegram.AllowedUserIDs {
+			ids = append(ids, json.Number(fmt.Sprint(id)))
+		}
+		entry.set("allowed_user_ids", ids)
+		entry.set("auto_approve", cfg.Telegram.AutoApprove)
+		entry.set("auto_allow_once", cfg.Telegram.AutoAllowOnce)
+		root.set("telegram", entry)
 	}
 	return root, nil
 }
