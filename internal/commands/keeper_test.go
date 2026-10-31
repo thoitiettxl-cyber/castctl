@@ -79,6 +79,10 @@ type keeperFakeGateway struct {
 	sessionSeen    int
 	authSeen       int
 	cookieHeaders  []string
+	// blockSession, when true, makes /api/session block until
+	// the request context is done, modelling a wedged cheap
+	// chain. Set before the test server starts; read under mu.
+	blockSession bool
 }
 
 // keeperFakeSessionStep is one scripted /api/session response.
@@ -89,6 +93,15 @@ type keeperFakeSessionStep struct {
 }
 
 func (f *keeperFakeGateway) handler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/api/session" {
+		f.mu.Lock()
+		block := f.blockSession
+		f.mu.Unlock()
+		if block {
+			<-r.Context().Done()
+			return
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	switch r.URL.Path {
@@ -755,5 +768,36 @@ func TestKeeperCheckDefaultPathProfileDirIsFile(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), filepath.Join(home, "profiles", "muse01")) {
 		t.Errorf("stderr = %q; want the state directory named", errb.String())
+	}
+}
+
+// TestKeeperCheckTickTimeoutIsHardError (E1): when a tick
+// outlives the per-entry timeout, the PRINTED keeper check
+// outcome must be "error", never "skipped", and the exit code
+// must stay 4. RED on 8356a96: outcome "skipped", code 4.
+//
+// Deliberately NOT t.Parallel: it shortens the package-level
+// keeperCheckTimeout for the duration of the test and must
+// not run concurrently with other keeper check tests. The
+// override is restored before the test returns.
+func TestKeeperCheckTickTimeoutIsHardError(t *testing.T) {
+	fake := &keeperFakeGateway{sessionStatus: 200, authStatus: 200, blockSession: true}
+	env, out, _, _ := keeperTestEnv(t, keeperTestConfig(), fake)
+	oldTimeout := keeperCheckTimeout
+	keeperCheckTimeout = 100 * time.Millisecond
+	defer func() { keeperCheckTimeout = oldTimeout }()
+	code := Run(context.Background(), []string{"keeper", "check"}, env)
+	if code != 4 {
+		t.Fatalf("check tick timeout: code=%d, want 4", code)
+	}
+	var res keeperCheckResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("check output is not one JSON object: %v (%q)", err, out.String())
+	}
+	if res.Outcome == keeper.OutcomeSkipped {
+		t.Fatalf("printed outcome = %q; a tick timeout must never be skipped", res.Outcome)
+	}
+	if res.Outcome != "error" {
+		t.Fatalf("printed outcome = %q, want \"error\"", res.Outcome)
 	}
 }

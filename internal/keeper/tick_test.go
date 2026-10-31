@@ -1121,3 +1121,43 @@ func TestTickDefaultProfileFreshBaseDirIs0700(t *testing.T) {
 		t.Fatalf("state file missing after tick: %v", err)
 	}
 }
+
+// blockingChecker blocks until the check context is done, then
+// returns the context error: it models a cheap chain wedged
+// past the tick deadline, with no timing of its own.
+type blockingChecker struct{}
+
+func (blockingChecker) Check(ctx context.Context, _ string) ([]CookieUpdate, int, error) {
+	<-ctx.Done()
+	return nil, 0, ctx.Err()
+}
+
+// TestTickContextTimeoutIsHardError (E1): a tick whose cheap
+// chain outlives its context deadline must surface a hard
+// error, never "skipped", and must not persist a skipped
+// outcome. RED on 8356a96: outcome "skipped".
+func TestTickContextTimeoutIsHardError(t *testing.T) {
+	initial := []StoredCookie{
+		{Name: "hatch_sess", Value: "FAKE-OLD", Domain: ".muse.ai", Path: "/", Secure: true, Expires: tickNow.Add(30 * 24 * time.Hour).Unix()},
+	}
+	baseDir, _, profileDir := tickFixture(t, initial)
+	deps := tickDeps(&fakeClock{now: tickNow}, blockingChecker{}, nil, nil)
+	deps.BaseDir = baseDir
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	res := Tick(ctx, deps)
+	if res.Outcome == OutcomeSkipped {
+		t.Fatalf("result = %+v; a context deadline must never be skipped", res)
+	}
+	if res.Outcome != OutcomeError {
+		t.Fatalf("result outcome = %q; want %q", res.Outcome, OutcomeError)
+	}
+	if res.Err == nil || !errors.Is(res.Err, context.DeadlineExceeded) {
+		t.Fatalf("result error = %v; want context.DeadlineExceeded carried", res.Err)
+	}
+	if _, err := os.Stat(filepath.Join(profileDir, StateFileName)); err == nil {
+		if st := readState(t, profileDir); st.LastTickOutcome == OutcomeSkipped {
+			t.Fatalf("persisted last_tick_outcome = %q; a deadline must never persist as skipped", st.LastTickOutcome)
+		}
+	}
+}
