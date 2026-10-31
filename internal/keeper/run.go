@@ -46,21 +46,23 @@ type RunResult struct {
 
 // Run runs the keeper for entries until ctx ends or every entry
 // stops. It returns one result per entry, in entry order.
-func Run(ctx context.Context, entries []*profile.KeeperEntry, profiles map[string]*profile.Profile, baseDir string, factory DepsFactory) []RunResult {
+// onTick, when non-nil, is called after every tick with the
+// entry and its result (the command layer's summary line).
+func Run(ctx context.Context, entries []*profile.KeeperEntry, profiles map[string]*profile.Profile, baseDir string, factory DepsFactory, onTick func(*profile.KeeperEntry, TickResult)) []RunResult {
 	results := make([]RunResult, len(entries))
 	var wg sync.WaitGroup
 	for i, entry := range entries {
 		wg.Add(1)
 		go func(i int, entry *profile.KeeperEntry) {
 			defer wg.Done()
-			results[i] = runEntry(ctx, entry, profiles[entry.Profile], baseDir, factory)
+			results[i] = runEntry(ctx, entry, profiles[entry.Profile], baseDir, factory, onTick)
 		}(i, entry)
 	}
 	wg.Wait()
 	return results
 }
 
-func runEntry(ctx context.Context, entry *profile.KeeperEntry, prof *profile.Profile, baseDir string, factory DepsFactory) RunResult {
+func runEntry(ctx context.Context, entry *profile.KeeperEntry, prof *profile.Profile, baseDir string, factory DepsFactory, onTick func(*profile.KeeperEntry, TickResult)) RunResult {
 	res := RunResult{Tag: entry.Tag}
 	deps, err := factory(entry, prof)
 	if err != nil {
@@ -78,6 +80,9 @@ func runEntry(ctx context.Context, entry *profile.KeeperEntry, prof *profile.Pro
 		result := Tick(ctx, deps)
 		res.Ticks++
 		res.Last = result
+		if onTick != nil {
+			onTick(entry, result)
+		}
 		if result.Stopped {
 			res.Stopped = true
 			NotifyStopped(ctx, deps, deps.Notifier)
