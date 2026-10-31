@@ -928,6 +928,8 @@ Status: `VERIFIED` except as tagged.
 | `github.com/sagernet/sing-tun` | `v0.9.7-0.20261023115432-040db71fcd33` | GPL-3.0-or-later (no extra sentence) | Yes — `internal/outbound/router_stub.go:13` imports `sing-tun` (import-level verified) |
 | `go.uber.org/goleak` | `v1.3.0` | MIT License (named in file) | Test-only — verified: imported only from `internal/approvals/main_test.go:10`, `internal/conn/main_test.go:10`, `internal/gateway/main_test.go:10`, `internal/wait/main_test.go:10` |
 | `google.golang.org/protobuf` | `v1.36.11` | BSD-3-Clause-style template text | Yes — generated `.pb.go` runtime |
+| `github.com/chromedp/chromedp` | `v0.21.0` | MIT License (named in file) | Added by the session-keeper PR; `with_chromedp`-gated only — `internal/keeper` CDP attach/export/screencast (import-level verified) |
+| `github.com/chromedp/cdproto` | `v0.157.8` | MIT License (named in file) | Added by the session-keeper PR; `with_chromedp`-gated only — CDP protocol types for `internal/keeper` |
 
 Indirect but load-bearing (from the `go.mod` indirect block;
 licenses read from the module cache):

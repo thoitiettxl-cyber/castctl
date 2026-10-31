@@ -94,6 +94,16 @@ docs/provenance.md.
   v1.27.1-0.20261008103508-f53bfe55a30b — MIT. Linked; used by
   internal/telegram for Bot API polling and calls. No upstream
   source is copied into the tree.
+- github.com/chromedp/chromedp v0.21.0 — MIT (LICENSE file:
+  "The MIT License (MIT)", Copyright (c) 2016-2026 Kenneth
+  Shaw). Linked ONLY in the `with_chromedp` build: CDP attach,
+  cookie export, and screencast login in `internal/keeper`. The
+  default build contains no chromedp code. No upstream source
+  is copied into the tree.
+- github.com/chromedp/cdproto v0.157.8 — MIT (same LICENSE
+  file and copyright as chromedp). CDP protocol types for the
+  `with_chromedp` build only. No upstream source is copied
+  into the tree.
 - github.com/bufbuild/protocompile v0.14.1 — Apache License 2.0.
   Build-time only, in the nested internal/proto/generate module;
   not linked into the castctl binary.
