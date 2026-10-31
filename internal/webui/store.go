@@ -157,15 +157,22 @@ func (s *Server) saveGuarded(load *configLoad, expectedSHA string, checkExpected
 	// Web UI containment (Boss ruling 2026-10-31): a save may
 	// only INTRODUCE a cookies_file value that is relative and
 	// resolves inside the config dir (symlink- and ".."-aware).
-	// Unchanged stored values pass through, so a CLI-created
-	// absolute path keeps round-tripping; only new or changed
-	// values are checked. This covers every web UI write path
-	// that funnels through saveGuarded: profile-create,
-	// PUT /config, and the section saves (whose cookies_file
-	// values are unchanged). Login import/restore check the
-	// resolved path separately, at the seam that writes it.
-	for name, value := range profileCookiesFiles(doc) {
-		if old, ok := storedCookies[name]; !ok || old != value {
+	// Values already present anywhere in the stored document
+	// pass through unchanged, so a CLI-created absolute path
+	// keeps round-tripping — including across a profile rename,
+	// which moves the value to a new key without changing it.
+	// Only values new to the document are checked. This covers
+	// every web UI write path that funnels through
+	// saveGuarded: profile-create, PUT /config, and the
+	// section saves (whose cookies_file values are unchanged).
+	// Login import/restore check the resolved path separately,
+	// at the seam that writes it.
+	storedValues := map[string]bool{}
+	for _, value := range storedCookies {
+		storedValues[value] = true
+	}
+	for _, value := range profileCookiesFiles(doc) {
+		if !storedValues[value] {
 			if err := rejectNewCookiesFile(s.deps.ConfigDir, value); err != nil {
 				return "", err
 			}
