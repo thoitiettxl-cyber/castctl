@@ -7,6 +7,7 @@ package webui
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/outbound"
@@ -29,6 +30,19 @@ type importEndpointBody struct {
 	Save     bool   `json:"save"`
 }
 
+var reConfLine = regexp.MustCompile(`line (\d+):`)
+
+// importLineHint extracts the "line N" hint from a WireGuard
+// conf parse error. The line number carries no pasted input,
+// so it is safe to echo; everything after it may echo input
+// and is dropped.
+func importLineHint(err error) string {
+	if m := reConfLine.FindStringSubmatch(err.Error()); m != nil {
+		return " at line " + m[1]
+	}
+	return ""
+}
+
 func (s *Server) handleImportEndpoint(w http.ResponseWriter, r *http.Request) {
 	var body importEndpointBody
 	if err := decodeBody(w, r, 64<<10, &body); err != nil {
@@ -45,7 +59,12 @@ func (s *Server) handleImportEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	parsed, err := outbound.ParseWireGuardConfWithDNS([]byte(body.ConfText))
 	if err != nil {
-		writeAPIError(w, errValidation("wireguard conf is invalid: "+safeMessage(err)))
+		// The parser echoes pasted input verbatim in several
+		// error shapes (addresses, endpoints, numbers, and
+		// strconv errors); the web UI must not echo user
+		// input back in an error. Only the line number (which
+		// carries no input) is kept.
+		writeAPIError(w, errValidation("wireguard conf is invalid"+importLineHint(err)))
 		return
 	}
 	raw, err := json.Marshal(parsed.Endpoint)

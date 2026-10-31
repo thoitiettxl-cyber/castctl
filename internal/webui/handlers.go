@@ -23,6 +23,7 @@ import (
 	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
 	"github.com/thoitiettxl-cyber/castctl/internal/keeper"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
+	"github.com/thoitiettxl-cyber/castctl/internal/redact"
 )
 
 // singboxVersion reports the sing-box module version from the
@@ -520,8 +521,12 @@ func (s *Server) handleSetDefaultProfile(w http.ResponseWriter, r *http.Request)
 // is CLI-shaped (stdout/Env-bound) and extracting it is a
 // follow-up, not silently faked here. The frontend surfaces
 // this error through its existing notification path.
-func handleUnavailableTest(w http.ResponseWriter, r *http.Request) {
+func handleUnavailableProfileTest(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusNotImplemented, "unavailable", "profile test is available only via the castctl CLI in this build")
+}
+
+func handleUnavailableOutboundTest(w http.ResponseWriter, r *http.Request) {
+	writeError(w, http.StatusNotImplemented, "unavailable", "outbound test is available only via the castctl CLI in this build")
 }
 
 // profilesObject returns the doc's "profiles" object, creating
@@ -657,8 +662,16 @@ func (s *Server) handleLoginImport(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, errValidation("format must be text or file"))
 		return
 	}
-	if _, _, err := s.resolveCookiesFile(name); err != nil {
+	if cookiesFile, _, err := s.resolveCookiesFile(name); err != nil {
 		writeAPIError(w, err)
+		return
+	} else if !containedInDir(s.deps.ConfigDir, cookiesFile) {
+		// Web UI containment (Boss ruling 2026-10-31): the
+		// import seam never writes outside the config dir,
+		// even when the stored cookies_file (CLI-created)
+		// points elsewhere. The seam is not called, so no
+		// file is written and no .bak is created.
+		writeAPIError(w, errValidation("cookies file is outside the config directory"))
 		return
 	}
 	if s.deps.ImportCookies == nil {
@@ -676,8 +689,13 @@ func (s *Server) handleLoginImport(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLoginRestore(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	if _, _, err := s.resolveCookiesFile(name); err != nil {
+	if cookiesFile, _, err := s.resolveCookiesFile(name); err != nil {
 		writeAPIError(w, err)
+		return
+	} else if !containedInDir(s.deps.ConfigDir, cookiesFile) {
+		// Same containment as login import: restore never
+		// touches a cookies file outside the config dir.
+		writeAPIError(w, errValidation("cookies file is outside the config directory"))
 		return
 	}
 	if s.deps.RestoreCookies == nil {
@@ -1480,7 +1498,14 @@ func (s *Server) handlePutTelegram(w http.ResponseWriter, r *http.Request) {
 			// A non-empty token replaces the stored one; its
 			// shape is validated by the full-config parse.
 			if strings.TrimSpace(*body.Token) != "" {
-				section["token"] = strings.TrimSpace(*body.Token)
+				token := strings.TrimSpace(*body.Token)
+				// A placeholder is never a token: accepting
+				// one would lock the bot out with the
+				// redaction marker as its credential.
+				if token == "***" || token == redact.Marker {
+					return errValidation("telegram.token must be a real bot token, not a placeholder")
+				}
+				section["token"] = token
 			} else if creating {
 				return errValidation("telegram.token is required")
 			}

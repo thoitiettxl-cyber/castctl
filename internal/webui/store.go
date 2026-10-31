@@ -147,8 +147,29 @@ func (s *Server) saveGuarded(load *configLoad, expectedSHA string, checkExpected
 	if err != nil {
 		return "", err
 	}
+	// Snapshot the stored cookies_file values before mutate:
+	// doc aliases stored, so the comparison below needs the
+	// pre-mutation strings.
+	storedCookies := profileCookiesFiles(stored)
 	if err := mutate(doc); err != nil {
 		return "", err
+	}
+	// Web UI containment (Boss ruling 2026-10-31): a save may
+	// only INTRODUCE a cookies_file value that is relative and
+	// resolves inside the config dir (symlink- and ".."-aware).
+	// Unchanged stored values pass through, so a CLI-created
+	// absolute path keeps round-tripping; only new or changed
+	// values are checked. This covers every web UI write path
+	// that funnels through saveGuarded: profile-create,
+	// PUT /config, and the section saves (whose cookies_file
+	// values are unchanged). Login import/restore check the
+	// resolved path separately, at the seam that writes it.
+	for name, value := range profileCookiesFiles(doc) {
+		if old, ok := storedCookies[name]; !ok || old != value {
+			if err := rejectNewCookiesFile(s.deps.ConfigDir, value); err != nil {
+				return "", err
+			}
+		}
 	}
 	if err := checkWhitespaceKeys(doc, ""); err != nil {
 		var rej *sentinelRejection

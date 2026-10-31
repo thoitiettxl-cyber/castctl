@@ -628,3 +628,264 @@ func TestConfigAbsentAndLegacy(t *testing.T) {
 		t.Fatalf("source = %s", rec.Body.String())
 	}
 }
+
+// Web UI cookies_file containment (loop-2 F2, Boss ruling
+// 2026-10-31): web UI seams reject absolute paths and anything
+// resolving outside the config dir (including via symlinks and
+// ".."). CLI resolveCookiesFile is unchanged; general CLI
+// containment is a backlog follow-up.
+
+func postJSONBody(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestCreateProfileRejectsOutsideCookiesFile(t *testing.T) {
+	ts := newTestServer(t, fixtureConfig, nil)
+	before, err := os.ReadFile(filepath.Join(ts.dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	target := filepath.Join(outside, "cookies.txt")
+	if err := os.WriteFile(target, []byte("ORIGINAL-CONTENT"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	escapeLink := filepath.Join(ts.dir, "escape-link")
+	if err := os.Symlink(outside, escapeLink); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(ts.dir, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"absolute": target,
+		"dotdot":   rel,
+		"symlink":  filepath.Join("escape-link", "cookies.txt"),
+	}
+	for name, cookiesFile := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec := ts.do(t, http.MethodPost, "/api/v1/profiles", postJSONBody(t, map[string]any{
+				"name": "evil", "cookies_file": cookiesFile, "outbound": "direct",
+			}), true)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("POST /profiles = %d, want 400: %s", rec.Code, rec.Body.String())
+			}
+			if strings.Contains(rec.Body.String(), target) || strings.Contains(rec.Body.String(), outside) {
+				t.Fatalf("rejection echoed the path: %s", rec.Body.String())
+			}
+			if got := ts.do(t, http.MethodGet, "/api/v1/profiles/evil", "", true); got.Code != http.StatusNotFound {
+				t.Fatalf("GET /profiles/evil = %d, want 404: %s", got.Code, got.Body.String())
+			}
+			after, err := os.ReadFile(filepath.Join(ts.dir, "config.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) {
+				t.Fatalf("config file changed:\n%s", after)
+			}
+			content, err := os.ReadFile(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(content) != "ORIGINAL-CONTENT" {
+				t.Fatalf("target changed: %q", content)
+			}
+			if _, err := os.Stat(target + ".bak"); !os.IsNotExist(err) {
+				t.Fatalf("backup created for rejected target: err=%v", err)
+			}
+		})
+	}
+}
+
+func TestCreateProfileAcceptsInDirCookiesFile(t *testing.T) {
+	ts := newTestServer(t, fixtureConfig, nil)
+	rec := ts.do(t, http.MethodPost, "/api/v1/profiles", postJSONBody(t, map[string]any{
+		"name": "inside", "cookies_file": "profiles/inside/cookies.txt", "outbound": "direct",
+	}), true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /profiles = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	rec = ts.do(t, http.MethodPost, "/api/v1/profiles", postJSONBody(t, map[string]any{
+		"name": "plain", "outbound": "direct",
+	}), true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /profiles (default cookies) = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func importConfigWithCookiesFile(cookiesFile string) string {
+	b, _ := json.Marshal(map[string]any{
+		"default_profile": "evil",
+		"profiles":        map[string]any{"evil": map[string]any{"cookies_file": cookiesFile}},
+	})
+	return string(b)
+}
+
+func TestLoginImportRefusesOutsideCookiesFile(t *testing.T) {
+	outside := t.TempDir()
+	target := filepath.Join(outside, "cookies.txt")
+	if err := os.WriteFile(target, []byte("ORIGINAL-CONTENT"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	ts := newTestServer(t, importConfigWithCookiesFile(target), func(deps *Deps) {
+		deps.ImportCookies = func(ctx context.Context, profileName, content string) (bool, error) {
+			calls++
+			return false, nil
+		}
+	})
+	rec := ts.do(t, http.MethodPost, "/api/v1/profiles/evil/login/import", postJSONBody(t, map[string]any{
+		"format": "text", "content": "example.com\tTRUE\t/\tFALSE\t0\thatch_sess\tFAKE-VALUE-1\n",
+	}), true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST import = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	if calls != 0 {
+		t.Fatalf("import seam called %d times, want 0", calls)
+	}
+	content, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "ORIGINAL-CONTENT" {
+		t.Fatalf("target changed: %q", content)
+	}
+	if _, err := os.Stat(target + ".bak"); !os.IsNotExist(err) {
+		t.Fatalf("backup created for rejected import: err=%v", err)
+	}
+}
+
+func TestLoginImportWorksInDir(t *testing.T) {
+	calls := 0
+	ts := newTestServer(t, importConfigWithCookiesFile("cookies-evil.txt"), func(deps *Deps) {
+		deps.ImportCookies = func(ctx context.Context, profileName, content string) (bool, error) {
+			calls++
+			if profileName != "evil" {
+				t.Errorf("profile = %q, want evil", profileName)
+			}
+			return false, nil
+		}
+	})
+	rec := ts.do(t, http.MethodPost, "/api/v1/profiles/evil/login/import", postJSONBody(t, map[string]any{
+		"format": "text", "content": "example.com\tTRUE\t/\tFALSE\t0\thatch_sess\tFAKE-VALUE-1\n",
+	}), true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST import = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("import seam called %d times, want 1", calls)
+	}
+}
+
+func TestPutConfigRejectsNewOutsideCookiesFile(t *testing.T) {
+	ts := newTestServer(t, fixtureConfig, nil)
+	before, err := os.ReadFile(filepath.Join(ts.dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := ts.do(t, http.MethodGet, "/api/v1/config", "", true)
+	env := decodeEnvelope(t, rec)
+	data := env["data"].(map[string]any)
+	content, _ := data["content"].(string)
+	baseSHA, _ := data["sha256"].(string)
+	doc := map[string]any{}
+	if err := json.Unmarshal([]byte(content), &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["profiles"].(map[string]any)["muse01"].(map[string]any)["cookies_file"] = filepath.Join(t.TempDir(), "cookies.txt")
+	body, _ := json.Marshal(doc)
+	rec = ts.do(t, http.MethodPut, "/api/v1/config", postJSONBody(t, map[string]any{
+		"base_sha256": baseSHA,
+		"content":     string(body),
+	}), true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT /config = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	after, err := os.ReadFile(filepath.Join(ts.dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("config file changed:\n%s", after)
+	}
+}
+
+func TestPutConfigKeepsUnchangedAbsoluteCookiesFile(t *testing.T) {
+	// Interpretation guard: the fixture's stored absolute
+	// in-dir cookies_file is unchanged by the save, so it must
+	// not block an otherwise valid edit.
+	ts := newTestServer(t, fixtureConfig, nil)
+	rec := ts.do(t, http.MethodGet, "/api/v1/config", "", true)
+	data := decodeEnvelope(t, rec)["data"].(map[string]any)
+	content, _ := data["content"].(string)
+	baseSHA, _ := data["sha256"].(string)
+	edited := strings.Replace(content, `"fingerprint": "chrome"`, `"fingerprint": "firefox"`, 1)
+	if edited == content {
+		t.Fatal("fixture edit did not apply (fingerprint spelling?)")
+	}
+	body, _ := json.Marshal(map[string]any{"content": edited, "base_sha256": baseSHA})
+	rec = ts.do(t, http.MethodPut, "/api/v1/config", string(body), true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /config = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRenameDeleteKeeperReferencedProfileRefused(t *testing.T) {
+	config := `{
+  "default_profile": "muse01",
+  "profiles": {"muse01": {}},
+  "keeper": [{"tag": "keep1", "profile": "muse01", "browser": "http://127.0.0.1:9226/"}]
+}`
+	ts := newTestServer(t, config, nil)
+	before, err := os.ReadFile(filepath.Join(ts.dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := ts.do(t, http.MethodPost, "/api/v1/profiles/muse01/rename", postJSONBody(t, map[string]any{"to": "renamed"}), true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("rename = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	rec = ts.do(t, http.MethodDelete, "/api/v1/profiles/muse01", postJSONBody(t, map[string]any{"confirm": true, "name": "muse01"}), true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("delete = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	after, err := os.ReadFile(filepath.Join(ts.dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("config file changed:\n%s", after)
+	}
+}
+
+func TestPutTelegramRejectsPlaceholderToken(t *testing.T) {
+	ts := newTestServer(t, fixtureConfig, nil)
+	rec := ts.do(t, http.MethodPut, "/api/v1/settings/telegram", postJSONBody(t, map[string]any{
+		"profile": "muse01", "token": "123456789:FAKE-TELEGRAM-TOKEN-ABCDEF123456", "allowed_user_ids": []int{123},
+	}), true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT telegram = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	for _, bad := range []string{"***", "<redacted>"} {
+		rec = ts.do(t, http.MethodPut, "/api/v1/settings/telegram", postJSONBody(t, map[string]any{"profile": "muse01", "token": bad}), true)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("PUT telegram token %q = %d, want 400: %s", bad, rec.Code, rec.Body.String())
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(ts.dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "123456789:FAKE-TELEGRAM-TOKEN-ABCDEF123456") {
+		t.Fatalf("stored token replaced:\n%s", raw)
+	}
+	if strings.Contains(string(raw), `"token":"***"`) || strings.Contains(string(raw), `"token":"<redacted>"`) {
+		t.Fatalf("placeholder token stored:\n%s", raw)
+	}
+}

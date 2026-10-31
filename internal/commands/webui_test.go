@@ -198,3 +198,17 @@ func TestWebUIServeEnvTokenPrecedenceAndStartup(t *testing.T) {
 		t.Fatal("server did not shut down on context cancel")
 	}
 }
+
+func TestWebUIServeWhitespaceEnvTokenCountsAsUnset(t *testing.T) {
+	// A whitespace-only CASTCTL_WEBUI_KEY must count as unset:
+	// it can never authenticate (the token is compared exactly),
+	// so with no block token the serve must fail closed.
+	cfg := `{"default_profile":"default","profiles":{"default":{}},"webui":{}}`
+	code, _, errb := runWebUICmd(t, cfg, map[string]string{"CASTCTL_WEBUI_KEY": "   "}, "webui", "serve")
+	if code != 2 {
+		t.Fatalf("code = %d, want 2", code)
+	}
+	if !strings.Contains(errb, "no token") {
+		t.Fatalf("stderr = %q, want no-token message", errb)
+	}
+}

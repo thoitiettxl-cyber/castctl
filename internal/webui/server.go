@@ -60,6 +60,7 @@ import (
 	"io/fs"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -149,6 +150,7 @@ func (s *Server) routes() http.Handler {
 	r.NotFound(s.serveShell)
 	api := chi.NewRouter()
 	api.Use(s.requireAuth)
+	api.Use(s.apiTimeout)
 	api.Get("/status", s.handleStatus)
 	api.Get("/profiles", s.handleListProfiles)
 	api.Post("/profiles", s.handleCreateProfile)
@@ -157,7 +159,7 @@ func (s *Server) routes() http.Handler {
 	api.Delete("/profiles/{name}", s.handleDeleteProfile)
 	api.Post("/profiles/{name}/rename", s.handleRenameProfile)
 	api.Post("/profiles/{name}/set-default", s.handleSetDefaultProfile)
-	api.Post("/profiles/{name}/test", handleUnavailableTest)
+	api.Post("/profiles/{name}/test", handleUnavailableProfileTest)
 	api.Get("/profiles/{name}/login/status", s.handleLoginStatus)
 	api.Post("/profiles/{name}/login/import", s.handleLoginImport)
 	api.Post("/profiles/{name}/login/restore", s.handleLoginRestore)
@@ -167,7 +169,7 @@ func (s *Server) routes() http.Handler {
 	api.Get("/outbounds/{tag}", s.handleGetOutbound)
 	api.Patch("/outbounds/{tag}", s.handlePatchOutbound)
 	api.Delete("/outbounds/{tag}", s.handleDeleteOutbound)
-	api.Post("/outbounds/{tag}/test", handleUnavailableTest)
+	api.Post("/outbounds/{tag}/test", handleUnavailableOutboundTest)
 	api.Get("/endpoints", s.handleListEndpoints)
 	api.Post("/endpoints", s.handleCreateEndpoint)
 	api.Post("/endpoints/import", s.handleImportEndpoint)
@@ -237,6 +239,107 @@ func (s *Server) authorized(r *http.Request) bool {
 	return subtle.ConstantTimeCompare(sum[:], s.deps.TokenHash[:]) == 1
 }
 
+// apiHandlerTimeout is the context timeout applied to non-WS
+// API handlers (loop-2 F4). Overridable in tests; the
+// production default is 30s.
+var apiHandlerTimeout = 30 * time.Second
+
+// apiTimeout bounds a handler by a context timeout, replying
+// 503 with a fixed timeout envelope when the handler does not
+// finish in time. The screencast WebSocket is excluded: it is
+// a long-lived session, and a context timeout would kill it.
+// No other API handler is long-lived: every config read/write
+// and keeper status read completes immediately.
+//
+// The handler runs against a buffered writer so a timeout can
+// still reply cleanly; a handler that finishes after the
+// timeout has its output discarded. A panic in the handler
+// goroutine is re-panicked on the request goroutine so the
+// outer recoverer keeps converting it to a fixed 500.
+func (s *Server) apiTimeout(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/screencast/ws") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), apiHandlerTimeout)
+		defer cancel()
+		buf := &timeoutBuffer{header: make(http.Header)}
+		done := make(chan struct{})
+		var panicked any
+		go func() {
+			defer func() {
+				if p := recover(); p != nil {
+					panicked = p
+				}
+				close(done)
+			}()
+			next.ServeHTTP(buf, r.WithContext(ctx))
+		}()
+		select {
+		case <-done:
+			if panicked != nil {
+				panic(panicked)
+			}
+			buf.writeTo(w)
+		case <-ctx.Done():
+			writeError(w, http.StatusServiceUnavailable, "timeout", "request timed out")
+		}
+	})
+}
+
+// timeoutBuffer is a mutex-guarded ResponseWriter buffer: the
+// handler goroutine may keep writing after the middleware has
+// replied, so the buffer must stay safe to write after the
+// read-out. writeTo runs only after the handler goroutine has
+// finished (the done channel closes in its defer), so the
+// header map is never read concurrently with a handler write.
+type timeoutBuffer struct {
+	mu          sync.Mutex
+	header      http.Header
+	status      int
+	wroteHeader bool
+	body        []byte
+}
+
+func (b *timeoutBuffer) Header() http.Header { return b.header }
+
+func (b *timeoutBuffer) WriteHeader(status int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.wroteHeader {
+		b.status = status
+		b.wroteHeader = true
+	}
+}
+
+func (b *timeoutBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.wroteHeader {
+		b.status = http.StatusOK
+		b.wroteHeader = true
+	}
+	b.body = append(b.body, p...)
+	return len(p), nil
+}
+
+func (b *timeoutBuffer) writeTo(w http.ResponseWriter) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for k, vs := range b.header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	status := b.status
+	if !b.wroteHeader {
+		status = http.StatusOK
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(b.body)
+}
+
 // recoverer converts a handler panic into a fixed 500 envelope
 // with no stack and no value text: a panic on an API path must
 // never leak a secret-bearing stack trace.
@@ -257,9 +360,14 @@ func methodNotAllowed(w http.ResponseWriter, r *http.Request) {
 
 // serveShell serves the embedded single-file frontend. It is
 // deliberately unauthenticated: the shell contains no secrets,
-// and the login page needs it to enter the token. Every other
-// path that is not /api/v1 falls back to the shell (hash
-// routing); unknown /api/v1 paths 404 inside the API mount.
+// and the login page needs it to enter the token. Every path
+// that matches no API route falls back to the shell (hash
+// routing) — including unknown /api/v1 paths, which return
+// the 200 shell rather than a 404: the mount falls through to
+// the root NotFound handler. Unauthenticated unknown /api/v1
+// paths still 401 (requireAuth runs before the fallthrough);
+// only known API routes return API envelopes. The shell itself
+// carries no secrets.
 func (s *Server) serveShell(w http.ResponseWriter, r *http.Request) {
 	data, err := fs.ReadFile(s.deps.DistFS, "index.html")
 	if err != nil {

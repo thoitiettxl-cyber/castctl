@@ -159,7 +159,12 @@ func cmdWebUIServe(ctx context.Context, env *Env, g *globalOpts, args []string) 
 	}
 
 	token := ""
-	if v, ok := env.lookupEnv("CASTCTL_WEBUI_KEY"); ok && v != "" {
+	if v, ok := env.lookupEnv("CASTCTL_WEBUI_KEY"); ok && strings.TrimSpace(v) != "" {
+		// A whitespace-only env value counts as unset: it
+		// could never authenticate (the token is compared
+		// exactly), so treating it as set would strand the
+		// operator with an unusable server. The token
+		// itself is used verbatim, never trimmed.
 		token = v
 	} else {
 		token = webuiCfg.Token

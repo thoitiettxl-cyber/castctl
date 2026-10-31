@@ -223,3 +223,30 @@ func TestCheckWhitespaceKeys(t *testing.T) {
 		t.Fatal("padded key accepted")
 	}
 }
+
+func TestMergeRejectsMarkerContainingUserinfoSpan(t *testing.T) {
+	// A submitted URL whose userinfo span contains the marker
+	// without equaling it must be rejected, not stored verbatim
+	// (the span could carry a live secret pasted by mistake).
+	stored := `{"proxy_url": "https://user:FAKE-SECRET-PASS@proxy.example.com:8080/path"}`
+	submitted := `{"proxy_url": "https://user:<redacted>@proxy.example.com:8080/path"}`
+	if _, err := mergedJSON(t, stored, submitted); err == nil {
+		t.Fatal("marker-containing userinfo span accepted, want sentinel rejection")
+	} else {
+		var rej *sentinelRejection
+		if !errors.As(err, &rej) {
+			t.Fatalf("err = %v, want sentinelRejection", err)
+		}
+	}
+	// New key via adoptNew: same rule.
+	stored2 := `{"keep": "yes"}`
+	submitted2 := `{"keep": "yes", "proxy_url": "https://user:<redacted>@proxy.example.com:8080/path"}`
+	if _, err := mergedJSON(t, stored2, submitted2); err == nil {
+		t.Fatal("marker-containing userinfo span in new key accepted, want sentinel rejection")
+	} else {
+		var rej *sentinelRejection
+		if !errors.As(err, &rej) {
+			t.Fatalf("err = %v, want sentinelRejection", err)
+		}
+	}
+}

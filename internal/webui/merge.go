@@ -106,8 +106,18 @@ func spliceUserinfo(stored, submitted string) (string, bool) {
 // block must have real values typed in, and a renamed secret
 // key is a new path.
 func adoptNew(submitted any, path string) (any, error) {
-	if s, ok := submitted.(string); ok && s == redact.Marker {
-		return nil, &sentinelRejection{path: path}
+	if s, ok := submitted.(string); ok {
+		if s == redact.Marker {
+			return nil, &sentinelRejection{path: path}
+		}
+		// A userinfo span that merely contains the marker
+		// is rejected here too (same rule as the merge
+		// string branch): it must never be stored verbatim.
+		for _, sp := range userinfoSpans(s) {
+			if sp.userinfo != redact.Marker && strings.Contains(sp.userinfo, redact.Marker) {
+				return nil, &sentinelRejection{path: path}
+			}
+		}
 	}
 	switch t := submitted.(type) {
 	case []any:
@@ -353,6 +363,16 @@ func mergeNode(stored any, storedPresent bool, submitted any, path string, secre
 			}
 			if hasSentinelSpan && (len(storedSpans) != 1 || len(submittedSpans) != 1) {
 				return nil, false, &sentinelRejection{path: path}
+			}
+			// A span that merely CONTAINS the marker (e.g.
+			// "user:<redacted>") is neither the exact
+			// sentinel splice nor a clean new literal: it
+			// could carry a live secret pasted by mistake
+			// past the redaction boundary. Reject it.
+			for _, sp := range submittedSpans {
+				if sp.userinfo != redact.Marker && strings.Contains(sp.userinfo, redact.Marker) {
+					return nil, false, &sentinelRejection{path: path}
+				}
 			}
 			if spliced, ok := spliceUserinfo(storedStr, submittedStr); ok {
 				return spliced, true, nil

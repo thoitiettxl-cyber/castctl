@@ -125,14 +125,18 @@ func (r *sessionRegistry) consume(token string) (string, error) {
 		delete(r.sessions, token)
 		return "", errSessionUnknown
 	}
-	sess.consumed = true
-	// Kept in the map while live: mint()'s busy check reads
-	// it through byProfile. release() removes both entries.
+	// Busy check BEFORE marking consumed: a token presented
+	// while another session is live must stay consumable
+	// after the live session ends; burning it here would
+	// strand the operator with an "unknown session" error.
 	if existing, ok := r.byProfile[sess.profile]; ok {
 		if other, ok := r.sessions[existing]; ok && other.live {
 			return "", errScreencastBusy
 		}
 	}
+	sess.consumed = true
+	// Kept in the map while live: mint()'s busy check reads
+	// it through byProfile. release() removes both entries.
 	sess.live = true
 	r.byProfile[sess.profile] = token
 	return sess.profile, nil
@@ -287,6 +291,12 @@ func (s *Server) handleScreencastWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	// Read limit: a single client message larger than 64 KiB
+	// is refused (the read fails and the pump exits) instead
+	// of being buffered whole. The bound is far above any
+	// legitimate input message (key/mouse/text events are
+	// capped at 1024 chars by validateWSInput).
+	conn.SetReadLimit(64 << 10)
 	defer func() { _ = conn.Close() }()
 	transport := newWSTransport(conn)
 	defer transport.close()
@@ -506,6 +516,12 @@ func validateWSInput(msg wsInputMessage) (keeper.InputEvent, bool) {
 			return keeper.InputEvent{}, false
 		}
 		if len(msg.Key) > 64 {
+			return keeper.InputEvent{}, false
+		}
+		// Key-event Text shares the Text-kind 1024 bound: an
+		// uncapped Text would reach the keeper dispatch path
+		// verbatim.
+		if len(msg.Text) > 1024 {
 			return keeper.InputEvent{}, false
 		}
 		if msg.Modifiers < 0 || msg.Modifiers > 15 {

@@ -194,3 +194,189 @@ func TestValidateWSInput(t *testing.T) {
 		t.Fatal("bogus kind accepted")
 	}
 }
+
+func TestValidateWSInputKeyTextLength(t *testing.T) {
+	base := wsInputMessage{Kind: "key", KeyType: "keyDown", Key: "a"}
+	base.Text = strings.Repeat("x", 1024)
+	if _, ok := validateWSInput(base); !ok {
+		t.Fatal("1024-char key Text rejected, want acceptance")
+	}
+	base.Text = strings.Repeat("x", 1025)
+	if _, ok := validateWSInput(base); ok {
+		t.Fatal("1025-char key Text accepted, want rejection")
+	}
+}
+
+// screencastConn mints a session and dials its WebSocket with the
+// given starter. The starter must return LoginSaved on Done so a
+// test can tell "the done input arrived" from "the transport died".
+func screencastConn(t *testing.T, starter func(context.Context, string, string, keeper.Transport) (keeper.LoginResult, error)) *websocket.Conn {
+	t.Helper()
+	ts := newTestServer(t, fixtureConfig, func(d *Deps) {
+		d.ScreencastAvailable = func(ctx context.Context, profileName string) (bool, string, error) {
+			return true, "", nil
+		}
+		d.ScreencastStarter = starter
+	})
+	server := httptest.NewServer(ts.handler)
+	t.Cleanup(server.Close)
+	req, _ := http.NewRequest("POST", server.URL+"/api/v1/screencast/muse01/start", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var startEnv map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&startEnv); err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	wsURL, _ := startEnv["data"].(map[string]any)["ws_url"].(string)
+	if wsURL == "" {
+		t.Fatalf("start response = %v", startEnv)
+	}
+	wsEndpoint := "ws" + strings.TrimPrefix(server.URL, "http") + wsURL
+	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
+	conn, _, err := dialer.Dial(wsEndpoint, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+func waitForDoneStarter() func(context.Context, string, string, keeper.Transport) (keeper.LoginResult, error) {
+	return func(ctx context.Context, profileName, sessionID string, transport keeper.Transport) (keeper.LoginResult, error) {
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			select {
+			case ev := <-transport.Inputs():
+				if ev.Kind == keeper.InputDone {
+					return keeper.LoginResult{Outcome: keeper.LoginSaved, CookiesSaved: true}, nil
+				}
+			case <-transport.Done():
+				return keeper.LoginResult{Outcome: keeper.LoginCancelled}, nil
+			case <-ctx.Done():
+				return keeper.LoginResult{Outcome: keeper.LoginTimeout}, nil
+			}
+		}
+		return keeper.LoginResult{Outcome: keeper.LoginTimeout}, nil
+	}
+}
+
+func TestScreencastWSReadLimit(t *testing.T) {
+	// A 2 MiB message must be refused by the 64 KiB read limit
+	// without saving: the done input sent after it must never
+	// reach the starter, so the outcome is cancelled (or the
+	// connection closes), never saved.
+	conn := screencastConn(t, waitForDoneStarter())
+	huge := strings.Repeat("x", 2<<20)
+	_ = conn.WriteJSON(map[string]any{"kind": "teleport", "pad": huge})
+	_ = conn.WriteJSON(map[string]any{"kind": "done"})
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for a screencast result after the oversized message")
+		}
+		var msg map[string]any
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if err := conn.ReadJSON(&msg); err != nil {
+			// Connection closed without a result: the oversized
+			// read was refused and the session did not save.
+			return
+		}
+		if msg["type"] == "result" {
+			if msg["outcome"] == "saved" {
+				t.Fatalf("oversized message accepted, outcome = saved")
+			}
+			return
+		}
+	}
+}
+
+func TestScreencastWSKeyTextNotForwarded(t *testing.T) {
+	// An oversized key-event Text must be dropped at the relay;
+	// a small key event must still reach the starter.
+	recorded := make(chan keeper.InputEvent, 16)
+	starter := func(ctx context.Context, profileName, sessionID string, transport keeper.Transport) (keeper.LoginResult, error) {
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			select {
+			case ev := <-transport.Inputs():
+				if ev.Kind == keeper.InputKey {
+					select {
+					case recorded <- ev:
+					default:
+					}
+				}
+				if ev.Kind == keeper.InputDone {
+					return keeper.LoginResult{Outcome: keeper.LoginSaved, CookiesSaved: true}, nil
+				}
+			case <-transport.Done():
+				return keeper.LoginResult{Outcome: keeper.LoginCancelled}, nil
+			case <-ctx.Done():
+				return keeper.LoginResult{Outcome: keeper.LoginTimeout}, nil
+			}
+		}
+		return keeper.LoginResult{Outcome: keeper.LoginTimeout}, nil
+	}
+	conn := screencastConn(t, starter)
+	_ = conn.WriteJSON(map[string]any{
+		"kind": "key", "key_type": "keyDown", "key": "a", "text": strings.Repeat("x", 2000),
+	})
+	_ = conn.WriteJSON(map[string]any{
+		"kind": "key", "key_type": "keyDown", "key": "b", "text": "ok",
+	})
+	_ = conn.WriteJSON(map[string]any{"kind": "done"})
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the screencast result")
+		}
+		var msg map[string]any
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if err := conn.ReadJSON(&msg); err != nil {
+			t.Fatalf("read result: %v", err)
+		}
+		if msg["type"] == "result" {
+			break
+		}
+	}
+	close(recorded)
+	seenSmall := false
+	for ev := range recorded {
+		if len(ev.Text) > 1024 {
+			t.Fatalf("oversized key Text forwarded: len=%d", len(ev.Text))
+		}
+		if ev.Text == "ok" {
+			seenSmall = true
+		}
+	}
+	if !seenSmall {
+		t.Fatal("small key event was not forwarded to the starter")
+	}
+}
+
+func TestSessionRegistryConsumeDoesNotBurnOnBusy(t *testing.T) {
+	reg := newSessionRegistry()
+	a, err := reg.mint("muse01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := reg.mint("muse01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.consume(a); err != nil {
+		t.Fatalf("consume A: %v", err)
+	}
+	if _, err := reg.consume(b); err == nil {
+		t.Fatal("consume B while A is live accepted, want busy rejection")
+	} else if !strings.Contains(err.Error(), "already live") {
+		t.Fatalf("consume B err = %v, want busy rejection", err)
+	}
+	reg.release("muse01")
+	if _, err := reg.consume(b); err != nil {
+		t.Fatalf("consume B after release: %v (token was burned by the busy attempt)", err)
+	}
+}
