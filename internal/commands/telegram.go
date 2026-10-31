@@ -143,9 +143,9 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 	// slog.Default() and bypasses the logging factory's
 	// level/output. Routing it through the factory needs a
 	// Runtime logger accessor plus lifecycle wiring and is
-	// step-5 work. Not a leak: every bot log line is
-	// scrubbed/summarised before it reaches this logger
-	// (see internal/telegram scrubErr/summarize).
+	// step-5 work. Not a leak: every bot log line carrying
+	// error text renders a class/length summary before it
+	// reaches this logger (see internal/telegram summarize).
 	logger := env.Logger
 	if logger == nil {
 		logger = slog.Default()

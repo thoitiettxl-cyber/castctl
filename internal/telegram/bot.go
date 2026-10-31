@@ -54,11 +54,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
-
-	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 )
 
 // PollTimeout is the long-poll duration passed to WithHTTPClient:
@@ -593,40 +592,103 @@ func (b *Bot) defaultHandler(_ context.Context, _ *bot.Bot, upd *models.Update) 
 }
 
 // errorsHandler replaces the library default (which logs errors
-// verbatim, including raw payloads on decode failure). Errors
-// render through summarize: response decode/read errors render
-// as a status/class/length summary only (no body bytes, at any
-// level); other errors render token-scrubbed through
-// SummarizeErr (SafeString backstop for errors that carry no
-// body). Raw server bodies are never emitted in a log line.
+// verbatim, including raw payloads on decode failure). Every
+// error renders through summarize as a class/length summary
+// only: no verbatim error text — and therefore no server body,
+// description, or raw update bytes — reaches a log line at any
+// level, whatever the error's shape or size.
 func (b *Bot) errorsHandler(err error) {
 	b.logger.Error("telegram poll error", "err", b.summarize(err.Error()))
 }
 
-// summarize renders an error for a log line. The token is
-// scrubbed out first (a hostile server body may echo it).
-// Errors whose text carries a response body (the library's
-// decode/read-body errors embed the raw body verbatim) render
-// as "telegram poll error: response decode failure
-// method=<method> message_length=<n>" — class and length
-// only, never body bytes. All other errors go through
-// SummarizeErr. Callers must never log an error by
-// unwrapping and printing: the scrubbed error type carries
-// no raw chain (see scrubErr), and %+v/%#v of a scrubbed
-// error contain no token.
+// summarize renders an error for a log line as a class/length
+// summary only, never verbatim error text. The class label is
+// chosen from a small safe vocabulary (library error classes
+// and the response/update decode classes) detected in a
+// bounded prefix; an unrecognised shape renders with the
+// generic class. Detection only selects the label: the bound
+// does not depend on it, so an undetected shape is still
+// fragment-free. The token is scrubbed out of the examined
+// prefix first (a hostile server body may echo it), but no
+// scrub of the full text is needed: nothing verbatim is
+// emitted, and the only extracted fragment (the method name
+// in the decode-failure class) is restricted to a short
+// library identifier.
+//
+// Bounded work: summarize inspects only the first 256 runes
+// (for the class label) plus one allocation-free rune-count
+// pass for message_length. It never runs SafeString,
+// ReplaceAll, or any other whole-input pass over a hostile
+// body, so a multi-megabyte server response costs no more
+// than a short one. Classification is untouched: 429 and
+// parse-error classification run on the raw error in
+// retryCall/isParseError before scrubbing, and summarize is
+// log-only. Callers must never log an error by unwrapping
+// and printing: the scrubbed error type carries no raw chain
+// (see scrubErr), and %+v/%#v of a scrubbed error contain no
+// token.
 func (b *Bot) summarize(msg string) string {
-	scrubbed := b.scrub(msg)
-	if isResponseBodyError(scrubbed) {
-		return fmt.Sprintf("telegram poll error: response decode failure method=%s message_length=%d", decodeErrorMethod(scrubbed), len([]rune(scrubbed)))
+	length := utf8.RuneCountInString(msg)
+	prefix := b.scrub(firstRunes(msg, summarizePrefixRunes))
+	class, method := summarizeClass(prefix)
+	switch class {
+	case "response decode failure":
+		return fmt.Sprintf("telegram poll error: response decode failure method=%s message_length=%d", method, length)
+	case "update decode failure":
+		return fmt.Sprintf("telegram poll error: update decode failure message_length=%d", length)
+	case "":
+		return fmt.Sprintf("telegram error: message_length=%d", length)
+	default:
+		return fmt.Sprintf("telegram error: %s message_length=%d", class, length)
 	}
-	return logging.SummarizeErr(errors.New(scrubbed))
 }
 
-// isResponseBodyError reports whether the error text is one
-// of the library's body-carrying errors: its message embeds
+// summarizePrefixRunes bounds how much of an error text
+// summarize ever inspects for its class label.
+const summarizePrefixRunes = 256
+
+// firstRunes returns the first n runes of s without converting
+// or scanning the rest: it stops at the nth rune boundary.
+func firstRunes(s string, n int) string {
+	count := 0
+	for i := range s {
+		if count == n {
+			return s[:i]
+		}
+		count++
+	}
+	return s
+}
+
+// summarizeClass selects the summary class label from a
+// bounded, token-scrubbed prefix of the error text. It returns
+// ("", "") for an unrecognised shape. The labels are a fixed
+// safe vocabulary: no part of the input text is ever returned.
+func summarizeClass(prefix string) (class, method string) {
+	if isResponseBodyError(prefix) {
+		return "response decode failure", decodeErrorMethod(prefix)
+	}
+	if strings.Contains(prefix, "decode update") {
+		return "update decode failure", ""
+	}
+	for _, sentinel := range []string{
+		"too many requests", "bad request", "forbidden",
+		"unauthorized", "not found", "conflict",
+	} {
+		if strings.Contains(prefix, sentinel) {
+			return sentinel, ""
+		}
+	}
+	return "", ""
+}
+
+// isResponseBodyError reports whether the examined prefix is
+// one of the library's body-carrying errors: its message embeds
 // the raw response body, so it must never reach a log line
 // verbatim (the logging-PR rule: raw server bodies are never
-// emitted anywhere, at any level).
+// emitted anywhere, at any level). In summarize it only
+// selects the class label; the bound applies to every shape
+// whether or not this matches.
 func isResponseBodyError(msg string) bool {
 	return strings.Contains(msg, "decode response body") ||
 		strings.Contains(msg, "read response body") ||
@@ -635,7 +697,11 @@ func isResponseBodyError(msg string) bool {
 
 // decodeErrorMethod extracts the method name from a
 // body-carrying error ("... for method <name>, ..."), or
-// "unknown" when the text does not carry one.
+// "unknown" when the text does not carry one. Only a short
+// library identifier is ever returned: the name is cut at
+// the first comma/space, restricted to identifier characters,
+// and capped at 32 characters, so no server fragment can
+// ride in through the method position.
 func decodeErrorMethod(msg string) string {
 	const prefix = "for method "
 	i := strings.Index(msg, prefix)
@@ -646,10 +712,22 @@ func decodeErrorMethod(msg string) string {
 	if j := strings.IndexAny(rest, ", "); j >= 0 {
 		rest = rest[:j]
 	}
-	if rest == "" {
+	end := 0
+	for end < len(rest) {
+		c := rest[end]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' {
+			end++
+		} else {
+			break
+		}
+	}
+	if end == 0 {
 		return "unknown"
 	}
-	return rest
+	if end > 32 {
+		end = 32
+	}
+	return rest[:end]
 }
 
 // scrub removes every occurrence of the token from s. The token
@@ -673,7 +751,10 @@ func (b *Bot) scrub(s string) string {
 // library sentinel classes (bad request / forbidden /
 // unauthorized / not found / conflict / too many requests),
 // via Unwrap() []error over scrubbed copies and sentinels
-// only. No other errors.As target is preserved — a caller
+// only. No other errors.As target is preserved — in
+// particular, errors.As to *url.Error and other transport
+// types and errors.Is to context.Canceled and
+// context.DeadlineExceeded do not survive scrubbing. A caller
 // needing another typed view of a server error must add it
 // here, with its string fields scrubbed, rather than
 // unwrapping the raw error.

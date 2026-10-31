@@ -787,6 +787,189 @@ func TestBotHostileBodyNotLogged(t *testing.T) {
 	}
 }
 
+func TestBotHostileDescriptionNotLogged(t *testing.T) {
+	t.Parallel()
+	const marker = "R6A-DESC-MARKER-"
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	// Valid-JSON 400 envelope whose description is a large
+	// marker body plus the fixture token: the library embeds
+	// the description verbatim in its error, so the poll log
+	// must carry only a class/length summary.
+	desc := strings.Repeat(marker, 1500) + " " + fakeToken
+	srv.garbageBody = `{"ok":false,"error_code":400,"description":` + jsonString(desc) + `}`
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startBot(t, tb.bot, ctx)
+	time.Sleep(300 * time.Millisecond)
+	if err := stopBot(t, cancel, done); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start = %v", err)
+	}
+	logged := tb.logBuf.String()
+	if strings.Contains(logged, marker) {
+		t.Error("log output contains the hostile description marker (server text reached the log)")
+	}
+	if strings.Contains(logged, fakeToken) {
+		t.Error("log output contains the fixture token after a hostile description")
+	}
+	if len(logged) > 400 {
+		t.Errorf("log output is %d bytes after one hostile poll; want length-bounded (class/length summary)", len(logged))
+	}
+	if !strings.Contains(logged, "message_length=") {
+		t.Error("log output lacks a class/length summary naming message_length (log buffer not printed: it may carry secrets)")
+	}
+}
+
+func TestBotHostileDecodeUpdateNotLogged(t *testing.T) {
+	t.Parallel()
+	const marker = "R6B-UPDATE-MARKER-"
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	// Undecodable update: the library logs the raw update JSON
+	// verbatim through the errors handler.
+	raw := `{"update_id":42,"message":"` + strings.Repeat(marker, 130) + `"}`
+	srv.enqueueUpdates(raw)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startBot(t, tb.bot, ctx)
+	time.Sleep(300 * time.Millisecond)
+	if err := stopBot(t, cancel, done); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start = %v", err)
+	}
+	if got := len(tb.handler.recorded()); got != 0 {
+		t.Errorf("handler calls = %d; want 0 (undecodable update must not be handled)", got)
+	}
+	logged := tb.logBuf.String()
+	if strings.Contains(logged, marker) {
+		t.Error("log output contains the hostile raw-update marker (server text reached the log)")
+	}
+	if strings.Contains(logged, fakeToken) {
+		t.Error("log output contains the fixture token after a hostile update")
+	}
+	if len(logged) > 400 {
+		t.Errorf("log output is %d bytes after one hostile batch; want length-bounded (class/length summary)", len(logged))
+	}
+	if !strings.Contains(logged, "message_length=") {
+		t.Error("log output lacks a class/length summary naming message_length (log buffer not printed: it may carry secrets)")
+	}
+}
+
+func TestSummarizeNeverEmitsServerText(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	cases := []struct {
+		name string
+		in   string
+		want string // fragment that must be absent
+	}{
+		{"short description", "bad request, R6D-SHORT-MARKER " + fakeToken, "R6D-SHORT-MARKER"},
+		{"short decode update", `error decode update 42, skipped, {"update_id":42,"message":"R6D-DECODE-MARKER"}: cannot unmarshal`, "R6D-DECODE-MARKER"},
+		{"long description", "bad request, " + strings.Repeat("R6D-LONG-MARKER-", 1500), "R6D-LONG-MARKER-"},
+		{"long decode update", "error decode update 42, skipped, " + strings.Repeat("R6D-LONG-UPDATE-", 1500), "R6D-LONG-UPDATE-"},
+		{"long arbitrary", strings.Repeat("R6D-GENERIC-", 5000), "R6D-GENERIC-"},
+	}
+	for _, tc := range cases {
+		got := tb.bot.summarize(tc.in)
+		if strings.Contains(got, tc.want) {
+			t.Errorf("%s: summarize kept a server fragment in %q", tc.name, got[:min(len(got), 120)])
+		}
+		if strings.Contains(got, fakeToken) {
+			t.Errorf("%s: summarize kept the fixture token", tc.name)
+		}
+		if len(got) > 400 {
+			t.Errorf("%s: summarize output is %d bytes; want length-bounded", tc.name, len(got))
+		}
+		if !strings.Contains(got, "message_length=") {
+			t.Errorf("%s: summarize output %q lacks message_length=", tc.name, got)
+		}
+	}
+}
+
+func TestSummarizeHostileBodyBoundedWork(t *testing.T) {
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	// 5MB of hostile text: the old SafeString pass over the
+	// whole input took tens of seconds; the bounded path must
+	// finish in seconds and emit only a short summary.
+	in := strings.Repeat("R6D-CPU-MARKER-", 350000)
+	start := time.Now()
+	got := tb.bot.summarize(in)
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("summarize(5MB) took %v; want bounded work (<10s)", elapsed)
+	}
+	if strings.Contains(got, "R6D-CPU-MARKER-") {
+		t.Error("summarize kept a server fragment from a 5MB input")
+	}
+	if len(got) > 400 {
+		t.Errorf("summarize(5MB) output is %d bytes; want length-bounded", len(got))
+	}
+	if !strings.Contains(got, "message_length=") {
+		t.Errorf("summarize(5MB) output of %d bytes lacks message_length=", len(got))
+	}
+}
+
+func TestBotEditPlainHostileDescriptionNotLogged(t *testing.T) {
+	t.Parallel()
+	const marker = "R6E-EDIT-MARKER"
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	// A non-poll log exit (EditPlain / stream-edit): a short
+	// description-carrying 400 and a long one must both stay
+	// out of the log.
+	srv.editFailures = []scriptedFailure{
+		{Code: 400, Desc: marker + " " + fakeToken},
+		{Code: 400, Desc: strings.Repeat(marker+"-", 1500)},
+	}
+	if err := tb.bot.EditPlain(context.Background(), 500, 100, "hello"); err != nil {
+		t.Fatalf("EditPlain(short hostile description) = %v; want nil (swallowed)", err)
+	}
+	if err := tb.bot.EditPlain(context.Background(), 500, 100, "hello"); err != nil {
+		t.Fatalf("EditPlain(long hostile description) = %v; want nil (swallowed)", err)
+	}
+	logged := tb.logBuf.String()
+	if strings.Contains(logged, marker) {
+		t.Error("log output contains the hostile description marker on the EditPlain exit")
+	}
+	if strings.Contains(logged, fakeToken) {
+		t.Error("log output contains the fixture token on the EditPlain exit")
+	}
+	if len(logged) > 400 {
+		t.Errorf("log output is %d bytes on the EditPlain exit; want length-bounded", len(logged))
+	}
+	if !strings.Contains(logged, "message_length=") {
+		t.Error("log output lacks a class/length summary naming message_length (log buffer not printed: it may carry secrets)")
+	}
+}
+
+func TestBotHandlerErrorHostileDescriptionNotLogged(t *testing.T) {
+	t.Parallel()
+	const marker = "R6E-HANDLER-MARKER"
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	// A non-poll log exit (message handler error): the handler
+	// returns a description-carrying error.
+	tb.handler.returnErr = errors.New("bad request, " + marker + " " + fakeToken)
+	srv.enqueueUpdates(messageUpdate(60, 500, 111, "hi"))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startBot(t, tb.bot, ctx)
+	waitFor(t, "handler called", func() bool { return len(tb.handler.recorded()) == 1 })
+	if err := stopBot(t, cancel, done); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start = %v", err)
+	}
+	logged := tb.logBuf.String()
+	if strings.Contains(logged, marker) {
+		t.Error("log output contains the hostile description marker on the handler-error exit")
+	}
+	if strings.Contains(logged, fakeToken) {
+		t.Error("log output contains the fixture token on the handler-error exit")
+	}
+	if len(logged) > 400 {
+		t.Errorf("log output is %d bytes on the handler-error exit; want length-bounded", len(logged))
+	}
+	if !strings.Contains(logged, "message_length=") {
+		t.Error("log output lacks a class/length summary naming message_length (log buffer not printed: it may carry secrets)")
+	}
+}
+
 func TestBotRedirectRefused(t *testing.T) {
 	t.Parallel()
 	var secondHits atomic.Int64
