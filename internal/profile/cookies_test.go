@@ -5,9 +5,11 @@
 package profile
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -216,4 +218,274 @@ func mustReadFile(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+func cookiesFileIno(t *testing.T, path string) uint64 {
+	t.Helper()
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("stat did not return *syscall.Stat_t; the inode assertion is unavailable")
+	}
+	return sys.Ino
+}
+
+// TestWriteCookiesFileBakIsCopyBeforeRename (K-LIVE-2): the
+// backup must be produced by copying the previous file to
+// .bak BEFORE the new file is renamed over the target, so the
+// target is never absent mid-write. A rename-based backup
+// reuses the previous file's inode for .bak; a copy does not.
+// That inode difference is the deterministic observable for
+// the ordering: RED on e4ef8c5 (rename), GREEN on the copy.
+func TestWriteCookiesFileBakIsCopyBeforeRename(t *testing.T) {
+	base := t.TempDir()
+	dest := filepath.Join(base, "cookies.txt")
+	old := []byte("hatch_sess=OLD\n")
+	if err := os.WriteFile(dest, old, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldIno := cookiesFileIno(t, dest)
+	neu := []byte("hatch_sess=NEW\n")
+	backup, err := WriteCookiesFile(base, "default", dest, neu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !backup {
+		t.Errorf("backup=false, want true when a previous file existed")
+	}
+	if got := mustReadFile(t, dest+".bak"); string(got) != string(old) {
+		t.Errorf(".bak bytes=%q, want previous file bytes %q", got, old)
+	}
+	if mode := cookiesFileMode(t, dest+".bak"); mode != 0o600 {
+		t.Errorf(".bak mode=%o, want 0600", mode)
+	}
+	if ino := cookiesFileIno(t, dest+".bak"); ino == oldIno {
+		t.Errorf(".bak inode=%d equals the old file's inode: the backup was a rename, so the target was absent mid-write", ino)
+	}
+	if got := mustReadFile(t, dest); string(got) != string(neu) {
+		t.Errorf("cookies bytes=%q, want %q", got, neu)
+	}
+	if mode := cookiesFileMode(t, dest); mode != 0o600 {
+		t.Errorf("cookies mode=%o, want 0600", mode)
+	}
+}
+
+// TestWriteCookiesFileBakPreservesSymlink (K-LIVE-2 guard): when
+// the previous cookies file is a symlink, .bak remains a
+// symlink to the same target, the target's content and mode
+// are untouched, and the new cookies file is a regular 0600
+// file. This pins the documented symlink rule under the
+// copy-based backup; it passes on the old rename code too.
+func TestWriteCookiesFileBakPreservesSymlink(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "target.txt")
+	old := []byte("hatch_sess=OLD\n")
+	if err := os.WriteFile(target, old, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Record the target's mode as created (subject to umask):
+	// the write must leave it untouched, whatever it is.
+	targetMode := cookiesFileMode(t, target)
+	dest := filepath.Join(base, "cookies.txt")
+	if err := os.Symlink(target, dest); err != nil {
+		t.Fatal(err)
+	}
+	neu := []byte("hatch_sess=NEW\n")
+	backup, err := WriteCookiesFile(base, "default", dest, neu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !backup {
+		t.Errorf("backup=false, want true when a previous (symlink) file existed")
+	}
+	lst, err := os.Lstat(dest + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lst.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf(".bak is not a symlink (mode=%v)", lst.Mode())
+	}
+	linkTarget, err := os.Readlink(dest + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkTarget != target {
+		t.Errorf(".bak points at %q, want %q", linkTarget, target)
+	}
+	if got := mustReadFile(t, target); string(got) != string(old) {
+		t.Errorf("symlink target bytes=%q, want untouched %q", got, old)
+	}
+	if mode := cookiesFileMode(t, target); mode != targetMode {
+		t.Errorf("symlink target mode=%o, want untouched %o", mode, targetMode)
+	}
+	lst, err = os.Lstat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lst.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("cookies file is still a symlink; want a regular file")
+	}
+	if got := mustReadFile(t, dest); string(got) != string(neu) {
+		t.Errorf("cookies bytes=%q, want %q", got, neu)
+	}
+	if mode := cookiesFileMode(t, dest); mode != 0o600 {
+		t.Errorf("cookies mode=%o, want 0600", mode)
+	}
+}
+
+// TestWriteCookiesFileBakIsDirectory (N4, loop 2): a directory at
+// the .bak path refuses the write with the destination untouched
+// and the directory still in place. Pins the guard under the
+// temp-file backup implementation; it passed on the old code
+// too (guard pre-dates loop 2).
+func TestWriteCookiesFileBakIsDirectory(t *testing.T) {
+	base := t.TempDir()
+	dest := filepath.Join(base, "cookies.txt")
+	old := []byte("hatch_sess=OLD\n")
+	if err := os.WriteFile(dest, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dest+".bak", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteCookiesFile(base, "default", dest, []byte("hatch_sess=NEW\n")); err == nil {
+		t.Fatalf(".bak is a directory: got no error")
+	}
+	if got := mustReadFile(t, dest); string(got) != string(old) {
+		t.Errorf("cookies bytes=%q after failed write, want untouched %q", got, old)
+	}
+	if st, err := os.Stat(dest + ".bak"); err != nil || !st.IsDir() {
+		t.Errorf(".bak directory missing or changed (stat err=%v, isDir=%v)", err, st != nil && st.IsDir())
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".tmp-") || strings.HasPrefix(e.Name(), ".cookies-bak-") {
+			t.Errorf("temp file left behind: %s", e.Name())
+		}
+	}
+}
+
+// TestWriteCookiesFileBakPreservedOnCopyFailure (N4, loop 2):
+// when the backup copy cannot be made, the stale .bak survives
+// byte-identical and the destination is untouched — the old
+// .bak is never deleted before the new copy succeeds.
+//
+// The failure is deterministic on every uid and filesystem:
+// the destination is a Unix socket file, so backupCookiesFile's
+// ReadFile — the first step of the copy body, reached only
+// after writeTempFile has already succeeded — fails ENXIO.
+// The previous chmod-based version failed (if at all) in
+// writeTempFile before the backup ever ran, skipped as root,
+// and passed vacuously wherever the filesystem does not
+// enforce chmod-based unwritability (the CI failure at
+// 46e24ce). No chmod, no skip here: a socket pathname cannot
+// be read as a regular file for root and non-root alike.
+func TestWriteCookiesFileBakPreservedOnCopyFailure(t *testing.T) {
+	base := t.TempDir()
+	dest := filepath.Join(base, "cookies.txt")
+	staleBak := []byte("hatch_sess=STALE-BAK\n")
+	if err := os.WriteFile(dest+".bak", staleBak, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Leave a socket file at the destination path: bind a Unix
+	// listener, keep its pathname (no unlink on close), then
+	// close it. Stat(dest) succeeds and it is not a directory,
+	// so WriteCookiesFile reaches backupCookiesFile, whose
+	// ReadFile fails ENXIO.
+	ln, err := net.Listen("unix", dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ul, ok := ln.(*net.UnixListener)
+	if !ok {
+		t.Fatalf("unix listener is %T, want *net.UnixListener", ln)
+	}
+	ul.SetUnlinkOnClose(false)
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lst, err := os.Lstat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lst.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("destination is not a socket file (mode=%v)", lst.Mode())
+	}
+	if _, err := WriteCookiesFile(base, "default", dest, []byte("hatch_sess=NEW\n")); err == nil {
+		t.Fatalf("unreadable destination (socket): got no error")
+	}
+	lst, err = os.Lstat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lst.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("destination socket missing or changed (mode=%v)", lst.Mode())
+	}
+	if got := mustReadFile(t, dest+".bak"); string(got) != string(staleBak) {
+		t.Errorf(".bak bytes=%q after failed write, want preserved %q", got, staleBak)
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".tmp-") || strings.HasPrefix(e.Name(), ".cookies-bak-") {
+			t.Errorf("temp file left behind: %s", e.Name())
+		}
+	}
+}
+
+// TestWriteCookiesFileStaleBakSymlinkReplaced (N4, loop 2): a
+// stale .bak symlink is replaced by a regular 0600 file holding
+// the previous bytes; the symlink's victim is never written
+// through. Pins the rename-over behaviour of the temp-file
+// backup; it passed on the old remove-then-write code too.
+func TestWriteCookiesFileStaleBakSymlinkReplaced(t *testing.T) {
+	base := t.TempDir()
+	victim := filepath.Join(base, "victim.txt")
+	victimBytes := []byte("victim\n")
+	if err := os.WriteFile(victim, victimBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(base, "cookies.txt")
+	old := []byte("hatch_sess=OLD\n")
+	if err := os.WriteFile(dest, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, dest+".bak"); err != nil {
+		t.Fatal(err)
+	}
+	neu := []byte("hatch_sess=NEW\n")
+	backup, err := WriteCookiesFile(base, "default", dest, neu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !backup {
+		t.Errorf("backup=false, want true when a previous file existed")
+	}
+	lst, err := os.Lstat(dest + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lst.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf(".bak is still a symlink; want a regular file")
+	}
+	if got := mustReadFile(t, dest+".bak"); string(got) != string(old) {
+		t.Errorf(".bak bytes=%q, want previous file bytes %q", got, old)
+	}
+	if mode := cookiesFileMode(t, dest+".bak"); mode != 0o600 {
+		t.Errorf(".bak mode=%o, want 0600", mode)
+	}
+	if got := mustReadFile(t, victim); string(got) != string(victimBytes) {
+		t.Errorf("victim bytes=%q, want untouched %q", got, victimBytes)
+	}
+	if got := mustReadFile(t, dest); string(got) != string(neu) {
+		t.Errorf("cookies bytes=%q, want %q", got, neu)
+	}
 }

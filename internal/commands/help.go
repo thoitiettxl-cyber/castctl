@@ -287,8 +287,10 @@ const authHelpText = `usage: castctl auth <subcommand> [options]
 Authentication helpers. "auth export" prints guidance only (exit 1,
 no writes). "auth import" reads cookies from stdin and writes the
 active profile's cookies.txt (see "castctl auth import --help").
+"auth login" is the experimental screencast login (see "castctl
+auth login --help"; off by default).
 
-Subcommands: list, export, import. Run "castctl auth <subcommand> --help"
+Subcommands: list, export, import, login. Run "castctl auth <subcommand> --help"
 for per-subcommand help.
 `
 

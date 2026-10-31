@@ -277,6 +277,32 @@ system-resolver fallback); cookies live in separate `0600` files, never
 inline in `config.json`; secrets are never printed, logged, or
 committed (see `docs/security.md`).
 
+**Session keeper and screencast login — documented routing
+exception.** The keeper's cheap-chain checks go through the
+profile's own outbound like any other profile traffic. The CDP
+re-export is different: it reads cookies from the user's
+already-running browser over a loopback CDP connection. The
+browser's own traffic does NOT go through the profile outbound
+(the browser is user-owned and pre-existing; castctl only reads
+its cookies locally, never navigates it or dispatches input).
+This is a deliberate, narrow exception to "every network call
+goes through the outbound": the CDP reads are local loopback
+reads of an already-authenticated session, not profile egress.
+The screencast launch fallback has the opposite rule: a
+castctl-launched browser must only ever egress through a
+fail-closed per-profile inbound, and until that plumbing exists
+the launch fails closed instead of spawning. The keeper's
+`session-state.json` is the first runtime state file in the
+tree: observed state (expiry dates, outcomes, warn markers),
+not configuration — it lives next to `config.json`, never
+inside it, because a sticky stopped state must survive config
+rewrites and must never be edited as config. Separation also
+keeps tick-churn out of a token-bearing file: `config.json`
+carries secrets (the telegram token, cookie paths), and
+rewriting it on every tick would churn a secret-bearing file
+for observed state; state that changes every tick lives
+beside it instead.
+
 ## Web UI
 
 Source: `webui/` — a fork of the router-for-me/Cli-Proxy-API-Management-Center

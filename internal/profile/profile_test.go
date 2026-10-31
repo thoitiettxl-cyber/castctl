@@ -149,12 +149,23 @@ func TestEnsureProfileDir(t *testing.T) {
 		t.Errorf("after re-ensure dir mode = %o; want 700", mode)
 	}
 
-	// Default dir: created, no 0700 requirement.
-	if _, err := EnsureProfileDir(base, "default"); err != nil {
+	// Default dir: created at 0700 and re-tightened (N2, loop 2),
+	// matching named profiles.
+	base2 := filepath.Join(t.TempDir(), "cfg")
+	if _, err := EnsureProfileDir(base2, "default"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(base); err != nil {
-		t.Errorf("default dir missing: %v", err)
+	if mode := fileMode(t, base2); mode != 0o700 {
+		t.Errorf("default dir mode = %o; want 700", mode)
+	}
+	if err := os.Chmod(base2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureProfileDir(base2, "default"); err != nil {
+		t.Fatal(err)
+	}
+	if mode := fileMode(t, base2); mode != 0o700 {
+		t.Errorf("after re-ensure default dir mode = %o; want 700", mode)
 	}
 }
 

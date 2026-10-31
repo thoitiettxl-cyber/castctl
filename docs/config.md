@@ -16,7 +16,7 @@ profile loading refuses (only `config migrate` reads it)).
 
 ## Single-file schema
 
-Top-level keys (exactly these eight; unknown keys are rejected):
+Top-level keys (exactly these nine; unknown keys are rejected):
 
 | Key | Value |
 |---|---|
@@ -28,6 +28,7 @@ Top-level keys (exactly these eight; unknown keys are rejected):
 | `wireguard_dns` | object: endpoint tag → array of DNS server addresses read by branch 2 (see [Per-profile DNS](#per-profile-dns)); castctl-side state, not a sing-box field — hand-written/preserved, not imported: no import-path wiring from a wg-quick `DNS=` line exists yet (follow-up) |
 | `log` | object: logging settings (see [The `log` section](#the-log-section)) |
 | `telegram` | object: Telegram bot settings (see [The `telegram` section](#the-telegram-section)) |
+| `keeper` | array: session-keeper entries (see [The `keeper` section](#the-keeper-section)) |
 
 A profile entry accepts exactly these ten keys (unknown keys
 are rejected — see [Per-profile DNS](#per-profile-dns)):
@@ -335,6 +336,164 @@ persistent offset/dedupe state, and `telegram setup` /
 `install-service`. `telegram run` answers every message with an
 explicit placeholder notice and fails approval decisions closed
 until that wiring lands.
+
+## The `keeper` section
+
+The optional top-level `keeper` block configures the session
+keeper (`keeper run` / `keeper check` / `keeper status`). It is
+sing-box style: a LIST of entries, each linked to a profile by
+tag. An absent block means the keeper is off: all three
+subcommands exit 2. The block accepts exactly these five keys
+per entry (unknown keys are rejected):
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `tag` | string | — (required) | Entry tag, unique across entries. A second entry with the same tag, or two entries for the same profile, is a config error (exit 2). Tags are exact: surrounding whitespace is rejected (never trimmed); `/`, `\`, control characters (including newline), and the tags `.`/`..` are rejected — tags name owner files under the profile directory. |
+| `profile` | string | — (required) | Tag of the profile whose cookies are watched. Must name a profile in `profiles`; a dangling tag is a config error (exit 2). |
+| `browser` | string | — (required) | CDP URL of the already-running Chrome to re-export cookies from. `http://` and `ws://` loopback URLs only, with an explicit port, no userinfo, no query/fragment; any non-loopback URL is a config error (exit 2, fail closed). Example: `http://127.0.0.1:9226`. Two entries sharing one browser (after canonicalisation of spelling variants such as a trailing slash, host case, or the `http://`/`ws://` scheme — the scheme is not part of the dedup key) is a config error. |
+| `interval` | duration string | `24h` | Tick cadence. Zero or absent means the documented default cadence of 24h; a present value must parse with `time.ParseDuration`, be positive, and be at most 1 year (`8760h`, the jitter-arithmetic bound). The effective delay is adaptive: when a driving cookie expiry is known, the next delay is `min(interval, clamp(remaining/4, 1h, 7d))`, ±20% jitter, re-drawn per wait. |
+| `notify` | string | `""` (off) | Only `""` or `"telegram"`. `"telegram"` sends fixed-content notices through the single `telegram` block (which must exist); any other value, or `"telegram"` with no telegram block, is a config error (exit 2). |
+
+Behaviour:
+
+- **Expiry detection.** Each tick runs the cheap chain only
+  (GET `/api/session` → POST `/api/auth/check`, no hatch/token,
+  no WebSocket, no chat) through the profile's own outbound,
+  with the profile identity. An AuthError means expired: the
+  entry stops (sticky stopped state), is marked logged out,
+  and notifies once — never loop-retried. Transient errors
+  back off on a 5m/15m/45m ±20% ladder, max 3 retries per tick.
+- **Re-export.** On expiry, cookies are re-exported from the
+  configured browser over CDP (`Storage.getCookies` primary,
+  `Network.getCookies` fallback) and merged. Only `muse.ai`
+  and `auth.muse.ai` cookies are kept; everything else is
+  dropped (count only). A merged set is written only if it
+  contains a non-empty `hatch_sess` and the earliest
+  FILTERED-domain expiry is not already past: an expired
+  cookie from an unrelated domain is preserved verbatim by
+  the merge and never vetoes a valid re-export. CDP
+  snapshots are faithful: an exported cookie is recorded
+  exactly as the browser holds it (an empty value with a
+  future expiry is written verbatim), and a filtered cookie
+  absent from the snapshot is dropped. Builds without
+  `-tags with_chromedp` detect and report expiry but cannot
+  re-export: the entry stops with the typed unavailable
+  outcome instead.
+- **Cookie save.** Netscape jar only (7 columns, LF, trailing
+  newline, deterministic sort). Set-Cookie updates merge into
+  a stored jar; a stored non-jar file is left untouched by
+  Set-Cookie capture (the tick still runs, state records the
+  observed expiry), while a CDP export REPLACES a non-jar file
+  with the validated export (dropped count recorded). The
+  merge key ignores the leading dot on domains: a host-only
+  stored entry and a Domain-scoped update are the same cookie
+  for merge purposes. Set-Cookie semantics: a present Domain
+  normalises to a leading-dot domain; Max-Age wins over
+  Expires; an empty value with a future expiry REPLACES
+  (expiry-only deletion is never assumed from an empty
+  value); an empty value with no expiry information deletes
+  (the Max-Age=0 clear shape). Writes happen only on
+  byte-difference, atomically, mode 0600 with a 0600 `.bak`,
+  under a per-cookies-file lock: the previous file is copied
+  to `.bak` first and the new file is then renamed over the
+  target, so the target is never absent mid-write. Cookie
+  values are never logged or printed, anywhere. The keeper's jar parser
+  requires exactly 7 columns; the legacy gateway reader
+  accepts 7 or more — the divergence is intentional (the
+  keeper rewrites the file and must not silently drop extra
+  columns) and is bridged by the state-only reset path.
+- **State file.** Per profile, `session-state.json` (mode
+  0600) next to — never inside — `config.json`, schema v1:
+  `logged_out`, `keeper_stopped` + reason, `last_checked_at`,
+  `last_tick_outcome`, per-cookie `expires_at`/`session`/
+  `last_seen` (names and dates only, never values),
+  `earliest_expiry`, `driving_cookie`/`driving_expiry`,
+  `next_check_at`, warn markers, and login provenance fields
+  (written by the login flow only). It is observed state, not
+  configuration; `keeper status` reads it with no network.
+  The driving cookie is `hatch_sess` when present with a
+  non-session expiry, else the earliest expiry; both fields
+  are carried in state so the choice stays a resolver change.
+  The profile directory is created (0700, including the
+  default profile's config dir) when a tick first needs it,
+  including when the profile's cookies file lives outside the
+  config dir, and re-ensured before every state save. If the
+  directory cannot be created, or any lock or state-save step
+  fails for any reason other than a held lock, the tick
+  reports outcome `error` and `keeper check` exits non-zero
+  with the problem named — never `skipped`, which is
+  reserved for a login in progress or a held lock (matched
+  by exact sentinel errors only). A cancelled context is
+  not an exception: a tick timeout surfaces as outcome
+  `error` carrying the context error (`keeper check` exit
+  4), and a parent interrupt exits 130 with no JSON
+  printed.
+  A corrupt or unknown-version state file does NOT brick the
+  keeper: ticks substitute a fresh state, re-observe from the
+  cookies file, and flag `state_corrupt` in `keeper check`
+  output and `keeper status` (reason `state_corrupt`); the
+  next successful save replaces the corrupt file, and the
+  import/login reset always succeeds. Manual remedy: delete
+  `session-state.json` in the profile directory (observed
+  state is rebuilt on the next tick; the cookies file is
+  untouched).
+- **Run/check behaviour.** `keeper run` prints one summary
+  line per tick and exits 2 naming the entry when an entry's
+  factory fails (the entry never ticked) instead of exiting 0
+  silently. `keeper check` ticks every selected entry even
+  when one errors transiently (the first typed error is
+  returned after all entries print), and an interrupt ends
+  the command instead of being swallowed as a skip. A
+  state-directory failure likewise surfaces as a non-zero
+  exit (outcome `error`, with `wrote_cookies` reporting
+  whether the cookies file was actually rewritten), never
+  as `skipped`. The same holds for any other lock or
+  state-save failure other than a held lock.
+- **Notifications.** Fixed content only: profile name,
+  outcome, the re-login path (`auth login` / `auth import`),
+  and "No action was taken automatically." No secrets, no
+  cookie names, no error text. At most one notice per
+  false→true logged-out transition; a failed send stays
+  pending for a later tick. Deduplication is at-least-once
+  across crashes: a crash between a successful send and the
+  marker-clear may re-send once. Targeting: the notice goes to the
+  FIRST `allowed_user_ids` entry of the telegram block, on
+  the assumption that a user id is a valid chat id for a 1:1
+  bot chat. Delivery to that id is UNVERIFIED offline and is
+  a live-test gate; if it fails, the fix is a chat registry,
+  not a silent change here. The notice travels through the
+  telegram block's LINKED profile outbound, bounded by a 30s
+  timeout.
+- **Shared session.** Exported cookies share the browser's
+  session: a server-side revoke kills both the browser and
+  the profile session. The keeper validates liveness with the
+  cheap chain, never by mere `hatch_sess` presence.
+- **Logging.** The keeper core emits no log lines of its
+  own: when no `log` block is configured, logging is OFF and
+  the state file plus `keeper run`'s stdout summary lines
+  (tag, outcome, counts, next delay — never values) are the
+  visible channel.
+- **Screencast login.** `castctl auth login` is experimental
+  and off by default (`--experimental-login` or
+  `CASTCTL_EXPERIMENTAL_LOGIN=1`); without the flag it exits 2
+  pointing at `auth import`. It attaches to the keeper entry's
+  browser first; launching a castctl-owned Chrome is only the
+  fallback when no attachable browser exists, and at this
+  base the launch fails closed (no fail-closed routed inbound
+  exists yet) rather than launching a direct-egress browser.
+  The human completes the login; captcha/2FA are never
+  auto-solved. Honesty note on the attach path: castctl's own
+  code sends no Runtime/JS calls and the browser-level export
+  path sends only `Storage.getCookies`, but chromedp's target
+  attach bootstrap enables Runtime, DOM, CSS, Log, Inspector,
+  and Page, sets `Target.setDiscoverTargets` /
+  `Target.setAutoAttach`, enables
+  `Page.setLifecycleEventsEnabled`, and evaluates the constant
+  `"self"` (the full observed set is listed in
+  `internal/keeper/screencast.go` and pinned exactly by the
+  wire-recording test) — the CDP allowlist discipline covers
+  castctl's own calls, not the library bootstrap. See
+  `castctl auth login --help`.
 
 ## The `dns` section — INTERIM, GLOBAL, COMPAT-ONLY
 

@@ -770,7 +770,7 @@ var commandOrder = []string{
 	"goals", "goal", "ideas", "idea", "idea-exec", "unread", "seen",
 	"session-start", "session-rename", "session-pin", "session-unpin",
 	"session-archive", "session-unarchive", "session-delete", "stop", "wake",
-	"raw", "fs", "auth", "profile", "config", "telegram", "update",
+	"raw", "fs", "auth", "profile", "config", "telegram", "keeper", "update",
 }
 
 // Run is the command-line entry point. args excludes argv[0]. It

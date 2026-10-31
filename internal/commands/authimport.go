@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
+	"github.com/thoitiettxl-cyber/castctl/internal/keeper"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
 )
 
@@ -82,9 +83,19 @@ func cmdAuthImport(_ context.Context, env *Env, g *globalOpts, args []string) er
 	if err != nil {
 		return err
 	}
-	backup, err := profile.WriteCookiesFile(loc.ConfigDir, prof.Name, prof.CookiesFile, []byte(stored+"\n"))
+	// The write goes through the same per-cookies-file lock the
+	// keeper uses, so an import racing a keeper tick cannot
+	// interleave bytes. Behaviour is otherwise unchanged.
+	backup, err := profile.WriteCookiesFileLocked(loc.ConfigDir, prof.Name, prof.CookiesFile, []byte(stored+"\n"), keeper.DefaultLockTimeout)
 	if err != nil {
 		return errCodef(2, "write cookies file: %v", err)
+	}
+	// A successful import is a fresh login: clear the keeper's
+	// sticky stopped/logged_out markers so the keeper resumes.
+	// The file is already written; a reset failure is reported
+	// as exit 2 and names the failure honestly.
+	if err := keeper.ResetAfterLogin(loc.ConfigDir, prof, keeper.RealClock); err != nil {
+		return errCodef(2, "cookies written but keeper state reset failed: %v", err)
 	}
 	return writeJSON(env.stdout(), authImportResult{
 		OK:          true,

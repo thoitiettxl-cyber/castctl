@@ -45,12 +45,18 @@ type SingleConfig struct {
 	// save and means the bot is off.
 	Telegram *TelegramConfig
 
+	// Keeper is the top-level "keeper" block (nil when absent;
+	// see internal/profile/keeper.go). Absence is preserved on
+	// save and means the keeper is off.
+	Keeper *KeeperConfig
+
 	rawOutbounds    [][]byte
 	rawEndpoints    [][]byte
 	rawDNS          []byte
 	rawWireGuardDNS []byte
 	rawLog          []byte
 	rawTelegram     []byte
+	rawKeeper       []byte
 	rawProfiles     map[string][]byte
 }
 
@@ -153,6 +159,7 @@ var singleTopLevelKeys = map[string]bool{
 	"wireguard_dns":   true,
 	"log":             true,
 	"telegram":        true,
+	"keeper":          true,
 }
 
 var profileKeys = map[string]bool{
@@ -319,6 +326,18 @@ func ParseSingleConfig(data []byte, baseDir string) (*SingleConfig, error) {
 		cfg.Telegram = tgCfg
 		cfg.rawTelegram = raw
 	}
+	if v, ok := obj.get("keeper"); ok {
+		raw, err := rawOf(v)
+		if err != nil {
+			return nil, err
+		}
+		kCfg, err := parseKeeperBlock(v)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Keeper = kCfg
+		cfg.rawKeeper = raw
+	}
 
 	for _, name := range profilesObj.keys {
 		if _, err := ValidateProfileName(name); err != nil {
@@ -363,6 +382,9 @@ func ParseSingleConfig(data []byte, baseDir string) (*SingleConfig, error) {
 		return nil, err
 	}
 	if err := validateTelegram(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateKeeper(cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -1309,6 +1331,19 @@ func buildSingleFileOrdered(cfg *SingleConfig) (*orderedObject, error) {
 		entry.set("auto_approve", cfg.Telegram.AutoApprove)
 		entry.set("auto_allow_once", cfg.Telegram.AutoAllowOnce)
 		root.set("telegram", entry)
+	}
+	if len(cfg.rawKeeper) > 0 {
+		v, err := decodeOrderedJSON(cfg.rawKeeper)
+		if err != nil {
+			return nil, err
+		}
+		root.set("keeper", v)
+	} else if cfg.Keeper != nil {
+		arr, err := encodeKeeperBlock(cfg.Keeper)
+		if err != nil {
+			return nil, err
+		}
+		root.set("keeper", arr)
 	}
 	return root, nil
 }

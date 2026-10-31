@@ -105,15 +105,21 @@ func ProfilePaths(baseDir, name string) (Paths, error) {
 // EnsureProfileDir creates the profile directory. Named profiles get mode
 // 0700 for both profiles/ and the profile dir (and the profile dir is
 // chmodded to 0700 unconditionally, as in cli.py ensure_config_dir);
-// the default directory is created with default permissions. It returns
-// the profile's paths.
+// the default profile's directory (the config dir itself, which holds
+// the state file) is likewise created at 0700 and chmodded to 0700
+// unconditionally: it holds secret-adjacent state, and a tick that
+// ensures it tightens a pre-existing looser directory. The profiles/
+// parent itself is never chmodded. It returns the profile's paths.
 func EnsureProfileDir(baseDir, name string) (Paths, error) {
 	paths, err := ProfilePaths(baseDir, name)
 	if err != nil {
 		return Paths{}, err
 	}
 	if name == DefaultProfileName {
-		if err := os.MkdirAll(paths.Dir, 0o755); err != nil {
+		if err := os.MkdirAll(paths.Dir, 0o700); err != nil {
+			return Paths{}, err
+		}
+		if err := os.Chmod(paths.Dir, 0o700); err != nil {
 			return Paths{}, err
 		}
 		return paths, nil
