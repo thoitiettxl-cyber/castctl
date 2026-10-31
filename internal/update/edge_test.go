@@ -10,9 +10,14 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -740,5 +745,64 @@ func TestReadOnlyDirRefuses(t *testing.T) {
 	old, _ := os.ReadFile(exe)
 	if string(old) != "old-binary-bytes" {
 		t.Error("read-only dir: target modified")
+	}
+}
+
+// TestClassifyTransportErrorTLSForms (loop 4, Technical D1): pins
+// the exact measured mapping of classifyTransportError over TLS
+// error forms, so the corrected carried wording cannot drift false
+// again. The "tls" class IS reachable, but only for specific forms;
+// a genuine self-signed-certificate handshake failure classifies as
+// "transport" (see TestClassifyTransportErrorRealHandshake).
+func TestClassifyTransportErrorTLSForms(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"unknownAuthorityPtr", &x509.UnknownAuthorityError{}, "tls"},
+		{"certInvalidValue", x509.CertificateInvalidError{}, "tls"},
+		{"certInvalidPtr", &x509.CertificateInvalidError{}, "transport"},
+		{"hostnameValue", x509.HostnameError{}, "tls"},
+		{"hostnamePtr", &x509.HostnameError{}, "transport"},
+		{"recordHeaderValue", tls.RecordHeaderError{}, "tls"},
+		{"recordHeaderPtr", &tls.RecordHeaderError{}, "transport"},
+	}
+	for _, c := range cases {
+		if got := classifyTransportError(c.err); got != c.want {
+			t.Errorf("%s: bare class=%s, want %s", c.name, got, c.want)
+		}
+		wrapped := &url.Error{Op: "Get", URL: "https://example.invalid/", Err: c.err}
+		if got := classifyTransportError(wrapped); got != c.want {
+			t.Errorf("%s: url-wrapped class=%s, want %s", c.name, got, c.want)
+		}
+	}
+}
+
+// TestClassifyTransportErrorRealHandshake (loop 4): a genuine TLS
+// handshake failure against an untrusted (httptest) certificate
+// surfaces as a VALUE x509.UnknownAuthorityError inside
+// *tls.CertificateVerificationError inside *url.Error, which
+// isTLSError's *x509.UnknownAuthorityError errors.As target does not
+// match — so it classifies as "transport", not "tls". The client
+// uses a cloned transport with Proxy nil so the probe is hermetic
+// (no ambient proxy can reroute the loopback handshake).
+func TestClassifyTransportErrorRealHandshake(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.Proxy = nil
+	client := &http.Client{Transport: tr}
+	_, err := client.Get(srv.URL)
+	if err == nil {
+		t.Fatal("expected a TLS verification failure, got nil error")
+	}
+	if got := classifyTransportError(err); got != "transport" {
+		t.Errorf("real handshake failure: class=%s, want transport", got)
+	}
+	if isTLSError(err) {
+		t.Error("real handshake failure: isTLSError must be false")
 	}
 }

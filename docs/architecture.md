@@ -122,6 +122,11 @@ Behaviour, in order:
    redirects only: the initial asset and checksums URLs come from
    the release JSON's `browser_download_url`, are not
    host-restricted, and are bound by the checksums verification.
+   A redirect target carrying userinfo refuses before it is
+   followed, so no Authorization header derived from a redirect
+   URL is ever sent; a download URL carrying userinfo in the
+   release JSON is refused during asset selection, before any
+   request.
 3. Asset selection is exact-equality against the release matrix
    for the selected tag: `castctl_<VERSION>_linux_<arch>.tar.gz`
    or `..._no-plugin.tar.gz`, matching `runtime.GOOS`,
