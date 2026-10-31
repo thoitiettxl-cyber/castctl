@@ -60,6 +60,23 @@ func TestResolveScreencastTarget(t *testing.T) {
 	srv.Close()
 }
 
+func TestResolveScreencastTargetWwwHost(t *testing.T) {
+	// Red-team N15: www.muse.ai is the same app host; a tab
+	// open there must resolve, not fail closed with "no Muse
+	// page".
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"T1","type":"page","url":"https://www.muse.ai/","title":"SYNTHETIC"}]`))
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	id, err := ResolveScreencastTarget(ctx, srv.URL)
+	if err != nil || string(id) != "T1" {
+		t.Fatalf("id = %q, err = %v; want T1", id, err)
+	}
+}
+
 func TestLaunchRunnerFailsClosedWithoutInbound(t *testing.T) {
 	// S2 verdict: no inbound builder exists at this base, so
 	// the launch path must refuse BEFORE spawning anything.

@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,12 +28,20 @@ import (
 // cookies from an already-running Chrome over the DevTools
 // protocol, read-only.
 //
-// Discipline (§15.2/§15.4 as adopted): allowlisted domains
-// only — Storage and Network cookie reads plus Browser
-// version, no Runtime/JS, no navigation, no input, no target
-// creation/activation/closure, no Emulation. The browser is
-// the user's own: the exporter attaches, reads, and detaches.
-// It never kills, closes, or navigates anything.
+// Discipline (§15.2/§15.4 as adopted): this file's path uses
+// browser-level calls ONLY — Storage and Network cookie reads
+// plus Browser version — and sends no Runtime/JS, no
+// navigation, no input, no target creation/activation/
+// closure, no Emulation. The browser is the user's own: the
+// exporter attaches, reads, and detaches. It never kills,
+// closes, or navigates anything.
+//
+// This "no Runtime" statement covers THIS file's browser-level
+// path only. The ATTACH path in screencast.go goes through
+// chromedp's target bootstrap, which DOES enable Runtime (and
+// DOM/CSS/Log/Inspector) and evaluates the constant "self":
+// see the bootstrap note in screencast.go. Do not shorten
+// this comment back to a blanket claim.
 //
 // Discovery never goes through chromedp's unchecked
 // remote.modifyURL path: /json/version is fetched with a
@@ -184,15 +193,26 @@ func DiscoverWebSocketURL(ctx context.Context, browserURL string) (string, error
 	return ver.WebSocketDebuggerURL, nil
 }
 
-// validateLoopbackURL requires a loopback host and a port.
-// It names the rule violated, never the URL value.
+// validateLoopbackURL requires a loopback host, a port in
+// range, and no userinfo — the same rules the config-time
+// validator (profile.validateKeeperBrowserURL) enforces, so a
+// URL the config accepted cannot fail here on a weaker rule
+// and vice versa. It names the rule violated, never the URL
+// value.
 func validateLoopbackURL(u *url.URL) error {
 	host := u.Hostname()
 	if host == "" {
 		return fmt.Errorf("browser URL has no host")
 	}
+	if u.User != nil {
+		return fmt.Errorf("browser URL must not carry userinfo")
+	}
 	if u.Port() == "" {
 		return fmt.Errorf("browser URL has no port")
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("browser URL port out of range")
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		if !ip.IsLoopback() {

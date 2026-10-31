@@ -32,12 +32,29 @@ import (
 // Chrome, screencasts ONE Muse page, and detaches. It never
 // closes, kills, activates, or navigates a user tab, never
 // dispatches input except the user's own transport input, and
-// never enables Runtime/JS. Cancelling the target context
-// detaches (WithDetachOnCancel): the tab stays open.
+// sends no Runtime/JS calls of its own.
 //
-// CDP allowlist (§15.2 discipline): Page (enable, screencast,
-// input dispatch via the Input domain), Network/Storage cookie
-// reads (exporter), Browser.getVersion. Nothing else.
+// HONEST BOOTSTRAP NOTE (loop-2 correction): castctl's own code
+// issues no Runtime calls, but chromedp's target attach does.
+// Attaching to an existing target runs chromedp's bootstrap
+// (attachTarget), which enables Runtime, Log, Network,
+// Inspector, Page, DOM, and CSS on the target, sets
+// Target.setDiscoverTargets and Target.setAutoAttach, and
+// evaluates the CONSTANT expression "self" (no page script,
+// no user data, no castctl input). New targets opened while
+// the session runs are auto-attached for the session's
+// lifetime. The EXPORT path is different: browser-level
+// Storage.getCookies sends only that one call (see
+// export_cdp.go and the wire test). Any claim that the attach
+// path "never enables Runtime" is false; this comment and the
+// PR body state the bootstrap as observed (wire-recorded
+// 2026-10-31, chromedp v0.21.0; the full method set is
+// asserted, superset-style, in screencast_wire_test.go).
+//
+// CDP allowlist (§15.2 discipline, as adopted for castctl's
+// OWN calls): Page (enable, screencast, input dispatch via
+// the Input domain), Network/Storage cookie reads (exporter),
+// Browser.getVersion. Nothing else is sent by castctl code.
 
 // attachRunner screencasts a Muse page in the user's browser.
 type attachRunner struct{ browserURL string }
@@ -118,7 +135,7 @@ type listTarget struct {
 
 // screencastHosts are the page hosts a login screencast may
 // attach to: the Muse app and its auth subdomain only.
-var screencastHosts = map[string]bool{"muse.ai": true, "auth.muse.ai": true}
+var screencastHosts = map[string]bool{"muse.ai": true, "auth.muse.ai": true, "www.muse.ai": true}
 
 // ResolveScreencastTarget picks the ONE Muse page in the
 // attached browser from a typed /json/list decode. Zero
@@ -281,8 +298,12 @@ func dispatchKey(tctx context.Context, ev InputEvent) {
 	if !allowedKeyTypes[ev.KeyType] || ev.Key == "" {
 		return
 	}
+	// Text is forwarded for "char" events: without it the
+	// browser receives a key with no character. For other
+	// key types ev.Text is empty and the field is omitted by
+	// the CDP encoder.
 	_, _ = chromedp.Call(tctx, input.DispatchKeyEvent, input.DispatchKeyEventParams{
-		Type: input.DispatchKeyEventType(ev.KeyType), Key: ev.Key,
+		Type: input.DispatchKeyEventType(ev.KeyType), Key: ev.Key, Text: ev.Text,
 		Modifiers: int64(ev.Modifiers),
 	})
 }

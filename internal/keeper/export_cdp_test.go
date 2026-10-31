@@ -30,13 +30,15 @@ type fakeCDPServer struct {
 	storageFails bool
 	mu           sync.Mutex
 	methods      []string
+	messages     []cdpMessage
 	server       *httptest.Server
 }
 
 type cdpMessage struct {
-	ID     json.RawMessage `json:"id"`
-	Method string          `json:"method"`
-	Params json.RawMessage `json:"params"`
+	ID        json.RawMessage `json:"id"`
+	SessionID string          `json:"sessionId,omitempty"`
+	Method    string          `json:"method"`
+	Params    json.RawMessage `json:"params"`
 }
 
 func newFakeCDPServer(t *testing.T, storageFails bool) *fakeCDPServer {
@@ -66,19 +68,36 @@ func newFakeCDPServer(t *testing.T, storageFails bool) *fakeCDPServer {
 			}
 			f.mu.Lock()
 			f.methods = append(f.methods, msg.Method)
+			f.messages = append(f.messages, msg)
 			f.mu.Unlock()
-			var resp map[string]any
+			resp := map[string]any{"id": json.RawMessage(msg.ID), "result": map[string]any{}}
+			if msg.SessionID != "" {
+				resp["sessionId"] = msg.SessionID
+			}
 			switch msg.Method {
+			case "Target.attachToTarget":
+				resp["result"] = map[string]any{"sessionId": "FAKE-SESSION-1"}
+			case "Page.getFrameTree":
+				// chromedp dereferences FrameTree.Frame during
+				// target init: an empty result panics it.
+				resp["result"] = map[string]any{"frameTree": map[string]any{"frame": map[string]any{"id": "FAKE-FRAME-ID", "url": "https://muse.ai/", "mimeType": "text/html"}}}
+			case "DOM.getDocument":
+				resp["result"] = map[string]any{"root": map[string]any{"nodeId": 1, "parentId": 0, "nodeType": 9, "nodeName": "#document"}}
+			case "Browser.getVersion":
+				resp["result"] = map[string]any{"protocolVersion": "1.3", "product": "Chrome/140.0.0.0", "userAgent": "Mozilla/5.0 (SYNTHETIC)", "revision": "FAKE", "jsVersion": "14.0.0"}
+			case "Runtime.evaluate":
+				resp["result"] = map[string]any{"result": map[string]any{"type": "object"}}
 			case "Storage.getCookies":
 				if f.storageFails {
 					resp = map[string]any{"id": json.RawMessage(msg.ID), "error": map[string]any{"code": -32601, "message": "Storage.getCookies wasn't found"}}
+					if msg.SessionID != "" {
+						resp["sessionId"] = msg.SessionID
+					}
 					break
 				}
-				resp = map[string]any{"id": json.RawMessage(msg.ID), "result": map[string]any{"cookies": syntheticCookies()}}
+				resp["result"] = map[string]any{"cookies": syntheticCookies()}
 			case "Network.getCookies":
-				resp = map[string]any{"id": json.RawMessage(msg.ID), "result": map[string]any{"cookies": syntheticCookies()}}
-			default:
-				resp = map[string]any{"id": json.RawMessage(msg.ID), "result": map[string]any{}}
+				resp["result"] = map[string]any{"cookies": syntheticCookies()}
 			}
 			if err := conn.WriteJSON(resp); err != nil {
 				return
@@ -110,6 +129,16 @@ func (f *fakeCDPServer) methodsSeen() []string {
 	defer f.mu.Unlock()
 	cp := make([]string, len(f.methods))
 	copy(cp, f.methods)
+	return cp
+}
+
+// messagesSeen returns every CDP message the server received,
+// in order, with params. Wire tests assert on these.
+func (f *fakeCDPServer) messagesSeen() []cdpMessage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := make([]cdpMessage, len(f.messages))
+	copy(cp, f.messages)
 	return cp
 }
 
@@ -147,6 +176,15 @@ func TestCDPExportPrimaryPath(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("Storage.getCookies never called: %v", seen)
+	}
+	// The export path sends no Runtime calls at all: the
+	// browser-level read is the allowlist-honouring path.
+	// (The ATTACH path's bootstrap does enable Runtime; that
+	// is asserted separately in screencast_wire_test.go.)
+	for _, m := range seen {
+		if strings.HasPrefix(m, "Runtime.") {
+			t.Fatalf("export path sent %q: %v", m, seen)
+		}
 	}
 }
 
