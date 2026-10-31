@@ -663,12 +663,24 @@ func (u *updater) selectLatest(ctx context.Context, current Version, flavour str
 }
 
 // decide applies the version policy and selects the exact asset.
+// The prerelease-tag guard sits AFTER the equal-version no-op
+// return (an equal prerelease version is already latest: no-op,
+// nothing installed) and BEFORE asset selection, so it covers
+// both latest and explicit primary modes. The fallback paths
+// guard prerelease tags before calling decide, so this message is
+// reached only in primary mode; the tag's prerelease part is
+// checked here because the release JSON prerelease flag is
+// independent of the tag and the primary-mode flag guards alone
+// do not see a flag-false prerelease tag.
 func (u *updater) decide(ctx context.Context, current Version, flavour string, rel *releaseInfo, target Version, tag string, fallback bool) (*selection, error) {
 	_ = ctx
 	if cmp := CompareVersions(target, current); cmp < 0 && !u.opts.AllowDowngrade {
 		return nil, newError(2, fmt.Sprintf("update: refusing downgrade from %s to %s; pass --allow-downgrade to install it", current.String(), target.String()))
 	} else if cmp == 0 {
 		return &selection{target: target, tag: tag, noop: true}, nil
+	}
+	if target.Prerelease() != "" && !u.opts.AllowPrerelease {
+		return nil, newError(2, fmt.Sprintf("update: the target release %s is a prerelease; pass --allow-prerelease to install it", target.String()))
 	}
 	sel := &selection{target: target, tag: tag}
 	sel.assetName = expectedAssetName(target, flavour, runtime.GOARCH)
@@ -749,10 +761,15 @@ func selectChecksumsAsset(rel *releaseInfo) (*releaseAsset, error) {
 
 // validateDownloadURL requires an absolute https URL, or http to a
 // loopback host (httptest only). Relative, javascript:, file:, and
-// other schemes never reach the network.
+// other schemes never reach the network. A URL carrying userinfo is
+// refused before any request: the stdlib client would otherwise
+// send an Authorization header derived from the URL.
 func validateDownloadURL(raw string) error {
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" {
+		return errors.New("invalid download URL")
+	}
+	if parsed.User != nil {
 		return errors.New("invalid download URL")
 	}
 	if parsed.Scheme == "https" {
