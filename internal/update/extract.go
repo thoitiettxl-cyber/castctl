@@ -20,16 +20,21 @@ import (
 //
 // Defence rules (failure-report §5): the member name is never joined
 // onto a destination path, so traversal, absolute, and backslash
-// names are inert; symlink, hardlink, device, and fifo members named
-// castctl refuse; a duplicate castctl member refuses; any
-// symlink/hardlink/device member anywhere in the archive refuses
-// (honest archives contain only the five regular files); archive
-// member modes, uids, and PAX overrides are ignored entirely — the
-// installed mode comes from the old binary, never from the header.
-// The tar reader applies PAX/GNU longname overrides transparently,
-// so hdr.Name is always the effective name. Entry count and member
-// size are capped during streaming; the declared size must match
-// the bytes read exactly.
+// names on regular members other than castctl are inert: such
+// members are skipped unread, never used as paths. Only link and
+// device typeflags refuse anywhere: a symlink, hardlink, device,
+// or fifo member anywhere in the archive refuses (honest archives
+// contain only the five regular files), including a castctl member
+// with such a typeflag. A duplicate castctl member refuses, and an
+// archive with no exact castctl member refuses (a PAX-renamed
+// castctl refuses by this path: the tar reader applies PAX/GNU
+// longname overrides transparently, so hdr.Name is always the
+// effective name, and a PAX path override changes the effective
+// name, which is then validated like any other name). Archive
+// member modes and uids are ignored entirely — the installed mode
+// comes from the old binary, never from the header. Entry count and
+// member size are capped during streaming; the declared size must
+// match the bytes read exactly.
 func extractCastctl(r io.Reader, w io.Writer) ([]byte, error) {
 	gz, err := gzip.NewReader(r)
 	if err != nil {

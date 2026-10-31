@@ -231,8 +231,9 @@ func (u *updater) printf(format string, args ...any) {
 // Run performs one self-update. It never loads config, never writes
 // state, and never uses credentials. Exit-code contract (see docs):
 // 0 success / already-latest no-op / dry-run report; 2 usage and
-// policy refusals decided without fetching bytes; 1 every fetch,
-// verify, or replace failure.
+// policy refusals (no download, no replace; release metadata may
+// have been fetched first); 1 every fetch, verify, or replace
+// failure.
 func Run(ctx context.Context, opts Options) (Result, error) {
 	updateMu.Lock()
 	defer updateMu.Unlock()
@@ -270,8 +271,10 @@ func (u *updater) run(ctx context.Context) (Result, error) {
 		return Result{}, newError(2, fmt.Sprintf("update: no release asset for %s/%s", runtime.GOOS, runtime.GOARCH))
 	}
 	// 4. Resolve the target once; every later step uses the
-	// resolved path. Symlinks are followed (the target file is
-	// replaced, the symlink is preserved).
+	// resolved path. Symlinks are followed through EvalSymlinks
+	// (the resolved target file is replaced, the symlink is
+	// preserved), including a target that resolves out of the
+	// directory containing the symlink.
 	target, targetMode, err := resolveTarget(opts.Executable)
 	if err != nil {
 		return Result{}, wrapError(1, "update: cannot resolve the running binary", err)
@@ -318,7 +321,12 @@ func (u *updater) buildInfo() *debug.BuildInfo {
 // and no other build setting differs (probe: go version -m on both
 // flavours built with the exact release flags shows CGO_ENABLED as
 // the only differing setting). Any other value, a missing setting,
-// or conflicting duplicates mean "unknown": never guess.
+// or conflicting duplicates mean "unknown": never guess. Flavour is
+// a selection heuristic, not authentication: a hand-stamped build
+// with mismatched CGO_ENABLED selects the wrong flavour, passes the
+// exec check, and silently flips flavour (the asset installed is a
+// genuine verified release asset either way); on a glibc-less host
+// the wrong flavour would fail to exec and fail closed [UNVERIFIED].
 func flavourFromBuildInfo(bi *debug.BuildInfo) (string, bool) {
 	if bi == nil {
 		return "", false
@@ -399,11 +407,15 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// checkRedirectPolicy: at most 5 hops, HTTPS only (HTTP only back to
-// a loopback origin, for httptest), and the target host must be the
-// origin host or one of github.com, release-assets.githubusercontent.com,
-// objects.githubusercontent.com (the measured browser_download_url
-// redirect target). Anything else aborts before dialing.
+// checkRedirectPolicy: at most 4 redirects followed, HTTPS only
+// (HTTP only back to a loopback origin, for httptest), and the
+// redirect target host must be the origin host or one of github.com,
+// release-assets.githubusercontent.com, objects.githubusercontent.com
+// (the measured browser_download_url redirect target). Anything else
+// aborts before dialing. This host allowlist applies to redirects
+// only: the initial asset and checksums URLs come from the release
+// JSON's browser_download_url, are not host-restricted, and are bound
+// by the checksums verification.
 func checkRedirectPolicy(req *http.Request, via []*http.Request) error {
 	if len(via) >= 5 {
 		return errTooManyRedirects
@@ -604,6 +616,9 @@ func (u *updater) selectExplicit(ctx context.Context, current Version, flavour s
 		return nil, newError(2, "update: --version must not carry build metadata")
 	}
 	tag := "v" + target.AssetVersion()
+	// The install is bound by the requested tag, the exact asset
+	// name, and the checksums: a tag_name mismatch in the fetched
+	// release object is ignored (rel.tag is never used here).
 	rel, status, ferr := u.fetchRelease(ctx, u.apiBase()+"/repos/thoitiettxl-cyber/castctl/releases/tags/"+tag)
 	if ferr != nil {
 		if status == http.StatusForbidden {
@@ -784,7 +799,10 @@ func decodeReleaseJSON(body []byte, out *releaseJSON) error {
 // fallbackLatest handles an API 403 on /latest: follow the public
 // web redirect once to learn the tag, then construct asset URLs
 // ONLY from the proven matrix pattern and verify checksums.txt as
-// usual. If the fallback also fails, a clear rate-limit error.
+// usual. If the fallback also fails, a clear rate-limit error. The
+// fallback is draft-blind by necessity: the redirect probe carries
+// no draft data, so a draft tag learned this way cannot be refused
+// as a draft (only the prerelease guard applies).
 func (u *updater) fallbackLatest(ctx context.Context, current Version, flavour string) (*selection, error) {
 	tag, err := u.fallbackTag(ctx)
 	if err != nil {
@@ -804,7 +822,11 @@ func (u *updater) fallbackLatest(ctx context.Context, current Version, flavour s
 }
 
 // fallbackSelection handles an API 403 on an explicit /tags/ fetch:
-// the tag is already known, so asset URLs are constructed directly.
+// the tag is already known, so no redirect probe runs and asset URLs
+// are constructed directly from the matrix pattern. It is
+// draft-blind like fallbackLatest: no release object was fetched,
+// so a draft release cannot be detected here (only the prerelease
+// guard applies).
 func (u *updater) fallbackSelection(ctx context.Context, current Version, flavour string, tag string, target Version) (*selection, error) {
 	if target.Prerelease() != "" && !u.opts.AllowPrerelease {
 		return nil, newError(2, "update: the requested release is a prerelease; pass --allow-prerelease to install it")

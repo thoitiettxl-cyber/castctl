@@ -101,45 +101,83 @@ Behaviour, in order:
 2. The latest stable release is selected from the unauthenticated
    GitHub API (`releases/latest`, castctl User-Agent). Drafts and
    prereleases abort; an invalid `tag_name` aborts. On an API 403
-   (rate limit) there is one fallback: follow the public
-   `github.com/.../releases/latest` redirect to learn the tag,
-   then construct asset URLs only from the proven release matrix
-   pattern and verify checksums as usual. Semver comparison is a
-   hand-written stdlib parser (no `x/mod/semver` dependency).
-   Equal version is an exit-0 no-op with zero writes; a
-   downgrade refuses unless `--allow-downgrade` is given; a
-   pre-release target refuses unless `--allow-prerelease` is
-   given. `--version TAG` names a specific release instead of
-   the latest, under the same verification.
+   (rate limit) there is one fallback, scoped to `/latest`: follow
+   the public `github.com/.../releases/latest` redirect to learn
+   the tag, then construct asset URLs only from the proven release
+   matrix pattern and verify checksums as usual. The fallback is
+   draft-blind by necessity (the redirect probe carries no draft
+   data, so a draft tag learned this way cannot be refused as a
+   draft); only the prerelease guard applies to a fallback tag.
+   An explicit-version API 403 falls back without a redirect probe
+   (the tag is already known) and constructs URLs from the matrix
+   pattern only. Semver comparison is a hand-written stdlib
+   parser (no `x/mod/semver` dependency). Equal version is an
+   exit-0 no-op with zero writes; a downgrade refuses unless
+   `--allow-downgrade` is given; a pre-release target refuses
+   unless `--allow-prerelease` is given. `--version TAG` names a
+   specific release instead of the latest, under the same
+   verification; an explicit-mode `tag_name` mismatch is ignored
+   (the install is bound by the requested tag, the exact asset
+   name, and the checksums). The host allowlist applies to
+   redirects only: the initial asset and checksums URLs come from
+   the release JSON's `browser_download_url`, are not
+   host-restricted, and are bound by the checksums verification.
 3. Asset selection is exact-equality against the release matrix
    for the selected tag: `castctl_<VERSION>_linux_<arch>.tar.gz`
    or `..._no-plugin.tar.gz`, matching `runtime.GOOS`,
    `runtime.GOARCH`, and the build flavour. The flavour is read
    from the build info `CGO_ENABLED` setting (`1` = glibc,
    `0` = no-plugin), verified by probe against the release build
-   flags; an unknown flavour refuses rather than guessing. No
-   match is fail-closed, nothing written.
-4. Verification happens BEFORE any replace: `checksums.txt` and
-   the asset are downloaded to temp files in the target's
-   directory (0600), the asset sha256 is verified against the
-   checksums entry for the exact asset filename (missing,
-   duplicate, or conflicting entries refuse), and only the
-   regular file named exactly `castctl` is extracted (symlink,
-   hardlink, absolute, traversal, and PAX-override members
-   refuse; trailing archive data refuses). The extracted binary
-   is validated with ELF/arch sanity (`debug/elf`) and an exec
-   check: it is run with argv `--version`, clean minimal env,
-   closed stdin, 10s timeout, capped stdout, and the output must
-   contain the target version. On any failure the old binary is
-   untouched and partials are deleted.
+   flags; an unknown flavour refuses rather than guessing. Flavour
+   is a selection heuristic, not authentication: a hand-stamped
+   build with mismatched `CGO_ENABLED` selects the wrong flavour,
+   passes the exec check, and silently flips flavour (the asset
+   installed is a genuine verified release asset either way); on
+   a glibc-less host the wrong flavour would fail to exec and
+   fail closed [UNVERIFIED]. No match is fail-closed, nothing
+   written.
+4. Verification happens BEFORE any replace: `checksums.txt` is
+   held in memory (64 KiB cap, never written to disk) and only
+   the asset is downloaded to a temp file in the target's
+   directory (0600); the asset sha256 is verified against the
+   checksums entry for the exact asset filename (missing or
+   conflicting entries refuse; identical duplicate entries are
+   idempotent), and only the regular file named exactly
+   `castctl` is extracted. Only link/device typeflags refuse
+   anywhere in the archive; other non-`castctl` regular members
+   (including traversal or absolute names) are skipped unread
+   and never used as paths; an archive with no exact `castctl`
+   member refuses (a PAX-renamed `castctl` refuses by this path,
+   since the effective name after PAX overrides is validated);
+   trailing archive data refuses. The extracted binary is
+   validated with ELF/arch sanity (`debug/elf`) and an exec
+   check: the checksummed candidate binary is executed,
+   unsandboxed, with argv `--version`, clean minimal env,
+   closed stdin, 10s timeout, capped stdout, and the output
+   must be exactly one line, `castctl <version>`, parsed and
+   compared equal to the target version (an optional
+   parenthetical after the version is shape-only). Every failure
+   before the rename leaves the old binary intact and partials
+   are deleted; a directory-sync failure after a successful
+   rename returns an error with the new binary in place
+   (durability unproven). A child process detached by the
+   candidate binary would survive the timeout kill; that
+   residual is carried (see the PR record).
 5. Replace is one rename in the target's directory, after
-   preserving the target's permission bits, fsyncing the temp
-   file, and fsyncing the directory after the rename. An
-   advisory flock on the target directory is held across
-   download and replace; a held lock fails fast with "another
-   update in progress". `--dry-run` reports exactly what would
-   be downloaded, verified, and replaced with zero writes (the
-   exec check is skipped in dry-run and the report says so).
+   preserving the target's Perm() (0777 rwx) bits (setuid/
+   setgid/sticky bits of the old binary are dropped), fsyncing
+   the temp file, and fsyncing the directory after the rename.
+   The target is resolved once through symlinks, including a
+   target resolving out of the directory. An advisory flock on
+   a lock file in the target directory (`.castctl-update.lock`,
+   0600, never deleted, persists by design; only temp files are
+   removed) is held across download and replace; a held lock
+   fails fast with "another update in progress". A tolerated
+   directory-sync error (filesystems without directory fsync)
+   succeeds silently. `--dry-run` reports what would be
+   downloaded, verified, and replaced with zero writes: it takes
+   no lock and skips the exec check, the chmod, and the re-hash
+   (the report says the exec check is skipped).
 
 No-signature limitation (stated, not hidden): releases carry no
 signatures. The checksums prove only that the downloaded bytes
@@ -148,9 +186,10 @@ nothing about who published the release. The exec check runs
 bytes already checksum-verified against the release.
 
 Exit codes: 0 = success, already-latest no-op, or dry-run
-report; 2 = usage and policy refusals decided without fetching
-bytes; 1 = operational failures. Error output carries class and
-length only, never response bodies or secrets.
+report; 2 = usage and policy refusals (no download, no replace;
+release metadata may have been fetched first); 1 = operational
+failures. Error output carries class and length only, never
+response bodies or secrets.
 
 Live-proof checklist (for the operator's own box, before
 relying on `update`): run `castctl update --dry-run` against the

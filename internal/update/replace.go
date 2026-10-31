@@ -48,7 +48,9 @@ func (e *dirSyncError) Unwrap() error { return e.err }
 // checksums fetch, asset download to a temp file, hash verification,
 // extraction, ELF validation, exec check, re-hash, and atomic
 // replace. Every error before the rename leaves the old binary
-// intact and removes temp files.
+// intact and removes temp files; a directory-sync failure after a
+// successful rename returns an error with the new binary in place
+// (see dirSyncError).
 func (u *updater) install(ctx context.Context, res Result, sel *selection, target string, targetMode os.FileMode) (Result, error) {
 	dir := filepath.Dir(target)
 	unlock, held, err := acquireUpdateLock(dir)
@@ -114,10 +116,11 @@ func (u *updater) install(ctx context.Context, res Result, sel *selection, targe
 	}
 	_ = os.Remove(assetTmpPath) // asset temp no longer needed
 
-	// Preserve the target's permission bits now, BEFORE the exec
-	// check (which needs +x) and the rename: the temp file is
-	// created 0600, and the installed mode must never come from
-	// the archive header.
+	// Preserve the target's Perm() (0777 rwx) bits now, BEFORE the
+	// exec check (which needs +x) and the rename: the temp file is
+	// created 0600, the installed mode must never come from the
+	// archive header, and setuid/setgid/sticky bits of the old
+	// binary are dropped (Perm() carries rwx bits only).
 	if err := os.Chmod(extractedTmpPath, targetMode); err != nil {
 		return Result{}, wrapError(1, "update: cannot set permissions on the new binary", err)
 	}
@@ -168,8 +171,8 @@ func (u *updater) install(ctx context.Context, res Result, sel *selection, targe
 	if err := syncDirFunc(dir); err != nil {
 		if isDirSyncTolerable(err) {
 			// Filesystems that do not support directory fsync
-			// (ENOTSUP/EINVAL) still hold the rename; durability
-			// limits are documented, not fatal (H-92).
+			// (ENOTSUP/EINVAL) still hold the rename; the error
+			// is tolerated and the run succeeds silently (H-92).
 		} else {
 			res.Replaced = true
 			res.Target = sel.target
@@ -185,10 +188,10 @@ func (u *updater) install(ctx context.Context, res Result, sel *selection, targe
 }
 
 // dryRun verifies everything a live run would verify except the
-// exec check (which needs a file on disk) and the replace itself,
-// with ZERO writes: no lock file, no temp files, no directory
-// changes. The asset and the extracted binary live in memory,
-// bounded by the same caps as the live path.
+// exec check (which needs a file on disk), the chmod, the re-hash,
+// the lock, and the replace itself, with ZERO writes: no lock file,
+// no temp files, no directory changes. The asset and the extracted
+// binary live in memory, bounded by the same caps as the live path.
 func (u *updater) dryRun(ctx context.Context, res Result, sel *selection, target string, targetMode os.FileMode) (Result, error) {
 	sums, err := u.fetchChecksums(ctx, sel)
 	if err != nil {
@@ -266,18 +269,22 @@ func syncDir(dir string) error {
 }
 
 // isDirSyncTolerable reports whether a directory-sync error may be
-// ignored with disclosure: filesystems that return ENOTSUP/EINVAL
-// for directory fsync still hold the rename.
+// tolerated, succeeding silently: filesystems that return
+// ENOTSUP/EINVAL for directory fsync still hold the rename.
 func isDirSyncTolerable(err error) bool {
 	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP)
 }
 
-// runExecCheck executes the extracted binary with argv --version in
-// a clean minimal environment (empty env: no LD_PRELOAD or other
-// injection variables are inherited), closed stdin, a 10s timeout,
-// and capped stdout. The output must be exactly one line naming
-// the target version. Any failure, timeout, or mismatch refuses
-// the update with the old binary intact.
+// runExecCheck executes the extracted binary, unsandboxed, with
+// argv --version in a clean minimal environment (empty env: no
+// LD_PRELOAD or other injection variables are inherited), closed
+// stdin, a 10s timeout, and capped stdout. The output must be
+// exactly one line, "castctl <version>", parsed and compared equal
+// to the target version; an optional parenthetical after the
+// version is shape-only (its content is not parsed). Any failure,
+// timeout, or mismatch refuses the update with the old binary
+// intact. A child process detached by the candidate binary would
+// survive the timeout kill; that residual is recorded in the docs.
 //
 // This executes bytes that already passed checksum verification
 // against the release. It proves the binary runs on this machine
@@ -323,8 +330,10 @@ func runExecCheck(ctx context.Context, path string, want Version) error {
 
 // checkVersionOutput requires exactly one line, "castctl <version>"
 // optionally followed by " (<commit> <date>)", where <version>
-// parses to the target version. Anything else — extra lines,
-// injected lines, trailing garbage, control bytes — refuses.
+// parses and compares equal to the target version. The
+// parenthetical is shape-only: only its surrounding parentheses
+// are checked, its content is never parsed. Anything else — extra
+// lines, injected lines, trailing garbage, control bytes — refuses.
 func checkVersionOutput(out []byte, want Version) error {
 	fail := func() error {
 		return newError(1, "update: the downloaded binary does not report the target version")

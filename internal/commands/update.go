@@ -22,13 +22,19 @@ Self-update castctl from the latest stable GitHub release.
 The release asset matching this platform and build flavour is
 downloaded, its sha256 is verified against the release
 checksums.txt BEFORE any replace, the extracted binary is
-validated (ELF/arch sanity and a --version run), and only then
-the running binary is replaced atomically (same-directory rename,
-permission bits preserved, fsync of file and directory). On any
-failure the old binary is left intact and partial downloads are
-deleted. There is no signature verification: GitHub releases
-carry no signatures, so the checksums prove only that the bytes
-match what the release published, over HTTPS.
+validated (ELF/arch sanity and an unsandboxed --version run of
+the checksummed candidate), and only then the running binary
+is replaced atomically (same-directory rename, the resolved
+target's Perm() (0777 rwx) bits preserved, setuid/setgid/sticky
+bits dropped, fsync of file and directory). The resolved target
+is followed through symlinks, including out of the directory.
+Every failure before the rename leaves the old binary intact
+and partial downloads are deleted; a directory-sync failure
+after a successful rename returns an error with the new binary
+in place (durability unproven). There is no signature
+verification: GitHub releases carry no signatures, so the
+checksums prove only that the bytes match what the release
+published, over HTTPS.
 
 The running build must be stamped (release -X flags): unstamped
 dev builds refuse with "cannot determine running version" in
@@ -38,6 +44,8 @@ Linux only: no release assets exist for other platforms.
 
   --dry-run          Report what would be downloaded, verified
                      and replaced, without writing anything.
+                     Dry-run takes no lock and skips the exec
+                     check, the chmod, and the re-hash.
   --version TAG      Update to a specific release tag (with or
                      without a leading v). Must name a stable
                      release unless --allow-prerelease is given.
@@ -48,7 +56,8 @@ Linux only: no release assets exist for other platforms.
                      default.
 
 Exit codes: 0 success, already-latest no-op, or dry-run report;
-2 usage and policy refusals decided without fetching bytes;
+2 = usage and policy refusals (no download, no replace; release
+metadata may have been fetched first);
 1 operational failures (network, checksums, validation, replace).
 `
 
