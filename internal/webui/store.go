@@ -265,7 +265,10 @@ func (s *Server) saveSubmitted(load *configLoad, baseSHA string, submitted any) 
 // whose name is not a key of the single file's profiles; no
 // legacy file is read.
 func (s *Server) configSource(load *configLoad, cfg *profile.SingleConfig) string {
-	legacyNames := s.legacyProfileNames(cfg)
+	// Display-only: an enumeration error degrades to no
+	// legacy profiles shown; only the log gate fails closed
+	// on it (see legacyProfileNames).
+	legacyNames, _ := s.legacyProfileNames(cfg)
 	if !load.state.Found {
 		if len(legacyNames) > 0 {
 			return "legacy"
@@ -278,18 +281,52 @@ func (s *Server) configSource(load *configLoad, cfg *profile.SingleConfig) strin
 	return "single-file"
 }
 
-func (s *Server) legacyProfileNames(cfg *profile.SingleConfig) []string {
-	entries, err := os.ReadDir(filepath.Join(s.deps.ConfigDir, "profiles"))
+// legacyProfileNames lists the names of legacy profile
+// directories under profiles/ that are not keys of the
+// single-file document: a directory carrying a config.json.
+// A symlink to a directory IS followed, mirroring
+// DiscoverProfileNames exactly for the symlink treatment
+// (DirEntry.IsDir is false for a symlink to a directory, so
+// a bare IsDir check would silently drop every symlinked
+// legacy profile from the log gate's refused set). Name
+// validation is deliberately NOT mirrored here: this
+// enumeration is a guard scan, not migration discovery, so
+// an invalid-name directory carrying a config.json is still
+// listed (its cookies files are refused), while
+// DiscoverProfileNames skips it for migration. An error is
+// returned when the profiles directory cannot be listed
+// (other than not existing, which means no legacy profile
+// can exist) or when a candidate entry's config.json cannot
+// be stat'ed (other than not existing, which means the
+// entry holds no legacy config): the refused set cannot be
+// enumerated then, so the caller that guards secrets
+// (logGate) must fail closed. Display-only callers treat an
+// error as no legacy profiles, as before.
+func (s *Server) legacyProfileNames(cfg *profile.SingleConfig) ([]string, error) {
+	profilesDir := filepath.Join(s.deps.ConfigDir, "profiles")
+	entries, err := os.ReadDir(profilesDir)
 	if err != nil {
-		return nil
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
 	var names []string
 	for _, e := range entries {
-		if !e.IsDir() {
+		isDir := e.IsDir()
+		if !isDir && e.Type()&os.ModeSymlink != 0 {
+			if st, serr := os.Stat(filepath.Join(profilesDir, e.Name())); serr == nil && st.IsDir() {
+				isDir = true
+			}
+		}
+		if !isDir {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(s.deps.ConfigDir, "profiles", e.Name(), "config.json")); err != nil {
-			continue
+		if _, err := os.Stat(filepath.Join(profilesDir, e.Name(), "config.json")); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
 		}
 		if cfg != nil {
 			if _, ok := cfg.Profiles[e.Name()]; ok {
@@ -299,7 +336,7 @@ func (s *Server) legacyProfileNames(cfg *profile.SingleConfig) []string {
 		names = append(names, e.Name())
 	}
 	sort.Strings(names)
-	return names
+	return names, nil
 }
 
 // redactGeneric redacts a generic document for a GET response:

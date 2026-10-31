@@ -485,6 +485,173 @@ func TestLogsRefusedLegacyConfigUnparseable(t *testing.T) {
 	}
 }
 
+// Log-gate refusal tests (final fix, M1): a legacy profile
+// reached through a SYMLINKED profiles/<name> directory must
+// be enumerated exactly like a regular directory, so its
+// default cookies path and its cookies_file override (plus
+// .bak) are refused. The symlinked directory must pre-exist
+// on the filesystem; neither the CLI nor the web UI creates
+// symlinked profile dirs. The jar lives inside the symlink
+// target and the legacy config names it by absolute target
+// path, so both the target spelling and the spelling through
+// the symlink name the same cookies file.
+
+func TestLogsRefusedSymlinkedLegacyDirOverride(t *testing.T) {
+	cases := []struct {
+		name     string
+		spelling func(dir, target string) string
+		bak      bool
+	}{
+		{"targetSpelling", func(_, target string) string {
+			return filepath.Join(target, "jar-cookies.txt")
+		}, false},
+		{"symlinkSpelling", func(dir, _ string) string {
+			return filepath.Join(dir, "profiles", "linkprof", "jar-cookies.txt")
+		}, false},
+		{"symlinkSpellingBak", func(dir, _ string) string {
+			return filepath.Join(dir, "profiles", "linkprof", "jar-cookies.txt.bak")
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			target := t.TempDir()
+			jarPath := filepath.Join(target, "jar-cookies.txt")
+			jar := ".example.com\tTRUE\t/\tFALSE\t0\thatch_sess\tFAKE-SYMDIR-OVERRIDE-HATCH-111\n"
+			writePath := jarPath
+			if tc.bak {
+				writePath = jarPath + ".bak"
+			}
+			if err := os.WriteFile(writePath, []byte(jar), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(target, "config.json"), []byte(`{"cookies_file": "`+jarPath+`"}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(dir, "profiles"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(dir, "profiles", "linkprof")); err != nil {
+				t.Fatal(err)
+			}
+			cookiesPath := filepath.Join(dir, "cookies.txt")
+			srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, tc.spelling(dir, target)))
+			assertLogsRefused(t, srv, "FAKE-SYMDIR-OVERRIDE-HATCH-111")
+		})
+	}
+}
+
+func TestLogsRefusedSymlinkedLegacyDirDefault(t *testing.T) {
+	// The legacy config carries no override, so the default
+	// path (profiles/linkprof/cookies.txt, through the
+	// symlink) is the cookies file. Both spellings of it,
+	// plus both .bak spellings, must be refused.
+	cases := []struct {
+		name     string
+		spelling func(dir, target string) string
+		bak      bool
+	}{
+		{"symlinkSpelling", func(dir, _ string) string {
+			return filepath.Join(dir, "profiles", "linkprof", "cookies.txt")
+		}, false},
+		{"targetSpelling", func(_, target string) string {
+			return filepath.Join(target, "cookies.txt")
+		}, false},
+		{"symlinkSpellingBak", func(dir, _ string) string {
+			return filepath.Join(dir, "profiles", "linkprof", "cookies.txt.bak")
+		}, true},
+		{"targetSpellingBak", func(_, target string) string {
+			return filepath.Join(target, "cookies.txt.bak")
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			target := t.TempDir()
+			jar := ".example.com\tTRUE\t/\tFALSE\t0\thatch_sess\tFAKE-SYMDIR-DEF-HATCH-222\n"
+			writePath := filepath.Join(target, "cookies.txt")
+			if tc.bak {
+				writePath += ".bak"
+			}
+			if err := os.WriteFile(writePath, []byte(jar), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(target, "config.json"), []byte(`{}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(dir, "profiles"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(dir, "profiles", "linkprof")); err != nil {
+				t.Fatal(err)
+			}
+			cookiesPath := filepath.Join(dir, "cookies.txt")
+			srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, tc.spelling(dir, target)))
+			assertLogsRefused(t, srv, "FAKE-SYMDIR-DEF-HATCH-222")
+		})
+	}
+}
+
+func TestLogsRefusedWhenLegacyEnumerationFails(t *testing.T) {
+	// Fail closed: when the profiles/ enumeration itself
+	// fails, the refused set cannot be enumerated, so the
+	// whole gate refuses — like the unreadable-config case.
+	// A missing profiles/ directory is NOT a failure (no
+	// legacy profile can exist), so the legitimate log
+	// still tails. Both failure shapes are deterministic
+	// filesystem conditions, not permission tricks (which
+	// root would bypass): profiles/ as a regular file
+	// fails the listing, and a self-symlinked config.json
+	// fails the entry stat with ELOOP.
+	legitLog := func(t *testing.T, dir string) string {
+		t.Helper()
+		logPath := filepath.Join(dir, "castctl.log")
+		if err := os.WriteFile(logPath, []byte("+0700 2026-10-31 13:00:01 INFO gateway: hello\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return logPath
+	}
+	t.Run("profilesIsFile", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "profiles"), []byte("not a directory"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cookiesPath := filepath.Join(dir, "cookies.txt")
+		srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, legitLog(t, dir)))
+		assertLogsRefused(t, srv)
+	})
+	t.Run("configSymlinkLoop", func(t *testing.T) {
+		dir := t.TempDir()
+		legacyDir := filepath.Join(dir, "profiles", "legacy1")
+		if err := os.MkdirAll(legacyDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("config.json", filepath.Join(legacyDir, "config.json")); err != nil {
+			t.Fatal(err)
+		}
+		cookiesPath := filepath.Join(dir, "cookies.txt")
+		srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, legitLog(t, dir)))
+		assertLogsRefused(t, srv)
+	})
+	t.Run("noProfilesDir", func(t *testing.T) {
+		dir := t.TempDir()
+		cookiesPath := filepath.Join(dir, "cookies.txt")
+		srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, legitLog(t, dir)))
+		rec := logDo(t, srv, "/api/v1/logs")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("logs: %d: %s", rec.Code, rec.Body.String())
+		}
+		data := decodeEnvelope(t, rec)["data"].(map[string]any)
+		if data["disabled"] != false {
+			t.Fatalf("no profiles dir: legitimate log refused: %v", data)
+		}
+		entries, _ := data["entries"].([]any)
+		if len(entries) != 1 {
+			t.Fatalf("entries = %d, want 1: %v", len(entries), entries)
+		}
+	})
+}
+
 func TestLogsRefusedRawCoercedCookiesFile(t *testing.T) {
 	// Guard (green on both old and new code): a raw
 	// single-file cookies_file value the parser coerces to

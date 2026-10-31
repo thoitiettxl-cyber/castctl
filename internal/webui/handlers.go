@@ -98,7 +98,11 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	writeEnvelope(w, http.StatusOK, s.profileSummaries(cfg, s.legacyProfileNames(cfg)))
+	// Display-only: an enumeration error degrades to no
+	// legacy profiles shown; only the log gate fails closed
+	// on it (see legacyProfileNames).
+	legacyNames, _ := s.legacyProfileNames(cfg)
+	writeEnvelope(w, http.StatusOK, s.profileSummaries(cfg, legacyNames))
 }
 
 // profileDetail is the frozen ProfileDetail shape.

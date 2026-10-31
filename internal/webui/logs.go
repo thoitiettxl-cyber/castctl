@@ -50,7 +50,9 @@ const (
 // to the config file, any cookies file, any cookies `.bak`
 // sibling, any legacy-layout cookies file or its `.bak`
 // (including a legacy config's own cookies_file override and
-// its .bak; a legacy config that cannot be read fails the
+// its .bak, and legacy profiles reached through a symlinked
+// profiles/<name> directory; a legacy config that cannot be
+// read, or a profiles/ enumeration that fails, fails the
 // gate closed), or any file under the config dir's
 // profiles/ subtree (the factory's A7 rule, re-checked here
 // because this endpoint opens the file itself). Paths are
@@ -100,7 +102,14 @@ func (s *Server) logGate() (path string, disabled bool, reason string, err error
 			refused = append(refused, p.CookiesFile, p.CookiesFile+".bak")
 		}
 	}
-	for _, name := range s.legacyProfileNames(cfg) {
+	legacyNames, enumErr := s.legacyProfileNames(cfg)
+	if enumErr != nil {
+		// The refused set cannot be enumerated: fail the
+		// whole gate closed rather than serve a file that
+		// might be a legacy cookies file.
+		return "", true, "log_output_refused", nil
+	}
+	for _, name := range legacyNames {
 		if paths, perr := profile.ProfilePaths(s.deps.ConfigDir, name); perr == nil {
 			refused = append(refused, paths.Cookies, paths.Cookies+".bak")
 			// A legacy config's own cookies_file override
