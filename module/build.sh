@@ -127,11 +127,28 @@ if [ -n "$CA_PEM_OVERRIDE" ]; then
   ca_version=external
 else
   fetch_locked "$ca_apk" "$LOCK_CA_APK_URL" "$LOCK_CA_APK_SHA256"
-  ca_member=$(tar -tzf "$ca_apk" | grep -E "(^|/)$LOCK_CA_FILE\$" | head -1)
+  # LOCK_CA_FILE is an absolute path (/etc/ssl/cert.pem); the .apk
+  # member path is relative (etc/ssl/cert.pem). Strip the leading
+  # slash for matching. The `|| true` keeps a no-match from
+  # exiting silently under pipefail+errexit before the check below.
+  ca_rel=${LOCK_CA_FILE#/}
+  ca_member=$(tar -tzf "$ca_apk" | grep -E "(^|/)$ca_rel\$" | head -1 || true)
   # The .apk member path is etc/ssl/cert.pem (no leading ./); accept either form.
   [ -n "$ca_member" ] || fail "CA package is missing $LOCK_CA_FILE"
   tar -xzf "$ca_apk" -C "$ca_extract" "$ca_member"
   CA_FILE=$ca_extract/$ca_member
+  # etc/ssl/cert.pem is a symlink to certs/ca-certificates.crt in
+  # the .apk: extracting the link alone leaves it dangling, so
+  # extract the link target too (single level; the -f check
+  # below still fails loudly on a deeper chain).
+  if [ -L "$CA_FILE" ]; then
+    link_target=$(readlink "$CA_FILE")
+    case "$link_target" in
+      /*) target_member=${link_target#/} ;;
+      *) target_member=$(dirname "$ca_member")/$link_target ;;
+    esac
+    tar -xzf "$ca_apk" -C "$ca_extract" "$target_member" || fail "CA link target missing: $target_member"
+  fi
   [ -f "$CA_FILE" ] || fail "CA extraction failed: $CA_FILE"
   ca_version=$LOCK_CA_PACKAGE
 fi
@@ -293,7 +310,7 @@ stage=$work/stage
 mkdir -p "$stage"
 
 for path in module.prop customize.sh service.sh action.sh uninstall.sh \
-  config.example.json payload-manifest.txt META-INF webroot scripts; do
+  config.example.json payload-manifest.txt META-INF webroot scripts docs; do
   cp -a "$ROOT/$path" "$stage/"
 done
 cp -a "$ROOT/licenses" "$stage/"
