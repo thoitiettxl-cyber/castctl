@@ -5,6 +5,7 @@
 package profile
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -371,36 +372,72 @@ func TestWriteCookiesFileBakIsDirectory(t *testing.T) {
 }
 
 // TestWriteCookiesFileBakPreservedOnCopyFailure (N4, loop 2):
-// when the backup copy cannot be made (unwritable directory),
-// the stale .bak survives and the destination is untouched —
-// the old .bak is never deleted before the new copy succeeds.
-// Skipped as root: permission bits do not fail writes for uid 0.
+// when the backup copy cannot be made, the stale .bak survives
+// byte-identical and the destination is untouched — the old
+// .bak is never deleted before the new copy succeeds.
+//
+// The failure is deterministic on every uid and filesystem:
+// the destination is a Unix socket file, so backupCookiesFile's
+// ReadFile — the first step of the copy body, reached only
+// after writeTempFile has already succeeded — fails ENXIO.
+// The previous chmod-based version failed (if at all) in
+// writeTempFile before the backup ever ran, skipped as root,
+// and passed vacuously wherever the filesystem does not
+// enforce chmod-based unwritability (the CI failure at
+// 46e24ce). No chmod, no skip here: a socket pathname cannot
+// be read as a regular file for root and non-root alike.
 func TestWriteCookiesFileBakPreservedOnCopyFailure(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("read-only directory does not fail writes as root")
-	}
 	base := t.TempDir()
 	dest := filepath.Join(base, "cookies.txt")
-	old := []byte("hatch_sess=OLD\n")
 	staleBak := []byte("hatch_sess=STALE-BAK\n")
-	if err := os.WriteFile(dest, old, 0o600); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.WriteFile(dest+".bak", staleBak, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(base, 0o500); err != nil {
+	// Leave a socket file at the destination path: bind a Unix
+	// listener, keep its pathname (no unlink on close), then
+	// close it. Stat(dest) succeeds and it is not a directory,
+	// so WriteCookiesFile reaches backupCookiesFile, whose
+	// ReadFile fails ENXIO.
+	ln, err := net.Listen("unix", dest)
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(base, 0o700) })
-	if _, err := WriteCookiesFile(base, "default", dest, []byte("hatch_sess=NEW\n")); err == nil {
-		t.Fatalf("unwritable directory: got no error")
+	ul, ok := ln.(*net.UnixListener)
+	if !ok {
+		t.Fatalf("unix listener is %T, want *net.UnixListener", ln)
 	}
-	if got := mustReadFile(t, dest); string(got) != string(old) {
-		t.Errorf("cookies bytes=%q after failed write, want untouched %q", got, old)
+	ul.SetUnlinkOnClose(false)
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lst, err := os.Lstat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lst.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("destination is not a socket file (mode=%v)", lst.Mode())
+	}
+	if _, err := WriteCookiesFile(base, "default", dest, []byte("hatch_sess=NEW\n")); err == nil {
+		t.Fatalf("unreadable destination (socket): got no error")
+	}
+	lst, err = os.Lstat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lst.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("destination socket missing or changed (mode=%v)", lst.Mode())
 	}
 	if got := mustReadFile(t, dest+".bak"); string(got) != string(staleBak) {
 		t.Errorf(".bak bytes=%q after failed write, want preserved %q", got, staleBak)
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".tmp-") || strings.HasPrefix(e.Name(), ".cookies-bak-") {
+			t.Errorf("temp file left behind: %s", e.Name())
+		}
 	}
 }
 
