@@ -129,6 +129,7 @@ func ValidateKeeperTag(tag string) error {
 	}
 	return nil
 }
+
 // entries in file order. A nil *KeeperConfig means the block was
 // absent.
 // KeeperConfig is one parsed top-level `keeper` block: the list of
@@ -319,6 +320,7 @@ func canonicalBrowserURL(raw string) (string, error) {
 	path := strings.TrimSuffix(u.Path, "/")
 	return fmt.Sprintf("%s://%s:%d%s", u.Scheme, host, port, path), nil
 }
+
 // canonicalBrowser is canonicalBrowserURL with a raw-string
 // fallback: validateKeeper also runs over hand-built configs
 // whose browser URLs never passed parse-time validation, and

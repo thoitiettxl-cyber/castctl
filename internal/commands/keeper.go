@@ -413,8 +413,12 @@ func cmdKeeperRun(ctx context.Context, env *Env, g *globalOpts, args []string) e
 	onTick := func(entry *profile.KeeperEntry, res keeper.TickResult) {
 		outMu.Lock()
 		defer outMu.Unlock()
-		fmt.Fprintf(env.stdout(), "keeper: %s (%s): %s cookies_seen=%d wrote=%v next_delay=%s\n",
-			keeper.SanitizeDisplay(entry.Tag), keeper.SanitizeDisplay(entry.Profile), res.Outcome, res.CookiesSeen, res.WroteCookies, res.NextDelay)
+		corrupt := ""
+		if res.StateCorrupt {
+			corrupt = " state_corrupt=true"
+		}
+		fmt.Fprintf(env.stdout(), "keeper: %s (%s): %s cookies_seen=%d wrote=%v next_delay=%s%s\n",
+			keeper.SanitizeDisplay(entry.Tag), keeper.SanitizeDisplay(entry.Profile), res.Outcome, res.CookiesSeen, res.WroteCookies, res.NextDelay, corrupt)
 	}
 	results := keeper.Run(ctx, entries, profiles, loc.ConfigDir, rts.factory, onTick)
 	if ctx.Err() != nil {
@@ -443,6 +447,10 @@ type keeperCheckResult struct {
 	CookiesSeen  int        `json:"cookies_seen"`
 	WroteCookies bool       `json:"wrote_cookies"`
 	NextCheckAt  *time.Time `json:"next_check_at,omitempty"`
+	// StateCorrupt reports a corrupt/unknown-version state
+	// file observed by this tick (fresh state substituted,
+	// re-observed from the cookies file).
+	StateCorrupt bool `json:"state_corrupt,omitempty"`
 }
 
 // keeperCheckTimeout bounds one entry's tick: past it, the
@@ -491,6 +499,7 @@ func cmdKeeperCheck(ctx context.Context, env *Env, g *globalOpts, args []string)
 			Tag: entry.Tag, Profile: entry.Profile, Outcome: res.Outcome,
 			Stopped: res.Stopped, CookiesSeen: res.CookiesSeen,
 			WroteCookies: res.WroteCookies, NextCheckAt: nextAt,
+			StateCorrupt: res.StateCorrupt,
 		}
 		if err := writeJSON(env.stdout(), out); err != nil {
 			return err

@@ -129,9 +129,11 @@ func StatePath(profileDir string) string {
 
 // LoadState reads the state file. A missing file is a fresh
 // state, not an error. A present file with an unknown version,
-// or unparseable JSON, is an error: the tick must refuse rather
-// than overwrite state it cannot understand. Unknown fields are
-// ignored.
+// or unparseable JSON, is an ErrStateCorrupt error: callers
+// that can recover (the tick, the login/import reset, status)
+// substitute a fresh state and record the corruption; nothing
+// silently overwrites state it cannot understand without
+// saying so. Unknown fields are ignored.
 func LoadState(profileDir string) (*SessionState, error) {
 	data, err := os.ReadFile(StatePath(profileDir))
 	if err != nil {
@@ -145,10 +147,10 @@ func LoadState(profileDir string) (*SessionState, error) {
 	}
 	var st SessionState
 	if err := json.Unmarshal(data, &st); err != nil {
-		return nil, fmt.Errorf("session state corrupt: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrStateCorrupt, err)
 	}
 	if st.Version != StateVersion {
-		return nil, fmt.Errorf("session state version %d is not supported (want %d)", st.Version, StateVersion)
+		return nil, fmt.Errorf("%w: version %d is not supported (want %d)", ErrStateCorrupt, st.Version, StateVersion)
 	}
 	if st.Cookies == nil {
 		st.Cookies = map[string]CookieState{}
@@ -157,6 +159,19 @@ func LoadState(profileDir string) (*SessionState, error) {
 		st.LastTickOutcome = OutcomeNever
 	}
 	return &st, nil
+}
+
+// ErrStateCorrupt marks a state file that is present but
+// unreadable (corrupt JSON or an unknown schema version).
+// IsStateCorrupt distinguishes it from I/O errors: a corrupt
+// state file is recoverable observed state, a missing
+// profile directory is not.
+var ErrStateCorrupt = errors.New("session state corrupt")
+
+// IsStateCorrupt reports whether err is (or wraps)
+// ErrStateCorrupt.
+func IsStateCorrupt(err error) bool {
+	return errors.Is(err, ErrStateCorrupt)
 }
 
 // SaveState writes the state atomically (temp file + rename in
@@ -183,6 +198,13 @@ func SaveState(profileDir string, st *SessionState) error {
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	// Sync before rename, like the cookie writer: a crash
+	// between write and rename must not leave a torn state
+	// file behind (loop-2 red-team N8).
+	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		return err
 	}

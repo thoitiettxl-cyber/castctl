@@ -288,7 +288,12 @@ func TestLoginSecondLoginRefuses(t *testing.T) {
 	st := NewSessionState()
 	st.LoginActive = true
 	st.LoginSessionID = "login-other"
-	started := tickNow.Add(-time.Minute)
+	// Fresh relative to the REAL clock this test uses: a
+	// fixed tickNow goes stale past LoginFlagStaleAfter
+	// (70m) and the flag is recovered instead of refusing.
+	// (Loop-2 drive-by: the fixed tickNow made this test a
+	// wall-clock time bomb.)
+	started := time.Now().Add(-time.Minute)
 	st.LoginStartedAt = &started
 	if err := SaveState(paths.Dir, st); err != nil {
 		t.Fatal(err)
@@ -379,5 +384,45 @@ func TestResetAfterLoginIgnoresCookiesBytes(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(paths.Cookies); string(got) != jar8 {
 		t.Fatalf("cookies file changed by reset: %q", got)
+	}
+}
+
+// TestResetAfterLoginCorruptState (loop-2 red-team F6): a
+// corrupt or unknown-version state file must not fail the
+// reset — the import half already wrote the cookies file.
+// RED on the old code: ResetAfterLogin returned the load
+// error, and `auth import` exited 2 after writing.
+func TestResetAfterLoginCorruptState(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"corrupt json", `{not json`},
+		{"unknown version", `{"version":99,"last_tick_outcome":"ok"}`},
+		{"empty version", `{"last_tick_outcome":"ok"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			baseDir := t.TempDir()
+			paths, err := profile.ProfilePaths(baseDir, "muse01")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(paths.Dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(StatePath(paths.Dir), []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := ResetAfterLogin(baseDir, &profile.Profile{Name: "muse01"}, RealClock); err != nil {
+				t.Fatalf("ResetAfterLogin with %s state: %v", tc.name, err)
+			}
+			st, err := LoadState(paths.Dir)
+			if err != nil {
+				t.Fatalf("LoadState after reset: %v", err)
+			}
+			if st.Version != StateVersion || st.LoggedOut || st.KeeperStopped {
+				t.Fatalf("state after reset = %+v; want fresh v1, not stopped", st)
+			}
+		})
 	}
 }

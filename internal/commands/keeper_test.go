@@ -560,3 +560,54 @@ func TestKeeperCheckInterrupted(t *testing.T) {
 		t.Fatalf("interrupted check: code=%d, want 130", code)
 	}
 }
+
+// TestKeeperStatusCorruptState (loop-2 red-team F6): status
+// reports a corrupt state file distinctly (state_corrupt +
+// reason) with exit 0, instead of erroring. RED on the old
+// code: status errored.
+func TestKeeperStatusCorruptState(t *testing.T) {
+	t.Parallel()
+	fake := &keeperFakeGateway{sessionStatus: 200, authStatus: 200}
+	env, out, _, home := keeperTestEnv(t, keeperTestConfig(), fake)
+	paths, err := profile.ProfilePaths(home, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(paths.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(paths.Dir, keeper.StateFileName), []byte(`{not json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := Run(context.Background(), []string{"keeper", "status"}, env); code != 0 {
+		t.Fatalf("status with corrupt state: code=%d, want 0", code)
+	}
+	if !strings.Contains(out.String(), `"state_corrupt": true`) || !strings.Contains(out.String(), "state_corrupt") {
+		t.Fatalf("status output = %q; want state_corrupt flagged with the reason", out.String())
+	}
+}
+
+// TestKeeperCheckCorruptState (loop-2 red-team F6): check
+// still ticks with a corrupt state file and flags it in the
+// JSON. RED on the old code: skipped tick, no flag.
+func TestKeeperCheckCorruptState(t *testing.T) {
+	t.Parallel()
+	fake := &keeperFakeGateway{sessionStatus: 200, authStatus: 200}
+	env, out, _, home := keeperTestEnv(t, keeperTestConfig(), fake)
+	paths, err := profile.ProfilePaths(home, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(paths.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(paths.Dir, keeper.StateFileName), []byte(`{"version": 99}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := Run(context.Background(), []string{"keeper", "check"}, env); code != 0 {
+		t.Fatalf("check with corrupt state: code=%d, want 0", code)
+	}
+	if !strings.Contains(out.String(), `"state_corrupt": true`) {
+		t.Fatalf("check output = %q; want state_corrupt flagged", out.String())
+	}
+}

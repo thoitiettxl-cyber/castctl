@@ -243,7 +243,15 @@ func (s *LoginSession) finish(ctx context.Context, started time.Time, outcome Lo
 		clock = RealClock
 	}
 	duration := clock.Now().Sub(started)
-	store, _ := NewStore(s.BaseDir, s.Profile, s.LockTimeout)
+	// The store is re-created here (Run created one too, for
+	// the flag). A failure is terminal and explicit: the
+	// audit closure guards a nil store, but saveLoginCookies
+	// must never dereference one (loop-2 technical N5).
+	store, storeErr := NewStore(s.BaseDir, s.Profile, s.LockTimeout)
+	if storeErr != nil {
+		_ = s.Transport.SendPhase(ctx, PhaseFailed, "")
+		return LoginResult{Outcome: LoginFailed, Duration: duration, Err: storeErr}
+	}
 	audit := func(final LoginOutcome, saved bool, names []string, earliest *time.Time) {
 		if store == nil {
 			return
@@ -298,6 +306,9 @@ func (s *LoginSession) saveLoginCookies(store *Store, exported []StoredCookie, v
 	clock := s.Clock
 	if clock == nil {
 		clock = RealClock
+	}
+	if store == nil {
+		return savedCookies{}, errors.New("login session has no cookie store")
 	}
 	ls, err := store.lock()
 	if err != nil {

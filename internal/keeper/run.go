@@ -295,11 +295,20 @@ type Status struct {
 	WarnPending         bool       `json:"warn_pending,omitempty"`
 	WarnSent            bool       `json:"warn_sent,omitempty"`
 	NextCheckAt         *time.Time `json:"next_check_at,omitempty"`
+	// StateCorrupt reports a corrupt or unknown-version state
+	// file: status still reports (with the state_corrupt
+	// reason) instead of erroring, and the remedy is to
+	// delete session-state.json (the keeper re-observes from
+	// the cookies file). See docs/config.md.
+	StateCorrupt bool `json:"state_corrupt,omitempty"`
 }
 
 // ReadStatus reads one entry's status from its profile's state
 // file. A missing state file is a never-ticked entry, not an
-// error. It performs no network I/O.
+// error. A corrupt or unknown-version state file is reported
+// distinctly (StateCorrupt + state_corrupt reason), not an
+// error: the remedy is documented in docs/config.md. It
+// performs no network I/O.
 func ReadStatus(baseDir string, entry *profile.KeeperEntry) (Status, error) {
 	paths, err := profile.ProfilePaths(baseDir, entry.Profile)
 	if err != nil {
@@ -307,6 +316,12 @@ func ReadStatus(baseDir string, entry *profile.KeeperEntry) (Status, error) {
 	}
 	st, err := LoadState(paths.Dir)
 	if err != nil {
+		if IsStateCorrupt(err) {
+			return Status{
+				Tag: entry.Tag, Profile: entry.Profile,
+				KeeperStoppedReason: StoppedStateCorrupt, StateCorrupt: true,
+			}, nil
+		}
 		return Status{}, err
 	}
 	return Status{

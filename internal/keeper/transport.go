@@ -34,6 +34,12 @@ import (
 //     payloads appear nowhere.
 
 // SessionPhase is the login session's user-visible phase.
+// There is deliberately NO timeout phase: a session whose
+// deadline elapses sends PhaseFailed, and the command
+// layer's JSON outcome ("timeout") names the reason
+// (loop-2 red-team N17, wording disposition). Adding a
+// phase would change the frozen Transport contract for
+// item 2's relay for no user-visible gain.
 type SessionPhase string
 
 const (

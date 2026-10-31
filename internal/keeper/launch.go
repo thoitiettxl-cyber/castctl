@@ -74,7 +74,16 @@ func (r launchRunner) Exporter() (Exporter, error) {
 type portFileExporter struct{ dir string }
 
 func (e portFileExporter) Export(ctx context.Context) ([]ExportedCookie, error) {
-	raw, err := os.ReadFile(filepath.Join(e.dir, "DevToolsActivePort"))
+	portPath := filepath.Join(e.dir, "DevToolsActivePort")
+	// The profile dir is operator-owned (0700); still, a
+	// symlink planted at the port-file path must not redirect
+	// the read elsewhere (loop-2 red-team N16).
+	if fi, err := os.Lstat(portPath); err != nil {
+		return nil, fmt.Errorf("launched browser debug port file unreadable: %w", err)
+	} else if fi.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("launched browser debug port file is a symlink")
+	}
+	raw, err := os.ReadFile(portPath)
 	if err != nil {
 		return nil, fmt.Errorf("launched browser debug port file unreadable: %w", err)
 	}
@@ -97,6 +106,12 @@ const ChromiumPathEnv = "CASTCTL_CHROMIUM_PATH"
 // resolveBrowserPath implements the detection order:
 // --browser-path > CASTCTL_CHROMIUM_PATH > chromedp's PATH
 // search ("" lets chromedp find it). No download, no install.
+// A relative path is accepted verbatim and resolved by the
+// OS/exec search at spawn time (loop-2 technical N7,
+// deferred to S2: the launch path fails closed before
+// spawning at this base, so no relative path is ever
+// resolved today; S2 decides whether to require absolute
+// paths when spawning becomes real).
 func resolveBrowserPath(flagPath string) string {
 	if flagPath != "" {
 		return flagPath
@@ -135,6 +150,12 @@ func (r launchRunner) Run(ctx context.Context, transport Transport) RunnerResult
 		return RunnerResult{Outcome: LoginFailed, Err: err}
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return RunnerResult{Outcome: LoginFailed, Err: err}
+	}
+	// Enforce 0700 even when the dir already exists:
+	// MkdirAll leaves an existing directory's mode alone
+	// (loop-2 red-team N16).
+	if err := os.Chmod(dir, 0o700); err != nil {
 		return RunnerResult{Outcome: LoginFailed, Err: err}
 	}
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],

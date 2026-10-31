@@ -233,23 +233,37 @@ func serveScreencast(tctx context.Context, transport Transport, version BrowserV
 
 	inputOutcome := make(chan LoginOutcome, 1)
 	go func() {
-		for ev := range transport.Inputs() {
-			switch ev.Kind {
-			case InputDone:
-				inputOutcome <- DoneOutcome
+		// The select on tctx.Done() bounds this goroutine:
+		// when the session ends by context cancellation the
+		// goroutine exits instead of blocking on Inputs()
+		// forever (loop-2 red-team N12). A closed Inputs
+		// channel ends the session as failed.
+		inputs := transport.Inputs()
+		for {
+			select {
+			case <-tctx.Done():
 				return
-			case InputCancel:
-				inputOutcome <- LoginCancelled
-				return
-			case InputMouse:
-				dispatchMouse(tctx, ev)
-			case InputKey:
-				dispatchKey(tctx, ev)
-			case InputText:
-				_, _ = chromedp.Call(tctx, input.InsertText, input.InsertTextParams{Text: ev.Text})
+			case ev, ok := <-inputs:
+				if !ok {
+					inputOutcome <- LoginFailed
+					return
+				}
+				switch ev.Kind {
+				case InputDone:
+					inputOutcome <- DoneOutcome
+					return
+				case InputCancel:
+					inputOutcome <- LoginCancelled
+					return
+				case InputMouse:
+					dispatchMouse(tctx, ev)
+				case InputKey:
+					dispatchKey(tctx, ev)
+				case InputText:
+					_, _ = chromedp.Call(tctx, input.InsertText, input.InsertTextParams{Text: ev.Text})
+				}
 			}
 		}
-		inputOutcome <- LoginFailed
 	}()
 
 	select {

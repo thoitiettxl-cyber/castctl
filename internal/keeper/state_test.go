@@ -85,19 +85,21 @@ func TestStateLoadErrors(t *testing.T) {
 	if err != nil || st.Version != StateVersion || st.LastTickOutcome != OutcomeNever {
 		t.Fatalf("missing state: %+v, %v", st, err)
 	}
-	// Corrupt JSON: error, never a guessed state.
+	// Corrupt JSON: error, never a guessed state. The error
+	// is ErrStateCorrupt, so recoverable callers can tell it
+	// from an I/O error (loop-2 red-team F6).
 	if err := os.WriteFile(StatePath(dir), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadState(dir); err == nil {
-		t.Fatal("corrupt state loaded without error")
+	if _, err := LoadState(dir); err == nil || !IsStateCorrupt(err) {
+		t.Fatalf("corrupt state err = %v; want ErrStateCorrupt", err)
 	}
-	// Unknown version: refuse.
+	// Unknown version: refuse, same sentinel.
 	if err := os.WriteFile(StatePath(dir), []byte(`{"version": 99}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadState(dir); err == nil {
-		t.Fatal("unknown state version loaded without error")
+	if _, err := LoadState(dir); err == nil || !IsStateCorrupt(err) {
+		t.Fatalf("unknown version err = %v; want ErrStateCorrupt", err)
 	}
 	// Unknown fields are ignored (forward tolerance).
 	if err := os.WriteFile(StatePath(dir), []byte(`{"version": 1, "future_field": true}`), 0o600); err != nil {

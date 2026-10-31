@@ -11,7 +11,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -116,5 +118,23 @@ func TestBrowserProfileDir(t *testing.T) {
 	}
 	if filepath.Base(dir) != "chromium-profile" {
 		t.Fatalf("dir = %q", dir)
+	}
+}
+
+func TestPortFileExporterRejectsSymlink(t *testing.T) {
+	// Red-team N16: a symlinked DevToolsActivePort must not
+	// redirect the debug-port read outside the profile dir.
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "DevToolsActivePort")
+	if err := os.WriteFile(target, []byte("9226\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "DevToolsActivePort")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := (portFileExporter{dir: dir}).Export(ctx); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Export with symlinked port file = %v; want a symlink error", err)
 	}
 }

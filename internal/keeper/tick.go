@@ -182,7 +182,11 @@ type TickDeps struct {
 // command-layer exit mapping and is never printed directly.
 // Recovered reports a CDP re-export recovery: the command layer
 // sends the re-exported notice after Tick returns (never under
-// the file lock).
+// the file lock). StateCorrupt reports that the state file was
+// corrupt or an unknown version when this tick read it: the
+// tick substituted a fresh state and re-observed from the
+// cookies file, and the next successful save replaces the
+// corrupt file. The corruption is surfaced, never silent.
 type TickResult struct {
 	Outcome      string
 	Stage        string
@@ -195,6 +199,7 @@ type TickResult struct {
 	CookiesSeen  int
 	Skipped      int
 	NextDelay    time.Duration
+	StateCorrupt bool
 	Err          error
 }
 
@@ -247,6 +252,13 @@ type lockedStore struct {
 	jarForm     bool
 	fileMissing bool
 	raw         []byte
+	// stateCorrupt reports that LoadState found a corrupt or
+	// unknown-version state file and a fresh state was
+	// substituted (loop-2 red-team F6). The corruption is
+	// recoverable observed state, not a reason to brick the
+	// tick: the cookies file is still authoritative, and the
+	// next successful save replaces the corrupt file.
+	stateCorrupt bool
 }
 
 func (s *Store) lock() (*lockedStore, error) {
@@ -257,10 +269,20 @@ func (s *Store) lock() (*lockedStore, error) {
 	ls := &lockedStore{store: s, release: release, jarForm: true}
 	st, err := LoadState(s.profileDir)
 	if err != nil {
-		release()
-		return nil, err
+		if IsStateCorrupt(err) {
+			// Recoverable: observed state is lost, the
+			// cookies file still decides the session.
+			// The tick records StateCorrupt and the next
+			// save replaces the corrupt file.
+			ls.state = NewSessionState()
+			ls.stateCorrupt = true
+		} else {
+			release()
+			return nil, err
+		}
+	} else {
+		ls.state = st
 	}
-	ls.state = st
 	raw, err := os.ReadFile(s.cookiesPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -297,6 +319,12 @@ func (s *Store) lockStateOnly() (*lockedStore, error) {
 	}
 	st, err := LoadState(s.profileDir)
 	if err != nil {
+		if IsStateCorrupt(err) {
+			// Same tolerance as lock(): a corrupt state
+			// file must never brick the login/import
+			// reset that clears the sticky stop.
+			return &lockedStore{store: s, release: release, state: NewSessionState(), stateCorrupt: true}, nil
+		}
 		release()
 		return nil, err
 	}
@@ -380,8 +408,12 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 	}
 	now := clock.Now()
 	base := deps.Entry.EffectiveInterval()
+	// corruptSeen accumulates the state-corruption flag
+	// across this tick's lock windows; fail() reads it so
+	// every failure return carries it.
+	corruptSeen := false
 	fail := func(outcome, stage string, err error) TickResult {
-		return TickResult{Outcome: outcome, Stage: stage, Err: err, NextDelay: base}
+		return TickResult{Outcome: outcome, Stage: stage, Err: err, NextDelay: base, StateCorrupt: corruptSeen}
 	}
 
 	store, err := NewStore(deps.BaseDir, deps.Profile, deps.LockTimeout)
@@ -397,6 +429,7 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 		}
 		return fail(OutcomeSkipped, "save", err)
 	}
+	corruptSeen = ls.stateCorrupt
 	state := ls.state
 	if state.LoginActive {
 		stale := state.LoginStartedAt == nil || now.Sub(*state.LoginStartedAt) > LoginFlagStaleAfter
@@ -407,7 +440,7 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 			state.NextCheckAt = &next
 			_ = SaveState(store.profileDir, state)
 			ls.unlock()
-			return TickResult{Outcome: OutcomeSkipped, NextDelay: base}
+			return TickResult{Outcome: OutcomeSkipped, NextDelay: base, StateCorrupt: corruptSeen}
 		}
 		// Stale flag: the login process is assumed dead.
 		state.LoginActive = false
@@ -434,7 +467,7 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 				}
 			}
 		}
-		return TickResult{Outcome: state.LastTickOutcome, Stopped: true, NextDelay: 0}
+		return TickResult{Outcome: state.LastTickOutcome, Stopped: true, NextDelay: 0, StateCorrupt: corruptSeen}
 	}
 	snapshotCookies := ls.cookies
 	jarForm := ls.jarForm
@@ -526,6 +559,7 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 		}
 		return fail(OutcomeSkipped, "save", err)
 	}
+	corruptSeen = corruptSeen || ls.stateCorrupt
 	defer ls.unlock()
 	st := ls.state
 	// Re-check the login pause under the fresh lock: a login
@@ -536,7 +570,7 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 		next := clock.Now().Add(base)
 		st.NextCheckAt = &next
 		_ = SaveState(store.profileDir, st)
-		return TickResult{Outcome: OutcomeSkipped, NextDelay: base}
+		return TickResult{Outcome: OutcomeSkipped, NextDelay: base, StateCorrupt: corruptSeen}
 	}
 	now2 := clock.Now()
 	merged := ls.cookies
@@ -606,7 +640,7 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 		Outcome: OutcomeOK, Recovered: recovered,
 		CookiesSeen: len(merged), Skipped: skipped,
 		WroteCookies: wrote, Dropped: dropped, CDPDropped: exportDropped,
-		Exported: len(exported), NextDelay: delay,
+		Exported: len(exported), NextDelay: delay, StateCorrupt: corruptSeen,
 	}
 }
 
@@ -685,7 +719,7 @@ func recordTransient(clock Clock, store *Store, base time.Duration, err error, s
 	next := now2.Add(base)
 	st.NextCheckAt = &next
 	_ = SaveState(store.profileDir, st)
-	return TickResult{Outcome: OutcomeTransientError, Stage: stage, Err: err, NextDelay: base}
+	return TickResult{Outcome: OutcomeTransientError, Stage: stage, Err: err, NextDelay: base, StateCorrupt: ls.stateCorrupt}
 }
 
 // recordExportFailed persists an export-failure outcome: the
@@ -706,7 +740,7 @@ func recordExportFailed(clock Clock, store *Store, base time.Duration, err error
 	next := now2.Add(base)
 	st.NextCheckAt = &next
 	_ = SaveState(store.profileDir, st)
-	return TickResult{Outcome: OutcomeExportFailed, Stage: "export", Err: err, NextDelay: base}
+	return TickResult{Outcome: OutcomeExportFailed, Stage: "export", Err: err, NextDelay: base, StateCorrupt: ls.stateCorrupt}
 }
 
 // stopEntry persists the sticky stop: logged_out, stopped with
@@ -754,7 +788,7 @@ func stopEntry(clock Clock, store *Store, base time.Duration, updates []CookieUp
 		}
 	}
 	_ = SaveState(store.profileDir, st)
-	return TickResult{Outcome: OutcomeAuthError, Stage: "session", Stopped: true, Err: cause, NextDelay: 0}
+	return TickResult{Outcome: OutcomeAuthError, Stage: "session", Stopped: true, Err: cause, NextDelay: 0, StateCorrupt: ls.stateCorrupt}
 }
 
 // NotifyStopped sends the pending warn-once notice for a
@@ -801,7 +835,10 @@ func NotifyStopped(ctx context.Context, deps TickDeps, notifier Notifier) {
 
 // ResetAfterLogin clears a sticky stop after a successful login
 // or import, so the keeper resumes on its next tick. Called by
-// the login/import flows, never by the tick itself.
+// the login/import flows, never by the tick itself. A corrupt
+// or unknown-version state file is tolerated (fresh state is
+// written): the import half must never fail after the cookies
+// file was already written (loop-2 red-team F6).
 func ResetAfterLogin(baseDir string, prof *profile.Profile, clock Clock) error {
 	if clock == nil {
 		clock = RealClock

@@ -758,3 +758,63 @@ func TestCDPSnapshotFaithfulEmptyValue(t *testing.T) {
 		}
 	}
 }
+
+// TestTickCorruptStateRecovers (loop-2 red-team F6): a tick
+// whose state file is corrupt or an unknown version still
+// runs the cheap chain (the cookies file decides), reports
+// StateCorrupt, and replaces the corrupt file with a fresh
+// state on save. RED on the old code: OutcomeSkipped, zero
+// checker calls, corrupt file untouched.
+func TestTickCorruptStateRecovers(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"corrupt json", `{not json`},
+		{"unknown version", `{"version":99,"last_tick_outcome":"ok"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			initial := []StoredCookie{
+				{Name: "hatch_sess", Value: "FAKE-OLD", Domain: ".muse.ai", Path: "/", Secure: true, Expires: tickNow.Add(time.Hour).Unix()},
+			}
+			baseDir, _, profileDir := tickFixture(t, initial)
+			if err := os.WriteFile(filepath.Join(profileDir, StateFileName), []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			checker := &fakeChecker{scripts: []checkScript{{}}}
+			res := tickRun(t, baseDir, tickDeps(&fakeClock{now: tickNow}, checker, nil, nil))
+			if res.Outcome != OutcomeOK || !res.StateCorrupt {
+				t.Fatalf("result = %+v; want ok + StateCorrupt", res)
+			}
+			if checker.callCount() != 1 {
+				t.Fatalf("checker calls = %d; want 1 (tick ran)", checker.callCount())
+			}
+			st, err := LoadState(profileDir)
+			if err != nil {
+				t.Fatalf("LoadState after tick: %v", err)
+			}
+			if st.Version != StateVersion || st.LastTickOutcome != OutcomeOK {
+				t.Fatalf("state after tick = %+v; want fresh v1 with ok outcome", st)
+			}
+		})
+	}
+}
+
+// TestTickCorruptStateStopSurfacesFlag (loop-2 red-team F6):
+// when a corrupt-state tick stops, the stop result still
+// carries StateCorrupt (the stop path locks separately).
+func TestTickCorruptStateStopSurfacesFlag(t *testing.T) {
+	initial := []StoredCookie{
+		{Name: "hatch_sess", Value: "FAKE-OLD", Domain: ".muse.ai", Path: "/", Secure: true, Expires: tickNow.Add(time.Hour).Unix()},
+	}
+	baseDir, _, profileDir := tickFixture(t, initial)
+	if err := os.WriteFile(filepath.Join(profileDir, StateFileName), []byte(`{not json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checker := &fakeChecker{scripts: []checkScript{{err: conn.NewAuthError("401")}}}
+	exporter := &fakeExporter{err: ErrReexportUnavailable}
+	res := tickRun(t, baseDir, tickDeps(&fakeClock{now: tickNow}, checker, exporter, nil))
+	if res.Outcome != OutcomeAuthError || !res.Stopped || !res.StateCorrupt {
+		t.Fatalf("result = %+v; want auth_error + stopped + StateCorrupt", res)
+	}
+}
