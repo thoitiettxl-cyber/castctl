@@ -1016,24 +1016,24 @@ Copied files (both `cmp` exit 0 against the upstream commit):
 Studied patterns, with mapping (castctl file ↔ upstream file at
 the pinned commit; line counts are the inspected versions):
 
-- Install-time publication: `module/customize.sh` (201 lines)
+- Install-time publication: `module/customize.sh` (254 lines)
   ↔ `customize.sh` (202 lines) — SKIPUNZIP, ABI gate,
   checksum verification from the embedded manifest,
   content-addressed `releases/<id>-<sha>/` + atomic `current`
   symlink swap, plugin forward-copy from the old release
   layout, example-config-only copy, permission loop.
-- Lifecycle controller: `module/scripts/castctl-ctl` (772
+- Lifecycle controller: `module/scripts/castctl-ctl` (962
   lines) ↔ `scripts/cpactl` (811 lines) — PID-file + cmdline
   matching, lifecycle lock outside the data tree, readiness
   wait, stop escalation, status/doctor/backup/purge-data
   commands, log helper shape.
-- Boot hook: `module/service.sh` (70 lines) ↔ `service.sh`
+- Boot hook: `module/service.sh` (100 lines) ↔ `service.sh`
   (28 lines) — single late-start hook, backgrounded subshell,
   boot_completed wait, disable check, watchdog.
 - Manager button / removal: `module/action.sh` (32 lines) ↔
-  `action.sh` (20 lines); `module/uninstall.sh` (17 lines) ↔
+  `action.sh` (20 lines); `module/uninstall.sh` (30 lines) ↔
   `uninstall.sh` (9 lines) — stop best-effort, keep data.
-- Host packager: `module/build.sh` (381 lines) ↔ `build.sh`
+- Host packager: `module/build.sh` (396 lines) ↔ `build.sh`
   (322 lines) — pinned downloads with verify-before-rename,
   ELF/glibc validation, payload `checksums.sha256`
   self-verification, secret refusal, deterministic ZIP.
