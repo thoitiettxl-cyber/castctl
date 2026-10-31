@@ -753,8 +753,11 @@ env-proxy transports, and the default direct-dial shape, and
 refuses redirects; errors leaving the bot are scrubbed copies
 (token-free at the error-object level, preserving only the
 429/migrate `errors.As` views and sentinel `errors.Is`);
-bot log lines render as class/length summaries only, carrying
-no verbatim error text at any size or shape.
+bot log lines carrying error text render as class/length
+summaries only, with no method field and no verbatim error
+text at any size or shape; the remaining bot log lines carry
+only numeric ids, fixed-vocabulary kinds, a gated
+approval_id, or field lengths.
 The dispatcher is bounded: a 1024-id dedupe window, 64-deep
 per-chat queues with counted drops, 5-minute idle reaping,
 and a 10-second shutdown drain deadline. Startup calls GetMe

@@ -145,7 +145,11 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 	// Runtime logger accessor plus lifecycle wiring and is
 	// step-5 work. Not a leak: every bot log line carrying
 	// error text renders a class/length summary before it
-	// reaches this logger (see internal/telegram summarize).
+	// reaches this logger, and every other bot log line
+	// carries only numeric ids, fixed-vocabulary kinds, a
+	// gated approval_id, or field lengths — no verbatim
+	// caller/server text (see internal/telegram summarize
+	// and logApprovalID).
 	logger := env.Logger
 	if logger == nil {
 		logger = slog.Default()
