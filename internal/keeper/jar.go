@@ -44,6 +44,20 @@ import (
 //   - Tab, newline, or CR in any field is rejected: a value
 //     containing one cannot round-trip through the format.
 //   - Values are verbatim: no quoting, no escaping.
+//
+// Strictness divergence (documented, intentional): ParseJar
+// below requires EXACTLY 7 columns per row, while the legacy
+// reader gateway.ParseCookies accepts >= 7 (extra columns
+// ignored). The keeper is strict because it rewrites the
+// file: silently dropping an extra column on rewrite would
+// destroy data the reader preserved. The gateway reader is
+// lenient because it only builds a Cookie header and must
+// keep reading files other tools wrote (including the
+// 8-column jars `auth import` accepts). The two parsers are
+// deliberately NOT aligned; the strictness boundary is
+// bridged by lockStateOnly (ResetAfterLogin never parses the
+// cookies bytes) and by classifyCookiesFile failing closed
+// on a jar-shaped file ParseJar rejects.
 
 // FilteredDomains is the CDP/Set-Cookie domain filter: only
 // cookies belonging to the Muse session are ever merged or
@@ -57,7 +71,9 @@ var FilteredDomains = []string{"muse.ai", "auth.muse.ai"}
 // Set-Cookie updates and CDP exports. No cookiejar, no
 // http.Cookie smuggling: every field is explicit, including the
 // host-only vs domain-scoped distinction carried by the leading
-// dot on Domain.
+// dot on Domain. The dot is preserved in the stored Domain
+// string (it decides the jar flag on write), but the MERGE key
+// is dot-insensitive: see cookieKey.
 type StoredCookie struct {
 	Name     string
 	Value    string // SECRET MATERIAL: never log or print.
@@ -73,15 +89,27 @@ type StoredCookie struct {
 func (c StoredCookie) Session() bool { return c.Expires == 0 }
 
 // cookieKey is the merge identity: (name, domain, path), domain
-// compared case-insensitively, the leading dot significant
-// (host-only "muse.ai" and domain ".muse.ai" are distinct
-// cookies under RFC 6265).
+// compared case-insensitively and WITHOUT its leading dot.
+// The dot is deliberately insignificant here (loop-2 fix for
+// the B1 duplication): a stored host-only entry ("muse.ai")
+// and a Domain-scoped update (".muse.ai", as EffectiveSetCookie
+// normalizes it) are the same cookie for merge purposes, on
+// both the header-rebuild path (mergeCookieHeader rebuilds
+// stored pairs with a bare domain) and the persisted path
+// (ParseJar keeps the jar's domain verbatim). The keeper never
+// does domain matching on the wire, so collapsing the
+// host-only/domain-scoped distinction in the key loses
+// nothing it uses; the stored Domain string itself still
+// carries the dot, and an upsert replaces it with the
+// update's form. A jar that holds both forms of one cookie
+// deduplicates to the last row (ParseJar) / the update's form
+// (ApplyUpdates).
 type cookieKey struct {
 	name, domain, path string
 }
 
 func (c StoredCookie) key() cookieKey {
-	return cookieKey{name: c.Name, domain: strings.ToLower(c.Domain), path: c.Path}
+	return cookieKey{name: c.Name, domain: strings.ToLower(strings.TrimPrefix(c.Domain, ".")), path: c.Path}
 }
 
 // InFilteredDomain reports whether the cookie belongs to the
@@ -344,11 +372,14 @@ func rebuildIndex(cookies []StoredCookie) map[cookieKey]int {
 
 // ReplaceWithExport replaces the filtered domain set with the
 // validated CDP export: stored entries outside the filter are
-// kept, every stored entry inside the filter is dropped, and
-// the export set takes its place. It returns the new set and
-// the number of stored entries dropped (0 when the previous
-// file was not jar form — the whole file was replaced, and
-// there were no jar entries to count).
+// kept verbatim (including expired ones: their expiries never
+// gate the session, see validateExportedSet), every stored
+// entry inside the filter is dropped, and the export set takes
+// its place — the snapshot is faithful, so absence from the
+// snapshot IS the deletion signal for filtered cookies. It
+// returns the new set and the number of stored entries dropped
+// (0 when the previous file was not jar form — the whole file
+// was replaced, and there were no jar entries to count).
 func ReplaceWithExport(stored []StoredCookie, exported []StoredCookie) ([]StoredCookie, int) {
 	kept := make([]StoredCookie, 0, len(stored))
 	dropped := 0
@@ -378,6 +409,21 @@ func EarliestExpiry(cookies []StoredCookie) *time.Time {
 		}
 	}
 	return earliest
+}
+
+// EarliestFilteredExpiry is EarliestExpiry over the filtered
+// domains only. Non-filtered cookies are operator data the
+// keeper preserves verbatim (ReplaceWithExport keeps them);
+// their expiries must never gate the session. Used by the
+// CDP-export validation gate (validateExportedSet).
+func EarliestFilteredExpiry(cookies []StoredCookie) *time.Time {
+	var filtered []StoredCookie
+	for _, c := range cookies {
+		if InFilteredDomain(c) {
+			filtered = append(filtered, c)
+		}
+	}
+	return EarliestExpiry(filtered)
 }
 
 // DrivingCookie resolves the adaptive-interval driver (freeze

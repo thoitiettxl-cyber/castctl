@@ -125,6 +125,15 @@ type ExportedCookie struct {
 // FromExportedCookie resolves an exported cookie to merge form.
 // The CDP Domain is taken as given (Chromium reports domain
 // cookies with the leading dot); a session cookie has expiry 0.
+//
+// CDP snapshots are FAITHFUL: an exported cookie is recorded
+// exactly as the browser holds it, including an empty value
+// with a future expiry, which is written verbatim — it is NOT
+// a deletion. Deletion in the CDP path happens by ABSENCE:
+// ReplaceWithExport drops every stored filtered-domain entry
+// not present in the snapshot. (Freeze (c)'s empty-value
+// rule applies to Set-Cookie updates via EffectiveSetCookie
+// only, never to snapshots.)
 func FromExportedCookie(c ExportedCookie) StoredCookie {
 	expires := int64(0)
 	if !c.Session && c.Expires > 0 {
@@ -610,10 +619,20 @@ func stopReason(fileMissing bool) string {
 
 // validateExportedSet enforces the pre-write gate for CDP
 // exports: hatch_sess present + non-empty in the MERGED set,
-// and the earliest dated expiry not already past.
+// and the earliest FILTERED-domain expiry not already past.
+// Non-filtered cookies are excluded from both checks (loop-2
+// F2 fix): an expired cookie from an unrelated domain must
+// never veto a valid re-export and sticky-stop the entry.
+// The empty-export stop is unchanged: an export that yields
+// no usable filtered set still stops (P1 decides otherwise).
 func validateExportedSet(merged []StoredCookie, now time.Time) bool {
 	hasHatch := false
+	var filtered []StoredCookie
 	for _, c := range merged {
+		if !InFilteredDomain(c) {
+			continue
+		}
+		filtered = append(filtered, c)
 		if c.Name == "hatch_sess" && c.Value != "" {
 			hasHatch = true
 		}
@@ -621,7 +640,7 @@ func validateExportedSet(merged []StoredCookie, now time.Time) bool {
 	if !hasHatch {
 		return false
 	}
-	if earliest := EarliestExpiry(merged); earliest != nil && !earliest.After(now) {
+	if earliest := EarliestExpiry(filtered); earliest != nil && !earliest.After(now) {
 		return false
 	}
 	return true

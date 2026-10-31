@@ -579,3 +579,182 @@ func TestGatewayCheckerAuthErrorWithDeletion(t *testing.T) {
 		t.Fatalf("error leaks a cookie value: %v", err)
 	}
 }
+
+// TestMergeCookieHeaderDomainScopedRenewal (loop-2 B1): a
+// Domain-scoped Set-Cookie renewal must REPLACE the stored
+// pair in the second chain step's header, not append a second
+// pair. The stored rebuild uses a bare domain ("muse.ai");
+// EffectiveSetCookie normalizes the update's Domain to
+// ".muse.ai". The merge key is dot-insensitive, so the update
+// hits the stored entry. RED on the old code: the header
+// carried hatch_sess=FAKE-NEW; hatch_sess=FAKE-OLD.
+func TestMergeCookieHeaderDomainScopedRenewal(t *testing.T) {
+	raw := "hatch_sess=FAKE-NEW; Domain=.muse.ai; Path=/; Max-Age=2592000; Secure; HttpOnly"
+	c, err := http.ParseSetCookie(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upd := EffectiveSetCookie(c, &url.URL{Scheme: "https", Host: "muse.ai", Path: "/api/session"}, tickNow)
+	if upd.Delete {
+		t.Fatalf("renewal parsed as deletion: %+v", upd)
+	}
+	got := mergeCookieHeader("hatch_sess=FAKE-OLD", []CookieUpdate{upd}, tickNow)
+	if got != "hatch_sess=FAKE-NEW" {
+		t.Fatalf("merged header = %q; want exactly one renewed pair", got)
+	}
+}
+
+// TestMergeCookieHeaderDomainScopedDeletion (loop-2 B1): a
+// Domain-scoped deletion update must remove the stored pair
+// from the second chain step's header. RED on the old code:
+// the stale pair survived.
+func TestMergeCookieHeaderDomainScopedDeletion(t *testing.T) {
+	raw := "hatch_sess=; Domain=.muse.ai; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure; HttpOnly"
+	c, err := http.ParseSetCookie(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upd := EffectiveSetCookie(c, &url.URL{Scheme: "https", Host: "muse.ai", Path: "/api/session"}, tickNow)
+	if !upd.Delete {
+		t.Fatalf("deletion parsed as upsert: %+v", upd)
+	}
+	got := mergeCookieHeader("hatch_sess=FAKE-OLD", []CookieUpdate{upd}, tickNow)
+	if got != "" {
+		t.Fatalf("merged header = %q; want empty", got)
+	}
+}
+
+// TestTickDomainScopedRenewalPersisted (loop-2 B1, persisted
+// path): a host-only stored entry (bare domain, as ParseJar
+// keeps it from a jar row) renewed by a Domain-scoped
+// Set-Cookie update must persist as ONE entry with the new
+// value. RED on the old code: the jar held both values.
+func TestTickDomainScopedRenewalPersisted(t *testing.T) {
+	initial := []StoredCookie{
+		{Name: "hatch_sess", Value: "FAKE-OLD", Domain: "muse.ai", Path: "/", Secure: true, Expires: tickNow.Add(time.Hour).Unix()},
+	}
+	baseDir, cookiesPath, _ := tickFixture(t, initial)
+	raw := "hatch_sess=FAKE-NEW; Domain=.muse.ai; Path=/; Max-Age=2592000; Secure; HttpOnly"
+	c, err := http.ParseSetCookie(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upd := EffectiveSetCookie(c, &url.URL{Scheme: "https", Host: "muse.ai", Path: "/api/session"}, tickNow)
+	checker := &fakeChecker{scripts: []checkScript{{updates: []CookieUpdate{upd}}}}
+	res := tickRun(t, baseDir, tickDeps(&fakeClock{now: tickNow}, checker, nil, nil))
+	if res.Outcome != OutcomeOK || !res.WroteCookies {
+		t.Fatalf("result = %+v; want ok + write", res)
+	}
+	cookies := readJar(t, cookiesPath)
+	if len(cookies) != 1 || cookies[0].Value != "FAKE-NEW" || cookies[0].Domain != ".muse.ai" {
+		t.Fatalf("jar = %+v; want one renewed domain-scoped entry", cookies)
+	}
+}
+
+// TestGatewayCheckerDomainScopedRenewalHeader (loop-2 B1,
+// wire path): the full cheap chain through real
+// http.ParseSetCookie must send the renewed value exactly
+// once to the second step when the renewal is Domain-scoped.
+// RED on the old code: the auth/check header duplicated the
+// pair (stale value validated second).
+func TestGatewayCheckerDomainScopedRenewalHeader(t *testing.T) {
+	var checkHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/session":
+			w.Header().Add("Set-Cookie", "hatch_sess=FAKE-RENEWED; Domain=.muse.ai; Path=/; Max-Age=2592000; Secure; HttpOnly")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"vm_id": "FAKE-VM"}`))
+		case "/api/auth/check":
+			checkHeader = r.Header.Get("Cookie")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token": "FAKE-TOKEN"}`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	client := &http.Client{Transport: &rewriteTransport{target: srv.URL, base: http.DefaultTransport}}
+	checker := &GatewayChecker{Client: client, Clock: &fakeClock{now: tickNow}}
+	if _, _, err := checker.Check(context.Background(), "hatch_sess=FAKE-OLD"); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if checkHeader != "hatch_sess=FAKE-RENEWED" {
+		t.Fatalf("auth/check Cookie header = %q; want exactly one renewed pair", checkHeader)
+	}
+}
+
+// TestTickExportGateIgnoresExpiredUnrelatedCookie (loop-2
+// red-team F2): one expired cookie from an unrelated domain
+// must not veto a valid re-export. The gate scopes to
+// filtered-domain expiries; the unrelated row is preserved
+// verbatim by the merge. RED on the old code: the tick
+// stopped with auth_error and wrote nothing.
+func TestTickExportGateIgnoresExpiredUnrelatedCookie(t *testing.T) {
+	initial := []StoredCookie{
+		{Name: "hatch_sess", Value: "FAKE-OLD", Domain: ".muse.ai", Path: "/", Secure: true, Expires: tickNow.Add(time.Hour).Unix()},
+		{Name: "stale", Value: "FAKE-STALE", Domain: ".example.com", Path: "/", Expires: tickNow.Add(-time.Hour).Unix()},
+	}
+	baseDir, cookiesPath, _ := tickFixture(t, initial)
+	authErr := conn.NewAuthError("api/session -> 401")
+	exported := []ExportedCookie{
+		{Name: "hatch_sess", Value: "FAKE-EXPORTED", Domain: ".muse.ai", Path: "/", Expires: float64(tickNow.Add(30 * 24 * time.Hour).Unix()), Secure: true, HTTPOnly: true},
+	}
+	exporter := &fakeExporter{cookies: exported}
+	checker := &fakeChecker{scripts: []checkScript{{err: authErr}, {}}}
+	res := tickRun(t, baseDir, tickDeps(&fakeClock{now: tickNow}, checker, exporter, nil))
+	if res.Outcome != OutcomeOK || !res.Recovered || res.Stopped {
+		t.Fatalf("result = %+v; want ok+recovered, not stopped", res)
+	}
+	cookies := readJar(t, cookiesPath)
+	var sess, stale *StoredCookie
+	for i := range cookies {
+		switch cookies[i].Name {
+		case "hatch_sess":
+			sess = &cookies[i]
+		case "stale":
+			stale = &cookies[i]
+		}
+	}
+	if sess == nil || sess.Value != "FAKE-EXPORTED" {
+		t.Fatalf("jar = %+v; want the exported hatch_sess", cookies)
+	}
+	if stale == nil || stale.Value != "FAKE-STALE" {
+		t.Fatalf("jar = %+v; want the unrelated row preserved verbatim", cookies)
+	}
+}
+
+// TestCDPSnapshotFaithfulEmptyValue (loop-2 red-team F3,
+// decision-text correction): a CDP snapshot is recorded
+// faithfully — an empty value with a future expiry is
+// written verbatim, and deletion happens by absence from
+// the snapshot. This pins the corrected semantics; the old
+// code already behaved this way, the PR body did not say so.
+func TestCDPSnapshotFaithfulEmptyValue(t *testing.T) {
+	exp := FromExportedCookie(ExportedCookie{Name: "victim", Value: "", Domain: ".muse.ai", Path: "/", Expires: float64(tickNow.Add(time.Hour).Unix())})
+	if exp.Value != "" || exp.Name != "victim" {
+		t.Fatalf("FromExportedCookie = %+v; want the empty value preserved", exp)
+	}
+	stored := []StoredCookie{
+		{Name: "victim", Value: "FAKE-REAL", Domain: ".muse.ai", Path: "/", Expires: tickNow.Add(time.Hour).Unix()},
+		{Name: "keeper", Value: "FAKE-KEEP", Domain: ".muse.ai", Path: "/", Expires: tickNow.Add(time.Hour).Unix()},
+	}
+	merged, _ := ReplaceWithExport(stored, []StoredCookie{exp, stored[1]})
+	var victim *StoredCookie
+	for i := range merged {
+		if merged[i].Name == "victim" {
+			victim = &merged[i]
+		}
+	}
+	if victim == nil || victim.Value != "" {
+		t.Fatalf("merged = %+v; want the empty-value row written verbatim", merged)
+	}
+	// Absence deletes: a filtered cookie missing from the
+	// snapshot is dropped.
+	merged2, _ := ReplaceWithExport(stored, []StoredCookie{stored[1]})
+	for _, c := range merged2 {
+		if c.Name == "victim" {
+			t.Fatalf("merged2 = %+v; want victim dropped by absence", merged2)
+		}
+	}
+}
