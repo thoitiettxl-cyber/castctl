@@ -54,12 +54,15 @@ const (
 )
 
 // Tick outcomes: the closed enum for LastTickOutcome.
-// OutcomeError is tick-result-only: a tick that could not run or
-// persist because the profile state directory could not be
-// created. It is never written to the state file (no state file
-// can be written when its directory does not exist) and never
-// "skipped": "skipped" is reserved for a login in progress or a
-// held lock.
+// OutcomeError is tick-result-only: a hard failure — the tick
+// could not run or persist because of a filesystem/lock error
+// other than a held lock (state-directory creation, lock
+// acquisition other than a timeout, cookies/state save). It is
+// never written to the state file as a LastTickOutcome value
+// by the paths that produce it (the state could not be
+// persisted) and never "skipped": "skipped" is reserved for a
+// login in progress or a held lock, matched by exact sentinel
+// errors only.
 const (
 	OutcomeNever          = "never"
 	OutcomeOK             = "ok"

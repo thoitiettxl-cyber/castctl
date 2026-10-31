@@ -165,23 +165,32 @@ type Exporter interface {
 // TickDeps wires one entry's tick. Checker is required;
 // Exporter and Notifier may be nil (no export attempt, no
 // notices). Clock nil means RealClock.
+//
+// BeforeStateSave is a TEST SEAM, nil by default: when set, it
+// is invoked synchronously by the state-save path after the
+// state directory is re-ensured and before the state file is
+// written, so a test can fault the save deterministically
+// (e.g. remove the directory). Production code must leave it
+// nil; when nil it changes nothing.
 type TickDeps struct {
-	Clock       Clock
-	Entry       *profile.KeeperEntry
-	BaseDir     string
-	Profile     *profile.Profile
-	Checker     Checker
-	Exporter    Exporter
-	Notifier    Notifier
-	Jitter      func() float64
-	LockTimeout time.Duration
+	Clock           Clock
+	Entry           *profile.KeeperEntry
+	BaseDir         string
+	Profile         *profile.Profile
+	Checker         Checker
+	Exporter        Exporter
+	Notifier        Notifier
+	Jitter          func() float64
+	LockTimeout     time.Duration
+	BeforeStateSave func()
 }
 
 // TickResult is one tick's observable outcome. Outcome uses the
-// state outcome enum; OutcomeError means the state directory
-// could not be created (loud failure, never "skipped"). Err is
-// the underlying typed error for command-layer exit mapping
-// and is never printed directly.
+// state outcome enum; OutcomeError is a hard failure — the tick
+// could not run or persist because of a lock, state-directory,
+// or save error other than a held lock (see classifyLockError).
+// Err is the underlying typed error for command-layer exit
+// mapping and is never printed directly.
 // Recovered reports a CDP re-export recovery: the command layer
 // sends the re-exported notice after Tick returns (never under
 // the file lock). StateCorrupt reports that the state file was
@@ -208,12 +217,15 @@ type TickResult struct {
 // Store serialises one profile's cookies file + state file
 // access behind the cookies-file lock. A Store holds no lock
 // itself: lock() acquires it for one short window.
+// beforeStateSave is the TickDeps test seam, copied by Tick;
+// it is nil for every other Store user.
 type Store struct {
-	baseDir     string
-	profileName string
-	cookiesPath string
-	profileDir  string
-	lockTimeout time.Duration
+	baseDir         string
+	profileName     string
+	cookiesPath     string
+	profileDir      string
+	lockTimeout     time.Duration
+	beforeStateSave func()
 }
 
 // NewStore resolves the profile's cookies path and state dir.
@@ -265,15 +277,14 @@ type lockedStore struct {
 
 // ensureStateDir creates the profile (state) directory when it
 // is missing, with the existing profile-dir semantics
-// (EnsureProfileDir: 0700 for named profiles, the base dir
-// itself for the default profile). The cookies-file lock only
-// creates the directory for the default cookies path, so a
-// profile whose cookies file lives outside the config dir
-// would otherwise tick with nowhere to save state: SaveState
-// fails and the tick collapses to "skipped" with no state
-// file, while the cookies file was already rewritten
-// (K-LIVE-1). A creation failure is wrapped in ErrStateDir so
-// callers fail loudly instead of skipping.
+// (EnsureProfileDir: 0700 for named profiles and for the
+// default profile's config dir). It runs BEFORE the
+// cookies-file lock is taken, so a creation failure is
+// classified as ErrStateDir on every route — including the
+// default cookies path, where LockCookiesFile's own parent
+// creation would otherwise return the failure unwrapped
+// (K-LIVE-1/B1). A creation failure is wrapped in ErrStateDir
+// so callers fail loudly instead of skipping.
 func (s *Store) ensureStateDir() error {
 	if _, err := profile.EnsureProfileDir(s.baseDir, s.profileName); err != nil {
 		return fmt.Errorf("%w: %q: %w", ErrStateDir, s.profileDir, err)
@@ -281,13 +292,55 @@ func (s *Store) ensureStateDir() error {
 	return nil
 }
 
+// classifyLockError is the ONE mapping from a lock-acquisition
+// (or lock-window load/parse) failure to a Tick outcome: only
+// a held lock — the exact ErrCookiesLockTimeout sentinel,
+// matched with errors.Is, never message text — is "skipped".
+// A state-directory failure and every other error is a hard
+// failure (OutcomeError). No other site in Tick or its helpers
+// may map a lock error to OutcomeSkipped.
+func classifyLockError(err error) (outcome, stage string) {
+	if errors.Is(err, profile.ErrCookiesLockTimeout) {
+		return OutcomeSkipped, "lock"
+	}
+	return OutcomeError, "save"
+}
+
+// saveState is the one state-save path used by Tick and its
+// helpers: re-ensure the state directory (it may have been
+// removed after the lock was taken), fire the BeforeStateSave
+// test seam (nil in production), then SaveState. Any error
+// from it is a hard failure for the caller: it must never be
+// swallowed into a "skipped" or primary outcome. The
+// ensure-step error is already wrapped as ErrStateDir; a
+// SaveState error is returned unwrapped and the caller maps
+// it to OutcomeError regardless of kind.
+func (s *Store) saveState(st *SessionState) error {
+	if err := s.ensureStateDir(); err != nil {
+		return err
+	}
+	if s.beforeStateSave != nil {
+		s.beforeStateSave()
+	}
+	return SaveState(s.profileDir, st)
+}
+
 func (s *Store) lock() (*lockedStore, error) {
-	release, err := profile.LockCookiesFile(s.baseDir, s.profileName, s.cookiesPath, s.lockTimeout)
-	if err != nil {
+	// State dir first: a creation failure must surface as
+	// ErrStateDir before any lock error can mask it, and the
+	// lock's own parent creation (default path) must not be
+	// the only route that creates the directory.
+	if err := s.ensureStateDir(); err != nil {
 		return nil, err
 	}
-	if err := s.ensureStateDir(); err != nil {
-		release()
+	release, err := profile.LockCookiesFile(s.baseDir, s.profileName, s.cookiesPath, s.lockTimeout)
+	if err != nil {
+		// Defence in depth for the ensure→lock window: a
+		// profile-dir failure raised inside LockCookiesFile
+		// (default path) carries the profile sentinel.
+		if errors.Is(err, profile.ErrProfileDir) {
+			return nil, fmt.Errorf("%w: %q: %w", ErrStateDir, s.profileDir, err)
+		}
 		return nil, err
 	}
 	ls := &lockedStore{store: s, release: release, jarForm: true}
@@ -337,12 +390,16 @@ func (ls *lockedStore) unlock() { ls.release() }
 // markers must never fail on the cookies bytes. The lock
 // still serialises against keeper ticks.
 func (s *Store) lockStateOnly() (*lockedStore, error) {
-	release, err := profile.LockCookiesFile(s.baseDir, s.profileName, s.cookiesPath, s.lockTimeout)
-	if err != nil {
+	// Same order as lock(): state dir first, then the lock,
+	// with the profile-dir wrap for the ensure→lock window.
+	if err := s.ensureStateDir(); err != nil {
 		return nil, err
 	}
-	if err := s.ensureStateDir(); err != nil {
-		release()
+	release, err := profile.LockCookiesFile(s.baseDir, s.profileName, s.cookiesPath, s.lockTimeout)
+	if err != nil {
+		if errors.Is(err, profile.ErrProfileDir) {
+			return nil, fmt.Errorf("%w: %q: %w", ErrStateDir, s.profileDir, err)
+		}
 		return nil, err
 	}
 	st, err := LoadState(s.profileDir)
@@ -443,24 +500,25 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 	fail := func(outcome, stage string, err error) TickResult {
 		return TickResult{Outcome: outcome, Stage: stage, Err: err, NextDelay: base, StateCorrupt: corruptSeen}
 	}
+	// failSave is fail() for save-path failures: the outcome is
+	// always the hard OutcomeError, and WroteCookies carries
+	// whether the cookies file was already rewritten, so the
+	// JSON never claims "wrote=false" for a file that changed.
+	failSave := func(stage string, err error, wrote bool) TickResult {
+		return TickResult{Outcome: OutcomeError, Stage: stage, Err: err, NextDelay: base, StateCorrupt: corruptSeen, WroteCookies: wrote}
+	}
 
 	store, err := NewStore(deps.BaseDir, deps.Profile, deps.LockTimeout)
 	if err != nil {
-		return fail(OutcomeSkipped, "save", err)
+		return fail(OutcomeError, "save", err)
 	}
+	store.beforeStateSave = deps.BeforeStateSave
 
 	// Phase 1: locked snapshot.
 	ls, err := store.lock()
 	if err != nil {
-		if IsStateDirError(err) {
-			// Loud, never skipped: the tick has nowhere
-			// to persist state (K-LIVE-1).
-			return fail(OutcomeError, "save", err)
-		}
-		if errors.Is(err, profile.ErrCookiesLockTimeout) {
-			return fail(OutcomeSkipped, "lock", err)
-		}
-		return fail(OutcomeSkipped, "save", err)
+		outcome, stage := classifyLockError(err)
+		return fail(outcome, stage, err)
 	}
 	corruptSeen = ls.stateCorrupt
 	state := ls.state
@@ -471,7 +529,10 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 			state.LastTickOutcome = OutcomeSkipped
 			state.LastTickStage = ""
 			state.NextCheckAt = &next
-			_ = SaveState(store.profileDir, state)
+			if err := store.saveState(state); err != nil {
+				ls.unlock()
+				return failSave("save", err, false)
+			}
 			ls.unlock()
 			return TickResult{Outcome: OutcomeSkipped, NextDelay: base, StateCorrupt: corruptSeen}
 		}
@@ -479,7 +540,10 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 		state.LoginActive = false
 		state.LoginSessionID = ""
 		state.LoginStartedAt = nil
-		_ = SaveState(store.profileDir, state)
+		if err := store.saveState(state); err != nil {
+			ls.unlock()
+			return failSave("save", err, false)
+		}
 	}
 	if state.KeeperStopped {
 		pending := state.WarnPending
@@ -495,7 +559,11 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 					ls2.state.WarnSent = true
 					warned := clock.Now()
 					ls2.state.WarnedAt = &warned
-					_ = SaveState(store.profileDir, ls2.state)
+					// Best-effort marker clear: a failed
+					// save leaves the marker pending for
+					// a later tick; it cannot change the
+					// stopped outcome already determined.
+					_ = store.saveState(ls2.state)
 					ls2.unlock()
 				}
 			}
@@ -524,6 +592,13 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 			break
 		}
 		if ctx.Err() != nil {
+			// Exception E1 (disclosed): context cancellation
+			// is an abort signal, not a lock/save error, and
+			// the command layer intercepts ctx.Err()
+			// (interrupt/timeout) before this outcome is
+			// surfaced, so it never reaches the user as a
+			// healthy skip. Reclassifying it would break
+			// the tick-timeout exit contract.
 			return fail(OutcomeSkipped, "session", ctx.Err())
 		}
 		delay, ok := backoff.NextDelay()
@@ -587,14 +662,8 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 	// Phase 3: locked merge + write + state.
 	ls, err = store.lock()
 	if err != nil {
-		if IsStateDirError(err) {
-			// Loud, never skipped: same rule as phase 1.
-			return fail(OutcomeError, "save", err)
-		}
-		if errors.Is(err, profile.ErrCookiesLockTimeout) {
-			return fail(OutcomeSkipped, "lock", err)
-		}
-		return fail(OutcomeSkipped, "save", err)
+		outcome, stage := classifyLockError(err)
+		return fail(outcome, stage, err)
 	}
 	corruptSeen = corruptSeen || ls.stateCorrupt
 	defer ls.unlock()
@@ -606,7 +675,9 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 		st.LastTickStage = ""
 		next := clock.Now().Add(base)
 		st.NextCheckAt = &next
-		_ = SaveState(store.profileDir, st)
+		if err := store.saveState(st); err != nil {
+			return failSave("save", err, false)
+		}
 		return TickResult{Outcome: OutcomeSkipped, NextDelay: base, StateCorrupt: corruptSeen}
 	}
 	now2 := clock.Now()
@@ -623,12 +694,12 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 		shouldWrite = !ls.fileMissing || len(merged) > 0
 		data, err := SerializeJar(merged)
 		if err != nil {
-			return fail(OutcomeSkipped, "save", err)
+			return failSave("save", err, false)
 		}
 		if shouldWrite {
 			wrote, err = ls.saveJar(data)
 			if err != nil {
-				return fail(OutcomeSkipped, "save", err)
+				return failSave("save", err, false)
 			}
 			written = data
 		}
@@ -637,12 +708,12 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 		shouldWrite = !ls.fileMissing || len(merged) > 0
 		data, err := SerializeJar(merged)
 		if err != nil {
-			return fail(OutcomeSkipped, "save", err)
+			return failSave("save", err, false)
 		}
 		if shouldWrite {
 			wrote, err = ls.saveJar(data)
 			if err != nil {
-				return fail(OutcomeSkipped, "save", err)
+				return failSave("save", err, false)
 			}
 			written = data
 		}
@@ -670,8 +741,8 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 	delay := NextDelayAfter(base, st.DrivingExpiry, now2)
 	next := now2.Add(delay)
 	st.NextCheckAt = &next
-	if err := SaveState(store.profileDir, st); err != nil {
-		return fail(OutcomeSkipped, "save", err)
+	if err := store.saveState(st); err != nil {
+		return failSave("save", err, wrote)
 	}
 	return TickResult{
 		Outcome: OutcomeOK, Recovered: recovered,
@@ -752,7 +823,10 @@ func runExport(ctx context.Context, exp Exporter) ([]StoredCookie, int, error) {
 func recordTransient(clock Clock, store *Store, base time.Duration, err error, stage string) TickResult {
 	ls, lerr := store.lock()
 	if lerr != nil {
-		return TickResult{Outcome: OutcomeTransientError, Stage: stage, Err: err, NextDelay: base}
+		if errors.Is(lerr, profile.ErrCookiesLockTimeout) {
+			return TickResult{Outcome: OutcomeTransientError, Stage: stage, Err: err, NextDelay: base}
+		}
+		return TickResult{Outcome: OutcomeError, Stage: "save", Err: errors.Join(lerr, err), NextDelay: base}
 	}
 	defer ls.unlock()
 	st := ls.state
@@ -763,7 +837,9 @@ func recordTransient(clock Clock, store *Store, base time.Duration, err error, s
 	st.RefreshCookieRecords(ls.cookies, now2)
 	next := now2.Add(base)
 	st.NextCheckAt = &next
-	_ = SaveState(store.profileDir, st)
+	if serr := store.saveState(st); serr != nil {
+		return TickResult{Outcome: OutcomeError, Stage: "save", Err: errors.Join(serr, err), NextDelay: base, StateCorrupt: ls.stateCorrupt}
+	}
 	return TickResult{Outcome: OutcomeTransientError, Stage: stage, Err: err, NextDelay: base, StateCorrupt: ls.stateCorrupt}
 }
 
@@ -773,7 +849,10 @@ func recordTransient(clock Clock, store *Store, base time.Duration, err error, s
 func recordExportFailed(clock Clock, store *Store, base time.Duration, err error) TickResult {
 	ls, lerr := store.lock()
 	if lerr != nil {
-		return TickResult{Outcome: OutcomeExportFailed, Stage: "export", Err: err, NextDelay: base}
+		if errors.Is(lerr, profile.ErrCookiesLockTimeout) {
+			return TickResult{Outcome: OutcomeExportFailed, Stage: "export", Err: err, NextDelay: base}
+		}
+		return TickResult{Outcome: OutcomeError, Stage: "save", Err: errors.Join(lerr, err), NextDelay: base}
 	}
 	defer ls.unlock()
 	st := ls.state
@@ -784,7 +863,9 @@ func recordExportFailed(clock Clock, store *Store, base time.Duration, err error
 	st.RefreshCookieRecords(ls.cookies, now2)
 	next := now2.Add(base)
 	st.NextCheckAt = &next
-	_ = SaveState(store.profileDir, st)
+	if serr := store.saveState(st); serr != nil {
+		return TickResult{Outcome: OutcomeError, Stage: "save", Err: errors.Join(serr, err), NextDelay: base, StateCorrupt: ls.stateCorrupt}
+	}
 	return TickResult{Outcome: OutcomeExportFailed, Stage: "export", Err: err, NextDelay: base, StateCorrupt: ls.stateCorrupt}
 }
 
@@ -803,19 +884,27 @@ func recordExportFailed(clock Clock, store *Store, base time.Duration, err error
 func stopEntry(clock Clock, store *Store, base time.Duration, updates []CookieUpdate, jarForm bool, fileMissing bool, reason string, cause error) TickResult {
 	ls, lerr := store.lock()
 	if lerr != nil {
-		return TickResult{Outcome: OutcomeAuthError, Stage: "session", Stopped: true, Err: cause, NextDelay: 0}
+		if errors.Is(lerr, profile.ErrCookiesLockTimeout) {
+			return TickResult{Outcome: OutcomeAuthError, Stage: "session", Stopped: true, Err: cause, NextDelay: 0}
+		}
+		return TickResult{Outcome: OutcomeError, Stage: "save", Stopped: true, Err: errors.Join(lerr, cause), NextDelay: 0}
 	}
 	defer ls.unlock()
 	st := ls.state
 	now2 := clock.Now()
 	wasLoggedOut := st.LoggedOut
 	merged := ls.cookies
+	wrote := false
 	if jarForm {
 		merged = ApplyUpdates(ls.cookies, updates)
 		if !fileMissing || len(merged) > 0 {
 			data, err := SerializeJar(merged)
 			if err == nil {
-				_, _ = ls.saveJar(data)
+				var serr error
+				wrote, serr = ls.saveJar(data)
+				if serr != nil {
+					return TickResult{Outcome: OutcomeError, Stage: "save", Stopped: true, Err: errors.Join(serr, cause), NextDelay: 0, StateCorrupt: ls.stateCorrupt}
+				}
 			}
 		}
 	} else {
@@ -838,8 +927,10 @@ func stopEntry(clock Clock, store *Store, base time.Duration, updates []CookieUp
 			st.WarnKind = string(NoticeFailed)
 		}
 	}
-	_ = SaveState(store.profileDir, st)
-	return TickResult{Outcome: OutcomeAuthError, Stage: "session", Stopped: true, Err: cause, NextDelay: 0, StateCorrupt: ls.stateCorrupt}
+	if serr := store.saveState(st); serr != nil {
+		return TickResult{Outcome: OutcomeError, Stage: "save", Stopped: true, Err: errors.Join(serr, cause), NextDelay: 0, StateCorrupt: ls.stateCorrupt, WroteCookies: wrote}
+	}
+	return TickResult{Outcome: OutcomeAuthError, Stage: "session", Stopped: true, Err: cause, NextDelay: 0, StateCorrupt: ls.stateCorrupt, WroteCookies: wrote}
 }
 
 // NotifyStopped sends the pending warn-once notice for a
@@ -881,7 +972,10 @@ func NotifyStopped(ctx context.Context, deps TickDeps, notifier Notifier) {
 	ls2.state.WarnSent = true
 	warned := clock.Now()
 	ls2.state.WarnedAt = &warned
-	_ = SaveState(store.profileDir, ls2.state)
+	// Best-effort marker clear (same disclosed exception as
+	// the Tick retry path): a failed save leaves the marker
+	// pending; it cannot change a notification outcome.
+	_ = store.saveState(ls2.state)
 }
 
 // ResetAfterLogin clears a sticky stop after a successful login
@@ -913,5 +1007,5 @@ func ResetAfterLogin(baseDir string, prof *profile.Profile, clock Clock) error {
 	st.LoginActive = false
 	st.LoginSessionID = ""
 	st.LoginStartedAt = nil
-	return SaveState(store.profileDir, st)
+	return store.saveState(st)
 }

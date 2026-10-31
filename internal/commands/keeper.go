@@ -63,7 +63,7 @@ adaptive rule shortens it once a cookie expiry is observed).
 
 check exit codes:
   0  healthy (or skipped: login in progress / lock held)
-  1  state-directory failure (outcome "error", never skipped)
+  1  hard failure: lock (other than held), state-directory, or state-save failure (outcome "error", never skipped)
   2  config error (no keeper block, dangling refs, bad selection)
   3  entry stopped (auth expired) or export failed
   4  tick timeout
@@ -85,8 +85,9 @@ const keeperCheckHelpText = `usage: castctl keeper check [--tag TAG | --profile 
 Run one tick now for each selected entry and print one JSON
 object per entry: tag, profile, outcome, stopped, cookies
 seen, whether the cookies file was written, and the next
-check time. Exit codes: 0 healthy, 1 state-directory failure
-(outcome "error", never "skipped"), 2 config, 3 entry
+check time. Exit codes: 0 healthy, 1 hard failure
+(lock other than held, state-directory, or state-save
+failure; outcome "error", never "skipped"), 2 config, 3 entry
 stopped (auth expired) or export failed, 4 timeout (90s per
 entry).
 A transient error surfaces through the normal error
@@ -433,7 +434,7 @@ func cmdKeeperRun(ctx context.Context, env *Env, g *globalOpts, args []string) e
 	// the entry and exit 2.
 	for _, res := range results {
 		if res.Ticks == 0 && res.Last.Err != nil {
-			fmt.Fprintf(env.stdout(), "keeper: %s: skipped (factory error, entry never ticked)\n",
+			fmt.Fprintf(env.stdout(), "keeper: %s: failed (factory error, entry never ticked)\n",
 				keeper.SanitizeDisplay(res.Tag))
 			return errCode(2, res.Last.Err)
 		}
@@ -506,6 +507,13 @@ func cmdKeeperCheck(ctx context.Context, env *Env, g *globalOpts, args []string)
 		if err := writeJSON(env.stdout(), out); err != nil {
 			return err
 		}
+		// A hard failure (OutcomeError) is remembered even
+		// when the entry also stopped: the typed error must
+		// surface after the loop (exit 1) instead of being
+		// swallowed into the stopped exit 3.
+		if res.Outcome == keeper.OutcomeError && res.Err != nil && firstSurfacedErr == nil {
+			firstSurfacedErr = res.Err
+		}
 		switch {
 		case timedOut:
 			worst = 4
@@ -527,7 +535,7 @@ func cmdKeeperCheck(ctx context.Context, env *Env, g *globalOpts, args []string)
 				worst = 1
 			}
 		case res.Outcome == keeper.OutcomeError:
-			// State-directory failure (K-LIVE-1): loud,
+			// Hard failure (K-LIVE-1/B1/B2): loud,
 			// never skipped. Same shape as the transient
 			// path — print every entry, then return the
 			// first typed error (a plain error, so the

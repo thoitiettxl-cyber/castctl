@@ -414,13 +414,19 @@ Behaviour:
   The driving cookie is `hatch_sess` when present with a
   non-session expiry, else the earliest expiry; both fields
   are carried in state so the choice stays a resolver change.
-  The profile directory is created (0700 for named profiles)
-  when a tick first needs it, including when the profile's
-  cookies file lives outside the config dir. If the directory
-  cannot be created, the tick reports outcome `error` and
-  `keeper check` exits non-zero with the directory named —
-  never `skipped`, which is reserved for a login in progress
-  or a held lock.
+  The profile directory is created (0700, including the
+  default profile's config dir) when a tick first needs it,
+  including when the profile's cookies file lives outside the
+  config dir, and re-ensured before every state save. If the
+  directory cannot be created, or any lock or state-save step
+  fails for any reason other than a held lock, the tick
+  reports outcome `error` and `keeper check` exits non-zero
+  with the problem named — never `skipped`, which is
+  reserved for a login in progress or a held lock (matched
+  by exact sentinel errors only). The one exception is a
+  cancelled context (interrupt or tick timeout), which the
+  command layer maps to its own exit codes before the
+  outcome is surfaced.
   A corrupt or unknown-version state file does NOT brick the
   keeper: ticks substitute a fresh state, re-observe from the
   cookies file, and flag `state_corrupt` in `keeper check`
@@ -438,7 +444,10 @@ Behaviour:
   returned after all entries print), and an interrupt ends
   the command instead of being swallowed as a skip. A
   state-directory failure likewise surfaces as a non-zero
-  exit (outcome `error`), never as `skipped`.
+  exit (outcome `error`, with `wrote_cookies` reporting
+  whether the cookies file was actually rewritten), never
+  as `skipped`. The same holds for any other lock or
+  state-save failure other than a held lock.
 - **Notifications.** Fixed content only: profile name,
   outcome, the re-login path (`auth login` / `auth import`),
   and "No action was taken automatically." No secrets, no

@@ -66,7 +66,7 @@ func runEntry(ctx context.Context, entry *profile.KeeperEntry, prof *profile.Pro
 	res := RunResult{Tag: entry.Tag}
 	deps, err := factory(entry, prof)
 	if err != nil {
-		res.Last = TickResult{Outcome: OutcomeSkipped, Err: err}
+		res.Last = TickResult{Outcome: OutcomeError, Err: err}
 		return res
 	}
 	clock := deps.Clock

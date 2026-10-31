@@ -36,6 +36,16 @@ import (
 // must be skipped, never forced.
 var ErrCookiesLockTimeout = errors.New("cookies lock timeout")
 
+// ErrProfileDir marks a failure to create the profile directory
+// (the state directory for the keeper) inside ensureCookiesParent.
+// It is a profile-package sentinel so callers that own the
+// state-directory contract (the keeper, whose ErrStateDir the
+// profile package cannot import without a cycle) can classify
+// the failure without string matching. A lock-acquisition
+// failure (flock timeout, lock-file creation) never carries
+// this sentinel.
+var ErrProfileDir = errors.New("cannot create profile directory")
+
 // ensureCookiesParent applies the same parent-directory rules as
 // WriteCookiesFile: the default path goes through EnsureProfileDir,
 // any other inside-baseDir path gets its parent created at 0700,
@@ -49,8 +59,10 @@ func ensureCookiesParent(baseDir, profileName, cookiesPath string) error {
 	}
 	switch {
 	case cookiesPath == paths.Cookies:
-		_, err := EnsureProfileDir(baseDir, profileName)
-		return err
+		if _, err := EnsureProfileDir(baseDir, profileName); err != nil {
+			return fmt.Errorf("%w: %w", ErrProfileDir, err)
+		}
+		return nil
 	case isInsideDir(cookiesPath, baseDir):
 		return os.MkdirAll(filepath.Dir(cookiesPath), 0o700)
 	default:

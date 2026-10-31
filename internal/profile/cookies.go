@@ -19,7 +19,7 @@ import (
 // (Profile.CookiesFile); it is never recomputed here. The parent
 // directory is created only when the path is inside baseDir
 // (CONFIG_DIR): the profile's default path goes through
-// EnsureProfileDir (0700 for named profiles, 0755 for the default
+// EnsureProfileDir (0700 for named profiles and for the default
 // directory), any other inside path gets its parent created at 0700.
 // A path outside baseDir is written only when its parent already
 // exists; a missing outside parent is an error (fail closed: never
@@ -37,10 +37,11 @@ import (
 // remains that symlink (no copy is made and no chmod is done,
 // so the symlink's target keeps its mode and content
 // untouched) and only the new cookies file ends at 0600. The
-// cookies file gets its mode via the temp file; .bak is a
-// fresh file created at 0600 (plus an explicit chmod), so a
-// stale .bak's mode never survives. No previous file means
-// no .bak and backup=false.
+// cookies file gets its mode via the temp file; .bak is
+// written to a temp file at 0600, fsynced, and renamed over
+// any stale .bak, so a stale .bak's mode never survives and
+// the previous .bak is preserved until the new copy is
+// durable. No previous file means no .bak and backup=false.
 // Concurrent imports are last-writer-wins: each write is atomic
 // (rename), there is no torn file, and no lock is taken — the
 // flock+sha256 guard protects config.json only and does not apply
@@ -102,13 +103,20 @@ func WriteCookiesFile(baseDir, profileName, cookiesPath string, data []byte) (bo
 
 // backupCookiesFile copies the previous cookies file to bak
 // BEFORE the new file is renamed over the destination, so the
-// destination is never absent mid-write (K-LIVE-2). A stale
-// .bak is replaced, never reused: the copy is a fresh file at
-// mode 0600. A directory at the .bak path is an error, never
-// removed, so a failed backup leaves the destination
-// untouched. When the previous file is a symlink, .bak is
-// created as a symlink to the same target and the target is
-// never read or chmodded.
+// destination is never absent mid-write (K-LIVE-2). The copy is
+// written to a temp file in the same directory, fsynced, and
+// renamed over .bak: the previous .bak survives until the new
+// copy is durable, and a failed copy leaves both the previous
+// .bak and the destination untouched. The directory entry is
+// synced best-effort after the rename (errors ignored: opening
+// a directory for sync is not portable everywhere); the file
+// sync itself is required and its error propagates. A
+// directory at the .bak path is an error, never removed, so a
+// failed backup leaves the destination untouched. When the
+// previous file is a symlink, .bak is created as a symlink to
+// the same target (via a temp link name + rename, so a stale
+// .bak symlink is replaced atomically) and the target is never
+// read or chmodded.
 func backupCookiesFile(cookiesPath, bak string) error {
 	if st, err := os.Stat(bak); err == nil && st.IsDir() {
 		return fmt.Errorf("backup path %q is a directory", bak)
@@ -117,40 +125,79 @@ func backupCookiesFile(cookiesPath, bak string) error {
 	if err != nil {
 		return err
 	}
+	dir := filepath.Dir(bak)
 	if lst.Mode()&os.ModeSymlink != 0 {
 		target, err := os.Readlink(cookiesPath)
 		if err != nil {
 			return err
 		}
-		if err := os.Symlink(target, bak); err != nil {
-			if !os.IsExist(err) {
-				return err
-			}
-			if err := os.Remove(bak); err != nil {
-				return err
-			}
-			return os.Symlink(target, bak)
+		// Link at a temp name, then rename over .bak: the
+		// stale .bak (if any) is replaced atomically and
+		// survives a failed link creation.
+		tmp, err := os.CreateTemp(dir, ".cookies-bak-*.tmp")
+		if err != nil {
+			return err
 		}
+		tmpName := tmp.Name()
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		if err := os.Symlink(target, tmpName); err != nil {
+			_ = os.Remove(tmpName)
+			return err
+		}
+		if err := os.Rename(tmpName, bak); err != nil {
+			_ = os.Remove(tmpName)
+			return err
+		}
+		syncDir(dir)
 		return nil
 	}
 	data, err := os.ReadFile(cookiesPath)
 	if err != nil {
 		return err
 	}
-	// Replace any stale .bak (regular file or symlink): the
-	// copy must be a fresh file, never a write through a
-	// stale symlink into its target. A directory was refused
-	// above, so Remove here cannot delete one.
-	_ = os.Remove(bak)
-	if err := os.WriteFile(bak, data, 0o600); err != nil {
+	tmp, err := os.CreateTemp(dir, ".cookies-bak-*.tmp")
+	if err != nil {
 		return err
 	}
-	// Fresh files already carry 0600; the explicit chmod is
-	// defence in depth for a stale file the Remove missed.
-	if lst, lerr := os.Lstat(bak); lerr == nil && lst.Mode()&os.ModeSymlink == 0 {
-		if err := os.Chmod(bak, 0o600); err != nil {
-			return err
-		}
+	tmpName := tmp.Name()
+	fail := func(err error) error {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
 	}
+	if err := tmp.Chmod(0o600); err != nil {
+		return fail(err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, bak); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	syncDir(dir)
 	return nil
+}
+
+// syncDir fsyncs a directory entry best-effort: a crash after
+// the rename must not lose the new .bak name on filesystems
+// that journal directory entries separately. Errors are
+// ignored (opening a directory for sync is not portable on
+// every target); the backup copy's own Sync above is the
+// required durability step.
+func syncDir(dir string) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = f.Sync()
+	_ = f.Close()
 }
