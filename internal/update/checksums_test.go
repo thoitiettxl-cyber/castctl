@@ -156,15 +156,15 @@ func TestParseChecksumsDuplicates(t *testing.T) {
 
 func TestParseChecksumsMalformed(t *testing.T) {
 	bad := [][]byte{
-		[]byte(""),                                                     // empty (A-02)
-		[]byte("abc  " + testAssetName + "\n"),                        // short hash (A-13)
-		[]byte(testAssetHex + "a  " + testAssetName + "\n"),           // 65 chars (A-13)
-		[]byte(strings.Repeat("g", 64) + "  " + testAssetName + "\n"), // non-hex (A-13)
-		[]byte("  " + testAssetName + "\n"),                           // empty hash (A-13)
-		[]byte("-  " + testAssetName + "\n"),                          // dash hash (A-13)
-		[]byte(testAssetHex + "  \n"),                                 // empty filename
-		[]byte("\\" + testAssetHex + "  " + testAssetName + "\n"),     // escaped (A-15)
-		[]byte(testAssetHex + "  " + testAssetName + "\x00x\n"),       // NUL (A-17ii)
+		[]byte(""),                             // empty (A-02)
+		[]byte("abc  " + testAssetName + "\n"), // short hash (A-13)
+		[]byte(testAssetHex + "a  " + testAssetName + "\n"),             // 65 chars (A-13)
+		[]byte(strings.Repeat("g", 64) + "  " + testAssetName + "\n"),   // non-hex (A-13)
+		[]byte("  " + testAssetName + "\n"),                             // empty hash (A-13)
+		[]byte("-  " + testAssetName + "\n"),                            // dash hash (A-13)
+		[]byte(testAssetHex + "  \n"),                                   // empty filename
+		[]byte("\\" + testAssetHex + "  " + testAssetName + "\n"),       // escaped (A-15)
+		[]byte(testAssetHex + "  " + testAssetName + "\x00x\n"),         // NUL (A-17ii)
 		[]byte("\xff\xfe" + testAssetHex + "  " + testAssetName + "\n"), // invalid UTF-8 (A-17iii)
 		[]byte(testAssetHex + "  " + testAssetName + "\n" + "garbage line without hash\n"),
 	}

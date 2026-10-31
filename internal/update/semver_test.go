@@ -55,8 +55,8 @@ func TestParseVersionInvalid(t *testing.T) {
 		"v1..0", "v1.0.0-alpha..1", "v1.0.0-alpha.", "v1.0.0-.alpha",
 		"v1.0.0-..", "--help", "-v", "v1.0.0; rm -rf /", "$(id)",
 		"1.0.0-", "1.0.0-a_b", "1.0.0-a b", "1.0.0+a_b",
-		strings.Repeat("9", 200),                      // length cap (D-03)
-		"v1.0.0-" + strings.Repeat("a", 1000),        // length cap (D-03)
+		strings.Repeat("9", 200),              // length cap (D-03)
+		"v1.0.0-" + strings.Repeat("a", 1000), // length cap (D-03)
 		"v1.0.0-alpha.1 ", "1.0.0-alpha..", "1.0.0+.",
 	}
 	for _, s := range invalid {
@@ -96,7 +96,7 @@ func TestCompareVersionOrdering(t *testing.T) {
 		a, b string
 		want int // sign of Compare(a,b)
 	}{
-		{"1.10.0", "1.9.0", 1},       // numeric, not lexical (D-06)
+		{"1.10.0", "1.9.0", 1}, // numeric, not lexical (D-06)
 		{"1.9.0", "1.10.0", -1},
 		{"1.0.0+build1", "1.0.0+build2", 0}, // build ignored (D-08)
 		{"1.0.0+build", "1.0.0", 0},
@@ -105,7 +105,7 @@ func TestCompareVersionOrdering(t *testing.T) {
 		{"1.0.0-alpha.10", "1.0.0-alpha.2", 1},
 		{"1.0.0-alpha.1", "1.0.0-alpha.2", -1},
 		{"2.0.0", "1.99999999999999999999999999.0", 1}, // huge numerics (D-09)
-		{"v1.0.0", "1.0.0", 0},                          // v-strip both sides
+		{"v1.0.0", "1.0.0", 0},                         // v-strip both sides
 		{"0.6.4", "0.6.3", 1},
 		{"0.6.3", "0.6.3", 0},
 		{"0.6.2", "0.6.3", -1},
