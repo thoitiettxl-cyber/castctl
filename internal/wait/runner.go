@@ -968,7 +968,12 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 		detail = status
 	}
 	if kind == KindTimeout {
-		if ignored, ok := r.waiter.IgnoredTerminal(); ok && failed[ignored] {
+		// The last-chance proof spends no read while the
+		// boundary is unknown: AcceptReplayedFailed refuses
+		// on an unknown boundary, so the read could never
+		// accept. Skipping it leaves kind, detail, and
+		// replies exactly as the refusal path leaves them.
+		if ignored, ok := r.waiter.IgnoredTerminal(); ok && failed[ignored] && !r.waiter.BoundaryUnknown() {
 			hctx, cancel := r.historyCtx(ctx, r.cfg.FinalReadFloor, nil)
 			latest, found, err := LatestUserSeq(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
 			cancel()
