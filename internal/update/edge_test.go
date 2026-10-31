@@ -15,12 +15,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -352,6 +354,187 @@ func TestExtractTrailingGzipDataRefuses(t *testing.T) {
 	f2, _, exe2 := installFixture(t, garbage)
 	if _, err := runUpdate(t, f2.baseOptions(exe2)); err == nil {
 		t.Fatal("trailing garbage: want refusal")
+	}
+}
+
+// gunzipBytes decompresses a gzip stream (test helper).
+func gunzipBytes(t *testing.T, gzipped []byte) []byte {
+	t.Helper()
+	gzr, err := gzip.NewReader(bytes.NewReader(gzipped))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(gzr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// appendDecompressedTrailer returns archive re-gzipped with trailer
+// bytes appended to the DECOMPRESSED tar stream, i.e. after the tar
+// end-blocks as the tar reader sees them.
+func appendDecompressedTrailer(t *testing.T, archive, trailer []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(append(append([]byte{}, gunzipBytes(t, archive)...), trailer...)); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func allZeroBytes(b []byte) bool {
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func TestExtractGnuTarRecordPaddingAccepted(t *testing.T) {
+	// Live-test failure (Boss, stamped 0.6.2 build of 4fc53f8,
+	// `update --dry-run` against the real v0.6.3 release, exit 1):
+	// GNU tar pads archives with zeros to a 10240-byte record
+	// boundary, and the trailing-data check refused that padding,
+	// so every real release was refused. This test builds the
+	// fixture with REAL GNU tar and drives the real update path;
+	// it must install.
+	out, err := exec.Command("tar", "--version").Output()
+	if err != nil {
+		t.Skipf("GNU tar required for this test: %v", err)
+	}
+	versionLine := strings.TrimRight(string(out), "\n")
+	if nl := strings.IndexByte(versionLine, '\n'); nl >= 0 {
+		versionLine = versionLine[:nl]
+	}
+	if !strings.Contains(versionLine, "GNU tar") {
+		t.Skipf("GNU tar required for this test: %q", versionLine)
+	}
+	bin := fakeBinary(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "castctl"), bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	arc := filepath.Join(dir, "archive.tar.gz")
+	cmd := exec.Command("tar", "--create", "--gzip", "--blocking-factor=20", "--file="+arc, "--directory="+dir, "castctl")
+	if bout, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("GNU tar create: %v: %s", err, bout)
+	}
+	gzipped, err := os.ReadFile(arc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Prove the fixture is genuine GNU tar output: the
+	// decompressed stream is a multiple of the 10240-byte record
+	// size, holds exactly one castctl member, ends with two zero
+	// end-blocks, and carries a NON-EMPTY all-zero tail after
+	// them. No zeros are appended by this test.
+	raw := gunzipBytes(t, gzipped)
+	if len(raw)%10240 != 0 {
+		t.Fatalf("decompressed tar size %d is not a multiple of 10240", len(raw))
+	}
+	if len(raw) < 512 {
+		t.Fatal("decompressed tar too short for a header")
+	}
+	hdr := raw[:512]
+	if name := strings.TrimRight(string(hdr[:100]), "\x00"); name != "castctl" {
+		t.Fatalf("first member name %q, want castctl", name)
+	}
+	size, err := strconv.ParseInt(strings.Trim(string(hdr[124:136]), "\x00 "), 8, 64)
+	if err != nil {
+		t.Fatalf("unparsable size field: %v", err)
+	}
+	if size != int64(len(bin)) {
+		t.Fatalf("member size %d, want fake binary size %d", size, len(bin))
+	}
+	endOff := 512 + int((size+511)/512)*512
+	if endOff+1024 > len(raw) {
+		t.Fatalf("no room for end-blocks: end %d, tar size %d", endOff, len(raw))
+	}
+	if !allZeroBytes(raw[endOff : endOff+1024]) {
+		t.Fatal("tar end-blocks are not zero")
+	}
+	trail := raw[endOff+1024:]
+	if len(trail) == 0 {
+		t.Fatal("no record padding after the end-blocks: fixture does not exercise the fix")
+	}
+	if len(trail) >= 10240 || !allZeroBytes(trail) {
+		t.Fatalf("trailing padding %d bytes, all zero=%v", len(trail), allZeroBytes(trail))
+	}
+	// Real update path, unstubbed exec check: the fake binary
+	// reports the target version, so the install must succeed.
+	f, _, exe := installFixture(t, gzipped)
+	res, err := runUpdate(t, f.baseOptions(exe))
+	if err != nil {
+		t.Fatalf("GNU tar archive must install: %v", err)
+	}
+	if !res.Replaced {
+		t.Fatal("want Replaced=true")
+	}
+	got, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, bin) {
+		t.Fatal("installed bytes differ from the archive member")
+	}
+}
+
+func TestExtractAllZeroTrailingDataAccepted(t *testing.T) {
+	// All-zero trailing bytes after the tar end-blocks are record
+	// padding, not data: they must be accepted, including a tail
+	// past the old 1 MiB read cap (the scan must reach EOF).
+	bin := fakeBinary(t)
+	base := buildTar(t, map[string][]byte{"castctl": bin})
+	cases := map[string][]byte{
+		"small": appendDecompressedTrailer(t, base, bytes.Repeat([]byte{0}, 100)),
+		"beyondOldCap": appendDecompressedTrailer(t, base,
+			bytes.Repeat([]byte{0}, 1<<20+123)),
+	}
+	for name, archive := range cases {
+		t.Run(name, func(t *testing.T) {
+			f, _, exe := installFixture(t, archive)
+			res, err := runUpdate(t, f.baseOptions(exe))
+			if err != nil {
+				t.Fatalf("all-zero trailer must install: %v", err)
+			}
+			if !res.Replaced {
+				t.Fatal("want Replaced=true")
+			}
+		})
+	}
+}
+
+func TestExtractNonZeroTrailingDataRefuses(t *testing.T) {
+	// Any non-zero byte after the tar end-blocks refuses: a
+	// non-zero byte immediately after the end-blocks, zeros
+	// followed by a late non-zero byte, and a late non-zero byte
+	// past the old 1 MiB read cap.
+	bin := fakeBinary(t)
+	base := buildTar(t, map[string][]byte{"castctl": bin})
+	cases := map[string][]byte{
+		"immediate": appendDecompressedTrailer(t, base, []byte{0x01}),
+		"late": appendDecompressedTrailer(t, base,
+			append(bytes.Repeat([]byte{0}, 100), 0xff)),
+		"lateBeyondOldCap": appendDecompressedTrailer(t, base,
+			append(bytes.Repeat([]byte{0}, 1<<20+123), 0x01)),
+	}
+	for name, archive := range cases {
+		t.Run(name, func(t *testing.T) {
+			f, _, exe := installFixture(t, archive)
+			if _, err := runUpdate(t, f.baseOptions(exe)); err == nil {
+				t.Fatalf("%s: want refusal", name)
+			}
+			old, _ := os.ReadFile(exe)
+			if string(old) != "old-binary-bytes" {
+				t.Errorf("%s: target modified", name)
+			}
+		})
 	}
 }
 
