@@ -108,16 +108,63 @@ export interface LogsPage {
   entries: LogEntry[];
   next_cursor: string | null;
   more: boolean;
+  /** Live logs disabled server-side (log gate off / file output not
+   * configured): entries is empty and the page shows the disabled
+   * notice instead of the table. */
+  disabled?: boolean;
+  reason?: string;
 }
 
 export interface TelegramSettings {
   configured: boolean;
   masked: string;
-  owner_id?: number;
+  /** Profile the bot operates (Go telegram block `profile` key).
+   * Absent when no block exists. */
+  profile?: string;
   allowed_user_ids?: number[];
   auto_approve: boolean;
   auto_allow_once: boolean;
-  watch: boolean;
+}
+
+/** One keeper entry with its state-file status (GET /keeper). The
+ * status object mirrors keeper.ReadStatus: name-only cookie records,
+ * never values. */
+export interface KeeperEntryStatus {
+  tag: string;
+  profile: string;
+  browser: string;
+  interval_seconds: number;
+  notify: string;
+  /** keeper.Status verbatim: omitempty fields are absent (not
+   * null) when unset; the object itself is always present — a
+   * never-ticked entry has an empty last_tick_outcome. */
+  status: {
+    tag: string;
+    profile: string;
+    logged_out: boolean;
+    keeper_stopped: boolean;
+    keeper_stopped_reason?: string;
+    last_checked_at?: string;
+    last_tick_outcome: string;
+    earliest_expiry?: string;
+    next_check_at?: string;
+    state_corrupt?: boolean;
+  };
+}
+
+/** Screencast availability for one profile (GET /screencast/status). */
+export interface ScreencastStatus {
+  available: boolean;
+  reason: string;
+  profile: string;
+}
+
+/** Minted screencast session (POST /screencast/{profile}/start). The
+ * ws_url carries the single-use session token in its query string;
+ * the management Bearer token is NEVER put in a URL. */
+export interface ScreencastStartResult {
+  session_id: string;
+  ws_url: string;
 }
 
 export interface ConfigContent {

@@ -3,8 +3,8 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
-import { statusApi } from '@/services/api';
-import type { StatusInfo } from '@/types';
+import { keeperApi, statusApi } from '@/services/api';
+import type { KeeperEntryStatus, StatusInfo } from '@/types';
 
 const UPSTREAM_REPO = 'router-for-me/Cli-Proxy-API-Management-Center';
 const UPSTREAM_HEAD = '64b4f5aed19b8f791eb21eb9e785ea379ea05b44';
@@ -36,6 +36,7 @@ function InfoRow({ label, children }: { label: string; children: ReactNode }) {
 export function SystemPage() {
   const { t } = useTranslation();
   const [status, setStatus] = useState<StatusInfo | null>(null);
+  const [keeperEntries, setKeeperEntries] = useState<KeeperEntryStatus[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -47,6 +48,13 @@ export function SystemPage() {
       setFailed(false);
       try {
         setStatus(await statusApi.get(controller.signal));
+        try {
+          setKeeperEntries(await keeperApi.list(controller.signal));
+        } catch {
+          // Keeper is optional: a missing keeper block must not
+          // fail the whole System page.
+          setKeeperEntries([]);
+        }
       } catch {
         // AbortError (via the client's plain Error) is not a failure:
         // the effect was cleaned up. Server errors surface only as the
@@ -125,6 +133,40 @@ export function SystemPage() {
           <p role="alert" style={{ marginBottom: 0 }}>
             {t('system.listen.remote')}
           </p>
+        )}
+      </Card>
+      <Card title={t('system.keeper.title')}>
+        {keeperEntries === null || keeperEntries.length === 0 ? (
+          <p style={{ margin: 0 }}>{t('system.keeper.none')}</p>
+        ) : (
+          keeperEntries.map((entry) => (
+            <div key={entry.tag} style={{ marginBottom: 12 }}>
+              <InfoRow label={t('system.keeper.tag')}>{entry.tag}</InfoRow>
+              <InfoRow label={t('system.keeper.profile')}>{entry.profile}</InfoRow>
+              <InfoRow label={t('system.keeper.browser')}>{entry.browser}</InfoRow>
+              {!entry.status.last_tick_outcome ? (
+                <p style={{ margin: 0 }}>{t('system.keeper.never_ticked')}</p>
+              ) : (
+                <>
+                  <InfoRow label={t('system.keeper.outcome')}>
+                    {entry.status.last_tick_outcome}
+                  </InfoRow>
+                  <InfoRow label={t('system.keeper.last_checked')}>
+                    {entry.status.last_checked_at || t('common.unknown')}
+                  </InfoRow>
+                  <InfoRow label={t('system.keeper.next_check')}>
+                    {entry.status.next_check_at || t('common.unknown')}
+                  </InfoRow>
+                  <InfoRow label={t('system.keeper.logged_out')}>
+                    {entry.status.logged_out ? t('common.yes') : t('common.no')}
+                  </InfoRow>
+                  <InfoRow label={t('system.keeper.stopped')}>
+                    {entry.status.keeper_stopped ? t('common.yes') : t('common.no')}
+                  </InfoRow>
+                </>
+              )}
+            </div>
+          ))
         )}
       </Card>
       <Card title={t('system.config.title')}>

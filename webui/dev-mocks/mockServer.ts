@@ -13,6 +13,7 @@ import {
 } from './configStore.ts';
 import {
   endpointsFixture,
+  keeperFixture,
   legacyProfileEntryFixture,
   loginStatusFixture,
   logsFixture,
@@ -54,12 +55,6 @@ let liveLogEntries: MockLogEntry[] = [...logsFixture];
 let liveLogNextIndex = 0;
 let liveLogPollCount = 0;
 
-function resetLiveLogs() {
-  liveLogEntries = [...logsFixture];
-  liveLogNextIndex = 0;
-  liveLogPollCount = 0;
-}
-
 /** Stored-form entry for a profile; the legacy profile's entry lives outside config.json (D3). */
 function storedEntryFor(name: string): Record<string, unknown> {
   return name === 'legacy-note'
@@ -82,7 +77,7 @@ export function registerMockApi(middlewares: Connect.Server) {
     const path = url.pathname.replace(/^\/api\/v1/, '') || '/';
     const method = req.method ?? 'GET';
 
-    if (path !== '/status' && !req.headers.authorization) {
+    if (!req.headers.authorization) {
       err(res, 401, 'unauthorized', 'Missing management token');
       return;
     }
@@ -198,8 +193,22 @@ export function registerMockApi(middlewares: Connect.Server) {
         return ok(res, { entries, next_cursor: null, more: false });
       }
       if (method === 'DELETE' && path === '/logs') {
-        resetLiveLogs();
-        return ok(res, { cleared: true });
+        // The Go server never truncates a live log file: 405.
+        return err(res, 405, 'method_not_allowed', 'Log clearing is not supported');
+      }
+      if (method === 'GET' && path === '/keeper') return ok(res, keeperFixture);
+      if (method === 'GET' && path === '/screencast/status') {
+        // The mock has no browser and no WebSocket relay: the page
+        // shows the unavailable state, exactly as the Go default
+        // build (without with_chromedp) does.
+        return ok(res, {
+          available: false,
+          reason: 'screencast unavailable in mock mode (no browser attached)',
+          profile: String(url.searchParams.get('profile') ?? ''),
+        });
+      }
+      if (method === 'POST' && /^\/screencast\/[^/]+\/start$/.test(path)) {
+        return err(res, 501, 'unavailable', 'screencast unavailable in mock mode (no browser attached)');
       }
       next();
     });
