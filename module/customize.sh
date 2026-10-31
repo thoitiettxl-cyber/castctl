@@ -62,6 +62,11 @@ case "$DATA_DIR" in
   /*) ;;
   *) fail "module data dir must be absolute" ;;
 esac
+# A symlinked data dir or releases dir would redirect every later
+# write (mkdir/chmod/publication) outside the data tree (F2/B2):
+# refuse before anything is created or written below it.
+[ ! -L "$DATA_DIR" ] || fail "module data dir must not be a symlink"
+[ ! -L "$DATA_DIR/releases" ] || fail "module releases dir must not be a symlink"
 case "$(getprop ro.product.cpu.abi 2>/dev/null)" in
   arm64-v8a|aarch64) ;;
   *) fail "this release requires ARM64 Android" ;;
@@ -177,6 +182,14 @@ if [ -L "$DATA_DIR/current" ]; then
     "$DATA_DIR/releases/"*) ;;
     *) fail "existing current runtime points outside releases/" ;;
   esac
+  # The remainder after releases/ must be exactly one component:
+  # [ -L ] on a path ending in `/` or `/.` resolves through the
+  # final component, so `releases/rel-link/` and
+  # `releases/rel-link/.` escaped the old check (safety B1).
+  # Publication only ever creates single-component release names.
+  current_rest=${current_resolved#"$DATA_DIR/releases/"}
+  case "$current_rest" in ''|.|*/*) fail "existing current runtime target must be a single release directory" ;; esac
+  [ ! -L "$DATA_DIR/releases" ] || fail "existing releases dir must not be a symlink"
   [ -d "$current_resolved" ] && [ ! -L "$current_resolved" ] || fail "existing current runtime target is unsafe"
 fi
 old_plugins="$DATA_DIR/current/plugins"
@@ -240,7 +253,10 @@ set_perm "$MODPATH/scripts/castctl-ctl" 0 0 0755
 # prefers an explicit CASTCTL_DATA_DIR, then this record, then
 # the default, so an install under a custom data dir is stopped
 # correctly even when the override is not set at uninstall time.
+# A planted symlink at the record path must never be written
+# through (F3): refuse, matching the other write paths.
 # Best-effort: a failed write only loses the fallback.
+[ ! -L "$MODPATH/.castctl-data-dir" ] || fail "install-time data-dir record must not be a symlink"
 printf '%s\n' "$DATA_DIR" >"$MODPATH/.castctl-data-dir" 2>/dev/null && chmod 0600 "$MODPATH/.castctl-data-dir" 2>/dev/null || true
 
 restore_old_controller || fail "unable to restore the legacy controller"

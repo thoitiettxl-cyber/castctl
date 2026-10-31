@@ -122,7 +122,13 @@ log() {
   # Never append through a symlink: a planted controller.log link
   # would redirect log output into an arbitrary file (F1). The
   # message still reaches stdout; the file is left untouched.
-  if [ -d "$LOG_DIR" ] && [ ! -L "$CTL_LOG" ]; then
+  # The same applies one level up: a symlinked DATA_DIR or LOG_DIR
+  # makes CTL_LOG resolve inside the link target, so the guard
+  # refusal itself (die() -> log(), before prepare_mutable_dirs
+  # runs) would be written through the planted link (F2). Refuse
+  # the append whenever either dir is a link; the message still
+  # reaches stdout/stderr via the caller.
+  if [ ! -L "$DATA_DIR" ] && [ ! -L "$LOG_DIR" ] && [ -d "$LOG_DIR" ] && [ ! -L "$CTL_LOG" ]; then
     rotate_log "$CTL_LOG" 2>/dev/null || true
     printf '%s\n' "$message" >>"$CTL_LOG" 2>/dev/null || true
   fi
@@ -178,8 +184,11 @@ prepare_lifecycle_lock() {
 prepare_mutable_dirs() {
   # A symlinked sensitive directory would redirect every write
   # under it outside the data tree (F1): refuse before creating
-  # or chmodding anything below it.
-  for _guard_dir in "$DATA_DIR/config" "$PROFILES_DIR" "$PLUGIN_ROOT" "$PLUGIN_DIR" \
+  # or chmodding anything below it. The data dir itself and
+  # releases/ are guarded first: a symlinked DATA_DIR defeats
+  # every subdir guard below it (F2), and a symlinked releases/
+  # defeats current-target validation (B2).
+  for _guard_dir in "$DATA_DIR" "$DATA_DIR/releases" "$DATA_DIR/config" "$PROFILES_DIR" "$PLUGIN_ROOT" "$PLUGIN_DIR" \
     "$RUN_DIR" "$LOG_DIR" "$BACKUP_DIR" "$CONTROL_DIR"; do
     [ ! -L "$_guard_dir" ] || die "data directory must not be a symlink: $_guard_dir"
   done
@@ -424,6 +433,19 @@ validate_current_target() {
     "$DATA_DIR/releases/"*) ;;
     *) log ERROR "current runtime symlink points outside releases/"; return 1 ;;
   esac
+  # The remainder after releases/ must be exactly one component:
+  # [ -L ] on a path ending in `/` or `/.` resolves through the
+  # final component, so `releases/rel-link/` and
+  # `releases/rel-link/.` reported "not a symlink" even when an
+  # earlier component was a link to an outside tree (safety B1).
+  # The install path only ever creates single-component release
+  # names (<id>-<sha>), so strictness rejects nothing legitimate.
+  rest=${resolved#"$DATA_DIR/releases/"}
+  case "$rest" in ''|.|*/*) log ERROR "current runtime target must be a single release directory under releases/"; return 1 ;; esac
+  # Intermediate components must not be links either: a symlinked
+  # DATA_DIR or releases/ defeats the checks above (B2/F2).
+  [ ! -L "$DATA_DIR" ] || { log ERROR "data directory must not be a symlink"; return 1; }
+  [ ! -L "$DATA_DIR/releases" ] || { log ERROR "releases directory must not be a symlink"; return 1; }
   [ -d "$resolved" ] || { log ERROR "current runtime target is not a directory"; return 1; }
   [ ! -L "$resolved" ] || { log ERROR "current runtime target must not be a symlink"; return 1; }
   return 0
@@ -624,7 +646,13 @@ start_one() {
   fi
   # Refuse symlinked write targets before launching: the service
   # log redirect and the PID file must never follow a planted link
-  # outside the data tree (F1).
+  # outside the data tree (F1). The parent dirs are refused too:
+  # a link swapped in for RUN_DIR/LOG_DIR after
+  # prepare_mutable_dirs ran would defeat the file checks below.
+  if [ -L "$RUN_DIR" ] || [ -L "$LOG_DIR" ]; then
+    log ERROR "service directories must not be symlinks"
+    return 1
+  fi
   refuse_symlink "$svc_log" "service log" || return 1
   refuse_symlink "$pidfile" "PID file" || return 1
   rotate_log "$svc_log" 2>/dev/null || true
@@ -647,23 +675,40 @@ start_one() {
   pid=$!
   cd / || true
 
+  # The service-log redirect was opened at launch: re-check for a
+  # link swapped in between the pre-launch check and the redirect
+  # (red-team N3). A swap in that window can redirect only the
+  # output written before this check; the child is killed here
+  # through the stop scan and no PID file is written. The
+  # check-then-open window itself cannot be closed in shell
+  # (no O_NOFOLLOW); it is a documented residual, bounded by
+  # this kill.
+  if [ -L "$svc_log" ] || [ -L "$LOG_DIR" ]; then
+    log ERROR "service log became a symlink during start; stopping $label"
+    stop_one "$pidfile" "$pattern" "$label" || true
+    return 1
+  fi
+
   wait_ready "$pid" "$label" "$pattern"
   ready=$?
   if [ "$ready" -ne 0 ]; then
-    kill -2 "$pid" 2>/dev/null || true
-    rm -f "$pidfile"
+    # Stop through the scan, not the wrapper PID alone: a child
+    # orphaned by a non-forwarding timeout must not survive a
+    # readiness failure to be reported "already running" with no
+    # PID file (safety R4). Bounded by the stop escalation.
+    stop_one "$pidfile" "$pattern" "$label" || true
     set_description "Error | $label readiness failed"
     return 1
   fi
 
   # The PID file must still be a plain path: if a symlink
-  # appeared between the pre-launch check and now, kill the
-  # just-started child and fail rather than writing through it.
-  if [ -L "$pidfile" ]; then
+  # appeared between the pre-launch check and now, stop the
+  # just-started child through the scan and fail rather than
+  # writing through it (safety R5). rm -f in stop_one removes
+  # the link itself, never its target.
+  if [ -L "$pidfile" ] || [ -L "$RUN_DIR" ]; then
     log ERROR "PID file became a symlink during start; stopping $label"
-    kill -2 "$pid" 2>/dev/null || true
-    sleep 1
-    kill -9 "$pid" 2>/dev/null || true
+    stop_one "$pidfile" "$pattern" "$label" || true
     return 1
   fi
   printf '%s' "$pid" >"$pidfile"
