@@ -63,6 +63,7 @@ adaptive rule shortens it once a cookie expiry is observed).
 
 check exit codes:
   0  healthy (or skipped: login in progress / lock held)
+  1  state-directory failure (outcome "error", never skipped)
   2  config error (no keeper block, dangling refs, bad selection)
   3  entry stopped (auth expired) or export failed
   4  tick timeout
@@ -84,7 +85,8 @@ const keeperCheckHelpText = `usage: castctl keeper check [--tag TAG | --profile 
 Run one tick now for each selected entry and print one JSON
 object per entry: tag, profile, outcome, stopped, cookies
 seen, whether the cookies file was written, and the next
-check time. Exit codes: 0 healthy, 2 config, 3 entry
+check time. Exit codes: 0 healthy, 1 state-directory failure
+(outcome "error", never "skipped"), 2 config, 3 entry
 stopped (auth expired) or export failed, 4 timeout (90s per
 entry).
 A transient error surfaces through the normal error
@@ -474,7 +476,7 @@ func cmdKeeperCheck(ctx context.Context, env *Env, g *globalOpts, args []string)
 	rts := &keeperRuntimes{env: env, g: g, loc: loc, single: single, ctx: ctx}
 	defer rts.closeAll()
 	worst := 0
-	var firstTransientErr error
+	var firstSurfacedErr error
 	for _, entry := range entries {
 		prof := single.Profiles[entry.Profile]
 		deps, err := rts.factory(entry, prof)
@@ -519,17 +521,28 @@ func cmdKeeperCheck(ctx context.Context, env *Env, g *globalOpts, args []string)
 			// through the normal contract (GatewayError
 			// 3, timeout 4, other 1) instead of
 			// inventing a new code.
-			if res.Err != nil && firstTransientErr == nil {
-				firstTransientErr = res.Err
+			if res.Err != nil && firstSurfacedErr == nil {
+				firstSurfacedErr = res.Err
+			} else if worst < 1 {
+				worst = 1
+			}
+		case res.Outcome == keeper.OutcomeError:
+			// State-directory failure (K-LIVE-1): loud,
+			// never skipped. Same shape as the transient
+			// path — print every entry, then return the
+			// first typed error (a plain error, so the
+			// normal contract exits 1 with its message).
+			if res.Err != nil && firstSurfacedErr == nil {
+				firstSurfacedErr = res.Err
 			} else if worst < 1 {
 				worst = 1
 			}
 		}
 	}
 	// Interrupt first (already returned above), then the
-	// remembered transient error, then the worst outcome.
-	if firstTransientErr != nil {
-		return firstTransientErr
+	// remembered transient/state-dir error, then the worst outcome.
+	if firstSurfacedErr != nil {
+		return firstSurfacedErr
 	}
 	switch worst {
 	case 4:

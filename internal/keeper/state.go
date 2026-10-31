@@ -54,6 +54,12 @@ const (
 )
 
 // Tick outcomes: the closed enum for LastTickOutcome.
+// OutcomeError is tick-result-only: a tick that could not run or
+// persist because the profile state directory could not be
+// created. It is never written to the state file (no state file
+// can be written when its directory does not exist) and never
+// "skipped": "skipped" is reserved for a login in progress or a
+// held lock.
 const (
 	OutcomeNever          = "never"
 	OutcomeOK             = "ok"
@@ -61,6 +67,7 @@ const (
 	OutcomeTransientError = "transient_error"
 	OutcomeExportFailed   = "export_failed"
 	OutcomeSkipped        = "skipped"
+	OutcomeError          = "error"
 )
 
 // CookieState is the per-cookie observed record: name is the map
@@ -171,6 +178,21 @@ func LoadState(profileDir string) (*SessionState, error) {
 // state file is recoverable observed state, a missing
 // profile directory is not.
 var ErrStateCorrupt = errors.New("session state corrupt")
+
+// ErrStateDir marks a failure to create the profile state
+// directory. Unlike a corrupt state file it is not recoverable
+// by substituting a fresh state: without the directory no
+// state can be written at all, so the tick fails loudly
+// (OutcomeError) instead of reporting "skipped". The wrapped
+// error names the directory and the underlying cause; it
+// never carries secret material.
+var ErrStateDir = errors.New("cannot create state directory")
+
+// IsStateDirError reports whether err is (or wraps)
+// ErrStateDir.
+func IsStateDirError(err error) bool {
+	return errors.Is(err, ErrStateDir)
+}
 
 // IsStateCorrupt reports whether err is (or wraps)
 // ErrStateCorrupt.

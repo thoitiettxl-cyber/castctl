@@ -178,8 +178,10 @@ type TickDeps struct {
 }
 
 // TickResult is one tick's observable outcome. Outcome uses the
-// state outcome enum; Err is the underlying typed error for
-// command-layer exit mapping and is never printed directly.
+// state outcome enum; OutcomeError means the state directory
+// could not be created (loud failure, never "skipped"). Err is
+// the underlying typed error for command-layer exit mapping
+// and is never printed directly.
 // Recovered reports a CDP re-export recovery: the command layer
 // sends the re-exported notice after Tick returns (never under
 // the file lock). StateCorrupt reports that the state file was
@@ -261,9 +263,31 @@ type lockedStore struct {
 	stateCorrupt bool
 }
 
+// ensureStateDir creates the profile (state) directory when it
+// is missing, with the existing profile-dir semantics
+// (EnsureProfileDir: 0700 for named profiles, the base dir
+// itself for the default profile). The cookies-file lock only
+// creates the directory for the default cookies path, so a
+// profile whose cookies file lives outside the config dir
+// would otherwise tick with nowhere to save state: SaveState
+// fails and the tick collapses to "skipped" with no state
+// file, while the cookies file was already rewritten
+// (K-LIVE-1). A creation failure is wrapped in ErrStateDir so
+// callers fail loudly instead of skipping.
+func (s *Store) ensureStateDir() error {
+	if _, err := profile.EnsureProfileDir(s.baseDir, s.profileName); err != nil {
+		return fmt.Errorf("%w: %q: %w", ErrStateDir, s.profileDir, err)
+	}
+	return nil
+}
+
 func (s *Store) lock() (*lockedStore, error) {
 	release, err := profile.LockCookiesFile(s.baseDir, s.profileName, s.cookiesPath, s.lockTimeout)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.ensureStateDir(); err != nil {
+		release()
 		return nil, err
 	}
 	ls := &lockedStore{store: s, release: release, jarForm: true}
@@ -315,6 +339,10 @@ func (ls *lockedStore) unlock() { ls.release() }
 func (s *Store) lockStateOnly() (*lockedStore, error) {
 	release, err := profile.LockCookiesFile(s.baseDir, s.profileName, s.cookiesPath, s.lockTimeout)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.ensureStateDir(); err != nil {
+		release()
 		return nil, err
 	}
 	st, err := LoadState(s.profileDir)
@@ -424,6 +452,11 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 	// Phase 1: locked snapshot.
 	ls, err := store.lock()
 	if err != nil {
+		if IsStateDirError(err) {
+			// Loud, never skipped: the tick has nowhere
+			// to persist state (K-LIVE-1).
+			return fail(OutcomeError, "save", err)
+		}
 		if errors.Is(err, profile.ErrCookiesLockTimeout) {
 			return fail(OutcomeSkipped, "lock", err)
 		}
@@ -554,6 +587,10 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 	// Phase 3: locked merge + write + state.
 	ls, err = store.lock()
 	if err != nil {
+		if IsStateDirError(err) {
+			// Loud, never skipped: same rule as phase 1.
+			return fail(OutcomeError, "save", err)
+		}
 		if errors.Is(err, profile.ErrCookiesLockTimeout) {
 			return fail(OutcomeSkipped, "lock", err)
 		}

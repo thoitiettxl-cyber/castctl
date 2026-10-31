@@ -924,8 +924,11 @@ func TestTickStateDirCreationFailureIsLoud(t *testing.T) {
 	if res.Err == nil || !strings.Contains(res.Err.Error(), "state director") {
 		t.Fatalf("result error = %v; want an error naming the state directory", res.Err)
 	}
-	if _, err := os.Stat(filepath.Join(paths.Dir, StateFileName)); !os.IsNotExist(err) {
-		t.Fatalf("state file unexpectedly present (err=%v)", err)
+	// No state file can exist: Stat must fail (ENOTDIR here,
+	// since profiles/ is a file — not ENOENT, so assert on
+	// Stat success, not on the error kind).
+	if st, err := os.Stat(filepath.Join(paths.Dir, StateFileName)); err == nil {
+		t.Fatalf("state file unexpectedly present: %+v", st)
 	}
 	if got, _ := os.ReadFile(cookiesPath); string(got) != string(data) {
 		t.Fatalf("cookies file changed on a failed tick")

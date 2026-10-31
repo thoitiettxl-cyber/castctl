@@ -25,18 +25,22 @@ import (
 // exists; a missing outside parent is an error (fail closed: never
 // create directories at an arbitrary user-configured path).
 //
-// The write order is: durable temp file first, then rename the
-// existing destination to .bak, then rename the temp file into
-// place. A failure before the final rename leaves the previous
-// file untouched (or, if the backup rename already happened, in
-// .bak). Both the cookies file and .bak end at mode 0600, except
-// when the previous file was a symlink to an existing file: then
-// .bak remains that symlink (the explicit chmod is skipped, so
-// the symlink's target keeps its mode and content untouched) and
-// only the new cookies file ends at 0600. The cookies file gets
-// its mode via the temp file, .bak via an explicit chmod after
-// the rename (a rename alone would keep the previous file's
-// mode). No previous file means no .bak and backup=false.
+// The write order is: durable temp file first, then copy the
+// existing destination to .bak, then rename the temp file over
+// the destination. The copy-before-rename order means the
+// destination is never absent: at every moment it holds either
+// the previous bytes or the new bytes, never nothing. A failure
+// before the final rename leaves the previous file untouched
+// (the .bak copy is a spare copy, not the file itself). Both
+// the cookies file and .bak end at mode 0600, except when the
+// previous file was a symlink to an existing file: then .bak
+// remains that symlink (no copy is made and no chmod is done,
+// so the symlink's target keeps its mode and content
+// untouched) and only the new cookies file ends at 0600. The
+// cookies file gets its mode via the temp file; .bak is a
+// fresh file created at 0600 (plus an explicit chmod), so a
+// stale .bak's mode never survives. No previous file means
+// no .bak and backup=false.
 // Concurrent imports are last-writer-wins: each write is atomic
 // (rename), there is no torn file, and no lock is taken — the
 // flock+sha256 guard protects config.json only and does not apply
@@ -83,17 +87,8 @@ func WriteCookiesFile(baseDir, profileName, cookiesPath string, data []byte) (bo
 			return false, fmt.Errorf("cookies path %q is a directory", cookiesPath)
 		}
 		bak := cookiesPath + ".bak"
-		if err := os.Rename(cookiesPath, bak); err != nil {
+		if err := backupCookiesFile(cookiesPath, bak); err != nil {
 			return false, err
-		}
-		// Chmod the backup explicitly: the rename keeps the old
-		// mode, and the backup must be 0600 like the cookies
-		// file. Skip it for a symlink backup: chmod would follow
-		// the link and change the target's mode.
-		if lst, lerr := os.Lstat(bak); lerr == nil && lst.Mode()&os.ModeSymlink == 0 {
-			if err := os.Chmod(bak, 0o600); err != nil {
-				return false, err
-			}
 		}
 		backup = true
 	} else if !os.IsNotExist(err) {
@@ -103,4 +98,59 @@ func WriteCookiesFile(baseDir, profileName, cookiesPath string, data []byte) (bo
 		return false, err
 	}
 	return backup, nil
+}
+
+// backupCookiesFile copies the previous cookies file to bak
+// BEFORE the new file is renamed over the destination, so the
+// destination is never absent mid-write (K-LIVE-2). A stale
+// .bak is replaced, never reused: the copy is a fresh file at
+// mode 0600. A directory at the .bak path is an error, never
+// removed, so a failed backup leaves the destination
+// untouched. When the previous file is a symlink, .bak is
+// created as a symlink to the same target and the target is
+// never read or chmodded.
+func backupCookiesFile(cookiesPath, bak string) error {
+	if st, err := os.Stat(bak); err == nil && st.IsDir() {
+		return fmt.Errorf("backup path %q is a directory", bak)
+	}
+	lst, err := os.Lstat(cookiesPath)
+	if err != nil {
+		return err
+	}
+	if lst.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(cookiesPath)
+		if err != nil {
+			return err
+		}
+		if err := os.Symlink(target, bak); err != nil {
+			if !os.IsExist(err) {
+				return err
+			}
+			if err := os.Remove(bak); err != nil {
+				return err
+			}
+			return os.Symlink(target, bak)
+		}
+		return nil
+	}
+	data, err := os.ReadFile(cookiesPath)
+	if err != nil {
+		return err
+	}
+	// Replace any stale .bak (regular file or symlink): the
+	// copy must be a fresh file, never a write through a
+	// stale symlink into its target. A directory was refused
+	// above, so Remove here cannot delete one.
+	_ = os.Remove(bak)
+	if err := os.WriteFile(bak, data, 0o600); err != nil {
+		return err
+	}
+	// Fresh files already carry 0600; the explicit chmod is
+	// defence in depth for a stale file the Remove missed.
+	if lst, lerr := os.Lstat(bak); lerr == nil && lst.Mode()&os.ModeSymlink == 0 {
+		if err := os.Chmod(bak, 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
 }

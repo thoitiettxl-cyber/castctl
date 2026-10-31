@@ -394,8 +394,10 @@ Behaviour:
   value); an empty value with no expiry information deletes
   (the Max-Age=0 clear shape). Writes happen only on
   byte-difference, atomically, mode 0600 with a 0600 `.bak`,
-  under a per-cookies-file lock. Cookie values are never
-  logged or printed, anywhere. The keeper's jar parser
+  under a per-cookies-file lock: the previous file is copied
+  to `.bak` first and the new file is then renamed over the
+  target, so the target is never absent mid-write. Cookie
+  values are never logged or printed, anywhere. The keeper's jar parser
   requires exactly 7 columns; the legacy gateway reader
   accepts 7 or more — the divergence is intentional (the
   keeper rewrites the file and must not silently drop extra
@@ -412,6 +414,13 @@ Behaviour:
   The driving cookie is `hatch_sess` when present with a
   non-session expiry, else the earliest expiry; both fields
   are carried in state so the choice stays a resolver change.
+  The profile directory is created (0700 for named profiles)
+  when a tick first needs it, including when the profile's
+  cookies file lives outside the config dir. If the directory
+  cannot be created, the tick reports outcome `error` and
+  `keeper check` exits non-zero with the directory named —
+  never `skipped`, which is reserved for a login in progress
+  or a held lock.
   A corrupt or unknown-version state file does NOT brick the
   keeper: ticks substitute a fresh state, re-observe from the
   cookies file, and flag `state_corrupt` in `keeper check`
@@ -427,7 +436,9 @@ Behaviour:
   silently. `keeper check` ticks every selected entry even
   when one errors transiently (the first typed error is
   returned after all entries print), and an interrupt ends
-  the command instead of being swallowed as a skip.
+  the command instead of being swallowed as a skip. A
+  state-directory failure likewise surfaces as a non-zero
+  exit (outcome `error`), never as `skipped`.
 - **Notifications.** Fixed content only: profile name,
   outcome, the re-login path (`auth login` / `auth import`),
   and "No action was taken automatically." No secrets, no
