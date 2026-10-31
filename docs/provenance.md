@@ -1007,39 +1007,41 @@ Copied files (both `cmp` exit 0 against the upstream commit):
   pinned commit.
 - `module/licenses/GLIBC-COPYING.LESSERv2` — the LGPL 2.1
   license text for the redistributed glibc libraries, sha256
-  `20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95`
-  (501 lines). Upstream:
+  `20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95`.
+  Upstream:
   `licenses/GLIBC-COPYING.LESSERv2` at the pinned commit. This
   is the glibc license text, not template code; it is recorded
   here because the file was copied from the template tree.
 
 Studied patterns, with mapping (castctl file ↔ upstream file at
-the pinned commit; line counts are the inspected versions):
+the pinned commit; no line counts are cited — counts were
+stale twice after later edits and rot on every loop, so the
+mapping names files only):
 
-- Install-time publication: `module/customize.sh` (254 lines)
-  ↔ `customize.sh` (202 lines) — SKIPUNZIP, ABI gate,
+- Install-time publication: `module/customize.sh`
+  ↔ `customize.sh` — SKIPUNZIP, ABI gate,
   checksum verification from the embedded manifest,
   content-addressed `releases/<id>-<sha>/` + atomic `current`
   symlink swap, plugin forward-copy from the old release
   layout, example-config-only copy, permission loop.
-- Lifecycle controller: `module/scripts/castctl-ctl` (962
-  lines) ↔ `scripts/cpactl` (811 lines) — PID-file + cmdline
+- Lifecycle controller: `module/scripts/castctl-ctl`
+  ↔ `scripts/cpactl` — PID-file + cmdline
   matching, lifecycle lock outside the data tree, readiness
   wait, stop escalation, status/doctor/backup/purge-data
   commands, log helper shape.
-- Boot hook: `module/service.sh` (100 lines) ↔ `service.sh`
-  (28 lines) — single late-start hook, backgrounded subshell,
+- Boot hook: `module/service.sh` ↔ `service.sh`
+  — single late-start hook, backgrounded subshell,
   boot_completed wait, disable check, watchdog.
-- Manager button / removal: `module/action.sh` (32 lines) ↔
-  `action.sh` (20 lines); `module/uninstall.sh` (30 lines) ↔
-  `uninstall.sh` (9 lines) — stop best-effort, keep data.
-- Host packager: `module/build.sh` (396 lines) ↔ `build.sh`
-  (322 lines) — pinned downloads with verify-before-rename,
+- Manager button / removal: `module/action.sh` ↔
+  `action.sh`; `module/uninstall.sh` ↔
+  `uninstall.sh` — stop best-effort, keep data.
+- Host packager: `module/build.sh` ↔ `build.sh`
+  — pinned downloads with verify-before-rename,
   ELF/glibc validation, payload `checksums.sha256`
   self-verification, secret refusal, deterministic ZIP.
-- Pins and manifest: `module/sources.lock` (42 lines) ↔
-  `sources.lock` (19 lines); `module/payload-manifest.txt`
-  (10 lines) ↔ `payload-manifest.txt` (8 lines). The castctl
+- Pins and manifest: `module/sources.lock` ↔
+  `sources.lock`; `module/payload-manifest.txt`
+  ↔ `payload-manifest.txt`. The castctl
   pins themselves (castctl v0.6.4 asset, glibc 2.44 `.deb`,
   CA bundle 20261020-r0) were re-verified by real download
   in the module work, not copied from the template's pins;

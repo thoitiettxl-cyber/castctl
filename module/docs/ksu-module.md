@@ -307,10 +307,17 @@ fight the checksum-pinned install).
   independent of the lifetime bound; a keeper whose entries
   all stop sticky exits on its own and is re-run at watchdog
   backoff cadence (bounded, logged).
-- Stop prefers SIGINT (castctl handles SIGINT; exit 130 from
-  an intentional stop is normal), escalates SIGTERM then SIGKILL
-  with bounded waits (5 s / 3 s), and stops BOTH services.
-  Stop removes the enabled marker so the watchdog does not
+- Stop signals SIGINT first (castctl handles SIGINT; exit 130 from
+  an intentional stop is normal), signals SIGINT again after a
+  re-scan, then escalates SIGTERM then SIGKILL with bounded
+  waits (5 s + 5 s + 3 s + 1 s ≈ 14 s at defaults, plus scan
+  time), and stops BOTH services. Whether SIGINT reaches the
+  Go binary when backgrounded is unproven: a non-interactive
+  shell ignores SIGINT/SIGQUIT for `&`-launched jobs, and
+  whether castctl's `signal.NotifyContext` resets an inherited
+  SIG_IGN is a live gate (gate 24) — TERM/KILL termination is
+  what the probes prove, so no claim here relies on SIGINT
+  delivery. Stop removes the enabled marker so the watchdog does not
   restart. Each PID file is validated against the live process
   cmdline including the service subcommand (`telegram run` /
   `keeper run`, never a bare PID, never the other service's
@@ -335,10 +342,21 @@ fight the checksum-pinned install).
 - Every controller write path refuses symlinks (PID files,
   enabled marker, controller/service logs, backup archive):
   a planted symlink never redirects a write outside the data
-  tree. The `current` symlink must resolve to a real directory
-  under `releases/`, and every file under a release must be
+  tree. The refusal covers parent dirs too: a symlinked data
+  dir, `releases/` dir, or logs dir is refused, and `log()`
+  never appends through a symlinked logs dir (a guard refusal
+  is reported to stderr only, never written through the link).
+  The `current` symlink must resolve to exactly one directory
+  component under `releases/` (a trailing `/`, `/.`, or
+  multi-component remainder is refused — `[ -L ]` resolves
+  through such suffixes), and every file under a release must be
   listed in its checksum manifest — an unlisted file refuses
-  the start (and the install). Numeric environment overrides
+  the start (and the install). The service-log symlink check is
+  re-run immediately after launch: a link swapped in between
+  the pre-launch check and the redirect is caught and the
+  child killed, but that check-then-open window (milliseconds)
+  cannot be closed in shell and is a documented residual.
+  Numeric environment overrides
   are validated and clamped to sane ranges (garbage falls back
   to defaults), so a bad override cannot defeat a bound; the
   bootloop proof in §10 holds with overrides set, not only
@@ -444,7 +462,8 @@ release tree. The busybox shim delegates applets to host GNU
 tools and the fake loader `exec`s the child, so harness
 evidence proves GNU-tool semantics; busybox `flock`/`timeout`/
 `nohup`/awk dialect on the device remains
-`[NEEDS-MEASUREMENT]`. 37 cases, all passing: install success +
+`[NEEDS-MEASUREMENT]`. 41 cases, all passing (run serially,
+twice): install success +
 checksum-fail install; unlisted-payload-file install refused;
 disable present → no start; missing binary → log + exit 0; bad
 config → no start + exit 0; telegram absent → no start, present
@@ -463,11 +482,21 @@ non-forwarding-`timeout` stop (orphan killed by the `/proc`
 scan, `is-running` reports stopped, restart creates no
 duplicate); symlink refusal for PID/enabled/log/backup paths
 (victims untouched); `current`-outside-`releases/` refused;
+`current` escape variants refused (`/.`, trailing `/`, `//`,
+multi-component, `..`, absolute outside — victims untouched,
+good release still passes); symlinked data dir / `releases/`
+refused (victims untouched); symlinked logs dir refused (no
+file in the victim, including from a dispatch-level refusal);
+symlinked install-time data-dir record refused (victim
+untouched, install aborts);
 pre-placed example preserved; stale quarantine cleaned;
 env-override clamping; fresh-log 0600 modes; uninstall
 data-dir record; interruptible watchdog sleep (disable stops
 promptly); relative data-dir refused; status version
-unavailable; action toggle; uninstall keeps data; purge guard
+unavailable; process matching in the harness is scoped to the
+case's own directory, so concurrent harness runs cannot
+pollute each other's orphan/duplicate assertions (runs are
+serial); action toggle; uninstall keeps data; purge guard
 refuses a wrong path and runs only with `--yes`; plugin file
 survives update + uninstall; log rotation cap; boot_completed
 timeout; flock timeout; watchdog backoff; fake-secret grep
@@ -522,7 +551,7 @@ when disk space matters.
 | D18 | Legacy controller quarantine + v1.1 lock + plugin-path migration | Quarantine kept; legacy lock and config-path migration dropped; plugin forward-copy kept; stale quarantine removed (not fatal) when the live controller exists; example copied only when neither config nor example exists | First module release: no legacy castctl controller/layout exists. The forward-copy is kept as the same defensive shape as the template |
 | D19 | `allow-root-core` marker opts into root | No marker; root is the only mode (see D9) | Single documented mode; no silent identity switch |
 | D20 | `set_perm_recursive` covers the whole module dir | `webroot/` excluded from permission setting | KernelSU sets webroot permissions/SELinux itself and warns against setting them by hand |
-| D21 | Controller writes follow symlinks (PID files, markers, logs) | Every controller write path refuses symlinks; `current` target validated under `releases/`; sensitive data dirs refused when symlinked | Hardening beyond the template: a planted symlink must never redirect a write outside the data tree (loop-1 F1) |
+| D21 | Controller writes follow symlinks (PID files, markers, logs) | Every controller write path refuses symlinks, including a symlinked data dir, `releases/` dir, or logs dir (`log()` never appends through one); `current` target must be exactly one component under `releases/`; sensitive data dirs refused when symlinked | Hardening beyond the template: a planted symlink must never redirect a write outside the data tree (loop-1 F1; loop-2 F2/B1) |
 | D22 | Checksum check covers listed files only | Install and start refuse a release containing files not listed in `checksums.sha256` (manifest allowlist) | An unlisted executable planted in the release tree must not survive install (loop-1 red-team N4) |
 
 ## 10. Bootloop safety — proof table
@@ -534,15 +563,15 @@ is a recovery procedure for Boss, never a design argument.
 
 | Script path | Cannot block | Cannot loop | Failure exits 0 | Proof required |
 |---|---|---|---|---|
-| `customize.sh` (install-time, not boot) | No unbounded wait: downloads happen only in `build.sh`, never here; `flock -n` fails fast; `abort` is the only failure exit | No `while` loop without a bound (the only loop scans quarantine candidates, a finite glob) | Install failure exits via `abort` (installer cleanup), never bare `exit 1` | Static: read the file. Live: install completes or aborts cleanly; phone reboots normally. `[NEEDS-MEASUREMENT]`. Lock parent is created before the lock check; a stale quarantine is removed (not fatal) when the live controller exists; the example is copied only when neither config nor example exists; the payload allowlist is enforced; an existing `current` target is validated under `releases/` before the plugin forward-copy |
+| `customize.sh` (install-time, not boot) | No unbounded wait: downloads happen only in `build.sh`, never here; `flock -n` fails fast; `abort` is the only failure exit | No `while` loop without a bound (the only loop scans quarantine candidates, a finite glob) | Install failure exits via `abort` (installer cleanup), never bare `exit 1` | Static: read the file. Live: install completes or aborts cleanly; phone reboots normally. `[NEEDS-MEASUREMENT]`. Lock parent is created before the lock check; a stale quarantine is removed (not fatal) when the live controller exists; the example is copied only when neither config nor example exists; the payload allowlist is enforced; an existing `current` target is validated under `releases/` before the plugin forward-copy; a symlinked data dir or `releases/` dir aborts the install before anything is written below it; the install-time data-dir record refuses a symlink |
 | `post-fs-data.sh` | — (must not ship) | — | — | Proof is absence: file must not exist in the ZIP or module dir. Any future addition reopens this section |
 | `post-mount.sh` | — (must not ship) | — | — | Proof is absence, as above |
 | `boot-completed.sh` | — (must not ship) | — | — | Proof is absence, as above |
 | `service.sh` (foreground) | Foreground contains only variable setup + one background launch `(...) &` + `exit 0`. No `sleep`, `wait`, `flock`, or daemon invocation | Foreground contains no loop | Foreground exits 0 unconditionally; no `set -e` | Static: read the file. Live: boot-completed time with module enabled vs disabled. `[NEEDS-MEASUREMENT]` |
-| `service.sh` (background body) | Runs parallel with boot (backgrounded). `boot_completed` wait is bounded polling (120 s cap). `start --boot` uses `flock -w 30`. Readiness wait is 10 s. Stop escalation is 5 s + 3 s. All four env-overridable bounds are validated and clamped, so the bounds hold with overrides set | Watchdog sleeps (30 s → 300 s backoff) between iterations, in 5 s chunks re-checking `disable` with exit; consecutive-failure counter caps the rate; no respawn without sleep | Every start/stop invocation ends `|| true`; disable/missing-controller exits are `exit 0`; no `set -e`, no bare failing command as the body's last word | Static: read the file; count sleeps, bounds, `|| true`s. Live: boots with config removed, binary removed, and `disable` created mid-boot. `[NEEDS-MEASUREMENT]` |
+| `service.sh` (background body) | Runs parallel with boot (backgrounded). `boot_completed` wait is bounded polling (120 s cap). `start --boot` uses `flock -w 30`. Readiness wait is 10 s. Stop escalation is ≈14 s (2×5 s INT + 3 s TERM + 1 s, at defaults, plus scan time). All four env-overridable bounds are validated and clamped, so the bounds hold with overrides set | Watchdog sleeps (30 s → 300 s backoff) between iterations, in 5 s chunks re-checking `disable` with exit; consecutive-failure counter caps the rate; no respawn without sleep | Every start/stop invocation ends `|| true`; disable/missing-controller exits are `exit 0`; no `set -e`, no bare failing command as the body's last word | Static: read the file; count sleeps, bounds, `|| true`s. Live: boots with config removed, binary removed, and `disable` created mid-boot. `[NEEDS-MEASUREMENT]` |
 | `action.sh` (manager button, not boot) | Returns promptly; no wait loops; controller readiness wait is bounded (10 s) | No loop | Exits 0 even when start/stop fails (`|| true` everywhere) | Static: read the file. Live: tap Action running and stopped. `[NEEDS-MEASUREMENT]` |
 | `uninstall.sh` | Returns promptly; stop is best-effort (`|| true`); no waits; stop resolves the data dir from an explicit env, then the install-time record, then the default | No loop | Exits 0 unconditionally | Static: read the file. Live: uninstall + reboot, no orphan daemon. `[NEEDS-MEASUREMENT]` |
-| `scripts/castctl-ctl` (invoked by the above) | Every wait bounded: flock 30 s, readiness 10 s, version probe 10 s, stop 5 s + 3 s, child lifetime 86400 s (all env-overridable values validated and clamped). Stop always re-scans `/proc` after the wrapper exits, so a non-forwarding `timeout` cannot orphan a child | No unbounded loop: watchdog backoff lives in `service.sh`; controller loops are all iteration-capped | Controller exit codes never propagate to boot: `service.sh` swallows them with `|| true`; manual invocation reports failures honestly (non-zero) | Static: read the file. Live: as for `service.sh` background body. Every write path refuses symlinks; `current` target and manifest allowlist validated on every runtime check |
+| `scripts/castctl-ctl` (invoked by the above) | Every wait bounded: flock 30 s, readiness 10 s, version probe 10 s, stop ≈14 s (2×5 s INT + 3 s TERM + 1 s, at defaults, plus scan time), child lifetime 86400 s (all env-overridable values validated and clamped). Stop always re-scans `/proc` after the wrapper exits, so a non-forwarding `timeout` cannot orphan a child; readiness-failure and mid-start symlink kills go through the same scan | No unbounded loop: watchdog backoff lives in `service.sh`; controller loops are all iteration-capped | Controller exit codes never propagate to boot: `service.sh` swallows them with `|| true`; manual invocation reports failures honestly (non-zero) | Static: read the file. Live: as for `service.sh` background body. Every write path refuses symlinks (including symlinked data dir / `releases/` / logs dir); `current` target must be a single component under `releases/` and the manifest allowlist is validated on every runtime check |
 | `initrc/`, `preinit/`, `system/`, `system.prop`, `sepolicy.rule`, `/data/adb/*.d/` scripts | — (must not ship) | — | — | Proof is absence in the ZIP listing. `initrc` content would still run in safe mode, so absence is load-bearing, not cosmetic |
 
 Additional hard-rule properties, verified by grep over the tree:
@@ -584,7 +613,7 @@ What the module needs from phase 2 item 2 (stub TODO in
    browser fallback URL.
 
 Live gates — phone-only proof, adapted from the environment pack
-(23 gates). None is passed by this work; check each off only with
+(24 gates). None is passed by this work; check each off only with
 an observed result on the device:
 
 1. Flash/install via the KernelSU manager: succeeds or aborts
@@ -644,6 +673,12 @@ an observed result on the device:
     `is-running` reports stopped, and the next start creates
     no duplicate (covers non-forwarding `timeout` behaviour
     on device).
+24. Signal delivery to the backgrounded Go binary: whether
+    `signal.NotifyContext` in `cmd/castctl/main.go` resets an
+    inherited SIG_IGN for SIGINT, i.e. whether the SIGINT step
+    of the stop escalation actually reaches castctl on device
+    (TERM/KILL termination is the proven path; do not claim
+    "SIGINT-first" operates until this gate passes).
 
 ## 12. Static fallback (manual only, never automatic)
 
