@@ -28,6 +28,26 @@ import (
 
 const keeperTestToken = "123456:FAKE-TOKEN-0123456789ABCD"
 
+// lockedBuffer is a bytes.Buffer safe for concurrent Write +
+// String: the cancel test polls output while the run goroutine
+// writes tick lines.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
 // keeperTestConfig returns a config with a default profile, a
 // muse01 profile, a telegram block linked to muse01, and one
 // keeper entry for the default profile. The browser URL points
@@ -277,7 +297,12 @@ func TestKeeperRunSecondRefuses(t *testing.T) {
 func TestKeeperRunCancelled(t *testing.T) {
 	t.Parallel()
 	fake := &keeperFakeGateway{sessionStatus: 200, authStatus: 200}
-	env, out, _, _ := keeperTestEnv(t, keeperTestConfig(), fake)
+	// The run goroutine writes tick lines while this goroutine
+	// polls for the first one: the output buffer must be safe
+	// for concurrent use (bytes.Buffer is not).
+	out := &lockedBuffer{}
+	env, _, _, _ := keeperTestEnv(t, keeperTestConfig(), fake)
+	env.Stdout = out
 	ctx, cancel := context.WithCancel(context.Background())
 	codeCh := make(chan int, 1)
 	go func() { codeCh <- Run(ctx, []string{"keeper", "run"}, env) }()

@@ -340,3 +340,44 @@ func TestLoginClearsStickyStopOnSave(t *testing.T) {
 		t.Fatalf("ResetAfterLogin: %v", err)
 	}
 }
+
+// TestResetAfterLoginIgnoresCookiesBytes: the reset clears
+// state markers without parsing the cookies file, so an
+// import holding a form the strict jar parser rejects (an
+// 8-column jar row) still resets. Regression: ResetAfterLogin
+// used the full locked store, whose classify step failed the
+// import after the file was already written.
+func TestResetAfterLoginIgnoresCookiesBytes(t *testing.T) {
+	baseDir := t.TempDir()
+	paths, err := profile.ProfilePaths(baseDir, "muse01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(paths.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// 8 tab-separated columns: ParseJar rejects it, the import
+	// parser accepts it.
+	jar8 := ".muse.ai\tTRUE\t/\tTRUE\t0\thatch_sess\tFAKE\tEXTRA\n"
+	if err := os.WriteFile(paths.Cookies, []byte(jar8), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st := NewSessionState()
+	st.LoggedOut = true
+	st.KeeperStopped = true
+	st.KeeperStoppedReason = StoppedAuthError
+	st.WarnPending = true
+	if err := SaveState(paths.Dir, st); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetAfterLogin(baseDir, &profile.Profile{Name: "muse01"}, RealClock); err != nil {
+		t.Fatalf("ResetAfterLogin with 8-column jar: %v", err)
+	}
+	st = readState(t, paths.Dir)
+	if st.LoggedOut || st.KeeperStopped || st.WarnPending {
+		t.Fatalf("markers not cleared: %+v", st)
+	}
+	if got, _ := os.ReadFile(paths.Cookies); string(got) != jar8 {
+		t.Fatalf("cookies file changed by reset: %q", got)
+	}
+}

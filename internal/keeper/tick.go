@@ -274,6 +274,26 @@ func (s *Store) lock() (*lockedStore, error) {
 
 func (ls *lockedStore) unlock() { ls.release() }
 
+// lockStateOnly acquires the cookies-file lock and loads the
+// state file, without reading or parsing the cookies file
+// itself. ResetAfterLogin uses it: a fresh import may hold any
+// accepted form (including forms the strict jar parser
+// rejects, such as extra-column jars), and clearing sticky
+// markers must never fail on the cookies bytes. The lock
+// still serialises against keeper ticks.
+func (s *Store) lockStateOnly() (*lockedStore, error) {
+	release, err := profile.LockCookiesFile(s.baseDir, s.profileName, s.cookiesPath, s.lockTimeout)
+	if err != nil {
+		return nil, err
+	}
+	st, err := LoadState(s.profileDir)
+	if err != nil {
+		release()
+		return nil, err
+	}
+	return &lockedStore{store: s, release: release, state: st}, nil
+}
+
 // classifyCookiesFile decides the stored file's form. A file
 // that LOOKS like a jar (any tab, or the Netscape header) is
 // parsed strictly: a malformed row fails closed with its line
@@ -771,7 +791,7 @@ func ResetAfterLogin(baseDir string, prof *profile.Profile, clock Clock) error {
 	if err != nil {
 		return err
 	}
-	ls, err := store.lock()
+	ls, err := store.lockStateOnly()
 	if err != nil {
 		return err
 	}

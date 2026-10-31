@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/keeper"
@@ -395,7 +396,13 @@ func cmdKeeperRun(ctx context.Context, env *Env, g *globalOpts, args []string) e
 	}()
 	rts := &keeperRuntimes{env: env, g: g, loc: loc, single: single, ctx: ctx}
 	defer rts.closeAll()
+	// Ticks for different entries run concurrently; serialise
+	// the summary lines so they never interleave, whatever
+	// writer backs stdout.
+	var outMu sync.Mutex
 	onTick := func(entry *profile.KeeperEntry, res keeper.TickResult) {
+		outMu.Lock()
+		defer outMu.Unlock()
 		fmt.Fprintf(env.stdout(), "keeper: %s (%s): %s cookies_seen=%d wrote=%v next_delay=%s\n",
 			entry.Tag, entry.Profile, res.Outcome, res.CookiesSeen, res.WroteCookies, res.NextDelay)
 	}
