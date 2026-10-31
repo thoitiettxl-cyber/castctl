@@ -69,6 +69,32 @@ const (
 // ids with an in-flight claim owned elsewhere (those are
 // awaited, then decided on takeover). It returns the ids it
 // decided (src/muse_cli/tgbot.py:1505-1580, approve_forever).
+//
+// [DEVIATION — CLAIM STORM, DOCUMENTED RESIDUAL] The mirrored
+// protocol has a claim storm: with a slow decider and a short
+// ClaimWait, every concurrent caller times out waiting, takes
+// over, and decides the same id (20 goroutines, 150ms decider,
+// 20ms ClaimWait → 20 decider calls; pinned by
+// TestApproveForeverClaimStormDocumentedResidual). This is a
+// defect in the mirrored Python protocol itself, not a Go
+// transcription error, and no fix keeps the surveyed
+// timeout-takeover semantics: at the moment a waiter times
+// out, a slow-but-alive owner blocked inside Decide is
+// observably identical to a genuinely gone owner (the Decider
+// interface carries no progress signal, and a heartbeat from
+// a companion goroutine ticks identically for a decider that
+// is merely slow and one that is blocked forever), so any
+// rule that makes the waiter wait out a slow decider also
+// makes it wait out a gone owner, and any rule that takes
+// over promptly storms. Serialising decide+record per id
+// without the timeout takeover would break the surveyed
+// takeover case (TestClaimTakeoverAfterShortWait). The
+// protocol is therefore kept as surveyed, and the storm is
+// disclosed here, in docs, and in the PR draft: gateway-side
+// idempotency is REQUIRED in step 5 (a repeated decide for
+// the same id must be harmless), and an error after the
+// decider's effect is indistinguishable from a failure —
+// callers must not assume one Decide call per id.
 // A failed decide releases the claim so a retry can decide it
 // (src/muse_cli/tgbot.py:1568-1572, _fail_claim). No claim is
 // created for an id that does not offer forever; that is

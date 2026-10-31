@@ -13,6 +13,8 @@ package telegram
 import (
 	"context"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -313,3 +315,54 @@ var errDecideFail = errString("decide failed")
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+func TestApproveForeverClaimStormDocumentedResidual(t *testing.T) {
+	t.Parallel()
+	// DOCUMENTED RESIDUAL (loop-2 fallback for R-F5): 20
+	// concurrent callers, a 150ms decider, a 20ms ClaimWait.
+	// The mirrored Python claim protocol decides once per
+	// caller that times out, so all 20 call Decide. This test
+	// pins that residual behaviour; it is NOT the desired
+	// exactly-once outcome. See the proof in claims.go and
+	// the deviation in the PR draft: gateway-side idempotency
+	// is required in step 5. No fix that keeps the surveyed
+	// timeout-takeover semantics can yield 1 call here (the
+	// owner is observably identical — blocked inside Decide
+	// with no progress signal — in the storm and in the
+	// takeover case), so the protocol is kept as surveyed
+	// and the storm is disclosed instead of half-fixed.
+	srv := newFakeTelegramServer(t)
+	var calls atomic.Int32
+	slow := DeciderFunc(func(_ context.Context, _, _ string) error {
+		calls.Add(1)
+		time.Sleep(150 * time.Millisecond)
+		return nil
+	})
+	tb := newTestBot(t, srv, func(s *Settings) {
+		s.AutoApprove = true
+		s.ClaimWait = 20 * time.Millisecond
+		s.Decider = slow
+	})
+	a := foreverApproval("appr-storm")
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = tb.bot.ApproveForever(context.Background(), []Approval{a})
+		}()
+	}
+	close(start)
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("storm callers did not return")
+	}
+	if got := calls.Load(); got != 20 {
+		t.Errorf("decider calls in the storm = %d; want 20 (the documented residual)", got)
+	}
+}

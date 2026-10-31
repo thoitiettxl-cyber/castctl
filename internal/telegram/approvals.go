@@ -260,6 +260,9 @@ func (r *CallbackRegistry) Register(entry CallbackEntry) string {
 		// predictable entry. Callers run under the bot's
 		// per-update recover, and registration happens only
 		// when building a message, never inside a handler.
+		// [STEP-5 NOTE] Consider an error return instead of
+		// a panic when the registry API is next touched;
+		// changing the signature is out of scope for item 4.
 		panic(err)
 	}
 	token := base64.RawURLEncoding.EncodeToString(b[:])

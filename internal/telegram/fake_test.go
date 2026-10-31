@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -53,9 +54,19 @@ type fakeTelegramServer struct {
 	// return invalid JSON embedding the fixture token (a hostile
 	// server body): the bot's error path must scrub it.
 	getUpdatesGarbage bool
-	sendFailures      []scriptedFailure
-	editFailures      []scriptedFailure
-	editTextTrue      bool
+	// garbageBody, when non-empty, is the exact hostile
+	// getUpdates body returned once (invalid JSON carrying a
+	// marker distinct from the token, so body-byte leakage is
+	// detectable even when the token is scrubbed).
+	garbageBody string
+	// sendRedirect, when true, makes sendMessage answer 302 to
+	// redirectTarget instead of 200: the bot must refuse the
+	// redirect and never request the second server.
+	sendRedirect   bool
+	redirectTarget string
+	sendFailures   []scriptedFailure
+	editFailures   []scriptedFailure
+	editTextTrue   bool
 }
 
 func newFakeTelegramServer(t *testing.T) *fakeTelegramServer {
@@ -105,6 +116,14 @@ func (f *fakeTelegramServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"Fake","username":"fakebot"}}`)
 	case "getUpdates":
+		if f.garbageBody != "" {
+			f.mu.Lock()
+			body := f.garbageBody
+			f.garbageBody = ""
+			f.mu.Unlock()
+			fmt.Fprint(w, body)
+			return
+		}
 		if f.getUpdatesGarbage {
 			f.mu.Lock()
 			f.getUpdatesGarbage = false
@@ -128,6 +147,15 @@ func (f *fakeTelegramServer) handle(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(5 * time.Millisecond)
 		fmt.Fprintf(w, `{"ok":true,"result":%s}`, batch)
 	case "sendMessage":
+		f.mu.Lock()
+		redirect := f.sendRedirect
+		target := f.redirectTarget
+		f.mu.Unlock()
+		if redirect {
+			w.Header().Set("Location", target+"/bot"+fakeToken+"/sendMessage")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
 		f.mu.Lock()
 		var fail *scriptedFailure
 		if len(f.sendFailures) > 0 {
@@ -273,7 +301,68 @@ func callbackUpdate(id int64, userID, chatID int64, msgID int, data, cqID string
 }
 
 func fakeHTTPClient() *http.Client {
-	return &http.Client{Transport: &http.Transport{Proxy: nil}}
+	// Test-only transport shape satisfying BoundClient: a
+	// *http.Transport with an explicit dial path (the loopback
+	// fake server is plain HTTP, so DialTLSContext is never
+	// invoked; it exists only so the transport is not the
+	// stdlib default direct-dial shape).
+	dialer := &net.Dialer{}
+	return &http.Client{Transport: &http.Transport{
+		Proxy:       nil,
+		DialContext: dialer.DialContext,
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, addr)
+		},
+	}}
+}
+
+// callbackUpdateInaccessible builds a callback_query whose
+// message has date 0: the library parses it as a
+// MaybeInaccessibleMessage (InaccessibleMessage), not a Message.
+func callbackUpdateInaccessible(id int64, userID, chatID int64, msgID int, data, cqID string) string {
+	b, _ := json.Marshal(map[string]any{
+		"update_id": id,
+		"callback_query": map[string]any{
+			"id":   cqID,
+			"from": map[string]any{"id": userID, "is_bot": false, "first_name": "Tester"},
+			"message": map[string]any{
+				"message_id": msgID,
+				"date":       0,
+				"chat":       map[string]any{"id": chatID, "type": "private"},
+			},
+			"data": data,
+		},
+	})
+	return string(b)
+}
+
+// combinedUpdate builds one update carrying BOTH a message and
+// a callback_query, with independent senders (a shape real
+// servers never emit; only a hostile/compromised response can
+// produce it). The gate must follow the dispatched kind.
+func combinedUpdate(id int64, msgUserID, msgChatID, cqUserID, cqChatID int64, msgID int, data, cqID string) string {
+	b, _ := json.Marshal(map[string]any{
+		"update_id": id,
+		"message": map[string]any{
+			"message_id": 1,
+			"date":       1700000000,
+			"chat":       map[string]any{"id": msgChatID, "type": "private"},
+			"from":       map[string]any{"id": msgUserID, "is_bot": false, "first_name": "Tester"},
+			"text":       "combined",
+		},
+		"callback_query": map[string]any{
+			"id":   cqID,
+			"from": map[string]any{"id": cqUserID, "is_bot": false, "first_name": "Tester"},
+			"message": map[string]any{
+				"message_id": msgID,
+				"date":       1700000000,
+				"chat":       map[string]any{"id": cqChatID, "type": "private"},
+				"text":       "approval?",
+			},
+			"data": data,
+		},
+	})
+	return string(b)
 }
 
 type recordingDecider struct {

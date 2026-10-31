@@ -16,8 +16,10 @@ package telegram
 // nil Transport silently inherits the stdlib env proxy),
 // WithNotAsyncHandlers + WithWorkers(1) for serial dispatch,
 // WithAllowedUpdates restricted to message + callback_query,
-// custom errors/default handlers (the defaults log full updates
-// and raw payloads), and GetMe at construction (no SkipGetMe:
+// a custom errors handler (the default logs errors verbatim,
+// including raw payloads; the default handler is registered
+// but unreachable behind the match-all handler), and GetMe at
+// construction (no SkipGetMe:
 // Python's Bot.run calls getMe at startup,
 // src/muse_cli/tgbot.py:2465). The per-chat serialising dispatcher
 // and the update_id dedupe store are writer code: the library
@@ -239,12 +241,27 @@ type Bot struct {
 
 // BoundClient wraps a profile-outbound client for the Telegram
 // library: the same Transport (the outbound dial path), an
-// explicit Timeout exceeding pollTimeout, no cookie jar, and a
-// fail-closed rejection of any client that could consult env
-// proxies (nil Transport inherits the stdlib default transport;
-// a non-nil Proxy consults the environment). A non-*http.Transport
-// RoundTripper (test doubles) is accepted as-is: there is no
-// proxy to inspect, and the double defines the dial path.
+// explicit Timeout exceeding pollTimeout, no cookie jar, a
+// no-follow redirect policy (a redirect is refused as an
+// error; the token-bearing path is never sent to a second
+// server), and fail-closed rejection of any client that could
+// consult env proxies or bypass the outbound: nil Transport
+// (the stdlib default transport, env-proxy inheriting),
+// a non-nil Proxy, any non-*http.Transport RoundTripper
+// (delegating/wrapping transports are rejected outright —
+// there is no test-double carve-out), and an *http.Transport
+// with no custom dial path at all (nil DialContext and nil
+// DialTLSContext: the default direct-dial shape).
+//
+// Residual, stated honestly: construction-time checks cannot
+// prove that an explicitly supplied dial function dials
+// through the outbound — a hostile caller that supplies
+// explicit direct-dial functions passes this binder. The
+// guarantee rests on the production construction path
+// (Dialer.HTTPClient, whose transport carries the outbound
+// dial functions) plus rejection of the default and wrapped
+// shapes above; BoundClient never accepts a transport it
+// cannot inspect.
 func BoundClient(base *http.Client, pollTimeout time.Duration) (*http.Client, error) {
 	if base == nil {
 		return nil, errors.New("telegram: HTTP client is required (profile outbound client)")
@@ -252,8 +269,15 @@ func BoundClient(base *http.Client, pollTimeout time.Duration) (*http.Client, er
 	if base.Transport == nil {
 		return nil, errors.New("telegram: HTTP client has no Transport: refusing the stdlib default transport (env proxy)")
 	}
-	if tr, ok := base.Transport.(*http.Transport); ok && tr.Proxy != nil {
+	tr, ok := base.Transport.(*http.Transport)
+	if !ok {
+		return nil, errors.New("telegram: HTTP client Transport is not an *http.Transport: refusing a delegating/wrapping RoundTripper")
+	}
+	if tr.Proxy != nil {
 		return nil, errors.New("telegram: HTTP client Transport consults proxy environment variables: refusing")
+	}
+	if tr.DialContext == nil && tr.DialTLSContext == nil {
+		return nil, errors.New("telegram: HTTP client Transport has no custom dial path: refusing the default direct-dial transport")
 	}
 	timeout := base.Timeout
 	if timeout == 0 {
@@ -263,10 +287,17 @@ func BoundClient(base *http.Client, pollTimeout time.Duration) (*http.Client, er
 		return nil, fmt.Errorf("telegram: HTTP client timeout %v must exceed the poll timeout %v", timeout, pollTimeout)
 	}
 	return &http.Client{
-		Transport:     base.Transport,
-		CheckRedirect: base.CheckRedirect,
+		Transport:     tr,
+		CheckRedirect: noFollowRedirect,
 		Timeout:       timeout,
 	}, nil
+}
+
+// noFollowRedirect refuses every redirect: the library
+// surfaces the refusal as an error through the scrubbed
+// error path, and no second server is ever requested.
+func noFollowRedirect(_ *http.Request, _ []*http.Request) error {
+	return errors.New("telegram: HTTP redirects are not followed")
 }
 
 // New constructs a Bot. It performs GetMe (no SkipGetMe) through
@@ -451,17 +482,25 @@ func updateKind(upd *models.Update) string {
 	}
 }
 
-// senderID extracts the sender's user id, or 0 when the update
-// carries none (src/muse_cli/tgbot.py:989-1000 takes from.id
-// from the message or callback_query, or None). There is no
-// uniform sender accessor in the library: every update kind is
-// nil-guarded here.
+// senderID extracts the sender's user id for the update kind
+// actually dispatched, or 0 when the update carries none
+// (src/muse_cli/tgbot.py:989-1000 takes from.id from the
+// message or callback_query, or None). The callback sender is
+// checked FIRST: processUpdate dispatches CallbackQuery
+// before Message, so the allowlist gate must derive the
+// sender from the callback when one is present — a combined
+// update (message + callback_query, a shape only a
+// hostile/compromised response can emit) is gated on the
+// callback sender, never on the message sender. Only
+// message, callback_query, and edited_message carry a sender
+// here; every other kind returns 0 and is dropped by the
+// allowlist gate.
 func senderID(upd *models.Update) int64 {
-	if upd.Message != nil && upd.Message.From != nil {
-		return upd.Message.From.ID
-	}
 	if upd.CallbackQuery != nil {
 		return upd.CallbackQuery.From.ID
+	}
+	if upd.Message != nil && upd.Message.From != nil {
+		return upd.Message.From.ID
 	}
 	if upd.EditedMessage != nil && upd.EditedMessage.From != nil {
 		return upd.EditedMessage.From.ID
@@ -469,14 +508,37 @@ func senderID(upd *models.Update) int64 {
 	return 0
 }
 
+// callbackChat returns the chat id and message id of a
+// callback query's message, whether it is a regular Message
+// or an InaccessibleMessage (date:0, e.g. a group/old or
+// deleted message whose buttons are still pressed). It
+// reports false when the callback carries no message at all
+// (inline messages): the caller then falls back to the
+// sender id as the chat, with no message to clear, as in
+// Python (tgbot.py:1042-1049: chat_id from message.chat or
+// uid, mid from message.message_id).
+func callbackChat(cq *models.CallbackQuery) (chatID int64, mid int, ok bool) {
+	if cq.Message.Message != nil {
+		return cq.Message.Message.Chat.ID, cq.Message.Message.ID, true
+	}
+	if cq.Message.InaccessibleMessage != nil {
+		return cq.Message.InaccessibleMessage.Chat.ID, cq.Message.InaccessibleMessage.MessageID, true
+	}
+	return 0, 0, false
+}
+
 // chatKey is the dispatcher's per-chat serialisation key: the
-// message chat, else the callback message chat, else the sender.
+// message chat, else the callback message chat (regular or
+// inaccessible), else the sender.
 func chatKey(upd *models.Update) int64 {
+	if upd.CallbackQuery != nil {
+		if chatID, _, ok := callbackChat(upd.CallbackQuery); ok {
+			return chatID
+		}
+		return senderID(upd)
+	}
 	if upd.Message != nil {
 		return upd.Message.Chat.ID
-	}
-	if upd.CallbackQuery != nil && upd.CallbackQuery.Message.Message != nil {
-		return upd.CallbackQuery.Message.Message.Chat.ID
 	}
 	return senderID(upd)
 }
@@ -498,9 +560,12 @@ func (b *Bot) allowlistMiddleware(next bot.HandlerFunc) bot.HandlerFunc {
 }
 
 // recoverMiddleware is the outermost middleware: a handler panic
-// must not kill the process (the library has no recover). The
-// panic value is logged summarised and token-scrubbed, never
-// verbatim.
+// must not kill the process (the library has no recover). It
+// wraps the library handler only, whose work is enqueueing
+// the update: it does NOT protect deferred handler execution
+// (the dispatcher recovers per item; that recover is the
+// effective one for handler panics). The panic value is
+// logged summarised and token-scrubbed, never verbatim.
 func (b *Bot) recoverMiddleware(next bot.HandlerFunc) bot.HandlerFunc {
 	return func(ctx context.Context, api *bot.Bot, upd *models.Update) {
 		defer func() {
@@ -518,23 +583,73 @@ func (b *Bot) logPanic(r any) {
 
 // defaultHandler replaces the library default (which logs the
 // full update with %+v). It logs ids and kinds only, never
-// message content.
+// message content. It is registered as a fallback but is
+// unreachable while the match-all handler is registered (the
+// match-all handler wins); it is kept only as defence if the
+// match-all registration is ever removed, and must not be
+// claimed as an active layer.
 func (b *Bot) defaultHandler(_ context.Context, _ *bot.Bot, upd *models.Update) {
 	b.logger.Debug("telegram unmatched update", "update_id", upd.ID, "kind", updateKind(upd))
 }
 
 // errorsHandler replaces the library default (which logs errors
 // verbatim, including raw payloads on decode failure). Errors
-// render summarised (status/class/length) and token-scrubbed.
+// render through summarize: response decode/read errors render
+// as a status/class/length summary only (no body bytes, at any
+// level); other errors render token-scrubbed through
+// SummarizeErr (SafeString backstop for errors that carry no
+// body). Raw server bodies are never emitted in a log line.
 func (b *Bot) errorsHandler(err error) {
 	b.logger.Error("telegram poll error", "err", b.summarize(err.Error()))
 }
 
-// summarize renders an error for a log line: the token scrubbed
-// out first (a hostile server body may echo it), then
-// SummarizeErr (status/class/length only, SafeString backstop).
+// summarize renders an error for a log line. The token is
+// scrubbed out first (a hostile server body may echo it).
+// Errors whose text carries a response body (the library's
+// decode/read-body errors embed the raw body verbatim) render
+// as "telegram poll error: response decode failure
+// method=<method> message_length=<n>" — class and length
+// only, never body bytes. All other errors go through
+// SummarizeErr. Callers must never log an error by
+// unwrapping and printing: the scrubbed error type carries
+// no raw chain (see scrubErr), and %+v/%#v of a scrubbed
+// error contain no token.
 func (b *Bot) summarize(msg string) string {
-	return logging.SummarizeErr(errors.New(b.scrub(msg)))
+	scrubbed := b.scrub(msg)
+	if isResponseBodyError(scrubbed) {
+		return fmt.Sprintf("telegram poll error: response decode failure method=%s message_length=%d", decodeErrorMethod(scrubbed), len([]rune(scrubbed)))
+	}
+	return logging.SummarizeErr(errors.New(scrubbed))
+}
+
+// isResponseBodyError reports whether the error text is one
+// of the library's body-carrying errors: its message embeds
+// the raw response body, so it must never reach a log line
+// verbatim (the logging-PR rule: raw server bodies are never
+// emitted anywhere, at any level).
+func isResponseBodyError(msg string) bool {
+	return strings.Contains(msg, "decode response body") ||
+		strings.Contains(msg, "read response body") ||
+		strings.Contains(msg, "decode response result")
+}
+
+// decodeErrorMethod extracts the method name from a
+// body-carrying error ("... for method <name>, ..."), or
+// "unknown" when the text does not carry one.
+func decodeErrorMethod(msg string) string {
+	const prefix = "for method "
+	i := strings.Index(msg, prefix)
+	if i < 0 {
+		return "unknown"
+	}
+	rest := msg[i+len(prefix):]
+	if j := strings.IndexAny(rest, ", "); j >= 0 {
+		rest = rest[:j]
+	}
+	if rest == "" {
+		return "unknown"
+	}
+	return rest
 }
 
 // scrub removes every occurrence of the token from s. The token
@@ -546,23 +661,67 @@ func (b *Bot) scrub(s string) string {
 	return strings.ReplaceAll(s, b.token, "***")
 }
 
-// scrubErr returns err with its text token-scrubbed, preserving
-// the error chain for errors.Is/As. Callers must use it for every
-// error that leaves the package carrying server text.
+// scrubErr returns a copy of err with the token scrubbed out
+// of the error text AND out of every typed string field that
+// can carry server text. The raw chain is NOT preserved:
+// returning the original error (or wrapping it) would leave
+// the token reachable through errors.As / Unwrap even when
+// Error() itself is scrubbed. Instead the copy preserves
+// only what step-5 needs: errors.As to *TooManyRequestsError
+// (RetryAfter) and *MigrateError (MigrateToChatID), with
+// their Message fields scrubbed, and errors.Is to the
+// library sentinel classes (bad request / forbidden /
+// unauthorized / not found / conflict / too many requests),
+// via Unwrap() []error over scrubbed copies and sentinels
+// only. No other errors.As target is preserved — a caller
+// needing another typed view of a server error must add it
+// here, with its string fields scrubbed, rather than
+// unwrapping the raw error.
+//
+// Invariant (never unwrap-and-print): a scrubbed error's
+// Error(), %+v, and %#v forms contain no token, and no
+// layer reachable from it carries the token; the scrubbed
+// copy holds no reference to the original error.
 func (b *Bot) scrubErr(err error) error {
 	if err == nil {
 		return nil
 	}
-	return &scrubbedErrorText{text: b.scrub(err.Error()), err: err}
+	text := b.scrub(err.Error())
+	var unwraps []error
+	var tmr *bot.TooManyRequestsError
+	if errors.As(err, &tmr) {
+		unwraps = append(unwraps, &bot.TooManyRequestsError{
+			Message:    b.scrub(tmr.Message),
+			RetryAfter: tmr.RetryAfter,
+		})
+	}
+	var mig *bot.MigrateError
+	if errors.As(err, &mig) {
+		unwraps = append(unwraps, &bot.MigrateError{
+			Message:         b.scrub(mig.Message),
+			MigrateToChatID: mig.MigrateToChatID,
+		})
+	}
+	for _, sentinel := range []error{
+		bot.ErrorBadRequest, bot.ErrorForbidden, bot.ErrorUnauthorized,
+		bot.ErrorNotFound, bot.ErrorConflict, bot.ErrorTooManyRequests,
+	} {
+		if errors.Is(err, sentinel) {
+			unwraps = append(unwraps, sentinel)
+		}
+	}
+	return &scrubbedError{text: text, unwraps: unwraps}
 }
 
-type scrubbedErrorText struct {
-	text string
-	err  error
+type scrubbedError struct {
+	text    string
+	unwraps []error
 }
 
-func (e *scrubbedErrorText) Error() string { return e.text }
-func (e *scrubbedErrorText) Unwrap() error { return e.err }
+func (e *scrubbedError) Error() string { return e.text }
+func (e *scrubbedError) Unwrap() []error {
+	return e.unwraps
+}
 
 // onMessage delivers a plain message to the message handler.
 // Non-text messages are ignored (src/muse_cli/tgbot.py:1013-1027
@@ -592,11 +751,12 @@ func (b *Bot) onMessage(ctx context.Context, upd *models.Update) {
 // the chat.
 func (b *Bot) onCallback(ctx context.Context, upd *models.Update) {
 	cq := upd.CallbackQuery
-	chatID := senderID(upd)
-	mid := 0
-	if cq.Message.Message != nil {
-		chatID = cq.Message.Message.Chat.ID
-		mid = cq.Message.Message.ID
+	chatID, mid, ok := callbackChat(cq)
+	if !ok {
+		// No message (inline message): fall back to the
+		// sender id as the chat, with no markup to clear.
+		chatID = senderID(upd)
+		mid = 0
 	}
 	entry, ok := b.registry.Lookup(cq.Data)
 	answerText := ""
@@ -904,6 +1064,18 @@ func (b *Bot) editTextCall(ctx context.Context, chatID int64, msgID int, text st
 // EditPlain edits with plain text, swallowing ALL errors: the
 // streaming-edit path, where a failed edit never fails a turn
 // (src/muse_cli/tgbot.py:754-758, edit_plain).
+//
+// [DEVIATION] Python's edit_plain catches only
+// (TelegramError, ConnectionError); other exceptions
+// propagate. This Go version swallows every error: scrubbed
+// errors (see scrubErr) deliberately drop the transport-type
+// distinctions that would let EditPlain tell a connection
+// error from any other failure, so narrowing the catch to
+// the Python pair is not expressible here without
+// unwrapping raw errors. The deviation is documented in
+// code, docs, and the PR draft; narrowing it is step-5 work
+// only if the scrubbed-error contract grows a connection
+// class.
 func (b *Bot) EditPlain(ctx context.Context, chatID int64, msgID int, text string) error {
 	if err := b.Edit(ctx, chatID, msgID, text, nil, HTMLModePlain); err != nil {
 		b.logger.Debug("telegram stream edit failed", "err", b.summarize(err.Error()))

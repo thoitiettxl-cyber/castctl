@@ -40,8 +40,13 @@ func EscapeText(text string) string {
 }
 
 // fenceMatchRe is Python's _FENCE_RE (re.S): ```lang, optional
-// newline, non-greedy body, closing ```.
+// newline, non-greedy body, closing ```. It is used ONLY by
+// MDToHTML and LongestCodeBlock, which need complete pairs.
+// fenceMarkerRe is the marker regex split_text uses
+// (re.findall(r"```([A-Za-z0-9_+.-]*)", p)): every marker,
+// paired or not, counted, the last marker's language carried.
 var fenceMatchRe = regexp.MustCompile("(?s)```([A-Za-z0-9_+.-]*)\\n?(.*?)```")
+var fenceMarkerRe = regexp.MustCompile("```([A-Za-z0-9_+.-]*)")
 
 var inlineCodeRe = regexp.MustCompile("`([^`\n]+)`")
 var linkRe = regexp.MustCompile(`\[([^\]\n]+)\]\((https?://[^\s)]+)\)`)
@@ -150,7 +155,11 @@ func StripTags(text string) string {
 // SplitText splits into pieces <= ChunkSize, preferring paragraph,
 // then line, then word breaks (src/muse_cli/tgapi.py:219-247,
 // split_text). A fenced code block cut by a split is closed and
-// reopened in the next piece so each piece renders.
+// reopened in the next piece so each piece renders. The carry
+// counts fence MARKERS in the piece (see fenceMarkerRe), not
+// complete pairs: a complete block in one piece (2 markers)
+// carries nothing; a piece cut mid-fence (1 marker) carries
+// the last marker's language.
 func SplitText(text string) []string {
 	return splitTextLimit(text, ChunkSize)
 }
@@ -183,7 +192,7 @@ func splitTextLimit(text string, limit int) []string {
 			p = "```" + *carry + "\n" + p
 			carry = nil
 		}
-		fences := fenceMatchRe.FindAllStringSubmatch(p, -1)
+		fences := fenceMarkerRe.FindAllStringSubmatch(p, -1)
 		if len(fences)%2 == 1 {
 			lang := fences[len(fences)-1][1]
 			carry = &lang

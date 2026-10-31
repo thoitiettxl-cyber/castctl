@@ -56,24 +56,54 @@ func TestSplitTextSmallLimit(t *testing.T) {
 
 func TestSplitTextFenceCarry(t *testing.T) {
 	t.Parallel()
-	// Python's fence fix counts complete ```...``` PAIRS in a
-	// piece (the fence regex needs a closing fence to match), so
-	// a piece holding exactly one pair gets a carry: limit 14,
-	// text "```a\nXX\n```\nYYYYYYYYYY" cuts at the "\n" at index
-	// 11 -> piece "```a\nXX\n```" (1 pair, odd) gains "\n```"
-	// and the remainder gains the "```a\n" reopen. This pins the
-	// surveyed algorithm including its pair-counting quirk: a
-	// lone opening fence with no close in the piece counts 0
-	// and carries nothing.
-	got := splitTextLimit("```a\nXX\n```\nYYYYYYYYYY", 14)
-	want := []string{"```a\nXX\n```\n```", "```a\nYYYYYYYYYY"}
-	if len(got) != len(want) {
-		t.Fatalf("splitTextLimit(fence) = %q; want %q", got, want)
+	// Python's fence fix (split_text, tgapi.py:219-247) counts
+	// fence MARKERS in a piece: fences =
+	// re.findall(r"```([A-Za-z0-9_+.-]*)", p); if len(fences) % 2:
+	// carry = fences[-1]. It never uses _FENCE_RE (the pair
+	// regex). So a piece holding a complete block (2 markers)
+	// carries nothing, and a piece cut mid-fence (1 marker)
+	// carries the last marker's language. Expected values were
+	// re-derived by executing Python's exact algorithm.
+	cases := []struct {
+		name  string
+		text  string
+		limit int
+		want  []string
+	}{
+		{
+			name:  "complete block in one piece carries nothing",
+			text:  "```a\nXX\n```\nYYYYYYYYYY",
+			limit: 14,
+			want:  []string{"```a\nXX\n```", "YYYYYYYYYY"},
+		},
+		{
+			name:  "mid-fence cut carries the language",
+			text:  "```go\n" + strings.Repeat("x", 20),
+			limit: 14,
+			want:  []string{"```go\n```", "```go\n" + strings.Repeat("x", 14) + "\n```", "```go\n" + strings.Repeat("x", 6) + "\n```"},
+		},
+		{
+			name:  "language carry survives across pieces",
+			text:  "a\n```py\n" + strings.Repeat("b", 30),
+			limit: 14,
+			want: []string{"a\n```py\n```",
+				"```py\n" + strings.Repeat("b", 14) + "\n```",
+				"```py\n" + strings.Repeat("b", 14) + "\n```",
+				"```py\n" + strings.Repeat("b", 2) + "\n```"},
+		},
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("piece %d = %q; want %q", i, got[i], want[i])
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitTextLimit(tc.text, tc.limit)
+			if len(got) != len(tc.want) {
+				t.Fatalf("splitTextLimit = %q; want %q", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("piece %d = %q; want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
 	}
 }
 

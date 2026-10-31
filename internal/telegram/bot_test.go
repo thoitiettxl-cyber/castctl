@@ -13,12 +13,16 @@ package telegram
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/go-telegram/bot"
 )
 
 func TestBotConstructionCallsGetMeOnce(t *testing.T) {
@@ -197,7 +201,7 @@ func TestBotRecoverPerUpdate(t *testing.T) {
 		t.Fatalf("handler calls = %d; want 2 (panic in one update must not kill the loop)", got)
 	}
 	if strings.Contains(tb.logBuf.String(), fakeToken) {
-		t.Errorf("log output contains the fixture token after a token-bearing panic:\n%s", tb.logBuf.String())
+		t.Errorf("log output contains the fixture token after a token-bearing panic (log buffer not printed: it may carry secrets)")
 	}
 }
 
@@ -373,6 +377,14 @@ func TestBotSend429Retry(t *testing.T) {
 	if _, err := tb.bot.Send(ctx, 500, "hi", SendOptions{}); err == nil {
 		t.Error("Send(persistent 429) = nil; want error after retries exhausted")
 	}
+	// Pin the attempt count: 2 + 1 + 3 = 6 sendMessage calls,
+	// and 1 + 0 + 2 = 3 recorded sleeps.
+	if got := srv.count("sendMessage"); got != 6 {
+		t.Errorf("sendMessage calls = %d; want 6 (2 + 1 + 3 attempts)", got)
+	}
+	if sleeps := tb.recordedSleeps(); len(sleeps) != 3 {
+		t.Errorf("sleeps = %v; want 3 (1 + 0 + 2 retries)", sleeps)
+	}
 }
 
 func TestBotCallbackDecide(t *testing.T) {
@@ -515,6 +527,13 @@ func TestBotApproveAll(t *testing.T) {
 
 func TestBotEnvProxyIgnoredAndOtherServerUntouched(t *testing.T) {
 	// NOT t.Parallel: t.Setenv forbids parallel tests.
+	// Limitation: this test is weak in isolation — ProxyFromEnvironment
+	// bypasses loopback destinations anyway, so a proxy-consulting
+	// transport could still pass it for a loopback fake. Env-proxy
+	// rejection is really proven by TestBotConstructionValidation
+	// (BoundClient rejects env-proxy transports at construction);
+	// this test proves only that no request reaches the proxy or
+	// the other server on the polling path.
 	// Counting proxy: every request through it is recorded.
 	var proxyHits atomic.Int64
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -568,7 +587,7 @@ func TestBotTokenAbsenceHostileServer(t *testing.T) {
 		t.Fatalf("Start = %v", err)
 	}
 	if strings.Contains(tb.logBuf.String(), fakeToken) {
-		t.Errorf("log output contains the fixture token after a hostile server body:\n%s", tb.logBuf.String())
+		t.Errorf("log output contains the fixture token after a hostile server body (log buffer not printed: it may carry secrets)")
 	}
 	// The token must also be absent from every error the bot
 	// returns to a caller on the hostile path.
@@ -580,4 +599,280 @@ func TestBotTokenAbsenceHostileServer(t *testing.T) {
 	} else {
 		t.Error("Send(hostile description) = nil; want error")
 	}
+}
+
+// walkErrChain visits err and every error reachable through
+// Unwrap() error and Unwrap() []error, so a test can prove no
+// layer of a returned error carries the token.
+func walkErrChain(err error, visit func(error)) {
+	seen := map[error]bool{}
+	var walk func(error)
+	walk = func(e error) {
+		if e == nil || seen[e] {
+			return
+		}
+		seen[e] = true
+		visit(e)
+		if u, ok := e.(interface{ Unwrap() error }); ok {
+			walk(u.Unwrap())
+		}
+		if u, ok := e.(interface{ Unwrap() []error }); ok {
+			for _, sub := range u.Unwrap() {
+				walk(sub)
+			}
+		}
+	}
+	walk(err)
+}
+
+func TestBotCallbackInaccessibleMessage(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	after := int64(42)
+	mk := tb.bot.ApprovalMarkup(Approval{ID: "appr-inacc", Options: []string{"allow_once", "deny"}}, ResumeTriple{SessionID: "s1", Title: "t", AfterSeq: &after})
+	data := mk.InlineKeyboard[0][0].CallbackData
+	// Chat 600 is the inaccessible message's chat; 111 is only
+	// the sender. Routing must use 600, never the sender id.
+	srv.enqueueUpdates(callbackUpdateInaccessible(100, 111, 600, 100, data, "cq-inacc"))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startBot(t, tb.bot, ctx)
+	waitFor(t, "decide handled", func() bool { return len(tb.decider.recorded()) == 1 })
+	waitFor(t, "markup cleared", func() bool { return srv.count("editMessageReplyMarkup") == 1 })
+	if err := stopBot(t, cancel, done); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start = %v", err)
+	}
+	sends := srv.callsOf("sendMessage")
+	found := false
+	for _, c := range sends {
+		if c.Form["chat_id"] == "600" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("confirmation sends = %+v; want one to chat 600 (the message chat, not the sender)", sends)
+	}
+	edits := srv.callsOf("editMessageReplyMarkup")
+	if len(edits) != 1 || edits[0].Form["chat_id"] != "600" || edits[0].Form["message_id"] != "100" {
+		t.Errorf("markup-clear calls = %+v; want one chat 600 message 100", edits)
+	}
+}
+
+func TestBotCombinedUpdateCallbackSenderGates(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	mk := tb.bot.ApprovalMarkup(Approval{ID: "appr-comb", Options: []string{"allow_once", "deny"}}, ResumeTriple{})
+	data := mk.InlineKeyboard[0][0].CallbackData
+	// Real servers never emit combined updates; only a
+	// hostile/compromised API response can. The gate must
+	// derive the sender from the dispatched kind (callback).
+	// The two updates go in separate batches so the
+	// stranger-callback outcome is observable before the
+	// allowlisted one is delivered.
+	srv.enqueueUpdates(combinedUpdate(110, 111, 500, 999, 600, 100, data, "cq-stranger"))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startBot(t, tb.bot, ctx)
+	// The stranger-callback update must decide nothing.
+	time.Sleep(200 * time.Millisecond)
+	if got := len(tb.decider.recorded()); got != 0 {
+		t.Errorf("decider calls after stranger callback = %d; want 0", got)
+	}
+	if got := srv.count("answerCallbackQuery"); got != 0 {
+		t.Errorf("answerCallbackQuery calls after stranger callback = %d; want 0", got)
+	}
+	srv.enqueueUpdates(combinedUpdate(111, 999, 500, 111, 600, 100, data, "cq-friend"))
+	waitFor(t, "allowlisted callback decided", func() bool { return len(tb.decider.recorded()) == 1 })
+	if err := stopBot(t, cancel, done); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start = %v", err)
+	}
+	if got := len(tb.handler.recorded()); got != 0 {
+		t.Errorf("handler calls = %d for combined updates; want 0 (callback dispatch, no message handling)", got)
+	}
+	if got := srv.count("answerCallbackQuery"); got != 1 {
+		t.Errorf("answerCallbackQuery calls = %d; want 1 (the allowlisted callback only)", got)
+	}
+}
+
+func TestBotScrubbedErrorTokenFreeAtObjectLevel(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	assertTokenFree := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("scrubbed error is nil; want a scrubbed error")
+		}
+		if strings.Contains(err.Error(), fakeToken) {
+			t.Error("scrubbed Error() contains the token")
+		}
+		if strings.Contains(fmt.Sprintf("%+v", err), fakeToken) {
+			t.Error("scrubbed verbose formatting contains the token (never unwrap-and-print)")
+		}
+		if strings.Contains(fmt.Sprintf("%#v", err), fakeToken) {
+			t.Error("scrubbed Go-syntax formatting contains the token")
+		}
+		walkErrChain(err, func(e error) {
+			if strings.Contains(e.Error(), fakeToken) {
+				t.Errorf("error chain layer %T contains the token", e)
+			}
+		})
+	}
+	// 429 path: the typed copy must carry the scrubbed message
+	// and RetryAfter, and errors.As must still find it.
+	tmr := &bot.TooManyRequestsError{Message: "too many requests, " + fakeToken, RetryAfter: 5}
+	scrubbed := tb.bot.scrubErr(tmr)
+	assertTokenFree(t, scrubbed)
+	var gotTMR *bot.TooManyRequestsError
+	if !errors.As(scrubbed, &gotTMR) {
+		t.Fatal("errors.As(scrubbed 429) does not find TooManyRequestsError")
+	}
+	if gotTMR.RetryAfter != 5 || strings.Contains(gotTMR.Message, fakeToken) {
+		t.Errorf("scrubbed TooManyRequestsError = %+v; want RetryAfter 5 and a token-free Message", gotTMR)
+	}
+	// 400 path: errors.Is for the BadRequest sentinel and the
+	// parse-error classification must survive scrubbing (the
+	// step-5 needs: isParseError / retryCall).
+	bad := fmt.Errorf("%w, %s", bot.ErrorBadRequest, "Bad Request: can't parse entities: "+fakeToken)
+	scrubbedBad := tb.bot.scrubErr(bad)
+	assertTokenFree(t, scrubbedBad)
+	if !errors.Is(scrubbedBad, bot.ErrorBadRequest) {
+		t.Error("errors.Is(scrubbed 400, ErrorBadRequest) = false; want true")
+	}
+	if !isParseError(scrubbedBad) {
+		t.Error("isParseError(scrubbed 400 parse error) = false; want true")
+	}
+	// Migrate path: typed fields scrubbed, id preserved.
+	mig := &bot.MigrateError{Message: "migrate: " + fakeToken, MigrateToChatID: 42}
+	scrubbedMig := tb.bot.scrubErr(mig)
+	assertTokenFree(t, scrubbedMig)
+	var gotMig *bot.MigrateError
+	if !errors.As(scrubbedMig, &gotMig) || gotMig.MigrateToChatID != 42 {
+		t.Errorf("scrubbed MigrateError = %v; want As-found with MigrateToChatID 42", scrubbedMig)
+	}
+	// A token-bearing Send error must be token-free at the
+	// object level too (not only in Error()).
+	srv.sendFailures = []scriptedFailure{{Code: 400, Desc: "Bad Request: token " + fakeToken + " rejected"}}
+	if _, err := tb.bot.Send(context.Background(), 500, "hi", SendOptions{}); err != nil {
+		assertTokenFree(t, err)
+	} else {
+		t.Error("Send(hostile description) = nil; want error")
+	}
+}
+
+func TestBotHostileBodyNotLogged(t *testing.T) {
+	t.Parallel()
+	const marker = "HOSTILE-BODY-MARKER-7f3a91"
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	srv.garbageBody = `{"ok":true,"result":[` + marker + ` ` + fakeToken + ` ` + strings.Repeat("x", 900) + `]}`
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startBot(t, tb.bot, ctx)
+	time.Sleep(300 * time.Millisecond)
+	if err := stopBot(t, cancel, done); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start = %v", err)
+	}
+	logged := tb.logBuf.String()
+	if strings.Contains(logged, marker) {
+		t.Error("log output contains the hostile body marker (raw body bytes reached the log)")
+	}
+	if strings.Contains(logged, fakeToken) {
+		t.Error("log output contains the fixture token after a hostile body")
+	}
+	if len(logged) > 400 {
+		t.Errorf("log output is %d bytes after one hostile poll; want length-bounded (status/class/length summary)", len(logged))
+	}
+	if !strings.Contains(logged, "message_length=") {
+		t.Error("log output lacks a status/class/length summary naming message_length (log buffer not printed: it may carry secrets)")
+	}
+}
+
+func TestBotRedirectRefused(t *testing.T) {
+	t.Parallel()
+	var secondHits atomic.Int64
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":1,"chat":{"id":500,"type":"private"},"date":0,"text":"evil"}}`)
+	}))
+	defer second.Close()
+	srv := newFakeTelegramServer(t)
+	srv.sendRedirect = true
+	srv.redirectTarget = second.URL
+	tb := newTestBot(t, srv, nil)
+	if _, err := tb.bot.Send(context.Background(), 500, "hi", SendOptions{}); err == nil {
+		t.Error("Send(302 redirect) = nil; want an error (redirects refused)")
+	}
+	if got := secondHits.Load(); got != 0 {
+		t.Errorf("second server saw %d requests; want 0 (no redirect followed)", got)
+	}
+	if got := srv.count("sendMessage"); got != 1 {
+		t.Errorf("sendMessage calls = %d; want 1 (the redirect itself, never followed)", got)
+	}
+}
+
+// delegatingTransport wraps another RoundTripper and delegates
+// every request: BoundClient must reject it outright.
+type delegatingTransport struct{ base http.RoundTripper }
+
+func (d *delegatingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return d.base.RoundTrip(req)
+}
+
+func TestBotBoundClientRejectsDelegatingAndDirectDial(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	// Delegating wrapper around a direct transport.
+	if _, err := New(Settings{Token: fakeToken, AllowedUserIDs: []int64{111}, HTTPClient: &http.Client{Transport: &delegatingTransport{base: &http.Transport{Proxy: nil}}}, ServerURL: srv.url()}); err == nil {
+		t.Error("New(delegating RoundTripper) = nil; want rejection")
+	}
+	// Direct-dial *http.Transport: nil Proxy but no custom dial
+	// path (nil DialContext and DialTLSContext) — the stdlib
+	// default dial shape, indistinguishable from a direct
+	// connection that bypasses the profile outbound.
+	if _, err := New(Settings{Token: fakeToken, AllowedUserIDs: []int64{111}, HTTPClient: &http.Client{Transport: &http.Transport{Proxy: nil}}, ServerURL: srv.url()}); err == nil {
+		t.Error("New(direct-dial transport) = nil; want rejection")
+	}
+	if got := srv.count("getMe"); got != 0 {
+		t.Errorf("getMe calls after rejected constructions = %d; want 0", got)
+	}
+}
+
+func TestBotStartReturnsOnCancelWithBlockedHandler(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	entered := make(chan struct{})
+	var once sync.Once
+	gate := make(chan struct{})
+	tb := newTestBot(t, srv, func(s *Settings) {
+		s.MessageHandler = func(_ context.Context, _ MessageContext) error {
+			once.Do(func() { close(entered) })
+			<-gate
+			return nil
+		}
+	})
+	tb.bot.dispatch.shutdownTimeout = 150 * time.Millisecond
+	srv.enqueueUpdates(messageUpdate(200, 500, 111, "blocked"))
+	ctx, cancel := context.WithCancel(context.Background())
+	start := time.Now()
+	done := startBot(t, tb.bot, ctx)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("blocked handler never entered")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if elapsed := time.Since(start); elapsed > 3*time.Second {
+			t.Errorf("Start returned after %v; want within the shutdown deadline", elapsed)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Start = %v; want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Start did not return after cancel with a blocked handler")
+	}
+	close(gate)
+	time.Sleep(100 * time.Millisecond)
 }
