@@ -60,7 +60,11 @@ type fakeReleaseServer struct {
 
 	mu     sync.Mutex
 	counts map[string]int
-	srv    *httptest.Server
+	// authSeen records non-empty Authorization headers received, for
+	// the userinfo-URL regression test (loop 3): no request must
+	// ever carry credentials derived from a download URL.
+	authSeen []string
+	srv      *httptest.Server
 }
 
 func newFakeReleaseServer(t *testing.T, tag string) *fakeReleaseServer {
@@ -95,8 +99,21 @@ func (f *fakeReleaseServer) getCount(prefix string) int {
 	return n
 }
 
+// authHeaderCount reports how many requests carried an Authorization
+// header (loop-3 userinfo regression test).
+func (f *fakeReleaseServer) authHeaderCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.authSeen)
+}
+
 func (f *fakeReleaseServer) serve(w http.ResponseWriter, r *http.Request) {
 	f.count(r.URL.Path)
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		f.mu.Lock()
+		f.authSeen = append(f.authSeen, auth)
+		f.mu.Unlock()
+	}
 	switch {
 	case r.URL.Path == "/repos/thoitiettxl-cyber/castctl/releases/latest":
 		if f.latestRedirect != "" {

@@ -517,3 +517,257 @@ func TestDryRunWritesNothing(t *testing.T) {
 		t.Errorf("dry-run output %q must disclose the skipped exec check", out)
 	}
 }
+
+// TestPrereleaseTagWithFlagFalseRefuses (loop 3, F1): a release tag
+// carrying a prerelease part must refuse in primary mode even when
+// the release JSON prerelease flag is false (the GitHub checkbox is
+// independent of the tag). The guard lives in decide(), after the
+// equal-version no-op return and before asset selection.
+func TestPrereleaseTagWithFlagFalseRefuses(t *testing.T) {
+	const tag = "v0.7.0-rc.1"
+	assetName := "castctl_0.7.0-rc.1_linux_amd64.tar.gz"
+
+	// Latest mode, flag=false, no flags: code 2, zero asset downloads,
+	// old binary intact. The exec check is NOT stubbed here: refusal
+	// happens before any download, so it must never be reached.
+	t.Run("latestFlagFalse", func(t *testing.T) {
+		f := newFakeReleaseServer(t, tag)
+		f.prerelease = false
+		f.assets[assetName] = &fakeAsset{body: buildTar(t, map[string][]byte{
+			"castctl": fakeBinary(t),
+		})}
+		f.setChecksums()
+		_, exe := makeTarget(t)
+		before := dirSnapshot(t, filepath.Dir(exe))
+		_, err := runUpdate(t, f.baseOptions(exe))
+		if err == nil || codeOf(err) != 2 {
+			t.Fatalf("latest flag-false prerelease tag: err=%v code=%d, want code 2", err, codeOf(err))
+		}
+		if !strings.Contains(err.Error(), "0.7.0-rc.1") || !strings.Contains(err.Error(), "--allow-prerelease") {
+			t.Errorf("refusal %q must name the target version and --allow-prerelease", err.Error())
+		}
+		if got := f.getCount("/download/"); got != 0 {
+			t.Errorf("refusal downloaded %d assets, want 0", got)
+		}
+		if !snapshotsEqual(before, dirSnapshot(t, filepath.Dir(exe))) {
+			t.Error("refusal changed the directory")
+		}
+		if old, _ := os.ReadFile(exe); string(old) != "old-binary-bytes" {
+			t.Error("refusal modified the target binary")
+		}
+	})
+
+	// Explicit mode, flag=false, no flags: same guarantees.
+	t.Run("explicitFlagFalse", func(t *testing.T) {
+		f := newFakeReleaseServer(t, tag)
+		f.prerelease = false
+		f.assets[assetName] = &fakeAsset{body: buildTar(t, map[string][]byte{
+			"castctl": fakeBinary(t),
+		})}
+		f.setChecksums()
+		_, exe := makeTarget(t)
+		before := dirSnapshot(t, filepath.Dir(exe))
+		opts := f.baseOptions(exe)
+		opts.TargetVersion = "0.7.0-rc.1"
+		_, err := runUpdate(t, opts)
+		if err == nil || codeOf(err) != 2 {
+			t.Fatalf("explicit flag-false prerelease tag: err=%v code=%d, want code 2", err, codeOf(err))
+		}
+		if !strings.Contains(err.Error(), "0.7.0-rc.1") || !strings.Contains(err.Error(), "--allow-prerelease") {
+			t.Errorf("refusal %q must name the target version and --allow-prerelease", err.Error())
+		}
+		if got := f.getCount("/download/"); got != 0 {
+			t.Errorf("refusal downloaded %d assets, want 0", got)
+		}
+		if !snapshotsEqual(before, dirSnapshot(t, filepath.Dir(exe))) {
+			t.Error("refusal changed the directory")
+		}
+	})
+
+	// With --allow-prerelease, flag=false installs in both modes
+	// (exec check stubbed: the fake binary reports 0.6.4).
+	t.Run("allowInstalls", func(t *testing.T) {
+		for _, explicit := range []bool{false, true} {
+			f := newFakeReleaseServer(t, tag)
+			f.prerelease = false
+			f.assets[assetName] = &fakeAsset{body: buildTar(t, map[string][]byte{
+				"castctl": fakeBinary(t),
+			})}
+			f.setChecksums()
+			_, exe := makeTarget(t)
+			stubExecCheck(t)
+			opts := f.baseOptions(exe)
+			opts.AllowPrerelease = true
+			if explicit {
+				opts.TargetVersion = "0.7.0-rc.1"
+			}
+			res, err := runUpdate(t, opts)
+			if err != nil {
+				t.Fatalf("explicit=%v allow-prerelease install: %v", explicit, err)
+			}
+			if !res.Replaced {
+				t.Errorf("explicit=%v allow-prerelease must replace", explicit)
+			}
+			if got, _ := os.ReadFile(exe); !bytes.Equal(got, fakeBinary(t)) {
+				t.Errorf("explicit=%v allow-prerelease did not replace the binary", explicit)
+			}
+		}
+	})
+
+	// Flag=true without --allow-prerelease still refuses (existing
+	// behaviour, pinned): latest and explicit.
+	t.Run("flagTrueStillRefuses", func(t *testing.T) {
+		f := newFakeReleaseServer(t, tag)
+		f.prerelease = true
+		_, exe := makeTarget(t)
+		if _, err := runUpdate(t, f.baseOptions(exe)); err == nil || codeOf(err) != 2 {
+			t.Fatalf("latest flag-true: err=%v code=%d, want code 2", err, codeOf(err))
+		}
+		f2 := newFakeReleaseServer(t, tag)
+		f2.prerelease = true
+		opts := f2.baseOptions(exe)
+		opts.TargetVersion = "0.7.0-rc.1"
+		if _, err := runUpdate(t, opts); err == nil || codeOf(err) != 2 {
+			t.Fatalf("explicit flag-true: err=%v code=%d, want code 2", err, codeOf(err))
+		}
+	})
+
+	// Equal prerelease no-op: current == target prerelease is already
+	// latest — exit 0, zero writes, zero downloads. Refusing a no-op
+	// would be wrong; the decide() guard sits after this return.
+	t.Run("equalPrereleaseNoOp", func(t *testing.T) {
+		f := newFakeReleaseServer(t, tag)
+		f.prerelease = false
+		_, exe := makeTarget(t)
+		before := dirSnapshot(t, filepath.Dir(exe))
+		opts := f.baseOptions(exe)
+		opts.CurrentVersion = "0.7.0-rc.1"
+		res, err := runUpdate(t, opts)
+		if err != nil {
+			t.Fatalf("equal prerelease no-op: %v", err)
+		}
+		if res.Replaced {
+			t.Error("equal prerelease no-op must not replace")
+		}
+		if !snapshotsEqual(before, dirSnapshot(t, filepath.Dir(exe))) {
+			t.Error("equal prerelease no-op changed the directory")
+		}
+		if got := f.getCount("/download/"); got != 0 {
+			t.Errorf("equal prerelease no-op downloaded %d assets, want 0", got)
+		}
+	})
+
+	// Fallback paths still refuse prerelease tags (pins of the
+	// existing fallback guards, which decide() must not disturb).
+	t.Run("fallbackStillRefuses", func(t *testing.T) {
+		f := newFakeReleaseServer(t, tag)
+		f.latestStatus = 403
+		f.latestJSON = `{"message":"API rate limit exceeded"}`
+		f.fallbackTag = tag
+		_, exe := makeTarget(t)
+		if _, err := runUpdate(t, f.baseOptions(exe)); err == nil || codeOf(err) != 2 {
+			t.Fatalf("fallback latest prerelease: err=%v code=%d, want code 2", err, codeOf(err))
+		}
+		f2 := newFakeReleaseServer(t, tag)
+		f2.tagStatus = 403
+		_, exe2 := makeTarget(t)
+		opts := f2.baseOptions(exe2)
+		opts.TargetVersion = "0.7.0-rc.1"
+		if _, err := runUpdate(t, opts); err == nil || codeOf(err) != 2 {
+			t.Fatalf("fallback explicit prerelease: err=%v code=%d, want code 2", err, codeOf(err))
+		}
+	})
+}
+
+// TestDownloadURLWithUserinfoRefuses (loop 3, red-team N4): a
+// browser_download_url carrying userinfo must be refused by
+// validateDownloadURL before any request, so no Authorization
+// header derived from the URL is ever sent.
+func TestDownloadURLWithUserinfoRefuses(t *testing.T) {
+	for _, raw := range []string{
+		"https://user:pass@example.com/castctl.tar.gz",
+		"https://user@example.com/castctl.tar.gz",
+		"http://user:pass@127.0.0.1:1/castctl.tar.gz",
+	} {
+		if err := validateDownloadURL(raw); err == nil {
+			t.Errorf("validateDownloadURL(%q): want refusal", raw)
+		}
+	}
+	// Clean URLs still validate.
+	for _, raw := range []string{
+		"https://example.com/castctl.tar.gz",
+		"http://127.0.0.1:1/castctl.tar.gz",
+	} {
+		if err := validateDownloadURL(raw); err != nil {
+			t.Errorf("validateDownloadURL(%q): %v, want nil", raw, err)
+		}
+	}
+
+	// Run-level: asset URL with userinfo refuses (code 1, the
+	// existing unusable-URL class), zero download requests, and no
+	// Authorization header reaches the fake server.
+	releaseWithUserinfo := func(t *testing.T, userinfoAsset, userinfoChecksums bool) *fakeReleaseServer {
+		t.Helper()
+		f := newFakeReleaseServer(t, "v0.6.4")
+		assetName := "castctl_0.6.4_linux_amd64.tar.gz"
+		f.assets[assetName] = &fakeAsset{body: buildTar(t, map[string][]byte{
+			"castctl": fakeBinary(t),
+		})}
+		f.setChecksums()
+		withUserinfo := func(name string) string {
+			return strings.Replace(f.srv.URL, "://", "://user:pass@", 1) + "/download/v0.6.4/" + name
+		}
+		clean := func(name string) string {
+			return f.srv.URL + "/download/v0.6.4/" + name
+		}
+		assetURL, sumsURL := clean(assetName), clean("checksums.txt")
+		if userinfoAsset {
+			assetURL = withUserinfo(assetName)
+		}
+		if userinfoChecksums {
+			sumsURL = withUserinfo("checksums.txt")
+		}
+		f.latestJSON = `{"tag_name":"v0.6.4","draft":false,"prerelease":false,"assets":[` +
+			`{"name":"` + assetName + `","browser_download_url":"` + assetURL + `","size":1,"state":"uploaded"},` +
+			`{"name":"checksums.txt","browser_download_url":"` + sumsURL + `","size":1,"state":"uploaded"}]}`
+		return f
+	}
+	for _, tc := range []struct {
+		name              string
+		userinfoAsset     bool
+		userinfoChecksums bool
+	}{
+		{"asset", true, false},
+		{"checksums", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := releaseWithUserinfo(t, tc.userinfoAsset, tc.userinfoChecksums)
+			_, exe := makeTarget(t)
+			before := dirSnapshot(t, filepath.Dir(exe))
+			_, err := runUpdate(t, f.baseOptions(exe))
+			if err == nil || codeOf(err) != 1 {
+				t.Fatalf("userinfo %s URL: err=%v code=%d, want code 1", tc.name, err, codeOf(err))
+			}
+			if got := f.getCount("/download/"); got != 0 {
+				t.Errorf("userinfo %s URL: %d download requests, want 0", tc.name, got)
+			}
+			if got := f.authHeaderCount(); got != 0 {
+				t.Errorf("userinfo %s URL: %d requests carried Authorization, want 0", tc.name, got)
+			}
+			if !snapshotsEqual(before, dirSnapshot(t, filepath.Dir(exe))) {
+				// The refusal happens inside install(), after the
+				// lock file is created; the lock persists by
+				// design, so compare ignoring it.
+				after := dirSnapshot(t, filepath.Dir(exe))
+				delete(after, lockFileName)
+				delete(before, lockFileName)
+				if !snapshotsEqual(before, after) {
+					t.Error("userinfo refusal changed the directory beyond the lock file")
+				}
+			}
+			if old, _ := os.ReadFile(exe); string(old) != "old-binary-bytes" {
+				t.Error("userinfo refusal modified the target binary")
+			}
+		})
+	}
+}
