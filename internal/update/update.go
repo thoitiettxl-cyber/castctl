@@ -789,13 +789,6 @@ func (u *updater) fetchRelease(ctx context.Context, rawURL string) (*releaseInfo
 	return rel, http.StatusOK, nil
 }
 
-func decodeReleaseJSON(body []byte, out *releaseJSON) error {
-	// Unmarshal (not a streaming Decoder) so trailing garbage after
-	// the object is rejected, and unknown fields are tolerated for
-	// forward compatibility with new GitHub API fields.
-	return json.Unmarshal(body, out)
-}
-
 // fallbackLatest handles an API 403 on /latest: follow the public
 // web redirect once to learn the tag, then construct asset URLs
 // ONLY from the proven matrix pattern and verify checksums.txt as
