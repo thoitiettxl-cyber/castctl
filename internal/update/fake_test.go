@@ -8,6 +8,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -363,8 +364,15 @@ func snapshotsEqual(a, b map[string]string) bool {
 	return true
 }
 
-// baseOptions returns Options pointed at the fake server with a
-// stamped 0.6.3 glibc build as the running version.
+// stubExecCheck replaces the --version exec check with a no-op for
+// tests whose target version differs from the fake binary's baked-in
+// 0.6.4 report. The real exec check is covered by dedicated tests.
+func stubExecCheck(t *testing.T) {
+	t.Helper()
+	prev := execCheckFn
+	execCheckFn = func(ctx context.Context, path string, want Version) error { return nil }
+	t.Cleanup(func() { execCheckFn = prev })
+}
 func (f *fakeReleaseServer) baseOptions(exe string) Options {
 	return Options{
 		Deps: Deps{

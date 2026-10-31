@@ -94,6 +94,13 @@ func TestNewerVersionInstalls(t *testing.T) {
 	})}
 	f.setChecksums()
 	_, exe := makeTarget(t)
+	oldMode := func() os.FileMode {
+		fi, err := os.Stat(exe)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fi.Mode().Perm()
+	}()
 	opts := f.baseOptions(exe)
 	var stdout bytes.Buffer
 	opts.Stdout = &stdout
@@ -114,8 +121,8 @@ func TestNewerVersionInstalls(t *testing.T) {
 	if !bytes.Equal(got, fakeBinary(t)) {
 		t.Error("target was not replaced with the downloaded binary")
 	}
-	if fi, err := os.Stat(exe); err != nil || fi.Mode().Perm() != 0o755 {
-		t.Errorf("installed mode = %v, want 0755 (old mode preserved)", fi.Mode())
+	if fi, err := os.Stat(exe); err != nil || fi.Mode().Perm() != oldMode {
+		t.Errorf("installed mode = %v, want old mode %v preserved", fi.Mode(), oldMode)
 	}
 	// No temp or lock litter beyond the lock file itself.
 	ents, _ := os.ReadDir(filepath.Dir(exe))
@@ -146,7 +153,10 @@ func TestDowngradeRefusedByDefault(t *testing.T) {
 	if got := f.getCount("/download/"); got != 0 {
 		t.Errorf("downgrade downloaded %d assets, want 0", got)
 	}
-	// Explicit --allow-downgrade installs the older release.
+	// Explicit --allow-downgrade installs the older release. The
+	// fake binary reports 0.6.4, so the exec check is stubbed here;
+	// version reporting is covered by dedicated exec tests.
+	stubExecCheck(t)
 	f.assets["castctl_0.6.2_linux_amd64.tar.gz"] = &fakeAsset{body: buildTar(t, map[string][]byte{
 		"castctl": fakeBinary(t),
 	})}
@@ -181,7 +191,9 @@ func TestPrereleaseRefusedUnlessAllowed(t *testing.T) {
 	if _, err := runUpdate(t, opts); err == nil || codeOf(err) != 2 {
 		t.Fatalf("explicit prerelease: err=%v code=%d, want code 2", err, codeOf(err))
 	}
-	// With --allow-prerelease it installs.
+	// With --allow-prerelease it installs. The fake binary reports
+	// 0.6.4, so the exec check is stubbed here (see stubExecCheck).
+	stubExecCheck(t)
 	f2.assets["castctl_0.6.4-rc.1_linux_amd64.tar.gz"] = &fakeAsset{body: buildTar(t, map[string][]byte{
 		"castctl": fakeBinary(t),
 	})}
