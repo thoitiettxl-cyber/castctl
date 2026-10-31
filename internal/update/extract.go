@@ -81,6 +81,20 @@ func extractCastctl(r io.Reader, w io.Writer) ([]byte, error) {
 	if !found {
 		return nil, newError(1, "update: the downloaded archive has no castctl member")
 	}
+	// After the tar end-blocks the gzip stream must be exhausted:
+	// a second gzip member or trailing garbage is never scanned as
+	// tar members, so it must refuse rather than be silently
+	// ignored (B-02/E-18). The hash already binds these bytes;
+	// this check closes the "unscanned bytes reach the tar reader
+	// in a future read" gap. The read is capped: any bytes at all
+	// refuse, so a huge trailing member cannot fill memory.
+	rest, err := io.ReadAll(io.LimitReader(gz, 1<<20))
+	if err != nil {
+		return nil, newError(1, "update: trailing data after the tar archive")
+	}
+	if len(rest) > 0 {
+		return nil, newError(1, "update: trailing data after the tar archive")
+	}
 	return hash.Sum(nil), nil
 }
 

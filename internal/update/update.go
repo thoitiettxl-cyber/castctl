@@ -39,7 +39,8 @@ const (
 )
 
 // execCheckTimeout bounds the --version check of a downloaded binary.
-const execCheckTimeout = 10 * time.Second
+// Package var so tests can inject a short timeout for hang fixtures.
+var execCheckTimeout = 10 * time.Second
 
 var (
 	// metadataTimeout bounds release-metadata, checksums, and

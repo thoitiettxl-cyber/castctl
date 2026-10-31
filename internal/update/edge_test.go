@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -167,15 +168,63 @@ func TestExtractLinkMembersRefuse(t *testing.T) {
 func TestExtractPAXOverrideRefuses(t *testing.T) {
 	// PAX path override changes the effective name: the ustar name
 	// "castctl" becomes "../evil", so no castctl member exists.
-	archive := buildTarEntries(t, []tarEntry{{
-		name: "castctl", body: fakeBinary(t), mode: 0o755,
-		typeflag: tar.TypeReg, format: tar.FormatPAX,
-		pax: map[string]string{"path": "../evil"}, sizeOverride: -1,
-	}})
+	// Go's tar.Writer sanitises user PAXRecords, so the archive is
+	// hand-crafted: an 'x' extended header carrying
+	// "16 path=../evil\n", then the ustar member header.
+	archive := paxOverrideArchive(t)
 	f, _, exe := installFixture(t, archive)
 	if _, err := runUpdate(t, f.baseOptions(exe)); err == nil {
 		t.Fatal("PAX path override: want refusal")
 	}
+}
+
+// paxOverrideArchive builds a gzip tar archive whose single member
+// has ustar name "castctl" but a PAX path override of "../evil".
+func paxOverrideArchive(t *testing.T) []byte {
+	t.Helper()
+	rec := "16 path=../evil\n"
+	var tarBytes []byte
+	tarBytes = append(tarBytes, rawTarHeader("PaxHeaders/castctl", int64(len(rec)), 'x')...)
+	tarBytes = append(tarBytes, padTo512([]byte(rec))...)
+	tarBytes = append(tarBytes, rawTarHeader("castctl", int64(len(fakeBinary(t))), '0')...)
+	tarBytes = append(tarBytes, padTo512(fakeBinary(t))...)
+	tarBytes = append(tarBytes, make([]byte, 1024)...)
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(tarBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func rawTarHeader(name string, size int64, typeflag byte) []byte {
+	b := make([]byte, 512)
+	copy(b[0:100], name)
+	copy(b[100:108], "0000777\x00")
+	copy(b[108:116], "0000000\x00")
+	copy(b[116:124], "0000000\x00")
+	copy(b[124:136], fmt.Sprintf("%011o\x00", size))
+	copy(b[136:148], "00000000000\x00")
+	copy(b[148:156], "        ")
+	b[156] = typeflag
+	copy(b[257:263], "ustar\x00")
+	copy(b[263:265], "00")
+	sum := 0
+	for _, c := range b {
+		sum += int(c)
+	}
+	copy(b[148:156], fmt.Sprintf("%06o\x00 ", sum))
+	return b
+}
+
+func padTo512(b []byte) []byte {
+	for len(b)%512 != 0 {
+		b = append(b, 0)
+	}
+	return b
 }
 
 func TestExtractMemberModeIgnored(t *testing.T) {
