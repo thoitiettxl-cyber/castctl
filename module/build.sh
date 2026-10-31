@@ -364,9 +364,7 @@ fi
 if find "$stage" -type f -name '*.json' ! -name config.example.json | grep -q .; then
   fail "refusing to package unexpected JSON files"
 fi
-if rg -l 'BEGIN [A-Z ]*PRIVATE KEY' "$stage/payload" "$stage/scripts" \
-  "$stage/customize.sh" "$stage/service.sh" "$stage/action.sh" \
-  "$stage/uninstall.sh" "$stage/config.example.json" >/dev/null 2>&1; then
+if rg -l 'BEGIN [A-Z ]*PRIVATE KEY' "$stage" >/dev/null 2>&1; then
   fail "refusing to package private keys"
 fi
 if find "$stage/payload/lib" -type l | grep -q .; then

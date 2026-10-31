@@ -31,10 +31,28 @@ verify_runtime_checksums() {
   fi
 }
 
+# check_payload_allowlist: every file/symlink in the payload must
+# be listed in checksums.sha256. The checksum check alone cannot
+# see an unlisted extra file; an extra executable planted in the
+# payload must abort the install.
+check_payload_allowlist() {
+  runtime_dir=$1
+  listed=$("$BUSYBOX" awk '{p=$2; sub(/^\*/, "", p); print p}' "$runtime_dir/checksums.sha256" 2>/dev/null | "$BUSYBOX" sort)
+  actual=$(cd "$runtime_dir" 2>/dev/null && "$BUSYBOX" find . \( -type f -o -type l \) -print 2>/dev/null | "$BUSYBOX" sed 's|^\./||' | "$BUSYBOX" grep -v '^checksums\.sha256$' | "$BUSYBOX" sort)
+  [ "$listed" = "$actual" ]
+}
+
 restore_old_controller() {
   [ -n "${old_ctl_quarantine:-}" ] || return 0
-  if [ -e "$old_ctl_quarantine" ] && [ ! -e "$old_ctl_original" ]; then
-    mv "$old_ctl_quarantine" "$old_ctl_original" || return 1
+  if [ -e "$old_ctl_quarantine" ]; then
+    if [ ! -e "$old_ctl_original" ]; then
+      mv "$old_ctl_quarantine" "$old_ctl_original" || return 1
+    else
+      # The new controller is in place: the quarantine is
+      # superseded. Removing it here keeps a stale quarantine
+      # from aborting the next install.
+      rm -f "$old_ctl_quarantine" || return 1
+    fi
   fi
   old_ctl_quarantine=
 }
@@ -59,6 +77,9 @@ BUSYBOX=/data/adb/ksu/bin/busybox
 LOCK_FILE=${CASTCTL_LIFECYCLE_LOCK:-${DATA_DIR}.lifecycle.lock}
 case "$LOCK_FILE" in /*) ;; *) fail "lifecycle lock path must be absolute" ;; esac
 lock_parent=${LOCK_FILE%/*}
+# Create the parent first: the lock check must not fail an install
+# whose data-dir parent does not exist yet.
+mkdir -p "$lock_parent" 2>/dev/null || fail "unable to create lifecycle lock parent"
 [ -d "$lock_parent" ] || fail "lifecycle lock parent is missing"
 [ ! -L "$LOCK_FILE" ] || fail "lifecycle lock must not be a symlink"
 { [ ! -e "$LOCK_FILE" ] || [ -f "$LOCK_FILE" ]; } || fail "lifecycle lock must be a regular file"
@@ -74,11 +95,17 @@ old_ctl_quarantine=
 stale_quarantine=
 for candidate in "$old_ctl_original".installing.*; do
   [ -e "$candidate" ] || continue
+  if [ -e "$old_ctl_original" ]; then
+    # A live controller is in place: the quarantine is superseded
+    # leftovers from an interrupted install. Remove, do not fail:
+    # failing here made every later install abort.
+    rm -f "$candidate" || fail "unable to remove stale controller quarantine"
+    continue
+  fi
   [ -z "$stale_quarantine" ] || fail "multiple quarantined legacy controllers require recovery"
   stale_quarantine=$candidate
 done
 if [ -n "$stale_quarantine" ]; then
-  [ ! -e "$old_ctl_original" ] || fail "a quarantined legacy controller requires recovery"
   mv "$stale_quarantine" "$old_ctl_original" || fail "unable to recover the legacy controller"
 fi
 
@@ -110,6 +137,7 @@ runtime="$stage/payload"
 [ ! -e "$runtime/plugins" ] || fail "payload must not contain a plugins directory"
 
 verify_runtime_checksums "$runtime" || fail "payload checksum mismatch or sha256sum unavailable"
+check_payload_allowlist "$runtime" || fail "payload contains files not listed in checksums.sha256"
 payload_manifest_sha=$("$BUSYBOX" sha256sum "$runtime/checksums.sha256" | "$BUSYBOX" awk '{print $1}')
 case "$payload_manifest_sha" in ''|*[!0-9a-f]*) fail "unable to identify payload content" ;; esac
 [ "${#payload_manifest_sha}" -eq 64 ] || fail "unexpected payload identifier length"
@@ -125,6 +153,7 @@ if [ -e "$release" ] || [ -L "$release" ]; then
   existing_manifest_sha=$("$BUSYBOX" sha256sum "$release/checksums.sha256" 2>/dev/null | "$BUSYBOX" awk '{print $1}')
   [ "$existing_manifest_sha" = "$payload_manifest_sha" ] || fail "existing release identity does not match payload"
   verify_runtime_checksums "$release" || fail "existing release failed checksum validation"
+  check_payload_allowlist "$release" || fail "existing release contains files not listed in checksums.sha256"
   rm -rf "$stage"
 else
   mv "$runtime" "$release" || fail "unable to publish runtime release"
@@ -134,6 +163,22 @@ fi
 # Plugins live in persistent $DATA_DIR/plugins, outside releases/, so a
 # release swap never touches them. If a previous layout kept plugins
 # under the old release dir, copy them forward (template migration).
+# The old `current` symlink is validated first: a pre-planted link
+# pointing outside releases/ must never make the copy read from
+# (or, via cp -a, write through) an attacker-chosen tree.
+if [ -L "$DATA_DIR/current" ]; then
+  current_target=$(readlink "$DATA_DIR/current" 2>/dev/null || true)
+  case "$current_target" in *..*) fail "existing current runtime target must not contain .." ;; esac
+  case "$current_target" in
+    /*) current_resolved=$current_target ;;
+    *) current_resolved=$DATA_DIR/$current_target ;;
+  esac
+  case "$current_resolved" in
+    "$DATA_DIR/releases/"*) ;;
+    *) fail "existing current runtime points outside releases/" ;;
+  esac
+  [ -d "$current_resolved" ] && [ ! -L "$current_resolved" ] || fail "existing current runtime target is unsafe"
+fi
 old_plugins="$DATA_DIR/current/plugins"
 if [ -d "$old_plugins" ]; then
   cp -a "$old_plugins/." "$DATA_DIR/plugins/" 2>/dev/null || fail "unable to preserve installed plugins"
@@ -146,8 +191,10 @@ ln -s "$release" "$DATA_DIR/current.new.$$" || fail "unable to stage runtime sel
 [ "$(readlink "$DATA_DIR/current" 2>/dev/null)" = "$release" ] || fail "runtime release selection did not persist"
 
 # The real config is NEVER auto-created. The example is copied only as
-# config.json.example, and only when no real config exists yet.
-if [ ! -f "$DATA_DIR/config/config.json" ] && [ -f "$MODPATH/config.example.json" ]; then
+# config.json.example, and only when neither a real config nor an
+# example exists yet: a user-placed example must never be silently
+# overwritten.
+if [ ! -f "$DATA_DIR/config/config.json" ] && [ ! -e "$DATA_DIR/config/config.json.example" ] && [ -f "$MODPATH/config.example.json" ]; then
   cp -p "$MODPATH/config.example.json" "$DATA_DIR/config/config.json.example"
 fi
 
@@ -188,6 +235,13 @@ set_perm "$MODPATH/service.sh" 0 0 0755
 set_perm "$MODPATH/action.sh" 0 0 0755
 set_perm "$MODPATH/uninstall.sh" 0 0 0755
 set_perm "$MODPATH/scripts/castctl-ctl" 0 0 0755
+
+# Record the install-time data dir for uninstall: uninstall.sh
+# prefers an explicit CASTCTL_DATA_DIR, then this record, then
+# the default, so an install under a custom data dir is stopped
+# correctly even when the override is not set at uninstall time.
+# Best-effort: a failed write only loses the fallback.
+printf '%s\n' "$DATA_DIR" >"$MODPATH/.castctl-data-dir" 2>/dev/null && chmod 0600 "$MODPATH/.castctl-data-dir" 2>/dev/null || true
 
 restore_old_controller || fail "unable to restore the legacy controller"
 trap - EXIT HUP INT TERM
