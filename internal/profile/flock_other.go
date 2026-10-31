@@ -16,3 +16,9 @@ import (
 func flockExclusive(f *os.File) error {
 	return errors.New("flock is not supported on this platform")
 }
+
+// flockTryExclusive is unsupported off unix: guarded writes fail
+// closed rather than running unlocked.
+func flockTryExclusive(f *os.File) (bool, error) {
+	return false, errors.New("flock is not supported on this platform")
+}
