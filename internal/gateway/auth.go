@@ -117,41 +117,8 @@ const vmUnavailableLabel = "VM unavailable; retry shortly or `MUSE_VM_ID=<id> ca
 // GatewayError payload is a constant, not body text: the
 // CLI's session_unavailable classification keys on it.
 func FetchSessionInfo(ctx context.Context, client *http.Client, cookies string) (SessionInfo, error) {
-	status, data, hdr, err := doHatch(ctx, client, http.MethodGet, "https://muse.ai/api/session", hatchHeaders(cookies, ""), nil)
-	if err != nil {
-		return SessionInfo{}, err
-	}
-	if status != 200 {
-		return SessionInfo{}, conn.NewAuthError(fmt.Sprintf("api/session -> %d (cookies expired? re-export)", status))
-	}
-	raw, err := decodeJSONValue(data)
-	if err != nil {
-		sum := summarizeBody("api/session returned non-JSON", data, hdr.Get("Content-Type"), nil)
-		return SessionInfo{}, conn.NewAuthError(sum.text)
-	}
-	info, ok := raw.(map[string]any)
-	if !ok {
-		// Python: "vm_id" not in a non-dict body is also the
-		// VM-unavailable case, not an auth failure.
-		sum := summarizeBody(vmUnavailableLabel, data, hdr.Get("Content-Type"), nil)
-		return SessionInfo{}, gatewayErrorFromSummary(-1, sum)
-	}
-	rawVM, ok := info["vm_id"]
-	if !ok {
-		sum := summarizeBody(vmUnavailableLabel, data, hdr.Get("Content-Type"), info, "status")
-		return SessionInfo{}, gatewayErrorFromSummary(-1, sum)
-	}
-	vmID, ok := rawVM.(string)
-	if !ok {
-		// JSON null (or any non-string) vm_id is the missing-VM
-		// case, not a string: Python's `"vm_id" not in info`
-		// branch is about absence, and a null vm_id means the
-		// same thing — the VM is down/restarting. Formatting
-		// it with %v would yield "<nil>" as a bogus VM id.
-		sum := summarizeBody(vmUnavailableLabel, data, hdr.Get("Content-Type"), info, "status")
-		return SessionInfo{}, gatewayErrorFromSummary(-1, sum)
-	}
-	return SessionInfo{VMID: vmID, Raw: info}, nil
+	info, _, err := fetchSessionInfoRaw(ctx, client, cookies)
+	return info, err
 }
 
 // FetchAccessToken exchanges cookies for an access token: POST
@@ -159,23 +126,8 @@ func FetchSessionInfo(ctx context.Context, client *http.Client, cookies string) 
 // Loop 5: the AuthError carries the allowlist summary only,
 // never body bytes.
 func FetchAccessToken(ctx context.Context, client *http.Client, cookies string) (string, error) {
-	status, data, hdr, err := doHatch(ctx, client, http.MethodPost, "https://muse.ai/api/auth/check", hatchHeaders(cookies, ""), []byte{})
-	if err != nil {
-		return "", err
-	}
-	if status != 200 {
-		sum := summarizeBody(fmt.Sprintf("auth/check -> %d (cookies expired? re-export)", status), data, hdr.Get("Content-Type"), nil)
-		return "", conn.NewAuthError(sum.text)
-	}
-	d, err := decodeJSONObject(data)
-	if err != nil {
-		return "", conn.NewAuthError("auth/check returned non-JSON or missing access_token")
-	}
-	token, _ := d["access_token"].(string)
-	if token == "" {
-		return "", conn.NewAuthError("auth/check response missing access_token")
-	}
-	return token, nil
+	token, _, err := fetchAccessTokenRaw(ctx, client, cookies)
+	return token, err
 }
 
 // FetchHatchToken exchanges an access token for a hatch token:
