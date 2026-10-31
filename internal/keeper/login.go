@@ -89,11 +89,22 @@ type RunnerResult struct {
 // Cancel through the transport. It must never close, kill, or
 // navigate an attached user browser; a launch runner owns its
 // browser and cleans it up.
+//
+// Exporter returns the CDP exporter for the session's browser:
+// the attach runner's configured browser, the launch runner's
+// spawned browser (resolved lazily from its DevToolsActivePort
+// file). The session core uses it for the hint poll and the
+// final export.
 type ScreencastRunner interface {
 	Run(ctx context.Context, transport Transport) RunnerResult
+	Exporter() (Exporter, error)
 }
 
 // LoginSession is one `auth login` run's core state.
+//
+// Exporter, when nil, is taken from Runner.Exporter() (the
+// session browser's exporter). An explicit Exporter overrides
+// it; tests use that seam, production always uses the runner's.
 type LoginSession struct {
 	Clock        Clock
 	BaseDir      string
@@ -132,9 +143,6 @@ func (s *LoginSession) Run(ctx context.Context) LoginResult {
 		clock = RealClock
 	}
 	started := clock.Now()
-	finish := func(outcome LoginOutcome, runnerRes RunnerResult) LoginResult {
-		return s.finish(ctx, started, outcome, runnerRes)
-	}
 	timeout := s.Timeout
 	if timeout == 0 {
 		timeout = DefaultLoginTimeout
@@ -143,15 +151,26 @@ func (s *LoginSession) Run(ctx context.Context) LoginResult {
 		return LoginResult{Outcome: LoginFailed, Duration: clock.Now().Sub(started),
 			Err: fmt.Errorf("login timeout %v out of range [%v, %v]", timeout, MinLoginTimeout, MaxLoginTimeout)}
 	}
-	if s.Transport == nil || s.Checker == nil || s.Exporter == nil || s.Runner == nil {
+	if s.Transport == nil || s.Checker == nil || s.Runner == nil {
 		return LoginResult{Outcome: LoginFailed, Duration: clock.Now().Sub(started),
-			Err: errors.New("login session missing transport, checker, exporter, or runner")}
+			Err: errors.New("login session missing transport, checker, or runner")}
+	}
+	exporter := s.Exporter
+	if exporter == nil {
+		var err error
+		exporter, err = s.Runner.Exporter()
+		if err != nil {
+			return LoginResult{Outcome: LoginFailed, Duration: clock.Now().Sub(started), Err: err}
+		}
 	}
 	sessionID := s.SessionID
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("login-%d", started.UnixNano())
 	}
 	s.SessionID = sessionID
+	finish := func(outcome LoginOutcome, runnerRes RunnerResult) LoginResult {
+		return s.finish(ctx, started, outcome, runnerRes, exporter)
+	}
 	store, err := NewStore(s.BaseDir, s.Profile, s.LockTimeout)
 	if err != nil {
 		return LoginResult{Outcome: LoginFailed, Duration: clock.Now().Sub(started), Err: err}
@@ -207,7 +226,7 @@ func (s *LoginSession) Run(ctx context.Context) LoginResult {
 			}
 		case <-pollCh:
 			pollCh = clock.After(pollInterval)
-			if !hintSent && s.loggedInHint(runCtx) {
+			if !hintSent && s.loggedInHint(runCtx, exporter) {
 				hintSent = true
 				_ = s.Transport.SendPhase(ctx, PhaseLoggedInHint, "")
 			}
@@ -218,7 +237,7 @@ func (s *LoginSession) Run(ctx context.Context) LoginResult {
 // finish resolves a terminal outcome: the save path for Done,
 // audit + phase for everything else. It never runs the save
 // path for a non-Done outcome.
-func (s *LoginSession) finish(ctx context.Context, started time.Time, outcome LoginOutcome, runnerRes RunnerResult) LoginResult {
+func (s *LoginSession) finish(ctx context.Context, started time.Time, outcome LoginOutcome, runnerRes RunnerResult, exporter Exporter) LoginResult {
 	clock := s.Clock
 	if clock == nil {
 		clock = RealClock
@@ -245,7 +264,7 @@ func (s *LoginSession) finish(ctx context.Context, started time.Time, outcome Lo
 		return LoginResult{Outcome: outcome, Version: runnerRes.Version, Duration: duration, Err: runnerRes.Err}
 	}
 	// Save path: final export, validate, write under lock.
-	exported, _, exportErr := runExport(ctx, s.Exporter)
+	exported, _, exportErr := runExport(ctx, exporter)
 	if exportErr != nil {
 		_ = s.Transport.SendPhase(ctx, PhaseFailed, "")
 		audit(LoginFailed, false, nil, nil)
@@ -327,8 +346,8 @@ func (s *LoginSession) saveLoginCookies(store *Store, exported []StoredCookie, v
 // loggedInHint exports the browser cookies and runs the cheap
 // chain against them: true means the session already works.
 // Hint only: errors are ignored and nothing is saved.
-func (s *LoginSession) loggedInHint(ctx context.Context) bool {
-	exported, _, err := runExport(ctx, s.Exporter)
+func (s *LoginSession) loggedInHint(ctx context.Context, exporter Exporter) bool {
+	exported, _, err := runExport(ctx, exporter)
 	if err != nil || len(exported) == 0 {
 		return false
 	}

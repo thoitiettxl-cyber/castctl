@@ -8,8 +8,12 @@ package keeper
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/chromedp/cdproto/browser"
 	"github.com/chromedp/cdproto/cdp"
@@ -50,6 +54,40 @@ type launchRunner struct {
 // A nil inbound fails every Run closed before spawning.
 func NewLaunchRunner(baseDir string, prof *profile.Profile, browserPath string, inbound InboundBuilder) ScreencastRunner {
 	return launchRunner{baseDir: baseDir, prof: prof, browserPath: browserPath, inbound: inbound}
+}
+
+// Exporter returns the exporter for the launched browser: it
+// resolves the debug port from the DevToolsActivePort file in
+// the persistent profile dir at Export time, then discovers
+// the WebSocket URL via /json/version like any attach. The
+// file format (first line: port number) is read defensively:
+// anything else fails closed. Live correctness of this path
+// is an S2 gate (the browser never spawns at this base).
+func (r launchRunner) Exporter() (Exporter, error) {
+	dir, err := browserProfileDir(r.baseDir, r.prof)
+	if err != nil {
+		return nil, err
+	}
+	return portFileExporter{dir: dir}, nil
+}
+
+type portFileExporter struct{ dir string }
+
+func (e portFileExporter) Export(ctx context.Context) ([]ExportedCookie, error) {
+	raw, err := os.ReadFile(filepath.Join(e.dir, "DevToolsActivePort"))
+	if err != nil {
+		return nil, fmt.Errorf("launched browser debug port file unreadable: %w", err)
+	}
+	line := strings.TrimSpace(strings.SplitN(string(raw), "\n", 2)[0])
+	port, err := strconv.Atoi(line)
+	if err != nil || port < 1 || port > 65535 {
+		return nil, errors.New("launched browser debug port file has no valid port")
+	}
+	wsURL, err := DiscoverWebSocketURL(ctx, fmt.Sprintf("http://127.0.0.1:%d/", port))
+	if err != nil {
+		return nil, err
+	}
+	return NewCDPExporter(wsURL).Export(ctx)
 }
 
 // ChromiumPathEnv is the environment override for the browser

@@ -20,8 +20,16 @@ import (
 type fakeRunner struct {
 	version   BrowserVersion
 	sendFrame *Frame
+	exporter  Exporter
 	mu        sync.Mutex
 	calls     int
+}
+
+func (f *fakeRunner) Exporter() (Exporter, error) {
+	if f.exporter == nil {
+		return &fakeExporter{}, nil
+	}
+	return f.exporter, nil
 }
 
 func (f *fakeRunner) Run(ctx context.Context, tr Transport) RunnerResult {

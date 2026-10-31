@@ -48,6 +48,11 @@ func NewAttachRunner(browserURL string) ScreencastRunner {
 	return attachRunner{browserURL: browserURL}
 }
 
+// Exporter returns the CDP exporter for the attached browser.
+func (r attachRunner) Exporter() (Exporter, error) {
+	return NewCDPExporter(r.browserURL), nil
+}
+
 func (r attachRunner) Run(ctx context.Context, transport Transport) RunnerResult {
 	wsURL, err := DiscoverWebSocketURL(ctx, r.browserURL)
 	if err != nil {

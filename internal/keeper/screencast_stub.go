@@ -23,6 +23,11 @@ func (r refusingRunner) Run(_ context.Context, _ Transport) RunnerResult {
 	return RunnerResult{Outcome: LoginFailed, Err: r.err}
 }
 
+// Exporter returns the typed unavailable outcome.
+func (r refusingRunner) Exporter() (Exporter, error) {
+	return nil, r.err
+}
+
 // NewAttachRunner returns a runner that refuses: screencast
 // login needs -tags with_chromedp.
 func NewAttachRunner(_ string) ScreencastRunner {
