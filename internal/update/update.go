@@ -160,7 +160,7 @@ func classifyTransportError(err error) string {
 	if err == nil {
 		return "transport"
 	}
-	if errors.Is(err, errTooManyRedirects) || errors.Is(err, errRedirectForbidden) {
+	if errors.Is(err, errTooManyRedirects) || errors.Is(err, errRedirectForbidden) || errors.Is(err, errRedirectUserinfo) {
 		return "redirect"
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
@@ -373,6 +373,7 @@ func (u *updater) gitHubBase() string {
 
 var errTooManyRedirects = errors.New("update: too many redirects")
 var errRedirectForbidden = errors.New("update: redirect to a host outside the release allowlist")
+var errRedirectUserinfo = errors.New("update: redirect to a URL carrying userinfo")
 
 // newUpdateClient builds the update command's own stdlib client. It
 // never uses http.DefaultClient (banned in internal/commands), sends
@@ -408,15 +409,21 @@ func isLoopbackHost(host string) bool {
 }
 
 // checkRedirectPolicy: at most 4 redirects followed, HTTPS only
-// (HTTP only back to a loopback origin, for httptest), and the
+// (HTTP only back to a loopback origin, for httptest), no redirect
+// target carrying userinfo (the stdlib client would otherwise send
+// an Authorization header derived from the redirect URL), and the
 // redirect target host must be the origin host or one of github.com,
 // release-assets.githubusercontent.com, objects.githubusercontent.com
 // (the measured browser_download_url redirect target). Anything else
 // aborts before dialing. This host allowlist applies to redirects
 // only: the initial asset and checksums URLs come from the release
 // JSON's browser_download_url, are not host-restricted, and are bound
-// by the checksums verification.
+// by the checksums verification; initial URLs carrying userinfo are
+// refused earlier by validateDownloadURL during asset selection.
 func checkRedirectPolicy(req *http.Request, via []*http.Request) error {
+	if req.URL.User != nil {
+		return errRedirectUserinfo
+	}
 	if len(via) >= 5 {
 		return errTooManyRedirects
 	}
