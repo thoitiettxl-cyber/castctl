@@ -744,10 +744,20 @@ writer-bound client whose Transport proxy is explicitly nil
 `WithNotAsyncHandlers` + `WithWorkers(1)` plus a writer
 dispatcher owning one FIFO queue per chat (the library's
 default dispatch is an unbounded goroutine per update);
-custom errors/default handlers (the defaults log full updates
-and raw payloads); recover per update (the library has none);
-update_id dedupe marked at enqueue. Startup calls GetMe (no
-`WithSkipGetMe`), mirroring Python's `Bot.run` getMe
+a custom errors handler (the default logs errors verbatim,
+including raw payloads; a default handler is registered but
+unreachable behind the match-all handler); recover per update
+(the library has none); update_id dedupe marked at enqueue.
+The binder rejects non-`*http.Transport` transports,
+env-proxy transports, and the default direct-dial shape, and
+refuses redirects; errors leaving the bot are scrubbed copies
+(token-free at the error-object level, preserving only the
+429/migrate `errors.As` views and sentinel `errors.Is`);
+response decode errors log as class/length summaries only.
+The dispatcher is bounded: a 1024-id dedupe window, 64-deep
+per-chat queues with counted drops, 5-minute idle reaping,
+and a 10-second shutdown drain deadline. Startup calls GetMe
+(no `WithSkipGetMe`), mirroring Python's `Bot.run` getMe
 (`tgbot.py:2465`); the fake-server tests assert exactly one
 getMe at construction and none during polling.
 
@@ -757,7 +767,12 @@ be handled twice); offset/dedupe state in memory only, no state
 file (Python persists the offset in `telegram-state.json`);
 `telegram run` answers messages with an explicit placeholder
 notice and fails approval decisions closed until the step-5
-gateway wiring lands.
+gateway wiring lands; `edit_plain` swallows all edit errors
+(Python catches only Telegram/connection errors); the claim
+storm is kept as surveyed (a slow decider with a short claim
+wait lets every concurrent caller decide one id — a defect
+of the mirrored protocol; gateway-side idempotency is
+required in step 5).
 
 ## 6. cronet-go — EVALUATED-NOT-WIRED (graph-only; no code, no tag)
 
