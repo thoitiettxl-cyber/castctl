@@ -642,3 +642,81 @@ func TestKeeperCheckCorruptState(t *testing.T) {
 		t.Fatalf("check output = %q; want state_corrupt flagged", out.String())
 	}
 }
+
+// TestKeeperCheckFreshConfigOutsideCookies (K-LIVE-1): the real
+// `keeper check` path on a fresh config dir (no profiles/
+// subdir) whose profile's cookies file lives outside the config
+// dir must tick healthy and write the state file (dir 0700),
+// not report "skipped" with exit 0 and no state. RED on
+// e4ef8c5: outcome "skipped", no state file.
+func TestKeeperCheckFreshConfigOutsideCookies(t *testing.T) {
+	t.Parallel()
+	outside := t.TempDir()
+	cookiesPath, _ := json.Marshal(filepath.Join(outside, "cookies.txt"))
+	cfg := `{"default_profile":"muse01","profiles":{"muse01":{"cookies_file":` + string(cookiesPath) + `}},` +
+		`"keeper":[{"tag":"k1","profile":"muse01","browser":"http://127.0.0.1:9226","interval":"1h"}]}`
+	fake := &keeperFakeGateway{sessionStatus: 200, authStatus: 200}
+	env, out, errb, home := keeperTestEnv(t, cfg, fake)
+	if _, err := os.Stat(filepath.Join(home, "profiles")); !os.IsNotExist(err) {
+		t.Fatalf("fresh config has a profiles/ entry (err=%v)", err)
+	}
+	if code := Run(context.Background(), []string{"keeper", "check"}, env); code != 0 {
+		t.Fatalf("check fresh config: code=%d, stderr=%q", code, errb.String())
+	}
+	var res keeperCheckResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("check output is not one JSON object: %v (%q)", err, out.String())
+	}
+	if res.Outcome != keeper.OutcomeOK {
+		t.Errorf("outcome = %q, want %q (never skipped)", res.Outcome, keeper.OutcomeOK)
+	}
+	paths, err := profile.ProfilePaths(home, "muse01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(paths.Dir)
+	if err != nil {
+		t.Fatalf("profile dir missing after check: %v", err)
+	}
+	if st.Mode().Perm() != 0o700 {
+		t.Errorf("profile dir mode=%o, want 0700", st.Mode().Perm())
+	}
+	if _, err := os.Stat(filepath.Join(paths.Dir, keeper.StateFileName)); err != nil {
+		t.Errorf("state file missing after check: %v", err)
+	}
+}
+
+// TestKeeperCheckStateDirFailure (K-LIVE-1): when the state dir
+// cannot be created (a file sits where profiles/ must be),
+// `keeper check` must exit non-zero with outcome "error" and a
+// stderr message naming the state directory — never exit 0
+// with "skipped". RED on e4ef8c5: code 0, outcome "skipped".
+func TestKeeperCheckStateDirFailure(t *testing.T) {
+	t.Parallel()
+	outside := t.TempDir()
+	cookiesPath, _ := json.Marshal(filepath.Join(outside, "cookies.txt"))
+	cfg := `{"default_profile":"muse01","profiles":{"muse01":{"cookies_file":` + string(cookiesPath) + `}},` +
+		`"keeper":[{"tag":"k1","profile":"muse01","browser":"http://127.0.0.1:9226","interval":"1h"}]}`
+	fake := &keeperFakeGateway{sessionStatus: 200, authStatus: 200}
+	env, out, errb, home := keeperTestEnv(t, cfg, fake)
+	if err := os.WriteFile(filepath.Join(home, "profiles"), []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code := Run(context.Background(), []string{"keeper", "check"}, env)
+	var res keeperCheckResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("check output is not one JSON object: %v (%q)", err, out.String())
+	}
+	if res.Outcome == keeper.OutcomeSkipped {
+		t.Errorf("outcome = %q; a state-dir failure must never be skipped", res.Outcome)
+	}
+	if res.Outcome != "error" {
+		t.Errorf("outcome = %q, want \"error\"", res.Outcome)
+	}
+	if code == 0 {
+		t.Errorf("check state-dir failure: code=0, want non-zero")
+	}
+	if !strings.Contains(errb.String(), "state director") {
+		t.Errorf("stderr = %q; want the state directory named", errb.String())
+	}
+}

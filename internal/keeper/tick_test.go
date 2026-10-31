@@ -818,3 +818,119 @@ func TestTickCorruptStateStopSurfacesFlag(t *testing.T) {
 		t.Fatalf("result = %+v; want auth_error + stopped + StateCorrupt", res)
 	}
 }
+
+// TestTickFreshConfigOutsideCookiesWritesState (K-LIVE-1): a
+// fresh config dir with NO profiles/ subdir, and a cookies file
+// OUTSIDE the config dir (the legacy layout: the lock's parent
+// creation never creates the profile dir for an outside path),
+// must still tick to completion and write the state file. The
+// state dir is created at 0700. RED on e4ef8c5: OutcomeSkipped,
+// no state file.
+func TestTickFreshConfigOutsideCookiesWritesState(t *testing.T) {
+	baseDir := t.TempDir()
+	paths, err := profile.ProfilePaths(baseDir, "muse01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(baseDir, "profiles")); !os.IsNotExist(err) {
+		t.Fatalf("fresh config has a profiles/ entry (err=%v); the fixture is not fresh", err)
+	}
+	initial := []StoredCookie{
+		{Name: "hatch_sess", Value: "FAKE-OLD", Domain: ".muse.ai", Path: "/", Secure: true, Expires: tickNow.Add(30 * 24 * time.Hour).Unix()},
+	}
+	data, err := SerializeJar(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	cookiesPath := filepath.Join(outside, "cookies.txt")
+	if err := os.WriteFile(cookiesPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(cookiesPath)
+	checker := &fakeChecker{scripts: []checkScript{{}}}
+	deps := tickDeps(&fakeClock{now: tickNow}, checker, nil, nil)
+	deps.Profile = &profile.Profile{Name: "muse01", CookiesFile: cookiesPath}
+	res := tickRun(t, baseDir, deps)
+	if res.Outcome != OutcomeOK || res.Err != nil {
+		t.Fatalf("result = %+v; want ok with no error (never skipped)", res)
+	}
+	if mode := dirMode(t, filepath.Join(baseDir, "profiles")); mode != 0o700 {
+		t.Errorf("profiles/ mode=%o, want 0700", mode)
+	}
+	if mode := dirMode(t, paths.Dir); mode != 0o700 {
+		t.Errorf("profile dir mode=%o, want 0700", mode)
+	}
+	if _, err := os.Stat(filepath.Join(paths.Dir, StateFileName)); err != nil {
+		t.Fatalf("state file missing after tick: %v", err)
+	}
+	st := readState(t, paths.Dir)
+	if st.LastTickOutcome != OutcomeOK {
+		t.Fatalf("state last_tick_outcome = %q; want ok", st.LastTickOutcome)
+	}
+	after, _ := os.ReadFile(cookiesPath)
+	if string(after) != string(before) {
+		t.Fatalf("cookies file changed on a no-op tick")
+	}
+}
+
+func dirMode(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Mode().Perm()
+}
+
+// TestTickStateDirCreationFailureIsLoud (K-LIVE-1): when the
+// state dir cannot be created — here a regular file sits where
+// profiles/ must be, so MkdirAll fails on the real filesystem —
+// the tick must fail loudly: outcome "error" (never "skipped"),
+// an error naming the state directory, no state file, and the
+// cookies file untouched. RED on e4ef8c5: OutcomeSkipped with a
+// bare "no such file or directory" / "not a directory" error.
+func TestTickStateDirCreationFailureIsLoud(t *testing.T) {
+	baseDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(baseDir, "profiles"), []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := profile.ProfilePaths(baseDir, "muse01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := []StoredCookie{
+		{Name: "hatch_sess", Value: "FAKE-OLD", Domain: ".muse.ai", Path: "/", Secure: true, Expires: tickNow.Add(30 * 24 * time.Hour).Unix()},
+	}
+	data, err := SerializeJar(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	cookiesPath := filepath.Join(outside, "cookies.txt")
+	if err := os.WriteFile(cookiesPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checker := &fakeChecker{scripts: []checkScript{{}}}
+	deps := tickDeps(&fakeClock{now: tickNow}, checker, nil, nil)
+	deps.Profile = &profile.Profile{Name: "muse01", CookiesFile: cookiesPath}
+	res := tickRun(t, baseDir, deps)
+	if res.Outcome == OutcomeSkipped {
+		t.Fatalf("result = %+v; a state-dir creation failure must never be skipped", res)
+	}
+	if res.Outcome != "error" {
+		t.Fatalf("result outcome = %q; want \"error\"", res.Outcome)
+	}
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "state director") {
+		t.Fatalf("result error = %v; want an error naming the state directory", res.Err)
+	}
+	if _, err := os.Stat(filepath.Join(paths.Dir, StateFileName)); !os.IsNotExist(err) {
+		t.Fatalf("state file unexpectedly present (err=%v)", err)
+	}
+	if got, _ := os.ReadFile(cookiesPath); string(got) != string(data) {
+		t.Fatalf("cookies file changed on a failed tick")
+	}
+	if st, err := os.Stat(filepath.Join(baseDir, "profiles")); err != nil || st.IsDir() {
+		t.Fatalf("profiles file clobbered or removed (stat err=%v, isDir=%v)", err, st != nil && st.IsDir())
+	}
+}

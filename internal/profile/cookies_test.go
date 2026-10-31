@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -216,4 +217,120 @@ func mustReadFile(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+func cookiesFileIno(t *testing.T, path string) uint64 {
+	t.Helper()
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("stat did not return *syscall.Stat_t; the inode assertion is unavailable")
+	}
+	return sys.Ino
+}
+
+// TestWriteCookiesFileBakIsCopyBeforeRename (K-LIVE-2): the
+// backup must be produced by copying the previous file to
+// .bak BEFORE the new file is renamed over the target, so the
+// target is never absent mid-write. A rename-based backup
+// reuses the previous file's inode for .bak; a copy does not.
+// That inode difference is the deterministic observable for
+// the ordering: RED on e4ef8c5 (rename), GREEN on the copy.
+func TestWriteCookiesFileBakIsCopyBeforeRename(t *testing.T) {
+	base := t.TempDir()
+	dest := filepath.Join(base, "cookies.txt")
+	old := []byte("hatch_sess=OLD\n")
+	if err := os.WriteFile(dest, old, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldIno := cookiesFileIno(t, dest)
+	neu := []byte("hatch_sess=NEW\n")
+	backup, err := WriteCookiesFile(base, "default", dest, neu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !backup {
+		t.Errorf("backup=false, want true when a previous file existed")
+	}
+	if got := mustReadFile(t, dest+".bak"); string(got) != string(old) {
+		t.Errorf(".bak bytes=%q, want previous file bytes %q", got, old)
+	}
+	if mode := cookiesFileMode(t, dest+".bak"); mode != 0o600 {
+		t.Errorf(".bak mode=%o, want 0600", mode)
+	}
+	if ino := cookiesFileIno(t, dest+".bak"); ino == oldIno {
+		t.Errorf(".bak inode=%d equals the old file's inode: the backup was a rename, so the target was absent mid-write", ino)
+	}
+	if got := mustReadFile(t, dest); string(got) != string(neu) {
+		t.Errorf("cookies bytes=%q, want %q", got, neu)
+	}
+	if mode := cookiesFileMode(t, dest); mode != 0o600 {
+		t.Errorf("cookies mode=%o, want 0600", mode)
+	}
+}
+
+// TestWriteCookiesFileBakPreservesSymlink (K-LIVE-2 guard): when
+// the previous cookies file is a symlink, .bak remains a
+// symlink to the same target, the target's content and mode
+// are untouched, and the new cookies file is a regular 0600
+// file. This pins the documented symlink rule under the
+// copy-based backup; it passes on the old rename code too.
+func TestWriteCookiesFileBakPreservesSymlink(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "target.txt")
+	old := []byte("hatch_sess=OLD\n")
+	if err := os.WriteFile(target, old, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Record the target's mode as created (subject to umask):
+	// the write must leave it untouched, whatever it is.
+	targetMode := cookiesFileMode(t, target)
+	dest := filepath.Join(base, "cookies.txt")
+	if err := os.Symlink(target, dest); err != nil {
+		t.Fatal(err)
+	}
+	neu := []byte("hatch_sess=NEW\n")
+	backup, err := WriteCookiesFile(base, "default", dest, neu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !backup {
+		t.Errorf("backup=false, want true when a previous (symlink) file existed")
+	}
+	lst, err := os.Lstat(dest + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lst.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf(".bak is not a symlink (mode=%v)", lst.Mode())
+	}
+	linkTarget, err := os.Readlink(dest + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkTarget != target {
+		t.Errorf(".bak points at %q, want %q", linkTarget, target)
+	}
+	if got := mustReadFile(t, target); string(got) != string(old) {
+		t.Errorf("symlink target bytes=%q, want untouched %q", got, old)
+	}
+	if mode := cookiesFileMode(t, target); mode != targetMode {
+		t.Errorf("symlink target mode=%o, want untouched %o", mode, targetMode)
+	}
+	lst, err = os.Lstat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lst.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("cookies file is still a symlink; want a regular file")
+	}
+	if got := mustReadFile(t, dest); string(got) != string(neu) {
+		t.Errorf("cookies bytes=%q, want %q", got, neu)
+	}
+	if mode := cookiesFileMode(t, dest); mode != 0o600 {
+		t.Errorf("cookies mode=%o, want 0600", mode)
+	}
 }
