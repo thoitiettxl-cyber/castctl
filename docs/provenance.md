@@ -654,10 +654,10 @@ tree reimplements the Python behavior; no Python code is copied.
 
 Castctl mappings (file:line, both sides re-read unless tagged):
 
-- Version/contract: `internal/commands/commands.go:664`
-  (`"telegram": "PR5"` deferred table) and
-  `internal/commands/commands_test.go:141,157-158` (PR5 note
-  asserted); exit-code/JSON contract per `README.md:131`.
+- Version/contract: `internal/commands/telegram.go`
+  (`telegram run` / `telegram status` wired to the `telegram`
+  config block) and `internal/commands/commands.go`
+  (command order); exit-code/JSON contract per `README.md:131`.
   `[DOCS-ONLY]` for the README contract sentence itself.
 - Gateway framing: `internal/gateway/framing.go:27-28,36` and
   `internal/gateway/doc.go:172-173` cite Python `gateway.py:83-93`
@@ -710,23 +710,54 @@ renames with `MUSE_AUTO_*`/`MUSE_NODE_ID`/`MUSE_VM_ID` kept;
 GPL-3.0 headers (`SPDX-License-Identifier: GPL-3.0-or-later`,
 "Copyright (C) 2026 muse-cli contributors") on Go files.
 
-## 5. go-telegram/bot @f53bfe5 — DESIGN-ONLY (studied, no code taken)
+## 5. go-telegram/bot @f53bfe5 — WIRED (linked dependency, no code copied)
 
 Upstream: `github.com/go-telegram/bot`, commit
 `f53bfe55a30bb6d0c54327a4233e60d5bccb5604` (verified three ways:
 `git ls-remote` HEAD/main tip, two research clones' rev-parse —
-all identical). License name: MIT (LICENSE head at that commit:
-"MIT License / Copyright (c) 2022 negasus").
+all identical; `go.mod` pins the pseudo-version
+`v1.27.1-0.20261008103508-f53bfe55a30b`, whose commit suffix is
+`f53bfe55a30b`). License name: MIT (LICENSE head at that commit:
+"MIT License / Copyright (c) 2022 negasus"). Zero requires of
+its own. No upstream source is copied into this tree: the
+library is linked as a Go module dependency only.
 
-Castctl side: absent. `go-telegram/bot` grep count is 0 in `go.mod`
-and `go.sum`, and zero `.go` files import it. Telegram in castctl
-is a stub only: `internal/commands/commands.go:664`
-(`"telegram": "PR5"`) plus help text, asserted in
-`internal/commands/commands_test.go:157-158`. Status:
-DESIGN-ONLY. Never claim code reuse: this library was evaluated
-as a candidate for a future PR and a decision was deferred to
-that PR; it is studied, no code taken. No evaluation conditions
-are enumerated here, and no out-of-tree plan file is cited.
+Castctl side: `internal/telegram/` (`bot.go`, `dispatcher.go`,
+`claims.go`, `text.go`, `approvals.go`) uses the library for
+polling and the Bot API calls; `internal/commands/telegram.go`
+wires `telegram run` / `telegram status` to the config block.
+Behaviour is reimplemented from the 0.6.1 Python reference
+(`src/muse_cli/tgbot.py`, `tgapi.py`, `wait.py`), not from the
+library's examples: message splitting and Markdown-to-HTML
+conversion (`tgapi.py:178-247`), the HTML-then-plain send/edit
+fallback and 429 retry rule (`tgbot.py:703-758`,
+`tgapi.py:116-130`), the sender-id allowlist gate
+(`tgbot.py:643-648,989-1000`), approval description/options
+(`wait.py:102-164`, `tgbot.py:1703-1723`), callback decide /
+approve-all (`tgbot.py:1725-1747`), and the claim / notified
+state machine (`tgbot.py:1505-1701`).
+
+Evaluation conditions applied (from the libpin report, all
+VERIFIED in tree): the bot is built with `WithHTTPClient` on a
+writer-bound client whose Transport proxy is explicitly nil
+(the library default client inherits the stdlib env proxy);
+`WithNotAsyncHandlers` + `WithWorkers(1)` plus a writer
+dispatcher owning one FIFO queue per chat (the library's
+default dispatch is an unbounded goroutine per update);
+custom errors/default handlers (the defaults log full updates
+and raw payloads); recover per update (the library has none);
+update_id dedupe marked at enqueue. Startup calls GetMe (no
+`WithSkipGetMe`), mirroring Python's `Bot.run` getMe
+(`tgbot.py:2465`); the fake-server tests assert exactly one
+getMe at construction and none during polling.
+
+Deliberate deviations from 0.6.1 (documented in code): the
+update_id dedupe itself (Python has none — a redelivery would
+be handled twice); offset/dedupe state in memory only, no state
+file (Python persists the offset in `telegram-state.json`);
+`telegram run` answers messages with an explicit placeholder
+notice and fails approval decisions closed until the step-5
+gateway wiring lands.
 
 ## 6. cronet-go — EVALUATED-NOT-WIRED (graph-only; no code, no tag)
 
