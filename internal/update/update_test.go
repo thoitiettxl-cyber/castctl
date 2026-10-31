@@ -9,10 +9,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -770,4 +775,183 @@ func TestDownloadURLWithUserinfoRefuses(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRedirectUserinfoRefuses (loop 4, red-team R-F1): a download
+// server that redirects to a URL carrying userinfo must be refused
+// by the redirect policy before the follow-up request is sent, so
+// no Authorization header derived from URL userinfo is ever sent
+// and nothing is installed. The redirect policy is the single choke
+// point for every client path, so the checksums leg, the asset leg,
+// both legs, and a userinfo target reached on the second hop of a
+// redirect chain are all covered; a redirect without userinfo
+// still installs (control). The exec check is stubbed in every
+// case, exactly as in the loop-3 redirect probe: a refusal must
+// precede any download, so the stub is irrelevant to the refusal
+// cases, and it lets the pre-fix run proceed far enough to prove
+// the channel end-to-end (install + Authorization headers).
+func TestRedirectUserinfoRefuses(t *testing.T) {
+	const tag = "v0.7.0"
+	assetName := "castctl_0.7.0_linux_amd64.tar.gz"
+	stubExecCheck(t)
+
+	// newFixture builds a two-server fixture. The API server serves
+	// the release JSON; each leg either points straight at the
+	// object server (direct, clean) or at the API server, which
+	// redirects to the object server. Redirect targets carry
+	// userinfo only when userinfo is set; with secondHop, the
+	// redirect leg first hops to /hop/, which redirects on to /dl/,
+	// so the userinfo target is the second redirect in the chain.
+	newFixture := func(t *testing.T, checksumsRedirect, assetRedirect, userinfo, secondHop bool) (run func(exe string) (Result, error), authCount func() int) {
+		t.Helper()
+		assetBody := buildTar(t, map[string][]byte{"castctl": fakeBinary(t)})
+		sum := sha256.Sum256(assetBody)
+		checksumsBody := []byte(hex.EncodeToString(sum[:]) + "  " + assetName + "\n")
+
+		var mu sync.Mutex
+		var auth []string
+		obj := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if a := r.Header.Get("Authorization"); a != "" {
+				mu.Lock()
+				auth = append(auth, a)
+				mu.Unlock()
+			}
+			switch {
+			case strings.HasSuffix(r.URL.Path, "checksums.txt"):
+				_, _ = w.Write(checksumsBody)
+			case strings.HasSuffix(r.URL.Path, assetName):
+				_, _ = w.Write(assetBody)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(obj.Close)
+		objURL, err := url.Parse(obj.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// target builds the object-server URL for a download
+		// object, optionally carrying userinfo.
+		target := func(name string, withUserinfo bool) string {
+			u := *objURL
+			u.Path = "/obj/" + name
+			if withUserinfo {
+				u.User = url.UserPassword("user", "pass")
+			}
+			return u.String()
+		}
+
+		api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			base := "http://" + r.Host
+			switch {
+			case r.URL.Path == "/repos/thoitiettxl-cyber/castctl/releases/latest":
+				checksumsURL, assetURL := target("checksums.txt", false), target(assetName, false)
+				if checksumsRedirect {
+					checksumsURL = base + "/dl/checksums.txt"
+					if secondHop {
+						checksumsURL = base + "/hop/checksums.txt"
+					}
+				}
+				if assetRedirect {
+					assetURL = base + "/dl/" + assetName
+					if secondHop {
+						assetURL = base + "/hop/" + assetName
+					}
+				}
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"tag_name":%q,"draft":false,"prerelease":false,"assets":[
+					{"name":%q,"browser_download_url":%q,"size":%d,"state":"uploaded"},
+					{"name":"checksums.txt","browser_download_url":%q,"size":%d,"state":"uploaded"}]}`,
+					tag, assetName, assetURL, len(assetBody), checksumsURL, len(checksumsBody))
+			case strings.HasPrefix(r.URL.Path, "/hop/"):
+				name := strings.TrimPrefix(r.URL.Path, "/hop/")
+				http.Redirect(w, r, base+"/dl/"+name, http.StatusFound)
+			case strings.HasPrefix(r.URL.Path, "/dl/"):
+				name := strings.TrimPrefix(r.URL.Path, "/dl/")
+				withUserinfo := userinfo && ((name == "checksums.txt" && checksumsRedirect) || (name == assetName && assetRedirect))
+				http.Redirect(w, r, target(name, withUserinfo), http.StatusFound)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(api.Close)
+
+		run = func(exe string) (Result, error) {
+			opts := Options{
+				Deps: Deps{
+					HTTPClient: api.Client(),
+					Executable: exe,
+					BuildInfo:  glibcBuildInfo(),
+					APIBase:    api.URL,
+					GitHubBase: api.URL,
+				},
+				CurrentVersion: "0.6.3",
+				Commit:         "0807125",
+				BuildDate:      "2026-10-30T17:31:50Z",
+				Stdout:         &bytes.Buffer{},
+			}
+			return runUpdate(t, opts)
+		}
+		authCount = func() int {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(auth)
+		}
+		return run, authCount
+	}
+
+	for _, tc := range []struct {
+		name              string
+		checksumsRedirect bool
+		assetRedirect     bool
+		secondHop         bool
+	}{
+		{"checksums", true, false, false},
+		{"asset", false, true, false},
+		{"both", true, true, false},
+		{"secondHop", true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run, authCount := newFixture(t, tc.checksumsRedirect, tc.assetRedirect, true, tc.secondHop)
+			_, exe := makeTarget(t)
+			before := dirSnapshot(t, filepath.Dir(exe))
+			res, err := run(exe)
+			t.Logf("redirect-userinfo %s: err=%v replaced=%v authHeaders=%d", tc.name, err, res.Replaced, authCount())
+			if err == nil || codeOf(err) != 1 {
+				t.Fatalf("userinfo redirect (%s): err=%v code=%d, want code 1", tc.name, err, codeOf(err))
+			}
+			if res.Replaced {
+				t.Errorf("userinfo redirect (%s) replaced the binary", tc.name)
+			}
+			if got := authCount(); got != 0 {
+				t.Errorf("userinfo redirect (%s): %d Authorization headers sent, want 0", tc.name, got)
+			}
+			if old, _ := os.ReadFile(exe); string(old) != "old-binary-bytes" {
+				t.Errorf("userinfo redirect (%s) modified the target binary", tc.name)
+			}
+			after := dirSnapshot(t, filepath.Dir(exe))
+			delete(after, lockFileName)
+			delete(before, lockFileName)
+			if !snapshotsEqual(before, after) {
+				t.Errorf("userinfo redirect (%s) changed the directory beyond the lock file", tc.name)
+			}
+		})
+	}
+
+	// Control: the same redirect chain without userinfo installs,
+	// with zero Authorization headers.
+	t.Run("cleanControl", func(t *testing.T) {
+		run, authCount := newFixture(t, true, true, false, false)
+		_, exe := makeTarget(t)
+		res, err := run(exe)
+		if err != nil || !res.Replaced {
+			t.Fatalf("clean redirect control: err=%v replaced=%v, want install", err, res.Replaced)
+		}
+		if got := authCount(); got != 0 {
+			t.Errorf("clean redirect control: %d Authorization headers sent, want 0", got)
+		}
+		if got, _ := os.ReadFile(exe); string(got) == "old-binary-bytes" {
+			t.Error("clean redirect control did not replace the target binary")
+		}
+	})
 }
