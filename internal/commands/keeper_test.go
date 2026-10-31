@@ -720,3 +720,40 @@ func TestKeeperCheckStateDirFailure(t *testing.T) {
 		t.Errorf("stderr = %q; want the state directory named", errb.String())
 	}
 }
+
+// TestKeeperCheckDefaultPathProfileDirIsFile (B1/P7, loop 2):
+// the real `keeper check` path with the DEFAULT cookies path
+// and a regular file where the profile dir must be must exit
+// non-zero with outcome "error" and stderr naming the state
+// directory — never exit 0 with "skipped". RED on 6925ff1:
+// code 0, outcome "skipped".
+func TestKeeperCheckDefaultPathProfileDirIsFile(t *testing.T) {
+	t.Parallel()
+	cfg := `{"default_profile":"muse01","profiles":{"muse01":{}},` +
+		`"keeper":[{"tag":"k1","profile":"muse01","browser":"http://127.0.0.1:9226","interval":"1h"}]}`
+	fake := &keeperFakeGateway{sessionStatus: 200, authStatus: 200}
+	env, out, errb, home := keeperTestEnv(t, cfg, fake)
+	if err := os.MkdirAll(filepath.Join(home, "profiles"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "profiles", "muse01"), []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code := Run(context.Background(), []string{"keeper", "check"}, env)
+	var res keeperCheckResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("check output is not one JSON object: %v (%q)", err, out.String())
+	}
+	if res.Outcome == keeper.OutcomeSkipped {
+		t.Errorf("outcome = %q; a default-path state-dir failure must never be skipped", res.Outcome)
+	}
+	if res.Outcome != "error" {
+		t.Errorf("outcome = %q, want \"error\"", res.Outcome)
+	}
+	if code == 0 {
+		t.Errorf("check default-path state-dir failure: code=0, want non-zero")
+	}
+	if !strings.Contains(errb.String(), filepath.Join(home, "profiles", "muse01")) {
+		t.Errorf("stderr = %q; want the state directory named", errb.String())
+	}
+}

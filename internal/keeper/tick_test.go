@@ -937,3 +937,187 @@ func TestTickStateDirCreationFailureIsLoud(t *testing.T) {
 		t.Fatalf("profiles file clobbered or removed (stat err=%v, isDir=%v)", err, st != nil && st.IsDir())
 	}
 }
+
+// TestTickDefaultPathProfileDirIsFileIsLoud (B1/P7, loop 2): the
+// DEFAULT cookies path with a regular file where the profile dir
+// must be — the EnsureProfileDir failure inside LockCookiesFile's
+// parent creation — must fail loudly as a state-dir error, never
+// "skipped". RED on 6925ff1: OutcomeSkipped with a bare mkdir
+// error (the wrap never applies on this route).
+func TestTickDefaultPathProfileDirIsFileIsLoud(t *testing.T) {
+	baseDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(baseDir, "profiles"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "profiles", "muse01"), []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := profile.ProfilePaths(baseDir, "muse01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checker := &fakeChecker{scripts: []checkScript{{}}}
+	deps := tickDeps(&fakeClock{now: tickNow}, checker, nil, nil)
+	// Empty CookiesFile: the default path inside the config dir.
+	res := tickRun(t, baseDir, deps)
+	if res.Outcome == OutcomeSkipped {
+		t.Fatalf("result = %+v; a default-path state-dir failure must never be skipped", res)
+	}
+	if res.Outcome != OutcomeError {
+		t.Fatalf("result outcome = %q; want %q", res.Outcome, OutcomeError)
+	}
+	if res.Err == nil || !IsStateDirError(res.Err) {
+		t.Fatalf("result error = %v; want an ErrStateDir error", res.Err)
+	}
+	if !strings.Contains(res.Err.Error(), filepath.Join(baseDir, "profiles", "muse01")) {
+		t.Fatalf("result error = %v; want the state directory named", res.Err)
+	}
+	if _, err := os.Stat(filepath.Join(paths.Dir, StateFileName)); err == nil {
+		t.Fatalf("state file unexpectedly present")
+	}
+	if checker.callCount() != 0 {
+		t.Fatalf("checker calls = %d; want 0 (tick failed before the chain)", checker.callCount())
+	}
+}
+
+// TestTickDefaultProfileConfigDirIsFileIsLoud (B1/P8, loop 2):
+// the default profile with a regular file where the config dir
+// must be must fail loudly as a state-dir error, never
+// "skipped". RED on 6925ff1: OutcomeSkipped with a bare mkdir
+// error.
+func TestTickDefaultProfileConfigDirIsFileIsLoud(t *testing.T) {
+	parent := t.TempDir()
+	baseDir := filepath.Join(parent, "cfg")
+	if err := os.WriteFile(baseDir, []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	checker := &fakeChecker{scripts: []checkScript{{}}}
+	deps := tickDeps(&fakeClock{now: tickNow}, checker, nil, nil)
+	deps.Profile = &profile.Profile{Name: "default"}
+	deps.Entry = &profile.KeeperEntry{Tag: "k1", Profile: "default", Browser: "http://127.0.0.1:9226/", Interval: time.Hour, IntervalSet: true}
+	res := tickRun(t, baseDir, deps)
+	if res.Outcome == OutcomeSkipped {
+		t.Fatalf("result = %+v; a config-dir creation failure must never be skipped", res)
+	}
+	if res.Outcome != OutcomeError {
+		t.Fatalf("result outcome = %q; want %q", res.Outcome, OutcomeError)
+	}
+	if res.Err == nil || !IsStateDirError(res.Err) {
+		t.Fatalf("result error = %v; want an ErrStateDir error", res.Err)
+	}
+	if !strings.Contains(res.Err.Error(), baseDir) {
+		t.Fatalf("result error = %v; want the state directory named", res.Err)
+	}
+	if _, err := os.Stat(filepath.Join(baseDir, StateFileName)); err == nil {
+		t.Fatalf("state file unexpectedly present")
+	}
+}
+
+// TestTickStateDirRemovedBeforeStateSaveIsLoud (B2, loop 2):
+// a deterministic fault at exactly the cookies-write → state-save
+// boundary — the BeforeStateSave hook removes the state dir
+// after the cookies file was rewritten — must be a hard
+// failure with wrote_cookies=true, never "skipped" with
+// wrote_cookies=false. No goroutine race, no sleeps: the hook
+// runs synchronously between the write and the save. RED on
+// 6925ff1 (with only the seam plumbing present): OutcomeSkipped
+// and WroteCookies=false while the cookies bytes changed.
+func TestTickStateDirRemovedBeforeStateSaveIsLoud(t *testing.T) {
+	baseDir := t.TempDir()
+	paths, err := profile.ProfilePaths(baseDir, "muse01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := []StoredCookie{
+		{Name: "hatch_sess", Value: "FAKE-OLD", Domain: ".muse.ai", Path: "/", Secure: true, Expires: tickNow.Add(time.Hour).Unix()},
+	}
+	data, err := SerializeJar(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	cookiesPath := filepath.Join(outside, "cookies.txt")
+	if err := os.WriteFile(cookiesPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(cookiesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renewal := []CookieUpdate{{Cookie: StoredCookie{Name: "hatch_sess", Value: "FAKE-NEW", Domain: ".muse.ai", Path: "/", Secure: true, Expires: tickNow.Add(30 * 24 * time.Hour).Unix()}}}
+	checker := &fakeChecker{scripts: []checkScript{{updates: renewal}}}
+	hookCalls := 0
+	deps := tickDeps(&fakeClock{now: tickNow}, checker, nil, nil)
+	deps.Profile = &profile.Profile{Name: "muse01", CookiesFile: cookiesPath}
+	deps.BeforeStateSave = func() {
+		hookCalls++
+		_ = os.RemoveAll(paths.Dir)
+	}
+	res := tickRun(t, baseDir, deps)
+	if res.Outcome == OutcomeSkipped {
+		t.Fatalf("result = %+v; a state-save failure after a cookies write must never be skipped", res)
+	}
+	if res.Outcome != OutcomeError {
+		t.Fatalf("result outcome = %q; want %q", res.Outcome, OutcomeError)
+	}
+	if res.Err == nil {
+		t.Fatalf("result has no error for a failed state save")
+	}
+	if !res.WroteCookies {
+		t.Fatalf("result = %+v; the cookies file was rewritten but wrote_cookies is false", res)
+	}
+	after, err := os.ReadFile(cookiesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) == string(before) {
+		t.Fatalf("cookies file unchanged; the write must precede the save failure")
+	}
+	if !strings.Contains(string(after), "FAKE-NEW") {
+		t.Fatalf("cookies bytes = %q; want the renewal value", after)
+	}
+	if _, err := os.Stat(filepath.Join(paths.Dir, StateFileName)); err == nil {
+		t.Fatalf("state file present after the state dir was removed")
+	}
+	if hookCalls != 1 {
+		t.Fatalf("BeforeStateSave calls = %d; want 1", hookCalls)
+	}
+}
+
+// TestTickDefaultProfileFreshBaseDirIs0700 (N2, loop 2): a
+// fresh tick for the default profile tightens the config dir
+// itself (the state dir) to 0700, matching named profiles.
+// RED on 6925ff1: the dir stays 0755.
+func TestTickDefaultProfileFreshBaseDirIs0700(t *testing.T) {
+	parent := t.TempDir()
+	baseDir := filepath.Join(parent, "cfg")
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initial := []StoredCookie{
+		{Name: "hatch_sess", Value: "FAKE-OLD", Domain: ".muse.ai", Path: "/", Secure: true, Expires: tickNow.Add(30 * 24 * time.Hour).Unix()},
+	}
+	data, err := SerializeJar(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	cookiesPath := filepath.Join(outside, "cookies.txt")
+	if err := os.WriteFile(cookiesPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checker := &fakeChecker{scripts: []checkScript{{}}}
+	deps := tickDeps(&fakeClock{now: tickNow}, checker, nil, nil)
+	deps.Profile = &profile.Profile{Name: "default", CookiesFile: cookiesPath}
+	deps.Entry = &profile.KeeperEntry{Tag: "k1", Profile: "default", Browser: "http://127.0.0.1:9226/", Interval: time.Hour, IntervalSet: true}
+	res := tickRun(t, baseDir, deps)
+	if res.Outcome != OutcomeOK || res.Err != nil {
+		t.Fatalf("result = %+v; want ok with no error", res)
+	}
+	if mode := dirMode(t, baseDir); mode != 0o700 {
+		t.Errorf("config dir mode=%o, want 0700", mode)
+	}
+	if _, err := os.Stat(filepath.Join(baseDir, StateFileName)); err != nil {
+		t.Fatalf("state file missing after tick: %v", err)
+	}
+}
