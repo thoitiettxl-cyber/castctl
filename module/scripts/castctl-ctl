@@ -187,9 +187,11 @@ prepare_mutable_dirs() {
   # or chmodding anything below it. The data dir itself and
   # releases/ are guarded first: a symlinked DATA_DIR defeats
   # every subdir guard below it (F2), and a symlinked releases/
-  # defeats current-target validation (B2).
+  # defeats current-target validation (B2). run/tmp is guarded
+  # too: it is created here and exported as the child's TMPDIR,
+  # so a planted link would redirect the child's temp files.
   for _guard_dir in "$DATA_DIR" "$DATA_DIR/releases" "$DATA_DIR/config" "$PROFILES_DIR" "$PLUGIN_ROOT" "$PLUGIN_DIR" \
-    "$RUN_DIR" "$LOG_DIR" "$BACKUP_DIR" "$CONTROL_DIR"; do
+    "$RUN_DIR" "$RUN_DIR/tmp" "$LOG_DIR" "$BACKUP_DIR" "$CONTROL_DIR"; do
     [ ! -L "$_guard_dir" ] || die "data directory must not be a symlink: $_guard_dir"
   done
   mkdir -p "$DATA_DIR" "$DATA_DIR/config" "$PROFILES_DIR" \

@@ -67,6 +67,19 @@ esac
 # refuse before anything is created or written below it.
 [ ! -L "$DATA_DIR" ] || fail "module data dir must not be a symlink"
 [ ! -L "$DATA_DIR/releases" ] || fail "module releases dir must not be a symlink"
+# A symlinked data SUBDIRECTORY would redirect every later write
+# below it (mkdir -p, the plugin forward-copy, the example copy,
+# the chmod/find passes) outside the data tree (F4): refuse
+# before anything is created or written below DATA_DIR, mirroring
+# the controller's prepare_mutable_dirs refusal list. Only links
+# AT OR BELOW DATA_DIR are refused here; a symlinked ancestor of
+# DATA_DIR is followed (see docs §10).
+for _guard_dir in "$DATA_DIR/config" "$DATA_DIR/config/profiles" \
+  "$DATA_DIR/plugins" "$DATA_DIR/plugins/linux/arm64" \
+  "$DATA_DIR/run" "$DATA_DIR/logs" "$DATA_DIR/backups" \
+  "$DATA_DIR/.controller"; do
+  [ ! -L "$_guard_dir" ] || fail "module data subdirectory must not be a symlink: $_guard_dir"
+done
 case "$(getprop ro.product.cpu.abi 2>/dev/null)" in
   arm64-v8a|aarch64) ;;
   *) fail "this release requires ARM64 Android" ;;

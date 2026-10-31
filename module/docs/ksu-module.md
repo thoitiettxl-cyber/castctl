@@ -341,11 +341,19 @@ fight the checksum-pinned install).
   state — treat it as secret material, never share it.
 - Every controller write path refuses symlinks (PID files,
   enabled marker, controller/service logs, backup archive):
-  a planted symlink never redirects a write outside the data
-  tree. The refusal covers parent dirs too: a symlinked data
-  dir, `releases/` dir, or logs dir is refused, and `log()`
-  never appends through a symlinked logs dir (a guard refusal
-  is reported to stderr only, never written through the link).
+  a planted symlink at or below `DATA_DIR` never redirects a
+  write outside the data tree. The refusal covers the data
+  subdirectories too: a symlinked data dir, `releases/` dir,
+  `config/` dir, `plugins/` dir, `run/` dir (including
+  `run/tmp`, the child's `TMPDIR`), logs dir, or backups dir
+  is refused, and `log()` never appends through a symlinked
+  logs dir (a guard refusal is reported to stderr only, never
+  written through the link). A symlinked ANCESTOR (parent) of
+  `DATA_DIR` is followed, not refused: the guards test links
+  at or below `DATA_DIR` only, and planting such a parent link
+  needs write access to the parent directory (on device,
+  `/data/local`). Canonicalising `DATA_DIR` is future
+  hardening, not claimed here.
   The `current` symlink must resolve to exactly one directory
   component under `releases/` (a trailing `/`, `/.`, or
   multi-component remainder is refused — `[ -L ]` resolves
@@ -551,8 +559,9 @@ when disk space matters.
 | D18 | Legacy controller quarantine + v1.1 lock + plugin-path migration | Quarantine kept; legacy lock and config-path migration dropped; plugin forward-copy kept; stale quarantine removed (not fatal) when the live controller exists; example copied only when neither config nor example exists | First module release: no legacy castctl controller/layout exists. The forward-copy is kept as the same defensive shape as the template |
 | D19 | `allow-root-core` marker opts into root | No marker; root is the only mode (see D9) | Single documented mode; no silent identity switch |
 | D20 | `set_perm_recursive` covers the whole module dir | `webroot/` excluded from permission setting | KernelSU sets webroot permissions/SELinux itself and warns against setting them by hand |
-| D21 | Controller writes follow symlinks (PID files, markers, logs) | Every controller write path refuses symlinks, including a symlinked data dir, `releases/` dir, or logs dir (`log()` never appends through one); `current` target must be exactly one component under `releases/`; sensitive data dirs refused when symlinked | Hardening beyond the template: a planted symlink must never redirect a write outside the data tree (loop-1 F1; loop-2 F2/B1) |
+| D21 | Controller writes follow symlinks (PID files, markers, logs) | Every controller write path refuses symlinks at or below `DATA_DIR`, including a symlinked data dir, `releases/` dir, or logs dir (`log()` never appends through one); `current` target must be exactly one component under `releases/`; sensitive data dirs refused when symlinked. A symlinked ancestor of `DATA_DIR` is followed (see §10) | Hardening beyond the template: a planted symlink at or below `DATA_DIR` must never redirect a write outside the data tree (loop-1 F1; loop-2 F2/B1) |
 | D22 | Checksum check covers listed files only | Install and start refuse a release containing files not listed in `checksums.sha256` (manifest allowlist) | An unlisted executable planted in the release tree must not survive install (loop-1 red-team N4) |
+| D23 | Install follows symlinked data subdirectories (`plugins/`, `config/`, …) | `customize.sh` refuses a symlinked data subdirectory (`config/`, `config/profiles/`, `plugins/`, `plugins/linux/arm64/`, `run/`, `logs/`, `backups/`, `.controller`) before anything is created or written below `DATA_DIR`, mirroring the controller's refusal list; the controller additionally refuses a symlinked `run/tmp` (the child's `TMPDIR`) | Hardening beyond the template: a planted link at or below `DATA_DIR` must never redirect an install or controller write outside the data tree (loop-3 red-team F4; micro-loop) |
 
 ## 10. Bootloop safety — proof table
 
@@ -563,7 +572,7 @@ is a recovery procedure for Boss, never a design argument.
 
 | Script path | Cannot block | Cannot loop | Failure exits 0 | Proof required |
 |---|---|---|---|---|
-| `customize.sh` (install-time, not boot) | No unbounded wait: downloads happen only in `build.sh`, never here; `flock -n` fails fast; `abort` is the only failure exit | No `while` loop without a bound (the only loop scans quarantine candidates, a finite glob) | Install failure exits via `abort` (installer cleanup), never bare `exit 1` | Static: read the file. Live: install completes or aborts cleanly; phone reboots normally. `[NEEDS-MEASUREMENT]`. Lock parent is created before the lock check; a stale quarantine is removed (not fatal) when the live controller exists; the example is copied only when neither config nor example exists; the payload allowlist is enforced; an existing `current` target is validated under `releases/` before the plugin forward-copy; a symlinked data dir or `releases/` dir aborts the install before anything is written below it; the install-time data-dir record refuses a symlink |
+| `customize.sh` (install-time, not boot) | No unbounded wait: downloads happen only in `build.sh`, never here; `flock -n` fails fast; `abort` is the only failure exit | No `while` loop without a bound (the only loop scans quarantine candidates, a finite glob) | Install failure exits via `abort` (installer cleanup), never bare `exit 1` | Static: read the file. Live: install completes or aborts cleanly; phone reboots normally. `[NEEDS-MEASUREMENT]`. Lock parent is created before the lock check; a stale quarantine is removed (not fatal) when the live controller exists; the example is copied only when neither config nor example exists; the payload allowlist is enforced; an existing `current` target is validated under `releases/` before the plugin forward-copy; a symlinked data dir, `releases/` dir, or data subdirectory (`config/`, `plugins/`, `run/`, `logs/`, `backups/`, `.controller`) aborts the install before anything is written below it (links at or below `DATA_DIR` only; a symlinked ancestor of `DATA_DIR` is followed — see below); the install-time data-dir record refuses a symlink |
 | `post-fs-data.sh` | — (must not ship) | — | — | Proof is absence: file must not exist in the ZIP or module dir. Any future addition reopens this section |
 | `post-mount.sh` | — (must not ship) | — | — | Proof is absence, as above |
 | `boot-completed.sh` | — (must not ship) | — | — | Proof is absence, as above |
@@ -571,7 +580,7 @@ is a recovery procedure for Boss, never a design argument.
 | `service.sh` (background body) | Runs parallel with boot (backgrounded). `boot_completed` wait is bounded polling (120 s cap). `start --boot` uses `flock -w 30`. Readiness wait is 10 s. Stop escalation is ≈14 s (2×5 s INT + 3 s TERM + 1 s, at defaults, plus scan time). All four env-overridable bounds are validated and clamped, so the bounds hold with overrides set | Watchdog sleeps (30 s → 300 s backoff) between iterations, in 5 s chunks re-checking `disable` with exit; consecutive-failure counter caps the rate; no respawn without sleep | Every start/stop invocation ends `|| true`; disable/missing-controller exits are `exit 0`; no `set -e`, no bare failing command as the body's last word | Static: read the file; count sleeps, bounds, `|| true`s. Live: boots with config removed, binary removed, and `disable` created mid-boot. `[NEEDS-MEASUREMENT]` |
 | `action.sh` (manager button, not boot) | Returns promptly; no wait loops; controller readiness wait is bounded (10 s) | No loop | Exits 0 even when start/stop fails (`|| true` everywhere) | Static: read the file. Live: tap Action running and stopped. `[NEEDS-MEASUREMENT]` |
 | `uninstall.sh` | Returns promptly; stop is best-effort (`|| true`); no waits; stop resolves the data dir from an explicit env, then the install-time record, then the default | No loop | Exits 0 unconditionally | Static: read the file. Live: uninstall + reboot, no orphan daemon. `[NEEDS-MEASUREMENT]` |
-| `scripts/castctl-ctl` (invoked by the above) | Every wait bounded: flock 30 s, readiness 10 s, version probe 10 s, stop ≈14 s (2×5 s INT + 3 s TERM + 1 s, at defaults, plus scan time), child lifetime 86400 s (all env-overridable values validated and clamped). Stop always re-scans `/proc` after the wrapper exits, so a non-forwarding `timeout` cannot orphan a child; readiness-failure and mid-start symlink kills go through the same scan | No unbounded loop: watchdog backoff lives in `service.sh`; controller loops are all iteration-capped | Controller exit codes never propagate to boot: `service.sh` swallows them with `|| true`; manual invocation reports failures honestly (non-zero) | Static: read the file. Live: as for `service.sh` background body. Every write path refuses symlinks (including symlinked data dir / `releases/` / logs dir); `current` target must be a single component under `releases/` and the manifest allowlist is validated on every runtime check |
+| `scripts/castctl-ctl` (invoked by the above) | Every wait bounded: flock 30 s, readiness 10 s, version probe 10 s, stop ≈14 s (2×5 s INT + 3 s TERM + 1 s, at defaults, plus scan time), child lifetime 86400 s (all env-overridable values validated and clamped). Stop always re-scans `/proc` after the wrapper exits, so a non-forwarding `timeout` cannot orphan a child; readiness-failure and mid-start symlink kills go through the same scan | No unbounded loop: watchdog backoff lives in `service.sh`; controller loops are all iteration-capped | Controller exit codes never propagate to boot: `service.sh` swallows them with `|| true`; manual invocation reports failures honestly (non-zero) | Static: read the file. Live: as for `service.sh` background body. Every write path refuses symlinks at or below `DATA_DIR` (including symlinked data dir / `releases/` / logs dir / `run/tmp`); a symlinked ancestor of `DATA_DIR` is followed (see below); `current` target must be a single component under `releases/` and the manifest allowlist is validated on every runtime check |
 | `initrc/`, `preinit/`, `system/`, `system.prop`, `sepolicy.rule`, `/data/adb/*.d/` scripts | — (must not ship) | — | — | Proof is absence in the ZIP listing. `initrc` content would still run in safe mode, so absence is load-bearing, not cosmetic |
 
 Additional hard-rule properties, verified by grep over the tree:
@@ -582,9 +591,15 @@ Additional hard-rule properties, verified by grep over the tree:
 - No write outside the module folder, `DATA_DIR`, and the
   lifecycle-lock sibling file `${DATA_DIR}.lifecycle.lock`
   (0600, symlink-refused, created only after its parent
-  exists). Every other write path refuses symlinks, so no
-  write can be redirected outside the tree via a planted
-  link. No general scripts installed under `/data/adb/*.d/`.
+  exists). Every other write path refuses symlinks at or
+  below `DATA_DIR`, so no write can be redirected outside
+  the tree via a planted link at or below `DATA_DIR`. A
+  symlinked ANCESTOR (parent) of `DATA_DIR` is followed,
+  not refused: planting one needs write access to the
+  parent directory (on device, `/data/local`), and
+  canonicalising `DATA_DIR` is future hardening, not
+  claimed here. No general scripts installed under
+  `/data/adb/*.d/`.
   (Plus the manager-owned `disable`/`remove` flag files, which
   scripts only read.)
 - `disable` is honoured before the first start and on every
