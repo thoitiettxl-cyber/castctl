@@ -1,7 +1,8 @@
 # castctl KernelSU module
 
 KernelSU module that runs castctl on a rooted Android phone. Base:
-castctl `origin/main` `6d3baac` (v0.6.4); template:
+castctl `origin/main` `8cb361f` (v0.6.4 + PR #19 session keeper,
+rebased from `6d3baac`); template:
 cli-proxy-api at commit `f912a733f84a3157e6570d84c05e5a02439d3ff0`.
 Structure and conventions mirror the template; every deviation is
 listed in §9 with a reason. Nothing in this document is claimed
@@ -52,6 +53,10 @@ DATA_DIR/                              (0711)
       <name>/cookies.txt              (0600; created by castctl)
       <name>/chat.json                (created by castctl)
       <name>/telegram.json, telegram-state.json (via Profile.Dir)
+      <name>/session-state.json       (0600; keeper observed state,
+                                       created by the keeper — see §4)
+      <name>/keeper-<tag>.owner       (keeper single-flight heartbeat,
+                                       created by the keeper — see §4)
   plugins/                            (0700)
     linux/arm64/                      (0700; reserved, see §6)
   run/                                (0700; castctl.pid, enabled, tmp/)
@@ -77,13 +82,22 @@ Layout verification (base tree, `internal/profile/`):
   `EnsureProfileDir` creates `profiles/` and per-profile dirs at
   `0700`. The module creates the empty `config/profiles/` dir at
   install (0700) and creates no profile dirs or cookies files.
-- Keeper state filename: there is NO `internal/keeper/` package on
-  the base HEAD and no keeper state filename is stated anywhere in
-  the tree. `session-state.json` (or any other keeper filename) is
-  therefore PROVISIONAL and is deliberately NOT named as a keeper
-  file anywhere in the module: the directory shape above is what is
-  implemented, and the filename must be re-surveyed after PR #19
-  merges. `[NEEDS-MEASUREMENT]` / re-survey-after-PR-#19.
+- Keeper state filename: VERIFIED on the 8cb361f tree (PR #19
+  merged). `internal/keeper/state.go:40`:
+  `StateFileName = "session-state.json"`, mode 0600, in the
+  profile directory — one file per profile, observed state only
+  (names and expiry dates, never cookie values). With
+  `--config $DATA_DIR/config/config.json`, named profiles keep
+  it at `config/profiles/<name>/session-state.json`; the default
+  profile keeps it directly under `config/` (per `ProfilePaths`).
+  The keeper's single-flight owner file is
+  `keeper-<tag>.owner` in the same profile directory
+  (`internal/keeper/run.go:144-151`), heartbeat 60 s, stale
+  after 120 s; a second `keeper run` for the same entry refuses
+  with exit 2 while the first is alive. The module creates
+  neither file; the keeper creates and owns both. State/owner
+  files are inside `config/`, so `backup` archives them and
+  `purge-data` removes them with the rest of the data dir.
 - `telegram.json` / `telegram-state.json` live under the active
   profile's `Dir` (`internal/commands/profilecmd.go`), i.e. under
   `config/profiles/<name>/` for named profiles.
@@ -115,9 +129,10 @@ Minimal valid example (`config.example.json` in the module):
 
 Config rules that matter here (base tree, strict parser):
 
-- Exactly 8 top-level keys; unknown keys are rejected (exit 2).
-  There is NO `keeper`, `webui`, or `plugins` key on this HEAD —
-  adding one makes every castctl command fail. See §4.
+- Exactly 9 top-level keys; unknown keys are rejected (exit 2).
+  The `keeper` key exists on this HEAD (PR #19 merged); there is
+  still NO `webui` or `plugins` key — adding one makes every
+  castctl command fail. See §4.
 - Cookies live only in a separate cookies file (`cookies_file`
   resolves relative to `CONFIG_DIR`); inline `cookies` keys are
   rejected. Use `auth import` (stdin-only) to populate cookies;
@@ -126,37 +141,89 @@ Config rules that matter here (base tree, strict parser):
   `allowed_user_ids`, `auto_approve`, `auto_allow_once`. The
   config block is the only token source on this HEAD. Never put
   the token anywhere else, never log it.
+- `keeper` block (verified, `internal/profile/keeper.go`): an
+  ARRAY of entries, each with exactly the keys `tag`, `profile`,
+  `browser`, `interval`, `notify` — unknown keys rejected, exit 2.
+  `tag` required (unique; names the `keeper-<tag>.owner` file);
+  `profile` required (must name a key of `profiles`; one entry
+  per profile); `browser` required (loopback-only CDP debug URL,
+  `http`/`ws`, port required, no query/fragment/userinfo);
+  `interval` optional (duration string, default 24 h, max 1 y);
+  `notify` optional (only `"telegram"`, which requires the
+  `telegram` block to exist). Absent block = keeper off, no
+  behaviour change. An empty array (`"keeper": []`) is valid and
+  means no entries. A present block is preserved verbatim on
+  save; the module never writes config.
 
 ## 4. Gating: what starts, and when
 
-The controller starts ONE process: `castctl --config <path>
-telegram run` (foreground, blocking), and only when a `telegram`
-top-level object block is present in `config.json`. Detection uses
-the module's own lexical top-level key probe (`has_top_block` in
-`scripts/castctl-ctl`): a depth-1 key whose value starts with `{`,
-with strings/escapes skipped and nested keys ignored. Limits,
+The controller manages up to TWO foreground processes, each with
+its own PID file and log, started only when the config gates
+them in. All command names, flags, and shapes below were verified
+against the 8cb361f tree (PR #19 merged), not assumed:
+
+- `castctl --config <path> telegram run` — only when a
+  `telegram` top-level OBJECT block is present. Foreground,
+  blocking, SIGINT-only; exit 130 on an intentional stop is
+  normal. (`internal/commands/` telegram command; no listener:
+  it listens on no port.)
+- `castctl --config <path> keeper run` — only when a `keeper`
+  top-level ARRAY block is present AND non-empty. Foreground,
+  one goroutine per entry, immediate tick then the entry
+  interval (±20% jitter, default 24 h); SIGINT ends it (exit
+  130 via the main contract); it returns when every entry
+  stops sticky or the context ends
+  (`internal/commands/keeper.go:22-28`, `internal/keeper/run.go:21-31`).
+  An empty array (`"keeper": []`) prints `keeper: no entries
+  configured` and exits 0 — the controller treats it as
+  "keeper off" and does not start the process. A second
+  `keeper run` for the same entry refuses (exit 2) via the
+  single-flight owner file while the first is alive
+  (`internal/keeper/run.go:119-151`); the controller's own
+  PID-file + cmdline check is the first guard, the owner file
+  the second. If a stale owner heartbeat (≤120 s) refuses a
+  restart right after a kill, the watchdog retries with
+  backoff — self-healing, `[NEEDS-MEASUREMENT]` on device.
+- Web UI: NEVER started. No `webui` config key and no web UI
+  command exist on this HEAD. If any `webui` key is present,
+  the controller starts NOTHING and logs why: the strict
+  parser rejects the whole file, so no command can run against
+  it. Re-survey after item 2 lands; its command name and flags
+  must be taken from the tree, never assumed.
+
+Detection uses the module's own lexical top-level key probe
+(`probe_top_key` in `scripts/castctl-ctl`): depth-1 keys with
+strings/escapes skipped and nested keys ignored, in four modes
+(object value, non-empty array, empty array, any value). Limits,
 stated honestly:
 
-- The probe is presence-only, not validation. Token shape,
-  profile existence, and allowed-user rules are castctl's job;
-  an invalid block makes the child exit 2 quickly and the
-  controller logs that and starts nothing (fail-soft).
+- The probe is presence-and-shape-only, not validation. Entry
+  fields, browser URLs, profile references, token shape, and
+  allowed-user rules are castctl's job; an invalid block makes
+  the child exit 2 quickly and the controller logs that
+  (fail-soft). A malformed `keeper` shape (key present, not an
+  array) or `telegram` shape (key present, not an object) is
+  logged as a warning and that service is not started — but
+  the strict parser rejects the whole file, so the OTHER
+  service's start will fail too; the child exit is the arbiter.
 - The probe is a lexical scan, not a JSON parser. Malformed JSON
   may still report presence; castctl's parser is the final
   arbiter. A key spelled inside a top-level string value with
-  the exact `"key": {` shape could false-positive; the child
-  exit is again the arbiter. `[NEEDS-MEASUREMENT]` for adversarial
-  configs on device (none expected in practice).
-- If a `keeper` or `webui` top-level block is present, the
-  controller starts NOTHING and logs why: this castctl build's
-  strict parser rejects the whole file, so no command can run
-  against it. This is a sequencing consequence of items 1/2 not
-  being merged, not a bug to work around in shell. Re-survey
-  after PR #19 (keeper) and item 2 (web UI) land; their command
-  names and flags must be taken from the tree, never assumed.
-- No `telegram` block → start is a successful no-op: nothing is
-  started, no enabled marker is written, the watchdog does not
-  restart anything.
+  the exact `"key": {` / `"key": [` shape could false-positive;
+  the child exit is again the arbiter. `[NEEDS-MEASUREMENT]`
+  for adversarial configs on device (none expected in practice).
+- The keeper needs an already-running Chrome holding the
+  profile's login, reachable at the entry's loopback CDP URL
+  (`internal/profile/keeper.go`, `browser` rule). The module
+  NEVER launches a browser: with no browser attached, ticks
+  fail/export-fail and entries stop sticky, and `keeper run`
+  returns; the watchdog re-runs it at backoff cadence. Whether
+  a phone Chrome can even expose a CDP port is
+  `[NEEDS-MEASUREMENT]` (live gate 12) — the keeper is
+  unproven on device until then.
+- Neither block present → start is a successful no-op: nothing
+  is started, no enabled marker is written, the watchdog stays
+  idle.
 
 `castctl update` is never invoked by the module (user-invoked
 only; it would replace the pinned binary from the network and
@@ -169,30 +236,47 @@ fight the checksum-pinned install).
   (bounded getprop polling, 120 s cap), checks the `disable`
   file, starts via the controller, then watchdogs with
   exponential backoff (30 s base, doubling, 300 s cap; counter
-  resets on success). The watchdog only restarts while the
-  `run/enabled` marker exists (i.e. the service was started and
-  not explicitly stopped).
-- The child runs under the bundled glibc loader:
+  resets on success). Each watchdog iteration runs
+  `castctl-ctl start --watchdog` (idempotent per service:
+  running services are left alone, missing wanted services
+  are restarted — so one dead service is repaired while the
+  other lives). The watchdog only runs while the `run/enabled`
+  marker exists. The marker means "a start was requested and
+  not explicitly stopped": it is written even when a start
+  fails (so a later config fix recovers without a reboot) and
+  removed only by an explicit stop.
+- Each child runs under the bundled glibc loader:
   `ld-linux-aarch64.so.1 --library-path <lib> castctl --config
-  <path> telegram run`, wrapped in busybox `timeout` with a
-  86400 s lifetime bound (`CASTCTL_CHILD_LIFETIME`), because
-  castctl provides no lifetime bound of its own. When the bound
-  fires, the watchdog restarts the service. `[NEEDS-MEASUREMENT]`
-  whether busybox `timeout` forwards SIGINT to the child on this
-  device.
-- Stop prefers SIGINT (castctl handles SIGINT only; exit 130 from
+  <path> telegram run` (log `logs/castctl.log`, PID file
+  `run/castctl.pid`) or `keeper run` (log `logs/keeper.log`,
+  PID file `run/keeper.pid`), each wrapped in busybox
+  `timeout` with a 86400 s lifetime bound
+  (`CASTCTL_CHILD_LIFETIME`), because castctl provides no
+  lifetime bound of its own. When the bound fires, the
+  watchdog restarts the service. `[NEEDS-MEASUREMENT]`
+  whether busybox `timeout` forwards SIGINT to the child on
+  this device. The keeper's own cadence (24 h default) is
+  independent of the lifetime bound; a keeper whose entries
+  all stop sticky exits on its own and is re-run at watchdog
+  backoff cadence (bounded, logged).
+- Stop prefers SIGINT (castctl handles SIGINT; exit 130 from
   an intentional stop is normal), escalates SIGTERM then SIGKILL
-  with bounded waits (5 s / 3 s). Stop removes the enabled
-  marker so the watchdog does not restart. The PID file is
-  validated against the live process cmdline (never trusted
-  bare); if it is gone, stop scans `/proc` for a matching
-  cmdline as a fallback and never signals an unmatched PID.
+  with bounded waits (5 s / 3 s), and stops BOTH services.
+  Stop removes the enabled marker so the watchdog does not
+  restart. Each PID file is validated against the live process
+  cmdline including the service subcommand (`telegram run` /
+  `keeper run`, never a bare PID, never the other service's
+  process); if a PID file is gone, stop scans `/proc` for a
+  matching cmdline as a fallback and never signals an
+  unmatched PID.
 - `action.sh` toggles start/stop, prints status, and shows the
-  last 10 controller log lines. `castctl-ctl log [N]` tails the
-  core log explicitly. `castctl-ctl doctor` re-runs the runtime
-  check plus gating checks. `castctl-ctl backup` archives
-  `config/` + `plugins/` (0600); the archive contains cookies —
-  treat it as secret material, never share it.
+  last 10 controller log lines. `castctl-ctl log [telegram|keeper]
+  [N]` tails a service log explicitly (default telegram).
+  `castctl-ctl doctor` re-runs the runtime check plus gating
+  checks (it never runs `keeper check`: that does network and
+  browser work). `castctl-ctl backup` archives `config/` +
+  `plugins/` (0600); the archive contains cookies and keeper
+  state — treat it as secret material, never share it.
 - The daemon runs as root in module context. The template drops
   to UID:GID 9999:3003; this module deliberately does NOT copy
   that: castctl creates and owns profile/cookie files under
@@ -230,8 +314,11 @@ invariant is recorded so the future loader work inherits it.
 
 ## 7. Logs and rotation
 
-- Controller log: `logs/controller.log`. Core log: `logs/castctl.log`
-  (the daemon's stdout/stderr). Both rotate at 1 MiB
+- Controller log: `logs/controller.log`. Telegram log:
+  `logs/castctl.log` (the daemon's stdout/stderr). Keeper log:
+  `logs/keeper.log` (one summary line per tick, names/counts/
+  outcomes only — the keeper never prints values). All three
+  rotate at 1 MiB
   (`CASTCTL_LOG_MAX_BYTES`), keeping 3 rotated files
   (`CASTCTL_LOG_KEEP`). Rotation renames only; the running daemon
   keeps its open file descriptor and a fresh file is used on the
@@ -275,14 +362,23 @@ a fake `castctl` (argv logging, SIGINT → exit 130), and a fake
 release tree. Cases: install success + checksum-fail install;
 disable present → no start; missing binary → log + exit 0; bad
 config → no start + exit 0; telegram absent → no start, present
-→ start; keeper/webui absent → no start (and present-but-
-unparseable → no start with a logged reason); action toggle;
-uninstall keeps data; purge guard refuses a wrong path and runs
-only with `--yes`; plugin file survives update + uninstall;
-log rotation cap; boot_completed timeout; flock timeout;
-watchdog backoff; fake-secret grep proof. The arm64 binary
-cannot execute on the x86_64 build host: `castctl --version` on
-device is `[NEEDS-MEASUREMENT]` (live gate 22).
+→ start; keeper absent → no start, present-but-empty (`[]`) →
+no start, present non-empty → start with the verified
+`keeper run` invocation (fake castctl records argv, including
+the `--config` flag and no selector flags); keeper present with
+a non-array shape → no keeper start + warning; webui present →
+no start; `has_top_block`/`has_top_nonempty_array`/
+`has_top_empty_array` fixtures (nested keys, string traps,
+malformed JSON, multi-line arrays, empty vs non-empty);
+stop-kills-only-matching-service (keeper stop must not signal
+the telegram process when the keeper PID file is missing);
+action toggle; uninstall keeps data; purge guard refuses a
+wrong path and runs only with `--yes`; plugin file survives
+update + uninstall; log rotation cap; boot_completed timeout;
+flock timeout; watchdog backoff; fake-secret grep proof. The
+arm64 binary cannot execute on the x86_64 build host:
+`castctl --version` on device is `[NEEDS-MEASUREMENT]`
+(live gate 22).
 
 Test-only environment overrides (documented here so reviewers
 can tell them from device behaviour; never set on the device):
@@ -310,8 +406,8 @@ can tell them from device behaviour; never set on the device):
 | D8 | No log rotation, no redaction | 1 MiB rotation, 3 kept; module never logs secrets | Boss decision (rotation + no secrets). Template log() prints verbatim |
 | D9 | Daemon dropped to 9999:3003 | Runs as root; no chown to 9999:3003 | No verified UID/GID for castctl on this device; root-owned 0700/0600 dirs are the secret boundary. `[NEEDS-MEASUREMENT]` |
 | D10 | `update-core` follows `releases/latest` with rollback | No updater at all (no `update-core` command) | Pinned-only installs (Boss); `castctl update` must never run unattended and would fight the pinned install |
-| D11 | Listener-based readiness + foreign-listener fail-closed | Process + cmdline readiness; no port logic | `telegram run` listens on no port; there is no listener to check or protect |
-| D12 | `config_is_safe` enforces host/port/plugins.dir | Gating probe only (presence of `telegram`/`keeper`/`webui` blocks) | Castctl has no host/port config keys; its strict parser is the validator. No castctl key is invented |
+| D11 | Listener-based readiness + foreign-listener fail-closed | Process + cmdline readiness per service (subcommand pattern distinguishes telegram/keeper); no port logic | `telegram run` and `keeper run` listen on no port; there is no listener to check or protect |
+| D12 | `config_is_safe` enforces host/port/plugins.dir | Gating probe only (presence + shape of `telegram`/`keeper`/`webui` blocks; keeper = non-empty array) | Castctl has no host/port config keys; its strict parser is the validator. No castctl key is invented; keeper shape verified on 8cb361f |
 | D13 | `customize.sh` hardcodes the data dir; only the controller honours `CPA_DATA_DIR` | `CASTCTL_DATA_DIR` honoured in both scripts | Boss-directed override; discrepancy recorded in §2.1 |
 | D14 | CA bundle read from the Alpine build host file | CA bundle downloaded as a pinned `.apk`, cert.pem extracted + verified | Host independence: `build.sh` must run on any Linux host, not only Alpine |
 | D15 | CA pin `20260611-r0` / sha `b8d83784…` | CA pin `20261020-r0` / apk + cert.pem hashes verified by download | Template pin is not in the Alpine index (404); the current bundle was verified instead. See `sources.lock` |
@@ -403,7 +499,11 @@ an observed result on the device:
 11. Webroot → `127.0.0.1` fetch works (once item 2 supplies the
     URL/token mechanism), without logging/displaying secrets.
 12. Gating: keeper block absent → keeper not started; present
-    (after PR #19) → keeper runs per its schedule.
+    non-empty → `keeper run` runs per its schedule, state file
+    `session-state.json` appears in the profile dir, and a
+    phone Chrome with a CDP port is reachable (or the tick
+    failures are understood and logged); empty array → keeper
+    not started.
 13. Gating: telegram block absent → no Telegram traffic;
     present → bot runs, no secrets in any log.
 14. Coexistence with `meta-hybrid_mount` in Magic Mount mode;
