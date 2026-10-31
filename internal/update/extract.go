@@ -86,19 +86,33 @@ func extractCastctl(r io.Reader, w io.Writer) ([]byte, error) {
 	if !found {
 		return nil, newError(1, "update: the downloaded archive has no castctl member")
 	}
-	// After the tar end-blocks the gzip stream must be exhausted:
-	// a second gzip member or trailing garbage is never scanned as
-	// tar members, so it must refuse rather than be silently
-	// ignored (B-02/E-18). The hash already binds these bytes;
-	// this check closes the "unscanned bytes reach the tar reader
-	// in a future read" gap. The read is capped: any bytes at all
-	// refuse, so a huge trailing member cannot fill memory.
-	rest, err := io.ReadAll(io.LimitReader(gz, 1<<20))
-	if err != nil {
-		return nil, newError(1, "update: trailing data after the tar archive")
-	}
-	if len(rest) > 0 {
-		return nil, newError(1, "update: trailing data after the tar archive")
+	// After the tar end-blocks only all-zero padding may follow:
+	// GNU tar pads archives with zeros to a 10240-byte record
+	// boundary, so every real release archive carries zero padding
+	// after the end-blocks, and refusing it refuses every real
+	// release. Any NON-zero trailing byte still refuses: a second
+	// gzip member or trailing garbage is never scanned as tar
+	// members, so it must refuse rather than be silently ignored
+	// (B-02/E-18). The hash already binds these bytes; this check
+	// closes the "unscanned bytes reach the tar reader in a future
+	// read" gap. The scan reads to EOF in fixed-size chunks and
+	// holds no growing buffer, so a huge trailing member cannot
+	// fill memory, and no non-zero byte past any cap can slip
+	// through unread.
+	var chunk [32 << 10]byte
+	for {
+		n, rerr := gz.Read(chunk[:])
+		for _, b := range chunk[:n] {
+			if b != 0 {
+				return nil, newError(1, "update: trailing data after the tar archive")
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return nil, newError(1, "update: trailing data after the tar archive")
+		}
 	}
 	return hash.Sum(nil), nil
 }
