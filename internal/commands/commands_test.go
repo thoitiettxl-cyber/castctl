@@ -135,27 +135,27 @@ func mustJSON(t *testing.T, data []byte, v any) {
 }
 
 func TestDeferredCommands(t *testing.T) {
+	// No deferred commands remain: update is wired (self-update
+	// PR). The deferred table is empty; bare update refuses as an
+	// unstamped dev build (exit 2, no deferred note), and
+	// update --help prints real help with no PR5 note.
 	_, configFile := testHome(t, "")
 	env := &Env{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile})}
-	cases := map[string]string{
-		"update": "PR5",
+	if len(deferredTable) != 0 {
+		t.Errorf("deferredTable = %v, want empty (update is wired)", deferredTable)
 	}
-	for cmd, pr := range cases {
-		out, errb := &bytes.Buffer{}, &bytes.Buffer{}
-		env.Stdout, env.Stderr = out, errb
-		code := Run(context.Background(), []string{cmd}, env)
-		if code != 2 || !strings.Contains(errb.String(), pr) {
-			t.Errorf("%s: code=%d err=%q, want 2 naming %s", cmd, code, errb.String(), pr)
-		}
-	}
-	// --help still exits 0 for deferred commands.
 	out, errb := &bytes.Buffer{}, &bytes.Buffer{}
+	env.Stdout, env.Stderr = out, errb
+	if code := Run(context.Background(), []string{"update"}, env); code != 2 || strings.Contains(errb.String(), "is not implemented") || strings.Contains(errb.String(), "PR5") {
+		t.Errorf("bare update: code=%d err=%q, want 2 without a deferred note", code, errb.String())
+	}
+	out, errb = &bytes.Buffer{}, &bytes.Buffer{}
 	env.Stdout, env.Stderr = out, errb
 	if code := Run(context.Background(), []string{"update", "--help"}, env); code != 0 {
 		t.Errorf("update --help: code=%d, want 0", code)
 	}
-	if !strings.Contains(out.String(), "PR5") {
-		t.Errorf("update --help: %q, want PR5 note", out.String())
+	if !strings.Contains(out.String(), "usage: castctl update") || strings.Contains(out.String(), "PR5") {
+		t.Errorf("update --help: %q, want real help without a PR5 note", out.String())
 	}
 	// telegram is wired (run/status): --help is real help with
 	// no deferred note, and bare telegram asks for a subcommand.

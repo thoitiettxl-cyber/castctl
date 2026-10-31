@@ -6,13 +6,16 @@
 // port (muse-cli 0.6.1 contract): a hand-rolled parser mirroring
 // argparse help/errors/exit 2, a single runtime-wiring path, and
 // dispatch to the read, filesystem, profile and deliver-backed
-// commands. Deferred commands (PR4/PR5) and the carried chat REPL are
+// commands. Deferred commands and the carried chat REPL are
 // rejected here with explicit messages; they are never faked.
 //
 // Fail-closed invariant: no http.DefaultClient, no net.Dial, no
 // system-resolver lookup anywhere in this package. Every HTTP call
 // goes through the outbound dialer's HTTPClient, every dial through
-// the Dialer. See BuildRuntime in runtime.go.
+// the Dialer. See BuildRuntime in runtime.go. The one exception is
+// `castctl update` (internal/update): release downloads are public
+// URLs, not profile traffic, so update uses its own stdlib client
+// and never loads a profile or config. See docs/architecture.md.
 package commands
 
 import (
@@ -35,6 +38,7 @@ import (
 	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
 	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
+	"github.com/thoitiettxl-cyber/castctl/internal/update"
 )
 
 // Version is the Go port version, mirroring the Python 0.6.1 contract
@@ -121,6 +125,12 @@ type Env struct {
 	// inject fake runtimes (fake DNS/outbound/gateway) through it;
 	// production always uses the real wiring.
 	BuildRuntime func(ctx context.Context, loc *profile.ConfigLocation, prof *profile.Profile, env *Env) (*Runtime, error)
+	// UpdateDeps, when non-nil, replaces the production update
+	// dependencies (HTTP client, executable path, build info, API
+	// bases) for `castctl update`. Tests inject httptest servers
+	// and temp binaries; production always passes nil, so update
+	// resolves the real running binary and the public GitHub API.
+	UpdateDeps *update.Deps
 }
 
 func (e *Env) stdout() io.Writer {
@@ -739,9 +749,12 @@ type globalOpts struct {
 // commandTable is the full PR3 surface. Deferred commands are in
 // deferredTable; unknown names are rejected, never guessed.
 var commandTable = map[string]*commandSpec{}
-var deferredTable = map[string]string{
-	"update": "PR5",
-}
+
+// deferredTable names commands that are parsed but not yet wired.
+// It is currently empty: every parsed command is wired, including
+// update (self-update). Keep the table: a future deferred command
+// must land here with its PR name, never as a fake handler.
+var deferredTable = map[string]string{}
 
 func registerCommand(spec *commandSpec) {
 	commandTable[spec.name] = spec
@@ -757,7 +770,7 @@ var commandOrder = []string{
 	"goals", "goal", "ideas", "idea", "idea-exec", "unread", "seen",
 	"session-start", "session-rename", "session-pin", "session-unpin",
 	"session-archive", "session-unarchive", "session-delete", "stop", "wake",
-	"raw", "fs", "auth", "profile", "config", "telegram",
+	"raw", "fs", "auth", "profile", "config", "telegram", "update",
 }
 
 // Run is the command-line entry point. args excludes argv[0]. It
