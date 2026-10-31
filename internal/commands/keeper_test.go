@@ -64,14 +64,28 @@ func keeperTestConfig() string {
 // and /api/auth/check. sessionStatus/authStatus control the
 // responses; sessionCookies are Set-Cookie values on the
 // session step (RECONSTRUCTED K.7 shapes, fake values).
+// sessionScript, when non-empty, drives /api/session per
+// call instead: the nth call uses
+// sessionScript[min(n-1, len(sessionScript)-1)], so one test
+// can drive multi-round tick paths (e.g. AuthError, then a
+// re-check GatewayError) through the real cheap chain. A
+// step's empty body means the default healthy body.
 type keeperFakeGateway struct {
 	mu             sync.Mutex
 	sessionStatus  int
 	authStatus     int
 	sessionCookies []string
+	sessionScript  []keeperFakeSessionStep
 	sessionSeen    int
 	authSeen       int
 	cookieHeaders  []string
+}
+
+// keeperFakeSessionStep is one scripted /api/session response.
+type keeperFakeSessionStep struct {
+	status  int
+	body    string
+	cookies []string
 }
 
 func (f *keeperFakeGateway) handler(w http.ResponseWriter, r *http.Request) {
@@ -81,12 +95,20 @@ func (f *keeperFakeGateway) handler(w http.ResponseWriter, r *http.Request) {
 	case "/api/session":
 		f.sessionSeen++
 		f.cookieHeaders = append(f.cookieHeaders, r.Header.Get("Cookie"))
-		for _, c := range f.sessionCookies {
+		status, body, cookies := f.sessionStatus, "", f.sessionCookies
+		if len(f.sessionScript) > 0 {
+			step := f.sessionScript[min(f.sessionSeen-1, len(f.sessionScript)-1)]
+			status, body, cookies = step.status, step.body, step.cookies
+		}
+		for _, c := range cookies {
 			w.Header().Add("Set-Cookie", c)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(f.sessionStatus)
-		if f.sessionStatus == 200 {
+		w.WriteHeader(status)
+		switch {
+		case body != "":
+			fmt.Fprint(w, body)
+		case status == 200:
 			fmt.Fprint(w, `{"vm_id":"vm-test"}`)
 		}
 	case "/api/auth/check":
@@ -387,16 +409,19 @@ func TestKeeperNotifierSendsFixedNotice(t *testing.T) {
 	}
 }
 
-func TestKeeperCheckTransientSurfacesTypedError(t *testing.T) {
+func TestKeeperCheckSession500StopsWithExit3(t *testing.T) {
 	t.Parallel()
-	// 500 on the session step is a transient GatewayError:
-	// check returns it through the classify contract (exit 3
-	// for GatewayError), not the stopped path.
+	// 500 on the session step is an AuthError, not a
+	// GatewayError: fetchSessionInfoRaw maps any non-200 to
+	// AuthError, so check stops the entry and exits 3 through
+	// the stopped branch. (Micro-loop N-B rename: the old
+	// name/comment misdescribed this as transient/GatewayError
+	// coverage; the assertion is unchanged.)
 	fake := &keeperFakeGateway{sessionStatus: 500, authStatus: 200}
 	env, out, errb, _ := keeperTestEnv(t, keeperTestConfig(), fake)
 	code := Run(context.Background(), []string{"keeper", "check"}, env)
 	if code != 3 {
-		t.Fatalf("check transient 500: code=%d, want 3 (GatewayError); stderr=%q out=%q", code, errb.String(), out.String())
+		t.Fatalf("check session 500: code=%d, want 3 (stopped AuthError); stderr=%q out=%q", code, errb.String(), out.String())
 	}
 }
 
@@ -527,10 +552,11 @@ func TestKeeperRunFactoryFailureSurfaced(t *testing.T) {
 // old code too for stopped outcomes — it guards the entry
 // loop against regressions from the N20 rework (continue
 // past a transient-error return). The transient-error return
-// itself has no fast commands-level regression test: reaching
-// it requires minute-scale backoff sleeps under RealClock,
-// so that path is verified by inspection of the loop change,
-// recorded in the loop-2 report.
+// itself is covered by the fast regression test
+// TestKeeperCheckContinuesPastRecheckTransient (the re-check
+// transient path takes no backoff sleep); the first-check
+// backoff-ladder path still has no fast test (RealClock is
+// hardcoded in the commands factory) and remains a follow-up.
 func TestKeeperCheckPrintsAllEntriesWhenFirstStops(t *testing.T) {
 	t.Parallel()
 	config := `{"default_profile":"default","profiles":{"default":{},"muse01":{}},` +
