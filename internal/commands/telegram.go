@@ -136,6 +136,16 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 	}
 	defer func() { _ = rt.Close() }()
 
+	// [STEP-5 FOLLOW-UP] env.Logger is nil on the production
+	// path (main passes an empty Env; the log factory handle
+	// is owned inside buildRuntime and Runtime exposes no
+	// logger accessor), so the bot logger falls back to
+	// slog.Default() and bypasses the logging factory's
+	// level/output. Routing it through the factory needs a
+	// Runtime logger accessor plus lifecycle wiring and is
+	// step-5 work. Not a leak: every bot log line is
+	// scrubbed/summarised before it reaches this logger
+	// (see internal/telegram scrubErr/summarize).
 	logger := env.Logger
 	if logger == nil {
 		logger = slog.Default()

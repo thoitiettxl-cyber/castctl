@@ -16,9 +16,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -100,20 +100,15 @@ func (f *cmdFakeTelegram) saw(method string) bool {
 	return false
 }
 
-// redirectTransport rewrites every request to the fake server,
-// keeping path and query (the token-bearing path stays intact
-// for the fake's own method extraction, but is never stored).
-type redirectTransport struct {
-	base   http.RoundTripper
-	target *url.URL
-}
-
-func (t *redirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	clone := req.Clone(req.Context())
-	clone.URL = &url.URL{Scheme: t.target.Scheme, Host: t.target.Host, Path: req.URL.Path, RawQuery: req.URL.RawQuery}
-	clone.Host = t.target.Host
-	return t.base.RoundTrip(clone)
-}
+// The fake client below is a plain *http.Transport whose dial
+// functions dial the fake server's listener whatever address
+// the Bot API URL names (BoundClient rejects delegating
+// RoundTrippers, so the fake cannot rewrite URLs at the
+// RoundTripper layer). DialTLSContext returns the plain
+// connection: the fake is plain HTTP, and the transport must
+// not TLS-handshake to it. The token-bearing path is kept
+// intact for the fake's own method extraction, but is never
+// stored.
 
 func TestTelegramStatus(t *testing.T) {
 	t.Parallel()
@@ -188,8 +183,18 @@ func TestTelegramRunPollsFakeServerThroughRuntimeClient(t *testing.T) {
 	fake := &cmdFakeTelegram{}
 	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
 	defer srv.Close()
-	target, _ := url.Parse(srv.URL)
-	fakeClient := &http.Client{Transport: &redirectTransport{base: &http.Transport{Proxy: nil}, target: target}}
+	fakeAddr := srv.Listener.Addr().String()
+	dialFake := func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, fakeAddr)
+	}
+	fakeClient := &http.Client{Transport: &http.Transport{
+		Proxy:       nil,
+		DialContext: dialFake,
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialFake(ctx, network, addr)
+		},
+	}}
 
 	env, out, errb := telegramTestEnv(t, telegramTestConfig())
 	var gotProfile string
