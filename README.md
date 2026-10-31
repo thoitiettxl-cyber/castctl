@@ -158,11 +158,9 @@ Wired in the Telegram PR, on the same framework: `telegram run`,
 against a fake server; messages get a placeholder notice and
 decisions fail closed until step 5 wires Muse turns).
 
-Deferred (the parser names the PR; `--help` still works):
-
-| Commands | Lands in |
-| --- | --- |
-| `update` | PR5 |
+Wired in the self-update PR, on the same framework: `update`
+(self-update from the latest stable GitHub release; see
+`castctl update --help` and docs/architecture.md).
 
 `auth import` is implemented (added after PR3): `castctl auth import
 [--profile NAME] < cookies.txt` reads cookies from stdin only and
@@ -441,7 +439,6 @@ path, the `HistoryReader` production adapter, profile resolution +
 
 Still deferred:
 
-- The `update` command.
 - Telegram step-5 wiring: Muse turn execution from Telegram
   messages, the full slash-command and callback surface beyond
   decide/approve-all, media, `/login`, persistent offset/dedupe

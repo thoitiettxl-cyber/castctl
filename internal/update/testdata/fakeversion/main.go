@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Licensed under the GNU General Public License v3.0 or later.
+
 // Command fakeversion is a test-only stand-in for a downloaded castctl
 // binary. It prints "castctl <version>" for --version, where <version>
 // comes from CASTCTL_FAKE_VERSION (default 0.6.4). CASTCTL_FAKE_MODE

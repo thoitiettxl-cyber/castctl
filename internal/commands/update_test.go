@@ -103,9 +103,9 @@ func (s *cliReleaseServer) serve(w http.ResponseWriter, r *http.Request) {
 	s.count(r.URL.Path)
 	if strings.HasPrefix(r.URL.Path, "/repos/") {
 		type asset struct {
-			Name string `json:"name"`
-			URL  string `json:"browser_download_url"`
-			Size int64  `json:"size"`
+			Name  string `json:"name"`
+			URL   string `json:"browser_download_url"`
+			Size  int64  `json:"size"`
 			State string `json:"state"`
 		}
 		var assets []asset

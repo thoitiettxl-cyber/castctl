@@ -78,6 +78,94 @@ The web UI must work from a phone browser against castctl on another host
 must not depend on the developer VM's environment (hermetic: temp dirs,
 fakes, no live hosts).
 
+## Self-update (`castctl update`)
+
+`castctl update` replaces the running binary from the latest
+stable GitHub release. It is user-invoked only: no daemon, no
+scheduled check, no config file read or written, no credentials.
+Release downloads are public URLs, not profile traffic, so the
+command loads no profile and uses its own stdlib HTTP client
+(`internal/update`), never a profile outbound and never
+`http.DefaultClient`. The command refuses on any platform other
+than Linux: no release assets exist for Windows, macOS, or
+Android, and that behaviour is [UNVERIFIED] by construction
+(no assets, never executed there).
+
+Behaviour, in order:
+
+1. The running build must be stamped (release `-X` flags set
+   `Commit` and `BuildDate`). An unstamped dev build refuses in
+   every mode, including `--dry-run` and explicit `--version`,
+   with "cannot determine running version"; the stale `Version`
+   default is never guessed from.
+2. The latest stable release is selected from the unauthenticated
+   GitHub API (`releases/latest`, castctl User-Agent). Drafts and
+   prereleases abort; an invalid `tag_name` aborts. On an API 403
+   (rate limit) there is one fallback: follow the public
+   `github.com/.../releases/latest` redirect to learn the tag,
+   then construct asset URLs only from the proven release matrix
+   pattern and verify checksums as usual. Semver comparison is a
+   hand-written stdlib parser (no `x/mod/semver` dependency).
+   Equal version is an exit-0 no-op with zero writes; a
+   downgrade refuses unless `--allow-downgrade` is given; a
+   pre-release target refuses unless `--allow-prerelease` is
+   given. `--version TAG` names a specific release instead of
+   the latest, under the same verification.
+3. Asset selection is exact-equality against the release matrix
+   for the selected tag: `castctl_<VERSION>_linux_<arch>.tar.gz`
+   or `..._no-plugin.tar.gz`, matching `runtime.GOOS`,
+   `runtime.GOARCH`, and the build flavour. The flavour is read
+   from the build info `CGO_ENABLED` setting (`1` = glibc,
+   `0` = no-plugin), verified by probe against the release build
+   flags; an unknown flavour refuses rather than guessing. No
+   match is fail-closed, nothing written.
+4. Verification happens BEFORE any replace: `checksums.txt` and
+   the asset are downloaded to temp files in the target's
+   directory (0600), the asset sha256 is verified against the
+   checksums entry for the exact asset filename (missing,
+   duplicate, or conflicting entries refuse), and only the
+   regular file named exactly `castctl` is extracted (symlink,
+   hardlink, absolute, traversal, and PAX-override members
+   refuse; trailing archive data refuses). The extracted binary
+   is validated with ELF/arch sanity (`debug/elf`) and an exec
+   check: it is run with argv `--version`, clean minimal env,
+   closed stdin, 10s timeout, capped stdout, and the output must
+   contain the target version. On any failure the old binary is
+   untouched and partials are deleted.
+5. Replace is one rename in the target's directory, after
+   preserving the target's permission bits, fsyncing the temp
+   file, and fsyncing the directory after the rename. An
+   advisory flock on the target directory is held across
+   download and replace; a held lock fails fast with "another
+   update in progress". `--dry-run` reports exactly what would
+   be downloaded, verified, and replaced with zero writes (the
+   exec check is skipped in dry-run and the report says so).
+
+No-signature limitation (stated, not hidden): releases carry no
+signatures. The checksums prove only that the downloaded bytes
+match what the release published, over HTTPS GitHub; they prove
+nothing about who published the release. The exec check runs
+bytes already checksum-verified against the release.
+
+Exit codes: 0 = success, already-latest no-op, or dry-run
+report; 2 = usage and policy refusals decided without fetching
+bytes; 1 = operational failures. Error output carries class and
+length only, never response bodies or secrets.
+
+Live-proof checklist (for the operator's own box, before
+relying on `update`): run `castctl update --dry-run` against the
+live release and confirm the report names the expected tag,
+asset, and target path with zero writes; then run a real
+`castctl update` on a COPY of the binary (not the live one) and
+confirm the replaced copy prints the target version and the
+original bytes are gone only in the copy; confirm a second
+concurrent `update` fails fast with the lock message; confirm
+an unstamped local build refuses. Redacted evidence only (tag,
+asset name, exit codes, version strings) — never binary bytes,
+tokens, or response bodies. Falsifiers: a dry-run that writes,
+a replace without a checksum match, or an update that proceeds
+from an unstamped build each invalidate the command.
+
 ## Profile isolation (hard invariant)
 
 Profiles must never interfere with each other through the sing-box
