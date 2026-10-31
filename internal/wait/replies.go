@@ -14,13 +14,33 @@ import (
 // Reply is one final assistant reply after the boundary: the
 // oldest-first, deduped, cleaned text of a completed
 // message.assistant event, kept only when it has text, unanswered
-// widgets, or media.
+// widgets, or media. AgentID/RootAgentID carry the payload's
+// agent identity when the event states it as strings; they are
+// recorded, never invented, and are used only by the settle
+// proof (Settle) — the final reply list is unattributed, as
+// before. Attribution is recorded only from payload-level
+// string fields: a non-string, agent-only, root-only,
+// empty-string, event-level, or metadata-nested id leaves the
+// reply unattributed (fail-open, within the stated residual).
+// Whether real history events carry these fields is
+// [UNVERIFIED] pending live capture (U-A2).
 type Reply struct {
-	Seq       int64
-	MessageID string
-	Text      string
-	Widgets   []Widget
-	Media     bool
+	Seq         int64
+	MessageID   string
+	Text        string
+	Widgets     []Widget
+	Media       bool
+	AgentID     string
+	RootAgentID string
+}
+
+// SubagentShaped reports whether the reply is identifiably a
+// subagent's: both identity fields are present as strings and
+// differ. An event with absent or non-string fields is not
+// identifiably subagent-shaped; it counts as unattributed,
+// never as proof of subagent origin.
+func (r Reply) SubagentShaped() bool {
+	return r.AgentID != "" && r.RootAgentID != "" && r.AgentID != r.RootAgentID
 }
 
 // Widget is one unanswered hatch widget carried by a reply.
@@ -90,8 +110,10 @@ func IsSelfReferential(ev Event) (selfRef bool, level string, matched string) {
 // text (possibly "") in the reply. Non-string text fields are
 // skipped (see firstText). It also returns the seqs of
 // text-bearing assistant events dropped for lacking payload
-// status "completed": the caller logs those (a status-less
-// partial must be visible when a wait reports no reply).
+// status "completed". HistoryReplies discards those seqs: the
+// core has no log sink, so a status-less partial that costs a
+// wait its reply is a pre-existing visibility gap, stated here
+// rather than claimed logged.
 //
 // Filter order matters and is preserved: seq window, literal
 // event_name (no event/type fallback), exact case-sensitive
@@ -138,6 +160,12 @@ func RepliesAfter(events []any, afterSeq int64, upto *int64) (replies []Reply, d
 			continue
 		}
 		r := Reply{Seq: seq, MessageID: mid, Text: text, Media: hasMedia}
+		if agentID, ok := p["agent_id"].(string); ok {
+			r.AgentID = agentID
+		}
+		if rootID, ok := p["root_agent_id"].(string); ok {
+			r.RootAgentID = rootID
+		}
 		if len(widgets) > 0 {
 			r.Widgets = widgets
 		}
@@ -289,9 +317,28 @@ func EventHasMedia(ev Event) bool {
 // UserAck finds the first (lowest-seq) message.user event above
 // baseline whose text contains, or is contained in, the sent
 // text, and returns its seq. A nil text matches the first user
-// event above the baseline. No status or self-reference check is
-// applied here.
+// event above the baseline. An empty or whitespace-only text
+// matches nothing (loop-2 F10/RT13c): an empty needle must not
+// ack any event. No status or self-reference check is applied
+// here.
+//
+// The substring match is trusted ONLY above a baseline read
+// successfully before sending: the caller must have read the
+// baseline from history successfully before sending
+// (deliverSend fails the send when that read fails, never
+// falling back to 0). Above a two-window baseline the first
+// match is the just-sent message's own seq; above a stale 0
+// it could be an older turn's. The baseline itself is two
+// windows, not one (see deliverSend): no ordering contract
+// for chat.history windows is stated anywhere in this tree,
+// so a single limit=1 read cannot establish the newest seq,
+// and an interleaved identical message from another client
+// can still win the first-match race (carried residual,
+// RT13d).
 func UserAck(events []any, baseline int64, text *string) (int64, bool) {
+	if text != nil && strings.TrimSpace(*text) == "" {
+		return 0, false
+	}
 	sorted := append([]any(nil), events...)
 	sort.SliceStable(sorted, func(i, j int) bool {
 		return seqOf(eventMap(sorted[i])) < seqOf(eventMap(sorted[j]))

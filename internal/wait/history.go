@@ -8,6 +8,8 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sort"
+	"strconv"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 )
@@ -69,9 +71,19 @@ func DefaultHistoryLimits() []int {
 // A boundary of 0 with known=true means genuinely empty history
 // (or history with no user event and no more pages), not a
 // failure. When every window read fails, the boundary is unknown
-// (0, false): settle and accept are disabled until a live root
-// running clears the flag. Each window read is retried once on a
-// transport error (see readWindow).
+// (0, false): settle and accept stay disabled for the whole
+// wait — no live event clears the flag (loop-2 F1). Each window
+// read is retried once on a transport error (see readWindow).
+//
+// Retention (loop-2 F7): proven data is never discarded by a
+// later window. An empty window with has_more and larger windows
+// still to try is skipped, not terminal — the larger window is
+// read. An empty window that ends the scan returns the max seq
+// seen in any earlier window instead of 0 (which may be a
+// non-user event's seq), so a shifting empty window cannot erase
+// earlier evidence. A non-empty window that
+// closes (has_more false) with no user event still returns 0:
+// a complete snapshot with no user event means no boundary.
 //
 // Errors: an AuthError (or a cancelled context) propagates; any
 // other read error fails that window and the next window is
@@ -79,7 +91,7 @@ func DefaultHistoryLimits() []int {
 func DeriveBoundary(ctx context.Context, r HistoryReader, limits []int) (afterSeq int64, known bool, derived bool, err error) {
 	seenMax := int64(0)
 	anySuccess := false
-	for _, limit := range limits {
+	for i, limit := range limits {
 		events, hasMore, readErr := readWindow(ctx, r, limit)
 		if readErr != nil {
 			if isFatalHistoryErr(ctx, readErr) {
@@ -89,6 +101,12 @@ func DeriveBoundary(ctx context.Context, r HistoryReader, limits []int) (afterSe
 		}
 		anySuccess = true
 		if len(events) == 0 {
+			if hasMore && i < len(limits)-1 {
+				continue
+			}
+			if seenMax > 0 {
+				return seenMax, true, true, nil
+			}
 			return 0, true, true, nil
 		}
 		maxUser, hasUser, maxSeq := scanWindow(events)
@@ -108,27 +126,39 @@ func DeriveBoundary(ctx context.Context, r HistoryReader, limits []int) (afterSe
 	}
 	// Exhaustion: all windows succeeded, has_more still true at
 	// the largest limit, no user event. Fall back to the max seq
-	// seen in any successful window.
+	// seen in any successful window — which may be a non-user
+	// event's seq. All-empty windows with has_more still true
+	// at the largest limit yield known-0 (seenMax 0, known
+	// true), not unknown: every window succeeded and closed
+	// empty.
 	return seenMax, true, true, nil
 }
 
 // LatestUserSeq returns the newest message.user seq in history,
 // or (0, false) when no user event was found in any window. The
 // windows stop early when has_more is false, when a window is
-// empty, or when the window already reaches the boundary (its
-// oldest seq is at or below afterSeq). The seen max accumulates
-// across windows before the early-return checks. A read error
-// fails the attempt and propagates to the caller, which treats
-// it as a failed read (never as proof).
+// empty and no larger window remains, or when the window already
+// reaches the boundary (its oldest seq is at or below afterSeq).
+// That last stop trusts newest-first window ordering (U-A8):
+// the same unproven ordering the send baseline relies on, and
+// it conditions the F4 turn check in finish as well as the
+// baseline. An empty window with has_more and larger windows
+// still to try is skipped, not terminal (loop-2 F7). The seen
+// max accumulates across windows before the early-return checks.
+// A read error fails the attempt and propagates to the caller,
+// which treats it as a failed read (never as proof).
 func LatestUserSeq(ctx context.Context, r HistoryReader, limits []int, afterSeq int64) (int64, bool, error) {
 	seen := int64(0)
 	found := false
-	for _, limit := range limits {
+	for i, limit := range limits {
 		events, hasMore, err := r.ReadHistory(ctx, limit)
 		if err != nil {
 			return 0, false, err
 		}
 		if len(events) == 0 {
+			if hasMore && i < len(limits)-1 {
+				continue
+			}
 			break
 		}
 		maxUser, hasUser, _ := scanWindow(events)
@@ -147,45 +177,83 @@ func LatestUserSeq(ctx context.Context, r HistoryReader, limits []int, afterSeq 
 }
 
 // HistoryReplies returns this turn's final replies from history:
-// the last window's events filtered by RepliesAfter, with upto
-// set to that window's newest seq (no upper bound when the
-// window is empty). Windows grow while has_more is true and the
-// window does not yet reach the boundary. A read error
-// propagates: the caller retries at its own level (the final
-// read gets two attempts).
+// replies accumulated across every window read, deduped by
+// (seq, message_id), oldest-first (loop-2 F7). Dedupe is
+// first-wins: the same (seq, message_id) with different text
+// across windows keeps the first window's text. HistoryReplies
+// has no internal cap on the number of windows read: the bound
+// lives in the caller's limits (three by default). A reply seen in
+// any window is real and is reported even when a later window's
+// slice does not contain it: windows are newest-N reads taken
+// at different instants, and a later slice never un-proves an
+// earlier one. Windows grow while has_more is true and the
+// window does not yet reach the boundary; an empty window with
+// has_more and larger windows still to try is skipped, not
+// terminal, and an empty window never discards replies
+// accumulated from earlier windows. A read error propagates:
+// the caller retries at its own level (the final read gets two
+// attempts).
+//
+// Exhausted reports window exhaustion: has_more was still true
+// at the largest limit, so events older than the window —
+// including replies — were never seen. The caller must make the
+// loss visible (the finish note) instead of silently reporting
+// an empty reply list: exhaustion is a bound, not a proof of
+// "no replies". Exhausted is false when the windows close
+// (empty window with has_more false, has_more false, or the
+// window reaches the boundary) or when no window was read.
 //
 // Edge: a window with events but no mappable seq (all events
-// non-maps, or maps without a numeric seq) yields upto=0, which
-// caps RepliesAfter at seq 0 and drops every reply. Python
+// non-maps, or maps without a numeric seq) yields upto=0.
+// RepliesAfter caps with a strict seq > upto, so a seq-0 event
+// passes the cap; it is the seq <= afterSeq filter that drops
+// seq-0 events, since afterSeq is never negative. Python
 // yields upto=None (no cap) only for the all-non-map window;
 // for maps without a seq Python also yields 0. The all-non-map
 // case is unobservable for well-formed server history, and the
 // Go behavior is kept as-is and documented here rather than
 // special-cased.
-func HistoryReplies(ctx context.Context, r HistoryReader, limits []int, afterSeq int64) ([]Reply, error) {
-	var lastEvents []any
-	var lastUpto *int64
-	for _, limit := range limits {
+func HistoryReplies(ctx context.Context, r HistoryReader, limits []int, afterSeq int64) ([]Reply, bool, error) {
+	var merged []Reply
+	seen := map[[2]string]bool{}
+	exhausted := false
+	for i, limit := range limits {
 		events, hasMore, err := r.ReadHistory(ctx, limit)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		lastEvents = events
 		if len(events) == 0 {
-			lastUpto = nil
+			if hasMore && i < len(limits)-1 {
+				continue
+			}
+			if hasMore {
+				exhausted = true
+			}
 			break
 		}
 		maxSeq := newestSeq(events)
-		lastUpto = &maxSeq
+		lastUpto := maxSeq
+		replies, _ := RepliesAfter(events, afterSeq, &lastUpto)
+		for _, rp := range replies {
+			key := [2]string{strconv.FormatInt(rp.Seq, 10), rp.MessageID}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			merged = append(merged, rp)
+		}
 		if !hasMore {
 			break
 		}
 		if oldestSeq(events) <= afterSeq {
 			break
 		}
+		if i == len(limits)-1 {
+			exhausted = true
+		}
 	}
-	replies, _ := RepliesAfter(lastEvents, afterSeq, lastUpto)
-	return replies, nil
+	sort.SliceStable(merged, func(i, j int) bool { return merged[i].Seq < merged[j].Seq })
+	return merged, exhausted, nil
 }
 
 // readWindow reads one window with one retry on a transport

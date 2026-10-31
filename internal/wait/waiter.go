@@ -205,7 +205,6 @@ type Waiter struct {
 	ignoredTermHasSeq bool
 	rootID            *string
 	boundaryUnknown   bool
-	runningSeq        *int64
 	afterSeq          *int64
 	boundaryDerived   bool
 	fatalErr          error
@@ -351,15 +350,6 @@ func (w *Waiter) RootID() (string, bool) {
 // BoundaryUnknown reports whether the history boundary is unreadable.
 func (w *Waiter) BoundaryUnknown() bool { return w.boundaryUnknown }
 
-// RunningSeq returns the seq of the first root-confirmed running,
-// if the record carried a numeric one.
-func (w *Waiter) RunningSeq() (int64, bool) {
-	if w.runningSeq == nil {
-		return 0, false
-	}
-	return *w.runningSeq, true
-}
-
 // AfterSeq returns the wait's boundary seq, if set.
 func (w *Waiter) AfterSeq() (int64, bool) {
 	if w.afterSeq == nil {
@@ -378,15 +368,6 @@ func (w *Waiter) SetBoundary(afterSeq int64, unknown, derived bool) {
 	w.afterSeq = &afterSeq
 	w.boundaryUnknown = unknown
 	w.boundaryDerived = derived
-}
-
-// SetAfterSeq moves the boundary seq (the ratchet: a live root
-// running ratchets after_seq up when the boundary was never
-// read). It never moves the boundary backwards.
-func (w *Waiter) SetAfterSeq(seq int64) {
-	if w.afterSeq == nil || seq > *w.afterSeq {
-		w.afterSeq = &seq
-	}
 }
 
 // expired reports whether a described approval is past its
@@ -462,11 +443,11 @@ func (w *Waiter) Feed(ev Event) *Outcome {
 				w.ignoredReason = ""
 				w.ignoredTermSeq = 0
 				w.ignoredTermHasSeq = false
-				w.boundaryUnknown = false
-				if w.runningSeq == nil && hasSeq(ev) {
-					seq := seqOf(ev)
-					w.runningSeq = &seq
-				}
+				// A live running teaches nothing about the
+				// history boundary: stream seqs and history
+				// seqs are different namespaces (loop-2
+				// F1), so it neither clears the
+				// unknown-boundary flag nor moves afterSeq.
 			}
 		}
 		w.status = &s
@@ -700,6 +681,23 @@ func (w *Waiter) FeedRecord(record []byte) *Outcome {
 // on any failure the terminal is kept. On success the ignored
 // terminal is cleared and the result maps SUSPECT_FAILED to
 // failed, anything else stored to done.
+//
+// A terminal held for "subagents" settles on a reply proof too
+// (redesign decision D2, deliberate deviation from muse-cli
+// 0.6.1, which refuses the subagents reason outright): the two
+// signals together — a stored root terminal plus a completed
+// reply in history after the boundary — release a wait the live
+// stream left held on a quiet stream. The proof is not
+// existence-only (loop-2 F2): a reply identifiably shaped as a
+// subagent's (agent_id present, root_agent_id present, and
+// different) never counts as proof on its own; at least one
+// reply that is not identifiably subagent-shaped is required.
+// Residual, carried: an unattributed reply (fields absent or
+// non-string, which is the common case until live capture
+// settles U-A2/U-A6) can still release the hold — attribution
+// is fail-open on absence, matching the absent-count rule.
+// FAILED terminals never settle here: they take the
+// replayed-failed path only.
 func (w *Waiter) Settle(replies []Reply) *Outcome {
 	s, ok := w.IgnoredTerminal()
 	if w.result != nil || !ok {
@@ -708,10 +706,17 @@ func (w *Waiter) Settle(replies []Reply) *Outcome {
 	if w.boundaryUnknown {
 		return nil
 	}
-	if w.ignoredReason == "subagents" || failed[s] {
+	if failed[s] {
 		return nil
 	}
-	if len(replies) == 0 {
+	proof := false
+	for _, rp := range replies {
+		if !rp.SubagentShaped() {
+			proof = true
+			break
+		}
+	}
+	if !proof {
 		return nil
 	}
 	w.clearIgnored()
@@ -725,20 +730,26 @@ func (w *Waiter) Settle(replies []Reply) *Outcome {
 
 // AcceptReplayedFailed accepts a replayed FAILED terminal that
 // provably ends the awaited turn: a standalone wait started after
-// a cancel. The proof is the boundary: the boundary was derived,
-// is known, the terminal carries no suspect reason, and no user
-// message newer than the boundary exists. SUSPECT_FAILED never
-// takes this path, and the replayed record's seq is never used:
-// stream seqs and history seqs are different namespaces.
+// a cancel. The proof is the boundary: the boundary is known,
+// the terminal carries no suspect reason other than "subagents"
+// (loop-2 F6: a subagents-held FAILED terminal takes this path
+// too — the user-seq proof does not depend on the count —
+// while "missing_root" still refuses, since the terminal was
+// never root-confirmed), and no user message newer than the
+// boundary exists. Explicit and derived boundaries accept
+// alike: provenance changes nothing about the evidence.
+// SUSPECT_FAILED never takes this path, and the replayed
+// record's seq is never used: stream seqs and history seqs are
+// different namespaces.
 func (w *Waiter) AcceptReplayedFailed(latestUserSeq *int64) *Outcome {
 	s, ok := w.IgnoredTerminal()
 	if w.result != nil || !ok || !failed[s] {
 		return nil
 	}
-	if w.boundaryUnknown || w.ignoredReason != "" {
+	if w.boundaryUnknown || w.afterSeq == nil {
 		return nil
 	}
-	if !w.boundaryDerived || w.afterSeq == nil {
+	if w.ignoredReason != "" && w.ignoredReason != "subagents" {
 		return nil
 	}
 	if latestUserSeq == nil || *latestUserSeq != *w.afterSeq {

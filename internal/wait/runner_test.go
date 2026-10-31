@@ -440,10 +440,14 @@ func TestRunnerSafetyNetCheckSettles(t *testing.T) {
 	})
 }
 
-func TestRunnerRatchet(t *testing.T) {
+func TestRunnerStreamSeqNeverRatchetsBoundary(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		// Boundary unknown (history always fails), then a live
-		// root running ratchets after_seq to the running seq.
+		// root running carries stream seq 300. The stream seq
+		// must NEVER become the history boundary (loop-2 F1):
+		// the turn decides Done on the proven terminal, but
+		// the reply in the final read is suppressed with the
+		// boundary-unknown note and AfterSeq stays 0.
 		sub := &fakeSubscriber{loopScript: [][]byte{
 			recordJSON(taskEv("running", "R", "R", 300, nil)),
 			recordJSON(taskEv("completed", "R", "R", 400, nil)),
@@ -462,8 +466,15 @@ func TestRunnerRatchet(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
-		if res.Kind != KindDone || res.AfterSeq != 300 || res.FinalText != "ratcheted" {
-			t.Errorf("res = %+v", res)
+		if res.Kind != KindDone || res.AfterSeq != 0 || res.FinalText != "" {
+			t.Errorf("res = %+v, want KindDone with AfterSeq 0 and no final text", res)
+		}
+		if len(res.Replies) != 0 {
+			t.Errorf("replies = %+v, want none (boundary unknown suppresses replies)", res.Replies)
+		}
+		wantNote := "turn-end boundary unknown: history could not be read, so no replies are reported; run `castctl wait` again"
+		if res.Note != wantNote {
+			t.Errorf("note = %q, want %q", res.Note, wantNote)
 		}
 	})
 }
@@ -620,7 +631,7 @@ func TestRunnerSettlePendingPrefersCtxErr(t *testing.T) {
 	}
 }
 
-func TestRunnerExplicitBoundaryNeverAcceptsReplayedFailed(t *testing.T) {
+func TestRunnerExplicitBoundaryAcceptsReplayedFailed(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		sub := &fakeSubscriber{loopScript: [][]byte{
 			recordJSON(taskEv("interrupted", "R", "R", 180, nil)),
@@ -635,8 +646,8 @@ func TestRunnerExplicitBoundaryNeverAcceptsReplayedFailed(t *testing.T) {
 			Dial:        sub.dial,
 			History:     hist,
 		})
-		if res.Kind != KindTimeout || res.ExitCode != 124 {
-			t.Errorf("explicit boundary must keep waiting: res = %+v", res)
+		if res.Kind != KindFailed || res.ExitCode != 2 {
+			t.Errorf("explicit boundary + replayed failed: res = %+v, want KindFailed/2 (parity with derived boundaries, loop-2 F6)", res)
 		}
 	})
 }
@@ -966,6 +977,9 @@ func TestNewRunnerClampsNegativeDurations(t *testing.T) {
 		LagPoll:          -1,
 		RecheckAfter:     -1,
 		CheckEvery:       -1,
+		// SettlePollInterval is never disable-able: a negative
+		// value clamps to the default like the other budgets.
+		SettlePollInterval: -1,
 	})
 	if err != nil {
 		t.Fatalf("NewRunner: %v", err)
@@ -994,6 +1008,9 @@ func TestNewRunnerClampsNegativeDurations(t *testing.T) {
 	// RecheckAfter/CheckEvery keep negative = disable.
 	if r.cfg.RecheckAfter != -1 || r.cfg.CheckEvery != -1 {
 		t.Errorf("RecheckAfter/CheckEvery = %v/%v, want -1/-1 (disable)", r.cfg.RecheckAfter, r.cfg.CheckEvery)
+	}
+	if r.cfg.SettlePollInterval != DefaultSettlePollInterval {
+		t.Errorf("SettlePollInterval = %v, want %v (negative clamps, never disables)", r.cfg.SettlePollInterval, DefaultSettlePollInterval)
 	}
 	// HistoryLimits defaults are a fresh copy per Runner.
 	if len(r.cfg.HistoryLimits) != len(DefaultHistoryLimits()) {
@@ -1307,8 +1324,8 @@ func TestRunnerFinishFinalGuardReturnsCtxErr(t *testing.T) {
 			if fired != 1 {
 				t.Errorf("hook fired %d times, want exactly 1", fired)
 			}
-			if calls != 1 {
-				t.Errorf("history reads = %d, want exactly 1 (final read; no lag read)", calls)
+			if calls != 2 {
+				t.Errorf("history reads = %d, want exactly 2 (final read + newest-user re-check; no lag read)", calls)
 			}
 			if tc.cancel {
 				if !errors.Is(err, context.Canceled) {

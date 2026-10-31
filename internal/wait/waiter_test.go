@@ -290,8 +290,13 @@ func TestFeedTraceI(t *testing.T) {
 	if out := w.FeedRecord([]byte(`{"event":"task.status","seq":120,"payload":{"status":"running","root_agent_id":"R","agent_id":"R"}}`)); out != nil {
 		t.Fatalf("running record = %v", out)
 	}
-	if seq, ok := w.RunningSeq(); !ok || seq != 120 {
-		t.Errorf("running_seq=%d ok=%v, want 120", seq, ok)
+	// A running record teaches SeenRunning only: its stream seq
+	// is never stored as boundary evidence (loop-2 F1).
+	if !w.SeenRunning() {
+		t.Error("running record must set SeenRunning")
+	}
+	if _, ok := w.AfterSeq(); ok {
+		t.Error("running record must not install a boundary seq")
 	}
 }
 
@@ -418,7 +423,13 @@ func TestAcceptReplayedFailedTable(t *testing.T) {
 		{"newer user rejects", nil, seq(201), false},
 		{"older user rejects", nil, seq(199), false},
 		{"nil latest rejects", nil, nil, false},
-		{"explicit boundary rejects", func(w *Waiter) { w.SetBoundary(200, false, false) }, seq(200), false},
+		{"explicit boundary accepts", func(w *Waiter) { w.SetBoundary(200, false, false) }, seq(200), true},
+		{"subagents reason accepts", func(w *Waiter) {
+			w2 := New("")
+			w2.Feed(taskEv("interrupted", "R", "R", 0, 2))
+			w2.SetBoundary(200, false, true)
+			*w = *w2
+		}, seq(200), true},
 		{"nil after_seq rejects", func(w *Waiter) { w.SetBoundary(200, false, true); w.afterSeq = nil }, seq(200), false},
 		{"missing_root rejects", func(w *Waiter) {
 			w2 := New("")

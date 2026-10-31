@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -42,6 +43,24 @@ const (
 	// DefaultCheckEvery is the safety-net cadence: an
 	// unconditional server state check.
 	DefaultCheckEvery = 60 * time.Second
+	// DefaultSettlePollInterval is how often a held ignored
+	// terminal is re-proved against history while the stream is
+	// quiet (redesign decision D3). A settle proof that finds no
+	// reply is retried at this cadence, driven by the monotonic
+	// clock, so a late reply never waits for a count-0 event or
+	// a server replay. The cadence is a hard gate (see
+	// settlePending): at most one proof per interval, whatever
+	// the terminal flapping or read failures do, plus at most
+	// one proof per subscribe iteration from the per-iteration
+	// throttle. Each proof spends at most one history proof
+	// (≤3 window reads), bounded by historyCtx like every
+	// other read.
+	DefaultSettlePollInterval = 5 * time.Second
+	// minSettlePollInterval is the floor for a caller-supplied
+	// SettlePollInterval: a cadence below the per-read floor
+	// (100ms, see historyCtx) cannot pace anything, so positive
+	// values below it clamp up to it (loop-2 safety N3).
+	minSettlePollInterval = 100 * time.Millisecond
 	// DefaultTimeout is the wait --timeout default.
 	DefaultTimeout = 600 * time.Second
 )
@@ -145,13 +164,20 @@ type Config struct {
 	FinalReadFloor   time.Duration
 	LagWindow        time.Duration
 	LagPoll          time.Duration
-	HistoryLimits    []int
-	Approver         approvals.Approver
-	Recheck          func() bool
-	UserStop         func() bool
-	Clock            Clock
-	Dial             func(ctx context.Context) (Subscriber, error)
-	History          HistoryReader
+	// SettlePollInterval is the re-poll cadence for a held
+	// ignored terminal (see DefaultSettlePollInterval). Zero
+	// takes the default; a negative value is clamped to the
+	// default, never a disable: disabling the re-poll would
+	// reintroduce the quiet-stream stall. A positive value
+	// below minSettlePollInterval clamps up to the floor.
+	SettlePollInterval time.Duration
+	HistoryLimits      []int
+	Approver           approvals.Approver
+	Recheck            func() bool
+	UserStop           func() bool
+	Clock              Clock
+	Dial               func(ctx context.Context) (Subscriber, error)
+	History            HistoryReader
 
 	// beforeFinalGuard is a test-only hook, invoked synchronously
 	// on the Runner's goroutine immediately before the final
@@ -223,6 +249,26 @@ type Runner struct {
 	settleTried    bool
 	settleKey      string
 	pendingErr     error
+	// lastSettleProof is the monotonic time the last settle
+	// proof started a history read. The settle re-poll
+	// (shouldStop) and the interval gate (settlePending)
+	// measure from it. It is stamped only when a proof
+	// actually reads: evaluations skipped for an unknown
+	// boundary stamp nothing, so they neither delay the
+	// first real proof nor churn resubscribes. Zero means
+	// no proof has read yet.
+	lastSettleProof time.Time
+	// proofReplies holds the replies of the last successful
+	// settle proof, if any: the evidence the turn was decided
+	// on. finish reconciles the final read against it
+	// (loop-2 F3, loop-3 H1): a proof reply the final read
+	// no longer contains is reported, with a note, never
+	// silently lost — except when the final read itself
+	// fails: reconciliation is then skipped and the proof is
+	// lost to the fail-closed KindTimeout, with only the
+	// generic final-read note (a stated exception, not a
+	// silent loss).
+	proofReplies []Reply
 }
 
 // NewRunner validates cfg and builds the Runner. Dial and
@@ -265,6 +311,9 @@ func NewRunner(cfg Config) (*Runner, error) {
 	if cfg.LagPoll == 0 {
 		cfg.LagPoll = DefaultLagPoll
 	}
+	if cfg.SettlePollInterval == 0 {
+		cfg.SettlePollInterval = DefaultSettlePollInterval
+	}
 	if cfg.StateCheckBudget < 0 {
 		cfg.StateCheckBudget = DefaultStateCheckBudget
 	}
@@ -282,6 +331,12 @@ func NewRunner(cfg Config) (*Runner, error) {
 	}
 	if cfg.LagPoll < 0 {
 		cfg.LagPoll = DefaultLagPoll
+	}
+	if cfg.SettlePollInterval < 0 {
+		cfg.SettlePollInterval = DefaultSettlePollInterval
+	}
+	if cfg.SettlePollInterval > 0 && cfg.SettlePollInterval < minSettlePollInterval {
+		cfg.SettlePollInterval = minSettlePollInterval
 	}
 	// A nil or explicitly empty HistoryLimits means "unset":
 	// an empty slice would otherwise disable every history
@@ -312,9 +367,33 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 		r.boundaryKnown = true
 		r.waiter.SetBoundary(r.afterSeq, false, false)
 	} else {
-		afterSeq, known, derived, err := DeriveBoundary(ctx, r.cfg.History, r.cfg.HistoryLimits)
+		// Boundary derivation runs under the wait deadline:
+		// the deadline is computed above but the caller's ctx
+		// carries no deadline of its own, and an unbounded
+		// derivation could otherwise consume wall time past a
+		// short --timeout before any subscription starts. A
+		// deadline expiry during derivation is not an error
+		// return: the boundary is unknown, the loop below does
+		// not run, and finish yields KindTimeout. An AuthError
+		// still propagates, and a dead caller ctx still
+		// returns the caller's error.
+		dctx, cancel := context.WithDeadline(ctx, r.deadline)
+		afterSeq, known, derived, err := DeriveBoundary(dctx, r.cfg.History, r.cfg.HistoryLimits)
+		cancel()
 		if err != nil {
-			return nil, err
+			if isAuthError(err) {
+				return nil, err
+			}
+			if ctx.Err() != nil {
+				return nil, err
+			}
+			// Any other derivation error with a live caller
+			// context can only be the deadline expiring:
+			// DeriveBoundary returns an error solely for a
+			// fatal error (AuthError, handled above, or a
+			// dead context, handled above). The boundary is
+			// unknown and the wait times out below.
+			afterSeq, known, derived = 0, false, false
 		}
 		r.afterSeq = afterSeq
 		r.boundaryKnown = known
@@ -351,6 +430,24 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 		r.onlineArmed = false
 		if err := r.subscribeOnce(ctx); err != nil {
 			return nil, err
+		}
+		if r.pendingErr != nil {
+			return nil, r.pendingErr
+		}
+		// Post-batch settle (redesign decision D3): a subscribe
+		// iteration that delivered no record — a quiet stream,
+		// or a resubscribe the server did not replay — must
+		// still re-prove a held terminal. trySettle is a no-op
+		// when no terminal is held, and the per-iteration
+		// throttle keeps a record-fed attempt from being
+		// repeated at this point in the same iteration. No
+		// settlePending proof starts past the deadline: the
+		// endgame's final read follows at once (endgame
+		// reads are floor-bounded, not deadline-guarded).
+		if r.waiter.Result() == nil && !r.settleTried && r.clock.Now().Before(r.deadline) {
+			if err := r.trySettle(ctx); err != nil {
+				return nil, err
+			}
 		}
 		if r.pendingErr != nil {
 			return nil, r.pendingErr
@@ -479,7 +576,6 @@ func (r *Runner) onRecord(ctx context.Context) func([]byte) bool {
 				r.pendingErr = ferr
 				return true
 			}
-			r.ratchet()
 			if r.waiter.Result() != nil {
 				return true
 			}
@@ -522,6 +618,20 @@ func (r *Runner) shouldStop(ctx context.Context) func() bool {
 			return true
 		}
 		if r.cfg.CheckEvery > 0 && r.clock.Now().Sub(r.lastCheck) > r.cfg.CheckEvery {
+			return true
+		}
+		// Settle re-poll (redesign decision D3): end the stream
+		// when a held terminal's proof is due, so the loop
+		// re-proves it against history instead of waiting for
+		// a new record, a count-0 event, or a server replay.
+		// No terminal held, no proof ever read, or an unknown
+		// boundary means no re-poll: the cadence measures
+		// from the last proof that read, never from the wait
+		// start, and a proof the gates forbid gains nothing
+		// from ending the subscription early.
+		if _, ok := r.waiter.IgnoredTerminal(); ok && !r.waiter.BoundaryUnknown() &&
+			!r.lastSettleProof.IsZero() && r.cfg.SettlePollInterval > 0 &&
+			r.clock.Now().Sub(r.lastSettleProof) >= r.cfg.SettlePollInterval {
 			return true
 		}
 		return false
@@ -568,19 +678,6 @@ func recordName(ev Event) string {
 	return ""
 }
 
-// ratchet moves the boundary up to the first live root running
-// seq when the boundary was never read. One-way only; a no-op
-// once the boundary was read.
-func (r *Runner) ratchet() {
-	if r.boundaryKnown {
-		return
-	}
-	if seq, ok := r.waiter.RunningSeq(); ok && seq > r.afterSeq {
-		r.afterSeq = seq
-		r.waiter.SetAfterSeq(seq)
-	}
-}
-
 // noteFailure accounts one failed resubscribe. After
 // ReconnectBudget of failures it runs one bounded state check
 // instead of storming until the deadline, then resets the storm
@@ -599,9 +696,11 @@ func (r *Runner) noteFailure(ctx context.Context) error {
 }
 
 // trySettle attempts one history proof for the current ignored
-// terminal, throttled to one read per terminal value per
-// subscribe iteration. A failed read resets the throttle so the
-// next record retries. A FAILED terminal is proved by user-seq
+// terminal, throttled to one attempt per terminal value per
+// subscribe iteration. A failed read does NOT reset the
+// throttle: the interval gate in settlePending bounds retries
+// (loop-2 F8), so a failing reader is re-proved at the cadence,
+// not once per record. A FAILED terminal is proved by user-seq
 // equality only (no replies are read); any other terminal is
 // proved by replies.
 //
@@ -610,7 +709,9 @@ func (r *Runner) noteFailure(ctx context.Context) error {
 // (the F8 re-arm), the settle gates change, so the proof is
 // re-attempted instead of waiting for a new terminal or a
 // server check. The extra read is outcome-equivalent — Settle
-// still applies every gate — it only settles sooner.
+// still applies every gate — it only settles sooner. The key
+// change never bypasses the interval gate: flapping terminals
+// prove at most once per interval.
 func (r *Runner) trySettle(ctx context.Context) error {
 	ignored, ok := r.waiter.IgnoredTerminal()
 	if !ok {
@@ -627,7 +728,6 @@ func (r *Runner) trySettle(ctx context.Context) error {
 	r.settleTried = true
 	if err := r.settlePending(ctx, ignored); err != nil {
 		if errors.Is(err, errHistoryRead) {
-			r.settleTried = false
 			return nil
 		}
 		return err
@@ -641,10 +741,55 @@ func (r *Runner) trySettle(ctx context.Context) error {
 // when a history read fails, an AuthError when auth failed,
 // ctx.Err() when the context died before the proof was applied,
 // or nil when the proof was attempted (whether or not it
-// accepted). A successful proof is never applied after
+// accepted), skipped as gate-forbidden, or not started because
+// the deadline passed. A successful proof is never applied after
 // cancellation: the ctx check sits immediately before each
-// apply site, so a cancelled wait settles nothing.
+// apply site, so a cancelled wait settles nothing. A proof that
+// reads is interval-gated (see the gate below) and its replies,
+// when they settle the turn, are captured as proofReplies for
+// the endgame reconciliation in finish.
 func (r *Runner) settlePending(ctx context.Context, pending string) error {
+	// No settlePending proof starts past the deadline
+	// (loop-2 F9; the finish endgame is excepted — its
+	// reads run after the deadline on floor budgets, by
+	// design): the endgame's final read follows at once,
+	// bounded by its own floor. A proof that starts just
+	// before the deadline may still overshoot it by at most
+	// the historyCtx floor per window read (100ms, ≤3 reads
+	// per proof). A zero deadline means Run never set one
+	// (a direct call in tests): the guard does not fire.
+	if !r.deadline.IsZero() && !r.clock.Now().Before(r.deadline) {
+		return nil
+	}
+	// Interval gate (loop-2 F8): at most one proof per
+	// SettlePollInterval, whatever the terminal flapping or
+	// read failures do. A key change or a failed read never
+	// bypasses it; only a proof that never read yet (zero
+	// stamp) starts immediately. The gate lives here, not in
+	// trySettle, so the checkState path is gated too.
+	if !r.lastSettleProof.IsZero() && r.clock.Now().Sub(r.lastSettleProof) < r.cfg.SettlePollInterval {
+		return nil
+	}
+	// No history read is spent on a proof the gates already
+	// forbid: with an unknown boundary neither Settle nor
+	// AcceptReplayedFailed can accept, so the attempt is
+	// evaluated and skipped. The flag is never cleared by a
+	// live event (loop-2 F1): only a successful derivation
+	// or an explicit boundary makes it known.
+	if r.waiter.BoundaryUnknown() {
+		return nil
+	}
+	// Stamp before reading: this proof counts against the
+	// cadence whether it succeeds or fails. A proof cut short
+	// by context death does not consume cadence: the stamp is
+	// cleared on any return with a dead context, so a later
+	// live attempt is not gated by a dead one.
+	r.lastSettleProof = r.clock.Now()
+	defer func() {
+		if ctx.Err() != nil {
+			r.lastSettleProof = time.Time{}
+		}
+	}()
 	hctx, cancel := r.historyCtx(ctx, 100*time.Millisecond, nil)
 	defer cancel()
 	if failed[pending] {
@@ -669,7 +814,7 @@ func (r *Runner) settlePending(ctx context.Context, pending string) error {
 		}
 		return nil
 	}
-	replies, err := HistoryReplies(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
+	replies, _, err := HistoryReplies(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -683,14 +828,16 @@ func (r *Runner) settlePending(ctx context.Context, pending string) error {
 		return ctx.Err()
 	}
 	if term, ok := r.waiter.IgnoredTerminal(); ok && term == pending && r.waiter.Result() == nil {
-		r.waiter.Settle(replies)
+		if out := r.waiter.Settle(replies); out != nil {
+			r.proofReplies = append([]Reply(nil), replies...)
+		}
 	}
 	return nil
 }
 
 // checkState reads the turn state on its own short subscription
 // (the server replays task.status), feeds the last scoped
-// task.status event, ratchets, and settles it like a live one.
+// task.status event, and settles it like a live one.
 // A failed check is silent except for AuthError, which
 // propagates — and except for a transient history-read failure
 // in the settle, which is swallowed exactly as trySettle
@@ -699,6 +846,16 @@ func (r *Runner) settlePending(ctx context.Context, pending string) error {
 // read and the history read complete before the Waiter is fed
 // or settled.
 func (r *Runner) checkState(ctx context.Context) error {
+	// No state check starts past the deadline (loop-2 F9):
+	// noteFailure reaches here unguarded, so the guard lives
+	// here, not at the call sites. A zero deadline means Run
+	// never set one (a direct call in tests): no guard. The
+	// finish endgame is not a state check and is excepted:
+	// its reads run after the deadline on floor budgets, by
+	// design.
+	if !r.deadline.IsZero() && !r.clock.Now().Before(r.deadline) {
+		return nil
+	}
 	budget := r.cfg.StateCheckBudget
 	cctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
@@ -755,7 +912,6 @@ func (r *Runner) checkState(ctx context.Context) error {
 		if ferr := r.waiter.FatalErr(); ferr != nil {
 			return ferr
 		}
-		r.ratchet()
 	}
 	if running {
 		r.lastProgress = r.clock.Now()
@@ -793,10 +949,15 @@ func (r *Runner) historyCtx(ctx context.Context, floor time.Duration, cap *time.
 }
 
 // finish runs the endgame in order: last-chance FAILED proof,
-// final history read (two attempts), lag window, fail-closed
-// 124, boundary suppression, then the result object. The
-// boundary-unknown rule follows the code, not the comment: kind
-// is unchanged, only replies are suppressed.
+// final history read (two attempts), lag window, endgame
+// reconciliation against the settle proof and the awaited turn,
+// fail-closed 124, boundary suppression, then the result object.
+// The boundary-unknown rule follows the code, not the comment: kind
+// is unchanged, only replies are suppressed. The endgame reads
+// run after the wait deadline by design, on floor budgets
+// (FinalReadFloor, lag window, 100ms re-check floor): the
+// deadline guards in settlePending/checkState cover
+// settle-pending and state-check proofs only, never finish.
 func (r *Runner) finish(ctx context.Context) (*Result, error) {
 	kind := KindTimeout
 	detail := ""
@@ -807,7 +968,12 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 		detail = status
 	}
 	if kind == KindTimeout {
-		if ignored, ok := r.waiter.IgnoredTerminal(); ok && failed[ignored] {
+		// The last-chance proof spends no read while the
+		// boundary is unknown: AcceptReplayedFailed refuses
+		// on an unknown boundary, so the read could never
+		// accept. Skipping it leaves kind, detail, and
+		// replies exactly as the refusal path leaves them.
+		if ignored, ok := r.waiter.IgnoredTerminal(); ok && failed[ignored] && !r.waiter.BoundaryUnknown() {
 			hctx, cancel := r.historyCtx(ctx, r.cfg.FinalReadFloor, nil)
 			latest, found, err := LatestUserSeq(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
 			cancel()
@@ -829,9 +995,10 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 	}
 	var replies []Reply
 	finalReadFailed := false
+	finalExhausted := false
 	for attempt := 0; attempt < 2; attempt++ {
 		hctx, cancel := r.historyCtx(ctx, r.cfg.FinalReadFloor, nil)
-		rs, err := HistoryReplies(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
+		rs, exhausted, err := HistoryReplies(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
 		cancel()
 		if err == nil {
 			// A read that succeeded after cancellation
@@ -841,6 +1008,7 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 				return nil, ctx.Err()
 			}
 			replies = rs
+			finalExhausted = exhausted
 			finalReadFailed = false
 			break
 		}
@@ -874,15 +1042,24 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 			}
 			capDur := remaining
 			hctx, cancel := r.historyCtx(ctx, 100*time.Millisecond, &capDur)
-			rs, err := HistoryReplies(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
+			rs, _, err := HistoryReplies(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
 			cancel()
 			if err != nil {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
-				// A failed poll ends the window without
-				// failing the done result.
-				break
+				if isAuthError(err) {
+					// Auth in the lag window is fatal,
+					// never a silent Done (loop-2 F5):
+					// an expired login must surface as
+					// exit 2, not success.
+					return nil, err
+				}
+				// A transient poll failure no longer ends
+				// the window: keep polling until it
+				// expires, so one bad read cannot kill a
+				// just-landed reply.
+				continue
 			}
 			replies = rs
 			if len(replies) > 0 {
@@ -893,11 +1070,127 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 			return nil, ctx.Err()
 		}
 	}
+	// Endgame reconciliation (loop-2 F3/F4): the final read
+	// must agree with the settle proof and with the awaited
+	// turn. A newer user message in history starts a follow-up
+	// turn, so replies after it are not this turn's; and a
+	// proof reply the final read no longer contains is the
+	// settled evidence, reported with a note rather than
+	// silently dropped, whether the final read is empty or
+	// not (loop-3 H1). When the final read fails,
+	// reconciliation is skipped entirely (see the guard
+	// below): the proof is then lost to the fail-closed
+	// KindTimeout, a stated exception. The newest-user
+	// re-check is best effort on a transport failure (the
+	// reads stand unverified); auth and cancellation
+	// propagate. It costs at most one LatestUserSeq proof
+	// (≤3 window reads, 100ms floor each) and runs only when
+	// there is something to reconcile.
+	reconcileNote := ""
+	if !finalReadFailed && !r.waiter.BoundaryUnknown() && (len(replies) > 0 || len(r.proofReplies) > 0) {
+		newestUser, haveNewestUser := int64(0), false
+		hctx, cancel := r.historyCtx(ctx, 100*time.Millisecond, nil)
+		latest, found, err := LatestUserSeq(hctx, r.cfg.History, r.cfg.HistoryLimits, r.afterSeq)
+		cancel()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if isAuthError(err) {
+				return nil, err
+			}
+		} else if found {
+			newestUser, haveNewestUser = latest, true
+		}
+		withinTurn := func(rs []Reply) []Reply {
+			if !haveNewestUser || newestUser <= r.afterSeq {
+				return rs
+			}
+			kept := rs[:0]
+			// Reuse the backing array: the dropped tail is
+			// never read again (replies is reassigned).
+			for _, rp := range rs {
+				if rp.Seq <= newestUser {
+					kept = append(kept, rp)
+				}
+			}
+			return kept
+		}
+		excludedFollowUp := false
+		if len(replies) > 0 {
+			filtered := withinTurn(replies)
+			excludedFollowUp = len(filtered) < len(replies)
+			replies = filtered
+		}
+		// Restore missing proof replies into the final read
+		// whether it is empty or not (loop-3 H1): a proof
+		// reply the final read no longer contains is the
+		// settled evidence and is reported, never silently
+		// dropped — restoring only into an empty final read
+		// let the F2 gate be bypassed in the outcome
+		// whenever the final read retained any reply.
+		// Restored replies are within-turn filtered and
+		// deduped by (seq, message_id) against the final
+		// read (the final read's text wins on a key
+		// collision), then merged oldest-first. Note
+		// precedence, single-note design: the restore note
+		// wins over the follow-up-exclusion note when both
+		// apply — the exclusion is visible in the reply
+		// list itself (the follow-up replies are absent),
+		// while a restored reply would otherwise be
+		// unexplained. The exclusion note survives only
+		// when nothing was restored.
+		restoredAny := false
+		if len(r.proofReplies) > 0 {
+			var missing []Reply
+			for _, rp := range withinTurn(append([]Reply(nil), r.proofReplies...)) {
+				present := false
+				for _, kept := range replies {
+					if kept.Seq == rp.Seq && kept.MessageID == rp.MessageID {
+						present = true
+						break
+					}
+				}
+				if !present {
+					missing = append(missing, rp)
+				}
+			}
+			if len(missing) > 0 {
+				replies = append(replies, missing...)
+				slices.SortStableFunc(replies, func(a, b Reply) int {
+					if a.Seq < b.Seq {
+						return -1
+					}
+					if a.Seq > b.Seq {
+						return 1
+					}
+					return 0
+				})
+				restoredAny = true
+			}
+		}
+		if restoredAny {
+			reconcileNote = "final read missed the settle proof reply; reporting the proof reply"
+		} else if excludedFollowUp {
+			reconcileNote = "replies after a newer user message were excluded"
+		}
+	}
 	if finalReadFailed && kind == KindDone {
 		kind = KindTimeout
 		detail, _ = r.waiter.Status()
 	}
 	note := ""
+	if finalExhausted && !r.waiter.BoundaryUnknown() {
+		// Window exhaustion is visible, never silent: the
+		// window bound may have hidden older replies. The
+		// boundary-unknown and final-read-failed notes below
+		// win over it when they apply.
+		largest := 0
+		if n := len(r.cfg.HistoryLimits); n > 0 {
+			largest = r.cfg.HistoryLimits[n-1]
+		}
+		note = fmt.Sprintf("history window exhausted at %d events; older replies may be missed; run `castctl wait` again", largest)
+	}
 	if r.waiter.BoundaryUnknown() {
 		replies = nil
 		note = "turn-end boundary unknown: history could not be read, so no replies are reported; run `castctl wait` again"
@@ -906,6 +1199,12 @@ func (r *Runner) finish(ctx context.Context) (*Result, error) {
 		// The final-read note wins over the boundary note, as in
 		// the Python result construction.
 		note = "could not read the final replies; run `castctl wait` again"
+	}
+	if reconcileNote != "" && !finalReadFailed && !r.waiter.BoundaryUnknown() {
+		// Reconciliation is more specific than exhaustion: the
+		// proof/follow-up note wins over the window note, but
+		// never over the boundary/final-read notes above.
+		note = reconcileNote
 	}
 	if kind == KindApproval {
 		// An approval Outcome carries no Detail; the status
