@@ -114,8 +114,9 @@ Rules:
   `grep -c CASTCTL_MOCK_FIXTURE webui/dist/index.html` (must be 0) and an
   external-reference audit (no `src=`/`href=`/`fetch(` URLs to other hosts).
 - The dev server binds loopback only (`--host 127.0.0.1`). Remote access is
-  via the Go server's `--listen` + token + HTTPS/tunnel, never by exposing
-  the Vite dev server.
+  via the Go server (`castctl webui serve`, loopback-only + token) reached
+  through an SSH tunnel, never by exposing the Vite dev server and never
+  by binding a non-loopback address.
 - Mock screenshots: `bun run dev:mocks`, open the printed loopback URL.
   Pages: `#/` (Dashboard), `#/profiles`, `#/profiles/muse01`,
   `#/outbounds`, `#/endpoints`, `#/config`, `#/logs`, `#/system`,
@@ -125,7 +126,13 @@ Rules:
   Add strings in both `src/i18n/locales/en.json` and `vi.json` together.
 - Branding: `castctl` everywhere user-visible. No upstream branding in
   `src/` or `index.html` (NOTICE/history comments excluded).
-- No hard-coded hosts/paths in `webui/src/` (loopback default + `--listen`
-  only; no VM paths, no launcher references).
+- No hard-coded hosts/paths in `webui/src/` (loopback default only; no VM
+  paths, no launcher references).
+- Run the real server with `castctl webui serve` (requires a `webui` block
+  in config.json; token from `CASTCTL_WEBUI_KEY` or the block). The
+  committed dist is built with `VITE_ENABLE_SCREENCAST_LOGIN=true` so the
+  screencast page is observable; the page queries the server for
+  availability first and reports unavailable without the `with_chromedp`
+  build or a keeper entry for the profile.
 - After editing the fork, update `webui/NOTICE` if the kept/replaced
   balance changes, and this file + docs/architecture.md in the same PR.

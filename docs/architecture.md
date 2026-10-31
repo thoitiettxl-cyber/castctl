@@ -71,10 +71,10 @@ Config location: `--config`, then `CASTCTL_CONFIG`, then `XDG_CONFIG_HOME`, via 
 
 Screencast login: the browser dependency is optional and detected at
 runtime (system Chromium or a configured path); with no browser, fall back
-to `auth import` with a clear message. Plan for logging in from another device's web UI (e.g. a phone browser) against castctl's `--listen` server.
-
-The web UI must work from a phone browser against castctl on another host
-(`--listen` + token + HTTPS/tunnel guidance, see docs/security.md). Tests
+to `auth import` with a clear message. The web UI is loopback-only: a
+phone or other device reaches it through an SSH tunnel forwarding the
+loopback port, never through a non-loopback bind (see docs/security.md).
+Tests
 must not depend on the developer VM's environment (hermetic: temp dirs,
 fakes, no live hosts).
 
@@ -317,9 +317,28 @@ integration, diff-before-save pattern. Replaced: all pages, the API client
 The committed `webui/dist/index.html` is the PRODUCTION build (mocks off).
 The mock API layer (`webui/dev-mocks/`, `VITE_USE_MOCKS=true`) is dev-only
 and never bundled. The screencast Login page is behind a build-time flag
-(`VITE_ENABLE_SCREENCAST_LOGIN`, default off). Build/serve/mock
+(`VITE_ENABLE_SCREENCAST_LOGIN`, default off); the committed dist is
+built with the flag on so the page is observable, and the page queries
+the server for availability first. Build/serve/mock
 instructions: docs/development.md. Native-login bundle research (PARKED):
 docs/research/native-login-bundle-analysis.md.
+
+The Go server (`internal/webui`, `castctl webui serve`, go-chi/chi)
+serves the embedded dist and `/api/v1`. It is loopback-only and
+token-authed: the optional top-level `webui` block configures it
+(absent = no server), every API route requires a Bearer token, and
+the listen address is validated loopback-only at parse time and
+again for flag overrides. Config saves validate the full config
+before writing and reuse the guarded atomic 0600 write path;
+cookie set/replace reuses the locked cookies writer and the keeper
+reset. Live logs tail the configured log *file* only, through the
+same SafeString boundary as the log pipeline, and report disabled
+when the log gate is off. The screencast relay embeds
+`internal/keeper` only: frames and input flow through the keeper
+Transport, chromedp stays behind `with_chromedp`, and without the
+tag the page and the API say unavailable. Profile/outbound test
+endpoints are CLI-only in this build (501 `unavailable`); the
+phased test runner was not extracted.
 
 Secrets in config are write-only under the [secrets write-only contract](../webui/SECRETS-CONTRACT.md),
 which the Go server MUST implement server-side (see docs/security.md).
