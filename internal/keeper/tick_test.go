@@ -110,8 +110,8 @@ func tickFixture(t *testing.T, initial []StoredCookie) (baseDir, cookiesPath, pr
 
 func tickDeps(clock Clock, checker Checker, exporter Exporter, notifier Notifier) TickDeps {
 	return TickDeps{
-		Clock: clock,
-		Entry: &profile.KeeperEntry{Tag: "k1", Profile: "muse01", Browser: "http://127.0.0.1:9226/", Interval: time.Hour, IntervalSet: true},
+		Clock:       clock,
+		Entry:       &profile.KeeperEntry{Tag: "k1", Profile: "muse01", Browser: "http://127.0.0.1:9226/", Interval: time.Hour, IntervalSet: true},
 		Profile:     &profile.Profile{Name: "muse01"},
 		Checker:     checker,
 		Exporter:    exporter,

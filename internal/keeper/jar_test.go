@@ -178,9 +178,9 @@ func TestEffectiveSetCookieReconstructed(t *testing.T) {
 	// right-most "/", "/" when at most one slash is present.
 	for raw, want := range map[string]string{
 		"https://muse.ai/api/session": "/api",
-		"https://muse.ai/":             "/",
-		"https://muse.ai/a/b/c":        "/a/b",
-		"https://muse.ai/a":            "/",
+		"https://muse.ai/":            "/",
+		"https://muse.ai/a/b/c":       "/a/b",
+		"https://muse.ai/a":           "/",
 	} {
 		u, _ := url.Parse(raw)
 		c = parseReconstructed(t, "x=FAKE; Max-Age=60")
@@ -241,7 +241,7 @@ func TestCookieHeaderAndDriving(t *testing.T) {
 		}
 	}
 	name, exp := DrivingCookie(cookies)
-	if name != "hatch_sess" || exp == nil || !exp.Equal(now.Add(12 * time.Hour)) {
+	if name != "hatch_sess" || exp == nil || !exp.Equal(now.Add(12*time.Hour)) {
 		t.Fatalf("driving = %q %v; want hatch_sess +12h", name, exp)
 	}
 	// Without hatch_sess, the earliest dated cookie drives
