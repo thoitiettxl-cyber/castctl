@@ -592,14 +592,14 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 			break
 		}
 		if ctx.Err() != nil {
-			// Exception E1 (disclosed): context cancellation
-			// is an abort signal, not a lock/save error, and
-			// the command layer intercepts ctx.Err()
-			// (interrupt/timeout) before this outcome is
-			// surfaced, so it never reaches the user as a
-			// healthy skip. Reclassifying it would break
-			// the tick-timeout exit contract.
-			return fail(OutcomeSkipped, "session", ctx.Err())
+			// A cancelled context is a hard failure, never
+			// a skip: the outcome is surfaced as-is, so a
+			// tick timeout prints outcome "error" with
+			// exit 4 (classifyError maps the carried
+			// DeadlineExceeded), and a parent interrupt
+			// returns before any JSON is printed (exit
+			// 130).
+			return fail(OutcomeError, "session", ctx.Err())
 		}
 		delay, ok := backoff.NextDelay()
 		if !ok {
@@ -607,7 +607,7 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 			return recordTransient(clock, store, base, checkErr, "session")
 		}
 		if !backoff.Sleep(ctx, delay) {
-			return fail(OutcomeSkipped, "session", ctx.Err())
+			return fail(OutcomeError, "session", ctx.Err())
 		}
 	}
 	// skipped counts unparseable Set-Cookie values; it is a

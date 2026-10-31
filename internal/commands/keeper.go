@@ -458,8 +458,11 @@ type keeperCheckResult struct {
 
 // keeperCheckTimeout bounds one entry's tick: past it, the
 // command exits 4 (timeout), never hangs on a dead browser
-// or a wedged chain.
-const keeperCheckTimeout = 90 * time.Second
+// or a wedged chain. A var, not a const, so tests can
+// shorten it; the production default is 90s, and a test
+// that overrides it must restore it and must not run in
+// parallel with other keeper check tests.
+var keeperCheckTimeout = 90 * time.Second
 
 func cmdKeeperCheck(ctx context.Context, env *Env, g *globalOpts, args []string) error {
 	sel, err := parseKeeperSelection(args, "castctl keeper check", keeperCheckHelpText, env)

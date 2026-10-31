@@ -423,10 +423,11 @@ Behaviour:
   reports outcome `error` and `keeper check` exits non-zero
   with the problem named — never `skipped`, which is
   reserved for a login in progress or a held lock (matched
-  by exact sentinel errors only). The one exception is a
-  cancelled context (interrupt or tick timeout), which the
-  command layer maps to its own exit codes before the
-  outcome is surfaced.
+  by exact sentinel errors only). A cancelled context is
+  not an exception: a tick timeout surfaces as outcome
+  `error` carrying the context error (`keeper check` exit
+  4), and a parent interrupt exits 130 with no JSON
+  printed.
   A corrupt or unknown-version state file does NOT brick the
   keeper: ticks substitute a fresh state, re-observe from the
   cookies file, and flag `state_corrupt` in `keeper check`
