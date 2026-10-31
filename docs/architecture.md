@@ -154,8 +154,11 @@ Behaviour, in order:
    and never used as paths; an archive with no exact `castctl`
    member refuses (a PAX-renamed `castctl` refuses by this path,
    since the effective name after PAX overrides is validated);
-   trailing archive data refuses. The extracted binary is
-   validated with ELF/arch sanity (`debug/elf`) and an exec
+   trailing data after the tar end-blocks refuses only when it
+   contains a non-zero byte; all-zero padding (GNU tar record
+   padding to the 10240-byte boundary) is accepted. The
+   extracted binary is validated with ELF/arch sanity
+   (`debug/elf`) and an exec
    check: the checksummed candidate binary is executed,
    unsandboxed, with argv `--version`, clean minimal env,
    closed stdin, 10s timeout, capped stdout, and the output
