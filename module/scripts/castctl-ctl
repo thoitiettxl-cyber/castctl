@@ -1,0 +1,601 @@
+#!/system/bin/sh
+
+# castctl-ctl — runtime lifecycle controller for the castctl KernelSU
+# module. Mirrors cli-proxy-api scripts/cpactl (template commit f912a733)
+# in structure; deviations are listed in module/docs/ksu-module.md.
+#
+# Differences that matter: no privilege drop (root in module context),
+# no listener/port checks (castctl telegram run listens on no port),
+# gating via the module's own JSON key probe (castctl's strict parser
+# rejects keeper/webui keys on the base HEAD, so the controller never
+# relies on invoking castctl to detect them), bounded waits everywhere
+# (flock, readiness, stop escalation), a lifetime bound on the child,
+# and log rotation. No plugin discovery or loading of any kind:
+# DATA_DIR/plugins exists only as a reserved, preserved directory.
+#
+# Test-only environment overrides (never set on the device; all are
+# documented in module/docs/ksu-module.md):
+#   CASTCTL_TEST_MODE=1, CASTCTL_BUSYBOX, CASTCTL_MODULE_DIR,
+#   CASTCTL_DATA_DIR, CASTCTL_LIFECYCLE_LOCK, CASTCTL_FLOCK_TIMEOUT,
+#   CASTCTL_READY_TIMEOUT, CASTCTL_BOOT_WAIT_TIMEOUT (service.sh),
+#   CASTCTL_WATCHDOG_BASE/MAX (service.sh), CASTCTL_CHILD_LIFETIME,
+#   CASTCTL_LOG_MAX_BYTES, CASTCTL_LOG_KEEP.
+
+set -u
+
+MODULE_DIR=${CASTCTL_MODULE_DIR:-/data/adb/modules/castctl}
+DATA_DIR=${CASTCTL_DATA_DIR:-/data/local/castctl}
+CURRENT=$DATA_DIR/current
+CONFIG=$DATA_DIR/config/config.json
+PROFILES_DIR=$DATA_DIR/config/profiles
+PLUGIN_ROOT=$DATA_DIR/plugins
+PLUGIN_DIR=$PLUGIN_ROOT/linux/arm64
+RUN_DIR=$DATA_DIR/run
+LOG_DIR=$DATA_DIR/logs
+BACKUP_DIR=$DATA_DIR/backups
+CONTROL_DIR=$DATA_DIR/.controller
+PID_FILE=$RUN_DIR/castctl.pid
+LOCK_FILE=${CASTCTL_LIFECYCLE_LOCK:-${DATA_DIR}.lifecycle.lock}
+ENABLED_FILE=$RUN_DIR/enabled
+CORE_LOG=$LOG_DIR/castctl.log
+CTL_LOG=$LOG_DIR/controller.log
+
+FLOCK_TIMEOUT=${CASTCTL_FLOCK_TIMEOUT:-30}
+READY_TIMEOUT=${CASTCTL_READY_TIMEOUT:-10}
+STOP_INT_WAIT=${CASTCTL_STOP_INT_WAIT:-5}
+STOP_TERM_WAIT=${CASTCTL_STOP_TERM_WAIT:-3}
+CHILD_LIFETIME=${CASTCTL_CHILD_LIFETIME:-86400}
+LOG_MAX_BYTES=${CASTCTL_LOG_MAX_BYTES:-1048576}
+LOG_KEEP=${CASTCTL_LOG_KEEP:-3}
+
+find_busybox() {
+  for candidate in "${CASTCTL_BUSYBOX:-}" /data/adb/ksu/bin/busybox \
+    /data/adb/magisk/busybox /data/adb/ap/bin/busybox; do
+    [ -n "$candidate" ] && [ -x "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }
+  done
+  command -v busybox 2>/dev/null || return 1
+}
+
+BUSYBOX=$(find_busybox) || { echo "castctl-ctl: busybox not found" >&2; exit 1; }
+
+bb() { "$BUSYBOX" "$@"; }
+now() { date '+%Y-%m-%dT%H:%M:%S%z'; }
+
+rotate_log() {
+  logfile=$1
+  [ -f "$logfile" ] || return 0
+  size=$(bb wc -c <"$logfile" 2>/dev/null | bb tr -d ' ' || true)
+  case "$size" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$size" -gt "$LOG_MAX_BYTES" ] || return 0
+  i=$LOG_KEEP
+  while [ "$i" -gt 1 ]; do
+    prev=$((i - 1))
+    if [ -f "$logfile.$prev" ]; then
+      bb mv -f "$logfile.$prev" "$logfile.$i" 2>/dev/null || true
+    fi
+    i=$prev
+  done
+  bb mv -f "$logfile" "$logfile.1" 2>/dev/null || true
+}
+
+log() {
+  level=$1
+  shift
+  # Callers must never pass config contents, tokens, cookies, or
+  # secret-bearing command lines here. This function logs verbatim.
+  message="$(now) [$level] $*"
+  printf '%s\n' "$message"
+  if [ -d "$LOG_DIR" ]; then
+    rotate_log "$CTL_LOG" 2>/dev/null || true
+    printf '%s\n' "$message" >>"$CTL_LOG" 2>/dev/null || true
+  fi
+}
+
+die() { log ERROR "$*" >&2; exit 1; }
+
+require_root() {
+  [ "${CASTCTL_TEST_MODE:-0}" = 1 ] && return 0
+  [ "$(id -u)" = 0 ] || die "root is required"
+}
+
+runtime_paths() {
+  LOADER=$CURRENT/lib/ld-linux-aarch64.so.1
+  LIB_DIR=$CURRENT/lib
+  BINARY=$CURRENT/bin/castctl
+  CA_FILE=$CURRENT/ca/cert.pem
+  RUNTIME_VERSION=$CURRENT/runtime.version
+  export LOADER LIB_DIR BINARY CA_FILE RUNTIME_VERSION
+}
+
+run_core_binary() {
+  loader_path=$1
+  library_path=$2
+  binary_path=$3
+  shift 3
+  "$BUSYBOX" timeout 10 "$loader_path" --library-path "$library_path" "$binary_path" "$@"
+}
+
+prepare_lifecycle_lock() {
+  case "$LOCK_FILE" in /*) ;; *) die "lifecycle lock path must be absolute" ;; esac
+  lock_parent=${LOCK_FILE%/*}
+  [ -d "$lock_parent" ] || die "lifecycle lock parent is missing: $lock_parent"
+  [ ! -L "$LOCK_FILE" ] || die "lifecycle lock must not be a symlink"
+  { [ ! -e "$LOCK_FILE" ] || [ -f "$LOCK_FILE" ]; } || die "lifecycle lock must be a regular file"
+  : >"$LOCK_FILE" || die "unable to create lifecycle lock"
+  chmod 0600 "$LOCK_FILE"
+  [ "$(id -u)" != 0 ] || chown 0:0 "$LOCK_FILE" 2>/dev/null || die "unable to own lifecycle lock"
+}
+
+prepare_mutable_dirs() {
+  mkdir -p "$DATA_DIR" "$DATA_DIR/config" "$PROFILES_DIR" \
+    "$PLUGIN_ROOT" "$PLUGIN_DIR" "$RUN_DIR" "$LOG_DIR" "$BACKUP_DIR" \
+    "$DATA_DIR/releases" "$RUN_DIR/tmp" "$CONTROL_DIR"
+  chmod 0711 "$DATA_DIR"
+  chmod 0755 "$DATA_DIR/releases"
+  chmod 0700 "$CONTROL_DIR"
+  chmod 0700 "$DATA_DIR/config" "$PROFILES_DIR" "$PLUGIN_ROOT" "$PLUGIN_DIR" \
+    "$RUN_DIR" "$RUN_DIR/tmp" "$LOG_DIR" "$BACKUP_DIR"
+  if [ "$(id -u)" = 0 ]; then
+    chown 0:0 "$DATA_DIR" "$DATA_DIR/releases" "$CONTROL_DIR" 2>/dev/null || true
+    bb find "$DATA_DIR/config" "$RUN_DIR" "$LOG_DIR" \
+      -type d -exec chmod 0700 {} \; 2>/dev/null || true
+    bb find "$DATA_DIR/config" "$RUN_DIR" "$LOG_DIR" \
+      -type f -exec chmod 0600 {} \; 2>/dev/null || true
+  fi
+}
+
+set_description() {
+  [ -f "$MODULE_DIR/module.prop" ] || return 0
+  safe=$(printf '%s' "$*" | tr '\n|' '  ')
+  bb sed -i "s|^description=.*|description=$safe|" "$MODULE_DIR/module.prop" 2>/dev/null || true
+}
+
+read_pid() {
+  [ -f "$PID_FILE" ] || return 1
+  value=$(cat "$PID_FILE" 2>/dev/null || true)
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$value"
+}
+
+pid_alive() { kill -0 "$1" 2>/dev/null; }
+
+pid_matches() {
+  pid=$1
+  runtime_paths
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  command_line=$(tr '\000' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)
+  case "$command_line" in *"$BINARY"*) return 0 ;; *) return 1 ;; esac
+}
+
+is_running() {
+  pid=$(read_pid 2>/dev/null) || return 1
+  pid_alive "$pid" && pid_matches "$pid"
+}
+
+# Scan /proc for processes whose cmdline contains the module binary
+# path. Used only as a stop fallback when the PID file is gone; the
+# controller never signals a PID it has not matched this way.
+find_module_pids() {
+  runtime_paths
+  for proc_dir in /proc/[0-9]*; do
+    [ -d "$proc_dir" ] || continue
+    pid=${proc_dir#/proc/}
+    [ "$pid" = "$$" ] && continue
+    [ "$pid" = 1 ] && continue
+    pid_matches "$pid" 2>/dev/null || continue
+    printf '%s\n' "$pid"
+  done
+}
+
+# has_top_block FILE KEY: true iff KEY is a top-level JSON object key
+# in FILE (depth-1 key whose value starts with '{'). Lexical scan,
+# not a JSON parser: strings (with escapes) are skipped, braces
+# inside strings do not count, and keys nested inside other objects
+# do not count. Malformed JSON may still report presence; castctl's
+# own strict parser is the final arbiter and the start path treats
+# a child exit as fail-soft. Never prints file contents.
+has_top_block() {
+  file=$1
+  want=$2
+  [ -f "$file" ] || return 1
+  bb awk -v want="$want" '
+    BEGIN { depth = 0; instr = 0; esc = 0; key = ""; lastkey = ""; state = "seek"; found = 0 }
+    {
+      line = $0
+      n = length(line)
+      for (i = 1; i <= n; i++) {
+        c = substr(line, i, 1)
+        if (instr) {
+          if (esc) { esc = 0 }
+          else if (c == "\\") { esc = 1 }
+          else if (c == "\"") {
+            instr = 0
+            if (state == "colon") { state = "seek" }
+            else if (depth == 1) { lastkey = key; state = "afterkey" }
+          } else { key = key c }
+          continue
+        }
+        if (c == "\"") { instr = 1; esc = 0; key = ""; continue }
+        if (c == "{") {
+          if (state == "colon") {
+            if (lastkey == want) { found = 1 }
+            state = "seek"
+          } else if (state == "afterkey") { state = "seek" }
+          depth++
+          continue
+        }
+        if (c == "}") { depth--; if (depth < 0) { depth = 0 }; state = "seek"; continue }
+        if (state == "afterkey") {
+          if (c == ":") { state = "colon" }
+          else if (c == " " || c == "\t" || c == "\r") { }
+          else { state = "seek" }
+          continue
+        }
+        if (state == "colon") {
+          if (c == " " || c == "\t" || c == "\r") { continue }
+          state = "seek"
+          continue
+        }
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$file"
+}
+
+# Gating summary for status/doctor logs: presence only, no values.
+gating_summary() {
+  if [ ! -f "$CONFIG" ]; then
+    printf 'config: missing\n'
+    return 0
+  fi
+  telegram=absent; keeper=absent; webui=absent
+  has_top_block "$CONFIG" telegram && telegram=present
+  has_top_block "$CONFIG" keeper && keeper=present
+  has_top_block "$CONFIG" webui && webui=present
+  printf 'config: telegram=%s keeper=%s webui=%s\n' "$telegram" "$keeper" "$webui"
+}
+
+runtime_check() {
+  runtime_paths
+  [ -L "$CURRENT" ] || { log ERROR "current runtime symlink missing"; return 1; }
+  for required in "$LOADER" "$BINARY" "$CA_FILE" "$RUNTIME_VERSION" \
+    "$LIB_DIR/libc.so.6" "$LIB_DIR/libdl.so.2" "$LIB_DIR/libresolv.so.2" \
+    "$LIB_DIR/libpthread.so.0"; do
+    [ -f "$required" ] || { log ERROR "runtime file missing"; return 1; }
+  done
+  [ -f "$CURRENT/checksums.sha256" ] || { log ERROR "runtime checksum manifest missing"; return 1; }
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$CURRENT" && sha256sum -c checksums.sha256 >/dev/null) || { log ERROR "runtime checksum mismatch"; return 1; }
+  else
+    (cd "$CURRENT" && bb sha256sum -c checksums.sha256 >/dev/null) || { log ERROR "runtime checksum mismatch"; return 1; }
+  fi
+  core_version=$(sed -n 's/^core_version=//p' "$RUNTIME_VERSION" | head -1)
+  case "$core_version" in ''|*[!A-Za-z0-9._-]*) log ERROR "runtime version record is unsafe"; return 1 ;; esac
+  version=$(run_core_binary "$LOADER" "$LIB_DIR" "$BINARY" --version 2>&1 | head -1 || true)
+  case "$version" in
+    "castctl $core_version"*) ;;
+    *) log ERROR "core version preflight failed"; return 1 ;;
+  esac
+  return 0
+}
+
+process_identity() {
+  pid=$1
+  [ -r "/proc/$pid/status" ] || { printf 'unknown:unknown\n'; return; }
+  uid=$(bb awk '/^Uid:/{print $2; exit}' "/proc/$pid/status")
+  gid=$(bb awk '/^Gid:/{print $2; exit}' "/proc/$pid/status")
+  printf '%s:%s\n' "${uid:-unknown}" "${gid:-unknown}"
+}
+
+stop_process() {
+  remove_intent=${1:-1}
+  [ "$remove_intent" = 0 ] || rm -f "$ENABLED_FILE"
+  pid=$(read_pid 2>/dev/null || true)
+  rm -f "$PID_FILE"
+  if [ -n "$pid" ] && ! pid_matches "$pid"; then
+    log WARNING "stale or foreign PID file ignored"
+    pid=
+  fi
+  if [ -z "$pid" ]; then
+    pid=$(find_module_pids | head -1 || true)
+    [ -n "$pid" ] && log WARNING "stopping module process found by scan (PID file was missing)"
+  fi
+  if [ -n "$pid" ]; then
+    log INFO "stopping castctl (PID $pid)"
+    kill -2 "$pid" 2>/dev/null || true
+  fi
+  i=0
+  while [ "$i" -lt "$STOP_INT_WAIT" ]; do
+    [ -z "$pid" ] && break
+    pid_alive "$pid" || break
+    sleep 1
+    i=$((i + 1))
+  done
+  if [ -n "$pid" ] && pid_alive "$pid" && pid_matches "$pid"; then
+    kill -15 "$pid" 2>/dev/null || true
+    i=0
+    while [ "$i" -lt "$STOP_TERM_WAIT" ]; do
+      pid_alive "$pid" || break
+      sleep 1
+      i=$((i + 1))
+    done
+  fi
+  if [ -n "$pid" ] && pid_alive "$pid" && pid_matches "$pid"; then
+    kill -9 "$pid" 2>/dev/null || true
+    sleep 1
+  fi
+  if [ -n "$pid" ] && pid_alive "$pid" && pid_matches "$pid"; then
+    log ERROR "module process survived forced stop"
+    return 1
+  fi
+  set_description "Stopped | castctl"
+  return 0
+}
+
+wait_ready() {
+  pid=$1
+  i=0
+  while [ "$i" -lt "$READY_TIMEOUT" ]; do
+    if ! pid_alive "$pid"; then
+      wait "$pid" 2>/dev/null
+      code=$?
+      log ERROR "castctl exited during startup (code $code)"
+      return 1
+    fi
+    pid_matches "$pid" && return 0
+    sleep 1
+    i=$((i + 1))
+  done
+  pid_alive "$pid" && pid_matches "$pid"
+}
+
+start_locked() {
+  mode=${1:-manual}
+  prepare_mutable_dirs
+  rotate_log "$CORE_LOG" 2>/dev/null || true
+  runtime_check || return 1
+
+  [ -f "$CONFIG" ] || { log ERROR "config missing; nothing to start"; return 1; }
+  if has_top_block "$CONFIG" keeper || has_top_block "$CONFIG" webui; then
+    log ERROR "config carries keeper/webui block(s) this castctl build cannot parse; no service started (re-survey after PR #19 / item 2)"
+    return 1
+  fi
+  if ! has_top_block "$CONFIG" telegram; then
+    log INFO "no telegram block in config; nothing to start"
+    return 0
+  fi
+
+  if is_running; then
+    [ "$mode" = watchdog ] || log INFO "castctl already running"
+    : >"$ENABLED_FILE"
+    return 0
+  fi
+
+  runtime_paths
+  export HOME="$DATA_DIR"
+  export TMPDIR="$RUN_DIR/tmp"
+  # Parity exports from the template. castctl does not read
+  # SSL_CERT_FILE/SSL_CERT_DIR on the base HEAD (grep-verified);
+  # whether its TLS stack consults them is [NEEDS-MEASUREMENT].
+  export SSL_CERT_FILE="$CA_FILE"
+  export SSL_CERT_DIR="$CURRENT/ca"
+  export CASTCTL_CONFIG="$CONFIG"
+
+  log INFO "starting castctl telegram run"
+  cd "$LOG_DIR" || return 1
+  "$BUSYBOX" nohup "$BUSYBOX" timeout -s INT "$CHILD_LIFETIME" \
+    "$LOADER" --library-path "$LIB_DIR" "$BINARY" \
+    --config "$CONFIG" telegram run \
+    >>"$CORE_LOG" 2>&1 </dev/null 8>&- 9>&- &
+  pid=$!
+  cd / || true
+
+  wait_ready "$pid"
+  ready=$?
+  if [ "$ready" -ne 0 ]; then
+    kill -2 "$pid" 2>/dev/null || true
+    rm -f "$PID_FILE" "$ENABLED_FILE"
+    set_description "Error | castctl readiness failed"
+    return 1
+  fi
+
+  printf '%s' "$pid" >"$PID_FILE"
+  : >"$ENABLED_FILE"
+  chmod 0600 "$PID_FILE" "$ENABLED_FILE"
+
+  log INFO "castctl started (PID $pid, UID:GID $(process_identity "$pid"))"
+  set_description "Running | castctl | Action to stop"
+  return 0
+}
+
+lifecycle_lock_is_inherited() {
+  [ "${CASTCTL_LIFECYCLE_LOCK_HELD:-0}" = 1 ] || return 1
+  inherited_lock=$(bb readlink "/proc/$$/fd/9" 2>/dev/null || true)
+  [ "$inherited_lock" = "$LOCK_FILE" ] || return 1
+  bb flock -n 9
+}
+
+run_lifecycle_locked() {
+  contention=$1
+  operation=$2
+  shift 2
+  if lifecycle_lock_is_inherited; then
+    "$operation" "$@"
+    return
+  fi
+  (
+    if [ "$contention" = wait ]; then
+      bb flock -w "$FLOCK_TIMEOUT" 9 || { log ERROR "unable to acquire lifecycle lock"; exit 1; }
+    elif ! bb flock -n 9; then
+      if [ "$contention" = ignore ]; then
+        log INFO "another lifecycle operation is in progress"
+        exit 0
+      fi
+      log ERROR "another lifecycle operation is in progress"
+      exit 1
+    fi
+    "$operation" "$@"
+  ) 9>"$LOCK_FILE"
+}
+
+start_service() {
+  require_root
+  prepare_lifecycle_lock
+  mode=${1:-manual}
+  contention=fail
+  [ "$mode" = boot ] && contention=wait
+  [ "$mode" = watchdog ] && contention=ignore
+  run_lifecycle_locked "$contention" start_locked "$mode"
+}
+
+stop_locked() {
+  prepare_mutable_dirs
+  stop_process "${1:-1}"
+}
+
+stop_service() {
+  require_root
+  prepare_lifecycle_lock
+  run_lifecycle_locked wait stop_locked "${1:-1}"
+}
+
+restart_locked() {
+  prepare_mutable_dirs
+  stop_process 0 && start_locked manual
+}
+
+restart_service() {
+  require_root
+  prepare_lifecycle_lock
+  run_lifecycle_locked wait restart_locked
+}
+
+status_service() {
+  runtime_paths
+  echo "castctl module status"
+  echo "  data: $DATA_DIR"
+  echo "  release: $(readlink "$CURRENT" 2>/dev/null || echo missing)"
+  if version=$(run_core_binary "$LOADER" "$LIB_DIR" "$BINARY" --version 2>/dev/null | head -1); then
+    echo "  version: $version"
+  else
+    echo "  version: unavailable"
+  fi
+  if is_running; then
+    pid=$(read_pid)
+    echo "  process: running (pid $pid, uid:gid $(process_identity "$pid"))"
+  else
+    echo "  process: stopped"
+  fi
+  echo "  $(gating_summary)"
+  if [ -d "$PLUGIN_DIR" ]; then
+    echo "  plugins: reserved dir present (no loader; file count: $(bb find "$PLUGIN_DIR" -maxdepth 1 -type f 2>/dev/null | bb wc -l | bb tr -d ' '))"
+  else
+    echo "  plugins: reserved dir missing"
+  fi
+  is_running
+}
+
+doctor_locked() {
+  prepare_mutable_dirs
+  failed=0
+  runtime_check || failed=1
+  if [ ! -f "$CONFIG" ]; then
+    log ERROR "config missing"
+    failed=1
+  elif has_top_block "$CONFIG" keeper || has_top_block "$CONFIG" webui; then
+    log ERROR "config carries keeper/webui block(s) this castctl build cannot parse"
+    failed=1
+  fi
+  if is_running; then
+    pid=$(read_pid)
+    pid_matches "$pid" || { log ERROR "running process does not match the module binary"; failed=1; }
+  fi
+  [ "$failed" = 0 ] || return 1
+  log INFO "doctor passed"
+}
+
+doctor() {
+  require_root
+  prepare_lifecycle_lock
+  run_lifecycle_locked wait doctor_locked
+}
+
+backup_state_locked() {
+  prepare_mutable_dirs
+  stamp=$(date -u +%Y%m%dT%H%M%SZ)
+  archive=$BACKUP_DIR/castctl-state.$stamp.tar.gz
+  # The archive contains cookies and any other profile state under
+  # config/: treat it as secret material. Never share it.
+  (cd "$DATA_DIR" && bb tar -czf "$archive" config plugins) || die "backup failed"
+  chmod 0600 "$archive"
+  log INFO "backup created"
+}
+
+backup_state() {
+  require_root
+  prepare_lifecycle_lock
+  run_lifecycle_locked wait backup_state_locked
+}
+
+purge_data_locked() {
+  [ "${1:-}" = --yes ] || die "purge-data requires --yes; uninstall preserves data"
+  purge_allowed=0
+  [ "$DATA_DIR" = /data/local/castctl ] && purge_allowed=1
+  if [ "${CASTCTL_TEST_MODE:-0}" = 1 ]; then
+    case "$DATA_DIR" in "${TMPDIR:-/nonexistent}"/castctl-test-*) purge_allowed=1 ;; esac
+  fi
+  [ "$purge_allowed" = 1 ] || die "refusing unsafe purge path"
+  prepare_mutable_dirs
+  stop_process 1 || die "unable to stop the service before purge"
+  rm -rf "$DATA_DIR" || die "unable to remove persistent data"
+  [ ! -e "$DATA_DIR" ] || die "persistent data still exists after purge"
+  log INFO "persistent castctl data removed"
+}
+
+purge_data() {
+  require_root
+  prepare_lifecycle_lock
+  run_lifecycle_locked wait purge_data_locked "${1:-}"
+}
+
+usage() {
+  cat <<'EOF'
+Usage: castctl-ctl <command>
+
+Commands:
+  start [--boot|--watchdog]  Start the Telegram bot if a telegram block exists.
+  stop                       Stop for the current boot.
+  restart                    Restart the service.
+  status                     Show safe runtime status.
+  is-running                 Return success only for the module process.
+  doctor                     Validate runtime and config gating.
+  version                    Show bundled core version.
+  log [N]                    Tail the core log.
+  backup                     Archive config/plugin state (contains secrets).
+  purge-data --yes           Destructively remove persistent state.
+EOF
+}
+
+command_name=${1:-}
+case "$command_name" in
+  start)
+    case "${2:-}" in --boot) mode=boot ;; --watchdog) mode=watchdog ;; '' ) mode=manual ;; *) die "invalid start option" ;; esac
+    start_service "$mode"
+    ;;
+  stop) stop_service 1 ;;
+  restart) restart_service ;;
+  status) status_service ;;
+  is-running) is_running ;;
+  doctor) doctor ;;
+  version) runtime_paths; run_core_binary "$LOADER" "$LIB_DIR" "$BINARY" --version ;;
+  log)
+    lines=${2:-20}
+    case "$lines" in ''|*[!0-9]*) die "log line count must be numeric" ;; esac
+    [ -f "$CORE_LOG" ] || die "log not found"
+    tail -n "$lines" "$CORE_LOG"
+    ;;
+  backup) backup_state ;;
+  purge-data) purge_data "${2:-}" ;;
+  help|-h|--help|'') usage ;;
+  *) die "unknown command: $command_name" ;;
+esac

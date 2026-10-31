@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>castctl — Web UI pending</title>
+<style>
+body { font-family: sans-serif; margin: 2em; line-height: 1.5; }
+code { background: #eee; padding: 0 0.3em; }
+</style>
+</head>
+<body>
+<h1>castctl web UI — pending (item 2)</h1>
+<p>The castctl web UI server does not exist yet in the castctl tree.
+This page is a static placeholder. It makes no network request, calls
+no endpoint, and handles no token.</p>
+<p>TODO (tied to castctl phase 2 item 2): replace this stub with the
+real WebUI entry point once item 2 delivers, in writing:</p>
+<ul>
+<li>Server start command and flags (foreground process? which subcommand?).</li>
+<li>Listen address and port (design says <code>127.0.0.1</code> only; confirm the exact port and <code>--port</code> spelling).</li>
+<li>Token/auth handoff: how the page or browser proves it may talk to the service, and where the token comes from without ever logging or displaying it.</li>
+<li>Health/readiness URL: exact path and what response counts as "up".</li>
+<li>Whether the service allows fetch/XHR from a WebView origin (CORS/origin behaviour), or whether the page must use the <code>kernelsu</code> <code>exec()</code> API instead.</li>
+<li>Browser fallback URL for opening the web UI outside the manager.</li>
+<li>Whether the web UI is the same daemon as the core service or a separate process, and which config block gates it.</li>
+</ul>
+<p>Until item 2 lands, the module starts nothing for the web UI, even
+if a <code>webui</code> key is present in the config (this castctl
+build's strict parser rejects such a key; the controller logs that
+and starts nothing).</p>
+</body>
+</html>

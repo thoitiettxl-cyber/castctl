@@ -1,0 +1,10 @@
+format=1
+payload_root=payload
+credentials_included=false
+runtime_layout=bin,lib,ca
+plugins=none
+runtime_libraries=ld-linux-aarch64.so.1,libc.so.6,libdl.so.2,libresolv.so.2,libpthread.so.0
+runtime_provenance=payload/runtime.version
+private_keys_included=false
+core_asset=castctl_0.6.4_linux_arm64.tar.gz
+core_asset_sha256=311696a8d3693b9510269ffd59f679070009e20cf81bbc3696ad9b2f67114c71
