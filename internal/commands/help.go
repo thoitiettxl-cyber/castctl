@@ -45,7 +45,7 @@ self-update PR):
   ideas, idea, idea-exec, unread, seen, session-start,
   session-rename, session-pin, session-unpin, session-archive,
   session-unarchive, session-delete, stop, wake, raw, fs, auth,
-  profile, config, telegram, update
+  profile, config, telegram, keeper, update, webui
 
 Run "castctl <command> --help" for per-command help.
 

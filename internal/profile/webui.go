@@ -149,6 +149,13 @@ func validateWebUIListen(raw string) error {
 	return nil
 }
 
+// ValidateWebUIListen is the exported form of
+// validateWebUIListen for the command layer, which re-validates
+// --listen/--port overrides before serving. The parse-time rule
+// in validateWebUIListen is the authority; this wrapper only
+// exposes it.
+func ValidateWebUIListen(raw string) error { return validateWebUIListen(raw) }
+
 // webUIListenError is a fixed-rule error: its text names only the
 // rule, never the supplied listen value.
 type webUIListenError struct{ rule string }

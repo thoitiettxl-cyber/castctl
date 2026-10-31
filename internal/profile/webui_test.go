@@ -68,10 +68,10 @@ func TestWebUIListenValidation(t *testing.T) {
 		{"[::]:8317", false},
 		{"192.168.1.1:8317", false},
 		{"example.com:8317", false},
-		{"127.0.0.1", false},          // missing port
-		{"127.0.0.1:0", false},        // port 0
-		{"127.0.0.1:65536", false},   // port out of range
-		{"127.0.0.1:abc", false},     // non-numeric port
+		{"127.0.0.1", false},             // missing port
+		{"127.0.0.1:0", false},           // port 0
+		{"127.0.0.1:65536", false},       // port out of range
+		{"127.0.0.1:abc", false},         // non-numeric port
 		{"http://127.0.0.1:8317", false}, // URL, not host:port
 		{"user@127.0.0.1:8317", false},   // userinfo
 		{"127.0.0.1:8317/path", false},   // path
