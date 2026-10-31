@@ -376,6 +376,164 @@ func TestLogsLegitimateFileOutsideProfilesTails(t *testing.T) {
 	}
 }
 
+// writeLegacyProfile creates profiles/<name>/config.json with the
+// given content and returns the profile directory.
+func writeLegacyProfile(t *testing.T, dir, name, config string) string {
+	t.Helper()
+	legacyDir := filepath.Join(dir, "profiles", name)
+	if err := os.MkdirAll(legacyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "config.json"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return legacyDir
+}
+
+// Log-gate refusal tests (loop-3 R10): a legacy profile's OWN
+// cookies_file override — absolute, .bak, or relative — must be
+// refused exactly like the default legacy cookies path. The
+// override lives in profiles/<name>/config.json, which the
+// loop-2 guard never read.
+
+func TestLogsRefusedLegacyOverrideCookiesFile(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	jarPath := filepath.Join(outside, "override-cookies.txt")
+	jar := ".example.com\tTRUE\t/\tFALSE\t0\thatch_sess\tFAKE-LEGACY-OVERRIDE-HATCH-555\n"
+	if err := os.WriteFile(jarPath, []byte(jar), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeLegacyProfile(t, dir, "legacy1", `{"cookies_file": "`+jarPath+`"}`)
+	cookiesPath := filepath.Join(dir, "cookies.txt")
+	srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, jarPath))
+	assertLogsRefused(t, srv, "FAKE-LEGACY-OVERRIDE-HATCH-555")
+}
+
+func TestLogsRefusedLegacyOverrideCookiesBak(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	jarPath := filepath.Join(outside, "override-cookies.txt")
+	bakPath := jarPath + ".bak"
+	jar := ".example.com\tTRUE\t/\tFALSE\t0\thatch_sess\tFAKE-LEGACY-OVERRIDEBAK-HATCH-666\n"
+	if err := os.WriteFile(bakPath, []byte(jar), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeLegacyProfile(t, dir, "legacy1", `{"cookies_file": "`+jarPath+`"}`)
+	cookiesPath := filepath.Join(dir, "cookies.txt")
+	srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, bakPath))
+	assertLogsRefused(t, srv, "FAKE-LEGACY-OVERRIDEBAK-HATCH-666")
+}
+
+func TestLogsRefusedLegacyOverrideRelative(t *testing.T) {
+	// Relative override: the value joins the config dir, so
+	// the file at the config root holds the jar rows. The
+	// parser would coerce this spelling to the profile's own
+	// path, but the raw spelling is the one an operator's
+	// log.output can name, so the guard must refuse it too.
+	dir := t.TempDir()
+	relPath := filepath.Join(dir, "legacy-rel-cookies.txt")
+	jar := ".example.com\tTRUE\t/\tFALSE\t0\thatch_sess\tFAKE-LEGACYREL-HATCH-777\n"
+	if err := os.WriteFile(relPath, []byte(jar), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeLegacyProfile(t, dir, "legacy1", `{"cookies_file": "legacy-rel-cookies.txt"}`)
+	cookiesPath := filepath.Join(dir, "cookies.txt")
+	srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, relPath))
+	assertLogsRefused(t, srv, "FAKE-LEGACYREL-HATCH-777")
+}
+
+func TestLogsRefusedLegacyConfigUnparseable(t *testing.T) {
+	// Fail closed: when a legacy config cannot be decoded,
+	// the guard cannot enumerate that profile's cookies
+	// files, so it refuses the whole gate instead of serving
+	// a file it cannot rule out. A null cookies_file counts
+	// as absent (the parser treats it that way), so the
+	// legitimate log still tails.
+	cases := []struct {
+		name          string
+		legacy        string
+		expectRefused bool
+	}{
+		{"invalidJSON", `{invalid json`, true},
+		{"nonStringCookiesFile", `{"cookies_file": 42}`, true},
+		{"nullCookiesFile", `{"cookies_file": null}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeLegacyProfile(t, dir, "legacy1", tc.legacy)
+			logPath := filepath.Join(dir, "castctl.log")
+			if err := os.WriteFile(logPath, []byte("+0700 2026-10-31 13:00:01 INFO gateway: hello\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cookiesPath := filepath.Join(dir, "cookies.txt")
+			srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, logPath))
+			rec := logDo(t, srv, "/api/v1/logs")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("logs: %d: %s", rec.Code, rec.Body.String())
+			}
+			data := decodeEnvelope(t, rec)["data"].(map[string]any)
+			if tc.expectRefused {
+				if data["disabled"] != true || data["reason"] != "log_output_refused" {
+					t.Fatalf("unparseable legacy config: refused response = %v", data)
+				}
+			} else if data["disabled"] != false {
+				t.Fatalf("null cookies_file: legitimate log refused: %v", data)
+			}
+		})
+	}
+}
+
+func TestLogsRefusedRawCoercedCookiesFile(t *testing.T) {
+	// Guard (green on both old and new code): a raw
+	// single-file cookies_file value the parser coerces to
+	// the profile's own path — the raw spelling itself must
+	// still be refused when named as the log output.
+	dir := t.TempDir()
+	rawPath := filepath.Join(dir, "cookies.txt")
+	jar := ".example.com\tTRUE\t/\tFALSE\t0\thatch_sess\tFAKE-RAW-COERCED-HATCH-888\n"
+	if err := os.WriteFile(rawPath, []byte(jar), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := `{
+  "default_profile": "muse01",
+  "profiles": {"muse01": {"cookies_file": "cookies.txt"}},
+  "log": {"output": "` + rawPath + `", "timestamp": true}
+}`
+	srv := logServerFromConfig(t, dir, config)
+	assertLogsRefused(t, srv, "FAKE-RAW-COERCED-HATCH-888")
+}
+
+func TestLogsInvalidLimitRejected(t *testing.T) {
+	// N-T11: an invalid limit is a 400 like an invalid
+	// cursor, not a silent fallback to the default. The
+	// frontend always sends a valid limit (PAGE_LIMIT) or
+	// omits the parameter, so no legitimate caller depends
+	// on the fallback.
+	srv, dir := newLogTestServer(t, logBlockConfig)
+	logPath := filepath.Join(dir, "castctl.log")
+	lines := "+0700 2026-10-31 13:00:01 INFO gateway: one\n" +
+		"+0700 2026-10-31 13:00:02 INFO gateway: two\n"
+	if err := os.WriteFile(logPath, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{"0", "-1", "501", "abc"} {
+		rec := logDo(t, srv, "/api/v1/logs?limit="+q)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "validation_failed") {
+			t.Fatalf("limit=%q: got %d: %s", q, rec.Code, rec.Body.String())
+		}
+	}
+	rec := logDo(t, srv, "/api/v1/logs?limit=1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("limit=1: %d: %s", rec.Code, rec.Body.String())
+	}
+	entries, _ := decodeEnvelope(t, rec)["data"].(map[string]any)["entries"].([]any)
+	if len(entries) != 1 {
+		t.Fatalf("limit=1: entries = %d, want 1", len(entries))
+	}
+}
+
 func collectLogMessages(t *testing.T, srv *Server, path string) ([]string, map[string]any) {
 	t.Helper()
 	rec := logDo(t, srv, path)

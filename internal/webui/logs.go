@@ -48,13 +48,16 @@ const (
 // returns the log file path, or disabled=true with a fixed
 // reason. The identity guard refuses a log output that resolves
 // to the config file, any cookies file, any cookies `.bak`
-// sibling, any legacy-layout cookies file or its `.bak`, or
-// any file under the config dir's profiles/ subtree (the
-// factory's A7 rule, re-checked here because this endpoint
-// opens the file itself). Paths are re-resolved per request
-// with symlink evaluation, so a symlink or ".." reaching a
-// refused file is refused even before the file exists; no
-// verdict is cached across renames.
+// sibling, any legacy-layout cookies file or its `.bak`
+// (including a legacy config's own cookies_file override and
+// its .bak; a legacy config that cannot be read fails the
+// gate closed), or any file under the config dir's
+// profiles/ subtree (the factory's A7 rule, re-checked here
+// because this endpoint opens the file itself). Paths are
+// re-resolved per request with symlink evaluation, so a
+// symlink or ".." reaching a refused file is refused even
+// before the file exists; no verdict is cached across
+// renames.
 func (s *Server) logGate() (path string, disabled bool, reason string, err error) {
 	load, err := s.loadConfig()
 	if err != nil {
@@ -100,6 +103,16 @@ func (s *Server) logGate() (path string, disabled bool, reason string, err error
 	for _, name := range s.legacyProfileNames(cfg) {
 		if paths, perr := profile.ProfilePaths(s.deps.ConfigDir, name); perr == nil {
 			refused = append(refused, paths.Cookies, paths.Cookies+".bak")
+			// A legacy config's own cookies_file override
+			// names a cookies file the default path does
+			// not: refuse its raw forms too (R10). An
+			// unreadable config fails the whole gate
+			// closed — see legacyCookiesFileRefusals.
+			forms, corrupt := legacyCookiesFileRefusals(s.deps.ConfigDir, paths)
+			if corrupt {
+				return "", true, "log_output_refused", nil
+			}
+			refused = append(refused, forms...)
 		}
 	}
 	profilesDir := resolvePathBestEffort(filepath.Join(s.deps.ConfigDir, "profiles"))
@@ -132,6 +145,63 @@ func (s *Server) logGate() (path string, disabled bool, reason string, err error
 		}
 	}
 	return resolved, false, "", nil
+}
+
+// legacyCookiesFileRefusals returns the refusal forms for a
+// legacy profile's OWN cookies_file override, read from
+// profiles/<name>/config.json. The migrate-only parser and
+// resolveCookiesFile are unexported, and the guard needs only
+// the RAW value: the parser-resolved form of an override is
+// always the profile's default cookies path (an in-dir value
+// coerces there, and the default path sits under profiles/,
+// refused by the subtree rule) or an outside absolute path
+// (which the raw forms below name directly). The raw value is
+// the spelling a log.output can name, so its lexical and
+// resolved forms, plus their .bak siblings, are refused —
+// the same treatment the single-file raw values in logGate
+// get. The file is decoded with the same generic decode used
+// for the single-file document; no new parser is introduced.
+// corrupt is true when the file cannot be stat'ed as a regular
+// file or read, cannot be decoded as a JSON object, or carries
+// a cookies_file that is present but not a string (null counts
+// as absent, as in the parser). The caller then refuses the
+// whole gate: the refused set cannot be enumerated for that
+// profile, so no file may be served as its log.
+func legacyCookiesFileRefusals(configDir string, paths profile.Paths) (forms []string, corrupt bool) {
+	st, err := os.Stat(paths.Config)
+	if err != nil || !st.Mode().IsRegular() {
+		return nil, true
+	}
+	data, err := os.ReadFile(paths.Config)
+	if err != nil {
+		return nil, true
+	}
+	doc, err := decodeGeneric(data)
+	if err != nil {
+		return nil, true
+	}
+	obj, ok := doc.(map[string]any)
+	if !ok {
+		return nil, true
+	}
+	v, ok := obj["cookies_file"]
+	if !ok || v == nil {
+		return nil, false
+	}
+	s, ok := v.(string)
+	if !ok {
+		return nil, true
+	}
+	if strings.TrimSpace(s) == "" {
+		return nil, false
+	}
+	lexical := s
+	if !filepath.IsAbs(lexical) {
+		lexical = filepath.Join(configDir, lexical)
+	}
+	lexical = filepath.Clean(lexical)
+	resolvedRaw := resolveAgainst(configDir, s)
+	return []string{lexical, lexical + ".bak", resolvedRaw, resolvedRaw + ".bak"}, false
 }
 
 // sameFile reports whether two paths name the same file: by
@@ -230,9 +300,12 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := defaultLogLimit
 	if q := r.URL.Query().Get("limit"); q != "" {
-		if n, err := strconv.Atoi(q); err == nil && n >= 1 && n <= maxLogLimit {
-			limit = n
+		n, err := strconv.Atoi(q)
+		if err != nil || n < 1 || n > maxLogLimit {
+			writeAPIError(w, errValidation("invalid limit"))
+			return
 		}
+		limit = n
 	}
 	levelFilter := r.URL.Query().Get("level")
 	if levelFilter == "all" {
