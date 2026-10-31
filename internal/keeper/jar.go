@@ -388,10 +388,13 @@ func rebuildIndex(cookies []StoredCookie) map[cookieKey]int {
 // gate the session, see validateExportedSet), every stored
 // entry inside the filter is dropped, and the export set takes
 // its place — the snapshot is faithful, so absence from the
-// snapshot IS the deletion signal for filtered cookies. It
-// returns the new set and the number of stored entries dropped
-// (0 when the previous file was not jar form — the whole file
-// was replaced, and there were no jar entries to count).
+// snapshot IS the deletion signal for filtered cookies. The
+// export set itself is deduplicated by merge key (last wins):
+// Chromium can hold both dot forms of one cookie, and the
+// merged set keeps one slot per key. It returns the new set
+// and the number of stored entries dropped (0 when the
+// previous file was not jar form — the whole file was
+// replaced, and there were no jar entries to count).
 func ReplaceWithExport(stored []StoredCookie, exported []StoredCookie) ([]StoredCookie, int) {
 	kept := make([]StoredCookie, 0, len(stored))
 	dropped := 0
@@ -402,7 +405,17 @@ func ReplaceWithExport(stored []StoredCookie, exported []StoredCookie) ([]Stored
 		}
 		kept = append(kept, c)
 	}
-	return append(kept, exported...), dropped
+	uniq := make([]StoredCookie, 0, len(exported))
+	seen := make(map[cookieKey]int, len(exported))
+	for _, c := range exported {
+		if idx, ok := seen[c.key()]; ok {
+			uniq[idx] = c
+			continue
+		}
+		seen[c.key()] = len(uniq)
+		uniq = append(uniq, c)
+	}
+	return append(kept, uniq...), dropped
 }
 
 // EarliestExpiry returns the earliest non-session expiry in the

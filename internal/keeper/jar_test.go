@@ -192,34 +192,85 @@ func TestEffectiveSetCookieReconstructed(t *testing.T) {
 }
 
 func TestApplyUpdatesAndReplace(t *testing.T) {
+	// Loop-2 B1: the merge key is DOT-INSENSITIVE by design
+	// (see cookieKey). The keeper holds one credential slot
+	// per (name, domain-without-dot, path): a host-only
+	// stored row and a Domain-scoped update are the SAME
+	// cookie for merge purposes, on both the header-rebuild
+	// and persisted paths. This deliberately collapses the
+	// RFC 6265 host-only/domain distinction, which the
+	// keeper never uses (it sends name=value pairs only and
+	// never does domain matching on the wire); the stored
+	// Domain string still carries the dot, and an upsert
+	// replaces it with the update's form. The previous
+	// version of this test asserted dot-significant keying;
+	// that semantics duplicated hatch_sess in the second
+	// chain step's header (B1).
 	stored := []StoredCookie{
+		{Name: "hatch_sess", Value: "OLD", Domain: ".muse.ai", Path: "/", Expires: 1000},
+		{Name: "other", Value: "KEEP", Domain: ".example.com", Path: "/", Expires: 1000},
+	}
+	// Domain-scoped update replaces the domain-scoped row.
+	merged := ApplyUpdates(stored, []CookieUpdate{
+		{Cookie: StoredCookie{Name: "hatch_sess", Value: "NEW", Domain: ".muse.ai", Path: "/", Expires: 2000}},
+	})
+	if len(merged) != 2 || merged[0].Value != "NEW" {
+		t.Fatalf("keyed update = %+v", merged)
+	}
+	// A Domain-scoped update ALSO replaces a host-only
+	// stored row (bare domain): same merge slot.
+	bare := []StoredCookie{
+		{Name: "hatch_sess", Value: "OLD", Domain: "muse.ai", Path: "/", Expires: 1000},
+	}
+	merged = ApplyUpdates(bare, []CookieUpdate{
+		{Cookie: StoredCookie{Name: "hatch_sess", Value: "NEW", Domain: ".muse.ai", Path: "/", Expires: 2000}},
+	})
+	if len(merged) != 1 || merged[0].Value != "NEW" || merged[0].Domain != ".muse.ai" {
+		t.Fatalf("host-only renewal = %+v; want one domain-scoped row", merged)
+	}
+	// Deletion removes the row whatever its dot form.
+	merged = ApplyUpdates(merged, []CookieUpdate{
+		{Cookie: StoredCookie{Name: "hatch_sess", Domain: ".muse.ai", Path: "/"}, Delete: true},
+	})
+	if len(merged) != 0 {
+		t.Fatalf("deletion = %+v", merged)
+	}
+	// A jar holding both forms of one cookie deduplicates
+	// to the last row on read (ParseJar), so a merged set
+	// never carries both forms from a file.
+	twoForm := ".muse.ai\tTRUE\t/\tFALSE\t1000\thatch_sess\tOLD\nmuse.ai\tFALSE\t/\tFALSE\t1000\thatch_sess\tHOSTONLY\n"
+	parsed, err := ParseJar([]byte(twoForm))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed) != 1 || parsed[0].Value != "HOSTONLY" {
+		t.Fatalf("two-form jar = %+v; want one row, last wins", parsed)
+	}
+	// Replace: outside-filter entries kept, filtered dropped,
+	// export set in place, dropped count exact.
+	stored2 := []StoredCookie{
 		{Name: "hatch_sess", Value: "OLD", Domain: ".muse.ai", Path: "/", Expires: 1000},
 		{Name: "hatch_sess", Value: "HOSTONLY", Domain: "muse.ai", Path: "/", Expires: 1000},
 		{Name: "other", Value: "KEEP", Domain: ".example.com", Path: "/", Expires: 1000},
 	}
-	// Domain-scoped update touches only the domain-scoped row.
-	merged := ApplyUpdates(stored, []CookieUpdate{
-		{Cookie: StoredCookie{Name: "hatch_sess", Value: "NEW", Domain: ".muse.ai", Path: "/", Expires: 2000}},
-	})
-	if merged[0].Value != "NEW" || merged[1].Value != "HOSTONLY" {
-		t.Fatalf("keyed update = %+v", merged)
-	}
-	// Deletion removes only its key.
-	merged = ApplyUpdates(merged, []CookieUpdate{
-		{Cookie: StoredCookie{Name: "hatch_sess", Domain: ".muse.ai", Path: "/"}, Delete: true},
-	})
-	if len(merged) != 2 || merged[0].Name != "hatch_sess" || merged[0].Domain != "muse.ai" {
-		t.Fatalf("deletion = %+v", merged)
-	}
-	// Replace: outside-filter entries kept, filtered dropped,
-	// export set in place, dropped count exact.
 	exported := []StoredCookie{{Name: "hatch_sess", Value: "EXP", Domain: ".muse.ai", Path: "/", Expires: 3000}}
-	replaced, dropped := ReplaceWithExport(stored, exported)
+	replaced, dropped := ReplaceWithExport(stored2, exported)
 	if dropped != 2 {
 		t.Fatalf("dropped = %d; want 2", dropped)
 	}
 	if len(replaced) != 2 || replaced[0].Name != "other" || replaced[1].Value != "EXP" {
 		t.Fatalf("replaced = %+v", replaced)
+	}
+	// An export holding both forms of one cookie collapses
+	// to the last row: Chromium can hold both, the keeper
+	// keeps one slot.
+	bothForms := []StoredCookie{
+		{Name: "hatch_sess", Value: "HOSTONLY", Domain: "muse.ai", Path: "/", Expires: 3000},
+		{Name: "hatch_sess", Value: "DOMAIN", Domain: ".muse.ai", Path: "/", Expires: 3000},
+	}
+	replaced, _ = ReplaceWithExport(nil, bothForms)
+	if len(replaced) != 1 || replaced[0].Value != "DOMAIN" {
+		t.Fatalf("both-forms export = %+v; want one row, last wins", replaced)
 	}
 }
 
