@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -494,5 +495,68 @@ func TestStdinTransportNeverEchoesInput(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "ignoring unrecognised input") {
 		t.Fatalf("stderr = %q; want the fixed ignoring message", errb.String())
+	}
+}
+
+// TestKeeperRunFactoryFailureSurfaced (loop-2 red-team F5):
+// a factory that fails for every entry must exit 2 with a
+// line naming the entry, never exit 0 silently. RED on the
+// old code: exit 0, no output.
+func TestKeeperRunFactoryFailureSurfaced(t *testing.T) {
+	t.Parallel()
+	_, configFile := testHome(t, keeperTestConfig())
+	out, errb := &bytes.Buffer{}, &bytes.Buffer{}
+	env := &Env{
+		Stdout: out, Stderr: errb,
+		Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile}),
+	}
+	env.BuildRuntime = func(_ context.Context, _ *profile.ConfigLocation, _ *profile.Profile, _ *Env) (*Runtime, error) {
+		return nil, errors.New("runtime build boom")
+	}
+	if code := Run(context.Background(), []string{"keeper", "run"}, env); code != 2 {
+		t.Fatalf("run with failing factory: code=%d, want 2; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "k1") || !strings.Contains(out.String(), "factory error") {
+		t.Fatalf("stdout = %q; want a line naming entry k1 and the factory error", out.String())
+	}
+}
+
+// TestKeeperCheckContinuesAfterTransient (loop-2 red-team
+// N20): a transient error on one entry must not skip the
+// remaining entries: every entry prints its JSON object, and
+// the typed error still surfaces. RED on the old code: one
+// JSON object, second entry never ticked.
+func TestKeeperCheckContinuesAfterTransient(t *testing.T) {
+	t.Parallel()
+	config := `{"default_profile":"default","profiles":{"default":{},"muse01":{}},` +
+		`"telegram":{"profile":"muse01","token":"` + keeperTestToken + `","allowed_user_ids":[111],"auto_approve":true},` +
+		`"keeper":[{"tag":"k1","profile":"default","browser":"http://127.0.0.1:9226","interval":"1h"},{"tag":"k2","profile":"muse01","browser":"http://127.0.0.1:9227","interval":"1h"}]}`
+	fake := &keeperFakeGateway{sessionStatus: 500, authStatus: 200}
+	env, out, errb, _ := keeperTestEnv(t, config, fake)
+	code := Run(context.Background(), []string{"keeper", "check"}, env)
+	if code != 3 {
+		t.Fatalf("check transient: code=%d, want 3 (GatewayError); stderr=%q out=%q", code, errb.String(), out.String())
+	}
+	lines := strings.Count(out.String(), `"tag":`)
+	if lines != 2 {
+		t.Fatalf("check printed %d JSON objects; want 2 (one per entry): %q", lines, out.String())
+	}
+	if !strings.Contains(out.String(), `"tag": "k1"`) || !strings.Contains(out.String(), `"tag": "k2"`) {
+		t.Fatalf("check output = %q; want both entry tags", out.String())
+	}
+}
+
+// TestKeeperCheckInterrupted (loop-2 technical N4): a
+// cancelled context ends `keeper check` with the interrupt
+// code instead of being swallowed as a skipped tick. RED on
+// the old code: exit 0.
+func TestKeeperCheckInterrupted(t *testing.T) {
+	t.Parallel()
+	fake := &keeperFakeGateway{sessionStatus: 200, authStatus: 200}
+	env, _, _, _ := keeperTestEnv(t, keeperTestConfig(), fake)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if code := Run(ctx, []string{"keeper", "check"}, env); code != 130 {
+		t.Fatalf("interrupted check: code=%d, want 130", code)
 	}
 }

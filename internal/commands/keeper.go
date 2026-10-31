@@ -58,10 +58,13 @@ selection (run/check/status):
   --tag TAG          only the entry with this tag
   --profile NAME     only the entry for this profile
 
+Default cadence is 24h per entry (the "interval" key; the
+adaptive rule shortens it once a cookie expiry is observed).
+
 check exit codes:
   0  healthy (or skipped: login in progress / lock held)
   2  config error (no keeper block, dangling refs, bad selection)
-  3  auth-expired or export-failed (entry stopped or unrecovered)
+  3  entry stopped (auth expired) or export failed
   4  tick timeout
 
 run prints one summary line per tick to stdout. check prints
@@ -81,8 +84,9 @@ const keeperCheckHelpText = `usage: castctl keeper check [--tag TAG | --profile 
 Run one tick now for each selected entry and print one JSON
 object per entry: tag, profile, outcome, stopped, cookies
 seen, whether the cookies file was written, and the next
-check time. Exit codes: 0 healthy, 2 config, 3
-auth-expired-or-export-failed, 4 timeout (90s per entry).
+check time. Exit codes: 0 healthy, 2 config, 3 entry
+stopped (auth expired) or export failed, 4 timeout (90s per
+entry).
 A transient error surfaces through the normal error
 contract instead (GatewayError 3, timeout 4, other 1).
 `
@@ -327,6 +331,12 @@ type telegramNotifier struct {
 }
 
 func (n *telegramNotifier) Notify(ctx context.Context, kind keeper.NoticeKind, profileName string) error {
+	// Bounded: a notice must never hang the runner on a dead
+	// Telegram endpoint (loop-2 red-team N9). 30s covers a
+	// normal send with retries inside the client; the tick
+	// already finished, so this bound only caps the wait.
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	form := url.Values{}
 	form.Set("chat_id", strconv.FormatInt(n.chatID, 10))
 	form.Set("text", keeper.NoticeText(kind, profileName))
@@ -406,10 +416,21 @@ func cmdKeeperRun(ctx context.Context, env *Env, g *globalOpts, args []string) e
 		fmt.Fprintf(env.stdout(), "keeper: %s (%s): %s cookies_seen=%d wrote=%v next_delay=%s\n",
 			keeper.SanitizeDisplay(entry.Tag), keeper.SanitizeDisplay(entry.Profile), res.Outcome, res.CookiesSeen, res.WroteCookies, res.NextDelay)
 	}
-	keeper.Run(ctx, entries, profiles, loc.ConfigDir, rts.factory, onTick)
+	results := keeper.Run(ctx, entries, profiles, loc.ConfigDir, rts.factory, onTick)
 	if ctx.Err() != nil {
 		// Interrupted: the main contract maps this to 130.
 		return ctx.Err()
+	}
+	// A factory failure is not a tick: the entry never ran,
+	// and Run records it with Ticks==0 and Last.Err set. It
+	// must not exit 0 silently (loop-2 red-team F5): name
+	// the entry and exit 2.
+	for _, res := range results {
+		if res.Ticks == 0 && res.Last.Err != nil {
+			fmt.Fprintf(env.stdout(), "keeper: %s: skipped (factory error, entry never ticked)\n",
+				keeper.SanitizeDisplay(res.Tag))
+			return errCode(2, res.Last.Err)
+		}
 	}
 	return nil
 }
@@ -445,6 +466,7 @@ func cmdKeeperCheck(ctx context.Context, env *Env, g *globalOpts, args []string)
 	rts := &keeperRuntimes{env: env, g: g, loc: loc, single: single, ctx: ctx}
 	defer rts.closeAll()
 	worst := 0
+	var firstTransientErr error
 	for _, entry := range entries {
 		prof := single.Profiles[entry.Profile]
 		deps, err := rts.factory(entry, prof)
@@ -455,6 +477,12 @@ func cmdKeeperCheck(ctx context.Context, env *Env, g *globalOpts, args []string)
 		res := keeper.Tick(tickCtx, deps)
 		timedOut := tickCtx.Err() == context.DeadlineExceeded
 		cancel()
+		// An interrupted parent context ends the command:
+		// never swallow it as a per-entry outcome, and never
+		// continue to further entries (loop-2 technical N4).
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if res.Stopped {
 			keeper.NotifyStopped(ctx, deps, deps.Notifier)
 		}
@@ -475,23 +503,30 @@ func cmdKeeperCheck(ctx context.Context, env *Env, g *globalOpts, args []string)
 				worst = 3
 			}
 		case res.Outcome == keeper.OutcomeTransientError:
-			// Transient: surface the typed error so the
-			// exit code follows the existing contract
-			// (GatewayError 3, anything else 1) instead
-			// of inventing a new code.
-			if res.Err != nil {
-				return res.Err
-			}
-			if worst < 1 {
+			// Transient: remember the first typed error
+			// and CONTINUE with the remaining entries so
+			// the output is complete (loop-2 red-team
+			// N20). The error surfaces after the loop
+			// through the normal contract (GatewayError
+			// 3, timeout 4, other 1) instead of
+			// inventing a new code.
+			if res.Err != nil && firstTransientErr == nil {
+				firstTransientErr = res.Err
+			} else if worst < 1 {
 				worst = 1
 			}
 		}
+	}
+	// Interrupt first (already returned above), then the
+	// remembered transient error, then the worst outcome.
+	if firstTransientErr != nil {
+		return firstTransientErr
 	}
 	switch worst {
 	case 4:
 		return errCode(4, errors.New("keeper check timed out"))
 	case 3:
-		return errCode(3, errors.New("keeper check: entry expired or export failed"))
+		return errCode(3, errors.New("keeper check: entry stopped (auth expired) or export failed"))
 	case 1:
 		return errCode(1, errors.New("keeper check: transient error"))
 	default:
