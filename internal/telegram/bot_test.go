@@ -1059,3 +1059,165 @@ func TestBotStartReturnsOnCancelWithBlockedHandler(t *testing.T) {
 	close(gate)
 	time.Sleep(100 * time.Millisecond)
 }
+
+// Loop-4 (D1) regression probes: no server-chosen fragment may ride
+// a summary through a method= field. Fresh markers (L4D1), never
+// reused from loop 3. Every probe must show NO "method=" field at
+// all. These tests were written before the fix and FAIL on 2cb0249,
+// where summarize emitted method=<identifier fragment>.
+
+func TestSummarizeLoop4NoMethodField(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	cases := []struct {
+		name string
+		in   string
+		want string // injected fragment that must be absent
+	}{
+		{"identifier", "failed to decode response body for method L4D1IDENT, retry", "L4D1IDENT"},
+		{"capped", "failed to decode response body for method " + "L4D1CAP" + strings.Repeat("X", 44) + ", retry", "L4D1CAP"},
+		{"token digits", "failed to decode response body for method 123456, retry", "123456"},
+		{"misclassifying phrase", "bad request, decode response body for method L4D1MISCLASS, bad", "L4D1MISCLASS"},
+	}
+	for _, tc := range cases {
+		got := tb.bot.summarize(tc.in)
+		if strings.Contains(got, "method=") {
+			t.Errorf("%s: summarize emitted a method= field in %q", tc.name, got)
+		}
+		if strings.Contains(got, tc.want) {
+			t.Errorf("%s: summarize kept the injected fragment in %q", tc.name, got)
+		}
+		if strings.Contains(got, fakeToken) {
+			t.Errorf("%s: summarize kept the fixture token", tc.name)
+		}
+		if !strings.HasPrefix(got, "telegram poll error: response decode failure message_length=") {
+			t.Errorf("%s: summarize = %q; want the response-decode class with no method field", tc.name, got)
+		}
+		if len(got) > 400 {
+			t.Errorf("%s: summarize output is %d bytes; want length-bounded", tc.name, len(got))
+		}
+	}
+}
+
+func TestBotGetUpdatesMethodInjectionNotLogged(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	// Hostile 400 description carrying a decode-body phrase and a
+	// method fragment: the poll log must carry no method= field.
+	desc := "bad request, decode response body for method L4D1POLL, " + fakeToken
+	srv.garbageBody = `{"ok":false,"error_code":400,"description":` + jsonString(desc) + `}`
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startBot(t, tb.bot, ctx)
+	time.Sleep(300 * time.Millisecond)
+	if err := stopBot(t, cancel, done); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start = %v", err)
+	}
+	logged := tb.logBuf.String()
+	if strings.Contains(logged, "method=") {
+		t.Errorf("log output contains a method= field (length %d; buffer not printed: it may carry secrets)", len(logged))
+	}
+	if strings.Contains(logged, "L4D1POLL") {
+		t.Error("log output contains the injected method fragment L4D1POLL")
+	}
+	if strings.Contains(logged, fakeToken) {
+		t.Error("log output contains the fixture token after a hostile description")
+	}
+	if len(logged) > 400 {
+		t.Errorf("log output is %d bytes after one hostile poll; want length-bounded", len(logged))
+	}
+	if !strings.Contains(logged, "message_length=") {
+		t.Error("log output lacks a class/length summary naming message_length")
+	}
+}
+
+func TestBotHandlerErrorMethodInjectionNotLogged(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	tb.handler.returnErr = errors.New("decode response body for method L4D1HANDLER, L4D1HANDLER-MARKER")
+	srv.enqueueUpdates(messageUpdate(61, 500, 111, "hi"))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startBot(t, tb.bot, ctx)
+	waitFor(t, "handler called", func() bool { return len(tb.handler.recorded()) == 1 })
+	if err := stopBot(t, cancel, done); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start = %v", err)
+	}
+	logged := tb.logBuf.String()
+	if strings.Contains(logged, "method=") {
+		t.Errorf("log output contains a method= field on the handler-error exit (length %d; buffer not printed)", len(logged))
+	}
+	if strings.Contains(logged, "L4D1HANDLER") {
+		t.Error("log output contains the injected method fragment on the handler-error exit")
+	}
+	if len(logged) > 400 {
+		t.Errorf("log output is %d bytes on the handler-error exit; want length-bounded", len(logged))
+	}
+	if !strings.Contains(logged, "message_length=") {
+		t.Error("log output lacks a class/length summary naming message_length")
+	}
+}
+
+func TestBotPanicMethodInjectionNotLogged(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	tb.handler.panicErr = errors.New("decode response body for method L4D1PANIC, L4D1PANIC-MARKER")
+	tb.handler.panicOnce = true
+	srv.enqueueUpdates(
+		messageUpdate(62, 500, 111, "first"),
+		messageUpdate(63, 500, 111, "second"),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startBot(t, tb.bot, ctx)
+	waitFor(t, "second message handled after panic", func() bool { return len(tb.handler.recorded()) == 2 })
+	if err := stopBot(t, cancel, done); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start = %v", err)
+	}
+	logged := tb.logBuf.String()
+	if strings.Contains(logged, "method=") {
+		t.Errorf("log output contains a method= field on the panic exit (length %d; buffer not printed)", len(logged))
+	}
+	if strings.Contains(logged, "L4D1PANIC") {
+		t.Error("log output contains the injected method fragment on the panic exit")
+	}
+	if strings.Contains(logged, fakeToken) {
+		t.Error("log output contains the fixture token after a token-bearing panic")
+	}
+	if !strings.Contains(logged, "message_length=") {
+		t.Error("log output lacks a class/length summary naming message_length")
+	}
+}
+
+func TestBotCallbackWarningNoMethodField(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	// The decider error carries a method-injection phrase; the
+	// warning sent to chat is built from summarize and must
+	// carry no method= field either.
+	tb.decider.err = errors.New("decode response body for method L4D1CALLBACK, L4D1CALLBACK-MARKER")
+	after := int64(42)
+	mk := tb.bot.ApprovalMarkup(Approval{ID: "appr-1", Options: []string{"allow_once", "deny"}}, ResumeTriple{SessionID: "s1", Title: "t", AfterSeq: &after})
+	data := mk.InlineKeyboard[0][0].CallbackData
+	srv.enqueueUpdates(callbackUpdate(64, 111, 500, 100, data, "cq-1"))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startBot(t, tb.bot, ctx)
+	waitFor(t, "decide handled", func() bool { return len(tb.decider.recorded()) == 1 })
+	waitFor(t, "warning sent", func() bool { return len(srv.callsOf("sendMessage")) >= 1 })
+	if err := stopBot(t, cancel, done); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start = %v", err)
+	}
+	for _, c := range srv.callsOf("sendMessage") {
+		if strings.Contains(c.Form["text"], "method=") {
+			t.Errorf("chat warning carries a method= field in %q", c.Form["text"][:min(len(c.Form["text"]), 120)])
+		}
+		if strings.Contains(c.Form["text"], "L4D1CALLBACK") {
+			t.Error("chat warning carries the injected method fragment")
+		}
+	}
+	if strings.Contains(tb.logBuf.String(), "method=") {
+		t.Error("log output contains a method= field on the callback-error exit")
+	}
+}

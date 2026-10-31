@@ -366,3 +366,107 @@ func TestApproveForeverClaimStormDocumentedResidual(t *testing.T) {
 		t.Errorf("decider calls in the storm = %d; want 20 (the documented residual)", got)
 	}
 }
+
+// Loop-4 (D2) regression probes: the ApproveForever no-forever
+// warning must carry no verbatim caller/server bytes. Fresh
+// markers (L4D2), never reused from loop 3. These tests were
+// written before the fix and FAIL on 2cb0249, where the warn
+// line logged approval_id/kind/scope/title verbatim.
+
+func TestApproveForeverNoForeverWarnBoundedFields(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, func(s *Settings) { s.AutoApprove = true })
+	denyOnly := func(id, title, kind, scope string) Approval {
+		return Approval{ID: id, Title: title, Kind: kind, Scope: scope, Options: []string{"deny"}}
+	}
+	// One fresh warn line per case: slice the log added by each
+	// call and assert on that slice only (lengths, not buffers).
+	warnSlice := func(before int, a Approval) string {
+		_ = tb.bot.ApproveForever(context.Background(), []Approval{a})
+		return tb.logBuf.String()[before:]
+	}
+	// 22.5k-char title: no title byte may reach the log.
+	before := len(tb.logBuf.String())
+	got := warnSlice(before, denyOnly("appr-l4d2-title", strings.Repeat("L4D2TITLE-", 2250), "", ""))
+	if strings.Contains(got, "L4D2TITLE") {
+		t.Error("warn line contains title bytes from a 22.5k-char title")
+	}
+	if len(got) > 400 {
+		t.Errorf("warn line is %d bytes for a 22.5k-char title; want length-bounded", len(got))
+	}
+	if !strings.Contains(got, "title_length=22500") {
+		t.Errorf("warn line lacks title_length=22500 (slice length %d)", len(got))
+	}
+	// Token-bearing title: the token must not reach the log.
+	before = len(tb.logBuf.String())
+	got = warnSlice(before, denyOnly("appr-l4d2-token", "L4D2TOKEN "+fakeToken+" tail", "", ""))
+	if strings.Contains(got, fakeToken) {
+		t.Error("warn line contains the fixture token from a token-bearing title")
+	}
+	if strings.Contains(got, "L4D2TOKEN") {
+		t.Error("warn line contains title bytes from a token-bearing title")
+	}
+	if !strings.Contains(got, "title_length=") {
+		t.Error("warn line lacks a title_length field")
+	}
+	if len(got) > 400 {
+		t.Errorf("warn line is %d bytes for a token-bearing title; want length-bounded", len(got))
+	}
+	// Long kind/scope: no kind/scope byte may reach the log.
+	before = len(tb.logBuf.String())
+	got = warnSlice(before, denyOnly("appr-l4d2-long", "T", strings.Repeat("L4D2KIND-", 1500), strings.Repeat("L4D2SCOPE-", 1500)))
+	if strings.Contains(got, "L4D2KIND") || strings.Contains(got, "L4D2SCOPE") {
+		t.Error("warn line contains kind/scope bytes from long kind/scope fields")
+	}
+	if len(got) > 400 {
+		t.Errorf("warn line is %d bytes for long kind/scope; want length-bounded", len(got))
+	}
+	if !strings.Contains(got, "kind_length=13500") || !strings.Contains(got, "scope_length=15000") {
+		t.Errorf("warn line lacks kind_length=13500/scope_length=15000 (slice length %d)", len(got))
+	}
+	if !strings.Contains(got, "appr-l4d2-long") {
+		t.Error("warn line lacks the gated approval_id for a well-formed id")
+	}
+	// Unbounded / ill-formed approval_id: gated to [omitted].
+	before = len(tb.logBuf.String())
+	got = warnSlice(before, denyOnly(strings.Repeat("x", 100)+":"+fakeToken, "T", "", ""))
+	if strings.Contains(got, fakeToken) {
+		t.Error("warn line contains the fixture token from an ill-formed approval_id")
+	}
+	if strings.Contains(got, strings.Repeat("x", 65)) {
+		t.Error("warn line contains an unbounded approval_id run")
+	}
+	if !strings.Contains(got, "[omitted]") {
+		t.Errorf("warn line lacks [omitted] for an ill-formed approval_id (slice length %d)", len(got))
+	}
+	if len(got) > 400 {
+		t.Errorf("warn line is %d bytes for an ill-formed approval_id; want length-bounded", len(got))
+	}
+}
+
+func TestLogApprovalIDGate(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"appr-1", "appr-1"},
+		{"A1_b-2", "A1_b-2"},
+		{"", "[omitted]"},
+		{strings.Repeat("x", 65), "[omitted]"},
+		{strings.Repeat("x", 64), strings.Repeat("x", 64)},
+		{"a:b", "[omitted]"},
+		{"a b", "[omitted]"},
+		{"a/b", "[omitted]"},
+		{fakeToken, "[omitted]"},
+		{"123456:FAKE", "[omitted]"},
+	}
+	for _, tc := range cases {
+		if got := tb.bot.logApprovalID(tc.in); got != tc.want {
+			t.Errorf("logApprovalID(%q) = %q; want %q", tc.in, got, tc.want)
+		}
+	}
+}
