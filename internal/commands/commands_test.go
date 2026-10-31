@@ -138,7 +138,7 @@ func TestDeferredCommands(t *testing.T) {
 	_, configFile := testHome(t, "")
 	env := &Env{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile})}
 	cases := map[string]string{
-		"telegram": "PR5", "update": "PR5",
+		"update": "PR5",
 	}
 	for cmd, pr := range cases {
 		out, errb := &bytes.Buffer{}, &bytes.Buffer{}
@@ -151,11 +151,26 @@ func TestDeferredCommands(t *testing.T) {
 	// --help still exits 0 for deferred commands.
 	out, errb := &bytes.Buffer{}, &bytes.Buffer{}
 	env.Stdout, env.Stderr = out, errb
+	if code := Run(context.Background(), []string{"update", "--help"}, env); code != 0 {
+		t.Errorf("update --help: code=%d, want 0", code)
+	}
+	if !strings.Contains(out.String(), "PR5") {
+		t.Errorf("update --help: %q, want PR5 note", out.String())
+	}
+	// telegram is wired (run/status): --help is real help with
+	// no deferred note, and bare telegram asks for a subcommand.
+	out, errb = &bytes.Buffer{}, &bytes.Buffer{}
+	env.Stdout, env.Stderr = out, errb
 	if code := Run(context.Background(), []string{"telegram", "--help"}, env); code != 0 {
 		t.Errorf("telegram --help: code=%d, want 0", code)
 	}
-	if !strings.Contains(out.String(), "PR5") {
-		t.Errorf("telegram --help: %q, want PR5 note", out.String())
+	if !strings.Contains(out.String(), "usage: castctl telegram") || strings.Contains(out.String(), "PR5") {
+		t.Errorf("telegram --help: %q, want real help without a PR5 note", out.String())
+	}
+	out, errb = &bytes.Buffer{}, &bytes.Buffer{}
+	env.Stdout, env.Stderr = out, errb
+	if code := Run(context.Background(), []string{"telegram"}, env); code != 2 || !strings.Contains(errb.String(), "subcommand") {
+		t.Errorf("telegram: code=%d err=%q, want 2 + subcommand requirement", code, errb.String())
 	}
 	// Wired PR4 commands no longer carry a deferred note.
 	out, errb = &bytes.Buffer{}, &bytes.Buffer{}

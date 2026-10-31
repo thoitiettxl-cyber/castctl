@@ -4,6 +4,7 @@ go 1.27.3
 
 require (
 	github.com/flynn/noise v1.1.0
+	github.com/go-telegram/bot v1.27.1-0.20261008103508-f53bfe55a30b
 	github.com/gorilla/websocket v1.5.3
 	github.com/miekg/dns v1.1.72
 	github.com/sagernet/sing v0.9.7-0.20261023115459-5dc452e537bf

@@ -90,6 +90,10 @@ docs/provenance.md.
   template text (same caveat).
 - go.uber.org/goleak v1.3.0 — MIT. Test-only: imported only from
   *_test.go files.
+- github.com/go-telegram/bot
+  v1.27.1-0.20261008103508-f53bfe55a30b — MIT. Linked; used by
+  internal/telegram for Bot API polling and calls. No upstream
+  source is copied into the tree.
 - github.com/bufbuild/protocompile v0.14.1 — Apache License 2.0.
   Build-time only, in the nested internal/proto/generate module;
   not linked into the castctl binary.
@@ -103,22 +107,18 @@ mistake these influences for vendored code.
    commit 90c447d3a8727d115aa7552ec93ce023736ed492) — plugin
    loader/ABI pattern and plugin config toggles:
    studied, no code taken. License name: MIT.
-2. go-telegram/bot (github.com/go-telegram/bot,
-   commit f53bfe55a30bb6d0c54327a4233e60d5bccb5604) — evaluated as a
-   candidate Telegram library for a future PR:
-   studied, no code taken; not imported. License name: MIT.
-3. cronet-go opt-in design — the evaluated TLS-engine option of a
+2. cronet-go opt-in design — the evaluated TLS-engine option of a
    future `with_cronet` build flavour plus a hash-verified sidecar;
    studied, no code taken. (The cronet-go library itself is listed
    in (b) as graph-only.)
-4. muse-cli 0.6.1 behavioral reference
+3. muse-cli 0.6.1 behavioral reference
    (github.com/thoitiettxl-cyber/muse-cli) — differential reference
    for gateway framing, the exit-code/JSON contract, Telegram caps,
    and node-ID rules; behavior reimplemented:
    studied, no code taken.
    (The byte-identical descriptor assets are listed in (a).)
    License name: MIT.
-5. Noise protocol, XX pattern — the public Noise specification's
+4. Noise protocol, XX pattern — the public Noise specification's
    handshake pattern, as implemented through the flynn/noise library
    listed in (b); studied, no code taken; no specification text
    copied. License name: not applicable (specification, not code).

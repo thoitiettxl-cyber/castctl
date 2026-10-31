@@ -153,11 +153,16 @@ Wired in PR4, on PR3's commands framework: `send`, `wait`,
 `approvals`, `approve`, `deny`, `auto-approve`, bare invocation
 (chat REPL).
 
+Wired in the Telegram PR, on the same framework: `telegram run`,
+`telegram status` (config block + polling + approval surface
+against a fake server; messages get a placeholder notice and
+decisions fail closed until step 5 wires Muse turns).
+
 Deferred (the parser names the PR; `--help` still works):
 
 | Commands | Lands in |
 | --- | --- |
-| `telegram` (+ subcommands), `update` | PR5 |
+| `update` | PR5 |
 
 `auth import` is implemented (added after PR3): `castctl auth import
 [--profile NAME] < cookies.txt` reads cookies from stdin only and
@@ -436,7 +441,13 @@ path, the `HistoryReader` production adapter, profile resolution +
 
 Still deferred:
 
-- Telegram wiring (PR5) and the `update` command.
+- The `update` command.
+- Telegram step-5 wiring: Muse turn execution from Telegram
+  messages, the full slash-command and callback surface beyond
+  decide/approve-all, media, `/login`, persistent offset/dedupe
+  state, and `telegram setup` / `install-service`. (The config
+  block, polling, send/wait/approval surface, and `telegram
+  run` / `telegram status` are wired; see the Telegram PR.)
 - Approval claim coordination between a monitor and a turn
   (the 15 s in-flight claim wait): a driver/monitor concern,
   not part of `AutoApprover`; PR5 Telegram territory.
