@@ -275,7 +275,7 @@ func TestAPIErrorRefuses(t *testing.T) {
 	if err == nil || codeOf(err) != 2 {
 		t.Fatalf("API 404: err=%v code=%d, want code 2", err, codeOf(err))
 	}
-	// 500 with a hostile body: no body bytes in the error (class/length only).
+	// 500 with a hostile body: no body bytes in the error (status/host/path/class/length summary only).
 	f2 := newFakeReleaseServer(t, "v0.6.4")
 	f2.latestStatus = 500
 	f2.latestJSON = `{"message":"SECRET-MARKER-12345 boom"}`

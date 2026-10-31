@@ -19,7 +19,12 @@ import (
 // It returns held=true when another update holds the lock: the
 // caller fails fast instead of waiting. The lock file is never
 // deleted. A lock path that is a symlink, or whose identity changes
-// between Lstat and open, refuses (G-75).
+// between Lstat and open, refuses (G-75). The identity re-check
+// narrows but does not close the check-to-flock window: a path swap
+// after the re-check can let two holders flock different inodes
+// (proven at this primitive under a swapping adversary in loop 3;
+// end-to-end double-replace was not demonstrated). 0600 applies
+// on creation only: a pre-existing lock file keeps its mode.
 func acquireUpdateLock(dir string) (release func(), held bool, err error) {
 	path := filepath.Join(dir, lockFileName)
 	if fi, lerr := os.Lstat(path); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {

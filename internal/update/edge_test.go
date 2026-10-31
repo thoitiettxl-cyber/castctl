@@ -86,7 +86,7 @@ func installFixture(t *testing.T, archive []byte) (*fakeReleaseServer, string, s
 	return f, filepath.Dir(exe), exe
 }
 
-func TestExtractTraversalMembersRefuse(t *testing.T) {
+func TestExtractTraversalOtherMembersInert(t *testing.T) {
 	bin := fakeBinary(t)
 	cases := map[string][]byte{
 		"dotdot":   buildTarEntries(t, []tarEntry{regEntry("../castctl", bin)}),

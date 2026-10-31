@@ -127,10 +127,10 @@ func wrapError(code int, msg string, cause error) *Error {
 	return &Error{code: code, msg: msg, cause: cause}
 }
 
-// httpError summarises an HTTP failure as status + class + body
-// length only (logging-PR rule): no body bytes, no URL query, no
-// transport error text. It implements LogSummary so SummarizeErr
-// renders this summary through any wrapper chain.
+// httpError summarises an HTTP failure as status, host, path,
+// class, and body length (logging-PR rule): no body bytes, no URL
+// query, no transport error text. It implements LogSummary so
+// SummarizeErr renders this summary through any wrapper chain.
 type httpError struct {
 	op      string // GET
 	host    string // host of the request URL, no port, no query

@@ -170,7 +170,7 @@ Behaviour, in order:
    The target is resolved once through symlinks, including a
    target resolving out of the directory. An advisory flock on
    a lock file in the target directory (`.castctl-update.lock`,
-   0600, never deleted, persists by design; only temp files are
+   created 0600, never deleted, persists by design; only temp files are
    removed) is held across download and replace; a held lock
    fails fast with "another update in progress". A tolerated
    directory-sync error (filesystems without directory fsync)
@@ -188,8 +188,9 @@ bytes already checksum-verified against the release.
 Exit codes: 0 = success, already-latest no-op, or dry-run
 report; 2 = usage and policy refusals (no download, no replace;
 release metadata may have been fetched first); 1 = operational
-failures. Error output carries class and length only, never
-response bodies or secrets.
+failures. Error output carries status, host, path, class, and
+body length only, never response bodies, query strings, or
+secrets.
 
 Live-proof checklist (for the operator's own box, before
 relying on `update`): run `castctl update --dry-run` against the
