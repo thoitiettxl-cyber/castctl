@@ -104,6 +104,11 @@ docs/provenance.md.
   file and copyright as chromedp). CDP protocol types for the
   `with_chromedp` build only. No upstream source is copied
   into the tree.
+- github.com/go-json-experiment/json
+  v0.0.0-20260213210345-44df1a37e875 — BSD 3-Clause
+  (LICENSE file: Copyright (c) 2020 The Go Authors).
+  Indirect dependency in `go.mod`. No upstream source is
+  copied into the tree.
 - github.com/bufbuild/protocompile v0.14.1 — Apache License 2.0.
   Build-time only, in the nested internal/proto/generate module;
   not linked into the castctl binary.

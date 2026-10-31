@@ -704,6 +704,14 @@ func runExport(ctx context.Context, exp Exporter) ([]StoredCookie, int, error) {
 // recordTransient persists a transient-error outcome (backoff
 // ladder exhausted or a non-auth error after the export
 // re-check) and returns the result. No stop, no notice.
+// Updates received alongside the failed check are
+// intentionally NOT persisted here (loop-2 technical N9 /
+// red-team N1-N2 disposition): a failed step's Set-Cookie
+// values are partial/untrusted, and the next tick
+// re-observes from the cookies file. The stop path
+// (stopEntry) DOES persist per-response updates: an
+// AuthError's last word is the server's verdict, not a
+// transient failure.
 func recordTransient(clock Clock, store *Store, base time.Duration, err error, stage string) TickResult {
 	ls, lerr := store.lock()
 	if lerr != nil {
@@ -749,6 +757,12 @@ func recordExportFailed(clock Clock, store *Store, base time.Duration, err error
 // last word is still recorded). The notice itself is sent by
 // the caller after Tick returns — see NotifyStopped — because
 // a network send must never happen under the file lock.
+// Durability note (loop-2 red-team N3): if the stop-path lock
+// fails, the returned result still stops THIS run's goroutine
+// (in-memory), but no marker is persisted; the next run
+// re-ticks and re-stops. The marker's durability depends on
+// the lock like every other state write — no separate
+// mechanism is added for it.
 func stopEntry(clock Clock, store *Store, base time.Duration, updates []CookieUpdate, jarForm bool, fileMissing bool, reason string, cause error) TickResult {
 	ls, lerr := store.lock()
 	if lerr != nil {

@@ -348,10 +348,10 @@ per entry (unknown keys are rejected):
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `tag` | string | — (required) | Entry tag, unique across entries. A second entry with the same tag, or two entries for the same profile, is a config error (exit 2). |
+| `tag` | string | — (required) | Entry tag, unique across entries. A second entry with the same tag, or two entries for the same profile, is a config error (exit 2). Tags are exact: surrounding whitespace is rejected (never trimmed); `/`, `\`, control characters (including newline), and the tags `.`/`..` are rejected — tags name owner files under the profile directory. |
 | `profile` | string | — (required) | Tag of the profile whose cookies are watched. Must name a profile in `profiles`; a dangling tag is a config error (exit 2). |
-| `browser` | string | — (required) | CDP URL of the already-running Chrome to re-export cookies from. `http://` and `ws://` loopback URLs only, with an explicit port; any non-loopback URL, userinfo, or default port is a config error (exit 2, fail closed). Example: `http://127.0.0.1:9226`. |
-| `interval` | duration string | `24h` | Tick cadence. Zero or absent means the documented default cadence of 24h; a present value must parse with `time.ParseDuration` and be positive. The effective delay is adaptive: when a driving cookie expiry is known, the next delay is `min(interval, clamp(remaining/4, 1h, 7d))`, ±20% jitter, re-drawn per wait. |
+| `browser` | string | — (required) | CDP URL of the already-running Chrome to re-export cookies from. `http://` and `ws://` loopback URLs only, with an explicit port, no userinfo, no query/fragment; any non-loopback URL is a config error (exit 2, fail closed). Example: `http://127.0.0.1:9226`. Two entries sharing one browser (after canonicalisation of spelling variants such as a trailing slash or host case) is a config error. |
+| `interval` | duration string | `24h` | Tick cadence. Zero or absent means the documented default cadence of 24h; a present value must parse with `time.ParseDuration`, be positive, and be at most 1 year (`8760h`, the jitter-arithmetic bound). The effective delay is adaptive: when a driving cookie expiry is known, the next delay is `min(interval, clamp(remaining/4, 1h, 7d))`, ±20% jitter, re-drawn per wait. |
 | `notify` | string | `""` (off) | Only `""` or `"telegram"`. `"telegram"` sends fixed-content notices through the single `telegram` block (which must exist); any other value, or `"telegram"` with no telegram block, is a config error (exit 2). |
 
 Behaviour:
@@ -368,19 +368,38 @@ Behaviour:
   `Network.getCookies` fallback) and merged. Only `muse.ai`
   and `auth.muse.ai` cookies are kept; everything else is
   dropped (count only). A merged set is written only if it
-  contains a non-empty `hatch_sess` and its earliest expiry
-  is not already past. Builds without `-tags with_chromedp`
-  detect and report expiry but cannot re-export: the entry
-  stops with the typed unavailable outcome instead.
+  contains a non-empty `hatch_sess` and the earliest
+  FILTERED-domain expiry is not already past: an expired
+  cookie from an unrelated domain is preserved verbatim by
+  the merge and never vetoes a valid re-export. CDP
+  snapshots are faithful: an exported cookie is recorded
+  exactly as the browser holds it (an empty value with a
+  future expiry is written verbatim), and a filtered cookie
+  absent from the snapshot is dropped. Builds without
+  `-tags with_chromedp` detect and report expiry but cannot
+  re-export: the entry stops with the typed unavailable
+  outcome instead.
 - **Cookie save.** Netscape jar only (7 columns, LF, trailing
   newline, deterministic sort). Set-Cookie updates merge into
   a stored jar; a stored non-jar file is left untouched by
   Set-Cookie capture (the tick still runs, state records the
   observed expiry), while a CDP export REPLACES a non-jar file
-  with the validated export (dropped count recorded). Writes
-  happen only on byte-difference, atomically, mode 0600 with a
-  0600 `.bak`, under a per-cookies-file lock. Cookie values
-  are never logged or printed, anywhere.
+  with the validated export (dropped count recorded). The
+  merge key ignores the leading dot on domains: a host-only
+  stored entry and a Domain-scoped update are the same cookie
+  for merge purposes. Set-Cookie semantics: a present Domain
+  normalises to a leading-dot domain; Max-Age wins over
+  Expires; an empty value with a future expiry REPLACES
+  (expiry-only deletion is never assumed from an empty
+  value); an empty value with no expiry information deletes
+  (the Max-Age=0 clear shape). Writes happen only on
+  byte-difference, atomically, mode 0600 with a 0600 `.bak`,
+  under a per-cookies-file lock. Cookie values are never
+  logged or printed, anywhere. The keeper's jar parser
+  requires exactly 7 columns; the legacy gateway reader
+  accepts 7 or more — the divergence is intentional (the
+  keeper rewrites the file and must not silently drop extra
+  columns) and is bridged by the state-only reset path.
 - **State file.** Per profile, `session-state.json` (mode
   0600) next to — never inside — `config.json`, schema v1:
   `logged_out`, `keeper_stopped` + reason, `last_checked_at`,
@@ -393,18 +412,37 @@ Behaviour:
   The driving cookie is `hatch_sess` when present with a
   non-session expiry, else the earliest expiry; both fields
   are carried in state so the choice stays a resolver change.
+  A corrupt or unknown-version state file does NOT brick the
+  keeper: ticks substitute a fresh state, re-observe from the
+  cookies file, and flag `state_corrupt` in `keeper check`
+  output and `keeper status` (reason `state_corrupt`); the
+  next successful save replaces the corrupt file, and the
+  import/login reset always succeeds. Manual remedy: delete
+  `session-state.json` in the profile directory (observed
+  state is rebuilt on the next tick; the cookies file is
+  untouched).
+- **Run/check behaviour.** `keeper run` prints one summary
+  line per tick and exits 2 naming the entry when an entry's
+  factory fails (the entry never ticked) instead of exiting 0
+  silently. `keeper check` ticks every selected entry even
+  when one errors transiently (the first typed error is
+  returned after all entries print), and an interrupt ends
+  the command instead of being swallowed as a skip.
 - **Notifications.** Fixed content only: profile name,
   outcome, the re-login path (`auth login` / `auth import`),
   and "No action was taken automatically." No secrets, no
   cookie names, no error text. At most one notice per
   false→true logged-out transition; a failed send stays
-  pending for a later tick. Targeting: the notice goes to the
+  pending for a later tick. Deduplication is at-least-once
+  across crashes: a crash between a successful send and the
+  marker-clear may re-send once. Targeting: the notice goes to the
   FIRST `allowed_user_ids` entry of the telegram block, on
   the assumption that a user id is a valid chat id for a 1:1
   bot chat. Delivery to that id is UNVERIFIED offline and is
   a live-test gate; if it fails, the fix is a chat registry,
   not a silent change here. The notice travels through the
-  telegram block's LINKED profile outbound.
+  telegram block's LINKED profile outbound, bounded by a 30s
+  timeout.
 - **Shared session.** Exported cookies share the browser's
   session: a server-side revoke kills both the browser and
   the profile session. The keeper validates liveness with the
@@ -423,7 +461,13 @@ Behaviour:
   base the launch fails closed (no fail-closed routed inbound
   exists yet) rather than launching a direct-egress browser.
   The human completes the login; captcha/2FA are never
-  auto-solved. See `castctl auth login --help`.
+  auto-solved. Honesty note on the attach path: castctl's own
+  code sends no Runtime/JS calls and the browser-level export
+  path sends only `Storage.getCookies`, but chromedp's target
+  attach bootstrap enables Runtime/DOM/CSS/Log/Inspector and
+  evaluates the constant `"self"` — the CDP allowlist
+  discipline covers castctl's own calls, not the library
+  bootstrap. See `castctl auth login --help`.
 
 ## The `dns` section — INTERIM, GLOBAL, COMPAT-ONLY
 

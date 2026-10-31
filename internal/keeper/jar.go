@@ -45,6 +45,15 @@ import (
 //     containing one cannot round-trip through the format.
 //   - Values are verbatim: no quoting, no escaping.
 //
+// Known limit (loop-2 red-team N14, documented, no scope
+// expansion): cookie attributes beyond name, value, domain,
+// path, secure, HttpOnly, and expiry are NOT modeled —
+// SameSite, Priority, Partitioned, and the __Secure-/__Host-
+// prefix rules are neither preserved across a jar round-trip
+// nor enforced on merge. The keeper is a session keeper, not
+// a cookie-jar implementation; the jar format has no columns
+// for these, and the cheap chain sends name=value pairs only.
+//
 // Strictness divergence (documented, intentional): ParseJar
 // below requires EXACTLY 7 columns per row, while the legacy
 // reader gateway.ParseCookies accepts >= 7 (extra columns
@@ -273,6 +282,9 @@ type CookieUpdate struct {
 //     default-path of the request URL.
 //   - Max-Age > 0 wins over Expires; expiry = receivedAt + Max-Age.
 //   - Max-Age < 0, or an Expires at/past receivedAt, deletes.
+//   - A Max-Age large enough to overflow time.Duration wraps
+//     to a past expiry, which CookieHeader then skips:
+//     fail-closed, no clamp applied (loop-2 red-team N13).
 //   - Empty value + future expiry REPLACES (freeze (c)):
 //     expiry-only deletion is not assumed from an empty value.
 //   - Empty value + no expiry information deletes: net/http's

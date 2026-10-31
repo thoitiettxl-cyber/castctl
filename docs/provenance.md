@@ -930,6 +930,7 @@ Status: `VERIFIED` except as tagged.
 | `google.golang.org/protobuf` | `v1.36.11` | BSD-3-Clause-style template text | Yes — generated `.pb.go` runtime |
 | `github.com/chromedp/chromedp` | `v0.21.0` | MIT License (named in file) | Added by the session-keeper PR; `with_chromedp`-gated only — `internal/keeper` CDP attach/export/screencast (import-level verified) |
 | `github.com/chromedp/cdproto` | `v0.157.8` | MIT License (named in file) | Added by the session-keeper PR; `with_chromedp`-gated only — CDP protocol types for `internal/keeper` |
+| `github.com/go-json-experiment/json` | `v0.0.0-20260213210345-44df1a37e875` | BSD 3-Clause (LICENSE file, Copyright (c) 2020 The Go Authors) | Indirect (`go.mod`); license read from the module cache — added in loop 2; loop-1 verifier measured 0 occurrences in the tagged keeper `go list -deps` |
 
 Indirect but load-bearing (from the `go.mod` indirect block;
 licenses read from the module cache):

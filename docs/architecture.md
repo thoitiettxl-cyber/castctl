@@ -296,7 +296,12 @@ the launch fails closed instead of spawning. The keeper's
 tree: observed state (expiry dates, outcomes, warn markers),
 not configuration — it lives next to `config.json`, never
 inside it, because a sticky stopped state must survive config
-rewrites and must never be edited as config.
+rewrites and must never be edited as config. Separation also
+keeps tick-churn out of a token-bearing file: `config.json`
+carries secrets (the telegram token, cookie paths), and
+rewriting it on every tick would churn a secret-bearing file
+for observed state; state that changes every tick lives
+beside it instead.
 
 ## Web UI
 

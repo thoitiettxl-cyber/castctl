@@ -111,6 +111,10 @@ type SessionState struct {
 
 	// Warn markers for the durable warn-once dedup: at most one
 	// notice per false->true logged_out transition.
+	// At-least-once across crashes (loop-2 red-team N18,
+	// documented): a crash between a successful send and the
+	// marker-clear may re-send once; no exactly-once
+	// mechanism is claimed.
 	WarnKind    string     `json:"warn_kind,omitempty"`
 	WarnPending bool       `json:"warn_pending,omitempty"`
 	WarnSent    bool       `json:"warn_sent,omitempty"`
