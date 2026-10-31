@@ -608,20 +608,26 @@ func (b *Bot) errorsHandler(err error) {
 // bounded prefix; an unrecognised shape renders with the
 // generic class. Detection only selects the label: the bound
 // does not depend on it, so an undetected shape is still
-// fragment-free. The token is scrubbed out of the examined
-// prefix first (a hostile server body may echo it), but no
-// scrub of the full text is needed: nothing verbatim is
-// emitted, and the only extracted fragment (the method name
-// in the decode-failure class) is restricted to a short
-// library identifier.
+// fragment-free. No fragment of the input is ever emitted:
+// summarize returns only fixed-vocabulary labels and the
+// input's rune count, and carries no method field of any
+// kind (no method, op, or api_method field exists in any
+// summary output).
+// The token is scrubbed out of the examined prefix first
+// (a hostile server body may echo it), but no scrub of the
+// full text is needed: nothing verbatim is emitted.
 //
 // Bounded work: summarize inspects only the first 256 runes
-// (for the class label) plus one allocation-free rune-count
-// pass for message_length. It never runs SafeString,
-// ReplaceAll, or any other whole-input pass over a hostile
-// body, so a multi-megabyte server response costs no more
-// than a short one. Classification is untouched: 429 and
-// parse-error classification run on the raw error in
+// for the class label (one ReplaceAll over that prefix,
+// preserving scrub-before-detection order for the examined
+// text) plus one allocation-free rune-count pass over the
+// whole input for message_length. The count pass is linear
+// in the input length, so a multi-megabyte input costs more
+// than a short one — one linear pass, not a whole-input
+// scrub, SafeString, or rune-slice conversion — and the
+// emitted output is always a short fixed-shape summary.
+// Classification is untouched: 429 and parse-error
+// classification run on the raw error in
 // retryCall/isParseError before scrubbing, and summarize is
 // log-only. Callers must never log an error by unwrapping
 // and printing: the scrubbed error type carries no raw chain
@@ -630,10 +636,10 @@ func (b *Bot) errorsHandler(err error) {
 func (b *Bot) summarize(msg string) string {
 	length := utf8.RuneCountInString(msg)
 	prefix := b.scrub(firstRunes(msg, summarizePrefixRunes))
-	class, method := summarizeClass(prefix)
+	class := summarizeClass(prefix)
 	switch class {
 	case "response decode failure":
-		return fmt.Sprintf("telegram poll error: response decode failure method=%s message_length=%d", method, length)
+		return fmt.Sprintf("telegram poll error: response decode failure message_length=%d", length)
 	case "update decode failure":
 		return fmt.Sprintf("telegram poll error: update decode failure message_length=%d", length)
 	case "":
@@ -662,24 +668,29 @@ func firstRunes(s string, n int) string {
 
 // summarizeClass selects the summary class label from a
 // bounded, token-scrubbed prefix of the error text. It returns
-// ("", "") for an unrecognised shape. The labels are a fixed
+// "" for an unrecognised shape. The labels are a fixed
 // safe vocabulary: no part of the input text is ever returned.
-func summarizeClass(prefix string) (class, method string) {
+// Class selection is by substring search in the prefix, so a
+// hostile fragment can mis-select the label (e.g. a 400
+// description embedding a decode-body phrase renders with
+// the response-decode class); the label is fixed-vocabulary
+// either way, so no fragment is emitted.
+func summarizeClass(prefix string) string {
 	if isResponseBodyError(prefix) {
-		return "response decode failure", decodeErrorMethod(prefix)
+		return "response decode failure"
 	}
 	if strings.Contains(prefix, "decode update") {
-		return "update decode failure", ""
+		return "update decode failure"
 	}
 	for _, sentinel := range []string{
 		"too many requests", "bad request", "forbidden",
 		"unauthorized", "not found", "conflict",
 	} {
 		if strings.Contains(prefix, sentinel) {
-			return sentinel, ""
+			return sentinel
 		}
 	}
-	return "", ""
+	return ""
 }
 
 // isResponseBodyError reports whether the examined prefix is
@@ -693,41 +704,6 @@ func isResponseBodyError(msg string) bool {
 	return strings.Contains(msg, "decode response body") ||
 		strings.Contains(msg, "read response body") ||
 		strings.Contains(msg, "decode response result")
-}
-
-// decodeErrorMethod extracts the method name from a
-// body-carrying error ("... for method <name>, ..."), or
-// "unknown" when the text does not carry one. Only a short
-// library identifier is ever returned: the name is cut at
-// the first comma/space, restricted to identifier characters,
-// and capped at 32 characters, so no server fragment can
-// ride in through the method position.
-func decodeErrorMethod(msg string) string {
-	const prefix = "for method "
-	i := strings.Index(msg, prefix)
-	if i < 0 {
-		return "unknown"
-	}
-	rest := msg[i+len(prefix):]
-	if j := strings.IndexAny(rest, ", "); j >= 0 {
-		rest = rest[:j]
-	}
-	end := 0
-	for end < len(rest) {
-		c := rest[end]
-		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' {
-			end++
-		} else {
-			break
-		}
-	}
-	if end == 0 {
-		return "unknown"
-	}
-	if end > 32 {
-		end = 32
-	}
-	return rest[:end]
 }
 
 // scrub removes every occurrence of the token from s. The token

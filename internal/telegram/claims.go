@@ -27,6 +27,7 @@ import (
 	"context"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // AutoLogEntry records one auto-decision, newest last, capped at
@@ -95,6 +96,34 @@ const (
 // the same id must be harmless), and an error after the
 // decider's effect is indistinguishable from a failure —
 // callers must not assume one Decide call per id.
+// logApprovalID renders an approval id for a log line only.
+// The id is token-scrubbed first, then emitted only when it
+// matches the strict structural gate — 1–64 runes of
+// [A-Za-z0-9_-], the wait.go structuralApprovalID bound —
+// and renders [omitted] otherwise, fail-closed. This mirrors
+// the logging-PR structural pattern: an id format is not
+// documented anywhere in this tree, so the gate is a
+// conservative bound, not a claim about the server's format.
+// The full id is unchanged everywhere else (decider calls,
+// AutoLogEntry, chat text); only log lines use this form.
+func (b *Bot) logApprovalID(id string) string {
+	id = b.scrub(id)
+	n := 0
+	for _, r := range id {
+		n++
+		if n > 64 {
+			return "[omitted]"
+		}
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+			return "[omitted]"
+		}
+	}
+	if n == 0 {
+		return "[omitted]"
+	}
+	return id
+}
+
 // A failed decide releases the claim so a retry can decide it
 // (src/muse_cli/tgbot.py:1568-1572, _fail_claim). No claim is
 // created for an id that does not offer forever; that is
@@ -151,14 +180,30 @@ func (b *Bot) ApproveForever(ctx context.Context, items []Approval) []string {
 			b.claimsMu.Unlock()
 			b.failClaim(w.a.ID, w.claim)
 			if !warned {
+				// Structural rendering (loop 4, D2): no
+				// approval field byte reaches this line
+				// except a gated approval_id. Title, kind,
+				// and scope are unconstrained caller/server
+				// strings, so only their rune lengths are
+				// emitted (the wait.go structural-rendering
+				// pattern: title_length / option_count, no
+				// title byte of any kind). The approval_id
+				// is emitted only when it matches the strict
+				// gate in logApprovalID; anything else
+				// renders [omitted]. AutoLogEntry and the
+				// chat/notify paths still carry the full
+				// fields — only this log line is structural.
 				b.logger.Warn("telegram approval offers no forever option; skipping auto-decision",
-					"approval_id", w.a.ID, "kind", w.a.Kind, "scope", w.a.Scope, "title", w.a.Title)
+					"approval_id", b.logApprovalID(w.a.ID),
+					"kind_length", utf8.RuneCountInString(w.a.Kind),
+					"scope_length", utf8.RuneCountInString(w.a.Scope),
+					"title_length", utf8.RuneCountInString(w.a.Title))
 			}
 			continue
 		}
 		if err := b.decider.Decide(ctx, w.a.ID, decision); err != nil {
 			b.logger.Warn("telegram auto-decide failed; claim released",
-				"approval_id", w.a.ID, "err", b.summarize(err.Error()))
+				"approval_id", b.logApprovalID(w.a.ID), "err", b.summarize(err.Error()))
 			b.failClaim(w.a.ID, w.claim)
 			continue
 		}
