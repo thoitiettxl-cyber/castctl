@@ -37,14 +37,14 @@ Global options:
   --help, -h       print this help and exit.
 
 Commands (PR4 wired send, wait, approvals and the chat REPL;
-telegram and update are carried to PR5):
+telegram run/status wired in the Telegram PR; update is carried to PR5):
   chat, status, usage, invite, redeem, threads, history, send, wait,
   approvals, approve, auto-approve, deny, files, download,
   watch, feed, feed-status, feed-react, feed-prompt, goals, goal,
   ideas, idea, idea-exec, unread, seen, session-start,
   session-rename, session-pin, session-unpin, session-archive,
   session-unarchive, session-delete, stop, wake, raw, fs, auth,
-  profile, config
+  profile, config, telegram
 
 Run "castctl <command> --help" for per-command help.
 
@@ -68,7 +68,6 @@ func deferredHelpText(cmd, pr string) string {
 		"approve":      "decide a pending approval (allow once / always / deny)",
 		"deny":         "deny a pending approval",
 		"auto-approve": "manage the auto-approve toggle (status/on/off/once)",
-		"telegram":     "Telegram bot that operates your Muse (setup, run, install-service, status)",
 		"update":       "check for and install updates from the fork's main branch",
 		"chat":         "interactive chat REPL (bare invocation with no command)",
 	}

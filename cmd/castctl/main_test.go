@@ -69,8 +69,10 @@ func TestUnknownAndDeferredCommandsExit2(t *testing.T) {
 	if code, _, errb := runMain(t, home, "send"); code != 2 || strings.Contains(errb, "is not implemented in the Go port yet") {
 		t.Fatalf("send: code=%d err=%q, want 2 without a deferred message", code, errb)
 	}
-	if code, _, errb := runMain(t, home, "telegram"); code != 2 || !strings.Contains(errb, "PR5") {
-		t.Fatalf("telegram: code=%d err=%q, want 2 + PR5", code, errb)
+	// telegram is wired (run/status): bare telegram fails on
+	// the missing subcommand with exit 2, with no deferred note.
+	if code, _, errb := runMain(t, home, "telegram"); code != 2 || !strings.Contains(errb, "subcommand") || strings.Contains(errb, "PR5") {
+		t.Fatalf("telegram: code=%d err=%q, want 2 + subcommand, no PR5", code, errb)
 	}
 	if code, _, errb := runMain(t, home, "frobnicate"); code != 2 || strings.Contains(errb, "is not implemented in the Go port yet") {
 		t.Fatalf("unknown command: code=%d err=%q, want 2 without a deferred message", code, errb)

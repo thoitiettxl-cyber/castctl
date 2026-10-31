@@ -740,8 +740,7 @@ type globalOpts struct {
 // deferredTable; unknown names are rejected, never guessed.
 var commandTable = map[string]*commandSpec{}
 var deferredTable = map[string]string{
-	"telegram": "PR5",
-	"update":   "PR5",
+	"update": "PR5",
 }
 
 func registerCommand(spec *commandSpec) {
@@ -758,7 +757,7 @@ var commandOrder = []string{
 	"goals", "goal", "ideas", "idea", "idea-exec", "unread", "seen",
 	"session-start", "session-rename", "session-pin", "session-unpin",
 	"session-archive", "session-unarchive", "session-delete", "stop", "wake",
-	"raw", "fs", "auth", "profile", "config",
+	"raw", "fs", "auth", "profile", "config", "telegram",
 }
 
 // Run is the command-line entry point. args excludes argv[0]. It
