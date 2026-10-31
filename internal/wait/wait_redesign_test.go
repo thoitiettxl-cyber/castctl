@@ -482,6 +482,65 @@ func TestWaitRedesignT12NeverSucceedingHistoryTerminates(t *testing.T) {
 	})
 }
 
+// Micro-fix (red-team Finding 1): the finish last-chance FAILED
+// proof must spend no history read while the boundary is
+// unknown — AcceptReplayedFailed refuses on an unknown
+// boundary, so the read is wasted. An ignored FAILED terminal
+// with an unknown boundary, a derivation that fails on all 6
+// attempts, and a final read that succeeds on its first
+// window: 6 derivation + 0 last-chance + 1 final = 7 reads,
+// with the result unchanged from the pre-gate behaviour
+// (KindTimeout/124, no replies, boundary-unknown note).
+func TestWaitRedesignLastChanceProofSpendsNoReadWhenBoundaryUnknown(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sub := &fakeSubscriber{
+			block: true,
+			loopScript: [][]byte{
+				recordJSON(taskEv("interrupted", "R", "R", 180, nil)),
+			},
+		}
+		resps := []historyResp{
+			{err: errTransport}, {err: errTransport},
+			{err: errTransport}, {err: errTransport},
+			{err: errTransport}, {err: errTransport},
+			historyOK([]any{userEv(100), asst(150, "completed", "stale?", nil)}),
+		}
+		hist := &queueHistory{resps: resps}
+		res := runRunner(t, Config{
+			Timeout:      10 * time.Second,
+			RecheckAfter: -1,
+			CheckEvery:   -1,
+			Dial:         sub.dial,
+			History:      hist,
+		})
+		if res.Kind != KindTimeout || res.ExitCode != 124 {
+			t.Errorf("res = %+v, want KindTimeout/124", res)
+		}
+		if res.Outcome != "timeout" {
+			t.Errorf("Outcome = %q, want %q", res.Outcome, "timeout")
+		}
+		if res.Status != "interrupted" {
+			t.Errorf("Status = %q, want %q", res.Status, "interrupted")
+		}
+		if res.AfterSeq != 0 {
+			t.Errorf("AfterSeq = %d, want 0 (boundary unknown)", res.AfterSeq)
+		}
+		if len(res.Replies) != 0 {
+			t.Errorf("replies = %+v, want none (boundary unknown)", res.Replies)
+		}
+		if res.FinalReadFailed {
+			t.Errorf("FinalReadFailed = true, want false (final read succeeded)")
+		}
+		wantNote := "turn-end boundary unknown: history could not be read, so no replies are reported; run `castctl wait` again"
+		if res.Note != wantNote {
+			t.Errorf("note = %q, want %q", res.Note, wantNote)
+		}
+		if hist.calls != 7 {
+			t.Errorf("history calls = %d, want 7 (6 derivation + 0 last-chance + 1 final)", hist.calls)
+		}
+	})
+}
+
 // T13 (meta-test, deaf stream): a stream that never delivers a
 // stopping record, with empty history, must still return at the
 // deadline. A synctest deadlock here is a FAIL.
