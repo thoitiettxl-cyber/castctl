@@ -34,22 +34,34 @@ import (
 // dispatches input except the user's own transport input, and
 // sends no Runtime/JS calls of its own.
 //
-// HONEST BOOTSTRAP NOTE (loop-2 correction): castctl's own code
-// issues no Runtime calls, but chromedp's target attach does.
-// Attaching to an existing target runs chromedp's bootstrap
-// (attachTarget), which enables Runtime, Log, Network,
-// Inspector, Page, DOM, and CSS on the target, sets
-// Target.setDiscoverTargets and Target.setAutoAttach, and
-// evaluates the CONSTANT expression "self" (no page script,
-// no user data, no castctl input). New targets opened while
-// the session runs are auto-attached for the session's
-// lifetime. The EXPORT path is different: browser-level
-// Storage.getCookies sends only that one call (see
-// export_cdp.go and the wire test). Any claim that the attach
-// path "never enables Runtime" is false; this comment and the
-// PR body state the bootstrap as observed (wire-recorded
-// 2026-10-31, chromedp v0.21.0; the full method set is
-// asserted, superset-style, in screencast_wire_test.go).
+// HONEST BOOTSTRAP NOTE (loop-2 correction, micro-loop
+// completion): castctl's own code issues no Runtime calls,
+// but chromedp's target attach does. Attaching to an existing
+// target runs chromedp's bootstrap (attachTarget), which
+// enables Runtime, Log, Network, Inspector, Page, DOM, and
+// CSS on the target, sets Target.setDiscoverTargets and
+// Target.setAutoAttach, enables Page.setLifecycleEventsEnabled,
+// and evaluates the CONSTANT expression "self" (no page
+// script, no user data, no castctl input). New targets
+// opened while the session runs are auto-attached for the
+// session's lifetime. The EXPORT path is different:
+// browser-level Storage.getCookies sends only that one call
+// (see export_cdp.go and the wire test). Any claim that the
+// attach path "never enables Runtime" is false.
+//
+// Full method set observed on the attach path (wire-recorded
+// 2026-10-31, chromedp v0.21.0; Page.enable is sent twice —
+// once at bootstrap, once when screencasting starts):
+// Browser.getVersion, Target.attachToTarget, Runtime.enable,
+// Runtime.evaluate("self"), Log.enable, Network.enable,
+// Inspector.enable, Page.enable, DOM.enable, CSS.enable,
+// Target.setDiscoverTargets, Target.setAutoAttach,
+// Page.setLifecycleEventsEnabled, Page.getFrameTree,
+// DOM.getDocument, Page.startScreencast, Page.stopScreencast,
+// Target.detachFromTarget. The wire test asserts exactly
+// this distinct set, so any method chromedp adds (or drops)
+// fails the suite until the set is re-observed and
+// re-disclosed here and in the wire test header.
 //
 // CDP allowlist (§15.2 discipline, as adopted for castctl's
 // OWN calls): Page (enable, screencast, input dispatch via

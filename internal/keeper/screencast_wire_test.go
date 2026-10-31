@@ -21,18 +21,20 @@ import (
 // real browser does (P1/CDP-skew gates stay box-side).
 //
 // Observed bootstrap set (chromedp v0.21.0, recorded
-// 2026-10-31, also the list in screencast.go's header):
-// Browser.getVersion, Target.attachToTarget, Runtime.enable,
-// Runtime.evaluate("self"), Log.enable, Network.enable,
-// Inspector.enable, Page.enable, DOM.enable, CSS.enable,
-// Target.setDiscoverTargets, Target.setAutoAttach,
-// Page.getFrameTree, DOM.getDocument, Page.enable,
-// Page.startScreencast, Page.stopScreencast,
-// Target.detachFromTarget. The test asserts the
-// claim-relevant subset (superset-style: presence, never
-// exact sequence or exact set) so incidental chromedp
-// additions do not break it, while a missing Runtime enable
-// fails loudly.
+// 2026-10-31; the same list is enumerated in screencast.go's
+// header): Browser.getVersion, Target.attachToTarget,
+// Runtime.enable, Runtime.evaluate("self"), Log.enable,
+// Network.enable, Inspector.enable, Page.enable, DOM.enable,
+// CSS.enable, Target.setDiscoverTargets, Target.setAutoAttach,
+// Page.setLifecycleEventsEnabled, Page.getFrameTree,
+// DOM.getDocument, Page.enable, Page.startScreencast,
+// Page.stopScreencast, Target.detachFromTarget (Page.enable is
+// sent twice: bootstrap, then screencast start). The test
+// asserts the full distinct set EXACTLY (presence of every
+// listed method, no unlisted method), so a chromedp upgrade
+// that adds or drops a bootstrap call fails loudly until the
+// set is re-observed and both disclosure lists are updated —
+// while a missing Runtime enable still fails loudly.
 
 func TestAttachBootstrapRuntimeDiscipline(t *testing.T) {
 	f := newFakeCDPServer(t, false)
@@ -58,26 +60,38 @@ func TestAttachBootstrapRuntimeDiscipline(t *testing.T) {
 			}
 		}
 	}
-	required := []string{
+	// Exact-set assertion: every method in the disclosed
+	// observed set must be present, and no method outside it
+	// may be sent. Sequence is not asserted.
+	expected := []string{
+		"Browser.getVersion", "Target.attachToTarget",
 		"Runtime.enable", "Runtime.evaluate",
 		"Log.enable", "Network.enable", "Inspector.enable",
 		"Page.enable", "DOM.enable", "CSS.enable",
 		"Target.setDiscoverTargets", "Target.setAutoAttach",
+		"Page.setLifecycleEventsEnabled", "Page.getFrameTree",
+		"DOM.getDocument", "Page.startScreencast",
+		"Page.stopScreencast", "Target.detachFromTarget",
 	}
-	for _, m := range required {
+	for _, m := range expected {
 		if !seen[m] {
 			t.Fatalf("attach bootstrap missing %q; methods = %v", m, f.methodsSeen())
 		}
 	}
+	for m := range seen {
+		disclosed := false
+		for _, e := range expected {
+			if e == m {
+				disclosed = true
+				break
+			}
+		}
+		if !disclosed {
+			t.Fatalf("attach path sent undisclosed method %q; methods = %v", m, f.methodsSeen())
+		}
+	}
 	if evalExpr != "self" {
 		t.Fatalf("Runtime.evaluate expression = %q; want the constant \"self\"", evalExpr)
-	}
-	// The attach path sends no cookie reads: export is a
-	// separate browser-level step (see TestCDPExportPrimaryPath).
-	for _, m := range f.methodsSeen() {
-		if m == "Storage.getCookies" || m == "Network.getCookies" {
-			t.Fatalf("attach path sent %q: %v", m, f.methodsSeen())
-		}
 	}
 }
 

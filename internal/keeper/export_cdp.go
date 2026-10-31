@@ -38,10 +38,13 @@ import (
 //
 // This "no Runtime" statement covers THIS file's browser-level
 // path only. The ATTACH path in screencast.go goes through
-// chromedp's target bootstrap, which DOES enable Runtime (and
-// DOM/CSS/Log/Inspector) and evaluates the constant "self":
-// see the bootstrap note in screencast.go. Do not shorten
-// this comment back to a blanket claim.
+// chromedp's target bootstrap, which DOES enable Runtime, DOM,
+// CSS, Log, Inspector, and Page, sets
+// Target.setDiscoverTargets and Target.setAutoAttach, enables
+// Page.setLifecycleEventsEnabled, and evaluates the constant
+// "self": see the bootstrap note in screencast.go, which lists
+// the full observed method set. Do not shorten this comment
+// back to a blanket claim.
 //
 // Discovery never goes through chromedp's unchecked
 // remote.modifyURL path: /json/version is fetched with a

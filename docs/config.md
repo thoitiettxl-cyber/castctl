@@ -464,10 +464,15 @@ Behaviour:
   auto-solved. Honesty note on the attach path: castctl's own
   code sends no Runtime/JS calls and the browser-level export
   path sends only `Storage.getCookies`, but chromedp's target
-  attach bootstrap enables Runtime/DOM/CSS/Log/Inspector and
-  evaluates the constant `"self"` — the CDP allowlist
-  discipline covers castctl's own calls, not the library
-  bootstrap. See `castctl auth login --help`.
+  attach bootstrap enables Runtime, DOM, CSS, Log, Inspector,
+  and Page, sets `Target.setDiscoverTargets` /
+  `Target.setAutoAttach`, enables
+  `Page.setLifecycleEventsEnabled`, and evaluates the constant
+  `"self"` (the full observed set is listed in
+  `internal/keeper/screencast.go` and pinned exactly by the
+  wire-recording test) — the CDP allowlist discipline covers
+  castctl's own calls, not the library bootstrap. See
+  `castctl auth login --help`.
 
 ## The `dns` section — INTERIM, GLOBAL, COMPAT-ONLY
 
