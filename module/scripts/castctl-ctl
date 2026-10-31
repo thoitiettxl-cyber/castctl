@@ -6,11 +6,15 @@
 #
 # Differences that matter: no privilege drop (root in module context),
 # no listener/port checks (castctl telegram run listens on no port),
-# gating via the module's own JSON key probe (castctl's strict parser
-# rejects keeper/webui keys on the base HEAD, so the controller never
-# relies on invoking castctl to detect them), bounded waits everywhere
-# (flock, readiness, stop escalation), a lifetime bound on the child,
-# and log rotation. No plugin discovery or loading of any kind:
+# gating via the module's own JSON key probe (the strict parser is
+# the final arbiter; the probe only decides which verified commands
+# to attempt), bounded waits everywhere (flock, readiness, stop
+# escalation), a lifetime bound on each child, and log rotation.
+# Two services are managed, each with its own PID file and log:
+# telegram run (telegram object block) and keeper run (non-empty
+# keeper array block; verified against the 8cb361f tree). The web
+# UI has no command or config block on this HEAD and is never
+# started. No plugin discovery or loading of any kind:
 # DATA_DIR/plugins exists only as a reserved, preserved directory.
 #
 # Test-only environment overrides (never set on the device; all are
@@ -35,9 +39,11 @@ LOG_DIR=$DATA_DIR/logs
 BACKUP_DIR=$DATA_DIR/backups
 CONTROL_DIR=$DATA_DIR/.controller
 PID_FILE=$RUN_DIR/castctl.pid
+KEEPER_PID_FILE=$RUN_DIR/keeper.pid
 LOCK_FILE=${CASTCTL_LIFECYCLE_LOCK:-${DATA_DIR}.lifecycle.lock}
 ENABLED_FILE=$RUN_DIR/enabled
 CORE_LOG=$LOG_DIR/castctl.log
+KEEPER_LOG=$LOG_DIR/keeper.log
 CTL_LOG=$LOG_DIR/controller.log
 
 FLOCK_TIMEOUT=${CASTCTL_FLOCK_TIMEOUT:-30}
@@ -150,55 +156,76 @@ set_description() {
   bb sed -i "s|^description=.*|description=$safe|" "$MODULE_DIR/module.prop" 2>/dev/null || true
 }
 
-read_pid() {
-  [ -f "$PID_FILE" ] || return 1
-  value=$(cat "$PID_FILE" 2>/dev/null || true)
+read_pid_file() {
+  [ -f "$1" ] || return 1
+  value=$(cat "$1" 2>/dev/null || true)
   case "$value" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s\n' "$value"
 }
 
 pid_alive() { kill -0 "$1" 2>/dev/null; }
 
+# pid_matches PID [PATTERN]: the process cmdline contains the module
+# binary path, and PATTERN when given (e.g. "telegram run" or
+# "keeper run", distinguishing the two managed services sharing one
+# binary). Never trust a bare PID.
 pid_matches() {
   pid=$1
+  pattern=${2:-}
   runtime_paths
   [ -r "/proc/$pid/cmdline" ] || return 1
   command_line=$(tr '\000' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)
-  case "$command_line" in *"$BINARY"*) return 0 ;; *) return 1 ;; esac
+  case "$command_line" in *"$BINARY"*) ;; *) return 1 ;; esac
+  [ -z "$pattern" ] && return 0
+  case "$command_line" in *"$pattern"*) return 0 ;; *) return 1 ;; esac
 }
 
+# service_running PIDFILE [PATTERN]: the PID file names a live
+# process matching the module binary (and PATTERN when given).
+service_running() {
+  pid=$(read_pid_file "$1" 2>/dev/null) || return 1
+  pid_alive "$pid" && pid_matches "$pid" "${2:-}"
+}
+
+# is_running: any managed service is alive (telegram or keeper).
 is_running() {
-  pid=$(read_pid 2>/dev/null) || return 1
-  pid_alive "$pid" && pid_matches "$pid"
+  service_running "$PID_FILE" "telegram run" && return 0
+  service_running "$KEEPER_PID_FILE" "keeper run"
 }
 
 # Scan /proc for processes whose cmdline contains the module binary
-# path. Used only as a stop fallback when the PID file is gone; the
-# controller never signals a PID it has not matched this way.
+# path (and PATTERN when given). Used only as a stop fallback when a
+# PID file is gone; the controller never signals a PID it has not
+# matched this way.
 find_module_pids() {
+  pattern=${1:-}
   runtime_paths
   for proc_dir in /proc/[0-9]*; do
     [ -d "$proc_dir" ] || continue
     pid=${proc_dir#/proc/}
     [ "$pid" = "$$" ] && continue
     [ "$pid" = 1 ] && continue
-    pid_matches "$pid" 2>/dev/null || continue
+    pid_matches "$pid" "$pattern" 2>/dev/null || continue
     printf '%s\n' "$pid"
   done
 }
 
-# has_top_block FILE KEY: true iff KEY is a top-level JSON object key
-# in FILE (depth-1 key whose value starts with '{'). Lexical scan,
-# not a JSON parser: strings (with escapes) are skipped, braces
-# inside strings do not count, and keys nested inside other objects
-# do not count. Malformed JSON may still report presence; castctl's
-# own strict parser is the final arbiter and the start path treats
-# a child exit as fail-soft. Never prints file contents.
-has_top_block() {
-  file=$1
-  want=$2
-  [ -f "$file" ] || return 1
-  bb awk -v want="$want" '
+# probe_top_key FILE KEY MODE: true iff KEY is a top-level JSON key
+# in FILE whose value matches MODE: "object" (value starts with
+# '{'), "array" (value is a non-empty array), "empty_array"
+# (value is '[]' allowing whitespace), "any" (key present with any
+# value). Lexical scan, not a JSON parser: strings (with escapes)
+# are skipped, braces inside strings do not count, and keys nested
+# inside other objects do not count. Malformed JSON may still
+# report presence; castctl's own strict parser is the final
+# arbiter and the start path treats a child exit as fail-soft.
+# Never prints file contents.
+probe_top_key() {
+  _probe_file=$1
+  _probe_want=$2
+  _probe_mode=$3
+  [ -f "$_probe_file" ] || return 1
+  bb awk -v want="$_probe_want" -v mode="$_probe_mode" '
     BEGIN { depth = 0; instr = 0; esc = 0; key = ""; lastkey = ""; state = "seek"; found = 0 }
     {
       line = $0
@@ -215,43 +242,84 @@ has_top_block() {
           } else { key = key c }
           continue
         }
-        if (c == "\"") { instr = 1; esc = 0; key = ""; continue }
+        if (state == "array") {
+          if (c == " " || c == "\t" || c == "\r") { continue }
+          if (c == "]") {
+            if (mode == "empty_array") { found = 1 }
+            state = "seek"; continue
+          }
+          if (mode == "array") { found = 1 }
+          state = "seek"
+        }
+        if (c == "\"") {
+          if (state == "colon" && mode == "any" && lastkey == want) { found = 1 }
+          instr = 1; esc = 0; key = ""; continue
+        }
         if (c == "{") {
           if (state == "colon") {
-            if (lastkey == want) { found = 1 }
+            if ((mode == "object" || mode == "any") && lastkey == want) { found = 1 }
             state = "seek"
           } else if (state == "afterkey") { state = "seek" }
           depth++
           continue
         }
         if (c == "}") { depth--; if (depth < 0) { depth = 0 }; state = "seek"; continue }
+        if (state == "colon") {
+          if (c == " " || c == "\t" || c == "\r") { continue }
+          if (mode == "any" && lastkey == want) { found = 1 }
+          if (c == "[" && lastkey == want && (mode == "array" || mode == "empty_array")) { state = "array"; continue }
+          state = "seek"
+          continue
+        }
         if (state == "afterkey") {
           if (c == ":") { state = "colon" }
           else if (c == " " || c == "\t" || c == "\r") { }
           else { state = "seek" }
           continue
         }
-        if (state == "colon") {
-          if (c == " " || c == "\t" || c == "\r") { continue }
-          state = "seek"
-          continue
-        }
       }
     }
     END { exit(found ? 0 : 1) }
-  ' "$file"
+  ' "$_probe_file"
 }
 
+# has_top_block FILE KEY: top-level key with an object value.
+has_top_block() { probe_top_key "$1" "$2" object; }
+
+# has_top_nonempty_array FILE KEY: top-level key with a non-empty
+# array value (the keeper block shape: "keeper": [{...}, ...]).
+has_top_nonempty_array() { probe_top_key "$1" "$2" array; }
+
+# has_top_empty_array FILE KEY: top-level key with an empty array
+# value ("keeper": [] — valid, keeper off, no entries to run).
+has_top_empty_array() { probe_top_key "$1" "$2" empty_array; }
+
+# has_top_key FILE KEY: top-level key present with any value.
+has_top_key() { probe_top_key "$1" "$2" any; }
+
 # Gating summary for status/doctor logs: presence only, no values.
+# keeper states: present (non-empty array, startable), empty
+# ("keeper": [] — valid, off), malformed (key present, neither an
+# object... a non-array shape the parser rejects), absent.
+# telegram states: present (object), malformed (key present, not
+# an object), absent. webui: present (any shape — no webui key
+# exists on this HEAD, so any presence is unparseable), absent.
 gating_summary() {
   if [ ! -f "$CONFIG" ]; then
     printf 'config: missing\n'
     return 0
   fi
   telegram=absent; keeper=absent; webui=absent
-  has_top_block "$CONFIG" telegram && telegram=present
-  has_top_block "$CONFIG" keeper && keeper=present
-  has_top_block "$CONFIG" webui && webui=present
+  if has_top_key "$CONFIG" telegram; then
+    telegram=malformed
+    has_top_block "$CONFIG" telegram && telegram=present
+  fi
+  if has_top_key "$CONFIG" keeper; then
+    keeper=malformed
+    has_top_nonempty_array "$CONFIG" keeper && keeper=present
+    has_top_empty_array "$CONFIG" keeper && keeper=empty
+  fi
+  has_top_key "$CONFIG" webui && webui=present
   printf 'config: telegram=%s keeper=%s webui=%s\n' "$telegram" "$keeper" "$webui"
 }
 
@@ -287,21 +355,29 @@ process_identity() {
   printf '%s:%s\n' "${uid:-unknown}" "${gid:-unknown}"
 }
 
-stop_process() {
-  remove_intent=${1:-1}
-  [ "$remove_intent" = 0 ] || rm -f "$ENABLED_FILE"
-  pid=$(read_pid 2>/dev/null || true)
-  rm -f "$PID_FILE"
-  if [ -n "$pid" ] && ! pid_matches "$pid"; then
-    log WARNING "stale or foreign PID file ignored"
+# stop_one PIDFILE PATTERN LABEL: stop one managed service
+# (SIGINT, then SIGTERM, then SIGKILL, all bounded). Removes the
+# service PID file. The /proc scan fallback matches PATTERN too,
+# so stopping the keeper can never signal the telegram process
+# (both share one binary path). Exit 130 from an intentional stop
+# is normal and needs no special handling here: the child is
+# gone either way.
+stop_one() {
+  pidfile=$1
+  pattern=$2
+  label=$3
+  pid=$(read_pid_file "$pidfile" 2>/dev/null || true)
+  rm -f "$pidfile"
+  if [ -n "$pid" ] && ! pid_matches "$pid" "$pattern"; then
+    log WARNING "stale or foreign PID file ignored for $label"
     pid=
   fi
   if [ -z "$pid" ]; then
-    pid=$(find_module_pids | head -1 || true)
-    [ -n "$pid" ] && log WARNING "stopping module process found by scan (PID file was missing)"
+    pid=$(find_module_pids "$pattern" | head -1 || true)
+    [ -n "$pid" ] && log WARNING "stopping $label process found by scan (PID file was missing)"
   fi
   if [ -n "$pid" ]; then
-    log INFO "stopping castctl (PID $pid)"
+    log INFO "stopping $label (PID $pid)"
     kill -2 "$pid" 2>/dev/null || true
   fi
   i=0
@@ -311,7 +387,7 @@ stop_process() {
     sleep 1
     i=$((i + 1))
   done
-  if [ -n "$pid" ] && pid_alive "$pid" && pid_matches "$pid"; then
+  if [ -n "$pid" ] && pid_alive "$pid" && pid_matches "$pid" "$pattern"; then
     kill -15 "$pid" 2>/dev/null || true
     i=0
     while [ "$i" -lt "$STOP_TERM_WAIT" ]; do
@@ -320,57 +396,69 @@ stop_process() {
       i=$((i + 1))
     done
   fi
-  if [ -n "$pid" ] && pid_alive "$pid" && pid_matches "$pid"; then
+  if [ -n "$pid" ] && pid_alive "$pid" && pid_matches "$pid" "$pattern"; then
     kill -9 "$pid" 2>/dev/null || true
     sleep 1
   fi
-  if [ -n "$pid" ] && pid_alive "$pid" && pid_matches "$pid"; then
-    log ERROR "module process survived forced stop"
+  if [ -n "$pid" ] && pid_alive "$pid" && pid_matches "$pid" "$pattern"; then
+    log ERROR "$label process survived forced stop"
     return 1
   fi
+  return 0
+}
+
+# stop_process REMOVE_INTENT: stop every managed service and drop
+# the enabled marker (unless REMOVE_INTENT is 0, for restart).
+stop_process() {
+  remove_intent=${1:-1}
+  [ "$remove_intent" = 0 ] || rm -f "$ENABLED_FILE"
+  failed=0
+  stop_one "$PID_FILE" "telegram run" "castctl telegram" || failed=1
+  stop_one "$KEEPER_PID_FILE" "keeper run" "castctl keeper" || failed=1
+  [ "$failed" = 0 ] || return 1
   set_description "Stopped | castctl"
   return 0
 }
 
 wait_ready() {
   pid=$1
+  label=$2
+  pattern=$3
   i=0
   while [ "$i" -lt "$READY_TIMEOUT" ]; do
     if ! pid_alive "$pid"; then
       wait "$pid" 2>/dev/null
       code=$?
-      log ERROR "castctl exited during startup (code $code)"
+      log ERROR "$label exited during startup (code $code)"
       return 1
     fi
-    pid_matches "$pid" && return 0
+    pid_matches "$pid" "$pattern" && return 0
     sleep 1
     i=$((i + 1))
   done
-  pid_alive "$pid" && pid_matches "$pid"
+  pid_alive "$pid" && pid_matches "$pid" "$pattern"
 }
 
-start_locked() {
-  mode=${1:-manual}
-  prepare_mutable_dirs
-  rotate_log "$CORE_LOG" 2>/dev/null || true
-  runtime_check || return 1
-
-  [ -f "$CONFIG" ] || { log ERROR "config missing; nothing to start"; return 1; }
-  if has_top_block "$CONFIG" keeper || has_top_block "$CONFIG" webui; then
-    log ERROR "config carries keeper/webui block(s) this castctl build cannot parse; no service started (re-survey after PR #19 / item 2)"
-    return 1
-  fi
-  if ! has_top_block "$CONFIG" telegram; then
-    log INFO "no telegram block in config; nothing to start"
+# start_one MODE LABEL PIDFILE LOGFILE PATTERN ARGS...: start one
+# managed service under the bundled loader with the lifetime bound,
+# unless it is already running. Idempotent: an already-running
+# service is left alone (silent in watchdog mode). On readiness
+# failure the child is signalled and only that service's PID file
+# is removed; the enabled marker is owned by start_locked, which
+# writes it whenever any service is wanted so the watchdog keeps
+# retrying a failed start after a config fix.
+start_one() {
+  mode=$1
+  label=$2
+  pidfile=$3
+  svc_log=$4
+  pattern=$5
+  shift 5
+  if service_running "$pidfile" "$pattern"; then
+    [ "$mode" = watchdog ] || log INFO "$label already running"
     return 0
   fi
-
-  if is_running; then
-    [ "$mode" = watchdog ] || log INFO "castctl already running"
-    : >"$ENABLED_FILE"
-    return 0
-  fi
-
+  rotate_log "$svc_log" 2>/dev/null || true
   runtime_paths
   export HOME="$DATA_DIR"
   export TMPDIR="$RUN_DIR/tmp"
@@ -381,31 +469,83 @@ start_locked() {
   export SSL_CERT_DIR="$CURRENT/ca"
   export CASTCTL_CONFIG="$CONFIG"
 
-  log INFO "starting castctl telegram run"
+  log INFO "starting $label"
   cd "$LOG_DIR" || return 1
   "$BUSYBOX" nohup "$BUSYBOX" timeout -s INT "$CHILD_LIFETIME" \
     "$LOADER" --library-path "$LIB_DIR" "$BINARY" \
-    --config "$CONFIG" telegram run \
-    >>"$CORE_LOG" 2>&1 </dev/null 8>&- 9>&- &
+    --config "$CONFIG" "$@" \
+    >>"$svc_log" 2>&1 </dev/null 8>&- 9>&- &
   pid=$!
   cd / || true
 
-  wait_ready "$pid"
+  wait_ready "$pid" "$label" "$pattern"
   ready=$?
   if [ "$ready" -ne 0 ]; then
     kill -2 "$pid" 2>/dev/null || true
-    rm -f "$PID_FILE" "$ENABLED_FILE"
-    set_description "Error | castctl readiness failed"
+    rm -f "$pidfile"
+    set_description "Error | $label readiness failed"
     return 1
   fi
 
-  printf '%s' "$pid" >"$PID_FILE"
-  : >"$ENABLED_FILE"
-  chmod 0600 "$PID_FILE" "$ENABLED_FILE"
+  printf '%s' "$pid" >"$pidfile"
+  chmod 0600 "$pidfile"
 
-  log INFO "castctl started (PID $pid, UID:GID $(process_identity "$pid"))"
-  set_description "Running | castctl | Action to stop"
+  log INFO "$label started (PID $pid, UID:GID $(process_identity "$pid"))"
   return 0
+}
+
+start_locked() {
+  mode=${1:-manual}
+  prepare_mutable_dirs
+  runtime_check || return 1
+
+  [ -f "$CONFIG" ] || { log ERROR "config missing; nothing to start"; return 1; }
+  if has_top_key "$CONFIG" webui; then
+    log ERROR "config carries a webui key this castctl build cannot parse (no webui block exists on this HEAD); no service started (see item 2)"
+    return 1
+  fi
+  telegram_wanted=0
+  keeper_wanted=0
+  if has_top_key "$CONFIG" telegram; then
+    if has_top_block "$CONFIG" telegram; then
+      telegram_wanted=1
+    else
+      log WARNING "telegram key present but not an object; castctl will reject the config, telegram not started"
+    fi
+  fi
+  if has_top_key "$CONFIG" keeper; then
+    if has_top_nonempty_array "$CONFIG" keeper; then
+      keeper_wanted=1
+    elif has_top_empty_array "$CONFIG" keeper; then
+      [ "$mode" = watchdog ] || log INFO "keeper block is empty; keeper not started"
+    else
+      log WARNING "keeper key present but not an array; castctl will reject the config, keeper not started"
+    fi
+  fi
+  if [ "$telegram_wanted" = 0 ] && [ "$keeper_wanted" = 0 ]; then
+    [ "$mode" = watchdog ] || log INFO "no telegram block and no keeper entries in config; nothing to start"
+    return 0
+  fi
+
+  # The enabled marker means "a start was requested and not
+  # explicitly stopped". It is written even when a start fails
+  # so the watchdog retries after a config fix; stop removes it.
+  : >"$ENABLED_FILE"
+  chmod 0600 "$ENABLED_FILE"
+
+  failed=0
+  if [ "$telegram_wanted" = 1 ]; then
+    start_one "$mode" "castctl telegram" "$PID_FILE" "$CORE_LOG" "telegram run" telegram run || failed=1
+  fi
+  if [ "$keeper_wanted" = 1 ]; then
+    start_one "$mode" "castctl keeper" "$KEEPER_PID_FILE" "$KEEPER_LOG" "keeper run" keeper run || failed=1
+  fi
+  if [ "$failed" = 0 ]; then
+    set_description "Running | castctl | Action to stop"
+    return 0
+  fi
+  set_description "Error | castctl start failed"
+  return 1
 }
 
 lifecycle_lock_is_inherited() {
@@ -480,11 +620,17 @@ status_service() {
   else
     echo "  version: unavailable"
   fi
-  if is_running; then
-    pid=$(read_pid)
-    echo "  process: running (pid $pid, uid:gid $(process_identity "$pid"))"
+  if service_running "$PID_FILE" "telegram run"; then
+    pid=$(read_pid_file "$PID_FILE")
+    echo "  telegram: running (pid $pid, uid:gid $(process_identity "$pid"))"
   else
-    echo "  process: stopped"
+    echo "  telegram: stopped"
+  fi
+  if service_running "$KEEPER_PID_FILE" "keeper run"; then
+    pid=$(read_pid_file "$KEEPER_PID_FILE")
+    echo "  keeper: running (pid $pid, uid:gid $(process_identity "$pid"))"
+  else
+    echo "  keeper: stopped"
   fi
   echo "  $(gating_summary)"
   if [ -d "$PLUGIN_DIR" ]; then
@@ -502,13 +648,27 @@ doctor_locked() {
   if [ ! -f "$CONFIG" ]; then
     log ERROR "config missing"
     failed=1
-  elif has_top_block "$CONFIG" keeper || has_top_block "$CONFIG" webui; then
-    log ERROR "config carries keeper/webui block(s) this castctl build cannot parse"
-    failed=1
+  else
+    if has_top_key "$CONFIG" webui; then
+      log ERROR "config carries a webui key this castctl build cannot parse"
+      failed=1
+    fi
+    if has_top_key "$CONFIG" telegram && ! has_top_block "$CONFIG" telegram; then
+      log ERROR "telegram key present but not an object; castctl will reject the config"
+      failed=1
+    fi
+    if has_top_key "$CONFIG" keeper && ! has_top_nonempty_array "$CONFIG" keeper && ! has_top_empty_array "$CONFIG" keeper; then
+      log ERROR "keeper key present but not an array; castctl will reject the config"
+      failed=1
+    fi
   fi
-  if is_running; then
-    pid=$(read_pid)
-    pid_matches "$pid" || { log ERROR "running process does not match the module binary"; failed=1; }
+  if service_running "$PID_FILE" "telegram run"; then
+    pid=$(read_pid_file "$PID_FILE")
+    pid_matches "$pid" "telegram run" || { log ERROR "running telegram process does not match the module binary"; failed=1; }
+  fi
+  if service_running "$KEEPER_PID_FILE" "keeper run"; then
+    pid=$(read_pid_file "$KEEPER_PID_FILE")
+    pid_matches "$pid" "keeper run" || { log ERROR "running keeper process does not match the module binary"; failed=1; }
   fi
   [ "$failed" = 0 ] || return 1
   log INFO "doctor passed"
@@ -563,14 +723,14 @@ usage() {
 Usage: castctl-ctl <command>
 
 Commands:
-  start [--boot|--watchdog]  Start the Telegram bot if a telegram block exists.
+  start [--boot|--watchdog]  Start telegram run and/or keeper run per config gating.
   stop                       Stop for the current boot.
   restart                    Restart the service.
   status                     Show safe runtime status.
-  is-running                 Return success only for the module process.
+  is-running                 Return success if any managed service is alive.
   doctor                     Validate runtime and config gating.
   version                    Show bundled core version.
-  log [N]                    Tail the core log.
+  log [telegram|keeper] [N]  Tail a service log (default telegram, 20 lines).
   backup                     Archive config/plugin state (contains secrets).
   purge-data --yes           Destructively remove persistent state.
 EOF
@@ -589,10 +749,21 @@ case "$command_name" in
   doctor) doctor ;;
   version) runtime_paths; run_core_binary "$LOADER" "$LIB_DIR" "$BINARY" --version ;;
   log)
-    lines=${2:-20}
+    svc=telegram
+    lines=20
+    case "${2:-}" in
+      telegram|keeper) svc=$2; lines=${3:-20} ;;
+      '') ;;
+      *) lines=$2 ;;
+    esac
     case "$lines" in ''|*[!0-9]*) die "log line count must be numeric" ;; esac
-    [ -f "$CORE_LOG" ] || die "log not found"
-    tail -n "$lines" "$CORE_LOG"
+    if [ "$svc" = keeper ]; then
+      logfile=$KEEPER_LOG
+    else
+      logfile=$CORE_LOG
+    fi
+    [ -f "$logfile" ] || die "log not found"
+    tail -n "$lines" "$logfile"
     ;;
   backup) backup_state ;;
   purge-data) purge_data "${2:-}" ;;

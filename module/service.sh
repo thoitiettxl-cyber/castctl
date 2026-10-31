@@ -44,13 +44,17 @@ WATCHDOG_MAX=${CASTCTL_WATCHDOG_MAX:-300}
   while sleep "$delay"; do
     [ -f "$MODULE_DIR/disable" ] && { "$CTL" stop >/dev/null 2>&1 || true; exit 0; }
     [ -f "$DATA_DIR/run/enabled" ] || continue
-    if "$CTL" is-running >/dev/null 2>&1; then
+    # start is idempotent per service: running services are left
+    # alone, missing wanted services are (re)started. A failed
+    # start backs off; a good one resets the delay. The enabled
+    # marker is written even by a failed start (so a later
+    # config fix recovers) and removed only by an explicit stop.
+    if "$CTL" start --watchdog >/dev/null 2>&1; then
       failures=0
       delay=$WATCHDOG_BASE
       continue
     fi
     failures=$((failures + 1))
-    "$CTL" start --watchdog >/dev/null 2>&1 || true
     # Exponential backoff, capped: a broken config must not spin the
     # watchdog. The loop itself never exits on failure alone, so a
     # later config fix still recovers without a reboot.
