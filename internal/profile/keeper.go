@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // The top-level `keeper` config block and its resolution.
@@ -23,7 +24,10 @@ import (
 //	 "interval": string, "notify": string}
 //
 //   - `tag` (required): unique name for the entry. Entries reference
-//     each other by tag, sing-box style.
+//     each other by tag, sing-box style. Tags are exact: no
+//     surrounding whitespace (rejected, never trimmed), no
+//     `/`, `\`, or control characters, never "." or ".." —
+//     tags name owner files under the profile directory.
 //   - `profile` (required): the name of a key of SingleConfig.Profiles.
 //     A name that is not a profile key is a dangling reference, exit
 //     2, exactly like a dangling outbound tag in validateTagGraph.
@@ -45,9 +49,10 @@ import (
 //     Zero value (key absent or empty) means the documented default
 //     cadence of 24h; see internal/keeper for the adaptive rule that
 //     shortens it once a cookie expiry is observed. A present value
-//     must parse with time.ParseDuration and be positive. Bare JSON
-//     numbers are rejected: seconds-vs-minutes has no in-band
-//     signal.
+//     must parse with time.ParseDuration, be positive, and be at
+//     most MaxKeeperInterval (1 year: the jitter arithmetic
+//     bound). Bare JSON numbers are rejected:
+//     seconds-vs-minutes has no in-band signal.
 //   - `notify` (optional): the telegram-block reference. The only
 //     accepted value is "telegram", naming the single top-level
 //     `telegram` block. A `notify` value naming anything else, or a
@@ -74,6 +79,14 @@ import (
 // is observed, and never lengthens beyond it.
 const DefaultKeeperInterval = 24 * time.Hour
 
+// MaxKeeperInterval bounds a configured `interval`: the
+// ±20% jitter in the runner multiplies the delay as a
+// float64, which overflows time.Duration (and wraps
+// negative) above ~243 years. A 1-year cap keeps every
+// jitter computation in range with wide margin; the 24h
+// zero-value default is unchanged.
+const MaxKeeperInterval = 365 * 24 * time.Hour
+
 // KeeperEntry is one parsed `keeper` list entry.
 type KeeperEntry struct {
 	Tag      string
@@ -90,9 +103,36 @@ type KeeperEntry struct {
 	raw []byte
 }
 
-// KeeperConfig is one parsed top-level `keeper` block: the list of
+// ValidateKeeperTag reports whether tag is a usable keeper
+// entry tag. Tags name owner files ("keeper-<tag>.owner") and
+// appear in stdout summaries, so they must be exact (no
+// silent trimming: surrounding whitespace is REJECTED, not
+// trimmed), contain no path separator, backslash, or control
+// character (including newline), and must not be "." or ".."
+// (path components). Interior spaces are allowed. The same
+// rule is enforced at parse time and, as defence in depth,
+// by AcquireSingleFlight for hand-built entries.
+func ValidateKeeperTag(tag string) error {
+	if tag == "" {
+		return fmt.Errorf("keeper tag must not be empty")
+	}
+	if tag != strings.TrimSpace(tag) {
+		return fmt.Errorf("keeper tag %q has surrounding whitespace", tag)
+	}
+	if tag == "." || tag == ".." {
+		return fmt.Errorf("keeper tag %q is a path component", tag)
+	}
+	for _, r := range tag {
+		if r == '/' || r == '\\' || unicode.IsControl(r) {
+			return fmt.Errorf("keeper tag %q contains a forbidden character", tag)
+		}
+	}
+	return nil
+}
 // entries in file order. A nil *KeeperConfig means the block was
 // absent.
+// KeeperConfig is one parsed top-level `keeper` block: the list of
+// entries in file order. A nil *KeeperConfig means the block was absent.
 type KeeperConfig struct {
 	Entries []*KeeperEntry
 
@@ -144,8 +184,11 @@ func parseKeeperBlock(v any) (*KeeperConfig, error) {
 			switch k {
 			case "tag":
 				s, ok := val.(string)
-				if !ok || strings.TrimSpace(s) == "" {
+				if !ok {
 					return nil, newConfigErrorf(`"keeper" entry %d: "tag" must be a non-empty string`, i)
+				}
+				if err := ValidateKeeperTag(s); err != nil {
+					return nil, newConfigErrorf(`"keeper" entry %d: invalid "tag": %v`, i, err)
 				}
 				entry.Tag = s
 			case "profile":
@@ -173,8 +216,8 @@ func parseKeeperBlock(v any) (*KeeperConfig, error) {
 				}
 				if strings.TrimSpace(s) != "" {
 					d, err := time.ParseDuration(s)
-					if err != nil || d <= 0 {
-						return nil, newConfigErrorf(`"keeper" entry %d: "interval" must be a positive duration string`, i)
+					if err != nil || d <= 0 || d > MaxKeeperInterval {
+						return nil, newConfigErrorf(`"keeper" entry %d: "interval" must be a positive duration string of at most %v`, i, MaxKeeperInterval)
 					}
 					entry.Interval = d
 					entry.IntervalSet = true
@@ -210,7 +253,8 @@ func parseKeeperBlock(v any) (*KeeperConfig, error) {
 // validateKeeperBrowserURL enforces the loopback-only CDP URL rule.
 // It names the rule violated, never the URL's credentials (a CDP URL
 // carries no credentials by construction, but the rule stays: the
-// error never echoes the supplied value).
+// error never echoes the supplied value). Query strings and
+// fragments are rejected: a CDP debug URL carries neither.
 func validateKeeperBrowserURL(raw string) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -218,6 +262,9 @@ func validateKeeperBrowserURL(raw string) error {
 	}
 	if u.User != nil {
 		return fmt.Errorf("must not carry userinfo")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("must not carry a query or fragment")
 	}
 	if u.Scheme != "http" && u.Scheme != "ws" {
 		return fmt.Errorf("scheme must be http or ws")
@@ -245,6 +292,46 @@ func validateKeeperBrowserURL(raw string) error {
 	return nil
 }
 
+// canonicalBrowserURL renders the duplicate-browser dedup key
+// for a validated browser URL: scheme, normalized host, port,
+// and path. Spelling variants of one endpoint — trailing
+// slash, host case, "localhost" case, IPv6 bracketing —
+// canonicalise to one key, so two entries cannot share a
+// browser by spelling it differently. The stored entry
+// Browser value is NOT rewritten: only the dedup key is
+// canonical. "localhost" and "127.0.0.1" are deliberately
+// NOT merged: which loopback address localhost resolves to
+// is resolver-dependent, and merging them would assert an
+// identity the config did not state.
+func canonicalBrowserURL(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", err
+	}
+	if err := validateKeeperBrowserURL(raw); err != nil {
+		return "", err
+	}
+	host := strings.ToLower(u.Hostname())
+	if ip := net.ParseIP(host); ip != nil {
+		host = ip.String()
+	}
+	port, _ := strconv.Atoi(u.Port())
+	path := strings.TrimSuffix(u.Path, "/")
+	return fmt.Sprintf("%s://%s:%d%s", u.Scheme, host, port, path), nil
+}
+// canonicalBrowser is canonicalBrowserURL with a raw-string
+// fallback: validateKeeper also runs over hand-built configs
+// whose browser URLs never passed parse-time validation, and
+// dedup must not fail on them — it keys on the raw string
+// instead. Parse-time validation remains the enforcement
+// point for real configs.
+func canonicalBrowser(raw string) string {
+	if c, err := canonicalBrowserURL(raw); err == nil {
+		return c
+	}
+	return raw
+}
+
 // validateKeeper enforces the block's cross-references: every
 // entry's profile must name a key of SingleConfig.Profiles, no two
 // entries may name the same profile or share a browser URL, and a
@@ -267,10 +354,10 @@ func validateKeeper(cfg *SingleConfig) error {
 			return newConfigErrorf("keeper: entries %q and %q both name profile %q", prev, e.Tag, e.Profile)
 		}
 		seenProfiles[e.Profile] = e.Tag
-		if prev, ok := seenBrowsers[e.Browser]; ok {
+		if prev, ok := seenBrowsers[canonicalBrowser(e.Browser)]; ok {
 			return newConfigErrorf("keeper: entries %q and %q share one browser URL", prev, e.Tag)
 		}
-		seenBrowsers[e.Browser] = e.Tag
+		seenBrowsers[canonicalBrowser(e.Browser)] = e.Tag
 		switch e.Notify {
 		case "", "telegram":
 		default:

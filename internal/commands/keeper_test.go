@@ -475,3 +475,24 @@ func TestAuthLoginTimeoutRange(t *testing.T) {
 		t.Errorf("stderr = %q; want the range named", errb.String())
 	}
 }
+
+// TestStdinTransportNeverEchoesInput (loop-2 safety F2): an
+// unrecognised stdin line is never echoed to stderr — it may
+// be a pasted password or 2FA code. RED on the old code: the
+// %q echo printed the line verbatim.
+func TestStdinTransportNeverEchoesInput(t *testing.T) {
+	t.Parallel()
+	errb := &bytes.Buffer{}
+	tr := newStdinTransport(strings.NewReader("MARKER-SECRET-XYZ-12345\n"), errb)
+	select {
+	case <-tr.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("stdin transport did not reach EOF")
+	}
+	if strings.Contains(errb.String(), "MARKER-SECRET-XYZ-12345") {
+		t.Fatalf("stderr echoes stdin input: %q", errb.String())
+	}
+	if !strings.Contains(errb.String(), "ignoring unrecognised input") {
+		t.Fatalf("stderr = %q; want the fixed ignoring message", errb.String())
+	}
+}

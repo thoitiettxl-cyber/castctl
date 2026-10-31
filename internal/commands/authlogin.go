@@ -226,7 +226,11 @@ func newStdinTransport(stdin io.Reader, stderr io.Writer) *stdinTransport {
 			case "cancel":
 				t.inputs <- keeper.InputEvent{Kind: keeper.InputCancel}
 			default:
-				fmt.Fprintf(stderr, "castctl: auth login: ignoring input %q (type \"done\" or \"cancel\")\n", line)
+				// Never echo the input: a pasted line may
+				// be a password, a 2FA code, or any other
+				// secret, and stderr is not a safe place
+				// for it. Fixed message, no input content.
+				fmt.Fprintln(stderr, "castctl: auth login: ignoring unrecognised input (type \"done\" or \"cancel\")")
 			}
 		}
 	}()

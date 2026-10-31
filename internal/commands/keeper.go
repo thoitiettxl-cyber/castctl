@@ -404,7 +404,7 @@ func cmdKeeperRun(ctx context.Context, env *Env, g *globalOpts, args []string) e
 		outMu.Lock()
 		defer outMu.Unlock()
 		fmt.Fprintf(env.stdout(), "keeper: %s (%s): %s cookies_seen=%d wrote=%v next_delay=%s\n",
-			entry.Tag, entry.Profile, res.Outcome, res.CookiesSeen, res.WroteCookies, res.NextDelay)
+			keeper.SanitizeDisplay(entry.Tag), keeper.SanitizeDisplay(entry.Profile), res.Outcome, res.CookiesSeen, res.WroteCookies, res.NextDelay)
 	}
 	keeper.Run(ctx, entries, profiles, loc.ConfigDir, rts.factory, onTick)
 	if ctx.Err() != nil {

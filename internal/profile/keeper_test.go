@@ -212,3 +212,115 @@ func TestCookiesFileLockTimeoutAndSerialisation(t *testing.T) {
 		t.Fatalf("lock file stat = %v, %v; want present at 0600", st, err)
 	}
 }
+
+// TestParseKeeperBlockTagValidation (loop-2 red-team F4):
+// tags that could escape the profile directory or forge
+// output lines are config errors. Surrounding whitespace is
+// rejected, never silently trimmed. RED on the old code: any
+// non-empty tag parsed.
+func TestParseKeeperBlockTagValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		tag  string
+	}{
+		{"path escape", `a/../../x`},
+		{"absolute", `/tmp/evil`},
+		{"backslash", `a\b`},
+		{"dotdot", `..`},
+		{"dot", `.`},
+		{"newline", "a\nb"},
+		{"carriage return", "a\rb"},
+		{"tab", "a\tb"},
+		{"leading space", ` k1`},
+		{"trailing space", `k1 `},
+		{"empty", ``},
+		{"whitespace only", `   `},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			keeper := `[{"tag": ` + quoteForTest(tc.tag) + `, "profile": "muse01", "browser": "http://127.0.0.1:9226/"}]`
+			if _, err := ParseSingleConfig([]byte(keeperTestConfig(t, keeper)), t.TempDir()); err == nil {
+				t.Fatalf("ParseSingleConfig(tag %q) succeeded; want config error", tc.tag)
+			}
+		})
+	}
+	// Interior spaces are fine.
+	if _, err := ParseSingleConfig([]byte(keeperTestConfig(t, `[{"tag": "my keeper", "profile": "muse01", "browser": "http://127.0.0.1:9226/"}]`)), t.TempDir()); err != nil {
+		t.Fatalf("interior-space tag rejected: %v", err)
+	}
+}
+
+func quoteForTest(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch r {
+		case '"':
+			b.WriteString(`\"`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+// TestParseKeeperBlockDuplicateBrowserSpellings (loop-2
+// red-team L2): spelling variants of one browser endpoint
+// are the same browser for the duplicate check. RED on the
+// old code: the raw-string key let them through.
+func TestParseKeeperBlockDuplicateBrowserSpellings(t *testing.T) {
+	pairs := [][2]string{
+		{"http://127.0.0.1:9226", "http://127.0.0.1:9226/"},
+		{"http://127.0.0.1:9226/", "HTTP://127.0.0.1:9226/"},
+		{"http://localhost:9226/", "http://LOCALHOST:9226"},
+		{"http://[::1]:9226/", "http://[0:0:0:0:0:0:0:1]:9226/"},
+		{"ws://127.0.0.1:9226/devtools/browser/X", "ws://127.0.0.1:9226/devtools/browser/X/"},
+	}
+	for _, p := range pairs {
+		keeper := `[{"tag": "k1", "profile": "muse01", "browser": ` + quoteForTest(p[0]) + `}, {"tag": "k2", "profile": "muse02", "browser": ` + quoteForTest(p[1]) + `}]`
+		if _, err := ParseSingleConfig([]byte(keeperTestConfig(t, keeper)), t.TempDir()); err == nil {
+			t.Fatalf("browsers %q and %q accepted as different; want duplicate-browser error", p[0], p[1])
+		}
+	}
+	// Distinct ports stay distinct; localhost and 127.0.0.1
+	// are NOT merged (resolver-dependent identity).
+	keeper := `[{"tag": "k1", "profile": "muse01", "browser": "http://127.0.0.1:9226/"}, {"tag": "k2", "profile": "muse02", "browser": "http://localhost:9226/"}]`
+	if _, err := ParseSingleConfig([]byte(keeperTestConfig(t, keeper)), t.TempDir()); err != nil {
+		t.Fatalf("localhost vs 127.0.0.1 wrongly merged: %v", err)
+	}
+}
+
+// TestParseKeeperBlockIntervalCap (loop-2 red-team N4): an
+// interval above MaxKeeperInterval is a config error (the
+// jitter multiplication would overflow); the cap itself
+// parses.
+func TestParseKeeperBlockIntervalCap(t *testing.T) {
+	over := `[{"tag": "k", "profile": "muse01", "browser": "http://127.0.0.1:9226/", "interval": "9000h"}]`
+	if _, err := ParseSingleConfig([]byte(keeperTestConfig(t, over)), t.TempDir()); err == nil {
+		t.Fatal("interval 9000h accepted; want config error")
+	}
+	at := `[{"tag": "k", "profile": "muse01", "browser": "http://127.0.0.1:9226/", "interval": "8760h"}]`
+	if _, err := ParseSingleConfig([]byte(keeperTestConfig(t, at)), t.TempDir()); err != nil {
+		t.Fatalf("interval at the cap rejected: %v", err)
+	}
+}
+
+// TestParseKeeperBlockBrowserQueryRejected: a CDP URL with a
+// query or fragment is a config error.
+func TestParseKeeperBlockBrowserQueryRejected(t *testing.T) {
+	for _, u := range []string{"http://127.0.0.1:9226/?x=1", "http://127.0.0.1:9226/#frag"} {
+		keeper := `[{"tag": "k", "profile": "muse01", "browser": ` + quoteForTest(u) + `}]`
+		if _, err := ParseSingleConfig([]byte(keeperTestConfig(t, keeper)), t.TempDir()); err == nil {
+			t.Fatalf("browser URL %q accepted; want config error", u)
+		}
+	}
+}

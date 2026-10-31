@@ -99,9 +99,15 @@ func runEntry(ctx context.Context, entry *profile.KeeperEntry, prof *profile.Pro
 		if delay <= 0 {
 			delay = entry.EffectiveInterval()
 		}
-		// ±20% jitter, re-drawn per wait.
+		// ±20% jitter, re-drawn per wait. The interval cap
+		// (MaxKeeperInterval) keeps this multiplication in
+		// range; the non-positive guard is defence in depth
+		// against a pathological NextDelay.
 		j := 1 + (rand.Float64()*2-1)*0.2
 		delay = time.Duration(float64(delay) * j)
+		if delay <= 0 {
+			delay = entry.EffectiveInterval()
+		}
 		select {
 		case <-ctx.Done():
 			return res
@@ -135,8 +141,18 @@ type ownerFile struct {
 	Heartbeat int64 `json:"heartbeat_unix"`
 }
 
-func ownerPath(profileDir, tag string) string {
-	return filepath.Join(profileDir, "keeper-"+tag+".owner")
+func ownerPath(profileDir, tag string) (string, error) {
+	// Defence in depth: the tag is validated at parse time,
+	// but a hand-built entry must never escape the profile
+	// directory through this path. The containment check
+	// rejects any tag that would place the owner file
+	// outside profileDir, whatever validation was skipped.
+	cleanDir := filepath.Clean(profileDir)
+	p := filepath.Join(cleanDir, "keeper-"+tag+".owner")
+	if filepath.Dir(p) != cleanDir {
+		return "", fmt.Errorf("keeper tag %q escapes the profile directory", tag)
+	}
+	return p, nil
 }
 
 // AcquireSingleFlight claims the entry. It returns a release
@@ -146,7 +162,16 @@ func AcquireSingleFlight(profileDir, tag string, clock Clock) (release func(), e
 	if clock == nil {
 		clock = RealClock
 	}
-	path := ownerPath(profileDir, tag)
+	// Tags are validated here as well as at parse time: the
+	// login flow passes the constant "login", and hand-built
+	// entries must be refused before ownerPath is computed.
+	if err := profile.ValidateKeeperTag(tag); err != nil {
+		return nil, err
+	}
+	path, err := ownerPath(profileDir, tag)
+	if err != nil {
+		return nil, err
+	}
 	releaseLock, err := profile.LockShortFile(path, time.Second)
 	if err != nil {
 		return nil, err
@@ -182,7 +207,11 @@ func AcquireSingleFlight(profileDir, tag string, clock Clock) (release func(), e
 			case <-done:
 				return
 			case <-ticker.C:
-				_ = os.WriteFile(path, mustOwnerJSON(clock), 0o600)
+				// Locked, ownership-checked refresh: a
+				// stale (SIGSTOPped) runner that resumes
+				// after a takeover must not overwrite the
+				// new owner's heartbeat.
+				refreshOwner(path, os.Getpid(), clock)
 			}
 		}
 	}
@@ -190,15 +219,51 @@ func AcquireSingleFlight(profileDir, tag string, clock Clock) (release func(), e
 	release = func() {
 		once.Do(func() {
 			close(done)
-			_ = os.Remove(path)
+			releaseOwner(path, os.Getpid())
 		})
 	}
 	return release, nil
 }
 
-func mustOwnerJSON(clock Clock) []byte {
-	data, _ := json.Marshal(ownerFile{PID: os.Getpid(), Heartbeat: clock.Now().Unix()})
-	return data
+// refreshOwner rewrites the owner file's heartbeat under the
+// short flock, only when the file still names pid. False when
+// the file is owned by someone else, unreadable, or the lock
+// could not be taken: the caller keeps ticking either way (a
+// missed heartbeat only risks a takeover after
+// OwnerStaleAfter, which the PID-liveness check still guards).
+func refreshOwner(path string, pid int, clock Clock) bool {
+	releaseLock, err := profile.LockShortFile(path, time.Second)
+	if err != nil {
+		return false
+	}
+	defer releaseLock()
+	raw, _ := os.ReadFile(path)
+	var owner ownerFile
+	if len(raw) == 0 || json.Unmarshal(raw, &owner) != nil || owner.PID != pid {
+		return false
+	}
+	data, _ := json.Marshal(ownerFile{PID: pid, Heartbeat: clock.Now().Unix()})
+	return os.WriteFile(path, data, 0o600) == nil
+}
+
+// releaseOwner removes the owner file under the short flock,
+// only when it still names pid (or is empty: an empty file
+// names no owner). A stale runner resuming after a takeover
+// must never delete the new owner's file.
+func releaseOwner(path string, pid int) bool {
+	releaseLock, err := profile.LockShortFile(path, time.Second)
+	if err != nil {
+		return false
+	}
+	defer releaseLock()
+	raw, _ := os.ReadFile(path)
+	if len(raw) > 0 {
+		var owner ownerFile
+		if json.Unmarshal(raw, &owner) != nil || owner.PID != pid {
+			return false
+		}
+	}
+	return os.Remove(path) == nil
 }
 
 // pidAlive reports whether pid exists. On non-unix targets the

@@ -7,6 +7,7 @@ package keeper
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // Telegram notices: fixed content, no secrets, no error text,
@@ -38,10 +39,26 @@ type Notifier interface {
 	Notify(ctx context.Context, kind NoticeKind, profileName string) error
 }
 
+// SanitizeDisplay strips line/field breaks from a name
+// before it is embedded in a notice or a stdout summary line:
+// a newline in a profile or tag name must never forge a
+// second output line. Profile names are charset-validated at
+// parse time and keeper tags at parse time too; this is
+// defence at the emission point for hand-built values.
+func SanitizeDisplay(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
 // NoticeText renders the fixed notice body for a kind and
 // profile. The re-login path names the two working remedies:
 // screencast login and auth import.
 func NoticeText(kind NoticeKind, profileName string) string {
+	profileName = SanitizeDisplay(profileName)
 	switch kind {
 	case NoticeReexported:
 		return fmt.Sprintf("castctl keeper: profile %s session re-exported from the browser and verified. No action was taken automatically.", profileName)
