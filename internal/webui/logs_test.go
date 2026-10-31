@@ -212,3 +212,272 @@ func TestParseLogLine(t *testing.T) {
 		}
 	}
 }
+
+// Log-gate refusal tests (loop-2 F1, Boss ruling 2026-10-31):
+// the gate must refuse the cookies file, its .bak sibling, the
+// legacy cookies file and its .bak, and every file resolving
+// under profiles/ — symlink-resolved per request. FAKE markers
+// only; a refused output must never reach a response.
+
+func logServerFromConfig(t *testing.T, dir, config string) *Server {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(testToken))
+	srv, err := New(Deps{
+		ConfigDir:    dir,
+		Version:      "t",
+		ListenAddr:   "127.0.0.1:8317",
+		TokenHash:    sum,
+		HasToken:     true,
+		DistFS:       fstest.MapFS{"index.html": {Data: []byte("shell")}},
+		BundleSHA256: "h",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return srv
+}
+
+func logConfigWithOutput(t *testing.T, dir, cookiesPath, logPath string) string {
+	t.Helper()
+	_ = t
+	return `{
+  "default_profile": "muse01",
+  "profiles": {"muse01": {"cookies_file": "` + cookiesPath + `"}},
+  "log": {"output": "` + logPath + `", "timestamp": true}
+}`
+}
+
+func assertLogsRefused(t *testing.T, srv *Server, markers ...string) {
+	t.Helper()
+	rec := logDo(t, srv, "/api/v1/logs")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logs: %d: %s", rec.Code, rec.Body.String())
+	}
+	data := decodeEnvelope(t, rec)["data"].(map[string]any)
+	if data["disabled"] != true || data["reason"] != "log_output_refused" {
+		t.Fatalf("refused response = %v", data)
+	}
+	for _, marker := range markers {
+		if strings.Contains(rec.Body.String(), marker) {
+			t.Fatalf("marker %s leaked into log response:\n%s", marker, rec.Body.String())
+		}
+	}
+}
+
+func TestLogsRefusedCookiesBak(t *testing.T) {
+	dir := t.TempDir()
+	cookiesPath := filepath.Join(dir, "cookies.txt")
+	bakPath := cookiesPath + ".bak"
+	jar := ".example.com\tTRUE\t/\tFALSE\t0\thatch_sess\tFAKE-COOKIE-HATCH-12345\n" +
+		".example.com\tTRUE\t/\tFALSE\t0\tdatr\tFAKE-COOKIE-DATR-67890\n"
+	if err := os.WriteFile(bakPath, []byte(jar), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, bakPath))
+	assertLogsRefused(t, srv, "FAKE-COOKIE-HATCH-12345", "FAKE-COOKIE-DATR-67890")
+}
+
+func TestLogsRefusedLegacyBak(t *testing.T) {
+	dir := t.TempDir()
+	legacyDir := filepath.Join(dir, "profiles", "legacy1")
+	if err := os.MkdirAll(legacyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "config.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacyBak := filepath.Join(legacyDir, "cookies.txt.bak")
+	jar := ".example.com\tTRUE\t/\tFALSE\t0\thatch_sess\tFAKE-LEGACY-HATCH-111\n"
+	if err := os.WriteFile(legacyBak, []byte(jar), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cookiesPath := filepath.Join(dir, "cookies.txt")
+	config := logConfigWithOutput(t, dir, cookiesPath, legacyBak)
+	srv := logServerFromConfig(t, dir, config)
+	assertLogsRefused(t, srv, "FAKE-LEGACY-HATCH-111")
+}
+
+func TestLogsRefusedProfilesSubtree(t *testing.T) {
+	dir := t.TempDir()
+	notesPath := filepath.Join(dir, "profiles", "muse01", "notes.txt")
+	if err := os.MkdirAll(filepath.Dir(notesPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notesPath, []byte("INFO gateway: FAKE-PROFILES-NOTE-222\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cookiesPath := filepath.Join(dir, "profiles", "muse01", "cookies.txt")
+	config := logConfigWithOutput(t, dir, cookiesPath, notesPath)
+	srv := logServerFromConfig(t, dir, config)
+	assertLogsRefused(t, srv, "FAKE-PROFILES-NOTE-222")
+}
+
+func TestLogsRefusedSymlinkToBak(t *testing.T) {
+	dir := t.TempDir()
+	cookiesPath := filepath.Join(dir, "cookies.txt")
+	bakPath := cookiesPath + ".bak"
+	jar := ".example.com\tTRUE\t/\tFALSE\t0\thatch_sess\tFAKE-SYMLINK-HATCH-333\n"
+	if err := os.WriteFile(bakPath, []byte(jar), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(dir, "link.log")
+	if err := os.Symlink(bakPath, linkPath); err != nil {
+		t.Fatal(err)
+	}
+	config := logConfigWithOutput(t, dir, cookiesPath, linkPath)
+	srv := logServerFromConfig(t, dir, config)
+	assertLogsRefused(t, srv, "FAKE-SYMLINK-HATCH-333")
+}
+
+func TestLogsRefusedDotDotSymlinkBak(t *testing.T) {
+	// The .bak does not exist yet: the gate must refuse the
+	// symlink-resolved target even before the backup exists.
+	// The output path reaches the (absent) .bak through a
+	// symlinked directory plus a ".." component, so a purely
+	// lexical check cannot see the target.
+	dir := t.TempDir()
+	aliasPath := filepath.Join(dir, "alias")
+	if err := os.Symlink(dir, aliasPath); err != nil {
+		t.Fatal(err)
+	}
+	cookiesPath := filepath.Join(dir, "cookies.txt")
+	// Lexically: dir/alias/profiles/../cookies.txt.bak collapses
+	// to dir/alias/cookies.txt.bak; resolved: dir/cookies.txt.bak.
+	logPath := filepath.Join(dir, "alias", "profiles", "..", "cookies.txt.bak")
+	config := logConfigWithOutput(t, dir, cookiesPath, logPath)
+	srv := logServerFromConfig(t, dir, config)
+	assertLogsRefused(t, srv)
+}
+
+func TestLogsLegitimateFileOutsideProfilesTails(t *testing.T) {
+	// No-over-refusal guard: a plain log file outside profiles/
+	// still tails normally. (Green on both old and new code.)
+	srv, dir := newLogTestServer(t, logBlockConfig)
+	logPath := filepath.Join(dir, "castctl.log")
+	lines := "+0700 2026-10-31 13:00:01 INFO gateway: hello\n" +
+		"+0700 2026-10-31 13:00:02 INFO gateway: world\n"
+	if err := os.WriteFile(logPath, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec := logDo(t, srv, "/api/v1/logs")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logs: %d: %s", rec.Code, rec.Body.String())
+	}
+	data := decodeEnvelope(t, rec)["data"].(map[string]any)
+	if data["disabled"] != false {
+		t.Fatalf("legitimate log refused: %v", data)
+	}
+	entries, _ := data["entries"].([]any)
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d, want 2: %v", len(entries), entries)
+	}
+}
+
+func collectLogMessages(t *testing.T, srv *Server, path string) ([]string, map[string]any) {
+	t.Helper()
+	rec := logDo(t, srv, path)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logs %s: %d: %s", path, rec.Code, rec.Body.String())
+	}
+	var env map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	data := env["data"].(map[string]any)
+	entries, _ := data["entries"].([]any)
+	msgs := []string{}
+	for _, e := range entries {
+		msgs = append(msgs, e.(map[string]any)["message"].(string))
+	}
+	return msgs, data
+}
+
+func TestLogsCursorPaginationNoLoss(t *testing.T) {
+	srv, dir := newLogTestServer(t, logBlockConfig)
+	logPath := filepath.Join(dir, "castctl.log")
+	var b strings.Builder
+	want := []string{}
+	for i := 0; i < 12; i++ {
+		msg := "line-" + itoa(i)
+		want = append(want, msg)
+		b.WriteString("+0700 2026-10-31 13:00:01 INFO gateway: " + msg + "\n")
+	}
+	if err := os.WriteFile(logPath, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	cursor := "0"
+	for page := 0; page < 10; page++ {
+		msgs, data := collectLogMessages(t, srv, "/api/v1/logs?cursor="+cursor+"&limit=5")
+		got = append(got, msgs...)
+		more, _ := data["more"].(bool)
+		next, _ := data["next_cursor"].(string)
+		if !more {
+			if len(msgs) == 0 && page == 0 {
+				t.Fatal("first page empty with more=false")
+			}
+			break
+		}
+		if next == "" || next == cursor {
+			t.Fatalf("page %d: more=true but next_cursor %q did not advance from %q", page, next, cursor)
+		}
+		cursor = next
+		if page == 9 {
+			t.Fatal("pagination did not terminate")
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("paginated messages = %d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("message %d = %q, want %q (all: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestLogsLevelFilterBeforeTruncate(t *testing.T) {
+	srv, dir := newLogTestServer(t, logBlockConfig)
+	logPath := filepath.Join(dir, "castctl.log")
+	var b strings.Builder
+	for i := 0; i < 8; i++ {
+		level := "INFO"
+		if i%2 == 1 {
+			level = "ERROR"
+		}
+		b.WriteString("+0700 2026-10-31 13:00:01 " + level + " gateway: line-" + itoa(i) + "\n")
+	}
+	if err := os.WriteFile(logPath, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	cursor := "0"
+	for page := 0; page < 10; page++ {
+		msgs, data := collectLogMessages(t, srv, "/api/v1/logs?cursor="+cursor+"&limit=2&level=error")
+		got = append(got, msgs...)
+		more, _ := data["more"].(bool)
+		next, _ := data["next_cursor"].(string)
+		if !more {
+			break
+		}
+		if next == "" || next == cursor {
+			t.Fatalf("page %d: more=true but next_cursor %q did not advance", page, next)
+		}
+		cursor = next
+		if page == 9 {
+			t.Fatal("pagination did not terminate")
+		}
+	}
+	want := []string{"line-1", "line-3", "line-5", "line-7"}
+	if len(got) != len(want) {
+		t.Fatalf("filtered messages = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("filtered message %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

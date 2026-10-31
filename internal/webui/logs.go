@@ -22,8 +22,12 @@ import (
 // block, or stderr/stdout output means the page reports
 // disabled: no ring is invented and no logging is started to
 // serve the page. Every returned line passes logging.SafeString
-// at the API boundary (the second boundary after emission), so
-// a marker secret in a fixture body can never reach a response.
+// at the API boundary, which strips only the pipeline's
+// redacted vocabulary (values already replaced by the
+// "<redacted>" marker at emission); it cannot strip a bare
+// secret value sitting in the file. Cookie material stays out
+// because the identity guard below refuses cookie-adjacent
+// outputs, not because SafeString would catch it.
 // No raw server/peer response body is ever emitted: the file
 // itself holds only the allowlisted summaries the pipeline
 // emits, and this endpoint adds no body extraction of its own.
@@ -42,9 +46,15 @@ const (
 
 // logGate resolves the live-log gate for the current config. It
 // returns the log file path, or disabled=true with a fixed
-// reason. The identity guard refuses a log output that IS the
-// config file or any cookies file (the factory's A7 rule,
-// re-checked here because this endpoint opens the file itself).
+// reason. The identity guard refuses a log output that resolves
+// to the config file, any cookies file, any cookies `.bak`
+// sibling, any legacy-layout cookies file or its `.bak`, or
+// any file under the config dir's profiles/ subtree (the
+// factory's A7 rule, re-checked here because this endpoint
+// opens the file itself). Paths are re-resolved per request
+// with symlink evaluation, so a symlink or ".." reaching a
+// refused file is refused even before the file exists; no
+// verdict is cached across renames.
 func (s *Server) logGate() (path string, disabled bool, reason string, err error) {
 	load, err := s.loadConfig()
 	if err != nil {
@@ -65,27 +75,59 @@ func (s *Server) logGate() (path string, disabled bool, reason string, err error
 	case "", "stderr", "stdout":
 		return "", true, "log_output_not_file", nil
 	}
-	resolved := settings.Output
-	if !filepath.IsAbs(resolved) {
-		// sing-box opens a relative output against the process
-		// working directory; the server resolves the same way.
+	// sing-box opens a relative output against the process
+	// working directory; the server resolves the same way,
+	// component by component so a symlink followed by ".."
+	// cannot hide the real target.
+	base := s.deps.ConfigDir
+	if !filepath.IsAbs(settings.Output) {
 		wd, werr := os.Getwd()
 		if werr != nil {
 			return "", false, "", errInternal()
 		}
-		resolved = filepath.Join(wd, resolved)
+		base = wd
 	}
-	resolved = filepath.Clean(resolved)
-	// A7 identity guard: never open the config file or a cookies
-	// file as if it were a log.
+	resolved := resolveAgainst(base, settings.Output)
+	// A7 identity guard: never open the config file, a cookies
+	// file, a cookies backup, or anything under profiles/ as
+	// if it were a log.
 	refused := []string{filepath.Join(s.deps.ConfigDir, "config.json")}
 	for _, name := range cfg.ProfileNames() {
 		if p := cfg.Profiles[name]; p != nil && p.CookiesFile != "" {
-			refused = append(refused, p.CookiesFile)
+			refused = append(refused, p.CookiesFile, p.CookiesFile+".bak")
 		}
 	}
+	for _, name := range s.legacyProfileNames(cfg) {
+		if paths, perr := profile.ProfilePaths(s.deps.ConfigDir, name); perr == nil {
+			refused = append(refused, paths.Cookies, paths.Cookies+".bak")
+		}
+	}
+	profilesDir := resolvePathBestEffort(filepath.Join(s.deps.ConfigDir, "profiles"))
+	if pathWithin(resolved, profilesDir) {
+		return "", true, "log_output_refused", nil
+	}
+	// Raw configured values: the parser coerces some
+	// cookies_file values to the profile's own path (an
+	// in-dir value that is not the profile's own), but the
+	// configured path is still the operator's cookies
+	// location, and its .bak must be refused too. Both the
+	// lexical form (so symlink aliases compare equal via
+	// the best-effort check below) and the resolved form
+	// are refused.
+	if rawDoc, derr := decodeGeneric(load.raw); derr == nil {
+		for _, v := range profileCookiesFiles(rawDoc) {
+			lexical := v
+			if !filepath.IsAbs(lexical) {
+				lexical = filepath.Join(s.deps.ConfigDir, lexical)
+			}
+			lexical = filepath.Clean(lexical)
+			resolvedRaw := resolveAgainst(s.deps.ConfigDir, v)
+			refused = append(refused, lexical, lexical+".bak", resolvedRaw, resolvedRaw+".bak")
+		}
+	}
+	resolvedReal := resolvePathBestEffort(resolved)
 	for _, other := range refused {
-		if sameFile(resolved, other) {
+		if sameFile(resolved, other) || resolvedReal == resolvePathBestEffort(other) {
 			return "", true, "log_output_refused", nil
 		}
 	}
@@ -275,14 +317,16 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	// just after a newline. Drop a leading partial line when the
 	// window starts mid-line, and drop a trailing partial line
 	// (it is delivered whole on the poll after its newline
-	// lands). endCursor is the boundary the next poll resumes
-	// from.
-	endCursor := size
+	// lands). windowStart/windowEnd are the file offsets of the
+	// kept text.
+	windowStart := startOffset
+	windowEnd := size
 	text := string(data)
 	if startOffset > 0 && len(text) > 0 {
 		one := make([]byte, 1)
 		if _, err := f.ReadAt(one, startOffset-1); err == nil && one[0] != '\n' {
 			if i := strings.IndexByte(text, '\n'); i >= 0 {
+				windowStart += int64(i) + 1
 				text = text[i+1:]
 			} else {
 				text = ""
@@ -291,40 +335,71 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(text) > 0 && !strings.HasSuffix(text, "\n") {
 		if i := strings.LastIndexByte(text, '\n'); i >= 0 {
-			endCursor = startOffset + int64(len(data)) - int64(len(text)) + int64(i) + 1
+			windowEnd = windowStart + int64(i) + 1
 			text = text[:i+1]
 		} else {
-			endCursor = startOffset
+			windowEnd = windowStart
 			text = ""
 		}
 	}
-	var lines []string
+	// Split into lines with their end offsets, so the cursor
+	// advances only past delivered lines.
+	type logLine struct {
+		text string
+		end  int64
+	}
+	var lines []logLine
 	if text != "" {
-		lines = strings.Split(strings.TrimSuffix(text, "\n"), "\n")
-	}
-	// Tail reads keep the LAST limit lines; cursor reads keep
-	// the FIRST limit lines (oldest-first append order).
-	if cursor == "" && len(lines) > limit {
-		lines = lines[len(lines)-limit:]
-	} else if cursor != "" && len(lines) > limit {
-		lines = lines[:limit]
-	}
-	entries := make([]logEntry, 0, len(lines))
-	for _, line := range lines {
-		if line == "" {
-			continue
+		off := windowStart
+		for _, raw := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
+			off += int64(len(raw)) + 1
+			lines = append(lines, logLine{text: raw, end: off})
 		}
-		entry := parseLogLine(line)
+	}
+	// Filter BEFORE truncating: the level filter must not
+	// discard entries the window never delivered.
+	var filtered []logLine
+	for _, ln := range lines {
+		entry := parseLogLine(ln.text)
 		if levelFilter != "" && entry.Level != levelFilter {
 			continue
 		}
-		entries = append(entries, entry)
+		filtered = append(filtered, ln)
+	}
+	// Tail reads keep the LAST limit lines; cursor reads keep
+	// the FIRST limit lines (oldest-first append order). more
+	// is true only when undelivered filtered lines remain in
+	// this window, or bytes remain past the window end; the
+	// cursor is the end offset of the last delivered line, or
+	// the window end when nothing remains undelivered.
+	var delivered []logLine
+	more := false
+	nextCursor := windowEnd
+	if cursor == "" && len(filtered) > limit {
+		delivered = filtered[len(filtered)-limit:]
+	} else if cursor != "" && len(filtered) > limit {
+		delivered = filtered[:limit]
+		more = true
+		nextCursor = delivered[len(delivered)-1].end
+	} else {
+		delivered = filtered
+	}
+	if !more && windowEnd < size {
+		more = true
+		nextCursor = windowEnd
+	}
+	entries := make([]logEntry, 0, len(delivered))
+	for _, ln := range delivered {
+		if ln.text == "" {
+			continue
+		}
+		entries = append(entries, parseLogLine(ln.text))
 	}
 	writeEnvelope(w, http.StatusOK, map[string]any{
 		"disabled":    false,
 		"entries":     entries,
-		"next_cursor": strconv.FormatInt(endCursor, 10),
-		"more":        false,
+		"next_cursor": strconv.FormatInt(nextCursor, 10),
+		"more":        more,
 	})
 }
 
