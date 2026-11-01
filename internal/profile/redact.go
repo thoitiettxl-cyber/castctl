@@ -44,6 +44,15 @@ func RedactOutboundJSON(data []byte) ([]byte, error) {
 // key. This is the production caller for the wholesale
 // plugins redaction (the web UI /config display path); it
 // operates on a decoded copy, never on stored config.
+//
+// Round-trip edge (documented, not hidden): the "fragment"
+// marker is a sentinel only at an ABSENT path in the web UI
+// merge. If a real fragment genuinely has a top-level
+// "fragment" key, a PUT round-trip of displayed content
+// OVERWRITES that key with the marker (data loss, no secret
+// leak) instead of rejecting. Fixing the merge behaviour is
+// a follow-up outside this PR; the merge code is
+// must-not-touch here.
 func RedactRawConfig(data []byte) ([]byte, error) {
 	v, err := decodeOrderedJSON(data)
 	if err != nil {
@@ -121,13 +130,26 @@ func RedactConfig(cfg *SingleConfig) ([]byte, error) {
 // fragment's own name in the plugin contract), never an
 // invented "config" key: a PUT round-trip of displayed
 // content then fail-closes loudly through the web UI's
-// sentinel merge (a <redacted> value at an absent path is
+// sentinel merge when the "fragment" path is ABSENT in the
+// stored config (a <redacted> value at an absent path is
 // rejected) instead of silently writing the marker into a
-// fragment. Key-based redaction alone cannot do this: a
+// fragment. Exception, documented at RedactRawConfig: when
+// the stored fragment genuinely has a top-level "fragment"
+// key, the round-trip overwrites it with the marker. Key-based redaction alone cannot do this: a
 // fragment key that is not in redact's secret-key set could
 // still carry a secret value under an unknown name, and the
 // fragment's key names themselves are plugin-opaque. This
 // operates on the built (copy) tree, never on the stored config.
+//
+// Fail-closed for EVERY shape: the plugins value is
+// plugin-opaque, so any shape other than an array of objects
+// with string tag/type — a bare object, string, number, or an
+// array holding a non-object — is replaced wholesale by one
+// <redacted> marker (or, inside an array, the offending
+// element is replaced by the marker). A malformed shape must
+// never let a fragment value survive display. Tag/type values
+// are kept only when they are strings; a non-string tag/type
+// is replaced by the marker too.
 func redactPluginsBlock(root *orderedObject) {
 	if root == nil {
 		return
@@ -138,21 +160,30 @@ func redactPluginsBlock(root *orderedObject) {
 	}
 	arr, ok := v.([]any)
 	if !ok {
+		root.set("plugins", redact.Marker)
 		return
 	}
 	out := make([]any, 0, len(arr))
 	for _, elem := range arr {
 		entry, ok := elem.(*orderedObject)
 		if !ok {
-			out = append(out, elem)
+			out = append(out, redact.Marker)
 			continue
 		}
 		shown := newOrderedObject()
 		if tag, ok := entry.get("tag"); ok {
-			shown.set("tag", tag)
+			if s, ok := tag.(string); ok {
+				shown.set("tag", s)
+			} else {
+				shown.set("tag", redact.Marker)
+			}
 		}
 		if typ, ok := entry.get("type"); ok {
-			shown.set("type", typ)
+			if s, ok := typ.(string); ok {
+				shown.set("type", s)
+			} else {
+				shown.set("type", redact.Marker)
+			}
 		}
 		hasFragment := false
 		for _, k := range entry.keys {

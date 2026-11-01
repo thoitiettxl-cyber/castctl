@@ -118,12 +118,17 @@ it, one plugin at a time, in order:
    and never fail the whole call or abort other plugins.
 
 Fuse: a host-adapter panic or a call timeout fuses the
-plugin, per PATH. A fused plugin stays loaded but is skipped
-by later `ApplyConfig` calls for the same path; loading a
-different path replaces it and clears the fuse. A fused
-plugin's remaining calls fail fast with the stored fuse
-reason, without invoking the plugin again. `Host.Call`
-checks the fuse first. The fuse reason names the method
+plugin, per PATH. A fused plugin is skipped by later
+`ApplyConfig` calls for the same path (the loader is not
+re-opened); loading a different path replaces it and
+clears the fuse. A call-time fuse keeps the image resident
+but refuses calls; a rollback-failure fuse deletes the
+loaded entry as well, and `Host.Call` then reports fused
+(not "not loaded"). A fused plugin's remaining calls fail
+fast with the stored fuse reason, without invoking the
+plugin again. `Host.Call` checks the fuse first. The fuse
+lasts until a different-path load clears it — not until a
+deadline. The fuse reason names the method
 and the panic type only — never a panic value, never a
 secret.
 
@@ -169,15 +174,21 @@ instances, BQ2(A)); different tags get different shadow
 paths and are isolated. This is by design, not a bug.
 
 Hardening castctl adds (not upstream, never cite upstream
-for it): every component of the plugin path is Lstat-checked
-(a symlinked directory component refuses the load, on unix);
-the source file is opened with `O_NOFOLLOW` and must be a
-regular file — symlinks and directories are refused, so a
-swapped symlink cannot redirect a load. On unix the file
-must additionally have exactly one hard link (`Nlink==1`);
-on Windows/macOS there is no equivalent check and only the
-symlink+regular-file refusal applies. Pre-existing shadow
-directories are hardened to 0700 with an ownership check.
+for it), per platform: every component of the plugin path
+is Lstat-checked on all platforms (this check has no build
+tag; a symlinked directory component refuses the load).
+The source file is opened with `O_NOFOLLOW` on unix only
+(`open_unix.go`; Windows and other platforms use a plain
+open plus the Lstat refusal, `open_windows.go` /
+`open_other.go`) and must be a regular file — symlinks and
+directories are refused, so a swapped symlink cannot
+redirect a load. On linux, darwin, and freebsd the file
+must additionally have exactly one hard link
+(`Nlink==1`); macOS HAS this check (the unix build tag
+covers darwin). Only Windows has no equivalent check and
+only the symlink+regular-file refusal applies there.
+Pre-existing shadow directories are hardened to 0700 with
+an ownership check.
 On graceful host shutdown the process's own shadow
 directory is removed (best-effort), and constructing a host
 sweeps stale `pid-<pid>` shadow directories whose pid is
@@ -234,7 +245,9 @@ required, and name/version/author are required:
 - `command_provider` — the plugin registers commands via
   the contract (`commands` in the registration). Commands
   are registered through the contract only; there is no
-  `init()`-based registration.
+  `init()`-based registration. Registration-only in this
+  PR: no castctl code dispatches `command.execute` (no CLI
+  command or scheduler invokes it).
 
 ## Reverse callbacks: `host.log` only
 
@@ -311,11 +324,12 @@ appears on any output.
 
 ## glibc compatibility
 
-Build floor: glibc 2.17. Bundled runtime (KernelSU module):
-glibc 2.44. Both are documented because they answer
-different questions: 2.17 is what a plugin may require at
-most to load everywhere castctl runs; 2.44 is what the
-module ships today.
+Build floor: glibc 2.17 — the most a plugin may require
+to load everywhere castctl runs. The gate compares
+against the RUNNING libc, whatever it is; no value is
+hardcoded. Droidspaces provides its own glibc on the
+phone; its version is recorded only from the on-device
+check, never assumed.
 
 Before `dlopen`, the loader parses the plugin ELF
 `.gnu.version_r` (`debug/elf`, no new dependency) for the
@@ -330,14 +344,14 @@ requirements present: the file is refused rather than
 loaded unchecked. Non-ELF files skip the check (the format
 gate is the loader itself).
 
-Android: there is no `GOOS=android` loader file. The
-module runs the `GOOS=linux` / `GOARCH=arm64` glibc build
-under the bundled glibc loader
-(`/lib/ld-linux-aarch64.so.1`), so the unix loader
-(`cgo && linux/darwin/freebsd`) IS the Android path. A
-`GOOS=android` binary falls back to the stub loader and
-refuses loads clearly. The phone load is the merge gate
-(see "On-device check").
+Android: there is no `GOOS=android` loader file, and the
+unix loader's build tag excludes android. The phone runs
+the normal `GOOS=linux` / `GOARCH=arm64` glibc build
+inside Droidspaces (a Linux container), so the unix
+loader (`cgo && linux/darwin/freebsd && !android`) IS the
+phone path. A `GOOS=android` binary uses the stub loader
+and refuses loads clearly (fallback only). The phone load
+is the merge gate (see "On-device check").
 
 Builds: the default build is dynamically linked
 (`CGO_ENABLED=1`) and loads plugins. Each architecture also
@@ -357,7 +371,8 @@ binaries; when a manifest path is supplied by the caller,
 the SHADOW-COPY bytes about to be `dlopen`ed are verified
 against it BEFORE load (the verify-before-use pattern from
 upstream's plugin store, without the store), through one
-`O_NOFOLLOW` open with a regular-file re-check. A mismatch,
+open (`O_NOFOLLOW` on unix; plain open + Lstat refusal on
+Windows) with a regular-file re-check. A mismatch,
 a missing entry, a duplicate or traversing manifest name,
 or a symlinked manifest/plugin path refuses the load.
 Manifest generation and distribution are the operator's
@@ -389,7 +404,7 @@ The echo example builds with:
 go build -buildmode=c-shared -o echo.so ./examples/plugin/echo
 ```
 
-Cross-compiling for the module (linux/arm64, glibc 2.17)
+Cross-compiling for the phone (linux/arm64, glibc 2.17)
 uses the pinned Gate 0 toolchain (zig 0.17.0 + pinned
 glibc 2.44 sysroot) — see "Cross-compiling the echo
 example" below. Verify any build with
@@ -407,10 +422,12 @@ glibc sysroot `.deb` sha256
 `5392d254e84c436e96783bcb6ffffe429d6b24c7ad00490f23f06f66c4769fb6`
 = `module/sources.lock` `LOCK_GLIBC_SHA256`). The exact
 commands and the qemu load log are recorded in the PR
-report; the load itself is proven under qemu with the
-bundled-loader invocation, and on the phone with
-`plugin-check` (merge gate). Do not re-download the
-toolchain without sha verification.
+report. That qemu proof is build history: it proves the
+linux/arm64 glibc build loads under qemu. It is NOT the
+phone runtime path — the phone runs the same binary
+inside Droidspaces (see "On-device check"). The sysroot
+pin above stays valid only as a build-input record. Do
+not re-download the toolchain without sha verification.
 
 ## On-device check
 
@@ -428,31 +445,33 @@ shutdown: ok
 ```
 
 On failure it prints one `FAIL` line naming the tag and a
-short reason, and exits 2. On the device, the wrapper is
-`castctl-ctl plugin-check <file>` (lifecycle-locked,
-root-gated; the file must already be in the reserved
-plugin dir, must not be a symlink, and the core binary
-runs under the bundled glibc loader):
+short reason, and exits 2. On the phone, run the NORMAL
+linux/arm64 castctl binary inside Droidspaces (a Linux
+container) against a plugin in a normal filesystem
+layout — no module loader, no `castctl-ctl` wrapper:
 
 ```sh
-# on the phone, as root (KernelSU module installed):
-cp echo-v0.1.0.so /data/local/castctl/plugins/linux/arm64/
-castctl-ctl plugin-check echo-v0.1.0.so
+# inside Droidspaces on the phone:
+castctl plugin check /path/to/echo-v0.1.0.so
 ```
 
 Expected output is the five lines above (name/version
-per the plugin). Phone result: [NEEDS-MEASUREMENT] — it is
-the merge gate for this PR.
+per the plugin). Phone result: [NEEDS-MEASUREMENT] — it
+is the merge gate for this PR: the gate passes only when
+Boss runs this command inside Droidspaces and the five
+lines print with no secrets. Compat/checksum errors
+never embed the shadow path on any platform, and the
+Windows loader has no dlerror-style path text to scrub.
 
 ## Per-platform load proof
 
 | Platform | Load proven? |
 |---|---|
 | Linux amd64 (host) | Yes — real-loader contract tests + `plugin check` dry run |
-| Linux arm64 under qemu (bundled loader) | See PR report (qemu load log + exit code) |
+| Linux arm64 under qemu | See PR report (qemu load log + exit code; build proof only) |
 | Windows | [NEEDS-MEASUREMENT] — loader compiles, never ran |
 | macOS | [NEEDS-MEASUREMENT] — unix loader, never ran |
-| Phone (KernelSU module) | [NEEDS-MEASUREMENT] — merge gate |
+| Phone (Droidspaces) | [NEEDS-MEASUREMENT] — merge gate: `castctl plugin check` inside Droidspaces |
 
 CI runs Linux-only jobs; no Windows/macOS/Android CI job
 exists, and none is claimed.
@@ -497,7 +516,8 @@ exists, and none is claimed.
   (`RTLD_NOW` backstop), not by the gate.
 - Windows/macOS/phone: [NEEDS-MEASUREMENT] (U4/U5) — the
   Windows loader compiles but has not run; the macOS
-  loader is the unix loader, unrun; the phone load is the
+  loader is the unix loader, unrun; the phone load
+  (`castctl plugin check` inside Droidspaces) is the
   merge gate.
 
 ## What was NOT copied, and why
@@ -507,8 +527,9 @@ exists, and none is claimed.
   credential surface exists for plugins.
 - Lstat/hardlink rejection in the shadow copy: absent
   upstream (verified by grep at the pin); implemented by
-  castctl (hardlink check unix-only). Never cite upstream
-  for it.
+  castctl (hardlink check on linux/darwin/freebsd only;
+  Lstat component check on all platforms). Never cite
+  upstream for it.
 - Upstream `validPlugin` also requires a non-empty
   `GitHubRepository` (`host.go:1241`); castctl deliberately
   does NOT require it. Do not cite upstream for castctl's
@@ -545,7 +566,7 @@ Files mirrored (renamed namespace, castctl schema 1):
 - `internal/pluginhost/host.go` — `ApplyConfig` (:213),
   quiesce, rollback.
 - `internal/pluginhost/platform.go` — candidate dirs
-  (:308), discovery (:292), extension (:99), ID rule
+  (:308), discovery (:291), extension (:99), ID rule
   (:17), version comparison (:218), file preference
   (:204).
 - `internal/pluginhost/shadow.go` — shadow copy (:33),

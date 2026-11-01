@@ -95,3 +95,33 @@ func TestVerifyFileChecksumRefusesSymlink(t *testing.T) {
 		t.Fatalf("symlinked plugin err = %v, want symlink refusal", err)
 	}
 }
+
+// TestVerifyShadowFileChecksumNoShadowPathLeak: errors from
+// the checksum/compat gates must never embed the shadow
+// path (which carries the pid directory layout).
+func TestVerifyShadowFileChecksumNoShadowPathLeak(t *testing.T) {
+	dir := t.TempDir()
+	manifest := writeManifest(t, dir, "echo.so", []byte("shadow-bytes"))
+	shadow := filepath.Join(dir, "castctl-pluginhost", "pid-424242", "castctl-plugin-echo-abc.so")
+	// Missing shadow file: the open error must not carry
+	// the shadow path.
+	err := VerifyShadowFileChecksum(shadow, manifest, "echo.so")
+	if err == nil {
+		t.Fatal("missing shadow file: want error")
+	}
+	if strings.Contains(err.Error(), "pid-424242") || strings.Contains(err.Error(), "castctl-pluginhost") {
+		t.Fatalf("checksum error leaked shadow path: %v", err)
+	}
+	// Non-regular shadow file (a directory): same rule.
+	shadowDir := filepath.Join(dir, "castctl-pluginhost", "pid-424243", "castctl-plugin-echo-def.so")
+	if err := os.MkdirAll(shadowDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err = VerifyShadowFileChecksum(shadowDir, manifest, "echo.so")
+	if err == nil {
+		t.Fatal("directory shadow file: want error")
+	}
+	if strings.Contains(err.Error(), "pid-424243") || strings.Contains(err.Error(), "castctl-pluginhost") {
+		t.Fatalf("checksum error leaked shadow path: %v", err)
+	}
+}

@@ -390,21 +390,22 @@ instead of upstream schema 10; castctl files in
   (stdlib `syscall` only; Windows load unproven).
 - `internal/pluginhost/loader_unsupported.go` (stub refusal
   wording) → `loader_stub.go` (also the `GOOS=android`
-  refusal; no android loader file by design).
+  refusal; no android loader file by design — the phone
+  runs the `GOOS=linux/arm64` build inside Droidspaces).
 - `internal/pluginhost/abi.go` (host/client/loader interface
   shape) → `host.go` (`Host`, `Client`, `Loader`).
 - `internal/pluginhost/host.go` (`ApplyConfig` :213, quiesce,
   rollback) → `host.go` lifecycle (reconfigure same path,
   quiesce-before-replace, rollback, fuse).
 - `internal/pluginhost/platform.go` (candidate dirs :308,
-  discovery :292, extension :99, ID rule :17, version
+  discovery :291, extension :99, ID rule :17, version
   comparison :218, file preference :204) →
   `discovery.go` (`Discover`, `PluginExtension`,
   `ValidatePluginID`).
 - `internal/pluginhost/shadow.go` (shadow copy :33, sha256
   naming :154, per-process dir :126-138) → `shadow.go`
   (plus castctl Lstat/hardlink hardening — not upstream;
-  hardlink check unix-only — and version selection, which
+  hardlink check on linux/darwin/freebsd — and version selection, which
   castctl adds mirroring upstream's comparison).
 - `internal/pluginhost/client_guard.go` (guarded call,
   recover, abandon-on-timeout :80-115) → `host.go`
@@ -430,7 +431,7 @@ instead of upstream schema 10; castctl files in
 Castctl-original (not upstream): the `plugins` array config
 shape (sing-box inline, no `enabled`), the glibc compat gate
 (`debug/elf` + `gnu_get_libc_version`), the Lstat/hardlink
-(unix-only) shadow hardening, the per-session loopback egress proxy
+(linux/darwin/freebsd hardlink check) shadow hardening, the per-session loopback egress proxy
 with cookie injection, the `plugin check` command, and the
 two-package consolidation (no `pluginapi`, no `sdk/`).
 

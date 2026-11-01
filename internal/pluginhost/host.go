@@ -148,7 +148,10 @@ type Skipped struct {
 }
 
 // ApplyReport is the result of ApplyConfig: the tags that are
-// loaded afterwards, and the desired entries that were skipped.
+// loaded AND callable afterwards, and the desired entries
+// that were skipped. A fused tag is never in Loaded, even
+// when its image is still resident: fused calls fail fast
+// until a different-path ApplyConfig clears the fuse.
 type ApplyReport struct {
 	Loaded  []string
 	Skipped []Skipped
@@ -225,9 +228,17 @@ func (h *Host) Loaded(tag string) (LoadedPlugin, bool) {
 // AdoptEgress registers a loopback proxy with the host so
 // Host.Close closes it (revoking its credentials). The host
 // never creates proxies and never adopts the same proxy
-// twice. Callers that create a proxy per plugin session
+// twice. Adoption is reference-counted by pointer across
+// loaded tags: superseding a plugin's proxy (reconfigure
+// with a different EgressProxy) or detaching the last tag
+// that references a proxy closes it immediately — a
+// superseded proxy's credentials and cookie scope must not
+// outlive the plugin image that used them. Two tags sharing
+// one proxy pointer keep it alive until the last tag
+// leaves. Callers that create a proxy per plugin session
 // adopt it here; callers that keep a proxy alive past the
-// host must not adopt it.
+// host must not adopt it. A nil EgressProxy in a later
+// Desired keeps the existing proxy (see applyRegistration).
 func (h *Host) AdoptEgress(p *EgressProxy) {
 	if h == nil || p == nil {
 		return
@@ -240,6 +251,32 @@ func (h *Host) AdoptEgress(p *EgressProxy) {
 		}
 	}
 	h.egresses = append(h.egresses, p)
+}
+
+// maybeCloseEgress closes p when no loaded tag references
+// it anymore (reference-counted by pointer: AdoptEgress
+// dedups by pointer, and tags may share one proxy). It is
+// called when a tag's egress pointer is superseded or the
+// tag is detached/deleted. ApplyConfig serialises these
+// calls (applyMu), so the scan-then-close sequence cannot
+// interleave with another ApplyConfig; Host.Close closes
+// every adopted proxy regardless and is idempotent via the
+// proxy's closeOnce.
+func (h *Host) maybeCloseEgress(p *EgressProxy) {
+	if h == nil || p == nil {
+		return
+	}
+	h.mu.Lock()
+	refs := 0
+	for _, lp := range h.loaded {
+		if lp != nil && lp.egress == p {
+			refs++
+		}
+	}
+	h.mu.Unlock()
+	if refs == 0 {
+		_ = p.Close()
+	}
 }
 
 // Close shuts down every loaded plugin (detach only; images
@@ -312,13 +349,19 @@ func (h *Host) ApplyConfig(ctx context.Context, desired []Desired) ApplyReport {
 
 	// Detach unselected plugins. Shutdown calls run
 	// outside h.mu (a client may block on an in-flight
-	// native call).
+	// native call); detached egress proxies are released
+	// after the map update, once no loaded tag references
+	// them.
 	h.mu.Lock()
 	var detached []Client
+	var detachedEgress []*EgressProxy
 	for tag, lp := range h.loaded {
 		if _, ok := desiredByTag[tag]; !ok {
 			if lp != nil && lp.client != nil {
 				detached = append(detached, lp.client)
+			}
+			if lp != nil && lp.egress != nil {
+				detachedEgress = append(detachedEgress, lp.egress)
 			}
 			delete(h.loaded, tag)
 			delete(h.fused, tag)
@@ -327,6 +370,9 @@ func (h *Host) ApplyConfig(ctx context.Context, desired []Desired) ApplyReport {
 	h.mu.Unlock()
 	for _, c := range detached {
 		c.Shutdown()
+	}
+	for _, p := range detachedEgress {
+		h.maybeCloseEgress(p)
 	}
 
 	for _, d := range ordered {
@@ -340,9 +386,9 @@ func (h *Host) ApplyConfig(ctx context.Context, desired []Desired) ApplyReport {
 		h.mu.Unlock()
 		if isFused && fuseEntry.path == d.Path {
 			report.Skipped = append(report.Skipped, Skipped{Tag: d.Tag, Reason: "fused: " + fuseEntry.reason})
-			if existing != nil {
-				report.Loaded = append(report.Loaded, d.Tag)
-			}
+			// A fused tag is never reported Loaded, even
+			// when its image is still resident: Loaded
+			// means callable, and fused calls fail fast.
 			continue
 		}
 		if isFused {
@@ -360,6 +406,7 @@ func (h *Host) ApplyConfig(ctx context.Context, desired []Desired) ApplyReport {
 					delete(h.loaded, d.Tag)
 					h.mu.Unlock()
 					existing.client.Shutdown()
+					h.maybeCloseEgress(existing.egress)
 					report.Skipped = append(report.Skipped, Skipped{Tag: d.Tag, Reason: "reconfigure failed and rollback failed"})
 				} else {
 					report.Skipped = append(report.Skipped, Skipped{Tag: d.Tag, Reason: "reconfigure failed, rolled back to previous config"})
@@ -387,6 +434,7 @@ func (h *Host) ApplyConfig(ctx context.Context, desired []Desired) ApplyReport {
 					delete(h.loaded, d.Tag)
 					h.mu.Unlock()
 					existing.client.Shutdown()
+					h.maybeCloseEgress(existing.egress)
 					report.Skipped = append(report.Skipped, Skipped{Tag: d.Tag, Reason: "replacement failed and rollback failed"})
 				} else {
 					report.Skipped = append(report.Skipped, Skipped{Tag: d.Tag, Reason: "replacement failed, rolled back to previous image"})
@@ -395,12 +443,16 @@ func (h *Host) ApplyConfig(ctx context.Context, desired []Desired) ApplyReport {
 				continue
 			}
 			// Shut the old image down before installing
-			// the replacement, outside h.mu.
+			// the replacement, outside h.mu. The old
+			// image's egress proxy is released once the
+			// replacement is installed (kept when the
+			// replacement shares the pointer).
 			existing.client.Shutdown()
 			h.mu.Lock()
 			h.loaded[d.Tag] = replacement
 			delete(h.fused, d.Tag)
 			h.mu.Unlock()
+			h.maybeCloseEgress(existing.egress)
 			report.Loaded = append(report.Loaded, d.Tag)
 			continue
 		}
@@ -529,12 +581,19 @@ func (h *Host) applyRegistration(lp *loadedPlugin, d Desired, reg pluginabi.Regi
 	lp.commands = append([]pluginabi.Command(nil), reg.Commands...)
 	lp.desired = d
 	lp.registered = true
+	oldEgress := lp.egress
 	if d.EgressProxy != nil {
 		h.AdoptEgress(d.EgressProxy)
 		lp.egress = d.EgressProxy
 	}
+	// Nil EgressProxy keeps the existing proxy (documented):
+	// the new registration's cookie scope still applies to
+	// it below.
 	if lp.egress != nil {
 		lp.egress.SetCookieHosts(reg.CookieHosts)
+	}
+	if oldEgress != nil && oldEgress != lp.egress {
+		h.maybeCloseEgress(oldEgress)
 	}
 }
 
@@ -588,14 +647,18 @@ func (h *Host) Call(ctx context.Context, tag, method string, request []byte) ([]
 	lp, ok := h.loaded[tag]
 	fuseEntry, isFused := h.fused[tag]
 	h.mu.Unlock()
-	if !ok || lp == nil || lp.client == nil {
-		return nil, fmt.Errorf("plugin %q is not loaded", tag)
-	}
 	// A fused plugin is never re-called: fail fast with the
 	// stored fuse reason instead of invoking the plugin
-	// again until its next deadline.
-	if isFused && fuseEntry.path == lp.path {
+	// again. The fuse lasts until a different-path
+	// ApplyConfig clears it — not until a deadline. A fused
+	// tag with no loaded entry (rollback-failure deletion)
+	// reports fused, not "not loaded": the distinction
+	// matters, because a same-path load will skip.
+	if isFused && (!ok || fuseEntry.path == lp.path) {
 		return nil, fmt.Errorf("plugin %q is fused: %s", tag, fuseEntry.reason)
+	}
+	if !ok || lp == nil || lp.client == nil {
+		return nil, fmt.Errorf("plugin %q is not loaded", tag)
 	}
 	return h.callEnvelope(ctx, lp, method, request, tag)
 }
@@ -707,22 +770,24 @@ func (h *Host) dispatchHostCall(method string, request []byte) []byte {
 	if message == "" {
 		message = "plugin log"
 	}
-	if len(message) > maxPluginTextLen {
-		message = message[:maxPluginTextLen]
-	}
-	// Strip NUL/control bytes so a plugin log line cannot
-	// inject terminal control sequences into host output.
-	// Newline/tab are kept (they are the line's own shape);
-	// ESC and other controls are dropped.
+	// Strip control characters so a plugin log line cannot
+	// inject terminal control sequences or forge a second
+	// log line in host output: newline/CR/tab become a
+	// space, other C0 controls and DEL are dropped. Then
+	// the message goes through the same cap-before-redact
+	// path as every other plugin-text surface (4096 with
+	// marker, secret-keyed shapes redacted).
 	message = strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\t' {
-			return r
+		switch r {
+		case '\n', '\r', '\t':
+			return ' '
 		}
 		if r < 0x20 || r == 0x7f {
 			return -1
 		}
 		return r
 	}, message)
+	message = safePluginText(message)
 	// The level is an allowlist, not free text: plugincheck
 	// prints it raw, so a level carrying a newline or ESC
 	// must never reach output as-is. Unknown levels become

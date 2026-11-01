@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/pluginhost"
 )
@@ -238,6 +239,109 @@ func TestEgressProxyConnectTunnels(t *testing.T) {
 	}
 	if string(got) != "pong!" {
 		t.Fatalf("tunnel reply = %q, want pong!", got)
+	}
+}
+
+// TestEgressProxyCloseAbortsTunnels: Close refuses new
+// connections AND aborts in-flight CONNECT tunnels by
+// closing their connections (revocation is not
+// new-connections-only).
+func TestEgressProxyCloseAbortsTunnels(t *testing.T) {
+	upstream := &recordingRoundTripper{}
+	serverSide, clientSide := net.Pipe()
+	defer clientSide.Close()
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return serverSide, nil
+	}
+	proxy, err := pluginhost.NewEgressProxy(upstream, dial, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("tcp", proxy.URL().Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "CONNECT example.invalid:443 HTTP/1.1\r\nProxy-Authorization: %s\r\nHost: example.invalid:443\r\n\r\n", proxyAuth(t, proxy.Username(), proxy.Password()))
+	br := bufio.NewReader(conn)
+	line, err := br.ReadString('\n')
+	if err != nil || !strings.Contains(line, "200") {
+		t.Fatalf("CONNECT status = %q, err = %v", line, err)
+	}
+	for {
+		l, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l == "\r\n" {
+			break
+		}
+	}
+	if err := proxy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// The tunnel must abort PROMPTLY on Close (connection
+	// closed), not merely time out on the read deadline.
+	start := time.Now()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1)
+	_, err = br.Read(buf)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("tunnel read after Close succeeded, want EOF/closed")
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Fatalf("tunnel read after Close took %s (err %v): Close did not abort the tunnel", elapsed, err)
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		t.Fatalf("tunnel read after Close timed out (%s): Close did not abort the tunnel", elapsed)
+	}
+}
+
+// TestEgressProxyCloseIgnoresDoubleClose: Close closes the
+// listener explicitly AND via http.Server.Close, which
+// re-closes the tracked onceCloseListener and returns the
+// stored "use of closed network connection" error when the
+// listener is still tracked — a race, not a failure: the
+// end state (listener closed) is what Close promises. The
+// loop amplifies the race window (CONNECT + immediate
+// Close); Close must return nil on every iteration.
+func TestEgressProxyCloseIgnoresDoubleClose(t *testing.T) {
+	for i := 0; i < 10; i++ {
+		upstream := &recordingRoundTripper{}
+		serverSide, clientSide := net.Pipe()
+		dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return serverSide, nil
+		}
+		proxy, err := pluginhost.NewEgressProxy(upstream, dial, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn, err := net.Dial("tcp", proxy.URL().Host)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(conn, "CONNECT example.invalid:443 HTTP/1.1\r\nProxy-Authorization: %s\r\nHost: example.invalid:443\r\n\r\n", proxyAuth(t, proxy.Username(), proxy.Password()))
+		br := bufio.NewReader(conn)
+		line, err := br.ReadString('\n')
+		if err != nil || !strings.Contains(line, "200") {
+			t.Fatalf("iter %d: CONNECT status = %q, err = %v", i, line, err)
+		}
+		for {
+			l, err := br.ReadString('\n')
+			if err != nil {
+				t.Fatal(err)
+			}
+			if l == "\r\n" {
+				break
+			}
+		}
+		if err := proxy.Close(); err != nil {
+			t.Fatalf("iter %d: Close = %v, want nil", i, err)
+		}
+		_ = conn.Close()
+		_ = clientSide.Close()
 	}
 }
 

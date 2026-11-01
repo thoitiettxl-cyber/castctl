@@ -16,10 +16,10 @@ import (
 // hard link (Nlink > 1): a hardlinked artifact shares its
 // inode with another path, so replacing or removing the
 // other path changes the bytes a load would map. The check
-// is unix-only; Windows/macOS behaviour is documented in
-// docs/plugins.md (Windows has no Nlink equivalent and
-// refuses symlinks + non-regular files only; darwin uses
-// this file).
+// runs on linux, darwin, and freebsd (this file's build
+// tag): macOS HAS the check. Only Windows and other
+// non-unix platforms (hardlink_other.go) have no Nlink
+// equivalent and refuse symlinks + non-regular files only.
 func checkHardlink(info os.FileInfo) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {

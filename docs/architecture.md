@@ -78,12 +78,12 @@ architecture also ships a `_no-plugin` static build
 (`CGO_ENABLED=0`) whose loader refuses loads. The plugin loader
 is implemented in-tree (unix + Windows loaders, stub for
 no-cgo); Linux amd64 loads are proven by contract tests and
-Linux arm64 loads under qemu with the bundled glibc loader,
-while Windows and macOS loads are unproven
-([NEEDS-MEASUREMENT] — see docs/plugins.md). The KernelSU
-module runs the linux/arm64 glibc build under its bundled
-glibc loader; there are no separate Android, Windows, or
-macOS release builds. Release builds are produced by
+Linux arm64 loads under qemu (build proof only), while
+Windows and macOS loads are unproven
+([NEEDS-MEASUREMENT] — see docs/plugins.md). The phone
+runs the normal linux/arm64 glibc build inside
+Droidspaces (a Linux container); there are no separate
+Android, Windows, or macOS release builds. Release builds are produced by
 `.github/workflows/release.yaml`, adapted from CLIProxyAPI's
 release.yaml (see docs/provenance.md §2).
 

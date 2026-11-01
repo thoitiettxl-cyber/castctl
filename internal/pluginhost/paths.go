@@ -22,7 +22,31 @@ import (
 // instead. The shadow directory itself is exempt: it lives
 // under os.TempDir() and is created by castctl, not named
 // by an operator path.
+//
+// ".." components are refused outright, BEFORE Clean: Clean
+// resolves ".." lexically (in the link's parent), while the
+// kernel resolves it in the link target's parent, so
+// checking the cleaned path would validate a different
+// file than the kernel opens. A path containing ".." must
+// be resolved by the caller first.
 func refuseSymlinkedComponents(path string) error {
+	raw := path
+	if !filepath.IsAbs(raw) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		// Concatenation, not Join: Join Cleans ".." away
+		// before the check below can see it.
+		raw = cwd + string(filepath.Separator) + raw
+	}
+	for _, comp := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == '/' || r == filepath.Separator
+	}) {
+		if comp == ".." {
+			return fmt.Errorf("plugin path %q must not contain \"..\"; pass a resolved path", path)
+		}
+	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return err

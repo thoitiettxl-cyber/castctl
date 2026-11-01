@@ -17,8 +17,8 @@ import (
 
 // Discovery (mirroring CLIProxyAPI
 // internal/pluginhost/platform.go at pin 250d5981: candidateDirs
-// :308, DiscoverPluginFiles :292, PluginExtension :99,
-// pluginFileFromPath :62, ID regex :17, version rule :38-41,
+// :308, DiscoverPluginFiles :291, PluginExtension :99,
+// pluginFileFromPath :62, ID regex :17, version rule :39-40,
 // comparePluginVersions :218, pluginFilePreferred :204).
 //
 // A plugin binary is named <id>[-v<version>]<ext> and is looked

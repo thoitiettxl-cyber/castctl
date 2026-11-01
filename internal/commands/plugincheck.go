@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 	"github.com/thoitiettxl-cyber/castctl/internal/pluginabi"
@@ -18,8 +19,9 @@ import (
 const pluginCheckHelpText = `usage: castctl plugin check <path> [--tag TAG] [--type TYPE]
 
 Load one plugin binary through the real plugin loader and run a
-single provider call against it. This is the on-device check for
-the KernelSU module (see docs/plugins.md): it prints one line per
+single provider call against it. This is the on-device check
+run inside Droidspaces with the normal linux/arm64 castctl
+binary (see docs/plugins.md): it prints one line per
 stage (dlopen, init, register, provider.call, shutdown), plus
 any host.log lines the plugin emits (printed as plugin log lines).
 Command-only plugins skip the provider.call stage (it is
@@ -93,7 +95,7 @@ func cmdPluginCheck(ctx context.Context, env *Env, args []string) error {
 			// cannot flood check output.
 			line := "plugin log [" + level + "]: " + message
 			if len(line) > 4096 {
-				line = line[:4096] + "…"
+				line = truncateRunes(line, 4096) + "…"
 			}
 			fmt.Fprintln(out, line)
 		},
@@ -142,51 +144,92 @@ func cmdPluginCheck(ctx context.Context, env *Env, args []string) error {
 	return nil
 }
 
+// redactClosers mirrors pluginhost.redactClosers: closing
+// quotes appended after a cap cut so the redaction scanner
+// sees a terminated value instead of writing the cut
+// remainder verbatim. See internal/pluginhost/text.go.
+const redactClosers = `""''\"\"\'\'`
+
+// truncateRunes cuts s at the largest rune boundary at or
+// below max bytes, in O(1) (backs up at most 3 bytes).
+func truncateRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && cut > max-4 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+// capBeforeRedact truncates s to max bytes at a rune
+// boundary and, only when truncated, appends redactClosers.
+// SafeString's cost is superlinear, so the cap must run
+// BEFORE redaction.
+func capBeforeRedact(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return truncateRunes(s, max) + redactClosers
+}
+
+// redactAndCap redacts s (SafeString) after capping it at
+// max, then caps the redacted output again at max with the
+// explicit marker.
+func redactAndCap(s string, max int) string {
+	out := logging.SafeString(capBeforeRedact(s, max))
+	if len(out) > max {
+		return truncateRunes(out, max) + "…"
+	}
+	return out
+}
+
 // checkField strips control characters from one metadata
 // field for the register line and caps it: plugin-chosen
-// text must never forge a check line.
+// text must never forge a check line. Metadata runs
+// through the same SafeString path as envelope errors,
+// after the cap (bounded cost: 200 bytes).
 func checkField(s string) string {
+	s = redactAndCap(s, 200)
 	s = strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f {
 			return -1
 		}
 		return r
 	}, s)
-	if len(s) > 200 {
-		s = s[:200] + "…"
-	}
 	return s
 }
 
 // shortPluginCheckError truncates a call error for the check
 // output: no raw server bodies, no secret values, tag only.
-// Plugin-chosen text is redacted (SafeString) and capped.
+// Plugin-chosen text is redacted (SafeString) and capped,
+// cap before redact, with the "…" marker.
 func shortPluginCheckError(err error) string {
-	text := logging.SafeString(err.Error())
-	if len(text) > 200 {
-		text = text[:200] + "..."
-	}
-	return text
+	return redactAndCap(err.Error(), 200)
 }
 
 func compactJSON(raw []byte) string {
 	var value any
 	if err := json.Unmarshal(raw, &value); err != nil {
-		return capCheckText(logging.SafeString(strings.TrimSpace(string(raw))))
+		return capCheckText(redactAndCap(strings.TrimSpace(string(raw)), 4096))
 	}
 	compact, err := json.Marshal(value)
 	if err != nil {
-		return capCheckText(logging.SafeString(strings.TrimSpace(string(raw))))
+		return capCheckText(redactAndCap(strings.TrimSpace(string(raw)), 4096))
 	}
-	return capCheckText(logging.SafeString(string(compact)))
+	return capCheckText(redactAndCap(string(compact), 4096))
 }
 
 // capCheckText caps rendered plugin output at the single
 // plugin-text limit (4096, matching the host.log cap) with
-// an explicit marker.
+// an explicit marker, at a rune boundary.
 func capCheckText(s string) string {
 	if len(s) > 4096 {
-		return s[:4096] + "…"
+		return truncateRunes(s, 4096) + "…"
 	}
 	return s
 }

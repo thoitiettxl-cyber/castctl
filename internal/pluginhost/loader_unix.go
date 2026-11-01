@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Licensed under the GNU General Public License v3.0 or later.
 
-//go:build cgo && (linux || darwin || freebsd)
+//go:build cgo && (linux || darwin || freebsd) && !android
 
 package pluginhost
 
@@ -87,6 +87,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -95,7 +96,7 @@ import (
 
 // Unix dynamic-library loader, mirroring CLIProxyAPI
 // internal/pluginhost/loader_unix.go at pin 250d5981 (C
-// preamble :8-77, dlopen RTLD_NOW|RTLD_LOCAL :43-45, entry
+// preamble :5-78, dlopen RTLD_NOW|RTLD_LOCAL :43-45, entry
 // symbol lookup :130, ABI exact check :166-168, never-unload
 // close :229-237), renamed into the castctl namespace
 // (castctl_plugin_init, castctl_buffer, castctl_host_api /
@@ -104,11 +105,11 @@ import (
 // CheckPluginCompat), and the host callback registry carries
 // only host.log (see dispatchHostCall).
 //
-// Android: there is deliberately NO GOOS=android loader file.
-// The KernelSU module runs the GOOS=linux/arm64 glibc build
-// under the bundled glibc loader (Gate 0 PROVEN), so this
-// unix loader is the Android path. GOOS=android builds fall
-// back to the stub loader, which refuses loads clearly.
+// Android: there is deliberately NO GOOS=android loader file,
+// and this file's build tag excludes android: GOOS=android
+// builds use the stub loader, which refuses loads clearly.
+// The phone path is the GOOS=linux/arm64 glibc build run
+// inside Droidspaces, which uses this unix loader.
 
 const supportValue = "1"
 
@@ -167,7 +168,14 @@ func (dynamicLibraryLoader) Open(file File, host *Host) (Client, error) {
 	handle := C.castctl_dlopen(cPath)
 	if handle == nil {
 		_ = removeShadowFile(loadPath)
-		return nil, fmt.Errorf("dlopen %s: %s", file.Path, scrubShadowPath(dlerrorString(), loadPath, file.Path))
+		// glibc's dlerror usually starts with the file
+		// path ("<path>: file too short"); after scrubbing
+		// the shadow path to the display path, strip that
+		// leading copy so the error prints the path once
+		// ("dlopen <path>: file too short"), not twice.
+		detail := scrubShadowPath(dlerrorString(), loadPath, file.Path)
+		detail = strings.TrimPrefix(detail, file.Path+": ")
+		return nil, fmt.Errorf("dlopen %s: %s", file.Path, detail)
 	}
 	// From here on the image must never be unloaded: dlopen
 	// may already have started the plugin runtime, and a Go

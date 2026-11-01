@@ -32,8 +32,9 @@ are a top-level `plugins` array (sing-box inline shape).
   drops the client only.
 - `CGO_ENABLED=0` builds and `GOOS=android` builds use
   the stub loader and refuse loads with a clear error.
-  Android runs the `GOOS=linux/arm64` glibc build under
-  the bundled loader; the unix loader is the Android path.
+  The phone runs the normal `GOOS=linux/arm64` glibc
+  build inside Droidspaces; the unix loader is the
+  phone path.
 
 ## 3. JSON envelope
 
@@ -71,7 +72,8 @@ ceiling (`1`) → reject with `not supported`, never load.
 Metadata name/version/author are required. At least one
 capability is required. `commands` only with
 `command_provider`; commands register via the contract,
-never via `init()`.
+never via `init()`. `command.execute` is registration-only
+in this PR: no dispatch path exists.
 
 ## 4. Lifecycle
 
@@ -103,9 +105,14 @@ thread is abandoned, not killed.
 - Shadow: copy to
   `<tmp>/castctl-pluginhost/pid-<pid>/castctl-plugin-<id>-<sha256[:32]>.<ext>`
   (0700 dir). Same content → same path. Source opened
-  with `O_NOFOLLOW`, must be a regular file (symlinks /
+  with `O_NOFOLLOW` on unix (plain open + Lstat refusal
+  on Windows/other), must be a regular file (symlinks /
   directories refused — castctl hardening, not upstream).
-- The shadow copy is removed only when `dlopen` fails.
+- The shadow copy is removed when any load gate fails:
+  checksum, compat, `dlopen`, missing entry symbol, init
+  failure, or ABI mismatch. A successfully loaded image's
+  shadow file stays until host shutdown removes the
+  directory; the image stays mapped regardless.
 
 ## 6. glibc compatibility
 
@@ -115,7 +122,9 @@ libc (`gnu_get_libc_version`, cgo/linux). Higher → refuse
 with required vs running versions. Non-glibc / no-cgo
 builds: refuse ELF files with requirements present
 (fail-closed); non-ELF files skip the check. Build floor
-2.17; module bundled runtime 2.44.
+2.17. Droidspaces provides its own glibc on the phone;
+its version is recorded only from the on-device check,
+never assumed.
 
 ## 7. Config
 
@@ -193,10 +202,11 @@ isolated (fuse). Documented, never tested-as-covered.
 no writes, no secrets. Prints one line per stage
 (`dlopen/init/register/provider.call/shutdown`, plus any
 `host.log` lines; command-only plugins print the
-provider.call stage as skipped); exit 0/2. Device wrapper:
-`castctl-ctl plugin-check <file>` (file in
-`$DATA_DIR/plugins/linux/arm64/`, no symlinks, bundled
-loader). Phone result is the merge gate:
+provider.call stage as skipped); exit 0/2. On the phone,
+run the normal linux/arm64 castctl binary inside
+Droidspaces (a Linux container) against a plugin in a
+normal filesystem layout — no module loader, no
+`castctl-ctl` wrapper. Phone result is the merge gate:
 [NEEDS-MEASUREMENT].
 
 ## 13. References

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/plugintest"
 )
@@ -71,6 +72,11 @@ func TestPluginCheckCorruptNoShadowPathLeak(t *testing.T) {
 	if strings.Contains(errb, "castctl-plugins") || strings.Contains(errb, "pid-") {
 		t.Fatalf("check output leaks shadow path/pid: %s", errb)
 	}
+	// D3: the bad-file error must print the path once, not
+	// twice ("dlopen <path>: <path>: file too short").
+	if n := strings.Count(errb, bad); n > 1 {
+		t.Fatalf("path appears %d times in check output, want <= 1: %s", n, errb)
+	}
 }
 
 func TestPluginCheckHelpersRedactAndCap(t *testing.T) {
@@ -92,5 +98,31 @@ func TestPluginCheckHelpersRedactAndCap(t *testing.T) {
 	}
 	if got := checkField("a\nb\x1bc"); strings.ContainsAny(got, "\n\x1b") {
 		t.Fatalf("checkField kept controls: %q", got)
+	}
+}
+
+// Cap-before-redact in check output: a secret pair straddling
+// the 4096 cap must be redacted, and rendering megabytes
+// must stay fast. checkField runs metadata through the
+// same SafeString path as envelope errors.
+func TestPluginCheckCapBeforeRedact(t *testing.T) {
+	secret := "SECRET-VALUE-xyz-1234567890"
+	pad := strings.Repeat("p", 4096-8)
+	if got := compactJSON([]byte(`{"pad":"` + pad + `","api_key":"` + secret + `"}`)); strings.Contains(got, secret) {
+		t.Fatalf("compactJSON leaked straddling secret: len=%d", len(got))
+	}
+	start := time.Now()
+	got := compactJSON([]byte(`{"api_key":"` + secret + `","pad":"` + strings.Repeat("x", 5<<20) + `"}`))
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("compactJSON 5MB took %s", elapsed)
+	}
+	if len(got) > 4100 || strings.Contains(got, secret) {
+		t.Fatalf("compactJSON 5MB bad output: len=%d leaked=%v", len(got), strings.Contains(got, secret))
+	}
+	if got := checkField(`{"api_key":"abc123"}`); strings.Contains(got, "abc123") {
+		t.Fatalf("checkField leaked secret shape: %q", got)
+	}
+	if got := shortPluginCheckError(errors.New(strings.Repeat("x", 5000))); !strings.HasSuffix(got, "…") {
+		t.Fatalf("shortPluginCheckError marker = %q, want …", got)
 	}
 }

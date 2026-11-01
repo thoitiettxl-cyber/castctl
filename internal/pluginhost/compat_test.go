@@ -7,6 +7,7 @@ package pluginhost
 import (
 	"encoding/binary"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -189,8 +190,8 @@ func TestGlibcVersionCompare(t *testing.T) {
 		{"2.4", "2.17", -1},
 		{"3.0", "2.99", 1},
 		// Distro suffixes from real gnu_get_libc_version
-		// strings (Debian glibc 2.44 reports "2.44-0"
-		// under qemu): only leading digits matter.
+		// strings (Debian glibc 2.44 reports "2.44-0"):
+		// only leading digits matter.
 		{"2.44-0", "2.44", 0},
 		{"2.17-0ubuntu1", "2.17", 0},
 		// The full triple is compared: a patch-level
@@ -219,5 +220,25 @@ func TestGlibcVersionCompare(t *testing.T) {
 	}
 	if _, err := parseGlibcVersion("2"); err == nil {
 		t.Fatal("version without minor: want error")
+	}
+}
+
+// TestCheckPluginCompatNoShadowPathLeak: compat-gate
+// errors must never embed the checked path (the loader
+// passes the shadow path, whose pid directory must not
+// leak into skip reasons or check output).
+func TestCheckPluginCompatNoShadowPathLeak(t *testing.T) {
+	shadow := filepath.Join(t.TempDir(), "castctl-pluginhost", "pid-424242", "castctl-plugin-echo-abc.so")
+	err := CheckPluginCompat(shadow)
+	if err == nil {
+		t.Fatal("missing file: want error")
+	}
+	if strings.Contains(err.Error(), "pid-424242") || strings.Contains(err.Error(), "castctl-pluginhost") {
+		t.Fatalf("compat error leaked shadow path: %v", err)
+	}
+	if _, err := MaxRequiredGLIBC(shadow); err == nil {
+		t.Fatal("MaxRequiredGLIBC missing file: want error")
+	} else if strings.Contains(err.Error(), "pid-424242") || strings.Contains(err.Error(), "castctl-pluginhost") {
+		t.Fatalf("MaxRequiredGLIBC error leaked shadow path: %v", err)
 	}
 }

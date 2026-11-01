@@ -7,26 +7,43 @@ package pluginhost
 import (
 	"debug/elf"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 )
 
+// openErrorWithoutPath strips the path from an os.Open-style
+// error: *os.PathError embeds the checked path, and the
+// loader passes the SHADOW path here (TempDir layout + pid
+// directory), which must never leak into skip reasons or
+// check output. The errno/reason survives; the layout does
+// not. Non-PathError values pass through unchanged apart
+// from the wrapping noun.
+func openErrorWithoutPath(what string, err error) error {
+	var pe *os.PathError
+	if errors.As(err, &pe) {
+		return fmt.Errorf("%s: %v", what, pe.Err)
+	}
+	return fmt.Errorf("%s: %v", what, err)
+}
+
 // isELFFile reports whether path starts with the ELF magic. A
 // file shorter than the 4-byte magic cannot be ELF. A
 // directory is an error: the compat gate must not silently
-// pass a non-file.
+// pass a non-file. Errors never embed path (see
+// openErrorWithoutPath).
 func isELFFile(path string) (bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return false, err
+		return false, openErrorWithoutPath("cannot open plugin file", err)
 	}
 	defer func() { _ = f.Close() }()
 	if info, err := f.Stat(); err != nil {
-		return false, err
+		return false, openErrorWithoutPath("cannot stat plugin file", err)
 	} else if info.IsDir() {
-		return false, fmt.Errorf("plugin file %q is a directory", path)
+		return false, fmt.Errorf("plugin file is a directory")
 	}
 	var magic [4]byte
 	n, _ := f.Read(magic[:])
@@ -36,11 +53,11 @@ func isELFFile(path string) (bool, error) {
 	return magic[0] == 0x7f && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F', nil
 }
 
-// Glibc compatibility gate (Boss decision, Gate 0 retry (5)):
-// the loader must compare the plugin's highest required GLIBC_
-// symbol version against the running libc and refuse with a
-// clear error instead of crashing. This check runs BEFORE
-// dlopen: a too-new plugin must never reach the dynamic loader.
+// Glibc compatibility gate: the loader must compare the
+// plugin's highest required GLIBC_ symbol version against
+// the running libc and refuse with a clear error instead of
+// crashing. This check runs BEFORE dlopen: a too-new plugin
+// must never reach the dynamic loader.
 //
 // Mechanism: parse the plugin ELF's .gnu.version_r (VERNEED)
 // entries with debug/elf (no new dependency) and read the
@@ -54,11 +71,13 @@ func isELFFile(path string) (bool, error) {
 // .github/workflows/release.yaml is a different check (it
 // gates the CORE binary); it is not the runtime check here.
 //
-// Build floor vs bundled runtime (documented in docs/plugins.md):
-// official plugins build against GLIBC 2.17; the KernelSU
-// module bundles glibc 2.44. The gate compares against the
-// RUNNING libc, whatever it is; 2.17/2.44 are documentation
-// facts, not constants in this check.
+// Build floor vs running libc (documented in docs/plugins.md):
+// official plugins build against GLIBC 2.17. The gate
+// compares against the RUNNING libc, whatever it is; 2.17 is
+// a documentation fact, not a constant in this check.
+// Droidspaces provides its own glibc on the phone; its
+// version is recorded only from the on-device check, never
+// assumed here.
 
 type glibcVersion struct {
 	major int
@@ -142,11 +161,17 @@ func compareGlibcVersion(a, b glibcVersion) int {
 // MaxRequiredGLIBC returns the highest GLIBC_x.y version the ELF
 // file at path requires, or "" when it requires none. A non-ELF
 // file, or an ELF whose version section cannot be read, is an
-// error: the loader must not guess.
+// error: the loader must not guess. (Deliberate asymmetry
+// with CheckPluginCompat, which returns nil for non-ELF
+// files: the format gate belongs to dlopen, not to this
+// check, while MaxRequiredGLIBC as a standalone reader must
+// not silently report "" for a file it could not parse.
+// Both behaviours are pinned by tests.) Errors never embed
+// path (see openErrorWithoutPath).
 func MaxRequiredGLIBC(path string) (string, error) {
 	f, err := elf.Open(path)
 	if err != nil {
-		return "", fmt.Errorf("read plugin elf: %w", err)
+		return "", openErrorWithoutPath("read plugin elf", err)
 	}
 	defer func() { _ = f.Close() }()
 	sec := f.Section(".gnu.version_r")

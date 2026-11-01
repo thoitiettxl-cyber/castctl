@@ -201,3 +201,26 @@ func TestRegisterRequestJSONKeys(t *testing.T) {
 		t.Fatalf("register request must never carry cookie_file: %s", raw)
 	}
 }
+
+// TestValidCookieHostLabels: per-label rules refuse empty
+// labels and hyphen-edged labels; string-exact scope means
+// no refused shape could have widened injection.
+func TestValidCookieHostLabels(t *testing.T) {
+	valid := []string{"example.invalid", "a", "a-b.c-d", "a1.b2", strings.Repeat("a", 63) + ".invalid", "x." + strings.Repeat("a", 63)}
+	for _, h := range valid {
+		if !pluginabi.ValidCookieHost(h) {
+			t.Fatalf("ValidCookieHost(%q) = false, want true", h)
+		}
+	}
+	invalid := []string{
+		"", "a..b", "a-.b", "a.-b", "-a.b", "a.b-", ".a.b", "a.b.",
+		"a_b", "a/b", "a:b", "a b", "A.B", "*.invalid", "a.*",
+		strings.Repeat("a", 64) + ".invalid", strings.Repeat("a", 254),
+		"http://example.invalid", "example.invalid:443",
+	}
+	for _, h := range invalid {
+		if pluginabi.ValidCookieHost(h) {
+			t.Fatalf("ValidCookieHost(%q) = true, want false", h)
+		}
+	}
+}

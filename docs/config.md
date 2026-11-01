@@ -759,12 +759,11 @@ never fragment contents, in any display, log, or error. The `plugins` block is s
 after `webui`.
 
 glibc floor: a plugin binary must require at most glibc
-2.17 to load everywhere castctl runs; the KernelSU module
-bundles glibc 2.44. The loader refuses a plugin whose
-highest required `GLIBC_` version exceeds the running libc
-before `dlopen`. Full plugin contract, lifecycle, egress,
-and the on-device check: [Plugins](plugins.md) and
-[Plugin spec](plugins-spec.md).
+2.17 to load everywhere castctl runs. The loader refuses
+a plugin whose highest required `GLIBC_` version exceeds
+the running libc before `dlopen`. Full plugin contract,
+lifecycle, egress, and the on-device check:
+[Plugins](plugins.md) and [Plugin spec](plugins-spec.md).
 
 ## The `dns` section — INTERIM, GLOBAL, COMPAT-ONLY
 

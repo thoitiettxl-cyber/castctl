@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -60,6 +61,14 @@ type EgressProxy struct {
 	// read it.
 	cookieMu    sync.RWMutex
 	cookieHosts map[string]bool
+	// tunnels tracks live CONNECT tunnel connections so
+	// Close can abort them. Guarded by tunnelMu; closed
+	// is set under tunnelMu before the snapshot in Close,
+	// so a tunnel starting concurrently with Close is
+	// closed immediately instead of surviving revocation.
+	tunnelMu sync.Mutex
+	tunnels  map[net.Conn]struct{}
+	closed   bool
 }
 
 // NewEgressProxy starts a loopback proxy. upstream must not
@@ -68,6 +77,15 @@ type EgressProxy struct {
 // nothing is injected. An empty cookie injects nothing.
 // Credentials live exactly as long as the proxy instance:
 // Close revokes them, and there is no rotation in v1.
+//
+// Timeouts: only ReadHeaderTimeout (10s) and IdleTimeout
+// (120s) are set, deliberately. A Read/Write timeout would
+// abort slow-but-legitimate streaming transfers through
+// the proxy (CONNECT tunnels, large forwarded bodies);
+// transfer timeouts belong to the wiring-owned upstream
+// transport and dial function, not to this loopback hop.
+// Header + idle timeouts bound connection setup and idle
+// retention instead.
 func NewEgressProxy(upstream http.RoundTripper, dial func(ctx context.Context, network, addr string) (net.Conn, error), cookie string) (*EgressProxy, error) {
 	if upstream == nil {
 		return nil, fmt.Errorf("egress proxy requires an upstream round tripper")
@@ -93,6 +111,7 @@ func NewEgressProxy(upstream http.RoundTripper, dial func(ctx context.Context, n
 		password:    password,
 		url:         &url.URL{Scheme: "http", Host: ln.Addr().String()},
 		cookieHosts: make(map[string]bool),
+		tunnels:     make(map[net.Conn]struct{}),
 	}
 	p.server = &http.Server{
 		Handler:           p,
@@ -156,14 +175,61 @@ func (p *EgressProxy) Addr() string { return p.listener.Addr().String() }
 // Serve goroutine has already registered, so a Close
 // racing Serve startup would otherwise leave the
 // listener accepting (the TestEgressProxyCloseRefuses
-// flake).
+// flake). Close also aborts in-flight CONNECT tunnels by
+// closing their connections: http.Server.Close does NOT
+// close hijacked connections, so without tunnel tracking
+// revocation would block new connections only and a live
+// tunnel would keep flowing. Close does not wait for
+// tunnel copy goroutines to return; closing the
+// connections unblocks them promptly.
 func (p *EgressProxy) Close() error {
 	var err error
 	p.closeOnce.Do(func() {
 		_ = p.listener.Close()
 		err = p.server.Close()
+		// server.Close re-closes the tracked listener
+		// (http.Server wraps it in onceCloseListener and
+		// returns the stored close error). The listener
+		// was already closed above, so "use of closed
+		// network connection" is the promised end state,
+		// not a failure: it must not surface as a Close
+		// error (it races with the Serve goroutine
+		// untracking the listener). Any other error is
+		// real and is returned.
+		if errors.Is(err, net.ErrClosed) {
+			err = nil
+		}
+		p.tunnelMu.Lock()
+		p.closed = true
+		var conns []net.Conn
+		for c := range p.tunnels {
+			conns = append(conns, c)
+		}
+		p.tunnelMu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
 	})
 	return err
+}
+
+// trackTunnel registers a tunnel connection for Close
+// abort. It returns false when the proxy is already
+// closed: the caller must close the connection itself.
+func (p *EgressProxy) trackTunnel(c net.Conn) bool {
+	p.tunnelMu.Lock()
+	defer p.tunnelMu.Unlock()
+	if p.closed {
+		return false
+	}
+	p.tunnels[c] = struct{}{}
+	return true
+}
+
+func (p *EgressProxy) untrackTunnel(c net.Conn) {
+	p.tunnelMu.Lock()
+	defer p.tunnelMu.Unlock()
+	delete(p.tunnels, c)
 }
 
 // ServeHTTP implements the proxy protocol: Basic-auth gate,
@@ -304,6 +370,21 @@ func (p *EgressProxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 		_ = clientConn.Close()
 		return
 	}
+	// Track both tunnel ends so Close aborts the tunnel.
+	// A tunnel that starts concurrently with Close sees
+	// closed and is shut down immediately.
+	if !p.trackTunnel(clientConn) {
+		_ = target.Close()
+		_ = clientConn.Close()
+		return
+	}
+	defer p.untrackTunnel(clientConn)
+	if !p.trackTunnel(target) {
+		_ = target.Close()
+		_ = clientConn.Close()
+		return
+	}
+	defer p.untrackTunnel(target)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {

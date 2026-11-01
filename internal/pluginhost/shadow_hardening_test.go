@@ -95,6 +95,44 @@ func TestShadowDirHardeningAndCleanup(t *testing.T) {
 	CleanupShadowDir()
 }
 
+// TestRefuseSymlinkedComponentsDotDot: a path with ".."
+// through a symlinked directory must be refused. Clean
+// resolves ".." lexically, so checking the cleaned path
+// validates a different file than the kernel opens (the
+// link target's parent, not the link's parent).
+func TestRefuseSymlinkedComponentsDotDot(t *testing.T) {
+	dir := t.TempDir()
+	other := filepath.Join(dir, "other")
+	sub := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Lexical resolution (Clean) points here; kernel
+	// resolution through the link points at other/x.so.
+	if err := os.WriteFile(filepath.Join(sub, "x.so"), []byte("lexical-file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "x.so"), []byte("kernel-file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(sub, "link")
+	if err := os.Symlink(other, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	// Built by concatenation on purpose: filepath.Join
+	// would Clean the ".." away before the function sees it.
+	dotdot := sub + string(filepath.Separator) + "link" + string(filepath.Separator) + ".." + string(filepath.Separator) + "x.so"
+	if err := refuseSymlinkedComponents(dotdot); err == nil {
+		t.Fatalf("refuseSymlinkedComponents(%q) = nil, want refusal", dotdot)
+	}
+	if _, err := ShadowCopy(File{ID: "echo", Path: dotdot}); err == nil {
+		t.Fatalf("ShadowCopy(%q) succeeded, want refusal", dotdot)
+	}
+}
+
 func TestSweepStaleShadowDirs(t *testing.T) {
 	root := shadowRoot()
 	if err := os.MkdirAll(root, 0o700); err != nil {
@@ -122,4 +160,47 @@ func TestSweepStaleShadowDirs(t *testing.T) {
 		t.Fatalf("non-pid dir swept: %v", err)
 	}
 	_ = os.RemoveAll(other)
+}
+
+// TestSweepKeepsLiveShadowFiles: the stale sweep must
+// never delete files in the live process's own shadow
+// directory. New() sweeps on every construction; a second
+// Host built while the first host's shadow copy is
+// in-flight must not delete the just-copied file out from
+// under a pending dlopen (the old sweep deleted own-dir
+// files and raced ShadowCopy -> ENOENT).
+func TestSweepKeepsLiveShadowFiles(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "echo.so")
+	if err := os.WriteFile(src, []byte("fake-plugin-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shadow, err := ShadowCopy(File{ID: "echo", Path: src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Many Host constructions (each sweeps) and direct
+	// sweeps must leave the live shadow file alone.
+	for i := 0; i < 20; i++ {
+		_ = New(Options{})
+		sweepStaleShadowDirs()
+	}
+	if _, err := os.Stat(shadow); err != nil {
+		t.Fatalf("live shadow file deleted by sweep: %v", err)
+	}
+	// A stray temp file in the own dir also survives: only
+	// dead-pid directories are swept.
+	ownDir, err := shadowDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stray := filepath.Join(ownDir, ".castctl-plugin-echo-tmp.so")
+	if err := os.WriteFile(stray, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sweepStaleShadowDirs()
+	if _, err := os.Stat(stray); err != nil {
+		t.Fatalf("own-dir file deleted by sweep: %v", err)
+	}
+	CleanupShadowDir()
 }

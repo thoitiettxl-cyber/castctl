@@ -193,11 +193,70 @@ func TestRedactRawConfigPluginsFragmentWholesale(t *testing.T) {
 	}
 }
 
+// Malformed plugins shapes must redact wholesale: a fragment value
+// must never survive display just because the shape is not the
+// well-formed array-of-objects the parser accepts.
+func TestRedactRawConfigMalformedPluginsShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"object", `{"profiles":{"default":{}},"plugins":{"tag":"echo","type":"echo","api_key":"SECRET-VALUE-xyz"}}`},
+		{"string", `{"profiles":{"default":{}},"plugins":"SECRET-VALUE-xyz"}`},
+		{"number", `{"profiles":{"default":{}},"plugins":42}`},
+		{"array-string", `{"profiles":{"default":{}},"plugins":["SECRET-VALUE-xyz"]}`},
+		{"array-number", `{"profiles":{"default":{}},"plugins":[42]}`},
+		{"array-null", `{"profiles":{"default":{}},"plugins":[null]}`},
+		{"array-mixed", `{"profiles":{"default":{}},"plugins":[{"tag":"echo","type":"echo"},"SECRET-VALUE-xyz",42]}`},
+		{"non-string-tag", `{"profiles":{"default":{}},"plugins":[{"tag":123,"type":"echo","api_key":"SECRET-VALUE-xyz"}]}`},
+		{"non-string-type", `{"profiles":{"default":{}},"plugins":[{"tag":"echo","type":["echo"],"api_key":"SECRET-VALUE-xyz"}]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := RedactRawConfig([]byte(tc.raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(out), "SECRET-VALUE-xyz") {
+				t.Fatalf("RedactRawConfig leaked fragment for %s shape: %s", tc.name, out)
+			}
+			if !strings.Contains(string(out), "<redacted>") {
+				t.Fatalf("RedactRawConfig missing marker for %s shape: %s", tc.name, out)
+			}
+		})
+	}
+}
+
 func TestPluginsFragmentDefensiveCopy(t *testing.T) {
 	cfg := parsePluginsConfig(t, `[{"tag":"echo","type":"echo","n":1}]`)
 	frag := cfg.Plugins.Entries[0].FragmentJSON()
 	frag[0] = 'X'
 	if got := string(cfg.Plugins.Entries[0].FragmentJSON()); got != `{"n":1}` {
 		t.Fatalf("fragment mutated via copy: %s", got)
+	}
+}
+
+// TestInvalidPluginTagErrorBounded: an over-long invalid tag
+// or type must not bloat the config error with its full
+// value; the echo is truncated with a marker.
+func TestInvalidPluginTagErrorBounded(t *testing.T) {
+	long := strings.Repeat("x", 5000) + "!"
+	for _, field := range []string{"tag", "type"} {
+		var data string
+		if field == "tag" {
+			data = `{"profiles":{"default":{}},"plugins":[{"tag":` + strconv.Quote(long) + `,"type":"echo"}]}`
+		} else {
+			data = `{"profiles":{"default":{}},"plugins":[{"tag":"echo","type":` + strconv.Quote(long) + `}]}`
+		}
+		_, err := ParseSingleConfig([]byte(data), t.TempDir())
+		if err == nil {
+			t.Fatalf("%s: want config error", field)
+		}
+		if len(err.Error()) > 300 {
+			t.Fatalf("%s error len = %d, want bounded: %.100q...", field, len(err.Error()), err.Error())
+		}
+		if !strings.Contains(err.Error(), "…") {
+			t.Fatalf("%s error missing truncation marker: %.100q...", field, err.Error())
+		}
 	}
 }

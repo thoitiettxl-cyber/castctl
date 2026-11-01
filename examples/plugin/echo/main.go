@@ -14,7 +14,8 @@
 //
 //	go build -buildmode=c-shared -o echo.so .
 //
-// Build for the KernelSU module (linux/arm64, glibc 2.17):
+// Build for the phone (linux/arm64, glibc 2.17) to run
+// inside Droidspaces:
 // see docs/plugins.md "Cross-compiling the echo example".
 // The resulting echo-v0.1.0.so is verified with
 // `castctl plugin check` (see docs/plugins.md).

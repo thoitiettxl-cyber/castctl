@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Licensed under the GNU General Public License v3.0 or later.
 
-//go:build !cgo && !windows
+//go:build (!cgo && !windows) || android
 
 package pluginhost_test
 
@@ -16,7 +16,7 @@ import (
 
 func TestStubLoaderRefuses(t *testing.T) {
 	if pluginhost.SupportPlugins() {
-		t.Fatal("SupportPlugins = true on a no-cgo build, want false")
+		t.Fatal("SupportPlugins = true on a stub build, want false")
 	}
 	if got := pluginhost.SupportValue(); got != "0" {
 		t.Fatalf("SupportValue = %q, want 0", got)

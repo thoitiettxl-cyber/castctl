@@ -19,7 +19,7 @@ import (
 // Shadow copies (mirroring CLIProxyAPI internal/pluginhost/shadow.go
 // at pin 250d5981: shadowCopyPlugin :33, shadowCopyPluginToDir :73,
 // shadowPluginPath :154, digest length 32 at :28, pid dir at :128
-// with MkdirAll 0700, temp prefix at :29, predictable
+// with MkdirAll 0700, temp prefix at :26, predictable
 // sha256[:32] name — NOT random, NOT memfd).
 //
 // A loaded Go plugin image must stay mapped for the lifetime of
@@ -32,10 +32,11 @@ import (
 // hardlink / O_NOFOLLOW check — verified absent by grep at pin
 // 250d5981; never cite upstream for it): the source is refused
 // when it is a symlink, when any path component is a symlink,
-// when it is a hard link (Nlink > 1, unix only — Windows
-// refuses symlinks and non-regular files only), and must be a
-// regular file. This is a load-time check on the artifact path,
-// not a sandbox: it does not make an untrusted plugin safe.
+// when it is a hard link (Nlink > 1, on linux/darwin/freebsd —
+// Windows refuses symlinks and non-regular files only), and
+// must be a regular file. This is a load-time check on the
+// artifact path, not a sandbox: it does not make an untrusted
+// plugin safe.
 
 const (
 	shadowPrefix     = "castctl-plugin-"
@@ -96,13 +97,19 @@ func CleanupShadowDir() {
 }
 
 // sweepStaleShadowDirs removes pid-* directories under the
-// shadow root whose pid is not alive, and stray shadow files
-// in the process's own directory. Only directories matching
-// the pid-<digits> naming pattern are ever removed, only
-// under the shadow root, and every error is ignored: the
-// sweep must never fail a load. A live pid (including a
-// reused pid) keeps its directory; that residual is
-// documented in docs/plugins.md.
+// shadow root whose pid is not alive. ONLY dead-pid
+// directories are removed, and only under the shadow root:
+// files in the live process's own directory are NEVER
+// deleted here. Deleting own-dir files raced in-flight
+// loads (ShadowCopy returns a path, a concurrent New()
+// sweep deletes it, dlopen fails ENOENT) and cleaned other
+// Hosts' files in the same process. Own-dir cleanup belongs
+// to Host.Close/CleanupShadowDir; a crash-killed process
+// leaves a whole dead-pid directory, which this sweep
+// removes. A live pid (including a reused pid) keeps its
+// directory; that residual is documented in
+// docs/plugins.md. Every error is ignored: the sweep must
+// never fail a load.
 func sweepStaleShadowDirs() {
 	root := shadowRoot()
 	entries, err := os.ReadDir(root)
@@ -126,30 +133,16 @@ func sweepStaleShadowDirs() {
 		}
 		_ = os.RemoveAll(filepath.Join(root, name))
 	}
-	removeStaleShadowPlugins(filepath.Join(root, fmt.Sprintf("pid-%d", os.Getpid())))
-}
-
-func removeStaleShadowPlugins(dir string) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		if entry == nil || entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if strings.HasPrefix(name, shadowPrefix) || strings.HasPrefix(name, shadowTempPrefix) {
-			_ = os.Remove(filepath.Join(dir, name))
-		}
-	}
 }
 
 func shadowCopyToDir(file File, dir string) (string, error) {
-	source := filepath.Clean(file.Path)
-	if err := refuseSymlinkedComponents(source); err != nil {
+	// Checked BEFORE Clean: refuseSymlinkedComponents
+	// refuses ".." components, and Clean would resolve
+	// them away lexically before the check could see them.
+	if err := refuseSymlinkedComponents(file.Path); err != nil {
 		return "", err
 	}
+	source := filepath.Clean(file.Path)
 	if info, err := os.Lstat(source); err != nil {
 		return "", err
 	} else if info.Mode()&os.ModeSymlink != 0 {

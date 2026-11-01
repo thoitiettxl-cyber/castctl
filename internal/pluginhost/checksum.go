@@ -16,14 +16,16 @@ import (
 // Manifest + checksums verification for local-directory plugins
 // (BQ4). The pattern mirrors CLIProxyAPI
 // internal/pluginstore/checksum.go:10 (ParseChecksums) and :34
-// (VerifyChecksum) and install.go:116-133 (download checksums.txt,
+// (VerifyChecksum) and install.go:125-133 (download checksums.txt,
 // parse, verify BEFORE extract) — with the download/registry/
 // signing parts deliberately NOT taken: there is no store, no
 // registry, and no default remote. Verification happens at load
 // time, on the SHADOW-COPY bytes about to be dlopened, when the
 // caller supplies a manifest path (Desired.ManifestPath): the
-// loader hashes the shadow file through a single O_NOFOLLOW
-// open and compares it against the manifest. Verifying the
+// loader hashes the shadow file through a single open
+// (O_NOFOLLOW on unix; plain open plus the Lstat refusal
+// elsewhere — see open_unix.go / open_windows.go) and
+// compares it against the manifest. Verifying the
 // source file instead would leave a swap window between the
 // verify read and the shadow copy; the shadow bytes are the
 // bytes the loader maps. A directory with no checksums.txt is
@@ -137,9 +139,10 @@ func VerifyFileChecksum(pluginPath, manifestPath string) error {
 // manifestPath, looking the entry up by entryName (the base
 // name of the original plugin file — the shadow file's own
 // name is content-derived and never appears in a manifest).
-// The shadow file is hashed through a single O_NOFOLLOW open
-// with a regular-file re-check, so the hashed bytes are the
-// bytes on the shadow path at verify time. A residual window
+// The shadow file is hashed through a single open
+// (O_NOFOLLOW on unix; plain open plus the Lstat refusal
+// elsewhere) with a regular-file re-check, so the hashed
+// bytes are the bytes on the shadow path at verify time. A residual window
 // remains between this verification and dlopen (no fd pin);
 // see docs/plugins.md "Known limits" (U1).
 func VerifyShadowFileChecksum(shadowPath, manifestPath, entryName string) error {
@@ -163,11 +166,11 @@ func VerifyShadowFileChecksum(shadowPath, manifestPath, entryName string) error 
 	}
 	f, err := openPluginSource(shadowPath)
 	if err != nil {
-		return err
+		return openErrorWithoutPath("open plugin shadow file", err)
 	}
 	defer func() { _ = f.Close() }()
 	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() {
-		return fmt.Errorf("plugin shadow file %q is not a regular file", shadowPath)
+		return fmt.Errorf("plugin shadow file is not a regular file")
 	}
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, f); err != nil {
@@ -179,8 +182,9 @@ func VerifyShadowFileChecksum(shadowPath, manifestPath, entryName string) error 
 	return nil
 }
 
-// readRegularFile reads a whole file through an O_NOFOLLOW
-// open with a regular-file re-check, refusing symlinks.
+// readRegularFile reads a whole file through an open with
+// a regular-file re-check (O_NOFOLLOW on unix), refusing
+// symlinks.
 func readRegularFile(path string) ([]byte, error) {
 	f, err := openPluginSource(path)
 	if err != nil {

@@ -114,10 +114,20 @@ func (c *SingleConfig) RawPlugins() []byte {
 	return cp
 }
 
+// boundEcho truncates user input echoed in an error to 64
+// runes with a marker, matching newInvalidProfileError: an
+// unbounded config value must not bloat logs or errors.
+func boundEcho(s string) string {
+	if len([]rune(s)) > 64 {
+		return string([]rune(s)[:64]) + "…"
+	}
+	return s
+}
+
 // validatePluginTag enforces the plugin-ID rule on a tag value.
 func validatePluginTag(tag string) error {
 	if !pluginIDPattern.MatchString(tag) {
-		return newConfigErrorf("invalid plugin tag %q", tag)
+		return newConfigErrorf("invalid plugin tag %q", boundEcho(tag))
 	}
 	return nil
 }
@@ -127,7 +137,7 @@ func validatePluginTag(tag string) error {
 // config boundary, exactly like a tag.
 func validatePluginType(typ string) error {
 	if !pluginIDPattern.MatchString(typ) {
-		return newConfigErrorf("invalid plugin type %q", typ)
+		return newConfigErrorf("invalid plugin type %q", boundEcho(typ))
 	}
 	return nil
 }

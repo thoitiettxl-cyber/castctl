@@ -64,6 +64,11 @@ const (
 	// response; there is no separate init for commands).
 	MethodCommandRegister = "command.register"
 	// MethodCommandExecute runs one registered command.
+	// Registration-only in this PR: commands are declared
+	// in the registration response, but no castctl code
+	// dispatches command.execute (no CLI command, no
+	// scheduler calls it). Host.Call could invoke it
+	// generically, but nothing in the repo does.
 	MethodCommandExecute = "command.execute"
 	// MethodHostLog is the ONLY reverse callback a plugin may
 	// call into the host. Every other host.* method is rejected.
@@ -100,7 +105,7 @@ func NewErrorEnvelope(code, message string) Envelope {
 
 // Metadata identifies a plugin. Name, Version, and Author are
 // required (mirroring upstream's validPlugin rule in
-// internal/pluginhost/host.go:1244 at pin 250d5981); a plugin
+// internal/pluginhost/host.go:1241 at pin 250d5981); a plugin
 // with an empty name, version, or author is rejected at
 // registration.
 type Metadata struct {
@@ -257,18 +262,32 @@ func ValidateRegistration(reg Registration) (uint32, error) {
 // and hyphens only, starting and ending with a letter or
 // digit, at most 253 characters. No scheme, port, path,
 // wildcard, or userinfo is allowed.
+//
+// Per-label rules (tightened): every dot-separated label is
+// 1-63 characters and must not start or end with a hyphen,
+// so `a..b` (empty label) and `a-.b` (label ending in a
+// hyphen) are refused. Scope comparison is string-exact
+// against the lowercased request hostname (see
+// EgressProxy.cookieAllowed), so a refused shape can never
+// widen injection: tightening only rejects declarations
+// that could never have matched a real host.
 func ValidCookieHost(host string) bool {
 	if host == "" || len(host) > 253 {
 		return false
 	}
-	for i, r := range host {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '.':
-		default:
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 {
 			return false
 		}
-		if (i == 0 || i == len(host)-1) && (r == '-' || r == '.') {
+		if label[0] == '-' || label[len(label)-1] == '-' {
 			return false
+		}
+		for _, r := range label {
+			switch {
+			case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+			default:
+				return false
+			}
 		}
 	}
 	return true
