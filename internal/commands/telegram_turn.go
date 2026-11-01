@@ -435,6 +435,7 @@ func (r *telegramTurnRunner) runTextTurn(ctx context.Context, chatID int64, text
 		requireRunning:    true,
 		togglesResolved:   &resolvedBotToggles{approve: aa, allowOnce: ao},
 		onEvent:           func(ev wait.Event) { preview.feed(ev); editor.signal() },
+		onDecided:         func(id, decision string) { r.deps.bot.RecordDecided(id, decision) },
 		externalHeartbeat: true,
 	})
 	if err != nil {
@@ -500,6 +501,7 @@ func (r *telegramTurnRunner) runResume(ctx context.Context, info telegram.Resume
 		requireRunning:    false,
 		togglesResolved:   &resolvedBotToggles{approve: aa, allowOnce: ao},
 		onEvent:           func(ev wait.Event) { preview.feed(ev); editor.signal() },
+		onDecided:         func(id, decision string) { r.deps.bot.RecordDecided(id, decision) },
 		externalHeartbeat: true,
 	})
 	if err != nil {

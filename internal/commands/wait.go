@@ -226,7 +226,7 @@ func waitDial(muse *conn.Muse) func(context.Context) (wait.Subscriber, error) {
 // id is decided at most once per approver lifetime. The 15 s
 // in-flight claim wait between a monitor and a turn is a
 // driver/monitor concern (tgbot.py, PR5), not part of AutoApprover.
-func waitApprover(muse *conn.Muse, allowOnce bool) *approvals.AutoApprover {
+func waitApprover(muse *conn.Muse, allowOnce bool, onDecided func(id, decision string)) *approvals.AutoApprover {
 	connect := func(ctx context.Context) (approvals.Decider, func(), error) {
 		gw, err := muse.Connect(ctx, nil)
 		if err != nil {
@@ -240,7 +240,9 @@ func waitApprover(muse *conn.Muse, allowOnce bool) *approvals.AutoApprover {
 		}
 		return decide, func() { _ = gw.Close() }, nil
 	}
-	return approvals.NewAutoApprover(connect, allowOnce)
+	aa := approvals.NewAutoApprover(connect, allowOnce)
+	aa.OnDecided = onDecided
+	return aa
 }
 
 // waitRunArgs are executeWait's inputs.
@@ -262,6 +264,12 @@ type waitRunArgs struct {
 	// onEvent, when non-nil, is the Runner's streaming callback
 	// (wait.Config.OnEvent): live records for the turn's bubble.
 	onEvent func(wait.Event)
+	// onDecided, when non-nil, is called after each
+	// successful auto-approve decide (id + decision): the
+	// Telegram bot records it in the Bot's decided set so a
+	// later manual tap for the same id re-issues nothing.
+	// CLI waits leave it nil.
+	onDecided func(id, decision string)
 	// externalHeartbeat, when true, means the caller owns the
 	// Muse heartbeat for the process lifetime (the long-lived
 	// bot starts it once); executeWait then neither starts nor
@@ -319,7 +327,7 @@ func executeWait(ctx context.Context, env *Env, rt *Runtime, prof *profile.Profi
 		cfg.HasAfterSeq = true
 	}
 	if approveEnabled {
-		cfg.Approver = waitApprover(rt.Muse, allowOnceEnabled).AsApprover()
+		cfg.Approver = waitApprover(rt.Muse, allowOnceEnabled, args.onDecided).AsApprover()
 	}
 	runner, err := wait.NewRunner(cfg)
 	if err != nil {

@@ -590,6 +590,29 @@ func TestBotCallbackDecideDistinctEntriesOneRPC(t *testing.T) {
 	}
 }
 
+func TestRecordDecidedSuppressesLaterDecide(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	// An auto-path decision recorded via RecordDecided
+	// suppresses a later manual tap for the same id: no
+	// second RPC.
+	tb.bot.RecordDecided("appr-9", "allow_always")
+	if ok, err := tb.bot.decideOnce(context.Background(), "appr-9", "allow_always"); err != nil || ok {
+		t.Errorf("decideOnce(recorded id) = (%v, %v); want (false, nil)", ok, err)
+	}
+	if got := len(tb.decider.recorded()); got != 0 {
+		t.Errorf("decider calls = %d; want 0", got)
+	}
+	// A different id is unaffected.
+	if ok, err := tb.bot.decideOnce(context.Background(), "appr-10", "deny"); err != nil || !ok {
+		t.Errorf("decideOnce(other id) = (%v, %v); want (true, nil)", ok, err)
+	}
+	if got := len(tb.decider.recorded()); got != 1 {
+		t.Errorf("decider calls = %d; want 1", got)
+	}
+}
+
 func TestDecidedCapEvictsOldest(t *testing.T) {
 	t.Parallel()
 	srv := newFakeTelegramServer(t)

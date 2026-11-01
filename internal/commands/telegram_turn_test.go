@@ -797,6 +797,29 @@ func TestTelegramResumeDroppedWhileTurnActive(t *testing.T) {
 	}
 }
 
+// markupButtonData returns the callback data of the first
+// button with the given label in a reply_markup JSON blob,
+// or "" when absent or unparseable.
+func markupButtonData(markupJSON, label string) string {
+	var markup struct {
+		InlineKeyboard [][]struct {
+			Text         string `json:"text"`
+			CallbackData string `json:"callback_data"`
+		} `json:"inline_keyboard"`
+	}
+	if json.Unmarshal([]byte(markupJSON), &markup) != nil {
+		return ""
+	}
+	for _, row := range markup.InlineKeyboard {
+		for _, btn := range row {
+			if btn.Text == label {
+				return btn.CallbackData
+			}
+		}
+	}
+	return ""
+}
+
 // decideButtonData polls the fake's edit markups for the
 // callback data of the newest "✅ Always allow" button whose
 // token differs from exclude: the newest match wins, so a
@@ -811,30 +834,111 @@ func decideButtonData(t *testing.T, h *telegramBotHarness, exclude string) strin
 		markups := append([]string(nil), h.fake.editMarkupJSON...)
 		h.fake.mu.Unlock()
 		for i := len(markups) - 1; i >= 0; i-- {
-			var markup struct {
-				InlineKeyboard [][]struct {
-					Text         string `json:"text"`
-					CallbackData string `json:"callback_data"`
-				} `json:"inline_keyboard"`
-			}
-			if json.Unmarshal([]byte(markups[i]), &markup) != nil {
-				continue
-			}
-			for _, row := range markup.InlineKeyboard {
-				for _, btn := range row {
-					if btn.Text == "✅ Always allow" {
-						if btn.CallbackData == exclude {
-							return false
-						}
-						data = btn.CallbackData
-						return true
-					}
+			if got := markupButtonData(markups[i], "✅ Always allow"); got != "" {
+				if got == exclude {
+					return false
 				}
+				data = got
+				return true
 			}
 		}
 		return false
 	})
 	return data
+}
+
+// listingButtonData polls the fake's SEND markups for the
+// newest "✅ Always allow" button: the /approvals listing
+// sends (not edits) carry these buttons.
+func listingButtonData(t *testing.T, h *telegramBotHarness) string {
+	t.Helper()
+	data := ""
+	waitFor(t, "listing decide button", func() bool {
+		h.fake.mu.Lock()
+		markups := append([]string(nil), h.fake.sendMarkupJSON...)
+		h.fake.mu.Unlock()
+		for i := len(markups) - 1; i >= 0; i-- {
+			if got := markupButtonData(markups[i], "✅ Always allow"); got != "" {
+				data = got
+				return true
+			}
+		}
+		return false
+	})
+	return data
+}
+
+// TestTelegramAutoDecidedApprovalNotReDecidedOnTap is the
+// N1 end-to-end repro: with auto-approve on, the turn's auto
+// path decides the approval (one RPC, recorded in the Bot's
+// decided set via OnDecided). The gateway still lists the
+// same approval as pending, so /approvals renders a fresh
+// listing button for it; tapping that button must NOT
+// re-issue the Decide RPC.
+func TestTelegramAutoDecidedApprovalNotReDecidedOnTap(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	approvalJSON, err := json.Marshal(approvalFixture("A1", "Run tests", "allow_always", "allow_once"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw.subScripts = []turnSubScript{{
+		replyText:       "Waiting",
+		deltas:          []string{"Wa"},
+		approvalRecords: []string{fmt.Sprintf(`{"event":"approvals.snapshot","payload":{"pending_approvals":[%s]}}`, approvalJSON)},
+	}}
+	h, cancel, codeCh := runTelegramBotWithConfig(t, gw, []string{telegramUpdate(1, 111, "run tests")}, telegramTestConfig(), nil)
+	defer cancel()
+	// The auto path decides A1 during the turn: exactly one
+	// decide RPC, and the turn completes with no buttons
+	// (the outcome is not needs_approval).
+	waitFor(t, "auto decide", func() bool { return len(gw.decideHistory()) == 1 })
+	waitFor(t, "turn final edit", func() bool {
+		for _, e := range h.fake.editTexts() {
+			if strings.Contains(e, "Waiting") {
+				return true
+			}
+		}
+		return false
+	})
+	// The fake gateway is static, so it still lists A1 as
+	// pending: /approvals renders a fresh button for it.
+	gw.approvalsScript = []any{approvalFixture("A1", "Run tests", "allow_always", "allow_once")}
+	h.fake.setBatches([]string{telegramUpdate(2, 111, "/approvals")})
+	data := listingButtonData(t, h)
+	answersBefore := 0
+	h.fake.mu.Lock()
+	for _, m := range h.fake.methods {
+		if m == "answerCallbackQuery" {
+			answersBefore++
+		}
+	}
+	h.fake.mu.Unlock()
+	h.fake.setBatches([]string{callbackUpdate(3, data, 1)})
+	waitFor(t, "listing tap answered", func() bool {
+		h.fake.mu.Lock()
+		defer h.fake.mu.Unlock()
+		n := 0
+		for _, m := range h.fake.methods {
+			if m == "answerCallbackQuery" {
+				n++
+			}
+		}
+		return n > answersBefore
+	})
+	// No second RPC, no resume: the tap was deduped against
+	// the auto path's record.
+	cancel()
+	if code := <-codeCh; code != 130 {
+		t.Errorf("bot exit code = %d, want 130 (interrupted)", code)
+	}
+	calls := gw.decideHistory()
+	if len(calls) != 1 || calls[0] != (decideRecord{approvalID: "A1", decision: "allow_always"}) {
+		t.Fatalf("decide calls = %+v, want exactly 1 (A1/allow_always, the auto path's)", calls)
+	}
+	if _, _, subs, _ := gw.counts(); subs != 1 {
+		t.Errorf("subscribe calls = %d, want exactly 1 (no resume from a listing tap)", subs)
+	}
 }
 
 // TestTelegramResumeGuardKeyedBySession is the R-M1 repro:
