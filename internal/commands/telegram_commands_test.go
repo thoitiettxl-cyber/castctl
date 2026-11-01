@@ -385,7 +385,7 @@ func TestTelegramWatchCommand(t *testing.T) {
 	if len(sends) != 4 {
 		t.Fatalf("sends = %q", sends)
 	}
-	if sends[0] != "👀 Watch is <b>on</b>: live tool/progress events are forwarded, batched every few seconds." {
+	if sends[0] != "👀 Watch is <b>on</b>: the flag is stored; live event forwarding lands in step 5b." {
 		t.Errorf("watch-on send = %q", sends[0])
 	}
 	if sends[1] != sends[0] || sends[2] != sends[0] {

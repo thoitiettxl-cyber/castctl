@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
 	"github.com/thoitiettxl-cyber/castctl/internal/telegram"
 )
@@ -140,7 +141,8 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 	// than "missing" fails startup: running without a
 	// persistable offset would silently re-handle updates after
 	// a restart. A corrupt file loads fresh (and is reported
-	// once below) instead of failing.
+	// once below) instead of failing; an unknown schema version
+	// fails startup rather than discarding stored state.
 	stateStore, stateCorrupt, err := telegram.LoadStateStore(prof.Dir)
 	if err != nil {
 		return err
@@ -168,7 +170,10 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 		logger = rt.Logger("telegram")
 	}
 	if stateCorrupt {
-		logger.Warn("telegram state file corrupt; starting with fresh state", "path", telegram.StatePath(prof.Dir))
+		// The counts of discarded mappings/watermarks/toggles
+		// are unknowable: the file did not parse. The offset
+		// reset and the discard are stated, not counted.
+		logger.Warn("telegram state file corrupt; starting with fresh state (offset reset to 0; stored chat mappings, watermarks, and runtime toggles discarded)", "path", telegram.StatePath(prof.Dir))
 	}
 	// The heartbeat lives for the bot process, not per turn:
 	// concurrent turns on one Muse share it, and no turn's
@@ -208,9 +213,16 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 			// Offset-before-handle: the save runs before the
 			// update is handled. A save failure is logged
 			// only — failing the poll loop over state would
-			// lose every later update too.
+			// lose every later update too. Bound: one local
+			// state save (temp file + fsync + rename) per
+			// new-max update_id, under the dispatcher lock
+			// held across this hook call, so a slow disk
+			// stalls the per-chat worker for that save.
+			// Persistence stays synchronous by design in
+			// this loop (no async move); the save is
+			// local-only.
 			if err := stateStore.NoteOffset(offset); err != nil {
-				logger.Warn("telegram state save failed", "err", err.Error())
+				logger.Warn("telegram state save failed", "err", logging.SummarizeErr(err))
 			}
 		},
 		Decider: gatewayDecider{muse: rt.Muse},

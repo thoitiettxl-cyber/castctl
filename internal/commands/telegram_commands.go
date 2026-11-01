@@ -696,8 +696,9 @@ func (h *telegramCmdHandler) archive(ctx context.Context, chatID int64) error {
 // deletePrompt asks for confirmation first (Python cmd_delete,
 // tgbot.py:1978-1984): the confirm button carries the session
 // id, Cancel carries noop. Any allowed user may confirm: there
-// is no owner gate in this build, the Python asymmetry,
-// flagged in the PR body rather than hardened unilaterally.
+// is no owner gate in this build. That asymmetry is Python
+// parity, Boss-approved 2026-11-01 on condition it is
+// documented (docs/config.md); it is not hardened here.
 func (h *telegramCmdHandler) deletePrompt(ctx context.Context, chatID int64) error {
 	mapping, ok, err := h.currentThread(ctx, chatID)
 	if err != nil {
@@ -716,9 +717,10 @@ func (h *telegramCmdHandler) deletePrompt(ctx context.Context, chatID int64) err
 
 // watch toggles the global watch flag in the state file only
 // (Python cmd_watch, tgbot.py:2054-2061). Forwarding and
-// monitors are PR-B: the reply states what the flag means
-// without promising delivery, and the PR body says so
-// plainly. An invalid arg reports the current state.
+// monitors are PR-B: the reply states only that the flag is
+// stored and that forwarding lands in step 5b — it must not
+// promise delivery this build lacks. An invalid arg reports
+// the current state.
 func (h *telegramCmdHandler) watch(ctx context.Context, chatID int64, arg string) error {
 	a := strings.ToLower(strings.TrimSpace(arg))
 	if a == "on" || a == "off" {
@@ -730,7 +732,7 @@ func (h *telegramCmdHandler) watch(ctx context.Context, chatID int64, arg string
 	on := watchOn != nil && *watchOn
 	text := "👀 Watch is <b>off</b>."
 	if on {
-		text = "👀 Watch is <b>on</b>: live tool/progress events are forwarded, batched every few seconds."
+		text = "👀 Watch is <b>on</b>: the flag is stored; live event forwarding lands in step 5b."
 	}
 	_, err := h.bot.Send(ctx, chatID, text, telegram.SendOptions{})
 	return err

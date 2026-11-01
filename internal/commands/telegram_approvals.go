@@ -20,14 +20,16 @@ import (
 // adapter, the pending-approvals read, and the /approvals +
 // /autoapprove command handlers.
 //
-// One decide RPC shape is shared by every decide path: the
-// gatewayDecider adapter (manual button decisions), the
-// waitApprover closure (auto-approve inside a turn), and the
-// CLI approve/deny commands (decideApproval, untouched here
-// except through the shared shape). callDecide is never
-// retried by any caller: decide is not idempotent, and the
-// server-side idempotency the claim protocol requires is
-// unproven [NEEDS-MEASUREMENT] (see claims.go and the PR body).
+// One decide RPC shape is issued by three paths, but they do
+// not share one call site: the gatewayDecider adapter (manual
+// button decisions) and the waitApprover closure (auto-approve
+// inside a turn) go through callDecide, while the CLI
+// approve/deny commands (decideApproval) duplicate the
+// identical RPC directly via Muse.Call and do not use
+// callDecide. callDecide is never retried by any caller:
+// decide is not idempotent, and the server-side idempotency
+// the claim protocol requires is unproven
+// [NEEDS-MEASUREMENT] (see claims.go and the PR body).
 // Every decision failure leaves the approval undecided: the
 // adapter returns the error unwrapped-typed (auth errors stay
 // *conn.AuthError), cbDecide surfaces it as a warning, and no
@@ -35,9 +37,10 @@ import (
 
 // callDecide issues one egress.approval.decide call on an
 // already-leased gateway. It performs no retry and no claim:
-// claim discipline lives in the caller (AutoApprover's
-// decided set per turn; ApproveForever's claim chain on the
-// monitor path, which has no caller in PR-A).
+// claim discipline lives in the caller (Bot.decideOnce's
+// decided set for manual buttons; AutoApprover's decided set
+// per turn; ApproveForever's claim chain on the monitor path,
+// which has no caller in PR-A).
 func callDecide(ctx context.Context, gw conn.Gateway, approvalID, decision string) error {
 	_, err := gw.CallJSON(ctx, "egress.approval.decide", conn.RequestOptions{
 		PathParams: map[string]string{"approval_id": approvalID},

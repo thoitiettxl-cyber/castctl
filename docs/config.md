@@ -319,8 +319,9 @@ state file below; there is no config field for `watch`
 (effective default `false`; `/watch on|off` toggles it, bare
 `/watch` reports it). Watch forwarding itself — live
 tool/progress events forwarded to chats — is step 5b; the
-toggle is persisted now so the reply text does not
-over-promise. No CLI flag, environment variable, or profile
+toggle is persisted now, and the `/watch` reply says so
+plainly (the flag is stored; forwarding lands in step 5b)
+instead of promising delivery this build lacks. No CLI flag, environment variable, or profile
 entry feeds a bot turn: only the telegram block's initial
 values, overlaid by the state file after the first runtime
 toggle, do.
@@ -337,8 +338,11 @@ the offset is persisted before an update is handled, so a
 crash mid-handle loses that update (at-most-once, mirroring
 Python `src/muse_cli/tgbot.py:2445-2450`); a crash during a
 save leaves the old or the new whole file, never a torn one.
-A corrupt or unknown-version state file is treated as fresh
-with one warning (the bot keeps running); any other read
+A corrupt state file is treated as fresh
+with one warning stating the offset reset and the discard
+(the bot keeps running); an unknown-version state file
+refuses to start, with an error naming the version and the
+counts that would be discarded. Any other read
 error fails startup rather than running on unpersistable
 state. Watermarks advance monotonically and are capped at
 the last seq a turn delivered.
@@ -375,7 +379,10 @@ approve-all buttons, resume after a decision), the core
 slash commands (`/help`, `/status`, `/chats`, `/main`, `/new`,
 `/history`, `/unread`, `/rename`, `/pin`, `/unpin`,
 `/archive`, `/unarchive`, `/delete`, `/watch` as a persisted
-toggle), and the persistent state file above. Known gaps in
+toggle), and the persistent state file above. `/delete`
+confirmation has no owner gate: any allowed user may confirm
+the delete prompt, matching Python — Boss-approved
+2026-11-01 as documented parity. Known gaps in
 this build: long replies are split into messages instead of
 being sent as a document, `/history` output is split instead
 of sent as a file, `/stop` does not drop dispatcher-queued

@@ -7,6 +7,7 @@ package telegram
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -35,14 +36,21 @@ import (
 // loses the mutation; a crash during a save leaves either the
 // old or the new whole file, never a torn one.
 //
-// A missing or empty file is a fresh state. A present file with
-// corrupt JSON or an unknown schema version loads as fresh state
-// and reports corrupt: the bot keeps running on fresh state
-// (Python's read_json is likewise lenient, tgbot.py:138-145)
-// and the caller logs the corruption once. Unknown fields are
-// ignored on load (forward tolerance). The stored offset is the
-// last handled update_id; the polling library adds 1 when it
-// resumes, matching Settings.InitialOffset.
+// A missing or empty file is a fresh state. A present file
+// with corrupt JSON loads as fresh state and reports corrupt:
+// the bot keeps running on fresh state (Python's read_json is
+// likewise lenient, tgbot.py:138-145) and the caller logs the
+// corruption once, stating that the offset resets to 0 and
+// any stored mappings, watermarks, and toggles are discarded
+// (their counts are unknowable from unreadable JSON). An
+// unknown schema version is NOT lenient: it is an error, and
+// the bot refuses to start rather than silently discard the
+// stored offset, mappings, watermarks, and toggles — the
+// error names the version and the counts that would be lost.
+// Unknown fields are ignored on load (forward tolerance). The
+// stored offset is the last handled update_id; the polling
+// library adds 1 when it resumes, matching
+// Settings.InitialOffset.
 
 // telegramStateVersion is the frozen schema version.
 const telegramStateVersion = 1
@@ -105,9 +113,11 @@ type StateStore struct {
 
 // LoadStateStore reads the state file in profileDir. A missing or
 // empty file yields a fresh store with corrupt=false. A present
-// file with corrupt JSON or an unknown version yields a fresh
-// store with corrupt=true. Any other read failure is an error:
-// the caller must not run on silently unpersistable state.
+// file with corrupt JSON yields a fresh store with corrupt=true.
+// A present file with an unknown schema version is an error: the
+// caller must not run on silently discarded state. Any other
+// read failure is an error: the caller must not run on silently
+// unpersistable state.
 func LoadStateStore(profileDir string) (*StateStore, bool, error) {
 	path := StatePath(profileDir)
 	data, err := os.ReadFile(path)
@@ -125,7 +135,17 @@ func LoadStateStore(profileDir string) (*StateStore, bool, error) {
 		return newStateStore(path), true, nil
 	}
 	if st.Version != telegramStateVersion {
-		return newStateStore(path), true, nil
+		toggles := 0
+		if st.AutoApprove != nil {
+			toggles++
+		}
+		if st.AutoAllowOnce != nil {
+			toggles++
+		}
+		if st.Watch != nil {
+			toggles++
+		}
+		return nil, false, fmt.Errorf("telegram: state file version %d is not supported (want %d); refusing to start rather than discard %d chat mappings, %d watermarks, offset %d, and %d runtime toggles", st.Version, telegramStateVersion, len(st.Chats), len(st.Watermarks), st.Offset, toggles)
 	}
 	store := newStateStore(path)
 	store.st = st

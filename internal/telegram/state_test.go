@@ -5,8 +5,10 @@
 package telegram
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -122,19 +124,28 @@ func TestStateStoreCorruptAndVersion(t *testing.T) {
 		t.Errorf("reload after repair: err=%v corrupt=%v; want clean", err, corrupt)
 	}
 
-	// Unknown schema version is corrupt, never guessed at.
-	if err := os.WriteFile(path, []byte(`{"version":99,"offset":9}`), 0o600); err != nil {
+	// Unknown schema version refuses to start: silently
+	// discarding stored mappings/watermarks would lose the
+	// poll offset and session state. The error names the
+	// version and the counts that would be discarded, and
+	// the failed load must not mutate the file (a restart
+	// after the refusal still sees version 99, not a fresh
+	// file written over it).
+	versioned := []byte(`{"version":99,"offset":9,"chats":{"500":{"title":"main"}},"watermarks":{"main":11},"auto_approve":true}`)
+	if err := os.WriteFile(path, versioned, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, corrupt, err = LoadStateStore(dir)
+	if _, _, err := LoadStateStore(dir); err == nil {
+		t.Error("unknown version must refuse to start")
+	} else if !strings.Contains(err.Error(), "version 99") || !strings.Contains(err.Error(), "1 chat mapping") || !strings.Contains(err.Error(), "1 watermark") || !strings.Contains(err.Error(), "offset 9") {
+		t.Errorf("unknown-version error = %v; want version + discarded counts", err)
+	}
+	after, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("LoadStateStore (version 99) = %v", err)
+		t.Fatal(err)
 	}
-	if !corrupt {
-		t.Error("unknown version must report corrupt")
-	}
-	if got := store.Offset(); got != 0 {
-		t.Errorf("unknown-version load Offset = %d; want fresh 0", got)
+	if !bytes.Equal(after, versioned) {
+		t.Error("failed unknown-version load mutated the state file; want it untouched")
 	}
 
 	// An empty file loads fresh without a corrupt report: a
