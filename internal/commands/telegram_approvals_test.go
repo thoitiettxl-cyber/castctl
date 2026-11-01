@@ -554,3 +554,89 @@ func TestCallbackApproveAllThroughBot(t *testing.T) {
 		t.Errorf("sends = %q; want the approve-all confirm naming Run tests", sends)
 	}
 }
+
+// TestCallbackDecideSingleFlight is the R1 acceptance test:
+// two callback updates with identical callback data and
+// distinct update_ids (double-tap / redelivery / two users)
+// must issue exactly ONE Decide RPC; the second tap takes
+// the expired path (no second confirm, no warning).
+func TestCallbackDecideSingleFlight(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	muse := conn.New(func(context.Context, conn.Config) (conn.Gateway, error) { return gw, nil })
+	rt := &Runtime{Muse: muse}
+	fake := &cmdFakeTelegram{}
+	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
+	defer srv.Close()
+	fakeAddr := srv.Listener.Addr().String()
+	dialFake := func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, fakeAddr)
+	}
+	fakeClient := &http.Client{Transport: &http.Transport{
+		Proxy:       nil,
+		DialContext: dialFake,
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialFake(ctx, network, addr)
+		},
+	}}
+	bot, err := telegram.New(telegram.Settings{
+		Token:          telegramTestToken,
+		AllowedUserIDs: []int64{111},
+		HTTPClient:     fakeClient,
+		Logger:         slog.Default(),
+		Decider:        gatewayDecider{muse: muse},
+		Pending: func(ctx context.Context) ([]telegram.Approval, error) {
+			return telegramPendingApprovals(ctx, rt)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := bot.Registry().Register(telegram.CallbackEntry{Action: "decide", ApprovalID: "A1", Decision: "allow_always"})
+	cb := func(updateID int64, queryID string) string {
+		return fmt.Sprintf(`{"update_id":%d,"callback_query":{"id":%q,"from":{"id":111,"is_bot":false,"first_name":"Tester"},"message":{"message_id":50,"chat":{"id":500,"type":"private"},"text":"Approval"},"data":%q}}`, updateID, queryID, data)
+	}
+	fake.batches = []string{`{"ok":true,"result":[` + cb(9, "q1") + `,` + cb(10, "q2") + `]}`}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = bot.Start(ctx); close(done) }()
+	waitFor(t, "decide confirm", func() bool {
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		for _, s := range fake.sends {
+			if strings.Contains(s, "Always allowed") {
+				return true
+			}
+		}
+		return false
+	})
+	// Both updates share chat 500, so one dispatcher worker
+	// handles them in order; give the second tap time to be
+	// (not) processed before asserting the counts.
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+	<-done
+	if calls := gw.decideHistory(); len(calls) != 1 || calls[0] != (decideRecord{approvalID: "A1", decision: "allow_always"}) {
+		t.Fatalf("decide calls = %+v, want exactly one", calls)
+	}
+	fake.mu.Lock()
+	sends := append([]string(nil), fake.sends...)
+	fake.mu.Unlock()
+	confirms, warnings := 0, 0
+	for _, s := range sends {
+		if strings.Contains(s, "Always allowed") {
+			confirms++
+		}
+		if strings.Contains(s, "⚠️") {
+			warnings++
+		}
+	}
+	if confirms != 1 {
+		t.Errorf("confirms = %d, sends = %q; want exactly one decide confirm", confirms, sends)
+	}
+	if warnings != 0 {
+		t.Errorf("warnings = %d, sends = %q; want none (second tap takes the expired answer)", warnings, sends)
+	}
+}

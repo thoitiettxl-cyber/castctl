@@ -847,6 +847,18 @@ func (b *Bot) onCallback(ctx context.Context, upd *models.Update) {
 	answerText := ""
 	if !ok {
 		answerText = "This button expired; run the command again."
+	} else if entry.Action == "decide" || entry.Action == "approve_all" {
+		// Decide buttons are single-flight: the first tap
+		// consumes the entry, so a double-tap, redelivery,
+		// or second user's tap takes the "expired" answer
+		// instead of issuing a second non-idempotent
+		// Decide RPC. Lookup above only peeked (the action
+		// decides whether consumption applies); Consume is
+		// the atomic arbiter when two taps race.
+		entry, ok = b.registry.Consume(cq.Data)
+		if !ok {
+			answerText = "This button expired; run the command again."
+		}
 	}
 	if err := b.answer(ctx, cq.ID, answerText); err != nil {
 		b.logger.Debug("telegram answerCallbackQuery failed", "err", b.summarize(err.Error()))
@@ -884,12 +896,48 @@ func (b *Bot) onCallback(ctx context.Context, upd *models.Update) {
 	}
 }
 
+// decideOnce issues at most one Decide RPC per approval id
+// for the bot's lifetime (in-memory): the check, the RPC, and
+// the record share claimsMu, so two distinct entries for the
+// same approval id (turn buttons plus an /approvals listing,
+// or a monitor path in step 5b) cannot double-issue the
+// non-idempotent egress.approval.decide RPC. The record lands
+// in the claim protocol's decided set, so the monitor paths
+// see manual decisions too. A failed RPC records nothing, so
+// a retry stays possible. Registry consumption in onCallback
+// is the first line for the same button; this is the second,
+// for distinct buttons over one approval.
+func (b *Bot) decideOnce(ctx context.Context, approvalID, decision string) (bool, error) {
+	b.claimsMu.Lock()
+	defer b.claimsMu.Unlock()
+	if _, ok := b.decided[approvalID]; ok {
+		return false, nil
+	}
+	if err := b.decider.Decide(ctx, approvalID, decision); err != nil {
+		return false, err
+	}
+	b.decided[approvalID] = decision
+	return true, nil
+}
+
 // cbDecide decides one approval, confirms, clears the buttons,
-// and resumes when the button carries a resume triple and no
-// turn is active (src/muse_cli/tgbot.py:1725-1737, cb_decide).
+// and resumes when the button carries a resume triple (src/
+// muse_cli/tgbot.py:1725-1737, cb_decide). When the approval
+// was already decided (a distinct button for the same id, or
+// a monitor path decided first), it clears the buttons and
+// returns without a second RPC, confirm, or resume: the first
+// decision already confirmed and scheduled the follow.
 func (b *Bot) cbDecide(ctx context.Context, chatID int64, mid int, entry CallbackEntry) error {
-	if err := b.decider.Decide(ctx, entry.ApprovalID, entry.Decision); err != nil {
+	decided, err := b.decideOnce(ctx, entry.ApprovalID, entry.Decision)
+	if err != nil {
 		return b.scrubErr(err)
+	}
+	if mid != 0 {
+		// Failure swallowed, as in Python (try/except pass).
+		_ = b.clearMarkup(ctx, chatID, mid)
+	}
+	if !decided {
+		return nil
 	}
 	label := "❌ Denied"
 	switch entry.Decision {
@@ -900,10 +948,6 @@ func (b *Bot) cbDecide(ctx context.Context, chatID int64, mid int, entry Callbac
 	}
 	if _, err := b.Send(ctx, chatID, label+": <code>"+EscapeText(entry.ApprovalID)+"</code>", SendOptions{Silent: true}); err != nil {
 		return err
-	}
-	if mid != 0 {
-		// Failure swallowed, as in Python (try/except pass).
-		_ = b.clearMarkup(ctx, chatID, mid)
 	}
 	if entry.AfterSeq != nil && b.resume != nil {
 		// The resume is scheduled, not run here: startResume
@@ -932,8 +976,16 @@ func (b *Bot) cbApproveAll(ctx context.Context, chatID int64, _ CallbackEntry) e
 		if !OffersForever(d) {
 			continue
 		}
-		if err := b.decider.Decide(ctx, d.ID, DecisionForever); err != nil {
+		// Single-flight, as in cbDecide: an approval already
+		// decided (manual tap, or a monitor path) is skipped
+		// without a second RPC and without a second report
+		// line — it was already confirmed where decided.
+		decided, err := b.decideOnce(ctx, d.ID, DecisionForever)
+		if err != nil {
 			return b.scrubErr(err)
+		}
+		if !decided {
+			continue
 		}
 		title := d.Title
 		if title == "" {
