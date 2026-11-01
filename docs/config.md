@@ -657,7 +657,8 @@ plaintext token set through the web UI never rests on disk.
 A token rotated through the web UI takes effect on the
 running server immediately, with no restart: every
 successful API save refreshes the live comparator from the
-saved document (a failed save changes nothing, and a
+saved document, except a save to a document that never carried a token,
+which leaves the startup comparator untouched (a failed save changes nothing, and a
 sentinel keep-on-save re-adopts the unchanged stored hash).
 A save that removes the token — deleting the `token` key or
 the whole `webui` block — clears the live comparator
@@ -665,6 +666,8 @@ immediately: every authenticated request then gets 401
 until a token is restored by editing the file and
 restarting, since a token-less running server accepts no
 Bearer token with which to save a new one through the API.
+A token removed by editing the file directly takes effect on restart,
+and a later API save of the token-less document does not clear the live comparator.
 A plaintext token starting with `$2a$`, `$2b$`, or `$2y$`
 is treated as an already-hashed value and can never
 authenticate: choose a token without such a prefix. A
