@@ -979,6 +979,96 @@ missing and why:
 5. Deviations from the upstream, each with castctl evidence, and
    anything deliberately not taken.
 
+## 11. cli-proxy-api KernelSU module template @f912a73 — STUDIED + COPIED (two files only)
+
+Upstream: `github.com/thoitiettxl-cyber/cli-proxy-api`, commit
+`f912a733f84a3157e6570d84c05e5a02439d3ff0` (verified against the
+remote: `git ls-remote` HEAD resolves to the same hash; log
+message "docs(plans): complete v1.2.0 release", dated 2026-08-28).
+License: MIT — upstream `LICENSE` ("MIT License / Copyright (c)
+2025 Hoang Nguyen"), read in full. The template's own
+`AGENTS.md` governs the template repo, not castctl.
+
+Category: mixed. (a) Copied, byte-identical, exactly two files
+(listed below with hashes). Everything else in `module/` is
+castctl-written code following the template's patterns, i.e. (c)
+studied, no code taken: no template shell code, Go code, or
+config text was copied into the module scripts. The deviations
+table in `module/docs/ksu-module.md` §9 is the authoritative
+list of what was deliberately not taken or changed, with
+reasons; the summary here names the load-bearing ones.
+
+Copied files (both `cmp` exit 0 against the upstream commit):
+
+- `module/META-INF/com/google/android/update-binary` — the
+  generic Magisk/KernelSU installer entry point, sha256
+  `5f4afbcd6537e00e64c4b468373cfcdf0d0e1cb378527a5ac8afcc31553d8ce0`.
+  Upstream: `META-INF/com/google/android/update-binary` at the
+  pinned commit.
+- `module/licenses/GLIBC-COPYING.LESSERv2` — the LGPL 2.1
+  license text for the redistributed glibc libraries, sha256
+  `20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95`.
+  Upstream:
+  `licenses/GLIBC-COPYING.LESSERv2` at the pinned commit. This
+  is the glibc license text, not template code; it is recorded
+  here because the file was copied from the template tree.
+
+Studied patterns, with mapping (castctl file ↔ upstream file at
+the pinned commit; no line counts are cited — counts were
+stale twice after later edits and rot on every loop, so the
+mapping names files only):
+
+- Install-time publication: `module/customize.sh`
+  ↔ `customize.sh` — SKIPUNZIP, ABI gate,
+  checksum verification from the embedded manifest,
+  content-addressed `releases/<id>-<sha>/` + atomic `current`
+  symlink swap, plugin forward-copy from the old release
+  layout, example-config-only copy, permission loop.
+- Lifecycle controller: `module/scripts/castctl-ctl`
+  ↔ `scripts/cpactl` — PID-file + cmdline
+  matching, lifecycle lock outside the data tree, readiness
+  wait, stop escalation, status/doctor/backup/purge-data
+  commands, log helper shape.
+- Boot hook: `module/service.sh` ↔ `service.sh`
+  — single late-start hook, backgrounded subshell,
+  boot_completed wait, disable check, watchdog.
+- Manager button / removal: `module/action.sh` ↔
+  `action.sh`; `module/uninstall.sh` ↔
+  `uninstall.sh` — stop best-effort, keep data.
+- Host packager: `module/build.sh` ↔ `build.sh`
+  — pinned downloads with verify-before-rename,
+  ELF/glibc validation, payload `checksums.sha256`
+  self-verification, secret refusal, deterministic ZIP.
+- Pins and manifest: `module/sources.lock` ↔
+  `sources.lock`; `module/payload-manifest.txt`
+  ↔ `payload-manifest.txt`. The castctl
+  pins themselves (castctl v0.6.4 asset, glibc 2.44 `.deb`,
+  CA bundle 20261020-r0) were re-verified by real download
+  in the module work, not copied from the template's pins;
+  the CA pin differs because the template's pin 404s (see
+  `module/docs/ksu-module.md` §9, D15).
+
+Deliberately not taken / changed (each with castctl evidence in
+`module/docs/ksu-module.md` §9): KernelSU-first busybox/PATH
+(D1); `SKIPMOUNT=true` + no `PROPFILE` line, no `system/` dir
+(D3/D4); bounded `boot_completed` polling instead of the
+unbounded `resetprop -w` wait (D5); bounded `flock` (D6);
+watchdog with exponential backoff (D7); log rotation + no
+secrets in logs (D8); no 9999:3003 privilege drop — root in
+module context (D9); no `update-core`/latest-following updater
+(D10); no listener checks (D11); `CASTCTL_DATA_DIR` honoured
+in both `customize.sh` and the controller, where the template
+honours `CPA_DATA_DIR` in `cpactl:6` only and hardcodes the
+path in `customize.sh` (D13); CA bundle from a pinned `.apk`
+instead of a host file (D14). The template's
+`system/bin/cpactl` shim, `system.prop` handling, and
+`allow-root-core` marker have no castctl counterpart.
+
+Nothing else in this tree is copied template code. In
+particular, no template Go code, web UI code, or provider
+logic is present in castctl; the `webui/` fork is covered
+separately by §3.
+
 ## Carried items (unresolved at the time of writing)
 
 - npm license check: not run — no license-checking tool present,

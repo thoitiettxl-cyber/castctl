@@ -1,0 +1,1012 @@
+#!/system/bin/sh
+
+# castctl-ctl — runtime lifecycle controller for the castctl KernelSU
+# module. Mirrors cli-proxy-api scripts/cpactl (template commit f912a733)
+# in structure; deviations are listed in module/docs/ksu-module.md.
+#
+# Differences that matter: no privilege drop (root in module context),
+# no listener/port checks (castctl telegram run listens on no port),
+# gating via the module's own JSON key probe (the strict parser is
+# the final arbiter; the probe only decides which verified commands
+# to attempt), bounded waits everywhere (flock, readiness, stop
+# escalation), a lifetime bound on each child, and log rotation.
+# Two services are managed, each with its own PID file and log:
+# telegram run (telegram object block) and keeper run (non-empty
+# keeper array block; verified against the 8cb361f tree). The web
+# UI has no command or config block on this HEAD and is never
+# started. No plugin discovery or loading of any kind:
+# DATA_DIR/plugins exists only as a reserved, preserved directory.
+#
+# Test-only environment overrides (never set on the device; all are
+# documented in module/docs/ksu-module.md):
+#   CASTCTL_TEST_MODE=1, CASTCTL_BUSYBOX, CASTCTL_MODULE_DIR,
+#   CASTCTL_DATA_DIR, CASTCTL_LIFECYCLE_LOCK, CASTCTL_FLOCK_TIMEOUT,
+#   CASTCTL_READY_TIMEOUT, CASTCTL_BOOT_WAIT_TIMEOUT (service.sh),
+#   CASTCTL_WATCHDOG_BASE/MAX (service.sh), CASTCTL_CHILD_LIFETIME,
+#   CASTCTL_STOP_INT_WAIT, CASTCTL_STOP_TERM_WAIT,
+#   CASTCTL_LOG_MAX_BYTES, CASTCTL_LOG_KEEP.
+
+set -u
+# Fresh files (logs, PID files, markers) must be owner-only even
+# before the first chmod pass: the 0600-file claim is literal only
+# with a restrictive umask.
+umask 077
+
+MODULE_DIR=${CASTCTL_MODULE_DIR:-/data/adb/modules/castctl}
+DATA_DIR=${CASTCTL_DATA_DIR:-/data/local/castctl}
+CURRENT=$DATA_DIR/current
+CONFIG=$DATA_DIR/config/config.json
+PROFILES_DIR=$DATA_DIR/config/profiles
+PLUGIN_ROOT=$DATA_DIR/plugins
+PLUGIN_DIR=$PLUGIN_ROOT/linux/arm64
+RUN_DIR=$DATA_DIR/run
+LOG_DIR=$DATA_DIR/logs
+BACKUP_DIR=$DATA_DIR/backups
+CONTROL_DIR=$DATA_DIR/.controller
+PID_FILE=$RUN_DIR/castctl.pid
+KEEPER_PID_FILE=$RUN_DIR/keeper.pid
+LOCK_FILE=${CASTCTL_LIFECYCLE_LOCK:-${DATA_DIR}.lifecycle.lock}
+ENABLED_FILE=$RUN_DIR/enabled
+CORE_LOG=$LOG_DIR/castctl.log
+KEEPER_LOG=$LOG_DIR/keeper.log
+CTL_LOG=$LOG_DIR/controller.log
+
+# A relative data dir would resolve against the caller's cwd
+# inconsistently across invocations (customize.sh already refuses
+# one); refuse it here too, before any path derived from it is used.
+case "$DATA_DIR" in /*) ;; *) echo "castctl-ctl: CASTCTL_DATA_DIR must be an absolute path" >&2; exit 1 ;; esac
+
+# clamp_int VALUE DEFAULT MIN MAX: numeric environment overrides
+# are validated and clamped; garbage falls back to the default, so
+# a bad override can never defeat a bound (bootloop proof holds
+# with overrides set, not only under defaults).
+clamp_int() {
+  _v=$1; _d=$2; _lo=$3; _hi=$4
+  case "$_v" in ''|*[!0-9]*) printf '%s\n' "$_d"; return 0 ;; esac
+  while [ "${#_v}" -gt 1 ]; do case "$_v" in 0*) _v=${_v#0} ;; *) break ;; esac; done
+  [ "${#_v}" -gt 10 ] && { printf '%s\n' "$_hi"; return 0; }
+  if [ "$_v" -lt "$_lo" ]; then printf '%s\n' "$_lo"; return 0; fi
+  if [ "$_v" -gt "$_hi" ]; then printf '%s\n' "$_hi"; return 0; fi
+  printf '%s\n' "$_v"
+}
+
+FLOCK_TIMEOUT=$(clamp_int "${CASTCTL_FLOCK_TIMEOUT:-30}" 30 1 300)
+READY_TIMEOUT=$(clamp_int "${CASTCTL_READY_TIMEOUT:-10}" 10 1 300)
+STOP_INT_WAIT=$(clamp_int "${CASTCTL_STOP_INT_WAIT:-5}" 5 1 60)
+STOP_TERM_WAIT=$(clamp_int "${CASTCTL_STOP_TERM_WAIT:-3}" 3 1 60)
+CHILD_LIFETIME=$(clamp_int "${CASTCTL_CHILD_LIFETIME:-86400}" 86400 60 604800)
+LOG_MAX_BYTES=$(clamp_int "${CASTCTL_LOG_MAX_BYTES:-1048576}" 1048576 1 104857600)
+LOG_KEEP=$(clamp_int "${CASTCTL_LOG_KEEP:-3}" 3 0 10)
+
+find_busybox() {
+  for candidate in "${CASTCTL_BUSYBOX:-}" /data/adb/ksu/bin/busybox \
+    /data/adb/magisk/busybox /data/adb/ap/bin/busybox; do
+    [ -n "$candidate" ] && [ -x "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }
+  done
+  command -v busybox 2>/dev/null || return 1
+}
+
+BUSYBOX=$(find_busybox) || { echo "castctl-ctl: busybox not found" >&2; exit 1; }
+
+bb() { "$BUSYBOX" "$@"; }
+now() { bb date '+%Y-%m-%dT%H:%M:%S%z'; }
+
+rotate_log() {
+  logfile=$1
+  # A symlinked log is never rotated: rotation must not follow a
+  # planted link into another file (F1). The file is left alone
+  # and the caller continues; log() refuses the append below.
+  [ -L "$logfile" ] && return 0
+  [ -f "$logfile" ] || return 0
+  size=$(bb wc -c <"$logfile" 2>/dev/null | bb tr -d ' ' || true)
+  case "$size" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$size" -gt "$LOG_MAX_BYTES" ] || return 0
+  i=$LOG_KEEP
+  while [ "$i" -gt 1 ]; do
+    prev=$((i - 1))
+    if [ -f "$logfile.$prev" ]; then
+      bb mv -f "$logfile.$prev" "$logfile.$i" 2>/dev/null || true
+    fi
+    i=$prev
+  done
+  bb mv -f "$logfile" "$logfile.1" 2>/dev/null || true
+}
+
+log() {
+  level=$1
+  shift
+  # Callers must never pass config contents, tokens, cookies, or
+  # secret-bearing command lines here. This function logs verbatim.
+  message="$(now) [$level] $*"
+  printf '%s\n' "$message"
+  # Never append through a symlink: a planted controller.log link
+  # would redirect log output into an arbitrary file (F1). The
+  # message still reaches stdout; the file is left untouched.
+  # The same applies one level up: a symlinked DATA_DIR or LOG_DIR
+  # makes CTL_LOG resolve inside the link target, so the guard
+  # refusal itself (die() -> log(), before prepare_mutable_dirs
+  # runs) would be written through the planted link (F2). Refuse
+  # the append whenever either dir is a link; the message still
+  # reaches stdout/stderr via the caller.
+  if [ ! -L "$DATA_DIR" ] && [ ! -L "$LOG_DIR" ] && [ -d "$LOG_DIR" ] && [ ! -L "$CTL_LOG" ]; then
+    rotate_log "$CTL_LOG" 2>/dev/null || true
+    printf '%s\n' "$message" >>"$CTL_LOG" 2>/dev/null || true
+  fi
+}
+
+die() { log ERROR "$*" >&2; exit 1; }
+
+# refuse_symlink PATH LABEL: fail if PATH is a symlink. Every
+# controller write path goes through this: a planted symlink must
+# never redirect a write outside the data tree (F1). The link is
+# left in place (evidence); the operation fails closed.
+refuse_symlink() {
+  [ ! -L "$1" ] || { log ERROR "$2 must not be a symlink"; return 1; }
+  return 0
+}
+
+require_root() {
+  [ "${CASTCTL_TEST_MODE:-0}" = 1 ] && return 0
+  [ "$(bb id -u)" = 0 ] || die "root is required"
+}
+
+runtime_paths() {
+  LOADER=$CURRENT/lib/ld-linux-aarch64.so.1
+  LIB_DIR=$CURRENT/lib
+  BINARY=$CURRENT/bin/castctl
+  CA_FILE=$CURRENT/ca/cert.pem
+  RUNTIME_VERSION=$CURRENT/runtime.version
+  export LOADER LIB_DIR BINARY CA_FILE RUNTIME_VERSION
+}
+
+run_core_binary() {
+  loader_path=$1
+  library_path=$2
+  binary_path=$3
+  shift 3
+  "$BUSYBOX" timeout 10 "$loader_path" --library-path "$library_path" "$binary_path" "$@"
+}
+
+prepare_lifecycle_lock() {
+  case "$LOCK_FILE" in /*) ;; *) die "lifecycle lock path must be absolute" ;; esac
+  lock_parent=${LOCK_FILE%/*}
+  # Create the parent first: the lock check must not fail an
+  # install whose data-dir parent does not exist yet.
+  mkdir -p "$lock_parent" 2>/dev/null || die "unable to create lifecycle lock parent: $lock_parent"
+  [ -d "$lock_parent" ] || die "lifecycle lock parent is missing: $lock_parent"
+  [ ! -L "$LOCK_FILE" ] || die "lifecycle lock must not be a symlink"
+  { [ ! -e "$LOCK_FILE" ] || [ -f "$LOCK_FILE" ]; } || die "lifecycle lock must be a regular file"
+  : >"$LOCK_FILE" || die "unable to create lifecycle lock"
+  chmod 0600 "$LOCK_FILE"
+  [ "$(bb id -u)" != 0 ] || chown 0:0 "$LOCK_FILE" 2>/dev/null || die "unable to own lifecycle lock"
+}
+
+prepare_mutable_dirs() {
+  # A symlinked sensitive directory would redirect every write
+  # under it outside the data tree (F1): refuse before creating
+  # or chmodding anything below it. The data dir itself and
+  # releases/ are guarded first: a symlinked DATA_DIR defeats
+  # every subdir guard below it (F2), and a symlinked releases/
+  # defeats current-target validation (B2). run/tmp is guarded
+  # too: it is created here and exported as the child's TMPDIR,
+  # so a planted link would redirect the child's temp files.
+  for _guard_dir in "$DATA_DIR" "$DATA_DIR/releases" "$DATA_DIR/config" "$PROFILES_DIR" "$PLUGIN_ROOT" "$PLUGIN_ROOT/linux" "$PLUGIN_DIR" \
+    "$RUN_DIR" "$RUN_DIR/tmp" "$LOG_DIR" "$BACKUP_DIR" "$CONTROL_DIR"; do
+    [ ! -L "$_guard_dir" ] || die "data directory must not be a symlink: $_guard_dir"
+  done
+  mkdir -p "$DATA_DIR" "$DATA_DIR/config" "$PROFILES_DIR" \
+    "$PLUGIN_ROOT" "$PLUGIN_DIR" "$RUN_DIR" "$LOG_DIR" "$BACKUP_DIR" \
+    "$DATA_DIR/releases" "$RUN_DIR/tmp" "$CONTROL_DIR"
+  chmod 0711 "$DATA_DIR"
+  chmod 0755 "$DATA_DIR/releases"
+  chmod 0700 "$CONTROL_DIR"
+  chmod 0700 "$DATA_DIR/config" "$PROFILES_DIR" "$PLUGIN_ROOT" "$PLUGIN_DIR" \
+    "$RUN_DIR" "$RUN_DIR/tmp" "$LOG_DIR" "$BACKUP_DIR"
+  if [ "$(bb id -u)" = 0 ]; then
+    chown 0:0 "$DATA_DIR" "$DATA_DIR/releases" "$CONTROL_DIR" 2>/dev/null || true
+    bb find "$DATA_DIR/config" "$RUN_DIR" "$LOG_DIR" \
+      -type d -exec chmod 0700 {} \; 2>/dev/null || true
+    bb find "$DATA_DIR/config" "$RUN_DIR" "$LOG_DIR" \
+      -type f -exec chmod 0600 {} \; 2>/dev/null || true
+  fi
+}
+
+set_description() {
+  [ -f "$MODULE_DIR/module.prop" ] || return 0
+  [ ! -L "$MODULE_DIR/module.prop" ] || return 0
+  safe=$(printf '%s' "$*" | bb tr '\n|' '  ')
+  bb sed -i "s|^description=.*|description=$safe|" "$MODULE_DIR/module.prop" 2>/dev/null || true
+}
+
+read_pid_file() {
+  # A symlinked PID file is never read: its target's contents are
+  # not a PID this controller wrote (F1).
+  [ -L "$1" ] && return 1
+  [ -f "$1" ] || return 1
+  value=$(bb cat "$1" 2>/dev/null || true)
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$value"
+}
+
+pid_alive() { kill -0 "$1" 2>/dev/null; }
+
+# pid_matches PID [PATTERN]: the process cmdline contains the module
+# binary path, and PATTERN when given (e.g. "telegram run" or
+# "keeper run", distinguishing the two managed services sharing one
+# binary). Never trust a bare PID.
+pid_matches() {
+  pid=$1
+  pattern=${2:-}
+  runtime_paths
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  command_line=$(bb tr '\000' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)
+  case "$command_line" in *"$BINARY"*) ;; *) return 1 ;; esac
+  [ -z "$pattern" ] && return 0
+  case "$command_line" in *"$pattern"*) return 0 ;; *) return 1 ;; esac
+}
+
+# service_running PIDFILE [PATTERN]: the PID file names a live
+# process matching the module binary (and PATTERN when given).
+service_running() {
+  pid=$(read_pid_file "$1" 2>/dev/null) || return 1
+  pid_alive "$pid" && pid_matches "$pid" "${2:-}"
+}
+
+# is_running: any managed service is alive (telegram or keeper).
+is_running() {
+  service_running "$PID_FILE" "telegram run" && return 0
+  service_running "$KEEPER_PID_FILE" "keeper run"
+}
+
+# Scan /proc for processes whose cmdline contains the module binary
+# path (and PATTERN when given). Used only as a stop fallback when a
+# PID file is gone; the controller never signals a PID it has not
+# matched this way.
+find_module_pids() {
+  pattern=${1:-}
+  runtime_paths
+  for proc_dir in /proc/[0-9]*; do
+    [ -d "$proc_dir" ] || continue
+    pid=${proc_dir#/proc/}
+    [ "$pid" = "$$" ] && continue
+    [ "$pid" = 1 ] && continue
+    pid_matches "$pid" "$pattern" 2>/dev/null || continue
+    printf '%s\n' "$pid"
+  done
+}
+
+# probe_top_key FILE KEY MODE: true iff KEY is a top-level JSON key
+# in FILE whose value matches MODE: "object" (value starts with
+# '{'), "array" (value is a non-empty array), "empty_array"
+# (value is '[]' allowing whitespace), "any" (key present with any
+# value). Lexical scan, not a JSON parser: strings (with escapes)
+# are skipped, braces inside strings do not count, and keys nested
+# inside other objects do not count. Malformed JSON may still
+# report presence; castctl's own strict parser is the final
+# arbiter and the start path treats a child exit as fail-soft.
+# Never prints file contents.
+probe_top_key() {
+  _probe_file=$1
+  _probe_want=$2
+  _probe_mode=$3
+  [ -f "$_probe_file" ] || return 1
+  bb awk -v want="$_probe_want" -v mode="$_probe_mode" '
+    BEGIN { depth = 0; bdepth = 0; instr = 0; esc = 0; key = ""; lastkey = ""; state = "seek"; found = 0 }
+    {
+      line = $0
+      n = length(line)
+      for (i = 1; i <= n; i++) {
+        c = substr(line, i, 1)
+        if (instr) {
+          if (esc) {
+            if (c == "u") {
+              hexpart = substr(line, i + 1, 4)
+              code = -1
+              if (length(hexpart) == 4) {
+                code = 0
+                for (h = 1; h <= 4; h++) {
+                  d = substr(hexpart, h, 1)
+                  v = index("0123456789abcdefABCDEF", d)
+                  if (v == 0) { code = -1; break }
+                  if (v > 16) { v = v - 6 }
+                  code = code * 16 + (v - 1)
+                }
+              }
+              if (code >= 0 && code < 128) { key = key sprintf("%c", code); i += 4 }
+              else if (code >= 128) { key = key "?"; i += 4 }
+              else { key = key "u" }
+            } else { key = key c }
+            esc = 0
+          }
+          else if (c == "\\") { esc = 1 }
+          else if (c == "\"") {
+            instr = 0
+            if (state == "colon") { state = "seek" }
+            else if (depth == 1 && bdepth == 0) { lastkey = key; state = "afterkey" }
+          } else { key = key c }
+          continue
+        }
+        if (state == "array") {
+          if (c == " " || c == "\t" || c == "\r") { continue }
+          if (c == "]") {
+            if (mode == "empty_array") { found = 1 }
+            state = "seek"; continue
+          }
+          if (mode == "array") { found = 1 }
+          state = "seek"
+        }
+        if (c == "\"") {
+          if (state == "colon" && mode == "any" && lastkey == want && bdepth == 0) { found = 1 }
+          instr = 1; esc = 0; key = ""; continue
+        }
+        if (c == "{") {
+          if (state == "colon") {
+            if ((mode == "object" || mode == "any") && lastkey == want && bdepth == 0) { found = 1 }
+            state = "seek"
+          } else if (state == "afterkey") { state = "seek" }
+          depth++
+          continue
+        }
+        if (c == "}") {
+          if (state == "colon" && mode == "any" && lastkey == want && bdepth == 0) { found = 1 }
+          depth--; if (depth < 0) { depth = 0 }; state = "seek"; continue
+        }
+        if (state == "colon") {
+          if (c == " " || c == "\t" || c == "\r") { continue }
+          if (mode == "any" && lastkey == want && bdepth == 0) { found = 1 }
+          if (c == "[" && lastkey == want && (mode == "array" || mode == "empty_array")) { state = "array"; continue }
+          state = "seek"
+          continue
+        }
+        # Bracket depth is tracked only outside a value: a `[`
+        # after a colon is the array-value opener handled above.
+        # A top-level `[...]` wrapper must not let its contents
+        # count as top-level keys.
+        if (c == "[") { if (state == "seek") { bdepth++ }; continue }
+        if (c == "]") { if (state == "seek" && bdepth > 0) { bdepth-- }; continue }
+        if (state == "afterkey") {
+          if (c == ":") { state = "colon" }
+          else if (c == " " || c == "\t" || c == "\r") { }
+          else { state = "seek" }
+          continue
+        }
+      }
+    }
+    END { exit((found && bdepth == 0) ? 0 : 1) }
+  ' "$_probe_file"
+}
+
+# has_top_block FILE KEY: top-level key with an object value.
+has_top_block() { probe_top_key "$1" "$2" object; }
+
+# has_top_nonempty_array FILE KEY: top-level key with a non-empty
+# array value (the keeper block shape: "keeper": [{...}, ...]).
+has_top_nonempty_array() { probe_top_key "$1" "$2" array; }
+
+# has_top_empty_array FILE KEY: top-level key with an empty array
+# value ("keeper": [] — valid, keeper off, no entries to run).
+has_top_empty_array() { probe_top_key "$1" "$2" empty_array; }
+
+# has_top_key FILE KEY: top-level key present with any value.
+has_top_key() { probe_top_key "$1" "$2" any; }
+
+# Gating summary for status/doctor logs: presence only, no values.
+# keeper states: present (non-empty array, startable), empty
+# ("keeper": [] — valid, off), malformed (key present, neither an
+# object... a non-array shape the parser rejects), absent.
+# telegram states: present (object), malformed (key present, not
+# an object), absent. webui: present (any shape — no webui key
+# exists on this HEAD, so any presence is unparseable), absent.
+gating_summary() {
+  if [ ! -f "$CONFIG" ]; then
+    printf 'config: missing\n'
+    return 0
+  fi
+  telegram=absent; keeper=absent; webui=absent
+  if has_top_key "$CONFIG" telegram; then
+    telegram=malformed
+    has_top_block "$CONFIG" telegram && telegram=present
+  fi
+  if has_top_key "$CONFIG" keeper; then
+    keeper=malformed
+    has_top_nonempty_array "$CONFIG" keeper && keeper=present
+    has_top_empty_array "$CONFIG" keeper && keeper=empty
+  fi
+  has_top_key "$CONFIG" webui && webui=present
+  printf 'config: telegram=%s keeper=%s webui=%s\n' "$telegram" "$keeper" "$webui"
+}
+
+# validate_current_target: the `current` symlink must resolve to a
+# real directory under $DATA_DIR/releases/. A pre-planted symlink
+# pointing elsewhere must never make the controller execute or
+# trust files outside the release tree (F1 / safety N2).
+validate_current_target() {
+  [ -L "$CURRENT" ] || { log ERROR "current runtime symlink missing"; return 1; }
+  target=$(bb readlink "$CURRENT" 2>/dev/null || true)
+  [ -n "$target" ] || { log ERROR "current runtime symlink unreadable"; return 1; }
+  # A `..` component would defeat the textual prefix check below
+  # (releases/../evil resolves outside releases/).
+  case "$target" in *..*) log ERROR "current runtime symlink target must not contain .."; return 1 ;; esac
+  case "$target" in
+    /*) resolved=$target ;;
+    *) resolved=$DATA_DIR/$target ;;
+  esac
+  case "$resolved" in
+    "$DATA_DIR/releases/"*) ;;
+    *) log ERROR "current runtime symlink points outside releases/"; return 1 ;;
+  esac
+  # The remainder after releases/ must be exactly one component:
+  # [ -L ] on a path ending in `/` or `/.` resolves through the
+  # final component, so `releases/rel-link/` and
+  # `releases/rel-link/.` reported "not a symlink" even when an
+  # earlier component was a link to an outside tree (safety B1).
+  # The install path only ever creates single-component release
+  # names (<id>-<sha>), so strictness rejects nothing legitimate.
+  rest=${resolved#"$DATA_DIR/releases/"}
+  case "$rest" in ''|.|*/*) log ERROR "current runtime target must be a single release directory under releases/"; return 1 ;; esac
+  # Intermediate components must not be links either: a symlinked
+  # DATA_DIR or releases/ defeats the checks above (B2/F2).
+  [ ! -L "$DATA_DIR" ] || { log ERROR "data directory must not be a symlink"; return 1; }
+  [ ! -L "$DATA_DIR/releases" ] || { log ERROR "releases directory must not be a symlink"; return 1; }
+  [ -d "$resolved" ] || { log ERROR "current runtime target is not a directory"; return 1; }
+  [ ! -L "$resolved" ] || { log ERROR "current runtime target must not be a symlink"; return 1; }
+  return 0
+}
+
+# check_manifest_allowlist: every file/symlink under the release
+# must be listed in checksums.sha256. The checksum check alone
+# cannot see an unlisted extra file (red-team N4); an extra
+# executable planted in the release tree must refuse the start.
+check_manifest_allowlist() {
+  listed=$(bb awk '{p=$2; sub(/^\*/, "", p); print p}' "$CURRENT/checksums.sha256" 2>/dev/null | bb sort)
+  actual=$(cd "$CURRENT" 2>/dev/null && bb find . \( -type f -o -type l \) -print 2>/dev/null | bb sed 's|^\./||' | bb grep -v '^checksums\.sha256$' | bb sort)
+  [ "$listed" = "$actual" ] || { log ERROR "runtime contains files not listed in the checksum manifest"; return 1; }
+  return 0
+}
+
+runtime_check() {
+  runtime_paths
+  validate_current_target || return 1
+  for required in "$LOADER" "$BINARY" "$CA_FILE" "$RUNTIME_VERSION" \
+    "$LIB_DIR/libc.so.6" "$LIB_DIR/libdl.so.2" "$LIB_DIR/libresolv.so.2" \
+    "$LIB_DIR/libpthread.so.0"; do
+    [ -f "$required" ] || { log ERROR "runtime file missing"; return 1; }
+  done
+  [ -f "$CURRENT/checksums.sha256" ] || { log ERROR "runtime checksum manifest missing"; return 1; }
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$CURRENT" && sha256sum -c checksums.sha256 >/dev/null) || { log ERROR "runtime checksum mismatch"; return 1; }
+  else
+    (cd "$CURRENT" && bb sha256sum -c checksums.sha256 >/dev/null) || { log ERROR "runtime checksum mismatch"; return 1; }
+  fi
+  check_manifest_allowlist || return 1
+  core_version=$(bb sed -n 's/^core_version=//p' "$RUNTIME_VERSION" | bb head -1)
+  case "$core_version" in ''|*[!A-Za-z0-9._-]*) log ERROR "runtime version record is unsafe"; return 1 ;; esac
+  version=$(run_core_binary "$LOADER" "$LIB_DIR" "$BINARY" --version 2>&1 | bb head -1 || true)
+  case "$version" in
+    "castctl $core_version"*) ;;
+    *) log ERROR "core version preflight failed"; return 1 ;;
+  esac
+  return 0
+}
+
+process_identity() {
+  pid=$1
+  [ -r "/proc/$pid/status" ] || { printf 'unknown:unknown\n'; return; }
+  uid=$(bb awk '/^Uid:/{print $2; exit}' "/proc/$pid/status")
+  gid=$(bb awk '/^Gid:/{print $2; exit}' "/proc/$pid/status")
+  printf '%s:%s\n' "${uid:-unknown}" "${gid:-unknown}"
+}
+
+# _targets_add LIST PID: LIST plus PID, deduplicated.
+_targets_add() {
+  case " $1 " in *" $2 "*) printf '%s' "$1" ;; *) printf '%s %s' "$1" "$2" ;; esac
+}
+
+# _stop_signal_all LIST SIGNAL PATTERN: signal every still-matching PID.
+_stop_signal_all() {
+  for _sp in $1; do
+    pid_alive "$_sp" && pid_matches "$_sp" "$3" 2>/dev/null && kill "-$2" "$_sp" 2>/dev/null || true
+  done
+}
+
+# _stop_wait_all LIST PATTERN SECONDS: true when no listed PID is
+# still alive and matching.
+_stop_wait_all() {
+  _sw=0
+  while [ "$_sw" -lt "$3" ]; do
+    _any=0
+    for _wp in $1; do
+      if pid_alive "$_wp" && pid_matches "$_wp" "$2" 2>/dev/null; then _any=1; break; fi
+    done
+    [ "$_any" = 0 ] && return 0
+    sleep 1
+    _sw=$((_sw + 1))
+  done
+  _any=0
+  for _wp in $1; do
+    if pid_alive "$_wp" && pid_matches "$_wp" "$2" 2>/dev/null; then _any=1; break; fi
+  done
+  [ "$_any" = 0 ]
+}
+
+# stop_one PIDFILE PATTERN LABEL: stop one managed service
+# (SIGINT, then SIGTERM, then SIGKILL, all bounded). Removes the
+# service PID file. The recorded PID is the `timeout` wrapper;
+# busybox `timeout` is NOT assumed to forward signals, so after
+# the wrapper is gone the /proc scan ALWAYS runs again and any
+# remaining process matching PATTERN is signalled too: a
+# non-forwarding timeout must never leave an orphaned child that
+# `is-running` reports as stopped (B1). The scan is
+# pattern-scoped, so stopping the keeper can never signal the
+# telegram process (both share one binary path). Exit 130 from an
+# intentional stop is normal and needs no special handling here:
+# the child is gone either way.
+stop_one() {
+  pidfile=$1
+  pattern=$2
+  label=$3
+  pid=$(read_pid_file "$pidfile" 2>/dev/null || true)
+  # rm -f on a symlink removes the link itself, never its target:
+  # safe even if the PID file was planted as a symlink (F1).
+  rm -f "$pidfile"
+  if [ -n "$pid" ] && ! pid_matches "$pid" "$pattern"; then
+    log WARNING "stale or foreign PID file ignored for $label"
+    pid=
+  fi
+  targets=""
+  [ -n "$pid" ] && targets=$(_targets_add "$targets" "$pid")
+  # Always scan, even with a live PID file: the scan is what
+  # finds the real child when the wrapper does not forward.
+  for _scan in $(find_module_pids "$pattern"); do
+    case " $targets " in *" $_scan "*) ;; *) log WARNING "stopping $label process found by scan (PID $_scan)"; targets=$(_targets_add "$targets" "$_scan") ;; esac
+  done
+  [ -n "$targets" ] || return 0
+  log INFO "stopping $label (PIDs:$targets )"
+  _stop_signal_all "$targets" 2 "$pattern"
+  _stop_wait_all "$targets" "$pattern" "$STOP_INT_WAIT" || true
+  # Re-scan after the wrapper is gone: a surviving child is an
+  # orphan left by a non-forwarding timeout. Signal it too.
+  for _scan in $(find_module_pids "$pattern"); do
+    case " $targets " in *" $_scan "*) ;; *) log WARNING "orphan $label process found after wrapper exit (PID $_scan)"; targets=$(_targets_add "$targets" "$_scan") ;; esac
+  done
+  _stop_signal_all "$targets" 2 "$pattern"
+  _stop_wait_all "$targets" "$pattern" "$STOP_INT_WAIT" || true
+  _stop_signal_all "$targets" 15 "$pattern"
+  _stop_wait_all "$targets" "$pattern" "$STOP_TERM_WAIT" || true
+  # Final scan before the last resort: anything still matching
+  # after TERM gets SIGKILL, including late-appearing orphans.
+  for _scan in $(find_module_pids "$pattern"); do
+    case " $targets " in *" $_scan "*) ;; *) log WARNING "orphan $label process found after SIGTERM (PID $_scan)"; targets=$(_targets_add "$targets" "$_scan") ;; esac
+  done
+  _stop_signal_all "$targets" 9 "$pattern"
+  sleep 1
+  for _scan in $(find_module_pids "$pattern"); do
+    log ERROR "$label process survived forced stop (PID $_scan)"
+    return 1
+  done
+  return 0
+}
+
+# stop_process REMOVE_INTENT: stop every managed service and drop
+# the enabled marker (unless REMOVE_INTENT is 0, for restart).
+stop_process() {
+  remove_intent=${1:-1}
+  [ "$remove_intent" = 0 ] || rm -f "$ENABLED_FILE"
+  failed=0
+  stop_one "$PID_FILE" "telegram run" "castctl telegram" || failed=1
+  stop_one "$KEEPER_PID_FILE" "keeper run" "castctl keeper" || failed=1
+  [ "$failed" = 0 ] || return 1
+  set_description "Stopped | castctl"
+  return 0
+}
+
+wait_ready() {
+  pid=$1
+  label=$2
+  pattern=$3
+  i=0
+  while [ "$i" -lt "$READY_TIMEOUT" ]; do
+    if ! pid_alive "$pid"; then
+      wait "$pid" 2>/dev/null
+      code=$?
+      log ERROR "$label exited during startup (code $code)"
+      return 1
+    fi
+    pid_matches "$pid" "$pattern" && return 0
+    sleep 1
+    i=$((i + 1))
+  done
+  pid_alive "$pid" && pid_matches "$pid" "$pattern"
+}
+
+# start_one MODE LABEL PIDFILE LOGFILE PATTERN ARGS...: start one
+# managed service under the bundled loader with the lifetime bound,
+# unless it is already running. Idempotent: an already-running
+# service is left alone (silent in watchdog mode). On readiness
+# failure the child is signalled and only that service's PID file
+# is removed; the enabled marker is owned by start_locked, which
+# writes it whenever any service is wanted so the watchdog keeps
+# retrying a failed start after a config fix.
+start_one() {
+  mode=$1
+  label=$2
+  pidfile=$3
+  svc_log=$4
+  pattern=$5
+  shift 5
+  if service_running "$pidfile" "$pattern"; then
+    [ "$mode" = watchdog ] || log INFO "$label already running"
+    return 0
+  fi
+  # Scan-before-start: a PID file is not the only record of a live
+  # service. An orphan left by an earlier stop must never be
+  # duplicated by a second start (safety N8).
+  _orphans=$(find_module_pids "$pattern")
+  if [ -n "$_orphans" ]; then
+    log WARNING "$label already running (found by scan: $_orphans); not starting a duplicate"
+    return 0
+  fi
+  # Refuse symlinked write targets before launching: the service
+  # log redirect and the PID file must never follow a planted link
+  # outside the data tree (F1). The parent dirs are refused too:
+  # a link swapped in for RUN_DIR/LOG_DIR after
+  # prepare_mutable_dirs ran would defeat the file checks below.
+  if [ -L "$RUN_DIR" ] || [ -L "$LOG_DIR" ]; then
+    log ERROR "service directories must not be symlinks"
+    return 1
+  fi
+  refuse_symlink "$svc_log" "service log" || return 1
+  refuse_symlink "$pidfile" "PID file" || return 1
+  rotate_log "$svc_log" 2>/dev/null || true
+  runtime_paths
+  export HOME="$DATA_DIR"
+  export TMPDIR="$RUN_DIR/tmp"
+  # Parity exports from the template. castctl does not read
+  # SSL_CERT_FILE/SSL_CERT_DIR on the base HEAD (grep-verified);
+  # whether its TLS stack consults them is [NEEDS-MEASUREMENT].
+  export SSL_CERT_FILE="$CA_FILE"
+  export SSL_CERT_DIR="$CURRENT/ca"
+  export CASTCTL_CONFIG="$CONFIG"
+
+  log INFO "starting $label"
+  cd "$LOG_DIR" || return 1
+  "$BUSYBOX" nohup "$BUSYBOX" timeout -s INT "$CHILD_LIFETIME" \
+    "$LOADER" --library-path "$LIB_DIR" "$BINARY" \
+    --config "$CONFIG" "$@" \
+    >>"$svc_log" 2>&1 </dev/null 8>&- 9>&- &
+  pid=$!
+  cd / || true
+
+  # The service-log redirect was opened at launch: re-check for a
+  # link swapped in between the pre-launch check and the redirect
+  # (red-team N3). A swap in that window can redirect only the
+  # output written before this check; the child is killed here
+  # through the stop scan and no PID file is written. The
+  # check-then-open window itself cannot be closed in shell
+  # (no O_NOFOLLOW); it is a documented residual, bounded by
+  # this kill.
+  if [ -L "$svc_log" ] || [ -L "$LOG_DIR" ]; then
+    log ERROR "service log became a symlink during start; stopping $label"
+    stop_one "$pidfile" "$pattern" "$label" || true
+    return 1
+  fi
+
+  wait_ready "$pid" "$label" "$pattern"
+  ready=$?
+  if [ "$ready" -ne 0 ]; then
+    # Stop through the scan, not the wrapper PID alone: a child
+    # orphaned by a non-forwarding timeout must not survive a
+    # readiness failure to be reported "already running" with no
+    # PID file (safety R4). Bounded by the stop escalation.
+    stop_one "$pidfile" "$pattern" "$label" || true
+    set_description "Error | $label readiness failed"
+    return 1
+  fi
+
+  # The PID file must still be a plain path: if a symlink
+  # appeared between the pre-launch check and now, stop the
+  # just-started child through the scan and fail rather than
+  # writing through it (safety R5). rm -f in stop_one removes
+  # the link itself, never its target.
+  if [ -L "$pidfile" ] || [ -L "$RUN_DIR" ]; then
+    log ERROR "PID file became a symlink during start; stopping $label"
+    stop_one "$pidfile" "$pattern" "$label" || true
+    return 1
+  fi
+  printf '%s' "$pid" >"$pidfile"
+  chmod 0600 "$pidfile"
+
+  log INFO "$label started (PID $pid, UID:GID $(process_identity "$pid"))"
+  return 0
+}
+
+start_locked() {
+  mode=${1:-manual}
+  prepare_mutable_dirs
+  runtime_check || return 1
+
+  [ -f "$CONFIG" ] || { log ERROR "config missing; nothing to start"; return 1; }
+  if has_top_key "$CONFIG" webui; then
+    log ERROR "config carries a webui key this castctl build cannot parse (no webui block exists on this HEAD); no service started (see item 2)"
+    return 1
+  fi
+  telegram_wanted=0
+  keeper_wanted=0
+  if has_top_key "$CONFIG" telegram; then
+    if has_top_block "$CONFIG" telegram; then
+      telegram_wanted=1
+    else
+      log WARNING "telegram key present but not an object; castctl will reject the config, telegram not started"
+    fi
+  fi
+  if has_top_key "$CONFIG" keeper; then
+    if has_top_nonempty_array "$CONFIG" keeper; then
+      keeper_wanted=1
+    elif has_top_empty_array "$CONFIG" keeper; then
+      [ "$mode" = watchdog ] || log INFO "keeper block is empty; keeper not started"
+    else
+      log WARNING "keeper key present but not an array; castctl will reject the config, keeper not started"
+    fi
+  fi
+  if [ "$telegram_wanted" = 0 ] && [ "$keeper_wanted" = 0 ]; then
+    [ "$mode" = watchdog ] || log INFO "no telegram block and no keeper entries in config; nothing to start"
+    return 0
+  fi
+
+  # The enabled marker means "a start was requested and not
+  # explicitly stopped". It is written even when a start fails
+  # so the watchdog retries after a config fix; stop removes it.
+  # A symlinked marker must never be truncated through (F1):
+  # fail closed; the watchdog retries and logs.
+  refuse_symlink "$ENABLED_FILE" "enabled marker" || return 1
+  : >"$ENABLED_FILE"
+  chmod 0600 "$ENABLED_FILE"
+
+  failed=0
+  if [ "$telegram_wanted" = 1 ]; then
+    start_one "$mode" "castctl telegram" "$PID_FILE" "$CORE_LOG" "telegram run" telegram run || failed=1
+  fi
+  if [ "$keeper_wanted" = 1 ]; then
+    start_one "$mode" "castctl keeper" "$KEEPER_PID_FILE" "$KEEPER_LOG" "keeper run" keeper run || failed=1
+  fi
+  if [ "$failed" = 0 ]; then
+    set_description "Running | castctl | Action to stop"
+    return 0
+  fi
+  set_description "Error | castctl start failed"
+  return 1
+}
+
+lifecycle_lock_is_inherited() {
+  [ "${CASTCTL_LIFECYCLE_LOCK_HELD:-0}" = 1 ] || return 1
+  inherited_lock=$(bb readlink "/proc/$$/fd/9" 2>/dev/null || true)
+  [ "$inherited_lock" = "$LOCK_FILE" ] || return 1
+  bb flock -n 9
+}
+
+run_lifecycle_locked() {
+  contention=$1
+  operation=$2
+  shift 2
+  if lifecycle_lock_is_inherited; then
+    "$operation" "$@"
+    return
+  fi
+  (
+    if [ "$contention" = wait ]; then
+      bb flock -w "$FLOCK_TIMEOUT" 9 || { log ERROR "unable to acquire lifecycle lock"; exit 1; }
+    elif ! bb flock -n 9; then
+      if [ "$contention" = ignore ]; then
+        log INFO "another lifecycle operation is in progress"
+        exit 0
+      fi
+      log ERROR "another lifecycle operation is in progress"
+      exit 1
+    fi
+    "$operation" "$@"
+  ) 9>"$LOCK_FILE"
+}
+
+start_service() {
+  require_root
+  prepare_lifecycle_lock
+  mode=${1:-manual}
+  contention=fail
+  [ "$mode" = boot ] && contention=wait
+  [ "$mode" = watchdog ] && contention=ignore
+  run_lifecycle_locked "$contention" start_locked "$mode"
+}
+
+stop_locked() {
+  prepare_mutable_dirs
+  stop_process "${1:-1}"
+}
+
+stop_service() {
+  require_root
+  prepare_lifecycle_lock
+  run_lifecycle_locked wait stop_locked "${1:-1}"
+}
+
+restart_locked() {
+  prepare_mutable_dirs
+  stop_process 0 && start_locked manual
+}
+
+restart_service() {
+  require_root
+  prepare_lifecycle_lock
+  run_lifecycle_locked wait restart_locked
+}
+
+status_service() {
+  runtime_paths
+  echo "castctl module status"
+  echo "  data: $DATA_DIR"
+  echo "  release: $(bb readlink "$CURRENT" 2>/dev/null || echo missing)"
+  # Do not rely on the assignment exit status: it is the exit
+  # status of `head`, which is 0 even when the loader fails and
+  # the output is empty. An empty version means unavailable.
+  version=$(run_core_binary "$LOADER" "$LIB_DIR" "$BINARY" --version 2>/dev/null | bb head -1 || true)
+  if [ -n "$version" ]; then
+    echo "  version: $version"
+  else
+    echo "  version: unavailable"
+  fi
+  if service_running "$PID_FILE" "telegram run"; then
+    pid=$(read_pid_file "$PID_FILE")
+    echo "  telegram: running (pid $pid, uid:gid $(process_identity "$pid"))"
+  else
+    echo "  telegram: stopped"
+  fi
+  if service_running "$KEEPER_PID_FILE" "keeper run"; then
+    pid=$(read_pid_file "$KEEPER_PID_FILE")
+    echo "  keeper: running (pid $pid, uid:gid $(process_identity "$pid"))"
+  else
+    echo "  keeper: stopped"
+  fi
+  echo "  $(gating_summary)"
+  if [ -d "$PLUGIN_DIR" ]; then
+    echo "  plugins: reserved dir present (no loader; file count: $(bb find "$PLUGIN_DIR" -maxdepth 1 -type f 2>/dev/null | bb wc -l | bb tr -d ' '))"
+  else
+    echo "  plugins: reserved dir missing"
+  fi
+  is_running
+}
+
+doctor_locked() {
+  prepare_mutable_dirs
+  failed=0
+  runtime_check || failed=1
+  if [ ! -f "$CONFIG" ]; then
+    log ERROR "config missing"
+    failed=1
+  else
+    if has_top_key "$CONFIG" webui; then
+      log ERROR "config carries a webui key this castctl build cannot parse"
+      failed=1
+    fi
+    if has_top_key "$CONFIG" telegram && ! has_top_block "$CONFIG" telegram; then
+      log ERROR "telegram key present but not an object; castctl will reject the config"
+      failed=1
+    fi
+    if has_top_key "$CONFIG" keeper && ! has_top_nonempty_array "$CONFIG" keeper && ! has_top_empty_array "$CONFIG" keeper; then
+      log ERROR "keeper key present but not an array; castctl will reject the config"
+      failed=1
+    fi
+  fi
+  if service_running "$PID_FILE" "telegram run"; then
+    pid=$(read_pid_file "$PID_FILE")
+    pid_matches "$pid" "telegram run" || { log ERROR "running telegram process does not match the module binary"; failed=1; }
+  fi
+  if service_running "$KEEPER_PID_FILE" "keeper run"; then
+    pid=$(read_pid_file "$KEEPER_PID_FILE")
+    pid_matches "$pid" "keeper run" || { log ERROR "running keeper process does not match the module binary"; failed=1; }
+  fi
+  [ "$failed" = 0 ] || return 1
+  log INFO "doctor passed"
+}
+
+doctor() {
+  require_root
+  prepare_lifecycle_lock
+  run_lifecycle_locked wait doctor_locked
+}
+
+backup_state_locked() {
+  prepare_mutable_dirs
+  stamp=$(bb date -u +%Y%m%dT%H%M%SZ)
+  archive=$BACKUP_DIR/castctl-state.$stamp.tar.gz
+  # Refuse a symlinked archive path: tar would follow it and
+  # overwrite the link target (F1). The stamp is second-granular,
+  # so a retry in the next second uses a fresh name.
+  refuse_symlink "$archive" "backup archive" || return 1
+  # The archive contains cookies and any other profile state under
+  # config/: treat it as secret material. Never share it.
+  # tar stores symlinks inside config/plugins as links, never
+  # dereferenced: restoring cannot write outside the tree.
+  (cd "$DATA_DIR" && bb tar -czf "$archive" config plugins) || die "backup failed"
+  chmod 0600 "$archive"
+  log INFO "backup created"
+}
+
+backup_state() {
+  require_root
+  prepare_lifecycle_lock
+  run_lifecycle_locked wait backup_state_locked
+}
+
+purge_data_locked() {
+  [ "${1:-}" = --yes ] || die "purge-data requires --yes; uninstall preserves data"
+  purge_allowed=0
+  [ "$DATA_DIR" = /data/local/castctl ] && purge_allowed=1
+  if [ "${CASTCTL_TEST_MODE:-0}" = 1 ]; then
+    case "$DATA_DIR" in "${TMPDIR:-/nonexistent}"/castctl-test-*) purge_allowed=1 ;; esac
+  fi
+  [ "$purge_allowed" = 1 ] || die "refusing unsafe purge path"
+  prepare_mutable_dirs
+  stop_process 1 || die "unable to stop the service before purge"
+  rm -rf "$DATA_DIR" || die "unable to remove persistent data"
+  [ ! -e "$DATA_DIR" ] || die "persistent data still exists after purge"
+  log INFO "persistent castctl data removed"
+}
+
+purge_data() {
+  require_root
+  prepare_lifecycle_lock
+  run_lifecycle_locked wait purge_data_locked "${1:-}"
+}
+
+usage() {
+  bb cat <<'EOF'
+Usage: castctl-ctl <command>
+
+Commands:
+  start [--boot|--watchdog]  Start telegram run and/or keeper run per config gating.
+  stop                       Stop for the current boot.
+  restart                    Restart the service.
+  status                     Show safe runtime status.
+  is-running                 Return success if any managed service is alive.
+  doctor                     Validate runtime and config gating.
+  version                    Show bundled core version.
+  log [telegram|keeper] [N]  Tail a service log (default telegram, 20 lines).
+  backup                     Archive config/plugin state (contains secrets).
+  purge-data --yes           Destructively remove persistent state.
+EOF
+}
+
+command_name=${1:-}
+case "$command_name" in
+  start)
+    case "${2:-}" in --boot) mode=boot ;; --watchdog) mode=watchdog ;; '' ) mode=manual ;; *) die "invalid start option" ;; esac
+    start_service "$mode"
+    ;;
+  stop) stop_service 1 ;;
+  restart) restart_service ;;
+  status) status_service ;;
+  is-running) is_running ;;
+  doctor) doctor ;;
+  version) runtime_paths; run_core_binary "$LOADER" "$LIB_DIR" "$BINARY" --version ;;
+  log)
+    svc=telegram
+    lines=20
+    case "${2:-}" in
+      telegram|keeper) svc=$2; lines=${3:-20} ;;
+      '') ;;
+      *) lines=$2 ;;
+    esac
+    case "$lines" in ''|*[!0-9]*) die "log line count must be numeric" ;; esac
+    if [ "$svc" = keeper ]; then
+      logfile=$KEEPER_LOG
+    else
+      logfile=$CORE_LOG
+    fi
+    [ -f "$logfile" ] || die "log not found"
+    [ ! -L "$logfile" ] || die "log must not be a symlink"
+    bb tail -n "$lines" "$logfile"
+    ;;
+  backup) backup_state ;;
+  purge-data) purge_data "${2:-}" ;;
+  help|-h|--help|'') usage ;;
+  *) die "unknown command: $command_name" ;;
+esac
