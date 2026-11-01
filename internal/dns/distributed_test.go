@@ -84,8 +84,14 @@ func TestDistributedDNSPerProfileIsolation(t *testing.T) {
 		if resolved.Source != profile.DNSSourceProfile {
 			t.Fatalf("profile %q source = %q; want profile", name, resolved.Source)
 		}
-		if len(resolved.Options.Servers) != 1 || resolved.Options.Servers[0].Tag != "dns1" {
-			t.Fatalf("profile %q servers = %+v; want one server dns1", name, resolved.Options.Servers)
+		if len(resolved.Options.Servers) != 2 || resolved.Options.Servers[0].Tag != "dns1" {
+			t.Fatalf("profile %q servers = %+v; want dns1 plus the appended local bootstrap server", name, resolved.Options.Servers)
+		}
+		if resolved.Options.Servers[1].Tag != profile.LocalBootstrapServerTag || resolved.Options.Servers[1].Type != "local" {
+			t.Fatalf("profile %q second server = %+v; want the synthesised local bootstrap server", name, resolved.Options.Servers[1])
+		}
+		if resolved.Options.Final != "dns1" {
+			t.Fatalf("profile %q final = %q; want dns1 (local is never final)", name, resolved.Options.Final)
 		}
 		w, ok := resolved.Options.Servers[0].Options.(option.DialerOptionsWrapper)
 		if !ok || w.TakeDialerOptions().Detour != want {

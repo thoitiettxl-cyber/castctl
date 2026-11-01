@@ -57,11 +57,21 @@ import (
 //     SynthesizedDirectTag; createOutbounds creates it (see
 //     internal/commands/runtime.go and the gate-2 note below).
 //
-// "local" is NEVER synthesised here: it is explicit-only. A
-// hand-written "local" server keeps sing-box's default
-// prefer_go=false; on systemd-resolved hosts its queries may
-// bypass the detour via D-Bus (see docs/config.md). The synthesised
-// default is DoH, not local.
+// "local" is NEVER synthesised as a target/final resolver: for
+// target lookups it is explicit-only. A hand-written "local"
+// server keeps sing-box's default prefer_go=false; on
+// systemd-resolved hosts its queries may bypass the detour via
+// D-Bus (see docs/config.md). The synthesised default is DoH,
+// not local.
+//
+// Scope exception, exactly one: a DEDICATED "local" server IS
+// synthesised by ensureLocalBootstrapServer below, but ONLY as
+// the default domain_resolver target for outbound server
+// addresses (see ApplyDomainResolverDefault). It is never the
+// final server, never rule-targeted, never the default
+// transport, and never used for target lookups unless the user
+// explicitly routes a lookup there. The two "local" statements
+// live in these two scopes; docs/config.md cross-links them.
 //
 // Gate-2 note (measured, internal/dns/gate2_test.go): sing-box
 // rejects a detour to an EMPTY direct outbound at transport Start
@@ -107,6 +117,14 @@ type ResolvedDNS struct {
 	// to an existing config tag. The runtime must create this
 	// tag (non-empty direct) before dnsClient.Start().
 	SynthesizedDirectTag string
+	// LocalServerTag is the tag of the "local" DNS server in
+	// Options that outbound server addresses resolve through
+	// by default (see ensureLocalBootstrapServer), or "" when
+	// there is no resolver at all (DNSSourceNone). It is
+	// always LocalBootstrapServerTag ("local") when set: the
+	// synthesised server, or a user-defined server with that
+	// tag reconciled by ensureLocalBootstrapServer.
+	LocalServerTag string
 }
 
 // defaultDNSServerTag is the tag of the single server in the
@@ -161,13 +179,17 @@ func ResolveProfileDNS(prof *Profile, single *SingleConfig) (*ResolvedDNS, error
 		if err != nil {
 			return nil, err
 		}
+		opts, err = ensureLocalBootstrapServer(prof, opts)
+		if err != nil {
+			return nil, err
+		}
 		synth := ""
 		for _, srv := range opts.Servers {
 			if d := detourOf(srv.Options); d == SynthesizedDirectTag(prof.Name) {
 				synth = d
 			}
 		}
-		return &ResolvedDNS{Options: opts, Source: DNSSourceProfile, SynthesizedDirectTag: synth}, nil
+		return &ResolvedDNS{Options: opts, Source: DNSSourceProfile, SynthesizedDirectTag: synth, LocalServerTag: LocalBootstrapServerTag}, nil
 	}
 	// (2) WireGuard DNS through the profile's tunnel. When a
 	// top-level dns section is also present, this branch
@@ -179,11 +201,15 @@ func ResolveProfileDNS(prof *Profile, single *SingleConfig) (*ResolvedDNS, error
 		if err != nil {
 			return nil, err
 		}
+		opts, err = ensureLocalBootstrapServer(prof, opts)
+		if err != nil {
+			return nil, err
+		}
 		warning := ""
 		if single.DNS != nil {
 			warning = fmt.Sprintf("castctl: top-level dns section is ignored for profile %q: WireGuard DNS takes precedence; remove the top-level dns section by hand (see docs/config.md)", prof.Name)
 		}
-		return &ResolvedDNS{Options: opts, Source: DNSSourceWireGuard, Warning: warning}, nil
+		return &ResolvedDNS{Options: opts, Source: DNSSourceWireGuard, Warning: warning, LocalServerTag: LocalBootstrapServerTag}, nil
 	}
 	// (3) Global-compat fallback, before the default (see the
 	// package header for why compat precedes synthesis: a
@@ -195,10 +221,15 @@ func ResolveProfileDNS(prof *Profile, single *SingleConfig) (*ResolvedDNS, error
 		if err != nil {
 			return nil, err
 		}
+		opts, err = ensureLocalBootstrapServer(prof, opts)
+		if err != nil {
+			return nil, err
+		}
 		return &ResolvedDNS{
-			Options: opts,
-			Source:  DNSSourceGlobalCompat,
-			Warning: "castctl: top-level dns section is deprecated and will become an error in a later release: run \"config migrate --write\" to distribute it into profile entries (see docs/config.md)",
+			Options:        opts,
+			Source:         DNSSourceGlobalCompat,
+			Warning:        "castctl: top-level dns section is deprecated and will become an error in a later release: run \"config migrate --write\" to distribute it into profile entries (see docs/config.md)",
+			LocalServerTag: LocalBootstrapServerTag,
 		}, nil
 	}
 	// (4) Synthesised DoH default.
@@ -207,7 +238,67 @@ func ResolveProfileDNS(prof *Profile, single *SingleConfig) (*ResolvedDNS, error
 	if err != nil {
 		return nil, err
 	}
-	return &ResolvedDNS{Options: opts, Source: DNSSourceDefault, SynthesizedDirectTag: synth}, nil
+	opts, err = ensureLocalBootstrapServer(prof, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &ResolvedDNS{Options: opts, Source: DNSSourceDefault, SynthesizedDirectTag: synth, LocalServerTag: LocalBootstrapServerTag}, nil
+}
+
+// ensureLocalBootstrapServer guarantees the effective DNS
+// options carry a "local" server usable as the default
+// domain_resolver target for outbound server addresses, and
+// reconciles a user-defined server with that tag (Q2):
+//
+//   - No server tagged "local": append a DEDICATED synthesised
+//     server, type "local", no detour, prefer_go=false (the
+//     sing-box default; the parsed shape is produced through
+//     parseDNS, never hand-built, so it is exactly the shape
+//     sing-box parsing produces). Final is untouched, no
+//     rules are added, and the server is never the
+//     TransportManager default (only the final server's
+//     transport is). The synthesis is runtime-only: opts is a
+//     fresh parse, and the caller's config value is never
+//     written back.
+//   - A server tagged "local" that IS type "local" with no
+//     detour: reuse it as-is (the user defined their own
+//     bootstrap server; castctl must not shadow it).
+//   - A server tagged "local" of any other type, or with any
+//     detour: fail closed with a config error naming the
+//     profile, the tag, and the offending type/detour. The
+//     tag is reserved for the bootstrap server; a detouring
+//     "local" server cannot serve as a domain_resolver
+//     target without re-entering the loop this fix removes.
+//
+// The returned options are a copy when a server is appended;
+// when a clean user-defined server is reused, opts is
+// returned unchanged. A nil opts is a config error.
+func ensureLocalBootstrapServer(prof *Profile, opts *option.DNSOptions) (*option.DNSOptions, error) {
+	if opts == nil {
+		return nil, newConfigErrorf("profile %q: no dns options: cannot synthesise the local bootstrap server", prof.Name)
+	}
+	for _, srv := range opts.Servers {
+		if srv.Tag != LocalBootstrapServerTag {
+			continue
+		}
+		if srv.Type != "local" {
+			return nil, newConfigErrorf("profile %q: dns server tag %q is type %q, not \"local\": the tag is reserved for the local bootstrap server; rename the server", prof.Name, LocalBootstrapServerTag, srv.Type)
+		}
+		if d := detourOf(srv.Options); d != "" {
+			return nil, newConfigErrorf("profile %q: dns server tag %q is a local server with detour %q: the bootstrap server must have no detour; rename the server or remove the detour", prof.Name, LocalBootstrapServerTag, d)
+		}
+		return opts, nil
+	}
+	parsed, err := parseDNS([]byte(`{"servers":[{"tag":"local","type":"local"}],"final":"local"}`))
+	if err != nil {
+		return nil, err
+	}
+	if len(parsed.Servers) != 1 {
+		return nil, newConfigErrorf("profile %q: local bootstrap synthesis produced %d servers, want 1", prof.Name, len(parsed.Servers))
+	}
+	out := *opts
+	out.Servers = append(append([]option.DNSServerOptions{}, opts.Servers...), parsed.Servers[0])
+	return &out, nil
 }
 
 // defaultDetourForProfile returns the detour tag the synthesised

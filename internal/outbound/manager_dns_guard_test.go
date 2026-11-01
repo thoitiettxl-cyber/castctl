@@ -61,6 +61,27 @@ func TestCreateOutboundDomainServerWithoutDNSRouter(t *testing.T) {
 	}
 }
 
+// TestCreateOutboundDomainServerWithResolverWithoutDNSRouter is
+// the R3 negative control for the local domain_resolver default:
+// an explicit domain_resolver does NOT bypass the F3 guard —
+// with no DNS router registered, creation is still refused.
+// (The default applied by createOutbounds is only ever used
+// after RegisterDNS, so this refusal shape is unchanged.)
+func TestCreateOutboundDomainServerWithResolverWithoutDNSRouter(t *testing.T) {
+	m := newTestManager(t)
+	out := parseOutbound(t, m, `{"type":"http","tag":"proxy","server":"proxy.invalid","server_port":8080,"domain_resolver":"dns1"}`)
+	err := m.CreateOutbound(context.Background(), out.Tag, out.Type, out.Options)
+	if err == nil {
+		t.Fatal("CreateOutbound(domain server + domain_resolver, no DNS router) = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "DNS router") {
+		t.Errorf("CreateOutbound error = %v, want it to name the missing DNS router", err)
+	}
+	if _, ok := m.Outbound("proxy"); ok {
+		t.Error("domain-server outbound exists after refused CreateOutbound")
+	}
+}
+
 // TestCreateOutboundDomainServerRouterRegisteredAfter is Case C:
 // registering a DNS router AFTER the (refused) CreateOutbound does
 // not repair anything — the outbound still does not exist and

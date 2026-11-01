@@ -249,12 +249,14 @@ func defaultBuildRuntime(ctx context.Context, loc *profile.ConfigLocation, prof 
 	// detour resolves by Start time (detour init is lazy).
 	var dnsClient *dns.Client
 	var synthDirectTag string
+	var localServerTag string
 	if single != nil {
 		resolved, err := profile.ResolveProfileDNS(prof, single)
 		if err != nil {
 			return fail(errCode(2, err))
 		}
 		synthDirectTag = resolved.SynthesizedDirectTag
+		localServerTag = resolved.LocalServerTag
 		if resolved.Warning != "" && env != nil {
 			fmt.Fprintln(env.stderr(), resolved.Warning)
 		}
@@ -282,7 +284,7 @@ func defaultBuildRuntime(ctx context.Context, loc *profile.ConfigLocation, prof 
 	}
 
 	// Endpoints and outbounds, detour-first (topological order).
-	if err := createOutbounds(ctx, mgr, single, prof, synthDirectTag); err != nil {
+	if err := createOutbounds(ctx, mgr, single, prof, synthDirectTag, localServerTag); err != nil {
 		return fail(err)
 	}
 
@@ -426,7 +428,7 @@ func SynthesizedDirectOutbound() *option.DirectOutboundOptions {
 	return opts
 }
 
-func createOutbounds(ctx context.Context, mgr *outbound.Manager, single *profile.SingleConfig, prof *profile.Profile, synthDirectTag string) error {
+func createOutbounds(ctx context.Context, mgr *outbound.Manager, single *profile.SingleConfig, prof *profile.Profile, synthDirectTag, localServerTag string) error {
 	created := map[string]bool{}
 	if single != nil {
 		endpoints, err := single.ParsedEndpoints()
@@ -452,6 +454,17 @@ func createOutbounds(ctx context.Context, mgr *outbound.Manager, single *profile
 			return errCode(2, err)
 		}
 		for _, ob := range ordered {
+			// Runtime-only default: a hostname outbound with
+			// no explicit domain_resolver resolves its server
+			// address through the "local" bootstrap server
+			// (see profile.ApplyDomainResolverDefault). The
+			// default is applied here, at creation, never in
+			// parse (identity hashes) and never persisted.
+			// Endpoints are untouched: no WireGuard-endpoint
+			// default (Q3). DNS was registered before this
+			// call, so the "local" transport exists when a
+			// defaulted outbound is created.
+			ob = profile.ApplyDomainResolverDefault(ob, localServerTag)
 			if err := mgr.CreateOutbound(ctx, ob.Tag, ob.Type, ob.Options); err != nil {
 				return errCode(2, err)
 			}
@@ -510,7 +523,10 @@ func createOutbounds(ctx context.Context, mgr *outbound.Manager, single *profile
 			if created[ob.Tag] {
 				return errCode(2, fmt.Errorf("inline outbound tag %q for profile %q is already taken by a config outbound or endpoint; rename the tag", ob.Tag, prof.Name))
 			}
-			if err := mgr.CreateOutbound(ctx, ob.Tag, ob.Type, ob.Options); err != nil {
+			// Same runtime-only domain_resolver default as
+			// for config outbounds above.
+			resolvedOb := profile.ApplyDomainResolverDefault(*ob, localServerTag)
+			if err := mgr.CreateOutbound(ctx, resolvedOb.Tag, resolvedOb.Type, resolvedOb.Options); err != nil {
 				return errCode(2, err)
 			}
 			created[ob.Tag] = true

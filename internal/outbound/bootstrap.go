@@ -22,23 +22,32 @@ import (
 // concept of its own (verified by grep over the sing-box 1.14.4
 // source: no "bootstrap" in dns/, common/dialer/, or adapter/).
 //
-// This is the ONLY exception to the fail-closed invariant, and it is
-// never a fallback for other hostnames: BootstrapLookup is called
-// only from the DNS package's bootstrap substitution, only for the
-// configured DNS server's hostname, and a bootstrap failure is an
-// error, never a silent fallback. The lookup is debug-logged with the
-// hostname and the address count only — never the resolved values —
+// This is one of exactly two system-resolver uses in the Go
+// port, and it is never a fallback for other hostnames:
+// BootstrapLookup is called only from the DNS package's
+// bootstrap substitution, only for the configured DNS
+// server's hostname, and a bootstrap failure is an error,
+// never a silent fallback. The other use is the sing-box
+// "local" DNS transport, which resolves outbound/endpoint
+// server hostnames through the system resolver when an
+// outbound carries no explicit domain_resolver (see
+// profile.ResolveProfileDNS / ApplyDomainResolverDefault).
+// Dial targets are never resolved through the system
+// resolver. The lookup is debug-logged with the hostname
+// and the address count only — never the resolved values —
 // and no secret is ever involved.
 //
 // Fail-closed boundary, precisely: bootstrap applies only to the DNS
 // server's own hostname, resolved once before that server can be
 // used. Every other lookup goes through the configured DNS server
-// and the outbound/detour that server is configured with; DNS
-// failure is an error, and there is no system-resolver fallback for
-// any other host. RECOMMENDATION: configure DNS servers by IP
-// address. An IP-address server needs no bootstrap lookup at all
-// (the DNS package leaves non-domain server addresses untouched),
-// so the system resolver is never consulted.
+// and the outbound/detour that server is configured with, except
+// outbound server hostnames resolved via the "local" transport
+// as above; DNS failure is an error, and there is no
+// system-resolver fallback for dial targets. RECOMMENDATION:
+// configure DNS servers by IP address. An IP-address server
+// needs no bootstrap lookup at all (the DNS package leaves
+// non-domain server addresses untouched), so the system
+// resolver is never consulted for it.
 func BootstrapLookup(ctx context.Context, host string) ([]netip.Addr, error) {
 	return BootstrapLookupWithLogger(ctx, host, slog.Default())
 }
