@@ -59,6 +59,8 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -87,6 +89,10 @@ type ScreencastAvailability func(ctx context.Context, profileName string) (avail
 // HasToken must be true (the command layer fails closed when no
 // token source is configured). DistFS serves the frontend shell;
 // BundleSHA256 is the SHA-256 of the embedded dist/index.html.
+// UIDir, when set, is an on-disk frontend directory served
+// instead of DistFS (see uidir.go); BundleSHA256 is then the
+// hash of the on-disk index.html, supplied by the command
+// layer, and the embedded hash is used only in fallback mode.
 type Deps struct {
 	ConfigDir    string
 	Version      string
@@ -95,6 +101,17 @@ type Deps struct {
 	HasToken     bool
 	DistFS       fs.FS
 	BundleSHA256 string
+	UIDir        string
+	// CookiesFiles, when set, is the list of profile cookies
+	// file paths (as resolved at parse time, absolute). With
+	// UIDir set, checkUIDir rejects a root containing any of
+	// them, so the cookies-exposure rule lives in New() itself
+	// and runs whenever CookiesFiles is supplied; the sole
+	// production caller supplies the profile list, so the
+	// rule is enforced on the production path. Empty
+	// means no cookies-exposure check (tests and callers
+	// without profiles).
+	CookiesFiles []string
 
 	// ImportCookies validates and writes cookies for a profile
 	// through the existing locked writer path, returning whether
@@ -121,6 +138,12 @@ type Server struct {
 // New builds a Server. It fails closed when no token is
 // configured or the frontend filesystem is missing: the server
 // never starts unauthenticated and never serves a partial shell.
+// With UIDir set, the on-disk root must additionally be a
+// directory holding a regular index.html and must not overlap
+// the config directory (B-1: the static shell is
+// unauthenticated, so an overlapping root would serve secrets);
+// a present-but-broken root fails here, never by falling back
+// to the embedded frontend.
 func New(deps Deps) (*Server, error) {
 	if deps.ConfigDir == "" {
 		return nil, errors.New("webui: config directory is required")
@@ -134,9 +157,58 @@ func New(deps Deps) (*Server, error) {
 	if _, err := fs.Stat(deps.DistFS, "index.html"); err != nil {
 		return nil, fmt.Errorf("webui: frontend shell: %w", err)
 	}
+	if deps.UIDir != "" {
+		if err := checkUIDir(deps.ConfigDir, deps.UIDir, deps.CookiesFiles); err != nil {
+			return nil, err
+		}
+	}
 	s := &Server{deps: deps, sessions: newSessionRegistry()}
 	s.handler = s.routes()
 	return s, nil
+}
+
+// UIDirError is a fail-closed ui_dir configuration error
+// from checkUIDir: missing, not a directory, no regular
+// non-symlink index.html, overlapping the config directory,
+// or containing a cookies file. It is a distinct type so
+// callers can map it to exit 2 (configuration) rather than
+// exit 1 (operational startup failure).
+type UIDirError struct{ msg string }
+
+func (e *UIDirError) Error() string { return e.msg }
+
+// checkUIDir validates an on-disk frontend root at startup:
+// a directory, holding a regular non-symlink index.html,
+// resolved against the config directory, not overlapping it
+// in either direction (equal, inside, or ancestor —
+// symlink-resolved), and containing none of the cookies files
+// when any are supplied. The index.html check uses Lstat: a
+// symlink to a regular file must fail here, or the shell path
+// would serve the link target unauthenticated. Error messages
+// name the rule only, never the path.
+func checkUIDir(configDir, uiDir string, cookiesFiles []string) error {
+	root := resolveAgainst(configDir, uiDir)
+	st, err := os.Stat(root)
+	if err != nil || !st.IsDir() {
+		return &UIDirError{"webui: ui_dir is not a readable directory"}
+	}
+	base := resolvePathBestEffort(configDir)
+	if pathWithin(root, base) || pathWithin(base, root) {
+		return &UIDirError{"webui: ui_dir must not overlap the config directory"}
+	}
+	for _, cookiesFile := range cookiesFiles {
+		if cookiesFile == "" {
+			continue
+		}
+		if pathWithin(resolvePathBestEffort(cookiesFile), root) {
+			return &UIDirError{"webui: ui_dir must not contain a cookies file"}
+		}
+	}
+	index, err := os.Lstat(filepath.Join(root, "index.html"))
+	if err != nil || index.Mode()&os.ModeSymlink != 0 || !index.Mode().IsRegular() {
+		return &UIDirError{"webui: ui_dir has no readable index.html"}
+	}
+	return nil
 }
 
 // Handler returns the server's HTTP handler (chi router with
@@ -147,7 +219,7 @@ func (s *Server) routes() http.Handler {
 	r := chi.NewRouter()
 	r.Use(recoverer)
 	r.MethodNotAllowed(methodNotAllowed)
-	r.NotFound(s.serveShell)
+	r.NotFound(s.serveStatic)
 	api := chi.NewRouter()
 	api.Use(s.requireAuth)
 	api.Use(s.apiTimeout)
@@ -191,8 +263,11 @@ func (s *Server) routes() http.Handler {
 	api.Get("/screencast/ws", s.handleScreencastWS)
 	r.Mount("/api/v1", api)
 	// Everything else is the SPA shell (hash routing): the shell
-	// itself carries no secrets and needs no token.
-	r.Get("/*", s.serveShell)
+	// itself carries no secrets and needs no token. With UIDir
+	// set, static files under the on-disk root are served here
+	// (GET only, contained, no listing); anything else falls
+	// back to the shell.
+	r.Get("/*", s.serveStatic)
 	return r
 }
 

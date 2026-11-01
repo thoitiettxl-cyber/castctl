@@ -7,11 +7,13 @@ package commands
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -174,6 +176,35 @@ func cmdWebUIServe(ctx context.Context, env *Env, g *globalOpts, args []string) 
 	}
 	tokenHash := sha256.Sum256([]byte(token))
 
+	// Resolve the on-disk frontend root, if configured. A
+	// present-but-broken ui_dir fails closed (exit 2) here,
+	// before the server starts; only an absent key falls back
+	// to the embedded frontend. The cookies-exposure rule is
+	// enforced inside webui.New via Deps.CookiesFiles when
+	// the list is supplied; this caller supplies it below.
+	uiDir, err := resolveWebUIUIDir(webuiCfg, loc.ConfigDir)
+	if err != nil {
+		return err
+	}
+	var cookiesFiles []string
+	for _, p := range single.Profiles {
+		if p != nil && p.CookiesFile != "" {
+			cookiesFiles = append(cookiesFiles, p.CookiesFile)
+		}
+	}
+	bundleHash := webuiassets.BundleSHA256()
+	if uiDir != "" {
+		// The status bundle hash is the on-disk shell's hash
+		// while ui_dir is active; the embedded hash is used
+		// only in fallback mode.
+		data, err := os.ReadFile(filepath.Join(uiDir, "index.html"))
+		if err != nil {
+			return errCodef(2, "webui serve: ui_dir has no readable index.html")
+		}
+		sum := sha256.Sum256(data)
+		bundleHash = hex.EncodeToString(sum[:])
+	}
+
 	srv, err := webui.New(webui.Deps{
 		ConfigDir:           loc.ConfigDir,
 		Version:             versionString(),
@@ -181,13 +212,19 @@ func cmdWebUIServe(ctx context.Context, env *Env, g *globalOpts, args []string) 
 		TokenHash:           tokenHash,
 		HasToken:            true,
 		DistFS:              webuiassets.FS(),
-		BundleSHA256:        webuiassets.BundleSHA256(),
+		BundleSHA256:        bundleHash,
+		UIDir:               uiDir,
+		CookiesFiles:        cookiesFiles,
 		ImportCookies:       webuiImportCookies(loc, env),
 		RestoreCookies:      webuiRestoreCookies(loc, env),
 		ScreencastAvailable: webuiScreencastAvailable(loc),
 		ScreencastStarter:   webuiScreencastStarter(loc, env),
 	})
 	if err != nil {
+		var uidErr *webui.UIDirError
+		if errors.As(err, &uidErr) {
+			return errCodef(2, "webui serve: %v", uidErr)
+		}
 		return errCodef(1, "webui serve: %v", err)
 	}
 	ln, err := net.Listen("tcp", listen)
@@ -218,6 +255,49 @@ func cmdWebUIServe(ctx context.Context, env *Env, g *globalOpts, args []string) 
 		// context to exit 130.
 		return ctx.Err()
 	}
+}
+
+// resolveWebUIUIDir resolves a configured ui_dir against
+// configDir and validates it on disk. It returns "" when no
+// ui_dir is configured (embedded fallback). A present-but-broken
+// value — missing, not a directory, no regular index.html, a
+// symlinked index.html, or overlapping the config directory —
+// fails closed (exit 2) with a fixed rule-only message: the
+// value is never echoed, and a broken directory must never
+// silently fall back to the embedded frontend (that would hide
+// a misconfiguration behind a stale UI). The root is
+// canonicalised (EvalSymlinks) so a symlink into the config
+// tree is caught here, before serving.
+func resolveWebUIUIDir(cfg *profile.WebUIConfig, configDir string) (string, error) {
+	if cfg == nil || strings.TrimSpace(cfg.UIDir) == "" {
+		return "", nil
+	}
+	resolved := strings.TrimSpace(cfg.UIDir)
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(configDir, resolved)
+	}
+	resolved = filepath.Clean(resolved)
+	canonical, err := filepath.EvalSymlinks(resolved)
+	if err != nil {
+		return "", errCodef(2, "webui serve: ui_dir is not a readable directory")
+	}
+	resolved = canonical
+	st, err := os.Stat(resolved)
+	if err != nil || !st.IsDir() {
+		return "", errCodef(2, "webui serve: ui_dir is not a readable directory")
+	}
+	canonicalConfig, err := filepath.EvalSymlinks(configDir)
+	if err != nil {
+		canonicalConfig = filepath.Clean(configDir)
+	}
+	if profile.DirOverlaps(canonicalConfig, resolved) {
+		return "", errCodef(2, "webui serve: ui_dir must not overlap the config directory")
+	}
+	index, err := os.Lstat(filepath.Join(resolved, "index.html"))
+	if err != nil || index.Mode()&os.ModeSymlink != 0 || !index.Mode().IsRegular() {
+		return "", errCodef(2, "webui serve: ui_dir has no readable index.html")
+	}
+	return resolved, nil
 }
 
 // resolveWebUIListen computes the effective listen address:

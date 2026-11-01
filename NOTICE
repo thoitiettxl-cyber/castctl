@@ -155,3 +155,15 @@ mistake these influences for vendored code.
    handshake pattern, as implemented through the flynn/noise library
    listed in (b); studied, no code taken; no specification text
    copied. License name: not applicable (specification, not code).
+5. SB-T (github.com/thoitiettxl-cyber/SB-T,
+   commit c03b73d6577505c5e1e947d760a8b0638202cab5) — KernelSU
+   module WebUI pattern: the `box.webui` JSON envelope shape,
+   the `box.want` desired-state marker semantics, the vendored
+   on-disk dashboard (`dashboard.path = "ui"`), and the
+   `kernelsu` exec-bridge call pattern: studied and adapted
+   (reimplemented in `module/scripts/castctl-ctl` and
+   `module/webroot/index.html`), no SB-T code taken, with
+   stated divergences (boot gating on the want marker,
+   single-file webroot, UI preservation via explicit update).
+   License name: Apache-2.0. Full mapping in
+   docs/provenance.md §12.

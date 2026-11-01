@@ -500,12 +500,79 @@ Behaviour:
 
 Optional. Absent means no web UI: `castctl webui serve` fails
 closed (exit 2) and nothing listens. The block accepts exactly
-two keys:
+three keys:
 
 | Key | Value |
 |---|---|
 | `listen` | string: loopback `host:port` the server binds (default `127.0.0.1:8317` when the block is present without `listen`) |
 | `token` | string: the management token, write-only (see below) |
+| `ui_dir` | string: directory of static frontend files served instead of the embedded frontend (see below) |
+
+`ui_dir` (optional) names a directory of public static files
+(HTML/JS/CSS/assets) that `webui serve` serves WITHOUT auth in
+place of the embedded single-file frontend. A relative value
+resolves against the directory holding `config.json`. When the
+key is absent, the embedded frontend is served byte-identical;
+when the key is present but broken (missing, not a directory,
+or without a regular `index.html`), `webui serve` fails closed
+(exit 2) instead of silently falling back to the embedded
+frontend. A symlinked `index.html` is refused at startup
+(exit 2) and per request on the shell path (fixed 404) — any
+symlink, even one whose target stays inside the root —
+because the shell path must only ever serve the regular file
+startup validated. The asset path refuses it too: the
+resolved path is Lstat-checked before opening and the
+opened file must be the file the Lstat saw, so a symlink
+swapped in after resolution is refused (fixed 404), and
+dotfiles are re-checked on the resolved root-relative path,
+so a symlink resolving to a dotfile inside the root is
+refused even when the request path named no dotfile.
+Steady-state symlinks inside the root are resolved by
+containment and served only when their target is a regular
+non-dotfile inside the root. A missing file under a valid `ui_dir` falls back to
+the on-disk shell (SPA hash routing). Serving is GET-only, with
+no directory listing, no dotfiles, and symlink-aware
+containment re-checked per request: a path escaping the root
+through `..` or a symlink gets a fixed 404, and only regular
+files are served. `/api/v1` keeps precedence and its Bearer
+gate: an API path never reads a disk file. The `/api/v1/status`
+`bundle_sha256` is the SHA-256 of the on-disk `index.html`
+while `ui_dir` is active, and the embedded hash only in
+fallback mode.
+
+`ui_dir` must never overlap the config directory — equal to,
+inside, or an ancestor of it — and must not contain any
+profile's cookies file: the static shell is unauthenticated,
+so an overlapping directory would serve `config.json` and
+cookies to anyone on loopback with no token. The rule is
+enforced at parse time (lexical), at serve time (symlink
+resolved), and at API save time for new or changed values
+(an authenticated user must not be able to `PUT /config` a
+`ui_dir` over the config tree and then fetch the secrets
+unauthenticated). Overlap checks compare absolutized paths,
+so a relative `--config` path behaves exactly like the
+equivalent absolute path. `ui_dir` is not a secret and is shown
+verbatim in redacted config views. The on-disk directory is
+trusted input: populate it only from verified module installs
+or explicit updates, never point it at a user-writable or
+shared directory. Its content is trusted same-origin code —
+the frontend keeps the token in `sessionStorage`, so a
+malicious file served from `ui_dir` could read it: serve only
+content from a trusted source. A check-then-open TOCTOU residual remains:
+a symlink swapped into an intermediate path component between the
+per-request containment resolution and the file open could redirect
+one read (the final component is Lstat/SameFile-guarded on both the
+asset and shell paths, so a final-component swap is refused instead
+of served). The window is one open call.
+Hardlinks are undetectable by Lstat/SameFile: a hardlinked
+`index.html` (the same inode as its target) serves the target's
+bytes, because a hardlink is the same file, not a redirect.
+Creating one needs `link()` in the `ui_dir` on the same
+filesystem plus ownership of, or read/write access to, the
+target — a remote attacker reaching only the HTTP API cannot
+create filesystem links, and a principal able to hardlink the
+cookies file already reads it or is root. Treat `ui_dir` as
+trusted input (above).
 
 Loopback-only is enforced at parse time: `listen` must be a
 bare `host:port` with a loopback host (`127.0.0.0/8`, `::1`, or
@@ -542,6 +609,25 @@ preserved.
 Remote access is loopback-only by design: reach the server from
 another device through an SSH tunnel forwarding the loopback
 port, never by binding a non-loopback address.
+
+### Sing-box mapping (names kept)
+
+The names `ui_dir` and `token` are kept (Boss decision
+2026-11-01): they were approved at Gate 2 and shipped in
+PR #20 / v0.7.0, so renaming here would be a breaking
+change outside this module PR's scope. Their semantics
+follow sing-box's Clash API
+([Clash API](https://sing-box.sagernet.org/configuration/experimental/clash-api/)):
+
+- `ui_dir` = `clash_api.external_ui` semantics: a relative
+  path to the configuration directory or an absolute path
+  to a directory of static web resources.
+- `token` = `clash_api.secret` semantics (Bearer
+  authentication), but REQUIRED in castctl — deliberately
+  stricter than sing-box's optional secret.
+- No auto-download: there is no equivalent of
+  `external_ui_download_url`; the UI ships in the
+  KernelSU module and is replaced only by explicit update.
 
 ## The `dns` section — INTERIM, GLOBAL, COMPAT-ONLY
 

@@ -151,6 +151,9 @@ func (s *Server) saveGuarded(load *configLoad, expectedSHA string, checkExpected
 	// doc aliases stored, so the comparison below needs the
 	// pre-mutation strings.
 	storedCookies := profileCookiesFiles(stored)
+	// Snapshot the stored ui_dir the same way: only a new or
+	// changed value is re-checked below.
+	storedUIDir, storedUIDirHas := webUIUIDirValue(stored)
 	if err := mutate(doc); err != nil {
 		return "", err
 	}
@@ -176,6 +179,20 @@ func (s *Server) saveGuarded(load *configLoad, expectedSHA string, checkExpected
 			if err := rejectNewCookiesFile(s.deps.ConfigDir, value); err != nil {
 				return "", err
 			}
+		}
+	}
+	// B-1 save-time guard (same "only new or changed values"
+	// pattern): a ui_dir the save introduces must not overlap
+	// the config directory or contain a cookies file. An
+	// unchanged stored value passes through here, but the
+	// full-document parse below rejects a lexically
+	// overlapping value, and serve-time resolution rejects
+	// any overlapping value (including symlink-only ones)
+	// before a file is served — so a dangerous stored value
+	// can never reach the static shell through the API.
+	if mergedUIDir, ok := webUIUIDirValue(doc); ok && mergedUIDir != "" && (!storedUIDirHas || storedUIDir != mergedUIDir) {
+		if err := rejectNewUIDir(s.deps.ConfigDir, mergedUIDir, profileCookiesFiles(doc)); err != nil {
+			return "", err
 		}
 	}
 	if err := checkWhitespaceKeys(doc, ""); err != nil {

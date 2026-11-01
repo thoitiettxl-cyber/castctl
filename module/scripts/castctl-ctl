@@ -10,12 +10,20 @@
 # the final arbiter; the probe only decides which verified commands
 # to attempt), bounded waits everywhere (flock, readiness, stop
 # escalation), a lifetime bound on each child, and log rotation.
-# Two services are managed, each with its own PID file and log:
-# telegram run (telegram object block) and keeper run (non-empty
-# keeper array block; verified against the 8cb361f tree). The web
-# UI has no command or config block on this HEAD and is never
-# started. No plugin discovery or loading of any kind:
-# DATA_DIR/plugins exists only as a reserved, preserved directory.
+# Three services are managed, each with its own PID file and log:
+# telegram run (telegram object block), keeper run (non-empty
+# keeper array block; verified against the 8cb361f tree), and
+# webui serve (webui object block; the web UI server, loopback
+# only). The web UI is started only when a webui block exists;
+# its token is read by castctl itself from the 0600 config (or
+# the ambient CASTCTL_WEBUI_KEY) and is never passed, echoed, or
+# logged by this controller. No plugin discovery or loading of
+# any kind: DATA_DIR/plugins exists only as a reserved,
+# preserved directory. The persistent want marker
+# (state/want, existence-only) records the user's desired
+# on/off state across reboots; boot/watchdog starts honour it,
+# and the KernelSU WebUI page talks to this controller through
+# the `webui-json` subcommand (fixed-shape JSON envelopes).
 #
 # Test-only environment overrides (never set on the device; all are
 # documented in module/docs/ksu-module.md):
@@ -45,10 +53,14 @@ BACKUP_DIR=$DATA_DIR/backups
 CONTROL_DIR=$DATA_DIR/.controller
 PID_FILE=$RUN_DIR/castctl.pid
 KEEPER_PID_FILE=$RUN_DIR/keeper.pid
+WEBUI_PID_FILE=$RUN_DIR/webui.pid
+STATE_DIR=$DATA_DIR/state
+WANT_FILE=$STATE_DIR/want
 LOCK_FILE=${CASTCTL_LIFECYCLE_LOCK:-${DATA_DIR}.lifecycle.lock}
 ENABLED_FILE=$RUN_DIR/enabled
 CORE_LOG=$LOG_DIR/castctl.log
 KEEPER_LOG=$LOG_DIR/keeper.log
+WEBUI_LOG=$LOG_DIR/webui.log
 CTL_LOG=$LOG_DIR/controller.log
 
 # A relative data dir would resolve against the caller's cwd
@@ -190,23 +202,27 @@ prepare_mutable_dirs() {
   # defeats current-target validation (B2). run/tmp is guarded
   # too: it is created here and exported as the child's TMPDIR,
   # so a planted link would redirect the child's temp files.
+  # state/ holds the persistent want marker (see want_exists):
+  # a symlinked state/ would redirect the desired-state record
+  # outside the data tree (F1/F5: every intermediate component
+  # of every guarded path is refused, and state/ is a leaf).
   for _guard_dir in "$DATA_DIR" "$DATA_DIR/releases" "$DATA_DIR/config" "$PROFILES_DIR" "$PLUGIN_ROOT" "$PLUGIN_ROOT/linux" "$PLUGIN_DIR" \
-    "$RUN_DIR" "$RUN_DIR/tmp" "$LOG_DIR" "$BACKUP_DIR" "$CONTROL_DIR"; do
+    "$RUN_DIR" "$RUN_DIR/tmp" "$LOG_DIR" "$BACKUP_DIR" "$CONTROL_DIR" "$STATE_DIR"; do
     [ ! -L "$_guard_dir" ] || die "data directory must not be a symlink: $_guard_dir"
   done
   mkdir -p "$DATA_DIR" "$DATA_DIR/config" "$PROFILES_DIR" \
     "$PLUGIN_ROOT" "$PLUGIN_DIR" "$RUN_DIR" "$LOG_DIR" "$BACKUP_DIR" \
-    "$DATA_DIR/releases" "$RUN_DIR/tmp" "$CONTROL_DIR"
+    "$DATA_DIR/releases" "$RUN_DIR/tmp" "$CONTROL_DIR" "$STATE_DIR"
   chmod 0711 "$DATA_DIR"
   chmod 0755 "$DATA_DIR/releases"
   chmod 0700 "$CONTROL_DIR"
   chmod 0700 "$DATA_DIR/config" "$PROFILES_DIR" "$PLUGIN_ROOT" "$PLUGIN_DIR" \
-    "$RUN_DIR" "$RUN_DIR/tmp" "$LOG_DIR" "$BACKUP_DIR"
+    "$RUN_DIR" "$RUN_DIR/tmp" "$LOG_DIR" "$BACKUP_DIR" "$STATE_DIR"
   if [ "$(bb id -u)" = 0 ]; then
     chown 0:0 "$DATA_DIR" "$DATA_DIR/releases" "$CONTROL_DIR" 2>/dev/null || true
-    bb find "$DATA_DIR/config" "$RUN_DIR" "$LOG_DIR" \
+    bb find "$DATA_DIR/config" "$RUN_DIR" "$LOG_DIR" "$STATE_DIR" \
       -type d -exec chmod 0700 {} \; 2>/dev/null || true
-    bb find "$DATA_DIR/config" "$RUN_DIR" "$LOG_DIR" \
+    bb find "$DATA_DIR/config" "$RUN_DIR" "$LOG_DIR" "$STATE_DIR" \
       -type f -exec chmod 0600 {} \; 2>/dev/null || true
   fi
 }
@@ -252,10 +268,11 @@ service_running() {
   pid_alive "$pid" && pid_matches "$pid" "${2:-}"
 }
 
-# is_running: any managed service is alive (telegram or keeper).
+# is_running: any managed service is alive (telegram, keeper, or webui).
 is_running() {
   service_running "$PID_FILE" "telegram run" && return 0
-  service_running "$KEEPER_PID_FILE" "keeper run"
+  service_running "$KEEPER_PID_FILE" "keeper run" && return 0
+  service_running "$WEBUI_PID_FILE" "webui serve"
 }
 
 # Scan /proc for processes whose cmdline contains the module binary
@@ -390,13 +407,337 @@ has_top_empty_array() { probe_top_key "$1" "$2" empty_array; }
 # has_top_key FILE KEY: top-level key present with any value.
 has_top_key() { probe_top_key "$1" "$2" any; }
 
+# probe_webui_listen FILE: print the decoded string value of the
+# "listen" key inside the top-level "webui" object, if exactly one
+# such key exists and its value is a string. Exit 0 with the value
+# on stdout; exit 2 when the key is absent (the caller falls back
+# to the default listen); exit 1 when the key is present but the
+# value is not a string, is duplicated, the "webui" key itself is
+# duplicated, or the JSON is unbalanced/unterminated. The scan
+# mirrors probe_top_key's discipline: depth-2 keys only inside
+# the "webui" object, strings (with escapes, including \uXXXX)
+# skipped/decoded, nested keys ignored, no file contents printed
+# except the single extracted value (which the caller validates
+# before any use; an unparseable value yields no URL).
+probe_webui_listen() {
+  _probe_file=$1
+  [ -f "$_probe_file" ] || return 1
+  bb awk '
+    BEGIN { depth = 0; bdepth = 0; instr = 0; esc = 0; vinstr = 0; vesc = 0; key = ""; val = ""; lastkey = ""; lastkey2 = ""; state = "seek"; count = 0; webui_count = 0; bad = 0; capturing = 0; havestr = 0; in_webui = 0 }
+    {
+      line = $0
+      n = length(line)
+      for (i = 1; i <= n; i++) {
+        c = substr(line, i, 1)
+        if (instr) {
+          if (esc) {
+            if (c == "u") {
+              hexpart = substr(line, i + 1, 4)
+              code = -1
+              if (length(hexpart) == 4) {
+                code = 0
+                for (h = 1; h <= 4; h++) {
+                  d = substr(hexpart, h, 1)
+                  v = index("0123456789abcdefABCDEF", d)
+                  if (v == 0) { code = -1; break }
+                  if (v > 16) { v = v - 6 }
+                  code = code * 16 + (v - 1)
+                }
+              }
+              if (code >= 0 && code < 128) { key = key sprintf("%c", code); i += 4 }
+              else if (code >= 128) { key = key "?"; i += 4 }
+              else { key = key "u" }
+            } else { key = key c }
+            esc = 0
+          }
+          else if (c == "\\") { esc = 1 }
+          else if (c == "\"") {
+            instr = 0
+            if (state == "colon") { state = "seek" }
+            else if (depth == 1 && bdepth == 0) {
+              lastkey = key; state = "afterkey"
+              if (key == "webui") { webui_count++ }
+            }
+            else if (depth == 2 && bdepth == 0 && in_webui) {
+              lastkey2 = key; state = "afterkey"
+              if (key == "listen") { count++ }
+            }
+          } else { key = key c }
+          continue
+        }
+        if (vinstr) {
+          if (vesc) {
+            if (c == "u") {
+              hexpart = substr(line, i + 1, 4)
+              code = -1
+              if (length(hexpart) == 4) {
+                code = 0
+                for (h = 1; h <= 4; h++) {
+                  d = substr(hexpart, h, 1)
+                  v = index("0123456789abcdefABCDEF", d)
+                  if (v == 0) { code = -1; break }
+                  if (v > 16) { v = v - 6 }
+                  code = code * 16 + (v - 1)
+                }
+              }
+              if (capturing) {
+                if (code >= 0 && code < 128) { val = val sprintf("%c", code); i += 4 }
+                else if (code >= 128) { val = val "?"; i += 4 }
+                else { val = val "u" }
+              } else if (code >= 0) { i += 4 }
+            } else {
+              if (capturing) {
+                if (c == "n") { val = val sprintf("%c", 10) }
+                else if (c == "t") { val = val sprintf("%c", 9) }
+                else if (c == "r") { val = val sprintf("%c", 13) }
+                else if (c == "b") { val = val sprintf("%c", 8) }
+                else if (c == "f") { val = val sprintf("%c", 12) }
+                else { val = val c }
+              }
+            }
+            vesc = 0
+          }
+          else if (c == "\\") { vesc = 1 }
+          else if (c == "\"") {
+            vinstr = 0
+            if (capturing) { havestr = 1 }
+            capturing = 0
+            state = "seek"
+          } else {
+            if (capturing) { val = val c }
+          }
+          continue
+        }
+        if (c == "\"") {
+          if (state == "colon") {
+            if (depth == 2 && bdepth == 0 && in_webui && lastkey2 == "listen") {
+              capturing = 1; val = ""
+            } else { capturing = 0 }
+            vinstr = 1; vesc = 0; continue
+          }
+          instr = 1; esc = 0; key = ""; continue
+        }
+        if (c == "{") {
+          if (state == "colon") {
+            if (depth == 1 && bdepth == 0 && lastkey == "webui") { in_webui = 1 }
+            if (depth == 2 && bdepth == 0 && in_webui && lastkey2 == "listen") { bad = 1 }
+            state = "seek"
+          } else if (state == "afterkey") { state = "seek" }
+          depth++
+          continue
+        }
+        if (c == "}") {
+          if (state == "colon") {
+            if (depth == 2 && bdepth == 0 && in_webui && lastkey2 == "listen") { bad = 1 }
+            state = "seek"
+          }
+          depth--; if (depth < 0) { depth = 0 }
+          if (depth < 2) { in_webui = 0 }
+          state = "seek"; continue
+        }
+        if (state == "colon") {
+          if (c == " " || c == "\t" || c == "\r") { continue }
+          if (depth == 2 && bdepth == 0 && in_webui && lastkey2 == "listen") { bad = 1 }
+          state = "seek"
+          continue
+        }
+        if (c == "[") { if (state == "seek") { bdepth++ }; continue }
+        if (c == "]") { if (state == "seek" && bdepth > 0) { bdepth-- }; continue }
+        if (state == "afterkey") {
+          if (c == ":") { state = "colon" }
+          else if (c == " " || c == "\t" || c == "\r") { }
+          else { state = "seek" }
+          continue
+        }
+      }
+    }
+    END {
+      if (count == 0) { exit 2 }
+      if (bad || !havestr || count != 1 || webui_count != 1 || depth != 0 || bdepth != 0 || instr || vinstr) { exit 1 }
+      printf "%s", val
+      exit 0
+    }
+  ' "$_probe_file"
+}
+
+# validate_listen_value: read a listen string on stdin, print the
+# normalised host:port on stdout, exit 0; exit 1 (silent) when
+# the value is not a bare loopback host:port. Mirrors Go
+# validateWebUIListen (internal/profile/webui.go): no URL, no
+# userinfo/path/query/fragment, loopback host (127.0.0.0/8 as a
+# dotted quad, [::1], or localhost, case-insensitive), explicit
+# port 1-65535. Deliberately stricter than Go in three display-only
+# ways (each fails closed to "no URL", never to a wrong URL):
+# expanded IPv6 loopback spellings (0:0:...:1) are rejected,
+# duplicate keys are rejected by probe_webui_listen (Go takes
+# last-wins), and a leading + on the port is rejected.
+validate_listen_value() {
+  bb awk '
+    { if (NR == 1) { s = $0 } else { s = s "\n" $0 } }
+    END {
+      while (substr(s, 1, 1) == " " || substr(s, 1, 1) == "\t" || substr(s, 1, 1) == "\r") { s = substr(s, 2) }
+      while (s != "" && (substr(s, length(s), 1) == " " || substr(s, length(s), 1) == "\t" || substr(s, length(s), 1) == "\r")) { s = substr(s, 1, length(s) - 1) }
+      if (index(s, "://")) { exit 1 }
+      if (substr(s, 1, 1) == "[") {
+        rb = index(s, "]")
+        if (rb == 0) { exit 1 }
+        host = substr(s, 2, rb - 2)
+        rest = substr(s, rb + 1)
+        if (substr(rest, 1, 1) != ":") { exit 1 }
+        port = substr(rest, 2)
+        if (host != "::1") { exit 1 }
+        hostout = "[::1]"
+      } else {
+        c1 = index(s, ":")
+        if (c1 == 0) { exit 1 }
+        if (index(substr(s, c1 + 1), ":") > 0) { exit 1 }
+        host = substr(s, 1, c1 - 1); port = substr(s, c1 + 1)
+        if (host == "" || port == "") { exit 1 }
+        if (index(host, "@") || index(host, "/") || index(host, "?") || index(host, "#") || index(host, " ")) { exit 1 }
+        lower = ""
+        for (i = 1; i <= length(host); i++) {
+          ch = substr(host, i, 1)
+          o = index("ABCDEFGHIJKLMNOPQRSTUVWXYZ", ch)
+          if (o > 0) { ch = substr("abcdefghijklmnopqrstuvwxyz", o, 1) }
+          lower = lower ch
+        }
+        if (lower == "localhost") { hostout = "localhost" }
+        else {
+          n = split(host, oct, ".")
+          if (n != 4) { exit 1 }
+          if (oct[1] != "127") { exit 1 }
+          for (k = 1; k <= 4; k++) {
+            o = oct[k]
+            if (length(o) == 0 || length(o) > 3) { exit 1 }
+            if (length(o) > 1 && substr(o, 1, 1) == "0") { exit 1 }
+            for (j = 1; j <= length(o); j++) {
+              if (index("0123456789", substr(o, j, 1)) == 0) { exit 1 }
+            }
+            if ((o + 0) > 255) { exit 1 }
+          }
+          hostout = host
+        }
+      }
+      if (length(port) == 0) { exit 1 }
+      for (j = 1; j <= length(port); j++) {
+        if (index("0123456789", substr(port, j, 1)) == 0) { exit 1 }
+      }
+      p = port + 0
+      if (p < 1 || p > 65535) { exit 1 }
+      print hostout ":" p
+    }'
+}
+
+# webui_listen_value: the validated listen host:port for the
+# config's webui block, or the default when the block has no
+# listen key. Prints nothing and fails when the block is absent
+# or its listen value is unparseable: an unparseable value must
+# never fall back to the default (the user wrote an address;
+# showing the default URL for it would be a lie).
+webui_listen_value() {
+  [ -f "$CONFIG" ] || return 1
+  has_top_block "$CONFIG" webui || return 1
+  raw=$(probe_webui_listen "$CONFIG" 2>/dev/null)
+  rc=$?
+  if [ "$rc" = 2 ]; then
+    printf '%s\n' "127.0.0.1:8317"
+    return 0
+  fi
+  [ "$rc" = 0 ] || return 1
+  printf '%s' "$raw" | validate_listen_value || return 1
+}
+
+# webui_url_if_running: print http://<listen>/ only when the
+# webui service is actually running (PID file + cmdline match).
+# A URL for a stopped service must never be printed or opened:
+# the port may belong to something else by then.
+webui_url_if_running() {
+  service_running "$WEBUI_PID_FILE" "webui serve" || return 1
+  listen=$(webui_listen_value) || return 1
+  printf 'http://%s/\n' "$listen"
+}
+
+# webui_probe: print "<result> <tool>" for an advisory GET of the
+# static shell path only (http://<listen>/, never any /api/v1
+# path), bounded to 10 s. result is ok (HTTP 200), fail
+# (reachable but not 200, or unreachable), or unknown (no probe
+# tool, or webui not running). Advisory only: never starts or
+# stops anything. Tool availability on the device (curl/wget in
+# the module PATH) is [NEEDS-MEASUREMENT].
+webui_probe() {
+  url=$(webui_url_if_running 2>/dev/null) || { printf 'unknown none\n'; return 0; }
+  if command -v curl >/dev/null 2>&1; then
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url" 2>/dev/null || true)
+    if [ "$code" = 200 ]; then printf 'ok curl\n'; else printf 'fail curl\n'; fi
+    return 0
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    if wget -q -O /dev/null -T 10 -t 1 "$url" 2>/dev/null; then printf 'ok wget\n'; else printf 'fail wget\n'; fi
+    return 0
+  fi
+  printf 'unknown none\n'
+}
+
+# webui_ui_dir_refused: true (exit 0) when the webui
+# service must not start because the shipped UI tree is a
+# symlink. CONDITIONAL guard only: callers apply it when a
+# webui block is present (gating). With no webui block, a
+# symlinked ui/ must never block telegram/keeper starts — the
+# controller guard list does not refuse ui/ unconditionally;
+# customize.sh and ui-update do. A ui_dir pointing elsewhere
+# is enforced by the Go server's own startup check (a
+# symlinked index.html fails closed, exit 2); this guard
+# covers the shipped default location, $DATA_DIR/ui.
+webui_ui_dir_refused() {
+  [ -L "$DATA_DIR/ui" ] && return 0
+  [ -L "$DATA_DIR/ui/index.html" ] && return 0
+  return 1
+}
+
+# --- Persistent want marker (desired on/off across reboots) ---
+# state/want is existence-only: its content is never read,
+# parsed, or logged. Fresh install default is OFF (no marker)
+# until the user presses Action (or webui-json start) once.
+# The KernelSU module disable switch still wins everywhere:
+# service.sh checks `disable` before the marker, and the
+# backend refuses start/restart while `disable` exists.
+
+# want_exists: the marker exists and is not a symlink. A symlink
+# is treated as absent (fail-safe OFF): a planted link must never
+# fake a desired state, and a torn write leaves no marker.
+want_exists() {
+  [ -f "$WANT_FILE" ] && [ ! -L "$WANT_FILE" ]
+}
+
+# set_want: record desired=on atomically (temp file + rename)
+# under the lifecycle lock (callers run locked). Refuses a
+# symlinked marker or staging path. No fsync: on a hard crash
+# the rename may not survive, which fails safe (stays OFF).
+set_want() {
+  [ ! -L "$WANT_FILE" ] || { log ERROR "want marker must not be a symlink"; return 1; }
+  tmp_want=$STATE_DIR/want.tmp.$$
+  { [ ! -e "$tmp_want" ] && [ ! -L "$tmp_want" ]; } || { log ERROR "want staging path is unsafe"; return 1; }
+  : >"$tmp_want" || { log ERROR "unable to stage want marker"; return 1; }
+  chmod 0600 "$tmp_want"
+  bb mv -f "$tmp_want" "$WANT_FILE" || { log ERROR "unable to record want marker"; rm -f "$tmp_want"; return 1; }
+  chmod 0600 "$WANT_FILE" 2>/dev/null || true
+  return 0
+}
+
+# clear_want: record desired=off by removing the marker and the
+# legacy enabled marker. rm -f on a symlink removes the link
+# itself, never its target.
+clear_want() {
+  rm -f "$WANT_FILE" "$ENABLED_FILE"
+}
+
 # Gating summary for status/doctor logs: presence only, no values.
 # keeper states: present (non-empty array, startable), empty
 # ("keeper": [] — valid, off), malformed (key present, neither an
 # object... a non-array shape the parser rejects), absent.
 # telegram states: present (object), malformed (key present, not
-# an object), absent. webui: present (any shape — no webui key
-# exists on this HEAD, so any presence is unparseable), absent.
+# an object), absent. webui states mirror telegram: present
+# (object), malformed (key present, not an object), absent.
 gating_summary() {
   if [ ! -f "$CONFIG" ]; then
     printf 'config: missing\n'
@@ -412,7 +753,10 @@ gating_summary() {
     has_top_nonempty_array "$CONFIG" keeper && keeper=present
     has_top_empty_array "$CONFIG" keeper && keeper=empty
   fi
-  has_top_key "$CONFIG" webui && webui=present
+  if has_top_key "$CONFIG" webui; then
+    webui=malformed
+    has_top_block "$CONFIG" webui && webui=present
+  fi
   printf 'config: telegram=%s keeper=%s webui=%s\n' "$telegram" "$keeper" "$webui"
 }
 
@@ -468,7 +812,7 @@ runtime_check() {
   runtime_paths
   validate_current_target || return 1
   for required in "$LOADER" "$BINARY" "$CA_FILE" "$RUNTIME_VERSION" \
-    "$LIB_DIR/libc.so.6" "$LIB_DIR/libdl.so.2" "$LIB_DIR/libresolv.so.2" \
+    "$LIB_DIR/libc.so.6" "$LIB_DIR/libresolv.so.2" \
     "$LIB_DIR/libpthread.so.0"; do
     [ -f "$required" ] || { log ERROR "runtime file missing"; return 1; }
   done
@@ -588,13 +932,15 @@ stop_one() {
 }
 
 # stop_process REMOVE_INTENT: stop every managed service and drop
-# the enabled marker (unless REMOVE_INTENT is 0, for restart).
+# the desired-state markers (want + enabled) unless REMOVE_INTENT
+# is 0, for restart (which preserves the desired state).
 stop_process() {
   remove_intent=${1:-1}
-  [ "$remove_intent" = 0 ] || rm -f "$ENABLED_FILE"
+  [ "$remove_intent" = 0 ] || clear_want
   failed=0
   stop_one "$PID_FILE" "telegram run" "castctl telegram" || failed=1
   stop_one "$KEEPER_PID_FILE" "keeper run" "castctl keeper" || failed=1
+  stop_one "$WEBUI_PID_FILE" "webui serve" "castctl webui" || failed=1
   [ "$failed" = 0 ] || return 1
   set_description "Stopped | castctl"
   return 0
@@ -723,15 +1069,20 @@ start_one() {
 start_locked() {
   mode=${1:-manual}
   prepare_mutable_dirs
+  # Boot/watchdog starts honour the persistent want marker: no
+  # marker means the user stopped the module (or never started
+  # it), so a reboot must not resurrect it. The check runs under
+  # the lifecycle lock (start_locked always runs locked) and the
+  # no-op writes nothing — no enabled marker, no start.
+  if [ "$mode" = boot ] || [ "$mode" = watchdog ]; then
+    want_exists || return 0
+  fi
   runtime_check || return 1
 
   [ -f "$CONFIG" ] || { log ERROR "config missing; nothing to start"; return 1; }
-  if has_top_key "$CONFIG" webui; then
-    log ERROR "config carries a webui key this castctl build cannot parse (no webui block exists on this HEAD); no service started (see item 2)"
-    return 1
-  fi
   telegram_wanted=0
   keeper_wanted=0
+  webui_wanted=0
   if has_top_key "$CONFIG" telegram; then
     if has_top_block "$CONFIG" telegram; then
       telegram_wanted=1
@@ -748,14 +1099,31 @@ start_locked() {
       log WARNING "keeper key present but not an array; castctl will reject the config, keeper not started"
     fi
   fi
-  if [ "$telegram_wanted" = 0 ] && [ "$keeper_wanted" = 0 ]; then
-    [ "$mode" = watchdog ] || log INFO "no telegram block and no keeper entries in config; nothing to start"
+  if has_top_key "$CONFIG" webui; then
+    if has_top_block "$CONFIG" webui; then
+      webui_wanted=1
+    else
+      log WARNING "webui key present but not an object; castctl will reject the config, webui not started"
+    fi
+  fi
+  # A manual start records the persistent want FIRST (under the
+  # lock), before any service starts — even when nothing is
+  # gated today: the marker means "the user wants the module
+  # running", independent of the current config, so a later
+  # config fix or reboot starts the gated services. A
+  # symlinked marker refuses the start (fail closed).
+  if [ "$mode" = manual ]; then
+    set_want || return 1
+  fi
+  if [ "$telegram_wanted" = 0 ] && [ "$keeper_wanted" = 0 ] && [ "$webui_wanted" = 0 ]; then
+    [ "$mode" = watchdog ] || log INFO "no telegram block, no keeper entries, and no webui block in config; nothing to start"
     return 0
   fi
 
   # The enabled marker means "a start was requested and not
   # explicitly stopped". It is written even when a start fails
-  # so the watchdog retries after a config fix; stop removes it.
+  # so the watchdog retries after a config fix; stop removes it
+  # (together with the want marker).
   # A symlinked marker must never be truncated through (F1):
   # fail closed; the watchdog retries and logs.
   refuse_symlink "$ENABLED_FILE" "enabled marker" || return 1
@@ -768,6 +1136,14 @@ start_locked() {
   fi
   if [ "$keeper_wanted" = 1 ]; then
     start_one "$mode" "castctl keeper" "$KEEPER_PID_FILE" "$KEEPER_LOG" "keeper run" keeper run || failed=1
+  fi
+  if [ "$webui_wanted" = 1 ]; then
+    if webui_ui_dir_refused; then
+      log ERROR "installed UI tree is a symlink; webui not started (telegram/keeper unaffected)"
+      failed=1
+    else
+      start_one "$mode" "castctl webui" "$WEBUI_PID_FILE" "$WEBUI_LOG" "webui serve" webui serve || failed=1
+    fi
   fi
   if [ "$failed" = 0 ]; then
     set_description "Running | castctl | Action to stop"
@@ -865,6 +1241,42 @@ status_service() {
   else
     echo "  keeper: stopped"
   fi
+  if service_running "$WEBUI_PID_FILE" "webui serve"; then
+    pid=$(read_pid_file "$WEBUI_PID_FILE")
+    url=$(webui_url_if_running 2>/dev/null || true)
+    probe_out=$(webui_probe 2>/dev/null || true)
+    health=${probe_out%% *}
+    tool=${probe_out#* }
+    # The URL is printed only for a running service (see
+    # webui_url_if_running): a stopped service's port may belong
+    # to something else. The listen address itself is not a
+    # secret; the token is never printed anywhere.
+    if [ -n "$url" ]; then
+      echo "  webui: running (pid $pid, uid:gid $(process_identity "$pid")) at $url health: $health ($tool)"
+    else
+      echo "  webui: running (pid $pid, uid:gid $(process_identity "$pid")) listen unparseable; no URL health: $health ($tool)"
+    fi
+  else
+    if [ -f "$CONFIG" ] && has_top_block "$CONFIG" webui; then
+      listen=$(webui_listen_value 2>/dev/null || true)
+      if [ -n "$listen" ]; then
+        echo "  webui: stopped (configured, listen $listen)"
+      else
+        echo "  webui: stopped (configured, listen unparseable)"
+      fi
+    else
+      echo "  webui: stopped (not configured)"
+    fi
+  fi
+  # Desired state is the persistent want marker, reported
+  # separately from the actual running state: desired=on with
+  # everything stopped means a start was requested but the
+  # services failed or are not gated.
+  if want_exists; then
+    echo "  desired: on"
+  else
+    echo "  desired: off"
+  fi
   echo "  $(gating_summary)"
   if [ -d "$PLUGIN_DIR" ]; then
     echo "  plugins: reserved dir present (no loader; file count: $(bb find "$PLUGIN_DIR" -maxdepth 1 -type f 2>/dev/null | bb wc -l | bb tr -d ' '))"
@@ -882,10 +1294,6 @@ doctor_locked() {
     log ERROR "config missing"
     failed=1
   else
-    if has_top_key "$CONFIG" webui; then
-      log ERROR "config carries a webui key this castctl build cannot parse"
-      failed=1
-    fi
     if has_top_key "$CONFIG" telegram && ! has_top_block "$CONFIG" telegram; then
       log ERROR "telegram key present but not an object; castctl will reject the config"
       failed=1
@@ -893,6 +1301,18 @@ doctor_locked() {
     if has_top_key "$CONFIG" keeper && ! has_top_nonempty_array "$CONFIG" keeper && ! has_top_empty_array "$CONFIG" keeper; then
       log ERROR "keeper key present but not an array; castctl will reject the config"
       failed=1
+    fi
+    if has_top_key "$CONFIG" webui && ! has_top_block "$CONFIG" webui; then
+      log ERROR "webui key present but not an object; castctl will reject the config"
+      failed=1
+    fi
+    if has_top_block "$CONFIG" webui; then
+      # The listen value is validated, never logged: it sits next
+      # to the token in the same block, so no value is echoed.
+      webui_listen_value >/dev/null 2>&1 || { log ERROR "webui listen value is unparseable or not loopback; castctl will reject the config"; failed=1; }
+      # Conditional ui/ guard: a symlinked shipped UI tree
+      # blocks webui only, never telegram/keeper.
+      webui_ui_dir_refused && { log ERROR "installed UI tree is a symlink; webui will not start"; failed=1; }
     fi
   fi
   if service_running "$PID_FILE" "telegram run"; then
@@ -902,6 +1322,14 @@ doctor_locked() {
   if service_running "$KEEPER_PID_FILE" "keeper run"; then
     pid=$(read_pid_file "$KEEPER_PID_FILE")
     pid_matches "$pid" "keeper run" || { log ERROR "running keeper process does not match the module binary"; failed=1; }
+  fi
+  if service_running "$WEBUI_PID_FILE" "webui serve"; then
+    pid=$(read_pid_file "$WEBUI_PID_FILE")
+    pid_matches "$pid" "webui serve" || { log ERROR "running webui process does not match the module binary"; failed=1; }
+    # Advisory health probe (static shell path `/` only):
+    # the result is logged but never fails doctor.
+    probe_out=$(webui_probe 2>/dev/null || true)
+    log INFO "webui health: ${probe_out%% *} (${probe_out#* })"
   fi
   [ "$failed" = 0 ] || return 1
   log INFO "doctor passed"
@@ -957,19 +1385,322 @@ purge_data() {
   run_lifecycle_locked wait purge_data_locked "${1:-}"
 }
 
+# --- KernelSU WebUI exec-bridge backend (webui-json) ---
+# Fixed-shape JSON envelopes for the module webroot page, following
+# the SB-T box.webui pattern (see docs/provenance.md §12): the
+# page calls this subcommand through the `kernelsu` exec bridge
+# with one shell string, scans stdout/stderr for the first `{`,
+# and branches on payload.ok. No code was copied from SB-T.
+#
+# Envelope (exactly):
+#   {"ok":true,"command":"<canonical>","data":...}
+#   {"ok":false,"command":"<canonical>","error":"<fixed>"}
+# Exit-code discipline: this subcommand ALWAYS exits 0 once an
+# envelope is emitted — payload.ok is the sole channel (unknown
+# commands, bad arguments, and refusals are ok:false envelopes,
+# never non-zero exits). The `command` echo is the allowlisted
+# canonical name only ("unknown" for anything unrecognised);
+# raw page input is never echoed in any field.
+# Commands: status, start, stop, restart, log, url. No config
+# editing, no token/cookie/config-content in any data/error
+# field, no token argv/env-file writes. status/log/url take no
+# lifecycle lock and create no directories (pure reads); start/
+# stop/restart background a normal locked lifecycle operation
+# and return "triggered" immediately (the page polls status).
+# start/restart refuse when $MODULE_DIR/disable exists; stop is
+# always allowed. Grep-proof: no eval, no sh -c on page input,
+# no unquoted expansions of page input, no cat of config.
+
+# json_quote: read stdin, print each input line as one JSON string
+# literal (quotes included), escaping backslash, quote, tab, CR,
+# backspace, formfeed, and replacing any other control byte with
+# "?". Non-ASCII bytes pass through unchanged. A trailing tr pass
+# deletes any control byte the awk comparison missed under a
+# non-C locale, so the output is always valid JSON. Limits: NUL
+# bytes truncate the awk record (the line is cut, never broken);
+# only single-line values may be passed (log lines are quoted
+# one per line by construction).
+json_quote() {
+  bb awk '
+    BEGIN { bs = sprintf("%c", 8); ff = sprintf("%c", 12); tb = sprintf("%c", 9); cr = sprintf("%c", 13) }
+    {
+      out = "\""
+      n = length($0)
+      for (i = 1; i <= n; i++) {
+        c = substr($0, i, 1)
+        if (c == "\"") { out = out "\\\"" }
+        else if (c == "\\") { out = out "\\\\" }
+        else if (c == tb) { out = out "\\t" }
+        else if (c == cr) { out = out "\\r" }
+        else if (c == bs) { out = out "\\b" }
+        else if (c == ff) { out = out "\\f" }
+        else if (c < " ") { out = out "?" }
+        else { out = out c }
+      }
+      out = out "\""
+      print out
+    }' | bb tr -d '\000-\010\013\014\016-\037'
+}
+
+# webui_json_ok COMMAND DATAFRAG: envelope with a raw JSON data
+# fragment (built by code, never from page input except through
+# json_quote). webui_json_err COMMAND FIXEDMSG: error envelope.
+webui_json_ok() {
+  printf '{"ok":true,"command":%s,"data":%s}\n' "$(printf '%s' "$1" | json_quote)" "$2"
+}
+
+webui_json_err() {
+  printf '{"ok":false,"command":%s,"error":%s}\n' "$(printf '%s' "$1" | json_quote)" "$(printf '%s' "$2" | json_quote)"
+}
+
+# svc_entry NAME PIDFILE PATTERN: one services[] element.
+svc_entry() {
+  # Capture the PID exactly once: reading the PID file again
+  # after service_running (as before) could yield an empty
+  # value if the file changed between the two reads, emitting
+  # invalid JSON ({"pid":}). read_pid_file validates the value
+  # is numeric, so the emitted pid is always well-formed.
+  _svc_pid=$(read_pid_file "$2" 2>/dev/null) || _svc_pid=""
+  if [ -n "$_svc_pid" ] && pid_alive "$_svc_pid" && pid_matches "$_svc_pid" "$3"; then
+    printf '{"name":"%s","running":true,"pid":%s}' "$1" "$_svc_pid"
+  else
+    printf '{"name":"%s","running":false,"pid":null}' "$1"
+  fi
+}
+
+# gating_json: the gating_summary states as a JSON object.
+gating_json() {
+  _gt=absent; _gk=absent; _gw=absent
+  if [ -f "$CONFIG" ]; then
+    if has_top_key "$CONFIG" telegram; then
+      _gt=malformed
+      has_top_block "$CONFIG" telegram && _gt=present
+    fi
+    if has_top_key "$CONFIG" keeper; then
+      _gk=malformed
+      has_top_nonempty_array "$CONFIG" keeper && _gk=present
+      has_top_empty_array "$CONFIG" keeper && _gk=empty
+    fi
+    if has_top_key "$CONFIG" webui; then
+      _gw=malformed
+      has_top_block "$CONFIG" webui && _gw=present
+    fi
+  fi
+  printf '{"telegram":"%s","keeper":"%s","webui":"%s"}' "$_gt" "$_gk" "$_gw"
+}
+
+webui_json_status() {
+  if want_exists; then _desired='"on"'; else _desired='"off"'; fi
+  if [ -f "$CONFIG" ]; then _config_present=true; else _config_present=false; fi
+  _services="$(svc_entry telegram "$PID_FILE" "telegram run"),$(svc_entry keeper "$KEEPER_PID_FILE" "keeper run"),$(svc_entry webui "$WEBUI_PID_FILE" "webui serve")"
+  _listen_json=null
+  _url_json=null
+  if [ "$_config_present" = true ] && has_top_block "$CONFIG" webui; then
+    if _listen=$(webui_listen_value 2>/dev/null); then
+      _listen_json=$(printf '%s' "$_listen" | json_quote)
+      if service_running "$WEBUI_PID_FILE" "webui serve"; then
+        _url_json=$(printf 'http://%s/' "$_listen" | json_quote)
+      fi
+    fi
+  fi
+  _probe_out=$(webui_probe 2>/dev/null || true)
+  _health=${_probe_out%% *}
+  _tool=${_probe_out#* }
+  webui_json_ok status "{\"desired\":$_desired,\"config\":$_config_present,\"services\":[$_services],\"listen\":$_listen_json,\"url\":$_url_json,\"health\":\"$_health\",\"health_tool\":\"$_tool\",\"gating\":$(gating_json)}"
+}
+
+# webui_json_log [SERVICE] [N]: controller.log tail only (v1
+# allowlist: service=controller). No telegram/keeper/webui log
+# tails without a proven redactor. N is digits-only, clamped to
+# 1..200, default 50.
+webui_json_log() {
+  _log_svc=${1:-controller}
+  _log_lines=${2:-50}
+  [ "$_log_svc" = controller ] || { webui_json_err log "unknown log service"; return 0; }
+  case "$_log_lines" in ''|*[!0-9]*) _log_lines=50 ;; esac
+  while [ "${#_log_lines}" -gt 1 ]; do case "$_log_lines" in 0*) _log_lines=${_log_lines#0} ;; *) break ;; esac; done
+  [ "$_log_lines" -lt 1 ] && _log_lines=1
+  [ "$_log_lines" -gt 200 ] && _log_lines=200
+  [ -f "$CTL_LOG" ] || { webui_json_err log "log not found"; return 0; }
+  [ ! -L "$CTL_LOG" ] || { webui_json_err log "log must not be a symlink"; return 0; }
+  _tail=$(bb tail -n "$_log_lines" "$CTL_LOG" 2>/dev/null || true)
+  if [ -z "$_tail" ]; then
+    webui_json_ok log '{"service":"controller","lines":[]}'
+    return 0
+  fi
+  _arr=""
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    _q=$(printf '%s' "$_line" | json_quote)
+    [ -z "$_arr" ] && _arr="$_q" || _arr="$_arr,$_q"
+  done <<CASTCTL_JSON_LOG_EOF
+$_tail
+CASTCTL_JSON_LOG_EOF
+  webui_json_ok log "{\"service\":\"controller\",\"lines\":[$_arr]}"
+}
+
+webui_json_url() {
+  if _url=$(webui_url_if_running 2>/dev/null); then
+    webui_json_ok url "$(printf '%s' "$_url" | json_quote)"
+  else
+    webui_json_ok url null
+  fi
+}
+
+# webui_json_trigger OP: background a normal locked lifecycle
+# operation and return "triggered" immediately. The backgrounded
+# child logs to controller.log; stdout must close so the bridge
+# returns. "triggered" means queued, not done: the page polls
+# status. Lock contention for a manual op logs an error and
+# changes nothing (the poll shows the unchanged state).
+webui_json_trigger() {
+  _op=$1
+  if [ "$_op" != stop ] && [ -f "$MODULE_DIR/disable" ]; then
+    webui_json_err "$_op" "module disabled"
+    return 0
+  fi
+  ( "$MODULE_DIR/scripts/castctl-ctl" "$_op" >/dev/null 2>&1 || true ) &
+  webui_json_ok "$_op" '"triggered"'
+}
+
+webui_json() {
+  _cmd=${1:-}
+  case "$_cmd" in
+    status)
+      [ $# -eq 1 ] || { webui_json_err unknown "bad arguments"; return 0; }
+      webui_json_status
+      ;;
+    start|stop|restart)
+      [ $# -eq 1 ] || { webui_json_err unknown "bad arguments"; return 0; }
+      webui_json_trigger "$_cmd"
+      ;;
+    log)
+      case $# in
+        1) webui_json_log controller 50 ;;
+        2) webui_json_log "$2" 50 ;;
+        3) webui_json_log "$2" "$3" ;;
+        *) webui_json_err unknown "bad arguments" ;;
+      esac
+      ;;
+    url)
+      [ $# -eq 1 ] || { webui_json_err unknown "bad arguments"; return 0; }
+      webui_json_url
+      ;;
+    *) webui_json_err unknown "unknown command" ;;
+  esac
+  return 0
+}
+
+# sha256_check DIR MANIFEST: verify a sha256sum manifest inside
+# DIR, via the system sha256sum or the busybox one.
+sha256_check() {
+  (cd "$1" && { command -v sha256sum >/dev/null 2>&1 && sha256sum -c "$2" >/dev/null 2>&1 || bb sha256sum -c "$2" >/dev/null 2>&1; })
+}
+
+# ui_update_locked: replace the installed DATA_DIR/ui tree from
+# the module's staged ui/ (this ZIP's frontend: index.html +
+# ui.sha256 manifest, separate from payload/checksums.sha256).
+# Fresh installs are handled by customize.sh; updates PRESERVE
+# the installed tree byte-identical. Replacement happens ONLY
+# here, explicitly, under the lifecycle lock: the staged tree
+# is verified before an atomic rename swap (stage ui.new.$$ +
+# mv -fT), a symlinked installed/staged tree is refused, and
+# the old tree is kept on any failure. An older ZIP never
+# downgrades automatically (customize.sh never replaces); a
+# ZIP without ui/ leaves the installed tree untouched (this
+# command then reports "no staged UI" and changes nothing).
+# The SHA-256 of index.html is the version identifier: an equal
+# SHA is a no-op. After a swap, the webui service is restarted
+# only if it was running (and still wanted).
+ui_update_locked() {
+  prepare_mutable_dirs
+  _candidate=$MODULE_DIR/ui
+  if [ ! -d "$_candidate" ] || [ -L "$_candidate" ]; then
+    log INFO "no staged UI in this module install; installed UI untouched"
+    return 0
+  fi
+  [ -f "$_candidate/index.html" ] && [ ! -L "$_candidate/index.html" ] || { log ERROR "staged UI index is missing or a symlink"; return 1; }
+  [ -f "$_candidate/ui.sha256" ] && [ ! -L "$_candidate/ui.sha256" ] || { log ERROR "staged UI manifest is missing or a symlink"; return 1; }
+  sha256_check "$_candidate" ui.sha256 || { log ERROR "staged UI checksum mismatch"; return 1; }
+  _candidate_sha=$(bb awk '{print $1}' "$_candidate/ui.sha256" 2>/dev/null | bb head -1 || true)
+  case "$_candidate_sha" in ''|*[!0-9a-f]*) log ERROR "staged UI manifest is malformed"; return 1 ;; esac
+  [ "${#_candidate_sha}" -eq 64 ] || { log ERROR "staged UI manifest is malformed"; return 1; }
+  _installed_sha=
+  if [ -f "$DATA_DIR/ui/ui.sha256" ] && [ ! -L "$DATA_DIR/ui/ui.sha256" ]; then
+    _installed_sha=$(bb awk '{print $1}' "$DATA_DIR/ui/ui.sha256" 2>/dev/null | bb head -1 || true)
+  fi
+  if [ "$_installed_sha" = "$_candidate_sha" ] && [ -f "$DATA_DIR/ui/index.html" ] && [ ! -L "$DATA_DIR/ui" ] && [ ! -L "$DATA_DIR/ui/index.html" ]; then
+    log INFO "installed UI is already current"
+    return 0
+  fi
+  [ ! -L "$DATA_DIR/ui" ] || { log ERROR "installed UI must not be a symlink"; return 1; }
+  _ui_stage=$DATA_DIR/ui.new.$$
+  { [ ! -e "$_ui_stage" ] && [ ! -L "$_ui_stage" ]; } || { log ERROR "UI staging path is unsafe"; return 1; }
+  mkdir -p "$_ui_stage" || { log ERROR "unable to stage UI"; return 1; }
+  cp -p "$_candidate/index.html" "$_candidate/ui.sha256" "$_ui_stage/" || { log ERROR "unable to stage UI"; rm -rf "$_ui_stage"; return 1; }
+  chmod 0644 "$_ui_stage/index.html" "$_ui_stage/ui.sha256" 2>/dev/null || true
+  sha256_check "$_ui_stage" ui.sha256 || { log ERROR "staged UI copy failed verification"; rm -rf "$_ui_stage"; return 1; }
+  chmod 0700 "$_ui_stage"
+  # Publish: rename(2) cannot replace a NON-EMPTY directory, so a
+  # direct mv -fT onto an existing UI tree fails ("Directory not
+  # empty"). Swap via a rename-aside instead: retire the old tree
+  # to ui.old.$$, publish the staged tree, then remove the old
+  # one. If the publish rename fails, the old tree is moved
+  # back. Between the two renames the ui/ path is briefly
+  # absent (a concurrent webui serve falls back to the embedded
+  # shell for that window); the restart below follows at once.
+  # Both renames run under the lifecycle lock.
+  _ui_old=$DATA_DIR/ui.old.$$
+  { [ ! -e "$_ui_old" ] && [ ! -L "$_ui_old" ]; } || { log ERROR "UI backup path is unsafe"; rm -rf "$_ui_stage"; return 1; }
+  if [ -e "$DATA_DIR/ui" ]; then
+    bb mv -fT "$DATA_DIR/ui" "$_ui_old" || { log ERROR "unable to retire old UI"; rm -rf "$_ui_stage"; return 1; }
+    bb mv -fT "$_ui_stage" "$DATA_DIR/ui" || { log ERROR "unable to publish UI"; bb mv -fT "$_ui_old" "$DATA_DIR/ui" 2>/dev/null || true; rm -rf "$_ui_stage"; return 1; }
+    rm -rf "$_ui_old"
+  else
+    bb mv -fT "$_ui_stage" "$DATA_DIR/ui" || { log ERROR "unable to publish UI"; rm -rf "$_ui_stage"; return 1; }
+  fi
+  log INFO "UI updated"
+  if service_running "$WEBUI_PID_FILE" "webui serve"; then
+    if has_top_block "$CONFIG" webui; then
+      # Restart only a WANTED service: a stop clears want but a
+      # surviving process must not be resurrected by ui-update.
+      # A running-but-unwanted process is left untouched (never
+      # stopped here: ui-update replaces files, it does not
+      # change the desired state).
+      if want_exists; then
+        stop_one "$WEBUI_PID_FILE" "webui serve" "castctl webui" || true
+        start_one manual "castctl webui" "$WEBUI_PID_FILE" "$WEBUI_LOG" "webui serve" webui serve || { log ERROR "UI updated but the webui service failed to restart"; return 1; }
+      else
+        log INFO "webui is running but not wanted; leaving it untouched"
+      fi
+    else
+      stop_one "$WEBUI_PID_FILE" "webui serve" "castctl webui" || true
+    fi
+  fi
+  return 0
+}
+
+ui_update() {
+  require_root
+  prepare_lifecycle_lock
+  run_lifecycle_locked wait ui_update_locked
+}
+
 usage() {
   bb cat <<'EOF'
 Usage: castctl-ctl <command>
 
 Commands:
-  start [--boot|--watchdog]  Start telegram run and/or keeper run per config gating.
-  stop                       Stop for the current boot.
-  restart                    Restart the service.
-  status                     Show safe runtime status.
+  start [--boot|--watchdog]  Start telegram run, keeper run and/or webui serve per config gating.
+  stop                       Stop for the current boot (clears the want marker).
+  stop-preserve              INTERNAL (watchdog disable reaction only): stop without clearing the want marker.
+  restart                    Restart the service (preserves the want marker).
+  status                     Show safe runtime status (desired + running + listen, no token).
   is-running                 Return success if any managed service is alive.
   doctor                     Validate runtime and config gating.
   version                    Show bundled core version.
-  log [telegram|keeper] [N]  Tail a service log (default telegram, 20 lines).
+  log [telegram|keeper|webui] [N]  Tail a service log (default telegram, 20 lines).
+  webui-json <command>       JSON backend for the KernelSU WebUI page (always exits 0; see status/log/url/start/stop/restart).
+  ui-update                  Replace the installed web UI frontend from this module's staged ui/ (explicit only).
   backup                     Archive config/plugin state (contains secrets).
   purge-data --yes           Destructively remove persistent state.
 EOF
@@ -982,6 +1713,7 @@ case "$command_name" in
     start_service "$mode"
     ;;
   stop) stop_service 1 ;;
+  stop-preserve) stop_service 0 ;; # INTERNAL: watchdog disable reaction only — stops services without clearing state/want (W-6). Never called by action.sh or the webroot backend.
   restart) restart_service ;;
   status) status_service ;;
   is-running) is_running ;;
@@ -991,13 +1723,15 @@ case "$command_name" in
     svc=telegram
     lines=20
     case "${2:-}" in
-      telegram|keeper) svc=$2; lines=${3:-20} ;;
+      telegram|keeper|webui) svc=$2; lines=${3:-20} ;;
       '') ;;
       *) lines=$2 ;;
     esac
     case "$lines" in ''|*[!0-9]*) die "log line count must be numeric" ;; esac
     if [ "$svc" = keeper ]; then
       logfile=$KEEPER_LOG
+    elif [ "$svc" = webui ]; then
+      logfile=$WEBUI_LOG
     else
       logfile=$CORE_LOG
     fi
@@ -1005,6 +1739,8 @@ case "$command_name" in
     [ ! -L "$logfile" ] || die "log must not be a symlink"
     bb tail -n "$lines" "$logfile"
     ;;
+  webui-json) shift; webui_json "$@" ;;
+  ui-update) ui_update ;;
   backup) backup_state ;;
   purge-data) purge_data "${2:-}" ;;
   help|-h|--help|'') usage ;;

@@ -14,10 +14,13 @@
 #     castctl_<ver>_linux_arm64.tar.gz + checksums.txt (release.yaml
 #     uploads them), verify the archive sha256 against checksums.txt,
 #     point the LOCK_CASTCTL_* lines of the workspace copy of
-#     sources.lock at that asset (not committed; the staged
-#     sources.lock inside the ZIP records it), set module.prop to the
-#     tag, build, then upload castctl-module_<ver>.zip and
-#     castctl-module_<ver>.zip.sha256. checksums.txt is never touched.
+#     sources.lock at that asset (not committed; the re-pinned lock
+#     is saved as castctl-module_<ver>.sources.lock + .sha256
+#     alongside the ZIP, so the exact pinned inputs of a release
+#     build stay reviewable — sources.lock is NOT staged inside
+#     the ZIP), set module.prop to the tag, build, then upload
+#     castctl-module_<ver>.zip and castctl-module_<ver>.zip.sha256.
+#     checksums.txt is never touched.
 #     This workflow never creates tags or releases.
 #
 # glibc + CA stay pinned by sources.lock; build.sh verifies every
@@ -192,12 +195,23 @@ jobs:
           (cd out && sha256sum "$asset" >"$asset.sha256" && sha256sum -c "$asset.sha256")
           list=$(unzip -Z1 "out/$asset")
           for f in module.prop customize.sh service.sh action.sh uninstall.sh \
-            payload/bin/castctl payload/lib/ld-linux-aarch64.so.1 payload/runtime.version \
+            scripts/castctl-ctl webroot/index.html config.json.example \
+            ui/index.html ui/ui.sha256 \
+            licenses/GLIBC-COPYING.LESSERv2 licenses/LICENSE licenses/LICENSE.sing-box licenses/NOTICE licenses/THIRD_PARTY_NOTICES.md \
+            payload/bin/castctl payload/lib/ld-linux-aarch64.so.1 payload/lib/libc.so.6 payload/lib/libresolv.so.2 payload/lib/libpthread.so.0 \
+            payload/ca/cert.pem payload/checksums.sha256 payload/runtime.version \
             META-INF/com/google/android/update-binary; do
             grep -qx "$f" <<<"$list" || { echo "missing in ZIP: $f" >&2; exit 1; }
           done
-          if grep -Eq '(^|/)(post-fs-data\.sh|post-mount\.sh|sepolicy\.rule|system\.prop|config\.json)$|^system/' <<<"$list"; then
+          if grep -Eq '(^|/)(post-fs-data\.sh|post-mount\.sh|sepolicy\.rule|system\.prop|config\.json|sources\.lock|payload-manifest\.txt|config\.example\.json)$|^system/|^docs/|^payload/lib/libdl\.so\.2$|^(LICENSE|LICENSE\.sing-box|NOTICE|THIRD_PARTY_NOTICES\.md)$' <<<"$list"; then
             echo "forbidden file in ZIP" >&2; exit 1
+          fi
+          # Release mode: save the re-pinned sources.lock alongside
+          # the ZIP (it is not staged inside the ZIP). PR builds
+          # use the tracked lock unchanged and save nothing.
+          if [ -n "${{ steps.mode.outputs.tag }}" ]; then
+            cp module/sources.lock "out/castctl-module_${mv_ver}.sources.lock"
+            (cd out && sha256sum "castctl-module_${mv_ver}.sources.lock" >"castctl-module_${mv_ver}.sources.lock.sha256" && sha256sum -c "castctl-module_${mv_ver}.sources.lock.sha256")
           fi
           unzip -p "out/$asset" payload/runtime.version
           echo "asset=$asset" >>"$GITHUB_OUTPUT"
@@ -236,3 +250,12 @@ jobs:
           gh release download "$TAG" --pattern "$ASSET*" --dir back
           (cd back && sha256sum -c "$ASSET.sha256")
           cmp back/"$ASSET" out/"$ASSET"
+          lock="castctl-module_${TAG#v}.sources.lock"
+          if [ -f "out/$lock" ]; then
+            (cd out && sha256sum -c "$lock.sha256")
+            gh release upload "$TAG" "out/$lock" "out/$lock.sha256" --clobber
+            mkdir -p back-lock
+            gh release download "$TAG" --pattern "$lock*" --dir back-lock
+            (cd back-lock && sha256sum -c "$lock.sha256")
+            cmp "back-lock/$lock" "out/$lock"
+          fi

@@ -5,6 +5,7 @@
 package webui
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -21,30 +22,46 @@ import (
 // as much of a possibly-nonexistent path as exists. Both are
 // re-run per request: no verdict is cached across renames.
 
+// absBestEffort absolutizes path against the working
+// directory. On error (an unreadable working directory) it
+// returns path unchanged; callers comparing resolved paths
+// keep their previous behaviour for that unreachable case.
+
 // resolvePathBestEffort resolves symlinks in path as far as
 // possible: EvalSymlinks on the full path, else on the nearest
 // existing ancestor, rejoining the remainder. It never fails;
 // the lexical Clean fallback keeps comparisons working for
 // paths that do not exist yet (a .bak the next write has not
-// created).
+// created). The result is always absolute: a relative config
+// directory (from a relative --config path) must compare
+// correctly with absolute candidates — filepath.Rel cannot
+// mix the two, and a relative result would silently disable
+// the overlap checks that consume it.
 func resolvePathBestEffort(path string) string {
 	clean := filepath.Clean(path)
 	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
-		return resolved
+		return absBestEffort(resolved)
 	}
 	var tail []string
 	cur := clean
 	for {
 		parent := filepath.Dir(cur)
 		if parent == cur {
-			return clean
+			return absBestEffort(clean)
 		}
 		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
-			return filepath.Join(append([]string{resolved, filepath.Base(cur)}, tail...)...)
+			return absBestEffort(filepath.Join(append([]string{resolved, filepath.Base(cur)}, tail...)...))
 		}
 		tail = append([]string{filepath.Base(cur)}, tail...)
 		cur = parent
 	}
+}
+
+func absBestEffort(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
 }
 
 func splitPathComponents(p string) []string {
@@ -123,6 +140,53 @@ func rejectNewCookiesFile(configDir, value string) error {
 	}
 	if !containedInDir(configDir, value) {
 		return errValidation("cookies_file must stay inside the config directory")
+	}
+	return nil
+}
+
+// webUIUIDirValue extracts the `webui.ui_dir` string from a
+// decoded config document. A missing block, a missing key, or a
+// non-string value is absent from the result (the config parser
+// rejects non-string values separately).
+func webUIUIDirValue(doc any) (string, bool) {
+	root, ok := doc.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	block, ok := root["webui"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	v, ok := block["ui_dir"].(string)
+	if !ok {
+		return "", false
+	}
+	return v, true
+}
+
+// rejectNewUIDir enforces the B-1 containment rule for a
+// `ui_dir` value the web UI is about to introduce: the
+// symlink-resolved root must not overlap the config directory
+// in either direction, and must not contain any cookies file
+// named in the document. A symlinked index.html inside the
+// root is refused too (any symlink, even one whose target
+// stays inside the root: the shell path must only ever serve
+// the file startup validated). A missing index.html is not
+// refused here — the startup checks reject a root without
+// one. The error messages name the rule only, never the value.
+func rejectNewUIDir(configDir, value string, cookiesFiles map[string]string) error {
+	root := resolveAgainst(configDir, value)
+	base := resolvePathBestEffort(configDir)
+	if pathWithin(root, base) || pathWithin(base, root) {
+		return errValidation("webui.ui_dir must not overlap the config directory")
+	}
+	for _, cookiesFile := range cookiesFiles {
+		if pathWithin(resolveAgainst(configDir, cookiesFile), root) {
+			return errValidation("webui.ui_dir must not contain a cookies file")
+		}
+	}
+	if lst, err := os.Lstat(filepath.Join(root, "index.html")); err == nil && lst.Mode()&os.ModeSymlink != 0 {
+		return errValidation("webui.ui_dir index.html must not be a symlink")
 	}
 	return nil
 }

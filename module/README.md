@@ -5,7 +5,7 @@ Android phone (KernelSU plus the meta-hybrid_mount metamodule, with
 Magisk paths as a fallback).
 
 The module ships the linux_arm64 glibc 2.17 castctl release binary
-(v0.6.4), run through a glibc + loader bundled inside the module
+(v0.7.0), run through a glibc + loader bundled inside the module
 exactly as the cli-proxy-api template does. It does not depend on any
 other module on the device. (This supersedes the earlier plan note
 that the binary would run through the user's glibc module; see the
@@ -24,16 +24,25 @@ it is not a release target.
 - `action.sh` — manager Action button (start/stop toggle + status).
 - `uninstall.sh` — stops the daemon, keeps all data.
 - `scripts/castctl-ctl` — lifecycle controller (start/stop/restart/
-  status/doctor/version/log/backup/purge-data).
+  status/doctor/version/log/webui-json/ui-update/backup/purge-data).
+  `start` records the persistent want marker; boot/watchdog starts
+  honour it.
 - `build.sh` — host-side packager; produces the flashable ZIP from
   checksum-pinned inputs in `sources.lock`.
-- `sources.lock`, `payload-manifest.txt` — pins and payload contract.
-- `config.example.json` — example config; copied only as
+- `sources.lock`, `payload-manifest.txt` — pins and payload contract
+  (repo/CI artifacts; neither is staged in the ZIP).
+- `config.json.example` — example config (with a `webui` block whose
+  token is empty and fails closed); copied only as
   `config.json.example`, never auto-activated.
-- `webroot/index.html` — static WebUI placeholder (TODO tied to
-  phase 2 item 2; no endpoint, no token handling).
-- `docs/ksu-module.md` — install, config, gating, logs, bootloop
-  safety proof, deviations from the template, live gates.
+- `webroot/index.html` — KernelSU WebUI controller page: status,
+  start/stop/restart, controller log tail, and a button opening the
+  castctl web UI. Talks to `castctl-ctl webui-json` through the
+  `kernelsu` exec bridge; shows no token.
+- `licenses/` — license texts shipped in the ZIP (glibc LGPL text
+  plus the castctl/sing-box texts and notices).
+- `docs/ksu-module.md` — install, config, gating, want marker, UI
+  shipping, logs, bootloop safety proof, deviations from the
+  template, live gates.
 
 ## Data on the device
 
@@ -45,6 +54,15 @@ it is not a release target.
   symlink. Plugins: `plugins/linux/arm64/` is reserved (0700) and
   preserved across updates and uninstall; no plugin loader exists
   yet — plugins come after phase 2.
+- Desired state: `state/want` (existence-only marker, 0600). A
+  manual start creates it; a stop removes it; boot and watchdog
+  starts honour it. Uninstall removes only this marker (the
+  fresh-install default is OFF until the user presses Action once).
+- Web UI frontend: `ui/` (the staged `webui/dist/index.html` plus
+  its `ui.sha256` manifest), installed on fresh install only and
+  preserved byte-identical across updates; replacement only via
+  the explicit `castctl-ctl ui-update` command. The `webui` config
+  block's `ui_dir` points here by default in the example config.
 - Logs: `logs/` with rotation (1 MiB cap, 3 kept). No secrets are
   ever logged by the module scripts.
 
@@ -54,15 +72,21 @@ it is not a release target.
 ./module/build.sh
 ```
 
-Produces `module/dist/castctl_ksu_v0.6.4.zip` plus a `.sha256`
+Produces `module/dist/castctl_ksu_v0.7.0.zip` plus a `.sha256`
 sidecar. Set `CASTCTL_MODULE_OUT_DIR` to choose another output
 directory. Every input hash is verified; any mismatch fails the
 build loudly. The loader execution preflight runs on AArch64 hosts
 or under qemu-aarch64; on other hosts it is skipped with a recorded
 warning and the device-side `--version` preflight is the proof.
+The ZIP root holds `META-INF`, `module.prop`, `customize.sh`,
+`service.sh`, `action.sh`, `uninstall.sh`, `scripts/`, `webroot/`,
+`payload/`, `licenses/`, `ui/`, and `config.json.example`
+(`docs/`, `sources.lock`, and `payload-manifest.txt` are repo/CI
+artifacts and are not staged).
 
 ## Status
 
-Implemented (phase 2 item 4). Live device gates (flash, boot,
-disable/remove, gating, uninstall) are Boss-side only and are
+Implemented (phase 2 items 4 and 5: module plus web UI wiring).
+Live device gates (flash, boot, disable/remove, gating, want
+marker, WebView exec bridge, uninstall) are Boss-side only and are
 listed, none claimed passed, in `docs/ksu-module.md`.

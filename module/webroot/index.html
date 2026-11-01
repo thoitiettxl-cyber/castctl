@@ -3,31 +3,255 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>castctl — Web UI pending</title>
+<title>castctl</title>
+<!--
+  castctl module controller page (KernelSU WebUI, webroot/index.html).
+
+  Talks to scripts/castctl-ctl ONLY, through the `kernelsu` exec
+  bridge, with fixed-shape JSON envelopes
+  {"ok":true,"command":"...","data":...} /
+  {"ok":false,"command":"...","error":"..."} (the SB-T box.webui
+  shape, reimplemented here; no SB-T code is used). The page never
+  fetches anything, never reads config, cookies, or the token, and
+  never shows a token: the web UI URL it opens carries no token
+  (the castctl dashboard itself asks for the token, which lives
+  only in the 0600 config / CASTCTL_WEBUI_KEY).
+
+  BRIDGE SPELLING [NEEDS-MEASUREMENT]: the `ksu.exec(command,
+  optionsJSON, callbackName)` callback form below is the spelling
+  used by independent plain webroot pages (callback registered
+  on window, invoked with (errno, stdout, stderr)) and matches
+  SB-T's `globalThis.ksu` presence check. It was NOT verified
+  against the official KernelSU manager build on a device: if
+  the manager on the device exposes a different spelling, this
+  page shows "bridge unavailable" and nothing else breaks (the
+  backend subcommand still works from a shell). Do not invent a
+  different global/function name without device evidence.
+-->
 <style>
-body { font-family: sans-serif; margin: 2em; line-height: 1.5; }
+body { font-family: sans-serif; margin: 1.2em; line-height: 1.5; }
+button { margin: 0.2em 0.4em 0.2em 0; padding: 0.4em 0.9em; }
+pre { background: #f4f4f4; padding: 0.8em; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
 code { background: #eee; padding: 0 0.3em; }
+table { border-collapse: collapse; }
+td, th { border: 1px solid #ccc; padding: 0.3em 0.7em; text-align: left; }
+#notice { font-weight: bold; }
 </style>
 </head>
 <body>
-<h1>castctl web UI — pending (item 2)</h1>
-<p>The castctl web UI server does not exist yet in the castctl tree.
-This page is a static placeholder. It makes no network request, calls
-no endpoint, and handles no token.</p>
-<p>TODO (tied to castctl phase 2 item 2): replace this stub with the
-real WebUI entry point once item 2 delivers, in writing:</p>
-<ul>
-<li>Server start command and flags (foreground process? which subcommand?).</li>
-<li>Listen address and port (design says <code>127.0.0.1</code> only; confirm the exact port and <code>--port</code> spelling).</li>
-<li>Token/auth handoff: how the page or browser proves it may talk to the service, and where the token comes from without ever logging or displaying it.</li>
-<li>Health/readiness URL: exact path and what response counts as "up".</li>
-<li>Whether the service allows fetch/XHR from a WebView origin (CORS/origin behaviour), or whether the page must use the <code>kernelsu</code> <code>exec()</code> API instead.</li>
-<li>Browser fallback URL for opening the web UI outside the manager.</li>
-<li>Whether the web UI is the same daemon as the core service or a separate process, and which config block gates it.</li>
-</ul>
-<p>Until item 2 lands, the module starts nothing for the web UI, even
-if a <code>webui</code> key is present in the config (this castctl
-build's strict parser rejects such a key; the controller logs that
-and starts nothing).</p>
+<h1>castctl</h1>
+<p id="bridge-note" hidden>This page needs the KernelSU manager WebUI (the <code>ksu</code> exec bridge). Opened outside the manager, it cannot reach the module controller; use <code>castctl-ctl</code> from a shell instead.</p>
+<div id="app" hidden>
+<p>Desired: <span id="desired">?</span> &middot; Config: <span id="config">?</span> &middot; Gating: <span id="gating">?</span></p>
+<table>
+<thead><tr><th>Service</th><th>Running</th><th>PID</th></tr></thead>
+<tbody id="services"></tbody>
+</table>
+<p>Web UI listen: <span id="listen">?</span> &middot; Health: <span id="health">?</span></p>
+<p>Web UI URL: <span id="webui-url">?</span><br>
+<button id="open-ui" type="button" disabled>Open web UI</button></p>
+<p>
+<button id="btn-start" type="button">Start</button>
+<button id="btn-stop" type="button">Stop</button>
+<button id="btn-restart" type="button">Restart</button>
+<button id="btn-refresh" type="button">Refresh</button>
+</p>
+<p id="notice" role="status"></p>
+<h2>Controller log</h2>
+<pre id="log"></pre>
+</div>
+<script>
+'use strict';
+/* Bridge path: the module controller, as installed on the device
+   (SB-T hardcodes its own backend path the same way). */
+var BRIDGE = '/data/adb/modules/castctl/scripts/castctl-ctl';
+var URL_RE = /^http:\/\/(127\.\d+\.\d+\.\d+|\[::1\]|localhost):\d+\/$/;
+var cbSeq = 0;
+var lastUrl = null;
+
+function $(id) { return document.getElementById(id); }
+
+function shellQuote(value) {
+  return "'" + String(value).split("'").join("'\\''") + "'";
+}
+
+function extractJson(out) {
+  var idx = out.indexOf('{');
+  if (idx === -1) { throw new Error('No JSON in backend output'); }
+  return JSON.parse(out.slice(idx));
+}
+
+/* ksuExec: Promise wrapper around the native ksu.exec bridge.
+   Assumed spelling (see the [NEEDS-MEASUREMENT] note in the file
+   header): ksu.exec(command, optionsJSON, callbackName), with the
+   callback invoked as (errno, stdout, stderr). Bounded: a 60 s
+   client-side timeout rejects and drops the callback. */
+function ksuExec(command) {
+  return new Promise(function (resolve, reject) {
+    var ksu = window.ksu;
+    if (!ksu || typeof ksu.exec !== 'function') {
+      reject(new Error('bridge unavailable'));
+      return;
+    }
+    var name = '__castctl_cb_' + Date.now() + '_' + (cbSeq++);
+    var done = false;
+    var timer = setTimeout(function () {
+      if (done) { return; }
+      done = true;
+      try { delete window[name]; } catch (e) { /* ignore */ }
+      reject(new Error('bridge timeout'));
+    }, 60000);
+    window[name] = function (errno, stdout, stderr) {
+      if (done) { return; }
+      done = true;
+      clearTimeout(timer);
+      try { delete window[name]; } catch (e) { /* ignore */ }
+      resolve({ errno: errno, stdout: stdout, stderr: stderr });
+    };
+    try {
+      ksu.exec(command, '{}', name);
+    } catch (e) {
+      if (done) { return; }
+      done = true;
+      clearTimeout(timer);
+      try { delete window[name]; } catch (e2) { /* ignore */ }
+      reject(e);
+    }
+  });
+}
+
+function runApi(args) {
+  /* Every backend call goes through the webui-json subcommand:
+     plain "status"/"start"/"stop" print human text, which the
+     JSON extractor below cannot parse. */
+  var command = shellQuote(BRIDGE) + ' ' + ['webui-json'].concat(args).map(shellQuote).join(' ');
+  return ksuExec(command).then(function (result) {
+    var payload = extractJson(result.stdout || result.stderr || '');
+    if (!payload.ok) { throw new Error(payload.error || 'Bridge error'); }
+    return payload.data;
+  });
+}
+
+function validUrl(url) {
+  if (typeof url !== 'string' || !URL_RE.test(url)) { return false; }
+  var m = /^http:\/\/[^:]+:(\d+)\/$/.exec(url);
+  if (!m) { return false; }
+  var port = parseInt(m[1], 10);
+  return port >= 1 && port <= 65535;
+}
+
+function renderStatus(data) {
+  var desired = (data && data.desired === 'on') ? 'on' : 'off';
+  $('desired').textContent = desired;
+  $('config').textContent = (data && data.config) ? 'present' : 'missing';
+  var gating = data && data.gating;
+  $('gating').textContent = gating
+    ? ('telegram=' + gating.telegram + ' keeper=' + gating.keeper + ' webui=' + gating.webui)
+    : '?';
+  var tbody = $('services');
+  while (tbody.firstChild) { tbody.removeChild(tbody.firstChild); }
+  var services = (data && Array.isArray(data.services)) ? data.services : [];
+  services.forEach(function (svc) {
+    var tr = document.createElement('tr');
+    var name = document.createElement('td');
+    name.textContent = String(svc.name);
+    var running = document.createElement('td');
+    running.textContent = svc.running ? 'running' : 'stopped';
+    var pid = document.createElement('td');
+    pid.textContent = (svc.pid === null || svc.pid === undefined) ? '-' : String(svc.pid);
+    tr.appendChild(name);
+    tr.appendChild(running);
+    tr.appendChild(pid);
+    tbody.appendChild(tr);
+  });
+  $('listen').textContent = (data && typeof data.listen === 'string') ? data.listen : '-';
+  var health = (data && typeof data.health === 'string') ? data.health : 'unknown';
+  var tool = (data && typeof data.health_tool === 'string') ? data.health_tool : 'none';
+  $('health').textContent = health + ' (' + tool + ')';
+  lastUrl = validUrl(data && data.url) ? data.url : null;
+  $('webui-url').textContent = lastUrl || '-';
+  $('open-ui').disabled = !lastUrl;
+}
+
+function renderLog(data) {
+  var lines = (data && Array.isArray(data.lines)) ? data.lines : [];
+  $('log').textContent = lines.join('\n');
+}
+
+function setNotice(text) {
+  $('notice').textContent = text;
+}
+
+function refreshStatus() {
+  return runApi(['status']).then(renderStatus);
+}
+
+function refreshAll() {
+  return refreshStatus().then(function () {
+    return runApi(['log', 'controller', '50']);
+  }).then(renderLog);
+}
+
+/* After an action, poll status every 600 ms for up to 20 s (the
+   backend returns "triggered" immediately; the operation runs
+   in the background), then do one final full refresh. */
+function pollAfterAction() {
+  var deadline = Date.now() + 20000;
+  var buttons = ['btn-start', 'btn-stop', 'btn-restart', 'btn-refresh'];
+  buttons.forEach(function (id) { $(id).disabled = true; });
+  function tick() {
+    refreshStatus().then(function () {
+      if (Date.now() < deadline) {
+        setTimeout(tick, 600);
+      } else {
+        buttons.forEach(function (id) { $(id).disabled = false; });
+        refreshAll().catch(function (e) { setNotice(String(e.message || e)); });
+      }
+    }).catch(function (e) {
+      buttons.forEach(function (id) { $(id).disabled = false; });
+      setNotice(String(e.message || e));
+    });
+  }
+  setTimeout(tick, 600);
+}
+
+function doAction(op) {
+  setNotice(op + ': triggered; polling status…');
+  runApi([op]).then(function () {
+    pollAfterAction();
+  }).catch(function (e) {
+    setNotice(String(e.message || e));
+  });
+}
+
+function init() {
+  if (!window.ksu || typeof window.ksu.exec !== 'function') {
+    $('bridge-note').hidden = false;
+    return;
+  }
+  $('app').hidden = false;
+  $('btn-start').addEventListener('click', function () { doAction('start'); });
+  $('btn-stop').addEventListener('click', function () { doAction('stop'); });
+  $('btn-restart').addEventListener('click', function () { doAction('restart'); });
+  $('btn-refresh').addEventListener('click', function () {
+    refreshAll().catch(function (e) { setNotice(String(e.message || e)); });
+  });
+  $('open-ui').addEventListener('click', function () {
+    if (!lastUrl) { return; }
+    var win = window.open(lastUrl, '_blank', 'noopener');
+    if (!win) { setNotice('Popup blocked: copy the URL above into the browser.'); }
+  });
+  refreshAll().catch(function (e) {
+    $('bridge-note').hidden = false;
+    setNotice(String(e.message || e));
+  });
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}
+</script>
 </body>
 </html>
