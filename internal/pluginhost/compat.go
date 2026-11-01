@@ -212,20 +212,43 @@ func versionStringTable(f *elf.File, verneed *elf.Section) ([]byte, error) {
 // non-numeric GLIBC_ names (e.g. GLIBC_PRIVATE) are ignored.
 // The parser fails CLOSED on any malformed version info: an
 // unparseable numeric GLIBC_ name, a truncated entry, an aux
-// chain cut short of vn_cnt entries, or an out-of-range name
+// chain cut short of vn_cnt entries, a vnNext that lands
+// inside the entry's own aux chain, or an out-of-range name
 // offset all refuse the plugin — a downgraded maximum is
 // never silently computed.
 func parseVersionNeeds(data, strtab []byte, order binary.ByteOrder) (string, error) {
 	var max glibcVersion
 	found := false
 	off := 0
+	// Walked regions, in data coordinates: a later entry
+	// offset must never land inside one. Headers and aux
+	// entries occupy disjoint regions, but their layout
+	// varies: real linkers emit all Verneed headers first
+	// and the aux entries after them (vn_aux past the
+	// next header), while other sections interleave one
+	// header with its aux entries. Only the aux RANGE
+	// is off-limits for a vnNext target, never the span
+	// from the header to the end of its aux chain.
+	var auxRanges [][2]int
+	var hdrRanges [][2]int
 	for {
+		for _, r := range auxRanges {
+			if off >= r[0] && off < r[1] {
+				return "", fmt.Errorf("invalid version need entry at offset %d: lands inside version auxiliary data (offsets %d-%d)", off, r[0], r[1])
+			}
+		}
+		for _, r := range hdrRanges {
+			if off > r[0] && off < r[1] {
+				return "", fmt.Errorf("invalid version need entry at offset %d: lands inside a version need header (offsets %d-%d)", off, r[0], r[1])
+			}
+		}
 		if off+16 > len(data) {
 			if off == 0 && len(data) == 0 {
 				return "", nil
 			}
 			return "", fmt.Errorf("truncated version need entry at offset %d", off)
 		}
+		hdrRanges = append(hdrRanges, [2]int{off, off + 16})
 		vnCnt := order.Uint16(data[off+2:])
 		vnAux := order.Uint32(data[off+8:])
 		vnNext := order.Uint32(data[off+12:])
@@ -233,10 +256,18 @@ func parseVersionNeeds(data, strtab []byte, order binary.ByteOrder) (string, err
 			return "", fmt.Errorf("invalid version need entry at offset %d: aux offset %d", off, vnAux)
 		}
 		auxOff := off + int(vnAux)
+		// auxStart/auxEnd delimit this entry's aux
+		// entries actually walked, wherever they sit:
+		// immediately after the header (interleaved
+		// layout) or after later headers (headers-first
+		// layout, as real linkers emit).
+		auxStart := auxOff
+		auxEnd := auxOff
 		for i := 0; i < int(vnCnt); i++ {
 			if auxOff+16 > len(data) {
 				return "", fmt.Errorf("truncated version auxiliary entry at offset %d", auxOff)
 			}
+			auxEnd = auxOff + 16
 			nameOff := order.Uint32(data[auxOff+8:])
 			next := order.Uint32(data[auxOff+12:])
 			name, err := cstringAt(strtab, int(nameOff))
@@ -268,6 +299,23 @@ func parseVersionNeeds(data, strtab []byte, order binary.ByteOrder) (string, err
 		}
 		if vnNext == 0 {
 			break
+		}
+		// A vnNext landing inside this entry's own header
+		// (1-15) or inside its aux range would re-parse
+		// header/aux bytes as a header (vnCnt=0,
+		// vnNext=0) and silently skip a later, higher
+		// requirement: refuse instead of computing a
+		// downgraded maximum. A vnNext that stops before
+		// the aux range (headers-first layout) or at/after
+		// it (interleaved layout) is well-formed.
+		if vnNext < 16 {
+			return "", fmt.Errorf("invalid version need entry at offset %d: vnNext %d lands inside the entry header", off, vnNext)
+		}
+		if vnCnt > 0 && int(vnNext) >= auxStart-off && int(vnNext) < auxEnd-off {
+			return "", fmt.Errorf("invalid version need entry at offset %d: vnNext %d lands inside the entry's auxiliary data (offsets %d-%d)", off, vnNext, auxStart-off, auxEnd-off)
+		}
+		if vnCnt > 0 {
+			auxRanges = append(auxRanges, [2]int{auxStart, auxEnd})
 		}
 		off += int(vnNext)
 	}

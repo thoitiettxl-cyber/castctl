@@ -5,6 +5,7 @@
 package pluginhost
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -91,17 +92,17 @@ func TestStripControlCharsDropsC1Controls(t *testing.T) {
 	// be dropped like the C0 controls: a bare C1, a C1 NEL
 	// line break, and a C1 CSI sequence must not survive.
 	in := "a\u0080b\u0085c\u009b31md\u009ce"
-	got := stripControlChars(in)
+	got := StripControlChars(in)
 	for _, r := range got {
 		if r >= 0x80 && r <= 0x9f {
-			t.Fatalf("stripControlChars kept C1 control U+%04X: %q", r, got)
+			t.Fatalf("StripControlChars kept C1 control U+%04X: %q", r, got)
 		}
 	}
 	if strings.ContainsAny(got, "\n\r\x1b") || strings.Contains(got, "[31m") {
-		t.Fatalf("stripControlChars kept controls/remnant: %q", got)
+		t.Fatalf("StripControlChars kept controls/remnant: %q", got)
 	}
 	if got != "abcde" {
-		t.Fatalf("stripControlChars(%q) = %q, want %q", in, got, "abcde")
+		t.Fatalf("StripControlChars(%q) = %q, want %q", in, got, "abcde")
 	}
 }
 
@@ -116,5 +117,49 @@ func TestCapPluginTextRuneSafe(t *testing.T) {
 	}
 	if got := capPluginText("short"); got != "short" {
 		t.Fatalf("cap changed short input: %q", got)
+	}
+}
+
+// TestStripControlCharsExactC1ByteSequences pins the
+// single sanitizer on the exact C1 byte sequences: c2 9b
+// 5b 33 31 6d (U+009B CSI + "[31m") and c2 85 (U+0085
+// NEL). Neither sequence, nor any raw C1 rune, may survive;
+// invalid UTF-8 bytes are replaced (U+FFFD), never passed
+// through raw.
+func TestStripControlCharsExactC1ByteSequences(t *testing.T) {
+	csiSeq := []byte{0xc2, 0x9b, 0x5b, 0x33, 0x31, 0x6d}
+	nelSeq := []byte{0xc2, 0x85}
+	in := "raw boom " + string(csiSeq) + "RED" + string(nelSeq) + "TAIL"
+	got := StripControlChars(in)
+	if bytes.Contains([]byte(got), csiSeq) || bytes.Contains([]byte(got), nelSeq) {
+		t.Fatalf("sanitizer kept C1 byte sequences: %q", got)
+	}
+	for _, r := range got {
+		if r >= 0x80 && r <= 0x9f {
+			t.Fatalf("sanitizer kept C1 control U+%04X: %q", r, got)
+		}
+	}
+	if strings.Contains(got, "[31m") {
+		t.Fatalf("sanitizer kept CSI remnant: %q", got)
+	}
+	// CSI grammar: '[' (0x5b) is the final byte of the
+	// U+009B CSI sequence, so it is consumed and the
+	// remaining "31m" is inert plain text, not a live
+	// sequence: no C1 byte and no "[31m" survive.
+	if got != "raw boom 31mREDTAIL" {
+		t.Fatalf("StripControlChars(%q) = %q, want %q", in, got, "raw boom 31mREDTAIL")
+	}
+	if got := StripControlChars("a\u0085b"); got != "ab" {
+		t.Fatalf("bare NEL: got %q, want %q", got, "ab")
+	}
+	// Raw (invalid UTF-8) 0x9b / 0x85 bytes must be
+	// replaced, never survive as raw bytes.
+	raw := string([]byte{'x', 0x9b, 'y', 0x85, 'z'})
+	got = StripControlChars(raw)
+	if strings.Contains(got, "\x9b") || strings.Contains(got, "\x85") {
+		t.Fatalf("sanitizer kept raw C1 bytes: %q", got)
+	}
+	if got != "x\ufffdy\ufffdz" {
+		t.Fatalf("invalid UTF-8: got %q, want %q", got, "x\ufffdy\ufffdz")
 	}
 }

@@ -96,20 +96,27 @@ func safePluginText(s string) string {
 	return capPluginText(logging.SafeString(capBeforeRedact(s, maxPluginTextLen)))
 }
 
-// stripControlChars maps newline/CR/tab to a space and
-// drops other C0 controls, DEL, and C1 controls
-// (U+0080-U+009F), so plugin-chosen text can never forge
-// a second output line or inject terminal control
-// sequences. An ESC that starts a CSI sequence (ESC [
-// ... final byte) drops the whole sequence, as does a
-// C1 CSI sequence (U+009B ... final byte): only
+// StripControlChars is THE single sanitizer for
+// plugin-chosen text that reaches output, shared by every
+// output path (host.log messages, envelope error text,
+// skip reasons, the loader's non-envelope error path, and
+// `plugin check` output via this exported function).
+// It works on decoded runes: newline/CR/tab become a
+// space and all other C0 controls, DEL, and C1 controls
+// (U+0080-U+009F) are dropped, so plugin-chosen text can
+// never forge a second output line or inject terminal
+// control sequences. An ESC that starts a CSI sequence
+// (ESC [ ... final byte) drops the whole sequence, as
+// does a C1 CSI sequence (U+009B ... final byte): only
 // stripping the introducer would leave a "[31m" remnant
 // in the output. A bare ESC, or a bare C1 control with
-// no CSI following it, is dropped alone. Shared by
-// host.log messages, envelope error text (see
+// no CSI following it, is dropped alone. Invalid UTF-8
+// bytes decode to U+FFFD and are re-encoded as such, so
+// a raw 0x80-0x9F byte can never survive as a raw byte.
+// Shared by host.log messages, envelope error text (see
 // dispatchHostCall, parseEnvelope), and skip reasons
 // (see shortErr).
-func stripControlChars(s string) string {
+func StripControlChars(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for len(s) > 0 {

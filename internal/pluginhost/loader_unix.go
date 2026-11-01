@@ -286,7 +286,7 @@ func (c *dynamicLibraryClient) Call(ctx context.Context, method string, request 
 		if isErrorEnvelope(out) {
 			return out, nil
 		}
-		return nil, fmt.Errorf("plugin call %s returned %d: %s", method, int(rc), safePluginText(string(out)))
+		return nil, fmt.Errorf("plugin call %s returned %d: %s", method, int(rc), safePluginText(StripControlChars(string(out))))
 	}
 	return out, nil
 }

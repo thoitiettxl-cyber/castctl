@@ -190,45 +190,26 @@ func redactAndCap(s string, max int) string {
 
 // checkField strips control characters from one metadata
 // field for the register line and caps it: plugin-chosen
-// text must never forge a check line. Metadata runs
-// through the same SafeString path as envelope errors,
-// after the cap (bounded cost: 200 bytes).
+// text must never forge a check line. It uses the single
+// pluginhost sanitizer (StripControlChars) BEFORE the
+// cap/redact path, the same order as the host's shortErr,
+// so C1 controls in a name or version can never reach
+// the register line. Metadata runs through the same
+// SafeString path as envelope errors, after the cap
+// (bounded cost: 200 bytes).
 func checkField(s string) string {
-	s = redactAndCap(s, 200)
-	s = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return -1
-		}
-		return r
-	}, s)
-	return s
+	return redactAndCap(pluginhost.StripControlChars(s), 200)
 }
 
 // shortPluginCheckError truncates a call error for the check
 // output: no raw server bodies, no secret values, tag only.
 // Plugin-chosen text is redacted (SafeString) and capped,
 // cap before redact, with the "…" marker. Control
-// characters are stripped first (safety N1): the FAIL
-// line must stay one line.
+// characters are stripped first with the single pluginhost
+// sanitizer (StripControlChars, C0/DEL/C1 incl. CSI
+// whole-drop): the FAIL line must stay one line.
 func shortPluginCheckError(err error) string {
-	return redactAndCap(stripCheckControls(err.Error()), 200)
-}
-
-// stripCheckControls maps newline/CR/tab to a space and
-// drops other C0 controls and DEL, mirroring
-// pluginhost.stripControlChars (same mapping, local copy:
-// the check helpers must not import pluginhost internals).
-func stripCheckControls(s string) string {
-	return strings.Map(func(r rune) rune {
-		switch r {
-		case '\n', '\r', '\t':
-			return ' '
-		}
-		if r < 0x20 || r == 0x7f {
-			return -1
-		}
-		return r
-	}, s)
+	return redactAndCap(pluginhost.StripControlChars(err.Error()), 200)
 }
 
 func compactJSON(raw []byte) string {

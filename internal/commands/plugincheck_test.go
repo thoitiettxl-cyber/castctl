@@ -130,3 +130,34 @@ func TestPluginCheckCapBeforeRedact(t *testing.T) {
 		t.Fatalf("shortPluginCheckError marker = %q, want …", got)
 	}
 }
+
+// TestPluginCheckRegisterNameStripsC1Controls (C1 item,
+// end-to-end): a real plugin whose registration name
+// carries a C1 CSI sequence must not reach the stdout
+// register line with live C1 bytes.
+func TestPluginCheckRegisterNameStripsC1Controls(t *testing.T) {
+	dir := t.TempDir()
+	so := plugintest.BuildFakePlugin(t, dir, plugintest.FakePluginOptions{Name: "evil\u009b[31mRED"})
+	out, errb, err := runPluginCheck(t, so)
+	if err != nil {
+		t.Fatalf("check err = %v stderr=%s", err, errb)
+	}
+	csiSeq := []byte{0xc2, 0x9b, 0x5b, 0x33, 0x31, 0x6d}
+	nelSeq := []byte{0xc2, 0x85}
+	for _, stream := range []string{out, errb} {
+		if bytes.Contains([]byte(stream), csiSeq) || bytes.Contains([]byte(stream), nelSeq) {
+			t.Fatalf("plugin check output kept C1 byte sequences: stdout=%q stderr=%q", out, errb)
+		}
+		for _, r := range stream {
+			if r >= 0x80 && r <= 0x9f {
+				t.Fatalf("plugin check output kept C1 control U+%04X: stdout=%q stderr=%q", r, out, errb)
+			}
+		}
+	}
+	if strings.Contains(out, "[31m") {
+		t.Fatalf("register line kept CSI remnant: %q", out)
+	}
+	if !strings.Contains(out, "register: ok") || !strings.Contains(out, "evil31mRED") {
+		t.Fatalf("register line lost content: %q", out)
+	}
+}

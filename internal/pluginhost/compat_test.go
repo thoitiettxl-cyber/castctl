@@ -242,3 +242,73 @@ func TestCheckPluginCompatNoShadowPathLeak(t *testing.T) {
 		t.Fatalf("MaxRequiredGLIBC error leaked shadow path: %v", err)
 	}
 }
+
+// TestParseVersionNeedsShortVnNextRefuses (B-N8): a short
+// vnNext that lands on an entry's own aux bytes must refuse
+// the load with a clear error, never compute a downgraded
+// maximum. Construction verbatim from the red-team probe:
+// entry1 (GLIBC_2.17, vnNext=16) + entry2 (GLIBC_2.99 at
+// offset 32). The well-formed control (vnNext=32) must
+// still find 2.99.
+func TestParseVersionNeedsShortVnNextRefuses(t *testing.T) {
+	entry := func(vnCnt uint16, vnAux, vnNext uint32, auxes ...[]byte) []byte {
+		b := make([]byte, 16)
+		binary.LittleEndian.PutUint16(b[2:], vnCnt)
+		binary.LittleEndian.PutUint32(b[8:], vnAux)
+		binary.LittleEndian.PutUint32(b[12:], vnNext)
+		out := append([]byte{}, b...)
+		for _, a := range auxes {
+			out = append(out, a...)
+		}
+		return out
+	}
+	aux := func(nameOff, next uint32) []byte {
+		b := make([]byte, 16)
+		binary.LittleEndian.PutUint32(b[8:], nameOff)
+		binary.LittleEndian.PutUint32(b[12:], next)
+		return b
+	}
+	strtab2 := []byte("GLIBC_2.17\x00GLIBC_2.99\x00")
+	e1 := entry(1, 16, 16, aux(0, 0))
+	e2 := entry(1, 16, 0, aux(11, 0))
+	two := append(append([]byte{}, e1...), e2...)
+	got, err := parseVersionNeeds(two, strtab2, binary.LittleEndian)
+	if err == nil {
+		t.Fatalf("short vnNext: want error, got max %q (downgraded maximum; true max is 2.99)", got)
+	}
+	if !strings.Contains(err.Error(), "vnNext") {
+		t.Fatalf("short vnNext error must name vnNext: %v", err)
+	}
+	e1ok := entry(1, 16, 32, aux(0, 0))
+	twoOK := append(append([]byte{}, e1ok...), e2...)
+	got, err = parseVersionNeeds(twoOK, strtab2, binary.LittleEndian)
+	if err != nil || got != "2.99" {
+		t.Fatalf("well-formed vnNext=32: got=%q err=%v, want 2.99/nil", got, err)
+	}
+	// Headers-first layout, as real linkers emit (the
+	// layout the qemu echo load exercises): both Verneed
+	// headers first, then both aux entries. Entry1's
+	// vnAux=32 skips past entry2's header; vnNext=16
+	// stops before the aux range and is well-formed.
+	header := func(vnCnt uint16, vnAux, vnNext uint32) []byte {
+		b := make([]byte, 16)
+		binary.LittleEndian.PutUint16(b[2:], vnCnt)
+		binary.LittleEndian.PutUint32(b[8:], vnAux)
+		binary.LittleEndian.PutUint32(b[12:], vnNext)
+		return b
+	}
+	hf := append([]byte{}, header(1, 32, 16)...)
+	hf = append(hf, header(1, 32, 0)...)
+	hf = append(hf, aux(0, 0)...)
+	hf = append(hf, aux(11, 0)...)
+	got, err = parseVersionNeeds(hf, strtab2, binary.LittleEndian)
+	if err != nil || got != "2.99" {
+		t.Fatalf("headers-first layout: got=%q err=%v, want 2.99/nil", got, err)
+	}
+	// A vnNext inside the entry's own header refuses.
+	e1hdr := entry(1, 16, 8, aux(0, 0))
+	got, err = parseVersionNeeds(append(append([]byte{}, e1hdr...), e2...), strtab2, binary.LittleEndian)
+	if err == nil {
+		t.Fatalf("vnNext inside header: want error, got max %q", got)
+	}
+}

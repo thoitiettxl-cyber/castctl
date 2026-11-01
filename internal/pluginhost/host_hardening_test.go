@@ -694,3 +694,214 @@ func TestHostSharedEgressScopeLastWriterWins(t *testing.T) {
 		}
 	}
 }
+
+// TestHostRollbackReportExcludesFusedReconfigurePanic (F1-R
+// probe a): a reconfigure panic fuses the OLD image's path;
+// the rollback re-register succeeds, but the tag must NOT
+// be reported Loaded: Loaded() and Call() both treat it as
+// fused, so the report must agree with them. The fuse is
+// NOT cleared by the rollback.
+func TestHostRollbackReportExcludesFusedReconfigurePanic(t *testing.T) {
+	loader, clients := fakeSetup("/plugins/echo.so")
+	var logs []string
+	h := newFakeHost(t, loader, &logs)
+	defer h.Close()
+	ctx := context.Background()
+	first := pluginhost.Desired{Tag: "echo", Type: "echo", Path: "/plugins/echo.so", Fragment: []byte(`{"n":1}`)}
+	if report := h.ApplyConfig(ctx, []pluginhost.Desired{first}); len(report.Loaded) != 1 {
+		t.Fatalf("initial load report = %+v", report)
+	}
+	fake := clients["/plugins/echo.so"]
+	fake.PanicMethods = map[string]any{pluginabi.MethodPluginReconfigure: true}
+	report := h.ApplyConfig(ctx, []pluginhost.Desired{{Tag: "echo", Type: "echo", Path: "/plugins/echo.so", Fragment: []byte(`{"n":2}`)}})
+	if len(report.Loaded) != 0 {
+		t.Fatalf("report Loaded = %v, want empty: reconfigure panic fused the loaded path", report.Loaded)
+	}
+	if len(report.Skipped) != 1 || !strings.Contains(report.Skipped[0].Reason, "rolled back") {
+		t.Fatalf("report = %+v, want one rolled-back skip", report)
+	}
+	if _, ok := h.Loaded("echo"); ok {
+		t.Fatal("Loaded() must be false after a reconfigure panic fused the loaded path")
+	}
+	if _, fused := h.Fused("echo"); !fused {
+		t.Fatal("fuse must still be recorded after a successful rollback (rollback must not clear it)")
+	}
+	if _, err := h.Call(ctx, "echo", pluginabi.MethodProviderCall, nil); err == nil || !strings.Contains(err.Error(), "fused") {
+		t.Fatalf("call err = %v, want fused fail-fast", err)
+	}
+}
+
+// TestHostRollbackReportExcludesFusedQuiescePanic (F1-R
+// probe b): a quiesce panic fuses the OLD image's path; the
+// replacement register then fails and the rollback
+// re-register succeeds, but the tag must NOT be reported
+// Loaded.
+func TestHostRollbackReportExcludesFusedQuiescePanic(t *testing.T) {
+	loader, clients := fakeSetup("/plugins/echo.so", "/plugins/v2.so")
+	var logs []string
+	h := newFakeHost(t, loader, &logs)
+	defer h.Close()
+	ctx := context.Background()
+	if report := h.ApplyConfig(ctx, []pluginhost.Desired{{Tag: "echo", Type: "echo", Path: "/plugins/echo.so", Fragment: []byte(`{"n":1}`)}}); len(report.Loaded) != 1 {
+		t.Fatalf("initial load report = %+v", report)
+	}
+	clients["/plugins/echo.so"].PanicMethods = map[string]any{pluginabi.MethodPluginQuiesce: true}
+	clients["/plugins/v2.so"].OnCall = func(ctx context.Context, method string, request []byte) ([]byte, error) {
+		if method == pluginabi.MethodPluginRegister {
+			return nil, errors.New("replacement register boom")
+		}
+		return plugintest.ErrorResponse("unexpected", "unexpected call: "+method), nil
+	}
+	report := h.ApplyConfig(ctx, []pluginhost.Desired{{Tag: "echo", Type: "echo", Path: "/plugins/v2.so", Fragment: []byte(`{"n":2}`)}})
+	if len(report.Loaded) != 0 {
+		t.Fatalf("report Loaded = %v, want empty: quiesce panic fused the loaded path", report.Loaded)
+	}
+	if len(report.Skipped) != 1 || !strings.Contains(report.Skipped[0].Reason, "rolled back to previous image") {
+		t.Fatalf("report = %+v, want one rolled-back-to-previous-image skip", report)
+	}
+	if _, ok := h.Loaded("echo"); ok {
+		t.Fatal("Loaded() must be false after a quiesce panic fused the loaded path")
+	}
+	if reason, fused := h.Fused("echo"); !fused || !strings.Contains(reason, "quiesce") {
+		t.Fatalf("fused=%v reason=%q, want quiesce-panic fuse still recorded", fused, reason)
+	}
+	if _, err := h.Call(ctx, "echo", pluginabi.MethodProviderCall, nil); err == nil || !strings.Contains(err.Error(), "fused") {
+		t.Fatalf("call err = %v, want fused fail-fast", err)
+	}
+}
+
+// TestHostStaleFuseDoesNotClobberCurrentFuse (B-F1): a
+// stale timeout fuse from a superseded image must never
+// overwrite the fuse of the currently loaded image. 60
+// fresh hosts under -race, adapted from the red-team
+// clobber repro: the old image's call blocks, v2 replaces
+// it and panics (fusing v2), then the old call's timeout
+// lands its stale fuse. The current image must stay fused
+// and Call must fail fast without re-invoking it.
+func TestHostStaleFuseDoesNotClobberCurrentFuse(t *testing.T) {
+	reinvocations := 0
+	for iter := 0; iter < 60; iter++ {
+		loader, clients := fakeSetup("/plugins/echo.so", "/plugins/v2.so")
+		var logs []string
+		h := newFakeHost(t, loader, &logs)
+		ctx := context.Background()
+		if report := h.ApplyConfig(ctx, []pluginhost.Desired{{Tag: "echo", Type: "echo", Path: "/plugins/echo.so"}}); len(report.Loaded) != 1 {
+			h.Close()
+			t.Fatalf("iter %d initial: %+v", iter, report)
+		}
+		oldFake := clients["/plugins/echo.so"]
+		newFake := clients["/plugins/v2.so"]
+		oldFake.BlockMethods = map[string]bool{pluginabi.MethodProviderCall: true}
+		callDone := make(chan error, 1)
+		callCtx, cancel := context.WithTimeout(ctx, 120*time.Millisecond)
+		go func() {
+			_, err := h.Call(callCtx, "echo", pluginabi.MethodProviderCall, []byte(`{"input":"ping"}`))
+			callDone <- err
+		}()
+		time.Sleep(10 * time.Millisecond)
+		if report := h.ApplyConfig(ctx, []pluginhost.Desired{{Tag: "echo", Type: "echo", Path: "/plugins/v2.so"}}); len(report.Loaded) != 1 {
+			cancel()
+			h.Close()
+			t.Fatalf("iter %d replace: %+v", iter, report)
+		}
+		newFake.PanicMethods = map[string]any{pluginabi.MethodProviderCall: true}
+		if _, err := h.Call(ctx, "echo", pluginabi.MethodProviderCall, nil); err == nil {
+			cancel()
+			h.Close()
+			t.Fatalf("iter %d: panicking call must error", iter)
+		}
+		before := newFake.CallCount(pluginabi.MethodProviderCall)
+		if _, err := h.Call(ctx, "echo", pluginabi.MethodProviderCall, nil); err == nil || !strings.Contains(err.Error(), "fused") {
+			cancel()
+			h.Close()
+			t.Fatalf("iter %d: fused call err = %v", iter, err)
+		}
+		if got := newFake.CallCount(pluginabi.MethodProviderCall); got != before {
+			cancel()
+			h.Close()
+			t.Fatalf("iter %d: fused plugin re-called before stale fuse landed", iter)
+		}
+		select {
+		case <-callDone:
+		case <-time.After(5 * time.Second):
+			cancel()
+			h.Close()
+			t.Fatalf("iter %d: old call did not return", iter)
+		}
+		cancel()
+		if _, fused := h.Fused("echo"); !fused {
+			h.Close()
+			t.Fatalf("iter %d: tag must stay fused after the stale fuse lands", iter)
+		}
+		if _, ok := h.Loaded("echo"); ok {
+			h.Close()
+			t.Fatalf("iter %d: Loaded() must be false: the current image is fused", iter)
+		}
+		before = newFake.CallCount(pluginabi.MethodProviderCall)
+		_, err := h.Call(ctx, "echo", pluginabi.MethodProviderCall, nil)
+		after := newFake.CallCount(pluginabi.MethodProviderCall)
+		if after != before {
+			reinvocations++
+			t.Logf("iter %d: CLOBBER — panicking plugin re-invoked after stale fuse landed (call err=%v)", iter, err)
+		}
+		h.Close()
+	}
+	t.Logf("clobber attempts: 60 iterations, re-invocations=%d", reinvocations)
+	if reinvocations > 0 {
+		t.Errorf("stale fuse clobbered the current fuse in %d/60 iterations", reinvocations)
+	}
+}
+
+// TestHostFusedSkipReasonStripsForgedControls: the fused
+// skip line (host.go:412, printed verbatim by `plugin
+// check`) must carry no C1 control bytes even when the
+// register error that created the fuse carried forged C1
+// sequences.
+func TestHostFusedSkipReasonStripsForgedControls(t *testing.T) {
+	loader, clients := fakeSetup("/plugins/echo.so")
+	var logs []string
+	h := newFakeHost(t, loader, &logs)
+	defer h.Close()
+	ctx := context.Background()
+	if report := h.ApplyConfig(ctx, []pluginhost.Desired{{Tag: "echo", Type: "echo", Path: "/plugins/echo.so"}}); len(report.Loaded) != 1 {
+		t.Fatalf("initial load report = %+v", report)
+	}
+	clients["/plugins/echo.so"].OnCall = func(ctx context.Context, method string, request []byte) ([]byte, error) {
+		switch method {
+		case pluginabi.MethodPluginReconfigure:
+			return nil, errors.New("reconfigure boom")
+		case pluginabi.MethodPluginRegister:
+			return nil, errors.New("rollback boom \u009b[31mRED\u0085TAIL")
+		default:
+			return plugintest.ErrorResponse("unexpected", "unexpected call: "+method), nil
+		}
+	}
+	report := h.ApplyConfig(ctx, []pluginhost.Desired{{Tag: "echo", Type: "echo", Path: "/plugins/echo.so", Fragment: []byte(`{"n":2}`)}})
+	if len(report.Skipped) != 1 {
+		t.Fatalf("rollback-failure report = %+v", report)
+	}
+	report = h.ApplyConfig(ctx, []pluginhost.Desired{{Tag: "echo", Type: "echo", Path: "/plugins/echo.so"}})
+	if len(report.Skipped) != 1 || !strings.Contains(report.Skipped[0].Reason, "fused") {
+		t.Fatalf("fused-skip report = %+v", report)
+	}
+	reason := report.Skipped[0].Reason
+	assertNoC1Bytes(t, reason)
+	if strings.Contains(reason, "[31m") {
+		t.Fatalf("fused-skip reason kept CSI remnant: %q", reason)
+	}
+}
+
+// assertNoC1Bytes fails when s contains the exact C1 byte
+// sequences (U+009B CSI + "[31m", U+0085 NEL) or any raw
+// C1 rune.
+func assertNoC1Bytes(t *testing.T, s string) {
+	t.Helper()
+	if strings.Contains(s, "\u009b[31m") || strings.Contains(s, "\u0085") {
+		t.Fatalf("output kept C1 bytes: %q", s)
+	}
+	for _, r := range s {
+		if r >= 0x80 && r <= 0x9f {
+			t.Fatalf("output kept C1 control U+%04X: %q", r, s)
+		}
+	}
+}

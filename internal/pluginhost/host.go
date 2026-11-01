@@ -118,6 +118,13 @@ type Host struct {
 	mu      sync.Mutex
 	loaded  map[string]*loadedPlugin
 	fused   map[string]fusedEntry
+	// nextGen is the next load generation, assigned under
+	// h.mu and monotonically increasing for the life of
+	// the host: each loaded image gets a distinct
+	// generation, so a fuse recorded for a superseded
+	// image can never be mistaken for the current
+	// image's fuse (see fuse).
+	nextGen uint64
 	// egresses are loopback proxies handed to the host by
 	// the wiring (AdoptEgress) so their credentials die
 	// with the host. The host never creates a proxy: the
@@ -128,11 +135,15 @@ type Host struct {
 }
 
 // fusedEntry records why a plugin is fused and WHICH image
-// path was fused. A fuse is per-path: reconfiguring to a
-// different path clears it, while the same path stays fused.
+// was fused: its path and its load generation. A fuse is
+// per path AND generation: reconfiguring to a different
+// path clears it, while the same path stays fused, and a
+// fuse recorded for a superseded generation never hides
+// the currently loaded image.
 type fusedEntry struct {
-	reason string
-	path   string
+	reason     string
+	path       string
+	generation uint64
 }
 
 // LoadedPlugin is the host-side view of a registered plugin.
@@ -155,10 +166,11 @@ type Skipped struct {
 
 // ApplyReport is the result of ApplyConfig: the tags that are
 // loaded AND callable afterwards, and the desired entries
-// that were skipped. A tag is never in Loaded for a path
-// it is fused for, even when its image is still resident:
-// fused calls fail fast for that path until a
-// different-path ApplyConfig clears the fuse.
+// that were skipped. A tag is never in Loaded when a fuse
+// is recorded for its loaded path and generation, even
+// when its image is still resident: fused calls fail fast
+// for that image until a different-path ApplyConfig clears
+// the fuse.
 type ApplyReport struct {
 	Loaded  []string
 	Skipped []Skipped
@@ -173,7 +185,12 @@ type loadedPlugin struct {
 	schema       uint32
 	commands     []pluginabi.Command
 	path         string
-	egress       *EgressProxy
+	// generation is this image's monotonically increasing
+	// load generation (see Host.nextGen): it distinguishes
+	// this image from any earlier image loaded for the
+	// same tag, so fuses are per image, not per tag.
+	generation uint64
+	egress     *EgressProxy
 }
 
 // New builds a Host. No plugin is loaded until ApplyConfig.
@@ -214,12 +231,13 @@ func (h *Host) Fused(tag string) (string, bool) {
 }
 
 // Loaded reports the registered plugin for tag, if any.
-// A fuse is per-path: only a fuse recorded for the loaded
-// image's own path hides it — a call for that path
-// fail-fasts (see Call), so Loaded means callable for
-// that path. A fuse recorded for a different path (a
-// failed replacement, rolled back to this image) does
-// not hide the loaded image. Registration fields are
+// A fuse is per path and generation: only a fuse recorded
+// for the loaded image's own path and generation hides
+// it — a call for that image fail-fasts (see Call), so
+// Loaded means callable for that image. A fuse recorded
+// for a different path or an earlier generation (a failed
+// replacement, rolled back to this image) does not hide
+// the loaded image. Registration fields are
 // read under h.mu, the same mutex applyRegistration
 // writes them under.
 func (h *Host) Loaded(tag string) (LoadedPlugin, bool) {
@@ -229,7 +247,7 @@ func (h *Host) Loaded(tag string) (LoadedPlugin, bool) {
 	if !ok || !lp.registered {
 		return LoadedPlugin{}, false
 	}
-	if entry, fused := h.fused[tag]; fused && entry.path == lp.path {
+	if entry, fused := h.fused[tag]; fused && entry.path == lp.path && entry.generation == lp.generation {
 		return LoadedPlugin{}, false
 	}
 	return LoadedPlugin{
@@ -409,11 +427,14 @@ func (h *Host) ApplyConfig(ctx context.Context, desired []Desired) ApplyReport {
 		existing := h.loaded[d.Tag]
 		h.mu.Unlock()
 		if isFused && fuseEntry.path == d.Path {
-			report.Skipped = append(report.Skipped, Skipped{Tag: d.Tag, Reason: "fused: " + fuseEntry.reason})
+			report.Skipped = append(report.Skipped, Skipped{Tag: d.Tag, Reason: "fused: " + StripControlChars(fuseEntry.reason)})
 			// A tag fused for this path is never reported
 			// Loaded, even when its image is still
 			// resident: Loaded means callable for that
-			// path, and fused calls fail fast.
+			// image, and fused calls fail fast. The
+			// stored reason is re-stripped at this print
+			// hop so the invariant does not rest on
+			// producer discipline alone.
 			continue
 		}
 		if isFused {
@@ -426,7 +447,7 @@ func (h *Host) ApplyConfig(ctx context.Context, desired []Desired) ApplyReport {
 			if err := h.reconfigure(ctx, existing, d); err != nil {
 				// Rollback: re-register with the old fragment.
 				if rerr := h.register(ctx, existing, existing.desired); rerr != nil {
-					h.fuse(d.Tag, "reconfigure failed and rollback failed: "+shortErr(rerr), existing.path)
+					h.fuse(d.Tag, "reconfigure failed and rollback failed: "+shortErr(rerr), existing.path, existing.generation)
 					h.mu.Lock()
 					delete(h.loaded, d.Tag)
 					h.mu.Unlock()
@@ -435,7 +456,16 @@ func (h *Host) ApplyConfig(ctx context.Context, desired []Desired) ApplyReport {
 					report.Skipped = append(report.Skipped, Skipped{Tag: d.Tag, Reason: "reconfigure failed and rollback failed"})
 				} else {
 					report.Skipped = append(report.Skipped, Skipped{Tag: d.Tag, Reason: "reconfigure failed, rolled back to previous config"})
-					report.Loaded = append(report.Loaded, d.Tag)
+					// The rollback does NOT clear a fuse
+					// the failed reconfigure recorded for
+					// this image: the image is fused, so
+					// it is never reported Loaded (the
+					// report must agree with Loaded() and
+					// Call(), which both fail fast for a
+					// fused image).
+					if !h.fusedForLoaded(d.Tag, existing) {
+						report.Loaded = append(report.Loaded, d.Tag)
+					}
 				}
 				continue
 			}
@@ -454,7 +484,7 @@ func (h *Host) ApplyConfig(ctx context.Context, desired []Desired) ApplyReport {
 				// Rollback: re-register the old image with
 				// its old fragment.
 				if rerr := h.register(ctx, existing, existing.desired); rerr != nil {
-					h.fuse(d.Tag, "replacement failed and rollback failed: "+shortErr(rerr), existing.path)
+					h.fuse(d.Tag, "replacement failed and rollback failed: "+shortErr(rerr), existing.path, existing.generation)
 					h.mu.Lock()
 					delete(h.loaded, d.Tag)
 					h.mu.Unlock()
@@ -463,7 +493,14 @@ func (h *Host) ApplyConfig(ctx context.Context, desired []Desired) ApplyReport {
 					report.Skipped = append(report.Skipped, Skipped{Tag: d.Tag, Reason: "replacement failed and rollback failed"})
 				} else {
 					report.Skipped = append(report.Skipped, Skipped{Tag: d.Tag, Reason: "replacement failed, rolled back to previous image"})
-					report.Loaded = append(report.Loaded, d.Tag)
+					// As in the reconfigure rollback above:
+					// a fuse the failed quiesce recorded
+					// for this image is not cleared by
+					// the rollback, so the image is never
+					// reported Loaded while it is fused.
+					if !h.fusedForLoaded(d.Tag, existing) {
+						report.Loaded = append(report.Loaded, d.Tag)
+					}
 				}
 				continue
 			}
@@ -507,16 +544,60 @@ func shortErr(err error) string {
 	// or inject a terminal sequence downstream. The cap
 	// and redaction in safePluginText reintroduce no
 	// control characters.
-	return safePluginText(stripControlChars(err.Error()))
+	return safePluginText(StripControlChars(err.Error()))
 }
 
-func (h *Host) fuse(tag, reason, path string) {
+func (h *Host) fuse(tag, reason, path string, generation uint64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.fused == nil {
 		h.fused = make(map[string]fusedEntry)
 	}
-	h.fused[tag] = fusedEntry{reason: reason, path: path}
+	// A fuse recorded for a superseded image (a different
+	// path or generation than the currently loaded one)
+	// must NEVER overwrite the fuse of the currently
+	// loaded image: a stale in-flight timeout fuse
+	// landing after a newer panic fuse would otherwise
+	// make the panicking image callable again, because
+	// Loaded()/Call() honour only a fuse recorded for
+	// the current image. Such a stale fuse is dropped;
+	// a fuse for the currently loaded image always
+	// replaces any older entry. When no image is loaded
+	// (a fresh-load fuse, or a fuse recorded just before
+	// the loaded entry is deleted on rollback failure)
+	// the fuse is recorded as-is: the next ApplyConfig's
+	// path check decides it.
+	if cur, ok := h.loaded[tag]; ok && cur != nil {
+		if existing, fused := h.fused[tag]; fused && existing.path == cur.path && existing.generation == cur.generation {
+			if path != cur.path || generation != cur.generation {
+				return
+			}
+		}
+	}
+	h.fused[tag] = fusedEntry{reason: reason, path: path, generation: generation}
+}
+
+// fusedForLoaded reports whether a fuse is recorded for
+// lp's own path and generation: the image is fused and
+// must not be reported Loaded. It never clears the fuse.
+func (h *Host) fusedForLoaded(tag string, lp *loadedPlugin) bool {
+	if lp == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	entry, ok := h.fused[tag]
+	return ok && entry.path == lp.path && entry.generation == lp.generation
+}
+
+// nextGeneration assigns the next monotonically increasing
+// load generation. Generations are never reused within a
+// host's life, including across Close.
+func (h *Host) nextGeneration() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.nextGen++
+	return h.nextGen
 }
 
 // loadOne opens (the loader shadow-copies and compat-gates)
@@ -555,7 +636,7 @@ func (h *Host) loadOne(ctx context.Context, d Desired) (*loadedPlugin, error) {
 	if err != nil {
 		return nil, err
 	}
-	lp := &loadedPlugin{desired: d, client: client, path: d.Path}
+	lp := &loadedPlugin{desired: d, client: client, path: d.Path, generation: h.nextGeneration()}
 	if err := h.register(ctx, lp, d); err != nil {
 		client.Shutdown()
 		return nil, err
@@ -689,12 +770,15 @@ func (h *Host) Call(ctx context.Context, tag, method string, request []byte) ([]
 	fuseEntry, isFused := h.fused[tag]
 	var client Client
 	var path string
+	var generation uint64
 	if ok && lp != nil {
-		// Snapshot the client and path under h.mu: they
-		// are immutable after loadOne, but no loadedPlugin
-		// field is read outside the lock.
+		// Snapshot the client, path, and generation
+		// under h.mu: they are immutable after loadOne,
+		// but no loadedPlugin field is read outside the
+		// lock.
 		client = lp.client
 		path = lp.path
+		generation = lp.generation
 	}
 	h.mu.Unlock()
 	// A fused plugin is never re-called: fail fast with the
@@ -703,24 +787,27 @@ func (h *Host) Call(ctx context.Context, tag, method string, request []byte) ([]
 	// ApplyConfig clears it — not until a deadline. A fused
 	// tag with no loaded entry (rollback-failure deletion)
 	// reports fused, not "not loaded": the distinction
-	// matters, because a same-path load will skip.
-	if isFused && (!ok || fuseEntry.path == path) {
+	// matters, because a same-path load will skip. Only a
+	// fuse recorded for this image's own path and
+	// generation fail-fasts: a stale fuse for a superseded
+	// image does not block the current one.
+	if isFused && (!ok || (fuseEntry.path == path && fuseEntry.generation == generation)) {
 		return nil, fmt.Errorf("plugin %q is fused: %s", tag, fuseEntry.reason)
 	}
 	if !ok || lp == nil || client == nil {
 		return nil, fmt.Errorf("plugin %q is not loaded", tag)
 	}
-	return h.callEnvelopeClient(ctx, client, method, request, tag, path)
+	return h.callEnvelopeClient(ctx, client, method, request, tag, path, generation)
 }
 
 // callEnvelope is the guarded call for a loadedPlugin
-// (registration, reconfigure, quiesce): lp.client and
-// lp.path are immutable after loadOne, so reading them
-// here cannot race applyRegistration's h.mu-guarded
+// (registration, reconfigure, quiesce): lp.client, lp.path,
+// and lp.generation are immutable after loadOne, so reading
+// them here cannot race applyRegistration's h.mu-guarded
 // writes. Call uses callEnvelopeClient with a snapshot
 // taken under h.mu instead.
 func (h *Host) callEnvelope(ctx context.Context, lp *loadedPlugin, method string, request []byte, tag string) ([]byte, error) {
-	return h.callEnvelopeClient(ctx, lp.client, method, request, tag, lp.path)
+	return h.callEnvelopeClient(ctx, lp.client, method, request, tag, lp.path, lp.generation)
 }
 
 // callEnvelopeClient is the guarded call (mirroring upstream
@@ -730,7 +817,7 @@ func (h *Host) callEnvelope(ctx context.Context, lp *loadedPlugin, method string
 // the plugin thread). Here a recovered host-adapter panic
 // fuses the plugin instead of re-panicking: the host boundary,
 // not the CLI boundary, owns plugin panics.
-func (h *Host) callEnvelopeClient(ctx context.Context, client Client, method string, request []byte, tag, path string) ([]byte, error) {
+func (h *Host) callEnvelopeClient(ctx context.Context, client Client, method string, request []byte, tag, path string, generation uint64) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -753,7 +840,7 @@ func (h *Host) callEnvelopeClient(ctx context.Context, client Client, method str
 	case res := <-result:
 		if res.recovered != nil {
 			reason := fmt.Sprintf("%s panic: %T", method, res.recovered)
-			h.fuse(tag, reason, path)
+			h.fuse(tag, reason, path, generation)
 			return nil, fmt.Errorf("plugin %q: %s", tag, reason)
 		}
 		if res.err != nil {
@@ -764,8 +851,10 @@ func (h *Host) callEnvelopeClient(ctx context.Context, client Client, method str
 		// The call is abandoned, not killed: the plugin
 		// thread keeps running until it notices ctx. The
 		// plugin is fused so no further call is attempted
-		// on a hung image.
-		h.fuse(tag, "call timed out or cancelled: "+method, path)
+		// on a hung image. The fuse carries this image's
+		// path and generation, so it can never clobber the
+		// fuse of a newer image (see fuse).
+		h.fuse(tag, "call timed out or cancelled: "+method, path, generation)
 		return nil, ctx.Err()
 	}
 }
@@ -785,7 +874,7 @@ func parseEnvelope(response []byte, tag string) ([]byte, error) {
 			// (safety N1) before the cap/redact path,
 			// so a forged newline cannot create a
 			// second output line downstream.
-			return nil, fmt.Errorf("plugin %q: %s: %s", tag, stripControlChars(env.Error.Code), safePluginText(stripControlChars(env.Error.Message)))
+			return nil, fmt.Errorf("plugin %q: %s: %s", tag, StripControlChars(env.Error.Code), safePluginText(StripControlChars(env.Error.Message)))
 		}
 		return nil, fmt.Errorf("plugin %q returned a failed envelope without an error", tag)
 	}
@@ -838,11 +927,12 @@ func (h *Host) dispatchHostCall(method string, request []byte) []byte {
 	// Strip control characters so a plugin log line cannot
 	// inject terminal control sequences or forge a second
 	// log line in host output: newline/CR/tab become a
-	// space, other C0 controls and DEL are dropped. Then
-	// the message goes through the same cap-before-redact
-	// path as every other plugin-text surface (4096 with
-	// marker, secret-keyed shapes redacted).
-	message = stripControlChars(message)
+	// space, other C0 controls, DEL, and C1 controls are
+	// dropped. Then the message goes through the same
+	// cap-before-redact path as every other plugin-text
+	// surface (4096 with marker, secret-keyed shapes
+	// redacted).
+	message = StripControlChars(message)
 	message = safePluginText(message)
 	// The level is an allowlist, not free text: plugincheck
 	// prints it raw, so a level carrying a newline or ESC
