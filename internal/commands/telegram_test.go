@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
 )
 
@@ -42,14 +43,30 @@ func telegramTestEnv(t *testing.T, configJSON string) (*Env, *bytes.Buffer, *byt
 }
 
 // cmdFakeTelegram is a minimal Bot API fake: getMe, getUpdates
-// (one message batch, then empty), sendMessage. It records
-// method names only; the request path (token-bearing) is never
-// stored.
+// (one message batch, then empty), sendMessage, editMessageText.
+// It records method names and sent/edited texts only; the
+// request path (token-bearing) is never stored. When batches is
+// set, getUpdates serves them in order instead of the default
+// single message.
 type cmdFakeTelegram struct {
-	mu      sync.Mutex
-	methods []string
-	sends   []string
-	served  bool
+	mu       sync.Mutex
+	methods  []string
+	sends    []string
+	edits    []string
+	served   bool
+	batches  []string
+	batchIdx int
+	// gates, parallel to batches: batch i is served only once
+	// gates[i] reports true (nil = always). A gated batch that
+	// is not ready yet yields an empty result without
+	// advancing, so the bot re-polls until it is.
+	gates []func(*cmdFakeTelegram) bool
+}
+
+func (f *cmdFakeTelegram) editTexts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.edits...)
 }
 
 func (f *cmdFakeTelegram) handler(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +80,45 @@ func (f *cmdFakeTelegram) handler(w http.ResponseWriter, r *http.Request) {
 	case "getMe":
 		fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"Fake","username":"fakebot"}}`)
 	case "getUpdates":
+		// The gate is evaluated WITHOUT holding f.mu: gates
+		// inspect the fake (editTexts locks f.mu), so
+		// evaluating one under the lock deadlocks the
+		// handler.
 		f.mu.Lock()
+		idx := f.batchIdx
+		var gate func(*cmdFakeTelegram) bool
+		hasBatches := f.batches != nil
+		if hasBatches && idx < len(f.gates) {
+			gate = f.gates[idx]
+		}
+		f.mu.Unlock()
+		if hasBatches && gate != nil && !gate(f) {
+			time.Sleep(5 * time.Millisecond)
+			fmt.Fprint(w, `{"ok":true,"result":[]}`)
+			return
+		}
+		f.mu.Lock()
+		var body string
+		if hasBatches {
+			if f.batchIdx != idx {
+				// Another poll served this batch while the
+				// gate was evaluated: yield empty.
+				f.mu.Unlock()
+				time.Sleep(5 * time.Millisecond)
+				fmt.Fprint(w, `{"ok":true,"result":[]}`)
+				return
+			}
+			if f.batchIdx < len(f.batches) {
+				body = f.batches[f.batchIdx]
+				f.batchIdx++
+			} else {
+				body = `{"ok":true,"result":[]}`
+			}
+			f.mu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+			fmt.Fprint(w, body)
+			return
+		}
 		served := f.served
 		f.served = true
 		f.mu.Unlock()
@@ -82,6 +137,17 @@ func (f *cmdFakeTelegram) handler(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Lock()
 		f.sends = append(f.sends, text)
+		f.mu.Unlock()
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":100,"chat":{"id":500,"type":"private"},"date":0,"text":"ok"}}`)
+	case "editMessageText":
+		text := ""
+		if err := r.ParseMultipartForm(1 << 20); err == nil && r.MultipartForm != nil {
+			text = r.MultipartForm.Value["text"][0]
+		} else if err := r.ParseForm(); err == nil {
+			text = r.Form.Get("text")
+		}
+		f.mu.Lock()
+		f.edits = append(f.edits, text)
 		f.mu.Unlock()
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":100,"chat":{"id":500,"type":"private"},"date":0,"text":"ok"}}`)
 	default:
@@ -196,24 +262,35 @@ func TestTelegramRunPollsFakeServerThroughRuntimeClient(t *testing.T) {
 		},
 	}}
 
+	// The turn runs against a scripted in-memory gateway: the
+	// fake Telegram server proves the bot polls through the
+	// runtime client, the gateway proves a real turn ran.
+	gw := newTelegramTurnFakeGateway()
+	gw.subScripts = []turnSubScript{{replyText: "Hello back", deltas: []string{"Hel"}}}
+	muse := conn.New(func(context.Context, conn.Config) (conn.Gateway, error) { return gw, nil })
+
 	env, out, errb := telegramTestEnv(t, telegramTestConfig())
 	var gotProfile string
 	env.BuildRuntime = func(ctx context.Context, loc *profile.ConfigLocation, prof *profile.Profile, env *Env) (*Runtime, error) {
 		gotProfile = prof.Name
-		return &Runtime{Profile: prof, httpClientOverride: fakeClient}, nil
+		return &Runtime{Profile: prof, Muse: muse, httpClientOverride: fakeClient}, nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	codeCh := make(chan int, 1)
 	go func() { codeCh <- Run(ctx, []string{"telegram", "run"}, env) }()
 
-	// Wait for the placeholder notice: proves GetMe + polling +
-	// the message handler ran through the runtime client.
+	// Wait for the final edit: proves GetMe + polling + the
+	// message handler ran a real turn through the runtime
+	// client and the fake gateway.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		fake.mu.Lock()
-		n := len(fake.sends)
-		fake.mu.Unlock()
-		if n >= 1 {
+		found := false
+		for _, e := range fake.editTexts() {
+			if strings.Contains(e, "Hello back") {
+				found = true
+			}
+		}
+		if found {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -237,8 +314,13 @@ func TestTelegramRunPollsFakeServerThroughRuntimeClient(t *testing.T) {
 	fake.mu.Lock()
 	sends := append([]string(nil), fake.sends...)
 	fake.mu.Unlock()
-	if len(sends) != 1 || !strings.Contains(sends[0], "does not run Muse turns yet") {
-		t.Errorf("placeholder sends = %q; want one placeholder notice", sends)
+	if len(sends) < 1 || !strings.Contains(sends[0], "Sending to Muse") {
+		t.Errorf("sends = %q; want the streaming bubble", sends)
+	}
+	for _, s := range sends {
+		if strings.Contains(s, "does not run Muse turns yet") {
+			t.Errorf("placeholder notice still sent: %q", s)
+		}
 	}
 	combined := out.String() + errb.String()
 	if strings.Contains(combined, telegramTestToken) {

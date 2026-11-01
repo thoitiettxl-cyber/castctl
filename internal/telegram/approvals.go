@@ -226,6 +226,13 @@ type CallbackEntry struct {
 	SessionID  string
 	Title      string
 	AfterSeq   *int64
+	// Answer is the plain-text value a question button sends
+	// as a new turn (Action "answer"). Page is the target
+	// page of a chat-picker navigation button (Action
+	// "chats_page"). Both are step-5 fields; the core
+	// decide/approve-all actions leave them zero.
+	Answer string
+	Page   int
 }
 
 // CallbackRegistry is the in-memory callback store, capped at

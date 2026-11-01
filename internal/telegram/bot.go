@@ -183,6 +183,15 @@ type Settings struct {
 	Pending PendingFunc
 	// Resume resumes turns after decisions. Nil means no resume.
 	Resume ResumeFunc
+	// CallbackFunc handles registry actions the bot core does not
+	// know: question answers, chat-picker paging/open, delete
+	// confirms, and other step-5 button surfaces. It returns
+	// (handled=true) when it acted (its error, if any, becomes
+	// the chat warning, as for decide/approve-all); (handled=false)
+	// falls back to the unknown-action log. Nil means no extra
+	// actions exist: unknown actions are only logged, exactly as
+	// before the hook existed.
+	CallbackFunc func(ctx context.Context, chatID int64, messageID int, entry CallbackEntry) (bool, error)
 	// MessageHandler handles plain messages. Nil means messages
 	// are dropped after the allowlist (no turn wiring in item 4).
 	MessageHandler MessageHandlerFunc
@@ -217,11 +226,12 @@ type Bot struct {
 	registry *CallbackRegistry
 	dispatch *dispatcher
 
-	decider Decider
-	pending PendingFunc
-	resume  ResumeFunc
-	handler MessageHandlerFunc
-	sleep   func(time.Duration)
+	decider      Decider
+	pending      PendingFunc
+	resume       ResumeFunc
+	handler      MessageHandlerFunc
+	callbackFunc func(ctx context.Context, chatID int64, messageID int, entry CallbackEntry) (bool, error)
+	sleep        func(time.Duration)
 
 	// AutoApprove / AutoAllowOnce are the toggles the approval
 	// surface reads (from the telegram config block).
@@ -353,6 +363,7 @@ func New(s Settings) (*Bot, error) {
 		pending:       pending,
 		resume:        s.Resume,
 		handler:       s.MessageHandler,
+		callbackFunc:  s.CallbackFunc,
 		sleep:         sleep,
 		claimWait:     claimWait,
 		AutoApprove:   s.AutoApprove,
@@ -851,8 +862,16 @@ func (b *Bot) onCallback(ctx context.Context, upd *models.Update) {
 		// action is ever registered in item 4. Defensive drop.
 		return
 	default:
-		b.logger.Debug("telegram unknown callback action", "update_id", upd.ID)
-		return
+		if b.callbackFunc == nil {
+			b.logger.Debug("telegram unknown callback action", "update_id", upd.ID)
+			return
+		}
+		handled, herr := b.callbackFunc(ctx, chatID, mid, entry)
+		if !handled {
+			b.logger.Debug("telegram unknown callback action", "update_id", upd.ID)
+			return
+		}
+		err = herr
 	}
 	if err != nil {
 		warning := "⚠️ " + EscapeText(truncateRunes(b.summarize(err.Error()), 600))

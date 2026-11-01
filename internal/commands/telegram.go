@@ -68,13 +68,6 @@ network, no GetMe). The token value is never printed; only its
 shape validity is reported.
 `
 
-// telegramPlaceholderNotice is the reply this build sends to
-// every allowlisted message. It is deliberately explicit that
-// no turn ran: silently dropping the message would look like a
-// dead bot, and inventing a turn reply would be a lie. The
-// step-5 handler replaces this with real turn wiring.
-const telegramPlaceholderNotice = "This bot build does not run Muse turns yet (step 5 wiring). Your message was received, nothing was run."
-
 var telegramSubcommands = []string{"run", "status"}
 
 func init() {
@@ -130,6 +123,12 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 	if err != nil {
 		return err
 	}
+	// ensureNodeID before the runtime is built: deliverSend
+	// transmits prof.NodeID verbatim, so the runtime must be
+	// built with the identity the send path uses.
+	if err := ensureNodeID(loc, prof, env.lookupEnv); err != nil {
+		return err
+	}
 	// Persistent runtime state lives beside the profile's other
 	// files (telegram-state.json in the profile directory), never
 	// inside the token-bearing config.json. A read failure other
@@ -146,6 +145,13 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 		return err
 	}
 	defer func() { _ = rt.Close() }()
+	if rt.Muse == nil {
+		// Production buildRuntime always sets Muse; a nil
+		// Muse here is a wiring error, and the turn runner
+		// would nil-panic on first use. Fail fast, before
+		// polling starts.
+		return errors.New("telegram: runtime has no Muse connection")
+	}
 
 	// [STEP-5 FOLLOW-UP] env.Logger is nil on the production
 	// path (main passes an empty Env; the log factory handle
@@ -168,7 +174,31 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 	if stateCorrupt {
 		logger.Warn("telegram state file corrupt; starting with fresh state", "path", telegram.StatePath(prof.Dir))
 	}
+	// The heartbeat lives for the bot process, not per turn:
+	// concurrent turns on one Muse share it, and no turn's
+	// stop may end the heartbeat mid-turn for another chat.
+	// executeWait therefore runs with externalHeartbeat.
+	rt.Muse.StartHeartbeat(0)
+	defer rt.Muse.StopHeartbeat()
+
+	// Effective toggles are resolved per turn: the telegram
+	// block values are the initial values, and the runtime
+	// state file wins after the first /autoapprove toggle
+	// (gate D4). No CLI flag, env var, or profile-entry value
+	// feeds a bot turn.
+	effectiveToggles := func() (bool, bool) {
+		aa, ao, _ := stateStore.Toggles()
+		approve, allowOnce := tg.AutoApprove, tg.AutoAllowOnce
+		if aa != nil {
+			approve = *aa
+		}
+		if ao != nil {
+			allowOnce = *ao
+		}
+		return approve, allowOnce
+	}
 	var bot *telegram.Bot
+	var runner *telegramTurnRunner
 	bot, err = telegram.New(telegram.Settings{
 		Token:          tg.Token,
 		AllowedUserIDs: tg.AllowedUserIDs,
@@ -189,14 +219,27 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 		Decider: telegram.DeciderFunc(func(context.Context, string, string) error {
 			return errors.New("telegram: approval decisions are not wired in this build (gateway decide lands in step 5)")
 		}),
+		// Command dispatch lands in A4; until then every
+		// message starts a turn. The runner is assigned
+		// after New returns; the handler cannot run before
+		// Start, so the nil window never observes a message.
 		MessageHandler: func(ctx context.Context, mc telegram.MessageContext) error {
-			_, err := bot.Send(ctx, mc.ChatID, telegramPlaceholderNotice, telegram.SendOptions{})
-			return err
+			runner.startTurn(ctx, mc.ChatID, mc.Text)
+			return nil
 		},
 	})
 	if err != nil {
 		return err
 	}
+	runner = newTelegramTurnRunner(telegramTurnDeps{
+		env:     env,
+		bot:     bot,
+		rt:      rt,
+		prof:    prof,
+		store:   stateStore,
+		logger:  logger,
+		toggles: effectiveToggles,
+	})
 	fmt.Fprintf(env.stdout(), "telegram: polling for profile %q (%d allowed users); Ctrl-C to stop\n", tg.Profile, len(tg.AllowedUserIDs))
 	return bot.Start(ctx)
 }
