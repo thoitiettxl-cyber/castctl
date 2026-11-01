@@ -364,6 +364,71 @@ four builds succeed, the release also carries a `checksums.txt`
 uploaded by the checksums job after the builds, so a release whose
 builds fail may lack it.
 
+### Running on a phone (Droidspaces)
+
+castctl runs on a phone inside a Droidspaces Linux container as a
+normal `linux/arm64` glibc binary. There is no separate Android build.
+Set up Droidspaces first: a rooted phone (KernelSU recommended) with
+a kernel that has container support, then install a Linux container
+from the Droidspaces app and open a shell in it. See the Droidspaces
+docs: https://www.droidspaces.org/docs/installation-android.html
+
+Inside the container shell, download the `linux/arm64` release
+archive for the release tag you want (replace `vX.Y.Z` with the tag,
+and confirm the asset exists on that tag's Releases page):
+
+```sh
+TAG=vX.Y.Z
+curl -fsSL -O "https://github.com/thoitiettxl-cyber/castctl/releases/download/${TAG}/castctl_${TAG#v}_linux_arm64.tar.gz"
+curl -fsSL -O "https://github.com/thoitiettxl-cyber/castctl/releases/download/${TAG}/checksums.txt"
+```
+
+Verify the downloaded archive against its single entry in
+`checksums.txt` (the file lists all four release archives, so do
+not run `sha256sum -c` on the whole file with only one archive
+present), then extract it and install the binary into
+`/usr/local/bin` (or any directory on your `PATH`):
+
+```sh
+grep "castctl_${TAG#v}_linux_arm64.tar.gz" checksums.txt | sha256sum -c -
+tar -xzf "castctl_${TAG#v}_linux_arm64.tar.gz"
+install -m 755 castctl /usr/local/bin/castctl
+castctl --version
+```
+
+If the glibc binary will not run in your container (for example a
+musl-based container), use the static `_no-plugin` archive instead:
+`castctl_<version>_linux_arm64_no-plugin.tar.gz` from the same
+release.
+
+Config lives in one `config.json`. With no `--config` flag and no
+`CASTCTL_CONFIG` set, castctl reads
+`$XDG_CONFIG_HOME/castctl/config.json`, or
+`$HOME/.config/castctl/config.json` when `XDG_CONFIG_HOME` is unset.
+Override it with `--config <path-to-config.json>` or by setting
+`CASTCTL_CONFIG` to that path. See `docs/config.md` for the schema.
+Never put tokens or cookies in chat, logs, or screenshots.
+
+To keep a long-running castctl process up without a service manager,
+run it in a simple restart loop in the container shell. The example
+below serves the web UI, which requires a `webui` block in
+`config.json` (with a token); without one, `webui serve` exits 2,
+so configure the block first:
+
+```sh
+while true; do
+  castctl webui serve
+  sleep 5
+done
+```
+
+> **UNVERIFIED — service integration:** running castctl as a
+> container service (a systemd/OpenRC unit, enabled at boot) has not
+> been tested. Droidspaces containers do boot with an init system as
+> PID 1, but no castctl service unit exists yet and none has been
+> verified inside Droidspaces. Do not treat the loop above as a
+> service; it stops when the shell/container stops.
+
 ## Gateway frame reassembly caps
 
 Deliberate Go-only fail-closed hardening ordered by Boss, NOT
