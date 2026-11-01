@@ -942,6 +942,75 @@ func TestTelegramRunFreshReplyPerTurn(t *testing.T) {
 	}
 }
 
+// TestBubbleEditorSignalNeverBlocksOnSlowEdit is the R7
+// acceptance test for the edit move off the Runner goroutine:
+// a slow (2s) streaming edit must not stall the signal path.
+// Signals return immediately while the edit is in flight (the
+// old maybeEdit-on-OnEvent path would block the first signal
+// for the full 2s); the loop goroutine still performs the
+// edit, exactly once, and finish() joins it.
+func TestBubbleEditorSignalNeverBlocksOnSlowEdit(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	starts, ends := 0, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/getMe") {
+			fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"Test","username":"testbot"}}`)
+			return
+		}
+		if !strings.HasSuffix(r.URL.Path, "/editMessageText") {
+			fmt.Fprint(w, `{"ok":true,"result":true}`)
+			return
+		}
+		mu.Lock()
+		starts++
+		first := starts == 1
+		mu.Unlock()
+		if first {
+			time.Sleep(2 * time.Second)
+		}
+		mu.Lock()
+		ends++
+		mu.Unlock()
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":1,"chat":{"id":500,"type":"private"},"date":0,"text":"ok"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	client := &http.Client{Transport: &http.Transport{DialContext: (&net.Dialer{}).DialContext}}
+	bot, err := telegram.New(telegram.Settings{
+		Token:          telegramTestToken,
+		AllowedUserIDs: []int64{111},
+		HTTPClient:     client,
+		Logger:         slog.Default(),
+		ServerURL:      srv.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview := newStreamPreview(time.Now())
+	preview.feed(wait.Event{"event_name": "delta.text_append", "payload": map[string]any{"text": "Hello slow", "message_id": "m1"}})
+	editor := newBubbleEditor(bot, context.Background(), 500, 1, preview)
+	go editor.loop()
+	start := time.Now()
+	for i := 0; i < 50; i++ {
+		editor.signal()
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("50 signals took %v with a slow edit in flight; want < 1s (non-blocking signal path)", elapsed)
+	}
+	done := make(chan struct{})
+	go func() { editor.finish(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("finish() did not return after the slow edit")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if starts != 1 || ends != 1 {
+		t.Errorf("streaming edits started=%d ended=%d; want exactly 1 (loop edit, no drain duplicate)", starts, ends)
+	}
+}
+
 func TestTelegramRunBusyWhileTurnActive(t *testing.T) {
 	t.Parallel()
 	gw := newTelegramTurnFakeGateway()

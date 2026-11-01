@@ -354,7 +354,7 @@ func (r *telegramTurnRunner) runTextTurn(ctx context.Context, chatID int64, text
 		return err
 	}
 	editor := newBubbleEditor(r.deps.bot, turnCtx, chatID, bubbleID, preview)
-	go editor.tick()
+	go editor.loop()
 	defer editor.finish()
 
 	gw, err := r.deps.rt.Muse.Connect(turnCtx, nil)
@@ -379,7 +379,7 @@ func (r *telegramTurnRunner) runTextTurn(ctx context.Context, chatID int64, text
 		timeout:           r.deps.turnTimeout,
 		requireRunning:    true,
 		togglesResolved:   &resolvedBotToggles{approve: aa, allowOnce: ao},
-		onEvent:           func(ev wait.Event) { preview.feed(ev); editor.maybeEdit() },
+		onEvent:           func(ev wait.Event) { preview.feed(ev); editor.signal() },
 		externalHeartbeat: true,
 	})
 	if err != nil {
@@ -433,7 +433,7 @@ func (r *telegramTurnRunner) runResume(ctx context.Context, info telegram.Resume
 		return err
 	}
 	editor := newBubbleEditor(r.deps.bot, turnCtx, chatID, bubbleID, preview)
-	go editor.tick()
+	go editor.loop()
 	defer editor.finish()
 
 	afterSeq := info.AfterSeq
@@ -444,7 +444,7 @@ func (r *telegramTurnRunner) runResume(ctx context.Context, info telegram.Resume
 		timeout:           r.deps.turnTimeout,
 		requireRunning:    false,
 		togglesResolved:   &resolvedBotToggles{approve: aa, allowOnce: ao},
-		onEvent:           func(ev wait.Event) { preview.feed(ev); editor.maybeEdit() },
+		onEvent:           func(ev wait.Event) { preview.feed(ev); editor.signal() },
 		externalHeartbeat: true,
 	})
 	if err != nil {
@@ -502,7 +502,11 @@ func turnErrorText(err error, stopped bool) string {
 // one edit per second, only when the preview changed and the
 // rendered text differs, under one lock so the final edit can
 // never be overwritten by a streaming edit (Python
-// Turn.maybe_edit / finish, tgbot.py:498-518).
+// Turn.maybe_edit / finish, tgbot.py:498-518). Only the loop
+// goroutine performs edits: the Runner's goroutine signals
+// through a non-blocking channel send and never touches the
+// network, so a slow or 429-throttled edit cannot stall record
+// consumption (the OnEvent seam contract in runner.go).
 type bubbleEditor struct {
 	bot     *telegram.Bot
 	ctx     context.Context
@@ -515,23 +519,41 @@ type bubbleEditor struct {
 	shown    string
 	lastEdit time.Time
 	done     chan struct{}
+	loopDone chan struct{}
+	signalCh chan struct{}
 	stopOnce sync.Once
 }
 
 func newBubbleEditor(bot *telegram.Bot, ctx context.Context, chatID int64, msgID int, preview *streamPreview) *bubbleEditor {
-	return &bubbleEditor{bot: bot, ctx: ctx, chatID: chatID, msgID: msgID, preview: preview, done: make(chan struct{})}
+	return &bubbleEditor{bot: bot, ctx: ctx, chatID: chatID, msgID: msgID, preview: preview, done: make(chan struct{}), loopDone: make(chan struct{}), signalCh: make(chan struct{}, 1)}
 }
 
-// tick forces an edit attempt every second so the elapsed timer
+// signal wakes the editor loop after a feed. It runs on the
+// Runner's goroutine via OnEvent: a non-blocking channel send
+// only, never I/O, never a lock. Coalescing is intended: one
+// pending signal is enough, the loop re-checks the preview
+// on every wake and every tick.
+func (e *bubbleEditor) signal() {
+	select {
+	case e.signalCh <- struct{}{}:
+	default:
+	}
+}
+
+// loop forces an edit attempt every second so the elapsed timer
 // keeps moving even between events (Python's _tick_turn cadence,
-// without its history poll).
-func (e *bubbleEditor) tick() {
+// without its history poll), and on every signal. It is the
+// only goroutine that calls maybeEdit.
+func (e *bubbleEditor) loop() {
+	defer close(e.loopDone)
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-e.done:
 			return
+		case <-e.signalCh:
+			e.maybeEdit()
 		case <-ticker.C:
 			e.maybeEdit()
 		}
@@ -540,34 +562,50 @@ func (e *bubbleEditor) tick() {
 
 func (e *bubbleEditor) maybeEdit() {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.finished || !e.preview.isDirty() {
+	if e.finished {
+		e.mu.Unlock()
 		return
 	}
 	now := time.Now()
 	if !e.lastEdit.IsZero() && now.Sub(e.lastEdit) < time.Second {
+		e.mu.Unlock()
 		return
 	}
-	text := e.preview.render(now)
-	if text == e.shown {
-		e.preview.clearDirty()
+	text, dirty := e.preview.renderAndClear(now)
+	if !dirty || text == e.shown {
+		e.mu.Unlock()
 		return
 	}
-	e.preview.clearDirty()
 	e.lastEdit = now
 	e.shown = text
+	e.mu.Unlock()
 	// EditPlain swallows every error: a failed streaming edit
-	// never fails a turn.
+	// never fails a turn. It runs without the lock: the loop
+	// is the only editor, and finish() joins the loop before
+	// the final edit, so no streaming edit can land after it.
 	_ = e.bot.EditPlain(e.ctx, e.chatID, e.msgID, text)
 }
 
-// finish stops streaming edits; it waits out any in-flight edit
-// because maybeEdit holds the same lock.
+// finish stops streaming edits and joins the loop goroutine,
+// so any in-flight edit completes before the final edit; it
+// then lands one last partial edit when deltas arrived after
+// the last streaming edit, so streamed text is not lost when
+// the final edit follows immediately after.
 func (e *bubbleEditor) finish() {
 	e.stopOnce.Do(func() { close(e.done) })
+	<-e.loopDone
 	e.mu.Lock()
 	e.finished = true
+	shown := e.shown
 	e.mu.Unlock()
+	text, dirty := e.preview.renderAndClear(time.Now())
+	if !dirty || text == shown {
+		return
+	}
+	e.mu.Lock()
+	e.shown = text
+	e.mu.Unlock()
+	_ = e.bot.EditPlain(e.ctx, e.chatID, e.msgID, text)
 }
 
 // editFinal replaces the bubble with text (Markdown-converted,

@@ -150,10 +150,29 @@ func (p *streamPreview) partKeyLocked(payload map[string]any, ev wait.Event) str
 
 // render produces the bubble text at now: the cleaned joined
 // parts (last 3300 chars with a "…" prefix when longer), then the
-// status line and elapsed time.
+// status line and elapsed time. It does not touch the dirty
+// flag: only renderAndClear does, atomically.
 func (p *streamPreview) render(now time.Time) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.renderLocked(now)
+}
+
+// renderAndClear renders and clears the dirty flag in one lock
+// hold, reporting whether the preview was dirty. Separate
+// render and clear steps that took the lock twice could lose
+// a delta fed in between until the next delta; this pair is
+// atomic, so a feed landing during an edit decision is still
+// dirty for the next attempt.
+func (p *streamPreview) renderAndClear(now time.Time) (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	dirty := p.dirty
+	p.dirty = false
+	return p.renderLocked(now), dirty
+}
+
+func (p *streamPreview) renderLocked(now time.Time) string {
 	var texts []string
 	for _, key := range p.order {
 		if t := strings.TrimSpace(p.parts[key]); t != "" {
@@ -188,20 +207,9 @@ func (p *streamPreview) startedAt() time.Time {
 	return p.started
 }
 
-// edit. clearDirty marks the current rendered state as shown;
-// it is called only when an edit was actually attempted, so a
-// throttled edit never loses a change.
-func (p *streamPreview) isDirty() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.dirty
-}
-
-func (p *streamPreview) clearDirty() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.dirty = false
-}
+// edit. renderAndClear is the only dirty-flag consumer: it
+// renders and clears atomically, so a delta fed between
+// render and clear is not lost until the next delta.
 
 // formatElapsedSecs formats a duration like Python fmt_secs
 // (tgbot.py:175-182): "Ns" / "Mm SSs" / "Hh MMm".
@@ -267,7 +275,7 @@ func previewActivity(t string) string {
 }
 
 func previewEventName(ev wait.Event) string {
-	for _, key := range []string{"event", "event_name"} {
+	for _, key := range []string{"event", "event_name", "type"} {
 		if s, ok := ev[key].(string); ok && s != "" {
 			return s
 		}
