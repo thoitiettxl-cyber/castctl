@@ -1200,9 +1200,12 @@ func TestTelegramResumeDropLogsAndNotifies(t *testing.T) {
 // the wait-then-run path. An intervening second turn between
 // the tap and the follow is NOT staged here: the wait core's
 // finish reconcile treats a newer user message as a
-// follow-up boundary and drops the follow's reply (observed
-// in this harness, stale text delivered — see the fix-loop-2
-// report; out of this loop's scope).
+// follow-up boundary and drops the follow's reply (a narrow,
+// theoretical same-session race, documented carry-over per
+// the Boss decision 2026-11-01 — it can only surface old
+// text/widgets, never another turn's approval outcome, and
+// the reconcile note is not surfaced by the Telegram path;
+// see the PR body). Out of this loop's scope.
 func TestTelegramResumeSlotWaitSuccess(t *testing.T) {
 	t.Parallel()
 	gw := newTelegramTurnFakeGateway()
