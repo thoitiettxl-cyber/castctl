@@ -163,9 +163,10 @@ jobs:
             "$lock"
           printf '\n# CI: LOCK_CASTCTL_* re-pinned to release %s (sha256 from its checksums.txt).\n' "$TAG" >>"$lock"
           grep -c "^LOCK_CASTCTL_SHA256=${sum}\$" "$lock" | grep -qx 1
+          # Same scheme as module.prop (0.6.4 -> 60400): MMmmpp00.
           IFS=. read -r ma mi pa <<<"${ver%%-*}"
           sed -i -e "s|^version=.*|version=${TAG}|" \
-            -e "s|^versionCode=.*|versionCode=$((ma*10000 + mi*100 + pa))|" module/module.prop
+            -e "s|^versionCode=.*|versionCode=$((ma*1000000 + mi*10000 + pa*100))|" module/module.prop
           git diff --stat
           git diff module/module.prop
       - name: Build
