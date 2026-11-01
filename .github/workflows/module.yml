@@ -69,7 +69,11 @@ jobs:
           command -v shellcheck >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q shellcheck; }
           shellcheck --version | head -2
           shellcheck -S warning -s bash module/build.sh
-          shellcheck -S warning -s sh module/customize.sh module/service.sh \
+          # Excluded for the Android scripts (intentional, runtime unchanged):
+          # SC2034 KernelSU installer vars (SKIPUNZIP, SKIPMOUNT, ...) read by
+          # the framework; SC3028 ${RANDOM:-0} is guarded for mksh/ash;
+          # SC2209 `contention=wait` assigns the literal string.
+          shellcheck -S warning -s sh -e SC2034,SC3028,SC2209 module/customize.sh module/service.sh \
             module/action.sh module/uninstall.sh module/scripts/castctl-ctl
           # Bootloop-safety invariants: no early-boot stages or
           # sepolicy/system overlays in the module source tree.
