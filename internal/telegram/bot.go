@@ -940,11 +940,15 @@ func (b *Bot) cbDecide(ctx context.Context, chatID int64, mid int, entry Callbac
 	if err != nil {
 		return b.scrubErr(err)
 	}
-	if mid != 0 {
-		// Failure swallowed, as in Python (try/except pass).
-		_ = b.clearMarkup(ctx, chatID, mid)
-	}
 	if !decided {
+		// Already decided elsewhere (a distinct button for
+		// the same id, or a monitor path decided first):
+		// clear the buttons and return without a second
+		// confirm or resume.
+		if mid != 0 {
+			// Failure swallowed, as in Python (try/except pass).
+			_ = b.clearMarkup(ctx, chatID, mid)
+		}
 		return nil
 	}
 	label := "❌ Denied"
@@ -956,6 +960,13 @@ func (b *Bot) cbDecide(ctx context.Context, chatID int64, mid int, entry Callbac
 	}
 	if _, err := b.Send(ctx, chatID, label+": <code>"+EscapeText(entry.ApprovalID)+"</code>", SendOptions{Silent: true}); err != nil {
 		return err
+	}
+	// The confirm is sent before the buttons are cleared:
+	// observing the markup clear implies the confirm
+	// already landed (the test sync assumption).
+	if mid != 0 {
+		// Failure swallowed, as in Python (try/except pass).
+		_ = b.clearMarkup(ctx, chatID, mid)
 	}
 	if entry.AfterSeq != nil && b.resume != nil {
 		// The resume is scheduled, not run here: startResume
