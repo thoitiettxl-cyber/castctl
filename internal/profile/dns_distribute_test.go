@@ -194,10 +194,21 @@ func TestMigrateDistributesTopLevelDNSVerbatimMultiProfile(t *testing.T) {
 		if res.Warning != "" {
 			t.Errorf("profile %q warning = %q; want none after distribution", name, res.Warning)
 		}
+		local := 0
 		for _, srv := range res.Options.Servers {
+			// The synthesised local bootstrap server has no
+			// detour by design; it is not part of the
+			// distributed block's detour assertion.
+			if srv.Tag == LocalBootstrapServerTag {
+				local++
+				continue
+			}
 			if d := detourOf(srv.Options); d != detour {
 				t.Errorf("profile %q resolved detour = %q; want %q", name, d, detour)
 			}
+		}
+		if local != 1 {
+			t.Errorf("profile %q: %d local bootstrap servers; want 1", name, local)
 		}
 	}
 }

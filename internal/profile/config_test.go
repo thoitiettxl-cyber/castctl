@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sagernet/sing-box/option"
 )
 
 // validOutbounds: one valid paste-JSON per protocol type in the delta, plus
@@ -986,5 +988,101 @@ func TestSaveSingleConfigCreatesDir(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(base, "config.json")); err != nil {
 		t.Errorf("save did not create config: %v", err)
+	}
+}
+
+// TestSaveSingleConfigPreservesDomainResolver (R7): the
+// synthesised "local" server and the runtime domain_resolver
+// default never reach a saved file. An authored explicit
+// domain_resolver round-trips; an outbound without one stays
+// without one; resolving the profile's DNS (which synthesises
+// "local" in memory) leaves the stored raw blocks untouched;
+// distributing a global section never synthesises "local"
+// into a profile block.
+func TestSaveSingleConfigPreservesDomainResolver(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	base := BaseDir(home)
+	httpExplicit := `{"type":"http","tag":"proxy-explicit","server":"proxy.test","server_port":8080,"domain_resolver":{"server":"dns1","timeout":"5s"}}`
+	httpPlain := `{"type":"http","tag":"proxy-plain","server":"proxy.test","server_port":8080}`
+	cfg, err := ParseSingleConfig([]byte(singleFileJSON(
+		`{"muse01":{"outbound":"proxy-plain","dns":{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353,"detour":"proxy-plain"}],"final":"dns1"}}}`,
+		`[`+httpExplicit+`,`+httpPlain+`]`, "", "")), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawBefore := cfg.Profiles["muse01"].RawDNS()
+	if _, err := ResolveProfileDNS(cfg.Profiles["muse01"], cfg); err != nil {
+		t.Fatal(err)
+	}
+	if rawAfter := cfg.Profiles["muse01"].RawDNS(); string(rawAfter) != string(rawBefore) {
+		t.Fatalf("ResolveProfileDNS mutated the stored profile dns block: before %s after %s", rawBefore, rawAfter)
+	}
+	if err := SaveSingleConfig(base, cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(base, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := string(data)
+	if strings.Contains(saved, `"tag": "local"`) || strings.Contains(saved, `"tag":"local"`) {
+		t.Fatalf("saved config contains a synthesised local server: %s", saved)
+	}
+	cfg2, err := ParseSingleConfig(data, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outs, err := cfg2.ParsedOutbounds()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var explicit, plain *option.Outbound
+	for i := range outs {
+		switch outs[i].Tag {
+		case "proxy-explicit":
+			explicit = &outs[i]
+		case "proxy-plain":
+			plain = &outs[i]
+		}
+	}
+	if explicit == nil {
+		t.Fatal("proxy-explicit missing after round-trip")
+	}
+	res := resolverOf(t, *explicit)
+	if res == nil || res.Server != "dns1" {
+		t.Fatalf("explicit domain_resolver after round-trip = %+v, want server dns1", res)
+	}
+	if plain == nil {
+		t.Fatal("proxy-plain missing after round-trip")
+	}
+	if res := resolverOf(t, *plain); res != nil {
+		t.Fatalf("plain outbound gained a domain_resolver after round-trip: %+v", res)
+	}
+	// Distribution: a global section distributes verbatim,
+	// with no synthesised local server in any profile block.
+	cfg3, err := ParseSingleConfig([]byte(singleFileJSON(
+		`{"muse01":{"outbound":"proxy-sg"}}`,
+		`[`+fakeSocksOutbound+`]`, "",
+		`{"servers":[{"tag":"gdns","type":"tcp","server":"127.0.0.1","server_port":5354,"detour":"proxy-sg"}],"final":"gdns"}`,
+	)), "/base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	distributed, refusal, derr := distributeTopLevelDNS(cfg3, "/base")
+	if derr != nil {
+		t.Fatalf("distributeTopLevelDNS: %v (refusal %q)", derr, refusal)
+	}
+	if !distributed {
+		t.Fatalf("distributeTopLevelDNS distributed=false refusal=%q", refusal)
+	}
+	profDNS, err := cfg3.Profiles["muse01"].ParsedDNS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, srv := range profDNS.Servers {
+		if srv.Tag == LocalBootstrapServerTag {
+			t.Fatalf("distributed profile dns contains a synthesised local server: %+v", profDNS.Servers)
+		}
 	}
 }

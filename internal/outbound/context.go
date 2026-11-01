@@ -8,10 +8,15 @@
 //
 // Fail-closed invariant: every network call of a profile goes through
 // that profile's outbound.Dialer. No http.DefaultClient, no net.Dial,
-// no system-resolver lookup anywhere else in the Go port. The sole
-// exception is BootstrapLookup (bootstrap.go), the one system-resolver
-// call site, used only to resolve a DNS server's own hostname before
-// that server can be used.
+// no system-resolver lookup anywhere else in the Go port. The two
+// exceptions are BootstrapLookup (bootstrap.go), the one Go
+// system-resolver call site, used only to resolve a DNS server's
+// own hostname before that server can be used; and the sing-box
+// "local" DNS transport, which resolves outbound server hostnames
+// through the system resolver when an outbound carries
+// no explicit domain_resolver (see profile.ResolveProfileDNS /
+// ApplyDomainResolverDefault). Dial targets are never resolved
+// through the system resolver.
 //
 // Env-proxy mapping: the VM egress proxy is modelled as an EXPLICIT
 // sing-box "http" outbound in config, never as an implicit env shim.

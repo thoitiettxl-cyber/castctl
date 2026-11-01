@@ -83,8 +83,9 @@ No size budget is set; the numbers are recorded only.
 ## Bootstrap DNS lookup
 
 `outbound.BootstrapLookup` (`internal/outbound/bootstrap.go`) is the
-sole exception where a DNS server's own hostname is resolved via the
-system resolver (`net.DefaultResolver`, 5 s timeout). It resolves the
+Go-level system-resolver call site where a DNS server's own hostname
+is resolved via the system resolver (`net.DefaultResolver`, 5 s
+timeout). It resolves the
 hostname once, before that server can be used; the DNS package
 substitutes the first IPv4 address (else the first address) for the
 hostname and preserves the original hostname as the TLS ServerName
@@ -97,7 +98,11 @@ hostname. Every other lookup goes through the configured DNS server
 and the outbound/detour that server is configured with; DNS failure
 is an error, and there is no system-resolver fallback for any other
 host. A bootstrap failure is a construction error, never a silent
-fallback.
+fallback. One documented exception: an outbound server
+address that is a hostname resolves through the synthesised
+`local` transport when no explicit `domain_resolver` is set
+(see docs/config.md, "Outbound server addresses"); dial targets
+never do.
 
 Recommendation: configure DNS servers by IP address to avoid the
 bootstrap lookup entirely. An IP-address server needs no bootstrap

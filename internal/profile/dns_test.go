@@ -12,6 +12,8 @@ package profile
 import (
 	"strings"
 	"testing"
+
+	"github.com/sagernet/sing-box/option"
 )
 
 const fakeSocksOutbound = `{"type":"socks","tag":"proxy-sg","server":"127.0.0.1","server_port":1080,"version":"5"}`
@@ -157,8 +159,11 @@ func TestResolveProfileDNSPrecedence(t *testing.T) {
 	if res.Source != DNSSourceWireGuard {
 		t.Fatalf("WG branch: source=%q, want wireguard", res.Source)
 	}
-	if len(res.Options.Servers) != 1 || res.Options.Servers[0].Tag == "" {
-		t.Fatalf("WG branch servers = %+v, want one server", res.Options.Servers)
+	if len(res.Options.Servers) != 2 || res.Options.Servers[0].Tag == "" {
+		t.Fatalf("WG branch servers = %+v, want the WG server plus the appended local bootstrap server", res.Options.Servers)
+	}
+	if res.Options.Servers[1].Tag != LocalBootstrapServerTag || res.Options.Servers[1].Type != "local" {
+		t.Fatalf("WG branch second server = %+v, want the synthesised local bootstrap server", res.Options.Servers[1])
 	}
 	if d := detourOf(res.Options.Servers[0].Options); d != "wg-home" {
 		t.Fatalf("WG branch detour = %q, want wg-home", d)
@@ -183,8 +188,14 @@ func TestResolveProfileDNSPrecedence(t *testing.T) {
 	if d := detourOf(res.Options.Servers[0].Options); d != res.SynthesizedDirectTag {
 		t.Fatalf("default branch detour = %q, want synthesized tag %q", d, res.SynthesizedDirectTag)
 	}
-	if len(res.Options.Servers) != 1 || res.Options.Servers[0].Type != "https" {
-		t.Fatalf("default branch server = %+v, want one https server", res.Options.Servers)
+	if len(res.Options.Servers) != 2 || res.Options.Servers[0].Type != "https" {
+		t.Fatalf("default branch server = %+v, want the https server plus the appended local bootstrap server", res.Options.Servers)
+	}
+	if res.Options.Servers[1].Tag != LocalBootstrapServerTag || res.Options.Servers[1].Type != "local" {
+		t.Fatalf("default branch second server = %+v, want the synthesised local bootstrap server", res.Options.Servers[1])
+	}
+	if res.Options.Final != defaultDNSServerTag {
+		t.Fatalf("default branch final = %q, want %q (the local server is never final)", res.Options.Final, defaultDNSServerTag)
 	}
 
 	// (iii-b) Default DoH for a tag profile detours to its own tag.
@@ -216,6 +227,356 @@ func TestResolveProfileDNSPrecedence(t *testing.T) {
 	}
 	if !strings.Contains(res.Warning, "config migrate") || strings.Contains(res.Warning, "by hand") {
 		t.Fatalf("compat warning = %q, want a 'config migrate' pointer and no 'by hand'", res.Warning)
+	}
+}
+
+// TestResolveProfileDNSSynthesisesLocalBootstrapServer (Seam A,
+// R6): every precedence branch appends exactly one dedicated
+// "local" server — type local, no detour, prefer_go=false,
+// never final, never rule-targeted — and reports it via
+// LocalServerTag. A clean user-defined "local" server is
+// reused; a wrong-type or detouring one fails closed; no
+// resolver means no synthesis.
+func TestResolveProfileDNSSynthesisesLocalBootstrapServer(t *testing.T) {
+	assertLocalServer := func(t *testing.T, res *ResolvedDNS, wantFinal string) {
+		t.Helper()
+		if res.LocalServerTag != LocalBootstrapServerTag {
+			t.Fatalf("LocalServerTag = %q, want %q", res.LocalServerTag, LocalBootstrapServerTag)
+		}
+		if res.Options.Final == LocalBootstrapServerTag {
+			t.Fatalf("final = %q; the local server must never be final", res.Options.Final)
+		}
+		if wantFinal != "" && res.Options.Final != wantFinal {
+			t.Fatalf("final = %q, want %q", res.Options.Final, wantFinal)
+		}
+		var local *option.DNSServerOptions
+		for i := range res.Options.Servers {
+			if res.Options.Servers[i].Tag == LocalBootstrapServerTag {
+				local = &res.Options.Servers[i]
+			}
+		}
+		if local == nil {
+			t.Fatalf("no server tagged %q in %+v", LocalBootstrapServerTag, res.Options.Servers)
+		}
+		if local.Type != "local" {
+			t.Fatalf("local server type = %q, want local", local.Type)
+		}
+		if d := detourOf(local.Options); d != "" {
+			t.Fatalf("local server detour = %q, want none", d)
+		}
+		lo, ok := local.Options.(*option.LocalDNSServerOptions)
+		if !ok {
+			t.Fatalf("local server options = %T, want *option.LocalDNSServerOptions", local.Options)
+		}
+		if lo.PreferGo {
+			t.Fatalf("local server prefer_go = true, want false (sing-box default)")
+		}
+		if len(res.Options.Rules) != 0 {
+			// These fixtures define no rules; synthesis must
+			// add none (the local server is never
+			// rule-targeted).
+			t.Fatalf("rules = %+v, want none: synthesis must not add rules", res.Options.Rules)
+		}
+	}
+
+	// (1) Own block.
+	own, err := parseDNS([]byte(`{"servers":[{"tag":"own","type":"tcp","server":"127.0.0.1","server_port":5353,"detour":"proxy-sg"}],"final":"own"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prof := &Profile{Name: "muse01", Outbound: OutboundRef{Kind: OutboundTag, Tag: "proxy-sg", Type: "socks", From: "outbound"}, DNS: own, dnsPresent: true}
+	res, err := ResolveProfileDNS(prof, &SingleConfig{Profiles: map[string]*Profile{"muse01": prof}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Options.Servers) != 2 {
+		t.Fatalf("own branch servers = %d, want 2 (own + local)", len(res.Options.Servers))
+	}
+	assertLocalServer(t, res, "own")
+	// Re-resolving must not accumulate local servers, and the
+	// profile value must not have been mutated.
+	res2, err := ResolveProfileDNS(prof, &SingleConfig{Profiles: map[string]*Profile{"muse01": prof}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res2.Options.Servers) != 2 {
+		t.Fatalf("second resolve servers = %d, want 2", len(res2.Options.Servers))
+	}
+	if again, err := prof.ParsedDNS(); err != nil || len(again.Servers) != 1 {
+		t.Fatalf("profile DNS mutated by resolve: servers=%d err=%v", len(again.Servers), err)
+	}
+
+	// (2) WireGuard branch.
+	cfg, err := ParseSingleConfig([]byte(singleFileJSON(
+		`{"muse01":{"outbound":"wg-home"}}`,
+		``, `[`+fakeWGEndpoint+`]`, "",
+	)), "/base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.WireGuardDNS = map[string][]string{"wg-home": {"10.2.0.1"}}
+	res, err = ResolveProfileDNS(cfg.Profiles["muse01"], cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Options.Servers) != 2 {
+		t.Fatalf("WG branch servers = %d, want 2", len(res.Options.Servers))
+	}
+	assertLocalServer(t, res, "castctl-doh-1")
+
+	// (3) Global-compat branch.
+	cfg3, err := ParseSingleConfig([]byte(singleFileJSON(
+		`{"muse01":{"outbound":"proxy-sg"}}`,
+		`[`+fakeSocksOutbound+`]`, "",
+		`{"servers":[{"tag":"gdns","type":"tcp","server":"127.0.0.1","server_port":5354,"detour":"proxy-sg"}],"final":"gdns"}`,
+	)), "/base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = ResolveProfileDNS(cfg3.Profiles["muse01"], cfg3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Options.Servers) != 2 {
+		t.Fatalf("compat branch servers = %d, want 2", len(res.Options.Servers))
+	}
+	assertLocalServer(t, res, "gdns")
+
+	// (4) Default branch.
+	cfg2, err := ParseSingleConfig([]byte(`{"profiles":{"default":{}}}`), "/base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = ResolveProfileDNS(cfg2.Profiles["default"], cfg2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Options.Servers) != 2 {
+		t.Fatalf("default branch servers = %d, want 2", len(res.Options.Servers))
+	}
+	assertLocalServer(t, res, defaultDNSServerTag)
+
+	// No resolver at all: no synthesis.
+	res, err = ResolveProfileDNS(cfg2.Profiles["default"], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Source != DNSSourceNone || res.Options != nil || res.LocalServerTag != "" {
+		t.Fatalf("none branch = %+v, want DNSSourceNone with no options and no local tag", res)
+	}
+}
+
+func TestResolveProfileDNSLocalTagReconciliation(t *testing.T) {
+	// Clean user-defined "local" server (global section, which
+	// has no detour requirement): reused as-is, not duplicated.
+	cfg, err := ParseSingleConfig([]byte(singleFileJSON(
+		`{"muse01":{"outbound":"proxy-sg"}}`,
+		`[`+fakeSocksOutbound+`]`, "",
+		`{"servers":[{"tag":"local","type":"local"},{"tag":"gdns","type":"tcp","server":"127.0.0.1","server_port":5354,"detour":"proxy-sg"}],"final":"gdns"}`,
+	)), "/base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := ResolveProfileDNS(cfg.Profiles["muse01"], cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Options.Servers) != 2 || res.LocalServerTag != LocalBootstrapServerTag {
+		t.Fatalf("reuse: servers=%+v localTag=%q, want 2 servers reusing the user-defined local server", res.Options.Servers, res.LocalServerTag)
+	}
+	if res.Options.Final != "gdns" {
+		t.Fatalf("reuse: final = %q, want gdns", res.Options.Final)
+	}
+
+	// Wrong type under the "local" tag: fail closed.
+	cfgBad, err := ParseSingleConfig([]byte(singleFileJSON(
+		`{"muse01":{"outbound":"proxy-sg"}}`,
+		`[`+fakeSocksOutbound+`]`, "",
+		`{"servers":[{"tag":"local","type":"tcp","server":"127.0.0.1","server_port":5354,"detour":"proxy-sg"}],"final":"local"}`,
+	)), "/base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveProfileDNS(cfgBad.Profiles["muse01"], cfgBad); err == nil || !strings.Contains(err.Error(), `tag "local" is type "tcp"`) {
+		t.Fatalf("wrong-type local tag: err=%v, want a fail-closed error naming the tag and type", err)
+	}
+
+	// Detouring "local" server: fail closed.
+	cfgDetour, err := ParseSingleConfig([]byte(singleFileJSON(
+		`{"muse01":{"outbound":"proxy-sg"}}`,
+		`[`+fakeSocksOutbound+`]`, "",
+		`{"servers":[{"tag":"local","type":"local","detour":"proxy-sg"},{"tag":"gdns","type":"tcp","server":"127.0.0.1","server_port":5354,"detour":"proxy-sg"}],"final":"gdns"}`,
+	)), "/base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveProfileDNS(cfgDetour.Profiles["muse01"], cfgDetour); err == nil || !strings.Contains(err.Error(), "detour") {
+		t.Fatalf("detouring local tag: err=%v, want a fail-closed error naming the detour", err)
+	}
+
+	// Hand-built profile block with a clean local server
+	// (parse-time validation requires detours in profile
+	// blocks, so this shape is only reachable hand-built):
+	// reused, not duplicated.
+	own, err := parseDNS([]byte(`{"servers":[{"tag":"local","type":"local"},{"tag":"own","type":"tcp","server":"127.0.0.1","server_port":5353,"detour":"proxy-sg"}],"final":"own"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prof := &Profile{Name: "muse01", Outbound: OutboundRef{Kind: OutboundTag, Tag: "proxy-sg", Type: "socks", From: "outbound"}, DNS: own, dnsPresent: true}
+	res, err = ResolveProfileDNS(prof, &SingleConfig{Profiles: map[string]*Profile{"muse01": prof}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Options.Servers) != 2 {
+		t.Fatalf("hand-built reuse: servers = %d, want 2", len(res.Options.Servers))
+	}
+}
+
+// TestResolveProfileDNSRefusesEmptyServersBlock (red-team BF1,
+// fix loop 1): an authored dns block with zero servers must
+// fail closed at ResolveProfileDNS, in both branches and both
+// spellings. Without the guard, synthesis would append the
+// "local" server as the sole server, making it the default
+// transport for target lookups. The WireGuard and DoH-default
+// branches are unaffected: they always carry >=1 server (see
+// TestResolveProfileDNSSynthesisesLocalBootstrapServer).
+func TestResolveProfileDNSRefusesEmptyServersBlock(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+	}{
+		{
+			name: "profile block servers empty list",
+			data: singleFileJSON(
+				`{"muse01":{"outbound":"proxy-sg","dns":{"servers":[]}}}`,
+				`[`+fakeSocksOutbound+`]`, "", "",
+			),
+		},
+		{
+			name: "profile block empty object",
+			data: singleFileJSON(
+				`{"muse01":{"outbound":"proxy-sg","dns":{}}}`,
+				`[`+fakeSocksOutbound+`]`, "", "",
+			),
+		},
+		{
+			name: "top-level servers empty list",
+			data: singleFileJSON(
+				`{"muse01":{"outbound":"proxy-sg"}}`,
+				`[`+fakeSocksOutbound+`]`, "",
+				`{"servers":[]}`,
+			),
+		},
+		{
+			name: "top-level empty object",
+			data: singleFileJSON(
+				`{"muse01":{"outbound":"proxy-sg"}}`,
+				`[`+fakeSocksOutbound+`]`, "",
+				`{}`,
+			),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := ParseSingleConfig([]byte(tc.data), "/base")
+			if err != nil {
+				t.Fatalf("ParseSingleConfig = %v; want the empty block to parse and fail at ResolveProfileDNS", err)
+			}
+			if _, err := ResolveProfileDNS(cfg.Profiles["muse01"], cfg); err == nil {
+				t.Fatal("ResolveProfileDNS(empty dns block) = nil; want a fail-closed error naming the profile")
+			} else if !strings.Contains(err.Error(), "muse01") || !strings.Contains(err.Error(), "no servers") {
+				t.Fatalf("ResolveProfileDNS error = %v; want it to name the profile and the empty server list", err)
+			}
+		})
+	}
+}
+
+// TestResolveProfileDNSRefusesReferencesToSynthesisedLocal
+// (safety B2, fix loop 1): when no clean user-defined "local"
+// server exists, a "final" or rule naming "local" must fail
+// closed at ResolveProfileDNS, so synthesis cannot
+// materialise a transport for a target route. When a clean
+// user-defined "local" server IS present, the same
+// references are the user's explicit choice and stay
+// allowed. Hand-built options reach ResolveProfileDNS
+// directly, bypassing parse-time validation, so the guard
+// itself is what the test pins.
+func TestResolveProfileDNSRefusesReferencesToSynthesisedLocal(t *testing.T) {
+	const gdns = `{"tag":"gdns","type":"tcp","server":"127.0.0.1","server_port":5354,"detour":"proxy-sg"}`
+	const cleanLocal = `{"tag":"local","type":"local"}`
+
+	resolve := func(t *testing.T, raw string) (*ResolvedDNS, error) {
+		t.Helper()
+		opts, err := parseDNS([]byte(raw))
+		if err != nil {
+			t.Fatalf("parseDNS(%s): %v", raw, err)
+		}
+		prof := &Profile{Name: "muse01", Outbound: OutboundRef{Kind: OutboundTag, Tag: "proxy-sg", Type: "socks", From: "outbound"}, DNS: opts, dnsPresent: true}
+		return ResolveProfileDNS(prof, &SingleConfig{Profiles: map[string]*Profile{"muse01": prof}})
+	}
+
+	refused := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "final names local",
+			raw:  `{"servers":[` + gdns + `],"final":"local"}`,
+		},
+		{
+			name: "default rule routes to local",
+			raw:  `{"servers":[` + gdns + `],"final":"gdns","rules":[{"domain":["example.test"],"server":"local"}]}`,
+		},
+		{
+			name: "logical rule routes to local",
+			raw:  `{"servers":[` + gdns + `],"final":"gdns","rules":[{"type":"logical","mode":"and","rules":[{"domain":["example.test"]}],"server":"local"}]}`,
+		},
+		{
+			// Nested rules carry match criteria only (sing-box
+			// rejects actions in nested rules at parse time);
+			// the action naming "local" sits on the outer
+			// logical rule, with nested match rules inside.
+			name: "logical rule with nested match rules routes to local",
+			raw:  `{"servers":[` + gdns + `],"final":"gdns","rules":[{"type":"logical","mode":"or","rules":[{"type":"logical","mode":"and","rules":[{"domain":["example.test"]}]} ],"server":"local"}]}`,
+		},
+		{
+			name: "evaluate action names local",
+			raw:  `{"servers":[` + gdns + `],"final":"gdns","rules":[{"domain":["example.test"],"action":"evaluate","server":"local"}]}`,
+		},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := resolve(t, tc.raw); err == nil {
+				t.Fatal("ResolveProfileDNS = nil; want a fail-closed error naming the local tag")
+			} else if !strings.Contains(err.Error(), `"local"`) {
+				t.Fatalf("ResolveProfileDNS error = %v; want it to name the local tag", err)
+			}
+		})
+	}
+
+	allowed := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "final names clean user-defined local",
+			raw:  `{"servers":[` + cleanLocal + `,` + gdns + `],"final":"local"}`,
+		},
+		{
+			name: "rule routes to clean user-defined local",
+			raw:  `{"servers":[` + cleanLocal + `,` + gdns + `],"final":"gdns","rules":[{"domain":["example.test"],"server":"local"}]}`,
+		},
+	}
+	for _, tc := range allowed {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := resolve(t, tc.raw)
+			if err != nil {
+				t.Fatalf("ResolveProfileDNS = %v; want the explicit clean local server to stay allowed", err)
+			}
+			if len(res.Options.Servers) != 2 {
+				t.Fatalf("servers = %d, want 2 (no synthesised duplicate)", len(res.Options.Servers))
+			}
+		})
 	}
 }
 

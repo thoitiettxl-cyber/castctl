@@ -82,7 +82,7 @@ func TestCreateOutboundsRefusesSynthesizedTagCollision(t *testing.T) {
 		Profiles:  map[string]*profile.Profile{"alice": prof},
 		Outbounds: []option.Outbound{ob},
 	}
-	err = createOutbounds(context.Background(), mgr, single, prof, profile.SynthesizedDirectTag("alice"))
+	err = createOutbounds(context.Background(), mgr, single, prof, profile.SynthesizedDirectTag("alice"), "")
 	if err == nil {
 		t.Fatal("createOutbounds with a colliding synthesised tag must fail loudly, got nil error")
 	}
@@ -104,7 +104,7 @@ func TestCreateOutboundsCreatesSynthesizedTagWhenFree(t *testing.T) {
 	t.Cleanup(func() { _ = mgr.Close() })
 	prof := &profile.Profile{Name: "alice", Outbound: profile.OutboundRef{Kind: profile.OutboundDirect, Type: "direct"}}
 	single := &profile.SingleConfig{Profiles: map[string]*profile.Profile{"alice": prof}}
-	if err := createOutbounds(context.Background(), mgr, single, prof, profile.SynthesizedDirectTag("alice")); err != nil {
+	if err := createOutbounds(context.Background(), mgr, single, prof, profile.SynthesizedDirectTag("alice"), ""); err != nil {
 		t.Fatalf("createOutbounds with a free synthesised tag = %v, want nil", err)
 	}
 	if _, ok := mgr.Outbound("castctl-direct:alice"); !ok {

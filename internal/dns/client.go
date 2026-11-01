@@ -8,15 +8,22 @@
 // configured.
 //
 // Fail-closed invariant: DNS failure is an error. There is NO
-// system-resolver fallback: no servers configured is an error at
-// construction, a failing transport is an error at lookup, and
-// "localhost" is resolved only if the configured DNS server answers
-// for it. The sole bootstrap exception is the DNS server's own
-// hostname, resolved once at construction through an injected
-// BootstrapFunc (default: outbound.BootstrapLookup) and substituted
-// into the server options; bootstrap is never used for any other
-// hostname. DNS queries travel through the outbound/detour the
-// transport is configured with, via sing-box's own transport dialer.
+// system-resolver fallback for dial targets: no servers
+// configured is an error at construction, a failing transport
+// is an error at lookup, and "localhost" is resolved only if
+// the configured DNS server answers for it. The system resolver
+// is consulted in exactly two cases, never for dial targets:
+// (a) the DNS server's own hostname, resolved once at
+// construction through an injected BootstrapFunc (default:
+// outbound.BootstrapLookup) and substituted into the server
+// options; bootstrap is never used for any other hostname;
+// (b) outbound server hostnames, resolved through the
+// synthesised "local" DNS transport when the outbound carries
+// no explicit domain_resolver (see profile.ResolveProfileDNS
+// and profile.ApplyDomainResolverDefault; documented in
+// docs/config.md). DNS queries travel through the outbound/detour
+// the transport is configured with, via sing-box's own
+// transport dialer.
 package dns
 
 import (
