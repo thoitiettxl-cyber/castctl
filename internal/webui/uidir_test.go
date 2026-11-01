@@ -339,6 +339,23 @@ func TestNewUIDirFailsClosed(t *testing.T) {
 	if err := os.Symlink(configDir, linkToConfig); err != nil {
 		t.Fatal(err)
 	}
+	// A symlinked index.html is refused at startup even when
+	// its target is a regular file: outside the root (a secret)
+	// and inside the root (a sibling file) alike.
+	secretOutside := filepath.Join(outside, "MARKER-UIDIR-SECRET")
+	if err := os.WriteFile(secretOutside, []byte("MARKER-OUTSIDE-SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkIndexOutside := writeUIDir(t, map[string]string{"real.html": "MARKER-REAL"})
+	_ = os.Remove(filepath.Join(linkIndexOutside, "index.html"))
+	if err := os.Symlink(secretOutside, filepath.Join(linkIndexOutside, "index.html")); err != nil {
+		t.Fatal(err)
+	}
+	linkIndexInside := writeUIDir(t, map[string]string{"real.html": "MARKER-REAL"})
+	_ = os.Remove(filepath.Join(linkIndexInside, "index.html"))
+	if err := os.Symlink("real.html", filepath.Join(linkIndexInside, "index.html")); err != nil {
+		t.Fatal(err)
+	}
 	cases := []struct {
 		name  string
 		uiDir string
@@ -351,6 +368,8 @@ func TestNewUIDirFailsClosed(t *testing.T) {
 		{"inside config dir", filepath.Join(configDir, "ui")},
 		{"ancestor of config dir", filepath.Dir(configDir)},
 		{"symlink to config dir", linkToConfig},
+		{"index.html symlink to outside secret", linkIndexOutside},
+		{"index.html symlink inside root", linkIndexInside},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -549,5 +568,174 @@ func TestPutConfigAcceptsValidUIDirChange(t *testing.T) {
 	code, body = putConfigWithUIDir(t, ts, other)
 	if code != http.StatusOK {
 		t.Fatalf("PUT changed ui_dir: %d, want 200: %s", code, body)
+	}
+}
+
+// --- fix loop 1: symlinked index.html + root-swap regressions ---
+
+func TestNewUIDirRejectsCookiesFileInsideRoot(t *testing.T) {
+	// The cookies-exposure rule lives in New() via
+	// Deps.CookiesFiles: a root containing a cookies file fails
+	// closed even when a direct Server construction bypasses
+	// the command layer.
+	configDir := t.TempDir()
+	uiDir := writeUIDir(t, map[string]string{"index.html": uiDirShellMarker})
+	cookiesFile := filepath.Join(uiDir, "cookies.txt")
+	if err := os.WriteFile(cookiesFile, []byte("MARKER-COOKIE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deps := newUIDirDeps(t, configDir, uiDir)
+	deps.CookiesFiles = []string{cookiesFile}
+	if _, err := New(deps); err == nil {
+		t.Fatal("New with a cookies file inside ui_dir succeeded, want failure")
+	}
+	// A cookies file outside the root does not block startup.
+	other := t.TempDir()
+	cookiesOutside := filepath.Join(other, "cookies.txt")
+	if err := os.WriteFile(cookiesOutside, []byte("MARKER-COOKIE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deps.CookiesFiles = []string{cookiesOutside}
+	if _, err := New(deps); err != nil {
+		t.Fatalf("New with a cookies file outside ui_dir failed: %v", err)
+	}
+}
+
+func swapIndexToSymlink(t *testing.T, uiDir, target string) {
+	t.Helper()
+	index := filepath.Join(uiDir, "index.html")
+	if err := os.Remove(index); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, index); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUIDirSymlinkedIndexSwappedMidRun(t *testing.T) {
+	// A server started with a regular index.html must never
+	// serve the target of a symlink swapped in afterwards —
+	// per request, fixed 404, on every fallback path.
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("MARKER-SWAPPED-SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("symlink to outside secret", func(t *testing.T) {
+		uiDir := writeUIDir(t, map[string]string{
+			"index.html": uiDirShellMarker,
+			"app.js":     "MARKER-JS",
+		})
+		ts := newTestServer(t, fixtureConfig, func(d *Deps) { d.UIDir = uiDir })
+		rec := ts.do(t, "GET", "/", "", false)
+		if rec.Code != http.StatusOK || rec.Body.String() != uiDirShellMarker {
+			t.Fatalf("before swap: %d %q, want the shell", rec.Code, rec.Body.String())
+		}
+		swapIndexToSymlink(t, uiDir, secret)
+		for _, path := range []string{"/", "/missing", "/deep/route"} {
+			rec := ts.do(t, "GET", path, "", false)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("GET %s after swap: %d, want 404", path, rec.Code)
+			}
+			if strings.Contains(rec.Body.String(), "MARKER-SWAPPED-SECRET") {
+				t.Fatalf("GET %s after swap: secret leaked", path)
+			}
+		}
+		// Regular assets keep serving: only the shell
+		// path is refused.
+		rec = ts.do(t, "GET", "/app.js", "", false)
+		if rec.Code != http.StatusOK || rec.Body.String() != "MARKER-JS" {
+			t.Fatalf("GET /app.js after swap: %d %q, want the asset", rec.Code, rec.Body.String())
+		}
+	})
+	t.Run("symlink inside root", func(t *testing.T) {
+		uiDir := writeUIDir(t, map[string]string{
+			"index.html": uiDirShellMarker,
+			"real.html":  "MARKER-REAL-SHELL",
+		})
+		ts := newTestServer(t, fixtureConfig, func(d *Deps) { d.UIDir = uiDir })
+		swapIndexToSymlink(t, uiDir, "real.html")
+		rec := ts.do(t, "GET", "/", "", false)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("GET / after inside-root swap: %d, want 404", rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), "MARKER-REAL-SHELL") {
+			t.Fatal("inside-root symlinked shell served")
+		}
+	})
+}
+
+func TestUIDirRootSwapRefused(t *testing.T) {
+	// The ui root is reached through a symlink. Repointing
+	// that symlink at the config directory after startup must
+	// refuse every request (fixed 404), never serve config
+	// content through the re-resolved root.
+	realDir := writeUIDir(t, map[string]string{
+		"index.html": uiDirShellMarker,
+		"a.txt":      "MARKER-VIA-LINK",
+	})
+	linkRoot := filepath.Join(t.TempDir(), "linkroot")
+	if err := os.Symlink(realDir, linkRoot); err != nil {
+		t.Fatal(err)
+	}
+	ts := newTestServer(t, fixtureConfig, func(d *Deps) { d.UIDir = linkRoot })
+	rec := ts.do(t, "GET", "/a.txt", "", false)
+	if rec.Code != http.StatusOK || rec.Body.String() != "MARKER-VIA-LINK" {
+		t.Fatalf("before swap: %d %q, want the asset", rec.Code, rec.Body.String())
+	}
+	if err := os.Remove(linkRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(ts.dir, linkRoot); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/", "/a.txt", "/config.json", "/profiles/muse01/cookies.txt"} {
+		rec := ts.do(t, "GET", path, "", false)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("GET %s after root swap: %d, want 404", path, rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), "FAKE-SECRET") || strings.Contains(rec.Body.String(), "MARKER-VIA-LINK") {
+			t.Fatalf("GET %s after root swap: content leaked: %q", path, rec.Body.String())
+		}
+	}
+}
+
+func TestPutConfigRejectsSymlinkedIndexUIDir(t *testing.T) {
+	// PUT chain for the demonstrated F1 exploit: an
+	// authenticated user sets ui_dir to a directory whose
+	// index.html is a symlink to a secret outside the root.
+	// The PUT must fail (400), the config file must not
+	// change, and a server built with that ui_dir must fail
+	// closed at startup.
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("MARKER-PUT-SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	evil := filepath.Join(outside, "evilui")
+	if err := os.MkdirAll(evil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(evil, "index.html")); err != nil {
+		t.Fatal(err)
+	}
+	ts := newTestServer(t, fixtureConfig, nil)
+	before, err := os.ReadFile(filepath.Join(ts.dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, body := putConfigWithUIDir(t, ts, evil)
+	if code != http.StatusBadRequest {
+		t.Fatalf("PUT symlinked-index ui_dir: %d, want 400: %s", code, body)
+	}
+	after, err := os.ReadFile(filepath.Join(ts.dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("config file changed:\n%s", after)
+	}
+	if _, err := New(newUIDirDeps(t, ts.dir, evil)); err == nil {
+		t.Fatal("New with a symlinked index.html succeeded, want failure")
 	}
 }

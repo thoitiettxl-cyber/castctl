@@ -387,9 +387,12 @@ find "$stage/payload/lib" -type f -exec chmod 0755 {} \;
 if find "$stage" -type f \( -name config.json -o -name '*.key' \) | grep -q .; then
   fail "refusing to package config or private-key files"
 fi
-# config.json.example is the shipped example file; it does not end
-# in .json, so any *.json file in the stage is unexpected (the
-# exemption names it so the allowlist stays explicit).
+# No *.json file may ship in the stage: config.json.example
+# does not end in .json, so it is never matched by *.json and
+# the ! -name exemption below is a no-op kept only to name the
+# intent explicitly. Any *.json file found here is unexpected
+# and refuses the build (the check is stricter than the
+# comment it replaced claimed).
 if find "$stage" -type f -name '*.json' ! -name 'config.json.example' | grep -q .; then
   fail "refusing to package unexpected JSON files"
 fi

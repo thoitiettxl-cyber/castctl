@@ -516,13 +516,16 @@ key is absent, the embedded frontend is served byte-identical;
 when the key is present but broken (missing, not a directory,
 or without a regular `index.html`), `webui serve` fails closed
 (exit 2) instead of silently falling back to the embedded
-frontend. A missing file under a valid `ui_dir` falls back to
+frontend. A symlinked `index.html` is refused at startup
+(exit 2) and per request (fixed 404) — any symlink, even one
+whose target stays inside the root — because the shell path
+must only ever serve the regular file startup validated. A missing file under a valid `ui_dir` falls back to
 the on-disk shell (SPA hash routing). Serving is GET-only, with
 no directory listing, no dotfiles, and symlink-aware
 containment re-checked per request: a path escaping the root
 through `..` or a symlink gets a fixed 404, and only regular
 files are served. `/api/v1` keeps precedence and its Bearer
-gate: an API path never reads a disk file. The `/status`
+gate: an API path never reads a disk file. The `/api/v1/status`
 `bundle_sha256` is the SHA-256 of the on-disk `index.html`
 while `ui_dir` is active, and the embedded hash only in
 fallback mode.
@@ -540,7 +543,10 @@ unauthenticated). `ui_dir` is not a secret and is shown
 verbatim in redacted config views. The on-disk directory is
 trusted input: populate it only from verified module installs
 or explicit updates, never point it at a user-writable or
-shared directory. A check-then-open TOCTOU residual remains
+shared directory. Its content is trusted same-origin code —
+the frontend keeps the token in `sessionStorage`, so a
+malicious file served from `ui_dir` could read it: serve only
+content from a trusted source. A check-then-open TOCTOU residual remains
 between the per-request containment check and the file open
 (the open is followed by an fstat re-check, so a non-regular
 file is never served, but a symlink swapped in the same

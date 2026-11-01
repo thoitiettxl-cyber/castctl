@@ -165,7 +165,7 @@ Minimal valid example (`config.json.example` in the module):
 
 The example's `webui` block is a starting point, NOT a working
 config: its `"token": ""` is rejected by the strict parser, so
-EVERY castctl command fails (exit 2) until the token is replaced
+every config-loading castctl command fails (exit 2) until the token is replaced
 with a real secret (or the `token` key is deleted and
 `CASTCTL_WEBUI_KEY` is set instead — but an empty token must
 never be left in place: empty never means "no auth"). Never
@@ -181,7 +181,7 @@ Config rules that matter here (base tree, strict parser):
   `telegram`, `keeper`, `webui` — verified at
   `internal/profile/config.go:159-170`); unknown keys are
   rejected (exit 2). There is still NO `plugins` key — adding
-  one makes every castctl command fail. See §4.
+  one makes every config-loading castctl command fail. See §4.
 - Cookies live only in a separate cookies file (`cookies_file`
   resolves relative to `CONFIG_DIR`); inline `cookies` keys are
   rejected. Use `auth import` (stdin-only) to populate cookies;
@@ -225,7 +225,7 @@ Config rules that matter here (base tree, strict parser):
 - Minimum-binary note (version skew): the tracked v0.7.0 binary
   predates the `ui_dir` key, so its strict parser rejects an
   unknown `ui_dir` key — a config copied from the new example
-  fails EVERY castctl command under the tracked pin. The
+  fails every config-loading castctl command under the tracked pin. The
   `ui_dir` combination works only with a binary containing the
   Go `ui_dir` change, i.e. the release built from the tag of
   this branch (the release workflow re-pins to the tag's own
@@ -392,6 +392,12 @@ fight the checksum-pinned install).
   marker under the lock and exit 0 as a no-op (writing
   nothing) when it is absent. Stop removes BOTH `state/want`
   and `run/enabled` under the lock; restart preserves both.
+  Which stops clear the marker, exactly: user `stop`, Action
+  stop, and backend (`webui-json`) stop clear it; the
+  watchdog disable reaction uses a preserve-intent stop
+  (`stop-preserve`, internal) that leaves the marker
+  untouched, so disabling the module is temporary and
+  re-enabling resumes the wanted state.
   `status` reports `desired: on|off` separately from the
   actual running state. The marker write has no fsync: on a
   hard crash the rename may not survive, which fails safe
@@ -489,7 +495,9 @@ fight the checksum-pinned install).
   kept on failure). Replacement happens ONLY via the explicit
   `castctl-ctl ui-update` command (under the lifecycle lock,
   verified manifest, atomic swap, webui service restarted
-  only if it was running and still wanted; a ZIP without
+  only if it was running and still wanted; a running but
+  unwanted webui process is left untouched, never stopped
+  or restarted by ui-update; a ZIP without
   `ui/` leaves the tree untouched; an older ZIP never
   downgrades it automatically). The SHA-256 of `index.html`
   is the version identifier. The swap retires the old tree
@@ -506,10 +514,15 @@ fight the checksum-pinned install).
   tree. The refusal covers the data subdirectories too: a
   symlinked data dir, `releases/` dir, `config/` dir,
   `plugins/` dir, `run/` dir (including `run/tmp`, the child's
-  `TMPDIR`), logs dir, backups dir, `state/` dir, or `ui/` dir
+  `TMPDIR`), logs dir, backups dir, or `state/` dir
   is refused, and `log()` never appends through a symlinked
   logs dir (a guard refusal is reported to stderr only, never
-  written through the link). A symlinked ANCESTOR (parent) of
+  written through the link). `ui/` is refused CONDITIONALLY,
+  not by this list: only when a webui block is present, and
+  only for the webui start/doctor paths — a symlinked `ui/`
+  with no webui block never blocks telegram/keeper starts
+  (`customize.sh` at install time and `ui-update` refuse a
+  symlinked `ui/` unconditionally). A symlinked ANCESTOR (parent) of
   `DATA_DIR` is followed, not refused: the guards test links
   at or below `DATA_DIR` only, and planting such a parent link
   needs write access to the parent directory (on device,
@@ -676,7 +689,7 @@ fixed error JSON, no execution), line-count clamping;
 unchanged, equal-SHA no-op, corrupt refused with old tree
 kept, no-staged-UI no-op); action toggle; fake-secret scan
 over every new output path and log; uninstall removes only
-`state/want`. The prior item-4 harness (41 cases, base
+`state/want`. The prior item-4 harness (base
 behaviour: stop escalation, symlink guards, rotation,
 watchdog backoff) is not re-run here: its paths are
 unchanged except where this item's cases cover the new
@@ -765,7 +778,7 @@ is a recovery procedure for Boss, never a design argument.
 | `service.sh` (background body) | Runs parallel with boot (backgrounded). `boot_completed` wait is bounded polling (120 s cap). The want-marker gate is a pure existence test before `start --boot`. `start --boot` uses `flock -w 30`. Readiness wait is 10 s. Stop escalation is ≈14 s (2×5 s INT + 3 s TERM + 1 s, at defaults, plus scan time). All four env-overridable bounds are validated and clamped, so the bounds hold with overrides set | Watchdog sleeps (30 s → 300 s backoff) between iterations, in 5 s chunks re-checking `disable` with exit; consecutive-failure counter caps the rate; no respawn without sleep; without the want marker the loop idles (existence test per iteration, no work) | Every start/stop invocation ends `|| true`; disable/missing-controller/missing-want exits are `exit 0`; no `set -e`, no bare failing command as the body's last word | Static: read the file; count sleeps, bounds, `|| true`s. Live: boots with config removed, binary removed, want marker absent, and `disable` created mid-boot. `[NEEDS-MEASUREMENT]` |
 | `action.sh` (manager button, not boot) | Returns promptly; no wait loops; controller readiness wait is bounded (10 s); the toggle reads the want marker with a pure existence test | No loop | Exits 0 even when start/stop fails (`|| true` everywhere) | Static: read the file. Live: tap Action running and stopped. `[NEEDS-MEASUREMENT]` |
 | `uninstall.sh` | Returns promptly; stop is best-effort (`|| true`); no waits; stop resolves the data dir from an explicit env, then the install-time record, then the default | No loop | Exits 0 unconditionally | Static: read the file. Live: uninstall + reboot, no orphan daemon. `[NEEDS-MEASUREMENT]` |
-| `scripts/castctl-ctl` (invoked by the above) | Every wait bounded: flock 30 s, readiness 10 s, version probe 10 s, stop ≈14 s (2×5 s INT + 3 s TERM + 1 s, at defaults, plus scan time), child lifetime 86400 s, health probe 10 s (all env-overridable values validated and clamped). Stop always re-scans `/proc` after the wrapper exits, so a non-forwarding `timeout` cannot orphan a child; readiness-failure and mid-start symlink kills go through the same scan. `webui-json` status/log/url take no lock and create nothing; its start/stop/restart background a normal locked operation and return immediately | No unbounded loop: watchdog backoff lives in `service.sh`; controller loops are all iteration-capped | Controller exit codes never propagate to boot: `service.sh` swallows them with `|| true`; manual invocation reports failures honestly (non-zero); `webui-json` always exits 0 once an envelope is emitted | Static: read the file. Live: as for `service.sh` background body. Every write path refuses symlinks at or below `DATA_DIR` (including symlinked data dir / `releases/` / logs dir / `run/tmp` / `state/` / `ui/`); a symlinked ancestor of `DATA_DIR` is followed (see below); `current` target must be a single component under `releases/` and the manifest allowlist is validated on every runtime check |
+| `scripts/castctl-ctl` (invoked by the above) | Every wait bounded: flock 30 s, readiness 10 s, version probe 10 s, stop ≈14 s (2×5 s INT + 3 s TERM + 1 s, at defaults, plus scan time), child lifetime 86400 s, health probe 10 s (all env-overridable values validated and clamped). Stop always re-scans `/proc` after the wrapper exits, so a non-forwarding `timeout` cannot orphan a child; readiness-failure and mid-start symlink kills go through the same scan. `webui-json` status/log/url take no lock and create nothing; its start/stop/restart background a normal locked operation and return immediately | No unbounded loop: watchdog backoff lives in `service.sh`; controller loops are all iteration-capped | Controller exit codes never propagate to boot: `service.sh` swallows them with `|| true`; manual invocation reports failures honestly (non-zero); `webui-json` always exits 0 once an envelope is emitted | Static: read the file. Live: as for `service.sh` background body. Every write path refuses symlinks at or below `DATA_DIR` (including symlinked data dir / `releases/` / logs dir / `run/tmp` / `state/`); `ui/` is refused conditionally only (webui block present, webui start/doctor paths — see §10), never as an unconditional controller guard; a symlinked ancestor of `DATA_DIR` is followed (see below); `current` target must be a single component under `releases/` and the manifest allowlist is validated on every runtime check |
 | `initrc/`, `preinit/`, `system/`, `system.prop`, `sepolicy.rule`, `/data/adb/*.d/` scripts | — (must not ship) | — | — | Proof is absence in the ZIP listing. `initrc` content would still run in safe mode, so absence is load-bearing, not cosmetic |
 
 Additional hard-rule properties, verified by grep over the tree:

@@ -678,6 +678,22 @@ webui_probe() {
   printf 'unknown none\n'
 }
 
+# webui_ui_dir_refused: true (exit 0) when the webui
+# service must not start because the shipped UI tree is a
+# symlink. CONDITIONAL guard only: callers apply it when a
+# webui block is present (gating). With no webui block, a
+# symlinked ui/ must never block telegram/keeper starts — the
+# controller guard list does not refuse ui/ unconditionally;
+# customize.sh and ui-update do. A ui_dir pointing elsewhere
+# is enforced by the Go server's own startup check (a
+# symlinked index.html fails closed, exit 2); this guard
+# covers the shipped default location, $DATA_DIR/ui.
+webui_ui_dir_refused() {
+  [ -L "$DATA_DIR/ui" ] && return 0
+  [ -L "$DATA_DIR/ui/index.html" ] && return 0
+  return 1
+}
+
 # --- Persistent want marker (desired on/off across reboots) ---
 # state/want is existence-only: its content is never read,
 # parsed, or logged. Fresh install default is OFF (no marker)
@@ -1122,7 +1138,12 @@ start_locked() {
     start_one "$mode" "castctl keeper" "$KEEPER_PID_FILE" "$KEEPER_LOG" "keeper run" keeper run || failed=1
   fi
   if [ "$webui_wanted" = 1 ]; then
-    start_one "$mode" "castctl webui" "$WEBUI_PID_FILE" "$WEBUI_LOG" "webui serve" webui serve || failed=1
+    if webui_ui_dir_refused; then
+      log ERROR "installed UI tree is a symlink; webui not started (telegram/keeper unaffected)"
+      failed=1
+    else
+      start_one "$mode" "castctl webui" "$WEBUI_PID_FILE" "$WEBUI_LOG" "webui serve" webui serve || failed=1
+    fi
   fi
   if [ "$failed" = 0 ]; then
     set_description "Running | castctl | Action to stop"
@@ -1289,6 +1310,9 @@ doctor_locked() {
       # The listen value is validated, never logged: it sits next
       # to the token in the same block, so no value is echoed.
       webui_listen_value >/dev/null 2>&1 || { log ERROR "webui listen value is unparseable or not loopback; castctl will reject the config"; failed=1; }
+      # Conditional ui/ guard: a symlinked shipped UI tree
+      # blocks webui only, never telegram/keeper.
+      webui_ui_dir_refused && { log ERROR "installed UI tree is a symlink; webui will not start"; failed=1; }
     fi
   fi
   if service_running "$PID_FILE" "telegram run"; then
@@ -1431,8 +1455,13 @@ webui_json_err() {
 
 # svc_entry NAME PIDFILE PATTERN: one services[] element.
 svc_entry() {
-  if service_running "$2" "$3"; then
-    _svc_pid=$(read_pid_file "$2")
+  # Capture the PID exactly once: reading the PID file again
+  # after service_running (as before) could yield an empty
+  # value if the file changed between the two reads, emitting
+  # invalid JSON ({"pid":}). read_pid_file validates the value
+  # is numeric, so the emitted pid is always well-formed.
+  _svc_pid=$(read_pid_file "$2" 2>/dev/null) || _svc_pid=""
+  if [ -n "$_svc_pid" ] && pid_alive "$_svc_pid" && pid_matches "$_svc_pid" "$3"; then
     printf '{"name":"%s","running":true,"pid":%s}' "$1" "$_svc_pid"
   else
     printf '{"name":"%s","running":false,"pid":null}' "$1"
@@ -1599,7 +1628,7 @@ ui_update_locked() {
   if [ -f "$DATA_DIR/ui/ui.sha256" ] && [ ! -L "$DATA_DIR/ui/ui.sha256" ]; then
     _installed_sha=$(bb awk '{print $1}' "$DATA_DIR/ui/ui.sha256" 2>/dev/null | bb head -1 || true)
   fi
-  if [ "$_installed_sha" = "$_candidate_sha" ] && [ -f "$DATA_DIR/ui/index.html" ] && [ ! -L "$DATA_DIR/ui" ]; then
+  if [ "$_installed_sha" = "$_candidate_sha" ] && [ -f "$DATA_DIR/ui/index.html" ] && [ ! -L "$DATA_DIR/ui" ] && [ ! -L "$DATA_DIR/ui/index.html" ]; then
     log INFO "installed UI is already current"
     return 0
   fi
@@ -1632,8 +1661,17 @@ ui_update_locked() {
   log INFO "UI updated"
   if service_running "$WEBUI_PID_FILE" "webui serve"; then
     if has_top_block "$CONFIG" webui; then
-      stop_one "$WEBUI_PID_FILE" "webui serve" "castctl webui" || true
-      start_one manual "castctl webui" "$WEBUI_PID_FILE" "$WEBUI_LOG" "webui serve" webui serve || { log ERROR "UI updated but the webui service failed to restart"; return 1; }
+      # Restart only a WANTED service: a stop clears want but a
+      # surviving process must not be resurrected by ui-update.
+      # A running-but-unwanted process is left untouched (never
+      # stopped here: ui-update replaces files, it does not
+      # change the desired state).
+      if want_exists; then
+        stop_one "$WEBUI_PID_FILE" "webui serve" "castctl webui" || true
+        start_one manual "castctl webui" "$WEBUI_PID_FILE" "$WEBUI_LOG" "webui serve" webui serve || { log ERROR "UI updated but the webui service failed to restart"; return 1; }
+      else
+        log INFO "webui is running but not wanted; leaving it untouched"
+      fi
     else
       stop_one "$WEBUI_PID_FILE" "webui serve" "castctl webui" || true
     fi
@@ -1654,6 +1692,7 @@ Usage: castctl-ctl <command>
 Commands:
   start [--boot|--watchdog]  Start telegram run, keeper run and/or webui serve per config gating.
   stop                       Stop for the current boot (clears the want marker).
+  stop-preserve              INTERNAL (watchdog disable reaction only): stop without clearing the want marker.
   restart                    Restart the service (preserves the want marker).
   status                     Show safe runtime status (desired + running + listen, no token).
   is-running                 Return success if any managed service is alive.
@@ -1674,6 +1713,7 @@ case "$command_name" in
     start_service "$mode"
     ;;
   stop) stop_service 1 ;;
+  stop-preserve) stop_service 0 ;; # INTERNAL: watchdog disable reaction only — stops services without clearing state/want (W-6). Never called by action.sh or the webroot backend.
   restart) restart_service ;;
   status) status_service ;;
   is-running) is_running ;;

@@ -179,13 +179,19 @@ func cmdWebUIServe(ctx context.Context, env *Env, g *globalOpts, args []string) 
 	// Resolve the on-disk frontend root, if configured. A
 	// present-but-broken ui_dir fails closed (exit 2) here,
 	// before the server starts; only an absent key falls back
-	// to the embedded frontend.
+	// to the embedded frontend. The cookies-exposure rule is
+	// enforced inside webui.New via Deps.CookiesFiles, so it
+	// cannot be skipped by a future direct Server
+	// construction.
 	uiDir, err := resolveWebUIUIDir(webuiCfg, loc.ConfigDir)
 	if err != nil {
 		return err
 	}
-	if uiDir != "" && webuiUIDirExposesCookies(uiDir, single.Profiles) {
-		return errCodef(2, "webui serve: ui_dir must not contain a cookies file")
+	var cookiesFiles []string
+	for _, p := range single.Profiles {
+		if p != nil && p.CookiesFile != "" {
+			cookiesFiles = append(cookiesFiles, p.CookiesFile)
+		}
 	}
 	bundleHash := webuiassets.BundleSHA256()
 	if uiDir != "" {
@@ -209,12 +215,17 @@ func cmdWebUIServe(ctx context.Context, env *Env, g *globalOpts, args []string) 
 		DistFS:              webuiassets.FS(),
 		BundleSHA256:        bundleHash,
 		UIDir:               uiDir,
+		CookiesFiles:        cookiesFiles,
 		ImportCookies:       webuiImportCookies(loc, env),
 		RestoreCookies:      webuiRestoreCookies(loc, env),
 		ScreencastAvailable: webuiScreencastAvailable(loc),
 		ScreencastStarter:   webuiScreencastStarter(loc, env),
 	})
 	if err != nil {
+		var uidErr *webui.UIDirError
+		if errors.As(err, &uidErr) {
+			return errCodef(2, "webui serve: %v", uidErr)
+		}
 		return errCodef(1, "webui serve: %v", err)
 	}
 	ln, err := net.Listen("tcp", listen)
@@ -250,13 +261,14 @@ func cmdWebUIServe(ctx context.Context, env *Env, g *globalOpts, args []string) 
 // resolveWebUIUIDir resolves a configured ui_dir against
 // configDir and validates it on disk. It returns "" when no
 // ui_dir is configured (embedded fallback). A present-but-broken
-// value — missing, not a directory, no regular index.html, or
-// overlapping the config directory — fails closed (exit 2) with
-// a fixed rule-only message: the value is never echoed, and a
-// broken directory must never silently fall back to the
-// embedded frontend (that would hide a misconfiguration behind
-// a stale UI). The root is canonicalised (EvalSymlinks) so a
-// symlink into the config tree is caught here, before serving.
+// value — missing, not a directory, no regular index.html, a
+// symlinked index.html, or overlapping the config directory —
+// fails closed (exit 2) with a fixed rule-only message: the
+// value is never echoed, and a broken directory must never
+// silently fall back to the embedded frontend (that would hide
+// a misconfiguration behind a stale UI). The root is
+// canonicalised (EvalSymlinks) so a symlink into the config
+// tree is caught here, before serving.
 func resolveWebUIUIDir(cfg *profile.WebUIConfig, configDir string) (string, error) {
 	if cfg == nil || strings.TrimSpace(cfg.UIDir) == "" {
 		return "", nil
@@ -282,35 +294,11 @@ func resolveWebUIUIDir(cfg *profile.WebUIConfig, configDir string) (string, erro
 	if profile.DirOverlaps(canonicalConfig, resolved) {
 		return "", errCodef(2, "webui serve: ui_dir must not overlap the config directory")
 	}
-	index, err := os.Stat(filepath.Join(resolved, "index.html"))
-	if err != nil || !index.Mode().IsRegular() {
+	index, err := os.Lstat(filepath.Join(resolved, "index.html"))
+	if err != nil || index.Mode()&os.ModeSymlink != 0 || !index.Mode().IsRegular() {
 		return "", errCodef(2, "webui serve: ui_dir has no readable index.html")
 	}
 	return resolved, nil
-}
-
-// webuiUIDirExposesCookies reports whether any profile's
-// resolved cookies file sits inside the ui root: the static
-// shell is unauthenticated, so serving that directory would
-// leak the cookies file with no token. Cookies paths are
-// already resolved absolute at parse time; a symlink in the
-// path is resolved best-effort (a missing file keeps its
-// lexical path, which the Rel check still catches).
-func webuiUIDirExposesCookies(uiRoot string, profiles map[string]*profile.Profile) bool {
-	for _, p := range profiles {
-		if p == nil || p.CookiesFile == "" {
-			continue
-		}
-		cookies := p.CookiesFile
-		if resolved, err := filepath.EvalSymlinks(cookies); err == nil {
-			cookies = resolved
-		}
-		rel, err := filepath.Rel(uiRoot, cookies)
-		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return true
-		}
-	}
-	return false
 }
 
 // resolveWebUIListen computes the effective listen address:

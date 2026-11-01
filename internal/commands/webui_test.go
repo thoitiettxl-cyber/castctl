@@ -397,6 +397,17 @@ func TestWebUIServeUIDirFailsClosed(t *testing.T) {
 		{"no index.html", func(t *testing.T) string {
 			return t.TempDir()
 		}},
+		{"symlinked index.html", func(t *testing.T) string {
+			secret := filepath.Join(t.TempDir(), "secret.txt")
+			if err := os.WriteFile(secret, []byte("MARKER-CMD-SECRET"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			if err := os.Symlink(secret, filepath.Join(dir, "index.html")); err != nil {
+				t.Fatal(err)
+			}
+			return dir
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

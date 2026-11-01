@@ -84,7 +84,7 @@ WATCHDOG_MAX=$(clamp_int "${CASTCTL_WATCHDOG_MAX:-300}" 300 1 3600)
       remaining=$((remaining - chunk))
       if [ -f "$MODULE_DIR/disable" ]; then disabled=1; break; fi
     done
-    if [ "$disabled" = 1 ]; then "$CTL" stop >/dev/null 2>&1 || true; exit 0; fi
+    if [ "$disabled" = 1 ]; then "$CTL" stop-preserve >/dev/null 2>&1 || true; exit 0; fi # stop without clearing want (W-6): disabling is temporary; re-enabling resumes the wanted state.
     # The want marker gates the watchdog: a stop removes it, so
     # the loop idles until the next manual start. run/enabled is
     # retained as a start-request record but is no longer the

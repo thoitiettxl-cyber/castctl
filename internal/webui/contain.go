@@ -5,6 +5,7 @@
 package webui
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -151,8 +152,12 @@ func webUIUIDirValue(doc any) (string, bool) {
 // `ui_dir` value the web UI is about to introduce: the
 // symlink-resolved root must not overlap the config directory
 // in either direction, and must not contain any cookies file
-// named in the document. The error messages name the rule
-// only, never the value.
+// named in the document. A symlinked index.html inside the
+// root is refused too (any symlink, even one whose target
+// stays inside the root: the shell path must only ever serve
+// the file startup validated). A missing index.html is not
+// refused here — the startup checks reject a root without
+// one. The error messages name the rule only, never the value.
 func rejectNewUIDir(configDir, value string, cookiesFiles map[string]string) error {
 	root := resolveAgainst(configDir, value)
 	base := resolvePathBestEffort(configDir)
@@ -163,6 +168,9 @@ func rejectNewUIDir(configDir, value string, cookiesFiles map[string]string) err
 		if pathWithin(resolveAgainst(configDir, cookiesFile), root) {
 			return errValidation("webui.ui_dir must not contain a cookies file")
 		}
+	}
+	if lst, err := os.Lstat(filepath.Join(root, "index.html")); err == nil && lst.Mode()&os.ModeSymlink != 0 {
+		return errValidation("webui.ui_dir index.html must not be a symlink")
 	}
 	return nil
 }

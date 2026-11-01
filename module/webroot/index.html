@@ -121,7 +121,10 @@ function ksuExec(command) {
 }
 
 function runApi(args) {
-  var command = shellQuote(BRIDGE) + ' ' + args.map(shellQuote).join(' ');
+  /* Every backend call goes through the webui-json subcommand:
+     plain "status"/"start"/"stop" print human text, which the
+     JSON extractor below cannot parse. */
+  var command = shellQuote(BRIDGE) + ' ' + ['webui-json'].concat(args).map(shellQuote).join(' ');
   return ksuExec(command).then(function (result) {
     var payload = extractJson(result.stdout || result.stderr || '');
     if (!payload.ok) { throw new Error(payload.error || 'Bridge error'); }

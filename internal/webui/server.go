@@ -102,6 +102,15 @@ type Deps struct {
 	DistFS       fs.FS
 	BundleSHA256 string
 	UIDir        string
+	// CookiesFiles, when set, is the list of profile cookies
+	// file paths (as resolved at parse time, absolute). With
+	// UIDir set, checkUIDir rejects a root containing any of
+	// them, so the cookies-exposure rule lives in New() itself
+	// and cannot be skipped by a future direct Server
+	// construction that bypasses the command layer. Empty
+	// means no cookies-exposure check (tests and callers
+	// without profiles).
+	CookiesFiles []string
 
 	// ImportCookies validates and writes cookies for a profile
 	// through the existing locked writer path, returning whether
@@ -148,7 +157,7 @@ func New(deps Deps) (*Server, error) {
 		return nil, fmt.Errorf("webui: frontend shell: %w", err)
 	}
 	if deps.UIDir != "" {
-		if err := checkUIDir(deps.ConfigDir, deps.UIDir); err != nil {
+		if err := checkUIDir(deps.ConfigDir, deps.UIDir, deps.CookiesFiles); err != nil {
 			return nil, err
 		}
 	}
@@ -157,24 +166,46 @@ func New(deps Deps) (*Server, error) {
 	return s, nil
 }
 
+// UIDirError is a fail-closed ui_dir configuration error
+// from checkUIDir: missing, not a directory, no regular
+// non-symlink index.html, overlapping the config directory,
+// or containing a cookies file. It is a distinct type so
+// callers can map it to exit 2 (configuration) rather than
+// exit 1 (operational startup failure).
+type UIDirError struct{ msg string }
+
+func (e *UIDirError) Error() string { return e.msg }
+
 // checkUIDir validates an on-disk frontend root at startup:
-// a directory, holding a regular index.html, resolved against
-// the config directory, not overlapping it in either direction
-// (equal, inside, or ancestor — symlink-resolved). Error
-// messages name the rule only, never the path.
-func checkUIDir(configDir, uiDir string) error {
+// a directory, holding a regular non-symlink index.html,
+// resolved against the config directory, not overlapping it
+// in either direction (equal, inside, or ancestor —
+// symlink-resolved), and containing none of the cookies files
+// when any are supplied. The index.html check uses Lstat: a
+// symlink to a regular file must fail here, or the shell path
+// would serve the link target unauthenticated. Error messages
+// name the rule only, never the path.
+func checkUIDir(configDir, uiDir string, cookiesFiles []string) error {
 	root := resolveAgainst(configDir, uiDir)
 	st, err := os.Stat(root)
 	if err != nil || !st.IsDir() {
-		return errors.New("webui: ui_dir is not a readable directory")
+		return &UIDirError{"webui: ui_dir is not a readable directory"}
 	}
 	base := resolvePathBestEffort(configDir)
 	if pathWithin(root, base) || pathWithin(base, root) {
-		return errors.New("webui: ui_dir must not overlap the config directory")
+		return &UIDirError{"webui: ui_dir must not overlap the config directory"}
 	}
-	index, err := os.Stat(filepath.Join(root, "index.html"))
-	if err != nil || !index.Mode().IsRegular() {
-		return errors.New("webui: ui_dir has no readable index.html")
+	for _, cookiesFile := range cookiesFiles {
+		if cookiesFile == "" {
+			continue
+		}
+		if pathWithin(resolvePathBestEffort(cookiesFile), root) {
+			return &UIDirError{"webui: ui_dir must not contain a cookies file"}
+		}
+	}
+	index, err := os.Lstat(filepath.Join(root, "index.html"))
+	if err != nil || index.Mode()&os.ModeSymlink != 0 || !index.Mode().IsRegular() {
+		return &UIDirError{"webui: ui_dir has no readable index.html"}
 	}
 	return nil
 }
