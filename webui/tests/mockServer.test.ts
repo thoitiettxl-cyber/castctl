@@ -86,7 +86,50 @@ describe('malformed request bodies (R-H)', () => {
   });
 
   it('still routes a bodyless request', async () => {
-    const result = await callMockApi({ method: 'GET', url: '/api/v1/status' });
+    const result = await callMockApi({
+      method: 'GET',
+      url: '/api/v1/status',
+      headers: { authorization: 'Bearer x' },
+    });
     expect(result.status).toBe(200);
+  });
+
+  it('requires auth on /status like every other route (Go parity)', async () => {
+    const result = await callMockApi({ method: 'GET', url: '/api/v1/status' });
+    expect(result.status).toBe(401);
+  });
+});
+
+describe('keeper + screencast mocks (Go parity)', () => {
+  const auth = { authorization: 'Bearer <redacted>' };
+  it('serves keeper entries', async () => {
+    const result = await callMockApi({ method: 'GET', url: '/api/v1/keeper', headers: auth });
+    expect(result.status).toBe(200);
+    const parsed = JSON.parse(result.body) as { data: Array<{ tag: string }> };
+    expect(parsed.data[0].tag).toBe('k1');
+  });
+  it('reports screencast unavailable in mock mode', async () => {
+    const result = await callMockApi({
+      method: 'GET',
+      url: '/api/v1/screencast/status?profile=muse01',
+      headers: auth,
+    });
+    expect(result.status).toBe(200);
+    const parsed = JSON.parse(result.body) as { data: { available: boolean; profile: string } };
+    expect(parsed.data.available).toBe(false);
+    expect(parsed.data.profile).toBe('muse01');
+  });
+  it('refuses screencast start in mock mode', async () => {
+    const result = await callMockApi({
+      method: 'POST',
+      url: '/api/v1/screencast/muse01/start',
+      headers: auth,
+      bodyText: '{}',
+    });
+    expect(result.status).toBe(501);
+  });
+  it('refuses log clearing with 405 like Go', async () => {
+    const result = await callMockApi({ method: 'DELETE', url: '/api/v1/logs', headers: auth });
+    expect(result.status).toBe(405);
   });
 });

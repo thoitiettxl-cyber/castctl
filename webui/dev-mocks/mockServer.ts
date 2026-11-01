@@ -2,6 +2,15 @@
  * Answers every /api/v1 endpoint from fixtures. Bearer check: any
  * non-empty Authorization header is accepted; missing → 401, so the
  * login/logout flow behaves like the real server. Never bundled.
+ *
+ * DIVERGENCES from the Go server (dev-only, deliberate): auth
+ * accepts any non-empty token (Go compares SHA-256 + constant
+ * time against the configured token); PATCH profile shallow-merges
+ * the body onto the stored entry (Go merges only the allowlisted
+ * fingerprint/outbound fields through the guarded save); login
+ * import returns verified:true with a fake vm_id_prefix (Go
+ * returns verified:false — no live verification — and a null
+ * prefix). The PR body lists these divergences.
  */
 import type { Connect } from 'vite';
 import {
@@ -13,6 +22,7 @@ import {
 } from './configStore.ts';
 import {
   endpointsFixture,
+  keeperFixture,
   legacyProfileEntryFixture,
   loginStatusFixture,
   logsFixture,
@@ -54,12 +64,6 @@ let liveLogEntries: MockLogEntry[] = [...logsFixture];
 let liveLogNextIndex = 0;
 let liveLogPollCount = 0;
 
-function resetLiveLogs() {
-  liveLogEntries = [...logsFixture];
-  liveLogNextIndex = 0;
-  liveLogPollCount = 0;
-}
-
 /** Stored-form entry for a profile; the legacy profile's entry lives outside config.json (D3). */
 function storedEntryFor(name: string): Record<string, unknown> {
   return name === 'legacy-note'
@@ -82,7 +86,7 @@ export function registerMockApi(middlewares: Connect.Server) {
     const path = url.pathname.replace(/^\/api\/v1/, '') || '/';
     const method = req.method ?? 'GET';
 
-    if (path !== '/status' && !req.headers.authorization) {
+    if (!req.headers.authorization) {
       err(res, 401, 'unauthorized', 'Missing management token');
       return;
     }
@@ -115,6 +119,10 @@ export function registerMockApi(middlewares: Connect.Server) {
         const rest = profileMatch[2];
         if (rest === '' && method === 'GET') return ok(res, servedProfileDetail(name));
         if (rest === '' && method === 'PATCH') {
+          // DIVERGENCE: shallow-merge of the body onto the stored
+          // entry. The Go handler merges only fingerprint/outbound
+          // through the guarded save; the mock keeps the shape
+          // for dev editing.
           return ok(res, {
             ...profileDetailFixture,
             name,
@@ -129,6 +137,10 @@ export function registerMockApi(middlewares: Connect.Server) {
         }
         if (rest === '/login/status' && method === 'GET') return ok(res, loginStatusFixture);
         if (rest === '/login/import' && method === 'POST') {
+          // DIVERGENCE: the Go server returns verified:false
+          // (no live verification) with a null vm_id_prefix;
+          // the mock returns a fake verified result so the dev
+          // login flow can be exercised end to end.
           return ok(res, { saved: true, verified: true, vm_id_prefix: 'vm_9f2c' });
         }
         if (rest === '/login/restore' && method === 'POST') return ok(res, { restored: true });
@@ -198,8 +210,22 @@ export function registerMockApi(middlewares: Connect.Server) {
         return ok(res, { entries, next_cursor: null, more: false });
       }
       if (method === 'DELETE' && path === '/logs') {
-        resetLiveLogs();
-        return ok(res, { cleared: true });
+        // The Go server never truncates a live log file: 405.
+        return err(res, 405, 'method_not_allowed', 'Log clearing is not supported');
+      }
+      if (method === 'GET' && path === '/keeper') return ok(res, keeperFixture);
+      if (method === 'GET' && path === '/screencast/status') {
+        // The mock has no browser and no WebSocket relay: the page
+        // shows the unavailable state, exactly as the Go default
+        // build (without with_chromedp) does.
+        return ok(res, {
+          available: false,
+          reason: 'screencast unavailable in mock mode (no browser attached)',
+          profile: String(url.searchParams.get('profile') ?? ''),
+        });
+      }
+      if (method === 'POST' && /^\/screencast\/[^/]+\/start$/.test(path)) {
+        return err(res, 501, 'unavailable', 'screencast unavailable in mock mode (no browser attached)');
       }
       next();
     });

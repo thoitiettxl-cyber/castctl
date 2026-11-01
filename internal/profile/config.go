@@ -50,6 +50,11 @@ type SingleConfig struct {
 	// save and means the keeper is off.
 	Keeper *KeeperConfig
 
+	// WebUI is the top-level "webui" block (nil when absent;
+	// see internal/profile/webui.go). Absence is preserved on
+	// save and means the web UI is off.
+	WebUI *WebUIConfig
+
 	rawOutbounds    [][]byte
 	rawEndpoints    [][]byte
 	rawDNS          []byte
@@ -57,6 +62,7 @@ type SingleConfig struct {
 	rawLog          []byte
 	rawTelegram     []byte
 	rawKeeper       []byte
+	rawWebUI        []byte
 	rawProfiles     map[string][]byte
 }
 
@@ -160,6 +166,7 @@ var singleTopLevelKeys = map[string]bool{
 	"log":             true,
 	"telegram":        true,
 	"keeper":          true,
+	"webui":           true,
 }
 
 var profileKeys = map[string]bool{
@@ -337,6 +344,18 @@ func ParseSingleConfig(data []byte, baseDir string) (*SingleConfig, error) {
 		}
 		cfg.Keeper = kCfg
 		cfg.rawKeeper = raw
+	}
+	if v, ok := obj.get("webui"); ok {
+		raw, err := rawOf(v)
+		if err != nil {
+			return nil, err
+		}
+		wCfg, err := parseWebUIBlock(v)
+		if err != nil {
+			return nil, err
+		}
+		cfg.WebUI = wCfg
+		cfg.rawWebUI = raw
 	}
 
 	for _, name := range profilesObj.keys {
@@ -1344,6 +1363,19 @@ func buildSingleFileOrdered(cfg *SingleConfig) (*orderedObject, error) {
 			return nil, err
 		}
 		root.set("keeper", arr)
+	}
+	if len(cfg.rawWebUI) > 0 {
+		v, err := decodeOrderedJSON(cfg.rawWebUI)
+		if err != nil {
+			return nil, err
+		}
+		root.set("webui", v)
+	} else if cfg.WebUI != nil {
+		entry, err := encodeWebUIBlock(cfg.WebUI)
+		if err != nil {
+			return nil, err
+		}
+		root.set("webui", entry)
 	}
 	return root, nil
 }

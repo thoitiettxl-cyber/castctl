@@ -23,11 +23,10 @@ export function SettingsPage() {
   const [telegramConfigured, setTelegramConfigured] = useState(false);
   const [telegramMasked, setTelegramMasked] = useState('');
   const [tokenInput, setTokenInput] = useState('');
-  const [ownerText, setOwnerText] = useState('');
+  const [profileText, setProfileText] = useState('');
   const [allowedText, setAllowedText] = useState('');
   const [tgAutoApprove, setTgAutoApprove] = useState(false);
   const [tgAutoAllowOnce, setTgAutoAllowOnce] = useState(false);
-  const [tgWatch, setTgWatch] = useState(false);
   const [telegramLoaded, setTelegramLoaded] = useState(false);
   const [telegramError, setTelegramError] = useState('');
   const [telegramSaving, setTelegramSaving] = useState(false);
@@ -50,11 +49,10 @@ export function SettingsPage() {
       const result = await settingsApi.getTelegram();
       setTelegramConfigured(result.configured);
       setTelegramMasked(result.masked);
-      setOwnerText(result.owner_id === undefined ? '' : String(result.owner_id));
+      setProfileText(result.profile ?? '');
       setAllowedText((result.allowed_user_ids ?? []).join(', '));
       setTgAutoApprove(result.auto_approve);
       setTgAutoAllowOnce(result.auto_allow_once);
-      setTgWatch(result.watch);
       setTelegramLoaded(true);
     } catch (err) {
       setTelegramError(getErrorMessage(err, t('common.error')));
@@ -112,15 +110,6 @@ export function SettingsPage() {
     event.preventDefault();
     setTelegramError('');
     const allowed = parseIdList(allowedText);
-    let ownerId: number | undefined;
-    if (ownerText.trim()) {
-      const value = Number(ownerText.trim());
-      if (!Number.isInteger(value)) {
-        setTelegramError(t('settings.telegram.invalid_ids'));
-        return;
-      }
-      ownerId = value;
-    }
     if (allowed === null) {
       setTelegramError(t('settings.telegram.invalid_ids'));
       return;
@@ -128,10 +117,11 @@ export function SettingsPage() {
     const body: Record<string, unknown> = {
       auto_approve: tgAutoApprove,
       auto_allow_once: tgAutoAllowOnce,
-      watch: tgWatch,
       allowed_user_ids: allowed,
     };
-    if (ownerId !== undefined) body.owner_id = ownerId;
+    // Empty profile = keep the stored one (or the default profile
+    // when creating the block, server-side).
+    if (profileText.trim()) body.profile = profileText.trim();
     // Empty token = unchanged (write-only field, design §5.4).
     if (tokenInput.trim()) body.token = tokenInput.trim();
     setTelegramSaving(true);
@@ -211,9 +201,9 @@ export function SettingsPage() {
               onChange={(event) => setTokenInput(event.target.value)}
             />
             <Input
-              label={t('settings.telegram.owner_id')}
-              value={ownerText}
-              onChange={(event) => setOwnerText(event.target.value)}
+              label={t('settings.telegram.profile')}
+              value={profileText}
+              onChange={(event) => setProfileText(event.target.value)}
             />
             <Input
               label={t('settings.telegram.allowed')}
@@ -230,7 +220,6 @@ export function SettingsPage() {
               onChange={setTgAutoAllowOnce}
               label={t('settings.defaults.auto_allow_once')}
             />
-            <ToggleSwitch checked={tgWatch} onChange={setTgWatch} label={t('settings.defaults.watch')} />
             <Button type="submit" loading={telegramSaving}>
               {t('settings.telegram.save')}
             </Button>

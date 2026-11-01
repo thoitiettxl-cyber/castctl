@@ -5,11 +5,18 @@
  * NOTE: there is NO global auto-approve endpoint — per-profile
  * auto_approve/auto_allow_once live on PATCH /profiles/{name} (design §2).
  * Settings must not invent a /settings/defaults endpoint.
+ *
+ * keeperApi + screencastApi were added with the Go web UI server
+ * (phase 2 item 2): GET /keeper and the /screencast/* endpoints,
+ * with mock handlers in dev-mocks/mockServer.ts. The screencast
+ * WebSocket is opened from the ws_url the server returns; the
+ * management Bearer token is never placed in a URL.
  */
 
 import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from './client';
 import type {
   ConfigContent,
+  KeeperEntryStatus,
   LoginImportResult,
   LoginStatus,
   LogsPage,
@@ -19,6 +26,8 @@ import type {
   ProfileSummary,
   ProfileTestPhase,
   ProfileTestResult,
+  ScreencastStartResult,
+  ScreencastStatus,
   StatusInfo,
   TelegramSettings,
 } from '@/types';
@@ -130,5 +139,20 @@ export const logsApi = {
     const suffix = qs.toString() ? `?${qs}` : '';
     return apiGet<LogsPage>(`/logs${suffix}`, signal);
   },
-  clear: () => apiDelete<{ cleared: boolean }>('/logs'),
+  // No clear(): DELETE /logs is 405 (the server never truncates a
+  // live log file). Kept as a comment so nobody re-adds it.
+};
+
+export const keeperApi = {
+  list: (signal?: AbortSignal) => apiGet<KeeperEntryStatus[]>('/keeper', signal),
+};
+
+export const screencastApi = {
+  status: (profile: string, signal?: AbortSignal) =>
+    apiGet<ScreencastStatus>(
+      `/screencast/status?profile=${encodeURIComponent(profile)}`,
+      signal,
+    ),
+  start: (profile: string) =>
+    apiPost<ScreencastStartResult>(`/screencast/${encodeURIComponent(profile)}/start`, {}),
 };

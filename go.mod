@@ -4,6 +4,7 @@ go 1.27.3
 
 require (
 	github.com/flynn/noise v1.1.0
+	github.com/go-chi/chi/v5 v5.2.5
 	github.com/go-telegram/bot v1.27.1-0.20261008103508-f53bfe55a30b
 	github.com/gorilla/websocket v1.5.3
 	github.com/miekg/dns v1.1.72
@@ -45,7 +46,6 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/gaissmai/bart v0.26.1 // indirect
-	github.com/go-chi/chi/v5 v5.2.5 // indirect
 	github.com/go-chi/render v1.0.3 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-json-experiment/json v0.0.0-20260213210345-44df1a37e875 // indirect

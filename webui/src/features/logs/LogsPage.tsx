@@ -51,6 +51,10 @@ export function LogsPage() {
   const [entries, setEntries] = useState<LogEntry[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [more, setMore] = useState(false);
+  // Server-side log gate: when the log block is absent/disabled or
+  // the output is not a file, the server answers disabled:true with
+  // empty entries. The page shows the notice, never invents logs.
+  const [disabled, setDisabled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
@@ -87,6 +91,7 @@ export function LogsPage() {
       setEntries(page.entries);
       setNextCursor(page.next_cursor);
       setMore(page.more);
+      setDisabled(page.disabled === true);
     } catch (err) {
       setError(getErrorMessage(err, t('common.error')));
     } finally {
@@ -99,6 +104,7 @@ export function LogsPage() {
     setEntries([]);
     setNextCursor(null);
     setMore(false);
+    setDisabled(false);
     setLoading(true);
     // A fresh list starts following again from the bottom.
     setFollowing(true);
@@ -230,6 +236,11 @@ export function LogsPage() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <LoadingSpinner />
             <span>{t('common.loading')}</span>
+          </div>
+        ) : disabled ? (
+          <div role="status">
+            <p>{t('logs.disabled')}</p>
+            <p>{t('logs.disabled_hint')}</p>
           </div>
         ) : entries.length === 0 ? (
           <EmptyState title={t('logs.empty')} />

@@ -309,6 +309,20 @@ export const storedConfigDocument = {
     ],
     final: 'dns-remote',
   },
+  // All current top-level blocks (FAKE values). No per-profile dns:
+  // a profile dns alongside top-level dns is invalid under G1.
+  log: { level: 'info', output: 'castctl.log', timestamp: true },
+  telegram: {
+    profile: 'muse01',
+    token: '123456789:FAKE-SECRET-TELEGRAM-TOKEN-AAAAAAAAAAAAAAAA',
+    allowed_user_ids: [1403530267],
+    auto_approve: false,
+    auto_allow_once: false,
+  },
+  keeper: [
+    { tag: 'k1', profile: 'muse01', browser: 'http://127.0.0.1:9226', interval: '24h', notify: 'telegram' },
+  ],
+  webui: { listen: '127.0.0.1:8317', token: 'FAKE-SECRET-WEBUI-TOKEN' },
 };
 
 /** Served redacted view of the stored document + its stored-bytes hash. */
@@ -326,15 +340,37 @@ export const dnsFixture = {
   sha256: sha256Hex(stringifyConfigDocument(storedConfigDocument)),
 };
 
+/** Served Telegram settings (Go shape): masked is exactly '***'
+ * when a token is stored; no owner_id/watch fields exist in Go. */
 export const telegramFixture = {
   configured: true,
-  masked: 'bot123456:AA***',
-  owner_id: 1403530267,
+  masked: '***',
+  profile: 'muse01',
   allowed_user_ids: [1403530267],
   auto_approve: false,
   auto_allow_once: false,
-  watch: true,
 };
+
+/** Served keeper entries with state-file status (name-only records). */
+export const keeperFixture = [
+  {
+    tag: 'k1',
+    profile: 'muse01',
+    browser: 'http://127.0.0.1:9226',
+    interval_seconds: 86400,
+    notify: 'telegram',
+    status: {
+      tag: 'k1',
+      profile: 'muse01',
+      logged_out: false,
+      keeper_stopped: false,
+      last_checked_at: '2026-10-29T05:00:00Z',
+      last_tick_outcome: 'healthy',
+      earliest_expiry: '2026-11-05T10:00:00Z',
+      next_check_at: '2026-10-30T05:00:00Z',
+    },
+  },
+];
 
 export const defaultsFixture = { auto_approve: false, auto_allow_once: false, watch: true };
 

@@ -16,7 +16,7 @@ profile loading refuses (only `config migrate` reads it)).
 
 ## Single-file schema
 
-Top-level keys (exactly these nine; unknown keys are rejected):
+Top-level keys (exactly these ten; unknown keys are rejected):
 
 | Key | Value |
 |---|---|
@@ -29,6 +29,7 @@ Top-level keys (exactly these nine; unknown keys are rejected):
 | `log` | object: logging settings (see [The `log` section](#the-log-section)) |
 | `telegram` | object: Telegram bot settings (see [The `telegram` section](#the-telegram-section)) |
 | `keeper` | array: session-keeper entries (see [The `keeper` section](#the-keeper-section)) |
+| `webui` | object: web UI server settings (see [The `webui` section](#the-webui-section)) |
 
 A profile entry accepts exactly these ten keys (unknown keys
 are rejected — see [Per-profile DNS](#per-profile-dns)):
@@ -494,6 +495,53 @@ Behaviour:
   wire-recording test) — the CDP allowlist discipline covers
   castctl's own calls, not the library bootstrap. See
   `castctl auth login --help`.
+
+## The `webui` section
+
+Optional. Absent means no web UI: `castctl webui serve` fails
+closed (exit 2) and nothing listens. The block accepts exactly
+two keys:
+
+| Key | Value |
+|---|---|
+| `listen` | string: loopback `host:port` the server binds (default `127.0.0.1:8317` when the block is present without `listen`) |
+| `token` | string: the management token, write-only (see below) |
+
+Loopback-only is enforced at parse time: `listen` must be a
+bare `host:port` with a loopback host (`127.0.0.0/8`, `::1`, or
+`localhost`, case-insensitive) and an explicit port 1–65535.
+Anything else — `0.0.0.0`, `::`, a non-loopback address or
+hostname, a URL, userinfo, a path, a query, or a fragment — is a
+config error (exit 2) whose message never echoes the value.
+Present-but-empty `listen`/`token` is a config error. The
+`--listen`/`--port` flags of `webui serve` override within a
+present block only, and are re-validated loopback-only; both
+flags together are an error.
+
+The effective token is `CASTCTL_WEBUI_KEY` when set (non-empty,
+exact value, no trimming), else the block's `token`. A
+whitespace-only `CASTCTL_WEBUI_KEY` counts as unset (it could
+never authenticate, since the token is compared exactly). With
+neither set, `webui serve` fails closed (exit 2) and never
+starts unauthenticated. The token is never printed, logged, or
+returned: the startup line names the listen address only, and
+the API answers every route (including `/status`) only with a
+valid Bearer token. The static frontend shell is served without
+auth (it carries no secrets); the single-use screencast session
+token travels in the WebSocket URL query, never the Bearer
+token. See `castctl webui serve --help` and
+[Security](security.md).
+
+The block is stored verbatim in the 0600 file like any other
+block (raw preservation on save); write-only is an API-layer
+property: GET endpoints return redacted views, and the token can
+only be set or replaced, never read back. Note the first-save
+reorder caveat that applies to every web UI save: the first
+web UI save may reorder keys within sections; semantics are
+preserved.
+Remote access is loopback-only by design: reach the server from
+another device through an SSH tunnel forwarding the loopback
+port, never by binding a non-loopback address.
 
 ## The `dns` section — INTERIM, GLOBAL, COMPAT-ONLY
 
