@@ -784,7 +784,11 @@ kept as surveyed for the monitor path (a slow decider with a
 short claim wait lets every concurrent caller decide one id
 — a defect of the mirrored protocol; gateway-side
 idempotency is required for the claim protocol, and no
-monitor exists in this build).
+monitor exists in this build). The manual button path is
+single-flight in this build (registry consumption on first
+tap plus `Bot.decideOnce` sharing the claim protocol's
+decided set); the storm residual above applies only to the
+monitor path, whose helpers have no production callers.
 
 ## 6. cronet-go — EVALUATED-NOT-WIRED (graph-only; no code, no tag)
 
