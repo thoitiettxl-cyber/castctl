@@ -123,6 +123,14 @@ Castctl mappings (`VERIFIED` except as tagged):
   construction. `[PARTLY VERIFIED — import level only; file contents
   not read in detail.]`
 
+- `internal/profile/plugins.go` — the `plugins` array shape
+  mirrors upstream `option/outbound.go` (`_Outbound`: Type/Tag
+  inline, no `enabled` field) and `option/endpoint.go`
+  (`_Endpoint`, identical shape), plus
+  `docs/configuration/outbound/index.md`
+  (`{"outbounds": [{"type": "", "tag": ""}]}`). Shape only;
+  no sing-box source copied.
+
 Outbound dialability for the interim-DNS detour walk (loop 4) —
 VERIFIED against the pinned module-cache source (no upstream code
 copied; the walker is castctl's own static model of the upstream
@@ -357,72 +365,112 @@ unresolved, no code — recorded here, not implemented):
   are standalone) plus a test driving the junction with
   non-empty Dialer options.
 
-## 2. CLIProxyAPI @90c447d — DESIGN-ONLY (studied, no code taken)
+## 2. CLIProxyAPI @250d5981 — plugin loader/ABI adapted (code taken, re-pinned)
 
 Upstream: `github.com/router-for-me/CLIProxyAPI`, commit
-`90c447d3a8727d115aa7552ec93ce023736ed492` (research-clone HEAD,
-verified against `git ls-remote`). License name: MIT (LICENSE at
+`250d598175db61a4e99ac38b9164ed04745754e5` (re-pinned from the
+`90c447d` research pin used for the design-only study; the
+`90c447d` pin still applies to the release-workflow
+adaptation recorded below). License name: MIT (LICENSE at
 that commit reads "MIT License / Copyright (c) 2025-2005.9 Luis
 Pater / Copyright (c) 2025.9-present Router-For.ME" — the
 "2025-2005.9" line is verbatim upstream text, not a typo to fix).
 
-What was taken: nothing in code. Verified by grep: zero
-`go-plugin` / `hashicorp` plugin-loader imports in any castctl
-`.go` file (only `hashicorp/yamux` appears, as an indirect entry in
-`go.sum`, pulled by another dependency — not a plugin loader);
-zero `pluginhost`, zero `sdk/pluginabi` in the tree. The only
-castctl-side artefacts are docs and comments. This item is
-DESIGN-ONLY: studied, no code taken.
+What was taken (adapted, renamed namespace, castctl schema 1
+instead of upstream schema 10; castctl files in
+`internal/pluginabi/` + `internal/pluginhost/`):
 
-Castctl mapping (docs/comments only — `[DESIGN-ONLY]`):
+- `internal/pluginhost/loader_unix.go` (C preamble, `dlopen`
+  RTLD_NOW|RTLD_LOCAL :44, entry lookup :130, ABI exact check
+  :166-168, never-unload close :225-237) → `loader_unix.go`
+  (`castctl_plugin_init`, `castctl_buffer`, compat gate on
+  the shadow path before `dlopen` added).
+- `internal/pluginhost/loader_windows.go` (table shape,
+  never-unload comment :204) → `loader_windows.go`
+  (stdlib `syscall` only; Windows load unproven).
+- `internal/pluginhost/loader_unsupported.go` (stub refusal
+  wording) → `loader_stub.go` (also the `GOOS=android`
+  refusal; no android loader file by design).
+- `internal/pluginhost/abi.go` (host/client/loader interface
+  shape) → `host.go` (`Host`, `Client`, `Loader`).
+- `internal/pluginhost/host.go` (`ApplyConfig` :213, quiesce,
+  rollback) → `host.go` lifecycle (reconfigure same path,
+  quiesce-before-replace, rollback, fuse).
+- `internal/pluginhost/platform.go` (candidate dirs :308,
+  discovery :292, extension :100, ID rule) →
+  `discovery.go` (`Discover`, `PluginExtension`,
+  `ValidatePluginID`).
+- `internal/pluginhost/shadow.go` (shadow copy :33, sha256
+  naming :95, per-process dir :126-138) → `shadow.go`
+  (plus castctl Lstat/hardlink hardening — not upstream).
+- `internal/pluginhost/client_guard.go` (guarded call,
+  recover, abandon-on-timeout :80-115) → `host.go`
+  `callEnvelope` (fuse on panic/timeout).
+- `internal/pluginhost/rpc_schema.go` (lifecycle
+  request/response shape) + `rpc_client.go` (schema ceiling
+  + missing→1 :111-118) → `pluginabi` registration +
+  `ValidateRegistration` (ceiling 1, missing→1).
+- `sdk/pluginabi/types.go` (ABIVersion :7, SchemaVersion
+  :36, `host.log` :140) → `pluginabi.go` (ABIVersion 1,
+  SchemaVersion 1, `MethodHostLog`).
+- `sdk/pluginapi/types.go` (Capabilities :74) →
+  `pluginabi.go` (`Capabilities{Provider,
+  CommandProvider}` only).
+- `internal/pluginstore/checksum.go` (`VerifyChecksum`
+  :34) + `internal/pluginstore/install.go` (verify before
+  extract) → `checksum.go` (verify-before-use for local
+  `checksums.txt` only; no store/download).
+- `examples/plugin/simple/go/main.go` (c-shared example,
+  extern declarations) → `internal/plugintest/testdata/`
+  fixture + `examples/plugin/echo/main.go`.
 
-- `docs/architecture.md:21-48` — "Core + plugins" section: castctl
-  follows CLIProxyAPI's plugin model; toggles `plugins.enabled` +
-  `plugins.configs.<id>.enabled` (`architecture.md:30-34`) are
-  "changed through the Management API and the web UI"; "Plugins are
-  trusted and in-process, with no sandbox, exactly like
-  CLIProxyAPI, and only first-party CLIs (BQ1, closed). BQ2–B5 are
-  parked… The plugin design draft is rationale only."
-  (`architecture.md:41-48`).
-- Idea comments only: `internal/gateway/doc.go:107`,
-  `internal/gateway/lost.go:19`, `internal/gateway/phase.go:15`,
-  `internal/outbound/failclosed_test.go:27`,
-  `internal/profile/config.go:386`, `internal/profile/config_test.go:292`,
-  `internal/profile/envproxy.go:28,43`,
-  `internal/profile/guard.go:15`, `internal/profile/identity.go:14`.
+Castctl-original (not upstream): the `plugins` array config
+shape (sing-box inline, no `enabled`), the glibc compat gate
+(`debug/elf` + `gnu_get_libc_version`), the Lstat/hardlink
+shadow hardening, the per-session loopback egress proxy
+with cookie injection, the `plugin check` command, and the
+two-package consolidation (no `pluginapi`, no `sdk/`).
 
-Upstream files studied (inspected at `90c447d`):
-`internal/pluginhost/abi.go` (`pluginHostABIVersion`,
-`pluginClient` interface with `Call(ctx, method, request []byte)`,
-`pluginLoader` interface with `Open(file, host)`),
-`internal/pluginhost/loader_unix.go`, `loader_windows.go`,
-`loader_unsupported.go`, and
-`internal/config/config_types.go:28-52` (`PluginsConfig` struct:
-`Enabled`, `Dir`, `StoreSources`, `StoreAuth`, `AuthRevision`,
-`Configs map[string]PluginInstanceConfig`; `PluginInstanceConfig`:
-`Enabled *bool`, `Priority`, `Raw yaml.Node`).
+Deliberately NOT taken (all verified absent-or-rejected at
+the pin): `host.auth.*` callbacks
+(`internal/pluginhost/auth_callbacks.go`, which reads
+credential files — rejected absolutely; castctl has no
+credential surface for plugins); upstream `PluginsConfig`
+(`internal/config/config_types.go:28-52`: `Enabled`, `Dir`,
+`StoreSources`, `StoreAuth`, `AuthRevision`, `Configs` map
+— castctl uses the `plugins` array instead); `min_version` /
+`allow_downgrade` (absent upstream by grep); random shadow
+names / memfd (absent upstream); load-time signature checks
+(absent upstream); sandbox promises (none, either side).
+The old design-only claims are superseded: the
+`plugins.enabled` / `plugins.configs.<id>.enabled` toggles
+(`architecture.md` pre-PR text) do NOT exist in castctl;
+the caveat paragraph below is retained as history of the
+design study only.
 
-Config-schema caveat (must be worded exactly this way): castctl's
-docs claim the *same* toggles (`plugins.enabled`,
-`plugins.configs.<id>.enabled`). That claim is true only for the two
-toggle names. Upstream's `PluginsConfig` additionally has `dir`,
-`store-sources`, `store-auth`, `auth-revision`, and per-instance
-`priority` plus raw-YAML preservation — castctl has no config
-struct for these (no `plugins` key exists in
-`internal/profile/config.go`). Status: `[DOCS-ONLY]` for the
-toggles; `[NOT FOUND]` for any wider schema adoption. The full
-schema is a parked BQ2–B5 matter.
+Config-schema caveat (history of the design study, retained
+verbatim in substance): the pre-implementation docs claimed
+the *same* toggles (`plugins.enabled`,
+`plugins.configs.<id>.enabled`). That claim was true only
+for the two toggle names. Upstream's `PluginsConfig`
+additionally has `dir`, `store-sources`, `store-auth`,
+`auth-revision`, and per-instance `priority` plus raw-YAML
+preservation — castctl has no config struct for these (no
+`plugins` key existed in `internal/profile/config.go` at
+that time). Status then: `[DOCS-ONLY]` for the toggles;
+`[NOT FOUND]` for any wider schema adoption. Status now:
+toggles not adopted; see the `plugins` array shape above.
 
-Deviations (design-level, all `[DESIGN-ONLY]`): (a) per-profile
-proxy + cookies handoff to plugins, never raw WireGuard keys
-(`architecture.md:21-48`); (b) plugins must use core's per-profile
-dialer, never dial directly (`architecture.md:21-48`); (c) trusted
-in-process, no sandbox (BQ1 closed) — the same as CLIProxyAPI, so
-not a deviation from upstream, but a deliberate departure from the
-generic plugin-sandbox expectation; record it as "same as upstream,
-deliberate". Red-team findings B1–B10 and BQ2–B5 are parked
-(`architecture.md:42-44`); B3 stays parked. None of them is
-described here as resolved.
+Deviations from upstream (implementation-level): (a)
+per-profile proxy + cookies handoff to plugins, never raw
+WireGuard keys; (b) plugins must use core's egress proxy,
+never dial directly; (c) trusted in-process, no sandbox
+(BQ1 closed) — the same as CLIProxyAPI, recorded as "same
+as upstream, deliberate". Red-team findings B1, B2, B4–B10
+kept; B3 dropped (accepted plugins design). BQ2(A) logical
+instances, BQ3(A) dlopen-init residual accepted, BQ4 no
+store, BQ5 hybrid egress — all implemented in this PR's
+framework (runtime wiring is a later PR).
 
 Release workflow adaptation: VERIFIED (adapted YAML in the tree;
 the plugin-design part of this section stays `[DESIGN-ONLY]`).

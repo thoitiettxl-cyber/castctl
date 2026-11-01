@@ -12,6 +12,23 @@ The full contract is the [secrets write-only contract](../webui/SECRETS-CONTRACT
 The Go server implements the same redaction, sentinel
 keep-on-save, and merge contract server-side (`internal/webui`).
 
+## Plugins
+
+Plugins are trusted, in-process, first-party only, with no
+sandbox: a loaded plugin runs with the process's privileges
+and must never be treated as untrusted input. A plugin
+receives no secrets — no cookie paths, tokens, WireGuard
+keys, or real proxy credentials — only a secret-stripped
+outbound identity hash, ephemeral loopback-proxy
+credentials, and its own config fragment (shown as
+`<redacted>` wholesale). The only reverse callback is
+`host.log`; `host.auth.*` is rejected absolutely. Plugin
+network traffic goes through the core-owned per-session
+loopback proxy, which injects the session cookie inside
+core. See [Plugins](plugins.md). The framework is not wired
+into the runtime in this PR: plugins load only through
+`castctl plugin check` and tests.
+
 ## Loopback-only + token guidance
 
 The web UI listens on loopback only (`127.0.0.1`, port `8317` by

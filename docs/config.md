@@ -16,7 +16,7 @@ profile loading refuses (only `config migrate` reads it)).
 
 ## Single-file schema
 
-Top-level keys (exactly these ten; unknown keys are rejected):
+Top-level keys (exactly these eleven; unknown keys are rejected):
 
 | Key | Value |
 |---|---|
@@ -30,6 +30,7 @@ Top-level keys (exactly these ten; unknown keys are rejected):
 | `telegram` | object: Telegram bot settings (see [The `telegram` section](#the-telegram-section)) |
 | `keeper` | array: session-keeper entries (see [The `keeper` section](#the-keeper-section)) |
 | `webui` | object: web UI server settings (see [The `webui` section](#the-webui-section)) |
+| `plugins` | array: plugin entries (see [The `plugins` section](#the-plugins-section)) |
 
 A profile entry accepts exactly these ten keys (unknown keys
 are rejected — see [Per-profile DNS](#per-profile-dns)):
@@ -728,6 +729,39 @@ follow sing-box's Clash API
   `external_ui_download_url`; the embedded UI ships in the
   binary, and an on-disk UI is replaced only by explicit
   update.
+## The `plugins` section
+
+Optional. Absent means no plugins. The block is an ARRAY of
+entries in the sing-box outbounds/endpoints style (type/tag
+inline, no wrapper object); each entry requires `tag`
+(unique) and `type`, and the remaining keys are handed to the
+plugin verbatim as its config fragment:
+
+```json
+{
+  "plugins": [
+    {"tag": "muse", "type": "muse", "model": "opus"}
+  ]
+}
+```
+
+There is NO `enabled` field at any level: presence in the
+array means active; remove the entry to disable. An `enabled`
+key inside an entry is plugin-opaque data, never a core
+toggle. Core parses `tag`/`type` strictly (unknown envelope
+keys are rejected); the fragment is raw-preserved on save,
+in original key order, and shown as `<redacted>` wholesale
+by redaction — tag/type only, never fragment contents, in
+any display, log, or error. The `plugins` block is saved
+after `webui`.
+
+glibc floor: a plugin binary must require at most glibc
+2.17 to load everywhere castctl runs; the KernelSU module
+bundles glibc 2.44. The loader refuses a plugin whose
+highest required `GLIBC_` version exceeds the running libc
+before `dlopen`. Full plugin contract, lifecycle, egress,
+and the on-device check: [Plugins](plugins.md) and
+[Plugin spec](plugins-spec.md).
 
 ## The `dns` section — INTERIM, GLOBAL, COMPAT-ONLY
 

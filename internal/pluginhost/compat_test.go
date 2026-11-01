@@ -1,0 +1,180 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Licensed under the GNU General Public License v3.0 or later.
+
+package pluginhost
+
+import (
+	"encoding/binary"
+	"os"
+	"strings"
+	"testing"
+)
+
+// buildVerneed synthesises a .gnu.version_r section body: one
+// Verneed for fileName with the given version names, in the
+// given ELF class. The string table is appended after the
+// entries; vna_name offsets are relative to it.
+func buildVerneed(t *testing.T, class string, fileName string, versions []string) ([]byte, []byte) {
+	t.Helper()
+	strtab := []byte{0}
+	strOff := map[string]uint32{}
+	addStr := func(s string) uint32 {
+		if off, ok := strOff[s]; ok {
+			return off
+		}
+		off := uint32(len(strtab))
+		strtab = append(strtab, []byte(s)...)
+		strtab = append(strtab, 0)
+		strOff[s] = off
+		return off
+	}
+	fileOff := addStr(fileName)
+	nameOffs := make([]uint32, len(versions))
+	for i, v := range versions {
+		nameOffs[i] = addStr(v)
+	}
+	// Verneed (16 bytes) + one Vernaux (16 bytes) per version.
+	body := make([]byte, 0, 16+16*len(versions))
+	put16 := func(v uint16) {
+		var b [2]byte
+		binary.LittleEndian.PutUint16(b[:], v)
+		body = append(body, b[:]...)
+	}
+	put32 := func(v uint32) {
+		var b [4]byte
+		binary.LittleEndian.PutUint32(b[:], v)
+		body = append(body, b[:]...)
+	}
+	_ = class
+	put16(1) // vn_version
+	put16(uint16(len(versions)))
+	put32(fileOff)
+	put32(16) // vn_aux: first Vernaux right after Verneed
+	if len(versions) > 0 {
+		put32(0) // vn_next: single Verneed
+	} else {
+		put32(0)
+	}
+	for i, off := range nameOffs {
+		put32(0) // vna_hash (unused by the parser)
+		put16(0) // vna_flags
+		put16(uint16(i + 2))
+		put32(off)
+		if i+1 < len(versions) {
+			put32(16)
+		} else {
+			put32(0)
+		}
+	}
+	return body, strtab
+}
+
+func TestParseVersionNeeds(t *testing.T) {
+	body, strtab := buildVerneed(t, "64", "libc.so.6", []string{"GLIBC_2.17", "GLIBC_2.34", "GLIBC_PRIVATE"})
+	max, err := parseVersionNeeds(body, strtab, binary.LittleEndian)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if max != "2.34" {
+		t.Fatalf("max = %q, want %q", max, "2.34")
+	}
+	body, strtab = buildVerneed(t, "64", "libc.so.6", []string{})
+	max, err = parseVersionNeeds(body, strtab, binary.LittleEndian)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if max != "" {
+		t.Fatalf("max = %q, want empty", max)
+	}
+	body, strtab = buildVerneed(t, "64", "libfoo.so.1", []string{"FOO_1.0"})
+	max, err = parseVersionNeeds(body, strtab, binary.LittleEndian)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if max != "" {
+		t.Fatalf("max = %q, want empty for non-glibc versions", max)
+	}
+	if _, err := parseVersionNeeds([]byte{1, 2}, strtab, binary.LittleEndian); err == nil {
+		t.Fatal("truncated section: want error")
+	}
+}
+
+func TestMaxRequiredGLIBCRealBinary(t *testing.T) {
+	if !testBinaryHasGLIBCReqs {
+		t.Skip("test binary is not a dynamically linked glibc binary")
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	max, err := MaxRequiredGLIBC(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if max == "" {
+		t.Fatalf("MaxRequiredGLIBC(%s) = empty, want a GLIBC_ version", self)
+	}
+	if !strings.Contains(max, ".") {
+		t.Fatalf("max = %q, want major.minor", max)
+	}
+	if _, err := MaxRequiredGLIBC("/dev/null"); err == nil {
+		t.Fatal("non-ELF file: want error")
+	}
+}
+
+func TestCheckPluginCompat(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The host binary itself must pass the compat gate: its
+	// requirements are satisfiable by the running libc by
+	// construction.
+	if err := CheckPluginCompat(self); err != nil {
+		t.Fatalf("CheckPluginCompat(self) = %v, want nil", err)
+	}
+	// A non-ELF file is outside the compat gate (format gate
+	// is dlopen's job).
+	if err := CheckPluginCompat("/dev/null"); err != nil {
+		t.Fatalf("CheckPluginCompat(/dev/null) = %v, want nil for non-ELF", err)
+	}
+}
+
+func TestGlibcVersionCompare(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"2.17", "2.17", 0},
+		{"2.17", "2.34", -1},
+		{"2.34", "2.17", 1},
+		{"2.4", "2.17", -1},
+		{"3.0", "2.99", 1},
+		// Distro suffixes from real gnu_get_libc_version
+		// strings (Debian glibc 2.44 reports "2.44-0"
+		// under qemu): only leading digits matter.
+		{"2.44-0", "2.44", 0},
+		{"2.44.1", "2.44", 0},
+		{"2.17-0ubuntu1", "2.17", 0},
+	}
+	for _, tc := range cases {
+		va, err := parseGlibcVersion(tc.a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		vb, err := parseGlibcVersion(tc.b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := compareGlibcVersion(va, vb); got != tc.want {
+			t.Fatalf("compare(%q,%q) = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
+	}
+	if _, err := parseGlibcVersion("banana"); err == nil {
+		t.Fatal("bad version: want error")
+	}
+	if _, err := parseGlibcVersion("2"); err == nil {
+		t.Fatal("version without minor: want error")
+	}
+}

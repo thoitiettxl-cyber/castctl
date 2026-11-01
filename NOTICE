@@ -72,8 +72,39 @@ docs/provenance.md.
    and no longer applies; it is not summarised here. Full
    mapping in docs/provenance.md §11.
 
+4. CLIProxyAPI plugin loader/ABI — internal/pluginabi/,
+   internal/pluginhost/, internal/plugintest/ fixture,
+   examples/plugin/echo/ (adapted, not verbatim)
+
+   Upstream: github.com/router-for-me/CLIProxyAPI, commit
+   250d598175db61a4e99ac38b9164ed04745754e5.
+   License: MIT (LICENSE at that commit reads "MIT License /
+   Copyright (c) 2025-2005.9 Luis Pater / Copyright (c)
+   2025.9-present Router-For.ME" — verbatim upstream text).
+
+   Adapted (renamed to the castctl namespace,
+   castctl_plugin_init; castctl schema 1 instead of upstream
+   schema 10): the C loader preamble and entry-symbol/ABI
+   checks (loader_unix.go), the Windows loader table shape
+   (loader_windows.go), the no-cgo stub refusal
+   (loader_unsupported.go), the host/client/loader interface
+   shape (abi.go), ApplyConfig/quiesce/rollback (host.go),
+   discovery and candidate dirs (platform.go), the shadow
+   copy (shadow.go), the guarded call (client_guard.go),
+   the lifecycle envelope shape (rpc_schema.go, rpc_client.go),
+   the ABI/schema constants (sdk/pluginabi/types.go), the
+   capabilities shape (sdk/pluginapi/types.go), and the
+   verify-before-use checksum idea
+   (internal/pluginstore/checksum.go). Deliberately NOT
+   taken: host.auth.* callbacks, the PluginsConfig
+   store/config schema, min_version/allow_downgrade, random
+   shadow names/memfd, and load-time signature checks. The
+   Lstat/hardlink shadow hardening and the glibc compat gate
+   are castctl-original. Full mapping in docs/provenance.md
+   §2 and docs/plugins.md References.
+
    Nothing else in this tree is copied upstream code. In particular,
-   no sing-box, CLIProxyAPI, go-telegram/bot, utls, or Noise-spec
+   no sing-box, go-telegram/bot, utls, or Noise-spec
    source is copied into the tree.
 
 (b) Linked dependencies (load-bearing only)

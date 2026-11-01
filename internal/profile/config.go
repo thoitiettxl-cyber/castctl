@@ -55,6 +55,11 @@ type SingleConfig struct {
 	// save and means the web UI is off.
 	WebUI *WebUIConfig
 
+	// Plugins is the top-level "plugins" block (nil when absent;
+	// see internal/profile/plugins.go). Absence is preserved on
+	// save and means no plugin is configured.
+	Plugins *PluginsConfig
+
 	rawOutbounds    [][]byte
 	rawEndpoints    [][]byte
 	rawDNS          []byte
@@ -63,6 +68,7 @@ type SingleConfig struct {
 	rawTelegram     []byte
 	rawKeeper       []byte
 	rawWebUI        []byte
+	rawPlugins      []byte
 	rawProfiles     map[string][]byte
 }
 
@@ -167,6 +173,7 @@ var singleTopLevelKeys = map[string]bool{
 	"telegram":        true,
 	"keeper":          true,
 	"webui":           true,
+	"plugins":         true,
 }
 
 var profileKeys = map[string]bool{
@@ -357,6 +364,18 @@ func ParseSingleConfig(data []byte, baseDir string) (*SingleConfig, error) {
 		cfg.WebUI = wCfg
 		cfg.rawWebUI = raw
 	}
+	if v, ok := obj.get("plugins"); ok {
+		raw, err := rawOf(v)
+		if err != nil {
+			return nil, err
+		}
+		pCfg, err := parsePluginsBlock(v)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Plugins = pCfg
+		cfg.rawPlugins = raw
+	}
 
 	for _, name := range profilesObj.keys {
 		if _, err := ValidateProfileName(name); err != nil {
@@ -404,6 +423,9 @@ func ParseSingleConfig(data []byte, baseDir string) (*SingleConfig, error) {
 		return nil, err
 	}
 	if err := validateKeeper(cfg); err != nil {
+		return nil, err
+	}
+	if err := validatePlugins(cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -1380,6 +1402,19 @@ func buildSingleFileOrdered(cfg *SingleConfig) (*orderedObject, error) {
 			return nil, err
 		}
 		root.set("webui", entry)
+	}
+	if len(cfg.rawPlugins) > 0 {
+		v, err := decodeOrderedJSON(cfg.rawPlugins)
+		if err != nil {
+			return nil, err
+		}
+		root.set("plugins", v)
+	} else if cfg.Plugins != nil {
+		arr, err := encodePluginsBlock(cfg.Plugins)
+		if err != nil {
+			return nil, err
+		}
+		root.set("plugins", arr)
 	}
 	return root, nil
 }

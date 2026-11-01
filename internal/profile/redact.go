@@ -81,6 +81,9 @@ func RedactProfile(p *Profile) ([]byte, error) {
 }
 
 // RedactConfig renders a whole SingleConfig as redacted JSON (indent 2).
+// Plugin fragments are redacted wholesale by redactPluginsBlock
+// (tag/type only, fragment as one <redacted> marker) before the
+// generic key-based redaction runs.
 func RedactConfig(cfg *SingleConfig) ([]byte, error) {
 	if cfg == nil {
 		return nil, newConfigError("cannot redact nil config")
@@ -92,7 +95,57 @@ func RedactConfig(cfg *SingleConfig) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	redactPluginsBlock(root)
 	return encodeOrderedJSONIndent(redact.Value(root), 2)
+}
+
+// redactPluginsBlock replaces every plugins entry's fragment with a
+// single <redacted> marker: display shows tag/type only, plus a
+// "config" key carrying the marker when the entry has any
+// plugin-specific keys. Key-based redaction alone cannot do this:
+// a fragment key that is not in redact's secret-key set could
+// still carry a secret value under an unknown name, and the
+// fragment's key names themselves are plugin-opaque. This
+// operates on the built (copy) tree, never on the stored config.
+func redactPluginsBlock(root *orderedObject) {
+	if root == nil {
+		return
+	}
+	v, ok := root.get("plugins")
+	if !ok {
+		return
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		return
+	}
+	out := make([]any, 0, len(arr))
+	for _, elem := range arr {
+		entry, ok := elem.(*orderedObject)
+		if !ok {
+			out = append(out, elem)
+			continue
+		}
+		shown := newOrderedObject()
+		if tag, ok := entry.get("tag"); ok {
+			shown.set("tag", tag)
+		}
+		if typ, ok := entry.get("type"); ok {
+			shown.set("type", typ)
+		}
+		hasFragment := false
+		for _, k := range entry.keys {
+			if k != "tag" && k != "type" {
+				hasFragment = true
+				break
+			}
+		}
+		if hasFragment {
+			shown.set("config", redact.Marker)
+		}
+		out = append(out, shown)
+	}
+	root.set("plugins", out)
 }
 
 // The OrderedMap methods below let redact.Value redact
