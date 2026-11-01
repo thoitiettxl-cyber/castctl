@@ -208,7 +208,7 @@ else
   grep -Fxq "Version: $LOCK_GLIBC_VERSION" "$control_extract/control" || fail "unexpected glibc package version"
 
   : >"$work/glibc-members"
-  for library in ld-linux-aarch64.so.1 libc.so.6 libdl.so.2 libresolv.so.2 libpthread.so.0; do
+  for library in ld-linux-aarch64.so.1 libc.so.6 libresolv.so.2 libpthread.so.0; do
     printf './data/data/com.termux/files/usr/glibc/lib/%s\n' "$library" >>"$work/glibc-members"
   done
   tar -tJf "$deb_extract/data.tar.xz" -T "$work/glibc-members" >/dev/null || \
@@ -228,7 +228,7 @@ if [ "$input_mode" != locked ] && [ "$ALLOW_UNATTESTED" != 1 ]; then
 fi
 
 for file in "$CASTCTL_BINARY" "$GLIBC_LIB_DIR/ld-linux-aarch64.so.1" \
-  "$GLIBC_LIB_DIR/libc.so.6" "$GLIBC_LIB_DIR/libdl.so.2" \
+  "$GLIBC_LIB_DIR/libc.so.6" \
   "$GLIBC_LIB_DIR/libresolv.so.2" "$GLIBC_LIB_DIR/libpthread.so.0"; do
   [ -f "$file" ] || fail "missing payload file: $file"
 done
@@ -239,6 +239,11 @@ grep -Eq 'Machine:[[:space:]]+AArch64' "$work/core-elf-header" || fail "core is 
 readelf -l "$CASTCTL_BINARY" >"$work/core-program-headers"
 grep -Fq '/lib/ld-linux-aarch64.so.1' "$work/core-program-headers" || fail "unexpected core interpreter"
 
+# Permitted NEEDED set (not the shipped set): libdl.so.2 stays
+# permitted so a future binary that needs it fails loudly at the
+# "[ -f $GLIBC_LIB_DIR/$needed ]" check below instead of silently
+# shipping without it. The pinned binary declares no libdl
+# dependency (readelf-verified), so no libdl library is staged.
 allowed_libs='^(libc\.so\.6|libdl\.so\.2|libresolv\.so\.2|libpthread\.so\.0)$'
 readelf -d "$CASTCTL_BINARY" >"$work/core-dynamic"
 sed -n 's/.*Shared library: \[\([^]]*\)\].*/\1/p' "$work/core-dynamic" >"$work/core-needed"
@@ -259,7 +264,7 @@ max_allowed=$(printf '%s\n%s\n' "$LOCK_CASTCTL_MAX_GLIBC" "$max_core_glibc" | so
 
 loader=$GLIBC_LIB_DIR/ld-linux-aarch64.so.1
 elf_index=0
-for elf in "$loader" "$GLIBC_LIB_DIR/libc.so.6" "$GLIBC_LIB_DIR/libdl.so.2" \
+for elf in "$loader" "$GLIBC_LIB_DIR/libc.so.6" \
   "$GLIBC_LIB_DIR/libresolv.so.2" "$GLIBC_LIB_DIR/libpthread.so.0"; do
   elf_index=$((elf_index + 1))
   readelf -h "$elf" >"$work/glibc-elf-header-$elf_index"
@@ -310,23 +315,45 @@ stage=$work/stage
 mkdir -p "$stage"
 
 for path in module.prop customize.sh service.sh action.sh uninstall.sh \
-  config.example.json payload-manifest.txt META-INF webroot scripts docs; do
+  config.json.example META-INF webroot scripts; do
   cp -a "$ROOT/$path" "$stage/"
 done
-cp -a "$ROOT/licenses" "$stage/"
-cp -a "$ROOT/THIRD_PARTY_NOTICES.md" "$stage/"
-# Castctl license files live at the repo root (not in module/).
-cp -p "$ROOT/../LICENSE" "$ROOT/../LICENSE.sing-box" "$ROOT/../NOTICE" "$stage/"
-if [ "$input_mode" = locked ]; then
-  cp -p "$LOCK_FILE" "$stage/sources.lock"
-else
+# License texts ship exactly once, under licenses/ (required for
+# glibc LGPL redistribution; do not drop). Repo originals stay
+# where they are: the castctl texts live at the repo root, the
+# glibc text in module/licenses/, the notices in module/.
+mkdir -p "$stage/licenses"
+cp -p "$ROOT/licenses/GLIBC-COPYING.LESSERv2" "$stage/licenses/"
+cp -p "$ROOT/../LICENSE" "$ROOT/../LICENSE.sing-box" "$ROOT/../NOTICE" "$stage/licenses/"
+cp -p "$ROOT/THIRD_PARTY_NOTICES.md" "$stage/licenses/"
+# sources.lock is NOT staged: it stays a repo/CI artifact. The
+# release workflow re-pins the workspace copy to the tag's own
+# archive and saves that re-pinned lock alongside the ZIP, so
+# the exact pinned inputs of a release build stay reviewable
+# without shipping the lock inside the ZIP. docs/ and
+# payload-manifest.txt are likewise not staged (docs stay in the
+# repo; the manifest existence check in customize.sh was removed
+# with the staging, in the same commit).
+if [ "$input_mode" != locked ]; then
   printf 'UNATTESTED DEVELOPMENT BUILD\n\nOne or more release inputs or provenance sources were customized.\nTheir origin, licensing, and source correspondence are not attested by this package.\nKnown license texts are included for reference but may not cover customized inputs; preserve all upstream notices.\nDo not publish this archive as an official release.\n' \
     >"$stage/UNATTESTED_INPUTS.txt"
 fi
+# The castctl web UI frontend: the committed single-file bundle
+# webui/dist/index.html, staged as ui/ with its own checksum
+# manifest (separate from payload/checksums.sha256, never under
+# payload/ or releases/). Exactly one dist asset exists at this
+# HEAD; any additional asset must be handled explicitly here.
+ui_src=$ROOT/../webui/dist
+[ -f "$ui_src/index.html" ] || fail "web UI dist is missing: $ui_src/index.html"
+ui_members=("$ui_src"/*)
+[ "${#ui_members[@]}" -eq 1 ] || fail "webui/dist must contain exactly index.html"
+mkdir -p "$stage/ui"
+cp -p "$ui_src/index.html" "$stage/ui/index.html"
+(cd "$stage/ui" && sha256sum index.html >ui.sha256 && sha256sum -c ui.sha256 >/dev/null)
 
 mkdir -p "$stage/payload/bin" "$stage/payload/lib" "$stage/payload/ca"
 cp -p "$CASTCTL_BINARY" "$stage/payload/bin/castctl"
-for library in ld-linux-aarch64.so.1 libc.so.6 libdl.so.2 libresolv.so.2 libpthread.so.0; do
+for library in ld-linux-aarch64.so.1 libc.so.6 libresolv.so.2 libpthread.so.0; do
   cp -L -p "$GLIBC_LIB_DIR/$library" "$stage/payload/lib/$library"
 done
 cp -p "$CA_FILE" "$stage/payload/ca/cert.pem"
@@ -360,8 +387,10 @@ find "$stage/payload/lib" -type f -exec chmod 0755 {} \;
 if find "$stage" -type f \( -name config.json -o -name '*.key' \) | grep -q .; then
   fail "refusing to package config or private-key files"
 fi
-# config.example.json is the only .json file allowed in the package.
-if find "$stage" -type f -name '*.json' ! -name config.example.json | grep -q .; then
+# config.json.example is the shipped example file; it does not end
+# in .json, so any *.json file in the stage is unexpected (the
+# exemption names it so the allowlist stays explicit).
+if find "$stage" -type f -name '*.json' ! -name 'config.json.example' | grep -q .; then
   fail "refusing to package unexpected JSON files"
 fi
 if rg -l 'BEGIN [A-Z ]*PRIVATE KEY' "$stage" >/dev/null 2>&1; then

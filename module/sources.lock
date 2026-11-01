@@ -6,19 +6,19 @@ LOCK_TEMPLATE_REPO=https://github.com/thoitiettxl-cyber/cli-proxy-api
 LOCK_TEMPLATE_COMMIT=f912a733f84a3157e6570d84c05e5a02439d3ff0
 
 # castctl release binary (primary, glibc build). Hashes re-verified by
-# real download against the release checksums.txt on 2026-10-31.
-LOCK_CASTCTL_VERSION=0.6.4
-LOCK_CASTCTL_ARCHIVE=castctl_0.6.4_linux_arm64.tar.gz
-LOCK_CASTCTL_URL=https://github.com/thoitiettxl-cyber/castctl/releases/download/v0.6.4/castctl_0.6.4_linux_arm64.tar.gz
-LOCK_CASTCTL_SHA256=311696a8d3693b9510269ffd59f679070009e20cf81bbc3696ad9b2f67114c71
+# real download against the release checksums.txt on 2026-11-01.
+LOCK_CASTCTL_VERSION=0.7.0
+LOCK_CASTCTL_ARCHIVE=castctl_0.7.0_linux_arm64.tar.gz
+LOCK_CASTCTL_URL=https://github.com/thoitiettxl-cyber/castctl/releases/download/v0.7.0/castctl_0.7.0_linux_arm64.tar.gz
+LOCK_CASTCTL_SHA256=534896a9e0b59117f2ad9d680267a91f9ab2f546fcc0f8f110fb3ecd1c34db6b
 LOCK_CASTCTL_MAX_GLIBC=2.17
 
 # Static no-plugin build: DOCUMENTED MANUAL FALLBACK ONLY. build.sh never
 # downloads it and no boot-time code path selects it. Hash verified by
-# real download on 2026-10-31; see module/docs/ksu-module.md.
-LOCK_CASTCTL_NOPLUGIN_ARCHIVE=castctl_0.6.4_linux_arm64_no-plugin.tar.gz
-LOCK_CASTCTL_NOPLUGIN_URL=https://github.com/thoitiettxl-cyber/castctl/releases/download/v0.6.4/castctl_0.6.4_linux_arm64_no-plugin.tar.gz
-LOCK_CASTCTL_NOPLUGIN_SHA256=e9b286a2c5575ee3b3d96aa5f571ae164395770bfcd85e67316fe8b7a64c73f7
+# real download on 2026-11-01; see module/docs/ksu-module.md.
+LOCK_CASTCTL_NOPLUGIN_ARCHIVE=castctl_0.7.0_linux_arm64_no-plugin.tar.gz
+LOCK_CASTCTL_NOPLUGIN_URL=https://github.com/thoitiettxl-cyber/castctl/releases/download/v0.7.0/castctl_0.7.0_linux_arm64_no-plugin.tar.gz
+LOCK_CASTCTL_NOPLUGIN_SHA256=dc617840ae884f5f4f548b446e882ac0559e36eaf94355b5208dd136d01b0b75
 
 # Bundled glibc (Termux glibc package, as in the template). The .deb hash
 # was re-verified by real download on 2026-10-31. The recipe commit is

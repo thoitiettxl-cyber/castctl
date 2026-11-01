@@ -1069,6 +1069,85 @@ particular, no template Go code, web UI code, or provider
 logic is present in castctl; the `webui/` fork is covered
 separately by §3.
 
+## 12. SB-T @c03b73d — STUDIED + ADAPTED (no code copied)
+
+Upstream: `github.com/thoitiettxl-cyber/SB-T`, commit
+`c03b73d6577505c5e1e947d760a8b0638202cab5` (main, 2026-10-12;
+verified against the remote: `git ls-remote` HEAD resolves to
+the same hash).
+License: Apache-2.0 — upstream `LICENSE` (Apache License,
+Version 2.0, January 2004), read in full. No `license` field
+in the SB-T `package.json` files was found; the repo-root
+LICENSE file governs.
+
+Category: (c) studied, no code taken — but the PATTERN was
+ported, so this section records the mapping (AGENTS.md rule 6).
+The following SB-T source files were read in the librarian
+checkout (`~/.cache/checkouts/github.com/thoitiettxl-cyber/SB-T`):
+`box/scripts/box.webui` (JSON envelope shape, `_ok`/`_err`,
+backgrounded `service` returning `"triggered"`, `check-log`
+type allowlist, `dashboard-url`), `box/scripts/box.want`
+handling in `box/scripts/box` (`_do_start` writes it first,
+deliberate stop removes it, never created by recovery or
+install), `webui/src/lib/bridge.ts` (`exec` import from
+`kernelsu@^3.0.2`, single-quote shell escaping, first-`{`
+extraction, `JSON.parse`, throw on `ok:false`, 20 s/600 ms
+poll after service actions, `globalThis['ksu']` presence
+check), `action.sh` (toggle + status + raw log tail),
+`box/sing-box/config.json` (`services[api].dashboard.path =
+"ui"`, UI vendored at `box/sing-box/ui/`), and
+`webroot/index.html` (built shell only; assets gitignored).
+
+What was followed in castctl (reimplemented, no SB-T source
+copied):
+
+- `module/scripts/castctl-ctl`, `webui-json` subcommand: the
+  `{"ok":true,"command":"CMD","data":...}` /
+  `{"ok":false,"command":"CMD","error":"..."}` envelope, the
+  always-exit-0 discipline (the envelope is the sole channel),
+  backgrounded start/stop/restart returning `"triggered"`,
+  and the controller-log-only allowlist for `log`.
+- `module/scripts/castctl-ctl`, want marker
+  (`$DATA_DIR/state/want`): existence-only semantics, written
+  first by a manual start, removed by a deliberate stop, never
+  created or deleted by install. DIVERGENCE (deliberate,
+  Boss-decided): SB-T does NOT gate boot on its marker — its
+  `service.sh` starts unconditionally every boot, so a stop
+  does not survive reboot and no desired state is reported.
+  Castctl DOES gate boot and watchdog starts on the marker
+  and reports `desired: on|off` in status.
+- `module/webroot/index.html`: a controller page calling the
+  backend through the `kernelsu` exec bridge with the
+  first-`{` extraction and `payload.ok` branching, polling
+  status after actions. DIVERGENCE: SB-T's page is a
+  Vite-built bundle; castctl's is a single self-contained
+  file with no build step, rendering via `textContent` only.
+  The plain-page `ksu.exec` callable spelling is
+  `[UNVERIFIED]` on the device manager build (see the page
+  header and `module/docs/ksu-module.md` gate 25).
+- `module/docs/ksu-module.md` §5 + `module/customize.sh` +
+  `castctl-ctl ui-update`: the on-disk-UI idea behind
+  `dashboard.path = "ui"` (serve a vendored frontend tree
+  from disk instead of the embedded one). DIVERGENCE: SB-T
+  vendors the UI under the sing-box tree and copies the old
+  tree back OVER the new one on update (old files win on
+  collision); castctl stages the UI as `ui/` in the ZIP,
+  installs it to `$DATA_DIR/ui` with its own checksum
+  manifest, preserves it byte-identical across updates, and
+  replaces it only via the explicit `ui-update` command.
+- `module/action.sh`: toggle + status + log tail shape.
+  DIVERGENCE: castctl's toggle keys on the want marker or
+  any running service, prints the web UI URL from status
+  (never a token), and shows the controller log only.
+
+No SB-T code, config text, or assets were copied into the
+tree: no shell function, TypeScript line, JSON shape literal
+beyond the three envelope field names, or UI file originates
+in SB-T. SB-T has no secrets and no redaction code; the
+castctl backend's secrecy guarantees (fixed shapes,
+allowlists, no token/cookie/config content in any field) are
+castctl-written hardening with no SB-T counterpart.
+
 ## Carried items (unresolved at the time of writing)
 
 - npm license check: not run — no license-checking tool present,

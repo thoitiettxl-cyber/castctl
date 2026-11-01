@@ -7,12 +7,12 @@ repository `LICENSE` (GPL-3.0-or-later).
 
 ## castctl
 
-- Version: 0.6.4
+- Version: 0.7.0
 - Upstream: https://github.com/thoitiettxl-cyber/castctl
-- Binary asset: `castctl_0.6.4_linux_arm64.tar.gz`
-- Binary SHA-256: `311696a8d3693b9510269ffd59f679070009e20cf81bbc3696ad9b2f67114c71`
-- License: GPL-3.0-or-later; see `LICENSE`, `LICENSE.sing-box`, `NOTICE`
-  included in the ZIP.
+- Binary asset: `castctl_0.7.0_linux_arm64.tar.gz`
+- Binary SHA-256: `534896a9e0b59117f2ad9d680267a91f9ab2f546fcc0f8f110fb3ecd1c34db6b`
+- License: GPL-3.0-or-later; see `licenses/LICENSE`,
+  `licenses/LICENSE.sing-box`, `licenses/NOTICE` included in the ZIP.
 
 ## GNU C Library for Android/Termux
 

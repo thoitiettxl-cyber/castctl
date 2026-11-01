@@ -73,11 +73,13 @@ esac
 # before anything is created or written below DATA_DIR, mirroring
 # the controller's prepare_mutable_dirs refusal list. Only links
 # AT OR BELOW DATA_DIR are refused here; a symlinked ancestor of
-# DATA_DIR is followed (see docs §10).
+# DATA_DIR is followed (see docs §10). state/ (want marker) and
+# ui/ (installed frontend) are guarded the same way: every
+# intermediate component of every guarded path is refused (F5).
 for _guard_dir in "$DATA_DIR/config" "$DATA_DIR/config/profiles" \
   "$DATA_DIR/plugins" "$DATA_DIR/plugins/linux" "$DATA_DIR/plugins/linux/arm64" \
   "$DATA_DIR/run" "$DATA_DIR/logs" "$DATA_DIR/backups" \
-  "$DATA_DIR/.controller"; do
+  "$DATA_DIR/.controller" "$DATA_DIR/state" "$DATA_DIR/ui"; do
   [ ! -L "$_guard_dir" ] || fail "module data subdirectory must not be a symlink: $_guard_dir"
 done
 case "$(getprop ro.product.cpu.abi 2>/dev/null)" in
@@ -139,11 +141,10 @@ fi
 
 say "extracting module controller"
 unzip -o "$ZIPFILE" -x 'META-INF/*' -x 'payload/*' -d "$MODPATH" >&2 || fail "module extraction failed"
-[ -f "$MODPATH/payload-manifest.txt" ] || fail "payload manifest is missing"
 
 mkdir -p "$DATA_DIR/releases" "$DATA_DIR/config" "$DATA_DIR/config/profiles" \
   "$DATA_DIR/plugins" "$DATA_DIR/plugins/linux/arm64" "$DATA_DIR/run" \
-  "$DATA_DIR/logs" "$DATA_DIR/backups"
+  "$DATA_DIR/logs" "$DATA_DIR/backups" "$DATA_DIR/state"
 
 stage="$DATA_DIR/releases/.staging.$$.${RANDOM:-0}"
 rm -rf "$stage"
@@ -220,8 +221,36 @@ ln -s "$release" "$DATA_DIR/current.new.$$" || fail "unable to stage runtime sel
 # config.json.example, and only when neither a real config nor an
 # example exists yet: a user-placed example must never be silently
 # overwritten.
-if [ ! -f "$DATA_DIR/config/config.json" ] && [ ! -e "$DATA_DIR/config/config.json.example" ] && [ -f "$MODPATH/config.example.json" ]; then
-  cp -p "$MODPATH/config.example.json" "$DATA_DIR/config/config.json.example"
+if [ ! -f "$DATA_DIR/config/config.json" ] && [ ! -e "$DATA_DIR/config/config.json.example" ] && [ -f "$MODPATH/config.json.example" ]; then
+  cp -p "$MODPATH/config.json.example" "$DATA_DIR/config/config.json.example"
+fi
+
+# The castctl web UI frontend ships as ui/ in the ZIP (a single
+# index.html plus its own ui.sha256 manifest, separate from the
+# payload manifest). Fresh install ONLY: an existing installed UI
+# tree is never replaced here — updates preserve it
+# byte-identical, and replacement happens only via the explicit
+# `castctl-ctl ui-update` command. A ZIP without ui/ leaves the
+# installed tree untouched. The staged tree is verified before
+# an atomic rename swap (stage ui.new.$$ + mv -fT); a symlinked
+# staged tree or a checksum mismatch aborts the install (a
+# corrupt ZIP must fail loudly); the old tree is kept on any
+# failure before the swap. The want marker is neither created
+# nor deleted here: a fresh install starts OFF.
+if [ ! -e "$DATA_DIR/ui" ] && [ -e "$MODPATH/ui" ]; then
+  [ -d "$MODPATH/ui" ] && [ ! -L "$MODPATH/ui" ] || fail "staged UI directory is missing or a symlink"
+  [ -f "$MODPATH/ui/index.html" ] && [ ! -L "$MODPATH/ui/index.html" ] || fail "staged UI index is missing or a symlink"
+  [ -f "$MODPATH/ui/ui.sha256" ] && [ ! -L "$MODPATH/ui/ui.sha256" ] || fail "staged UI manifest is missing or a symlink"
+  (cd "$MODPATH/ui" && "$BUSYBOX" sha256sum -c ui.sha256 >/dev/null 2>&1) || fail "staged UI checksum mismatch"
+  ui_stage="$DATA_DIR/ui.new.$$"
+  { [ ! -e "$ui_stage" ] && [ ! -L "$ui_stage" ]; } || fail "UI staging path is unsafe"
+  mkdir -p "$ui_stage" || fail "unable to stage UI"
+  cp -p "$MODPATH/ui/index.html" "$MODPATH/ui/ui.sha256" "$ui_stage/" || fail "unable to stage UI"
+  (cd "$ui_stage" && "$BUSYBOX" sha256sum -c ui.sha256 >/dev/null 2>&1) || fail "staged UI copy failed verification"
+  "$BUSYBOX" mv -fT "$ui_stage" "$DATA_DIR/ui" || fail "unable to publish UI"
+  chmod 0700 "$DATA_DIR/ui" 2>/dev/null || true
+  chmod 0644 "$DATA_DIR/ui/index.html" "$DATA_DIR/ui/ui.sha256" 2>/dev/null || true
+  say "web UI frontend installed"
 fi
 
 find "$release" -type d -exec chmod 0755 {} \; 2>/dev/null || true
@@ -232,14 +261,14 @@ find "$release/lib" -type f -exec chmod 0755 {} \; 2>/dev/null || true
 chmod 0711 "$DATA_DIR"
 chmod 0700 "$DATA_DIR/config" "$DATA_DIR/config/profiles" \
   "$DATA_DIR/plugins" "$DATA_DIR/plugins/linux/arm64" \
-  "$DATA_DIR/run" "$DATA_DIR/logs" "$DATA_DIR/backups"
+  "$DATA_DIR/run" "$DATA_DIR/logs" "$DATA_DIR/backups" "$DATA_DIR/state"
 # The daemon runs as root in module context (see docs: no 9999:3003
 # privilege drop). Data stays root-owned; modes below are the secret
 # boundary, not ownership.
 find "$DATA_DIR/config" "$DATA_DIR/run" \
-  "$DATA_DIR/logs" -type d -exec chmod 0700 {} \; 2>/dev/null || true
+  "$DATA_DIR/logs" "$DATA_DIR/state" -type d -exec chmod 0700 {} \; 2>/dev/null || true
 find "$DATA_DIR/config" "$DATA_DIR/run" \
-  "$DATA_DIR/logs" -type f -exec chmod 0600 {} \; 2>/dev/null || true
+  "$DATA_DIR/logs" "$DATA_DIR/state" -type f -exec chmod 0600 {} \; 2>/dev/null || true
 find "$DATA_DIR/plugins" -type d -exec chmod 0700 {} \; 2>/dev/null || true
 find "$DATA_DIR/plugins" -type f -exec chmod 0600 {} \; 2>/dev/null || true
 
