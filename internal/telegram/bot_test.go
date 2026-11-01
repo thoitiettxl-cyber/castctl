@@ -454,6 +454,162 @@ func TestBotCallbackDecide(t *testing.T) {
 	}
 }
 
+func TestDecideOncePerIDLocking(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	enteredA := make(chan struct{})
+	releaseA := make(chan struct{})
+	var mu sync.Mutex
+	var order []string
+	tb.bot.decider = DeciderFunc(func(_ context.Context, id, _ string) error {
+		if id == "A" {
+			close(enteredA)
+			<-releaseA
+		}
+		// Recorded at completion: B must complete while A is
+		// still blocked, so the completion order is [B A].
+		mu.Lock()
+		order = append(order, id)
+		mu.Unlock()
+		return nil
+	})
+	ctx := context.Background()
+	aDone := make(chan bool, 1)
+	go func() {
+		ok, err := tb.bot.decideOnce(ctx, "A", "allow_once")
+		if err != nil {
+			t.Errorf("decideOnce(A) error = %v", err)
+		}
+		aDone <- ok
+	}()
+	select {
+	case <-enteredA:
+	case <-time.After(5 * time.Second):
+		t.Fatal("decideOnce(A) never entered the decider")
+	}
+	// B must decide WITHOUT waiting for A's release: no
+	// head-of-line blocking across approval ids.
+	bDone := make(chan bool, 1)
+	go func() {
+		ok, err := tb.bot.decideOnce(ctx, "B", "deny")
+		if err != nil {
+			t.Errorf("decideOnce(B) error = %v", err)
+		}
+		bDone <- ok
+	}()
+	select {
+	case ok := <-bDone:
+		if !ok {
+			t.Error("decideOnce(B) = false; want true (first decision for B)")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("decideOnce(B) blocked behind decideOnce(A)")
+	}
+	close(releaseA)
+	select {
+	case ok := <-aDone:
+		if !ok {
+			t.Error("decideOnce(A) = false; want true (first decision for A)")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("decideOnce(A) did not return after release")
+	}
+	mu.Lock()
+	got := append([]string{}, order...)
+	mu.Unlock()
+	if len(got) != 2 || got[0] != "B" || got[1] != "A" {
+		t.Errorf("decider order = %v; want [B A] (B completed while A was blocked)", got)
+	}
+	// A second call for A is a no-op: no second RPC.
+	if ok, err := tb.bot.decideOnce(ctx, "A", "allow_once"); err != nil || ok {
+		t.Errorf("decideOnce(A) again = (%v, %v); want (false, nil)", ok, err)
+	}
+	// Concurrent same-id calls single-flight: exactly one RPC.
+	var wg sync.WaitGroup
+	results := make([]bool, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ok, err := tb.bot.decideOnce(ctx, "C", "allow_once")
+			if err != nil {
+				t.Errorf("decideOnce(C) error = %v", err)
+			}
+			results[i] = ok
+		}(i)
+	}
+	wg.Wait()
+	if results[0] == results[1] {
+		t.Errorf("concurrent decideOnce(C) results = %v; want exactly one true", results)
+	}
+	mu.Lock()
+	calls := 0
+	for _, id := range order {
+		if id == "C" {
+			calls++
+		}
+	}
+	mu.Unlock()
+	if calls != 1 {
+		t.Errorf("decider calls for C = %d; want 1", calls)
+	}
+}
+
+func TestBotCallbackDecideDistinctEntriesOneRPC(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	after := int64(42)
+	mk1 := tb.bot.ApprovalMarkup(Approval{ID: "appr-1", Options: []string{"allow_once", "deny"}}, ResumeTriple{SessionID: "s1", Title: "t", AfterSeq: &after})
+	data1 := mk1.InlineKeyboard[0][0].CallbackData
+	mk2 := tb.bot.ApprovalMarkup(Approval{ID: "appr-1", Options: []string{"allow_once", "deny"}}, ResumeTriple{SessionID: "s1", Title: "t", AfterSeq: &after})
+	data2 := mk2.InlineKeyboard[0][0].CallbackData
+	if data1 == data2 {
+		t.Fatalf("distinct markups produced identical callback data %q", data1)
+	}
+	srv.enqueueUpdates(
+		callbackUpdate(60, 111, 500, 100, data1, "cq-1"),
+		callbackUpdate(61, 111, 500, 100, data2, "cq-2"),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startBot(t, tb.bot, ctx)
+	waitFor(t, "decide handled", func() bool { return len(tb.decider.recorded()) == 1 })
+	waitFor(t, "both callbacks answered", func() bool { return srv.count("answerCallbackQuery") == 2 })
+	if err := stopBot(t, cancel, done); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start = %v", err)
+	}
+	if got := len(tb.decider.recorded()); got != 1 {
+		t.Errorf("decider calls = %d; want 1 (distinct entries, same approval id)", got)
+	}
+	// The deduped tap clears its buttons and is answered, but
+	// schedules no second resume: one resume per approval
+	// (the first tap's) is the decideOnce invariant.
+	if got := len(tb.recordedResumes()); got != 1 {
+		t.Errorf("resumes = %d; want 1", got)
+	}
+}
+
+func TestDecidedCapEvictsOldest(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	for i := 0; i < decidedCap+1; i++ {
+		tb.bot.RecordDecided(fmt.Sprintf("id-%d", i), "allow_once")
+	}
+	// The oldest id was evicted: deciding it again re-issues.
+	if ok, err := tb.bot.decideOnce(context.Background(), "id-0", "allow_once"); err != nil || !ok {
+		t.Errorf("decideOnce(evicted id-0) = (%v, %v); want (true, nil)", ok, err)
+	}
+	// The newest id is still recorded: no second RPC.
+	if ok, err := tb.bot.decideOnce(context.Background(), fmt.Sprintf("id-%d", decidedCap), "allow_once"); err != nil || ok {
+		t.Errorf("decideOnce(newest) = (%v, %v); want (false, nil)", ok, err)
+	}
+	if got := len(tb.decider.recorded()); got != 1 {
+		t.Errorf("decider calls = %d; want 1 (only the evicted id)", got)
+	}
+}
+
 func TestBotCallbackExpiredAndStranger(t *testing.T) {
 	t.Parallel()
 	srv := newFakeTelegramServer(t)

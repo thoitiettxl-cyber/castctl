@@ -248,11 +248,19 @@ type Bot struct {
 
 	claimsMu sync.Mutex
 	decided  map[string]string
-	claimed  map[string]bool
-	inflight map[string]*inflightClaim
-	notified map[string]bool
-	warned   map[string]bool
-	autoLog  []AutoLogEntry
+	// decidedOrder is the insertion order of decided, for
+	// oldest-first eviction at decidedCap.
+	decidedOrder []string
+	// decideInflight marks approval ids with a Decide RPC
+	// in flight under decideOnce: a second caller for the
+	// same id waits on the channel, then re-checks decided.
+	// Guarded by claimsMu; channels are closed, never sent.
+	decideInflight map[string]chan struct{}
+	claimed        map[string]bool
+	inflight       map[string]*inflightClaim
+	notified       map[string]bool
+	warned         map[string]bool
+	autoLog        []AutoLogEntry
 
 	startMu sync.Mutex
 	started bool
@@ -371,8 +379,9 @@ func New(s Settings) (*Bot, error) {
 		claimWait:     claimWait,
 		AutoApprove:   s.AutoApprove,
 		AutoAllowOnce: s.AutoAllowOnce,
-		turns:         make(map[int64]bool),
-		decided:       make(map[string]string),
+		turns:          make(map[int64]bool),
+		decided:        make(map[string]string),
+		decideInflight: make(map[string]chan struct{}),
 		claimed:       make(map[string]bool),
 		inflight:      make(map[string]*inflightClaim),
 		notified:      make(map[string]bool),
@@ -904,27 +913,92 @@ func (b *Bot) onCallback(ctx context.Context, upd *models.Update) {
 	}
 }
 
-// decideOnce issues at most one Decide RPC per approval id
-// for the bot's lifetime (in-memory): the check, the RPC, and
-// the record share claimsMu, so two distinct entries for the
-// same approval id (turn buttons plus an /approvals listing,
-// or a monitor path in step 5b) cannot double-issue the
-// non-idempotent egress.approval.decide RPC. The record lands
-// in the claim protocol's decided set, so the monitor paths
-// see manual decisions too. A failed RPC records nothing, so
-// a retry stays possible. Registry consumption in onCallback
-// is the first line for the same button; this is the second,
-// for distinct buttons over one approval.
-func (b *Bot) decideOnce(ctx context.Context, approvalID, decision string) (bool, error) {
-	b.claimsMu.Lock()
-	defer b.claimsMu.Unlock()
+// decidedCap bounds the in-memory decided set: one entry per
+// decided approval id, lost on restart (matching Python's
+// in-memory semantics). Eviction is oldest-first; an evicted
+// id may be decided again if a stale button for it is tapped
+// later — the documented cost of the bound, unreachable at
+// human-paced volumes. The cap is an internal constant (no
+// config retrofit in this loop; flagged for a Boss decision
+// under the config.json-only standing rule).
+const decidedCap = 1024
+
+// setDecidedLocked records a decision in the claim protocol's
+// decided set, first decision wins. The caller holds claimsMu.
+func (b *Bot) setDecidedLocked(approvalID, decision string) {
 	if _, ok := b.decided[approvalID]; ok {
-		return false, nil
-	}
-	if err := b.decider.Decide(ctx, approvalID, decision); err != nil {
-		return false, err
+		return
 	}
 	b.decided[approvalID] = decision
+	b.decidedOrder = append(b.decidedOrder, approvalID)
+	for len(b.decidedOrder) > decidedCap {
+		oldest := b.decidedOrder[0]
+		b.decidedOrder = b.decidedOrder[1:]
+		delete(b.decided, oldest)
+	}
+}
+
+// RecordDecided records a decision made outside decideOnce
+// (the turn auto-approve path, which decides through the
+// gateway directly) in the same decided set decideOnce
+// consults, so a later manual tap for the same id does not
+// re-issue the RPC. It never issues an RPC itself. Ordering
+// limit, stated honestly: a tap racing an in-flight auto RPC
+// can still double-issue, because the record lands only
+// after the auto RPC returns; the concurrent window is
+// disclosed in the PR body residuals.
+func (b *Bot) RecordDecided(approvalID, decision string) {
+	b.claimsMu.Lock()
+	defer b.claimsMu.Unlock()
+	b.setDecidedLocked(approvalID, decision)
+}
+
+// decideOnce issues at most one Decide RPC per approval id
+// for the bot's lifetime (in-memory). The check, the RPC, and
+// the record are atomic per id: a second caller for the SAME
+// id waits for the in-flight call to settle and then
+// re-checks, while callers for DIFFERENT ids proceed
+// concurrently — claimsMu is never held across the RPC, so
+// one slow gateway call cannot head-of-line-block another
+// chat's decide. The record lands in the claim protocol's
+// decided set, so the monitor paths see manual decisions
+// too. A failed RPC records nothing, so a retry stays
+// possible. Registry consumption in onCallback is the first
+// line for the same button; this is the second, for distinct
+// buttons over one approval.
+func (b *Bot) decideOnce(ctx context.Context, approvalID, decision string) (bool, error) {
+	var waitCh chan struct{}
+	for {
+		b.claimsMu.Lock()
+		if _, ok := b.decided[approvalID]; ok {
+			b.claimsMu.Unlock()
+			return false, nil
+		}
+		if ch, ok := b.decideInflight[approvalID]; ok {
+			b.claimsMu.Unlock()
+			select {
+			case <-ch:
+				continue
+			case <-ctx.Done():
+				return false, ctx.Err()
+			}
+		}
+		waitCh = make(chan struct{})
+		b.decideInflight[approvalID] = waitCh
+		b.claimsMu.Unlock()
+		break
+	}
+	err := b.decider.Decide(ctx, approvalID, decision)
+	b.claimsMu.Lock()
+	delete(b.decideInflight, approvalID)
+	if err == nil {
+		b.setDecidedLocked(approvalID, decision)
+	}
+	close(waitCh)
+	b.claimsMu.Unlock()
+	if err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
