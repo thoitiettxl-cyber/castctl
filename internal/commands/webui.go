@@ -180,9 +180,8 @@ func cmdWebUIServe(ctx context.Context, env *Env, g *globalOpts, args []string) 
 	// present-but-broken ui_dir fails closed (exit 2) here,
 	// before the server starts; only an absent key falls back
 	// to the embedded frontend. The cookies-exposure rule is
-	// enforced inside webui.New via Deps.CookiesFiles, so it
-	// cannot be skipped by a future direct Server
-	// construction.
+	// enforced inside webui.New via Deps.CookiesFiles when
+	// the list is supplied; this caller supplies it below.
 	uiDir, err := resolveWebUIUIDir(webuiCfg, loc.ConfigDir)
 	if err != nil {
 		return err

@@ -106,8 +106,9 @@ type Deps struct {
 	// file paths (as resolved at parse time, absolute). With
 	// UIDir set, checkUIDir rejects a root containing any of
 	// them, so the cookies-exposure rule lives in New() itself
-	// and cannot be skipped by a future direct Server
-	// construction that bypasses the command layer. Empty
+	// and runs whenever CookiesFiles is supplied; the sole
+	// production caller supplies the profile list, so the
+	// rule is enforced on the production path. Empty
 	// means no cookies-exposure check (tests and callers
 	// without profiles).
 	CookiesFiles []string

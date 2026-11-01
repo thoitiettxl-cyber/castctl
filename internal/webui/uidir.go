@@ -27,7 +27,10 @@ import (
 // helpers from contain.go (resolveAgainst / pathWithin): no
 // verdict is cached across renames, symlinks that leave the
 // root are refused, directories never list, and only regular
-// files are served. The root-vs-config overlap rule is also
+// files are served. Dotfiles are refused on the request path
+// and again on the resolved root-relative path, so a symlink
+// resolving to a dotfile inside the root is refused. The
+// root-vs-config overlap rule is also
 // re-checked per request: a root repointed at the config tree
 // after startup is refused instead of followed. A missing file
 // under a valid root falls back to the on-disk shell (SPA hash
@@ -46,15 +49,16 @@ import (
 //
 // Residual (documented honestly, same candour as the shell
 // side): between the per-request containment resolution and
-// the open, a swapped symlink can redirect the read, and a
-// swapped-in FIFO could block one request goroutine
-// (check-then-open TOCTOU). The open is followed by an fstat
-// re-check, so a steady-state non-regular file is never
-// served; the shell path additionally requires the opened
-// file to be the same file the Lstat saw (os.SameFile), so a
-// symlink swapped in between the Lstat and the open is
-// refused instead of served. The window is one open call;
-// nothing here claims it closed.
+// the open, a symlink swapped into an intermediate path
+// component can redirect the read, and a swapped-in FIFO
+// could block one request goroutine (check-then-open
+// TOCTOU). The final component is Lstat-checked before the
+// open and the opened file must be the same file the Lstat
+// saw (os.SameFile) on both the asset and shell paths, so a
+// final-component swap is refused instead of served. The
+// window is one open call; nothing here claims it closed.
+// Hardlinks are undetectable by Lstat/SameFile (a hardlink
+// is the same inode, not a redirect): see docs/config.md.
 
 // uiDirMIME is the closed extension allowlist for on-disk
 // frontend files. Anything unlisted is served as
@@ -155,6 +159,31 @@ func (s *Server) serveUIDir(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}
+	// A symlink at the resolved path is refused: resolveAgainst
+	// already resolved steady-state symlinks, so a symlink
+	// here appeared after resolution (swap) — never follow
+	// it. The Lstat result is kept for the open-then-verify
+	// check below, mirroring the shell path.
+	lst, lerr := os.Lstat(resolved)
+	if lerr == nil && lst.Mode()&os.ModeSymlink != 0 {
+		writeError(w, http.StatusNotFound, "not_found", "not found")
+		return
+	}
+	// Dotfiles are re-checked on the resolved, root-relative
+	// path: a symlink resolving to a dotfile inside the root
+	// (e.g. index.html -> .secret, or x.js -> .secret) is
+	// refused even though the request path named no dotfile.
+	relResolved, err := filepath.Rel(root, resolved)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "not found")
+		return
+	}
+	for _, comp := range strings.Split(relResolved, string(filepath.Separator)) {
+		if comp != "." && comp != ".." && strings.HasPrefix(comp, ".") {
+			writeError(w, http.StatusNotFound, "not_found", "not found")
+			return
+		}
+	}
 	st, err := os.Stat(resolved)
 	if err != nil {
 		// Missing file under a valid root: SPA fallback.
@@ -179,10 +208,14 @@ func (s *Server) serveUIDir(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = f.Close() }()
 	// Open-then-verify: the type is re-checked on the open
-	// file, so a non-regular file swapped in between Stat and
-	// Open is refused instead of served.
+	// file, and the opened file must be the same file the
+	// Lstat saw, so a symlink swapped in between the Lstat
+	// and the open is refused instead of served (same
+	// parity as the shell path). When the Lstat failed the
+	// file did not exist at check time, so only the
+	// regular-file check applies.
 	fst, err := f.Stat()
-	if err != nil || !fst.Mode().IsRegular() {
+	if err != nil || !fst.Mode().IsRegular() || (lst != nil && !os.SameFile(lst, fst)) {
 		writeError(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}

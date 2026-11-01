@@ -665,6 +665,83 @@ func TestUIDirSymlinkedIndexSwappedMidRun(t *testing.T) {
 	})
 }
 
+func TestUIDirSymlinkToDotfileRefused(t *testing.T) {
+	// F-RT2-1: the asset path checked dotfiles only on the
+	// request path, so a symlink resolving to a dotfile
+	// inside the root served the dotfile (GET /index.html
+	// and GET /x.js both 200 with the marker, while GET /
+	// and GET /.secret were 404). The resolved
+	// root-relative path is re-checked, and the opened file
+	// must be the file the Lstat saw.
+	t.Run("symlinked index requested as asset", func(t *testing.T) {
+		uiDir := writeUIDir(t, map[string]string{
+			"index.html": uiDirShellMarker,
+			".secret":    "DOTFILE-MARKER-RT2",
+		})
+		ts := newTestServer(t, fixtureConfig, func(d *Deps) { d.UIDir = uiDir })
+		// The startup check refuses a symlinked index.html,
+		// so the swap happens after startup, as in the
+		// demonstrated exploit.
+		swapIndexToSymlink(t, uiDir, ".secret")
+		for _, path := range []string{"/index.html", "/"} {
+			rec := ts.do(t, "GET", path, "", false)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("GET %s: %d, want 404", path, rec.Code)
+			}
+			if strings.Contains(rec.Body.String(), "DOTFILE-MARKER-RT2") {
+				t.Fatalf("GET %s: dotfile marker leaked", path)
+			}
+		}
+	})
+	t.Run("symlink to dotfile under another name", func(t *testing.T) {
+		uiDir := writeUIDir(t, map[string]string{
+			"index.html": uiDirShellMarker,
+			"app.js":     "MARKER-JS",
+			".secret":    "DOTFILE-MARKER-RT2",
+		})
+		if err := os.Symlink(".secret", filepath.Join(uiDir, "x.js")); err != nil {
+			t.Fatal(err)
+		}
+		ts := newTestServer(t, fixtureConfig, func(d *Deps) { d.UIDir = uiDir })
+		for _, path := range []string{"/x.js", "/.secret"} {
+			rec := ts.do(t, "GET", path, "", false)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("GET %s: %d, want 404", path, rec.Code)
+			}
+			if strings.Contains(rec.Body.String(), "DOTFILE-MARKER-RT2") {
+				t.Fatalf("GET %s: dotfile marker leaked", path)
+			}
+		}
+		// A regular asset in the same root still serves.
+		rec := ts.do(t, "GET", "/app.js", "", false)
+		if rec.Code != http.StatusOK || rec.Body.String() != "MARKER-JS" {
+			t.Fatalf("GET /app.js: %d %q, want the asset", rec.Code, rec.Body.String())
+		}
+	})
+	t.Run("symlink to dotfile in a subdirectory", func(t *testing.T) {
+		uiDir := writeUIDir(t, map[string]string{
+			"index.html":  uiDirShellMarker,
+			"sub/.secret": "DOTFILE-MARKER-RT2",
+			"sub/ok.txt":  "MARKER-OK",
+		})
+		if err := os.Symlink("sub/.secret", filepath.Join(uiDir, "s.js")); err != nil {
+			t.Fatal(err)
+		}
+		ts := newTestServer(t, fixtureConfig, func(d *Deps) { d.UIDir = uiDir })
+		rec := ts.do(t, "GET", "/s.js", "", false)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("GET /s.js: %d, want 404", rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), "DOTFILE-MARKER-RT2") {
+			t.Fatal("GET /s.js: dotfile marker leaked")
+		}
+		rec = ts.do(t, "GET", "/sub/ok.txt", "", false)
+		if rec.Code != http.StatusOK || rec.Body.String() != "MARKER-OK" {
+			t.Fatalf("GET /sub/ok.txt: %d %q, want the asset", rec.Code, rec.Body.String())
+		}
+	})
+}
+
 func TestUIDirRootSwapRefused(t *testing.T) {
 	// The ui root is reached through a symlink. Repointing
 	// that symlink at the config directory after startup must

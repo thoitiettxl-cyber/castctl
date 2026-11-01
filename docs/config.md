@@ -517,9 +517,19 @@ when the key is present but broken (missing, not a directory,
 or without a regular `index.html`), `webui serve` fails closed
 (exit 2) instead of silently falling back to the embedded
 frontend. A symlinked `index.html` is refused at startup
-(exit 2) and per request (fixed 404) — any symlink, even one
-whose target stays inside the root — because the shell path
-must only ever serve the regular file startup validated. A missing file under a valid `ui_dir` falls back to
+(exit 2) and per request on the shell path (fixed 404) — any
+symlink, even one whose target stays inside the root —
+because the shell path must only ever serve the regular file
+startup validated. The asset path refuses it too: the
+resolved path is Lstat-checked before opening and the
+opened file must be the file the Lstat saw, so a symlink
+swapped in after resolution is refused (fixed 404), and
+dotfiles are re-checked on the resolved root-relative path,
+so a symlink resolving to a dotfile inside the root is
+refused even when the request path named no dotfile.
+Steady-state symlinks inside the root are resolved by
+containment and served only when their target is a regular
+non-dotfile inside the root. A missing file under a valid `ui_dir` falls back to
 the on-disk shell (SPA hash routing). Serving is GET-only, with
 no directory listing, no dotfiles, and symlink-aware
 containment re-checked per request: a path escaping the root
@@ -546,11 +556,21 @@ or explicit updates, never point it at a user-writable or
 shared directory. Its content is trusted same-origin code —
 the frontend keeps the token in `sessionStorage`, so a
 malicious file served from `ui_dir` could read it: serve only
-content from a trusted source. A check-then-open TOCTOU residual remains
-between the per-request containment check and the file open
-(the open is followed by an fstat re-check, so a non-regular
-file is never served, but a symlink swapped in the same
-window could redirect one read).
+content from a trusted source. A check-then-open TOCTOU residual remains:
+a symlink swapped into an intermediate path component between the
+per-request containment resolution and the file open could redirect
+one read (the final component is Lstat/SameFile-guarded on both the
+asset and shell paths, so a final-component swap is refused instead
+of served). The window is one open call.
+Hardlinks are undetectable by Lstat/SameFile: a hardlinked
+`index.html` (the same inode as its target) serves the target's
+bytes, because a hardlink is the same file, not a redirect.
+Creating one needs `link()` in the `ui_dir` on the same
+filesystem plus ownership of, or read/write access to, the
+target — a remote attacker reaching only the HTTP API cannot
+create filesystem links, and a principal able to hardlink the
+cookies file already reads it or is root. Treat `ui_dir` as
+trusted input (above).
 
 Loopback-only is enforced at parse time: `listen` must be a
 bare `host:port` with a loopback host (`127.0.0.0/8`, `::1`, or
