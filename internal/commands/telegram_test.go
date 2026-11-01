@@ -49,13 +49,17 @@ func telegramTestEnv(t *testing.T, configJSON string) (*Env, *bytes.Buffer, *byt
 // set, getUpdates serves them in order instead of the default
 // single message.
 type cmdFakeTelegram struct {
-	mu       sync.Mutex
-	methods  []string
-	sends    []string
-	edits    []string
-	served   bool
-	batches  []string
-	batchIdx int
+	mu      sync.Mutex
+	methods []string
+	sends   []string
+	edits   []string
+	// sendMarkups/editMarkups parallel sends/edits: whether a
+	// reply_markup was attached (button presence, not content).
+	sendMarkups []bool
+	editMarkups []bool
+	served      bool
+	batches     []string
+	batchIdx    int
 	// gates, parallel to batches: batch i is served only once
 	// gates[i] reports true (nil = always). A gated batch that
 	// is not ready yet yields an empty result without
@@ -130,26 +134,36 @@ func (f *cmdFakeTelegram) handler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"ok":true,"result":[]}`)
 	case "sendMessage":
 		text := ""
+		markup := false
 		if err := r.ParseMultipartForm(1 << 20); err == nil && r.MultipartForm != nil {
 			text = r.MultipartForm.Value["text"][0]
+			markup = len(r.MultipartForm.Value["reply_markup"]) > 0 && r.MultipartForm.Value["reply_markup"][0] != "" && r.MultipartForm.Value["reply_markup"][0] != "null"
 		} else if err := r.ParseForm(); err == nil {
 			text = r.Form.Get("text")
+			markup = r.Form.Get("reply_markup") != "" && r.Form.Get("reply_markup") != "null"
 		}
 		f.mu.Lock()
 		f.sends = append(f.sends, text)
+		f.sendMarkups = append(f.sendMarkups, markup)
 		f.mu.Unlock()
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":100,"chat":{"id":500,"type":"private"},"date":0,"text":"ok"}}`)
 	case "editMessageText":
 		text := ""
+		markup := false
 		if err := r.ParseMultipartForm(1 << 20); err == nil && r.MultipartForm != nil {
 			text = r.MultipartForm.Value["text"][0]
+			markup = len(r.MultipartForm.Value["reply_markup"]) > 0 && r.MultipartForm.Value["reply_markup"][0] != "" && r.MultipartForm.Value["reply_markup"][0] != "null"
 		} else if err := r.ParseForm(); err == nil {
 			text = r.Form.Get("text")
+			markup = r.Form.Get("reply_markup") != "" && r.Form.Get("reply_markup") != "null"
 		}
 		f.mu.Lock()
 		f.edits = append(f.edits, text)
+		f.editMarkups = append(f.editMarkups, markup)
 		f.mu.Unlock()
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":100,"chat":{"id":500,"type":"private"},"date":0,"text":"ok"}}`)
+	case "answerCallbackQuery":
+		fmt.Fprint(w, `{"ok":true,"result":true}`)
 	default:
 		fmt.Fprint(w, `{"ok":false,"error_code":404,"description":"Not Found"}`)
 	}

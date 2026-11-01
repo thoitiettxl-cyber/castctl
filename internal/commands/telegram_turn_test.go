@@ -45,24 +45,39 @@ import (
 // the shared gateway.
 type telegramTurnFakeGateway struct {
 	conn.Gateway
-	mu             sync.Mutex
-	events         []map[string]any
-	nextSeq        int64
-	historyCalls   int
-	openStreams    int
-	subscribeCalls int
-	cancelCalls    int
-	subScripts     []turnSubScript
-	blockSub       chan struct{}
-	noAck          bool
+	mu              sync.Mutex
+	events          []map[string]any
+	nextSeq         int64
+	historyCalls    int
+	openStreams     int
+	subscribeCalls  int
+	cancelCalls     int
+	decideCalls     []decideRecord
+	decideErr       error
+	approvalsScript []any
+	// approvalsFallback makes egress.approvals answer under
+	// the "pending" key instead of "pending_approvals".
+	approvalsFallback bool
+	approvalsErr      error
+	subScripts        []turnSubScript
+	blockSub          chan struct{}
+	noAck             bool
+}
+
+// decideRecord is one egress.approval.decide call.
+type decideRecord struct {
+	approvalID string
+	decision   string
 }
 
 // turnSubScript is one SubscribeRaw call's feed: the assistant
-// reply appended to the history log, and the delta texts fed
-// live before the terminal task.status.
+// reply appended to the history log, the delta texts fed live,
+// the raw approval records fed live, and the terminal
+// task.status.
 type turnSubScript struct {
-	replyText string
-	deltas    []string
+	replyText       string
+	deltas          []string
+	approvalRecords []string
 }
 
 func newTelegramTurnFakeGateway() *telegramTurnFakeGateway {
@@ -97,6 +112,28 @@ func (f *telegramTurnFakeGateway) CallJSON(ctx context.Context, method string, o
 	case "chat.cancel":
 		f.cancelCalls++
 		return map[string]any{"cancelled": true}, nil
+	case "egress.approval.decide":
+		if f.decideErr != nil {
+			return nil, f.decideErr
+		}
+		id := ""
+		if opts.PathParams != nil {
+			id = opts.PathParams["approval_id"]
+		}
+		decision := ""
+		if body, ok := opts.Body.(map[string]any); ok {
+			decision, _ = body["decision"].(string)
+		}
+		f.decideCalls = append(f.decideCalls, decideRecord{approvalID: id, decision: decision})
+		return map[string]any{"ok": true}, nil
+	case "egress.approvals":
+		if f.approvalsErr != nil {
+			return nil, f.approvalsErr
+		}
+		if f.approvalsFallback {
+			return map[string]any{"pending": f.approvalsScript}, nil
+		}
+		return map[string]any{"pending_approvals": f.approvalsScript}, nil
 	default:
 		return nil, fmt.Errorf("unexpected method %s", method)
 	}
@@ -177,6 +214,11 @@ func (f *telegramTurnFakeGateway) SubscribeRaw(ctx context.Context, method strin
 			return nil, nil
 		}
 	}
+	for _, rec := range script.approvalRecords {
+		if feed(rec) {
+			return nil, nil
+		}
+	}
 	if script.replyText != "" {
 		rec, _ := json.Marshal(map[string]any{
 			"event": "task.status", "seq": replySeq + 1,
@@ -205,6 +247,12 @@ func (f *telegramTurnFakeGateway) counts() (history, streams, subscribes, cancel
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.historyCalls, f.openStreams, f.subscribeCalls, f.cancelCalls
+}
+
+func (f *telegramTurnFakeGateway) decideHistory() []decideRecord {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]decideRecord(nil), f.decideCalls...)
 }
 
 // telegramBotHarness runs `telegram run` against a fake

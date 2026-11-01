@@ -236,11 +236,7 @@ func waitApprover(muse *conn.Muse, allowOnce bool) *approvals.AutoApprover {
 			if a.ApprovalID == nil {
 				return errors.New("approvals: cannot decide an approval without an id")
 			}
-			_, err := gw.CallJSON(ctx, "egress.approval.decide", conn.RequestOptions{
-				PathParams: map[string]string{"approval_id": *a.ApprovalID},
-				Body:       map[string]any{"decision": decision},
-			})
-			return err
+			return callDecide(ctx, gw, *a.ApprovalID, decision)
 		}
 		return decide, func() { _ = gw.Close() }, nil
 	}

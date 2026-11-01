@@ -139,8 +139,11 @@ func (f DeciderFunc) Decide(ctx context.Context, approvalID, decision string) er
 type PendingFunc func(ctx context.Context) ([]Approval, error)
 
 // ResumeInfo is the resume triple carried by a decide button
-// (src/muse_cli/tgbot.py:1725-1737).
+// (src/muse_cli/tgbot.py:1725-1737). ChatID is the chat the
+// decision came from: the resume closure needs it to send the
+// follow bubble, and the button entry carries no chat.
 type ResumeInfo struct {
+	ChatID    int64
 	SessionID string
 	Title     string
 	AfterSeq  int64
@@ -339,7 +342,7 @@ func New(s Settings) (*Bot, error) {
 	decider := s.Decider
 	if decider == nil {
 		decider = DeciderFunc(func(context.Context, string, string) error {
-			return errors.New("telegram: approval decisions are not wired in this build (gateway decide lands in step 5)")
+			return errors.New("telegram: approval decisions are not wired (no decider)")
 		})
 	}
 	pending := s.Pending
@@ -903,7 +906,7 @@ func (b *Bot) cbDecide(ctx context.Context, chatID int64, mid int, entry Callbac
 		_ = b.clearMarkup(ctx, chatID, mid)
 	}
 	if entry.AfterSeq != nil && !b.HasActiveTurn(chatID) && b.resume != nil {
-		if err := b.resume(ctx, ResumeInfo{SessionID: entry.SessionID, Title: entry.Title, AfterSeq: *entry.AfterSeq}); err != nil {
+		if err := b.resume(ctx, ResumeInfo{ChatID: chatID, SessionID: entry.SessionID, Title: entry.Title, AfterSeq: *entry.AfterSeq}); err != nil {
 			return b.scrubErr(err)
 		}
 	}

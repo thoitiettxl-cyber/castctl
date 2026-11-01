@@ -282,8 +282,10 @@ func (r *telegramTurnRunner) runTextTurn(ctx context.Context, chatID int64, text
 // runResume follows a turn after a manual approval decision,
 // with no new delivery (Python resume_turn, tgbot.py:1205-1222):
 // the bubble says Muse is continuing, and the wait follows from
-// after_seq. It is wired as the bot's ResumeFunc in A3.
-func (r *telegramTurnRunner) runResume(ctx context.Context, chatID int64, info telegram.ResumeInfo) error {
+// after_seq. It is wired as the bot's ResumeFunc in A3; the chat
+// comes from info.ChatID (set by cbDecide from the update).
+func (r *telegramTurnRunner) runResume(ctx context.Context, info telegram.ResumeInfo) error {
+	chatID := info.ChatID
 	scope, title := info.SessionID, info.Title
 	if title == "" {
 		title = "main chat"

@@ -216,9 +216,13 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 				logger.Warn("telegram state save failed", "err", err.Error())
 			}
 		},
-		Decider: telegram.DeciderFunc(func(context.Context, string, string) error {
-			return errors.New("telegram: approval decisions are not wired in this build (gateway decide lands in step 5)")
-		}),
+		Decider: gatewayDecider{muse: rt.Muse},
+		Pending: func(ctx context.Context) ([]telegram.Approval, error) {
+			return telegramPendingApprovals(ctx, rt)
+		},
+		Resume: func(ctx context.Context, info telegram.ResumeInfo) error {
+			return runner.runResume(ctx, info)
+		},
 		// Command dispatch lands in A4; until then every
 		// message starts a turn. The runner is assigned
 		// after New returns; the handler cannot run before
