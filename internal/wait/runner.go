@@ -179,6 +179,22 @@ type Config struct {
 	Dial               func(ctx context.Context) (Subscriber, error)
 	History            HistoryReader
 
+	// OnEvent, when non-nil, receives every decoded stream record
+	// the Runner feeds to the Waiter, in arrival order, on the
+	// Runner's goroutine, before the record's progress/settle
+	// handling. It is the streaming seam: a caller that renders
+	// live partial text (the Telegram turn runner) observes
+	// delta.* / agent.status records here without a second
+	// subscription or a history poll. The callback must return
+	// quickly, must not block, must not panic, and must not call
+	// Runner methods: a slow callback stalls the subscription,
+	// and a panic propagates out of Run (the Runner has no
+	// recover, matching the Subscriber contract). A nil OnEvent
+	// changes nothing. Records that fail to decode never reach
+	// it. The callback sees the deciding record too; the wait
+	// outcome is unaffected by anything it does.
+	OnEvent func(Event)
+
 	// beforeFinalGuard is a test-only hook, invoked synchronously
 	// on the Runner's goroutine immediately before the final
 	// guard in finish, with finish's ctx. It is unexported so no
@@ -575,6 +591,9 @@ func (r *Runner) onRecord(ctx context.Context) func([]byte) bool {
 			if ferr := r.waiter.FatalErr(); ferr != nil {
 				r.pendingErr = ferr
 				return true
+			}
+			if r.cfg.OnEvent != nil {
+				r.cfg.OnEvent(ev)
 			}
 			if r.waiter.Result() != nil {
 				return true

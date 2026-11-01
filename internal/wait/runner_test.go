@@ -161,6 +161,49 @@ func TestRunnerLiveDone(t *testing.T) {
 	})
 }
 
+func TestRunnerOnEventSeesStreamRecordsInOrder(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		delta := func(name string, p map[string]any) Event {
+			return Event{"event": name, "payload": p}
+		}
+		sub := &fakeSubscriber{loopScript: [][]byte{
+			recordJSON(taskEv("running", "R", "R", 120, nil)),
+			recordJSON(delta("delta.message_start", map[string]any{"message_id": "m1"})),
+			recordJSON(delta("delta.text_append", map[string]any{"message_id": "m1", "text": "hel"})),
+			recordJSON(delta("delta.text_append", map[string]any{"message_id": "m1", "text": "lo"})),
+			recordJSON(delta("agent.status", map[string]any{"activity_text": "is working"})),
+			recordJSON(taskEv("completed", "R", "R", 180, nil)),
+		}}
+		hist := &queueHistory{resps: []historyResp{
+			historyOK([]any{userEv(100)}),
+			historyOK([]any{userEv(100), asst(150, "completed", "done", nil)}),
+		}}
+		var seen []string
+		res := runRunner(t, Config{
+			Timeout:      60 * time.Second,
+			Dial:         sub.dial,
+			History:      hist,
+			RecheckAfter: 20 * time.Second,
+			OnEvent: func(ev Event) {
+				name, _ := ev["event"].(string)
+				seen = append(seen, name)
+			},
+		})
+		if res.Kind != KindDone {
+			t.Fatalf("res.Kind = %v; want done", res.Kind)
+		}
+		want := []string{"task.status", "delta.message_start", "delta.text_append", "delta.text_append", "agent.status", "task.status"}
+		if len(seen) != len(want) {
+			t.Fatalf("OnEvent saw %v; want %v", seen, want)
+		}
+		for i := range want {
+			if seen[i] != want[i] {
+				t.Errorf("OnEvent[%d] = %q; want %q", i, seen[i], want[i])
+			}
+		}
+	})
+}
+
 func TestRunnerReplaySettle(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		sub := &fakeSubscriber{loopScript: [][]byte{

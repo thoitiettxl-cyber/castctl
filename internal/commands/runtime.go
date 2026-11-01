@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"os"
@@ -43,6 +44,10 @@ type Runtime struct {
 	Dialer   *outbound.Dialer
 	Muse     *conn.Muse
 
+	// logHandle is the logging factory built by
+	// defaultBuildRuntime (nil for test-built runtimes, whose
+	// logger falls back to slog.Default()).
+	logHandle *logging.Handle
 	// resolveFn, when non-nil, replaces Dialer.Resolve. It is a
 	// test seam: tests inject a fake resolver through a
 	// BuildRuntime override instead of standing up DNS.
@@ -62,6 +67,18 @@ func (r *Runtime) Resolve(ctx context.Context, domain string) ([]netip.Addr, err
 		return r.resolveFn(ctx, domain)
 	}
 	return r.Dialer.Resolve(ctx, domain)
+}
+
+// Logger returns a *slog.Logger writing through the logging
+// factory built by defaultBuildRuntime (level filter + SafeString
+// redaction, the sing-box-mirroring log block), tagged for the
+// caller. Test-built runtimes have no factory: they fall back
+// to slog.Default(), as before. A nil receiver is safe.
+func (r *Runtime) Logger(tag string) *slog.Logger {
+	if r == nil || r.logHandle == nil {
+		return slog.Default()
+	}
+	return r.logHandle.SlogLogger(tag)
 }
 
 // Close releases resources in reverse build order: Muse, DNS client,
@@ -230,6 +247,7 @@ func defaultBuildRuntime(ctx context.Context, loc *profile.ConfigLocation, prof 
 		return nil, errCode(2, err)
 	}
 	rt.closeFuncs = append([]func() error{func() error { return logHandle.Close() }}, rt.closeFuncs...)
+	rt.logHandle = logHandle
 
 	mgr, err := outbound.NewManager(ctx, logHandle.Logger("castctl"))
 	if err != nil {

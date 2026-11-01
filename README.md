@@ -158,10 +158,11 @@ Wired in PR4, on PR3's commands framework: `send`, `wait`,
 `approvals`, `approve`, `deny`, `auto-approve`, bare invocation
 (chat REPL).
 
-Wired in the Telegram PR, on the same framework: `telegram run`,
-`telegram status` (config block + polling + approval surface
-against a fake server; messages get a placeholder notice and
-decisions fail closed until step 5 wires Muse turns).
+Wired in the Telegram PR (step 5a), on the same framework:
+`telegram run`, `telegram status` (config block + polling +
+persistent state + real Muse turns with streamed, edited
+replies + gateway-wired approvals + core slash commands,
+against a fake server).
 
 Wired in the self-update PR, on the same framework: `update`
 (self-update from the latest stable GitHub release; see
@@ -509,12 +510,12 @@ path, the `HistoryReader` production adapter, profile resolution +
 
 Still deferred:
 
-- Telegram step-5 wiring: Muse turn execution from Telegram
-  messages, the full slash-command and callback surface beyond
-  decide/approve-all, media, `/login`, persistent offset/dedupe
-  state, and `telegram setup` / `install-service`. (The config
-  block, polling, send/wait/approval surface, and `telegram
-  run` / `telegram status` are wired; see the Telegram PR.)
+- Telegram step-5b wiring: media download/upload, `/files`,
+  `/fs`, `/feed`, `/goals`, `/goal`, `/ideas`, `/usage`,
+  `/wake`, `/profile`, `/update`, `/watch` forwarding/monitors,
+  `/login`, `/raw`, and `telegram setup` / `install-service`.
+  (Step 5a — Muse turn execution, approvals, core commands,
+  persistent state — is wired; see the Telegram PR.)
 - Approval claim coordination between a monitor and a turn
   (the 15 s in-flight claim wait): a driver/monitor concern,
   not part of `AutoApprover`; PR5 Telegram territory.

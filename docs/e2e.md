@@ -19,7 +19,7 @@ verdict per check and a counts-only secret scan at the end:
 | 5 | DNS | `profile test` DNS phase fields (stdout and stderr both checked for the sandbox string); `config migrate` dry-run (SHA-256 captured before the run and compared after — a vacuous same-file comparison is not a check); empty per-profile `dns: {}` fails at runtime construction (exact construction error unpinned — any non-zero exit is asserted, see below); profile `dns` + top-level `dns` together exit 2 naming `dns` (G1). No resolver is re-implemented. |
 | 6 | Outbounds / WireGuard | Shape only, from the config copy: tags unique, `wireguard` in `outbounds[]` rejected, duplicate tag rejected, WireGuard endpoint field presence/type/counts only. **Never** a key value. Key-sharing error with fake key material must name tags but not the value. Liveness is leg 1's gateway phase only — no no-dial WireGuard liveness command exists. |
 | 7 | Logging | Off-gate (no block + no flag = one typed JSON stderr line); file output created mode 0600 (content not asserted on a failing run); `disabled: true` creates no file; `--log-level trace` override with the typed JSON last; no `--trace` flag; invalid level exits 2 without echoing the value; log output equal to the config file is refused. Live-success log content is [NEEDS-MEASUREMENT]. |
-| 8 | Telegram | `telegram status` offline JSON (`configured`, `token_valid`); bounded `telegram run` until SIGINT (exit 130). Message delivery / placeholder reply is manual, [NEEDS-MEASUREMENT]. See the token-source rule below. |
+| 8 | Telegram | `telegram status` offline JSON (`configured`, `token_valid`); bounded `telegram run` until SIGINT (exit 130). One chat turn, one approval allow, one approval deny, and `/autoapprove` persistence across a restart are manual, [NEEDS-MEASUREMENT]. See the token-source rule below. |
 | 9 | Update | Unstamped refusal (exit 2, fixed message) is the PASS-able check for a script-built binary. A stamped `--dry-run` is SKIP with reason when unstamped. A non-dry-run update is never run. |
 | 10 | Keeper | `keeper status` (state files only). `keeper check` can rewrite cookies, so it stays dry/SKIP on real profiles unless `--live-keeper` is given; exit 3 (entry stopped) is a distinct SKIP outcome, never a healthy PASS. `session-state.json` is checked at the per-profile path the keeper actually writes, `profiles/<name>/session-state.json`, mode 0600 when present. Real CDP re-export and single-flight refusal are [NEEDS-MEASUREMENT]. |
 | 11 | Web UI | Loopback bind verified via `ss` (supplementary evidence; castctl itself validates loopback); non-loopback `--listen` exits 2 naming the loopback rule, without echoing the address (the listen check runs before the token check when a `webui` block exists; without a block the block gate fires first and the probe SKIPs); no-token and wrong-token both 401, good token 200 with `data.remote_exposure: false` (all success bodies are read under the `data` envelope); `GET /config` carries `<redacted>` markers at secret positions; `GET /settings/telegram` masked exactly `***` only when `data.configured` is true (unconfigured → SKIP); `/logs` gate `reason` compared against the config (closed enum: `logging_disabled`, `log_output_not_file`, `log_output_refused`); the server process itself (not a wrapper subshell) is killed and the port is verified closed after the leg. External-connect refusal is [NEEDS-MEASUREMENT]. |
@@ -263,8 +263,10 @@ control itself at the end of every run.
 7. Real CDP re-export against a running browser; screencast session
    start; keeper `run` single-flight refusal; keeper notice delivery
    to the first allowlist id.
-8. `telegram run` live (GetMe/poll, placeholder reply to a real
-   message, approval fail-closed, no token in logs).
+8. `telegram run` live (GetMe/poll, a real streamed turn reply
+   to a real message, one approval allow and one deny,
+   `/autoapprove` persistence across a restart, no token in
+   logs).
 9. Web UI `PUT /config`, `PUT /dns`, `PUT /settings/telegram`
    (sentinel keep, empty-token unchanged, 409 guard), login/endpoint
    import echo checks, create/patch response echo checks,

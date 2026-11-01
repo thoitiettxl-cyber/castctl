@@ -226,7 +226,7 @@ func waitDial(muse *conn.Muse) func(context.Context) (wait.Subscriber, error) {
 // id is decided at most once per approver lifetime. The 15 s
 // in-flight claim wait between a monitor and a turn is a
 // driver/monitor concern (tgbot.py, PR5), not part of AutoApprover.
-func waitApprover(muse *conn.Muse, allowOnce bool) *approvals.AutoApprover {
+func waitApprover(muse *conn.Muse, allowOnce bool, onDecided func(id, decision string)) *approvals.AutoApprover {
 	connect := func(ctx context.Context) (approvals.Decider, func(), error) {
 		gw, err := muse.Connect(ctx, nil)
 		if err != nil {
@@ -236,15 +236,13 @@ func waitApprover(muse *conn.Muse, allowOnce bool) *approvals.AutoApprover {
 			if a.ApprovalID == nil {
 				return errors.New("approvals: cannot decide an approval without an id")
 			}
-			_, err := gw.CallJSON(ctx, "egress.approval.decide", conn.RequestOptions{
-				PathParams: map[string]string{"approval_id": *a.ApprovalID},
-				Body:       map[string]any{"decision": decision},
-			})
-			return err
+			return callDecide(ctx, gw, *a.ApprovalID, decision)
 		}
 		return decide, func() { _ = gw.Close() }, nil
 	}
-	return approvals.NewAutoApprover(connect, allowOnce)
+	aa := approvals.NewAutoApprover(connect, allowOnce)
+	aa.OnDecided = onDecided
+	return aa
 }
 
 // waitRunArgs are executeWait's inputs.
@@ -254,6 +252,39 @@ type waitRunArgs struct {
 	timeout        time.Duration
 	requireRunning bool // accepted, no live effect: the core stores it as a dead parameter (waiter.go)
 	toggles        autoToggles
+	// togglesResolved, when non-nil, is the already-resolved
+	// auto-approve pair for the turn: executeWait uses it
+	// directly and performs NO CLI toggle resolution (no flag,
+	// env, or profile-entry read). The Telegram bot resolves
+	// its toggles from the telegram block overlaid with the
+	// runtime state file (gate D4); letting the CLI resolution
+	// run would let MUSE_AUTO_APPROVE / --auto-approve feed a
+	// bot turn, which the precedence split forbids.
+	togglesResolved *resolvedBotToggles
+	// onEvent, when non-nil, is the Runner's streaming callback
+	// (wait.Config.OnEvent): live records for the turn's bubble.
+	onEvent func(wait.Event)
+	// onDecided, when non-nil, is called after each
+	// successful auto-approve decide (id + decision): the
+	// Telegram bot records it in the Bot's decided set so a
+	// later manual tap for the same id re-issues nothing.
+	// CLI waits leave it nil.
+	onDecided func(id, decision string)
+	// externalHeartbeat, when true, means the caller owns the
+	// Muse heartbeat for the process lifetime (the long-lived
+	// bot starts it once); executeWait then neither starts nor
+	// stops it per turn, so concurrent turns on one Muse never
+	// stop each other's heartbeat. False keeps the per-call
+	// start/stop the CLI commands use.
+	externalHeartbeat bool
+}
+
+// resolvedBotToggles is one turn's effective auto-approve pair,
+// resolved by the caller (the Telegram bot: telegram block over
+// runtime state toggles).
+type resolvedBotToggles struct {
+	approve   bool
+	allowOnce bool
 }
 
 // executeWait runs one Runner turn on the profile's connection with
@@ -267,13 +298,21 @@ type waitRunArgs struct {
 // waiter state after this returns an error: a cancelled Run may
 // leave the waiter mutated (see the R2/R4 containment notes).
 func executeWait(ctx context.Context, env *Env, rt *Runtime, prof *profile.Profile, args waitRunArgs) (*wait.Result, bool, error) {
-	approveResolved, err := profile.ResolveAutoApprove(prof, args.toggles.approve, env.lookupEnv)
-	if err != nil {
-		return nil, false, err
-	}
-	allowOnceResolved, err := profile.ResolveAutoAllowOnce(prof, args.toggles.allowOnce, env.lookupEnv)
-	if err != nil {
-		return nil, false, err
+	var approveEnabled, allowOnceEnabled bool
+	if args.togglesResolved != nil {
+		approveEnabled = args.togglesResolved.approve
+		allowOnceEnabled = args.togglesResolved.allowOnce
+	} else {
+		approveResolved, err := profile.ResolveAutoApprove(prof, args.toggles.approve, env.lookupEnv)
+		if err != nil {
+			return nil, false, err
+		}
+		allowOnceResolved, err := profile.ResolveAutoAllowOnce(prof, args.toggles.allowOnce, env.lookupEnv)
+		if err != nil {
+			return nil, false, err
+		}
+		approveEnabled = approveResolved.Enabled
+		allowOnceEnabled = allowOnceResolved.Enabled
 	}
 	cfg := wait.Config{
 		Thread:  args.thread,
@@ -281,20 +320,23 @@ func executeWait(ctx context.Context, env *Env, rt *Runtime, prof *profile.Profi
 		Timeout: args.timeout,
 		Dial:    waitDial(rt.Muse),
 		History: &historyAdapter{muse: rt.Muse, thread: args.thread},
+		OnEvent: args.onEvent,
 	}
 	if args.afterSeq != nil {
 		cfg.AfterSeq = *args.afterSeq
 		cfg.HasAfterSeq = true
 	}
-	if approveResolved.Enabled {
-		cfg.Approver = waitApprover(rt.Muse, allowOnceResolved.Enabled).AsApprover()
+	if approveEnabled {
+		cfg.Approver = waitApprover(rt.Muse, allowOnceEnabled, args.onDecided).AsApprover()
 	}
 	runner, err := wait.NewRunner(cfg)
 	if err != nil {
 		return nil, false, err
 	}
-	rt.Muse.StartHeartbeat(0)
-	defer rt.Muse.StopHeartbeat()
+	if !args.externalHeartbeat {
+		rt.Muse.StartHeartbeat(0)
+		defer rt.Muse.StopHeartbeat()
+	}
 	res, err := runner.Run(ctx)
 	if err != nil {
 		var authErr *conn.AuthError
@@ -316,10 +358,10 @@ func executeWait(ctx context.Context, env *Env, rt *Runtime, prof *profile.Profi
 			Replies:  []wait.Reply{},
 			Note:     "wait failed internally; run `castctl wait` again",
 			ExitCode: wait.ExitTimeout,
-		}, approveResolved.Enabled, nil
+		}, approveEnabled, nil
 	}
 	logAutoApproved(env.stderr(), res)
-	return res, approveResolved.Enabled, nil
+	return res, approveEnabled, nil
 }
 
 // Structural stderr rendering (loop 8, Boss ruling 2026-10-30

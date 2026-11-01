@@ -178,6 +178,35 @@ func TestCallbackRegistryEviction(t *testing.T) {
 	}
 }
 
+// TestCallbackRegistryEvictionSkipsLiveDecide is the R8
+// acceptance test: eviction must not kill a live decide
+// button while expendable entries exist, and Consume is the
+// single-flight guard (first tap wins, second finds nothing).
+func TestCallbackRegistryEvictionSkipsLiveDecide(t *testing.T) {
+	t.Parallel()
+	reg := NewCallbackRegistry()
+	live := reg.Register(CallbackEntry{Action: "decide", ApprovalID: "live"})
+	firstNoop := reg.Register(CallbackEntry{Action: "noop"})
+	for i := 0; i < 3000; i++ {
+		reg.Register(CallbackEntry{Action: "noop"})
+	}
+	if _, ok := reg.Lookup(live); !ok {
+		t.Error("live decide entry evicted by noop registrations; want decide entries skipped on eviction")
+	}
+	if _, ok := reg.Lookup(firstNoop); ok {
+		t.Error("oldest noop survived past the cap; want eviction to take non-decide entries first")
+	}
+	if _, ok := reg.Consume(live); !ok {
+		t.Error("Consume(live) = false; want the entry")
+	}
+	if _, ok := reg.Lookup(live); ok {
+		t.Error("consumed entry still resolvable; want single-flight consumption")
+	}
+	if _, ok := reg.Consume(live); ok {
+		t.Error("second Consume = true; want false")
+	}
+}
+
 func TestApprovalMarkup(t *testing.T) {
 	t.Parallel()
 	reg := NewCallbackRegistry()

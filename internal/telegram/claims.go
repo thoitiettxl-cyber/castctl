@@ -275,7 +275,7 @@ func (b *Bot) recordClaim(a Approval, decision string, claim *inflightClaim) boo
 		claim.settle()
 		return false
 	}
-	b.decided[a.ID] = decision
+	b.setDecidedLocked(a.ID, decision)
 	claim.decision = &decision
 	b.autoLog = append(b.autoLog, AutoLogEntry{
 		Time:       time.Now(),

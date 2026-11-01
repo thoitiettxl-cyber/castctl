@@ -31,17 +31,16 @@ package telegram
 // (src/muse_cli/tgbot.py:2435-2462, absence inspected); a
 // redelivered update would be handled twice. This bot drops
 // redelivered update_ids (in-memory seen set). The dedupe state
-// is lost on restart, like every other in-memory registry here.
-// [DEVIATION] Offset persistence: Python saves offset = update_id
-// + 1 to telegram-state.json BEFORE handling each update
-// (tgbot.py:2454-2457). This build keeps the max-seen update_id
-// in memory only (MaxHandledID) and passes it as
-// WithInitialOffset on the next construction within the process;
-// no state file is written in item 4 (the one-config.json rule
-// leaves no separate state file, and writing runtime state into
-// config.json would risk the token-bearing file). Restart
-// redelivery is therefore re-handled unless the server already
-// confirmed the offset. Persistent offset/dedupe is step-5 work.
+// is lost on restart, like every other in-memory registry here;
+// the persisted offset (state.go) bounds redelivery to what the
+// server replays below the confirmed offset.
+// Offset persistence: Python saves offset = update_id + 1 to
+// telegram-state.json BEFORE handling each update
+// (tgbot.py:2454-2457). This build persists the maximum handled
+// update_id itself (the library adds 1 when resuming) through
+// the OnOffset hook, marked at enqueue before handling, in the
+// state file (state.go). A crash mid-handle loses that update
+// instead of redelivering it, exactly as in Python.
 
 import (
 	"context"
@@ -140,8 +139,11 @@ func (f DeciderFunc) Decide(ctx context.Context, approvalID, decision string) er
 type PendingFunc func(ctx context.Context) ([]Approval, error)
 
 // ResumeInfo is the resume triple carried by a decide button
-// (src/muse_cli/tgbot.py:1725-1737).
+// (src/muse_cli/tgbot.py:1725-1737). ChatID is the chat the
+// decision came from: the resume closure needs it to send the
+// follow bubble, and the button entry carries no chat.
 type ResumeInfo struct {
+	ChatID    int64
 	SessionID string
 	Title     string
 	AfterSeq  int64
@@ -184,6 +186,15 @@ type Settings struct {
 	Pending PendingFunc
 	// Resume resumes turns after decisions. Nil means no resume.
 	Resume ResumeFunc
+	// CallbackFunc handles registry actions the bot core does not
+	// know: question answers, chat-picker paging/open, delete
+	// confirms, and other step-5 button surfaces. It returns
+	// (handled=true) when it acted (its error, if any, becomes
+	// the chat warning, as for decide/approve-all); (handled=false)
+	// falls back to the unknown-action log. Nil means no extra
+	// actions exist: unknown actions are only logged, exactly as
+	// before the hook existed.
+	CallbackFunc func(ctx context.Context, chatID int64, messageID int, entry CallbackEntry) (bool, error)
 	// MessageHandler handles plain messages. Nil means messages
 	// are dropped after the allowlist (no turn wiring in item 4).
 	MessageHandler MessageHandlerFunc
@@ -198,6 +209,14 @@ type Settings struct {
 	// run in this process (WithInitialOffset: the library adds
 	// 1). Zero means start from the beginning.
 	InitialOffset int64
+	// OnOffset is called with each new maximum update_id, marked
+	// before the update is handled (the offset-before-handle
+	// order). The production command persists it to the state
+	// file. It runs on the poll goroutine under the dispatcher
+	// lock: it must be fast, must not block, and must not call
+	// back into the Bot. Nil means offsets are tracked in
+	// memory only (MaxHandledID).
+	OnOffset func(offset int64)
 }
 
 // Bot is a polling Telegram bot bound to one profile's outbound
@@ -210,11 +229,12 @@ type Bot struct {
 	registry *CallbackRegistry
 	dispatch *dispatcher
 
-	decider Decider
-	pending PendingFunc
-	resume  ResumeFunc
-	handler MessageHandlerFunc
-	sleep   func(time.Duration)
+	decider      Decider
+	pending      PendingFunc
+	resume       ResumeFunc
+	handler      MessageHandlerFunc
+	callbackFunc func(ctx context.Context, chatID int64, messageID int, entry CallbackEntry) (bool, error)
+	sleep        func(time.Duration)
 
 	// AutoApprove / AutoAllowOnce are the toggles the approval
 	// surface reads (from the telegram config block).
@@ -228,11 +248,19 @@ type Bot struct {
 
 	claimsMu sync.Mutex
 	decided  map[string]string
-	claimed  map[string]bool
-	inflight map[string]*inflightClaim
-	notified map[string]bool
-	warned   map[string]bool
-	autoLog  []AutoLogEntry
+	// decidedOrder is the insertion order of decided, for
+	// oldest-first eviction at decidedCap.
+	decidedOrder []string
+	// decideInflight marks approval ids with a Decide RPC
+	// in flight under decideOnce: a second caller for the
+	// same id waits on the channel, then re-checks decided.
+	// Guarded by claimsMu; channels are closed, never sent.
+	decideInflight map[string]chan struct{}
+	claimed        map[string]bool
+	inflight       map[string]*inflightClaim
+	notified       map[string]bool
+	warned         map[string]bool
+	autoLog        []AutoLogEntry
 
 	startMu sync.Mutex
 	started bool
@@ -322,7 +350,7 @@ func New(s Settings) (*Bot, error) {
 	decider := s.Decider
 	if decider == nil {
 		decider = DeciderFunc(func(context.Context, string, string) error {
-			return errors.New("telegram: approval decisions are not wired in this build (gateway decide lands in step 5)")
+			return errors.New("telegram: approval decisions are not wired (no decider)")
 		})
 	}
 	pending := s.Pending
@@ -338,29 +366,46 @@ func New(s Settings) (*Bot, error) {
 		claimWait = 15 * time.Second
 	}
 	b := &Bot{
-		token:         token,
-		allowed:       make(map[int64]bool, len(s.AllowedUserIDs)),
-		logger:        logger,
-		registry:      NewCallbackRegistry(),
-		decider:       decider,
-		pending:       pending,
-		resume:        s.Resume,
-		handler:       s.MessageHandler,
-		sleep:         sleep,
-		claimWait:     claimWait,
-		AutoApprove:   s.AutoApprove,
-		AutoAllowOnce: s.AutoAllowOnce,
-		turns:         make(map[int64]bool),
-		decided:       make(map[string]string),
-		claimed:       make(map[string]bool),
-		inflight:      make(map[string]*inflightClaim),
-		notified:      make(map[string]bool),
-		warned:        make(map[string]bool),
+		token:          token,
+		allowed:        make(map[int64]bool, len(s.AllowedUserIDs)),
+		logger:         logger,
+		registry:       NewCallbackRegistry(),
+		decider:        decider,
+		pending:        pending,
+		resume:         s.Resume,
+		handler:        s.MessageHandler,
+		callbackFunc:   s.CallbackFunc,
+		sleep:          sleep,
+		claimWait:      claimWait,
+		AutoApprove:    s.AutoApprove,
+		AutoAllowOnce:  s.AutoAllowOnce,
+		turns:          make(map[int64]bool),
+		decided:        make(map[string]string),
+		decideInflight: make(map[string]chan struct{}),
+		claimed:        make(map[string]bool),
+		inflight:       make(map[string]*inflightClaim),
+		notified:       make(map[string]bool),
+		warned:         make(map[string]bool),
 	}
 	for _, id := range s.AllowedUserIDs {
 		b.allowed[id] = true
 	}
 	b.dispatch = newDispatcher(b.processUpdate, b.logPanic)
+	b.dispatch.onOffset = s.OnOffset
+	// Surface dropped updates: a queue-full or
+	// shutdown-abandoned update's offset is already
+	// persisted (offset-before-handle), so it is never
+	// replayed — this warn log is the only observability
+	// for the loss.
+	b.dispatch.onDropped = func(chatID, delta, total int64) {
+		b.logger.Warn("telegram dispatcher dropped update(s)", "chat_id", chatID, "dropped_delta", delta, "dropped_total", total)
+	}
+	// Seed the in-memory maximum from the persisted offset so
+	// MaxHandledID never regresses across a restart and a
+	// replayed id at or below the offset reports nothing new.
+	// The server-side skip itself is the library's
+	// WithInitialOffset above.
+	b.dispatch.maxSeen_.Store(s.InitialOffset)
 	opts := []bot.Option{
 		bot.WithHTTPClient(PollTimeout, client),
 		bot.WithNotAsyncHandlers(),
@@ -819,6 +864,18 @@ func (b *Bot) onCallback(ctx context.Context, upd *models.Update) {
 	answerText := ""
 	if !ok {
 		answerText = "This button expired; run the command again."
+	} else if entry.Action == "decide" || entry.Action == "approve_all" {
+		// Decide buttons are single-flight: the first tap
+		// consumes the entry, so a double-tap, redelivery,
+		// or second user's tap takes the "expired" answer
+		// instead of issuing a second non-idempotent
+		// Decide RPC. Lookup above only peeked (the action
+		// decides whether consumption applies); Consume is
+		// the atomic arbiter when two taps race.
+		entry, ok = b.registry.Consume(cq.Data)
+		if !ok {
+			answerText = "This button expired; run the command again."
+		}
 	}
 	if err := b.answer(ctx, cq.ID, answerText); err != nil {
 		b.logger.Debug("telegram answerCallbackQuery failed", "err", b.summarize(err.Error()))
@@ -837,8 +894,16 @@ func (b *Bot) onCallback(ctx context.Context, upd *models.Update) {
 		// action is ever registered in item 4. Defensive drop.
 		return
 	default:
-		b.logger.Debug("telegram unknown callback action", "update_id", upd.ID)
-		return
+		if b.callbackFunc == nil {
+			b.logger.Debug("telegram unknown callback action", "update_id", upd.ID)
+			return
+		}
+		handled, herr := b.callbackFunc(ctx, chatID, mid, entry)
+		if !handled {
+			b.logger.Debug("telegram unknown callback action", "update_id", upd.ID)
+			return
+		}
+		err = herr
 	}
 	if err != nil {
 		warning := "⚠️ " + EscapeText(truncateRunes(b.summarize(err.Error()), 600))
@@ -848,12 +913,127 @@ func (b *Bot) onCallback(ctx context.Context, upd *models.Update) {
 	}
 }
 
+// decidedCap bounds the in-memory decided set: one entry per
+// decided approval id, lost on restart (matching Python's
+// in-memory semantics). Eviction is oldest-first; an evicted
+// id may be decided again if a stale button for it is tapped
+// later — the documented cost of the bound, unreachable at
+// human-paced volumes. The cap is an internal constant (no
+// config retrofit in this loop; flagged for a Boss decision
+// under the config.json-only standing rule).
+const decidedCap = 1024
+
+// setDecidedLocked records a decision in the claim protocol's
+// decided set, first decision wins. The caller holds claimsMu.
+func (b *Bot) setDecidedLocked(approvalID, decision string) {
+	if _, ok := b.decided[approvalID]; ok {
+		return
+	}
+	b.decided[approvalID] = decision
+	b.decidedOrder = append(b.decidedOrder, approvalID)
+	for len(b.decidedOrder) > decidedCap {
+		oldest := b.decidedOrder[0]
+		b.decidedOrder = b.decidedOrder[1:]
+		delete(b.decided, oldest)
+	}
+}
+
+// RecordDecided records a decision made outside decideOnce
+// (the turn auto-approve path, which decides through the
+// gateway directly) in the same decided set decideOnce
+// consults, so a later manual tap for the same id does not
+// re-issue the RPC. It never issues an RPC itself. Ordering
+// limit, stated honestly: a tap racing an in-flight auto RPC
+// can still double-issue, because the record lands only
+// after the auto RPC returns; the concurrent window is
+// disclosed in the PR body residuals.
+func (b *Bot) RecordDecided(approvalID, decision string) {
+	b.claimsMu.Lock()
+	defer b.claimsMu.Unlock()
+	b.setDecidedLocked(approvalID, decision)
+}
+
+// decideOnce issues at most one Decide RPC per approval id
+// for the bot's lifetime (in-memory). The check, the RPC, and
+// the record are atomic per id: a second caller for the SAME
+// id waits for the in-flight call to settle and then
+// re-checks, while callers for DIFFERENT ids proceed
+// concurrently — claimsMu is never held across the RPC, so
+// one slow gateway call cannot head-of-line-block another
+// chat's decide. The record lands in the claim protocol's
+// decided set, so the monitor paths see manual decisions
+// too. A failed RPC records nothing, so a retry stays
+// possible. Registry consumption in onCallback is the first
+// line for the same button; this is the second, for distinct
+// buttons over one approval.
+func (b *Bot) decideOnce(ctx context.Context, approvalID, decision string) (bool, error) {
+	var waitCh chan struct{}
+	for {
+		b.claimsMu.Lock()
+		if _, ok := b.decided[approvalID]; ok {
+			b.claimsMu.Unlock()
+			return false, nil
+		}
+		if ch, ok := b.decideInflight[approvalID]; ok {
+			b.claimsMu.Unlock()
+			select {
+			case <-ch:
+				continue
+			case <-ctx.Done():
+				return false, ctx.Err()
+			}
+		}
+		waitCh = make(chan struct{})
+		b.decideInflight[approvalID] = waitCh
+		b.claimsMu.Unlock()
+		break
+	}
+	// The deferred cleanup runs on every exit path —
+	// including a decider panic — so a panicking decider
+	// cannot leak the in-flight marker and strand later
+	// taps for this id until shutdown. The record (on
+	// success) lands before this runs, so waiters woken by
+	// the close always see it.
+	defer func() {
+		b.claimsMu.Lock()
+		delete(b.decideInflight, approvalID)
+		close(waitCh)
+		b.claimsMu.Unlock()
+	}()
+	err := b.decider.Decide(ctx, approvalID, decision)
+	if err == nil {
+		b.claimsMu.Lock()
+		b.setDecidedLocked(approvalID, decision)
+		b.claimsMu.Unlock()
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // cbDecide decides one approval, confirms, clears the buttons,
-// and resumes when the button carries a resume triple and no
-// turn is active (src/muse_cli/tgbot.py:1725-1737, cb_decide).
+// and resumes when the button carries a resume triple (src/
+// muse_cli/tgbot.py:1725-1737, cb_decide). When the approval
+// was already decided (a distinct button for the same id, or
+// a monitor path decided first), it clears the buttons and
+// returns without a second RPC, confirm, or resume: the first
+// decision already confirmed and scheduled the follow.
 func (b *Bot) cbDecide(ctx context.Context, chatID int64, mid int, entry CallbackEntry) error {
-	if err := b.decider.Decide(ctx, entry.ApprovalID, entry.Decision); err != nil {
+	decided, err := b.decideOnce(ctx, entry.ApprovalID, entry.Decision)
+	if err != nil {
 		return b.scrubErr(err)
+	}
+	if !decided {
+		// Already decided elsewhere (a distinct button for
+		// the same id, or a monitor path decided first):
+		// clear the buttons and return without a second
+		// confirm or resume.
+		if mid != 0 {
+			// Failure swallowed, as in Python (try/except pass).
+			_ = b.clearMarkup(ctx, chatID, mid)
+		}
+		return nil
 	}
 	label := "❌ Denied"
 	switch entry.Decision {
@@ -865,12 +1045,20 @@ func (b *Bot) cbDecide(ctx context.Context, chatID int64, mid int, entry Callbac
 	if _, err := b.Send(ctx, chatID, label+": <code>"+EscapeText(entry.ApprovalID)+"</code>", SendOptions{Silent: true}); err != nil {
 		return err
 	}
+	// The confirm is sent before the buttons are cleared:
+	// observing the markup clear implies the confirm
+	// already landed (the test sync assumption).
 	if mid != 0 {
 		// Failure swallowed, as in Python (try/except pass).
 		_ = b.clearMarkup(ctx, chatID, mid)
 	}
-	if entry.AfterSeq != nil && !b.HasActiveTurn(chatID) && b.resume != nil {
-		if err := b.resume(ctx, ResumeInfo{SessionID: entry.SessionID, Title: entry.Title, AfterSeq: *entry.AfterSeq}); err != nil {
+	if entry.AfterSeq != nil && b.resume != nil {
+		// The resume is scheduled, not run here: startResume
+		// guards the active-turn slot and drops stale
+		// triples, so no HasActiveTurn pre-check is needed
+		// (a tap during the deciding turn's teardown must
+		// wait the slot out, not drop the follow).
+		if err := b.resume(ctx, ResumeInfo{ChatID: chatID, SessionID: entry.SessionID, Title: entry.Title, AfterSeq: *entry.AfterSeq}); err != nil {
 			return b.scrubErr(err)
 		}
 	}
@@ -891,8 +1079,16 @@ func (b *Bot) cbApproveAll(ctx context.Context, chatID int64, _ CallbackEntry) e
 		if !OffersForever(d) {
 			continue
 		}
-		if err := b.decider.Decide(ctx, d.ID, DecisionForever); err != nil {
+		// Single-flight, as in cbDecide: an approval already
+		// decided (manual tap, or a monitor path) is skipped
+		// without a second RPC and without a second report
+		// line — it was already confirmed where decided.
+		decided, err := b.decideOnce(ctx, d.ID, DecisionForever)
+		if err != nil {
 			return b.scrubErr(err)
+		}
+		if !decided {
+			continue
 		}
 		title := d.Title
 		if title == "" {
@@ -1164,6 +1360,13 @@ func (b *Bot) Delete(ctx context.Context, chatID int64, msgID int) error {
 		return err
 	})
 	return b.scrubErr(err)
+}
+
+// ClearMarkup clears a message's inline keyboard. It is the
+// exported form of clearMarkup for step-5 callback actions
+// (question answers), which run outside the bot core.
+func (b *Bot) ClearMarkup(ctx context.Context, chatID int64, msgID int) error {
+	return b.clearMarkup(ctx, chatID, msgID)
 }
 
 // clearMarkup clears a message's inline keyboard with an empty

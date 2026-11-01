@@ -369,6 +369,17 @@ func (e *ApproveError) Unwrap() error { return e.Err }
 type AutoApprover struct {
 	connect   func(ctx context.Context) (Decider, func(), error)
 	allowOnce bool
+	// OnDecided, when non-nil, is called after each successful
+	// decide with the approval id and decision. The Telegram
+	// bot sets it so an auto-approved id lands in the same
+	// decided set the manual button path consults
+	// (Bot.RecordDecided): a later tap for the same id then
+	// re-issues nothing. It runs on the approver's goroutine
+	// with no AutoApprover lock held, and must not call back
+	// into the AutoApprover. A tap racing an in-flight auto
+	// RPC can still double-issue: the record lands only
+	// after the auto RPC returns.
+	OnDecided func(id, decision string)
 	mu        sync.Mutex
 	// warned is keyed by (present, id): a nil ApprovalID and a
 	// present "" id warn independently. decided stays
@@ -491,6 +502,9 @@ func (a *AutoApprover) Approve(ctx context.Context, items []DescribedApproval) (
 			continue
 		}
 		approved = append(approved, rec)
+		if a.OnDecided != nil && item.ApprovalID != nil {
+			a.OnDecided(*item.ApprovalID, decision)
+		}
 		// Handled is a bare-string list by contract, not a
 		// key: deref here is a display value, and the
 		// waiter keys it present (it never offers a nil-id

@@ -217,6 +217,40 @@ func TestAutoApproverDecidesEachAtMostOnce(t *testing.T) {
 	}
 }
 
+func TestAutoApproverOnDecided(t *testing.T) {
+	var mu sync.Mutex
+	var got []string
+	decide := func(ctx context.Context, a DescribedApproval, decision string) error {
+		if deref(a.ApprovalID) == "bad" {
+			return errors.New("gateway down")
+		}
+		return nil
+	}
+	aa := NewAutoApprover(func(ctx context.Context) (Decider, func(), error) {
+		return decide, func() {}, nil
+	}, false)
+	aa.OnDecided = func(id, decision string) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, id+"="+decision)
+	}
+	handled, _, errs := aa.Approve(context.Background(), []DescribedApproval{
+		{ApprovalID: strp("a1"), Options: []string{Forever}},
+		{ApprovalID: strp("bad"), Options: []string{Forever}},
+	})
+	if len(handled) != 1 || handled[0] != "a1" {
+		t.Errorf("handled = %v, want [a1]", handled)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("errs = %v, want 1 (the failed decide)", errs)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 || got[0] != "a1="+Forever {
+		t.Errorf("OnDecided calls = %v, want [a1=%s] (success only, never on failure)", got, Forever)
+	}
+}
+
 func TestAutoApproverDecideFailureIsNotRetried(t *testing.T) {
 	calls := 0
 	decide := func(ctx context.Context, a DescribedApproval, decision string) error {

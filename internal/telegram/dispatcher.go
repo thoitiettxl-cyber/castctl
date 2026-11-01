@@ -89,6 +89,28 @@ type dispatcher struct {
 	idleTimeout     time.Duration
 	shutdownTimeout time.Duration
 	window          int
+
+	// onOffset, when non-nil, is called synchronously in
+	// enqueue (under d.mu) when a new maximum update_id is
+	// marked, before the update is handled: the
+	// offset-before-handle order. It must be fast and must
+	// not call back into the dispatcher; a slow hook stalls
+	// polling for every chat. The bot sets it to persist the
+	// offset to the state file: one local fsync+rename save
+	// per new-max id, under the lock — the acknowledged
+	// bound for that hook (no async move in step 5a).
+	onOffset func(int64)
+
+	// onDropped, when non-nil, is called with the chat key,
+	// the per-event delta, and the running dropped total
+	// whenever updates are dropped (a full queue in
+	// enqueue, under d.mu, or an abandoned shutdown drain).
+	// Same contract as onOffset: fast, no callbacks into
+	// the dispatcher. The bot sets it to log the loss: a
+	// dropped update's offset is already persisted, so it
+	// is never replayed — the log is the only observability
+	// for the loss.
+	onDropped func(chatID, delta, total int64)
 }
 
 func newDispatcher(process func(context.Context, *models.Update), logPanic func(r any)) *dispatcher {
@@ -161,12 +183,15 @@ func (d *dispatcher) enqueue(ctx context.Context, upd *models.Update) {
 	// MaxHandledID is updated with a CAS loop: enqueue is
 	// serialised by d.mu today (the single library worker),
 	// but the store must stay correct if that ever changes.
+	prevMax := d.maxSeen_.Load()
+	advanced := false
 	for {
 		cur := d.maxSeen_.Load()
 		if upd.ID <= cur || d.maxSeen_.CompareAndSwap(cur, upd.ID) {
 			break
 		}
 	}
+	advanced = upd.ID > prevMax
 	key := chatKey(upd)
 	q, ok := d.queues[key]
 	if !ok {
@@ -186,7 +211,15 @@ func (d *dispatcher) enqueue(ctx context.Context, upd *models.Update) {
 	select {
 	case q.ch <- dispatchItem{ctx: ctx, upd: upd}:
 	default:
-		d.dropped_.Add(1)
+		d.countDropped(key, 1)
+	}
+	// Offset-before-handle: a new maximum is reported before
+	// the worker handles the update (and whether or not the
+	// queue accepted it — a dropped update is still marked
+	// seen above). Still under d.mu, so no second enqueue can
+	// interleave a smaller max between the mark and the report.
+	if advanced && d.onOffset != nil {
+		d.onOffset(upd.ID)
 	}
 }
 
@@ -235,13 +268,17 @@ func (d *dispatcher) shutdown() {
 		return
 	}
 	d.shutdown_ = true
-	var queues []*chatQueue
+	type queuedChat struct {
+		key int64
+		q   *chatQueue
+	}
+	var queues []queuedChat
 	for key, q := range d.queues {
-		queues = append(queues, q)
+		queues = append(queues, queuedChat{key, q})
 		delete(d.queues, key)
 	}
-	for _, q := range queues {
-		close(q.ch)
+	for _, dq := range queues {
+		close(dq.q.ch)
 	}
 	d.mu.Unlock()
 
@@ -254,17 +291,31 @@ func (d *dispatcher) shutdown() {
 	case <-done:
 	case <-time.After(d.shutdownTimeoutValue()):
 		// Bounded drain: abandon the remaining queued
-		// work. Count what is still buffered as dropped;
-		// workers discard those same items once they
-		// observe abandonment, without recounting.
+		// work. Count what is still buffered as dropped,
+		// per chat; workers discard those same items once
+		// they observe abandonment, without recounting.
 		d.abandoned.Store(true)
-		for _, q := range queues {
-			d.dropped_.Add(int64(len(q.ch)))
+		for _, dq := range queues {
+			if n := int64(len(dq.q.ch)); n > 0 {
+				d.countDropped(dq.key, n)
+			}
 		}
 	}
 }
 
 func (d *dispatcher) maxSeen() int64 { return d.maxSeen_.Load() }
+
+// countDropped adds n to the dropped total and reports the
+// chat key, the delta, and the new total to onDropped. In
+// enqueue the caller holds d.mu (the onDropped contract:
+// fast, no dispatcher callbacks); in shutdown it runs after
+// the drain deadline with no lock held.
+func (d *dispatcher) countDropped(chatID, n int64) {
+	total := d.dropped_.Add(n)
+	if d.onDropped != nil {
+		d.onDropped(chatID, n, total)
+	}
+}
 
 // droppedCount reports updates dropped by a full queue or by
 // an abandoned shutdown drain.

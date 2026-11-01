@@ -226,6 +226,13 @@ type CallbackEntry struct {
 	SessionID  string
 	Title      string
 	AfterSeq   *int64
+	// Answer is the plain-text value a question button sends
+	// as a new turn (Action "answer"). Page is the target
+	// page of a chat-picker navigation button (Action
+	// "chats_page"). Both are step-5 fields; the core
+	// decide/approve-all actions leave them zero.
+	Answer string
+	Page   int
 }
 
 // CallbackRegistry is the in-memory callback store, capped at
@@ -257,12 +264,15 @@ func (r *CallbackRegistry) Register(entry CallbackEntry) string {
 	if _, err := rand.Read(b[:]); err != nil {
 		// crypto/rand failure is unrecoverable for a token that
 		// must be unguessable; panic rather than register a
-		// predictable entry. Callers run under the bot's
-		// per-update recover, and registration happens only
-		// when building a message, never inside a handler.
-		// [STEP-5 NOTE] Consider an error return instead of
-		// a panic when the registry API is next touched;
-		// changing the signature is out of scope for item 4.
+		// predictable entry. Every production call site runs
+		// under a recover: command handlers on the
+		// dispatcher's per-update recover (dispatcher.go
+		// processOne), turn-path markup builders on the turn
+		// goroutine's recover (telegram_turn.go
+		// recoverTurnPanic). The panic is logged, never a
+		// process crash; an error return would need every
+		// markup builder to grow an error channel, which is
+		// out of scope for this fix loop.
 		panic(err)
 	}
 	token := base64.RawURLEncoding.EncodeToString(b[:])
@@ -272,11 +282,56 @@ func (r *CallbackRegistry) Register(entry CallbackEntry) string {
 	r.entries[data] = entry
 	r.order = append(r.order, data)
 	for len(r.entries) > CallbackRegistryCap {
-		oldest := r.order[0]
-		r.order = r.order[1:]
-		delete(r.entries, oldest)
+		// Evict the oldest entry that is not a live decide
+		// button: evicting a decide/approve_all entry would
+		// kill a button the user may still tap (its
+		// approval pending), turning a tap into an
+		// "expired" answer. Only when every entry is a
+		// decide button does the oldest one go, so the
+		// cap always holds.
+		victim := -1
+		for i, d := range r.order {
+			if e := r.entries[d]; e.Action != "decide" && e.Action != "approve_all" {
+				victim = i
+				break
+			}
+		}
+		if victim < 0 {
+			victim = 0
+		}
+		delete(r.entries, r.order[victim])
+		r.order = append(r.order[:victim], r.order[victim+1:]...)
 	}
 	return data
+}
+
+// Consume atomically removes and returns the entry for data:
+// the single-flight guard for decide/approve_all buttons. The
+// first tap consumes the entry; a double-tap, redelivery, or
+// second user's tap finds nothing and takes the "expired"
+// answer in onCallback, so no second Decide RPC is issued for
+// the same button. Non-decide entries are never consumed (a
+// pagination or open button stays usable until re-rendered).
+// Consumption precedes the Decide RPC, so a failed Decide
+// burns the button: the entry is gone and a re-tap finds
+// nothing. Retry needs a fresh /approvals listing —
+// already-sent buttons carry the old token and cannot be
+// re-registered.
+func (r *CallbackRegistry) Consume(data string) (CallbackEntry, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.entries[data]
+	if !ok {
+		return CallbackEntry{}, false
+	}
+	delete(r.entries, data)
+	for i, d := range r.order {
+		if d == data {
+			r.order = append(r.order[:i], r.order[i+1:]...)
+			break
+		}
+	}
+	return e, true
 }
 
 // Lookup resolves callback data to its entry. Data not starting
