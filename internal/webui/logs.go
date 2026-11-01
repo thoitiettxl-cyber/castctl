@@ -110,19 +110,32 @@ func (s *Server) logGate() (path string, disabled bool, reason string, err error
 		return "", true, "log_output_refused", nil
 	}
 	for _, name := range legacyNames {
-		if paths, perr := profile.ProfilePaths(s.deps.ConfigDir, name); perr == nil {
-			refused = append(refused, paths.Cookies, paths.Cookies+".bak")
-			// A legacy config's own cookies_file override
-			// names a cookies file the default path does
-			// not: refuse its raw forms too (R10). An
-			// unreadable config fails the whole gate
-			// closed — see legacyCookiesFileRefusals.
-			forms, corrupt := legacyCookiesFileRefusals(s.deps.ConfigDir, paths)
-			if corrupt {
-				return "", true, "log_output_refused", nil
-			}
-			refused = append(refused, forms...)
+		paths, perr := profile.ProfilePaths(s.deps.ConfigDir, name)
+		if perr != nil {
+			// The listed entry's refused set cannot be
+			// computed (e.g. the name fails validation,
+			// so no valid paths exist for it): fail the
+			// whole gate closed rather than serve a file
+			// that might be that entry's cookies file.
+			// Every listed name carries a config.json
+			// (see legacyProfileNames), so this cannot
+			// trigger for an entry without one — an
+			// invalid-name directory without a config.json
+			// is still skipped at enumeration, not
+			// refused here.
+			return "", true, "log_output_refused", nil
 		}
+		refused = append(refused, paths.Cookies, paths.Cookies+".bak")
+		// A legacy config's own cookies_file override
+		// names a cookies file the default path does
+		// not: refuse its raw forms too (R10). An
+		// unreadable config fails the whole gate
+		// closed — see legacyCookiesFileRefusals.
+		forms, corrupt := legacyCookiesFileRefusals(s.deps.ConfigDir, paths)
+		if corrupt {
+			return "", true, "log_output_refused", nil
+		}
+		refused = append(refused, forms...)
 	}
 	profilesDir := resolvePathBestEffort(filepath.Join(s.deps.ConfigDir, "profiles"))
 	if pathWithin(resolved, profilesDir) {

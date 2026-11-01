@@ -292,16 +292,21 @@ func (s *Server) configSource(load *configLoad, cfg *profile.SingleConfig) strin
 // validation is deliberately NOT mirrored here: this
 // enumeration is a guard scan, not migration discovery, so
 // an invalid-name directory carrying a config.json is still
-// listed (its cookies files are refused), while
-// DiscoverProfileNames skips it for migration. An error is
-// returned when the profiles directory cannot be listed
-// (other than not existing, which means no legacy profile
-// can exist) or when a candidate entry's config.json cannot
-// be stat'ed (other than not existing, which means the
-// entry holds no legacy config): the refused set cannot be
-// enumerated then, so the caller that guards secrets
-// (logGate) must fail closed. Display-only callers treat an
-// error as no legacy profiles, as before.
+// listed — but listing alone refuses nothing: logGate fails
+// the whole gate closed when the listed entry's refused set
+// cannot be computed (its paths reject the name; see
+// logGate). An error is returned when the profiles
+// directory cannot be listed (other than not existing,
+// which means no legacy profile can exist), when a symlink
+// entry's target cannot be stat'ed (any error, including a
+// dangling target: an unresolvable symlink holds no
+// enumerable config), or when a candidate entry's
+// config.json cannot be stat'ed (other than not existing,
+// which means the entry holds no legacy config): the
+// refused set cannot be enumerated then, so the caller
+// that guards secrets (logGate) must fail closed.
+// Display-only callers treat an error as no legacy
+// profiles, as before.
 func (s *Server) legacyProfileNames(cfg *profile.SingleConfig) ([]string, error) {
 	profilesDir := filepath.Join(s.deps.ConfigDir, "profiles")
 	entries, err := os.ReadDir(profilesDir)
@@ -313,11 +318,36 @@ func (s *Server) legacyProfileNames(cfg *profile.SingleConfig) ([]string, error)
 	}
 	var names []string
 	for _, e := range entries {
+		// Names already defined in the single-file document
+		// are never legacy profiles, whatever the
+		// filesystem entry looks like: exclude them before
+		// any probe, so an unresolvable symlink carrying a
+		// single-file profile's name cannot fail the gate
+		// closed for a shape that holds no legacy profile.
+		if cfg != nil {
+			if _, ok := cfg.Profiles[e.Name()]; ok {
+				continue
+			}
+		}
 		isDir := e.IsDir()
 		if !isDir && e.Type()&os.ModeSymlink != 0 {
-			if st, serr := os.Stat(filepath.Join(profilesDir, e.Name())); serr == nil && st.IsDir() {
-				isDir = true
+			// A symlink whose target cannot be stat'ed
+			// (loop, dangling) is an enumeration failure,
+			// not a skip: the entry's config is
+			// unreachable, so its refused set is
+			// unknowable. There is deliberately NO
+			// IsNotExist carve-out here — a dangling
+			// symlink's ENOENT means the target does not
+			// resolve, unlike a missing config.json,
+			// which means the entry holds no legacy
+			// profile. A stat that succeeds but names a
+			// non-directory is still skipped, as in
+			// DiscoverProfileNames.
+			st, serr := os.Stat(filepath.Join(profilesDir, e.Name()))
+			if serr != nil {
+				return nil, serr
 			}
+			isDir = st.IsDir()
 		}
 		if !isDir {
 			continue
@@ -327,11 +357,6 @@ func (s *Server) legacyProfileNames(cfg *profile.SingleConfig) ([]string, error)
 				continue
 			}
 			return nil, err
-		}
-		if cfg != nil {
-			if _, ok := cfg.Profiles[e.Name()]; ok {
-				continue
-			}
 		}
 		names = append(names, e.Name())
 	}
