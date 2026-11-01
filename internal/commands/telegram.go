@@ -216,11 +216,11 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 			// lose every later update too. Bound: one local
 			// state save (temp file + fsync + rename) per
 			// new-max update_id, under the dispatcher lock
-			// held across this hook call, so a slow disk
-			// stalls the per-chat worker for that save.
-			// Persistence stays synchronous by design in
-			// this loop (no async move); the save is
-			// local-only.
+			// held across this hook call, so a slow save
+			// stalls polling for EVERY chat, not just the
+			// chat the update belongs to. Persistence stays
+			// synchronous by design in this loop (no async
+			// move); the save is local-only.
 			if err := stateStore.NoteOffset(offset); err != nil {
 				logger.Warn("telegram state save failed", "err", logging.SummarizeErr(err))
 			}

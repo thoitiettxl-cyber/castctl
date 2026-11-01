@@ -522,7 +522,7 @@ func turnDiagnostics(h *telegramBotHarness, gw *telegramTurnFakeGateway) string 
 // waitForTurnEnd stages on turn completion: the watermark
 // advanced past prev in the state file (the save is the turn
 // goroutine's last act before it clears the active slot),
-// followed by a short quiet window for the slot clear.
+// followed by a 150 ms settle delay for the slot clear.
 // Staging on edit visibility instead races the teardown
 // window: the final edit lands before the watermark save and
 // the active-slot clear, so a second update staged on the
@@ -1811,10 +1811,26 @@ func TestQuestionOptionsWidget(t *testing.T) {
 		map[string]any{"value": "only"},
 	}}}}
 	opts = questionOptions(reply)
-	if len(opts) != 4 || opts[0].value != "42" || opts[1].value != "true" ||
+	if len(opts) != 4 || opts[0].value != "42.0" || opts[1].value != "True" ||
 		opts[2].label != "T" || opts[2].value != "v" ||
 		opts[3].label != "only" || opts[3].value != "only" {
 		t.Fatalf("scalar/dict options = %+v", opts)
+	}
+	// Python str() spellings: nil is "None", False is
+	// "False", integral floats keep ".0"; lists use
+	// fmt.Sprint, matching Python ("[1]").
+	reply = wait.Reply{Widgets: []wait.Widget{{Options: []any{
+		nil,
+		false,
+		float64(1),
+		float64(1.5),
+		[]any{float64(1)},
+	}}}}
+	opts = questionOptions(reply)
+	if len(opts) != 5 || opts[0].value != "None" || opts[0].label != "None" ||
+		opts[1].value != "False" || opts[2].value != "1.0" ||
+		opts[3].value != "1.5" || opts[4].value != "[1]" {
+		t.Fatalf("python-str options = %+v", opts)
 	}
 }
 

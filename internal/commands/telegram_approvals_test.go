@@ -613,9 +613,21 @@ func TestCallbackDecideSingleFlight(t *testing.T) {
 		return false
 	})
 	// Both updates share chat 500, so one dispatcher worker
-	// handles them in order; give the second tap time to be
-	// (not) processed before asserting the counts.
-	time.Sleep(300 * time.Millisecond)
+	// handles them in order; wait for the second tap's
+	// callback answer (the expired answer) instead of a
+	// fixed sleep, so the counts are asserted only after
+	// both taps were processed.
+	waitFor(t, "second tap answered", func() bool {
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		n := 0
+		for _, m := range fake.methods {
+			if m == "answerCallbackQuery" {
+				n++
+			}
+		}
+		return n >= 2
+	})
 	cancel()
 	<-done
 	if calls := gw.decideHistory(); len(calls) != 1 || calls[0] != (decideRecord{approvalID: "A1", decision: "allow_always"}) {

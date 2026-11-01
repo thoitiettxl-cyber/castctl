@@ -184,10 +184,13 @@ func TestDispatcherOnDroppedHook(t *testing.T) {
 	}, func(r any) {})
 	d.idleTimeout = time.Minute
 	var hookMu sync.Mutex
-	var hookTotals []int64
-	d.onDropped = func(total int64) {
+	type dropReport struct {
+		chat, delta, total int64
+	}
+	var hookReports []dropReport
+	d.onDropped = func(chatID, delta, total int64) {
 		hookMu.Lock()
-		hookTotals = append(hookTotals, total)
+		hookReports = append(hookReports, dropReport{chatID, delta, total})
 		hookMu.Unlock()
 	}
 	ctx := context.Background()
@@ -199,13 +202,13 @@ func TestDispatcherOnDroppedHook(t *testing.T) {
 	waitFor(t, "drop hook fired", func() bool {
 		hookMu.Lock()
 		defer hookMu.Unlock()
-		return len(hookTotals) >= 1
+		return len(hookReports) >= 1
 	})
 	hookMu.Lock()
-	total := hookTotals[len(hookTotals)-1]
+	last := hookReports[len(hookReports)-1]
 	hookMu.Unlock()
-	if total < 1 || total != d.droppedCount() {
-		t.Errorf("hook total = %d, droppedCount = %d; want the hook to report the running total", total, d.droppedCount())
+	if last.chat != 500 || last.delta < 1 || last.total < 1 || last.total != d.droppedCount() {
+		t.Errorf("hook report = %+v, droppedCount = %d; want chat 500, a positive per-event delta, and the running total", last, d.droppedCount())
 	}
 	close(gate)
 	d.shutdown()

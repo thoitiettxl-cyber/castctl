@@ -312,6 +312,11 @@ func (r *CallbackRegistry) Register(entry CallbackEntry) string {
 // answer in onCallback, so no second Decide RPC is issued for
 // the same button. Non-decide entries are never consumed (a
 // pagination or open button stays usable until re-rendered).
+// Consumption precedes the Decide RPC, so a failed Decide
+// burns the button: the entry is gone and a re-tap finds
+// nothing. Retry needs a fresh /approvals listing —
+// already-sent buttons carry the old token and cannot be
+// re-registered.
 func (r *CallbackRegistry) Consume(data string) (CallbackEntry, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

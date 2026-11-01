@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -910,8 +912,9 @@ func widgetOptions(w wait.Widget) []questionOption {
 
 // optionLabel mirrors Python option_label: a dict's first
 // non-empty label/text/title/value, a plain string itself, or
-// the string form of another scalar (number, bool). Nil and
-// composite values have no label.
+// the string form of another scalar (number, bool). Nil yields
+// "None" (Python str(None)); composites use fmt.Sprint (see
+// optionScalarString).
 func optionLabel(o any) string {
 	switch v := o.(type) {
 	case string:
@@ -919,7 +922,7 @@ func optionLabel(o any) string {
 	case map[string]any:
 		return firstWidgetString(v, "label", "text", "title", "value")
 	case nil:
-		return ""
+		return "None"
 	default:
 		if s, ok := optionScalarString(v); ok {
 			return s
@@ -930,7 +933,9 @@ func optionLabel(o any) string {
 
 // optionValue mirrors Python option_value: a dict's first
 // non-empty value/label/text/title, a plain string itself, or
-// the string form of another scalar.
+// the string form of another scalar. Nil yields "None"
+// (Python str(None)); composites use fmt.Sprint (see
+// optionScalarString).
 func optionValue(o any) string {
 	switch v := o.(type) {
 	case string:
@@ -938,7 +943,7 @@ func optionValue(o any) string {
 	case map[string]any:
 		return firstWidgetString(v, "value", "label", "text", "title")
 	case nil:
-		return ""
+		return "None"
 	default:
 		if s, ok := optionScalarString(v); ok {
 			return s
@@ -947,19 +952,60 @@ func optionValue(o any) string {
 	}
 }
 
-// optionScalarString stringifies a JSON scalar as Python str()
-// would for option purposes. Slices, maps, and other shapes
-// are not scalars here.
+// optionScalarString stringifies a JSON scalar the way Python
+// str() would: bools as True/False, floats keeping a ".0" for
+// integral values (1.0 stays "1.0"), nil as None. Composites
+// fall back to fmt.Sprint: lists match Python ("[1]"), maps do
+// not (Go "map[a:1]" vs Python "{'a': 1}") — a documented
+// divergence, kept deliberately small (see firstWidgetString
+// for the dict-value divergence).
 func optionScalarString(v any) (string, bool) {
-	switch v.(type) {
-	case float64, float32, int, int64, int32, uint64, bool:
+	switch t := v.(type) {
+	case nil:
+		return "None", true
+	case bool:
+		if t {
+			return "True", true
+		}
+		return "False", true
+	case float64:
+		return pythonFloat(t), true
+	case float32:
+		return pythonFloat(float64(t)), true
+	case int, int64, int32, uint64:
 		return fmt.Sprint(v), true
 	default:
-		return "", false
+		return fmt.Sprint(v), true
 	}
 }
 
+// pythonFloat formats f as Python repr() does for the values
+// JSON can carry: shortest round-trip digits, with ".0"
+// appended when the value is integral (str(42.0) == "42.0").
+// Infinities and NaN cannot arrive via JSON; they map to the
+// Python spellings anyway.
+func pythonFloat(f float64) string {
+	if math.IsNaN(f) {
+		return "nan"
+	}
+	if math.IsInf(f, 1) {
+		return "inf"
+	}
+	if math.IsInf(f, -1) {
+		return "-inf"
+	}
+	s := strconv.FormatFloat(f, 'g', -1, 64)
+	if !strings.ContainsAny(s, ".eE") {
+		s += ".0"
+	}
+	return s
+}
+
 func firstWidgetString(m map[string]any, keys ...string) string {
+	// String values only: a numeric or bool dict value is
+	// skipped, unlike Python's truthiness-aware str() of the
+	// first truthy value — a documented divergence, kept
+	// deliberately small (see optionScalarString).
 	for _, k := range keys {
 		if s, ok := m[k].(string); ok && s != "" {
 			return s

@@ -397,8 +397,8 @@ func New(s Settings) (*Bot, error) {
 	// persisted (offset-before-handle), so it is never
 	// replayed — this warn log is the only observability
 	// for the loss.
-	b.dispatch.onDropped = func(total int64) {
-		b.logger.Warn("telegram dispatcher dropped update(s)", "dropped_total", total)
+	b.dispatch.onDropped = func(chatID, delta, total int64) {
+		b.logger.Warn("telegram dispatcher dropped update(s)", "chat_id", chatID, "dropped_delta", delta, "dropped_total", total)
 	}
 	// Seed the in-memory maximum from the persisted offset so
 	// MaxHandledID never regresses across a restart and a

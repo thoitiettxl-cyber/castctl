@@ -101,15 +101,16 @@ type dispatcher struct {
 	// bound for that hook (no async move in step 5a).
 	onOffset func(int64)
 
-	// onDropped, when non-nil, is called with the running
-	// dropped total whenever updates are dropped (a full
-	// queue in enqueue, under d.mu, or an abandoned shutdown
-	// drain). Same contract as onOffset: fast, no callbacks
-	// into the dispatcher. The bot sets it to log the loss:
-	// a dropped update's offset is already persisted, so it
+	// onDropped, when non-nil, is called with the chat key,
+	// the per-event delta, and the running dropped total
+	// whenever updates are dropped (a full queue in
+	// enqueue, under d.mu, or an abandoned shutdown drain).
+	// Same contract as onOffset: fast, no callbacks into
+	// the dispatcher. The bot sets it to log the loss: a
+	// dropped update's offset is already persisted, so it
 	// is never replayed — the log is the only observability
 	// for the loss.
-	onDropped func(total int64)
+	onDropped func(chatID, delta, total int64)
 }
 
 func newDispatcher(process func(context.Context, *models.Update), logPanic func(r any)) *dispatcher {
@@ -210,7 +211,7 @@ func (d *dispatcher) enqueue(ctx context.Context, upd *models.Update) {
 	select {
 	case q.ch <- dispatchItem{ctx: ctx, upd: upd}:
 	default:
-		d.countDropped(1)
+		d.countDropped(key, 1)
 	}
 	// Offset-before-handle: a new maximum is reported before
 	// the worker handles the update (and whether or not the
@@ -267,13 +268,17 @@ func (d *dispatcher) shutdown() {
 		return
 	}
 	d.shutdown_ = true
-	var queues []*chatQueue
+	type queuedChat struct {
+		key int64
+		q   *chatQueue
+	}
+	var queues []queuedChat
 	for key, q := range d.queues {
-		queues = append(queues, q)
+		queues = append(queues, queuedChat{key, q})
 		delete(d.queues, key)
 	}
-	for _, q := range queues {
-		close(q.ch)
+	for _, dq := range queues {
+		close(dq.q.ch)
 	}
 	d.mu.Unlock()
 
@@ -286,16 +291,14 @@ func (d *dispatcher) shutdown() {
 	case <-done:
 	case <-time.After(d.shutdownTimeoutValue()):
 		// Bounded drain: abandon the remaining queued
-		// work. Count what is still buffered as dropped;
-		// workers discard those same items once they
-		// observe abandonment, without recounting.
+		// work. Count what is still buffered as dropped,
+		// per chat; workers discard those same items once
+		// they observe abandonment, without recounting.
 		d.abandoned.Store(true)
-		var buffered int64
-		for _, q := range queues {
-			buffered += int64(len(q.ch))
-		}
-		if buffered > 0 {
-			d.countDropped(buffered)
+		for _, dq := range queues {
+			if n := int64(len(dq.q.ch)); n > 0 {
+				d.countDropped(dq.key, n)
+			}
 		}
 	}
 }
@@ -303,14 +306,14 @@ func (d *dispatcher) shutdown() {
 func (d *dispatcher) maxSeen() int64 { return d.maxSeen_.Load() }
 
 // countDropped adds n to the dropped total and reports the
-// new total to onDropped. In enqueue the caller holds d.mu
-// (the onDropped contract: fast, no dispatcher callbacks);
-// in shutdown it runs after the drain deadline with no lock
-// held.
-func (d *dispatcher) countDropped(n int64) {
+// chat key, the delta, and the new total to onDropped. In
+// enqueue the caller holds d.mu (the onDropped contract:
+// fast, no dispatcher callbacks); in shutdown it runs after
+// the drain deadline with no lock held.
+func (d *dispatcher) countDropped(chatID, n int64) {
 	total := d.dropped_.Add(n)
 	if d.onDropped != nil {
-		d.onDropped(total)
+		d.onDropped(chatID, n, total)
 	}
 }
 
