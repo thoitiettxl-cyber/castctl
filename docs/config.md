@@ -556,7 +556,7 @@ unauthenticated). Overlap checks compare absolutized paths,
 so a relative `--config` path behaves exactly like the
 equivalent absolute path. `ui_dir` is not a secret and is shown
 verbatim in redacted config views. The on-disk directory is
-trusted input: populate it only from verified module installs
+trusted input: populate it only from a trusted source
 or explicit updates, never point it at a user-writable or
 shared directory. Its content is trusted same-origin code —
 the frontend keeps the token in `sessionStorage`, so a
@@ -617,8 +617,8 @@ port, never by binding a non-loopback address.
 
 The names `ui_dir` and `token` are kept (Boss decision
 2026-11-01): they were approved at Gate 2 and shipped in
-PR #20 / v0.7.0, so renaming here would be a breaking
-change outside this module PR's scope. Their semantics
+PR #20 / v0.7.0, so renaming them would be a breaking
+change outside the scope of that decision. Their semantics
 follow sing-box's Clash API
 ([Clash API](https://sing-box.sagernet.org/configuration/experimental/clash-api/)):
 
@@ -629,8 +629,9 @@ follow sing-box's Clash API
   authentication), but REQUIRED in castctl — deliberately
   stricter than sing-box's optional secret.
 - No auto-download: there is no equivalent of
-  `external_ui_download_url`; the UI ships in the
-  KernelSU module and is replaced only by explicit update.
+  `external_ui_download_url`; the embedded UI ships in the
+  binary, and an on-disk UI is replaced only by explicit
+  update.
 
 ## The `dns` section — INTERIM, GLOBAL, COMPAT-ONLY
 

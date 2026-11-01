@@ -990,15 +990,18 @@ License: MIT — upstream `LICENSE` ("MIT License / Copyright (c)
 `AGENTS.md` governs the template repo, not castctl.
 
 Category: mixed. (a) Copied, byte-identical, exactly two files
-(listed below with hashes). Everything else in `module/` is
-castctl-written code following the template's patterns, i.e. (c)
-studied, no code taken: no template shell code, Go code, or
-config text was copied into the module scripts. The deviations
-table in `module/docs/ksu-module.md` §9 is the authoritative
-list of what was deliberately not taken or changed, with
-reasons; the summary here names the load-bearing ones.
+(listed below with hashes) into the former `module/`
+directory, removed with the module. Everything else in
+`module/` had been castctl-written code following the
+template's patterns, i.e. (c) studied, no code taken: no
+template shell code, Go code, or config text was copied
+into the module scripts. The deviations record (formerly
+`module/docs/ksu-module.md` §9) was removed with the module
+and no longer applies; it is not summarised here beyond the
+load-bearing items named below.
 
-Copied files (both `cmp` exit 0 against the upstream commit):
+Copied files (both `cmp` exit 0 against the upstream commit,
+into the former `module/` directory):
 
 - `module/META-INF/com/google/android/update-binary` — the
   generic Magisk/KernelSU installer entry point, sha256
@@ -1013,10 +1016,10 @@ Copied files (both `cmp` exit 0 against the upstream commit):
   is the glibc license text, not template code; it is recorded
   here because the file was copied from the template tree.
 
-Studied patterns, with mapping (castctl file ↔ upstream file at
-the pinned commit; no line counts are cited — counts were
-stale twice after later edits and rot on every loop, so the
-mapping names files only):
+Studied patterns, with the historical mapping (former castctl
+file ↔ upstream file at the pinned commit; no line counts are
+cited — counts were stale twice after later edits and rot on
+every loop, so the mapping names files only):
 
 - Install-time publication: `module/customize.sh`
   ↔ `customize.sh` — SKIPUNZIP, ABI gate,
@@ -1045,11 +1048,11 @@ mapping names files only):
   pins themselves (castctl v0.6.4 asset, glibc 2.44 `.deb`,
   CA bundle 20261020-r0) were re-verified by real download
   in the module work, not copied from the template's pins;
-  the CA pin differs because the template's pin 404s (see
-  `module/docs/ksu-module.md` §9, D15).
+  the CA pin differs because the template's pin 404s
+  (deviations record D15, removed with the module).
 
-Deliberately not taken / changed (each with castctl evidence in
-`module/docs/ksu-module.md` §9): KernelSU-first busybox/PATH
+Deliberately not taken / changed (as recorded in the removed
+deviations record): KernelSU-first busybox/PATH
 (D1); `SKIPMOUNT=true` + no `PROPFILE` line, no `system/` dir
 (D3/D4); bounded `boot_completed` polling instead of the
 unbounded `resetprop -w` wait (D5); bounded `flock` (D6);
@@ -1080,8 +1083,9 @@ Version 2.0, January 2004), read in full. No `license` field
 in the SB-T `package.json` files was found; the repo-root
 LICENSE file governs.
 
-Category: (c) studied, no code taken — but the PATTERN was
-ported, so this section records the mapping (AGENTS.md rule 6).
+Category: (c) studied, no code taken — but the PATTERN had
+been ported into the former module, so this section records
+the historical mapping (AGENTS.md rule 6).
 The following SB-T source files were read in the librarian
 checkout (`~/.cache/checkouts/github.com/thoitiettxl-cyber/SB-T`):
 `box/scripts/box.webui` (JSON envelope shape, `_ok`/`_err`,
@@ -1098,16 +1102,16 @@ check), `action.sh` (toggle + status + raw log tail),
 "ui"`, UI vendored at `box/sing-box/ui/`), and
 `webroot/index.html` (built shell only; assets gitignored).
 
-What was followed in castctl (reimplemented, no SB-T source
-copied):
+What had been followed in the former module (reimplemented,
+no SB-T source copied):
 
-- `module/scripts/castctl-ctl`, `webui-json` subcommand: the
+- The former `module/scripts/castctl-ctl`, `webui-json` subcommand: the
   `{"ok":true,"command":"CMD","data":...}` /
   `{"ok":false,"command":"CMD","error":"..."}` envelope, the
   always-exit-0 discipline (the envelope is the sole channel),
   backgrounded start/stop/restart returning `"triggered"`,
   and the controller-log-only allowlist for `log`.
-- `module/scripts/castctl-ctl`, want marker
+- The former `module/scripts/castctl-ctl`, want marker
   (`$DATA_DIR/state/want`): existence-only semantics, written
   first by a manual start, removed by a deliberate stop, never
   created or deleted by install. DIVERGENCE (deliberate,
@@ -1116,37 +1120,38 @@ copied):
   does not survive reboot and no desired state is reported.
   Castctl DOES gate boot and watchdog starts on the marker
   and reports `desired: on|off` in status.
-- `module/webroot/index.html`: a controller page calling the
-  backend through the `kernelsu` exec bridge with the
-  first-`{` extraction and `payload.ok` branching, polling
+- The former `module/webroot/index.html`: a controller page
+  calling the backend through the `kernelsu` exec bridge with
+  the first-`{` extraction and `payload.ok` branching, polling
   status after actions. DIVERGENCE: SB-T's page is a
-  Vite-built bundle; castctl's is a single self-contained
+  Vite-built bundle; castctl's was a single self-contained
   file with no build step, rendering via `textContent` only.
-  The plain-page `ksu.exec` callable spelling is
-  `[UNVERIFIED]` on the device manager build (see the page
-  header and `module/docs/ksu-module.md` gate 25).
-- `module/docs/ksu-module.md` §5 + `module/customize.sh` +
+  The plain-page `ksu.exec` callable spelling had been
+  recorded as `[UNVERIFIED]` on the device manager build in
+  the removed module docs (gate 25); the page itself has
+  been removed with the module.
+- The former `module/docs/ksu-module.md` §5 + `module/customize.sh` +
   `castctl-ctl ui-update`: the on-disk-UI idea behind
   `dashboard.path = "ui"` (serve a vendored frontend tree
   from disk instead of the embedded one). DIVERGENCE: SB-T
   vendors the UI under the sing-box tree and copies the old
   tree back OVER the new one on update (old files win on
-  collision); castctl stages the UI as `ui/` in the ZIP,
-  installs it to `$DATA_DIR/ui` with its own checksum
-  manifest, preserves it byte-identical across updates, and
-  replaces it only via the explicit `ui-update` command.
-- `module/action.sh`: toggle + status + log tail shape.
-  DIVERGENCE: castctl's toggle keys on the want marker or
-  any running service, prints the web UI URL from status
-  (never a token), and shows the controller log only.
+  collision); castctl had staged the UI as `ui/` in the ZIP,
+  installed it to `$DATA_DIR/ui` with its own checksum
+  manifest, preserved it byte-identical across updates, and
+  replaced it only via the explicit `ui-update` command.
+- The former `module/action.sh`: toggle + status + log tail shape.
+  DIVERGENCE: castctl's toggle had keyed on the want marker or
+  any running service, printed the web UI URL from status
+  (never a token), and showed the controller log only.
 
 No SB-T code, config text, or assets were copied into the
 tree: no shell function, TypeScript line, JSON shape literal
 beyond the three envelope field names, or UI file originates
 in SB-T. SB-T has no secrets and no redaction code; the
-castctl backend's secrecy guarantees (fixed shapes,
-allowlists, no token/cookie/config content in any field) are
-castctl-written hardening with no SB-T counterpart.
+removed castctl backend's secrecy guarantees (fixed shapes,
+allowlists, no token/cookie/config content in any field) had
+been castctl-written hardening with no SB-T counterpart.
 
 ## Carried items (unresolved at the time of writing)
 

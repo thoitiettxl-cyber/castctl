@@ -23,8 +23,7 @@ verdict per check and a counts-only secret scan at the end:
 | 9 | Update | Unstamped refusal (exit 2, fixed message) is the PASS-able check for a script-built binary. A stamped `--dry-run` is SKIP with reason when unstamped. A non-dry-run update is never run. |
 | 10 | Keeper | `keeper status` (state files only). `keeper check` can rewrite cookies, so it stays dry/SKIP on real profiles unless `--live-keeper` is given; exit 3 (entry stopped) is a distinct SKIP outcome, never a healthy PASS. `session-state.json` is checked at the per-profile path the keeper actually writes, `profiles/<name>/session-state.json`, mode 0600 when present. Real CDP re-export and single-flight refusal are [NEEDS-MEASUREMENT]. |
 | 11 | Web UI | Loopback bind verified via `ss` (supplementary evidence; castctl itself validates loopback); non-loopback `--listen` exits 2 naming the loopback rule, without echoing the address (the listen check runs before the token check when a `webui` block exists; without a block the block gate fires first and the probe SKIPs); no-token and wrong-token both 401, good token 200 with `data.remote_exposure: false` (all success bodies are read under the `data` envelope); `GET /config` carries `<redacted>` markers at secret positions; `GET /settings/telegram` masked exactly `***` only when `data.configured` is true (unconfigured → SKIP); `/logs` gate `reason` compared against the config (closed enum: `logging_disabled`, `log_output_not_file`, `log_output_refused`); the server process itself (not a wrapper subshell) is killed and the port is verified closed after the leg. External-connect refusal is [NEEDS-MEASUREMENT]. |
-| 12 | Module | `module/build.sh` with output/cache under the temp dir; `unzip -t`; member names via `unzip -Z1` (no `config.json` at any depth, no `*.key`); per-member counts-only secret scan (never extracted): label patterns FAIL only in text members — the payload binary legitimately embeds field-name/code strings, so in `payload/bin`/`payload/lib` only a private-key header is FAIL; `runtime.version` presence with the `loader_preflight` outcome recorded, never claimed as executed. ZIP SHA-256 is recorded, never asserted cross-host. On this VM, `build.sh` fails when its stage dir lands on the `/home` filesystem (`cp: failed to preserve ownership`); it succeeds with the default `/tmp` stage. |
-| 13 | Secret scan | Counts only over captured outputs (Scope A). See below. |
+| 12 | Secret scan | Counts only over captured outputs (Scope A). See below. |
 
 ## Interface
 
@@ -61,16 +60,16 @@ scripts/e2e.sh --config PATH <profile>... [--live-send] [--live-keeper] [--binar
 | Prerequisite | If missing |
 |---|---|
 | `bash`, `python3`, `sha256sum`, `stat` | **Required.** The script fails fast (exit 2) with a clear message before creating anything. `python3` is stdlib only: the config tool and the Telegram injector use exactly one method, python3 stdlib — there is no `jq` fallback anywhere in the script or this document. |
-| `go` (only when building), `curl` (web UI leg), `unzip` (module leg), `ss` (bind leg) | The affected checks SKIP with a reason naming the missing tool. Runs are bounded internally by the script; no external `timeout` command is needed. |
+| `go` (only when building), `curl` (web UI leg), `ss` (bind leg) | The affected checks SKIP with a reason naming the missing tool. Runs are bounded internally by the script; no external `timeout` command is needed. |
 | A config file whose profiles have cookies files | Legs needing a live profile SKIP per profile with reason `no cookies file for profile`. Cookies presence is read from `profile list` (`cookies` field), never by reading a cookies file. |
 | A running Chrome with remote debugging, for CDP re-export | The re-export sub-check SKIP with reason. Never faked with a stub CDP server. |
 | Network to the release API, for a stamped `update --dry-run` | SKIP with reason. |
-| `rg` and the other `module/build.sh` tools, for the module leg | SKIP with reason naming the missing tools. A build failure on a `curl:` download SKIP as network/cache; any other build failure is FAIL. |
+
 
 Run with a normal environment: a warm Go build cache and the usual
 proxy variables. A sterile environment (cold cache, no proxy vars)
-makes the module leg SKIP on a `curl:` download and can make live
-legs behave differently; headline counts are environment-dependent
+can make live legs behave differently; headline counts are
+environment-dependent
 and must be read with the run's environment stated.
 
 The script sets `umask 077` and verifies the temp dir is mode 0700
@@ -173,7 +172,7 @@ SKIPs separately). This rule covers the assistant sandbox, which
 intercepts raw outbound TCP; on the operator's own machine the same
 legs are expected to run live.
 
-## Secret scan (leg 13, counts only)
+## Secret scan (leg 12, counts only)
 
 Scopes:
 
@@ -244,11 +243,6 @@ control itself at the end of every run.
 - `update` on an unstamped build refuses in every mode before any
   network access; that refusal is the check, not a failure.
 - `CASTCTL_TELEGRAM_TOKEN` does not exist in castctl (see above).
-- ZIP SHA-256 is not cross-host reproducible; assert self-verification
-  only (`unzip -t`, member list, per-member scan), never a cross-host SHA.
-- The payload binary embeds field-name strings, so the module ZIP
-  scan must not FAIL on label patterns inside `payload/bin`/`payload/lib`
-  (measured 2026-11-01: all label hits inside `payload/bin/castctl`).
 - `local` DNS servers: leak-freedom through a detour is unproven;
   the script never claims it.
 - The `dns.timeout` default and the exact error for an unreachable
@@ -278,7 +272,6 @@ control itself at the end of every run.
    non-loopback connect attempt.
 10. `keeper check`/`run` against a live profile (cheap-chain outcome,
     expiry detection, state-file contents).
-11. Same-host repeat-build ZIP equality for `module/build.sh`.
 
 Nothing in this document claims any of the above as proven. Each is
 either SKIP with reason in the script or a manual step for the

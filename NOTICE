@@ -51,8 +51,10 @@ docs/provenance.md.
    The .proto files recreated from these descriptors live in
    internal/proto/generate/.
 
-3. KernelSU module template — module/ (patterns studied; two
-   files copied byte-identical)
+3. KernelSU module template — formerly module/ (patterns
+   studied; two files copied byte-identical). The KernelSU
+   module has been removed from this tree; the paths below
+   are historical.
 
    Upstream: github.com/thoitiettxl-cyber/cli-proxy-api, commit
    f912a733f84a3157e6570d84c05e5a02439d3ff0 (2026-08-28).
@@ -62,12 +64,13 @@ docs/provenance.md.
    update-binary (the generic installer entry point, sha256
    5f4afbcd…) and module/licenses/GLIBC-COPYING.LESSERv2
    (the LGPL 2.1 text for the redistributed glibc libraries,
-   sha256 20e50fe7…). All other module scripts were written
-   for castctl following the template's patterns (install-time
-   publication, lifecycle controller, boot hook, host
-   packager); the deviations are listed in
-   module/docs/ksu-module.md §9. Full mapping in
-   docs/provenance.md §11.
+   sha256 20e50fe7…). All other module scripts had been
+   written for castctl following the template's patterns
+   (install-time publication, lifecycle controller, boot
+   hook, host packager). The deviations record (formerly
+   module/docs/ksu-module.md §9) was removed with the module
+   and no longer applies; it is not summarised here. Full
+   mapping in docs/provenance.md §11.
 
    Nothing else in this tree is copied upstream code. In particular,
    no sing-box, CLIProxyAPI, go-telegram/bot, utls, or Noise-spec
@@ -156,14 +159,15 @@ mistake these influences for vendored code.
    listed in (b); studied, no code taken; no specification text
    copied. License name: not applicable (specification, not code).
 5. SB-T (github.com/thoitiettxl-cyber/SB-T,
-   commit c03b73d6577505c5e1e947d760a8b0638202cab5) — KernelSU
-   module WebUI pattern: the `box.webui` JSON envelope shape,
-   the `box.want` desired-state marker semantics, the vendored
-   on-disk dashboard (`dashboard.path = "ui"`), and the
-   `kernelsu` exec-bridge call pattern: studied and adapted
-   (reimplemented in `module/scripts/castctl-ctl` and
-   `module/webroot/index.html`), no SB-T code taken, with
-   stated divergences (boot gating on the want marker,
-   single-file webroot, UI preservation via explicit update).
-   License name: Apache-2.0. Full mapping in
-   docs/provenance.md §12.
+   commit c03b73d6577505c5e1e947d760a8b0638202cab5) — former
+   KernelSU module WebUI pattern: the `box.webui` JSON
+   envelope shape, the `box.want` desired-state marker
+   semantics, the vendored on-disk dashboard
+   (`dashboard.path = "ui"`), and the `kernelsu` exec-bridge
+   call pattern: studied and adapted (reimplemented in the
+   former `module/scripts/castctl-ctl` and
+   `module/webroot/index.html`, removed with the module), no
+   SB-T code taken, with stated divergences (boot gating on
+   the want marker, single-file webroot, UI preservation via
+   explicit update). License name: Apache-2.0. Full mapping
+   in docs/provenance.md §12.
