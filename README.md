@@ -98,7 +98,7 @@ hostname. Every other lookup goes through the configured DNS server
 and the outbound/detour that server is configured with; DNS failure
 is an error, and there is no system-resolver fallback for any other
 host. A bootstrap failure is a construction error, never a silent
-fallback. One documented exception: an outbound/endpoint server
+fallback. One documented exception: an outbound server
 address that is a hostname resolves through the synthesised
 `local` transport when no explicit `domain_resolver` is set
 (see docs/config.md, "Outbound server addresses"); dial targets

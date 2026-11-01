@@ -28,8 +28,8 @@ import (
 // bootstrap substitution, only for the configured DNS
 // server's hostname, and a bootstrap failure is an error,
 // never a silent fallback. The other use is the sing-box
-// "local" DNS transport, which resolves outbound/endpoint
-// server hostnames through the system resolver when an
+// "local" DNS transport, which resolves outbound server
+// hostnames through the system resolver when an
 // outbound carries no explicit domain_resolver (see
 // profile.ResolveProfileDNS / ApplyDomainResolverDefault).
 // Dial targets are never resolved through the system

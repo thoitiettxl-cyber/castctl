@@ -44,12 +44,15 @@ are rejected — see [Per-profile DNS](#per-profile-dns)):
 | `subscription_action_id` | string |
 | `fingerprint` | string (browser fingerprint preset name) |
 | `tls_engine` | string (`utls`, `cronet`, …; storage-only in the current build) |
-| `outbound` | string tag (shared outbound/endpoint), an inline outbound object, or absent (= direct); an outbound whose server address is a hostname resolves it through the synthesised `local` server unless `domain_resolver` is set (see [Outbound server addresses](#outbound-server-addresses-domain_resolver-and-the-local-bootstrap-server)) |
+| `outbound` | string tag (shared outbound/endpoint), an inline outbound object, or absent (= direct); an outbound (not an endpoint) whose server address is a hostname resolves it through the synthesised `local` server unless `domain_resolver` is set (see [Outbound server addresses](#outbound-server-addresses-domain_resolver-and-the-local-bootstrap-server)) |
 | `dns` | object: the profile's own DNS section, parsed exactly like the top-level section (see [Per-profile DNS](#per-profile-dns)) |
 
 Strictness: the file is parsed strictly — unknown fields anywhere
 in the config are rejected, including inside `dns` servers and
-rules. A malformed single file is an error (exit 2), never a
+rules. (One exception: unknown fields nested inside a
+`domain_resolver` object are accepted and dropped by sing-box
+parsing — see [Outbound server addresses](#outbound-server-addresses-domain_resolver-and-the-local-bootstrap-server).)
+A malformed single file is an error (exit 2), never a
 silent fallback. Cookies are never inline in the config:
 `cookies`/`cookie` keys are rejected.
 
@@ -699,7 +702,10 @@ names the DNS server tag used to resolve a domain in a server
 address (string or object form; see [Outbound server
 addresses](#outbound-server-addresses-domain_resolver-and-the-local-bootstrap-server));
 castctl defaults it to the synthesised `local` server for
-outbounds/endpoints with hostname servers.
+outbounds with hostname servers. Endpoints and DNS servers
+themselves receive no default: an endpoint server hostname
+resolves as before, and a DNS server hostname uses bootstrap
+substitution (above).
 
 Per-type fields:
 
@@ -767,11 +773,11 @@ match-all; verify against a live run before relying on it.
   domain name is bootstrapped through the system resolver so
   its address can be dialled through the detour (bootstrap
   substitution, via `outbound.BootstrapLookup`). (b) An
-  outbound/endpoint server addressed by domain name is
+  outbound server addressed by domain name is
   resolved through the synthesised `local` transport when no
   explicit `domain_resolver` is set (see [Outbound server
   addresses](#outbound-server-addresses-domain_resolver-and-the-local-bootstrap-server)).
-  Neither is ever used for dial targets. IP-literal servers
+  Endpoints receive no such default. Neither is ever used for dial targets. IP-literal servers
   need no bootstrap. `local`, `hosts`, and `fakeip` servers
   are unaffected by bootstrap substitution.
 - **WireGuard key-sharing check includes dns detours.**
@@ -911,7 +917,7 @@ below; the two statements do not contradict each other.
 
 ### Outbound server addresses: `domain_resolver` and the `local` bootstrap server
 
-An outbound or endpoint whose `server` address is a hostname
+An outbound whose `server` address is a hostname
 must resolve that hostname before it can dial. In sing-box
 1.14.4 the field that chooses the resolver is
 `domain_resolver`, a Dial Field present on every outbound and
@@ -928,17 +934,26 @@ and the `local` server doc
 setting `server` in the object form. The object form fields
 are: `server` (required: the DNS server tag), `timeout`,
 `strategy`, `disable_cache`, `disable_optimistic_cache`,
-`rewrite_ttl`, `client_subnet`. An explicit value — string or
-object — is honoured exactly as sing-box parses it, never
-overwritten. An empty value (empty string, or an empty
-object) is treated as unset.
+`rewrite_ttl`, `client_subnet`. A non-empty explicit value —
+string or object — is honoured exactly as sing-box parses
+it, never overwritten. An empty value (empty string, or an
+empty object) is treated as wholly unset, including any
+other fields the object carries (e.g. a `strategy` on an
+object with an empty `server` is dropped with the default).
+Unknown fields inside a `domain_resolver` object are
+accepted by sing-box parsing and dropped, so a missing or
+typo'd `server` key behaves as unset. Any sing-box transport
+tag may be named as an explicit `domain_resolver` (user
+responsibility), including `hosts`/`fakeip` servers.
 
 **The default rule (a deliberate castctl choice, NOT a
 sing-box default).** When `domain_resolver` is unset and an
-outbound/endpoint server address is a hostname, castctl
+outbound server address is a hostname, castctl
 resolves it through the synthesised `local` server. When the
 server is an IP literal, or the outbound is `direct`, nothing
 is set and behaviour is exactly as before. An explicit
+`domain_resolver` on an IP-literal server is inert: sing-box
+never consults it, since there is no domain to resolve. An explicit
 `domain_resolver` always wins.
 
 Why the default exists: sing-box resolves an unset
@@ -951,17 +966,25 @@ explicit resolver therefore failed outright. The `local`
 server breaks the loop by resolving the server address
 through the system resolver instead.
 
-**Scope limit.** The default applies ONLY to outbound/endpoint
+**Scope limit.** The default applies ONLY to outbound
 server addresses, per hop (each hop with a domain server
-address resolves via its own `domain_resolver`). Target
+address resolves via its own `domain_resolver`). A middle
+hop's hostname is resolved locally via `local` rather than
+forwarded verbatim to its detour, so a split-horizon name
+resolvable only via the detour now fails closed instead of
+succeeding. Target
 lookups always use the profile's configured resolver
 (rules/`final`); never through `local` unless the user
-explicitly routes them there (a rule or `final` naming the
-`local` tag, or an explicit `domain_resolver` on the
+explicitly routes them there by defining a clean `local`
+server and naming it (a rule or `final` naming the `local`
+tag, or an explicit `domain_resolver` on the
 requesting outbound). No change is made to DNS-server
 hostnames (the bootstrap substitution path stays as
-documented above), and no default is applied to
-WireGuard endpoints: an explicit `domain_resolver` authored
+documented above), and endpoints receive no castctl
+default: no default is applied to
+WireGuard endpoints — a WireGuard peer hostname resolves as
+before through the endpoint dialer's resolver options — and
+an explicit `domain_resolver` authored
 on an endpoint is honoured by sing-box as today.
 
 **The synthesised `local` server.** The runtime appends one
@@ -970,9 +993,14 @@ only, never written to any config file:
 `{"type": "local", "tag": "local"}`, with no detour,
 `prefer_go=false` (the sing-box default), and no
 `neighbor_domain`. It has no `server` field: it queries the
-system resolver. It is never `final`, never rule-targeted,
-never the default transport, and never reused for target
-lookups. If a user-defined server tagged `"local"` already
+system resolver. Synthesis itself never makes it `final`,
+never adds a rule targeting it, never installs it as the
+default transport, and never routes target lookups through
+it. Explicit routing to a clean user-defined `local` server
+is honoured; routing to the synthesised server is refused:
+a `final` or rule naming `"local"` with no user-defined
+clean `local` server, and a dns block with no servers at
+all, both fail closed at construction (exit 2). If a user-defined server tagged `"local"` already
 exists and is type `local` with no detour, it is reused
 as-is. If the tag `"local"` exists with a different type or
 with a detour, runtime construction fails closed (exit 2)
@@ -981,11 +1009,11 @@ detour in a profile `dns` block is refused earlier, at parse
 time, by the rule that every profile-block server needs a
 detour — so the reuse case is reachable from the top-level
 section and from hand-built configs; to use your own
-bootstrap server, rename its tag and author
+bootstrap server in the top-level `dns` section, rename its tag and author
 `domain_resolver` explicitly.
 
-**Failure mode: fail closed, no fallback.** A missing or
-dangling `domain_resolver` fails at startup with an error
+**Failure mode: fail closed, no fallback.** A `domain_resolver`
+naming a missing tag fails at startup with an error
 naming the tag. If the system resolver cannot resolve the
 server hostname, dialing fails as a construction/dial error.
 There is never a fallback to direct dialing or to the
@@ -994,7 +1022,11 @@ profile DNS for a server address.
 **Leak, stated plainly.** Proxy and outbound server hostnames
 resolve via the system resolver by default; the system
 resolver (and, on systemd-resolved hosts, the D-Bus resolver
-service) sees those hostnames. That is the price of the fix:
+service) sees those hostnames. Sing-box also logs successful
+router lookups at Info level, including `domain_resolver`
+lookups for proxy hostnames, when logging is on, so proxy
+hostnames and resolved addresses can appear in log output.
+That is the price of the fix:
 without it, hostname outbounds cannot dial at all. Target
 hostnames are unaffected — they still resolve only through
 the profile's configured resolver and outbound. SNI and TLS

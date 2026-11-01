@@ -17,7 +17,7 @@
 // construction through an injected BootstrapFunc (default:
 // outbound.BootstrapLookup) and substituted into the server
 // options; bootstrap is never used for any other hostname;
-// (b) outbound/endpoint server hostnames, resolved through the
+// (b) outbound server hostnames, resolved through the
 // synthesised "local" DNS transport when the outbound carries
 // no explicit domain_resolver (see profile.ResolveProfileDNS
 // and profile.ApplyDomainResolverDefault; documented in
