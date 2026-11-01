@@ -1,7 +1,0 @@
-id=castctl
-name=castctl
-version=v0.7.0
-versionCode=70000
-author=castctl contributors
-description=castctl on Android via KernelSU (standalone, bundled glibc; config under /data/local/castctl)
-updateJson=
