@@ -9,6 +9,7 @@ package pluginhost
 import (
 	"context"
 	"fmt"
+	"math"
 	"path/filepath"
 	"sync"
 	"syscall"
@@ -282,6 +283,15 @@ func (c *windowsClient) Call(ctx context.Context, method string, request []byte)
 	)
 	var out []byte
 	if resp.ptr != 0 && resp.len > 0 {
+		// Bound the plugin-reported length before
+		// copying, as on unix: an oversize length is an
+		// error, never a truncated or over-read copy.
+		if resp.len > math.MaxInt32 {
+			if freeFn != 0 {
+				_, _, _ = syscall.Syscall(freeFn, 2, resp.ptr, resp.len, 0)
+			}
+			return nil, fmt.Errorf("plugin call %s returned an oversize response", method)
+		}
 		out = make([]byte, resp.len)
 		copy(out, unsafe.Slice((*byte)(unsafe.Pointer(resp.ptr)), resp.len))
 	}
