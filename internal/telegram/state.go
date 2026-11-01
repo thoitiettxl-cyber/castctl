@@ -111,6 +111,30 @@ type StateStore struct {
 	st   telegramStateFile
 }
 
+// isJSONIntegerLiteral reports whether b is a JSON integer
+// literal: an optional minus followed by ASCII digits. It
+// rejects floats (2.0), exponents (2e0), strings, booleans,
+// and null, so a mistyped version field can never pass the
+// shape check in LoadStateStore.
+func isJSONIntegerLiteral(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	i := 0
+	if b[0] == '-' {
+		i = 1
+	}
+	if i == len(b) {
+		return false
+	}
+	for ; i < len(b); i++ {
+		if b[i] < '0' || b[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // LoadStateStore reads the state file in profileDir. A missing or
 // empty file yields a fresh store with corrupt=false. A present
 // file with corrupt JSON yields a fresh store with corrupt=true.
@@ -129,6 +153,25 @@ func LoadStateStore(profileDir string) (*StateStore, bool, error) {
 	}
 	if len(data) == 0 {
 		return newStateStore(path), false, nil
+	}
+	// Two-phase parse: the version field's SHAPE is checked
+	// before the body is decoded. A single unmarshal into
+	// telegramStateFile would turn a string ("2") or float
+	// (2.0) version into a JSON type error, reported as
+	// corrupt — and the corrupt path loads fresh, silently
+	// discarding the state the unknown-version refusal
+	// exists to protect. Any present version that is not a
+	// JSON integer literal refuses, like an unknown numeric
+	// version; the file is left unmutated. A missing version
+	// decodes as 0 below and refuses as before.
+	var probe struct {
+		Version json.RawMessage `json:"version"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return newStateStore(path), true, nil
+	}
+	if len(probe.Version) > 0 && !isJSONIntegerLiteral(probe.Version) {
+		return nil, false, fmt.Errorf("telegram: state file version has non-integer shape %s; refusing to start rather than discard state", string(probe.Version))
 	}
 	var st telegramStateFile
 	if err := json.Unmarshal(data, &st); err != nil {

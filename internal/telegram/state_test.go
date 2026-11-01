@@ -148,6 +148,35 @@ func TestStateStoreCorruptAndVersion(t *testing.T) {
 		t.Error("failed unknown-version load mutated the state file; want it untouched")
 	}
 
+	// A mistyped version refuses too, instead of falling
+	// through to the corrupt path (which would load fresh
+	// and discard the state): a string "2" or a float 2.0
+	// is a shape error, not corruption, and the file must
+	// survive the refusal byte-for-byte.
+	for _, shaped := range []string{
+		`{"version":"2","offset":9,"chats":{"500":{"title":"main"}}}`,
+		`{"version":2.0,"offset":9,"chats":{"500":{"title":"main"}}}`,
+		`{"version":2e0,"offset":9,"chats":{"500":{"title":"main"}}}`,
+		`{"version":true,"offset":9,"chats":{"500":{"title":"main"}}}`,
+	} {
+		shapedBytes := []byte(shaped)
+		if err := os.WriteFile(path, shapedBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := LoadStateStore(dir); err == nil {
+			t.Errorf("mistyped version %s must refuse to start", shaped)
+		} else if !strings.Contains(err.Error(), "non-integer shape") {
+			t.Errorf("mistyped-version error = %v; want the shape refusal", err)
+		}
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(after, shapedBytes) {
+			t.Errorf("failed mistyped-version load mutated the state file for %s; want it untouched", shaped)
+		}
+	}
+
 	// An empty file loads fresh without a corrupt report: a
 	// zero-length state file carries no claim at all.
 	if err := os.WriteFile(path, []byte{}, 0o600); err != nil {
