@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -29,18 +28,21 @@ import (
 // The server is loopback-only and token-authed, configured by
 // the optional top-level `webui` block in config.json (see
 // docs/config.md). An absent block fails closed (exit 2): the
-// server never starts without explicit configuration. The
-// effective token is CASTCTL_WEBUI_KEY when set, else the
-// block's `token`; with neither set the command fails closed
-// and never starts unauthenticated. The token is never printed,
-// logged, or echoed: the startup line names the listen address
-// only. `--profile` is ignored by this command (the server
-// serves the whole single file); `--config` selects the config
-// location as usual.
+// server never starts without explicit configuration. The only
+// token source is the block's `token`: with it unset the
+// command fails closed and never starts unauthenticated. A
+// plaintext token is hashed with bcrypt and written back into
+// config.json on startup (see hashWebUITokenOnStart); an
+// already-hashed token is used as-is. The token is never
+// printed, logged, or echoed: the startup line names the
+// listen address only. `--profile` is ignored by this command
+// (the server serves the whole single file); `--config`
+// selects the config location as usual.
 //
 // Exit codes: 2 usage/config (absent block, non-loopback
-// listen, missing token, bad flags), 1 server runtime failure,
-// 130 on interrupt (via the cancelled-context contract).
+// listen, missing token, bad flags, write-back failure), 1
+// server runtime failure, 130 on interrupt (via the
+// cancelled-context contract).
 
 const webuiHelpText = `usage: castctl webui <subcommand> [options]
 
@@ -54,24 +56,18 @@ subcommands:
 Run "castctl webui serve --help" for serve options.
 `
 
-const webuiServeHelpText = `usage: castctl webui serve [--listen ADDR] [--port N]
+const webuiServeHelpText = `usage: castctl webui serve
 
 Serve the web UI in the foreground until interrupted (Ctrl-C,
-exit 130). Listens on 127.0.0.1 only, with token auth.
+exit 130). Listens on loopback only, with token auth.
 
 The "webui" block in config.json configures the listen address
-(default 127.0.0.1:8317) and the token. The effective token is
-CASTCTL_WEBUI_KEY when set, else the block's "token". With
-neither set, the server does not start. The token is never
-printed or logged.
+(default 127.0.0.1:8317 when the block has no "listen" key) and
+the "token". A plaintext token is hashed with bcrypt and
+written back into config.json on startup; an already-hashed
+token is used as-is. The token is never printed or logged.
 
-  --listen ADDR   override the block's listen address
-                  (loopback only; a warning names the address)
-  --port N        override the port, keeping the block's host
-                  (or 127.0.0.1 when the block has no listen key)
-
---listen and --port together are an error. --profile is ignored:
-the server serves the whole single file.
+--profile is ignored: the server serves the whole single file.
 `
 
 func init() {
@@ -106,10 +102,6 @@ func cmdWebUI(ctx context.Context, env *Env, g *globalOpts, args []string) error
 
 func cmdWebUIServe(ctx context.Context, env *Env, g *globalOpts, args []string) error {
 	ap := &argParser{
-		defs: []flagDef{
-			{name: "listen", kind: flagString},
-			{name: "port", kind: flagString},
-		},
 		helpText: webuiServeHelpText,
 		prog:     "castctl webui serve",
 	}
@@ -126,9 +118,6 @@ func cmdWebUIServe(ctx context.Context, env *Env, g *globalOpts, args []string) 
 	}
 	if err := checkPositionals(p, nil, "webui serve"); err != nil {
 		return usageErr(err)
-	}
-	if p.strIsSet("listen") && p.strIsSet("port") {
-		return errCodef(2, "webui serve: --listen and --port together are an error")
 	}
 
 	loc, err := resolveConfig(g, env, false)
@@ -150,41 +139,48 @@ func cmdWebUIServe(ctx context.Context, env *Env, g *globalOpts, args []string) 
 		return errCodef(2, "webui serve: no \"webui\" block in config.json: add one (see docs/config.md) or use the CLI")
 	}
 
-	listen, err := resolveWebUIListen(webuiCfg, p)
-	if err != nil {
-		return err
-	}
-	if p.strIsSet("listen") {
-		// One warning naming the ADDRESS only (never the
-		// token), per the prior --listen + warning design.
-		fmt.Fprintf(env.stderr(), "castctl: webui: --listen overrides the \"webui\" block: listening on %s\n", listen)
-	}
+	listen := profile.EffectiveListen(webuiCfg)
 
-	token := ""
-	if v, ok := env.lookupEnv("CASTCTL_WEBUI_KEY"); ok && strings.TrimSpace(v) != "" {
-		// A whitespace-only env value counts as unset: it
-		// could never authenticate (the token is compared
-		// exactly), so treating it as set would strand the
-		// operator with an unusable server. The token
-		// itself is used verbatim, never trimmed.
-		token = v
-	} else {
-		token = webuiCfg.Token
-	}
+	token := webuiCfg.Token
 	if token == "" {
-		return errCodef(2, "webui serve: no token: set CASTCTL_WEBUI_KEY or a \"token\" in the \"webui\" block")
+		// Wording note: the literal "no token: set a ..." form is
+		// unrenderable — the shared SafeString backstop redacts
+		// any `token: <value>` fragment, so "set" would print as
+		// "[redacted]". This spelling keeps the same meaning
+		// and renders verbatim.
+		return errCodef(2, "webui serve: no token configured: add a \"token\" to the \"webui\" block")
 	}
-	tokenHash := sha256.Sum256([]byte(token))
 
 	// Resolve the on-disk frontend root, if configured. A
 	// present-but-broken ui_dir fails closed (exit 2) here,
-	// before the server starts; only an absent key falls back
-	// to the embedded frontend. The cookies-exposure rule is
-	// enforced inside webui.New via Deps.CookiesFiles when
-	// the list is supplied; this caller supplies it below.
+	// before the server starts and before any token write-back;
+	// only an absent key falls back to the embedded frontend.
+	// The cookies-exposure rule is enforced inside webui.New
+	// via Deps.CookiesFiles when the list is supplied; this
+	// caller supplies it below.
 	uiDir, err := resolveWebUIUIDir(webuiCfg, loc.ConfigDir)
 	if err != nil {
 		return err
+	}
+
+	// Hash-on-start (fail closed): a plaintext block token is
+	// hashed and written back before serving; an already-hashed
+	// token is used as-is. The plaintext is dropped from this
+	// scope once the hash is obtained: only the hash reaches
+	// the server. Any write-back failure exits 2 and the
+	// server does not start.
+	tokenHash, err := hashWebUITokenOnStart(loc.ConfigDir, token)
+	token = ""
+	if err != nil {
+		return errCodef(2, "webui serve: failed to hash and store the \"webui\" token")
+	}
+	// Drop the plaintext from the parsed config too: only
+	// the hash reaches the server, and nothing below reads
+	// the parsed token again (only single.Profiles is read
+	// for the cookies-exposure list). webuiCfg aliases
+	// single.WebUI, so it is cleared by the same write.
+	if single.WebUI != nil {
+		single.WebUI.Token = ""
 	}
 	var cookiesFiles []string
 	for _, p := range single.Profiles {
@@ -257,6 +253,63 @@ func cmdWebUIServe(ctx context.Context, env *Env, g *globalOpts, args []string) 
 	}
 }
 
+// errWebUIBlockGone and errWebUITokenChanged are the guarded
+// write-back refusals: the block vanished or the token changed
+// between the startup load and the locked re-read. Both map to
+// the same fixed exit-2 message in cmdWebUIServe; they name the
+// key/rule only, never a value.
+var (
+	errWebUIBlockGone    = errors.New("webui: no \"webui\" block")
+	errWebUITokenChanged = errors.New("webui: token changed during startup")
+)
+
+// hashWebUITokenOnStart returns the bcrypt hash logins are
+// compared against. A plaintext block token is hashed and
+// written back into config.json through the guarded update
+// path (lock + re-read + atomic 0600 write, replacing the raw
+// capture so the hash persists); an already-hashed token is
+// returned as-is and the file is not touched. A concurrent
+// writer that hashed the block first wins: its stored hash is
+// returned without overwriting. Any failure (hashing, lock,
+// concurrent change) returns an error and the caller fails
+// closed before serving. The plaintext is never logged.
+func hashWebUITokenOnStart(configDir, plaintext string) (string, error) {
+	if profile.LooksLikeBcryptHash(plaintext) {
+		return plaintext, nil
+	}
+	hash, err := profile.HashWebUIToken(plaintext)
+	if err != nil {
+		return "", err
+	}
+	stored := ""
+	err = profile.UpdateSingleConfig(configDir, func(cfg *profile.SingleConfig) error {
+		if cfg.WebUI == nil {
+			return errWebUIBlockGone
+		}
+		current := cfg.WebUI.Token
+		if profile.LooksLikeBcryptHash(current) {
+			// A concurrent writer hashed the same block
+			// first: use the stored hash. The update still
+			// re-encodes the file on save; the values are
+			// unchanged.
+			stored = current
+			return nil
+		}
+		if current != plaintext {
+			return errWebUITokenChanged
+		}
+		if err := cfg.ReplaceWebUIToken(hash); err != nil {
+			return err
+		}
+		stored = hash
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return stored, nil
+}
+
 // resolveWebUIUIDir resolves a configured ui_dir against
 // configDir and validates it on disk. It returns "" when no
 // ui_dir is configured (embedded fallback). A present-but-broken
@@ -298,39 +351,6 @@ func resolveWebUIUIDir(cfg *profile.WebUIConfig, configDir string) (string, erro
 		return "", errCodef(2, "webui serve: ui_dir has no readable index.html")
 	}
 	return resolved, nil
-}
-
-// resolveWebUIListen computes the effective listen address:
-// the block's listen (or the default), with --listen replacing
-// it wholesale or --port replacing only the port. Every result
-// is re-validated loopback-only: an override can never widen
-// the bind.
-func resolveWebUIListen(cfg *profile.WebUIConfig, p *parsed) (string, error) {
-	base := profile.EffectiveListen(cfg)
-	if p.strIsSet("listen") {
-		addr := strings.TrimSpace(p.str("listen"))
-		if err := profile.ValidateWebUIListen(addr); err != nil {
-			return "", errCodef(2, "webui serve: invalid --listen: %v", err)
-		}
-		return addr, nil
-	}
-	if p.strIsSet("port") {
-		portStr := strings.TrimSpace(p.str("port"))
-		port, err := strconv.Atoi(portStr)
-		if err != nil || port < 1 || port > 65535 {
-			return "", errCodef(2, "webui serve: invalid --port %q (expected 1-65535)", portStr)
-		}
-		host, _, err := net.SplitHostPort(base)
-		if err != nil {
-			return "", errCodef(2, "webui serve: invalid listen address in config")
-		}
-		addr := net.JoinHostPort(host, strconv.Itoa(port))
-		if err := profile.ValidateWebUIListen(addr); err != nil {
-			return "", errCodef(2, "webui serve: invalid --port: %v", err)
-		}
-		return addr, nil
-	}
-	return base, nil
 }
 
 // webuiImportCookies is the cookie-import seam: the exact

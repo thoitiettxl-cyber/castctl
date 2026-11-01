@@ -12,6 +12,7 @@ require (
 	github.com/sagernet/sing-box v1.14.4
 	github.com/sagernet/sing-tun v0.9.7-0.20261023115432-040db71fcd33
 	go.uber.org/goleak v1.3.0
+	golang.org/x/crypto v0.57.0
 	google.golang.org/protobuf v1.36.11
 )
 
@@ -170,7 +171,6 @@ require (
 	go.uber.org/zap/exp v0.3.0 // indirect
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
-	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/net v0.60.0 // indirect

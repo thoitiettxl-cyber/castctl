@@ -413,7 +413,9 @@ Never put tokens or cookies in chat, logs, or screenshots.
 To keep a long-running castctl process up without a service manager,
 run it in a simple restart loop in the container shell. The example
 below serves the web UI, which requires a `webui` block in
-`config.json` (with a token, or `CASTCTL_WEBUI_KEY` set); without one, `webui serve` exits 2,
+`config.json` with a `token` (the block token is the only token
+source; a plaintext token is hashed with bcrypt and written back
+on startup); without one, `webui serve` exits 2,
 so configure the block first. The loop restarts on any exit, including exit 2 and interrupt, so stop the loop itself deliberately when you want it to stop:
 
 ```sh

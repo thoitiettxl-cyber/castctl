@@ -11,7 +11,7 @@ embedded in the binary; see "Web UI" below.
 Core + plugins: see "Core + plugins" below. The earlier layout
 (`internal/source/muse`, `internal/publish/<platform>`) is superseded;
 it is not the layout. Binary: `castctl`. Env vars: `CASTCTL_CONFIG`,
-`CASTCTL_PROFILE`, `CASTCTL_WEBUI_KEY`.
+`CASTCTL_PROFILE`.
 
 Migration done: the `go/` tree moved to the castctl
 root keeping only `go/` history, the Go module became

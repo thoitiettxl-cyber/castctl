@@ -44,8 +44,8 @@ are rejected — see [Per-profile DNS](#per-profile-dns)):
 | `subscription_action_id` | string |
 | `fingerprint` | string (browser fingerprint preset name) |
 | `tls_engine` | string (`utls`, `cronet`, …; storage-only in the current build) |
-| `outbound` | string tag (shared outbound/endpoint), an inline outbound object, or absent (= direct); an outbound (not an endpoint) whose server address is a hostname resolves it through the synthesised `local` server unless `domain_resolver` is set (see [Outbound server addresses](#outbound-server-addresses-domain_resolver-and-the-local-bootstrap-server)) |
 | `dns` | object: the profile's own DNS section, parsed exactly like the top-level section (see [Per-profile DNS](#per-profile-dns)) |
+| `outbound` | string tag (shared outbound/endpoint), an inline outbound object, or absent (= direct); an outbound (not an endpoint) whose server address is a hostname resolves it through the synthesised `local` server unless `domain_resolver` is set (see [Outbound server addresses](#outbound-server-addresses-domain_resolver-and-the-local-bootstrap-server)) |
 
 Strictness: the file is parsed strictly — unknown fields anywhere
 in the config are rejected, including inside `dns` servers and
@@ -641,31 +641,61 @@ Anything else — `0.0.0.0`, `::`, a non-loopback address or
 hostname, a URL, userinfo, a path, a query, or a fragment — is a
 config error (exit 2) whose message never echoes the value.
 Present-but-empty `listen`/`token` is a config error. The
-`--listen`/`--port` flags of `webui serve` override within a
-present block only, and are re-validated loopback-only; both
-flags together are an error.
+block's `listen` key is the only listen source: there are no
+`--listen`/`--port` flags and no environment override for
+`webui serve` (both were removed; see the breaking-change
+note in the PR that introduced this section's current shape).
 
-The effective token is `CASTCTL_WEBUI_KEY` when set (non-empty,
-exact value, no trimming), else the block's `token`. A
-whitespace-only `CASTCTL_WEBUI_KEY` counts as unset (it could
-never authenticate, since the token is compared exactly). With
-neither set, `webui serve` fails closed (exit 2) and never
-starts unauthenticated. The token is never printed, logged, or
-returned: the startup line names the listen address only, and
-the API answers every route (including `/status`) only with a
-valid Bearer token. The static frontend shell is served without
-auth (it carries no secrets); the single-use screencast session
-token travels in the WebSocket URL query, never the Bearer
-token. See `castctl webui serve --help` and
-[Security](security.md).
+The block's `token` is the only token source. When it is
+unset, `webui serve` fails closed (exit 2) and never starts
+unauthenticated. A plaintext token is hashed with bcrypt and
+written back into the 0600 file on `webui serve` startup,
+before serving; an already-hashed token is used as-is and
+the file is not rewritten. The same hashing runs on any API
+save that persists a plaintext token (hash-on-save), so a
+plaintext token set through the web UI never rests on disk.
+A token rotated through the web UI takes effect on the
+running server immediately, with no restart: every
+successful API save refreshes the live comparator from the
+saved document, except a save to a document that never carried a token,
+which leaves the startup comparator untouched (a failed save changes nothing, and a
+sentinel keep-on-save re-adopts the unchanged stored hash).
+A save that removes the token — deleting the `token` key or
+the whole `webui` block — clears the live comparator
+immediately: every authenticated request then gets 401
+until a token is restored by editing the file and
+restarting, since a token-less running server accepts no
+Bearer token with which to save a new one through the API.
+A token removed by editing the file directly takes effect on restart,
+and a later API save of the token-less document does not clear the live comparator.
+A plaintext token starting with `$2a$`, `$2b$`, or `$2y$`
+is treated as an already-hashed value and can never
+authenticate: choose a token without such a prefix. A
+write-back failure fails the start/save closed (exit 2 /
+400) and the token is never printed, logged, or returned:
+the startup line names the listen address only, and the API
+answers every route (including `/status`) only with a valid
+Bearer token compared against the stored hash. The static
+frontend shell is served without auth (it carries no
+secrets); the single-use screencast session token travels
+in the WebSocket URL query, never the Bearer token. See
+`castctl webui serve --help` and [Security](security.md).
+The bcrypt behavior follows CLIProxyAPI's remote-management
+secret handling, not sing-box's (see
+[Provenance](provenance.md) §2).
 
-The block is stored verbatim in the 0600 file like any other
-block (raw preservation on save); write-only is an API-layer
-property: GET endpoints return redacted views, and the token can
-only be set or replaced, never read back. Note the first-save
-reorder caveat that applies to every web UI save: the first
-web UI save may reorder keys within sections; semantics are
-preserved.
+The block is stored in the 0600 file like any other block
+(raw preservation on save: the stored key order inside the
+block is kept, and a hashed token replaces the plaintext in
+place); write-only is an API-layer property: GET endpoints
+return redacted views, and the token can only be set or
+replaced, never read back. Saved files use a fixed top-level
+key order (`default_profile`, `profiles`, `outbounds`,
+`endpoints`, `dns`, `wireguard_dns`, `log`, `telegram`,
+`keeper`, `webui`), synthesized blocks render in canonical
+within-block order, raw blocks keep their stored key order,
+and the file ends with exactly one trailing newline. A web
+UI save does not reorder keys.
 Remote access is loopback-only by design: reach the server from
 another device through an SSH tunnel forwarding the loopback
 port, never by binding a non-loopback address.
@@ -679,12 +709,21 @@ change outside the scope of that decision. Their semantics
 follow sing-box's Clash API
 ([Clash API](https://sing-box.sagernet.org/configuration/experimental/clash-api/)):
 
+- `listen` ≈ `clash_api.external_controller` semantics (the
+  address the API serves on), but loopback-only and with a
+  runtime default: sing-box defines no default port (an
+  empty `external_controller` disables the API, and `9090`
+  appears only in documentation examples); castctl applies
+  `127.0.0.1:8317` at runtime when the block has no `listen`
+  key, and never writes the default into the file.
 - `ui_dir` = `clash_api.external_ui` semantics: a relative
   path to the configuration directory or an absolute path
   to a directory of static web resources.
 - `token` = `clash_api.secret` semantics (Bearer
   authentication), but REQUIRED in castctl — deliberately
-  stricter than sing-box's optional secret.
+  stricter than sing-box's optional secret — and stored as
+  a bcrypt hash, following CLIProxyAPI, not sing-box
+  (sing-box compares its secret as plaintext).
 - No auto-download: there is no equivalent of
   `external_ui_download_url`; the embedded UI ships in the
   binary, and an on-disk UI is replaced only by explicit

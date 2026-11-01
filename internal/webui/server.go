@@ -13,8 +13,10 @@
 //     There is no non-loopback listen in this build.
 //   - Token auth: every /api/v1 route and every screencast endpoint
 //     requires a Bearer token. The token itself is never logged,
-//     returned, or echoed; comparison is SHA-256 + constant-time
-//     compare. The static frontend shell is served WITHOUT auth:
+//     returned, or echoed; comparison is bcrypt
+//     CompareHashAndPassword against the stored hash (the config
+//     file's `webui.token`, hashed on serve start / on save).
+//     The static frontend shell is served WITHOUT auth:
 //     it contains no secrets, and the login page needs the shell
 //     to enter the token.
 //   - Secrets write-only: GET endpoints return redacted views
@@ -51,8 +53,6 @@ package webui
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -68,6 +68,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/keeper"
+	"github.com/thoitiettxl-cyber/castctl/internal/profile"
 )
 
 // ScreencastStarter runs one screencast login session for a
@@ -85,9 +86,14 @@ type ScreencastStarter func(ctx context.Context, profileName, sessionID string, 
 type ScreencastAvailability func(ctx context.Context, profileName string) (available bool, reason string, err error)
 
 // Deps wires one Server. ConfigDir is the directory holding
-// config.json. TokenHash is the SHA-256 of the effective token;
-// HasToken must be true (the command layer fails closed when no
-// token source is configured). DistFS serves the frontend shell;
+// config.json. TokenHash is the stored bcrypt hash of the
+// `webui` block token at startup (the command layer hashes a
+// plaintext token on serve start and fails closed when no token
+// is configured); HasToken must be true. The live comparator
+// starts at TokenHash and is refreshed by refreshTokenHash
+// after every successful guarded save that persists a token,
+// so a rotation through the API takes effect without restart.
+// DistFS serves the frontend shell;
 // BundleSHA256 is the SHA-256 of the embedded dist/index.html.
 // UIDir, when set, is an on-disk frontend directory served
 // instead of DistFS (see uidir.go); BundleSHA256 is then the
@@ -97,7 +103,7 @@ type Deps struct {
 	ConfigDir    string
 	Version      string
 	ListenAddr   string
-	TokenHash    [sha256.Size]byte
+	TokenHash    string
 	HasToken     bool
 	DistFS       fs.FS
 	BundleSHA256 string
@@ -128,11 +134,17 @@ type Deps struct {
 }
 
 // Server is one web UI HTTP server: chi router + session
-// registry for screencast sessions.
+// registry for screencast sessions. tokenHash is the live
+// comparator for Bearer auth, guarded by tokenMu: it starts
+// at Deps.TokenHash and is replaced by refreshTokenHash
+// after a successful guarded save, so a save goroutine never
+// races a request goroutine on the hash.
 type Server struct {
-	deps     Deps
-	handler  http.Handler
-	sessions *sessionRegistry
+	deps      Deps
+	handler   http.Handler
+	sessions  *sessionRegistry
+	tokenMu   sync.RWMutex
+	tokenHash string
 }
 
 // New builds a Server. It fails closed when no token is
@@ -148,7 +160,7 @@ func New(deps Deps) (*Server, error) {
 	if deps.ConfigDir == "" {
 		return nil, errors.New("webui: config directory is required")
 	}
-	if !deps.HasToken {
+	if !deps.HasToken || deps.TokenHash == "" {
 		return nil, errors.New("webui: no token configured")
 	}
 	if deps.DistFS == nil {
@@ -162,7 +174,7 @@ func New(deps Deps) (*Server, error) {
 			return nil, err
 		}
 	}
-	s := &Server{deps: deps, sessions: newSessionRegistry()}
+	s := &Server{deps: deps, sessions: newSessionRegistry(), tokenHash: deps.TokenHash}
 	s.handler = s.routes()
 	return s, nil
 }
@@ -310,8 +322,44 @@ func (s *Server) authorized(r *http.Request) bool {
 	if presented == "" || strings.ContainsAny(presented, " \t\r\n") {
 		return false
 	}
-	sum := sha256.Sum256([]byte(presented))
-	return subtle.ConstantTimeCompare(sum[:], s.deps.TokenHash[:]) == 1
+	// The stored hash is compared with bcrypt only: no plaintext
+	// fallback, and any comparison error (malformed hash, empty
+	// hash) rejects with the same generic 401 as a wrong token.
+	// The hash is the live comparator, refreshed on save (see
+	// refreshTokenHash), not the startup snapshot.
+	s.tokenMu.RLock()
+	hash := s.tokenHash
+	s.tokenMu.RUnlock()
+	return profile.CompareWebUIToken(hash, presented)
+}
+
+// refreshTokenHash refreshes the live comparator from the
+// persisted document after a successful guarded save, so a
+// token rotated through the API takes effect on the running
+// server immediately, with no restart. It runs only after
+// Save succeeds: a failed save leaves the live comparator
+// untouched. A sentinel keep-on-save re-adopts the unchanged
+// stored hash (a no-op). A save whose document carries no
+// webui token clears the comparator — but only when the
+// stored document carried one (hadToken): the token is gone,
+// so every authenticated request fails closed with 401 until
+// a token is restored out-of-band (file edit + restart,
+// since a token-less server accepts no Bearer token with
+// which to save a new one through the API). When the stored
+// document never carried a token, the comparator came from
+// the startup Deps, not the file, and the save leaves it
+// untouched.
+func (s *Server) refreshTokenHash(parsed *profile.SingleConfig, hadToken bool) {
+	var hash string
+	if parsed != nil && parsed.WebUI != nil {
+		hash = parsed.WebUI.Token
+	}
+	if hash == "" && !hadToken {
+		return
+	}
+	s.tokenMu.Lock()
+	s.tokenHash = hash
+	s.tokenMu.Unlock()
 }
 
 // apiHandlerTimeout is the context timeout applied to non-WS

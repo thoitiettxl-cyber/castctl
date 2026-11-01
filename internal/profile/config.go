@@ -1225,8 +1225,12 @@ func profileExists(baseDir, name string, single *SingleConfig) bool {
 }
 
 // buildSingleFileOrdered renders a SingleConfig as an ordered JSON
-// value with keys in the delta order: default_profile, profiles
-// (sorted), outbounds, endpoints, dns.
+// value with keys in the fixed top-level order: default_profile,
+// profiles (sorted), outbounds, endpoints, dns, wireguard_dns,
+// log, telegram, keeper, webui. Raw blocks keep their input key
+// order; synthesized blocks render in canonical within-block
+// order (see encodeWebUIBlock, encodeKeeperBlock, and the log /
+// telegram synthesis below).
 func buildSingleFileOrdered(cfg *SingleConfig) (*orderedObject, error) {
 	root := newOrderedObject()
 	if cfg.DefaultProfile != "" {

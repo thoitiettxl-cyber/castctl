@@ -5,7 +5,6 @@
 package webui
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -46,12 +45,11 @@ func writeUIDir(t *testing.T, files map[string]string) string {
 
 func newUIDirDeps(t *testing.T, configDir, uiDir string) Deps {
 	t.Helper()
-	sum := sha256.Sum256([]byte(testToken))
 	return Deps{
 		ConfigDir:    configDir,
 		Version:      "0.6.1-test",
 		ListenAddr:   "127.0.0.1:8317",
-		TokenHash:    sum,
+		TokenHash:    testTokenHash(t),
 		HasToken:     true,
 		DistFS:       fstest.MapFS{"index.html": {Data: []byte("<html>castctl shell</html>")}},
 		BundleSHA256: "test-bundle-hash",

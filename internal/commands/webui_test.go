@@ -16,14 +16,38 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const webuiTestConfig = `{"default_profile":"default","profiles":{"default":{}},"webui":{"listen":"127.0.0.1:8317","token":"BLOCK-TOKEN-UNUSED"}}`
+
+// webuiConfigWithListen returns configJSON with webui.listen set
+// to addr, preserving the other keys. The config must carry a
+// webui block: after the flag removal, the block's listen key is
+// the only way to choose a bind address in tests.
+func webuiConfigWithListen(t *testing.T, configJSON, addr string) string {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(configJSON), &doc); err != nil {
+		t.Fatal(err)
+	}
+	block, ok := doc["webui"].(map[string]any)
+	if !ok {
+		t.Fatalf("config has no webui block: %s", configJSON)
+	}
+	block["listen"] = addr
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
 
 func runWebUICmd(t *testing.T, configJSON string, envExtra map[string]string, args ...string) (int, string, string) {
 	t.Helper()
@@ -63,8 +87,12 @@ func TestWebUIServeHelp(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code = %d, want 0", code)
 	}
-	if !strings.Contains(out, "CASTCTL_WEBUI_KEY") {
-		t.Fatalf("help = %q, want token source documented", out)
+	// Block-only: no flag or env source is documented anymore.
+	if strings.Contains(out, "CASTCTL_WEBUI_KEY") || strings.Contains(out, "--listen") || strings.Contains(out, "--port") {
+		t.Fatalf("help = %q, must not mention removed flag/env sources", out)
+	}
+	if !strings.Contains(out, `"webui" block`) || !strings.Contains(out, `"token"`) {
+		t.Fatalf("help = %q, want block-only token source documented", out)
 	}
 }
 
@@ -84,43 +112,80 @@ func TestWebUIServeMissingTokenFailsClosed(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("code = %d, want 2", code)
 	}
-	if !strings.Contains(errb, "no token") {
-		t.Fatalf("stderr = %q, want no-token message", errb)
+	// Exact wording: block-only, no env alternative. (The
+	// D-N1 literal "no token: set a ..." is unrenderable: the
+	// SafeString backstop redacts `token: <value>` fragments,
+	// so this spelling is the verbatim-rendering equivalent.)
+	if !strings.Contains(errb, `webui serve: no token configured: add a "token" to the "webui" block`) {
+		t.Fatalf("stderr = %q, want the exact no-token message", errb)
+	}
+	if strings.Contains(errb, "CASTCTL_WEBUI_KEY") {
+		t.Fatalf("stderr = %q, must not name the removed env source", errb)
 	}
 }
 
 func TestWebUIServeNonLoopbackListenRejected(t *testing.T) {
-	code, _, errb := runWebUICmd(t, webuiTestConfig, nil, "webui", "serve", "--listen", "0.0.0.0:8317")
+	// Non-loopback refusal is parse-time now: the config listen
+	// key is the only listen source.
+	cfg := `{"default_profile":"default","profiles":{"default":{}},"webui":{"listen":"0.0.0.0:8317","token":"BLOCK-TOKEN-UNUSED"}}`
+	code, _, errb := runWebUICmd(t, cfg, nil, "webui", "serve")
 	if code != 2 {
 		t.Fatalf("code = %d, want 2", code)
 	}
 	if strings.Contains(errb, "0.0.0.0") {
 		t.Fatalf("stderr = %q, must not echo the rejected address", errb)
 	}
-}
-
-func TestWebUIServeListenAndPortTogetherRejected(t *testing.T) {
-	code, _, _ := runWebUICmd(t, webuiTestConfig, nil, "webui", "serve", "--listen", "127.0.0.1:8317", "--port", "9000")
-	if code != 2 {
-		t.Fatalf("code = %d, want 2", code)
+	if !strings.Contains(errb, "host must be loopback") {
+		t.Fatalf("stderr = %q, want the loopback rule named", errb)
 	}
 }
 
-func TestWebUIServeEnvTokenPrecedenceAndStartup(t *testing.T) {
-	// The env token wins over the block token; the server binds
+// TestWebUIServeRemovedFlagsRejected pins the removal: the old
+// --listen/--port flags are unknown arguments now and exit 2
+// via the shared parser, in both spellings.
+func TestWebUIServeRemovedFlagsRejected(t *testing.T) {
+	for _, args := range [][]string{
+		{"webui", "serve", "--listen", "127.0.0.1:9000"},
+		{"webui", "serve", "--port", "9000"},
+		{"webui", "serve", "--listen=127.0.0.1:9000"},
+		{"webui", "serve", "--port=9000"},
+	} {
+		t.Run(strings.Join(args[2:], " "), func(t *testing.T) {
+			code, _, errb := runWebUICmd(t, webuiTestConfig, nil, args...)
+			if code != 2 {
+				t.Fatalf("code = %d, want 2", code)
+			}
+			if !strings.Contains(errb, "unrecognized argument") {
+				t.Fatalf("stderr = %q, want the parser's unknown-flag message", errb)
+			}
+		})
+	}
+}
+
+func TestWebUIServeBlockTokenStartupAndWriteBack(t *testing.T) {
+	// The block token is the only token source; the server binds
 	// loopback, answers authed /status, rejects unauthenticated
 	// and wrong-token requests, and exits 130 on interrupt. The
 	// token value must appear nowhere in stderr or responses.
+	// An env token, if present, is ignored entirely. On startup
+	// the plaintext block token is hashed with bcrypt and
+	// written back into the config file (atomic, 0600); the
+	// file keeps the other keys and their order.
 	const envToken = "ENV-TOKEN-TEST-ONLY-1234"
-	_, configFile := testHome(t, webuiTestConfig)
+	home, configFile := testHome(t, webuiTestConfig)
 
-	// Pick an ephemeral loopback port to bind.
+	// Pick an ephemeral loopback port to bind, via the config
+	// listen key (the only listen source).
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
+	cfg := webuiConfigWithListen(t, webuiTestConfig, fmt.Sprintf("127.0.0.1:%d", port))
+	if err := os.WriteFile(configFile, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	out, errb := &bytes.Buffer{}, &bytes.Buffer{}
 	env := &Env{
@@ -134,15 +199,20 @@ func TestWebUIServeEnvTokenPrecedenceAndStartup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan int, 1)
 	go func() {
-		done <- Run(ctx, []string{"webui", "serve", "--port", fmt.Sprint(port)}, env)
+		done <- Run(ctx, []string{"webui", "serve"}, env)
 	}()
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	client := &http.Client{Timeout: 5 * time.Second}
-	deadline := time.Now().Add(10 * time.Second)
+	// Generous timeouts: one bcrypt DefaultCost compare takes
+	// ~4.2s under -race on this VM (measured 2026-11-01;
+	// ~0.3s without the race detector), and serve start pays
+	// one generate before listening. The 5s/10s windows the
+	// SHA-256 era used cannot survive that under load.
+	client := &http.Client{Timeout: 15 * time.Second}
+	deadline := time.Now().Add(45 * time.Second)
 	var statusOK bool
 	for time.Now().Before(deadline) {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/api/v1/status", nil)
-		req.Header.Set("Authorization", "Bearer "+envToken)
+		req.Header.Set("Authorization", "Bearer BLOCK-TOKEN-UNUSED")
 		resp, err := client.Do(req)
 		if err == nil {
 			body, _ := io.ReadAll(resp.Body)
@@ -173,8 +243,8 @@ func TestWebUIServeEnvTokenPrecedenceAndStartup(t *testing.T) {
 		<-done
 		t.Fatalf("server did not answer authed /status; stderr = %q", errb.String())
 	}
-	// Unauthenticated and wrong-token (block token) requests: 401.
-	for name, tok := range map[string]string{"none": "", "block": "BLOCK-TOKEN-UNUSED"} {
+	// Unauthenticated and wrong-token (env token) requests: 401.
+	for name, tok := range map[string]string{"none": "", "env": envToken} {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/api/v1/status", nil)
 		if tok != "" {
 			req.Header.Set("Authorization", "Bearer "+tok)
@@ -194,6 +264,35 @@ func TestWebUIServeEnvTokenPrecedenceAndStartup(t *testing.T) {
 	if !strings.Contains(errb.String(), addr) {
 		t.Fatalf("stderr = %q, want the listen address named", errb.String())
 	}
+	// Write-back: the stored token is now a bcrypt hash, the
+	// other keys are untouched, and the file kept mode 0600.
+	stored, err := os.ReadFile(filepath.Join(home, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(stored, &doc); err != nil {
+		t.Fatal(err)
+	}
+	block, ok := doc["webui"].(map[string]any)
+	if !ok {
+		t.Fatalf("stored config has no webui block: %s", stored)
+	}
+	storedToken, _ := block["token"].(string)
+	if !profile.LooksLikeBcryptHash(storedToken) {
+		t.Fatalf("stored token is not a bcrypt hash: %s", stored)
+	}
+	if storedToken == "BLOCK-TOKEN-UNUSED" || storedToken == envToken {
+		t.Fatalf("stored token is still plaintext: %s", stored)
+	}
+	if block["listen"] != addr {
+		t.Fatalf("stored listen = %v, want %q", block["listen"], addr)
+	}
+	if st, err := os.Stat(filepath.Join(home, "config.json")); err != nil {
+		t.Fatal(err)
+	} else if st.Mode().Perm() != 0o600 {
+		t.Errorf("config mode after write-back = %o, want 600", st.Mode().Perm())
+	}
 	cancel()
 	select {
 	case code := <-done:
@@ -205,17 +304,63 @@ func TestWebUIServeEnvTokenPrecedenceAndStartup(t *testing.T) {
 	}
 }
 
-func TestWebUIServeWhitespaceEnvTokenCountsAsUnset(t *testing.T) {
-	// A whitespace-only CASTCTL_WEBUI_KEY must count as unset:
-	// it can never authenticate (the token is compared exactly),
-	// so with no block token the serve must fail closed.
+// TestHashWebUITokenOnStartRefusesChangedToken pins the
+// concurrent-change refusal: when the stored token differs
+// from the plaintext the startup load saw, the guarded
+// write-back refuses (errWebUITokenChanged) and writes
+// nothing, instead of overwriting another writer's token.
+func TestHashWebUITokenOnStartRefusesChangedToken(t *testing.T) {
+	home, _ := testHome(t, `{"default_profile":"default","profiles":{"default":{}},"webui":{"token":"MARKER-STORED-TOKEN"}}`)
+	before, err := os.ReadFile(filepath.Join(home, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hashWebUITokenOnStart(home, "MARKER-STARTUP-TOKEN"); err == nil {
+		t.Fatal("hashWebUITokenOnStart with a changed stored token succeeded, want failure")
+	}
+	after, err := os.ReadFile(filepath.Join(home, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("refused write-back modified the file:\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
+// TestWebUIServeAlreadyHashedTokenNotRewritten pins the
+// already-hashed path: a stored bcrypt hash is used as-is and
+// the file is byte-identical after a serve start (no re-hash,
+// no rewrite).
+func TestWebUIServeAlreadyHashedTokenNotRewritten(t *testing.T) {
+	hashBytes, err := bcrypt.GenerateFromPassword([]byte("BLOCK-TOKEN-UNUSED"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := `{"default_profile":"default","profiles":{"default":{}},"webui":{"token":` + strconv.Quote(string(hashBytes)) + `}}`
+	home, addr, _, cancel, done := startWebUIServer(t, cfg, nil, "BLOCK-TOKEN-UNUSED")
+	defer stopWebUIServer(t, cancel, done)
+	stored, err := os.ReadFile(filepath.Join(home, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The helper wrote exactly the listen-injected config; any
+	// write-back would have re-encoded it canonically.
+	if want := webuiConfigWithListen(t, cfg, addr); string(stored) != want {
+		t.Fatalf("config changed after serve start with a hashed token:\nstored: %s\nwant:   %s", stored, want)
+	}
+}
+
+func TestWebUIServeEnvTokenIgnored(t *testing.T) {
+	// CASTCTL_WEBUI_KEY is no longer a token source: with no
+	// block token the serve fails closed even when the env var
+	// is set, and the env value never authenticates.
 	cfg := `{"default_profile":"default","profiles":{"default":{}},"webui":{}}`
-	code, _, errb := runWebUICmd(t, cfg, map[string]string{"CASTCTL_WEBUI_KEY": "   "}, "webui", "serve")
+	code, _, errb := runWebUICmd(t, cfg, map[string]string{"CASTCTL_WEBUI_KEY": "ENV-TOKEN-TEST-ONLY-1234"}, "webui", "serve")
 	if code != 2 {
 		t.Fatalf("code = %d, want 2", code)
 	}
-	if !strings.Contains(errb, "no token") {
-		t.Fatalf("stderr = %q, want no-token message", errb)
+	if !strings.Contains(errb, `webui serve: no token configured: add a "token" to the "webui" block`) {
+		t.Fatalf("stderr = %q, want the exact no-token message", errb)
 	}
 }
 
@@ -257,6 +402,12 @@ func startWebUIServer(t *testing.T, configJSON string, envExtra map[string]strin
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	// The listen key is the only bind source: inject the
+	// ephemeral address into the config copy before starting.
+	if err := os.WriteFile(configFile, []byte(webuiConfigWithListen(t, configJSON, addr)), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	envMap := map[string]string{"CASTCTL_CONFIG": configFile}
 	for k, v := range envExtra {
 		envMap[k] = v
@@ -266,11 +417,10 @@ func startWebUIServer(t *testing.T, configJSON string, envExtra map[string]strin
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan int, 1)
 	go func() {
-		done <- Run(ctx, []string{"webui", "serve", "--port", fmt.Sprint(port)}, env)
+		done <- Run(ctx, []string{"webui", "serve"}, env)
 	}()
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	client := &http.Client{Timeout: 5 * time.Second}
-	deadline := time.Now().Add(10 * time.Second)
+	client := &http.Client{Timeout: 15 * time.Second}
+	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/api/v1/status", nil)
 		req.Header.Set("Authorization", "Bearer "+statusToken)
@@ -311,7 +461,7 @@ func TestWebUIServeUIDirServesOnDiskUI(t *testing.T) {
 	})
 	_, addr, errb, cancel, done := startWebUIServer(t, webuiConfigWithUIDir(t, uiDir), nil, "BLOCK-TOKEN-TEST")
 	defer stopWebUIServer(t, cancel, done)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 15 * time.Second}
 	// The on-disk shell and assets, unauthenticated.
 	for path, want := range map[string]string{"/": shellMarker, "/app.js": "MARKER-UIDIR-JS"} {
 		resp, err := client.Get("http://" + addr + path)
@@ -479,25 +629,26 @@ func TestWebUIServeUIDirRelativeOutsideServes(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := webuiConfigWithUIDir(t, "../shared-ui")
-	if err := os.WriteFile(configFile, []byte(cfg), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	cfg = webuiConfigWithListen(t, cfg, addr)
+	if err := os.WriteFile(configFile, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	out, errb := &bytes.Buffer{}, &bytes.Buffer{}
 	env := &Env{Stdout: out, Stderr: errb, Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile})}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan int, 1)
 	go func() {
-		done <- Run(ctx, []string{"webui", "serve", "--port", fmt.Sprint(port)}, env)
+		done <- Run(ctx, []string{"webui", "serve"}, env)
 	}()
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	client := &http.Client{Timeout: 5 * time.Second}
-	deadline := time.Now().Add(10 * time.Second)
+	client := &http.Client{Timeout: 15 * time.Second}
+	deadline := time.Now().Add(45 * time.Second)
 	var got string
 	for time.Now().Before(deadline) {
 		resp, err := client.Get("http://" + addr + "/")
@@ -560,7 +711,7 @@ func TestWebUIServeUIDirEscalationViaAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 15 * time.Second}
 	// GET the redacted view, set ui_dir to the config dir, PUT.
 	req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/api/v1/config", nil)
 	req.Header.Set("Authorization", "Bearer BLOCK-TOKEN-TEST")
@@ -679,16 +830,35 @@ func TestResolveWebUIUIDirRelativeConfigDir(t *testing.T) {
 // signature of the relative --config false refusal.
 func serveRelativeConfig(t *testing.T, configValue string, port int, wantBody string) {
 	t.Helper()
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	// Inject the ephemeral listen address into the on-disk
+	// config (the only bind source): resolve configValue
+	// against the test's working directory, as CASTCTL_CONFIG
+	// resolution does.
+	configPath := configValue
+	if !filepath.IsAbs(configPath) {
+		wd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		configPath = filepath.Join(wd, configValue)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(webuiConfigWithListen(t, string(raw), addr)), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	out, errb := &bytes.Buffer{}, &bytes.Buffer{}
 	env := &Env{Stdout: out, Stderr: errb, Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configValue})}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan int, 1)
 	go func() {
-		done <- Run(ctx, []string{"webui", "serve", "--port", fmt.Sprint(port)}, env)
+		done <- Run(ctx, []string{"webui", "serve"}, env)
 	}()
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	client := &http.Client{Timeout: 5 * time.Second}
-	deadline := time.Now().Add(10 * time.Second)
+	client := &http.Client{Timeout: 15 * time.Second}
+	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
 		case code := <-done:

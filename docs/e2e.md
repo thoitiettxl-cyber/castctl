@@ -22,7 +22,7 @@ verdict per check and a counts-only secret scan at the end:
 | 8 | Telegram | `telegram status` offline JSON (`configured`, `token_valid`); bounded `telegram run` until SIGINT (exit 130). One chat turn, one approval allow, one approval deny, and `/autoapprove` persistence across a restart are manual, [NEEDS-MEASUREMENT]. See the token-source rule below. |
 | 9 | Update | Unstamped refusal (exit 2, fixed message) is the PASS-able check for a script-built binary. A stamped `--dry-run` is SKIP with reason when unstamped. A non-dry-run update is never run. |
 | 10 | Keeper | `keeper status` (state files only). `keeper check` can rewrite cookies, so it stays dry/SKIP on real profiles unless `--live-keeper` is given; exit 3 (entry stopped) is a distinct SKIP outcome, never a healthy PASS. `session-state.json` is checked at the per-profile path the keeper actually writes, `profiles/<name>/session-state.json`, mode 0600 when present. Real CDP re-export and single-flight refusal are [NEEDS-MEASUREMENT]. |
-| 11 | Web UI | Loopback bind verified via `ss` (supplementary evidence; castctl itself validates loopback); non-loopback `--listen` exits 2 naming the loopback rule, without echoing the address (the listen check runs before the token check when a `webui` block exists; without a block the block gate fires first and the probe SKIPs); no-token and wrong-token both 401, good token 200 with `data.remote_exposure: false` (all success bodies are read under the `data` envelope); `GET /config` carries `<redacted>` markers at secret positions; `GET /settings/telegram` masked exactly `***` only when `data.configured` is true (unconfigured → SKIP); `/logs` gate `reason` compared against the config (closed enum: `logging_disabled`, `log_output_not_file`, `log_output_refused`); the server process itself (not a wrapper subshell) is killed and the port is verified closed after the leg. External-connect refusal is [NEEDS-MEASUREMENT]. |
+| 11 | Web UI | Loopback bind verified via `ss` (supplementary evidence; castctl itself validates loopback); a non-loopback `listen` key in the config copy exits 2 naming the loopback rule, without echoing the address (the listen check is parse-time and runs before the token check when a `webui` block exists; without a block the block gate fires first and the probe SKIPs); no-token and wrong-token both 401, good token 200 with `data.remote_exposure: false` (all success bodies are read under the `data` envelope); the block token is hashed with bcrypt and written back on serve start (the stored value is a hash, never the plaintext); `GET /config` carries `<redacted>` markers at secret positions; `GET /settings/telegram` masked exactly `***` only when `data.configured` is true (unconfigured → SKIP); `/logs` gate `reason` compared against the config (closed enum: `logging_disabled`, `log_output_not_file`, `log_output_refused`); the server process itself (not a wrapper subshell) is killed and the port is verified closed after the leg. External-connect refusal is [NEEDS-MEASUREMENT]. |
 | 12 | Secret scan | Counts only over captured outputs (Scope A). See below. |
 
 ## Interface
@@ -49,9 +49,13 @@ scripts/e2e.sh --config PATH <profile>... [--live-send] [--live-keeper] [--binar
   `with_utls,with_quic,with_wireguard,with_gvisor,with_chromedp`.
   A build failure is FAIL, not SKIP.
 - `--help` / `-h` prints the usage text and exits 0.
-- Tokens come only from the environment: `CASTCTL_TELEGRAM_TOKEN`
-  and `CASTCTL_WEBUI_KEY`. They are never taken from argv and never
-  embedded in the script or this document.
+- The Telegram token comes only from the environment:
+  `CASTCTL_TELEGRAM_TOKEN`. It is never taken from argv and never
+  embedded in the script or this document. The web UI token is
+  generated inside the script and injected into the temp config
+  copy's `webui` block (never echoed, never written outside the
+  temp dir); there is no environment token source for the web
+  UI.
 - Exit code is non-zero if any check FAILs. SKIP alone does not fail
   the run; the summary lists every SKIP with its reason.
 

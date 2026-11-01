@@ -5,7 +5,6 @@
 package webui
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -30,12 +29,11 @@ func newLogTestServer(t *testing.T, config string) (*Server, string) {
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sum := sha256.Sum256([]byte(testToken))
 	srv, err := New(Deps{
 		ConfigDir:    dir,
 		Version:      "t",
 		ListenAddr:   "127.0.0.1:8317",
-		TokenHash:    sum,
+		TokenHash:    testTokenHash(t),
 		HasToken:     true,
 		DistFS:       fstest.MapFS{"index.html": {Data: []byte("shell")}},
 		BundleSHA256: "h",
@@ -94,12 +92,11 @@ func TestLogsRefusedIdentity(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sum := sha256.Sum256([]byte(testToken))
 	srv, err := New(Deps{
 		ConfigDir:    dir,
 		Version:      "t",
 		ListenAddr:   "127.0.0.1:8317",
-		TokenHash:    sum,
+		TokenHash:    testTokenHash(t),
 		HasToken:     true,
 		DistFS:       fstest.MapFS{"index.html": {Data: []byte("shell")}},
 		BundleSHA256: "h",
@@ -224,12 +221,11 @@ func logServerFromConfig(t *testing.T, dir, config string) *Server {
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sum := sha256.Sum256([]byte(testToken))
 	srv, err := New(Deps{
 		ConfigDir:    dir,
 		Version:      "t",
 		ListenAddr:   "127.0.0.1:8317",
-		TokenHash:    sum,
+		TokenHash:    testTokenHash(t),
 		HasToken:     true,
 		DistFS:       fstest.MapFS{"index.html": {Data: []byte("shell")}},
 		BundleSHA256: "h",
