@@ -785,10 +785,17 @@ short claim wait lets every concurrent caller decide one id
 — a defect of the mirrored protocol; gateway-side
 idempotency is required for the claim protocol, and no
 monitor exists in this build). The manual button path is
-single-flight in this build (registry consumption on first
-tap plus `Bot.decideOnce` sharing the claim protocol's
-decided set); the storm residual above applies only to the
-monitor path, whose helpers have no production callers.
+single-flight per approval id in this build (registry
+consumption on first tap plus `Bot.decideOnce` with
+per-id locking, sharing the claim protocol's decided set,
+which the auto-approve path also records into after each
+successful decide). Two exceptions remain, both unproven
+gateway-side ([NEEDS-MEASUREMENT]): the monitor path's
+claim storm (helpers with no production callers in this
+build), and a manual tap racing an in-flight auto-approve
+RPC, which can still issue a second Decide RPC that the
+gateway may apply twice — gateway decide idempotency is
+unproven, and no rejection can be assumed.
 
 ## 6. cronet-go — EVALUATED-NOT-WIRED (graph-only; no code, no tag)
 
