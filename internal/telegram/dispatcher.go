@@ -89,6 +89,15 @@ type dispatcher struct {
 	idleTimeout     time.Duration
 	shutdownTimeout time.Duration
 	window          int
+
+	// onOffset, when non-nil, is called synchronously in
+	// enqueue (under d.mu) when a new maximum update_id is
+	// marked, before the update is handled: the
+	// offset-before-handle order. It must be fast and must
+	// not call back into the dispatcher; a slow hook stalls
+	// polling for every chat. The bot sets it to persist the
+	// offset to the state file.
+	onOffset func(int64)
 }
 
 func newDispatcher(process func(context.Context, *models.Update), logPanic func(r any)) *dispatcher {
@@ -161,12 +170,15 @@ func (d *dispatcher) enqueue(ctx context.Context, upd *models.Update) {
 	// MaxHandledID is updated with a CAS loop: enqueue is
 	// serialised by d.mu today (the single library worker),
 	// but the store must stay correct if that ever changes.
+	prevMax := d.maxSeen_.Load()
+	advanced := false
 	for {
 		cur := d.maxSeen_.Load()
 		if upd.ID <= cur || d.maxSeen_.CompareAndSwap(cur, upd.ID) {
 			break
 		}
 	}
+	advanced = upd.ID > prevMax
 	key := chatKey(upd)
 	q, ok := d.queues[key]
 	if !ok {
@@ -187,6 +199,14 @@ func (d *dispatcher) enqueue(ctx context.Context, upd *models.Update) {
 	case q.ch <- dispatchItem{ctx: ctx, upd: upd}:
 	default:
 		d.dropped_.Add(1)
+	}
+	// Offset-before-handle: a new maximum is reported before
+	// the worker handles the update (and whether or not the
+	// queue accepted it — a dropped update is still marked
+	// seen above). Still under d.mu, so no second enqueue can
+	// interleave a smaller max between the mark and the report.
+	if advanced && d.onOffset != nil {
+		d.onOffset(upd.ID)
 	}
 }
 

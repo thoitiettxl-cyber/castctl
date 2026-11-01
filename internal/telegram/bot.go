@@ -31,17 +31,16 @@ package telegram
 // (src/muse_cli/tgbot.py:2435-2462, absence inspected); a
 // redelivered update would be handled twice. This bot drops
 // redelivered update_ids (in-memory seen set). The dedupe state
-// is lost on restart, like every other in-memory registry here.
-// [DEVIATION] Offset persistence: Python saves offset = update_id
-// + 1 to telegram-state.json BEFORE handling each update
-// (tgbot.py:2454-2457). This build keeps the max-seen update_id
-// in memory only (MaxHandledID) and passes it as
-// WithInitialOffset on the next construction within the process;
-// no state file is written in item 4 (the one-config.json rule
-// leaves no separate state file, and writing runtime state into
-// config.json would risk the token-bearing file). Restart
-// redelivery is therefore re-handled unless the server already
-// confirmed the offset. Persistent offset/dedupe is step-5 work.
+// is lost on restart, like every other in-memory registry here;
+// the persisted offset (state.go) bounds redelivery to what the
+// server replays below the confirmed offset.
+// Offset persistence: Python saves offset = update_id + 1 to
+// telegram-state.json BEFORE handling each update
+// (tgbot.py:2454-2457). This build persists the maximum handled
+// update_id itself (the library adds 1 when resuming) through
+// the OnOffset hook, marked at enqueue before handling, in the
+// state file (state.go). A crash mid-handle loses that update
+// instead of redelivering it, exactly as in Python.
 
 import (
 	"context"
@@ -198,6 +197,14 @@ type Settings struct {
 	// run in this process (WithInitialOffset: the library adds
 	// 1). Zero means start from the beginning.
 	InitialOffset int64
+	// OnOffset is called with each new maximum update_id, marked
+	// before the update is handled (the offset-before-handle
+	// order). The production command persists it to the state
+	// file. It runs on the poll goroutine under the dispatcher
+	// lock: it must be fast, must not block, and must not call
+	// back into the Bot. Nil means offsets are tracked in
+	// memory only (MaxHandledID).
+	OnOffset func(offset int64)
 }
 
 // Bot is a polling Telegram bot bound to one profile's outbound
@@ -361,6 +368,13 @@ func New(s Settings) (*Bot, error) {
 		b.allowed[id] = true
 	}
 	b.dispatch = newDispatcher(b.processUpdate, b.logPanic)
+	b.dispatch.onOffset = s.OnOffset
+	// Seed the in-memory maximum from the persisted offset so
+	// MaxHandledID never regresses across a restart and a
+	// replayed id at or below the offset reports nothing new.
+	// The server-side skip itself is the library's
+	// WithInitialOffset above.
+	b.dispatch.maxSeen_.Store(s.InitialOffset)
 	opts := []bot.Option{
 		bot.WithHTTPClient(PollTimeout, client),
 		bot.WithNotAsyncHandlers(),

@@ -130,6 +130,17 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 	if err != nil {
 		return err
 	}
+	// Persistent runtime state lives beside the profile's other
+	// files (telegram-state.json in the profile directory), never
+	// inside the token-bearing config.json. A read failure other
+	// than "missing" fails startup: running without a
+	// persistable offset would silently re-handle updates after
+	// a restart. A corrupt file loads fresh (and is reported
+	// once below) instead of failing.
+	stateStore, stateCorrupt, err := telegram.LoadStateStore(prof.Dir)
+	if err != nil {
+		return err
+	}
 	rt, err := env.buildRuntime(ctx, loc, prof)
 	if err != nil {
 		return err
@@ -154,6 +165,9 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 	if logger == nil {
 		logger = slog.Default()
 	}
+	if stateCorrupt {
+		logger.Warn("telegram state file corrupt; starting with fresh state", "path", telegram.StatePath(prof.Dir))
+	}
 	var bot *telegram.Bot
 	bot, err = telegram.New(telegram.Settings{
 		Token:          tg.Token,
@@ -162,6 +176,16 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 		AutoAllowOnce:  tg.AutoAllowOnce,
 		HTTPClient:     rt.HTTPClient(),
 		Logger:         logger,
+		InitialOffset:  stateStore.Offset(),
+		OnOffset: func(offset int64) {
+			// Offset-before-handle: the save runs before the
+			// update is handled. A save failure is logged
+			// only — failing the poll loop over state would
+			// lose every later update too.
+			if err := stateStore.NoteOffset(offset); err != nil {
+				logger.Warn("telegram state save failed", "err", err.Error())
+			}
+		},
 		Decider: telegram.DeciderFunc(func(context.Context, string, string) error {
 			return errors.New("telegram: approval decisions are not wired in this build (gateway decide lands in step 5)")
 		}),
