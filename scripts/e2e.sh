@@ -6,20 +6,32 @@
 # full plan, the isolation rules, and the [NEEDS-MEASUREMENT] gaps.
 #
 # Usage:
-#   scripts/e2e.sh --config PATH <profile>... [--live-send] [--binary PATH]
+#   scripts/e2e.sh --config PATH <profile>... [--live-send] [--live-keeper] [--binary PATH] [--help]
 #
 # Rules this script implements (Boss-decided, 2026-11-01):
 # - Every castctl invocation passes --config pointing at a temp copy.
 #   The supplied config is never modified; ~/.config/castctl is never
 #   read or written. State, logs and ports live under one temp dir
-#   (mktemp -d, mode 0700) removed by a trap on EXIT/INT/TERM.
+#   (mktemp -d, mode 0700) removed by a trap on EXIT/INT/TERM. On
+#   INT/TERM the signal trap ENDS the run: it kills servers, removes
+#   the temp dir, and exits without printing a summary or a
+#   secret-scan verdict.
 # - Tokens come only from the environment (CASTCTL_TELEGRAM_TOKEN,
 #   CASTCTL_WEBUI_KEY). castctl itself reads the Telegram token only
 #   from config; the env var is a script-level convenience: the script
 #   injects it into the temp config copy only, never into the
-#   supplied config, and never prints it.
+#   supplied config, and never prints it. A whitespace-only token
+#   counts as unset. After injection the env vars are unset so child
+#   processes cannot inherit them; saved shell copies serve only the
+#   final scan and the web UI server start.
 # - Real messages are sent only with --live-send. Without it, the
 #   send/watch/approval-positive legs SKIP with a reason.
+# - Cookies are never copied and never read. The temp copy's
+#   cookies_file paths point at the ORIGINAL absolute paths; the
+#   script records sha256+mtime of each original (and .bak) before
+#   and after the legs and FAILs on any unexpected change. Keeper
+#   legs that would rewrite cookies stay dry/SKIP unless
+#   --live-keeper is given. --live-send does NOT imply --live-keeper.
 # - Exit code is non-zero if any check FAILs. A sandbox SKIP never
 #   counts as a PASS; the summary lists every SKIP separately.
 # - The final secret scan prints counts only, never a matched value.
@@ -41,20 +53,26 @@ FAKE_WG_PUB='BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB='
 
 CONFIG_PATH=''
 LIVE_SEND=0
+LIVE_KEEPER=0
 BINARY_PATH=''
 declare -a PROFILES=()
 
 usage() {
     cat <<'USAGE'
-usage: scripts/e2e.sh --config PATH <profile>... [--live-send] [--binary PATH]
+usage: scripts/e2e.sh --config PATH <profile>... [--live-send] [--live-keeper] [--binary PATH] [--help]
 
   --config PATH   config.json file to test (required, must exist).
                   A temp copy is made; the supplied file is never modified.
   <profile>...    one or more profile names to exercise (required).
   --live-send     opt-in: send one real probe message per profile.
                   Without it, send/watch/approval-positive legs SKIP.
+  --live-keeper   opt-in: allow keeper legs that would rewrite cookies
+                  to run. Without it, those legs stay dry/SKIP with a
+                  reason, and any change to a cookies original FAILs.
+                  --live-send does NOT imply --live-keeper.
   --binary PATH   castctl binary to test. Without it, the script builds
                   one from this checkout with the approved build tags.
+  --help, -h      print this usage and exit 0.
 
 Tokens come only from the environment: CASTCTL_TELEGRAM_TOKEN and
 CASTCTL_WEBUI_KEY. See docs/e2e.md.
@@ -76,6 +94,8 @@ while [ "$#" -gt 0 ]; do
             BINARY_PATH="${1#--binary=}"; shift ;;
         --live-send)
             LIVE_SEND=1; shift ;;
+        --live-keeper)
+            LIVE_KEEPER=1; shift ;;
         --help|-h)
             usage; exit 0 ;;
         --)
@@ -96,41 +116,90 @@ done
 SUPPLIED_CONFIG="$(CDPATH= cd -- "$(dirname -- "$CONFIG_PATH")" && pwd)/config.json"
 SUPPLIED_DIR="$(dirname -- "$SUPPLIED_CONFIG")"
 
+# ---- required tools (fail fast) ---------------------------------------
+# python3, sha256sum and stat are required by every run (config
+# handling, hashing, mode checks). go, curl, unzip and ss are
+# per-leg: a missing one SKIPs its leg with a reason instead of
+# failing the whole run. See docs/e2e.md prerequisites.
+for _tool in python3 sha256sum stat; do
+    command -v "$_tool" >/dev/null 2>&1 || { printf 'e2e: required tool missing: %s\n' "$_tool" >&2; exit 2; }
+done
+unset _tool
+
 # ---- temp dir, trap, verdict recording --------------------------------
+# The trap is installed immediately after mktemp/chmod, before the
+# mode check, so every exit path (including a mode-check failure)
+# removes the temp dir. cleanup is idempotent: it guards unset/empty
+# variables and dead PIDs, so the EXIT trap and the signal handler
+# can both run it.
 E2E_TMP="$(mktemp -d)"
 chmod 0700 "$E2E_TMP"
-TMP_STAT="$(stat -c '%a' "$E2E_TMP")"
-[ "$TMP_STAT" = '700' ] || { printf 'e2e: temp dir mode is %s, expected 700\n' "$TMP_STAT" >&2; exit 2; }
 CFG_DIR="$E2E_TMP/config"
 OUT_DIR="$E2E_TMP/out"
 WEBUI_DIR="$E2E_TMP/webui"
 LOG_DIR="$E2E_TMP/logfiles"
-mkdir -p "$CFG_DIR" "$OUT_DIR" "$WEBUI_DIR" "$LOG_DIR"
-CFG="$CFG_DIR/config.json"
 VERDICTS="$OUT_DIR/verdicts.txt"
-: > "$VERDICTS"
-
 PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
 SANDBOX_SKIP_COUNT=0
 WEBUI_PID=''
-TELEGRAM_PID=''
+WATCH_JOB=''
+
+# safe_name <raw>: filename component derived from a profile or
+# variant name. Raw names may contain '/' (or other path-breaking
+# characters), so they must never appear in a path. Sanitised text
+# plus 12 hex of the sha256 of the raw name keeps distinct names
+# distinct. Verdict check names keep the raw profile name; only
+# paths use the slug.
+safe_name() {
+    local raw="$1" sanitised h
+    sanitised="$(printf '%s' "$raw" | tr -c 'A-Za-z0-9_.-' '_')"
+    h="$(printf '%s' "$raw" | sha256sum | awk '{print substr($1,1,12)}')"
+    printf '%s-%s' "$sanitised" "$h"
+}
+
+# kill_descendants <pid>: TERM every descendant of pid (deepest
+# first), so a signal cannot leave a background job or server alive.
+kill_descendants() {
+    local pid="$1" child
+    command -v ps >/dev/null 2>&1 || return 0
+    for child in $(ps --no-headers -o pid --ppid "$pid" 2>/dev/null); do
+        kill_descendants "$child"
+        kill -TERM "$child" 2>/dev/null || true
+    done
+}
 
 cleanup() {
     local rc="$?"
-    if [ -n "$WEBUI_PID" ] && kill -0 "$WEBUI_PID" 2>/dev/null; then
+    if [ -n "${WEBUI_PID:-}" ] && kill -0 "$WEBUI_PID" 2>/dev/null; then
         kill "$WEBUI_PID" 2>/dev/null || true
         wait "$WEBUI_PID" 2>/dev/null || true
     fi
-    if [ -n "$TELEGRAM_PID" ] && kill -0 "$TELEGRAM_PID" 2>/dev/null; then
-        kill "$TELEGRAM_PID" 2>/dev/null || true
-        wait "$TELEGRAM_PID" 2>/dev/null || true
+    if [ -n "${WATCH_JOB:-}" ] && kill -0 "$WATCH_JOB" 2>/dev/null; then
+        kill "$WATCH_JOB" 2>/dev/null || true
+        wait "$WATCH_JOB" 2>/dev/null || true
     fi
-    rm -rf "$E2E_TMP"
+    kill_descendants "$$"
+    rm -rf "${E2E_TMP:-}"
     return "$rc"
 }
-trap cleanup EXIT INT TERM
+
+# on_signal: a signal ENDS the run. Kill servers and descendants,
+# remove the temp dir, and exit 130 — never print a summary or a
+# secret-scan verdict over deleted files.
+on_signal() {
+    cleanup
+    exit 130
+}
+
+trap cleanup EXIT
+trap on_signal INT TERM
+TMP_STAT="$(stat -c '%a' "$E2E_TMP")"
+[ "$TMP_STAT" = '700' ] || { printf 'e2e: temp dir mode is %s, expected 700\n' "$TMP_STAT" >&2; exit 2; }
+mkdir -p "$CFG_DIR" "$OUT_DIR" "$WEBUI_DIR" "$LOG_DIR"
+CFG="$CFG_DIR/config.json"
+: > "$VERDICTS"
 
 # record <leg> <check> <PASS|FAIL|SKIP> <reason>
 # Reasons are fixed strings, counts, exit codes, profile names and
@@ -160,7 +229,10 @@ has_sandbox_string() {
 # run_cap <base> <timeout-secs> <cmd...>: capture stdout/stderr/exit.
 # timeout 0 = no bound. The bound is implemented in shell (background
 # + kill), because the external timeout(1) cannot exec shell
-# functions such as ccfg. A bound kill records exit 124.
+# functions such as ccfg. A bound kill records exit 124. On timeout
+# the signal escalates TERM -> (brief poll) -> KILL, and a .code
+# file is always written (125 if the background subshell died
+# before writing one), so a missing .code can never read as PASS.
 run_cap() {
     local base="$1" timeout_s="$2"; shift 2
     if [ "$timeout_s" -gt 0 ]; then
@@ -170,6 +242,9 @@ run_cap() {
         while kill -0 "$pid" 2>/dev/null; do
             if [ "$waited" -ge "$timeout_s" ]; then
                 kill "$pid" 2>/dev/null || true
+                local esc=0
+                while kill -0 "$pid" 2>/dev/null && [ "$esc" -lt 15 ]; do sleep 0.2; esc=$((esc + 1)); done
+                if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi
                 wait "$pid" 2>/dev/null || true
                 printf '124' >"$base.code"
                 return 0
@@ -183,20 +258,31 @@ run_cap() {
         "$@" >"$base.out" 2>"$base.err"
         printf '%s' "$?" >"$base.code"
     fi
+    [ -f "$base.code" ] || printf '125' >"$base.code"
 }
 
 # run_cap_int <base> <secs> <cmd...>: like run_cap, but the bound is
 # delivered as SIGINT (castctl exits 130 on a cancelled context).
+# The wait polls so a fast exit does not cost the full interval, and
+# escalates INT -> (brief poll) -> KILL if the child ignores SIGINT.
 run_cap_int() {
     local base="$1" secs="$2"; shift 2
     "$@" >"$base.out" 2>"$base.err" &
     local pid="$!"
-    sleep "$secs"
+    local waited=0
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$((secs * 5))" ]; do
+        sleep 0.2
+        waited=$((waited + 1))
+    done
     if kill -0 "$pid" 2>/dev/null; then
         kill -INT "$pid" 2>/dev/null || true
+        local esc=0
+        while kill -0 "$pid" 2>/dev/null && [ "$esc" -lt 15 ]; do sleep 0.2; esc=$((esc + 1)); done
+        if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi
     fi
     wait "$pid"
     printf '%s' "$?" >"$base.code"
+    [ -f "$base.code" ] || printf '125' >"$base.code"
 }
 
 # ccfg <config> <args...>: castctl with a clean environment and an
@@ -206,6 +292,24 @@ ccfg() {
     env -u CASTCTL_CONFIG -u CASTCTL_PROFILE -u CASTCTL_TELEGRAM_TOKEN \
         -u MUSE_AUTO_APPROVE -u MUSE_AUTO_ALLOW_ONCE \
         "$BIN" --config "$cfg" "$@"
+}
+
+# webui_exec <config> <args...>: like ccfg, but exports the held web
+# UI key (saved copy) when one was held, so the server can require
+# Bearer auth. Uses exec, so the caller's $! IS the castctl PID —
+# never a wrapper subshell. Call only backgrounded or via run_cap;
+# a direct call replaces this shell.
+webui_exec() {
+    local cfg="$1"; shift
+    if [ "${WEBUI_KEY_HELD:-0}" = '1' ]; then
+        CASTCTL_WEBUI_KEY="$WEBUI_KEY_VALUE" exec env -u CASTCTL_CONFIG -u CASTCTL_PROFILE \
+            -u CASTCTL_TELEGRAM_TOKEN -u MUSE_AUTO_APPROVE -u MUSE_AUTO_ALLOW_ONCE \
+            "$BIN" --config "$cfg" "$@"
+    else
+        exec env -u CASTCTL_CONFIG -u CASTCTL_PROFILE -u CASTCTL_TELEGRAM_TOKEN \
+            -u MUSE_AUTO_APPROVE -u MUSE_AUTO_ALLOW_ONCE -u CASTCTL_WEBUI_KEY \
+            "$BIN" --config "$cfg" "$@"
+    fi
 }
 
 # json_field <file> <dotted.path>: print the JSON value, or
@@ -303,6 +407,8 @@ def cmd_inject(argv):
     src, dst = argv
     cfg = load(src)
     token = os.environ.get("CASTCTL_TELEGRAM_TOKEN", "")
+    if not token.strip():
+        token = ""
     block = cfg.get("telegram")
     if not token:
         print("unset")
@@ -333,10 +439,11 @@ def cmd_related(argv):
         print(name)
 
 
-def cmd_cookies_paths(argv):
-    # Prints: <profile>\t<resolved cookies path>. Resolution mirrors
-    # castctl: absolute as-is, relative under the config file's dir,
-    # absent -> <dir>/profiles/<name>/cookies.txt. Paths only.
+def cmd_original_paths(argv):
+    # Prints: <profile>\t<resolved ORIGINAL cookies path>. Resolution
+    # mirrors castctl: absolute as-is, relative under the SUPPLIED
+    # config file's dir, absent -> <supplied-dir>/profiles/<name>/
+    # cookies.txt. Paths only; cookie content is never read.
     cfg = load(argv[0])
     base = os.path.dirname(os.path.abspath(argv[0]))
     for name in sorted(profiles(cfg)):
@@ -526,6 +633,47 @@ def cmd_edit(argv):
     print("ok")
 
 
+def cmd_logs_expected(argv):
+    # Prints the /logs reason the web UI handler must return for
+    # this config, or "enabled" when logs are served. Mirrors the
+    # handler's logGate: no log block or disabled -> logging_disabled;
+    # output ""/stderr/stdout -> log_output_not_file; an output
+    # target the handler refuses (the config file itself, a cookies
+    # file, or anything under profiles/) -> log_output_refused.
+    # Relative outputs are resolved against the config file's dir,
+    # the same base the handler's refused-set uses for config paths.
+    cfg = load(argv[0])
+    base = os.path.dirname(os.path.abspath(argv[0]))
+    block = cfg.get("log")
+    if not isinstance(block, dict):
+        print("logging_disabled")
+        return
+    if block.get("disabled") is True:
+        print("logging_disabled")
+        return
+    output = block.get("output")
+    if not isinstance(output, str) or output in ("", "stderr", "stdout"):
+        print("log_output_not_file")
+        return
+    resolved = output if os.path.isabs(output) else os.path.join(base, output)
+    resolved = os.path.normpath(resolved)
+    if resolved == os.path.abspath(argv[0]):
+        print("log_output_refused")
+        return
+    refused_roots = [os.path.join(base, "profiles")]
+    for name in sorted(profiles(cfg)):
+        entry = profiles(cfg)[name] or {}
+        value = entry.get("cookies_file") if isinstance(entry, dict) else None
+        if isinstance(value, str) and value.strip():
+            cpath = value if os.path.isabs(value) else os.path.join(base, value)
+            refused_roots.append(os.path.normpath(cpath))
+    for root in refused_roots:
+        if resolved == root or resolved.startswith(root + os.sep):
+            print("log_output_refused")
+            return
+    print("enabled")
+
+
 def main():
     if len(sys.argv) < 2:
         print("usage: cfgtool <command> ...")
@@ -536,10 +684,12 @@ def main():
         cmd_inject(argv)
     elif cmd == "related-profiles":
         cmd_related(argv)
-    elif cmd == "cookies-paths":
-        cmd_cookies_paths(argv)
+    elif cmd == "original-paths":
+        cmd_original_paths(argv)
     elif cmd == "point-cookies":
         cmd_point_cookies(argv)
+    elif cmd == "logs-expected":
+        cmd_logs_expected(argv)
     elif cmd == "has-block":
         cmd_has_block(argv)
     elif cmd == "token-present":
@@ -563,51 +713,99 @@ SUPPLIED_SHA="$(sha256sum -- "$SUPPLIED_CONFIG" | awk '{print $1}')"
 cp -- "$SUPPLIED_CONFIG" "$CFG"
 chmod 0600 "$CFG"
 
-INJECT_RESULT="$(python3 "$CFGTOOL" inject "$CFG" "$CFG" 2>"$OUT_DIR/inject.err" || echo inject-failed)"
+INJECT_RESULT=''
 TELEGRAM_INJECTED=0
-[ "$INJECT_RESULT" = 'injected' ] && TELEGRAM_INJECTED=1
 TELEGRAM_TOKEN_HELD=0
-[ -n "${CASTCTL_TELEGRAM_TOKEN:-}" ] && TELEGRAM_TOKEN_HELD=1
+if [ -n "${CASTCTL_TELEGRAM_TOKEN:-}" ] && [ "$(printf '%s' "${CASTCTL_TELEGRAM_TOKEN}" | tr -d '[:space:]')" != '' ]; then
+    TELEGRAM_TOKEN_HELD=1
+fi
 WEBUI_KEY_HELD=0
-[ -n "${CASTCTL_WEBUI_KEY:-}" ] && [ "$(printf '%s' "${CASTCTL_WEBUI_KEY}" | tr -d '[:space:]')" != '' ] && WEBUI_KEY_HELD=1
-# Saved copy: the server leg must not unset the env var (the final
-# secret scan still needs the value to grep for, counts only).
+if [ -n "${CASTCTL_WEBUI_KEY:-}" ] && [ "$(printf '%s' "${CASTCTL_WEBUI_KEY}" | tr -d '[:space:]')" != '' ]; then
+    WEBUI_KEY_HELD=1
+fi
+# Saved copies: the final secret scan (counts only) and the web UI
+# server start still need the values after the env vars are unset.
+# A whitespace-only token counts as unset and is never injected.
+TELEGRAM_TOKEN_VALUE="${CASTCTL_TELEGRAM_TOKEN:-}"
 WEBUI_KEY_VALUE="${CASTCTL_WEBUI_KEY:-}"
+INJECT_RESULT="$(python3 "$CFGTOOL" inject "$CFG" "$CFG" 2>"$OUT_DIR/inject.err" || echo inject-failed)"
+[ "$INJECT_RESULT" = 'injected' ] && TELEGRAM_INJECTED=1
+# Narrow the scope: after injection, no child process can inherit
+# the token env vars. Saved shell copies above serve the scan and
+# the web UI server start only.
+unset CASTCTL_TELEGRAM_TOKEN CASTCTL_WEBUI_KEY
 
-# copy_cookies <config-file> <dest-dir>: copy the cookies file (+ .bak)
-# for every related profile into <dest-dir>/profiles/<name>/, mode
-# 0600. Content is never read. Profiles whose cookies file does not
-# exist keep cookies-missing behaviour. When a cookies file is copied,
-# the config copy's cookies_file is pointed at the copy so castctl
-# never touches the original.
-copy_cookies() {
-    local cfg_file="$1" dest_dir="$2"
-    local name src_path dest_path
+# point_originals: point the temp copy's cookies_file at the
+# ORIGINAL absolute path for every profile. Cookies are never
+# copied and their content is never read — path strings only.
+# A relative cookies_file resolves against the SUPPLIED config's
+# directory; an absolute path is kept as-is; an absent
+# cookies_file resolves to the supplied dir's default location.
+point_originals() {
+    local name src_path
+    while IFS="$(printf '\t')" read -r name src_path; do
+        [ -n "$name" ] || continue
+        python3 "$CFGTOOL" point-cookies "$CFG" "$CFG" "$name" "$src_path" >/dev/null
+    done <<EOF
+$(python3 "$CFGTOOL" original-paths "$SUPPLIED_CONFIG")
+EOF
+}
+point_originals
+
+# record_originals <outfile>: one line per original cookies file
+# (and .bak when the path is checked): name, path, sha256 or
+# MISSING, mtime or MISSING. Hashes are never printed; the file
+# lives in OUT_DIR with a .txt suffix so the secret scan's
+# .out/.err globs never read it.
+record_originals() {
+    local outfile="$1" name src_path sha mtime
+    : > "$outfile"
     while IFS="$(printf '\t')" read -r name src_path; do
         [ -n "$name" ] || continue
         if [ -f "$src_path" ]; then
-            dest_path="$dest_dir/profiles/$name/cookies.txt"
-            mkdir -p "$(dirname -- "$dest_path")"
-            cp -- "$src_path" "$dest_path"
-            chmod 0600 "$dest_path"
-            if [ -f "$src_path.bak" ]; then
-                cp -- "$src_path.bak" "$dest_path.bak"
-                chmod 0600 "$dest_path.bak"
-            fi
-            python3 "$CFGTOOL" point-cookies "$cfg_file" "$cfg_file" "$name" "$dest_path" >/dev/null
+            sha="$(sha256sum -- "$src_path" | awk '{print $1}')"
+            mtime="$(stat -c '%Y' -- "$src_path")"
+        else
+            sha='MISSING'; mtime='MISSING'
         fi
+        printf '%s\t%s\t%s\t%s\n' "$name" "$src_path" "$sha" "$mtime" >> "$outfile"
+        if [ -f "$src_path.bak" ]; then
+            sha="$(sha256sum -- "$src_path.bak" | awk '{print $1}')"
+            mtime="$(stat -c '%Y' -- "$src_path.bak")"
+        else
+            sha='MISSING'; mtime='MISSING'
+        fi
+        printf '%s\t%s\t%s\t%s\n' "$name.bak" "$src_path.bak" "$sha" "$mtime" >> "$outfile"
     done <<EOF
-$(python3 "$CFGTOOL" cookies-paths "$cfg_file")
+$(python3 "$CFGTOOL" original-paths "$SUPPLIED_CONFIG")
 EOF
 }
-copy_cookies "$CFG" "$CFG_DIR"
+ORIGINALS_BEFORE="$OUT_DIR/originals-before.txt"
+record_originals "$ORIGINALS_BEFORE"
+
+# verify_originals: re-record and compare. Without --live-keeper
+# any change (content, mtime, new or vanished .bak) is a FAIL.
+# With --live-keeper a change is expected and records PASS.
+verify_originals() {
+    local after="$OUT_DIR/originals-after.txt"
+    record_originals "$after"
+    if cmp -s "$ORIGINALS_BEFORE" "$after"; then
+        record 'immutability' 'cookies-originals' 'PASS' 'cookies originals byte- and mtime-identical before/after'
+    elif [ "$LIVE_KEEPER" = '1' ]; then
+        record 'immutability' 'cookies-originals' 'PASS' 'cookies originals changed as expected with --live-keeper'
+    else
+        record 'immutability' 'cookies-originals' 'FAIL' 'cookies original changed unexpectedly'
+    fi
+}
 
 # make_variant <name> <cfgtool-edit-args...>: a fresh config dir under
-# $E2E_TMP/variants/<name> holding an edited copy of the temp config
-# plus cookies copies. Prints the variant config path.
+# $E2E_TMP/variants/<slug> holding an edited copy of the temp config.
+# Variant names are slugged (see safe_name) because they may embed a
+# profile name. No cookies copies: the variant inherits the temp
+# copy's cookies_file paths, which point at the originals.
 make_variant() {
     local name="$1"; shift
-    local vdir="$E2E_TMP/variants/$name"
+    local vdir="$E2E_TMP/variants/$(safe_name "$name")"
     mkdir -p "$vdir"
     local vcfg="$vdir/config.json"
     cp -- "$CFG" "$vcfg"
@@ -615,7 +813,6 @@ make_variant() {
     if [ "$#" -gt 0 ]; then
         python3 "$CFGTOOL" edit "$vcfg" "$vcfg" "$@" >/dev/null
     fi
-    copy_cookies "$vcfg" "$vdir"
     printf '%s' "$vcfg"
 }
 
@@ -639,8 +836,8 @@ else
     BUILD_RC="$?"
     if [ "$BUILD_RC" -ne 0 ]; then
         record 'build' 'go-build' 'FAIL' "go build exited $BUILD_RC"
-        printf 'e2e: build failed (last 20 lines of build output):\n' >&2
-        tail -n 20 "$BUILD_BASE.err" "$BUILD_BASE.out" >&2 || true
+        printf 'e2e: go build failed; tail recorded in captured output (fixed notice only)\n' >&2
+        tail -n 20 "$BUILD_BASE.err" "$BUILD_BASE.out" >"$OUT_DIR/build-failure-tail.err" 2>/dev/null || true
         exit 1
     fi
     record 'build' 'go-build' 'PASS' "built with tags $BUILD_TAGS"
@@ -662,7 +859,7 @@ esac
 # ---- helpers for legs -------------------------------------------------
 # cookies_present <profile>: profile list row field "cookies" (bool).
 cookies_present() {
-    local base="$OUT_DIR/list-$1"
+    local base="$OUT_DIR/list-$(safe_name "$1")"
     run_cap "$base" 30 ccfg "$CFG" profile list
     [ "$(cat "$base.code")" = '0' ] || return 1
     local row
@@ -684,7 +881,8 @@ PY
 
 # ---- leg 1: profile test ----------------------------------------------
 for PROFILE in "${PROFILES[@]}"; do
-    SHOW_BASE="$OUT_DIR/show-$PROFILE"
+    SLUG="$(safe_name "$PROFILE")"
+    SHOW_BASE="$OUT_DIR/show-$SLUG"
     run_cap "$SHOW_BASE" 30 ccfg "$CFG" profile show "$PROFILE"
     SHOW_RC="$(cat "$SHOW_BASE.code")"
     if [ "$SHOW_RC" -ne 0 ]; then
@@ -693,12 +891,12 @@ for PROFILE in "${PROFILES[@]}"; do
         fi
         continue
     fi
-    record 'profile-test' "show-$PROFILE" 'PASS' 'profile show exited 0 (redacted view)'
+    record 'profile-test' "show-$PROFILE" 'PASS' 'profile show exited 0'
     if ! cookies_present "$PROFILE"; then
         record 'profile-test' "test-$PROFILE" 'SKIP' 'no cookies file for profile'
         continue
     fi
-    TEST_BASE="$OUT_DIR/profile-test-$PROFILE"
+    TEST_BASE="$OUT_DIR/profile-test-$SLUG"
     run_cap "$TEST_BASE" 180 ccfg "$CFG" profile test "$PROFILE"
     TEST_RC="$(cat "$TEST_BASE.code")"
     if ! json_is_valid "$TEST_BASE.out"; then
@@ -722,11 +920,11 @@ for PROFILE in "${PROFILES[@]}"; do
     if [ "$DNS_OK" = 'true' ] && [ "$HTTPS_OK" = 'true' ] && [ "$GW_OK" = 'true' ] \
         && [ "$SOURCE_OK" = '1' ] && [ "$DNS_SERVER" != '__MISSING__' ] && [ "$DNS_SERVER" != '' ] \
         && [ "$TEST_RC" = '0' ] && [ "$OK_FIELD" = 'true' ]; then
-        record 'profile-test' "test-$PROFILE" 'PASS' "dns/https/gateway ok, dns.source=$DNS_SOURCE"
+        record 'profile-test' "test-$PROFILE" 'PASS' 'dns/https/gateway ok, dns.source in closed enum, server tag present'
     elif has_sandbox_string "$TEST_BASE.out" || has_sandbox_string "$TEST_BASE.err"; then
         record_sandbox 'profile-test' "test-$PROFILE"
     else
-        record 'profile-test' "test-$PROFILE" 'FAIL' "profile test exited $TEST_RC dns.ok=$DNS_OK https.ok=$HTTPS_OK gateway.ok=$GW_OK"
+        record 'profile-test' "test-$PROFILE" 'FAIL' "profile test exited $TEST_RC with fields not all ok"
     fi
     EGRESS="$(json_field "$TEST_BASE.out" 'egress_ip')"
     if [ "$EGRESS" = 'null' ]; then
@@ -740,7 +938,8 @@ done
 # Offline negative control: conflicting toggles are rejected by the
 # parser before any network work (exit 2, measured in Phase 1).
 for PROFILE in "${PROFILES[@]}"; do
-    CONF_BASE="$OUT_DIR/wait-conflict-$PROFILE"
+    SLUG="$(safe_name "$PROFILE")"
+    CONF_BASE="$OUT_DIR/wait-conflict-$SLUG"
     run_cap "$CONF_BASE" 30 ccfg "$CFG" --profile "$PROFILE" wait --auto-approve --no-auto-approve
     if [ "$(cat "$CONF_BASE.code")" = '2' ]; then
         record 'send-wait' "conflict-$PROFILE" 'PASS' 'conflicting toggles exit 2'
@@ -750,17 +949,19 @@ for PROFILE in "${PROFILES[@]}"; do
 done
 if [ "$LIVE_SEND" -ne 1 ]; then
     for PROFILE in "${PROFILES[@]}"; do
+        SLUG="$(safe_name "$PROFILE")"
         record 'send-wait' "send-$PROFILE" 'SKIP' 'no --live-send flag'
         record 'send-wait' "wait-$PROFILE" 'SKIP' 'no --live-send flag'
     done
 else
     for PROFILE in "${PROFILES[@]}"; do
+        SLUG="$(safe_name "$PROFILE")"
         if ! cookies_present "$PROFILE"; then
             record 'send-wait' "send-$PROFILE" 'SKIP' 'no cookies file for profile'
             record 'send-wait' "wait-$PROFILE" 'SKIP' 'no cookies file for profile'
             continue
         fi
-        SEND_BASE="$OUT_DIR/send-$PROFILE"
+        SEND_BASE="$OUT_DIR/send-$SLUG"
         run_cap "$SEND_BASE" 120 ccfg "$CFG" --profile "$PROFILE" send 'castctl e2e probe (no action needed)' --wait 30 --ack-timeout 15
         SEND_RC="$(cat "$SEND_BASE.code")"
         if ! json_is_valid "$SEND_BASE.out"; then
@@ -780,17 +981,17 @@ else
             *) OUTCOME_OK=0 ;;
         esac
         if [ "$DELIVERED" = 'true' ] && [ "$USER_SEQ" != '__MISSING__' ] && [ "$OUTCOME_OK" = '1' ]; then
-            record 'send-wait' "send-$PROFILE" 'PASS' "delivered, outcome=$OUTCOME"
+            record 'send-wait' "send-$PROFILE" 'PASS' 'delivered, outcome in closed set'
         elif has_sandbox_string "$SEND_BASE.out" || has_sandbox_string "$SEND_BASE.err"; then
             record_sandbox 'send-wait' "send-$PROFILE"
         else
-            record 'send-wait' "send-$PROFILE" 'FAIL' "send exited $SEND_RC delivered=$DELIVERED outcome=$OUTCOME"
+            record 'send-wait' "send-$PROFILE" 'FAIL' "send exited $SEND_RC with fields not ok"
         fi
         if [ "$USER_SEQ" = '__MISSING__' ] || [ "$USER_SEQ" = '' ]; then
             record 'send-wait' "wait-$PROFILE" 'SKIP' 'no user_seq from send result'
             continue
         fi
-        WAIT_BASE="$OUT_DIR/wait-$PROFILE"
+        WAIT_BASE="$OUT_DIR/wait-$SLUG"
         run_cap "$WAIT_BASE" 60 ccfg "$CFG" --profile "$PROFILE" wait --after-seq "$USER_SEQ" --timeout 30 --json
         WAIT_RC="$(cat "$WAIT_BASE.code")"
         if ! json_is_valid "$WAIT_BASE.out"; then
@@ -807,19 +1008,20 @@ else
             *) W_OK=0 ;;
         esac
         if [ "$W_OK" = '1' ]; then
-            record 'send-wait' "wait-$PROFILE" 'PASS' "wait outcome=$W_OUTCOME"
+            record 'send-wait' "wait-$PROFILE" 'PASS' 'wait outcome in closed set'
         elif has_sandbox_string "$WAIT_BASE.out" || has_sandbox_string "$WAIT_BASE.err"; then
             record_sandbox 'send-wait' "wait-$PROFILE"
         else
-            record 'send-wait' "wait-$PROFILE" 'FAIL' "wait exited $WAIT_RC outcome=$W_OUTCOME"
+            record 'send-wait' "wait-$PROFILE" 'FAIL' "wait exited $WAIT_RC with outcome not in closed set"
         fi
     done
 fi
 
 # ---- leg 3: approvals --------------------------------------------------
 for PROFILE in "${PROFILES[@]}"; do
+    SLUG="$(safe_name "$PROFILE")"
     # Status shape + precedence, offline (no network).
-    ST_BASE="$OUT_DIR/autoapprove-status-$PROFILE"
+    ST_BASE="$OUT_DIR/autoapprove-status-$SLUG"
     run_cap "$ST_BASE" 30 ccfg "$CFG" --profile "$PROFILE" auto-approve status
     if [ "$(cat "$ST_BASE.code")" = '0' ] && json_is_valid "$ST_BASE.out" \
         && [ "$(json_field "$ST_BASE.out" 'auto_approve')" != '__MISSING__' ]; then
@@ -827,16 +1029,16 @@ for PROFILE in "${PROFILES[@]}"; do
     else
         record 'approvals' "status-$PROFILE" 'FAIL' "auto-approve status exited $(cat "$ST_BASE.code")"
     fi
-    ENV_BASE="$OUT_DIR/autoapprove-env-$PROFILE"
+    ENV_BASE="$OUT_DIR/autoapprove-env-$SLUG"
     run_cap "$ENV_BASE" 30 env -u CASTCTL_CONFIG -u CASTCTL_PROFILE MUSE_AUTO_APPROVE=always "$BIN" --config "$CFG" --profile "$PROFILE" auto-approve status
     ENV_AA="$(json_field "$ENV_BASE.out" 'auto_approve')"
     ENV_SRC="$(json_field "$ENV_BASE.out" 'source')"
     if [ "$(cat "$ENV_BASE.code")" = '0' ] && [ "$ENV_AA" = 'always' ]; then
-        record 'approvals' "env-wins-$PROFILE" 'PASS' "env override wins without writing (source=$ENV_SRC)"
+        record 'approvals' "env-wins-$PROFILE" 'PASS' 'env override wins without writing'
     else
         record 'approvals' "env-wins-$PROFILE" 'FAIL' "env override exited $(cat "$ENV_BASE.code") auto_approve=$ENV_AA"
     fi
-    BADENV_BASE="$OUT_DIR/autoapprove-badenv-$PROFILE"
+    BADENV_BASE="$OUT_DIR/autoapprove-badenv-$SLUG"
     run_cap "$BADENV_BASE" 30 env -u CASTCTL_CONFIG -u CASTCTL_PROFILE MUSE_AUTO_APPROVE=bogus "$BIN" --config "$CFG" --profile "$PROFILE" auto-approve status
     if [ "$(cat "$BADENV_BASE.code")" = '2' ]; then
         record 'approvals' "bad-env-$PROFILE" 'PASS' 'invalid MUSE_AUTO_APPROVE exits 2 (probe value only)'
@@ -844,7 +1046,7 @@ for PROFILE in "${PROFILES[@]}"; do
         record 'approvals' "bad-env-$PROFILE" 'FAIL' "invalid env exited $(cat "$BADENV_BASE.code"), expected 2"
     fi
     # Parser negative controls (no network, no invented approval id).
-    APP_BASE="$OUT_DIR/approve-noid-$PROFILE"
+    APP_BASE="$OUT_DIR/approve-noid-$SLUG"
     run_cap "$APP_BASE" 30 ccfg "$CFG" --profile "$PROFILE" approve
     if [ "$(cat "$APP_BASE.code")" = '2' ]; then
         record 'approvals' "approve-noid-$PROFILE" 'PASS' 'approve with no id exits 2'
@@ -854,14 +1056,14 @@ for PROFILE in "${PROFILES[@]}"; do
     # Persistence on a THROWAWAY copy: auto-approve on rewrites the
     # config (mode stays 0600, file is not byte-preserving). Never
     # run this against the main temp copy.
-    AA_DIR="$E2E_TMP/aa-$PROFILE"
+    AA_DIR="$E2E_TMP/aa-$SLUG"
     mkdir -p "$AA_DIR"
     AA_CFG="$AA_DIR/config.json"
     cp -- "$CFG" "$AA_CFG"; chmod 0600 "$AA_CFG"
-    AA_BASE="$OUT_DIR/autoapprove-on-$PROFILE"
+    AA_BASE="$OUT_DIR/autoapprove-on-$SLUG"
     run_cap "$AA_BASE" 30 ccfg "$AA_CFG" --profile "$PROFILE" auto-approve on
     AA_MODE="$(stat -c '%a' "$AA_CFG" 2>/dev/null || echo missing)"
-    AA_ST_BASE="$OUT_DIR/autoapprove-on-status-$PROFILE"
+    AA_ST_BASE="$OUT_DIR/autoapprove-on-status-$SLUG"
     run_cap "$AA_ST_BASE" 30 ccfg "$AA_CFG" --profile "$PROFILE" auto-approve status
     if [ "$(cat "$AA_BASE.code")" = '0' ] && [ "$AA_MODE" = '600' ] \
         && [ "$(json_field "$AA_ST_BASE.out" 'auto_approve')" = 'always' ]; then
@@ -878,7 +1080,7 @@ for PROFILE in "${PROFILES[@]}"; do
         record 'approvals' "list-$PROFILE" 'SKIP' 'no cookies file for profile'
         continue
     fi
-    LIST_BASE="$OUT_DIR/approvals-list-$PROFILE"
+    LIST_BASE="$OUT_DIR/approvals-list-$SLUG"
     run_cap "$LIST_BASE" 60 ccfg "$CFG" --profile "$PROFILE" approvals
     if [ "$(cat "$LIST_BASE.code")" = '0' ] && json_is_valid "$LIST_BASE.out"; then
         PENDING="$(python3 - "$LIST_BASE.out" <<'PY'
@@ -906,20 +1108,22 @@ done
 # ---- leg 4: watch ------------------------------------------------------
 if [ "$LIVE_SEND" -ne 1 ]; then
     for PROFILE in "${PROFILES[@]}"; do
+        SLUG="$(safe_name "$PROFILE")"
         record 'watch' "watch-$PROFILE" 'SKIP' 'unseeded window must not PASS; needs --live-send'
     done
 else
     for PROFILE in "${PROFILES[@]}"; do
+        SLUG="$(safe_name "$PROFILE")"
         if ! cookies_present "$PROFILE"; then
             record 'watch' "watch-$PROFILE" 'SKIP' 'no cookies file for profile'
             continue
         fi
-        WATCH_BASE="$OUT_DIR/watch-$PROFILE"
+        WATCH_BASE="$OUT_DIR/watch-$SLUG"
         # Start watch, then send during its window, then collect it.
         run_cap "$WATCH_BASE" 30 ccfg "$CFG" --profile "$PROFILE" watch --timeout 20 --n 50 &
         WATCH_JOB="$!"
         sleep 2
-        SEND2_BASE="$OUT_DIR/watch-send-$PROFILE"
+        SEND2_BASE="$OUT_DIR/watch-send-$SLUG"
         run_cap "$SEND2_BASE" 60 ccfg "$CFG" --profile "$PROFILE" send 'castctl e2e watch probe (no action needed)' --wait 10 --ack-timeout 10
         wait "$WATCH_JOB" 2>/dev/null || true
         WATCH_RC="$(cat "$WATCH_BASE.code")"
@@ -962,15 +1166,17 @@ fi
 # profile test Phase 1 fields, config migrate (dry-run, writes
 # nothing), and mutated-copy parse checks.
 MIG_BASE="$OUT_DIR/config-migrate"
+MIG_SHA_BEFORE="$(sha256sum -- "$CFG" | awk '{print $1}')"
 run_cap "$MIG_BASE" 30 ccfg "$CFG" config migrate
 MIG_SHA_AFTER="$(sha256sum -- "$CFG" | awk '{print $1}')"
-if [ "$(cat "$MIG_BASE.code")" = '0' ] && [ "$MIG_SHA_AFTER" = "$(sha256sum -- "$CFG" | awk '{print $1}')" ]; then
+if [ "$(cat "$MIG_BASE.code")" = '0' ] && [ "$MIG_SHA_BEFORE" = "$MIG_SHA_AFTER" ]; then
     record 'dns' 'migrate-dry-run' 'PASS' 'config migrate dry-run exited 0, temp config unchanged'
 else
     record 'dns' 'migrate-dry-run' 'FAIL' "config migrate exited $(cat "$MIG_BASE.code")"
 fi
 for PROFILE in "${PROFILES[@]}"; do
-    TEST_OUT="$OUT_DIR/profile-test-$PROFILE.out"
+    SLUG="$(safe_name "$PROFILE")"
+    TEST_OUT="$OUT_DIR/profile-test-$SLUG.out"
     if [ -f "$TEST_OUT" ] && json_is_valid "$TEST_OUT"; then
         DNS_OK="$(json_field "$TEST_OUT" 'dns.ok')"
         DNS_SOURCE="$(json_field "$TEST_OUT" 'dns.source')"
@@ -980,11 +1186,11 @@ for PROFILE in "${PROFILES[@]}"; do
             *) DS_OK=0 ;;
         esac
         if [ "$DNS_OK" = 'true' ] && [ "$DS_OK" = '1' ] && [ "$DNS_SERVER" != '__MISSING__' ]; then
-            record 'dns' "phase1-$PROFILE" 'PASS' "dns.ok, source=$DNS_SOURCE server tag present"
-        elif has_sandbox_string "$TEST_OUT"; then
+            record 'dns' "phase1-$PROFILE" 'PASS' 'dns.ok, source in closed enum, server tag present'
+        elif has_sandbox_string "$TEST_OUT" || has_sandbox_string "$OUT_DIR/profile-test-$SLUG.err"; then
             record_sandbox 'dns' "phase1-$PROFILE"
         else
-            record 'dns' "phase1-$PROFILE" 'FAIL' "dns.ok=$DNS_OK source=$DNS_SOURCE"
+            record 'dns' "phase1-$PROFILE" 'FAIL' 'dns fields not ok in profile test output'
         fi
     else
         record 'dns' "phase1-$PROFILE" 'SKIP' 'no profile test result to read DNS fields from'
@@ -993,7 +1199,7 @@ for PROFILE in "${PROFILES[@]}"; do
     # construction, not parse silently. Only meaningful with cookies.
     if cookies_present "$PROFILE"; then
         EMPTY_VCFG="$(make_variant "empty-dns-$PROFILE" empty-profile-dns "$PROFILE")"
-        EMPTY_BASE="$OUT_DIR/empty-dns-$PROFILE"
+        EMPTY_BASE="$OUT_DIR/empty-dns-$SLUG"
         run_cap "$EMPTY_BASE" 60 ccfg "$EMPTY_VCFG" profile test "$PROFILE"
         if has_sandbox_string "$EMPTY_BASE.out" || has_sandbox_string "$EMPTY_BASE.err"; then
             record_sandbox 'dns' "empty-dns-$PROFILE"
@@ -1009,13 +1215,12 @@ for PROFILE in "${PROFILES[@]}"; do
     DETOUR="$(python3 "$CFGTOOL" detour-for "$CFG" "$PROFILE")"
     G1_VCFG="$(make_variant "g1-$PROFILE" add-profile-dns "$PROFILE" "$DETOUR")"
     python3 "$CFGTOOL" edit "$G1_VCFG" "$G1_VCFG" add-global-dns "$DETOUR" >/dev/null
-    copy_cookies "$G1_VCFG" "$(dirname -- "$G1_VCFG")"
-    G1_BASE="$OUT_DIR/g1-$PROFILE"
+    G1_BASE="$OUT_DIR/g1-$SLUG"
     run_cap "$G1_BASE" 30 ccfg "$G1_VCFG" profile show "$PROFILE"
-    if [ "$(cat "$G1_BASE.code")" = '2' ]; then
-        record 'dns' "g1-$PROFILE" 'PASS' 'profile dns + top-level dns together exit 2'
+    if [ "$(cat "$G1_BASE.code")" = '2' ] && grep -a -q -i -F 'dns' "$G1_BASE.err"; then
+        record 'dns' "g1-$PROFILE" 'PASS' 'profile dns + top-level dns together exit 2 naming dns'
     else
-        record 'dns' "g1-$PROFILE" 'FAIL' "G1 variant exited $(cat "$G1_BASE.code"), expected 2"
+        record 'dns' "g1-$PROFILE" 'FAIL' "G1 variant exited $(cat "$G1_BASE.code"), expected 2 naming dns"
     fi
 done
 
@@ -1025,17 +1230,19 @@ python3 "$CFGTOOL" shape "$CFG" >"$SHAPE_BASE.out" 2>"$SHAPE_BASE.err"
 SHAPE_RC="$?"
 if [ "$SHAPE_RC" -ne 0 ]; then
     record 'outbounds' 'shape' 'FAIL' "shape query exited $SHAPE_RC"
+elif ! grep -q '^tags_unique=yes$' "$SHAPE_BASE.out"; then
+    record 'outbounds' 'shape' 'FAIL' 'shape query did not assert tags_unique=yes'
 else
-    record 'outbounds' 'shape' 'PASS' 'shape query ok (field names, tags, counts only)'
+    record 'outbounds' 'shape' 'PASS' 'shape query ok (field names, tags, counts only, tags_unique=yes)'
 fi
 # Negative control: a wireguard object in outbounds[] must be rejected.
 WGOB_VCFG="$(make_variant 'wg-outbound' wg-outbound)"
 WGOB_BASE="$OUT_DIR/wg-outbound"
 run_cap "$WGOB_BASE" 30 ccfg "$WGOB_VCFG" profile show "${PROFILES[0]}"
-if [ "$(cat "$WGOB_BASE.code")" = '2' ]; then
-    record 'outbounds' 'wg-in-outbounds' 'PASS' 'wireguard in outbounds[] rejected, exit 2'
+if [ "$(cat "$WGOB_BASE.code")" = '2' ] && grep -a -q -i -F 'wireguard' "$WGOB_BASE.err"; then
+    record 'outbounds' 'wg-in-outbounds' 'PASS' 'wireguard in outbounds[] rejected, exit 2 naming wireguard'
 else
-    record 'outbounds' 'wg-in-outbounds' 'FAIL' "wireguard outbound variant exited $(cat "$WGOB_BASE.code"), expected 2"
+    record 'outbounds' 'wg-in-outbounds' 'FAIL' "wireguard outbound variant exited $(cat "$WGOB_BASE.code"), expected 2 naming wireguard"
 fi
 # Negative control: duplicate outbound tag must be rejected (only
 # when the config has at least one outbound to duplicate).
@@ -1043,10 +1250,10 @@ if grep -q '^outbounds_count=[1-9]' "$SHAPE_BASE.out"; then
     DUP_VCFG="$(make_variant 'dup-tag' dup-tag)"
     DUP_BASE="$OUT_DIR/dup-tag"
     run_cap "$DUP_BASE" 30 ccfg "$DUP_VCFG" profile show "${PROFILES[0]}"
-    if [ "$(cat "$DUP_BASE.code")" = '2' ]; then
-        record 'outbounds' 'dup-tag' 'PASS' 'duplicate outbound tag rejected, exit 2'
+    if [ "$(cat "$DUP_BASE.code")" = '2' ] && grep -a -q -i -F 'duplicate' "$DUP_BASE.err"; then
+        record 'outbounds' 'dup-tag' 'PASS' 'duplicate outbound tag rejected, exit 2 naming duplicate'
     else
-        record 'outbounds' 'dup-tag' 'FAIL' "duplicate tag variant exited $(cat "$DUP_BASE.code"), expected 2"
+        record 'outbounds' 'dup-tag' 'FAIL' "duplicate tag variant exited $(cat "$DUP_BASE.code"), expected 2 naming duplicate"
     fi
 else
     record 'outbounds' 'dup-tag' 'SKIP' 'config has no outbounds to duplicate'
@@ -1072,7 +1279,8 @@ if grep -q '^wireguard ' "$SHAPE_BASE.out"; then
     fi
     # Liveness is profile test Phase 1/4 only; reuse leg 1's result.
     for PROFILE in "${PROFILES[@]}"; do
-        TEST_OUT="$OUT_DIR/profile-test-$PROFILE.out"
+        SLUG="$(safe_name "$PROFILE")"
+        TEST_OUT="$OUT_DIR/profile-test-$SLUG.out"
         if [ -f "$TEST_OUT" ] && json_is_valid "$TEST_OUT" && [ "$(json_field "$TEST_OUT" 'gateway.ok')" = 'true' ]; then
             record 'outbounds' "wg-liveness-$PROFILE" 'PASS' 'gateway phase ok through the profile outbound (see leg 1)'
         elif [ -f "$TEST_OUT" ] && has_sandbox_string "$TEST_OUT"; then
@@ -1085,6 +1293,7 @@ else
     record 'outbounds' 'wg-shape' 'SKIP' 'no wireguard endpoint in config'
     record 'outbounds' 'wg-key-sharing' 'SKIP' 'no wireguard endpoint in config'
     for PROFILE in "${PROFILES[@]}"; do
+        SLUG="$(safe_name "$PROFILE")"
         record 'outbounds' "wg-liveness-$PROFILE" 'SKIP' 'no wireguard endpoint in config'
     done
 fi
@@ -1093,11 +1302,11 @@ fi
 # All logging probes use a variant config whose profile has NO
 # cookies file, so the failing wait path is offline and bounded.
 for PROFILE in "${PROFILES[@]}"; do
-    NOCOOKIE_VCFG="$(make_variant "nolog-$PROFILE" no-cookies "$PROFILE" "$E2E_TMP/variants/nolog-$PROFILE/missing-cookies")"
+    SLUG="$(safe_name "$PROFILE")"
     # (a) No log block + no flag: off-gate. stderr = one JSON line.
-    NOLOG_VCFG="$(make_variant "nolog2-$PROFILE" no-cookies "$PROFILE" "$E2E_TMP/variants/nolog2-$PROFILE/missing-cookies")"
+    NOLOG_VCFG="$(make_variant "nolog2-$PROFILE" no-cookies "$PROFILE" "$E2E_TMP/variants/missing-cookies-$SLUG")"
     python3 "$CFGTOOL" edit "$NOLOG_VCFG" "$NOLOG_VCFG" strip-log >/dev/null
-    NL_BASE="$OUT_DIR/log-nolog-$PROFILE"
+    NL_BASE="$OUT_DIR/log-nolog-$SLUG"
     run_cap "$NL_BASE" 30 ccfg "$NOLOG_VCFG" --profile "$PROFILE" wait --timeout 1 --json
     NL_LINES="$(wc -l < "$NL_BASE.err" | tr -d ' ')"
     if [ "$(cat "$NL_BASE.code")" = '2' ] && [ "$NL_LINES" = '1' ] && [ ! -s "$NL_BASE.out" ]; then
@@ -1106,10 +1315,10 @@ for PROFILE in "${PROFILES[@]}"; do
         record 'logging' "nolog-$PROFILE" 'FAIL' "off-gate probe exited $(cat "$NL_BASE.code") stderr_lines=$NL_LINES"
     fi
     # (b) Log block to a fresh file: castctl creates it 0600.
-    LOGFILE="$LOG_DIR/e2e-$PROFILE.log"
-    FILE_VCFG="$(make_variant "logfile-$PROFILE" no-cookies "$PROFILE" "$E2E_TMP/variants/logfile-$PROFILE/missing-cookies")"
+    LOGFILE="$LOG_DIR/e2e-$SLUG.log"
+    FILE_VCFG="$(make_variant "logfile-$PROFILE" no-cookies "$PROFILE" "$E2E_TMP/variants/missing-cookies-$SLUG")"
     python3 "$CFGTOOL" edit "$FILE_VCFG" "$FILE_VCFG" set-log-file "$LOGFILE" >/dev/null
-    LF_BASE="$OUT_DIR/log-file-$PROFILE"
+    LF_BASE="$OUT_DIR/log-file-$SLUG"
     run_cap "$LF_BASE" 30 ccfg "$FILE_VCFG" --profile "$PROFILE" wait --timeout 1 --json
     if [ -f "$LOGFILE" ]; then
         LF_MODE="$(stat -c '%a' "$LOGFILE")"
@@ -1122,10 +1331,10 @@ for PROFILE in "${PROFILES[@]}"; do
         record 'logging' "file-$PROFILE" 'FAIL' 'log file was not created'
     fi
     # (c) disabled:true creates no file.
-    DIS_LOGFILE="$LOG_DIR/disabled-$PROFILE.log"
-    DIS_VCFG="$(make_variant "logdisabled-$PROFILE" no-cookies "$PROFILE" "$E2E_TMP/variants/logdisabled-$PROFILE/missing-cookies")"
+    DIS_LOGFILE="$LOG_DIR/disabled-$SLUG.log"
+    DIS_VCFG="$(make_variant "logdisabled-$PROFILE" no-cookies "$PROFILE" "$E2E_TMP/variants/missing-cookies-$SLUG")"
     python3 "$CFGTOOL" edit "$DIS_VCFG" "$DIS_VCFG" set-log-disabled "$DIS_LOGFILE" >/dev/null
-    DIS_BASE="$OUT_DIR/log-disabled-$PROFILE"
+    DIS_BASE="$OUT_DIR/log-disabled-$SLUG"
     run_cap "$DIS_BASE" 30 ccfg "$DIS_VCFG" --profile "$PROFILE" wait --timeout 1 --json
     if [ ! -f "$DIS_LOGFILE" ] && [ "$(cat "$DIS_BASE.code")" = '2' ]; then
         record 'logging' "disabled-$PROFILE" 'PASS' 'disabled:true creates no log file'
@@ -1134,7 +1343,7 @@ for PROFILE in "${PROFILES[@]}"; do
     fi
     # (d) Trace override: --log-level trace turns logging on; the
     # typed JSON stays the last stderr line. No --trace flag exists.
-    TR_BASE="$OUT_DIR/log-trace-$PROFILE"
+    TR_BASE="$OUT_DIR/log-trace-$SLUG"
     run_cap "$TR_BASE" 30 ccfg "$NOLOG_VCFG" --log-level trace --profile "$PROFILE" wait --timeout 1 --json
     TR_LAST="$(tail -n 1 "$TR_BASE.err" 2>/dev/null)"
     case "$TR_LAST" in
@@ -1146,14 +1355,14 @@ for PROFILE in "${PROFILES[@]}"; do
     else
         record 'logging' "trace-$PROFILE" 'FAIL' "trace override exited $(cat "$TR_BASE.code")"
     fi
-    NOTRACE_BASE="$OUT_DIR/log-notrace-$PROFILE"
+    NOTRACE_BASE="$OUT_DIR/log-notrace-$SLUG"
     run_cap "$NOTRACE_BASE" 30 ccfg "$NOLOG_VCFG" --trace --profile "$PROFILE" wait --timeout 1 --json
     if [ "$(cat "$NOTRACE_BASE.code")" = '2' ]; then
         record 'logging' "no-trace-flag-$PROFILE" 'PASS' 'no --trace flag: exit 2'
     else
         record 'logging' "no-trace-flag-$PROFILE" 'FAIL' "unexpected --trace acceptance, exit $(cat "$NOTRACE_BASE.code")"
     fi
-    BADLV_BASE="$OUT_DIR/log-badlevel-$PROFILE"
+    BADLV_BASE="$OUT_DIR/log-badlevel-$SLUG"
     run_cap "$BADLV_BASE" 30 ccfg "$NOLOG_VCFG" --log-level bogus --profile "$PROFILE" wait --timeout 1 --json
     if [ "$(cat "$BADLV_BASE.code")" = '2' ] && [ "$(count_fixed "$BADLV_BASE.err" 'bogus')" = '0' ]; then
         record 'logging' "bad-level-$PROFILE" 'PASS' 'invalid log level exits 2, probe value never echoed (count 0)'
@@ -1161,9 +1370,9 @@ for PROFILE in "${PROFILES[@]}"; do
         record 'logging' "bad-level-$PROFILE" 'FAIL' "bad log level exited $(cat "$BADLV_BASE.code")"
     fi
     # (e) Refused log target: output = the config file itself.
-    REF_VCFG="$(make_variant "logrefused-$PROFILE" no-cookies "$PROFILE" "$E2E_TMP/variants/logrefused-$PROFILE/missing-cookies")"
+    REF_VCFG="$(make_variant "logrefused-$PROFILE" no-cookies "$PROFILE" "$E2E_TMP/variants/missing-cookies-$SLUG")"
     python3 "$CFGTOOL" edit "$REF_VCFG" "$REF_VCFG" set-log-output "$REF_VCFG" >/dev/null
-    REF_BASE="$OUT_DIR/log-refused-$PROFILE"
+    REF_BASE="$OUT_DIR/log-refused-$SLUG"
     run_cap "$REF_BASE" 30 ccfg "$REF_VCFG" --profile "$PROFILE" wait --timeout 1 --json
     if [ "$(cat "$REF_BASE.code")" = '2' ]; then
         record 'logging' "refused-$PROFILE" 'PASS' 'log output = config file refused, exit 2'
@@ -1171,10 +1380,6 @@ for PROFILE in "${PROFILES[@]}"; do
         record 'logging' "refused-$PROFILE" 'FAIL' "refused log target exited $(cat "$REF_BASE.code"), expected 2"
     fi
     record 'logging' "live-content-$PROFILE" 'SKIP' 'log content on a live successful run [NEEDS-MEASUREMENT]'
-    # Keep the no-cookies variant path referenced (avoids an unused
-    # variable warning in strict shells; the variant itself is the
-    # base for the strip-log variant above).
-    [ -n "$NOCOOKIE_VCFG" ] || true
 done
 
 # ---- leg 8: Telegram ---------------------------------------------------
@@ -1279,36 +1484,55 @@ else
     else
         record 'keeper' 'status' 'FAIL' "keeper status exited $KEEPER_STATUS_RC"
     fi
-    # One tick now. Exit 3 (entry stopped: auth expired) is a real
-    # outcome, recorded as PASS with the reason; exit 1/4 are
-    # failures unless the sandbox string is present.
+    # One tick now — but keeper check can rewrite cookies (tick
+    # writes the cookies file), so on real profiles it stays dry
+    # unless --live-keeper is given. Exit 3 (entry stopped: auth
+    # expired) is a real outcome, recorded as SKIP — never a
+    # healthy PASS. Exit 1/4 are failures unless the sandbox
+    # string is present.
     KEEPER_ANY_COOKIES=0
     for PROFILE in "${PROFILES[@]}"; do
+        SLUG="$(safe_name "$PROFILE")"
         cookies_present "$PROFILE" && KEEPER_ANY_COOKIES=1
     done
     if [ "$KEEPER_ANY_COOKIES" = '0' ]; then
         record 'keeper' 'check' 'SKIP' 'no cookies file for any profile'
+        record 'keeper' 'state-file' 'SKIP' 'no cookies file for any profile; state path not asserted'
+    elif [ "$LIVE_KEEPER" != '1' ]; then
+        record 'keeper' 'check' 'SKIP' 'dry: keeper check may rewrite cookies; pass --live-keeper to run it'
+        record 'keeper' 'state-file' 'SKIP' 'dry: keeper check did not run; state path not asserted'
     else
         CHECK_BASE="$OUT_DIR/keeper-check"
         run_cap "$CHECK_BASE" 120 ccfg "$CFG" keeper check
         CHECK_RC="$(cat "$CHECK_BASE.code")"
-        if [ "$CHECK_RC" = '0' ] || [ "$CHECK_RC" = '3' ]; then
-            record 'keeper' 'check' 'PASS' "keeper check exited $CHECK_RC (0 healthy, 3 entry stopped)"
+        if [ "$CHECK_RC" = '0' ]; then
+            record 'keeper' 'check' 'PASS' 'keeper check exited 0 (healthy)'
+        elif [ "$CHECK_RC" = '3' ]; then
+            record 'keeper' 'check' 'SKIP' 'keeper check exited 3 (entry stopped), recorded outcome, not a healthy PASS'
         elif has_sandbox_string "$CHECK_BASE.out" || has_sandbox_string "$CHECK_BASE.err"; then
             record_sandbox 'keeper' 'check'
         else
             record 'keeper' 'check' 'FAIL' "keeper check exited $CHECK_RC"
         fi
-        STATE_FILE="$CFG_DIR/session-state.json"
-        if [ -f "$STATE_FILE" ]; then
-            STATE_MODE="$(stat -c '%a' "$STATE_FILE")"
-            if [ "$STATE_MODE" = '600' ]; then
-                record 'keeper' 'state-file' 'PASS' 'session-state.json exists mode 0600'
-            else
-                record 'keeper' 'state-file' 'FAIL' "session-state.json mode $STATE_MODE, expected 600"
+        # The keeper writes state per profile, at
+        # <config-dir>/profiles/<name>/session-state.json — never at
+        # <config-dir>/session-state.json. Mode must be 0600.
+        STATE_FOUND=0
+        STATE_BAD=0
+        for PROFILE in "${PROFILES[@]}"; do
+            SLUG="$(safe_name "$PROFILE")"
+            STATE_FILE="$CFG_DIR/profiles/$PROFILE/session-state.json"
+            if [ -f "$STATE_FILE" ]; then
+                STATE_FOUND=1
+                [ "$(stat -c '%a' "$STATE_FILE")" = '600' ] || STATE_BAD=1
             fi
+        done
+        if [ "$STATE_FOUND" = '1' ] && [ "$STATE_BAD" = '0' ]; then
+            record 'keeper' 'state-file' 'PASS' 'session-state.json exists mode 0600 at profiles/<name>/session-state.json'
+        elif [ "$STATE_BAD" = '1' ]; then
+            record 'keeper' 'state-file' 'FAIL' 'session-state.json mode wrong, expected 600'
         else
-            record 'keeper' 'state-file' 'SKIP' 'no session-state.json in the temp config dir (path unverified)'
+            record 'keeper' 'state-file' 'SKIP' 'no session-state.json under profiles/<name>/ (per-profile path checked)'
         fi
     fi
     record 'keeper' 'cdp-reexport' 'SKIP' 'real CDP re-export needs a running browser + expired session [NEEDS-MEASUREMENT]'
@@ -1341,6 +1565,24 @@ if [ "$WEBUI_TOKEN_AVAILABLE" = '0' ]; then
     else
         record 'webui' 'no-token' 'FAIL' "webui serve with no token exited $(cat "$NEG_BASE.code"), expected 2"
     fi
+    # The non-loopback probe needs a webui block: without one,
+    # serve fails on the block gate before the listen check, so
+    # the listen rule is unreachable and the probe SKIP, never
+    # PASS for the wrong reason. With a block, the listen check
+    # runs before the token check (measured).
+    if [ "$HAS_WEBUI_BLOCK" != 'yes' ]; then
+        record 'webui' 'nonloopback-refusal' 'SKIP' 'no webui block: listen check unreachable behind the block gate'
+    else
+        NL_PORT="$(free_port)"
+        NL_BASE="$OUT_DIR/webui-nonloopback"
+        run_cap "$NL_BASE" 15 ccfg "$CFG" webui serve --listen "0.0.0.0:$NL_PORT"
+        if [ "$(cat "$NL_BASE.code")" = '2' ] && grep -a -q -F -- 'host must be loopback' "$NL_BASE.err" \
+            && [ "$(count_fixed "$NL_BASE.err" "0.0.0.0")" = '0' ]; then
+            record 'webui' 'nonloopback-refusal' 'PASS' 'non-loopback --listen exits 2 naming the loopback rule, address never echoed (count 0)'
+        else
+            record 'webui' 'nonloopback-refusal' 'FAIL' "non-loopback --listen exited $(cat "$NL_BASE.code"), expected 2 naming the loopback rule"
+        fi
+    fi
     record 'webui' 'auth' 'SKIP' 'no webui token (env unset, no block token)'
     record 'webui' 'bind' 'SKIP' 'no webui token (env unset, no block token)'
     record 'webui' 'secrets-write-only' 'SKIP' 'no webui token (env unset, no block token)'
@@ -1366,11 +1608,9 @@ else
         GOOD_TOKEN_KNOWN=0
         [ "$WEBUI_KEY_HELD" = '1' ] && GOOD_TOKEN_KNOWN=1
         WEBUI_LOG="$OUT_DIR/webui-serve"
-        if [ "$WEBUI_KEY_HELD" = '1' ]; then
-            ( export CASTCTL_WEBUI_KEY; ccfg "$CFG" webui serve --port "$PORT" ) >"$WEBUI_LOG.out" 2>"$WEBUI_LOG.err" &
-        else
-            ccfg "$CFG" webui serve --port "$PORT" >"$WEBUI_LOG.out" 2>"$WEBUI_LOG.err" &
-        fi
+        # webui_exec uses exec, so $! IS the castctl PID itself —
+        # never a wrapper subshell (see the helper definition).
+        webui_exec "$CFG" webui serve --port "$PORT" >"$WEBUI_LOG.out" 2>"$WEBUI_LOG.err" &
         WEBUI_PID="$!"
         # Poll until the API answers 401 unauthenticated (server up)
         # or the process exits.
@@ -1411,11 +1651,11 @@ else
             if [ "$GOOD_TOKEN_KNOWN" = '1' ]; then
                 STATUS_GOOD="$WEBUI_DIR/status-good.json"
                 CODE_GOOD="$(curl -s -m 10 -o "$STATUS_GOOD" -w '%{http_code}' -H @"$HDR_GOOD" "http://127.0.0.1:$PORT/api/v1/status" 2>/dev/null || echo 000)"
-                REMOTE_EXP="$(json_field "$STATUS_GOOD" 'remote_exposure')"
+                REMOTE_EXP="$(json_field "$STATUS_GOOD" 'data.remote_exposure')"
                 if [ "$CODE_GOOD" = '200' ] && [ "$REMOTE_EXP" = 'false' ]; then
                     record 'webui' 'auth-good' 'PASS' 'good token 200, remote_exposure false'
                 else
-                    record 'webui' 'auth-good' 'FAIL' "good token code=$CODE_GOOD remote_exposure=$REMOTE_EXP"
+                    record 'webui' 'auth-good' 'FAIL' "good token did not return 200 with remote_exposure false (code=$CODE_GOOD)"
                 fi
                 # Secrets write-only: GET /config decoded content must
                 # carry <redacted> at secret positions (when the
@@ -1429,13 +1669,15 @@ try:
     d = json.load(open(sys.argv[1], encoding="utf-8"))
 except Exception:
     print("__BADJSON__"); sys.exit(0)
-content = d.get("content", "")
+data = d.get("data", {})
+content = data.get("content", "") if isinstance(data, dict) else ""
 print(content.count("<redacted>") if isinstance(content, str) else "__NOCONTENT__")
 PY
 )"
                     SECRETS_IN_COPY=0
-                    [ "$TELEGRAM_TOKEN_HELD" = '1' ] || [ "$TG_TOKEN_PRESENT" = 'yes' ] && SECRETS_IN_COPY=1
-                    [ "$WEBUI_TOKEN_PRESENT" = 'yes' ] && SECRETS_IN_COPY=1
+                    if [ "$TELEGRAM_TOKEN_HELD" = '1' ] || [ "$TG_TOKEN_PRESENT" = 'yes' ] || [ "$WEBUI_TOKEN_PRESENT" = 'yes' ]; then
+                        SECRETS_IN_COPY=1
+                    fi
                     if [ "$SECRETS_IN_COPY" = '1' ] && [ "$MARKERS" != '__BADJSON__' ] && [ "$MARKERS" != '__NOCONTENT__' ] && [ "$MARKERS" -ge 1 ] 2>/dev/null; then
                         record 'webui' 'secrets-write-only' 'PASS' "GET /config decoded content carries <redacted> markers (count=$MARKERS)"
                     elif [ "$SECRETS_IN_COPY" = '0' ]; then
@@ -1450,11 +1692,14 @@ PY
                 TG_BODY="$WEBUI_DIR/settings-telegram.json"
                 CODE_TG="$(curl -s -m 10 -o "$TG_BODY" -w '%{http_code}' -H @"$HDR_GOOD" "http://127.0.0.1:$PORT/api/v1/settings/telegram" 2>/dev/null || echo 000)"
                 if [ "$CODE_TG" = '200' ]; then
-                    MASKED="$(json_field "$TG_BODY" 'masked')"
-                    if [ "$MASKED" = '***' ]; then
+                    TG_CONFIGURED="$(json_field "$TG_BODY" 'data.configured')"
+                    MASKED="$(json_field "$TG_BODY" 'data.masked')"
+                    if [ "$TG_CONFIGURED" != 'true' ]; then
+                        record 'webui' 'telegram-masked' 'SKIP' 'telegram not configured on the served config; masked is empty by design'
+                    elif [ "$MASKED" = '***' ]; then
                         record 'webui' 'telegram-masked' 'PASS' 'GET /settings/telegram masked exactly ***'
                     else
-                        record 'webui' 'telegram-masked' 'FAIL' "settings/telegram masked=$MASKED"
+                        record 'webui' 'telegram-masked' 'FAIL' 'settings/telegram masked value is not exactly ***'
                     fi
                 elif [ "$CODE_TG" = '404' ] || [ "$CODE_TG" = '501' ]; then
                     record 'webui' 'telegram-masked' 'SKIP' "settings/telegram code=$CODE_TG (no telegram block served)"
@@ -1472,11 +1717,20 @@ PY
             if [ "$CODE_LOGS" != '200' ] && [ "$GOOD_TOKEN_KNOWN" != '1' ]; then
                 record 'webui' 'logs' 'SKIP' 'logs check needs a good token'
             elif [ "$CODE_LOGS" = '200' ] && json_is_valid "$LOGS_BODY"; then
-                LOGS_DISABLED="$(json_field "$LOGS_BODY" 'disabled')"
-                if [ "$LOGS_DISABLED" = 'true' ]; then
-                    record 'webui' 'logs' 'PASS' 'GET /logs reports disabled with a gate reason (no ring invented)'
-                else
+                LOGS_DISABLED="$(json_field "$LOGS_BODY" 'data.disabled')"
+                LOGS_REASON="$(json_field "$LOGS_BODY" 'data.reason')"
+                LOGS_ENTRIES="$(json_field "$LOGS_BODY" 'data.entries')"
+                EXPECTED_REASON="$(python3 "$CFGTOOL" logs-expected "$CFG")"
+                LOGS_REASON_OK=0
+                case "$LOGS_REASON" in
+                    logging_disabled|log_output_not_file|log_output_refused) LOGS_REASON_OK=1 ;;
+                esac
+                if [ "$LOGS_DISABLED" = 'true' ] && [ "$LOGS_REASON_OK" = '1' ] && [ "$LOGS_REASON" = "$EXPECTED_REASON" ]; then
+                    record 'webui' 'logs' 'PASS' 'GET /logs disabled with the gate reason matching the config'
+                elif [ "$LOGS_DISABLED" = 'false' ] && [ "$EXPECTED_REASON" = 'enabled' ] && [ "${LOGS_ENTRIES#[}" != "$LOGS_ENTRIES" ]; then
                     record 'webui' 'logs' 'PASS' 'GET /logs served entries (gate reason not disabled)'
+                else
+                    record 'webui' 'logs' 'FAIL' "GET /logs gate mismatch: disabled=$LOGS_DISABLED reason-in-closed-enum=$LOGS_REASON_OK"
                 fi
             else
                 record 'webui' 'logs' 'FAIL' "GET /logs code=$CODE_LOGS"
@@ -1485,15 +1739,40 @@ PY
         kill "$WEBUI_PID" 2>/dev/null || true
         wait "$WEBUI_PID" 2>/dev/null || true
         WEBUI_PID=''
-        # Non-loopback --listen refusal (value never echoed: the
-        # probe address is a fixed literal, not a secret).
-        NL_PORT="$(free_port)"
-        NL_BASE="$OUT_DIR/webui-nonloopback"
-        run_cap "$NL_BASE" 15 ccfg "$CFG" webui serve --listen "0.0.0.0:$NL_PORT"
-        if [ "$(cat "$NL_BASE.code")" = '2' ] && [ "$(count_fixed "$NL_BASE.err" "0.0.0.0")" = '0' ]; then
-            record 'webui' 'nonloopback-refusal' 'PASS' 'non-loopback --listen exits 2, address never echoed (count 0)'
+        # Verify the port actually closes. The recorded PID is the
+        # castctl process itself (webui_exec uses exec), so a
+        # lingering answer means the kill missed the real server.
+        PORT_CLOSED=0
+        for _ in $(seq 1 10); do
+            if ! curl -s -m 2 -o /dev/null "http://127.0.0.1:$PORT/api/v1/status" 2>/dev/null; then
+                PORT_CLOSED=1; break
+            fi
+            sleep 0.5
+        done
+        if [ "$PORT_CLOSED" = '1' ]; then
+            record 'webui' 'server-stopped' 'PASS' 'webui server stopped, port closed after the leg'
         else
-            record 'webui' 'nonloopback-refusal' 'FAIL' "non-loopback --listen exited $(cat "$NL_BASE.code")"
+            record 'webui' 'server-stopped' 'FAIL' 'webui server port still answering after kill'
+        fi
+        # Non-loopback --listen refusal. The listen check runs
+        # before the token check when a webui block exists
+        # (measured: exit 2, fixed message "invalid --listen: host
+        # must be loopback"), so this probe needs no token — but
+        # without a block the block gate fires first and the probe
+        # SKIP, never PASS for the wrong reason. The probe address
+        # is a fixed literal, not a secret.
+        if [ "$HAS_WEBUI_BLOCK" != 'yes' ]; then
+            record 'webui' 'nonloopback-refusal' 'SKIP' 'no webui block: listen check unreachable behind the block gate'
+        else
+            NL_PORT="$(free_port)"
+            NL_BASE="$OUT_DIR/webui-nonloopback"
+            run_cap "$NL_BASE" 15 ccfg "$CFG" webui serve --listen "0.0.0.0:$NL_PORT"
+            if [ "$(cat "$NL_BASE.code")" = '2' ] && grep -a -q -F -- 'host must be loopback' "$NL_BASE.err" \
+                && [ "$(count_fixed "$NL_BASE.err" "0.0.0.0")" = '0' ]; then
+                record 'webui' 'nonloopback-refusal' 'PASS' 'non-loopback --listen exits 2 naming the loopback rule, address never echoed (count 0)'
+            else
+                record 'webui' 'nonloopback-refusal' 'FAIL' "non-loopback --listen exited $(cat "$NL_BASE.code"), expected 2 naming the loopback rule"
+            fi
         fi
         record 'webui' 'external-connect' 'SKIP' 'external connect attempt is single-interface [NEEDS-MEASUREMENT]; bind + rejection are the proof'
     fi
@@ -1528,8 +1807,8 @@ else
             record 'module' 'zip-scan' 'SKIP' 'no ZIP was built'
         else
             record 'module' 'build' 'FAIL' "build.sh exited $MOD_RC"
-            printf 'e2e: module build.sh failed (last 20 lines):\n' >&2
-            tail -n 20 "$MOD_BASE.err" "$MOD_BASE.out" >&2 || true
+            printf 'e2e: module build.sh failed; tail recorded in captured output (fixed notice only)\n' >&2
+            tail -n 20 "$MOD_BASE.err" "$MOD_BASE.out" >"$OUT_DIR/module-build-tail.err" 2>/dev/null || true
             record 'module' 'zip-scan' 'SKIP' 'no ZIP was built'
         fi
     elif [ -z "$ZIP_FILE" ]; then
@@ -1547,13 +1826,18 @@ else
         fi
         MEMBERS="$OUT_DIR/module-members.txt"
         unzip -l -- "$ZIP_FILE" >"$MEMBERS" 2>/dev/null || true
+        # Member NAMES only: unzip -l output wraps long names and
+        # indents entries, so a nested member (payload/config.json)
+        # evades a (^|[[:space:]])config\.json$ match over it.
+        MEMBER_NAMES="$OUT_DIR/module-member-names.txt"
+        unzip -Z1 -- "$ZIP_FILE" >"$MEMBER_NAMES" 2>/dev/null || true
         BAD_MEMBERS=0
-        grep -a -q -E -- '(^|[[:space:]])config\.json$' "$MEMBERS" && BAD_MEMBERS=1
-        grep -a -q -E -- '\.key$' "$MEMBERS" && BAD_MEMBERS=1
+        grep -a -q -E -- '(^|/)config\.json$' "$MEMBER_NAMES" && BAD_MEMBERS=1
+        grep -a -q -E -- '\.key$' "$MEMBER_NAMES" && BAD_MEMBERS=1
         if [ "$BAD_MEMBERS" = '0' ]; then
-            record 'module' 'zip-members' 'PASS' 'no config.json / *.key member (names only)'
+            record 'module' 'zip-members' 'PASS' 'no config.json / *.key member at any depth (member names only)'
         else
-            record 'module' 'zip-members' 'FAIL' 'forbidden member name present in ZIP listing'
+            record 'module' 'zip-members' 'FAIL' 'forbidden member name present in ZIP member names'
         fi
         # Per-member counts-only scan: never extract the ZIP.
         # The payload binary legitimately embeds field-name/code
@@ -1603,10 +1887,15 @@ EOF_MEMBERS
 fi
 
 # ---- leg 13: final secret scan (counts only) ----------------------------
-# Scope A: captured outputs only. Scope B (never content-scanned):
-# the temp config copy, header files, cookies copies, .bak files.
-# Scope C: a control file with a FAKE labelled value the scanner
-# must detect, proving it can detect.
+# Scope A: captured outputs only (.out/.err in OUT_DIR, .json in
+# WEBUI_DIR, .log in LOG_DIR), plus verdicts.txt for VALUE patterns
+# only (label patterns would self-match on the scan lines' pattern
+# names). The scan asserts Scope A is non-empty: an empty scope
+# would make a zero-count verdict vacuous.
+# Scope B (never content-scanned): the temp config copy, header
+# files, and the cookies ORIGINALS (hash/mtime recorded only, never
+# read). Scope C: a control file with a FAKE labelled value the
+# scanner must detect, proving it can detect.
 CONTROL_FILE="$E2E_TMP/control.txt"
 printf 'hatch_sess=FAKEPLACEHOLDER123\n' > "$CONTROL_FILE"
 CONTROL_COUNT="$(count_regex "$CONTROL_FILE" 'hatch_sess=[^;[:space:]"]+')"
@@ -1617,12 +1906,20 @@ if [ "$CONTROL_COUNT" -lt 1 ]; then
 else
     record 'secret-scan' 'control' 'PASS' "scanner control detected (count=$CONTROL_COUNT, fake value)"
 fi
+SCOPE_A_FILES=0
+for f in "$OUT_DIR"/*.out "$OUT_DIR"/*.err "$WEBUI_DIR"/*.json "$LOG_DIR"/*.log; do
+    [ -f "$f" ] && SCOPE_A_FILES=$((SCOPE_A_FILES + 1))
+done
+if [ "$SCOPE_A_FILES" = '0' ]; then
+    record 'secret-scan' 'scope' 'FAIL' 'no captured output files to scan; a zero-count verdict would be vacuous'
+    SCAN_FAIL=1
+fi
 # Value patterns: only values the script itself holds from the env.
 VALUE_TOTAL=0
 if [ "$TELEGRAM_TOKEN_HELD" = '1' ]; then
-    for f in "$OUT_DIR"/*.out "$OUT_DIR"/*.err "$WEBUI_DIR"/*.json "$LOG_DIR"/*.log; do
+    for f in "$VERDICTS" "$OUT_DIR"/*.out "$OUT_DIR"/*.err "$WEBUI_DIR"/*.json "$LOG_DIR"/*.log; do
         [ -f "$f" ] || continue
-        VALUE_TOTAL=$((VALUE_TOTAL + $(count_fixed "$f" "$CASTCTL_TELEGRAM_TOKEN")))
+        VALUE_TOTAL=$((VALUE_TOTAL + $(count_fixed "$f" "$TELEGRAM_TOKEN_VALUE")))
     done
     printf 'secret-scan | telegram_token_value | count=%s\n' "$VALUE_TOTAL" | tee -a "$VERDICTS"
     [ "$VALUE_TOTAL" = '0' ] || SCAN_FAIL=1
@@ -1631,7 +1928,7 @@ else
 fi
 WEBUI_VALUE_TOTAL=0
 if [ "$WEBUI_KEY_HELD" = '1' ]; then
-    for f in "$OUT_DIR"/*.out "$OUT_DIR"/*.err "$WEBUI_DIR"/*.json "$LOG_DIR"/*.log; do
+    for f in "$VERDICTS" "$OUT_DIR"/*.out "$OUT_DIR"/*.err "$WEBUI_DIR"/*.json "$LOG_DIR"/*.log; do
         [ -f "$f" ] || continue
         WEBUI_VALUE_TOTAL=$((WEBUI_VALUE_TOTAL + $(count_fixed "$f" "$WEBUI_KEY_VALUE")))
     done
@@ -1672,6 +1969,9 @@ if [ "$SUPPLIED_SHA" = "$SUPPLIED_SHA_AFTER" ]; then
 else
     record 'immutability' 'supplied-config' 'FAIL' 'supplied config changed during the run'
 fi
+# Cookies originals: byte/mtime re-recorded and compared (paths
+# only, hashes never printed). See verify_originals above.
+verify_originals
 
 printf '\n=== e2e summary ===\n'
 printf 'PASS: %s\nFAIL: %s\nSKIP: %s (of which suspected-sandbox: %s)\n' "$PASS_COUNT" "$FAIL_COUNT" "$SKIP_COUNT" "$SANDBOX_SKIP_COUNT"
