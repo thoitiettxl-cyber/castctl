@@ -44,7 +44,7 @@ are rejected — see [Per-profile DNS](#per-profile-dns)):
 | `subscription_action_id` | string |
 | `fingerprint` | string (browser fingerprint preset name) |
 | `tls_engine` | string (`utls`, `cronet`, …; storage-only in the current build) |
-| `outbound` | string tag (shared outbound/endpoint), an inline outbound object, or absent (= direct) |
+| `outbound` | string tag (shared outbound/endpoint), an inline outbound object, or absent (= direct); an outbound whose server address is a hostname resolves it through the synthesised `local` server unless `domain_resolver` is set (see [Outbound server addresses](#outbound-server-addresses-domain_resolver-and-the-local-bootstrap-server)) |
 | `dns` | object: the profile's own DNS section, parsed exactly like the top-level section (see [Per-profile DNS](#per-profile-dns)) |
 
 Strictness: the file is parsed strictly — unknown fields anywhere
@@ -694,7 +694,12 @@ runtime-only `"direct"` outbound and the synthetic
 `"castctl-dialer"` are NOT valid detour tags, except for the
 per-profile synthesised direct tag, which is valid only as its
 own direct profile's detour — see
-[Per-profile DNS](#per-profile-dns)).
+[Per-profile DNS](#per-profile-dns)). `domain_resolver`
+names the DNS server tag used to resolve a domain in a server
+address (string or object form; see [Outbound server
+addresses](#outbound-server-addresses-domain_resolver-and-the-local-bootstrap-server));
+castctl defaults it to the synthesised `local` server for
+outbounds/endpoints with hostname servers.
 
 Per-type fields:
 
@@ -703,7 +708,7 @@ Per-type fields:
 | `udp`, `tcp` | `server` (required: hostname or IP), `server_port` (default 53) |
 | `tls` | remote fields + TLS options (`tls.enabled`, `server_name`, `insecure`, `alpn`, certificates); `server_port` default 853 |
 | `https` | TLS fields + `path` (default `/dns-query`), `method`, `headers`; TLS is forced on for `https` transports; `server_port` default 443 |
-| `local` | `prefer_go` (bool), `neighbor_domain`; **no** `server` field — it queries the system resolver |
+| `local` | `prefer_go` (bool), `neighbor_domain`; **no** `server` field — it queries the system resolver; also the synthesised bootstrap server for outbound server addresses (see [Outbound server addresses](#outbound-server-addresses-domain_resolver-and-the-local-bootstrap-server)) |
 | `hosts` | `path`, `predefined` (static host mappings) |
 | `fakeip` | `inet4_range`, `inet6_range` |
 | `dhcp`, `mdns` | local fields + `interface` |
@@ -757,11 +762,18 @@ match-all; verify against a live run before relying on it.
   before the outbound manager starts; one DNS client per
   invocation/profile, with a per-client cache and per-manager
   detour resolution (no cross-profile cache/pool sharing).
-- **Bootstrap is the sole system-resolver use.** A remote
-  server addressed by domain name is bootstrapped through the
-  system resolver so its address can be dialled through the
-  detour. IP-literal servers need no bootstrap. `local`,
-  `hosts`, and `fakeip` servers are unaffected by bootstrap.
+- **Bootstrap and the `local` bootstrap server are the two
+  system-resolver uses.** (a) A remote DNS server addressed by
+  domain name is bootstrapped through the system resolver so
+  its address can be dialled through the detour (bootstrap
+  substitution, via `outbound.BootstrapLookup`). (b) An
+  outbound/endpoint server addressed by domain name is
+  resolved through the synthesised `local` transport when no
+  explicit `domain_resolver` is set (see [Outbound server
+  addresses](#outbound-server-addresses-domain_resolver-and-the-local-bootstrap-server)).
+  Neither is ever used for dial targets. IP-literal servers
+  need no bootstrap. `local`, `hosts`, and `fakeip` servers
+  are unaffected by bootstrap substitution.
 - **WireGuard key-sharing check includes dns detours.**
   A dns server whose detour is a WireGuard endpoint participates
   in the same private-key comparison as profile outbounds: two
@@ -889,7 +901,109 @@ Prefer an explicit `https`/`tls` server with a detour over
 `local` until live proof exists.] `local` has no hermetic
 fake-upstream test (it reads the OS resolver config); the
 fake-upstream tests prove the `tcp` detour mechanism, not
-`local`.
+`local`. This paragraph governs TARGET lookups (rules and
+`final`): for target resolution, `local` is explicit-only and
+is never synthesised as the default. The `local` server
+synthesised for OUTBOUND server addresses is a separate
+scope — see [Outbound server addresses: `domain_resolver`
+and the `local` bootstrap server](#outbound-server-addresses-domain_resolver-and-the-local-bootstrap-server)
+below; the two statements do not contradict each other.
+
+### Outbound server addresses: `domain_resolver` and the `local` bootstrap server
+
+An outbound or endpoint whose `server` address is a hostname
+must resolve that hostname before it can dial. In sing-box
+1.14.4 the field that chooses the resolver is
+`domain_resolver`, a Dial Field present on every outbound and
+endpoint: it names a DNS server TAG in the same effective
+resolver (the profile's resolved `dns` options), and for
+every type except `direct` it governs the domain in the
+server address (for `direct` it governs the domain in the
+request instead). See the sing-box Dial Fields doc
+(<https://sing-box.sagernet.org/configuration/shared/dial/>)
+and the `local` server doc
+(<https://sing-box.sagernet.org/configuration/dns/server/local/>).
+
+`domain_resolver` has two forms. A string is equivalent to
+setting `server` in the object form. The object form fields
+are: `server` (required: the DNS server tag), `timeout`,
+`strategy`, `disable_cache`, `disable_optimistic_cache`,
+`rewrite_ttl`, `client_subnet`. An explicit value — string or
+object — is honoured exactly as sing-box parses it, never
+overwritten. An empty value (empty string, or an empty
+object) is treated as unset.
+
+**The default rule (a deliberate castctl choice, NOT a
+sing-box default).** When `domain_resolver` is unset and an
+outbound/endpoint server address is a hostname, castctl
+resolves it through the synthesised `local` server. When the
+server is an IP literal, or the outbound is `direct`, nothing
+is set and behaviour is exactly as before. An explicit
+`domain_resolver` always wins.
+
+Why the default exists: sing-box resolves an unset
+`domain_resolver` through the profile's DNS transport, and
+when that transport itself detours through the hostname
+outbound (the normal shape for a proxy profile), the
+resolution re-enters the same transport and sing-box rejects
+it (`DNS query loopback`). A hostname proxy outbound with no
+explicit resolver therefore failed outright. The `local`
+server breaks the loop by resolving the server address
+through the system resolver instead.
+
+**Scope limit.** The default applies ONLY to outbound/endpoint
+server addresses, per hop (each hop with a domain server
+address resolves via its own `domain_resolver`). Target
+lookups always use the profile's configured resolver
+(rules/`final`); never through `local` unless the user
+explicitly routes them there (a rule or `final` naming the
+`local` tag, or an explicit `domain_resolver` on the
+requesting outbound). No change is made to DNS-server
+hostnames (the bootstrap substitution path stays as
+documented above), and no default is applied to
+WireGuard endpoints: an explicit `domain_resolver` authored
+on an endpoint is honoured by sing-box as today.
+
+**The synthesised `local` server.** The runtime appends one
+dedicated server to the effective DNS options, in memory
+only, never written to any config file:
+`{"type": "local", "tag": "local"}`, with no detour,
+`prefer_go=false` (the sing-box default), and no
+`neighbor_domain`. It has no `server` field: it queries the
+system resolver. It is never `final`, never rule-targeted,
+never the default transport, and never reused for target
+lookups. If a user-defined server tagged `"local"` already
+exists and is type `local` with no detour, it is reused
+as-is. If the tag `"local"` exists with a different type or
+with a detour, runtime construction fails closed (exit 2)
+with an error naming the tag. Note: a `local` server with no
+detour in a profile `dns` block is refused earlier, at parse
+time, by the rule that every profile-block server needs a
+detour — so the reuse case is reachable from the top-level
+section and from hand-built configs; to use your own
+bootstrap server, rename its tag and author
+`domain_resolver` explicitly.
+
+**Failure mode: fail closed, no fallback.** A missing or
+dangling `domain_resolver` fails at startup with an error
+naming the tag. If the system resolver cannot resolve the
+server hostname, dialing fails as a construction/dial error.
+There is never a fallback to direct dialing or to the
+profile DNS for a server address.
+
+**Leak, stated plainly.** Proxy and outbound server hostnames
+resolve via the system resolver by default; the system
+resolver (and, on systemd-resolved hosts, the D-Bus resolver
+service) sees those hostnames. That is the price of the fix:
+without it, hostname outbounds cannot dial at all. Target
+hostnames are unaffected — they still resolve only through
+the profile's configured resolver and outbound. SNI and TLS
+verification are preserved: no substitution happens, the
+resolved address only feeds the dialer, and the TLS
+`server_name` stays the configured hostname. In
+particular, `tls.insecure` is never set by this default: a
+TLS-intercepting proxy still needs its CA configured in the
+profile, exactly as before.
 
 **Live proof (post-merge, not claimed from fake-upstream
 tests).** For each profile: `profile test` Phase 1 `ok: true`
@@ -1201,6 +1315,9 @@ detour, and live traversal of `local`+detour is unproven].
 The model documents `prefer_go=false` for `local` servers
 (the Go resolver path stays off). Until live proof exists,
 prefer an explicit `https`/`tls` server with a detour over
-`local`. Live proof of DoH-via-detour on the real migrated
-config is a post-merge step (see [Per-profile DNS](#per-profile-dns));
+`local`. (This governs target lookups; the `local` server
+synthesised for outbound server addresses is a separate
+scope — see [Outbound server
+addresses](#outbound-server-addresses-domain_resolver-and-the-local-bootstrap-server).)
+Live proof of DoH-via-detour on the real migrated config is a post-merge step (see [Per-profile DNS](#per-profile-dns));
 fake-upstream tests do not claim it.
