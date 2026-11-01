@@ -23,6 +23,7 @@ package pluginabi
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 const (
@@ -79,8 +80,11 @@ type Envelope struct {
 }
 
 // Error is the failure half of an Envelope. It carries a stable
-// code and a scrubbed message only: a plugin never picks an exit
-// code and must never return a raw server body.
+// code and a redacted message only: a plugin never picks an exit
+// code and must never return a raw server body. The host
+// redacts/caps plugin-chosen error text before it reaches any
+// output path; the plugin must not rely on the host to make a
+// secret it embedded in a message safe.
 type Error struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
@@ -135,12 +139,23 @@ type Registration struct {
 	Metadata      Metadata     `json:"metadata"`
 	Capabilities  Capabilities `json:"capabilities"`
 	Commands      []Command    `json:"commands,omitempty"`
+	// CookieHosts declares the hosts the plugin needs the
+	// egress proxy to inject the session cookie for (schema 1,
+	// additive: absent means no hosts, hence no injection).
+	// Core injects the cookie ONLY for these hosts; a plugin
+	// that declares none never receives the cookie through
+	// the proxy. Hosts are bare hostnames, no scheme, port,
+	// path, or wildcard.
+	CookieHosts []string `json:"cookie_hosts,omitempty"`
 }
 
 // Identity is the opaque, secret-stripped identity core hands a
 // plugin: the profile outbound's tag plus the sha256 of its
 // secret-stripped canonical JSON (see pluginhost.StrippedOutboundHash).
 // It carries no secret value, no cookie, no key, and no path.
+// Construct it only through pluginhost.NewPluginIdentity, which
+// strips secrets internally; never hand a plugin the raw hash
+// from profile.OutboundIdentityForConfig.
 type Identity struct {
 	OutboundTag  string `json:"outbound_tag"`
 	OutboundHash string `json:"outbound_hash"`
@@ -159,13 +174,14 @@ type Egress struct {
 
 // RegisterRequest is the request core sends to plugin.register
 // and plugin.reconfigure. ConfigJSON is the plugin's config
-// fragment verbatim (the entry object minus tag/type); it is
-// scrubbed by core before it reaches the plugin only in the
-// sense that core never adds secrets to it — core hands the
-// fragment as written in config.json, and the fragment must
-// never contain a secret because core never puts one there.
-// Identity and Egress are present only when the caller supplies
-// them; a plugin must work when they are absent.
+// fragment VERBATIM (the entry object minus tag/type): core
+// never scrubs it, never adds secrets to it, and hands it as
+// written in config.json. The fragment must never contain a
+// secret: core's only protection for it is wholesale redaction
+// on DISPLAY (tag/type only, fragment shown as <redacted>),
+// never scrubbing on handoff. Identity and Egress are present
+// only when the caller supplies them; a plugin must work when
+// they are absent.
 type RegisterRequest struct {
 	ConfigJSON    json.RawMessage `json:"config_json"`
 	SchemaVersion uint32          `json:"schema_version"`
@@ -180,6 +196,18 @@ type RegisterRequest struct {
 // schema_version (0) is treated as the original contract, 1.
 // A higher version is rejected with a clear error, never
 // adapted. It returns the negotiated schema version.
+//
+// Rules enforced here (fail-closed): metadata name/version/
+// author are required and must contain no control characters
+// (they reach host output); at least one capability is
+// required; commands are allowed only with the
+// command_provider capability, and command names must be
+// non-empty and control-free; cookie_hosts entries must be
+// bare hostnames. Upstream's validPlugin additionally
+// requires a non-empty GitHubRepository; castctl deliberately
+// drops that requirement (first-party plugins need no
+// repository URL) — the deviation is stated here and in
+// docs/plugins.md.
 func ValidateRegistration(reg Registration) (uint32, error) {
 	if reg.SchemaVersion > SchemaVersion {
 		return 0, fmt.Errorf("plugin schema version %d is not supported", reg.SchemaVersion)
@@ -197,8 +225,51 @@ func ValidateRegistration(reg Registration) (uint32, error) {
 	if reg.Metadata.Author == "" {
 		return 0, fmt.Errorf("plugin metadata author is required")
 	}
+	for _, field := range []string{reg.Metadata.Name, reg.Metadata.Version, reg.Metadata.Author} {
+		if strings.ContainsFunc(field, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			return 0, fmt.Errorf("plugin metadata must not contain control characters")
+		}
+	}
 	if !reg.Capabilities.Any() {
 		return 0, fmt.Errorf("plugin declares no capabilities: at least one capability is required")
 	}
+	if len(reg.Commands) > 0 && !reg.Capabilities.CommandProvider {
+		return 0, fmt.Errorf("plugin declares commands without the command_provider capability")
+	}
+	for _, cmd := range reg.Commands {
+		if cmd.Name == "" {
+			return 0, fmt.Errorf("plugin command name is required")
+		}
+		if strings.ContainsFunc(cmd.Name, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			return 0, fmt.Errorf("plugin command name must not contain control characters")
+		}
+	}
+	for _, host := range reg.CookieHosts {
+		if !ValidCookieHost(host) {
+			return 0, fmt.Errorf("plugin cookie_hosts entry %q is not a bare hostname", host)
+		}
+	}
 	return schema, nil
+}
+
+// ValidCookieHost reports whether host is a bare hostname
+// usable in cookie_hosts: lowercase letters, digits, dots,
+// and hyphens only, starting and ending with a letter or
+// digit, at most 253 characters. No scheme, port, path,
+// wildcard, or userinfo is allowed.
+func ValidCookieHost(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	for i, r := range host {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '.':
+		default:
+			return false
+		}
+		if (i == 0 || i == len(host)-1) && (r == '-' || r == '.') {
+			return false
+		}
+	}
+	return true
 }

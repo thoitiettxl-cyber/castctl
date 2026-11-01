@@ -12,10 +12,12 @@ import (
 )
 
 // buildVerneed synthesises a .gnu.version_r section body: one
-// Verneed for fileName with the given version names, in the
-// given ELF class. The string table is appended after the
-// entries; vna_name offsets are relative to it.
-func buildVerneed(t *testing.T, class string, fileName string, versions []string) ([]byte, []byte) {
+// Verneed for fileName with the given version names. The
+// string table is appended after the entries; vna_name
+// offsets are relative to it. Verneed/Vernaux entries are
+// 16 bytes in both ELF classes, so no class parameter is
+// needed.
+func buildVerneed(t *testing.T, fileName string, versions []string) ([]byte, []byte) {
 	t.Helper()
 	strtab := []byte{0}
 	strOff := map[string]uint32{}
@@ -46,7 +48,7 @@ func buildVerneed(t *testing.T, class string, fileName string, versions []string
 		binary.LittleEndian.PutUint32(b[:], v)
 		body = append(body, b[:]...)
 	}
-	_ = class
+	_ = fileName
 	put16(1) // vn_version
 	put16(uint16(len(versions)))
 	put32(fileOff)
@@ -71,7 +73,7 @@ func buildVerneed(t *testing.T, class string, fileName string, versions []string
 }
 
 func TestParseVersionNeeds(t *testing.T) {
-	body, strtab := buildVerneed(t, "64", "libc.so.6", []string{"GLIBC_2.17", "GLIBC_2.34", "GLIBC_PRIVATE"})
+	body, strtab := buildVerneed(t, "libc.so.6", []string{"GLIBC_2.17", "GLIBC_2.34", "GLIBC_PRIVATE"})
 	max, err := parseVersionNeeds(body, strtab, binary.LittleEndian)
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +81,7 @@ func TestParseVersionNeeds(t *testing.T) {
 	if max != "2.34" {
 		t.Fatalf("max = %q, want %q", max, "2.34")
 	}
-	body, strtab = buildVerneed(t, "64", "libc.so.6", []string{})
+	body, strtab = buildVerneed(t, "libc.so.6", []string{})
 	max, err = parseVersionNeeds(body, strtab, binary.LittleEndian)
 	if err != nil {
 		t.Fatal(err)
@@ -87,7 +89,7 @@ func TestParseVersionNeeds(t *testing.T) {
 	if max != "" {
 		t.Fatalf("max = %q, want empty", max)
 	}
-	body, strtab = buildVerneed(t, "64", "libfoo.so.1", []string{"FOO_1.0"})
+	body, strtab = buildVerneed(t, "libfoo.so.1", []string{"FOO_1.0"})
 	max, err = parseVersionNeeds(body, strtab, binary.LittleEndian)
 	if err != nil {
 		t.Fatal(err)
@@ -97,6 +99,41 @@ func TestParseVersionNeeds(t *testing.T) {
 	}
 	if _, err := parseVersionNeeds([]byte{1, 2}, strtab, binary.LittleEndian); err == nil {
 		t.Fatal("truncated section: want error")
+	}
+}
+
+func TestParseVersionNeedsFailClosed(t *testing.T) {
+	// Red-team cases: a bad numeric GLIBC_ name, a hidden
+	// aux-chain maximum, and an out-of-range name offset
+	// must all refuse — never silently downgrade the max.
+	body, strtab := buildVerneed(t, "libc.so.6", []string{"GLIBC_2.34", "GLIBC_2.XX"})
+	if _, err := parseVersionNeeds(body, strtab, binary.LittleEndian); err == nil {
+		t.Fatal("unparseable GLIBC_ name: want error, not a downgraded max")
+	}
+	// Aux chain cut short of vn_cnt: two declared aux
+	// entries, the first with next==0 hiding the second
+	// (GLIBC_2.34) behind a GLIBC_2.2.5 name.
+	body, strtab = buildVerneed(t, "libc.so.6", []string{"GLIBC_2.2.5", "GLIBC_2.34"})
+	// Zero the first Vernaux's next field (offset 16 + 12).
+	body[16+12] = 0
+	body[16+13] = 0
+	body[16+14] = 0
+	body[16+15] = 0
+	if max, err := parseVersionNeeds(body, strtab, binary.LittleEndian); err == nil {
+		t.Fatalf("cut aux chain: want error, got max %q", max)
+	}
+	// Out-of-range name offset: patch the first Vernaux's
+	// name offset (offset 16 + 8) to 0xFFFFFF00.
+	body, strtab = buildVerneed(t, "libc.so.6", []string{"GLIBC_2.34"})
+	binary.LittleEndian.PutUint32(body[16+8:], 0xFFFFFF00)
+	if _, err := parseVersionNeeds(body, strtab, binary.LittleEndian); err == nil {
+		t.Fatal("out-of-range name offset: want error")
+	}
+	// GLIBC_PRIVATE stays ignored (non-numeric name).
+	body, strtab = buildVerneed(t, "libc.so.6", []string{"GLIBC_PRIVATE"})
+	max, err := parseVersionNeeds(body, strtab, binary.LittleEndian)
+	if err != nil || max != "" {
+		t.Fatalf("GLIBC_PRIVATE: max=%q err=%v, want empty/nil", max, err)
 	}
 }
 
@@ -155,8 +192,14 @@ func TestGlibcVersionCompare(t *testing.T) {
 		// strings (Debian glibc 2.44 reports "2.44-0"
 		// under qemu): only leading digits matter.
 		{"2.44-0", "2.44", 0},
-		{"2.44.1", "2.44", 0},
 		{"2.17-0ubuntu1", "2.17", 0},
+		// The full triple is compared: a patch-level
+		// requirement must not pass on a lower patch.
+		{"2.44.1", "2.44", 1},
+		{"2.44", "2.44.1", -1},
+		{"2.3.4", "2.3.2", 1},
+		{"2.3.2", "2.3.4", -1},
+		{"2.2.5", "2.2.5", 0},
 	}
 	for _, tc := range cases {
 		va, err := parseGlibcVersion(tc.a)

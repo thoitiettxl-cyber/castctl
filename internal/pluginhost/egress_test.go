@@ -95,6 +95,7 @@ func TestEgressProxyForwardsAndInjectsCookie(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer proxy.Close()
+	proxy.SetCookieHosts([]string{"example.invalid"})
 	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURLWithCreds(t, proxy, proxy.Username(), proxy.Password()))}}
 	req, _ := http.NewRequest("GET", "http://example.invalid/path?q=1", nil)
 	req.Header.Set("Cookie", "plugin-cookie")
@@ -237,6 +238,153 @@ func TestEgressProxyConnectTunnels(t *testing.T) {
 	}
 	if string(got) != "pong!" {
 		t.Fatalf("tunnel reply = %q, want pong!", got)
+	}
+}
+
+func TestEgressProxyCookieScope(t *testing.T) {
+	upstream := &recordingRoundTripper{body: "ok"}
+	proxy, err := pluginhost.NewEgressProxy(upstream, nil, "injected-cookie-value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+	proxy.SetCookieHosts([]string{"declared.invalid"})
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURLWithCreds(t, proxy, proxy.Username(), proxy.Password()))}}
+	req, _ := http.NewRequest("GET", "http://declared.invalid/a", nil)
+	req.Header.Set("Cookie", "plugin-cookie")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if got := upstream.last.Header.Get("Cookie"); got != "injected-cookie-value" {
+		t.Fatalf("declared host Cookie = %q, want injected value", got)
+	}
+	req, _ = http.NewRequest("GET", "http://other.invalid/b", nil)
+	req.Header.Set("Cookie", "plugin-cookie")
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if got := upstream.last.Header.Get("Cookie"); got != "" {
+		t.Fatalf("undeclared host Cookie = %q, want empty", got)
+	}
+	proxy.SetCookieHosts(nil)
+	req, _ = http.NewRequest("GET", "http://declared.invalid/c", nil)
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if got := upstream.last.Header.Get("Cookie"); got != "" {
+		t.Fatalf("no-declaration Cookie = %q, want empty", got)
+	}
+	proxy.SetCookieHosts([]string{"not a host", "EXAMPLE.INVALID:443", "*.invalid", "ok.invalid"})
+	req, _ = http.NewRequest("GET", "http://ok.invalid/d", nil)
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if got := upstream.last.Header.Get("Cookie"); got != "injected-cookie-value" {
+		t.Fatalf("valid host after invalid declarations Cookie = %q, want injected value", got)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestEgressProxyStripsSetCookieAndHopTokens(t *testing.T) {
+	upstream := &recordingRoundTripper{body: "ok"}
+	upstreamWithCookie := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		resp, err := upstream.RoundTrip(req)
+		if err != nil {
+			return nil, err
+		}
+		resp.Header.Set("Set-Cookie", "hatch_sess=SECRETVALUE; Path=/")
+		resp.Header.Set("Connection", "X-Hop")
+		resp.Header.Set("X-Hop", "hop-value")
+		return resp, nil
+	})
+	proxy, err := pluginhost.NewEgressProxy(upstreamWithCookie, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURLWithCreds(t, proxy, proxy.Username(), proxy.Password()))}}
+	req, _ := http.NewRequest("GET", "http://example.invalid/path", nil)
+	req.Header.Set("Connection", "X-Req-Hop")
+	req.Header.Set("X-Req-Hop", "must-not-forward")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if got := resp.Header.Get("Set-Cookie"); got != "" {
+		t.Fatalf("Set-Cookie forwarded to plugin: %q", got)
+	}
+	if got := resp.Header.Get("X-Hop"); got != "" {
+		t.Fatalf("hop-by-hop response header forwarded: %q", got)
+	}
+	if upstream.last != nil {
+		if got := upstream.last.Header.Get("X-Req-Hop"); got != "" {
+			t.Fatalf("hop-by-hop request token header forwarded: %q", got)
+		}
+		if got := upstream.last.Header.Get("Connection"); got != "" {
+			t.Fatalf("Connection header forwarded: %q", got)
+		}
+	}
+}
+
+func TestEgressProxyConnectAddsNoCookie(t *testing.T) {
+	upstream := &recordingRoundTripper{}
+	serverSide, clientSide := net.Pipe()
+	defer clientSide.Close()
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return serverSide, nil
+	}
+	proxy, err := pluginhost.NewEgressProxy(upstream, dial, "injected-cookie-value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+	proxy.SetCookieHosts([]string{"example.invalid"})
+	conn, err := net.Dial("tcp", proxy.URL().Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "CONNECT example.invalid:443 HTTP/1.1\r\nProxy-Authorization: %s\r\nHost: example.invalid:443\r\n\r\n", proxyAuth(t, proxy.Username(), proxy.Password()))
+	br := bufio.NewReader(conn)
+	if _, err := br.ReadString('\n'); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		l, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l == "\r\n" {
+			break
+		}
+	}
+	payload := "GET / HTTP/1.1\r\nHost: example.invalid\r\n\r\n"
+	if _, err := conn.Write([]byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, len(payload))
+	if _, err := io.ReadFull(clientSide, buf); err != nil {
+		t.Fatal(err)
+	}
+	if string(buf) != payload {
+		t.Fatalf("tunnel bytes = %q, want verbatim %q", buf, payload)
 	}
 }
 

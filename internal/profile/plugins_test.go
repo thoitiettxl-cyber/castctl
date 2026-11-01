@@ -7,6 +7,7 @@ package profile
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -142,6 +143,53 @@ func TestRedactConfigPluginsFragmentWholesale(t *testing.T) {
 	}
 	if strings.Contains(string(out), `"api_key"`) {
 		t.Fatalf("RedactConfig leaked fragment key name: %s", out)
+	}
+	if !strings.Contains(string(out), `"fragment": "<redacted>"`) {
+		t.Fatalf("RedactConfig marker key must be \"fragment\": %s", out)
+	}
+}
+
+func TestParsePluginsTypeValidation(t *testing.T) {
+	for _, typ := range []string{"../evil", "a/b", "", "echo x", "echo\nx", strings.Repeat("e", 129)} {
+		data := `{"profiles":{"default":{}},"plugins":[{"tag":"echo","type":` + strconv.Quote(typ) + `}]}`
+		if _, err := ParseSingleConfig([]byte(data), t.TempDir()); err == nil {
+			t.Fatalf("type %q: want config error", typ)
+		}
+	}
+	for _, typ := range []string{"echo", "echo-1", "echo.v2", "e"} {
+		data := `{"profiles":{"default":{}},"plugins":[{"tag":"echo","type":` + strconv.Quote(typ) + `}]}`
+		if _, err := ParseSingleConfig([]byte(data), t.TempDir()); err != nil {
+			t.Fatalf("type %q: want valid, got %v", typ, err)
+		}
+	}
+}
+
+func TestRedactRawConfigMatchesRedactJSONWithoutPlugins(t *testing.T) {
+	raw := []byte(`{"profiles":{"default":{"outbound":{"type":"direct","tag":"direct"}}},"log":{"level":"info"}}`)
+	a, err := RedactJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := RedactRawConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(a) != string(b) {
+		t.Fatalf("RedactRawConfig differs without plugins:\n%s\nvs\n%s", a, b)
+	}
+}
+
+func TestRedactRawConfigPluginsFragmentWholesale(t *testing.T) {
+	raw := []byte(`{"profiles":{"default":{}},"plugins":[{"tag":"echo","type":"echo","api_key":"SECRET-VALUE-xyz","weird_name":"hidden-value"}]}`)
+	out, err := RedactRawConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "SECRET-VALUE-xyz") || strings.Contains(string(out), "hidden-value") || strings.Contains(string(out), "weird_name") {
+		t.Fatalf("RedactRawConfig leaked fragment: %s", out)
+	}
+	if !strings.Contains(string(out), `"fragment": "<redacted>"`) {
+		t.Fatalf("RedactRawConfig missing fragment marker: %s", out)
 	}
 }
 

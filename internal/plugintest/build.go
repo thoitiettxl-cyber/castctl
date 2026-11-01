@@ -36,6 +36,10 @@ type FakePluginOptions struct {
 	// FailRegister makes plugin.register return an error
 	// envelope.
 	FailRegister bool
+	// CookieHosts is the comma-separated cookie_hosts list
+	// the fixture declares in its registration ("" keeps
+	// the fixture default: no declaration).
+	CookieHosts string
 	// NoInit makes the fixture omit the entry symbol (built
 	// from the noinit source instead).
 	NoInit bool
@@ -88,6 +92,9 @@ func BuildFakePlugin(t *testing.T, dir string, opts FakePluginOptions) string {
 	}
 	if opts.FailRegister {
 		ldflags += " -X main.testFailRegister=1"
+	}
+	if opts.CookieHosts != "" {
+		ldflags += " -X main.testCookieHosts=" + opts.CookieHosts
 	}
 	cmd := exec.Command("go", "build", "-buildmode=c-shared", "-ldflags", ldflags, "-o", out, ".")
 	cmd.Dir = absSrc

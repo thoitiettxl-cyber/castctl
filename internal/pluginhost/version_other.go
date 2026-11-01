@@ -14,10 +14,13 @@ const testBinaryHasGLIBCReqs = false
 
 // runningLibcVersion is unknown on builds without cgo/glibc:
 // gnu_get_libc_version is a glibc extension and is unavailable
-// on darwin, windows, and no-cgo builds. Callers treat this as
-// a fail-closed refusal for any plugin WITH version
-// requirements (see CheckPluginCompat); it is never reported
-// as a successful check.
+// on darwin, windows, and no-cgo builds. On cgo/linux musl
+// builds the version_glibc.go runtime lookup fails the same
+// way (no symbol), so musl is fail-closed at runtime, not at
+// compile time. Callers treat this as a fail-closed refusal
+// for any plugin WITH version requirements (see
+// CheckPluginCompat); it is never reported as a successful
+// check.
 func runningLibcVersion() (glibcVersion, error) {
 	return glibcVersion{}, fmt.Errorf("running libc version is unknown on this build")
 }

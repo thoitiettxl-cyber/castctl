@@ -31,9 +31,11 @@ import (
 // Castctl hardening, NOT upstream (upstream has no Lstat /
 // hardlink / O_NOFOLLOW check — verified absent by grep at pin
 // 250d5981; never cite upstream for it): the source is refused
-// when it is a symlink, and must be a regular file. This is a
-// load-time check on the artifact path, not a sandbox: it does
-// not make an untrusted plugin safe.
+// when it is a symlink, when any path component is a symlink,
+// when it is a hard link (Nlink > 1, unix only — Windows
+// refuses symlinks and non-regular files only), and must be a
+// regular file. This is a load-time check on the artifact path,
+// not a sandbox: it does not make an untrusted plugin safe.
 
 const (
 	shadowPrefix     = "castctl-plugin-"
@@ -46,22 +48,85 @@ var shadowCleanupOnce sync.Once
 // ShadowCopy copies the plugin file into the per-process shadow
 // directory and returns the shadow path. Identical content maps
 // to the same path; different content maps to a different path.
-// The source file is never modified.
+// The source file is never modified. The file ID is validated
+// before it is embedded in a filename: an unvalidated tag
+// containing "/" or ".." must never reach shadowPath.
 func ShadowCopy(file File) (string, error) {
+	if !ValidatePluginID(file.ID) {
+		return "", fmt.Errorf("invalid plugin id %q", file.ID)
+	}
 	dir, err := shadowDir()
 	if err != nil {
 		return "", err
 	}
-	shadowCleanupOnce.Do(func() { removeStaleShadowPlugins(dir) })
+	shadowCleanupOnce.Do(func() { sweepStaleShadowDirs() })
 	return shadowCopyToDir(file, dir)
 }
 
+func shadowRoot() string {
+	return filepath.Join(os.TempDir(), "castctl-pluginhost")
+}
+
 func shadowDir() (string, error) {
-	dir := filepath.Join(os.TempDir(), "castctl-pluginhost", fmt.Sprintf("pid-%d", os.Getpid()))
+	dir := filepath.Join(shadowRoot(), fmt.Sprintf("pid-%d", os.Getpid()))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
+	// MkdirAll does not harden a pre-existing directory:
+	// force 0700 and refuse another uid's directory.
+	// Best-effort on platforms without ownership checks.
+	if info, err := os.Stat(dir); err == nil {
+		if err := checkShadowDirOwnership(info); err != nil {
+			return "", err
+		}
+	}
+	_ = os.Chmod(dir, 0o700)
 	return dir, nil
+}
+
+// CleanupShadowDir removes the process's own shadow
+// directory (best-effort, never an error): every shadow
+// file in it, mapped or not. Host.Close calls it; a
+// crash-killed process leaves its directory for the next
+// process's stale sweep. Removing mapped files is safe:
+// dlopen'd images stay mapped after unlink.
+func CleanupShadowDir() {
+	dir := filepath.Join(shadowRoot(), fmt.Sprintf("pid-%d", os.Getpid()))
+	_ = os.RemoveAll(dir)
+}
+
+// sweepStaleShadowDirs removes pid-* directories under the
+// shadow root whose pid is not alive, and stray shadow files
+// in the process's own directory. Only directories matching
+// the pid-<digits> naming pattern are ever removed, only
+// under the shadow root, and every error is ignored: the
+// sweep must never fail a load. A live pid (including a
+// reused pid) keeps its directory; that residual is
+// documented in docs/plugins.md.
+func sweepStaleShadowDirs() {
+	root := shadowRoot()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry == nil || !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "pid-") {
+			continue
+		}
+		var pid int
+		if _, err := fmt.Sscanf(name, "pid-%d", &pid); err != nil || pid <= 0 || fmt.Sprintf("pid-%d", pid) != name {
+			continue
+		}
+		if pid == os.Getpid() || pidAlive(pid) {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(root, name))
+	}
+	removeStaleShadowPlugins(filepath.Join(root, fmt.Sprintf("pid-%d", os.Getpid())))
 }
 
 func removeStaleShadowPlugins(dir string) {
@@ -82,12 +147,17 @@ func removeStaleShadowPlugins(dir string) {
 
 func shadowCopyToDir(file File, dir string) (string, error) {
 	source := filepath.Clean(file.Path)
+	if err := refuseSymlinkedComponents(source); err != nil {
+		return "", err
+	}
 	if info, err := os.Lstat(source); err != nil {
 		return "", err
 	} else if info.Mode()&os.ModeSymlink != 0 {
 		return "", fmt.Errorf("plugin file %q must not be a symlink", source)
 	} else if !info.Mode().IsRegular() {
 		return "", fmt.Errorf("plugin file %q is not a regular file", source)
+	} else if err := checkHardlink(info); err != nil {
+		return "", err
 	}
 	tmp, err := os.CreateTemp(dir, shadowTempPrefix+file.ID+"-*"+filepath.Ext(source))
 	if err != nil {
@@ -109,6 +179,9 @@ func shadowCopyToDir(file File, dir string) (string, error) {
 	if info, err := in.Stat(); err != nil || !info.Mode().IsRegular() {
 		_ = tmp.Close()
 		return "", fmt.Errorf("plugin file %q is not a regular file", source)
+	} else if err := checkHardlink(info); err != nil {
+		_ = tmp.Close()
+		return "", err
 	}
 	hasher := sha256.New()
 	size, err := io.Copy(io.MultiWriter(tmp, hasher), in)
@@ -146,6 +219,13 @@ func shadowPath(dir, id, digest, ext string) string {
 		digest = digest[:shadowDigestLen]
 	}
 	return filepath.Join(dir, shadowPrefix+id+"-"+digest+ext)
+}
+
+// removeShadowFile removes one shadow file (best-effort).
+// Removing a mapped shadow file is safe: the image stays
+// mapped after unlink.
+func removeShadowFile(path string) error {
+	return os.Remove(path)
 }
 
 func shadowMatches(path string, size int64, digest string) bool {

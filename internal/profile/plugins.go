@@ -51,12 +51,13 @@ import (
 // block is preserved on save (defaults stay runtime-only, the
 // same presence precedent as the `log` block).
 
-// pluginIDPattern is the plugin tag rule, mirroring upstream
-// CLIProxyAPI's plugin ID regex
-// (internal/pluginhost/platform.go:35 at pin 250d5981:
-// `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`). Tags are exact: no
-// surrounding whitespace (the regex rejects it), no path
-// separators beyond the allowed set, never "." or "..".
+// pluginIDPattern is the plugin tag/type rule, mirroring
+// upstream CLIProxyAPI's plugin ID regex
+// (internal/pluginhost/platform.go:17 at pin 250d5981:
+// `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`). Tags and types are
+// exact: no surrounding whitespace (the regex rejects it),
+// no path separators beyond the allowed set, never "." or
+// "..".
 var pluginIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // PluginEntry is one parsed `plugins` array entry.
@@ -121,6 +122,16 @@ func validatePluginTag(tag string) error {
 	return nil
 }
 
+// validatePluginType enforces the SAME rule on a type value:
+// a path-like type ("../evil", "a/b") is refused at the
+// config boundary, exactly like a tag.
+func validatePluginType(typ string) error {
+	if !pluginIDPattern.MatchString(typ) {
+		return newConfigErrorf("invalid plugin type %q", typ)
+	}
+	return nil
+}
+
 // parsePluginsBlock parses one decoded `plugins` value (an array
 // of entry objects) into a PluginsConfig. Wrong shapes, wrong
 // types, missing tag/type, duplicate tags, and invalid tags are
@@ -159,6 +170,9 @@ func parsePluginsBlock(v any) (*PluginsConfig, error) {
 				s, ok := val.(string)
 				if !ok || strings.TrimSpace(s) == "" || s != strings.TrimSpace(s) {
 					return nil, newConfigErrorf(`"plugins" entry %d: "type" must be a non-empty string`, i)
+				}
+				if err := validatePluginType(s); err != nil {
+					return nil, newConfigErrorf(`"plugins" entry %d: invalid "type": %v`, i, err)
 				}
 				entry.Type = s
 			}
@@ -210,6 +224,12 @@ func validatePlugins(cfg *SingleConfig) error {
 		if e.Tag == "" || e.Type == "" {
 			return newConfigError("plugin entry must have a non-empty tag and type")
 		}
+		if err := validatePluginTag(e.Tag); err != nil {
+			return err
+		}
+		if err := validatePluginType(e.Type); err != nil {
+			return err
+		}
 		if seen[e.Tag] {
 			return newConfigErrorf("duplicate plugin tag %q", e.Tag)
 		}
@@ -225,6 +245,9 @@ func validatePlugins(cfg *SingleConfig) error {
 func encodePluginsBlock(cfg *PluginsConfig) ([]any, error) {
 	arr := make([]any, 0, len(cfg.Entries))
 	for _, e := range cfg.Entries {
+		if e == nil {
+			continue
+		}
 		entry := newOrderedObject()
 		entry.set("tag", e.Tag)
 		entry.set("type", e.Type)

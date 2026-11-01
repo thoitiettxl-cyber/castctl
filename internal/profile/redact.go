@@ -35,7 +35,26 @@ func RedactOutboundJSON(data []byte) ([]byte, error) {
 	return encodeOrderedJSONIndent(redact.Value(v), 2)
 }
 
-// RedactProfile renders a profile as redacted JSON (indent 2) for
+// RedactRawConfig redacts serialised config JSON exactly
+// like RedactJSON, except the plugins block is redacted
+// wholesale first (tag/type only, fragment as one
+// <redacted> marker under the "fragment" key). For configs
+// without a plugins block the output is byte-identical to
+// RedactJSON: redactPluginsBlock touches only the "plugins"
+// key. This is the production caller for the wholesale
+// plugins redaction (the web UI /config display path); it
+// operates on a decoded copy, never on stored config.
+func RedactRawConfig(data []byte) ([]byte, error) {
+	v, err := decodeOrderedJSON(data)
+	if err != nil {
+		return nil, err
+	}
+	if root, ok := v.(*orderedObject); ok {
+		redactPluginsBlock(root)
+	}
+	return encodeOrderedJSONIndent(redact.Value(v), 2)
+}
+
 // display: identity fields and paths are kept, the inline outbound is
 // redacted, a tag reference is kept as a bare tag string, and a direct
 // profile omits the outbound key. vm_id, node_id, and
@@ -88,9 +107,6 @@ func RedactConfig(cfg *SingleConfig) ([]byte, error) {
 	if cfg == nil {
 		return nil, newConfigError("cannot redact nil config")
 	}
-	if cfg.Profiles == nil {
-		cfg.Profiles = make(map[string]*Profile)
-	}
 	root, err := buildSingleFileOrdered(cfg)
 	if err != nil {
 		return nil, err
@@ -100,10 +116,15 @@ func RedactConfig(cfg *SingleConfig) ([]byte, error) {
 }
 
 // redactPluginsBlock replaces every plugins entry's fragment with a
-// single <redacted> marker: display shows tag/type only, plus a
-// "config" key carrying the marker when the entry has any
-// plugin-specific keys. Key-based redaction alone cannot do this:
-// a fragment key that is not in redact's secret-key set could
+// single <redacted> marker under the "fragment" key: display
+// shows tag/type only. The key is named "fragment" (the
+// fragment's own name in the plugin contract), never an
+// invented "config" key: a PUT round-trip of displayed
+// content then fail-closes loudly through the web UI's
+// sentinel merge (a <redacted> value at an absent path is
+// rejected) instead of silently writing the marker into a
+// fragment. Key-based redaction alone cannot do this: a
+// fragment key that is not in redact's secret-key set could
 // still carry a secret value under an unknown name, and the
 // fragment's key names themselves are plugin-opaque. This
 // operates on the built (copy) tree, never on the stored config.
@@ -141,7 +162,7 @@ func redactPluginsBlock(root *orderedObject) {
 			}
 		}
 		if hasFragment {
-			shown.set("config", redact.Marker)
+			shown.set("fragment", redact.Marker)
 		}
 		out = append(out, shown)
 	}

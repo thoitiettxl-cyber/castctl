@@ -1235,7 +1235,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	redacted, err := profile.RedactJSON(load.raw)
+	redacted, err := profile.RedactRawConfig(load.raw)
 	if err != nil {
 		writeAPIError(w, errValidation("stored config is invalid: "+safeMessage(err)))
 		return

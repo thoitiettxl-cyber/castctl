@@ -59,8 +59,10 @@ type Loader interface {
 // entry (tag/type/fragment) plus the binary path resolved by
 // discovery and the per-session handoff (identity/egress).
 // Two Desired entries may share one Path (BQ2(A) logical
-// instances): each gets its own shadow copy, image, and
-// registration.
+// instances): each gets its own registration and its own
+// host-side state. Whether two Hosts share one loaded image
+// for the same tag+path is a loader property (see
+// docs/plugins.md "Image sharing"), not a Desired property.
 type Desired struct {
 	Tag  string
 	Type string
@@ -75,6 +77,13 @@ type Desired struct {
 	// Egress is the per-session loopback proxy description, or
 	// nil when the caller supplies none.
 	Egress *pluginabi.Egress
+	// EgressProxy, when set, is the loopback proxy this
+	// plugin's traffic goes through, owned by the wiring
+	// that built it. The host adopts it (AdoptEgress) so
+	// its credentials die with the host, and applies the
+	// plugin's declared cookie_hosts to it after each
+	// registration. Nil means no proxy is handed over.
+	EgressProxy *EgressProxy
 	// ManifestPath, when set, names a checksums.txt manifest the
 	// binary must verify against before it is loaded.
 	ManifestPath string
@@ -102,7 +111,22 @@ type Host struct {
 	applyMu sync.Mutex
 	mu      sync.Mutex
 	loaded  map[string]*loadedPlugin
-	fused   map[string]string
+	fused   map[string]fusedEntry
+	// egresses are loopback proxies handed to the host by
+	// the wiring (AdoptEgress) so their credentials die
+	// with the host. The host never creates a proxy: the
+	// upstream transport and dial function belong to the
+	// wiring that owns the profile.
+	egressMu sync.Mutex
+	egresses []*EgressProxy
+}
+
+// fusedEntry records why a plugin is fused and WHICH image
+// path was fused. A fuse is per-path: reconfiguring to a
+// different path clears it, while the same path stays fused.
+type fusedEntry struct {
+	reason string
+	path   string
 }
 
 // LoadedPlugin is the host-side view of a registered plugin.
@@ -139,9 +163,12 @@ type loadedPlugin struct {
 	schema       uint32
 	commands     []pluginabi.Command
 	path         string
+	egress       *EgressProxy
 }
 
 // New builds a Host. No plugin is loaded until ApplyConfig.
+// Constructing a host sweeps stale shadow directories left
+// by dead processes (best-effort; see shadow.go).
 func New(opts Options) *Host {
 	loader := opts.Loader
 	if loader == nil {
@@ -151,11 +178,12 @@ func New(opts Options) *Host {
 	if logFn == nil {
 		logFn = func(string, string) {}
 	}
+	sweepStaleShadowDirs()
 	return &Host{
 		loader: loader,
 		log:    logFn,
 		loaded: make(map[string]*loadedPlugin),
-		fused:  make(map[string]string),
+		fused:  make(map[string]fusedEntry),
 	}
 }
 
@@ -171,8 +199,8 @@ func (h *Host) logf(level, message string) {
 func (h *Host) Fused(tag string) (string, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	reason, ok := h.fused[tag]
-	return reason, ok
+	entry, ok := h.fused[tag]
+	return entry.reason, ok
 }
 
 // Loaded reports the registered plugin for tag, if any.
@@ -194,18 +222,60 @@ func (h *Host) Loaded(tag string) (LoadedPlugin, bool) {
 	}, true
 }
 
+// AdoptEgress registers a loopback proxy with the host so
+// Host.Close closes it (revoking its credentials). The host
+// never creates proxies and never adopts the same proxy
+// twice. Callers that create a proxy per plugin session
+// adopt it here; callers that keep a proxy alive past the
+// host must not adopt it.
+func (h *Host) AdoptEgress(p *EgressProxy) {
+	if h == nil || p == nil {
+		return
+	}
+	h.egressMu.Lock()
+	defer h.egressMu.Unlock()
+	for _, existing := range h.egresses {
+		if existing == p {
+			return
+		}
+	}
+	h.egresses = append(h.egresses, p)
+}
+
 // Close shuts down every loaded plugin (detach only; images
-// stay mapped) and clears host state. It is idempotent.
+// stay mapped), closes adopted egress proxies (revoking
+// their credentials), removes this process's shadow
+// directory, and clears host state. It is idempotent.
+// Client Shutdown calls run OUTSIDE h.mu: a client may block
+// on an in-flight native call, and holding the host lock
+// across that would stall every other host operation.
 func (h *Host) Close() {
+	if h == nil {
+		return
+	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	var clients []Client
 	for tag, lp := range h.loaded {
 		if lp != nil && lp.client != nil {
-			lp.client.Shutdown()
+			clients = append(clients, lp.client)
 		}
 		delete(h.loaded, tag)
 	}
-	h.fused = make(map[string]string)
+	h.fused = make(map[string]fusedEntry)
+	h.mu.Unlock()
+	h.egressMu.Lock()
+	proxies := h.egresses
+	h.egresses = nil
+	h.egressMu.Unlock()
+	for _, c := range clients {
+		c.Shutdown()
+	}
+	for _, p := range proxies {
+		_ = p.Close()
+	}
+	// Best-effort: a shadow-cleanup failure must never
+	// fail shutdown.
+	CleanupShadowDir()
 }
 
 // ApplyConfig loads, reconfigures, replaces, and detaches
@@ -240,45 +310,56 @@ func (h *Host) ApplyConfig(ctx context.Context, desired []Desired) ApplyReport {
 		ordered = append(ordered, d)
 	}
 
-	// Detach unselected plugins.
+	// Detach unselected plugins. Shutdown calls run
+	// outside h.mu (a client may block on an in-flight
+	// native call).
 	h.mu.Lock()
+	var detached []Client
 	for tag, lp := range h.loaded {
 		if _, ok := desiredByTag[tag]; !ok {
 			if lp != nil && lp.client != nil {
-				lp.client.Shutdown()
+				detached = append(detached, lp.client)
 			}
 			delete(h.loaded, tag)
 			delete(h.fused, tag)
 		}
 	}
 	h.mu.Unlock()
+	for _, c := range detached {
+		c.Shutdown()
+	}
 
 	for _, d := range ordered {
-		// Fused plugins are skipped unless replaced (different
-		// path): a fused plugin with the same path stays fused.
+		// A fuse is per-path: the same path stays fused
+		// (skipped), a different path replaces and clears
+		// the fuse. A fused tag with no loaded entry and
+		// the same path stays skipped.
 		h.mu.Lock()
-		fuseReason, isFused := h.fused[d.Tag]
+		fuseEntry, isFused := h.fused[d.Tag]
 		existing := h.loaded[d.Tag]
 		h.mu.Unlock()
-		if isFused && existing != nil && existing.path == d.Path {
-			report.Skipped = append(report.Skipped, Skipped{Tag: d.Tag, Reason: "fused: " + fuseReason})
-			report.Loaded = append(report.Loaded, d.Tag)
+		if isFused && fuseEntry.path == d.Path {
+			report.Skipped = append(report.Skipped, Skipped{Tag: d.Tag, Reason: "fused: " + fuseEntry.reason})
+			if existing != nil {
+				report.Loaded = append(report.Loaded, d.Tag)
+			}
 			continue
 		}
-		if isFused && existing == nil {
-			report.Skipped = append(report.Skipped, Skipped{Tag: d.Tag, Reason: "fused: " + fuseReason})
-			continue
+		if isFused {
+			h.mu.Lock()
+			delete(h.fused, d.Tag)
+			h.mu.Unlock()
 		}
 		if existing != nil && existing.path == d.Path {
 			// Same image: reconfigure in place.
 			if err := h.reconfigure(ctx, existing, d); err != nil {
 				// Rollback: re-register with the old fragment.
 				if rerr := h.register(ctx, existing, existing.desired); rerr != nil {
-					h.fuse(d.Tag, "reconfigure failed and rollback failed: "+shortErr(rerr))
+					h.fuse(d.Tag, "reconfigure failed and rollback failed: "+shortErr(rerr), existing.path)
 					h.mu.Lock()
-					existing.client.Shutdown()
 					delete(h.loaded, d.Tag)
 					h.mu.Unlock()
+					existing.client.Shutdown()
 					report.Skipped = append(report.Skipped, Skipped{Tag: d.Tag, Reason: "reconfigure failed and rollback failed"})
 				} else {
 					report.Skipped = append(report.Skipped, Skipped{Tag: d.Tag, Reason: "reconfigure failed, rolled back to previous config"})
@@ -301,11 +382,11 @@ func (h *Host) ApplyConfig(ctx context.Context, desired []Desired) ApplyReport {
 				// Rollback: re-register the old image with
 				// its old fragment.
 				if rerr := h.register(ctx, existing, existing.desired); rerr != nil {
-					h.fuse(d.Tag, "replacement failed and rollback failed: "+shortErr(rerr))
+					h.fuse(d.Tag, "replacement failed and rollback failed: "+shortErr(rerr), existing.path)
 					h.mu.Lock()
-					existing.client.Shutdown()
 					delete(h.loaded, d.Tag)
 					h.mu.Unlock()
+					existing.client.Shutdown()
 					report.Skipped = append(report.Skipped, Skipped{Tag: d.Tag, Reason: "replacement failed and rollback failed"})
 				} else {
 					report.Skipped = append(report.Skipped, Skipped{Tag: d.Tag, Reason: "replacement failed, rolled back to previous image"})
@@ -313,8 +394,10 @@ func (h *Host) ApplyConfig(ctx context.Context, desired []Desired) ApplyReport {
 				}
 				continue
 			}
-			h.mu.Lock()
+			// Shut the old image down before installing
+			// the replacement, outside h.mu.
 			existing.client.Shutdown()
+			h.mu.Lock()
 			h.loaded[d.Tag] = replacement
 			delete(h.fused, d.Tag)
 			h.mu.Unlock()
@@ -340,23 +423,19 @@ func shortErr(err error) string {
 	if err == nil {
 		return ""
 	}
-	s := err.Error()
-	// Keep skip reasons short and free of long plugin-chosen
-	// text; the full error is available to the caller of the
-	// single-load path (plugin check).
-	if len(s) > 200 {
-		s = s[:200] + "…"
-	}
-	return s
+	// Skip reasons are rendered output: plugin-chosen text
+	// is redacted and capped (see safePluginText), never
+	// passed through verbatim.
+	return safePluginText(err.Error())
 }
 
-func (h *Host) fuse(tag, reason string) {
+func (h *Host) fuse(tag, reason, path string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.fused == nil {
-		h.fused = make(map[string]string)
+		h.fused = make(map[string]fusedEntry)
 	}
-	h.fused[tag] = reason
+	h.fused[tag] = fusedEntry{reason: reason, path: path}
 }
 
 // loadOne opens (the loader shadow-copies and compat-gates)
@@ -367,12 +446,20 @@ func (h *Host) fuse(tag, reason string) {
 // loader, not here: it must run on the shadow-copy bytes
 // about to be dlopened, and the host must stay usable with
 // injected loaders whose paths are not files on disk. The
-// unix loader re-checks CheckPluginCompat on the shadow path
+// unix loader checks CheckPluginCompat on the shadow path
 // before dlopen, so every real load is gated exactly once,
 // on the exact bytes loaded.
 func (h *Host) loadOne(ctx context.Context, d Desired) (*loadedPlugin, error) {
-	if d.Tag == "" {
-		return nil, fmt.Errorf("plugin tag must not be empty")
+	// Tag and type are validated at the Host layer with the
+	// same regex as config/discovery BEFORE any filename
+	// use: a tag like "../../evil" must never reach
+	// ShadowCopy, and a path-like type must never be
+	// trusted as a type name.
+	if !validPluginID(d.Tag) {
+		return nil, fmt.Errorf("invalid plugin tag %q", d.Tag)
+	}
+	if !validPluginID(d.Type) {
+		return nil, fmt.Errorf("invalid plugin type %q", d.Type)
 	}
 	if d.Path == "" {
 		return nil, fmt.Errorf("plugin %q has no binary path", d.Tag)
@@ -382,7 +469,7 @@ func (h *Host) loadOne(ctx context.Context, d Desired) (*loadedPlugin, error) {
 			return nil, err
 		}
 	}
-	file := File{ID: d.Tag, Path: d.Path}
+	file := File{ID: d.Tag, Path: d.Path, ManifestPath: d.ManifestPath}
 	client, err := h.loader.Open(file, h)
 	if err != nil {
 		return nil, err
@@ -395,74 +482,82 @@ func (h *Host) loadOne(ctx context.Context, d Desired) (*loadedPlugin, error) {
 	return lp, nil
 }
 
+// sendRegistration marshals one register/reconfigure request
+// (the fragment is sent verbatim; an empty fragment is sent
+// as {} so the plugin never sees a JSON null) and returns
+// the validated registration. register and reconfigure
+// differ only in the method name and the error noun.
+func (h *Host) sendRegistration(ctx context.Context, lp *loadedPlugin, method string, d Desired) (pluginabi.Registration, uint32, error) {
+	fragment := cloneBytes(d.Fragment)
+	if len(fragment) == 0 {
+		fragment = []byte(`{}`)
+	}
+	req, err := json.Marshal(pluginabi.RegisterRequest{
+		ConfigJSON:    json.RawMessage(fragment),
+		SchemaVersion: pluginabi.SchemaVersion,
+		Tag:           d.Tag,
+		Type:          d.Type,
+		Identity:      d.Identity,
+		Egress:        d.Egress,
+	})
+	if err != nil {
+		return pluginabi.Registration{}, 0, err
+	}
+	result, err := h.callEnvelope(ctx, lp, method, req, d.Tag)
+	if err != nil {
+		return pluginabi.Registration{}, 0, err
+	}
+	var reg pluginabi.Registration
+	if err := json.Unmarshal(result, &reg); err != nil {
+		return pluginabi.Registration{}, 0, fmt.Errorf("plugin %q registration is not valid json: %v", d.Tag, err)
+	}
+	schema, err := pluginabi.ValidateRegistration(reg)
+	if err != nil {
+		return pluginabi.Registration{}, 0, fmt.Errorf("plugin %q: %w", d.Tag, err)
+	}
+	return reg, schema, nil
+}
+
+// applyRegistration stores a validated registration on lp
+// and applies its declared cookie hosts to the plugin's
+// egress proxy, if any. Cookie scoping is fail-closed: no
+// declaration means no injection.
+func (h *Host) applyRegistration(lp *loadedPlugin, d Desired, reg pluginabi.Registration, schema uint32) {
+	lp.metadata = reg.Metadata
+	lp.capabilities = reg.Capabilities
+	lp.schema = schema
+	lp.commands = append([]pluginabi.Command(nil), reg.Commands...)
+	lp.desired = d
+	lp.registered = true
+	if d.EgressProxy != nil {
+		h.AdoptEgress(d.EgressProxy)
+		lp.egress = d.EgressProxy
+	}
+	if lp.egress != nil {
+		lp.egress.SetCookieHosts(reg.CookieHosts)
+	}
+}
+
 // register sends plugin.register with the lifecycle request
 // and applies the schema/metadata/capability gate (mirroring
 // upstream registerRPCPlugin, rpc_client.go:100-118: request
 // carries the host schema version; higher plugin schema
 // rejected; missing schema becomes 1).
 func (h *Host) register(ctx context.Context, lp *loadedPlugin, d Desired) error {
-	req, err := json.Marshal(pluginabi.RegisterRequest{
-		ConfigJSON:    json.RawMessage(cloneBytes(d.Fragment)),
-		SchemaVersion: pluginabi.SchemaVersion,
-		Tag:           d.Tag,
-		Type:          d.Type,
-		Identity:      d.Identity,
-		Egress:        d.Egress,
-	})
+	reg, schema, err := h.sendRegistration(ctx, lp, pluginabi.MethodPluginRegister, d)
 	if err != nil {
 		return err
 	}
-	result, err := h.callEnvelope(ctx, lp, pluginabi.MethodPluginRegister, req, d.Tag)
-	if err != nil {
-		return err
-	}
-	var reg pluginabi.Registration
-	if err := json.Unmarshal(result, &reg); err != nil {
-		return fmt.Errorf("plugin %q registration is not valid json: %v", d.Tag, err)
-	}
-	schema, err := pluginabi.ValidateRegistration(reg)
-	if err != nil {
-		return fmt.Errorf("plugin %q: %w", d.Tag, err)
-	}
-	lp.metadata = reg.Metadata
-	lp.capabilities = reg.Capabilities
-	lp.schema = schema
-	lp.commands = append([]pluginabi.Command(nil), reg.Commands...)
-	lp.desired = d
-	lp.registered = true
+	h.applyRegistration(lp, d, reg, schema)
 	return nil
 }
 
 func (h *Host) reconfigure(ctx context.Context, lp *loadedPlugin, d Desired) error {
-	req, err := json.Marshal(pluginabi.RegisterRequest{
-		ConfigJSON:    json.RawMessage(cloneBytes(d.Fragment)),
-		SchemaVersion: pluginabi.SchemaVersion,
-		Tag:           d.Tag,
-		Type:          d.Type,
-		Identity:      d.Identity,
-		Egress:        d.Egress,
-	})
+	reg, schema, err := h.sendRegistration(ctx, lp, pluginabi.MethodPluginReconfigure, d)
 	if err != nil {
 		return err
 	}
-	result, err := h.callEnvelope(ctx, lp, pluginabi.MethodPluginReconfigure, req, d.Tag)
-	if err != nil {
-		return err
-	}
-	var reg pluginabi.Registration
-	if err := json.Unmarshal(result, &reg); err != nil {
-		return fmt.Errorf("plugin %q reconfiguration is not valid json: %v", d.Tag, err)
-	}
-	schema, err := pluginabi.ValidateRegistration(reg)
-	if err != nil {
-		return fmt.Errorf("plugin %q: %w", d.Tag, err)
-	}
-	lp.metadata = reg.Metadata
-	lp.capabilities = reg.Capabilities
-	lp.schema = schema
-	lp.commands = append([]pluginabi.Command(nil), reg.Commands...)
-	lp.desired = d
-	lp.registered = true
+	h.applyRegistration(lp, d, reg, schema)
 	return nil
 }
 
@@ -491,9 +586,16 @@ func cloneBytes(b []byte) []byte {
 func (h *Host) Call(ctx context.Context, tag, method string, request []byte) ([]byte, error) {
 	h.mu.Lock()
 	lp, ok := h.loaded[tag]
+	fuseEntry, isFused := h.fused[tag]
 	h.mu.Unlock()
 	if !ok || lp == nil || lp.client == nil {
 		return nil, fmt.Errorf("plugin %q is not loaded", tag)
+	}
+	// A fused plugin is never re-called: fail fast with the
+	// stored fuse reason instead of invoking the plugin
+	// again until its next deadline.
+	if isFused && fuseEntry.path == lp.path {
+		return nil, fmt.Errorf("plugin %q is fused: %s", tag, fuseEntry.reason)
 	}
 	return h.callEnvelope(ctx, lp, method, request, tag)
 }
@@ -528,7 +630,7 @@ func (h *Host) callEnvelope(ctx context.Context, lp *loadedPlugin, method string
 	case res := <-result:
 		if res.recovered != nil {
 			reason := fmt.Sprintf("%s panic: %T", method, res.recovered)
-			h.fuse(tag, reason)
+			h.fuse(tag, reason, lp.path)
 			return nil, fmt.Errorf("plugin %q: %s", tag, reason)
 		}
 		if res.err != nil {
@@ -540,7 +642,7 @@ func (h *Host) callEnvelope(ctx context.Context, lp *loadedPlugin, method string
 		// thread keeps running until it notices ctx. The
 		// plugin is fused so no further call is attempted
 		// on a hung image.
-		h.fuse(tag, "call timed out or cancelled: "+method)
+		h.fuse(tag, "call timed out or cancelled: "+method, lp.path)
 		return nil, ctx.Err()
 	}
 }
@@ -555,7 +657,7 @@ func parseEnvelope(response []byte, tag string) ([]byte, error) {
 	}
 	if !env.OK {
 		if env.Error != nil {
-			return nil, fmt.Errorf("plugin %q: %s: %s", tag, env.Error.Code, env.Error.Message)
+			return nil, fmt.Errorf("plugin %q: %s: %s", tag, env.Error.Code, safePluginText(env.Error.Message))
 		}
 		return nil, fmt.Errorf("plugin %q returned a failed envelope without an error", tag)
 	}
@@ -605,11 +707,13 @@ func (h *Host) dispatchHostCall(method string, request []byte) []byte {
 	if message == "" {
 		message = "plugin log"
 	}
-	if len(message) > 4096 {
-		message = message[:4096]
+	if len(message) > maxPluginTextLen {
+		message = message[:maxPluginTextLen]
 	}
 	// Strip NUL/control bytes so a plugin log line cannot
 	// inject terminal control sequences into host output.
+	// Newline/tab are kept (they are the line's own shape);
+	// ESC and other controls are dropped.
 	message = strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\t' {
 			return r
@@ -619,9 +723,19 @@ func (h *Host) dispatchHostCall(method string, request []byte) []byte {
 		}
 		return r
 	}, message)
-	level := strings.TrimSpace(req.Level)
-	if level == "" {
+	// The level is an allowlist, not free text: plugincheck
+	// prints it raw, so a level carrying a newline or ESC
+	// must never reach output as-is. Unknown levels become
+	// "info".
+	level := strings.ToLower(strings.TrimSpace(req.Level))
+	switch level {
+	case "info", "warn", "warning", "error", "debug":
+		// Keep, normalising "warning" to "warn" below.
+	default:
 		level = "info"
+	}
+	if level == "warning" {
+		level = "warn"
 	}
 	h.logf(level, message)
 	raw, _ := json.Marshal(pluginabi.Envelope{OK: true, Result: json.RawMessage(`{}`)})

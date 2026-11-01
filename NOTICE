@@ -99,7 +99,7 @@ docs/provenance.md.
    taken: host.auth.* callbacks, the PluginsConfig
    store/config schema, min_version/allow_downgrade, random
    shadow names/memfd, and load-time signature checks. The
-   Lstat/hardlink shadow hardening and the glibc compat gate
+   Lstat/hardlink (unix-only) shadow hardening and the glibc compat gate
    are castctl-original. Full mapping in docs/provenance.md
    §2 and docs/plugins.md References.
 

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 	"github.com/thoitiettxl-cyber/castctl/internal/pluginabi"
 	"github.com/thoitiettxl-cyber/castctl/internal/pluginhost"
 )
@@ -19,10 +20,12 @@ const pluginCheckHelpText = `usage: castctl plugin check <path> [--tag TAG] [--t
 Load one plugin binary through the real plugin loader and run a
 single provider call against it. This is the on-device check for
 the KernelSU module (see docs/plugins.md): it prints one line per
-stage (dlopen, init, register, provider.call, shutdown) and
-nothing else. It loads no config, starts no services, writes no
-config or cookies, and logs no secrets. Exit 0 when every stage
-passes, exit 2 otherwise.
+stage (dlopen, init, register, provider.call, shutdown), plus
+any host.log lines the plugin emits (printed as plugin log lines).
+Command-only plugins skip the provider.call stage (it is
+printed as skipped, not failed). It loads no config, starts no
+services, writes no config or cookies, and logs no secrets.
+Exit 0 when every stage passes, exit 2 otherwise.
 `
 
 func init() {
@@ -84,7 +87,15 @@ func cmdPluginCheck(ctx context.Context, env *Env, args []string) error {
 	out := env.stdout()
 	host := pluginhost.New(pluginhost.Options{
 		Log: func(level, message string) {
-			fmt.Fprintf(out, "plugin log [%s]: %s\n", level, message)
+			// Level and message are already sanitised by
+			// the host (allowlisted level, control chars
+			// stripped); cap the line so a chatty plugin
+			// cannot flood check output.
+			line := "plugin log [" + level + "]: " + message
+			if len(line) > 4096 {
+				line = line[:4096] + "…"
+			}
+			fmt.Fprintln(out, line)
 		},
 	})
 	report := host.ApplyConfig(ctx, []pluginhost.Desired{
@@ -111,7 +122,15 @@ func cmdPluginCheck(ctx context.Context, env *Env, args []string) error {
 		caps = append(caps, "command-provider")
 	}
 	fmt.Fprintf(out, "register: ok schema=%d name=%s version=%s capabilities=%s\n",
-		loaded.SchemaVersion, loaded.Metadata.Name, loaded.Metadata.Version, strings.Join(caps, ","))
+		loaded.SchemaVersion, checkField(loaded.Metadata.Name), checkField(loaded.Metadata.Version), strings.Join(caps, ","))
+	if !loaded.Capabilities.Provider {
+		// Command-only plugin: provider.call has no
+		// dispatch path and must not FAIL the check.
+		fmt.Fprintln(out, "provider.call: skipped (command-only plugin)")
+		fmt.Fprintln(out, "shutdown: ok")
+		host.Close()
+		return nil
+	}
 	result, err := host.Call(ctx, tag, pluginabi.MethodProviderCall, []byte(`{"input":"ping"}`))
 	host.Close()
 	if err != nil {
@@ -123,10 +142,27 @@ func cmdPluginCheck(ctx context.Context, env *Env, args []string) error {
 	return nil
 }
 
+// checkField strips control characters from one metadata
+// field for the register line and caps it: plugin-chosen
+// text must never forge a check line.
+func checkField(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+	if len(s) > 200 {
+		s = s[:200] + "…"
+	}
+	return s
+}
+
 // shortPluginCheckError truncates a call error for the check
 // output: no raw server bodies, no secret values, tag only.
+// Plugin-chosen text is redacted (SafeString) and capped.
 func shortPluginCheckError(err error) string {
-	text := err.Error()
+	text := logging.SafeString(err.Error())
 	if len(text) > 200 {
 		text = text[:200] + "..."
 	}
@@ -136,11 +172,21 @@ func shortPluginCheckError(err error) string {
 func compactJSON(raw []byte) string {
 	var value any
 	if err := json.Unmarshal(raw, &value); err != nil {
-		return strings.TrimSpace(string(raw))
+		return capCheckText(logging.SafeString(strings.TrimSpace(string(raw))))
 	}
 	compact, err := json.Marshal(value)
 	if err != nil {
-		return strings.TrimSpace(string(raw))
+		return capCheckText(logging.SafeString(strings.TrimSpace(string(raw))))
 	}
-	return string(compact)
+	return capCheckText(logging.SafeString(string(compact)))
+}
+
+// capCheckText caps rendered plugin output at the single
+// plugin-text limit (4096, matching the host.log cap) with
+// an explicit marker.
+func capCheckText(s string) string {
+	if len(s) > 4096 {
+		return s[:4096] + "…"
+	}
+	return s
 }

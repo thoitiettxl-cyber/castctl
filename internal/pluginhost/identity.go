@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/thoitiettxl-cyber/castctl/internal/pluginabi"
 	"github.com/thoitiettxl-cyber/castctl/internal/redact"
 )
 
@@ -25,6 +26,25 @@ import (
 // rotates, and must never be handed to a plugin). The canonical
 // form is encoding/json's map encoding (keys sorted), so key
 // order in the input does not affect the hash.
+// NewPluginIdentity builds the ONLY identity a plugin may
+// receive: the outbound tag plus the secret-stripped hash.
+// Changing a secret value in the outbound object does not
+// change the hash (see TestPluginIdentitySecretBlind); the
+// identity carries no secret value and is stable across
+// secret rotation. Wiring must call this helper for every
+// plugin-facing identity path; the raw hash helpers in
+// internal/profile are not for plugin use.
+func NewPluginIdentity(outboundTag string, outboundRawJSON []byte) (*pluginabi.Identity, error) {
+	if outboundTag == "" {
+		return nil, fmt.Errorf("plugin identity requires an outbound tag")
+	}
+	hash, err := StrippedOutboundHash(outboundRawJSON)
+	if err != nil {
+		return nil, err
+	}
+	return &pluginabi.Identity{OutboundTag: outboundTag, OutboundHash: hash}, nil
+}
+
 func StrippedOutboundHash(raw []byte) (string, error) {
 	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {

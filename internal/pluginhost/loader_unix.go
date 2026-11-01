@@ -85,7 +85,9 @@ import "C"
 import (
 	"context"
 	"fmt"
-	"os"
+	"math"
+	"path/filepath"
+	"sync"
 	"unsafe"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/pluginabi"
@@ -119,6 +121,19 @@ type dynamicLibraryClient struct {
 	api     C.castctl_plugin_api
 	host    *Host
 	tag     string
+
+	// mu guards api/closed/host against concurrent Call
+	// and close: Call snapshots the function table under
+	// the lock and refcounts itself with calls, close
+	// marks closed, waits for in-flight calls to drain,
+	// and only then invokes the plugin shutdown function
+	// (outside the lock, and outside any Host lock the
+	// caller may hold). A Call that snapshots a nil table
+	// after close fails cleanly; no goroutine ever reads
+	// api.* while another writes it.
+	mu     sync.Mutex
+	closed bool
+	calls  sync.WaitGroup
 }
 
 func defaultLoader() Loader { return dynamicLibraryLoader{} }
@@ -127,6 +142,16 @@ func (dynamicLibraryLoader) Open(file File, host *Host) (Client, error) {
 	loadPath, errShadow := ShadowCopy(file)
 	if errShadow != nil {
 		return nil, errShadow
+	}
+	// Verify the SHADOW bytes — the bytes about to be
+	// dlopened — against the manifest when one is
+	// configured. The host's earlier source check is a
+	// fail-fast only; this is the load gate.
+	if file.ManifestPath != "" {
+		if err := VerifyShadowFileChecksum(loadPath, file.ManifestPath, filepath.Base(file.Path)); err != nil {
+			_ = removeShadowFile(loadPath)
+			return nil, err
+		}
 	}
 	// Compat gate on the exact bytes about to be loaded, as
 	// defence in depth over the host-level check (same bytes,
@@ -142,7 +167,7 @@ func (dynamicLibraryLoader) Open(file File, host *Host) (Client, error) {
 	handle := C.castctl_dlopen(cPath)
 	if handle == nil {
 		_ = removeShadowFile(loadPath)
-		return nil, fmt.Errorf("dlopen %s: %s", file.Path, dlerrorString())
+		return nil, fmt.Errorf("dlopen %s: %s", file.Path, scrubShadowPath(dlerrorString(), loadPath, file.Path))
 	}
 	// From here on the image must never be unloaded: dlopen
 	// may already have started the plugin runtime, and a Go
@@ -156,15 +181,18 @@ func (dynamicLibraryLoader) Open(file File, host *Host) (Client, error) {
 	initSymbol := C.castctl_dlsym(handle, cSymbol)
 	C.free(unsafe.Pointer(cSymbol))
 	if initSymbol == nil {
-		return nil, fmt.Errorf("missing %s: %s", pluginabi.EntrySymbol, dlerrorString())
+		_ = removeShadowFile(loadPath)
+		return nil, fmt.Errorf("missing %s: %s", pluginabi.EntrySymbol, scrubShadowPath(dlerrorString(), loadPath, file.Path))
 	}
 
 	hostAPI := (*C.castctl_host_api)(C.malloc(C.size_t(unsafe.Sizeof(C.castctl_host_api{}))))
 	if hostAPI == nil {
+		_ = removeShadowFile(loadPath)
 		return nil, fmt.Errorf("allocate host api")
 	}
 	hostCtx := C.malloc(C.size_t(unsafe.Sizeof(C.uintptr_t(0))))
 	if hostCtx == nil {
+		_ = removeShadowFile(loadPath)
 		return nil, fmt.Errorf("allocate host context")
 	}
 	id := registerHostCallback(host, file.ID)
@@ -181,21 +209,37 @@ func (dynamicLibraryLoader) Open(file File, host *Host) (Client, error) {
 	rc := C.castctl_call_init(initSymbol, hostAPI, &client.api)
 	if rc != 0 {
 		client.closeAfterOpenFailure()
+		_ = removeShadowFile(loadPath)
 		return nil, fmt.Errorf("%s returned %d", pluginabi.EntrySymbol, int(rc))
 	}
 	if uint32(client.api.abi_version) != pluginabi.ABIVersion {
 		client.closeAfterOpenFailure()
+		_ = removeShadowFile(loadPath)
 		return nil, fmt.Errorf("plugin ABI version %d is not supported", uint32(client.api.abi_version))
 	}
 	if client.api.call == nil || client.api.free_buffer == nil {
 		client.closeAfterOpenFailure()
+		_ = removeShadowFile(loadPath)
 		return nil, fmt.Errorf("plugin function table is incomplete")
 	}
 	return client, nil
 }
 
 func (c *dynamicLibraryClient) Call(ctx context.Context, method string, request []byte) ([]byte, error) {
-	if c == nil || c.api.call == nil {
+	if c == nil {
+		return nil, fmt.Errorf("plugin client is closed")
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("plugin client is closed")
+	}
+	c.calls.Add(1)
+	callFn := c.api.call
+	freeFn := c.api.free_buffer
+	c.mu.Unlock()
+	defer c.calls.Done()
+	if callFn == nil || freeFn == nil {
 		return nil, fmt.Errorf("plugin client is closed")
 	}
 	if ctx != nil {
@@ -213,19 +257,28 @@ func (c *dynamicLibraryClient) Call(ctx context.Context, method string, request 
 		defer C.free(cRequest)
 	}
 	var response C.castctl_buffer
-	rc := C.castctl_call_plugin(c.api.call, cMethod, (*C.uint8_t)(cRequest), C.size_t(len(request)), &response)
+	rc := C.castctl_call_plugin(callFn, cMethod, (*C.uint8_t)(cRequest), C.size_t(len(request)), &response)
 	var out []byte
 	if response.ptr != nil && response.len > 0 {
+		// Never trust a plugin-reported length past
+		// int32: C.GoBytes takes a C.int, and a
+		// truncated length could silently accept
+		// wrong bytes. Oversize responses are an
+		// error, not a truncation.
+		if response.len > math.MaxInt32 {
+			C.castctl_free_plugin_buffer(freeFn, response.ptr, response.len)
+			return nil, fmt.Errorf("plugin call %s returned an oversize response", method)
+		}
 		out = C.GoBytes(response.ptr, C.int(response.len))
 	}
 	if response.ptr != nil {
-		C.castctl_free_plugin_buffer(c.api.free_buffer, response.ptr, response.len)
+		C.castctl_free_plugin_buffer(freeFn, response.ptr, response.len)
 	}
 	if rc != 0 {
 		if isErrorEnvelope(out) {
 			return out, nil
 		}
-		return nil, fmt.Errorf("plugin call %s returned %d: %s", method, int(rc), string(out))
+		return nil, fmt.Errorf("plugin call %s returned %d: %s", method, int(rc), safePluginText(string(out)))
 	}
 	return out, nil
 }
@@ -246,29 +299,48 @@ func (c *dynamicLibraryClient) closeAfterOpenFailure() { c.close() }
 // plugin was loaded from a shadow copy, so keeping the image
 // mapped does not block deleting or replacing the source
 // artifact.
+//
+// Synchronisation: close marks the client closed and
+// snapshots the shutdown function under mu, waits for
+// in-flight Calls to drain, and only then invokes the
+// plugin shutdown function and drops the callback
+// registration. A hung native call therefore blocks close
+// until it returns (the documented native limit); it can
+// never race a nilled function pointer into a SIGSEGV. The
+// C host context and host API block themselves are
+// deliberately leaked: the resident plugin runtime may
+// still pass the context back into castctlHostCall, which
+// reads the callback id from it before failing the lookup.
 func (c *dynamicLibraryClient) close() {
 	if c == nil {
 		return
 	}
-	if c.api.shutdown != nil {
-		C.castctl_shutdown_plugin(c.api.shutdown)
-		c.api.shutdown = nil
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	c.closed = true
+	shutdownFn := c.api.shutdown
+	var callbackID uint64
+	hasCallback := false
+	if c.hostCtx != nil {
+		callbackID = uint64(*(*C.uintptr_t)(c.hostCtx))
+		hasCallback = true
+		c.hostCtx = nil
 	}
 	c.api.call = nil
 	c.api.free_buffer = nil
-	if c.hostCtx != nil {
-		// Drop the callback registration so repeated reloads
-		// do not pin the host forever. The C host context
-		// and host API block themselves are deliberately
-		// leaked: the resident plugin runtime may still
-		// pass the context back into castctlHostCall, which
-		// reads the callback id from it before failing the
-		// lookup.
-		id := uint64(*(*C.uintptr_t)(c.hostCtx))
-		unregisterHostCallback(id)
-		c.hostCtx = nil
-	}
+	c.api.shutdown = nil
 	c.host = nil
+	c.mu.Unlock()
+	c.calls.Wait()
+	if hasCallback {
+		unregisterHostCallback(callbackID)
+	}
+	if shutdownFn != nil {
+		C.castctl_shutdown_plugin(shutdownFn)
+	}
 }
 
 func dlerrorString() string {
@@ -277,8 +349,4 @@ func dlerrorString() string {
 		return ""
 	}
 	return C.GoString(errText)
-}
-
-func removeShadowFile(path string) error {
-	return os.Remove(path)
 }

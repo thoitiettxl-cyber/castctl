@@ -28,6 +28,10 @@ func TestIsSecretKey(t *testing.T) {
 		"zone_token", "origin_ca_key", "client_key",
 		"client_certificate", "userkey", "mca_key_password",
 		"mac_key",
+		// Plugin-era additions (loop 2): generic secret key
+		// spellings plugins and sing-box-style fragments use.
+		"api_key", "auth_token", "client_secret",
+		"session_key", "access_key",
 	}
 	for _, k := range secret {
 		if !IsSecretKey(k) {

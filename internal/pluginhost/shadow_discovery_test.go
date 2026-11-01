@@ -90,10 +90,11 @@ func TestDiscover(t *testing.T) {
 	}
 	archDir := filepath.Join(runtime.GOOS, runtime.GOARCH)
 	write(filepath.Join(archDir, "echo-v1.2.3"+ext))
-	write(filepath.Join(archDir, "echo"+ext)) // arch dir wins over root for echo
-	write("echo-v9.9.9" + ext)
+	write(filepath.Join(archDir, "echo"+ext)) // versioned beats versionless
+	write("echo-v9.9.9" + ext)                // highest version wins across dirs
 	write("other" + ext)
-	write("bad name!" + ext) // invalid id: skipped
+	write("bad name!" + ext)  // invalid id: skipped
+	write("echo-vv1.0" + ext) // malformed version: skipped, no odd id
 	write("notaplugin.txt")
 	files, err := Discover(root)
 	if err != nil {
@@ -110,14 +111,85 @@ func TestDiscover(t *testing.T) {
 	if !ok {
 		t.Fatalf("echo not discovered: %+v", files)
 	}
-	if echo.Version != "1.2.3" {
-		t.Fatalf("echo version = %q, want 1.2.3 (arch-dir file wins)", echo.Version)
+	if echo.Version != "9.9.9" {
+		t.Fatalf("echo version = %q, want 9.9.9 (highest version wins across dirs)", echo.Version)
 	}
 	if byID["other"].Version != "" {
 		t.Fatalf("other version = %q, want empty", byID["other"].Version)
 	}
 	if _, err := Discover(filepath.Join(root, "missing")); err == nil {
 		t.Fatal("missing root: want error")
+	}
+}
+
+func TestDiscoverVersionTieBreakAndCompare(t *testing.T) {
+	root := t.TempDir()
+	ext := PluginExtension(runtime.GOOS)
+	write := func(rel string) {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	archDir := filepath.Join(runtime.GOOS, runtime.GOARCH)
+	// Exact tie: platform directory wins.
+	write(filepath.Join(archDir, "echo-v1.2.3"+ext))
+	write("echo-v1.2.3" + ext)
+	files, err := Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || !strings.Contains(files[0].Path, archDir) {
+		t.Fatalf("tie-break = %+v, want the platform-dir file", files)
+	}
+	// Numeric comparison, not lexical: v10 beats v2.
+	if err := os.WriteFile(filepath.Join(root, "echo-v10.0.0"+ext), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "echo-v2.0.0"+ext), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	files, err = Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].Version != "10.0.0" {
+		t.Fatalf("version compare = %+v, want 10.0.0", files)
+	}
+	// Symlink entries are refused at discovery.
+	link := filepath.Join(root, "other-v1.0.0"+ext)
+	target := filepath.Join(root, "other-real"+ext)
+	if err := os.WriteFile(target, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink not available: %v", err)
+	}
+	files, err = Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if f.ID == "other" {
+			t.Fatalf("symlinked discovery entry selected: %+v", files)
+		}
+	}
+	for _, tc := range []struct {
+		a, b string
+		want int
+		ok   bool
+	}{
+		{"1.0", "1.0.0", 0, true},
+		{"2.0", "10.0", -1, true},
+		{"1.0-alpha", "1.0", 0, false},
+		{"1.2.3", "1.2", 1, true},
+	} {
+		if got, comparable := comparePluginVersions(tc.a, tc.b); got != tc.want || comparable != tc.ok {
+			t.Fatalf("comparePluginVersions(%q,%q) = (%d,%v), want (%d,%v)", tc.a, tc.b, got, comparable, tc.want, tc.ok)
+		}
 	}
 }
 

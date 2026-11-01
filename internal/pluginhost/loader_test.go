@@ -260,12 +260,12 @@ func TestRealLoaderDiscoveryAndChecksum(t *testing.T) {
 	}
 	var found pluginhost.File
 	for _, f := range files {
-		if f.ID == "echo" && strings.Contains(f.Path, filepath.Join("linux", "amd64")) {
+		if f.ID == "echo" {
 			found = f
 		}
 	}
-	if found.Version != "1.2.3" || found.Path == "" {
-		t.Fatalf("discovered = %+v, want arch-dir 1.2.3", files)
+	if found.Version != "9.9.9" || !strings.Contains(found.Path, "echo-v9.9.9.so") {
+		t.Fatalf("discovered = %+v, want root 9.9.9 (highest version wins)", files)
 	}
 	if _, err := pluginhost.Discover(filepath.Join(dir, "no-such-root")); err == nil {
 		t.Fatal("missing root: want error")

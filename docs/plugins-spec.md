@@ -126,9 +126,12 @@ builds: refuse ELF files with requirements present
 - `tag` required + unique, `type` required. No `enabled`
   at any level; presence = active. `enabled` inside an
   entry is plugin-opaque.
-- Core validates the envelope (`tag`/`type`) under the
-  strict unknown-key rules; the remainder is the verbatim
+- Core validates `tag`/`type` strictly (both matching the
+  plugin-ID rule). There is no unknown-key rejection for
+  the remainder: every other key becomes the verbatim
   fragment (original order, raw-preserved on save).
+  Plugin tags do not participate in the tag-graph
+  namespace.
 - Display/redaction: `tag`/`type` + fragment `<redacted>`.
 
 ## 8. Egress and secrets
@@ -140,29 +143,42 @@ builds: refuse ELF files with requirements present
 - Identity hash: SHA-256 over the secret-stripped outbound
   (`redact.Value`, sorted-key canonical JSON).
 - Egress: per-session loopback proxy (`127.0.0.1:0`),
-  ephemeral random Basic creds, 407 without them,
-  absolute-form forwarding through the caller-supplied
-  upstream transport, hop-by-hop stripping, `Cookie`
-  injected inside core (overwrites plugin-sent values).
-  CONNECT only with a caller-supplied dial function, else
-  502. No direct dial path exists for plugins.
+  ephemeral random Basic creds (instance lifetime, no
+  rotation in v1, revoked on host Close), 407 without
+  them, absolute-form forwarding through the
+  caller-supplied upstream transport, hop-by-hop
+  stripping, `Set-Cookie` stripped from responses,
+  `Cookie` injected inside core ONLY for hosts declared
+  in the registration `cookie_hosts` (no declaration =
+  no injection; overwrites plugin-sent values for
+  declared hosts, removes them for others). CONNECT
+  only with a caller-supplied dial function, else 502;
+  a CONNECT tunnel is opaque (no injection/inspection
+  inside TLS). Proxy use is by contract + code review,
+  not an enforcement boundary: a native plugin can
+  still dial directly. Plugin text on output is redacted
+  and capped at 4096 characters.
 - Errors: envelope + existing classifier; plugin never
   picks an exit code; no raw server bodies on output.
 
 ## 9. Reverse callbacks
 
-Only `host.log` (`{level,message}`; truncated, control
-chars stripped). All other `host.*` methods →
-`unsupported_host_callback`. `host.auth.*` rejected
-absolutely. Upstream auth callbacks were not ported.
+Only `host.log` (`{level,message}`; truncated to 4096,
+control chars stripped, level allowlisted). All other
+`host.*` methods → `unsupported_host_callback`.
+`host.auth.*` rejected absolutely. Upstream auth
+callbacks were not ported.
 
 ## 10. Checksums
 
 Opt-in local-dir verification only: `checksums.txt`
-(SHA-256) verified before load when a manifest path is
-supplied; mismatch/missing entry refuses. No store,
-download, registry, signing, or version gating
+(SHA-256) verified against the SHADOW bytes before load
+when a manifest path is supplied by the caller;
+mismatch/missing entry refuses. No store, download,
+registry, signing, or version gating
 (`min_version`/`allow_downgrade` absent upstream and here).
+Residual verify-to-dlopen window (no fd pin): see
+`docs/plugins.md` "Known limits".
 
 ## 11. Isolation limit
 
@@ -174,8 +190,10 @@ isolated (fuse). Documented, never tested-as-covered.
 ## 12. On-device check
 
 `castctl plugin check <path>`: no config, no services,
-no writes, no secrets. Prints `dlopen/init/register/
-provider.call/shutdown` lines; exit 0/2. Device wrapper:
+no writes, no secrets. Prints one line per stage
+(`dlopen/init/register/provider.call/shutdown`, plus any
+`host.log` lines; command-only plugins print the
+provider.call stage as skipped); exit 0/2. Device wrapper:
 `castctl-ctl plugin-check <file>` (file in
 `$DATA_DIR/plugins/linux/arm64/`, no symlinks, bundled
 loader). Phone result is the merge gate:

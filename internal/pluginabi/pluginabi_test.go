@@ -99,6 +99,52 @@ func TestValidateRegistration(t *testing.T) {
 			t.Fatalf("ValidateRegistration err = %v, want capability error", err)
 		}
 	})
+	t.Run("commands without command_provider rejected", func(t *testing.T) {
+		reg := validRegistration()
+		reg.Commands = []pluginabi.Command{{Name: "x"}}
+		if _, err := pluginabi.ValidateRegistration(reg); err == nil || !strings.Contains(err.Error(), "command_provider") {
+			t.Fatalf("ValidateRegistration err = %v, want command_provider error", err)
+		}
+	})
+	t.Run("commands with command_provider accepted", func(t *testing.T) {
+		reg := validRegistration()
+		reg.Capabilities = pluginabi.Capabilities{CommandProvider: true}
+		reg.Commands = []pluginabi.Command{{Name: "x", Usage: "run x"}}
+		if _, err := pluginabi.ValidateRegistration(reg); err != nil {
+			t.Fatalf("ValidateRegistration = %v, want nil", err)
+		}
+	})
+	t.Run("empty command name rejected", func(t *testing.T) {
+		reg := validRegistration()
+		reg.Capabilities = pluginabi.Capabilities{CommandProvider: true}
+		reg.Commands = []pluginabi.Command{{Name: ""}}
+		if _, err := pluginabi.ValidateRegistration(reg); err == nil || !strings.Contains(err.Error(), "command name is required") {
+			t.Fatalf("ValidateRegistration err = %v, want command name error", err)
+		}
+	})
+	t.Run("metadata newline rejected", func(t *testing.T) {
+		reg := validRegistration()
+		reg.Metadata.Name = "echo\nFORGED-LINE"
+		if _, err := pluginabi.ValidateRegistration(reg); err == nil || !strings.Contains(err.Error(), "control characters") {
+			t.Fatalf("ValidateRegistration err = %v, want control-character error", err)
+		}
+	})
+	t.Run("cookie_hosts valid", func(t *testing.T) {
+		reg := validRegistration()
+		reg.CookieHosts = []string{"api.example.invalid", "example.invalid"}
+		if _, err := pluginabi.ValidateRegistration(reg); err != nil {
+			t.Fatalf("ValidateRegistration = %v, want nil", err)
+		}
+	})
+	t.Run("cookie_hosts rejected", func(t *testing.T) {
+		for _, host := range []string{"*.example.invalid", "example.invalid:443", "https://example.invalid", "exa mple.invalid", "", "EXAMPLE.INVALID", "/etc/passwd"} {
+			reg := validRegistration()
+			reg.CookieHosts = []string{host}
+			if _, err := pluginabi.ValidateRegistration(reg); err == nil {
+				t.Fatalf("ValidateRegistration cookie_hosts %q = nil, want error", host)
+			}
+		}
+	})
 }
 
 func TestEnvelopeJSON(t *testing.T) {

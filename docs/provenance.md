@@ -397,12 +397,15 @@ instead of upstream schema 10; castctl files in
   rollback) → `host.go` lifecycle (reconfigure same path,
   quiesce-before-replace, rollback, fuse).
 - `internal/pluginhost/platform.go` (candidate dirs :308,
-  discovery :292, extension :100, ID rule) →
+  discovery :292, extension :99, ID rule :17, version
+  comparison :218, file preference :204) →
   `discovery.go` (`Discover`, `PluginExtension`,
   `ValidatePluginID`).
 - `internal/pluginhost/shadow.go` (shadow copy :33, sha256
-  naming :95, per-process dir :126-138) → `shadow.go`
-  (plus castctl Lstat/hardlink hardening — not upstream).
+  naming :154, per-process dir :126-138) → `shadow.go`
+  (plus castctl Lstat/hardlink hardening — not upstream;
+  hardlink check unix-only — and version selection, which
+  castctl adds mirroring upstream's comparison).
 - `internal/pluginhost/client_guard.go` (guarded call,
   recover, abandon-on-timeout :80-115) → `host.go`
   `callEnvelope` (fuse on panic/timeout).
@@ -427,7 +430,7 @@ instead of upstream schema 10; castctl files in
 Castctl-original (not upstream): the `plugins` array config
 shape (sing-box inline, no `enabled`), the glibc compat gate
 (`debug/elf` + `gnu_get_libc_version`), the Lstat/hardlink
-shadow hardening, the per-session loopback egress proxy
+(unix-only) shadow hardening, the per-session loopback egress proxy
 with cookie injection, the `plugin check` command, and the
 two-package consolidation (no `pluginapi`, no `sdk/`).
 

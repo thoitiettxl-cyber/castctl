@@ -14,13 +14,20 @@ import (
 )
 
 // isELFFile reports whether path starts with the ELF magic. A
-// file shorter than the 4-byte magic cannot be ELF.
+// file shorter than the 4-byte magic cannot be ELF. A
+// directory is an error: the compat gate must not silently
+// pass a non-file.
 func isELFFile(path string) (bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = f.Close() }()
+	if info, err := f.Stat(); err != nil {
+		return false, err
+	} else if info.IsDir() {
+		return false, fmt.Errorf("plugin file %q is a directory", path)
+	}
 	var magic [4]byte
 	n, _ := f.Read(magic[:])
 	if n < len(magic) {
@@ -56,15 +63,24 @@ func isELFFile(path string) (bool, error) {
 type glibcVersion struct {
 	major int
 	minor int
+	patch int
 }
 
-func (v glibcVersion) String() string { return strconv.Itoa(v.major) + "." + strconv.Itoa(v.minor) }
+func (v glibcVersion) String() string {
+	s := strconv.Itoa(v.major) + "." + strconv.Itoa(v.minor)
+	if v.patch != 0 {
+		s += "." + strconv.Itoa(v.patch)
+	}
+	return s
+}
 
-// parseGlibcVersion parses "major.minor", tolerating the
-// distro suffixes and extra components real
+// parseGlibcVersion parses "major.minor[.patch]", tolerating
+// the distro suffixes and extra components real
 // gnu_get_libc_version strings carry (e.g. Debian's
-// "2.44-0"): only the leading digits of the first two
-// dot-separated components matter.
+// "2.44-0"): only the leading digits of the first three
+// dot-separated components matter. The full triple is
+// compared: a plugin requiring GLIBC_2.3.4 must not pass on
+// a 2.3.2 libc.
 func parseGlibcVersion(s string) (glibcVersion, error) {
 	parts := strings.Split(s, ".")
 	if len(parts) < 2 {
@@ -78,7 +94,15 @@ func parseGlibcVersion(s string) (glibcVersion, error) {
 	if err != nil {
 		return glibcVersion{}, fmt.Errorf("invalid glibc version %q", s)
 	}
-	return glibcVersion{major: major, minor: minor}, nil
+	v := glibcVersion{major: major, minor: minor}
+	if len(parts) > 2 {
+		patch, err := leadingInt(parts[2])
+		if err != nil {
+			return glibcVersion{}, fmt.Errorf("invalid glibc version %q", s)
+		}
+		v.patch = patch
+	}
+	return v, nil
 }
 
 // leadingInt parses the leading digit run of part.
@@ -102,6 +126,12 @@ func compareGlibcVersion(a, b glibcVersion) int {
 	}
 	if a.minor != b.minor {
 		if a.minor < b.minor {
+			return -1
+		}
+		return 1
+	}
+	if a.patch != b.patch {
+		if a.patch < b.patch {
 			return -1
 		}
 		return 1
@@ -152,9 +182,14 @@ func versionStringTable(f *elf.File, verneed *elf.Section) ([]byte, error) {
 
 // parseVersionNeeds walks VERNEED entries (Elf_Verneed + Elf_Vernaux,
 // 16 bytes each in both 32- and 64-bit forms) and returns the
-// highest GLIBC_x.y name found, or "" when none is present.
+// highest GLIBC_x.y[.z] name found, or "" when none is present.
 // Names are offsets into strtab. Entries for other libraries and
-// non-GLIBC_ names (e.g. GLIBC_PRIVATE) are ignored.
+// non-numeric GLIBC_ names (e.g. GLIBC_PRIVATE) are ignored.
+// The parser fails CLOSED on any malformed version info: an
+// unparseable numeric GLIBC_ name, a truncated entry, an aux
+// chain cut short of vn_cnt entries, or an out-of-range name
+// offset all refuse the plugin — a downgraded maximum is
+// never silently computed.
 func parseVersionNeeds(data, strtab []byte, order binary.ByteOrder) (string, error) {
 	var max glibcVersion
 	found := false
@@ -169,6 +204,9 @@ func parseVersionNeeds(data, strtab []byte, order binary.ByteOrder) (string, err
 		vnCnt := order.Uint16(data[off+2:])
 		vnAux := order.Uint32(data[off+8:])
 		vnNext := order.Uint32(data[off+12:])
+		if vnCnt > 0 && vnAux < 16 {
+			return "", fmt.Errorf("invalid version need entry at offset %d: aux offset %d", off, vnAux)
+		}
 		auxOff := off + int(vnAux)
 		for i := 0; i < int(vnCnt); i++ {
 			if auxOff+16 > len(data) {
@@ -176,17 +214,29 @@ func parseVersionNeeds(data, strtab []byte, order binary.ByteOrder) (string, err
 			}
 			nameOff := order.Uint32(data[auxOff+8:])
 			next := order.Uint32(data[auxOff+12:])
-			name := cstringAt(strtab, int(nameOff))
+			name, err := cstringAt(strtab, int(nameOff))
+			if err != nil {
+				return "", fmt.Errorf("invalid version name offset %d: %w", nameOff, err)
+			}
 			if strings.HasPrefix(name, "GLIBC_") {
 				verStr := strings.TrimPrefix(name, "GLIBC_")
-				if v, err := parseGlibcVersion(verStr); err == nil {
+				if len(verStr) > 0 && verStr[0] >= '0' && verStr[0] <= '9' {
+					v, err := parseGlibcVersion(verStr)
+					if err != nil {
+						return "", fmt.Errorf("unparseable glibc version %q: refusing to load", name)
+					}
 					if !found || compareGlibcVersion(v, max) > 0 {
 						max = v
 						found = true
 					}
 				}
+				// Non-numeric GLIBC_ names (GLIBC_PRIVATE,
+				// ...) carry no version requirement.
 			}
 			if next == 0 {
+				if i < int(vnCnt)-1 {
+					return "", fmt.Errorf("truncated version auxiliary chain at entry %d of %d", i, vnCnt)
+				}
 				break
 			}
 			auxOff += int(next)
@@ -202,15 +252,15 @@ func parseVersionNeeds(data, strtab []byte, order binary.ByteOrder) (string, err
 	return max.String(), nil
 }
 
-func cstringAt(strtab []byte, off int) string {
+func cstringAt(strtab []byte, off int) (string, error) {
 	if off < 0 || off >= len(strtab) {
-		return ""
+		return "", fmt.Errorf("name offset %d out of range (table size %d)", off, len(strtab))
 	}
 	end := off
 	for end < len(strtab) && strtab[end] != 0 {
 		end++
 	}
-	return string(strtab[off:end])
+	return string(strtab[off:end]), nil
 }
 
 // CheckPluginCompat refuses a plugin file whose highest required

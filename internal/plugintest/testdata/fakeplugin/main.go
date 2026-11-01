@@ -60,6 +60,8 @@ import "C"
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/pluginabi"
@@ -73,6 +75,7 @@ var (
 	testAuthor       = "plugintest"
 	testCaps         = "provider"
 	testFailRegister = ""
+	testCookieHosts  = ""
 )
 
 var savedHost *C.castctl_host_api
@@ -158,13 +161,6 @@ func errorEnvelope(code, message string) []byte {
 	return env
 }
 
-type registrationOut struct {
-	SchemaVersion uint32                 `json:"schema_version"`
-	Metadata      pluginabi.Metadata     `json:"metadata"`
-	Capabilities  pluginabi.Capabilities `json:"capabilities"`
-	Commands      []pluginabi.Command    `json:"commands,omitempty"`
-}
-
 func registration() []byte {
 	schema, _ := strconv.Atoi(testSchema)
 	caps := pluginabi.Capabilities{}
@@ -181,7 +177,7 @@ func registration() []byte {
 		commands = []pluginabi.Command{{Name: "fake-cmd", Usage: "fake command"}}
 	case "none":
 	}
-	reg := registrationOut{
+	reg := pluginabi.Registration{
 		SchemaVersion: uint32(schema),
 		Metadata: pluginabi.Metadata{
 			Name:             testName,
@@ -191,6 +187,9 @@ func registration() []byte {
 		},
 		Capabilities: caps,
 		Commands:     commands,
+	}
+	if testCookieHosts != "" {
+		reg.CookieHosts = strings.Split(testCookieHosts, ",")
 	}
 	return okEnvelope(reg)
 }
@@ -245,6 +244,18 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		}
 		_ = json.Unmarshal(request, &req)
 		return okEnvelope(map[string]string{"payload": "echo:" + req.Input}), nil
+	case "fake.sleep":
+		// Test-only slow call for the Call/Close race
+		// test: sleeps {"ms":N} milliseconds, default 400.
+		var req struct {
+			Ms int `json:"ms"`
+		}
+		_ = json.Unmarshal(request, &req)
+		if req.Ms <= 0 {
+			req.Ms = 400
+		}
+		time.Sleep(time.Duration(req.Ms) * time.Millisecond)
+		return okEnvelope(map[string]bool{"slept": true}), nil
 	case "fake.log":
 		resp, err := callHost(pluginabi.MethodHostLog, []byte(`{"level":"info","message":"hello from fake"}`))
 		if err != nil {

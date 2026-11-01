@@ -118,10 +118,12 @@ it, one plugin at a time, in order:
    and never fail the whole call or abort other plugins.
 
 Fuse: a host-adapter panic or a call timeout fuses the
-plugin. A fused plugin stays loaded but is skipped by later
-`ApplyConfig` calls for the same path; loading a different
-path replaces it and clears the fuse. A fused plugin's
-remaining calls fail fast. The fuse reason names the method
+plugin, per PATH. A fused plugin stays loaded but is skipped
+by later `ApplyConfig` calls for the same path; loading a
+different path replaces it and clears the fuse. A fused
+plugin's remaining calls fail fast with the stored fuse
+reason, without invoking the plugin again. `Host.Call`
+checks the fuse first. The fuse reason names the method
 and the panic type only — never a panic value, never a
 secret.
 
@@ -139,22 +141,49 @@ thread is not terminated), and the plugin is fused.
 
 ## Discovery
 
-Plugins are discovered from a root directory, `<GOOS>/<GOARCH>`
-subdirectory first, then the root. File names are
+Plugins are discovered from a root directory. Selection is
+by VERSION, mirroring upstream `comparePluginVersions` /
+`pluginFilePreferred` (`platform.go:218` / `:204`): numeric
+dot-separated segments, a missing segment counting as 0,
+non-numeric segments falling back to lexical order; a
+versioned file beats a versionless one; on an exact version
+tie the `<GOOS>/<GOARCH>` platform directory wins. A
+downgrade is never silent: dropping an older file into the
+root cannot beat a newer platform file. File names are
 `<id>-v<version>.<ext>` (`.so`, `.dylib`, `.dll`); a bare
-`<id>.<ext>` is versionless. Invalid names are skipped.
-IDs match `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` (the upstream
-rule). The shadow copy name is
+`<id>.<ext>` is versionless. Names that do not parse —
+including a `-v` suffix with a malformed version
+(`echo-vv1.0.so`) — are skipped, never given a silent odd
+id. Symlink entries are skipped at discovery. IDs match
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` (the upstream rule,
+`platform.go:17`). The shadow copy name is
 `castctl-plugin-<id>-<sha256[:32]>.so` under a per-process
 directory (`castctl-pluginhost/pid-<pid>/`, 0700): the same
 content maps to the same path, different content to a
 different path. The name is predictable from content, as
-upstream — not random, not a memfd.
+upstream (`shadow.go:154`) — not random, not a memfd.
+
+Image sharing: two Hosts loading the same tag+path share
+one shadow path, so `dlopen` caches one image (logical
+instances, BQ2(A)); different tags get different shadow
+paths and are isolated. This is by design, not a bug.
 
 Hardening castctl adds (not upstream, never cite upstream
-for it): the source file is opened with `O_NOFOLLOW` and
-must be a regular file — symlinks and directories are
-refused, so a swapped symlink cannot redirect a load.
+for it): every component of the plugin path is Lstat-checked
+(a symlinked directory component refuses the load, on unix);
+the source file is opened with `O_NOFOLLOW` and must be a
+regular file — symlinks and directories are refused, so a
+swapped symlink cannot redirect a load. On unix the file
+must additionally have exactly one hard link (`Nlink==1`);
+on Windows/macOS there is no equivalent check and only the
+symlink+regular-file refusal applies. Pre-existing shadow
+directories are hardened to 0700 with an ownership check.
+On graceful host shutdown the process's own shadow
+directory is removed (best-effort), and constructing a host
+sweeps stale `pid-<pid>` shadow directories whose pid is
+not alive. Crash-killed processes leave stale directories
+until the next sweep; `/tmp` size remains a deployment
+consideration.
 
 ## Config
 
@@ -177,19 +206,22 @@ Rules:
   means active; remove the entry to disable. An `enabled`
   key inside an entry is plugin-opaque data, never a core
   toggle.
-- Core parses `tag`/`type` strictly (unknown envelope keys
-  are rejected, as for other top-level blocks). The
-  REMAINING object is handed to the plugin verbatim as its
-  config fragment, in original key order, and raw-preserved
-  on save.
+- Core parses `tag`/`type` strictly (both required, both
+  matching the plugin-ID rule). There is NO unknown-key
+  rejection for the rest of the entry: every other key
+  becomes part of the fragment. The REMAINING object is
+  handed to the plugin verbatim as its config fragment, in
+  original key order, and raw-preserved on save.
 - Display and redaction show `tag`/`type` only; the fragment
-  is shown as `<redacted>` wholesale
-  (`internal/profile/redact.go`). Plugin fragments never
-  appear in logs, errors, or the web UI.
-- The `plugins` block participates in the strict
-  unknown-key and tag-graph rules for its envelope only
-  (`tag`/`type`); fragment contents are the plugin's
-  business.
+  is shown as `<redacted>` wholesale under the `fragment`
+  key (`internal/profile/redact.go`). Plugin fragments never
+  appear in logs, errors, or the web UI. (A PUT round-trip
+  of displayed content fail-closes loudly through the web
+  UI's sentinel merge instead of writing the marker into
+  a fragment.)
+- Plugin tags live in their own namespace: they do NOT
+  participate in `validateTagGraph`'s outbound/endpoint tag
+  namespace. Fragment contents are the plugin's business.
 
 ## Capabilities
 
@@ -208,7 +240,10 @@ required, and name/version/author are required:
 
 The only reverse callback a plugin may call is `host.log`
 (`{level, message}`), delivered to the host log function
-with the message truncated and control characters stripped.
+with the message truncated to 4096 characters and control
+characters stripped, and the level restricted to an
+allowlist (`info`, `warn`, `error`, `debug`; anything else
+becomes `info`) so a level cannot forge a log line.
 Every other `host.*` method is rejected with
 `unsupported_host_callback`. In particular `host.auth.*`
 is rejected absolutely: plugins never read, list, or save
@@ -231,24 +266,44 @@ self-built `http.Client`. What it receives at register time:
 - Egress: `{proxy_url, username, password}` for the
   per-session loopback proxy (below).
 - Config fragment: the verbatim remainder of its config
-  entry, scrubbed of nothing by core — the fragment is the
-  plugin's own configuration, and core adds no secrets to
-  it.
+  entry, handed VERBATIM by core (never scrubbed on
+  handoff) and displayed REDACTED wholesale — the fragment
+  is the plugin's own configuration, and core adds no
+  secrets to it.
 
 Egress (BQ5, hybrid): each plugin session gets a loopback
 HTTP proxy (`127.0.0.1:0`) owned by core, with ephemeral
 random Basic credentials that exist only for that proxy's
-lifetime. The proxy requires those credentials (407
+lifetime (lifetime = instance lifetime; no rotation in v1;
+`Host.Close` closes adopted proxies and revokes the
+credentials). The proxy requires those credentials (407
 otherwise), forwards absolute-form requests through the
 caller-supplied upstream transport (in real wiring, derived
 from the profile's outbound — `pluginhost` never imports
-`internal/outbound` and never dials directly), strips
-hop-by-hop headers, and injects the session `Cookie` header
-inside core, overwriting anything the plugin sent. CONNECT
-tunneling works only when the caller supplies a dial
-function; without one it returns 502. The proxy proves the
-mechanism with a fake/local upstream in tests; it does not
-prove a live profile outbound path.
+`internal/outbound`), strips hop-by-hop headers (including
+`Connection`-listed tokens), strips `Set-Cookie` from
+responses so upstream session cookies never reach the
+plugin, and injects the session `Cookie` header inside core
+ONLY for hosts the plugin declares in its registration
+`cookie_hosts` — no declaration means NO injection
+(fail-closed) — overwriting anything the plugin sent for a
+declared host, and removing the plugin's `Cookie` header
+for undeclared hosts. CONNECT tunneling works only when
+the caller supplies a dial function; without one it
+returns 502. A CONNECT tunnel is OPAQUE: core neither
+injects nor inspects anything inside TLS, so cookie
+scoping does not apply there — a trusted-model limit.
+Proxy use by plugins is by CONTRACT and code review for
+first-party plugins, NOT an enforcement boundary: an
+in-process native plugin can still `net.Dial`, read the
+environment, or read process memory. The enforceable
+guarantees are only the handed surface, redaction on
+output, and per-plugin isolation. Plugin-chosen text
+reaching output is redacted and capped at 4096 characters
+(the single plugin-text limit, matching the `host.log`
+cap). The proxy proves the mechanism with a fake/local
+upstream in tests; it does not prove a live profile
+outbound path.
 
 Errors travel as envelopes plus the existing classifier; a
 plugin never picks an exit code, and no raw server body
@@ -298,11 +353,19 @@ macOS loader is the unix loader; it has not run on macOS:
 There is no plugin store, download, registry, or signing
 (BQ4). For local-directory plugins only, a `checksums.txt`
 manifest (SHA-256, `checksums.txt` format) may accompany the
-binaries; when a manifest path is supplied, the file is
-verified BEFORE load (the verify-before-use pattern from
-upstream's plugin store, without the store). A mismatch or
-a missing entry refuses the load. Manifest generation and
-distribution are the operator's job.
+binaries; when a manifest path is supplied by the caller,
+the SHADOW-COPY bytes about to be `dlopen`ed are verified
+against it BEFORE load (the verify-before-use pattern from
+upstream's plugin store, without the store), through one
+`O_NOFOLLOW` open with a regular-file re-check. A mismatch,
+a missing entry, a duplicate or traversing manifest name,
+or a symlinked manifest/plugin path refuses the load.
+Manifest generation and distribution are the operator's
+job. There is no production caller wiring a manifest path
+in this PR: verification happens only where the caller
+supplies `Desired.ManifestPath`. A residual window remains
+between shadow verification and `dlopen` (no fd pin); see
+"Known limits".
 
 ## Writing a plugin
 
@@ -394,6 +457,49 @@ the merge gate for this PR.
 CI runs Linux-only jobs; no Windows/macOS/Android CI job
 exists, and none is claimed.
 
+## Known limits
+
+- TOCTOU window (U1): between shadow-copy verification and
+  `dlopen` the shadow file could be swapped by another
+  process with write access to the shadow directory. The
+  verification + symlinked-component checks narrow the
+  window; there is no fd pin. Treat the shadow directory
+  as host-private (`0700`, per-process).
+- Runtime bypass (U2): a plugin can `dlopen` another
+  library at runtime, bypassing the compat/checksum gates
+  for that library. The gates cover only the direct `.so`
+  at load time. Trusted-model limit.
+- Callback-id guessing (U3): a plugin guessing another
+  plugin's host-callback id gets only that plugin's
+  `host.log` lines misattributed in logs. No secret or
+  control surface is reachable through `host.log`.
+- Native access (U6): a native plugin can read the
+  environment, files, and process memory. Trusted-model
+  limit; see "Trust model".
+- Hung native calls (U7): `Host.Close` waits for
+  in-flight native calls to return; a hung plugin call
+  blocks shutdown until it returns.
+- Envelope size (U8): there is no cap on the size of a
+  plugin's envelope response; only RENDERED plugin text is
+  capped at 4096 characters. A >2 GiB response length is
+  refused rather than truncated in the C call path.
+- Lazy binding (U9): loading uses `RTLD_NOW`, so missing
+  symbols fail at load; a plugin that resolves symbols
+  lazily at runtime is outside the gate.
+- `$ORIGIN` sidecars / transitive deps (R13/R14): a
+  plugin whose `DT_NEEDED` dependency is resolved via
+  `$ORIGIN` fails through the shadow copy (no sidecar is
+  copied); absolute-rpath dependencies load bypassing the
+  gates. Dependencies must be self-contained or
+  absolute-rpath with this limitation understood. The
+  compat gate covers only the direct `.so`: a dependency
+  requiring a newer glibc is refused cleanly by `dlopen`
+  (`RTLD_NOW` backstop), not by the gate.
+- Windows/macOS/phone: [NEEDS-MEASUREMENT] (U4/U5) — the
+  Windows loader compiles but has not run; the macOS
+  loader is the unix loader, unrun; the phone load is the
+  merge gate.
+
 ## What was NOT copied, and why
 
 - `host.auth.*` callbacks: upstream reads credential files
@@ -401,7 +507,12 @@ exists, and none is claimed.
   credential surface exists for plugins.
 - Lstat/hardlink rejection in the shadow copy: absent
   upstream (verified by grep at the pin); implemented by
-  castctl. Never cite upstream for it.
+  castctl (hardlink check unix-only). Never cite upstream
+  for it.
+- Upstream `validPlugin` also requires a non-empty
+  `GitHubRepository` (`host.go:1241`); castctl deliberately
+  does NOT require it. Do not cite upstream for castctl's
+  metadata gate without stating this deviation.
 - `min_version` / `allow_downgrade` plugin config: absent
   upstream; not implemented.
 - Random shadow names / memfd: absent upstream; shadow
@@ -434,9 +545,11 @@ Files mirrored (renamed namespace, castctl schema 1):
 - `internal/pluginhost/host.go` — `ApplyConfig` (:213),
   quiesce, rollback.
 - `internal/pluginhost/platform.go` — candidate dirs
-  (:308), discovery (:292), extension (:100), ID rule.
+  (:308), discovery (:292), extension (:99), ID rule
+  (:17), version comparison (:218), file preference
+  (:204).
 - `internal/pluginhost/shadow.go` — shadow copy (:33),
-  sha256 naming (:95), per-process dir (:126-138).
+  sha256 naming (:154), per-process dir (:126-138).
 - `internal/pluginhost/client_guard.go` — guarded call,
   recover, abandon-on-timeout (:80-115).
 - `internal/pluginhost/rpc_schema.go` — lifecycle

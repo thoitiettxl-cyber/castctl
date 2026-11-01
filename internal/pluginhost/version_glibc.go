@@ -7,8 +7,43 @@
 package pluginhost
 
 /*
-#include <gnu/libc-version.h>
+#include <dlfcn.h>
 #include <stdlib.h>
+#include <string.h>
+
+// castctl_libc_version returns a malloc'd copy of the running
+// libc version string, or NULL when it cannot be known. The
+// version is read through dlopen/dlsym on purpose: including
+// <gnu/libc-version.h> would make a cgo/linux MUSL build fail
+// to COMPILE (musl has no such header), while this form
+// compiles everywhere and fails CLOSED at runtime on musl
+// (no gnu_get_libc_version symbol), where CheckPluginCompat
+// refuses ELF files with requirements present. The dlopen
+// handle is deliberately leaked: the version string is read
+// once per process lifetime in practice, and closing the
+// libc handle is never safe.
+static char* castctl_libc_version(void) {
+	void* handle = dlopen("libc.so.6", RTLD_NOW | RTLD_LOCAL);
+	if (handle == NULL) {
+		return NULL;
+	}
+	typedef const char* (*version_fn)(void);
+	version_fn fn = (version_fn)dlsym(handle, "gnu_get_libc_version");
+	if (fn == NULL) {
+		return NULL;
+	}
+	const char* v = fn();
+	if (v == NULL) {
+		return NULL;
+	}
+	size_t len = strlen(v);
+	char* out = (char*)malloc(len + 1);
+	if (out == NULL) {
+		return NULL;
+	}
+	memcpy(out, v, len + 1);
+	return out;
+}
 */
 import "C"
 
@@ -24,15 +59,17 @@ import (
 const testBinaryHasGLIBCReqs = true
 
 // runningLibcVersion reports the running glibc version via
-// gnu_get_libc_version. It exists only on cgo/linux builds: the
-// symbol is a glibc extension, absent on musl, darwin, and
-// windows.
+// gnu_get_libc_version, resolved at runtime through
+// dlopen/dlsym (see the C helper). It exists only on
+// cgo/linux builds. On musl (no such symbol) it errors,
+// and the compat gate refuses fail-closed.
 func runningLibcVersion() (glibcVersion, error) {
-	cstr := C.gnu_get_libc_version()
+	cstr := C.castctl_libc_version()
 	if cstr == nil {
-		return glibcVersion{}, fmt.Errorf("gnu_get_libc_version returned nil")
+		return glibcVersion{}, fmt.Errorf("gnu_get_libc_version is unavailable (non-glibc libc?)")
 	}
-	s := C.GoString((*C.char)(unsafe.Pointer(cstr)))
+	defer C.free(unsafe.Pointer(cstr))
+	s := C.GoString(cstr)
 	v, err := parseGlibcVersion(s)
 	if err != nil {
 		return glibcVersion{}, fmt.Errorf("running libc version %q: %w", s, err)

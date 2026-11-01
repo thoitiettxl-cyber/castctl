@@ -120,6 +120,9 @@ func handle(method string, request []byte) ([]byte, error) {
 }
 
 func registration() []byte {
+	// No CookieHosts declaration: the echo plugin needs no
+	// session cookie, so core injects none for it
+	// (fail-closed cookie scoping — see docs/plugins.md).
 	raw, _ := json.Marshal(pluginabi.Registration{
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginabi.Metadata{

@@ -748,11 +748,14 @@ plugin verbatim as its config fragment:
 There is NO `enabled` field at any level: presence in the
 array means active; remove the entry to disable. An `enabled`
 key inside an entry is plugin-opaque data, never a core
-toggle. Core parses `tag`/`type` strictly (unknown envelope
-keys are rejected); the fragment is raw-preserved on save,
-in original key order, and shown as `<redacted>` wholesale
-by redaction — tag/type only, never fragment contents, in
-any display, log, or error. The `plugins` block is saved
+toggle. Core parses `tag`/`type` strictly (both matching
+the plugin-ID rule); every other key becomes part of the
+fragment — there is no unknown-key rejection for fragment
+keys, and plugin tags do not participate in the tag-graph
+namespace. The fragment is raw-preserved on save, in
+original key order, and shown as `<redacted>` wholesale
+under the `fragment` key by redaction — tag/type only,
+never fragment contents, in any display, log, or error. The `plugins` block is saved
 after `webui`.
 
 glibc floor: a plugin binary must require at most glibc

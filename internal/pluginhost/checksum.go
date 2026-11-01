@@ -8,7 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
+	"io"
 	"path/filepath"
 	"strings"
 )
@@ -19,19 +19,29 @@ import (
 // (VerifyChecksum) and install.go:116-133 (download checksums.txt,
 // parse, verify BEFORE extract) — with the download/registry/
 // signing parts deliberately NOT taken: there is no store, no
-// registry, and no default remote. Verification happens at
-// place/load time for files already in a local plugin directory:
-// a directory carrying a checksums.txt manifest must have every
-// plugin file it lists verify, and a plugin file listed in the
-// manifest must match before it is loaded. A directory with no
-// checksums.txt is unverified but loadable (local, first-party
-// files); that absence is stated in docs/plugins.md, never
-// hidden behind a verification claim.
+// registry, and no default remote. Verification happens at load
+// time, on the SHADOW-COPY bytes about to be dlopened, when the
+// caller supplies a manifest path (Desired.ManifestPath): the
+// loader hashes the shadow file through a single O_NOFOLLOW
+// open and compares it against the manifest. Verifying the
+// source file instead would leave a swap window between the
+// verify read and the shadow copy; the shadow bytes are the
+// bytes the loader maps. A directory with no checksums.txt is
+// unverified but loadable (local, first-party files); that
+// absence is stated in docs/plugins.md, never hidden behind a
+// verification claim. No caller in this PR supplies a
+// ManifestPath except tests: wiring the manifest from a plugin
+// directory's checksums.txt is future work for the wiring PR
+// (see docs/plugins.md "Known limits").
 
 // ParseChecksums parses a checksums.txt body: one
 // "<sha256-hex>  <name>" per line, blank lines and #-comments
 // skipped, a leading "*" on the name stripped (sha256sum -b
-// form). It mirrors upstream's ParseChecksums.
+// form). It mirrors upstream's ParseChecksums. Duplicate
+// names, absolute names, and names containing a path
+// separator or ".." are rejected: a manifest entry names
+// exactly one base name in the plugin directory, and a
+// duplicate must never silently last-win.
 func ParseChecksums(data []byte) (map[string]string, error) {
 	out := map[string]string{}
 	for lineNumber, rawLine := range strings.Split(string(data), "\n") {
@@ -51,9 +61,28 @@ func ParseChecksums(data []byte) (map[string]string, error) {
 			return nil, fmt.Errorf("line %d: invalid sha256: %w", lineNumber+1, err)
 		}
 		name := strings.TrimPrefix(strings.TrimSpace(fields[1]), "*")
+		if err := validateManifestName(name); err != nil {
+			return nil, fmt.Errorf("line %d: %w", lineNumber+1, err)
+		}
+		if _, dup := out[name]; dup {
+			return nil, fmt.Errorf("line %d: duplicate checksum entry for %q", lineNumber+1, name)
+		}
 		out[name] = hash
 	}
 	return out, nil
+}
+
+func validateManifestName(name string) error {
+	if name == "" || name == "." || name == ".." {
+		return fmt.Errorf("invalid checksum name %q", name)
+	}
+	if filepath.IsAbs(name) || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
+		return fmt.Errorf("invalid checksum name %q", name)
+	}
+	if filepath.Base(name) != name {
+		return fmt.Errorf("invalid checksum name %q", name)
+	}
+	return nil
 }
 
 // VerifyChecksum checks data against the manifest entry for
@@ -75,12 +104,24 @@ func VerifyChecksum(name string, data []byte, checksums map[string]string) error
 // VerifyFileChecksum verifies the plugin file at pluginPath
 // against the checksums.txt manifest at manifestPath. The
 // manifest entry is looked up by the plugin file's base name.
+// Both files are opened refusing symlinks (final component
+// and every path component): a manifest or plugin reached
+// through a symlink is refused rather than verified through
+// the link. This helper verifies the bytes at pluginPath;
+// the loader path verifies the shadow copy instead (see
+// VerifyShadowFileChecksum).
 func VerifyFileChecksum(pluginPath, manifestPath string) error {
-	data, err := os.ReadFile(pluginPath)
+	if err := refuseSymlinkedComponents(pluginPath); err != nil {
+		return err
+	}
+	if err := refuseSymlinkedComponents(manifestPath); err != nil {
+		return err
+	}
+	data, err := readRegularFile(pluginPath)
 	if err != nil {
 		return err
 	}
-	manifest, err := os.ReadFile(manifestPath)
+	manifest, err := readRegularFile(manifestPath)
 	if err != nil {
 		return fmt.Errorf("read plugin checksums manifest: %w", err)
 	}
@@ -89,4 +130,65 @@ func VerifyFileChecksum(pluginPath, manifestPath string) error {
 		return err
 	}
 	return VerifyChecksum(filepath.Base(pluginPath), data, checksums)
+}
+
+// VerifyShadowFileChecksum verifies the shadow-copy bytes at
+// shadowPath against the checksums.txt manifest at
+// manifestPath, looking the entry up by entryName (the base
+// name of the original plugin file — the shadow file's own
+// name is content-derived and never appears in a manifest).
+// The shadow file is hashed through a single O_NOFOLLOW open
+// with a regular-file re-check, so the hashed bytes are the
+// bytes on the shadow path at verify time. A residual window
+// remains between this verification and dlopen (no fd pin);
+// see docs/plugins.md "Known limits" (U1).
+func VerifyShadowFileChecksum(shadowPath, manifestPath, entryName string) error {
+	if err := validateManifestName(entryName); err != nil {
+		return err
+	}
+	if err := refuseSymlinkedComponents(manifestPath); err != nil {
+		return err
+	}
+	manifest, err := readRegularFile(manifestPath)
+	if err != nil {
+		return fmt.Errorf("read plugin checksums manifest: %w", err)
+	}
+	checksums, err := ParseChecksums(manifest)
+	if err != nil {
+		return err
+	}
+	expected := strings.ToLower(strings.TrimSpace(checksums[entryName]))
+	if expected == "" {
+		return fmt.Errorf("checksum for %s not found", entryName)
+	}
+	f, err := openPluginSource(shadowPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("plugin shadow file %q is not a regular file", shadowPath)
+	}
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		return fmt.Errorf("hash plugin shadow file: %w", err)
+	}
+	if hex.EncodeToString(hasher.Sum(nil)) != expected {
+		return fmt.Errorf("checksum mismatch for %s", entryName)
+	}
+	return nil
+}
+
+// readRegularFile reads a whole file through an O_NOFOLLOW
+// open with a regular-file re-check, refusing symlinks.
+func readRegularFile(path string) ([]byte, error) {
+	f, err := openPluginSource(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("file %q is not a regular file", path)
+	}
+	return io.ReadAll(f)
 }
