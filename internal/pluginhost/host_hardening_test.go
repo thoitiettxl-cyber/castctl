@@ -120,6 +120,101 @@ func TestHostFuseIsPerPath(t *testing.T) {
 	}
 }
 
+// TestHostLoadedIgnoresStaleFuseForDifferentPath: a fuse is
+// per-path. When a replacement image's register panics, the
+// tag is fused with the NEW path and ApplyConfig rolls back
+// to the old image successfully. The old image stays loaded
+// and callable, so Loaded() must report it (agreeing with
+// Call, which already ignores a fuse whose path differs
+// from the loaded image's path). The stale fuse entry itself
+// remains: a same-path ApplyConfig for the fused path still
+// skips without re-opening.
+func TestHostLoadedIgnoresStaleFuseForDifferentPath(t *testing.T) {
+	loader, clients := fakeSetup("/plugins/echo.so", "/plugins/v2.so")
+	var logs []string
+	h := newFakeHost(t, loader, &logs)
+	defer h.Close()
+	ctx := context.Background()
+	first := pluginhost.Desired{Tag: "echo", Type: "echo", Path: "/plugins/echo.so", Fragment: []byte(`{"n":1}`)}
+	if report := h.ApplyConfig(ctx, []pluginhost.Desired{first}); len(report.Loaded) != 1 {
+		t.Fatalf("initial load report = %+v", report)
+	}
+	// The replacement image panics on register: the panic
+	// fuses the tag with the NEW path, loadOne fails, and
+	// the rollback re-register of the old image succeeds.
+	clients["/plugins/v2.so"].PanicMethods = map[string]any{pluginabi.MethodPluginRegister: true}
+	report := h.ApplyConfig(ctx, []pluginhost.Desired{{Tag: "echo", Type: "echo", Path: "/plugins/v2.so", Fragment: []byte(`{"n":2}`)}})
+	if len(report.Loaded) != 1 || !strings.Contains(report.Skipped[0].Reason, "rolled back") {
+		t.Fatalf("replacement report = %+v, want rolled-back load", report)
+	}
+	loaded, ok := h.Loaded("echo")
+	if !ok {
+		t.Fatal("Loaded must report the rolled-back old image: stale fuse is for a different path")
+	}
+	if loaded.Path != "/plugins/echo.so" {
+		t.Fatalf("loaded path = %q, want /plugins/echo.so", loaded.Path)
+	}
+	if _, err := h.Call(ctx, "echo", pluginabi.MethodProviderCall, []byte(`{"input":"ping"}`)); err != nil {
+		t.Fatalf("call after rollback err = %v", err)
+	}
+	// The stale fuse entry is still recorded for the new
+	// path, so a same-path ApplyConfig skips without
+	// re-opening the fused image.
+	if _, fused := h.Fused("echo"); !fused {
+		t.Fatal("stale fuse for the replacement path must still be recorded")
+	}
+	opensBefore := loader.OpenCount("/plugins/v2.so")
+	report = h.ApplyConfig(ctx, []pluginhost.Desired{{Tag: "echo", Type: "echo", Path: "/plugins/v2.so", Fragment: []byte(`{"n":2}`)}})
+	if len(report.Skipped) != 1 || !strings.Contains(report.Skipped[0].Reason, "fused") {
+		t.Fatalf("same-path report = %+v, want fused skip", report)
+	}
+	if got := loader.OpenCount("/plugins/v2.so"); got != opensBefore {
+		t.Fatalf("loader opens = %d (was %d): fused same-path load must not re-open", got, opensBefore)
+	}
+	if _, ok := h.Loaded("echo"); !ok {
+		t.Fatal("Loaded must still report the old image after the fused-path skip")
+	}
+}
+
+// TestHostSkippedReasonStripsForgedControls: a non-envelope
+// register error carrying a forged newline, an ESC CSI
+// sequence, and C1 controls must reach the Skipped reason
+// (the exact string `plugin check` prints on its FAIL line)
+// with no forged line and no live escape: newline/CR become
+// spaces, CSI and C1 sequences are dropped whole, and no
+// hop (cap/redact) reintroduces a control character.
+func TestHostSkippedReasonStripsForgedControls(t *testing.T) {
+	loader, clients := fakeSetup("/plugins/echo.so")
+	var logs []string
+	h := newFakeHost(t, loader, &logs)
+	defer h.Close()
+	clients["/plugins/echo.so"].OnCall = func(ctx context.Context, method string, request []byte) ([]byte, error) {
+		if method == pluginabi.MethodPluginRegister {
+			return nil, errors.New("register boom\nFORGED-LINE\x1b[31mRED\u0085TAIL\u009b31mEND")
+		}
+		return plugintest.ErrorResponse("unexpected", "unexpected call: "+method), nil
+	}
+	report := h.ApplyConfig(context.Background(), []pluginhost.Desired{{Tag: "echo", Type: "echo", Path: "/plugins/echo.so"}})
+	if len(report.Skipped) != 1 || len(report.Loaded) != 0 {
+		t.Fatalf("report = %+v, want one skip", report)
+	}
+	reason := report.Skipped[0].Reason
+	if strings.ContainsAny(reason, "\n\r\x1b") {
+		t.Fatalf("skipped reason kept controls: %q", reason)
+	}
+	for _, r := range reason {
+		if r >= 0x80 && r <= 0x9f {
+			t.Fatalf("skipped reason kept C1 control U+%04X: %q", r, reason)
+		}
+	}
+	if strings.Contains(reason, "[31m") {
+		t.Fatalf("skipped reason kept CSI remnant: %q", reason)
+	}
+	if !strings.Contains(reason, "register boom") || !strings.Contains(reason, "FORGED-LINE") {
+		t.Fatalf("skipped reason lost content: %q", reason)
+	}
+}
+
 // TestHostTagAndTypeValidation: invalid tag/type values are
 // rejected at the Host layer.
 func TestHostTagAndTypeValidation(t *testing.T) {

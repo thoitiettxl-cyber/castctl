@@ -244,7 +244,7 @@ Rules:
   participate in `validateTagGraph`'s outbound/endpoint tag
   namespace. Fragment contents are the plugin's business.
 
-### Config audit and BD-C1 (OPEN — audit gate does not pass until Boss decides)
+### Config audit and BD-C1 (DECIDED (b) — library defaults until runtime wiring lands)
 
 Every bound, literal, and default in the plugin-core delta,
 audited against the standing rule ("every castctl setting
@@ -282,17 +282,18 @@ fixed by the ABI, and a future config block could change
 it. (An earlier plan note called it a true constant; that
 classification is superseded by this table.)
 
-**BD-C1 — OPEN.** Host-level values (the BD-C1 rows above)
-have no config surface because no runtime wiring reads
-`config.json` into a `Host` yet: the only production
-`ApplyConfig` caller is `plugin check` (verified by grep;
-all other callers are tests). Boss decides: (a) a
-follow-up PR with a sing-box-style top-level block for
-host-level plugin settings (shape and defaults to be
-proposed then), or (b) keep these as library defaults
-until runtime wiring lands. **The config audit gate stays
-open until Boss decides BD-C1.** This decision is not
-made by this PR; no config block is invented here.
+**BD-C1 — DECIDED (b).** Host-level values (the BD-C1 rows
+above) are LIBRARY DEFAULTS in this PR: they are constants
+in the host code with no config surface, because no
+runtime wiring reads `config.json` into a `Host` yet: the
+only production `ApplyConfig` caller is `plugin check`
+(verified by grep; all other callers are tests). When
+runtime wiring lands, these values move into a
+sing-box-style `config.json` block, and every setting must
+end up in `config.json` per the standing rule. No
+top-level block is invented here: no new config fields,
+no env-var config, and no separate config files are added
+by this PR.
 
 ## Capabilities
 
@@ -318,7 +319,10 @@ characters stripped, and the level restricted to an
 allowlist (`info`, `warn`, `error`, `debug`; anything else
 becomes `info`) so a level cannot forge a log line.
 Every other `host.*` method is rejected with
-`unsupported_host_callback`. In particular `host.auth.*`
+`unsupported_host_callback`. The rejection envelope
+echoes the method string verbatim, bounded to 256 bytes
+by the guarded scan; the envelope goes back to the plugin
+only, never to host output (N10). In particular `host.auth.*`
 is rejected absolutely: plugins never read, list, or save
 credentials through the host. Upstream's auth callbacks
 (`auth_callbacks.go`, which reads credential files) were
@@ -333,6 +337,13 @@ scanned range reports "no NUL" instead of crashing the
 host). The guard covers the method-name read only, is
 measured only on linux, and assumes no other code
 replaces the SIGSEGV/SIGBUS handlers after install.
+A SIGBUS install failure degrades silently: SIGBUS
+faults then go straight to the previous handler
+unguarded (the install still succeeds for SIGSEGV), and
+a fault address near the top of the address space can
+wrap the `ptr+len` range check, so an in-range fault
+chains to the previous handler instead of longjmping
+(N9).
 Windows uses a plain bounded scan with the same
 page-fault class unproven there.
 
@@ -361,7 +372,12 @@ HTTP proxy (`127.0.0.1:0`) owned by core, with ephemeral
 random Basic credentials that exist only for that proxy's
 lifetime (lifetime = instance lifetime; no rotation in v1;
 `Host.Close` closes adopted proxies and revokes the
-credentials). The proxy requires those credentials (407
+credentials). Credential comparison uses
+`subtle.ConstantTimeCompare`, which returns 0 when the
+presented and stored values differ in length; the stored
+credentials are fixed 32-character values and the proxy
+is loopback-only, so the length difference leaks nothing
+beyond the fixed length (N11). The proxy requires those credentials (407
 otherwise), forwards absolute-form requests through the
 caller-supplied upstream transport (in real wiring, derived
 from the profile's outbound — `pluginhost` never imports
@@ -373,7 +389,12 @@ ONLY for hosts the plugin declares in its registration
 `cookie_hosts` — no declaration means NO injection
 (fail-closed) — overwriting anything the plugin sent for a
 declared host, and removing the plugin's `Cookie` header
-for undeclared hosts. CONNECT tunneling works only when
+for undeclared hosts. Cookie scope lives on the proxy,
+not per tag: `SetCookieHosts` replaces the whole map, so
+when two tags share one proxy pointer with different
+`cookie_hosts` declarations, the last registration wins
+and its scope applies to both tags' traffic
+(last-writer-wins, per-proxy scope). CONNECT tunneling works only when
 the caller supplies a dial function; without one it
 returns 502. A CONNECT tunnel is OPAQUE: core neither
 injects nor inspects anything inside TLS, so cookie
@@ -413,7 +434,13 @@ silent pass. Running-version strings with distro suffixes
 (e.g. Debian's `2.44-0`) parse by leading digits. On non-glibc targets (darwin, Windows) and on
 no-cgo builds the check is fail-closed for ELF files with
 requirements present: the file is refused rather than
-loaded unchecked. Non-ELF files skip the check (the format
+loaded unchecked. Offsets in `parseVersionNeeds` use plain
+`int` arithmetic: the parser is written for the claimed
+64-bit targets only, and any malformed version info
+(truncated entry, aux chain cut short of `vn_cnt`, an
+out-of-range name offset, or an unparseable numeric
+`GLIBC_` name) refuses the load rather than computing a
+downgraded maximum (N8). Non-ELF files skip the check (the format
 gate is the loader itself).
 
 Android: there is no `GOOS=android` loader file, and the

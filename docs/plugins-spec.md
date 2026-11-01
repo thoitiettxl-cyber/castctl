@@ -143,7 +143,7 @@ never assumed.
   namespace.
 - Display/redaction: `tag`/`type` + fragment `<redacted>`.
 
-### Config audit (BD-C1 — OPEN)
+### Config audit (BD-C1 — DECIDED (b))
 
 Full audit table: `docs/plugins.md` Config ("Config audit
 and BD-C1"). Summary: the `plugins` array above IS in
@@ -151,14 +151,14 @@ and BD-C1"). Summary: the `plugins` array above IS in
 (`os.TempDir()/castctl-pluginhost`), egress bind
 (`127.0.0.1:0`) + timeouts (10s/120s), render cap (4096),
 check-output caps (200), and the `host.log` level
-allowlist — have NO config surface, because no runtime
-wiring reads `config.json` into a `Host` yet (the only
-production `ApplyConfig` caller is `plugin check`).
-**BD-C1 (Boss decision, not made here):** (a) a follow-up
-PR with a sing-box-style top-level block for host-level
-plugin settings (shape/defaults proposed later), or (b)
-keep library defaults until runtime wiring lands. The
-audit gate stays open until Boss decides.
+allowlist — are LIBRARY DEFAULTS in this PR, with NO
+config surface, because no runtime wiring reads
+`config.json` into a `Host` yet (the only production
+`ApplyConfig` caller is `plugin check`). When runtime
+wiring lands, these values move into a sing-box-style
+`config.json` block, and every setting must end up in
+`config.json` per the standing rule. No top-level block
+is invented here.
 
 ## 8. Egress and secrets
 

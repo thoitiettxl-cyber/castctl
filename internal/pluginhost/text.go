@@ -97,24 +97,33 @@ func safePluginText(s string) string {
 }
 
 // stripControlChars maps newline/CR/tab to a space and
-// drops other C0 controls and DEL, so plugin-chosen text
-// can never forge a second output line or inject terminal
-// control sequences. An ESC that starts a CSI sequence
-// (ESC [ ... final byte) drops the whole sequence: only
-// stripping the ESC would leave a "[31m" remnant in the
-// output. A bare ESC with no CSI following it is dropped
-// alone. Shared by host.log messages and envelope error
-// text (see dispatchHostCall, parseEnvelope).
+// drops other C0 controls, DEL, and C1 controls
+// (U+0080-U+009F), so plugin-chosen text can never forge
+// a second output line or inject terminal control
+// sequences. An ESC that starts a CSI sequence (ESC [
+// ... final byte) drops the whole sequence, as does a
+// C1 CSI sequence (U+009B ... final byte): only
+// stripping the introducer would leave a "[31m" remnant
+// in the output. A bare ESC, or a bare C1 control with
+// no CSI following it, is dropped alone. Shared by
+// host.log messages, envelope error text (see
+// dispatchHostCall, parseEnvelope), and skip reasons
+// (see shortErr).
 func stripControlChars(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for len(s) > 0 {
 		r, size := utf8.DecodeRuneInString(s)
-		if r == 0x1b && len(s) > size && s[size] == '[' {
+		escCSI := r == 0x1b && len(s) > size && s[size] == '['
+		if escCSI || r == 0x9b {
 			// Skip the CSI sequence through its final
 			// byte (0x40-0x7e); an unterminated sequence
 			// drops to end of input.
-			s = s[size+1:]
+			if escCSI {
+				s = s[size+1:]
+			} else {
+				s = s[size:]
+			}
 			for len(s) > 0 && !(s[0] >= 0x40 && s[0] <= 0x7e) {
 				_, n := utf8.DecodeRuneInString(s)
 				s = s[n:]
@@ -129,9 +138,9 @@ func stripControlChars(s string) string {
 		case '\n', '\r', '\t':
 			b.WriteRune(' ')
 		default:
-			if r < 0x20 || r == 0x7f {
-				// Dropped: other C0 controls, DEL,
-				// and a bare ESC.
+			if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+				// Dropped: other C0 controls, DEL, C1
+				// controls, and a bare ESC.
 			} else {
 				b.WriteRune(r)
 			}

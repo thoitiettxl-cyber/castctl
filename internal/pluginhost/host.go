@@ -155,9 +155,10 @@ type Skipped struct {
 
 // ApplyReport is the result of ApplyConfig: the tags that are
 // loaded AND callable afterwards, and the desired entries
-// that were skipped. A fused tag is never in Loaded, even
-// when its image is still resident: fused calls fail fast
-// until a different-path ApplyConfig clears the fuse.
+// that were skipped. A tag is never in Loaded for a path
+// it is fused for, even when its image is still resident:
+// fused calls fail fast for that path until a
+// different-path ApplyConfig clears the fuse.
 type ApplyReport struct {
 	Loaded  []string
 	Skipped []Skipped
@@ -213,19 +214,22 @@ func (h *Host) Fused(tag string) (string, bool) {
 }
 
 // Loaded reports the registered plugin for tag, if any.
-// A fused tag is never reported Loaded, even when its
-// image is still resident: Loaded means callable, and
-// fused calls fail fast (see Call). Registration fields
-// are read under h.mu, the same mutex applyRegistration
+// A fuse is per-path: only a fuse recorded for the loaded
+// image's own path hides it — a call for that path
+// fail-fasts (see Call), so Loaded means callable for
+// that path. A fuse recorded for a different path (a
+// failed replacement, rolled back to this image) does
+// not hide the loaded image. Registration fields are
+// read under h.mu, the same mutex applyRegistration
 // writes them under.
 func (h *Host) Loaded(tag string) (LoadedPlugin, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if _, fused := h.fused[tag]; fused {
-		return LoadedPlugin{}, false
-	}
 	lp, ok := h.loaded[tag]
 	if !ok || !lp.registered {
+		return LoadedPlugin{}, false
+	}
+	if entry, fused := h.fused[tag]; fused && entry.path == lp.path {
 		return LoadedPlugin{}, false
 	}
 	return LoadedPlugin{
@@ -406,9 +410,10 @@ func (h *Host) ApplyConfig(ctx context.Context, desired []Desired) ApplyReport {
 		h.mu.Unlock()
 		if isFused && fuseEntry.path == d.Path {
 			report.Skipped = append(report.Skipped, Skipped{Tag: d.Tag, Reason: "fused: " + fuseEntry.reason})
-			// A fused tag is never reported Loaded, even
-			// when its image is still resident: Loaded
-			// means callable, and fused calls fail fast.
+			// A tag fused for this path is never reported
+			// Loaded, even when its image is still
+			// resident: Loaded means callable for that
+			// path, and fused calls fail fast.
 			continue
 		}
 		if isFused {
@@ -495,10 +500,14 @@ func shortErr(err error) string {
 	if err == nil {
 		return ""
 	}
-	// Skip reasons are rendered output: plugin-chosen text
-	// is redacted and capped (see safePluginText), never
-	// passed through verbatim.
-	return safePluginText(err.Error())
+	// Skip reasons are rendered output: strip control
+	// characters (including C1) BEFORE the cap/redact
+	// path, so a plugin-chosen newline or escape in a
+	// loader error can never forge a second output line
+	// or inject a terminal sequence downstream. The cap
+	// and redaction in safePluginText reintroduce no
+	// control characters.
+	return safePluginText(stripControlChars(err.Error()))
 }
 
 func (h *Host) fuse(tag, reason, path string) {

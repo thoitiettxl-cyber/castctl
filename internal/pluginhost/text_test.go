@@ -84,6 +84,27 @@ func TestSafePluginTextLargeInputBounded(t *testing.T) {
 	}
 }
 
+func TestStripControlCharsDropsC1Controls(t *testing.T) {
+	// C1 controls (U+0080-U+009F) are terminal controls
+	// when decoded from UTF-8 on some consoles (e.g. the
+	// Linux console treats U+009B as CSI), so they must
+	// be dropped like the C0 controls: a bare C1, a C1 NEL
+	// line break, and a C1 CSI sequence must not survive.
+	in := "a\u0080b\u0085c\u009b31md\u009ce"
+	got := stripControlChars(in)
+	for _, r := range got {
+		if r >= 0x80 && r <= 0x9f {
+			t.Fatalf("stripControlChars kept C1 control U+%04X: %q", r, got)
+		}
+	}
+	if strings.ContainsAny(got, "\n\r\x1b") || strings.Contains(got, "[31m") {
+		t.Fatalf("stripControlChars kept controls/remnant: %q", got)
+	}
+	if got != "abcde" {
+		t.Fatalf("stripControlChars(%q) = %q, want %q", in, got, "abcde")
+	}
+}
+
 func TestCapPluginTextRuneSafe(t *testing.T) {
 	s := strings.Repeat("é", 3000)
 	got := capPluginText(s)
