@@ -190,7 +190,7 @@ prepare_mutable_dirs() {
   # defeats current-target validation (B2). run/tmp is guarded
   # too: it is created here and exported as the child's TMPDIR,
   # so a planted link would redirect the child's temp files.
-  for _guard_dir in "$DATA_DIR" "$DATA_DIR/releases" "$DATA_DIR/config" "$PROFILES_DIR" "$PLUGIN_ROOT" "$PLUGIN_DIR" \
+  for _guard_dir in "$DATA_DIR" "$DATA_DIR/releases" "$DATA_DIR/config" "$PROFILES_DIR" "$PLUGIN_ROOT" "$PLUGIN_ROOT/linux" "$PLUGIN_DIR" \
     "$RUN_DIR" "$RUN_DIR/tmp" "$LOG_DIR" "$BACKUP_DIR" "$CONTROL_DIR"; do
     [ ! -L "$_guard_dir" ] || die "data directory must not be a symlink: $_guard_dir"
   done

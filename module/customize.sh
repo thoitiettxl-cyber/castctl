@@ -75,7 +75,7 @@ esac
 # AT OR BELOW DATA_DIR are refused here; a symlinked ancestor of
 # DATA_DIR is followed (see docs §10).
 for _guard_dir in "$DATA_DIR/config" "$DATA_DIR/config/profiles" \
-  "$DATA_DIR/plugins" "$DATA_DIR/plugins/linux/arm64" \
+  "$DATA_DIR/plugins" "$DATA_DIR/plugins/linux" "$DATA_DIR/plugins/linux/arm64" \
   "$DATA_DIR/run" "$DATA_DIR/logs" "$DATA_DIR/backups" \
   "$DATA_DIR/.controller"; do
   [ ! -L "$_guard_dir" ] || fail "module data subdirectory must not be a symlink: $_guard_dir"
