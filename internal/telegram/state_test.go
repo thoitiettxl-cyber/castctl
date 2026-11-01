@@ -152,12 +152,19 @@ func TestStateStoreCorruptAndVersion(t *testing.T) {
 	// through to the corrupt path (which would load fresh
 	// and discard the state): a string "2" or a float 2.0
 	// is a shape error, not corruption, and the file must
-	// survive the refusal byte-for-byte.
+	// survive the refusal byte-for-byte. (A leading-zero
+	// literal such as 007 never reaches the shape check: it
+	// is invalid JSON, so the probe decode fails first and
+	// the file takes the warned corrupt path — the
+	// pre-existing accepted residual for malformed files.
+	// See the micro-loop report for why no lenient pre-scan
+	// was added for it.)
 	for _, shaped := range []string{
 		`{"version":"2","offset":9,"chats":{"500":{"title":"main"}}}`,
 		`{"version":2.0,"offset":9,"chats":{"500":{"title":"main"}}}`,
 		`{"version":2e0,"offset":9,"chats":{"500":{"title":"main"}}}`,
 		`{"version":true,"offset":9,"chats":{"500":{"title":"main"}}}`,
+		`{"version":null,"offset":9,"chats":{"500":{"title":"main"}}}`,
 	} {
 		shapedBytes := []byte(shaped)
 		if err := os.WriteFile(path, shapedBytes, 0o600); err != nil {
@@ -175,6 +182,71 @@ func TestStateStoreCorruptAndVersion(t *testing.T) {
 		if !bytes.Equal(after, shapedBytes) {
 			t.Errorf("failed mistyped-version load mutated the state file for %s; want it untouched", shaped)
 		}
+	}
+
+	// An out-of-range integer literal refuses too, instead of
+	// overflowing the body decode into the corrupt path: the
+	// digit string is a valid shape but no int can hold it,
+	// so the file must survive the refusal byte-for-byte.
+	for _, huge := range []string{
+		`{"version":99999999999999999999999,"offset":9,"chats":{"500":{"title":"main"}}}`,
+		`{"version":-99999999999999999999999,"offset":9,"chats":{"500":{"title":"main"}}}`,
+	} {
+		hugeBytes := []byte(huge)
+		if err := os.WriteFile(path, hugeBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := LoadStateStore(dir); err == nil {
+			t.Errorf("out-of-range version %s must refuse to start", huge)
+		} else if !strings.Contains(err.Error(), "out of range") {
+			t.Errorf("out-of-range-version error = %v; want the range refusal", err)
+		}
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(after, hugeBytes) {
+			t.Errorf("failed out-of-range-version load mutated the state file for %s; want it untouched", huge)
+		}
+	}
+
+	// A missing version refuses as 0, as before, without
+	// mutating the file.
+	missingBytes := []byte(`{"offset":9,"chats":{"500":{"title":"main"}}}`)
+	if err := os.WriteFile(path, missingBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadStateStore(dir); err == nil {
+		t.Error("missing version must refuse to start")
+	} else if !strings.Contains(err.Error(), "version 0 is not supported") {
+		t.Errorf("missing-version error = %v; want the version 0 refusal", err)
+	}
+	after, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, missingBytes) {
+		t.Error("failed missing-version load mutated the state file; want it untouched")
+	}
+
+	// A giant mistyped version must not turn the refusal
+	// into a giant log line: the echoed shape is bounded.
+	giant := `{"version":"` + strings.Repeat("x", 200) + `","offset":9}`
+	giantBytes := []byte(giant)
+	if err := os.WriteFile(path, giantBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadStateStore(dir); err == nil {
+		t.Error("giant mistyped version must refuse to start")
+	} else if len(err.Error()) > 200 || !strings.Contains(err.Error(), "...") {
+		t.Errorf("giant-version error length = %d; want a bounded echo", len(err.Error()))
+	}
+	after, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, giantBytes) {
+		t.Error("failed giant-version load mutated the state file; want it untouched")
 	}
 
 	// An empty file loads fresh without a corrupt report: a

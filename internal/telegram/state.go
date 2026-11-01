@@ -112,10 +112,13 @@ type StateStore struct {
 }
 
 // isJSONIntegerLiteral reports whether b is a JSON integer
-// literal: an optional minus followed by ASCII digits. It
-// rejects floats (2.0), exponents (2e0), strings, booleans,
-// and null, so a mistyped version field can never pass the
-// shape check in LoadStateStore.
+// literal: an optional minus, then either a single zero or a
+// non-zero digit followed by digits. It rejects floats (2.0),
+// exponents (2e0), strings, booleans, null, and leading-zero
+// forms ("007", which are not valid JSON numbers). Shape alone
+// does not bound the value: an over-long digit string still
+// passes here, so LoadStateStore range-checks the literal
+// with ParseInt before the body is decoded.
 func isJSONIntegerLiteral(b []byte) bool {
 	if len(b) == 0 {
 		return false
@@ -127,12 +130,29 @@ func isJSONIntegerLiteral(b []byte) bool {
 	if i == len(b) {
 		return false
 	}
-	for ; i < len(b); i++ {
+	if b[i] == '0' {
+		return i+1 == len(b)
+	}
+	if b[i] < '1' || b[i] > '9' {
+		return false
+	}
+	for i++; i < len(b); i++ {
 		if b[i] < '0' || b[i] > '9' {
 			return false
 		}
 	}
 	return true
+}
+
+// truncVersionShape bounds the version bytes echoed in a
+// refusal error: a hand-edited state file must not turn a
+// startup refusal into a giant log line.
+func truncVersionShape(b []byte) string {
+	const maxVersionShapeEcho = 32
+	if len(b) <= maxVersionShapeEcho {
+		return string(b)
+	}
+	return string(b[:maxVersionShapeEcho]) + "..."
 }
 
 // LoadStateStore reads the state file in profileDir. A missing or
@@ -170,8 +190,20 @@ func LoadStateStore(profileDir string) (*StateStore, bool, error) {
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return newStateStore(path), true, nil
 	}
-	if len(probe.Version) > 0 && !isJSONIntegerLiteral(probe.Version) {
-		return nil, false, fmt.Errorf("telegram: state file version has non-integer shape %s; refusing to start rather than discard state", string(probe.Version))
+	if len(probe.Version) > 0 {
+		if !isJSONIntegerLiteral(probe.Version) {
+			return nil, false, fmt.Errorf("telegram: state file version has non-integer shape %s; refusing to start rather than discard state", truncVersionShape(probe.Version))
+		}
+		// Range-check the literal before the body is decoded:
+		// a digit string outside int range would otherwise
+		// fail the body unmarshal and fall into the corrupt
+		// fresh-load path, silently discarding the state the
+		// unknown-version refusal exists to protect.
+		// ParseInt with IntSize validates exactly the range
+		// the Version int field below can hold.
+		if _, err := strconv.ParseInt(string(probe.Version), 10, strconv.IntSize); err != nil {
+			return nil, false, fmt.Errorf("telegram: state file version %s is out of range; refusing to start rather than discard state", truncVersionShape(probe.Version))
+		}
 	}
 	var st telegramStateFile
 	if err := json.Unmarshal(data, &st); err != nil {
