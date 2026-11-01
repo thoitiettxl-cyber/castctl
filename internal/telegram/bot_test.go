@@ -556,6 +556,35 @@ func TestDecideOncePerIDLocking(t *testing.T) {
 	}
 }
 
+func TestDecideOncePanickingDeciderDoesNotStrandID(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	var calls atomic.Int32
+	tb.bot.decider = DeciderFunc(func(_ context.Context, id, _ string) error {
+		if calls.Add(1) == 1 {
+			panic("test panic in decider")
+		}
+		return nil
+	})
+	ctx := context.Background()
+	// The panic propagates out of decideOnce (the dispatcher
+	// per-update recover bounds it in production); the marker
+	// cleanup must still run, so the next tap for the same id
+	// proceeds instead of waiting until shutdown.
+	func() {
+		defer func() { _ = recover() }()
+		_, _ = tb.bot.decideOnce(ctx, "A", "allow_once")
+	}()
+	ok, err := tb.bot.decideOnce(ctx, "A", "allow_once")
+	if err != nil || !ok {
+		t.Errorf("decideOnce(A) after panic = (%v, %v); want (true, nil)", ok, err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("decider calls = %d; want 2 (panic + retry)", got)
+	}
+}
+
 func TestBotCallbackDecideDistinctEntriesOneRPC(t *testing.T) {
 	t.Parallel()
 	srv := newFakeTelegramServer(t)

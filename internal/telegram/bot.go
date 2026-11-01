@@ -988,14 +988,24 @@ func (b *Bot) decideOnce(ctx context.Context, approvalID, decision string) (bool
 		b.claimsMu.Unlock()
 		break
 	}
+	// The deferred cleanup runs on every exit path —
+	// including a decider panic — so a panicking decider
+	// cannot leak the in-flight marker and strand later
+	// taps for this id until shutdown. The record (on
+	// success) lands before this runs, so waiters woken by
+	// the close always see it.
+	defer func() {
+		b.claimsMu.Lock()
+		delete(b.decideInflight, approvalID)
+		close(waitCh)
+		b.claimsMu.Unlock()
+	}()
 	err := b.decider.Decide(ctx, approvalID, decision)
-	b.claimsMu.Lock()
-	delete(b.decideInflight, approvalID)
 	if err == nil {
+		b.claimsMu.Lock()
 		b.setDecidedLocked(approvalID, decision)
+		b.claimsMu.Unlock()
 	}
-	close(waitCh)
-	b.claimsMu.Unlock()
 	if err != nil {
 		return false, err
 	}
