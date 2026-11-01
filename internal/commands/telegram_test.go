@@ -34,6 +34,13 @@ func telegramTestConfig() string {
 	return `{"default_profile":"default","profiles":{"default":{},"muse01":{}},"telegram":{"profile":"muse01","token":"` + telegramTestToken + `","allowed_user_ids":[111],"auto_approve":true}}`
 }
 
+// telegramTestConfigNoAuto is telegramTestConfig with
+// auto_approve off: approvals surface as buttons instead of
+// being auto-decided, so a test can tap them.
+func telegramTestConfigNoAuto() string {
+	return `{"default_profile":"default","profiles":{"default":{},"muse01":{}},"telegram":{"profile":"muse01","token":"` + telegramTestToken + `","allowed_user_ids":[111]}}`
+}
+
 func telegramTestEnv(t *testing.T, configJSON string) (*Env, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	_, configFile := testHome(t, configJSON)

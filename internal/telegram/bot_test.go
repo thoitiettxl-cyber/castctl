@@ -484,7 +484,7 @@ func TestBotCallbackExpiredAndStranger(t *testing.T) {
 	}
 }
 
-func TestBotCallbackDecideActiveTurnBlocksResume(t *testing.T) {
+func TestBotCallbackDecideSchedulesResumeWhileTurnActive(t *testing.T) {
 	t.Parallel()
 	srv := newFakeTelegramServer(t)
 	tb := newTestBot(t, srv, nil)
@@ -496,12 +496,21 @@ func TestBotCallbackDecideActiveTurnBlocksResume(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := startBot(t, tb.bot, ctx)
 	waitFor(t, "decide handled", func() bool { return len(tb.decider.recorded()) == 1 })
-	time.Sleep(100 * time.Millisecond)
-	if got := len(tb.recordedResumes()); got != 0 {
-		t.Errorf("resumes = %d with an active turn; want 0", got)
-	}
+	// The Bot layer always schedules the resume when a triple
+	// is present, even with a turn active: it cannot tell a
+	// running turn from one in teardown (final edit shown,
+	// watermark save in progress), and dropping the schedule
+	// here would strand the decision. The guard lives in the
+	// runner's startResume (active-slot wait + HasActiveTurn
+	// + stale-seq re-validation), covered in the commands
+	// package; here the schedule itself is asserted.
+	waitFor(t, "resume scheduled", func() bool { return len(tb.recordedResumes()) == 1 })
 	if err := stopBot(t, cancel, done); err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("Start = %v", err)
+	}
+	resumes := tb.recordedResumes()
+	if resumes[0].ChatID != 500 || resumes[0].SessionID != "s" || resumes[0].Title != "t" || resumes[0].AfterSeq != 7 {
+		t.Errorf("resume = %+v", resumes[0])
 	}
 }
 

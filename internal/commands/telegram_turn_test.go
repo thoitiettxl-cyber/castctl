@@ -549,8 +549,7 @@ func TestTelegramResumeAsyncStopRunsMidFollow(t *testing.T) {
 	// be auto-decided, or there is no tap to resume from.
 	gw.blockSub = make(chan struct{})
 	gw.blockCallIdx = 1
-	noAutoConfig := `{"default_profile":"default","profiles":{"default":{},"muse01":{}},"telegram":{"profile":"muse01","token":"` + telegramTestToken + `","allowed_user_ids":[111]}}`
-	h, cancel, codeCh := runTelegramBotWithConfig(t, gw, []string{telegramUpdate(1, 111, "run tests")}, noAutoConfig, nil)
+	h, cancel, codeCh := runTelegramBotWithConfig(t, gw, []string{telegramUpdate(1, 111, "run tests")}, telegramTestConfigNoAuto(), nil)
 	defer cancel()
 
 	// Stage the tap only after turn 1 ended: the buttons are
@@ -665,6 +664,120 @@ func TestTelegramResumeAsyncStopRunsMidFollow(t *testing.T) {
 	}
 	if _, _, subs, _ := gw.counts(); subs < 2 {
 		t.Errorf("subscribe calls = %d, want at least 2 (turn + resume follow)", subs)
+	}
+}
+
+// TestTelegramResumeDroppedWhileTurnActive covers the
+// startResume guard's drop path: a decide tap that arrives
+// while another turn holds the chat's active slot schedules
+// a follow that must NOT run — the decide still confirms
+// (one RPC), but no resume bubble appears, no follow
+// subscribes, and the running turn completes normally.
+func TestTelegramResumeDroppedWhileTurnActive(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	approvalJSON, err := json.Marshal(approvalFixture("A1", "Run tests", "allow_always", "allow_once"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw.subScripts = []turnSubScript{
+		{
+			replyText:       "Waiting",
+			deltas:          []string{"Wa"},
+			approvalRecords: []string{fmt.Sprintf(`{"event":"approvals.snapshot","payload":{"pending_approvals":[%s]}}`, approvalJSON)},
+		},
+		{replyText: "Second task reply", deltas: []string{"Se"}},
+	}
+	// Block the second turn's subscribe (call index 1).
+	gw.blockSub = make(chan struct{})
+	gw.blockCallIdx = 1
+	h, cancel, codeCh := runTelegramBotWithConfig(t, gw, []string{telegramUpdate(1, 111, "run tests")}, telegramTestConfigNoAuto(), nil)
+	defer cancel()
+	waitFor(t, "approval note edit", func() bool {
+		for _, e := range h.fake.editTexts() {
+			if strings.Contains(e, "Approval: Run tests") {
+				return true
+			}
+		}
+		return false
+	})
+	waitForTurnEnd(t, h, 0)
+	data := ""
+	waitFor(t, "decide button on the final edit", func() bool {
+		h.fake.mu.Lock()
+		markups := append([]string(nil), h.fake.editMarkupJSON...)
+		h.fake.mu.Unlock()
+		for _, m := range markups {
+			var markup struct {
+				InlineKeyboard [][]struct {
+					Text         string `json:"text"`
+					CallbackData string `json:"callback_data"`
+				} `json:"inline_keyboard"`
+			}
+			if json.Unmarshal([]byte(m), &markup) != nil {
+				continue
+			}
+			for _, row := range markup.InlineKeyboard {
+				for _, btn := range row {
+					if btn.Text == "✅ Always allow" {
+						data = btn.CallbackData
+						return true
+					}
+				}
+			}
+		}
+		return false
+	})
+	// Start turn 2 and wait until its subscribe blocks.
+	h.fake.setBatches([]string{telegramUpdate(2, 111, "second task")})
+	waitFor(t, "second turn subscribe started", func() bool {
+		_, _, subs, _ := gw.counts()
+		return subs >= 2
+	})
+	// Tap the old approval button while turn 2 runs.
+	h.fake.setBatches([]string{callbackUpdate(3, data, 1)})
+	waitFor(t, "decide confirm while turn active", func() bool {
+		h.fake.mu.Lock()
+		sends := append([]string(nil), h.fake.sends...)
+		h.fake.mu.Unlock()
+		for _, s := range sends {
+			if strings.Contains(s, "Always allowed") {
+				return true
+			}
+		}
+		return false
+	})
+	// The scheduled follow waits out the slot-wait bound
+	// (5s) and drops: no resume bubble may appear in that
+	// window, and no follow may subscribe.
+	time.Sleep(6 * time.Second)
+	h.fake.mu.Lock()
+	sends := append([]string(nil), h.fake.sends...)
+	h.fake.mu.Unlock()
+	for _, s := range sends {
+		if strings.Contains(s, "Muse is continuing") {
+			t.Errorf("resume bubble sent while a turn was active: %q; want the follow dropped", s)
+		}
+	}
+	if _, _, subs, _ := gw.counts(); subs != 2 {
+		t.Errorf("subscribe calls = %d, want exactly 2 (no resume follow)", subs)
+	}
+	// Release turn 2: it completes normally, with no follow.
+	close(gw.blockSub)
+	waitFor(t, "second turn final edit", func() bool {
+		for _, e := range h.fake.editTexts() {
+			if strings.Contains(e, "Second task reply") {
+				return true
+			}
+		}
+		return false
+	})
+	cancel()
+	if code := <-codeCh; code != 130 {
+		t.Errorf("bot exit code = %d, want 130 (interrupted)", code)
+	}
+	if calls := gw.decideHistory(); len(calls) != 1 {
+		t.Fatalf("decide calls = %+v, want exactly 1", calls)
 	}
 }
 
