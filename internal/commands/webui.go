@@ -174,6 +174,14 @@ func cmdWebUIServe(ctx context.Context, env *Env, g *globalOpts, args []string) 
 	if err != nil {
 		return errCodef(2, "webui serve: failed to hash and store the \"webui\" token")
 	}
+	// Drop the plaintext from the parsed config too: only
+	// the hash reaches the server, and nothing below reads
+	// the parsed token again (only single.Profiles is read
+	// for the cookies-exposure list). webuiCfg aliases
+	// single.WebUI, so it is cleared by the same write.
+	if single.WebUI != nil {
+		single.WebUI.Token = ""
+	}
 	var cookiesFiles []string
 	for _, p := range single.Profiles {
 		if p != nil && p.CookiesFile != "" {

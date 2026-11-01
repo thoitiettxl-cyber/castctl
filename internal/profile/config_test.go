@@ -1043,14 +1043,33 @@ func TestEncodeSingleConfigIdempotence(t *testing.T) {
 		prev = at
 	}
 	// Raw blocks keep input order: webui token first, log
-	// timestamp first, telegram auto_allow_once first.
-	if strings.Index(got, `"token"`) > strings.Index(got, `"listen"`) {
+	// timestamp first, telegram auto_allow_once first. The
+	// checks run inside each block's own slice: whole-document
+	// Index searches are vacuous here (the first "token" is
+	// telegram's, the first "auto_allow_once" is a profile's).
+	block := func(start, end string) string {
+		i := strings.Index(got, start)
+		if i < 0 {
+			t.Fatalf("block %s missing:\n%s", start, got)
+		}
+		j := len(got)
+		if end != "" {
+			if k := strings.Index(got[i:], end); k >= 0 {
+				j = i + k
+			}
+		}
+		return got[i:j]
+	}
+	webuiBlock := block(`"webui":`, "")
+	if strings.Index(webuiBlock, `"token"`) > strings.Index(webuiBlock, `"listen"`) {
 		t.Fatalf("raw webui order not preserved:\n%s", got)
 	}
-	if strings.Index(got, `"timestamp"`) > strings.Index(got, `"output"`) {
+	logBlock := block(`"log":`, `"telegram":`)
+	if strings.Index(logBlock, `"timestamp"`) > strings.Index(logBlock, `"output"`) {
 		t.Fatalf("raw log order not preserved:\n%s", got)
 	}
-	if strings.Index(got, `"auto_allow_once"`) > strings.Index(got, `"allowed_user_ids"`) {
+	telegramBlock := block(`"telegram":`, `"keeper":`)
+	if strings.Index(telegramBlock, `"auto_allow_once"`) > strings.Index(telegramBlock, `"allowed_user_ids"`) {
 		t.Fatalf("raw telegram order not preserved:\n%s", got)
 	}
 	// No HTML escaping: the outbound password stays literal.

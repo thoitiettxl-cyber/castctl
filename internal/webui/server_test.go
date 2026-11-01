@@ -112,6 +112,23 @@ func (ts *testServer) do(t *testing.T, method, path, body string, authed bool) *
 	return rec
 }
 
+// doToken is do with an explicit Bearer token instead of the
+// default test token (an empty token sends no header).
+func (ts *testServer) doToken(t *testing.T, method, path, body, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, reader)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	ts.handler.ServeHTTP(rec, req)
+	return rec
+}
+
 func decodeEnvelope(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
 	var env map[string]any
@@ -348,12 +365,16 @@ func TestSavePreservesRawOrderAndHashesToken(t *testing.T) {
 	if !profile.CompareWebUIToken(storedToken, "MARKER-PLAINTOKEN") {
 		t.Fatalf("stored hash does not match the submitted token:\n%s", got)
 	}
-	// A second unchanged save is byte-identical.
-	data = decodeEnvelope(t, ts.do(t, "GET", "/api/v1/config", "", true))["data"].(map[string]any)
+	// A second unchanged save is byte-identical. The first
+	// save rotated the live comparator to the stored hash
+	// (S1: rotation takes effect without restart), so the
+	// second round authenticates with the stored token, not
+	// the startup test token.
+	data = decodeEnvelope(t, ts.doToken(t, "GET", "/api/v1/config", "", "MARKER-PLAINTOKEN"))["data"].(map[string]any)
 	content, _ = data["content"].(string)
 	baseSHA, _ = data["sha256"].(string)
 	body, _ = json.Marshal(map[string]any{"content": content, "base_sha256": baseSHA})
-	if rec := ts.do(t, "PUT", "/api/v1/config", string(body), true); rec.Code != http.StatusOK {
+	if rec := ts.doToken(t, "PUT", "/api/v1/config", string(body), "MARKER-PLAINTOKEN"); rec.Code != http.StatusOK {
 		t.Fatalf("second PUT config: %d: %s", rec.Code, rec.Body.String())
 	}
 	after2, err := os.ReadFile(filepath.Join(ts.dir, "config.json"))
@@ -397,6 +418,18 @@ func TestSaveKeepsStoredHashOnSentinelKeep(t *testing.T) {
 	if storedToken != string(hashBytes) {
 		t.Fatalf("stored hash changed on sentinel save:\n%s", after)
 	}
+	// The live comparator adopts the stored hash on every
+	// save, including a sentinel keep (in production the
+	// startup comparator already equals the stored hash, so
+	// this is a no-op; the fixture diverges them on purpose
+	// to make the adoption observable): the stored token
+	// authenticates, the startup test token no longer does.
+	if rec := ts.doToken(t, "GET", "/api/v1/status", "", "MARKER-PLAINTOKEN"); rec.Code != http.StatusOK {
+		t.Fatalf("stored token status: %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := ts.doToken(t, "GET", "/api/v1/status", "", testToken); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("startup token status: %d, want 401", rec.Code)
+	}
 }
 
 // TestSaveHashesNewPlaintextToken pins hash-on-save for a token
@@ -431,6 +464,66 @@ func TestSaveHashesNewPlaintextToken(t *testing.T) {
 	storedToken, _ := doc["webui"].(map[string]any)["token"].(string)
 	if !profile.LooksLikeBcryptHash(storedToken) || !profile.CompareWebUIToken(storedToken, "MARKER-NEWTOKEN") {
 		t.Fatalf("stored token is not the hash of the new token:\n%s", after)
+	}
+}
+
+// TestSaveRotatesLiveToken pins the S1 fix: a token rotated
+// through PUT /config takes effect on the running server
+// immediately, with no restart — the new token authenticates
+// and the old token stops authenticating.
+func TestSaveRotatesLiveToken(t *testing.T) {
+	fixture := `{"profiles": {"muse01": {}}, "webui": {"token": "MARKER-OLDTOKEN", "listen": "127.0.0.1:8317"}}`
+	ts := newTestServer(t, fixture, nil)
+	data := decodeEnvelope(t, ts.do(t, "GET", "/api/v1/config", "", true))["data"].(map[string]any)
+	content, _ := data["content"].(string)
+	baseSHA, _ := data["sha256"].(string)
+	if strings.Count(content, redact.Marker) != 1 {
+		t.Fatalf("redacted view has %d sentinels, want 1:\n%s", strings.Count(content, redact.Marker), content)
+	}
+	edited := strings.Replace(content, redact.Marker, "MARKER-NEWTOKEN", 1)
+	body, _ := json.Marshal(map[string]any{"content": edited, "base_sha256": baseSHA})
+	if rec := ts.do(t, "PUT", "/api/v1/config", string(body), true); rec.Code != http.StatusOK {
+		t.Fatalf("PUT config: %d: %s", rec.Code, rec.Body.String())
+	}
+	// No restart: the new token authenticates, the old one does not.
+	if rec := ts.doToken(t, "GET", "/api/v1/status", "", "MARKER-NEWTOKEN"); rec.Code != http.StatusOK {
+		t.Fatalf("rotated token status: %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := ts.doToken(t, "GET", "/api/v1/status", "", testToken); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("old token status: %d, want 401", rec.Code)
+	}
+}
+
+// TestSaveRejectsOversizedToken pins the hash-on-save error
+// mapping: a webui token over bcrypt's 72-byte limit fails
+// the API save with 400, writes nothing, and never echoes
+// the value.
+func TestSaveRejectsOversizedToken(t *testing.T) {
+	fixture := `{"profiles": {"muse01": {}}, "webui": {"token": "MARKER-OLDTOKEN", "listen": "127.0.0.1:8317"}}`
+	ts := newTestServer(t, fixture, nil)
+	before, err := os.ReadFile(filepath.Join(ts.dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := decodeEnvelope(t, ts.do(t, "GET", "/api/v1/config", "", true))["data"].(map[string]any)
+	content, _ := data["content"].(string)
+	baseSHA, _ := data["sha256"].(string)
+	oversized := strings.Repeat("K", 73)
+	edited := strings.Replace(content, redact.Marker, oversized, 1)
+	body, _ := json.Marshal(map[string]any{"content": edited, "base_sha256": baseSHA})
+	rec := ts.do(t, "PUT", "/api/v1/config", string(body), true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT config with 73-byte token: %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), oversized) {
+		t.Fatal("oversized token echoed in the error body")
+	}
+	after, err := os.ReadFile(filepath.Join(ts.dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("rejected save modified the file:\nbefore: %s\nafter: %s", before, after)
 	}
 }
 

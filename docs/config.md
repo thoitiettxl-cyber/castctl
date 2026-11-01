@@ -654,7 +654,15 @@ before serving; an already-hashed token is used as-is and
 the file is not rewritten. The same hashing runs on any API
 save that persists a plaintext token (hash-on-save), so a
 plaintext token set through the web UI never rests on disk.
-A write-back failure fails the start/save closed (exit 2 /
+A token rotated through the web UI takes effect on the
+running server immediately, with no restart: every
+successful API save refreshes the live comparator to the
+stored hash (a failed save changes nothing, and a
+sentinel keep-on-save re-adopts the unchanged stored hash).
+A plaintext token starting with `$2a$`, `$2b$`, or `$2y$`
+is treated as an already-hashed value and can never
+authenticate: choose a token without such a prefix. A
+write-back failure fails the start/save closed (exit 2 /
 400) and the token is never printed, logged, or returned:
 the startup line names the listen address only, and the API
 answers every route (including `/status`) only with a valid

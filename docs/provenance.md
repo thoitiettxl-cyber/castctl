@@ -544,10 +544,12 @@ commit):
   ignored (`_ =`, non-atomic `os.WriteFile`, 0600 on create
   only). A second load leaves the file byte-identical
   (`internal/config/config_v8_test.go:925-932`).
-- Fail-closed pre-seed rewrite: `internal/config/config_load.go:37-99`
-  (`prepareConfigForUpload`): every error returned, file left
-  untouched, plaintext surviving elsewhere (YAML anchor/alias)
-  refused.
+- Fail-closed pre-seed rewrite:
+  `internal/config/config_load.go:43-99`
+  (exported wrapper `PrepareConfigFileForUpload` at :43,
+  worker `prepareConfigForUpload` at :66-99): every error
+  returned, file left untouched, plaintext surviving
+  elsewhere (YAML anchor/alias) refused.
 - Login comparison: a single `CompareHashAndPassword` site; any
   error is a generic 401 with no plaintext fallback. Upstream
   additionally accepts an env secret (`MANAGEMENT_PASSWORD`)

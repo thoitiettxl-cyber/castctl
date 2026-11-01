@@ -70,11 +70,32 @@ func TestMarshalOrderedNoStoredRawFallsBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// No stored order: keys render sorted, as json.Marshal
+	// would render them.
+	if string(out) != `{"a":1,"b":2}` {
+		t.Fatalf("fallback order wrong: %s", out)
+	}
 	var back map[string]any
 	if err := json.Unmarshal(out, &back); err != nil {
 		t.Fatalf("output does not parse: %v", err)
 	}
 	if len(back) != 2 {
 		t.Fatalf("back = %v", back)
+	}
+}
+
+// TestMarshalOrderedDedupesStoredKeys pins the duplicate-key
+// collapse: a stored document with a repeated key renders
+// that key once (first position, last value), matching the
+// profile decoder's semantics.
+func TestMarshalOrderedDedupesStoredKeys(t *testing.T) {
+	stored := []byte(`{"a": 1, "b": 2, "a": 3}`)
+	doc := map[string]any{"a": json.Number("3"), "b": json.Number("2")}
+	out, err := marshalOrdered(stored, doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != `{"a":3,"b":2}` {
+		t.Fatalf("duplicate key rendered twice or out of order: %s", out)
 	}
 }

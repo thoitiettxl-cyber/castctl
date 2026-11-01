@@ -251,6 +251,15 @@ func (s *Server) saveGuarded(load *configLoad, expectedSHA string, checkExpected
 		}
 		return "", errInternal()
 	}
+	// The save persisted: adopt the stored token hash as the
+	// live comparator (rotation takes effect without restart;
+	// see refreshTokenHash). This is the only in-process save
+	// funnel — every API save path (saveMerged, saveDirect,
+	// saveSubmitted) runs through saveGuarded — so no save
+	// path can persist a token without refreshing the
+	// comparator. CLI saves run in another process and take
+	// effect on restart, as before.
+	s.refreshTokenHash(parsed)
 	return load.state.SHA256, nil
 }
 

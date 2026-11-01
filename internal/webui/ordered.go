@@ -60,7 +60,14 @@ func decodeOrderedValue(dec *json.Decoder) (any, error) {
 				if err != nil {
 					return nil, err
 				}
-				obj.keys = append(obj.keys, key)
+				// Duplicate keys collapse: last value wins,
+				// first position kept — the same semantics
+				// as the profile decoder (orderedObject in
+				// internal/profile/jsonvalue.go), so a
+				// duplicate key renders once.
+				if _, seen := obj.vals[key]; !seen {
+					obj.keys = append(obj.keys, key)
+				}
 				obj.vals[key] = val
 			}
 			if _, err := dec.Token(); err != nil {

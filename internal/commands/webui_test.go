@@ -304,6 +304,29 @@ func TestWebUIServeBlockTokenStartupAndWriteBack(t *testing.T) {
 	}
 }
 
+// TestHashWebUITokenOnStartRefusesChangedToken pins the
+// concurrent-change refusal: when the stored token differs
+// from the plaintext the startup load saw, the guarded
+// write-back refuses (errWebUITokenChanged) and writes
+// nothing, instead of overwriting another writer's token.
+func TestHashWebUITokenOnStartRefusesChangedToken(t *testing.T) {
+	home, _ := testHome(t, `{"default_profile":"default","profiles":{"default":{}},"webui":{"token":"MARKER-STORED-TOKEN"}}`)
+	before, err := os.ReadFile(filepath.Join(home, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hashWebUITokenOnStart(home, "MARKER-STARTUP-TOKEN"); err == nil {
+		t.Fatal("hashWebUITokenOnStart with a changed stored token succeeded, want failure")
+	}
+	after, err := os.ReadFile(filepath.Join(home, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("refused write-back modified the file:\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
 // TestWebUIServeAlreadyHashedTokenNotRewritten pins the
 // already-hashed path: a stored bcrypt hash is used as-is and
 // the file is byte-identical after a serve start (no re-hash,

@@ -276,8 +276,10 @@ func writeSingleConfigLocked(baseDir string, cfg *SingleConfig) (string, error) 
 // output shape. Raw blocks keep their input key order; only
 // synthesized blocks render in canonical within-block order.
 // The trailing newline is appended here, not in
-// encodeOrderedJSONIndent, so display encodings (redaction) and
-// the migrate writer keep their existing byte shape.
+// encodeOrderedJSONIndent, so display encodings (redaction)
+// keep their existing byte shape — but every file written
+// through this function (saves and migrate writes alike)
+// gains the newline.
 func encodeSingleConfig(cfg *SingleConfig) ([]byte, error) {
 	root, err := buildSingleFileOrdered(cfg)
 	if err != nil {
