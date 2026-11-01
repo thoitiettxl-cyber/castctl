@@ -333,22 +333,33 @@ func (s *Server) authorized(r *http.Request) bool {
 	return profile.CompareWebUIToken(hash, presented)
 }
 
-// refreshTokenHash adopts the persisted webui token hash after
-// a successful guarded save, so a token rotated through the API
-// takes effect on the running server immediately, with no
-// restart. It runs only after Save succeeds: a failed save
-// leaves the live comparator untouched. A sentinel keep-on-save
-// re-adopts the unchanged stored hash (a no-op). A save whose
-// document carries no webui token leaves the comparator as-is:
-// removing the token takes effect on restart, like any other
-// out-of-band config change, and the live server is never
-// bricked by a save.
-func (s *Server) refreshTokenHash(parsed *profile.SingleConfig) {
-	if parsed != nil && parsed.WebUI != nil && parsed.WebUI.Token != "" {
-		s.tokenMu.Lock()
-		s.tokenHash = parsed.WebUI.Token
-		s.tokenMu.Unlock()
+// refreshTokenHash refreshes the live comparator from the
+// persisted document after a successful guarded save, so a
+// token rotated through the API takes effect on the running
+// server immediately, with no restart. It runs only after
+// Save succeeds: a failed save leaves the live comparator
+// untouched. A sentinel keep-on-save re-adopts the unchanged
+// stored hash (a no-op). A save whose document carries no
+// webui token clears the comparator — but only when the
+// stored document carried one (hadToken): the token is gone,
+// so every authenticated request fails closed with 401 until
+// a token is restored out-of-band (file edit + restart,
+// since a token-less server accepts no Bearer token with
+// which to save a new one through the API). When the stored
+// document never carried a token, the comparator came from
+// the startup Deps, not the file, and the save leaves it
+// untouched.
+func (s *Server) refreshTokenHash(parsed *profile.SingleConfig, hadToken bool) {
+	var hash string
+	if parsed != nil && parsed.WebUI != nil {
+		hash = parsed.WebUI.Token
 	}
+	if hash == "" && !hadToken {
+		return
+	}
+	s.tokenMu.Lock()
+	s.tokenHash = hash
+	s.tokenMu.Unlock()
 }
 
 // apiHandlerTimeout is the context timeout applied to non-WS

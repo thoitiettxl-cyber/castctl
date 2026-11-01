@@ -494,6 +494,134 @@ func TestSaveRotatesLiveToken(t *testing.T) {
 	}
 }
 
+// getConfigDoc returns the redacted config document and its base
+// sha256, for tests that PUT an edited document.
+func getConfigDoc(t *testing.T, ts *testServer) (map[string]any, string) {
+	t.Helper()
+	data := decodeEnvelope(t, ts.do(t, "GET", "/api/v1/config", "", true))["data"].(map[string]any)
+	content, _ := data["content"].(string)
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(content), &doc); err != nil {
+		t.Fatalf("unmarshal config content: %v", err)
+	}
+	baseSHA, _ := data["sha256"].(string)
+	return doc, baseSHA
+}
+
+// putConfigDoc saves an edited document, asserting the PUT succeeds.
+func putConfigDoc(t *testing.T, ts *testServer, doc map[string]any, baseSHA string) {
+	t.Helper()
+	edited, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal edited config: %v", err)
+	}
+	body, _ := json.Marshal(map[string]any{"content": string(edited), "base_sha256": baseSHA})
+	if rec := ts.do(t, "PUT", "/api/v1/config", string(body), true); rec.Code != http.StatusOK {
+		t.Fatalf("PUT config: %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSaveClearsLiveTokenOnTokenKeyRemoval pins the R1 fix:
+// deleting the webui token key through PUT /config takes effect
+// on the running server immediately, with no restart — the
+// removed token stops authenticating and every authenticated
+// request 401s until a token is restored.
+func TestSaveClearsLiveTokenOnTokenKeyRemoval(t *testing.T) {
+	fixture := `{"profiles": {"muse01": {}}, "webui": {"token": "MARKER-OLDTOKEN", "listen": "127.0.0.1:8317"}}`
+	ts := newTestServer(t, fixture, nil)
+	doc, baseSHA := getConfigDoc(t, ts)
+	webui := doc["webui"].(map[string]any)
+	delete(webui, "token")
+	putConfigDoc(t, ts, doc, baseSHA)
+	// No restart: the previously live token and the removed
+	// fixture token both 401; a missing token 401s too.
+	if rec := ts.doToken(t, "GET", "/api/v1/status", "", testToken); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("removed live token status: %d, want 401", rec.Code)
+	}
+	if rec := ts.doToken(t, "GET", "/api/v1/status", "", "MARKER-OLDTOKEN"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("removed fixture token status: %d, want 401", rec.Code)
+	}
+	if rec := ts.doToken(t, "GET", "/api/v1/status", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing token status: %d, want 401", rec.Code)
+	}
+	// The file carries no token key and no plaintext token.
+	raw, err := os.ReadFile(filepath.Join(ts.dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatalf("unmarshal saved config: %v", err)
+	}
+	savedWebUI, ok := saved["webui"].(map[string]any)
+	if !ok {
+		t.Fatalf("saved config has no webui block: %s", raw)
+	}
+	if _, ok := savedWebUI["token"]; ok {
+		t.Fatalf("saved config still carries a token key: %s", raw)
+	}
+	if strings.Contains(string(raw), "MARKER-OLDTOKEN") {
+		t.Fatalf("removed token plaintext left on disk: %s", raw)
+	}
+	// Re-adoption: a later save carrying a token re-adopts it.
+	// An HTTP re-add cannot authenticate by design once the
+	// comparator is cleared (no valid Bearer token exists), so
+	// this step drives refreshTokenHash directly with the
+	// stored hash, exactly as saveGuarded does after a
+	// successful save.
+	readded, err := bcrypt.GenerateFromPassword([]byte("MARKER-READDED"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts.srv.refreshTokenHash(&profile.SingleConfig{WebUI: &profile.WebUIConfig{Token: string(readded)}}, true)
+	if rec := ts.doToken(t, "GET", "/api/v1/status", "", "MARKER-READDED"); rec.Code != http.StatusOK {
+		t.Fatalf("re-added token status: %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := ts.doToken(t, "GET", "/api/v1/status", "", testToken); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("old token after re-add: %d, want 401", rec.Code)
+	}
+	// A nil parsed document clears the comparator too when the
+	// stored document carried a token.
+	ts.srv.refreshTokenHash(nil, true)
+	if rec := ts.doToken(t, "GET", "/api/v1/status", "", "MARKER-READDED"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("token after nil refresh: %d, want 401", rec.Code)
+	}
+}
+
+// TestSaveClearsLiveTokenOnBlockRemoval is the whole-block shape
+// of the same R1 fix: deleting the entire webui block clears the
+// live comparator immediately, with no restart.
+func TestSaveClearsLiveTokenOnBlockRemoval(t *testing.T) {
+	fixture := `{"profiles": {"muse01": {}}, "webui": {"token": "MARKER-OLDTOKEN", "listen": "127.0.0.1:8317"}}`
+	ts := newTestServer(t, fixture, nil)
+	doc, baseSHA := getConfigDoc(t, ts)
+	delete(doc, "webui")
+	putConfigDoc(t, ts, doc, baseSHA)
+	if rec := ts.doToken(t, "GET", "/api/v1/status", "", testToken); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("removed live token status: %d, want 401", rec.Code)
+	}
+	if rec := ts.doToken(t, "GET", "/api/v1/status", "", "MARKER-OLDTOKEN"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("removed fixture token status: %d, want 401", rec.Code)
+	}
+	if rec := ts.doToken(t, "GET", "/api/v1/status", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing token status: %d, want 401", rec.Code)
+	}
+	raw, err := os.ReadFile(filepath.Join(ts.dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatalf("unmarshal saved config: %v", err)
+	}
+	if _, ok := saved["webui"]; ok {
+		t.Fatalf("saved config still carries a webui block: %s", raw)
+	}
+	if strings.Contains(string(raw), "MARKER-OLDTOKEN") {
+		t.Fatalf("removed token plaintext left on disk: %s", raw)
+	}
+}
+
 // TestSaveRejectsOversizedToken pins the hash-on-save error
 // mapping: a webui token over bcrypt's 72-byte limit fails
 // the API save with 400, writes nothing, and never echoes

@@ -164,6 +164,26 @@ func webUIUIDirValue(doc any) (string, bool) {
 	return v, true
 }
 
+// storedWebUIToken reports whether a decoded config document
+// carries a non-empty `webui.token`. Callers snapshot it from
+// the stored document before mutation: a save that removes a
+// token the stored document carried must clear the live
+// comparator, while a save to a document that never carried
+// one leaves the startup comparator (which came from Deps,
+// not the file) untouched.
+func storedWebUIToken(doc any) bool {
+	root, ok := doc.(map[string]any)
+	if !ok {
+		return false
+	}
+	block, ok := root["webui"].(map[string]any)
+	if !ok {
+		return false
+	}
+	tok, _ := block["token"].(string)
+	return tok != ""
+}
+
 // rejectNewUIDir enforces the B-1 containment rule for a
 // `ui_dir` value the web UI is about to introduce: the
 // symlink-resolved root must not overlap the config directory

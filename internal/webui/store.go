@@ -155,6 +155,11 @@ func (s *Server) saveGuarded(load *configLoad, expectedSHA string, checkExpected
 	// Snapshot the stored ui_dir the same way: only a new or
 	// changed value is re-checked below.
 	storedUIDir, storedUIDirHas := webUIUIDirValue(stored)
+	// Snapshot whether the stored document carries a token:
+	// refreshTokenHash needs it after the save to tell a
+	// removal (stored token gone) from a document that never
+	// carried one (startup comparator untouched).
+	storedHadToken := storedWebUIToken(stored)
 	if err := mutate(doc); err != nil {
 		return "", err
 	}
@@ -251,15 +256,18 @@ func (s *Server) saveGuarded(load *configLoad, expectedSHA string, checkExpected
 		}
 		return "", errInternal()
 	}
-	// The save persisted: adopt the stored token hash as the
-	// live comparator (rotation takes effect without restart;
-	// see refreshTokenHash). This is the only in-process save
-	// funnel — every API save path (saveMerged, saveDirect,
-	// saveSubmitted) runs through saveGuarded — so no save
-	// path can persist a token without refreshing the
-	// comparator. CLI saves run in another process and take
-	// effect on restart, as before.
-	s.refreshTokenHash(parsed)
+	// The save persisted: refresh the live comparator from
+	// the saved document (rotation takes effect without
+	// restart; a removal clears it — see refreshTokenHash).
+	// hadToken is snapshotted from the stored document
+	// before mutation: only a token the stored document
+	// carried can be removed by this save. This is the only
+	// in-process save funnel — every API save path
+	// (saveMerged, saveDirect, saveSubmitted) runs through
+	// saveGuarded — so no save path can persist a token
+	// without refreshing the comparator. CLI saves run in
+	// another process and take effect on restart, as before.
+	s.refreshTokenHash(parsed, storedHadToken)
 	return load.state.SHA256, nil
 }
 
