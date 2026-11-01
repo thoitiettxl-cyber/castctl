@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/thoitiettxl-cyber/castctl/internal/profile"
 )
 
 const webuiTestConfig = `{"default_profile":"default","profiles":{"default":{}},"webui":{"listen":"127.0.0.1:8317","token":"BLOCK-TOKEN-UNUSED"}}`
@@ -614,5 +616,184 @@ func TestWebUIServeUIDirEscalationViaAPI(t *testing.T) {
 	}
 	if strings.Contains(string(fetchBody), "BLOCK-TOKEN-TEST") {
 		t.Fatal("token leaked into unauthenticated fetch")
+	}
+}
+
+// TestResolveWebUIUIDirRelativeConfigDir is the serve-time half
+// of the relative --config defect: resolveWebUIUIDir receives
+// the config directory as given (relative for a relative
+// --config path). An unrelated absolute ui_dir must resolve;
+// every overlapping spelling must still fail closed.
+func TestResolveWebUIUIDirRelativeConfigDir(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	// The accepted ui_dir must live OUTSIDE root: with a "."
+	// config directory, root itself is the config directory
+	// and anything under it overlaps.
+	ui := filepath.Join(t.TempDir(), "ui")
+	writeUIDirFiles(t, ui, map[string]string{"index.html": "<html>MARKER-REL-CFG</html>"})
+	cfgDir := filepath.Join(root, "cfg")
+	if err := os.MkdirAll(filepath.Join(cfgDir, "ui"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "ui", "index.html"), []byte("<html>x</html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Accept: unrelated absolute ui_dir, relative config dirs.
+	for _, base := range []string{".", "cfg"} {
+		got, err := resolveWebUIUIDir(&profile.WebUIConfig{UIDir: ui}, base)
+		if err != nil {
+			t.Fatalf("configDir %q ui_dir %q: unexpected error: %v", base, ui, err)
+		}
+		if got != want {
+			t.Fatalf("configDir %q: resolved = %q, want %q", base, got, want)
+		}
+	}
+	// Refuse: every overlapping spelling.
+	for name, tc := range map[string]struct {
+		base, uiDir string
+	}{
+		"relative inside":   {"cfg", "ui"},
+		"dot":               {"cfg", "."},
+		"equal absolute":    {"cfg", cfgDir},
+		"ancestor absolute": {"cfg", root},
+		"dot base equal":    {".", root},
+		"dot base inside":   {".", "cfg/ui"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := resolveWebUIUIDir(&profile.WebUIConfig{UIDir: tc.uiDir}, tc.base); err == nil {
+				t.Fatalf("configDir %q ui_dir %q: accepted, want rejection", tc.base, tc.uiDir)
+			}
+		})
+	}
+}
+
+// serveRelativeConfig starts `webui serve` under a relative
+// CASTCTL_CONFIG value from the test's working directory and
+// waits for GET / to return wantBody. It fails fast (with the
+// server's stderr) if the server exits before serving — the
+// signature of the relative --config false refusal.
+func serveRelativeConfig(t *testing.T, configValue string, port int, wantBody string) {
+	t.Helper()
+	out, errb := &bytes.Buffer{}, &bytes.Buffer{}
+	env := &Env{Stdout: out, Stderr: errb, Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configValue})}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	go func() {
+		done <- Run(ctx, []string{"webui", "serve", "--port", fmt.Sprint(port)}, env)
+	}()
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	client := &http.Client{Timeout: 5 * time.Second}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case code := <-done:
+			t.Fatalf("server exited early with code %d (stderr %q), want it to serve", code, errb.String())
+		default:
+		}
+		resp, err := client.Get("http://" + addr + "/")
+		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK && string(body) == wantBody {
+				stopWebUIServer(t, cancel, done)
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	t.Fatalf("GET / never returned the ui_dir shell; stderr = %q", errb.String())
+}
+
+func freeLoopbackPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	return port
+}
+
+func writeRelativeConfigLayout(t *testing.T) (root, ui string) {
+	t.Helper()
+	root = t.TempDir()
+	ui = filepath.Join(root, "ui")
+	writeUIDirFiles(t, ui, map[string]string{"index.html": "<html>MARKER-REL-CONFIG</html>"})
+	if err := os.MkdirAll(filepath.Join(root, "cfg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := fmt.Sprintf(`{"profiles":{},"webui":{"token":"FAKE-TOKEN-ONLY","ui_dir":%q}}`, ui)
+	if err := os.WriteFile(filepath.Join(root, "cfg", "config.json"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return root, ui
+}
+
+// TestWebUIServeRelativeConfigCWD reproduces the live defect
+// end to end: cd into the config directory, --config
+// config.json (relative), unrelated absolute ui_dir.
+func TestWebUIServeRelativeConfigCWD(t *testing.T) {
+	root, _ := writeRelativeConfigLayout(t)
+	t.Chdir(filepath.Join(root, "cfg"))
+	serveRelativeConfig(t, "config.json", freeLoopbackPort(t), "<html>MARKER-REL-CONFIG</html>")
+}
+
+// TestWebUIServeRelativeConfigSubdir reproduces the live
+// defect with a relative path naming a subdirectory:
+// --config cfg/config.json from the parent directory.
+func TestWebUIServeRelativeConfigSubdir(t *testing.T) {
+	root, _ := writeRelativeConfigLayout(t)
+	t.Chdir(root)
+	serveRelativeConfig(t, "cfg/config.json", freeLoopbackPort(t), "<html>MARKER-REL-CONFIG</html>")
+}
+
+// TestWebUIServeRelativeConfigAbsoluteControl is the control
+// for the two relative tests: the same layout with an
+// absolute --config path must serve identically.
+func TestWebUIServeRelativeConfigAbsoluteControl(t *testing.T) {
+	root, _ := writeRelativeConfigLayout(t)
+	t.Chdir(root)
+	serveRelativeConfig(t, filepath.Join(root, "cfg", "config.json"), freeLoopbackPort(t), "<html>MARKER-REL-CONFIG</html>")
+}
+
+// TestWebUIServeRelativeConfigUIDirOverlapStillRefused guards
+// the fix against over-loosening: under a relative --config,
+// overlapping ui_dir spellings must still exit 2.
+func TestWebUIServeRelativeConfigUIDirOverlapStillRefused(t *testing.T) {
+	root := t.TempDir()
+	cfgDir := filepath.Join(root, "cfg")
+	if err := os.MkdirAll(filepath.Join(cfgDir, "ui"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cfgDir)
+	for name, uiDir := range map[string]string{
+		"relative inside": "ui",
+		"dot":             ".",
+		"equal absolute":  cfgDir,
+		"ancestor":        root,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := fmt.Sprintf(`{"profiles":{},"webui":{"token":"FAKE-TOKEN-ONLY","ui_dir":%q}}`, uiDir)
+			if err := os.WriteFile("config.json", []byte(cfg), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, errb := &bytes.Buffer{}, &bytes.Buffer{}
+			env := &Env{Stdout: out, Stderr: errb, Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": "config.json"})}
+			code := Run(context.Background(), []string{"webui", "serve"}, env)
+			if code != 2 {
+				t.Fatalf("ui_dir %q: code = %d, want 2 (stderr %q)", uiDir, code, errb.String())
+			}
+			if !strings.Contains(errb.String(), "ui_dir") {
+				t.Fatalf("stderr = %q, want a ui_dir rule message", errb.String())
+			}
+		})
 	}
 }

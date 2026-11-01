@@ -22,30 +22,46 @@ import (
 // as much of a possibly-nonexistent path as exists. Both are
 // re-run per request: no verdict is cached across renames.
 
+// absBestEffort absolutizes path against the working
+// directory. On error (an unreadable working directory) it
+// returns path unchanged; callers comparing resolved paths
+// keep their previous behaviour for that unreachable case.
+
 // resolvePathBestEffort resolves symlinks in path as far as
 // possible: EvalSymlinks on the full path, else on the nearest
 // existing ancestor, rejoining the remainder. It never fails;
 // the lexical Clean fallback keeps comparisons working for
 // paths that do not exist yet (a .bak the next write has not
-// created).
+// created). The result is always absolute: a relative config
+// directory (from a relative --config path) must compare
+// correctly with absolute candidates — filepath.Rel cannot
+// mix the two, and a relative result would silently disable
+// the overlap checks that consume it.
 func resolvePathBestEffort(path string) string {
 	clean := filepath.Clean(path)
 	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
-		return resolved
+		return absBestEffort(resolved)
 	}
 	var tail []string
 	cur := clean
 	for {
 		parent := filepath.Dir(cur)
 		if parent == cur {
-			return clean
+			return absBestEffort(clean)
 		}
 		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
-			return filepath.Join(append([]string{resolved, filepath.Base(cur)}, tail...)...)
+			return absBestEffort(filepath.Join(append([]string{resolved, filepath.Base(cur)}, tail...)...))
 		}
 		tail = append([]string{filepath.Base(cur)}, tail...)
 		cur = parent
 	}
+}
+
+func absBestEffort(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
 }
 
 func splitPathComponents(p string) []string {

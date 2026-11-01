@@ -103,10 +103,12 @@ func (c *SingleConfig) RawWebUI() []byte {
 // value is never echoed in an error: the token in particular must
 // never appear in any error string, and the listen and `ui_dir`
 // values are named only by their rule, never verbatim. The
-// overlap check here is lexical only (Clean + Join, no filesystem
-// access, keeping resolution pure): a `ui_dir` that reaches the
-// config tree only through a symlink is caught at serve time,
-// where the path is canonicalised before any file is served.
+// overlap check here is lexical only (both sides absolutized
+// against the working directory, then Clean + Join, no
+// filesystem access to the compared paths, keeping resolution
+// pure): a `ui_dir` that reaches the config tree only through
+// a symlink is caught at serve time, where the path is
+// canonicalised before any file is served.
 func parseWebUIBlock(v any, baseDir string) (*WebUIConfig, error) {
 	obj, ok := v.(*orderedObject)
 	if !ok {
@@ -209,15 +211,30 @@ type webUIListenError struct{ rule string }
 func (e *webUIListenError) Error() string { return e.rule }
 
 // DirOverlaps reports whether candidate is equal to, inside, or
-// an ancestor of dir. Both paths are cleaned lexically; no
-// filesystem access happens, so symlink-resolved forms must be
-// compared by callers that canonicalise first (the command
-// layer's resolveWebUIUIDir does). A sibling subtree of an
-// ancestor (e.g. dir=/a/b, candidate=/a/c) does NOT overlap:
-// dir is not inside candidate. An unresolvable Rel fails
+// an ancestor of dir. Both paths are absolutized against the
+// working directory first — a relative config directory, as
+// produced by a relative --config path, must compare correctly
+// with an absolute candidate: filepath.Rel cannot mix a
+// relative base with an absolute target and errors, which
+// would fail closed for every absolute ui_dir. Absolutizing
+// is lexical apart from reading the working directory; no
+// filesystem access to the compared paths happens, so
+// symlink-resolved forms must be compared by callers that
+// canonicalise first (the command layer's resolveWebUIUIDir
+// does). A sibling subtree of an ancestor (e.g. dir=/a/b,
+// candidate=/a/c) does NOT overlap: dir is not inside
+// candidate. An unresolvable Rel or absolutization fails
 // closed (overlap).
 func DirOverlaps(dir, candidate string) bool {
-	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(candidate))
+	dirAbs, err := filepath.Abs(dir)
+	if err != nil {
+		return true
+	}
+	candidateAbs, err := filepath.Abs(candidate)
+	if err != nil {
+		return true
+	}
+	rel, err := filepath.Rel(dirAbs, candidateAbs)
 	if err != nil {
 		return true
 	}

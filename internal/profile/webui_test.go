@@ -5,7 +5,9 @@
 package profile
 
 import (
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -266,5 +268,103 @@ func TestDirOverlaps(t *testing.T) {
 		if got := DirOverlaps(tc.dir, tc.candidate); got != tc.overlap {
 			t.Errorf("DirOverlaps(%q, %q) = %v, want %v", tc.dir, tc.candidate, got, tc.overlap)
 		}
+	}
+}
+
+// TestDirOverlapsRelativeBaseDir covers the live defect found
+// on the box (PR #25): with a relative --config path, the
+// config directory is relative ("." or "wt/b"), and comparing
+// it lexically with an absolute ui_dir must still decide
+// overlap correctly. A relative dir and an absolute candidate
+// must be absolutized against the working directory before
+// the Rel comparison: filepath.Rel errors across the
+// relative/absolute boundary, and DirOverlaps fails closed
+// on that error, so every absolute ui_dir was refused.
+func TestDirOverlapsRelativeBaseDir(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	if err := os.Mkdir(filepath.Join(root, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The unrelated tree must live OUTSIDE root: a path under
+	// root would be inside the "." config directory.
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	cases := []struct {
+		dir, candidate string
+		overlap        bool
+	}{
+		{".", elsewhere, false},                         // unrelated absolute ui_dir
+		{"sub", elsewhere, false},                       // unrelated absolute ui_dir, subdir base
+		{".", root, true},                               // equal, via "."
+		{"sub", filepath.Join(root, "sub"), true},       // equal, via subdir spelling
+		{".", ".", true},                                // equal, relative spelling
+		{".", "..", true},                               // ancestor, relative spelling
+		{"sub", "sub/ui", true},                         // inside, relative spelling
+		{".", "ui", true},                               // inside, relative spelling
+		{"sub", root, true},                             // ancestor of the subdir
+		{".", filepath.Join(root, "sub"), true},         // inside, absolute spelling
+		{"sub", filepath.Join(root, "sub", "ui"), true}, // inside, absolute spelling
+	}
+	for _, tc := range cases {
+		if got := DirOverlaps(tc.dir, tc.candidate); got != tc.overlap {
+			t.Errorf("DirOverlaps(%q, %q) = %v, want %v", tc.dir, tc.candidate, got, tc.overlap)
+		}
+	}
+}
+
+// TestWebUIUIDirParseRelativeBaseDir is the parse-time half of
+// the relative --config defect: ParseSingleConfig receives the
+// config directory as given (relative for a relative --config
+// path), and an unrelated absolute ui_dir must parse while
+// every overlapping spelling — relative or absolute — is
+// still refused.
+func TestWebUIUIDirParseRelativeBaseDir(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	if err := os.Mkdir(filepath.Join(root, "cfg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The unrelated tree must live OUTSIDE root: a path under
+	// root would be inside the "." config directory.
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	cfgAbs := filepath.Join(root, "cfg")
+	doc := func(uiDir string) []byte {
+		return []byte(`{"profiles":{},"webui":{"token":"MARKER-WEBUI-TOKEN","ui_dir":` + strconv.Quote(uiDir) + `}}`)
+	}
+	cases := []struct {
+		name    string
+		baseDir string
+		uiDir   string
+		valid   bool
+	}{
+		{"dot base unrelated absolute", ".", elsewhere, true},
+		{"subdir base unrelated absolute", "cfg", elsewhere, true},
+		{"absolute base unrelated absolute", cfgAbs, elsewhere, true},
+		{"dot base relative inside", ".", "ui", false},
+		{"dot base subdir inside", ".", "cfg/ui", false},
+		{"dot base equal absolute", ".", root, false},
+		{"dot base dot", ".", ".", false},
+		{"dot base dotdot", ".", "..", false},
+		{"subdir base equal absolute", "cfg", cfgAbs, false},
+		{"subdir base dot", "cfg", ".", false},
+		{"subdir base relative inside", "cfg", "ui", false},
+		{"subdir base ancestor absolute", "cfg", root, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := ParseSingleConfig(doc(tc.uiDir), tc.baseDir)
+			if tc.valid {
+				if err != nil {
+					t.Fatalf("baseDir %q ui_dir %q: unexpected error: %v", tc.baseDir, tc.uiDir, err)
+				}
+				if cfg.WebUI == nil || cfg.WebUI.UIDir != tc.uiDir {
+					t.Fatalf("UIDir = %+v, want %q", cfg.WebUI, tc.uiDir)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("baseDir %q ui_dir %q: accepted, want rejection", tc.baseDir, tc.uiDir)
+			}
+		})
 	}
 }

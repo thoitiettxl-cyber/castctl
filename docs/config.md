@@ -549,7 +549,9 @@ enforced at parse time (lexical), at serve time (symlink
 resolved), and at API save time for new or changed values
 (an authenticated user must not be able to `PUT /config` a
 `ui_dir` over the config tree and then fetch the secrets
-unauthenticated). `ui_dir` is not a secret and is shown
+unauthenticated). Overlap checks compare absolutized paths,
+so a relative `--config` path behaves exactly like the
+equivalent absolute path. `ui_dir` is not a secret and is shown
 verbatim in redacted config views. The on-disk directory is
 trusted input: populate it only from verified module installs
 or explicit updates, never point it at a user-writable or
