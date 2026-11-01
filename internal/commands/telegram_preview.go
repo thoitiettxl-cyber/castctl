@@ -1,6 +1,6 @@
 // Copyright (c) 2026 muse-cli contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Licensed under the GNU General Public License v3.0-or-later.
+// Licensed under the GNU General Public License v3.0 or later.
 
 package commands
 
@@ -171,7 +171,23 @@ func (p *streamPreview) render(now time.Time) string {
 	return p.status + " · " + elapsed
 }
 
-// isDirty reports whether the preview changed since the last
+// statusLine returns the current status label (without the
+// elapsed timer), for the /status "Now:" line: the same label
+// the bubble shows.
+func (p *streamPreview) statusLine() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.status
+}
+
+// startedAt returns the turn's start time, for the /status
+// elapsed timer.
+func (p *streamPreview) startedAt() time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.started
+}
+
 // edit. clearDirty marks the current rendered state as shown;
 // it is called only when an edit was actually attempted, so a
 // throttled edit never loses a change.

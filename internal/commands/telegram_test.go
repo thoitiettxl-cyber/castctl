@@ -57,9 +57,13 @@ type cmdFakeTelegram struct {
 	// reply_markup was attached (button presence, not content).
 	sendMarkups []bool
 	editMarkups []bool
-	served      bool
-	batches     []string
-	batchIdx    int
+	// sendMarkupJSON/editMarkupJSON carry the raw reply_markup
+	// JSON per send/edit ("" when none), for button assertions.
+	sendMarkupJSON []string
+	editMarkupJSON []string
+	served         bool
+	batches        []string
+	batchIdx       int
 	// gates, parallel to batches: batch i is served only once
 	// gates[i] reports true (nil = always). A gated batch that
 	// is not ready yet yields an empty result without
@@ -135,31 +139,39 @@ func (f *cmdFakeTelegram) handler(w http.ResponseWriter, r *http.Request) {
 	case "sendMessage":
 		text := ""
 		markup := false
+		markupJSON := ""
 		if err := r.ParseMultipartForm(1 << 20); err == nil && r.MultipartForm != nil {
 			text = r.MultipartForm.Value["text"][0]
-			markup = len(r.MultipartForm.Value["reply_markup"]) > 0 && r.MultipartForm.Value["reply_markup"][0] != "" && r.MultipartForm.Value["reply_markup"][0] != "null"
+			markupJSON = firstFormValue(r.MultipartForm.Value["reply_markup"])
+			markup = markupJSON != "" && markupJSON != "null"
 		} else if err := r.ParseForm(); err == nil {
 			text = r.Form.Get("text")
-			markup = r.Form.Get("reply_markup") != "" && r.Form.Get("reply_markup") != "null"
+			markupJSON = r.Form.Get("reply_markup")
+			markup = markupJSON != "" && markupJSON != "null"
 		}
 		f.mu.Lock()
 		f.sends = append(f.sends, text)
 		f.sendMarkups = append(f.sendMarkups, markup)
+		f.sendMarkupJSON = append(f.sendMarkupJSON, markupJSON)
 		f.mu.Unlock()
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":100,"chat":{"id":500,"type":"private"},"date":0,"text":"ok"}}`)
 	case "editMessageText":
 		text := ""
 		markup := false
+		markupJSON := ""
 		if err := r.ParseMultipartForm(1 << 20); err == nil && r.MultipartForm != nil {
 			text = r.MultipartForm.Value["text"][0]
-			markup = len(r.MultipartForm.Value["reply_markup"]) > 0 && r.MultipartForm.Value["reply_markup"][0] != "" && r.MultipartForm.Value["reply_markup"][0] != "null"
+			markupJSON = firstFormValue(r.MultipartForm.Value["reply_markup"])
+			markup = markupJSON != "" && markupJSON != "null"
 		} else if err := r.ParseForm(); err == nil {
 			text = r.Form.Get("text")
-			markup = r.Form.Get("reply_markup") != "" && r.Form.Get("reply_markup") != "null"
+			markupJSON = r.Form.Get("reply_markup")
+			markup = markupJSON != "" && markupJSON != "null"
 		}
 		f.mu.Lock()
 		f.edits = append(f.edits, text)
 		f.editMarkups = append(f.editMarkups, markup)
+		f.editMarkupJSON = append(f.editMarkupJSON, markupJSON)
 		f.mu.Unlock()
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":100,"chat":{"id":500,"type":"private"},"date":0,"text":"ok"}}`)
 	case "answerCallbackQuery":
@@ -167,6 +179,23 @@ func (f *cmdFakeTelegram) handler(w http.ResponseWriter, r *http.Request) {
 	default:
 		fmt.Fprint(w, `{"ok":false,"error_code":404,"description":"Not Found"}`)
 	}
+}
+
+func firstFormValue(vs []string) string {
+	if len(vs) == 0 {
+		return ""
+	}
+	return vs[0]
+}
+
+// setBatches replaces the pending getUpdates batches under the
+// lock (the poller reads them concurrently; direct assignment
+// would race under -race). The batch index restarts at 0.
+func (f *cmdFakeTelegram) setBatches(batches []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.batches = batches
+	f.batchIdx = 0
 }
 
 func (f *cmdFakeTelegram) saw(method string) bool {

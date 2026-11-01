@@ -1202,6 +1202,13 @@ func (b *Bot) Delete(ctx context.Context, chatID int64, msgID int) error {
 	return b.scrubErr(err)
 }
 
+// ClearMarkup clears a message's inline keyboard. It is the
+// exported form of clearMarkup for step-5 callback actions
+// (question answers), which run outside the bot core.
+func (b *Bot) ClearMarkup(ctx context.Context, chatID int64, msgID int) error {
+	return b.clearMarkup(ctx, chatID, msgID)
+}
+
 // clearMarkup clears a message's inline keyboard with an empty
 // editMessageReplyMarkup (src/muse_cli/tgbot.py:1725-1737:
 // failure swallowed by the caller).

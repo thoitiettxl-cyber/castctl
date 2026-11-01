@@ -106,6 +106,28 @@ func TestBotStartPollsAndHandlesMessage(t *testing.T) {
 	}
 }
 
+func TestBotSecondStartErrors(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := startBot(t, tb.bot, ctx)
+	// Wait until the first Start is actually polling: the
+	// started flag is set by whichever Start wins the race,
+	// and calling the second Start before the first runs
+	// would let the second one become the poller.
+	waitFor(t, "first Start polling", func() bool { return srv.count("getUpdates") >= 1 })
+	// A second Start on the same bot must fail closed
+	// instead of double-polling (one poller per token).
+	if err := tb.bot.Start(ctx); err == nil || !strings.Contains(err.Error(), "already started") {
+		t.Errorf("second Start = %v; want the already-started error", err)
+	}
+	if err := stopBot(t, cancel, done); !errors.Is(err, context.Canceled) {
+		t.Errorf("first Start after cancel = %v; want context.Canceled", err)
+	}
+}
+
 func TestBotAllowlistSilentDrop(t *testing.T) {
 	t.Parallel()
 	srv := newFakeTelegramServer(t)

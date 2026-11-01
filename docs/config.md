@@ -293,8 +293,8 @@ keys (unknown keys are rejected):
 | `profile` | string | — (required) | Tag of the profile the bot serves. The tag must name a profile in `profiles`; a dangling tag is a config error (exit 2). `telegram run` always serves this profile: an explicit `--profile` or `CASTCTL_PROFILE` naming a different profile is exit 2 naming both tags. |
 | `token` | string | — (required) | The bot token from @BotFather. Shape-checked (`digits`, a colon, then 20 or more token characters, mirroring the Python check in `src/muse_cli/tgapi.py:49-52`); a shape-invalid token is a config error (exit 2) and the value is never echoed. The token is a secret: errors leaving the bot carry scrubbed copies whose text, verbose (`%+v`) and Go-syntax (`%#v`) forms, and every reachable error layer are token-free, and bot log lines render class/length summaries only, with no method field and no verbatim error text (no server body, description, or raw update bytes, at any size or shape); the one approval-metadata warn line carries only a gated approval_id (1–64 runes of `[A-Za-z0-9_-]`, else `[omitted]`) and kind/scope/title lengths, no field bytes; `telegram status` reports only shape validity. The scrubbed copies preserve only `errors.As` to the 429/migrate error types (with scrubbed messages) and `errors.Is` to the library sentinel classes — no other typed error view survives scrubbing. |
 | `allowed_user_ids` | array of integers | — (required, non-empty) | The allowlist: sender user ids permitted to use the bot. Every id must be positive. The gate is on the sender's user id only (never chat id or chat type), mirroring Python `src/muse_cli/tgbot.py:643-648,989-1000`: a non-allowlisted sender's update is dropped silently — no reply, no state change. The sender is derived from the dispatched update kind (a callback sender gates a callback query even when the update also carries a message). Callback routing reads the message chat from a regular or inaccessible (`date:0`) message. A missing or empty allowlist refuses to start (exit 2, no token use, no polling). |
-| `auto_approve` | bool | `false` | Auto-decide approvals that offer a forever option. Default source: the castctl profile-entry default (`parseProfileEntry` treats a missing entry as off). Bool-only in this block: the profile entry's `on`/`off` word spelling is not carried over. |
-| `auto_allow_once` | bool | `false` | When `auto_approve` is on, also auto-decide approvals that offer only a once option, with the `allow_once` decision. Default source: the Python bot-state default (`src/muse_cli/tgbot.py:630`, `auto_allow_once: False`). `allow_once` is a decision string for one approval id gated by this toggle, not a consumed one-shot grant; the manual Allow-once button ignores the toggle (`src/muse_cli/tgbot.py:1703-1723`). |
+| `auto_approve` | bool | `false` | Auto-decide approvals that offer a forever option. Default source: the castctl profile-entry default (`parseProfileEntry` treats a missing entry as off). Bool-only in this block: the profile entry's `on`/`off` word spelling is not carried over. A runtime `/autoapprove on\|off` in the bot persists to the state file (below) and overrides this value after the first toggle; the block value is the initial value, and the bot never rewrites `config.json`. The effective default is `false` (fail-closed), which differs from the Python bot's runtime default of on (`src/muse_cli/tgbot.py:635-639`). |
+| `auto_allow_once` | bool | `false` | When `auto_approve` is on, also auto-decide approvals that offer only a once option, with the `allow_once` decision. Default source: the Python bot-state default (`src/muse_cli/tgbot.py:630`, `auto_allow_once: False`). `allow_once` is a decision string for one approval id gated by this toggle, not a consumed one-shot grant; the manual Allow-once button ignores the toggle (`src/muse_cli/tgbot.py:1703-1723`). A runtime `/autoapprove once on\|off` persists to the state file (below) and overrides this value after the first toggle; the block value is the initial value. |
 
 The bot dials only through the linked profile's outbound: its
 HTTP client is the profile runtime's client (proxy explicitly
@@ -310,36 +310,86 @@ may be handled again); per-chat queues hold 64 updates and
 drop (counted) arrivals past that rather than stalling other
 chats; idle queues are reaped after 5 minutes; shutdown
 drains queues for at most 10 seconds, then abandons the
-remainder (counted as dropped).
+remainder (counted as dropped). The persisted offset (state
+file below) bounds redelivery across restarts: the in-memory
+window only covers redeliveries within one run.
 
-Deliberate deviations from 0.6.1 beyond the in-memory state
-above: `edit_plain` swallows every edit error (Python catches
-only Telegram/connection errors — the scrubbed-error contract
-cannot express that distinction); and the claim protocol's
-storm (a slow decider with a short claim wait lets every
-concurrent caller decide the same id — the mirrored Python
-protocol's own defect, kept as surveyed; gateway-side
-idempotency is required in step 5). The production bot
-logger falls back to the default slog logger, bypassing the
-logging factory (step-5 follow-up; every bot log line carrying
-error text renders a class/length summary first, and every
-other bot log line carries only numeric ids, fixed-vocabulary
-kinds, a gated approval_id, or field lengths — no verbatim
-caller/server text — so this is a routing issue, not
-a leak).
+Runtime toggles: `/autoapprove` and `/watch` persist to the
+state file below; there is no config field for `watch`
+(effective default `false`; `/watch on|off` toggles it, bare
+`/watch` reports it). Watch forwarding itself — live
+tool/progress events forwarded to chats — is step 5b; the
+toggle is persisted now so the reply text does not
+over-promise. No CLI flag, environment variable, or profile
+entry feeds a bot turn: only the telegram block's initial
+values, overlaid by the state file after the first runtime
+toggle, do.
+
+State file: `telegram-state.json`, a JSON file at mode 0600
+next to the profile directory's `chat.json` (the path is
+derived from the resolved config location; there is no config
+field for it, and it is never written inside the
+token-bearing `config.json`). It holds the persisted update
+offset, the per-chat session/watermark mapping, and the
+runtime toggles. Writes are atomic (temp file + rename in the
+same directory, synced before the rename). Crash semantics:
+the offset is persisted before an update is handled, so a
+crash mid-handle loses that update (at-most-once, mirroring
+Python `src/muse_cli/tgbot.py:2445-2450`); a crash during a
+save leaves the old or the new whole file, never a torn one.
+A corrupt or unknown-version state file is treated as fresh
+with one warning (the bot keeps running); any other read
+error fails startup rather than running on unpersistable
+state. Watermarks advance monotonically and are capped at
+the last seq a turn delivered.
+
+Deliberate deviations from 0.6.1: `edit_plain` swallows every
+edit error (Python catches only Telegram/connection errors —
+the scrubbed-error contract cannot express that distinction);
+the claim protocol's storm is kept as surveyed for the
+monitor path (a slow decider with a short claim wait lets
+every concurrent caller decide the same id — the mirrored
+Python protocol's own defect; gateway-side idempotency is
+still required for the claim protocol, and no monitor exists
+in this build, so the turn path's own claim discipline —
+the Waiter's offered set plus the AutoApprover decided set —
+is what runs). The bot logger is routed through the logging
+factory (`env.Logger` override, else the `telegram` tag
+logger); every bot log line carrying error text renders a
+class/length summary first, and every other bot log line
+carries only numeric ids, fixed-vocabulary kinds, a gated
+approval_id, or field lengths — no verbatim caller/server
+text.
 
 Save behaviour: config renders carry the block verbatim when
 present in raw form, and re-render it field-by-field otherwise
 (including the stored token value); the token is never written
 to logs.
 
-What this build does NOT wire (roadmap step 5): Muse turn
-execution from Telegram messages, the full slash-command and
-callback surface beyond decide/approve-all, media, `/login`,
-persistent offset/dedupe state, and `telegram setup` /
-`install-service`. `telegram run` answers every message with an
-explicit placeholder notice and fails approval decisions closed
-until that wiring lands.
+What this build wires (roadmap step 5a): Muse turn execution
+from Telegram messages through the send/wait path (streamed,
+edited replies; question-option buttons answering via
+plain-text turns; `/stop`), approval deciding through the
+gateway decide path (`/approvals`, `/autoapprove`, decide /
+approve-all buttons, resume after a decision), the core
+slash commands (`/help`, `/status`, `/chats`, `/main`, `/new`,
+`/history`, `/unread`, `/rename`, `/pin`, `/unpin`,
+`/archive`, `/unarchive`, `/delete`, `/watch` as a persisted
+toggle), and the persistent state file above. Known gaps in
+this build: long replies are split into messages instead of
+being sent as a document, `/history` output is split instead
+of sent as a file, `/stop` does not drop dispatcher-queued
+updates (no per-chat drop API), and shutdown does not wait
+for in-flight turns (turns inherit the handler context and
+are cancelled on shutdown).
+
+What this build does NOT wire (roadmap step 5b): media
+download/upload, `/files`, `/fs`, `/feed`, `/goals`, `/goal`,
+`/ideas`, `/usage`, `/wake`, `/profile`, `/update`, `/watch`
+forwarding/monitors, `/login`, `/raw`, and `telegram setup` /
+`install-service`. Those commands answer with an explicit
+not-wired reply naming step 5b, except `/login` and `/raw`,
+which answer that they are not available in this build.
 
 ## The `keeper` section
 

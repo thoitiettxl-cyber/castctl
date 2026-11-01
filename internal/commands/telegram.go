@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
@@ -18,13 +17,20 @@ import (
 
 // The telegram command wires the optional top-level `telegram`
 // config block (docs/config.md) to the polling bot in
-// internal/telegram. Item 4 wires exactly two subcommands:
+// internal/telegram. It wires exactly two subcommands:
 //
 //   - `telegram run`: poll the Bot API through the LINKED
-//     profile's outbound until interrupted. Messages get a
-//     placeholder notice and approval decisions fail closed:
-//     the Muse turn wiring (send/wait/approvals over the
-//     gateway) is roadmap step 5, not this PR.
+//     profile's outbound until interrupted. Allowed users
+//     talk to Muse with plain messages (streamed, edited
+//     replies through the send/wait path), approvals are
+//     decided through the gateway decide path, and the core
+//     slash commands (/help, /status, /chats, /main, /new,
+//     /history, /unread, /approvals, /autoapprove, /watch,
+//     session ops, /stop) are wired; media, /files, /fs,
+//     /feed, /goals, /goal, /ideas, /usage, /wake, /profile,
+//     /update, /login, /raw, watch forwarding, and
+//     `telegram setup` / `install-service` are roadmap
+//     step 5b, not this build.
 //   - `telegram status`: offline report of the block (configured
 //     flag, linked profile tag, allowlist count, toggles,
 //     token-shape validity). No network, no GetMe, no token
@@ -49,9 +55,8 @@ subcommands:
 
 "run" serves the profile named by the block's "profile" field,
 never the active profile: --profile or CASTCTL_PROFILE naming a
-different profile is an error. Messages received by this build
-get a placeholder notice; approval decisions fail closed. Muse
-turn wiring lands in roadmap step 5.
+different profile is an error. Allowed users talk to Muse with
+plain messages; /help in the chat lists the bot commands.
 `
 
 const telegramRunHelpText = `usage: castctl telegram run
@@ -153,23 +158,14 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 		return errors.New("telegram: runtime has no Muse connection")
 	}
 
-	// [STEP-5 FOLLOW-UP] env.Logger is nil on the production
-	// path (main passes an empty Env; the log factory handle
-	// is owned inside buildRuntime and Runtime exposes no
-	// logger accessor), so the bot logger falls back to
-	// slog.Default() and bypasses the logging factory's
-	// level/output. Routing it through the factory needs a
-	// Runtime logger accessor plus lifecycle wiring and is
-	// step-5 work. Not a leak: every bot log line carrying
-	// error text renders a class/length summary before it
-	// reaches this logger, and every other bot log line
-	// carries only numeric ids, fixed-vocabulary kinds, a
-	// gated approval_id, or field lengths — no verbatim
-	// caller/server text (see internal/telegram summarize
-	// and logApprovalID).
+	// The bot logger comes from the runtime's logging factory
+	// (the sing-box-mirroring log block: level filter +
+	// SafeString redaction), tagged "telegram". env.Logger, when
+	// set, is an explicit override (tests); on the production
+	// path it is nil and the factory logger applies.
 	logger := env.Logger
 	if logger == nil {
-		logger = slog.Default()
+		logger = rt.Logger("telegram")
 	}
 	if stateCorrupt {
 		logger.Warn("telegram state file corrupt; starting with fresh state", "path", telegram.StatePath(prof.Dir))
@@ -199,6 +195,7 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 	}
 	var bot *telegram.Bot
 	var runner *telegramTurnRunner
+	var handler *telegramCmdHandler
 	bot, err = telegram.New(telegram.Settings{
 		Token:          tg.Token,
 		AllowedUserIDs: tg.AllowedUserIDs,
@@ -223,13 +220,16 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 		Resume: func(ctx context.Context, info telegram.ResumeInfo) error {
 			return runner.runResume(ctx, info)
 		},
-		// Command dispatch lands in A4; until then every
-		// message starts a turn. The runner is assigned
-		// after New returns; the handler cannot run before
-		// Start, so the nil window never observes a message.
+		// Command dispatch (A4) routes "/" messages to the
+		// command table and everything else to a turn. The
+		// handler is assigned after New returns; it cannot
+		// run before Start, so the nil window never observes
+		// a message.
 		MessageHandler: func(ctx context.Context, mc telegram.MessageContext) error {
-			runner.startTurn(ctx, mc.ChatID, mc.Text)
-			return nil
+			return handler.dispatch(ctx, mc)
+		},
+		CallbackFunc: func(ctx context.Context, chatID int64, messageID int, entry telegram.CallbackEntry) (bool, error) {
+			return handler.handleCallback(ctx, chatID, messageID, entry)
 		},
 	})
 	if err != nil {
@@ -244,6 +244,16 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 		logger:  logger,
 		toggles: effectiveToggles,
 	})
+	handler = &telegramCmdHandler{
+		env:     env,
+		bot:     bot,
+		rt:      rt,
+		prof:    prof,
+		store:   stateStore,
+		runner:  runner,
+		toggles: effectiveToggles,
+		logger:  logger,
+	}
 	fmt.Fprintf(env.stdout(), "telegram: polling for profile %q (%d allowed users); Ctrl-C to stop\n", tg.Profile, len(tg.AllowedUserIDs))
 	return bot.Start(ctx)
 }

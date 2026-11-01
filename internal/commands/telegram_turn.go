@@ -1,6 +1,6 @@
 // Copyright (c) 2026 muse-cli contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Licensed under the GNU General Public License v3.0-or-later.
+// Licensed under the GNU General Public License v3.0 or later.
 
 package commands
 
@@ -105,6 +105,12 @@ type telegramTurnRunner struct {
 	// the whole goroutine lifetime.
 	activeMu sync.Mutex
 	active   map[int64]struct{}
+
+	// live tracks each running turn's streaming preview, for
+	// the /status "Now:" line. It is separate from active: a
+	// resume-follow also registers its preview here.
+	liveMu sync.Mutex
+	live   map[int64]*streamPreview
 }
 
 type telegramStopEntry struct {
@@ -119,7 +125,29 @@ func newTelegramTurnRunner(deps telegramTurnDeps) *telegramTurnRunner {
 	if deps.ackTimeout <= 0 {
 		deps.ackTimeout = 30 * time.Second
 	}
-	return &telegramTurnRunner{deps: deps, stops: map[int64]*telegramStopEntry{}, active: map[int64]struct{}{}}
+	return &telegramTurnRunner{deps: deps, stops: map[int64]*telegramStopEntry{}, active: map[int64]struct{}{}, live: map[int64]*streamPreview{}}
+}
+
+// liveTurn returns the running turn's preview for a chat, if any.
+func (r *telegramTurnRunner) liveTurn(chatID int64) (*streamPreview, bool) {
+	r.liveMu.Lock()
+	defer r.liveMu.Unlock()
+	p, ok := r.live[chatID]
+	return p, ok
+}
+
+func (r *telegramTurnRunner) registerLive(chatID int64, p *streamPreview) {
+	r.liveMu.Lock()
+	r.live[chatID] = p
+	r.liveMu.Unlock()
+}
+
+func (r *telegramTurnRunner) unregisterLive(chatID int64, p *streamPreview) {
+	r.liveMu.Lock()
+	if r.live[chatID] == p {
+		delete(r.live, chatID)
+	}
+	r.liveMu.Unlock()
 }
 
 // startTurn launches a text turn in its own goroutine and
@@ -222,6 +250,8 @@ func (r *telegramTurnRunner) runTextTurn(ctx context.Context, chatID int64, text
 	defer r.deps.bot.EndTurn(chatID)
 
 	preview := newStreamPreview(time.Now())
+	r.registerLive(chatID, preview)
+	defer r.unregisterLive(chatID, preview)
 	bubbleID, err := r.deps.bot.Send(turnCtx, chatID, "⏳ Sending to Muse…", telegram.SendOptions{Mode: telegram.HTMLModePlain})
 	if err != nil {
 		// Bubble failure aborts the turn, as in Python: without
@@ -299,6 +329,8 @@ func (r *telegramTurnRunner) runResume(ctx context.Context, info telegram.Resume
 	defer r.deps.bot.EndTurn(chatID)
 
 	preview := newStreamPreview(time.Now())
+	r.registerLive(chatID, preview)
+	defer r.unregisterLive(chatID, preview)
 	bubbleID, err := r.deps.bot.Send(turnCtx, chatID, "⏳ Muse is continuing…", telegram.SendOptions{Mode: telegram.HTMLModePlain})
 	if err != nil {
 		return err

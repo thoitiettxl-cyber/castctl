@@ -59,9 +59,16 @@ type telegramTurnFakeGateway struct {
 	// the "pending" key instead of "pending_approvals".
 	approvalsFallback bool
 	approvalsErr      error
-	subScripts        []turnSubScript
-	blockSub          chan struct{}
-	noAck             bool
+	// Command-path scripts.
+	sessionsScript     []any
+	unreadScript       any
+	identityScript     any
+	sessionStartScript map[string]any
+	sessionStartErr    error
+	sessionOpCalls     []map[string]any
+	subScripts         []turnSubScript
+	blockSub           chan struct{}
+	noAck              bool
 }
 
 // decideRecord is one egress.approval.decide call.
@@ -72,12 +79,13 @@ type decideRecord struct {
 
 // turnSubScript is one SubscribeRaw call's feed: the assistant
 // reply appended to the history log, the delta texts fed live,
-// the raw approval records fed live, and the terminal
-// task.status.
+// the raw approval records fed live, the terminal task.status,
+// and (for the /status probe) a standalone task.status record.
 type turnSubScript struct {
 	replyText       string
 	deltas          []string
 	approvalRecords []string
+	probeStatus     string
 }
 
 func newTelegramTurnFakeGateway() *telegramTurnFakeGateway {
@@ -134,6 +142,33 @@ func (f *telegramTurnFakeGateway) CallJSON(ctx context.Context, method string, o
 			return map[string]any{"pending": f.approvalsScript}, nil
 		}
 		return map[string]any{"pending_approvals": f.approvalsScript}, nil
+	case "sessions.list":
+		return map[string]any{"sessions": f.sessionsScript}, nil
+	case "chat.unread_count":
+		if f.unreadScript != nil {
+			return f.unreadScript, nil
+		}
+		return map[string]any{}, nil
+	case "identity":
+		if f.identityScript != nil {
+			return f.identityScript, nil
+		}
+		return map[string]any{}, nil
+	case "session.start":
+		if f.sessionStartErr != nil {
+			return nil, f.sessionStartErr
+		}
+		if f.sessionStartScript != nil {
+			return f.sessionStartScript, nil
+		}
+		return map[string]any{}, nil
+	case "session.rename", "session.pin", "session.unpin", "session.archive", "session.unarchive", "session.delete":
+		b, _ := json.Marshal(opts.Body)
+		var body map[string]any
+		_ = json.Unmarshal(b, &body)
+		body["method"] = method
+		f.sessionOpCalls = append(f.sessionOpCalls, body)
+		return map[string]any{"ok": true}, nil
 	default:
 		return nil, fmt.Errorf("unexpected method %s", method)
 	}
@@ -219,6 +254,13 @@ func (f *telegramTurnFakeGateway) SubscribeRaw(ctx context.Context, method strin
 			return nil, nil
 		}
 	}
+	if script.probeStatus != "" {
+		rec, _ := json.Marshal(map[string]any{
+			"event": "task.status", "seq": replySeq + 1,
+			"payload": map[string]any{"status": script.probeStatus, "root_agent_id": "R", "agent_id": "R"},
+		})
+		feed(string(rec))
+	}
 	if script.replyText != "" {
 		rec, _ := json.Marshal(map[string]any{
 			"event": "task.status", "seq": replySeq + 1,
@@ -255,6 +297,26 @@ func (f *telegramTurnFakeGateway) decideHistory() []decideRecord {
 	return append([]decideRecord(nil), f.decideCalls...)
 }
 
+// addEvent appends a history event to the log (test setup).
+func (f *telegramTurnFakeGateway) addEvent(ev map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, ev)
+}
+
+// eventsSnapshot returns a copy of the history log.
+func (f *telegramTurnFakeGateway) eventsSnapshot() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]map[string]any(nil), f.events...)
+}
+
+func (f *telegramTurnFakeGateway) sessionOps() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]map[string]any(nil), f.sessionOpCalls...)
+}
+
 // telegramBotHarness runs `telegram run` against a fake
 // Telegram server and a scripted fake gateway. The caller waits
 // on fake observations, then cancels; run returns the exit code.
@@ -289,18 +351,74 @@ func runTelegramBotGated(t *testing.T, gw *telegramTurnFakeGateway, batches []st
 	env := &Env{Stdout: &strings.Builder{}, Stderr: &strings.Builder{}, Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile})}
 	muse := conn.New(func(context.Context, conn.Config) (conn.Gateway, error) { return gw, nil })
 	env.BuildRuntime = func(ctx context.Context, loc *profile.ConfigLocation, prof *profile.Profile, env *Env) (*Runtime, error) {
+		// The status report needs a VM id without the
+		// FetchSessionInfo fallback (no cookies in tests).
+		prof.VMID = "vm-test"
 		return &Runtime{Profile: prof, Muse: muse, httpClientOverride: fakeClient}, nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancelFn := context.WithCancel(context.Background())
 	codeCh := make(chan int, 1)
-	go func() { codeCh <- Run(ctx, []string{"telegram", "run"}, env) }()
+	done := make(chan struct{})
+	go func() {
+		codeCh <- Run(ctx, []string{"telegram", "run"}, env)
+		close(done)
+	}()
 	h := &telegramBotHarness{fake: fake, gw: gw, homeDir: home}
+	// The returned cancel waits for Run to return (via done,
+	// without consuming codeCh, which stays the caller's to
+	// read) and then drains in-flight turn goroutines: turns
+	// run async (so /stop can run mid-turn), and their
+	// deferred watermark save writes into the temp home —
+	// without the drain, the save can race t.TempDir cleanup
+	// ("directory not empty") or land after the directory
+	// is gone. The drain waits for the fake's send/edit
+	// counts to stay quiet, which is the turn goroutine's
+	// last observable act before the save. Production
+	// shutdown does not join turns (documented); this is a
+	// test-harness-only join. Safe to call twice: done is
+	// closed once, and a second drain finds quiet counts.
+	cancel := func() {
+		cancelFn()
+		<-done
+		drainTurns(fake)
+	}
 	return h, cancel, codeCh
+}
+
+// drainTurns waits until the fake has seen no new send/edit
+// for 300ms (three quiet 100ms polls), capped at 5s. A turn
+// goroutine's final edit precedes its watermark save in the
+// same goroutine, so a quiet window means no turn is still
+// writing into the temp home.
+func drainTurns(fake *cmdFakeTelegram) {
+	deadline := time.Now().Add(5 * time.Second)
+	lastSends, lastEdits := -1, -1
+	quiet := 0
+	for time.Now().Before(deadline) {
+		fake.mu.Lock()
+		sends, edits := len(fake.sends), len(fake.edits)
+		fake.mu.Unlock()
+		if sends == lastSends && edits == lastEdits {
+			quiet++
+			if quiet >= 3 {
+				return
+			}
+		} else {
+			quiet = 0
+			lastSends, lastEdits = sends, edits
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	waitForTimeout(t, what, 10*time.Second, cond)
+}
+
+func waitForTimeout(t *testing.T, what string, budget time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
@@ -468,26 +586,29 @@ func TestTelegramRunFreshReplyPerTurn(t *testing.T) {
 		{replyText: "First reply", deltas: []string{"First"}},
 		{replyText: "Second reply", deltas: []string{"Second"}},
 	}
-	h, cancel, codeCh := runTelegramBotGated(t, gw, []string{
+	h, cancel, codeCh := runTelegramBot(t, gw, []string{
 		telegramUpdate(1, 111, "hello"),
-		telegramUpdate(2, 111, "hello again"),
-	}, []func(*cmdFakeTelegram) bool{
-		nil,
-		// The second update is served only after the first
-		// turn's final edit landed: without the gate it
-		// would arrive mid-turn and correctly get the busy
-		// reply instead of a second turn.
-		func(f *cmdFakeTelegram) bool {
-			for _, e := range f.editTexts() {
-				if strings.Contains(e, "First reply") {
-					return true
-				}
-			}
-			return false
-		},
 	})
 	defer cancel()
-	waitFor(t, "second turn's final edit", func() bool {
+	// Two stages, so a timeout names the slow half: the first
+	// turn must land its final edit, then the second update
+	// is staged (setBatches, not a poll gate) and the second
+	// turn must run. Without staging, the second update
+	// would arrive mid-turn and correctly get the busy
+	// reply instead of a second turn. The second stage gets
+	// a generous budget: the chain takes 0.22s solo but a
+	// full -race suite on few CPUs starves it badly (a
+	// >60s stall was observed once under the 4-tag suite).
+	waitFor(t, "first turn's final edit", func() bool {
+		for _, e := range h.fake.editTexts() {
+			if strings.Contains(e, "First reply") {
+				return true
+			}
+		}
+		return false
+	})
+	h.fake.setBatches([]string{telegramUpdate(2, 111, "hello again")})
+	waitForTimeout(t, "second turn's final edit", 120*time.Second, func() bool {
 		for _, e := range h.fake.editTexts() {
 			if strings.Contains(e, "Second reply") {
 				return true

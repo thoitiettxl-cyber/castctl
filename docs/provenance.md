@@ -723,19 +723,24 @@ its own. No upstream source is copied into this tree: the
 library is linked as a Go module dependency only.
 
 Castctl side: `internal/telegram/` (`bot.go`, `dispatcher.go`,
-`claims.go`, `text.go`, `approvals.go`) uses the library for
-polling and the Bot API calls; `internal/commands/telegram.go`
-wires `telegram run` / `telegram status` to the config block.
-Behaviour is reimplemented from the 0.6.1 Python reference
-(`src/muse_cli/tgbot.py`, `tgapi.py`, `wait.py`), not from the
-library's examples: message splitting and Markdown-to-HTML
-conversion (`tgapi.py:178-247`), the HTML-then-plain send/edit
-fallback and 429 retry rule (`tgbot.py:703-758`,
-`tgapi.py:116-130`), the sender-id allowlist gate
-(`tgbot.py:643-648,989-1000`), approval description/options
-(`wait.py:102-164`, `tgbot.py:1703-1723`), callback decide /
-approve-all (`tgbot.py:1725-1747`), and the claim / notified
-state machine (`tgbot.py:1505-1701`).
+`claims.go`, `text.go`, `approvals.go`, `state.go`) uses the
+library for polling and the Bot API calls;
+`internal/commands/telegram.go`, `telegram_turn.go`,
+`telegram_preview.go`, `telegram_commands.go`, and
+`telegram_approvals.go` wire `telegram run` to the config
+block, the send/wait turn path, and the slash-command /
+callback surface. Step 5a reimplements the turn streaming
+(`tgbot.py:312-518`), the approval claim / decide flow, and
+the command behaviours from the 0.6.1 Python reference, not
+from the library's examples — including message splitting and
+Markdown-to-HTML conversion (`tgapi.py:178-247`), the
+HTML-then-plain send/edit fallback and 429 retry rule
+(`tgbot.py:703-758`, `tgapi.py:116-130`), the sender-id
+allowlist gate (`tgbot.py:643-648,989-1000`), approval
+description/options (`wait.py:102-164`,
+`tgbot.py:1703-1723`), callback decide / approve-all
+(`tgbot.py:1725-1747`), and the claim / notified state
+machine (`tgbot.py:1505-1701`).
 
 Evaluation conditions applied (from the libpin report, all
 VERIFIED in tree): the bot is built with `WithHTTPClient` on a
@@ -767,16 +772,19 @@ getMe at construction and none during polling.
 
 Deliberate deviations from 0.6.1 (documented in code): the
 update_id dedupe itself (Python has none — a redelivery would
-be handled twice); offset/dedupe state in memory only, no state
-file (Python persists the offset in `telegram-state.json`);
-`telegram run` answers messages with an explicit placeholder
-notice and fails approval decisions closed until the step-5
-gateway wiring lands; `edit_plain` swallows all edit errors
-(Python catches only Telegram/connection errors); the claim
-storm is kept as surveyed (a slow decider with a short claim
-wait lets every concurrent caller decide one id — a defect
-of the mirrored protocol; gateway-side idempotency is
-required in step 5).
+be handled twice); the offset is persisted in
+`telegram-state.json` (mode 0600, atomic writes,
+offset-before-handle crash semantics), with per-chat
+session/watermark and runtime-toggle state in the same file;
+`telegram run` executes real Muse turns through the send/wait
+path with streamed, edited replies and gateway-wired
+approvals; `edit_plain` swallows all edit errors (Python
+catches only Telegram/connection errors); the claim storm is
+kept as surveyed for the monitor path (a slow decider with a
+short claim wait lets every concurrent caller decide one id
+— a defect of the mirrored protocol; gateway-side
+idempotency is required for the claim protocol, and no
+monitor exists in this build).
 
 ## 6. cronet-go — EVALUATED-NOT-WIRED (graph-only; no code, no tag)
 
