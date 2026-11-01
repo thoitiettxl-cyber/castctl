@@ -20,6 +20,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime/debug"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"testing"
@@ -70,6 +72,7 @@ type telegramTurnFakeGateway struct {
 	blockSub            chan struct{}
 	blockCallIdx        int // subscribe call index to block; 0 (first) by default
 	exhaustedSubscribes int
+	exhaustedStack      []byte // stack of the first exhausted SubscribeRaw call
 	noAck               bool
 }
 
@@ -228,6 +231,9 @@ func (f *telegramTurnFakeGateway) SubscribeRaw(ctx context.Context, method strin
 		// count it so a hang here is diagnosable instead of a
 		// silent resubscribe loop (see TestTelegramRunFreshReplyPerTurn).
 		f.exhaustedSubscribes++
+		if f.exhaustedStack == nil {
+			f.exhaustedStack = debug.Stack()
+		}
 	}
 	// Append the reply to the history log BEFORE feeding, so
 	// the settle history read sees it.
@@ -306,6 +312,14 @@ func (f *telegramTurnFakeGateway) exhausted() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.exhaustedSubscribes
+}
+
+// exhaustedStackTrace returns the stack captured at the first
+// exhausted SubscribeRaw call, or "" when no call exhausted.
+func (f *telegramTurnFakeGateway) exhaustedStackTrace() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return string(f.exhaustedStack)
 }
 
 func (f *telegramTurnFakeGateway) decideHistory() []decideRecord {
@@ -435,6 +449,60 @@ func drainTurns(fake *cmdFakeTelegram) {
 	}
 }
 
+// readState returns the persisted offset and main-chat
+// watermark, or ok=false when no state file exists yet or it
+// does not load cleanly (a concurrent save mid-read).
+func (h *telegramBotHarness) readState() (offset, watermark int64, ok bool) {
+	if !h.hasStateFile() {
+		return 0, 0, false
+	}
+	var path string
+	_ = filepath.Walk(h.homeDir, func(p string, info os.FileInfo, err error) error {
+		if err == nil && info.Name() == "telegram-state.json" {
+			path = p
+		}
+		return nil
+	})
+	if path == "" {
+		return 0, 0, false
+	}
+	store, corrupt, err := telegram.LoadStateStore(filepath.Dir(path))
+	if err != nil || corrupt {
+		return 0, 0, false
+	}
+	return store.Offset(), store.Watermark(telegram.WatermarkKey("")), true
+}
+
+// turnDiagnostics snapshots the fake counters, the bot's
+// sends, and the persisted state for a hung-turn failure, so
+// the next flake is diagnosable from the failure output
+// instead of from rerun counts: exhausted>0 implicates fake
+// script exhaustion; a busy reply with no second subscribe
+// implicates the teardown window; a goroutine dump shows
+// where the Runner and dispatcher workers are stuck.
+func turnDiagnostics(h *telegramBotHarness, gw *telegramTurnFakeGateway) string {
+	hist, streams, subs, cancels := gw.counts()
+	offset, watermark, stateOK := h.readState()
+	h.fake.mu.Lock()
+	sends := append([]string(nil), h.fake.sends...)
+	edits := append([]string(nil), h.fake.edits...)
+	h.fake.mu.Unlock()
+	busy := false
+	for _, s := range sends {
+		if strings.Contains(s, "already working") {
+			busy = true
+		}
+	}
+	var stacks strings.Builder
+	_ = pprof.Lookup("goroutine").WriteTo(&stacks, 1)
+	dump := stacks.String()
+	if len(dump) > 8000 {
+		dump = dump[:8000] + "\n...[truncated]"
+	}
+	return fmt.Sprintf("history=%d streams=%d subscribes=%d cancels=%d exhausted=%d exhaustedStack=%q stateOK=%v offset=%d watermark=%d busyReply=%v sends=%q edits=%q\n-- goroutines --\n%s",
+		hist, streams, subs, cancels, gw.exhausted(), gw.exhaustedStackTrace(), stateOK, offset, watermark, busy, sends, edits, dump)
+}
+
 // waitForTurnEnd stages on turn completion: the watermark
 // advanced past prev in the state file (the save is the turn
 // goroutine's last act before it clears the active slot),
@@ -446,24 +514,8 @@ func drainTurns(fake *cmdFakeTelegram) {
 func waitForTurnEnd(t *testing.T, h *telegramBotHarness, prev int64) {
 	t.Helper()
 	waitForTimeout(t, "turn-end watermark", 10*time.Second, func() bool {
-		if !h.hasStateFile() {
-			return false
-		}
-		var path string
-		_ = filepath.Walk(h.homeDir, func(p string, info os.FileInfo, err error) error {
-			if err == nil && info.Name() == "telegram-state.json" {
-				path = p
-			}
-			return nil
-		})
-		if path == "" {
-			return false
-		}
-		store, _, err := telegram.LoadStateStore(filepath.Dir(path))
-		if err != nil {
-			return false
-		}
-		return store.Watermark(telegram.WatermarkKey("")) > prev
+		_, wm, ok := h.readState()
+		return ok && wm > prev
 	})
 	time.Sleep(150 * time.Millisecond)
 }
@@ -796,14 +848,21 @@ func TestTelegramRunFreshReplyPerTurn(t *testing.T) {
 	})
 	defer cancel()
 	// Two stages, so a timeout names the slow half: the first
-	// turn must land its final edit, then the second update
-	// is staged (setBatches, not a poll gate) and the second
-	// turn must run. Without staging, the second update
-	// would arrive mid-turn and correctly get the busy
-	// reply instead of a second turn. The second stage gets
-	// a generous budget: the chain takes 0.22s solo but a
-	// full -race suite on few CPUs starves it badly (a
-	// >60s stall was observed once under the 4-tag suite).
+	// turn must land its final edit AND end (watermark saved,
+	// active slot cleared) before the second update is staged
+	// (setBatches, not a poll gate). Staging on the edit alone
+	// is the proven flake mechanism (fix loop 1, GOMAXPROCS=2
+	// -count=30 probe, 1 failure in the first 11 iterations
+	// with diagnostics:
+	// subscribes=1, streams=1, exhausted=0, busyReply=true,
+	// watermark saved, no Runner goroutine stuck): the final
+	// edit lands before the watermark save and the
+	// active-slot clear, so an update staged on the edit can
+	// arrive while r.active is still set, get the busy reply,
+	// and never run a turn — a 120s stage-2 timeout with
+	// nothing stuck anywhere. The busy reply in that window
+	// is the intended at-most-one-turn guard, not a bug to
+	// weaken here; the test must stage on turn-end.
 	waitFor(t, "first turn's final edit", func() bool {
 		for _, e := range h.fake.editTexts() {
 			if strings.Contains(e, "First reply") {
@@ -812,18 +871,51 @@ func TestTelegramRunFreshReplyPerTurn(t *testing.T) {
 		}
 		return false
 	})
+	waitForTurnEnd(t, h, 0)
 	h.fake.setBatches([]string{telegramUpdate(2, 111, "hello again")})
-	waitForTimeout(t, "second turn's final edit", 120*time.Second, func() bool {
-		for _, e := range h.fake.editTexts() {
-			if strings.Contains(e, "Second reply") {
-				return true
+	// Stage 2 keeps the 120s budget and fails with full
+	// diagnostics (counts, busy-reply presence, goroutine
+	// dump) instead of a bare timeout: the mechanism, not
+	// the rerun count, is the evidence.
+	{
+		deadline := time.Now().Add(120 * time.Second)
+		for {
+			found := false
+			for _, e := range h.fake.editTexts() {
+				if strings.Contains(e, "Second reply") {
+					found = true
+					break
+				}
 			}
+			if found {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for second turn's final edit\n%s", turnDiagnostics(h, gw))
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-		return false
-	})
+	}
 	cancel()
 	if code := <-codeCh; code != 130 {
 		t.Errorf("run code = %d; want 130", code)
+	}
+	// Update 2 must have run a turn, not taken the busy
+	// reply: any busy reply here means the staging raced the
+	// teardown window again. And no subscribe may have
+	// exhausted the fake's scripts: exhaustion would mean
+	// the second turn ran on an empty script, not the
+	// scripted reply.
+	h.fake.mu.Lock()
+	sends := append([]string(nil), h.fake.sends...)
+	h.fake.mu.Unlock()
+	for _, s := range sends {
+		if strings.Contains(s, "already working") {
+			t.Errorf("busy reply sent for update 2: %q; want a second turn", s)
+		}
+	}
+	if got := gw.exhausted(); got != 0 {
+		t.Errorf("exhausted subscribes = %d; want 0", got)
 	}
 	edits := h.fake.editTexts()
 	var finals []string
