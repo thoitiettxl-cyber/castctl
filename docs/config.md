@@ -500,12 +500,51 @@ Behaviour:
 
 Optional. Absent means no web UI: `castctl webui serve` fails
 closed (exit 2) and nothing listens. The block accepts exactly
-two keys:
+three keys:
 
 | Key | Value |
 |---|---|
 | `listen` | string: loopback `host:port` the server binds (default `127.0.0.1:8317` when the block is present without `listen`) |
 | `token` | string: the management token, write-only (see below) |
+| `ui_dir` | string: directory of static frontend files served instead of the embedded frontend (see below) |
+
+`ui_dir` (optional) names a directory of public static files
+(HTML/JS/CSS/assets) that `webui serve` serves WITHOUT auth in
+place of the embedded single-file frontend. A relative value
+resolves against the directory holding `config.json`. When the
+key is absent, the embedded frontend is served byte-identical;
+when the key is present but broken (missing, not a directory,
+or without a regular `index.html`), `webui serve` fails closed
+(exit 2) instead of silently falling back to the embedded
+frontend. A missing file under a valid `ui_dir` falls back to
+the on-disk shell (SPA hash routing). Serving is GET-only, with
+no directory listing, no dotfiles, and symlink-aware
+containment re-checked per request: a path escaping the root
+through `..` or a symlink gets a fixed 404, and only regular
+files are served. `/api/v1` keeps precedence and its Bearer
+gate: an API path never reads a disk file. The `/status`
+`bundle_sha256` is the SHA-256 of the on-disk `index.html`
+while `ui_dir` is active, and the embedded hash only in
+fallback mode.
+
+`ui_dir` must never overlap the config directory — equal to,
+inside, or an ancestor of it — and must not contain any
+profile's cookies file: the static shell is unauthenticated,
+so an overlapping directory would serve `config.json` and
+cookies to anyone on loopback with no token. The rule is
+enforced at parse time (lexical), at serve time (symlink
+resolved), and at API save time for new or changed values
+(an authenticated user must not be able to `PUT /config` a
+`ui_dir` over the config tree and then fetch the secrets
+unauthenticated). `ui_dir` is not a secret and is shown
+verbatim in redacted config views. The on-disk directory is
+trusted input: populate it only from verified module installs
+or explicit updates, never point it at a user-writable or
+shared directory. A check-then-open TOCTOU residual remains
+between the per-request containment check and the file open
+(the open is followed by an fstat re-check, so a non-regular
+file is never served, but a symlink swapped in the same
+window could redirect one read).
 
 Loopback-only is enforced at parse time: `listen` must be a
 bare `host:port` with a loopback host (`127.0.0.0/8`, `::1`, or

@@ -5,6 +5,7 @@
 package profile
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -160,5 +161,110 @@ func TestWebUIBlockRoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded2), `"token": "MARKER-WEBUI-TOKEN"`) {
 		t.Fatalf("raw webui block not preserved verbatim:\n%s", encoded2)
+	}
+}
+
+func TestWebUIUIDirParse(t *testing.T) {
+	base := t.TempDir() // the config directory for these parses
+	outside := t.TempDir()
+	cases := []struct {
+		name  string
+		value string
+		valid bool
+	}{
+		{"absolute outside", filepath.Join(outside, "ui"), true},
+		{"relative outside", "../ui", true},
+		{"sibling of config dir", filepath.Join(filepath.Dir(base), "other"), true},
+		{"relative inside", "ui", false},
+		{"dot", ".", false},
+		{"dotdot", "..", false},
+		{"absolute equal", base, false},
+		{"absolute inside", filepath.Join(base, "MARKER-UIDIR"), false},
+		{"absolute ancestor", filepath.Dir(base), false},
+		{"empty", "", false},
+		{"whitespace", "   ", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := `{"profiles":{},"webui":{"ui_dir":` + quoteWebUIJSON(tc.value) + `}}`
+			cfg, err := ParseSingleConfig([]byte(doc), base)
+			if tc.valid {
+				if err != nil {
+					t.Fatalf("ui_dir %q: unexpected error: %v", tc.value, err)
+				}
+				if cfg.WebUI == nil || cfg.WebUI.UIDir != strings.TrimSpace(tc.value) {
+					t.Fatalf("UIDir = %+v, want %q", cfg.WebUI, strings.TrimSpace(tc.value))
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ui_dir %q: accepted, want rejection", tc.value)
+			}
+			if strings.Contains(err.Error(), "MARKER-UIDIR") {
+				t.Fatalf("ui_dir error echoes the value: %v", err)
+			}
+		})
+	}
+	// Non-string ui_dir is rejected.
+	if _, err := ParseSingleConfig([]byte(`{"profiles":{},"webui":{"ui_dir":123}}`), base); err == nil {
+		t.Error("non-string ui_dir accepted, want rejection")
+	}
+	// A ui_dir value with surrounding whitespace is trimmed and
+	// still checked after trimming.
+	doc := `{"profiles":{},"webui":{"ui_dir":"  ` + filepath.Join(base, "ui") + `  "}}`
+	if _, err := ParseSingleConfig([]byte(doc), base); err == nil {
+		t.Error("whitespace-padded inside ui_dir accepted, want rejection")
+	}
+}
+
+func TestWebUIUIDirRoundTrip(t *testing.T) {
+	// A hand-built config renders ui_dir and re-parses
+	// identically (the re-parse base is outside the ui_dir).
+	cfg := &SingleConfig{
+		Profiles: map[string]*Profile{},
+		WebUI:    &WebUIConfig{Listen: "127.0.0.1:9000", Token: "MARKER-WEBUI-TOKEN", UIDir: "/srv/MARKER-UIDIR"},
+	}
+	encoded, err := encodeSingleConfig(cfg)
+	if err != nil {
+		t.Fatalf("encodeSingleConfig: %v", err)
+	}
+	back, err := ParseSingleConfig(encoded, t.TempDir())
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	if back.WebUI == nil || back.WebUI.UIDir != "/srv/MARKER-UIDIR" {
+		t.Fatalf("round-trip UIDir = %+v", back.WebUI)
+	}
+	// Raw preservation: a parsed block with ui_dir re-renders
+	// verbatim.
+	cfg2 := parseWebUITestConfig(t, "{\n  \"profiles\": {},\n  \"webui\": {\"token\": \"MARKER-WEBUI-TOKEN\", \"ui_dir\": \"/srv/MARKER-UIDIR\"}\n}")
+	encoded2, err := encodeSingleConfig(cfg2)
+	if err != nil {
+		t.Fatalf("encodeSingleConfig: %v", err)
+	}
+	if !strings.Contains(string(encoded2), `"ui_dir": "/srv/MARKER-UIDIR"`) {
+		t.Fatalf("raw webui block lost ui_dir:\n%s", encoded2)
+	}
+}
+
+func TestDirOverlaps(t *testing.T) {
+	cases := []struct {
+		dir, candidate string
+		overlap        bool
+	}{
+		{"/a/b", "/a/b", true},       // equal
+		{"/a/b", "/a/b/c", true},     // inside
+		{"/a/b", "/a", true},         // ancestor
+		{"/a/b", "/", true},          // ancestor (root)
+		{"/a/b", "/a/c", false},      // sibling subtree
+		{"/a/b", "/a/bc", false},     // prefix lookalike, not inside
+		{"/a/b", "/c/d", false},      // unrelated
+		{"/a/b/", "/a/b/c/", true},   // trailing slashes cleaned
+		{"/a/b", "/a/b/../c", false}, // .. resolves out (lexical)
+	}
+	for _, tc := range cases {
+		if got := DirOverlaps(tc.dir, tc.candidate); got != tc.overlap {
+			t.Errorf("DirOverlaps(%q, %q) = %v, want %v", tc.dir, tc.candidate, got, tc.overlap)
+		}
 	}
 }

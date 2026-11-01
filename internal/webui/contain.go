@@ -127,6 +127,46 @@ func rejectNewCookiesFile(configDir, value string) error {
 	return nil
 }
 
+// webUIUIDirValue extracts the `webui.ui_dir` string from a
+// decoded config document. A missing block, a missing key, or a
+// non-string value is absent from the result (the config parser
+// rejects non-string values separately).
+func webUIUIDirValue(doc any) (string, bool) {
+	root, ok := doc.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	block, ok := root["webui"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	v, ok := block["ui_dir"].(string)
+	if !ok {
+		return "", false
+	}
+	return v, true
+}
+
+// rejectNewUIDir enforces the B-1 containment rule for a
+// `ui_dir` value the web UI is about to introduce: the
+// symlink-resolved root must not overlap the config directory
+// in either direction, and must not contain any cookies file
+// named in the document. The error messages name the rule
+// only, never the value.
+func rejectNewUIDir(configDir, value string, cookiesFiles map[string]string) error {
+	root := resolveAgainst(configDir, value)
+	base := resolvePathBestEffort(configDir)
+	if pathWithin(root, base) || pathWithin(base, root) {
+		return errValidation("webui.ui_dir must not overlap the config directory")
+	}
+	for _, cookiesFile := range cookiesFiles {
+		if pathWithin(resolveAgainst(configDir, cookiesFile), root) {
+			return errValidation("webui.ui_dir must not contain a cookies file")
+		}
+	}
+	return nil
+}
+
 // profileCookiesFiles extracts each profile's cookies_file
 // string from a decoded config document. Non-string or missing
 // values are absent from the result (the config parser rejects

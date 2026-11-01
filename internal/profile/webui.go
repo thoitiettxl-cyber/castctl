@@ -6,10 +6,10 @@ package profile
 
 // The top-level `webui` config block and its resolution.
 //
-// Schema (exactly two keys; unknown keys are rejected, like every
+// Schema (exactly three keys; unknown keys are rejected, like every
 // other strict section in this file):
 //
-//	{"listen": string, "token": string}
+//	{"listen": string, "token": string, "ui_dir": string}
 //
 // The block is optional. A nil *WebUIConfig on SingleConfig means
 // the block was absent from the file, and the web UI is off: `webui
@@ -39,13 +39,35 @@ package profile
 //     command layer, which owns environment reads; see
 //     internal/commands/webui.go).
 //
+//   - `ui_dir` (optional): a directory of static frontend files
+//     served WITHOUT auth by `webui serve` instead of the embedded
+//     frontend (see docs/config.md). A relative value resolves
+//     against the config directory. It is NOT a secret: the
+//     directory is public static content, and the value is never
+//     redacted. It must never overlap the config directory (or
+//     contain a cookies file): the static shell is unauthenticated,
+//     so an overlapping `ui_dir` would serve config.json and
+//     cookies to anyone on loopback with no token. The overlap
+//     rule is enforced lexically at parse time (see
+//     parseWebUIBlock), canonically at serve time (the command
+//     layer resolves symlinks before serving), and again at API
+//     save time (internal/webui saveGuarded, which also checks
+//     cookies files). A present-but-broken `ui_dir` (missing,
+//     not a directory, no regular index.html) fails `webui
+//     serve` closed (exit 2) at the command layer; only an
+//     absent key falls back to the embedded frontend.
+//
 // Resolution is pure (ResolveLogSettings / ResolveProfileDNS are
 // the pattern): it reads only its input, never the filesystem,
 // never mutates. The block references no other block, so there is
-// no cross-reference validation beyond the listen rule.
+// no cross-reference validation beyond the listen rule and the
+// lexical `ui_dir` overlap rule (which needs no filesystem
+// access: symlink escapes are caught where the path is
+// canonicalised, at serve time).
 
 import (
 	"net"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -60,6 +82,7 @@ const DefaultWebUIListen = "127.0.0.1:8317"
 type WebUIConfig struct {
 	Listen string
 	Token  string
+	UIDir  string
 }
 
 // RawWebUI returns a copy of the raw JSON captured for the `webui`
@@ -75,11 +98,16 @@ func (c *SingleConfig) RawWebUI() []byte {
 
 // parseWebUIBlock parses one decoded `webui` value into a
 // WebUIConfig. Wrong shapes, wrong types, unknown keys, an empty
-// token, and a non-loopback listen address are all config errors
-// (exit 2). A supplied value is never echoed in an error: the
-// token in particular must never appear in any error string, and
-// the listen value is named only by its rule, never verbatim.
-func parseWebUIBlock(v any) (*WebUIConfig, error) {
+// token, a non-loopback listen address, and a `ui_dir` overlapping
+// the config directory are all config errors (exit 2). A supplied
+// value is never echoed in an error: the token in particular must
+// never appear in any error string, and the listen and `ui_dir`
+// values are named only by their rule, never verbatim. The
+// overlap check here is lexical only (Clean + Join, no filesystem
+// access, keeping resolution pure): a `ui_dir` that reaches the
+// config tree only through a symlink is caught at serve time,
+// where the path is canonicalised before any file is served.
+func parseWebUIBlock(v any, baseDir string) (*WebUIConfig, error) {
 	obj, ok := v.(*orderedObject)
 	if !ok {
 		return nil, newConfigError(`"webui" must be an object`)
@@ -109,8 +137,26 @@ func parseWebUIBlock(v any) (*WebUIConfig, error) {
 				return nil, newConfigError(`"webui.token" must not be empty`)
 			}
 			cfg.Token = s
+		case "ui_dir":
+			s, ok := val.(string)
+			if !ok {
+				return nil, newConfigError(`"webui.ui_dir" must be a string`)
+			}
+			if strings.TrimSpace(s) == "" {
+				return nil, newConfigError(`"webui.ui_dir" must not be empty`)
+			}
+			cfg.UIDir = strings.TrimSpace(s)
 		default:
 			return nil, newConfigErrorf("unknown webui config key %q", k)
+		}
+	}
+	if cfg.UIDir != "" && baseDir != "" {
+		resolved := cfg.UIDir
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(baseDir, resolved)
+		}
+		if DirOverlaps(baseDir, resolved) {
+			return nil, newConfigError(`"webui.ui_dir" must not overlap the config directory`)
 		}
 	}
 	return cfg, nil
@@ -162,6 +208,34 @@ type webUIListenError struct{ rule string }
 
 func (e *webUIListenError) Error() string { return e.rule }
 
+// DirOverlaps reports whether candidate is equal to, inside, or
+// an ancestor of dir. Both paths are cleaned lexically; no
+// filesystem access happens, so symlink-resolved forms must be
+// compared by callers that canonicalise first (the command
+// layer's resolveWebUIUIDir does). A sibling subtree of an
+// ancestor (e.g. dir=/a/b, candidate=/a/c) does NOT overlap:
+// dir is not inside candidate. An unresolvable Rel fails
+// closed (overlap).
+func DirOverlaps(dir, candidate string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(candidate))
+	if err != nil {
+		return true
+	}
+	if rel == "." {
+		return true
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if parts[0] != ".." {
+		return true
+	}
+	for _, part := range parts {
+		if part != ".." {
+			return false
+		}
+	}
+	return true
+}
+
 // EffectiveListen returns the listen address a present `webui`
 // block resolves to: the block's `listen` when set, otherwise
 // DefaultWebUIListen. A nil config means the block was absent
@@ -177,7 +251,12 @@ func EffectiveListen(cfg *WebUIConfig) string {
 // block is absent (feature off) or there is no single config. It
 // never reads the filesystem and never mutates its input. The
 // listen rule is re-checked here so callers that receive a
-// hand-built SingleConfig get the same refusal parse gives.
+// hand-built SingleConfig get the same refusal parse gives. The
+// `ui_dir` overlap rule is NOT re-checked here: it needs the
+// config directory, which this signature does not carry. Parse
+// (ParseSingleConfig) enforces it lexically, and the command
+// layer enforces it canonically (resolveWebUIUIDir) before any
+// file is served, so no serve path bypasses it.
 func ResolveWebUI(single *SingleConfig) (*WebUIConfig, error) {
 	if single == nil || single.WebUI == nil {
 		return nil, nil
@@ -206,6 +285,9 @@ func encodeWebUIBlock(cfg *WebUIConfig) (*orderedObject, error) {
 	}
 	if cfg.Token != "" {
 		entry.set("token", cfg.Token)
+	}
+	if strings.TrimSpace(cfg.UIDir) != "" {
+		entry.set("ui_dir", strings.TrimSpace(cfg.UIDir))
 	}
 	return entry, nil
 }

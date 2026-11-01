@@ -350,7 +350,7 @@ func ParseSingleConfig(data []byte, baseDir string) (*SingleConfig, error) {
 		if err != nil {
 			return nil, err
 		}
-		wCfg, err := parseWebUIBlock(v)
+		wCfg, err := parseWebUIBlock(v, baseDir)
 		if err != nil {
 			return nil, err
 		}
