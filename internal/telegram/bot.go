@@ -383,6 +383,14 @@ func New(s Settings) (*Bot, error) {
 	}
 	b.dispatch = newDispatcher(b.processUpdate, b.logPanic)
 	b.dispatch.onOffset = s.OnOffset
+	// Surface dropped updates: a queue-full or
+	// shutdown-abandoned update's offset is already
+	// persisted (offset-before-handle), so it is never
+	// replayed — this warn log is the only observability
+	// for the loss.
+	b.dispatch.onDropped = func(total int64) {
+		b.logger.Warn("telegram dispatcher dropped update(s)", "dropped_total", total)
+	}
 	// Seed the in-memory maximum from the persisted offset so
 	// MaxHandledID never regresses across a restart and a
 	// replayed id at or below the offset reports nothing new.

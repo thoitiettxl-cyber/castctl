@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/go-telegram/bot/models"
 
@@ -805,13 +806,13 @@ type questionOption struct {
 
 // questionOptions derives the question buttons for a
 // needs_input reply (tgbot.py:200-220, question_options), in
-// priority order: (1) the first unanswered widget's options in
-// the last reply, at most 10; (2) a numbered/bulleted list
-// (2-8 items) parsed from the reply tail; (3) the generic
-// Yes/No/Go-ahead set.
+// priority order: (1) the first widget with non-empty options
+// across ALL widgets in the last reply, at most 10; (2) a
+// numbered/bulleted list (2-8 items) parsed from the reply
+// tail; (3) the generic Yes/No/Go-ahead set.
 func questionOptions(last wait.Reply) []questionOption {
-	if len(last.Widgets) > 0 {
-		if opts := widgetOptions(last.Widgets[0]); len(opts) > 0 {
+	for _, w := range last.Widgets {
+		if opts := widgetOptions(w); len(opts) > 0 {
 			return opts
 		}
 	}
@@ -825,9 +826,13 @@ func questionOptions(last wait.Reply) []questionOption {
 	}
 }
 
-// widgetOptions reads one widget's options: a list of strings or
-// of dicts carrying label/text/title/value. At most 10 options,
-// as in Python.
+// widgetOptions reads one widget's options: a list of strings,
+// dicts, or other scalars. Dicts use the Python key orders
+// (label: label/text/title/value; value: value/label/text/
+// title); other scalars stringify as Python str(o) does; nil
+// and composites carry no label and are skipped. Options with
+// an empty label are filtered before the 10-cap, as in
+// Python. At most 10 options.
 func widgetOptions(w wait.Widget) []questionOption {
 	list, ok := w.Options.([]any)
 	if !ok {
@@ -838,20 +843,64 @@ func widgetOptions(w wait.Widget) []questionOption {
 		if len(opts) >= 10 {
 			break
 		}
-		switch v := raw.(type) {
-		case string:
-			if v != "" {
-				opts = append(opts, questionOption{label: v, value: v})
-			}
-		case map[string]any:
-			label := firstWidgetString(v, "label", "text", "title", "value")
-			value := firstWidgetString(v, "value", "label", "text", "title")
-			if label != "" {
-				opts = append(opts, questionOption{label: label, value: value})
-			}
+		label := optionLabel(raw)
+		if label == "" {
+			continue
 		}
+		opts = append(opts, questionOption{label: label, value: optionValue(raw)})
 	}
 	return opts
+}
+
+// optionLabel mirrors Python option_label: a dict's first
+// non-empty label/text/title/value, a plain string itself, or
+// the string form of another scalar (number, bool). Nil and
+// composite values have no label.
+func optionLabel(o any) string {
+	switch v := o.(type) {
+	case string:
+		return v
+	case map[string]any:
+		return firstWidgetString(v, "label", "text", "title", "value")
+	case nil:
+		return ""
+	default:
+		if s, ok := optionScalarString(v); ok {
+			return s
+		}
+		return ""
+	}
+}
+
+// optionValue mirrors Python option_value: a dict's first
+// non-empty value/label/text/title, a plain string itself, or
+// the string form of another scalar.
+func optionValue(o any) string {
+	switch v := o.(type) {
+	case string:
+		return v
+	case map[string]any:
+		return firstWidgetString(v, "value", "label", "text", "title")
+	case nil:
+		return ""
+	default:
+		if s, ok := optionScalarString(v); ok {
+			return s
+		}
+		return ""
+	}
+}
+
+// optionScalarString stringifies a JSON scalar as Python str()
+// would for option purposes. Slices, maps, and other shapes
+// are not scalars here.
+func optionScalarString(v any) (string, bool) {
+	switch v.(type) {
+	case float64, float32, int, int64, int32, uint64, bool:
+		return fmt.Sprint(v), true
+	default:
+		return "", false
+	}
 }
 
 func firstWidgetString(m map[string]any, keys ...string) string {
@@ -863,83 +912,103 @@ func firstWidgetString(m map[string]any, keys ...string) string {
 	return ""
 }
 
-// listOptions parses a trailing list block from reply text: the
-// last 12 lines, an optional closing question line, then 2-8
-// consecutive list items (tgbot.py:200-220, _OPT_RE). Items are
-// 1-80 chars; the marker prefixes are (1. / 1) / (a. / - / • / *.
+// listOptions parses a trailing list block from reply text,
+// faithfully to tgbot.py:200-220: the last 12 non-blank lines,
+// scanned forward; an option line appends, a non-option line
+// after options resets the block unless it ends with "?"
+// (a closing question line is tolerated mid-block); 2-8
+// items or the generic fallback. More than 8 items is not a
+// list at all: the fallback applies, the first 8 are not
+// kept.
 func listOptions(text string) []questionOption {
-	lines := strings.Split(text, "\n")
-	if len(lines) > 12 {
-		lines = lines[len(lines)-12:]
-	}
-	// Drop trailing blank lines, then one optional closing
-	// question line.
-	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
-		lines = lines[:len(lines)-1]
-	}
-	if len(lines) > 0 {
-		last := strings.TrimSpace(lines[len(lines)-1])
-		if strings.HasSuffix(last, "?") || strings.HasSuffix(last, "？") {
-			lines = lines[:len(lines)-1]
+	var tail []string
+	for _, ln := range strings.Split(text, "\n") {
+		if strings.TrimSpace(ln) != "" {
+			tail = append(tail, ln)
 		}
 	}
-	var opts []questionOption
-	for i := len(lines) - 1; i >= 0; i-- {
-		item, ok := parseListItem(lines[i])
-		if !ok {
-			break
-		}
-		opts = append([]questionOption{{label: item, value: item}}, opts...)
-		if len(opts) == 8 {
-			break
+	if len(tail) > 12 {
+		tail = tail[len(tail)-12:]
+	}
+	var found []string
+	for _, ln := range tail {
+		if item, ok := parseListItem(ln); ok {
+			found = append(found, item)
+		} else if len(found) > 0 && !strings.HasSuffix(strings.TrimSpace(ln), "?") {
+			found = nil
 		}
 	}
-	if len(opts) < 2 {
+	if len(found) < 2 || len(found) > 8 {
 		return nil
+	}
+	opts := make([]questionOption, 0, len(found))
+	for _, f := range found {
+		opts = append(opts, questionOption{label: f, value: f})
 	}
 	return opts
 }
 
-// parseListItem extracts a list item's text, or reports false
-// when the line is not a list item.
+// parseListItem extracts a list item's text per Python _OPT_RE
+// (tgbot.py:198): optional leading whitespace, then a marker —
+// 1-2 digits or one A-H letter, optionally "(" -prefixed,
+// followed by "." or ")"; or a -, •, * bullet — then REQUIRED
+// whitespace, then 1-80 runes. Markup chars [*_`] are stripped
+// from the item, which is then re-trimmed.
 func parseListItem(line string) (string, bool) {
-	s := strings.TrimSpace(line)
-	if s == "" {
+	runes := []rune(line)
+	i := 0
+	for i < len(runes) && unicode.IsSpace(runes[i]) {
+		i++
+	}
+	if i >= len(runes) {
 		return "", false
 	}
-	runes := []rune(s)
-	var rest string
-	switch {
-	case runes[0] == '(':
-		// "(1." or "(a." : '(' + alnum run + '.' or ')'.
-		j := 1
-		for j < len(runes) && isListMarkerRune(runes[j]) {
+	rest := runes[i:]
+	// Bullet alternative: no paren, no terminator.
+	if rest[0] == '-' || rest[0] == '•' || rest[0] == '*' {
+		return parseListItemRest(rest[1:])
+	}
+	j := 0
+	if rest[0] == '(' {
+		j = 1
+	}
+	start := j
+	if j < len(rest) && rest[j] >= '0' && rest[j] <= '9' {
+		for j < len(rest) && j-start < 2 && rest[j] >= '0' && rest[j] <= '9' {
 			j++
 		}
-		if j >= len(runes) || runes[j] != '.' && runes[j] != ')' {
-			return "", false
-		}
-		rest = strings.TrimSpace(string(runes[j+1:]))
-	case isListMarkerRune(runes[0]):
-		j := 0
-		for j < len(runes) && isListMarkerRune(runes[j]) {
-			j++
-		}
-		if j >= len(runes) || runes[j] != '.' && runes[j] != ')' {
-			return "", false
-		}
-		rest = strings.TrimSpace(string(runes[j+1:]))
-	case runes[0] == '-' || runes[0] == '•' || runes[0] == '*':
-		rest = strings.TrimSpace(string(runes[1:]))
-	default:
+	} else if j < len(rest) && ((rest[j] >= 'A' && rest[j] <= 'H') || (rest[j] >= 'a' && rest[j] <= 'h')) {
+		j++
+	} else {
 		return "", false
 	}
-	if rest == "" || len([]rune(rest)) > 80 {
+	if j >= len(rest) || (rest[j] != '.' && rest[j] != ')') {
 		return "", false
 	}
-	return rest, true
+	return parseListItemRest(rest[j+1:])
 }
 
-func isListMarkerRune(c rune) bool {
-	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+// parseListItemRest validates the item text after a marker:
+// required whitespace, then 1-80 runes after stripping
+// [*_`] and trimming.
+func parseListItemRest(after []rune) (string, bool) {
+	if len(after) == 0 || !unicode.IsSpace(after[0]) {
+		return "", false
+	}
+	k := 0
+	for k < len(after) && unicode.IsSpace(after[k]) {
+		k++
+	}
+	item := strings.TrimSpace(string(after[k:]))
+	item = strings.Map(func(r rune) rune {
+		if r == '*' || r == '_' || r == '`' {
+			return -1
+		}
+		return r
+	}, item)
+	item = strings.TrimSpace(item)
+	if n := len([]rune(item)); n < 1 || n > 80 {
+		return "", false
+	}
+	return item, true
 }

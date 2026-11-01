@@ -169,6 +169,48 @@ func TestDispatcherQueueFullDoesNotBlockOtherChat(t *testing.T) {
 	d.shutdown()
 }
 
+// TestDispatcherOnDroppedHook surfaces queue-full drops: the
+// hook fires with the running total, so a drop is observable
+// instead of silently counted. (The fate of the dropped
+// update — offset already persisted, never replayed — is the
+// dispatcher's documented at-most-once semantics.)
+func TestDispatcherOnDroppedHook(t *testing.T) {
+	t.Parallel()
+	gate := make(chan struct{})
+	d := newDispatcher(func(_ context.Context, upd *models.Update) {
+		if upd.Message != nil && upd.Message.Chat.ID == 500 {
+			<-gate
+		}
+	}, func(r any) {})
+	d.idleTimeout = time.Minute
+	var hookMu sync.Mutex
+	var hookTotals []int64
+	d.onDropped = func(total int64) {
+		hookMu.Lock()
+		hookTotals = append(hookTotals, total)
+		hookMu.Unlock()
+	}
+	ctx := context.Background()
+	d.enqueue(ctx, dispatchMessage(1, 500))
+	for i := int64(2); i <= 65; i++ {
+		d.enqueue(ctx, dispatchMessage(i, 500))
+	}
+	d.enqueue(ctx, dispatchMessage(66, 500))
+	waitFor(t, "drop hook fired", func() bool {
+		hookMu.Lock()
+		defer hookMu.Unlock()
+		return len(hookTotals) >= 1
+	})
+	hookMu.Lock()
+	total := hookTotals[len(hookTotals)-1]
+	hookMu.Unlock()
+	if total < 1 || total != d.droppedCount() {
+		t.Errorf("hook total = %d, droppedCount = %d; want the hook to report the running total", total, d.droppedCount())
+	}
+	close(gate)
+	d.shutdown()
+}
+
 func TestDispatcherShutdownDeadline(t *testing.T) {
 	t.Parallel()
 	gate := make(chan struct{})

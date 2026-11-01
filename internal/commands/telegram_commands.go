@@ -282,11 +282,7 @@ func marshalTruncated(v any, n int) string {
 	if err != nil {
 		return ""
 	}
-	s := string(b)
-	if len(s) > n {
-		s = s[:n]
-	}
-	return s
+	return truncateRunes(string(b), n)
 }
 
 // telegramTaskState returns the first scoped task.status the
@@ -499,10 +495,7 @@ func (h *telegramCmdHandler) newChat(ctx context.Context, chatID int64, arg stri
 	}
 	if sid == "" {
 		b, _ := json.Marshal(result)
-		s := string(b)
-		if len(s) > 300 {
-			s = s[:300]
-		}
+		s := truncateRunes(string(b), 300)
 		_, err := h.bot.Send(ctx, chatID, "⚠️ Muse returned no session id: <code>"+telegram.EscapeText(s)+"</code>", telegram.SendOptions{})
 		return err
 	}
@@ -612,9 +605,7 @@ func (h *telegramCmdHandler) unread(ctx context.Context, chatID int64) error {
 		return err
 	}
 	s := strings.TrimRight(buf.String(), "\n")
-	if len(s) > 3500 {
-		s = s[:3500]
-	}
+	s = truncateRunes(s, 3500)
 	_, err = h.bot.Send(ctx, chatID, "<pre>"+telegram.EscapeText(s)+"</pre>", telegram.SendOptions{})
 	return err
 }

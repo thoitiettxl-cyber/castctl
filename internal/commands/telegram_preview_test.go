@@ -8,12 +8,46 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/wait"
 )
 
 func previewEvent(name string, payload map[string]any) wait.Event {
 	return wait.Event{"event": name, "payload": payload}
+}
+
+// TestPreviewEventNameTypeKey: records carrying only a
+// "type" key name their event; "event"/"event_name" keep
+// precedence over "type".
+func TestPreviewEventNameTypeKey(t *testing.T) {
+	t.Parallel()
+	if got := previewEventName(wait.Event{"type": "delta.tool_start"}); got != "delta.tool_start" {
+		t.Errorf("type-only event name = %q", got)
+	}
+	if got := previewEventName(wait.Event{"event": "task.status", "type": "delta.tool_start"}); got != "task.status" {
+		t.Errorf("event+type name = %q; want event to win", got)
+	}
+	if got := previewEventName(wait.Event{"event_name": "agent.status", "type": "delta.tool_start"}); got != "agent.status" {
+		t.Errorf("event_name+type name = %q; want event_name to win", got)
+	}
+	if got := previewEventName(wait.Event{"payload": map[string]any{}}); got != "" {
+		t.Errorf("keyless event name = %q; want empty", got)
+	}
+}
+
+// TestTruncateRunesKeepsUTF8: truncation counts runes, never
+// splits a multi-byte character (the byte-slice truncation in
+// /status, /new, and /unread did).
+func TestTruncateRunesKeepsUTF8(t *testing.T) {
+	t.Parallel()
+	s := "🦆🦆🦆🦆🦆"
+	if got := truncateRunes(s, 3); got != "🦆🦆🦆" {
+		t.Errorf("truncateRunes(5 ducks, 3) = %q", got)
+	}
+	if got := marshalTruncated(map[string]any{"x": s}, 8); !utf8.ValidString(got) || utf8.RuneCountInString(got) != 8 {
+		t.Errorf("marshalTruncated = %q; want 8 valid runes", got)
+	}
 }
 
 func TestStreamPreviewPartKeyingMixedIDs(t *testing.T) {

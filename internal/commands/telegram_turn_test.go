@@ -1192,6 +1192,31 @@ func TestQuestionOptionsWidget(t *testing.T) {
 	if len(opts) != 10 {
 		t.Fatalf("widget options = %d, want 10", len(opts))
 	}
+	// All widgets are scanned: an empty first widget does not
+	// hide the second widget's options.
+	reply = wait.Reply{Widgets: []wait.Widget{
+		{Options: []any{}},
+		{Options: []any{"Second"}},
+	}}
+	opts = questionOptions(reply)
+	if len(opts) != 1 || opts[0].value != "Second" {
+		t.Fatalf("second-widget options = %+v, want [Second]", opts)
+	}
+	// Scalar options stringify; dict key orders fall through
+	// empty fields (label→text→title→value,
+	// value→label→text→title).
+	reply = wait.Reply{Widgets: []wait.Widget{{Options: []any{
+		float64(42),
+		true,
+		map[string]any{"label": "", "text": "T", "value": "v"},
+		map[string]any{"value": "only"},
+	}}}}
+	opts = questionOptions(reply)
+	if len(opts) != 4 || opts[0].value != "42" || opts[1].value != "true" ||
+		opts[2].label != "T" || opts[2].value != "v" ||
+		opts[3].label != "only" || opts[3].value != "only" {
+		t.Fatalf("scalar/dict options = %+v", opts)
+	}
 }
 
 func TestQuestionOptionsListAndGeneric(t *testing.T) {
@@ -1216,6 +1241,26 @@ func TestQuestionOptionsListAndGeneric(t *testing.T) {
 	if len(opts) != 3 || opts[2].value != "Go ahead" {
 		t.Fatalf("generic options = %+v", opts)
 	}
+	// Reset rule: a non-option line after options clears the
+	// block, unless it ends with "?".
+	opts = questionOptions(wait.Reply{Text: "1. A\n2. B\nNot a list\n3. C\n4. D"})
+	if len(opts) != 2 || opts[0].value != "C" || opts[1].value != "D" {
+		t.Fatalf("reset options = %+v, want [C D]", opts)
+	}
+	opts = questionOptions(wait.Reply{Text: "1. A\n2. B\nWhich?\n3. C"})
+	if len(opts) != 3 || opts[2].value != "C" {
+		t.Fatalf("question-tolerated options = %+v, want [A B C]", opts)
+	}
+	// More than 8 items is not a list: generic fallback, not
+	// the first 8.
+	var nine strings.Builder
+	for i := 1; i <= 9; i++ {
+		fmt.Fprintf(&nine, "%d. Item%d\n", i, i)
+	}
+	opts = questionOptions(wait.Reply{Text: nine.String()})
+	if len(opts) != 3 || opts[0].value != "Yes" {
+		t.Fatalf("nine-item options = %+v, want generic fallback", opts)
+	}
 }
 
 func TestParseListItem(t *testing.T) {
@@ -1234,7 +1279,17 @@ func TestParseListItem(t *testing.T) {
 		{"Hello world", "", false},
 		{"-", "", false},
 		{"1. ", "", false},
-		{"1.5 things", "5 things", true},
+		{"1.5 things", "", false},
+		{"10. Ten", "Ten", true},
+		{"123. Too many digits", "", false},
+		{"I. Beyond H", "", false},
+		{"H. Last letter", "Last letter", true},
+		{"(H) Paren letter", "Paren letter", true},
+		{"-nospace", "", false},
+		{"1.Nospace", "", false},
+		{"•nospace", "", false},
+		{"1. *a* _b_ `c`", "a b c", true},
+		{"  2.  Spaced  ", "Spaced", true},
 	}
 	for _, tc := range cases {
 		got, ok := parseListItem(tc.line)

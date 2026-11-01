@@ -96,8 +96,20 @@ type dispatcher struct {
 	// offset-before-handle order. It must be fast and must
 	// not call back into the dispatcher; a slow hook stalls
 	// polling for every chat. The bot sets it to persist the
-	// offset to the state file.
+	// offset to the state file: one local fsync+rename save
+	// per new-max id, under the lock — the acknowledged
+	// bound for that hook (no async move in step 5a).
 	onOffset func(int64)
+
+	// onDropped, when non-nil, is called with the running
+	// dropped total whenever updates are dropped (a full
+	// queue in enqueue, under d.mu, or an abandoned shutdown
+	// drain). Same contract as onOffset: fast, no callbacks
+	// into the dispatcher. The bot sets it to log the loss:
+	// a dropped update's offset is already persisted, so it
+	// is never replayed — the log is the only observability
+	// for the loss.
+	onDropped func(total int64)
 }
 
 func newDispatcher(process func(context.Context, *models.Update), logPanic func(r any)) *dispatcher {
@@ -198,7 +210,7 @@ func (d *dispatcher) enqueue(ctx context.Context, upd *models.Update) {
 	select {
 	case q.ch <- dispatchItem{ctx: ctx, upd: upd}:
 	default:
-		d.dropped_.Add(1)
+		d.countDropped(1)
 	}
 	// Offset-before-handle: a new maximum is reported before
 	// the worker handles the update (and whether or not the
@@ -278,13 +290,29 @@ func (d *dispatcher) shutdown() {
 		// workers discard those same items once they
 		// observe abandonment, without recounting.
 		d.abandoned.Store(true)
+		var buffered int64
 		for _, q := range queues {
-			d.dropped_.Add(int64(len(q.ch)))
+			buffered += int64(len(q.ch))
+		}
+		if buffered > 0 {
+			d.countDropped(buffered)
 		}
 	}
 }
 
 func (d *dispatcher) maxSeen() int64 { return d.maxSeen_.Load() }
+
+// countDropped adds n to the dropped total and reports the
+// new total to onDropped. In enqueue the caller holds d.mu
+// (the onDropped contract: fast, no dispatcher callbacks);
+// in shutdown it runs after the drain deadline with no lock
+// held.
+func (d *dispatcher) countDropped(n int64) {
+	total := d.dropped_.Add(n)
+	if d.onDropped != nil {
+		d.onDropped(total)
+	}
+}
 
 // droppedCount reports updates dropped by a full queue or by
 // an abandoned shutdown drain.
