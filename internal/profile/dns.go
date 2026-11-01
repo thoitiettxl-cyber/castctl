@@ -67,11 +67,17 @@ import (
 // Scope exception, exactly one: a DEDICATED "local" server IS
 // synthesised by ensureLocalBootstrapServer below, but ONLY as
 // the default domain_resolver target for outbound server
-// addresses (see ApplyDomainResolverDefault). It is never the
-// final server, never rule-targeted, never the default
-// transport, and never used for target lookups unless the user
-// explicitly routes a lookup there. The two "local" statements
-// live in these two scopes; docs/config.md cross-links them.
+// addresses (see ApplyDomainResolverDefault). Synthesis itself
+// never makes it the final server, never adds a rule targeting
+// it, never installs it as the default transport, and never
+// routes target lookups through it. Explicit routing to a
+// clean user-defined "local" server is honoured; routing to
+// the synthesised server is refused: a "final" or rule naming
+// "local" with no user-defined clean "local" server, and a dns
+// block with no servers at all, both fail closed at
+// construction (see ensureLocalBootstrapServer). The two
+// "local" statements live in these two scopes;
+// docs/config.md cross-links them.
 //
 // Gate-2 note (measured, internal/dns/gate2_test.go): sing-box
 // rejects a detour to an EMPTY direct outbound at transport Start
@@ -259,7 +265,16 @@ func ResolveProfileDNS(prof *Profile, single *SingleConfig) (*ResolvedDNS, error
 //     TransportManager default (only the final server's
 //     transport is). The synthesis is runtime-only: opts is a
 //     fresh parse, and the caller's config value is never
-//     written back.
+//     written back. Two refusals guard the append, so the
+//     synthesised server can never become a target resolver:
+//     a block with no servers at all fails closed (otherwise
+//     the synthesised server would be the sole server and
+//     hence the default transport), and a "final" or rule
+//     naming "local" fails closed (otherwise the reference
+//     would materialise into a live target route). Both
+//     refusals are skipped when a clean user-defined "local"
+//     server is reused: routing to that server is the user's
+//     explicit choice.
 //   - A server tagged "local" that IS type "local" with no
 //     detour: reuse it as-is (the user defined their own
 //     bootstrap server; castctl must not shadow it).
@@ -289,6 +304,18 @@ func ensureLocalBootstrapServer(prof *Profile, opts *option.DNSOptions) (*option
 		}
 		return opts, nil
 	}
+	// No clean user-defined "local" server exists past this
+	// point, so the guards below apply: synthesis must never
+	// create a target resolver out of the bootstrap server.
+	if len(opts.Servers) == 0 {
+		return nil, newConfigErrorf("profile %q: dns block has no servers: refusing to synthesise the local bootstrap server as the only server", prof.Name)
+	}
+	if opts.Final == LocalBootstrapServerTag {
+		return nil, newConfigErrorf("profile %q: dns final %q names the reserved local bootstrap server tag with no user-defined local server: define a clean local server to route targets there, or name another server", prof.Name, LocalBootstrapServerTag)
+	}
+	if ruleRoutesToServer(opts.Rules, LocalBootstrapServerTag) {
+		return nil, newConfigErrorf("profile %q: dns rule routes to the reserved local bootstrap server tag %q with no user-defined local server: define a clean local server to route targets there, or name another server", prof.Name, LocalBootstrapServerTag)
+	}
 	parsed, err := parseDNS([]byte(`{"servers":[{"tag":"local","type":"local"}],"final":"local"}`))
 	if err != nil {
 		return nil, err
@@ -299,6 +326,31 @@ func ensureLocalBootstrapServer(prof *Profile, opts *option.DNSOptions) (*option
 	out := *opts
 	out.Servers = append(append([]option.DNSServerOptions{}, opts.Servers...), parsed.Servers[0])
 	return &out, nil
+}
+
+// ruleRoutesToServer reports whether any DNS rule routes lookups
+// to the given server tag, recursing through logical rules.
+// Both action forms that name a server are checked: the route
+// action (DNSRouteActionOptions.Server) and the evaluate action
+// (DNSEvaluateActionOptions.Server). Route-options, respond,
+// reject, and predefined actions name no server and never
+// match. The walk is deliberately conservative: a nested
+// rule's action is checked even where sing-box parsing zeroes
+// it, so no spelling of a reference to the tag can slip past
+// the synthesis guard in ensureLocalBootstrapServer.
+func ruleRoutesToServer(rules []option.DNSRule, tag string) bool {
+	for _, r := range rules {
+		if r.DefaultOptions.DNSRuleAction.RouteOptions.Server == tag ||
+			r.DefaultOptions.DNSRuleAction.EvaluateOptions.Server == tag ||
+			r.LogicalOptions.DNSRuleAction.RouteOptions.Server == tag ||
+			r.LogicalOptions.DNSRuleAction.EvaluateOptions.Server == tag {
+			return true
+		}
+		if ruleRoutesToServer(r.LogicalOptions.Rules, tag) {
+			return true
+		}
+	}
+	return false
 }
 
 // defaultDetourForProfile returns the detour tag the synthesised

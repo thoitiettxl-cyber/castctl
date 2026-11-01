@@ -87,6 +87,24 @@ func TestApplyDomainResolverDefault(t *testing.T) {
 			want:     local,
 		},
 		{
+			name:     "empty object resolver treated as unset",
+			raw:      `{"type":"http","tag":"p","server":"proxy.test","server_port":8080,"domain_resolver":{}}`,
+			localTag: local,
+			want:     local,
+		},
+		{
+			name:     "trailing-dot hostname gets local",
+			raw:      `{"type":"http","tag":"p","server":"proxy.test.","server_port":8080}`,
+			localTag: local,
+			want:     local,
+		},
+		{
+			name:     "uppercase hostname gets local",
+			raw:      `{"type":"http","tag":"p","server":"PROXY.TEST","server_port":8080}`,
+			localTag: local,
+			want:     local,
+		},
+		{
 			name:     "selector untouched",
 			raw:      `{"type":"selector","tag":"sel","outbounds":["a","b"]}`,
 			localTag: local,
@@ -102,6 +120,14 @@ func TestApplyDomainResolverDefault(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ob := mustParseOutboundForDefault(t, tc.raw)
+			// Snapshot the caller's resolver before the call:
+			// the default must be applied to a copy only, for
+			// every case (unset, empty, and explicit alike).
+			before := resolverOf(t, ob)
+			beforeServer := ""
+			if before != nil {
+				beforeServer = before.Server
+			}
 			got := ApplyDomainResolverDefault(ob, tc.localTag)
 			if tc.name == "selector untouched" && got.Options != ob.Options {
 				t.Fatalf("selector options were copied/replaced; want the input returned unchanged")
@@ -116,15 +142,16 @@ func TestApplyDomainResolverDefault(t *testing.T) {
 					t.Fatalf("DomainResolver = %+v, want server %q", res, tc.want)
 				}
 			}
-			// The caller's options must not be mutated: the
-			// default is applied to a copy only.
-			if orig := resolverOf(t, ob); orig != nil && tc.want == "" {
-				// Explicit cases keep their value on the
-				// input too; unset cases must stay unset.
-				t.Fatalf("input mutated: DomainResolver = %+v", orig)
+			after := resolverOf(t, ob)
+			afterServer := ""
+			if after != nil {
+				afterServer = after.Server
 			}
-			if tc.want != "" && resolverOf(t, ob) != nil && tc.name == "hostname http unset gets local" {
-				t.Fatalf("input mutated: DomainResolver set on the caller's options")
+			if before == nil && after != nil && afterServer != "" {
+				t.Fatalf("input mutated: DomainResolver = %+v, want unset", after)
+			}
+			if before != nil && afterServer != beforeServer {
+				t.Fatalf("input mutated: DomainResolver server = %q, want %q", afterServer, beforeServer)
 			}
 		})
 	}

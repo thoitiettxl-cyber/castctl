@@ -49,8 +49,9 @@ func stripANSICmd(s string) string { return ansiReCmd.ReplaceAllString(s, "") }
 // fakeDNSServerCmd is a TCP-only loopback DNS server (this VM
 // blocks loopback UDP sendto; see internal/dns helpers). It
 // answers gateway.test with A 127.0.0.1 and everything else with
-// NXDOMAIN, counting queries so tests prove the configured DNS
-// path was used.
+// NXDOMAIN, counting queries and recording question names so
+// tests prove the configured DNS path was used — and prove
+// which names were asked for.
 type fakeDNSServerCmd struct {
 	t       *testing.T
 	ln      net.Listener
@@ -58,6 +59,7 @@ type fakeDNSServerCmd struct {
 	port    int
 	mu      sync.Mutex
 	queries int
+	names   []string
 }
 
 func startFakeDNSServerCmd(t *testing.T) *fakeDNSServerCmd {
@@ -98,6 +100,9 @@ func (s *fakeDNSServerCmd) handle(conn net.Conn) {
 		}
 		s.mu.Lock()
 		s.queries++
+		for _, q := range req.Question {
+			s.names = append(s.names, q.Name)
+		}
 		s.mu.Unlock()
 		resp := new(dns.Msg)
 		resp.SetReply(&req)
@@ -130,6 +135,14 @@ func (s *fakeDNSServerCmd) queryCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.queries
+}
+
+// queryNames returns a copy of every question name the fake
+// server has seen, in arrival order.
+func (s *fakeDNSServerCmd) queryNames() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.names...)
 }
 
 // fakeSOCKS5Cmd is a minimal no-auth / user-pass SOCKS5 CONNECT

@@ -14,11 +14,15 @@ package commands
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,6 +39,7 @@ type cmdCONNECTProxy struct {
 	t        *testing.T
 	ln       net.Listener
 	port     int
+	mu       sync.Mutex
 	connects int
 }
 
@@ -56,6 +61,12 @@ func startCmdCONNECTProxy(t *testing.T) *cmdCONNECTProxy {
 		}
 	}()
 	return s
+}
+
+func (s *cmdCONNECTProxy) connectCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.connects
 }
 
 func (s *cmdCONNECTProxy) handle(client net.Conn) {
@@ -87,7 +98,9 @@ func (s *cmdCONNECTProxy) handle(client net.Conn) {
 		return
 	}
 	defer target.Close()
+	s.mu.Lock()
 	s.connects++
+	s.mu.Unlock()
 	if _, err := client.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 		return
 	}
@@ -185,7 +198,7 @@ func TestCreateOutboundsAppliesLocalDomainResolver(t *testing.T) {
 	if string(buf[:n]) != "ok" {
 		t.Fatalf("echo = %q, want %q", string(buf[:n]), "ok")
 	}
-	if proxy.connects == 0 {
+	if proxy.connectCount() == 0 {
 		t.Error("CONNECT proxy saw no requests; the dial did not go through the proxy")
 	}
 }
@@ -216,5 +229,98 @@ func TestCreateOutboundsHostnameWithoutResolverOrRouterRefused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "DNS router") {
 		t.Fatalf("createOutbounds error = %v; want it to name the missing DNS router", err)
+	}
+}
+
+// TestDefaultBuildRuntimeJoinsLocalBootstrap (F3, fix loop 1)
+// is the joining test: Seam A synthesis (ResolveProfileDNS
+// appends "local" to the profile's own dns block) composed
+// with Seam B defaulting (createOutbounds applies
+// domain_resolver: "local" to the hostname proxy), driven
+// through the production path defaultBuildRuntime with no
+// manual helper application and no hand-built DNS options.
+// The profile's dns block is a fake TCP transport detouring
+// through a "localhost" http outbound. Three assertions on
+// the one built runtime: (1) a target lookup through
+// rt.DNS is answered by the fake DNS server through the
+// proxy; (2) a dial through the proxy succeeds — the proxy
+// hostname "localhost" must resolve via the system resolver
+// for the dial to reach the proxy at all; (3) the fake DNS
+// was never asked for the proxy hostname. The dial target
+// is an IP literal on purpose: sing-box HTTP CONNECT
+// forwards a domain destination verbatim for the proxy to
+// resolve, so a domain dial would not exercise the local
+// target path; the target lookup is asserted via rt.DNS on
+// the same runtime instead. If localServerTag were dropped
+// in defaultBuildRuntime, the dial would resolve
+// "localhost" through the router and fail; if synthesis
+// were dropped, the default would name a missing transport
+// and construction would fail.
+func TestDefaultBuildRuntimeJoinsLocalBootstrap(t *testing.T) {
+	srv := startFakeDNSServerCmd(t)
+	proxy := startCmdCONNECTProxy(t)
+	echoPort := startCmdEcho(t)
+	home := t.TempDir()
+	configJSON := fmt.Sprintf(`{"profiles":{"alice":{"outbound":"proxy","dns":{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":%d,"detour":"proxy"}],"final":"dns1"}}},"outbounds":[{"type":"http","tag":"proxy","server":"localhost","server_port":%d}]}`,
+		srv.port, proxy.port)
+	configFile := filepath.Join(home, "config.json")
+	if err := os.WriteFile(configFile, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "cookies.txt"), []byte(fakeCookie), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, errb := &bytes.Buffer{}, &bytes.Buffer{}
+	env := &Env{Stdout: out, Stderr: errb, Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile})}
+	prof, err := profile.LoadProfile(home, "alice", env.Getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loc := &profile.ConfigLocation{ConfigFile: configFile, ConfigDir: home, Explicit: true}
+	rt, err := defaultBuildRuntime(context.Background(), loc, prof, env)
+	if err != nil {
+		t.Fatalf("defaultBuildRuntime = %v; want a running runtime", err)
+	}
+	t.Cleanup(func() { _ = rt.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	addrs, err := rt.DNS.Lookup(ctx, "gateway.test")
+	if err != nil {
+		t.Fatalf("Lookup(gateway.test) via defaultBuildRuntime = %v; want [127.0.0.1] from the fake DNS through the proxy", err)
+	}
+	if len(addrs) != 1 || addrs[0].String() != "127.0.0.1" {
+		t.Fatalf("Lookup(gateway.test) = %v, want [127.0.0.1]", addrs)
+	}
+	conn, err := rt.Dialer.DialContext(ctx, "tcp", "127.0.0.1", uint16(echoPort))
+	if err != nil {
+		t.Fatalf("dial via defaultBuildRuntime = %v; want success through the hostname proxy", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(buf[:n]) != "ok" {
+		t.Fatalf("echo = %q, want %q", string(buf[:n]), "ok")
+	}
+	if proxy.connectCount() == 0 {
+		t.Error("CONNECT proxy saw no requests; the dial did not go through the proxy")
+	}
+	names := srv.queryNames()
+	sawTarget := false
+	for _, name := range names {
+		if strings.EqualFold(name, "localhost.") {
+			t.Errorf("fake DNS was asked for %q; the proxy hostname must resolve via the system resolver only (questions: %v)", name, names)
+		}
+		if strings.EqualFold(name, "gateway.test.") {
+			sawTarget = true
+		}
+	}
+	if !sawTarget {
+		t.Errorf("fake DNS saw no gateway.test. question; the target lookup must go through the configured transport (questions: %v)", names)
 	}
 }
