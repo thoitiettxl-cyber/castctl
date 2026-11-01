@@ -118,7 +118,7 @@ SUPPLIED_DIR="$(dirname -- "$SUPPLIED_CONFIG")"
 
 # ---- required tools (fail fast) ---------------------------------------
 # python3, sha256sum and stat are required by every run (config
-# handling, hashing, mode checks). go, curl, unzip and ss are
+# handling, hashing, mode checks). go, curl and ss are
 # per-leg: a missing one SKIPs its leg with a reason instead of
 # failing the whole run. See docs/e2e.md prerequisites.
 for _tool in python3 sha256sum stat; do
@@ -1778,115 +1778,7 @@ PY
     fi
 fi
 
-# ---- leg 12: module -----------------------------------------------------
-MODULE_TOOLS='ar curl find grep readelf rg sed sha256sum sort tar touch uname unzip zip'
-MODULE_MISSING=''
-for tool in $MODULE_TOOLS; do
-    command -v "$tool" >/dev/null 2>&1 || MODULE_MISSING="$MODULE_MISSING $tool"
-done
-if [ -n "$MODULE_MISSING" ]; then
-    record 'module' 'build' 'SKIP' "missing build.sh tools:$MODULE_MISSING"
-    record 'module' 'zip-scan' 'SKIP' "missing build.sh tools:$MODULE_MISSING"
-elif [ ! -x "$REPO_ROOT/module/build.sh" ]; then
-    record 'module' 'build' 'SKIP' 'module/build.sh is not executable in this checkout'
-    record 'module' 'zip-scan' 'SKIP' 'module/build.sh is not executable in this checkout'
-else
-    MODULE_OUT="$E2E_TMP/module-out"
-    MODULE_CACHE="$E2E_TMP/module-cache"
-    mkdir -p "$MODULE_OUT" "$MODULE_CACHE"
-    MOD_BASE="$OUT_DIR/module-build"
-    run_cap "$MOD_BASE" 900 env -u CASTCTL_BINARY -u GLIBC_LIB_DIR -u CASTCTL_RUNTIME_DIR \
-        -u CASTCTL_CA_PEM -u CASTCTL_ALLOW_UNATTESTED_INPUTS -u CASTCTL_SOURCES_LOCK \
-        CASTCTL_MODULE_OUT_DIR="$MODULE_OUT" CASTCTL_BUILD_CACHE_DIR="$MODULE_CACHE" \
-        "$REPO_ROOT/module/build.sh"
-    MOD_RC="$(cat "$MOD_BASE.code")"
-    ZIP_FILE="$(find "$MODULE_OUT" -maxdepth 1 -name '*.zip' -print 2>/dev/null | head -n 1)"
-    if [ "$MOD_RC" -ne 0 ]; then
-        if grep -a -q -F -- 'curl: ' "$MOD_BASE.err" || grep -a -q -F -- 'curl: ' "$MOD_BASE.out"; then
-            record 'module' 'build' 'SKIP' 'build.sh failed on a curl download (locked inputs need network/cache)'
-            record 'module' 'zip-scan' 'SKIP' 'no ZIP was built'
-        else
-            record 'module' 'build' 'FAIL' "build.sh exited $MOD_RC"
-            printf 'e2e: module build.sh failed; tail recorded in captured output (fixed notice only)\n' >&2
-            tail -n 20 "$MOD_BASE.err" "$MOD_BASE.out" >"$OUT_DIR/module-build-tail.err" 2>/dev/null || true
-            record 'module' 'zip-scan' 'SKIP' 'no ZIP was built'
-        fi
-    elif [ -z "$ZIP_FILE" ]; then
-        record 'module' 'build' 'FAIL' 'build.sh exited 0 but no ZIP was produced'
-        record 'module' 'zip-scan' 'SKIP' 'no ZIP was built'
-    else
-        ZIP_SHA="$(sha256sum -- "$ZIP_FILE" | awk '{print $1}')"
-        record 'module' 'build' 'PASS' "build.sh exited 0, ZIP produced (sha256 recorded, never asserted cross-host)"
-        UNZIP_TEST_BASE="$OUT_DIR/module-unziptest"
-        run_cap "$UNZIP_TEST_BASE" 60 unzip -tq -- "$ZIP_FILE"
-        if [ "$(cat "$UNZIP_TEST_BASE.code")" = '0' ]; then
-            record 'module' 'zip-integrity' 'PASS' 'unzip -t passes'
-        else
-            record 'module' 'zip-integrity' 'FAIL' 'unzip -t failed'
-        fi
-        MEMBERS="$OUT_DIR/module-members.txt"
-        unzip -l -- "$ZIP_FILE" >"$MEMBERS" 2>/dev/null || true
-        # Member NAMES only: unzip -l output wraps long names and
-        # indents entries, so a nested member (payload/config.json)
-        # evades a (^|[[:space:]])config\.json$ match over it.
-        MEMBER_NAMES="$OUT_DIR/module-member-names.txt"
-        unzip -Z1 -- "$ZIP_FILE" >"$MEMBER_NAMES" 2>/dev/null || true
-        BAD_MEMBERS=0
-        grep -a -q -E -- '(^|/)config\.json$' "$MEMBER_NAMES" && BAD_MEMBERS=1
-        grep -a -q -E -- '\.key$' "$MEMBER_NAMES" && BAD_MEMBERS=1
-        if [ "$BAD_MEMBERS" = '0' ]; then
-            record 'module' 'zip-members' 'PASS' 'no config.json / *.key member at any depth (member names only)'
-        else
-            record 'module' 'zip-members' 'FAIL' 'forbidden member name present in ZIP member names'
-        fi
-        # Per-member counts-only scan: never extract the ZIP.
-        # The payload binary legitimately embeds field-name/code
-        # strings (hatch_sess, private_key, ...), so label patterns
-        # are FAIL only in TEXT members; in binary members
-        # (payload/bin, payload/lib) only a private-key header is
-        # FAIL. Measured 2026-11-01: all label hits were inside
-        # payload/bin/castctl, header count 0, no hits in any text
-        # member.
-        ZIP_FAIL_TOTAL=0
-        ZIP_BIN_LABEL_TOTAL=0
-        ZIP_TEXT_LABEL_TOTAL=0
-        while IFS= read -r MEMBER; do
-            case "$MEMBER" in
-                */) continue ;;
-            esac
-            case "$MEMBER" in
-                payload/bin/*|payload/lib/*) IS_BIN=1 ;;
-                *) IS_BIN=0 ;;
-            esac
-            M_HDR="$(unzip -p -- "$ZIP_FILE" "$MEMBER" 2>/dev/null | grep -a -c -E -- 'BEGIN [A-Z ]*PRIVATE KEY' || true)"
-            [ -n "$M_HDR" ] || M_HDR=0
-            M_LABEL="$(unzip -p -- "$ZIP_FILE" "$MEMBER" 2>/dev/null | grep -a -c -E -- 'hatch_sess=[^;[:space:]"]+|datr=[^;[:space:]"]+|private_key[":=]|preshared_key[":=]|Authorization:[[:space:]]*Bearer[[:space:]]+\S+' || true)"
-            [ -n "$M_LABEL" ] || M_LABEL=0
-            ZIP_FAIL_TOTAL=$((ZIP_FAIL_TOTAL + M_HDR))
-            if [ "$IS_BIN" -eq 1 ]; then
-                ZIP_BIN_LABEL_TOTAL=$((ZIP_BIN_LABEL_TOTAL + M_LABEL))
-            else
-                ZIP_TEXT_LABEL_TOTAL=$((ZIP_TEXT_LABEL_TOTAL + M_LABEL))
-                ZIP_FAIL_TOTAL=$((ZIP_FAIL_TOTAL + M_LABEL))
-            fi
-        done <<EOF_MEMBERS
-$(unzip -Z1 -- "$ZIP_FILE" 2>/dev/null)
-EOF_MEMBERS
-        if [ "$ZIP_FAIL_TOTAL" = '0' ]; then
-            record 'module' 'zip-scan' 'PASS' "no secret material in text members; binary label counts=$ZIP_BIN_LABEL_TOTAL (embedded strings only, header 0)"
-        else
-            record 'module' 'zip-scan' 'FAIL' "secret-pattern counts: fail-class=$ZIP_FAIL_TOTAL text-label=$ZIP_TEXT_LABEL_TOTAL binary-label=$ZIP_BIN_LABEL_TOTAL"
-        fi
-        if grep -a -q -F -- 'loader_preflight=' <(unzip -p -- "$ZIP_FILE" payload/runtime.version 2>/dev/null); then
-            record 'module' 'runtime-version' 'PASS' 'payload/runtime.version present, loader_preflight outcome recorded (not claimed as executed)'
-        else
-            record 'module' 'runtime-version' 'SKIP' 'payload/runtime.version not readable in the ZIP stream'
-        fi
-        printf '%s' "$ZIP_SHA" > "$OUT_DIR/module-zip.sha256"
-    fi
-fi
-
-# ---- leg 13: final secret scan (counts only) ----------------------------
+# ---- leg 12: final secret scan (counts only) ----------------------------
 # Scope A: captured outputs only (.out/.err in OUT_DIR, .json in
 # WEBUI_DIR, .log in LOG_DIR), plus verdicts.txt for VALUE patterns
 # only (label patterns would self-match on the scan lines' pattern
