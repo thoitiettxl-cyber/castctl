@@ -49,10 +49,12 @@ func RedactOutboundJSON(data []byte) ([]byte, error) {
 // marker is a sentinel only at an ABSENT path in the web UI
 // merge. If a real fragment genuinely has a top-level
 // "fragment" key, a PUT round-trip of displayed content
-// OVERWRITES that key with the marker (data loss, no secret
-// leak) instead of rejecting. Fixing the merge behaviour is
-// a follow-up outside this PR; the merge code is
-// must-not-touch here.
+// collapses the whole fragment to {"fragment": "<redacted>"}
+// (data loss, no secret leak): the sentinel is taken as an
+// ordinary literal at the present key, and the fragment's
+// other keys — absent from displayed content — are deleted
+// by the merge. Fixing the merge behaviour is a follow-up
+// outside this PR; the merge code is must-not-touch here.
 func RedactRawConfig(data []byte) ([]byte, error) {
 	v, err := decodeOrderedJSON(data)
 	if err != nil {

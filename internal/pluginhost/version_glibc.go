@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Licensed under the GNU General Public License v3.0 or later.
 
-//go:build cgo && linux
+//go:build cgo && linux && !android
 
 package pluginhost
 

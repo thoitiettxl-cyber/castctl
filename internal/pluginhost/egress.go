@@ -275,11 +275,17 @@ var hopByHopHeaders = []string{
 func stripHopByHop(h http.Header) {
 	// Read the Connection tokens FIRST: deleting the
 	// Connection header first would make the token list
-	// unreadable and the stripping dead code.
+	// unreadable and the stripping dead code. Iterate
+	// EVERY Connection value: Header.Get returns only
+	// the first line, so tokens named in a second (or
+	// later) Connection header would otherwise survive
+	// in both directions.
 	var tokens []string
-	for _, token := range strings.Split(h.Get("Connection"), ",") {
-		if token = strings.TrimSpace(token); token != "" {
-			tokens = append(tokens, token)
+	for _, value := range h.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			if token = strings.TrimSpace(token); token != "" {
+				tokens = append(tokens, token)
+			}
 		}
 	}
 	for _, name := range hopByHopHeaders {

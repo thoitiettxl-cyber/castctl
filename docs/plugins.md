@@ -152,8 +152,10 @@ by VERSION, mirroring upstream `comparePluginVersions` /
 dot-separated segments, a missing segment counting as 0,
 non-numeric segments falling back to lexical order; a
 versioned file beats a versionless one; on an exact version
-tie the `<GOOS>/<GOARCH>` platform directory wins. A
-downgrade is never silent: dropping an older file into the
+tie the `<GOOS>/<GOARCH>` platform directory wins. (A
+version segment that overflows `int64` is non-comparable
+and also falls back to lexical order — upstream-mirrored
+behaviour.) A downgrade is never silent: dropping an older file into the
 root cannot beat a newer platform file. File names are
 `<id>-v<version>.<ext>` (`.so`, `.dylib`, `.dll`); a bare
 `<id>.<ext>` is versionless. Names that do not parse —
@@ -225,14 +227,72 @@ Rules:
   original key order, and raw-preserved on save.
 - Display and redaction show `tag`/`type` only; the fragment
   is shown as `<redacted>` wholesale under the `fragment`
-  key (`internal/profile/redact.go`). Plugin fragments never
-  appear in logs, errors, or the web UI. (A PUT round-trip
-  of displayed content fail-closes loudly through the web
-  UI's sentinel merge instead of writing the marker into
-  a fragment.)
+  key (`internal/profile/redact.go`). Neither the fragment's
+  contents nor its key names ever appear in logs, errors,
+  or the web UI. (A PUT round-trip of displayed content
+  fail-closes loudly through the web UI's sentinel merge
+  instead of writing the marker into a fragment —
+  EXCEPT when the stored fragment genuinely has a
+  top-level `"fragment"` key: then the round-trip
+  collapses the whole fragment to
+  `{"fragment": "<redacted>"}` — the sentinel is taken as
+  an ordinary literal at the present key, and the
+  fragment's other keys, absent from displayed content,
+  are deleted by the merge. Data loss only, no secret
+  leak; see `internal/profile/redact.go`.)
 - Plugin tags live in their own namespace: they do NOT
   participate in `validateTagGraph`'s outbound/endpoint tag
   namespace. Fragment contents are the plugin's business.
+
+### Config audit and BD-C1 (OPEN — audit gate does not pass until Boss decides)
+
+Every bound, literal, and default in the plugin-core delta,
+audited against the standing rule ("every castctl setting
+must be configurable in config.json, exactly like
+sing-box"). "Overridable?" means overridable from
+`config.json` in this PR.
+
+| Setting | Config field | Overridable? | Default | Location |
+|---|---|---|---|---|
+| `plugins[]` inline entries (`tag`/`type` required, rest verbatim fragment; no `enabled`, no wrapper) | `plugins` array | Yes — presence = active | Absent = no plugins | `docs/config.md`, spec §7, `internal/profile/plugins.go` |
+| Shadow-dir root `os.TempDir()/castctl-pluginhost`, `pid-<pid>` subdir, 0700 | None — **BD-C1** | No | As stated | `internal/pluginhost/shadow.go` |
+| Egress bind `127.0.0.1:0` | None — **BD-C1** | No | `127.0.0.1:0` | `internal/pluginhost/egress.go` |
+| Egress timeouts ReadHeaderTimeout / IdleTimeout | None — **BD-C1** | No | 10s / 120s (no read/write timeout by design) | `internal/pluginhost/egress.go` |
+| Render cap + `…` marker (envelope/loader/host.log/check output) | None — **BD-C1** | No | 4096 | `internal/pluginhost/text.go`, `internal/commands/plugincheck.go` |
+| Check-output caps (`checkField` metadata, `shortPluginCheckError`) | None — **BD-C1** (render-cap family) | No | 200 | `internal/commands/plugincheck.go` |
+| `host.log` level allowlist (`info`/`warn`/`error`/`debug`, `warning`→`warn`, else `info`) | None — **BD-C1** | No | `info` | `internal/pluginhost/host.go` (`dispatchHostCall`) |
+| Method-name bound | None — true constant: the C ABI carries no length, so an untrusted pointer read needs a safety bound | No | 256 (`maxHostMethodLen`) | `internal/pluginhost/text.go` |
+| Config-error echo bound | None — true constant: display bound on user input echoed in errors, not a host setting | No | 64 runes (`boundEcho`) | `internal/profile/plugins.go` |
+| Response/request length guards | None — true constants: C `int` width; refuse rather than truncate | No | `MaxInt32` | `internal/pluginhost/loader_unix.go`, `loader_windows.go`, `callbacks_unix.go` |
+| `ABIVersion` / `SchemaVersion` | None — true constants: protocol versions | No | 1 / 1 | `internal/pluginabi/pluginabi.go` |
+| Shadow digest length + file prefixes | None — true constants: internal layout mirroring upstream | No | 32, `castctl-plugin-` / `.castctl-plugin-` | `internal/pluginhost/shadow.go` |
+| Per-proxy egress credentials | None — security mechanism: must NOT be user-settable; ephemeral, per-proxy, revoked on close | No | 24-byte `crypto/rand` each | `internal/pluginhost/egress.go` |
+| glibc floor | None — doc/build fact, not a gate constant: no `2.17` literal in gate code; the gate compares the plugin's requirement against the running libc | — | 2.17 (build floor) | docs, `internal/pluginhost/compat.go` |
+| Call deadline | None — caller context; no hardcoded deadline in the host (call abandonment via `ctx.Done()`, fuse until a different-path `ApplyConfig`) | Caller-supplied | No deadline | `internal/pluginhost/host.go` |
+| Stale-shadow sweep rule (dead-pid `pid-<digits>` dirs only; never live, own, or malformed entries) | None — true constant: safety invariant | No | As stated; on Windows/other platforms pid liveness is unknown so the sweep keeps every pid directory (only the own directory is removed on `Host.Close`) | `internal/pluginhost/shadow.go`, `hardlink_unix.go` / `hardlink_other.go` |
+| Validation & wire rules (hostname 253 / label 63, plugin-ID regex 128 chars, ELF entry sizes, `Nlink==1`, `RTLD_NOW\|RTLD_LOCAL`, cookie-host rules) | None — true constants: contract/format bounds | No | As stated | `internal/pluginabi/pluginabi.go`, `internal/pluginhost/discovery.go`, `compat.go`, `paths.go` |
+| Discovery root | Caller-supplied parameter (`Discover(root)`); no hardcoded root, no production caller in this PR | Caller-supplied | None (empty/missing root errors) | `internal/pluginhost/discovery.go` |
+| Env vars / separate config files | None exist: zero `os.Getenv`/`LookupEnv` in plugin code; no plugin config file is read | — | — | `internal/pluginhost/`, `internal/pluginabi/`, `internal/profile/plugins.go`, `internal/commands/plugincheck.go` |
+| Loader support value | None — true constant: build capability, not a setting | No | `"1"` cgo unix/windows, `"0"` stub/other | `internal/pluginhost/support.go`, loader files |
+
+The `host.log` level allowlist is classified here, in this
+one place, as a **BD-C1 item, not a true constant**: the
+level set is a host policy choice, not protocol vocabulary
+fixed by the ABI, and a future config block could change
+it. (An earlier plan note called it a true constant; that
+classification is superseded by this table.)
+
+**BD-C1 — OPEN.** Host-level values (the BD-C1 rows above)
+have no config surface because no runtime wiring reads
+`config.json` into a `Host` yet: the only production
+`ApplyConfig` caller is `plugin check` (verified by grep;
+all other callers are tests). Boss decides: (a) a
+follow-up PR with a sing-box-style top-level block for
+host-level plugin settings (shape and defaults to be
+proposed then), or (b) keep these as library defaults
+until runtime wiring lands. **The config audit gate stays
+open until Boss decides BD-C1.** This decision is not
+made by this PR; no config block is invented here.
 
 ## Capabilities
 
@@ -263,6 +323,18 @@ is rejected absolutely: plugins never read, list, or save
 credentials through the host. Upstream's auth callbacks
 (`auth_callbacks.go`, which reads credential files) were
 deliberately NOT ported.
+
+The method name is read through a guarded bounded scan
+(`internal/pluginhost/callbacks_unix.go`): the handler is
+installed once at init and chains any out-of-range fault
+to the Go runtime handler, so a genuine host fault on any
+thread keeps its normal behaviour (a fault inside the
+scanned range reports "no NUL" instead of crashing the
+host). The guard covers the method-name read only, is
+measured only on linux, and assumes no other code
+replaces the SIGSEGV/SIGBUS handlers after install.
+Windows uses a plain bounded scan with the same
+page-fault class unproven there.
 
 ## Secrets and egress
 
@@ -492,6 +564,12 @@ exists, and none is claimed.
   plugin's host-callback id gets only that plugin's
   `host.log` lines misattributed in logs. No secret or
   control surface is reachable through `host.log`.
+  Windows variant (unproven platform): the Windows
+  `hostCtx` is Go-heap memory, while unix deliberately
+  leaks a C-malloc'd block so a resident plugin runtime
+  cannot deref freed memory; after a Windows client is
+  closed and collected, a retained plugin pointer could
+  deref reused memory.
 - Native access (U6): a native plugin can read the
   environment, files, and process memory. Trusted-model
   limit; see "Trust model".
@@ -566,7 +644,7 @@ Files mirrored (renamed namespace, castctl schema 1):
 - `internal/pluginhost/host.go` — `ApplyConfig` (:213),
   quiesce, rollback.
 - `internal/pluginhost/platform.go` — candidate dirs
-  (:308), discovery (:291), extension (:99), ID rule
+  (:308), discovery (:292), extension (:99), ID rule
   (:17), version comparison (:218), file preference
   (:204).
 - `internal/pluginhost/shadow.go` — shadow copy (:33),

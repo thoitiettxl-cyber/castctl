@@ -19,6 +19,12 @@ type otherLoader struct{}
 
 func defaultLoader() Loader { return otherLoader{} }
 
+// supportValue mirrors the stub loader: dynamic loading is
+// refused on this platform, so SupportValue reports "0".
+// (Without this definition the package does not compile for
+// cgo builds on GOOSes outside the claimed set.)
+const supportValue = "0"
+
 func (otherLoader) Open(file File, host *Host) (Client, error) {
 	return nil, fmt.Errorf("dynamic library plugin loading is not supported on this platform: %s", file.Path)
 }

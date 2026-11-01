@@ -7,8 +7,10 @@
 package pluginhost
 
 import (
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -52,4 +54,64 @@ func TestBoundedCStringLenPageBoundary(t *testing.T) {
 	if _, ok := boundedCStringLen(ptr, 256); !ok {
 		t.Fatal("scan after panic recovery: want success")
 	}
+}
+
+// TestBoundedCStringLenCrossThreadFault is the regression
+// test for the cross-thread chaining defect (B-R2): saved
+// signal handlers are process-wide state (sigaction is
+// process-wide), so a genuine fault on a thread that never
+// installed the guard must still chain to the Go runtime
+// handler and be recoverable — not die via SIG_DFL. Shape
+// mirrors the red-team repro: N goroutines hammering
+// boundedCStringLen on an unterminated buffer while the
+// test goroutine nil-dereferences in a loop with recover,
+// for ~2s. Pre-fix this died 8/8 runs with
+// "signal: segmentation fault"; post-fix the process must
+// survive every run. The test passes trivially if no fault
+// happens to land inside a scan window, but the hammer
+// keeps the guard installed near-continuously (scans are
+// serialised back-to-back under the mutex), so a fault
+// landing outside a window is unlikely over 2s — and a
+// pre-fix build dies on the first such fault.
+func TestBoundedCStringLenCrossThreadFault(t *testing.T) {
+	buf := make([]byte, maxHostMethodLen)
+	for i := range buf {
+		buf[i] = 'x'
+	}
+	ptr := unsafe.Pointer(&buf[0])
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_, _ = boundedCStringLen(ptr, maxHostMethodLen)
+			}
+		}()
+	}
+	recovered := 0
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		func() {
+			defer func() {
+				if recover() != nil {
+					recovered++
+				}
+			}()
+			var p *int
+			_ = *p
+		}()
+	}
+	close(stop)
+	wg.Wait()
+	if recovered == 0 {
+		t.Fatal("no nil-deref panic was recovered during the hammer; the cross-thread case was not exercised")
+	}
+	t.Logf("recovered %d nil-deref panics during concurrent guarded scans", recovered)
 }

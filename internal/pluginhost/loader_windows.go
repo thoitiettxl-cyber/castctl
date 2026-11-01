@@ -226,11 +226,6 @@ func windowsCStringBounded(ptr uintptr, max int) (string, bool) {
 	return "", false
 }
 
-func windowsCString(ptr uintptr) string {
-	s, _ := windowsCStringBounded(ptr, maxHostMethodLen)
-	return s
-}
-
 // windowsHostFree releases a buffer allocated by
 // windowsHostCall. Signature: (ptr, len) -> void.
 func windowsHostFree(ptr, length uintptr) uintptr {
@@ -328,10 +323,16 @@ func (c *windowsClient) close() {
 	c.dll = nil
 	c.mu.Unlock()
 	c.calls.Wait()
+	// Same order as the unix client: drop the callback
+	// registration BEFORE invoking the plugin shutdown
+	// function, so shutdown code cannot call back into a
+	// half-detached host. (Windows load itself is
+	// [NEEDS-MEASUREMENT]; this order is code-reviewed
+	// only.)
+	unregisterHostCallback(callbackID)
 	if shutdownFn != 0 {
 		_, _, _ = syscall.Syscall(shutdownFn, 0, 0, 0, 0)
 	}
-	unregisterHostCallback(callbackID)
 	// Deliberately no FreeLibrary: see the never-unload rule
 	// in the package doc and loader_unix.go close().
 }

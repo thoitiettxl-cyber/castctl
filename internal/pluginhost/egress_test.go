@@ -512,3 +512,78 @@ func TestEgressProxyCloseRefuses(t *testing.T) {
 		t.Fatalf("dial err = %v, want OpError", err)
 	}
 }
+
+// TestEgressProxyDuplicateConnectionHeaders: hop-by-hop
+// stripping must honour tokens named in EVERY Connection
+// header line, in both directions. A token-named header
+// carried only by a second Connection line must not leak
+// upstream (request) or to the plugin (response). Raw TCP
+// on both sides: Go's client/server transports strip
+// hop-by-hop headers themselves, which would mask a proxy
+// stripping failure.
+func TestEgressProxyDuplicateConnectionHeaders(t *testing.T) {
+	upstream := &recordingRoundTripper{body: "ok"}
+	upstreamDup := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		resp, err := upstream.RoundTrip(req)
+		if err != nil {
+			return nil, err
+		}
+		resp.Header.Add("Connection", "keep-alive")
+		resp.Header.Add("Connection", "X-Resp-Leak")
+		resp.Header.Set("X-Resp-Leak", "RESPLEAK")
+		resp.Header.Set("Set-Cookie", "hatch_sess=SECRETVALUE; Path=/")
+		return resp, nil
+	})
+	proxy, err := pluginhost.NewEgressProxy(upstreamDup, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+	conn, err := net.Dial("tcp", proxy.URL().Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	raw := "GET http://example.invalid/path HTTP/1.1\r\n" +
+		"Host: example.invalid\r\n" +
+		"Proxy-Authorization: " + proxyAuth(t, proxy.Username(), proxy.Password()) + "\r\n" +
+		"Connection: keep-alive\r\n" +
+		"Connection: X-Leak\r\n" +
+		"X-Leak: LEAKME\r\n" +
+		"X-Keep: yes\r\n\r\n"
+	if _, err := conn.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(conn)
+	var headLines []string
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if line == "\r\n" {
+			break
+		}
+		headLines = append(headLines, line)
+	}
+	for _, line := range headLines {
+		if strings.Contains(line, "X-Resp-Leak") || strings.Contains(line, "RESPLEAK") {
+			t.Fatalf("response header leaked to plugin: %q (headers %q)", line, headLines)
+		}
+		if strings.Contains(line, "Set-Cookie") {
+			t.Fatalf("Set-Cookie leaked to plugin: %q", line)
+		}
+	}
+	if upstream.last == nil {
+		t.Fatal("upstream not reached")
+	}
+	if got := upstream.last.Header.Get("X-Leak"); got != "" {
+		t.Fatalf("X-Leak forwarded upstream: %q (second Connection line ignored)", got)
+	}
+	if got := upstream.last.Header.Get("X-Keep"); got != "yes" {
+		t.Fatalf("X-Keep = %q, want ordinary header preserved", got)
+	}
+	if got := upstream.last.Header.Get("Proxy-Authorization"); got != "" {
+		t.Fatalf("Proxy-Authorization forwarded: %q", got)
+	}
+}

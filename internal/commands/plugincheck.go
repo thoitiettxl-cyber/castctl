@@ -207,9 +207,28 @@ func checkField(s string) string {
 // shortPluginCheckError truncates a call error for the check
 // output: no raw server bodies, no secret values, tag only.
 // Plugin-chosen text is redacted (SafeString) and capped,
-// cap before redact, with the "…" marker.
+// cap before redact, with the "…" marker. Control
+// characters are stripped first (safety N1): the FAIL
+// line must stay one line.
 func shortPluginCheckError(err error) string {
-	return redactAndCap(err.Error(), 200)
+	return redactAndCap(stripCheckControls(err.Error()), 200)
+}
+
+// stripCheckControls maps newline/CR/tab to a space and
+// drops other C0 controls and DEL, mirroring
+// pluginhost.stripControlChars (same mapping, local copy:
+// the check helpers must not import pluginhost internals).
+func stripCheckControls(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t':
+			return ' '
+		}
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 func compactJSON(raw []byte) string {

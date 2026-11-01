@@ -99,6 +99,10 @@ func TestPluginCheckHelpersRedactAndCap(t *testing.T) {
 	if got := checkField("a\nb\x1bc"); strings.ContainsAny(got, "\n\x1b") {
 		t.Fatalf("checkField kept controls: %q", got)
 	}
+	// The FAIL line must stay one line (safety N1).
+	if got := shortPluginCheckError(errors.New("line1\nFORGED-LINE\x1b[31m")); strings.ContainsAny(got, "\n\r\x1b") {
+		t.Fatalf("shortPluginCheckError kept controls: %q", got)
+	}
 }
 
 // Cap-before-redact in check output: a secret pair straddling

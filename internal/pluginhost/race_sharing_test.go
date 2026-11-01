@@ -9,6 +9,7 @@ package pluginhost_test
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -123,4 +124,22 @@ func TestRealLoaderTwoHostsShareImage(t *testing.T) {
 	if !strings.Contains(string(out), "echo:still") {
 		t.Fatalf("host B out = %s", out)
 	}
+}
+
+// TestRealLoaderLoadedVsReconfigureRace is the real-loader
+// half of the B-R1 hammer: the same Call + reconfigure +
+// Loaded() polling shape, against the C fake plugin through
+// the real loader. Run under -race.
+func TestRealLoaderLoadedVsReconfigureRace(t *testing.T) {
+	dir := t.TempDir()
+	so := plugintest.BuildFakePlugin(t, dir, plugintest.FakePluginOptions{})
+	var logs []string
+	h := newRealHost(t, &logs)
+	defer h.Close()
+	if report := applyOne(t, h, so); len(report.Skipped) != 0 {
+		t.Fatalf("skipped = %+v", report)
+	}
+	hammerLoadedVsReconfigure(t, h, func(n int) []pluginhost.Desired {
+		return []pluginhost.Desired{{Tag: "echo", Type: "echo", Path: so, Fragment: []byte(`{"v":` + strconv.Itoa(n) + `}`)}}
+	})
 }

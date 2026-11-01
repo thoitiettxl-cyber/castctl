@@ -10,7 +10,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -437,6 +439,163 @@ func TestHostNilEgressKeepsExisting(t *testing.T) {
 		_ = resp.Body.Close()
 		if got := upstream.last.Header.Get("Cookie"); got != "injected-cookie-value" {
 			t.Fatalf("new scope Cookie = %q, want injected value", got)
+		}
+	}
+}
+
+// hammerLoadedVsReconfigure runs the red-team B-R1 shape:
+// Call goroutines + same-path reconfigure goroutines +
+// Loaded()/Fused() polling, concurrently. Under -race any
+// unsynchronised read/write of registration fields (or of
+// the egress pointer) is reported. Call errors are
+// tolerated (a reconfigure may legitimately be in flight);
+// a deadlock or race is not.
+func hammerLoadedVsReconfigure(t *testing.T, h *pluginhost.Host, desired func(n int) []pluginhost.Desired) {
+	t.Helper()
+	ctx := context.Background()
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_, _ = h.Call(ctx, "echo", pluginabi.MethodProviderCall, []byte(`{"input":"ping"}`))
+			}
+		}()
+	}
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for j := 0; ; j++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_ = h.ApplyConfig(ctx, desired(n*1000+j))
+			}
+		}(i)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_, _ = h.Loaded("echo")
+			_, _ = h.Fused("echo")
+		}
+	}()
+	time.Sleep(2 * time.Second)
+	close(stop)
+	wg.Wait()
+}
+
+// TestHostLoadedVsReconfigureRace is the fake-loader half
+// of the B-R1 hammer: registration fields written by
+// applyRegistration must not race Loaded() reads.
+func TestHostLoadedVsReconfigureRace(t *testing.T) {
+	loader, _ := fakeSetup("/plugins/echo.so")
+	var logs []string
+	h := newFakeHost(t, loader, &logs)
+	defer h.Close()
+	if report := h.ApplyConfig(context.Background(), []pluginhost.Desired{{Tag: "echo", Type: "echo", Path: "/plugins/echo.so", Fragment: []byte(`{"v":0}`)}}); len(report.Loaded) != 1 {
+		t.Fatalf("load report = %+v", report)
+	}
+	hammerLoadedVsReconfigure(t, h, func(n int) []pluginhost.Desired {
+		return []pluginhost.Desired{{Tag: "echo", Type: "echo", Path: "/plugins/echo.so", Fragment: []byte(`{"v":` + strconv.Itoa(n) + `}`)}}
+	})
+}
+
+// TestHostEnvelopeErrorControlStripped: a plugin-chosen
+// envelope error code/message must not carry control
+// characters into the Go error (safety N1): a forged
+// newline in the message must not create a second output
+// line on the plugin check FAIL line.
+func TestHostEnvelopeErrorControlStripped(t *testing.T) {
+	loader, clients := fakeSetup("/plugins/echo.so")
+	var logs []string
+	h := newFakeHost(t, loader, &logs)
+	defer h.Close()
+	clients["/plugins/echo.so"].OnCall = func(ctx context.Context, method string, request []byte) ([]byte, error) {
+		switch method {
+		case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
+			return plugintest.RegisterResponse(1, "fake", "0.1.0", "plugintest", pluginabi.Capabilities{Provider: true}), nil
+		default:
+			return plugintest.ErrorResponse("bad\ncode\x1b[31m", "line1\nFORGED-LINE\x1b[31m"), nil
+		}
+	}
+	if report := h.ApplyConfig(context.Background(), []pluginhost.Desired{{Tag: "echo", Type: "echo", Path: "/plugins/echo.so"}}); len(report.Loaded) != 1 {
+		t.Fatalf("load report = %+v", report)
+	}
+	_, err := h.Call(context.Background(), "echo", pluginabi.MethodProviderCall, nil)
+	if err == nil {
+		t.Fatal("want envelope error, got nil")
+	}
+	if strings.ContainsAny(err.Error(), "\n\r\x1b\x00") {
+		t.Fatalf("envelope error kept controls: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "FORGED-LINE") {
+		t.Fatalf("envelope error lost content: %q", err.Error())
+	}
+}
+
+// TestHostSharedEgressScopeLastWriterWins (safety N2):
+// cookie scope lives on the PROXY, not per tag. Two tags
+// sharing one proxy with differing cookie_hosts get the
+// last registration's scope applied to both tags' traffic
+// (last-writer-wins, per-proxy scope). Documented in
+// docs/plugins.md; pinned here so the semantics cannot
+// drift silently into per-tag scoping.
+func TestHostSharedEgressScopeLastWriterWins(t *testing.T) {
+	loader, clients := fakeSetup("/plugins/a.so", "/plugins/b.so")
+	var logs []string
+	h := newFakeHost(t, loader, &logs)
+	defer h.Close()
+	upstream := &recordingRoundTripper{body: "ok"}
+	proxy, err := pluginhost.NewEgressProxy(upstream, nil, "injected-cookie-value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+	clients["/plugins/a.so"].OnCall = registerWithHosts([]string{"a.invalid"})
+	clients["/plugins/b.so"].OnCall = registerWithHosts([]string{"b.invalid"})
+	ctx := context.Background()
+	desired := []pluginhost.Desired{
+		{Tag: "a", Type: "a", Path: "/plugins/a.so", EgressProxy: proxy},
+		{Tag: "b", Type: "b", Path: "/plugins/b.so", EgressProxy: proxy},
+	}
+	if report := h.ApplyConfig(ctx, desired); len(report.Loaded) != 2 {
+		t.Fatalf("load report = %+v", report)
+	}
+	// Last writer (b) wins: b.invalid gets the cookie,
+	// a.invalid (registered first) no longer does.
+	if resp, err := dialViaProxy(t, proxy, upstream, "http://b.invalid/x"); err != nil {
+		t.Fatal(err)
+	} else {
+		_, _ = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if got := upstream.last.Header.Get("Cookie"); got != "injected-cookie-value" {
+			t.Fatalf("b.invalid Cookie = %q, want injected value", got)
+		}
+	}
+	if resp, err := dialViaProxy(t, proxy, upstream, "http://a.invalid/x"); err != nil {
+		t.Fatal(err)
+	} else {
+		_, _ = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if got := upstream.last.Header.Get("Cookie"); got != "" {
+			t.Fatalf("a.invalid Cookie = %q, want none (last-writer scope)", got)
 		}
 	}
 }

@@ -31,6 +31,10 @@ const maxHostMethodLen = 256
 // below max bytes, in O(1): it backs up at most 3 bytes
 // from max to a rune start. It never scans the whole
 // string, so truncating a 50 MB input costs nothing.
+// Input is assumed valid UTF-8 (all plugin-text surfaces
+// here are JSON-decoded strings): on invalid input the
+// backup can cut mid-sequence, leaving a partial rune in
+// display-only output.
 func truncateRunes(s string, max int) string {
 	if max <= 0 {
 		return ""
@@ -45,9 +49,9 @@ func truncateRunes(s string, max int) string {
 	return s[:cut]
 }
 
-// capPluginText truncates s to maxPluginTextLen runes with
-// an explicit marker. It never invents content: over-long
-// text is cut, not summarised.
+// capPluginText truncates s to maxPluginTextLen bytes at
+// a rune boundary, with an explicit marker. It never
+// invents content: over-long text is cut, not summarised.
 func capPluginText(s string) string {
 	if len(s) > maxPluginTextLen {
 		return truncateRunes(s, maxPluginTextLen) + "…"
@@ -90,6 +94,51 @@ func capBeforeRedact(s string, max int) string {
 // error path that can carry plugin text goes through it.
 func safePluginText(s string) string {
 	return capPluginText(logging.SafeString(capBeforeRedact(s, maxPluginTextLen)))
+}
+
+// stripControlChars maps newline/CR/tab to a space and
+// drops other C0 controls and DEL, so plugin-chosen text
+// can never forge a second output line or inject terminal
+// control sequences. An ESC that starts a CSI sequence
+// (ESC [ ... final byte) drops the whole sequence: only
+// stripping the ESC would leave a "[31m" remnant in the
+// output. A bare ESC with no CSI following it is dropped
+// alone. Shared by host.log messages and envelope error
+// text (see dispatchHostCall, parseEnvelope).
+func stripControlChars(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for len(s) > 0 {
+		r, size := utf8.DecodeRuneInString(s)
+		if r == 0x1b && len(s) > size && s[size] == '[' {
+			// Skip the CSI sequence through its final
+			// byte (0x40-0x7e); an unterminated sequence
+			// drops to end of input.
+			s = s[size+1:]
+			for len(s) > 0 && !(s[0] >= 0x40 && s[0] <= 0x7e) {
+				_, n := utf8.DecodeRuneInString(s)
+				s = s[n:]
+			}
+			if len(s) > 0 {
+				_, n := utf8.DecodeRuneInString(s)
+				s = s[n:]
+			}
+			continue
+		}
+		switch r {
+		case '\n', '\r', '\t':
+			b.WriteRune(' ')
+		default:
+			if r < 0x20 || r == 0x7f {
+				// Dropped: other C0 controls, DEL,
+				// and a bare ESC.
+			} else {
+				b.WriteRune(r)
+			}
+		}
+		s = s[size:]
+	}
+	return b.String()
 }
 
 // scrubShadowPath replaces occurrences of the shadow path

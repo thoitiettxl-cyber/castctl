@@ -25,23 +25,40 @@ typedef struct {
 // pointer with no length; the bound alone does not protect
 // a read that crosses into an unmapped page (a forgotten
 // NUL 10 bytes before a guard page still faults). The scan
-// therefore runs under a temporary SIGSEGV/SIGBUS handler
-// that longjmps back only when the fault address is inside
-// the scanned range [ptr, ptr+max); any other fault chains
-// to the previously installed handler (the Go runtime's),
-// so genuine host faults keep their normal behaviour.
+// therefore runs under a SIGSEGV/SIGBUS handler that
+// longjmps back only when the fault address is inside the
+// scanned range [ptr, ptr+max); any other fault chains to
+// the previously installed handler (the Go runtime's), so
+// genuine host faults keep their normal behaviour.
 //
-// Proven by probe (scratch program, linux/amd64): page-tail
-// reads return "no NUL", in-range NULs are found,
-// concurrent readers on separate guard mappings do not
-// crash, a genuine Go nil-deref panic during a held handler
-// is still recovered by the runtime, and the process stays
-// alive. The handler MUST use SA_ONSTACK: without it the Go
-// runtime aborts the process ("non-Go code set up signal
-// handler without SA_ONSTACK flag", measured). sigaction is
-// process-wide, so the Go side serialises scans with a
-// mutex; the handler itself only reads per-thread
-// (__thread) state, calls siglongjmp, or chains.
+// The handler is installed ONCE, from Go init(), and stays
+// installed for the process lifetime: installing and
+// restoring it around every scan leaves a window (after
+// sigaction, before the saved handler is recorded) in
+// which a fault on any thread finds no valid saved handler
+// and dies via SIG_DFL instead of reaching the Go runtime
+// — measured: a fault hammer killed the process in ~10 ms
+// with per-scan install/restore, because the sigaction
+// syscalls dominate each short scan. With a single
+// install, done before any goroutine can fault
+// concurrently, there is no install/restore window at
+// all. The jmp buffer, probe pointer/length, and active
+// flag stay per-thread (__thread); the SAVED previous
+// handlers are process-wide globals, written once at
+// install, so a fault on any thread chains to the real
+// previous handler. The Go side still serialises scans
+// with a mutex, so at most one guarded scan is in flight.
+//
+// Proven by committed tests on linux/amd64
+// (callbacks_guard_test.go): page-tail reads return
+// "no NUL", in-range NULs are found, and a genuine Go
+// nil-deref panic on a thread that never scanned — while
+// other threads hold the guard in guarded scans — is
+// still recovered by the runtime, with the process
+// staying alive. The handler MUST use SA_ONSTACK: without
+// it the Go runtime aborts the process ("non-Go code set
+// up signal handler without SA_ONSTACK flag", measured).
+// If the one-time install fails, scans fail closed.
 //
 // Limits, stated plainly: the guard covers the method-name
 // read only. Faults inside native plugin code reached
@@ -51,15 +68,21 @@ typedef struct {
 // is compiled on linux/darwin/freebsd but measured only on
 // linux; darwin/freebsd behaviour is unproven. Windows uses
 // a plain bounded scan (loader_windows.go) with the same
-// page-fault class unproven there.
+// page-fault class unproven there. The guard assumes no
+// other code replaces the SIGSEGV/SIGBUS handlers after
+// install; a native plugin that does so disables the
+// guard (trusted-model limit).
 
 static __thread sigjmp_buf castctl_probe_jmp;
 static __thread volatile const unsigned char *castctl_probe_ptr;
 static __thread volatile size_t castctl_probe_len;
 static __thread volatile int castctl_probe_active;
-static __thread struct sigaction castctl_probe_old_segv;
-static __thread struct sigaction castctl_probe_old_bus;
-static __thread volatile int castctl_probe_old_valid;
+// Process-wide, written once by castctl_probe_install:
+// sigaction is process-wide, so the saved previous
+// handlers must be visible on every thread.
+static struct sigaction castctl_probe_old_segv;
+static struct sigaction castctl_probe_old_bus;
+static volatile int castctl_probe_old_valid;
 
 static void castctl_probe_chain(int sig, siginfo_t *info, void *uc) {
 	struct sigaction *old = (sig == SIGBUS) ? &castctl_probe_old_bus : &castctl_probe_old_segv;
@@ -90,13 +113,12 @@ static void castctl_probe_handler(int sig, siginfo_t *info, void *uc) {
 
 // Returns 1 and sets *out when a NUL is found within max,
 // 0 when no NUL is found (including a fault inside the
-// range), and -1 when the handler cannot be installed
-// (caller fails closed).
+// range), and -1 when the one-time handler install failed
+// (caller fails closed). No sigaction happens here: the
+// handler was installed once by castctl_probe_install.
 static int castctl_guarded_cstring_len(const unsigned char *ptr, size_t max, size_t *out) {
 	size_t i;
 	size_t found = (size_t)-1;
-	struct sigaction sa, oldsegv, oldbus;
-	int have_bus;
 
 	if (castctl_probe_active) {
 		// Nested scan on this thread (cannot happen via
@@ -112,21 +134,9 @@ static int castctl_guarded_cstring_len(const unsigned char *ptr, size_t max, siz
 		}
 		return 0;
 	}
-	memset(&sa, 0, sizeof(sa));
-	sa.sa_sigaction = castctl_probe_handler;
-	sigemptyset(&sa.sa_mask);
-	sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
-	if (sigaction(SIGSEGV, &sa, &oldsegv) != 0) {
+	if (!castctl_probe_old_valid) {
 		return -1;
 	}
-	have_bus = (sigaction(SIGBUS, &sa, &oldbus) == 0);
-	if (!have_bus) {
-		memset(&oldbus, 0, sizeof(oldbus));
-		oldbus.sa_handler = SIG_DFL;
-	}
-	castctl_probe_old_segv = oldsegv;
-	castctl_probe_old_bus = oldbus;
-	castctl_probe_old_valid = 1;
 	castctl_probe_ptr = ptr;
 	castctl_probe_len = max;
 	castctl_probe_active = 1;
@@ -139,15 +149,41 @@ static int castctl_guarded_cstring_len(const unsigned char *ptr, size_t max, siz
 		}
 	}
 	castctl_probe_active = 0;
-	castctl_probe_old_valid = 0;
-	sigaction(SIGSEGV, &oldsegv, NULL);
-	if (have_bus) {
-		sigaction(SIGBUS, &oldbus, NULL);
-	}
 	if (found == (size_t)-1) {
 		return 0;
 	}
 	*out = found;
+	return 1;
+}
+
+// Installs the probe handler once and records the
+// previous handlers. Returns 1 on success, 0 when the
+// SIGSEGV handler cannot be installed (the guard is then
+// unusable and scans fail closed). A SIGBUS install
+// failure degrades silently: SIGBUS faults then go
+// straight to the previous handler unguarded. Called
+// once from Go init(), before any concurrent fault can
+// occur, so there is no install window for a fault to
+// land in.
+static int castctl_probe_install(void) {
+	struct sigaction sa, oldsegv, oldbus;
+	int have_bus;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_sigaction = castctl_probe_handler;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
+	if (sigaction(SIGSEGV, &sa, &oldsegv) != 0) {
+		return 0;
+	}
+	castctl_probe_old_segv = oldsegv;
+	castctl_probe_old_valid = 1;
+	have_bus = (sigaction(SIGBUS, &sa, &oldbus) == 0);
+	if (!have_bus) {
+		memset(&oldbus, 0, sizeof(oldbus));
+		oldbus.sa_handler = SIG_DFL;
+	}
+	castctl_probe_old_bus = oldbus;
 	return 1;
 }
 */
@@ -159,21 +195,31 @@ import (
 	"unsafe"
 )
 
-// boundedCStringMu serialises boundedCStringLen: sigaction
-// is process-wide, so two concurrent installs would race
-// each other's save/restore.
+// boundedCStringMu serialises boundedCStringLen so at
+// most one guarded scan is in flight at a time.
 var boundedCStringMu sync.Mutex
+
+// guardInstalled is set once by init from the C
+// one-time handler install. A failed install fails
+// every scan closed (boundedCStringLen returns false)
+// instead of reading an unguarded pointer.
+var guardInstalled bool
+
+func init() {
+	guardInstalled = C.castctl_probe_install() != 0
+}
 
 // boundedCStringLen scans at most max bytes at ptr for a NUL
 // and returns its offset. It reports false when no NUL
 // appears within the bound, so the host never reads an
 // unterminated method pointer unbounded (a plugin C bug —
 // a forgotten NUL — must not segfault the host through its
-// own callback API). The scan runs under a temporary
-// signal guard (see the C preamble): a fault inside the
-// scanned range reports "no NUL" instead of crashing the
-// host; faults outside the range chain to the previous
-// handler. A sigaction failure fails closed (false).
+// own callback API). The scan runs under the signal
+// guard installed once at init (see the C preamble): a
+// fault inside the scanned range reports "no NUL"
+// instead of crashing the host; faults outside the range
+// chain to the previous handler. A failed handler
+// install fails closed (false).
 func boundedCStringLen(ptr unsafe.Pointer, max int) (int, bool) {
 	if ptr == nil {
 		return 0, true
@@ -183,6 +229,9 @@ func boundedCStringLen(ptr unsafe.Pointer, max int) (int, bool) {
 	}
 	boundedCStringMu.Lock()
 	defer boundedCStringMu.Unlock()
+	if !guardInstalled {
+		return 0, false
+	}
 	var out C.size_t
 	rc := C.castctl_guarded_cstring_len((*C.uchar)(ptr), C.size_t(max), &out)
 	if rc <= 0 {

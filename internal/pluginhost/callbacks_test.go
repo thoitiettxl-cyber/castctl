@@ -36,11 +36,12 @@ func TestDispatchHostCallLevelSanitised(t *testing.T) {
 	}
 	// Message control chars (ESC, NUL, newline) are stripped
 	// or spaced: one host.log call must never forge a second
-	// log line.
+	// log line. An ESC-led CSI sequence leaves no "[31m"
+	// remnant behind either.
 	got = nil
 	req2, _ := json.Marshal(map[string]string{"level": "info", "message": "a\x1b[31mb\x00c\nd"})
 	h.dispatchHostCall("host.log", req2)
-	if len(got) != 1 || strings.Contains(got[0], "\x1b") || strings.Contains(got[0], "\x00") || strings.Contains(got[0], "\n") {
+	if len(got) != 1 || strings.Contains(got[0], "\x1b") || strings.Contains(got[0], "\x00") || strings.Contains(got[0], "\n") || strings.Contains(got[0], "[31m") {
 		t.Fatalf("message not sanitised: %q", got)
 	}
 }

@@ -398,7 +398,7 @@ instead of upstream schema 10; castctl files in
   rollback) → `host.go` lifecycle (reconfigure same path,
   quiesce-before-replace, rollback, fuse).
 - `internal/pluginhost/platform.go` (candidate dirs :308,
-  discovery :291, extension :99, ID rule :17, version
+  discovery :292, extension :99, ID rule :17, version
   comparison :218, file preference :204) →
   `discovery.go` (`Discover`, `PluginExtension`,
   `ValidatePluginID`).

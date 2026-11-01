@@ -83,6 +83,12 @@ type Desired struct {
 	// its credentials die with the host, and applies the
 	// plugin's declared cookie_hosts to it after each
 	// registration. Nil means no proxy is handed over.
+	// Ownership: the host adopts the proxy only when a
+	// registration succeeds (applyRegistration). If a
+	// fresh load fails (Open or register), the proxy is
+	// never adopted and stays caller-owned: the caller
+	// must close it. The host never closes a proxy it
+	// did not adopt.
 	EgressProxy *EgressProxy
 	// ManifestPath, when set, names a checksums.txt manifest the
 	// binary must verify against before it is loaded.
@@ -207,9 +213,17 @@ func (h *Host) Fused(tag string) (string, bool) {
 }
 
 // Loaded reports the registered plugin for tag, if any.
+// A fused tag is never reported Loaded, even when its
+// image is still resident: Loaded means callable, and
+// fused calls fail fast (see Call). Registration fields
+// are read under h.mu, the same mutex applyRegistration
+// writes them under.
 func (h *Host) Loaded(tag string) (LoadedPlugin, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if _, fused := h.fused[tag]; fused {
+		return LoadedPlugin{}, false
+	}
 	lp, ok := h.loaded[tag]
 	if !ok || !lp.registered {
 		return LoadedPlugin{}, false
@@ -283,6 +297,10 @@ func (h *Host) maybeCloseEgress(p *EgressProxy) {
 // stay mapped), closes adopted egress proxies (revoking
 // their credentials), removes this process's shadow
 // directory, and clears host state. It is idempotent.
+// Close serialises against ApplyConfig via applyMu: an
+// ApplyConfig racing Close can no longer install a plugin
+// after Close snapshot the state (a client Close would
+// never shut down and a proxy Close would never revoke).
 // Client Shutdown calls run OUTSIDE h.mu: a client may block
 // on an in-flight native call, and holding the host lock
 // across that would stall every other host operation.
@@ -290,6 +308,8 @@ func (h *Host) Close() {
 	if h == nil {
 		return
 	}
+	h.applyMu.Lock()
+	defer h.applyMu.Unlock()
 	h.mu.Lock()
 	var clients []Client
 	for tag, lp := range h.loaded {
@@ -573,8 +593,16 @@ func (h *Host) sendRegistration(ctx context.Context, lp *loadedPlugin, method st
 // applyRegistration stores a validated registration on lp
 // and applies its declared cookie hosts to the plugin's
 // egress proxy, if any. Cookie scoping is fail-closed: no
-// declaration means no injection.
+// declaration means no injection. Registration fields are
+// written under h.mu — the same mutex Loaded() reads them
+// under and maybeCloseEgress scans lp.egress under — so a
+// reconfigure cannot race a concurrent Loaded() or Call.
+// The egress side effects (adoption, scope update, release
+// of a superseded proxy) run after the lock is released:
+// AdoptEgress and maybeCloseEgress take their own locks,
+// and holding h.mu across them would deadlock.
 func (h *Host) applyRegistration(lp *loadedPlugin, d Desired, reg pluginabi.Registration, schema uint32) {
+	h.mu.Lock()
 	lp.metadata = reg.Metadata
 	lp.capabilities = reg.Capabilities
 	lp.schema = schema
@@ -583,16 +611,20 @@ func (h *Host) applyRegistration(lp *loadedPlugin, d Desired, reg pluginabi.Regi
 	lp.registered = true
 	oldEgress := lp.egress
 	if d.EgressProxy != nil {
-		h.AdoptEgress(d.EgressProxy)
 		lp.egress = d.EgressProxy
+	}
+	egress := lp.egress
+	h.mu.Unlock()
+	if d.EgressProxy != nil {
+		h.AdoptEgress(d.EgressProxy)
 	}
 	// Nil EgressProxy keeps the existing proxy (documented):
 	// the new registration's cookie scope still applies to
 	// it below.
-	if lp.egress != nil {
-		lp.egress.SetCookieHosts(reg.CookieHosts)
+	if egress != nil {
+		egress.SetCookieHosts(reg.CookieHosts)
 	}
-	if oldEgress != nil && oldEgress != lp.egress {
+	if oldEgress != nil && oldEgress != egress {
 		h.maybeCloseEgress(oldEgress)
 	}
 }
@@ -646,6 +678,15 @@ func (h *Host) Call(ctx context.Context, tag, method string, request []byte) ([]
 	h.mu.Lock()
 	lp, ok := h.loaded[tag]
 	fuseEntry, isFused := h.fused[tag]
+	var client Client
+	var path string
+	if ok && lp != nil {
+		// Snapshot the client and path under h.mu: they
+		// are immutable after loadOne, but no loadedPlugin
+		// field is read outside the lock.
+		client = lp.client
+		path = lp.path
+	}
 	h.mu.Unlock()
 	// A fused plugin is never re-called: fail fast with the
 	// stored fuse reason instead of invoking the plugin
@@ -654,23 +695,33 @@ func (h *Host) Call(ctx context.Context, tag, method string, request []byte) ([]
 	// tag with no loaded entry (rollback-failure deletion)
 	// reports fused, not "not loaded": the distinction
 	// matters, because a same-path load will skip.
-	if isFused && (!ok || fuseEntry.path == lp.path) {
+	if isFused && (!ok || fuseEntry.path == path) {
 		return nil, fmt.Errorf("plugin %q is fused: %s", tag, fuseEntry.reason)
 	}
-	if !ok || lp == nil || lp.client == nil {
+	if !ok || lp == nil || client == nil {
 		return nil, fmt.Errorf("plugin %q is not loaded", tag)
 	}
-	return h.callEnvelope(ctx, lp, method, request, tag)
+	return h.callEnvelopeClient(ctx, client, method, request, tag, path)
 }
 
-// callEnvelope is the guarded call (mirroring upstream
+// callEnvelope is the guarded call for a loadedPlugin
+// (registration, reconfigure, quiesce): lp.client and
+// lp.path are immutable after loadOne, so reading them
+// here cannot race applyRegistration's h.mu-guarded
+// writes. Call uses callEnvelopeClient with a snapshot
+// taken under h.mu instead.
+func (h *Host) callEnvelope(ctx context.Context, lp *loadedPlugin, method string, request []byte, tag string) ([]byte, error) {
+	return h.callEnvelopeClient(ctx, lp.client, method, request, tag, lp.path)
+}
+
+// callEnvelopeClient is the guarded call (mirroring upstream
 // client_guard.go:80-115: the call runs in a goroutine, a
 // recovered panic re-surfaces to the caller after the finish
 // hook, and ctx cancellation abandons the call without killing
 // the plugin thread). Here a recovered host-adapter panic
 // fuses the plugin instead of re-panicking: the host boundary,
 // not the CLI boundary, owns plugin panics.
-func (h *Host) callEnvelope(ctx context.Context, lp *loadedPlugin, method string, request []byte, tag string) ([]byte, error) {
+func (h *Host) callEnvelopeClient(ctx context.Context, client Client, method string, request []byte, tag, path string) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -686,14 +737,14 @@ func (h *Host) callEnvelope(ctx context.Context, lp *loadedPlugin, method string
 				result <- callResult{recovered: recovered}
 			}
 		}()
-		response, err := lp.client.Call(ctx, method, request)
+		response, err := client.Call(ctx, method, request)
 		result <- callResult{response: response, err: err}
 	}()
 	select {
 	case res := <-result:
 		if res.recovered != nil {
 			reason := fmt.Sprintf("%s panic: %T", method, res.recovered)
-			h.fuse(tag, reason, lp.path)
+			h.fuse(tag, reason, path)
 			return nil, fmt.Errorf("plugin %q: %s", tag, reason)
 		}
 		if res.err != nil {
@@ -705,7 +756,7 @@ func (h *Host) callEnvelope(ctx context.Context, lp *loadedPlugin, method string
 		// thread keeps running until it notices ctx. The
 		// plugin is fused so no further call is attempted
 		// on a hung image.
-		h.fuse(tag, "call timed out or cancelled: "+method, lp.path)
+		h.fuse(tag, "call timed out or cancelled: "+method, path)
 		return nil, ctx.Err()
 	}
 }
@@ -720,7 +771,12 @@ func parseEnvelope(response []byte, tag string) ([]byte, error) {
 	}
 	if !env.OK {
 		if env.Error != nil {
-			return nil, fmt.Errorf("plugin %q: %s: %s", tag, env.Error.Code, safePluginText(env.Error.Message))
+			// Both the code and the message are
+			// plugin-chosen: strip controls from both
+			// (safety N1) before the cap/redact path,
+			// so a forged newline cannot create a
+			// second output line downstream.
+			return nil, fmt.Errorf("plugin %q: %s: %s", tag, stripControlChars(env.Error.Code), safePluginText(stripControlChars(env.Error.Message)))
 		}
 		return nil, fmt.Errorf("plugin %q returned a failed envelope without an error", tag)
 	}
@@ -777,16 +833,7 @@ func (h *Host) dispatchHostCall(method string, request []byte) []byte {
 	// the message goes through the same cap-before-redact
 	// path as every other plugin-text surface (4096 with
 	// marker, secret-keyed shapes redacted).
-	message = strings.Map(func(r rune) rune {
-		switch r {
-		case '\n', '\r', '\t':
-			return ' '
-		}
-		if r < 0x20 || r == 0x7f {
-			return -1
-		}
-		return r
-	}, message)
+	message = stripControlChars(message)
 	message = safePluginText(message)
 	// The level is an allowlist, not free text: plugincheck
 	// prints it raw, so a level carrying a newline or ESC
