@@ -65,7 +65,6 @@ scripts/e2e.sh --config PATH <profile>... [--live-send] [--live-keeper] [--binar
 | A running Chrome with remote debugging, for CDP re-export | The re-export sub-check SKIP with reason. Never faked with a stub CDP server. |
 | Network to the release API, for a stamped `update --dry-run` | SKIP with reason. |
 
-
 Run with a normal environment: a warm Go build cache and the usual
 proxy variables. A sterile environment (cold cache, no proxy vars)
 can make live legs behave differently; headline counts are

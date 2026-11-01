@@ -118,7 +118,7 @@ SUPPLIED_DIR="$(dirname -- "$SUPPLIED_CONFIG")"
 
 # ---- required tools (fail fast) ---------------------------------------
 # python3, sha256sum and stat are required by every run (config
-# handling, hashing, mode checks). go, curl, unzip and ss are
+# handling, hashing, mode checks). go, curl and ss are
 # per-leg: a missing one SKIPs its leg with a reason instead of
 # failing the whole run. See docs/e2e.md prerequisites.
 for _tool in python3 sha256sum stat; do

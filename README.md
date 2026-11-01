@@ -366,8 +366,8 @@ builds fail may lack it.
 
 ### Running on a phone (Droidspaces)
 
-castctl runs on a phone inside a Droidspaces Linux container as a
-normal `linux/arm64` glibc binary. There is no separate Android build.
+castctl is intended to run on a phone inside a Droidspaces Linux container as a
+normal `linux/arm64` glibc binary. The in-container run itself has not been verified in this PR. There is no separate Android build.
 Set up Droidspaces first: a rooted phone (KernelSU recommended) with
 a kernel that has container support, then install a Linux container
 from the Droidspaces app and open a shell in it. See the Droidspaces
@@ -387,7 +387,7 @@ Verify the downloaded archive against its single entry in
 `checksums.txt` (the file lists all four release archives, so do
 not run `sha256sum -c` on the whole file with only one archive
 present), then extract it and install the binary into
-`/usr/local/bin` (or any directory on your `PATH`):
+`/usr/local/bin` (or any directory on your `PATH`). If verification fails, or `checksums.txt` is absent, stop here and do not extract or install the binary:
 
 ```sh
 grep "castctl_${TAG#v}_linux_arm64.tar.gz" checksums.txt | sha256sum -c -
@@ -399,7 +399,7 @@ castctl --version
 If the glibc binary will not run in your container (for example a
 musl-based container), use the static `_no-plugin` archive instead:
 `castctl_<version>_linux_arm64_no-plugin.tar.gz` from the same
-release.
+release. That build can never load plugins (see the Platforms note above).
 
 Config lives in one `config.json`. With no `--config` flag and no
 `CASTCTL_CONFIG` set, castctl reads
@@ -412,8 +412,8 @@ Never put tokens or cookies in chat, logs, or screenshots.
 To keep a long-running castctl process up without a service manager,
 run it in a simple restart loop in the container shell. The example
 below serves the web UI, which requires a `webui` block in
-`config.json` (with a token); without one, `webui serve` exits 2,
-so configure the block first:
+`config.json` (with a token, or `CASTCTL_WEBUI_KEY` set); without one, `webui serve` exits 2,
+so configure the block first. The loop restarts on any exit, including exit 2 and interrupt, so stop the loop itself deliberately when you want it to stop:
 
 ```sh
 while true; do

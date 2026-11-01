@@ -1118,8 +1118,8 @@ no SB-T source copied):
   Boss-decided): SB-T does NOT gate boot on its marker — its
   `service.sh` starts unconditionally every boot, so a stop
   does not survive reboot and no desired state is reported.
-  Castctl DOES gate boot and watchdog starts on the marker
-  and reports `desired: on|off` in status.
+  Castctl DID gate boot and watchdog starts on the marker
+  and reported `desired: on|off` in status.
 - The former `module/webroot/index.html`: a controller page
   calling the backend through the `kernelsu` exec bridge with
   the first-`{` extraction and `payload.ok` branching, polling
