@@ -7,6 +7,7 @@ package commands
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -111,6 +112,14 @@ type telegramTurnRunner struct {
 	// resume-follow also registers its preview here.
 	liveMu sync.Mutex
 	live   map[int64]*streamPreview
+
+	// resumed records, per chat, the AfterSeq of the last
+	// resume-follow that reached its wait: a stale resume
+	// triple (an approval button tapped after its turn
+	// already resumed) must not re-fire from the same seq.
+	// Process-memory only, like the claim state.
+	resumeMu sync.Mutex
+	resumed  map[int64]int64
 }
 
 type telegramStopEntry struct {
@@ -125,7 +134,26 @@ func newTelegramTurnRunner(deps telegramTurnDeps) *telegramTurnRunner {
 	if deps.ackTimeout <= 0 {
 		deps.ackTimeout = 30 * time.Second
 	}
-	return &telegramTurnRunner{deps: deps, stops: map[int64]*telegramStopEntry{}, active: map[int64]struct{}{}, live: map[int64]*streamPreview{}}
+	return &telegramTurnRunner{deps: deps, stops: map[int64]*telegramStopEntry{}, active: map[int64]struct{}{}, live: map[int64]*streamPreview{}, resumed: map[int64]int64{}}
+}
+
+// clearActive releases a chat's active-turn slot.
+func (r *telegramTurnRunner) clearActive(chatID int64) {
+	r.activeMu.Lock()
+	delete(r.active, chatID)
+	r.activeMu.Unlock()
+}
+
+// recoverTurnPanic logs a panic from a turn goroutine instead of
+// crashing the process: turn goroutines run outside the
+// dispatcher's per-update recover, so a panic here (for example
+// a callback-registry Register failure while building buttons)
+// must be contained. The defers in runTextTurn/runResume still
+// run during the unwind, so turn bookkeeping is released.
+func (r *telegramTurnRunner) recoverTurnPanic(chatID int64) {
+	if rec := recover(); rec != nil {
+		r.deps.logger.Error("telegram turn goroutine panicked", "chat_id", chatID, "panic", fmt.Sprint(rec))
+	}
 }
 
 // liveTurn returns the running turn's preview for a chat, if any.
@@ -167,15 +195,82 @@ func (r *telegramTurnRunner) startTurn(ctx context.Context, chatID int64, text s
 	r.active[chatID] = struct{}{}
 	r.activeMu.Unlock()
 	go func() {
-		defer func() {
-			r.activeMu.Lock()
-			delete(r.active, chatID)
-			r.activeMu.Unlock()
-		}()
+		defer r.clearActive(chatID)
+		defer r.recoverTurnPanic(chatID)
 		if err := r.runTextTurn(ctx, chatID, text); err != nil {
 			r.deps.logger.Error("telegram turn failed", "err", logging.SummarizeErr(err))
 		}
 	}()
+}
+
+// resumeSlotWait bounds how long a scheduled resume waits for
+// the chat's active-turn slot: the usual holder is the deciding
+// turn itself, still in teardown (watermark save) when its
+// buttons were just shown, so a tap in that window must wait
+// out the teardown rather than drop the follow. A genuinely
+// busy chat (a new turn started) never frees the slot in time,
+// and the stale-triple guard drops the resume then.
+const resumeSlotWait = 5 * time.Second
+
+// startResume schedules a resume-follow in its own goroutine
+// under the same one-turn-per-chat guard as startTurn, so the
+// dispatcher's per-chat worker stays free for /stop while the
+// follow runs (a synchronous follow would block the worker for
+// up to the 6h turn timeout, and /stop sent mid-follow would
+// queue behind the very turn it must interrupt). The slot is
+// waited for briefly inside the goroutine: the deciding turn
+// usually still holds it while its final edit's watermark save
+// completes, and dropping the follow in that window would
+// strand the decision (the buttons are cleared after a
+// decide). The decide→resume ordering is preserved — the
+// decision already happened in cbDecide before this is called.
+// A stale triple is dropped: if a turn is already active for
+// the chat when the slot frees, or a follow already ran from
+// this AfterSeq, the resume does not re-fire.
+func (r *telegramTurnRunner) startResume(ctx context.Context, info telegram.ResumeInfo) error {
+	chatID := info.ChatID
+	go func() {
+		acquired := false
+		defer func() {
+			if acquired {
+				r.clearActive(chatID)
+			}
+		}()
+		defer r.recoverTurnPanic(chatID)
+		deadline := time.Now().Add(resumeSlotWait)
+		for {
+			r.activeMu.Lock()
+			_, busy := r.active[chatID]
+			if !busy {
+				r.active[chatID] = struct{}{}
+				acquired = true
+				r.activeMu.Unlock()
+				break
+			}
+			r.activeMu.Unlock()
+			if ctx.Err() != nil || time.Now().After(deadline) {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		if r.deps.bot.HasActiveTurn(chatID) {
+			return
+		}
+		r.resumeMu.Lock()
+		last, seen := r.resumed[chatID]
+		r.resumeMu.Unlock()
+		if seen && info.AfterSeq <= last {
+			return
+		}
+		if err := r.runResume(ctx, info); err != nil {
+			r.deps.logger.Error("telegram resume failed", "err", logging.SummarizeErr(err))
+		}
+	}()
+	return nil
 }
 
 // registerStop records a turn's cancel func; unregisterStop
@@ -312,8 +407,10 @@ func (r *telegramTurnRunner) runTextTurn(ctx context.Context, chatID int64, text
 // runResume follows a turn after a manual approval decision,
 // with no new delivery (Python resume_turn, tgbot.py:1205-1222):
 // the bubble says Muse is continuing, and the wait follows from
-// after_seq. It is wired as the bot's ResumeFunc in A3; the chat
-// comes from info.ChatID (set by cbDecide from the update).
+// after_seq. It runs on the goroutine startResume schedules, under
+// the active-turn guard; it must never be called synchronously on
+// the dispatcher's per-chat worker. The chat comes from
+// info.ChatID (set by cbDecide from the update).
 func (r *telegramTurnRunner) runResume(ctx context.Context, info telegram.ResumeInfo) error {
 	chatID := info.ChatID
 	scope, title := info.SessionID, info.Title
@@ -354,6 +451,13 @@ func (r *telegramTurnRunner) runResume(ctx context.Context, info telegram.Resume
 		editor.editFinal(turnErrorText(err, entry.stopped.Load()))
 		return nil
 	}
+	// The follow reached its wait: record the seq so a stale
+	// re-tap of another button from the same turn cannot
+	// re-fire this follow. A failed follow records nothing,
+	// so it stays retryable.
+	r.resumeMu.Lock()
+	r.resumed[chatID] = afterSeq
+	r.resumeMu.Unlock()
 	editor.finish()
 	if err := r.deliverFinal(turnCtx, chatID, bubbleID, scope, title, afterSeq, res, entry.stopped.Load()); err != nil {
 		return err

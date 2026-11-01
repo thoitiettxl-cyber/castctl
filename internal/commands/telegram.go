@@ -218,7 +218,7 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 			return telegramPendingApprovals(ctx, rt)
 		},
 		Resume: func(ctx context.Context, info telegram.ResumeInfo) error {
-			return runner.runResume(ctx, info)
+			return runner.startResume(ctx, info)
 		},
 		// Command dispatch (A4) routes "/" messages to the
 		// command table and everything else to a turn. The

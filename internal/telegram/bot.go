@@ -905,7 +905,12 @@ func (b *Bot) cbDecide(ctx context.Context, chatID int64, mid int, entry Callbac
 		// Failure swallowed, as in Python (try/except pass).
 		_ = b.clearMarkup(ctx, chatID, mid)
 	}
-	if entry.AfterSeq != nil && !b.HasActiveTurn(chatID) && b.resume != nil {
+	if entry.AfterSeq != nil && b.resume != nil {
+		// The resume is scheduled, not run here: startResume
+		// guards the active-turn slot and drops stale
+		// triples, so no HasActiveTurn pre-check is needed
+		// (a tap during the deciding turn's teardown must
+		// wait the slot out, not drop the follow).
 		if err := b.resume(ctx, ResumeInfo{ChatID: chatID, SessionID: entry.SessionID, Title: entry.Title, AfterSeq: *entry.AfterSeq}); err != nil {
 			return b.scrubErr(err)
 		}

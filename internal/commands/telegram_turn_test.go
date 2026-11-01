@@ -60,15 +60,17 @@ type telegramTurnFakeGateway struct {
 	approvalsFallback bool
 	approvalsErr      error
 	// Command-path scripts.
-	sessionsScript     []any
-	unreadScript       any
-	identityScript     any
-	sessionStartScript map[string]any
-	sessionStartErr    error
-	sessionOpCalls     []map[string]any
-	subScripts         []turnSubScript
-	blockSub           chan struct{}
-	noAck              bool
+	sessionsScript      []any
+	unreadScript        any
+	identityScript      any
+	sessionStartScript  map[string]any
+	sessionStartErr     error
+	sessionOpCalls      []map[string]any
+	subScripts          []turnSubScript
+	blockSub            chan struct{}
+	blockCallIdx        int // subscribe call index to block; 0 (first) by default
+	exhaustedSubscribes int
+	noAck               bool
 }
 
 // decideRecord is one egress.approval.decide call.
@@ -208,8 +210,9 @@ func (f *telegramTurnFakeGateway) SubscribeRaw(ctx context.Context, method strin
 	f.subscribeCalls++
 	callIdx := f.subscribeCalls - 1
 	block := f.blockSub
+	blockIdx := f.blockCallIdx
 	f.mu.Unlock()
-	if block != nil && callIdx == 0 {
+	if block != nil && callIdx == blockIdx {
 		select {
 		case <-block:
 		case <-ctx.Done():
@@ -220,6 +223,11 @@ func (f *telegramTurnFakeGateway) SubscribeRaw(ctx context.Context, method strin
 	var script turnSubScript
 	if callIdx < len(f.subScripts) {
 		script = f.subScripts[callIdx]
+	} else {
+		// Exhaustion is a test-authoring error, not a script:
+		// count it so a hang here is diagnosable instead of a
+		// silent resubscribe loop (see TestTelegramRunFreshReplyPerTurn).
+		f.exhaustedSubscribes++
 	}
 	// Append the reply to the history log BEFORE feeding, so
 	// the settle history read sees it.
@@ -291,6 +299,15 @@ func (f *telegramTurnFakeGateway) counts() (history, streams, subscribes, cancel
 	return f.historyCalls, f.openStreams, f.subscribeCalls, f.cancelCalls
 }
 
+// exhausted returns how many SubscribeRaw calls found no script
+// left: a positive count on a hung test means the fake ran out
+// of scripts, not that the turn logic stalled.
+func (f *telegramTurnFakeGateway) exhausted() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.exhaustedSubscribes
+}
+
 func (f *telegramTurnFakeGateway) decideHistory() []decideRecord {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -331,6 +348,13 @@ func runTelegramBot(t *testing.T, gw *telegramTurnFakeGateway, batches []string)
 }
 
 func runTelegramBotGated(t *testing.T, gw *telegramTurnFakeGateway, batches []string, gates []func(*cmdFakeTelegram) bool) (*telegramBotHarness, context.CancelFunc, chan int) {
+	return runTelegramBotWithConfig(t, gw, batches, telegramTestConfig(), gates)
+}
+
+// runTelegramBotWithConfig is runTelegramBotGated with an
+// explicit config JSON: tests that need toggles other than the
+// shared config's (auto_approve on) use it.
+func runTelegramBotWithConfig(t *testing.T, gw *telegramTurnFakeGateway, batches []string, configJSON string, gates []func(*cmdFakeTelegram) bool) (*telegramBotHarness, context.CancelFunc, chan int) {
 	t.Helper()
 	fake := &cmdFakeTelegram{batches: batches, gates: gates}
 	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
@@ -347,7 +371,7 @@ func runTelegramBotGated(t *testing.T, gw *telegramTurnFakeGateway, batches []st
 			return dialFake(ctx, network, addr)
 		},
 	}}
-	home, configFile := testHome(t, telegramTestConfig())
+	home, configFile := testHome(t, configJSON)
 	env := &Env{Stdout: &strings.Builder{}, Stderr: &strings.Builder{}, Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile})}
 	muse := conn.New(func(context.Context, conn.Config) (conn.Gateway, error) { return gw, nil })
 	env.BuildRuntime = func(ctx context.Context, loc *profile.ConfigLocation, prof *profile.Profile, env *Env) (*Runtime, error) {
@@ -408,6 +432,187 @@ func drainTurns(fake *cmdFakeTelegram) {
 			lastSends, lastEdits = sends, edits
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// waitForTurnEnd stages on turn completion: the watermark
+// advanced past prev in the state file (the save is the turn
+// goroutine's last act before it clears the active slot),
+// followed by a short quiet window for the slot clear.
+// Staging on edit visibility instead races the teardown
+// window: the final edit lands before the watermark save and
+// the active-slot clear, so a second update staged on the
+// edit can get the busy reply and never run a turn.
+func waitForTurnEnd(t *testing.T, h *telegramBotHarness, prev int64) {
+	t.Helper()
+	waitForTimeout(t, "turn-end watermark", 10*time.Second, func() bool {
+		if !h.hasStateFile() {
+			return false
+		}
+		var path string
+		_ = filepath.Walk(h.homeDir, func(p string, info os.FileInfo, err error) error {
+			if err == nil && info.Name() == "telegram-state.json" {
+				path = p
+			}
+			return nil
+		})
+		if path == "" {
+			return false
+		}
+		store, _, err := telegram.LoadStateStore(filepath.Dir(path))
+		if err != nil {
+			return false
+		}
+		return store.Watermark(telegram.WatermarkKey("")) > prev
+	})
+	time.Sleep(150 * time.Millisecond)
+}
+
+// TestTelegramResumeAsyncStopRunsMidFollow is the R2
+// acceptance test for the async resume: the resume-follow
+// runs in its own goroutine under the active-turn guard, so a
+// /stop sent while the follow is blocked in its wait is
+// processed promptly (the dispatcher worker is free), and a
+// concurrent plain message gets the busy reply (the guard
+// holds) instead of starting a second turn.
+func TestTelegramResumeAsyncStopRunsMidFollow(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	approvalJSON, err := json.Marshal(approvalFixture("A1", "Run tests", "allow_always", "allow_once"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw.subScripts = []turnSubScript{
+		{
+			replyText:       "Waiting",
+			deltas:          []string{"Wa"},
+			approvalRecords: []string{fmt.Sprintf(`{"event":"approvals.snapshot","payload":{"pending_approvals":[%s]}}`, approvalJSON)},
+		},
+		{replyText: "Continued", deltas: []string{"Co"}},
+	}
+	// Block the resume follow's subscribe (call index 1);
+	// turn 1's subscribe (index 0) runs free. The config
+	// leaves auto_approve off (unlike the shared test
+	// config): the approval must surface as buttons, not
+	// be auto-decided, or there is no tap to resume from.
+	gw.blockSub = make(chan struct{})
+	gw.blockCallIdx = 1
+	noAutoConfig := `{"default_profile":"default","profiles":{"default":{},"muse01":{}},"telegram":{"profile":"muse01","token":"` + telegramTestToken + `","allowed_user_ids":[111]}}`
+	h, cancel, codeCh := runTelegramBotWithConfig(t, gw, []string{telegramUpdate(1, 111, "run tests")}, noAutoConfig, nil)
+	defer cancel()
+
+	// Stage the tap only after turn 1 ended: the buttons are
+	// attached to the final edit, which lands before the
+	// watermark save and active-slot clear.
+	waitFor(t, "approval note edit", func() bool {
+		for _, e := range h.fake.editTexts() {
+			if strings.Contains(e, "Approval: Run tests") {
+				return true
+			}
+		}
+		return false
+	})
+	waitForTurnEnd(t, h, 0)
+	// Callback data is an opaque "c:<token>": match the
+	// decide button by its label, not by the data.
+	data := ""
+	waitFor(t, "decide button on the final edit", func() bool {
+		h.fake.mu.Lock()
+		markups := append([]string(nil), h.fake.editMarkupJSON...)
+		h.fake.mu.Unlock()
+		for _, m := range markups {
+			var markup struct {
+				InlineKeyboard [][]struct {
+					Text         string `json:"text"`
+					CallbackData string `json:"callback_data"`
+				} `json:"inline_keyboard"`
+			}
+			if json.Unmarshal([]byte(m), &markup) != nil {
+				continue
+			}
+			for _, row := range markup.InlineKeyboard {
+				for _, btn := range row {
+					if btn.Text == "✅ Always allow" {
+						data = btn.CallbackData
+						return true
+					}
+				}
+			}
+		}
+		return false
+	})
+	h.fake.setBatches([]string{callbackUpdate(2, data, 1)})
+	// The decide confirm + resume bubble prove cbDecide ran
+	// and the follow started; the follow then blocks in its
+	// subscribe, holding the active guard.
+	waitFor(t, "decide confirm + resume bubble", func() bool {
+		foundConfirm, foundBubble := false, false
+		h.fake.mu.Lock()
+		sends := append([]string(nil), h.fake.sends...)
+		h.fake.mu.Unlock()
+		for _, s := range sends {
+			if strings.Contains(s, "Always allowed") {
+				foundConfirm = true
+			}
+			if strings.Contains(s, "Muse is continuing") {
+				foundBubble = true
+			}
+		}
+		return foundConfirm && foundBubble
+	})
+	// A concurrent plain message must get the busy reply:
+	// the resume follow holds the one-turn-per-chat guard.
+	h.fake.setBatches([]string{telegramUpdate(3, 111, "second message")})
+	waitFor(t, "busy reply for the concurrent message", func() bool {
+		h.fake.mu.Lock()
+		sends := append([]string(nil), h.fake.sends...)
+		h.fake.mu.Unlock()
+		for _, s := range sends {
+			if strings.Contains(s, "already working") {
+				return true
+			}
+		}
+		return false
+	})
+	// /stop sent while the follow is blocked must be
+	// processed promptly: the worker is not behind the
+	// follow. 2s is far below the follow's 6h-class wait.
+	stopSent := time.Now()
+	h.fake.setBatches([]string{telegramUpdate(4, 111, "/stop")})
+	waitForTimeout(t, "stop reply while resume blocked", 2*time.Second, func() bool {
+		h.fake.mu.Lock()
+		sends := append([]string(nil), h.fake.sends...)
+		h.fake.mu.Unlock()
+		for _, s := range sends {
+			if strings.Contains(s, "Stopped Muse") {
+				return true
+			}
+		}
+		return false
+	})
+	if elapsed := time.Since(stopSent); elapsed > 2*time.Second {
+		t.Errorf("/stop took %v while the resume follow was blocked; want prompt processing", elapsed)
+	}
+	// Release the follow: its context was cancelled by the
+	// stop, so it ends stopped, not continued.
+	close(gw.blockSub)
+	waitFor(t, "stopped final edit", func() bool {
+		for _, e := range h.fake.editTexts() {
+			if strings.Contains(e, "Stopped.") {
+				return true
+			}
+		}
+		return false
+	})
+	cancel()
+	if code := <-codeCh; code != 130 {
+		t.Errorf("bot exit code = %d, want 130 (interrupted)", code)
+	}
+	if calls := gw.decideHistory(); len(calls) != 1 {
+		t.Fatalf("decide calls = %+v, want exactly 1", calls)
+	}
+	if _, _, subs, _ := gw.counts(); subs < 2 {
+		t.Errorf("subscribe calls = %d, want at least 2 (turn + resume follow)", subs)
 	}
 }
 
