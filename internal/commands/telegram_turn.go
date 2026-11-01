@@ -114,13 +114,29 @@ type telegramTurnRunner struct {
 	liveMu sync.Mutex
 	live   map[int64]*streamPreview
 
-	// resumed records, per chat, the AfterSeq of the last
-	// resume-follow that reached its wait: a stale resume
-	// triple (an approval button tapped after its turn
-	// already resumed) must not re-fire from the same seq.
-	// Process-memory only, like the claim state.
+	// resumed records, per (chat, session), the AfterSeq of
+	// the last resume-follow that reached its wait: a stale
+	// resume triple (an approval button tapped after its
+	// turn already resumed) must not re-fire from the same
+	// seq. The key includes the session because AfterSeq is
+	// per-session (a main session and a side session in the
+	// same chat can legitimately share a seq value): keying
+	// by chat alone would drop the second session's follow.
+	// The guard survives a session switch per session: each
+	// session keeps its own last-resumed seq, so switching
+	// back to a session whose follow already ran does not
+	// re-fire it, and a fresh session is never blocked by
+	// another session's record. Process-memory only, like
+	// the claim state.
 	resumeMu sync.Mutex
-	resumed  map[int64]int64
+	resumed  map[resumeGuardKey]int64
+}
+
+// resumeGuardKey identifies one session's resume stream
+// within a Telegram chat.
+type resumeGuardKey struct {
+	chatID    int64
+	sessionID string
 }
 
 type telegramStopEntry struct {
@@ -135,7 +151,7 @@ func newTelegramTurnRunner(deps telegramTurnDeps) *telegramTurnRunner {
 	if deps.ackTimeout <= 0 {
 		deps.ackTimeout = 30 * time.Second
 	}
-	return &telegramTurnRunner{deps: deps, stops: map[int64]*telegramStopEntry{}, active: map[int64]struct{}{}, live: map[int64]*streamPreview{}, resumed: map[int64]int64{}}
+	return &telegramTurnRunner{deps: deps, stops: map[int64]*telegramStopEntry{}, active: map[int64]struct{}{}, live: map[int64]*streamPreview{}, resumed: map[resumeGuardKey]int64{}}
 }
 
 // clearActive releases a chat's active-turn slot.
@@ -239,6 +255,8 @@ func (r *telegramTurnRunner) startResume(ctx context.Context, info telegram.Resu
 		}()
 		defer r.recoverTurnPanic(chatID)
 		deadline := time.Now().Add(resumeSlotWait)
+		timer := time.NewTimer(10 * time.Millisecond)
+		defer timer.Stop()
 		for {
 			r.activeMu.Lock()
 			_, busy := r.active[chatID]
@@ -249,22 +267,34 @@ func (r *telegramTurnRunner) startResume(ctx context.Context, info telegram.Resu
 				break
 			}
 			r.activeMu.Unlock()
-			if ctx.Err() != nil || time.Now().After(deadline) {
+			if ctx.Err() != nil {
+				// Shutdown cancelled the wait: log only, no
+				// user notice (the bot is going away).
+				r.logResumeDrop(info, "shutdown-cancelled")
 				return
 			}
+			if time.Now().After(deadline) {
+				r.dropResume(ctx, info, "slot-wait-expired")
+				return
+			}
+			timer.Reset(10 * time.Millisecond)
 			select {
 			case <-ctx.Done():
+				r.logResumeDrop(info, "shutdown-cancelled")
 				return
-			case <-time.After(10 * time.Millisecond):
+			case <-timer.C:
 			}
 		}
 		if r.deps.bot.HasActiveTurn(chatID) {
+			r.dropResume(ctx, info, "turn-active")
 			return
 		}
+		key := resumeGuardKey{chatID: chatID, sessionID: info.SessionID}
 		r.resumeMu.Lock()
-		last, seen := r.resumed[chatID]
+		last, seen := r.resumed[key]
 		r.resumeMu.Unlock()
 		if seen && info.AfterSeq <= last {
+			r.dropResume(ctx, info, "stale-resume")
 			return
 		}
 		if err := r.runResume(ctx, info); err != nil {
@@ -272,6 +302,30 @@ func (r *telegramTurnRunner) startResume(ctx context.Context, info telegram.Resu
 		}
 	}()
 	return nil
+}
+
+// logResumeDrop records a dropped resume-follow with the
+// chat, session, AfterSeq, and reason: every drop is
+// observable in the log, never silent.
+func (r *telegramTurnRunner) logResumeDrop(info telegram.ResumeInfo, reason string) {
+	r.deps.logger.Warn("telegram resume dropped",
+		"chat_id", info.ChatID,
+		"session_id", info.SessionID,
+		"after_seq", info.AfterSeq,
+		"reason", reason)
+}
+
+// dropResume logs the drop and tells the chat: the user
+// already saw "Allowed" and the buttons clear, so a silent
+// drop would strand the decision with no way forward. The
+// notice is best-effort (a failed send must not mask the
+// log) and the follow is NOT re-queued: dropping is the
+// documented guard semantics.
+func (r *telegramTurnRunner) dropResume(ctx context.Context, info telegram.ResumeInfo, reason string) {
+	r.logResumeDrop(info, reason)
+	if _, err := r.deps.bot.Send(ctx, info.ChatID, "⚠️ Follow dropped ("+reason+"). Send a message to continue.", telegram.SendOptions{Silent: true}); err != nil {
+		r.deps.logger.Warn("telegram resume-drop notice failed", "err", logging.SummarizeErr(err))
+	}
 }
 
 // registerStop records a turn's cancel func; unregisterStop
@@ -457,7 +511,7 @@ func (r *telegramTurnRunner) runResume(ctx context.Context, info telegram.Resume
 	// re-fire this follow. A failed follow records nothing,
 	// so it stays retryable.
 	r.resumeMu.Lock()
-	r.resumed[chatID] = afterSeq
+	r.resumed[resumeGuardKey{chatID: chatID, sessionID: info.SessionID}] = afterSeq
 	r.resumeMu.Unlock()
 	editor.finish()
 	if err := r.deliverFinal(turnCtx, chatID, bubbleID, scope, title, afterSeq, res, entry.stopped.Load()); err != nil {

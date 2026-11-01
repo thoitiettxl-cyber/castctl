@@ -335,6 +335,22 @@ func (f *telegramTurnFakeGateway) addEvent(ev map[string]any) {
 	f.events = append(f.events, ev)
 }
 
+// resetHistory restores the fake's event log to its initial
+// state (one baseline event, next seq 10), so a later turn
+// observes the same user seq as an earlier turn: the
+// session-keyed resume-guard repro needs equal AfterSeq
+// values across two sessions in one chat (AfterSeq is
+// per-session, and the fake's log is global).
+func (f *telegramTurnFakeGateway) resetHistory() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = []map[string]any{{
+		"event_name": "message.user", "seq": int64(9),
+		"payload": map[string]any{"display_text": "earlier"},
+	}}
+	f.nextSeq = 10
+}
+
 // eventsSnapshot returns a copy of the history log.
 func (f *telegramTurnFakeGateway) eventsSnapshot() []map[string]any {
 	f.mu.Lock()
@@ -778,6 +794,372 @@ func TestTelegramResumeDroppedWhileTurnActive(t *testing.T) {
 	}
 	if calls := gw.decideHistory(); len(calls) != 1 {
 		t.Fatalf("decide calls = %+v, want exactly 1", calls)
+	}
+}
+
+// decideButtonData polls the fake's edit markups for the
+// callback data of the newest "✅ Always allow" button whose
+// token differs from exclude: the newest match wins, so a
+// second turn's buttons are found even when an earlier
+// turn's buttons are still recorded (a stale token would
+// answer expired and decide nothing).
+func decideButtonData(t *testing.T, h *telegramBotHarness, exclude string) string {
+	t.Helper()
+	data := ""
+	waitFor(t, "decide button on the final edit", func() bool {
+		h.fake.mu.Lock()
+		markups := append([]string(nil), h.fake.editMarkupJSON...)
+		h.fake.mu.Unlock()
+		for i := len(markups) - 1; i >= 0; i-- {
+			var markup struct {
+				InlineKeyboard [][]struct {
+					Text         string `json:"text"`
+					CallbackData string `json:"callback_data"`
+				} `json:"inline_keyboard"`
+			}
+			if json.Unmarshal([]byte(markups[i]), &markup) != nil {
+				continue
+			}
+			for _, row := range markup.InlineKeyboard {
+				for _, btn := range row {
+					if btn.Text == "✅ Always allow" {
+						if btn.CallbackData == exclude {
+							return false
+						}
+						data = btn.CallbackData
+						return true
+					}
+				}
+			}
+		}
+		return false
+	})
+	return data
+}
+
+// TestTelegramResumeGuardKeyedBySession is the R-M1 repro:
+// the same Telegram chat runs a main-session turn and a side
+// session turn whose AfterSeq values are equal (the fake
+// history is reset between them, mirroring per-session seq
+// spaces). Both end needs_approval and both Allow taps must
+// run their follows: the stale-resume guard is keyed by
+// (chat, session), not by chat alone.
+func TestTelegramResumeGuardKeyedBySession(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	approval1, err := json.Marshal(approvalFixture("A1", "Run tests", "allow_always", "allow_once"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval2, err := json.Marshal(approvalFixture("A2", "Side approval", "allow_always", "allow_once"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw.sessionStartScript = map[string]any{"session_id": "sess-1"}
+	gw.subScripts = []turnSubScript{
+		{
+			replyText:       "Waiting",
+			deltas:          []string{"Wa"},
+			approvalRecords: []string{fmt.Sprintf(`{"event":"approvals.snapshot","payload":{"pending_approvals":[%s]}}`, approval1)},
+		},
+		{replyText: "Continued", deltas: []string{"Co"}},
+		{
+			replyText:       "Side waiting",
+			deltas:          []string{"Si"},
+			approvalRecords: []string{fmt.Sprintf(`{"event":"approvals.snapshot","payload":{"pending_approvals":[%s]}}`, approval2)},
+		},
+		{replyText: "Side continued", deltas: []string{"Sc"}},
+	}
+	h, cancel, codeCh := runTelegramBotWithConfig(t, gw, []string{telegramUpdate(1, 111, "run tests")}, telegramTestConfigNoAuto(), nil)
+	defer cancel()
+
+	waitFor(t, "approval note edit", func() bool {
+		for _, e := range h.fake.editTexts() {
+			if strings.Contains(e, "Approval: Run tests") {
+				return true
+			}
+		}
+		return false
+	})
+	waitForTurnEnd(t, h, 0)
+	data1 := decideButtonData(t, h, "")
+	h.fake.setBatches([]string{callbackUpdate(2, data1, 1)})
+	waitFor(t, "first resume bubble", func() bool {
+		for _, s := range sendsOf(h) {
+			if strings.Contains(s, "Muse is continuing") {
+				return true
+			}
+		}
+		return false
+	})
+	waitFor(t, "first follow final edit", func() bool {
+		for _, e := range h.fake.editTexts() {
+			if strings.Contains(e, "Continued") {
+				return true
+			}
+		}
+		return false
+	})
+	// Reset the fake history so the side session's turn
+	// observes the same user seq as the main turn.
+	gw.resetHistory()
+	h.fake.setBatches([]string{telegramUpdate(3, 111, "/new Side")})
+	waitFor(t, "new side chat reply", func() bool {
+		for _, s := range sendsOf(h) {
+			if strings.Contains(s, "Now in a new side chat") {
+				return true
+			}
+		}
+		return false
+	})
+	h.fake.setBatches([]string{telegramUpdate(4, 111, "side task")})
+	waitFor(t, "side approval note edit", func() bool {
+		for _, e := range h.fake.editTexts() {
+			if strings.Contains(e, "Approval: Side approval") {
+				return true
+			}
+		}
+		return false
+	})
+	// Stage the second tap on edit visibility: if it lands
+	// in the side turn's teardown window, startResume's
+	// slot-wait absorbs it (up to 5s).
+	data2 := decideButtonData(t, h, data1)
+	h.fake.setBatches([]string{callbackUpdate(5, data2, 1)})
+	waitFor(t, "two resume bubbles", func() bool {
+		n := 0
+		for _, s := range sendsOf(h) {
+			if strings.Contains(s, "Muse is continuing") {
+				n++
+			}
+		}
+		return n >= 2
+	})
+	waitFor(t, "second follow subscribed", func() bool {
+		_, _, subs, _ := gw.counts()
+		return subs >= 4
+	})
+	waitFor(t, "second follow final edit", func() bool {
+		for _, e := range h.fake.editTexts() {
+			if strings.Contains(e, "Side continued") {
+				return true
+			}
+		}
+		return false
+	})
+	cancel()
+	if code := <-codeCh; code != 130 {
+		t.Errorf("bot exit code = %d, want 130 (interrupted)", code)
+	}
+	calls := gw.decideHistory()
+	if len(calls) != 2 {
+		t.Fatalf("decide calls = %+v, want exactly 2 (A1 + A2)", calls)
+	}
+	if _, _, subs, _ := gw.counts(); subs != 4 {
+		t.Errorf("subscribe calls = %d, want exactly 4 (2 turns + 2 follows)", subs)
+	}
+}
+
+// lockedWriter is a goroutine-safe strings.Builder for
+// capturing slog output from the bot's concurrent workers.
+type lockedWriter struct {
+	mu sync.Mutex
+	sb strings.Builder
+}
+
+func (w *lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.sb.Write(p)
+}
+
+func (w *lockedWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.sb.String()
+}
+
+// TestTelegramResumeDropLogsAndNotifies is the R-M3 repro: a
+// decide tap that arrives while another turn holds the chat's
+// active slot schedules a follow that drops after the 5s
+// slot-wait bound. The drop must be observable: a warn log
+// naming chat, session, AfterSeq, and reason, plus a
+// user-visible notice in the chat. No t.Parallel: the test
+// replaces the process default logger to capture the drop
+// line, and must not run alongside other tests' log output.
+func TestTelegramResumeDropLogsAndNotifies(t *testing.T) {
+	var logs lockedWriter
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(old)
+
+	gw := newTelegramTurnFakeGateway()
+	approvalJSON, err := json.Marshal(approvalFixture("A1", "Run tests", "allow_always", "allow_once"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw.subScripts = []turnSubScript{
+		{
+			replyText:       "Waiting",
+			deltas:          []string{"Wa"},
+			approvalRecords: []string{fmt.Sprintf(`{"event":"approvals.snapshot","payload":{"pending_approvals":[%s]}}`, approvalJSON)},
+		},
+		{replyText: "Second task reply", deltas: []string{"Se"}},
+	}
+	// Block the second turn's subscribe (call index 1).
+	gw.blockSub = make(chan struct{})
+	gw.blockCallIdx = 1
+	h, cancel, codeCh := runTelegramBotWithConfig(t, gw, []string{telegramUpdate(1, 111, "run tests")}, telegramTestConfigNoAuto(), nil)
+	defer cancel()
+	waitFor(t, "approval note edit", func() bool {
+		for _, e := range h.fake.editTexts() {
+			if strings.Contains(e, "Approval: Run tests") {
+				return true
+			}
+		}
+		return false
+	})
+	waitForTurnEnd(t, h, 0)
+	data := decideButtonData(t, h, "")
+	// Start turn 2 and wait until its subscribe blocks.
+	h.fake.setBatches([]string{telegramUpdate(2, 111, "second task")})
+	waitFor(t, "second turn subscribe started", func() bool {
+		_, _, subs, _ := gw.counts()
+		return subs >= 2
+	})
+	// Tap the old approval button while turn 2 runs.
+	h.fake.setBatches([]string{callbackUpdate(3, data, 1)})
+	waitFor(t, "decide confirm while turn active", func() bool {
+		for _, s := range sendsOf(h) {
+			if strings.Contains(s, "Always allowed") {
+				return true
+			}
+		}
+		return false
+	})
+	// The scheduled follow waits out the slot-wait bound
+	// (5s) and drops: no resume bubble, but a drop notice.
+	time.Sleep(6 * time.Second)
+	sends := sendsOf(h)
+	for _, s := range sends {
+		if strings.Contains(s, "Muse is continuing") {
+			t.Errorf("resume bubble sent while a turn was active: %q; want the follow dropped", s)
+		}
+	}
+	foundNotice := false
+	for _, s := range sends {
+		if strings.Contains(s, "Follow dropped") && strings.Contains(s, "Send a message to continue") {
+			foundNotice = true
+		}
+	}
+	if !foundNotice {
+		t.Errorf("drop notice not found in sends = %q", sends)
+	}
+	if _, _, subs, _ := gw.counts(); subs != 2 {
+		t.Errorf("subscribe calls = %d, want exactly 2 (no resume follow)", subs)
+	}
+	logged := logs.String()
+	for _, want := range []string{"telegram resume dropped", "chat_id=500", "after_seq=10", "reason=slot-wait-expired", "session_id="} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("drop log does not contain %q:\n%s", want, logged)
+		}
+	}
+	// Release turn 2: it completes normally, with no follow.
+	close(gw.blockSub)
+	waitFor(t, "second turn final edit", func() bool {
+		for _, e := range h.fake.editTexts() {
+			if strings.Contains(e, "Second task reply") {
+				return true
+			}
+		}
+		return false
+	})
+	cancel()
+	if code := <-codeCh; code != 130 {
+		t.Errorf("bot exit code = %d, want 130 (interrupted)", code)
+	}
+	if calls := gw.decideHistory(); len(calls) != 1 {
+		t.Fatalf("decide calls = %+v, want exactly 1", calls)
+	}
+}
+
+// TestTelegramResumeSlotWaitSuccess covers the slot-wait
+// success path: a decide tap staged on the approval buttons'
+// first visibility — i.e. inside the deciding turn's teardown
+// window, while it may still hold the chat's active slot —
+// must run its follow, not drop it. The tap may land just
+// before or just after the slot clears (the teardown save is
+// not synchronised with the tap); both cases must run the
+// follow, which is exactly what the slot-wait exists for.
+// The wait-then-drop path is covered by
+// TestTelegramResumeDroppedWhileTurnActive; this test covers
+// the wait-then-run path. An intervening second turn between
+// the tap and the follow is NOT staged here: the wait core's
+// finish reconcile treats a newer user message as a
+// follow-up boundary and drops the follow's reply (observed
+// in this harness, stale text delivered — see the fix-loop-2
+// report; out of this loop's scope).
+func TestTelegramResumeSlotWaitSuccess(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	approvalJSON, err := json.Marshal(approvalFixture("A1", "Run tests", "allow_always", "allow_once"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw.subScripts = []turnSubScript{
+		{
+			replyText:       "Waiting",
+			deltas:          []string{"Wa"},
+			approvalRecords: []string{fmt.Sprintf(`{"event":"approvals.snapshot","payload":{"pending_approvals":[%s]}}`, approvalJSON)},
+		},
+		{replyText: "Continued", deltas: []string{"Co"}},
+	}
+	h, cancel, codeCh := runTelegramBotWithConfig(t, gw, []string{telegramUpdate(1, 111, "run tests")}, telegramTestConfigNoAuto(), nil)
+	defer cancel()
+	// Stage the tap on the buttons' first visibility, NOT on
+	// turn-end: the deciding turn is still in teardown
+	// (watermark save + slot clear pending) when the tap
+	// lands, so startResume must wait the slot out.
+	data := decideButtonData(t, h, "")
+	h.fake.setBatches([]string{callbackUpdate(2, data, 1)})
+	waitFor(t, "decide confirm", func() bool {
+		for _, s := range sendsOf(h) {
+			if strings.Contains(s, "Always allowed") {
+				return true
+			}
+		}
+		return false
+	})
+	waitFor(t, "resume bubble after tap in teardown window", func() bool {
+		for _, s := range sendsOf(h) {
+			if strings.Contains(s, "Muse is continuing") {
+				return true
+			}
+		}
+		return false
+	})
+	waitFor(t, "follow final edit", func() bool {
+		for _, e := range h.fake.editTexts() {
+			if strings.Contains(e, "Continued") {
+				return true
+			}
+		}
+		return false
+	})
+	for _, s := range sendsOf(h) {
+		if strings.Contains(s, "Follow dropped") {
+			t.Errorf("drop notice sent on the slot-wait success path: %q", s)
+		}
+	}
+	cancel()
+	if code := <-codeCh; code != 130 {
+		t.Errorf("bot exit code = %d, want 130 (interrupted)", code)
+	}
+	if calls := gw.decideHistory(); len(calls) != 1 {
+		t.Fatalf("decide calls = %+v, want exactly 1", calls)
+	}
+	if _, _, subs, _ := gw.counts(); subs != 2 {
+		t.Errorf("subscribe calls = %d, want exactly 2 (turn + follow)", subs)
 	}
 }
 
