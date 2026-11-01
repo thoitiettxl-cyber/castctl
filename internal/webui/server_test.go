@@ -7,16 +7,20 @@ package webui
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/thoitiettxl-cyber/castctl/internal/profile"
+	"github.com/thoitiettxl-cyber/castctl/internal/redact"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Fixture values are FAKE markers only. The fixture config is a
@@ -25,6 +29,18 @@ import (
 // it is not captured traffic and not a real config.
 
 const testToken = "MARKER-TEST-TOKEN"
+
+// testTokenHash is the bcrypt hash of testToken for test
+// servers, generated at MinCost like upstream tests. The hash
+// differs per call (random salt); only comparison matters.
+func testTokenHash(t *testing.T) string {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte(testToken), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(hash)
+}
 
 const fixtureConfig = `{
   "default_profile": "muse01",
@@ -62,12 +78,11 @@ func newTestServer(t *testing.T, config string, extra func(*Deps)) *testServer {
 			t.Fatalf("write config: %v", err)
 		}
 	}
-	sum := sha256.Sum256([]byte(testToken))
 	deps := Deps{
 		ConfigDir:    dir,
 		Version:      "0.6.1-test",
 		ListenAddr:   "127.0.0.1:8317",
-		TokenHash:    sum,
+		TokenHash:    testTokenHash(t),
 		HasToken:     true,
 		DistFS:       fstest.MapFS{"index.html": {Data: []byte("<html>castctl shell</html>")}},
 		BundleSHA256: "test-bundle-hash",
@@ -153,16 +168,26 @@ func TestAuthGate(t *testing.T) {
 }
 
 func TestNewFailsClosedWithoutToken(t *testing.T) {
-	sum := sha256.Sum256([]byte(testToken))
 	_, err := New(Deps{
 		ConfigDir:    t.TempDir(),
-		TokenHash:    sum,
+		TokenHash:    testTokenHash(t),
 		HasToken:     false,
 		DistFS:       fstest.MapFS{"index.html": {Data: []byte("x")}},
 		BundleSHA256: "h",
 	})
 	if err == nil {
 		t.Fatal("New without HasToken succeeded, want failure")
+	}
+	// HasToken with an empty hash is the same failure: the
+	// server never starts with no stored hash to compare.
+	if _, err := New(Deps{
+		ConfigDir:    t.TempDir(),
+		TokenHash:    "",
+		HasToken:     true,
+		DistFS:       fstest.MapFS{"index.html": {Data: []byte("x")}},
+		BundleSHA256: "h",
+	}); err == nil {
+		t.Fatal("New with empty TokenHash succeeded, want failure")
 	}
 }
 
@@ -270,6 +295,142 @@ func TestConfigRedactionAndSave(t *testing.T) {
 	// appear in the error body.
 	if strings.Contains(rec.Body.String(), "FAKE-SECRET") {
 		t.Fatalf("marker leaked into error body: %s", rec.Body.String())
+	}
+}
+
+// TestSavePreservesRawOrderAndHashesToken pins the two Slice D
+// rules through PUT /config: the first web UI save keeps the
+// stored document's key order inside raw blocks (fixed order
+// only at the top level), and a plaintext webui.token is
+// hashed with bcrypt before it lands on disk. A second
+// unchanged save leaves the file byte-identical.
+func TestSavePreservesRawOrderAndHashesToken(t *testing.T) {
+	fixture := `{"webui": {"token": "MARKER-PLAINTOKEN", "listen": "127.0.0.1:8317"}, "log": {"timestamp": true, "level": "info", "disabled": false, "output": ""}, "profiles": {"muse01": {}}}`
+	ts := newTestServer(t, fixture, nil)
+	data := decodeEnvelope(t, ts.do(t, "GET", "/api/v1/config", "", true))["data"].(map[string]any)
+	content, _ := data["content"].(string)
+	baseSHA, _ := data["sha256"].(string)
+	body, _ := json.Marshal(map[string]any{"content": content, "base_sha256": baseSHA})
+	if rec := ts.do(t, "PUT", "/api/v1/config", string(body), true); rec.Code != http.StatusOK {
+		t.Fatalf("PUT config: %d: %s", rec.Code, rec.Body.String())
+	}
+	after, err := os.ReadFile(filepath.Join(ts.dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(after)
+	// Top level renders in fixed order, whatever the input order.
+	if strings.Index(got, `"profiles"`) > strings.Index(got, `"webui"`) {
+		t.Fatalf("top-level order not fixed:\n%s", got)
+	}
+	// Raw blocks keep input order: webui token before listen,
+	// log timestamp before level.
+	if strings.Index(got, `"token"`) > strings.Index(got, `"listen"`) {
+		t.Fatalf("raw webui order not preserved:\n%s", got)
+	}
+	if strings.Index(got, `"timestamp"`) > strings.Index(got, `"level"`) {
+		t.Fatalf("raw log order not preserved:\n%s", got)
+	}
+	if !strings.HasSuffix(got, "}\n") || strings.HasSuffix(got, "\n\n") {
+		t.Fatalf("saved file does not end with exactly one newline: %q", got[len(got)-8:])
+	}
+	if strings.Contains(got, "MARKER-PLAINTOKEN") {
+		t.Fatalf("plaintext token persisted:\n%s", got)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(after, &doc); err != nil {
+		t.Fatal(err)
+	}
+	storedToken, _ := doc["webui"].(map[string]any)["token"].(string)
+	if !profile.LooksLikeBcryptHash(storedToken) {
+		t.Fatalf("stored token is not a bcrypt hash:\n%s", got)
+	}
+	if !profile.CompareWebUIToken(storedToken, "MARKER-PLAINTOKEN") {
+		t.Fatalf("stored hash does not match the submitted token:\n%s", got)
+	}
+	// A second unchanged save is byte-identical.
+	data = decodeEnvelope(t, ts.do(t, "GET", "/api/v1/config", "", true))["data"].(map[string]any)
+	content, _ = data["content"].(string)
+	baseSHA, _ = data["sha256"].(string)
+	body, _ = json.Marshal(map[string]any{"content": content, "base_sha256": baseSHA})
+	if rec := ts.do(t, "PUT", "/api/v1/config", string(body), true); rec.Code != http.StatusOK {
+		t.Fatalf("second PUT config: %d: %s", rec.Code, rec.Body.String())
+	}
+	after2, err := os.ReadFile(filepath.Join(ts.dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, after2) {
+		t.Fatalf("second save changed the file:\n%s\n%s", after, after2)
+	}
+}
+
+// TestSaveKeepsStoredHashOnSentinelKeep pins the sentinel rule
+// for the token: a redacted view saved back keeps the stored
+// bcrypt hash byte-identical — no re-hash, no plaintext.
+func TestSaveKeepsStoredHashOnSentinelKeep(t *testing.T) {
+	hashBytes, err := bcrypt.GenerateFromPassword([]byte("MARKER-PLAINTOKEN"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := `{"profiles": {"muse01": {}}, "webui": {"token": ` + strconv.Quote(string(hashBytes)) + `, "listen": "127.0.0.1:8317"}}`
+	ts := newTestServer(t, fixture, nil)
+	data := decodeEnvelope(t, ts.do(t, "GET", "/api/v1/config", "", true))["data"].(map[string]any)
+	content, _ := data["content"].(string)
+	baseSHA, _ := data["sha256"].(string)
+	if strings.Count(content, redact.Marker) != 1 {
+		t.Fatalf("redacted view has %d sentinels, want 1:\n%s", strings.Count(content, redact.Marker), content)
+	}
+	body, _ := json.Marshal(map[string]any{"content": content, "base_sha256": baseSHA})
+	if rec := ts.do(t, "PUT", "/api/v1/config", string(body), true); rec.Code != http.StatusOK {
+		t.Fatalf("PUT config: %d: %s", rec.Code, rec.Body.String())
+	}
+	after, err := os.ReadFile(filepath.Join(ts.dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(after, &doc); err != nil {
+		t.Fatal(err)
+	}
+	storedToken, _ := doc["webui"].(map[string]any)["token"].(string)
+	if storedToken != string(hashBytes) {
+		t.Fatalf("stored hash changed on sentinel save:\n%s", after)
+	}
+}
+
+// TestSaveHashesNewPlaintextToken pins hash-on-save for a token
+// the user types into the redacted view: the submitted
+// plaintext is hashed before it lands on disk, and the
+// plaintext appears nowhere in the file.
+func TestSaveHashesNewPlaintextToken(t *testing.T) {
+	fixture := `{"profiles": {"muse01": {}}, "webui": {"token": "MARKER-OLDTOKEN", "listen": "127.0.0.1:8317"}}`
+	ts := newTestServer(t, fixture, nil)
+	data := decodeEnvelope(t, ts.do(t, "GET", "/api/v1/config", "", true))["data"].(map[string]any)
+	content, _ := data["content"].(string)
+	baseSHA, _ := data["sha256"].(string)
+	if strings.Count(content, redact.Marker) != 1 {
+		t.Fatalf("redacted view has %d sentinels, want 1:\n%s", strings.Count(content, redact.Marker), content)
+	}
+	edited := strings.Replace(content, redact.Marker, "MARKER-NEWTOKEN", 1)
+	body, _ := json.Marshal(map[string]any{"content": edited, "base_sha256": baseSHA})
+	if rec := ts.do(t, "PUT", "/api/v1/config", string(body), true); rec.Code != http.StatusOK {
+		t.Fatalf("PUT config: %d: %s", rec.Code, rec.Body.String())
+	}
+	after, err := os.ReadFile(filepath.Join(ts.dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(after), "MARKER-NEWTOKEN") || strings.Contains(string(after), "MARKER-OLDTOKEN") {
+		t.Fatalf("plaintext token persisted:\n%s", after)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(after, &doc); err != nil {
+		t.Fatal(err)
+	}
+	storedToken, _ := doc["webui"].(map[string]any)["token"].(string)
+	if !profile.LooksLikeBcryptHash(storedToken) || !profile.CompareWebUIToken(storedToken, "MARKER-NEWTOKEN") {
+		t.Fatalf("stored token is not the hash of the new token:\n%s", after)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -946,6 +947,11 @@ func TestSaveSingleConfig(t *testing.T) {
 	if !strings.Contains(string(data), "\n  \"profiles\"") {
 		t.Errorf("saved config not indent-2: %s", data)
 	}
+	// Canonical saved encoding ends with exactly one trailing
+	// newline (sing-box format -w shape); see encodeSingleConfig.
+	if !strings.HasSuffix(string(data), "}\n") || strings.HasSuffix(string(data), "\n\n") {
+		t.Errorf("saved config does not end with exactly one newline: %q", string(data[len(data)-8:]))
+	}
 	// Round-trip: re-parse and compare the resolved model.
 	cfg2, err := ParseSingleConfig(data, base)
 	if err != nil {
@@ -975,6 +981,120 @@ func TestSaveSingleConfig(t *testing.T) {
 	}
 	if strings.Contains(string(data), "FAKE") {
 		t.Errorf("saved config contains test secret marker unexpectedly: %s", data)
+	}
+}
+
+// TestEncodeSingleConfigIdempotence pins the stable-JSON rule:
+// parse -> encode -> parse -> encode is byte-identical, including
+// a deliberately reordered input. Fixed order applies at the top
+// level and in synthesized blocks; raw blocks keep their input
+// key order (WEAK scope), so the reordered webui/log/telegram
+// blocks below re-render in input order, not canonical order.
+func TestEncodeSingleConfigIdempotence(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	cookiesFile := filepath.Join(base, "cookies.txt")
+	doc := `{
+  "webui": {"token": "MARKER-WEBUI-TOKEN", "ui_dir": "/srv/MARKER-UIDIR", "listen": "127.0.0.1:8317"},
+  "keeper": [{"notify": "telegram", "browser": "http://127.0.0.1:9226/", "profile": "muse01", "tag": "k1", "interval": "30m"}],
+  "telegram": {"auto_allow_once": true, "allowed_user_ids": [111], "token": "123456:ABCDEFGHIJ0123456789ab", "profile": "muse01", "auto_approve": false},
+  "log": {"timestamp": true, "output": "", "level": "info", "disabled": false},
+  "wireguard_dns": {"wg-home": ["10.2.0.1"]},
+  "dns": {"final": "dns1", "servers": [{"server_port": 5353, "server": "127.0.0.1", "type": "tcp", "tag": "dns1"}]},
+  "endpoints": [{"tag": "wg-home", "type": "wireguard", "address": ["10.0.0.2/32"], "private_key": "FAKE-PRIVKEY", "peers": [{"address": "203.0.113.10", "port": 51820, "public_key": "FAKE-PUBKEY", "allowed_ips": ["0.0.0.0/0"]}]}],
+  "outbounds": [{"tag": "proxy-sg", "type": "socks", "server": "127.0.0.1", "server_port": 1080, "version": "5", "username": "FAKE-USER", "password": "FAKE-PW<>&"}],
+  "profiles": {"muse01": {"outbound": "proxy-sg", "auto_allow_once": true, "auto_approve": "always", "cookies_file": ` + strconv.Quote(cookiesFile) + `}},
+  "default_profile": "muse01"
+}`
+	cfg, err := ParseSingleConfig([]byte(doc), base)
+	if err != nil {
+		t.Fatalf("ParseSingleConfig: %v", err)
+	}
+	enc1, err := encodeSingleConfig(cfg)
+	if err != nil {
+		t.Fatalf("encodeSingleConfig: %v", err)
+	}
+	cfg2, err := ParseSingleConfig(enc1, base)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	enc2, err := encodeSingleConfig(cfg2)
+	if err != nil {
+		t.Fatalf("encodeSingleConfig again: %v", err)
+	}
+	if string(enc1) != string(enc2) {
+		t.Fatalf("not idempotent:\nfirst:\n%s\nsecond:\n%s", enc1, enc2)
+	}
+	if !strings.HasSuffix(string(enc1), "}\n") || strings.HasSuffix(string(enc1), "\n\n") {
+		t.Fatalf("encoding does not end with exactly one newline: %q", string(enc1[len(enc1)-8:]))
+	}
+	// Top-level order is the fixed order, regardless of input order.
+	got := string(enc1)
+	wantOrder := []string{"\"default_profile\"", "\"profiles\"", "\"outbounds\"", "\"endpoints\"", "\"dns\"", "\"wireguard_dns\"", "\"log\"", "\"telegram\"", "\"keeper\"", "\"webui\""}
+	prev := -1
+	for _, key := range wantOrder {
+		at := strings.Index(got, key)
+		if at < 0 {
+			t.Fatalf("top-level key %s missing:\n%s", key, got)
+		}
+		if at < prev {
+			t.Fatalf("top-level order wrong at %s:\n%s", key, got)
+		}
+		prev = at
+	}
+	// Raw blocks keep input order: webui token first, log
+	// timestamp first, telegram auto_allow_once first.
+	if strings.Index(got, `"token"`) > strings.Index(got, `"listen"`) {
+		t.Fatalf("raw webui order not preserved:\n%s", got)
+	}
+	if strings.Index(got, `"timestamp"`) > strings.Index(got, `"output"`) {
+		t.Fatalf("raw log order not preserved:\n%s", got)
+	}
+	if strings.Index(got, `"auto_allow_once"`) > strings.Index(got, `"allowed_user_ids"`) {
+		t.Fatalf("raw telegram order not preserved:\n%s", got)
+	}
+	// No HTML escaping: the outbound password stays literal.
+	if !strings.Contains(got, `"password": "FAKE-PW<>&"`) {
+		t.Fatalf("HTML escaping changed a value:\n%s", got)
+	}
+	// Per-profile dns (no top-level dns section: the two cannot
+	// coexist) is idempotent too, and renders before `outbound`
+	// in the profile entry, as the encoder orders it.
+	profDoc := `{"profiles": {"muse01": {"outbound": "proxy-sg", "dns": {"final": "dns1", "servers": [{"server_port": 5353, "server": "127.0.0.1", "type": "tcp", "tag": "dns1", "detour": "proxy-sg"}]}, "cookies_file": ` + strconv.Quote(cookiesFile) + `}}, "outbounds": [{"tag": "proxy-sg", "type": "socks", "server": "127.0.0.1", "server_port": 1080, "version": "5"}]}`
+	profCfg, err := ParseSingleConfig([]byte(profDoc), base)
+	if err != nil {
+		t.Fatalf("ParseSingleConfig (profile dns): %v", err)
+	}
+	profEnc1, err := encodeSingleConfig(profCfg)
+	if err != nil {
+		t.Fatalf("encodeSingleConfig (profile dns): %v", err)
+	}
+	profCfg2, err := ParseSingleConfig(profEnc1, base)
+	if err != nil {
+		t.Fatalf("re-parse (profile dns): %v", err)
+	}
+	profEnc2, err := encodeSingleConfig(profCfg2)
+	if err != nil {
+		t.Fatalf("encodeSingleConfig again (profile dns): %v", err)
+	}
+	if string(profEnc1) != string(profEnc2) {
+		t.Fatalf("profile-dns config not idempotent:\n%s\n%s", profEnc1, profEnc2)
+	}
+	if strings.Index(string(profEnc1), `"dns"`) > strings.Index(string(profEnc1), `"outbound"`) {
+		t.Fatalf("profile entry dns does not precede outbound:\n%s", profEnc1)
+	}
+	// The runtime default is never materialized: a block without
+	// listen stays without one.
+	cfg3, err := ParseSingleConfig([]byte(`{"profiles":{},"webui":{"token":"MARKER-WEBUI-TOKEN"}}`), base)
+	if err != nil {
+		t.Fatalf("ParseSingleConfig: %v", err)
+	}
+	enc3, err := encodeSingleConfig(cfg3)
+	if err != nil {
+		t.Fatalf("encodeSingleConfig: %v", err)
+	}
+	if strings.Contains(string(enc3), "8317") {
+		t.Fatalf("runtime default listen materialized:\n%s", enc3)
 	}
 }
 

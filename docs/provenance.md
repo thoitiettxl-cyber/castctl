@@ -519,6 +519,87 @@ Deviations (each with castctl evidence):
   (`.github/workflows/test.yaml`) is castctl-original, not
   adapted from upstream.
 
+### Remote-management secret hashing — PORTED (behavior re-implemented, no code taken)
+
+Studied at upstream commit
+`250d598175db61a4e99ac38b9164ed04745754e5` (2026-10-31). What
+was taken: the behavior only, re-implemented in castctl code;
+no upstream code was copied. Upstream sites (all at that
+commit):
+
+- Detection predicate, verbatim: `internal/config/config_validation.go:66-69`
+  (`looksLikeBcrypt`: length > 4 and a `$2a$`/`$2b$`/`$2y$`
+  prefix, nothing else checked). Reused for the upload-guard
+  scan in `internal/config/config_load.go:118`.
+- Hashing: `internal/config/config_validation.go:71-79`
+  (`hashSecret`) and `internal/config/parse.go:69-74`, both
+  `bcrypt.GenerateFromPassword(secret, bcrypt.DefaultCost)`.
+  DefaultCost is 10 in `golang.org/x/crypto v0.57.0`
+  (`bcrypt/bcrypt.go:24`); the 72-byte limit is a library
+  guarantee (`bcrypt/bcrypt.go:85-98`, `ErrPasswordTooLong`).
+- Write-back: `internal/config/config_load.go:243-255`
+  (`LoadConfigOptional`): hash in memory, best-effort rewrite
+  of the YAML node tree (`internal/config/config_yaml.go:143-187`,
+  indent 2, scalar replaced in place). A hash/write failure is
+  ignored (`_ =`, non-atomic `os.WriteFile`, 0600 on create
+  only). A second load leaves the file byte-identical
+  (`internal/config/config_v8_test.go:925-932`).
+- Fail-closed pre-seed rewrite: `internal/config/config_load.go:37-99`
+  (`prepareConfigForUpload`): every error returned, file left
+  untouched, plaintext surviving elsewhere (YAML anchor/alias)
+  refused.
+- Login comparison: a single `CompareHashAndPassword` site; any
+  error is a generic 401 with no plaintext fallback. Upstream
+  additionally accepts an env secret (`MANAGEMENT_PASSWORD`)
+  and a local password, and registers management routes only
+  when some secret exists (`internal/api/server.go:253`).
+- Upload-path gap (upstream): `PutConfigYAML`
+  (`internal/api/handlers/management/config_basic.go:129-181`)
+  writes the raw uploaded body verbatim and only hashes on
+  the later reload — a plaintext secret rests on disk until
+  that reload's write-back succeeds.
+
+Castctl mapping (re-implementation, this PR):
+
+- `internal/profile/webui_secret.go` — `LooksLikeBcryptHash`
+  (verbatim predicate), `HashWebUIToken` (DefaultCost; empty
+  and >72-byte errors naming the rule only),
+  `CompareWebUIToken` (any error rejects), and
+  `(*SingleConfig).ReplaceWebUIToken` (edits the raw captured
+  `webui` JSON in place so the hash persists; raw blocks win
+  on save).
+- `internal/commands/webui.go` — `hashWebUITokenOnStart`:
+  hash-on-serve-start through the guarded
+  `profile.UpdateSingleConfig` path (lock + re-read + atomic
+  0600 write); already-hashed tokens are used as-is with no
+  rewrite; any failure exits 2 before serving.
+- `internal/webui/store.go` (`saveGuarded`) — hash-on-save:
+  any API save persisting a plaintext `webui.token` hashes it
+  before writing, via the same helper; sentinel keep-on-save
+  keeps the stored value verbatim.
+- `internal/webui/server.go` (`authorized`) — bcrypt
+  comparison against the stored hash only.
+
+Deviations from upstream (all deliberate, Boss-decided):
+
+- (D1) Write-back failures fail closed (exit 2, no serve),
+  where upstream ignores the load-path persist error.
+- (D2) The write-back is atomic (temp + rename) at mode 0600,
+  where upstream uses a direct `os.WriteFile` (0600 on create
+  only, existing mode kept).
+- (D3) Trigger scope is serve-start plus API saves only; no
+  reload re-hashing was traced upstream and none is claimed.
+- (D4) No environment secret and no local password: the
+  `webui` block token is the only source.
+- (D5) File format is JSON with fixed top-level order and
+  raw-block order preservation, not a YAML node tree.
+- (D6) The YAML-anchor plaintext refusal has no JSON analogue.
+- (D7) An empty token is a config error and serve fails closed;
+  upstream skips empty secrets at load and 403s when unset.
+- (ND4) Hash-on-save deliberately closes upstream's
+  upload-path gap: a plaintext token set through the API is
+  hashed before it is written, never left resting on disk.
+
 ## 3. Cli-Proxy-API-Management-Center (web UI fork) @64b4f5a — VERIFIED (copied + adapted code/assets in the tree)
 
 Upstream: `github.com/router-for-me/Cli-Proxy-API-Management-Center`,

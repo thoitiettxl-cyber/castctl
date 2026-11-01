@@ -16,14 +16,19 @@
 #   INT/TERM the signal trap ENDS the run: it kills servers, removes
 #   the temp dir, and exits without printing a summary or a
 #   secret-scan verdict.
-# - Tokens come only from the environment (CASTCTL_TELEGRAM_TOKEN,
-#   CASTCTL_WEBUI_KEY). castctl itself reads the Telegram token only
-#   from config; the env var is a script-level convenience: the script
-#   injects it into the temp config copy only, never into the
+# - The Telegram token comes only from the environment
+#   (CASTCTL_TELEGRAM_TOKEN). castctl itself reads the Telegram token
+#   only from config; the env var is a script-level convenience: the
+#   script injects it into the temp config copy only, never into the
 #   supplied config, and never prints it. A whitespace-only token
-#   counts as unset. After injection the env vars are unset so child
-#   processes cannot inherit them; saved shell copies serve only the
-#   final scan and the web UI server start.
+#   counts as unset. After injection the env var is unset so child
+#   processes cannot inherit it; a saved shell copy serves only the
+#   final scan. The web UI token is generated inside the script and
+#   injected into the temp copy's `webui` block (there is no
+#   environment token source for the web UI anymore): the generated
+#   value is held only for the auth header file and the final scan,
+#   and is never printed. A CASTCTL_WEBUI_KEY in the environment is
+#   ignored and unset early so no child can inherit it.
 # - Real messages are sent only with --live-send. Without it, the
 #   send/watch/approval-positive legs SKIP with a reason.
 # - Cookies are never copied and never read. The temp copy's
@@ -74,8 +79,10 @@ usage: scripts/e2e.sh --config PATH <profile>... [--live-send] [--live-keeper] [
                   one from this checkout with the approved build tags.
   --help, -h      print this usage and exit 0.
 
-Tokens come only from the environment: CASTCTL_TELEGRAM_TOKEN and
-CASTCTL_WEBUI_KEY. See docs/e2e.md.
+The Telegram token comes only from the environment:
+CASTCTL_TELEGRAM_TOKEN. The web UI token is generated inside the
+script and injected into the temp config copy's `webui` block.
+See docs/e2e.md.
 USAGE
 }
 
@@ -294,22 +301,17 @@ ccfg() {
         "$BIN" --config "$cfg" "$@"
 }
 
-# webui_exec <config> <args...>: like ccfg, but exports the held web
-# UI key (saved copy) when one was held, so the server can require
-# Bearer auth. Uses exec, so the caller's $! IS the castctl PID —
-# never a wrapper subshell. Call only backgrounded or via run_cap;
-# a direct call replaces this shell.
+# webui_exec <config> <args...>: like ccfg, but never inherits a
+# web UI key from the environment (there is no environment token
+# source for the web UI: the token lives in the config copy's
+# `webui` block). Uses exec, so the caller's $! IS the castctl
+# PID — never a wrapper subshell. Call only backgrounded or via
+# run_cap; a direct call replaces this shell.
 webui_exec() {
     local cfg="$1"; shift
-    if [ "${WEBUI_KEY_HELD:-0}" = '1' ]; then
-        CASTCTL_WEBUI_KEY="$WEBUI_KEY_VALUE" exec env -u CASTCTL_CONFIG -u CASTCTL_PROFILE \
-            -u CASTCTL_TELEGRAM_TOKEN -u MUSE_AUTO_APPROVE -u MUSE_AUTO_ALLOW_ONCE \
-            "$BIN" --config "$cfg" "$@"
-    else
-        exec env -u CASTCTL_CONFIG -u CASTCTL_PROFILE -u CASTCTL_TELEGRAM_TOKEN \
-            -u MUSE_AUTO_APPROVE -u MUSE_AUTO_ALLOW_ONCE -u CASTCTL_WEBUI_KEY \
-            "$BIN" --config "$cfg" "$@"
-    fi
+    exec env -u CASTCTL_CONFIG -u CASTCTL_PROFILE -u CASTCTL_TELEGRAM_TOKEN \
+        -u MUSE_AUTO_APPROVE -u MUSE_AUTO_ALLOW_ONCE -u CASTCTL_WEBUI_KEY \
+        "$BIN" --config "$cfg" "$@"
 }
 
 # json_field <file> <dotted.path>: print the JSON value, or
@@ -421,6 +423,47 @@ def cmd_inject(argv):
     block["token"] = token
     cfg["telegram"] = block
     print("injected")
+    save(cfg, dst)
+
+
+def cmd_inject_webui(argv):
+    # Sets the temp copy's webui token to the script-generated
+    # value from E2E_WEBUI_TOKEN (passed via the environment of
+    # this one python call only, mirroring the telegram inject).
+    # Only a config that already has a webui block is touched:
+    # a block-less config keeps no block, so the no-token
+    # negative probe still tests the block gate.
+    src, dst = argv
+    cfg = load(src)
+    token = os.environ.get("E2E_WEBUI_TOKEN", "")
+    if not token.strip():
+        print("unset")
+        save(cfg, dst)
+        return
+    block = cfg.get("webui")
+    if not isinstance(block, dict):
+        print("no-block")
+        save(cfg, dst)
+        return
+    block["token"] = token
+    cfg["webui"] = block
+    print("injected")
+    save(cfg, dst)
+
+
+def cmd_set_webui_listen(argv):
+    # Sets webui.listen on a probe copy (or in place) when a
+    # webui block exists; a block-less config is left untouched.
+    src, dst, addr = argv
+    cfg = load(src)
+    block = cfg.get("webui")
+    if not isinstance(block, dict):
+        print("no-block")
+        save(cfg, dst)
+        return
+    block["listen"] = addr
+    cfg["webui"] = block
+    print("ok")
     save(cfg, dst)
 
 
@@ -682,6 +725,10 @@ def main():
     argv = sys.argv[2:]
     if cmd == "inject":
         cmd_inject(argv)
+    elif cmd == "inject-webui":
+        cmd_inject_webui(argv)
+    elif cmd == "set-webui-listen":
+        cmd_set_webui_listen(argv)
     elif cmd == "related-profiles":
         cmd_related(argv)
     elif cmd == "original-paths":
@@ -719,21 +766,33 @@ TELEGRAM_TOKEN_HELD=0
 if [ -n "${CASTCTL_TELEGRAM_TOKEN:-}" ] && [ "$(printf '%s' "${CASTCTL_TELEGRAM_TOKEN}" | tr -d '[:space:]')" != '' ]; then
     TELEGRAM_TOKEN_HELD=1
 fi
-WEBUI_KEY_HELD=0
-if [ -n "${CASTCTL_WEBUI_KEY:-}" ] && [ "$(printf '%s' "${CASTCTL_WEBUI_KEY}" | tr -d '[:space:]')" != '' ]; then
-    WEBUI_KEY_HELD=1
-fi
-# Saved copies: the final secret scan (counts only) and the web UI
-# server start still need the values after the env vars are unset.
-# A whitespace-only token counts as unset and is never injected.
+# Saved copies: the final secret scan (counts only) still needs the
+# Telegram value after the env var is unset. A whitespace-only
+# token counts as unset and is never injected.
 TELEGRAM_TOKEN_VALUE="${CASTCTL_TELEGRAM_TOKEN:-}"
-WEBUI_KEY_VALUE="${CASTCTL_WEBUI_KEY:-}"
 INJECT_RESULT="$(python3 "$CFGTOOL" inject "$CFG" "$CFG" 2>"$OUT_DIR/inject.err" || echo inject-failed)"
 [ "$INJECT_RESULT" = 'injected' ] && TELEGRAM_INJECTED=1
 # Narrow the scope: after injection, no child process can inherit
-# the token env vars. Saved shell copies above serve the scan and
-# the web UI server start only.
-unset CASTCTL_TELEGRAM_TOKEN CASTCTL_WEBUI_KEY
+# the Telegram token env var. A saved shell copy above serves the
+# scan only.
+unset CASTCTL_TELEGRAM_TOKEN
+# The web UI token is generated here and injected into the temp
+# copy's webui block. CASTCTL_WEBUI_KEY is not a token source
+# anymore: ignore and unset it before anything can inherit it.
+# The generated value is passed to the one cfgtool call only, via
+# a narrowly scoped env var, and is never printed.
+unset CASTCTL_WEBUI_KEY
+WEBUI_KEY_VALUE="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+[ -n "$WEBUI_KEY_VALUE" ] || { printf 'e2e: failed to generate a web UI token\n' >&2; exit 2; }
+WEBUI_KEY_HELD=0
+WEBUI_INJECT_RESULT="$(E2E_WEBUI_TOKEN="$WEBUI_KEY_VALUE" python3 "$CFGTOOL" inject-webui "$CFG" "$CFG" 2>"$OUT_DIR/inject-webui.err" || echo inject-failed)"
+if [ "$WEBUI_INJECT_RESULT" = 'injected' ]; then
+    WEBUI_KEY_HELD=1
+else
+    # No webui block (or generation failed): the script holds no
+    # usable value; the negative probes cover this shape.
+    WEBUI_KEY_VALUE=''
+fi
 
 # point_originals: point the temp copy's cookies_file at the
 # ORIGINAL absolute path for every profile. Cookies are never
@@ -1557,9 +1616,9 @@ fi
 
 if [ "$WEBUI_TOKEN_AVAILABLE" = '0' ]; then
     # Negative check: no token anywhere -> serve fails closed, exit 2.
-    PORT_PROBE="$(free_port)"
+    # Bare serve: the failure is pre-bind, no port is needed.
     NEG_BASE="$OUT_DIR/webui-no-token"
-    run_cap "$NEG_BASE" 15 ccfg "$CFG" webui serve --port "$PORT_PROBE"
+    run_cap "$NEG_BASE" 15 ccfg "$CFG" webui serve
     if [ "$(cat "$NEG_BASE.code")" = '2' ]; then
         record 'webui' 'no-token' 'PASS' 'webui serve with no token exits 2, never starts unauthenticated'
     else
@@ -1569,18 +1628,24 @@ if [ "$WEBUI_TOKEN_AVAILABLE" = '0' ]; then
     # serve fails on the block gate before the listen check, so
     # the listen rule is unreachable and the probe SKIP, never
     # PASS for the wrong reason. With a block, the listen check
-    # runs before the token check (measured).
+    # is parse-time and runs before the token check (measured).
+    # The probe uses a copy of the config with a non-loopback
+    # listen key; the shared copy is never mutated.
     if [ "$HAS_WEBUI_BLOCK" != 'yes' ]; then
         record 'webui' 'nonloopback-refusal' 'SKIP' 'no webui block: listen check unreachable behind the block gate'
     else
         NL_PORT="$(free_port)"
         NL_BASE="$OUT_DIR/webui-nonloopback"
-        run_cap "$NL_BASE" 15 ccfg "$CFG" webui serve --listen "0.0.0.0:$NL_PORT"
+        NL_CFG="$E2E_TMP/nl-config.json"
+        cp -- "$CFG" "$NL_CFG"
+        chmod 0600 "$NL_CFG"
+        python3 "$CFGTOOL" set-webui-listen "$NL_CFG" "$NL_CFG" "0.0.0.0:$NL_PORT" >/dev/null
+        run_cap "$NL_BASE" 15 ccfg "$NL_CFG" webui serve
         if [ "$(cat "$NL_BASE.code")" = '2' ] && grep -a -q -F -- 'host must be loopback' "$NL_BASE.err" \
             && [ "$(count_fixed "$NL_BASE.err" "0.0.0.0")" = '0' ]; then
-            record 'webui' 'nonloopback-refusal' 'PASS' 'non-loopback --listen exits 2 naming the loopback rule, address never echoed (count 0)'
+            record 'webui' 'nonloopback-refusal' 'PASS' 'non-loopback listen key exits 2 naming the loopback rule, address never echoed (count 0)'
         else
-            record 'webui' 'nonloopback-refusal' 'FAIL' "non-loopback --listen exited $(cat "$NL_BASE.code"), expected 2 naming the loopback rule"
+            record 'webui' 'nonloopback-refusal' 'FAIL' "non-loopback listen key exited $(cat "$NL_BASE.code"), expected 2 naming the loopback rule"
         fi
     fi
     record 'webui' 'auth' 'SKIP' 'no webui token (env unset, no block token)'
@@ -1601,16 +1666,15 @@ else
         chmod 0600 "$HDR_GOOD"
         printf 'Authorization: Bearer e2e-wrong-token\n' > "$HDR_BAD"
         chmod 0600 "$HDR_BAD"
-        # When the key comes from the block (not env), the header file
-        # cannot be built without reading the token: that case is
-        # SKIP for the good-token checks (the script holds no value
-        # to present). The no-token / wrong-token checks still run.
-        GOOD_TOKEN_KNOWN=0
-        [ "$WEBUI_KEY_HELD" = '1' ] && GOOD_TOKEN_KNOWN=1
+        # The good token is always known: the script generated it
+        # and injected it into the temp copy's webui block.
         WEBUI_LOG="$OUT_DIR/webui-serve"
+        # Bind address via the config listen key (the only listen
+        # source): inject the ephemeral port into the temp copy.
+        python3 "$CFGTOOL" set-webui-listen "$CFG" "$CFG" "127.0.0.1:$PORT" >/dev/null
         # webui_exec uses exec, so $! IS the castctl PID itself —
         # never a wrapper subshell (see the helper definition).
-        webui_exec "$CFG" webui serve --port "$PORT" >"$WEBUI_LOG.out" 2>"$WEBUI_LOG.err" &
+        webui_exec "$CFG" webui serve >"$WEBUI_LOG.out" 2>"$WEBUI_LOG.err" &
         WEBUI_PID="$!"
         # Poll until the API answers 401 unauthenticated (server up)
         # or the process exits.
@@ -1625,6 +1689,24 @@ else
             record 'webui' 'startup' 'FAIL' 'webui server did not answer 401 unauthenticated within the poll window'
         else
             record 'webui' 'startup' 'PASS' 'webui server answers on the loopback port'
+            # Hash write-back: serve start hashes the plaintext
+            # block token into the temp copy (atomic, 0600).
+            # The stored value must be a bcrypt hash, never the
+            # generated plaintext. The hash itself is compared
+            # in-shell only, never printed.
+            STORED_TOKEN="$(json_field "$CFG" 'webui.token')"
+            case "$STORED_TOKEN" in
+                '$2a$'*|'$2b$'*|'$2y$'*)
+                    if [ "$STORED_TOKEN" != "$WEBUI_KEY_VALUE" ]; then
+                        record 'webui' 'token-hash-writeback' 'PASS' 'stored webui token is a bcrypt hash, plaintext never rests on disk'
+                    else
+                        record 'webui' 'token-hash-writeback' 'FAIL' 'stored webui token equals the plaintext value'
+                    fi
+                    ;;
+                *)
+                    record 'webui' 'token-hash-writeback' 'FAIL' 'stored webui token is not a bcrypt hash after serve start'
+                    ;;
+            esac
             # Bind: loopback only in ss output (if ss exists).
             if command -v ss >/dev/null 2>&1; then
                 SS_OUT="$OUT_DIR/webui-ss"
@@ -1648,7 +1730,9 @@ else
             else
                 record 'webui' 'auth' 'FAIL' "auth codes: no-token=$CODE_NOAUTH wrong-token=$CODE_BAD, expected 401/401"
             fi
-            if [ "$GOOD_TOKEN_KNOWN" = '1' ]; then
+            # Good-token checks run when the script holds the
+            # token: always, since it generated and injected it.
+            if [ -n "$WEBUI_KEY_VALUE" ]; then
                 STATUS_GOOD="$WEBUI_DIR/status-good.json"
                 CODE_GOOD="$(curl -s -m 10 -o "$STATUS_GOOD" -w '%{http_code}' -H @"$HDR_GOOD" "http://127.0.0.1:$PORT/api/v1/status" 2>/dev/null || echo 000)"
                 REMOTE_EXP="$(json_field "$STATUS_GOOD" 'data.remote_exposure')"
@@ -1707,16 +1791,14 @@ PY
                     record 'webui' 'telegram-masked' 'FAIL' "settings/telegram code=$CODE_TG"
                 fi
             else
-                record 'webui' 'auth-good' 'SKIP' 'good-token check needs CASTCTL_WEBUI_KEY; block token is held by castctl only'
-                record 'webui' 'secrets-write-only' 'SKIP' 'good-token check needs CASTCTL_WEBUI_KEY'
-                record 'webui' 'telegram-masked' 'SKIP' 'good-token check needs CASTCTL_WEBUI_KEY'
+                record 'webui' 'auth-good' 'SKIP' 'script holds no web UI token value'
+                record 'webui' 'secrets-write-only' 'SKIP' 'script holds no web UI token value'
+                record 'webui' 'telegram-masked' 'SKIP' 'script holds no web UI token value'
             fi
             # /logs: gate reason must match the config.
             LOGS_BODY="$WEBUI_DIR/logs.json"
             CODE_LOGS="$(curl -s -m 10 -o "$LOGS_BODY" -w '%{http_code}' -H @"$HDR_GOOD" "http://127.0.0.1:$PORT/api/v1/logs" 2>/dev/null || echo 000)"
-            if [ "$CODE_LOGS" != '200' ] && [ "$GOOD_TOKEN_KNOWN" != '1' ]; then
-                record 'webui' 'logs' 'SKIP' 'logs check needs a good token'
-            elif [ "$CODE_LOGS" = '200' ] && json_is_valid "$LOGS_BODY"; then
+            if [ "$CODE_LOGS" = '200' ] && json_is_valid "$LOGS_BODY"; then
                 LOGS_DISABLED="$(json_field "$LOGS_BODY" 'data.disabled')"
                 LOGS_REASON="$(json_field "$LOGS_BODY" 'data.reason')"
                 LOGS_ENTRIES="$(json_field "$LOGS_BODY" 'data.entries')"
@@ -1754,24 +1836,29 @@ PY
         else
             record 'webui' 'server-stopped' 'FAIL' 'webui server port still answering after kill'
         fi
-        # Non-loopback --listen refusal. The listen check runs
-        # before the token check when a webui block exists
-        # (measured: exit 2, fixed message "invalid --listen: host
-        # must be loopback"), so this probe needs no token — but
-        # without a block the block gate fires first and the probe
-        # SKIP, never PASS for the wrong reason. The probe address
-        # is a fixed literal, not a secret.
+        # Non-loopback refusal. The listen check is parse-time
+        # and runs before the token check when a webui block
+        # exists (measured: exit 2 naming the loopback rule), so
+        # this probe needs no token — but without a block the
+        # block gate fires first and the probe SKIP, never PASS
+        # for the wrong reason. The probe uses a copy of the
+        # config with a non-loopback listen key; the probe
+        # address is a fixed literal, not a secret.
         if [ "$HAS_WEBUI_BLOCK" != 'yes' ]; then
             record 'webui' 'nonloopback-refusal' 'SKIP' 'no webui block: listen check unreachable behind the block gate'
         else
             NL_PORT="$(free_port)"
             NL_BASE="$OUT_DIR/webui-nonloopback"
-            run_cap "$NL_BASE" 15 ccfg "$CFG" webui serve --listen "0.0.0.0:$NL_PORT"
+            NL_CFG="$E2E_TMP/nl-config.json"
+            cp -- "$CFG" "$NL_CFG"
+            chmod 0600 "$NL_CFG"
+            python3 "$CFGTOOL" set-webui-listen "$NL_CFG" "$NL_CFG" "0.0.0.0:$NL_PORT" >/dev/null
+            run_cap "$NL_BASE" 15 ccfg "$NL_CFG" webui serve
             if [ "$(cat "$NL_BASE.code")" = '2' ] && grep -a -q -F -- 'host must be loopback' "$NL_BASE.err" \
                 && [ "$(count_fixed "$NL_BASE.err" "0.0.0.0")" = '0' ]; then
-                record 'webui' 'nonloopback-refusal' 'PASS' 'non-loopback --listen exits 2 naming the loopback rule, address never echoed (count 0)'
+                record 'webui' 'nonloopback-refusal' 'PASS' 'non-loopback listen key exits 2 naming the loopback rule, address never echoed (count 0)'
             else
-                record 'webui' 'nonloopback-refusal' 'FAIL' "non-loopback --listen exited $(cat "$NL_BASE.code"), expected 2 naming the loopback rule"
+                record 'webui' 'nonloopback-refusal' 'FAIL' "non-loopback listen key exited $(cat "$NL_BASE.code"), expected 2 naming the loopback rule"
             fi
         fi
         record 'webui' 'external-connect' 'SKIP' 'external connect attempt is single-interface [NEEDS-MEASUREMENT]; bind + rejection are the proof'

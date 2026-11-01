@@ -129,7 +129,8 @@ Rules:
 - No hard-coded hosts/paths in `webui/src/` (loopback default only; no VM
   paths, no launcher references).
 - Run the real server with `castctl webui serve` (requires a `webui` block
-  in config.json; token from `CASTCTL_WEBUI_KEY` or the block). The
+  in config.json; the block's `token` is the only token source, hashed
+  with bcrypt and written back on startup). The
   committed dist is built with `VITE_ENABLE_SCREENCAST_LOGIN=true` so the
   screencast page is observable; the page queries the server for
   availability first and reports unavailable without the `with_chromedp`

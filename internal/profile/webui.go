@@ -32,12 +32,13 @@ package profile
 //     RedactConfig redacts the "token" key wholesale
 //     (internal/redact already carries "token" in its secret-key
 //     set). A present-but-empty token is a config error: an empty
-//     token must never mean "no auth". The runtime token source
-//     precedence is CASTCTL_WEBUI_KEY (environment) over the block
-//     token; when neither is set, `webui serve` fails closed and
-//     never starts unauthenticated (that precedence lives in the
-//     command layer, which owns environment reads; see
-//     internal/commands/webui.go).
+//     token must never mean "no auth". The block token is the
+//     only token source: when it is unset, `webui
+//     serve` fails closed and never starts unauthenticated.
+//     A plaintext token is hashed with bcrypt and written back
+//     into config.json on serve start and on API save (see
+//     webui_secret.go); an already-hashed token is stored and
+//     compared as-is. There is no environment token source.
 //
 //   - `ui_dir` (optional): a directory of static frontend files
 //     served WITHOUT auth by `webui serve` instead of the embedded
@@ -198,10 +199,11 @@ func validateWebUIListen(raw string) error {
 }
 
 // ValidateWebUIListen is the exported form of
-// validateWebUIListen for the command layer, which re-validates
-// --listen/--port overrides before serving. The parse-time rule
-// in validateWebUIListen is the authority; this wrapper only
-// exposes it.
+// validateWebUIListen for callers that must check a listen
+// value outside parse time. The parse-time rule in
+// validateWebUIListen is the authority; this wrapper only
+// exposes it. The `webui` block's `listen` key is the only
+// listen source: there are no flag or environment overrides.
 func ValidateWebUIListen(raw string) error { return validateWebUIListen(raw) }
 
 // webUIListenError is a fixed-rule error: its text names only the
@@ -292,9 +294,11 @@ func ResolveWebUI(single *SingleConfig) (*WebUIConfig, error) {
 // encodeWebUIBlock renders a WebUIConfig for save when no raw JSON
 // was captured: canonical key order, only the keys that were set.
 // The returned value is an *orderedObject so the save encoder
-// preserves key order. The token is written verbatim (the file is
-// 0600 and the block is write-only at the API layer, never at
-// the file layer: a save must round-trip the stored token).
+// preserves key order. The stored token value is written
+// verbatim (the file is 0600 and the block is write-only at the
+// API layer, never at the file layer: a save must round-trip
+// the stored token). Hashing happens before the save, in the
+// serve-start and API save paths, never in this encoder.
 func encodeWebUIBlock(cfg *WebUIConfig) (*orderedObject, error) {
 	entry := newOrderedObject()
 	if strings.TrimSpace(cfg.Listen) != "" {

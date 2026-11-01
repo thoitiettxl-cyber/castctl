@@ -107,14 +107,15 @@ func docObject(doc any) (map[string]any, error) {
 // saveMerged applies mutate to a generic copy of the stored
 // document, validates the FULL merged document (parse + tag
 // cross-references) before any write, asserts the merged
-// document holds no sentinel at a secret position (R8), and
-// writes through the guarded path. baseSHA is the client's
+// document holds no sentinel at a secret position (R8), hashes
+// a plaintext webui.token before persisting (hash-on-save),
+// and writes through the guarded path. baseSHA is the client's
 // base_sha256: a mismatch is 409 config_changed with no write,
 // no merge. An invalid merged document leaves the file
-// byte-identical. The generic marshal may reorder keys within
-// sections on the first web UI save (semantics preserved); the
-// canonical encoder preserves raw sections verbatim on later
-// CLI saves.
+// byte-identical. The intermediate marshal preserves the stored
+// document's key order inside raw blocks (see marshalOrdered);
+// the canonical encoder then preserves raw sections verbatim
+// on later CLI saves, so a web UI save does not reorder keys.
 func (s *Server) saveMerged(load *configLoad, baseSHA string, mutate func(doc map[string]any) error) (string, error) {
 	return s.saveGuarded(load, baseSHA, true, mutate)
 }
@@ -202,7 +203,10 @@ func (s *Server) saveGuarded(load *configLoad, expectedSHA string, checkExpected
 		}
 		return "", err
 	}
-	merged, err := json.Marshal(doc)
+	// Order-preserving intermediate marshal: the re-parse
+	// below captures raw blocks, so this order is the order
+	// the canonical encoder re-emits on save.
+	merged, err := marshalOrdered(load.raw, doc)
 	if err != nil {
 		return "", errInternal()
 	}
@@ -217,6 +221,29 @@ func (s *Server) saveGuarded(load *configLoad, expectedSHA string, checkExpected
 	}
 	if path := findSentinelAtSecretPosition(mergedDoc, false, ""); path != "" {
 		return "", errValidation("redacted value at " + path + " has no stored value to keep")
+	}
+	// Hash-on-save: a plaintext webui.token in the merged
+	// document is hashed with bcrypt before persisting, via
+	// the same helper as serve-start hashing; an
+	// already-hashed token passes through untouched. The
+	// sentinel can never reach here at this position: the
+	// merge keeps the stored value for a sentinel at a
+	// secret position (R1) and R8 above rejects a sentinel
+	// with no stored value, so a Marker here is an internal
+	// error, never a value to hash. A token over bcrypt's
+	// 72-byte limit fails the save (400) with a rule-only
+	// message; nothing is written.
+	if parsed.WebUI != nil && parsed.WebUI.Token != "" && !profile.LooksLikeBcryptHash(parsed.WebUI.Token) {
+		if parsed.WebUI.Token == redact.Marker {
+			return "", errInternal()
+		}
+		hash, err := profile.HashWebUIToken(parsed.WebUI.Token)
+		if err != nil {
+			return "", errValidation("webui token is invalid: " + safeMessage(err))
+		}
+		if err := parsed.ReplaceWebUIToken(hash); err != nil {
+			return "", errInternal()
+		}
 	}
 	if err := load.state.Save(parsed); err != nil {
 		if errors.Is(err, profile.ErrConcurrentChange) {

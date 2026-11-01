@@ -270,12 +270,22 @@ func writeSingleConfigLocked(baseDir string, cfg *SingleConfig) (string, error) 
 	return sha256Hex(data), nil
 }
 
-// encodeSingleConfig renders cfg in the canonical saved encoding
-// (delta key order, indent 2).
+// encodeSingleConfig renders cfg in the canonical saved encoding:
+// fixed top-level key order (buildSingleFileOrdered), indent 2,
+// and exactly one trailing newline, matching `sing-box format -w`
+// output shape. Raw blocks keep their input key order; only
+// synthesized blocks render in canonical within-block order.
+// The trailing newline is appended here, not in
+// encodeOrderedJSONIndent, so display encodings (redaction) and
+// the migrate writer keep their existing byte shape.
 func encodeSingleConfig(cfg *SingleConfig) ([]byte, error) {
 	root, err := buildSingleFileOrdered(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return encodeOrderedJSONIndent(root, 2)
+	data, err := encodeOrderedJSONIndent(root, 2)
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
 }
