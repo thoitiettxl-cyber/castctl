@@ -608,6 +608,25 @@ Remote access is loopback-only by design: reach the server from
 another device through an SSH tunnel forwarding the loopback
 port, never by binding a non-loopback address.
 
+### Sing-box mapping (names kept)
+
+The names `ui_dir` and `token` are kept (Boss decision
+2026-11-01): they were approved at Gate 2 and shipped in
+PR #20 / v0.7.0, so renaming here would be a breaking
+change outside this module PR's scope. Their semantics
+follow sing-box's Clash API
+([Clash API](https://sing-box.sagernet.org/configuration/experimental/clash-api/)):
+
+- `ui_dir` = `clash_api.external_ui` semantics: a relative
+  path to the configuration directory or an absolute path
+  to a directory of static web resources.
+- `token` = `clash_api.secret` semantics (Bearer
+  authentication), but REQUIRED in castctl — deliberately
+  stricter than sing-box's optional secret.
+- No auto-download: there is no equivalent of
+  `external_ui_download_url`; the UI ships in the
+  KernelSU module and is replaced only by explicit update.
+
 ## The `dns` section — INTERIM, GLOBAL, COMPAT-ONLY
 
 > **INTERIM.** The top-level `dns` section is global: one section
