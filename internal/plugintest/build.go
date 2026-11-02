@@ -40,6 +40,12 @@ type FakePluginOptions struct {
 	// the fixture declares in its registration ("" keeps
 	// the fixture default: no declaration).
 	CookieHosts string
+	// RawRC makes provider.call return rc != 0 with raw
+	// (non-envelope) bytes carrying the exact C1 byte
+	// sequences, exercising the loader's rc != 0 error
+	// construction (the C1 rc!=0 test gap). Register and
+	// quiesce are unaffected, so the plugin still loads.
+	RawRC bool
 	// NoInit makes the fixture omit the entry symbol (built
 	// from the noinit source instead).
 	NoInit bool
@@ -95,6 +101,9 @@ func BuildFakePlugin(t *testing.T, dir string, opts FakePluginOptions) string {
 	}
 	if opts.CookieHosts != "" {
 		ldflags += " -X main.testCookieHosts=" + opts.CookieHosts
+	}
+	if opts.RawRC {
+		ldflags += " -X main.testRawRC=1"
 	}
 	cmd := exec.Command("go", "build", "-buildmode=c-shared", "-ldflags", ldflags, "-o", out, ".")
 	cmd.Dir = absSrc

@@ -106,6 +106,43 @@ func TestStripControlCharsDropsC1Controls(t *testing.T) {
 	}
 }
 
+// TestPluginCallErrorStripsExactC1ByteSequences (C1
+// rc!=0 gap, both legs): the single error construction
+// shared by the unix and windows loaders, fed the exact
+// C1 byte sequences a raw-rc plugin returns, must yield
+// a sanitised one-line error. This test has no build tag
+// and runs on every build, so the Windows leg's
+// construction is covered even though the Windows loader
+// itself cannot run on this VM; the unix leg is covered
+// end-to-end by TestRealLoaderRawRCC1Sanitized.
+func TestPluginCallErrorStripsExactC1ByteSequences(t *testing.T) {
+	csiSeq := []byte{0xc2, 0x9b, 0x5b, 0x33, 0x31, 0x6d}
+	nelSeq := []byte{0xc2, 0x85}
+	raw := append([]byte("raw boom "), csiSeq...)
+	raw = append(raw, []byte("RED")...)
+	raw = append(raw, nelSeq...)
+	raw = append(raw, []byte("TAIL\nFORGED\x1b[31m\x7f\x01END")...)
+	err := pluginCallError("provider.call", 1, raw)
+	if err == nil {
+		t.Fatal("pluginCallError: want error")
+	}
+	got := err.Error()
+	if bytes.Contains([]byte(got), csiSeq) || bytes.Contains([]byte(got), nelSeq) {
+		t.Fatalf("pluginCallError kept C1 byte sequences: %q", got)
+	}
+	for _, r := range got {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			t.Fatalf("pluginCallError kept control U+%04X: %q", r, got)
+		}
+	}
+	if strings.ContainsAny(got, "\n\r\x1b") || strings.Contains(got, "[31m") {
+		t.Fatalf("pluginCallError kept controls/remnant: %q", got)
+	}
+	if got != "plugin call provider.call returned 1: raw boom 31mREDTAIL FORGEDEND" {
+		t.Fatalf("pluginCallError = %q, want exact sanitised form", got)
+	}
+}
+
 func TestCapPluginTextRuneSafe(t *testing.T) {
 	s := strings.Repeat("é", 3000)
 	got := capPluginText(s)

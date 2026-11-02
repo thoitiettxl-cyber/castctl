@@ -76,6 +76,7 @@ var (
 	testCaps         = "provider"
 	testFailRegister = ""
 	testCookieHosts  = ""
+	testRawRC        = ""
 )
 
 var savedHost *C.castctl_host_api
@@ -114,6 +115,17 @@ func castctlPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t, 
 	var requestBytes []byte
 	if request != nil && requestLen > 0 {
 		requestBytes = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
+	}
+	// RawRC (C1 rc!=0 gap): provider.call returns rc != 0
+	// with raw, non-envelope bytes carrying the exact C1
+	// sequences (U+009B CSI + "[31m", U+0085 NEL) plus a
+	// newline, an ESC CSI sequence, DEL, and a C0
+	// control, so the loader's rc != 0 error construction
+	// must sanitise them all to one line. Register and
+	// quiesce keep their normal behaviour.
+	if testRawRC == "1" && C.GoString(method) == pluginabi.MethodProviderCall {
+		writeResponse(response, []byte("raw boom \u009b[31mRED\u0085TAIL\nFORGED\x1b[31m\x7f\x01END"))
+		return 1
 	}
 	raw, errHandle := handleMethod(C.GoString(method), requestBytes)
 	if errHandle != nil {

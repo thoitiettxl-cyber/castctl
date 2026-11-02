@@ -131,6 +131,44 @@ func TestPluginCheckCapBeforeRedact(t *testing.T) {
 	}
 }
 
+// TestPluginCheckRawRCC1Sanitized (C1 rc!=0 gap,
+// stderr stream): a real plugin whose provider.call
+// returns rc != 0 with raw C1 bytes must FAIL the check
+// with a single sanitised FAIL line on stderr and no C1
+// bytes on either stream.
+func TestPluginCheckRawRCC1Sanitized(t *testing.T) {
+	dir := t.TempDir()
+	so := plugintest.BuildFakePlugin(t, dir, plugintest.FakePluginOptions{RawRC: true})
+	out, errb, err := runPluginCheck(t, so)
+	if err == nil {
+		t.Fatal("raw-rc plugin check: want error")
+	}
+	if !strings.Contains(errb, "FAIL") || !strings.Contains(errb, "provider.call") {
+		t.Fatalf("stderr missing FAIL provider.call line: %q", errb)
+	}
+	if strings.Count(strings.TrimSuffix(errb, "\n"), "\n") != 0 {
+		t.Fatalf("FAIL output must be one line: %q", errb)
+	}
+	csiSeq := []byte{0xc2, 0x9b, 0x5b, 0x33, 0x31, 0x6d}
+	nelSeq := []byte{0xc2, 0x85}
+	for _, stream := range []string{out, errb} {
+		if bytes.Contains([]byte(stream), csiSeq) || bytes.Contains([]byte(stream), nelSeq) {
+			t.Fatalf("plugin check output kept C1 byte sequences: stdout=%q stderr=%q", out, errb)
+		}
+		for _, r := range stream {
+			if r < 0x20 && r != '\n' || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+				t.Fatalf("plugin check output kept control U+%04X: stdout=%q stderr=%q", r, out, errb)
+			}
+		}
+	}
+	if strings.Contains(errb, "[31m") {
+		t.Fatalf("FAIL line kept CSI remnant: %q", errb)
+	}
+	if !strings.Contains(errb, "raw boom 31mREDTAIL FORGEDEND") {
+		t.Fatalf("FAIL line lost sanitised content: %q", errb)
+	}
+}
+
 // TestPluginCheckRegisterNameStripsC1Controls (C1 item,
 // end-to-end): a real plugin whose registration name
 // carries a C1 CSI sequence must not reach the stdout

@@ -5,6 +5,7 @@
 package pluginhost
 
 import (
+	"debug/elf"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -310,5 +311,104 @@ func TestParseVersionNeedsShortVnNextRefuses(t *testing.T) {
 	got, err = parseVersionNeeds(append(append([]byte{}, e1hdr...), e2...), strtab2, binary.LittleEndian)
 	if err == nil {
 		t.Fatalf("vnNext inside header: want error, got max %q", got)
+	}
+}
+
+// TestParseVersionNeedsLongJumpVnNextRefuses (N8 long-jump):
+// the verifier's exact headers-first probe. Header1
+// {vnCnt=1, vnAux=32, vnNext=48} at offset 0, header2 at
+// offset 16, aux1 at 32 = GLIBC_2.17, aux2 at 48 =
+// GLIBC_2.99. A vnNext of 48 jumps over header2, and the
+// aux bytes at 48 parse as a header with vnCnt=0 and
+// vnNext=0, so the old past-ranges-only check returned
+// "2.17" with no error. A long jump over a header must be
+// refused, never returned as a silently downgraded
+// maximum. The well-formed control (vnNext=32, i.e. the
+// headers-first layout above) must still find 2.99.
+func TestParseVersionNeedsLongJumpVnNextRefuses(t *testing.T) {
+	header := func(vnCnt uint16, vnAux, vnNext uint32) []byte {
+		b := make([]byte, 16)
+		binary.LittleEndian.PutUint16(b[2:], vnCnt)
+		binary.LittleEndian.PutUint32(b[8:], vnAux)
+		binary.LittleEndian.PutUint32(b[12:], vnNext)
+		return b
+	}
+	aux := func(nameOff, next uint32) []byte {
+		b := make([]byte, 16)
+		binary.LittleEndian.PutUint32(b[8:], nameOff)
+		binary.LittleEndian.PutUint32(b[12:], next)
+		return b
+	}
+	strtab := []byte("GLIBC_2.17\x00GLIBC_2.99\x00")
+	probe := append([]byte{}, header(1, 32, 48)...)
+	probe = append(probe, header(1, 32, 0)...)
+	probe = append(probe, aux(0, 0)...)
+	probe = append(probe, aux(11, 0)...)
+	got, err := parseVersionNeeds(probe, strtab, binary.LittleEndian)
+	if err == nil {
+		t.Fatalf("long-jump vnNext=48: want error, got max %q (downgraded maximum; true max is 2.99)", got)
+	}
+	// Well-formed control: same layout with vnNext=32
+	// (header1 jumps to its aux, header2 is reached via
+	// vnNext=16 from header1's position) still finds
+	// 2.99. This is the headers-first layout real linkers
+	// emit, with header2's vnAux=32 reaching aux2 at 48.
+	control := append([]byte{}, header(1, 32, 16)...)
+	control = append(control, header(1, 32, 0)...)
+	control = append(control, aux(0, 0)...)
+	control = append(control, aux(11, 0)...)
+	got, err = parseVersionNeeds(control, strtab, binary.LittleEndian)
+	if err != nil || got != "2.99" {
+		t.Fatalf("headers-first control vnNext=32: got=%q err=%v, want 2.99/nil", got, err)
+	}
+}
+
+// TestParseVersionNeedsRealSection feeds parseVersionNeeds
+// a REAL .gnu.version_r section extracted from the test
+// binary itself (a real linker output on this VM), not a
+// synthesised layout: the whole-section validation must
+// accept real linker output. The result must agree with
+// MaxRequiredGLIBC on the same binary.
+func TestParseVersionNeedsRealSection(t *testing.T) {
+	if !testBinaryHasGLIBCReqs {
+		t.Skip("test binary is not a dynamically linked glibc binary")
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := elf.Open(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	sec := f.Section(".gnu.version_r")
+	if sec == nil {
+		t.Fatal("test binary has no .gnu.version_r section")
+	}
+	data, err := sec.Data()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) == 0 {
+		t.Fatal("real .gnu.version_r section is empty")
+	}
+	strtab, err := versionStringTable(f, sec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := parseVersionNeeds(data, strtab, f.ByteOrder)
+	if err != nil {
+		t.Fatalf("real section: parseVersionNeeds = %v, want nil (section size %d, sh_info %d)", err, len(data), sec.Info)
+	}
+	want, err := MaxRequiredGLIBC(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("real section: parseVersionNeeds = %q, MaxRequiredGLIBC = %q, want agreement", got, want)
+	}
+	if got == "" {
+		t.Fatal("real section: want a GLIBC_ version, got empty")
 	}
 }

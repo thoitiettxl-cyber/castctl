@@ -295,6 +295,57 @@ func TestRealLoaderDiscoveryAndChecksum(t *testing.T) {
 	}
 }
 
+// TestRealLoaderRawRCC1Sanitized (C1 rc!=0 gap, unix
+// leg): a real plugin whose provider.call returns rc != 0
+// with raw bytes carrying the exact C1 sequences must
+// surface as a sanitised one-line loader error through
+// the real dlopen path (loader_unix.go Call, rc != 0
+// site): no C0/C1/DEL/ESC byte survives, no second line
+// is forged, and the CSI remnant "[31m" is gone. The
+// Windows leg shares the same error construction (see
+// TestPluginCallErrorStripsExactC1ByteSequences, which
+// runs on every build); the Windows loader itself has
+// not run on this VM.
+func TestRealLoaderRawRCC1Sanitized(t *testing.T) {
+	dir := t.TempDir()
+	so := plugintest.BuildFakePlugin(t, dir, plugintest.FakePluginOptions{RawRC: true})
+	var logs []string
+	h := newRealHost(t, &logs)
+	defer h.Close()
+	report := applyOne(t, h, so)
+	if len(report.Skipped) != 0 {
+		t.Fatalf("skipped = %+v, want load (RawRC affects provider.call only)", report.Skipped)
+	}
+	_, err := h.Call(context.Background(), "echo", pluginabi.MethodProviderCall, []byte(`{"input":"ping"}`))
+	if err == nil {
+		t.Fatal("raw-rc provider.call: want error")
+	}
+	assertLoaderErrorClean(t, err.Error())
+	if !strings.Contains(err.Error(), "returned 1") {
+		t.Fatalf("raw-rc error must name the return code: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "raw boom 31mREDTAIL FORGEDEND") {
+		t.Fatalf("raw-rc error lost sanitised content: %q", err.Error())
+	}
+}
+
+func assertLoaderErrorClean(t *testing.T, got string) {
+	t.Helper()
+	csiSeq := []byte{0xc2, 0x9b, 0x5b, 0x33, 0x31, 0x6d}
+	nelSeq := []byte{0xc2, 0x85}
+	if strings.Contains(got, string(csiSeq)) || strings.Contains(got, string(nelSeq)) {
+		t.Fatalf("loader error kept C1 byte sequences: %q", got)
+	}
+	for _, r := range got {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			t.Fatalf("loader error kept control U+%04X: %q", r, got)
+		}
+	}
+	if strings.ContainsAny(got, "\n\r\x1b") || strings.Contains(got, "[31m") {
+		t.Fatalf("loader error kept controls/remnant: %q", got)
+	}
+}
+
 func sha256File(t *testing.T, path string) string {
 	t.Helper()
 	raw, err := os.ReadFile(path)

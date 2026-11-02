@@ -297,7 +297,7 @@ func (c *windowsClient) Call(ctx context.Context, method string, request []byte)
 		if isErrorEnvelope(out) {
 			return out, nil
 		}
-		return nil, fmt.Errorf("plugin call %s returned %d: %s", method, int(r1), safePluginText(StripControlChars(string(out))))
+		return nil, pluginCallError(method, int(r1), out)
 	}
 	return out, nil
 }

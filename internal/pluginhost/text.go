@@ -5,6 +5,7 @@
 package pluginhost
 
 import (
+	"fmt"
 	"strings"
 	"unicode/utf8"
 
@@ -94,6 +95,21 @@ func capBeforeRedact(s string, max int) string {
 // error path that can carry plugin text goes through it.
 func safePluginText(s string) string {
 	return capPluginText(logging.SafeString(capBeforeRedact(s, maxPluginTextLen)))
+}
+
+// pluginCallError builds the error for a plugin call that
+// returned a non-zero rc with non-envelope bytes: THE single
+// error construction shared by the unix and windows loaders
+// (their Call rc != 0 sites). The raw bytes go through the
+// single sanitizer (StripControlChars) and the cap/redact
+// path (safePluginText), so no C0/C1/DEL/ESC byte can reach
+// output and the error stays one line. It lives here, in
+// platform-independent code, so the construction is
+// testable on every build — including the Windows leg,
+// whose loader cannot run on this VM — instead of being
+// duplicated verbatim in two platform files.
+func pluginCallError(method string, rc int, out []byte) error {
+	return fmt.Errorf("plugin call %s returned %d: %s", method, rc, safePluginText(StripControlChars(string(out))))
 }
 
 // StripControlChars is THE single sanitizer for
