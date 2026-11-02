@@ -62,7 +62,9 @@ func isELFFile(path string) (bool, error) {
 // Mechanism: parse the plugin ELF's .gnu.version_r (VERNEED)
 // entries with debug/elf (no new dependency) and read the
 // running libc version via gnu_get_libc_version on cgo/glibc
-// builds (see version_glibc.go). On builds where the running
+// builds (see version_glibc.go). The reported maximum
+// additionally takes the conservative strtab superset
+// bound (see MaxRequiredGLIBC). On builds where the running
 // version cannot be known (no-cgo, darwin, windows), a plugin
 // WITH version requirements is refused fail-closed — the check
 // is never claimed as passed when it did not run; a plugin
@@ -168,6 +170,17 @@ func compareGlibcVersion(a, b glibcVersion) int {
 // not silently report "" for a file it could not parse.
 // Both behaviours are pinned by tests.) Errors never embed
 // path (see openErrorWithoutPath).
+//
+// The reported maximum is a conservative preflight upper
+// bound: the maximum of the parsed verneed entries, every
+// GLIBC_ version string in the verneed section's string
+// table, and every GLIBC_ version string in the DT_STRTAB
+// range (PT_DYNAMIC DT_STRTAB/DT_STRSZ mapped through
+// PT_LOAD). A DT_STRTAB that cannot be resolved
+// consistently refuses the load. This bound is NOT an
+// adversary-proof verneed parser; plugins are fully
+// trusted in-process code by design, and dlopen fails
+// closed with the linker's own version error.
 func MaxRequiredGLIBC(path string) (string, error) {
 	f, err := elf.Open(path)
 	if err != nil {
@@ -200,6 +213,32 @@ func MaxRequiredGLIBC(path string) (string, error) {
 	if sec.Info != 0 && int(sec.Info) != count {
 		return "", fmt.Errorf("plugin version section entry count mismatch: section header declares %d version need entries, vnNext chain found %d: refusing to load", sec.Info, count)
 	}
+	// Conservative strtab superset bound, second source
+	// (the first is the verneed section's string table,
+	// scanned by parseVersionNeedsCount): every GLIBC_
+	// version string anywhere in the DT_STRTAB range
+	// raises the reported maximum, and an unresolvable
+	// DT_STRTAB refuses the load instead of guessing.
+	dynBytes, err := dynamicStrtabRange(f, path)
+	if err != nil {
+		return "", err
+	}
+	dynBound, dynFound, err := scanStrtabVersions(dynBytes)
+	if err != nil {
+		return "", err
+	}
+	if dynFound {
+		if max == "" {
+			return dynBound.String(), nil
+		}
+		walkMax, err := parseGlibcVersion(max)
+		if err != nil {
+			return "", fmt.Errorf("plugin requires unparseable glibc version %q: refusing to load", max)
+		}
+		if compareGlibcVersion(dynBound, walkMax) > 0 {
+			return dynBound.String(), nil
+		}
+	}
 	return max, nil
 }
 
@@ -213,6 +252,186 @@ func versionStringTable(f *elf.File, verneed *elf.Section) ([]byte, error) {
 		return nil, fmt.Errorf("read plugin version string table: %w", err)
 	}
 	return data, nil
+}
+
+// scanStrtabVersions returns the highest GLIBC_x.y[.z]
+// version named by any string in data, searching for the
+// "GLIBC_" prefix ANYWHERE in the bytes (not only at
+// offsets a chain walk references, and not only at the
+// start of a NUL-delimited string). A string whose suffix
+// starts with a digit must be exactly
+// digits.digits[.digits]; anything else digit-led
+// (e.g. "GLIBC_2.XX" or "GLIBC_2.34x") refuses with a
+// clear error rather than silently downgrading the
+// maximum. Non-numeric names (e.g. GLIBC_PRIVATE) are
+// ignored, matching the chain walk.
+func scanStrtabVersions(data []byte) (glibcVersion, bool, error) {
+	var max glibcVersion
+	found := false
+	for i := 0; i+6 <= len(data); i++ {
+		if data[i] != 'G' || string(data[i:i+6]) != "GLIBC_" {
+			continue
+		}
+		rest := data[i+6:]
+		end := 0
+		for end < len(rest) && rest[end] != 0 {
+			end++
+		}
+		suffix := string(rest[:end])
+		if suffix == "" || suffix[0] < '0' || suffix[0] > '9' {
+			continue
+		}
+		parts := strings.Split(suffix, ".")
+		malformed := len(parts) < 2 || len(parts) > 3
+		if !malformed {
+			for _, p := range parts {
+				if p == "" {
+					malformed = true
+					break
+				}
+				for j := 0; j < len(p); j++ {
+					if p[j] < '0' || p[j] > '9' {
+						malformed = true
+						break
+					}
+				}
+				if malformed {
+					break
+				}
+			}
+		}
+		if malformed {
+			display := suffix
+			if len(display) > 64 {
+				display = display[:64]
+			}
+			return glibcVersion{}, false, fmt.Errorf("unparseable glibc version string %q in version string table: refusing to load", display)
+		}
+		v, err := parseGlibcVersion(suffix)
+		if err != nil {
+			return glibcVersion{}, false, fmt.Errorf("unparseable glibc version string %q in version string table: refusing to load", suffix)
+		}
+		if !found || compareGlibcVersion(v, max) > 0 {
+			max = v
+			found = true
+		}
+	}
+	return max, found, nil
+}
+
+// dynamicStrtabRange returns the DT_STRTAB byte range of
+// an ELF file: DT_STRTAB/DT_STRSZ taken from every
+// PT_DYNAMIC program header and mapped to a file offset
+// through the PT_LOAD segments. Any inconsistency —
+// no PT_DYNAMIC, missing or conflicting DT_STRTAB/
+// DT_STRSZ entries, an empty DT_STRSZ, an address no
+// PT_LOAD covers, or a range past the end of the file —
+// refuses with a clear error naming DT_STRTAB. Errors
+// never embed path (see openErrorWithoutPath). Only
+// 32- and 64-bit layouts are resolved; anything else
+// refuses rather than guessing.
+func dynamicStrtabRange(f *elf.File, path string) ([]byte, error) {
+	var dynProgs []*elf.Prog
+	for _, p := range f.Progs {
+		if p.Type == elf.PT_DYNAMIC {
+			dynProgs = append(dynProgs, p)
+		}
+	}
+	if len(dynProgs) == 0 {
+		return nil, fmt.Errorf("cannot resolve DT_STRTAB: no PT_DYNAMIC program header: refusing to load")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, openErrorWithoutPath("cannot stat plugin file", err)
+	}
+	fileSize := uint64(info.Size())
+	order := f.ByteOrder
+	if order == nil {
+		return nil, fmt.Errorf("cannot resolve DT_STRTAB: unknown byte order: refusing to load")
+	}
+	var entrySize int
+	switch f.Class {
+	case elf.ELFCLASS32:
+		entrySize = 8
+	case elf.ELFCLASS64:
+		entrySize = 16
+	default:
+		return nil, fmt.Errorf("cannot resolve DT_STRTAB: unsupported ELF class: refusing to load")
+	}
+	var strtabAddr, strsz uint64
+	haveAddr, haveSz := false, false
+	for _, dynProg := range dynProgs {
+		if dynProg.Filesz > fileSize {
+			return nil, fmt.Errorf("cannot resolve DT_STRTAB: PT_DYNAMIC size exceeds file size: refusing to load")
+		}
+		raw := make([]byte, dynProg.Filesz)
+		if _, err := dynProg.ReadAt(raw, 0); err != nil {
+			return nil, fmt.Errorf("cannot resolve DT_STRTAB: cannot read PT_DYNAMIC: refusing to load")
+		}
+		if len(raw)%entrySize != 0 {
+			return nil, fmt.Errorf("cannot resolve DT_STRTAB: dynamic section size is not a multiple of the dynamic entry size: refusing to load")
+		}
+		for off := 0; off < len(raw); off += entrySize {
+			var tag int64
+			var val uint64
+			if entrySize == 8 {
+				tag = int64(int32(order.Uint32(raw[off:])))
+				val = uint64(order.Uint32(raw[off+4:]))
+			} else {
+				tag = int64(order.Uint64(raw[off:]))
+				val = order.Uint64(raw[off+8:])
+			}
+			if tag == 0 {
+				break
+			}
+			switch elf.DynTag(tag) {
+			case elf.DT_STRTAB:
+				if haveAddr && strtabAddr != val {
+					return nil, fmt.Errorf("cannot resolve DT_STRTAB: inconsistent DT_STRTAB values: refusing to load")
+				}
+				strtabAddr, haveAddr = val, true
+			case elf.DT_STRSZ:
+				if haveSz && strsz != val {
+					return nil, fmt.Errorf("cannot resolve DT_STRTAB: inconsistent DT_STRSZ values: refusing to load")
+				}
+				strsz, haveSz = val, true
+			}
+		}
+	}
+	if !haveAddr || !haveSz {
+		return nil, fmt.Errorf("cannot resolve DT_STRTAB: missing DT_STRTAB or DT_STRSZ dynamic entry: refusing to load")
+	}
+	if strsz == 0 {
+		return nil, fmt.Errorf("cannot resolve DT_STRTAB: empty DT_STRSZ: refusing to load")
+	}
+	for _, p := range f.Progs {
+		if p.Type != elf.PT_LOAD {
+			continue
+		}
+		if strtabAddr < p.Vaddr || strtabAddr-p.Vaddr >= p.Filesz {
+			continue
+		}
+		rel := strtabAddr - p.Vaddr
+		if strsz > p.Filesz-rel {
+			continue
+		}
+		off := p.Off + rel
+		if off < p.Off || off+strsz < off || off+strsz > fileSize {
+			return nil, fmt.Errorf("cannot resolve DT_STRTAB: DT_STRTAB range exceeds file size: refusing to load")
+		}
+		fh, err := os.Open(path)
+		if err != nil {
+			return nil, openErrorWithoutPath("cannot open plugin file", err)
+		}
+		defer func() { _ = fh.Close() }()
+		buf := make([]byte, strsz)
+		n, readErr := fh.ReadAt(buf, int64(off))
+		if readErr != nil || n != len(buf) {
+			return nil, fmt.Errorf("cannot resolve DT_STRTAB: cannot read DT_STRTAB range: refusing to load")
+		}
+		return buf, nil
+	}
+	return nil, fmt.Errorf("cannot resolve DT_STRTAB: DT_STRTAB address is not covered by any PT_LOAD segment: refusing to load")
 }
 
 // parseVersionNeeds walks VERNEED entries (Elf_Verneed + Elf_Vernaux,
@@ -232,6 +451,20 @@ func versionStringTable(f *elf.File, verneed *elf.Section) ([]byte, error) {
 // bytes uncovered, and the section is refused instead of
 // yielding the maximum of only the entries the chain
 // happened to visit.
+//
+// The reported maximum is a conservative preflight upper
+// bound, not just the chain walk's result: it is the
+// maximum of the walked entries and every GLIBC_x.y[.z]
+// version string found anywhere in strtab (see
+// scanStrtabVersions). A version string the walk skips
+// over still raises the reported maximum, so a skipped
+// entry can never silently downgrade it. This bound is
+// NOT an adversary-proof verneed parser: a hand-crafted
+// section can still present inconsistent readings, and a
+// new bypass of the bound is a documented known
+// limitation, not a second fix round. Plugins are fully
+// trusted in-process code by design; dlopen fails closed
+// with the linker's own version error.
 func parseVersionNeeds(data, strtab []byte, order binary.ByteOrder) (string, error) {
 	max, _, err := parseVersionNeedsCount(data, strtab, order)
 	return max, err
@@ -298,6 +531,13 @@ func parseVersionNeedsCount(data, strtab []byte, order binary.ByteOrder) (string
 		}
 		if off < 0 || off+16 > len(data) {
 			if off == 0 && len(data) == 0 {
+				bound, boundFound, scanErr := scanStrtabVersions(strtab)
+				if scanErr != nil {
+					return "", 0, scanErr
+				}
+				if boundFound {
+					return bound.String(), 0, nil
+				}
 				return "", 0, nil
 			}
 			return "", 0, fmt.Errorf("truncated version need entry at offset %d", off)
@@ -403,6 +643,19 @@ func parseVersionNeedsCount(data, strtab []byte, order binary.ByteOrder) (string
 			}
 			return "", 0, fmt.Errorf("version need section has uncovered bytes at offsets %d-%d: the vnNext chain skips over a version need entry or auxiliary entry: refusing to load", i, end)
 		}
+	}
+	// Conservative strtab superset bound: every GLIBC_
+	// version string anywhere in the string table raises
+	// the reported maximum, including strings no walked
+	// entry references. A malformed numeric GLIBC_
+	// string refuses rather than downgrading.
+	bound, boundFound, err := scanStrtabVersions(strtab)
+	if err != nil {
+		return "", 0, err
+	}
+	if boundFound && (!found || compareGlibcVersion(bound, max) > 0) {
+		max = bound
+		found = true
 	}
 	if !found {
 		return "", headerCount, nil
