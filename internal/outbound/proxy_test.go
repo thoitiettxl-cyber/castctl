@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"
@@ -552,5 +553,129 @@ func TestLoopbackProxyGuardListedPublicIPLiteral(t *testing.T) {
 	}
 	if len(fake.dials) != 1 {
 		t.Fatalf("outbound dials = %d; want 1", len(fake.dials))
+	}
+}
+
+func TestLoopbackProxyGuardRefusesTrailingDotLiteralIPs(t *testing.T) {
+	t.Parallel()
+	// R-10: one trailing dot must not defeat the range rule.
+	// The allowlist match ignores one trailing dot, so the
+	// range check must use the same normalisation: a dotted
+	// literal ("127.0.0.1.") is the same address as a listed
+	// "127.0.0.1" and must still be refused, never dialled.
+	opts := proxyTestOpts("127.0.0.1", "10.0.0.0", "allowed.test")
+	_, proxyURL, fake, refused := guardTestProxy(t, "", opts)
+	for _, authority := range []string{"127.0.0.1.:443", "10.1.2.3.:443", "169.254.1.2.:443", "192.168.0.5.:443", "0.0.0.0.:443", "100.64.0.9.:443", "[::1.]:443"} {
+		if code := guardCONNECT(t, proxyURL, authority); code != 403 {
+			t.Fatalf("CONNECT %s: status = %d; want 403", authority, code)
+		}
+	}
+	if len(fake.dials) != 0 {
+		t.Fatalf("outbound dials = %d; want 0 (refused before dialling)", len(fake.dials))
+	}
+	want := map[string]bool{"127.0.0.1": true, "10.1.2.3": true, "169.254.1.2": true, "192.168.0.5": true, "0.0.0.0": true, "100.64.0.9": true, "::1": true}
+	if len(*refused) != len(want) {
+		t.Fatalf("refusals logged = %v; want %d host-only entries", *refused, len(want))
+	}
+	for _, h := range *refused {
+		if !want[h] || strings.ContainsAny(h, "/?#@") {
+			t.Fatalf("refused host = %q; want a host only, no port/query/userinfo", h)
+		}
+	}
+}
+
+// guardRawStatus sends one raw request line (plus an empty
+// header block) to the proxy and returns the response status
+// code. Unlike http.Client it does not normalise the target
+// first, so the proxy sees the literal request-target form.
+func guardRawStatus(t *testing.T, proxyURL, requestLine string) int {
+	t.Helper()
+	pu, _ := url.Parse(proxyURL)
+	conn, err := net.DialTimeout("tcp", pu.Host, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := fmt.Fprintf(conn, "%s\r\n\r\n", requestLine); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	status, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	var code int
+	if _, err := fmt.Sscanf(status, "HTTP/1.1 %d", &code); err != nil {
+		t.Fatalf("status line = %q", status)
+	}
+	return code
+}
+
+func TestLoopbackProxyGuardRefusesTrailingDotLiteralHTTP(t *testing.T) {
+	t.Parallel()
+	// R-10, plain-HTTP leg: u.Hostname() hands the dotted
+	// literal to the same guard, so the same normalisation
+	// hole would dial it. The dotted literal must be refused
+	// with the query stripped from the refusal log.
+	opts := proxyTestOpts("127.0.0.1", "allowed.test")
+	_, proxyURL, fake, refused := guardTestProxy(t, "", opts)
+	if code := guardRawStatus(t, proxyURL, "GET http://127.0.0.1.:9/x?token=SECRET HTTP/1.1"); code != 403 {
+		t.Fatalf("GET status = %d; want 403", code)
+	}
+	if len(fake.dials) != 0 {
+		t.Fatalf("outbound dials = %d; want 0", len(fake.dials))
+	}
+	if len(*refused) != 1 || (*refused)[0] != "127.0.0.1" {
+		t.Fatalf("refusals = %v; want host-only [127.0.0.1], no query", *refused)
+	}
+}
+
+func TestLoopbackProxyGuardMalformedAuthorityRejected(t *testing.T) {
+	t.Parallel()
+	// R-12: a CONNECT authority is host:port only. A host
+	// carrying a query, fragment, path, or userinfo is
+	// malformed and is rejected (400) BEFORE the guard, so
+	// no query/fragment content can reach the refusal log.
+	opts := proxyTestOpts("allowed.test")
+	_, proxyURL, fake, refused := guardTestProxy(t, "", opts)
+	for _, authority := range []string{"evil.example?token=SECRET:443", "evil.example#frag:443", "evil.example/path:443"} {
+		if code := guardCONNECT(t, proxyURL, authority); code != 400 {
+			t.Fatalf("CONNECT %s: status = %d; want 400", authority, code)
+		}
+	}
+	if len(fake.dials) != 0 {
+		t.Fatalf("outbound dials = %d; want 0", len(fake.dials))
+	}
+	if len(*refused) != 0 {
+		t.Fatalf("refusals = %v; want none: a malformed authority is rejected before refusal logging", *refused)
+	}
+}
+
+func TestLoopbackProxyLogRefusedSanitises(t *testing.T) {
+	t.Parallel()
+	// R-12 defence in depth + S22: logRefused is the single
+	// funnel to the refusal callback. Trailing query /
+	// fragment / path junk is cut, a userinfo/whitespace
+	// shape is not logged at all, and truncation to
+	// DNS-name length never splits a multi-byte rune.
+	opts := proxyTestOpts("allowed.test")
+	proxy, _, _, refused := guardTestProxy(t, "", opts)
+	proxy.logRefused("evil.example?token=SECRET")
+	proxy.logRefused("evil.example#frag")
+	proxy.logRefused("evil.example/path")
+	proxy.logRefused("user@evil.example")
+	proxy.logRefused("evil .example")
+	proxy.logRefused(strings.Repeat("é", 200)) // 400 bytes of multibyte runes
+	if len(*refused) != 4 {
+		t.Fatalf("refusals = %v; want 4 entries (3 cut hosts + 1 truncated host, no userinfo/whitespace shape)", *refused)
+	}
+	for _, h := range (*refused)[:3] {
+		if h != "evil.example" {
+			t.Fatalf("refused host = %q; want evil.example", h)
+		}
+	}
+	last := (*refused)[3]
+	if len(last) > 253 || !utf8.ValidString(last) {
+		t.Fatalf("truncated host is %d bytes, valid UTF-8 = %v; want at most 253 bytes at a rune boundary", len(last), utf8.ValidString(last))
 	}
 }

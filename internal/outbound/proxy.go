@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // The S2 loopback proxy: the minimal inbound that lets a
@@ -125,6 +126,19 @@ func validateGuardHost(s string) bool {
 	return true
 }
 
+// connectHostOK reports whether host is a bare host as a
+// CONNECT authority or URL host may carry it: no scheme,
+// path, query, fragment, userinfo, whitespace, or control
+// characters. A zone suffix ("%eth0") and ':' (IPv6
+// literals, brackets already stripped by the caller) are
+// allowed: they are host syntax, not smuggled content.
+func connectHostOK(host string) bool {
+	if strings.ContainsAny(host, "/?#@") {
+		return false
+	}
+	return strings.IndexFunc(host, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) < 0
+}
+
 // cgnatPrefix is the shared-address (CGNAT) range,
 // refused like the private ranges: a browser must not
 // reach it as a literal target through the proxy.
@@ -137,11 +151,19 @@ var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
 // ("fe80::1%eth0") is stripped before parsing. A hostname
 // never refuses here: hostnames are gated by the allowlist
 // only, and resolution happens at the egress.
+//
+// The range check uses the same normalisation as the
+// allowlist match (normalizeGuardHost): one trailing dot
+// is ignored there, so it is ignored here too. Without the
+// dot strip, a dotted literal ("127.0.0.1.") would fail to
+// parse, miss the range rule, and match a listed
+// "127.0.0.1" — dialling a refused-range address (R-10).
 func refusedIPLiteral(host string) bool {
 	if i := strings.IndexByte(host, '%'); i >= 0 {
 		host = host[:i]
 	}
-	addr, err := netip.ParseAddr(strings.TrimSpace(host))
+	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
+	addr, err := netip.ParseAddr(host)
 	if err != nil {
 		return false
 	}
@@ -295,14 +317,28 @@ func (p *LoopbackProxy) targetRefused(host string) bool {
 // logRefused reports a refused target's host ONLY to the
 // configured callback: no URL, query, port, or headers.
 // The logged host is the normalized match form, truncated
-// to DNS-name length.
+// to DNS-name length. Defence in depth for the HOST ONLY
+// contract: trailing query/fragment/path junk is cut, a
+// userinfo/whitespace/control shape is not logged at all,
+// and truncation never splits a multi-byte rune (S22) —
+// so no malformed-authority content can reach the callback
+// even if a caller forgets to validate the host first.
 func (p *LoopbackProxy) logRefused(host string) {
 	if p.opts.OnRefused == nil {
 		return
 	}
 	h := normalizeGuardHost(host)
+	if i := strings.IndexAny(h, "?#/"); i >= 0 {
+		h = h[:i]
+	}
+	if !connectHostOK(h) {
+		return
+	}
 	if len(h) > 253 {
 		h = h[:253]
+		for len(h) > 0 && !utf8.ValidString(h) {
+			h = h[:len(h)-1]
+		}
 	}
 	p.opts.OnRefused(h)
 }
@@ -413,6 +449,13 @@ func (p *LoopbackProxy) handleConnect(client net.Conn, br *bufio.Reader, target 
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 1 || port > 65535 || host == "" {
+		return p.proxyError(client, 400)
+	}
+	// A CONNECT authority is host:port only. A host carrying
+	// a query, fragment, path, or userinfo is malformed:
+	// reject it (400) BEFORE the guard, so no query/fragment
+	// content can reach the refusal log (R-12).
+	if !connectHostOK(host) {
 		return p.proxyError(client, 400)
 	}
 	if p.targetRefused(host) {

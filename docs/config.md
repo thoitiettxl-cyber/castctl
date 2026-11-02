@@ -440,9 +440,9 @@ The web UI edits this block through `GET`/`PUT /settings/keeper`
 null` deletes the block). Keeper status display (`GET /keeper`)
 is read-only: the web UI never ticks the keeper.
 
-No hardcoded operational values remain in the keeper/headless
-code: every timeout, cap, and host above is a config key with
-the documented default, and omitting a key preserves exactly
+Every timeout, cap, and host in the keeper-entry
+proxy/driver/observe paths above is a config key with the
+documented default, and omitting a key preserves exactly
 the behaviour the hardcoded value had. Validation caps are
 bounds on the schema, not defaults, and stay constants:
 `MaxRetryBackoffSteps = 8`, `MaxKeeperAttempts = 10`,
@@ -451,6 +451,29 @@ bounds on the schema, not defaults, and stay constants:
 `MaxProxyDialTimeout = 1m`, `MaxReloginPollInterval = 1m`,
 `MaxReloginWaitTimeout = 10m`
 (`internal/profile/keeper.go`, `internal/keeper/backoff.go`).
+The refusal-log truncation to 253 bytes (the DNS-name
+length bound, `internal/outbound/proxy.go`) is a log-safety
+constant, not a tunable: it caps how much of a refused host
+reaches the log, never a timeout or dial.
+
+Pre-existing hardcoded timeouts OUTSIDE the paths above
+stay as they were (Boss scoping: branch-diff values only,
+plus this inventory — Boss decides separately whether any
+moves into config): CDP discovery 5s HTTP + 5s dial
+(`internal/keeper/export_cdp.go`, `DiscoverWebSocketURL`);
+`keeper check` tick bound 90s (`internal/commands/keeper.go`,
+`keeperCheckTimeout`); gateway connect 60s + heartbeat 25s
+(`internal/conn/gateway.go`, `ConnectTimeout`/`Heartbeat`);
+Telegram notice send bound 30s
+(`internal/commands/keeper.go`, `telegramNotifier.Notify`);
+single-flight owner freshness 120s + heartbeat 60s
+(`internal/keeper/run.go`, `OwnerStaleAfter`/
+`OwnerHeartbeatInterval`); login-pause staleness 70m
+(`internal/keeper/state.go`, `LoginFlagStaleAfter`); adaptive
+keep-alive clamp 1h–7d (`internal/keeper/backoff.go`,
+`NextDelayAfter`, the G1-approved rule); dialer transport
+timeouts 90s idle / 10s TLS handshake / 1s expect-continue
+(`internal/outbound/dialer.go`).
 
 **S2 proxy guard.** Before dialling, the loopback proxy
 refuses (fixed 403, no dial spent) any target that is a
@@ -477,7 +500,9 @@ the proxy is unmeasured until the outside-sandbox
 observation gate; extend the list in config if it does. A
 refusal logs the refused host ONLY (no URL, query, port,
 or headers), at the single caller that wires the proxy, via
-the castctl logger.
+the castctl logger. A malformed CONNECT authority (query,
+fragment, path, or userinfo in the host) is rejected with
+400 before the guard, so it is never logged.
 
 **Follow-ups (not implemented in this change).** Attach-success
 path (needs a debug-port Chrome harness; `internal/keeper`,

@@ -95,7 +95,7 @@ import (
 //     bounds the sequence's internal retries.)
 //   - `proxy_dial_timeout` (optional duration string, default
 //     30s): one upstream dial through the S2 loopback proxy.
-//     Positive, at most MaxKeeperInterval.
+//     Positive, at most MaxProxyDialTimeout (1m).
 //   - `proxy_max_header_bytes` (optional number, default
 //     65536): the largest request header block the S2 proxy
 //     accepts. Positive, at most MaxProxyHeaderBytes.
@@ -109,10 +109,12 @@ import (
 //     IPv6 literal. Matching is exact on the lowercased host
 //     (one trailing dot ignored). A target whose host is not
 //     listed is refused without a dial, and a literal IP in a
-//     loopback, link-local, or private range is refused unless
-//     it is explicitly listed (an explicit listing is an
-//     explicit operator decision that overrides the range
-//     refusal; the default list contains no such address).
+//     loopback, link-local, or private range is refused even
+//     when it is explicitly listed: the range rule is
+//     absolute and listing does NOT override it (the
+//     default list contains no such address). To reach a
+//     refused-range address, list a hostname that resolves
+//     to it at the egress.
 //     An absent key — or an entry without one — means the
 //     default list; an explicitly empty list is a config
 //     error.
@@ -120,30 +122,31 @@ import (
 //     default 30s): how long the headless driver polls for
 //     the login form (or a blocker) before declaring a
 //     contract mismatch. Positive, at most
-//     MaxKeeperInterval.
+//     MaxReloginWaitTimeout (10m).
 //   - `relogin_cookie_timeout` (optional duration string,
 //     default 30s): how long the driver polls for the
 //     harvested session cookie after submit. Positive, at
-//     most MaxKeeperInterval.
+//     most MaxReloginWaitTimeout (10m).
 //   - `relogin_poll_interval` (optional duration string,
 //     default 500ms): the driver's snapshot poll cadence.
-//     Positive, at most MaxKeeperInterval.
+//     Positive, at most MaxReloginPollInterval (1m).
 //   - `relogin_attach_timeout` (optional duration string,
 //     default 10s): the dial timeout for attaching to an
 //     already-running Chrome. Positive, at most
-//     MaxKeeperInterval.
+//     MaxProxyDialTimeout (1m).
 //   - `relogin_cancel_timeout` (optional duration string,
 //     default 10s): the bound on waiting for a launched
 //     browser's cancel to reap it (a process that never
 //     started is never reaped; the wait must not wedge the
-//     tick). Positive, at most MaxKeeperInterval.
+//     tick). Positive, at most MaxProxyDialTimeout (1m).
 //   - `observe_settle_timeout` (optional duration string,
 //     default 15s): how long `auth observe-login` polls for
 //     at least one form control before returning the
-//     inventory. Positive, at most MaxKeeperInterval.
+//     inventory. Positive, at most MaxReloginWaitTimeout
+//     (10m).
 //   - `observe_timeout` (optional duration string, default
 //     90s): the whole `auth observe-login` run bound.
-//     Positive, at most MaxKeeperInterval.
+//     Positive, at most MaxReloginWaitTimeout (10m).
 //   - `observe_inventory_cap` (optional number, default
 //     200): the maximum form-control elements one observation
 //     records. Positive, at most MaxObserveInventoryCap.
@@ -151,8 +154,13 @@ import (
 //   Every operational timeout, cap, and host above is a
 //   config key with a documented default (Boss decision
 //   S10, 2026-11-02): no hardcoded operational value
-//   remains in the keeper/driver/proxy code paths. The
-//   validation caps (MaxRetryBackoffSteps,
+//   remains in the keeper-entry proxy/driver/observe code
+//   paths these keys cover. Pre-existing timeouts outside
+//   those paths (CDP discovery, keeper check, gateway
+//   connect/heartbeat, Telegram notice send, single-flight
+//   ownership, login-pause staleness, dialer transport)
+//   stay as they were; see docs/config.md for the
+//   inventory. The validation caps (MaxRetryBackoffSteps,
 //   MaxKeeperAttempts, MaxProxyHeaderBytes,
 //   MaxProxyBodyBytes, MaxObserveInventoryCap) are schema
 //   bounds, not settings: they bound what a config value
@@ -201,9 +209,10 @@ const MaxProxyDialTimeout = time.Minute
 const MaxReloginWaitTimeout = 10 * time.Minute
 
 // MaxReloginPollInterval bounds a configured
-// `relogin_poll_interval`, `relogin_attach_timeout`, and
-// `relogin_cancel_timeout`: a minute between polls, or a
-// minute to dial/cancel, is already a wedged browser.
+// `relogin_poll_interval`: a minute between polls is
+// already a wedged browser. (The attach/cancel bounds use
+// MaxProxyDialTimeout, the same 1m value, not this
+// constant.)
 const MaxReloginPollInterval = time.Minute
 
 // DefaultRetryBackoff is the documented zero-value transient
@@ -413,17 +422,19 @@ var keeperEntryKeys = map[string]bool{
 // dot removed. Entries are hostnames or IPv4 literals only:
 // no scheme, port, userinfo, path, query, fragment,
 // wildcard, bracket, or whitespace. An entry that parses as
-// a loopback/private/link-local IP is NOT rejected here: an
-// explicit listing is an explicit operator decision that
-// overrides the proxy's range refusal (see
-// EffectiveProxyAllowedHosts and internal/outbound's guard),
-// and the default list contains no such address.
+// a loopback/private/link-local IP is NOT rejected here: it
+// is refused at dial time by the proxy's range rule, which
+// is absolute — an explicit listing does NOT override the
+// range refusal (see EffectiveProxyAllowedHosts and
+// internal/outbound's guard); the default list contains no
+// such address. Errors never echo the entry: the caller
+// names the element index (R-13).
 func normalizeAllowedHost(raw string) (string, error) {
 	if raw == "" {
 		return "", fmt.Errorf("host must not be empty")
 	}
 	if raw != strings.TrimSpace(raw) {
-		return "", fmt.Errorf("host %q has surrounding whitespace", raw)
+		return "", fmt.Errorf("host entry has surrounding whitespace")
 	}
 	s := strings.ToLower(raw)
 	s = strings.TrimSuffix(s, ".")
@@ -433,7 +444,7 @@ func normalizeAllowedHost(raw string) (string, error) {
 	for _, r := range s {
 		switch {
 		case r == '/' || r == ':' || r == '@' || r == '?' || r == '#' || r == '[' || r == ']' || r == '*' || unicode.IsSpace(r) || unicode.IsControl(r):
-			return "", fmt.Errorf("host %q contains a forbidden character", raw)
+			return "", fmt.Errorf("host entry contains a forbidden character")
 		}
 	}
 	return s, nil

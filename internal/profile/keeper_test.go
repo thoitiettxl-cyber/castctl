@@ -415,6 +415,25 @@ func TestParseKeeperS10KeysErrors(t *testing.T) {
 	}
 }
 
+// TestParseKeeperAllowedHostErrorHasNoEntryValue (R-13): a
+// rejected allowlist entry must not be echoed in the config
+// error, even when the operator pasted a tokenised URL as
+// the entry. The error names the element index and the rule
+// instead.
+func TestParseKeeperAllowedHostErrorHasNoEntryValue(t *testing.T) {
+	raw := keeperTestConfig(t, `[{"tag": "k1", "profile": "muse01", "proxy_allowed_hosts": ["https://a.test?token=SECRET-9f3a7c", "ok.test"]}]`)
+	_, err := ParseSingleConfig([]byte(raw), t.TempDir())
+	if err == nil {
+		t.Fatal("ParseSingleConfig = nil error; want config error")
+	}
+	if strings.Contains(err.Error(), "SECRET-9f3a7c") || strings.Contains(err.Error(), "a.test") {
+		t.Fatalf("config error echoes the rejected entry: %v", err)
+	}
+	if !strings.Contains(err.Error(), "element 0") {
+		t.Fatalf("config error = %v; want the element index named", err)
+	}
+}
+
 // TestKeeperS10KeysRoundTrip (S10): hand-built entries
 // render every new key and re-parse to the same values;
 // raw JSON with all keys is preserved on encode.
