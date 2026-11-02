@@ -573,8 +573,8 @@ five keys:
 | `listen` | string: loopback `host:port` the server binds (default `127.0.0.1:8317` when the block is present without `listen`) |
 | `token` | string: the management token, write-only (see below) |
 | `ui_dir` | string: directory of static frontend files served instead of the embedded frontend (see below) |
-| `session_idle_timeout` | duration string: how long the frontend keeps the token without user activity before discarding it and requiring re-login (default `12h`, at most 30 days; empty is a config error) |
-| `login_rate_limit` | object: login rate limit — `attempts` (integer 1–100, default `5`) failed token verifications per `window` (duration string, default `5m`, at most 24h) per remote address, after which the server answers fixed 429 with `Retry-After` |
+| `session_idle_timeout` | duration string: how long the frontend keeps the token without user activity before discarding it and requiring re-login (default `12h`, at least `1m`, at most 30 days; empty is a config error; sub-floor values are rejected, never clamped) |
+| `login_rate_limit` | object: login rate limit — `attempts` (integer 1–100, default `5`) failed token verifications per `window` (duration string, default `5m`, at least `1s`, at most 24h; sub-floor values are rejected, never clamped) per remote address, after which the server answers fixed 429 with `Retry-After` |
 
 sing-box defines no `webui` block: these keys are castctl-only.
 The duration-string value form follows sing-box timeout fields and

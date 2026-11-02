@@ -122,6 +122,9 @@ func TestWebUIBlockRejects(t *testing.T) {
 		`{"profiles":{},"webui":{"listen":8317}}`,
 		`{"profiles":{},"webui":{"token":""}}`,
 		`{"profiles":{},"webui":{"token":123}}`,
+		`{"profiles":{},"webui":{"token":"has space"}}`, // whitespace can never authenticate
+		`{"profiles":{},"webui":{"token":"has	tab"}}`,   // tab likewise
+		`{"profiles":{},"webui":{"token":" lead"}}`,     // leading space likewise
 		`{"profiles":{},"webui":{"listen":""}}`,
 		`{"profiles":{},"webui":{"unknown":true}}`,
 		`{"profiles":{},"webui":{"listen":"0.0.0.0:8317"}}`,
@@ -280,6 +283,11 @@ func TestWebUIIdleTimeoutAndRateLimitParse(t *testing.T) {
 	if cfg4.WebUI.LoginRateLimit == nil {
 		t.Fatal("empty login_rate_limit object parsed to nil")
 	}
+	// The documented floors are accepted exactly: 1m idle, 1s window.
+	cfg5 := parseWebUITestConfig(t, `{"profiles":{},"webui":{"token":"MARKER-WEBUI-TOKEN","session_idle_timeout":"1m","login_rate_limit":{"window":"1s"}}}`)
+	if cfg5.WebUI.SessionIdleTimeout != time.Minute || cfg5.WebUI.LoginRateLimit.Window != time.Second {
+		t.Fatalf("floor values = %+v", cfg5.WebUI)
+	}
 }
 
 func TestWebUIIdleTimeoutAndRateLimitRejects(t *testing.T) {
@@ -287,6 +295,7 @@ func TestWebUIIdleTimeoutAndRateLimitRejects(t *testing.T) {
 		`{"profiles":{},"webui":{"session_idle_timeout":3600}}`,                 // bare number, not a duration string
 		`{"profiles":{},"webui":{"session_idle_timeout":""}}`,                   // empty must not mean "no expiry"
 		`{"profiles":{},"webui":{"session_idle_timeout":"0s"}}`,                 // non-positive
+		`{"profiles":{},"webui":{"session_idle_timeout":"59s"}}`,                // below the 1m floor
 		`{"profiles":{},"webui":{"session_idle_timeout":"-1h"}}`,                // negative
 		`{"profiles":{},"webui":{"session_idle_timeout":"31d"}}`,                // over the 30-day cap (ParseDuration rejects "d"; either way it must fail)
 		`{"profiles":{},"webui":{"session_idle_timeout":"10000h"}}`,             // over the cap
@@ -299,6 +308,8 @@ func TestWebUIIdleTimeoutAndRateLimitRejects(t *testing.T) {
 		`{"profiles":{},"webui":{"login_rate_limit":{"window":300}}}`,           // bare number
 		`{"profiles":{},"webui":{"login_rate_limit":{"window":""}}}`,            // empty
 		`{"profiles":{},"webui":{"login_rate_limit":{"window":"0s"}}}`,          // non-positive
+		`{"profiles":{},"webui":{"login_rate_limit":{"window":"999ms"}}}`,       // below the 1s floor
+		`{"profiles":{},"webui":{"login_rate_limit":{"window":"1ns"}}}`,         // sub-second: would disable the limit
 		`{"profiles":{},"webui":{"login_rate_limit":{"window":"25h"}}}`,         // over the 24h cap
 		`{"profiles":{},"webui":{"login_rate_limit":{"burst":2}}}`,              // unknown nested key
 		`{"profiles":{},"webui":{"session_idle_timeout":"12h","unknown":true}}`, // unknown key still rejected

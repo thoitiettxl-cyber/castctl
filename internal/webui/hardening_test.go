@@ -60,6 +60,8 @@ func TestOriginAllowlist(t *testing.T) {
 		{"same-host other port", "http://127.0.0.1:4000", "127.0.0.1:8317", true},
 		{"remote origin", "https://evil.example", "", false},
 		{"remote ip origin", "http://203.0.113.10:8317", "", false},
+		{"userinfo loopback origin", "http://evil.com@127.0.0.1:8317", "", false},
+		{"userinfo same-host origin", "http://user@127.0.0.1:8317", "127.0.0.1:8317", false},
 		{"opaque null origin", "null", "", false},
 		{"malformed origin", "://bad", "", false},
 		{"origin without host", "http://", "", false},
@@ -214,20 +216,46 @@ func TestLoginRateLimiterUnit(t *testing.T) {
 	}
 }
 
-func TestLoginRateLimiterEvictionBound(t *testing.T) {
-	l := &loginRateLimiter{}
-	for i := 0; i <= maxRateLimitEntries; i++ {
-		l.recordFailure("10.0.0."+strconv.Itoa(i), time.Minute)
+func TestLoginRateLimiterFailClosedAtCap(t *testing.T) {
+	// The cap fails closed (F1 regression): a flood of distinct
+	// addresses inside the window must never evict a limited
+	// address's entry and reset its budget. Only expired
+	// entries are evicted to make room.
+	now := time.Now()
+	l := &loginRateLimiter{now: func() time.Time { return now }}
+	attempts, window := 5, 5*time.Minute
+	victim := "192.0.2.1"
+	for i := 0; i < attempts; i++ {
+		l.recordFailure(victim, window)
+	}
+	if !l.exceeded(victim, attempts, window) {
+		t.Fatal("victim not limited after 5 failures")
+	}
+	for i := 0; i < maxRateLimitEntries*2; i++ {
+		l.recordFailure("10.0.0."+strconv.Itoa(i), window)
 	}
 	l.mu.Lock()
 	n := len(l.entries)
-	_, oldestKept := l.entries["10.0.0.0"]
+	_, victimKept := l.entries[victim]
 	l.mu.Unlock()
 	if n > maxRateLimitEntries {
 		t.Fatalf("entries = %d, want at most %d", n, maxRateLimitEntries)
 	}
-	if oldestKept {
-		t.Fatal("oldest address was not evicted at the cap")
+	if !victimKept {
+		t.Fatal("victim entry was evicted at the cap: the flood reset its budget")
+	}
+	if !l.exceeded(victim, attempts, window) {
+		t.Fatal("victim no longer limited after the flood: still 429 within the window")
+	}
+	// Expired entries ARE evicted to make room for a new
+	// address once the window passes.
+	now = now.Add(window)
+	l.recordFailure("203.0.113.1", window)
+	l.mu.Lock()
+	_, newKept := l.entries["203.0.113.1"]
+	l.mu.Unlock()
+	if !newKept {
+		t.Fatal("new address was not inserted after expired entries were evicted")
 	}
 }
 

@@ -37,6 +37,27 @@ type orderedObject struct {
 	vals map[string]any
 }
 
+// set records key in insertion order (first position kept on
+// re-set), mirroring the profile decoder's orderedObject.
+func (o *orderedObject) set(key string, value any) {
+	if _, ok := o.vals[key]; !ok {
+		o.keys = append(o.keys, key)
+	}
+	o.vals[key] = value
+}
+
+// MarshalJSON renders the object with keys in stored order, so
+// a plain json.Marshal fallback (no stored bytes to overlay
+// against) cannot silently empty it: the unexported fields
+// would otherwise encode as {}.
+func (o *orderedObject) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	if err := marshalOrderedValue(&buf, o); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 func decodeOrderedValue(dec *json.Decoder) (any, error) {
 	tok, err := dec.Token()
 	if err != nil {

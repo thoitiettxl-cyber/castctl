@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/thoitiettxl-cyber/castctl/internal/profile"
 )
 
 // Secret-leak sweeps (research §2.3): every response the API can
@@ -17,11 +19,15 @@ import (
 // must contain a redaction marker — so the test cannot pass
 // vacuously by the endpoints returning nothing. All secrets
 // below are FAKE markers, never real credentials. The
-// log-path sweep is structural, not behavioural: this package
-// has no logger and writes nothing to stderr (verified by
-// grep: no log/slog/fmt-print import in non-test files), so
-// there is no log sink for a secret to reach; the sweeps here
-// cover the response, write, and error paths.
+// log-path sweep is the behavioural
+// TestLogsTailRedactionAndCursor (logs_test.go): it plants
+// marker secrets in the log file and asserts they never reach
+// the /logs response — that test, not this file, pins the
+// log boundary, because this package has no logger and writes
+// nothing to stderr (verified by grep: no log/slog/fmt-print
+// import in non-test files). The sweeps here cover the
+// response, write, error, rate-limit, Origin, and oversized
+// paths.
 
 const (
 	leakTrojanPassword = "FAKE-SECRET-TROJAN-PASSWORD"
@@ -32,11 +38,16 @@ const (
 	leakTelegramToken  = "123456789:FAKE-SECRET-TELEGRAM-TOKEN-0123456789"
 	leakWebUIToken     = "FAKE-SECRET-WEBUI-TOKEN-VALUE"
 	leakCookieValue    = "hatch_sess=FAKE-SECRET-HATCH-SESS-VALUE"
+	// leakProxyPassword is the secret half of a proxy URL's
+	// userinfo (proxy auth password): it must never surface in
+	// an outbound view or a validation error.
+	leakProxyPassword = "FAKE-SECRET-PROXY-PASSWORD"
 )
 
 var leakMarkers = []string{
 	leakTrojanPassword, leakWGPrivate, leakWGPublic, leakVMID,
 	leakNodeID, leakTelegramToken, leakWebUIToken, leakCookieValue,
+	leakProxyPassword,
 }
 
 const leakFixtureConfig = `{
@@ -51,7 +62,8 @@ const leakFixtureConfig = `{
     }
   },
   "outbounds": [
-    {"type": "trojan", "tag": "proxy-eu", "server": "203.0.113.10", "server_port": 443, "password": "FAKE-SECRET-TROJAN-PASSWORD"}
+    {"type": "trojan", "tag": "proxy-eu", "server": "203.0.113.10", "server_port": 443, "password": "FAKE-SECRET-TROJAN-PASSWORD"},
+    {"type": "socks", "tag": "proxy-userinfo", "server": "203.0.113.10", "server_port": 1080, "version": "5", "username": "proxy-user", "password": "FAKE-SECRET-PROXY-PASSWORD"}
   ],
   "endpoints": [
     {"type": "wireguard", "tag": "wg-home", "address": ["10.0.0.2/32"], "private_key": "FAKE-SECRET-WG-PRIVATE-KEY", "peers": [{"address": "203.0.113.10", "port": 51820, "public_key": "FAKE-SECRET-WG-PUBLIC-KEY", "allowed_ips": ["0.0.0.0/0"]}]}
@@ -78,6 +90,7 @@ func TestSecretLeakResponseSweep(t *testing.T) {
 		"/api/v1/profiles/muse01",
 		"/api/v1/outbounds",
 		"/api/v1/outbounds/proxy-eu",
+		"/api/v1/outbounds/proxy-userinfo",
 		"/api/v1/endpoints",
 		"/api/v1/endpoints/wg-home",
 		"/api/v1/config",
@@ -167,6 +180,24 @@ func TestSecretLeakWritePathSweep(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PUT webui settings: got %d: %s", rec.Code, rec.Body.String())
 	}
+	// On-disk: the stored file must hold the token as a bcrypt
+	// hash, never the plaintext marker, and the marker token
+	// must authenticate against the refreshed comparator.
+	stored := readTestConfig(t, ts)
+	if strings.Contains(string(stored), leakWebUIToken) {
+		t.Fatal("stored config.json contains the plaintext webui token marker")
+	}
+	parsed, err := profile.ParseSingleConfig(stored, ts.dir)
+	if err != nil {
+		t.Fatalf("stored config does not parse: %v", err)
+	}
+	if parsed.WebUI == nil || !profile.LooksLikeBcryptHash(parsed.WebUI.Token) {
+		t.Fatalf("stored webui token is not a bcrypt hash: %+v", parsed.WebUI)
+	}
+	rec = ts.doToken(t, "GET", "/api/v1/status", "", leakWebUIToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("marker token after rotation: got %d, want 200", rec.Code)
+	}
 }
 
 func TestSecretLeakErrorPathSweep(t *testing.T) {
@@ -204,4 +235,46 @@ func TestSecretLeakErrorPathSweep(t *testing.T) {
 	// the rejection names the path, never the value.
 	rec = ts.do(t, "PUT", "/api/v1/dns", `{"dns": {"servers": []}, "base_sha256": "`+sha+`"}`, true)
 	assertNoLeak(t, "dns PUT", rec.Body.String())
+}
+
+func TestSecretLeakRateLimitOriginOversizedSweep(t *testing.T) {
+	// 429 bodies: a marker presented as the Bearer on a
+	// 1-attempt window must never be echoed by the fixed
+	// rate-limit body.
+	cfg429 := strings.Replace(leakFixtureConfig, `"dns":`, `"webui":{"token":"FAKE-SECRET-WEBUI-TOKEN-VALUE","login_rate_limit":{"attempts":1,"window":"5m"}},"dns":`, 1)
+	ts := newTestServer(t, cfg429, nil)
+	rec := ts.doToken(t, "GET", "/api/v1/status", "", leakCookieValue)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("first marker failure: got %d, want 401", rec.Code)
+	}
+	assertNoLeak(t, "401 body", rec.Body.String())
+	rec = ts.doToken(t, "GET", "/api/v1/status", "", leakCookieValue)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second marker failure: got %d, want 429", rec.Code)
+	}
+	assertNoLeak(t, "429 body", rec.Body.String())
+
+	// 403 bodies: a marker-bearing mutation from a remote
+	// Origin gets the fixed cross-origin body only.
+	ts2 := newTestServer(t, leakFixtureConfig, nil)
+	rec = ts2.doReq(t, "POST", "/api/v1/config/validate", `{"bogus":"FAKE-SECRET-TROJAN-PASSWORD"}`, true, map[string]string{"Origin": "https://evil.example"}, "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("remote Origin: got %d, want 403", rec.Code)
+	}
+	assertNoLeak(t, "403 body", rec.Body.String())
+
+	// Oversized bodies: a marker past the 1 MiB section-editor
+	// cap must never be echoed by the fixed validation error.
+	huge := `{"token":"` + strings.Repeat("A", 2<<20) + leakTelegramToken + `"}`
+	rec = ts2.do(t, "PUT", "/api/v1/settings/telegram", huge, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized body: got %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	assertNoLeak(t, "oversized body error", rec.Body.String())
+
+	// Proxy-userinfo marker in a validation error: an
+	// outbound carrying the marker password must not leak
+	// it when validation rejects the document.
+	rec = ts2.do(t, "POST", "/api/v1/outbounds/validate", `{"outbound":{"type":"socks","tag":"x","server":"203.0.113.10","server_port":1080,"version":"5","username":"proxy-user","password":"FAKE-SECRET-PROXY-PASSWORD","bogus":1}}`, true)
+	assertNoLeak(t, "outbound validate error", rec.Body.String())
 }

@@ -138,16 +138,22 @@ func (s *Server) handlePutKeeperSettings(w http.ResponseWriter, r *http.Request)
 			entries = []putKeeperEntryBody{}
 		}
 		for _, e := range entries {
-			entry := map[string]any{
-				"tag":     e.Tag,
-				"profile": e.Profile,
-				"browser": e.Browser,
-			}
+			// Canonical key order tag, profile, browser,
+			// interval, notify, rendered via orderedObject:
+			// a plain map would re-encode with sorted keys
+			// (encoding/json) for entries the stored
+			// document does not already carry, so a new
+			// entry saved through this editor would come
+			// back alphabetised instead of canonical.
+			entry := &orderedObject{vals: map[string]any{}}
+			entry.set("tag", e.Tag)
+			entry.set("profile", e.Profile)
+			entry.set("browser", e.Browser)
 			if e.Interval != nil && strings.TrimSpace(*e.Interval) != "" {
-				entry["interval"] = *e.Interval
+				entry.set("interval", *e.Interval)
 			}
 			if e.Notify != nil && *e.Notify != "" {
-				entry["notify"] = *e.Notify
+				entry.set("notify", *e.Notify)
 			}
 			submitted = append(submitted, entry)
 		}
@@ -300,11 +306,18 @@ func (s *Server) handlePutWebUISettings(w http.ResponseWriter, r *http.Request) 
 		if body.Token != nil {
 			// Empty token = unchanged (write-only field). A
 			// non-empty token replaces the stored one; a
-			// placeholder is never a token.
+			// placeholder is never a token. Whitespace
+			// anywhere is rejected, matching parse: a stored
+			// token with whitespace can never authenticate
+			// (authorized() rejects it before bcrypt) and
+			// would lock the server out.
 			if strings.TrimSpace(*body.Token) != "" {
 				token := *body.Token
 				if token == "***" || token == redact.Marker {
 					return errValidation("webui.token must be a real token, not a placeholder")
+				}
+				if strings.ContainsAny(token, " \t\r\n") {
+					return errValidation("webui.token must not contain whitespace")
 				}
 				section["token"] = token
 			}
@@ -320,6 +333,14 @@ func (s *Server) handlePutWebUISettings(w http.ResponseWriter, r *http.Request) 
 			if strings.TrimSpace(*body.SessionIdleTimeout) == "" {
 				delete(section, "session_idle_timeout")
 			} else {
+				// Enforced here, not only by the full-document
+				// parse in saveMerged: sub-floor values are
+				// rejected with a fixed message, never
+				// silently clamped.
+				d, err := time.ParseDuration(strings.TrimSpace(*body.SessionIdleTimeout))
+				if err != nil || d < profile.MinSessionIdleTimeout || d > profile.MaxSessionIdleTimeout {
+					return errValidation("session_idle_timeout must be a duration string from 1m to 720h")
+				}
 				section["session_idle_timeout"] = *body.SessionIdleTimeout
 			}
 		}
@@ -339,6 +360,10 @@ func (s *Server) handlePutWebUISettings(w http.ResponseWriter, r *http.Request) 
 			if limit.Window != nil {
 				if strings.TrimSpace(*limit.Window) == "" {
 					return errValidation("login_rate_limit.window must not be empty")
+				}
+				d, err := time.ParseDuration(strings.TrimSpace(*limit.Window))
+				if err != nil || d < profile.MinLoginRateLimitWindow || d > profile.MaxLoginRateLimitWindow {
+					return errValidation("login_rate_limit.window must be a duration string from 1s to 24h")
 				}
 				nested["window"] = *limit.Window
 			}

@@ -96,6 +96,12 @@ const DefaultSessionIdleTimeout = 12 * time.Hour
 // is nominal only; the cap keeps the setting an expiry.
 const MaxSessionIdleTimeout = 30 * 24 * time.Hour
 
+// MinSessionIdleTimeout is the floor for a configured
+// `session_idle_timeout`: 1 minute. Below it the token would
+// be discarded almost as soon as it was stored; sub-floor
+// values are rejected, never silently clamped.
+const MinSessionIdleTimeout = time.Minute
+
 // DefaultLoginRateLimitAttempts is the failed-verification
 // budget per window when a `webui` block carries no
 // `login_rate_limit` key: 5. DefaultLoginRateLimitWindow is
@@ -113,6 +119,13 @@ const MaxLoginRateLimitAttempts = 100
 // MaxLoginRateLimitWindow bounds a configured
 // `login_rate_limit.window`: 24 hours.
 const MaxLoginRateLimitWindow = 24 * time.Hour
+
+// MinLoginRateLimitWindow is the floor for a configured
+// `login_rate_limit.window`: 1 second. Below it the window
+// expires before a second failure is checked and the limit
+// is effectively disabled; sub-floor values are rejected,
+// never silently clamped.
+const MinLoginRateLimitWindow = time.Second
 
 // LoginRateLimitConfig is one parsed `login_rate_limit` value
 // inside the `webui` block. Either field may be absent: the
@@ -198,6 +211,15 @@ func parseWebUIBlock(v any, baseDir string) (*WebUIConfig, error) {
 			if strings.TrimSpace(s) == "" {
 				return nil, newConfigError(`"webui.token" must not be empty`)
 			}
+			// Whitespace anywhere makes the token
+			// unauthenticatable: authorized() rejects any
+			// presented token containing a space, tab, CR,
+			// or LF before bcrypt, so a stored token with
+			// whitespace would lock the server out until an
+			// out-of-band file edit. Reject it at parse time.
+			if strings.ContainsAny(s, " \t\r\n") {
+				return nil, newConfigError(`"webui.token" must not contain whitespace`)
+			}
 			cfg.Token = s
 		case "ui_dir":
 			s, ok := val.(string)
@@ -225,8 +247,8 @@ func parseWebUIBlock(v any, baseDir string) (*WebUIConfig, error) {
 				return nil, newConfigError(`"webui.session_idle_timeout" must not be empty`)
 			}
 			d, err := time.ParseDuration(s)
-			if err != nil || d <= 0 || d > MaxSessionIdleTimeout {
-				return nil, newConfigErrorf(`"webui.session_idle_timeout" must be a positive duration string of at most %v`, MaxSessionIdleTimeout)
+			if err != nil || d < MinSessionIdleTimeout || d > MaxSessionIdleTimeout {
+				return nil, newConfigErrorf(`"webui.session_idle_timeout" must be a duration string from %v to %v`, MinSessionIdleTimeout, MaxSessionIdleTimeout)
 			}
 			cfg.SessionIdleTimeout = d
 			cfg.SessionIdleTimeoutSet = true
@@ -355,8 +377,8 @@ func DirOverlaps(dir, candidate string) bool {
 
 // parseLoginRateLimitBlock parses one decoded
 // `login_rate_limit` object. Wrong shapes, wrong types, unknown
-// keys, a non-positive attempts count, and a non-positive or
-// over-long window are all config errors (exit 2). A supplied
+// keys, a non-positive attempts count, and a window below the
+// 1s floor or over the 24h cap are all config errors (exit 2). A supplied
 // value is never echoed in an error.
 func parseLoginRateLimitBlock(obj *orderedObject) (*LoginRateLimitConfig, error) {
 	rl := &LoginRateLimitConfig{}
@@ -383,8 +405,8 @@ func parseLoginRateLimitBlock(obj *orderedObject) (*LoginRateLimitConfig, error)
 				return nil, newConfigError(`"webui.login_rate_limit.window" must not be empty`)
 			}
 			d, err := time.ParseDuration(s)
-			if err != nil || d <= 0 || d > MaxLoginRateLimitWindow {
-				return nil, newConfigErrorf(`"webui.login_rate_limit.window" must be a positive duration string of at most %v`, MaxLoginRateLimitWindow)
+			if err != nil || d < MinLoginRateLimitWindow || d > MaxLoginRateLimitWindow {
+				return nil, newConfigErrorf(`"webui.login_rate_limit.window" must be a duration string from %v to %v`, MinLoginRateLimitWindow, MaxLoginRateLimitWindow)
 			}
 			rl.Window = d
 			rl.WindowSet = true
@@ -458,20 +480,23 @@ func ResolveWebUI(single *SingleConfig) (*WebUIConfig, error) {
 	if single.WebUI.Token != "" && strings.TrimSpace(single.WebUI.Token) == "" {
 		return nil, newConfigError(`"webui.token" must not be empty`)
 	}
+	if strings.ContainsAny(single.WebUI.Token, " \t\r\n") {
+		return nil, newConfigError(`"webui.token" must not contain whitespace`)
+	}
 	// The duration/limit rules are re-checked here so callers
 	// that receive a hand-built SingleConfig get the same
 	// refusal parse gives.
 	if single.WebUI.SessionIdleTimeoutSet {
-		if single.WebUI.SessionIdleTimeout <= 0 || single.WebUI.SessionIdleTimeout > MaxSessionIdleTimeout {
-			return nil, newConfigErrorf(`"webui.session_idle_timeout" must be a positive duration string of at most %v`, MaxSessionIdleTimeout)
+		if single.WebUI.SessionIdleTimeout < MinSessionIdleTimeout || single.WebUI.SessionIdleTimeout > MaxSessionIdleTimeout {
+			return nil, newConfigErrorf(`"webui.session_idle_timeout" must be a duration string from %v to %v`, MinSessionIdleTimeout, MaxSessionIdleTimeout)
 		}
 	}
 	if rl := single.WebUI.LoginRateLimit; rl != nil {
 		if rl.AttemptsSet && (rl.Attempts < 1 || rl.Attempts > MaxLoginRateLimitAttempts) {
 			return nil, newConfigErrorf(`"webui.login_rate_limit.attempts" must be an integer from 1 to %d`, MaxLoginRateLimitAttempts)
 		}
-		if rl.WindowSet && (rl.Window <= 0 || rl.Window > MaxLoginRateLimitWindow) {
-			return nil, newConfigErrorf(`"webui.login_rate_limit.window" must be a positive duration string of at most %v`, MaxLoginRateLimitWindow)
+		if rl.WindowSet && (rl.Window < MinLoginRateLimitWindow || rl.Window > MaxLoginRateLimitWindow) {
+			return nil, newConfigErrorf(`"webui.login_rate_limit.window" must be a duration string from %v to %v`, MinLoginRateLimitWindow, MaxLoginRateLimitWindow)
 		}
 	}
 	return single.WebUI, nil

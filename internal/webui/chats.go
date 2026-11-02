@@ -151,8 +151,14 @@ const (
 )
 
 // chatJob is one async send. Result is set only on done;
-// Err is a fixed message only, never chat text.
+// Err is a fixed message only, never chat text. ID, Profile,
+// SessionID and CreatedAt are immutable after creation; mu
+// guards Status, UpdatedAt, Result and Err, which the worker
+// goroutine mutates (finish) while request goroutines read
+// them (view) — the store mutex guards the map only, so
+// without mu a fast-finishing job races the 202 response.
 type chatJob struct {
+	mu        sync.Mutex
 	ID        string
 	Profile   string
 	SessionID string
@@ -178,6 +184,8 @@ type chatJobView struct {
 }
 
 func (j *chatJob) view() chatJobView {
+	j.mu.Lock()
+	defer j.mu.Unlock()
 	v := chatJobView{
 		ID: j.ID, Profile: j.Profile, SessionID: j.SessionID,
 		Status: j.Status, CreatedAt: j.CreatedAt, UpdatedAt: j.UpdatedAt,
@@ -263,7 +271,14 @@ func (s *chatJobStore) finish(id string, result *ChatSendResult, errMsg string) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	j, ok := s.jobs[id]
-	if !ok || j.Status != chatJobRunning {
+	if !ok {
+		return
+	}
+	// Lock ordering is store mu, then job mu: every writer
+	// holds the store lock, and view takes only the job lock.
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.Status != chatJobRunning {
 		return
 	}
 	j.UpdatedAt = s.clock()
@@ -485,6 +500,17 @@ func (s *Server) handleSendChat(w http.ResponseWriter, r *http.Request) {
 	jobCtx, cancel := context.WithTimeout(context.Background(), chatJobTimeout)
 	go func() {
 		defer cancel()
+		// A panic on the send path must fail the job, never
+		// crash the server: the chi recoverer runs on the
+		// request goroutine only and cannot catch a panic
+		// here. The fixed failure message keeps chat text
+		// and seam error text out of the job view, as with
+		// any other seam failure.
+		defer func() {
+			if rec := recover(); rec != nil {
+				s.jobs().finish(job.ID, nil, "upstream error")
+			}
+		}()
 		result, err := deps.SendChat(jobCtx, name, sessionID, body.Text)
 		if err != nil {
 			// The job context has no parent: an error here
@@ -535,6 +561,16 @@ func (s *Server) handleChatSessionOp(w http.ResponseWriter, r *http.Request) {
 	}
 	if !validChatSessionOps[body.Op] {
 		writeAPIError(w, errValidation("op must be one of rename, pin, unpin, archive, unarchive, delete"))
+		return
+	}
+	// The main chat has no session id (the "main" path segment
+	// maps to "") and no session entry: ops on it are rejected
+	// here with a fixed 400 for every op, instead of forwarding
+	// an empty id to the gateway, whose behaviour on an empty
+	// id is unproven. Reads and sends on the main chat stay
+	// allowed: they address the main chat by design.
+	if sessionID == "" {
+		writeAPIError(w, errValidation("session operations do not apply to the main chat"))
 		return
 	}
 	title := ""

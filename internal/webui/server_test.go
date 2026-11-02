@@ -159,7 +159,6 @@ func TestAuthGate(t *testing.T) {
 	// Wrong token: identical fixed 401 (no leak about whether
 	// the token exists or which route was hit).
 	rec := ts.doReq(t, "GET", "/api/v1/status", "", false, nil, "192.0.2.9:1234")
-	rec.Header().Set("Authorization", "Bearer wrong")
 	req := httptest.NewRequest("GET", "/api/v1/status", nil)
 	req.RemoteAddr = "192.0.2.10:1234"
 	req.Header.Set("Authorization", "Bearer wrong-token-value")

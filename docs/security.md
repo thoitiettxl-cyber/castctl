@@ -61,9 +61,19 @@ Login attempts are rate-limited with a stdlib fixed-window
 counter, in-memory and bounded: 5 failed token verifications per
 5 minutes per remote address (configurable via
 `webui.login_rate_limit`), then a fixed 429 with `Retry-After`.
-A successful verification resets the counter. API responses
-carry `Cache-Control: no-store` and `X-Content-Type-Options:
-nosniff`.
+A successful verification resets the counter. The store holds
+at most 1024 addresses and fails closed at the cap: when full,
+recording a failure for a new address evicts only entries whose
+window has expired, and when none has expired the failure is
+dropped without inserting — a flood of distinct addresses can
+never evict a limited address's entry and reset its budget. The
+store is per-process: a restart resets all budgets. The
+screencast WebSocket upgrade passes through the same limiter
+(it carries no Bearer check and never feeds the counter), so an
+over-limit address gets a 429 on the upgrade too until its
+window expires; the WebSocket path is not exempted. API
+responses carry `Cache-Control: no-store` and
+`X-Content-Type-Options: nosniff`.
 
 Session expiry is frontend-only: the browser discards the token
 after `webui.session_idle_timeout` (default `12h`) without user

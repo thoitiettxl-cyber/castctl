@@ -35,11 +35,15 @@ import (
 // which is the intended shape: a local brute-force prober and
 // the operator share the loopback, and the window is short.
 //
-// The store is bounded (maxRateLimitEntries addresses): when
-// full, recording a failure for a new address evicts the entry
-// whose window started earliest. Entries are pruned lazily on
-// each check: an expired window is dropped, never counted.
-// No failure or address is ever logged: this package never logs.
+// The store is bounded (maxRateLimitEntries addresses) and fails
+// closed at the cap: recording a failure for a new address when
+// the store is full first evicts only entries whose window has
+// expired; when none has expired the failure is dropped without
+// inserting, so a flood of distinct addresses can never evict a
+// limited address's entry and reset its budget. Entries are
+// pruned lazily on each check: an expired window is dropped,
+// never counted. No failure or address is ever logged: this
+// package never logs.
 
 const maxRateLimitEntries = 1024
 
@@ -88,7 +92,11 @@ func (l *loginRateLimiter) exceeded(addr string, attempts int, window time.Durat
 
 // recordFailure counts one failed verification for addr. A
 // failure outside the current window starts a fresh window
-// with count 1.
+// with count 1. When addr is new and the store is full, only
+// expired entries are evicted; if none has expired the failure
+// is dropped without inserting, so the store fails closed at
+// the cap instead of evicting a limited address's entry (see
+// the package note).
 func (l *loginRateLimiter) recordFailure(addr string, window time.Duration) {
 	if window <= 0 {
 		return
@@ -102,7 +110,10 @@ func (l *loginRateLimiter) recordFailure(addr string, window time.Duration) {
 	w, ok := l.entries[addr]
 	if !ok {
 		if len(l.entries) >= maxRateLimitEntries {
-			l.evictOldestLocked()
+			l.pruneExpiredLocked(now, window)
+			if len(l.entries) >= maxRateLimitEntries {
+				return
+			}
 		}
 		l.entries[addr] = &rateWindow{count: 1, windowStart: now}
 		return
@@ -115,26 +126,22 @@ func (l *loginRateLimiter) recordFailure(addr string, window time.Duration) {
 	w.count++
 }
 
+// pruneExpiredLocked drops entries whose window ended at or
+// before now. The caller holds the mutex.
+func (l *loginRateLimiter) pruneExpiredLocked(now time.Time, window time.Duration) {
+	for addr, w := range l.entries {
+		if now.Sub(w.windowStart) >= window {
+			delete(l.entries, addr)
+		}
+	}
+}
+
 // recordSuccess resets addr's counter: one good token proves
 // the address is not probing.
 func (l *loginRateLimiter) recordSuccess(addr string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.entries, addr)
-}
-
-// evictOldestLocked drops the entry whose window started
-// earliest. The caller holds the mutex and the map is non-empty.
-func (l *loginRateLimiter) evictOldestLocked() {
-	var oldest string
-	var oldestStart time.Time
-	first := true
-	for addr, w := range l.entries {
-		if first || w.windowStart.Before(oldestStart) {
-			oldest, oldestStart, first = addr, w.windowStart, false
-		}
-	}
-	delete(l.entries, oldest)
 }
 
 // clientKey is the rate-limit key for a request: the host part
@@ -162,7 +169,11 @@ func (s *Server) loginLimits() (attempts int, window time.Duration) {
 // request passes through untouched. It never records anything:
 // requireAuth records failures and resets on success, so the
 // 429 and the screencast WebSocket (which has no Bearer check)
-// never feed the counter.
+// never feed the counter. The WebSocket upgrade does pass
+// through this middleware, so an over-limit address gets a
+// 429 on the upgrade too until its window expires; that is
+// the documented Design A shape (docs/security.md), not an
+// exemption.
 func (s *Server) loginRateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attempts, window := s.loginLimits()

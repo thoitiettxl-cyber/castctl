@@ -21,10 +21,12 @@ type fakeChats struct {
 	mu          sync.Mutex
 	listCalls   []string
 	historySeen []historyCall
+	opCalls     []string
 	sendCalls   int
 	release     chan struct{}
 	released    bool
 	sendErr     error
+	sendPanic   bool
 	startID     string
 }
 
@@ -67,12 +69,18 @@ func (f *fakeChats) deps() *ChatDeps {
 			return f.startID, nil
 		},
 		SessionOp: func(ctx context.Context, profileName, sessionID, op, title string) error {
+			f.mu.Lock()
+			f.opCalls = append(f.opCalls, profileName+"/"+sessionID+"/"+op)
+			f.mu.Unlock()
 			return nil
 		},
 		SendChat: func(ctx context.Context, profileName, sessionID, text string) (*ChatSendResult, error) {
 			f.mu.Lock()
 			f.sendCalls++
 			f.mu.Unlock()
+			if f.sendPanic {
+				panic("fake seam panic")
+			}
 			<-f.release
 			if f.sendErr != nil {
 				return nil, f.sendErr
@@ -234,9 +242,12 @@ func TestChatsSendJobLifecycle(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"outcome":"done"`) || !strings.Contains(rec.Body.String(), `"text":"reply text"`) {
 		t.Fatalf("poll done body: %s", rec.Body.String())
 	}
-	// A different profile is not blocked by this profile's job
-	// history (no job is running now in any case): a fresh
-	// send on muse01 works again after completion.
+	// After completion the profile accepts a new send again:
+	// the busy check is per profile and only while a job is
+	// running. (A fresh server is used here so no job is
+	// running in any case; the per-profile scope is pinned
+	// by the 409 above, which fires only on the same
+	// profile while its job is in flight.)
 	f2 := newFakeChats()
 	ts2 := newTestServer(t, fixtureConfig, func(d *Deps) { d.Chats = f2.deps() })
 	rec = ts2.do(t, "POST", "/api/v1/chats/muse01/main/send", `{"text":"x"}`, true)
@@ -277,6 +288,74 @@ func TestChatsSendFailureIsFixedMessage(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"error":"upstream error"`) {
 		t.Fatalf("failed job body: %s", rec.Body.String())
+	}
+}
+
+func TestChatsSendPanicFinishesJobFailed(t *testing.T) {
+	// A panic in the send seam must fail the job with the
+	// fixed message, never crash the server process: the chi
+	// recoverer cannot catch a panic in the job goroutine.
+	f := newFakeChats()
+	f.sendPanic = true
+	ts := newTestServer(t, fixtureConfig, func(d *Deps) { d.Chats = f.deps() })
+	rec := ts.do(t, "POST", "/api/v1/chats/muse01/main/send", `{"text":"hello"}`, true)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("send: got %d", rec.Code)
+	}
+	jobID, _ := decodeEnvelope(t, rec)["data"].(map[string]any)["id"].(string)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		rec = ts.do(t, "GET", "/api/v1/chats/jobs/"+jobID, "", true)
+		if strings.Contains(rec.Body.String(), `"status":"failed"`) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job never failed after seam panic: %s", rec.Body.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if strings.Contains(rec.Body.String(), "panic") {
+		t.Fatalf("failed job leaks panic text: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"error":"upstream error"`) {
+		t.Fatalf("failed job body: %s", rec.Body.String())
+	}
+	// The server survives: an unrelated request still works.
+	rec = ts.do(t, "GET", "/api/v1/status", "", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status after panic: got %d, want 200", rec.Code)
+	}
+}
+
+func TestChatsSessionOpOnMainRejected(t *testing.T) {
+	// Every op on the "main" alias is a fixed 400 in the
+	// handler: the empty session id must never be forwarded
+	// to the gateway. The seam must never be called.
+	f := newFakeChats()
+	ts := newTestServer(t, fixtureConfig, func(d *Deps) { d.Chats = f.deps() })
+	for _, body := range []string{
+		`{"op":"delete"}`,
+		`{"op":"rename","title":"New"}`,
+		`{"op":"pin"}`,
+		`{"op":"unpin"}`,
+		`{"op":"archive"}`,
+		`{"op":"unarchive"}`,
+	} {
+		rec := ts.do(t, "POST", "/api/v1/chats/muse01/main/op", body, true)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("op %s on main: got %d, want 400: %s", body, rec.Code, rec.Body.String())
+		}
+	}
+	f.mu.Lock()
+	calls := f.opCalls
+	f.mu.Unlock()
+	if len(calls) != 0 {
+		t.Fatalf("session op reached the seam for main: %v", calls)
+	}
+	// A named session still accepts ops.
+	rec := ts.do(t, "POST", "/api/v1/chats/muse01/sess-1/op", `{"op":"delete"}`, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete on named session: got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

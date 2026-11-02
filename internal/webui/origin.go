@@ -32,8 +32,9 @@ import (
 //     any port): the UI served from this server calling back
 //     to it. Allowed.
 //   - Anything else — a remote origin, an opaque "null"
-//     origin, a malformed Origin — gets a fixed 403 with no
-//     value echo. The Bearer token is still required first:
+//     origin, a malformed Origin, or an Origin carrying
+//     userinfo (browsers never emit userinfo in Origin) —
+//     gets a fixed 403 with no value echo. The Bearer token is still required first:
 //     the 403 only ever replaces a response an authenticated
 //     request would have received, so it leaks nothing about
 //     whether the token was valid to an unauthenticated
@@ -69,7 +70,7 @@ func (s *Server) requireSameOrigin(next http.Handler) http.Handler {
 // requestHost. A malformed Origin is never allowed.
 func allowedOrigin(origin, requestHost string) bool {
 	u, err := url.Parse(origin)
-	if err != nil || u.Host == "" {
+	if err != nil || u.Host == "" || u.User != nil {
 		return false
 	}
 	if isLoopbackHost(originHost(origin)) {

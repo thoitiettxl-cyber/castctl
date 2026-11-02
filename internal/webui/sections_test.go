@@ -84,6 +84,7 @@ const keeperFixtureConfig = `{
   "outbounds": [
     {"type": "trojan", "tag": "proxy-eu", "server": "203.0.113.10", "server_port": 443, "password": "FAKE-SECRET-TROJAN"}
   ],
+  "telegram": {"profile": "muse01", "token": "123456789:FAKE-SECRET-TELEGRAM-TOKEN-0123456789", "allowed_user_ids": [12345]},
   "keeper": [
     {"tag": "k1", "profile": "muse01", "browser": "http://127.0.0.1:9226", "interval": "24h"}
   ]
@@ -107,10 +108,13 @@ func TestKeeperSettingsGetPutRoundTrip(t *testing.T) {
 	// PUT a second entry + a changed interval, with the fresh
 	// base hash: the save succeeds, the file re-parses, and
 	// the top-level key order is unchanged. (One entry per
-	// profile: the second entry names muse02.)
+	// profile: the second entry names muse02.) The request
+	// entries are deliberately key-scrambled: the saved file
+	// must still render each entry in canonical order
+	// tag, profile, browser, interval, notify.
 	body := `{"entries":[
-	  {"tag":"k1","profile":"muse01","browser":"http://127.0.0.1:9226","interval":"12h"},
-	  {"tag":"k2","profile":"muse02","browser":"http://127.0.0.1:9227"}
+	  {"interval":"12h","browser":"http://127.0.0.1:9226","profile":"muse01","tag":"k1"},
+	  {"notify":"telegram","interval":"24h","browser":"http://127.0.0.1:9227","profile":"muse02","tag":"k2"}
 	],"base_sha256":"` + sha + `"}`
 	rec := ts.do(t, "PUT", "/api/v1/settings/keeper", body, true)
 	if rec.Code != http.StatusOK {
@@ -120,6 +124,24 @@ func TestKeeperSettingsGetPutRoundTrip(t *testing.T) {
 	if got := topLevelKeys(t, after); strings.Join(got, ",") != strings.Join(beforeKeys, ",") {
 		t.Fatalf("top-level key order changed: %v -> %v", beforeKeys, got)
 	}
+	assertEntryKeyOrder := func(tag string, keys ...string) {
+		t.Helper()
+		raw := string(after)
+		pos := strings.Index(raw, `"`+tag+`"`)
+		if pos < 0 {
+			t.Fatalf("saved file lacks entry %q:\n%s", tag, raw)
+		}
+		prev := pos
+		for _, key := range keys {
+			next := strings.Index(raw[prev:], `"`+key+`"`)
+			if next < 0 {
+				t.Fatalf("entry %q: key %q missing after position %d:\n%s", tag, key, prev, raw)
+			}
+			prev += next + len(key) + 2
+		}
+	}
+	assertEntryKeyOrder("k1", "profile", "browser", "interval")
+	assertEntryKeyOrder("k2", "profile", "browser", "interval", "notify")
 	cfg, err := profile.ParseSingleConfig(after, ts.dir)
 	if err != nil {
 		t.Fatalf("saved config does not parse: %v", err)
@@ -288,6 +310,61 @@ func TestWebUISettingsPutRoundTrip(t *testing.T) {
 	limit3, _ := data3["settings"].(map[string]any)["login_rate_limit"].(map[string]any)
 	if limit3["attempts"] != float64(5) {
 		t.Fatalf("rate limit after delete = %v, want defaults", limit3)
+	}
+}
+
+func TestWebUISettingsTokenWhitespaceAndBoundsRejected(t *testing.T) {
+	ts := newTestServer(t, webuiSettingsFixture(t), nil)
+	before := readTestConfig(t, ts)
+	_, sha := getSettingsSHA(t, ts, "/api/v1/settings/webui")
+
+	// A token containing whitespace is a 400 with no write,
+	// and the live comparator is untouched: the old token
+	// still authenticates afterwards.
+	for _, tok := range []string{"has space", " lead", "a\tb", "a\nb"} {
+		rec := ts.do(t, "PUT", "/api/v1/settings/webui", `{"token":"`+tok+`","base_sha256":"`+sha+`"}`, true)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("token %q: got %d, want 400: %s", tok, rec.Code, rec.Body.String())
+		}
+	}
+	if got := readTestConfig(t, ts); string(got) != string(before) {
+		t.Fatal("rejected token PUT modified the file")
+	}
+	rec := ts.do(t, "GET", "/api/v1/status", "", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("old token after rejected PUTs: got %d, want 200", rec.Code)
+	}
+
+	// Sub-floor durations are 400s with no write, never
+	// silently clamped.
+	for _, body := range []string{
+		`{"session_idle_timeout":"59s","base_sha256":"` + sha + `"}`,
+		`{"session_idle_timeout":"1ns","base_sha256":"` + sha + `"}`,
+		`{"login_rate_limit":{"window":"999ms"},"base_sha256":"` + sha + `"}`,
+		`{"login_rate_limit":{"window":"1ns"},"base_sha256":"` + sha + `"}`,
+	} {
+		rec := ts.do(t, "PUT", "/api/v1/settings/webui", body, true)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("body %s: got %d, want 400: %s", body, rec.Code, rec.Body.String())
+		}
+	}
+	if got := readTestConfig(t, ts); string(got) != string(before) {
+		t.Fatal("rejected bounds PUT modified the file")
+	}
+
+	// The floor values themselves are accepted.
+	for _, body := range []string{
+		`{"session_idle_timeout":"1m","base_sha256":"` + sha + `"}`,
+	} {
+		rec := ts.do(t, "PUT", "/api/v1/settings/webui", body, true)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("floor idle PUT: got %d: %s", rec.Code, rec.Body.String())
+		}
+		_, sha = getSettingsSHA(t, ts, "/api/v1/settings/webui")
+	}
+	rec = ts.do(t, "PUT", "/api/v1/settings/webui", `{"login_rate_limit":{"window":"1s"},"base_sha256":"`+sha+`"}`, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("floor window PUT: got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
