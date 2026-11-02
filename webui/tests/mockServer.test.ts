@@ -199,3 +199,100 @@ describe('chats + plugins + section-editor mocks (management upgrade)', () => {
     expect(result.body).not.toContain('token":');
   });
 });
+
+/**
+ * Settings shape contract (D-WEBUI-GET, fix loop 3). The dev mock
+ * once returned the flat webui shape while the real server wrapped
+ * it under a nested "settings" key, so frontend tests passed and
+ * the real editor failed to load. These runtime field assertions
+ * (not just tsc) pin the mock's served payloads to the same
+ * shared field list the Go contract test pins server-side
+ * (internal/webui/settings_shape_test.go):
+ *
+ *   GET /dns               -> {dns: object, sha256}
+ *                             (inline type, src/services/api/index.ts:129)
+ *   GET /settings/telegram -> TelegramSettings (src/types/api.ts:121)
+ *   GET /settings/keeper   -> KeeperSettings (src/types/api.ts:265)
+ *   GET /settings/webui    -> WebUISettings (src/types/api.ts:273)
+ *
+ * The mock carries exactly the TS-declared fields. The server
+ * additionally emits the sanctioned *_seconds additive fields
+ * (webui session_idle_timeout_seconds + window_seconds, keeper
+ * entry interval_seconds); those are asserted Go-side only.
+ * A field added to one side without the other fails at least
+ * one of the two checks.
+ */
+describe('settings shape contract (dev mock matches TS types)', () => {
+  const auth = { authorization: 'Bearer <redacted>' };
+
+  async function getSettingsData(url: string): Promise<Record<string, unknown>> {
+    const result = await callMockApi({ method: 'GET', url, headers: auth });
+    expect(result.status).toBe(200);
+    const parsed = JSON.parse(result.body) as { data: Record<string, unknown> };
+    expect(parsed.data).toBeTypeOf('object');
+    return parsed.data;
+  }
+
+  it('GET /dns carries dns + sha256', async () => {
+    const data = await getSettingsData('/api/v1/dns');
+    expect(Object.keys(data).sort()).toEqual(['dns', 'sha256']);
+    expect(data.dns).toBeTypeOf('object');
+    expect(data.sha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('GET /settings/telegram matches TelegramSettings', async () => {
+    const data = await getSettingsData('/api/v1/settings/telegram');
+    expect(Object.keys(data).sort()).toEqual([
+      'allowed_user_ids',
+      'auto_allow_once',
+      'auto_approve',
+      'configured',
+      'masked',
+      'profile',
+    ]);
+    expect(data.configured).toBe(true);
+    expect(data.masked).toBe('***');
+    expect(data.profile).toBe('muse01');
+    expect(data.allowed_user_ids).toEqual([1403530267]);
+    expect(data.auto_approve).toBe(false);
+    expect(data.auto_allow_once).toBe(false);
+  });
+
+  it('GET /settings/keeper matches KeeperSettings', async () => {
+    const data = await getSettingsData('/api/v1/settings/keeper');
+    expect(Object.keys(data).sort()).toEqual(['entries', 'sha256']);
+    expect(data.sha256).toMatch(/^[0-9a-f]{64}$/);
+    const entries = data.entries as Array<Record<string, unknown>>;
+    expect(entries).toHaveLength(1);
+    expect(Object.keys(entries[0]).sort()).toEqual(['browser', 'interval', 'notify', 'profile', 'tag']);
+    expect(entries[0].tag).toBe('k1');
+    expect(entries[0].profile).toBe('muse01');
+    expect(entries[0].browser).toBe('http://127.0.0.1:9226');
+    expect(entries[0].interval).toBe('24h');
+    expect(entries[0].notify).toBe('telegram');
+  });
+
+  it('GET /settings/webui matches WebUISettings, flat (no settings key)', async () => {
+    const data = await getSettingsData('/api/v1/settings/webui');
+    expect(Object.keys(data).sort()).toEqual([
+      'listen',
+      'login_rate_limit',
+      'masked',
+      'session_idle_timeout',
+      'sha256',
+      'token_set',
+      'ui_dir',
+    ]);
+    expect(data).not.toHaveProperty('settings');
+    expect(data.listen).toBe('127.0.0.1:8317');
+    expect(data.ui_dir).toBe('');
+    expect(data.session_idle_timeout).toBe('12h');
+    expect(data.token_set).toBe(true);
+    expect(data.masked).toBe('***');
+    expect(data.sha256).toMatch(/^[0-9a-f]{64}$/);
+    const limit = data.login_rate_limit as Record<string, unknown>;
+    expect(Object.keys(limit).sort()).toEqual(['attempts', 'window']);
+    expect(limit.attempts).toBe(5);
+    expect(limit.window).toBe('5m');
+  });
+});
