@@ -19,6 +19,20 @@
 //     The static frontend shell is served WITHOUT auth:
 //     it contains no secrets, and the login page needs the shell
 //     to enter the token.
+//   - Stateless sessions (Design A): no cookies, no server-side
+//     session, no CORS headers. The frontend discards its token
+//     after `webui.session_idle_timeout` without API activity
+//     (effective value reported by /status) and must re-login;
+//     a stolen Bearer stays valid until token rotation — stated
+//     honestly in docs/security.md. Mutating requests pass an
+//     Origin allowlist (absent = non-browser, loopback or
+//     same-host allowed, anything else a fixed 403). Failed
+//     token verifications are rate-limited per remote address
+//     (stdlib fixed window, in-memory, bounded: 5 per 5m by
+//     default, `webui.login_rate_limit`). Middleware order is
+//     pinned: rate-limit → auth → Origin → timeout. API
+//     responses carry Cache-Control: no-store and
+//     X-Content-Type-Options: nosniff.
 //   - Secrets write-only: GET endpoints return redacted views
 //     (sentinel "<redacted>" at secret positions, per
 //     webui/SECRETS-CONTRACT.md); PUT/POST set or replace secrets
@@ -131,6 +145,11 @@ type Deps struct {
 	// screencast relay; nil means unavailable.
 	ScreencastAvailable ScreencastAvailability
 	ScreencastStarter   ScreencastStarter
+	// Chats wires the chats/sessions seams (list, history,
+	// start, session ops, send). Nil means chats are
+	// unavailable: the handlers report it explicitly instead
+	// of serving fake data.
+	Chats *ChatDeps
 }
 
 // Server is one web UI HTTP server: chi router + session
@@ -145,6 +164,15 @@ type Server struct {
 	sessions  *sessionRegistry
 	tokenMu   sync.RWMutex
 	tokenHash string
+	// rateLimiter is the login rate-limit store (Design A): the
+	// outermost /api/v1 middleware consults it, requireAuth
+	// feeds it. One store per server: the limit is per process.
+	rateLimiter *loginRateLimiter
+	// jobsMu guards the lazy job-store creation: the store is
+	// created on first use so test servers without an explicit
+	// store still serve the jobs routes.
+	jobsMu   sync.Mutex
+	jobStore *chatJobStore
 }
 
 // New builds a Server. It fails closed when no token is
@@ -174,7 +202,7 @@ func New(deps Deps) (*Server, error) {
 			return nil, err
 		}
 	}
-	s := &Server{deps: deps, sessions: newSessionRegistry(), tokenHash: deps.TokenHash}
+	s := &Server{deps: deps, sessions: newSessionRegistry(), tokenHash: deps.TokenHash, rateLimiter: &loginRateLimiter{}}
 	s.handler = s.routes()
 	return s, nil
 }
@@ -233,7 +261,15 @@ func (s *Server) routes() http.Handler {
 	r.MethodNotAllowed(methodNotAllowed)
 	r.NotFound(s.serveStatic)
 	api := chi.NewRouter()
+	// Pinned middleware order (Design A): rate-limit → auth →
+	// Origin → timeout. The order is load-bearing: the limiter
+	// gates before any verification work, auth runs before the
+	// Origin check so a 403 never replaces a 401 for an
+	// unauthenticated caller, and the timeout bounds only the
+	// handler itself.
+	api.Use(s.loginRateLimit)
 	api.Use(s.requireAuth)
+	api.Use(s.requireSameOrigin)
 	api.Use(s.apiTimeout)
 	api.Get("/status", s.handleStatus)
 	api.Get("/profiles", s.handleListProfiles)
@@ -267,6 +303,17 @@ func (s *Server) routes() http.Handler {
 	api.Put("/dns", s.handlePutDNS)
 	api.Get("/settings/telegram", s.handleGetTelegram)
 	api.Put("/settings/telegram", s.handlePutTelegram)
+	api.Get("/settings/keeper", s.handleGetKeeperSettings)
+	api.Put("/settings/keeper", s.handlePutKeeperSettings)
+	api.Get("/settings/webui", s.handleGetWebUISettings)
+	api.Put("/settings/webui", s.handlePutWebUISettings)
+	api.Get("/chats/{profile}", s.handleListChats)
+	api.Post("/chats/{profile}", s.handleStartChat)
+	api.Get("/chats/{profile}/{session}", s.handleGetChatHistory)
+	api.Post("/chats/{profile}/{session}/send", s.handleSendChat)
+	api.Post("/chats/{profile}/{session}/op", s.handleChatSessionOp)
+	api.Get("/chats/jobs/{job}", s.handleGetChatJob)
+	api.Get("/plugins", s.handleGetPlugins)
 	api.Get("/logs", s.handleGetLogs)
 	api.Delete("/logs", handleLogsDeleteRefused)
 	api.Get("/keeper", s.handleGetKeeper)
@@ -302,9 +349,16 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			return
 		}
 		if !s.authorized(r) {
+			// A failed verification feeds the login rate
+			// limiter (Design A): the counter is per remote
+			// address over the effective window, and a
+			// success below resets it.
+			_, window := s.loginLimits()
+			s.rateLimiter.recordFailure(clientKey(r), window)
 			writeError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing token")
 			return
 		}
+		s.rateLimiter.recordSuccess(clientKey(r))
 		next.ServeHTTP(w, r)
 	})
 }
@@ -531,17 +585,43 @@ func errInternal() *apiError {
 	return &apiError{status: http.StatusInternalServerError, typ: "internal_error", msg: "internal error"}
 }
 
-// writeEnvelope writes a success envelope {data: ...}.
+// currentWebUIConfig returns the stored `webui` block, or nil
+// when the block is absent or the stored config cannot be
+// loaded or parsed. Callers apply the documented defaults to
+// a nil result: live settings (rate limit, idle timeout) must
+// degrade to defaults, never break the request, when the file
+// is unreadable.
+func (s *Server) currentWebUIConfig() *profile.WebUIConfig {
+	load, err := s.loadConfig()
+	if err != nil || !load.state.Found {
+		return nil
+	}
+	cfg, err := s.parseLoaded(load)
+	if err != nil || cfg.WebUI == nil {
+		return nil
+	}
+	return cfg.WebUI
+}
+
+// writeEnvelope writes a success envelope {data: ...}. Every API
+// response carries no-store + nosniff (Design A): API payloads
+// must never sit in a cache, and must never be sniffed as
+// another content type.
 func writeEnvelope(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
 }
 
 // writeError writes an error envelope {error: {type, message}}.
-// A nil *apiError is a fixed internal error.
+// A nil *apiError is a fixed internal error. Error responses
+// carry the same no-store + nosniff headers as successes.
 func writeError(w http.ResponseWriter, status int, typ, msg string) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"type": typ, "message": msg}})
 }
