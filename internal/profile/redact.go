@@ -35,7 +35,37 @@ func RedactOutboundJSON(data []byte) ([]byte, error) {
 	return encodeOrderedJSONIndent(redact.Value(v), 2)
 }
 
-// RedactProfile renders a profile as redacted JSON (indent 2) for
+// RedactRawConfig redacts serialised config JSON exactly
+// like RedactJSON, except the plugins block is redacted
+// wholesale first (tag/type only, fragment as one
+// <redacted> marker under the "fragment" key). For configs
+// without a plugins block the output is byte-identical to
+// RedactJSON: redactPluginsBlock touches only the "plugins"
+// key. This is the production caller for the wholesale
+// plugins redaction (the web UI /config display path); it
+// operates on a decoded copy, never on stored config.
+//
+// Round-trip edge (documented, not hidden): the "fragment"
+// marker is a sentinel only at an ABSENT path in the web UI
+// merge. If a real fragment genuinely has a top-level
+// "fragment" key, a PUT round-trip of displayed content
+// collapses the whole fragment to {"fragment": "<redacted>"}
+// (data loss, no secret leak): the sentinel is taken as an
+// ordinary literal at the present key, and the fragment's
+// other keys — absent from displayed content — are deleted
+// by the merge. Fixing the merge behaviour is a follow-up
+// outside this PR; the merge code is must-not-touch here.
+func RedactRawConfig(data []byte) ([]byte, error) {
+	v, err := decodeOrderedJSON(data)
+	if err != nil {
+		return nil, err
+	}
+	if root, ok := v.(*orderedObject); ok {
+		redactPluginsBlock(root)
+	}
+	return encodeOrderedJSONIndent(redact.Value(v), 2)
+}
+
 // display: identity fields and paths are kept, the inline outbound is
 // redacted, a tag reference is kept as a bare tag string, and a direct
 // profile omits the outbound key. vm_id, node_id, and
@@ -81,18 +111,95 @@ func RedactProfile(p *Profile) ([]byte, error) {
 }
 
 // RedactConfig renders a whole SingleConfig as redacted JSON (indent 2).
+// Plugin fragments are redacted wholesale by redactPluginsBlock
+// (tag/type only, fragment as one <redacted> marker) before the
+// generic key-based redaction runs.
 func RedactConfig(cfg *SingleConfig) ([]byte, error) {
 	if cfg == nil {
 		return nil, newConfigError("cannot redact nil config")
-	}
-	if cfg.Profiles == nil {
-		cfg.Profiles = make(map[string]*Profile)
 	}
 	root, err := buildSingleFileOrdered(cfg)
 	if err != nil {
 		return nil, err
 	}
+	redactPluginsBlock(root)
 	return encodeOrderedJSONIndent(redact.Value(root), 2)
+}
+
+// redactPluginsBlock replaces every plugins entry's fragment with a
+// single <redacted> marker under the "fragment" key: display
+// shows tag/type only. The key is named "fragment" (the
+// fragment's own name in the plugin contract), never an
+// invented "config" key: a PUT round-trip of displayed
+// content then fail-closes loudly through the web UI's
+// sentinel merge when the "fragment" path is ABSENT in the
+// stored config (a <redacted> value at an absent path is
+// rejected) instead of silently writing the marker into a
+// fragment. Exception, documented at RedactRawConfig: when
+// the stored fragment genuinely has a top-level "fragment"
+// key, the round-trip overwrites it with the marker. Key-based redaction alone cannot do this: a
+// fragment key that is not in redact's secret-key set could
+// still carry a secret value under an unknown name, and the
+// fragment's key names themselves are plugin-opaque. This
+// operates on the built (copy) tree, never on the stored config.
+//
+// Fail-closed for EVERY shape: the plugins value is
+// plugin-opaque, so any shape other than an array of objects
+// with string tag/type — a bare object, string, number, or an
+// array holding a non-object — is replaced wholesale by one
+// <redacted> marker (or, inside an array, the offending
+// element is replaced by the marker). A malformed shape must
+// never let a fragment value survive display. Tag/type values
+// are kept only when they are strings; a non-string tag/type
+// is replaced by the marker too.
+func redactPluginsBlock(root *orderedObject) {
+	if root == nil {
+		return
+	}
+	v, ok := root.get("plugins")
+	if !ok {
+		return
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		root.set("plugins", redact.Marker)
+		return
+	}
+	out := make([]any, 0, len(arr))
+	for _, elem := range arr {
+		entry, ok := elem.(*orderedObject)
+		if !ok {
+			out = append(out, redact.Marker)
+			continue
+		}
+		shown := newOrderedObject()
+		if tag, ok := entry.get("tag"); ok {
+			if s, ok := tag.(string); ok {
+				shown.set("tag", s)
+			} else {
+				shown.set("tag", redact.Marker)
+			}
+		}
+		if typ, ok := entry.get("type"); ok {
+			if s, ok := typ.(string); ok {
+				shown.set("type", s)
+			} else {
+				shown.set("type", redact.Marker)
+			}
+		}
+		hasFragment := false
+		for _, k := range entry.keys {
+			if k != "tag" && k != "type" {
+				hasFragment = true
+				break
+			}
+		}
+		if hasFragment {
+			shown.set("fragment", redact.Marker)
+		}
+		out = append(out, shown)
+	}
+	root.set("plugins", out)
 }
 
 // The OrderedMap methods below let redact.Value redact

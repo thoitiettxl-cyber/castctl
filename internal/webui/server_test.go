@@ -238,6 +238,62 @@ func TestStatusShape(t *testing.T) {
 	}
 }
 
+func TestConfigDisplayRedactsPluginFragment(t *testing.T) {
+	config := `{
+  "default_profile": "muse01",
+  "profiles": {
+    "muse01": {
+      "cookies_file": "COOKIESFILE",
+      "vm_id": "FAKE-SECRET-VMID",
+      "outbound": "proxy-eu",
+      "fingerprint": "chrome"
+    }
+  },
+  "outbounds": [
+    {"type": "trojan", "tag": "proxy-eu", "server": "203.0.113.10", "server_port": 443, "password": "FAKE-SECRET-TROJAN"}
+  ],
+  "plugins": [
+    {"tag": "echo", "type": "echo", "api_key": "FAKE-SECRET-PLUGIN", "weird_name": "hidden-value", "nested": {"token": "FAKE-SECRET-NESTED"}}
+  ]
+}`
+	ts := newTestServer(t, config, nil)
+	rec := ts.do(t, "GET", "/api/v1/config", "", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET config: %d: %s", rec.Code, rec.Body.String())
+	}
+	data := decodeEnvelope(t, rec)["data"].(map[string]any)
+	content, _ := data["content"].(string)
+	for _, leaked := range []string{"FAKE-SECRET-PLUGIN", "hidden-value", "FAKE-SECRET-NESTED", "weird_name", "api_key", "FAKE-SECRET-TROJAN", "FAKE-SECRET-VMID"} {
+		if strings.Contains(content, leaked) {
+			t.Fatalf("GET /config leaked %q:\n%s", leaked, content)
+		}
+	}
+	if !strings.Contains(content, `"tag": "echo"`) || !strings.Contains(content, `"type": "echo"`) {
+		t.Fatalf("GET /config lost plugin tag/type:\n%s", content)
+	}
+	if !strings.Contains(content, `"fragment": "<redacted>"`) {
+		t.Fatalf("GET /config missing fragment marker:\n%s", content)
+	}
+	// A PUT round-trip of the displayed content must
+	// fail loudly (sentinel at an absent path) and leave
+	// the stored file byte-identical: the marker must
+	// never be written into a fragment.
+	before, _ := os.ReadFile(filepath.Join(ts.dir, "config.json"))
+	baseSHA, _ := data["sha256"].(string)
+	body, _ := json.Marshal(map[string]any{"content": content, "base_sha256": baseSHA})
+	rec = ts.do(t, "PUT", "/api/v1/config", string(body), true)
+	if rec.Code == http.StatusOK {
+		t.Fatalf("PUT of displayed content succeeded: %s", rec.Body.String())
+	}
+	after, _ := os.ReadFile(filepath.Join(ts.dir, "config.json"))
+	if !bytes.Equal(before, after) {
+		t.Fatal("rejected PUT modified the stored config")
+	}
+	if !strings.Contains(string(after), "FAKE-SECRET-PLUGIN") {
+		t.Fatal("stored fragment lost on rejected PUT")
+	}
+}
+
 func TestConfigRedactionAndSave(t *testing.T) {
 	ts := newTestServer(t, fixtureConfig, nil)
 	rec := ts.do(t, "GET", "/api/v1/config", "", true)

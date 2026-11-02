@@ -1,0 +1,735 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Licensed under the GNU General Public License v3.0 or later.
+
+package pluginhost
+
+import (
+	"debug/elf"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+)
+
+// openErrorWithoutPath strips the path from an os.Open-style
+// error: *os.PathError embeds the checked path, and the
+// loader passes the SHADOW path here (TempDir layout + pid
+// directory), which must never leak into skip reasons or
+// check output. The errno/reason survives; the layout does
+// not. Non-PathError values pass through unchanged apart
+// from the wrapping noun.
+func openErrorWithoutPath(what string, err error) error {
+	var pe *os.PathError
+	if errors.As(err, &pe) {
+		return fmt.Errorf("%s: %v", what, pe.Err)
+	}
+	return fmt.Errorf("%s: %v", what, err)
+}
+
+// isELFFile reports whether path starts with the ELF magic. A
+// file shorter than the 4-byte magic cannot be ELF. A
+// directory is an error: the compat gate must not silently
+// pass a non-file. Errors never embed path (see
+// openErrorWithoutPath).
+func isELFFile(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, openErrorWithoutPath("cannot open plugin file", err)
+	}
+	defer func() { _ = f.Close() }()
+	if info, err := f.Stat(); err != nil {
+		return false, openErrorWithoutPath("cannot stat plugin file", err)
+	} else if info.IsDir() {
+		return false, fmt.Errorf("plugin file is a directory")
+	}
+	var magic [4]byte
+	n, _ := f.Read(magic[:])
+	if n < len(magic) {
+		return false, nil
+	}
+	return magic[0] == 0x7f && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F', nil
+}
+
+// Glibc compatibility gate: the loader must compare the
+// plugin's highest required GLIBC_ symbol version against
+// the running libc and refuse with a clear error instead of
+// crashing. This check runs BEFORE dlopen: a too-new plugin
+// must never reach the dynamic loader.
+//
+// Mechanism: parse the plugin ELF's .gnu.version_r (VERNEED)
+// entries with debug/elf (no new dependency) and read the
+// running libc version via gnu_get_libc_version on cgo/glibc
+// builds (see version_glibc.go). The reported maximum
+// additionally takes the conservative strtab superset
+// bound (see MaxRequiredGLIBC). On builds where the running
+// version cannot be known (no-cgo, darwin, windows), a plugin
+// WITH version requirements is refused fail-closed — the check
+// is never claimed as passed when it did not run; a plugin
+// with NO requirements is compatible by construction. The
+// build-time readelf gate in module/build.sh and
+// .github/workflows/release.yaml is a different check (it
+// gates the CORE binary); it is not the runtime check here.
+//
+// Build floor vs running libc (documented in docs/plugins.md):
+// official plugins build against GLIBC 2.17. The gate
+// compares against the RUNNING libc, whatever it is; 2.17 is
+// a documentation fact, not a constant in this check.
+// Droidspaces provides its own glibc on the phone; its
+// version is recorded only from the on-device check, never
+// assumed here.
+
+type glibcVersion struct {
+	major int
+	minor int
+	patch int
+}
+
+func (v glibcVersion) String() string {
+	s := strconv.Itoa(v.major) + "." + strconv.Itoa(v.minor)
+	if v.patch != 0 {
+		s += "." + strconv.Itoa(v.patch)
+	}
+	return s
+}
+
+// parseGlibcVersion parses "major.minor[.patch]", tolerating
+// the distro suffixes and extra components real
+// gnu_get_libc_version strings carry (e.g. Debian's
+// "2.44-0"): only the leading digits of the first three
+// dot-separated components matter. The full triple is
+// compared: a plugin requiring GLIBC_2.3.4 must not pass on
+// a 2.3.2 libc.
+func parseGlibcVersion(s string) (glibcVersion, error) {
+	parts := strings.Split(s, ".")
+	if len(parts) < 2 {
+		return glibcVersion{}, fmt.Errorf("invalid glibc version %q", s)
+	}
+	major, err := leadingInt(parts[0])
+	if err != nil {
+		return glibcVersion{}, fmt.Errorf("invalid glibc version %q", s)
+	}
+	minor, err := leadingInt(parts[1])
+	if err != nil {
+		return glibcVersion{}, fmt.Errorf("invalid glibc version %q", s)
+	}
+	v := glibcVersion{major: major, minor: minor}
+	if len(parts) > 2 {
+		patch, err := leadingInt(parts[2])
+		if err != nil {
+			return glibcVersion{}, fmt.Errorf("invalid glibc version %q", s)
+		}
+		v.patch = patch
+	}
+	return v, nil
+}
+
+// leadingInt parses the leading digit run of part.
+func leadingInt(part string) (int, error) {
+	i := 0
+	for i < len(part) && part[i] >= '0' && part[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return 0, fmt.Errorf("no leading digits")
+	}
+	return strconv.Atoi(part[:i])
+}
+
+func compareGlibcVersion(a, b glibcVersion) int {
+	if a.major != b.major {
+		if a.major < b.major {
+			return -1
+		}
+		return 1
+	}
+	if a.minor != b.minor {
+		if a.minor < b.minor {
+			return -1
+		}
+		return 1
+	}
+	if a.patch != b.patch {
+		if a.patch < b.patch {
+			return -1
+		}
+		return 1
+	}
+	return 0
+}
+
+// MaxRequiredGLIBC returns the highest GLIBC_x.y version the ELF
+// file at path requires, or "" when it requires none. A non-ELF
+// file, or an ELF whose version section cannot be read, is an
+// error: the loader must not guess. (Deliberate asymmetry
+// with CheckPluginCompat, which returns nil for non-ELF
+// files: the format gate belongs to dlopen, not to this
+// check, while MaxRequiredGLIBC as a standalone reader must
+// not silently report "" for a file it could not parse.
+// Both behaviours are pinned by tests.) Errors never embed
+// path (see openErrorWithoutPath).
+//
+// The reported maximum is a conservative preflight upper
+// bound: the maximum of the parsed verneed entries, every
+// GLIBC_ version string in the verneed section's string
+// table, and every GLIBC_ version string in the DT_STRTAB
+// range (PT_DYNAMIC DT_STRTAB/DT_STRSZ mapped through
+// PT_LOAD). A DT_STRTAB that cannot be resolved
+// consistently refuses the load. This bound is NOT an
+// adversary-proof verneed parser; plugins are fully
+// trusted in-process code by design, and dlopen fails
+// closed with the linker's own version error.
+//
+// Known limitations of this preflight:
+// (a) a version string truncated at the DT_STRSZ/.dynstr
+// boundary can under-report: ld.so reads to NUL in memory;
+// (b) the first matching PT_LOAD wins and a later overlapping
+// PT_LOAD remapping the .dynstr page is not accounted for;
+// (c) the sh_link string table can differ from DT_STRTAB and
+// a name beyond DT_STRSZ may be missed; (d) with no section
+// headers the verneed section is absent, so the bound
+// reports no max although DT_VERNEED still applies;
+// (e) DT_VERNEED can point at a hidden verneed in unscanned tail bytes;
+// not covered. This preflight is a convenience check, not a security boundary.
+func MaxRequiredGLIBC(path string) (string, error) {
+	f, err := elf.Open(path)
+	if err != nil {
+		return "", openErrorWithoutPath("read plugin elf", err)
+	}
+	defer func() { _ = f.Close() }()
+	sec := f.Section(".gnu.version_r")
+	if sec == nil {
+		return "", nil
+	}
+	data, err := sec.Data()
+	if err != nil {
+		return "", fmt.Errorf("read plugin version section: %w", err)
+	}
+	strtab, err := versionStringTable(f, sec)
+	if err != nil {
+		return "", err
+	}
+	max, count, err := parseVersionNeedsCount(data, strtab, f.ByteOrder)
+	if err != nil {
+		return "", err
+	}
+	// sh_info of a SHT_GNU_verneed section is the number
+	// of Verneed entries. Cross-check it against the
+	// headers the vnNext chain actually visited: a chain
+	// that skips an entry yet still tiles the section
+	// (e.g. by re-covering the skipped bytes as aux
+	// data) must still be refused. A section header
+	// declaring 0 entries carries no count to check.
+	if sec.Info != 0 && int(sec.Info) != count {
+		return "", fmt.Errorf("plugin version section entry count mismatch: section header declares %d version need entries, vnNext chain found %d: refusing to load", sec.Info, count)
+	}
+	// Conservative strtab superset bound, second source
+	// (the first is the verneed section's string table,
+	// scanned by parseVersionNeedsCount): every GLIBC_
+	// version string anywhere in the DT_STRTAB range
+	// raises the reported maximum, and an unresolvable
+	// DT_STRTAB refuses the load instead of guessing.
+	dynBytes, err := dynamicStrtabRange(f, path)
+	if err != nil {
+		return "", err
+	}
+	dynBound, dynFound, err := scanStrtabVersions(dynBytes)
+	if err != nil {
+		return "", err
+	}
+	if dynFound {
+		if max == "" {
+			return dynBound.String(), nil
+		}
+		walkMax, err := parseGlibcVersion(max)
+		if err != nil {
+			return "", fmt.Errorf("plugin requires unparseable glibc version %q: refusing to load", max)
+		}
+		if compareGlibcVersion(dynBound, walkMax) > 0 {
+			return dynBound.String(), nil
+		}
+	}
+	return max, nil
+}
+
+func versionStringTable(f *elf.File, verneed *elf.Section) ([]byte, error) {
+	if int(verneed.Link) >= len(f.Sections) {
+		return nil, fmt.Errorf("plugin version section has invalid string table link")
+	}
+	strSec := f.Sections[verneed.Link]
+	data, err := strSec.Data()
+	if err != nil {
+		return nil, fmt.Errorf("read plugin version string table: %w", err)
+	}
+	return data, nil
+}
+
+// scanStrtabVersions returns the highest GLIBC_x.y[.z]
+// version named by any string in data, searching for the
+// "GLIBC_" prefix ANYWHERE in the bytes (not only at
+// offsets a chain walk references, and not only at the
+// start of a NUL-delimited string). A string whose suffix
+// starts with a digit must be exactly
+// digits.digits[.digits]; anything else digit-led
+// (e.g. "GLIBC_2.XX" or "GLIBC_2.34x") refuses with a
+// clear error rather than silently downgrading the
+// maximum. Non-numeric names (e.g. GLIBC_PRIVATE) are
+// ignored, matching the chain walk.
+func scanStrtabVersions(data []byte) (glibcVersion, bool, error) {
+	var max glibcVersion
+	found := false
+	for i := 0; i+6 <= len(data); i++ {
+		if data[i] != 'G' || string(data[i:i+6]) != "GLIBC_" {
+			continue
+		}
+		rest := data[i+6:]
+		end := 0
+		for end < len(rest) && rest[end] != 0 {
+			end++
+		}
+		suffix := string(rest[:end])
+		if suffix == "" || suffix[0] < '0' || suffix[0] > '9' {
+			continue
+		}
+		parts := strings.Split(suffix, ".")
+		malformed := len(parts) < 2 || len(parts) > 3
+		if !malformed {
+			for _, p := range parts {
+				if p == "" {
+					malformed = true
+					break
+				}
+				for j := 0; j < len(p); j++ {
+					if p[j] < '0' || p[j] > '9' {
+						malformed = true
+						break
+					}
+				}
+				if malformed {
+					break
+				}
+			}
+		}
+		if malformed {
+			display := suffix
+			if len(display) > 64 {
+				display = display[:64]
+			}
+			return glibcVersion{}, false, fmt.Errorf("unparseable glibc version string %q in version string table: refusing to load", display)
+		}
+		v, err := parseGlibcVersion(suffix)
+		if err != nil {
+			return glibcVersion{}, false, fmt.Errorf("unparseable glibc version string %q in version string table: refusing to load", suffix)
+		}
+		if !found || compareGlibcVersion(v, max) > 0 {
+			max = v
+			found = true
+		}
+	}
+	return max, found, nil
+}
+
+// dynamicStrtabRange returns the DT_STRTAB byte range of
+// an ELF file: DT_STRTAB/DT_STRSZ taken from every
+// PT_DYNAMIC program header and mapped to a file offset
+// through the PT_LOAD segments. Any inconsistency —
+// no PT_DYNAMIC, missing or conflicting DT_STRTAB/
+// DT_STRSZ entries, an empty DT_STRSZ, an address no
+// PT_LOAD covers, or a range past the end of the file —
+// refuses with a clear error naming DT_STRTAB. Errors
+// never embed path (see openErrorWithoutPath). Only
+// 32- and 64-bit layouts are resolved; anything else
+// refuses rather than guessing.
+func dynamicStrtabRange(f *elf.File, path string) ([]byte, error) {
+	var dynProgs []*elf.Prog
+	for _, p := range f.Progs {
+		if p.Type == elf.PT_DYNAMIC {
+			dynProgs = append(dynProgs, p)
+		}
+	}
+	if len(dynProgs) == 0 {
+		return nil, fmt.Errorf("cannot resolve DT_STRTAB: no PT_DYNAMIC program header: refusing to load")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, openErrorWithoutPath("cannot stat plugin file", err)
+	}
+	fileSize := uint64(info.Size())
+	order := f.ByteOrder
+	if order == nil {
+		return nil, fmt.Errorf("cannot resolve DT_STRTAB: unknown byte order: refusing to load")
+	}
+	var entrySize int
+	switch f.Class {
+	case elf.ELFCLASS32:
+		entrySize = 8
+	case elf.ELFCLASS64:
+		entrySize = 16
+	default:
+		return nil, fmt.Errorf("cannot resolve DT_STRTAB: unsupported ELF class: refusing to load")
+	}
+	var strtabAddr, strsz uint64
+	haveAddr, haveSz := false, false
+	for _, dynProg := range dynProgs {
+		if dynProg.Filesz > fileSize {
+			return nil, fmt.Errorf("cannot resolve DT_STRTAB: PT_DYNAMIC size exceeds file size: refusing to load")
+		}
+		raw := make([]byte, dynProg.Filesz)
+		if _, err := dynProg.ReadAt(raw, 0); err != nil {
+			return nil, fmt.Errorf("cannot resolve DT_STRTAB: cannot read PT_DYNAMIC: refusing to load")
+		}
+		if len(raw)%entrySize != 0 {
+			return nil, fmt.Errorf("cannot resolve DT_STRTAB: dynamic section size is not a multiple of the dynamic entry size: refusing to load")
+		}
+		for off := 0; off < len(raw); off += entrySize {
+			var tag int64
+			var val uint64
+			if entrySize == 8 {
+				tag = int64(int32(order.Uint32(raw[off:])))
+				val = uint64(order.Uint32(raw[off+4:]))
+			} else {
+				tag = int64(order.Uint64(raw[off:]))
+				val = order.Uint64(raw[off+8:])
+			}
+			if tag == 0 {
+				break
+			}
+			switch elf.DynTag(tag) {
+			case elf.DT_STRTAB:
+				if haveAddr && strtabAddr != val {
+					return nil, fmt.Errorf("cannot resolve DT_STRTAB: inconsistent DT_STRTAB values: refusing to load")
+				}
+				strtabAddr, haveAddr = val, true
+			case elf.DT_STRSZ:
+				if haveSz && strsz != val {
+					return nil, fmt.Errorf("cannot resolve DT_STRTAB: inconsistent DT_STRSZ values: refusing to load")
+				}
+				strsz, haveSz = val, true
+			}
+		}
+	}
+	if !haveAddr || !haveSz {
+		return nil, fmt.Errorf("cannot resolve DT_STRTAB: missing DT_STRTAB or DT_STRSZ dynamic entry: refusing to load")
+	}
+	if strsz == 0 {
+		return nil, fmt.Errorf("cannot resolve DT_STRTAB: empty DT_STRSZ: refusing to load")
+	}
+	for _, p := range f.Progs {
+		if p.Type != elf.PT_LOAD {
+			continue
+		}
+		if strtabAddr < p.Vaddr || strtabAddr-p.Vaddr >= p.Filesz {
+			continue
+		}
+		rel := strtabAddr - p.Vaddr
+		if strsz > p.Filesz-rel {
+			continue
+		}
+		off := p.Off + rel
+		if off < p.Off || off+strsz < off || off+strsz > fileSize {
+			return nil, fmt.Errorf("cannot resolve DT_STRTAB: DT_STRTAB range exceeds file size: refusing to load")
+		}
+		fh, err := os.Open(path)
+		if err != nil {
+			return nil, openErrorWithoutPath("cannot open plugin file", err)
+		}
+		defer func() { _ = fh.Close() }()
+		buf := make([]byte, strsz)
+		n, readErr := fh.ReadAt(buf, int64(off))
+		if readErr != nil || n != len(buf) {
+			return nil, fmt.Errorf("cannot resolve DT_STRTAB: cannot read DT_STRTAB range: refusing to load")
+		}
+		return buf, nil
+	}
+	return nil, fmt.Errorf("cannot resolve DT_STRTAB: DT_STRTAB address is not covered by any PT_LOAD segment: refusing to load")
+}
+
+// parseVersionNeeds walks VERNEED entries (Elf_Verneed + Elf_Vernaux,
+// 16 bytes each in both 32- and 64-bit forms) and returns the
+// highest GLIBC_x.y[.z] name found, or "" when none is present.
+// Names are offsets into strtab. Entries for other libraries and
+// non-numeric GLIBC_ names (e.g. GLIBC_PRIVATE) are ignored.
+// The parser fails CLOSED on any malformed version info: an
+// unparseable numeric GLIBC_ name, a truncated entry, an aux
+// chain cut short of vn_cnt entries, a vnNext that lands
+// inside the entry's own aux chain, or an out-of-range name
+// offset all refuse the plugin — a downgraded maximum is
+// never silently computed. The walk is validated against
+// the WHOLE section before any maximum is returned (see
+// parseVersionNeedsCount): a vnNext that jumps over a
+// header, or an aux chain that skips an entry, leaves
+// bytes uncovered, and the section is refused instead of
+// yielding the maximum of only the entries the chain
+// happened to visit.
+//
+// The reported maximum is a conservative preflight upper
+// bound, not just the chain walk's result: it is the
+// maximum of the walked entries and every GLIBC_x.y[.z]
+// version string found anywhere in strtab (see
+// scanStrtabVersions). A version string the walk skips
+// over still raises the reported maximum, so a skipped
+// entry can never silently downgrade it. This bound is
+// NOT an adversary-proof verneed parser: a hand-crafted
+// section can still present inconsistent readings, and a
+// new bypass of the bound is a documented known
+// limitation, not a second fix round. Plugins are fully
+// trusted in-process code by design; dlopen fails closed
+// with the linker's own version error.
+//
+// Known limitations of this preflight:
+// (a) a version string truncated at the DT_STRSZ/.dynstr
+// boundary can under-report: ld.so reads to NUL in memory;
+// (b) the first matching PT_LOAD wins and a later overlapping
+// PT_LOAD remapping the .dynstr page is not accounted for;
+// (c) the sh_link string table can differ from DT_STRTAB and
+// a name beyond DT_STRSZ may be missed; (d) with no section
+// headers the verneed section is absent, so the bound
+// reports no max although DT_VERNEED still applies;
+// (e) DT_VERNEED can point at a hidden verneed in unscanned tail bytes;
+// not covered. This preflight is a convenience check, not a security boundary.
+func parseVersionNeeds(data, strtab []byte, order binary.ByteOrder) (string, error) {
+	max, _, err := parseVersionNeedsCount(data, strtab, order)
+	return max, err
+}
+
+// parseVersionNeedsCount is parseVersionNeeds plus the
+// number of Verneed headers the vnNext chain visited, so
+// MaxRequiredGLIBC can cross-check it against the section
+// header's sh_info entry count.
+func parseVersionNeedsCount(data, strtab []byte, order binary.ByteOrder) (string, int, error) {
+	var max glibcVersion
+	found := false
+	off := 0
+	// Walked regions, in data coordinates: a later entry
+	// offset must never land inside one. Headers and aux
+	// entries occupy disjoint regions, but their layout
+	// varies: real linkers emit all Verneed headers first
+	// and the aux entries after them (vn_aux past the
+	// next header), while other sections interleave one
+	// header with its aux entries. Only the aux RANGE
+	// is off-limits for a vnNext target, never the span
+	// from the header to the end of its aux chain.
+	var auxRanges [][2]int
+	var hdrRanges [][2]int
+	// covered marks every byte accounted for by a visited
+	// header or aux entry, one range per 16-byte entry
+	// (aux entries are recorded individually, never as a
+	// contiguous span: an aux chain that skips an entry
+	// must leave that entry's bytes uncovered). The
+	// whole-section check after the walk refuses any
+	// section whose bytes are not covered exactly once.
+	// Past-ranges-only checks cannot catch a vnNext whose
+	// target equals the end of the ranges walked so far
+	// (the N8 probe: vnNext=48 equals auxEnd, the bytes
+	// at 48 parse as a vnCnt=0 header, and header2 at
+	// 16 is never visited) — only whole-section coverage
+	// sees the skipped header.
+	covered := make([]bool, len(data))
+	mark := func(start, end int) error {
+		for i := start; i < end; i++ {
+			if covered[i] {
+				return fmt.Errorf("version need entries overlap at offset %d: refusing to load", i)
+			}
+			covered[i] = true
+		}
+		return nil
+	}
+	visited := map[int]bool{}
+	headerCount := 0
+	for {
+		if visited[off] {
+			return "", 0, fmt.Errorf("invalid version need entry at offset %d: vnNext chain revisits an entry (cycle): refusing to load", off)
+		}
+		visited[off] = true
+		for _, r := range auxRanges {
+			if off >= r[0] && off < r[1] {
+				return "", 0, fmt.Errorf("invalid version need entry at offset %d: lands inside version auxiliary data (offsets %d-%d)", off, r[0], r[1])
+			}
+		}
+		for _, r := range hdrRanges {
+			if off > r[0] && off < r[1] {
+				return "", 0, fmt.Errorf("invalid version need entry at offset %d: lands inside a version need header (offsets %d-%d)", off, r[0], r[1])
+			}
+		}
+		if off < 0 || off+16 > len(data) {
+			if off == 0 && len(data) == 0 {
+				bound, boundFound, scanErr := scanStrtabVersions(strtab)
+				if scanErr != nil {
+					return "", 0, scanErr
+				}
+				if boundFound {
+					return bound.String(), 0, nil
+				}
+				return "", 0, nil
+			}
+			return "", 0, fmt.Errorf("truncated version need entry at offset %d", off)
+		}
+		if err := mark(off, off+16); err != nil {
+			return "", 0, err
+		}
+		hdrRanges = append(hdrRanges, [2]int{off, off + 16})
+		headerCount++
+		vnCnt := order.Uint16(data[off+2:])
+		vnAux := order.Uint32(data[off+8:])
+		vnNext := order.Uint32(data[off+12:])
+		if vnCnt > 0 && vnAux < 16 {
+			return "", 0, fmt.Errorf("invalid version need entry at offset %d: aux offset %d", off, vnAux)
+		}
+		auxOff := off + int(vnAux)
+		// thisAuxRanges holds this entry's aux entries
+		// actually walked, wherever they sit:
+		// immediately after the header (interleaved
+		// layout) or after later headers (headers-first
+		// layout, as real linkers emit).
+		var thisAuxRanges [][2]int
+		for i := 0; i < int(vnCnt); i++ {
+			if auxOff < 0 || auxOff+16 > len(data) {
+				return "", 0, fmt.Errorf("truncated version auxiliary entry at offset %d", auxOff)
+			}
+			if err := mark(auxOff, auxOff+16); err != nil {
+				return "", 0, err
+			}
+			auxRanges = append(auxRanges, [2]int{auxOff, auxOff + 16})
+			thisAuxRanges = append(thisAuxRanges, [2]int{auxOff, auxOff + 16})
+			nameOff := order.Uint32(data[auxOff+8:])
+			next := order.Uint32(data[auxOff+12:])
+			name, err := cstringAt(strtab, int(nameOff))
+			if err != nil {
+				return "", 0, fmt.Errorf("invalid version name offset %d: %w", nameOff, err)
+			}
+			if strings.HasPrefix(name, "GLIBC_") {
+				verStr := strings.TrimPrefix(name, "GLIBC_")
+				if len(verStr) > 0 && verStr[0] >= '0' && verStr[0] <= '9' {
+					v, err := parseGlibcVersion(verStr)
+					if err != nil {
+						return "", 0, fmt.Errorf("unparseable glibc version %q: refusing to load", name)
+					}
+					if !found || compareGlibcVersion(v, max) > 0 {
+						max = v
+						found = true
+					}
+				}
+				// Non-numeric GLIBC_ names (GLIBC_PRIVATE,
+				// ...) carry no version requirement.
+			}
+			if next == 0 {
+				if i < int(vnCnt)-1 {
+					return "", 0, fmt.Errorf("truncated version auxiliary chain at entry %d of %d", i, vnCnt)
+				}
+				break
+			}
+			auxOff += int(next)
+		}
+		if vnNext == 0 {
+			break
+		}
+		// A vnNext landing inside this entry's own header
+		// (1-15) or inside one of its aux entries would
+		// re-parse header/aux bytes as a header (vnCnt=0,
+		// vnNext=0) and silently skip a later, higher
+		// requirement: refuse instead of computing a
+		// downgraded maximum. A vnNext that stops before
+		// the aux range (headers-first layout) or at/after
+		// it (interleaved layout) is well-formed.
+		if vnNext < 16 {
+			return "", 0, fmt.Errorf("invalid version need entry at offset %d: vnNext %d lands inside the entry header", off, vnNext)
+		}
+		for _, r := range thisAuxRanges {
+			if int(vnNext) >= r[0]-off && int(vnNext) < r[1]-off {
+				return "", 0, fmt.Errorf("invalid version need entry at offset %d: vnNext %d lands inside the entry's auxiliary data (offsets %d-%d)", off, vnNext, r[0]-off, r[1]-off)
+			}
+		}
+		nextOff := off + int(vnNext)
+		if nextOff < off {
+			return "", 0, fmt.Errorf("invalid version need entry at offset %d: vnNext %d overflows the section", off, vnNext)
+		}
+		off = nextOff
+	}
+	// Whole-section validation: every byte of the section
+	// must be covered exactly once by a visited header or
+	// aux entry. Any gap is a header or aux entry the
+	// vnNext/aux chains skipped over — its requirement
+	// is unknown, so the maximum of the visited entries
+	// alone must never be returned. Refusing here is
+	// always safe; a downgraded maximum is not. (A
+	// vnCnt=0 header is NOT refused on its own: an empty
+	// Verneed tiles the section exactly and is pinned
+	// accepted by TestParseVersionNeeds. What refuses
+	// the N8 probe is the gap its skipped header leaves,
+	// not the vnCnt=0 bytes the jump lands on.)
+	for i, c := range covered {
+		if !c {
+			end := i + 1
+			for end < len(covered) && !covered[end] {
+				end++
+			}
+			return "", 0, fmt.Errorf("version need section has uncovered bytes at offsets %d-%d: the vnNext chain skips over a version need entry or auxiliary entry: refusing to load", i, end)
+		}
+	}
+	// Conservative strtab superset bound: every GLIBC_
+	// version string anywhere in the string table raises
+	// the reported maximum, including strings no walked
+	// entry references. A malformed numeric GLIBC_
+	// string refuses rather than downgrading.
+	bound, boundFound, err := scanStrtabVersions(strtab)
+	if err != nil {
+		return "", 0, err
+	}
+	if boundFound && (!found || compareGlibcVersion(bound, max) > 0) {
+		max = bound
+		found = true
+	}
+	if !found {
+		return "", headerCount, nil
+	}
+	return max.String(), headerCount, nil
+}
+
+func cstringAt(strtab []byte, off int) (string, error) {
+	if off < 0 || off >= len(strtab) {
+		return "", fmt.Errorf("name offset %d out of range (table size %d)", off, len(strtab))
+	}
+	end := off
+	for end < len(strtab) && strtab[end] != 0 {
+		end++
+	}
+	return string(strtab[off:end]), nil
+}
+
+// CheckPluginCompat refuses a plugin file whose highest required
+// GLIBC_ version exceeds the running libc, or whose ELF cannot
+// be read. It returns nil when the file has no GLIBC_
+// requirements or satisfies the running libc, and nil for
+// non-ELF files (PE/Dylib plugins have no .gnu.version_r; the
+// format gate is dlopen/LoadLibrary, not this check). It must
+// be called before dlopen.
+func CheckPluginCompat(path string) error {
+	isELF, err := isELFFile(path)
+	if err != nil {
+		return err
+	}
+	if !isELF {
+		return nil
+	}
+	max, err := MaxRequiredGLIBC(path)
+	if err != nil {
+		return err
+	}
+	if max == "" {
+		return nil
+	}
+	running, err := runningLibcVersion()
+	if err != nil {
+		return fmt.Errorf("plugin requires GLIBC_%s but the running libc version is unknown on this build: refusing to load (%v)", max, err)
+	}
+	required, err := parseGlibcVersion(max)
+	if err != nil {
+		return fmt.Errorf("plugin requires unparseable glibc version %q: refusing to load", max)
+	}
+	if compareGlibcVersion(required, running) > 0 {
+		return fmt.Errorf("plugin requires GLIBC_%s, running libc is %s: refusing to load", max, running.String())
+	}
+	return nil
+}

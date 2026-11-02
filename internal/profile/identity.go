@@ -76,6 +76,13 @@ func OutboundIdentity(p *Profile) (string, string, error) {
 // that, so editing the referenced object changes the identity and
 // forces a reconnect. Direct and inline profiles delegate to
 // OutboundIdentity.
+//
+// NOT FOR PLUGIN USE: the hash is over the RAW outbound JSON and
+// may therefore carry secret values (it changes when a secret
+// rotates). Plugin-facing identity must be built with
+// pluginhost.NewPluginIdentity, which hashes the
+// secret-stripped form. Do not hand this helper's output to a
+// plugin.
 func OutboundIdentityForConfig(cfg *SingleConfig, name string) (string, string, error) {
 	if cfg == nil {
 		return "", "", newConfigError("cannot compute outbound identity of nil config")

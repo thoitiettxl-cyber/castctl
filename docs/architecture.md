@@ -20,18 +20,29 @@ Deleting `go/` from muse-cli with a README pointer is a separate PR.
 
 ## Core + plugins
 
-castctl is core + plugins, following CLIProxyAPI's plugin model exactly:
-the same loader approach, ABI/contract style, plugins directory layout,
-and store/install flow, adapted only for the per-profile proxy/cookies
-handoff to plugins (never raw WireGuard keys). Plugins MUST send all
-network traffic through the per-profile dialer that core provides, and
-never dial directly, since without a sandbox they could otherwise bypass
-the profile's outbound. CLIProxyAPI's config schema uses
-`plugins.enabled` (global) and `plugins.configs.<id>.enabled`
-(per-plugin); castctl follows the model exactly, adopting the same
-toggles. The plugin toggles (`plugins.enabled` and
-`plugins.configs.<id>.enabled`) are changed through the Management API
-and the web UI.
+castctl is core + plugins. The plugin framework is
+implemented (`internal/pluginabi` + `internal/pluginhost`,
+mirroring CLIProxyAPI's loader approach, ABI/contract style,
+and plugins directory layout, adapted for the per-profile
+proxy/cookies handoff to plugins — never raw WireGuard
+keys). The framework is not yet wired into the runtime:
+`ApplyConfig` is called only by `castctl plugin check` and
+tests, no Muse code has moved into a plugin, and wiring is
+a later PR. Plugins MUST send all network traffic through
+the per-profile egress proxy that core provides, and never
+dial directly, since without a sandbox they could otherwise
+bypass the profile's outbound.
+
+Config is the sing-box inline shape, NOT upstream's toggles:
+a top-level `plugins` array of `{tag, type, ...fields}`
+entries, with no `enabled` field at any level (presence =
+active). Upstream's `PluginsConfig` (`enabled`, `dir`,
+`store-sources`, `store-auth`, `auth-revision`, per-instance
+`configs` map) was deliberately not ported: no store,
+download, registry, or signing exists (BQ4). The plugin
+design draft is rationale only: the implementable spec is
+`docs/plugins-spec.md` (under 20 KB, mirroring CLIProxyAPI),
+and the full contract is `docs/plugins.md`.
 
 Core is profiles, per-profile outbound (sing-box), the cookie/session
 store and keeper, config, the web UI, and Telegram. Screencast login
@@ -39,16 +50,19 @@ stays in core. Each platform is a plugin: castctl-muse first, then
 castctl-facebook, castctl-tiktok, and castctl-youtube.
 
 Plugins are trusted and in-process, with no sandbox, exactly like
-CLIProxyAPI, and only first-party CLIs (BQ1, closed). BQ2–BQ5 are
-parked until just before plugin implementation, after the migration.
-The red-team findings B1, B2, B3, and B4–B10 are parked.
-The plugin design draft is rationale only: at implementation start it
-is condensed to an implementable spec of under 20 KB mirroring
-CLIProxyAPI, pointing to the draft for rationale. This docs change
-does not condense it.
+CLIProxyAPI, and only first-party CLIs (BQ1, closed). BQ2 (logical
+instances) is settled as (A); BQ3 (dlopen-init residual) is
+accepted and documented; BQ5 is the core per-session loopback
+proxy with ephemeral credentials. A native plugin panic/crash
+cannot be isolated by the host — only host-adapter panics and
+plugin-returned errors are (fuse). The red-team findings B1, B2,
+and B4–B10 are kept; B3 stays dropped (per the accepted
+plugins design). The earlier "BQ2–B5 parked" line is
+superseded by the implemented framework.
 
-The upstream sources for the plugin model, the toggles, and what was
-deliberately not taken are recorded in docs/provenance.md §2.
+The upstream sources for the plugin model, what was mirrored,
+and what was deliberately not taken are recorded in
+docs/provenance.md §2.
 
 Castctl stays one config.json whose schema grows by adding top-level modular blocks, sing-box style (log, dns, outbounds, profiles, later telegram/keeper), each block optional with sing-box-like defaults, and blocks reference each other by tag (profile -> outbound tag, dns server -> detour tag) rather than duplicating settings; there are no hidden hardcoded paths or rigid defaults, and every new feature is a new block or field, not a separate file.
 
@@ -61,9 +75,15 @@ This supersedes the earlier five-target plan: release targets are
 Linux only (above). The default build is dynamically linked
 (`CGO_ENABLED=1`) on a GLIBC 2.17 baseline (manylinux2014); each
 architecture also ships a `_no-plugin` static build
-(`CGO_ENABLED=0`). The plugin loader is not implemented, so
-neither build loads plugins. There are no Android, Windows, or
-macOS builds. Release builds are produced by
+(`CGO_ENABLED=0`) whose loader refuses loads. The plugin loader
+is implemented in-tree (unix + Windows loaders, stub for
+no-cgo); Linux amd64 loads are proven by contract tests and
+Linux arm64 loads under qemu (build proof only), while
+Windows and macOS loads are unproven
+([NEEDS-MEASUREMENT] — see docs/plugins.md). The phone
+runs the normal linux/arm64 glibc build inside
+Droidspaces (a Linux container); there are no separate
+Android, Windows, or macOS release builds. Release builds are produced by
 `.github/workflows/release.yaml`, adapted from CLIProxyAPI's
 release.yaml (see docs/provenance.md §2).
 
