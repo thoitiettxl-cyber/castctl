@@ -95,7 +95,7 @@ func cmdPluginCheck(ctx context.Context, env *Env, args []string) error {
 			// cannot flood check output.
 			line := "plugin log [" + level + "]: " + message
 			if len(line) > 4096 {
-				line = truncateRunes(line, 4096) + "…"
+				line = truncateUTF8Bytes(line, 4096) + "…"
 			}
 			fmt.Fprintln(out, line)
 		},
@@ -150,9 +150,9 @@ func cmdPluginCheck(ctx context.Context, env *Env, args []string) error {
 // remainder verbatim. See internal/pluginhost/text.go.
 const redactClosers = `""''\"\"\'\'`
 
-// truncateRunes cuts s at the largest rune boundary at or
+// truncateUTF8Bytes cuts s at the largest rune boundary at or
 // below max bytes, in O(1) (backs up at most 3 bytes).
-func truncateRunes(s string, max int) string {
+func truncateUTF8Bytes(s string, max int) string {
 	if max <= 0 {
 		return ""
 	}
@@ -174,7 +174,7 @@ func capBeforeRedact(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return truncateRunes(s, max) + redactClosers
+	return truncateUTF8Bytes(s, max) + redactClosers
 }
 
 // redactAndCap redacts s (SafeString) after capping it at
@@ -183,7 +183,7 @@ func capBeforeRedact(s string, max int) string {
 func redactAndCap(s string, max int) string {
 	out := logging.SafeString(capBeforeRedact(s, max))
 	if len(out) > max {
-		return truncateRunes(out, max) + "…"
+		return truncateUTF8Bytes(out, max) + "…"
 	}
 	return out
 }
@@ -229,7 +229,7 @@ func compactJSON(raw []byte) string {
 // an explicit marker, at a rune boundary.
 func capCheckText(s string) string {
 	if len(s) > 4096 {
-		return truncateRunes(s, 4096) + "…"
+		return truncateUTF8Bytes(s, 4096) + "…"
 	}
 	return s
 }
