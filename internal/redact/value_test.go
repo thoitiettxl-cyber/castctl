@@ -129,7 +129,12 @@ func TestValue(t *testing.T) {
 			},
 			want: map[string]any{
 				"tls":   map[string]any{"reality": map[string]any{"public_key": Marker, "short_id": Marker}},
-				"users": []any{map[string]any{"username": "u", "password": Marker}},
+				// G2: "username" joined the secret keys with
+				// "password" (credentials block), so a
+				// username inside a nested users array is
+				// redacted too — the pre-G2 expectation of a
+				// visible "u" is superseded.
+				"users": []any{map[string]any{"username": Marker, "password": Marker}},
 			},
 		},
 		{

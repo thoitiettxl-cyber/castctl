@@ -205,7 +205,7 @@ func TestKeeperCheckHealthy(t *testing.T) {
 		// RECONSTRUCTED K.7 shape: host-only, Max-Age 30d.
 		sessionCookies: []string{"hatch_sess=FAKE-RENEWED; Max-Age=2592000; Path=/; Secure; HttpOnly; SameSite=Lax"},
 	}
-	env, out, errb, _ := keeperTestEnv(t, keeperTestConfig(), fake)
+	env, out, errb, home := keeperTestEnv(t, keeperTestConfig(), fake)
 	if code := Run(context.Background(), []string{"keeper", "check"}, env); code != 0 {
 		t.Fatalf("check healthy: code=%d, stderr=%q", code, errb.String())
 	}
@@ -216,8 +216,28 @@ func TestKeeperCheckHealthy(t *testing.T) {
 	if res.Outcome != keeper.OutcomeOK {
 		t.Errorf("outcome = %q, want %q", res.Outcome, keeper.OutcomeOK)
 	}
-	if res.WroteCookies {
-		t.Error("non-jar stored file: Set-Cookie capture must skip the write")
+	// G5 supersedes the old non-jar freeze: a rotation IS
+	// persisted for every cookies-file format, converting a
+	// non-jar file to jar form on write.
+	if !res.WroteCookies {
+		t.Error("non-jar stored file: G5 requires the rotation to be written (convert-to-jar)")
+	}
+	raw, err := os.ReadFile(filepath.Join(home, "cookies.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar, err := keeper.ParseJar(raw)
+	if err != nil {
+		t.Fatalf("stored file is not a jar after conversion: %v (%q)", err, raw)
+	}
+	renewed := false
+	for _, c := range jar {
+		if c.Name == "hatch_sess" && c.Value == "FAKE-RENEWED" {
+			renewed = true
+		}
+	}
+	if !renewed {
+		t.Fatalf("jar = %+v; want the renewed hatch_sess persisted", jar)
 	}
 	if fake.sessionSeen != 1 || fake.authSeen != 1 {
 		t.Errorf("chain calls: session=%d auth=%d, want 1/1", fake.sessionSeen, fake.authSeen)
