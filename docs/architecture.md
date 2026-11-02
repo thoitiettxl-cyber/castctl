@@ -360,6 +360,24 @@ tag the page and the API say unavailable. Profile/outbound test
 endpoints are CLI-only in this build (501 `unavailable`); the
 phased test runner was not extracted.
 
+Chats/sessions ride the same seams as the CLI (`sessions.list`,
+`chat.history`, `deliverSend` + `executeWait`,
+`deliver.SessionStart`/`SessionOp`) through injected `Deps`
+fields — `internal/webui` never imports `internal/commands` — and
+each call builds and closes its own Runtime. Send is an async
+job: `POST` creates it, `GET /chats/jobs/{job}` polls it, one
+send per profile runs at a time (a second in-flight send is a
+fixed 409), and an approval-blocked turn ends the job with a
+documented outcome instead of stalling. The Plugins page is a
+gated placeholder: `GET /plugins` advertises `available: false`
+with an empty list and no loader or schema exists in this build.
+Keeper and `webui` blocks gain section editors (`GET`/`PUT
+/settings/keeper`, `/settings/webui`) funnelling through the same
+guarded save as DNS/Telegram. Browser hardening (Origin
+allowlist, login rate limit, frontend idle expiry, security
+headers) follows Design A in docs/security.md; middleware order
+is rate-limit → auth → Origin → timeout.
+
 Secrets in config are write-only under the [secrets write-only contract](../webui/SECRETS-CONTRACT.md),
 which the Go server MUST implement server-side (see docs/security.md).
 

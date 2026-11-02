@@ -101,6 +101,18 @@ shapes; the Go backend must implement it the same way (Go PR6).
 - Telegram stays write-only (empty token = unchanged); the token is
   never part of config content. Login cookies travel only through the
   login-import endpoint and are never written into config content.
+- Section editors (`GET`/`PUT /dns`, `/settings/telegram`,
+  `/settings/keeper`, `/settings/webui`) follow the same rules:
+  redacted reads, sentinel keep-on-save, `base_sha256` 409 guard,
+  write-only secret fields. The `webui` token behaves like the
+  Telegram token: empty means unchanged, the `***` placeholder is
+  rejected, a new value is hashed on save.
+- Chat bodies are sensitive display, not config secrets: they are
+  shown verbatim to the authenticated user (no SafeString
+  redaction is applied on read), never logged server-side, never
+  placed in an error message, and never persisted to browser
+  storage. Send-job state lives in memory only, bounded and
+  TTL'd, and is never logged.
 - The config editor edits the single-file portion only. The stored
   legacy profile entry is untouched by config/DNS saves; backend
   behaviour for legacy-only layouts is unpinned/carried (Go PR6).

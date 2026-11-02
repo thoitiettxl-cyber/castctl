@@ -416,6 +416,11 @@ per entry (unknown keys are rejected):
 | `interval` | duration string | `24h` | Tick cadence. Zero or absent means the documented default cadence of 24h; a present value must parse with `time.ParseDuration`, be positive, and be at most 1 year (`8760h`, the jitter-arithmetic bound). The effective delay is adaptive: when a driving cookie expiry is known, the next delay is `min(interval, clamp(remaining/4, 1h, 7d))`, ±20% jitter, re-drawn per wait. |
 | `notify` | string | `""` (off) | Only `""` or `"telegram"`. `"telegram"` sends fixed-content notices through the single `telegram` block (which must exist); any other value, or `"telegram"` with no telegram block, is a config error (exit 2). |
 
+The web UI edits this block through `GET`/`PUT /settings/keeper`
+(the entries list plus the stored-file SHA-256 guard; `entries:
+null` deletes the block). Keeper status display (`GET /keeper`)
+is read-only: the web UI never ticks the keeper.
+
 Behaviour:
 
 - **Expiry detection.** Each tick runs the cheap chain only
@@ -561,13 +566,29 @@ Behaviour:
 
 Optional. Absent means no web UI: `castctl webui serve` fails
 closed (exit 2) and nothing listens. The block accepts exactly
-three keys:
+five keys:
 
 | Key | Value |
 |---|---|
 | `listen` | string: loopback `host:port` the server binds (default `127.0.0.1:8317` when the block is present without `listen`) |
 | `token` | string: the management token, write-only (see below) |
 | `ui_dir` | string: directory of static frontend files served instead of the embedded frontend (see below) |
+| `session_idle_timeout` | duration string: how long the frontend keeps the token without user activity before discarding it and requiring re-login (default `12h`, at most 30 days; empty is a config error) |
+| `login_rate_limit` | object: login rate limit — `attempts` (integer 1–100, default `5`) failed token verifications per `window` (duration string, default `5m`, at most 24h) per remote address, after which the server answers fixed 429 with `Retry-After` |
+
+sing-box defines no `webui` block: these keys are castctl-only.
+The duration-string value form follows sing-box timeout fields and
+the in-tree keeper `interval` precedent (`time.ParseDuration`
+syntax, e.g. `12h`, `5m`). `/status` reports the effective idle
+timeout as `session_idle_timeout_seconds` so the frontend can
+enforce it; the server itself stays stateless Bearer (see
+[Security](security.md) — a stolen Bearer stays valid until token
+rotation). The block is editable through the web UI section
+editor (`GET`/`PUT /settings/webui`, same `base_sha256` 409 guard
+as the config editor; the token field is write-only, empty means
+unchanged, the `***` placeholder is rejected). Editing `listen`
+takes effect on restart; the idle timeout and rate limit are
+re-read per request and take effect immediately.
 
 `ui_dir` (optional) names a directory of public static files
 (HTML/JS/CSS/assets) that `webui serve` serves WITHOUT auth in
