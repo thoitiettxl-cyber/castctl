@@ -8,6 +8,36 @@ keeps the stored value, guarded by the stored-file SHA-256 with a
 409 on mismatch. Error and rejection messages name paths only,
 never values. Secrets are never printed, logged, or committed.
 
+## Login credentials (`credentials` block)
+
+The `credentials` block (login `username`/`password` per profile,
+for the keeper's automatic headless re-login) follows the same
+write-only contract, strengthened:
+
+- Both `username` and `password` are secret keys in the
+  redaction layer (`redact.secretKeys`, pinned by tests):
+  every redacted view — CLI, web UI, logs, errors — renders
+  `<redacted>`, and a `<redacted>` sentinel at either position
+  is a secret position a save must never persist (the web UI's
+  R8 assertion).
+- The config file is mode 0600 and is saved atomically with
+  no `.bak` or any other backup copy: a backup would be a
+  second copy of plaintext secrets.
+- Credentials are stored reversibly (form submission needs
+  the plaintext) — never hashed, never sourced from env/argv,
+  never written to a separate file, never passed to a plugin.
+  The only read path is the keeper-internal accessor; no
+  exported struct field carries a credential value.
+- Credentials never appear in `auth status` output, keeper
+  state files, audit records, logs, or Telegram notices
+  (profile name only). A sentinel-leak test pins this at the
+  command layer.
+- A file edit that removes a credential entry is
+  authoritative on the next keeper tick: credentials are
+  re-read from disk per factory build and no live comparator
+  caches them (unlike the webui token's live comparator —
+  see the file-edit-removal limit in the web UI contract).
+
 The full contract is the [secrets write-only contract](../webui/SECRETS-CONTRACT.md).
 The Go server implements the same redaction, sentinel
 keep-on-save, and merge contract server-side (`internal/webui`).

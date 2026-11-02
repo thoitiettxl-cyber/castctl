@@ -5,6 +5,7 @@
 package profile
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
@@ -21,7 +22,10 @@ import (
 // every other strict section in this file:
 //
 //	{"tag": string, "profile": string, "browser": string,
-//	 "interval": string, "notify": string}
+//	 "interval": string, "notify": string,
+//	 "credentials": string, "wake_on_gateway_failure": bool,
+//	 "retry_backoff": [string], "expiring_within": string,
+//	 "wake_attempts": number, "relogin_attempts": number}
 //
 //   - `tag` (required): unique name for the entry. Entries reference
 //     each other by tag, sing-box style. Tags are exact: no
@@ -33,31 +37,56 @@ import (
 //     2, exactly like a dangling outbound tag in validateTagGraph.
 //     One entry per profile: two entries naming the same profile is
 //     a config error (two keepers would race one cookies file).
-//   - `browser` (required): the CDP debug URL of the already-running
-//     Chrome that holds the profile's login, e.g.
-//     "http://127.0.0.1:9226/". Loopback only: the host must be
-//     127.0.0.1, ::1, or localhost, the scheme http or ws, and a port
-//     must be present. A non-loopback browser URL is a config error:
-//     the debug port is an unauthenticated local privilege boundary
-//     and castctl must never be told to reach a remote browser.
-//     Two entries must not share one browser URL: one CDP endpoint
-//     is one browser instance, and profiles must never share
-//     mutable browser state. No default port is ever assumed: an
-//     entry without a browser key is a config error, and there is
-//     no fallback to Chrome's conventional 9222.
-//   - `interval` (optional): Go duration string ("24h", "30m").
-//     Zero value (key absent or empty) means the documented default
-//     cadence of 24h; see internal/keeper for the adaptive rule that
-//     shortens it once a cookie expiry is observed. A present value
-//     must parse with time.ParseDuration, be positive, and be at
-//     most MaxKeeperInterval (1 year: the jitter arithmetic
-//     bound). Bare JSON numbers are rejected:
-//     seconds-vs-minutes has no in-band signal.
-//   - `notify` (optional): the telegram-block reference. The only
-//     accepted value is "telegram", naming the single top-level
-//     `telegram` block. A `notify` value naming anything else, or a
-//     `notify: "telegram"` entry when no `telegram` block exists,
-//     is a dangling reference, exit 2.
+//   - `browser` (optional since the cookie keep-alive work): the CDP
+//     debug URL of the already-running Chrome that holds the
+//     profile's login, e.g. "http://127.0.0.1:9226/". Loopback
+//     only: the host must be 127.0.0.1, ::1, or localhost, the
+//     scheme http or ws, and a port must be present. A
+//     non-loopback browser URL is a config error: the debug port
+//     is an unauthenticated local privilege boundary and castctl
+//     must never be told to reach a remote browser. Two entries
+//     must not share one browser URL: one CDP endpoint is one
+//     browser instance, and profiles must never share mutable
+//     browser state. No default port is ever assumed. An entry
+//     WITHOUT a browser key is a keep-alive-only entry: the tick
+//     persists Set-Cookie rotations and wakes a sleeping VM, but
+//     cannot re-export from a browser; when cookies die it stops
+//     (or re-logs in headless, when a `credentials` reference is
+//     present) and alerts instead of exporting.
+//   - `credentials` (optional): the tag of an entry in the
+//     top-level `credentials` block naming THIS profile. Absence
+//     means no auto re-login: when cookies die the entry stops
+//     and alerts. A dangling tag, or a tag naming another
+//     profile, is a config error, exit 2.
+//   - `wake_on_gateway_failure` (optional bool, default true):
+//     when true, a tick whose cheap chain succeeds but whose
+//     gateway handshake fails wakes the VM (bounded attempts)
+//     before declaring the entry transient. When false, the
+//     tick reports transient without waking.
+//   - `retry_backoff` (optional): the transient-retry ladder as
+//     a list of duration strings, e.g. ["5m", "15m", "45m"].
+//     Zero value (key absent or empty) means the documented
+//     default ladder ["5m", "15m", "45m"], max 3 retries. Every
+//     element must parse, be positive, and be at most
+//     MaxKeeperInterval; the list must have at least one and
+//     at most MaxRetryBackoffSteps entries. No hardcoded ladder
+//     remains: the tick reads the entry's ladder.
+//   - `expiring_within` (optional): the window, as a duration
+//     string, inside which a driving cookie's expiry counts as
+//     "expiring" for `auth status` and for the tick's
+//     keep-alive urgency. Zero value means the documented
+//     default of 72h. Must parse, be positive, at most
+//     MaxKeeperInterval.
+//   - `wake_attempts` (optional number, default 3): the maximum
+//     wake attempts per incident (a gateway-failure incident
+//     in one tick). Must be a positive integer, at most
+//     MaxKeeperAttempts.
+//   - `relogin_attempts` (optional number, default 3): the
+//     maximum headless re-login attempts per incident. Must be
+//     a positive integer, at most MaxKeeperAttempts. (The
+//     "1 re-login per tick" gate in G1 is enforced by the tick:
+//     a tick performs at most one re-login sequence; the cap
+//     bounds the sequence's internal retries.)
 //
 // A nil *KeeperConfig on SingleConfig means the block was absent
 // from the file, and the keeper is off: no behaviour changes, no
@@ -87,6 +116,34 @@ const DefaultKeeperInterval = 24 * time.Hour
 // zero-value default is unchanged.
 const MaxKeeperInterval = 365 * 24 * time.Hour
 
+// DefaultRetryBackoff is the documented zero-value transient
+// retry ladder for a keeper entry whose `retry_backoff` key is
+// absent or empty: 5m, 15m, 45m, max 3 retries (Boss decision
+// G1). It is a stated default (docs/config.md), not a hidden
+// hardcoded one: the tick reads the entry's ladder, and this
+// value is only the zero-value fallback.
+var DefaultRetryBackoff = []time.Duration{5 * time.Minute, 15 * time.Minute, 45 * time.Minute}
+
+// MaxRetryBackoffSteps bounds a configured `retry_backoff` list:
+// more steps than this would let a transient incident stall the
+// runner for longer than the backoff ladder can express
+// usefully, and the bound keeps the config surface reviewable.
+const MaxRetryBackoffSteps = 8
+
+// DefaultExpiringWithin is the documented zero-value window for
+// a keeper entry whose `expiring_within` key is absent or
+// empty: 72h (Boss decision G1).
+const DefaultExpiringWithin = 72 * time.Hour
+
+// DefaultKeeperAttempts is the documented zero-value cap for
+// `wake_attempts` and `relogin_attempts` when the key is absent:
+// 3 attempts per incident (Boss decision G1).
+const DefaultKeeperAttempts = 3
+
+// MaxKeeperAttempts bounds a configured `wake_attempts` /
+// `relogin_attempts` value.
+const MaxKeeperAttempts = 10
+
 // KeeperEntry is one parsed `keeper` list entry.
 type KeeperEntry struct {
 	Tag      string
@@ -99,6 +156,30 @@ type KeeperEntry struct {
 	IntervalSet bool
 	// Notify is "" (no notification) or "telegram".
 	Notify string
+	// Credentials is "" (no auto re-login) or the tag of a
+	// `credentials` entry naming this profile.
+	Credentials string
+	// WakeOnGatewayFailure enables the auto-wake leg. WakeSet
+	// reports whether the key was present; absent means true.
+	WakeOnGatewayFailure bool
+	WakeSet              bool
+	// RetryBackoff is the entry's transient-retry ladder.
+	// RetryBackoffSet reports whether the key was present
+	// with a non-empty list; absent means DefaultRetryBackoff.
+	RetryBackoff    []time.Duration
+	RetryBackoffSet bool
+	// ExpiringWithin is the "expiring" window. ExpiringSet
+	// reports whether the key was present with a non-empty
+	// value; absent means DefaultExpiringWithin.
+	ExpiringWithin time.Duration
+	ExpiringSet    bool
+	// WakeAttempts / ReloginAttempts are the per-incident
+	// attempt caps; the *Set flags report presence, absent
+	// means DefaultKeeperAttempts.
+	WakeAttempts    int
+	WakeAttemptsSet bool
+	ReloginAttempts int
+	ReloginSet      bool
 
 	raw []byte
 }
@@ -154,6 +235,8 @@ func (c *SingleConfig) RawKeeper() []byte {
 
 var keeperEntryKeys = map[string]bool{
 	"tag": true, "profile": true, "browser": true, "interval": true, "notify": true,
+	"credentials": true, "wake_on_gateway_failure": true, "retry_backoff": true,
+	"expiring_within": true, "wake_attempts": true, "relogin_attempts": true,
 }
 
 // parseKeeperBlock parses one decoded `keeper` value (an array of
@@ -229,6 +312,71 @@ func parseKeeperBlock(v any) (*KeeperConfig, error) {
 					return nil, newConfigErrorf(`"keeper" entry %d: "notify" must be a string`, i)
 				}
 				entry.Notify = s
+			case "credentials":
+				s, ok := val.(string)
+				if !ok || strings.TrimSpace(s) == "" {
+					return nil, newConfigErrorf(`"keeper" entry %d: "credentials" must be a non-empty tag string`, i)
+				}
+				if err := ValidateKeeperTag(s); err != nil {
+					return nil, newConfigErrorf(`"keeper" entry %d: invalid "credentials" tag: %v`, i, err)
+				}
+				entry.Credentials = s
+			case "wake_on_gateway_failure":
+				b, ok := val.(bool)
+				if !ok {
+					return nil, newConfigErrorf(`"keeper" entry %d: "wake_on_gateway_failure" must be a boolean`, i)
+				}
+				entry.WakeOnGatewayFailure = b
+				entry.WakeSet = true
+			case "retry_backoff":
+				arr, ok := val.([]any)
+				if !ok || len(arr) == 0 {
+					return nil, newConfigErrorf(`"keeper" entry %d: "retry_backoff" must be a non-empty array of duration strings`, i)
+				}
+				if len(arr) > MaxRetryBackoffSteps {
+					return nil, newConfigErrorf(`"keeper" entry %d: "retry_backoff" must have at most %d steps`, i, MaxRetryBackoffSteps)
+				}
+				for j, elem := range arr {
+					s, ok := elem.(string)
+					if !ok || strings.TrimSpace(s) == "" {
+						return nil, newConfigErrorf(`"keeper" entry %d: "retry_backoff" element %d must be a duration string`, i, j)
+					}
+					d, err := time.ParseDuration(s)
+					if err != nil || d <= 0 || d > MaxKeeperInterval {
+						return nil, newConfigErrorf(`"keeper" entry %d: "retry_backoff" element %d must be a positive duration string of at most %v`, i, j, MaxKeeperInterval)
+					}
+					entry.RetryBackoff = append(entry.RetryBackoff, d)
+				}
+				entry.RetryBackoffSet = true
+			case "expiring_within":
+				s, ok := val.(string)
+				if !ok {
+					return nil, newConfigErrorf(`"keeper" entry %d: "expiring_within" must be a duration string`, i)
+				}
+				if strings.TrimSpace(s) != "" {
+					d, err := time.ParseDuration(s)
+					if err != nil || d <= 0 || d > MaxKeeperInterval {
+						return nil, newConfigErrorf(`"keeper" entry %d: "expiring_within" must be a positive duration string of at most %v`, i, MaxKeeperInterval)
+					}
+					entry.ExpiringWithin = d
+					entry.ExpiringSet = true
+				}
+			case "wake_attempts", "relogin_attempts":
+				n, ok := val.(json.Number)
+				if !ok {
+					return nil, newConfigErrorf(`"keeper" entry %d: %q must be a positive integer`, i, k)
+				}
+				iv, err := strconv.Atoi(n.String())
+				if err != nil || iv <= 0 || iv > MaxKeeperAttempts {
+					return nil, newConfigErrorf(`"keeper" entry %d: %q must be a positive integer of at most %d`, i, k, MaxKeeperAttempts)
+				}
+				if k == "wake_attempts" {
+					entry.WakeAttempts = iv
+					entry.WakeAttemptsSet = true
+				} else {
+					entry.ReloginAttempts = iv
+					entry.ReloginSet = true
+				}
 			default:
 				return nil, newConfigErrorf(`unknown keeper config key %q`, k)
 			}
@@ -238,9 +386,6 @@ func parseKeeperBlock(v any) (*KeeperConfig, error) {
 		}
 		if entry.Profile == "" {
 			return nil, newConfigErrorf(`"keeper" entry %d requires a "profile" key`, i)
-		}
-		if entry.Browser == "" {
-			return nil, newConfigErrorf(`"keeper" entry %d requires a "browser" key`, i)
 		}
 		if seenTags[entry.Tag] {
 			return nil, newConfigErrorf(`"keeper" has duplicate tag %q`, entry.Tag)
@@ -360,10 +505,12 @@ func validateKeeper(cfg *SingleConfig) error {
 			return newConfigErrorf("keeper: entries %q and %q both name profile %q", prev, e.Tag, e.Profile)
 		}
 		seenProfiles[e.Profile] = e.Tag
-		if prev, ok := seenBrowsers[canonicalBrowser(e.Browser)]; ok {
-			return newConfigErrorf("keeper: entries %q and %q share one browser URL", prev, e.Tag)
+		if e.Browser != "" {
+			if prev, ok := seenBrowsers[canonicalBrowser(e.Browser)]; ok {
+				return newConfigErrorf("keeper: entries %q and %q share one browser URL", prev, e.Tag)
+			}
+			seenBrowsers[canonicalBrowser(e.Browser)] = e.Tag
 		}
-		seenBrowsers[canonicalBrowser(e.Browser)] = e.Tag
 		switch e.Notify {
 		case "", "telegram":
 		default:
@@ -387,6 +534,9 @@ func ResolveKeeper(single *SingleConfig) (*KeeperConfig, error) {
 		return nil, nil
 	}
 	if err := validateKeeper(single); err != nil {
+		return nil, err
+	}
+	if err := validateCredentialRefs(single); err != nil {
 		return nil, err
 	}
 	return single.Keeper, nil
@@ -415,23 +565,104 @@ func (e *KeeperEntry) EffectiveInterval() time.Duration {
 	return DefaultKeeperInterval
 }
 
+// EffectiveWakeOnGatewayFailure returns the entry's auto-wake
+// setting: the parsed value when set, true otherwise.
+func (e *KeeperEntry) EffectiveWakeOnGatewayFailure() bool {
+	if e != nil && e.WakeSet {
+		return e.WakeOnGatewayFailure
+	}
+	return true
+}
+
+// EffectiveRetryBackoff returns the entry's transient-retry
+// ladder: the parsed list when set, DefaultRetryBackoff
+// otherwise. The returned slice is a copy; callers must not
+// mutate the entry's ladder.
+func (e *KeeperEntry) EffectiveRetryBackoff() []time.Duration {
+	if e != nil && e.RetryBackoffSet && len(e.RetryBackoff) > 0 {
+		out := make([]time.Duration, len(e.RetryBackoff))
+		copy(out, e.RetryBackoff)
+		return out
+	}
+	out := make([]time.Duration, len(DefaultRetryBackoff))
+	copy(out, DefaultRetryBackoff)
+	return out
+}
+
+// EffectiveExpiringWithin returns the entry's "expiring"
+// window: the parsed value when set, DefaultExpiringWithin
+// otherwise.
+func (e *KeeperEntry) EffectiveExpiringWithin() time.Duration {
+	if e != nil && e.ExpiringSet && e.ExpiringWithin > 0 {
+		return e.ExpiringWithin
+	}
+	return DefaultExpiringWithin
+}
+
+// EffectiveWakeAttempts returns the entry's per-incident wake
+// cap: the parsed value when set, DefaultKeeperAttempts
+// otherwise.
+func (e *KeeperEntry) EffectiveWakeAttempts() int {
+	if e != nil && e.WakeAttemptsSet && e.WakeAttempts > 0 {
+		return e.WakeAttempts
+	}
+	return DefaultKeeperAttempts
+}
+
+// EffectiveReloginAttempts returns the entry's per-incident
+// re-login cap: the parsed value when set,
+// DefaultKeeperAttempts otherwise.
+func (e *KeeperEntry) EffectiveReloginAttempts() int {
+	if e != nil && e.ReloginSet && e.ReloginAttempts > 0 {
+		return e.ReloginAttempts
+	}
+	return DefaultKeeperAttempts
+}
+
 // encodeKeeperBlock renders a KeeperConfig for save when no raw
 // JSON was captured: entries in order, canonical key order, the
-// interval as a duration string, `notify` omitted when empty. The
-// returned values are *orderedObject so the save encoder preserves
-// key order.
+// interval as a duration string, `browser` omitted when empty
+// (keep-alive-only entry), `notify`/`credentials` omitted when
+// empty, `wake_on_gateway_failure` omitted when unset (default
+// true), `retry_backoff`/`expiring_within`/attempt caps omitted
+// when unset. The returned values are *orderedObject so the
+// save encoder preserves key order.
 func encodeKeeperBlock(cfg *KeeperConfig) ([]any, error) {
 	arr := make([]any, 0, len(cfg.Entries))
 	for _, e := range cfg.Entries {
 		entry := newOrderedObject()
 		entry.set("tag", e.Tag)
 		entry.set("profile", e.Profile)
-		entry.set("browser", e.Browser)
+		if e.Browser != "" {
+			entry.set("browser", e.Browser)
+		}
 		if e.IntervalSet && e.Interval > 0 {
 			entry.set("interval", e.Interval.String())
 		}
 		if e.Notify != "" {
 			entry.set("notify", e.Notify)
+		}
+		if e.Credentials != "" {
+			entry.set("credentials", e.Credentials)
+		}
+		if e.WakeSet {
+			entry.set("wake_on_gateway_failure", e.WakeOnGatewayFailure)
+		}
+		if e.RetryBackoffSet && len(e.RetryBackoff) > 0 {
+			steps := make([]any, 0, len(e.RetryBackoff))
+			for _, d := range e.RetryBackoff {
+				steps = append(steps, d.String())
+			}
+			entry.set("retry_backoff", steps)
+		}
+		if e.ExpiringSet && e.ExpiringWithin > 0 {
+			entry.set("expiring_within", e.ExpiringWithin.String())
+		}
+		if e.WakeAttemptsSet && e.WakeAttempts > 0 {
+			entry.set("wake_attempts", json.Number(strconv.Itoa(e.WakeAttempts)))
+		}
+		if e.ReloginSet && e.ReloginAttempts > 0 {
+			entry.set("relogin_attempts", json.Number(strconv.Itoa(e.ReloginAttempts)))
 		}
 		arr = append(arr, entry)
 	}

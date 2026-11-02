@@ -353,7 +353,10 @@ func TestTickTransientBackoffExhaustion(t *testing.T) {
 	}
 }
 
-func TestTickNonJarSkipsWrite(t *testing.T) {
+func TestTickNonJarConvertsOnRotation(t *testing.T) {
+	// G5 supersedes the old freeze: a Set-Cookie rotation
+	// IS persisted for a non-jar file, by converting the
+	// file to jar form through the locked atomic writer.
 	baseDir, cookiesPath, profileDir := tickFixture(t, nil)
 	// One-line form: readable, never rewritten from captures.
 	oneLine := []byte("hatch_sess=FAKE-OLD; hatch_gw=FAKE-GW\n")
@@ -364,12 +367,18 @@ func TestTickNonJarSkipsWrite(t *testing.T) {
 	renewal := []CookieUpdate{{Cookie: StoredCookie{Name: "hatch_sess", Value: "FAKE-NEW", Domain: ".muse.ai", Path: "/", Expires: tickNow.Add(30 * 24 * time.Hour).Unix()}}}
 	checker := &fakeChecker{scripts: []checkScript{{updates: renewal}}}
 	res := tickRun(t, baseDir, tickDeps(&fakeClock{now: tickNow}, checker, nil, nil))
-	if res.Outcome != OutcomeOK || res.WroteCookies {
-		t.Fatalf("result = %+v; want ok, no write (freeze a)", res)
+	if res.Outcome != OutcomeOK || !res.WroteCookies {
+		t.Fatalf("result = %+v; want ok with a converting write (G5)", res)
 	}
-	after, _ := os.ReadFile(cookiesPath)
-	if string(after) != string(oneLine) {
-		t.Fatalf("non-jar file rewritten: %q", after)
+	after := readJar(t, cookiesPath)
+	found := false
+	for _, c := range after {
+		if c.Name == "hatch_sess" && c.Value == "FAKE-NEW" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("converted jar = %+v; want the rotated value persisted", after)
 	}
 	// State still records the observed (merged) expiry.
 	st := readState(t, profileDir)

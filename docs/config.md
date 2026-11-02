@@ -16,7 +16,7 @@ profile loading refuses (only `config migrate` reads it)).
 
 ## Single-file schema
 
-Top-level keys (exactly these eleven; unknown keys are rejected):
+Top-level keys (exactly these twelve; unknown keys are rejected):
 
 | Key | Value |
 |---|---|
@@ -31,6 +31,7 @@ Top-level keys (exactly these eleven; unknown keys are rejected):
 | `keeper` | array: session-keeper entries (see [The `keeper` section](#the-keeper-section)) |
 | `webui` | object: web UI server settings (see [The `webui` section](#the-webui-section)) |
 | `plugins` | array: plugin entries (see [The `plugins` section](#the-plugins-section)) |
+| `credentials` | array: login credentials for automatic re-login, write-only (see [The `credentials` section](#the-credentials-section)) |
 
 A profile entry accepts exactly these ten keys (unknown keys
 are rejected — see [Per-profile DNS](#per-profile-dns)):
@@ -405,52 +406,102 @@ The optional top-level `keeper` block configures the session
 keeper (`keeper run` / `keeper check` / `keeper status`). It is
 sing-box style: a LIST of entries, each linked to a profile by
 tag. An absent block means the keeper is off: all three
-subcommands exit 2. The block accepts exactly these five keys
-per entry (unknown keys are rejected):
+subcommands exit 2. The block accepts exactly these keys per
+entry (unknown keys are rejected):
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `tag` | string | — (required) | Entry tag, unique across entries. A second entry with the same tag, or two entries for the same profile, is a config error (exit 2). Tags are exact: surrounding whitespace is rejected (never trimmed); `/`, `\`, control characters (including newline), and the tags `.`/`..` are rejected — tags name owner files under the profile directory. |
 | `profile` | string | — (required) | Tag of the profile whose cookies are watched. Must name a profile in `profiles`; a dangling tag is a config error (exit 2). |
-| `browser` | string | — (required) | CDP URL of the already-running Chrome to re-export cookies from. `http://` and `ws://` loopback URLs only, with an explicit port, no userinfo, no query/fragment; any non-loopback URL is a config error (exit 2, fail closed). Example: `http://127.0.0.1:9226`. Two entries sharing one browser (after canonicalisation of spelling variants such as a trailing slash, host case, or the `http://`/`ws://` scheme — the scheme is not part of the dedup key) is a config error. |
+| `browser` | string | — (optional) | CDP URL of the already-running Chrome to re-export cookies from. `http://` and `ws://` loopback URLs only, with an explicit port, no userinfo, no query/fragment; any non-loopback URL is a config error (exit 2, fail closed). Example: `http://127.0.0.1:9226`. Two entries sharing one browser (after canonicalisation of spelling variants such as a trailing slash, host case, or the `http://`/`ws://` scheme — the scheme is not part of the dedup key) is a config error. An entry without `browser` is keep-alive-only: it never re-exports, and on expiry goes straight to headless re-login when credentials are configured, or stops with an alert. |
 | `interval` | duration string | `24h` | Tick cadence. Zero or absent means the documented default cadence of 24h; a present value must parse with `time.ParseDuration`, be positive, and be at most 1 year (`8760h`, the jitter-arithmetic bound). The effective delay is adaptive: when a driving cookie expiry is known, the next delay is `min(interval, clamp(remaining/4, 1h, 7d))`, ±20% jitter, re-drawn per wait. |
 | `notify` | string | `""` (off) | Only `""` or `"telegram"`. `"telegram"` sends fixed-content notices through the single `telegram` block (which must exist); any other value, or `"telegram"` with no telegram block, is a config error (exit 2). |
+| `credentials` | string | `""` (off) | Tag of a `credentials` entry (see below) for this profile. Absence means no automatic re-login: on expiry the entry stops and alerts. A dangling tag, or a tag naming another profile's credentials, is a config error (exit 2). |
+| `wake_on_gateway_failure` | bool | `true` | When true, a tick whose cheap chain succeeds but whose gateway handshake fails wakes the VM and re-probes (see below). Set `false` to skip the wake leg entirely. |
+| `retry_backoff` | array of duration strings | `["5m","15m","45m"]` | Transient-error backoff ladder, 1–8 steps, each positive and at most 1 year; the ladder length is the retry cap (max 3 retries with the default ladder). |
+| `expiring_within` | duration string | `72h` | Window for `auth status`'s `expiring` state: a driving expiry within this window of now reports `expiring`. Positive, at most 1 year. |
+| `wake_attempts` | integer | `3` | Max wake attempts per incident (probe → wake → re-probe), 1–10. |
+| `relogin_attempts` | integer | `3` | Max headless re-login attempts per incident, 1–10. At most one re-login invocation happens per tick. |
 
 The web UI edits this block through `GET`/`PUT /settings/keeper`
 (the entries list plus the stored-file SHA-256 guard; `entries:
 null` deletes the block). Keeper status display (`GET /keeper`)
 is read-only: the web UI never ticks the keeper.
 
-Behaviour:
+Behaviour — the self-healing loop, in order:
 
-- **Expiry detection.** Each tick runs the cheap chain only
+- **Keep-alive.** Each tick runs the cheap chain only
   (GET `/api/session` → POST `/api/auth/check`, no hatch/token,
   no WebSocket, no chat) through the profile's own outbound,
-  with the profile identity. An AuthError means expired: the
-  entry stops (sticky stopped state), is marked logged out,
-  and notifies once — never loop-retried. Transient errors
-  back off on a 5m/15m/45m ±20% ladder, max 3 retries per tick.
-- **Re-export.** On expiry, cookies are re-exported from the
-  configured browser over CDP (`Storage.getCookies` primary,
-  `Network.getCookies` fallback) and merged. Only `muse.ai`
-  and `auth.muse.ai` cookies are kept; everything else is
-  dropped (count only). A merged set is written only if it
-  contains a non-empty `hatch_sess` and the earliest
+  with the profile identity. Rotated Set-Cookie values are
+  persisted on every tick, for every cookies-file format: a
+  non-jar file is converted to jar form on write when a
+  rotation must be persisted (atomic write, mode 0600, under
+  the per-file lock); a non-jar file with no rotation is left
+  byte-identical. An AuthError means expired: the entry goes
+  to re-export / re-login (below) and stops only when both
+  fail. Transient errors back off on the configured
+  `retry_backoff` ladder, ±20% jitter.
+- **Auto-wake.** When the cheap chain succeeds (HTTP auth
+  alive, access token present, `vm_id` present) but the
+  gateway Noise handshake fails, the keeper wakes the VM
+  (POST `/api/hatch/vm/wake`) and re-probes the gateway, up
+  to `wake_attempts` times. Wake success is judged by a
+  subsequent successful gateway probe, never by the wake
+  HTTP status. Wake exhaustion is transient: no stop, no
+  alert; rotations observed on the cheap chain are still
+  persisted. The wake leg never runs when HTTPS auth failed,
+  and a missing `vm_id` is never reclassified — it stays a
+  transient gateway error.
+- **Auto re-login.** When the session is dead and a
+  `credentials` tag is configured, the keeper re-logs in
+  headlessly (builds with `-tags with_chromedp` only):
+  attach to the entry's browser first when one is
+  configured, otherwise launch headless Chrome whose egress
+  goes through the profile's outbound via the loopback proxy
+  (S2 inbound plumbing — AGENTS.md rule 2 holds for the
+  browser too). The login page must match the versioned
+  contract (recorded by read-only observation, see
+  `docs/providers.md`); on any contract mismatch, captcha,
+  2FA, checkpoint, or lock signal, the driver stops
+  immediately, never bypasses, and the entry stops with one
+  alert for the incident. Harvested cookies are written
+  through the locked atomic path and the session state is
+  reset, then the cheap chain re-checks once. Builds without
+  `with_chromedp` cannot re-login: the entry stops with the
+  `blocked` notice kind. **Release builds do not include
+  `with_chromedp`** (see `.github/workflows/release.yaml`):
+  a release binary reports headless re-login as unavailable
+  and the keeper falls back to alert-only.
+- **Alert.** One Telegram notice per (profile, incident
+  kind), fixed text, profile name only. Routine successes —
+  including a first-tick self-healing recovery — are silent;
+  the `re-exported` notice fires only when a previous tick
+  was unhealthy. Incident kinds are the closed set
+  `logged_out`, `relogin_failed`, `captcha`, `two_factor`,
+  `checkpoint`, `locked`, `blocked`, `re-exported`.
+- **Re-export.** On expiry, when a browser is configured,
+  cookies are re-exported from it over CDP
+  (`Storage.getCookies` primary, `Network.getCookies`
+  fallback) and merged, before re-login is attempted. Only
+  `muse.ai` and `auth.muse.ai` cookies are kept; everything
+  else is dropped (count only). A merged set is written only
+  if it contains a non-empty `hatch_sess` and the earliest
   FILTERED-domain expiry is not already past: an expired
   cookie from an unrelated domain is preserved verbatim by
   the merge and never vetoes a valid re-export. CDP
   snapshots are faithful: an exported cookie is recorded
   exactly as the browser holds it (an empty value with a
   future expiry is written verbatim), and a filtered cookie
-  absent from the snapshot is dropped. Builds without
-  `-tags with_chromedp` detect and report expiry but cannot
-  re-export: the entry stops with the typed unavailable
-  outcome instead.
+  absent from the snapshot is dropped. An invalid export
+  falls through to re-login instead of stopping immediately;
+  an unreachable browser with no re-login configured stops
+  the entry with the `export_failed` reason.
 - **Cookie save.** Netscape jar only (7 columns, LF, trailing
   newline, deterministic sort). Set-Cookie updates merge into
-  a stored jar; a stored non-jar file is left untouched by
-  Set-Cookie capture (the tick still runs, state records the
-  observed expiry), while a CDP export REPLACES a non-jar file
+  a stored jar, and into a non-jar file by converting it to
+  jar form when a rotation is to be persisted (see
+  keep-alive above); a CDP export REPLACES a non-jar file
   with the validated export (dropped count recorded). The
   merge key ignores the leading dot on domains: a host-only
   stored entry and a Domain-scoped update are the same cookie
@@ -469,6 +520,24 @@ Behaviour:
   accepts 7 or more — the divergence is intentional (the
   keeper rewrites the file and must not silently drop extra
   columns) and is bridged by the state-only reset path.
+- **Embedded keeper.** `telegram run` embeds the keeper:
+  entries tick in the bot process under the shared shutdown
+  context, guarded by the same single-flight owner files as
+  `keeper run` — an entry already owned by a standalone
+  `keeper run` is skipped with a warning, never stolen.
+  An absent `keeper` block is a no-op; a load failure is
+  logged once and never fails the bot.
+- **`auth status`.** `castctl auth status [--profile NAME | --all]`
+  is state-only (no network): per profile it reports
+  `status` (`ok`/`expiring`/`expired`), the driving cookie
+  NAME only, `driving_expiry`, `last_checked_at`,
+  `keeper_stopped` + reason, `headless_available` + reason
+  (`no_keeper_entry` / `no_chromedp` / `no_credentials` /
+  available), `needs_action`, and `cookies_seen`. Exit 0 ok,
+  1 expiring, 2 config error, 3 expired; `--all` takes the
+  worst exit across profiles and derives status from
+  cookies-file expiry metadata when no keeper state exists.
+  A missing cookies file reports `expired`.
 - **State file.** Per profile, `session-state.json` (mode
   0600) next to — never inside — `config.json`, schema v1:
   `logged_out`, `keeper_stopped` + reason, `last_checked_at`,
@@ -520,10 +589,11 @@ Behaviour:
   outcome, the re-login path (`auth login` / `auth import`),
   and "No action was taken automatically." No secrets, no
   cookie names, no error text. At most one notice per
-  false→true logged-out transition; a failed send stays
-  pending for a later tick. Deduplication is at-least-once
-  across crashes: a crash between a successful send and the
-  marker-clear may re-send once. Targeting: the notice goes to the
+  (profile, incident kind) per episode; a failed send stays
+  pending for a later tick, and recovery clears the episode
+  so a new incident alerts again. Deduplication is
+  at-least-once across crashes: a crash between a successful
+  send and the marker-clear may re-send once. Targeting: the notice goes to the
   FIRST `allowed_user_ids` entry of the telegram block, on
   the assumption that a user id is a valid chat id for a 1:1
   bot chat. Delivery to that id is UNVERIFIED offline and is
@@ -545,9 +615,11 @@ Behaviour:
   `CASTCTL_EXPERIMENTAL_LOGIN=1`); without the flag it exits 2
   pointing at `auth import`. It attaches to the keeper entry's
   browser first; launching a castctl-owned Chrome is only the
-  fallback when no attachable browser exists, and at this
-  base the launch fails closed (no fail-closed routed inbound
-  exists yet) rather than launching a direct-egress browser.
+  fallback when no attachable browser exists, and the
+  screencast launch still fails closed (its runner passes no
+  routed inbound — the S2 inbound plumbing exists for the
+  keeper's headless re-login only) rather than launching a
+  direct-egress browser.
   The human completes the login; captcha/2FA are never
   auto-solved. Honesty note on the attach path: castctl's own
   code sends no Runtime/JS calls and the browser-level export
@@ -561,6 +633,53 @@ Behaviour:
   wire-recording test) — the CDP allowlist discipline covers
   castctl's own calls, not the library bootstrap. See
   `castctl auth login --help`.
+
+## The `credentials` section
+
+The optional top-level `credentials` block stores login
+credentials for the keeper's automatic headless re-login. It
+is sing-box style: a LIST of entries, each linked to exactly
+one profile. The block accepts exactly these four keys per
+entry (unknown keys are rejected):
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `tag` | string | — (required) | Entry tag, unique across entries. Tags are exact (same rules as keeper tags: no surrounding whitespace, no `/`, `\`, control characters, or `.`/`..`). |
+| `profile` | string | — (required) | Tag of the profile these credentials log in. Must name a profile in `profiles`; one entry per profile — a second entry for the same profile is a config error (exit 2). |
+| `username` | string | — (required) | Login username (email). Write-only: never printed, logged, or returned by any API; redacted as `<redacted>` in every redacted view. |
+| `password` | string | — (required) | Login password. Same write-only treatment as `username`. Stored reversibly (form submission needs the plaintext) — never hashed, never taken from env/argv, never written to a separate file. |
+
+Rules:
+
+- A keeper entry references credentials by tag
+  (`credentials` key); the referenced entry must exist and
+  must name the keeper entry's own profile — a dangling tag
+  or a cross-profile tag is a config error (exit 2).
+- The config file stays mode 0600; the guarded atomic save
+  applies. **No `.bak`/backup of `config.json` is ever made
+  for credentials** (a backup would be a second copy of
+  plaintext secrets): the save path writes the new file
+  atomically without retaining the previous bytes.
+- Credentials are readable only through the keeper-internal
+  accessor (`CredentialForProfile`); no exported struct
+  field carries a credential value, so no plugin API can
+  serialise one. They are never exposed to plugins, never
+  logged, and never appear in `auth status`, keeper state,
+  audit records, or Telegram notices (profile name only).
+- The web UI never edits this block: it round-trips
+  untouched through generic-document saves, and a
+  `<redacted>` sentinel at a `username`/`password` position
+  is a secret position that a save must never persist (the
+  same R8 assertion as the webui token). The PR #29
+  file-edit-removal architecture limit (a token removed by a
+  file edit, followed by an unrelated API save, could in
+  principle restore it) does **not** apply here: credentials
+  are re-read from disk on every keeper factory build, and
+  no live in-memory comparator caches them, so a file edit
+  is authoritative on the next tick.
+- A keeper entry with no `credentials` reference never
+  re-logs in: on expiry it stops and alerts (the
+  human-recovery path via `auth login` / `auth import`).
 
 ## The `webui` section
 

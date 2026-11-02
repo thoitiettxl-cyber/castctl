@@ -213,6 +213,17 @@ func TestFindSentinelAtSecretPosition(t *testing.T) {
 	}
 }
 
+// TestFindSentinelAtCredentialPosition pins the G2 rule: a
+// sentinel at a credentials username/password position is a
+// secret position (R8), never a literal the save may persist.
+func TestFindSentinelAtCredentialPosition(t *testing.T) {
+	doc := mustDoc(t, `{"credentials":[{"tag":"c1","profile":"muse01","username":"<redacted>","password":"<redacted>"}]}`)
+	path := findSentinelAtSecretPosition(doc, false, "")
+	if path != "credentials[0].username" && path != "credentials[0].password" {
+		t.Fatalf("path = %q, want a credentials username/password position", path)
+	}
+}
+
 func TestCheckWhitespaceKeys(t *testing.T) {
 	doc := mustDoc(t, `{"profiles":{"p":{"fingerprint":"chrome"}}}`)
 	if err := checkWhitespaceKeys(doc, ""); err != nil {

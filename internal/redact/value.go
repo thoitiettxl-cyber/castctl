@@ -33,6 +33,10 @@ const Marker = "<redacted>"
 // submission_key), the Tailscale mesh key (mesh_psk), the OpenVPN
 // static key (static_key), TLS client material (client_key,
 // client_certificate), and the Snell user key (userkey).
+// "username" joins the set with the credentials block (keeper
+// auto re-login): a login username is secret material in the
+// same write-only class as "password" and must never appear in
+// any redacted view, log, or API response.
 // Matching is exact after lowercasing (see IsSecretKey); there is
 // no substring or suffix matching. Header maps are NOT in this
 // set: they are redacted wholesale by the header rule in
@@ -77,6 +81,7 @@ var secretKeys = map[string]bool{
 	"subscription_action_id": true,
 	"token":                  true,
 	"userkey":                true,
+	"username":               true,
 	"uuid":                   true,
 	"vm_id":                  true,
 	"zone_token":             true,

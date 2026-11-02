@@ -32,6 +32,10 @@ func TestIsSecretKey(t *testing.T) {
 		// spellings plugins and sing-box-style fragments use.
 		"api_key", "auth_token", "client_secret",
 		"session_key", "access_key",
+		// Credentials block (keeper auto re-login, G2):
+		// the login username is secret material in the same
+		// write-only class as "password".
+		"username",
 	}
 	for _, k := range secret {
 		if !IsSecretKey(k) {
@@ -54,7 +58,8 @@ func TestIsSecretKey(t *testing.T) {
 		{"Client_Certificate", true},
 		{"MAC_KEY", true},
 		{"UserKey", true},
-		{"username", false},
+		{"Username", true},
+		{"USERNAME", true},
 		{"server", false},
 		{"type", false},
 		{"tag", false},

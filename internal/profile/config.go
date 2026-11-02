@@ -59,6 +59,12 @@ type SingleConfig struct {
 	// see internal/profile/plugins.go). Absence is preserved on
 	// save and means no plugin is configured.
 	Plugins *PluginsConfig
+	// Credentials is the top-level "credentials" block (nil
+	// when absent; see internal/profile/credentials.go).
+	// Absence is preserved on save and means no stored login
+	// credentials: the keeper cannot auto re-login and falls
+	// back to alerting.
+	Credentials *CredentialsConfig
 
 	rawOutbounds    [][]byte
 	rawEndpoints    [][]byte
@@ -69,6 +75,7 @@ type SingleConfig struct {
 	rawKeeper       []byte
 	rawWebUI        []byte
 	rawPlugins      []byte
+	rawCredentials  []byte
 	rawProfiles     map[string][]byte
 }
 
@@ -174,6 +181,7 @@ var singleTopLevelKeys = map[string]bool{
 	"keeper":          true,
 	"webui":           true,
 	"plugins":         true,
+	"credentials":     true,
 }
 
 var profileKeys = map[string]bool{
@@ -376,6 +384,18 @@ func ParseSingleConfig(data []byte, baseDir string) (*SingleConfig, error) {
 		cfg.Plugins = pCfg
 		cfg.rawPlugins = raw
 	}
+	if v, ok := obj.get("credentials"); ok {
+		raw, err := rawOf(v)
+		if err != nil {
+			return nil, err
+		}
+		cCfg, err := parseCredentialsBlock(v)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Credentials = cCfg
+		cfg.rawCredentials = raw
+	}
 
 	for _, name := range profilesObj.keys {
 		if _, err := ValidateProfileName(name); err != nil {
@@ -423,6 +443,12 @@ func ParseSingleConfig(data []byte, baseDir string) (*SingleConfig, error) {
 		return nil, err
 	}
 	if err := validateKeeper(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateCredentials(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateCredentialRefs(cfg); err != nil {
 		return nil, err
 	}
 	if err := validatePlugins(cfg); err != nil {
@@ -1249,7 +1275,7 @@ func profileExists(baseDir, name string, single *SingleConfig) bool {
 // buildSingleFileOrdered renders a SingleConfig as an ordered JSON
 // value with keys in the fixed top-level order: default_profile,
 // profiles (sorted), outbounds, endpoints, dns, wireguard_dns,
-// log, telegram, keeper, webui. Raw blocks keep their input key
+// log, telegram, keeper, webui, credentials. Raw blocks keep their input key
 // order; synthesized blocks render in canonical within-block
 // order (see encodeWebUIBlock, encodeKeeperBlock, and the log /
 // telegram synthesis below).
@@ -1415,6 +1441,19 @@ func buildSingleFileOrdered(cfg *SingleConfig) (*orderedObject, error) {
 			return nil, err
 		}
 		root.set("plugins", arr)
+	}
+	if len(cfg.rawCredentials) > 0 {
+		v, err := decodeOrderedJSON(cfg.rawCredentials)
+		if err != nil {
+			return nil, err
+		}
+		root.set("credentials", v)
+	} else if cfg.Credentials != nil {
+		arr, err := encodeCredentialsBlock(cfg.Credentials)
+		if err != nil {
+			return nil, err
+		}
+		root.set("credentials", arr)
 	}
 	return root, nil
 }

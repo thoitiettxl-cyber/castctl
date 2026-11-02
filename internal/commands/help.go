@@ -288,9 +288,13 @@ Authentication helpers. "auth export" prints guidance only (exit 1,
 no writes). "auth import" reads cookies from stdin and writes the
 active profile's cookies.txt (see "castctl auth import --help").
 "auth login" is the experimental screencast login (see "castctl
-auth login --help"; off by default).
+auth login --help"; off by default). "auth status" reports the
+session state from files only, no network (see "castctl auth
+status --help"). "auth observe-login" prints the read-only,
+redacted login-page inventory for the contract fixture (see
+"castctl auth observe-login --help").
 
-Subcommands: list, export, import, login. Run "castctl auth <subcommand> --help"
+Subcommands: list, export, import, login, status, observe-login. Run "castctl auth <subcommand> --help"
 for per-subcommand help.
 `
 

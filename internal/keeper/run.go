@@ -79,6 +79,7 @@ func runEntry(ctx context.Context, entry *profile.KeeperEntry, prof *profile.Pro
 		}
 		result := Tick(ctx, deps)
 		res.Ticks++
+		prevOutcome := res.Last.Outcome
 		res.Last = result
 		if onTick != nil {
 			onTick(entry, result)
@@ -89,8 +90,17 @@ func runEntry(ctx context.Context, entry *profile.KeeperEntry, prof *profile.Pro
 			return res
 		}
 		if result.Recovered && deps.Notifier != nil {
-			// Best-effort, outside the tick and its locks.
-			_ = deps.Notifier.Notify(ctx, NoticeReexported, prof.Name)
+			// Incident recovery only (G5): the notice
+			// fires when the PREVIOUS tick was not
+			// healthy, i.e. this recovery closes a real
+			// incident. A first-tick or routine
+			// self-healing recovery stays silent: the
+			// session is alive again and no one needs
+			// to be told.
+			if res.Ticks > 1 && prevOutcome != "" && prevOutcome != OutcomeOK {
+				// Best-effort, outside the tick and its locks.
+				_ = deps.Notifier.Notify(ctx, NoticeReexported, prof.Name)
+			}
 		}
 		if ctx.Err() != nil {
 			return res

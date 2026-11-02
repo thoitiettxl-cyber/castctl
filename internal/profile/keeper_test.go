@@ -65,7 +65,11 @@ func TestParseKeeperBlockErrors(t *testing.T) {
 		{"unknown key", `[{"tag": "k", "profile": "muse01", "browser": "http://127.0.0.1:9226/", "enabled": true}]`},
 		{"missing tag", `[{"profile": "muse01", "browser": "http://127.0.0.1:9226/"}]`},
 		{"missing profile", `[{"tag": "k", "browser": "http://127.0.0.1:9226/"}]`},
-		{"missing browser", `[{"tag": "k", "profile": "muse01"}]`},
+		// A missing browser key is VALID since the cookie
+		// keep-alive work: a keep-alive-only entry with no
+		// browser to re-export from (see
+		// TestKeeperNoBrowserParses).
+		{"bad browser", `[{"tag": "k", "profile": "muse01", "browser": "not a url"}]`},
 		{"duplicate tag", `[{"tag": "k", "profile": "muse01", "browser": "http://127.0.0.1:9226/"}, {"tag": "k", "profile": "muse02", "browser": "http://127.0.0.1:9227/"}]`},
 		{"dangling profile", `[{"tag": "k", "profile": "ghost", "browser": "http://127.0.0.1:9226/"}]`},
 		{"duplicate profile", `[{"tag": "k1", "profile": "muse01", "browser": "http://127.0.0.1:9226/"}, {"tag": "k2", "profile": "muse01", "browser": "http://127.0.0.1:9227/"}]`},

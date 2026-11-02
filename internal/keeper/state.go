@@ -129,6 +129,80 @@ type SessionState struct {
 	WarnPending bool       `json:"warn_pending,omitempty"`
 	WarnSent    bool       `json:"warn_sent,omitempty"`
 	WarnedAt    *time.Time `json:"warned_at,omitempty"`
+
+	// WarnedKinds is the per-(incident, kind) dedup record:
+	// one entry per notice kind alerted during the current
+	// stopped episode. A kind already marked Sent in this
+	// episode is never re-alerted; the map is cleared when
+	// the entry recovers (a healthy tick), so a later,
+	// separate incident of the same kind alerts again. The
+	// legacy Warn* fields above stay in sync for existing
+	// readers; WarnedKinds is the episode-scoped authority.
+	// Keys are NoticeKind strings; values carry only a
+	// boolean and a timestamp, never content.
+	WarnedKinds map[string]WarnedKind `json:"warned_kinds,omitempty"`
+}
+
+// WarnedKind is one per-kind dedup record: whether the notice
+// for this kind was sent during the current episode.
+type WarnedKind struct {
+	Sent bool       `json:"sent"`
+	At   *time.Time `json:"at,omitempty"`
+}
+
+// WarnedKindSent reports whether kind was already alerted in
+// the current episode.
+func (st *SessionState) WarnedKindSent(kind NoticeKind) bool {
+	if st == nil || st.WarnedKinds == nil {
+		return false
+	}
+	m, ok := st.WarnedKinds[string(kind)]
+	return ok && m.Sent
+}
+
+// MarkWarnPending records a pending notice for kind in the
+// current episode, unless the kind was already sent in this
+// episode. It reports whether the notice is newly pending
+// (false = already alerted, caller must not re-notify). The
+// legacy Warn* fields are kept in sync.
+func (st *SessionState) MarkWarnPending(kind NoticeKind, now time.Time) bool {
+	if st.WarnedKindSent(kind) {
+		return false
+	}
+	if st.WarnedKinds == nil {
+		st.WarnedKinds = map[string]WarnedKind{}
+	}
+	st.WarnedKinds[string(kind)] = WarnedKind{Sent: false}
+	st.WarnKind = string(kind)
+	st.WarnPending = true
+	st.WarnSent = false
+	return true
+}
+
+// MarkWarnSent records that kind's notice was sent: the
+// episode dedup entry flips to Sent and the legacy fields
+// sync. Other kinds' entries are untouched.
+func (st *SessionState) MarkWarnSent(kind NoticeKind, now time.Time) {
+	if st.WarnedKinds == nil {
+		st.WarnedKinds = map[string]WarnedKind{}
+	}
+	at := now
+	st.WarnedKinds[string(kind)] = WarnedKind{Sent: true, At: &at}
+	st.WarnPending = false
+	st.WarnSent = true
+	st.WarnKind = string(kind)
+	st.WarnedAt = &at
+}
+
+// ClearWarnEpisode clears the whole episode dedup record and
+// the legacy warn fields: called when the entry recovers, so
+// a later incident alerts afresh.
+func (st *SessionState) ClearWarnEpisode() {
+	st.WarnedKinds = nil
+	st.WarnKind = ""
+	st.WarnPending = false
+	st.WarnSent = false
+	st.WarnedAt = nil
 }
 
 // NewSessionState returns a fresh v1 state.
