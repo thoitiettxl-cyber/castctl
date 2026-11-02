@@ -211,7 +211,9 @@ func jsonDeepEqual(a, b any) bool {
 // whose merge restored a secret must still be the same element.
 // Every identity key present in the stored element (tag, type,
 // username, name, address, port) must be present and unchanged
-// in the submitted element. An `address` value carrying a URL
+// in the MERGED element (the submitted element after sentinel
+// restoration — never the raw submitted element, whose secret
+// identity keys still hold the sentinel). An `address` value carrying a URL
 // userinfo span is governed by R6, not by identity, and its
 // comparison is skipped.
 func checkElementIdentity(storedElement, submittedElement any, path string) error {
@@ -313,7 +315,21 @@ func mergeNode(stored any, storedPresent bool, submitted any, path string, secre
 						return nil, false, err
 					}
 					if elemRestored {
-						if err := checkElementIdentity(storedArr[i], elem, elemPath); err != nil {
+						// Compare against the RESTORED
+						// element (result), not the
+						// submitted one: an identity
+						// key that is also a secret
+						// key (e.g. a credentials
+						// entry's `username`, or an
+						// outbound's) still holds the
+						// sentinel in the submitted
+						// element, and comparing that
+						// would reject every untouched
+						// round-trip. The restore
+						// already put the stored value
+						// back; the guard must judge
+						// the element as merged.
+						if err := checkElementIdentity(storedArr[i], result, elemPath); err != nil {
 							return nil, false, err
 						}
 					}

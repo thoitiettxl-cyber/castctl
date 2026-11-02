@@ -32,6 +32,10 @@ func TestIsSecretKey(t *testing.T) {
 		// spellings plugins and sing-box-style fragments use.
 		"api_key", "auth_token", "client_secret",
 		"session_key", "access_key",
+		// Credentials block (keeper auto re-login, G2):
+		// the login username is secret material in the same
+		// write-only class as "password".
+		"username",
 	}
 	for _, k := range secret {
 		if !IsSecretKey(k) {
@@ -54,7 +58,8 @@ func TestIsSecretKey(t *testing.T) {
 		{"Client_Certificate", true},
 		{"MAC_KEY", true},
 		{"UserKey", true},
-		{"username", false},
+		{"Username", true},
+		{"USERNAME", true},
 		{"server", false},
 		{"type", false},
 		{"tag", false},
@@ -124,7 +129,12 @@ func TestValue(t *testing.T) {
 			},
 			want: map[string]any{
 				"tls":   map[string]any{"reality": map[string]any{"public_key": Marker, "short_id": Marker}},
-				"users": []any{map[string]any{"username": "u", "password": Marker}},
+				// G2: "username" joined the secret keys with
+				// "password" (credentials block), so a
+				// username inside a nested users array is
+				// redacted too — the pre-G2 expectation of a
+				// visible "u" is superseded.
+				"users": []any{map[string]any{"username": Marker, "password": Marker}},
 			},
 		},
 		{

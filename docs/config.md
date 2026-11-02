@@ -16,7 +16,7 @@ profile loading refuses (only `config migrate` reads it)).
 
 ## Single-file schema
 
-Top-level keys (exactly these eleven; unknown keys are rejected):
+Top-level keys (exactly these twelve; unknown keys are rejected):
 
 | Key | Value |
 |---|---|
@@ -31,6 +31,7 @@ Top-level keys (exactly these eleven; unknown keys are rejected):
 | `keeper` | array: session-keeper entries (see [The `keeper` section](#the-keeper-section)) |
 | `webui` | object: web UI server settings (see [The `webui` section](#the-webui-section)) |
 | `plugins` | array: plugin entries (see [The `plugins` section](#the-plugins-section)) |
+| `credentials` | array: login credentials for automatic re-login, write-only (see [The `credentials` section](#the-credentials-section)) |
 
 A profile entry accepts exactly these ten keys (unknown keys
 are rejected — see [Per-profile DNS](#per-profile-dns)):
@@ -405,52 +406,204 @@ The optional top-level `keeper` block configures the session
 keeper (`keeper run` / `keeper check` / `keeper status`). It is
 sing-box style: a LIST of entries, each linked to a profile by
 tag. An absent block means the keeper is off: all three
-subcommands exit 2. The block accepts exactly these five keys
-per entry (unknown keys are rejected):
+subcommands exit 2. The block accepts exactly these keys per
+entry (unknown keys are rejected):
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `tag` | string | — (required) | Entry tag, unique across entries. A second entry with the same tag, or two entries for the same profile, is a config error (exit 2). Tags are exact: surrounding whitespace is rejected (never trimmed); `/`, `\`, control characters (including newline), and the tags `.`/`..` are rejected — tags name owner files under the profile directory. |
 | `profile` | string | — (required) | Tag of the profile whose cookies are watched. Must name a profile in `profiles`; a dangling tag is a config error (exit 2). |
-| `browser` | string | — (required) | CDP URL of the already-running Chrome to re-export cookies from. `http://` and `ws://` loopback URLs only, with an explicit port, no userinfo, no query/fragment; any non-loopback URL is a config error (exit 2, fail closed). Example: `http://127.0.0.1:9226`. Two entries sharing one browser (after canonicalisation of spelling variants such as a trailing slash, host case, or the `http://`/`ws://` scheme — the scheme is not part of the dedup key) is a config error. |
+| `browser` | string | — (optional) | CDP URL of the already-running Chrome to re-export cookies from. `http://` and `ws://` loopback URLs only, with an explicit port, no userinfo, no query/fragment; any non-loopback URL is a config error (exit 2, fail closed). Example: `http://127.0.0.1:9226`. Two entries sharing one browser (after canonicalisation of spelling variants such as a trailing slash, host case, or the `http://`/`ws://` scheme — the scheme is not part of the dedup key) is a config error. An entry without `browser` is keep-alive-only: it never re-exports, and on expiry goes straight to headless re-login when credentials are configured, or stops with an alert. |
 | `interval` | duration string | `24h` | Tick cadence. Zero or absent means the documented default cadence of 24h; a present value must parse with `time.ParseDuration`, be positive, and be at most 1 year (`8760h`, the jitter-arithmetic bound). The effective delay is adaptive: when a driving cookie expiry is known, the next delay is `min(interval, clamp(remaining/4, 1h, 7d))`, ±20% jitter, re-drawn per wait. |
 | `notify` | string | `""` (off) | Only `""` or `"telegram"`. `"telegram"` sends fixed-content notices through the single `telegram` block (which must exist); any other value, or `"telegram"` with no telegram block, is a config error (exit 2). |
+| `credentials` | string | `""` (off) | Tag of a `credentials` entry (see below) for this profile. Absence means no automatic re-login: on expiry the entry stops and alerts. A dangling tag, or a tag naming another profile's credentials, is a config error (exit 2). |
+| `wake_on_gateway_failure` | bool | `true` | When true, a tick whose cheap chain succeeds but whose gateway handshake fails wakes the VM and re-probes (see below). Set `false` to skip the wake leg entirely. |
+| `retry_backoff` | array of duration strings | `["5m","15m","45m"]` | Transient-error backoff ladder, 1–8 steps, each positive and at most 1 year; the ladder length is the retry cap (max 3 retries with the default ladder). |
+| `expiring_within` | duration string | `72h` | Window for `auth status`'s `expiring` state: a driving expiry within this window of now reports `expiring`. Positive, at most 1 year. |
+| `wake_attempts` | integer | `3` | Max wake attempts per incident (probe → wake → re-probe), 1–10. |
+| `relogin_attempts` | integer | `3` | Max headless re-login attempts per incident, 1–10. At most one re-login invocation happens per tick. |
+| `proxy_dial_timeout` | duration string | `30s` | S2 loopback proxy: bound on one upstream dial through the outbound. Positive, at most 1 minute. |
+| `proxy_max_header_bytes` | integer | `65536` | S2 loopback proxy: max bytes of one request's header block. 1–1048576. |
+| `proxy_max_body_bytes` | integer | `16777216` | S2 loopback proxy: max bytes of a forwarded plain-HTTP request body. 1–1073741824. |
+| `proxy_allowed_hosts` | array of strings | `["auth.muse.ai", "muse.ai"]` | S2 loopback proxy guard allowlist (see below): the only hosts the proxy dials. Non-empty; each entry a hostname or IPv4 literal, exact match on the lowercased host (trailing dots ignored), no scheme/port/userinfo/path/query/wildcard/IPv6 literal. Duplicates are kept. |
+| `relogin_match_timeout` | duration string | `30s` | Headless driver: how long to poll for the login form (or a blocker) to appear. Positive, at most 10 minutes. |
+| `relogin_cookie_timeout` | duration string | `30s` | Headless driver: how long to poll for a session cookie after submit. Positive, at most 10 minutes. |
+| `relogin_poll_interval` | duration string | `500ms` | Headless driver: poll cadence for form/cookie waits and observation settle. Positive, at most 1 minute. |
+| `relogin_attach_timeout` | duration string | `10s` | Headless driver: bound on the WebSocket dial when attaching to a running browser. Positive, at most 1 minute. |
+| `relogin_cancel_timeout` | duration string | `10s` | Headless driver: bound on waiting for chromedp's target cancel after a failed launch. Positive, at most 1 minute. A wedged cancel leaks one goroutine per failed launch; a failed launch already stops the entry, so this cannot accumulate. |
+| `observe_timeout` | duration string | `90s` | `auth observe-login`: bound on the whole observation run. Positive, at most 10 minutes. |
+| `observe_settle_timeout` | duration string | `15s` | `auth observe-login`: how long to poll for at least one form control before returning the (possibly empty) inventory. Positive, at most 10 minutes. |
+| `observe_inventory_cap` | integer | `200` | `auth observe-login`: max form-control elements in the inventory. 1–10000. |
 
 The web UI edits this block through `GET`/`PUT /settings/keeper`
 (the entries list plus the stored-file SHA-256 guard; `entries:
 null` deletes the block). Keeper status display (`GET /keeper`)
 is read-only: the web UI never ticks the keeper.
 
-Behaviour:
+Every timeout, cap, and host in the keeper-entry
+proxy/driver/observe paths above is a config key with the
+documented default, and omitting a key preserves exactly
+the behaviour the hardcoded value had. Validation caps are
+bounds on the schema, not defaults, and stay constants:
+`MaxRetryBackoffSteps = 8`, `MaxKeeperAttempts = 10`,
+`MaxProxyHeaderBytes = 1048576`, `MaxProxyBodyBytes =
+1073741824`, `MaxObserveInventoryCap = 10000`,
+`MaxProxyDialTimeout = 1m`, `MaxReloginPollInterval = 1m`,
+`MaxReloginWaitTimeout = 10m`
+(`internal/profile/keeper.go`, `internal/keeper/backoff.go`).
+The refusal-log truncation to 253 bytes (the DNS-name
+length bound, `internal/outbound/proxy.go`) is a log-safety
+constant, not a tunable: it caps how much of a refused host
+reaches the log, never a timeout or dial.
 
-- **Expiry detection.** Each tick runs the cheap chain only
+Pre-existing hardcoded timeouts OUTSIDE the paths above
+stay as they were (Boss scoping: branch-diff values only,
+plus this inventory — Boss decides separately whether any
+moves into config): CDP discovery 5s HTTP + 5s dial
+(`internal/keeper/export_cdp.go`, `DiscoverWebSocketURL`);
+`keeper check` tick bound 90s (`internal/commands/keeper.go`,
+`keeperCheckTimeout`); gateway connect 60s + heartbeat 25s
+(`internal/conn/gateway.go`, `ConnectTimeout`/`Heartbeat`);
+Telegram notice send bound 30s
+(`internal/commands/keeper.go`, `telegramNotifier.Notify`);
+single-flight owner freshness 120s + heartbeat 60s
+(`internal/keeper/run.go`, `OwnerStaleAfter`/
+`OwnerHeartbeatInterval`); login-pause staleness 70m
+(`internal/keeper/state.go`, `LoginFlagStaleAfter`); adaptive
+keep-alive clamp 1h–7d (`internal/keeper/backoff.go`,
+`NextDelayAfter`, the G1-approved rule); dialer transport
+timeouts 90s idle / 10s TLS handshake / 1s expect-continue
+(`internal/outbound/dialer.go`).
+
+**S2 proxy guard.** Before dialling, the loopback proxy
+refuses (fixed 403, no dial spent) any target that is a
+literal IP in a loopback, link-local, private (RFC 1918 /
+ULA), CGNAT (`100.64.0.0/10`), unspecified, or multicast
+range, or any host not on `proxy_allowed_hosts`. The two
+rules are conjunctive: an allowlist entry naming a
+refused-range address does NOT permit it — list the
+hostname instead. The range rule recognises canonical IP
+literals, trailing dots in any number, and inet_aton-style
+shorthand spellings (1–4 dot-separated parts, each decimal,
+octal with a leading 0, or hexadecimal with a 0x prefix,
+e.g. `127.1`, `0x7f.0.0.1`, `0177.0.0.1`, `2130706433`); a
+spelling outside that set is matched exactly as a hostname.
+Forms with digits invalid for their implied base (e.g. an
+`08` octal part) are not recognised as IPs; whether any
+egress resolver interprets such a form as an address is
+unmeasured. Hostnames are never resolved locally to
+apply the range check (resolution happens at the egress,
+where a listed hostname may legitimately resolve to a
+private address, e.g. through a VPN outbound; only literal
+IP targets are range-refused, so egress-reachable private
+targets behind a listed hostname keep working, and an
+operator who needs a literal private target dialled must
+reach it through a hostname on the allowlist). Matching is
+exact on the lowercased host, trailing dots ignored, no
+wildcards, no suffix matching, ports ignored. The default
+allowlist is the two Muse hosts the login flow is known
+from code to need: `auth.muse.ai` (the default login URL
+host) and `muse.ai` (the app origin / gateway API host).
+Whether the live login page needs any further host through
+the proxy is unmeasured until the outside-sandbox
+observation gate; extend the list in config if it does. A
+refusal logs the refused host ONLY (no URL, query, port,
+or headers), at the single caller that wires the proxy, via
+the castctl logger. A malformed CONNECT authority (query,
+fragment, path, or userinfo in the host) is rejected with
+400 before the guard, so it is never logged.
+
+**Follow-ups (not implemented in this change).** Attach-success
+path (needs a debug-port Chrome harness; `internal/keeper`,
+re-login driver); log-line sentinel coverage for credential
+values (needs a test-only log-capture harness; see
+`docs/security.md`); screencast-path cancel hang (same wedge
+shape as the bounded driver cancel, in `internal/keeper/launch.go`
+`launchRunner.Run` — needs its own fix); JS hit-computation
+precedence in the contract matcher (unpinned; `internal/keeper/contract.go`);
+web UI `SECRET_KEYS`/`username` mock drift (the `webui/dev-mocks`
+mirror lacks `username`; owned by the web UI session).
+
+Behaviour — the self-healing loop, in order:
+
+- **Keep-alive.** Each tick runs the cheap chain only
   (GET `/api/session` → POST `/api/auth/check`, no hatch/token,
   no WebSocket, no chat) through the profile's own outbound,
-  with the profile identity. An AuthError means expired: the
-  entry stops (sticky stopped state), is marked logged out,
-  and notifies once — never loop-retried. Transient errors
-  back off on a 5m/15m/45m ±20% ladder, max 3 retries per tick.
-- **Re-export.** On expiry, cookies are re-exported from the
-  configured browser over CDP (`Storage.getCookies` primary,
-  `Network.getCookies` fallback) and merged. Only `muse.ai`
-  and `auth.muse.ai` cookies are kept; everything else is
-  dropped (count only). A merged set is written only if it
-  contains a non-empty `hatch_sess` and the earliest
+  with the profile identity. Rotated Set-Cookie values are
+  persisted on every tick, for every cookies-file format: a
+  non-jar file is converted to jar form on write when a
+  rotation must be persisted (atomic write, mode 0600, under
+  the per-file lock); a non-jar file with no rotation is left
+  byte-identical. An AuthError means expired: the entry goes
+  to re-export / re-login (below) and stops only when both
+  fail. Transient errors back off on the configured
+  `retry_backoff` ladder, ±20% jitter.
+- **Auto-wake.** When the cheap chain succeeds (HTTP auth
+  alive, access token present, `vm_id` present) but the
+  gateway Noise handshake fails, the keeper wakes the VM
+  (POST `/api/hatch/vm/wake`) and re-probes the gateway, up
+  to `wake_attempts` times. Wake success is judged by a
+  subsequent successful gateway probe, never by the wake
+  HTTP status. Wake exhaustion is transient: no stop, no
+  alert; rotations observed on the cheap chain are still
+  persisted. The wake leg never runs when HTTPS auth failed,
+  and a missing `vm_id` is never reclassified — it stays a
+  transient gateway error.
+- **Auto re-login.** When the session is dead and a
+  `credentials` tag is configured, the keeper re-logs in
+  headlessly (builds with `-tags with_chromedp` only):
+  attach to the entry's browser first when one is
+  configured, otherwise launch headless Chrome whose egress
+  goes through the profile's outbound via the loopback proxy
+  (S2 inbound plumbing — AGENTS.md rule 2 holds for the
+  browser too). The login page must match the versioned
+  contract (to be recorded by read-only observation, see
+  `docs/providers.md` — the embedded contract is currently
+  UNOBSERVED: the driver refuses to run, `auth status`
+  reports `headless_available: false` with reason
+  `no_contract`, and no live re-login may be attempted until
+  a read-only observation from outside the sandbox transport
+  intercept records it); on any contract mismatch, captcha,
+  2FA, checkpoint, or lock signal, the driver stops
+  immediately, never bypasses, and the entry stops with one
+  alert for the incident. Harvested cookies are written
+  through the locked atomic path and the session state is
+  reset, then the cheap chain re-checks once. Builds without
+  `with_chromedp` cannot re-login: the entry stops with the
+  `blocked` notice kind. **Release builds do not include
+  `with_chromedp`** (see `.github/workflows/release.yaml`):
+  a release binary reports headless re-login as unavailable
+  and the keeper falls back to alert-only.
+- **Alert.** One Telegram notice per (profile, incident
+  kind), fixed text, profile name only. Routine successes —
+  including a first-tick self-healing recovery — are silent;
+  the `re-exported` notice fires only when a previous tick
+  was unhealthy. Incident kinds are the closed set
+  `logged_out`, `relogin_failed`, `captcha`, `two_factor`,
+  `checkpoint`, `locked`, `blocked`, `re-exported`.
+- **Re-export.** On expiry, when a browser is configured,
+  cookies are re-exported from it over CDP
+  (`Storage.getCookies` primary, `Network.getCookies`
+  fallback) and merged, before re-login is attempted. Only
+  `muse.ai` and `auth.muse.ai` cookies are kept; everything
+  else is dropped (count only). A merged set is written only
+  if it contains a non-empty `hatch_sess` and the earliest
   FILTERED-domain expiry is not already past: an expired
   cookie from an unrelated domain is preserved verbatim by
   the merge and never vetoes a valid re-export. CDP
   snapshots are faithful: an exported cookie is recorded
   exactly as the browser holds it (an empty value with a
   future expiry is written verbatim), and a filtered cookie
-  absent from the snapshot is dropped. Builds without
-  `-tags with_chromedp` detect and report expiry but cannot
-  re-export: the entry stops with the typed unavailable
-  outcome instead.
+  absent from the snapshot is dropped. An invalid export
+  falls through to re-login instead of stopping immediately;
+  an unreachable browser with no re-login configured records
+  an `export_failed` outcome and keeps ticking (transient: no
+  stop, no alert; the next tick retries).
 - **Cookie save.** Netscape jar only (7 columns, LF, trailing
   newline, deterministic sort). Set-Cookie updates merge into
-  a stored jar; a stored non-jar file is left untouched by
-  Set-Cookie capture (the tick still runs, state records the
-  observed expiry), while a CDP export REPLACES a non-jar file
+  a stored jar, and into a non-jar file by converting it to
+  jar form when a rotation is to be persisted (see
+  keep-alive above); a CDP export REPLACES a non-jar file
   with the validated export (dropped count recorded). The
   merge key ignores the leading dot on domains: a host-only
   stored entry and a Domain-scoped update are the same cookie
@@ -469,6 +622,24 @@ Behaviour:
   accepts 7 or more — the divergence is intentional (the
   keeper rewrites the file and must not silently drop extra
   columns) and is bridged by the state-only reset path.
+- **Embedded keeper.** `telegram run` embeds the keeper:
+  entries tick in the bot process under the shared shutdown
+  context, guarded by the same single-flight owner files as
+  `keeper run` — an entry already owned by a standalone
+  `keeper run` is skipped with a warning, never stolen.
+  An absent `keeper` block is a no-op; a load failure is
+  logged once and never fails the bot.
+- **`auth status`.** `castctl auth status [--profile NAME | --all]`
+  is state-only (no network): per profile it reports
+  `status` (`ok`/`expiring`/`expired`), the driving cookie
+  NAME only, `driving_expiry`, `last_checked_at`,
+  `keeper_stopped` + reason, `headless_available` + reason
+  (`no_keeper_entry` / `no_chromedp` / `no_credentials` /
+  available), `needs_action`, and `cookies_seen`. Exit 0 ok,
+  1 expiring, 2 config error, 3 expired; `--all` takes the
+  worst exit across profiles and derives status from
+  cookies-file expiry metadata when no keeper state exists.
+  A missing cookies file reports `expired`.
 - **State file.** Per profile, `session-state.json` (mode
   0600) next to — never inside — `config.json`, schema v1:
   `logged_out`, `keeper_stopped` + reason, `last_checked_at`,
@@ -520,10 +691,11 @@ Behaviour:
   outcome, the re-login path (`auth login` / `auth import`),
   and "No action was taken automatically." No secrets, no
   cookie names, no error text. At most one notice per
-  false→true logged-out transition; a failed send stays
-  pending for a later tick. Deduplication is at-least-once
-  across crashes: a crash between a successful send and the
-  marker-clear may re-send once. Targeting: the notice goes to the
+  (profile, incident kind) per episode; a failed send stays
+  pending for a later tick, and recovery clears the episode
+  so a new incident alerts again. Deduplication is
+  at-least-once across crashes: a crash between a successful
+  send and the marker-clear may re-send once. Targeting: the notice goes to the
   FIRST `allowed_user_ids` entry of the telegram block, on
   the assumption that a user id is a valid chat id for a 1:1
   bot chat. Delivery to that id is UNVERIFIED offline and is
@@ -545,9 +717,11 @@ Behaviour:
   `CASTCTL_EXPERIMENTAL_LOGIN=1`); without the flag it exits 2
   pointing at `auth import`. It attaches to the keeper entry's
   browser first; launching a castctl-owned Chrome is only the
-  fallback when no attachable browser exists, and at this
-  base the launch fails closed (no fail-closed routed inbound
-  exists yet) rather than launching a direct-egress browser.
+  fallback when no attachable browser exists, and the
+  screencast launch still fails closed (its runner passes no
+  routed inbound — the S2 inbound plumbing exists for the
+  keeper's headless re-login only) rather than launching a
+  direct-egress browser.
   The human completes the login; captcha/2FA are never
   auto-solved. Honesty note on the attach path: castctl's own
   code sends no Runtime/JS calls and the browser-level export
@@ -561,6 +735,74 @@ Behaviour:
   wire-recording test) — the CDP allowlist discipline covers
   castctl's own calls, not the library bootstrap. See
   `castctl auth login --help`.
+
+## The `credentials` section
+
+The optional top-level `credentials` block stores login
+credentials for the keeper's automatic headless re-login. It
+is sing-box style: a LIST of entries, each linked to exactly
+one profile. The block accepts exactly these four keys per
+entry (unknown keys are rejected):
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `tag` | string | — (required) | Entry tag, unique across entries. Tags are exact (same rules as keeper tags: no surrounding whitespace, no `/`, `\`, control characters, or `.`/`..`). |
+| `profile` | string | — (required) | Tag of the profile these credentials log in. Must name a profile in `profiles`; one entry per profile — a second entry for the same profile is a config error (exit 2). |
+| `username` | string | — (required) | Login username (email). Write-only: never printed, logged, or returned by any API; redacted as `<redacted>` in every redacted view. |
+| `password` | string | — (required) | Login password. Same write-only treatment as `username`. Stored reversibly (form submission needs the plaintext) — never hashed, never taken from env/argv. Castctl itself never writes the values to a separate file, but a headless re-login types them into a browser: see the browser-retention note in [Security](security.md). |
+
+Rules:
+
+- A keeper entry references credentials by tag
+  (`credentials` key); the referenced entry must exist and
+  must name the keeper entry's own profile — a dangling tag
+  or a cross-profile tag is a config error (exit 2).
+- A file edit that removes or rotates a credential entry is
+  authoritative on the next re-login attempt (the keeper
+  re-reads `config.json` from disk each time a re-login is
+  attempted). The re-read conflates a transiently
+  unreadable or broken config with a removal: if
+  `config.json` is mid-edit and unparseable at the exact
+  moment a re-login is attempted, the entry sticky-stops
+  (blocked) exactly as if the credential had been removed,
+  and needs manual recovery — the trade-off for never
+  serving a stale credential (see [Security](security.md)).
+- The config file is saved mode 0600 by the guarded atomic
+  save (save-side enforcement: loading does not refuse a
+  world-readable file); the guarded atomic save
+  applies. **No `.bak`/backup of `config.json` is ever made
+  for credentials** (a backup would be a second copy of
+  plaintext secrets): the save path writes the new file
+  atomically without retaining the previous bytes.
+- Credentials are readable only through the keeper-internal
+  accessor (`CredentialForProfile`); values live in unexported
+  fields on the config entries, and the only value-carrying
+  accessor returns the keeper-internal `LoginCredential`
+  value (in memory only, never marshalled, logged, or handed
+  to a plugin), so no plugin API can serialise one. They are never exposed to plugins, never
+  logged, and never appear in `auth status`, keeper state,
+  audit records, or Telegram notices (profile name only).
+- The web UI never edits this block: it round-trips
+  untouched through generic-document saves, and a
+  `<redacted>` sentinel at a `username`/`password` position
+  is a secret position that a save must never persist (the
+  same R8 assertion as the webui token). The PR #29
+  file-edit-removal architecture limit (a token removed by a
+  file edit, followed by an unrelated API save, could in
+  principle restore it) does **not** apply here: there is no
+  live in-memory comparator for credentials, and saves read
+  the file on disk. A file edit that removes or rotates a
+  credential entry is authoritative on the next re-login
+  attempt: the keeper re-reads `config.json` from disk each
+  time a re-login is attempted, so a running `keeper run` /
+  `telegram run` picks the edit up without a restart. (The
+  driver wiring itself — which entries get a driver — is
+  fixed when the process starts; only the credential values
+  are re-read. Removing a credential does not invalidate
+  cookies already harvested.)
+- A keeper entry with no `credentials` reference never
+  re-logs in: on expiry it stops and alerts (the
+  human-recovery path via `auth login` / `auth import`).
 
 ## The `webui` section
 

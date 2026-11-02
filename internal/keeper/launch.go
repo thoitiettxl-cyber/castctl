@@ -26,20 +26,16 @@ import (
 // Launch fallback (with_chromedp only): a castctl-owned Chrome
 // for screencast login when no attachable browser exists.
 //
-// FAIL-CLOSED VERDICT (verified at base 6d3baac): the
-// minimal-router plumbing the design's S2 gate requires does
-// not exist in this tree — internal/outbound/router_stub.go
-// returns errNoRouter and no mixed-inbound construction
-// exists in production code. A castctl-launched browser
-// therefore CANNOT be routed through the profile outbound
-// today, and launching one with direct egress would violate
-// the per-profile routing invariant. So the launch path
-// refuses BEFORE spawning anything unless an InboundBuilder
-// is supplied (none exists at this base; the command layer
-// passes nil). The code below (flag list, persistent dir,
-// detection order) exists behind that check so the S2 work
-// plugs in without restructuring; live launch correctness
-// remains an S2 gate and is NOT claimed here.
+// The S2 inbound plumbing (internal/outbound's loopback proxy,
+// supplied by the command layer as an InboundBuilder) exists
+// for routing a launched browser's egress through the
+// profile's outbound — but it is supplied ONLY to the
+// headless re-login driver (launchHeadlessContext in
+// relogin_chromedp.go). This launch runner receives whatever
+// inbound its caller passes: the screencast path
+// (internal/commands/authlogin.go) still passes nil today,
+// so it still fails closed BEFORE spawning anything. A nil
+// inbound here always fails closed, whatever the caller.
 
 type launchRunner struct {
 	baseDir     string
@@ -123,10 +119,14 @@ func resolveBrowserPath(flagPath string) string {
 }
 
 // browserProfileDir is the persistent per-profile user-data
-// dir (0700, never auto-deleted): the launched browser's
-// state survives across logins, like a real profile. For the
-// default profile it sits in the base dir; named profiles
-// under profiles/<name>/.
+// dir (0700): the launched browser's state survives across
+// logins, like a real profile. It persists by design and is
+// never rotated; a FAILED launch or observation attempts to
+// remove a dir that launch created (best effort — a
+// lingering Chrome child can recreate lock/empty files, see
+// the headless driver), and the operator removes it by
+// deleting the directory. For the default profile it sits
+// in the base dir; named profiles under profiles/<name>/.
 func browserProfileDir(baseDir string, prof *profile.Profile) (string, error) {
 	paths, err := profile.ProfilePaths(baseDir, prof.Name)
 	if err != nil {

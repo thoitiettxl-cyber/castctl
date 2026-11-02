@@ -213,6 +213,17 @@ func TestFindSentinelAtSecretPosition(t *testing.T) {
 	}
 }
 
+// TestFindSentinelAtCredentialPosition pins the G2 rule: a
+// sentinel at a credentials username/password position is a
+// secret position (R8), never a literal the save may persist.
+func TestFindSentinelAtCredentialPosition(t *testing.T) {
+	doc := mustDoc(t, `{"credentials":[{"tag":"c1","profile":"muse01","username":"<redacted>","password":"<redacted>"}]}`)
+	path := findSentinelAtSecretPosition(doc, false, "")
+	if path != "credentials[0].username" && path != "credentials[0].password" {
+		t.Fatalf("path = %q, want a credentials username/password position", path)
+	}
+}
+
 func TestCheckWhitespaceKeys(t *testing.T) {
 	doc := mustDoc(t, `{"profiles":{"p":{"fingerprint":"chrome"}}}`)
 	if err := checkWhitespaceKeys(doc, ""); err != nil {
@@ -248,5 +259,61 @@ func TestMergeRejectsMarkerContainingUserinfoSpan(t *testing.T) {
 		if !errors.As(err, &rej) {
 			t.Fatalf("err = %v, want sentinelRejection", err)
 		}
+	}
+}
+
+// TestMergeCredentialsRoundTrip (R-4) pins the end-to-end
+// merge for a config with a credentials entry: a
+// GET-then-PUT round-trip of the redacted view must succeed
+// with both values preserved, because `username` is both an
+// identity key and (per G2) a secret key. Before the fix,
+// the identity guard compared the submitted element still
+// holding the sentinel and rejected every untouched
+// round-trip.
+func TestMergeCredentialsRoundTrip(t *testing.T) {
+	out, err := mergedJSON(t,
+		`{"profiles":{"muse01":{}},"credentials":[{"tag":"c1","profile":"muse01","username":"FAKE-USER-1","password":"FAKE-SECRET-1"}]}`,
+		`{"profiles":{"muse01":{}},"credentials":[{"tag":"c1","profile":"muse01","username":"<redacted>","password":"<redacted>"}]}`)
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if !strings.Contains(out, "FAKE-USER-1") || !strings.Contains(out, "FAKE-SECRET-1") {
+		t.Fatalf("credential values not preserved: %s", out)
+	}
+	if strings.Contains(out, "<redacted>") {
+		t.Fatalf("sentinel persisted: %s", out)
+	}
+}
+
+// TestMergeOutboundUsernameRoundTrip (R-4 corollary) pins
+// the same round-trip for an outbound entry carrying a
+// username: the username identity key is newly secret, so
+// the same guard failure applied there.
+func TestMergeOutboundUsernameRoundTrip(t *testing.T) {
+	out, err := mergedJSON(t,
+		`{"outbounds":[{"tag":"p","type":"http","server":"proxy.example.com","server_port":8080,"username":"FAKE-USER-1","password":"FAKE-SECRET-1"}]}`,
+		`{"outbounds":[{"tag":"p","type":"http","server":"proxy.example.com","server_port":8080,"username":"<redacted>","password":"<redacted>"}]}`)
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if !strings.Contains(out, "FAKE-USER-1") || !strings.Contains(out, "FAKE-SECRET-1") {
+		t.Fatalf("outbound values not preserved: %s", out)
+	}
+	if strings.Contains(out, "<redacted>") {
+		t.Fatalf("sentinel persisted: %s", out)
+	}
+}
+
+// TestMergeCredentialsReorderRejects pins that the R-4 fix
+// did not weaken the identity guard: swapping two credential
+// entries (sentinels shifting onto different elements) must
+// still reject rather than restore the wrong secret.
+func TestMergeCredentialsReorderRejects(t *testing.T) {
+	_, err := mergedJSON(t,
+		`{"credentials":[{"tag":"c1","profile":"muse01","username":"FAKE-USER-1","password":"FAKE-SECRET-1"},{"tag":"c2","profile":"muse02","username":"FAKE-USER-2","password":"FAKE-SECRET-2"}]}`,
+		`{"credentials":[{"tag":"c2","profile":"muse02","username":"<redacted>","password":"<redacted>"},{"tag":"c1","profile":"muse01","username":"<redacted>","password":"<redacted>"}]}`)
+	var rej *sentinelRejection
+	if !errors.As(err, &rej) {
+		t.Fatalf("err = %v, want sentinelRejection (reorder must not restore the wrong secret)", err)
 	}
 }

@@ -166,6 +166,26 @@ type Exporter interface {
 // Exporter and Notifier may be nil (no export attempt, no
 // notices). Clock nil means RealClock.
 //
+// GatewayProbe, when non-nil, is the Phase-4-equivalent
+// gateway probe (auth chain + WebSocket + Noise handshake,
+// no chat, gateway closed immediately): it runs after a
+// successful cheap chain, and a handshake failure triggers
+// the auto-wake leg. A nil probe means the tick never wakes
+// (the cheap chain alone decides).
+//
+// Wake, when non-nil, performs ONE VM wake request through
+// the profile's outbound. The tick calls it up to the
+// entry's wake_attempts per incident and judges success by
+// a subsequent GatewayProbe, never by the wake HTTP status.
+// A nil Wake means a failed probe is transient without
+// waking.
+//
+// Relogin, when non-nil, is the headless re-login driver;
+// CredentialProvider, when non-nil, supplies the stored
+// login credential for this entry's profile (only called
+// when a re-login is actually attempted). Both nil means no
+// auto re-login: an AuthError stops the entry and alerts.
+//
 // BeforeStateSave is a TEST SEAM, nil by default: when set, it
 // is invoked synchronously by the state-save path after the
 // state directory is re-ensured and before the state file is
@@ -173,16 +193,20 @@ type Exporter interface {
 // (e.g. remove the directory). Production code must leave it
 // nil; when nil it changes nothing.
 type TickDeps struct {
-	Clock           Clock
-	Entry           *profile.KeeperEntry
-	BaseDir         string
-	Profile         *profile.Profile
-	Checker         Checker
-	Exporter        Exporter
-	Notifier        Notifier
-	Jitter          func() float64
-	LockTimeout     time.Duration
-	BeforeStateSave func()
+	Clock              Clock
+	Entry              *profile.KeeperEntry
+	BaseDir            string
+	Profile            *profile.Profile
+	Checker            Checker
+	Exporter           Exporter
+	Notifier           Notifier
+	GatewayProbe       func(ctx context.Context) error
+	Wake               func(ctx context.Context) error
+	Relogin            ReloginDriver
+	CredentialProvider func() (profile.LoginCredential, bool)
+	Jitter             func() float64
+	LockTimeout        time.Duration
+	BeforeStateSave    func()
 }
 
 // TickResult is one tick's observable outcome. Outcome uses the
@@ -441,9 +465,10 @@ func classifyCookiesFile(raw []byte, path string) ([]StoredCookie, bool, error) 
 	}
 	// Rebuild stored cookies from the header for the check's
 	// Cookie header construction; domain/path are unknown in
-	// this form, so they are placeholders that never reach a
-	// write (non-jar files are never rewritten from Set-Cookie
-	// captures).
+	// this form, so they are placeholders. On a rotation
+	// write, a non-jar file is converted to jar form (G5)
+	// and these placeholders become the jar rows; with no
+	// rotation the file is left byte-identical.
 	var cookies []StoredCookie
 	for _, pair := range strings.Split(header, ";") {
 		pair = strings.TrimSpace(pair)
@@ -482,8 +507,9 @@ func (ls *lockedStore) saveJar(data []byte) (bool, error) {
 //     an error are still persisted (per-response rule).
 //  3. Locked merge + validate + write + state save. CDP
 //     exports replace the filtered set with the hatch_sess
-//     gate; Set-Cookie captures merge into jar files only and
-//     skip the write for non-jar files (freeze (a)).
+//     gate; Set-Cookie captures merge into jar files, and
+//     into non-jar files by converting them to jar form
+//     when a rotation is to be persisted (G5).
 //  4. Notices outside the lock: warn-once on the false->true
 //     logged_out transition, re-exported on recovery.
 func Tick(ctx context.Context, deps TickDeps) TickResult {
@@ -555,10 +581,7 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 			// pending for a later tick.
 			if err := deps.Notifier.Notify(ctx, kind, deps.Profile.Name); err == nil {
 				if ls2, err := store.lock(); err == nil {
-					ls2.state.WarnPending = false
-					ls2.state.WarnSent = true
-					warned := clock.Now()
-					ls2.state.WarnedAt = &warned
+					ls2.state.MarkWarnSent(kind, clock.Now())
 					// Best-effort marker clear: a failed
 					// save leaves the marker pending for
 					// a later tick; it cannot change the
@@ -578,7 +601,9 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 	header := CookieHeader(snapshotCookies, now)
 
 	// Phase 2: cheap chain with backoff on transient errors.
-	backoff := NewBackoff(clock, deps.Jitter)
+	// The ladder is the entry's configured retry_backoff
+	// (default 5m/15m/45m); the tick never hardcodes it.
+	backoff := NewBackoffWithLadder(clock, deps.Jitter, deps.Entry.EffectiveRetryBackoff())
 	var updates []CookieUpdate
 	var skipped int
 	var checkErr error
@@ -613,7 +638,32 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 	// skipped counts unparseable Set-Cookie values; it is a
 	// diagnostic count only and never carries values.
 
-	// Phase 2b: AuthError -> export-or-stop.
+	// Phase 2a: auto-wake. The cheap chain succeeded (HTTPS
+	// auth is fine) but the gateway handshake may still
+	// fail — the VM is asleep. Probe, wake, re-probe, up to
+	// the entry's wake_attempts per incident. An AuthError
+	// from the probe/wake means auth died mid-flight: fall
+	// into the Phase 2b export/re-login/stop path with it.
+	// Wake exhaustion is transient (no alert, no stop): the
+	// VM may simply be slow, and the next tick retries.
+	// Wake never runs when the cheap chain failed, and a
+	// missing vm_id is never reclassified here: the probe
+	// itself returns the GatewayError for it, which is
+	// transient, not auth.
+	if checkErr == nil && deps.GatewayProbe != nil && deps.Entry.EffectiveWakeOnGatewayFailure() {
+		if werr := attemptWakeGateway(ctx, deps); werr != nil {
+			var authErr *conn.AuthError
+			if errors.As(werr, &authErr) {
+				checkErr = werr
+			} else if ctx.Err() != nil {
+				return fail(OutcomeError, "gateway", ctx.Err())
+			} else {
+				return recordGatewayDown(clock, store, base, updates, jarForm, fileMissing, werr)
+			}
+		}
+	}
+
+	// Phase 2b: AuthError -> export/re-login/stop.
 	recovered := false
 	var exportErr error
 	var exported []StoredCookie
@@ -623,6 +673,8 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 		if !errors.As(checkErr, &authErr) {
 			return fail(OutcomeTransientError, "session", checkErr)
 		}
+		// 1) CDP re-export from the attached browser, when
+		// the entry configures one (Exporter non-nil).
 		if deps.Exporter != nil {
 			exported, exportDropped, exportErr = runExport(ctx, deps.Exporter)
 			switch {
@@ -631,7 +683,56 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 				// once with the new cookies.
 				merged, _ := ReplaceWithExport(snapshotCookies, exported)
 				if !validateExportedSet(merged, now) {
-					return stopEntry(clock, store, base, updates, jarForm, fileMissing, StoppedAuthError, checkErr)
+					// Invalid export: fall through to
+					// re-login/stop below instead of
+					// stopping here — the export may
+					// have caught a logged-out browser.
+					checkErr = conn.NewAuthError("exported set failed validation")
+				} else {
+					header2 := CookieHeader(merged, now)
+					updates2, _, err2 := deps.Checker.Check(ctx, header2)
+					updates = append(updates, updates2...)
+					if err2 == nil {
+						recovered = true
+						checkErr = nil
+					} else {
+						var authErr2 *conn.AuthError
+						if !errors.As(err2, &authErr2) {
+							return recordTransient(clock, store, base, err2, "auth_check")
+						}
+						checkErr = err2
+					}
+				}
+			case errors.Is(exportErr, ErrReexportUnavailable):
+				// Tag-off build: no recovery possible
+				// from the browser; fall through to
+				// re-login/stop below.
+			default:
+				// CDP unreachable etc.: if a headless
+				// re-login is configured, try it (the
+				// launch path does not need the attached
+				// browser); otherwise transient, do not
+				// stop.
+				if deps.Relogin == nil {
+					return recordExportFailed(clock, store, base, exportErr)
+				}
+			}
+		}
+		// 2) Headless re-login, when configured. Exactly
+		// one driver invocation per tick (G1).
+		if checkErr != nil && deps.Relogin != nil {
+			relExported, relDropped, blocker, relErr := tryRelogin(ctx, deps, snapshotCookies, now)
+			switch {
+			case blocker != nil:
+				// Blocker: stop immediately, alert
+				// once with the blocker kind. Never
+				// retry a blocker.
+				return stopEntry(clock, store, base, updates, jarForm, fileMissing, StoppedAuthError, blocker.Kind, checkErr)
+			case relErr == nil:
+				exported, exportDropped = relExported, relDropped
+				merged, _ := ReplaceWithExport(snapshotCookies, exported)
+				if !validateExportedSet(merged, now) {
+					return stopEntry(clock, store, base, updates, jarForm, fileMissing, StoppedAuthError, NoticeFailed, checkErr)
 				}
 				header2 := CookieHeader(merged, now)
 				updates2, _, err2 := deps.Checker.Check(ctx, header2)
@@ -646,16 +747,27 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 					}
 					checkErr = err2
 				}
-			case errors.Is(exportErr, ErrReexportUnavailable):
-				// Tag-off build: no recovery possible.
-				return stopEntry(clock, store, base, updates, jarForm, fileMissing, StoppedAuthError, checkErr)
+			case errors.Is(relErr, ErrReloginUnavailable):
+				return stopEntry(clock, store, base, updates, jarForm, fileMissing, StoppedAuthError, NoticeBlocked, checkErr)
 			default:
-				// CDP unreachable etc.: transient, do not stop.
-				return recordExportFailed(clock, store, base, exportErr)
+				// Attempts exhausted without a proven
+				// blocker: stop and alert once with the
+				// relogin_failed kind.
+				return stopEntry(clock, store, base, updates, jarForm, fileMissing, StoppedAuthError, NoticeReloginFailed, checkErr)
 			}
 		}
 		if checkErr != nil {
-			return stopEntry(clock, store, base, updates, jarForm, fileMissing, stopReason(fileMissing), checkErr)
+			// No re-login configured (or no exporter and
+			// no driver): stop. When credentials are
+			// configured but this build has no driver,
+			// the stop kind is blocked, not logged_out:
+			// the user must know automation could not
+			// even attempt the re-login.
+			kind := NoticeKind("")
+			if deps.Relogin == nil && deps.Entry != nil && deps.Entry.Credentials != "" {
+				kind = NoticeBlocked
+			}
+			return stopEntry(clock, store, base, updates, jarForm, fileMissing, stopReason(fileMissing), kind, checkErr)
 		}
 	}
 
@@ -718,14 +830,37 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 			written = data
 		}
 	} else {
-		// Non-jar file: Set-Cookie capture SKIPS the rewrite
-		// (freeze (a)); the tick still ran and the state
-		// still records the observed expiry.
+		// Non-jar file: when the cheap chain rotated a
+		// cookie, persist the rotation by converting the
+		// file to jar form through the locked atomic
+		// writer (G5). With no rotation there is nothing
+		// to persist and the file keeps its form; the
+		// tick still ran and the state still records the
+		// observed expiry.
 		merged = ApplyUpdates(ls.cookies, updates)
+		if len(updates) > 0 {
+			shouldWrite = !ls.fileMissing || len(merged) > 0
+			data, err := SerializeJar(merged)
+			if err == nil && shouldWrite {
+				wrote, err = ls.saveJar(data)
+				if err != nil {
+					return failSave("save", err, false)
+				}
+				written = data
+			}
+			// A serialisation failure degrades to no-write:
+			// the file keeps its form, the state still
+			// records the observed expiry, and the next
+			// tick retries. Failing the whole tick over
+			// an unserialisable value would stall
+			// keep-alive for every profile sharing the
+			// form.
+		}
 	}
 	st.LoggedOut = false
 	st.KeeperStopped = false
 	st.KeeperStoppedReason = ""
+	st.ClearWarnEpisode()
 	st.LastCheckedAt = &now2
 	st.LastTickOutcome = OutcomeOK
 	st.LastTickStage = ""
@@ -786,6 +921,137 @@ func validateExportedSet(merged []StoredCookie, now time.Time) bool {
 		return false
 	}
 	return true
+}
+
+// attemptWakeGateway probes the gateway and, on handshake
+// failure, wakes the VM up to the entry's wake_attempts and
+// re-probes after each wake. It returns nil when the gateway
+// is reachable. An AuthError means auth died during the
+// probe/wake (the caller falls into the export/re-login/stop
+// path). Any other error means the gateway stayed down after
+// all wake attempts: transient, no alert. A nil Wake means
+// the first probe failure is returned unwoken. The probe
+// itself classifies a missing vm_id as a GatewayError, never
+// an AuthError, so it is never reclassified here.
+func attemptWakeGateway(ctx context.Context, deps TickDeps) error {
+	var lastErr error
+	if err := deps.GatewayProbe(ctx); err == nil {
+		return nil
+	} else {
+		lastErr = err
+	}
+	var authErr *conn.AuthError
+	if errors.As(lastErr, &authErr) {
+		return lastErr
+	}
+	attempts := deps.Entry.EffectiveWakeAttempts()
+	for i := 0; i < attempts; i++ {
+		if deps.Wake == nil {
+			return lastErr
+		}
+		if werr := deps.Wake(ctx); werr != nil {
+			if errors.As(werr, &authErr) {
+				return werr
+			}
+			// A failed wake request still counts as an
+			// attempt: re-probe below; the probe decides.
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if perr := deps.GatewayProbe(ctx); perr == nil {
+			return nil
+		} else {
+			lastErr = perr
+		}
+		if errors.As(lastErr, &authErr) {
+			return lastErr
+		}
+	}
+	return lastErr
+}
+
+// recordGatewayDown persists a wake-exhausted transient
+// outcome: the cheap chain succeeded, so its Set-Cookie
+// updates ARE persisted (they come from fully successful
+// steps, unlike the partial captures recordTransient
+// discards) — through the same convert-to-jar write as the
+// normal path — but the entry does not stop and no notice
+// is sent. The next tick retries.
+func recordGatewayDown(clock Clock, store *Store, base time.Duration, updates []CookieUpdate, jarForm bool, fileMissing bool, err error) TickResult {
+	ls, lerr := store.lock()
+	if lerr != nil {
+		if errors.Is(lerr, profile.ErrCookiesLockTimeout) {
+			return TickResult{Outcome: OutcomeTransientError, Stage: "gateway", Err: err, NextDelay: base}
+		}
+		return TickResult{Outcome: OutcomeError, Stage: "save", Err: errors.Join(lerr, err), NextDelay: base}
+	}
+	defer ls.unlock()
+	st := ls.state
+	now2 := clock.Now()
+	merged := ls.cookies
+	wrote := false
+	if len(updates) > 0 {
+		merged = ApplyUpdates(ls.cookies, updates)
+		if !ls.fileMissing || len(merged) > 0 {
+			data, serr := SerializeJar(merged)
+			if serr == nil {
+				wrote, serr = ls.saveJar(data)
+				if serr != nil {
+					return TickResult{Outcome: OutcomeError, Stage: "save", Err: errors.Join(serr, err), NextDelay: base, StateCorrupt: ls.stateCorrupt}
+				}
+			}
+		}
+	}
+	st.LastCheckedAt = &now2
+	st.LastTickOutcome = OutcomeTransientError
+	st.LastTickStage = "gateway"
+	st.RefreshCookieRecords(merged, now2)
+	next := now2.Add(base)
+	st.NextCheckAt = &next
+	if serr := store.saveState(st); serr != nil {
+		return TickResult{Outcome: OutcomeError, Stage: "save", Err: errors.Join(serr, err), NextDelay: base, StateCorrupt: ls.stateCorrupt, WroteCookies: wrote}
+	}
+	return TickResult{Outcome: OutcomeTransientError, Stage: "gateway", Err: err, NextDelay: base, StateCorrupt: ls.stateCorrupt, WroteCookies: wrote, CookiesSeen: len(merged)}
+}
+
+// tryRelogin runs one headless re-login attempt sequence: it
+// fetches the credential through the narrow provider (never
+// from an exported field), invokes the driver once, and
+// converts the harvest to merge form. A missing credential
+// provider or a missing credential is ErrReloginUnavailable
+// (the entry is misconfigured for re-login). A *ReloginBlocker
+// passes through untouched; any other driver error passes
+// through for the tick to stop with relogin_failed. The
+// fetched credential copy is cleared on return.
+func tryRelogin(ctx context.Context, deps TickDeps, snapshotCookies []StoredCookie, now time.Time) ([]StoredCookie, int, *ReloginBlocker, error) {
+	if deps.CredentialProvider == nil {
+		return nil, 0, nil, ErrReloginUnavailable
+	}
+	cred, ok := deps.CredentialProvider()
+	if !ok {
+		return nil, 0, nil, ErrReloginUnavailable
+	}
+	defer cred.Clear()
+	raw, err := deps.Relogin.Relogin(ctx, cred)
+	if err != nil {
+		var blocker *ReloginBlocker
+		if errors.As(err, &blocker) {
+			return nil, 0, blocker, nil
+		}
+		return nil, 0, nil, err
+	}
+	out := make([]StoredCookie, 0, len(raw))
+	dropped := 0
+	for _, c := range raw {
+		sc := FromExportedCookie(c)
+		if !InFilteredDomain(sc) {
+			dropped++
+			continue
+		}
+		out = append(out, sc)
+	}
+	return out, dropped, nil, nil
 }
 
 // runExport calls the exporter, filters to the Muse domains,
@@ -870,18 +1136,24 @@ func recordExportFailed(clock Clock, store *Store, base time.Duration, err error
 }
 
 // stopEntry persists the sticky stop: logged_out, stopped with
-// reason, warn-once marker on the false->true transition, and
-// the per-response updates merged for jar files (the server's
-// last word is still recorded). The notice itself is sent by
-// the caller after Tick returns — see NotifyStopped — because
-// a network send must never happen under the file lock.
+// reason, a per-(episode, kind) warn-once marker, and the
+// per-response updates merged for jar files (the server's
+// last word is still recorded) — and for non-jar files by
+// converting to jar form when a rotation is to be persisted
+// (G5). kind names the notice kind: "" derives it from the
+// reason as before (auth_error -> logged_out, anything else
+// -> failed); a caller-supplied kind must be in the closed
+// NoticeKind set or it is ignored in favour of the derived
+// kind. The notice itself is sent by the caller after Tick
+// returns — see NotifyStopped — because a network send must
+// never happen under the file lock.
 // Durability note (loop-2 red-team N3): if the stop-path lock
 // fails, the returned result still stops THIS run's goroutine
 // (in-memory), but no marker is persisted; the next run
 // re-ticks and re-stops. The marker's durability depends on
 // the lock like every other state write — no separate
 // mechanism is added for it.
-func stopEntry(clock Clock, store *Store, base time.Duration, updates []CookieUpdate, jarForm bool, fileMissing bool, reason string, cause error) TickResult {
+func stopEntry(clock Clock, store *Store, base time.Duration, updates []CookieUpdate, jarForm bool, fileMissing bool, reason string, kind NoticeKind, cause error) TickResult {
 	ls, lerr := store.lock()
 	if lerr != nil {
 		if errors.Is(lerr, profile.ErrCookiesLockTimeout) {
@@ -892,7 +1164,6 @@ func stopEntry(clock Clock, store *Store, base time.Duration, updates []CookieUp
 	defer ls.unlock()
 	st := ls.state
 	now2 := clock.Now()
-	wasLoggedOut := st.LoggedOut
 	merged := ls.cookies
 	wrote := false
 	if jarForm {
@@ -909,6 +1180,16 @@ func stopEntry(clock Clock, store *Store, base time.Duration, updates []CookieUp
 		}
 	} else {
 		merged = ApplyUpdates(ls.cookies, updates)
+		if len(updates) > 0 && (!fileMissing || len(merged) > 0) {
+			data, err := SerializeJar(merged)
+			if err == nil {
+				var serr error
+				wrote, serr = ls.saveJar(data)
+				if serr != nil {
+					return TickResult{Outcome: OutcomeError, Stage: "save", Stopped: true, Err: errors.Join(serr, cause), NextDelay: 0, StateCorrupt: ls.stateCorrupt}
+				}
+			}
+		}
 	}
 	st.LoggedOut = true
 	st.KeeperStopped = true
@@ -918,15 +1199,19 @@ func stopEntry(clock Clock, store *Store, base time.Duration, updates []CookieUp
 	st.LastTickStage = "session"
 	st.RefreshCookieRecords(merged, now2)
 	st.NextCheckAt = nil
-	if !wasLoggedOut {
-		st.WarnPending = true
-		st.WarnSent = false
+	if !ValidNoticeKind(kind) {
 		if reason == StoppedAuthError {
-			st.WarnKind = string(NoticeLoggedOut)
+			kind = NoticeLoggedOut
 		} else {
-			st.WarnKind = string(NoticeFailed)
+			kind = NoticeFailed
 		}
 	}
+	// Per-(episode, kind) dedup: a kind already alerted in
+	// this episode stays silent; a new kind goes pending.
+	// The legacy wasLoggedOut transition gate is subsumed:
+	// the episode map is cleared on recovery, so a fresh
+	// incident always alerts.
+	st.MarkWarnPending(kind, now2)
 	if serr := store.saveState(st); serr != nil {
 		return TickResult{Outcome: OutcomeError, Stage: "save", Stopped: true, Err: errors.Join(serr, cause), NextDelay: 0, StateCorrupt: ls.stateCorrupt, WroteCookies: wrote}
 	}
@@ -968,10 +1253,7 @@ func NotifyStopped(ctx context.Context, deps TickDeps, notifier Notifier) {
 		return
 	}
 	defer ls2.unlock()
-	ls2.state.WarnPending = false
-	ls2.state.WarnSent = true
-	warned := clock.Now()
-	ls2.state.WarnedAt = &warned
+	ls2.state.MarkWarnSent(kind, clock.Now())
 	// Best-effort marker clear (same disclosed exception as
 	// the Tick retry path): a failed save leaves the marker
 	// pending; it cannot change a notification outcome.
@@ -1001,9 +1283,7 @@ func ResetAfterLogin(baseDir string, prof *profile.Profile, clock Clock) error {
 	st.LoggedOut = false
 	st.KeeperStopped = false
 	st.KeeperStoppedReason = ""
-	st.WarnPending = false
-	st.WarnSent = false
-	st.WarnKind = ""
+	st.ClearWarnEpisode()
 	st.LoginActive = false
 	st.LoginSessionID = ""
 	st.LoginStartedAt = nil

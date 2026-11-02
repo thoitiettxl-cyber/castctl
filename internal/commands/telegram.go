@@ -267,6 +267,12 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 		logger:  logger,
 	}
 	fmt.Fprintf(env.stdout(), "telegram: polling for profile %q (%d allowed users); Ctrl-C to stop\n", tg.Profile, len(tg.AllowedUserIDs))
+	// Embedded keeper (G5): the keeper loop shares this
+	// process and its shutdown context. Entries already
+	// owned by a standalone `keeper run` are skipped, never
+	// stolen; a missing keeper block starts nothing.
+	releaseKeeper := startEmbeddedKeeper(ctx, env, g, logger)
+	defer releaseKeeper()
 	return bot.Start(ctx)
 }
 

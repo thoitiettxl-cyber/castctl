@@ -67,7 +67,7 @@ func init() {
 	registerFlags("wake", "wake", nil)
 }
 
-// cmdAuth dispatches auth subcommands: list, export, import, login.
+// cmdAuth dispatches auth subcommands: list, export, import, login, status, observe-login.
 func cmdAuth(ctx context.Context, env *Env, g *globalOpts, args []string) error {
 	if len(args) == 0 {
 		fmt.Fprintln(env.stderr(), "castctl: the following arguments are required: subcommand")
@@ -86,8 +86,12 @@ func cmdAuth(ctx context.Context, env *Env, g *globalOpts, args []string) error 
 		return cmdAuthImport(ctx, env, g, args[1:])
 	case "login":
 		return cmdAuthLogin(ctx, env, g, args[1:])
+	case "status":
+		return cmdAuthStatus(ctx, env, g, args[1:])
+	case "observe-login":
+		return cmdAuthObserveLogin(ctx, env, g, args[1:])
 	default:
-		fmt.Fprintf(env.stderr(), "castctl: argument subcommand: invalid choice: %q (choose from list, export, import, login)\n", args[0])
+		fmt.Fprintf(env.stderr(), "castctl: argument subcommand: invalid choice: %q (choose from list, export, import, login, status, observe-login)\n", args[0])
 		return errCode(2, nil)
 	}
 }

@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
 	"github.com/thoitiettxl-cyber/castctl/internal/keeper"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
 )
@@ -172,6 +174,92 @@ func parseKeeperSelection(args []string, prog, helpText string, env *Env) (keepe
 	return sel, nil
 }
 
+// startEmbeddedKeeper starts the keeper loop inside a
+// long-running process (telegram run), sharing its shutdown
+// context. It returns a release function the caller defers:
+// releasing the single-flight claims and closing the keeper
+// runtimes. When no keeper block exists it returns a no-op
+// release and starts nothing. A config load failure here
+// never fails the host process: the host's own config load
+// would already have failed first on a broken file, and a
+// keeper that cannot start must not take the bot down with
+// it — the failure is logged, once, and the bot runs
+// without an embedded keeper.
+//
+// Single-flight: an entry already owned by a standalone
+// `keeper run` is skipped (logged once), never stolen: the
+// owner file refuses a second runner for the same entry,
+// whichever process started first.
+func startEmbeddedKeeper(ctx context.Context, env *Env, g *globalOpts, logger interface {
+	Info(string, ...any)
+	Warn(string, ...any)
+}) func() {
+	noop := func() {}
+	loc, err := resolveConfig(g, env, false)
+	if err != nil {
+		logger.Warn("keeper: embedded keeper not started (config location)", "err", err.Error())
+		return noop
+	}
+	single, found, err := profile.LoadSingleConfig(loc.ConfigDir)
+	if err != nil || !found {
+		if err != nil {
+			logger.Warn("keeper: embedded keeper not started (config load)", "err", err.Error())
+		}
+		return noop
+	}
+	kcfg, err := profile.ResolveKeeper(single)
+	if err != nil {
+		logger.Warn("keeper: embedded keeper not started (keeper block)", "err", err.Error())
+		return noop
+	}
+	if kcfg == nil || len(kcfg.Entries) == 0 {
+		return noop
+	}
+	var releases []func()
+	var entries []*profile.KeeperEntry
+	for _, e := range kcfg.Entries {
+		paths, err := profile.ProfilePaths(loc.ConfigDir, e.Profile)
+		if err != nil {
+			logger.Warn("keeper: embedded keeper skipped entry (paths)", "tag", e.Tag, "err", err.Error())
+			continue
+		}
+		release, err := keeper.AcquireSingleFlight(paths.Dir, e.Tag, keeper.RealClock)
+		if err != nil {
+			logger.Warn("keeper: embedded keeper skipped entry (already running)", "tag", e.Tag, "err", err.Error())
+			continue
+		}
+		releases = append(releases, release)
+		entries = append(entries, e)
+	}
+	if len(entries) == 0 {
+		for _, r := range releases {
+			r()
+		}
+		return noop
+	}
+	rts := &keeperRuntimes{env: env, g: g, loc: loc, single: single, ctx: ctx}
+	onTick := func(entry *profile.KeeperEntry, res keeper.TickResult) {
+		logger.Info("keeper tick",
+			"tag", keeper.SanitizeDisplay(entry.Tag),
+			"profile", keeper.SanitizeDisplay(entry.Profile),
+			"outcome", res.Outcome,
+			"cookies_seen", res.CookiesSeen,
+			"wrote_cookies", res.WroteCookies,
+			"next_delay", res.NextDelay.String())
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		keeper.Run(ctx, entries, single.Profiles, loc.ConfigDir, rts.factory, onTick)
+	}()
+	return func() {
+		<-done
+		for _, r := range releases {
+			r()
+		}
+		rts.closeAll()
+	}
+}
 // keeperConfig loads the config location, the single config,
 // and the keeper block. A missing block is exit 2: the keeper
 // is off, and run/check/status have nothing to do.
@@ -255,20 +343,28 @@ func (k *keeperRuntimes) closeAll() {
 // keeperFactory builds one entry's TickDeps: a per-profile
 // runtime (the entry profile's outbound), the cheap-chain
 // checker through it, the CDP exporter for the entry's
-// browser URL, and the Telegram notifier when referenced.
+// browser URL (only when the entry configures a browser: a
+// browser-less entry is keep-alive-only and must never
+// attempt an export), the gateway probe + wake leg, the
+// headless re-login driver when the entry references
+// credentials, and the Telegram notifier when referenced.
 func (k *keeperRuntimes) factory(entry *profile.KeeperEntry, prof *profile.Profile) (keeper.TickDeps, error) {
 	rt, err := k.forProfile(prof.Name)
 	if err != nil {
 		return keeper.TickDeps{}, err
 	}
 	deps := keeper.TickDeps{
-		Clock:    keeper.RealClock,
-		Entry:    entry,
-		BaseDir:  k.loc.ConfigDir,
-		Profile:  prof,
-		Checker:  &keeper.GatewayChecker{Client: rt.HTTPClient()},
-		Exporter: keeper.NewCDPExporter(entry.Browser),
+		Clock:   keeper.RealClock,
+		Entry:   entry,
+		BaseDir: k.loc.ConfigDir,
+		Profile: prof,
+		Checker: &keeper.GatewayChecker{Client: rt.HTTPClient()},
 	}
+	if entry.Browser != "" {
+		deps.Exporter = keeper.NewCDPExporter(entry.Browser)
+	}
+	k.wireWake(entry, prof, rt, &deps)
+	k.wireRelogin(entry, prof, rt, &deps)
 	if entry.Notify == "telegram" {
 		n, err := k.notifier()
 		if err != nil {
@@ -281,6 +377,134 @@ func (k *keeperRuntimes) factory(entry *profile.KeeperEntry, prof *profile.Profi
 		}
 	}
 	return deps, nil
+}
+
+// wireWake installs the gateway probe and the wake leg: the
+// probe is the full connector path (auth chain + WebSocket
+// + Noise handshake, gateway closed immediately, no chat),
+// and Wake re-fetches the session/token from the cookies
+// file and issues one WakeVM request. A connector-config
+// failure leaves both nil: the tick then never wakes, and
+// the cheap chain alone decides (the same failure would
+// break chat too, so nothing is silently lost).
+func (k *keeperRuntimes) wireWake(entry *profile.KeeperEntry, prof *profile.Profile, rt *Runtime, deps *keeper.TickDeps) {
+	if !entry.EffectiveWakeOnGatewayFailure() {
+		return
+	}
+	cfg, err := connectorConfig(prof, k.single)
+	if err != nil {
+		return
+	}
+	if rt.Dialer == nil {
+		// No outbound dialer (test/fake runtime): the
+		// gateway probe cannot run, so the wake leg
+		// stays unwired rather than dialing on a nil
+		// dialer. The cheap chain alone decides.
+		return
+	}
+	connector := k.env.newConnector(rt.Dialer)
+	client := rt.HTTPClient()
+	deps.GatewayProbe = func(ctx context.Context) error {
+		gw, err := conn.BoundedConnect(ctx, connector, cfg, conn.ConnectTimeout)
+		if err != nil {
+			return err
+		}
+		return gw.Close()
+	}
+	deps.Wake = func(ctx context.Context) error {
+		cookies, err := rt.Cookies()
+		if err != nil {
+			return err
+		}
+		info, err := gateway.FetchSessionInfo(ctx, client, cookies)
+		if err != nil {
+			return err
+		}
+		token, err := gateway.FetchAccessToken(ctx, client, cookies)
+		if err != nil {
+			return err
+		}
+		vmID := prof.VMID
+		if vmID == "" {
+			vmID = info.VMID
+		}
+		if vmID == "" {
+			// FetchSessionInfo already classifies a
+			// missing vm_id as a GatewayError; reaching
+			// here with an empty id means the profile
+			// and the session disagree — treat it as
+			// the same transient class, never auth.
+			return &conn.GatewayError{Status: -1, Payload: "wake: no vm_id available"}
+		}
+		_, _, err = gateway.WakeVM(ctx, client, cookies, token, vmID)
+		return err
+	}
+}
+
+// wireRelogin installs the headless re-login driver and the
+// narrow credential provider when the entry references a
+// credentials tag. The provider RE-READS config.json from
+// disk on every invocation (i.e. on every re-login attempt):
+// a credential removed or rotated by file edit is
+// authoritative on the next re-login attempt of a running
+// keeper, with no restart. The driver wiring itself (which
+// entries get a driver) is fixed at factory-build time from
+// the once-loaded config; only the credential VALUES are
+// re-read. The provider reads through CredentialForProfile —
+// the only read path for credential values — and is only
+// invoked when a re-login is actually attempted. The driver
+// is built with the recorded contract (unobserved contracts
+// refuse at runtime) and the S2 inbound builder for the
+// launch fallback. A missing or unresolvable credentials
+// block leaves the driver unset: the tick stops and alerts
+// instead of guessing.
+func (k *keeperRuntimes) wireRelogin(entry *profile.KeeperEntry, prof *profile.Profile, rt *Runtime, deps *keeper.TickDeps) {
+	if entry.Credentials == "" {
+		return
+	}
+	creds, err := profile.ResolveCredentials(k.single)
+	if err != nil || creds == nil {
+		return
+	}
+	configDir := k.loc.ConfigDir
+	profileName := prof.Name
+	snapshot := creds
+	deps.CredentialProvider = func() (profile.LoginCredential, bool) {
+		// Re-read from disk per attempt: the factory-time
+		// snapshot is only the fallback when the config
+		// file cannot be re-read because there is no
+		// config dir (never in production: factory
+		// callers always set loc). A re-read failure —
+		// deleted file, broken JSON — is fail-closed:
+		// no credential, so the tick stops with
+		// blocked instead of re-logging in on stale
+		// values.
+		if configDir == "" {
+			return snapshot.CredentialForProfile(profileName)
+		}
+		fresh, found, err := profile.LoadSingleConfig(configDir)
+		if err != nil || !found {
+			return profile.LoginCredential{}, false
+		}
+		freshCreds, err := profile.ResolveCredentials(fresh)
+		if err != nil || freshCreds == nil {
+			return profile.LoginCredential{}, false
+		}
+		return freshCreds.CredentialForProfile(profileName)
+	}
+	contract, err := keeper.DefaultLoginContract()
+	if err != nil {
+		return
+	}
+	deps.Relogin = keeper.NewReloginDriver(keeper.ReloginOptions{
+		BrowserURL:  entry.Browser,
+		BaseDir:     k.loc.ConfigDir,
+		Inbound:     newProfileInboundBuilder(rt, entry),
+		Profile:     prof,
+		Contract:    contract,
+		MaxAttempts: entry.EffectiveReloginAttempts(),
+		Entry:       entry,
+	})
 }
 
 // notifier builds the Telegram notifier for the single

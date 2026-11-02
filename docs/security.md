@@ -8,6 +8,88 @@ keeps the stored value, guarded by the stored-file SHA-256 with a
 409 on mismatch. Error and rejection messages name paths only,
 never values. Secrets are never printed, logged, or committed.
 
+## Login credentials (`credentials` block)
+
+The `credentials` block (login `username`/`password` per profile,
+for the keeper's automatic headless re-login) follows the same
+write-only contract, strengthened:
+
+- Both `username` and `password` are secret keys in the
+  redaction layer (`redact.secretKeys`, pinned by tests):
+  every redacted view — CLI, web UI, logs, errors — renders
+  `<redacted>`, and a `<redacted>` sentinel at either position
+  is a secret position a save must never persist (the web UI's
+  R8 assertion).
+- The config file is saved mode 0600, atomically, with
+  no `.bak` or any other backup copy: a backup would be a
+  second copy of plaintext secrets. (Save-side enforcement:
+  loading does not refuse a world-readable file.)
+- Credentials are stored reversibly (form submission needs
+  the plaintext) — never hashed, never sourced from env/argv,
+  never passed to a plugin. Castctl itself never writes the
+  values to a separate file — but a headless re-login types
+  them into a browser, and the browser keeps its own copies
+  outside castctl's control:
+  - Attach-first: the credentials are typed into the
+    operator's own running Chrome, where Chrome may retain
+    them via autofill, password-save prompts, and form
+    history. Castctl cannot clear or audit that retention.
+  - Launched browser: Chrome writes its own cookie store,
+    history, and Login Data under the per-profile
+    `chromium-profile/` dir (0700 directory; file modes are
+    Chrome's, not castctl's). The dir persists by design
+    (Chrome profile reuse across attempts) and castctl never
+    rotates or deletes it, except that a failed launch or
+    observation attempts to remove a dir that launch
+    created (best effort: a lingering Chrome child process
+    can recreate lock/empty files after removal, so the
+    removal is attempted twice with a settle between, and
+    the dir may still exist afterwards holding no cookie
+    store). The operator removes it by deleting the
+    directory. A launch whose Chrome binary is explicitly
+    configured (via `--browser-path` or
+    `CASTCTL_CHROMIUM_PATH`) and whose binary is missing
+    fails fast, before the dir or the proxy is created, and
+    never waits past cancellation for a browser that failed
+    to start; when no binary path is configured, chromedp's
+    own search runs with the bounded cancel (entry
+    `relogin_cancel_timeout`) as the guard.
+  - Harvest reads all of the browser profile's cookies into
+    memory briefly; only `muse.ai` / `auth.muse.ai` cookies
+    are kept and persisted, the rest are dropped (count only).
+  The only castctl read path is the keeper-internal accessor;
+  values live in unexported config-entry fields, and the only
+  value-carrying accessor returns the keeper-internal
+  `LoginCredential` value (in memory only, cleared after use
+  on a best-effort basis, never marshalled, logged, or handed
+  to a plugin).
+- Credentials never appear in `auth status` output, keeper
+  state files, audit records, logs, or Telegram notices
+  (profile name only). A sentinel-leak test pins this at the
+  command layer, over CLI outputs, state files, redacted
+  config views, display commands, and web UI API responses.
+  Log-line coverage for credential sentinels is NOT pinned
+  by a test and is UNVERIFIED (a capture harness driving a
+  credential sentinel through a keeper-tick-shaped path
+  into the real logger does not exist yet; the log writer
+  itself is covered by fixture-secret tests over other
+  secret values, and no leak has been observed). Until that
+  harness exists, do not claim log lines are
+  sentinel-tested for credentials.
+- A file edit that removes or rotates a credential entry is
+  authoritative on the next re-login attempt: the keeper
+  re-reads `config.json` from disk each time a re-login is
+  attempted, so a running keeper picks the edit up without a
+  restart. (Driver wiring is fixed at process start; only
+  the values are re-read. Removing a credential does not
+  invalidate cookies already harvested.) The re-read
+  conflates a transiently unreadable or broken config with
+  a removal: if `config.json` is mid-edit and unparseable
+  at the exact moment a re-login is attempted, the entry
+  sticky-stops (blocked) exactly as if the credential had
+  been removed, and needs manual recovery — the trade-off
+  for never serving a stale credential.
+
 The full contract is the [secrets write-only contract](../webui/SECRETS-CONTRACT.md).
 The Go server implements the same redaction, sentinel
 keep-on-save, and merge contract server-side (`internal/webui`).
