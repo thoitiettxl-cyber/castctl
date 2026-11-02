@@ -7,6 +7,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"time"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/keeper"
@@ -19,15 +20,22 @@ import (
 // records ONLY the redacted form-control inventory — element
 // tag, type, name, id, classes, aria-label presence — and
 // prints it as JSON. It never enters or submits a credential,
-// never clicks anything, and writes nothing to the profile
-// (the throwaway browser dir is removed with the launch).
+// never clicks anything, and writes nothing to the profile's
+// config or cookies file. The launched browser's per-profile
+// dir persists under the profile dir (Chrome profile reuse;
+// it is removed only when the launch created it and the
+// observation fails — see docs/security.md). The observation
+// always launches a headless browser: this command never
+// attaches to a running browser. The returned URL is the
+// final URL with query and fragment stripped.
 //
 // The output is the evidence for the versioned login contract
 // (keeper LoginContract): a human records the selectors/steps
 // from it into the contract fixture, redacted. The command
 // itself never writes a contract file.
 //
-// Exit 2 when the build has no headless driver, when no
+// Exit 2 when the build has no headless driver, when the
+// --login-url is not an https URL with a host, when no
 // runtime/inbound can be built (fail closed), or when the
 // page cannot be loaded.
 
@@ -41,7 +49,12 @@ submitted; nothing is written to the profile.
 
   --profile NAME    profile whose outbound routes the page load
                     (default: active profile)
-  --login-url URL   page to observe (default: https://auth.muse.ai/login)
+  --login-url URL   page to observe (default: https://auth.muse.ai/login;
+                    must be an https URL with a host)
+
+The observation always launches a headless browser; it never
+attaches to a running browser. The printed "url" is the final
+URL with query and fragment stripped.
 `
 
 func cmdAuthObserveLogin(ctx context.Context, env *Env, g *globalOpts, args []string) error {
@@ -90,6 +103,9 @@ func cmdAuthObserveLogin(ctx context.Context, env *Env, g *globalOpts, args []st
 	if p.strIsSet("login-url") {
 		loginURL = p.str("login-url")
 	}
+	if err := validateObserveLoginURL(loginURL); err != nil {
+		return err
+	}
 	rt, err := env.buildRuntime(ctx, loc, prof)
 	if err != nil {
 		return err
@@ -117,4 +133,17 @@ func cmdAuthObserveLogin(ctx context.Context, env *Env, g *globalOpts, args []st
 		URL      string                   `json:"url"`
 	}{Profile: prof.Name, LoginURL: loginURL, Elements: obs.Elements, URL: obs.URL}
 	return writeJSON(env.stdout(), out)
+}
+
+// validateObserveLoginURL rejects anything but an https URL
+// with a non-empty host, before any browser or network is
+// involved. The error is value-free: it never echoes the
+// supplied URL (which an operator could have pasted with a
+// token in it).
+func validateObserveLoginURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return errCodef(2, "auth observe-login: --login-url must be an https URL with a host")
+	}
+	return nil
 }

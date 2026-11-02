@@ -90,6 +90,91 @@ type PageSnapshot struct {
 	VisibleText      string
 }
 
+// snapshotResult is the driver's boolean-only snapshot: which
+// contract selectors are present, and which blocker kinds
+// hit (by selector or keyword — the value names the signal
+// class only, never page text). The evaluation script
+// returns nothing else. It lives here (not in the
+// chromedp-tagged driver file) so the decision equivalence
+// with MatchContract is testable without a browser.
+type snapshotResult struct {
+	Present map[string]bool   `json:"present"`
+	Hits    map[string]string `json:"hits"`
+}
+
+// snapshotDecision maps a boolean snapshot onto the contract
+// through the SAME decision as MatchContract (see
+// matchDecision below): blocker signals first, then
+// step-selector presence. The two paths must agree on every
+// input; TestSnapshotDecisionMatchesContract pins it.
+func snapshotDecision(c LoginContract, res snapshotResult) error {
+	var blockedKind NoticeKind
+	blockedDetail := ""
+	for _, sig := range c.Blockers {
+		if detail, ok := res.Hits[string(sig.Kind)]; ok {
+			blockedKind, blockedDetail = sig.Kind, "blocker_"+detail
+			break
+		}
+	}
+	// No special case for an empty-kind signal: MatchContract
+	// records its hit as blockedKind "" too, so matchDecision
+	// falls through to the step checks. An empty kind in the
+	// contract is a malformed entry; both paths treat it the
+	// same (a hit does not block by itself).
+	return matchDecision(c, blockedKind, blockedDetail, res.Present)
+}
+
+// isBlockerSignal reports whether a blocker was produced by a
+// recorded blocker signal (selector or keyword hit), as opposed
+// to a contract mismatch: mismatch means "the form is not the
+// recorded one (yet)", a signal means "the page is blocked".
+// Wait loops stop immediately on a signal but poll to the
+// deadline on a mismatch (a slow page still loading must not
+// look like a changed form). The Detail values are the fixed
+// enums produced by MatchContract and by the driver's boolean
+// snapshot; any other Detail is not a signal.
+func isBlockerSignal(b *ReloginBlocker) bool {
+	if b == nil {
+		return false
+	}
+	switch b.Detail {
+	case "blocker_signal", "blocker_selector", "blocker_keyword":
+		return true
+	default:
+		return false
+	}
+}
+
+// matchDecision is the ONE blocker/mismatch decision shared by
+// MatchContract (Go-side snapshot: page text in hand) and the
+// driver's boolean snapshot (kinds only, no page text crosses
+// from the page). blockedKind is "" when no blocker signal
+// hit; blockedDetail names the signal class that hit.
+// present maps contract selectors to presence. Both callers
+// must agree: a test pins their equivalence (see
+// TestSnapshotDecisionMatchesContract).
+func matchDecision(c LoginContract, blockedKind NoticeKind, blockedDetail string, present map[string]bool) error {
+	if !c.Observed {
+		return ErrContractNotEstablished
+	}
+	if blockedKind != "" {
+		kind := blockedKind
+		if !ValidNoticeKind(kind) {
+			kind = NoticeBlocked
+		}
+		return &ReloginBlocker{Kind: kind, Detail: blockedDetail}
+	}
+	for _, step := range c.Steps {
+		if step.Selector == "" {
+			return &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_step_no_selector"}
+		}
+		if !present[step.Selector] {
+			return &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_mismatch"}
+		}
+	}
+	return nil
+}
+
 // MatchContract checks a page snapshot against the contract.
 // Blocker signals are checked FIRST (a blocked page may also
 // lack the form): a hit returns a *ReloginBlocker with the
@@ -101,32 +186,17 @@ type PageSnapshot struct {
 // fixed enum string naming the signal class only, never page
 // text or a value.
 func MatchContract(c LoginContract, snap PageSnapshot) error {
-	if !c.Observed {
-		return ErrContractNotEstablished
-	}
+	var blockedKind NoticeKind
+	blockedDetail := ""
 	for _, sig := range c.Blockers {
 		if sig.Selector != "" && snap.PresentSelectors[sig.Selector] {
-			kind := sig.Kind
-			if !ValidNoticeKind(kind) {
-				kind = NoticeBlocked
-			}
-			return &ReloginBlocker{Kind: kind, Detail: "blocker_selector"}
+			blockedKind, blockedDetail = sig.Kind, "blocker_selector"
+			break
 		}
 		if sig.Keyword != "" && strings.Contains(strings.ToLower(snap.VisibleText), strings.ToLower(sig.Keyword)) {
-			kind := sig.Kind
-			if !ValidNoticeKind(kind) {
-				kind = NoticeBlocked
-			}
-			return &ReloginBlocker{Kind: kind, Detail: "blocker_keyword"}
+			blockedKind, blockedDetail = sig.Kind, "blocker_keyword"
+			break
 		}
 	}
-	for _, step := range c.Steps {
-		if step.Selector == "" {
-			return &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_step_no_selector"}
-		}
-		if !snap.PresentSelectors[step.Selector] {
-			return &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_mismatch"}
-		}
-	}
-	return nil
+	return matchDecision(c, blockedKind, blockedDetail, snap.PresentSelectors)
 }

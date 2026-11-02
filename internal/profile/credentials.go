@@ -26,15 +26,17 @@ import (
 //     identity per profile; ambiguity would risk submitting the
 //     wrong credentials). A name that is not a profile key is a
 //     dangling reference, exit 2.
-//   - `username`, `password` (required, non-empty): the login
-//     credentials for the profile's provider login form. They are
-//     SECRET MATERIAL: stored reversibly (hashing is impossible —
+//   - `username`, `password` (required, non-empty after
+//     trimming surrounding whitespace — a whitespace-only
+//     value is rejected at parse): the login credentials for
+//     the profile's provider login form. They are SECRET
+//     MATERIAL: stored reversibly (hashing is impossible —
 //     the form submission needs the plaintext), write-only in
 //     every display path, never logged, never exposed to plugins,
 //     never echoed into errors. Both keys are in redact.secretKeys.
-//     The config file itself must be mode 0600 (enforced by the
-//     guarded config save; a world-readable file is refused at
-//     load by the config loader's mode check where it exists).
+//     The config file is mode 0600 on save (the guarded atomic
+//     save enforces it; loading does not refuse a
+//     world-readable file — save-side enforcement only).
 //   - No `.bak` or backup copy of config.json is ever written for
 //     credentials: the guarded atomic save is the only write path.
 //
@@ -44,13 +46,14 @@ import (
 // A present block is preserved verbatim on save when its raw JSON
 // was captured, exactly like `keeper` and `telegram`.
 //
-// Access discipline: the username/password fields are unexported.
-// The only accessor is CredentialForProfile, which returns a
-// value struct to the keeper's headless re-login driver (built in
-// the command layer) — never through an exported struct field
-// any plugin API could serialise, never through RedactConfig
-// (which renders the raw block through redact.Value, so both
-// values come out as "<redacted>").
+// Access discipline: the credential values are unexported
+// fields on CredentialEntry. The only value-carrying accessor
+// is CredentialForProfile, which returns the keeper-internal
+// LoginCredential value (exported fields, in memory only) to
+// the headless re-login driver — never through a config
+// serialisation, never through RedactConfig (which renders
+// the raw block through redact.Value, so both values come out
+// as "<redacted>"), and never to a plugin.
 
 // CredentialEntry is one parsed `credentials` list entry. The
 // credential values are unexported: see CredentialForProfile.
@@ -71,18 +74,6 @@ type CredentialsConfig struct {
 	Entries []*CredentialEntry
 
 	raw []byte
-}
-
-// RawCredentials returns a defensive copy of the raw
-// `credentials` JSON when the block was parsed from a file, or
-// nil. It mirrors the raw-preservation accessors of other blocks.
-func (c *SingleConfig) RawCredentials() []byte {
-	if c == nil || len(c.rawCredentials) == 0 {
-		return nil
-	}
-	cp := make([]byte, len(c.rawCredentials))
-	copy(cp, c.rawCredentials)
-	return cp
 }
 
 var credentialEntryKeys = map[string]bool{
@@ -138,13 +129,13 @@ func parseCredentialsBlock(v any) (*CredentialsConfig, error) {
 				entry.Profile = s
 			case "username":
 				s, ok := val.(string)
-				if !ok || s == "" {
+				if !ok || strings.TrimSpace(s) == "" {
 					return nil, newConfigErrorf(`"credentials" entry %d: "username" must be a non-empty string`, i)
 				}
 				entry.username = s
 			case "password":
 				s, ok := val.(string)
-				if !ok || s == "" {
+				if !ok || strings.TrimSpace(s) == "" {
 					return nil, newConfigErrorf(`"credentials" entry %d: "password" must be a non-empty string`, i)
 				}
 				entry.password = s
@@ -216,12 +207,24 @@ func ResolveCredentials(single *SingleConfig) (*CredentialsConfig, error) {
 // LoginCredential is the narrow value the keeper's headless
 // re-login driver receives. It exists only in memory, only
 // inside the keeper/login core: it is never marshalled, never
-// logged, and never handed to any exported accessor. The
-// driver must zero it after use where it can (it cannot be
-// forced: the driver holds the only copy by construction).
+// logged, and never handed to any plugin-facing accessor.
+// Callers clear it after use with Clear (best effort: the
+// strings' backing bytes cannot be scrubbed once copied
+// elsewhere, e.g. into the browser over CDP — Clear drops
+// this copy's references so the values become eligible for
+// collection).
 type LoginCredential struct {
 	Username string
 	Password string
+}
+
+// Clear drops this copy's credential values. It cannot scrub
+// copies already made by the caller or the driver; it makes
+// this copy eligible for collection promptly instead of
+// lingering until the struct goes out of scope.
+func (c *LoginCredential) Clear() {
+	c.Username = ""
+	c.Password = ""
 }
 
 // CredentialForProfile returns the stored login credential for
@@ -229,8 +232,10 @@ type LoginCredential struct {
 // names it. This is the ONLY read path for credential values
 // outside this package's parse/encode: the keeper command
 // layer calls it once per re-login attempt and hands the
-// result to the driver; no exported struct field, no config
-// serialisation, and no display path ever sees a value.
+// result to the driver; no config serialisation and no
+// display path ever sees a value. Callers that only need
+// presence must use HasCredentialForProfile, which never
+// materialises a value.
 func (c *CredentialsConfig) CredentialForProfile(profileName string) (LoginCredential, bool) {
 	if c == nil {
 		return LoginCredential{}, false
@@ -241,6 +246,23 @@ func (c *CredentialsConfig) CredentialForProfile(profileName string) (LoginCrede
 		}
 	}
 	return LoginCredential{}, false
+}
+
+// HasCredentialForProfile reports whether a credentials entry
+// names the profile, without materialising any value. Use it
+// for presence checks (e.g. `auth status` capability); the
+// value itself is only ever read through
+// CredentialForProfile, at a re-login attempt.
+func (c *CredentialsConfig) HasCredentialForProfile(profileName string) bool {
+	if c == nil {
+		return false
+	}
+	for _, e := range c.Entries {
+		if e.Profile == profileName {
+			return true
+		}
+	}
+	return false
 }
 
 // CredentialEntryForTag returns the entry with the given tag,

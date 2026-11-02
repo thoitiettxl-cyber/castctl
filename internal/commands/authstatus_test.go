@@ -228,6 +228,35 @@ func TestSentinelNeverLeavesConfig(t *testing.T) {
 	if strings.Contains(string(redactedJSON), sentinelUser) || strings.Contains(string(redactedJSON), sentinelPass) {
 		t.Fatal("sentinel leaked into RedactConfig output")
 	}
+	// The raw-bytes redaction (the web UI GET /api/v1/config
+	// path) must not leak either.
+	rawCfg, rerr := os.ReadFile(filepath.Join(home, "config.json"))
+	if rerr != nil {
+		t.Fatalf("read config: %v", rerr)
+	}
+	rawRedacted, rerr := profile.RedactRawConfig(rawCfg)
+	if rerr != nil {
+		t.Fatalf("RedactRawConfig: %v", rerr)
+	}
+	if strings.Contains(string(rawRedacted), sentinelUser) || strings.Contains(string(rawRedacted), sentinelPass) {
+		t.Fatal("sentinel leaked into RedactRawConfig output")
+	}
+	// Display surfaces: profile show and keeper status.
+	out.Reset()
+	errb.Reset()
+	if code := Run(context.Background(), []string{"profile", "show"}, env); code != 0 {
+		t.Fatalf("profile show: code=%d stderr=%q", code, errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run(context.Background(), []string{"keeper", "status"}, env); code != 0 {
+		t.Fatalf("keeper status: code=%d stderr=%q", code, errb.String())
+	}
+	for _, hay := range []string{out.String(), errb.String()} {
+		if strings.Contains(hay, sentinelUser) || strings.Contains(hay, sentinelPass) {
+			t.Fatalf("sentinel leaked into display output: %q", hay)
+		}
+	}
 }
 
 // testLogger records Info/Warn lines for the embedded
@@ -301,4 +330,65 @@ func TestEmbeddedKeeperCoRun(t *testing.T) {
 		t.Fatalf("flight not released after embedded keeper stop: %v", err)
 	}
 	rel()
+}
+
+// TestHeadlessCapability (D3/T6) pins the pure capability
+// decision: an unobserved contract reports headless
+// unavailable with reason no_contract even when a keeper
+// entry, a driver, and credentials are all present; the
+// observed-contract case reports available.
+func TestHeadlessCapability(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name            string
+		entry, driver   bool
+		creds, observed bool
+		wantAvail       bool
+		wantReason      string
+	}{
+		{"no entry", false, false, false, false, false, "no_keeper_entry"},
+		{"entry no driver", true, false, false, false, false, "no_chromedp"},
+		{"entry driver no creds", true, true, false, false, false, "no_credentials"},
+		{"all present unobserved", true, true, true, false, false, "no_contract"},
+		{"all present observed", true, true, true, true, true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			avail, reason := headlessCapability(tc.entry, tc.driver, tc.creds, tc.observed)
+			if avail != tc.wantAvail || reason != tc.wantReason {
+				t.Fatalf("headlessCapability = %v/%q; want %v/%q", avail, reason, tc.wantAvail, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestValidateObserveLoginURL (S7) pins the --login-url
+// validation: https with a host only; the error never echoes
+// the supplied URL.
+func TestValidateObserveLoginURL(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		raw string
+		ok  bool
+	}{
+		{"https://auth.muse.ai/login", true},
+		{"https://auth.muse.ai:8443/a/b", true},
+		{"http://auth.muse.ai/login", false},
+		{"https://", false},
+		{"https:///path", false},
+		{"", false},
+		{"auth.muse.ai/login", false},
+		{"ftp://auth.muse.ai/login", false},
+		{"https://auth.muse.ai/login?code=SECRET", true},
+	}
+	for _, tc := range cases {
+		if err := validateObserveLoginURL(tc.raw); (err == nil) != tc.ok {
+			t.Errorf("validateObserveLoginURL(%q) err=%v; want ok=%v", tc.raw, err, tc.ok)
+		}
+	}
+	if err := validateObserveLoginURL("http://x/?token=SENTINEL-TOKEN-123"); err == nil {
+		t.Fatal("http URL accepted")
+	} else if strings.Contains(err.Error(), "SENTINEL-TOKEN-123") {
+		t.Fatalf("validation error echoes the URL: %q", err.Error())
+	}
 }

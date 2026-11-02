@@ -42,7 +42,8 @@ last_checked_at, keeper_stopped, keeper_stopped_reason,
 headless_available, headless_reason, needs_action.
 
 headless_reason is "" when headless re-login is available,
-or one of: no_keeper_entry, no_chromedp, no_credentials.
+or one of: no_keeper_entry, no_chromedp, no_credentials,
+no_contract (the login-form contract is not yet established).
 
 Exit codes: 0 ok, 1 expiring, 2 config error, 3 expired.
 `
@@ -215,22 +216,36 @@ func authStatusForProfile(baseDir, name string, prof *profile.Profile, kcfg *pro
 // authHeadlessCapability reports whether headless re-login
 // could run for this profile, with a closed-enum reason. The
 // gates, in order: a keeper entry must exist (re-login only
-// runs from a tick), this build must have the driver, and
-// stored credentials must exist for the profile. No network
-// is involved: a build without the driver reports
-// no_chromedp even though the binary runs.
+// runs from a tick), this build must have the driver, stored
+// credentials must exist for the profile, and the versioned
+// login-form contract must be established (an unobserved
+// contract makes the driver refuse, so the report must say
+// so). No network is involved: a build without the driver
+// reports no_chromedp even though the binary runs. Presence
+// is checked without materialising a credential value.
 func authHeadlessCapability(entry *profile.KeeperEntry, creds *profile.CredentialsConfig, profileName string) (bool, string) {
-	if entry == nil {
+	hasCreds := creds != nil && creds.HasCredentialForProfile(profileName)
+	contract, err := keeper.DefaultLoginContract()
+	observed := err == nil && contract.Observed
+	return headlessCapability(entry != nil, keeper.ReloginAvailable(), hasCreds, observed)
+}
+
+// headlessCapability is the pure gate order behind
+// authHeadlessCapability, unit-testable for every branch
+// (including the observed-contract case, which the embedded
+// fixture cannot express while it stays unobserved).
+func headlessCapability(hasEntry, driverAvailable, hasCredentials, contractObserved bool) (bool, string) {
+	if !hasEntry {
 		return false, "no_keeper_entry"
 	}
-	if !keeper.ReloginAvailable() {
+	if !driverAvailable {
 		return false, "no_chromedp"
 	}
-	if creds == nil {
+	if !hasCredentials {
 		return false, "no_credentials"
 	}
-	if _, ok := creds.CredentialForProfile(profileName); !ok {
-		return false, "no_credentials"
+	if !contractObserved {
+		return false, "no_contract"
 	}
 	return true, ""
 }

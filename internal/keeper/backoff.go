@@ -8,6 +8,8 @@ import (
 	"context"
 	"math/rand"
 	"time"
+
+	"github.com/thoitiettxl-cyber/castctl/internal/profile"
 )
 
 // Transient-error backoff: stdlib only, no failsafe-go.
@@ -24,10 +26,16 @@ import (
 // uses math/rand's locked global source, which is safe for
 // concurrent use.
 
-var backoffLadder = []time.Duration{5 * time.Minute, 15 * time.Minute, 45 * time.Minute}
+// defaultBackoffLadder is the ONE canonical source of the
+// default ladder: profile.DefaultRetryBackoff (the documented
+// G1 zero-value default). It is referenced, never copied
+// into a second literal, so the default cannot drift between
+// the config layer and the tick layer; NewBackoffWithLadder
+// copies it per Backoff.
+var defaultBackoffLadder = profile.DefaultRetryBackoff
 
 // BackoffMaxRetries is the retry cap per tick for the DEFAULT
-// ladder (len(backoffLadder)). A configured ladder's length
+// ladder (len(defaultBackoffLadder)). A configured ladder's length
 // governs its own cap: NewBackoffWithLadder caps at
 // len(ladder), so a longer configured ladder retries longer.
 // Kept for the default-ladder callers that pin the constant.
@@ -59,7 +67,7 @@ func NewBackoffWithLadder(clock Clock, jitter func() float64, ladder []time.Dura
 		jitter = rand.Float64
 	}
 	if len(ladder) == 0 {
-		ladder = backoffLadder
+		ladder = defaultBackoffLadder
 	}
 	cp := make([]time.Duration, len(ladder))
 	copy(cp, ladder)

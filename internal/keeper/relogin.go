@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
 )
@@ -19,8 +20,10 @@ import (
 // and returns the harvested session cookies. It is a keeper
 // seam, not a plugin API: the credential value reaches the
 // driver only through TickDeps.CredentialProvider, the driver
-// holds it only for the attempt, and no exported struct field
-// anywhere carries a credential value.
+// holds it only for the attempt (and clears its copy after
+// use — see LoginCredential.Clear), and the value-carrying
+// LoginCredential type is keeper-internal: it is never
+// marshalled, never logged, and never handed to a plugin.
 //
 // The real driver lives behind the with_chromedp build tag
 // (relogin_chromedp.go); the tag-off stub (relogin_stub.go)
@@ -126,12 +129,30 @@ type ObservedElement struct {
 
 // LoginPageObservation is the redacted result of one
 // automated, read-only load of the login page: the final URL
-// (after redirects) and the form-control inventory. It is
-// the input the fixture author encodes into the versioned
-// LoginContract; it is never used at re-login runtime.
+// (after redirects, query and fragment stripped — auth
+// redirects routinely carry codes/tokens there) and the
+// form-control inventory. It is the input the fixture author
+// encodes into the versioned LoginContract; it is never used
+// at re-login runtime.
 type LoginPageObservation struct {
 	URL      string            `json:"url"`
 	Elements []ObservedElement `json:"elements"`
+}
+
+// stripObservationURL strips the query string and fragment
+// from an observed final URL, keeping scheme/host/path only.
+// A redirect target carrying ?code=… or #token=… must never
+// reach an output that gets pasted into reports. An
+// unparseable URL is dropped outright rather than echoed.
+func stripObservationURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.RawFragment = ""
+	return u.String()
 }
 
 // ObserveOptions wires one read-only login-page observation:

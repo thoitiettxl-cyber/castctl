@@ -205,6 +205,8 @@ func TestParseCredentialsBlockErrors(t *testing.T) {
 		{"missing password", `[{"tag":"c","profile":"muse01","username":"u"}]`, `[]`, "password"},
 		{"empty username", `[{"tag":"c","profile":"muse01","username":"","password":"p"}]`, `[]`, "username"},
 		{"empty password", `[{"tag":"c","profile":"muse01","username":"u","password":""}]`, `[]`, "password"},
+		{"whitespace username", `[{"tag":"c","profile":"muse01","username":"   ","password":"p"}]`, `[]`, "username"},
+		{"whitespace password", `[{"tag":"c","profile":"muse01","username":"u","password":" \t\n "}]`, `[]`, "password"},
 		{"duplicate tag", `[{"tag":"c","profile":"muse01","username":"u","password":"p"},{"tag":"c","profile":"muse02","username":"u","password":"p"}]`, `[]`, "duplicate"},
 		{"dangling profile", `[{"tag":"c","profile":"ghost","username":"u","password":"p"}]`, `[]`, "does not exist"},
 		{"two per profile", `[{"tag":"c1","profile":"muse01","username":"u","password":"p"},{"tag":"c2","profile":"muse01","username":"u","password":"p"}]`, `[]`, "both name"},

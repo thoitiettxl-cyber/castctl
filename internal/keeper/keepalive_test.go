@@ -542,3 +542,141 @@ func TestDeriveAuthStatus(t *testing.T) {
 		})
 	}
 }
+
+// TestSnapshotDecisionMatchesContract (D2) pins that the
+// boolean-snapshot decision (chromedp driver) and the
+// text-snapshot decision (MatchContract) agree on every
+// input: same nil, same blocker kind+detail, same
+// not-established error. A drift between them would let
+// the driver act on a page the contract rejects, or refuse
+// a page the contract accepts.
+func TestSnapshotDecisionMatchesContract(t *testing.T) {
+	t.Parallel()
+	contract := LoginContract{
+		Version:  1,
+		Observed: true,
+		Steps: []LoginContractStep{
+			{Action: "fill", Selector: "#user", Field: "username"},
+			{Action: "fill", Selector: "#pass", Field: "password"},
+			{Action: "click", Selector: "#submit"},
+		},
+		Blockers: []LoginBlockerSignal{
+			{Kind: NoticeCaptcha, Selector: ".captcha-box", Keyword: "captcha"},
+			{Kind: NoticeTwoFactor, Selector: ".two-factor", Keyword: "two-factor"},
+		},
+	}
+	present := map[string]bool{"#user": true, "#pass": true, "#submit": true}
+	emptyKind := LoginContract{
+		Version:  1,
+		Observed: true,
+		Steps:    []LoginContractStep{{Action: "fill", Selector: "#user", Field: "username"}},
+		Blockers: []LoginBlockerSignal{{Kind: "", Keyword: "surprise"}},
+	}
+	noSelector := LoginContract{
+		Version:  1,
+		Observed: true,
+		Steps:    []LoginContractStep{{Action: "fill", Selector: "", Field: "username"}},
+	}
+	cases := []struct {
+		name     string
+		contract LoginContract
+		snap     PageSnapshot
+		res      snapshotResult
+	}{
+		{"all present", contract,
+			PageSnapshot{PresentSelectors: present, VisibleText: "sign in"},
+			snapshotResult{Present: present, Hits: map[string]string{}}},
+		{"missing submit", contract,
+			PageSnapshot{PresentSelectors: map[string]bool{"#user": true, "#pass": true}, VisibleText: "sign in"},
+			snapshotResult{Present: map[string]bool{"#user": true, "#pass": true}, Hits: map[string]string{}}},
+		{"captcha keyword", contract,
+			PageSnapshot{PresentSelectors: present, VisibleText: "please solve the captcha"},
+			snapshotResult{Present: present, Hits: map[string]string{string(NoticeCaptcha): "keyword"}}},
+		{"two-factor selector", contract,
+			PageSnapshot{PresentSelectors: map[string]bool{"#user": true, "#pass": true, "#submit": true, ".two-factor": true}, VisibleText: "sign in"},
+			snapshotResult{Present: map[string]bool{"#user": true, "#pass": true, "#submit": true, ".two-factor": true}, Hits: map[string]string{string(NoticeTwoFactor): "selector"}}},
+		{"blocker beats missing step", contract,
+			PageSnapshot{PresentSelectors: map[string]bool{"#user": true}, VisibleText: "captcha required"},
+			snapshotResult{Present: map[string]bool{"#user": true}, Hits: map[string]string{string(NoticeCaptcha): "keyword"}}},
+		{"unobserved", LoginContract{Version: 1},
+			PageSnapshot{PresentSelectors: present},
+			snapshotResult{Present: present, Hits: map[string]string{}}},
+		{"empty-kind signal falls through", emptyKind,
+			PageSnapshot{PresentSelectors: map[string]bool{}, VisibleText: "surprise check"},
+			snapshotResult{Present: map[string]bool{}, Hits: map[string]string{"": "keyword"}}},
+		{"step without selector", noSelector,
+			PageSnapshot{PresentSelectors: map[string]bool{}, VisibleText: "sign in"},
+			snapshotResult{Present: map[string]bool{}, Hits: map[string]string{}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want := MatchContract(tc.contract, tc.snap)
+			got := snapshotDecision(tc.contract, tc.res)
+			if !sameContractDecision(want, got) {
+				t.Fatalf("MatchContract = %v; snapshotDecision = %v; want agreement", want, got)
+			}
+		})
+	}
+}
+
+func sameContractDecision(a, b error) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if errors.Is(a, ErrContractNotEstablished) || errors.Is(b, ErrContractNotEstablished) {
+		return errors.Is(a, ErrContractNotEstablished) && errors.Is(b, ErrContractNotEstablished)
+	}
+	ab, aok := a.(*ReloginBlocker)
+	bb, bok := b.(*ReloginBlocker)
+	return aok && bok && ab.Kind == bb.Kind && ab.Detail == bb.Detail
+}
+
+// TestStripObservationURL (D6/R-5) pins that the observed
+// URL printed by `auth observe-login` never carries a query
+// or fragment — auth redirects tokenise both.
+func TestStripObservationURL(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in, want string
+	}{
+		{"https://auth.muse.ai/login?code=SECRET123&state=x#frag", "https://auth.muse.ai/login"},
+		{"https://auth.muse.ai/login#only-fragment", "https://auth.muse.ai/login"},
+		{"https://auth.muse.ai/login", "https://auth.muse.ai/login"},
+		{"https://auth.muse.ai/a/b?x=1", "https://auth.muse.ai/a/b"},
+		{"http://127.0.0.1:9/login?next=/", "http://127.0.0.1:9/login"},
+		{"not a url ::", ""},
+		{"", ""},
+		{"/relative/path?x=1", ""},
+	}
+	for _, tc := range cases {
+		if got := stripObservationURL(tc.in); got != tc.want {
+			t.Errorf("stripObservationURL(%q) = %q; want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestDeriveAuthStatusCarriesStateOnMissingFile (S3) pins
+// that a missing cookies file still reports the keeper stop
+// that likely explains it: LastCheckedAt, KeeperStopped,
+// and KeeperStoppedReason pass through the missing-file
+// return, while the status stays expired.
+func TestDeriveAuthStatusCarriesStateOnMissingFile(t *testing.T) {
+	t.Parallel()
+	checked := tickNow.Add(-time.Hour)
+	st := &SessionState{
+		LastCheckedAt:       &checked,
+		KeeperStopped:       true,
+		KeeperStoppedReason: StoppedAuthError,
+		LastTickOutcome:     OutcomeError,
+	}
+	got := DeriveAuthStatus("muse01", "hatch_sess", nil, 0, true, st, 72*time.Hour, false, "no_chromedp", tickNow)
+	if got.Status != AuthStatusExpired || !got.NeedsAction {
+		t.Fatalf("status = %q action=%v; want expired/true", got.Status, got.NeedsAction)
+	}
+	if got.LastCheckedAt == nil || !got.LastCheckedAt.Equal(checked) {
+		t.Fatalf("LastCheckedAt = %v; want %v", got.LastCheckedAt, checked)
+	}
+	if !got.KeeperStopped || got.KeeperStoppedReason != StoppedAuthError {
+		t.Fatalf("KeeperStopped = %v reason = %q; want true/%q", got.KeeperStopped, got.KeeperStoppedReason, StoppedAuthError)
+	}
+}

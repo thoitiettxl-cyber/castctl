@@ -44,7 +44,7 @@ type AuthStatus struct {
 	KeeperStopped       bool
 	KeeperStoppedReason string
 	HeadlessAvailable   bool
-	HeadlessReason      string // closed enum: "", "no_chromedp", "no_credentials", "no_keeper_entry"
+	HeadlessReason      string // closed enum: "", "no_chromedp", "no_credentials", "no_keeper_entry", "no_contract"
 	NeedsAction         bool
 	CookiesSeen         int
 }
@@ -80,8 +80,10 @@ func CookieExpiryMetadata(cookiesPath string, now time.Time) (drivingName string
 // regardless of the file's dates: the keeper already proved
 // the session dead. headlessAvailable/headlessReason are
 // computed by the caller (build capability + credentials
-// presence); DeriveAuthStatus only carries them through and
-// folds them into NeedsAction.
+// presence + contract establishment) and carried through
+// verbatim; they do not by themselves set NeedsAction (an
+// unavailable re-login is not "needs action" while the
+// session is ok).
 func DeriveAuthStatus(profileName string, drivingName string, drivingExpiry *time.Time, cookiesSeen int, fileMissing bool, st *SessionState, expiringWithin time.Duration, headlessAvailable bool, headlessReason string, now time.Time) AuthStatus {
 	out := AuthStatus{
 		Profile:           profileName,
@@ -92,18 +94,23 @@ func DeriveAuthStatus(profileName string, drivingName string, drivingExpiry *tim
 		HeadlessReason:    headlessReason,
 		CookiesSeen:       cookiesSeen,
 	}
+	if st != nil {
+		out.LastCheckedAt = st.LastCheckedAt
+		out.KeeperStopped = st.KeeperStopped
+		out.KeeperStoppedReason = st.KeeperStoppedReason
+	}
 	// A missing cookies file is expired outright: there is
 	// nothing to authenticate with, whatever the state file
-	// last recorded.
+	// last recorded. The keeper-stop fields above are still
+	// carried through: the stop is the likeliest explanation
+	// for the missing file, and hiding it would hide the
+	// diagnosis.
 	if fileMissing {
 		out.Status = AuthStatusExpired
 		out.NeedsAction = true
 		return out
 	}
 	if st != nil {
-		out.LastCheckedAt = st.LastCheckedAt
-		out.KeeperStopped = st.KeeperStopped
-		out.KeeperStoppedReason = st.KeeperStoppedReason
 		if st.KeeperStopped && (st.KeeperStoppedReason == StoppedAuthError || st.KeeperStoppedReason == StoppedCookiesMissing) {
 			out.Status = AuthStatusExpired
 			out.NeedsAction = true

@@ -443,14 +443,21 @@ func (k *keeperRuntimes) wireWake(entry *profile.KeeperEntry, prof *profile.Prof
 
 // wireRelogin installs the headless re-login driver and the
 // narrow credential provider when the entry references a
-// credentials tag. The provider reads through
-// CredentialForProfile — the only read path for credential
-// values — and is only invoked when a re-login is actually
-// attempted. The driver is built with the recorded contract
-// (unobserved contracts refuse at runtime) and the S2
-// inbound builder for the launch fallback. A missing or
-// unresolvable credentials block leaves the driver unset:
-// the tick stops and alerts instead of guessing.
+// credentials tag. The provider RE-READS config.json from
+// disk on every invocation (i.e. on every re-login attempt):
+// a credential removed or rotated by file edit is
+// authoritative on the next re-login attempt of a running
+// keeper, with no restart. The driver wiring itself (which
+// entries get a driver) is fixed at factory-build time from
+// the once-loaded config; only the credential VALUES are
+// re-read. The provider reads through CredentialForProfile —
+// the only read path for credential values — and is only
+// invoked when a re-login is actually attempted. The driver
+// is built with the recorded contract (unobserved contracts
+// refuse at runtime) and the S2 inbound builder for the
+// launch fallback. A missing or unresolvable credentials
+// block leaves the driver unset: the tick stops and alerts
+// instead of guessing.
 func (k *keeperRuntimes) wireRelogin(entry *profile.KeeperEntry, prof *profile.Profile, rt *Runtime, deps *keeper.TickDeps) {
 	if entry.Credentials == "" {
 		return
@@ -459,8 +466,31 @@ func (k *keeperRuntimes) wireRelogin(entry *profile.KeeperEntry, prof *profile.P
 	if err != nil || creds == nil {
 		return
 	}
+	configDir := k.loc.ConfigDir
+	profileName := prof.Name
+	snapshot := creds
 	deps.CredentialProvider = func() (profile.LoginCredential, bool) {
-		return creds.CredentialForProfile(prof.Name)
+		// Re-read from disk per attempt: the factory-time
+		// snapshot is only the fallback when the config
+		// file cannot be re-read because there is no
+		// config dir (never in production: factory
+		// callers always set loc). A re-read failure —
+		// deleted file, broken JSON — is fail-closed:
+		// no credential, so the tick stops with
+		// blocked instead of re-logging in on stale
+		// values.
+		if configDir == "" {
+			return snapshot.CredentialForProfile(profileName)
+		}
+		fresh, found, err := profile.LoadSingleConfig(configDir)
+		if err != nil || !found {
+			return profile.LoginCredential{}, false
+		}
+		freshCreds, err := profile.ResolveCredentials(fresh)
+		if err != nil || freshCreds == nil {
+			return profile.LoginCredential{}, false
+		}
+		return freshCreds.CredentialForProfile(profileName)
 	}
 	contract, err := keeper.DefaultLoginContract()
 	if err != nil {

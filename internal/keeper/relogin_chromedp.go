@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"time"
 
@@ -26,12 +27,13 @@ import (
 // evaluates JavaScript in a browser, and it does so under a
 // strict rule: the evaluated script is a FIXED string that
 // takes the contract's selectors/keywords as data and
-// returns ONLY booleans (which selectors are present, which
-// blocker signals hit). No page text, HTML, attribute value,
-// screenshot, or cookie value ever crosses from the page
-// into Go through evaluation; cookies are harvested only
-// through the browser-level Storage.getCookies call, the
-// same read the CDP exporter uses. The driver never
+// returns ONLY booleans (which selectors are present) and
+// fixed signal-class strings (which blocker kind hit, and
+// whether by selector or keyword). No page text, HTML,
+// attribute value, screenshot, or cookie value ever crosses
+// from the page into Go through evaluation; cookies are
+// harvested only through the browser-level Storage.getCookies
+// call, the same read the CDP exporter uses. The driver never
 // exfiltrates, never screenshots, never enables the screencast
 // relay, and never touches a target it did not create.
 //
@@ -42,10 +44,17 @@ import (
 // ONLY egress). Match the page against the recorded contract
 // BEFORE entering anything; on any mismatch or blocker
 // signal, stop with a *ReloginBlocker and enter nothing.
-// Fill and submit exactly the recorded steps, then poll for
-// the harvested session cookies. Transient failures retry
-// up to MaxAttempts with a fresh tab each time; a blocker
-// returns immediately and is never retried.
+// Fill and submit exactly the recorded steps — clearing each
+// field before typing, and re-matching the page before the
+// submit click so a blocker appearing mid-fill stops before
+// anything is submitted — then poll for the harvested
+// session cookies. Transient failures retry up to MaxAttempts
+// with a fresh tab each time; a blocker returns immediately
+// and is never retried. A failed launch or attempt removes
+// the browser profile dir the launch created (a pre-existing
+// dir is never removed: it may belong to the screencast
+// login path); a successful harvest keeps the dir, which
+// persists by design (see docs/security.md).
 
 // ReloginAvailable reports whether this build has a headless
 // re-login driver. Chromedp build: yes.
@@ -58,15 +67,6 @@ func NewReloginDriver(opts ReloginOptions) ReloginDriver {
 
 type chromedpReloginDriver struct {
 	opts ReloginOptions
-}
-
-// snapshotResult is the boolean-only page snapshot: which
-// contract selectors are present, and which blocker kinds
-// hit (by keyword or selector). The script returns nothing
-// else.
-type snapshotResult struct {
-	Present map[string]bool `json:"present"`
-	Hits    map[string]bool `json:"hits"`
 }
 
 // snapshotScript is the FIXED evaluation script. It receives
@@ -102,8 +102,12 @@ func snapshotScript(selectors []string, blockers []LoginBlockerSignal) (string, 
 		var hits = {};
 		for (var j = 0; j < blockers.length; j++) {
 			var b = blockers[j];
-			if (b.keyword && lower.indexOf(b.keyword.toLowerCase()) !== -1) { hits[b.kind] = true; }
-			if (b.selector) { try { if (document.querySelector(b.selector)) { hits[b.kind] = true; } } catch (e) {} }
+			// Selector first, then keyword, first hit per
+			// kind wins — the same order MatchContract
+			// applies Go-side. The value names the signal
+			// class only, never page text.
+			if (b.selector) { try { if (document.querySelector(b.selector)) { if (!hits[b.kind]) { hits[b.kind] = "selector"; } } } catch (e) {} }
+			if (b.keyword && lower.indexOf(b.keyword.toLowerCase()) !== -1) { if (!hits[b.kind]) { hits[b.kind] = "keyword"; } }
 		}
 		return {present: present, hits: hits};
 	})(` + string(selJSON) + `, ` + string(blkJSON) + `)`
@@ -111,9 +115,10 @@ func snapshotScript(selectors []string, blockers []LoginBlockerSignal) (string, 
 }
 
 // snapshot evaluates the fixed boolean script on the target
-// and maps the result onto the contract: blocker hits first,
-// then step-selector presence. It returns a *ReloginBlocker
-// for a hit/mismatch, or nil when the page matches.
+// and maps the result onto the contract through
+// snapshotDecision (the same decision MatchContract makes).
+// It returns a *ReloginBlocker for a hit/mismatch, or nil
+// when the page matches.
 func snapshotMatch(ctx context.Context, contract LoginContract) error {
 	selectors := make([]string, 0, len(contract.Steps))
 	for _, step := range contract.Steps {
@@ -127,28 +132,7 @@ func snapshotMatch(ctx context.Context, contract LoginContract) error {
 	if err != nil {
 		return err
 	}
-	// Keyword/selector hits are computed in-page; a hit kind
-	// present in the map is a blocker, whatever the signal
-	// was. No page text crosses into Go: the hits map
-	// carries kinds only.
-	for _, sig := range contract.Blockers {
-		if res.Hits[string(sig.Kind)] {
-			kind := sig.Kind
-			if !ValidNoticeKind(kind) {
-				kind = NoticeBlocked
-			}
-			return &ReloginBlocker{Kind: kind, Detail: "blocker_signal"}
-		}
-	}
-	for _, step := range contract.Steps {
-		if step.Selector == "" {
-			return &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_step_no_selector"}
-		}
-		if !res.Present[step.Selector] {
-			return &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_mismatch"}
-		}
-	}
-	return nil
+	return snapshotDecision(contract, res)
 }
 
 // browserContext acquires a chromedp target context:
@@ -158,14 +142,23 @@ func snapshotMatch(ctx context.Context, contract LoginContract) error {
 // a launched browser) or just the target (for attach: the
 // user's browser is never killed). An attach failure falls
 // back to launch; a launch failure is returned.
-func (d *chromedpReloginDriver) browserContext(ctx context.Context) (context.Context, context.CancelFunc, error) {
+//
+// removeDir removes the browser profile dir when the launch
+// created it AND the caller reports failure (the caller
+// invokes it only on a failed attempt/observation, after
+// cancel). It is a no-op for the attach path and when the
+// dir pre-existed the launch: a pre-existing dir may belong
+// to the screencast login path and must never be deleted
+// from here. A successful attempt never calls it: the dir
+// persists by design.
+func (d *chromedpReloginDriver) browserContext(ctx context.Context) (context.Context, context.CancelFunc, func(), error) {
 	if d.opts.BrowserURL != "" {
 		if tctx, cancel, err := attachTargetContext(ctx, d.opts.BrowserURL); err == nil {
-			return tctx, cancel, nil
+			return tctx, cancel, func() {}, nil
 		} else {
 			attachErr := err
 			if d.opts.Inbound == nil {
-				return nil, nil, attachErr
+				return nil, nil, nil, attachErr
 			}
 			// Attach failed: fall through to launch.
 			_ = attachErr
@@ -200,30 +193,60 @@ func attachTargetContext(ctx context.Context, browserURL string) (context.Contex
 // launchHeadlessContext launches a headless Chrome whose
 // ONLY egress is the S2 profile-routed inbound, and returns
 // a target context in it. The browser is killed when cancel
-// runs; the per-profile user-data dir persists.
-func launchHeadlessContext(ctx context.Context, opts ReloginOptions) (context.Context, context.CancelFunc, error) {
+// runs; the per-profile user-data dir persists (see
+// browserContext's removeDir for the failure-cleanup rule).
+func launchHeadlessContext(ctx context.Context, opts ReloginOptions) (context.Context, context.CancelFunc, func(), error) {
 	if opts.Inbound == nil {
-		return nil, nil, ErrLaunchUnavailable
+		return nil, nil, nil, ErrLaunchUnavailable
 	}
 	if opts.Profile == nil {
-		return nil, nil, errors.New("re-login: no profile")
+		return nil, nil, nil, errors.New("re-login: no profile")
+	}
+	// Fail fast on a missing Chrome binary, BEFORE creating
+	// the profile dir or starting the proxy: chromedp's
+	// context cancel waits for the allocator to reap the
+	// browser process, and a process that never started is
+	// never reaped — a launch against a missing binary
+	// would wedge the attempt past context cancellation
+	// (observed: 130s+ hang on a 60s context). Only an
+	// explicitly configured path is checked here; an empty
+	// path falls through to chromedp's own search, and the
+	// bounded cancel below guards that case.
+	browserPath := resolveBrowserPath("")
+	if browserPath != "" {
+		if _, err := os.Stat(browserPath); err != nil {
+			return nil, nil, nil, fmt.Errorf("re-login: chrome binary not found at %s", browserPath)
+		}
 	}
 	proxyURL, cleanup, err := opts.Inbound.BuildInbound(ctx, opts.Profile)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	dir, err := browserProfileDir(opts.BaseDir, opts.Profile)
 	if err != nil {
 		cleanup()
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	// Only a dir this launch creates is ever removed on
+	// failure (see browserContext): record pre-existence
+	// before creating it. A pre-existing dir may hold the
+	// screencast login's Chrome state.
+	_, statErr := os.Lstat(dir)
+	created := os.IsNotExist(statErr)
+	removeDir := func() {
+		if created {
+			_ = os.RemoveAll(dir)
+		}
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		cleanup()
-		return nil, nil, err
+		removeDir()
+		return nil, nil, nil, err
 	}
 	if err := os.Chmod(dir, 0o700); err != nil {
 		cleanup()
-		return nil, nil, err
+		removeDir()
+		return nil, nil, nil, err
 	}
 	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Headless,
@@ -243,11 +266,31 @@ func launchHeadlessContext(ctx context.Context, opts ReloginOptions) (context.Co
 	allocCtx, cancelAlloc := chromedp.NewExecAllocator(ctx, allocOpts...)
 	tctx, cancelTarget := chromedp.NewContext(allocCtx)
 	cancel := func() {
-		cancelTarget()
-		cancelAlloc()
+		// Bounded: chromedp's target cancel waits for the
+		// allocator to reap the browser process, which never
+		// happens when the process failed to start (or died
+		// before allocating) — an unbounded wait wedges the
+		// tick past context cancellation. The process kill
+		// itself already happened via context cancellation
+		// inside the allocator; only the reap-wait is
+		// bounded. A wedged cancel leaks one goroutine per
+		// failed launch; a failed launch already stops the
+		// entry, so this cannot accumulate in normal
+		// operation. 10s is generous for a healthy shutdown
+		// (one tab) and far below any tick timeout.
+		done := make(chan struct{})
+		go func() {
+			cancelTarget()
+			cancelAlloc()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+		}
 		cleanup()
 	}
-	return tctx, cancel, nil
+	return tctx, cancel, removeDir, nil
 }
 
 // Relogin runs one headless re-login incident: up to
@@ -258,6 +301,10 @@ func (d *chromedpReloginDriver) Relogin(ctx context.Context, cred profile.LoginC
 	if !contract.Observed {
 		return nil, ErrContractNotEstablished
 	}
+	// The driver's copy is cleared on return (best effort:
+	// copies already handed to chromedp/CDP cannot be
+	// scrubbed from here — see LoginCredential.Clear).
+	defer cred.Clear()
 	if len(contract.Steps) == 0 || contract.LoginURL == "" {
 		return nil, &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_empty"}
 	}
@@ -288,15 +335,27 @@ func (d *chromedpReloginDriver) Relogin(ctx context.Context, cred profile.LoginC
 // attempt runs one whole login sequence in a fresh tab:
 // navigate, match, fill, submit, harvest. It returns either
 // cookies, a blocker, or a transient error — never more
-// than one of them.
+// than one of them. A failed attempt removes the browser
+// profile dir the launch created (after the browser is
+// killed); a successful harvest keeps it.
 func (d *chromedpReloginDriver) attempt(ctx context.Context, contract LoginContract, cred profile.LoginCredential) ([]ExportedCookie, *ReloginBlocker, error) {
-	tctx, cancel, err := d.browserContext(ctx)
+	// This attempt's copy is cleared on return; the
+	// caller's copy is cleared by Relogin.
+	defer cred.Clear()
+	tctx, cancel, removeDir, err := d.browserContext(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
+	// fail tears the browser down, removes a
+	// launch-created profile dir, and returns the failure.
+	fail := func(blocker *ReloginBlocker, terr error) ([]ExportedCookie, *ReloginBlocker, error) {
+		cancel()
+		removeDir()
+		return nil, blocker, terr
+	}
 	defer cancel()
 	if _, err := chromedp.Run(tctx, chromedp.Navigate(contract.LoginURL)); err != nil {
-		return nil, nil, err
+		return fail(nil, err)
 	}
 	// Wait for the form (or a blocker) to appear, polling
 	// the boolean snapshot. A page that never matches the
@@ -305,13 +364,29 @@ func (d *chromedpReloginDriver) attempt(ctx context.Context, contract LoginContr
 	if berr := d.waitForMatch(tctx, contract, 30*time.Second); berr != nil {
 		var blocker *ReloginBlocker
 		if errors.As(berr, &blocker) {
-			return nil, blocker, nil
+			return fail(blocker, nil)
 		}
-		return nil, nil, berr
+		return fail(nil, berr)
 	}
 	// Enter exactly the recorded steps, in order. No other
-	// input is ever dispatched.
+	// input is ever dispatched. Before a click step, the
+	// page is re-matched: a blocker appearing mid-fill
+	// (captcha/checkpoint after the first field) stops
+	// before the submit click, and a page that changed
+	// mid-fill is never clicked into. Each fill clears the
+	// field first: a prefilled/autofilled value must not be
+	// appended to. The typed value is dropped after each
+	// step.
 	for _, step := range contract.Steps {
+		if step.Action == "click" {
+			if berr := snapshotMatch(tctx, contract); berr != nil {
+				var blocker *ReloginBlocker
+				if errors.As(berr, &blocker) {
+					return fail(blocker, nil)
+				}
+				return fail(nil, berr)
+			}
+		}
 		var actErr error
 		switch step.Action {
 		case "fill":
@@ -322,44 +397,64 @@ func (d *chromedpReloginDriver) attempt(ctx context.Context, contract LoginContr
 			case "password":
 				value = cred.Password
 			default:
-				return nil, &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_unknown_field"}, nil
+				return fail(&ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_unknown_field"}, nil)
 			}
-			_, actErr = chromedp.Run(tctx, chromedp.SendKeys(step.Selector, value))
+			actErr = chromedp.Do(tctx, chromedp.Clear(step.Selector), chromedp.SendKeys(step.Selector, value))
+			value = ""
 		case "click":
 			_, actErr = chromedp.Run(tctx, chromedp.Click(step.Selector))
 		default:
-			return nil, &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_unknown_action"}, nil
+			return fail(&ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_unknown_action"}, nil)
 		}
 		if actErr != nil {
-			return nil, nil, actErr
+			return fail(nil, actErr)
 		}
 	}
 	// After submit: poll for blockers, then for the
 	// harvested session. A blocker here (captcha after
-	// submit, checkpoint) stops immediately.
-	return d.waitForCookies(tctx, contract, 30*time.Second)
+	// submit, checkpoint) stops immediately. A failed
+	// harvest removes the launch-created profile dir, like
+	// any other failed attempt.
+	cookies, blocker, terr := d.waitForCookies(tctx, contract, 30*time.Second)
+	if blocker != nil || terr != nil {
+		return fail(blocker, terr)
+	}
+	return cookies, nil, nil
 }
 
 // waitForMatch polls the boolean snapshot until the page
-// matches the contract, a blocker appears, or the deadline
-// passes (mismatch blocker). A snapshot evaluation failure
-// is transient: the page may still be loading.
+// matches the contract, a blocker signal appears, or the
+// deadline passes (mismatch blocker). Only a named blocker
+// signal stops immediately: a contract_mismatch on an early
+// poll means "the form is not there YET" (slow/async render)
+// as much as "the form is not the recorded one", so it polls
+// to the deadline like any other transient state. A snapshot
+// evaluation failure is transient for the same reason: the
+// page may still be loading.
 func (d *chromedpReloginDriver) waitForMatch(ctx context.Context, contract LoginContract, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
+	var lastMismatch *ReloginBlocker
 	for {
 		if err := snapshotMatch(ctx, contract); err == nil {
 			return nil
 		} else {
 			var blocker *ReloginBlocker
 			if errors.As(err, &blocker) {
-				return blocker
+				if isBlockerSignal(blocker) {
+					return blocker
+				}
+				lastMismatch = blocker
+			} else {
+				lastErr = err
 			}
-			lastErr = err
 		}
 		if time.Now().After(deadline) {
 			if lastErr != nil {
 				return lastErr
+			}
+			if lastMismatch != nil {
+				return lastMismatch
 			}
 			return &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_mismatch"}
 		}
@@ -386,10 +481,11 @@ func (d *chromedpReloginDriver) waitForCookies(ctx context.Context, contract Log
 				// A contract_mismatch AFTER submit is
 				// not a blocker: the page navigated
 				// away from the form (likely a
-				// successful login). Only named
-				// blocker kinds stop here; a mismatch
+				// successful login). Only a named
+				// blocker signal stops here; a mismatch
 				// falls through to the cookie check.
-				if blocker.Kind != NoticeBlocked {
+				// (Same distinction as waitForMatch.)
+				if isBlockerSignal(blocker) {
 					return nil, blocker, nil
 				}
 			}
@@ -431,12 +527,16 @@ func hasHatchSess(cookies []ExportedCookie) bool {
 }
 
 // ObserveLoginPage loads the login page headless (attach
-// first, launch fallback) and returns its redacted
-// form-control inventory. No credential is entered, nothing
-// is submitted, and the tab is closed on return. The
-// inventory script returns structure only: tag, type, name,
-// id, classes, aria-label presence — never values, text, or
-// hrefs.
+// first when a browser URL is configured, launch fallback)
+// and returns its redacted form-control inventory. No
+// credential is entered, nothing is submitted, and the tab
+// is closed on return. The inventory script returns
+// structure only: tag, type, name, id, classes, aria-label
+// presence — never values, text, or hrefs. The returned URL
+// is the final URL with query and fragment stripped. A
+// failed observation removes the browser profile dir the
+// launch created; a successful one keeps it (see
+// browserContext).
 func ObserveLoginPage(ctx context.Context, opts ObserveOptions) (LoginPageObservation, error) {
 	if opts.LoginURL == "" {
 		return LoginPageObservation{}, errors.New("observe: no login URL")
@@ -445,13 +545,18 @@ func ObserveLoginPage(ctx context.Context, opts ObserveOptions) (LoginPageObserv
 		return LoginPageObservation{}, errors.New("observe: no profile")
 	}
 	driver := &chromedpReloginDriver{opts: ReloginOptions{BrowserURL: opts.BrowserURL, BaseDir: opts.BaseDir, Inbound: opts.Inbound, Profile: opts.Profile}}
-	tctx, cancel, err := driver.browserContext(ctx)
+	tctx, cancel, removeDir, err := driver.browserContext(ctx)
 	if err != nil {
 		return LoginPageObservation{}, err
 	}
 	defer cancel()
-	if _, err := chromedp.Run(tctx, chromedp.Navigate(opts.LoginURL)); err != nil {
+	fail := func(err error) (LoginPageObservation, error) {
+		cancel()
+		removeDir()
 		return LoginPageObservation{}, err
+	}
+	if _, err := chromedp.Run(tctx, chromedp.Navigate(opts.LoginURL)); err != nil {
+		return fail(err)
 	}
 	// Let the page settle: poll until at least one form
 	// control exists or 15s pass (a page with no form at
@@ -463,14 +568,15 @@ func ObserveLoginPage(ctx context.Context, opts ObserveOptions) (LoginPageObserv
 		if err == nil {
 			obs = res
 			if len(obs.Elements) > 0 || time.Now().After(deadline) {
+				obs.URL = stripObservationURL(obs.URL)
 				return obs, nil
 			}
 		} else if time.Now().After(deadline) {
-			return LoginPageObservation{}, err
+			return fail(err)
 		}
 		select {
 		case <-ctx.Done():
-			return LoginPageObservation{}, ctx.Err()
+			return fail(ctx.Err())
 		case <-time.After(500 * time.Millisecond):
 		}
 	}

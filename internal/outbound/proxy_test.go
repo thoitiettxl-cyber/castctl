@@ -5,6 +5,7 @@
 package outbound
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -202,5 +203,172 @@ func TestLoopbackProxyNilDialer(t *testing.T) {
 	t.Parallel()
 	if _, _, err := NewLoopbackProxy(nil); err == nil {
 		t.Fatal("NewLoopbackProxy(nil) = nil error; want fail-closed")
+	}
+}
+
+// TestLoopbackProxyCONNECTClosesUpstream (D1): when the
+// client side of a CONNECT tunnel closes, the upstream
+// connection must be closed too — a leaked upstream socket
+// per tunnel would accumulate across re-logins in a
+// long-lived process. The upstream server proves it by
+// seeing EOF.
+func TestLoopbackProxyCONNECTClosesUpstream(t *testing.T) {
+	t.Parallel()
+	upstreamEOF := make(chan struct{})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, _ = io.Copy(io.Discard, conn)
+		close(upstreamEOF)
+	}()
+
+	dialer, _ := proxyTestDialer(t, ln.Addr().String())
+	proxy, proxyURL, err := NewLoopbackProxy(dialer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+	pu, _ := url.Parse(proxyURL)
+
+	conn, err := net.DialTimeout("tcp", pu.Host, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(conn, "CONNECT upstream.test:443 HTTP/1.1\r\nHost: upstream.test:443\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	status, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(status, "200") {
+		t.Fatalf("CONNECT status = %q; want 200", status)
+	}
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-upstreamEOF:
+	case <-time.After(5 * time.Second):
+		t.Fatal("upstream connection was not closed after the tunnel client closed (leaked upstream socket)")
+	}
+}
+
+// TestLoopbackProxyChunkedBody (S8): a chunked plain-HTTP
+// request body must arrive decoded at the upstream with a
+// single Content-Length and no Transfer-Encoding — the
+// proxy must not drop the body, and must not forward a
+// chunked stream it did not re-chunk.
+func TestLoopbackProxyChunkedBody(t *testing.T) {
+	t.Parallel()
+	var gotBody string
+	var gotTE []string
+	var gotCL int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody, gotTE, gotCL = string(body), r.TransferEncoding, r.ContentLength
+		fmt.Fprint(w, "chunked-ok")
+	}))
+	defer srv.Close()
+	srvURL, _ := url.Parse(srv.URL)
+
+	dialer, _ := proxyTestDialer(t, srv.Listener.Addr().String())
+	proxy, proxyURL, err := NewLoopbackProxy(dialer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+	pu, _ := url.Parse(proxyURL)
+	transport := &http.Transport{Proxy: http.ProxyURL(pu)}
+	client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
+	req, err := http.NewRequest("POST", "http://chunked-target.test:"+srvURL.Port()+"/x", io.NopCloser(strings.NewReader("chunked-payload")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ContentLength = -1 // forces chunked request encoding
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST via proxy: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "chunked-ok" {
+		t.Fatalf("body = %q; want chunked-ok", body)
+	}
+	if gotBody != "chunked-payload" {
+		t.Fatalf("upstream body = %q; want chunked-payload", gotBody)
+	}
+	if len(gotTE) != 0 {
+		t.Fatalf("upstream Transfer-Encoding = %v; want none (proxy re-framed with Content-Length)", gotTE)
+	}
+	if gotCL != int64(len("chunked-payload")) {
+		t.Fatalf("upstream Content-Length = %d; want %d", gotCL, len("chunked-payload"))
+	}
+}
+
+// TestLoopbackProxyDuplicateContentLength (S8): duplicate
+// Content-Length headers with differing values must be
+// rejected (400) without dialling the upstream — the last
+// value must never silently govern the body copy.
+func TestLoopbackProxyDuplicateContentLength(t *testing.T) {
+	t.Parallel()
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		fmt.Fprint(w, "ok")
+	}))
+	defer srv.Close()
+	srvURL, _ := url.Parse(srv.URL)
+
+	dialer, fake := proxyTestDialer(t, srv.Listener.Addr().String())
+	proxy, proxyURL, err := NewLoopbackProxy(dialer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+	pu, _ := url.Parse(proxyURL)
+
+	conn, err := net.DialTimeout("tcp", pu.Host, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// Two differing Content-Length headers over the same
+	// 5-byte body.
+	raw := "POST http://dup.test:" + srvURL.Port() + "/x HTTP/1.1\r\n" +
+		"Host: dup.test:" + srvURL.Port() + "\r\n" +
+		"Content-Length: 5\r\nContent-Length: 6\r\n\r\nhello"
+	if _, err := conn.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	status, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(status, "400") {
+		t.Fatalf("status = %q; want 400 for differing duplicate Content-Length", status)
+	}
+	if hits != 0 || len(fake.dials) != 0 {
+		t.Fatalf("upstream hits = %d, outbound dials = %d; want 0/0 (rejected before dialling)", hits, len(fake.dials))
 	}
 }

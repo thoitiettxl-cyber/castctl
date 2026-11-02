@@ -154,7 +154,7 @@ func TestMockReloginHarvest(t *testing.T) {
 	_, port, _ := net.SplitHostPort(host)
 
 	fake := &mockOutbound{target: host}
-	baseDir := t.TempDir()
+	baseDir := mockBaseDir(t)
 	driver := NewReloginDriver(ReloginOptions{
 		BaseDir:     baseDir,
 		Inbound:     mockInbound{dialer: outbound.NewDialer(fake, &mockResolver{}, option.OutboundTLSOptions{})},
@@ -218,7 +218,7 @@ func TestMockReloginCaptchaStopsBeforeSubmit(t *testing.T) {
 	_, port, _ := net.SplitHostPort(host)
 
 	fake := &mockOutbound{target: host}
-	baseDir := t.TempDir()
+	baseDir := mockBaseDir(t)
 	driver := NewReloginDriver(ReloginOptions{
 		BaseDir:     baseDir,
 		Inbound:     mockInbound{dialer: outbound.NewDialer(fake, &mockResolver{}, option.OutboundTLSOptions{})},

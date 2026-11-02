@@ -16,7 +16,12 @@ in headlessly against the versioned login contract
 read-only observation via `castctl auth observe-login`, never
 by credential submission). Any contract mismatch, captcha, 2FA,
 checkpoint, or lock stops the entry with one Telegram alert;
-nothing is ever bypassed. See [The `keeper` section](config.md#the-keeper-section)
+nothing is ever bypassed. **The contract is NOT yet
+established**: the embedded fixture is unobserved (no
+read-only observation has succeeded — the sandbox transport
+intercept blocks the page load), so the driver refuses to run
+and no live re-login may be attempted until an observation
+from outside the sandbox intercept records the contract. See [The `keeper` section](config.md#the-keeper-section)
 and [The `credentials` section](config.md#the-credentials-section).
 
 Release-build note: the release workflow

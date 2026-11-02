@@ -41,7 +41,12 @@ import (
 // request line may carry credentials in a query string, and
 // the proxy is not a place that records traffic. Errors are
 // fixed strings. The listener binds 127.0.0.1 only; cleanup
-// closes the listener and every open connection.
+// closes the listener and every open connection. (This file
+// logs nothing at all; the Dialer it dials through may emit
+// debug-level dial metadata — network, bare host via
+// SafeHost, port, no URLs/headers/values — see
+// internal/outbound/dialer.go. The no-logging claim here is
+// scoped to this file's code.)
 
 // proxyDialTimeout bounds one upstream dial through the
 // outbound. Chrome's own timeouts bound the rest; the proxy
@@ -272,6 +277,11 @@ func (p *LoopbackProxy) handleConnect(client net.Conn, br *bufio.Reader, target 
 		return p.proxyError(client, 502)
 	}
 	defer p.trackUpstream(up)()
+	// The tunnel owns the upstream socket: closing it here
+	// (and in pipe) is what reclaims it. The deferred
+	// trackUpstream forget runs after this close (LIFO) and
+	// only drops the set entry.
+	defer up.Close()
 	if _, err := io.WriteString(client, "HTTP/1.1 200 Connection Established\r\nProxy-Connection: close\r\n\r\n"); err != nil {
 		return err
 	}
@@ -306,6 +316,50 @@ func (p *LoopbackProxy) handleHTTP(client net.Conn, br *bufio.Reader, method, ta
 	if host == "" {
 		return p.proxyError(client, 400)
 	}
+	// Body plan, decided (and the body read) BEFORE the
+	// outbound dial: a malformed body framing must be
+	// refused without spending a dial on it. At most one
+	// of Content-Length / chunked Transfer-Encoding (both
+	// together is a smuggling shape: refuse), duplicate
+	// Content-Length values must agree (differing values:
+	// refuse), any other Transfer-Encoding is refused. A
+	// chunked body is decoded fully (bounded) before
+	// forwarding, so the upstream request carries one
+	// Content-Length and no Transfer-Encoding.
+	contentLength := -1 // -1: no body framing present
+	chunked := false
+	for _, h := range headers {
+		switch strings.ToLower(h.key) {
+		case "content-length":
+			n, err := strconv.Atoi(strings.TrimSpace(h.value))
+			if err != nil || n < 0 || n > maxProxyBodyBytes {
+				return p.proxyError(client, 400)
+			}
+			if contentLength >= 0 && contentLength != n {
+				return p.proxyError(client, 400)
+			}
+			contentLength = n
+		case "transfer-encoding":
+			if chunked || strings.ToLower(strings.TrimSpace(h.value)) != "chunked" {
+				return p.proxyError(client, 400)
+			}
+			chunked = true
+		}
+	}
+	if chunked && contentLength >= 0 {
+		return p.proxyError(client, 400)
+	}
+	var decodedBody []byte
+	if chunked {
+		decodedBody, err = readChunkedBody(br, maxProxyBodyBytes)
+		if err != nil {
+			return p.proxyError(client, 400)
+		}
+		contentLength = len(decodedBody)
+	}
+	// Dial only after the body framing was validated (and a
+	// chunked body fully read): malformed requests never
+	// spend an outbound dial.
 	ctx, cancel := context.WithTimeout(context.Background(), proxyDialTimeout)
 	defer cancel()
 	up, err := p.dialer.DialContext(ctx, "tcp", host, uint16(port))
@@ -313,11 +367,15 @@ func (p *LoopbackProxy) handleHTTP(client net.Conn, br *bufio.Reader, method, ta
 		return p.proxyError(client, 502)
 	}
 	defer p.trackUpstream(up)()
+	defer up.Close()
 	// Rebuild the request in origin form. Hop-by-hop and
 	// proxy headers never cross: Connection,
 	// Proxy-Connection, Proxy-Authorization, Keep-Alive, TE,
 	// Trailer, and any header named by Connection. The
-	// upstream leg is Connection: close.
+	// upstream leg is Connection: close. Content-Length is
+	// rewritten as a single header (the agreed value, or the
+	// decoded chunked length); Transfer-Encoding never
+	// crosses (chunked bodies are de-chunked above).
 	origin := u.RequestURI()
 	var sb strings.Builder
 	sb.WriteString(method + " " + origin + " HTTP/1.1\r\n")
@@ -326,33 +384,32 @@ func (p *LoopbackProxy) handleHTTP(client net.Conn, br *bufio.Reader, method, ta
 		"connection": true, "proxy-connection": true,
 		"proxy-authorization": true, "keep-alive": true,
 		"te": true, "trailer": true, "transfer-encoding": true,
-		"host": true,
+		"host": true, "content-length": true,
 	}
 	if connVal, ok := headerValue(headers, "Connection"); ok {
 		for _, tok := range strings.Split(connVal, ",") {
 			skip[strings.ToLower(strings.TrimSpace(tok))] = true
 		}
 	}
-	contentLength := 0
 	for _, h := range headers {
 		lk := strings.ToLower(h.key)
 		if skip[lk] {
 			continue
 		}
-		if lk == "content-length" {
-			n, err := strconv.Atoi(strings.TrimSpace(h.value))
-			if err != nil || n < 0 || n > maxProxyBodyBytes {
-				return p.proxyError(client, 400)
-			}
-			contentLength = n
-		}
 		sb.WriteString(h.key + ": " + h.value + "\r\n")
+	}
+	if contentLength >= 0 {
+		sb.WriteString("Content-Length: " + strconv.Itoa(contentLength) + "\r\n")
 	}
 	sb.WriteString("Connection: close\r\n\r\n")
 	if _, err := io.WriteString(up, sb.String()); err != nil {
 		return err
 	}
-	if contentLength > 0 {
+	if chunked {
+		if _, err := up.Write(decodedBody); err != nil {
+			return err
+		}
+	} else if contentLength > 0 {
 		if _, err := io.CopyN(up, br, int64(contentLength)); err != nil {
 			return err
 		}
@@ -361,6 +418,54 @@ func (p *LoopbackProxy) handleHTTP(client net.Conn, br *bufio.Reader, method, ta
 	// close was requested). No parsing, no logging.
 	_, err = io.Copy(client, up)
 	return err
+}
+
+// readChunkedBody decodes one chunked request body from br,
+// bounded by limit total bytes. Chunk extensions are ignored;
+// trailers are read and discarded. Any malformed framing or
+// over-limit body is an error (the caller answers 400).
+func readChunkedBody(br *bufio.Reader, limit int) ([]byte, error) {
+	var out []byte
+	for {
+		line, err := readHeaderLine(br, maxProxyHeaderBytes)
+		if err != nil {
+			return nil, err
+		}
+		sizeStr := line
+		if i := strings.IndexByte(sizeStr, ';'); i >= 0 {
+			sizeStr = sizeStr[:i]
+		}
+		size, err := strconv.ParseUint(strings.TrimSpace(sizeStr), 16, 63)
+		if err != nil {
+			return nil, errors.New("outbound: proxy: malformed chunk size")
+		}
+		if size == 0 {
+			for {
+				trailer, err := readHeaderLine(br, maxProxyHeaderBytes)
+				if err != nil {
+					return nil, err
+				}
+				if trailer == "" {
+					return out, nil
+				}
+			}
+		}
+		if size > uint64(limit-len(out)) {
+			return nil, errors.New("outbound: proxy: chunked body too large")
+		}
+		chunk := make([]byte, size)
+		if _, err := io.ReadFull(br, chunk); err != nil {
+			return nil, errors.New("outbound: proxy: truncated chunked body")
+		}
+		out = append(out, chunk...)
+		end, err := readHeaderLine(br, maxProxyHeaderBytes)
+		if err != nil {
+			return nil, err
+		}
+		if end != "" {
+			return nil, errors.New("outbound: proxy: malformed chunk ending")
+		}
+	}
 }
 
 // proxyError writes a fixed, body-free error response. No
@@ -376,11 +481,15 @@ func (p *LoopbackProxy) proxyError(client net.Conn, status int) error {
 }
 
 // pipe copies both directions until one side ends, then
-// closes the write side of the other via full close (both
-// conns are closed by their owners; half-close is unnecessary
-// for a CONNECT tunnel whose peers close after their last
-// byte).
+// closes BOTH connections: the first direction to end
+// unblocks the other copy, and closing here is what
+// reclaims the upstream socket — neither the serve loop
+// (which closes only the client side) nor the deferred
+// trackUpstream forget (which only drops the set entry)
+// closes it. Closing a conn its owner also closes is safe.
 func (p *LoopbackProxy) pipe(a, b net.Conn) error {
+	defer a.Close()
+	defer b.Close()
 	errCh := make(chan error, 2)
 	go func() { _, err := io.Copy(a, b); errCh <- err }()
 	go func() { _, err := io.Copy(b, a); errCh <- err }()

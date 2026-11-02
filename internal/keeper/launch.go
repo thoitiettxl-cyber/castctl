@@ -26,12 +26,16 @@ import (
 // Launch fallback (with_chromedp only): a castctl-owned Chrome
 // for screencast login when no attachable browser exists.
 //
-// S2 (cookie keep-alive work): the inbound plumbing now
-// exists — internal/outbound's loopback proxy, supplied by
-// the command layer as an InboundBuilder — so a launched
-// browser's egress goes through the profile's outbound and
-// the launch path no longer refuses unconditionally. A nil
-// inbound still fails closed BEFORE spawning anything.
+// The S2 inbound plumbing (internal/outbound's loopback proxy,
+// supplied by the command layer as an InboundBuilder) exists
+// for routing a launched browser's egress through the
+// profile's outbound — but it is supplied ONLY to the
+// headless re-login driver (launchHeadlessContext in
+// relogin_chromedp.go). This launch runner receives whatever
+// inbound its caller passes: the screencast path
+// (internal/commands/authlogin.go) still passes nil today,
+// so it still fails closed BEFORE spawning anything. A nil
+// inbound here always fails closed, whatever the caller.
 
 type launchRunner struct {
 	baseDir     string

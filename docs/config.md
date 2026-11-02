@@ -428,6 +428,19 @@ The web UI edits this block through `GET`/`PUT /settings/keeper`
 null` deletes the block). Keeper status display (`GET /keeper`)
 is read-only: the web UI never ticks the keeper.
 
+Fixed operational bounds (not config keys — changing them
+is a code change, and whether any should become configurable
+is an open decision, not a silent default): the S2 loopback
+proxy dial timeout 30s, header cap 64 KiB, body cap 16 MiB
+(`internal/outbound/proxy.go`); the headless driver match
+wait 30s, cookie wait 30s, poll 500ms, observation settle
+15s, attach dial timeout 10s, observation context timeout
+90s, form-inventory cap 200 elements
+(`internal/keeper/relogin_chromedp.go`,
+`internal/commands/authobserve.go`); validation caps
+`MaxRetryBackoffSteps = 8`, `MaxKeeperAttempts = 10`
+(`internal/profile/keeper.go`, `internal/keeper/backoff.go`).
+
 Behaviour — the self-healing loop, in order:
 
 - **Keep-alive.** Each tick runs the cheap chain only
@@ -461,8 +474,13 @@ Behaviour — the self-healing loop, in order:
   goes through the profile's outbound via the loopback proxy
   (S2 inbound plumbing — AGENTS.md rule 2 holds for the
   browser too). The login page must match the versioned
-  contract (recorded by read-only observation, see
-  `docs/providers.md`); on any contract mismatch, captcha,
+  contract (to be recorded by read-only observation, see
+  `docs/providers.md` — the embedded contract is currently
+  UNOBSERVED: the driver refuses to run, `auth status`
+  reports `headless_available: false` with reason
+  `no_contract`, and no live re-login may be attempted until
+  a read-only observation from outside the sandbox transport
+  intercept records it); on any contract mismatch, captcha,
   2FA, checkpoint, or lock signal, the driver stops
   immediately, never bypasses, and the entry stops with one
   alert for the incident. Harvested cookies are written
@@ -495,8 +513,9 @@ Behaviour — the self-healing loop, in order:
   future expiry is written verbatim), and a filtered cookie
   absent from the snapshot is dropped. An invalid export
   falls through to re-login instead of stopping immediately;
-  an unreachable browser with no re-login configured stops
-  the entry with the `export_failed` reason.
+  an unreachable browser with no re-login configured records
+  an `export_failed` outcome and keeps ticking (transient: no
+  stop, no alert; the next tick retries).
 - **Cookie save.** Netscape jar only (7 columns, LF, trailing
   newline, deterministic sort). Set-Cookie updates merge into
   a stored jar, and into a non-jar file by converting it to
@@ -647,7 +666,7 @@ entry (unknown keys are rejected):
 | `tag` | string | — (required) | Entry tag, unique across entries. Tags are exact (same rules as keeper tags: no surrounding whitespace, no `/`, `\`, control characters, or `.`/`..`). |
 | `profile` | string | — (required) | Tag of the profile these credentials log in. Must name a profile in `profiles`; one entry per profile — a second entry for the same profile is a config error (exit 2). |
 | `username` | string | — (required) | Login username (email). Write-only: never printed, logged, or returned by any API; redacted as `<redacted>` in every redacted view. |
-| `password` | string | — (required) | Login password. Same write-only treatment as `username`. Stored reversibly (form submission needs the plaintext) — never hashed, never taken from env/argv, never written to a separate file. |
+| `password` | string | — (required) | Login password. Same write-only treatment as `username`. Stored reversibly (form submission needs the plaintext) — never hashed, never taken from env/argv. Castctl itself never writes the values to a separate file, but a headless re-login types them into a browser: see the browser-retention note in [Security](security.md). |
 
 Rules:
 
@@ -655,15 +674,19 @@ Rules:
   (`credentials` key); the referenced entry must exist and
   must name the keeper entry's own profile — a dangling tag
   or a cross-profile tag is a config error (exit 2).
-- The config file stays mode 0600; the guarded atomic save
+- The config file is saved mode 0600 by the guarded atomic
+  save (save-side enforcement: loading does not refuse a
+  world-readable file); the guarded atomic save
   applies. **No `.bak`/backup of `config.json` is ever made
   for credentials** (a backup would be a second copy of
   plaintext secrets): the save path writes the new file
   atomically without retaining the previous bytes.
 - Credentials are readable only through the keeper-internal
-  accessor (`CredentialForProfile`); no exported struct
-  field carries a credential value, so no plugin API can
-  serialise one. They are never exposed to plugins, never
+  accessor (`CredentialForProfile`); values live in unexported
+  fields on the config entries, and the only value-carrying
+  accessor returns the keeper-internal `LoginCredential`
+  value (in memory only, never marshalled, logged, or handed
+  to a plugin), so no plugin API can serialise one. They are never exposed to plugins, never
   logged, and never appear in `auth status`, keeper state,
   audit records, or Telegram notices (profile name only).
 - The web UI never edits this block: it round-trips
@@ -673,10 +696,17 @@ Rules:
   same R8 assertion as the webui token). The PR #29
   file-edit-removal architecture limit (a token removed by a
   file edit, followed by an unrelated API save, could in
-  principle restore it) does **not** apply here: credentials
-  are re-read from disk on every keeper factory build, and
-  no live in-memory comparator caches them, so a file edit
-  is authoritative on the next tick.
+  principle restore it) does **not** apply here: there is no
+  live in-memory comparator for credentials, and saves read
+  the file on disk. A file edit that removes or rotates a
+  credential entry is authoritative on the next re-login
+  attempt: the keeper re-reads `config.json` from disk each
+  time a re-login is attempted, so a running `keeper run` /
+  `telegram run` picks the edit up without a restart. (The
+  driver wiring itself — which entries get a driver — is
+  fixed when the process starts; only the credential values
+  are re-read. Removing a credential does not invalidate
+  cookies already harvested.)
 - A keeper entry with no `credentials` reference never
   re-logs in: on expiry it stops and alerts (the
   human-recovery path via `auth login` / `auth import`).

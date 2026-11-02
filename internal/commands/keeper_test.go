@@ -83,6 +83,14 @@ type keeperFakeGateway struct {
 	// the request context is done, modelling a wedged cheap
 	// chain. Set before the test server starts; read under mu.
 	blockSession bool
+	// blockUntil, when non-nil, is closed by the test to
+	// unblock a blocked /api/session handler, which then
+	// returns a non-200 (so the outcome is deterministic
+	// whatever the client timeout race decides). The
+	// ctx.Done()-only block races the client's timeout
+	// handling and must not be used by tests that assert a
+	// specific outcome on timeout.
+	blockUntil chan struct{}
 }
 
 // keeperFakeSessionStep is one scripted /api/session response.
@@ -96,8 +104,14 @@ func (f *keeperFakeGateway) handler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/api/session" {
 		f.mu.Lock()
 		block := f.blockSession
+		blockUntil := f.blockUntil
 		f.mu.Unlock()
 		if block {
+			if blockUntil != nil {
+				<-blockUntil
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 			<-r.Context().Done()
 			return
 		}
@@ -801,8 +815,16 @@ func TestKeeperCheckDefaultPathProfileDirIsFile(t *testing.T) {
 // not run concurrently with other keeper check tests. The
 // override is restored before the test returns.
 func TestKeeperCheckTickTimeoutIsHardError(t *testing.T) {
-	fake := &keeperFakeGateway{sessionStatus: 200, authStatus: 200, blockSession: true}
+	// The fake blocks until the test closes blockUntil, then
+	// returns a non-200, so the outcome is "error" whichever
+	// side of the timeout race the client lands on (a
+	// ctx.Done()-only block races the client's timeout
+	// handling against the implicit 200-empty-body
+	// AuthError mapping — the V-1 flake). Cleanup closes
+	// the channel before the test server closes.
+	fake := &keeperFakeGateway{sessionStatus: 200, authStatus: 200, blockSession: true, blockUntil: make(chan struct{})}
 	env, out, _, _ := keeperTestEnv(t, keeperTestConfig(), fake)
+	t.Cleanup(func() { close(fake.blockUntil) })
 	oldTimeout := keeperCheckTimeout
 	keeperCheckTimeout = 100 * time.Millisecond
 	defer func() { keeperCheckTimeout = oldTimeout }()
@@ -820,4 +842,79 @@ func TestKeeperCheckTickTimeoutIsHardError(t *testing.T) {
 	if res.Outcome != "error" {
 		t.Fatalf("printed outcome = %q, want \"error\"", res.Outcome)
 	}
+}
+
+// TestWireReloginReloadsCredentials (D5/R-3) pins that the
+// credential provider installed by wireRelogin re-reads
+// config.json from disk on every invocation: a credential
+// removed by file edit (cleanly, or by breaking the config)
+// is not usable on the next attempt, and a rotated password
+// is picked up — with no restart, from the factory built
+// against the original config. Fake sentinel values only.
+func TestWireReloginReloadsCredentials(t *testing.T) {
+	t.Parallel()
+	const user = "SENTINEL-USER-9f3a7c"
+	const pass = "SENTINEL-PASS-9f3a7c"
+	const rotated = "SENTINEL-PASS-ROTATED-9f3a7c"
+	v1 := `{"default_profile":"muse01","profiles":{"muse01":{}},` +
+		`"credentials":[{"tag":"c1","profile":"muse01","username":"` + user + `","password":"` + pass + `"}],` +
+		`"keeper":[{"tag":"k1","profile":"muse01","interval":"1h","credentials":"c1"}]}`
+	fake := &keeperFakeGateway{sessionStatus: 200, authStatus: 200}
+	env, _, _, home := keeperTestEnv(t, v1, fake)
+	configFile := filepath.Join(home, "config.json")
+	single, found, err := profile.LoadSingleConfig(home)
+	if err != nil || !found {
+		t.Fatalf("load config: found=%v err=%v", found, err)
+	}
+	kcfg, err := profile.ResolveKeeper(single)
+	if err != nil || len(kcfg.Entries) != 1 {
+		t.Fatalf("resolve keeper: %v entries=%v", err, kcfg)
+	}
+	rts := &keeperRuntimes{
+		env: env, g: &globalOpts{},
+		loc:    &profile.ConfigLocation{ConfigDir: home, ConfigFile: configFile},
+		single: single, ctx: context.Background(),
+	}
+	deps, err := rts.factory(kcfg.Entries[0], single.Profiles["muse01"])
+	if err != nil {
+		t.Fatalf("factory: %v", err)
+	}
+	if deps.CredentialProvider == nil {
+		t.Fatal("no credential provider wired")
+	}
+	cred, ok := deps.CredentialProvider()
+	if !ok || cred.Username != user || cred.Password != pass {
+		t.Fatalf("provider() = (%v, %v); want the configured sentinels", cred.Username != "", ok)
+	}
+	cred.Clear()
+
+	rewrite := func(t *testing.T, cfg string) {
+		t.Helper()
+		if err := os.WriteFile(configFile, []byte(cfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Broken removal: credentials block gone but the keeper
+	// entry still references it — the config no longer
+	// parses, so the provider must fail closed.
+	rewrite(t, `{"default_profile":"muse01","profiles":{"muse01":{}},`+
+		`"keeper":[{"tag":"k1","profile":"muse01","interval":"1h","credentials":"c1"}]}`)
+	if _, ok := deps.CredentialProvider(); ok {
+		t.Fatal("provider() succeeded after the config broke; want fail-closed")
+	}
+	// Clean removal: block and reference both gone.
+	rewrite(t, `{"default_profile":"muse01","profiles":{"muse01":{}},`+
+		`"keeper":[{"tag":"k1","profile":"muse01","interval":"1h"}]}`)
+	if _, ok := deps.CredentialProvider(); ok {
+		t.Fatal("provider() succeeded after the credential was removed; want no credential")
+	}
+	// Rotation: same tag, new password.
+	rewrite(t, `{"default_profile":"muse01","profiles":{"muse01":{}},`+
+		`"credentials":[{"tag":"c1","profile":"muse01","username":"`+user+`","password":"`+rotated+`"}],`+
+		`"keeper":[{"tag":"k1","profile":"muse01","interval":"1h","credentials":"c1"}]}`)
+	cred, ok = deps.CredentialProvider()
+	if !ok || cred.Password != rotated {
+		t.Fatalf("provider() after rotation: ok=%v; want the rotated password", ok)
+	}
+	cred.Clear()
 }

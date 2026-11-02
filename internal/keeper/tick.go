@@ -465,9 +465,10 @@ func classifyCookiesFile(raw []byte, path string) ([]StoredCookie, bool, error) 
 	}
 	// Rebuild stored cookies from the header for the check's
 	// Cookie header construction; domain/path are unknown in
-	// this form, so they are placeholders that never reach a
-	// write (non-jar files are never rewritten from Set-Cookie
-	// captures).
+	// this form, so they are placeholders. On a rotation
+	// write, a non-jar file is converted to jar form (G5)
+	// and these placeholders become the jar rows; with no
+	// rotation the file is left byte-identical.
 	var cookies []StoredCookie
 	for _, pair := range strings.Split(header, ";") {
 		pair = strings.TrimSpace(pair)
@@ -1021,7 +1022,8 @@ func recordGatewayDown(clock Clock, store *Store, base time.Duration, updates []
 // provider or a missing credential is ErrReloginUnavailable
 // (the entry is misconfigured for re-login). A *ReloginBlocker
 // passes through untouched; any other driver error passes
-// through for the tick to stop with relogin_failed.
+// through for the tick to stop with relogin_failed. The
+// fetched credential copy is cleared on return.
 func tryRelogin(ctx context.Context, deps TickDeps, snapshotCookies []StoredCookie, now time.Time) ([]StoredCookie, int, *ReloginBlocker, error) {
 	if deps.CredentialProvider == nil {
 		return nil, 0, nil, ErrReloginUnavailable
@@ -1030,6 +1032,7 @@ func tryRelogin(ctx context.Context, deps TickDeps, snapshotCookies []StoredCook
 	if !ok {
 		return nil, 0, nil, ErrReloginUnavailable
 	}
+	defer cred.Clear()
 	raw, err := deps.Relogin.Relogin(ctx, cred)
 	if err != nil {
 		var blocker *ReloginBlocker
