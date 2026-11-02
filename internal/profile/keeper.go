@@ -107,12 +107,16 @@ import (
 //     S2 proxy dials. Entries are hostnames or IPv4 literals:
 //     no scheme, port, userinfo, path, query, wildcard, or
 //     IPv6 literal. Matching is exact on the lowercased host
-//     (one trailing dot ignored). A target whose host is not
+//     (trailing dots ignored). A target whose host is not
 //     listed is refused without a dial, and a literal IP in a
 //     loopback, link-local, or private range is refused even
 //     when it is explicitly listed: the range rule is
 //     absolute and listing does NOT override it (the
-//     default list contains no such address). To reach a
+//     default list contains no such address). The range rule
+//     recognises canonical literals, trailing dots in any
+//     number, and inet_aton-style shorthand (see
+//     internal/outbound); other spellings match exactly as
+//     hostnames. To reach a
 //     refused-range address, list a hostname that resolves
 //     to it at the egress.
 //     An absent key — or an entry without one — means the
@@ -418,8 +422,10 @@ var keeperEntryKeys = map[string]bool{
 }
 
 // normalizeAllowedHost validates one `proxy_allowed_hosts`
-// entry and returns its match form: lowercased, one trailing
-// dot removed. Entries are hostnames or IPv4 literals only:
+// entry and returns its match form: lowercased, all
+// trailing dots removed (D12: every normalisation pass
+// strips all dots, so a multi-dot entry collapses to the
+// same form a request collapses to). Entries are hostnames or IPv4 literals only:
 // no scheme, port, userinfo, path, query, fragment,
 // wildcard, bracket, or whitespace. An entry that parses as
 // a loopback/private/link-local IP is NOT rejected here: it
@@ -437,7 +443,7 @@ func normalizeAllowedHost(raw string) (string, error) {
 		return "", fmt.Errorf("host entry has surrounding whitespace")
 	}
 	s := strings.ToLower(raw)
-	s = strings.TrimSuffix(s, ".")
+	s = strings.TrimRight(s, ".")
 	if s == "" {
 		return "", fmt.Errorf("host must not be empty")
 	}

@@ -425,7 +425,7 @@ entry (unknown keys are rejected):
 | `proxy_dial_timeout` | duration string | `30s` | S2 loopback proxy: bound on one upstream dial through the outbound. Positive, at most 1 minute. |
 | `proxy_max_header_bytes` | integer | `65536` | S2 loopback proxy: max bytes of one request's header block. 1–1048576. |
 | `proxy_max_body_bytes` | integer | `16777216` | S2 loopback proxy: max bytes of a forwarded plain-HTTP request body. 1–1073741824. |
-| `proxy_allowed_hosts` | array of strings | `["auth.muse.ai", "muse.ai"]` | S2 loopback proxy guard allowlist (see below): the only hosts the proxy dials. Non-empty; each entry a hostname or IPv4 literal, exact match on the lowercased host (one trailing dot ignored), no scheme/port/userinfo/path/query/wildcard/IPv6 literal. Duplicates are kept. |
+| `proxy_allowed_hosts` | array of strings | `["auth.muse.ai", "muse.ai"]` | S2 loopback proxy guard allowlist (see below): the only hosts the proxy dials. Non-empty; each entry a hostname or IPv4 literal, exact match on the lowercased host (trailing dots ignored), no scheme/port/userinfo/path/query/wildcard/IPv6 literal. Duplicates are kept. |
 | `relogin_match_timeout` | duration string | `30s` | Headless driver: how long to poll for the login form (or a blocker) to appear. Positive, at most 10 minutes. |
 | `relogin_cookie_timeout` | duration string | `30s` | Headless driver: how long to poll for a session cookie after submit. Positive, at most 10 minutes. |
 | `relogin_poll_interval` | duration string | `500ms` | Headless driver: poll cadence for form/cookie waits and observation settle. Positive, at most 1 minute. |
@@ -482,7 +482,16 @@ ULA), CGNAT (`100.64.0.0/10`), unspecified, or multicast
 range, or any host not on `proxy_allowed_hosts`. The two
 rules are conjunctive: an allowlist entry naming a
 refused-range address does NOT permit it — list the
-hostname instead. Hostnames are never resolved locally to
+hostname instead. The range rule recognises canonical IP
+literals, trailing dots in any number, and inet_aton-style
+shorthand spellings (1–4 dot-separated parts, each decimal,
+octal with a leading 0, or hexadecimal with a 0x prefix,
+e.g. `127.1`, `0x7f.0.0.1`, `0177.0.0.1`, `2130706433`); a
+spelling outside that set is matched exactly as a hostname.
+Forms with digits invalid for their implied base (e.g. an
+`08` octal part) are not recognised as IPs; whether any
+egress resolver interprets such a form as an address is
+unmeasured. Hostnames are never resolved locally to
 apply the range check (resolution happens at the egress,
 where a listed hostname may legitimately resolve to a
 private address, e.g. through a VPN outbound; only literal
@@ -490,7 +499,7 @@ IP targets are range-refused, so egress-reachable private
 targets behind a listed hostname keep working, and an
 operator who needs a literal private target dialled must
 reach it through a hostname on the allowlist). Matching is
-exact on the lowercased host, one trailing dot ignored, no
+exact on the lowercased host, trailing dots ignored, no
 wildcards, no suffix matching, ports ignored. The default
 allowlist is the two Muse hosts the login flow is known
 from code to need: `auth.muse.ai` (the default login URL

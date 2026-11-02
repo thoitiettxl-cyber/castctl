@@ -636,9 +636,11 @@ func TestLoopbackProxyGuardMalformedAuthorityRejected(t *testing.T) {
 	// carrying a query, fragment, path, or userinfo is
 	// malformed and is rejected (400) BEFORE the guard, so
 	// no query/fragment content can reach the refusal log.
+	// The no-port `?` form (S27) 400s earlier, at
+	// SplitHostPort, on the same 400 path.
 	opts := proxyTestOpts("allowed.test")
 	_, proxyURL, fake, refused := guardTestProxy(t, "", opts)
-	for _, authority := range []string{"evil.example?token=SECRET:443", "evil.example#frag:443", "evil.example/path:443"} {
+	for _, authority := range []string{"evil.example?token=SECRET:443", "evil.example?token=SECRET", "evil.example#frag:443", "evil.example/path:443"} {
 		if code := guardCONNECT(t, proxyURL, authority); code != 400 {
 			t.Fatalf("CONNECT %s: status = %d; want 400", authority, code)
 		}
@@ -677,5 +679,245 @@ func TestLoopbackProxyLogRefusedSanitises(t *testing.T) {
 	last := (*refused)[3]
 	if len(last) > 253 || !utf8.ValidString(last) {
 		t.Fatalf("truncated host is %d bytes, valid UTF-8 = %v; want at most 253 bytes at a rune boundary", len(last), utf8.ValidString(last))
+	}
+}
+
+// TestRefusedIPLiteralForms pins the exact set of literal
+// spellings the range rule recognises (D12): canonical
+// literals, any number of trailing dots, and inet_aton-style
+// shorthand (1-4 parts, decimal/octal/hex). Spellings
+// outside that set are NOT recognised as IPs here: they fall
+// through to exact allowlist matching, which refuses them
+// unless listed under that exact spelling. In particular a
+// part whose digits are invalid for its implied base
+// ("08" as octal) is not parsed; whether any resolver in the
+// egress path interprets such a form as an address is
+// unmeasured (residual, stated in docs/config.md).
+func TestRefusedIPLiteralForms(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"127.0.0.1", true},
+		{"127.0.0.1.", true},
+		{"127.0.0.1...", true},
+		{"127.1", true},
+		{"127.0.1", true},
+		{"127.65537", true},
+		{"0x7f.0.0.1", true},
+		{"0X7F.0.0.1", true},
+		{"0x7f.1", true},
+		{"0177.0.0.1", true},
+		{"2130706433", true},
+		{"0x7f000001", true},
+		{"10.1", true},
+		{"192.168.1", true},
+		{"0.0.0.0", true},
+		{"0", true},
+		{"::1", true},
+		{"fe80::1%eth0", true},
+		{"8.8.8.8", false},
+		{"8.8.8.8.", false},
+		{"134744072", false},
+		{"example.test", false},
+		{"example.test.", false},
+		{"1.2.3.4.5", false},
+		{"08.0.0.1", false},
+		{"0x", false},
+		{"", false},
+		{"1..2", false},
+		{"256.0.0.1", false},
+		{"4294967296", false},
+		{"0x100000000", false},
+		{"127.1.2.3.4", false},
+	}
+	for _, tc := range cases {
+		if got := refusedIPLiteral(tc.host); got != tc.want {
+			t.Errorf("refusedIPLiteral(%q) = %v; want %v", tc.host, got, tc.want)
+		}
+	}
+}
+
+// TestParseIPLiteralCanonicalises pins the exact addresses
+// the shorthand parser produces, including the multi-part
+// compositions and the invalid forms. It covers the new
+// function only (no pre-fix equivalent); the behavioural
+// guard tests above prove the fix discriminates.
+func TestParseIPLiteralCanonicalises(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		host string
+		want string
+		ok   bool
+	}{
+		{"127.0.0.1", "127.0.0.1", true},
+		{"::1", "::1", true},
+		{"::ffff:127.0.0.1", "::ffff:127.0.0.1", true},
+		{"127.1", "127.0.0.1", true},
+		{"127.0.1", "127.0.0.1", true},
+		{"127.65537", "127.1.0.1", true},
+		{"10.1", "10.0.0.1", true},
+		{"192.168.1", "192.168.0.1", true},
+		{"0x7f.0.0.1", "127.0.0.1", true},
+		{"0X7F.0.0.1", "127.0.0.1", true},
+		{"0x7f.1", "127.0.0.1", true},
+		{"0177.0.0.1", "127.0.0.1", true},
+		{"0177.1", "127.0.0.1", true},
+		{"2130706433", "127.0.0.1", true},
+		{"0x7f000001", "127.0.0.1", true},
+		{"0", "0.0.0.0", true},
+		{"134744072", "8.8.8.8", true},
+		{"8.8.2056", "8.8.8.8", true},
+		{"08.0.0.1", "", false},
+		{"0x", "", false},
+		{"0xg", "", false},
+		{"", "", false},
+		{"1..2", "", false},
+		{"1.2.3.4.5", "", false},
+		{"256.0.0.1", "", false},
+		{"4294967296", "", false},
+		{"0x100000000", "", false},
+		{"1.2.3.256", "", false},
+		{"1.16777216", "", false},
+		{"1.2.65536", "", false},
+		{"-1", "", false},
+		{"+1", "", false},
+		{"1_000", "", false},
+		{"0b101", "", false},
+		{"example.test", "", false},
+	}
+	for _, tc := range cases {
+		got, ok := parseIPLiteral(tc.host)
+		if ok != tc.ok {
+			t.Errorf("parseIPLiteral(%q) ok = %v; want %v", tc.host, ok, tc.ok)
+			continue
+		}
+		if ok && got.String() != tc.want {
+			t.Errorf("parseIPLiteral(%q) = %v; want %v", tc.host, got, tc.want)
+		}
+	}
+}
+
+func TestLoopbackProxyGuardRefusesShorthandLiteralIPs(t *testing.T) {
+	t.Parallel()
+	// D12, CONNECT leg: inet_aton-style shorthand spellings
+	// of loopback must be refused even when listed — the
+	// range rule canonicalises them instead of relying on
+	// netip.ParseAddr accepting them.
+	opts := proxyTestOpts("127.1", "0x7f.0.0.1", "0177.0.0.1", "2130706433", "0x7f000001", "127.0.0.1", "allowed.test")
+	_, proxyURL, fake, refused := guardTestProxy(t, "", opts)
+	for _, authority := range []string{"127.1:443", "0x7f.0.0.1:443", "0177.0.0.1:443", "2130706433:443", "0x7f000001:443", "127.0.0.1:443"} {
+		if code := guardCONNECT(t, proxyURL, authority); code != 403 {
+			t.Fatalf("CONNECT %s: status = %d; want 403", authority, code)
+		}
+	}
+	if len(fake.dials) != 0 {
+		t.Fatalf("outbound dials = %d; want 0 (refused before dialling)", len(fake.dials))
+	}
+	want := map[string]bool{"127.1": true, "0x7f.0.0.1": true, "0177.0.0.1": true, "2130706433": true, "0x7f000001": true, "127.0.0.1": true}
+	if len(*refused) != len(want) {
+		t.Fatalf("refusals logged = %v; want %d host-only entries", *refused, len(want))
+	}
+	for _, h := range *refused {
+		if !want[h] || strings.ContainsAny(h, "/?#@") {
+			t.Fatalf("refused host = %q; want a host only, no port/query/userinfo", h)
+		}
+	}
+}
+
+func TestLoopbackProxyGuardAllowsListedPublicShorthandIP(t *testing.T) {
+	t.Parallel()
+	// D12 control: canonicalisation must not over-refuse. A
+	// listed shorthand spelling of a PUBLIC address
+	// (134744072 = 8.8.8.8 in one-part decimal) is dialled.
+	opts := proxyTestOpts("134744072")
+	_, proxyURL, fake, refused := guardTestProxy(t, "", opts)
+	if code := guardCONNECT(t, proxyURL, "134744072:443"); code != 200 {
+		t.Fatalf("CONNECT status = %d; want 200 (dial spent)", code)
+	}
+	if len(fake.dials) != 1 {
+		t.Fatalf("outbound dials = %d; want 1", len(fake.dials))
+	}
+	if len(*refused) != 0 {
+		t.Fatalf("refusals = %v; want none", *refused)
+	}
+}
+
+func TestLoopbackProxyGuardRefusesMultiDotLiteralIPs(t *testing.T) {
+	t.Parallel()
+	// D12, CONNECT leg: EVERY normalisation pass strips ALL
+	// trailing dots, so a literal with two, three, or four
+	// trailing dots is the same address as the listed
+	// canonical form and is refused, never dialled. The
+	// four-dot entry also proves the config-side collapse:
+	// entries pass through three normalisation passes
+	// (parse, Effective*, proxy construction) while a
+	// request passes through one.
+	opts := proxyTestOpts("127.0.0.1..", "127.0.0.1...", "127.0.0.1....", "allowed.test")
+	_, proxyURL, fake, refused := guardTestProxy(t, "", opts)
+	for _, authority := range []string{"127.0.0.1..:443", "127.0.0.1...:443", "127.0.0.1....:443", "127.0.0.1:443"} {
+		if code := guardCONNECT(t, proxyURL, authority); code != 403 {
+			t.Fatalf("CONNECT %s: status = %d; want 403", authority, code)
+		}
+	}
+	if len(fake.dials) != 0 {
+		t.Fatalf("outbound dials = %d; want 0 (refused before dialling)", len(fake.dials))
+	}
+	if len(*refused) != 4 {
+		t.Fatalf("refusals logged = %v; want 4 host-only entries", *refused)
+	}
+	for _, h := range *refused {
+		if h != "127.0.0.1" {
+			t.Fatalf("refused host = %q; want 127.0.0.1 (all dots stripped)", h)
+		}
+	}
+}
+
+func TestLoopbackProxyGuardRefusesShorthandLiteralHTTP(t *testing.T) {
+	t.Parallel()
+	// D12, plain-HTTP leg: u.Hostname() hands the shorthand
+	// literal to the same guard, so the same canonicalisation
+	// hole would dial it.
+	opts := proxyTestOpts("127.1", "0x7f.0.0.1", "2130706433", "allowed.test")
+	_, proxyURL, fake, refused := guardTestProxy(t, "", opts)
+	for _, requestLine := range []string{
+		"GET http://127.1:9/x HTTP/1.1",
+		"GET http://0x7f.0.0.1:9/x HTTP/1.1",
+		"GET http://2130706433:9/x HTTP/1.1",
+	} {
+		if code := guardRawStatus(t, proxyURL, requestLine); code != 403 {
+			t.Fatalf("%s: status = %d; want 403", requestLine, code)
+		}
+	}
+	if len(fake.dials) != 0 {
+		t.Fatalf("outbound dials = %d; want 0 (refused before dialling)", len(fake.dials))
+	}
+	want := map[string]bool{"127.1": true, "0x7f.0.0.1": true, "2130706433": true}
+	if len(*refused) != len(want) {
+		t.Fatalf("refusals logged = %v; want 3 host-only entries", *refused)
+	}
+	for _, h := range *refused {
+		if !want[h] || strings.ContainsAny(h, "/?#@") {
+			t.Fatalf("refused host = %q; want a host only, no port/query/userinfo", h)
+		}
+	}
+}
+
+func TestLoopbackProxyGuardRefusesMultiDotLiteralHTTP(t *testing.T) {
+	t.Parallel()
+	// D12, plain-HTTP leg: a multi-dot literal with a
+	// tokenised query is refused with the query stripped
+	// from the refusal log.
+	opts := proxyTestOpts("127.0.0.1....", "allowed.test")
+	_, proxyURL, fake, refused := guardTestProxy(t, "", opts)
+	if code := guardRawStatus(t, proxyURL, "GET http://127.0.0.1..:9/x?token=SECRET HTTP/1.1"); code != 403 {
+		t.Fatalf("GET status = %d; want 403", code)
+	}
+	if len(fake.dials) != 0 {
+		t.Fatalf("outbound dials = %d; want 0 (refused before dialling)", len(fake.dials))
+	}
+	if len(*refused) != 1 || (*refused)[0] != "127.0.0.1" {
+		t.Fatalf("refusals = %v; want host-only [127.0.0.1], no query", *refused)
 	}
 }

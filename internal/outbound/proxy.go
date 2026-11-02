@@ -62,7 +62,11 @@ import (
 // entry naming such an address does not permit it; list
 // the hostname instead (resolution happens at the egress,
 // where a listed hostname may legitimately resolve to a
-// private address, e.g. through a VPN outbound). A refused
+// private address, e.g. through a VPN outbound). The range
+// rule recognises canonical literals, trailing dots in any
+// number, and inet_aton-style shorthand (see
+// refusedIPLiteral); other spellings match exactly as
+// hostnames. A refused
 // target gets a fixed 403 and no dial is spent. Hostnames
 // are never resolved locally to apply the range check: the
 // range refusal applies to literal IP targets only.
@@ -90,7 +94,7 @@ type ProxyOptions struct {
 	MaxBodyBytes int
 	// AllowedHosts is the guard allowlist: the only hosts
 	// the proxy dials, matched exactly on the lowercased
-	// host (one trailing dot ignored). Entries are
+	// host (trailing dots ignored). Entries are
 	// hostnames or IPv4 literals: no scheme, port,
 	// userinfo, path, query, wildcard, or IPv6 literal.
 	// At least one entry is required.
@@ -104,9 +108,13 @@ type ProxyOptions struct {
 }
 
 // normalizeGuardHost returns a host's match form:
-// lowercased, one trailing dot removed.
+// lowercased, all trailing dots removed. Every
+// normalisation pass in the guard and the config parse
+// strips ALL trailing dots (D12): stripping one per pass
+// lets a multi-dot literal survive as a distinct match
+// form the range check cannot parse.
 func normalizeGuardHost(host string) string {
-	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	return strings.TrimRight(strings.ToLower(strings.TrimSpace(host)), ".")
 }
 
 // validateGuardHost reports whether s is a usable
@@ -144,6 +152,108 @@ func connectHostOK(host string) bool {
 // reach it as a literal target through the proxy.
 var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
 
+// parseIPLiteral parses a literal IP address: a canonical
+// literal accepted by netip.ParseAddr, or an inet_aton-style
+// IPv4 shorthand (1-4 dot-separated parts, each decimal,
+// octal with a leading 0, or hexadecimal with a 0x prefix).
+// Anything else is not an IP literal here: it falls through
+// to exact allowlist matching.
+func parseIPLiteral(host string) (netip.Addr, bool) {
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return addr, true
+	}
+	return parseIPv4Shorthand(host)
+}
+
+// parseIPv4Shorthand parses an inet_aton-style IPv4 literal:
+// 1-4 parts whose values compose big-endian (a, a.b, a.b.c,
+// a.b.c.d). A part with a digit invalid for its base, an
+// empty part, more than four parts, or a value out of range
+// for its position is not an address.
+func parseIPv4Shorthand(host string) (netip.Addr, bool) {
+	parts := strings.Split(host, ".")
+	if len(parts) > 4 {
+		return netip.Addr{}, false
+	}
+	vals := make([]uint64, len(parts))
+	for i, p := range parts {
+		v, ok := parseInetAtonPart(p)
+		if !ok {
+			return netip.Addr{}, false
+		}
+		vals[i] = v
+	}
+	var ip uint32
+	switch len(vals) {
+	case 1:
+		if vals[0] > 0xFFFFFFFF {
+			return netip.Addr{}, false
+		}
+		ip = uint32(vals[0])
+	case 2:
+		if vals[0] > 0xFF || vals[1] > 0xFFFFFF {
+			return netip.Addr{}, false
+		}
+		ip = uint32(vals[0])<<24 | uint32(vals[1])
+	case 3:
+		if vals[0] > 0xFF || vals[1] > 0xFF || vals[2] > 0xFFFF {
+			return netip.Addr{}, false
+		}
+		ip = uint32(vals[0])<<24 | uint32(vals[1])<<16 | uint32(vals[2])
+	case 4:
+		for _, v := range vals {
+			if v > 0xFF {
+				return netip.Addr{}, false
+			}
+		}
+		ip = uint32(vals[0])<<24 | uint32(vals[1])<<16 | uint32(vals[2])<<8 | uint32(vals[3])
+	}
+	return netip.AddrFrom4([4]byte{byte(ip >> 24), byte(ip >> 16), byte(ip >> 8), byte(ip)}), true
+}
+
+// parseInetAtonPart parses one inet_aton number: a 0x/0X
+// prefix means hexadecimal, a leading 0 with more digits
+// means octal, otherwise decimal. No sign, no underscores,
+// no binary prefix: anything else is not a number here.
+func parseInetAtonPart(s string) (uint64, bool) {
+	if s == "" {
+		return 0, false
+	}
+	base := 10
+	digits := s
+	if len(s) > 2 && (s[:2] == "0x" || s[:2] == "0X") {
+		base, digits = 16, s[2:]
+		if digits == "" {
+			return 0, false
+		}
+	} else if len(s) > 1 && s[0] == '0' {
+		base, digits = 8, s[1:]
+	}
+	var v uint64
+	for i := 0; i < len(digits); i++ {
+		c := digits[i]
+		var d uint64
+		switch {
+		case '0' <= c && c <= '9':
+			d = uint64(c - '0')
+		case base == 16 && 'a' <= c && c <= 'f':
+			d = uint64(c-'a') + 10
+		case base == 16 && 'A' <= c && c <= 'F':
+			d = uint64(c-'A') + 10
+		default:
+			return 0, false
+		}
+		if d >= uint64(base) {
+			return 0, false
+		}
+		v = v*uint64(base) + d
+		if v > 0xFFFFFFFF {
+			return 0, false
+		}
+	}
+	return v, true
+}
+
 // refusedIPLiteral reports whether host is a literal IP
 // address in a range the guard never dials: loopback,
 // link-local (unicast and multicast), private (RFC 1918 /
@@ -152,19 +262,25 @@ var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
 // never refuses here: hostnames are gated by the allowlist
 // only, and resolution happens at the egress.
 //
-// The range check uses the same normalisation as the
-// allowlist match (normalizeGuardHost): one trailing dot
-// is ignored there, so it is ignored here too. Without the
-// dot strip, a dotted literal ("127.0.0.1.") would fail to
-// parse, miss the range rule, and match a listed
-// "127.0.0.1" — dialling a refused-range address (R-10).
+// The range check canonicalises the literal before parsing
+// (D12): all trailing dots are stripped, and inet_aton-style
+// shorthand (127.1, 0x7f.0.0.1, 0177.0.0.1, 2130706433) is
+// parsed to its canonical address, so no recognised spelling
+// of a refused-range address can pass the range check and
+// match a listing of another spelling. The recognised set
+// is exactly: canonical literals, any number of trailing
+// dots, and strict inet_aton shorthand (see parseIPLiteral).
+// A spelling outside that set is matched exactly as a
+// hostname; whether any egress resolver interprets such a
+// form (e.g. a part with digits invalid for its implied
+// base, like 08 as octal) as an address is unmeasured.
 func refusedIPLiteral(host string) bool {
 	if i := strings.IndexByte(host, '%'); i >= 0 {
 		host = host[:i]
 	}
-	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
-	addr, err := netip.ParseAddr(host)
-	if err != nil {
+	host = strings.TrimRight(strings.TrimSpace(host), ".")
+	addr, ok := parseIPLiteral(host)
+	if !ok {
 		return false
 	}
 	if addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() ||
