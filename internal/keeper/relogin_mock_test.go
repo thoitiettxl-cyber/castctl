@@ -66,10 +66,42 @@ func (f *mockOutbound) ListenPacket(ctx context.Context, dest M.Socksaddr) (net.
 
 var _ adapter.Outbound = (*mockOutbound)(nil)
 
-type mockInbound struct{ dialer *outbound.Dialer }
+type mockInbound struct {
+	dialer *outbound.Dialer
+	// opts, when non-nil, overrides mockProxyOpts: tests
+	// that exercise the guard wire entry-derived options
+	// here (e.g. the default allowlist, without the mock
+	// host) to prove the guard refuses.
+	opts *outbound.ProxyOptions
+}
+
+// mockProxyOptsForEntry builds S2 proxy options for
+// mock-browser tests from a keeper entry's Effective*
+// accessors (nil = documented defaults) plus extra
+// allowlisted hosts. The allowlist IS the mechanism: the
+// mock host is listed explicitly, never bypassed.
+func mockProxyOptsForEntry(entry *profile.KeeperEntry, extra ...string) outbound.ProxyOptions {
+	hosts := append(entry.EffectiveProxyAllowedHosts(), extra...)
+	return outbound.ProxyOptions{
+		DialTimeout:    entry.EffectiveProxyDialTimeout(),
+		MaxHeaderBytes: entry.EffectiveProxyMaxHeaderBytes(),
+		MaxBodyBytes:   entry.EffectiveProxyMaxBodyBytes(),
+		AllowedHosts:   hosts,
+	}
+}
+
+// mockProxyOpts is the default mock proxy options: the
+// documented defaults plus the fake login host.
+func mockProxyOpts() outbound.ProxyOptions {
+	return mockProxyOptsForEntry(nil, "fake-login.test")
+}
 
 func (m mockInbound) BuildInbound(_ context.Context, _ *profile.Profile) (string, func(), error) {
-	proxy, proxyURL, err := outbound.NewLoopbackProxy(m.dialer)
+	opts := mockProxyOpts()
+	if m.opts != nil {
+		opts = *m.opts
+	}
+	proxy, proxyURL, err := outbound.NewLoopbackProxy(m.dialer, opts)
 	if err != nil {
 		return "", nil, err
 	}

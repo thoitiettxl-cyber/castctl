@@ -157,7 +157,9 @@ func TestAuthStatusHeadlessReasons(t *testing.T) {
 		t.Fatalf("headless = %v/%q; want false/no_keeper_entry", res.HeadlessAvailable, res.HeadlessReason)
 	}
 	// Keeper entry, no credentials: no_chromedp (tag off)
-	// or no_credentials (tag on).
+	// or no_contract (tag on — the contract gate precedes
+	// the credentials gates, and the embedded fixture is
+	// unobserved).
 	home2, configFile2 := testHome(t, `{"default_profile":"muse01","profiles":{"muse01":{}},"keeper":[{"tag":"k1","profile":"muse01","interval":"1h"}]}`)
 	dir2 := filepath.Join(home2, "profiles", "muse01")
 	_ = os.MkdirAll(dir2, 0o700)
@@ -170,7 +172,7 @@ func TestAuthStatusHeadlessReasons(t *testing.T) {
 		t.Fatalf("status: code=%d stderr=%q", code, errBuf.String())
 	}
 	_ = json.Unmarshal([]byte(outBuf.String()), &res)
-	want := "no_credentials"
+	want := "no_contract"
 	if !keeper.ReloginAvailable() {
 		want = "no_chromedp"
 	}
@@ -343,18 +345,21 @@ func TestHeadlessCapability(t *testing.T) {
 		name            string
 		entry, driver   bool
 		creds, observed bool
+		ref             bool
 		wantAvail       bool
 		wantReason      string
 	}{
-		{"no entry", false, false, false, false, false, "no_keeper_entry"},
-		{"entry no driver", true, false, false, false, false, "no_chromedp"},
-		{"entry driver no creds", true, true, false, false, false, "no_credentials"},
-		{"all present unobserved", true, true, true, false, false, "no_contract"},
-		{"all present observed", true, true, true, true, true, ""},
+		{"no entry", false, false, false, false, false, false, "no_keeper_entry"},
+		{"entry no driver", true, false, false, false, false, false, "no_chromedp"},
+		{"entry driver no creds unobserved", true, true, false, false, false, false, "no_contract"},
+		{"creds unobserved no ref", true, true, true, false, false, false, "no_contract"},
+		{"observed no ref", true, true, true, true, false, false, "no_credentials_ref"},
+		{"observed ref no creds", true, true, false, true, true, false, "no_credentials"},
+		{"all present observed", true, true, true, true, true, true, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			avail, reason := headlessCapability(tc.entry, tc.driver, tc.creds, tc.observed)
+			avail, reason := headlessCapability(tc.entry, tc.driver, tc.creds, tc.observed, tc.ref)
 			if avail != tc.wantAvail || reason != tc.wantReason {
 				t.Fatalf("headlessCapability = %v/%q; want %v/%q", avail, reason, tc.wantAvail, tc.wantReason)
 			}

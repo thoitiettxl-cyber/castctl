@@ -44,7 +44,7 @@ type AuthStatus struct {
 	KeeperStopped       bool
 	KeeperStoppedReason string
 	HeadlessAvailable   bool
-	HeadlessReason      string // closed enum: "", "no_chromedp", "no_credentials", "no_keeper_entry", "no_contract"
+	HeadlessReason      string // closed enum: "", "no_chromedp", "no_credentials", "no_credentials_ref", "no_keeper_entry", "no_contract"
 	NeedsAction         bool
 	CookiesSeen         int
 }

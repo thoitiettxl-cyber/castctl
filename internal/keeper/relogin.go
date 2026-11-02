@@ -96,10 +96,14 @@ func (f ReloginDriverFunc) Relogin(ctx context.Context, cred profile.LoginCreden
 // S2 inbound builder that routes a launched browser through
 // the profile's outbound, the profile, the recorded
 // login-form contract, and the per-incident attempt cap.
-// The Chrome binary path is resolved inside the driver by
-// resolveBrowserPath (--browser-path > CASTCTL_CHROMIUM_PATH
-// > PATH search); there is no option for it because the
-// driver never invents a browser location.
+// Entry, when non-nil, is the keeper entry whose
+// Effective* timeouts tune the driver (match/cookie waits,
+// poll cadence, attach/cancel bounds, observation settle
+// and inventory cap); a nil entry means the documented
+// defaults. The Chrome binary path is resolved inside the
+// driver by resolveBrowserPath (--browser-path >
+// CASTCTL_CHROMIUM_PATH > PATH search); there is no option
+// for it because the driver never invents a browser location.
 type ReloginOptions struct {
 	BrowserURL  string
 	BaseDir     string
@@ -107,6 +111,7 @@ type ReloginOptions struct {
 	Profile     *profile.Profile
 	Contract    LoginContract
 	MaxAttempts int
+	Entry       *profile.KeeperEntry
 }
 
 // ReloginAvailable reports whether this build has a headless
@@ -129,26 +134,31 @@ type ObservedElement struct {
 
 // LoginPageObservation is the redacted result of one
 // automated, read-only load of the login page: the final URL
-// (after redirects, query and fragment stripped — auth
-// redirects routinely carry codes/tokens there) and the
-// form-control inventory. It is the input the fixture author
-// encodes into the versioned LoginContract; it is never used
-// at re-login runtime.
+// (after redirects, query, fragment, and userinfo stripped
+// — auth redirects routinely carry codes/tokens there) and
+// the form-control inventory. It is the input the fixture
+// author encodes into the versioned LoginContract; it is
+// never used at re-login runtime.
 type LoginPageObservation struct {
 	URL      string            `json:"url"`
 	Elements []ObservedElement `json:"elements"`
 }
 
-// stripObservationURL strips the query string and fragment
-// from an observed final URL, keeping scheme/host/path only.
-// A redirect target carrying ?code=… or #token=… must never
-// reach an output that gets pasted into reports. An
+// StripObservationURL strips the query string, fragment,
+// and userinfo from an observed URL, keeping
+// scheme/host/path only. A redirect target carrying
+// ?code=… or #token=…, or a userinfo-bearing URL, must
+// never reach an output that gets pasted into reports. An
 // unparseable URL is dropped outright rather than echoed.
-func stripObservationURL(raw string) string {
+// It is exported so the observe command can strip the
+// operator-supplied --login-url the same way before
+// printing it: the same echo class, the same fix.
+func StripObservationURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return ""
 	}
+	u.User = nil
 	u.RawQuery = ""
 	u.Fragment = ""
 	u.RawFragment = ""
@@ -159,13 +169,21 @@ func stripObservationURL(raw string) string {
 // the attach-first browser URL, the S2 inbound builder for
 // the headless launch fallback, the profile, and the login
 // URL to load. No credentials are involved: the observation
-// never enters or submits anything.
+// never enters or submits anything. Entry, when non-nil, is
+// the keeper entry whose Effective* timeouts tune the
+// observation (settle wait, whole-run bound, inventory
+// cap); a nil entry means the documented defaults.
+// BrowserURL is accepted for callers that attach, but the
+// `auth observe-login` command never sets it: observation
+// through the command always launches (launch-only in
+// practice).
 type ObserveOptions struct {
 	BrowserURL string
 	BaseDir    string
 	Inbound    InboundBuilder
 	Profile    *profile.Profile
 	LoginURL   string
+	Entry      *profile.KeeperEntry
 }
 
 // ObserveLoginPage loads the login page headless (attach

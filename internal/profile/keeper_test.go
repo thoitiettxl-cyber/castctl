@@ -342,3 +342,175 @@ func TestParseKeeperBlockBrowserQueryRejected(t *testing.T) {
 		}
 	}
 }
+
+// TestParseKeeperS10Keys (S10): all twelve proxy/driver/
+// observe keys parse, set their flags, and normalise the
+// allowlist (case + trailing dot, duplicates kept).
+func TestParseKeeperS10Keys(t *testing.T) {
+	raw := keeperTestConfig(t, `[{"tag": "k1", "profile": "muse01", "proxy_dial_timeout": "45s", "proxy_max_header_bytes": 1024, "proxy_max_body_bytes": 2048, "proxy_allowed_hosts": ["Login.Host.TEST.", "example.test", "example.test"], "relogin_match_timeout": "20s", "relogin_cookie_timeout": "25s", "relogin_poll_interval": "250ms", "relogin_attach_timeout": "5s", "relogin_cancel_timeout": "7s", "observe_settle_timeout": "10s", "observe_timeout": "60s", "observe_inventory_cap": 50}]`)
+	cfg, err := ParseSingleConfig([]byte(raw), t.TempDir())
+	if err != nil {
+		t.Fatalf("ParseSingleConfig: %v", err)
+	}
+	e := cfg.Keeper.Entries[0]
+	if e.ProxyDialTimeout != 45*time.Second || !e.ProxyDialSet ||
+		e.ProxyMaxHeaderBytes != 1024 || !e.ProxyMaxHeaderSet ||
+		e.ProxyMaxBodyBytes != 2048 || !e.ProxyMaxBodySet ||
+		e.ReloginMatchTimeout != 20*time.Second || !e.ReloginMatchSet ||
+		e.ReloginCookieTimeout != 25*time.Second || !e.ReloginCookieSet ||
+		e.ReloginPollInterval != 250*time.Millisecond || !e.ReloginPollSet ||
+		e.ReloginAttachTimeout != 5*time.Second || !e.ReloginAttachSet ||
+		e.ReloginCancelTimeout != 7*time.Second || !e.ReloginCancelSet ||
+		e.ObserveSettleTimeout != 10*time.Second || !e.ObserveSettleSet ||
+		e.ObserveTimeout != 60*time.Second || !e.ObserveTimeoutSet ||
+		e.ObserveInventoryCap != 50 || !e.ObserveInventorySet {
+		t.Fatalf("entry = %+v", e)
+	}
+	if got := e.EffectiveProxyAllowedHosts(); len(got) != 3 || got[0] != "login.host.test" || got[1] != "example.test" || got[2] != "example.test" {
+		t.Fatalf("EffectiveProxyAllowedHosts = %v; want normalised [login.host.test example.test example.test]", got)
+	}
+	if e.EffectiveProxyDialTimeout() != 45*time.Second || e.EffectiveReloginPollInterval() != 250*time.Millisecond || e.EffectiveObserveInventoryCap() != 50 {
+		t.Fatalf("Effective* mismatch: %+v", e)
+	}
+}
+
+// TestParseKeeperS10KeysErrors (S10): out-of-range and
+// malformed values for the new keys are config errors.
+func TestParseKeeperS10KeysErrors(t *testing.T) {
+	cases := []struct{ name, key string }{
+		{"zero dial", `"proxy_dial_timeout": "0s"`},
+		{"over-cap dial", `"proxy_dial_timeout": "61s"`},
+		{"bad dial", `"proxy_dial_timeout": "soon"`},
+		{"zero header cap", `"proxy_max_header_bytes": 0`},
+		{"over-cap header", `"proxy_max_header_bytes": 1048577`},
+		{"float header cap", `"proxy_max_header_bytes": 1.5`},
+		{"zero body cap", `"proxy_max_body_bytes": 0`},
+		{"over-cap body", `"proxy_max_body_bytes": 1073741825`},
+		{"empty hosts", `"proxy_allowed_hosts": []`},
+		{"string hosts", `"proxy_allowed_hosts": "auth.muse.ai"`},
+		{"empty host", `"proxy_allowed_hosts": [""]`},
+		{"scheme host", `"proxy_allowed_hosts": ["https://a.test"]`},
+		{"port host", `"proxy_allowed_hosts": ["a.test:443"]`},
+		{"wildcard host", `"proxy_allowed_hosts": ["*.a.test"]`},
+		{"userinfo host", `"proxy_allowed_hosts": ["u@a.test"]`},
+		{"ipv6 host", `"proxy_allowed_hosts": ["[::1]"]`},
+		{"zero match", `"relogin_match_timeout": "0s"`},
+		{"over-cap match", `"relogin_match_timeout": "601s"`},
+		{"zero poll", `"relogin_poll_interval": "0s"`},
+		{"over-cap poll", `"relogin_poll_interval": "61s"`},
+		{"zero attach", `"relogin_attach_timeout": "0s"`},
+		{"zero cancel", `"relogin_cancel_timeout": "0s"`},
+		{"zero settle", `"observe_settle_timeout": "0s"`},
+		{"zero observe", `"observe_timeout": "0s"`},
+		{"zero inventory", `"observe_inventory_cap": 0`},
+		{"over-cap inventory", `"observe_inventory_cap": 10001`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := keeperTestConfig(t, `[{"tag": "k1", "profile": "muse01", `+tc.key+`}]`)
+			if _, err := ParseSingleConfig([]byte(raw), t.TempDir()); err == nil {
+				t.Fatalf("ParseSingleConfig(%s) = nil error; want config error", tc.key)
+			}
+		})
+	}
+}
+
+// TestKeeperS10KeysRoundTrip (S10): hand-built entries
+// render every new key and re-parse to the same values;
+// raw JSON with all keys is preserved on encode.
+func TestKeeperS10KeysRoundTrip(t *testing.T) {
+	base := t.TempDir()
+	hand := &SingleConfig{
+		Profiles: map[string]*Profile{"muse01": {Name: "muse01"}},
+		Keeper: &KeeperConfig{Entries: []*KeeperEntry{{
+			Tag: "k1", Profile: "muse01",
+			ProxyDialTimeout: 45 * time.Second, ProxyDialSet: true,
+			ProxyMaxHeaderBytes: 1024, ProxyMaxHeaderSet: true,
+			ProxyMaxBodyBytes: 2048, ProxyMaxBodySet: true,
+			ProxyAllowedHosts: []string{"example.test"}, ProxyHostsSet: true,
+			ReloginMatchTimeout: 20 * time.Second, ReloginMatchSet: true,
+			ReloginCookieTimeout: 25 * time.Second, ReloginCookieSet: true,
+			ReloginPollInterval: 250 * time.Millisecond, ReloginPollSet: true,
+			ReloginAttachTimeout: 5 * time.Second, ReloginAttachSet: true,
+			ReloginCancelTimeout: 7 * time.Second, ReloginCancelSet: true,
+			ObserveSettleTimeout: 10 * time.Second, ObserveSettleSet: true,
+			ObserveTimeout: 60 * time.Second, ObserveTimeoutSet: true,
+			ObserveInventoryCap: 50, ObserveInventorySet: true,
+		}}},
+	}
+	enc, err := encodeSingleConfig(hand)
+	if err != nil {
+		t.Fatalf("encodeSingleConfig: %v", err)
+	}
+	for _, want := range []string{`"proxy_dial_timeout": "45s"`, `"proxy_max_header_bytes": 1024`, `"proxy_max_body_bytes": 2048`, `"proxy_allowed_hosts"`, `"relogin_match_timeout": "20s"`, `"relogin_cookie_timeout": "25s"`, `"relogin_poll_interval": "250ms"`, `"relogin_attach_timeout": "5s"`, `"relogin_cancel_timeout": "7s"`, `"observe_settle_timeout": "10s"`, `"observe_timeout": "1m0s"`, `"observe_inventory_cap": 50`} {
+		if !strings.Contains(string(enc), want) {
+			t.Fatalf("encoded config missing %s:\n%s", want, enc)
+		}
+	}
+	cfg, err := ParseSingleConfig(enc, base)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	e := cfg.Keeper.Entries[0]
+	if e.ProxyDialTimeout != 45*time.Second || e.ProxyMaxHeaderBytes != 1024 || e.ObserveTimeout != 60*time.Second || e.ObserveInventoryCap != 50 || len(e.ProxyAllowedHosts) != 1 {
+		t.Fatalf("re-parsed entry = %+v", e)
+	}
+}
+
+// TestKeeperS10EffectiveDefaults (S10): a nil entry and an
+// empty entry both yield exactly the documented defaults,
+// nil-safely.
+func TestKeeperS10EffectiveDefaults(t *testing.T) {
+	var nilEntry *KeeperEntry
+	empty := &KeeperEntry{}
+	for _, e := range []*KeeperEntry{nilEntry, empty} {
+		if e.EffectiveProxyDialTimeout() != DefaultProxyDialTimeout ||
+			e.EffectiveProxyMaxHeaderBytes() != DefaultProxyMaxHeaderBytes ||
+			e.EffectiveProxyMaxBodyBytes() != DefaultProxyMaxBodyBytes ||
+			e.EffectiveReloginMatchTimeout() != DefaultReloginMatchTimeout ||
+			e.EffectiveReloginCookieTimeout() != DefaultReloginCookieTimeout ||
+			e.EffectiveReloginPollInterval() != DefaultReloginPollInterval ||
+			e.EffectiveReloginAttachTimeout() != DefaultReloginAttachTimeout ||
+			e.EffectiveReloginCancelTimeout() != DefaultReloginCancelTimeout ||
+			e.EffectiveObserveSettleTimeout() != DefaultObserveSettleTimeout ||
+			e.EffectiveObserveTimeout() != DefaultObserveTimeout ||
+			e.EffectiveObserveInventoryCap() != DefaultObserveInventoryCap {
+			t.Fatalf("defaults mismatch for entry %+v", e)
+		}
+		hosts := e.EffectiveProxyAllowedHosts()
+		if len(hosts) != 2 || hosts[0] != "auth.muse.ai" || hosts[1] != "muse.ai" {
+			t.Fatalf("default allowlist = %v; want [auth.muse.ai muse.ai]", hosts)
+		}
+	}
+}
+
+// TestKeeperS10OmittedKeysPreserveBehaviour (S10): an entry
+// that sets none of the new keys carries no set flags and
+// encodes without any new key name — omitted keys change
+// nothing.
+func TestKeeperS10OmittedKeysPreserveBehaviour(t *testing.T) {
+	raw := keeperTestConfig(t, `[{"tag": "k1", "profile": "muse01", "interval": "30m"}]`)
+	cfg, err := ParseSingleConfig([]byte(raw), t.TempDir())
+	if err != nil {
+		t.Fatalf("ParseSingleConfig: %v", err)
+	}
+	e := cfg.Keeper.Entries[0]
+	if e.ProxyDialSet || e.ProxyMaxHeaderSet || e.ProxyMaxBodySet || e.ProxyHostsSet ||
+		e.ReloginMatchSet || e.ReloginCookieSet || e.ReloginPollSet || e.ReloginAttachSet ||
+		e.ReloginCancelSet || e.ObserveSettleSet || e.ObserveTimeoutSet || e.ObserveInventorySet {
+		t.Fatalf("unset flags set: %+v", e)
+	}
+	hand := &SingleConfig{
+		Profiles: map[string]*Profile{"muse01": {Name: "muse01"}},
+		Keeper:   &KeeperConfig{Entries: []*KeeperEntry{{Tag: "k1", Profile: "muse01", Interval: 30 * time.Minute, IntervalSet: true}}},
+	}
+	enc, err := encodeSingleConfig(hand)
+	if err != nil {
+		t.Fatalf("encodeSingleConfig: %v", err)
+	}
+	for _, key := range []string{"proxy_dial_timeout", "proxy_max_header_bytes", "proxy_max_body_bytes", "proxy_allowed_hosts", "relogin_match_timeout", "relogin_cookie_timeout", "relogin_poll_interval", "relogin_attach_timeout", "relogin_cancel_timeout", "observe_settle_timeout", "observe_timeout", "observe_inventory_cap"} {
+		if strings.Contains(string(enc), key) {
+			t.Fatalf("encoded config contains unset key %s:\n%s", key, enc)
+		}
+	}
+}

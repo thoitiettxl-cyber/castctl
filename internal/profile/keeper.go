@@ -25,7 +25,13 @@ import (
 //	 "interval": string, "notify": string,
 //	 "credentials": string, "wake_on_gateway_failure": bool,
 //	 "retry_backoff": [string], "expiring_within": string,
-//	 "wake_attempts": number, "relogin_attempts": number}
+//	 "wake_attempts": number, "relogin_attempts": number,
+//	 "proxy_dial_timeout": string, "proxy_max_header_bytes": number,
+//	 "proxy_max_body_bytes": number, "proxy_allowed_hosts": [string],
+//	 "relogin_match_timeout": string, "relogin_cookie_timeout": string,
+//	 "relogin_poll_interval": string, "relogin_attach_timeout": string,
+//	 "relogin_cancel_timeout": string, "observe_settle_timeout": string,
+//	 "observe_timeout": string, "observe_inventory_cap": number}
 //
 //   - `tag` (required): unique name for the entry. Entries reference
 //     each other by tag, sing-box style. Tags are exact: no
@@ -87,6 +93,70 @@ import (
 //     "1 re-login per tick" gate in G1 is enforced by the tick:
 //     a tick performs at most one re-login sequence; the cap
 //     bounds the sequence's internal retries.)
+//   - `proxy_dial_timeout` (optional duration string, default
+//     30s): one upstream dial through the S2 loopback proxy.
+//     Positive, at most MaxKeeperInterval.
+//   - `proxy_max_header_bytes` (optional number, default
+//     65536): the largest request header block the S2 proxy
+//     accepts. Positive, at most MaxProxyHeaderBytes.
+//   - `proxy_max_body_bytes` (optional number, default
+//     16777216): the largest plain-HTTP request body the S2
+//     proxy forwards. Positive, at most MaxProxyBodyBytes.
+//   - `proxy_allowed_hosts` (optional array of host strings,
+//     default ["auth.muse.ai", "muse.ai"]): the ONLY hosts the
+//     S2 proxy dials. Entries are hostnames or IPv4 literals:
+//     no scheme, port, userinfo, path, query, wildcard, or
+//     IPv6 literal. Matching is exact on the lowercased host
+//     (one trailing dot ignored). A target whose host is not
+//     listed is refused without a dial, and a literal IP in a
+//     loopback, link-local, or private range is refused unless
+//     it is explicitly listed (an explicit listing is an
+//     explicit operator decision that overrides the range
+//     refusal; the default list contains no such address).
+//     An absent key — or an entry without one — means the
+//     default list; an explicitly empty list is a config
+//     error.
+//   - `relogin_match_timeout` (optional duration string,
+//     default 30s): how long the headless driver polls for
+//     the login form (or a blocker) before declaring a
+//     contract mismatch. Positive, at most
+//     MaxKeeperInterval.
+//   - `relogin_cookie_timeout` (optional duration string,
+//     default 30s): how long the driver polls for the
+//     harvested session cookie after submit. Positive, at
+//     most MaxKeeperInterval.
+//   - `relogin_poll_interval` (optional duration string,
+//     default 500ms): the driver's snapshot poll cadence.
+//     Positive, at most MaxKeeperInterval.
+//   - `relogin_attach_timeout` (optional duration string,
+//     default 10s): the dial timeout for attaching to an
+//     already-running Chrome. Positive, at most
+//     MaxKeeperInterval.
+//   - `relogin_cancel_timeout` (optional duration string,
+//     default 10s): the bound on waiting for a launched
+//     browser's cancel to reap it (a process that never
+//     started is never reaped; the wait must not wedge the
+//     tick). Positive, at most MaxKeeperInterval.
+//   - `observe_settle_timeout` (optional duration string,
+//     default 15s): how long `auth observe-login` polls for
+//     at least one form control before returning the
+//     inventory. Positive, at most MaxKeeperInterval.
+//   - `observe_timeout` (optional duration string, default
+//     90s): the whole `auth observe-login` run bound.
+//     Positive, at most MaxKeeperInterval.
+//   - `observe_inventory_cap` (optional number, default
+//     200): the maximum form-control elements one observation
+//     records. Positive, at most MaxObserveInventoryCap.
+//
+//   Every operational timeout, cap, and host above is a
+//   config key with a documented default (Boss decision
+//   S10, 2026-11-02): no hardcoded operational value
+//   remains in the keeper/driver/proxy code paths. The
+//   validation caps (MaxRetryBackoffSteps,
+//   MaxKeeperAttempts, MaxProxyHeaderBytes,
+//   MaxProxyBodyBytes, MaxObserveInventoryCap) are schema
+//   bounds, not settings: they bound what a config value
+//   may say, and are not themselves configurable.
 //
 // A nil *KeeperConfig on SingleConfig means the block was absent
 // from the file, and the keeper is off: no behaviour changes, no
@@ -116,6 +186,26 @@ const DefaultKeeperInterval = 24 * time.Hour
 // zero-value default is unchanged.
 const MaxKeeperInterval = 365 * 24 * time.Hour
 
+// MaxProxyDialTimeout bounds a configured
+// `proxy_dial_timeout`: a dial through an outbound that
+// takes longer than a minute is a broken path, not a slow
+// one; the browser's own timeouts bound the rest.
+const MaxProxyDialTimeout = time.Minute
+
+// MaxReloginWaitTimeout bounds a configured
+// `relogin_match_timeout`, `relogin_cookie_timeout`,
+// `observe_settle_timeout`, and `observe_timeout`: ten
+// minutes is far beyond any login page's settle time, and
+// a longer wait would stall a tick past any useful alert
+// window.
+const MaxReloginWaitTimeout = 10 * time.Minute
+
+// MaxReloginPollInterval bounds a configured
+// `relogin_poll_interval`, `relogin_attach_timeout`, and
+// `relogin_cancel_timeout`: a minute between polls, or a
+// minute to dial/cancel, is already a wedged browser.
+const MaxReloginPollInterval = time.Minute
+
 // DefaultRetryBackoff is the documented zero-value transient
 // retry ladder for a keeper entry whose `retry_backoff` key is
 // absent or empty: 5m, 15m, 45m, max 3 retries (Boss decision
@@ -143,6 +233,44 @@ const DefaultKeeperAttempts = 3
 // MaxKeeperAttempts bounds a configured `wake_attempts` /
 // `relogin_attempts` value.
 const MaxKeeperAttempts = 10
+
+// S10 operational defaults (Boss decision 2026-11-02): every
+// timeout, cap, and host the keeper/driver/S2-proxy paths use
+// is a keeper-entry key whose zero value is the constant
+// below. The constants are the documented defaults
+// (docs/config.md), not hidden hardcoded behaviour: the
+// Effective* accessors return them only when the key is
+// absent, and the driver/proxy read only the Effective*
+// values.
+const DefaultProxyDialTimeout = 30 * time.Second
+const DefaultProxyMaxHeaderBytes = 64 << 10
+const DefaultProxyMaxBodyBytes = 16 << 20
+const DefaultReloginMatchTimeout = 30 * time.Second
+const DefaultReloginCookieTimeout = 30 * time.Second
+const DefaultReloginPollInterval = 500 * time.Millisecond
+const DefaultReloginAttachTimeout = 10 * time.Second
+const DefaultReloginCancelTimeout = 10 * time.Second
+const DefaultObserveSettleTimeout = 15 * time.Second
+const DefaultObserveTimeout = 90 * time.Second
+const DefaultObserveInventoryCap = 200
+
+// DefaultProxyAllowedHosts is the documented zero-value S2
+// proxy allowlist: the Muse login hosts, derived from code
+// only — the default login URL host (auth.muse.ai) and the
+// app origin the login lands on (muse.ai, the gateway API
+// host and FilteredDomains member). No other host is
+// reachable through the proxy unless the entry lists it.
+var DefaultProxyAllowedHosts = []string{"auth.muse.ai", "muse.ai"}
+
+// MaxProxyHeaderBytes bounds a configured
+// `proxy_max_header_bytes` value. MaxProxyBodyBytes bounds a
+// configured `proxy_max_body_bytes` value.
+// MaxObserveInventoryCap bounds a configured
+// `observe_inventory_cap` value. These are schema bounds,
+// not settings: they are not themselves configurable.
+const MaxProxyHeaderBytes = 1 << 20
+const MaxProxyBodyBytes = 1 << 30
+const MaxObserveInventoryCap = 10000
 
 // KeeperEntry is one parsed `keeper` list entry.
 type KeeperEntry struct {
@@ -180,6 +308,43 @@ type KeeperEntry struct {
 	WakeAttemptsSet bool
 	ReloginAttempts int
 	ReloginSet      bool
+	// ProxyDialTimeout / ProxyMaxHeaderBytes /
+	// ProxyMaxBodyBytes / ProxyAllowedHosts tune the S2
+	// loopback proxy for launches from this entry. The *Set
+	// flags report presence; absent means the S10 defaults.
+	ProxyDialTimeout    time.Duration
+	ProxyDialSet        bool
+	ProxyMaxHeaderBytes int
+	ProxyMaxHeaderSet   bool
+	ProxyMaxBodyBytes   int
+	ProxyMaxBodySet     bool
+	ProxyAllowedHosts   []string
+	ProxyHostsSet       bool
+	// ReloginMatchTimeout / ReloginCookieTimeout /
+	// ReloginPollInterval / ReloginAttachTimeout /
+	// ReloginCancelTimeout tune the headless driver for
+	// this entry. The *Set flags report presence; absent
+	// means the S10 defaults.
+	ReloginMatchTimeout  time.Duration
+	ReloginMatchSet      bool
+	ReloginCookieTimeout time.Duration
+	ReloginCookieSet     bool
+	ReloginPollInterval  time.Duration
+	ReloginPollSet       bool
+	ReloginAttachTimeout time.Duration
+	ReloginAttachSet     bool
+	ReloginCancelTimeout time.Duration
+	ReloginCancelSet     bool
+	// ObserveSettleTimeout / ObserveTimeout /
+	// ObserveInventoryCap tune `auth observe-login` for
+	// this entry's profile. The *Set flags report presence;
+	// absent means the S10 defaults.
+	ObserveSettleTimeout time.Duration
+	ObserveSettleSet     bool
+	ObserveTimeout       time.Duration
+	ObserveTimeoutSet    bool
+	ObserveInventoryCap  int
+	ObserveInventorySet  bool
 
 	raw []byte
 }
@@ -237,6 +402,66 @@ var keeperEntryKeys = map[string]bool{
 	"tag": true, "profile": true, "browser": true, "interval": true, "notify": true,
 	"credentials": true, "wake_on_gateway_failure": true, "retry_backoff": true,
 	"expiring_within": true, "wake_attempts": true, "relogin_attempts": true,
+	"proxy_dial_timeout": true, "proxy_max_header_bytes": true, "proxy_max_body_bytes": true,
+	"proxy_allowed_hosts": true, "relogin_match_timeout": true, "relogin_cookie_timeout": true,
+	"relogin_poll_interval": true, "relogin_attach_timeout": true, "relogin_cancel_timeout": true,
+	"observe_settle_timeout": true, "observe_timeout": true, "observe_inventory_cap": true,
+}
+
+// normalizeAllowedHost validates one `proxy_allowed_hosts`
+// entry and returns its match form: lowercased, one trailing
+// dot removed. Entries are hostnames or IPv4 literals only:
+// no scheme, port, userinfo, path, query, fragment,
+// wildcard, bracket, or whitespace. An entry that parses as
+// a loopback/private/link-local IP is NOT rejected here: an
+// explicit listing is an explicit operator decision that
+// overrides the proxy's range refusal (see
+// EffectiveProxyAllowedHosts and internal/outbound's guard),
+// and the default list contains no such address.
+func normalizeAllowedHost(raw string) (string, error) {
+	if raw == "" {
+		return "", fmt.Errorf("host must not be empty")
+	}
+	if raw != strings.TrimSpace(raw) {
+		return "", fmt.Errorf("host %q has surrounding whitespace", raw)
+	}
+	s := strings.ToLower(raw)
+	s = strings.TrimSuffix(s, ".")
+	if s == "" {
+		return "", fmt.Errorf("host must not be empty")
+	}
+	for _, r := range s {
+		switch {
+		case r == '/' || r == ':' || r == '@' || r == '?' || r == '#' || r == '[' || r == ']' || r == '*' || unicode.IsSpace(r) || unicode.IsControl(r):
+			return "", fmt.Errorf("host %q contains a forbidden character", raw)
+		}
+	}
+	return s, nil
+}
+
+// parseAllowedHosts validates a `proxy_allowed_hosts` value:
+// a non-empty array of host strings, each passing
+// normalizeAllowedHost. The returned list is in file order,
+// normalized, duplicates kept (harmless: matching is a set
+// lookup).
+func parseAllowedHosts(v any) ([]string, error) {
+	arr, ok := v.([]any)
+	if !ok || len(arr) == 0 {
+		return nil, fmt.Errorf(`"proxy_allowed_hosts" must be a non-empty array of host strings`)
+	}
+	hosts := make([]string, 0, len(arr))
+	for i, elem := range arr {
+		s, ok := elem.(string)
+		if !ok {
+			return nil, fmt.Errorf(`"proxy_allowed_hosts" element %d must be a string`, i)
+		}
+		h, err := normalizeAllowedHost(s)
+		if err != nil {
+			return nil, fmt.Errorf(`"proxy_allowed_hosts" element %d: %v`, i, err)
+		}
+		hosts = append(hosts, h)
+	}
+	return hosts, nil
 }
 
 // parseKeeperBlock parses one decoded `keeper` value (an array of
@@ -377,6 +602,88 @@ func parseKeeperBlock(v any) (*KeeperConfig, error) {
 					entry.ReloginAttempts = iv
 					entry.ReloginSet = true
 				}
+			case "proxy_dial_timeout", "relogin_match_timeout", "relogin_cookie_timeout", "relogin_poll_interval", "relogin_attach_timeout", "relogin_cancel_timeout", "observe_settle_timeout", "observe_timeout":
+				s, ok := val.(string)
+				if !ok {
+					return nil, newConfigErrorf(`"keeper" entry %d: %q must be a duration string`, i, k)
+				}
+				d, err := time.ParseDuration(s)
+				maxDur := MaxReloginWaitTimeout
+				switch k {
+				case "proxy_dial_timeout", "relogin_attach_timeout", "relogin_cancel_timeout":
+					maxDur = MaxProxyDialTimeout
+				case "relogin_poll_interval":
+					maxDur = MaxReloginPollInterval
+				}
+				if err != nil || d <= 0 || d > maxDur {
+					return nil, newConfigErrorf(`"keeper" entry %d: %q must be a positive duration string of at most %v`, i, k, maxDur)
+				}
+				switch k {
+				case "proxy_dial_timeout":
+					entry.ProxyDialTimeout = d
+					entry.ProxyDialSet = true
+				case "relogin_match_timeout":
+					entry.ReloginMatchTimeout = d
+					entry.ReloginMatchSet = true
+				case "relogin_cookie_timeout":
+					entry.ReloginCookieTimeout = d
+					entry.ReloginCookieSet = true
+				case "relogin_poll_interval":
+					entry.ReloginPollInterval = d
+					entry.ReloginPollSet = true
+				case "relogin_attach_timeout":
+					entry.ReloginAttachTimeout = d
+					entry.ReloginAttachSet = true
+				case "relogin_cancel_timeout":
+					entry.ReloginCancelTimeout = d
+					entry.ReloginCancelSet = true
+				case "observe_settle_timeout":
+					entry.ObserveSettleTimeout = d
+					entry.ObserveSettleSet = true
+				case "observe_timeout":
+					entry.ObserveTimeout = d
+					entry.ObserveTimeoutSet = true
+				}
+			case "proxy_max_header_bytes":
+				n, ok := val.(json.Number)
+				if !ok {
+					return nil, newConfigErrorf(`"keeper" entry %d: "proxy_max_header_bytes" must be a positive integer`, i)
+				}
+				iv, err := strconv.Atoi(n.String())
+				if err != nil || iv <= 0 || iv > MaxProxyHeaderBytes {
+					return nil, newConfigErrorf(`"keeper" entry %d: "proxy_max_header_bytes" must be a positive integer of at most %d`, i, MaxProxyHeaderBytes)
+				}
+				entry.ProxyMaxHeaderBytes = iv
+				entry.ProxyMaxHeaderSet = true
+			case "proxy_max_body_bytes":
+				n, ok := val.(json.Number)
+				if !ok {
+					return nil, newConfigErrorf(`"keeper" entry %d: "proxy_max_body_bytes" must be a positive integer`, i)
+				}
+				iv, err := strconv.Atoi(n.String())
+				if err != nil || iv <= 0 || iv > MaxProxyBodyBytes {
+					return nil, newConfigErrorf(`"keeper" entry %d: "proxy_max_body_bytes" must be a positive integer of at most %d`, i, MaxProxyBodyBytes)
+				}
+				entry.ProxyMaxBodyBytes = iv
+				entry.ProxyMaxBodySet = true
+			case "observe_inventory_cap":
+				n, ok := val.(json.Number)
+				if !ok {
+					return nil, newConfigErrorf(`"keeper" entry %d: "observe_inventory_cap" must be a positive integer`, i)
+				}
+				iv, err := strconv.Atoi(n.String())
+				if err != nil || iv <= 0 || iv > MaxObserveInventoryCap {
+					return nil, newConfigErrorf(`"keeper" entry %d: "observe_inventory_cap" must be a positive integer of at most %d`, i, MaxObserveInventoryCap)
+				}
+				entry.ObserveInventoryCap = iv
+				entry.ObserveInventorySet = true
+			case "proxy_allowed_hosts":
+				hosts, err := parseAllowedHosts(val)
+				if err != nil {
+					return nil, newConfigErrorf(`"keeper" entry %d: %v`, i, err)
+				}
+				entry.ProxyAllowedHosts = hosts
+				entry.ProxyHostsSet = true
 			default:
 				return nil, newConfigErrorf(`unknown keeper config key %q`, k)
 			}
@@ -619,14 +926,161 @@ func (e *KeeperEntry) EffectiveReloginAttempts() int {
 	return DefaultKeeperAttempts
 }
 
+// effectiveDuration is the shared zero-value guard for the
+// S10 duration keys: the parsed value when set and in
+// range, the documented default otherwise. Callers nil-guard
+// the entry first: evaluating a field on a nil entry would
+// panic before this function ever runs.
+func effectiveDuration(set bool, v, def time.Duration) time.Duration {
+	if set && v > 0 && v <= MaxKeeperInterval {
+		return v
+	}
+	return def
+}
+
+// EffectiveProxyDialTimeout returns the entry's S2 proxy
+// dial timeout: the parsed value when set,
+// DefaultProxyDialTimeout otherwise.
+func (e *KeeperEntry) EffectiveProxyDialTimeout() time.Duration {
+	if e == nil {
+		return DefaultProxyDialTimeout
+	}
+	return effectiveDuration(e.ProxyDialSet, e.ProxyDialTimeout, DefaultProxyDialTimeout)
+}
+
+// EffectiveProxyMaxHeaderBytes returns the entry's S2 proxy
+// header cap: the parsed value when set,
+// DefaultProxyMaxHeaderBytes otherwise.
+func (e *KeeperEntry) EffectiveProxyMaxHeaderBytes() int {
+	if e != nil && e.ProxyMaxHeaderSet && e.ProxyMaxHeaderBytes > 0 && e.ProxyMaxHeaderBytes <= MaxProxyHeaderBytes {
+		return e.ProxyMaxHeaderBytes
+	}
+	return DefaultProxyMaxHeaderBytes
+}
+
+// EffectiveProxyMaxBodyBytes returns the entry's S2 proxy
+// body cap: the parsed value when set,
+// DefaultProxyMaxBodyBytes otherwise.
+func (e *KeeperEntry) EffectiveProxyMaxBodyBytes() int {
+	if e != nil && e.ProxyMaxBodySet && e.ProxyMaxBodyBytes > 0 && e.ProxyMaxBodyBytes <= MaxProxyBodyBytes {
+		return e.ProxyMaxBodyBytes
+	}
+	return DefaultProxyMaxBodyBytes
+}
+
+// EffectiveProxyAllowedHosts returns the entry's S2 proxy
+// allowlist: the parsed list when set,
+// DefaultProxyAllowedHosts otherwise. The returned slice is
+// a copy. Hand-built entries are normalized defensively
+// (invalid entries dropped); an empty result means the
+// default list, exactly as parse treats an absent key.
+func (e *KeeperEntry) EffectiveProxyAllowedHosts() []string {
+	if e != nil && e.ProxyHostsSet && len(e.ProxyAllowedHosts) > 0 {
+		out := make([]string, 0, len(e.ProxyAllowedHosts))
+		for _, h := range e.ProxyAllowedHosts {
+			if norm, err := normalizeAllowedHost(h); err == nil {
+				out = append(out, norm)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	out := make([]string, len(DefaultProxyAllowedHosts))
+	copy(out, DefaultProxyAllowedHosts)
+	return out
+}
+
+// EffectiveReloginMatchTimeout returns the entry's driver
+// form-match wait: the parsed value when set,
+// DefaultReloginMatchTimeout otherwise.
+func (e *KeeperEntry) EffectiveReloginMatchTimeout() time.Duration {
+	if e == nil {
+		return DefaultReloginMatchTimeout
+	}
+	return effectiveDuration(e.ReloginMatchSet, e.ReloginMatchTimeout, DefaultReloginMatchTimeout)
+}
+
+// EffectiveReloginCookieTimeout returns the entry's driver
+// cookie wait: the parsed value when set,
+// DefaultReloginCookieTimeout otherwise.
+func (e *KeeperEntry) EffectiveReloginCookieTimeout() time.Duration {
+	if e == nil {
+		return DefaultReloginCookieTimeout
+	}
+	return effectiveDuration(e.ReloginCookieSet, e.ReloginCookieTimeout, DefaultReloginCookieTimeout)
+}
+
+// EffectiveReloginPollInterval returns the entry's driver
+// poll cadence: the parsed value when set,
+// DefaultReloginPollInterval otherwise.
+func (e *KeeperEntry) EffectiveReloginPollInterval() time.Duration {
+	if e == nil {
+		return DefaultReloginPollInterval
+	}
+	return effectiveDuration(e.ReloginPollSet, e.ReloginPollInterval, DefaultReloginPollInterval)
+}
+
+// EffectiveReloginAttachTimeout returns the entry's driver
+// attach dial timeout: the parsed value when set,
+// DefaultReloginAttachTimeout otherwise.
+func (e *KeeperEntry) EffectiveReloginAttachTimeout() time.Duration {
+	if e == nil {
+		return DefaultReloginAttachTimeout
+	}
+	return effectiveDuration(e.ReloginAttachSet, e.ReloginAttachTimeout, DefaultReloginAttachTimeout)
+}
+
+// EffectiveReloginCancelTimeout returns the entry's driver
+// cancel-wait bound: the parsed value when set,
+// DefaultReloginCancelTimeout otherwise.
+func (e *KeeperEntry) EffectiveReloginCancelTimeout() time.Duration {
+	if e == nil {
+		return DefaultReloginCancelTimeout
+	}
+	return effectiveDuration(e.ReloginCancelSet, e.ReloginCancelTimeout, DefaultReloginCancelTimeout)
+}
+
+// EffectiveObserveSettleTimeout returns the entry's
+// observation settle wait: the parsed value when set,
+// DefaultObserveSettleTimeout otherwise.
+func (e *KeeperEntry) EffectiveObserveSettleTimeout() time.Duration {
+	if e == nil {
+		return DefaultObserveSettleTimeout
+	}
+	return effectiveDuration(e.ObserveSettleSet, e.ObserveSettleTimeout, DefaultObserveSettleTimeout)
+}
+
+// EffectiveObserveTimeout returns the entry's whole
+// observation bound: the parsed value when set,
+// DefaultObserveTimeout otherwise.
+func (e *KeeperEntry) EffectiveObserveTimeout() time.Duration {
+	if e == nil {
+		return DefaultObserveTimeout
+	}
+	return effectiveDuration(e.ObserveTimeoutSet, e.ObserveTimeout, DefaultObserveTimeout)
+}
+
+// EffectiveObserveInventoryCap returns the entry's
+// observation inventory cap: the parsed value when set,
+// DefaultObserveInventoryCap otherwise.
+func (e *KeeperEntry) EffectiveObserveInventoryCap() int {
+	if e != nil && e.ObserveInventorySet && e.ObserveInventoryCap > 0 && e.ObserveInventoryCap <= MaxObserveInventoryCap {
+		return e.ObserveInventoryCap
+	}
+	return DefaultObserveInventoryCap
+}
+
 // encodeKeeperBlock renders a KeeperConfig for save when no raw
 // JSON was captured: entries in order, canonical key order, the
 // interval as a duration string, `browser` omitted when empty
 // (keep-alive-only entry), `notify`/`credentials` omitted when
 // empty, `wake_on_gateway_failure` omitted when unset (default
 // true), `retry_backoff`/`expiring_within`/attempt caps omitted
-// when unset. The returned values are *orderedObject so the
-// save encoder preserves key order.
+// when unset. The S10 proxy/driver/observe keys are likewise
+// omitted when unset (their defaults stay runtime-only). The
+// returned values are *orderedObject so the save encoder
+// preserves key order.
 func encodeKeeperBlock(cfg *KeeperConfig) ([]any, error) {
 	arr := make([]any, 0, len(cfg.Entries))
 	for _, e := range cfg.Entries {
@@ -663,6 +1117,46 @@ func encodeKeeperBlock(cfg *KeeperConfig) ([]any, error) {
 		}
 		if e.ReloginSet && e.ReloginAttempts > 0 {
 			entry.set("relogin_attempts", json.Number(strconv.Itoa(e.ReloginAttempts)))
+		}
+		if e.ProxyDialSet && e.ProxyDialTimeout > 0 {
+			entry.set("proxy_dial_timeout", e.ProxyDialTimeout.String())
+		}
+		if e.ProxyMaxHeaderSet && e.ProxyMaxHeaderBytes > 0 {
+			entry.set("proxy_max_header_bytes", json.Number(strconv.Itoa(e.ProxyMaxHeaderBytes)))
+		}
+		if e.ProxyMaxBodySet && e.ProxyMaxBodyBytes > 0 {
+			entry.set("proxy_max_body_bytes", json.Number(strconv.Itoa(e.ProxyMaxBodyBytes)))
+		}
+		if e.ProxyHostsSet && len(e.ProxyAllowedHosts) > 0 {
+			hosts := make([]any, 0, len(e.ProxyAllowedHosts))
+			for _, h := range e.ProxyAllowedHosts {
+				hosts = append(hosts, h)
+			}
+			entry.set("proxy_allowed_hosts", hosts)
+		}
+		if e.ReloginMatchSet && e.ReloginMatchTimeout > 0 {
+			entry.set("relogin_match_timeout", e.ReloginMatchTimeout.String())
+		}
+		if e.ReloginCookieSet && e.ReloginCookieTimeout > 0 {
+			entry.set("relogin_cookie_timeout", e.ReloginCookieTimeout.String())
+		}
+		if e.ReloginPollSet && e.ReloginPollInterval > 0 {
+			entry.set("relogin_poll_interval", e.ReloginPollInterval.String())
+		}
+		if e.ReloginAttachSet && e.ReloginAttachTimeout > 0 {
+			entry.set("relogin_attach_timeout", e.ReloginAttachTimeout.String())
+		}
+		if e.ReloginCancelSet && e.ReloginCancelTimeout > 0 {
+			entry.set("relogin_cancel_timeout", e.ReloginCancelTimeout.String())
+		}
+		if e.ObserveSettleSet && e.ObserveSettleTimeout > 0 {
+			entry.set("observe_settle_timeout", e.ObserveSettleTimeout.String())
+		}
+		if e.ObserveTimeoutSet && e.ObserveTimeout > 0 {
+			entry.set("observe_timeout", e.ObserveTimeout.String())
+		}
+		if e.ObserveInventorySet && e.ObserveInventoryCap > 0 {
+			entry.set("observe_inventory_cap", json.Number(strconv.Itoa(e.ObserveInventoryCap)))
 		}
 		arr = append(arr, entry)
 	}

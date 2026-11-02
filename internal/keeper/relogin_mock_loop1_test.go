@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -422,8 +423,35 @@ func TestReloginMismatchRemovesCreatedProfileDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("profile dir %q still exists after failed attempt; want it removed", dir)
+	// D9: settle-poll for absence. A lingering Chrome child
+	// can recreate (part of) the dir after RemoveAll, so an
+	// immediate Stat assertion flakes. Poll for absence
+	// over a settle window; if the dir is still present
+	// afterwards, it must hold no cookie store — the
+	// recreated skeleton holds lock/empty files only.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		_, statErr := os.Stat(dir)
+		if os.IsNotExist(statErr) {
+			return
+		}
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	var cookieStore bool
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && (d.Name() == "Cookies" || d.Name() == "Cookies-journal") {
+			cookieStore = true
+		}
+		return nil
+	})
+	if cookieStore {
+		t.Fatalf("profile dir %q still holds a cookie store after failed attempt; want it removed", dir)
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"time"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/keeper"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
@@ -27,7 +26,8 @@ import (
 // observation fails — see docs/security.md). The observation
 // always launches a headless browser: this command never
 // attaches to a running browser. The returned URL is the
-// final URL with query and fragment stripped.
+// final URL with query, fragment, and userinfo stripped;
+// the echoed login_url is stripped the same way.
 //
 // The output is the evidence for the versioned login contract
 // (keeper LoginContract): a human records the selectors/steps
@@ -54,7 +54,8 @@ submitted; nothing is written to the profile.
 
 The observation always launches a headless browser; it never
 attaches to a running browser. The printed "url" is the final
-URL with query and fragment stripped.
+URL with query, fragment, and userinfo stripped; the printed
+"login_url" is the supplied URL stripped the same way.
 `
 
 func cmdAuthObserveLogin(ctx context.Context, env *Env, g *globalOpts, args []string) error {
@@ -111,28 +112,60 @@ func cmdAuthObserveLogin(ctx context.Context, env *Env, g *globalOpts, args []st
 		return err
 	}
 	defer rt.Close()
-	inbound := newProfileInboundBuilder(rt)
+	// The profile's keeper entry tunes the observation
+	// (observe timeout, driver settle/poll, proxy guard);
+	// absent or unreadable config means the documented
+	// defaults — the observation must not fail for lack
+	// of a keeper entry.
+	var entry *profile.KeeperEntry
+	if single, found, err := profile.LoadSingleConfig(loc.ConfigDir); err == nil && found {
+		if kcfg, err := profile.ResolveKeeper(single); err == nil && kcfg != nil {
+			entry = kcfg.KeeperEntryForProfile(prof.Name)
+		}
+	}
+	inbound := newProfileInboundBuilder(rt, entry)
 	if inbound == nil {
 		return errCodef(2, "auth observe-login: no outbound for profile %q: refusing to load the page outside the profile's outbound", prof.Name)
 	}
-	obsCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	obsCtx, cancel := context.WithTimeout(ctx, entry.EffectiveObserveTimeout())
 	defer cancel()
 	obs, err := keeper.ObserveLoginPage(obsCtx, keeper.ObserveOptions{
 		BaseDir:  loc.ConfigDir,
 		Inbound:  inbound,
 		Profile:  prof,
 		LoginURL: loginURL,
+		Entry:    entry,
 	})
 	if err != nil {
 		return err
 	}
-	out := struct {
-		Profile  string                   `json:"profile"`
-		LoginURL string                   `json:"login_url"`
-		Elements []keeper.ObservedElement `json:"elements"`
-		URL      string                   `json:"url"`
-	}{Profile: prof.Name, LoginURL: loginURL, Elements: obs.Elements, URL: obs.URL}
-	return writeJSON(env.stdout(), out)
+	return writeJSON(env.stdout(), buildObserveOutput(prof.Name, loginURL, obs))
+}
+
+// authObserveOutput is the FULL printed shape of
+// `auth observe-login`. login_url is the operator-supplied
+// URL stripped the same way as the observed final URL
+// (query, fragment, userinfo removed): an operator may
+// paste a tokenised redirect URL, and no field of the
+// output may echo it back.
+type authObserveOutput struct {
+	Profile  string                   `json:"profile"`
+	LoginURL string                   `json:"login_url"`
+	Elements []keeper.ObservedElement `json:"elements"`
+	URL      string                   `json:"url"`
+}
+
+// buildObserveOutput strips the supplied login URL before
+// it reaches any output field. The observed URL arrives
+// already stripped from the driver; stripping it again is
+// harmless and keeps the invariant in one place.
+func buildObserveOutput(profileName, loginURL string, obs keeper.LoginPageObservation) authObserveOutput {
+	return authObserveOutput{
+		Profile:  profileName,
+		LoginURL: keeper.StripObservationURL(loginURL),
+		Elements: obs.Elements,
+		URL:      keeper.StripObservationURL(obs.URL),
+	}
 }
 
 // validateObserveLoginURL rejects anything but an https URL

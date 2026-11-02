@@ -422,24 +422,73 @@ entry (unknown keys are rejected):
 | `expiring_within` | duration string | `72h` | Window for `auth status`'s `expiring` state: a driving expiry within this window of now reports `expiring`. Positive, at most 1 year. |
 | `wake_attempts` | integer | `3` | Max wake attempts per incident (probe → wake → re-probe), 1–10. |
 | `relogin_attempts` | integer | `3` | Max headless re-login attempts per incident, 1–10. At most one re-login invocation happens per tick. |
+| `proxy_dial_timeout` | duration string | `30s` | S2 loopback proxy: bound on one upstream dial through the outbound. Positive, at most 1 minute. |
+| `proxy_max_header_bytes` | integer | `65536` | S2 loopback proxy: max bytes of one request's header block. 1–1048576. |
+| `proxy_max_body_bytes` | integer | `16777216` | S2 loopback proxy: max bytes of a forwarded plain-HTTP request body. 1–1073741824. |
+| `proxy_allowed_hosts` | array of strings | `["auth.muse.ai", "muse.ai"]` | S2 loopback proxy guard allowlist (see below): the only hosts the proxy dials. Non-empty; each entry a hostname or IPv4 literal, exact match on the lowercased host (one trailing dot ignored), no scheme/port/userinfo/path/query/wildcard/IPv6 literal. Duplicates are kept. |
+| `relogin_match_timeout` | duration string | `30s` | Headless driver: how long to poll for the login form (or a blocker) to appear. Positive, at most 10 minutes. |
+| `relogin_cookie_timeout` | duration string | `30s` | Headless driver: how long to poll for a session cookie after submit. Positive, at most 10 minutes. |
+| `relogin_poll_interval` | duration string | `500ms` | Headless driver: poll cadence for form/cookie waits and observation settle. Positive, at most 1 minute. |
+| `relogin_attach_timeout` | duration string | `10s` | Headless driver: bound on the WebSocket dial when attaching to a running browser. Positive, at most 1 minute. |
+| `relogin_cancel_timeout` | duration string | `10s` | Headless driver: bound on waiting for chromedp's target cancel after a failed launch. Positive, at most 1 minute. A wedged cancel leaks one goroutine per failed launch; a failed launch already stops the entry, so this cannot accumulate. |
+| `observe_timeout` | duration string | `90s` | `auth observe-login`: bound on the whole observation run. Positive, at most 10 minutes. |
+| `observe_settle_timeout` | duration string | `15s` | `auth observe-login`: how long to poll for at least one form control before returning the (possibly empty) inventory. Positive, at most 10 minutes. |
+| `observe_inventory_cap` | integer | `200` | `auth observe-login`: max form-control elements in the inventory. 1–10000. |
 
 The web UI edits this block through `GET`/`PUT /settings/keeper`
 (the entries list plus the stored-file SHA-256 guard; `entries:
 null` deletes the block). Keeper status display (`GET /keeper`)
 is read-only: the web UI never ticks the keeper.
 
-Fixed operational bounds (not config keys — changing them
-is a code change, and whether any should become configurable
-is an open decision, not a silent default): the S2 loopback
-proxy dial timeout 30s, header cap 64 KiB, body cap 16 MiB
-(`internal/outbound/proxy.go`); the headless driver match
-wait 30s, cookie wait 30s, poll 500ms, observation settle
-15s, attach dial timeout 10s, observation context timeout
-90s, form-inventory cap 200 elements
-(`internal/keeper/relogin_chromedp.go`,
-`internal/commands/authobserve.go`); validation caps
-`MaxRetryBackoffSteps = 8`, `MaxKeeperAttempts = 10`
+No hardcoded operational values remain in the keeper/headless
+code: every timeout, cap, and host above is a config key with
+the documented default, and omitting a key preserves exactly
+the behaviour the hardcoded value had. Validation caps are
+bounds on the schema, not defaults, and stay constants:
+`MaxRetryBackoffSteps = 8`, `MaxKeeperAttempts = 10`,
+`MaxProxyHeaderBytes = 1048576`, `MaxProxyBodyBytes =
+1073741824`, `MaxObserveInventoryCap = 10000`,
+`MaxProxyDialTimeout = 1m`, `MaxReloginPollInterval = 1m`,
+`MaxReloginWaitTimeout = 10m`
 (`internal/profile/keeper.go`, `internal/keeper/backoff.go`).
+
+**S2 proxy guard.** Before dialling, the loopback proxy
+refuses (fixed 403, no dial spent) any target that is a
+literal IP in a loopback, link-local, private (RFC 1918 /
+ULA), CGNAT (`100.64.0.0/10`), unspecified, or multicast
+range, or any host not on `proxy_allowed_hosts`. The two
+rules are conjunctive: an allowlist entry naming a
+refused-range address does NOT permit it — list the
+hostname instead. Hostnames are never resolved locally to
+apply the range check (resolution happens at the egress,
+where a listed hostname may legitimately resolve to a
+private address, e.g. through a VPN outbound; only literal
+IP targets are range-refused, so egress-reachable private
+targets behind a listed hostname keep working, and an
+operator who needs a literal private target dialled must
+reach it through a hostname on the allowlist). Matching is
+exact on the lowercased host, one trailing dot ignored, no
+wildcards, no suffix matching, ports ignored. The default
+allowlist is the two Muse hosts the login flow is known
+from code to need: `auth.muse.ai` (the default login URL
+host) and `muse.ai` (the app origin / gateway API host).
+Whether the live login page needs any further host through
+the proxy is unmeasured until the outside-sandbox
+observation gate; extend the list in config if it does. A
+refusal logs the refused host ONLY (no URL, query, port,
+or headers), at the single caller that wires the proxy, via
+the castctl logger.
+
+**Follow-ups (not implemented in this change).** Attach-success
+path (needs a debug-port Chrome harness; `internal/keeper`,
+re-login driver); log-line sentinel coverage for credential
+values (needs a test-only log-capture harness; see
+`docs/security.md`); screencast-path cancel hang (same wedge
+shape as the bounded driver cancel, in `internal/keeper/launch.go`
+`launchRunner.Run` — needs its own fix); JS hit-computation
+precedence in the contract matcher (unpinned; `internal/keeper/contract.go`);
+web UI `SECRET_KEYS`/`username` mock drift (the `webui/dev-mocks`
+mirror lacks `username`; owned by the web UI session).
 
 Behaviour — the self-healing loop, in order:
 
@@ -674,6 +723,16 @@ Rules:
   (`credentials` key); the referenced entry must exist and
   must name the keeper entry's own profile — a dangling tag
   or a cross-profile tag is a config error (exit 2).
+- A file edit that removes or rotates a credential entry is
+  authoritative on the next re-login attempt (the keeper
+  re-reads `config.json` from disk each time a re-login is
+  attempted). The re-read conflates a transiently
+  unreadable or broken config with a removal: if
+  `config.json` is mid-edit and unparseable at the exact
+  moment a re-login is attempted, the entry sticky-stops
+  (blocked) exactly as if the credential had been removed,
+  and needs manual recovery — the trade-off for never
+  serving a stale credential (see [Security](security.md)).
 - The config file is saved mode 0600 by the guarded atomic
   save (save-side enforcement: loading does not refuse a
   world-readable file); the guarded atomic save

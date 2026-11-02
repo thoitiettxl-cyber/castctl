@@ -644,13 +644,17 @@ func TestStripObservationURL(t *testing.T) {
 		{"https://auth.muse.ai/login", "https://auth.muse.ai/login"},
 		{"https://auth.muse.ai/a/b?x=1", "https://auth.muse.ai/a/b"},
 		{"http://127.0.0.1:9/login?next=/", "http://127.0.0.1:9/login"},
+		// R-7: userinfo is stripped too — a pasted URL
+		// carrying credentials must never survive.
+		{"https://user:pass@auth.muse.ai/login?code=SECRET123#frag", "https://auth.muse.ai/login"},
+		{"https://user@auth.muse.ai/login", "https://auth.muse.ai/login"},
 		{"not a url ::", ""},
 		{"", ""},
 		{"/relative/path?x=1", ""},
 	}
 	for _, tc := range cases {
-		if got := stripObservationURL(tc.in); got != tc.want {
-			t.Errorf("stripObservationURL(%q) = %q; want %q", tc.in, got, tc.want)
+		if got := StripObservationURL(tc.in); got != tc.want {
+			t.Errorf("StripObservationURL(%q) = %q; want %q", tc.in, got, tc.want)
 		}
 	}
 }

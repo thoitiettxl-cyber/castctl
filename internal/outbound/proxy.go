@@ -11,11 +11,13 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // The S2 loopback proxy: the minimal inbound that lets a
@@ -40,35 +42,122 @@ import (
 // resolver, and NEVER logs a URL, header, or body byte: a
 // request line may carry credentials in a query string, and
 // the proxy is not a place that records traffic. Errors are
-// fixed strings. The listener binds 127.0.0.1 only; cleanup
-// closes the listener and every open connection. (This file
-// logs nothing at all; the Dialer it dials through may emit
-// debug-level dial metadata — network, bare host via
-// SafeHost, port, no URLs/headers/values — see
-// internal/outbound/dialer.go. The no-logging claim here is
-// scoped to this file's code.)
+// fixed strings, except the guard refusal (403), which is
+// also a fixed string. The listener binds 127.0.0.1 only;
+// cleanup closes the listener and every open connection.
+// (This file logs nothing at all except a refused target's
+// HOST, via the OnRefused callback when one is configured;
+// the Dialer it dials through may emit debug-level dial
+// metadata — network, bare host via SafeHost, port, no
+// URLs/headers/values — see internal/outbound/dialer.go.
+// The no-logging claim here is scoped to this file's code.)
+//
+// GUARD. Before dialling, every target is gated (Boss
+// decision S8): the host must be on the configured
+// allowlist (ProxyOptions.AllowedHosts, exact match on the
+// lowercased host), and a literal IP in a loopback,
+// link-local, private, CGNAT, unspecified, or multicast
+// range is refused even if it is listed — an allowlist
+// entry naming such an address does not permit it; list
+// the hostname instead (resolution happens at the egress,
+// where a listed hostname may legitimately resolve to a
+// private address, e.g. through a VPN outbound). A refused
+// target gets a fixed 403 and no dial is spent. Hostnames
+// are never resolved locally to apply the range check: the
+// range refusal applies to literal IP targets only.
 
-// proxyDialTimeout bounds one upstream dial through the
-// outbound. Chrome's own timeouts bound the rest; the proxy
-// adds no read/write deadlines (a slow page load must not be
-// killed by the proxy).
-const proxyDialTimeout = 30 * time.Second
+// ProxyOptions configures one S2 loopback proxy. Every
+// field is required: NewLoopbackProxy fails closed on a
+// zero value, so no proxy ever runs on hidden defaults.
+// Production callers build these from the keeper entry's
+// Effective* accessors (internal/profile), whose zero
+// values are the documented S10 defaults. Tests build them
+// explicitly.
+type ProxyOptions struct {
+	// DialTimeout bounds one upstream dial through the
+	// outbound. Chrome's own timeouts bound the rest; the
+	// proxy adds no read/write deadlines (a slow page load
+	// must not be killed by the proxy).
+	DialTimeout time.Duration
+	// MaxHeaderBytes bounds one request's header block
+	// (request line + headers). A hostile local client
+	// cannot grow memory through the proxy.
+	MaxHeaderBytes int
+	// MaxBodyBytes bounds a forwarded plain-HTTP request
+	// body (login forms are small; a file upload through
+	// the proxy is not a castctl use case).
+	MaxBodyBytes int
+	// AllowedHosts is the guard allowlist: the only hosts
+	// the proxy dials, matched exactly on the lowercased
+	// host (one trailing dot ignored). Entries are
+	// hostnames or IPv4 literals: no scheme, port,
+	// userinfo, path, query, wildcard, or IPv6 literal.
+	// At least one entry is required.
+	AllowedHosts []string
+	// OnRefused, when non-nil, is called with the refused
+	// HOST ONLY (no URL, query, port, or headers) when
+	// the guard refuses a target. It runs on the
+	// connection handler goroutine and must not block.
+	// When nil, refusals are answered 403 and not logged.
+	OnRefused func(host string)
+}
 
-// maxProxyHeaderBytes bounds one request's header block
-// (request line + headers). Chrome's proxy requests are
-// small; a hostile local client cannot grow memory through
-// the proxy.
-const maxProxyHeaderBytes = 64 << 10
+// normalizeGuardHost returns a host's match form:
+// lowercased, one trailing dot removed.
+func normalizeGuardHost(host string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+}
 
-// maxProxyBodyBytes bounds a forwarded plain-HTTP request
-// body (login forms are small; a file upload through the
-// proxy is not a castctl use case).
-const maxProxyBodyBytes = 16 << 20
+// validateGuardHost reports whether s is a usable
+// allowlist entry: non-empty, no scheme/port/userinfo/
+// path/query/fragment/wildcard/bracket/whitespace/control
+// characters.
+func validateGuardHost(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r == '/' || r == ':' || r == '@' || r == '?' || r == '#' || r == '[' || r == ']' || r == '*' || unicode.IsSpace(r) || unicode.IsControl(r):
+			return false
+		}
+	}
+	return true
+}
+
+// cgnatPrefix is the shared-address (CGNAT) range,
+// refused like the private ranges: a browser must not
+// reach it as a literal target through the proxy.
+var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
+
+// refusedIPLiteral reports whether host is a literal IP
+// address in a range the guard never dials: loopback,
+// link-local (unicast and multicast), private (RFC 1918 /
+// ULA), CGNAT, unspecified, or multicast. A zone suffix
+// ("fe80::1%eth0") is stripped before parsing. A hostname
+// never refuses here: hostnames are gated by the allowlist
+// only, and resolution happens at the egress.
+func refusedIPLiteral(host string) bool {
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		host = host[:i]
+	}
+	addr, err := netip.ParseAddr(strings.TrimSpace(host))
+	if err != nil {
+		return false
+	}
+	if addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() ||
+		addr.IsPrivate() || addr.IsUnspecified() || addr.IsMulticast() {
+		return true
+	}
+	return cgnatPrefix.Contains(addr)
+}
 
 // LoopbackProxy is a running S2 proxy. Close is idempotent.
 type LoopbackProxy struct {
 	listener net.Listener
 	dialer   *Dialer
+	opts     ProxyOptions
+	allowed  map[string]struct{}
 
 	mu      sync.Mutex
 	conns   map[net.Conn]struct{}
@@ -78,12 +167,30 @@ type LoopbackProxy struct {
 }
 
 // NewLoopbackProxy starts a loopback HTTP proxy whose upstream
-// dials go through dialer. It returns the proxy URL to hand
-// to Chrome (--proxy-server) and a cleanup function. A nil
-// dialer fails closed before listening.
-func NewLoopbackProxy(dialer *Dialer) (*LoopbackProxy, string, error) {
+// dials go through dialer, gated by opts. It returns the proxy
+// URL to hand to Chrome (--proxy-server) and a cleanup
+// function. A nil dialer, a zero dial timeout or cap, or an
+// empty/invalid allowlist fails closed before listening.
+func NewLoopbackProxy(dialer *Dialer, opts ProxyOptions) (*LoopbackProxy, string, error) {
 	if dialer == nil {
 		return nil, "", errors.New("outbound: loopback proxy requires a dialer")
+	}
+	if opts.DialTimeout <= 0 {
+		return nil, "", errors.New("outbound: loopback proxy requires a positive dial timeout")
+	}
+	if opts.MaxHeaderBytes <= 0 || opts.MaxBodyBytes <= 0 {
+		return nil, "", errors.New("outbound: loopback proxy requires positive header/body caps")
+	}
+	if len(opts.AllowedHosts) == 0 {
+		return nil, "", errors.New("outbound: loopback proxy requires a non-empty host allowlist")
+	}
+	allowed := make(map[string]struct{}, len(opts.AllowedHosts))
+	for _, h := range opts.AllowedHosts {
+		norm := normalizeGuardHost(h)
+		if !validateGuardHost(norm) {
+			return nil, "", fmt.Errorf("outbound: loopback proxy: invalid allowlist host %q", h)
+		}
+		allowed[norm] = struct{}{}
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -92,6 +199,8 @@ func NewLoopbackProxy(dialer *Dialer) (*LoopbackProxy, string, error) {
 	p := &LoopbackProxy{
 		listener: ln,
 		dialer:   dialer,
+		opts:     opts,
+		allowed:  allowed,
 		conns:    map[net.Conn]struct{}{},
 		done:     make(chan struct{}),
 	}
@@ -170,6 +279,41 @@ func (p *LoopbackProxy) trackUpstream(conn net.Conn) func() {
 	return func() { p.forget(conn) }
 }
 
+// targetRefused reports whether host must not be dialled:
+// a literal IP in a refused range is refused outright, and
+// any host not on the allowlist is refused. Only an
+// allowlisted hostname (or a listed public IP literal) is
+// dialled.
+func (p *LoopbackProxy) targetRefused(host string) bool {
+	if refusedIPLiteral(host) {
+		return true
+	}
+	_, ok := p.allowed[normalizeGuardHost(host)]
+	return !ok
+}
+
+// logRefused reports a refused target's host ONLY to the
+// configured callback: no URL, query, port, or headers.
+// The logged host is the normalized match form, truncated
+// to DNS-name length.
+func (p *LoopbackProxy) logRefused(host string) {
+	if p.opts.OnRefused == nil {
+		return
+	}
+	h := normalizeGuardHost(host)
+	if len(h) > 253 {
+		h = h[:253]
+	}
+	p.opts.OnRefused(h)
+}
+
+// refuseTarget answers a fixed 403 for a guard-refused
+// target and logs its host only. No dial is spent.
+func (p *LoopbackProxy) refuseTarget(client net.Conn, host string) error {
+	p.logRefused(host)
+	return p.proxyError(client, 403)
+}
+
 // handle serves one client connection: exactly one request
 // (Connection: close semantics on both legs), then return.
 // Chrome opens a fresh proxy connection per request stream
@@ -177,7 +321,7 @@ func (p *LoopbackProxy) trackUpstream(conn net.Conn) func() {
 // keep-alive — and keeps the proxy stateless.
 func (p *LoopbackProxy) handle(client net.Conn) error {
 	br := bufio.NewReaderSize(client, 4096)
-	method, target, headers, err := readProxyRequest(br)
+	method, target, headers, err := readProxyRequest(br, p.opts.MaxHeaderBytes)
 	if err != nil {
 		return err
 	}
@@ -195,9 +339,10 @@ type proxyHeader struct {
 
 // readProxyRequest reads one request line + headers. It
 // returns the method, request target, and headers in order.
-// The body is left unread in br for the caller.
-func readProxyRequest(br *bufio.Reader) (string, string, []proxyHeader, error) {
-	line, err := readHeaderLine(br, maxProxyHeaderBytes)
+// The body is left unread in br for the caller. limit bounds
+// the header block.
+func readProxyRequest(br *bufio.Reader, limit int) (string, string, []proxyHeader, error) {
+	line, err := readHeaderLine(br, limit)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -212,12 +357,12 @@ func readProxyRequest(br *bufio.Reader) (string, string, []proxyHeader, error) {
 	var headers []proxyHeader
 	total := len(line)
 	for {
-		hline, err := readHeaderLine(br, maxProxyHeaderBytes)
+		hline, err := readHeaderLine(br, limit)
 		if err != nil {
 			return "", "", nil, err
 		}
 		total += len(hline)
-		if total > maxProxyHeaderBytes {
+		if total > limit {
 			return "", "", nil, errors.New("outbound: proxy: header block too large")
 		}
 		if hline == "" {
@@ -270,7 +415,10 @@ func (p *LoopbackProxy) handleConnect(client net.Conn, br *bufio.Reader, target 
 	if err != nil || port < 1 || port > 65535 || host == "" {
 		return p.proxyError(client, 400)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), proxyDialTimeout)
+	if p.targetRefused(host) {
+		return p.refuseTarget(client, host)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), p.opts.DialTimeout)
 	defer cancel()
 	up, err := p.dialer.DialContext(ctx, "tcp", host, uint16(port))
 	if err != nil {
@@ -316,6 +464,9 @@ func (p *LoopbackProxy) handleHTTP(client net.Conn, br *bufio.Reader, method, ta
 	if host == "" {
 		return p.proxyError(client, 400)
 	}
+	if p.targetRefused(host) {
+		return p.refuseTarget(client, host)
+	}
 	// Body plan, decided (and the body read) BEFORE the
 	// outbound dial: a malformed body framing must be
 	// refused without spending a dial on it. At most one
@@ -332,7 +483,7 @@ func (p *LoopbackProxy) handleHTTP(client net.Conn, br *bufio.Reader, method, ta
 		switch strings.ToLower(h.key) {
 		case "content-length":
 			n, err := strconv.Atoi(strings.TrimSpace(h.value))
-			if err != nil || n < 0 || n > maxProxyBodyBytes {
+			if err != nil || n < 0 || n > p.opts.MaxBodyBytes {
 				return p.proxyError(client, 400)
 			}
 			if contentLength >= 0 && contentLength != n {
@@ -351,7 +502,7 @@ func (p *LoopbackProxy) handleHTTP(client net.Conn, br *bufio.Reader, method, ta
 	}
 	var decodedBody []byte
 	if chunked {
-		decodedBody, err = readChunkedBody(br, maxProxyBodyBytes)
+		decodedBody, err = readChunkedBody(br, p.opts.MaxBodyBytes, p.opts.MaxHeaderBytes)
 		if err != nil {
 			return p.proxyError(client, 400)
 		}
@@ -360,7 +511,7 @@ func (p *LoopbackProxy) handleHTTP(client net.Conn, br *bufio.Reader, method, ta
 	// Dial only after the body framing was validated (and a
 	// chunked body fully read): malformed requests never
 	// spend an outbound dial.
-	ctx, cancel := context.WithTimeout(context.Background(), proxyDialTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), p.opts.DialTimeout)
 	defer cancel()
 	up, err := p.dialer.DialContext(ctx, "tcp", host, uint16(port))
 	if err != nil {
@@ -424,10 +575,10 @@ func (p *LoopbackProxy) handleHTTP(client net.Conn, br *bufio.Reader, method, ta
 // bounded by limit total bytes. Chunk extensions are ignored;
 // trailers are read and discarded. Any malformed framing or
 // over-limit body is an error (the caller answers 400).
-func readChunkedBody(br *bufio.Reader, limit int) ([]byte, error) {
+func readChunkedBody(br *bufio.Reader, limit int, headerLimit int) ([]byte, error) {
 	var out []byte
 	for {
-		line, err := readHeaderLine(br, maxProxyHeaderBytes)
+		line, err := readHeaderLine(br, headerLimit)
 		if err != nil {
 			return nil, err
 		}
@@ -441,7 +592,7 @@ func readChunkedBody(br *bufio.Reader, limit int) ([]byte, error) {
 		}
 		if size == 0 {
 			for {
-				trailer, err := readHeaderLine(br, maxProxyHeaderBytes)
+				trailer, err := readHeaderLine(br, headerLimit)
 				if err != nil {
 					return nil, err
 				}
@@ -458,7 +609,7 @@ func readChunkedBody(br *bufio.Reader, limit int) ([]byte, error) {
 			return nil, errors.New("outbound: proxy: truncated chunked body")
 		}
 		out = append(out, chunk...)
-		end, err := readHeaderLine(br, maxProxyHeaderBytes)
+		end, err := readHeaderLine(br, headerLimit)
 		if err != nil {
 			return nil, err
 		}
@@ -469,12 +620,17 @@ func readChunkedBody(br *bufio.Reader, limit int) ([]byte, error) {
 }
 
 // proxyError writes a fixed, body-free error response. No
-// detail: the cause (dial failure, bad target) must not leak
-// upstream behaviour to the browser beyond the status.
+// detail: the cause (dial failure, bad target, guard
+// refusal) must not leak upstream behaviour to the browser
+// beyond the status. A guard refusal is 403, not 502: the
+// target was refused by policy, not unreachable.
 func (p *LoopbackProxy) proxyError(client net.Conn, status int) error {
 	reason := "Bad Gateway"
-	if status == 400 {
+	switch status {
+	case 400:
 		reason = "Bad Request"
+	case 403:
+		reason = "Forbidden"
 	}
 	_, err := fmt.Fprintf(client, "HTTP/1.1 %d %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", status, reason)
 	return err

@@ -358,10 +358,7 @@ function jsonDeepEqual(a: unknown, b: unknown): boolean {
  * R4 identity guard: an array element whose merge restored a secret
  * must still be the same element. Every identity key present in the
  * stored element (`tag`, `type`, `username`, `name`, `address`,
- * `port`) must be present and unchanged in the merged element
- * (the submitted element after sentinel restoration — never
- * the raw submitted element, whose secret identity keys still
- * hold the sentinel);
+ * `port`) must be present and unchanged in the submitted element;
  * a reorder/insert/delete that shifts a sentinel onto a different
  * element rejects instead of restoring the wrong secret. Keys
  * absent from the stored element impose no constraint. When the
@@ -456,12 +453,7 @@ function mergeNode(
       const elementPath = `${path}[${index}]`;
       if (index < stored.length) {
         const result = mergeNode(stored[index], submitted[index], elementPath, secretPosition);
-        // Compare against the RESTORED element (result.merged),
-        // not the submitted one: an identity key that is also a
-        // secret key still holds the sentinel in the submitted
-        // element, and comparing that would reject every
-        // untouched round-trip. Mirrors merge.go.
-        if (result.restored) checkElementIdentity(stored[index], result.merged, elementPath);
+        if (result.restored) checkElementIdentity(stored[index], submitted[index], elementPath);
         restored = restored || result.restored;
         out.push(result.merged);
       } else {

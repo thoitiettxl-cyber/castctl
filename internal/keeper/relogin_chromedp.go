@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/chromedp/cdproto/storage"
@@ -153,7 +154,7 @@ func snapshotMatch(ctx context.Context, contract LoginContract) error {
 // persists by design.
 func (d *chromedpReloginDriver) browserContext(ctx context.Context) (context.Context, context.CancelFunc, func(), error) {
 	if d.opts.BrowserURL != "" {
-		if tctx, cancel, err := attachTargetContext(ctx, d.opts.BrowserURL); err == nil {
+		if tctx, cancel, err := attachTargetContext(ctx, d.opts.BrowserURL, d.opts.Entry.EffectiveReloginAttachTimeout()); err == nil {
 			return tctx, cancel, func() {}, nil
 		} else {
 			attachErr := err
@@ -168,13 +169,16 @@ func (d *chromedpReloginDriver) browserContext(ctx context.Context) (context.Con
 }
 
 // attachTargetContext attaches to a running browser and
-// returns a fresh target context in it.
-func attachTargetContext(ctx context.Context, browserURL string) (context.Context, context.CancelFunc, error) {
+// returns a fresh target context in it. dialTimeout bounds
+// the WebSocket dial; it comes from the entry's
+// relogin_attach_timeout (documented default when the entry
+// is absent).
+func attachTargetContext(ctx context.Context, browserURL string, dialTimeout time.Duration) (context.Context, context.CancelFunc, error) {
 	wsURL, err := DiscoverWebSocketURL(ctx, browserURL)
 	if err != nil {
 		return nil, nil, err
 	}
-	allocCtx, cancelAlloc := remote.NewAllocator(ctx, wsURL, remote.NoModifyURL, remote.WithDialTimeout(10*time.Second))
+	allocCtx, cancelAlloc := remote.NewAllocator(ctx, wsURL, remote.NoModifyURL, remote.WithDialTimeout(dialTimeout))
 	tctx, cancelTarget := chromedp.NewContext(allocCtx)
 	cancel := func() {
 		cancelTarget()
@@ -234,9 +238,27 @@ func launchHeadlessContext(ctx context.Context, opts ReloginOptions) (context.Co
 	_, statErr := os.Lstat(dir)
 	created := os.IsNotExist(statErr)
 	removeDir := func() {
-		if created {
-			_ = os.RemoveAll(dir)
+		if !created {
+			return
 		}
+		// Best effort, with one settle retry: Chrome child
+		// processes can outlive the browser and recreate
+		// (part of) the dir after RemoveAll — the
+		// recreated skeleton holds lock/empty files, not
+		// the cookie store (the browser process is dead),
+		// but the removal must still be attempted again
+		// after a short settle. The settle is one driver
+		// poll interval (the entry's
+		// relogin_poll_interval, documented default when
+		// the entry is absent), not a second hardcoded
+		// bound. If the dir is already gone, the second
+		// check costs nothing and no sleep happens.
+		_ = os.RemoveAll(dir)
+		if _, err := os.Lstat(dir); os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(opts.Entry.EffectiveReloginPollInterval())
+		_ = os.RemoveAll(dir)
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		cleanup()
@@ -270,14 +292,18 @@ func launchHeadlessContext(ctx context.Context, opts ReloginOptions) (context.Co
 		// allocator to reap the browser process, which never
 		// happens when the process failed to start (or died
 		// before allocating) — an unbounded wait wedges the
-		// tick past context cancellation. The process kill
-		// itself already happened via context cancellation
-		// inside the allocator; only the reap-wait is
-		// bounded. A wedged cancel leaks one goroutine per
-		// failed launch; a failed launch already stops the
-		// entry, so this cannot accumulate in normal
-		// operation. 10s is generous for a healthy shutdown
-		// (one tab) and far below any tick timeout.
+		// tick past context cancellation. The bound is the
+		// entry's relogin_cancel_timeout (documented
+		// default when the entry is absent). Note the
+		// ordering precisely: if cancelTarget() itself
+		// wedges, cancelAlloc() never runs, and the
+		// process kill in that case comes from the outer
+		// attempt-context cancellation watched by the
+		// allocator — the bound limits only the wait, it
+		// does not itself kill anything. A wedged cancel
+		// leaks one goroutine per failed launch; a failed
+		// launch already stops the entry, so this cannot
+		// accumulate in normal operation.
 		done := make(chan struct{})
 		go func() {
 			cancelTarget()
@@ -286,7 +312,7 @@ func launchHeadlessContext(ctx context.Context, opts ReloginOptions) (context.Co
 		}()
 		select {
 		case <-done:
-		case <-time.After(10 * time.Second):
+		case <-time.After(opts.Entry.EffectiveReloginCancelTimeout()):
 		}
 		cleanup()
 	}
@@ -360,8 +386,10 @@ func (d *chromedpReloginDriver) attempt(ctx context.Context, contract LoginContr
 	// Wait for the form (or a blocker) to appear, polling
 	// the boolean snapshot. A page that never matches the
 	// contract is a mismatch blocker, not a retry: the
-	// form genuinely is not the recorded one.
-	if berr := d.waitForMatch(tctx, contract, 30*time.Second); berr != nil {
+	// form genuinely is not the recorded one. The wait and
+	// poll cadence come from the entry (documented
+	// defaults when the entry is absent).
+	if berr := d.waitForMatch(tctx, contract, d.opts.Entry.EffectiveReloginMatchTimeout(), d.opts.Entry.EffectiveReloginPollInterval()); berr != nil {
 		var blocker *ReloginBlocker
 		if errors.As(berr, &blocker) {
 			return fail(blocker, nil)
@@ -415,7 +443,7 @@ func (d *chromedpReloginDriver) attempt(ctx context.Context, contract LoginContr
 	// submit, checkpoint) stops immediately. A failed
 	// harvest removes the launch-created profile dir, like
 	// any other failed attempt.
-	cookies, blocker, terr := d.waitForCookies(tctx, contract, 30*time.Second)
+	cookies, blocker, terr := d.waitForCookies(tctx, contract, d.opts.Entry.EffectiveReloginCookieTimeout(), d.opts.Entry.EffectiveReloginPollInterval())
 	if blocker != nil || terr != nil {
 		return fail(blocker, terr)
 	}
@@ -431,7 +459,7 @@ func (d *chromedpReloginDriver) attempt(ctx context.Context, contract LoginContr
 // to the deadline like any other transient state. A snapshot
 // evaluation failure is transient for the same reason: the
 // page may still be loading.
-func (d *chromedpReloginDriver) waitForMatch(ctx context.Context, contract LoginContract, timeout time.Duration) error {
+func (d *chromedpReloginDriver) waitForMatch(ctx context.Context, contract LoginContract, timeout, poll time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	var lastMismatch *ReloginBlocker
@@ -461,7 +489,7 @@ func (d *chromedpReloginDriver) waitForMatch(ctx context.Context, contract Login
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(poll):
 		}
 	}
 }
@@ -470,7 +498,7 @@ func (d *chromedpReloginDriver) waitForMatch(ctx context.Context, contract Login
 // a hatch_sess cookie is harvested, a blocker appears, or
 // the deadline passes (transient: the login may have
 // failed server-side, which a retry can still recover).
-func (d *chromedpReloginDriver) waitForCookies(ctx context.Context, contract LoginContract, timeout time.Duration) ([]ExportedCookie, *ReloginBlocker, error) {
+func (d *chromedpReloginDriver) waitForCookies(ctx context.Context, contract LoginContract, timeout, poll time.Duration) ([]ExportedCookie, *ReloginBlocker, error) {
 	deadline := time.Now().Add(timeout)
 	for {
 		// Blockers first: a captcha/2FA page after submit
@@ -500,7 +528,7 @@ func (d *chromedpReloginDriver) waitForCookies(ctx context.Context, contract Log
 		select {
 		case <-ctx.Done():
 			return nil, nil, ctx.Err()
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(poll):
 		}
 	}
 }
@@ -526,17 +554,21 @@ func hasHatchSess(cookies []ExportedCookie) bool {
 	return false
 }
 
-// ObserveLoginPage loads the login page headless (attach
-// first when a browser URL is configured, launch fallback)
-// and returns its redacted form-control inventory. No
-// credential is entered, nothing is submitted, and the tab
-// is closed on return. The inventory script returns
-// structure only: tag, type, name, id, classes, aria-label
-// presence — never values, text, or hrefs. The returned URL
-// is the final URL with query and fragment stripped. A
-// failed observation removes the browser profile dir the
-// launch created; a successful one keeps it (see
-// browserContext).
+// ObserveLoginPage loads the login page headless and
+// returns its redacted form-control inventory. It attaches
+// to a running browser only when the caller supplies a
+// browser URL; the `auth observe-login` command never does,
+// so observation through the command always launches
+// (launch-only in practice). No credential is entered,
+// nothing is submitted, and the tab is closed on return.
+// The inventory script returns structure only: tag, type,
+// name, id, classes, aria-label presence — never values,
+// text, or hrefs. The returned URL is the final URL with
+// query, fragment, and userinfo stripped. A failed
+// observation removes the browser profile dir the launch
+// created; a successful one keeps it (see browserContext).
+// The settle wait, poll cadence, and inventory cap come
+// from the entry (documented defaults when absent).
 func ObserveLoginPage(ctx context.Context, opts ObserveOptions) (LoginPageObservation, error) {
 	if opts.LoginURL == "" {
 		return LoginPageObservation{}, errors.New("observe: no login URL")
@@ -544,7 +576,7 @@ func ObserveLoginPage(ctx context.Context, opts ObserveOptions) (LoginPageObserv
 	if opts.Profile == nil {
 		return LoginPageObservation{}, errors.New("observe: no profile")
 	}
-	driver := &chromedpReloginDriver{opts: ReloginOptions{BrowserURL: opts.BrowserURL, BaseDir: opts.BaseDir, Inbound: opts.Inbound, Profile: opts.Profile}}
+	driver := &chromedpReloginDriver{opts: ReloginOptions{BrowserURL: opts.BrowserURL, BaseDir: opts.BaseDir, Inbound: opts.Inbound, Profile: opts.Profile, Entry: opts.Entry}}
 	tctx, cancel, removeDir, err := driver.browserContext(ctx)
 	if err != nil {
 		return LoginPageObservation{}, err
@@ -559,16 +591,18 @@ func ObserveLoginPage(ctx context.Context, opts ObserveOptions) (LoginPageObserv
 		return fail(err)
 	}
 	// Let the page settle: poll until at least one form
-	// control exists or 15s pass (a page with no form at
-	// all still returns its — empty — inventory).
-	deadline := time.Now().Add(15 * time.Second)
+	// control exists or the entry's settle timeout passes
+	// (a page with no form at all still returns its —
+	// empty — inventory).
+	deadline := time.Now().Add(opts.Entry.EffectiveObserveSettleTimeout())
+	poll := opts.Entry.EffectiveReloginPollInterval()
 	var obs LoginPageObservation
 	for {
-		res, err := chromedp.Run(tctx, chromedp.Evaluate[LoginPageObservation](inventoryScript))
+		res, err := chromedp.Run(tctx, chromedp.Evaluate[LoginPageObservation](inventoryScript(opts.Entry.EffectiveObserveInventoryCap())))
 		if err == nil {
 			obs = res
 			if len(obs.Elements) > 0 || time.Now().After(deadline) {
-				obs.URL = stripObservationURL(obs.URL)
+				obs.URL = StripObservationURL(obs.URL)
 				return obs, nil
 			}
 		} else if time.Now().After(deadline) {
@@ -577,18 +611,25 @@ func ObserveLoginPage(ctx context.Context, opts ObserveOptions) (LoginPageObserv
 		select {
 		case <-ctx.Done():
 			return fail(ctx.Err())
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(poll):
 		}
 	}
 }
 
-const inventoryScript = `(function(){
+// inventoryScript is the FIXED evaluation script, with the
+// entry's inventory cap interpolated as a decimal: the cap
+// is an int validated at parse time, so formatting it with
+// %d cannot inject script. The script returns structure
+// only, capped at that many elements.
+func inventoryScript(cap int) string {
+	return `(function(){
 	var out = [];
 	var els = document.querySelectorAll("input, button, select, textarea, form");
-	for (var i = 0; i < els.length && out.length < 200; i++) {
+	for (var i = 0; i < els.length && out.length < ` + strconv.Itoa(cap) + `; i++) {
 		var el = els[i];
 		var cls = (el.getAttribute("class") || "").split(/\s+/).filter(function(s){ return s !== ""; });
 		out.push({tag: el.tagName.toLowerCase(), type: el.getAttribute("type") || "", name: el.getAttribute("name") || "", id: el.getAttribute("id") || "", classes: cls, has_aria_label: !!el.getAttribute("aria-label")});
 	}
 	return {url: location.href, elements: out};
 })()`
+}

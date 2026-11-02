@@ -499,10 +499,11 @@ func (k *keeperRuntimes) wireRelogin(entry *profile.KeeperEntry, prof *profile.P
 	deps.Relogin = keeper.NewReloginDriver(keeper.ReloginOptions{
 		BrowserURL:  entry.Browser,
 		BaseDir:     k.loc.ConfigDir,
-		Inbound:     newProfileInboundBuilder(rt),
+		Inbound:     newProfileInboundBuilder(rt, entry),
 		Profile:     prof,
 		Contract:    contract,
 		MaxAttempts: entry.EffectiveReloginAttempts(),
+		Entry:       entry,
 	})
 }
 

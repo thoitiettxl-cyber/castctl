@@ -119,10 +119,14 @@ func resolveBrowserPath(flagPath string) string {
 }
 
 // browserProfileDir is the persistent per-profile user-data
-// dir (0700, never auto-deleted): the launched browser's
-// state survives across logins, like a real profile. For the
-// default profile it sits in the base dir; named profiles
-// under profiles/<name>/.
+// dir (0700): the launched browser's state survives across
+// logins, like a real profile. It persists by design and is
+// never rotated; a FAILED launch or observation attempts to
+// remove a dir that launch created (best effort — a
+// lingering Chrome child can recreate lock/empty files, see
+// the headless driver), and the operator removes it by
+// deleting the directory. For the default profile it sits
+// in the base dir; named profiles under profiles/<name>/.
 func browserProfileDir(baseDir string, prof *profile.Profile) (string, error) {
 	paths, err := profile.ProfilePaths(baseDir, prof.Name)
 	if err != nil {

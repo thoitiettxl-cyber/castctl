@@ -40,11 +40,20 @@ write-only contract, strengthened:
     Chrome's, not castctl's). The dir persists by design
     (Chrome profile reuse across attempts) and castctl never
     rotates or deletes it, except that a failed launch or
-    observation removes a dir that launch created. The
-    operator removes it by deleting the directory. A launch
-    whose Chrome binary is missing fails fast, before the
-    dir or the proxy is created, and never waits past
-    cancellation for a browser that failed to start.
+    observation attempts to remove a dir that launch
+    created (best effort: a lingering Chrome child process
+    can recreate lock/empty files after removal, so the
+    removal is attempted twice with a settle between, and
+    the dir may still exist afterwards holding no cookie
+    store). The operator removes it by deleting the
+    directory. A launch whose Chrome binary is explicitly
+    configured (via `--browser-path` or
+    `CASTCTL_CHROMIUM_PATH`) and whose binary is missing
+    fails fast, before the dir or the proxy is created, and
+    never waits past cancellation for a browser that failed
+    to start; when no binary path is configured, chromedp's
+    own search runs with the bounded cancel (entry
+    `relogin_cancel_timeout`) as the guard.
   - Harvest reads all of the browser profile's cookies into
     memory briefly; only `muse.ai` / `auth.muse.ai` cookies
     are kept and persisted, the rest are dropped (count only).
@@ -58,14 +67,28 @@ write-only contract, strengthened:
   state files, audit records, logs, or Telegram notices
   (profile name only). A sentinel-leak test pins this at the
   command layer, over CLI outputs, state files, redacted
-  config views, log lines, and web UI API responses.
+  config views, display commands, and web UI API responses.
+  Log-line coverage for credential sentinels is NOT pinned
+  by a test and is UNVERIFIED (a capture harness driving a
+  credential sentinel through a keeper-tick-shaped path
+  into the real logger does not exist yet; the log writer
+  itself is covered by fixture-secret tests over other
+  secret values, and no leak has been observed). Until that
+  harness exists, do not claim log lines are
+  sentinel-tested for credentials.
 - A file edit that removes or rotates a credential entry is
   authoritative on the next re-login attempt: the keeper
   re-reads `config.json` from disk each time a re-login is
   attempted, so a running keeper picks the edit up without a
   restart. (Driver wiring is fixed at process start; only
   the values are re-read. Removing a credential does not
-  invalidate cookies already harvested.)
+  invalidate cookies already harvested.) The re-read
+  conflates a transiently unreadable or broken config with
+  a removal: if `config.json` is mid-edit and unparseable
+  at the exact moment a re-login is attempted, the entry
+  sticky-stops (blocked) exactly as if the credential had
+  been removed, and needs manual recovery — the trade-off
+  for never serving a stale credential.
 
 The full contract is the [secrets write-only contract](../webui/SECRETS-CONTRACT.md).
 The Go server implements the same redaction, sentinel

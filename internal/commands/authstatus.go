@@ -216,36 +216,44 @@ func authStatusForProfile(baseDir, name string, prof *profile.Profile, kcfg *pro
 // authHeadlessCapability reports whether headless re-login
 // could run for this profile, with a closed-enum reason. The
 // gates, in order: a keeper entry must exist (re-login only
-// runs from a tick), this build must have the driver, stored
-// credentials must exist for the profile, and the versioned
-// login-form contract must be established (an unobserved
-// contract makes the driver refuse, so the report must say
-// so). No network is involved: a build without the driver
-// reports no_chromedp even though the binary runs. Presence
-// is checked without materialising a credential value.
+// runs from a tick), this build must have the driver, the
+// versioned login-form contract must be established (an
+// unobserved contract makes the driver refuse, so the
+// report must say so), the keeper entry must reference
+// credentials, and stored credentials must exist for the
+// profile. The contract gate precedes the credentials gates:
+// with the fixture unobserved, the reason is no_contract
+// even when credentials are also missing. No network is
+// involved: a build without the driver reports no_chromedp
+// even though the binary runs. Presence is checked without
+// materialising a credential value.
 func authHeadlessCapability(entry *profile.KeeperEntry, creds *profile.CredentialsConfig, profileName string) (bool, string) {
 	hasCreds := creds != nil && creds.HasCredentialForProfile(profileName)
+	hasRef := entry != nil && entry.Credentials != ""
 	contract, err := keeper.DefaultLoginContract()
 	observed := err == nil && contract.Observed
-	return headlessCapability(entry != nil, keeper.ReloginAvailable(), hasCreds, observed)
+	return headlessCapability(entry != nil, keeper.ReloginAvailable(), hasCreds, observed, hasRef)
 }
 
 // headlessCapability is the pure gate order behind
 // authHeadlessCapability, unit-testable for every branch
 // (including the observed-contract case, which the embedded
 // fixture cannot express while it stays unobserved).
-func headlessCapability(hasEntry, driverAvailable, hasCredentials, contractObserved bool) (bool, string) {
+func headlessCapability(hasEntry, driverAvailable, hasCredentials, contractObserved, hasCredentialsRef bool) (bool, string) {
 	if !hasEntry {
 		return false, "no_keeper_entry"
 	}
 	if !driverAvailable {
 		return false, "no_chromedp"
 	}
-	if !hasCredentials {
-		return false, "no_credentials"
-	}
 	if !contractObserved {
 		return false, "no_contract"
+	}
+	if !hasCredentialsRef {
+		return false, "no_credentials_ref"
+	}
+	if !hasCredentials {
+		return false, "no_credentials"
 	}
 	return true, ""
 }
