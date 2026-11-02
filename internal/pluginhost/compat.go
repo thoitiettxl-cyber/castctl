@@ -181,6 +181,18 @@ func compareGlibcVersion(a, b glibcVersion) int {
 // adversary-proof verneed parser; plugins are fully
 // trusted in-process code by design, and dlopen fails
 // closed with the linker's own version error.
+//
+// Known limitations of this preflight:
+// (a) a version string truncated at the DT_STRSZ/.dynstr
+// boundary can under-report: ld.so reads to NUL in memory;
+// (b) the first matching PT_LOAD wins and a later overlapping
+// PT_LOAD remapping the .dynstr page is not accounted for;
+// (c) the sh_link string table can differ from DT_STRTAB and
+// a name beyond DT_STRSZ may be missed; (d) with no section
+// headers the verneed section is absent, so the bound
+// reports no max although DT_VERNEED still applies;
+// (e) DT_VERNEED can point at a hidden verneed in unscanned tail bytes;
+// not covered. This preflight is a convenience check, not a security boundary.
 func MaxRequiredGLIBC(path string) (string, error) {
 	f, err := elf.Open(path)
 	if err != nil {
@@ -465,6 +477,18 @@ func dynamicStrtabRange(f *elf.File, path string) ([]byte, error) {
 // limitation, not a second fix round. Plugins are fully
 // trusted in-process code by design; dlopen fails closed
 // with the linker's own version error.
+//
+// Known limitations of this preflight:
+// (a) a version string truncated at the DT_STRSZ/.dynstr
+// boundary can under-report: ld.so reads to NUL in memory;
+// (b) the first matching PT_LOAD wins and a later overlapping
+// PT_LOAD remapping the .dynstr page is not accounted for;
+// (c) the sh_link string table can differ from DT_STRTAB and
+// a name beyond DT_STRSZ may be missed; (d) with no section
+// headers the verneed section is absent, so the bound
+// reports no max although DT_VERNEED still applies;
+// (e) DT_VERNEED can point at a hidden verneed in unscanned tail bytes;
+// not covered. This preflight is a convenience check, not a security boundary.
 func parseVersionNeeds(data, strtab []byte, order binary.ByteOrder) (string, error) {
 	max, _, err := parseVersionNeedsCount(data, strtab, order)
 	return max, err
