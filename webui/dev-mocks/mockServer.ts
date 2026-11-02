@@ -10,7 +10,11 @@
  * fingerprint/outbound fields through the guarded save); login
  * import returns verified:true with a fake vm_id_prefix (Go
  * returns verified:false — no live verification — and a null
- * prefix). The PR body lists these divergences.
+ * prefix); chats send answers with a completed job synchronously
+ * (Go returns a running job; the page polls); keeper/webui
+ * settings PUTs echo the fixture hash without base_sha256/409
+ * validation (Go enforces the guard through saveGuarded). The PR
+ * body lists these divergences.
  */
 import type { Connect } from 'vite';
 import {
@@ -21,17 +25,23 @@ import {
   handleValidateConfig,
 } from './configStore.ts';
 import {
+  chatHistoryFixture,
+  chatJobFixture,
+  chatsFixture,
   endpointsFixture,
   keeperFixture,
+  keeperSettingsFixture,
   legacyProfileEntryFixture,
   loginStatusFixture,
   logsFixture,
   outboundsFixture,
+  pluginsFixture,
   profileDetailFixture,
   profileTestFixture,
   profilesFixture,
   statusFixture,
   telegramFixture,
+  webuiSettingsFixture,
 } from './fixtures.ts';
 import { redactValue } from './redact.ts';
 
@@ -198,6 +208,59 @@ export function registerMockApi(middlewares: Connect.Server) {
       }
       if (method === 'GET' && path === '/settings/telegram') return ok(res, telegramFixture);
       if (method === 'PUT' && path === '/settings/telegram') return ok(res, telegramFixture);
+      if (method === 'GET' && path === '/settings/keeper') return ok(res, keeperSettingsFixture);
+      if (method === 'PUT' && path === '/settings/keeper') {
+        return ok(res, { sha256: keeperSettingsFixture.sha256 });
+      }
+      if (method === 'GET' && path === '/settings/webui') return ok(res, webuiSettingsFixture);
+      if (method === 'PUT' && path === '/settings/webui') {
+        return ok(res, { sha256: webuiSettingsFixture.sha256 });
+      }
+      if (method === 'GET' && path === '/plugins') return ok(res, pluginsFixture);
+      // Chats: the jobs route is checked before the generic
+      // profile/session match ("/chats/jobs/{id}" would otherwise
+      // read as profile "jobs"). DIVERGENCE: send answers with a
+      // completed job synchronously; the Go server returns a
+      // running job and the page polls GET /chats/jobs/{job}.
+      const jobMatch = path.match(/^\/chats\/jobs\/([^/]+)$/);
+      if (jobMatch && method === 'GET') return ok(res, { ...chatJobFixture, job_id: jobMatch[1] });
+      const chatsMatch = path.match(/^\/chats\/([^/]+)(.*)$/);
+      if (chatsMatch) {
+        const rest = chatsMatch[2];
+        if (rest === '' && method === 'GET') return ok(res, chatsFixture);
+        if (rest === '' && method === 'POST') {
+          const title = typeof json.title === 'string' && json.title ? json.title : 'Fixture session';
+          return ok(res, {
+            id: 's-new',
+            title,
+            pinned: false,
+            archived: false,
+            last_used: '',
+            message_count: 0,
+          });
+        }
+        const sessionMatch = rest.match(/^\/([^/]+)(.*)$/);
+        if (sessionMatch) {
+          const sessionRest = sessionMatch[2];
+          if (sessionRest === '' && method === 'GET') {
+            const limit = Number(url.searchParams.get('limit'));
+            const events =
+              Number.isFinite(limit) && limit > 0 ? chatHistoryFixture.slice(0, limit) : chatHistoryFixture;
+            return ok(res, events);
+          }
+          if (sessionRest === '/send' && method === 'POST') return ok(res, chatJobFixture);
+          if (sessionRest === '/op' && method === 'POST') {
+            const session = chatsFixture.find((s) => s.id === sessionMatch[1]) ?? chatsFixture[0];
+            const op = String(json.op ?? '');
+            return ok(res, {
+              ...session,
+              title: op === 'rename' && typeof json.title === 'string' ? json.title : session.title,
+              pinned: op === 'pin' ? true : op === 'unpin' ? false : session.pinned,
+              archived: op === 'archive' ? true : op === 'unarchive' ? false : session.archived,
+            });
+          }
+        }
+      }
       if (method === 'GET' && path === '/logs') {
         liveLogPollCount += 1;
         if (liveLogPollCount > 1) {

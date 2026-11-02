@@ -67,6 +67,16 @@ export function IconBot({ size = 20, ...props }: IconProps) {
   );
 }
 
+/** Lucide message-square (chat sessions nav entry). Same inline-SVG
+ * pattern as the other icons in this file. */
+export function IconMessageSquare({ size = 20, ...props }: IconProps) {
+  return (
+    <svg {...baseSvgProps} width={size} height={size} {...props}>
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+
 export function IconModelCluster({ size = 20, ...props }: IconProps) {
   return (
     <svg {...baseSvgProps} width={size} height={size} {...props}>

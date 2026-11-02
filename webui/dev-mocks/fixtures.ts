@@ -73,6 +73,8 @@ export const statusFixture = {
   outbound_count: 3,
   endpoint_count: 1,
   bundle_sha256: 'CASTCTL_MOCK_FIXTURE',
+  // Effective webui.session_idle_timeout (default 12h).
+  session_idle_timeout_seconds: 43200,
 };
 
 /**
@@ -373,6 +375,80 @@ export const keeperFixture = [
 ];
 
 export const defaultsFixture = { auto_approve: false, auto_allow_once: false, watch: true };
+
+/** Plugins availability probe (Go shape): unavailable in this
+ * build, empty list, no enable/disable data. */
+export const pluginsFixture = {
+  available: false,
+  reason: 'plugin support is not available in this build (plugin core lands separately; a follow-up wires list/enable/disable)',
+  plugins: [],
+};
+
+/** Chat sessions for one profile (Go shape). The main chat ("")
+ * has no row: the page synthesises it. */
+export const chatsFixture = [
+  {
+    id: 's-1',
+    title: 'Fixture session',
+    pinned: false,
+    archived: false,
+    last_used: '2026-11-01 09:30',
+    message_count: 4,
+  },
+  {
+    id: 's-2',
+    title: 'Pinned fixture',
+    pinned: true,
+    archived: false,
+    last_used: '2026-10-31 18:05',
+    message_count: 2,
+  },
+];
+
+/** Chat history events (Go shape: text only, no resources). */
+export const chatHistoryFixture = [
+  { seq: 1, time: '2026-11-01 09:28', kind: 'user', role: 'user', text: 'Fixture question' },
+  { seq: 2, time: '2026-11-01 09:29', kind: 'assistant', role: 'assistant', text: 'Fixture answer' },
+];
+
+/** Completed send job (Go shape). The mock answers synchronously;
+ * the real server returns a running job and the page polls. */
+export const chatJobFixture = {
+  job_id: 'job-fixture',
+  profile: 'muse01',
+  session_id: 'main',
+  status: 'done',
+  result: {
+    outcome: 'done',
+    text: 'Fixture answer',
+    replies: [{ seq: 2, time: '2026-11-01 09:29', kind: 'assistant', role: 'assistant', text: 'Fixture answer' }],
+    approvals_requested: 0,
+    approvals_resolved: 0,
+    note: '',
+  },
+  created_at: '2026-11-01T09:28:00Z',
+  updated_at: '2026-11-01T09:29:00Z',
+};
+
+/** Keeper block editor (Go shape): stored entries + file hash. */
+export const keeperSettingsFixture = {
+  entries: [
+    { tag: 'k1', profile: 'muse01', browser: 'http://127.0.0.1:9226', interval: '24h', notify: 'telegram' },
+  ],
+  sha256: sha256Hex(stringifyConfigDocument(storedConfigDocument)),
+};
+
+/** Web UI block editor (Go shape): effective values, write-only
+ * token as token_set + masked. */
+export const webuiSettingsFixture = {
+  listen: '127.0.0.1:8317',
+  ui_dir: '',
+  session_idle_timeout: '12h',
+  login_rate_limit: { attempts: 5, window: '5m' },
+  token_set: true,
+  masked: '***',
+  sha256: sha256Hex(stringifyConfigDocument(storedConfigDocument)),
+};
 
 export const logsFixture = [
   { ts: '2026-10-29T05:00:01Z', level: 'info', kind: 'server', message: 'castctl web UI started on 127.0.0.1:8317' },

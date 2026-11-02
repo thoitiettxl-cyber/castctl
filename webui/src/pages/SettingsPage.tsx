@@ -31,6 +31,33 @@ export function SettingsPage() {
   const [telegramError, setTelegramError] = useState('');
   const [telegramSaving, setTelegramSaving] = useState(false);
 
+  // Keeper section editor: the entries list as JSON text, saved
+  // through the same base_sha256 guard as DNS. `[]` keeps an empty
+  // block; `null` removes the block (server semantics, see the
+  // hint under the editor).
+  const [keeperText, setKeeperText] = useState('');
+  const [keeperBaseSha, setKeeperBaseSha] = useState('');
+  const [keeperLoaded, setKeeperLoaded] = useState(false);
+  const [keeperError, setKeeperError] = useState('');
+  const [keeperSaving, setKeeperSaving] = useState(false);
+
+  // Web UI section editor: partial PUT, absent = unchanged. Empty
+  // listen/ui_dir/idle deletes the key (default returns); empty
+  // token = unchanged (write-only); empty attempts+window leaves
+  // the rate limit untouched. Deleting the rate-limit key needs
+  // the whole-document Config editor.
+  const [webuiListen, setWebuiListen] = useState('');
+  const [webuiUiDir, setWebuiUiDir] = useState('');
+  const [webuiIdle, setWebuiIdle] = useState('');
+  const [webuiAttempts, setWebuiAttempts] = useState('');
+  const [webuiWindow, setWebuiWindow] = useState('');
+  const [webuiTokenSet, setWebuiTokenSet] = useState(false);
+  const [webuiTokenInput, setWebuiTokenInput] = useState('');
+  const [webuiBaseSha, setWebuiBaseSha] = useState('');
+  const [webuiLoaded, setWebuiLoaded] = useState(false);
+  const [webuiError, setWebuiError] = useState('');
+  const [webuiSaving, setWebuiSaving] = useState(false);
+
   const loadDns = useCallback(async () => {
     setDnsError('');
     try {
@@ -63,6 +90,40 @@ export function SettingsPage() {
     void loadDns();
     void loadTelegram();
   }, [loadDns, loadTelegram]);
+
+  const loadKeeper = useCallback(async () => {
+    setKeeperError('');
+    try {
+      const result = await settingsApi.getKeeper();
+      setKeeperText(JSON.stringify(result.entries, null, 2));
+      setKeeperBaseSha(result.sha256);
+      setKeeperLoaded(true);
+    } catch (err) {
+      setKeeperError(getErrorMessage(err, t('common.error')));
+    }
+  }, [t]);
+
+  const loadWebUI = useCallback(async () => {
+    setWebuiError('');
+    try {
+      const result = await settingsApi.getWebUI();
+      setWebuiListen(result.listen);
+      setWebuiUiDir(result.ui_dir);
+      setWebuiIdle(result.session_idle_timeout);
+      setWebuiAttempts(String(result.login_rate_limit.attempts));
+      setWebuiWindow(result.login_rate_limit.window);
+      setWebuiTokenSet(result.token_set);
+      setWebuiBaseSha(result.sha256);
+      setWebuiLoaded(true);
+    } catch (err) {
+      setWebuiError(getErrorMessage(err, t('common.error')));
+    }
+  }, [t]);
+
+  useEffect(() => {
+    void loadKeeper();
+    void loadWebUI();
+  }, [loadKeeper, loadWebUI]);
 
   const handleSaveDns = async (event: FormEvent) => {
     event.preventDefault();
@@ -138,7 +199,80 @@ export function SettingsPage() {
     }
   };
 
-  if (!dnsLoaded && !telegramLoaded && !dnsError && !telegramError) {
+  const handleSaveKeeper = async (event: FormEvent) => {
+    event.preventDefault();
+    setKeeperError('');
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(keeperText);
+    } catch {
+      setKeeperError(t('settings.keeper.invalid_json'));
+      return;
+    }
+    if (!Array.isArray(parsed) && parsed !== null) {
+      setKeeperError(t('settings.keeper.invalid_json'));
+      return;
+    }
+    setKeeperSaving(true);
+    try {
+      const result = await settingsApi.saveKeeper({ entries: parsed, base_sha256: keeperBaseSha });
+      setKeeperBaseSha(result.sha256);
+      showNotification(t('settings.saved'), 'success');
+    } catch (err) {
+      // 409 config_changed: reload the fresh entries, discarding
+      // the failed edit; never auto-reapply it.
+      if ((err as ApiError).status === 409) await loadKeeper();
+      showNotification(getErrorMessage(err, t('notification.save_failed')), 'error');
+    } finally {
+      setKeeperSaving(false);
+    }
+  };
+
+  const handleSaveWebUI = async (event: FormEvent) => {
+    event.preventDefault();
+    setWebuiError('');
+    const body: Record<string, unknown> = { base_sha256: webuiBaseSha };
+    // Empty listen/ui_dir/idle = delete the key (server default
+    // returns). The token is write-only: empty = unchanged.
+    body.listen = webuiListen;
+    body.ui_dir = webuiUiDir;
+    body.session_idle_timeout = webuiIdle;
+    if (webuiTokenInput.trim()) body.token = webuiTokenInput.trim();
+    const limit: Record<string, unknown> = {};
+    if (webuiAttempts.trim()) {
+      const attempts = Number(webuiAttempts.trim());
+      if (!Number.isInteger(attempts)) {
+        setWebuiError(t('settings.webui.invalid_attempts'));
+        return;
+      }
+      limit.attempts = attempts;
+    }
+    if (webuiWindow.trim()) limit.window = webuiWindow.trim();
+    if (Object.keys(limit).length > 0) body.login_rate_limit = limit;
+    setWebuiSaving(true);
+    try {
+      const result = await settingsApi.saveWebUI(body);
+      setWebuiBaseSha(result.sha256);
+      setWebuiTokenInput('');
+      showNotification(t('settings.saved'), 'success');
+    } catch (err) {
+      if ((err as ApiError).status === 409) await loadWebUI();
+      showNotification(getErrorMessage(err, t('notification.save_failed')), 'error');
+    } finally {
+      setWebuiSaving(false);
+    }
+  };
+
+  if (
+    !dnsLoaded &&
+    !telegramLoaded &&
+    !keeperLoaded &&
+    !webuiLoaded &&
+    !dnsError &&
+    !telegramError &&
+    !keeperError &&
+    !webuiError
+  ) {
     return (
       <div className="page-root">
         <h1>{t('settings.title')}</h1>
@@ -153,7 +287,11 @@ export function SettingsPage() {
       <h1>{t('settings.title')}</h1>
 
       <Card title={t('settings.dns.title')}>
-        {dnsError && <p>{dnsError}</p>}
+        {dnsError && (
+          <div className="error-box" role="alert">
+            {dnsError}
+          </div>
+        )}
         {!dnsLoaded && dnsError ? (
           <Button variant="secondary" onClick={() => void loadDns()}>
             {t('common.retry')}
@@ -178,7 +316,11 @@ export function SettingsPage() {
       </Card>
 
       <Card title={t('settings.telegram.title')}>
-        {telegramError && <p>{telegramError}</p>}
+        {telegramError && (
+          <div className="error-box" role="alert">
+            {telegramError}
+          </div>
+        )}
         {!telegramLoaded && telegramError ? (
           <Button variant="secondary" onClick={() => void loadTelegram()}>
             {t('common.retry')}
@@ -222,6 +364,94 @@ export function SettingsPage() {
             />
             <Button type="submit" loading={telegramSaving}>
               {t('settings.telegram.save')}
+            </Button>
+          </form>
+        )}
+      </Card>
+
+      <Card title={t('settings.keeper.title')}>
+        {keeperError && (
+          <div className="error-box" role="alert">
+            {keeperError}
+          </div>
+        )}
+        {!keeperLoaded && keeperError ? (
+          <Button variant="secondary" onClick={() => void loadKeeper()}>
+            {t('common.retry')}
+          </Button>
+        ) : (
+          <form onSubmit={(event) => void handleSaveKeeper(event)}>
+            <div>
+              <label htmlFor="keeper-editor">{t('settings.keeper.entries')}</label>
+              <textarea
+                id="keeper-editor"
+                className="input"
+                rows={10}
+                value={keeperText}
+                onChange={(event) => setKeeperText(event.target.value)}
+              />
+            </div>
+            <p>{t('settings.keeper.delete_hint')}</p>
+            <Button type="submit" loading={keeperSaving}>
+              {t('settings.keeper.save')}
+            </Button>
+          </form>
+        )}
+      </Card>
+
+      <Card title={t('settings.webui.title')}>
+        {webuiError && (
+          <div className="error-box" role="alert">
+            {webuiError}
+          </div>
+        )}
+        {!webuiLoaded && webuiError ? (
+          <Button variant="secondary" onClick={() => void loadWebUI()}>
+            {t('common.retry')}
+          </Button>
+        ) : (
+          <form onSubmit={(event) => void handleSaveWebUI(event)}>
+            <p>
+              {t('settings.webui.token_set')}: {webuiTokenSet ? t('common.yes') : t('common.no')}
+            </p>
+            <Input
+              label={t('settings.webui.listen')}
+              value={webuiListen}
+              onChange={(event) => setWebuiListen(event.target.value)}
+            />
+            <Input
+              label={t('settings.webui.ui_dir')}
+              value={webuiUiDir}
+              onChange={(event) => setWebuiUiDir(event.target.value)}
+            />
+            <Input
+              label={t('settings.webui.session_idle_timeout')}
+              value={webuiIdle}
+              hint={t('settings.webui.session_idle_timeout_hint')}
+              onChange={(event) => setWebuiIdle(event.target.value)}
+            />
+            <Input
+              label={t('settings.webui.attempts')}
+              type="number"
+              value={webuiAttempts}
+              onChange={(event) => setWebuiAttempts(event.target.value)}
+            />
+            <Input
+              label={t('settings.webui.window')}
+              value={webuiWindow}
+              onChange={(event) => setWebuiWindow(event.target.value)}
+            />
+            <Input
+              label={t('settings.webui.token')}
+              type="password"
+              autoComplete="off"
+              hint={t('common.unchanged')}
+              value={webuiTokenInput}
+              onChange={(event) => setWebuiTokenInput(event.target.value)}
+            />
+            <p>{t('settings.webui.restart_hint')}</p>
+            <Button type="submit" loading={webuiSaving}>
+              {t('settings.webui.save')}
             </Button>
           </form>
         )}

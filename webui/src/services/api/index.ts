@@ -15,13 +15,19 @@
 
 import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from './client';
 import type {
+  ChatEvent,
+  ChatJob,
+  ChatSession,
+  ChatSessionOp,
   ConfigContent,
   KeeperEntryStatus,
+  KeeperSettings,
   LoginImportResult,
   LoginStatus,
   LogsPage,
   OutboundSummary,
   EndpointSummary,
+  PluginsStatus,
   ProfileDetail,
   ProfileSummary,
   ProfileTestPhase,
@@ -30,6 +36,7 @@ import type {
   ScreencastStatus,
   StatusInfo,
   TelegramSettings,
+  WebUISettings,
 } from '@/types';
 
 export interface OutboundTestResult {
@@ -128,6 +135,43 @@ export const settingsApi = {
   getTelegram: (signal?: AbortSignal) => apiGet<TelegramSettings>('/settings/telegram', signal),
   saveTelegram: (body: Record<string, unknown>) =>
     apiPut<TelegramSettings>('/settings/telegram', body),
+  getKeeper: (signal?: AbortSignal) => apiGet<KeeperSettings>('/settings/keeper', signal),
+  saveKeeper: (body: { entries: unknown; base_sha256: string }) =>
+    apiPut<{ sha256: string }>('/settings/keeper', body),
+  getWebUI: (signal?: AbortSignal) => apiGet<WebUISettings>('/settings/webui', signal),
+  saveWebUI: (body: Record<string, unknown>) =>
+    apiPut<{ sha256: string }>('/settings/webui', body),
+};
+
+/** Chats/sessions. Session id "" (the main chat) is addressed as
+ * "main" in the path. Send is an async job: POST returns 202 with
+ * the job, GET /chats/jobs/{job} polls it. A second send on the
+ * same profile while one is in flight is a fixed 409. */
+export const chatsApi = {
+  list: (profile: string, params: { include_archived?: boolean } = {}, signal?: AbortSignal) => {
+    const qs = params.include_archived ? '?include_archived=true' : '';
+    return apiGet<ChatSession[]>(`/chats/${encodeURIComponent(profile)}${qs}`, signal);
+  },
+  history: (profile: string, session: string, limit = 50, signal?: AbortSignal) =>
+    apiGet<ChatEvent[]>(
+      `/chats/${encodeURIComponent(profile)}/${encodeURIComponent(session)}?limit=${limit}`,
+      signal,
+    ),
+  start: (profile: string, body: { title?: string }) =>
+    apiPost<ChatSession>(`/chats/${encodeURIComponent(profile)}`, body),
+  send: (profile: string, session: string, body: { text: string }) =>
+    apiPost<ChatJob>(`/chats/${encodeURIComponent(profile)}/${encodeURIComponent(session)}/send`, body),
+  job: (jobId: string, signal?: AbortSignal) =>
+    apiGet<ChatJob>(`/chats/jobs/${encodeURIComponent(jobId)}`, signal),
+  op: (profile: string, session: string, body: { op: ChatSessionOp; title?: string }) =>
+    apiPost<ChatSession>(`/chats/${encodeURIComponent(profile)}/${encodeURIComponent(session)}/op`, body),
+};
+
+/** Plugins. Status fetch only: the follow-up wires list/enable/
+ * disable after the plugin core lands; this module must not grow
+ * list/enable/disable functions before that contract exists. */
+export const pluginsApi = {
+  status: (signal?: AbortSignal) => apiGet<PluginsStatus>('/plugins', signal),
 };
 
 export const logsApi = {

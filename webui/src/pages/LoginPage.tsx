@@ -44,7 +44,7 @@ export function LoginPage() {
     const result = await login(value);
     setSubmitting(false);
     if (!result.success) {
-      setError(t('login.invalid_token'));
+      setError(t(result.error ?? 'login.invalid_token'));
       return;
     }
     navigate('/', { replace: true });

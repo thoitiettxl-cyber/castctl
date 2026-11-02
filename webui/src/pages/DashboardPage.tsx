@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { profilesApi, statusApi } from '@/services/api';
@@ -32,31 +32,26 @@ export function DashboardPage() {
   const [testError, setTestError] = useState('');
   const [testing, setTesting] = useState(false);
 
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      setLoading(true);
-      setError('');
-      try {
-        const [statusResult, profileResult] = await Promise.all([
-          statusApi.get(),
-          profilesApi.list(),
-        ]);
-        if (!alive) return;
-        setStatus(statusResult);
-        setProfiles(profileResult);
-      } catch (err) {
-        if (!alive) return;
-        setError(getErrorMessage(err, t('common.error')));
-      } finally {
-        if (alive) setLoading(false);
-      }
-    };
-    void load();
-    return () => {
-      alive = false;
-    };
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const [statusResult, profileResult] = await Promise.all([
+        statusApi.get(),
+        profilesApi.list(),
+      ]);
+      setStatus(statusResult);
+      setProfiles(profileResult);
+    } catch (err) {
+      setError(getErrorMessage(err, t('common.error')));
+    } finally {
+      setLoading(false);
+    }
   }, [t]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   // Login status is lazy per profile (design §2/§6.3); a single row failing
   // must not fail the whole page.
@@ -104,6 +99,19 @@ export function DashboardPage() {
     (p) => loginByName[p.name] && !loginByName[p.name].logged_in,
   ).length;
   const hasLegacy = profiles.some((p) => p.source === 'legacy');
+  const checkingCount = profiles.length - loggedInCount - needsAttentionCount;
+
+  // Verdict headline from existing counts only: no traffic/usage
+  // tiles (no data source — never a misleading zero). Unmeasured
+  // login rows count as "checking", never as logged out.
+  const verdictKey =
+    profiles.length === 0
+      ? 'dashboard.verdict.none'
+      : needsAttentionCount > 0
+        ? 'dashboard.verdict.attention'
+        : checkingCount > 0
+          ? 'dashboard.verdict.checking'
+          : 'dashboard.verdict.ok';
 
   if (loading && !status) {
     return (
@@ -118,7 +126,24 @@ export function DashboardPage() {
   return (
     <div className="page-root">
       <h1>{t('dashboard.title')}</h1>
-      {error && <p>{error}</p>}
+      {!loading && (
+        <p>
+          {t(verdictKey, {
+            total: profiles.length,
+            loggedIn: loggedInCount,
+            attention: needsAttentionCount,
+            checking: checkingCount,
+          })}
+        </p>
+      )}
+      {error && (
+        <div className="error-box" role="alert">
+          {error}{' '}
+          <Button variant="secondary" size="sm" onClick={() => void load()}>
+            {t('common.retry')}
+          </Button>
+        </div>
+      )}
       {status?.remote_exposure && <p role="alert">{t('dashboard.remote_banner')}</p>}
       {hasLegacy && <p role="alert">{t('dashboard.legacy_warning')}</p>}
 
@@ -243,7 +268,11 @@ export function DashboardPage() {
         }
       >
         {testing && <LoadingSpinner />}
-        {testError && <p>{testError}</p>}
+        {testError && (
+          <div className="error-box" role="alert">
+            {testError}
+          </div>
+        )}
         {testResult && (
           <div>
             <p>

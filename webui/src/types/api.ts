@@ -31,6 +31,9 @@ export interface StatusInfo {
   outbound_count: number;
   endpoint_count: number;
   bundle_sha256: string;
+  /** Effective webui.session_idle_timeout in seconds (default 43200).
+   * The frontend discards the token after this long without activity. */
+  session_idle_timeout_seconds: number;
 }
 
 export interface ProfileSummary {
@@ -171,4 +174,108 @@ export interface ConfigContent {
   content: string;
   sha256: string;
   source: string;
+}
+
+/** Chats: one session row (shared.SessionRows shape). `id` is "" for
+ * the main chat; the UI addresses it as "main". Chat bodies are
+ * sensitive display only: never persisted to browser storage, never
+ * logged, never placed in an error message. */
+export interface ChatSession {
+  id: string;
+  title: string;
+  pinned: boolean;
+  archived: boolean;
+  last_used: string;
+  message_count: number;
+}
+
+/** One history event (shared.FmtEvent, text only). Resources are
+ * never downloaded and never rendered. */
+export interface ChatEvent {
+  seq: number;
+  time: string;
+  kind: string;
+  role: string;
+  text: string;
+}
+
+export interface ChatReply {
+  seq: number;
+  time: string;
+  kind: string;
+  role: string;
+  text: string;
+}
+
+export type ChatSendOutcome =
+  | 'done'
+  | 'needs_input'
+  | 'needs_approval'
+  | 'failed'
+  | 'timeout'
+  | 'undelivered';
+
+/** Result of a completed send job. Approvals are counted, never
+ * described; the timeout note is UI wording, not an upstream quote. */
+export interface ChatSendResult {
+  outcome: ChatSendOutcome;
+  text: string;
+  replies: ChatReply[];
+  approvals_requested: number;
+  approvals_resolved: number;
+  note: string;
+  reason?: string;
+  question?: string;
+}
+
+export type ChatJobStatus = 'running' | 'done' | 'failed' | 'timeout';
+
+export interface ChatJob {
+  job_id: string;
+  profile: string;
+  session_id: string;
+  status: ChatJobStatus;
+  result?: ChatSendResult;
+  error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ChatSessionOp = 'rename' | 'pin' | 'unpin' | 'archive' | 'unarchive' | 'delete';
+
+/** Plugins availability probe (GET /plugins). The follow-up that
+ * wires the real plugin loader MUST version this contract before
+ * reusing the shape for list/enable/disable data. */
+export interface PluginsStatus {
+  available: boolean;
+  reason: string;
+  plugins: unknown[];
+}
+
+/** Keeper block editor (GET/PUT /settings/keeper). `entries` is the
+ * stored list; each entry's `interval` is a duration string. */
+export interface KeeperSettingsEntry {
+  tag: string;
+  profile: string;
+  browser: string;
+  interval?: string;
+  notify?: string;
+}
+
+export interface KeeperSettings {
+  entries: KeeperSettingsEntry[];
+  sha256: string;
+}
+
+/** Web UI block editor (GET/PUT /settings/webui). The token is
+ * write-only: GET returns `token_set` + `masked: "***"`; PUT accepts
+ * a new plaintext token, empty = unchanged, "***" rejected. */
+export interface WebUISettings {
+  listen: string;
+  ui_dir: string;
+  session_idle_timeout: string;
+  login_rate_limit: { attempts: number; window: string };
+  token_set: boolean;
+  masked: string;
+  sha256: string;
 }

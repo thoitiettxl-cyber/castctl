@@ -21,6 +21,14 @@ export const MAX_COOKIE_IMPORT_SIZE = 1 * 1024 * 1024;
 export const STORAGE_KEY_THEME = 'castctl-theme';
 export const STORAGE_KEY_LANGUAGE = 'castctl-language';
 export const SESSION_KEY_TOKEN = 'castctl-management-token';
+// Last-activity stamp for frontend idle expiry (sessionStorage,
+// same tab lifetime as the token). Never the token itself.
+export const SESSION_KEY_LAST_ACTIVITY = 'castctl-last-activity';
+
+// Idle expiry: how often the shell re-checks inactivity, and how
+// often activity events may rewrite the sessionStorage stamp.
+export const IDLE_CHECK_INTERVAL_MS = 60 * 1000;
+export const IDLE_ACTIVITY_WRITE_INTERVAL_MS = 30 * 1000;
 
 // Languages: English + Vietnamese only.
 export const LANGUAGE_ORDER = defineLanguageOrder(['en', 'vi'] as const);
