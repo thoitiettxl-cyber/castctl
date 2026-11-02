@@ -6,10 +6,11 @@ package profile
 
 // The top-level `webui` config block and its resolution.
 //
-// Schema (exactly three keys; unknown keys are rejected, like every
+// Schema (exactly five keys; unknown keys are rejected, like every
 // other strict section in this file):
 //
-//	{"listen": string, "token": string, "ui_dir": string}
+//	{"listen": string, "token": string, "ui_dir": string,
+//	 "session_idle_timeout": string, "login_rate_limit": object}
 //
 // The block is optional. A nil *WebUIConfig on SingleConfig means
 // the block was absent from the file, and the web UI is off: `webui
@@ -67,10 +68,12 @@ package profile
 // canonicalised, at serve time).
 
 import (
+	"encoding/json"
 	"net"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // DefaultWebUIListen is the listen address when a `webui` block
@@ -78,12 +81,68 @@ import (
 // (the prior design default, docs/config.md).
 const DefaultWebUIListen = "127.0.0.1:8317"
 
+// DefaultSessionIdleTimeout is the frontend idle-expiry cadence
+// when a `webui` block carries no `session_idle_timeout` key:
+// 12h. It is a stated default (docs/config.md), not a hidden
+// hardcoded one: the server stays stateless Bearer, and the
+// frontend discards its token after this long without API
+// activity, requiring re-login. The bound below keeps a
+// misconfigured value from disabling expiry outright while
+// still allowing multi-day sessions.
+const DefaultSessionIdleTimeout = 12 * time.Hour
+
+// MaxSessionIdleTimeout bounds a configured
+// `session_idle_timeout`: 30 days. Beyond that the "expiry"
+// is nominal only; the cap keeps the setting an expiry.
+const MaxSessionIdleTimeout = 30 * 24 * time.Hour
+
+// DefaultLoginRateLimitAttempts is the failed-verification
+// budget per window when a `webui` block carries no
+// `login_rate_limit` key: 5. DefaultLoginRateLimitWindow is
+// the window: 5 minutes. Both are stated defaults
+// (docs/config.md). The bounds below keep a misconfigured
+// value from disabling the limit (attempts) or locking an
+// address out for longer than a day (window).
+const DefaultLoginRateLimitAttempts = 5
+const DefaultLoginRateLimitWindow = 5 * time.Minute
+
+// MaxLoginRateLimitAttempts bounds a configured
+// `login_rate_limit.attempts`: 100.
+const MaxLoginRateLimitAttempts = 100
+
+// MaxLoginRateLimitWindow bounds a configured
+// `login_rate_limit.window`: 24 hours.
+const MaxLoginRateLimitWindow = 24 * time.Hour
+
+// LoginRateLimitConfig is one parsed `login_rate_limit` value
+// inside the `webui` block. Either field may be absent: the
+// effective value fills the documented default per field.
+// The Set flags distinguish "key present" from "default", so
+// the save encoder renders only the keys that were set.
+type LoginRateLimitConfig struct {
+	Attempts    int
+	AttemptsSet bool
+	Window      time.Duration
+	WindowSet   bool
+}
+
 // WebUIConfig is one parsed `webui` block. A nil *WebUIConfig on
 // SingleConfig means the block was absent.
 type WebUIConfig struct {
 	Listen string
 	Token  string
 	UIDir  string
+	// SessionIdleTimeout is the parsed `session_idle_timeout`
+	// duration when the key was present with a non-empty
+	// value; SessionIdleTimeoutSet reports that presence. A
+	// zero value with Set false means "use
+	// DefaultSessionIdleTimeout".
+	SessionIdleTimeout    time.Duration
+	SessionIdleTimeoutSet bool
+	// LoginRateLimit is nil when the `login_rate_limit` key
+	// was absent: the effective limit is the documented
+	// default pair.
+	LoginRateLimit *LoginRateLimitConfig
 }
 
 // RawWebUI returns a copy of the raw JSON captured for the `webui`
@@ -149,6 +208,45 @@ func parseWebUIBlock(v any, baseDir string) (*WebUIConfig, error) {
 				return nil, newConfigError(`"webui.ui_dir" must not be empty`)
 			}
 			cfg.UIDir = strings.TrimSpace(s)
+		case "session_idle_timeout":
+			// Duration string, the keeper `interval` precedent
+			// (time.ParseDuration, positive, bounded) and the
+			// duration-string form sing-box uses for its
+			// timeout fields. Sing-box defines no webui block:
+			// this key is castctl-only; the citation is for
+			// the value form, not the key. A present-but-empty
+			// value is a config error, like `listen`: an empty
+			// duration must never silently mean "no expiry".
+			s, ok := val.(string)
+			if !ok {
+				return nil, newConfigError(`"webui.session_idle_timeout" must be a duration string`)
+			}
+			if strings.TrimSpace(s) == "" {
+				return nil, newConfigError(`"webui.session_idle_timeout" must not be empty`)
+			}
+			d, err := time.ParseDuration(s)
+			if err != nil || d <= 0 || d > MaxSessionIdleTimeout {
+				return nil, newConfigErrorf(`"webui.session_idle_timeout" must be a positive duration string of at most %v`, MaxSessionIdleTimeout)
+			}
+			cfg.SessionIdleTimeout = d
+			cfg.SessionIdleTimeoutSet = true
+		case "login_rate_limit":
+			// Nested object, both fields optional: {"attempts":
+			// int, "window": duration string}. Unknown nested
+			// keys are rejected, like every strict section.
+			// Sing-box defines no webui block: this key is
+			// castctl-only; the window's duration-string form
+			// follows the same precedent as
+			// `session_idle_timeout` above.
+			nested, ok := val.(*orderedObject)
+			if !ok {
+				return nil, newConfigError(`"webui.login_rate_limit" must be an object`)
+			}
+			rl, err := parseLoginRateLimitBlock(nested)
+			if err != nil {
+				return nil, err
+			}
+			cfg.LoginRateLimit = rl
 		default:
 			return nil, newConfigErrorf("unknown webui config key %q", k)
 		}
@@ -255,6 +353,78 @@ func DirOverlaps(dir, candidate string) bool {
 	return true
 }
 
+// parseLoginRateLimitBlock parses one decoded
+// `login_rate_limit` object. Wrong shapes, wrong types, unknown
+// keys, a non-positive attempts count, and a non-positive or
+// over-long window are all config errors (exit 2). A supplied
+// value is never echoed in an error.
+func parseLoginRateLimitBlock(obj *orderedObject) (*LoginRateLimitConfig, error) {
+	rl := &LoginRateLimitConfig{}
+	for _, k := range obj.keys {
+		val := obj.values[k]
+		switch k {
+		case "attempts":
+			n, ok := val.(json.Number)
+			if !ok {
+				return nil, newConfigError(`"webui.login_rate_limit.attempts" must be an integer`)
+			}
+			attempts, err := n.Int64()
+			if err != nil || attempts < 1 || attempts > MaxLoginRateLimitAttempts {
+				return nil, newConfigErrorf(`"webui.login_rate_limit.attempts" must be an integer from 1 to %d`, MaxLoginRateLimitAttempts)
+			}
+			rl.Attempts = int(attempts)
+			rl.AttemptsSet = true
+		case "window":
+			s, ok := val.(string)
+			if !ok {
+				return nil, newConfigError(`"webui.login_rate_limit.window" must be a duration string`)
+			}
+			if strings.TrimSpace(s) == "" {
+				return nil, newConfigError(`"webui.login_rate_limit.window" must not be empty`)
+			}
+			d, err := time.ParseDuration(s)
+			if err != nil || d <= 0 || d > MaxLoginRateLimitWindow {
+				return nil, newConfigErrorf(`"webui.login_rate_limit.window" must be a positive duration string of at most %v`, MaxLoginRateLimitWindow)
+			}
+			rl.Window = d
+			rl.WindowSet = true
+		default:
+			return nil, newConfigErrorf("unknown webui.login_rate_limit config key %q", k)
+		}
+	}
+	return rl, nil
+}
+
+// EffectiveSessionIdleTimeout returns the idle-expiry cadence a
+// present `webui` block resolves to: the block's
+// `session_idle_timeout` when set, otherwise
+// DefaultSessionIdleTimeout. A nil config means the block was
+// absent (feature off); callers must check presence before
+// serving, and the default still applies to the status view
+// only through this helper's caller.
+func EffectiveSessionIdleTimeout(cfg *WebUIConfig) time.Duration {
+	if cfg != nil && cfg.SessionIdleTimeoutSet && cfg.SessionIdleTimeout > 0 {
+		return cfg.SessionIdleTimeout
+	}
+	return DefaultSessionIdleTimeout
+}
+
+// EffectiveLoginRateLimit returns the login rate-limit pair a
+// present `webui` block resolves to: each configured field when
+// set, the documented default per field otherwise.
+func EffectiveLoginRateLimit(cfg *WebUIConfig) (attempts int, window time.Duration) {
+	attempts, window = DefaultLoginRateLimitAttempts, DefaultLoginRateLimitWindow
+	if cfg != nil && cfg.LoginRateLimit != nil {
+		if cfg.LoginRateLimit.AttemptsSet && cfg.LoginRateLimit.Attempts > 0 {
+			attempts = cfg.LoginRateLimit.Attempts
+		}
+		if cfg.LoginRateLimit.WindowSet && cfg.LoginRateLimit.Window > 0 {
+			window = cfg.LoginRateLimit.Window
+		}
+	}
+	return attempts, window
+}
+
 // EffectiveListen returns the listen address a present `webui`
 // block resolves to: the block's `listen` when set, otherwise
 // DefaultWebUIListen. A nil config means the block was absent
@@ -288,6 +458,22 @@ func ResolveWebUI(single *SingleConfig) (*WebUIConfig, error) {
 	if single.WebUI.Token != "" && strings.TrimSpace(single.WebUI.Token) == "" {
 		return nil, newConfigError(`"webui.token" must not be empty`)
 	}
+	// The duration/limit rules are re-checked here so callers
+	// that receive a hand-built SingleConfig get the same
+	// refusal parse gives.
+	if single.WebUI.SessionIdleTimeoutSet {
+		if single.WebUI.SessionIdleTimeout <= 0 || single.WebUI.SessionIdleTimeout > MaxSessionIdleTimeout {
+			return nil, newConfigErrorf(`"webui.session_idle_timeout" must be a positive duration string of at most %v`, MaxSessionIdleTimeout)
+		}
+	}
+	if rl := single.WebUI.LoginRateLimit; rl != nil {
+		if rl.AttemptsSet && (rl.Attempts < 1 || rl.Attempts > MaxLoginRateLimitAttempts) {
+			return nil, newConfigErrorf(`"webui.login_rate_limit.attempts" must be an integer from 1 to %d`, MaxLoginRateLimitAttempts)
+		}
+		if rl.WindowSet && (rl.Window <= 0 || rl.Window > MaxLoginRateLimitWindow) {
+			return nil, newConfigErrorf(`"webui.login_rate_limit.window" must be a positive duration string of at most %v`, MaxLoginRateLimitWindow)
+		}
+	}
 	return single.WebUI, nil
 }
 
@@ -309,6 +495,22 @@ func encodeWebUIBlock(cfg *WebUIConfig) (*orderedObject, error) {
 	}
 	if strings.TrimSpace(cfg.UIDir) != "" {
 		entry.set("ui_dir", strings.TrimSpace(cfg.UIDir))
+	}
+	// New keys append after the original three (sing-box-style
+	// growth by adding keys, never reordering). Durations render
+	// as Go duration strings, the keeper `interval` precedent.
+	if cfg.SessionIdleTimeoutSet && cfg.SessionIdleTimeout > 0 {
+		entry.set("session_idle_timeout", cfg.SessionIdleTimeout.String())
+	}
+	if cfg.LoginRateLimit != nil {
+		nested := newOrderedObject()
+		if cfg.LoginRateLimit.AttemptsSet && cfg.LoginRateLimit.Attempts > 0 {
+			nested.set("attempts", json.Number(strconv.Itoa(cfg.LoginRateLimit.Attempts)))
+		}
+		if cfg.LoginRateLimit.WindowSet && cfg.LoginRateLimit.Window > 0 {
+			nested.set("window", cfg.LoginRateLimit.Window.String())
+		}
+		entry.set("login_rate_limit", nested)
 	}
 	return entry, nil
 }
