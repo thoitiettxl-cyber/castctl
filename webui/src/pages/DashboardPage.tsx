@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { profilesApi, statusApi } from '@/services/api';
@@ -31,6 +31,16 @@ export function DashboardPage() {
   const [testResult, setTestResult] = useState<ProfileTestResult | null>(null);
   const [testError, setTestError] = useState('');
   const [testing, setTesting] = useState(false);
+  // Unmount guard for load(): the useCallback refactor dropped
+  // the `alive` flag the login-status effect still has; restore
+  // it via a ref so a slow fetch cannot setState after unmount.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -40,12 +50,14 @@ export function DashboardPage() {
         statusApi.get(),
         profilesApi.list(),
       ]);
+      if (!mountedRef.current) return;
       setStatus(statusResult);
       setProfiles(profileResult);
     } catch (err) {
+      if (!mountedRef.current) return;
       setError(getErrorMessage(err, t('common.error')));
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   }, [t]);
 

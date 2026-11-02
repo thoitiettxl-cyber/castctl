@@ -48,7 +48,7 @@ export function Input({
         </div>
       )}
       {error && (
-        <div id={errorId} className="error-box">
+        <div id={errorId} className="error-box" role="alert">
           {error}
         </div>
       )}

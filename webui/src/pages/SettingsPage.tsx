@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
+import { Modal } from '@/components/ui/Modal';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 
 export function SettingsPage() {
@@ -40,6 +41,9 @@ export function SettingsPage() {
   const [keeperLoaded, setKeeperLoaded] = useState(false);
   const [keeperError, setKeeperError] = useState('');
   const [keeperSaving, setKeeperSaving] = useState(false);
+  // Saving a literal `null` removes the keeper block: confirm
+  // first (page-local Modal, danger variant).
+  const [keeperConfirmOpen, setKeeperConfirmOpen] = useState(false);
 
   // Web UI section editor: partial PUT, absent = unchanged. Empty
   // listen/ui_dir/idle deletes the key (default returns); empty
@@ -57,6 +61,12 @@ export function SettingsPage() {
   const [webuiLoaded, setWebuiLoaded] = useState(false);
   const [webuiError, setWebuiError] = useState('');
   const [webuiSaving, setWebuiSaving] = useState(false);
+  // Values as loaded, for the key-deletion confirm: emptying a
+  // field that was non-empty deletes its key, so confirm first.
+  // (A field empty at load stays empty: no key is deleted.)
+  const [webuiInitial, setWebuiInitial] = useState({ listen: '', uiDir: '', idle: '' });
+  const [webuiDeleteKeys, setWebuiDeleteKeys] = useState<string[]>([]);
+  const [webuiConfirmOpen, setWebuiConfirmOpen] = useState(false);
 
   const loadDns = useCallback(async () => {
     setDnsError('');
@@ -114,6 +124,11 @@ export function SettingsPage() {
       setWebuiWindow(result.login_rate_limit.window);
       setWebuiTokenSet(result.token_set);
       setWebuiBaseSha(result.sha256);
+      setWebuiInitial({
+        listen: result.listen,
+        uiDir: result.ui_dir,
+        idle: result.session_idle_timeout,
+      });
       setWebuiLoaded(true);
     } catch (err) {
       setWebuiError(getErrorMessage(err, t('common.error')));
@@ -213,6 +228,15 @@ export function SettingsPage() {
       setKeeperError(t('settings.keeper.invalid_json'));
       return;
     }
+    // A literal null removes the block: confirm before saving.
+    if (parsed === null) {
+      setKeeperConfirmOpen(true);
+      return;
+    }
+    await doSaveKeeper(parsed);
+  };
+
+  const doSaveKeeper = async (parsed: unknown) => {
     setKeeperSaving(true);
     try {
       const result = await settingsApi.saveKeeper({ entries: parsed, base_sha256: keeperBaseSha });
@@ -228,9 +252,11 @@ export function SettingsPage() {
     }
   };
 
-  const handleSaveWebUI = async (event: FormEvent) => {
-    event.preventDefault();
-    setWebuiError('');
+  // Builds the partial PUT body, or null after setting a
+  // validation error. Shared by the submit handler and the
+  // key-deletion confirm, so the confirmed save sends exactly
+  // the body the user submitted.
+  const buildWebUIBody = (): Record<string, unknown> | null => {
     const body: Record<string, unknown> = { base_sha256: webuiBaseSha };
     // Empty listen/ui_dir/idle = delete the key (server default
     // returns). The token is write-only: empty = unchanged.
@@ -243,12 +269,35 @@ export function SettingsPage() {
       const attempts = Number(webuiAttempts.trim());
       if (!Number.isInteger(attempts)) {
         setWebuiError(t('settings.webui.invalid_attempts'));
-        return;
+        return null;
       }
       limit.attempts = attempts;
     }
     if (webuiWindow.trim()) limit.window = webuiWindow.trim();
     if (Object.keys(limit).length > 0) body.login_rate_limit = limit;
+    return body;
+  };
+
+  const handleSaveWebUI = async (event: FormEvent) => {
+    event.preventDefault();
+    setWebuiError('');
+    const body = buildWebUIBody();
+    if (body === null) return;
+    // Emptying a field that was non-empty at load deletes its
+    // key: confirm before saving, naming the keys.
+    const deletedKeys: string[] = [];
+    if (!webuiListen.trim() && webuiInitial.listen.trim()) deletedKeys.push('listen');
+    if (!webuiUiDir.trim() && webuiInitial.uiDir.trim()) deletedKeys.push('ui_dir');
+    if (!webuiIdle.trim() && webuiInitial.idle.trim()) deletedKeys.push('session_idle_timeout');
+    if (deletedKeys.length > 0) {
+      setWebuiDeleteKeys(deletedKeys);
+      setWebuiConfirmOpen(true);
+      return;
+    }
+    await doSaveWebUI(body);
+  };
+
+  const doSaveWebUI = async (body: Record<string, unknown>) => {
     setWebuiSaving(true);
     try {
       const result = await settingsApi.saveWebUI(body);
@@ -456,6 +505,57 @@ export function SettingsPage() {
           </form>
         )}
       </Card>
+
+      <Modal
+        open={keeperConfirmOpen}
+        onClose={() => setKeeperConfirmOpen(false)}
+        title={t('settings.keeper.confirm_delete_title')}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setKeeperConfirmOpen(false)}>
+              {t('common.cancel')}
+            </Button>{' '}
+            <Button
+              variant="danger"
+              disabled={keeperSaving}
+              onClick={() => {
+                setKeeperConfirmOpen(false);
+                void doSaveKeeper(null);
+              }}
+            >
+              {t('common.delete')}
+            </Button>
+          </>
+        }
+      >
+        <p>{t('settings.keeper.confirm_delete_body')}</p>
+      </Modal>
+
+      <Modal
+        open={webuiConfirmOpen}
+        onClose={() => setWebuiConfirmOpen(false)}
+        title={t('settings.webui.confirm_delete_title')}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setWebuiConfirmOpen(false)}>
+              {t('common.cancel')}
+            </Button>{' '}
+            <Button
+              variant="danger"
+              disabled={webuiSaving}
+              onClick={() => {
+                setWebuiConfirmOpen(false);
+                const body = buildWebUIBody();
+                if (body !== null) void doSaveWebUI(body);
+              }}
+            >
+              {t('settings.webui.confirm_delete_save')}
+            </Button>
+          </>
+        }
+      >
+        <p>{t('settings.webui.confirm_delete_body', { keys: webuiDeleteKeys.join(', ') })}</p>
+      </Modal>
     </div>
   );
 }

@@ -388,7 +388,10 @@ export function MainLayout() {
     const events = ['pointerdown', 'keydown', 'wheel', 'touchstart', 'scroll'] as const;
     events.forEach((name) => window.addEventListener(name, stamp, { passive: true }));
     const timer = window.setInterval(() => {
-      if (checkIdleExpiry()) navigate('/login', { replace: true });
+      // On expiry the login page shows an "expired" notice
+      // (router state), so the redirect is explained instead
+      // of landing silently on the login form.
+      if (checkIdleExpiry()) navigate('/login', { replace: true, state: { expired: true } });
     }, IDLE_CHECK_INTERVAL_MS);
     return () => {
       alive = false;

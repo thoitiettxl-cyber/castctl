@@ -18,6 +18,11 @@ export function LoginPage() {
   const [token, setToken] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  // Idle expiry lands here with router state { expired: true }
+  // (MainLayout): show the notice until the next submit.
+  const [expiredNotice, setExpiredNotice] = useState(
+    () => Boolean((location.state as { expired?: boolean } | null)?.expired),
+  );
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -25,10 +30,11 @@ export function LoginPage() {
     if (captured) {
       setToken(captured);
       // Strip the token from the URL bar immediately; it must not linger
-      // in history or be shared via copy-paste of the URL.
-      navigate(location.pathname, { replace: true });
+      // in history or be shared via copy-paste of the URL. Keep the
+      // router state (e.g. the idle-expiry notice) while doing so.
+      navigate(location.pathname, { replace: true, state: location.state });
     }
-  }, [location.search, location.pathname, navigate]);
+  }, [location.search, location.pathname, location.state, navigate]);
 
   if (isAuthenticated) {
     const from = (location.state as { from?: { pathname?: string } } | null)?.from?.pathname;
@@ -41,6 +47,7 @@ export function LoginPage() {
     if (!value) return;
     setSubmitting(true);
     setError('');
+    setExpiredNotice(false);
     const result = await login(value);
     setSubmitting(false);
     if (!result.success) {
@@ -66,6 +73,11 @@ export function LoginPage() {
             never exceeds a 390px viewport. */}
         <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 'min(420px, calc(100vw - 80px))' }}>
           <p style={{ margin: 0 }}>{t('login.subtitle')}</p>
+          {expiredNotice && (
+            <p role="status" style={{ margin: 0 }}>
+              {t('login.session_expired')}
+            </p>
+          )}
           <Input
             label={t('login.token_label')}
             type="password"

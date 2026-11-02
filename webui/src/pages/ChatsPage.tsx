@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { chatsApi, profilesApi, statusApi } from '@/services/api';
-import type { ApiError, ChatEvent, ChatJob, ChatSession, ChatSessionOp } from '@/types';
+import type { ApiError, ChatEvent, ChatJob, ChatJobStatus, ChatSession, ChatSessionOp } from '@/types';
 import { getErrorMessage } from '@/utils/helpers';
 import { useNotificationStore } from '@/stores';
 import { Button } from '@/components/ui/Button';
@@ -64,6 +64,19 @@ export function ChatsPage() {
   const [sendError, setSendError] = useState('');
   const pollCountRef = useRef(0);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const prevJobStatusRef = useRef<ChatJobStatus | null>(null);
+
+  // Toast a send outcome once, when the job leaves "running":
+  // the inline job result stays the canonical detail, and the
+  // toast is the mutation feedback the other actions give.
+  useEffect(() => {
+    const prev = prevJobStatusRef.current;
+    prevJobStatusRef.current = job?.status ?? null;
+    if (!job || prev !== 'running') return;
+    if (job.status === 'done') showNotification(t('chats.send_done'), 'success');
+    else if (job.status === 'failed') showNotification(t('chats.send_failed'), 'error');
+    else if (job.status === 'timeout') showNotification(t('chats.send_timeout'), 'error');
+  }, [job, showNotification, t]);
 
   const loadProfiles = useCallback(async () => {
     setProfilesError('');
@@ -144,6 +157,7 @@ export function ChatsPage() {
         if (pollCountRef.current > JOB_POLL_MAX) {
           stopPolling();
           setSendError(t('chats.send_timeout'));
+          showNotification(t('chats.send_timeout'), 'error');
           return;
         }
         chatsApi
@@ -158,7 +172,7 @@ export function ChatsPage() {
           });
       }, JOB_POLL_MS);
     },
-    [stopPolling, t],
+    [stopPolling, showNotification, t],
   );
 
   const handleSend = async (event: FormEvent) => {
@@ -175,9 +189,16 @@ export function ChatsPage() {
     } catch (err) {
       // 409 = a send is already in flight for this profile; the
       // server serialises sends per profile. Anything else is a
-      // plain failure; the message body is never echoed.
-      if ((err as ApiError).status === 409) setSendError(t('chats.send_in_flight'));
-      else setSendError(getErrorMessage(err, t('common.error')));
+      // plain failure; the message body is never echoed. The
+      // inline box carries the detail; the toast is the
+      // mutation feedback.
+      if ((err as ApiError).status === 409) {
+        setSendError(t('chats.send_in_flight'));
+        showNotification(t('chats.send_in_flight'), 'error');
+      } else {
+        setSendError(getErrorMessage(err, t('common.error')));
+        showNotification(getErrorMessage(err, t('notification.save_failed')), 'error');
+      }
     }
   };
 
@@ -274,7 +295,7 @@ export function ChatsPage() {
         )}
         {!sessionsLoaded && !sessionsError ? (
           <LoadingSpinner />
-        ) : sessions.length === 0 ? (
+        ) : sessionsError ? null : sessions.length === 0 ? (
           <EmptyState title={t('chats.empty_sessions')} />
         ) : (
           <Table>
@@ -370,7 +391,7 @@ export function ChatsPage() {
         )}
         {!historyLoaded && !historyError ? (
           <LoadingSpinner />
-        ) : events.length === 0 ? (
+        ) : historyError ? null : events.length === 0 ? (
           <EmptyState title={t('chats.empty_history')} />
         ) : (
           <div>
