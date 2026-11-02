@@ -386,7 +386,7 @@ across themes, and this note records every measured row.
 | White on `--primary-active` | 5.12 | 5.12 | 2.59 | Passes light/white; fails dark |
 | White on danger `#c65746` (danger button) | 4.33 | 4.33 | 4.33 | Fails all (marginal) |
 | Error text `#c65746` on card | 3.73 | 4.33 | (unmeasured) | Fails light/white |
-| Error-box `#c65746` on 10% error tint over card | 3.32 | (unmeasured) | 3.59 | Fails all themes (dark uses Sass `$error-color`, not dark `--warning-text: #f1b0a6`) |
+| Error-box `#c65746` on 10% error tint over card | 3.32 | (unmeasured) | 3.59 | Fails light and dark; white unmeasured (dark uses Sass `$error-color`, not dark `--warning-text: #f1b0a6`) |
 | Warning text on card | 3.73 | 4.33 | 9.41 (`#f1b0a6`) | Fails light/white; passes dark |
 | Count-badge text (`--primary-active`) on badge tint | 3.71 | 4.23 | 4.43 | Fails all (light/dark marginal) |
 

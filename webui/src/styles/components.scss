@@ -355,10 +355,10 @@ textarea {
     animation: none;
   }
 
-  .modal-overlay-entering,
-  .modal-overlay-closing,
-  .modal-entering,
-  .modal-closing {
+  .modal-overlay.modal-overlay-entering,
+  .modal-overlay.modal-overlay-closing,
+  .modal.modal-entering,
+  .modal.modal-closing {
     animation: none;
   }
 }
