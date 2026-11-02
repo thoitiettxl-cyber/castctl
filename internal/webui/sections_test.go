@@ -218,14 +218,13 @@ func webuiSettingsFixture(t *testing.T) string {
 func TestWebUISettingsGetDefaults(t *testing.T) {
 	ts := newTestServer(t, fixtureConfig, nil)
 	data, _ := getSettingsSHA(t, ts, "/api/v1/settings/webui")
-	settings, _ := data["settings"].(map[string]any)
-	if settings["token_set"] != false || settings["masked"] != "" {
-		t.Fatalf("settings without a webui block: %v", settings)
+	if data["token_set"] != false || data["masked"] != "" {
+		t.Fatalf("settings without a webui block: %v", data)
 	}
-	if settings["session_idle_timeout_seconds"] != float64(43200) {
-		t.Fatalf("default idle seconds = %v, want 43200", settings["session_idle_timeout_seconds"])
+	if data["session_idle_timeout_seconds"] != float64(43200) {
+		t.Fatalf("default idle seconds = %v, want 43200", data["session_idle_timeout_seconds"])
 	}
-	limit, _ := settings["login_rate_limit"].(map[string]any)
+	limit, _ := data["login_rate_limit"].(map[string]any)
 	if limit["attempts"] != float64(5) || limit["window_seconds"] != float64(300) {
 		t.Fatalf("default rate limit = %v", limit)
 	}
@@ -237,12 +236,11 @@ func TestWebUISettingsPutRoundTrip(t *testing.T) {
 	beforeKeys := topLevelKeys(t, before)
 
 	data, sha := getSettingsSHA(t, ts, "/api/v1/settings/webui")
-	settings, _ := data["settings"].(map[string]any)
-	if settings["token_set"] != true || settings["masked"] != "***" {
-		t.Fatalf("settings view: %v", settings)
+	if data["token_set"] != true || data["masked"] != "***" {
+		t.Fatalf("settings view: %v", data)
 	}
-	if settings["listen"] != "127.0.0.1:8317" {
-		t.Fatalf("listen = %v", settings["listen"])
+	if data["listen"] != "127.0.0.1:8317" {
+		t.Fatalf("listen = %v", data["listen"])
 	}
 
 	// Set the idle timeout + rate limit. The stored file must
@@ -272,11 +270,10 @@ func TestWebUISettingsPutRoundTrip(t *testing.T) {
 		t.Fatalf("stored token is not a bcrypt hash after save: %q", parsed.WebUI.Token)
 	}
 	data2, sha2 := getSettingsSHA(t, ts, "/api/v1/settings/webui")
-	settings2, _ := data2["settings"].(map[string]any)
-	if settings2["session_idle_timeout_seconds"] != float64(21600) {
-		t.Fatalf("idle seconds after save = %v", settings2["session_idle_timeout_seconds"])
+	if data2["session_idle_timeout_seconds"] != float64(21600) {
+		t.Fatalf("idle seconds after save = %v", data2["session_idle_timeout_seconds"])
 	}
-	limit2, _ := settings2["login_rate_limit"].(map[string]any)
+	limit2, _ := data2["login_rate_limit"].(map[string]any)
 	if limit2["attempts"] != float64(3) || limit2["window_seconds"] != float64(600) {
 		t.Fatalf("rate limit after save = %v", limit2)
 	}
@@ -307,7 +304,7 @@ func TestWebUISettingsPutRoundTrip(t *testing.T) {
 		t.Fatalf("delete limit: got %d: %s", rec.Code, rec.Body.String())
 	}
 	data3, _ := getSettingsSHA(t, ts, "/api/v1/settings/webui")
-	limit3, _ := data3["settings"].(map[string]any)["login_rate_limit"].(map[string]any)
+	limit3, _ := data3["login_rate_limit"].(map[string]any)
 	if limit3["attempts"] != float64(5) {
 		t.Fatalf("rate limit after delete = %v, want defaults", limit3)
 	}

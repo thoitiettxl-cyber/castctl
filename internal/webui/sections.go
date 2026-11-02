@@ -202,6 +202,21 @@ type loginRateLimitSettings struct {
 	WindowSeconds int64  `json:"window_seconds"`
 }
 
+// webUISettingsResponse is the GET /settings/webui envelope
+// payload: the view fields FLAT in `data` alongside sha256,
+// the same shape as the keeper and telegram GETs and the
+// shape the frontend WebUISettings type declares
+// (webui/src/types/api.ts:273-281). A nested "settings" key
+// here broke the section editor (D-WEBUI-GET): loadWebUI
+// reads result.login_rate_limit.attempts off `data` directly.
+// The flat shape is pinned by TestSettingsGETShapesMatchFrontend
+// (settings_shape_test.go) and the dev-mock shape check in
+// webui/tests/mockServer.test.ts.
+type webUISettingsResponse struct {
+	webUISettingsView
+	SHA256 string `json:"sha256"`
+}
+
 func (s *Server) handleGetWebUISettings(w http.ResponseWriter, r *http.Request) {
 	load, err := s.loadConfig()
 	if err != nil {
@@ -232,10 +247,7 @@ func (s *Server) handleGetWebUISettings(w http.ResponseWriter, r *http.Request) 
 		attempts, window = profile.EffectiveLoginRateLimit(cfg.WebUI)
 		view.LoginRateLimit = loginRateLimitSettings{Attempts: attempts, Window: window.String(), WindowSeconds: int64(window / time.Second)}
 	}
-	writeEnvelope(w, http.StatusOK, map[string]any{
-		"settings": view,
-		"sha256":   load.hash,
-	})
+	writeEnvelope(w, http.StatusOK, webUISettingsResponse{webUISettingsView: view, SHA256: load.hash})
 }
 
 type putLoginRateLimitBody struct {
