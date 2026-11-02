@@ -220,7 +220,9 @@ func TestLoginRateLimiterFailClosedAtCap(t *testing.T) {
 	// The cap fails closed (F1 regression): a flood of distinct
 	// addresses inside the window must never evict a limited
 	// address's entry and reset its budget. Only expired
-	// entries are evicted to make room.
+	// entries are evicted to make room. A newcomer arriving
+	// after the cap is full is 429 by the check itself, without
+	// being inserted (F1-NEW).
 	now := time.Now()
 	l := &loginRateLimiter{now: func() time.Time { return now }}
 	attempts, window := 5, 5*time.Minute
@@ -247,8 +249,36 @@ func TestLoginRateLimiterFailClosedAtCap(t *testing.T) {
 	if !l.exceeded(victim, attempts, window) {
 		t.Fatal("victim no longer limited after the flood: still 429 within the window")
 	}
-	// Expired entries ARE evicted to make room for a new
-	// address once the window passes.
+	// F1-NEW: a newcomer arriving AFTER the cap is full must
+	// also be 429, not slip past uncounted. The check fails
+	// closed without inserting the newcomer, and recording
+	// its failure drops without inserting either.
+	newcomer := "198.51.100.1"
+	if !l.exceeded(newcomer, attempts, window) {
+		t.Fatal("newcomer at a full cap does not report exceeded: failures from a fresh address would never be counted")
+	}
+	l.recordFailure(newcomer, window)
+	if !l.exceeded(newcomer, attempts, window) {
+		t.Fatal("newcomer stopped reporting exceeded after its failure was recorded at a full cap")
+	}
+	l.mu.Lock()
+	n = len(l.entries)
+	_, newcomerKept := l.entries[newcomer]
+	_, victimKept = l.entries[victim]
+	l.mu.Unlock()
+	if n > maxRateLimitEntries {
+		t.Fatalf("entries = %d, want at most %d", n, maxRateLimitEntries)
+	}
+	if newcomerKept {
+		t.Fatal("newcomer entry was inserted at a full cap: the fail-closed check must not create an entry")
+	}
+	if !victimKept {
+		t.Fatal("victim entry was evicted by the newcomer check/record at the cap")
+	}
+	if !l.exceeded(victim, attempts, window) {
+		t.Fatal("victim no longer limited after the newcomer check/record at the cap")
+	}
+	// Expiry re-admits a new address once the window passes.
 	now = now.Add(window)
 	l.recordFailure("203.0.113.1", window)
 	l.mu.Lock()
@@ -256,6 +286,55 @@ func TestLoginRateLimiterFailClosedAtCap(t *testing.T) {
 	l.mu.Unlock()
 	if !newKept {
 		t.Fatal("new address was not inserted after expired entries were evicted")
+	}
+}
+
+func TestLoginRateLimiterFullCapHTTP(t *testing.T) {
+	// F1-NEW at the HTTP layer: with the store filled to the
+	// cap (filled directly, not by 1024 bcrypt verifications),
+	// a request from a fresh address gets 429 before
+	// authentication — with a wrong token AND with the valid
+	// token — while the limited victim stays 429. exceeded()
+	// is token-agnostic and the limiter runs before requireAuth,
+	// so this pins the documented valid-token-at-cap tradeoff.
+	ts := newTestServer(t, fixtureConfig, nil)
+	attempts, window := ts.srv.loginLimits()
+	victim := "192.0.2.1"
+	for i := 0; i < attempts; i++ {
+		ts.srv.rateLimiter.recordFailure(victim, window)
+	}
+	for i := 0; i < maxRateLimitEntries-1; i++ {
+		ts.srv.rateLimiter.recordFailure("10.0.0."+strconv.Itoa(i), window)
+	}
+	newcomerBad := ts.doReq(t, "GET", "/api/v1/status", "", false, map[string]string{"Authorization": "Bearer WRONG-TOKEN"}, "198.51.100.1:1234")
+	if newcomerBad.Code != http.StatusTooManyRequests {
+		t.Fatalf("newcomer bad token at a full cap: got %d, want 429", newcomerBad.Code)
+	}
+	newcomerGood := ts.doReq(t, "GET", "/api/v1/status", "", true, nil, "198.51.100.2:1234")
+	if newcomerGood.Code != http.StatusTooManyRequests {
+		t.Fatalf("newcomer valid token at a full cap: got %d, want 429 (documented tradeoff)", newcomerGood.Code)
+	}
+	if got := newcomerGood.Header().Get("Retry-After"); got == "" {
+		t.Fatal("429 at a full cap lacks Retry-After")
+	}
+	victimBad := ts.doReq(t, "GET", "/api/v1/status", "", false, map[string]string{"Authorization": "Bearer WRONG-TOKEN"}, victim+":1234")
+	if victimBad.Code != http.StatusTooManyRequests {
+		t.Fatalf("victim bad token at a full cap: got %d, want 429", victimBad.Code)
+	}
+	ts.srv.rateLimiter.mu.Lock()
+	n := len(ts.srv.rateLimiter.entries)
+	_, newcomerKept := ts.srv.rateLimiter.entries["198.51.100.1"]
+	_, newcomerGoodKept := ts.srv.rateLimiter.entries["198.51.100.2"]
+	_, victimKept := ts.srv.rateLimiter.entries[victim]
+	ts.srv.rateLimiter.mu.Unlock()
+	if n > maxRateLimitEntries {
+		t.Fatalf("entries = %d, want at most %d", n, maxRateLimitEntries)
+	}
+	if newcomerKept || newcomerGoodKept {
+		t.Fatal("fail-closed check inserted a newcomer entry at a full cap")
+	}
+	if !victimKept {
+		t.Fatal("victim entry was evicted at a full cap")
 	}
 }
 

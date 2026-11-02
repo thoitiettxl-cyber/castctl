@@ -35,15 +35,23 @@ import (
 // which is the intended shape: a local brute-force prober and
 // the operator share the loopback, and the window is short.
 //
-// The store is bounded (maxRateLimitEntries addresses) and fails
-// closed at the cap: recording a failure for a new address when
-// the store is full first evicts only entries whose window has
-// expired; when none has expired the failure is dropped without
-// inserting, so a flood of distinct addresses can never evict a
-// limited address's entry and reset its budget. Entries are
-// pruned lazily on each check: an expired window is dropped,
-// never counted. No failure or address is ever logged: this
-// package never logs.
+// The store is bounded (maxRateLimitEntries addresses) and the
+// CHECK fails closed at the cap: when the store is full of
+// unexpired entries, exceeded reports true for an address with
+// no entry (after pruning entries whose window has expired),
+// without inserting it, so the middleware 429s a newcomer —
+// including one presenting a valid token, because the
+// rate-limit check runs before authentication — until an
+// entry's window expires and a slot frees (expiry re-admits)
+// or the process restarts. The store is per-process: a restart
+// resets all budgets. Recording a failure for a new address
+// when the store is full first evicts only entries whose window
+// has expired; when none has expired the failure is dropped
+// without inserting, so a flood of distinct addresses can never
+// evict a limited address's entry and reset its budget.
+// Entries are pruned lazily on each check: an expired window
+// is dropped, never counted. No failure or address is ever
+// logged: this package never logs.
 
 const maxRateLimitEntries = 1024
 
@@ -71,19 +79,26 @@ func (l *loginRateLimiter) clock() time.Time {
 
 // exceeded reports whether addr is currently over the limit: at
 // least `attempts` failures inside the current window. An
-// expired window is pruned and does not count. Exceeded never
-// mutates the count: the 429 itself is not a failed verification.
+// expired window is pruned and does not count. For an address
+// with no entry, exceeded prunes expired entries and reports
+// true when the store is still at the cap: the check fails
+// closed without inserting the address, so the 429 is served
+// before authentication and applies to a valid token too.
+// Exceeded never mutates the count: the 429 itself is not a
+// failed verification, and a fail-closed check creates no entry.
 func (l *loginRateLimiter) exceeded(addr string, attempts int, window time.Duration) bool {
 	if attempts < 1 || window <= 0 {
 		return false
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	now := l.clock()
 	w, ok := l.entries[addr]
 	if !ok {
-		return false
+		l.pruneExpiredLocked(now, window)
+		return len(l.entries) >= maxRateLimitEntries
 	}
-	if l.clock().Sub(w.windowStart) >= window {
+	if now.Sub(w.windowStart) >= window {
 		delete(l.entries, addr)
 		return false
 	}
@@ -94,9 +109,10 @@ func (l *loginRateLimiter) exceeded(addr string, attempts int, window time.Durat
 // failure outside the current window starts a fresh window
 // with count 1. When addr is new and the store is full, only
 // expired entries are evicted; if none has expired the failure
-// is dropped without inserting, so the store fails closed at
-// the cap instead of evicting a limited address's entry (see
-// the package note).
+// is dropped without inserting, so the store never evicts a
+// limited address's entry to make room (see the package note:
+// the check, not the insert, is what 429s a newcomer at a
+// full cap).
 func (l *loginRateLimiter) recordFailure(addr string, window time.Duration) {
 	if window <= 0 {
 		return
