@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func parseWebUITestConfig(t *testing.T, doc string) *SingleConfig {
@@ -121,6 +122,9 @@ func TestWebUIBlockRejects(t *testing.T) {
 		`{"profiles":{},"webui":{"listen":8317}}`,
 		`{"profiles":{},"webui":{"token":""}}`,
 		`{"profiles":{},"webui":{"token":123}}`,
+		`{"profiles":{},"webui":{"token":"has space"}}`, // whitespace can never authenticate
+		`{"profiles":{},"webui":{"token":"has	tab"}}`,   // tab likewise
+		`{"profiles":{},"webui":{"token":" lead"}}`,     // leading space likewise
 		`{"profiles":{},"webui":{"listen":""}}`,
 		`{"profiles":{},"webui":{"unknown":true}}`,
 		`{"profiles":{},"webui":{"listen":"0.0.0.0:8317"}}`,
@@ -246,6 +250,115 @@ func TestWebUIUIDirRoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded2), `"ui_dir": "/srv/MARKER-UIDIR"`) {
 		t.Fatalf("raw webui block lost ui_dir:\n%s", encoded2)
+	}
+}
+
+func TestWebUIIdleTimeoutAndRateLimitParse(t *testing.T) {
+	cfg := parseWebUITestConfig(t, `{"profiles":{},"webui":{"token":"MARKER-WEBUI-TOKEN","session_idle_timeout":"6h","login_rate_limit":{"attempts":3,"window":"10m"}}}`)
+	w := cfg.WebUI
+	if w == nil || !w.SessionIdleTimeoutSet || w.SessionIdleTimeout != 6*time.Hour {
+		t.Fatalf("SessionIdleTimeout = %+v", w)
+	}
+	if w.LoginRateLimit == nil || !w.LoginRateLimit.AttemptsSet || w.LoginRateLimit.Attempts != 3 || !w.LoginRateLimit.WindowSet || w.LoginRateLimit.Window != 10*time.Minute {
+		t.Fatalf("LoginRateLimit = %+v", w.LoginRateLimit)
+	}
+	// Defaults when the keys are absent, and per-field defaults
+	// when only one sub-field is set.
+	cfg2 := parseWebUITestConfig(t, `{"profiles":{},"webui":{"token":"MARKER-WEBUI-TOKEN"}}`)
+	if got := EffectiveSessionIdleTimeout(cfg2.WebUI); got != DefaultSessionIdleTimeout {
+		t.Fatalf("effective idle = %v, want %v", got, DefaultSessionIdleTimeout)
+	}
+	if a, win := EffectiveLoginRateLimit(cfg2.WebUI); a != DefaultLoginRateLimitAttempts || win != DefaultLoginRateLimitWindow {
+		t.Fatalf("effective rate limit = %d/%v, want %d/%v", a, win, DefaultLoginRateLimitAttempts, DefaultLoginRateLimitWindow)
+	}
+	if got := EffectiveSessionIdleTimeout(nil); got != DefaultSessionIdleTimeout {
+		t.Fatalf("effective idle (nil) = %v", got)
+	}
+	cfg3 := parseWebUITestConfig(t, `{"profiles":{},"webui":{"token":"MARKER-WEBUI-TOKEN","login_rate_limit":{"attempts":2}}}`)
+	if a, win := EffectiveLoginRateLimit(cfg3.WebUI); a != 2 || win != DefaultLoginRateLimitWindow {
+		t.Fatalf("partial rate limit = %d/%v, want 2/%v", a, win, DefaultLoginRateLimitWindow)
+	}
+	// An empty login_rate_limit object is accepted (all defaults).
+	cfg4 := parseWebUITestConfig(t, `{"profiles":{},"webui":{"token":"MARKER-WEBUI-TOKEN","login_rate_limit":{}}}`)
+	if cfg4.WebUI.LoginRateLimit == nil {
+		t.Fatal("empty login_rate_limit object parsed to nil")
+	}
+	// The documented floors are accepted exactly: 1m idle, 1s window.
+	cfg5 := parseWebUITestConfig(t, `{"profiles":{},"webui":{"token":"MARKER-WEBUI-TOKEN","session_idle_timeout":"1m","login_rate_limit":{"window":"1s"}}}`)
+	if cfg5.WebUI.SessionIdleTimeout != time.Minute || cfg5.WebUI.LoginRateLimit.Window != time.Second {
+		t.Fatalf("floor values = %+v", cfg5.WebUI)
+	}
+}
+
+func TestWebUIIdleTimeoutAndRateLimitRejects(t *testing.T) {
+	cases := []string{
+		`{"profiles":{},"webui":{"session_idle_timeout":3600}}`,                 // bare number, not a duration string
+		`{"profiles":{},"webui":{"session_idle_timeout":""}}`,                   // empty must not mean "no expiry"
+		`{"profiles":{},"webui":{"session_idle_timeout":"0s"}}`,                 // non-positive
+		`{"profiles":{},"webui":{"session_idle_timeout":"59s"}}`,                // below the 1m floor
+		`{"profiles":{},"webui":{"session_idle_timeout":"-1h"}}`,                // negative
+		`{"profiles":{},"webui":{"session_idle_timeout":"31d"}}`,                // over the 30-day cap (ParseDuration rejects "d"; either way it must fail)
+		`{"profiles":{},"webui":{"session_idle_timeout":"10000h"}}`,             // over the cap
+		`{"profiles":{},"webui":{"session_idle_timeout":"soon"}}`,               // unparseable
+		`{"profiles":{},"webui":{"login_rate_limit":[]}}`,                       // not an object
+		`{"profiles":{},"webui":{"login_rate_limit":{"attempts":"5"}}}`,         // attempts must be an integer
+		`{"profiles":{},"webui":{"login_rate_limit":{"attempts":5.5}}}`,         // fractional
+		`{"profiles":{},"webui":{"login_rate_limit":{"attempts":0}}}`,           // non-positive
+		`{"profiles":{},"webui":{"login_rate_limit":{"attempts":101}}}`,         // over the cap
+		`{"profiles":{},"webui":{"login_rate_limit":{"window":300}}}`,           // bare number
+		`{"profiles":{},"webui":{"login_rate_limit":{"window":""}}}`,            // empty
+		`{"profiles":{},"webui":{"login_rate_limit":{"window":"0s"}}}`,          // non-positive
+		`{"profiles":{},"webui":{"login_rate_limit":{"window":"999ms"}}}`,       // below the 1s floor
+		`{"profiles":{},"webui":{"login_rate_limit":{"window":"1ns"}}}`,         // sub-second: would disable the limit
+		`{"profiles":{},"webui":{"login_rate_limit":{"window":"25h"}}}`,         // over the 24h cap
+		`{"profiles":{},"webui":{"login_rate_limit":{"burst":2}}}`,              // unknown nested key
+		`{"profiles":{},"webui":{"session_idle_timeout":"12h","unknown":true}}`, // unknown key still rejected
+	}
+	for _, doc := range cases {
+		if _, err := ParseSingleConfig([]byte(doc), t.TempDir()); err == nil {
+			t.Errorf("doc %s: accepted, want rejection", doc)
+		}
+	}
+}
+
+func TestWebUIIdleTimeoutAndRateLimitRoundTrip(t *testing.T) {
+	// A hand-built config (no raw capture) renders the new keys
+	// and re-parses identically.
+	cfg := &SingleConfig{
+		Profiles: map[string]*Profile{},
+		WebUI: &WebUIConfig{
+			Listen: "127.0.0.1:9000", Token: "MARKER-WEBUI-TOKEN",
+			SessionIdleTimeout: 6 * time.Hour, SessionIdleTimeoutSet: true,
+			LoginRateLimit: &LoginRateLimitConfig{Attempts: 3, AttemptsSet: true, Window: 10 * time.Minute, WindowSet: true},
+		},
+	}
+	encoded, err := encodeSingleConfig(cfg)
+	if err != nil {
+		t.Fatalf("encodeSingleConfig: %v", err)
+	}
+	back, err := ParseSingleConfig(encoded, t.TempDir())
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	w := back.WebUI
+	if w == nil || !w.SessionIdleTimeoutSet || w.SessionIdleTimeout != 6*time.Hour {
+		t.Fatalf("round-trip idle = %+v", w)
+	}
+	if w.LoginRateLimit == nil || w.LoginRateLimit.Attempts != 3 || w.LoginRateLimit.Window != 10*time.Minute {
+		t.Fatalf("round-trip rate limit = %+v", w.LoginRateLimit)
+	}
+	// A block without the new keys renders without them: no
+	// key is invented on save.
+	cfg2 := &SingleConfig{
+		Profiles: map[string]*Profile{},
+		WebUI:    &WebUIConfig{Listen: "127.0.0.1:9000", Token: "MARKER-WEBUI-TOKEN"},
+	}
+	encoded2, err := encodeSingleConfig(cfg2)
+	if err != nil {
+		t.Fatalf("encodeSingleConfig: %v", err)
+	}
+	if strings.Contains(string(encoded2), "session_idle_timeout") || strings.Contains(string(encoded2), "login_rate_limit") {
+		t.Fatalf("encode invented new keys:\n%s", encoded2)
 	}
 }
 

@@ -360,6 +360,61 @@ tag the page and the API say unavailable. Profile/outbound test
 endpoints are CLI-only in this build (501 `unavailable`); the
 phased test runner was not extracted.
 
+### Known limitation: contrast (WCAG AA)
+
+The inherited upstream palette does **not** meet WCAG 2.x AA (4.5:1
+for normal text) on the pairs below. Ratios were computed from the
+exact token values in `webui/src/styles/themes.scss` by WCAG
+relative luminance, with RGBA fills composited over the card
+background at their stated alpha; "card" is `--bg-primary`,
+"page" is `--bg-secondary`. Body/button text is normal size, so
+the 3:1 large-text allowance does not apply (except where noted).
+`auto` resolves to the light/dark token sets, so there is no
+fourth set. The earlier review summary called this "six
+failing pairs"; the full measured table lists **twelve failing
+rows** — the count discrepancy is the summary grouping pairs
+across themes, and this note records every measured row.
+
+| Pair (text on background) | Light | White | Dark | AA normal? |
+|---|---|---|---|---|
+| `--text-tertiary` on page | 2.58 | 2.72 | 6.22 | Fails light/white |
+| `--text-tertiary` on card | 2.34 | 2.72 | 5.81 | Fails light/white |
+| `--text-quaternary` on page | 1.83 | 1.92 | 3.40 | Fails all (dark passes 3:1 large-only) |
+| `--text-quaternary` on card | 1.66 | 1.92 | 3.17 | Fails all (dark passes 3:1 large-only) |
+| White `--primary-contrast` on `--primary-color` (primary button) | 3.61 | 3.61 | 3.61 | Fails all |
+| White on `--primary-hover` | 4.25 | 4.25 | 3.00 | Fails all |
+| White on `--primary-active` | 5.12 | 5.12 | 2.59 | Passes light/white; fails dark |
+| White on danger `#c65746` (danger button) | 4.33 | 4.33 | 4.33 | Fails all (marginal) |
+| Error text `#c65746` on card | 3.73 | 4.33 | (unmeasured) | Fails light/white |
+| Error-box `#c65746` on 10% error tint over card | 3.32 | (unmeasured) | 3.59 | Fails light and dark; white unmeasured (dark uses Sass `$error-color`, not dark `--warning-text: #f1b0a6`) |
+| Warning text on card | 3.73 | 4.33 | 9.41 (`#f1b0a6`) | Fails light/white; passes dark |
+| Count-badge text (`--primary-active`) on badge tint | 3.71 | 4.23 | 4.43 | Fails all (light/dark marginal) |
+
+Fixing these pairs requires changing `themes.scss` token values
+and re-verifying all themes; that is a separate follow-up, not
+part of this change. Do not treat the upstream comment that the
+themes "passed contrast checks" as evidence: it is contradicted
+by the numbers above (see the qualified comment in
+`themes.scss`).
+
+Chats/sessions ride the same seams as the CLI (`sessions.list`,
+`chat.history`, `deliverSend` + `executeWait`,
+`deliver.SessionStart`/`SessionOp`) through injected `Deps`
+fields — `internal/webui` never imports `internal/commands` — and
+each call builds and closes its own Runtime. Send is an async
+job: `POST` creates it, `GET /chats/jobs/{job}` polls it, one
+send per profile runs at a time (a second in-flight send is a
+fixed 409), and an approval-blocked turn ends the job with a
+documented outcome instead of stalling. The Plugins page is a
+gated placeholder: `GET /plugins` advertises `available: false`
+with an empty list and no loader or schema exists in this build.
+Keeper and `webui` blocks gain section editors (`GET`/`PUT
+/settings/keeper`, `/settings/webui`) funnelling through the same
+guarded save as DNS/Telegram. Browser hardening (Origin
+allowlist, login rate limit, frontend idle expiry, security
+headers) follows Design A in docs/security.md; middleware order
+is rate-limit → auth → Origin → timeout.
+
 Secrets in config are write-only under the [secrets write-only contract](../webui/SECRETS-CONTRACT.md),
 which the Go server MUST implement server-side (see docs/security.md).
 

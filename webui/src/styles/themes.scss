@@ -235,7 +235,9 @@
   --glass-border: color-mix(in srgb, var(--border-color) 55%, transparent);
 
   // 深色卡面上 #10b981 亮度超出 OKLCH 0.48–0.67 区间，且与失败色的色盲分离度不足，
-  // 因此深色单独降一档。三套主题均已通过对比度/色盲/亮度校验。
+  // 因此深色单独降一档。注意：三套主题并未全部通过 WCAG AA 对比度校验——
+  // 已测量的不合格配对见 docs/architecture.md “Known limitation: contrast” 一节，
+  // token 修复属于后续单独任务，本轮不改 token 值。
   --viz-success: #0fae78;
   --viz-failure: #cf4b3a;
 }

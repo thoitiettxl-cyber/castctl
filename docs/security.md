@@ -43,3 +43,45 @@ token is never printed, logged, or returned. Reach the server
 from another device through an SSH tunnel forwarding the
 loopback port — never by binding a non-loopback address, and
 never by exposing the Vite dev server.
+
+## Browser hardening (Design A)
+
+Authentication stays stateless Bearer: no cookies, no CORS, no
+remember-password. The no-CORS defence is the Origin allowlist:
+mutating requests (`POST`/`PUT`/`PATCH`/`DELETE`) with an `Origin`
+header from a non-loopback, non-same-host origin get a fixed 403;
+an absent `Origin` (a non-browser client) is allowed, and
+loopback/same-host origins are allowed. The check runs after
+authentication, so a cross-origin request without a valid token
+still gets 401, never a 403 that would confirm the route exists.
+Middleware order is load-bearing and pinned: rate-limit → auth →
+Origin → timeout.
+
+Login attempts are rate-limited with a stdlib fixed-window
+counter, in-memory and bounded: 5 failed token verifications per
+5 minutes per remote address (configurable via
+`webui.login_rate_limit`), then a fixed 429 with `Retry-After`.
+A successful verification resets the counter. The store holds
+at most 1024 addresses and the check fails closed at the cap:
+when the store is full of unexpired entries, a request from an
+address with no entry gets a fixed 429 (after pruning entries
+whose window has expired), without being inserted — so a flood
+of distinct addresses can never evict a limited address's entry
+and reset its budget, and a newcomer's failures can never slip
+past uncounted. The tradeoff is stated plainly: the 429 is
+served before authentication, so a valid token presented from a
+fresh address at a full cap is also 429 until an entry's window
+expires and frees a slot, or the process restarts. The store is
+per-process: a restart resets all budgets. The screencast WebSocket upgrade passes through the same limiter
+(it carries no Bearer check and never feeds the counter), so an
+over-limit address gets a 429 on the upgrade too until its
+window expires; the WebSocket path is not exempted. API
+responses carry `Cache-Control: no-store` and
+`X-Content-Type-Options: nosniff`.
+
+Session expiry is frontend-only: the browser discards the token
+after `webui.session_idle_timeout` (default `12h`) without user
+activity and requires re-login; a 401 from any call logs out
+globally. Stated honestly: the server cannot revoke a Bearer, so
+a stolen token stays valid until the configured token is
+rotated — idle expiry bounds only an unattended browser tab.

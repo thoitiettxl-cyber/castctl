@@ -78,6 +78,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"outbound_count":  outboundCount,
 		"endpoint_count":  endpointCount,
 		"bundle_sha256":   s.deps.BundleSHA256,
+		// The frontend's idle-expiry budget in seconds: the
+		// effective `webui.session_idle_timeout` (documented
+		// default 12h when unset). The server stays stateless
+		// Bearer; the frontend discards its token after this
+		// long without API activity.
+		"session_idle_timeout_seconds": int64(profile.EffectiveSessionIdleTimeout(s.currentWebUIConfig()) / time.Second),
 	})
 }
 

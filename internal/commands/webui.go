@@ -215,6 +215,7 @@ func cmdWebUIServe(ctx context.Context, env *Env, g *globalOpts, args []string) 
 		RestoreCookies:      webuiRestoreCookies(loc, env),
 		ScreencastAvailable: webuiScreencastAvailable(loc),
 		ScreencastStarter:   webuiScreencastStarter(loc, env),
+		Chats:               webuiChatDeps(loc, env),
 	})
 	if err != nil {
 		var uidErr *webui.UIDirError

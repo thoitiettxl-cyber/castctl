@@ -346,6 +346,23 @@ textarea {
   }
 }
 
+// Reduced motion: the modal overlay/modal animations and the
+// loading spinner animate under prefers-reduced-motion by
+// default in this file; collapse them to instant/static, like
+// the Sheet/Skeleton/ToggleSwitch rules elsewhere.
+@media (prefers-reduced-motion: reduce) {
+  .loading-spinner {
+    animation: none;
+  }
+
+  .modal-overlay.modal-overlay-entering,
+  .modal-overlay.modal-overlay-closing,
+  .modal.modal-entering,
+  .modal.modal-closing {
+    animation: none;
+  }
+}
+
 .modal-close-floating {
   position: absolute;
   top: 12px;

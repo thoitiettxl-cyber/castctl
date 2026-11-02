@@ -140,9 +140,13 @@ func decodeEnvelope(t *testing.T, rec *httptest.ResponseRecorder) map[string]any
 
 func TestAuthGate(t *testing.T) {
 	ts := newTestServer(t, fixtureConfig, nil)
-	// No token: fixed 401, same body for every route.
-	for _, path := range []string{"/api/v1/status", "/api/v1/profiles", "/api/v1/config", "/api/v1/screencast/status"} {
-		rec := ts.do(t, "GET", path, "", false)
+	// No token: fixed 401, same body for every route. Each
+	// request uses a distinct remote address: the login rate
+	// limiter counts failed verifications per address (5 per
+	// 5m by default), and six failures from one address would
+	// legitimately 429 — the limiter has its own tests.
+	for i, path := range []string{"/api/v1/status", "/api/v1/profiles", "/api/v1/config", "/api/v1/screencast/status"} {
+		rec := ts.doReq(t, "GET", path, "", false, nil, "192.0.2."+strconv.Itoa(i+1)+":1234")
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("GET %s without token: %d, want 401", path, rec.Code)
 		}
@@ -154,9 +158,9 @@ func TestAuthGate(t *testing.T) {
 	}
 	// Wrong token: identical fixed 401 (no leak about whether
 	// the token exists or which route was hit).
-	rec := ts.do(t, "GET", "/api/v1/status", "", false)
-	rec.Header().Set("Authorization", "Bearer wrong")
+	rec := ts.doReq(t, "GET", "/api/v1/status", "", false, nil, "192.0.2.9:1234")
 	req := httptest.NewRequest("GET", "/api/v1/status", nil)
+	req.RemoteAddr = "192.0.2.10:1234"
 	req.Header.Set("Authorization", "Bearer wrong-token-value")
 	rec2 := httptest.NewRecorder()
 	ts.handler.ServeHTTP(rec2, req)

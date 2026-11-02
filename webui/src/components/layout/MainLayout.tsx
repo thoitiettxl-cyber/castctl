@@ -9,7 +9,14 @@ import {
 import { NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import type { Language, Theme } from '@/types';
-import { LANGUAGE_LABEL_KEYS, LANGUAGE_ORDER } from '@/utils/constants';
+import {
+  IDLE_ACTIVITY_WRITE_INTERVAL_MS,
+  IDLE_CHECK_INTERVAL_MS,
+  LANGUAGE_LABEL_KEYS,
+  LANGUAGE_ORDER,
+} from '@/utils/constants';
+import { recordActivity } from '@/utils/idle';
+import { statusApi } from '@/services/api';
 import {
   useAuthStore,
   useLanguageStore,
@@ -23,6 +30,7 @@ import {
   IconFileText,
   IconInfo,
   IconKey,
+  IconMessageSquare,
   IconNetwork,
   IconPlug,
   IconScrollText,
@@ -32,6 +40,8 @@ import {
 import { DashboardPage } from '@/pages/DashboardPage';
 import { ProfilesPage } from '@/pages/ProfilesPage';
 import { ProfileDetailPage } from '@/pages/ProfileDetailPage';
+import { ChatsPage } from '@/pages/ChatsPage';
+import { PluginsPage } from '@/pages/PluginsPage';
 import { OutboundsPage } from '@/pages/OutboundsPage';
 import { EndpointsPage } from '@/pages/EndpointsPage';
 import { ConfigPage } from '@/pages/ConfigPage';
@@ -242,12 +252,59 @@ type NavEntry = {
   end?: boolean;
 };
 
+/** One nav link. When the rail is collapsed, hover/focus shows the
+ * `.nav-tooltip` element the stylesheet already defines (label +
+ * meta, vertically centred on the link); the native `title` is
+ * dropped in that state so the two tooltips do not stack. In the
+ * expanded state the meta stays on `title`. React Router's NavLink
+ * sets aria-current="page" on the active link. */
+function NavItem({ entry, isCollapsed }: { entry: NavEntry; isCollapsed: boolean }) {
+  const { t } = useTranslation();
+  const linkRef = useRef<HTMLAnchorElement | null>(null);
+  const [tooltipTop, setTooltipTop] = useState<number | null>(null);
+
+  const showTooltip = () => {
+    if (!isCollapsed) return;
+    const rect = linkRef.current?.getBoundingClientRect();
+    if (rect) setTooltipTop(rect.top + rect.height / 2);
+  };
+  const hideTooltip = () => setTooltipTop(null);
+
+  return (
+    <NavLink
+      ref={linkRef}
+      to={entry.to}
+      end={entry.end}
+      className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}
+      title={isCollapsed ? undefined : t(entry.metaKey)}
+      onMouseEnter={showTooltip}
+      onMouseLeave={hideTooltip}
+      onFocus={showTooltip}
+      onBlur={hideTooltip}
+    >
+      <span className="nav-icon">
+        <entry.icon size={18} />
+      </span>
+      <span className="nav-text">
+        <span className="nav-label">{t(entry.labelKey)}</span>
+      </span>
+      {isCollapsed && tooltipTop !== null && (
+        <span className="nav-tooltip" role="tooltip" style={{ top: tooltipTop }}>
+          <span className="nav-tooltip-label">{t(entry.labelKey)}</span>
+          <span className="nav-tooltip-meta">{t(entry.metaKey)}</span>
+        </span>
+      )}
+    </NavLink>
+  );
+}
+
 const NAV_GROUPS: { labelKey: string; entries: NavEntry[] }[] = [
   {
     labelKey: 'nav_groups.operate',
     entries: [
       { to: '/', icon: IconBot, labelKey: 'nav.dashboard', metaKey: 'nav_meta.dashboard', end: true },
       { to: '/profiles', icon: IconKey, labelKey: 'nav.profiles', metaKey: 'nav_meta.profiles' },
+      { to: '/chats', icon: IconMessageSquare, labelKey: 'nav.chats', metaKey: 'nav_meta.chats' },
       ...(SCREENCAST_LOGIN_ENABLED
         ? [{ to: '/login-browser', icon: IconShield, labelKey: 'nav.login', metaKey: 'nav_meta.login' }]
         : []),
@@ -265,6 +322,7 @@ const NAV_GROUPS: { labelKey: string; entries: NavEntry[] }[] = [
     entries: [
       { to: '/config', icon: IconFileText, labelKey: 'nav.config_management', metaKey: 'nav_meta.config_management' },
       { to: '/settings', icon: IconSettings, labelKey: 'nav.settings', metaKey: 'nav_meta.settings' },
+      { to: '/plugins', icon: IconPlug, labelKey: 'nav.plugins', metaKey: 'nav_meta.plugins' },
     ],
   },
   {
@@ -299,6 +357,80 @@ export function MainLayout() {
   const closeThemeMenu = useCallback(() => setThemeMenuOpen(false), []);
   useMenuDismiss(languageMenuOpen, languageMenuRef, closeLanguageMenu);
   useMenuDismiss(themeMenuOpen, themeMenuRef, closeThemeMenu);
+
+  // Frontend idle expiry (webui.session_idle_timeout): record
+  // activity, fetch the effective timeout once from /status (a
+  // restored session has none yet), and re-check every minute. On
+  // expiry the store discards the token and ProtectedRoute sends
+  // the tab back to /login. The server stays stateless Bearer.
+  const setSessionIdleTimeout = useAuthStore((state) => state.setSessionIdleTimeout);
+  const checkIdleExpiry = useAuthStore((state) => state.checkIdleExpiry);
+  const mobileMenuButtonRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    let alive = true;
+    statusApi
+      .get()
+      .then((status) => {
+        if (alive) setSessionIdleTimeout(status.session_idle_timeout_seconds);
+      })
+      .catch(() => {
+        // 401 already logs out globally; any other failure leaves
+        // the timeout unknown (no expiry) until the next check.
+      });
+    let lastWrite = 0;
+    const stamp = () => {
+      const now = Date.now();
+      if (now - lastWrite >= IDLE_ACTIVITY_WRITE_INTERVAL_MS) {
+        lastWrite = now;
+        recordActivity(now);
+      }
+    };
+    const events = ['pointerdown', 'keydown', 'wheel', 'touchstart', 'scroll'] as const;
+    events.forEach((name) => window.addEventListener(name, stamp, { passive: true }));
+    const timer = window.setInterval(() => {
+      // On expiry the login page shows an "expired" notice
+      // (router state), so the redirect is explained instead
+      // of landing silently on the login form.
+      if (checkIdleExpiry()) navigate('/login', { replace: true, state: { expired: true } });
+    }, IDLE_CHECK_INTERVAL_MS);
+    return () => {
+      alive = false;
+      events.forEach((name) => window.removeEventListener(name, stamp));
+      window.clearInterval(timer);
+    };
+  }, [checkIdleExpiry, navigate, setSessionIdleTimeout]);
+
+  // Mobile drawer: Escape closes it and returns focus to the menu
+  // button that opened it. Route changes close it without stealing
+  // focus (the new page owns focus).
+  useEffect(() => {
+    if (!isMobileOpen) return;
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeMobile();
+        mobileMenuButtonRef.current?.focus();
+      }
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [isMobileOpen, closeMobile]);
+
+  // Ctrl+B / Cmd+B toggles the desktop rail. Ignored while typing
+  // (inputs, textareas, content-editable, the CodeMirror editor)
+  // so editor shortcuts keep working.
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.repeat) return;
+      if (!(event.ctrlKey || event.metaKey)) return;
+      if (event.key.toLowerCase() !== 'b') return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('input, textarea, [contenteditable="true"], .cm-editor')) return;
+      event.preventDefault();
+      toggleCollapse();
+    };
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [toggleCollapse]);
 
   const toggleLanguageMenu = useCallback(() => {
     setLanguageMenuOpen((v) => !v);
@@ -338,6 +470,7 @@ export function MainLayout() {
         </Button>
         <div className="mobile-sidebar-actions">
           <Button
+            ref={mobileMenuButtonRef}
             className="mobile-menu-btn"
             variant="ghost"
             size="sm"
@@ -490,20 +623,7 @@ export function MainLayout() {
               <div className="nav-group" key={group.labelKey}>
                 <div className="nav-group-label">{t(group.labelKey)}</div>
                 {group.entries.map((entry) => (
-                  <NavLink
-                    key={entry.to}
-                    to={entry.to}
-                    end={entry.end}
-                    className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}
-                    title={t(entry.metaKey)}
-                  >
-                    <span className="nav-icon">
-                      <entry.icon size={18} />
-                    </span>
-                    <span className="nav-text">
-                      <span className="nav-label">{t(entry.labelKey)}</span>
-                    </span>
-                  </NavLink>
+                  <NavItem key={entry.to} entry={entry} isCollapsed={isCollapsed} />
                 ))}
               </div>
             ))}
@@ -516,6 +636,8 @@ export function MainLayout() {
                 <Route path="/" element={<DashboardPage />} />
                 <Route path="/profiles" element={<ProfilesPage />} />
                 <Route path="/profiles/:name" element={<ProfileDetailPage />} />
+                <Route path="/chats" element={<ChatsPage />} />
+                <Route path="/plugins" element={<PluginsPage />} />
                 <Route path="/outbounds" element={<OutboundsPage />} />
                 <Route path="/endpoints" element={<EndpointsPage />} />
                 <Route path="/config" element={<ConfigPage />} />
