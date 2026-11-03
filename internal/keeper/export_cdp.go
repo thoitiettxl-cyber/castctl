@@ -144,8 +144,12 @@ func (e cdpExporter) Export(ctx context.Context) ([]ExportedCookie, error) {
 	}
 
 	// Level 3: browser-level Network.getCookies with
-	// explicit URLs. Its result stands even when empty:
-	// every level agreed empty, so the tick decides.
+	// explicit URLs. Its result stands even when empty,
+	// but ONLY when it succeeds: on real Chrome 155 the
+	// browser-level Network call can error -32601, in
+	// which case the joined error below is returned
+	// instead. When it succeeds empty, every level agreed
+	// empty, so the tick decides.
 	fb, ferr := chromedp.CallBrowser(browserCtx, network.GetCookies, network.GetCookiesParams{URLs: ExportURLs})
 	if ferr != nil {
 		return nil, fmt.Errorf("cdp cookie read failed: target: %v; storage: %v; network: %w", targetErr, storageErr, ferr)

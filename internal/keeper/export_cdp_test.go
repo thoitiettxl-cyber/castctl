@@ -33,6 +33,10 @@ type fakeCDPServer struct {
 	targetNetworkEmpty   bool
 	targetNetworkPartial bool
 	networkFails         bool
+	targetNetworkFails   bool
+	browserNetworkFails  bool
+	targetStorageFails   bool
+	unscopedTabCookie    bool
 	noTargets            bool
 	blankTarget          bool
 	mu                   sync.Mutex
@@ -103,8 +107,16 @@ func newFakeCDPServer(t *testing.T, storageFails bool) *fakeCDPServer {
 			case "Runtime.evaluate":
 				resp["result"] = map[string]any{"result": map[string]any{"type": "object"}}
 			case "Storage.getCookies":
-				if f.storageFails {
-					resp = map[string]any{"id": json.RawMessage(msg.ID), "error": map[string]any{"code": -32601, "message": "Storage.getCookies wasn't found"}}
+				// Per-level error injection: storageFails
+				// errors on every session; targetStorageFails
+				// only on a target session (a read harvest
+				// never issues, so it must not poison the
+				// browser-level read). The message is
+				// distinct from both Network messages so a
+				// joined error's components stay
+				// distinguishable. Defaults off.
+				if f.storageFails || (f.targetStorageFails && msg.SessionID != "") {
+					resp = map[string]any{"id": json.RawMessage(msg.ID), "error": map[string]any{"code": -32601, "message": "storage synthetic failure: Storage.getCookies unavailable"}}
 					if msg.SessionID != "" {
 						resp["sessionId"] = msg.SessionID
 					}
@@ -120,30 +132,75 @@ func newFakeCDPServer(t *testing.T, storageFails bool) *fakeCDPServer {
 				}
 				resp["result"] = map[string]any{"cookies": syntheticCookies()}
 			case "Network.getCookies":
-				// Network-error injection: Network.getCookies
-				// errors -32601-style on every session, so a
-				// target-error fall-through is exercisable.
-				// Defaults off; no existing export test sets it.
-				if f.networkFails {
-					resp = map[string]any{"id": json.RawMessage(msg.ID), "error": map[string]any{"code": -32601, "message": "Network.getCookies wasn't found"}}
-					if msg.SessionID != "" {
+				// Params-aware error injection + scoping
+				// shape: the handler inspects the urls list,
+				// because the harvest's second target read
+				// is unscoped (no urls) while the first is
+				// scoped to ExportURLs. Error injection is
+				// gated by session: networkFails errors on
+				// every session (legacy, kept for the
+				// target-error fall-through case);
+				// targetNetworkFails only on a target
+				// session and browserNetworkFails only on
+				// the browser session, each with a message
+				// distinct from the other levels so a
+				// joined error's components stay
+				// distinguishable. Defaults off; no
+				// existing export test sets the new flags.
+				var getCookiesParams struct {
+					URLs []string `json:"urls"`
+				}
+				if len(msg.Params) > 0 {
+					_ = json.Unmarshal(msg.Params, &getCookiesParams)
+				}
+				scoped := len(getCookiesParams.URLs) > 0
+				isTarget := msg.SessionID != ""
+				failMessage := ""
+				switch {
+				case f.networkFails && isTarget, f.targetNetworkFails && isTarget:
+					failMessage = "target synthetic failure: Network.getCookies unavailable"
+				case f.networkFails && !isTarget, f.browserNetworkFails && !isTarget:
+					failMessage = "browser synthetic failure: Network.getCookies unavailable"
+				}
+				if failMessage != "" {
+					resp = map[string]any{"id": json.RawMessage(msg.ID), "error": map[string]any{"code": -32601, "message": failMessage}}
+					if isTarget {
 						resp["sessionId"] = msg.SessionID
 					}
 					break
 				}
-				// Partial-target injection: the target-session
-				// read returns a non-empty set WITHOUT
-				// hatch_sess (2 of the 3 synthetic cookies)
-				// while the browser-level reads still return
-				// the full set. Defaults off.
-				if f.targetNetworkPartial && msg.SessionID != "" {
+				// Unscoped target read (the harvest's
+				// second target read, L1b): it sees only
+				// the tab's own host, so when
+				// unscopedTabCookie is on it returns a
+				// DIFFERENT synthetic set — a host-only
+				// tab-host cookie whose value and domain
+				// prove L1b served it — and empty when
+				// off. The scoped flags below do not apply
+				// to it. Defaults off; no export call sends
+				// an unscoped target read.
+				if isTarget && !scoped {
+					if f.unscopedTabCookie {
+						resp["result"] = map[string]any{"cookies": syntheticTabCookies()}
+					} else {
+						resp["result"] = map[string]any{"cookies": []map[string]any{}}
+					}
+					break
+				}
+				// Partial-target injection: the scoped
+				// target-session read returns a non-empty
+				// set WITHOUT hatch_sess (2 of the 3
+				// synthetic cookies) while the
+				// browser-level reads still return the
+				// full set. Defaults off.
+				if f.targetNetworkPartial && isTarget {
 					resp["result"] = map[string]any{"cookies": syntheticCookies()[1:]}
 					break
 				}
 				// A target-session read that yields nothing
 				// (logged-out tab) while the browser-level
 				// read still sees cookies.
-				if f.networkEmpty || (f.targetNetworkEmpty && msg.SessionID != "") {
+				if f.networkEmpty || (f.targetNetworkEmpty && isTarget) {
 					resp["result"] = map[string]any{"cookies": []map[string]any{}}
 					break
 				}
@@ -166,6 +223,19 @@ func syntheticCookies() []map[string]any {
 		{"name": "hatch_sess", "value": "FAKE-EXPORTED-SESS", "domain": ".muse.ai", "path": "/", "expires": float64(1796040000), "size": 20, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
 		{"name": "hatch_gw", "value": "FAKE-EXPORTED-GW", "domain": ".muse.ai", "path": "/", "expires": float64(1820000000), "size": 18, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
 		{"name": "sess", "value": "FAKE-SESSION", "domain": "muse.ai", "path": "/", "expires": float64(-1), "size": 12, "httpOnly": false, "secure": true, "session": true, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
+	}
+}
+
+// syntheticTabCookies returns the unscoped-read synthetic set: a
+// host-only hatch_sess on the tab's own host (www.muse.ai, no
+// leading dot), which the scoped ExportURLs read cannot see.
+// Its hatch_sess value and domain differ from syntheticCookies
+// so a test can tell which read served the harvest.
+func syntheticTabCookies() []map[string]any {
+	return []map[string]any{
+		{"name": "hatch_sess", "value": "FAKE-TABHOST-SESS", "domain": "www.muse.ai", "path": "/", "expires": float64(1796040000), "size": 18, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
+		{"name": "hatch_gw", "value": "FAKE-TABHOST-GW", "domain": "www.muse.ai", "path": "/", "expires": float64(1820000000), "size": 16, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
+		{"name": "sess", "value": "FAKE-TABHOST-SESSION", "domain": "www.muse.ai", "path": "/", "expires": float64(-1), "size": 19, "httpOnly": false, "secure": true, "session": true, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
 	}
 }
 

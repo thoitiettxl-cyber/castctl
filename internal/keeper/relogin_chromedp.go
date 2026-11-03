@@ -35,10 +35,11 @@ import (
 // text, HTML,
 // attribute value, screenshot, or cookie value ever crosses
 // from the page into Go through evaluation; cookies are
-// harvested target-level first (Network.getCookies with
-// ExportURLs on the login tab), then through the
+// harvested target-level first (Network.getCookies on the
+// login tab, scoped with ExportURLs and then unscoped —
+// the unscoped read is harvest-only), then through the
 // browser-level Storage and Network reads, the same read
-// order and URL scoping the CDP exporter uses. The driver never
+// order the CDP exporter uses. The driver never
 // exfiltrates, never screenshots, never enables the screencast
 // relay, and never touches a target it did not create.
 //
@@ -546,31 +547,43 @@ func (d *chromedpReloginDriver) waitForCookies(ctx context.Context, contract Log
 }
 
 // harvest reads the login tab's cookies, target-level first:
-// Network.getCookies on the target context with ExportURLs
-// (the explicit Muse origins: with a URL list, the read is
-// scoped to the page and its subframes, matching the CDP
-// exporter), then the browser-level Storage.getCookies read,
-// then the browser-level Network.getCookies read with
-// ExportURLs. A level's set is accepted immediately only
-// when it is non-empty and contains hatch_sess; a non-empty
-// set without hatch_sess is remembered as the first
-// candidate and the harvest falls through to the next
-// level, which may hold the session cookie the earlier
-// level missed. When no level yields hatch_sess, the first
-// candidate is returned, preserving the contract with
-// waitForCookies. An empty read at the first two levels is
-// a failed read (the browser-level Storage read can
-// succeed empty on Chrome 155 headless while the browser
-// holds a live session), so the harvest falls through.
-// The final level stands only when it succeeds: on real
-// Chrome 155 the browser-level Network.getCookies call can
-// error -32601, in which case the joined error is returned
-// unless an earlier level already yielded a non-empty
-// candidate, which is returned instead; waitForCookies
-// discards a harvest error and polls again, as with any
-// harvest error. Only when the final level succeeds empty
-// is (empty, nil) returned, meaning "no session cookie
-// yet", not an error.
+// two sequential Network.getCookies reads on the same
+// target context — L1a scoped with ExportURLs (the explicit
+// Muse origins: with a URL list, the read is scoped to the
+// page and its subframes, matching the CDP exporter), then
+// L1b unscoped, but only when L1a did not yield hatch_sess.
+// A scoped URL list REPLACES the page+subframes list, so
+// the scoped read cannot see a host-only cookie on the
+// tab's own host when that host is outside ExportURLs; the
+// unscoped read restores the page list and recovers it.
+// ExportURLs is unchanged by L1b: the second read
+// deliberately carries no list, and no Export code
+// changes. After the target reads come the browser-level
+// Storage.getCookies read, then the browser-level
+// Network.getCookies read with ExportURLs. A level's set
+// is accepted immediately only when it is non-empty and
+// contains hatch_sess; a non-empty set without hatch_sess
+// is remembered as the first candidate and the harvest
+// falls through to the next level, which may hold the
+// session cookie the earlier level missed. When no level
+// yields hatch_sess, the first candidate is returned,
+// preserving the contract with waitForCookies. The
+// hatch_sess gate checks name + non-empty value only: it
+// does not check domain or expiry, which the tick's
+// validateExportedSet checks before any write. An empty
+// read at the first levels is a failed read (the
+// browser-level Storage read can succeed empty on Chrome
+// 155 headless while the browser holds a live session),
+// so the harvest falls through. The final level stands
+// only when it succeeds: on real Chrome 155 the
+// browser-level Network.getCookies call can error -32601,
+// in which case the joined error is returned unless an
+// earlier level already yielded a non-empty candidate,
+// which is returned instead; waitForCookies discards a
+// harvest error and polls again, as with any harvest
+// error. Only when the final level succeeds empty is
+// (empty, nil) returned, meaning "no session cookie yet",
+// not an error.
 func (d *chromedpReloginDriver) harvest(ctx context.Context) ([]ExportedCookie, error) {
 	var first []ExportedCookie
 	var targetErr, storageErr error
@@ -586,6 +599,24 @@ func (d *chromedpReloginDriver) harvest(ctx context.Context) ([]ExportedCookie, 
 			targetErr = errNoCookies
 		}
 	} else {
+		targetErr = err
+	}
+
+	// L1b: unscoped Network.getCookies on the same target
+	// context, reached only when L1a did not yield
+	// hatch_sess (L1a returns immediately when it does).
+	// An L1b error replaces the target error only when
+	// L1a succeeded empty; when L1a already errored, its
+	// error is the reported target error.
+	if res, err := chromedp.Call(ctx, network.GetCookies, network.GetCookiesParams{}); err == nil {
+		cookies := fromNetworkCookies(res.Cookies)
+		if hasHatchSess(cookies) {
+			return cookies, nil
+		}
+		if len(cookies) > 0 && first == nil {
+			first = cookies
+		}
+	} else if targetErr == errNoCookies {
 		targetErr = err
 	}
 
