@@ -49,7 +49,7 @@ submitted; nothing is written to the profile.
 
   --profile NAME    profile whose outbound routes the page load
                     (default: active profile)
-  --login-url URL   page to observe (default: https://auth.muse.ai/login;
+  --login-url URL   page to observe (default: https://muse.ai/;
                     must be an https URL with a host)
 
 The observation always launches a headless browser; it never
@@ -100,7 +100,7 @@ func cmdAuthObserveLogin(ctx context.Context, env *Env, g *globalOpts, args []st
 			return err
 		}
 	}
-	loginURL := "https://auth.muse.ai/login"
+	loginURL := "https://muse.ai/"
 	if p.strIsSet("login-url") {
 		loginURL = p.str("login-url")
 	}

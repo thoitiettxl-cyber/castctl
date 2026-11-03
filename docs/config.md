@@ -421,7 +421,25 @@ The optional top-level `keeper` block configures the session
 keeper (`keeper run` / `keeper check` / `keeper status`). It is
 sing-box style: a LIST of entries, each linked to a profile by
 tag. An absent block means the keeper is off: all three
-subcommands exit 2. The block accepts exactly these keys per
+subcommands exit 2.
+
+**Login-form contract.** Headless re-login never guesses a
+form: it matches the live page against the versioned contract
+embedded in the build (`internal/keeper/testdata/login-contract.v1.json`).
+The v1 contract was recorded 2026-11-03 by the read-only
+observation `castctl auth observe-login` (default page
+`https://muse.ai/`, loaded headless through the S2 proxy;
+nothing entered or submitted). It covers the first screen
+only — the identifier field plus Continue — with structural
+selectors (the page exposes no id or name). The
+code-challenge screen is not recorded: reaching it requires
+submitting, which the observer never does. After Continue
+the driver therefore waits for session cookies and fails
+closed at the cookie timeout when the provider challenges
+with a code. Re-observe (and update the fixture and its
+pinning test) whenever the login page changes.
+
+The block accepts exactly these keys per
 entry (unknown keys are rejected):
 
 | Field | Type | Default | Meaning |
@@ -440,7 +458,7 @@ entry (unknown keys are rejected):
 | `proxy_dial_timeout` | duration string | `30s` | S2 loopback proxy: bound on one upstream dial through the outbound. Positive, at most 1 minute. |
 | `proxy_max_header_bytes` | integer | `65536` | S2 loopback proxy: max bytes of one request's header block. 1–1048576. |
 | `proxy_max_body_bytes` | integer | `16777216` | S2 loopback proxy: max bytes of a forwarded plain-HTTP request body. 1–1073741824. |
-| `proxy_allowed_hosts` | array of strings | `["auth.muse.ai", "muse.ai"]` | S2 loopback proxy guard allowlist (see below): the only hosts the proxy dials. Non-empty; each entry a hostname or IPv4 literal, exact match on the lowercased host (trailing dots ignored), no scheme/port/userinfo/path/query/wildcard/IPv6 literal. Duplicates are kept. |
+| `proxy_allowed_hosts` | array of strings | `["auth.muse.ai", "muse.ai", "www.facebook.com", "www.instagram.com", "auth.meta.com"]` | S2 loopback proxy guard allowlist (see below): the only hosts the proxy dials. Non-empty; each entry a hostname or IPv4 literal, exact match on the lowercased host (trailing dots ignored), no scheme/port/userinfo/path/query/wildcard/IPv6 literal. Duplicates are kept. The default is the login surface proven by the 2026-11-03 observation probe: the muse.ai page load fails with any of the five refused, and succeeds with `api.muse.ai` refused, so that host is not listed. |
 | `relogin_match_timeout` | duration string | `30s` | Headless driver: how long to poll for the login form (or a blocker) to appear. Positive, at most 10 minutes. |
 | `relogin_cookie_timeout` | duration string | `30s` | Headless driver: how long to poll for a session cookie after submit. Positive, at most 10 minutes. |
 | `relogin_poll_interval` | duration string | `500ms` | Headless driver: poll cadence for form/cookie waits and observation settle. Positive, at most 1 minute. |

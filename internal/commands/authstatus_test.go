@@ -157,9 +157,9 @@ func TestAuthStatusHeadlessReasons(t *testing.T) {
 		t.Fatalf("headless = %v/%q; want false/no_keeper_entry", res.HeadlessAvailable, res.HeadlessReason)
 	}
 	// Keeper entry, no credentials: no_chromedp (tag off)
-	// or no_contract (tag on — the contract gate precedes
-	// the credentials gates, and the embedded fixture is
-	// unobserved).
+	// or no_credentials_ref (tag on — the contract gate now
+	// passes, the embedded fixture is observed, so the
+	// credentials gates report first).
 	home2, configFile2 := testHome(t, `{"default_profile":"muse01","profiles":{"muse01":{}},"keeper":[{"tag":"k1","profile":"muse01","interval":"1h"}]}`)
 	dir2 := filepath.Join(home2, "profiles", "muse01")
 	_ = os.MkdirAll(dir2, 0o700)
@@ -172,7 +172,7 @@ func TestAuthStatusHeadlessReasons(t *testing.T) {
 		t.Fatalf("status: code=%d stderr=%q", code, errBuf.String())
 	}
 	_ = json.Unmarshal([]byte(outBuf.String()), &res)
-	want := "no_contract"
+	want := "no_credentials_ref"
 	if !keeper.ReloginAvailable() {
 		want = "no_chromedp"
 	}

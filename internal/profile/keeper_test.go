@@ -18,6 +18,29 @@ func keeperTestConfig(t *testing.T, keeper string) string {
 	return `{"profiles": {"muse01": {}, "muse02": {}}, "telegram": {"profile": "muse01", "token": "123456:FAKE-TOKEN-0123456789ABCD", "allowed_user_ids": [111]}, "keeper": ` + keeper + `}`
 }
 
+// TestDefaultProxyAllowedHosts pins the zero-value S2 guard
+// allowlist: the login surface proven load-blocking host by
+// host by the 2026-11-03 observation probe. api.muse.ai is
+// deliberately absent (refused but non-blocking for the page
+// load). A host added here widens every headless browser's
+// egress, so the list changes only with a new probe.
+func TestDefaultProxyAllowedHosts(t *testing.T) {
+	t.Parallel()
+	want := []string{"auth.muse.ai", "muse.ai", "www.facebook.com", "www.instagram.com", "auth.meta.com"}
+	if len(DefaultProxyAllowedHosts) != len(want) {
+		t.Fatalf("DefaultProxyAllowedHosts = %v; want %v", DefaultProxyAllowedHosts, want)
+	}
+	for i, h := range want {
+		if DefaultProxyAllowedHosts[i] != h {
+			t.Fatalf("DefaultProxyAllowedHosts[%d] = %q; want %q", i, DefaultProxyAllowedHosts[i], h)
+		}
+	}
+	e := &KeeperEntry{}
+	if got := e.EffectiveProxyAllowedHosts(); len(got) != len(want) {
+		t.Fatalf("EffectiveProxyAllowedHosts (no entry) = %v; want %v", got, want)
+	}
+}
+
 func TestParseKeeperBlockValid(t *testing.T) {
 	cfg, err := ParseSingleConfig([]byte(keeperTestConfig(t, `[{"tag": "k1", "profile": "muse01", "browser": "http://127.0.0.1:9226/", "interval": "30m", "notify": "telegram"}, {"tag": "k2", "profile": "muse02", "browser": "ws://127.0.0.1:9227/devtools/browser/FAKE-UUID"}]`)), t.TempDir())
 	if err != nil {
@@ -497,8 +520,14 @@ func TestKeeperS10EffectiveDefaults(t *testing.T) {
 			t.Fatalf("defaults mismatch for entry %+v", e)
 		}
 		hosts := e.EffectiveProxyAllowedHosts()
-		if len(hosts) != 2 || hosts[0] != "auth.muse.ai" || hosts[1] != "muse.ai" {
-			t.Fatalf("default allowlist = %v; want [auth.muse.ai muse.ai]", hosts)
+		wantHosts := []string{"auth.muse.ai", "muse.ai", "www.facebook.com", "www.instagram.com", "auth.meta.com"}
+		if len(hosts) != len(wantHosts) {
+			t.Fatalf("default allowlist = %v; want %v", hosts, wantHosts)
+		}
+		for i, h := range wantHosts {
+			if hosts[i] != h {
+				t.Fatalf("default allowlist[%d] = %q; want %q", i, hosts[i], h)
+			}
 		}
 	}
 }

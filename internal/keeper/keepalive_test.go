@@ -487,21 +487,38 @@ func TestMatchContract(t *testing.T) {
 	}
 }
 
-// TestDefaultContractUnobserved pins the honest starting
-// state: the embedded fixture is unobserved until the
-// read-only observation leg records it. If this test fails
-// because the fixture was filled, the observation leg has
-// run — update this test to pin the recorded version then.
-func TestDefaultContractUnobserved(t *testing.T) {
+// TestDefaultContractObserved pins the recorded contract:
+// the 2026-11-03 read-only observation leg filled the v1
+// fixture from the live login page at https://muse.ai/.
+// The steps are the first screen only (identifier + Continue);
+// the code-challenge screen is unobserved by design (see the
+// fixture notes). Any re-observation must update this test
+// to pin the new recorded selectors.
+func TestDefaultContractObserved(t *testing.T) {
 	c, err := DefaultLoginContract()
 	if err != nil {
 		t.Fatalf("DefaultLoginContract: %v", err)
 	}
-	if c.Observed {
-		t.Fatalf("embedded contract is observed (version %d); the observation leg must update this test", c.Version)
+	if !c.Observed {
+		t.Fatal("embedded contract is unobserved; the observation leg must record it")
 	}
 	if c.Version != 1 {
 		t.Fatalf("contract version = %d; want 1", c.Version)
+	}
+	if c.LoginURL != "https://muse.ai/" {
+		t.Fatalf("contract login_url = %q; want https://muse.ai/", c.LoginURL)
+	}
+	if len(c.Steps) != 2 {
+		t.Fatalf("contract steps = %d; want 2 (identifier fill + Continue click)", len(c.Steps))
+	}
+	if c.Steps[0] != (LoginContractStep{Action: "fill", Selector: "form input[aria-label]", Field: "username"}) {
+		t.Fatalf("contract step 0 = %+v; want the identifier fill", c.Steps[0])
+	}
+	if c.Steps[1] != (LoginContractStep{Action: "click", Selector: "form button[type=\"submit\"]"}) {
+		t.Fatalf("contract step 1 = %+v; want the Continue click", c.Steps[1])
+	}
+	if len(c.Blockers) != 0 {
+		t.Fatalf("contract blockers = %d; want 0 (none observed)", len(c.Blockers))
 	}
 }
 
