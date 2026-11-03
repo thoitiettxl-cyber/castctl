@@ -44,10 +44,11 @@ import (
 // and evaluates the CONSTANT expression "self" (no page
 // script, no user data, no castctl input). New targets
 // opened while the session runs are auto-attached for the
-// session's lifetime. The EXPORT path is different:
-// browser-level Storage.getCookies sends only that one call
-// (see export_cdp.go and the wire test). Any claim that the
-// attach path "never enables Runtime" is false.
+// session's lifetime. The EXPORT path uses the same target
+// attach (target-level Network.getCookies, see export_cdp.go
+// and its wire tests) with the browser-level read as
+// fallback. Any claim that the attach path "never enables
+// Runtime" is false.
 //
 // Full method set observed on the attach path (wire-recorded
 // 2026-10-31, chromedp v0.21.0; Page.enable is sent twice —

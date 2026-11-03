@@ -264,7 +264,15 @@ func TestKeeperCheckHealthy(t *testing.T) {
 func TestKeeperCheckAuthExpiredStops(t *testing.T) {
 	t.Parallel()
 	fake := &keeperFakeGateway{sessionStatus: 401, authStatus: 200}
-	env, out, errb, _ := keeperTestEnv(t, keeperTestConfig(), fake)
+	// The tag-on leg needs an endpoint nothing listens on. Port
+	// 9226 is the conventional CDP port: a developer or test VM
+	// may legitimately have a browser there (the cue test VM
+	// does), and a live browser answers the export with real
+	// cookies, turning this leg into an auth_error stop. Port 1
+	// is never bound, so the attach fails deterministically
+	// everywhere.
+	cfg := strings.Replace(keeperTestConfig(), "http://127.0.0.1:9226", "http://127.0.0.1:1", 1)
+	env, out, errb, _ := keeperTestEnv(t, cfg, fake)
 	if code := Run(context.Background(), []string{"keeper", "check"}, env); code != 3 {
 		t.Fatalf("check expired: code=%d, want 3; stderr=%q", code, errb.String())
 	}

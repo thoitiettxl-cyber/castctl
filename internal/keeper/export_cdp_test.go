@@ -26,12 +26,17 @@ import (
 // is the test's own code. Nothing here is a capture from a real
 // browser; real-Chromium scoping is the P1 box-side gate.
 type fakeCDPServer struct {
-	t            *testing.T
-	storageFails bool
-	mu           sync.Mutex
-	methods      []string
-	messages     []cdpMessage
-	server       *httptest.Server
+	t                  *testing.T
+	storageFails       bool
+	storageEmpty       bool
+	networkEmpty       bool
+	targetNetworkEmpty bool
+	noTargets          bool
+	blankTarget        bool
+	mu                 sync.Mutex
+	methods            []string
+	messages           []cdpMessage
+	server             *httptest.Server
 }
 
 type cdpMessage struct {
@@ -52,6 +57,14 @@ func newFakeCDPServer(t *testing.T, storageFails bool) *fakeCDPServer {
 	})
 	mux.HandleFunc("/json/list", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if f.noTargets {
+			_, _ = w.Write([]byte(`[]`))
+			return
+		}
+		if f.blankTarget {
+			_, _ = w.Write([]byte(`[{"id":"FAKE-TARGET-ID","type":"page","url":"about:blank","title":"SYNTHETIC","webSocketDebuggerUrl":"ws://` + r.Host + `/devtools/page/FAKE-TARGET-ID"}]`))
+			return
+		}
 		_, _ = w.Write([]byte(`[{"id":"FAKE-TARGET-ID","type":"page","url":"https://muse.ai/","title":"SYNTHETIC","webSocketDebuggerUrl":"ws://` + r.Host + `/devtools/page/FAKE-TARGET-ID"}]`))
 	})
 	mux.HandleFunc("/devtools/browser/FAKE-BROWSER-ID", func(w http.ResponseWriter, r *http.Request) {
@@ -95,8 +108,23 @@ func newFakeCDPServer(t *testing.T, storageFails bool) *fakeCDPServer {
 					}
 					break
 				}
+				// Chrome-155 shape: the BROWSER-level read
+				// (no session) succeeds empty while the
+				// browser holds cookies. A target-session
+				// read still returns the synthetic set.
+				if f.storageEmpty && msg.SessionID == "" {
+					resp["result"] = map[string]any{"cookies": []map[string]any{}}
+					break
+				}
 				resp["result"] = map[string]any{"cookies": syntheticCookies()}
 			case "Network.getCookies":
+				// A target-session read that yields nothing
+				// (logged-out tab) while the browser-level
+				// read still sees cookies.
+				if f.networkEmpty || (f.targetNetworkEmpty && msg.SessionID != "") {
+					resp["result"] = map[string]any{"cookies": []map[string]any{}}
+					break
+				}
 				resp["result"] = map[string]any{"cookies": syntheticCookies()}
 			}
 			if err := conn.WriteJSON(resp); err != nil {
@@ -142,8 +170,47 @@ func (f *fakeCDPServer) messagesSeen() []cdpMessage {
 	return cp
 }
 
-func TestCDPExportPrimaryPath(t *testing.T) {
+// assertExportWire checks the CDP wire discipline for the
+// export path: no navigation, no input, no target
+// creation/activation/closure, and any Runtime.evaluate is
+// exactly chromedp's constant "self" from the target-attach
+// bootstrap (never castctl's own script).
+func assertExportWire(t *testing.T, f *fakeCDPServer) {
+	t.Helper()
+	forbidden := map[string]bool{
+		"Page.navigate": true, "Page.stopLoading": true,
+		"Input.dispatchMouseEvent": true, "Input.dispatchKeyEvent": true,
+		"Input.insertText": true, "Input.dispatchTouchEvent": true,
+		"Target.createTarget": true, "Target.closeTarget": true,
+		"Target.activateTarget": true,
+	}
+	for _, msg := range f.messagesSeen() {
+		if forbidden[msg.Method] {
+			t.Fatalf("export path sent forbidden %q", msg.Method)
+		}
+		if msg.Method == "Runtime.evaluate" {
+			var params struct {
+				Expression string `json:"expression"`
+			}
+			if err := json.Unmarshal(msg.Params, &params); err != nil {
+				t.Fatalf("Runtime.evaluate params undecodable: %v", err)
+			}
+			if params.Expression != "self" {
+				t.Fatalf("Runtime.evaluate expression = %q; want the bootstrap constant \"self\"", params.Expression)
+			}
+		}
+	}
+}
+
+// TestCDPExportTargetLevelPrimary pins the K-LIVE-2 fix: the
+// browser-level Storage read succeeds EMPTY (the Chrome 155
+// headless shape) while the browser holds a live session, and
+// the export still returns the full set via the target-level
+// read. No browser-level Storage call may happen at all on
+// this path: the target read succeeds first.
+func TestCDPExportTargetLevelPrimary(t *testing.T) {
 	f := newFakeCDPServer(t, false)
+	f.storageEmpty = true
 	defer f.server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -164,32 +231,71 @@ func TestCDPExportPrimaryPath(t *testing.T) {
 	if sc.Expires != 0 || sc.Name != "sess" {
 		t.Fatalf("session conversion = %+v", sc)
 	}
-	seen := f.methodsSeen()
-	found := false
-	for _, m := range seen {
-		if m == "Storage.getCookies" {
-			found = true
-		}
-		if m == "Network.getCookies" {
-			t.Fatalf("fallback Network.getCookies called on the primary path: %v", seen)
-		}
-	}
-	if !found {
-		t.Fatalf("Storage.getCookies never called: %v", seen)
-	}
-	// The export path sends no Runtime calls at all: the
-	// browser-level read is the allowlist-honouring path.
-	// (The ATTACH path's bootstrap does enable Runtime; that
-	// is asserted separately in screencast_wire_test.go.)
-	for _, m := range seen {
-		if strings.HasPrefix(m, "Runtime.") {
-			t.Fatalf("export path sent %q: %v", m, seen)
+	attached, targetNetwork, browserStorage := false, false, false
+	for _, msg := range f.messagesSeen() {
+		switch msg.Method {
+		case "Target.attachToTarget":
+			attached = true
+		case "Network.getCookies":
+			if msg.SessionID != "" {
+				targetNetwork = true
+			}
+		case "Storage.getCookies":
+			if msg.SessionID == "" {
+				browserStorage = true
+			}
 		}
 	}
+	if !attached || !targetNetwork {
+		t.Fatalf("methods = %v; want target attach + target-level Network.getCookies", f.methodsSeen())
+	}
+	if browserStorage {
+		t.Fatalf("browser-level Storage.getCookies called despite a successful target read: %v", f.methodsSeen())
+	}
+	assertExportWire(t, f)
 }
 
-func TestCDPExportFallbackPath(t *testing.T) {
+// TestCDPExportTargetEmptyFallsThrough pins the target-level
+// empty guard: a Muse tab that yields no cookies (logged-out
+// tab) falls through to the browser-level Storage read, which
+// still sees the session.
+func TestCDPExportTargetEmptyFallsThrough(t *testing.T) {
+	f := newFakeCDPServer(t, false)
+	f.targetNetworkEmpty = true
+	defer f.server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	exp := NewCDPExporter(f.server.URL)
+	cookies, err := exp.Export(ctx)
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if len(cookies) != 3 {
+		t.Fatalf("cookies = %+v; want 3 via browser-level Storage", cookies)
+	}
+	seen := f.methodsSeen()
+	hasTargetNetwork, hasStorage := false, false
+	for _, msg := range f.messagesSeen() {
+		if msg.Method == "Network.getCookies" && msg.SessionID != "" {
+			hasTargetNetwork = true
+		}
+		if msg.Method == "Storage.getCookies" && msg.SessionID == "" {
+			hasStorage = true
+		}
+	}
+	if !hasTargetNetwork || !hasStorage {
+		t.Fatalf("methods = %v; want target Network attempt then browser Storage", seen)
+	}
+	assertExportWire(t, f)
+}
+
+// TestCDPExportBrowserFallback pins the browser-level chain
+// when no Muse page is open: Storage fails, Network with
+// explicit URLs returns the set. No target attach happens:
+// there is no page to attach to.
+func TestCDPExportBrowserFallback(t *testing.T) {
 	f := newFakeCDPServer(t, true)
+	f.noTargets = true
 	defer f.server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -200,6 +306,52 @@ func TestCDPExportFallbackPath(t *testing.T) {
 	}
 	if len(cookies) != 3 {
 		t.Fatalf("cookies = %+v; want 3 via fallback", cookies)
+	}
+	seen := f.methodsSeen()
+	hasStorage, hasNetwork, attached := false, false, false
+	for _, m := range seen {
+		if m == "Storage.getCookies" {
+			hasStorage = true
+		}
+		if m == "Network.getCookies" {
+			hasNetwork = true
+		}
+		if m == "Target.attachToTarget" {
+			attached = true
+		}
+	}
+	if !hasStorage || !hasNetwork {
+		t.Fatalf("methods = %v; want Storage attempt then Network fallback", seen)
+	}
+	if attached {
+		t.Fatalf("target attach with no Muse page open: %v", seen)
+	}
+	// The browser-level path sends no Runtime calls at all.
+	for _, m := range seen {
+		if strings.HasPrefix(m, "Runtime.") {
+			t.Fatalf("browser-level path sent %q: %v", m, seen)
+		}
+	}
+}
+
+// TestCDPExportEmptyStorageFallsThrough pins the browser-level
+// empty guard: Storage succeeds EMPTY (Chrome 155 shape) and
+// the export still returns the set via Network instead of
+// short-circuiting to an empty result.
+func TestCDPExportEmptyStorageFallsThrough(t *testing.T) {
+	f := newFakeCDPServer(t, false)
+	f.noTargets = true
+	f.storageEmpty = true
+	defer f.server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	exp := NewCDPExporter(f.server.URL)
+	cookies, err := exp.Export(ctx)
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if len(cookies) != 3 {
+		t.Fatalf("cookies = %+v; want 3 via Network after empty Storage", cookies)
 	}
 	seen := f.methodsSeen()
 	hasStorage, hasNetwork := false, false
@@ -214,6 +366,71 @@ func TestCDPExportFallbackPath(t *testing.T) {
 	if !hasStorage || !hasNetwork {
 		t.Fatalf("methods = %v; want Storage attempt then Network fallback", seen)
 	}
+}
+
+// TestCDPExportAllLevelsEmpty pins P1: when every read level
+// yields empty with success, Export returns an empty result
+// with a nil error and the tick's validation gate decides
+// (the entry stops). An empty read is not an export error.
+func TestCDPExportAllLevelsEmpty(t *testing.T) {
+	f := newFakeCDPServer(t, false)
+	f.noTargets = true
+	f.storageEmpty = true
+	f.networkEmpty = true
+	defer f.server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	exp := NewCDPExporter(f.server.URL)
+	cookies, err := exp.Export(ctx)
+	if err != nil {
+		t.Fatalf("Export: %v; want nil error for an all-empty read", err)
+	}
+	if len(cookies) != 0 {
+		t.Fatalf("cookies = %+v; want empty", cookies)
+	}
+}
+
+// TestCDPExportBlankPageTarget pins the any-page fallback:
+// with only an about:blank tab open and the browser-level
+// Storage read succeeding empty, the export still returns
+// the set via the target-level read with explicit URLs.
+func TestCDPExportBlankPageTarget(t *testing.T) {
+	f := newFakeCDPServer(t, false)
+	f.storageEmpty = true
+	f.blankTarget = true
+	defer f.server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	exp := NewCDPExporter(f.server.URL)
+	cookies, err := exp.Export(ctx)
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if len(cookies) != 3 {
+		t.Fatalf("cookies = %+v; want 3 synthetic cookies", cookies)
+	}
+	attached, targetNetwork, browserStorage := false, false, false
+	for _, msg := range f.messagesSeen() {
+		switch msg.Method {
+		case "Target.attachToTarget":
+			attached = true
+		case "Network.getCookies":
+			if msg.SessionID != "" {
+				targetNetwork = true
+			}
+		case "Storage.getCookies":
+			if msg.SessionID == "" {
+				browserStorage = true
+			}
+		}
+	}
+	if !attached || !targetNetwork {
+		t.Fatalf("methods = %v; want target attach + target-level Network.getCookies", f.methodsSeen())
+	}
+	if browserStorage {
+		t.Fatalf("browser-level Storage.getCookies called despite a successful target read: %v", f.methodsSeen())
+	}
+	assertExportWire(t, f)
 }
 
 func TestDiscoverWebSocketURLMalformed(t *testing.T) {

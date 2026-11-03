@@ -32,8 +32,11 @@ const (
 // the ordered Set-Cookie updates observed, in step order
 // (session response first, then auth/check). Updates are
 // returned alongside errors whenever a response header was
-// received, so a tick persists a server-issued deletion even
-// when the step then reports AuthError. The error classes are
+// received, so a tick that persists updates (success,
+// recovery, and gateway-down paths) records a server-issued
+// deletion even when the step then reports AuthError. The
+// stop path preserves the cookies file instead (see
+// stopEntry). The error classes are
 // the conn contracts: AuthError = expired/invalid (stop),
 // GatewayError/transport = transient (backoff). Callers
 // distinguish with errors.As, never message text. The skipped
@@ -157,7 +160,10 @@ var ErrReexportUnavailable = errors.New("re-export unavailable in this build (re
 // Exporter reads the live session cookies from the attached
 // browser. Implementations live in the with_chromedp file (real
 // CDP) and the stub file (tag-off). Export must never navigate,
-// dispatch input, or enable Runtime/JS.
+// dispatch input, or mutate/close targets. Attaching to a
+// target runs chromedp's target bootstrap, which enables
+// Runtime and evaluates the constant "self" (see
+// export_cdp.go); Export sends no Runtime/JS of its own.
 type Exporter interface {
 	Export(ctx context.Context) ([]ExportedCookie, error)
 }
@@ -504,7 +510,9 @@ func (ls *lockedStore) saveJar(data []byte) (bool, error) {
 //     retry a pending notice, no network to muse.ai).
 //  2. Cheap chain with backoff on transient errors. AuthError
 //     goes to the export/stop path; updates received alongside
-//     an error are still persisted (per-response rule).
+//     an error are persisted on the success, recovery, and
+//     gateway-down paths, while the stop path preserves the
+//     cookies file byte-identical (see stopEntry).
 //  3. Locked merge + validate + write + state save. CDP
 //     exports replace the filtered set with the hatch_sess
 //     gate; Set-Cookie captures merge into jar files, and
@@ -727,12 +735,12 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 				// Blocker: stop immediately, alert
 				// once with the blocker kind. Never
 				// retry a blocker.
-				return stopEntry(clock, store, base, updates, jarForm, fileMissing, StoppedAuthError, blocker.Kind, checkErr)
+				return stopEntry(clock, store, base, StoppedAuthError, blocker.Kind, checkErr)
 			case relErr == nil:
 				exported, exportDropped = relExported, relDropped
 				merged, _ := ReplaceWithExport(snapshotCookies, exported)
 				if !validateExportedSet(merged, now) {
-					return stopEntry(clock, store, base, updates, jarForm, fileMissing, StoppedAuthError, NoticeFailed, checkErr)
+					return stopEntry(clock, store, base, StoppedAuthError, NoticeFailed, checkErr)
 				}
 				header2 := CookieHeader(merged, now)
 				updates2, _, err2 := deps.Checker.Check(ctx, header2)
@@ -748,12 +756,12 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 					checkErr = err2
 				}
 			case errors.Is(relErr, ErrReloginUnavailable):
-				return stopEntry(clock, store, base, updates, jarForm, fileMissing, StoppedAuthError, NoticeBlocked, checkErr)
+				return stopEntry(clock, store, base, StoppedAuthError, NoticeBlocked, checkErr)
 			default:
 				// Attempts exhausted without a proven
 				// blocker: stop and alert once with the
 				// relogin_failed kind.
-				return stopEntry(clock, store, base, updates, jarForm, fileMissing, StoppedAuthError, NoticeReloginFailed, checkErr)
+				return stopEntry(clock, store, base, StoppedAuthError, NoticeReloginFailed, checkErr)
 			}
 		}
 		if checkErr != nil {
@@ -767,7 +775,7 @@ func Tick(ctx context.Context, deps TickDeps) TickResult {
 			if deps.Relogin == nil && deps.Entry != nil && deps.Entry.Credentials != "" {
 				kind = NoticeBlocked
 			}
-			return stopEntry(clock, store, base, updates, jarForm, fileMissing, stopReason(fileMissing), kind, checkErr)
+			return stopEntry(clock, store, base, stopReason(fileMissing), kind, checkErr)
 		}
 	}
 
@@ -1083,9 +1091,11 @@ func runExport(ctx context.Context, exp Exporter) ([]StoredCookie, int, error) {
 // red-team N1-N2 disposition): a failed step's Set-Cookie
 // values are partial/untrusted, and the next tick
 // re-observes from the cookies file. The stop path
-// (stopEntry) DOES persist per-response updates: an
-// AuthError's last word is the server's verdict, not a
-// transient failure.
+// (stopEntry) does not persist them either: a stop preserves
+// the cookies file byte-identical, so the pre-stop jar
+// survives for manual recovery or re-import; the server's
+// verdict is recorded in state (logged_out/stopped), not by
+// mutating cookies.
 func recordTransient(clock Clock, store *Store, base time.Duration, err error, stage string) TickResult {
 	ls, lerr := store.lock()
 	if lerr != nil {
@@ -1136,24 +1146,27 @@ func recordExportFailed(clock Clock, store *Store, base time.Duration, err error
 }
 
 // stopEntry persists the sticky stop: logged_out, stopped with
-// reason, a per-(episode, kind) warn-once marker, and the
-// per-response updates merged for jar files (the server's
-// last word is still recorded) — and for non-jar files by
-// converting to jar form when a rotation is to be persisted
-// (G5). kind names the notice kind: "" derives it from the
-// reason as before (auth_error -> logged_out, anything else
-// -> failed); a caller-supplied kind must be in the closed
-// NoticeKind set or it is ignored in favour of the derived
-// kind. The notice itself is sent by the caller after Tick
-// returns — see NotifyStopped — because a network send must
-// never happen under the file lock.
+// reason, and a per-(episode, kind) warn-once marker. It
+// NEVER rewrites the cookies file: when recovery has failed,
+// the pre-stop jar is preserved byte-identical for manual
+// recovery or re-import (K-LIVE-2: persisting the failed
+// check's server-issued deletions overwrote the jar with a
+// degraded set missing hatch_sess). The server's verdict is
+// recorded in state, not by mutating cookies. kind names the
+// notice kind: "" derives it from the reason as before
+// (auth_error -> logged_out, anything else -> failed); a
+// caller-supplied kind must be in the closed NoticeKind set
+// or it is ignored in favour of the derived kind. The notice
+// itself is sent by the caller after Tick returns — see
+// NotifyStopped — because a network send must never happen
+// under the file lock.
 // Durability note (loop-2 red-team N3): if the stop-path lock
 // fails, the returned result still stops THIS run's goroutine
 // (in-memory), but no marker is persisted; the next run
 // re-ticks and re-stops. The marker's durability depends on
 // the lock like every other state write — no separate
 // mechanism is added for it.
-func stopEntry(clock Clock, store *Store, base time.Duration, updates []CookieUpdate, jarForm bool, fileMissing bool, reason string, kind NoticeKind, cause error) TickResult {
+func stopEntry(clock Clock, store *Store, base time.Duration, reason string, kind NoticeKind, cause error) TickResult {
 	ls, lerr := store.lock()
 	if lerr != nil {
 		if errors.Is(lerr, profile.ErrCookiesLockTimeout) {
@@ -1164,40 +1177,13 @@ func stopEntry(clock Clock, store *Store, base time.Duration, updates []CookieUp
 	defer ls.unlock()
 	st := ls.state
 	now2 := clock.Now()
-	merged := ls.cookies
-	wrote := false
-	if jarForm {
-		merged = ApplyUpdates(ls.cookies, updates)
-		if !fileMissing || len(merged) > 0 {
-			data, err := SerializeJar(merged)
-			if err == nil {
-				var serr error
-				wrote, serr = ls.saveJar(data)
-				if serr != nil {
-					return TickResult{Outcome: OutcomeError, Stage: "save", Stopped: true, Err: errors.Join(serr, cause), NextDelay: 0, StateCorrupt: ls.stateCorrupt}
-				}
-			}
-		}
-	} else {
-		merged = ApplyUpdates(ls.cookies, updates)
-		if len(updates) > 0 && (!fileMissing || len(merged) > 0) {
-			data, err := SerializeJar(merged)
-			if err == nil {
-				var serr error
-				wrote, serr = ls.saveJar(data)
-				if serr != nil {
-					return TickResult{Outcome: OutcomeError, Stage: "save", Stopped: true, Err: errors.Join(serr, cause), NextDelay: 0, StateCorrupt: ls.stateCorrupt}
-				}
-			}
-		}
-	}
 	st.LoggedOut = true
 	st.KeeperStopped = true
 	st.KeeperStoppedReason = reason
 	st.LastCheckedAt = &now2
 	st.LastTickOutcome = OutcomeAuthError
 	st.LastTickStage = "session"
-	st.RefreshCookieRecords(merged, now2)
+	st.RefreshCookieRecords(ls.cookies, now2)
 	st.NextCheckAt = nil
 	if !ValidNoticeKind(kind) {
 		if reason == StoppedAuthError {
@@ -1213,9 +1199,9 @@ func stopEntry(clock Clock, store *Store, base time.Duration, updates []CookieUp
 	// incident always alerts.
 	st.MarkWarnPending(kind, now2)
 	if serr := store.saveState(st); serr != nil {
-		return TickResult{Outcome: OutcomeError, Stage: "save", Stopped: true, Err: errors.Join(serr, cause), NextDelay: 0, StateCorrupt: ls.stateCorrupt, WroteCookies: wrote}
+		return TickResult{Outcome: OutcomeError, Stage: "save", Stopped: true, Err: errors.Join(serr, cause), NextDelay: 0, StateCorrupt: ls.stateCorrupt}
 	}
-	return TickResult{Outcome: OutcomeAuthError, Stage: "session", Stopped: true, Err: cause, NextDelay: 0, StateCorrupt: ls.stateCorrupt, WroteCookies: wrote}
+	return TickResult{Outcome: OutcomeAuthError, Stage: "session", Stopped: true, Err: cause, NextDelay: 0, StateCorrupt: ls.stateCorrupt}
 }
 
 // NotifyStopped sends the pending warn-once notice for a

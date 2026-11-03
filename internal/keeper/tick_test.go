@@ -302,6 +302,43 @@ func TestTickExportValidationGate(t *testing.T) {
 	}
 }
 
+// TestTickStopPreservesJarOnFailedRecovery pins the K-LIVE-2
+// stop-path rule: when recovery fails, the stop preserves the
+// cookies file byte-identical — even when the failed check
+// carried server-issued deletions for hatch_sess and
+// hatch_gw alongside the AuthError. The pre-stop jar survives
+// for manual recovery or re-import; the verdict lives in
+// state, not in a mutated jar.
+func TestTickStopPreservesJarOnFailedRecovery(t *testing.T) {
+	initial := []StoredCookie{
+		{Name: "hatch_sess", Value: "FAKE-OLD", Domain: ".muse.ai", Path: "/", Secure: true, Expires: tickNow.Add(time.Hour).Unix()},
+		{Name: "hatch_gw", Value: "FAKE-GW", Domain: ".muse.ai", Path: "/", Secure: true, Expires: tickNow.Add(time.Hour).Unix()},
+	}
+	baseDir, cookiesPath, profileDir := tickFixture(t, initial)
+	authErr := conn.NewAuthError("api/session -> 401")
+	deletions := []CookieUpdate{
+		{Cookie: StoredCookie{Name: "hatch_sess", Domain: ".muse.ai", Path: "/"}, Delete: true},
+		{Cookie: StoredCookie{Name: "hatch_gw", Domain: ".muse.ai", Path: "/"}, Delete: true},
+	}
+	exporter := &fakeExporter{cookies: []ExportedCookie{
+		{Name: "hatch_gw", Value: "FAKE-GW", Domain: ".muse.ai", Path: "/", Expires: float64(tickNow.Add(time.Hour).Unix())},
+	}}
+	checker := &fakeChecker{scripts: []checkScript{{updates: deletions, err: authErr}}}
+	before, _ := os.ReadFile(cookiesPath)
+	res := tickRun(t, baseDir, tickDeps(&fakeClock{now: tickNow}, checker, exporter, nil))
+	if res.Outcome != OutcomeAuthError || !res.Stopped || res.WroteCookies {
+		t.Fatalf("result = %+v; want stopped, WroteCookies=false", res)
+	}
+	after, _ := os.ReadFile(cookiesPath)
+	if string(after) != string(before) {
+		t.Fatal("stop path rewrote the cookies file")
+	}
+	st := readState(t, profileDir)
+	if !st.LoggedOut || !st.KeeperStopped {
+		t.Fatalf("state = %+v; want logged_out + stopped", st)
+	}
+}
+
 func TestTickExportUnavailableStops(t *testing.T) {
 	baseDir, _, _ := tickFixture(t, []StoredCookie{
 		{Name: "hatch_sess", Value: "FAKE-OLD", Domain: ".muse.ai", Path: "/", Expires: tickNow.Add(time.Hour).Unix()},
