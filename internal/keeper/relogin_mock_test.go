@@ -269,3 +269,81 @@ func TestMockReloginCaptchaStopsBeforeSubmit(t *testing.T) {
 		t.Fatalf("form posts = %d; want 0 (never submitted past a captcha)", *posts)
 	}
 }
+
+// mockBadSelectorEntry wires a driver to an entry with a
+// short match timeout and the mock host allowlisted, so a
+// selector-syntax stop is distinguishable from polling to
+// the deadline: an immediate stop returns well under the
+// 5s timeout, a mismatch poll takes the full timeout.
+func mockBadSelectorEntry(t *testing.T, srv *httptest.Server, contract LoginContract) ReloginDriver {
+	t.Helper()
+	entry := &profile.KeeperEntry{
+		ProxyHostsSet:       true,
+		ProxyAllowedHosts:   []string{"fake-login.test"},
+		ReloginMatchSet:     true,
+		ReloginMatchTimeout: 5 * time.Second,
+	}
+	driver, _, _ := mockEntryDriver(t, srv, contract, entry)
+	return driver
+}
+
+// TestMockReloginBadBlockerSelectorStops: a blocker selector
+// the browser cannot evaluate must stop the attempt with the
+// distinct bad-selector detail and zero posts — the page is
+// never filled or submitted past a selector that may hide a
+// blocker. On the old code the exception was swallowed, the
+// selector counted 0, and the driver polled to a mismatch.
+func TestMockReloginBadBlockerSelectorStops(t *testing.T) {
+	chromePath := chromeTestPath(t)
+	t.Setenv("CASTCTL_CHROMIUM_PATH", chromePath)
+	srv, posts, _, _ := mockFormServer(t, mockLoginPageHTML(`<div class="blocked-banner">You are blocked</div>`+mockFormBody), nil)
+	contract := mockContractSignals("", []LoginBlockerSignal{{Selector: "div.banner[[", Kind: NoticeBlocked}})
+	driver := mockBadSelectorEntry(t, srv, contract)
+	ctx, cancel := mockReloginCtx(t)
+	defer cancel()
+	start := time.Now()
+	_, err := driver.Relogin(ctx, profile.LoginCredential{Username: "u", Password: "p"})
+	elapsed := time.Since(start)
+	t.Logf("bad blocker selector: elapsed=%v posts=%d", elapsed, *posts)
+	var blocker *ReloginBlocker
+	if !errors.As(err, &blocker) || blocker.Kind != NoticeBlocked || blocker.Detail != "contract_bad_selector" {
+		t.Fatalf("Relogin = %v; want a blocked/contract_bad_selector blocker", err)
+	}
+	if *posts != 0 {
+		t.Fatalf("form posts = %d; want 0 (never submitted past an unevaluable blocker selector)", *posts)
+	}
+	if elapsed >= 4*time.Second {
+		t.Fatalf("bad blocker selector took %v; want an immediate stop, well under the 5s match timeout", elapsed)
+	}
+}
+
+// TestMockReloginBadStepSelectorStops: a step selector the
+// browser cannot evaluate must surface the distinct
+// bad-selector detail instead of a contract_mismatch, with
+// zero posts and an immediate stop. On the old code the
+// exception became count 0 and the driver polled the full
+// match timeout to a mismatch.
+func TestMockReloginBadStepSelectorStops(t *testing.T) {
+	chromePath := chromeTestPath(t)
+	t.Setenv("CASTCTL_CHROMIUM_PATH", chromePath)
+	srv, posts, _, _ := mockFormServer(t, mockLoginPageHTML(mockFormBody), nil)
+	contract := mockContractSignals("", nil)
+	contract.Steps[0].Selector = "#user[["
+	driver := mockBadSelectorEntry(t, srv, contract)
+	ctx, cancel := mockReloginCtx(t)
+	defer cancel()
+	start := time.Now()
+	_, err := driver.Relogin(ctx, profile.LoginCredential{Username: "u", Password: "p"})
+	elapsed := time.Since(start)
+	t.Logf("bad step selector: elapsed=%v posts=%d", elapsed, *posts)
+	var blocker *ReloginBlocker
+	if !errors.As(err, &blocker) || blocker.Kind != NoticeBlocked || blocker.Detail != "contract_bad_selector" {
+		t.Fatalf("Relogin = %v; want a blocked/contract_bad_selector blocker", err)
+	}
+	if *posts != 0 {
+		t.Fatalf("form posts = %d; want 0 (never submitted past an unevaluable step selector)", *posts)
+	}
+	if elapsed >= 4*time.Second {
+		t.Fatalf("bad step selector took %v; want an immediate stop, well under the 5s match timeout", elapsed)
+	}
+}

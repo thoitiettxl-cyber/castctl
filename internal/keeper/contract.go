@@ -96,22 +96,40 @@ type PageSnapshot struct {
 // snapshotResult is the driver's count-only snapshot: how
 // many elements each contract selector matches, and which
 // blocker kinds hit (by selector or keyword — the value
-// names the signal class only, never page text). The
-// evaluation script returns nothing else. It lives here
-// (not in the chromedp-tagged driver file) so the decision
-// equivalence with MatchContract is testable without a
-// browser.
+// names the signal class only, never page text). BadSelectors
+// lists the contract selectors whose evaluation threw in the
+// browser (an invalid selector makes querySelector /
+// querySelectorAll throw a SyntaxError); a selector listed
+// here has an unreliable count of 0 and must never be read
+// as a mismatch. The evaluation script returns nothing else.
+// It lives here (not in the chromedp-tagged driver file) so
+// the decision equivalence with MatchContract is testable
+// without a browser.
 type snapshotResult struct {
-	Counts map[string]int    `json:"counts"`
-	Hits   map[string]string `json:"hits"`
+	Counts       map[string]int    `json:"counts"`
+	Hits         map[string]string `json:"hits"`
+	BadSelectors []string          `json:"badSelectors"`
 }
 
 // snapshotDecision maps a count snapshot onto the contract
 // through the SAME decision as MatchContract (see
-// matchDecision below): blocker signals first, then
-// step-selector presence. The two paths must agree on every
-// input; TestSnapshotDecisionMatchesContract pins it.
+// matchDecision below), plus one driver-only stop: a
+// selector the browser could not evaluate (BadSelectors
+// non-empty) outranks a blocker hit and the step checks —
+// the snapshot is unreliable once any recorded selector
+// threw, so it must never be read as a mismatch or as a
+// clean blocker read. Precedence: unobserved refuses
+// outright; then bad selector; then blocker signals; then
+// the step-selector exactly-one count. The two paths must
+// agree on every input without BadSelectors;
+// TestSnapshotDecisionMatchesContract pins it.
 func snapshotDecision(c LoginContract, res snapshotResult) error {
+	if !c.Observed {
+		return ErrContractNotEstablished
+	}
+	if len(res.BadSelectors) > 0 {
+		return &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_bad_selector"}
+	}
 	var blockedKind NoticeKind
 	blockedDetail := ""
 	for _, sig := range c.Blockers {
@@ -135,14 +153,14 @@ func snapshotDecision(c LoginContract, res snapshotResult) error {
 // Wait loops stop immediately on a signal but poll to the
 // deadline on a mismatch (a slow page still loading must not
 // look like a changed form). The Detail values are the fixed
-// enums produced by MatchContract and by the driver's boolean
+// enums produced by MatchContract and by the driver's count
 // snapshot; any other Detail is not a signal.
 func isBlockerSignal(b *ReloginBlocker) bool {
 	if b == nil {
 		return false
 	}
 	switch b.Detail {
-	case "blocker_signal", "blocker_selector", "blocker_keyword":
+	case "blocker_signal", "blocker_selector", "blocker_keyword", "contract_bad_selector":
 		return true
 	default:
 		return false
@@ -207,14 +225,18 @@ func MatchContract(c LoginContract, snap PageSnapshot) error {
 	return matchDecision(c, blockedKind, blockedDetail, snap.Counts)
 }
 
-// validateContract checks the WHOLE recorded contract BEFORE
-// any browser is launched or any credential typed: the
-// version, and every step's action, field, and selector.
+// validateContract checks the recorded contract's steps
+// BEFORE any browser is launched or any credential typed:
+// the version, and every step's action, field, and selector.
 // A violation returns a *ReloginBlocker with a fixed-enum
 // Detail (same class as contract_empty: the contract is
-// unusable, not the page). The driver's in-loop checks for
-// an unknown action/field remain as defense in depth; they
-// are unreachable for a contract that passes here.
+// unusable, not the page). Blocker signals are NOT checked
+// here: a blocker's selector is evaluated in the browser at
+// snapshot time, and one that cannot be evaluated stops the
+// driver with contract_bad_selector (see snapshotDecision).
+// The driver's in-loop checks for an unknown action/field
+// remain as defense in depth; they are unreachable for a
+// contract that passes here.
 func validateContract(c LoginContract) *ReloginBlocker {
 	if c.Version != 1 {
 		return &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_bad_version"}
@@ -231,6 +253,9 @@ func validateContract(c LoginContract) *ReloginBlocker {
 				return &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_unknown_field"}
 			}
 		case "click":
+			if step.Field != "" {
+				return &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_click_field"}
+			}
 		default:
 			return &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_unknown_action"}
 		}

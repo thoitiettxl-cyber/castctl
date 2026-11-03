@@ -518,6 +518,7 @@ func TestValidateContract(t *testing.T) {
 		{"bad version", func(c *LoginContract) { c.Version = 2 }, "contract_bad_version"},
 		{"bad action in later step", func(c *LoginContract) { c.Steps[2].Action = "clik" }, "contract_unknown_action"},
 		{"bad field in later step", func(c *LoginContract) { c.Steps[1].Field = "usernam" }, "contract_unknown_field"},
+		{"field on click step", func(c *LoginContract) { c.Steps[2].Field = "username" }, "contract_click_field"},
 		{"empty selector", func(c *LoginContract) { c.Steps[1].Selector = "" }, "contract_step_no_selector"},
 	}
 	for _, tc := range cases {
@@ -610,7 +611,7 @@ func TestDeriveAuthStatus(t *testing.T) {
 }
 
 // TestSnapshotDecisionMatchesContract (D2) pins that the
-// boolean-snapshot decision (chromedp driver) and the
+// count-snapshot decision (chromedp driver) and the
 // text-snapshot decision (MatchContract) agree on every
 // input: same nil, same blocker kind+detail, same
 // not-established error. A drift between them would let
@@ -688,6 +689,59 @@ func TestSnapshotDecisionMatchesContract(t *testing.T) {
 				t.Fatalf("MatchContract = %v; snapshotDecision = %v; want agreement", want, got)
 			}
 		})
+	}
+}
+
+// TestSnapshotDecisionBadSelector pins that a selector the
+// browser could not evaluate is a distinct stop, not a
+// mismatch: the driver must surface the malformed recorded
+// selector instead of polling the page as "not the recorded
+// form". The syntax error outranks a blocker hit and a
+// mismatch (the snapshot is unreliable once any recorded
+// selector threw), and it outranks nothing else: an
+// unobserved contract still refuses outright. MatchContract
+// has no syntax-error channel — the Go-side snapshot only
+// ever sees counts — so these cases are deliberately NOT
+// part of the equivalence table above.
+func TestSnapshotDecisionBadSelector(t *testing.T) {
+	t.Parallel()
+	contract := LoginContract{
+		Version:  1,
+		Observed: true,
+		Steps: []LoginContractStep{
+			{Action: "fill", Selector: "#user", Field: "username"},
+			{Action: "fill", Selector: "#pass", Field: "password"},
+			{Action: "click", Selector: "#submit"},
+		},
+		Blockers: []LoginBlockerSignal{
+			{Kind: NoticeCaptcha, Selector: ".captcha-box", Keyword: "captcha"},
+		},
+	}
+	counts := map[string]int{"#user": 1, "#pass": 1, "#submit": 1}
+	cases := []struct {
+		name string
+		res  snapshotResult
+	}{
+		{"step selector bad", snapshotResult{Counts: counts, Hits: map[string]string{}, BadSelectors: []string{"#user"}}},
+		{"blocker selector bad", snapshotResult{Counts: counts, Hits: map[string]string{}, BadSelectors: []string{".captcha-box"}}},
+		{"bad selector beats blocker hit", snapshotResult{Counts: counts, Hits: map[string]string{string(NoticeCaptcha): "keyword"}, BadSelectors: []string{"#pass"}}},
+		{"bad selector beats mismatch counts", snapshotResult{Counts: map[string]int{"#user": 0, "#pass": 1, "#submit": 1}, Hits: map[string]string{}, BadSelectors: []string{"#user"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := snapshotDecision(contract, tc.res)
+			var blocker *ReloginBlocker
+			if !errors.As(err, &blocker) || blocker.Kind != NoticeBlocked || blocker.Detail != "contract_bad_selector" {
+				t.Fatalf("snapshotDecision = %v; want blocked/contract_bad_selector", err)
+			}
+			if !isBlockerSignal(blocker) {
+				t.Fatalf("isBlockerSignal(%+v) = false; want the bad-selector stop to halt the driver like a blocker signal", blocker)
+			}
+		})
+	}
+	unobserved := LoginContract{Version: 1}
+	if err := snapshotDecision(unobserved, snapshotResult{Counts: counts, Hits: map[string]string{}, BadSelectors: []string{"#user"}}); !errors.Is(err, ErrContractNotEstablished) {
+		t.Fatalf("snapshotDecision(unobserved, bad selector) = %v; want ErrContractNotEstablished", err)
 	}
 }
 

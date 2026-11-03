@@ -8,6 +8,19 @@
 # The untagged leg passes by design: without `with_utls`, the 6
 # uTLS subtests skip (see README.md).
 #
+# The `with_chromedp` leg runs the chromedp-tagged keeper
+# tests (mock re-login grid + real-Chrome harvest tests)
+# with NO browser provisioned on the runner: measured
+# 2026-11-03 on cue, the keeper package reports 21 SKIP /
+# 96 PASS with no Chrome binary, and 0 SKIP / 117 PASS with
+# CASTCTL_CHROMIUM_PATH=/usr/bin/google-chrome (Google
+# Chrome 155.0.8059.39); the whole ./... leg reports 31
+# SKIP / 1681 PASS / 0 FAIL with no Chrome. A SKIP here is
+# the expected outcome, not a gap: this leg proves the
+# chromedp-tagged tests compile and skip cleanly without a
+# browser, and does NOT assert a browser exists on the
+# runner. Provisioning Chrome in CI is a separate decision.
+#
 # No artifact steps of any kind in this file: test logs are the
 # output. `setup-go` caching below uses the Actions cache for Go
 # modules and the build cache; cache is NOT artifact storage.
@@ -33,6 +46,8 @@ jobs:
             label: untagged
           - tag: 'with_utls'
             label: with_utls
+          - tag: 'with_chromedp'
+            label: with_chromedp
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
