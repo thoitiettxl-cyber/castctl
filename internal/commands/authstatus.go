@@ -19,7 +19,9 @@ import (
 // metadata: names and dates, never values) and its keeper
 // state file. It performs no network I/O, contacts no
 // browser, and never prints a cookie value: the driving
-// cookie appears by NAME only.
+// cookie appears by NAME only. The `liveness_checked` output
+// field is always false: nothing in the report says whether
+// the session is alive.
 //
 // Output: one JSON object for a single profile, a JSON array
 // for --all. Exit codes: 0 ok, 1 expiring, 2 config error,
@@ -37,9 +39,15 @@ driving expiry is past, or the keeper stopped the entry for
 a dead session).
 
 Prints one JSON object (or a JSON array with --all) with:
-profile, status, driving_cookie (name only), driving_expiry,
-last_checked_at, keeper_stopped, keeper_stopped_reason,
-headless_available, headless_reason, needs_action.
+profile, status, liveness_checked, driving_cookie (name only),
+driving_expiry, last_checked_at, keeper_stopped,
+keeper_stopped_reason, headless_available, headless_reason,
+needs_action.
+
+The report never verifies the session is alive: a revoked
+cookie still reports expiring until its expiry passes or the
+keeper stops the entry, so liveness_checked is always false.
+Use "keeper check" for a live verdict.
 
 headless_reason is "" when headless re-login is available,
 or one of: no_keeper_entry, no_chromedp, no_credentials,
@@ -51,6 +59,7 @@ Exit codes: 0 ok, 1 expiring, 2 config error, 3 expired.
 type authStatusJSON struct {
 	Profile             string     `json:"profile"`
 	Status              string     `json:"status"`
+	LivenessChecked     bool       `json:"liveness_checked"`
 	DrivingCookie       string     `json:"driving_cookie,omitempty"`
 	DrivingExpiry       *time.Time `json:"driving_expiry,omitempty"`
 	LastCheckedAt       *time.Time `json:"last_checked_at,omitempty"`
@@ -198,9 +207,13 @@ func authStatusForProfile(baseDir, name string, prof *profile.Profile, kcfg *pro
 	}
 	headlessAvailable, headlessReason := authHeadlessCapability(entry, creds, name)
 	derived := keeper.DeriveAuthStatus(name, drivingName, drivingExpiry, seen, fileMissing, st, expiringWithin, headlessAvailable, headlessReason, now)
+	// LivenessChecked is always false: this command performs no
+	// live check, so the status is expiry metadata only and says
+	// nothing about whether the session is alive.
 	return authStatusJSON{
 		Profile:             derived.Profile,
 		Status:              string(derived.Status),
+		LivenessChecked:     false,
 		DrivingCookie:       derived.DrivingCookie,
 		DrivingExpiry:       derived.DrivingExpiry,
 		LastCheckedAt:       derived.LastCheckedAt,
