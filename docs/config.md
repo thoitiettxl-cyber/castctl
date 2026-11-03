@@ -654,7 +654,11 @@ Behaviour — the self-healing loop, in order:
   logged once and never fails the bot.
 - **`auth status`.** `castctl auth status [--profile NAME | --all]`
   is state-only (no network): per profile it reports
-  `status` (`ok`/`expiring`/`expired`), the driving cookie
+  `status` (`ok`/`expiring`/`expired`), `liveness_checked`
+  (always `false`: the report never verifies the session is
+  alive — a revoked cookie still reports `expiring` until its
+  expiry passes or the keeper stops the entry; use `keeper
+  check` for a live verdict), the driving cookie
   NAME only, `driving_expiry`, `last_checked_at`,
   `keeper_stopped` + reason, `headless_available` + reason
   (`no_keeper_entry` / `no_chromedp` / `no_credentials` /

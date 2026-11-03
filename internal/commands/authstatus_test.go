@@ -397,3 +397,93 @@ func TestValidateObserveLoginURL(t *testing.T) {
 		t.Fatalf("validation error echoes the URL: %q", err.Error())
 	}
 }
+
+// jarCookiesValue renders a minimal Netscape jar like jarCookies
+// but with the given hatch_sess value. Values are fake.
+func jarCookiesValue(exp int64, value string) string {
+	return "# Netscape HTTP Cookie File\n.muse.ai\tTRUE\t/\tTRUE\t" + strconv.Itoa(int(exp)) + "\thatch_sess\t" + value + "\n"
+}
+
+// runAuthStatus runs `auth status` against configFile and returns
+// its exit code and raw stdout.
+func runAuthStatus(t *testing.T, configFile string) (int, string) {
+	t.Helper()
+	var outBuf, errBuf strings.Builder
+	env := &Env{Stdout: stringWriter{&outBuf}, Stderr: stringWriter{&errBuf},
+		Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile})}
+	code := Run(context.Background(), []string{"auth", "status"}, env)
+	if code != 0 && code != 1 && code != 3 {
+		t.Fatalf("auth status: code=%d stderr=%q", code, errBuf.String())
+	}
+	return code, outBuf.String()
+}
+
+func TestAuthStatusLivenessNeverChecked(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		exp  int64
+		code int
+		want string
+	}{
+		{"ok", time.Now().Add(30 * 24 * time.Hour).Unix(), 0, "ok"},
+		{"expiring", time.Now().Add(48 * time.Hour).Unix(), 1, "expiring"},
+		{"expired", time.Now().Add(-time.Hour).Unix(), 3, "expired"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home, configFile := testHome(t, `{"default_profile":"muse01","profiles":{"muse01":{}}}`)
+			dir := filepath.Join(home, "profiles", "muse01")
+			_ = os.MkdirAll(dir, 0o700)
+			_ = os.WriteFile(filepath.Join(dir, "cookies.txt"), []byte(jarCookies(tc.exp)), 0o600)
+			code, raw := runAuthStatus(t, configFile)
+			if code != tc.code {
+				t.Fatalf("code=%d want %d", code, tc.code)
+			}
+			var res authStatusJSON
+			if err := json.Unmarshal([]byte(raw), &res); err != nil {
+				t.Fatalf("status output: %v", err)
+			}
+			if res.Status != tc.want {
+				t.Fatalf("status = %q, want %q", res.Status, tc.want)
+			}
+			if res.LivenessChecked {
+				t.Fatalf("liveness_checked = true; auth status never performs a live check")
+			}
+			// The field must serialize explicitly: a missing
+			// field would unmarshal to the same false.
+			if !strings.Contains(raw, `"liveness_checked": false`) {
+				t.Fatalf("raw output lacks liveness_checked:false: %q", raw)
+			}
+		})
+	}
+}
+
+func TestAuthStatusValueBlind(t *testing.T) {
+	t.Parallel()
+	// Same expiry, different hatch_sess values: the report reads
+	// expiry metadata only, so both outputs are identical, neither
+	// contains a cookie value, and both say the session was not
+	// live-checked. A dead cookie and a live one are
+	// indistinguishable here by design; keeper check is the live
+	// verdict.
+	exp := time.Now().Add(30 * 24 * time.Hour).Unix()
+	var raws []string
+	for _, value := range []string{"FAKE-VALUE-A", "FAKE-VALUE-B"} {
+		home, configFile := testHome(t, `{"default_profile":"muse01","profiles":{"muse01":{}}}`)
+		dir := filepath.Join(home, "profiles", "muse01")
+		_ = os.MkdirAll(dir, 0o700)
+		_ = os.WriteFile(filepath.Join(dir, "cookies.txt"), []byte(jarCookiesValue(exp, value)), 0o600)
+		code, raw := runAuthStatus(t, configFile)
+		if code != 0 {
+			t.Fatalf("value %q: code=%d want 0", value, code)
+		}
+		if strings.Contains(raw, value) {
+			t.Fatalf("cookie value leaked into auth status output: %q", raw)
+		}
+		raws = append(raws, raw)
+	}
+	if raws[0] != raws[1] {
+		t.Fatalf("outputs differ by cookie value:\n%s\n%s", raws[0], raws[1])
+	}
+}
