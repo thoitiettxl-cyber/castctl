@@ -28,20 +28,26 @@ import (
 	"github.com/chromedp/chromedp/remote"
 )
 
-// TestHarvestRealChromeScopedVsForeign promotes the probe-4
-// discrimination to a committed test: on real Chrome 155, the
-// harvest of a tab on an in-list host returns the in-list
-// host-only hatch_sess and NOT a different hatch_sess that
-// lives only on an out-of-list host — in a session where the
-// browser-level Storage read provably holds the foreign
-// value, so the harvested set can only be the target-level
-// scoped read. ExportURLs is NOT swapped: the local server
-// answers TLS for the real Muse origins via
+// TestHarvestRealChromeStorageFirstServesScopedTab pins the
+// Storage-first order on real Chrome 155: the harvest of a
+// tab on an in-list host returns the browser-level Storage
+// set — which holds BOTH the in-list host-only hatch_sess
+// and a different hatch_sess that lives only on an
+// out-of-list host — because Storage is consulted first
+// and its set passes usableSession. A target-first order
+// must fail this test: the scoped target read returns
+// only the in-list value. Deleting the L2/L3 target reads
+// leaves this test green by design (Storage serves
+// first); target-level contribution on real Chrome is
+// therefore NOT discriminated here — its evidence is the
+// fake TestHarvest wire assertions and the Chrome-155
+// empty-Storage case. ExportURLs is NOT swapped: the
+// local server answers TLS for the real Muse origins via
 // host-resolver-rules, and Chrome ignores the synthetic
-// certificate. The test skips cleanly when no Chrome binary
-// is available (the chromeTestPath pattern). All cookie
-// values are synthetic FAKE-* values.
-func TestHarvestRealChromeScopedVsForeign(t *testing.T) {
+// certificate. The test skips cleanly when no Chrome
+// binary is available (the chromeTestPath pattern). All
+// cookie values are synthetic FAKE-* values.
+func TestHarvestRealChromeStorageFirstServesScopedTab(t *testing.T) {
 	chromePath := chromeTestPath(t)
 	_, port := harvestRealChromeServer(t)
 	rules := fmt.Sprintf("MAP muse.ai 127.0.0.1:%d, MAP auth.muse.ai 127.0.0.1:%d, MAP www.muse.ai 127.0.0.1:%d, MAP other.test 127.0.0.1:%d", port, port, port, port)
@@ -122,25 +128,29 @@ func TestHarvestRealChromeScopedVsForeign(t *testing.T) {
 	if !sawAuth {
 		t.Fatalf("harvest = %+v; want the in-list FAKE-AUTH-SESS", cookies)
 	}
-	if sawOther {
-		t.Fatalf("harvest = %+v; want no out-of-list FAKE-OTHER-SESS", cookies)
+	if !sawOther {
+		t.Fatalf("harvest = %+v; want the Storage set including out-of-list FAKE-OTHER-SESS", cookies)
 	}
 }
 
-// TestHarvestRealChromeUnscopedTabHostServes promotes the
-// P1 probe to a committed test: on real Chrome 155, the
-// harvest of a tab ending on an OUT-OF-LIST host
-// (www.muse.ai, outside ExportURLs) returns that tab's
-// host-only hatch_sess and NOT a different hatch_sess that
-// lives only on another host (other.test) — in a session
-// where the browser-level Storage read provably holds the
-// foreign value, so the harvested set can only be the
-// unscoped target read L1b. Deleting the L1b block must
-// fail this test: the harvest then falls through to
-// Storage, whose set contains the foreign value.
-// ExportURLs is NOT swapped. All cookie values are
-// synthetic FAKE-* values.
-func TestHarvestRealChromeUnscopedTabHostServes(t *testing.T) {
+// TestHarvestRealChromeStorageFirstServesTabHost pins the
+// Storage-first order on real Chrome 155 for a tab ending
+// on an OUT-OF-LIST host (www.muse.ai, outside
+// ExportURLs): the harvest returns the browser-level
+// Storage set — which holds BOTH that tab's host-only
+// hatch_sess and a different hatch_sess that lives only
+// on another host (other.test) — because Storage is
+// consulted first and its set passes usableSession. A
+// target-first order must fail this test: the target
+// reads return only the tab-host value. Deleting the
+// L2/L3 target reads leaves this test green by design
+// (Storage serves first); the unscoped target read's
+// contribution on real Chrome is therefore NOT
+// discriminated here — its evidence is the fake
+// TestHarvest wire assertions and the Chrome-155
+// empty-Storage case. ExportURLs is NOT swapped. All
+// cookie values are synthetic FAKE-* values.
+func TestHarvestRealChromeStorageFirstServesTabHost(t *testing.T) {
 	chromePath := chromeTestPath(t)
 	_, port := harvestRealChromeServer(t)
 	rules := fmt.Sprintf("MAP muse.ai 127.0.0.1:%d, MAP auth.muse.ai 127.0.0.1:%d, MAP www.muse.ai 127.0.0.1:%d, MAP other.test 127.0.0.1:%d", port, port, port, port)
@@ -217,8 +227,8 @@ func TestHarvestRealChromeUnscopedTabHostServes(t *testing.T) {
 	if !sawWww {
 		t.Fatalf("harvest = %+v; want the tab-host FAKE-WWW-SESS", cookies)
 	}
-	if sawOther {
-		t.Fatalf("harvest = %+v; want no out-of-list FAKE-OTHER-SESS", cookies)
+	if !sawOther {
+		t.Fatalf("harvest = %+v; want the Storage set including out-of-list FAKE-OTHER-SESS", cookies)
 	}
 }
 

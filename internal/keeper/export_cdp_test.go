@@ -39,6 +39,7 @@ type fakeCDPServer struct {
 	unscopedTabCookie    bool
 	unscopedTabExpired   bool
 	unscopedNetworkFails bool
+	scopedTargetDistinct bool
 	noTargets            bool
 	blankTarget          bool
 	mu                   sync.Mutex
@@ -136,8 +137,8 @@ func newFakeCDPServer(t *testing.T, storageFails bool) *fakeCDPServer {
 			case "Network.getCookies":
 				// Params-aware error injection + scoping
 				// shape: the handler inspects the urls list,
-				// because the harvest's second target read
-				// is unscoped (no urls) while the first is
+				// because the harvest's third target read
+				// is unscoped (no urls) while the second is
 				// scoped to ExportURLs. Error injection is
 				// gated by session: networkFails errors on
 				// every session (legacy, kept for the
@@ -172,7 +173,7 @@ func newFakeCDPServer(t *testing.T, storageFails bool) *fakeCDPServer {
 					break
 				}
 				// Unscoped target read (the harvest's
-				// second target read, L1b): it sees only
+				// third read, L3): it sees only
 				// the tab's own host, so when
 				// unscopedTabCookie is on it returns a
 				// DIFFERENT synthetic set — a host-only
@@ -182,11 +183,11 @@ func newFakeCDPServer(t *testing.T, storageFails bool) *fakeCDPServer {
 				// to it. Defaults off; no export call sends
 				// an unscoped target read.
 				if isTarget && !scoped {
-					// Second-read-only error injection: the
-					// unscoped target read (L1b) fails while
-					// the scoped read (L1a) succeeds, so a
-					// test can prove the joined error's l1b
-					// label carries L1b's own error.
+					// Third-read-only error injection: the
+					// unscoped target read (L3) fails while
+					// the scoped read (L2) succeeds, so a
+					// test can prove the joined error's l3
+					// label carries L3's own error.
 					if f.unscopedNetworkFails {
 						resp = map[string]any{"id": json.RawMessage(msg.ID), "error": map[string]any{"code": -32601, "message": "target unscoped synthetic failure: Network.getCookies unavailable"}}
 						resp["sessionId"] = msg.SessionID
@@ -218,6 +219,18 @@ func newFakeCDPServer(t *testing.T, storageFails bool) *fakeCDPServer {
 					resp["result"] = map[string]any{"cookies": []map[string]any{}}
 					break
 				}
+				// Scoped-distinct injection: the scoped
+				// target-session read returns a DIFFERENT
+				// usable set (a hatch_sess on auth.muse.ai)
+				// from the browser-level Storage set, so a
+				// test can prove Storage-first priority:
+				// both sets pass the gate, only the
+				// Storage set may win. Defaults off; no
+				// export call sets it.
+				if f.scopedTargetDistinct && isTarget && scoped {
+					resp["result"] = map[string]any{"cookies": syntheticTargetCookies()}
+					break
+				}
 				resp["result"] = map[string]any{"cookies": syntheticCookies()}
 			}
 			if err := conn.WriteJSON(resp); err != nil {
@@ -231,12 +244,29 @@ func newFakeCDPServer(t *testing.T, storageFails bool) *fakeCDPServer {
 
 // syntheticCookies returns Chromium-shaped network.Cookie JSON
 // with FAKE values. expires is a float64 epoch; the session
-// cookie uses -1, matching Chromium's encoding.
+// cookie uses -1, matching Chromium's encoding. Dated
+// expiries are 2035-01-01 (epoch 2051222400) so the gate
+// never rejects these sets for age; the pinned assertion in
+// TestCDPExportTargetLevelPrimary asserts the same epoch.
 func syntheticCookies() []map[string]any {
 	return []map[string]any{
-		{"name": "hatch_sess", "value": "FAKE-EXPORTED-SESS", "domain": ".muse.ai", "path": "/", "expires": float64(1796040000), "size": 20, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
-		{"name": "hatch_gw", "value": "FAKE-EXPORTED-GW", "domain": ".muse.ai", "path": "/", "expires": float64(1820000000), "size": 18, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
+		{"name": "hatch_sess", "value": "FAKE-EXPORTED-SESS", "domain": ".muse.ai", "path": "/", "expires": float64(2051222400), "size": 20, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
+		{"name": "hatch_gw", "value": "FAKE-EXPORTED-GW", "domain": ".muse.ai", "path": "/", "expires": float64(2051222400), "size": 18, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
 		{"name": "sess", "value": "FAKE-SESSION", "domain": "muse.ai", "path": "/", "expires": float64(-1), "size": 12, "httpOnly": false, "secure": true, "session": true, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
+	}
+}
+
+// syntheticTargetCookies returns the scoped-read synthetic set
+// used only when scopedTargetDistinct is on: a hatch_sess on
+// auth.muse.ai (a filtered domain, inside ExportURLs) whose
+// value differs from the Storage set's, so a test can tell
+// which read served the harvest. Dated expiries are the
+// 2035-01-01 epoch below, matching the other synthetic sets.
+func syntheticTargetCookies() []map[string]any {
+	return []map[string]any{
+		{"name": "hatch_sess", "value": "FAKE-TARGET-SESS", "domain": "auth.muse.ai", "path": "/", "expires": float64(2051222400), "size": 18, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
+		{"name": "hatch_gw", "value": "FAKE-TARGET-GW", "domain": "auth.muse.ai", "path": "/", "expires": float64(2051222400), "size": 16, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
+		{"name": "sess", "value": "FAKE-TARGET-SESSION", "domain": "auth.muse.ai", "path": "/", "expires": float64(-1), "size": 18, "httpOnly": false, "secure": true, "session": true, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
 	}
 }
 
@@ -247,8 +277,8 @@ func syntheticCookies() []map[string]any {
 // so a test can tell which read served the harvest.
 func syntheticTabCookies() []map[string]any {
 	return []map[string]any{
-		{"name": "hatch_sess", "value": "FAKE-TABHOST-SESS", "domain": "www.muse.ai", "path": "/", "expires": float64(1796040000), "size": 18, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
-		{"name": "hatch_gw", "value": "FAKE-TABHOST-GW", "domain": "www.muse.ai", "path": "/", "expires": float64(1820000000), "size": 16, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
+		{"name": "hatch_sess", "value": "FAKE-TABHOST-SESS", "domain": "www.muse.ai", "path": "/", "expires": float64(2051222400), "size": 18, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
+		{"name": "hatch_gw", "value": "FAKE-TABHOST-GW", "domain": "www.muse.ai", "path": "/", "expires": float64(2051222400), "size": 16, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
 		{"name": "sess", "value": "FAKE-TABHOST-SESSION", "domain": "www.muse.ai", "path": "/", "expires": float64(-1), "size": 19, "httpOnly": false, "secure": true, "session": true, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
 	}
 }
@@ -262,7 +292,7 @@ func syntheticTabCookies() []map[string]any {
 func syntheticTabCookiesExpired() []map[string]any {
 	return []map[string]any{
 		{"name": "hatch_sess", "value": "FAKE-TABHOST-EXPIRED-SESS", "domain": "www.muse.ai", "path": "/", "expires": float64(1000), "size": 26, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
-		{"name": "hatch_gw", "value": "FAKE-TABHOST-GW", "domain": "www.muse.ai", "path": "/", "expires": float64(1820000000), "size": 16, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
+		{"name": "hatch_gw", "value": "FAKE-TABHOST-GW", "domain": "www.muse.ai", "path": "/", "expires": float64(2051222400), "size": 16, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
 		{"name": "sess", "value": "FAKE-TABHOST-SESSION", "domain": "www.muse.ai", "path": "/", "expires": float64(-1), "size": 19, "httpOnly": false, "secure": true, "session": true, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
 	}
 }
@@ -342,7 +372,7 @@ func TestCDPExportTargetLevelPrimary(t *testing.T) {
 	if len(cookies) != 3 {
 		t.Fatalf("cookies = %+v; want 3 synthetic cookies", cookies)
 	}
-	if cookies[0].Name != "hatch_sess" || cookies[0].Value != "FAKE-EXPORTED-SESS" || cookies[0].Domain != ".muse.ai" || cookies[0].Expires != 1796040000 {
+	if cookies[0].Name != "hatch_sess" || cookies[0].Value != "FAKE-EXPORTED-SESS" || cookies[0].Domain != ".muse.ai" || cookies[0].Expires != 2051222400 {
 		t.Fatalf("cookie 0 = %+v", cookies[0])
 	}
 	// Session cookie: -1 expiry + session flag -> merge form

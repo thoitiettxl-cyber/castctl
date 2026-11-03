@@ -73,7 +73,9 @@ func CDPAvailable() bool { return true }
 // the Muse origins only. An empty URL list would mean "page
 // + subframes", which is NOT all cookies, so the list is
 // explicit wherever Network.getCookies is used (target-level
-// primary and browser-level fallback alike).
+// primary and browser-level fallback alike), except the
+// harvest's L3 unscoped read, which deliberately carries
+// no list to recover a tab-host cookie (see harvest).
 var ExportURLs = []string{"https://muse.ai/", "https://auth.muse.ai/"}
 
 // errNoCookies is the internal empty-read signal: a CDP read

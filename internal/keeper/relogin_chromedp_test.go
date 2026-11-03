@@ -39,33 +39,36 @@ func harvestTargetContext(t *testing.T, f *fakeCDPServer) (context.Context, cont
 	return tctx, cancelTarget
 }
 
-// TestHarvest pins the K-LIVE-2 read order for the re-login
-// harvest: target-level Network.getCookies first, as TWO
-// sequential reads on the same target context — L1a scoped
-// with ExportURLs, then L1b unscoped, but only when L1a did
-// not yield hatch_sess (a scoped URL list replaces the
-// page+subframes list, so L1b is what recovers a host-only
-// cookie on the tab's own host) — then browser-level
-// Storage, then browser-level Network with ExportURLs. An
-// empty read is a failed read. A level's set is accepted
-// only when it passes usableSession (the tick's
+// TestHarvest pins the Storage-first read order for the re-login
+// harvest: browser-level Storage.getCookies first — the
+// browser's authoritative store — then target-level
+// Network.getCookies as TWO sequential reads on the same
+// target context (L2 scoped with ExportURLs, then L3
+// unscoped, which runs only when L2 did not yield a usable
+// set; a scoped URL list replaces the page+subframes list,
+// so L3 is what recovers a host-only cookie on the tab's
+// own host), then browser-level Network with ExportURLs
+// (L4). An empty read is a failed read. A level's set is
+// accepted only when it passes usableSession (the tick's
 // validateExportedSet gate: usable filtered hatch_sess +
 // no past filtered expiry); a non-empty set that fails
 // the gate falls through to the next level, and the first
 // such candidate is returned only when no level passes
-// the gate. The fake encodes the
-// Chrome 155 headless shape: the browser-level Storage read
-// succeeds empty while the browser holds a live session.
-// (empty, nil) holds ONLY when the final level succeeds
-// empty; when the final level errors, harvest returns the
-// joined error (four labelled components: l1a/l1b/l2/l3) instead — UNLESS an earlier level already
-// yielded a non-empty candidate, which is returned instead.
-// Wire assertions pin the read sequence: the first target
-// Network.getCookies call must carry exactly ExportURLs, the
-// second (when it runs) must be unscoped, every
-// browser-level Network.getCookies call must carry exactly
-// ExportURLs, and no target-session Storage.getCookies call
-// may occur.
+// the gate. The fake encodes the Chrome 155 headless
+// shape: the browser-level Storage read succeeds empty
+// while the browser holds a live session. (empty, nil)
+// holds ONLY when the final level succeeds empty; when
+// the final level errors, harvest returns the joined
+// error (four labelled components: l1/l2/l3/l4) instead
+// — UNLESS an earlier level already yielded a non-empty
+// candidate, which is returned instead. Wire assertions
+// pin the read sequence: Storage first, then the scoped
+// target read, then the unscoped target read, then
+// browser Network; the first target Network.getCookies
+// call must carry exactly ExportURLs, the unscoped read
+// must carry no urls, every browser-level
+// Network.getCookies call must carry exactly ExportURLs,
+// and no target-session Storage.getCookies call may occur.
 func TestHarvest(t *testing.T) {
 	tests := []struct {
 		name                 string
@@ -80,6 +83,7 @@ func TestHarvest(t *testing.T) {
 		unscopedTabCookie    bool
 		unscopedTabExpired   bool
 		unscopedNetworkFails bool
+		scopedTargetDistinct bool
 		networkEmpty         bool
 		wantLen              int
 		wantErr              bool
@@ -94,28 +98,28 @@ func TestHarvest(t *testing.T) {
 		wantTargetUnscoped   int
 	}{
 		{
-			name:               "target level primary Chrome 155 shape",
+			name:               "storage empty falls through to target scoped read",
 			storageEmpty:       true,
-			wantLen:            3,
-			wantTargetNetwork:  true,
-			wantBrowserStorage: false,
-			wantBrowserNetwork: false,
-			wantTargetScoped:   1,
-			wantTargetUnscoped: 0,
-		},
-		{
-			// Scoped L1a empty is a failed read; the
-			// unscoped L1b read runs next, returns empty
-			// (flag off), and the full set comes from
-			// browser-level Storage.
-			name:               "target empty falls through to browser Storage",
-			targetNetworkEmpty: true,
 			wantLen:            3,
 			wantTargetNetwork:  true,
 			wantBrowserStorage: true,
 			wantBrowserNetwork: false,
 			wantTargetScoped:   1,
-			wantTargetUnscoped: 1,
+			wantTargetUnscoped: 0,
+		},
+		{
+			// Storage holds a usable set, so it returns
+			// immediately and no target read runs at all: the
+			// target-empty flag is inert under Storage-first,
+			// and this case pins the short-circuit (no target
+			// Network.getCookies call on the wire).
+			name:               "usable Storage returns before any target read",
+			wantLen:            3,
+			wantTargetNetwork:  false,
+			wantBrowserStorage: true,
+			wantBrowserNetwork: false,
+			wantTargetScoped:   0,
+			wantTargetUnscoped: 0,
 		},
 		{
 			// All levels succeed empty: the final level
@@ -132,29 +136,33 @@ func TestHarvest(t *testing.T) {
 			wantTargetUnscoped: 1,
 		},
 		{
-			// Partial target: a non-empty set without
-			// hatch_sess must NOT be accepted; the full
-			// set comes from browser-level Storage.
-			name:                 "partial target without hatch_sess falls through to browser Storage",
+			// Storage is empty, so the scoped target read
+			// runs and yields a non-empty set WITHOUT hatch_sess:
+			// it must NOT be accepted; it becomes the candidate
+			// and the final browser Network level serves the
+			// full set.
+			name:                 "partial target set falls through to final level",
 			targetNetworkPartial: true,
+			storageEmpty:         true,
 			wantLen:              3,
 			wantTargetNetwork:    true,
 			wantBrowserStorage:   true,
-			wantBrowserNetwork:   false,
+			wantBrowserNetwork:   true,
 			wantTargetScoped:     1,
 			wantTargetUnscoped:   1,
 		},
 		{
-			// Target Network error: fall through to
-			// browser-level Storage, which returns the
-			// full set; the browser Network level is
-			// never reached.
-			name:               "target Network error falls through to browser Storage",
-			networkFails:       true,
+			// Storage is empty, both target reads error
+			// (target-only Network failure), and the final
+			// browser Network level serves the full set; the
+			// target error must not poison the final level.
+			name:               "target Network errors fall through to browser Network level",
+			storageEmpty:       true,
+			targetNetworkFails: true,
 			wantLen:            3,
 			wantTargetNetwork:  true,
 			wantBrowserStorage: true,
-			wantBrowserNetwork: false,
+			wantBrowserNetwork: true,
 			wantTargetScoped:   1,
 			wantTargetUnscoped: 1,
 		},
@@ -183,7 +191,7 @@ func TestHarvest(t *testing.T) {
 			browserNetworkFails: true,
 			wantLen:             0,
 			wantErr:             true,
-			wantErrExact:        "cookie harvest failed: l1a: target synthetic failure: Network.getCookies unavailable (-32601); l1b: target synthetic failure: Network.getCookies unavailable (-32601); l2: storage synthetic failure: Storage.getCookies unavailable (-32601); l3: browser synthetic failure: Network.getCookies unavailable (-32601)",
+			wantErrExact:        "cookie harvest failed: l1: storage synthetic failure: Storage.getCookies unavailable (-32601); l2: target synthetic failure: Network.getCookies unavailable (-32601); l3: target synthetic failure: Network.getCookies unavailable (-32601); l4: browser synthetic failure: Network.getCookies unavailable (-32601)",
 			wantTargetNetwork:   true,
 			wantBrowserStorage:  true,
 			wantBrowserNetwork:  true,
@@ -191,36 +199,38 @@ func TestHarvest(t *testing.T) {
 			wantTargetUnscoped:  1,
 		},
 		{
-			// L1b serves: the scoped read is empty, but
-			// the unscoped read on the same target
-			// context returns the tab-host cookie, whose
-			// value and domain prove L1b served it; no
-			// browser-level read runs.
-			name:               "scoped empty unscoped tab-host cookie serves",
+			// L3 serves: Storage is empty and the scoped
+			// read is empty, but the unscoped read on the same
+			// target context returns the tab-host cookie, whose
+			// value and domain prove L3 served it; no
+			// browser-level Network read runs.
+			name:               "Storage empty and scoped empty, unscoped tab-host cookie serves",
 			targetNetworkEmpty: true,
+			storageEmpty:       true,
 			unscopedTabCookie:  true,
 			wantLen:            3,
 			wantFirstValue:     "FAKE-TABHOST-SESS",
 			wantFirstDomain:    "www.muse.ai",
 			wantTargetNetwork:  true,
-			wantBrowserStorage: false,
+			wantBrowserStorage: true,
 			wantBrowserNetwork: false,
 			wantTargetScoped:   1,
 			wantTargetUnscoped: 1,
 		},
 		{
-			// L1b serves over a candidate: the scoped
-			// read yields a hatch_sess-less candidate,
-			// the unscoped read yields hatch_sess, and
-			// the unscoped set wins immediately.
-			name:                 "scoped partial unscoped tab-host cookie serves over candidate",
+			// L3 serves over a candidate: Storage is empty,
+			// the scoped read yields a hatch_sess-less
+			// candidate, the unscoped read yields hatch_sess,
+			// and the unscoped set wins immediately.
+			name:                 "Storage empty, scoped partial candidate, unscoped tab-host cookie serves",
 			targetNetworkPartial: true,
+			storageEmpty:         true,
 			unscopedTabCookie:    true,
 			wantLen:              3,
 			wantFirstValue:       "FAKE-TABHOST-SESS",
 			wantFirstDomain:      "www.muse.ai",
 			wantTargetNetwork:    true,
-			wantBrowserStorage:   false,
+			wantBrowserStorage:   true,
 			wantBrowserNetwork:   false,
 			wantTargetScoped:     1,
 			wantTargetUnscoped:   1,
@@ -261,55 +271,101 @@ func TestHarvest(t *testing.T) {
 			wantTargetUnscoped:   1,
 		},
 		{
-			// A target-only Storage error must not poison
-			// the browser-level Storage read, which
-			// serves the full set.
-			name:               "target-only Storage error does not poison browser Storage",
+			// Storage holds a usable set and returns first,
+			// so no target read runs; the target-session
+			// Storage error flag is inert for harvest (harvest
+			// never issues a target Storage read), exactly as
+			// before — this case pins the short-circuit.
+			name:               "usable Storage returns before target reads; target Storage error inert",
 			targetStorageFails: true,
 			targetNetworkEmpty: true,
 			wantLen:            3,
-			wantTargetNetwork:  true,
+			wantTargetNetwork:  false,
 			wantBrowserStorage: true,
 			wantBrowserNetwork: false,
-			wantTargetScoped:   1,
-			wantTargetUnscoped: 1,
+			wantTargetScoped:   0,
+			wantTargetUnscoped: 0,
 		},
 		{
-			// F1S fall-through: the unscoped L1b set holds a
-			// tab-host hatch_sess, but expired, so it fails
-			// usableSession; the harvest must fall through
-			// to browser-level Storage and return its usable
-			// set instead of being shadowed by L1b.
-			name:               "expired tab-host cookie falls through to browser Storage",
+			// F1S fall-through, Storage-first form: Storage
+			// is empty and the scoped read is empty, the
+			// unscoped L3 set holds a tab-host hatch_sess,
+			// but expired, so it fails usableSession; the
+			// harvest must fall through to the final level
+			// and return its usable set instead of being
+			// shadowed by L3.
+			name:               "expired tab-host cookie falls through to browser Network level",
 			targetNetworkEmpty: true,
+			storageEmpty:       true,
 			unscopedTabExpired: true,
 			wantLen:            3,
 			wantFirstValue:     "FAKE-EXPORTED-SESS",
 			wantFirstDomain:    ".muse.ai",
 			wantTargetNetwork:  true,
 			wantBrowserStorage: true,
-			wantBrowserNetwork: false,
+			wantBrowserNetwork: true,
 			wantTargetScoped:   1,
 			wantTargetUnscoped: 1,
 		},
 		{
-			// L1b provenance: L1a succeeds empty, only the
-			// second target read errors, L2 succeeds empty,
-			// and L3 errors with no candidate — the
-			// joined error's l1b label must carry L1b's
-			// own error, with l1a/l2 as the empty-read
+			// L3 provenance: Storage and the scoped read
+			// succeed empty, only the third (unscoped) read
+			// errors, L4 errors with no candidate — the
+			// joined error's l3 label must carry L3's
+			// own error, with l1/l2 as the empty-read
 			// sentinel.
-			name:                 "second target read error is labelled l1b in joined error",
+			name:                 "third read error is labelled l3 in joined error",
 			targetNetworkEmpty:   true,
 			unscopedNetworkFails: true,
 			storageEmpty:         true,
 			browserNetworkFails:  true,
 			wantLen:              0,
 			wantErr:              true,
-			wantErrExact:         "cookie harvest failed: l1a: cdp read returned no cookies; l1b: target unscoped synthetic failure: Network.getCookies unavailable (-32601); l2: cdp read returned no cookies; l3: browser synthetic failure: Network.getCookies unavailable (-32601)",
+			wantErrExact:         "cookie harvest failed: l1: cdp read returned no cookies; l2: cdp read returned no cookies; l3: target unscoped synthetic failure: Network.getCookies unavailable (-32601); l4: browser synthetic failure: Network.getCookies unavailable (-32601)",
 			wantTargetNetwork:    true,
 			wantBrowserStorage:   true,
 			wantBrowserNetwork:   true,
+			wantTargetScoped:     1,
+			wantTargetUnscoped:   1,
+		},
+		{
+			// P2 / Storage-first priority: the Storage set
+			// and the scoped target set BOTH pass
+			// usableSession with different hatch_sess
+			// values on different hosts. Priority, not
+			// a value comparison, decides: the Storage
+			// set wins deterministically, and no target
+			// read runs at all. A target-first order
+			// must fail this case.
+			name:                 "usable Storage wins over usable scoped target set with a different value",
+			scopedTargetDistinct: true,
+			wantLen:              3,
+			wantFirstValue:       "FAKE-EXPORTED-SESS",
+			wantFirstDomain:      ".muse.ai",
+			wantTargetNetwork:    false,
+			wantBrowserStorage:   true,
+			wantBrowserNetwork:   false,
+			wantTargetScoped:     0,
+			wantTargetUnscoped:   0,
+		},
+		{
+			// Chrome 155 empty Storage: the browser-level
+			// Storage read succeeds empty (a failed
+			// read), the scoped target read yields a
+			// hatch_sess-less candidate, and the
+			// unscoped target read serves the tab-host
+			// set — the full fall-through chain, in
+			// order Storage, scoped, unscoped.
+			name:                 "Chrome 155 empty Storage falls through scoped and unscoped target reads",
+			storageEmpty:         true,
+			targetNetworkPartial: true,
+			unscopedTabCookie:    true,
+			wantLen:              3,
+			wantFirstValue:       "FAKE-TABHOST-SESS",
+			wantFirstDomain:      "www.muse.ai",
+			wantTargetNetwork:    true,
+			wantBrowserStorage:   true,
+			wantBrowserNetwork:   false,
 			wantTargetScoped:     1,
 			wantTargetUnscoped:   1,
 		},
@@ -328,6 +384,7 @@ func TestHarvest(t *testing.T) {
 			f.unscopedTabCookie = tt.unscopedTabCookie
 			f.unscopedTabExpired = tt.unscopedTabExpired
 			f.unscopedNetworkFails = tt.unscopedNetworkFails
+			f.scopedTargetDistinct = tt.scopedTargetDistinct
 			f.networkEmpty = tt.networkEmpty
 			defer f.server.Close()
 
@@ -399,7 +456,7 @@ func TestHarvest(t *testing.T) {
 					}
 					// No params field, or an empty urls
 					// list, means the unscoped read: only
-					// the second target read (L1b) may
+					// the third read (L3) may
 					// send it. A scoped read must carry
 					// exactly ExportURLs.
 					if len(msg.Params) > 0 {
@@ -454,7 +511,11 @@ func TestHarvest(t *testing.T) {
 			if targetStorage {
 				t.Fatalf("target-session Storage.getCookies called; want none: %v", f.methodsSeen())
 			}
-			if !attached {
+			// Target attach is lazy in chromedp: it happens on
+			// the first target-session call. A Storage-first
+			// short-circuit legitimately never attaches, so
+			// attach is required only when a target read ran.
+			if !attached && tt.wantTargetNetwork {
 				t.Fatalf("methods = %v; want target attach", f.methodsSeen())
 			}
 			if targetNetwork != tt.wantTargetNetwork {
@@ -470,7 +531,7 @@ func TestHarvest(t *testing.T) {
 			// read, then the unscoped target read only
 			// when the scoped read did not yield
 			// hatch_sess — the ordered scoped-then-
-			// unscoped sequence pins L1b.
+			// unscoped sequence pins L3.
 			if targetScoped != tt.wantTargetScoped {
 				t.Fatalf("scoped target Network.getCookies calls = %d; want %d; methods = %v", targetScoped, tt.wantTargetScoped, f.methodsSeen())
 			}
@@ -480,20 +541,24 @@ func TestHarvest(t *testing.T) {
 			if tt.wantTargetUnscoped > 0 && firstTargetNetwork > firstTargetUnscoped {
 				t.Fatalf("scoped target Network index %d after unscoped index %d; methods = %v", firstTargetNetwork, firstTargetUnscoped, f.methodsSeen())
 			}
-			// Wire order: the target-level reads run
-			// before any browser-level read that runs
-			// at all.
-			if tt.wantTargetNetwork && tt.wantBrowserStorage && firstTargetNetwork > firstBrowserStorage {
-				t.Fatalf("target Network index %d after browser Storage index %d; methods = %v", firstTargetNetwork, firstBrowserStorage, f.methodsSeen())
+			// Wire order: Storage runs before any
+			// target-level read, target reads run before
+			// browser Network, and Storage runs before
+			// browser Network.
+			if tt.wantBrowserStorage && tt.wantTargetNetwork && firstBrowserStorage > firstTargetNetwork {
+				t.Fatalf("browser Storage index %d after target Network index %d; methods = %v", firstBrowserStorage, firstTargetNetwork, f.methodsSeen())
 			}
-			if tt.wantTargetNetwork && tt.wantBrowserStorage && firstTargetUnscoped > firstBrowserStorage {
-				t.Fatalf("unscoped target Network index %d after browser Storage index %d; methods = %v", firstTargetUnscoped, firstBrowserStorage, f.methodsSeen())
+			if tt.wantBrowserStorage && tt.wantTargetUnscoped > 0 && firstBrowserStorage > firstTargetUnscoped {
+				t.Fatalf("browser Storage index %d after unscoped target Network index %d; methods = %v", firstBrowserStorage, firstTargetUnscoped, f.methodsSeen())
 			}
 			if tt.wantBrowserStorage && tt.wantBrowserNetwork && firstBrowserStorage > firstBrowserNetwork {
 				t.Fatalf("browser Storage index %d after browser Network index %d; methods = %v", firstBrowserStorage, firstBrowserNetwork, f.methodsSeen())
 			}
 			if tt.wantTargetNetwork && tt.wantBrowserNetwork && firstTargetNetwork > firstBrowserNetwork {
 				t.Fatalf("target Network index %d after browser Network index %d; methods = %v", firstTargetNetwork, firstBrowserNetwork, f.methodsSeen())
+			}
+			if tt.wantTargetUnscoped > 0 && tt.wantBrowserNetwork && firstTargetUnscoped > firstBrowserNetwork {
+				t.Fatalf("unscoped target Network index %d after browser Network index %d; methods = %v", firstTargetUnscoped, firstBrowserNetwork, f.methodsSeen())
 			}
 		})
 	}
