@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/storage"
 	"github.com/chromedp/chromedp"
 	"github.com/chromedp/chromedp/remote"
@@ -34,8 +35,9 @@ import (
 // text, HTML,
 // attribute value, screenshot, or cookie value ever crosses
 // from the page into Go through evaluation; cookies are
-// harvested only through the browser-level Storage.getCookies
-// call, the same read the CDP exporter uses. The driver never
+// harvested target-level first (Network.getCookies on the
+// login tab), then through the browser-level Storage and
+// Network reads, the same read order the CDP exporter uses. The driver never
 // exfiltrates, never screenshots, never enables the screencast
 // relay, and never touches a target it did not create.
 //
@@ -503,7 +505,7 @@ func (d *chromedpReloginDriver) waitForMatch(ctx context.Context, contract Login
 	}
 }
 
-// waitForCookies polls the browser-level cookie read until
+// waitForCookies polls the target-first cookie harvest until
 // a hatch_sess cookie is harvested, a blocker appears, or
 // the deadline passes (transient: the login may have
 // failed server-side, which a retry can still recover).
@@ -542,14 +544,44 @@ func (d *chromedpReloginDriver) waitForCookies(ctx context.Context, contract Log
 	}
 }
 
-// harvest reads all browser cookies through the
-// browser-level Storage.getCookies call.
+// harvest reads the login tab's cookies, target-level first:
+// Network.getCookies on the target context (no URL scope, so
+// the read returns the tab's cookies whatever host set them),
+// then the browser-level Storage.getCookies read, then the
+// browser-level Network.getCookies read with ExportURLs. An
+// empty read at the first two levels is a failed read (the
+// browser-level Storage read can succeed empty on Chrome 155
+// headless while the browser holds a live session), so the
+// harvest falls through to the next level. Only the final
+// level's result stands even when empty, preserving the
+// contract with waitForCookies: (empty, nil) means "no
+// session cookie yet", not an error.
 func (d *chromedpReloginDriver) harvest(ctx context.Context) ([]ExportedCookie, error) {
-	res, err := chromedp.CallBrowser(ctx, storage.GetCookies, storage.GetCookiesParams{})
-	if err != nil {
-		return nil, err
+	var targetErr error
+	if res, err := chromedp.Call(ctx, network.GetCookies, network.GetCookiesParams{}); err == nil {
+		if len(res.Cookies) > 0 {
+			return fromNetworkCookies(res.Cookies), nil
+		}
+		targetErr = errNoCookies
+	} else {
+		targetErr = err
 	}
-	return fromNetworkCookies(res.Cookies), nil
+
+	var storageErr error
+	if res, err := chromedp.CallBrowser(ctx, storage.GetCookies, storage.GetCookiesParams{}); err == nil {
+		if len(res.Cookies) > 0 {
+			return fromNetworkCookies(res.Cookies), nil
+		}
+		storageErr = errNoCookies
+	} else {
+		storageErr = err
+	}
+
+	fb, err := chromedp.CallBrowser(ctx, network.GetCookies, network.GetCookiesParams{URLs: ExportURLs})
+	if err != nil {
+		return nil, fmt.Errorf("cookie harvest failed: target: %v; storage: %v; network: %w", targetErr, storageErr, err)
+	}
+	return fromNetworkCookies(fb.Cookies), nil
 }
 
 // hasHatchSess reports whether the harvest holds a
