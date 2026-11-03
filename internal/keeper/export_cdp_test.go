@@ -26,17 +26,19 @@ import (
 // is the test's own code. Nothing here is a capture from a real
 // browser; real-Chromium scoping is the P1 box-side gate.
 type fakeCDPServer struct {
-	t                  *testing.T
-	storageFails       bool
-	storageEmpty       bool
-	networkEmpty       bool
-	targetNetworkEmpty bool
-	noTargets          bool
-	blankTarget        bool
-	mu                 sync.Mutex
-	methods            []string
-	messages           []cdpMessage
-	server             *httptest.Server
+	t                    *testing.T
+	storageFails         bool
+	storageEmpty         bool
+	networkEmpty         bool
+	targetNetworkEmpty   bool
+	targetNetworkPartial bool
+	networkFails         bool
+	noTargets            bool
+	blankTarget          bool
+	mu                   sync.Mutex
+	methods              []string
+	messages             []cdpMessage
+	server               *httptest.Server
 }
 
 type cdpMessage struct {
@@ -118,6 +120,26 @@ func newFakeCDPServer(t *testing.T, storageFails bool) *fakeCDPServer {
 				}
 				resp["result"] = map[string]any{"cookies": syntheticCookies()}
 			case "Network.getCookies":
+				// Network-error injection: Network.getCookies
+				// errors -32601-style on every session, so a
+				// target-error fall-through is exercisable.
+				// Defaults off; no existing export test sets it.
+				if f.networkFails {
+					resp = map[string]any{"id": json.RawMessage(msg.ID), "error": map[string]any{"code": -32601, "message": "Network.getCookies wasn't found"}}
+					if msg.SessionID != "" {
+						resp["sessionId"] = msg.SessionID
+					}
+					break
+				}
+				// Partial-target injection: the target-session
+				// read returns a non-empty set WITHOUT
+				// hatch_sess (2 of the 3 synthetic cookies)
+				// while the browser-level reads still return
+				// the full set. Defaults off.
+				if f.targetNetworkPartial && msg.SessionID != "" {
+					resp["result"] = map[string]any{"cookies": syntheticCookies()[1:]}
+					break
+				}
 				// A target-session read that yields nothing
 				// (logged-out tab) while the browser-level
 				// read still sees cookies.
