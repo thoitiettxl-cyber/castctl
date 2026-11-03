@@ -379,6 +379,9 @@ func TestTelegramRunPollsFakeServerThroughRuntimeClient(t *testing.T) {
 	if !strings.Contains(out.String(), `"muse01"`) {
 		t.Errorf("stdout = %q; want the linked profile named", out.String())
 	}
+	if !strings.Contains(errb.String(), "telegram: polling stopped") {
+		t.Errorf("stderr = %q; want the polling-stopped shutdown marker", errb.String())
+	}
 }
 
 func TestTelegramHelpAndDispatch(t *testing.T) {

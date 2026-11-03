@@ -273,7 +273,14 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 	// stolen; a missing keeper block starts nothing.
 	releaseKeeper := startEmbeddedKeeper(ctx, env, g, logger)
 	defer releaseKeeper()
-	return bot.Start(ctx)
+	err = bot.Start(ctx)
+	// Shutdown boundary marker, always visible even when the log
+	// block disables the bot logger: reaching this line proves the
+	// poll loop exited and the dispatcher drained. A future hang
+	// leaves stderr without it, pointing inside Start rather than
+	// at the deferred keeper/heartbeat/runtime teardown below.
+	fmt.Fprintln(env.stderr(), "telegram: polling stopped")
+	return err
 }
 
 // telegramStatus is the offline JSON report of the block.

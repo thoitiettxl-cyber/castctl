@@ -451,7 +451,9 @@ func (b *Bot) MaxHandledID() int64 { return b.dispatch.maxSeen() }
 // Start polls until ctx is done, then drains the dispatcher and
 // returns ctx.Err(). SIGINT cancellation therefore surfaces as
 // context.Canceled (exit 130 via the command layer), matching
-// the process-wide signal contract.
+// the process-wide signal contract. Both shutdown phases are
+// logged, so a future slow shutdown leaves a trail showing
+// which phase stuck: the poll loop exit, then the drain.
 func (b *Bot) Start(ctx context.Context) error {
 	b.startMu.Lock()
 	if b.started {
@@ -460,8 +462,12 @@ func (b *Bot) Start(ctx context.Context) error {
 	}
 	b.started = true
 	b.startMu.Unlock()
-	defer b.dispatch.shutdown()
+	defer func() {
+		b.dispatch.shutdown()
+		b.logger.Info("telegram dispatcher drained")
+	}()
 	b.api.Start(ctx)
+	b.logger.Info("telegram poll loop stopped; draining dispatcher")
 	return ctx.Err()
 }
 

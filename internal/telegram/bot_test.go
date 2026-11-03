@@ -1460,3 +1460,26 @@ func TestBotCallbackWarningNoMethodField(t *testing.T) {
 		t.Error("log output contains a method= field on the callback-error exit")
 	}
 }
+
+func TestBotStartLogsShutdownPhases(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startBot(t, tb.bot, ctx)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Start = %v; want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not return after cancel")
+	}
+	buf := tb.logBuf.String()
+	loop := strings.Index(buf, "telegram poll loop stopped")
+	drained := strings.Index(buf, "telegram dispatcher drained")
+	if loop < 0 || drained < 0 || drained < loop {
+		t.Errorf("shutdown phases not logged in order in %q", buf)
+	}
+}
