@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Lock file name in the target directory. The file is never deleted
@@ -31,7 +32,40 @@ var (
 	renameFunc  = os.Rename
 	syncDirFunc = syncDir
 	execCheckFn = runExecCheck
+	reopenOpen  = func(path string) (*os.File, error) { return os.OpenFile(path, os.O_RDWR, 0) }
 )
+
+// reopenRetryBudget bounds the ETXTBSY retry in openForSync: the
+// kernel may hold an exec'd file busy briefly after the child exits
+// (24-82ms measured on cue, ext4); 200ms covers the observed window
+// with margin without stalling a genuinely stuck replace.
+const reopenRetryBudget = 200 * time.Millisecond
+
+// openForSync opens path O_RDWR for the pre-rename fsync, retrying
+// only ETXTBSY (text file busy) until reopenRetryBudget expires.
+// Any other error returns immediately, and exhaustion returns the
+// last error unwrapped, so errors.Is(err, syscall.ETXTBSY) holds
+// through the caller's wrapError chain.
+func openForSync(path string) (*os.File, error) {
+	deadline := time.Now().Add(reopenRetryBudget)
+	delay := 5 * time.Millisecond
+	for {
+		f, err := reopenOpen(path)
+		if err == nil {
+			return f, nil
+		}
+		if !errors.Is(err, syscall.ETXTBSY) {
+			return nil, err
+		}
+		if time.Now().After(deadline) {
+			return nil, err
+		}
+		time.Sleep(delay)
+		if delay < 20*time.Millisecond {
+			delay *= 2
+		}
+	}
+}
 
 // dirSyncError reports a directory-sync failure AFTER a successful
 // rename: the new binary IS in place, but crash-durability of the
@@ -154,8 +188,10 @@ func (u *updater) install(ctx context.Context, res Result, sel *selection, targe
 	}
 
 	// Fsync the temp file (mode already set above), rename once,
-	// fsync the directory.
-	syncFile, err := os.OpenFile(extractedTmpPath, os.O_RDWR, 0)
+	// fsync the directory. The open retries ETXTBSY briefly: the
+	// exec check just ran this file, and the kernel may still
+	// hold it busy for a few milliseconds after the child exits.
+	syncFile, err := openForSync(extractedTmpPath)
 	if err != nil {
 		return Result{}, wrapError(1, "update: cannot re-open the new binary", err)
 	}
