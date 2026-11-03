@@ -37,6 +37,8 @@ type fakeCDPServer struct {
 	browserNetworkFails  bool
 	targetStorageFails   bool
 	unscopedTabCookie    bool
+	unscopedTabExpired   bool
+	unscopedNetworkFails bool
 	noTargets            bool
 	blankTarget          bool
 	mu                   sync.Mutex
@@ -180,7 +182,19 @@ func newFakeCDPServer(t *testing.T, storageFails bool) *fakeCDPServer {
 				// to it. Defaults off; no export call sends
 				// an unscoped target read.
 				if isTarget && !scoped {
-					if f.unscopedTabCookie {
+					// Second-read-only error injection: the
+					// unscoped target read (L1b) fails while
+					// the scoped read (L1a) succeeds, so a
+					// test can prove the joined error's l1b
+					// label carries L1b's own error.
+					if f.unscopedNetworkFails {
+						resp = map[string]any{"id": json.RawMessage(msg.ID), "error": map[string]any{"code": -32601, "message": "target unscoped synthetic failure: Network.getCookies unavailable"}}
+						resp["sessionId"] = msg.SessionID
+						break
+					}
+					if f.unscopedTabExpired {
+						resp["result"] = map[string]any{"cookies": syntheticTabCookiesExpired()}
+					} else if f.unscopedTabCookie {
 						resp["result"] = map[string]any{"cookies": syntheticTabCookies()}
 					} else {
 						resp["result"] = map[string]any{"cookies": []map[string]any{}}
@@ -234,6 +248,20 @@ func syntheticCookies() []map[string]any {
 func syntheticTabCookies() []map[string]any {
 	return []map[string]any{
 		{"name": "hatch_sess", "value": "FAKE-TABHOST-SESS", "domain": "www.muse.ai", "path": "/", "expires": float64(1796040000), "size": 18, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
+		{"name": "hatch_gw", "value": "FAKE-TABHOST-GW", "domain": "www.muse.ai", "path": "/", "expires": float64(1820000000), "size": 16, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
+		{"name": "sess", "value": "FAKE-TABHOST-SESSION", "domain": "www.muse.ai", "path": "/", "expires": float64(-1), "size": 19, "httpOnly": false, "secure": true, "session": true, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
+	}
+}
+
+// syntheticTabCookiesExpired returns the unscoped-read set
+// with an EXPIRED dated hatch_sess (epoch 1000): the
+// earliest filtered-domain expiry is past, so
+// validateExportedSet rejects the set even though it holds
+// a non-empty hatch_sess on a filtered domain. It is the
+// detectable form of a stale tab-host cookie.
+func syntheticTabCookiesExpired() []map[string]any {
+	return []map[string]any{
+		{"name": "hatch_sess", "value": "FAKE-TABHOST-EXPIRED-SESS", "domain": "www.muse.ai", "path": "/", "expires": float64(1000), "size": 26, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
 		{"name": "hatch_gw", "value": "FAKE-TABHOST-GW", "domain": "www.muse.ai", "path": "/", "expires": float64(1820000000), "size": 16, "httpOnly": true, "secure": true, "session": false, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
 		{"name": "sess", "value": "FAKE-TABHOST-SESSION", "domain": "www.muse.ai", "path": "/", "expires": float64(-1), "size": 19, "httpOnly": false, "secure": true, "session": true, "sameSite": "Lax", "priority": "Medium", "sourceScheme": "Secure", "sourcePort": 443},
 	}

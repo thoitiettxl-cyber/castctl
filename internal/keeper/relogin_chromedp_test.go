@@ -48,15 +48,17 @@ func harvestTargetContext(t *testing.T, f *fakeCDPServer) (context.Context, cont
 // cookie on the tab's own host) — then browser-level
 // Storage, then browser-level Network with ExportURLs. An
 // empty read is a failed read. A level's set is accepted
-// only when it is non-empty AND contains hatch_sess; a
-// non-empty set without hatch_sess falls through to the
-// next level, and the first such candidate is returned only
-// when no level yields hatch_sess. The fake encodes the
+// only when it passes usableSession (the tick's
+// validateExportedSet gate: usable filtered hatch_sess +
+// no past filtered expiry); a non-empty set that fails
+// the gate falls through to the next level, and the first
+// such candidate is returned only when no level passes
+// the gate. The fake encodes the
 // Chrome 155 headless shape: the browser-level Storage read
 // succeeds empty while the browser holds a live session.
 // (empty, nil) holds ONLY when the final level succeeds
 // empty; when the final level errors, harvest returns the
-// joined error instead — UNLESS an earlier level already
+// joined error (four labelled components: l1a/l1b/l2/l3) instead — UNLESS an earlier level already
 // yielded a non-empty candidate, which is returned instead.
 // Wire assertions pin the read sequence: the first target
 // Network.getCookies call must carry exactly ExportURLs, the
@@ -76,6 +78,8 @@ func TestHarvest(t *testing.T) {
 		browserNetworkFails  bool
 		targetStorageFails   bool
 		unscopedTabCookie    bool
+		unscopedTabExpired   bool
+		unscopedNetworkFails bool
 		networkEmpty         bool
 		wantLen              int
 		wantErr              bool
@@ -170,16 +174,16 @@ func TestHarvest(t *testing.T) {
 		},
 		{
 			// Every level errors: the joined error, not
-			// (empty, nil), is returned, with all three
-			// labelled components in order — a swap of
-			// any two components must fail this case.
+			// (empty, nil), is returned, with all four
+			// labelled components in order — a swap or
+			// drop of any component must fail this case.
 			name:                "all levels error returns joined error",
 			storageFails:        true,
 			targetNetworkFails:  true,
 			browserNetworkFails: true,
 			wantLen:             0,
 			wantErr:             true,
-			wantErrExact:        "cookie harvest failed: target: target synthetic failure: Network.getCookies unavailable (-32601); storage: storage synthetic failure: Storage.getCookies unavailable (-32601); network: browser synthetic failure: Network.getCookies unavailable (-32601)",
+			wantErrExact:        "cookie harvest failed: l1a: target synthetic failure: Network.getCookies unavailable (-32601); l1b: target synthetic failure: Network.getCookies unavailable (-32601); l2: storage synthetic failure: Storage.getCookies unavailable (-32601); l3: browser synthetic failure: Network.getCookies unavailable (-32601)",
 			wantTargetNetwork:   true,
 			wantBrowserStorage:  true,
 			wantBrowserNetwork:  true,
@@ -270,6 +274,45 @@ func TestHarvest(t *testing.T) {
 			wantTargetScoped:   1,
 			wantTargetUnscoped: 1,
 		},
+		{
+			// F1S fall-through: the unscoped L1b set holds a
+			// tab-host hatch_sess, but expired, so it fails
+			// usableSession; the harvest must fall through
+			// to browser-level Storage and return its usable
+			// set instead of being shadowed by L1b.
+			name:               "expired tab-host cookie falls through to browser Storage",
+			targetNetworkEmpty: true,
+			unscopedTabExpired: true,
+			wantLen:            3,
+			wantFirstValue:     "FAKE-EXPORTED-SESS",
+			wantFirstDomain:    ".muse.ai",
+			wantTargetNetwork:  true,
+			wantBrowserStorage: true,
+			wantBrowserNetwork: false,
+			wantTargetScoped:   1,
+			wantTargetUnscoped: 1,
+		},
+		{
+			// L1b provenance: L1a succeeds empty, only the
+			// second target read errors, L2 succeeds empty,
+			// and L3 errors with no candidate — the
+			// joined error's l1b label must carry L1b's
+			// own error, with l1a/l2 as the empty-read
+			// sentinel.
+			name:                 "second target read error is labelled l1b in joined error",
+			targetNetworkEmpty:   true,
+			unscopedNetworkFails: true,
+			storageEmpty:         true,
+			browserNetworkFails:  true,
+			wantLen:              0,
+			wantErr:              true,
+			wantErrExact:         "cookie harvest failed: l1a: cdp read returned no cookies; l1b: target unscoped synthetic failure: Network.getCookies unavailable (-32601); l2: cdp read returned no cookies; l3: browser synthetic failure: Network.getCookies unavailable (-32601)",
+			wantTargetNetwork:    true,
+			wantBrowserStorage:   true,
+			wantBrowserNetwork:   true,
+			wantTargetScoped:     1,
+			wantTargetUnscoped:   1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -283,6 +326,8 @@ func TestHarvest(t *testing.T) {
 			f.browserNetworkFails = tt.browserNetworkFails
 			f.targetStorageFails = tt.targetStorageFails
 			f.unscopedTabCookie = tt.unscopedTabCookie
+			f.unscopedTabExpired = tt.unscopedTabExpired
+			f.unscopedNetworkFails = tt.unscopedNetworkFails
 			f.networkEmpty = tt.networkEmpty
 			defer f.server.Close()
 

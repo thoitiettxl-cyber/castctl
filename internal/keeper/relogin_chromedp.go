@@ -551,98 +551,129 @@ func (d *chromedpReloginDriver) waitForCookies(ctx context.Context, contract Log
 // target context — L1a scoped with ExportURLs (the explicit
 // Muse origins: with a URL list, the read is scoped to the
 // page and its subframes, matching the CDP exporter), then
-// L1b unscoped, but only when L1a did not yield hatch_sess.
-// A scoped URL list REPLACES the page+subframes list, so
-// the scoped read cannot see a host-only cookie on the
-// tab's own host when that host is outside ExportURLs; the
-// unscoped read restores the page list and recovers it.
+// L1b unscoped. A scoped URL list REPLACES the page+subframes
+// list, so the scoped read cannot see a host-only cookie on
+// the tab's own host when that host is outside ExportURLs;
+// the unscoped read restores the page list and recovers it.
 // ExportURLs is unchanged by L1b: the second read
 // deliberately carries no list, and no Export code
 // changes. After the target reads come the browser-level
-// Storage.getCookies read, then the browser-level
-// Network.getCookies read with ExportURLs. A level's set
-// is accepted immediately only when it is non-empty and
-// contains hatch_sess; a non-empty set without hatch_sess
-// is remembered as the first candidate and the harvest
-// falls through to the next level, which may hold the
-// session cookie the earlier level missed. When no level
-// yields hatch_sess, the first candidate is returned,
-// preserving the contract with waitForCookies. The
-// hatch_sess gate checks name + non-empty value only: it
-// does not check domain or expiry, which the tick's
-// validateExportedSet checks before any write. An empty
-// read at the first levels is a failed read (the
-// browser-level Storage read can succeed empty on Chrome
-// 155 headless while the browser holds a live session),
-// so the harvest falls through. The final level stands
-// only when it succeeds: on real Chrome 155 the
+// Storage.getCookies read (L2), then the browser-level
+// Network.getCookies read with ExportURLs (L3). A level's
+// set is returned immediately only when it passes
+// usableSession, the tick's pre-write gate (see below): a
+// set that fails the gate — no usable hatch_sess, or an
+// expired filtered cookie — is remembered as the first
+// candidate only when non-empty, and the harvest falls
+// through to the next level, which may hold the session
+// cookie the earlier level missed. Choosing ONE set by the
+// gate, never merging levels, is what keeps a tab-host
+// cookie from shadowing a usable cookie another level
+// holds. When no level passes the gate, the first
+// candidate is returned, preserving the contract with
+// waitForCookies and leaving the final decision to the
+// tick. An empty read at the first levels is a failed
+// read (the browser-level Storage read can succeed empty
+// on Chrome 155 headless while the browser holds a live
+// session), so the harvest falls through. The final level
+// stands only when it succeeds: on real Chrome 155 the
 // browser-level Network.getCookies call can error -32601,
-// in which case the joined error is returned unless an
-// earlier level already yielded a non-empty candidate,
-// which is returned instead; waitForCookies discards a
-// harvest error and polls again, as with any harvest
-// error. Only when the final level succeeds empty is
-// (empty, nil) returned, meaning "no session cookie yet",
-// not an error.
+// in which case the labelled joined error is returned
+// unless an earlier level already yielded a non-empty
+// candidate, which is returned instead; waitForCookies
+// discards a harvest error and polls again, as with any
+// harvest error. Only when the final level succeeds empty
+// is (empty, nil) returned, meaning "no session cookie
+// yet", not an error.
+// usableSession reports whether one read level's cookie set
+// passes the same pre-write gate the tick applies to CDP
+// exports: it converts the set with FromExportedCookie (the
+// tick's own conversion) and calls validateExportedSet
+// (tick.go), so the rule is shared, not restated. That gate
+// requires a non-empty hatch_sess on a filtered domain and
+// rejects the set when the earliest filtered-domain expiry
+// has passed; session cookies carry no expiry and do not
+// gate it, and cookies outside the filter never gate it.
+// A set can therefore pass while holding a hatch_sess value
+// the server would reject as stale: expiry and domain are
+// all the gate can see, and liveness is the tick's live
+// check, not harvest's.
+func usableSession(cookies []ExportedCookie) bool {
+	stored := make([]StoredCookie, 0, len(cookies))
+	for _, c := range cookies {
+		stored = append(stored, FromExportedCookie(c))
+	}
+	return validateExportedSet(stored, time.Now())
+}
+
 func (d *chromedpReloginDriver) harvest(ctx context.Context) ([]ExportedCookie, error) {
 	var first []ExportedCookie
-	var targetErr, storageErr error
+	var l1aErr, l1bErr, l2Err error
 
+	// L1a: scoped target-level read. A usable set returns
+	// immediately; any other set becomes the first
+	// candidate (when non-empty) and the harvest falls
+	// through to L1b.
 	if res, err := chromedp.Call(ctx, network.GetCookies, network.GetCookiesParams{URLs: ExportURLs}); err == nil {
 		cookies := fromNetworkCookies(res.Cookies)
-		if hasHatchSess(cookies) {
+		if usableSession(cookies) {
 			return cookies, nil
 		}
 		if len(cookies) > 0 {
 			first = cookies
 		} else {
-			targetErr = errNoCookies
+			l1aErr = errNoCookies
 		}
 	} else {
-		targetErr = err
+		l1aErr = err
 	}
 
 	// L1b: unscoped Network.getCookies on the same target
-	// context, reached only when L1a did not yield
-	// hatch_sess (L1a returns immediately when it does).
-	// An L1b error replaces the target error only when
-	// L1a succeeded empty; when L1a already errored, its
-	// error is the reported target error.
+	// context. It runs whenever L1a did not return a usable
+	// set, including when L1a errored, and its error is
+	// kept separately from L1a's so the joined error can
+	// label each read's provenance (the old error-replacement
+	// rule, which folded L1b's error into the target
+	// component, is gone: every level keeps its own error).
 	if res, err := chromedp.Call(ctx, network.GetCookies, network.GetCookiesParams{}); err == nil {
 		cookies := fromNetworkCookies(res.Cookies)
-		if hasHatchSess(cookies) {
-			return cookies, nil
-		}
-		if len(cookies) > 0 && first == nil {
-			first = cookies
-		}
-	} else if targetErr == errNoCookies {
-		targetErr = err
-	}
-
-	if res, err := chromedp.CallBrowser(ctx, storage.GetCookies, storage.GetCookiesParams{}); err == nil {
-		cookies := fromNetworkCookies(res.Cookies)
-		if hasHatchSess(cookies) {
+		if usableSession(cookies) {
 			return cookies, nil
 		}
 		if len(cookies) > 0 && first == nil {
 			first = cookies
 		} else if len(cookies) == 0 {
-			storageErr = errNoCookies
+			l1bErr = errNoCookies
 		}
 	} else {
-		storageErr = err
+		l1bErr = err
 	}
 
+	// L2: browser-level Storage.getCookies.
+	if res, err := chromedp.CallBrowser(ctx, storage.GetCookies, storage.GetCookiesParams{}); err == nil {
+		cookies := fromNetworkCookies(res.Cookies)
+		if usableSession(cookies) {
+			return cookies, nil
+		}
+		if len(cookies) > 0 && first == nil {
+			first = cookies
+		} else if len(cookies) == 0 {
+			l2Err = errNoCookies
+		}
+	} else {
+		l2Err = err
+	}
+
+	// L3: browser-level Network.getCookies with ExportURLs.
 	fb, err := chromedp.CallBrowser(ctx, network.GetCookies, network.GetCookiesParams{URLs: ExportURLs})
 	if err != nil {
 		if first != nil {
 			return first, nil
 		}
-		return nil, fmt.Errorf("cookie harvest failed: target: %v; storage: %v; network: %w", targetErr, storageErr, err)
+		return nil, fmt.Errorf("cookie harvest failed: l1a: %v; l1b: %v; l2: %v; l3: %w", l1aErr, l1bErr, l2Err, err)
 	}
 	cookies := fromNetworkCookies(fb.Cookies)
-	if hasHatchSess(cookies) {
+	if usableSession(cookies) {
 		return cookies, nil
 	}
 	if len(cookies) > 0 && first == nil {

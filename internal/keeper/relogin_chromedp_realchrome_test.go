@@ -127,6 +127,101 @@ func TestHarvestRealChromeScopedVsForeign(t *testing.T) {
 	}
 }
 
+// TestHarvestRealChromeUnscopedTabHostServes promotes the
+// P1 probe to a committed test: on real Chrome 155, the
+// harvest of a tab ending on an OUT-OF-LIST host
+// (www.muse.ai, outside ExportURLs) returns that tab's
+// host-only hatch_sess and NOT a different hatch_sess that
+// lives only on another host (other.test) — in a session
+// where the browser-level Storage read provably holds the
+// foreign value, so the harvested set can only be the
+// unscoped target read L1b. Deleting the L1b block must
+// fail this test: the harvest then falls through to
+// Storage, whose set contains the foreign value.
+// ExportURLs is NOT swapped. All cookie values are
+// synthetic FAKE-* values.
+func TestHarvestRealChromeUnscopedTabHostServes(t *testing.T) {
+	chromePath := chromeTestPath(t)
+	_, port := harvestRealChromeServer(t)
+	rules := fmt.Sprintf("MAP muse.ai 127.0.0.1:%d, MAP auth.muse.ai 127.0.0.1:%d, MAP www.muse.ai 127.0.0.1:%d, MAP other.test 127.0.0.1:%d", port, port, port, port)
+
+	dir, err := os.MkdirTemp("", "castctl-harvest-realchrome-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Headless,
+		remote.WebSocket,
+		chromedp.Flag("enable-automation", false),
+		chromedp.Flag("disable-blink-features", "AutomationControlled"),
+		chromedp.Flag("no-sandbox", true),
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("ignore-certificate-errors", true),
+		chromedp.Flag("host-resolver-rules", rules),
+		chromedp.UserDataDir(dir),
+		chromedp.ExecPath(chromePath),
+	)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(ctx, allocOpts...)
+	tctx, cancelTarget := chromedp.NewContext(allocCtx)
+	t.Cleanup(func() {
+		cancelTarget()
+		cancelAlloc()
+		time.Sleep(time.Second)
+		if err := os.RemoveAll(dir); err != nil {
+			t.Logf("profile dir cleanup: %v", err)
+		}
+	})
+
+	// Set the foreign cookie first, then the tab-host one,
+	// leaving the tab on the out-of-list host.
+	if _, err := chromedp.Run(tctx, chromedp.Navigate("https://other.test/")); err != nil {
+		t.Fatalf("navigate foreign host: %v", err)
+	}
+	if _, err := chromedp.Run(tctx, chromedp.Navigate("https://www.muse.ai/")); err != nil {
+		t.Fatalf("navigate tab host: %v", err)
+	}
+
+	// Evidence, logged not asserted: the browser-level
+	// Storage read in this session, and the browser-level
+	// Network error shape (-32601 on Chrome 155).
+	if sres, serr := chromedp.CallBrowser(tctx, storage.GetCookies, storage.GetCookiesParams{}); serr == nil {
+		var rows []string
+		for _, c := range sres.Cookies {
+			rows = append(rows, c.Name+"@"+c.Domain+"="+c.Value)
+		}
+		t.Logf("browser Storage: %v", rows)
+	} else {
+		t.Logf("browser Storage error: %v", serr)
+	}
+	if _, berr := chromedp.CallBrowser(tctx, network.GetCookies, network.GetCookiesParams{URLs: ExportURLs}); berr != nil {
+		t.Logf("browser Network scoped error: %v (want -32601 on Chrome 155)", berr)
+	} else {
+		t.Logf("browser Network scoped: no error in this session")
+	}
+
+	cookies, err := (&chromedpReloginDriver{}).harvest(tctx)
+	if err != nil {
+		t.Fatalf("harvest: %v", err)
+	}
+	sawWww, sawOther := false, false
+	for _, c := range cookies {
+		if c.Name == "hatch_sess" && c.Value == "FAKE-WWW-SESS" {
+			sawWww = true
+		}
+		if c.Name == "hatch_sess" && c.Value == "FAKE-OTHER-SESS" {
+			sawOther = true
+		}
+	}
+	if !sawWww {
+		t.Fatalf("harvest = %+v; want the tab-host FAKE-WWW-SESS", cookies)
+	}
+	if sawOther {
+		t.Fatalf("harvest = %+v; want no out-of-list FAKE-OTHER-SESS", cookies)
+	}
+}
+
 // harvestRealChromeServer serves TLS for the synthetic Muse
 // origins and the foreign host, setting a host-only
 // hatch_sess per host (no Domain attribute). It returns the
@@ -146,6 +241,8 @@ func harvestRealChromeServer(t *testing.T) (*http.Server, int) {
 			http.SetCookie(w, &http.Cookie{Name: "hatch_sess", Value: "FAKE-OTHER-SESS", Path: "/", HttpOnly: true})
 		case "auth.muse.ai":
 			http.SetCookie(w, &http.Cookie{Name: "hatch_sess", Value: "FAKE-AUTH-SESS", Path: "/", HttpOnly: true})
+		case "www.muse.ai":
+			http.SetCookie(w, &http.Cookie{Name: "hatch_sess", Value: "FAKE-WWW-SESS", Path: "/", HttpOnly: true})
 		}
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte("<!doctype html><title>synthetic</title><p>synthetic</p>"))
