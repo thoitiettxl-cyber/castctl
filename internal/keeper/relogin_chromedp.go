@@ -81,7 +81,13 @@ type chromedpReloginDriver struct {
 
 // snapshotScript is the FIXED evaluation script. It receives
 // the selector list and blocker signals as JSON data (never
-// interpolated page content) and returns match counts only.
+// interpolated page content) and returns match counts, the
+// blocker hits, and the selectors whose evaluation threw in
+// the browser. A selector that cannot be evaluated (an
+// invalid selector makes querySelector / querySelectorAll
+// throw) is recorded in badSelectors — never silently
+// counted as 0 — so the driver stops instead of filling or
+// submitting past a selector that may hide a blocker.
 func snapshotScript(selectors []string, blockers []LoginBlockerSignal) (string, error) {
 	selJSON, err := json.Marshal(selectors)
 	if err != nil {
@@ -102,9 +108,11 @@ func snapshotScript(selectors []string, blockers []LoginBlockerSignal) (string, 
 	}
 	script := `(function(selectors, blockers){
 		var counts = {};
+		var badSelectors = [];
+		function noteBad(sel) { if (badSelectors.indexOf(sel) === -1) { badSelectors.push(sel); } }
 		for (var i = 0; i < selectors.length; i++) {
 			try { counts[selectors[i]] = document.querySelectorAll(selectors[i]).length; }
-			catch (e) { counts[selectors[i]] = 0; }
+			catch (e) { counts[selectors[i]] = 0; noteBad(selectors[i]); }
 		}
 		var text = "";
 		try { text = (document.body ? document.body.innerText : "") || ""; } catch (e) {}
@@ -116,10 +124,10 @@ func snapshotScript(selectors []string, blockers []LoginBlockerSignal) (string, 
 			// kind wins — the same order MatchContract
 			// applies Go-side. The value names the signal
 			// class only, never page text.
-			if (b.selector) { try { if (document.querySelector(b.selector)) { if (!hits[b.kind]) { hits[b.kind] = "selector"; } } } catch (e) {} }
+			if (b.selector) { try { if (document.querySelector(b.selector)) { if (!hits[b.kind]) { hits[b.kind] = "selector"; } } } catch (e) { noteBad(b.selector); } }
 			if (b.keyword && lower.indexOf(b.keyword.toLowerCase()) !== -1) { if (!hits[b.kind]) { hits[b.kind] = "keyword"; } }
 		}
-		return {counts: counts, hits: hits};
+		return {counts: counts, hits: hits, badSelectors: badSelectors};
 	})(` + string(selJSON) + `, ` + string(blkJSON) + `)`
 	return script, nil
 }

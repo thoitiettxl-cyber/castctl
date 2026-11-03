@@ -448,7 +448,11 @@ the inventoried page is the redirect target, not the
 requested page — verify the final host before recording
 selectors from the inventory. Re-observe (and update the
 fixture and its pinning test) whenever the login page
-changes.
+changes. Each step selector must match exactly one element:
+zero matches, or more than one, is a `contract_mismatch`.
+The `field` of a step names the credential slot only for
+`fill` steps: a `click` step must leave it empty, and a
+non-empty value is rejected by up-front validation.
 
 The block accepts exactly these keys per
 entry (unknown keys are rejected):
