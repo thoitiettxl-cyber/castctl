@@ -194,7 +194,10 @@ Behaviour, in order:
 5. Replace is one rename in the target's directory, after
    preserving the target's Perm() (0777 rwx) bits (setuid/
    setgid/sticky bits of the old binary are dropped), fsyncing
-   the temp file, and fsyncing the directory after the rename.
+   the temp file (the pre-rename open retries `ETXTBSY` briefly:
+   the kernel may hold the just-exec'd file busy for a few
+   milliseconds after the child exits), and fsyncing the directory
+   after the rename.
    The target is resolved once through symlinks, including a
    target resolving out of the directory. An advisory flock on
    a lock file in the target directory (`.castctl-update.lock`,
