@@ -582,11 +582,15 @@ Behaviour — the self-healing loop, in order:
   `logged_out`, `relogin_failed`, `captcha`, `two_factor`,
   `checkpoint`, `locked`, `blocked`, `re-exported`.
 - **Re-export.** On expiry, when a browser is configured,
-  cookies are re-exported from it over CDP
-  (`Storage.getCookies` primary, `Network.getCookies`
-  fallback) and merged, before re-login is attempted. Only
-  `muse.ai` and `auth.muse.ai` cookies are kept; everything
-  else is dropped (count only). A merged set is written only
+  cookies are re-exported from it over CDP:
+  `Network.getCookies` on each open Muse page target first
+  (target-level), then browser-level `Storage.getCookies`,
+  then browser-level `Network.getCookies` with explicit URLs.
+  An empty read at any level is a failed read, never a
+  result: the next level runs instead (a browser-level
+  Storage read can succeed empty while the browser holds a
+  live session). Only `muse.ai` and `auth.muse.ai` cookies
+  are kept; everything else is dropped (count only). A merged set is written only
   if it contains a non-empty `hatch_sess` and the earliest
   FILTERED-domain expiry is not already past: an expired
   cookie from an unrelated domain is preserved verbatim by
@@ -598,7 +602,11 @@ Behaviour — the self-healing loop, in order:
   falls through to re-login instead of stopping immediately;
   an unreachable browser with no re-login configured records
   an `export_failed` outcome and keeps ticking (transient: no
-  stop, no alert; the next tick retries).
+  stop, no alert; the next tick retries). A stop never
+  rewrites the cookies file: when recovery fails, the
+  pre-stop jar is preserved byte-identical for manual
+  recovery or re-import; the server's verdict is recorded in
+  state, not by mutating cookies.
 - **Cookie save.** Netscape jar only (7 columns, LF, trailing
   newline, deterministic sort). Set-Cookie updates merge into
   a stored jar, and into a non-jar file by converting it to
@@ -724,8 +732,9 @@ Behaviour — the self-healing loop, in order:
   direct-egress browser.
   The human completes the login; captcha/2FA are never
   auto-solved. Honesty note on the attach path: castctl's own
-  code sends no Runtime/JS calls and the browser-level export
-  path sends only `Storage.getCookies`, but chromedp's target
+  code sends no Runtime/JS calls of its own, but the export
+  path attaches to page targets (the browser-level read is
+  only its fallback), and chromedp's target
   attach bootstrap enables Runtime, DOM, CSS, Log, Inspector,
   and Page, sets `Target.setDiscoverTargets` /
   `Target.setAutoAttach`, enables
