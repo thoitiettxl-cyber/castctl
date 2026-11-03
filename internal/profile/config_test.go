@@ -784,20 +784,22 @@ func TestLoadProfileStrayDefaultLegacyFile(t *testing.T) {
 	}
 }
 
-func TestLoadProfileCoercion(t *testing.T) {
+func TestLoadProfileInsideDirCookiesFileRejected(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()
 	base := BaseDir(home)
-	// Copied config pointing inside the base dir is coerced to the profile's own file.
+	// A named profile's cookies_file pointing inside the base
+	// dir at any path other than its own file is a config
+	// error naming both paths — the old silent coercion to
+	// the profile's own file is gone.
 	workDir := filepath.Join(base, "profiles", "work")
+	inside := filepath.Join(base, "cookies.txt")
 	writeFile(t, filepath.Join(base, "config.json"),
-		`{"profiles":{"work":{"cookies_file":`+quote(filepath.Join(base, "cookies.txt"))+`,"node_id":"n1"}}}`, 0o600)
-	p, err := LoadProfile(base, "work", lookupEnv(map[string]string{}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.CookiesFile != filepath.Join(workDir, "cookies.txt") {
-		t.Errorf("coerced CookiesFile = %q; want own file", p.CookiesFile)
+		`{"profiles":{"work":{"cookies_file":`+quote(inside)+`,"node_id":"n1"}}}`, 0o600)
+	if _, err := LoadProfile(base, "work", lookupEnv(map[string]string{})); err == nil {
+		t.Fatal("inside-dir cookies_file loaded; want a config error")
+	} else if !strings.Contains(err.Error(), inside) || !strings.Contains(err.Error(), filepath.Join(workDir, "cookies.txt")) {
+		t.Errorf("error = %q; want both the configured and the profile path named", err.Error())
 	}
 	// A cookies_file outside the base dir is kept (Python keeps it).
 	outside := filepath.Join(t.TempDir(), "outside-cookies.txt")
@@ -810,15 +812,34 @@ func TestLoadProfileCoercion(t *testing.T) {
 	if p2.CookiesFile != outside {
 		t.Errorf("outside CookiesFile = %q; want kept", p2.CookiesFile)
 	}
-	// Relative cookies_file resolves under the base dir, then coercion applies.
+	// A relative cookies_file spelling the profile's own file
+	// resolves under the base dir to exactly that file: kept.
 	writeFile(t, filepath.Join(base, "config.json"),
-		`{"profiles":{"rel":{"cookies_file":"cookies.txt","node_id":"n1"}}}`, 0o600)
+		`{"profiles":{"rel":{"cookies_file":"profiles/rel/cookies.txt","node_id":"n1"}}}`, 0o600)
 	p3, err := LoadProfile(base, "rel", lookupEnv(map[string]string{}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if p3.CookiesFile != filepath.Join(base, "profiles", "rel", "cookies.txt") {
 		t.Errorf("relative CookiesFile = %q; want own file via base resolution", p3.CookiesFile)
+	}
+	// A relative value resolving inside the dir at another
+	// path is rejected the same way as the absolute form.
+	writeFile(t, filepath.Join(base, "config.json"),
+		`{"profiles":{"rel":{"cookies_file":"cookies.txt","node_id":"n1"}}}`, 0o600)
+	if _, err := LoadProfile(base, "rel", lookupEnv(map[string]string{})); err == nil {
+		t.Fatal("relative inside-dir cookies_file loaded; want a config error")
+	}
+	// The default profile keeps the old behaviour: an
+	// inside-dir value is honoured as-is, never redirected.
+	writeFile(t, filepath.Join(base, "config.json"),
+		`{"profiles":{"default":{"cookies_file":"cookies.txt","node_id":"n1"}}}`, 0o600)
+	p4, err := LoadProfile(base, "default", lookupEnv(map[string]string{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p4.CookiesFile != filepath.Join(base, "cookies.txt") {
+		t.Errorf("default CookiesFile = %q; want honoured", p4.CookiesFile)
 	}
 }
 
@@ -993,7 +1014,7 @@ func TestSaveSingleConfig(t *testing.T) {
 func TestEncodeSingleConfigIdempotence(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
-	cookiesFile := filepath.Join(base, "cookies.txt")
+	cookiesFile := filepath.Join(base, "profiles", "muse01", "cookies.txt")
 	doc := `{
   "webui": {"token": "MARKER-WEBUI-TOKEN", "ui_dir": "/srv/MARKER-UIDIR", "listen": "127.0.0.1:8317"},
   "keeper": [{"notify": "telegram", "browser": "http://127.0.0.1:9226/", "profile": "muse01", "tag": "k1", "interval": "30m"}],

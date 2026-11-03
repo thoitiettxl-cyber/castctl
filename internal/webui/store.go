@@ -120,6 +120,25 @@ func (s *Server) saveMerged(load *configLoad, baseSHA string, mutate func(doc ma
 	return s.saveGuarded(load, baseSHA, true, mutate)
 }
 
+// isOwnCookiesFile reports whether value names the profile's own
+// cookies file, in either spelling (absolute or relative to the
+// config dir). A canonical value is contained by construction, so
+// the save guard allows a save to introduce it: a profile rename
+// rewrites the moved entry's spelling to the new key's own file,
+// and that rewritten value is new to the document. Anything else
+// still goes through rejectNewCookiesFile.
+func isOwnCookiesFile(configDir, name, value string) bool {
+	paths, err := profile.ProfilePaths(configDir, name)
+	if err != nil {
+		return false
+	}
+	resolved := value
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(configDir, resolved)
+	}
+	return filepath.Clean(resolved) == paths.Cookies
+}
+
 // saveDirect is saveMerged for endpoints without a client hash
 // (profile/outbound/endpoint/telegram saves, whose frozen
 // request bodies carry no base_sha256): the expected hash is
@@ -168,20 +187,22 @@ func (s *Server) saveGuarded(load *configLoad, expectedSHA string, checkExpected
 	// resolves inside the config dir (symlink- and ".."-aware).
 	// Values already present anywhere in the stored document
 	// pass through unchanged, so a CLI-created absolute path
-	// keeps round-tripping — including across a profile rename,
-	// which moves the value to a new key without changing it.
-	// Only values new to the document are checked. This covers
-	// every web UI write path that funnels through
-	// saveGuarded: profile-create, PUT /config, and the
-	// section saves (whose cookies_file values are unchanged).
-	// Login import/restore check the resolved path separately,
-	// at the seam that writes it.
+	// keeps round-tripping. A value that names the profile's
+	// OWN cookies file is likewise allowed (see
+	// isOwnCookiesFile): a profile rename rewrites the moved
+	// entry's spelling to the new key, and that value is new
+	// to the document. Only values new to the document are
+	// checked. This covers every web UI write path that
+	// funnels through saveGuarded: profile-create, PUT
+	// /config, and the section saves (whose cookies_file
+	// values are unchanged). Login import/restore check the
+	// resolved path separately, at the seam that writes it.
 	storedValues := map[string]bool{}
 	for _, value := range storedCookies {
 		storedValues[value] = true
 	}
-	for _, value := range profileCookiesFiles(doc) {
-		if !storedValues[value] {
+	for name, value := range profileCookiesFiles(doc) {
+		if !storedValues[value] && !isOwnCookiesFile(s.deps.ConfigDir, name, value) {
 			if err := rejectNewCookiesFile(s.deps.ConfigDir, value); err != nil {
 				return "", err
 			}

@@ -7,6 +7,7 @@ package webui
 import (
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -152,7 +153,10 @@ func TestSecretLeakWritePathSweep(t *testing.T) {
 	// must succeed (200) for the write path to be swept at
 	// all — a rejected body would sweep only the error path.
 	_, sha2 := getSettingsSHA(t, ts, "/api/v1/config")
-	cfgDoc := `{"default_profile":"muse01","profiles":{"muse01":{"cookies_file":"COOKIESFILE","vm_id":"FAKE-SECRET-VMID-VALUE","node_id":"FAKE-SECRET-NODEID-VALUE","outbound":"proxy-eu","fingerprint":"chrome"}},"outbounds":[{"type":"trojan","tag":"proxy-eu","server":"203.0.113.10","server_port":443,"password":"FAKE-SECRET-TROJAN-PASSWORD-NEW"}],"endpoints":[],"dns":{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353}],"final":"dns1"}}`
+	// The PUT doc carries the profile's own cookies file: the
+	// literal placeholder would resolve inside the config dir
+	// at a non-default path, which the parser rejects.
+	cfgDoc := strings.ReplaceAll(`{"default_profile":"muse01","profiles":{"muse01":{"cookies_file":"COOKIESFILE","vm_id":"FAKE-SECRET-VMID-VALUE","node_id":"FAKE-SECRET-NODEID-VALUE","outbound":"proxy-eu","fingerprint":"chrome"}},"outbounds":[{"type":"trojan","tag":"proxy-eu","server":"203.0.113.10","server_port":443,"password":"FAKE-SECRET-TROJAN-PASSWORD-NEW"}],"endpoints":[],"dns":{"servers":[{"tag":"dns1","type":"tcp","server":"127.0.0.1","server_port":5353}],"final":"dns1"}}`, "COOKIESFILE", filepath.Join(ts.dir, "profiles", "muse01", "cookies.txt"))
 	putBody, err := json.Marshal(map[string]string{"content": cfgDoc, "base_sha256": sha2})
 	if err != nil {
 		t.Fatalf("marshal PUT body: %v", err)

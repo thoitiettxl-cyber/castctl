@@ -411,8 +411,14 @@ func TestMigrateWriteCreatesMissingExplicit(t *testing.T) {
 
 func TestRelativeCookiesFileUnderCustomConfigDir(t *testing.T) {
 	base := t.TempDir()
-	seedSingleFile(t, base, `{"profiles":{"default":{"cookies_file":"relcookies.txt"},"work":{"cookies_file":"relcookies.txt"}}}`)
 	// Default profile: relative resolves under the resolved dir.
+	// (The doc is written raw below in two shapes: the shared
+	// shape is invalid for the named profile, so it must not
+	// go through the parse-and-save seeder.)
+	rawDefault := `{"profiles":{"default":{"cookies_file":"relcookies.txt"}}}`
+	if err := os.WriteFile(filepath.Join(base, "config.json"), []byte(rawDefault), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	def, err := LoadProfile(base, "default", lookupEnv(map[string]string{}))
 	if err != nil {
 		t.Fatal(err)
@@ -435,16 +441,18 @@ func TestRelativeCookiesFileUnderCustomConfigDir(t *testing.T) {
 	if !strings.Contains(string(rawCookies), "FAKESESS") || !strings.Contains(string(rawCookies), "FAKEDATR") {
 		t.Fatalf("cookies file = %q, want the fake cookies", rawCookies)
 	}
-	// Named profile: the coercion still applies within the
-	// resolved dir — a value inside the dir cannot borrow the
-	// default profile's login.
-	work, err := LoadProfile(base, "work", lookupEnv(map[string]string{}))
-	if err != nil {
+	rawShared := `{"profiles":{"default":{"cookies_file":"relcookies.txt"},"work":{"cookies_file":"relcookies.txt"}}}`
+	if err := os.WriteFile(filepath.Join(base, "config.json"), []byte(rawShared), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	wantWork := filepath.Join(base, "profiles", "work", "cookies.txt")
-	if work.CookiesFile != wantWork {
-		t.Fatalf("CookiesFile (work) = %q, want coerced %q", work.CookiesFile, wantWork)
+	// Named profile: the same value is a config error within
+	// the resolved dir — a value inside the dir cannot borrow
+	// the default profile's login, and the old silent coercion
+	// to the profile's own file is gone.
+	if _, err := LoadProfile(base, "work", lookupEnv(map[string]string{})); err == nil {
+		t.Fatal("named profile sharing the default's cookies_file loaded; want a config error")
+	} else if !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), filepath.Join(base, "profiles", "work", "cookies.txt")) {
+		t.Errorf("error = %q; want both paths named", err.Error())
 	}
 }
 

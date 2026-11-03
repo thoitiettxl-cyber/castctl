@@ -38,7 +38,7 @@ are rejected — see [Per-profile DNS](#per-profile-dns)):
 
 | Key | Value |
 |---|---|
-| `cookies_file` | string: path to the cookie file (relative paths resolve under `CONFIG_DIR`) |
+| `cookies_file` | string: path to the cookie file (relative paths resolve under `CONFIG_DIR`; a named profile's value inside `CONFIG_DIR` at any path other than `profiles/<name>/cookies.txt` is a config error — see below) |
 | `vm_id` | string |
 | `node_id` | string |
 | `auto_approve` | `"always"` or `"off"` only — any other value, including `"on"`, is a config error |
@@ -57,6 +57,21 @@ parsing — see [Outbound server addresses](#outbound-server-addresses-domain_re
 A malformed single file is an error (exit 2), never a
 silent fallback. Cookies are never inline in the config:
 `cookies`/`cookie` keys are rejected.
+
+`cookies_file` is honoured exactly as resolved: relative values
+resolve under `CONFIG_DIR`, absolute values are used as-is, and
+omitting it uses `profiles/<name>/cookies.txt` (`cookies.txt` at
+the config root for the `default` profile). One exception is a
+config error, not a fallback: a named profile's `cookies_file`
+that resolves inside `CONFIG_DIR` at any other path is rejected
+at load time, naming the configured path and the profile's own
+cookies file. Earlier versions silently redirected such a value
+to the profile's own file, so the configured file was never read
+and `profile show` displayed a path the operator did not write.
+To use a cookies file that lives inside the config directory,
+point the profile at its own file (or omit the key); to share a
+cookies file across profiles or keep it elsewhere, point
+`cookies_file` at a path outside `CONFIG_DIR`.
 
 A profile with no entry in `profiles` and no config file of its
 own still exists (its directory is its home) and loads with

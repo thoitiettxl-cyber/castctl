@@ -141,14 +141,15 @@ func (s *Server) logGate() (path string, disabled bool, reason string, err error
 	if pathWithin(resolved, profilesDir) {
 		return "", true, "log_output_refused", nil
 	}
-	// Raw configured values: the parser coerces some
-	// cookies_file values to the profile's own path (an
-	// in-dir value that is not the profile's own), but the
-	// configured path is still the operator's cookies
-	// location, and its .bak must be refused too. Both the
-	// lexical form (so symlink aliases compare equal via
-	// the best-effort check below) and the resolved form
-	// are refused.
+	// Raw configured values: the parser rejects some
+	// cookies_file values (an in-dir value that is not the
+	// profile's own), but a stored document written before
+	// that rule — or a legacy override — can still carry
+	// one, and the configured path is still the operator's
+	// cookies location, and its .bak must be refused too.
+	// Both the lexical form (so symlink aliases compare
+	// equal via the best-effort check below) and the
+	// resolved form are refused.
 	if rawDoc, derr := decodeGeneric(load.raw); derr == nil {
 		for _, v := range profileCookiesFiles(rawDoc) {
 			lexical := v
@@ -175,9 +176,9 @@ func (s *Server) logGate() (path string, disabled bool, reason string, err error
 // resolveCookiesFile are unexported, and the guard needs only
 // the RAW value: the parser-resolved form of an override is
 // always the profile's default cookies path (an in-dir value
-// coerces there, and the default path sits under profiles/,
-// refused by the subtree rule) or an outside absolute path
-// (which the raw forms below name directly). The raw value is
+// is rejected by the parser, and the default path sits under
+// profiles/, refused by the subtree rule) or an outside
+// absolute path (which the raw forms below name directly). The raw value is
 // the spelling a log.output can name, so its lexical and
 // resolved forms, plus their .bak siblings, are refused —
 // the same treatment the single-file raw values in logGate

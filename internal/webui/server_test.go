@@ -72,6 +72,12 @@ func newTestServer(t *testing.T, config string, extra func(*Deps)) *testServer {
 	t.Helper()
 	dir := t.TempDir()
 	cookiesFile := filepath.Join(dir, "profiles", "muse01", "cookies.txt")
+	// COOKIESFILE2 first: it contains COOKIESFILE as a
+	// prefix, and the muse02 path must be muse02's own file,
+	// not muse01's path with a "2" suffix (an in-dir value
+	// at a non-default path is a config error).
+	cookiesFile2 := filepath.Join(dir, "profiles", "muse02", "cookies.txt")
+	config = strings.ReplaceAll(config, "COOKIESFILE2", cookiesFile2)
 	config = strings.ReplaceAll(config, "COOKIESFILE", cookiesFile)
 	if config != "" {
 		if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(config), 0o600); err != nil {
@@ -762,6 +768,14 @@ func TestProfilesCRUD(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("rename: %d: %s", rec.Code, rec.Body.String())
 	}
+	// Rename rewrites the profile's own cookies_file spelling
+	// to the new name; the old path must not survive under
+	// the new key (the parser rejects it as an in-dir value
+	// at a non-default path).
+	raw, _ = os.ReadFile(filepath.Join(ts.dir, "config.json"))
+	if !strings.Contains(string(raw), `profiles/work2/cookies.txt`) || strings.Contains(string(raw), `profiles/work/cookies.txt`) {
+		t.Fatalf("rename did not rewrite cookies_file:\\n%s", raw)
+	}
 	rec = ts.do(t, "POST", "/api/v1/profiles/work2/set-default", ``, true)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("set-default: %d: %s", rec.Code, rec.Body.String())
@@ -1205,7 +1219,7 @@ func TestLoginImportRefusesOutsideCookiesFile(t *testing.T) {
 
 func TestLoginImportWorksInDir(t *testing.T) {
 	calls := 0
-	ts := newTestServer(t, importConfigWithCookiesFile("cookies-evil.txt"), func(deps *Deps) {
+	ts := newTestServer(t, importConfigWithCookiesFile("profiles/evil/cookies.txt"), func(deps *Deps) {
 		deps.ImportCookies = func(ctx context.Context, profileName, content string) (bool, error) {
 			calls++
 			if profileName != "evil" {
