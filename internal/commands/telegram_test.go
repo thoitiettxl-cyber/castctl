@@ -19,6 +19,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -76,6 +78,11 @@ type cmdFakeTelegram struct {
 	// is not ready yet yields an empty result without
 	// advancing, so the bot re-polls until it is.
 	gates []func(*cmdFakeTelegram) bool
+	// editGate, when non-nil, blocks editMessageText until
+	// closed: the gated-join test holds the turn in its final
+	// edit across shutdown. Nil (the default) leaves edits
+	// unblocked.
+	editGate chan struct{}
 }
 
 func (f *cmdFakeTelegram) editTexts() []string {
@@ -163,6 +170,9 @@ func (f *cmdFakeTelegram) handler(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":100,"chat":{"id":500,"type":"private"},"date":0,"text":"ok"}}`)
 	case "editMessageText":
+		if f.editGate != nil {
+			<-f.editGate
+		}
 		text := ""
 		markup := false
 		markupJSON := ""
@@ -381,6 +391,105 @@ func TestTelegramRunPollsFakeServerThroughRuntimeClient(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "telegram: polling stopped") {
 		t.Errorf("stderr = %q; want the polling-stopped shutdown marker", errb.String())
+	}
+}
+
+func TestTelegramRunShutdownJoinsBlockedTurn(t *testing.T) {
+	t.Parallel()
+	// The turn blocks twice: first its subscription waits on
+	// blockSub, then — after cancel unwinds it — its final
+	// edit waits on editGate. Without the shutdown join, Run
+	// returns as soon as the poll loop exits, while the turn
+	// is still stuck in the edit; with the join, Run waits.
+	editGate := make(chan struct{})
+	fake := &cmdFakeTelegram{editGate: editGate}
+	release := func(ch chan struct{}) {
+		select {
+		case <-ch:
+		default:
+			close(ch)
+		}
+	}
+	defer release(editGate)
+	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
+	defer srv.Close()
+	fakeAddr := srv.Listener.Addr().String()
+	dialFake := func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, fakeAddr)
+	}
+	fakeClient := &http.Client{Transport: &http.Transport{
+		Proxy:       nil,
+		DialContext: dialFake,
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialFake(ctx, network, addr)
+		},
+	}}
+
+	gw := newTelegramTurnFakeGateway()
+	gw.subScripts = []turnSubScript{{replyText: "Hello back", deltas: []string{"Hel"}}}
+	gw.blockSub = make(chan struct{})
+	defer release(gw.blockSub)
+	muse := conn.New(func(context.Context, conn.Config) (conn.Gateway, error) { return gw, nil })
+
+	home, configFile := testHome(t, telegramTestConfig())
+	out, errb := &bytes.Buffer{}, &bytes.Buffer{}
+	env := &Env{Stdout: out, Stderr: errb, Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile})}
+	env.BuildRuntime = func(ctx context.Context, loc *profile.ConfigLocation, prof *profile.Profile, env *Env) (*Runtime, error) {
+		return &Runtime{Profile: prof, Muse: muse, httpClientOverride: fakeClient}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- Run(ctx, []string{"telegram", "run"}, env) }()
+
+	// Wait until the turn is provably inside its subscription
+	// wait: the gateway recorded the subscribe call.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		_, _, subs, _ := gw.counts()
+		if subs >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, _, subs, _ := gw.counts(); subs < 1 {
+		t.Fatal("turn never started its subscription; cannot prove it blocked in the wait")
+	}
+	cancel()
+	// The join must hold Run here: the turn is stuck in its
+	// final edit (detached ctx, gated by the test). Without
+	// the join Run returns ~immediately with 130 + marker.
+	select {
+	case code := <-codeCh:
+		t.Fatalf("telegram run returned code %d while the turn was blocked in its final edit; want it still running (shutdown join missing)", code)
+	case <-time.After(500 * time.Millisecond):
+	}
+	// Release both gates: the turn unwinds, Run returns 130
+	// with the shutdown marker.
+	close(editGate)
+	close(gw.blockSub)
+	select {
+	case code := <-codeCh:
+		if code != 130 {
+			t.Errorf("run code = %d; want 130 (interrupted)", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("telegram run did not return after releasing the gates")
+	}
+	if !strings.Contains(errb.String(), "telegram: polling stopped") {
+		t.Errorf("stderr = %q; want the polling-stopped shutdown marker", errb.String())
+	}
+	// No torn-state temp file may remain: the join guarantees
+	// no state save is still in flight when Run returns.
+	var leftovers []string
+	_ = filepath.Walk(home, func(p string, info os.FileInfo, err error) error {
+		if err == nil && strings.HasPrefix(info.Name(), ".telegram-state-") && strings.HasSuffix(info.Name(), ".tmp") {
+			leftovers = append(leftovers, p)
+		}
+		return nil
+	})
+	if len(leftovers) > 0 {
+		t.Errorf("leftover state temp files: %v; want none (turn must finish before Run returns)", leftovers)
 	}
 }
 

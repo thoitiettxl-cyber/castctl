@@ -403,9 +403,11 @@ the delete prompt, matching Python — Boss-approved
 this build: long replies are split into messages instead of
 being sent as a document, `/history` output is split instead
 of sent as a file, `/stop` does not drop dispatcher-queued
-updates (no per-chat drop API), and shutdown does not wait
-for in-flight turns (turns inherit the handler context and
-are cancelled on shutdown).
+updates (no per-chat drop API). Shutdown joins in-flight
+turns before returning (runner.Wait): turns inherit the
+handler context and are cancelled on shutdown, so the join
+waits only for teardown, not for a turn to run to
+completion.
 
 What this build does NOT wire (roadmap step 5b): media
 download/upload, `/files`, `/fs`, `/feed`, `/goals`, `/goal`,
