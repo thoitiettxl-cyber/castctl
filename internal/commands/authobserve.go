@@ -35,9 +35,9 @@ import (
 // itself never writes a contract file.
 //
 // Exit 2 when the build has no headless driver, when the
-// --login-url is not an https URL with a host, when no
-// runtime/inbound can be built (fail closed), or when the
-// page cannot be loaded.
+// --login-url is not an https URL with a host or carries
+// userinfo, when no runtime/inbound can be built (fail
+// closed), or when the page cannot be loaded.
 
 const authObserveLoginHelpText = `usage: castctl auth observe-login [--profile NAME] [--login-url URL]
 
@@ -49,8 +49,8 @@ submitted; nothing is written to the profile.
 
   --profile NAME    profile whose outbound routes the page load
                     (default: active profile)
-  --login-url URL   page to observe (default: https://auth.muse.ai/login;
-                    must be an https URL with a host)
+  --login-url URL   page to observe (default: https://muse.ai/;
+                    must be an https URL with a host and no userinfo)
 
 The observation always launches a headless browser; it never
 attaches to a running browser. The printed "url" is the final
@@ -100,7 +100,7 @@ func cmdAuthObserveLogin(ctx context.Context, env *Env, g *globalOpts, args []st
 			return err
 		}
 	}
-	loginURL := "https://auth.muse.ai/login"
+	loginURL := "https://muse.ai/"
 	if p.strIsSet("login-url") {
 		loginURL = p.str("login-url")
 	}
@@ -169,14 +169,17 @@ func buildObserveOutput(profileName, loginURL string, obs keeper.LoginPageObserv
 }
 
 // validateObserveLoginURL rejects anything but an https URL
-// with a non-empty host, before any browser or network is
-// involved. The error is value-free: it never echoes the
-// supplied URL (which an operator could have pasted with a
-// token in it).
+// with a non-empty host and no userinfo, before any browser
+// or network is involved. The error is value-free: it never
+// echoes the supplied URL (which an operator could have
+// pasted with a token in it).
 func validateObserveLoginURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.Host == "" {
 		return errCodef(2, "auth observe-login: --login-url must be an https URL with a host")
+	}
+	if u.User != nil {
+		return errCodef(2, "auth observe-login: --login-url must not carry userinfo")
 	}
 	return nil
 }

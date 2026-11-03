@@ -103,13 +103,15 @@ import (
 //     16777216): the largest plain-HTTP request body the S2
 //     proxy forwards. Positive, at most MaxProxyBodyBytes.
 //   - `proxy_allowed_hosts` (optional array of host strings,
-//     default ["auth.muse.ai", "muse.ai"]): the ONLY hosts the
-//     S2 proxy dials. Entries are hostnames or IPv4 literals:
-//     no scheme, port, userinfo, path, query, wildcard, or
-//     IPv6 literal. Matching is exact on the lowercased host
-//     (trailing dots ignored). A target whose host is not
-//     listed is refused without a dial, and a literal IP in a
-//     loopback, link-local, or private range is refused even
+//     default ["auth.muse.ai", "muse.ai", "www.facebook.com",
+//     "www.instagram.com", "auth.meta.com"]): the ONLY hosts
+//     the S2 proxy dials. Entries are hostnames or IPv4
+//     literals: no scheme, port, userinfo, path, query,
+//     wildcard, or IPv6 literal. Matching is exact on the
+//     lowercased host (trailing dots ignored). A target
+//     whose host is not listed is refused without a dial,
+//     and a literal IP in a loopback, link-local, or
+//     private range is refused even
 //     when it is explicitly listed: the range rule is
 //     absolute and listing does NOT override it (the
 //     default list contains no such address). The range rule
@@ -268,12 +270,17 @@ const DefaultObserveTimeout = 90 * time.Second
 const DefaultObserveInventoryCap = 200
 
 // DefaultProxyAllowedHosts is the documented zero-value S2
-// proxy allowlist: the Muse login hosts, derived from code
-// only — the default login URL host (auth.muse.ai) and the
-// app origin the login lands on (muse.ai, the gateway API
-// host and FilteredDomains member). No other host is
-// reachable through the proxy unless the entry lists it.
-var DefaultProxyAllowedHosts = []string{"auth.muse.ai", "muse.ai"}
+// proxy allowlist: the login surface, proven load-blocking
+// host by host by the 2026-11-03 read-only observation
+// probe (each host's refusal failed the muse.ai page load
+// until it was allowed): the app origin (muse.ai), the
+// session/API host (auth.muse.ai), and the Meta Account
+// login hosts the page needs to complete load
+// (www.facebook.com, www.instagram.com, auth.meta.com).
+// api.muse.ai is deliberately NOT listed: its refusal does
+// not block the page load. No other host is reachable
+// through the proxy unless the entry lists it.
+var DefaultProxyAllowedHosts = []string{"auth.muse.ai", "muse.ai", "www.facebook.com", "www.instagram.com", "auth.meta.com"}
 
 // MaxProxyHeaderBytes bounds a configured
 // `proxy_max_header_bytes` value. MaxProxyBodyBytes bounds a

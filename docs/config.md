@@ -421,7 +421,34 @@ The optional top-level `keeper` block configures the session
 keeper (`keeper run` / `keeper check` / `keeper status`). It is
 sing-box style: a LIST of entries, each linked to a profile by
 tag. An absent block means the keeper is off: all three
-subcommands exit 2. The block accepts exactly these keys per
+subcommands exit 2.
+
+**Login-form contract.** Headless re-login never guesses a
+form: it matches the live page against the versioned contract
+embedded in the build (`internal/keeper/testdata/login-contract.v1.json`).
+The v1 contract was recorded 2026-11-03 by the read-only
+observation `castctl auth observe-login` (default page
+`https://muse.ai/`, loaded headless through the S2 proxy;
+nothing entered or submitted). It covers the first screen
+only — the identifier field plus Continue — with structural
+selectors (the page exposes no id or name). The
+code-challenge screen is not recorded: reaching it requires
+submitting, which the observer never does. After Continue
+the driver therefore waits for session cookies and fails
+closed at the cookie timeout when the provider challenges
+with a code. Each Continue click asks the provider to
+deliver a login code to the account owner; attempts are
+capped by `relogin_attempts` (default 3) with at most one
+re-login invocation per tick, and the entry then stops with
+a notice. The observe-login output prints both the
+requested `login_url` and the final `url`: if they differ,
+the inventoried page is the redirect target, not the
+requested page — verify the final host before recording
+selectors from the inventory. Re-observe (and update the
+fixture and its pinning test) whenever the login page
+changes.
+
+The block accepts exactly these keys per
 entry (unknown keys are rejected):
 
 | Field | Type | Default | Meaning |
@@ -440,7 +467,7 @@ entry (unknown keys are rejected):
 | `proxy_dial_timeout` | duration string | `30s` | S2 loopback proxy: bound on one upstream dial through the outbound. Positive, at most 1 minute. |
 | `proxy_max_header_bytes` | integer | `65536` | S2 loopback proxy: max bytes of one request's header block. 1–1048576. |
 | `proxy_max_body_bytes` | integer | `16777216` | S2 loopback proxy: max bytes of a forwarded plain-HTTP request body. 1–1073741824. |
-| `proxy_allowed_hosts` | array of strings | `["auth.muse.ai", "muse.ai"]` | S2 loopback proxy guard allowlist (see below): the only hosts the proxy dials. Non-empty; each entry a hostname or IPv4 literal, exact match on the lowercased host (trailing dots ignored), no scheme/port/userinfo/path/query/wildcard/IPv6 literal. Duplicates are kept. |
+| `proxy_allowed_hosts` | array of strings | `["auth.muse.ai", "muse.ai", "www.facebook.com", "www.instagram.com", "auth.meta.com"]` | S2 loopback proxy guard allowlist (see below): the only hosts the proxy dials. Non-empty; each entry a hostname or IPv4 literal, exact match on the lowercased host (trailing dots ignored), no scheme/port/userinfo/path/query/wildcard/IPv6 literal. Duplicates are kept. The default is the login surface proven by the 2026-11-03 observation probe: the muse.ai page load fails with any of the five refused, and succeeds with `api.muse.ai` refused, so that host is not listed. An explicit list REPLACES the defaults entirely: a list copied from older docs (the two Muse hosts only) does not inherit the Meta hosts — remove the key to inherit the current defaults. |
 | `relogin_match_timeout` | duration string | `30s` | Headless driver: how long to poll for the login form (or a blocker) to appear. Positive, at most 10 minutes. |
 | `relogin_cookie_timeout` | duration string | `30s` | Headless driver: how long to poll for a session cookie after submit. Positive, at most 10 minutes. |
 | `relogin_poll_interval` | duration string | `500ms` | Headless driver: poll cadence for form/cookie waits and observation settle. Positive, at most 1 minute. |
@@ -516,12 +543,13 @@ operator who needs a literal private target dialled must
 reach it through a hostname on the allowlist). Matching is
 exact on the lowercased host, trailing dots ignored, no
 wildcards, no suffix matching, ports ignored. The default
-allowlist is the two Muse hosts the login flow is known
-from code to need: `auth.muse.ai` (the default login URL
-host) and `muse.ai` (the app origin / gateway API host).
-Whether the live login page needs any further host through
-the proxy is unmeasured until the outside-sandbox
-observation gate; extend the list in config if it does. A
+allowlist is the five-host login surface proven by the
+2026-11-03 observation probe: `auth.muse.ai`, `muse.ai`,
+`www.facebook.com`, `www.instagram.com`, and `auth.meta.com`
+(the muse.ai page load fails with any of the five refused;
+`api.muse.ai` is refused but does not block the load, so it
+is not listed). An explicit list replaces the defaults
+entirely; remove the key to inherit them. A
 refusal logs the refused host ONLY (no URL, query, port,
 or headers), at the single caller that wires the proxy, via
 the castctl logger. A malformed CONNECT authority (query,
@@ -572,13 +600,12 @@ Behaviour — the self-healing loop, in order:
   goes through the profile's outbound via the loopback proxy
   (S2 inbound plumbing — AGENTS.md rule 2 holds for the
   browser too). The login page must match the versioned
-  contract (to be recorded by read-only observation, see
-  `docs/providers.md` — the embedded contract is currently
-  UNOBSERVED: the driver refuses to run, `auth status`
-  reports `headless_available: false` with reason
-  `no_contract`, and no live re-login may be attempted until
-  a read-only observation from outside the sandbox transport
-  intercept records it); on any contract mismatch, captcha,
+  contract (recorded 2026-11-03 by read-only observation,
+  see `docs/providers.md` — first screen only; the driver
+  refuses to run when the page does not match it, and
+  `auth status` reports `headless_available` /
+  `headless_reason` accordingly); on any contract mismatch,
+  captcha,
   2FA, checkpoint, or lock signal, the driver stops
   immediately, never bypasses, and the entry stops with one
   alert for the incident. Harvested cookies are written

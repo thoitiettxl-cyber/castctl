@@ -16,12 +16,12 @@ import (
 	"time"
 )
 
-// TestAuthStatusHeadlessNoContract (D3) pins the real
-// wiring in a chromedp build: keeper entry + credentials
-// present, driver available, but the embedded contract is
-// unobserved, so auth status must report headless unavailable
-// with reason no_contract — never available.
-func TestAuthStatusHeadlessNoContract(t *testing.T) {
+// TestAuthStatusHeadlessObservedAvailable (D3) pins the
+// real wiring in a chromedp build: keeper entry +
+// credentials present, driver available, and the embedded
+// contract observed (2026-11-03 observation leg), so auth
+// status must report headless available with no reason.
+func TestAuthStatusHeadlessObservedAvailable(t *testing.T) {
 	t.Parallel()
 	exp := time.Now().Add(30 * 24 * time.Hour).Unix()
 	home, configFile := testHome(t, `{"default_profile":"muse01","profiles":{"muse01":{}},`+
@@ -40,7 +40,7 @@ func TestAuthStatusHeadlessNoContract(t *testing.T) {
 	if err := json.Unmarshal([]byte(outBuf.String()), &res); err != nil {
 		t.Fatalf("status output: %v (%q)", err, outBuf.String())
 	}
-	if res.HeadlessAvailable || res.HeadlessReason != "no_contract" {
-		t.Fatalf("headless = %v/%q; want false/no_contract (contract unobserved)", res.HeadlessAvailable, res.HeadlessReason)
+	if !res.HeadlessAvailable || res.HeadlessReason != "" {
+		t.Fatalf("headless = %v/%q; want true/\"\" (contract observed)", res.HeadlessAvailable, res.HeadlessReason)
 	}
 }

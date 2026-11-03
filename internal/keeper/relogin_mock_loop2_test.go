@@ -212,3 +212,96 @@ func TestObserveFailureErrorHasNoToken(t *testing.T) {
 		t.Fatalf("observation error echoes the tokenised URL: %v", err)
 	}
 }
+
+// TestMockReloginDuplicateSelectorBlocks (S1/S2): a second
+// form earlier in the DOM matches the fill selector twice.
+// The count assertion must block before any fill: zero
+// posts, contract_mismatch, no submit.
+func TestMockReloginDuplicateSelectorBlocks(t *testing.T) {
+	chromePath := chromeTestPath(t)
+	t.Setenv("CASTCTL_CHROMIUM_PATH", chromePath)
+	page := mockLoginPageHTML(`<form action="/search" method="get">` +
+		`<input name="q" type="text" aria-label="Search">` +
+		`<button type="button">Search</button></form>` +
+		`<form action="/login" method="post">` +
+		`<input id="user" name="username" type="text" aria-label="Email">` +
+		`<input id="pass" name="password" type="password">` +
+		`<button id="submit" type="submit">Log in</button></form>`)
+	srv, posts, _, _ := mockFormServer(t, page, nil)
+	contract := LoginContract{
+		Version:  1,
+		Observed: true,
+		Steps: []LoginContractStep{
+			{Action: "fill", Selector: "form input[aria-label]", Field: "username"},
+			{Action: "click", Selector: "form button[type=\"submit\"]"},
+		},
+	}
+	entry := &profile.KeeperEntry{
+		ProxyHostsSet:       true,
+		ProxyAllowedHosts:   []string{"fake-login.test"},
+		ReloginMatchSet:     true,
+		ReloginMatchTimeout: 3 * time.Second,
+	}
+	driver, _, _ := mockEntryDriver(t, srv, contract, entry)
+	ctx, cancel := mockReloginCtx(t)
+	defer cancel()
+	_, err := driver.Relogin(ctx, profile.LoginCredential{Username: "u", Password: "p"})
+	var blocker *ReloginBlocker
+	if !errors.As(err, &blocker) || blocker.Detail != "contract_mismatch" {
+		t.Fatalf("Relogin = %v; want a contract_mismatch blocker", err)
+	}
+	if *posts != 0 {
+		t.Fatalf("form posts = %d; want 0 (blocked before any fill/submit)", *posts)
+	}
+}
+
+// TestMockReloginZeroMatchBlocks: no element matches the
+// fill selector. The count assertion must block before any
+// fill: zero posts, contract_mismatch.
+func TestMockReloginZeroMatchBlocks(t *testing.T) {
+	chromePath := chromeTestPath(t)
+	t.Setenv("CASTCTL_CHROMIUM_PATH", chromePath)
+	srv, posts, _, _ := mockFormServer(t, mockLoginPageHTML(`<p>no form here</p>`), nil)
+	entry := &profile.KeeperEntry{
+		ProxyHostsSet:       true,
+		ProxyAllowedHosts:   []string{"fake-login.test"},
+		ReloginMatchSet:     true,
+		ReloginMatchTimeout: 3 * time.Second,
+	}
+	driver, _, _ := mockEntryDriver(t, srv, mockContractSignals("", []LoginBlockerSignal{{Keyword: "captcha", Kind: NoticeCaptcha}}), entry)
+	ctx, cancel := mockReloginCtx(t)
+	defer cancel()
+	_, err := driver.Relogin(ctx, profile.LoginCredential{Username: "u", Password: "p"})
+	var blocker *ReloginBlocker
+	if !errors.As(err, &blocker) || blocker.Detail != "contract_mismatch" {
+		t.Fatalf("Relogin = %v; want a contract_mismatch blocker", err)
+	}
+	if *posts != 0 {
+		t.Fatalf("form posts = %d; want 0 (blocked before any fill/submit)", *posts)
+	}
+}
+
+// TestMockReloginInvalidContractBlockedBeforeLaunch (S10):
+// a bad action in a LATER step must fail validation before
+// any browser is launched: zero outbound dials, zero posts,
+// contract_unknown_action — the first step's fill never runs.
+// No Chrome binary is needed: validation fires first.
+func TestMockReloginInvalidContractBlockedBeforeLaunch(t *testing.T) {
+	srv, posts, _, _ := mockFormServer(t, mockLoginPageHTML(mockFormBody), nil)
+	contract := mockContractSignals("", nil)
+	contract.Steps = append(contract.Steps, LoginContractStep{Action: "clik", Selector: "#submit"})
+	driver, fake, _ := mockReloginDriver(t, srv, contract, "")
+	ctx, cancel := mockReloginCtx(t)
+	defer cancel()
+	_, err := driver.Relogin(ctx, profile.LoginCredential{Username: "u", Password: "p"})
+	var blocker *ReloginBlocker
+	if !errors.As(err, &blocker) || blocker.Detail != "contract_unknown_action" {
+		t.Fatalf("Relogin = %v; want a contract_unknown_action blocker", err)
+	}
+	if fake.dialCount() != 0 {
+		t.Fatalf("outbound dials = %d; want 0 (no browser launched)", fake.dialCount())
+	}
+	if *posts != 0 {
+		t.Fatalf("form posts = %d; want 0", *posts)
+	}
+}
