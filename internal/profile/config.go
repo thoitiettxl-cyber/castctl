@@ -491,7 +491,11 @@ func parseProfileEntry(name string, obj *orderedObject, baseDir string) (*Profil
 		if !ok {
 			return nil, newConfigErrorf("profile %q: cookies_file must be a string", name)
 		}
-		p.CookiesFile = resolveCookiesFile(baseDir, paths, s, name != DefaultProfileName)
+		resolved, err := resolveCookiesFile(baseDir, paths, s, name)
+		if err != nil {
+			return nil, err
+		}
+		p.CookiesFile = resolved
 	}
 	if v, ok := obj.get("vm_id"); ok {
 		s, ok := v.(string)
@@ -779,22 +783,31 @@ func validateTagGraph(cfg *SingleConfig) error {
 }
 
 // resolveCookiesFile resolves a cookies_file value: relative paths
-// resolve under baseDir (delta rule); a named profile whose value points
-// inside the base dir but at another profile's file is coerced to its
-// own cookies file (cli.py:151-188). An empty value means the default.
-func resolveCookiesFile(baseDir string, paths Paths, value string, named bool) string {
+// resolve under baseDir (delta rule); an empty value means the
+// default. A named profile whose value points inside the base dir
+// at any path other than its own cookies file is a config error:
+// earlier code silently coerced such a value to the profile's own
+// file (cli.py:151-188), so the configured file was never read and
+// `profile show` displayed a path the operator did not write.
+// The error names both paths so the fix is obvious: remove
+// cookies_file to use the default, or point it outside the config
+// directory. The default profile keeps the old behaviour (any
+// value honoured as-is): its cookies file predates the profiles/
+// layout and the value is never redirected. An error here is a
+// config error (exit 2), raised at load time by every caller.
+func resolveCookiesFile(baseDir string, paths Paths, value, name string) (string, error) {
 	if strings.TrimSpace(value) == "" {
-		return paths.Cookies
+		return paths.Cookies, nil
 	}
 	resolved := value
 	if !filepath.IsAbs(resolved) {
 		resolved = filepath.Join(baseDir, resolved)
 	}
 	resolved = filepath.Clean(resolved)
-	if named && resolved != paths.Cookies && isInsideDir(resolved, baseDir) {
-		return paths.Cookies
+	if name != DefaultProfileName && resolved != paths.Cookies && isInsideDir(resolved, baseDir) {
+		return "", newConfigErrorf("profile %q: cookies_file %q is inside the config directory but is not the profile cookies file %q; remove cookies_file to use the default, or point it outside the config directory", name, resolved, paths.Cookies)
 	}
-	return resolved
+	return resolved, nil
 }
 
 func isInsideDir(path, dir string) bool {
@@ -985,7 +998,7 @@ func parseLegacyConfig(data []byte, strict bool) (*legacySettings, error) {
 // applyLegacy builds a Profile from legacy settings for the given paths.
 // MIGRATE-ONLY: the only caller is migrateLegacyProfile (via Migrate).
 // LoadProfile never builds a profile from legacy settings.
-func applyLegacy(name string, paths Paths, s *legacySettings, baseDir string) *Profile {
+func applyLegacy(name string, paths Paths, s *legacySettings, baseDir string) (*Profile, error) {
 	p := &Profile{
 		Name:                 name,
 		Dir:                  paths.Dir,
@@ -1002,7 +1015,11 @@ func applyLegacy(name string, paths Paths, s *legacySettings, baseDir string) *P
 		Outbound:             OutboundRef{Kind: OutboundDirect, Type: "direct"},
 	}
 	if s.cookiesFilePresent {
-		p.CookiesFile = resolveCookiesFile(baseDir, paths, s.cookiesFile, name != DefaultProfileName)
+		resolved, err := resolveCookiesFile(baseDir, paths, s.cookiesFile, name)
+		if err != nil {
+			return nil, err
+		}
+		p.CookiesFile = resolved
 	}
 	if s.vmIDPresent {
 		p.VMID = s.vmID
@@ -1020,7 +1037,7 @@ func applyLegacy(name string, paths Paths, s *legacySettings, baseDir string) *P
 		p.TLSEngine = s.tlsEngine
 		p.tlsEnginePresent = true
 	}
-	return p
+	return p, nil
 }
 
 // applyEnvFill fills vm_id/node_id from the environment only when the

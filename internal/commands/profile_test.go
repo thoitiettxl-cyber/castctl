@@ -77,7 +77,10 @@ func TestProfileListShowAddRm(t *testing.T) {
 	}
 
 	// add: no cookies file is created; fingerprint/tls-engine stored.
-	cookies2 := filepath.Join(home, "work-cookies.txt")
+	// The cookies file lives outside the config dir: an
+	// inside-dir path at a non-default location is a config
+	// error for a named profile.
+	cookies2 := filepath.Join(t.TempDir(), "work-cookies.txt")
 	if err := os.WriteFile(cookies2, []byte(fakeCookie), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -26,8 +26,9 @@ type AddProfileOptions struct {
 	// CookiesFile overrides the default cookies file. "" means the
 	// default (baseDir/cookies.txt for "default",
 	// baseDir/profiles/<name>/cookies.txt otherwise). Relative
-	// paths resolve under baseDir; the named-profile coercion from
-	// ParseSingleConfig applies. No cookies file is created.
+	// paths resolve under baseDir; a named profile's value that
+	// points inside baseDir at any other path is a config error
+	// (see resolveCookiesFile). No cookies file is created.
 	CookiesFile string
 	// OutboundTag selects the outbound: "" or "direct" means
 	// direct; any other value must be a tag in the single file's
@@ -102,11 +103,15 @@ func AddProfile(baseDir, name string, opts AddProfileOptions) (*Profile, error) 
 		if err != nil {
 			return err
 		}
+		cookiesFile, err := resolveCookiesFile(baseDir, paths, opts.CookiesFile, name)
+		if err != nil {
+			return err
+		}
 		p := &Profile{
 			Name:          name,
 			Dir:           paths.Dir,
 			ConfigFile:    filepath.Join(baseDir, "config.json"),
-			CookiesFile:   resolveCookiesFile(baseDir, paths, opts.CookiesFile, name != DefaultProfileName),
+			CookiesFile:   cookiesFile,
 			ChatFile:      paths.Chat,
 			NodeID:        nodeID,
 			AutoApprove:   "off",

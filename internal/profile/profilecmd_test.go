@@ -121,14 +121,18 @@ func TestAddProfileCookiesFileAndOutboundTag(t *testing.T) {
 	if !strings.HasSuffix(p2.CookiesFile, filepath.Join("elsewhere", "cookies.txt")) || strings.HasPrefix(p2.CookiesFile, base) {
 		t.Errorf("CookiesFile = %q; want the absolute path outside baseDir preserved", p2.CookiesFile)
 	}
-	// A cookies_file inside baseDir but at another profile's file is
-	// coerced to the profile's own file (the Python rule).
-	p3, err := AddProfile(base, "coerced", AddProfileOptions{CookiesFile: "elsewhere/cookies.txt"})
-	if err != nil {
-		t.Fatal(err)
+	// A cookies_file inside baseDir but at another path is a
+	// config error (the old silent coercion to the profile's
+	// own file is gone): nothing is written.
+	before3, _ := os.ReadFile(filepath.Join(base, "config.json"))
+	if _, err := AddProfile(base, "coerced", AddProfileOptions{CookiesFile: "elsewhere/cookies.txt"}); err == nil {
+		t.Fatal("AddProfile with inside-dir cookies_file = nil error; want error")
+	} else if !strings.Contains(err.Error(), "elsewhere") || !strings.Contains(err.Error(), filepath.Join(base, "profiles", "coerced", "cookies.txt")) {
+		t.Errorf("error = %q; want both paths named", err.Error())
 	}
-	if p3.CookiesFile != filepath.Join(base, "profiles", "coerced", "cookies.txt") {
-		t.Errorf("CookiesFile = %q; want coercion to the profile's own file", p3.CookiesFile)
+	after3, _ := os.ReadFile(filepath.Join(base, "config.json"))
+	if string(before3) != string(after3) {
+		t.Error("failed AddProfile modified the file")
 	}
 	// Dangling tag: error, nothing written.
 	before, _ := os.ReadFile(filepath.Join(base, "config.json"))

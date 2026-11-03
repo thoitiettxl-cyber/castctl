@@ -24,7 +24,12 @@ import (
 func newLogTestServer(t *testing.T, config string) (*Server, string) {
 	t.Helper()
 	dir := t.TempDir()
-	config = strings.ReplaceAll(config, "COOKIESFILE", filepath.Join(dir, "cookies.txt"))
+	// The cookies file lives outside the config dir: a named
+	// profile's in-dir cookies_file at a non-default path is a
+	// config error, and these fixtures only need a parseable
+	// config with a known cookies path.
+	cookiesDir := t.TempDir()
+	config = strings.ReplaceAll(config, "COOKIESFILE", filepath.Join(cookiesDir, "cookies.txt"))
 	config = strings.ReplaceAll(config, "LOGFILE", filepath.Join(dir, "castctl.log"))
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
@@ -87,7 +92,8 @@ func TestLogsRefusedIdentity(t *testing.T) {
 	// as if it were a log.
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
-	config := strings.ReplaceAll(logBlockConfig, "COOKIESFILE", filepath.Join(dir, "cookies.txt"))
+	cookiesDir := t.TempDir()
+	config := strings.ReplaceAll(logBlockConfig, "COOKIESFILE", filepath.Join(cookiesDir, "cookies.txt"))
 	config = strings.ReplaceAll(config, "LOGFILE", configPath)
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
@@ -265,7 +271,7 @@ func assertLogsRefused(t *testing.T, srv *Server, markers ...string) {
 
 func TestLogsRefusedCookiesBak(t *testing.T) {
 	dir := t.TempDir()
-	cookiesPath := filepath.Join(dir, "cookies.txt")
+	cookiesPath := filepath.Join(t.TempDir(), "cookies.txt")
 	bakPath := cookiesPath + ".bak"
 	jar := ".example.com\tTRUE\t/\tFALSE\t0\thatch_sess\tFAKE-COOKIE-HATCH-12345\n" +
 		".example.com\tTRUE\t/\tFALSE\t0\tdatr\tFAKE-COOKIE-DATR-67890\n"
@@ -290,7 +296,7 @@ func TestLogsRefusedLegacyBak(t *testing.T) {
 	if err := os.WriteFile(legacyBak, []byte(jar), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cookiesPath := filepath.Join(dir, "cookies.txt")
+	cookiesPath := filepath.Join(t.TempDir(), "cookies.txt")
 	config := logConfigWithOutput(t, dir, cookiesPath, legacyBak)
 	srv := logServerFromConfig(t, dir, config)
 	assertLogsRefused(t, srv, "FAKE-LEGACY-HATCH-111")
@@ -313,7 +319,7 @@ func TestLogsRefusedProfilesSubtree(t *testing.T) {
 
 func TestLogsRefusedSymlinkToBak(t *testing.T) {
 	dir := t.TempDir()
-	cookiesPath := filepath.Join(dir, "cookies.txt")
+	cookiesPath := filepath.Join(t.TempDir(), "cookies.txt")
 	bakPath := cookiesPath + ".bak"
 	jar := ".example.com\tTRUE\t/\tFALSE\t0\thatch_sess\tFAKE-SYMLINK-HATCH-333\n"
 	if err := os.WriteFile(bakPath, []byte(jar), 0o600); err != nil {
@@ -335,13 +341,15 @@ func TestLogsRefusedDotDotSymlinkBak(t *testing.T) {
 	// symlinked directory plus a ".." component, so a purely
 	// lexical check cannot see the target.
 	dir := t.TempDir()
+	cookiesDir := t.TempDir()
 	aliasPath := filepath.Join(dir, "alias")
-	if err := os.Symlink(dir, aliasPath); err != nil {
+	if err := os.Symlink(cookiesDir, aliasPath); err != nil {
 		t.Fatal(err)
 	}
-	cookiesPath := filepath.Join(dir, "cookies.txt")
+	cookiesPath := filepath.Join(cookiesDir, "cookies.txt")
 	// Lexically: dir/alias/profiles/../cookies.txt.bak collapses
-	// to dir/alias/cookies.txt.bak; resolved: dir/cookies.txt.bak.
+	// to dir/alias/cookies.txt.bak; resolved (alias points at
+	// the cookies dir): cookiesDir/cookies.txt.bak.
 	logPath := filepath.Join(dir, "alias", "profiles", "..", "cookies.txt.bak")
 	config := logConfigWithOutput(t, dir, cookiesPath, logPath)
 	srv := logServerFromConfig(t, dir, config)
@@ -401,7 +409,7 @@ func TestLogsRefusedLegacyOverrideCookiesFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeLegacyProfile(t, dir, "legacy1", `{"cookies_file": "`+jarPath+`"}`)
-	cookiesPath := filepath.Join(dir, "cookies.txt")
+	cookiesPath := filepath.Join(t.TempDir(), "cookies.txt")
 	srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, jarPath))
 	assertLogsRefused(t, srv, "FAKE-LEGACY-OVERRIDE-HATCH-555")
 }
@@ -416,7 +424,7 @@ func TestLogsRefusedLegacyOverrideCookiesBak(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeLegacyProfile(t, dir, "legacy1", `{"cookies_file": "`+jarPath+`"}`)
-	cookiesPath := filepath.Join(dir, "cookies.txt")
+	cookiesPath := filepath.Join(t.TempDir(), "cookies.txt")
 	srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, bakPath))
 	assertLogsRefused(t, srv, "FAKE-LEGACY-OVERRIDEBAK-HATCH-666")
 }
@@ -424,9 +432,10 @@ func TestLogsRefusedLegacyOverrideCookiesBak(t *testing.T) {
 func TestLogsRefusedLegacyOverrideRelative(t *testing.T) {
 	// Relative override: the value joins the config dir, so
 	// the file at the config root holds the jar rows. The
-	// parser would coerce this spelling to the profile's own
-	// path, but the raw spelling is the one an operator's
-	// log.output can name, so the guard must refuse it too.
+	// guard reads legacy overrides raw (the single-file
+	// parser never sees them), so the raw spelling is the
+	// one an operator's log.output can name, and the guard
+	// must refuse it too.
 	dir := t.TempDir()
 	relPath := filepath.Join(dir, "legacy-rel-cookies.txt")
 	jar := ".example.com\tTRUE\t/\tFALSE\t0\thatch_sess\tFAKE-LEGACYREL-HATCH-777\n"
@@ -434,7 +443,7 @@ func TestLogsRefusedLegacyOverrideRelative(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeLegacyProfile(t, dir, "legacy1", `{"cookies_file": "legacy-rel-cookies.txt"}`)
-	cookiesPath := filepath.Join(dir, "cookies.txt")
+	cookiesPath := filepath.Join(t.TempDir(), "cookies.txt")
 	srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, relPath))
 	assertLogsRefused(t, srv, "FAKE-LEGACYREL-HATCH-777")
 }
@@ -463,7 +472,7 @@ func TestLogsRefusedLegacyConfigUnparseable(t *testing.T) {
 			if err := os.WriteFile(logPath, []byte("+0700 2026-10-31 13:00:01 INFO gateway: hello\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			cookiesPath := filepath.Join(dir, "cookies.txt")
+			cookiesPath := filepath.Join(t.TempDir(), "cookies.txt")
 			srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, logPath))
 			rec := logDo(t, srv, "/api/v1/logs")
 			if rec.Code != http.StatusOK {
@@ -530,7 +539,7 @@ func TestLogsRefusedSymlinkedLegacyDirOverride(t *testing.T) {
 			if err := os.Symlink(target, filepath.Join(dir, "profiles", "linkprof")); err != nil {
 				t.Fatal(err)
 			}
-			cookiesPath := filepath.Join(dir, "cookies.txt")
+			cookiesPath := filepath.Join(t.TempDir(), "cookies.txt")
 			srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, tc.spelling(dir, target)))
 			assertLogsRefused(t, srv, "FAKE-SYMDIR-OVERRIDE-HATCH-111")
 		})
@@ -581,7 +590,7 @@ func TestLogsRefusedSymlinkedLegacyDirDefault(t *testing.T) {
 			if err := os.Symlink(target, filepath.Join(dir, "profiles", "linkprof")); err != nil {
 				t.Fatal(err)
 			}
-			cookiesPath := filepath.Join(dir, "cookies.txt")
+			cookiesPath := filepath.Join(t.TempDir(), "cookies.txt")
 			srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, tc.spelling(dir, target)))
 			assertLogsRefused(t, srv, "FAKE-SYMDIR-DEF-HATCH-222")
 		})
@@ -612,7 +621,7 @@ func TestLogsRefusedWhenLegacyEnumerationFails(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "profiles"), []byte("not a directory"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		cookiesPath := filepath.Join(dir, "cookies.txt")
+		cookiesPath := filepath.Join(t.TempDir(), "cookies.txt")
 		srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, legitLog(t, dir)))
 		assertLogsRefused(t, srv)
 	})
@@ -625,13 +634,13 @@ func TestLogsRefusedWhenLegacyEnumerationFails(t *testing.T) {
 		if err := os.Symlink("config.json", filepath.Join(legacyDir, "config.json")); err != nil {
 			t.Fatal(err)
 		}
-		cookiesPath := filepath.Join(dir, "cookies.txt")
+		cookiesPath := filepath.Join(t.TempDir(), "cookies.txt")
 		srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, legitLog(t, dir)))
 		assertLogsRefused(t, srv)
 	})
 	t.Run("noProfilesDir", func(t *testing.T) {
 		dir := t.TempDir()
-		cookiesPath := filepath.Join(dir, "cookies.txt")
+		cookiesPath := filepath.Join(t.TempDir(), "cookies.txt")
 		srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, legitLog(t, dir)))
 		rec := logDo(t, srv, "/api/v1/logs")
 		if rec.Code != http.StatusOK {
@@ -687,7 +696,7 @@ func TestLogsRefusedWhenLegacySymlinkUnresolvable(t *testing.T) {
 			if err := os.Symlink(tc.target(dir), filepath.Join(dir, "profiles", tc.entry)); err != nil {
 				t.Fatal(err)
 			}
-			cookiesPath := filepath.Join(dir, "cookies.txt")
+			cookiesPath := filepath.Join(t.TempDir(), "cookies.txt")
 			srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, writePath))
 			assertLogsRefused(t, srv, "FAKE-NARROW-LOOP-HATCH-333")
 		})
@@ -730,7 +739,7 @@ func TestLogsRefusedInvalidNameLegacyDir(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(legacyDir, "config.json"), []byte(`{"cookies_file": "`+jarPath+`"}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		cookiesPath := filepath.Join(dir, "cookies.txt")
+		cookiesPath := filepath.Join(t.TempDir(), "cookies.txt")
 		srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, jarPath))
 		assertLogsRefused(t, srv, marker)
 	})
@@ -748,7 +757,7 @@ func TestLogsRefusedInvalidNameLegacyDir(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(legacyDir, "config.json"), []byte(`{"cookies_file": "`+jarPath+`"}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		cookiesPath := filepath.Join(dir, "cookies.txt")
+		cookiesPath := filepath.Join(t.TempDir(), "cookies.txt")
 		srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, jarPath+".bak"))
 		assertLogsRefused(t, srv, marker)
 	})
@@ -765,7 +774,7 @@ func TestLogsRefusedInvalidNameLegacyDir(t *testing.T) {
 		if err := os.WriteFile(jarPath, []byte(jar), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		cookiesPath := filepath.Join(dir, "cookies.txt")
+		cookiesPath := filepath.Join(t.TempDir(), "cookies.txt")
 		srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, jarPath))
 		assertLogsRefused(t, srv, marker)
 	})
@@ -785,7 +794,7 @@ func TestLogsRefusedInvalidNameLegacyDir(t *testing.T) {
 		if err := os.Symlink(target, filepath.Join(dir, "profiles", "bad name")); err != nil {
 			t.Fatal(err)
 		}
-		cookiesPath := filepath.Join(dir, "cookies.txt")
+		cookiesPath := filepath.Join(t.TempDir(), "cookies.txt")
 		srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, jarPath))
 		assertLogsRefused(t, srv, marker)
 	})
@@ -805,7 +814,7 @@ func TestLogsRefusedInvalidNameLegacyDir(t *testing.T) {
 		if err := os.Symlink(target, filepath.Join(dir, "profiles", "bad name")); err != nil {
 			t.Fatal(err)
 		}
-		cookiesPath := filepath.Join(dir, "cookies.txt")
+		cookiesPath := filepath.Join(t.TempDir(), "cookies.txt")
 		srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, jarPath+".bak"))
 		assertLogsRefused(t, srv, marker)
 	})
@@ -815,7 +824,7 @@ func TestLogsRefusedInvalidNameLegacyDir(t *testing.T) {
 		if err := os.MkdirAll(legacyDir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		cookiesPath := filepath.Join(dir, "cookies.txt")
+		cookiesPath := filepath.Join(t.TempDir(), "cookies.txt")
 		srv := logServerFromConfig(t, dir, logConfigWithOutput(t, dir, cookiesPath, legitLog(t, dir)))
 		rec := logDo(t, srv, "/api/v1/logs")
 		if rec.Code != http.StatusOK {
@@ -871,11 +880,12 @@ func TestDisplayCallersDegradeOnGuardEnumerationError(t *testing.T) {
 	}
 }
 
-func TestLogsRefusedRawCoercedCookiesFile(t *testing.T) {
-	// Guard (green on both old and new code): a raw
-	// single-file cookies_file value the parser coerces to
-	// the profile's own path — the raw spelling itself must
-	// still be refused when named as the log output.
+func TestLogsInvalidInsideDirCookiesFileRejected(t *testing.T) {
+	// Supersedes the old raw-coercion guard test: the parser
+	// now rejects a named profile's in-dir cookies_file at a
+	// non-default path, so a stored document carrying that
+	// spelling fails closed at load — /logs reports the
+	// config error and never opens the named file.
 	dir := t.TempDir()
 	rawPath := filepath.Join(dir, "cookies.txt")
 	jar := ".example.com\tTRUE\t/\tFALSE\t0\thatch_sess\tFAKE-RAW-COERCED-HATCH-888\n"
@@ -888,7 +898,16 @@ func TestLogsRefusedRawCoercedCookiesFile(t *testing.T) {
   "log": {"output": "` + rawPath + `", "timestamp": true}
 }`
 	srv := logServerFromConfig(t, dir, config)
-	assertLogsRefused(t, srv, "FAKE-RAW-COERCED-HATCH-888")
+	rec := logDo(t, srv, "/api/v1/logs")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("logs: got %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "FAKE-RAW-COERCED-HATCH-888") {
+		t.Fatalf("marker leaked into log response:\n%s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "cookies_file") {
+		t.Errorf("error = %s; want the cookies_file rule named", rec.Body.String())
+	}
 }
 
 func TestLogsInvalidLimitRejected(t *testing.T) {

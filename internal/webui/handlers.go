@@ -474,6 +474,9 @@ func (s *Server) handleRenameProfile(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return errValidation("profile entry is invalid")
 		}
+		if m, ok := entry.(map[string]any); ok {
+			rewriteRenamedCookiesFile(m, s.deps.ConfigDir, name, body.To)
+		}
 		delete(profiles, name)
 		profiles[body.To] = entry
 		if def, _ := doc["default_profile"].(string); def == name {
@@ -498,6 +501,51 @@ func (s *Server) handleRenameProfile(w http.ResponseWriter, r *http.Request) {
 		Fingerprint: detail.Fingerprint,
 		Dir:         detail.Dir,
 	})
+}
+
+// rewriteRenamedCookiesFile moves a renamed profile's cookies_file
+// spelling with it: when the stored value names the OLD profile's
+// own cookies file, it is rewritten to the NEW profile's own file
+// in the same form (relative stays relative, absolute stays
+// absolute). Any other value — absent, an outside path, or a
+// spelling that does not resolve to the old file — is left
+// untouched for the save guard to judge. Without this, a rename
+// would carry the old canonical path under the new key, which
+// the config parser rejects as an in-dir value at a non-default
+// path. The cookies file itself is not moved on disk: like the
+// old silent coercion, the renamed profile starts with its own
+// (absent) cookies file.
+func rewriteRenamedCookiesFile(entry map[string]any, configDir, oldName, newName string) {
+	v, ok := entry["cookies_file"]
+	if !ok {
+		return
+	}
+	s, ok := v.(string)
+	if !ok || strings.TrimSpace(s) == "" {
+		return
+	}
+	oldPaths, err := profile.ProfilePaths(configDir, oldName)
+	if err != nil {
+		return
+	}
+	newPaths, err := profile.ProfilePaths(configDir, newName)
+	if err != nil {
+		return
+	}
+	resolved := s
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(configDir, resolved)
+	}
+	if filepath.Clean(resolved) != oldPaths.Cookies {
+		return
+	}
+	if filepath.IsAbs(s) {
+		entry["cookies_file"] = newPaths.Cookies
+		return
+	}
+	if rel, err := filepath.Rel(configDir, newPaths.Cookies); err == nil {
+		entry["cookies_file"] = rel
+	}
 }
 
 func (s *Server) handleSetDefaultProfile(w http.ResponseWriter, r *http.Request) {

@@ -197,9 +197,10 @@ const (
 )
 
 // Profile is the resolved settings for one profile. CookiesFile is the
-// resolved absolute path after defaulting and coercion. AutoApprove is
-// normalised to "always" or "off". Outbound is direct when no outbound
-// key is present.
+// resolved absolute path after defaulting (an inside-the-config-dir
+// value at a non-default path is a config error for named profiles;
+// see resolveCookiesFile). AutoApprove is normalised to "always" or
+// "off". Outbound is direct when no outbound key is present.
 //
 // Fingerprint and TLSEngine are RECORDED in PR3 (storage + data
 // validation + display only). Their EFFECT takes place only after

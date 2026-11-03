@@ -554,11 +554,13 @@ func TestAuthImportProfileResolution(t *testing.T) {
 		_ = home
 	})
 
-	t.Run("named coercion to own file", func(t *testing.T) {
+	t.Run("named inside-dir cookies_file rejected", func(t *testing.T) {
 		home, cfg := importHome(t, "")
 		// Rewrite the config with a named entry borrowing another
-		// in-config-dir path: LoadProfile coerces it to the
-		// profile's own cookies.txt; import must not recompute.
+		// in-config-dir path: loading the profile is a config
+		// error now (the old silent coercion to the profile's
+		// own cookies.txt is gone), so import refuses and
+		// writes nothing anywhere.
 		borrowed := filepath.Join(home, "other.txt")
 		configJSON := fmt.Sprintf(`{"default_profile":"default","profiles":{"default":{},"work":{"cookies_file":%q}}}`, borrowed)
 		if err := os.WriteFile(cfg, []byte(configJSON), 0o600); err != nil {
@@ -567,14 +569,14 @@ func TestAuthImportProfileResolution(t *testing.T) {
 		out, errb := &bytes.Buffer{}, &bytes.Buffer{}
 		env := &Env{Stdout: out, Stderr: errb, Stdin: strings.NewReader("hatch_sess=FAKE"), Getenv: mapGetenv(nil)}
 		code := Run(context.Background(), []string{"--config", cfg, "--profile", "work", "auth", "import"}, env)
-		if code != 0 {
-			t.Fatalf("code=%d, want 0 (stderr=%q)", code, errb.String())
+		if code == 0 {
+			t.Fatalf("code=0, want non-zero (stdout=%q stderr=%q)", out.String(), errb.String())
 		}
-		res := importResult(t, out.String())
-		if res["cookies_file"] != filepath.Join(home, "profiles", "work", "cookies.txt") {
-			t.Errorf("JSON=%v, want coerced own cookies.txt", res)
+		if !strings.Contains(errb.String(), borrowed) || !strings.Contains(errb.String(), filepath.Join(home, "profiles", "work", "cookies.txt")) {
+			t.Errorf("stderr=%q; want both paths named", errb.String())
 		}
 		assertImportAbsent(t, borrowed)
+		assertImportAbsent(t, filepath.Join(home, "profiles", "work", "cookies.txt"))
 	})
 
 	t.Run("no single-file entry writes synthesised path", func(t *testing.T) {

@@ -49,10 +49,12 @@
 //     legacy parser in config.go reads the same key from a flat
 //     legacy file): a relative value resolves under the config file's
 //     directory (the resolved CONFIG_DIR); an absolute value is
-//     honoured as-is. The named-profile coercion (a named profile
-//     cannot borrow another profile's login when the value points
-//     inside the config dir) applies within the resolved dir.
-//     Python 0.6.1 did NOT resolve this key (the value was kept
+//     honoured as-is. A named profile's value that points inside
+//     the config dir at any path other than the profile's own
+//     cookies file is a config error naming both paths —
+//     earlier code silently coerced it to the profile's own
+//     file, so the configured file was never read. Python
+//     0.6.1 did NOT resolve this key (the value was kept
 //     as-is, so a relative value meant CWD-relative at open
 //     time); the Go delta rule (resolve under the config dir)
 //     predates Requirement A and is unchanged — only the base

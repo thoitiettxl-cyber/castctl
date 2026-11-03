@@ -853,7 +853,7 @@ func migrateLegacyProfile(baseDir, name string, paths Paths) (*Profile, error) {
 	if err != nil {
 		return nil, err
 	}
-	return applyLegacy(name, paths, s, baseDir), nil
+	return applyLegacy(name, paths, s, baseDir)
 }
 
 // legacyProfileSettingsEqual compares the settings a legacy file

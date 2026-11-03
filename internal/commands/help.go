@@ -373,7 +373,10 @@ until a later write needs one.
 
 options:
   --cookies-file PATH   cookies file for the profile (relative paths
-                        resolve under the resolved config directory).
+                        resolve under the resolved config directory;
+                        a named profile's path inside that directory
+                        must be its own cookies file, anything else
+                        there is a config error).
   --outbound TAG|FILE   outbound tag from the config, or a file holding
                         one outbound/endpoint object (use - for stdin).
   --set-default         make the new profile the default.
