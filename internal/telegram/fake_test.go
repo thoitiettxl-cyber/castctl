@@ -456,10 +456,11 @@ func newTestBot(t *testing.T, srv *fakeTelegramServer, mutate func(*Settings)) *
 		Decider:        tb.decider,
 		MessageHandler: tb.handler.handle,
 		ClaimWait:      100 * time.Millisecond,
-		Sleep: func(d time.Duration) {
+		Sleep: func(ctx context.Context, d time.Duration) bool {
 			tb.sleepMu.Lock()
 			tb.sleeps = append(tb.sleeps, d)
 			tb.sleepMu.Unlock()
+			return ctx.Err() == nil
 		},
 		Resume: func(_ context.Context, info ResumeInfo) error {
 			tb.resMu.Lock()

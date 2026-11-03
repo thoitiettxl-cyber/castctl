@@ -110,6 +110,20 @@ type telegramTurnRunner struct {
 	activeMu sync.Mutex
 	active   map[int64]struct{}
 
+	// turns tracks in-flight turn/resume goroutines so shutdown
+	// can join them before the process exits: a turn may still
+	// be saving state when the poll loop stops, and exiting
+	// under it leaves a temp file behind (TempDir cleanup race)
+	// or a torn state file. stopping closes the spawn gate:
+	// once Wait sets it, no new turn can start, so Add can
+	// never race Wait after the dispatcher drain times out
+	// (dispatcher.shutdown abandons workers past 10s, and a
+	// worker still inside processOne could otherwise Add
+	// concurrently with Wait and panic the WaitGroup).
+	turnsMu  sync.Mutex
+	stopping bool
+	turns    sync.WaitGroup
+
 	// live tracks each running turn's streaming preview, for
 	// the /status "Now:" line. It is separate from active: a
 	// resume-follow also registers its preview here.
@@ -197,23 +211,67 @@ func (r *telegramTurnRunner) unregisterLive(chatID int64, p *streamPreview) {
 	r.liveMu.Unlock()
 }
 
+// trackTurn claims one in-flight turn slot for a goroutine
+// about to start: it returns false once Wait has closed the
+// spawn gate, and the caller must then not start the
+// goroutine. A true return must be balanced by exactly one
+// turns.Done, in the goroutine's defers or on the no-spawn
+// path. Add happens-before the go statement, and the spawn
+// gate refuses Adds once Wait begins, so no Add can race Wait.
+func (r *telegramTurnRunner) trackTurn() bool {
+	r.turnsMu.Lock()
+	defer r.turnsMu.Unlock()
+	if r.stopping {
+		return false
+	}
+	r.turns.Add(1)
+	return true
+}
+
+// Wait blocks until all in-flight turn/resume goroutines
+// finish teardown, and closes the spawn gate first so no
+// turn can start after the dispatcher drain: a worker
+// abandoned past the drain timeout could otherwise Add
+// concurrently with Wait. Every blocking operation in a
+// turn takes the (shutdown-cancelled) turn ctx except the
+// detached 15s final-edit attempt and local state saves,
+// so the join is bounded and cannot hang on the 6h turn
+// timeout.
+func (r *telegramTurnRunner) Wait() {
+	r.turnsMu.Lock()
+	r.stopping = true
+	r.turnsMu.Unlock()
+	r.turns.Wait()
+}
+
 // startTurn launches a text turn in its own goroutine and
 // returns immediately, so the dispatcher's per-chat worker
 // stays free for /stop while the turn runs. At most one turn
 // runs per chat: a second message while one is active gets the
 // busy reply. The turn inherits the handler ctx: process
-// shutdown cancels it, and the process does not wait for
-// in-flight turns before exiting (documented in the PR body).
+// shutdown cancels it, and cmdTelegramRun joins in-flight
+// turns (runner.Wait) before returning, so shutdown waits for
+// turn teardown instead of exiting mid-save.
 func (r *telegramTurnRunner) startTurn(ctx context.Context, chatID int64, text string) {
+	if !r.trackTurn() {
+		// Shutdown is joining turns: the bot is going away,
+		// so drop the turn instead of starting work that
+		// Wait can no longer account for. The drop is
+		// logged (never silent); there is no user notice.
+		r.deps.logger.Warn("telegram turn dropped", "chat_id", chatID, "reason", "shutdown-gate")
+		return
+	}
 	r.activeMu.Lock()
 	if _, busy := r.active[chatID]; busy {
 		r.activeMu.Unlock()
+		r.turns.Done()
 		_, _ = r.deps.bot.Send(ctx, chatID, "⏳ Muse is already working in this chat. Use /stop to interrupt it.", telegram.SendOptions{Mode: telegram.HTMLModePlain})
 		return
 	}
 	r.active[chatID] = struct{}{}
 	r.activeMu.Unlock()
 	go func() {
+		defer r.turns.Done()
 		defer r.clearActive(chatID)
 		defer r.recoverTurnPanic(chatID)
 		if err := r.runTextTurn(ctx, chatID, text); err != nil {
@@ -245,10 +303,20 @@ const resumeSlotWait = 5 * time.Second
 // decision already happened in cbDecide before this is called.
 // A stale triple is dropped: if a turn is already active for
 // the chat when the slot frees, or a follow already ran from
-// this AfterSeq, the resume does not re-fire.
+// this AfterSeq, the resume does not re-fire. Like startTurn,
+// the goroutine is tracked so shutdown joins it (see Wait);
+// a follow scheduled after shutdown begins is dropped.
 func (r *telegramTurnRunner) startResume(ctx context.Context, info telegram.ResumeInfo) error {
 	chatID := info.ChatID
+	if !r.trackTurn() {
+		// Shutdown is joining turns: drop the follow
+		// (log-only via logResumeDrop; the bot is going
+		// away, no user notice).
+		r.logResumeDrop(info, "shutdown-gate")
+		return nil
+	}
 	go func() {
+		defer r.turns.Done()
 		acquired := false
 		defer func() {
 			if acquired {

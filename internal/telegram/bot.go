@@ -202,9 +202,10 @@ type Settings struct {
 	// (claim_wait_seconds = 15, src/muse_cli/tgbot.py:618).
 	// Zero means 15s.
 	ClaimWait time.Duration
-	// Sleep sleeps between 429 retries. Nil means time.Sleep.
-	// Tests inject a recorder.
-	Sleep func(time.Duration)
+	// Sleep sleeps between 429 retries, returning false when
+	// ctx is done first. Nil means a timer-based sleep. Tests
+	// inject a recorder.
+	Sleep func(ctx context.Context, d time.Duration) bool
 	// InitialOffset is the last handled update_id from a previous
 	// run in this process (WithInitialOffset: the library adds
 	// 1). Zero means start from the beginning.
@@ -234,7 +235,7 @@ type Bot struct {
 	resume       ResumeFunc
 	handler      MessageHandlerFunc
 	callbackFunc func(ctx context.Context, chatID int64, messageID int, entry CallbackEntry) (bool, error)
-	sleep        func(time.Duration)
+	sleep        func(ctx context.Context, d time.Duration) bool
 
 	// AutoApprove / AutoAllowOnce are the toggles the approval
 	// surface reads (from the telegram config block).
@@ -359,7 +360,7 @@ func New(s Settings) (*Bot, error) {
 	}
 	sleep := s.Sleep
 	if sleep == nil {
-		sleep = time.Sleep
+		sleep = sleepOrDone
 	}
 	claimWait := s.ClaimWait
 	if claimWait <= 0 {
@@ -451,7 +452,9 @@ func (b *Bot) MaxHandledID() int64 { return b.dispatch.maxSeen() }
 // Start polls until ctx is done, then drains the dispatcher and
 // returns ctx.Err(). SIGINT cancellation therefore surfaces as
 // context.Canceled (exit 130 via the command layer), matching
-// the process-wide signal contract.
+// the process-wide signal contract. Both shutdown phases are
+// logged, so a future slow shutdown leaves a trail showing
+// which phase stuck: the poll loop exit, then the drain.
 func (b *Bot) Start(ctx context.Context) error {
 	b.startMu.Lock()
 	if b.started {
@@ -460,8 +463,12 @@ func (b *Bot) Start(ctx context.Context) error {
 	}
 	b.started = true
 	b.startMu.Unlock()
-	defer b.dispatch.shutdown()
+	defer func() {
+		b.dispatch.shutdown()
+		b.logger.Info("telegram dispatcher drained")
+	}()
 	b.api.Start(ctx)
+	b.logger.Info("telegram poll loop stopped; draining dispatcher")
 	return ctx.Err()
 }
 
@@ -1124,11 +1131,31 @@ func truncateToRunes(s string, n int) string {
 	return s
 }
 
+// sleepOrDone sleeps for d, returning false when ctx is done
+// first. It mirrors internal/conn.sleepOrDone: a 429 retry
+// pause must respect cancellation, or a shutdown join can
+// stall for the full retry_after (up to 60s).
+func sleepOrDone(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 // retryCall runs one Bot API call with Python's 429 retry rule
 // (src/muse_cli/tgapi.py:116-130, TelegramAPI.call): retry only
 // HTTP 429 with retry_after present and <= 60, at most 2 retries,
-// sleeping retry_after + 0.5s between attempts.
-func (b *Bot) retryCall(call func() error) error {
+// sleeping retry_after + 0.5s between attempts. The pause
+// respects ctx cancellation: a cancelled shutdown must not
+// wait out the full retry_after.
+func (b *Bot) retryCall(ctx context.Context, call func() error) error {
 	for attempt := 0; ; attempt++ {
 		err := call()
 		if err == nil {
@@ -1136,7 +1163,12 @@ func (b *Bot) retryCall(call func() error) error {
 		}
 		var tmr *bot.TooManyRequestsError
 		if errors.As(err, &tmr) && tmr.RetryAfter > 0 && tmr.RetryAfter <= 60 && attempt < 2 {
-			b.sleep(time.Duration(tmr.RetryAfter)*time.Second + 500*time.Millisecond)
+			if !b.sleep(ctx, time.Duration(tmr.RetryAfter)*time.Second+500*time.Millisecond) {
+				if cerr := ctx.Err(); cerr != nil {
+					return cerr
+				}
+				return err
+			}
 			continue
 		}
 		return err
@@ -1245,7 +1277,7 @@ func (b *Bot) sendMessageCall(ctx context.Context, chatID int64, text string, pa
 		params.ReplyParameters = &models.ReplyParameters{MessageID: replyTo}
 	}
 	var msg *models.Message
-	err := b.retryCall(func() error {
+	err := b.retryCall(ctx, func() error {
 		var err error
 		msg, err = b.api.SendMessage(ctx, params)
 		return err
@@ -1308,7 +1340,7 @@ func (b *Bot) editTextCall(ctx context.Context, chatID int64, msgID int, text st
 		LinkPreviewOptions: &models.LinkPreviewOptions{IsDisabled: &disabled},
 		ReplyMarkup:        markup,
 	}
-	return b.retryCall(func() error {
+	return b.retryCall(ctx, func() error {
 		_, err := b.api.EditMessageText(ctx, params)
 		return err
 	})
@@ -1342,7 +1374,7 @@ func (b *Bot) EditPlain(ctx context.Context, chatID int64, msgID int, text strin
 // unknown, no text otherwise). Its own failure is the caller's
 // to log; onCallback debug-logs it.
 func (b *Bot) answer(ctx context.Context, callbackQueryID, text string) error {
-	err := b.retryCall(func() error {
+	err := b.retryCall(ctx, func() error {
 		_, err := b.api.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
 			CallbackQueryID: callbackQueryID,
 			Text:            text,
@@ -1355,7 +1387,7 @@ func (b *Bot) answer(ctx context.Context, callbackQueryID, text string) error {
 // Delete deletes a message (the /login cookie-message deletion
 // pattern, src/muse_cli/tgbot.py:2251-2279).
 func (b *Bot) Delete(ctx context.Context, chatID int64, msgID int) error {
-	err := b.retryCall(func() error {
+	err := b.retryCall(ctx, func() error {
 		_, err := b.api.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: chatID, MessageID: msgID})
 		return err
 	})
@@ -1373,7 +1405,7 @@ func (b *Bot) ClearMarkup(ctx context.Context, chatID int64, msgID int) error {
 // editMessageReplyMarkup (src/muse_cli/tgbot.py:1725-1737:
 // failure swallowed by the caller).
 func (b *Bot) clearMarkup(ctx context.Context, chatID int64, msgID int) error {
-	err := b.retryCall(func() error {
+	err := b.retryCall(ctx, func() error {
 		_, err := b.api.EditMessageReplyMarkup(ctx, &bot.EditMessageReplyMarkupParams{
 			ChatID:      chatID,
 			MessageID:   msgID,

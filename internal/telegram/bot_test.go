@@ -409,6 +409,43 @@ func TestBotSend429Retry(t *testing.T) {
 	}
 }
 
+func TestBotSend429RetrySleepRespectsCancel(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	// Default timer-based sleep (no recorder): the retry pause
+	// is real, so cancellation mid-pause must cut it short
+	// instead of waiting out the full retry_after.
+	tb := newTestBot(t, srv, func(s *Settings) { s.Sleep = nil })
+	srv.sendFailures = []scriptedFailure{{Code: 429, Desc: "Too Many Requests", RetryAfter: 60}}
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := tb.bot.Send(ctx, 500, "hi", SendOptions{})
+		errCh <- err
+	}()
+	// Wait until the 429 was served and the retry pause began.
+	deadline := time.Now().Add(5 * time.Second)
+	for srv.count("sendMessage") < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if srv.count("sendMessage") < 1 {
+		t.Fatal("no sendMessage attempt served; cannot prove the retry pause began")
+	}
+	start := time.Now()
+	cancel()
+	select {
+	case err := <-errCh:
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("Send returned after %v; want < 5s (must not wait out the 60s retry_after)", elapsed)
+		}
+		if !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), context.Canceled.Error()) {
+			t.Errorf("Send error = %v; want a cancellation error (scrubErr returns the cancellation as text, not the chain)", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Send did not return within 10s of cancel; retry pause ignored ctx cancellation")
+	}
+}
+
 func TestBotCallbackDecide(t *testing.T) {
 	t.Parallel()
 	srv := newFakeTelegramServer(t)
@@ -1458,5 +1495,28 @@ func TestBotCallbackWarningNoMethodField(t *testing.T) {
 	}
 	if strings.Contains(tb.logBuf.String(), "method=") {
 		t.Error("log output contains a method= field on the callback-error exit")
+	}
+}
+
+func TestBotStartLogsShutdownPhases(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startBot(t, tb.bot, ctx)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Start = %v; want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not return after cancel")
+	}
+	buf := tb.logBuf.String()
+	loop := strings.Index(buf, "telegram poll loop stopped")
+	drained := strings.Index(buf, "telegram dispatcher drained")
+	if loop < 0 || drained < 0 || drained < loop {
+		t.Errorf("shutdown phases not logged in order in %q", buf)
 	}
 }

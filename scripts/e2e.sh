@@ -166,14 +166,20 @@ safe_name() {
     printf '%s-%s' "$sanitised" "$h"
 }
 
-# kill_descendants <pid>: TERM every descendant of pid (deepest
-# first), so a signal cannot leave a background job or server alive.
+# kill_descendants <pid> [signal]: signal (default TERM) every
+# descendant of pid, deepest first, so a signal cannot leave a
+# background job or server alive. The signal parameter exists
+# for run_cap_int: a backgrounded shell function runs in a
+# subshell that forks the real command, so signalling the
+# subshell alone orphans the command (proven 2026-11-03: the
+# subshell died 137 while its castctl child kept polling for
+# hours). Descendants-first INT/KILL reaches the real process.
 kill_descendants() {
-    local pid="$1" child
+    local pid="$1" sig="${2:-TERM}" child
     command -v ps >/dev/null 2>&1 || return 0
     for child in $(ps --no-headers -o pid --ppid "$pid" 2>/dev/null); do
-        kill_descendants "$child"
-        kill -TERM "$child" 2>/dev/null || true
+        kill_descendants "$child" "$sig"
+        kill -"$sig" "$child" 2>/dev/null || true
     done
 }
 
@@ -271,7 +277,15 @@ run_cap() {
 # run_cap_int <base> <secs> <cmd...>: like run_cap, but the bound is
 # delivered as SIGINT (castctl exits 130 on a cancelled context).
 # The wait polls so a fast exit does not cost the full interval, and
-# escalates INT -> (brief poll) -> KILL if the child ignores SIGINT.
+# escalates INT -> (longer poll) -> KILL if the child ignores SIGINT.
+# The signal goes to the DESCENDANTS first: a backgrounded shell
+# function (ccfg) runs in a subshell that forks the real command,
+# so signalling $pid alone kills the subshell (wait reports 137)
+# while the command keeps running orphaned. The 12s grace covers
+# either documented shutdown bound alone (dispatcher drain 10s,
+# heartbeat stop 6s); a quiet telegram run shuts down in ~0.2s, so
+# a shutdown past 12s here is genuinely stuck, not a timing
+# artifact. Escalation KILLs descendants too: no orphans.
 run_cap_int() {
     local base="$1" secs="$2"; shift 2
     "$@" >"$base.out" 2>"$base.err" &
@@ -282,10 +296,14 @@ run_cap_int() {
         waited=$((waited + 1))
     done
     if kill -0 "$pid" 2>/dev/null; then
+        kill_descendants "$pid" INT
         kill -INT "$pid" 2>/dev/null || true
         local esc=0
-        while kill -0 "$pid" 2>/dev/null && [ "$esc" -lt 15 ]; do sleep 0.2; esc=$((esc + 1)); done
-        if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi
+        while kill -0 "$pid" 2>/dev/null && [ "$esc" -lt 60 ]; do sleep 0.2; esc=$((esc + 1)); done
+        if kill -0 "$pid" 2>/dev/null; then
+            kill_descendants "$pid" KILL
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
     fi
     wait "$pid"
     printf '%s' "$?" >"$base.code"

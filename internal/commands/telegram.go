@@ -273,7 +273,24 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 	// stolen; a missing keeper block starts nothing.
 	releaseKeeper := startEmbeddedKeeper(ctx, env, g, logger)
 	defer releaseKeeper()
-	return bot.Start(ctx)
+	err = bot.Start(ctx)
+	// Join in-flight turns before reporting shutdown: a turn
+	// goroutine may still be saving state when the poll loop
+	// exits, and returning under it leaves a temp file behind
+	// (or a torn state file). The join is bounded: shutdown
+	// cancels the turn ctx, so the wait unwinds promptly and
+	// only the detached 15s final-edit attempt can linger.
+	// Waiting before the marker also makes the marker mean
+	// "turns done", not just "polling stopped".
+	runner.Wait()
+	// Shutdown boundary marker, always visible even when the log
+	// block disables the bot logger: reaching this line proves the
+	// poll loop exited, the dispatcher drained, and in-flight
+	// turns finished teardown. A future hang leaves stderr
+	// without it, pointing inside Start or the turn join rather
+	// than at the deferred keeper/heartbeat/runtime teardown below.
+	fmt.Fprintln(env.stderr(), "telegram: polling stopped")
+	return err
 }
 
 // telegramStatus is the offline JSON report of the block.

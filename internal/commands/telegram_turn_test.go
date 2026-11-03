@@ -428,8 +428,9 @@ func runTelegramBotWithConfig(t *testing.T, gw *telegramTurnFakeGateway, batches
 	// is gone. The drain waits for the fake's send/edit
 	// counts to stay quiet, which is the turn goroutine's
 	// last observable act before the save. Production
-	// shutdown does not join turns (documented); this is a
-	// test-harness-only join. Safe to call twice: done is
+	// shutdown now joins turns too (runner.Wait); the drain
+	// remains as a harness-side belt-and-braces. Safe to
+	// call twice: done is
 	// closed once, and a second drain finds quiet counts.
 	cancel := func() {
 		cancelFn()
