@@ -81,28 +81,32 @@ func DefaultLoginContract() (LoginContract, error) {
 }
 
 // PageSnapshot is the redacted, driver-supplied view of the
-// live login page the contract is matched against: which
-// recorded selectors are present, and the page's visible text
-// (lowercased by the driver) for keyword signals. It carries
-// no values, no HTML, and no screenshot bytes.
+// live login page the contract is matched against: how many
+// elements each recorded selector matches, and the page's
+// visible text (lowercased by the driver) for keyword
+// signals. It carries no values, no HTML, and no screenshot
+// bytes. A selector matches exactly when its count is 1:
+// zero matches, or more than one, is a mismatch — the driver
+// must never fill or submit into an ambiguous form.
 type PageSnapshot struct {
-	PresentSelectors map[string]bool
-	VisibleText      string
+	Counts      map[string]int
+	VisibleText string
 }
 
-// snapshotResult is the driver's boolean-only snapshot: which
-// contract selectors are present, and which blocker kinds
-// hit (by selector or keyword — the value names the signal
-// class only, never page text). The evaluation script
-// returns nothing else. It lives here (not in the
-// chromedp-tagged driver file) so the decision equivalence
-// with MatchContract is testable without a browser.
+// snapshotResult is the driver's count-only snapshot: how
+// many elements each contract selector matches, and which
+// blocker kinds hit (by selector or keyword — the value
+// names the signal class only, never page text). The
+// evaluation script returns nothing else. It lives here
+// (not in the chromedp-tagged driver file) so the decision
+// equivalence with MatchContract is testable without a
+// browser.
 type snapshotResult struct {
-	Present map[string]bool   `json:"present"`
-	Hits    map[string]string `json:"hits"`
+	Counts map[string]int    `json:"counts"`
+	Hits   map[string]string `json:"hits"`
 }
 
-// snapshotDecision maps a boolean snapshot onto the contract
+// snapshotDecision maps a count snapshot onto the contract
 // through the SAME decision as MatchContract (see
 // matchDecision below): blocker signals first, then
 // step-selector presence. The two paths must agree on every
@@ -121,7 +125,7 @@ func snapshotDecision(c LoginContract, res snapshotResult) error {
 	// falls through to the step checks. An empty kind in the
 	// contract is a malformed entry; both paths treat it the
 	// same (a hit does not block by itself).
-	return matchDecision(c, blockedKind, blockedDetail, res.Present)
+	return matchDecision(c, blockedKind, blockedDetail, res.Counts)
 }
 
 // isBlockerSignal reports whether a blocker was produced by a
@@ -147,13 +151,14 @@ func isBlockerSignal(b *ReloginBlocker) bool {
 
 // matchDecision is the ONE blocker/mismatch decision shared by
 // MatchContract (Go-side snapshot: page text in hand) and the
-// driver's boolean snapshot (kinds only, no page text crosses
-// from the page). blockedKind is "" when no blocker signal
-// hit; blockedDetail names the signal class that hit.
-// present maps contract selectors to presence. Both callers
-// must agree: a test pins their equivalence (see
-// TestSnapshotDecisionMatchesContract).
-func matchDecision(c LoginContract, blockedKind NoticeKind, blockedDetail string, present map[string]bool) error {
+// driver's count snapshot (kinds and match counts only, no
+// page text crosses from the page). blockedKind is "" when
+// no blocker signal hit; blockedDetail names the signal
+// class that hit. counts maps contract selectors to match
+// counts: exactly one match is required — zero, or more than
+// one, is a mismatch. Both callers must agree: a test pins
+// their equivalence (see TestSnapshotDecisionMatchesContract).
+func matchDecision(c LoginContract, blockedKind NoticeKind, blockedDetail string, counts map[string]int) error {
 	if !c.Observed {
 		return ErrContractNotEstablished
 	}
@@ -168,7 +173,7 @@ func matchDecision(c LoginContract, blockedKind NoticeKind, blockedDetail string
 		if step.Selector == "" {
 			return &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_step_no_selector"}
 		}
-		if !present[step.Selector] {
+		if counts[step.Selector] != 1 {
 			return &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_mismatch"}
 		}
 	}
@@ -178,9 +183,10 @@ func matchDecision(c LoginContract, blockedKind NoticeKind, blockedDetail string
 // MatchContract checks a page snapshot against the contract.
 // Blocker signals are checked FIRST (a blocked page may also
 // lack the form): a hit returns a *ReloginBlocker with the
-// signal's kind. Then every contract step selector must be
-// present: a missing selector returns a *ReloginBlocker of
-// kind NoticeBlocked (contract mismatch — the page changed).
+// signal's kind. Then every contract step selector must
+// match exactly one element: zero matches, or more than one,
+// returns a *ReloginBlocker of kind NoticeBlocked (contract
+// mismatch — the page changed, or the form is ambiguous).
 // A contract that is not Observed refuses outright with
 // ErrContractNotEstablished. The returned blocker Detail is a
 // fixed enum string naming the signal class only, never page
@@ -189,7 +195,7 @@ func MatchContract(c LoginContract, snap PageSnapshot) error {
 	var blockedKind NoticeKind
 	blockedDetail := ""
 	for _, sig := range c.Blockers {
-		if sig.Selector != "" && snap.PresentSelectors[sig.Selector] {
+		if sig.Selector != "" && snap.Counts[sig.Selector] > 0 {
 			blockedKind, blockedDetail = sig.Kind, "blocker_selector"
 			break
 		}
@@ -198,5 +204,36 @@ func MatchContract(c LoginContract, snap PageSnapshot) error {
 			break
 		}
 	}
-	return matchDecision(c, blockedKind, blockedDetail, snap.PresentSelectors)
+	return matchDecision(c, blockedKind, blockedDetail, snap.Counts)
+}
+
+// validateContract checks the WHOLE recorded contract BEFORE
+// any browser is launched or any credential typed: the
+// version, and every step's action, field, and selector.
+// A violation returns a *ReloginBlocker with a fixed-enum
+// Detail (same class as contract_empty: the contract is
+// unusable, not the page). The driver's in-loop checks for
+// an unknown action/field remain as defense in depth; they
+// are unreachable for a contract that passes here.
+func validateContract(c LoginContract) *ReloginBlocker {
+	if c.Version != 1 {
+		return &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_bad_version"}
+	}
+	for _, step := range c.Steps {
+		if step.Selector == "" {
+			return &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_step_no_selector"}
+		}
+		switch step.Action {
+		case "fill":
+			switch step.Field {
+			case "username", "password":
+			default:
+				return &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_unknown_field"}
+			}
+		case "click":
+		default:
+			return &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_unknown_action"}
+		}
+	}
+	return nil
 }

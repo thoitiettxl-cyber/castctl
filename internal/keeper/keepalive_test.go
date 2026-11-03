@@ -445,9 +445,9 @@ func TestNoticeKindsClosed(t *testing.T) {
 }
 
 // TestMatchContract pins the matcher: observed contract,
-// present selectors pass; a missing selector mismatches; a
-// keyword hit blocks with its kind; an unobserved contract
-// refuses outright.
+// exactly-one selectors pass; a missing or duplicated
+// selector mismatches; a keyword hit blocks with its kind;
+// an unobserved contract refuses outright.
 func TestMatchContract(t *testing.T) {
 	contract := LoginContract{
 		Version:  1,
@@ -463,20 +463,24 @@ func TestMatchContract(t *testing.T) {
 			{Selector: ".two-factor", Kind: NoticeTwoFactor},
 		},
 	}
-	ok := PageSnapshot{PresentSelectors: map[string]bool{"#user": true, "#pass": true, "#submit": true}}
+	ok := PageSnapshot{Counts: map[string]int{"#user": 1, "#pass": 1, "#submit": 1}}
 	if err := MatchContract(contract, ok); err != nil {
 		t.Fatalf("MatchContract(ok) = %v", err)
 	}
-	missing := PageSnapshot{PresentSelectors: map[string]bool{"#user": true, "#pass": true}}
+	missing := PageSnapshot{Counts: map[string]int{"#user": 1, "#pass": 1}}
 	var blocker *ReloginBlocker
 	if err := MatchContract(contract, missing); !errors.As(err, &blocker) || blocker.Kind != NoticeBlocked {
 		t.Fatalf("MatchContract(missing) = %v; want blocked", err)
 	}
-	keyword := PageSnapshot{PresentSelectors: map[string]bool{"#user": true, "#pass": true, "#submit": true}, VisibleText: "Please solve this CAPTCHA to continue"}
+	keyword := PageSnapshot{Counts: map[string]int{"#user": 1, "#pass": 1, "#submit": 1}, VisibleText: "Please solve this CAPTCHA to continue"}
+	duplicate := PageSnapshot{Counts: map[string]int{"#user": 2, "#pass": 1, "#submit": 1}}
+	if err := MatchContract(contract, duplicate); !errors.As(err, &blocker) || blocker.Detail != "contract_mismatch" {
+		t.Fatalf("MatchContract(duplicate) = %v; want contract_mismatch", err)
+	}
 	if err := MatchContract(contract, keyword); !errors.As(err, &blocker) || blocker.Kind != NoticeCaptcha {
 		t.Fatalf("MatchContract(keyword) = %v; want captcha", err)
 	}
-	selHit := PageSnapshot{PresentSelectors: map[string]bool{"#user": true, "#pass": true, "#submit": true, ".two-factor": true}}
+	selHit := PageSnapshot{Counts: map[string]int{"#user": 1, "#pass": 1, "#submit": 1, ".two-factor": 1}}
 	if err := MatchContract(contract, selHit); !errors.As(err, &blocker) || blocker.Kind != NoticeTwoFactor {
 		t.Fatalf("MatchContract(selector) = %v; want two_factor", err)
 	}
@@ -484,6 +488,48 @@ func TestMatchContract(t *testing.T) {
 	unobserved.Observed = false
 	if err := MatchContract(unobserved, ok); !errors.Is(err, ErrContractNotEstablished) {
 		t.Fatalf("MatchContract(unobserved) = %v; want ErrContractNotEstablished", err)
+	}
+}
+
+// TestValidateContract pins the up-front contract check:
+// the version and EVERY step are validated before any
+// browser launches, so a bad action or field in a LATER
+// step fails without the first step's fill ever running.
+func TestValidateContract(t *testing.T) {
+	t.Parallel()
+	good := LoginContract{
+		Version:  1,
+		Observed: true,
+		LoginURL: "https://auth.example.test/login",
+		Steps: []LoginContractStep{
+			{Action: "fill", Selector: "#user", Field: "username"},
+			{Action: "fill", Selector: "#pass", Field: "password"},
+			{Action: "click", Selector: "#submit"},
+		},
+	}
+	if b := validateContract(good); b != nil {
+		t.Fatalf("validateContract(good) = %v; want nil", b)
+	}
+	cases := []struct {
+		name   string
+		mutate func(*LoginContract)
+		want   string
+	}{
+		{"bad version", func(c *LoginContract) { c.Version = 2 }, "contract_bad_version"},
+		{"bad action in later step", func(c *LoginContract) { c.Steps[2].Action = "clik" }, "contract_unknown_action"},
+		{"bad field in later step", func(c *LoginContract) { c.Steps[1].Field = "usernam" }, "contract_unknown_field"},
+		{"empty selector", func(c *LoginContract) { c.Steps[1].Selector = "" }, "contract_step_no_selector"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := good
+			c.Steps = append([]LoginContractStep(nil), good.Steps...)
+			tc.mutate(&c)
+			b := validateContract(c)
+			if b == nil || b.Kind != NoticeBlocked || b.Detail != tc.want {
+				t.Fatalf("validateContract = %+v; want blocked/%s", b, tc.want)
+			}
+		})
 	}
 }
 
@@ -519,6 +565,9 @@ func TestDefaultContractObserved(t *testing.T) {
 	}
 	if len(c.Blockers) != 0 {
 		t.Fatalf("contract blockers = %d; want 0 (none observed)", len(c.Blockers))
+	}
+	if b := validateContract(c); b != nil {
+		t.Fatalf("embedded contract fails up-front validation: %v", b)
 	}
 }
 
@@ -582,7 +631,7 @@ func TestSnapshotDecisionMatchesContract(t *testing.T) {
 			{Kind: NoticeTwoFactor, Selector: ".two-factor", Keyword: "two-factor"},
 		},
 	}
-	present := map[string]bool{"#user": true, "#pass": true, "#submit": true}
+	counts := map[string]int{"#user": 1, "#pass": 1, "#submit": 1}
 	emptyKind := LoginContract{
 		Version:  1,
 		Observed: true,
@@ -601,29 +650,35 @@ func TestSnapshotDecisionMatchesContract(t *testing.T) {
 		res      snapshotResult
 	}{
 		{"all present", contract,
-			PageSnapshot{PresentSelectors: present, VisibleText: "sign in"},
-			snapshotResult{Present: present, Hits: map[string]string{}}},
+			PageSnapshot{Counts: counts, VisibleText: "sign in"},
+			snapshotResult{Counts: counts, Hits: map[string]string{}}},
 		{"missing submit", contract,
-			PageSnapshot{PresentSelectors: map[string]bool{"#user": true, "#pass": true}, VisibleText: "sign in"},
-			snapshotResult{Present: map[string]bool{"#user": true, "#pass": true}, Hits: map[string]string{}}},
+			PageSnapshot{Counts: map[string]int{"#user": 1, "#pass": 1}, VisibleText: "sign in"},
+			snapshotResult{Counts: map[string]int{"#user": 1, "#pass": 1}, Hits: map[string]string{}}},
 		{"captcha keyword", contract,
-			PageSnapshot{PresentSelectors: present, VisibleText: "please solve the captcha"},
-			snapshotResult{Present: present, Hits: map[string]string{string(NoticeCaptcha): "keyword"}}},
+			PageSnapshot{Counts: counts, VisibleText: "please solve the captcha"},
+			snapshotResult{Counts: counts, Hits: map[string]string{string(NoticeCaptcha): "keyword"}}},
 		{"two-factor selector", contract,
-			PageSnapshot{PresentSelectors: map[string]bool{"#user": true, "#pass": true, "#submit": true, ".two-factor": true}, VisibleText: "sign in"},
-			snapshotResult{Present: map[string]bool{"#user": true, "#pass": true, "#submit": true, ".two-factor": true}, Hits: map[string]string{string(NoticeTwoFactor): "selector"}}},
+			PageSnapshot{Counts: map[string]int{"#user": 1, "#pass": 1, "#submit": 1, ".two-factor": 1}, VisibleText: "sign in"},
+			snapshotResult{Counts: map[string]int{"#user": 1, "#pass": 1, "#submit": 1, ".two-factor": 1}, Hits: map[string]string{string(NoticeTwoFactor): "selector"}}},
 		{"blocker beats missing step", contract,
-			PageSnapshot{PresentSelectors: map[string]bool{"#user": true}, VisibleText: "captcha required"},
-			snapshotResult{Present: map[string]bool{"#user": true}, Hits: map[string]string{string(NoticeCaptcha): "keyword"}}},
+			PageSnapshot{Counts: map[string]int{"#user": 1}, VisibleText: "captcha required"},
+			snapshotResult{Counts: map[string]int{"#user": 1}, Hits: map[string]string{string(NoticeCaptcha): "keyword"}}},
 		{"unobserved", LoginContract{Version: 1},
-			PageSnapshot{PresentSelectors: present},
-			snapshotResult{Present: present, Hits: map[string]string{}}},
+			PageSnapshot{Counts: counts},
+			snapshotResult{Counts: counts, Hits: map[string]string{}}},
 		{"empty-kind signal falls through", emptyKind,
-			PageSnapshot{PresentSelectors: map[string]bool{}, VisibleText: "surprise check"},
-			snapshotResult{Present: map[string]bool{}, Hits: map[string]string{"": "keyword"}}},
+			PageSnapshot{Counts: map[string]int{}, VisibleText: "surprise check"},
+			snapshotResult{Counts: map[string]int{}, Hits: map[string]string{"": "keyword"}}},
 		{"step without selector", noSelector,
-			PageSnapshot{PresentSelectors: map[string]bool{}, VisibleText: "sign in"},
-			snapshotResult{Present: map[string]bool{}, Hits: map[string]string{}}},
+			PageSnapshot{Counts: map[string]int{}, VisibleText: "sign in"},
+			snapshotResult{Counts: map[string]int{}, Hits: map[string]string{}}},
+		{"duplicate selector", contract,
+			PageSnapshot{Counts: map[string]int{"#user": 2, "#pass": 1, "#submit": 1}, VisibleText: "sign in"},
+			snapshotResult{Counts: map[string]int{"#user": 2, "#pass": 1, "#submit": 1}, Hits: map[string]string{}}},
+		{"zero selector", contract,
+			PageSnapshot{Counts: map[string]int{"#user": 1, "#pass": 1, "#submit": 0}, VisibleText: "sign in"},
+			snapshotResult{Counts: map[string]int{"#user": 1, "#pass": 1, "#submit": 0}, Hits: map[string]string{}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -16,12 +16,20 @@ in headlessly against the versioned login contract
 read-only observation via `castctl auth observe-login`, never
 by credential submission). Any contract mismatch, captcha, 2FA,
 checkpoint, or lock stops the entry with one Telegram alert;
-nothing is ever bypassed. **The contract is NOT yet
-established**: the embedded fixture is unobserved (no
-read-only observation has succeeded — the sandbox transport
-intercept blocks the page load), so the driver refuses to run
-and no live re-login may be attempted until an observation
-from outside the sandbox intercept records the contract. See [The `keeper` section](config.md#the-keeper-section)
+nothing is ever bypassed. **The contract is established**:
+the embedded fixture was recorded 2026-11-03 by the
+read-only observation `castctl auth observe-login`
+(headless, through the S2 profile-routed inbound; nothing
+entered or submitted). It covers the first screen only —
+the identifier field plus Continue — with structural
+selectors (the page exposes no id or name on either
+control). The code-challenge screen is not recorded:
+reaching it requires submitting, which the observer never
+does, so after Continue the driver waits for session
+cookies and fails closed at the cookie timeout when the
+provider challenges with a code. Re-observe (and update
+the fixture and its pinning test) whenever the login page
+changes. See [The `keeper` section](config.md#the-keeper-section)
 and [The `credentials` section](config.md#the-credentials-section).
 
 Release-build note: the release workflow

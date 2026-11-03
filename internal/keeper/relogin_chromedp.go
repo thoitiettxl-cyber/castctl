@@ -28,9 +28,10 @@ import (
 // evaluates JavaScript in a browser, and it does so under a
 // strict rule: the evaluated script is a FIXED string that
 // takes the contract's selectors/keywords as data and
-// returns ONLY booleans (which selectors are present) and
-// fixed signal-class strings (which blocker kind hit, and
-// whether by selector or keyword). No page text, HTML,
+// returns ONLY match counts (how many elements each selector
+// matches) and fixed signal-class strings (which blocker
+// kind hit, and whether by selector or keyword). No page
+// text, HTML,
 // attribute value, screenshot, or cookie value ever crosses
 // from the page into Go through evaluation; cookies are
 // harvested only through the browser-level Storage.getCookies
@@ -45,6 +46,8 @@ import (
 // ONLY egress). Match the page against the recorded contract
 // BEFORE entering anything; on any mismatch or blocker
 // signal, stop with a *ReloginBlocker and enter nothing.
+// The contract itself is validated before any browser is
+// launched (see validateContract).
 // Fill and submit exactly the recorded steps — clearing each
 // field before typing, and re-matching the page before the
 // submit click so a blocker appearing mid-fill stops before
@@ -72,7 +75,7 @@ type chromedpReloginDriver struct {
 
 // snapshotScript is the FIXED evaluation script. It receives
 // the selector list and blocker signals as JSON data (never
-// interpolated page content) and returns booleans only.
+// interpolated page content) and returns match counts only.
 func snapshotScript(selectors []string, blockers []LoginBlockerSignal) (string, error) {
 	selJSON, err := json.Marshal(selectors)
 	if err != nil {
@@ -92,10 +95,10 @@ func snapshotScript(selectors []string, blockers []LoginBlockerSignal) (string, 
 		return "", err
 	}
 	script := `(function(selectors, blockers){
-		var present = {};
+		var counts = {};
 		for (var i = 0; i < selectors.length; i++) {
-			try { present[selectors[i]] = !!document.querySelector(selectors[i]); }
-			catch (e) { present[selectors[i]] = false; }
+			try { counts[selectors[i]] = document.querySelectorAll(selectors[i]).length; }
+			catch (e) { counts[selectors[i]] = 0; }
 		}
 		var text = "";
 		try { text = (document.body ? document.body.innerText : "") || ""; } catch (e) {}
@@ -110,12 +113,12 @@ func snapshotScript(selectors []string, blockers []LoginBlockerSignal) (string, 
 			if (b.selector) { try { if (document.querySelector(b.selector)) { if (!hits[b.kind]) { hits[b.kind] = "selector"; } } } catch (e) {} }
 			if (b.keyword && lower.indexOf(b.keyword.toLowerCase()) !== -1) { if (!hits[b.kind]) { hits[b.kind] = "keyword"; } }
 		}
-		return {present: present, hits: hits};
+		return {counts: counts, hits: hits};
 	})(` + string(selJSON) + `, ` + string(blkJSON) + `)`
 	return script, nil
 }
 
-// snapshot evaluates the fixed boolean script on the target
+// snapshot evaluates the fixed count script on the target
 // and maps the result onto the contract through
 // snapshotDecision (the same decision MatchContract makes).
 // It returns a *ReloginBlocker for a hit/mismatch, or nil
@@ -334,6 +337,12 @@ func (d *chromedpReloginDriver) Relogin(ctx context.Context, cred profile.LoginC
 	if len(contract.Steps) == 0 || contract.LoginURL == "" {
 		return nil, &ReloginBlocker{Kind: NoticeBlocked, Detail: "contract_empty"}
 	}
+	// Validate the whole contract BEFORE the attempt loop:
+	// no browser is launched and no credential typed for a
+	// contract with an unknown version, action, or field.
+	if blocker := validateContract(contract); blocker != nil {
+		return nil, blocker
+	}
 	attempts := d.opts.MaxAttempts
 	if attempts < 1 {
 		attempts = 1
@@ -384,7 +393,7 @@ func (d *chromedpReloginDriver) attempt(ctx context.Context, contract LoginContr
 		return fail(nil, err)
 	}
 	// Wait for the form (or a blocker) to appear, polling
-	// the boolean snapshot. A page that never matches the
+	// the count snapshot. A page that never matches the
 	// contract is a mismatch blocker, not a retry: the
 	// form genuinely is not the recorded one. The wait and
 	// poll cadence come from the entry (documented
@@ -450,7 +459,7 @@ func (d *chromedpReloginDriver) attempt(ctx context.Context, contract LoginContr
 	return cookies, nil, nil
 }
 
-// waitForMatch polls the boolean snapshot until the page
+// waitForMatch polls the count snapshot until the page
 // matches the contract, a blocker signal appears, or the
 // deadline passes (mismatch blocker). Only a named blocker
 // signal stops immediately: a contract_mismatch on an early

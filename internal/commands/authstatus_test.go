@@ -342,24 +342,25 @@ func TestEmbeddedKeeperCoRun(t *testing.T) {
 func TestHeadlessCapability(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name            string
-		entry, driver   bool
-		creds, observed bool
-		ref             bool
-		wantAvail       bool
-		wantReason      string
+		name          string
+		entry, driver bool
+		creds, usable bool
+		ref           bool
+		wantAvail     bool
+		wantReason    string
 	}{
 		{"no entry", false, false, false, false, false, false, "no_keeper_entry"},
 		{"entry no driver", true, false, false, false, false, false, "no_chromedp"},
 		{"entry driver no creds unobserved", true, true, false, false, false, false, "no_contract"},
 		{"creds unobserved no ref", true, true, true, false, false, false, "no_contract"},
 		{"observed no ref", true, true, true, true, false, false, "no_credentials_ref"},
+		{"observed but unusable", true, true, true, false, true, false, "no_contract"},
 		{"observed ref no creds", true, true, false, true, true, false, "no_credentials"},
 		{"all present observed", true, true, true, true, true, true, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			avail, reason := headlessCapability(tc.entry, tc.driver, tc.creds, tc.observed, tc.ref)
+			avail, reason := headlessCapability(tc.entry, tc.driver, tc.creds, tc.usable, tc.ref)
 			if avail != tc.wantAvail || reason != tc.wantReason {
 				t.Fatalf("headlessCapability = %v/%q; want %v/%q", avail, reason, tc.wantAvail, tc.wantReason)
 			}
@@ -385,6 +386,8 @@ func TestValidateObserveLoginURL(t *testing.T) {
 		{"auth.muse.ai/login", false},
 		{"ftp://auth.muse.ai/login", false},
 		{"https://auth.muse.ai/login?code=SECRET", true},
+		{"https://user@auth.muse.ai/login", false},
+		{"https://user:SENTINEL-PASS@auth.muse.ai/login", false},
 	}
 	for _, tc := range cases {
 		if err := validateObserveLoginURL(tc.raw); (err == nil) != tc.ok {
@@ -394,6 +397,11 @@ func TestValidateObserveLoginURL(t *testing.T) {
 	if err := validateObserveLoginURL("http://x/?token=SENTINEL-TOKEN-123"); err == nil {
 		t.Fatal("http URL accepted")
 	} else if strings.Contains(err.Error(), "SENTINEL-TOKEN-123") {
+		t.Fatalf("validation error echoes the URL: %q", err.Error())
+	}
+	if err := validateObserveLoginURL("https://user:SENTINEL-PASS@auth.muse.ai/login"); err == nil {
+		t.Fatal("userinfo URL accepted")
+	} else if strings.Contains(err.Error(), "SENTINEL-PASS") {
 		t.Fatalf("validation error echoes the URL: %q", err.Error())
 	}
 }
