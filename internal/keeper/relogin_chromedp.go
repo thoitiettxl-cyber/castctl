@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/storage"
 	"github.com/chromedp/chromedp"
 	"github.com/chromedp/chromedp/remote"
@@ -34,8 +35,13 @@ import (
 // text, HTML,
 // attribute value, screenshot, or cookie value ever crosses
 // from the page into Go through evaluation; cookies are
-// harvested only through the browser-level Storage.getCookies
-// call, the same read the CDP exporter uses. The driver never
+// harvested Storage first (browser-level Storage.getCookies,
+// the browser's authoritative store), then target-level
+// (Network.getCookies on the login tab, scoped with
+// ExportURLs and then unscoped — the unscoped read is
+// harvest-only), then the browser-level Network read.
+// That Storage-first order is harvest-only: it differs
+// from the CDP exporter's target-first order. The driver never
 // exfiltrates, never screenshots, never enables the screencast
 // relay, and never touches a target it did not create.
 //
@@ -503,7 +509,7 @@ func (d *chromedpReloginDriver) waitForMatch(ctx context.Context, contract Login
 	}
 }
 
-// waitForCookies polls the browser-level cookie read until
+// waitForCookies polls the target-first cookie harvest until
 // a hatch_sess cookie is harvested, a blocker appears, or
 // the deadline passes (transient: the login may have
 // failed server-side, which a retry can still recover).
@@ -542,14 +548,162 @@ func (d *chromedpReloginDriver) waitForCookies(ctx context.Context, contract Log
 	}
 }
 
-// harvest reads all browser cookies through the
-// browser-level Storage.getCookies call.
-func (d *chromedpReloginDriver) harvest(ctx context.Context) ([]ExportedCookie, error) {
-	res, err := chromedp.CallBrowser(ctx, storage.GetCookies, storage.GetCookiesParams{})
-	if err != nil {
-		return nil, err
+// harvest reads the login tab's cookies, Storage first:
+// L1 browser-level Storage.getCookies is the browser's
+// authoritative cookie store, so when it holds a usable
+// set that set wins deterministically over every
+// target-level set. That priority — not a value
+// comparison — is what closes P2: a usable tab-host
+// cookie can never shadow a usable Storage cookie,
+// because Storage is consulted first and a usable
+// Storage set returns immediately. The K-LIVE-2 shape
+// is not "Storage is wrong" but "an empty Storage read
+// was treated as success": an empty read is a failed
+// read (the browser-level Storage read can succeed
+// empty on Chrome 155 headless while the browser holds
+// a live session), so the harvest falls through. After
+// Storage come two sequential Network.getCookies reads
+// on the same target context — L2 scoped with
+// ExportURLs (the explicit Muse origins: with a URL
+// list, the read is scoped to the page and its
+// subframes, matching the CDP exporter), then L3
+// unscoped, which restores the page list and recovers
+// a host-only cookie on the tab's own host when that
+// host is outside ExportURLs. ExportURLs is unchanged
+// by L3: the third read deliberately carries no list,
+// and no Export code changes. The final level is L4,
+// browser-level Network.getCookies with ExportURLs. A
+// level's set is returned immediately only when it
+// passes usableSession, the tick's pre-write gate (see
+// below): a set that fails the gate — no usable
+// hatch_sess, or an expired filtered cookie — is
+// remembered as the first candidate only when
+// non-empty, and the harvest falls through to the next
+// level, which may hold the session cookie the earlier
+// level missed. Choosing ONE set by the gate, never
+// merging levels, keeps levels from being mixed. When
+// no level passes the gate, the first candidate is
+// returned, preserving the contract with
+// waitForCookies and leaving the final decision to
+// the tick. The final level stands only when it
+// succeeds: on real Chrome 155 the browser-level
+// Network.getCookies call can error -32601, in which
+// case the labelled joined error is returned unless
+// an earlier level already yielded a non-empty
+// candidate, which is returned instead;
+// waitForCookies discards a harvest error and polls
+// again, as with any harvest error. Only when the
+// final level succeeds empty is (empty, nil)
+// returned, meaning "no session cookie yet", not an
+// error.
+// usableSession reports whether one read level's cookie set
+// passes the same pre-write gate the tick applies to CDP
+// exports: it converts the set with FromExportedCookie (the
+// tick's own conversion) and calls validateExportedSet
+// (tick.go), so the rule is shared, not restated. That gate
+// requires a non-empty hatch_sess on a filtered domain and
+// rejects the set when the earliest filtered-domain expiry
+// has passed; session cookies carry no expiry and do not
+// gate it, and cookies outside the filter never gate it.
+// A set can therefore pass while holding a hatch_sess value
+// the server would reject as stale: expiry and domain are
+// all the gate can see, and liveness is the tick's live
+// check, not harvest's. Priority between levels is fixed
+// (Storage first); the gate never compares values across
+// levels.
+func usableSession(cookies []ExportedCookie) bool {
+	stored := make([]StoredCookie, 0, len(cookies))
+	for _, c := range cookies {
+		stored = append(stored, FromExportedCookie(c))
 	}
-	return fromNetworkCookies(res.Cookies), nil
+	return validateExportedSet(stored, time.Now())
+}
+
+func (d *chromedpReloginDriver) harvest(ctx context.Context) ([]ExportedCookie, error) {
+	var first []ExportedCookie
+	var l1Err, l2Err, l3Err error
+
+	// L1: browser-level Storage.getCookies. Storage is the
+	// browser's authoritative cookie store: when it holds a
+	// usable set, that set wins deterministically over any
+	// target-level set, so a tab-host cookie can never shadow
+	// a usable Storage cookie (P2). The Chrome 155 headless
+	// shape — Storage succeeding empty while the browser
+	// holds a live session — is an empty read, a failed
+	// read: it falls through to the target levels below.
+	// A usable set returns immediately; any other set
+	// becomes the first candidate (when non-empty) and the
+	// harvest falls through to L2.
+	if res, err := chromedp.CallBrowser(ctx, storage.GetCookies, storage.GetCookiesParams{}); err == nil {
+		cookies := fromNetworkCookies(res.Cookies)
+		if usableSession(cookies) {
+			return cookies, nil
+		}
+		if len(cookies) > 0 {
+			first = cookies
+		} else {
+			l1Err = errNoCookies
+		}
+	} else {
+		l1Err = err
+	}
+
+	// L2: scoped target-level read with ExportURLs. A usable
+	// set returns immediately; any other set becomes the
+	// first candidate (when non-empty) and the harvest falls
+	// through to L3.
+	if res, err := chromedp.Call(ctx, network.GetCookies, network.GetCookiesParams{URLs: ExportURLs}); err == nil {
+		cookies := fromNetworkCookies(res.Cookies)
+		if usableSession(cookies) {
+			return cookies, nil
+		}
+		if len(cookies) > 0 && first == nil {
+			first = cookies
+		} else if len(cookies) == 0 {
+			l2Err = errNoCookies
+		}
+	} else {
+		l2Err = err
+	}
+
+	// L3: unscoped Network.getCookies on the same target
+	// context. It runs whenever L2 did not return a usable
+	// set, including when L2 errored, and its error is
+	// kept separately from L2's so the joined error can
+	// label each read's provenance.
+	if res, err := chromedp.Call(ctx, network.GetCookies, network.GetCookiesParams{}); err == nil {
+		cookies := fromNetworkCookies(res.Cookies)
+		if usableSession(cookies) {
+			return cookies, nil
+		}
+		if len(cookies) > 0 && first == nil {
+			first = cookies
+		} else if len(cookies) == 0 {
+			l3Err = errNoCookies
+		}
+	} else {
+		l3Err = err
+	}
+
+	// L4: browser-level Network.getCookies with ExportURLs.
+	fb, err := chromedp.CallBrowser(ctx, network.GetCookies, network.GetCookiesParams{URLs: ExportURLs})
+	if err != nil {
+		if first != nil {
+			return first, nil
+		}
+		return nil, fmt.Errorf("cookie harvest failed: l1: %v; l2: %v; l3: %v; l4: %w", l1Err, l2Err, l3Err, err)
+	}
+	cookies := fromNetworkCookies(fb.Cookies)
+	if usableSession(cookies) {
+		return cookies, nil
+	}
+	if len(cookies) > 0 && first == nil {
+		first = cookies
+	}
+	if first != nil {
+		return first, nil
+	}
+	return cookies, nil
 }
 
 // hasHatchSess reports whether the harvest holds a

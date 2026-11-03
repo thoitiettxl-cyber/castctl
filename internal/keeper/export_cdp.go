@@ -73,7 +73,9 @@ func CDPAvailable() bool { return true }
 // the Muse origins only. An empty URL list would mean "page
 // + subframes", which is NOT all cookies, so the list is
 // explicit wherever Network.getCookies is used (target-level
-// primary and browser-level fallback alike).
+// primary and browser-level fallback alike), except the
+// harvest's L3 unscoped read, which deliberately carries
+// no list to recover a tab-host cookie (see harvest).
 var ExportURLs = []string{"https://muse.ai/", "https://auth.muse.ai/"}
 
 // errNoCookies is the internal empty-read signal: a CDP read
@@ -144,8 +146,12 @@ func (e cdpExporter) Export(ctx context.Context) ([]ExportedCookie, error) {
 	}
 
 	// Level 3: browser-level Network.getCookies with
-	// explicit URLs. Its result stands even when empty:
-	// every level agreed empty, so the tick decides.
+	// explicit URLs. Its result stands even when empty,
+	// but ONLY when it succeeds: on real Chrome 155 the
+	// browser-level Network call can error -32601, in
+	// which case the joined error below is returned
+	// instead. When it succeeds empty, every level agreed
+	// empty, so the tick decides.
 	fb, ferr := chromedp.CallBrowser(browserCtx, network.GetCookies, network.GetCookiesParams{URLs: ExportURLs})
 	if ferr != nil {
 		return nil, fmt.Errorf("cdp cookie read failed: target: %v; storage: %v; network: %w", targetErr, storageErr, ferr)
