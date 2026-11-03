@@ -581,6 +581,16 @@ func TestCallbackAnswerStartsTurn(t *testing.T) {
 	})
 	wb.cancel()
 	<-wb.done
+	// Join the answer turn before the test returns. startTurn runs
+	// in its own goroutine and saves state (watermark) after the
+	// final edit waitFor observes, so returning here can race
+	// t.TempDir cleanup ("directory not empty") or leave the save
+	// running after the directory is gone. Production shutdown
+	// joins the same way (bot.Start, then runner.Wait); cancel
+	// first so the join is bounded and cannot hang on the turn
+	// timeout. Keep t.Parallel: the join, not parallelism, is
+	// what removes the race.
+	wb.handler.runner.Wait()
 	wb.fake.mu.Lock()
 	sends := append([]string(nil), wb.fake.sends...)
 	wb.fake.mu.Unlock()
