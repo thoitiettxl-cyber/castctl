@@ -591,7 +591,15 @@ def cmd_shape(argv):
             addr = obj.get("address")
             addr_count = len(addr) if isinstance(addr, list) else -1
             system = obj.get("system")
-            print(f"wireguard tag={tag} system={system} private_key={'present' if has_key else 'absent'} "
+            # Presence only, no value is ever printed. The wording is
+            # deliberately `private_key present` / `private_key absent`
+            # (space, not `private_key=...`): leg 12 scans shape.out
+            # with the label pattern `private_key[":=]`, so the `=`
+            # spelling made the script's own diagnostic self-trigger
+            # the scan. Real labelled values (`private_key=<value>`,
+            # `"private_key": "<value>"`) still match that pattern,
+            # which is unchanged; see scripts/test-e2e-shape-scan.sh.
+            print(f"wireguard tag={tag} system={system} private_key {'present' if has_key else 'absent'} "
                   f"address_count={addr_count} peers={peer_count}")
             if isinstance(peers, list):
                 for peer in peers:
@@ -1339,7 +1347,7 @@ fi
 # printed, logged, or hashed into output by the shape query.
 if grep -q '^wireguard ' "$SHAPE_BASE.out"; then
     WG_SYSTEM_BAD="$(grep -c '^wireguard .* system=True' "$SHAPE_BASE.out" || true)"
-    WG_NOKEY="$(grep -c '^wireguard .* private_key=absent' "$SHAPE_BASE.out" || true)"
+    WG_NOKEY="$(grep -c '^wireguard .* private_key absent' "$SHAPE_BASE.out" || true)"
     if [ "$WG_SYSTEM_BAD" = '0' ] && [ "$WG_NOKEY" = '0' ]; then
         record 'outbounds' 'wg-shape' 'PASS' 'wireguard endpoints: system not true, private_key present (presence only)'
     else
