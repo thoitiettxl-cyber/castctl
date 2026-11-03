@@ -1636,7 +1636,11 @@ if [ "$WEBUI_TOKEN_AVAILABLE" = '0' ]; then
     else
         NL_PORT="$(free_port)"
         NL_BASE="$OUT_DIR/webui-nonloopback"
-        NL_CFG="$E2E_TMP/nl-config.json"
+        # --config requires the basename config.json: the probe copy
+        # lives in its own directory, like the main temp copy.
+        NL_DIR="$E2E_TMP/nl"
+        mkdir -p "$NL_DIR"
+        NL_CFG="$NL_DIR/config.json"
         cp -- "$CFG" "$NL_CFG"
         chmod 0600 "$NL_CFG"
         python3 "$CFGTOOL" set-webui-listen "$NL_CFG" "$NL_CFG" "0.0.0.0:$NL_PORT" >/dev/null
@@ -1849,7 +1853,11 @@ PY
         else
             NL_PORT="$(free_port)"
             NL_BASE="$OUT_DIR/webui-nonloopback"
-            NL_CFG="$E2E_TMP/nl-config.json"
+            # --config requires the basename config.json: the probe
+            # copy lives in its own directory, like the main temp copy.
+            NL_DIR="$E2E_TMP/nl"
+            mkdir -p "$NL_DIR"
+            NL_CFG="$NL_DIR/config.json"
             cp -- "$CFG" "$NL_CFG"
             chmod 0600 "$NL_CFG"
             python3 "$CFGTOOL" set-webui-listen "$NL_CFG" "$NL_CFG" "0.0.0.0:$NL_PORT" >/dev/null
