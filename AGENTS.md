@@ -16,6 +16,12 @@ Hard rules:
 4. Work on branches, open PRs; main is protected. Tags v* are admin-only.
 5. Update the matching docs/* file in the same PR as the code.
 6. When porting new behavior from an upstream, update `docs/provenance.md` and `NOTICE` in the same PR.
+7. Never build or run the test suite on the Pi host (the Debian chroot on
+   the phone): CPU-heavy work runs the device hot. Build and test on the
+   cue VM instead: `ssh cue-96e79c5bd353`, then
+   `PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=auto go test -race -tags
+   with_utls,with_quic,with_wireguard,with_gvisor ./...`. No toolchain
+   install, no `-race`/`-count=N` loop, no Docker on the Pi host.
 
 Core roadmap order (Boss-decided, each step its own PR, gated):
 Step A migration → legacy-removal → per-profile DNS → release

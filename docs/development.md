@@ -2,7 +2,21 @@
 
 ## Go
 
-Build and test from the repo root:
+Build and test from the repo root, on the cue VM — never on the Pi host
+(the Debian chroot on the phone runs hot under CPU load; see AGENTS.md
+hard rule 7). From the Pi host:
+
+```sh
+ssh cue-96e79c5bd353
+cd <clone>
+PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=auto go build ./...
+PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=auto go vet ./...
+PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=auto go test -race -tags with_utls,with_quic,with_wireguard,with_gvisor ./...
+```
+
+`GOTOOLCHAIN=auto` is required: the toolchain at `/usr/local/go` on cue
+is older than the `go` directive in `go.mod`, and the `go` in `PATH`
+there is a wrapper. On any other machine, from the repo root:
 
 ```sh
 go build ./...
