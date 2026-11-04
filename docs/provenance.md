@@ -975,7 +975,7 @@ first 800 characters of the body JSON. Deviations:
 to 10 (upstream passes 0 through, listing everything
 — deliberate override, brief-pinned); gateway and
 auth errors render as the bot's summarised
-class/length replies, NOT upstream's `str(e)[:300]`
+class/length replies, NOT upstream's `str(e)[:600]`
 (and no owner-notify on auth failure); the
 `idea_exec` callback adds one typed field to
 `CallbackEntry` (card id; the title reuses the
