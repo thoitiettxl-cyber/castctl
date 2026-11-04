@@ -755,10 +755,19 @@ func (e *bubbleEditor) editFinal(text string) {
 // deliverFinal delivers a finished turn into the bubble (first
 // piece) and follow-up messages (the rest), with outcome notes
 // and buttons. The text comes from the wait Result only: the
-// streamed preview is never used as reply text. A document
-// attachment for very long replies (Python needs_document) is
-// NOT DONE in PR-A: long replies split into messages instead,
-// with no attachment claim.
+// streamed preview is never used as reply text. A reply that
+// needs a document (telegram.NeedsDocument, Python
+// needs_document) is edited into the bubble as a preview and
+// attached as a muse-reply document instead of being split
+// (deliver_reply, tgbot.py:1480-1488).
+//
+// [DEVIATION] A failed preview edit falls back to sending the
+// preview as a new message and still sends the document (the
+// existing Go split-path behaviour); Python lets the edit
+// error propagate and never sends the document. A SendFile
+// failure still returns an error, so the watermark does not
+// advance. [DEVIATION] The document stem is the fixed
+// "muse-reply"; Python uses muse-reply-{user_seq}.
 func (r *telegramTurnRunner) deliverFinal(ctx context.Context, chatID int64, bubbleID int, scope, title string, userSeq int64, res *wait.Result, stopped bool) error {
 	finalText := res.FinalText
 	if finalText == "" {
@@ -779,6 +788,18 @@ func (r *telegramTurnRunner) deliverFinal(ctx context.Context, chatID int64, bub
 		text = "(done)"
 	}
 	markup := r.finalMarkup(res, scope, title, userSeq)
+	if telegram.NeedsDocument(text) {
+		preview := documentPreview(text)
+		if err := r.deps.bot.Edit(ctx, chatID, bubbleID, preview, nil, telegram.HTMLModeMarkdown); err != nil {
+			if _, err := r.deps.bot.Send(ctx, chatID, preview, telegram.SendOptions{Mode: telegram.HTMLModeMarkdown}); err != nil {
+				return err
+			}
+		}
+		if _, err := r.deps.bot.SendFile(ctx, chatID, telegram.DocName("muse-reply", text), []byte(text), "", "Muse's full reply", telegram.SendOptions{Markup: markup}); err != nil {
+			return err
+		}
+		return nil
+	}
 	pieces := telegram.SplitText(text)
 	for i, piece := range pieces {
 		last := i == len(pieces)-1
@@ -799,6 +820,18 @@ func (r *telegramTurnRunner) deliverFinal(ctx context.Context, chatID int64, bub
 		}
 	}
 	return nil
+}
+
+// documentPreview renders the bubble preview for a reply sent
+// as a document: the first 1500 runes, rstripped, plus the
+// attachment suffix (Python deliver_reply, tgbot.py:1482:
+// text[:1500].rstrip() + "\n\n… (full reply attached)").
+func documentPreview(text string) string {
+	r := []rune(text)
+	if len(r) > 1500 {
+		r = r[:1500]
+	}
+	return strings.TrimRightFunc(string(r), unicode.IsSpace) + "\n\n… (full reply attached)"
 }
 
 func joinReplyTexts(replies []wait.Reply) string {

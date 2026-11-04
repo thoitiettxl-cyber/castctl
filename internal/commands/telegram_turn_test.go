@@ -1956,3 +1956,165 @@ func TestDeliveredTopSeq(t *testing.T) {
 		t.Errorf("top = %d, want 20 (user seq wins)", got)
 	}
 }
+
+// Phase B: NeedsDocument in deliverFinal. The runner is driven
+// directly (no `telegram run` harness): deliverFinal needs only
+// the bot fake, and direct calls make the edit/document/send
+// counts exact.
+
+func TestDeliverFinalLongReplySendsDocument(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	runner, fake := directTurnRunner(t, gw, 5*time.Second)
+	text := strings.Repeat("a", 12000)
+	res := &wait.Result{FinalText: text, Outcome: "done"}
+	if err := runner.deliverFinal(context.Background(), 500, 100, "", "main chat", 10, res, false); err != nil {
+		t.Fatalf("deliverFinal = %v; want nil", err)
+	}
+	edits := fake.editTexts()
+	if len(edits) != 1 {
+		t.Fatalf("edits = %d; want 1 (preview edit)", len(edits))
+	}
+	wantPreview := strings.Repeat("a", 1500) + "\n\n… (full reply attached)"
+	if edits[0] != wantPreview {
+		t.Errorf("preview edit differs: got %d runes, want %d runes with the attachment suffix", len([]rune(edits[0])), len([]rune(wantPreview)))
+	}
+	if fake.editMarkups[0] {
+		t.Error("preview edit carries markup; want none (markup goes on the document)")
+	}
+	if got := fake.methodCount("sendMessage"); got != 0 {
+		t.Errorf("sendMessage calls = %d; want 0 (no split text sends)", got)
+	}
+	docs := fake.documentsSeen()
+	if len(docs) != 1 {
+		t.Fatalf("sendDocument calls = %d; want 1", len(docs))
+	}
+	if docs[0].Filename != "muse-reply.txt" {
+		t.Errorf("document filename = %q; want %q", docs[0].Filename, "muse-reply.txt")
+	}
+	if docs[0].Caption != "Muse's full reply" {
+		t.Errorf("document caption = %q; want %q", docs[0].Caption, "Muse's full reply")
+	}
+	if docs[0].Size != int64(len(text)) {
+		t.Errorf("document size = %d; want %d (the full combined text)", docs[0].Size, len(text))
+	}
+	if docs[0].HasMarkup {
+		t.Error("document carries markup; want none for a done outcome")
+	}
+}
+
+func TestDeliverFinalCodeBlockSendsMarkdownDocument(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	runner, fake := directTurnRunner(t, gw, 5*time.Second)
+	text := "```go\n" + strings.Repeat("x", 3100) + "\n```\nshort tail"
+	res := &wait.Result{FinalText: text, Outcome: "done"}
+	if err := runner.deliverFinal(context.Background(), 500, 100, "", "main chat", 10, res, false); err != nil {
+		t.Fatalf("deliverFinal = %v; want nil", err)
+	}
+	if got := fake.methodCount("sendMessage"); got != 0 {
+		t.Errorf("sendMessage calls = %d; want 0", got)
+	}
+	docs := fake.documentsSeen()
+	if len(docs) != 1 {
+		t.Fatalf("sendDocument calls = %d; want 1", len(docs))
+	}
+	if docs[0].Filename != "muse-reply.md" {
+		t.Errorf("document filename = %q; want %q", docs[0].Filename, "muse-reply.md")
+	}
+}
+
+func TestDeliverFinalDocumentCarriesMarkup(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	runner, fake := directTurnRunner(t, gw, 5*time.Second)
+	text := strings.Repeat("q", 12000)
+	res := &wait.Result{
+		Outcome: "needs_input",
+		Replies: []wait.Reply{{
+			Text:    text,
+			Widgets: []wait.Widget{{Options: []any{"Yes", "No"}}},
+		}},
+	}
+	if err := runner.deliverFinal(context.Background(), 500, 100, "", "main chat", 10, res, false); err != nil {
+		t.Fatalf("deliverFinal = %v; want nil", err)
+	}
+	docs := fake.documentsSeen()
+	if len(docs) != 1 {
+		t.Fatalf("sendDocument calls = %d; want 1", len(docs))
+	}
+	if !docs[0].HasMarkup {
+		t.Fatal("document carries no markup; want the question buttons on the document")
+	}
+	if !strings.Contains(docs[0].MarkupJSON, "Yes") {
+		t.Errorf("document markup = %s; want the Yes button", docs[0].MarkupJSON)
+	}
+	if fake.editMarkups[0] {
+		t.Error("preview edit carries markup; want none")
+	}
+}
+
+func TestDeliverFinalDocumentEditFailureSendsPreviewAndDocument(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	runner, fake := directTurnRunner(t, gw, 5*time.Second)
+	fake.editFailCount = 1
+	text := strings.Repeat("a", 12000)
+	res := &wait.Result{FinalText: text, Outcome: "done"}
+	if err := runner.deliverFinal(context.Background(), 500, 100, "", "main chat", 10, res, false); err != nil {
+		t.Fatalf("deliverFinal = %v; want nil (preview sent as a new message, document still sent)", err)
+	}
+	if got := fake.methodCount("editMessageText"); got != 1 {
+		t.Errorf("editMessageText calls = %d; want 1 (the failed preview edit)", got)
+	}
+	fake.mu.Lock()
+	sends := append([]string(nil), fake.sends...)
+	fake.mu.Unlock()
+	if len(sends) != 1 {
+		t.Fatalf("sendMessage texts = %d; want 1 (the preview as a new message)", len(sends))
+	}
+	wantPreview := strings.Repeat("a", 1500) + "\n\n… (full reply attached)"
+	if sends[0] != wantPreview {
+		t.Error("preview sent as a new message differs from the preview edit text")
+	}
+	if got := len(fake.documentsSeen()); got != 1 {
+		t.Errorf("sendDocument calls = %d; want 1", got)
+	}
+}
+
+func TestDeliverFinalDocumentFailureReturnsError(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	runner, fake := directTurnRunner(t, gw, 5*time.Second)
+	fake.failDocuments = true
+	text := strings.Repeat("a", 12000)
+	res := &wait.Result{FinalText: text, Outcome: "done"}
+	if err := runner.deliverFinal(context.Background(), 500, 100, "", "main chat", 10, res, false); err == nil {
+		t.Fatal("deliverFinal = nil; want the SendFile error (watermark must not advance)")
+	}
+	if got := fake.methodCount("editMessageText"); got != 1 {
+		t.Errorf("editMessageText calls = %d; want 1 (preview edit still happened)", got)
+	}
+	if got := len(fake.documentsSeen()); got != 1 {
+		t.Errorf("sendDocument calls = %d; want 1", got)
+	}
+}
+
+func TestDeliverFinalShortReplyStillSplits(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	runner, fake := directTurnRunner(t, gw, 5*time.Second)
+	res := &wait.Result{FinalText: "short reply", Outcome: "done"}
+	if err := runner.deliverFinal(context.Background(), 500, 100, "", "main chat", 10, res, false); err != nil {
+		t.Fatalf("deliverFinal = %v; want nil", err)
+	}
+	if got := len(fake.editTexts()); got != 1 {
+		t.Errorf("edits = %d; want 1", got)
+	}
+	if got := len(fake.documentsSeen()); got != 0 {
+		t.Errorf("sendDocument calls = %d; want 0 (short replies stay text)", got)
+	}
+	if got := fake.methodCount("sendMessage"); got != 0 {
+		t.Errorf("sendMessage calls = %d; want 0", got)
+	}
+}
