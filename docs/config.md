@@ -375,8 +375,10 @@ document); captions are capped at 1024 runes. A file over
 49 MB is never downloaded for sending when its size is
 known, and never sent when its downloaded size exceeds the
 cap: the chat gets the line `📎 <b>name</b> is N MB, too big
-for Telegram. Get it with castctl download.` There is no
-per-turn file cap.
+for Telegram. Get it with castctl download.` At most 6 files
+are sent per turn, in seq order; when a turn shows more, the
+chat gets the note `📎 N more file(s): see /files` after any
+other notes, and the remaining files are listed by `/files`.
 
 Deliberate deviations from 0.6.1: `edit_plain` swallows every
 edit error (Python catches only Telegram/connection errors —
@@ -410,17 +412,17 @@ approve-all buttons, resume after a decision), the core
 slash commands (`/help`, `/status`, `/chats`, `/main`, `/new`,
 `/history`, `/unread`, `/rename`, `/pin`, `/unpin`,
 `/archive`, `/unarchive`, `/delete`, `/watch` as a persisted
-toggle), and the persistent state file above. Very long
+toggle, `/files`), and the persistent state file above. Very long
 replies are sent as a `muse-reply` document with a bubble
 preview instead of being split, and files Muse shows in a
 turn are downloaded and sent to the chat in seq order
 (photos, videos, audio, documents; the limits above apply).
 At startup the
-bot registers exactly the 18 wired commands as the `/` menu
+bot registers exactly the 19 wired commands as the `/` menu
 (`setMyCommands`): `start`, `help`, `stop`, `status`, `chats`,
 `main`, `new`, `history`, `unread`, `rename`, `pin`, `unpin`,
 `archive`, `unarchive`, `delete`, `approvals`, `autoapprove`,
-`watch`. A `setMyCommands` failure is only a warning: polling
+`watch`, `files`. A `setMyCommands` failure is only a warning: polling
 starts regardless, and the menu is re-registered on the next
 start. `/delete`
 confirmation has no owner gate: any allowed user may confirm
@@ -435,16 +437,16 @@ waits only for teardown, not for a turn to run to
 completion.
 
 What this build does NOT wire (roadmap step 5b): media sent
-by users to the bot, `/files`, `/fs`, `/feed`, `/goals`, `/goal`,
+by users to the bot, `/fs`, `/feed`, `/goals`, `/goal`,
 `/ideas`, `/usage`, `/wake`, `/profile`, `/update`, `/watch`
 forwarding/monitors, `/login`, `/raw`, and `telegram setup` /
 `install-service`. Turn media (files Muse shows, downloaded
-and sent) is wired above; `/files` itself and user-sent
-media remain step 5b. Those commands answer with an explicit
+and sent) is wired above; user-sent media remains step 5b.
+Those commands answer with an explicit
 not-wired reply naming step 5b, except `/login` and `/raw`,
 which answer that they are not available in this build.
 None of them appears in the `/` menu: the menu holds only
-the 18 wired commands listed above.
+the 19 wired commands listed above.
 
 ## The `keeper` section
 

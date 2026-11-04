@@ -898,12 +898,18 @@ bubble preview) and `deliver_interleaved`
 seq order), with `media_from_events` (`tgbot.py:527-542`),
 `send_media` (`tgbot.py:823-858`), `claim_media` /
 `release_media` (`tgbot.py:781-804`), and `media_label`
-(`tgbot.py:551-554`). Deviations: the event source is a
+(`tgbot.py:551-554`), and the 6-file-per-turn cap
+(`tgbot.py:55`, `MAX_FILES_PER_TURN`; `finish_turn` at
+`tgbot.py:1362-1364`, first 6 in seq order with the `📎 N more
+file(s): see /files` note appended after other notes).
+Deviations: the event source is a
 history re-read inside the deliver chain, not live
 accumulation; the preview-edit failure falls back to sending
 the preview and still sends the document; the document stem
 is the fixed `muse-reply`; the fallback trigger is HTTP 400
-only; there is no per-turn file cap; a media-first turn
+only; the cap counts post-dedupe items before the sent-media
+claim, where upstream filters already-sent files first
+(`tgbot.py:1360-1361`); a media-first turn
 deletes the status bubble best-effort; the sent-media keys
 live in `telegram-state.json` (`sent_media`, capped at the
 last 500, schema version unchanged); and a file over the
