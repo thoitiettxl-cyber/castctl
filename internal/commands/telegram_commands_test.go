@@ -112,8 +112,10 @@ func TestTelegramDispatchHelpStartUnknownDeferred(t *testing.T) {
 	if sends[3] != "Unknown command /foo-bar. /help lists them." {
 		t.Errorf("dashed-name send = %q", sends[3])
 	}
-	if sends[4] != "⚠️ /files is not wired in this build yet (step 5b)." {
-		t.Errorf("deferred send = %q", sends[4])
+	// /files is wired now (PR-B): the default harness has no
+	// files, so it answers the no-files line.
+	if sends[4] != "No files in recent messages here." {
+		t.Errorf("files send = %q", sends[4])
 	}
 	if sends[5] != "⚠️ /login is not available in this build." {
 		t.Errorf("login send = %q", sends[5])

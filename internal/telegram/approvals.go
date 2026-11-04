@@ -17,6 +17,8 @@ import (
 	"sync"
 
 	"github.com/go-telegram/bot/models"
+
+	"github.com/thoitiettxl-cyber/castctl/internal/shared"
 )
 
 // Decision strings sent to Muse for one approval
@@ -233,6 +235,12 @@ type CallbackEntry struct {
 	// decide/approve-all actions leave them zero.
 	Answer string
 	Page   int
+	// Resource is the file a download button (Action "dl")
+	// sends (src/muse_cli/tgbot.py:2064-2082). It lives in
+	// process memory only, like every other entry field:
+	// callback data stays the short "c:" token, and the
+	// resource never enters it (Telegram's 64-byte limit).
+	Resource shared.Resource
 }
 
 // CallbackRegistry is the in-memory callback store, capped at
