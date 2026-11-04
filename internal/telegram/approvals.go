@@ -234,6 +234,15 @@ type CallbackEntry struct {
 	// the id never enters it (Telegram's 64-byte limit).
 	IdeaID   string
 	AfterSeq *int64
+	// FSPath is the normalized System Files path an fs_rm
+	// button (Action "fs_rm") deletes, and FSRecursive is
+	// the -r flag of the rm that produced the button
+	// (src/muse_cli/tgbot.py:2146-2156). They live in
+	// process memory only, like every other entry field:
+	// callback data stays the short "c:" token, and the
+	// path never enters it (Telegram's 64-byte limit).
+	FSPath      string
+	FSRecursive bool
 	// Answer is the plain-text value a question button sends
 	// as a new turn (Action "answer"). Page is the target
 	// page of a chat-picker navigation button (Action

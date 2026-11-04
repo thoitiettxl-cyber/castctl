@@ -42,8 +42,8 @@ import (
 // ever reaches a chat message.
 
 // telegramBotHelpText is Python's HELP verbatim
-// (src/muse_cli/tgbot.py:98-117). It advertises commands
-// this build has not wired yet (/fs, /profile, /update);
+// (src/muse_cli/tgbot.py:98-115). It advertises commands
+// this build has not wired yet (/profile, /update);
 // tapping one gets the deferred reply from dispatch,
 // which says so plainly.
 const telegramBotHelpText = `<b>Muse on Telegram</b>
@@ -69,7 +69,7 @@ Type anything to talk to Muse in the current conversation. Send a photo or file 
 // instead of running; /login and /raw have no owner gate in
 // this build and are not available at all.
 var telegramDeferredCommands = map[string]bool{
-	"fs": true, "profile": true, "update": true,
+	"profile": true, "update": true,
 }
 
 var commandNameRe = regexp.MustCompile(`^[a-z_]+$`)
@@ -107,6 +107,7 @@ var telegramCommandMenu = []telegram.Command{
 	{Name: "ideas", Description: "List idea cards with Execute buttons"},
 	{Name: "usage", Description: "Show plan usage and reset time"},
 	{Name: "wake", Description: "Ask muse.ai to wake the VM"},
+	{Name: "fs", Description: "Browse System Files (ls, tree, cat, get, find, stat, mkdir, mv, rm)"},
 }
 
 // dispatch routes one message: "/name args" to the command
@@ -203,6 +204,8 @@ func (h *telegramCmdHandler) runCommand(ctx context.Context, chatID int64, name,
 		return h.usage(ctx, chatID)
 	case "wake":
 		return h.wake(ctx, chatID)
+	case "fs":
+		return h.fs(ctx, chatID, arg)
 	case "login", "raw":
 		_, err := h.bot.Send(ctx, chatID, "⚠️ /"+name+" is not available in this build.", telegram.SendOptions{Mode: telegram.HTMLModePlain})
 		return err
@@ -950,7 +953,7 @@ func (h *telegramCmdHandler) watch(ctx context.Context, chatID int64, arg string
 
 // handleCallback serves the step-5 button actions through the
 // bot's CallbackFunc hook: answer, open, chats_page, dl,
-// delete, noop, idea_exec. It returns handled=false for
+// delete, noop, idea_exec, fs_rm. It returns handled=false for
 // anything else, so the core falls back to its unknown-action
 // log. Question answers go out as plain-text turns, exactly
 // as in Python (no widget-answer gateway call exists): the
@@ -997,6 +1000,8 @@ func (h *telegramCmdHandler) handleCallback(ctx context.Context, chatID int64, m
 		return true, nil
 	case "idea_exec":
 		return h.ideaExec(ctx, chatID, entry)
+	case "fs_rm":
+		return h.fsRm(ctx, chatID, messageID, entry)
 	default:
 		return false, nil
 	}

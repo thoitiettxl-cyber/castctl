@@ -115,6 +115,30 @@ type telegramTurnFakeGateway struct {
 	ideasErr     error
 	executeCalls []ideaExecuteCall
 	executeErr   error
+	// FS scripts (PR-E): per-method result payloads, call
+	// recordings, and error injection. A nil script answers an
+	// empty result; an error field, when set, wins over the
+	// script. fsReadScript answers fs.read windows sliced by
+	// the requested offset/len, so ReadFile's chunk loop and
+	// caps are observable.
+	fsListScript   map[string][]any
+	fsListErr      error
+	fsListCalls    []string
+	fsReadScript   map[string][]byte
+	fsReadErr      error
+	fsReadCalls    []fsReadCall
+	fsStatScript   map[string]map[string]any
+	fsStatErr      error
+	fsStatCalls    []string
+	fsSearchScript []any
+	fsSearchErr    error
+	fsSearchCalls  []fsSearchCall
+	fsMkdirCalls   []fsMkdirCall
+	fsMkdirErr     error
+	fsRenameCalls  []fsRenameCall
+	fsRenameErr    error
+	fsDeleteCalls  []fsDeleteCall
+	fsDeleteErr    error
 }
 
 // ideaExecuteCall is one api.idea-cards.execute call the fake
@@ -122,6 +146,40 @@ type telegramTurnFakeGateway struct {
 type ideaExecuteCall struct {
 	PathParams map[string]string
 	Body       map[string]any
+}
+
+// fsReadCall is one fs.read window call the fake gateway saw.
+type fsReadCall struct {
+	Path   string
+	Offset int64
+	Len    int64
+}
+
+// fsSearchCall is one fs.search call the fake gateway saw.
+type fsSearchCall struct {
+	Contains string
+	Limit    int64
+	HasLimit bool
+}
+
+// fsMkdirCall is one fs.mkdir call the fake gateway saw.
+type fsMkdirCall struct {
+	Path      string
+	Recursive bool
+}
+
+// fsRenameCall is one fs.rename call the fake gateway saw.
+type fsRenameCall struct {
+	Source       string
+	Destination  string
+	Overwrite    bool
+	CreateParent bool
+}
+
+// fsDeleteCall is one fs.delete call the fake gateway saw.
+type fsDeleteCall struct {
+	Path      string
+	Recursive bool
 }
 
 // fsWriteCall is one fs.write chunk call the fake gateway saw.
@@ -325,6 +383,100 @@ func (f *telegramTurnFakeGateway) CallJSON(ctx context.Context, method string, o
 			_ = json.Unmarshal(b, &call.Body)
 		}
 		f.executeCalls = append(f.executeCalls, call)
+		return map[string]any{}, nil
+	case "fs.list":
+		if f.fsListErr != nil {
+			return nil, f.fsListErr
+		}
+		body, _ := opts.Body.(map[string]any)
+		p, _ := body["path"].(string)
+		f.fsListCalls = append(f.fsListCalls, p)
+		entries := f.fsListScript[p]
+		if entries == nil {
+			entries = []any{}
+		}
+		return map[string]any{"entries": entries}, nil
+	case "fs.read":
+		body, _ := opts.Body.(map[string]any)
+		p, _ := body["path"].(string)
+		call := fsReadCall{Path: p, Offset: fsTestNum(body["offset"]), Len: fsTestNum(body["len"])}
+		f.fsReadCalls = append(f.fsReadCalls, call)
+		if f.fsReadErr != nil {
+			return nil, f.fsReadErr
+		}
+		data := f.fsReadScript[p]
+		off := call.Offset
+		if off < 0 {
+			off = 0
+		}
+		if off > int64(len(data)) {
+			off = int64(len(data))
+		}
+		end := off + call.Len
+		if end > int64(len(data)) {
+			end = int64(len(data))
+		}
+		window := data[off:end]
+		return map[string]any{
+			"data_base64": base64.StdEncoding.EncodeToString(window),
+			"eof":         end >= int64(len(data)),
+		}, nil
+	case "fs.stat":
+		if f.fsStatErr != nil {
+			return nil, f.fsStatErr
+		}
+		body, _ := opts.Body.(map[string]any)
+		p, _ := body["path"].(string)
+		f.fsStatCalls = append(f.fsStatCalls, p)
+		if st := f.fsStatScript[p]; st != nil {
+			return st, nil
+		}
+		return map[string]any{}, nil
+	case "fs.search":
+		if f.fsSearchErr != nil {
+			return nil, f.fsSearchErr
+		}
+		body, _ := opts.Body.(map[string]any)
+		name, _ := body["name"].(map[string]any)
+		contains, _ := name["contains"].(string)
+		call := fsSearchCall{Contains: contains}
+		if v, ok := body["limit"]; ok {
+			call.Limit, call.HasLimit = fsTestNum(v), true
+		}
+		f.fsSearchCalls = append(f.fsSearchCalls, call)
+		entries := f.fsSearchScript
+		if entries == nil {
+			entries = []any{}
+		}
+		return map[string]any{"entries": entries}, nil
+	case "fs.mkdir":
+		if f.fsMkdirErr != nil {
+			return nil, f.fsMkdirErr
+		}
+		body, _ := opts.Body.(map[string]any)
+		p, _ := body["path"].(string)
+		recursive, _ := body["recursive"].(bool)
+		f.fsMkdirCalls = append(f.fsMkdirCalls, fsMkdirCall{Path: p, Recursive: recursive})
+		return map[string]any{}, nil
+	case "fs.rename":
+		if f.fsRenameErr != nil {
+			return nil, f.fsRenameErr
+		}
+		body, _ := opts.Body.(map[string]any)
+		src, _ := body["source"].(string)
+		dst, _ := body["destination"].(string)
+		overwrite, _ := body["overwrite"].(bool)
+		createParent, _ := body["create_parent"].(bool)
+		f.fsRenameCalls = append(f.fsRenameCalls, fsRenameCall{Source: src, Destination: dst, Overwrite: overwrite, CreateParent: createParent})
+		return map[string]any{}, nil
+	case "fs.delete":
+		if f.fsDeleteErr != nil {
+			return nil, f.fsDeleteErr
+		}
+		body, _ := opts.Body.(map[string]any)
+		p, _ := body["path"].(string)
+		recursive, _ := body["recursive"].(bool)
+		f.fsDeleteCalls = append(f.fsDeleteCalls, fsDeleteCall{Path: p, Recursive: recursive})
 		return map[string]any{}, nil
 	default:
 		return nil, fmt.Errorf("unexpected method %s", method)
@@ -589,6 +741,65 @@ func (f *telegramTurnFakeGateway) executeCallsSeen() []ideaExecuteCall {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]ideaExecuteCall(nil), f.executeCalls...)
+}
+
+// fsTestNum converts a gateway numeric body value to int64.
+func fsTestNum(v any) int64 {
+	switch n := v.(type) {
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case float64:
+		return int64(n)
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return i
+		}
+	}
+	return 0
+}
+
+func (f *telegramTurnFakeGateway) fsListCallsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.fsListCalls...)
+}
+
+func (f *telegramTurnFakeGateway) fsReadCallsSeen() []fsReadCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fsReadCall(nil), f.fsReadCalls...)
+}
+
+func (f *telegramTurnFakeGateway) fsStatCallsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.fsStatCalls...)
+}
+
+func (f *telegramTurnFakeGateway) fsSearchCallsSeen() []fsSearchCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fsSearchCall(nil), f.fsSearchCalls...)
+}
+
+func (f *telegramTurnFakeGateway) fsMkdirCallsSeen() []fsMkdirCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fsMkdirCall(nil), f.fsMkdirCalls...)
+}
+
+func (f *telegramTurnFakeGateway) fsRenameCallsSeen() []fsRenameCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fsRenameCall(nil), f.fsRenameCalls...)
+}
+
+func (f *telegramTurnFakeGateway) fsDeleteCallsSeen() []fsDeleteCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fsDeleteCall(nil), f.fsDeleteCalls...)
 }
 
 // telegramBotHarness runs `telegram run` against a fake
