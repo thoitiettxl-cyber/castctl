@@ -189,7 +189,10 @@ mistake these influences for vendored code.
    and node-ID rules; behavior reimplemented:
    studied, no code taken. Telegram file sending
    (`file_kind`/`doc_name`/`send_file`/`send_doc`) is reimplemented
-   in `internal/telegram/files.go`; see docs/provenance.md §5.
+   in `internal/telegram/files.go`, and turn delivery
+   (`deliver_reply`/`deliver_interleaved`/`send_media`/media
+   claims) in `internal/commands/telegram_turn.go`;
+   see docs/provenance.md §5.
    (The byte-identical descriptor assets are listed in (a).)
    License name: MIT.
 4. Noise protocol, XX pattern — the public Noise specification's

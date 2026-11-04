@@ -6,6 +6,8 @@ package telegram
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -326,5 +328,117 @@ func TestStateStoreConcurrent(t *testing.T) {
 	}
 	if _, ok := store.Chat(19); !ok {
 		t.Error("Chat(19) absent after concurrent writes")
+	}
+}
+
+func TestSentMediaKey(t *testing.T) {
+	if got := SentMediaKey("muse01", 500, "", "sandbox://workspace/pic.jpg"); got != "muse01|500|main|sandbox://workspace/pic.jpg" {
+		t.Errorf("SentMediaKey(main) = %q", got)
+	}
+	if got := SentMediaKey("muse01", 500, "sess-9", "sandbox://workspace/pic.jpg"); got != "muse01|500|sess-9|sandbox://workspace/pic.jpg" {
+		t.Errorf("SentMediaKey(session) = %q", got)
+	}
+}
+
+func TestStateStoreSentMediaClaimRelease(t *testing.T) {
+	dir := t.TempDir()
+	store, _, err := LoadStateStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := SentMediaKey("muse01", 500, "", "sandbox://workspace/pic.jpg")
+
+	claimed, err := store.ClaimSentMedia(key)
+	if err != nil || !claimed {
+		t.Fatalf("ClaimSentMedia(first) = %v, %v; want true, nil", claimed, err)
+	}
+	claimed, err = store.ClaimSentMedia(key)
+	if err != nil || claimed {
+		t.Fatalf("ClaimSentMedia(duplicate) = %v, %v; want false, nil", claimed, err)
+	}
+
+	// The schema version must stay 1: sent_media is a new
+	// field, not a new schema.
+	raw, err := os.ReadFile(StatePath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var probe struct {
+		Version   int      `json:"version"`
+		SentMedia []string `json:"sent_media"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		t.Fatalf("state file JSON = %v", err)
+	}
+	if probe.Version != 1 {
+		t.Errorf("state file version = %d; want 1 (no bump for sent_media)", probe.Version)
+	}
+	if len(probe.SentMedia) != 1 || probe.SentMedia[0] != key {
+		t.Errorf("state file sent_media = %q; want [%q]", probe.SentMedia, key)
+	}
+
+	// A restart still blocks the duplicate: the claim
+	// survives a fresh load from the same file.
+	reloaded, _, err := LoadStateStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = reloaded.ClaimSentMedia(key)
+	if err != nil || claimed {
+		t.Fatalf("ClaimSentMedia(after reload) = %v, %v; want false, nil", claimed, err)
+	}
+
+	// Releasing unblocks: a failed download or send must
+	// let the next turn retry the file.
+	if err := reloaded.ReleaseSentMedia(key); err != nil {
+		t.Fatalf("ReleaseSentMedia = %v", err)
+	}
+	claimed, err = reloaded.ClaimSentMedia(key)
+	if err != nil || !claimed {
+		t.Fatalf("ClaimSentMedia(after release) = %v, %v; want true, nil", claimed, err)
+	}
+}
+
+func TestStateStoreSentMediaCap(t *testing.T) {
+	dir := t.TempDir()
+	store, _, err := LoadStateStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < sentMediaCap+2; i++ {
+		key := SentMediaKey("muse01", 500, "", fmt.Sprintf("sandbox://workspace/file-%04d", i))
+		if _, err := store.ClaimSentMedia(key); err != nil {
+			t.Fatalf("ClaimSentMedia(%d) = %v", i, err)
+		}
+	}
+	keys := store.SentMedia()
+	if len(keys) != sentMediaCap {
+		t.Fatalf("SentMedia() = %d keys; want %d (oldest evicted)", len(keys), sentMediaCap)
+	}
+	// The two oldest keys were evicted and claim again;
+	// the newest key is still held.
+	evicted := SentMediaKey("muse01", 500, "", "sandbox://workspace/file-0000")
+	claimed, err := store.ClaimSentMedia(evicted)
+	if err != nil || !claimed {
+		t.Errorf("ClaimSentMedia(evicted) = %v, %v; want true, nil", claimed, err)
+	}
+	kept := keys[len(keys)-1]
+	claimed, err = store.ClaimSentMedia(kept)
+	if err != nil || claimed {
+		t.Errorf("ClaimSentMedia(newest) = %v, %v; want false, nil", claimed, err)
+	}
+}
+
+func TestStateStoreSentMediaReleaseAbsent(t *testing.T) {
+	dir := t.TempDir()
+	store, _, err := LoadStateStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReleaseSentMedia("nobody|0|main|nowhere"); err != nil {
+		t.Errorf("ReleaseSentMedia(absent) = %v; want nil", err)
+	}
+	if got := store.SentMedia(); len(got) != 0 {
+		t.Errorf("SentMedia() = %q; want empty after absent release", got)
 	}
 }

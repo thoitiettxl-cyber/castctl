@@ -13,6 +13,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -74,6 +75,12 @@ type telegramTurnFakeGateway struct {
 	exhaustedSubscribes int
 	exhaustedStack      []byte // stack of the first exhausted SubscribeRaw call
 	noAck               bool
+	// Download scripts: downloads maps a download ref key to
+	// bytes; downloadErr fails every download; downloadCalls
+	// records the ref key of each download, in order.
+	downloads     map[string][]byte
+	downloadErr   error
+	downloadCalls []string
 }
 
 // decideRecord is one egress.approval.decide call.
@@ -86,8 +93,15 @@ type decideRecord struct {
 // reply appended to the history log, the delta texts fed live,
 // the raw approval records fed live, the terminal task.status,
 // and (for the /status probe) a standalone task.status record.
+// replyData, when non-nil, is the reply event's "data" payload
+// (resource lists, the EventResources shape); extraEvents are
+// further history events appended after the reply, each
+// assigned the next seq in order (payloads scripted without
+// seq, e.g. a second assistant reply carrying resources).
 type turnSubScript struct {
 	replyText       string
+	replyData       map[string]any
+	extraEvents     []map[string]any
 	deltas          []string
 	approvalRecords []string
 	probeStatus     string
@@ -236,15 +250,32 @@ func (f *telegramTurnFakeGateway) SubscribeRaw(ctx context.Context, method strin
 		}
 	}
 	// Append the reply to the history log BEFORE feeding, so
-	// the settle history read sees it.
+	// the settle history read sees it. A reply with resources
+	// but no text is still appended: it is a media-only turn
+	// event, kept by the waiter for its media.
 	var replySeq int64
-	if script.replyText != "" {
+	hasReply := script.replyText != "" || script.replyData != nil
+	if hasReply {
 		replySeq = f.nextSeq
 		f.nextSeq++
+		payload := map[string]any{"display_text": script.replyText, "status": "completed"}
+		if script.replyData != nil {
+			payload["data"] = script.replyData
+		}
 		f.events = append(f.events, map[string]any{
 			"event_name": "message.assistant", "seq": replySeq,
-			"payload": map[string]any{"display_text": script.replyText, "status": "completed"},
+			"payload": payload,
 		})
+		for _, extra := range script.extraEvents {
+			seq := f.nextSeq
+			f.nextSeq++
+			ev := map[string]any{}
+			for k, v := range extra {
+				ev[k] = v
+			}
+			ev["seq"] = seq
+			f.events = append(f.events, ev)
+		}
 	}
 	onRecord := opts.OnRecord
 	f.mu.Unlock()
@@ -275,7 +306,7 @@ func (f *telegramTurnFakeGateway) SubscribeRaw(ctx context.Context, method strin
 		})
 		feed(string(rec))
 	}
-	if script.replyText != "" {
+	if script.replyText != "" || script.replyData != nil {
 		rec, _ := json.Marshal(map[string]any{
 			"event": "task.status", "seq": replySeq + 1,
 			"payload": map[string]any{"status": "completed", "root_agent_id": "R", "agent_id": "R"},
@@ -283,6 +314,43 @@ func (f *telegramTurnFakeGateway) SubscribeRaw(ctx context.Context, method strin
 		feed(string(rec))
 	}
 	return nil, nil
+}
+
+// DownloadFile serves scripted downloads: downloads maps a
+// download ref key (the bare path string, or the "path" entry
+// of a variants-dict ref) to bytes, downloadErr fails every
+// download. An unscripted ref is a test-authoring error.
+func (f *telegramTurnFakeGateway) DownloadFile(_ context.Context, ref any, _ conn.DownloadOptions) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := downloadRefKey(ref)
+	f.downloadCalls = append(f.downloadCalls, key)
+	if f.downloadErr != nil {
+		return nil, f.downloadErr
+	}
+	data, ok := f.downloads[key]
+	if !ok {
+		return nil, fmt.Errorf("no download scripted for ref %q", key)
+	}
+	return data, nil
+}
+
+func downloadRefKey(ref any) string {
+	if s, ok := ref.(string); ok {
+		return s
+	}
+	if m, ok := ref.(map[string]any); ok {
+		if s, ok := m["path"].(string); ok {
+			return s
+		}
+	}
+	return fmt.Sprintf("%v", ref)
+}
+
+func (f *telegramTurnFakeGateway) downloadCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.downloadCalls)
 }
 
 func (f *telegramTurnFakeGateway) Ping(context.Context, time.Duration) (any, error) {
@@ -2116,5 +2184,626 @@ func TestDeliverFinalShortReplyStillSplits(t *testing.T) {
 	}
 	if got := fake.methodCount("sendMessage"); got != 0 {
 		t.Errorf("sendMessage calls = %d; want 0", got)
+	}
+}
+
+// --- Phase C: media in turns ---
+
+// turnRunnerNamed is directTurnRunner with a named profile, so
+// the sent-media claim key carries a real profile component.
+func turnRunnerNamed(t *testing.T, gw *telegramTurnFakeGateway) (*telegramTurnRunner, *cmdFakeTelegram) {
+	t.Helper()
+	runner, fake := directTurnRunner(t, gw, 5*time.Second)
+	runner.deps.prof.Name = "muse01"
+	return runner, fake
+}
+
+// fakeCallSequence rebuilds the fake Telegram call order:
+// sendMessage/editMessageText with their text, media/document
+// sends with their filename, other methods bare.
+func fakeCallSequence(f *cmdFakeTelegram) []string {
+	methods := f.methodsSeen()
+	sends := f.sendsSeen()
+	edits := f.editTexts()
+	media := f.mediaSendsSeen()
+	docs := f.documentsSeen()
+	var out []string
+	si, ei, mi, di := 0, 0, 0, 0
+	for _, m := range methods {
+		switch m {
+		case "sendMessage":
+			text := ""
+			if si < len(sends) {
+				text = sends[si]
+				si++
+			}
+			out = append(out, "sendMessage:"+text)
+		case "editMessageText":
+			text := ""
+			if ei < len(edits) {
+				text = edits[ei]
+				ei++
+			}
+			out = append(out, "editMessageText:"+text)
+		case "sendPhoto", "sendVideo", "sendAudio":
+			name := ""
+			if mi < len(media) {
+				name = media[mi].Filename
+				mi++
+			}
+			out = append(out, m+":"+name)
+		case "sendDocument":
+			name := ""
+			if di < len(docs) {
+				name = docs[di].Filename
+				di++
+			}
+			out = append(out, "sendDocument:"+name)
+		default:
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// callOrder fails unless want appears as a subsequence of seq,
+// in order (other calls may interleave).
+func callOrder(t *testing.T, seq []string, want ...string) {
+	t.Helper()
+	idx := 0
+	for _, call := range seq {
+		if idx < len(want) && call == want[idx] {
+			idx++
+		}
+	}
+	if idx != len(want) {
+		t.Errorf("call sequence %q lacks ordered subsequence %q", seq, want)
+	}
+}
+
+func TestTurnMediaInterleavesTextBeforeMedia(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.downloads = map[string][]byte{
+		"sandbox://workspace/pic.jpg": []byte("fake-jpeg-bytes"),
+	}
+	gw.subScripts = []turnSubScript{{
+		replyText: "first",
+		replyData: map[string]any{"images": []any{map[string]any{
+			"path": "sandbox://workspace/pic.jpg", "mime": "image/jpeg",
+			"byte_len": int64(15), "label": "My Chart",
+		}}},
+		extraEvents: []map[string]any{{
+			"event_name": "message.assistant",
+			"payload":    map[string]any{"display_text": "second", "status": "completed"},
+		}},
+	}}
+	runner, fake := turnRunnerNamed(t, gw)
+	if err := runner.runTextTurn(context.Background(), 500, "show me"); err != nil {
+		t.Fatalf("runTextTurn = %v; want nil", err)
+	}
+	media := fake.mediaSendsSeen()
+	if len(media) != 1 {
+		t.Fatalf("media sends = %d; want 1", len(media))
+	}
+	if media[0].Method != "sendPhoto" || media[0].Filename != "pic.jpg" || media[0].Size != 15 {
+		t.Errorf("media send = %+v; want sendPhoto pic.jpg size 15", media[0])
+	}
+	if media[0].Caption != "My Chart" {
+		t.Errorf("photo caption = %q; want the resource label", media[0].Caption)
+	}
+	if gw.downloadCount() != 1 {
+		t.Errorf("downloads = %d; want 1", gw.downloadCount())
+	}
+	callOrder(t, fakeCallSequence(fake),
+		"editMessageText:first", "sendPhoto:pic.jpg", "sendMessage:second")
+}
+
+func TestTurnMediaTooBigByteLenRefusesWithoutDownload(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.subScripts = []turnSubScript{{
+		replyText: "here is your file",
+		replyData: map[string]any{"files": []any{map[string]any{
+			"path": "sandbox://workspace/big.bin", "mime": "application/octet-stream",
+			"byte_len": int64(51 << 20),
+		}}},
+	}}
+	runner, fake := turnRunnerNamed(t, gw)
+	if err := runner.runTextTurn(context.Background(), 500, "send it"); err != nil {
+		t.Fatalf("runTextTurn = %v; want nil", err)
+	}
+	if got := gw.downloadCount(); got != 0 {
+		t.Errorf("downloads = %d; want 0 (ByteLen gate precedes the download)", got)
+	}
+	if got := len(fake.mediaSendsSeen()) + len(fake.documentsSeen()); got != 0 {
+		t.Errorf("Telegram file sends = %d; want 0 for a 51MB file", got)
+	}
+	want := "📎 <b>big.bin</b> is 51 MB, too big for Telegram. Get it with castctl download."
+	found := false
+	for _, s := range fake.sendsSeen() {
+		if s == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("sends = %q; want the exact refusal line %q", fake.sendsSeen(), want)
+	}
+	// The refusal keeps the claim: the key is stored.
+	keys := runner.deps.store.SentMedia()
+	if len(keys) != 1 || keys[0] != telegram.SentMediaKey("muse01", 500, "", "sandbox://workspace/big.bin") {
+		t.Errorf("SentMedia() = %q; want the refused file's key", keys)
+	}
+}
+
+func TestTurnMediaTooBigDownloadedRefusesWithoutSend(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.downloads = map[string][]byte{
+		"sandbox://workspace/big2.bin": make([]byte, 51<<20),
+	}
+	gw.subScripts = []turnSubScript{{
+		replyText: "here is your file",
+		replyData: map[string]any{"files": []any{map[string]any{
+			"path": "sandbox://workspace/big2.bin",
+		}}},
+	}}
+	runner, fake := turnRunnerNamed(t, gw)
+	if err := runner.runTextTurn(context.Background(), 500, "send it"); err != nil {
+		t.Fatalf("runTextTurn = %v; want nil", err)
+	}
+	if got := gw.downloadCount(); got != 1 {
+		t.Errorf("downloads = %d; want 1 (no ByteLen: download, then gate)", got)
+	}
+	if got := len(fake.mediaSendsSeen()) + len(fake.documentsSeen()); got != 0 {
+		t.Errorf("Telegram file sends = %d; want 0 for a 51MB download", got)
+	}
+	want := "📎 <b>big2.bin</b> is 51 MB, too big for Telegram. Get it with castctl download."
+	found := false
+	for _, s := range fake.sendsSeen() {
+		if s == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("sends = %q; want the exact refusal line %q", fake.sendsSeen(), want)
+	}
+}
+
+func TestTurnMediaLargePhotoSendsAsDocument(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.downloads = map[string][]byte{
+		"sandbox://workspace/chart.png": make([]byte, 11<<20),
+	}
+	gw.subScripts = []turnSubScript{{
+		replyText: "chart",
+		replyData: map[string]any{"images": []any{map[string]any{
+			"path": "sandbox://workspace/chart.png", "mime": "image/png",
+			"byte_len": int64(11 << 20),
+		}}},
+	}}
+	runner, fake := turnRunnerNamed(t, gw)
+	if err := runner.runTextTurn(context.Background(), 500, "show the chart"); err != nil {
+		t.Fatalf("runTextTurn = %v; want nil", err)
+	}
+	if got := len(fake.mediaSendsSeen()); got != 0 {
+		t.Errorf("media sends = %d; want 0 (an 11MB photo is not a photo send)", got)
+	}
+	docs := fake.documentsSeen()
+	if len(docs) != 1 {
+		t.Fatalf("sendDocument calls = %d; want 1", len(docs))
+	}
+	if docs[0].Filename != "chart.png" || docs[0].Size != 11<<20 {
+		t.Errorf("document = %+v; want chart.png size %d", docs[0], 11<<20)
+	}
+	if docs[0].Caption != "" {
+		t.Errorf("document caption = %q; want none (no label)", docs[0].Caption)
+	}
+}
+
+func TestTurnMediaLabelEqualToFilenameHasNoCaption(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.downloads = map[string][]byte{
+		"sandbox://workspace/chart.png": []byte("png-bytes"),
+	}
+	gw.subScripts = []turnSubScript{{
+		replyText: "chart",
+		replyData: map[string]any{"images": []any{map[string]any{
+			"path": "sandbox://workspace/chart.png", "mime": "image/png",
+			"byte_len": int64(9), "label": "chart.png",
+		}}},
+	}}
+	runner, fake := turnRunnerNamed(t, gw)
+	if err := runner.runTextTurn(context.Background(), 500, "show it"); err != nil {
+		t.Fatalf("runTextTurn = %v; want nil", err)
+	}
+	media := fake.mediaSendsSeen()
+	if len(media) != 1 {
+		t.Fatalf("media sends = %d; want 1", len(media))
+	}
+	if media[0].Caption != "" {
+		t.Errorf("photo caption = %q; want none (label equals the filename)", media[0].Caption)
+	}
+}
+
+func TestTurnMediaVariantsRefDownloadsOriginal(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.downloads = map[string][]byte{
+		"sandbox://workspace/v.jpg": []byte("jpeg-bytes"),
+	}
+	gw.subScripts = []turnSubScript{{
+		replyText: "variant",
+		replyData: map[string]any{"images": []any{map[string]any{
+			"variants": map[string]any{
+				"original": "sandbox://workspace/v.jpg",
+				"thumb":    "sandbox://workspace/v-thumb.jpg",
+			},
+			"mime":     "image/jpeg",
+			"byte_len": int64(10),
+		}}},
+	}}
+	runner, fake := turnRunnerNamed(t, gw)
+	if err := runner.runTextTurn(context.Background(), 500, "show it"); err != nil {
+		t.Fatalf("runTextTurn = %v; want nil", err)
+	}
+	if got := gw.downloadCount(); got != 1 {
+		t.Fatalf("downloads = %d; want 1 (the variants-dict ref)", got)
+	}
+	media := fake.mediaSendsSeen()
+	if len(media) != 1 || media[0].Filename != "v.jpg" {
+		t.Errorf("media sends = %+v; want one sendPhoto of v.jpg", media)
+	}
+}
+
+func TestTurnMediaFirstDeletesBubble(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.downloads = map[string][]byte{
+		"sandbox://workspace/pic.jpg": []byte("fake-jpeg-bytes"),
+	}
+	gw.subScripts = []turnSubScript{{
+		replyData: map[string]any{"images": []any{map[string]any{
+			"path": "sandbox://workspace/pic.jpg", "mime": "image/jpeg",
+			"byte_len": int64(15),
+		}}},
+		extraEvents: []map[string]any{{
+			"event_name": "message.assistant",
+			"payload":    map[string]any{"display_text": "trailing", "status": "completed"},
+		}},
+	}}
+	runner, fake := turnRunnerNamed(t, gw)
+	if err := runner.runTextTurn(context.Background(), 500, "show me"); err != nil {
+		t.Fatalf("runTextTurn = %v; want nil", err)
+	}
+	callOrder(t, fakeCallSequence(fake), "deleteMessage", "sendPhoto:pic.jpg", "sendMessage:trailing")
+	for _, e := range fake.editTexts() {
+		if strings.Contains(e, "trailing") {
+			t.Errorf("edit %q carries the trailing text; want it sent, not edited (the bubble was deleted)", e)
+		}
+	}
+}
+
+func TestTurnMediaDuplicateClaimBlocked(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.downloads = map[string][]byte{
+		"sandbox://workspace/pic.jpg": []byte("fake-jpeg-bytes"),
+	}
+	gw.addEvent(map[string]any{
+		"event_name": "message.assistant", "seq": int64(11),
+		"payload": map[string]any{
+			"display_text": "hi", "status": "completed",
+			"data": map[string]any{"images": []any{map[string]any{
+				"path": "sandbox://workspace/pic.jpg", "mime": "image/jpeg",
+				"byte_len": int64(15),
+			}}},
+		},
+	})
+	runner, fake := turnRunnerNamed(t, gw)
+	res := &wait.Result{
+		FinalText: "hi", Outcome: "done",
+		Replies: []wait.Reply{{Seq: 11, Text: "hi"}},
+	}
+	for i := 0; i < 2; i++ {
+		if err := runner.deliverFinal(context.Background(), 500, 100, "", "main chat", 10, res, false); err != nil {
+			t.Fatalf("deliverFinal #%d = %v; want nil", i+1, err)
+		}
+	}
+	if got := gw.downloadCount(); got != 1 {
+		t.Errorf("downloads = %d; want 1 (the second delivery reuses the claim)", got)
+	}
+	if got := len(fake.mediaSendsSeen()); got != 1 {
+		t.Errorf("media sends = %d; want 1", got)
+	}
+	if got := len(fake.editTexts()); got != 2 {
+		t.Errorf("edits = %d; want 2 (the text is re-delivered; only the media is deduped)", got)
+	}
+	if keys := runner.deps.store.SentMedia(); len(keys) != 1 {
+		t.Errorf("SentMedia() = %q; want exactly one key", keys)
+	}
+}
+
+func TestTurnMediaDownloadFailureReleasesClaim(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.mu.Lock()
+	gw.downloadErr = &conn.GatewayError{Status: 502, ErrorCode: "bad_gateway", Payload: "SECRET-PATH /private/x"}
+	gw.mu.Unlock()
+	script := turnSubScript{
+		replyText: "file",
+		replyData: map[string]any{"files": []any{map[string]any{
+			"path": "sandbox://workspace/doc.pdf", "mime": "application/pdf",
+			"byte_len": int64(100),
+		}}},
+	}
+	gw.subScripts = []turnSubScript{script, script}
+	runner, fake := turnRunnerNamed(t, gw)
+	if err := runner.runTextTurn(context.Background(), 500, "send it"); err != nil {
+		t.Fatalf("runTextTurn #1 = %v; want nil", err)
+	}
+	if got := gw.downloadCount(); got != 1 {
+		t.Fatalf("downloads after turn 1 = %d; want 1", got)
+	}
+	if got := len(fake.mediaSendsSeen()) + len(fake.documentsSeen()); got != 0 {
+		t.Errorf("file sends after turn 1 = %d; want 0 (the download failed)", got)
+	}
+	notice := ""
+	for _, s := range fake.sendsSeen() {
+		if strings.Contains(s, "could not be fetched") {
+			notice = s
+		}
+	}
+	if notice == "" {
+		t.Fatalf("sends = %q; want a fetch-failure notice", fake.sendsSeen())
+	}
+	if !strings.Contains(notice, "doc.pdf") || !strings.Contains(notice, "bad_gateway") {
+		t.Errorf("notice = %q; want the filename and the error class", notice)
+	}
+	if strings.Contains(notice, "SECRET-PATH") || strings.Contains(notice, "sandbox://") {
+		t.Errorf("notice = %q; must not carry the path or the raw error text", notice)
+	}
+	// The failure released the claim: a retry turn sends the file.
+	gw.mu.Lock()
+	gw.downloadErr = nil
+	gw.downloads = map[string][]byte{"sandbox://workspace/doc.pdf": []byte("pdf-bytes")}
+	gw.mu.Unlock()
+	if err := runner.runTextTurn(context.Background(), 500, "send it again"); err != nil {
+		t.Fatalf("runTextTurn #2 = %v; want nil", err)
+	}
+	if got := gw.downloadCount(); got != 2 {
+		t.Errorf("downloads after turn 2 = %d; want 2 (the claim was released)", got)
+	}
+	docs := fake.documentsSeen()
+	if len(docs) != 1 || docs[0].Filename != "doc.pdf" {
+		t.Errorf("documents = %+v; want one sendDocument of doc.pdf", docs)
+	}
+}
+
+func TestTurnMediaSendFailureReleasesClaim(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.downloads = map[string][]byte{
+		"sandbox://workspace/pic.jpg": []byte("fake-jpeg-bytes"),
+	}
+	script := turnSubScript{
+		replyText: "pic",
+		replyData: map[string]any{"images": []any{map[string]any{
+			"path": "sandbox://workspace/pic.jpg", "mime": "image/jpeg",
+			"byte_len": int64(15),
+		}}},
+	}
+	gw.subScripts = []turnSubScript{script, script}
+	runner, fake := turnRunnerNamed(t, gw)
+	fake.mu.Lock()
+	fake.failPhoto = true
+	fake.failDocuments = true
+	fake.mu.Unlock()
+	if err := runner.runTextTurn(context.Background(), 500, "send it"); err != nil {
+		t.Fatalf("runTextTurn #1 = %v; want nil", err)
+	}
+	if got := gw.downloadCount(); got != 1 {
+		t.Fatalf("downloads after turn 1 = %d; want 1", got)
+	}
+	notice := ""
+	for _, s := range fake.sendsSeen() {
+		if strings.Contains(s, "could not be sent") {
+			notice = s
+		}
+	}
+	if notice == "" {
+		t.Fatalf("sends = %q; want a send-failure notice", fake.sendsSeen())
+	}
+	if !strings.Contains(notice, "pic.jpg") || strings.Contains(notice, "sandbox://") {
+		t.Errorf("notice = %q; want the filename only, no path", notice)
+	}
+	// The failure released the claim: a retry turn sends the photo.
+	fake.mu.Lock()
+	fake.failPhoto = false
+	fake.failDocuments = false
+	fake.mu.Unlock()
+	if err := runner.runTextTurn(context.Background(), 500, "send it again"); err != nil {
+		t.Fatalf("runTextTurn #2 = %v; want nil", err)
+	}
+	if got := gw.downloadCount(); got != 2 {
+		t.Errorf("downloads after turn 2 = %d; want 2 (the claim was released)", got)
+	}
+	media := fake.mediaSendsSeen()
+	if len(media) != 2 || media[1].Method != "sendPhoto" || media[1].Filename != "pic.jpg" {
+		t.Errorf("media sends = %+v; want a failed photo attempt then a successful one", media)
+	}
+}
+
+// runnerWithGateway builds a turn runner whose Muse connection is
+// the given gateway (for history-read behaviour the scripted
+// fake cannot express: paging, read failures, auth failures).
+func runnerWithGateway(t *testing.T, gw conn.Gateway) (*telegramTurnRunner, *cmdFakeTelegram) {
+	t.Helper()
+	fake := &cmdFakeTelegram{}
+	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
+	t.Cleanup(srv.Close)
+	fakeAddr := srv.Listener.Addr().String()
+	dialFake := func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, fakeAddr)
+	}
+	fakeClient := &http.Client{Transport: &http.Transport{
+		Proxy:       nil,
+		DialContext: dialFake,
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialFake(ctx, network, addr)
+		},
+	}}
+	bot, err := telegram.New(telegram.Settings{
+		Token:          telegramTestToken,
+		AllowedUserIDs: []int64{111},
+		HTTPClient:     fakeClient,
+		Logger:         slog.Default(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, _, err := telegram.LoadStateStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	muse := conn.New(func(context.Context, conn.Config) (conn.Gateway, error) { return gw, nil })
+	runner := newTelegramTurnRunner(telegramTurnDeps{
+		env:        &Env{},
+		bot:        bot,
+		rt:         &Runtime{Muse: muse},
+		prof:       &profile.Profile{NodeID: "node-1", Name: "muse01"},
+		store:      store,
+		logger:     slog.Default(),
+		toggles:    func() (bool, bool) { return false, false },
+		ackTimeout: 5 * time.Second,
+	})
+	return runner, fake
+}
+
+// pagingHistoryGateway answers chat.history with the last
+// `limit` events, recording each limit requested, so the
+// window-growth loop is observable.
+type pagingHistoryGateway struct {
+	conn.Gateway
+	mu     sync.Mutex
+	events []map[string]any
+	limits []int
+}
+
+func (g *pagingHistoryGateway) CallJSON(_ context.Context, method string, opts conn.RequestOptions) (any, error) {
+	if method != "chat.history" {
+		return nil, fmt.Errorf("unexpected method %s", method)
+	}
+	limit := 0
+	if body, ok := opts.Body.(map[string]any); ok {
+		limit, _ = body["limit"].(int)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.limits = append(g.limits, limit)
+	evs := g.events
+	if limit < len(evs) {
+		evs = evs[len(evs)-limit:]
+	}
+	out := make([]any, len(evs))
+	for i, ev := range evs {
+		out[i] = ev
+	}
+	return map[string]any{"chat_events": out}, nil
+}
+
+func TestTurnMediaHistoryPagingGrowsUntilBoundary(t *testing.T) {
+	t.Parallel()
+	gw := &pagingHistoryGateway{
+		events: []map[string]any{
+			{"event_name": "message.user", "seq": int64(1),
+				"payload": map[string]any{"display_text": "hi"}},
+			{"event_name": "message.assistant", "seq": int64(2),
+				"payload": map[string]any{
+					"display_text": "here", "status": "completed",
+					"data": map[string]any{"images": []any{map[string]any{
+						"path": "sandbox://workspace/pic.jpg", "mime": "image/jpeg",
+						"byte_len": int64(15),
+					}}},
+				}},
+			{"event_name": "message.assistant", "seq": int64(3),
+				"payload": map[string]any{"display_text": "later", "status": "completed"}},
+			{"event_name": "message.assistant", "seq": int64(4),
+				"payload": map[string]any{"display_text": "later", "status": "completed"}},
+			{"event_name": "message.assistant", "seq": int64(5),
+				"payload": map[string]any{"display_text": "later", "status": "completed"}},
+		},
+	}
+	// The limits are passed explicitly: no test mutates the
+	// shared default slice while parallel tests read it.
+	items, err := collectTurnMedia(context.Background(), gw, "", 1, 2, []int{2, 3, 5})
+	if err != nil {
+		t.Fatalf("collectTurnMedia = %v; want nil", err)
+	}
+	gw.mu.Lock()
+	limits := append([]int(nil), gw.limits...)
+	gw.mu.Unlock()
+	if len(limits) != 3 || limits[0] != 2 || limits[1] != 3 || limits[2] != 5 {
+		t.Errorf("history limits requested = %v; want [2 3 5] (grow until the userSeq boundary)", limits)
+	}
+	if len(items) != 1 || items[0].seq != 2 || items[0].resource.Path != "sandbox://workspace/pic.jpg" {
+		t.Errorf("collected media = %+v; want the seq-2 pic", items)
+	}
+}
+
+// failingHistoryGateway fails every chat.history read with a
+// scripted error.
+type failingHistoryGateway struct {
+	conn.Gateway
+	err error
+}
+
+func (g *failingHistoryGateway) CallJSON(context.Context, string, conn.RequestOptions) (any, error) {
+	return nil, g.err
+}
+
+func (g *failingHistoryGateway) Ping(context.Context, time.Duration) (any, error) {
+	return map[string]any{"ok": true}, nil
+}
+
+func (g *failingHistoryGateway) Alive() bool { return true }
+
+func (g *failingHistoryGateway) Dead() error { return nil }
+
+func (g *failingHistoryGateway) LastRecv() time.Time { return time.Now() }
+
+func (g *failingHistoryGateway) LastUsed() time.Time { return time.Now() }
+
+func (g *failingHistoryGateway) Close() error { return nil }
+
+func TestTurnMediaHistoryReadFailureFallsBackToText(t *testing.T) {
+	t.Parallel()
+	gw := &failingHistoryGateway{err: &conn.GatewayError{Status: 502, ErrorCode: "bad_gateway"}}
+	runner, fake := runnerWithGateway(t, gw)
+	res := &wait.Result{FinalText: "hello", Outcome: "done"}
+	if err := runner.deliverFinal(context.Background(), 500, 100, "", "main chat", 10, res, false); err != nil {
+		t.Fatalf("deliverFinal = %v; want nil (a failed media re-read delivers text-only)", err)
+	}
+	edits := fake.editTexts()
+	if len(edits) != 1 || edits[0] != "hello" {
+		t.Errorf("edits = %q; want the text-only delivery", edits)
+	}
+}
+
+func TestTurnMediaHistoryAuthFailurePropagates(t *testing.T) {
+	t.Parallel()
+	gw := &failingHistoryGateway{err: conn.NewAuthError("login expired")}
+	runner, fake := runnerWithGateway(t, gw)
+	res := &wait.Result{FinalText: "hello", Outcome: "done"}
+	err := runner.deliverFinal(context.Background(), 500, 100, "", "main chat", 10, res, false)
+	var authErr *conn.AuthError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("deliverFinal = %v; want an auth error", err)
+	}
+	if got := len(fake.editTexts()); got != 0 {
+		t.Errorf("edits = %d; want 0 (nothing is delivered before a fatal media-read failure)", got)
 	}
 }

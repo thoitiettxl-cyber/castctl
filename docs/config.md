@@ -349,7 +349,11 @@ derived from the resolved config location; there is no config
 field for it, and it is never written inside the
 token-bearing `config.json`). It holds the persisted update
 offset, the per-chat session/watermark mapping, and the
-runtime toggles. Writes are atomic (temp file + rename in the
+runtime toggles. It also holds `sent_media`: the keys of
+files already sent to a chat in a turn
+(`profile|chat|session|path`), in claim order, capped at the
+last 500, so a file Muse shows twice is sent once; the
+schema version stays 1. Writes are atomic (temp file + rename in the
 same directory, synced before the rename). Crash semantics:
 the offset is persisted before an update is handled, so a
 crash mid-handle loses that update (at-most-once, mirroring
@@ -363,6 +367,16 @@ counts that would be discarded. Any other read
 error fails startup rather than running on unpersistable
 state. Watermarks advance monotonically and are capped at
 the last seq a turn delivered.
+
+Telegram file limits: a file Muse shows in a turn is sent by
+multipart upload only (never by URL), capped at 49 MB;
+photos are capped at 10 MB (a larger photo is sent as a
+document); captions are capped at 1024 runes. A file over
+49 MB is never downloaded for sending when its size is
+known, and never sent when its downloaded size exceeds the
+cap: the chat gets the line `📎 <b>name</b> is N MB, too big
+for Telegram. Get it with castctl download.` There is no
+per-turn file cap.
 
 Deliberate deviations from 0.6.1: `edit_plain` swallows every
 edit error (Python catches only Telegram/connection errors —
@@ -396,7 +410,12 @@ approve-all buttons, resume after a decision), the core
 slash commands (`/help`, `/status`, `/chats`, `/main`, `/new`,
 `/history`, `/unread`, `/rename`, `/pin`, `/unpin`,
 `/archive`, `/unarchive`, `/delete`, `/watch` as a persisted
-toggle), and the persistent state file above. At startup the
+toggle), and the persistent state file above. Very long
+replies are sent as a `muse-reply` document with a bubble
+preview instead of being split, and files Muse shows in a
+turn are downloaded and sent to the chat in seq order
+(photos, videos, audio, documents; the limits above apply).
+At startup the
 bot registers exactly the 18 wired commands as the `/` menu
 (`setMyCommands`): `start`, `help`, `stop`, `status`, `chats`,
 `main`, `new`, `history`, `unread`, `rename`, `pin`, `unpin`,
@@ -407,20 +426,21 @@ start. `/delete`
 confirmation has no owner gate: any allowed user may confirm
 the delete prompt, matching Python — Boss-approved
 2026-11-01 as documented parity. Known gaps in
-this build: long replies are split into messages instead of
-being sent as a document, `/history` output is split instead
-of sent as a file, `/stop` does not drop dispatcher-queued
+this build: `/history` output is split instead of sent as a
+file, `/stop` does not drop dispatcher-queued
 updates (no per-chat drop API). Shutdown joins in-flight
 turns before returning (runner.Wait): turns inherit the
 handler context and are cancelled on shutdown, so the join
 waits only for teardown, not for a turn to run to
 completion.
 
-What this build does NOT wire (roadmap step 5b): media
-download/upload, `/files`, `/fs`, `/feed`, `/goals`, `/goal`,
+What this build does NOT wire (roadmap step 5b): media sent
+by users to the bot, `/files`, `/fs`, `/feed`, `/goals`, `/goal`,
 `/ideas`, `/usage`, `/wake`, `/profile`, `/update`, `/watch`
 forwarding/monitors, `/login`, `/raw`, and `telegram setup` /
-`install-service`. Those commands answer with an explicit
+`install-service`. Turn media (files Muse shows, downloaded
+and sent) is wired above; `/files` itself and user-sent
+media remain step 5b. Those commands answer with an explicit
 not-wired reply naming step 5b, except `/login` and `/raw`,
 which answer that they are not available in this build.
 None of them appears in the `/` menu: the menu holds only

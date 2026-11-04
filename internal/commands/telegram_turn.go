@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ import (
 	"github.com/thoitiettxl-cyber/castctl/internal/deliver"
 	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
+	"github.com/thoitiettxl-cyber/castctl/internal/shared"
 	"github.com/thoitiettxl-cyber/castctl/internal/telegram"
 	"github.com/thoitiettxl-cyber/castctl/internal/wait"
 )
@@ -50,7 +52,10 @@ import (
 //     final delivery, which is still correct. The fallback is
 //     NOT DONE in PR-A (see the PR body).
 //   - No live-media freeze/send (delta.presentation is ignored
-//     by the preview): media is PR-B work.
+//     by the preview): files Muse shows in a finished turn are
+//     downloaded and sent by deliverFinal (below), but a live
+//     presentation delta never freezes the preview or sends
+//     mid-turn.
 //   - The turn timeout is Python's TURN_TIMEOUT (6h); /stop is
 //     the escape hatch, and process cancellation ends the wait.
 //   - User-facing turn errors use fixed templates by error
@@ -759,7 +764,11 @@ func (e *bubbleEditor) editFinal(text string) {
 // needs a document (telegram.NeedsDocument, Python
 // needs_document) is edited into the bubble as a preview and
 // attached as a muse-reply document instead of being split
-// (deliver_reply, tgbot.py:1480-1488).
+// (deliver_reply, tgbot.py:1480-1488). Files Muse showed in
+// the turn are interleaved with the reply texts in seq order
+// (deliver_interleaved, tgbot.py:1440-1476) when the history
+// re-read finds any; when it finds none, or the re-read fails
+// non-fatally, delivery is exactly the text-only path below.
 //
 // [DEVIATION] A failed preview edit falls back to sending the
 // preview as a new message and still sends the document (the
@@ -768,6 +777,14 @@ func (e *bubbleEditor) editFinal(text string) {
 // failure still returns an error, so the watermark does not
 // advance. [DEVIATION] The document stem is the fixed
 // "muse-reply"; Python uses muse-reply-{user_seq}.
+// [DEVIATION] When media is present, the text segments come
+// from res.Replies (every reply's text, coalesced), not from
+// FinalText alone: the text-only path keeps the existing
+// FinalText-or-joined rule, but the interleaved path mirrors
+// Python's per-reply iteration. A media item's download or
+// send failure becomes a short notice and never holds the
+// watermark; only the main reply text and fatal (auth/cancel)
+// failures return an error.
 func (r *telegramTurnRunner) deliverFinal(ctx context.Context, chatID int64, bubbleID int, scope, title string, userSeq int64, res *wait.Result, stopped bool) error {
 	finalText := res.FinalText
 	if finalText == "" {
@@ -788,7 +805,21 @@ func (r *telegramTurnRunner) deliverFinal(ctx context.Context, chatID int64, bub
 		text = "(done)"
 	}
 	markup := r.finalMarkup(res, scope, title, userSeq)
-	if telegram.NeedsDocument(text) {
+	if delivered, err := r.deliverMediaTurn(ctx, chatID, bubbleID, scope, userSeq, res, finalText, notes, markup); err != nil {
+		return err
+	} else if delivered {
+		return nil
+	}
+	return r.deliverTextSegment(ctx, chatID, bubbleID, true, text, markup)
+}
+
+// deliverTextSegment delivers one text segment: into the bubble
+// when first (preview + document when it needs one, else the
+// split path's edit-then-send), as new messages otherwise.
+// markup is already scoped by the caller: non-nil only when
+// this segment owns the turn's buttons.
+func (r *telegramTurnRunner) deliverTextSegment(ctx context.Context, chatID int64, bubbleID int, first bool, text string, markup models.ReplyMarkup) error {
+	if first && telegram.NeedsDocument(text) {
 		preview := documentPreview(text)
 		if err := r.deps.bot.Edit(ctx, chatID, bubbleID, preview, nil, telegram.HTMLModeMarkdown); err != nil {
 			if _, err := r.deps.bot.Send(ctx, chatID, preview, telegram.SendOptions{Mode: telegram.HTMLModeMarkdown}); err != nil {
@@ -796,6 +827,18 @@ func (r *telegramTurnRunner) deliverFinal(ctx context.Context, chatID int64, bub
 			}
 		}
 		if _, err := r.deps.bot.SendFile(ctx, chatID, telegram.DocName("muse-reply", text), []byte(text), "", "Muse's full reply", telegram.SendOptions{Markup: markup}); err != nil {
+			return err
+		}
+		return nil
+	}
+	if !first && telegram.NeedsDocument(text) {
+		if _, err := r.deps.bot.SendFile(ctx, chatID, telegram.DocName("muse-reply", text), []byte(text), "", "Muse's full reply", telegram.SendOptions{Markup: markup}); err != nil {
+			return err
+		}
+		return nil
+	}
+	if !first {
+		if _, err := r.deps.bot.Send(ctx, chatID, text, telegram.SendOptions{Markup: markup, Mode: telegram.HTMLModeMarkdown}); err != nil {
 			return err
 		}
 		return nil
@@ -842,6 +885,380 @@ func joinReplyTexts(replies []wait.Reply) string {
 		}
 	}
 	return strings.Join(texts, "\n\n")
+}
+
+// turnMediaHistoryLimits mirrors wait.HistoryReplies' window
+// growth ([200, 500, 1000]): the media re-read pages until the
+// oldest event read is at or below the turn's user message,
+// so a turn whose events sit deep in history is still found.
+// Read-only after init: tests pass explicit limits to
+// collectTurnMedia instead of mutating this slice.
+var turnMediaHistoryLimits = []int{200, 500, 1000}
+
+// errMediaUnavailable marks "no turn media to deliver": the
+// history re-read found nothing, or failed non-fatally. The
+// caller falls back to the text-only path; it is never
+// returned to the turn.
+var errMediaUnavailable = errors.New("telegram: no turn media available")
+
+// turnMediaItem is one file Muse showed in the turn, with the
+// seq of the event that referenced it (the interleave order).
+type turnMediaItem struct {
+	seq      int64
+	resource shared.Resource
+}
+
+// collectTurnMedia re-reads the turn's history window and
+// returns the files Muse showed in it, in seq order,
+// deduplicated by path (first seen wins). The filter mirrors
+// wait.RepliesAfter: the (userSeq, upto] window, literal
+// event_name "message.assistant", exact "completed" status,
+// self-reference exclusion, and (seq, message_id) dedupe
+// across the growing windows. It assumes no
+// delta.presentation event appears in chat.history: the
+// live path ignores those deltas, and the history shape is
+// unverified against live traffic.
+func collectTurnMedia(ctx context.Context, gw conn.Gateway, scope string, userSeq, upto int64, limits []int) ([]turnMediaItem, error) {
+	type historyKey struct {
+		seq  int64
+		name string
+		mid  string
+	}
+	seen := map[historyKey]struct{}{}
+	var merged []any
+	for _, limit := range limits {
+		page, err := callHistoryEvents(ctx, gw, limit, scope)
+		if err != nil {
+			return nil, err
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, raw := range page {
+			key := historyKey{seq: eventSeq(raw), name: historyEventName(raw), mid: historyEventMessageID(raw)}
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged = append(merged, raw)
+		}
+		if oldestHistorySeq(page) <= userSeq {
+			break
+		}
+	}
+	sort.SliceStable(merged, func(i, j int) bool { return eventSeq(merged[i]) < eventSeq(merged[j]) })
+	var items []turnMediaItem
+	seenPaths := map[string]struct{}{}
+	for _, raw := range merged {
+		ev, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		seq := eventSeq(raw)
+		if seq <= userSeq || seq > upto {
+			continue
+		}
+		if ev["event_name"] != "message.assistant" {
+			continue
+		}
+		payload, _ := ev["payload"].(map[string]any)
+		if payload["status"] != "completed" {
+			continue
+		}
+		if selfRef, _, _ := wait.IsSelfReferential(ev); selfRef {
+			continue
+		}
+		for _, res := range shared.EventResources(ev) {
+			if _, dup := seenPaths[res.Path]; dup {
+				continue
+			}
+			seenPaths[res.Path] = struct{}{}
+			items = append(items, turnMediaItem{seq: seq, resource: res})
+		}
+	}
+	return items, nil
+}
+
+// historyEventName reads an event's literal event_name (no
+// event/type fallback, the RepliesAfter rule).
+func historyEventName(raw any) string {
+	ev, ok := raw.(map[string]any)
+	if !ok {
+		return ""
+	}
+	name, _ := ev["event_name"].(string)
+	return name
+}
+
+// historyEventMessageID reads the first non-empty message_id,
+// payload first, then the event itself (the RepliesAfter
+// dedupe key).
+func historyEventMessageID(raw any) string {
+	ev, ok := raw.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if payload, ok := ev["payload"].(map[string]any); ok {
+		if mid, ok := payload["message_id"].(string); ok && mid != "" {
+			return mid
+		}
+	}
+	mid, _ := ev["message_id"].(string)
+	return mid
+}
+
+// oldestHistorySeq is the smallest seq in a history page (0
+// when the page holds no numeric seq).
+func oldestHistorySeq(page []any) int64 {
+	var oldest int64
+	for i, raw := range page {
+		seq := eventSeq(raw)
+		if i == 0 || seq < oldest {
+			oldest = seq
+		}
+	}
+	return oldest
+}
+
+// turnSegment is one deliverable piece of a media turn: a
+// reply text or one file, ordered by seq with text before
+// media at the same seq (Python's (seq, kind-order) merge).
+type turnSegment struct {
+	seq      int64
+	isMedia  bool
+	text     string
+	resource shared.Resource
+}
+
+// buildTurnSegments merges the wait Result's reply texts with
+// the turn's media items: per-reply texts in seq order,
+// consecutive texts coalesced with "\n\n", media in seq
+// order. When the Result carries no reply texts, finalText
+// (the text-only path's assembly) becomes one leading text
+// segment at userSeq.
+func buildTurnSegments(res *wait.Result, finalText string, userSeq int64, items []turnMediaItem) []turnSegment {
+	var segs []turnSegment
+	for _, reply := range res.Replies {
+		if strings.TrimSpace(reply.Text) == "" {
+			continue
+		}
+		segs = append(segs, turnSegment{seq: reply.Seq, text: reply.Text})
+	}
+	if len(segs) == 0 && finalText != "" {
+		segs = append(segs, turnSegment{seq: userSeq, text: finalText})
+	}
+	for _, item := range items {
+		segs = append(segs, turnSegment{seq: item.seq, isMedia: true, resource: item.resource})
+	}
+	sort.SliceStable(segs, func(i, j int) bool {
+		if segs[i].seq != segs[j].seq {
+			return segs[i].seq < segs[j].seq
+		}
+		if segs[i].isMedia != segs[j].isMedia {
+			return !segs[i].isMedia
+		}
+		return false
+	})
+	var out []turnSegment
+	for _, seg := range segs {
+		if !seg.isMedia && len(out) > 0 && !out[len(out)-1].isMedia {
+			out[len(out)-1].text += "\n\n" + seg.text
+			continue
+		}
+		out = append(out, seg)
+	}
+	return out
+}
+
+// deliverMediaTurn delivers a turn that showed files: the
+// history re-read, the interleave, and the downloads all run
+// on one gateway lease (the sendDownloadStep precedent). It
+// reports (true, nil) when media was found and delivered,
+// (false, nil) when no media was found or the re-read failed
+// non-fatally (the caller falls back to text-only), and
+// (false, err) only for fatal failures (auth, cancellation,
+// or a failed main text segment). A non-fatal re-read failure
+// is warn-logged: the turn still delivers its text, and the
+// watermark still advances.
+func (r *telegramTurnRunner) deliverMediaTurn(ctx context.Context, chatID int64, bubbleID int, scope string, userSeq int64, res *wait.Result, finalText, notes string, markup models.ReplyMarkup) (bool, error) {
+	delivered := false
+	err := r.deps.rt.Muse.WithGateway(ctx, func(gw conn.Gateway) error {
+		items, err := collectTurnMedia(ctx, gw, scope, userSeq, deliveredTopSeq(userSeq, res), turnMediaHistoryLimits)
+		if err != nil {
+			var authErr *conn.AuthError
+			if errors.As(err, &authErr) || ctx.Err() != nil {
+				return err
+			}
+			r.deps.logger.Warn("telegram turn media history read failed; delivering text only", "err", logging.SummarizeErr(err))
+			return errMediaUnavailable
+		}
+		if len(items) == 0 {
+			return errMediaUnavailable
+		}
+		delivered = true
+		return r.deliverMediaSegments(ctx, gw, chatID, bubbleID, scope, res, finalText, userSeq, notes, markup, items)
+	})
+	if err == nil {
+		return delivered, nil
+	}
+	if errors.Is(err, errMediaUnavailable) {
+		return false, nil
+	}
+	return false, err
+}
+
+// deliverMediaSegments delivers the interleaved segments:
+// the first text segment owns the bubble, a media-first turn
+// deletes the bubble best-effort, notes and buttons ride the
+// last segment, and a trailing tail message carries them when
+// the last segment is media (Python deliver_interleaved).
+// There is no per-turn file cap. A failed text segment
+// returns an error; a failed media item becomes a notice
+// inside deliverMediaItem.
+func (r *telegramTurnRunner) deliverMediaSegments(ctx context.Context, gw conn.Gateway, chatID int64, bubbleID int, scope string, res *wait.Result, finalText string, userSeq int64, notes string, markup models.ReplyMarkup, items []turnMediaItem) error {
+	segments := buildTurnSegments(res, finalText, userSeq, items)
+	if len(segments) > 0 && !segments[len(segments)-1].isMedia && notes != "" {
+		last := &segments[len(segments)-1]
+		last.text = strings.TrimSpace(last.text + "\n\n" + notes)
+	}
+	for i, seg := range segments {
+		last := i == len(segments)-1
+		var segMarkup models.ReplyMarkup
+		if last {
+			segMarkup = markup
+		}
+		if seg.isMedia {
+			if i == 0 {
+				// Best-effort: a failed delete must not
+				// hold the turn (no per-turn file cap,
+				// no status-bubble fallback edit).
+				_ = r.deps.bot.Delete(ctx, chatID, bubbleID)
+			}
+			if err := r.deliverMediaItem(ctx, gw, chatID, scope, seg.resource, segMarkup); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := r.deliverTextSegment(ctx, chatID, bubbleID, i == 0, seg.text, segMarkup); err != nil {
+			return err
+		}
+	}
+	if len(segments) > 0 && segments[len(segments)-1].isMedia && (notes != "" || markup != nil) {
+		tail := notes
+		if tail == "" {
+			tail = "⬆️"
+		}
+		if _, err := r.deps.bot.Send(ctx, chatID, tail, telegram.SendOptions{Markup: markup, Mode: telegram.HTMLModeMarkdown}); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
+// deliverMediaItem downloads and sends one file, under the
+// sent-media claim: claimed before the download, released on
+// a download or send failure, kept on success and on a
+// too-big refusal (Python claim_media / release_media). A
+// file over the upload limit is never downloaded (when
+// ByteLen says so) and never sent: the chat gets the refusal
+// line pointing at castctl download. Failures become short
+// notices (filename + error class only); only a fatal
+// (auth/cancel) failure returns an error.
+func (r *telegramTurnRunner) deliverMediaItem(ctx context.Context, gw conn.Gateway, chatID int64, scope string, res shared.Resource, markup models.ReplyMarkup) error {
+	name := shared.LocalName(res.Path, "")
+	var mime string
+	if res.MIME != nil {
+		mime = *res.MIME
+	}
+	key := telegram.SentMediaKey(r.deps.prof.Name, chatID, scope, res.Path)
+	claimed, err := r.deps.store.ClaimSentMedia(key)
+	if err != nil {
+		r.deps.logger.Warn("telegram sent-media claim save failed", "err", logging.SummarizeErr(err))
+	}
+	if !claimed {
+		return nil
+	}
+	release := func() {
+		if err := r.deps.store.ReleaseSentMedia(key); err != nil {
+			r.deps.logger.Warn("telegram sent-media release failed", "err", logging.SummarizeErr(err))
+		}
+	}
+	if res.ByteLen != nil && *res.ByteLen > telegram.UploadLimit {
+		r.sendTooBigNotice(ctx, chatID, name, *res.ByteLen)
+		return nil
+	}
+	data, err := gw.DownloadFile(ctx, downloadRef(res), conn.DownloadOptions{})
+	if err != nil {
+		release()
+		if isMediaFatal(err, ctx) {
+			return err
+		}
+		r.sendMediaFailureNotice(ctx, chatID, name, "fetched", err)
+		return nil
+	}
+	if int64(len(data)) > telegram.UploadLimit {
+		r.sendTooBigNotice(ctx, chatID, name, int64(len(data)))
+		return nil
+	}
+	caption := ""
+	if res.Label != nil {
+		if label := strings.TrimSpace(*res.Label); label != "" && label != name {
+			caption = label
+		}
+	}
+	if _, err := r.deps.bot.SendFile(ctx, chatID, name, data, mime, caption, telegram.SendOptions{Markup: markup}); err != nil {
+		release()
+		if isMediaFatal(err, ctx) {
+			return err
+		}
+		r.sendMediaFailureNotice(ctx, chatID, name, "sent", err)
+		return nil
+	}
+	return nil
+}
+
+// downloadRef replicates shared's unexported rule
+// (resources.go): a variants dict downloads through
+// {"path", "variants"}, so the gateway's variants.original
+// preference applies; without variants the bare path is
+// equivalent. The bare Resource struct is never passed: the
+// gateway only understands these two shapes.
+func downloadRef(res shared.Resource) any {
+	if res.Variants != nil {
+		return map[string]any{"path": res.Path, "variants": res.Variants}
+	}
+	return res.Path
+}
+
+// isMediaFatal reports whether a media download/send failure
+// must fail the turn: an auth failure, or a cancelled
+// context. Any other failure becomes a notice.
+func isMediaFatal(err error, ctx context.Context) bool {
+	var authErr *conn.AuthError
+	return errors.As(err, &authErr) || ctx.Err() != nil
+}
+
+// sendTooBigNotice sends the brief-literal refusal line for
+// a file over the upload limit. The size renders in whole
+// MiB (bytes // 1MiB). A failed notice is warn-logged, never
+// returned: the refusal is advisory, not the turn.
+func (r *telegramTurnRunner) sendTooBigNotice(ctx context.Context, chatID int64, name string, sizeBytes int64) {
+	text := fmt.Sprintf("📎 <b>%s</b> is %d MB, too big for Telegram. Get it with castctl download.", telegram.EscapeText(name), sizeBytes>>20)
+	if _, err := r.deps.bot.Send(ctx, chatID, text, telegram.SendOptions{Mode: telegram.HTMLModeHTML}); err != nil {
+		r.deps.logger.Warn("telegram too-big notice failed", "err", logging.SummarizeErr(err))
+	}
+}
+
+// sendMediaFailureNotice sends the short failure notice for
+// one file: the filename and the error class only (never the
+// path, the URL, or raw error text). The class is capped at
+// 200 runes, the Python truncation shape. A failed notice is
+// warn-logged, never returned.
+func (r *telegramTurnRunner) sendMediaFailureNotice(ctx context.Context, chatID int64, name, verb string, err error) {
+	text := fmt.Sprintf("📎 <b>%s</b> could not be %s (%s).", telegram.EscapeText(name), verb, truncateRunes(logging.SummarizeErr(err), 200))
+	if _, err := r.deps.bot.Send(ctx, chatID, text, telegram.SendOptions{Mode: telegram.HTMLModeHTML}); err != nil {
+		r.deps.logger.Warn("telegram media failure notice failed", "err", logging.SummarizeErr(err))
+	}
 }
 
 // outcomeNotes appends the outcome notes in Python's order
