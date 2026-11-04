@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,7 +30,10 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
+	"github.com/thoitiettxl-cyber/castctl/internal/profile"
+	"github.com/thoitiettxl-cyber/castctl/internal/telegram"
 	"github.com/thoitiettxl-cyber/castctl/internal/update"
 )
 
@@ -808,6 +812,266 @@ func TestTelegramLoginNoHatchSess(t *testing.T) {
 	assertNoMarker(t, "login no-hatch_sess", allSendsAndEdits(h), logs.String())
 }
 
+// TestTelegramLoginWriteFailureNoPathInLog: when the cookie
+// write fails, the save-failure log line must carry a fixed
+// class only — neither the marker cookie text nor the
+// absolute cookies path (B1 invariant, PR #57). The cookies
+// path is a directory, so WriteCookiesFile fails
+// deterministically with the path embedded in its error.
+func TestTelegramLoginWriteFailureNoPathInLog(t *testing.T) {
+	t.Parallel()
+	logger, logs := captureLogger()
+	cookiesDir := t.TempDir()
+	cookiesPath := filepath.Join(cookiesDir, "cookiesdir")
+	if err := os.MkdirAll(cookiesPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cookiesPathJSON, err := json.Marshal(cookiesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configJSON := `{"default_profile":"default","profiles":{"default":{},"muse01":{"cookies_file":` + string(cookiesPathJSON) + `}},"telegram":{"profile":"muse01","token":"` + telegramTestToken + `","allowed_user_ids":[111],"owner_id":111}}`
+	gw := newTelegramTurnFakeGateway()
+	h, cancel, codeCh := runTelegramBotWithConfigDeps(t, gw, []string{
+		telegramUpdate(1, 111, "/login"),
+		telegramUpdate(2, 111, loginMarkerText),
+	}, configJSON, nil, nil, logger)
+	defer cancel()
+	wantReply := "⚠️ Could not save the cookies; nothing changed. /login to retry."
+	waitFor(t, "save-failure reply", func() bool {
+		for _, s := range sendsOf(h) {
+			if s == wantReply {
+				return true
+			}
+		}
+		return false
+	})
+	stopBot(t, cancel, codeCh)
+	found := false
+	for _, s := range sendsOf(h) {
+		if s == wantReply {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("sends = %q; want the fixed save-failure sentence", sendsOf(h))
+	}
+	deletes := h.fake.deletesSeen()
+	if len(deletes) != 1 {
+		t.Errorf("deletes = %+v; want one delete of the cookie message", deletes)
+	}
+	captured := logs.String()
+	if strings.Contains(captured, cookiesPath) || strings.Contains(captured, cookiesDir) {
+		t.Errorf("log contains the cookies path: %q", captured)
+	}
+	assertNoMarker(t, "login write failure", nil, captured)
+}
+
+// leaserFakeGateway wraps the turn fake gateway with a Lease
+// method so conn.Muse installs it as the shared connection
+// (every production gateway is a Leaser). It exists only for
+// TestTelegramLoginResetDropsSharedConnection: a plain
+// dial-count probe without the Leaser wrapper passes
+// vacuously, because the shared slot never engages.
+type leaserFakeGateway struct {
+	*telegramTurnFakeGateway
+}
+
+// Lease returns the same connection: the shared view's Close
+// is a no-op through SharedConn, as on the production path.
+func (w *leaserFakeGateway) Lease() conn.Gateway { return w }
+
+// TestTelegramLoginResetDropsSharedConnection: the /login
+// write must drop the shared gateway connection (resetMuse)
+// so the next request re-dials and re-reads the fresh
+// cookies file. Control: a second WithGateway before login
+// does NOT re-dial (dials stay 1, the shared slot is
+// engaged); after the login flow the next WithGateway
+// re-dials (dials become 2).
+func TestTelegramLoginResetDropsSharedConnection(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	gw := newTelegramTurnFakeGateway()
+	dials := 0
+	muse := conn.New(func(context.Context, conn.Config) (conn.Gateway, error) {
+		dials++
+		return &leaserFakeGateway{gw}, nil
+	})
+	cookiesPath := filepath.Join(home, "profiles", "muse01", "cookies.txt")
+	prof := &profile.Profile{Name: "muse01", CookiesFile: cookiesPath, VMID: "vm-test"}
+	loc := &profile.ConfigLocation{ConfigDir: home, ConfigFile: filepath.Join(home, "config.json")}
+	rt := &Runtime{Profile: prof, Location: loc, Muse: muse}
+	fake := &cmdFakeTelegram{}
+	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
+	t.Cleanup(srv.Close)
+	fakeAddr := srv.Listener.Addr().String()
+	dialFake := func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, fakeAddr)
+	}
+	fakeClient := &http.Client{Transport: &http.Transport{
+		Proxy:       nil,
+		DialContext: dialFake,
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialFake(ctx, network, addr)
+		},
+	}}
+	bot, err := telegram.New(telegram.Settings{
+		Token:          telegramTestToken,
+		AllowedUserIDs: []int64{111},
+		HTTPClient:     fakeClient,
+		Logger:         slog.Default(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &telegramCmdHandler{env: &Env{}, bot: bot, rt: rt, prof: prof, logger: slog.Default(), ownerID: 111, hasOwner: true}
+	ctx := context.Background()
+	withGateway := func() {
+		t.Helper()
+		if err := muse.WithGateway(ctx, func(conn.Gateway) error { return nil }); err != nil {
+			t.Fatalf("WithGateway: %v", err)
+		}
+	}
+	withGateway()
+	withGateway()
+	if dials != 1 {
+		t.Fatalf("gateway dials = %d before login; want 1 (shared slot engaged, no re-dial)", dials)
+	}
+	if err := h.dispatch(ctx, telegram.MessageContext{ChatID: 500, UserID: 111, Text: "/login", MessageID: 1}); err != nil {
+		t.Fatalf("dispatch /login: %v", err)
+	}
+	if err := h.dispatch(ctx, telegram.MessageContext{ChatID: 500, UserID: 111, Text: loginMarkerText, MessageID: 2}); err != nil {
+		t.Fatalf("dispatch cookie text: %v", err)
+	}
+	withGateway()
+	if dials != 2 {
+		t.Fatalf("gateway dials = %d after login (was 1); want 2, proving resetMuse dropped the shared connection", dials)
+	}
+	data, err := os.ReadFile(cookiesPath)
+	if err != nil {
+		t.Fatalf("cookies file unreadable: %v", err)
+	}
+	if string(data) != loginMarkerText+"\n" {
+		t.Errorf("cookies file = %q; want the login cookie text", data)
+	}
+	sends := fake.sendsSeen()
+	found := false
+	for _, s := range sends {
+		if strings.Contains(s, "Cookies saved and working") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("sends = %q; want the login success sentence", sends)
+	}
+}
+
+// TestTelegramStatusOwnerConfigured: telegram status reports
+// owner_configured true when owner_id is set, false without
+// it (technical N4; the field is D14-optional behaviour).
+func TestTelegramStatusOwnerConfigured(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		config string
+		want   bool
+	}{
+		{"owner set", telegramTestConfigWithOwner(111, []int64{111}), true},
+		{"no owner", telegramTestConfig(), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env, out, errb := telegramTestEnv(t, tc.config)
+			if code := Run(context.Background(), []string{"telegram", "status"}, env); code != 0 {
+				t.Fatalf("status: code=%d err=%q, want 0", code, errb.String())
+			}
+			var st telegramStatus
+			if err := json.Unmarshal(out.Bytes(), &st); err != nil {
+				t.Fatalf("status output is not JSON: %v (%q)", err, out.String())
+			}
+			if st.OwnerConfigured != tc.want {
+				t.Errorf("status = %+v; want owner_configured=%v", st, tc.want)
+			}
+		})
+	}
+}
+
+// TestTelegramLoginStatusFailure: after a successful cookie
+// write, a failing status check answers upstream's "Saved,
+// but Muse still refuses" sentence ([:300] bound), with the
+// file written and the message deleted. Direct-handler shape
+// (red-team probe): no VM id, so statusVMID falls through
+// to FetchSessionInfo against a dead client.
+func TestTelegramLoginStatusFailure(t *testing.T) {
+	t.Parallel()
+	logger, logs := captureLogger()
+	home := t.TempDir()
+	gw := newTelegramTurnFakeGateway()
+	muse := conn.New(func(context.Context, conn.Config) (conn.Gateway, error) { return gw, nil })
+	cookiesPath := filepath.Join(home, "profiles", "muse01", "cookies.txt")
+	prof := &profile.Profile{Name: "muse01", CookiesFile: cookiesPath}
+	loc := &profile.ConfigLocation{ConfigDir: home, ConfigFile: filepath.Join(home, "config.json")}
+	fake := &cmdFakeTelegram{}
+	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
+	t.Cleanup(srv.Close)
+	fakeAddr := srv.Listener.Addr().String()
+	dialFake := func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, fakeAddr)
+	}
+	fakeClient := &http.Client{Transport: &http.Transport{
+		Proxy:       nil,
+		DialContext: dialFake,
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialFake(ctx, network, addr)
+		},
+	}}
+	rt := &Runtime{Profile: prof, Location: loc, Muse: muse, httpClientOverride: fakeClient}
+	bot, err := telegram.New(telegram.Settings{
+		Token:          telegramTestToken,
+		AllowedUserIDs: []int64{111},
+		HTTPClient:     fakeClient,
+		Logger:         logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &telegramCmdHandler{env: &Env{}, bot: bot, rt: rt, prof: prof, logger: logger, ownerID: 111, hasOwner: true}
+	ctx := context.Background()
+	if err := h.dispatch(ctx, telegram.MessageContext{ChatID: 500, UserID: 111, Text: "/login", MessageID: 1}); err != nil {
+		t.Fatalf("dispatch /login: %v", err)
+	}
+	if err := h.dispatch(ctx, telegram.MessageContext{ChatID: 500, UserID: 111, Text: loginMarkerText, MessageID: 2}); err != nil {
+		t.Fatalf("dispatch cookie text: %v", err)
+	}
+	sends := fake.sendsSeen()
+	found := false
+	for _, s := range sends {
+		if strings.HasPrefix(s, "⚠️ Saved, but Muse still refuses: ") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("sends = %q; want the still-refuses sentence", sends)
+	}
+	data, err := os.ReadFile(cookiesPath)
+	if err != nil {
+		t.Fatalf("cookies file unreadable: %v", err)
+	}
+	if string(data) != loginMarkerText+"\n" {
+		t.Errorf("cookies file = %q; want the login cookie text", data)
+	}
+	deletes := fake.deletesSeen()
+	if len(deletes) != 1 {
+		t.Errorf("deletes = %+v; want one delete of the cookie message", deletes)
+	}
+	assertNoMarker(t, "login status failure", sends, logs.String())
+	if strings.Contains(logs.String(), home) {
+		t.Errorf("log contains the home path: %q", logs.String())
+	}
+}
+
 // TestTelegramLoginTooLargeDeclared: a declared >1MB size
 // refuses BEFORE any download, deletes the message, and
 // writes nothing.
@@ -1024,10 +1288,16 @@ func TestTelegramLoginWrongUIDCookieIgnored(t *testing.T) {
 	t.Parallel()
 	gw := newTelegramTurnFakeGateway()
 	gw.subScripts = []turnSubScript{{replyText: "turn reply"}}
+	// Distinct marker texts per sender: the file-content
+	// assertion below must tell whose cookies were written,
+	// so the uid-check-removed mutant fails on content
+	// alone, deterministically.
+	wrongUIDText := "hatch_sess=WRONGUIDMARKERAAA999; other=wrong"
+	ownerText := "hatch_sess=OWNERMARKERCCC333; other=owner"
 	h, cancel, codeCh := runTelegramBotWithConfig(t, gw, []string{
 		telegramUpdate(1, 111, "/login"),
-		telegramUpdate(2, 222, loginMarkerText),
-		telegramUpdate(3, 111, loginMarkerText),
+		telegramUpdate(2, 222, wrongUIDText),
+		telegramUpdate(3, 111, ownerText),
 	}, telegramTestConfigTwoUsers(), nil)
 	defer cancel()
 	waitFor(t, "owner login success", func() bool {
@@ -1038,6 +1308,14 @@ func TestTelegramLoginWrongUIDCookieIgnored(t *testing.T) {
 		}
 		return false
 	})
+	// The other user's text must have started a turn
+	// (subscribe ran) before the bot stops: observe it
+	// with waitFor, mirroring TestTelegramLoginNoHatchSess,
+	// instead of racing stopBot's cancel.
+	waitFor(t, "turn after wrong-uid text", func() bool {
+		_, _, subs, _ := gw.counts()
+		return subs >= 1
+	})
 	stopBot(t, cancel, codeCh)
 	// Exactly one delete: the owner's completing message.
 	// The other user's text started a turn (subscribe ran).
@@ -1045,16 +1323,15 @@ func TestTelegramLoginWrongUIDCookieIgnored(t *testing.T) {
 	if len(deletes) != 1 {
 		t.Errorf("deletes = %+v; want exactly the owner's message deleted", deletes)
 	}
-	_, _, subs, _ := gw.counts()
-	if subs < 1 {
-		t.Error("no turn subscribe: the other user's text should have started a turn")
-	}
 	data, err := os.ReadFile(loginCookiesPath(h.homeDir))
 	if err != nil {
 		t.Fatalf("cookies file unreadable: %v", err)
 	}
-	if string(data) != loginMarkerText+"\n" {
-		t.Errorf("cookies file = %q; want the owner's cookie text", data)
+	if string(data) != ownerText+"\n" {
+		t.Errorf("cookies file = %q; want only the owner's cookie text", data)
+	}
+	if strings.Contains(string(data), "WRONGUIDMARKERAAA999") {
+		t.Errorf("cookies file contains the wrong-uid marker: %q", data)
 	}
 }
 

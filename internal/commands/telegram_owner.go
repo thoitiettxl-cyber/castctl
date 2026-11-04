@@ -339,8 +339,15 @@ func (h *telegramCmdHandler) takeAwaitingCookies(ctx context.Context, mc telegra
 	}
 	if err := h.saveLoginCookies(text); err != nil {
 		// Never surface the write error: WriteCookiesFile
-		// errors embed the cookies path.
-		h.logger.Warn("telegram login cookies save failed", "err", logging.SummarizeErr(err))
+		// errors embed the cookies path, and SummarizeErr
+		// falls back to the raw error text for them. Log
+		// a fixed class only, distinguishing the lock
+		// timeout from any other write failure.
+		class := "cookies write failed"
+		if errors.Is(err, profile.ErrCookiesLockTimeout) {
+			class = "cookies lock timeout"
+		}
+		h.logger.Warn("telegram login cookies save failed", "err", class)
 		_, sendErr := h.bot.Send(ctx, chatID, "⚠️ Could not save the cookies; nothing changed. /login to retry.", telegram.SendOptions{Mode: telegram.HTMLModePlain})
 		return true, sendErr
 	}
