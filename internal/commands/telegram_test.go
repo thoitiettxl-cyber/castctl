@@ -16,15 +16,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
@@ -83,6 +86,11 @@ type cmdFakeTelegram struct {
 	// edit across shutdown. Nil (the default) leaves edits
 	// unblocked.
 	editGate chan struct{}
+	// commandsJSON records the raw "commands" field of each
+	// setMyCommands call, in order. setMyCommandsFail, when
+	// true, makes setMyCommands answer 400 instead of true.
+	commandsJSON      []string
+	setMyCommandsFail bool
 }
 
 func (f *cmdFakeTelegram) editTexts() []string {
@@ -193,6 +201,25 @@ func (f *cmdFakeTelegram) handler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":100,"chat":{"id":500,"type":"private"},"date":0,"text":"ok"}}`)
 	case "answerCallbackQuery":
 		fmt.Fprint(w, `{"ok":true,"result":true}`)
+	case "setMyCommands":
+		// The commands JSON arrives as the "commands"
+		// multipart field; record it verbatim so tests
+		// assert what the bot actually registered.
+		commands := ""
+		if err := r.ParseMultipartForm(1 << 20); err == nil && r.MultipartForm != nil {
+			commands = firstFormValue(r.MultipartForm.Value["commands"])
+		} else if err := r.ParseForm(); err == nil {
+			commands = r.Form.Get("commands")
+		}
+		f.mu.Lock()
+		f.commandsJSON = append(f.commandsJSON, commands)
+		fail := f.setMyCommandsFail
+		f.mu.Unlock()
+		if fail {
+			fmt.Fprint(w, `{"ok":false,"error_code":400,"description":"Bad Request: commands are invalid"}`)
+			return
+		}
+		fmt.Fprint(w, `{"ok":true,"result":true}`)
 	default:
 		fmt.Fprint(w, `{"ok":false,"error_code":404,"description":"Not Found"}`)
 	}
@@ -224,6 +251,14 @@ func (f *cmdFakeTelegram) saw(method string) bool {
 		}
 	}
 	return false
+}
+
+// commandsSeen returns the raw "commands" field recorded for
+// each setMyCommands call, in call order.
+func (f *cmdFakeTelegram) commandsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.commandsJSON...)
 }
 
 // The fake client below is a plain *http.Transport whose dial
@@ -515,5 +550,172 @@ func TestTelegramHelpAndDispatch(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "invalid choice") {
 		t.Errorf("telegram setup stderr = %q; want invalid choice", errb.String())
+	}
+}
+
+// TestTelegramCommandMenu (Test 1) pins the "/" menu table: the
+// exact 18 wired commands, in dispatch order, each name within
+// the Bot API rule and each description 3-256 runes. Deferred
+// and not-available commands must stay out of the menu.
+func TestTelegramCommandMenu(t *testing.T) {
+	t.Parallel()
+	wantOrder := []string{
+		"start", "help", "stop", "status", "chats", "main", "new",
+		"history", "unread", "rename", "pin", "unpin", "archive",
+		"unarchive", "delete", "approvals", "autoapprove", "watch",
+	}
+	if len(telegramCommandMenu) != len(wantOrder) {
+		t.Fatalf("menu has %d entries; want %d (%v)", len(telegramCommandMenu), len(wantOrder), wantOrder)
+	}
+	nameRe := regexp.MustCompile(`^[a-z0-9_]{1,32}$`)
+	seen := make(map[string]bool, len(wantOrder))
+	for i, c := range telegramCommandMenu {
+		if c.Name != wantOrder[i] {
+			t.Errorf("menu[%d] name = %q; want %q", i, c.Name, wantOrder[i])
+		}
+		if !nameRe.MatchString(c.Name) {
+			t.Errorf("menu name %q breaks the Bot API rule ^[a-z0-9_]{1,32}$", c.Name)
+		}
+		if n := utf8.RuneCountInString(c.Description); n < 3 || n > 256 {
+			t.Errorf("menu %q description is %d runes; want 3-256", c.Name, n)
+		}
+		if seen[c.Name] {
+			t.Errorf("menu repeats %q", c.Name)
+		}
+		seen[c.Name] = true
+		if telegramDeferredCommands[c.Name] || c.Name == "login" || c.Name == "raw" {
+			t.Errorf("menu contains deferred/not-available command %q", c.Name)
+		}
+	}
+}
+
+// menuCommandJSON is the wire shape of one setMyCommands entry,
+// as the fake records it in the "commands" form field.
+type menuCommandJSON struct {
+	Command     string `json:"command"`
+	Description string `json:"description"`
+}
+
+// TestTelegramCommandMenuMatchesWiredCommands (Test 2, the
+// anti-drift test) sends every menu command through the full
+// `telegram run` harness and requires a wired reply: never
+// "Unknown command", never "not wired", never "not available".
+// It also asserts the bot registered exactly this menu with
+// the fake server at startup.
+func TestTelegramCommandMenuMatchesWiredCommands(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	batches := make([]string, 0, len(telegramCommandMenu))
+	for i, c := range telegramCommandMenu {
+		batches = append(batches, telegramUpdate(int64(i+1), 111, "/"+c.Name))
+	}
+	h, cancel, codeCh := runTelegramBot(t, gw, batches)
+	defer cancel()
+	waitFor(t, "one reply per menu command", func() bool { return len(sendsOf(h)) >= len(telegramCommandMenu) })
+	seen := h.fake.commandsSeen()
+	if len(seen) != 1 {
+		t.Fatalf("setMyCommands calls = %d; want 1 at startup", len(seen))
+	}
+	var registered []menuCommandJSON
+	if err := json.Unmarshal([]byte(seen[0]), &registered); err != nil {
+		t.Fatalf("registered commands %q are not BotCommand JSON: %v", seen[0], err)
+	}
+	if len(registered) != len(telegramCommandMenu) {
+		t.Fatalf("registered %d commands; want %d", len(registered), len(telegramCommandMenu))
+	}
+	for i, c := range telegramCommandMenu {
+		if registered[i].Command != c.Name || registered[i].Description != c.Description {
+			t.Errorf("registered[%d] = %+v; want {%q %q}", i, registered[i], c.Name, c.Description)
+		}
+	}
+	cancel()
+	if code := <-codeCh; code != 130 {
+		t.Errorf("run code = %d; want 130", code)
+	}
+	sends := sendsOf(h)
+	if len(sends) != len(telegramCommandMenu) {
+		t.Fatalf("sends = %d; want one reply per menu command (%d): %q", len(sends), len(telegramCommandMenu), sends)
+	}
+	forbidden := []string{"Unknown command", "not wired", "not available"}
+	for i, c := range telegramCommandMenu {
+		for _, f := range forbidden {
+			if strings.Contains(sends[i], f) {
+				t.Errorf("reply to /%s contains %q: %q", c.Name, f, sends[i])
+			}
+		}
+	}
+}
+
+// TestTelegramRunContinuesWhenSetMyCommandsFails (Test 3) makes
+// setMyCommands answer 400 and requires the bot to still poll
+// and handle an update, with the failure logged as a summary
+// warning — never blocking, never leaking the token.
+func TestTelegramRunContinuesWhenSetMyCommandsFails(t *testing.T) {
+	t.Parallel()
+	fake := &cmdFakeTelegram{
+		setMyCommandsFail: true,
+		batches:           []string{telegramUpdate(1, 111, "hello")},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
+	defer srv.Close()
+	fakeAddr := srv.Listener.Addr().String()
+	dialFake := func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, fakeAddr)
+	}
+	fakeClient := &http.Client{Transport: &http.Transport{
+		Proxy:       nil,
+		DialContext: dialFake,
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialFake(ctx, network, addr)
+		},
+	}}
+	gw := newTelegramTurnFakeGateway()
+	gw.subScripts = []turnSubScript{{replyText: "Hello back", deltas: []string{"Hel"}}}
+	muse := conn.New(func(context.Context, conn.Config) (conn.Gateway, error) { return gw, nil })
+	_, configFile := testHome(t, telegramTestConfig())
+	logBuf := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	env := &Env{
+		Stdout: &strings.Builder{},
+		Stderr: &strings.Builder{},
+		Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile}),
+		Logger: logger,
+	}
+	env.BuildRuntime = func(ctx context.Context, loc *profile.ConfigLocation, prof *profile.Profile, env *Env) (*Runtime, error) {
+		prof.VMID = "vm-test"
+		return &Runtime{Profile: prof, Muse: muse, httpClientOverride: fakeClient}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- Run(ctx, []string{"telegram", "run"}, env) }()
+	waitFor(t, "setMyCommands attempt", func() bool { return fake.saw("setMyCommands") })
+	waitFor(t, "final edit after the failed menu registration", func() bool {
+		for _, e := range fake.editTexts() {
+			if strings.Contains(e, "Hello back") {
+				return true
+			}
+		}
+		return false
+	})
+	cancel()
+	var code int
+	select {
+	case code = <-codeCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("telegram run did not return after cancel")
+	}
+	if code != 130 {
+		t.Errorf("run code = %d; want 130 (interrupted)", code)
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, "telegram setMyCommands failed") {
+		t.Errorf("logs = %q; want the setMyCommands warning", logs)
+	}
+	if !strings.Contains(logs, "bad request") {
+		t.Errorf("logs = %q; want the summary class (bad request), not verbatim error text", logs)
+	}
+	if strings.Contains(logs, telegramTestToken) {
+		t.Error("token value appears in the setMyCommands failure log")
 	}
 }

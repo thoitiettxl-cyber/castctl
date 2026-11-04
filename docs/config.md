@@ -396,7 +396,14 @@ approve-all buttons, resume after a decision), the core
 slash commands (`/help`, `/status`, `/chats`, `/main`, `/new`,
 `/history`, `/unread`, `/rename`, `/pin`, `/unpin`,
 `/archive`, `/unarchive`, `/delete`, `/watch` as a persisted
-toggle), and the persistent state file above. `/delete`
+toggle), and the persistent state file above. At startup the
+bot registers exactly the 18 wired commands as the `/` menu
+(`setMyCommands`): `start`, `help`, `stop`, `status`, `chats`,
+`main`, `new`, `history`, `unread`, `rename`, `pin`, `unpin`,
+`archive`, `unarchive`, `delete`, `approvals`, `autoapprove`,
+`watch`. A `setMyCommands` failure is only a warning: polling
+starts regardless, and the menu is re-registered on the next
+start. `/delete`
 confirmation has no owner gate: any allowed user may confirm
 the delete prompt, matching Python — Boss-approved
 2026-11-01 as documented parity. Known gaps in
@@ -416,6 +423,8 @@ forwarding/monitors, `/login`, `/raw`, and `telegram setup` /
 `install-service`. Those commands answer with an explicit
 not-wired reply naming step 5b, except `/login` and `/raw`,
 which answer that they are not available in this build.
+None of them appears in the `/` menu: the menu holds only
+the 18 wired commands listed above.
 
 ## The `keeper` section
 

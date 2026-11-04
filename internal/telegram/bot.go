@@ -1712,6 +1712,52 @@ func (b *Bot) Delete(ctx context.Context, chatID int64, msgID int) error {
 	return b.scrubErr(err)
 }
 
+// Command is one "/" menu entry: the command name without the
+// slash, plus the short description Telegram shows beside it.
+// The Bot API bounds (core.telegram.org/bots/api#setmycommands):
+// name 1-32 chars, lowercase letters, digits and underscores;
+// description 1-256 chars.
+type Command struct {
+	Name        string
+	Description string
+}
+
+// botCommandNameRe is the Bot API command-name rule.
+var botCommandNameRe = regexp.MustCompile(`^[a-z0-9_]{1,32}$`)
+
+// SetCommands registers cmds as the bot's "/" menu
+// (setMyCommands, default scope, default language) through
+// retryCall. It validates every entry before any request, so
+// a bad entry makes no API call. An API failure returns a
+// scrubbed error; SetCommands logs nothing — the caller
+// decides whether a failed registration is worth a log line
+// (the production caller only warns, polling continues).
+func (b *Bot) SetCommands(ctx context.Context, cmds []Command) error {
+	seen := make(map[string]bool, len(cmds))
+	apiCmds := make([]models.BotCommand, 0, len(cmds))
+	for _, c := range cmds {
+		if !botCommandNameRe.MatchString(c.Name) {
+			return fmt.Errorf("telegram: invalid bot command name %q", c.Name)
+		}
+		if seen[c.Name] {
+			return fmt.Errorf("telegram: duplicate bot command %q", c.Name)
+		}
+		seen[c.Name] = true
+		if n := utf8.RuneCountInString(c.Description); n < 1 || n > 256 {
+			return fmt.Errorf("telegram: bot command %q description is %d runes; want 1-256", c.Name, n)
+		}
+		apiCmds = append(apiCmds, models.BotCommand{Command: c.Name, Description: c.Description})
+	}
+	err := b.retryCall(ctx, func() error {
+		_, err := b.api.SetMyCommands(ctx, &bot.SetMyCommandsParams{Commands: apiCmds})
+		return err
+	})
+	if err != nil {
+		return b.scrubErr(err)
+	}
+	return nil
+}
+
 // ClearMarkup clears a message's inline keyboard. It is the
 // exported form of clearMarkup for step-5 callback actions
 // (question answers), which run outside the bot core.
