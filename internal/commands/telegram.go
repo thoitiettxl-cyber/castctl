@@ -28,9 +28,9 @@ import (
 //     slash commands (/help, /status, /chats, /main, /new,
 //     /history, /unread, /approvals, /autoapprove, /watch,
 //     session ops, /stop, /feed, /goals, /goal, /ideas,
-//     /usage, /wake) are wired; files Muse shows in a
+//     /usage, /wake, /fs) are wired; files Muse shows in a
 //     turn are downloaded and sent to the chat (photos,
-//     videos, audio, documents); /fs, /profile, /update,
+//     videos, audio, documents); /profile, /update,
 //     /login, /raw, watch forwarding, and `telegram setup` /
 //     `install-service` are roadmap step 5b, not this build.
 //   - `telegram status`: offline report of the block (configured

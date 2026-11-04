@@ -205,6 +205,13 @@ mistake these influences for vendored code.
    with the command-table wiring in
    `internal/commands/telegram_commands.go` and the
    `idea_exec` callback id in
+   `internal/telegram/approvals.go` (`CallbackEntry`), and
+   the `/fs` command (`cmd_fs`/`cb_fs_rm`, with
+   `reply_long`/`fs.norm`/`fs.fmt_size`) in
+   `internal/commands/telegram_fs.go` (new file) with the
+   command-table wiring in
+   `internal/commands/telegram_commands.go` and the
+   `fs_rm` callback fields in
    `internal/telegram/approvals.go` (`CallbackEntry`);
    see docs/provenance.md §5.
    (The byte-identical descriptor assets are listed in (a).)

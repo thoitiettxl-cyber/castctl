@@ -885,7 +885,7 @@ func TestTelegramHelpAndDispatch(t *testing.T) {
 }
 
 // TestTelegramCommandMenu (Test 1) pins the "/" menu table: the
-// exact 25 wired commands, in dispatch order, each name within
+// exact 26 wired commands, in dispatch order, each name within
 // the Bot API rule and each description 3-256 runes. Deferred
 // and not-available commands must stay out of the menu.
 func TestTelegramCommandMenu(t *testing.T) {
@@ -894,7 +894,7 @@ func TestTelegramCommandMenu(t *testing.T) {
 		"start", "help", "stop", "status", "chats", "main", "new",
 		"history", "unread", "rename", "pin", "unpin", "archive",
 		"unarchive", "delete", "approvals", "autoapprove", "watch",
-		"files", "feed", "goals", "goal", "ideas", "usage", "wake",
+		"files", "feed", "goals", "goal", "ideas", "usage", "wake", "fs",
 	}
 	if len(telegramCommandMenu) != len(wantOrder) {
 		t.Fatalf("menu has %d entries; want %d (%v)", len(telegramCommandMenu), len(wantOrder), wantOrder)
