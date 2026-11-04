@@ -485,3 +485,192 @@ func TestInboundNoTokenInSendsOrMethods(t *testing.T) {
 		}
 	}
 }
+
+// TestInboundDownloadFailureSendsCouldNotFetch pins the
+// download-failure own-reply (red-team B1/M15): when the
+// file endpoint answers 500, the chat gets the exact
+// "Could not fetch" sentence, and nothing is written and no
+// turn starts.
+func TestInboundDownloadFailureSendsCouldNotFetch(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	h, cancel, codeCh := runTelegramBot(t, gw, []string{})
+	defer cancel()
+	h.fake.mu.Lock()
+	h.fake.getFileSizeSet = true
+	h.fake.getFileSize = 5
+	h.fake.getFilePath = "photos/file_1.jpg"
+	h.fake.fileStatus = 500
+	h.fake.fileBytes = []byte("MARKER-RAW-BODY")
+	h.fake.mu.Unlock()
+	h.fake.setBatches([]string{inboundMediaBatch(1, 7, "", "", "photo", photoPayload("big", 5))})
+	waitFor(t, "could-not-fetch send", func() bool {
+		for _, s := range h.fake.sendsSeen() {
+			if strings.HasPrefix(s, "⚠️ Could not fetch that file from Telegram: ") {
+				return true
+			}
+		}
+		return false
+	})
+	cancel()
+	if code := <-codeCh; code != 130 {
+		t.Errorf("run code = %d; want 130", code)
+	}
+	h.fake.mu.Lock()
+	fileHits := len(h.fake.filePaths)
+	h.fake.mu.Unlock()
+	if fileHits == 0 {
+		t.Error("file endpoint never hit; want the download attempted")
+	}
+	for _, s := range h.fake.sendsSeen() {
+		if strings.Contains(s, "Saved to") {
+			t.Errorf("Saved line sent despite the failed download: %q", s)
+		}
+		if strings.Contains(s, "MARKER-RAW-BODY") {
+			t.Errorf("failure send leaks the raw error body: %q", s)
+		}
+		if strings.Contains(s, telegramTestToken) {
+			t.Errorf("failure send leaks the token: %q", s)
+		}
+	}
+	if got := len(fsWrittenPaths(gw)); got != 0 {
+		t.Errorf("fs.write paths = %d; want 0", got)
+	}
+	if got := len(turnInputTexts(gw)); got != 0 {
+		t.Errorf("turn inputs = %d; want 0 (no turn on failed download)", got)
+	}
+}
+
+// TestInboundFirstWriteChunkCarriesNoOverwriteAndCreateParent
+// pins the overwrite=false collision guard (red-team B2/M16):
+// the first fs.write chunk the fake gateway records carries
+// Overwrite=false and CreateParent=true.
+func TestInboundFirstWriteChunkCarriesNoOverwriteAndCreateParent(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.subScripts = []turnSubScript{{replyText: "noted"}}
+	h, cancel, codeCh := runTelegramBot(t, gw, []string{})
+	defer cancel()
+	h.fake.mu.Lock()
+	h.fake.getFileSizeSet = true
+	h.fake.getFileSize = 5
+	h.fake.getFilePath = "photos/file_1.jpg"
+	h.fake.fileBytes = []byte("JPEG!")
+	h.fake.mu.Unlock()
+	h.fake.setBatches([]string{inboundMediaBatch(1, 7, "", "", "photo", photoPayload("big", 5))})
+	waitFor(t, "Saved line", func() bool {
+		for _, s := range h.fake.sendsSeen() {
+			if strings.HasPrefix(s, "📥 Saved to <code>telegram-inbox/") {
+				return true
+			}
+		}
+		return false
+	})
+	cancel()
+	if code := <-codeCh; code != 130 {
+		t.Errorf("run code = %d; want 130", code)
+	}
+	gw.mu.Lock()
+	calls := append([]fsWriteCall(nil), gw.fsWriteCalls...)
+	gw.mu.Unlock()
+	if len(calls) == 0 {
+		t.Fatal("no fs.write calls recorded; want at least 1")
+	}
+	if calls[0].Overwrite {
+		t.Errorf("first fs.write chunk has Overwrite=true; want false")
+	}
+	if !calls[0].CreateParent {
+		t.Errorf("first fs.write chunk has CreateParent=false; want true")
+	}
+}
+
+// TestInboundVideoNoteNoteOmitsMimeClause pins the empty-mime
+// note (red-team B4/M7): a video_note carries no MIME type,
+// so its saved note reads "(N bytes)" with no dangling ", "
+// clause.
+func TestInboundVideoNoteNoteOmitsMimeClause(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.subScripts = []turnSubScript{{replyText: "noted"}}
+	h, cancel, codeCh := runTelegramBot(t, gw, []string{})
+	defer cancel()
+	h.fake.mu.Lock()
+	h.fake.getFileSizeSet = true
+	h.fake.getFileSize = 4
+	h.fake.getFilePath = "notes/file_3.mp4"
+	h.fake.fileBytes = []byte("VN!!")
+	h.fake.mu.Unlock()
+	h.fake.setBatches([]string{inboundMediaBatch(1, 7, "", "", "video_note", map[string]any{
+		"file_id": "vn1", "file_size": 4,
+	})})
+	waitForMediaTurn(t, gw)
+	cancel()
+	if code := <-codeCh; code != 130 {
+		t.Errorf("run code = %d; want 130", code)
+	}
+	paths := fsWrittenPaths(gw)
+	if len(paths) != 1 {
+		t.Fatalf("fs.write paths = %q; want 1", paths)
+	}
+	if !regexp.MustCompile(`^telegram-inbox/\d{8}-\d{6}-video_note-7\.mp4$`).MatchString(paths[0]) {
+		t.Errorf("fs.write path = %q; want telegram-inbox/<ts>-video_note-7.mp4", paths[0])
+	}
+	inputs := turnInputTexts(gw)
+	want := "I sent you a file from Telegram. [Telegram attachment saved in your System Files at " + paths[0] + " (4 bytes)]"
+	found := false
+	for _, in := range inputs {
+		if in == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("turn inputs = %q; want exactly %q", inputs, want)
+	}
+}
+
+// TestInboundNoteUsesDownloadedLength pins the note's byte
+// count source (red-team B3/M18): the note carries the
+// DOWNLOADED length, not the size declared by getFile or
+// the update, in both the overstated-size and the
+// exactly-at-cap cases.
+func TestInboundNoteUsesDownloadedLength(t *testing.T) {
+	t.Parallel()
+	runCase := func(t *testing.T, name string, declared int64, body []byte, wantBytes int) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			gw := newTelegramTurnFakeGateway()
+			gw.subScripts = []turnSubScript{{replyText: "noted"}}
+			h, cancel, codeCh := runTelegramBot(t, gw, []string{})
+			defer cancel()
+			h.fake.mu.Lock()
+			h.fake.getFileSizeSet = true
+			h.fake.getFileSize = declared
+			h.fake.getFilePath = "photos/file_1.jpg"
+			h.fake.fileBytes = body
+			h.fake.mu.Unlock()
+			h.fake.setBatches([]string{inboundMediaBatch(1, 7, "", "", "photo", photoPayload("big", int(declared)))})
+			waitForMediaTurn(t, gw)
+			cancel()
+			if code := <-codeCh; code != 130 {
+				t.Errorf("run code = %d; want 130", code)
+			}
+			paths := fsWrittenPaths(gw)
+			if len(paths) != 1 {
+				t.Fatalf("fs.write paths = %q; want 1", paths)
+			}
+			inputs := turnInputTexts(gw)
+			want := fmt.Sprintf("I sent you a file from Telegram. [Telegram attachment saved in your System Files at %s (%d bytes, image/jpeg)]", paths[0], wantBytes)
+			found := false
+			for _, in := range inputs {
+				if in == want {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("turn inputs = %q; want exactly %q", inputs, want)
+			}
+		})
+	}
+	runCase(t, "declared larger than body", 999, []byte("JPEG!"), 5)
+	runCase(t, "declared exactly at cap with tiny body", 20<<20, []byte("tiny"), 4)
+}
