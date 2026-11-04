@@ -27,13 +27,12 @@ import (
 //     decided through the gateway decide path, and the core
 //     slash commands (/help, /status, /chats, /main, /new,
 //     /history, /unread, /approvals, /autoapprove, /watch,
-//     session ops, /stop) are wired; files Muse shows in a
+//     session ops, /stop, /feed, /goals, /goal, /ideas,
+//     /usage, /wake) are wired; files Muse shows in a
 //     turn are downloaded and sent to the chat (photos,
-//     videos, audio, documents); /fs,
-//     /feed, /goals, /goal, /ideas, /usage, /wake, /profile,
-//     /update, /login, /raw, watch forwarding, and
-//     `telegram setup` / `install-service` are roadmap
-//     step 5b, not this build.
+//     videos, audio, documents); /fs, /profile, /update,
+//     /login, /raw, watch forwarding, and `telegram setup` /
+//     `install-service` are roadmap step 5b, not this build.
 //   - `telegram status`: offline report of the block (configured
 //     flag, linked profile tag, allowlist count, toggles,
 //     token-shape validity). No network, no GetMe, no token

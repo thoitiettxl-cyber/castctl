@@ -94,6 +94,34 @@ type telegramTurnFakeGateway struct {
 	fsWriteCalls []fsWriteCall
 	fsWritten    map[string][]byte
 	fsWriteErr   error
+	// Read-command scripts (PR-D): per-method result payloads,
+	// call recordings, and error injection. A nil script
+	// answers an empty object; an error field, when set, wins
+	// over the script.
+	feedScript  map[string]any
+	feedQueries []map[string]string
+	feedErr     error
+	goalsScript map[string]any
+	goalsErr    error
+	// goalResult, when non-nil, is returned verbatim (it may be
+	// a non-object, for the upstream non-dict head fallback);
+	// otherwise goalScript (a map) is returned and the id is
+	// recorded in goalIDs.
+	goalScript   map[string]any
+	goalResult   any
+	goalIDs      []string
+	goalErr      error
+	ideasScript  map[string]any
+	ideasErr     error
+	executeCalls []ideaExecuteCall
+	executeErr   error
+}
+
+// ideaExecuteCall is one api.idea-cards.execute call the fake
+// gateway saw: the path params and the request body, copied.
+type ideaExecuteCall struct {
+	PathParams map[string]string
+	Body       map[string]any
 }
 
 // fsWriteCall is one fs.write chunk call the fake gateway saw.
@@ -238,6 +266,65 @@ func (f *telegramTurnFakeGateway) CallJSON(ctx context.Context, method string, o
 			f.fsWritten = map[string][]byte{}
 		}
 		f.fsWritten[call.Path] = append(f.fsWritten[call.Path], call.Data...)
+		return map[string]any{}, nil
+	case "feed.list":
+		if f.feedErr != nil {
+			return nil, f.feedErr
+		}
+		if opts.Query != nil {
+			q := make(map[string]string, len(opts.Query))
+			for k, v := range opts.Query {
+				q[k] = v
+			}
+			f.feedQueries = append(f.feedQueries, q)
+		}
+		if f.feedScript != nil {
+			return f.feedScript, nil
+		}
+		return map[string]any{}, nil
+	case "goals.list":
+		if f.goalsErr != nil {
+			return nil, f.goalsErr
+		}
+		if f.goalsScript != nil {
+			return f.goalsScript, nil
+		}
+		return map[string]any{}, nil
+	case "goals.get":
+		if f.goalErr != nil {
+			return nil, f.goalErr
+		}
+		if opts.PathParams != nil {
+			f.goalIDs = append(f.goalIDs, opts.PathParams["id"])
+		}
+		if f.goalResult != nil {
+			return f.goalResult, nil
+		}
+		if f.goalScript != nil {
+			return f.goalScript, nil
+		}
+		return map[string]any{}, nil
+	case "api.idea-cards.list":
+		if f.ideasErr != nil {
+			return nil, f.ideasErr
+		}
+		if f.ideasScript != nil {
+			return f.ideasScript, nil
+		}
+		return map[string]any{}, nil
+	case "api.idea-cards.execute":
+		if f.executeErr != nil {
+			return nil, f.executeErr
+		}
+		call := ideaExecuteCall{PathParams: map[string]string{}, Body: map[string]any{}}
+		for k, v := range opts.PathParams {
+			call.PathParams[k] = v
+		}
+		if body, ok := opts.Body.(map[string]any); ok {
+			b, _ := json.Marshal(body)
+			_ = json.Unmarshal(b, &call.Body)
+		}
+		f.executeCalls = append(f.executeCalls, call)
 		return map[string]any{}, nil
 	default:
 		return nil, fmt.Errorf("unexpected method %s", method)
@@ -481,6 +568,27 @@ func (f *telegramTurnFakeGateway) sessionOps() []map[string]any {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]map[string]any(nil), f.sessionOpCalls...)
+}
+
+// feedQueriesSeen returns the recorded feed.list query maps, in
+// call order. goalIDsSeen returns the recorded goals.get ids.
+// executeCallsSeen returns the recorded idea-executes.
+func (f *telegramTurnFakeGateway) feedQueriesSeen() []map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]map[string]string(nil), f.feedQueries...)
+}
+
+func (f *telegramTurnFakeGateway) goalIDsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.goalIDs...)
+}
+
+func (f *telegramTurnFakeGateway) executeCallsSeen() []ideaExecuteCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ideaExecuteCall(nil), f.executeCalls...)
 }
 
 // telegramBotHarness runs `telegram run` against a fake
