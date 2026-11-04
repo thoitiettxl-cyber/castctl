@@ -802,7 +802,28 @@ Behaviour — the self-healing loop, in order:
 The optional top-level `credentials` block stores login
 credentials for the keeper's automatic headless re-login. It
 is sing-box style: a LIST of entries, each linked to exactly
-one profile. The block accepts exactly these four keys per
+one profile.
+
+**Limitation: the contract decides what credentials can do.**
+The driver enters exactly the contract's recorded steps, in
+order, and nothing else. The only contract in this build (v1,
+for `https://muse.ai/`) records two steps — fill the
+identifier field and click Continue — and no password step
+and no code step. A `password` value is therefore never typed
+for this provider, and a login that challenges with a code
+cannot complete headlessly: after Continue the driver waits
+for session cookies and fails closed at the cookie timeout,
+and the keeper entry stops with the `relogin_failed` notice
+(see **Login-form contract** in [The `keeper`
+section](#the-keeper-section)). Do not configure
+`credentials` expecting headless re-login for a
+code-challenge login; recover the session by re-exporting
+cookies from the running browser (the keeper entry's
+`browser` key) or by `auth import`. A contract version that
+records a password or code step must first be established by
+read-only observation — credentials never invent steps.
+
+The block accepts exactly these four keys per
 entry (unknown keys are rejected):
 
 | Field | Type | Default | Meaning |
