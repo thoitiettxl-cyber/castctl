@@ -3040,3 +3040,49 @@ func TestTurnMediaLeaseAuthFailurePropagates(t *testing.T) {
 		t.Errorf("sendMessage calls = %d; want 0", got)
 	}
 }
+
+// TestTurnMediaRanBranchFailureNoRedelivery pins the ran flag in
+// deliverMediaTurn: once the gateway callback has run and found
+// media, a delivery failure is fatal and must NOT be reclassified
+// as a lease failure and re-delivered as text-only. With the flag
+// stuck false the same failure falls back to the text-only path,
+// repeating the failed edit + send (2 attempts each) — the
+// double-delivery hazard the flag exists to prevent.
+func TestTurnMediaRanBranchFailureNoRedelivery(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.downloads = map[string][]byte{
+		"sandbox://workspace/pic.jpg": []byte("fake-jpeg-bytes"),
+	}
+	gw.addEvent(map[string]any{
+		"event_name": "message.assistant", "seq": int64(11),
+		"payload": map[string]any{
+			"display_text": "here", "status": "completed",
+			"data": map[string]any{"images": []any{map[string]any{
+				"path": "sandbox://workspace/pic.jpg", "mime": "image/jpeg",
+				"byte_len": int64(15),
+			}}},
+		},
+	})
+	runner, fake := turnRunnerNamed(t, gw)
+	fake.editFailCount = 1
+	fake.failSends = true
+	res := &wait.Result{
+		Outcome: "needs_input",
+		Replies: []wait.Reply{{Seq: 11, Text: "pick?"}},
+	}
+	if err := runner.deliverFinal(context.Background(), 500, 100, "", "main chat", 10, res, false); err == nil {
+		t.Fatal("deliverFinal = nil; want the failed text segment error (watermark must not advance)")
+	}
+	if got := fake.methodCount("editMessageText"); got != 1 {
+		t.Errorf("editMessageText calls = %d; want 1 (the failed bubble edit, no text-only re-delivery)", got)
+	}
+	if got := fake.methodCount("sendMessage"); got != 1 {
+		t.Errorf("sendMessage calls = %d; want 1 (the failed preview fallback, no text-only re-delivery)", got)
+	}
+	for _, method := range []string{"sendPhoto", "sendVideo", "sendAudio", "sendDocument"} {
+		if got := fake.methodCount(method); got != 0 {
+			t.Errorf("%s calls = %d; want 0 (the media segment is never reached)", method, got)
+		}
+	}
+}
