@@ -900,6 +900,14 @@ func joinReplyTexts(replies []wait.Reply) string {
 // collectTurnMedia instead of mutating this slice.
 var turnMediaHistoryLimits = []int{200, 500, 1000}
 
+// maxFilesPerTurn caps the files sent in one turn, mirroring
+// upstream MAX_FILES_PER_TURN (src/muse_cli/tgbot.py:55). The
+// cap counts the post-dedupe items list before the sent-media
+// claim; upstream filters already-sent files first
+// (tgbot.py:1360-1361), so a re-show turn can count
+// differently — a disclosed deviation, see docs/provenance.md.
+const maxFilesPerTurn = 6
+
 // errMediaUnavailable marks "no turn media to deliver": the
 // history re-read found nothing, or failed non-fatally. The
 // caller falls back to the text-only path; it is never
@@ -1134,6 +1142,18 @@ func (r *telegramTurnRunner) deliverMediaTurn(ctx context.Context, chatID int64,
 		if len(items) == 0 {
 			return errMediaUnavailable
 		}
+		if len(items) > maxFilesPerTurn {
+			// The cap note rides the notes string, after any
+			// other notes (Python finish_turn appends it
+			// last, tgbot.py:1362-1364); both carriers in
+			// deliverMediaSegments carry it from here.
+			excess := len(items) - maxFilesPerTurn
+			if notes != "" {
+				notes += "\n"
+			}
+			notes += fmt.Sprintf("📎 %d more file(s): see /files", excess)
+			items = items[:maxFilesPerTurn]
+		}
 		delivered = true
 		return r.deliverMediaSegments(ctx, gw, chatID, bubbleID, scope, res, finalText, userSeq, notes, markup, items)
 	})
@@ -1162,10 +1182,11 @@ func (r *telegramTurnRunner) deliverMediaTurn(ctx context.Context, chatID int64,
 // deletes the bubble best-effort, notes ride the last text
 // segment, and buttons ride exactly one message: the last
 // text segment, or a trailing tail message when the last
-// segment is media (Python deliver_interleaved).
-// There is no per-turn file cap. A failed text segment
-// returns an error; a failed media item becomes a notice
-// inside deliverMediaItem.
+// segment is media (Python deliver_interleaved). At most
+// maxFilesPerTurn files are sent: deliverMediaTurn truncates
+// the items and appends the cap note to notes. A failed text
+// segment returns an error; a failed media item becomes a
+// notice inside deliverMediaItem.
 func (r *telegramTurnRunner) deliverMediaSegments(ctx context.Context, gw conn.Gateway, chatID int64, bubbleID int, scope string, res *wait.Result, finalText string, userSeq int64, notes string, markup models.ReplyMarkup, items []turnMediaItem) error {
 	segments := buildTurnSegments(res, finalText, userSeq, items)
 	if len(segments) > 0 && !segments[len(segments)-1].isMedia && notes != "" {
@@ -1186,8 +1207,7 @@ func (r *telegramTurnRunner) deliverMediaSegments(ctx context.Context, gw conn.G
 		if seg.isMedia {
 			if i == 0 {
 				// Best-effort: a failed delete must not
-				// hold the turn (no per-turn file cap,
-				// no status-bubble fallback edit).
+				// hold the turn (no status-bubble fallback edit).
 				_ = r.deps.bot.Delete(ctx, chatID, bubbleID)
 			}
 			if err := r.deliverMediaItem(ctx, gw, chatID, scope, seg.resource, segMarkup); err != nil {
