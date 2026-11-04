@@ -11,10 +11,15 @@ package commands
 // network, no token, no cookies beyond the seeded fake file.
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,6 +27,8 @@ import (
 	"testing"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
+	"github.com/thoitiettxl-cyber/castctl/internal/logging"
+	"github.com/thoitiettxl-cyber/castctl/internal/profile"
 	"github.com/thoitiettxl-cyber/castctl/internal/telegram"
 )
 
@@ -590,6 +597,19 @@ func TestIdeaExecTap(t *testing.T) {
 	// The chat's current session is sess-9: the execute call
 	// must carry it, plus the card id in both places.
 	waitFor(t, "idea execute call", func() bool { return len(gw.executeCallsSeen()) >= 1 })
+	want := "▶️ Muse is working on: <b>Build &lt;thing&gt; &amp; stuff</b>. Replies arrive here when they land."
+	// Wait for the working reply BEFORE cancelling: the reply
+	// Send runs after callJSON on the cancellable Start ctx,
+	// so cancelling on the execute call alone races it (the
+	// TestIdeaExecTapAuthError pattern — wait for the reply).
+	waitFor(t, "working reply", func() bool {
+		for _, s := range wb.fake.sendsSeen() {
+			if s == want {
+				return true
+			}
+		}
+		return false
+	})
 	wb.cancel()
 	<-wb.done
 	calls := gw.executeCallsSeen()
@@ -603,7 +623,6 @@ func TestIdeaExecTap(t *testing.T) {
 		t.Errorf("Body = %v; want ideaCardId c1, mode full, session_id sess-9", calls[0].Body)
 	}
 	sends := wb.fake.sendsSeen()
-	want := "▶️ Muse is working on: <b>Build &lt;thing&gt; &amp; stuff</b>. Replies arrive here when they land."
 	found := false
 	for _, s := range sends {
 		if s == want {
@@ -640,6 +659,18 @@ func TestIdeaExecTapUntitledFallsBackToID(t *testing.T) {
 	wb := tapIdeaButton(t, gw, 1, "")
 	defer wb.cancel()
 	waitFor(t, "idea execute call", func() bool { return len(gw.executeCallsSeen()) >= 1 })
+	want := "▶️ Muse is working on: <b>c2</b>. Replies arrive here when they land."
+	// Wait for the working reply before cancelling, as in
+	// TestIdeaExecTap: cancelling on the execute call alone
+	// races the reply Send on the cancellable Start ctx.
+	waitFor(t, "working reply", func() bool {
+		for _, s := range wb.fake.sendsSeen() {
+			if s == want {
+				return true
+			}
+		}
+		return false
+	})
 	wb.cancel()
 	<-wb.done
 	calls := gw.executeCallsSeen()
@@ -647,7 +678,6 @@ func TestIdeaExecTapUntitledFallsBackToID(t *testing.T) {
 		t.Fatalf("execute calls = %+v; want exactly 1 for card c2", calls)
 	}
 	sends := wb.fake.sendsSeen()
-	want := "▶️ Muse is working on: <b>c2</b>. Replies arrive here when they land."
 	found := false
 	for _, s := range sends {
 		if s == want {
@@ -905,5 +935,323 @@ func TestReadWakeNoCookies(t *testing.T) {
 	}
 	if strings.Contains(sends[0], "cookies.txt") {
 		t.Errorf("send leaks the cookies path: %q", sends[0])
+	}
+}
+
+// --- Fix loop 1 (Round-1 review findings) ---
+
+// TestReadGoalBoundary3000Multibyte pins the 3000 gate in
+// RUNES, not bytes: a body of exactly 3000 runes built from
+// multi-byte chars (5932 bytes) takes the <pre> branch, and
+// 3001 runes takes the document branch. A byte-count mutant
+// (len(body)) sends a document for the 3000-rune body.
+func TestReadGoalBoundary3000Multibyte(t *testing.T) {
+	t.Parallel()
+	// The dump shape is fixed by construction, as in
+	// TestReadGoalBoundary3000: 68 fixed runes + the pad.
+	// The pad is U+00E9 (1 rune, 2 bytes in UTF-8, emitted
+	// raw: the dump encoder has SetEscapeHTML(false)).
+	for _, tc := range []struct {
+		name    string
+		pad     int
+		wantDoc bool
+	}{
+		{name: "exactly_3000_runes", pad: 2932, wantDoc: false},
+		{name: "3001_runes", pad: 2933, wantDoc: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gw := newTelegramTurnFakeGateway()
+			gw.goalScript = map[string]any{
+				"goal": map[string]any{"status": "active", "title": "Big"},
+				"pad":  strings.Repeat("é", tc.pad),
+			}
+			h, cancel := runReadBot(t, gw)
+			defer cancel()
+			sends := sendOnly(t, h, "/goal g1")
+			if tc.wantDoc {
+				head := "🎯 <b>Big</b> [active]\n"
+				if len(sends) != 1 || sends[0] != head {
+					t.Errorf("sends = %q; want exactly the head send [%q]", sends, head)
+				}
+				waitFor(t, "goal.json document", func() bool { return len(h.fake.documentsSeen()) >= 1 })
+				if docs := h.fake.documentsSeen(); len(docs) != 1 || docs[0].Filename != "goal.json" {
+					t.Errorf("documents = %+v; want exactly 1 goal.json", docs)
+				}
+				return
+			}
+			if len(sends) != 1 {
+				t.Fatalf("sends = %q; want exactly 1", sends)
+			}
+			if docs := h.fake.documentsSeen(); len(docs) != 0 {
+				t.Errorf("documents = %+v; want none at exactly 3000 runes", docs)
+			}
+			if !strings.Contains(sends[0], "<pre>") {
+				t.Errorf("send = %q; want the <pre> branch", sends[0])
+			}
+			// Prove the body really is 3000 runes AND more
+			// than 3000 bytes: strip the head and the <pre>
+			// tags and unescape, as in
+			// TestReadGoalBoundary3000.
+			head := "🎯 <b>Big</b> [active]\n"
+			rest := strings.TrimPrefix(sends[0], head)
+			rest = strings.TrimPrefix(rest, "<pre>")
+			rest = strings.TrimSuffix(rest, "</pre>")
+			rest = strings.NewReplacer("&amp;", "&", "&lt;", "<", "&gt;", ">").Replace(rest)
+			if n := len([]rune(rest)); n != 3000 {
+				t.Errorf("body is %d runes; want exactly 3000", n)
+			}
+			if n := len(rest); n <= 3000 {
+				t.Errorf("body is %d bytes; want over 3000 (multi-byte pad)", n)
+			}
+		})
+	}
+}
+
+// TestIdeaExecTapUsesCurrentSession pins the tap-time session
+// read: render /ideas with sess-A mapped, switch the store to
+// sess-B, then tap — the execute must carry sess-B. A mutant
+// capturing the session into the registry entry at render
+// time executes with the stale sess-A.
+func TestIdeaExecTapUsesCurrentSession(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.ideasScript = ideasFixture()
+	wb := startWiredBot(t, gw)
+	defer wb.cancel()
+	if err := wb.store.SetChat(500, telegram.ChatEntry{SessionID: "sess-A", Title: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	wb.fake.setBatches([]string{telegramUpdate(1, 111, "/ideas")})
+	waitFor(t, "ideas sends", func() bool { return len(wb.fake.sendsSeen()) >= 3 })
+	// Switch sessions AFTER the render, BEFORE the tap.
+	if err := wb.store.SetChat(500, telegram.ChatEntry{SessionID: "sess-B", Title: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	wb.fake.mu.Lock()
+	markup := wb.fake.sendMarkupJSON[0]
+	wb.fake.mu.Unlock()
+	buttons := filesMarkupButtons(t, markup)
+	if len(buttons) == 0 {
+		t.Fatal("no buttons on the ideas send")
+	}
+	wb.fake.setBatches([]string{callbackUpdate(2, buttons[0][1], 100)})
+	waitFor(t, "idea execute call", func() bool { return len(gw.executeCallsSeen()) >= 1 })
+	want := "▶️ Muse is working on: <b>Build &lt;thing&gt; &amp; stuff</b>. Replies arrive here when they land."
+	waitFor(t, "working reply", func() bool {
+		for _, s := range wb.fake.sendsSeen() {
+			if s == want {
+				return true
+			}
+		}
+		return false
+	})
+	wb.cancel()
+	<-wb.done
+	calls := gw.executeCallsSeen()
+	if len(calls) != 1 {
+		t.Fatalf("execute calls = %+v; want exactly 1", calls)
+	}
+	if calls[0].Body["session_id"] != "sess-B" {
+		t.Errorf("Body = %v; want session_id sess-B (the session at tap time)", calls[0].Body)
+	}
+}
+
+// TestReadWakeLongEscapeOrder pins the /wake slice-then-escape
+// order AND the 800-rune bound: a 911-rune dumped body rich in
+// `<` must yield the first 800 runes escaped (791 `&lt;`
+// entities). Escape-before-slice truncates mid-entity (197
+// entities + a dangling `&lt`), and no-truncation yields all
+// 900 — both mutants fail this exact expectation.
+func TestReadWakeLongEscapeOrder(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	h, cancel := runReadBot(t, gw)
+	defer cancel()
+	seedProfileCookies(t, h)
+	h.fake.mu.Lock()
+	h.fake.wakeBody = `{"note":"` + strings.Repeat("<", 900) + `"}`
+	h.fake.mu.Unlock()
+	sends := sendOnly(t, h, "/wake")
+	// Dumped body: `{"note":"` (9 runes) + 900 `<` + `"}` =
+	// 911 runes; sliced to 800 runes, then escaped: the 9
+	// literal runes + 791 `&lt;` entities, closing quote cut.
+	want := "⏰ Wake requested: HTTP 200<pre>{\"note\":\"" + strings.Repeat("&lt;", 791) + "</pre>"
+	if len(sends) != 1 || sends[0] != want {
+		t.Errorf("sends = %q; want exactly [%q]", sends, want)
+	}
+	if n := strings.Count(sends[0], "&lt;"); n != 791 {
+		t.Errorf("send has %d &lt; entities; want 791", n)
+	}
+}
+
+// TestReadGoalsHostileStatus pins escaping of the status
+// field: a status carrying markup must render escaped, like
+// the title and id already pinned by TestReadGoalsData.
+func TestReadGoalsHostileStatus(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.goalsScript = map[string]any{"goals": []any{
+		map[string]any{"id": "g1", "title": "T", "status": "a<b>&c"},
+	}}
+	h, cancel := runReadBot(t, gw)
+	defer cancel()
+	sends := sendOnly(t, h, "/goals")
+	want := "🎯 <b>Goals</b>\n• T [a&lt;b&gt;&amp;c] <code>g1</code>\n\n/goal &lt;id&gt; for details"
+	if len(sends) != 1 || sends[0] != want {
+		t.Errorf("send = %q; want %q", sends[0], want)
+	}
+}
+
+// runReadBotWithLog starts the harness like runTelegramBot but
+// with the bot logger writing into logBuf, so a test can
+// assert on dispatch log lines. The shared harness builds Env
+// without a Logger (rt.Logger("telegram") applies);
+// replicating its setup here is the least invasive capture
+// seam — no production change, no global slog.Default swap.
+func runReadBotWithLog(t *testing.T, gw *telegramTurnFakeGateway, logBuf *bytes.Buffer) (*telegramBotHarness, func()) {
+	t.Helper()
+	fake := &cmdFakeTelegram{batches: []string{}}
+	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
+	t.Cleanup(srv.Close)
+	fakeAddr := srv.Listener.Addr().String()
+	dialFake := func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, fakeAddr)
+	}
+	fakeClient := &http.Client{Transport: &http.Transport{
+		Proxy:       nil,
+		DialContext: dialFake,
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialFake(ctx, network, addr)
+		},
+	}}
+	home, configFile := testHome(t, telegramTestConfig())
+	logger := slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	env := &Env{Stdout: &strings.Builder{}, Stderr: &strings.Builder{}, Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile}), Logger: logger}
+	muse := conn.New(func(context.Context, conn.Config) (conn.Gateway, error) { return gw, nil })
+	env.BuildRuntime = func(ctx context.Context, loc *profile.ConfigLocation, prof *profile.Profile, env *Env) (*Runtime, error) {
+		prof.VMID = "vm-test"
+		return &Runtime{Profile: prof, Muse: muse, httpClientOverride: fakeClient}, nil
+	}
+	ctx, cancelFn := context.WithCancel(context.Background())
+	codeCh := make(chan int, 1)
+	done := make(chan struct{})
+	go func() {
+		codeCh <- Run(ctx, []string{"telegram", "run"}, env)
+		close(done)
+	}()
+	_ = codeCh
+	h := &telegramBotHarness{fake: fake, gw: gw, homeDir: home}
+	cancel := func() {
+		cancelFn()
+		<-done
+		drainTurns(fake)
+	}
+	return h, cancel
+}
+
+// TestDispatchLogHasNoCookiesPath (B1) feeds the missing/empty
+// cookie-file error through the REAL dispatch path and asserts
+// the captured dispatch log carries the auth class but no
+// absolute cookies path. The send stays the exact generic
+// sentence. Both dispatch-routed rt.Cookies() callers (/wake,
+// /usage) and both failure variants (missing file, empty
+// file) are covered: the fix is in typedAuthError's
+// LogSummary, shared by all of them.
+func TestDispatchLogHasNoCookiesPath(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		command string
+		empty   bool // empty cookies file vs missing file
+	}{
+		{name: "wake/missing", command: "/wake"},
+		{name: "wake/empty", command: "/wake", empty: true},
+		{name: "usage/missing", command: "/usage"},
+		{name: "usage/empty", command: "/usage", empty: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gw := newTelegramTurnFakeGateway()
+			var logBuf bytes.Buffer
+			h, cancel := runReadBotWithLog(t, gw, &logBuf)
+			defer cancel()
+			if tc.empty {
+				dir := filepath.Join(h.homeDir, "profiles", "muse01")
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "cookies.txt"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sends := sendOnly(t, h, tc.command)
+			want := "⚠️ Could not run " + tc.command + " (gateway error)."
+			if len(sends) != 1 || sends[0] != want {
+				t.Errorf("sends = %q; want exactly [%q]", sends, want)
+			}
+			// The dispatch Warn line is logged before the
+			// send, so it is in the buffer by now.
+			absPath := filepath.Join(h.homeDir, "profiles", "muse01", "cookies.txt")
+			found := false
+			for _, line := range strings.Split(logBuf.String(), "\n") {
+				if !strings.Contains(line, "telegram command failed") {
+					continue
+				}
+				found = true
+				if strings.Contains(line, h.homeDir) || strings.Contains(line, absPath) || strings.Contains(line, "cookies.txt") {
+					t.Errorf("dispatch log line carries the cookies path: %q", line)
+				}
+				if !strings.Contains(line, "cookies_missing") {
+					t.Errorf("dispatch log line = %q; want the cookies_missing class", line)
+				}
+			}
+			if !found {
+				t.Errorf("no dispatch failure log line in logs = %q", logBuf.String())
+			}
+		})
+	}
+}
+
+// TestCookiesMissingSummaryHasNoPath pins the B1 fix at the
+// producer: requireCookiesFile's missing/empty/stat errors
+// render (via SummarizeErr, the dispatch/CLI rendering) as
+// the class-prefixed, path-free message. The messages embed
+// no absolute path — there is no LogSummary method on
+// typedAuthError (a wrapper-level summary would shadow the
+// inner SafeString rendering pinned by
+// TestClassifyErrorTwelveShapes).
+func TestCookiesMissingSummaryHasNoPath(t *testing.T) {
+	t.Parallel()
+	absDir := filepath.Join(t.TempDir(), "profiles", "muse01")
+	absPath := filepath.Join(absDir, "cookies.txt")
+	prof := &profile.Profile{CookiesFile: absPath}
+	// Missing file.
+	err := requireCookiesFile(prof)
+	if err == nil {
+		t.Fatal("requireCookiesFile(nil file) = nil; want cookies_missing")
+	}
+	for _, text := range []string{logging.SummarizeErr(err), err.Error()} {
+		if strings.Contains(text, absDir) || strings.Contains(text, absPath) {
+			t.Errorf("missing-file rendering %q carries the absolute path", text)
+		}
+		if !strings.Contains(text, "cookies_missing") {
+			t.Errorf("missing-file rendering %q lacks the cookies_missing class", text)
+		}
+	}
+	// Empty file.
+	if err := os.MkdirAll(absDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(absPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = requireCookiesFile(prof)
+	if err == nil {
+		t.Fatal("requireCookiesFile(empty file) = nil; want cookies_missing")
+	}
+	if got := logging.SummarizeErr(err); strings.Contains(got, absPath) || !strings.Contains(got, "cookies_missing") {
+		t.Errorf("empty-file summary = %q; want class only, no path", got)
 	}
 }

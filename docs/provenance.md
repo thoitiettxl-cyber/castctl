@@ -981,7 +981,12 @@ class/length replies, NOT upstream's `str(e)[:300]`
 `CallbackEntry` (card id; the title reuses the
 existing field); `/goal` answers the usage sentence
 for a whitespace-only arg (upstream calls goals.get
-with id=""); `/wake` body JSON is compact (no spaces
+with id=""); for a top-level non-dict `goals.get`
+result upstream emits the empty head line
+(`🎯 <b></b> []`, its `g = {}` dict) while castctl
+emits no head, or `Goal:` before the document — the
+empty-head outcome matches upstream only when the
+`goal` member is present-but-not-a-dict; `/wake` body JSON is compact (no spaces
 after separators). No state field is added (schema
 version unchanged); the 6 commands leave the
 deferred map and join the `/` menu (19 → 25).

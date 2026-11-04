@@ -126,7 +126,7 @@ func (r *Runtime) Cookies() (string, error) {
 		return "", &typedAuthError{Code: 2, Type: "cookies_missing", Err: err}
 	}
 	if strings.TrimSpace(cookies) == "" {
-		return "", &typedAuthError{Code: 2, Type: "cookies_missing", Err: fmt.Errorf("cookies file %s is empty", r.Profile.CookiesFile)}
+		return "", &typedAuthError{Code: 2, Type: "cookies_missing", Err: errors.New("cookies_missing: cookies file is empty")}
 	}
 	return cookies, nil
 }
@@ -135,12 +135,12 @@ func requireCookiesFile(p *profile.Profile) error {
 	info, err := os.Stat(p.CookiesFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &typedAuthError{Code: 2, Type: "cookies_missing", Err: fmt.Errorf("no cookies at %s (run `castctl auth export` for guidance)", p.CookiesFile)}
+			return &typedAuthError{Code: 2, Type: "cookies_missing", Err: errors.New("cookies_missing: no cookies file (run `castctl auth export` for guidance)")}
 		}
-		return &typedAuthError{Code: 2, Type: "cookies_missing", Err: err}
+		return &typedAuthError{Code: 2, Type: "cookies_missing", Err: errors.New("cookies_missing: cannot access cookies file")}
 	}
 	if info.Size() == 0 {
-		return &typedAuthError{Code: 2, Type: "cookies_missing", Err: fmt.Errorf("cookies file %s is empty", p.CookiesFile)}
+		return &typedAuthError{Code: 2, Type: "cookies_missing", Err: errors.New("cookies_missing: cookies file is empty")}
 	}
 	return nil
 }
