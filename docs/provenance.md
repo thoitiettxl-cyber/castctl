@@ -877,6 +877,20 @@ description/options (`wait.py:102-164`,
 (`tgbot.py:1725-1747`), and the claim / notified state
 machine (`tgbot.py:1505-1701`).
 
+File sending reimplements `file_kind` (`tgapi.py:271-281`),
+`doc_name` (`tgapi.py:266-269`), `send_file`
+(`tgapi.py:132-139`, with the 120s timeout on a second
+library instance built with `WithSkipGetMe`, so construction
+still issues exactly one getMe), and the `send_doc`
+fallback (`tgbot.py:760-770`) — narrowed to HTTP 400
+rejections only, with the fallback error returned on
+failure; the mime only feeds kind selection (no send*
+params struct carries a MIME field, and the library writes
+the stdlib multipart default Content-Type); captions are
+plain and truncated to 1024 runes (`tgapi.py:18`); and
+`SendFile` enforces no size limit — callers enforce the
+49 MiB `UPLOAD_LIMIT` (`tgapi.py:19`) before downloading.
+
 Evaluation conditions applied (from the libpin report, all
 VERIFIED in tree): the bot is built with `WithHTTPClient` on a
 writer-bound client whose Transport proxy is explicitly nil

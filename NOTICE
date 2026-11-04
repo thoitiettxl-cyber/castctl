@@ -187,7 +187,9 @@ mistake these influences for vendored code.
    (github.com/thoitiettxl-cyber/muse-cli) — differential reference
    for gateway framing, the exit-code/JSON contract, Telegram caps,
    and node-ID rules; behavior reimplemented:
-   studied, no code taken.
+   studied, no code taken. Telegram file sending
+   (`file_kind`/`doc_name`/`send_file`/`send_doc`) is reimplemented
+   in `internal/telegram/files.go`; see docs/provenance.md §5.
    (The byte-identical descriptor assets are listed in (a).)
    License name: MIT.
 4. Noise protocol, XX pattern — the public Noise specification's
