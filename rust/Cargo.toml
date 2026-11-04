@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "castctl-tg-text",
+    "castctl-tg-files",
+    "castctl-shared",
+    "castctl-log-redact",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# regex is the sole dependency of the M1 workspace. Reason: Go's
+# regexp package is RE2; the Rust `regex` crate is the RE2-family
+# analogue and the in-scope patterns (fence/link/heading/stash/tag,
+# doc-name, sandbox link, redaction vocabularies) use only
+# constructs it supports (no backreferences, no lookaround).
+# Pinned exactly after measurement on cue (rustc 1.97.1).
+regex = "=1.13.1"
