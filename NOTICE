@@ -198,7 +198,14 @@ mistake these influences for vendored code.
    `internal/commands/telegram_turn.go`, and inbound user
    media (`media_of`/`upload_and_send`) in
    `internal/telegram/inbound.go` with the commands-side
-   handler in `internal/commands/telegram_commands.go`;
+   handler in `internal/commands/telegram_commands.go`,
+   and the read commands (`cmd_feed`/`cmd_goals`/
+   `cmd_goal`/`cmd_ideas`/`cb_idea_exec`/`cmd_usage`/
+   `cmd_wake`) in `internal/commands/telegram_read.go`
+   with the command-table wiring in
+   `internal/commands/telegram_commands.go` and the
+   `idea_exec` callback id in
+   `internal/telegram/approvals.go` (`CallbackEntry`);
    see docs/provenance.md §5.
    (The byte-identical descriptor assets are listed in (a).)
    License name: MIT.

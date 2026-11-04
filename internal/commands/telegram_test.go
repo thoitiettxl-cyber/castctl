@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -123,6 +124,30 @@ type cmdFakeTelegram struct {
 	fileBytes      []byte
 	fileStatus     int
 	filePaths      []string
+	// muse.ai-path scripting for the /usage and /wake handlers
+	// (PR-D): the fake dialer routes every host here, so the
+	// HTTPS helpers land on these paths. settingsRSC is the
+	// full RSC body for POST /settings ("" = the default
+	// subscription fixture); settingsStatus, when non-zero,
+	// is the POST /settings status (401/403 exercise the
+	// AuthError mapping). authCheckStatus, when non-zero, is
+	// the POST /api/auth/check status. wakeBody is the
+	// POST /api/hatch/vm/wake JSON body ("" with wakeNoBody
+	// false = the default {"woke":true}); wakeStatus, when
+	// non-zero, is its status; wakeDrop, when true, drops the
+	// connection without a response (transport error).
+	// wakeBodies records each wake POST body, in order.
+	settingsRSC     string
+	settingsStatus  int
+	authCheckStatus int
+	wakeBody        string
+	wakeStatus      int
+	wakeNoBody      bool
+	wakeDrop        bool
+	wakeBodies      []string
+	// sendSilent parallels sends: the disable_notification
+	// flag of each sendMessage, for pinning silent sends.
+	sendSilent []bool
 }
 
 // cmdFakeMediaSend is one sendPhoto/sendVideo/sendAudio call
@@ -183,6 +208,76 @@ func (f *cmdFakeTelegram) handler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(status)
 		_, _ = w.Write(body)
+		return
+	}
+	// muse.ai paths (PR-D): the subscription settings page,
+	// the auth check, and the VM wake endpoint. These arrive
+	// here because the harness dials every host to this
+	// server; the path (never a token or cookie) is all that
+	// is inspected.
+	switch r.URL.Path {
+	case "/settings":
+		f.mu.Lock()
+		f.methods = append(f.methods, "muse-settings")
+		status := f.settingsStatus
+		rsc := f.settingsRSC
+		f.mu.Unlock()
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, "<html></html>")
+			return
+		}
+		if status != 0 {
+			w.WriteHeader(status)
+			return
+		}
+		if rsc == "" {
+			rsc = "0:{\"a\":\"$@1\"}\n1:{\"success\":true,\"subscription\":{\"tier\":{\"name\":\"Pro\"},\"usage\":{\"state\":\"ok\"}}}\n"
+		}
+		w.Header().Set("Content-Type", "text/x-component; charset=utf-8")
+		fmt.Fprint(w, rsc)
+		return
+	case "/api/auth/check":
+		f.mu.Lock()
+		f.methods = append(f.methods, "muse-auth-check")
+		status := f.authCheckStatus
+		f.mu.Unlock()
+		if status != 0 {
+			w.WriteHeader(status)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"access_token":"fake-access-token"}`)
+		return
+	case "/api/hatch/vm/wake":
+		body, _ := io.ReadAll(r.Body)
+		f.mu.Lock()
+		f.methods = append(f.methods, "muse-wake")
+		f.wakeBodies = append(f.wakeBodies, string(body))
+		drop := f.wakeDrop
+		status := f.wakeStatus
+		respBody := f.wakeBody
+		noBody := f.wakeNoBody
+		f.mu.Unlock()
+		if drop {
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					_ = conn.Close()
+					return
+				}
+			}
+		}
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		if !noBody {
+			if respBody == "" {
+				respBody = `{"woke":true}`
+			}
+			fmt.Fprint(w, respBody)
+		}
 		return
 	}
 	method := strings.TrimPrefix(r.URL.Path, "/bot"+telegramTestToken+"/")
@@ -269,19 +364,23 @@ func (f *cmdFakeTelegram) handler(w http.ResponseWriter, r *http.Request) {
 		text := ""
 		markup := false
 		markupJSON := ""
+		silent := false
 		if err := r.ParseMultipartForm(1 << 20); err == nil && r.MultipartForm != nil {
 			text = r.MultipartForm.Value["text"][0]
 			markupJSON = firstFormValue(r.MultipartForm.Value["reply_markup"])
 			markup = markupJSON != "" && markupJSON != "null"
+			silent = firstFormValue(r.MultipartForm.Value["disable_notification"]) == "true"
 		} else if err := r.ParseForm(); err == nil {
 			text = r.Form.Get("text")
 			markupJSON = r.Form.Get("reply_markup")
 			markup = markupJSON != "" && markupJSON != "null"
+			silent = r.Form.Get("disable_notification") == "true"
 		}
 		f.mu.Lock()
 		f.sends = append(f.sends, text)
 		f.sendMarkups = append(f.sendMarkups, markup)
 		f.sendMarkupJSON = append(f.sendMarkupJSON, markupJSON)
+		f.sendSilent = append(f.sendSilent, silent)
 		f.mu.Unlock()
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":100,"chat":{"id":500,"type":"private"},"date":0,"text":"ok"}}`)
 	case "editMessageText":
@@ -430,6 +529,22 @@ func (f *cmdFakeTelegram) saw(method string) bool {
 		}
 	}
 	return false
+}
+
+// sendsSilent returns the recorded disable_notification flag
+// per sendMessage, in call order.
+func (f *cmdFakeTelegram) sendsSilent() []bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]bool(nil), f.sendSilent...)
+}
+
+// wakeBodiesSeen returns the recorded wake POST bodies, in
+// call order.
+func (f *cmdFakeTelegram) wakeBodiesSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.wakeBodies...)
 }
 
 // commandsSeen returns the raw "commands" field recorded for
@@ -770,7 +885,7 @@ func TestTelegramHelpAndDispatch(t *testing.T) {
 }
 
 // TestTelegramCommandMenu (Test 1) pins the "/" menu table: the
-// exact 19 wired commands, in dispatch order, each name within
+// exact 25 wired commands, in dispatch order, each name within
 // the Bot API rule and each description 3-256 runes. Deferred
 // and not-available commands must stay out of the menu.
 func TestTelegramCommandMenu(t *testing.T) {
@@ -779,7 +894,7 @@ func TestTelegramCommandMenu(t *testing.T) {
 		"start", "help", "stop", "status", "chats", "main", "new",
 		"history", "unread", "rename", "pin", "unpin", "archive",
 		"unarchive", "delete", "approvals", "autoapprove", "watch",
-		"files",
+		"files", "feed", "goals", "goal", "ideas", "usage", "wake",
 	}
 	if len(telegramCommandMenu) != len(wantOrder) {
 		t.Fatalf("menu has %d entries; want %d (%v)", len(telegramCommandMenu), len(wantOrder), wantOrder)

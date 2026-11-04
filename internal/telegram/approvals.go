@@ -227,7 +227,13 @@ type CallbackEntry struct {
 	Decision   string
 	SessionID  string
 	Title      string
-	AfterSeq   *int64
+	// IdeaID is the idea-card id an Execute button (Action
+	// "idea_exec") executes (src/muse_cli/tgbot.py:2190-2205).
+	// It lives in process memory only, like every other entry
+	// field: callback data stays the short "c:" token, and
+	// the id never enters it (Telegram's 64-byte limit).
+	IdeaID   string
+	AfterSeq *int64
 	// Answer is the plain-text value a question button sends
 	// as a new turn (Action "answer"). Page is the target
 	// page of a chat-picker navigation button (Action
