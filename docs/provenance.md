@@ -1023,6 +1023,57 @@ omits `reply_markup`). No state field is added (schema
 version unchanged); `/fs` leaves the deferred map and
 joins the `/` menu (25 → 26).
 
+The four owner commands reimplement `cmd_profile` /
+`cb_profile` (`tgbot.py:2220-2236`), `cmd_login` /
+`take_cookies` (`:2244-2279`), `cmd_update` (`:2281-2309`)
+and `cmd_raw` (`:2311-2330`), behind the owner gate
+(`:1031-1034`) driven by a new optional `owner_id` in the
+`telegram` block: with no owner configured, or a sender
+who is not the owner, all four refuse with upstream's
+fixed sentence `Only the owner can use that command.`,
+before any gateway or updater call; the owner need not be
+listed in `allowed_user_ids`, because `telegram run`
+merges the owner into the effective allowlist, as upstream
+(`:643-648`). `/profile` shows the linked profile only
+(name, configured VM id, cookies present/missing — no
+path, no contents, no gateway call). `/login` arms a
+per-chat, in-memory cookie-awaiting state consumed by the
+next document (at most 1 MiB) or text from the same user;
+the message is deleted before validation, a missing
+`hatch_sess` writes nothing, and a present one writes the
+profile's `cookies.txt` (old file kept as `.bak`, mode
+0600), resets the connection, and confirms via a status
+check, keeping upstream's `[:300]` failure bound.
+`/update` runs the release check in dry-run mode only and
+reports the manual `castctl update` command. `/raw`
+checks the method against the route table before opening
+any gateway, pops `_params` from a dict body (a non-string
+`_params` value is refused with a fixed sentence), and
+sends long results as a `<method>.json` document.
+Deviations: `/profile` cannot switch profiles from chat
+([DEVIATION] — the bot serves the linked profile only);
+`/update` never replaces the binary or re-execs
+([DEVIATION] — check-only, because the systemd unit
+restarts on failure and a mid-turn re-exec would drop the
+turn); the awaiting state admits only the uid that ran
+`/login` ([DEVIATION] — upstream admits any sender in the
+chat); an oversize document is refused with a fixed
+sentence after deleting the message ([DEVIATION] —
+upstream drops it silently, which would leave a
+cookie-bearing message in chat); the login instruction
+names the profile's `cookies.txt` with no absolute path
+(upstream interpolates the real path); gateway and auth
+errors render as the bot's summarised class/length
+replies, NOT upstream's `str(e)[:600]`. No state field is
+added (schema version unchanged — the awaiting state is
+in-memory only, lost on restart); the deferred map is
+deleted (now empty) and the four commands join the `/`
+menu (26 → 30). The only additions outside the command
+files are the `IsDocument` field on `MessageContext`
+(plus its assignment in `onMessage`) and the
+owner/awaiting/version-stamp fields on the command
+handler struct.
+
 Evaluation conditions applied (from the libpin report, all
 VERIFIED in tree): the bot is built with `WithHTTPClient` on a
 writer-bound client whose Transport proxy is explicitly nil

@@ -302,7 +302,7 @@ The optional top-level `telegram` block configures the Telegram
 bot (`telegram run` / `telegram status`). It is sing-box style:
 one block, linked to a profile by tag, with no separate file.
 The block is optional; an absent block means the bot is off and
-both subcommands exit 2. The block accepts exactly these five
+both subcommands exit 2. The block accepts exactly these six
 keys (unknown keys are rejected):
 
 | Field | Type | Default | Meaning |
@@ -310,6 +310,7 @@ keys (unknown keys are rejected):
 | `profile` | string | — (required) | Tag of the profile the bot serves. The tag must name a profile in `profiles`; a dangling tag is a config error (exit 2). `telegram run` always serves this profile: an explicit `--profile` or `CASTCTL_PROFILE` naming a different profile is exit 2 naming both tags. |
 | `token` | string | — (required) | The bot token from @BotFather. Shape-checked (`digits`, a colon, then 20 or more token characters, mirroring the Python check in `src/muse_cli/tgapi.py:49-52`); a shape-invalid token is a config error (exit 2) and the value is never echoed. The token is a secret: errors leaving the bot carry scrubbed copies whose text, verbose (`%+v`) and Go-syntax (`%#v`) forms, and every reachable error layer are token-free, and bot log lines render class/length summaries only, with no method field and no verbatim error text (no server body, description, or raw update bytes, at any size or shape); the one approval-metadata warn line carries only a gated approval_id (1–64 runes of `[A-Za-z0-9_-]`, else `[omitted]`) and kind/scope/title lengths, no field bytes; `telegram status` reports only shape validity. The scrubbed copies preserve only `errors.As` to the 429/migrate error types (with scrubbed messages) and `errors.Is` to the library sentinel classes — no other typed error view survives scrubbing. |
 | `allowed_user_ids` | array of integers | — (required, non-empty) | The allowlist: sender user ids permitted to use the bot. Every id must be positive. The gate is on the sender's user id only (never chat id or chat type), mirroring Python `src/muse_cli/tgbot.py:643-648,989-1000`: a non-allowlisted sender's update is dropped silently — no reply, no state change. The sender is derived from the dispatched update kind (a callback sender gates a callback query even when the update also carries a message). Callback routing reads the message chat from a regular or inaccessible (`date:0`) message. A missing or empty allowlist refuses to start (exit 2, no token use, no polling). |
+| `owner_id` | integer | — (optional) | The owner user id for the four owner commands (`/profile`, `/update`, `/login`, `/raw`). When set it must be a positive integer: 0, a negative, or a non-integer is a config error (exit 2), and the value is never echoed. The owner need not be listed in `allowed_user_ids`: `telegram run` merges the owner into the effective allowlist, mirroring Python `src/muse_cli/tgbot.py:643-648`, so the owner reaches dispatch, where the owner gate admits them; `telegram status` counts only the configured allowlist. When unset, the four owner commands answer "owner only" to every sender — they are never open to all allowed users. |
 | `auto_approve` | bool | `false` | Auto-decide approvals that offer a forever option. Default source: the castctl profile-entry default (`parseProfileEntry` treats a missing entry as off). Bool-only in this block: the profile entry's `on`/`off` word spelling is not carried over. A runtime `/autoapprove on\|off` in the bot persists to the state file (below) and overrides this value after the first toggle; the block value is the initial value, and the bot never rewrites `config.json`. The effective default is `false` (fail-closed), which differs from the Python bot's runtime default of on (`src/muse_cli/tgbot.py:635-639`). |
 | `auto_allow_once` | bool | `false` | When `auto_approve` is on, also auto-decide approvals that offer only a once option, with the `allow_once` decision. Default source: the Python bot-state default (`src/muse_cli/tgbot.py:630`, `auto_allow_once: False`). `allow_once` is a decision string for one approval id gated by this toggle, not a consumed one-shot grant; the manual Allow-once button ignores the toggle (`src/muse_cli/tgbot.py:1703-1723`). A runtime `/autoapprove once on\|off` persists to the state file (below) and overrides this value after the first toggle; the block value is the initial value. |
 
@@ -443,14 +444,36 @@ preview instead of being split, and files Muse shows in a
 turn are downloaded and sent to the chat in seq order
 (photos, videos, audio, documents; the limits above apply).
 At startup the
-bot registers exactly the 26 wired commands as the `/` menu
+bot registers exactly the 30 wired commands as the `/` menu
 (`setMyCommands`): `start`, `help`, `stop`, `status`, `chats`,
 `main`, `new`, `history`, `unread`, `rename`, `pin`, `unpin`,
 `archive`, `unarchive`, `delete`, `approvals`, `autoapprove`,
 `watch`, `files`, `feed`, `goals`, `goal`, `ideas`, `usage`,
-`wake`, `fs`. A `setMyCommands` failure is only a warning: polling
+`wake`, `fs`, `profile`, `update`, `login`, `raw`. A `setMyCommands` failure is only a warning: polling
 starts regardless, and the menu is re-registered on the next
-start. `/delete`
+start. The four owner commands (`/profile`, `/update`,
+`/login`, `/raw`) refuse with `Only the owner can use that
+command.` when no owner is configured or the sender is not
+the owner, before any gateway or updater call; the gate is
+on the sender's user id, as the allowlist gate above.
+`/profile` shows the linked profile only — its name, the
+configured VM id if any, and cookies present/missing (no
+path, no contents, no gateway call) — and states profile
+switching is not available from chat. `/update` runs the
+release check in dry-run mode only and reports the manual
+`castctl update` command; it never replaces the binary or
+restarts the bot. `/login` arms a per-chat, in-memory
+cookie-awaiting state: the next document (at most 1 MiB) or
+text from the owner replaces the profile's `cookies.txt`
+(old file kept as `.bak`, mode 0600), deletes the owner's
+message, and confirms with a status check; the state is
+lost on restart, and only the owner who ran `/login` can
+answer it. `/raw` runs one gateway method with an optional
+JSON body (`{"_params": {...}}` carries path params) and
+sends long results as a `<method>.json` document. Turn media
+(files Muse shows, downloaded and sent) and user-sent media
+(files users send, saved to `telegram-inbox/`) are both
+wired above. `/delete`
 confirmation has no owner gate: any allowed user may confirm
 the delete prompt, matching Python — Boss-approved
 2026-11-01 as documented parity. Known gaps in
@@ -462,16 +485,10 @@ handler context and are cancelled on shutdown, so the join
 waits only for teardown, not for a turn to run to
 completion.
 
-What this build does NOT wire (roadmap step 5b): `/profile`,
-`/update`, `/watch`
-forwarding/monitors, `/login`, `/raw`, and `telegram setup` /
-`install-service`. Turn media (files Muse shows, downloaded
-and sent) and user-sent media (files users send, saved to
-`telegram-inbox/`) are both wired above. Those commands answer with an explicit
-not-wired reply naming step 5b, except `/login` and `/raw`,
-which answer that they are not available in this build.
-None of them appears in the `/` menu: the menu holds only
-the 26 wired commands listed above.
+What this build does NOT wire (roadmap step 5b): `/watch`
+forwarding/monitors, and `telegram setup` /
+`install-service`. None of them appears in the `/` menu:
+the menu holds only the 30 wired commands listed above.
 
 ## The `keeper` section
 
