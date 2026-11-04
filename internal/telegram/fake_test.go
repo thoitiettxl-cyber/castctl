@@ -83,7 +83,22 @@ type fakeTelegramServer struct {
 	// order (a 400 by default in the SetCommands failure
 	// test); empty means setMyCommands succeeds.
 	setMyCommandsFailures []scriptedFailure
-	editTextTrue          bool
+	// getFile scripting for the inbound-media path: getFileSize
+	// is reported only when getFileSizeSet; getFilePath is the
+	// reported file_path ("" means omitted, a fetch failure);
+	// getFileFail, when non-nil, scripts a getFile error.
+	getFileSize    int64
+	getFileSizeSet bool
+	getFilePath    string
+	getFileFail    *scriptedFailure
+	// fileBytes/fileStatus script the /file/ download endpoint:
+	// fileStatus 0 means 200. filePaths records each requested
+	// file_path (the part after the token prefix only — the
+	// token-bearing path is never stored).
+	fileBytes    []byte
+	fileStatus   int
+	filePaths    []string
+	editTextTrue bool
 	// sendDocumentFailures / sendPhotoFailures /
 	// sendVideoFailures / sendAudioFailures script the
 	// matching send* errors in order (a 400 by default in
@@ -106,6 +121,25 @@ func newFakeTelegramServer(t *testing.T) *fakeTelegramServer {
 func (f *fakeTelegramServer) url() string { return f.server.URL }
 
 func (f *fakeTelegramServer) handle(w http.ResponseWriter, r *http.Request) {
+	// The file-download endpoint has a different URL shape
+	// (/file/bot<token>/<file_path>): recognise it before the
+	// /bot<token>/ prefix strip, and record only the file_path
+	// (never the token-bearing path).
+	if rest, ok := strings.CutPrefix(r.URL.Path, "/file/bot"+fakeToken+"/"); ok {
+		f.mu.Lock()
+		f.calls = append(f.calls, recordedCall{Method: "file", Form: map[string]string{"file_path": rest}})
+		f.filePaths = append(f.filePaths, rest)
+		body := f.fileBytes
+		status := f.fileStatus
+		f.mu.Unlock()
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+		return
+	}
 	method := ""
 	rest := strings.TrimPrefix(r.URL.Path, "/bot"+fakeToken+"/")
 	if rest == r.URL.Path {
@@ -206,6 +240,26 @@ func (f *fakeTelegramServer) handle(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		fmt.Fprintf(w, `{"ok":true,"result":{"message_id":%d,"chat":{"id":%s,"type":"private"},"date":0,"text":%s}}`,
 			id, form["chat_id"], jsonString(form["text"]))
+	case "getFile":
+		f.mu.Lock()
+		fail := f.getFileFail
+		sizeSet := f.getFileSizeSet
+		size := f.getFileSize
+		filePath := f.getFilePath
+		f.mu.Unlock()
+		if fail != nil {
+			writeFakeErrorParams(w, fail.Code, fail.Desc, fail.RetryAfter)
+			return
+		}
+		result := map[string]any{"file_id": form["file_id"], "file_unique_id": "unique-" + form["file_id"]}
+		if sizeSet {
+			result["file_size"] = size
+		}
+		if filePath != "" {
+			result["file_path"] = filePath
+		}
+		b, _ := json.Marshal(map[string]any{"ok": true, "result": result})
+		fmt.Fprint(w, string(b))
 	case "editMessageText":
 		f.mu.Lock()
 		var fail *scriptedFailure
@@ -368,6 +422,30 @@ func messageUpdateNoSender(id int64, chatID int64, text string) string {
 			"text":       text,
 		},
 	})
+	return string(b)
+}
+
+// mediaUpdate builds one update whose message carries the given
+// media payload under key (e.g. "photo", "document") plus an
+// optional caption and optional text. extra keys are merged
+// into the message map as-is.
+func mediaUpdate(id int64, chatID, userID int64, msgID int, caption, text, key string, payload any) string {
+	msg := map[string]any{
+		"message_id": msgID,
+		"date":       1700000000,
+		"chat":       map[string]any{"id": chatID, "type": "private"},
+		"from":       map[string]any{"id": userID, "is_bot": false, "first_name": "Tester"},
+	}
+	if caption != "" {
+		msg["caption"] = caption
+	}
+	if text != "" {
+		msg["text"] = text
+	}
+	if key != "" {
+		msg[key] = payload
+	}
+	b, _ := json.Marshal(map[string]any{"update_id": id, "message": msg})
 	return string(b)
 }
 
