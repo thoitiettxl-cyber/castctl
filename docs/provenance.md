@@ -991,6 +991,38 @@ after separators). No state field is added (schema
 version unchanged); the 6 commands leave the
 deferred map and join the `/` menu (19 → 25).
 
+The `/fs` command reimplements `cmd_fs`
+(`tgbot.py:2085-2152`) and `cb_fs_rm` (`:2154-2156`),
+with `reply_long` (`:928-936`) and `fs.norm`/`fs.fmt_size`
+(`fs.py:20-29,173-179`): `/fs ls` lists entries (hidden
+entries only with `-a`, sizes via `fmt_size`); `/fs tree`
+walks to a depth (default 2, numeric second positional);
+`/fs stat` shows the gateway JSON (long dumps arrive as
+`output.txt`); `/fs find` searches names (50 results);
+`/fs cat` shows text (binary or over-long content arrives
+as a document, capped at 5 MiB read); `/fs get` sends one
+file (folders refused, over 49 MiB refused, the whole file
+read before the gate, as upstream); `/fs mkdir` creates
+with parents; `/fs mv` moves (overwrite only with `-f`);
+`/fs rm` asks first with Yes/Cancel buttons and deletes on
+confirmation. Long listings go through `reply_long` (over
+3800 characters arrives as a document captioned `{name}
+({n} chars)`). Deviations: `..` components are REJECTED
+with an input error instead of upstream's silent collapse
+(norm's `..` raise is unreachable after normpath —
+deliberate [DEVIATION], brief-pinned, to catch typos
+without losing functionality; `find` arguments are never
+path-checked, as upstream); gateway and auth errors render
+as the bot's summarised class/length replies, NOT
+upstream's `str(e)[:300]`; the `fs_rm` callback adds two
+typed fields to `CallbackEntry` (path + recursive flag;
+Cancel reuses `noop`); re-tapping Yes re-deletes (entries
+are never consumed); the delete-confirm Edit passes nil
+markup, so the buttons stay attached (the Bot API call
+omits `reply_markup`). No state field is added (schema
+version unchanged); `/fs` leaves the deferred map and
+joins the `/` menu (25 → 26).
+
 Evaluation conditions applied (from the libpin report, all
 VERIFIED in tree): the bot is built with `WithHTTPClient` on a
 writer-bound client whose Transport proxy is explicitly nil
