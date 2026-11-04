@@ -50,7 +50,8 @@ func telegramConfigsEqual(a, b *TelegramConfig) bool {
 	}
 	return a.Profile == b.Profile && a.Token == b.Token &&
 		slices.Equal(a.AllowedUserIDs, b.AllowedUserIDs) &&
-		a.AutoApprove == b.AutoApprove && a.AutoAllowOnce == b.AutoAllowOnce
+		a.AutoApprove == b.AutoApprove && a.AutoAllowOnce == b.AutoAllowOnce &&
+		a.OwnerID == b.OwnerID && a.OwnerIDSet == b.OwnerIDSet
 }
 
 func TestParseTelegramBlockValid(t *testing.T) {
@@ -105,7 +106,6 @@ func TestParseTelegramBlockInvalid(t *testing.T) {
 		`{"profiles":{"muse01":{}},"telegram":{"profile":"muse01","token":"` + fakeTelegramToken + `","allowed_user_ids":["111"]}}`,
 		`{"profiles":{"muse01":{}},"telegram":{"profile":"muse01","token":"` + fakeTelegramToken + `","allowed_user_ids":[1],"auto_approve":"yes"}}`,
 		`{"profiles":{"muse01":{}},"telegram":{"profile":"muse01","token":"` + fakeTelegramToken + `","allowed_user_ids":[1],"auto_allow_once":1}}`,
-		`{"profiles":{"muse01":{}},"telegram":{"profile":"muse01","token":"` + fakeTelegramToken + `","allowed_user_ids":[1],"owner_id":111}}`, // unknown key
 		`{"profiles":{"muse01":{}},"telegram":{"profile":"muse01","token":"` + fakeTelegramToken + `","allowed_user_ids":[1],"poll_timeout":25}}`,
 	}
 	for _, data := range bad {
@@ -120,6 +120,76 @@ func TestParseTelegramBlockInvalid(t *testing.T) {
 		if strings.Contains(err.Error(), fakeTelegramToken) {
 			t.Errorf("ParseSingleConfig(%s) error echoes the fixture token: %v", data, err)
 		}
+	}
+}
+
+func TestParseTelegramBlockOwnerID(t *testing.T) {
+	t.Parallel()
+	// Valid: a positive integer owner is kept, with presence
+	// distinguished from absence.
+	cfg := telegramJSON(t, `{"profile":"muse01","token":"`+fakeTelegramToken+`","allowed_user_ids":[111],"owner_id":111}`)
+	if !cfg.Telegram.OwnerIDSet || cfg.Telegram.OwnerID != 111 {
+		t.Errorf("owner = %d/set=%v; want 111/set", cfg.Telegram.OwnerID, cfg.Telegram.OwnerIDSet)
+	}
+	// Absent stays absent.
+	cfg = telegramJSON(t, `{"profile":"muse01","token":"`+fakeTelegramToken+`","allowed_user_ids":[111]}`)
+	if cfg.Telegram.OwnerIDSet || cfg.Telegram.OwnerID != 0 {
+		t.Errorf("owner = %d/set=%v; want 0/unset", cfg.Telegram.OwnerID, cfg.Telegram.OwnerIDSet)
+	}
+	// Invalid shapes are config errors (exit 2), never
+	// silently unset: 0, negative, fractional, string, bool,
+	// and exponent forms.
+	bad := []string{"0", "-5", "1.5", `"111"`, "true", "1e3"}
+	for _, v := range bad {
+		data := `{"profiles":{"muse01":{}},"telegram":{"profile":"muse01","token":"` + fakeTelegramToken + `","allowed_user_ids":[111],"owner_id":` + v + `}}`
+		cfg, err := ParseSingleConfig([]byte(data), "/base")
+		if err == nil {
+			t.Errorf("ParseSingleConfig(owner_id=%s) = %+v, want error (exit 2)", v, cfg)
+			continue
+		}
+		if ExitCode(err) != 2 {
+			t.Errorf("ParseSingleConfig(owner_id=%s) exit code = %d, want 2", v, ExitCode(err))
+		}
+	}
+	// Defensive validation: a hand-built block with a set
+	// but non-positive owner is refused by ResolveTelegram.
+	cfg = telegramJSON(t, `{"profile":"muse01","token":"`+fakeTelegramToken+`","allowed_user_ids":[111],"owner_id":111}`)
+	cfg.Telegram.OwnerID = 0
+	if _, err := ResolveTelegram(cfg); err == nil {
+		t.Error("ResolveTelegram(hand-built owner 0) = nil, want error")
+	}
+}
+
+// TestTelegramBlockOwnerIDSaveRoundTrip: owner_id survives a
+// save + reload (raw bytes preserved).
+func TestTelegramBlockOwnerIDSaveRoundTrip(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := telegramJSON(t, `{"profile":"muse01","token":"`+fakeTelegramToken+`","allowed_user_ids":[111,222],"auto_approve":true,"owner_id":222}`)
+	if err := SaveSingleConfig(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	block, ok := root["telegram"].(map[string]any)
+	if !ok {
+		t.Fatalf("saved config has no telegram block: %s", data)
+	}
+	if block["owner_id"] != float64(222) {
+		t.Errorf("saved owner_id = %v; want 222", block["owner_id"])
+	}
+	loaded, err := ParseSingleConfig(data, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Telegram == nil || !telegramConfigsEqual(loaded.Telegram, cfg.Telegram) {
+		t.Errorf("reloaded Telegram = %+v, want %+v", loaded.Telegram, cfg.Telegram)
 	}
 }
 

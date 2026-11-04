@@ -42,10 +42,8 @@ import (
 // ever reaches a chat message.
 
 // telegramBotHelpText is Python's HELP verbatim
-// (src/muse_cli/tgbot.py:98-115). It advertises commands
-// this build has not wired yet (/profile, /update);
-// tapping one gets the deferred reply from dispatch,
-// which says so plainly.
+// (src/muse_cli/tgbot.py:98-115). All commands it lists are
+// wired in this build.
 const telegramBotHelpText = `<b>Muse on Telegram</b>
 Type anything to talk to Muse in the current conversation. Send a photo or file to put it in Muse's System Files (<code>telegram-inbox/</code>) and tell Muse about it.
 
@@ -65,22 +63,13 @@ Type anything to talk to Muse in the current conversation. Send a photo or file 
 <b>Admin</b>
 /profile · /login (new cookies) · /update · /raw &lt;method&gt; [json]`
 
-// Commands not wired yet reply with the deferred line
-// instead of running; /login and /raw have no owner gate in
-// this build and are not available at all.
-var telegramDeferredCommands = map[string]bool{
-	"profile": true, "update": true,
-}
-
 var commandNameRe = regexp.MustCompile(`^[a-z_]+$`)
 
 // telegramCommandMenu is the single source for the "/" menu
 // registered at startup (setMyCommands, see cmdTelegramRun):
 // exactly the commands runCommand wires, in dispatch order,
-// with short English descriptions. Deferred commands
-// (telegramDeferredCommands) and the not-available /login and
-// /raw are deliberately absent: the menu must never offer a
-// command that answers "not wired" or "not available".
+// with short English descriptions. The menu must never offer
+// a command that answers "not wired" or "not available".
 var telegramCommandMenu = []telegram.Command{
 	{Name: "start", Description: "Start the bot and show how to talk to Muse"},
 	{Name: "help", Description: "Show the command list and how to talk to Muse"},
@@ -108,23 +97,32 @@ var telegramCommandMenu = []telegram.Command{
 	{Name: "usage", Description: "Show plan usage and reset time"},
 	{Name: "wake", Description: "Ask muse.ai to wake the VM"},
 	{Name: "fs", Description: "Browse System Files (ls, tree, cat, get, find, stat, mkdir, mv, rm)"},
+	{Name: "profile", Description: "Show the linked profile (cannot switch from chat)"},
+	{Name: "update", Description: "Check for a castctl update (owner only, check only)"},
+	{Name: "login", Description: "Replace the muse.ai cookies (owner only)"},
+	{Name: "raw", Description: "Raw gateway call (owner only)"},
 }
 
 // dispatch routes one message: "/name args" to the command
 // table (Python on_message/run_command, tgbot.py:1013-1040),
-// a message with media to the inbound-media path (saved to
+// a cookie-awaiting answer (the message after /login, from
+// the same user in the same chat) to the cookie handler, a
+// message with media to the inbound-media path (saved to
 // System Files, then a turn from the caption — a text+photo
 // update is media only, the text field is dropped), anything
 // else with non-blank text to a turn. The name is the
 // head before the first space, lowercased, with any @botname
 // suffix stripped; the arg is the stripped remainder.
+// Commands never consume the awaiting state, and photos
+// never do either: only a document or non-blank text from
+// the awaiting user does.
 func (h *telegramCmdHandler) dispatch(ctx context.Context, mc telegram.MessageContext) error {
 	text := mc.Text
 	if strings.HasPrefix(text, "/") {
 		head, rest, _ := strings.Cut(text, " ")
 		name := strings.ToLower(strings.SplitN(head[1:], "@", 2)[0])
 		arg := strings.TrimSpace(rest)
-		err := h.runCommand(ctx, mc.ChatID, name, arg)
+		err := h.runCommand(ctx, mc, name, arg)
 		if err == nil {
 			return nil
 		}
@@ -138,6 +136,11 @@ func (h *telegramCmdHandler) dispatch(ctx context.Context, mc telegram.MessageCo
 		_, sendErr := h.bot.Send(ctx, mc.ChatID, "⚠️ Could not run /"+name+" (gateway error).", telegram.SendOptions{Mode: telegram.HTMLModePlain})
 		return sendErr
 	}
+	if consumed, err := h.takeAwaitingCookies(ctx, mc); err != nil {
+		return err
+	} else if consumed {
+		return nil
+	}
 	if mc.Media != nil {
 		return h.inboundMedia(ctx, mc)
 	}
@@ -148,9 +151,20 @@ func (h *telegramCmdHandler) dispatch(ctx context.Context, mc telegram.MessageCo
 	return nil
 }
 
-func (h *telegramCmdHandler) runCommand(ctx context.Context, chatID int64, name, arg string) error {
+func (h *telegramCmdHandler) runCommand(ctx context.Context, mc telegram.MessageContext, name, arg string) error {
+	chatID := mc.ChatID
 	if !commandNameRe.MatchString(name) || name == "" {
 		_, err := h.bot.Send(ctx, chatID, "Unknown command /"+telegram.EscapeText(name)+". /help lists them.", telegram.SendOptions{})
+		return err
+	}
+	// Owner gate (Python run_command, tgbot.py:1033-1034):
+	// the four owner commands refuse with one fixed
+	// sentence when no owner is configured or the sender
+	// is not the owner. It runs before the handler, and
+	// before dispatch's error mapping, so a refusal never
+	// touches the gateway or the updater.
+	if isOwnerCommand(name) && !h.isOwner(mc.UserID) {
+		_, err := h.bot.Send(ctx, chatID, ownerOnlySentence, telegram.SendOptions{Mode: telegram.HTMLModePlain})
 		return err
 	}
 	switch name {
@@ -206,14 +220,15 @@ func (h *telegramCmdHandler) runCommand(ctx context.Context, chatID int64, name,
 		return h.wake(ctx, chatID)
 	case "fs":
 		return h.fs(ctx, chatID, arg)
-	case "login", "raw":
-		_, err := h.bot.Send(ctx, chatID, "⚠️ /"+name+" is not available in this build.", telegram.SendOptions{Mode: telegram.HTMLModePlain})
-		return err
+	case "profile":
+		return h.ownerProfile(ctx, chatID)
+	case "update":
+		return h.ownerUpdate(ctx, chatID)
+	case "login":
+		return h.ownerLogin(ctx, mc)
+	case "raw":
+		return h.ownerRaw(ctx, chatID, arg)
 	default:
-		if telegramDeferredCommands[name] {
-			_, err := h.bot.Send(ctx, chatID, "⚠️ /"+name+" is not wired in this build yet (step 5b).", telegram.SendOptions{Mode: telegram.HTMLModePlain})
-			return err
-		}
 		_, err := h.bot.Send(ctx, chatID, "Unknown command /"+name+". /help lists them.", telegram.SendOptions{})
 		return err
 	}

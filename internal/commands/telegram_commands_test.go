@@ -117,10 +117,10 @@ func TestTelegramDispatchHelpStartUnknownDeferred(t *testing.T) {
 	if sends[4] != "No files in recent messages here." {
 		t.Errorf("files send = %q", sends[4])
 	}
-	if sends[5] != "⚠️ /login is not available in this build." {
+	if sends[5] != "Only the owner can use that command." {
 		t.Errorf("login send = %q", sends[5])
 	}
-	if sends[6] != "⚠️ /raw is not available in this build." {
+	if sends[6] != "Only the owner can use that command." {
 		t.Errorf("raw send = %q", sends[6])
 	}
 	if sends[7] != telegramBotHelpText {

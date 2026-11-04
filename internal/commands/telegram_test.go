@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -148,6 +149,30 @@ type cmdFakeTelegram struct {
 	// sendSilent parallels sends: the disable_notification
 	// flag of each sendMessage, for pinning silent sends.
 	sendSilent []bool
+	// deletes records each deleteMessage call's chat_id and
+	// message_id, in order (PR-F: the /login cookie-message
+	// deletion must be provable).
+	deletes []cmdFakeDelete
+}
+
+// cmdFakeDelete is one deleteMessage call the fake saw.
+type cmdFakeDelete struct {
+	ChatID    int64
+	MessageID int
+}
+
+// deletesSeen returns the recorded deleteMessage calls, in order.
+func (f *cmdFakeTelegram) deletesSeen() []cmdFakeDelete {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]cmdFakeDelete(nil), f.deletes...)
+}
+
+// filePathsSeen returns the recorded /file/ download paths, in order.
+func (f *cmdFakeTelegram) filePathsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.filePaths...)
 }
 
 // cmdFakeMediaSend is one sendPhoto/sendVideo/sendAudio call
@@ -478,6 +503,17 @@ func (f *cmdFakeTelegram) handler(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":100,"chat":{"id":500,"type":"private"},"date":0,"text":"ok"}}`)
 	case "deleteMessage":
+		chatID, messageID := int64(0), 0
+		if err := r.ParseMultipartForm(1 << 20); err == nil && r.MultipartForm != nil {
+			chatID, _ = strconv.ParseInt(firstFormValue(r.MultipartForm.Value["chat_id"]), 10, 64)
+			messageID, _ = strconv.Atoi(firstFormValue(r.MultipartForm.Value["message_id"]))
+		} else if err := r.ParseForm(); err == nil {
+			chatID, _ = strconv.ParseInt(r.Form.Get("chat_id"), 10, 64)
+			messageID, _ = strconv.Atoi(r.Form.Get("message_id"))
+		}
+		f.mu.Lock()
+		f.deletes = append(f.deletes, cmdFakeDelete{ChatID: chatID, MessageID: messageID})
+		f.mu.Unlock()
 		fmt.Fprint(w, `{"ok":true,"result":true}`)
 	case "setMyCommands":
 		// The commands JSON arrives as the "commands"
@@ -885,7 +921,7 @@ func TestTelegramHelpAndDispatch(t *testing.T) {
 }
 
 // TestTelegramCommandMenu (Test 1) pins the "/" menu table: the
-// exact 26 wired commands, in dispatch order, each name within
+// exact 30 wired commands, in dispatch order, each name within
 // the Bot API rule and each description 3-256 runes. Deferred
 // and not-available commands must stay out of the menu.
 func TestTelegramCommandMenu(t *testing.T) {
@@ -895,6 +931,7 @@ func TestTelegramCommandMenu(t *testing.T) {
 		"history", "unread", "rename", "pin", "unpin", "archive",
 		"unarchive", "delete", "approvals", "autoapprove", "watch",
 		"files", "feed", "goals", "goal", "ideas", "usage", "wake", "fs",
+		"profile", "update", "login", "raw",
 	}
 	if len(telegramCommandMenu) != len(wantOrder) {
 		t.Fatalf("menu has %d entries; want %d (%v)", len(telegramCommandMenu), len(wantOrder), wantOrder)
@@ -915,9 +952,6 @@ func TestTelegramCommandMenu(t *testing.T) {
 			t.Errorf("menu repeats %q", c.Name)
 		}
 		seen[c.Name] = true
-		if telegramDeferredCommands[c.Name] || c.Name == "login" || c.Name == "raw" {
-			t.Errorf("menu contains deferred/not-available command %q", c.Name)
-		}
 	}
 }
 
@@ -973,6 +1007,17 @@ func TestTelegramCommandMenuMatchesWiredCommands(t *testing.T) {
 		for _, f := range forbidden {
 			if strings.Contains(sends[i], f) {
 				t.Errorf("reply to /%s contains %q: %q", c.Name, f, sends[i])
+			}
+		}
+	}
+	// The four owner commands run under the no-owner harness
+	// config: each must answer the fixed owner-only sentence
+	// (not merely avoid the forbidden substrings).
+	for i, c := range telegramCommandMenu {
+		switch c.Name {
+		case "profile", "update", "login", "raw":
+			if sends[i] != "Only the owner can use that command." {
+				t.Errorf("reply to /%s = %q; want the owner-only sentence", c.Name, sends[i])
 			}
 		}
 	}

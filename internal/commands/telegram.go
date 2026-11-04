@@ -28,11 +28,13 @@ import (
 //     slash commands (/help, /status, /chats, /main, /new,
 //     /history, /unread, /approvals, /autoapprove, /watch,
 //     session ops, /stop, /feed, /goals, /goal, /ideas,
-//     /usage, /wake, /fs) are wired; files Muse shows in a
-//     turn are downloaded and sent to the chat (photos,
-//     videos, audio, documents); /profile, /update,
-//     /login, /raw, watch forwarding, and `telegram setup` /
+//     /usage, /wake, /fs, /profile, /update, /login, /raw)
+//     are wired; files Muse shows in a turn are downloaded
+//     and sent to the chat (photos, videos, audio,
+//     documents); watch forwarding and `telegram setup` /
 //     `install-service` are roadmap step 5b, not this build.
+//     /update is check-only (no binary replace, no re-exec)
+//     and /profile is display-only (no switch from chat).
 //   - `telegram status`: offline report of the block (configured
 //     flag, linked profile tag, allowlist count, toggles,
 //     token-shape validity). No network, no GetMe, no token
@@ -202,9 +204,29 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 	var bot *telegram.Bot
 	var runner *telegramTurnRunner
 	var handler *telegramCmdHandler
+	// The effective allowlist is the config list plus the
+	// owner, when set (Python merges owner_id into the
+	// allowlist, tgbot.py:643-648): an owner outside
+	// allowed_user_ids still reaches dispatch, where the
+	// owner gate admits them. The config list itself is
+	// untouched: `telegram status` counts it, and the
+	// startup line below reports it.
+	allowed := tg.AllowedUserIDs
+	if tg.OwnerIDSet {
+		found := false
+		for _, id := range allowed {
+			if id == tg.OwnerID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			allowed = append(append([]int64(nil), allowed...), tg.OwnerID)
+		}
+	}
 	bot, err = telegram.New(telegram.Settings{
 		Token:          tg.Token,
-		AllowedUserIDs: tg.AllowedUserIDs,
+		AllowedUserIDs: allowed,
 		AutoApprove:    tg.AutoApprove,
 		AutoAllowOnce:  tg.AutoAllowOnce,
 		HTTPClient:     rt.HTTPClient(),
@@ -266,14 +288,19 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 		toggles: effectiveToggles,
 	})
 	handler = &telegramCmdHandler{
-		env:     env,
-		bot:     bot,
-		rt:      rt,
-		prof:    prof,
-		store:   stateStore,
-		runner:  runner,
-		toggles: effectiveToggles,
-		logger:  logger,
+		env:       env,
+		bot:       bot,
+		rt:        rt,
+		prof:      prof,
+		store:     stateStore,
+		runner:    runner,
+		toggles:   effectiveToggles,
+		logger:    logger,
+		ownerID:   tg.OwnerID,
+		hasOwner:  tg.OwnerIDSet,
+		version:   Version,
+		commit:    Commit,
+		buildDate: BuildDate,
 	}
 	fmt.Fprintf(env.stdout(), "telegram: polling for profile %q (%d allowed users); Ctrl-C to stop\n", tg.Profile, len(tg.AllowedUserIDs))
 	// Embedded keeper (G5): the keeper loop shares this
@@ -304,12 +331,13 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 
 // telegramStatus is the offline JSON report of the block.
 type telegramStatus struct {
-	Configured    bool   `json:"configured"`
-	Profile       string `json:"profile"`
-	AllowedUsers  int    `json:"allowed_user_ids"`
-	AutoApprove   bool   `json:"auto_approve"`
-	AutoAllowOnce bool   `json:"auto_allow_once"`
-	TokenValid    bool   `json:"token_valid"`
+	Configured      bool   `json:"configured"`
+	Profile         string `json:"profile"`
+	AllowedUsers    int    `json:"allowed_user_ids"`
+	AutoApprove     bool   `json:"auto_approve"`
+	AutoAllowOnce   bool   `json:"auto_allow_once"`
+	TokenValid      bool   `json:"token_valid"`
+	OwnerConfigured bool   `json:"owner_configured"`
 }
 
 func cmdTelegramStatus(ctx context.Context, env *Env, g *globalOpts, args []string) error {
@@ -326,12 +354,13 @@ func cmdTelegramStatus(ctx context.Context, env *Env, g *globalOpts, args []stri
 		return err
 	}
 	st := telegramStatus{
-		Configured:    true,
-		Profile:       tg.Profile,
-		AllowedUsers:  len(tg.AllowedUserIDs),
-		AutoApprove:   tg.AutoApprove,
-		AutoAllowOnce: tg.AutoAllowOnce,
-		TokenValid:    true, // resolveTelegramBlock already shape-checked it
+		Configured:      true,
+		Profile:         tg.Profile,
+		AllowedUsers:    len(tg.AllowedUserIDs),
+		AutoApprove:     tg.AutoApprove,
+		AutoAllowOnce:   tg.AutoAllowOnce,
+		TokenValid:      true, // resolveTelegramBlock already shape-checked it
+		OwnerConfigured: tg.OwnerIDSet,
 	}
 	out, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
