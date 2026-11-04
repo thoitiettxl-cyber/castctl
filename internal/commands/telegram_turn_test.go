@@ -12,6 +12,7 @@ package commands
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -85,6 +86,23 @@ type telegramTurnFakeGateway struct {
 	// call, in order, so tests can prove the window a caller
 	// requested (e.g. /files reads 40).
 	historyLimits []int
+	// fs.write capture for the inbound-media path: fsWriteCalls
+	// records every chunk call (path/flags/data); fsWritten
+	// holds the reassembled bytes per path, in chunk order;
+	// fsWriteErr, when non-nil, fails every fs.write call
+	// (AuthError injection for the login-expired mapping).
+	fsWriteCalls []fsWriteCall
+	fsWritten    map[string][]byte
+	fsWriteErr   error
+}
+
+// fsWriteCall is one fs.write chunk call the fake gateway saw.
+type fsWriteCall struct {
+	Path         string
+	Overwrite    bool
+	CreateParent bool
+	Append       bool
+	Data         []byte
 }
 
 // decideRecord is one egress.approval.decide call.
@@ -198,6 +216,29 @@ func (f *telegramTurnFakeGateway) CallJSON(ctx context.Context, method string, o
 		body["method"] = method
 		f.sessionOpCalls = append(f.sessionOpCalls, body)
 		return map[string]any{"ok": true}, nil
+	case "fs.write":
+		if f.fsWriteErr != nil {
+			return nil, f.fsWriteErr
+		}
+		body, _ := opts.Body.(map[string]any)
+		call := fsWriteCall{}
+		call.Path, _ = body["path"].(string)
+		call.Overwrite, _ = body["overwrite"].(bool)
+		call.CreateParent, _ = body["create_parent"].(bool)
+		call.Append, _ = body["append"].(bool)
+		if enc, _ := body["data_base64"].(string); enc != "" {
+			raw, err := base64.StdEncoding.DecodeString(enc)
+			if err != nil {
+				return nil, err
+			}
+			call.Data = raw
+		}
+		f.fsWriteCalls = append(f.fsWriteCalls, call)
+		if f.fsWritten == nil {
+			f.fsWritten = map[string][]byte{}
+		}
+		f.fsWritten[call.Path] = append(f.fsWritten[call.Path], call.Data...)
+		return map[string]any{}, nil
 	default:
 		return nil, fmt.Errorf("unexpected method %s", method)
 	}
