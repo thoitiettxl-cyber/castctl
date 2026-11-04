@@ -128,7 +128,7 @@ func TestTelegramDispatchHelpStartUnknownDeferred(t *testing.T) {
 	}
 }
 
-func TestTelegramHelpOmitsInboxClaim(t *testing.T) {
+func TestTelegramHelpAdvertisesInbox(t *testing.T) {
 	t.Parallel()
 	gw := newTelegramTurnFakeGateway()
 	h, cancel, codeCh := runTelegramBot(t, gw, []string{
@@ -144,11 +144,16 @@ func TestTelegramHelpOmitsInboxClaim(t *testing.T) {
 	if len(sends) != 1 {
 		t.Fatalf("sends = %d, want 1: %q", len(sends), sends)
 	}
-	if strings.Contains(sends[0], "telegram-inbox") {
-		t.Errorf("/help advertises telegram-inbox: %q", sends[0])
-	}
-	if strings.Contains(sends[0], "Send a photo or file") {
-		t.Errorf("/help advertises sending a photo/file: %q", sends[0])
+	// PR-C restores the inbox sentence (upstream HELP verbatim,
+	// tgbot.py:99): /help advertises sending a photo/file to
+	// telegram-inbox/. Behaviour-driven update of
+	// TestTelegramHelpOmitsInboxClaim: the brief changes the
+	// specified behaviour, so the absence assertions become a
+	// presence assertion on the exact sentence. Exact
+	// equality against the constant stays covered by the
+	// dispatch test.
+	if !strings.Contains(sends[0], "Send a photo or file to put it in Muse's System Files (<code>telegram-inbox/</code>) and tell Muse about it.") {
+		t.Errorf("/help does not advertise telegram-inbox: %q", sends[0])
 	}
 }
 

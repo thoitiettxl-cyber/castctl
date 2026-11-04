@@ -21,6 +21,7 @@ import (
 
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 	"github.com/thoitiettxl-cyber/castctl/internal/deliver"
+	"github.com/thoitiettxl-cyber/castctl/internal/fsclient"
 	"github.com/thoitiettxl-cyber/castctl/internal/logging"
 	"github.com/thoitiettxl-cyber/castctl/internal/shared"
 	"github.com/thoitiettxl-cyber/castctl/internal/telegram"
@@ -45,7 +46,7 @@ import (
 // has not wired yet; tapping one gets the deferred reply from
 // dispatch, which says so plainly.
 const telegramBotHelpText = `<b>Muse on Telegram</b>
-Type anything to talk to Muse in the current conversation.
+Type anything to talk to Muse in the current conversation. Send a photo or file to put it in Muse's System Files (<code>telegram-inbox/</code>) and tell Muse about it.
 
 <b>Conversation</b>
 /chats open another chat · /main · /new [title]
@@ -105,34 +106,40 @@ var telegramCommandMenu = []telegram.Command{
 
 // dispatch routes one message: "/name args" to the command
 // table (Python on_message/run_command, tgbot.py:1013-1040),
-// anything else with non-blank text to a turn. The name is the
+// a message with media to the inbound-media path (saved to
+// System Files, then a turn from the caption — a text+photo
+// update is media only, the text field is dropped), anything
+// else with non-blank text to a turn. The name is the
 // head before the first space, lowercased, with any @botname
 // suffix stripped; the arg is the stripped remainder.
 func (h *telegramCmdHandler) dispatch(ctx context.Context, mc telegram.MessageContext) error {
 	text := mc.Text
-	if !strings.HasPrefix(text, "/") {
-		if strings.TrimSpace(text) == "" {
+	if strings.HasPrefix(text, "/") {
+		head, rest, _ := strings.Cut(text, " ")
+		name := strings.ToLower(strings.SplitN(head[1:], "@", 2)[0])
+		arg := strings.TrimSpace(rest)
+		err := h.runCommand(ctx, mc.ChatID, name, arg)
+		if err == nil {
 			return nil
 		}
-		h.runner.startTurn(ctx, mc.ChatID, text)
-		return nil
-	}
-	head, rest, _ := strings.Cut(text, " ")
-	name := strings.ToLower(strings.SplitN(head[1:], "@", 2)[0])
-	arg := strings.TrimSpace(rest)
-	err := h.runCommand(ctx, mc.ChatID, name, arg)
-	if err == nil {
-		return nil
-	}
-	var authErr *conn.AuthError
-	if errors.As(err, &authErr) {
-		h.logger.Warn("telegram command failed (auth)", "command", name, "err", logging.SummarizeErr(err))
-		_, sendErr := h.bot.Send(ctx, mc.ChatID, "🔑 muse.ai login expired. Re-export cookies with `castctl auth export` and restart the bot.", telegram.SendOptions{Mode: telegram.HTMLModePlain})
+		var authErr *conn.AuthError
+		if errors.As(err, &authErr) {
+			h.logger.Warn("telegram command failed (auth)", "command", name, "err", logging.SummarizeErr(err))
+			_, sendErr := h.bot.Send(ctx, mc.ChatID, "🔑 muse.ai login expired. Re-export cookies with `castctl auth export` and restart the bot.", telegram.SendOptions{Mode: telegram.HTMLModePlain})
+			return sendErr
+		}
+		h.logger.Warn("telegram command failed", "command", name, "err", logging.SummarizeErr(err))
+		_, sendErr := h.bot.Send(ctx, mc.ChatID, "⚠️ Could not run /"+name+" (gateway error).", telegram.SendOptions{Mode: telegram.HTMLModePlain})
 		return sendErr
 	}
-	h.logger.Warn("telegram command failed", "command", name, "err", logging.SummarizeErr(err))
-	_, sendErr := h.bot.Send(ctx, mc.ChatID, "⚠️ Could not run /"+name+" (gateway error).", telegram.SendOptions{Mode: telegram.HTMLModePlain})
-	return sendErr
+	if mc.Media != nil {
+		return h.inboundMedia(ctx, mc)
+	}
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	h.runner.startTurn(ctx, mc.ChatID, text)
+	return nil
 }
 
 func (h *telegramCmdHandler) runCommand(ctx context.Context, chatID int64, name, arg string) error {
@@ -693,6 +700,70 @@ func (h *telegramCmdHandler) downloadFile(ctx context.Context, chatID int64, res
 	}
 	_, err = h.bot.SendFile(ctx, chatID, name, data, mime, "", telegram.SendOptions{})
 	return err
+}
+
+// inboundMedia serves one user-sent photo/file (Python
+// upload_and_send, tgbot.py:1777-1799): download it through
+// the bot, write it to System Files at
+// telegram-inbox/<timestamp>-<name> (overwrite=False), send
+// the silent Saved line, and start a turn whose text is the
+// caption plus the saved note (or the no-caption sentence).
+// It sends its own replies and returns nil: the AuthError
+// sentence here is upstream's ("Use /login."), not the
+// generic dispatch sentence, and a failed write must not
+// reach dispatch's generic mapping. [DEVIATION] gateway and
+// download failures render as class/length summaries per
+// the bot's scrubbed-error contract, not upstream's
+// str(e)[:300]; the oversize refusal is a fixed sentence
+// (upstream's download-failure sentence carries the
+// ValueError text "file is N bytes; bots can only fetch
+// 20971520"). A same-second same-name collision fails at
+// the gateway (overwrite=False, upstream parity) and takes
+// the normal failure path: no uniqueness suffix is added.
+func (h *telegramCmdHandler) inboundMedia(ctx context.Context, mc telegram.MessageContext) error {
+	media := mc.Media
+	data, err := h.bot.DownloadMedia(ctx, media)
+	if err != nil {
+		if errors.Is(err, telegram.ErrDownloadTooLarge) {
+			_, sendErr := h.bot.Send(ctx, mc.ChatID, "⚠️ That file is too big for Telegram to fetch (20 MB limit).", telegram.SendOptions{Mode: telegram.HTMLModePlain})
+			return sendErr
+		}
+		h.logger.Warn("telegram media fetch failed", "err", logging.SummarizeErr(err))
+		_, sendErr := h.bot.Send(ctx, mc.ChatID, "⚠️ Could not fetch that file from Telegram: "+h.bot.SummarizeError(err), telegram.SendOptions{Mode: telegram.HTMLModePlain})
+		return sendErr
+	}
+	path := "telegram-inbox/" + telegram.InboxName(media.Name, time.Now())
+	err = h.rt.Muse.WithGateway(ctx, func(gw conn.Gateway) error {
+		_, err := fsclient.New(gw).WriteFile(ctx, path, data, false, true)
+		return err
+	})
+	if err != nil {
+		var authErr *conn.AuthError
+		if errors.As(err, &authErr) {
+			_, sendErr := h.bot.Send(ctx, mc.ChatID, "🔑 muse.ai login expired. Use /login.", telegram.SendOptions{Mode: telegram.HTMLModePlain})
+			return sendErr
+		}
+		h.logger.Warn("telegram media upload failed", "err", logging.SummarizeErr(err))
+		_, sendErr := h.bot.Send(ctx, mc.ChatID, "⚠️ Upload to System Files failed: "+h.bot.SummarizeError(err), telegram.SendOptions{Mode: telegram.HTMLModePlain})
+		return sendErr
+	}
+	if _, err := h.bot.Send(ctx, mc.ChatID, "📥 Saved to <code>"+path+"</code>", telegram.SendOptions{Mode: telegram.HTMLModeHTML, Silent: true}); err != nil {
+		// The file is saved; a failed notice must not lose
+		// the turn. Log it summarised and continue.
+		h.logger.Warn("telegram media saved notice failed", "err", logging.SummarizeErr(err))
+	}
+	mimeClause := ""
+	if media.MIME != "" {
+		mimeClause = ", " + media.MIME
+	}
+	note := fmt.Sprintf("[Telegram attachment saved in your System Files at %s (%d bytes%s)]", path, len(data), mimeClause)
+	caption := strings.TrimSpace(mc.Caption)
+	turnText := "I sent you a file from Telegram. " + note
+	if caption != "" {
+		turnText = caption + "\n\n" + note
+	}
+	h.runner.startTurn(ctx, mc.ChatID, turnText)
+	return nil
 }
 
 // dlFileName is the send filename for a download-button file:

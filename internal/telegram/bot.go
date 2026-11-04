@@ -108,12 +108,17 @@ type SendOptions struct {
 }
 
 // MessageContext is one plain message delivered to the message
-// handler.
+// handler. Media carries a user-sent file when the message has
+// one (MediaOf); Caption carries the message's caption, which
+// is where a media message's user text lives (a media message
+// has no Text).
 type MessageContext struct {
 	ChatID    int64
 	UserID    int64
 	Text      string
 	MessageID int
+	Media     *Media
+	Caption   string
 }
 
 // MessageHandlerFunc handles a plain allowlisted message. It runs
@@ -233,11 +238,16 @@ type Bot struct {
 	// only: a 120s client (uploadClientTimeout) that never
 	// polls, built with WithSkipGetMe so construction issues
 	// no second getMe. SendFile is its only caller.
-	token    string
-	allowed  map[int64]bool
-	logger   *slog.Logger
-	registry *CallbackRegistry
-	dispatch *dispatcher
+	// downloadClient is the same 120s client, retained so
+	// DownloadMedia can GET a file URL through the profile
+	// transport without re-deriving a client (the library
+	// keeps no accessor to it).
+	downloadClient *http.Client
+	token          string
+	allowed        map[int64]bool
+	logger         *slog.Logger
+	registry       *CallbackRegistry
+	dispatch       *dispatcher
 
 	decider      Decider
 	pending      PendingFunc
@@ -459,6 +469,7 @@ func New(s Settings) (*Bot, error) {
 		return nil, b.scrubErr(fmt.Errorf("telegram: bot upload construction failed: %w", err))
 	}
 	b.uploadAPI = uploadAPI
+	b.downloadClient = uploadClient
 	api.RegisterHandlerMatchFunc(func(*models.Update) bool { return true }, b.libraryHandler)
 	return b, nil
 }
@@ -1180,12 +1191,16 @@ func (e *scrubbedError) Unwrap() []error {
 }
 
 // onMessage delivers a plain message to the message handler.
-// Non-text messages are ignored (src/muse_cli/tgbot.py:1013-1027
-// falls through when there is no text and no media; media upload
-// is not in item 4). A handler error is logged, never propagated.
+// A message with text is delivered; a textless message with
+// media is delivered too (the handler's media path saves the
+// file and starts a turn from the caption); a message with
+// neither text nor media is ignored (src/muse_cli/tgbot.py:1013-1027
+// falls through when there is no text and no media). A handler
+// error is logged, never propagated.
 func (b *Bot) onMessage(ctx context.Context, upd *models.Update) {
 	msg := upd.Message
-	if msg.Text == "" || b.handler == nil {
+	media := MediaOf(msg)
+	if (msg.Text == "" && media == nil) || b.handler == nil {
 		return
 	}
 	err := b.handler(ctx, MessageContext{
@@ -1193,6 +1208,8 @@ func (b *Bot) onMessage(ctx context.Context, upd *models.Update) {
 		UserID:    senderID(upd),
 		Text:      msg.Text,
 		MessageID: msg.ID,
+		Media:     media,
+		Caption:   msg.Caption,
 	})
 	if err != nil {
 		b.logger.Error("telegram message handler error", "err", b.summarizeError(err), "update_id", upd.ID)

@@ -915,6 +915,41 @@ live in `telegram-state.json` (`sent_media`, capped at the
 last 500, schema version unchanged); and a file over the
 limit gets a refusal line pointing at `castctl download`.
 
+Inbound media reimplements `media_of` (`tgbot.py:1762-1775`)
+and `upload_and_send` (`tgbot.py:1777-1799`): photo takes
+the last size (`photo-<message_id>.jpg`, `image/jpeg`);
+other kinds are tried in the order document, video, audio,
+voice, video_note, animation, named `file_name` or
+`<kind>-<message_id><ext>` (voice `.ogg`, video and
+video_note `.mp4`, audio `.mp3`, animation `.mp4`;
+document takes no extension); the file is fetched by
+`download` (`tgapi.py:140-144`, `DOWNLOAD_LIMIT` 20 MiB at
+`tgapi.py:20`, gated on getFile's reported size before
+downloading) and written to
+`telegram-inbox/<YYYYmmdd-HHMMSS>-<name>` with the name
+sanitised by `[^A-Za-z0-9._-]+` → `_`, stripped of
+leading/trailing `.`/`_`, or `file`, `overwrite=False`; on
+success the chat gets the silent `📥 Saved to
+<code>path</code>` line and Muse gets a turn with the
+caption plus `[Telegram attachment saved in your System
+Files at <path> (<N> bytes[, <mime>])]`, or `I sent you a
+file from Telegram. <note>` with no caption (`on_message`
+order at `tgbot.py:1013-1027`: commands before media; a
+text+photo update is treated as media only). Deviations:
+gateway/AuthError failures and the download-failure
+sentence render as class/length summaries per the bot's
+scrubbed-error contract, NOT upstream's `str(e)[:300]` (the
+oversize refusal is a fixed sentence, not upstream's
+`file is N bytes` ValueError text); a post-download length
+re-check (LimitReader at cap+1) is a castctl addition —
+upstream gates on getFile's size only; the file GET reuses
+the stored 120s bound client, which refuses redirects
+where upstream's plain GET follows them; `createParent`
+is passed true as a castctl fsclient-API necessity (upstream
+passes no such flag); a same-second same-name collision
+fails at the gateway, as upstream. No state field is added
+(schema version unchanged).
+
 Evaluation conditions applied (from the libpin report, all
 VERIFIED in tree): the bot is built with `WithHTTPClient` on a
 writer-bound client whose Transport proxy is explicitly nil

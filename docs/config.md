@@ -380,6 +380,18 @@ are sent per turn, in seq order; when a turn shows more, the
 chat gets the note `📎 N more file(s): see /files` after any
 other notes, and the remaining files are listed by `/files`.
 
+Files users send to the bot are downloaded through `getFile`
+plus the file URL, capped at 20 MB (`DOWNLOAD_LIMIT`,
+`tgapi.py:20`): a file whose reported size exceeds 20 MB is
+never downloaded. A downloaded file is written to System
+Files at `telegram-inbox/<YYYYmmdd-HHMMSS>-<sanitised name>`
+(the name sanitised as in the provenance entry for inbound
+media), the chat gets `📥 Saved to <code>path</code>`, and
+Muse gets a turn whose text is the caption plus the note
+`[Telegram attachment saved in your System Files at <path>
+(<N> bytes[, <mime>])]`, or `I sent you a file from
+Telegram. <note>` with no caption.
+
 Deliberate deviations from 0.6.1: `edit_plain` swallows every
 edit error (Python catches only Telegram/connection errors —
 the scrubbed-error contract cannot express that distinction);
@@ -412,7 +424,10 @@ approve-all buttons, resume after a decision), the core
 slash commands (`/help`, `/status`, `/chats`, `/main`, `/new`,
 `/history`, `/unread`, `/rename`, `/pin`, `/unpin`,
 `/archive`, `/unarchive`, `/delete`, `/watch` as a persisted
-toggle, `/files`), and the persistent state file above. Very long
+toggle, `/files`), files users send to the bot (photos,
+documents, video, audio, voice, animations) saved to
+`telegram-inbox/` and told to Muse in a turn, and the
+persistent state file above. Very long
 replies are sent as a `muse-reply` document with a bubble
 preview instead of being split, and files Muse shows in a
 turn are downloaded and sent to the chat in seq order
@@ -436,13 +451,12 @@ handler context and are cancelled on shutdown, so the join
 waits only for teardown, not for a turn to run to
 completion.
 
-What this build does NOT wire (roadmap step 5b): media sent
-by users to the bot, `/fs`, `/feed`, `/goals`, `/goal`,
+What this build does NOT wire (roadmap step 5b): `/fs`, `/feed`, `/goals`, `/goal`,
 `/ideas`, `/usage`, `/wake`, `/profile`, `/update`, `/watch`
 forwarding/monitors, `/login`, `/raw`, and `telegram setup` /
 `install-service`. Turn media (files Muse shows, downloaded
-and sent) is wired above; user-sent media remains step 5b.
-Those commands answer with an explicit
+and sent) and user-sent media (files users send, saved to
+`telegram-inbox/`) are both wired above. Those commands answer with an explicit
 not-wired reply naming step 5b, except `/login` and `/raw`,
 which answer that they are not available in this build.
 None of them appears in the `/` menu: the menu holds only

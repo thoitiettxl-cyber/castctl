@@ -110,6 +110,19 @@ type cmdFakeTelegram struct {
 	// answers records each answerCallbackQuery call's text,
 	// in order ("" when the bot answered with no text).
 	answers []string
+	// getFile/file-endpoint scripting for the inbound-media
+	// path, mirroring the telegram-package fake: getFileSize
+	// is reported only when getFileSizeSet; getFilePath is
+	// the reported file_path ("" means omitted); fileBytes /
+	// fileStatus script the /file/ download endpoint (status
+	// 0 means 200); filePaths records each requested
+	// file_path (the part after the token prefix only).
+	getFileSize    int64
+	getFileSizeSet bool
+	getFilePath    string
+	fileBytes      []byte
+	fileStatus     int
+	filePaths      []string
 }
 
 // cmdFakeMediaSend is one sendPhoto/sendVideo/sendAudio call
@@ -153,6 +166,25 @@ func (f *cmdFakeTelegram) methodsSeen() []string {
 }
 
 func (f *cmdFakeTelegram) handler(w http.ResponseWriter, r *http.Request) {
+	// The file-download endpoint has a different URL shape
+	// (/file/bot<token>/<file_path>): recognise it before the
+	// /bot<token>/ prefix strip, and record only the file_path
+	// (never the token-bearing path).
+	if rest, ok := strings.CutPrefix(r.URL.Path, "/file/bot"+telegramTestToken+"/"); ok {
+		f.mu.Lock()
+		f.methods = append(f.methods, "file")
+		f.filePaths = append(f.filePaths, rest)
+		body := f.fileBytes
+		status := f.fileStatus
+		f.mu.Unlock()
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+		return
+	}
 	method := strings.TrimPrefix(r.URL.Path, "/bot"+telegramTestToken+"/")
 	method = strings.Trim(method, "/")
 	f.mu.Lock()
@@ -162,6 +194,21 @@ func (f *cmdFakeTelegram) handler(w http.ResponseWriter, r *http.Request) {
 	switch method {
 	case "getMe":
 		fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"Fake","username":"fakebot"}}`)
+	case "getFile":
+		f.mu.Lock()
+		sizeSet := f.getFileSizeSet
+		size := f.getFileSize
+		filePath := f.getFilePath
+		f.mu.Unlock()
+		result := map[string]any{"file_id": "fid1", "file_unique_id": "unique-fid1"}
+		if sizeSet {
+			result["file_size"] = size
+		}
+		if filePath != "" {
+			result["file_path"] = filePath
+		}
+		b, _ := json.Marshal(map[string]any{"ok": true, "result": result})
+		fmt.Fprint(w, string(b))
 	case "getUpdates":
 		// The gate is evaluated WITHOUT holding f.mu: gates
 		// inspect the fake (editTexts locks f.mu), so
