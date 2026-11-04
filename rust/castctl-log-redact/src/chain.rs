@@ -171,6 +171,12 @@ impl fmt::Debug for ChainLevel {
 
 impl ChainLevel {
     /// A plain level with the given text and children.
+    ///
+    /// Source: `internal/telegram/bot.go:864-872` (the
+    /// `chainPrefixClass` chain model: each level is an error
+    /// reachable through `Unwrap`). There is no direct Go
+    /// function counterpart for this constructor: it is a
+    /// Rust-side constructor for building a [`ChainLevel`].
     #[must_use]
     pub fn plain(text: &str, children: Vec<ChainLevel>) -> Self {
         ChainLevel {
@@ -181,6 +187,12 @@ impl ChainLevel {
     }
 
     /// A leaf level (no children) of the given kind.
+    ///
+    /// Source: `internal/telegram/bot.go:864-872` (the
+    /// `chainPrefixClass` chain model: a level with no
+    /// `Unwrap` children). There is no direct Go function
+    /// counterpart for this constructor: it is a Rust-side
+    /// constructor for building a [`ChainLevel`].
     #[must_use]
     pub fn leaf(text: &str, kind: LevelKind) -> Self {
         ChainLevel {
@@ -201,6 +213,13 @@ pub struct ErrorChain {
 
 impl ErrorChain {
     /// A chain with a single plain level.
+    ///
+    /// Source: `internal/telegram/bot.go:864-872` (the
+    /// `chainPrefixClass` chain model: a chain is its root
+    /// level plus the levels reachable through `Unwrap`).
+    /// There is no direct Go function counterpart for this
+    /// constructor: it is a Rust-side constructor for
+    /// building an [`ErrorChain`].
     #[must_use]
     pub fn plain(text: &str) -> Self {
         ErrorChain {

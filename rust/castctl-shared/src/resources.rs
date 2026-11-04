@@ -36,6 +36,14 @@ pub struct Resource {
 impl Resource {
     /// A resource with only path and kind set, as `EventResources`
     /// creates a first-seen slot.
+    ///
+    /// Source: the `Resource` struct definition in
+    /// `internal/shared/resources.go:32-50` and the first-seen
+    /// slot creation in `EventResources` at
+    /// `resources.go:113-118` (`&Resource{Path: ..., Kind: ...}`).
+    /// There is no direct Go function counterpart for this
+    /// constructor: Go creates the struct literal inline; this
+    /// is a Rust-side constructor for building a [`Resource`].
     #[must_use]
     pub fn new(path: String, kind: String) -> Self {
         Resource {

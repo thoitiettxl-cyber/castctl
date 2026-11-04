@@ -65,6 +65,14 @@ pub enum ErrorClass {
 
 impl ErrorClass {
     /// Go's fixed-vocabulary label for this class.
+    ///
+    /// Source: the label vocabulary in
+    /// `internal/telegram/bot.go:817-862` (`classifyError`),
+    /// `bot.go:956-991` (`transportClass`), and
+    /// `bot.go:1015-1056` (`fallbackClass`). There is no
+    /// direct Go function counterpart for this accessor:
+    /// Go returns the label strings directly; this is a
+    /// Rust-side accessor returning the same fixed label.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {

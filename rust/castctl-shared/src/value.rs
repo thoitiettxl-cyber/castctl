@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 /// integer spellings (Go `int64` / `json.Number` integer form),
 /// [`JsonValue::Float`] for float spellings (Go `float64` /
 /// `json.Number` float form). That split is what lets
-/// [`as_int64`] reproduce Go's integer-first, float-fallback
+/// `as_int64` reproduce Go's integer-first, float-fallback
 /// conversion. There is deliberately no `UInt` variant: a Go
 /// `uint64` fixture value above `i64::MAX` has no M1 model;
 /// see `rust/PORTING.md`.
@@ -114,7 +114,7 @@ pub(crate) fn as_bool(v: &JsonValue) -> Option<bool> {
 
 /// Python truthiness: null is false, `false`/`0`/`""`/empty
 /// array/object are false, everything else is true. A float
-/// NaN is true: it is not a number per [`as_int64`], so it
+/// NaN is true: it is not a number per `as_int64`, so it
 /// falls through to the default arm, as in Go.
 /// Source: `internal/shared/values.go:84` (`truthy`).
 pub(crate) fn truthy(v: &JsonValue) -> bool {

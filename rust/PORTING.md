@@ -30,6 +30,16 @@ scanner invariants, never caller data.
 
 ## 2. API mapping
 
+Constructors/accessors with no Go function counterpart (for
+example `ChainLevel::plain`, `ChainLevel::leaf`,
+`ErrorChain::plain`, `ErrorClass::label`, `Resource::new`) cite
+their Go type/vocabulary source — the struct definition, the
+chain-model region, or the label vocabulary they model — and
+their doc comments state explicitly that there is no direct Go
+function counterpart and the item is a Rust-side
+constructor/accessor. No Go function line is fabricated for
+such items.
+
 ### 2.1 `castctl-tg-text`
 
 | Go (`text.go`) | Rust | Notes |
@@ -436,10 +446,10 @@ $ cargo build --workspace
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.24s
 BUILD_EXIT=0
 $ cargo test --workspace
-test result: ok. 41 passed; 0 failed  (castctl-log-redact)
+test result: ok. 46 passed; 0 failed  (castctl-log-redact)
 test result: ok. 7 passed; 0 failed   (castctl-shared)
 test result: ok. 2 passed; 0 failed   (castctl-tg-files)
-test result: ok. 8 passed; 0 failed   (castctl-tg-text)
+test result: ok. 10 passed; 0 failed   (castctl-tg-text)
 TEST_EXIT=0
 $ cargo clippy --workspace -- -D warnings
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.08s

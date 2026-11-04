@@ -5,7 +5,7 @@
 //! Security invariants (load-bearing, do not weaken):
 //! - `summarize`/`summarize_error` output contains ONLY fixed
 //!   vocabulary plus a rune count — never raw server text.
-//! - [`safe_string`] is a backstop only: bare secrets with no
+//! - [`safe_string()`] is a backstop only: bare secrets with no
 //!   label are NOT stripped; callers exclude them by
 //!   construction.
 //! - [`scrub_chain`] holds no reference to pre-scrub text.
