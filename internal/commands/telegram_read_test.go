@@ -1157,8 +1157,9 @@ func runReadBotWithLog(t *testing.T, gw *telegramTurnFakeGateway, logBuf *bytes.
 // absolute cookies path. The send stays the exact generic
 // sentence. Both dispatch-routed rt.Cookies() callers (/wake,
 // /usage) and both failure variants (missing file, empty
-// file) are covered: the fix is in typedAuthError's
-// LogSummary, shared by all of them.
+// file) are covered: the fix is the path-free,
+// class-prefixed messages built in requireCookiesFile
+// (internal/commands/runtime.go), shared by all of them.
 func TestDispatchLogHasNoCookiesPath(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
