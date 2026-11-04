@@ -31,11 +31,21 @@ import (
 const fakeToken = "123456:FAKE-TOKEN-0123456789ABCD"
 
 // recordedCall is one API call the fake server saw. Form holds the
-// first value per multipart field. The request path (which carries
+// first value per multipart field. Files holds, per file field,
+// the first file part's filename and byte length (never the
+// bytes: unbounded test memory). The request path (which carries
 // the token) is never stored.
 type recordedCall struct {
 	Method string
 	Form   map[string]string
+	Files  map[string]filePart
+}
+
+// filePart is one multipart file part the fake server saw:
+// its filename and size only.
+type filePart struct {
+	Filename string
+	Size     int64
 }
 
 type scriptedFailure struct {
@@ -74,6 +84,15 @@ type fakeTelegramServer struct {
 	// test); empty means setMyCommands succeeds.
 	setMyCommandsFailures []scriptedFailure
 	editTextTrue          bool
+	// sendDocumentFailures / sendPhotoFailures /
+	// sendVideoFailures / sendAudioFailures script the
+	// matching send* errors in order (a 400 by default in
+	// the SendFile fallback test); empty means the send
+	// succeeds.
+	sendDocumentFailures []scriptedFailure
+	sendPhotoFailures    []scriptedFailure
+	sendVideoFailures    []scriptedFailure
+	sendAudioFailures    []scriptedFailure
 }
 
 func newFakeTelegramServer(t *testing.T) *fakeTelegramServer {
@@ -97,10 +116,16 @@ func (f *fakeTelegramServer) handle(w http.ResponseWriter, r *http.Request) {
 		method = strings.Trim(rest, "/")
 	}
 	form := map[string]string{}
+	files := map[string]filePart{}
 	if err := r.ParseMultipartForm(1 << 20); err == nil && r.MultipartForm != nil {
 		for k, v := range r.MultipartForm.Value {
 			if len(v) > 0 {
 				form[k] = v[0]
+			}
+		}
+		for k, v := range r.MultipartForm.File {
+			if len(v) > 0 {
+				files[k] = filePart{Filename: v[0].Filename, Size: v[0].Size}
 			}
 		}
 	} else if err := r.ParseForm(); err == nil {
@@ -111,7 +136,7 @@ func (f *fakeTelegramServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	f.mu.Lock()
-	f.calls = append(f.calls, recordedCall{Method: method, Form: form})
+	f.calls = append(f.calls, recordedCall{Method: method, Form: form, Files: files})
 	f.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -222,9 +247,49 @@ func (f *fakeTelegramServer) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fmt.Fprint(w, `{"ok":true,"result":true}`)
+	case "sendDocument", "sendPhoto", "sendVideo", "sendAudio":
+		// A file send: honour a scripted failure, else
+		// allocate a message id and answer with the caption
+		// as the message text, mirroring sendMessage.
+		if fail := f.takeSendFailure(method); fail != nil {
+			writeFakeErrorParams(w, fail.Code, fail.Desc, fail.RetryAfter)
+			return
+		}
+		f.mu.Lock()
+		id := f.nextMsg
+		f.nextMsg++
+		f.mu.Unlock()
+		fmt.Fprintf(w, `{"ok":true,"result":{"message_id":%d,"chat":{"id":%s,"type":"private"},"date":0,"text":%s}}`,
+			id, form["chat_id"], jsonString(form["caption"]))
 	default:
 		writeFakeError(w, 404, "Not Found")
 	}
+}
+
+// takeSendFailure shifts the next scripted failure for a
+// send* method, or nil when the send should succeed.
+func (f *fakeTelegramServer) takeSendFailure(method string) *scriptedFailure {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var failures *[]scriptedFailure
+	switch method {
+	case "sendDocument":
+		failures = &f.sendDocumentFailures
+	case "sendPhoto":
+		failures = &f.sendPhotoFailures
+	case "sendVideo":
+		failures = &f.sendVideoFailures
+	case "sendAudio":
+		failures = &f.sendAudioFailures
+	default:
+		return nil
+	}
+	if len(*failures) == 0 {
+		return nil
+	}
+	c := (*failures)[0]
+	*failures = (*failures)[1:]
+	return &c
 }
 
 func jsonString(s string) string {

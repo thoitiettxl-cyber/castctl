@@ -27,7 +27,10 @@ import (
 //     decided through the gateway decide path, and the core
 //     slash commands (/help, /status, /chats, /main, /new,
 //     /history, /unread, /approvals, /autoapprove, /watch,
-//     session ops, /stop) are wired; media, /files, /fs,
+//     session ops, /stop) are wired; files Muse shows in a
+//     turn are downloaded and sent to the chat (photos,
+//     videos, audio, documents); media sent by users to the
+//     bot, /files, /fs,
 //     /feed, /goals, /goal, /ideas, /usage, /wake, /profile,
 //     /update, /login, /raw, watch forwarding, and
 //     `telegram setup` / `install-service` are roadmap

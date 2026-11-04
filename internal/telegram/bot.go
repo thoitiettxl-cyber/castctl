@@ -228,7 +228,11 @@ type Settings struct {
 // Bot is a polling Telegram bot bound to one profile's outbound
 // via its injected HTTP client.
 type Bot struct {
-	api      *bot.Bot
+	api       *bot.Bot
+	uploadAPI *bot.Bot // second library instance for file uploads
+	// only: a 120s client (uploadClientTimeout) that never
+	// polls, built with WithSkipGetMe so construction issues
+	// no second getMe. SendFile is its only caller.
 	token    string
 	allowed  map[int64]bool
 	logger   *slog.Logger
@@ -430,6 +434,31 @@ func New(s Settings) (*Bot, error) {
 		return nil, b.scrubErr(fmt.Errorf("telegram: bot construction failed: %w", err))
 	}
 	b.api = api
+	// The upload instance shares the outbound transport (a
+	// second BoundClient call on a copy of the injected client
+	// with the 120s timeout, so the same validation applies)
+	// and the same ServerURL, but never polls and never calls
+	// getMe: WithSkipGetMe keeps construction at exactly one
+	// getMe (TestBotConstructionCallsGetMeOnce). The poll
+	// client's 40s timeout is untouched.
+	uploadBase := *s.HTTPClient
+	uploadBase.Timeout = uploadClientTimeout
+	uploadClient, err := BoundClient(&uploadBase, PollTimeout)
+	if err != nil {
+		return nil, b.scrubErr(fmt.Errorf("telegram: bot upload construction failed: %w", err))
+	}
+	uploadOpts := []bot.Option{
+		bot.WithHTTPClient(PollTimeout, uploadClient),
+		bot.WithSkipGetMe(),
+	}
+	if s.ServerURL != "" {
+		uploadOpts = append(uploadOpts, bot.WithServerURL(s.ServerURL))
+	}
+	uploadAPI, err := bot.New(token, uploadOpts...)
+	if err != nil {
+		return nil, b.scrubErr(fmt.Errorf("telegram: bot upload construction failed: %w", err))
+	}
+	b.uploadAPI = uploadAPI
 	api.RegisterHandlerMatchFunc(func(*models.Update) bool { return true }, b.libraryHandler)
 	return b, nil
 }

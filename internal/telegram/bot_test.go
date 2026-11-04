@@ -46,6 +46,23 @@ func TestBotConstructionCallsGetMeOnce(t *testing.T) {
 	}
 }
 
+func TestBotConstructionFailureCarriesNoToken(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	// A client whose transport may consult env proxies is refused
+	// at construction: the error must carry no token text.
+	_, err := New(Settings{Token: fakeToken, AllowedUserIDs: []int64{1}, HTTPClient: &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}, ServerURL: srv.url()})
+	if err == nil {
+		t.Fatal("New(env-proxy client) = nil; want an error")
+	}
+	if strings.Contains(err.Error(), fakeToken) || strings.Contains(err.Error(), "FAKE-TOKEN") {
+		t.Errorf("construction error = %q; must not carry the token", err)
+	}
+	if got := srv.count("getMe"); got != 0 {
+		t.Errorf("getMe calls after rejected construction = %d; want 0", got)
+	}
+}
+
 func TestBotConstructionValidation(t *testing.T) {
 	t.Parallel()
 	srv := newFakeTelegramServer(t)

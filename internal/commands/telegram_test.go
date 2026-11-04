@@ -91,12 +91,62 @@ type cmdFakeTelegram struct {
 	// true, makes setMyCommands answer 400 instead of true.
 	commandsJSON      []string
 	setMyCommandsFail bool
+	// documents records each sendDocument call's file part
+	// (filename and size only, never the bytes), caption, and
+	// reply_markup JSON. failDocuments, when true, makes
+	// sendDocument answer 400. editFailCount makes that many
+	// editMessageText calls answer 400 before succeeding.
+	// failSends, when true, makes sendMessage answer 400.
+	documents     []cmdFakeDocument
+	editFailCount int
+	failSends     bool
+	failDocuments bool
+	// mediaSends records each sendPhoto/sendVideo/sendAudio
+	// call's file part (filename and size only, never the
+	// bytes), caption, and reply_markup JSON. failPhoto, when
+	// true, makes sendPhoto answer 400.
+	mediaSends []cmdFakeMediaSend
+	failPhoto  bool
+}
+
+// cmdFakeMediaSend is one sendPhoto/sendVideo/sendAudio call
+// the fake saw.
+type cmdFakeMediaSend struct {
+	Method     string
+	Filename   string
+	Size       int64
+	Caption    string
+	MarkupJSON string
+	HasMarkup  bool
+}
+
+// cmdFakeDocument is one sendDocument call the fake saw.
+type cmdFakeDocument struct {
+	Filename   string
+	Size       int64
+	Caption    string
+	MarkupJSON string
+	HasMarkup  bool
 }
 
 func (f *cmdFakeTelegram) editTexts() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.edits...)
+}
+
+// sendsSeen returns the recorded sendMessage texts, in call order.
+func (f *cmdFakeTelegram) sendsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.sends...)
+}
+
+// methodsSeen returns the Bot API methods the fake saw, in call order.
+func (f *cmdFakeTelegram) methodsSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.methods...)
 }
 
 func (f *cmdFakeTelegram) handler(w http.ResponseWriter, r *http.Request) {
@@ -159,6 +209,13 @@ func (f *cmdFakeTelegram) handler(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(5 * time.Millisecond)
 		fmt.Fprint(w, `{"ok":true,"result":[]}`)
 	case "sendMessage":
+		f.mu.Lock()
+		fail := f.failSends
+		f.mu.Unlock()
+		if fail {
+			fmt.Fprint(w, `{"ok":false,"error_code":400,"description":"Bad Request: message can't be sent"}`)
+			return
+		}
 		text := ""
 		markup := false
 		markupJSON := ""
@@ -178,6 +235,16 @@ func (f *cmdFakeTelegram) handler(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":100,"chat":{"id":500,"type":"private"},"date":0,"text":"ok"}}`)
 	case "editMessageText":
+		f.mu.Lock()
+		failEdits := f.editFailCount
+		if failEdits > 0 {
+			f.editFailCount--
+		}
+		f.mu.Unlock()
+		if failEdits > 0 {
+			fmt.Fprint(w, `{"ok":false,"error_code":400,"description":"Bad Request: message can't be edited"}`)
+			return
+		}
 		if f.editGate != nil {
 			<-f.editGate
 		}
@@ -200,6 +267,59 @@ func (f *cmdFakeTelegram) handler(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":100,"chat":{"id":500,"type":"private"},"date":0,"text":"ok"}}`)
 	case "answerCallbackQuery":
+		fmt.Fprint(w, `{"ok":true,"result":true}`)
+	case "sendDocument":
+		// A file send: record the document file part
+		// (filename/size), caption, and reply_markup.
+		doc := cmdFakeDocument{}
+		if err := r.ParseMultipartForm(1 << 20); err == nil && r.MultipartForm != nil {
+			doc.Caption = firstFormValue(r.MultipartForm.Value["caption"])
+			doc.MarkupJSON = firstFormValue(r.MultipartForm.Value["reply_markup"])
+			if parts := r.MultipartForm.File["document"]; len(parts) > 0 {
+				doc.Filename = parts[0].Filename
+				doc.Size = parts[0].Size
+			}
+		} else if err := r.ParseForm(); err == nil {
+			doc.Caption = r.Form.Get("caption")
+			doc.MarkupJSON = r.Form.Get("reply_markup")
+		}
+		doc.HasMarkup = doc.MarkupJSON != "" && doc.MarkupJSON != "null"
+		f.mu.Lock()
+		f.documents = append(f.documents, doc)
+		fail := f.failDocuments
+		f.mu.Unlock()
+		if fail {
+			fmt.Fprint(w, `{"ok":false,"error_code":400,"description":"Bad Request: wrong file type"}`)
+			return
+		}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":100,"chat":{"id":500,"type":"private"},"date":0,"text":"ok"}}`)
+	case "sendPhoto", "sendVideo", "sendAudio":
+		// A media send: record the file part (filename/size),
+		// caption, and reply_markup, like sendDocument.
+		field := map[string]string{"sendPhoto": "photo", "sendVideo": "video", "sendAudio": "audio"}[method]
+		send := cmdFakeMediaSend{Method: method}
+		if err := r.ParseMultipartForm(1 << 20); err == nil && r.MultipartForm != nil {
+			send.Caption = firstFormValue(r.MultipartForm.Value["caption"])
+			send.MarkupJSON = firstFormValue(r.MultipartForm.Value["reply_markup"])
+			if parts := r.MultipartForm.File[field]; len(parts) > 0 {
+				send.Filename = parts[0].Filename
+				send.Size = parts[0].Size
+			}
+		} else if err := r.ParseForm(); err == nil {
+			send.Caption = r.Form.Get("caption")
+			send.MarkupJSON = r.Form.Get("reply_markup")
+		}
+		send.HasMarkup = send.MarkupJSON != "" && send.MarkupJSON != "null"
+		f.mu.Lock()
+		f.mediaSends = append(f.mediaSends, send)
+		fail := method == "sendPhoto" && f.failPhoto
+		f.mu.Unlock()
+		if fail {
+			fmt.Fprint(w, `{"ok":false,"error_code":400,"description":"Bad Request: wrong file type"}`)
+			return
+		}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":100,"chat":{"id":500,"type":"private"},"date":0,"text":"ok"}}`)
+	case "deleteMessage":
 		fmt.Fprint(w, `{"ok":true,"result":true}`)
 	case "setMyCommands":
 		// The commands JSON arrives as the "commands"
@@ -259,6 +379,35 @@ func (f *cmdFakeTelegram) commandsSeen() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.commandsJSON...)
+}
+
+// documentsSeen returns the recorded sendDocument calls, in
+// call order.
+func (f *cmdFakeTelegram) documentsSeen() []cmdFakeDocument {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]cmdFakeDocument(nil), f.documents...)
+}
+
+// mediaSendsSeen returns the recorded sendPhoto/sendVideo/
+// sendAudio calls, in call order.
+func (f *cmdFakeTelegram) mediaSendsSeen() []cmdFakeMediaSend {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]cmdFakeMediaSend(nil), f.mediaSends...)
+}
+
+// methodCount returns how many times the fake saw method.
+func (f *cmdFakeTelegram) methodCount(method string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, m := range f.methods {
+		if m == method {
+			n++
+		}
+	}
+	return n
 }
 
 // The fake client below is a plain *http.Transport whose dial

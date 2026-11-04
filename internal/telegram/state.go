@@ -18,8 +18,9 @@ import (
 //
 // Python 0.6.1 keeps this in telegram-state.json beside the
 // profile config (src/muse_cli/tgbot.py:151-154, 593-641): the
-// per-chat session mapping, watermarks, runtime toggles, and the
-// poll offset. Castctl keeps the same split — config in
+// per-chat session mapping, watermarks, runtime toggles, the
+// poll offset, and the sent-media keys (files already sent to
+// Telegram, deduplicated per chat). Castctl keeps the same split — config in
 // config.json (the telegram block, token-bearing), runtime state
 // in a sibling file that never holds a secret — derived from the
 // resolved config location through the profile directory (the
@@ -62,6 +63,21 @@ const telegramStateFileName = "telegram-state.json"
 // (Python's MAIN = "main" sentinel, tgbot.py:56).
 const mainWatermarkKey = "main"
 
+// sentMediaCap bounds the stored sent-media keys: only the
+// most recent keys are kept (Python keeps the last 500,
+// tgbot.py:781-791), so the state file cannot grow without
+// bound on a chat that receives files every turn.
+const sentMediaCap = 500
+
+// SentMediaKey builds the dedupe key for a file sent to a
+// chat: profile, chat id, session id ("main" for the main
+// chat, the WatermarkKey rule), and the resource path. The
+// key identifies one delivery, not one file: the same path
+// sent to another chat or session is a different delivery.
+func SentMediaKey(profile string, chatID int64, sessionID, path string) string {
+	return profile + "|" + strconv.FormatInt(chatID, 10) + "|" + WatermarkKey(sessionID) + "|" + path
+}
+
 // WatermarkKey returns the watermark key for a session: the
 // session id, or "main" for the main chat (empty session id).
 func WatermarkKey(sessionID string) string {
@@ -98,6 +114,13 @@ type telegramStateFile struct {
 	AutoApprove   *bool                `json:"auto_approve,omitempty"`
 	AutoAllowOnce *bool                `json:"auto_allow_once,omitempty"`
 	Watch         *bool                `json:"watch,omitempty"`
+	// SentMedia holds the sent-media keys in claim order
+	// (oldest first), capped at sentMediaCap. Added without
+	// a schema version bump: unknown fields are ignored on
+	// load, so an older binary drops the list on its next
+	// save (forward-tolerance cost, accepted: a duplicate
+	// send after a downgrade is a nuisance, not a loss).
+	SentMedia []string `json:"sent_media,omitempty"`
 }
 
 // StateStore is the loaded state file plus its path. All methods
@@ -383,4 +406,54 @@ func (s *StateStore) SetWatch(watch bool) error {
 	defer s.mu.Unlock()
 	s.st.Watch = &watch
 	return s.saveLocked()
+}
+
+// SentMedia returns a copy of the stored sent-media keys, in
+// claim order (oldest first).
+func (s *StateStore) SentMedia() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.st.SentMedia...)
+}
+
+// ClaimSentMedia records key as sent and saves, in one lock
+// hold: the check, the append, the cap trim, and the save are
+// atomic with respect to other store methods (Python's
+// claim_media under its state lock, tgbot.py:781-791). It
+// reports false when the key was already claimed — the caller
+// must skip the send — and true when the key is newly
+// claimed. A save failure is returned and the in-memory claim
+// still stands (the next mutation retries the save, the
+// SetWatermark precedent); the caller logs it and proceeds,
+// since the in-process dedupe still holds.
+func (s *StateStore) ClaimSentMedia(key string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, claimed := range s.st.SentMedia {
+		if claimed == key {
+			return false, nil
+		}
+	}
+	s.st.SentMedia = append(s.st.SentMedia, key)
+	if len(s.st.SentMedia) > sentMediaCap {
+		s.st.SentMedia = append([]string(nil), s.st.SentMedia[len(s.st.SentMedia)-sentMediaCap:]...)
+	}
+	return true, s.saveLocked()
+}
+
+// ReleaseSentMedia removes a claim, so a later turn retries
+// the file (a download or send failure releases the claim;
+// a success or a too-big refusal keeps it, Python's
+// release_media, tgbot.py:793-804). Releasing an absent key
+// is a no-op and does not save.
+func (s *StateStore) ReleaseSentMedia(key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, claimed := range s.st.SentMedia {
+		if claimed == key {
+			s.st.SentMedia = append(s.st.SentMedia[:i], s.st.SentMedia[i+1:]...)
+			return s.saveLocked()
+		}
+	}
+	return nil
 }
