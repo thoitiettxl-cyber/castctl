@@ -12,15 +12,23 @@ package telegram
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-telegram/bot"
 )
@@ -1180,6 +1188,316 @@ func TestSummarizeHostileBodyBoundedWork(t *testing.T) {
 	}
 	if !strings.Contains(got, "message_length=") {
 		t.Errorf("summarize(5MB) output of %d bytes lacks message_length=", len(got))
+	}
+}
+
+// expectedSummary builds the exact summary summarizeError must
+// emit for label and err, pinning the shared format: the decode
+// classes keep the historical "telegram poll error:" prefix,
+// every other class uses "telegram error:". A nil error has
+// message_length=0.
+func expectedSummary(label string, err error) string {
+	length := 0
+	if err != nil {
+		length = utf8.RuneCountInString(err.Error())
+	}
+	if label == "response decode failure" || label == "update decode failure" {
+		return fmt.Sprintf("telegram poll error: %s message_length=%d", label, length)
+	}
+	return fmt.Sprintf("telegram error: %s message_length=%d", label, length)
+}
+
+// mustJSONDecodeError returns a genuine encoding/json decode
+// error, the leaf the library wraps in its decode formats
+// (raw_request.go, get_updates.go).
+func mustJSONDecodeError(t *testing.T) error {
+	t.Helper()
+	var dst struct {
+		UpdateID int64 `json:"update_id"`
+	}
+	err := json.Unmarshal([]byte(`{"update_id":`), &dst)
+	if err == nil {
+		t.Fatal("json.Unmarshal(truncated object) = nil; want a decode error")
+	}
+	return err
+}
+
+func TestSummarizeErrorClasses(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	decodeErr := mustJSONDecodeError(t)
+	responseDecode := func() error {
+		return fmt.Errorf("error decode response body for method %s, %s, %w", "getUpdates", `{"ok":true,"result":[]}`, decodeErr)
+	}
+	timeoutURL := func() error {
+		return &url.Error{
+			Op:  "Post",
+			URL: "https://api.telegram.org/bot" + fakeToken + "/getUpdates",
+			Err: &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded},
+		}
+	}
+	dnsURL := func() error {
+		return &url.Error{
+			Op:  "Post",
+			URL: "https://api.telegram.org/",
+			Err: &net.DNSError{Err: "no such host", Name: "api.telegram.org", IsNotFound: true},
+		}
+	}
+	refusedURL := func() error {
+		return &url.Error{
+			Op:  "dial",
+			URL: "",
+			Err: &net.OpError{
+				Op:   "dial",
+				Net:  "tcp",
+				Addr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 443},
+				Err:  &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED},
+			},
+		}
+	}
+	cases := []struct {
+		name string
+		want string
+		err  func(b *Bot) error
+	}{
+		{"too many requests typed", "too many requests", func(*Bot) error {
+			return &bot.TooManyRequestsError{Message: "too many requests, retry after 5", RetryAfter: 5}
+		}},
+		{"too many requests sentinel wrap", "too many requests", func(*Bot) error {
+			return fmt.Errorf("%w, retry after 5", bot.ErrorTooManyRequests)
+		}},
+		{"too many requests scrubbed", "too many requests", func(b *Bot) error {
+			return b.scrubErr(&bot.TooManyRequestsError{Message: "too many requests, " + fakeToken, RetryAfter: 5})
+		}},
+		{"bad request sentinel", "bad request", func(*Bot) error {
+			return fmt.Errorf("%w, can't parse entities", bot.ErrorBadRequest)
+		}},
+		{"bad request scrubbed", "bad request", func(b *Bot) error {
+			return b.scrubErr(fmt.Errorf("%w, Bad Request: %s", bot.ErrorBadRequest, fakeToken))
+		}},
+		{"bad request migrate error", "bad request", func(*Bot) error {
+			return &bot.MigrateError{Message: "bad request: group migrated", MigrateToChatID: -100123}
+		}},
+		{"forbidden sentinel", "forbidden", func(*Bot) error {
+			return fmt.Errorf("%w, bot was blocked by the user", bot.ErrorForbidden)
+		}},
+		{"unauthorized sentinel", "unauthorized", func(*Bot) error {
+			return fmt.Errorf("%w, Unauthorized", bot.ErrorUnauthorized)
+		}},
+		{"not found sentinel", "not found", func(*Bot) error {
+			return fmt.Errorf("%w, chat not found", bot.ErrorNotFound)
+		}},
+		{"conflict sentinel", "conflict", func(*Bot) error {
+			return fmt.Errorf("%w, terminated by other getUpdates request", bot.ErrorConflict)
+		}},
+		{"response decode body", "response decode failure", func(*Bot) error { return responseDecode() }},
+		{"response decode body wrapped by poll loop", "response decode failure", func(*Bot) error {
+			return fmt.Errorf("error get updates, %w", responseDecode())
+		}},
+		{"response decode body scrubbed", "response decode failure", func(b *Bot) error {
+			return b.scrubErr(responseDecode())
+		}},
+		{"response decode result", "response decode failure", func(*Bot) error {
+			return fmt.Errorf("error decode response result for method %s, %w", "sendMessage", decodeErr)
+		}},
+		{"response read body beats eof", "response decode failure", func(*Bot) error {
+			return fmt.Errorf("error read response body for method %s, %w", "getUpdates", io.ErrUnexpectedEOF)
+		}},
+		{"update decode", "update decode failure", func(*Bot) error {
+			return fmt.Errorf("error decode update, %s, %w", `{"update_id":42}`, decodeErr)
+		}},
+		{"update decode skipped", "update decode failure", func(*Bot) error {
+			return fmt.Errorf("error decode update %d, skipped, %s, %w", 42, `{"update_id":42}`, decodeErr)
+		}},
+		{"timeout op error", "timeout", func(*Bot) error { return timeoutURL() }},
+		{"timeout wrapped do request", "timeout", func(*Bot) error {
+			return fmt.Errorf("error do request for method %s, %w", "getUpdates", timeoutURL())
+		}},
+		{"timeout scrubbed fallback", "timeout", func(b *Bot) error {
+			return b.scrubErr(fmt.Errorf("error do request for method %s, %w", "sendMessage", timeoutURL()))
+		}},
+		{"dns error", "dns", func(*Bot) error { return dnsURL() }},
+		{"dns wrapped do request", "dns", func(*Bot) error {
+			return fmt.Errorf("error do request for method %s, %w", "getMe", dnsURL())
+		}},
+		{"dns scrubbed fallback", "dns", func(b *Bot) error {
+			return b.scrubErr(fmt.Errorf("error do request for method %s, %w", "getMe", dnsURL()))
+		}},
+		{"tls record header", "tls", func(*Bot) error {
+			return &url.Error{
+				Op:  "Post",
+				URL: "https://api.telegram.org/",
+				Err: tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"},
+			}
+		}},
+		{"tls bad certificate text", "tls", func(*Bot) error {
+			return &url.Error{Op: "Post", URL: "https://api.telegram.org/", Err: errors.New("tls: bad certificate")}
+		}},
+		{"connection refused errno", "connection refused", func(*Bot) error {
+			return fmt.Errorf("dial tcp: %w", syscall.ECONNREFUSED)
+		}},
+		{"connection refused url wrapped", "connection refused", func(*Bot) error { return refusedURL() }},
+		{"connection refused scrubbed fallback", "connection refused", func(b *Bot) error {
+			return b.scrubErr(fmt.Errorf("error do request for method %s, %w", "sendMessage", refusedURL()))
+		}},
+		{"connection reset errno", "connection reset", func(*Bot) error {
+			return fmt.Errorf("read tcp: %w", syscall.ECONNRESET)
+		}},
+		{"unreachable host", "unreachable", func(*Bot) error {
+			return fmt.Errorf("dial: %w", syscall.EHOSTUNREACH)
+		}},
+		{"unreachable network", "unreachable", func(*Bot) error {
+			return fmt.Errorf("dial: %w", syscall.ENETUNREACH)
+		}},
+		{"eof", "eof", func(*Bot) error {
+			return fmt.Errorf("reading response: %w", io.EOF)
+		}},
+		{"unexpected eof", "eof", func(*Bot) error { return io.ErrUnexpectedEOF }},
+		{"context canceled", "context canceled", func(*Bot) error { return context.Canceled }},
+		{"context canceled wrapped", "context canceled", func(*Bot) error {
+			return fmt.Errorf("poll: %w", context.Canceled)
+		}},
+		{"context canceled in url error", "context canceled", func(*Bot) error {
+			return &url.Error{Op: "Post", URL: "https://api.telegram.org/", Err: context.Canceled}
+		}},
+		{"context deadline exceeded", "context deadline exceeded", func(*Bot) error {
+			return context.DeadlineExceeded
+		}},
+		{"context deadline exceeded from expired ctx", "context deadline exceeded", func(*Bot) error {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+			defer cancel()
+			time.Sleep(time.Millisecond)
+			return ctx.Err()
+		}},
+		{"http 5xx", "http 5xx", func(*Bot) error {
+			return fmt.Errorf("error response from telegram for method %s, %d %s", "getUpdates", 500, "Internal Server Error")
+		}},
+		{"http 5xx wrapped by poll loop", "http 5xx", func(*Bot) error {
+			return fmt.Errorf("error get updates, %w", fmt.Errorf("error response from telegram for method %s, %d %s", "getUpdates", 503, "Service Unavailable"))
+		}},
+		{"http 4xx", "http 4xx", func(*Bot) error {
+			return fmt.Errorf("error response from telegram for method %s, %d %s", "sendMessage", 422, "Unprocessable Entity")
+		}},
+		{"unclassified plain", "unclassified", func(*Bot) error {
+			return errors.New("something completely unexpected")
+		}},
+		{"unclassified nil", "unclassified", func(*Bot) error { return nil }},
+		{"unclassified scrubbed unknown", "unclassified", func(b *Bot) error {
+			return b.scrubErr(errors.New("weird failure"))
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.err(tb.bot)
+			got := tb.bot.summarizeError(err)
+			if want := expectedSummary(tc.want, err); got != want {
+				t.Errorf("summarizeError = %q; want %q (label %q)", got, want, tc.want)
+			}
+			if strings.Contains(got, "method=") {
+				t.Errorf("summarizeError emitted a method= field in %q", got)
+			}
+			if err != nil && strings.Contains(got, fakeToken) {
+				t.Errorf("summarizeError kept the fixture token in %q", got)
+			}
+			if len(got) > 400 {
+				t.Errorf("summarizeError output is %d bytes; want length-bounded", len(got))
+			}
+		})
+	}
+}
+
+// TestSummarizeErrorHostileDescriptionNotDecode is the
+// negative case for typed classification: a 400-rune server
+// description that merely contains the decode phrase must
+// neither select a decode class nor leak any fragment. The
+// first error carries the decode phrase after a sentinel, so
+// the sentinel wins; the second carries it with no chain at
+// all, so only an anchored chain marker could select decode
+// — and there is none. (The string-only summarize keeps the
+// legacy substring behaviour for panic values; that split is
+// pinned by TestSummarizeLoop4NoMethodField.)
+func TestSummarizeErrorHostileDescriptionNotDecode(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	phrase := "decode response body"
+	desc := strings.Repeat("D", 100) + " " + phrase + " " + fakeToken + " " +
+		strings.Repeat("E", 400-100-1-len(phrase)-1-len(fakeToken)-1)
+	if n := utf8.RuneCountInString(desc); n != 400 {
+		t.Fatalf("description is %d runes; want exactly 400", n)
+	}
+	err := fmt.Errorf("%w, %s", bot.ErrorBadRequest, desc)
+	got := tb.bot.summarizeError(err)
+	if want := expectedSummary("bad request", err); got != want {
+		t.Errorf("summarizeError(hostile 400) = %q; want %q", got, want)
+	}
+	if strings.Contains(got, phrase) {
+		t.Errorf("summarizeError leaked the decode phrase in %q", got)
+	}
+	if strings.Contains(got, fakeToken) {
+		t.Errorf("summarizeError kept the fixture token in %q", got)
+	}
+	plain := errors.New(strings.Repeat("z", 100) + " decode response body for method getUpdates, {\"ok\":true}" + strings.Repeat("z", 200))
+	gotPlain := tb.bot.summarizeError(plain)
+	if want := expectedSummary("unclassified", plain); gotPlain != want {
+		t.Errorf("summarizeError(unanchored decode phrase) = %q; want %q", gotPlain, want)
+	}
+	if strings.Contains(gotPlain, phrase) {
+		t.Errorf("summarizeError leaked the decode phrase in %q", gotPlain)
+	}
+}
+
+// TestSummarizeErrorHugeInputBounded mirrors
+// TestSummarizeHostileBodyBoundedWork for the typed path: a
+// multi-megabyte error must finish in seconds, emit only a
+// short summary, and never select a class from text past the
+// bounded prefix.
+func TestSummarizeErrorHugeInputBounded(t *testing.T) {
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	inputs := []struct {
+		name string
+		err  error
+		want string // fragment that must be absent
+	}{
+		{"plain 5MB", errors.New(strings.Repeat("R6D-CPU-MARKER-", 350000)), "R6D-CPU-MARKER-"},
+		{"late decode phrase", errors.New(strings.Repeat("q", 100000) + " decode response body " + strings.Repeat("q", 5000000-100000-22)), "decode response body"},
+	}
+	for _, tc := range inputs {
+		start := time.Now()
+		got := tb.bot.summarizeError(tc.err)
+		if elapsed := time.Since(start); elapsed > 10*time.Second {
+			t.Errorf("summarizeError(%s) took %v; want bounded work (<10s)", tc.name, elapsed)
+		}
+		if want := expectedSummary("unclassified", tc.err); got != want {
+			t.Errorf("summarizeError(%s) = %q; want %q", tc.name, got, want)
+		}
+		if strings.Contains(got, tc.want) {
+			t.Errorf("summarizeError(%s) kept an input fragment in %q", tc.name, got)
+		}
+		if len(got) > 400 {
+			t.Errorf("summarizeError(%s) output is %d bytes; want length-bounded", tc.name, len(got))
+		}
+	}
+}
+
+// TestSummarizeUnclassifiedFallback pins the end of the ""
+// branch: the string path never emits a labelless summary
+// either.
+func TestSummarizeUnclassifiedFallback(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	for _, in := range []string{"totally unknown shape", ""} {
+		got := tb.bot.summarize(in)
+		want := "telegram error: unclassified message_length=" + fmt.Sprint(utf8.RuneCountInString(in))
+		if got != want {
+			t.Errorf("summarize(%q) = %q; want %q", in, got, want)
+		}
+		if strings.Contains(got, "telegram error: message_length=") {
+			t.Errorf("summarize(%q) emitted the old labelless shape %q", in, got)
+		}
 	}
 }
 
