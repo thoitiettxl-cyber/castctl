@@ -44,7 +44,7 @@ import (
 // has not wired yet; tapping one gets the deferred reply from
 // dispatch, which says so plainly.
 const telegramBotHelpText = `<b>Muse on Telegram</b>
-Type anything to talk to Muse in the current conversation. Send a photo or file to put it in Muse's System Files (<code>telegram-inbox/</code>) and tell Muse about it.
+Type anything to talk to Muse in the current conversation.
 
 <b>Conversation</b>
 /chats open another chat · /main · /new [title]

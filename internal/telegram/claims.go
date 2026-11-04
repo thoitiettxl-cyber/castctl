@@ -203,7 +203,7 @@ func (b *Bot) ApproveForever(ctx context.Context, items []Approval) []string {
 		}
 		if err := b.decider.Decide(ctx, w.a.ID, decision); err != nil {
 			b.logger.Warn("telegram auto-decide failed; claim released",
-				"approval_id", b.logApprovalID(w.a.ID), "err", b.summarize(err.Error()))
+				"approval_id", b.logApprovalID(w.a.ID), "err", b.summarizeError(err))
 			b.failClaim(w.a.ID, w.claim)
 			continue
 		}
@@ -374,7 +374,7 @@ func (b *Bot) NotifyPending(ctx context.Context, chatID int64, items []Approval)
 				title = d.ID
 			}
 			if _, err := b.Send(ctx, chatID, "✅ Auto-approved ("+label+"): "+EscapeText(title), SendOptions{Silent: true}); err != nil {
-				b.logger.Warn("telegram auto-approval notify failed", "err", b.summarize(err.Error()))
+				b.logger.Warn("telegram auto-approval notify failed", "err", b.summarizeError(err))
 			}
 		}
 		var undecidable []Approval
@@ -405,7 +405,7 @@ func (b *Bot) NotifyPending(ctx context.Context, chatID int64, items []Approval)
 		b.claimsMu.Unlock()
 		markup := b.ApprovalMarkup(d, ResumeTriple{})
 		if _, err := b.Send(ctx, chatID, ApprovalText(d), SendOptions{Markup: markup}); err != nil {
-			b.logger.Warn("telegram pending approval notify failed", "err", b.summarize(err.Error()))
+			b.logger.Warn("telegram pending approval notify failed", "err", b.summarizeError(err))
 		}
 	}
 	return nil

@@ -12,9 +12,14 @@ package telegram
 
 import (
 	"context"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -468,5 +473,161 @@ func TestLogApprovalIDGate(t *testing.T) {
 		if got := tb.bot.logApprovalID(tc.in); got != tc.want {
 			t.Errorf("logApprovalID(%q) = %q; want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// The decider-failure warn inside ApproveForever (claims.go:206)
+// must keep the error class: a typed transport/context error
+// reaching the log through summarizeError renders its class
+// label, never unclassified. Pre-fix (summarize on the error
+// string) both shapes render unclassified.
+func TestApproveForeverDecideTransportErrorKeepsClass(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	cases := []struct {
+		name  string
+		err   error
+		class string
+	}{
+		{
+			name: "connection refused",
+			err: &url.Error{
+				Op:  "Post",
+				URL: srv.url() + "/bot" + fakeToken + "/sendMessage",
+				Err: &net.OpError{
+					Op:  "dial",
+					Net: "tcp",
+					Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED},
+				},
+			},
+			class: "connection refused",
+		},
+		{
+			name:  "deadline exceeded",
+			err:   context.DeadlineExceeded,
+			class: "context deadline exceeded",
+		},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tb := newTestBot(t, srv, func(s *Settings) { s.AutoApprove = true })
+			tb.decider.err = tc.err
+			before := len(tb.logBuf.String())
+			if got := tb.bot.ApproveForever(context.Background(), []Approval{foreverApproval("appr-f1-" + itoa(i))}); len(got) != 0 {
+				t.Errorf("done = %v; want empty (claim released after failed decide)", got)
+			}
+			slice := tb.logBuf.String()[before:]
+			if !strings.Contains(slice, "telegram auto-decide failed; claim released") {
+				t.Errorf("log slice lacks the auto-decide warn line: %q", slice)
+			}
+			if !strings.Contains(slice, "telegram error: "+tc.class) {
+				t.Errorf("log slice lacks class %q: %q", tc.class, slice)
+			}
+			if strings.Contains(slice, "unclassified") {
+				t.Errorf("log slice contains unclassified: %q", slice)
+			}
+		})
+	}
+}
+
+// breakBotDialing swaps the test bot's shared transport dial
+// function (after construction, so getMe already succeeded)
+// for one that always fails with ECONNREFUSED, and closes the
+// transport's idle connections: without the close, Send would
+// reuse the keep-alive connection getMe pooled and never dial.
+// The transport pointer is shared by BoundClient with the
+// bot's poll and upload clients, so subsequent Send calls fail
+// below HTTP with a genuine dial chain.
+func breakBotDialing(client *http.Client) {
+	tr := client.Transport.(*http.Transport)
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return nil, &net.OpError{Op: "dial", Net: "tcp",
+			Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}
+	}
+	tr.CloseIdleConnections()
+}
+
+// The auto-approval notify warn (claims.go:377) must keep the
+// error class even though Send scrubs the typed chain first:
+// the class survives via the string fallback on the scrubbed
+// text, so the test uses a genuine dial failure, not a
+// scripted HTTP status.
+func TestNotifyPendingAutoApprovalNotifyKeepsClass(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	var client *http.Client
+	tb := newTestBot(t, srv, func(s *Settings) {
+		s.AutoApprove = true
+		client = s.HTTPClient
+	})
+	breakBotDialing(client)
+	before := len(tb.logBuf.String())
+	if err := tb.bot.NotifyPending(context.Background(), 111, []Approval{foreverApproval("appr-f1-b")}); err != nil {
+		t.Fatalf("NotifyPending = %v; want nil (notify failures are warn-only)", err)
+	}
+	slice := tb.logBuf.String()[before:]
+	if !strings.Contains(slice, "telegram auto-approval notify failed") {
+		t.Errorf("log slice lacks the auto-approval notify warn line: %q", slice)
+	}
+	if !strings.Contains(slice, "telegram error: connection refused") {
+		t.Errorf("log slice lacks class connection refused: %q", slice)
+	}
+	if strings.Contains(slice, "unclassified") {
+		t.Errorf("log slice contains unclassified: %q", slice)
+	}
+}
+
+// The pending-approval notify warn (claims.go:408) must keep
+// the error class on the same genuine dial failure: the item
+// is undecidable (deny only), so the second NotifyPending
+// loop sends it with markup and the dial fails.
+func TestNotifyPendingPendingNotifyKeepsClass(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	var client *http.Client
+	tb := newTestBot(t, srv, func(s *Settings) {
+		client = s.HTTPClient
+	})
+	breakBotDialing(client)
+	before := len(tb.logBuf.String())
+	if err := tb.bot.NotifyPending(context.Background(), 111, []Approval{denyOnlyApproval("appr-f1-c")}); err != nil {
+		t.Fatalf("NotifyPending = %v; want nil (notify failures are warn-only)", err)
+	}
+	slice := tb.logBuf.String()[before:]
+	if !strings.Contains(slice, "telegram pending approval notify failed") {
+		t.Errorf("log slice lacks the pending notify warn line: %q", slice)
+	}
+	if !strings.Contains(slice, "telegram error: connection refused") {
+		t.Errorf("log slice lacks class connection refused: %q", slice)
+	}
+	if strings.Contains(slice, "unclassified") {
+		t.Errorf("log slice contains unclassified: %q", slice)
+	}
+}
+
+// Probe: does context.DeadlineExceeded survive the Send path
+// (expired-deadline context) with its phrase in the scrubbed
+// text, so the notify warn keeps the class? Kept only if this
+// test runs green; it discriminates old vs new code the same
+// way the ECONNREFUSED Send tests do.
+func TestNotifyPendingNotifyDeadlineExceededKeepsClass(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, func(s *Settings) { s.AutoApprove = true })
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	before := len(tb.logBuf.String())
+	if err := tb.bot.NotifyPending(expired, 111, []Approval{foreverApproval("appr-f1-d")}); err != nil {
+		t.Fatalf("NotifyPending = %v; want nil (notify failures are warn-only)", err)
+	}
+	slice := tb.logBuf.String()[before:]
+	if !strings.Contains(slice, "telegram auto-approval notify failed") {
+		t.Errorf("log slice lacks the auto-approval notify warn line: %q", slice)
+	}
+	if !strings.Contains(slice, "telegram error: context deadline exceeded") {
+		t.Errorf("log slice lacks class context deadline exceeded: %q", slice)
+	}
+	if strings.Contains(slice, "unclassified") {
+		t.Errorf("log slice contains unclassified: %q", slice)
 	}
 }

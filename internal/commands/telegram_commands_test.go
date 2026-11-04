@@ -126,6 +126,30 @@ func TestTelegramDispatchHelpStartUnknownDeferred(t *testing.T) {
 	}
 }
 
+func TestTelegramHelpOmitsInboxClaim(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	h, cancel, codeCh := runTelegramBot(t, gw, []string{
+		telegramUpdate(1, 111, "/help"),
+	})
+	defer cancel()
+	waitFor(t, "1 command reply", func() bool { return len(sendsOf(h)) >= 1 })
+	cancel()
+	if code := <-codeCh; code != 130 {
+		t.Errorf("run code = %d; want 130", code)
+	}
+	sends := sendsOf(h)
+	if len(sends) != 1 {
+		t.Fatalf("sends = %d, want 1: %q", len(sends), sends)
+	}
+	if strings.Contains(sends[0], "telegram-inbox") {
+		t.Errorf("/help advertises telegram-inbox: %q", sends[0])
+	}
+	if strings.Contains(sends[0], "Send a photo or file") {
+		t.Errorf("/help advertises sending a photo/file: %q", sends[0])
+	}
+}
+
 func TestTelegramStatusReport(t *testing.T) {
 	t.Parallel()
 	gw := newTelegramTurnFakeGateway()
