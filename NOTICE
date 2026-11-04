@@ -195,7 +195,10 @@ mistake these influences for vendored code.
    command (`cmd_files`) and its download callback (`cb_dl`)
    are reimplemented in `internal/commands/telegram_commands.go`,
    and the 6-file-per-turn cap (`MAX_FILES_PER_TURN`) in
-   `internal/commands/telegram_turn.go`;
+   `internal/commands/telegram_turn.go`, and inbound user
+   media (`media_of`/`upload_and_send`) in
+   `internal/telegram/inbound.go` with the commands-side
+   handler in `internal/commands/telegram_commands.go`;
    see docs/provenance.md §5.
    (The byte-identical descriptor assets are listed in (a).)
    License name: MIT.
