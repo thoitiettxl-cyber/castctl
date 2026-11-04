@@ -1,0 +1,9 @@
+[package]
+name = "castctl-tg-files"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Telegram file-kind and doc-name logic ported from castctl's Go internal/telegram/files.go, pure part only (M1)"
+
+[dependencies]
+regex.workspace = true

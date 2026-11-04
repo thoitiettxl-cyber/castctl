@@ -1,0 +1,9 @@
+[package]
+name = "castctl-tg-text"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Telegram message-text formatting ported from castctl's Go internal/telegram/text.go (M1, pure logic only)"
+
+[dependencies]
+regex.workspace = true
