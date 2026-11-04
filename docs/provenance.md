@@ -1014,7 +1014,7 @@ deliberate [DEVIATION], brief-pinned, to catch typos
 without losing functionality; `find` arguments are never
 path-checked, as upstream); gateway and auth errors render
 as the bot's summarised class/length replies, NOT
-upstream's `str(e)[:300]`; the `fs_rm` callback adds two
+upstream's `str(e)[:600]`; the `fs_rm` callback adds two
 typed fields to `CallbackEntry` (path + recursive flag;
 Cancel reuses `noop`); re-tapping Yes re-deletes (entries
 are never consumed); the delete-confirm Edit passes nil

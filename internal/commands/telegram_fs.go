@@ -197,11 +197,12 @@ func (h *telegramCmdHandler) fs(ctx context.Context, chatID int64, arg string) e
 	}
 
 	// Arity, checked before any gateway call: ls/tree take an
-	// optional path; stat/cat/get/mkdir/rm need exactly one
-	// positional; mv needs exactly two.
+	// optional path; stat/cat/get/mkdir/rm guard on a nonempty
+	// path (upstream `if op == ... and path`) and IGNORE extra
+	// positionals; mv needs exactly two.
 	switch op {
 	case "stat", "cat", "get", "mkdir", "rm":
-		if len(positionals) != 1 {
+		if path == "" {
 			return h.fsUsageReply(ctx, chatID)
 		}
 	case "mv":

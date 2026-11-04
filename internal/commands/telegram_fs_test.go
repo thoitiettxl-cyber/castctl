@@ -949,3 +949,165 @@ func TestTelegramFSStatEscapesKeys(t *testing.T) {
 		t.Errorf("send = %q; want the hostile key escaped inside one <pre>", sends[0])
 	}
 }
+
+// TestTelegramFSStatExtraPositional pins the upstream arity
+// rule (D16/F1): single-path ops guard on a nonempty path
+// and IGNORE extra positionals — /fs stat a b stats a.
+func TestTelegramFSStatExtraPositional(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.fsStatScript = map[string]map[string]any{
+		"a.txt": {"kind": "file", "size": 12, "name": "a.txt"},
+	}
+	h, cancel := runReadBot(t, gw)
+	defer cancel()
+	sends := sendFS(t, h, "/fs stat a.txt extra junk")
+	want := "<pre>{\n \"kind\": \"file\",\n \"name\": \"a.txt\",\n \"size\": 12\n}</pre>"
+	if len(sends) != 1 || sends[0] != want {
+		t.Fatalf("sends = %q; want [%q] (the stat dump for a.txt, not usage)", sends, want)
+	}
+	if calls := gw.fsStatCallsSeen(); len(calls) != 1 || calls[0] != "a.txt" {
+		t.Errorf("fs.stat paths = %q; want [\"a.txt\"]", calls)
+	}
+}
+
+// TestTelegramFSEmptyPathUsage pins the other half of the
+// upstream rule (D16/F1): a present-but-empty path is falsy,
+// so /fs cat "" and /fs rm "" answer usage and never reach
+// the gateway.
+func TestTelegramFSEmptyPathUsage(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.fsReadScript = map[string][]byte{"x": []byte("x")}
+	h, cancel := runReadBot(t, gw)
+	defer cancel()
+	sends := sendFS(t, h, `/fs cat ""`)
+	if len(sends) != 1 || sends[0] != fsUsage {
+		t.Fatalf("sends = %q; want [%q]", sends, fsUsage)
+	}
+	if n := len(gw.fsReadCallsSeen()); n != 0 {
+		t.Fatalf("fs.read calls = %d; want 0 (empty path never reaches the gateway)", n)
+	}
+
+	h2, cancel2 := runReadBot(t, gw)
+	defer cancel2()
+	sends = sendFS(t, h2, `/fs rm ""`)
+	if len(sends) != 1 || sends[0] != fsUsage {
+		t.Fatalf("sends = %q; want [%q]", sends, fsUsage)
+	}
+	if n := len(gw.fsDeleteCallsSeen()); n != 0 {
+		t.Fatalf("fs.delete calls = %d; want 0 (empty path never prompts)", n)
+	}
+}
+
+// TestTelegramFSRmExtraPositional pins the upstream arity
+// rule for rm (D16/F1): extra positionals are ignored —
+// /fs rm a b prompts for a and deletes nothing yet.
+func TestTelegramFSRmExtraPositional(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	h, cancel := runReadBot(t, gw)
+	defer cancel()
+	sends := sendFS(t, h, "/fs rm a b")
+	want := "Delete <code>/a</code>?"
+	if len(sends) != 1 || sends[0] != want {
+		t.Fatalf("sends = %q; want [%q] (the prompt for a, not usage)", sends, want)
+	}
+	if n := len(gw.fsDeleteCallsSeen()); n != 0 {
+		t.Fatalf("fs.delete calls = %d; want 0 (prompt only, no delete yet)", n)
+	}
+}
+
+// TestTelegramFSReplyLongRuneBoundary pins the replyLong gate
+// in RUNES at exactly the threshold (D17/F2, G1): a multibyte
+// listing of exactly 3800 runes stays a <pre> message (0
+// documents), and 3801 runes becomes a document captioned with
+// the RUNE count. A byte-based gate or a >= gate would route
+// the 3800-rune listing to a document.
+func TestTelegramFSReplyLongRuneBoundary(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	// Text: "/\n📄 " + name + "  1B" = 1+1+1+1+3792+2+2 = 3800 runes,
+	// 7592 bytes. The wrapped <pre> send is 3811 runes, so the
+	// bot's splitter delivers it in two pieces; join them.
+	name := strings.Repeat("é", 3792)
+	gw.fsListScript = map[string][]any{
+		"": {fsEntry(name, "file", fsSize(1))},
+	}
+	h, cancel := runReadBot(t, gw)
+	defer cancel()
+	h.fake.setBatches([]string{telegramUpdate(1, 111, "/fs ls")})
+	waitFor(t, "2 sends", func() bool { return len(h.fake.sendsSeen()) >= 2 })
+	joined := strings.Join(h.fake.sendsSeen(), "")
+	text := "/\n📄 " + name + "  1B"
+	if utf8.RuneCountInString(text) != 3800 {
+		t.Fatalf("listing is %d runes; want exactly 3800 (test construction bug)", utf8.RuneCountInString(text))
+	}
+	want := "<pre>" + text + "</pre>"
+	if joined != want {
+		t.Fatalf("joined sends = %d runes; want the one <pre> message with 3800 runes", utf8.RuneCountInString(joined))
+	}
+	if n := len(h.fake.documentsSeen()); n != 0 {
+		t.Fatalf("documents = %d; want 0 (exactly 3800 runes is not over the threshold)", n)
+	}
+
+	// 3801 runes: one document, caption in runes.
+	name = strings.Repeat("é", 3793)
+	gw2 := newTelegramTurnFakeGateway()
+	gw2.fsListScript = map[string][]any{
+		"": {fsEntry(name, "file", fsSize(1))},
+	}
+	h2, cancel2 := runReadBot(t, gw2)
+	defer cancel2()
+	docs := waitForDocs(t, h2, "/fs ls", 1)
+	if len(h2.fake.sendsSeen()) != 0 {
+		t.Fatalf("sends = %q; want none (3801 runes goes to a document)", h2.fake.sendsSeen())
+	}
+	if len(docs) != 1 || docs[0].Filename != "ls.txt" || docs[0].Caption != "ls.txt (3801 chars)" {
+		t.Fatalf("documents = %+v; want one {ls.txt, caption \"ls.txt (3801 chars)\"}", docs)
+	}
+}
+
+// TestTelegramFSMvRfNoOverwrite pins the mv overwrite gate
+// (D18/G2): -rf (and -fr) are NOT -f, so the recorded rename
+// call must carry overwrite=false.
+func TestTelegramFSMvRfNoOverwrite(t *testing.T) {
+	t.Parallel()
+	for _, flag := range []string{"-rf", "-fr"} {
+		gw := newTelegramTurnFakeGateway()
+		h, cancel := runReadBot(t, gw)
+		sends := sendFS(t, h, "/fs mv "+flag+" a b")
+		want := "Moved <code>/a</code> → <code>/b</code>"
+		if len(sends) != 1 || sends[0] != want {
+			t.Fatalf("%s: sends = %q; want [%q]", flag, sends, want)
+		}
+		calls := gw.fsRenameCallsSeen()
+		if len(calls) != 1 || calls[0] != (fsRenameCall{Source: "a", Destination: "b", CreateParent: true}) {
+			t.Errorf("%s: fs.rename calls = %+v; want one {a→b, overwrite=false, create_parent=true}", flag, calls)
+		}
+		cancel()
+	}
+}
+
+// TestTelegramFSCatBinaryWindowBytes pins the cat binary
+// window in BYTES (D19/G3): a NUL past byte 8192 but within
+// the first 8192 RUNES must NOT take the binary branch — the
+// content takes the text path (over 3800 runes, so a document
+// captioned /{path}, not (binary)).
+func TestTelegramFSCatBinaryWindowBytes(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	// 5000 é (10000 bytes) + NUL at byte offset 10000 + "x":
+	// 5002 runes, NUL past byte 8192 but within rune 8192.
+	data := append([]byte(strings.Repeat("é", 5000)), 0, 'x')
+	gw.fsReadScript = map[string][]byte{"nul.bin": data}
+	h, cancel := runReadBot(t, gw)
+	defer cancel()
+	docs := waitForDocs(t, h, "/fs cat nul.bin", 1)
+	if len(h.fake.sendsSeen()) != 0 {
+		t.Fatalf("sends = %q; want none (over-long text goes to a document)", h.fake.sendsSeen())
+	}
+	if len(docs) != 1 || docs[0].Filename != "nul.bin" || docs[0].Caption != "/nul.bin" || docs[0].Size != int64(len(data)) {
+		t.Fatalf("documents = %+v; want one {nul.bin, %d bytes, caption \"/nul.bin\"} (text branch, not binary)", docs, len(data))
+	}
+}
