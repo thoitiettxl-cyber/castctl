@@ -251,9 +251,15 @@ pub fn split_text(text: &str) -> Vec<String> {
 /// limits 1-2 when a cut lands at 0 with a space/letter-led
 /// remainder); no test pins that behaviour. The cut-at-zero guard
 /// below forces a hard cut ONLY when the remainder does not start
-/// with '\n' — the one non-progressing case. When the remainder
-/// starts with '\n', Go terminates (empty piece + newline strip)
-/// and the port reproduces its trace exactly.
+/// with '\n' — the per-iteration non-progressing case: with
+/// `cut == 0` Go's next remainder is `lstripNewlines(r)`, which
+/// is identity iff the remainder does not start with `'\n'`. A
+/// `'\n'`-led remainder progresses on that iteration only (the
+/// strip removes at least one `'\n'`); overall termination still
+/// fails when the strip exposes a space-led remainder (Go hangs
+/// on `"\n ABCDEF"` at limit 2), and the port terminates those
+/// with hard-cut pieces. On terminating `'\n'`-led traces the
+/// port reproduces Go's trace exactly.
 pub(crate) fn split_text_limit(text: &str, limit: usize) -> Vec<String> {
     if limit == 0 {
         return vec![text.to_string()];
@@ -277,10 +283,13 @@ pub(crate) fn split_text_limit(text: &str, limit: usize) -> Vec<String> {
             // loops forever on a space/letter-led remainder
             // (empty piece, same remainder: the newline strip
             // is identity). Force the hard cut only in that
-            // non-progressing case; a '\n'-led remainder
-            // progresses in Go and keeps Go's empty-piece
-            // trace here (cut == 0 is only accepted by Go
-            // when limit < 3).
+            // per-iteration non-progressing case; a '\n'-led
+            // remainder progresses on that iteration only in
+            // Go (the strip removes at least one '\n'), which
+            // does not guarantee overall termination when the
+            // strip exposes a space-led remainder. Terminating
+            // '\n'-led traces keep Go's empty-piece trace here
+            // (cut == 0 is only accepted by Go when limit < 3).
             limit
         } else {
             cut

@@ -141,11 +141,17 @@ text, and no preview/snippet variant exists.
   the Go probe hung 56 s on `splitTextLimit("a b c d e f g h", 1)`
   and was terminated). For limits 1–2 the Rust cutter forces a hard
   cut when the break search lands at 0 ONLY if the remainder does
-  not start with `'\n'` (Round 1 fix F2): that is the one case
-  where Go loops forever with cut == 0 (the newline strip is
-  identity on a space/letter-led remainder). When the remainder
-  starts with `'\n'`, Go terminates (empty piece + newline strip)
-  and the port reproduces its trace exactly
+  not start with `'\n'` (Round 1 fix F2): the guard fires iff that
+  cut-0 iteration would repeat the same remainder — with `cut == 0`
+  Go's next remainder is `lstripNewlines(r)`, identity iff the
+  remainder does not start with `'\n'`. A `'\n'`-led remainder
+  therefore progresses on that iteration only (the strip removes
+  at least one `'\n'`); it does not guarantee overall termination,
+  because the strip can expose a space-led remainder that then
+  loops — Go hangs on `"\n ABCDEF"` / `"\n AB"` at limit 2, and
+  the port terminates those with hard-cut pieces (documented
+  deviation class, no terminating Go trace to match). On
+  terminating `'\n'`-led traces the port reproduces Go exactly
   (`split_text_limit("\nABCDEF", 2) == ["", "AB", "CD", "EF"]`).
   No Go case pins either behaviour.
 - **Chain traversal contracts (Round 1 fixes F3a/F3b)** — the
