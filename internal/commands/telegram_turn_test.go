@@ -81,6 +81,10 @@ type telegramTurnFakeGateway struct {
 	downloads     map[string][]byte
 	downloadErr   error
 	downloadCalls []string
+	// historyLimits records the limit of each chat.history
+	// call, in order, so tests can prove the window a caller
+	// requested (e.g. /files reads 40).
+	historyLimits []int
 }
 
 // decideRecord is one egress.approval.decide call.
@@ -128,9 +132,15 @@ func (f *telegramTurnFakeGateway) CallJSON(ctx context.Context, method string, o
 			limit, _ = body["limit"].(int)
 		}
 		events := f.events
-		if limit == 1 && len(events) > 0 {
-			events = events[len(events)-1:]
+		// Honor the requested window: the last `limit`
+		// events, oldest-first (limit <= 0 means all).
+		// Production history reads are windowed; a fake
+		// that ignored the limit could not prove which
+		// window a caller asked for.
+		if limit > 0 && limit < len(events) {
+			events = events[len(events)-limit:]
 		}
+		f.historyLimits = append(f.historyLimits, limit)
 		out := make([]any, len(events))
 		for i, ev := range events {
 			out[i] = ev

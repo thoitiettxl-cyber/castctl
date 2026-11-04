@@ -107,6 +107,9 @@ type cmdFakeTelegram struct {
 	// true, makes sendPhoto answer 400.
 	mediaSends []cmdFakeMediaSend
 	failPhoto  bool
+	// answers records each answerCallbackQuery call's text,
+	// in order ("" when the bot answered with no text).
+	answers []string
 }
 
 // cmdFakeMediaSend is one sendPhoto/sendVideo/sendAudio call
@@ -267,6 +270,15 @@ func (f *cmdFakeTelegram) handler(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":100,"chat":{"id":500,"type":"private"},"date":0,"text":"ok"}}`)
 	case "answerCallbackQuery":
+		text := ""
+		if err := r.ParseMultipartForm(1 << 20); err == nil && r.MultipartForm != nil {
+			text = firstFormValue(r.MultipartForm.Value["text"])
+		} else if err := r.ParseForm(); err == nil {
+			text = r.Form.Get("text")
+		}
+		f.mu.Lock()
+		f.answers = append(f.answers, text)
+		f.mu.Unlock()
 		fmt.Fprint(w, `{"ok":true,"result":true}`)
 	case "sendDocument":
 		// A file send: record the document file part
@@ -395,6 +407,14 @@ func (f *cmdFakeTelegram) mediaSendsSeen() []cmdFakeMediaSend {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]cmdFakeMediaSend(nil), f.mediaSends...)
+}
+
+// answersSeen returns the recorded answerCallbackQuery texts, in
+// call order.
+func (f *cmdFakeTelegram) answersSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.answers...)
 }
 
 // methodCount returns how many times the fake saw method.
@@ -703,7 +723,7 @@ func TestTelegramHelpAndDispatch(t *testing.T) {
 }
 
 // TestTelegramCommandMenu (Test 1) pins the "/" menu table: the
-// exact 18 wired commands, in dispatch order, each name within
+// exact 19 wired commands, in dispatch order, each name within
 // the Bot API rule and each description 3-256 runes. Deferred
 // and not-available commands must stay out of the menu.
 func TestTelegramCommandMenu(t *testing.T) {
@@ -712,6 +732,7 @@ func TestTelegramCommandMenu(t *testing.T) {
 		"start", "help", "stop", "status", "chats", "main", "new",
 		"history", "unread", "rename", "pin", "unpin", "archive",
 		"unarchive", "delete", "approvals", "autoapprove", "watch",
+		"files",
 	}
 	if len(telegramCommandMenu) != len(wantOrder) {
 		t.Fatalf("menu has %d entries; want %d (%v)", len(telegramCommandMenu), len(wantOrder), wantOrder)

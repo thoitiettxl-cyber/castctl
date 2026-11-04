@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -66,7 +67,7 @@ Type anything to talk to Muse in the current conversation.
 // deferred line instead of running; /login and /raw have no
 // owner gate in this build and are not available at all.
 var telegramDeferredCommands = map[string]bool{
-	"files": true, "fs": true, "feed": true, "goals": true,
+	"fs": true, "feed": true, "goals": true,
 	"goal": true, "ideas": true, "usage": true, "wake": true,
 	"profile": true, "update": true,
 }
@@ -99,6 +100,7 @@ var telegramCommandMenu = []telegram.Command{
 	{Name: "approvals", Description: "List pending approvals"},
 	{Name: "autoapprove", Description: "Show or change auto-approve settings"},
 	{Name: "watch", Description: "Show or change the watch flag"},
+	{Name: "files", Description: "List recent files with download buttons"},
 }
 
 // dispatch routes one message: "/name args" to the command
@@ -175,6 +177,8 @@ func (h *telegramCmdHandler) runCommand(ctx context.Context, chatID int64, name,
 		return h.autoApprove(ctx, chatID, arg)
 	case "watch":
 		return h.watch(ctx, chatID, arg)
+	case "files":
+		return h.files(ctx, chatID)
 	case "login", "raw":
 		_, err := h.bot.Send(ctx, chatID, "⚠️ /"+name+" is not available in this build.", telegram.SendOptions{Mode: telegram.HTMLModePlain})
 		return err
@@ -605,6 +609,105 @@ func (h *telegramCmdHandler) history(ctx context.Context, chatID int64, arg stri
 	return nil
 }
 
+// files lists the files Muse showed in the current chat's recent
+// messages, newest first, with one download button per file
+// (Python cmd_files, tgbot.py:2064-2075). The history window is
+// the last 40 events of the current session, read through the
+// same historyAdapter /history uses; unlike /history, no text
+// filter applies (resources live on assistant events' data
+// payloads). Rows are reversed, deduped by path with the
+// newest row winning, and capped at 12 after dedupe. Each
+// button registers a "dl" callback carrying the whole resource
+// in process memory; callback data stays the short "c:" token.
+func (h *telegramCmdHandler) files(ctx context.Context, chatID int64) error {
+	mapping, _ := h.store.Chat(chatID)
+	scope := mapping.SessionID
+	events, _, err := (&historyAdapter{muse: h.rt.Muse, thread: scope}).ReadHistory(ctx, 40)
+	if err != nil {
+		return err
+	}
+	rows := shared.FileRows(events)
+	seen := make(map[string]struct{}, len(rows))
+	var deduped []shared.FileRow
+	for i := len(rows) - 1; i >= 0; i-- {
+		if _, dup := seen[rows[i].Path]; dup {
+			continue
+		}
+		seen[rows[i].Path] = struct{}{}
+		deduped = append(deduped, rows[i])
+	}
+	if len(deduped) > 12 {
+		deduped = deduped[:12]
+	}
+	if len(deduped) == 0 {
+		_, err := h.bot.Send(ctx, chatID, "No files in recent messages here.", telegram.SendOptions{Mode: telegram.HTMLModePlain})
+		return err
+	}
+	btns := make([][]models.InlineKeyboardButton, 0, len(deduped))
+	for _, row := range deduped {
+		btns = append(btns, []models.InlineKeyboardButton{{
+			Text:         telegram.ButtonText("📥 " + truncateRunes(dlFileName(row.Path), 50)),
+			CallbackData: h.bot.Registry().Register(telegram.CallbackEntry{Action: "dl", Resource: row.Resource}),
+		}})
+	}
+	markup := models.InlineKeyboardMarkup{InlineKeyboard: btns}
+	_, err = h.bot.Send(ctx, chatID, "Recent files (newest first). Tap one to get it:", telegram.SendOptions{Markup: markup, Mode: telegram.HTMLModePlain})
+	return err
+}
+
+// downloadFile serves one download-button tap (Python cb_dl,
+// tgbot.py:2077-2082): refuse oversize files, otherwise
+// download through the gateway lease and send with SendFile
+// (empty caption, no markup). Both size gates mirror
+// deliverMediaItem: the ByteLen pre-check refuses before
+// downloading, and the downloaded-length post-check refuses
+// when the size was unknown. Errors return to the caller:
+// onCallback sends the summarized warning, so no second
+// notice is sent here. [DEVIATION] the refusal wording says
+// 49 MB and names castctl, where upstream says 50 MB and
+// names muse-cli.
+func (h *telegramCmdHandler) downloadFile(ctx context.Context, chatID int64, res shared.Resource) error {
+	name := dlFileName(res.Path)
+	var mime string
+	if res.MIME != nil {
+		mime = *res.MIME
+	}
+	refuse := func() error {
+		_, err := h.bot.Send(ctx, chatID, "Too big for Telegram (49 MB); use castctl download.", telegram.SendOptions{Mode: telegram.HTMLModePlain})
+		return err
+	}
+	if res.ByteLen != nil && *res.ByteLen > telegram.UploadLimit {
+		return refuse()
+	}
+	var data []byte
+	err := h.rt.Muse.WithGateway(ctx, func(gw conn.Gateway) error {
+		var err error
+		data, err = gw.DownloadFile(ctx, downloadRef(res), conn.DownloadOptions{})
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) > telegram.UploadLimit {
+		return refuse()
+	}
+	_, err = h.bot.SendFile(ctx, chatID, name, data, mime, "", telegram.SendOptions{})
+	return err
+}
+
+// dlFileName is the send filename for a download-button file:
+// the query-stripped basename, or "file" when nothing remains
+// (Python cb_dl, tgbot.py:2082). It differs from
+// shared.LocalName only in the empty fallback ("download"
+// there, for the turn path).
+func dlFileName(pathStr string) string {
+	base := path.Base(strings.TrimRight(strings.SplitN(pathStr, "?", 2)[0], "/"))
+	if base == "" || base == "." || base == "/" {
+		return "file"
+	}
+	return base
+}
+
 func isAllDigits(s string) bool {
 	if s == "" {
 		return false
@@ -758,8 +861,8 @@ func (h *telegramCmdHandler) watch(ctx context.Context, chatID int64, arg string
 }
 
 // handleCallback serves the step-5 button actions through the
-// bot's CallbackFunc hook: answer, open, chats_page, delete,
-// noop. It returns handled=false for anything else, so the
+// bot's CallbackFunc hook: answer, open, chats_page, dl,
+// delete, noop. It returns handled=false for anything else, so the
 // core falls back to its unknown-action log. Question answers
 // go out as plain-text turns, exactly as in Python (no
 // widget-answer gateway call exists): the keyboard is cleared,
@@ -785,6 +888,8 @@ func (h *telegramCmdHandler) handleCallback(ctx context.Context, chatID int64, m
 		return true, h.history(ctx, chatID, "3")
 	case "chats_page":
 		return true, h.showChats(ctx, chatID, messageID, entry.Page)
+	case "dl":
+		return true, h.downloadFile(ctx, chatID, entry.Resource)
 	case "delete":
 		if err := h.sessionOp(ctx, deliver.SessionOpDelete, entry.SessionID, ""); err != nil {
 			return true, err
