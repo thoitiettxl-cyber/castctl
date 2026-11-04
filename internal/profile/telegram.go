@@ -6,12 +6,13 @@ package profile
 
 // The top-level `telegram` config block and its resolution.
 //
-// Schema (exactly five keys; unknown keys are rejected, like every
+// Schema (exactly six keys; unknown keys are rejected, like every
 // other strict section in this file):
 //
 //	{"profile": string, "token": string,
 //	 "allowed_user_ids": [int64...],
-//	 "auto_approve": bool, "auto_allow_once": bool}
+//	 "auto_approve": bool, "auto_allow_once": bool,
+//	 "owner_id": int64}
 //
 // The block is optional. A nil *TelegramConfig on SingleConfig means
 // the block was absent from the file, and the Telegram bot is off:
@@ -47,12 +48,25 @@ package profile
 //     checked on the SENDER's user id only, never on chat id or
 //     chat type (src/muse_cli/tgbot.py:643-648, 989-1000). This
 //     block carries the same key name and the same sender-id
-//     semantics; there is no owner_id field in this build because
-//     the owner-only gates in Python guard commands (raw, update,
-//     login, profile) that are not wired in item 4. An empty or
-//     missing allowlist is fail-closed (exit 2, no token use, no
-//     polling). Ids must be positive integers; a non-positive,
-//     fractional, or non-numeric id is a config error.
+//     semantics. An empty or missing allowlist is fail-closed
+//     (exit 2, no token use, no polling). Ids must be positive
+//     integers; a non-positive, fractional, or non-numeric id
+//     is a config error.
+//   - `owner_id` (optional): the owner-only gate for the
+//     `/profile`, `/update`, `/login`, and `/raw` commands
+//     (src/muse_cli/tgbot.py:645-652, 1033-1034). When set,
+//     only the sender with this user id may run those
+//     commands; anyone else — and everyone, when the key is
+//     absent — gets the fixed sentence `Only the owner can
+//     use that command.` The owner need NOT be listed in
+//     `allowed_user_ids`: like Python, the bot merges the
+//     owner into the effective allowlist at startup, so an
+//     owner outside the list still reaches dispatch. The id
+//     must be a positive integer; 0, a negative, a
+//     fractional, or a non-numeric value is a config error
+//     (exit 2), never silently "unset" — presence is tracked
+//     separately (OwnerIDSet) because 0 is not a valid owner.
+//     A user id is not a secret and may appear in logs.
 //   - `auto_approve`, `auto_allow_once` (optional, default false):
 //     the two toggles the approval surface reads. The false
 //     defaults come from the existing castctl defaults: the
@@ -87,6 +101,11 @@ type TelegramConfig struct {
 	AllowedUserIDs []int64
 	AutoApprove    bool
 	AutoAllowOnce  bool
+	// OwnerID is the owner-only gate id; OwnerIDSet reports
+	// whether the key was present (0 is not a valid owner, so
+	// presence cannot be read off the value).
+	OwnerID    int64
+	OwnerIDSet bool
 }
 
 // telegramTokenShape is Python's token shape check
@@ -173,6 +192,20 @@ func parseTelegramBlock(v any) (*TelegramConfig, error) {
 				return nil, newConfigError(`"telegram.auto_allow_once" must be a boolean`)
 			}
 			cfg.AutoAllowOnce = b
+		case "owner_id":
+			n, ok := val.(json.Number)
+			if !ok {
+				return nil, newConfigError(`"telegram.owner_id" must be an integer`)
+			}
+			id, err := n.Int64()
+			if err != nil {
+				return nil, newConfigError(`"telegram.owner_id" must be an integer`)
+			}
+			if id <= 0 {
+				return nil, newConfigError(`"telegram.owner_id" must be a positive user id`)
+			}
+			cfg.OwnerID = id
+			cfg.OwnerIDSet = true
 		default:
 			return nil, newConfigErrorf("unknown telegram config key %q", k)
 		}
@@ -214,6 +247,9 @@ func validateTelegram(cfg *SingleConfig) error {
 		if id <= 0 {
 			return newConfigError(`"telegram.allowed_user_ids" must contain positive user ids only`)
 		}
+	}
+	if tg.OwnerIDSet && tg.OwnerID <= 0 {
+		return newConfigError(`"telegram.owner_id" must be a positive user id`)
 	}
 	return nil
 }

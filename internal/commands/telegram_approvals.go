@@ -8,6 +8,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/approvals"
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
@@ -92,6 +93,33 @@ type telegramCmdHandler struct {
 	runner  *telegramTurnRunner
 	toggles func() (autoApprove, allowOnce bool)
 	logger  *slog.Logger
+	// Owner gate (PR-F): the telegram block's owner_id, when
+	// set. Zero values mean no owner configured: every sender
+	// is refused the owner commands, exactly as upstream with
+	// owner None.
+	ownerID  int64
+	hasOwner bool
+	// Version stamps for the /update check-only report, copied
+	// from the package vars in cmdTelegramRun (a test binary
+	// is unstamped, so the handler must not read the vars at
+	// call time through a seam tests cannot stamp).
+	version   string
+	commit    string
+	buildDate string
+	// awaitingCookies is the /login cookie-awaiting state:
+	// chat id -> the uid that ran /login there. In-memory
+	// only, lost on restart; no state-file change. Guarded
+	// by awaitingMu: different chats dispatch concurrently.
+	// Lazily initialised under the mutex so a directly built
+	// handler (tests) never sees a nil map.
+	awaitingMu      sync.Mutex
+	awaitingCookies map[int64]awaitingLogin
+}
+
+// awaitingLogin is one armed /login: the uid that may answer
+// with the cookies.
+type awaitingLogin struct {
+	uid int64
 }
 
 // approvals lists pending approvals fresh from the server, one

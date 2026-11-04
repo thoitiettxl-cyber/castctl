@@ -212,7 +212,18 @@ mistake these influences for vendored code.
    command-table wiring in
    `internal/commands/telegram_commands.go` and the
    `fs_rm` callback fields in
-   `internal/telegram/approvals.go` (`CallbackEntry`);
+   `internal/telegram/approvals.go` (`CallbackEntry`), and
+   the owner commands (`cmd_profile`/`cb_profile`,
+   `cmd_login`/`take_cookies`, `cmd_update`, `cmd_raw`,
+   with the owner gate) in
+   `internal/commands/telegram_owner.go` (new file) with
+   the command-table wiring in
+   `internal/commands/telegram_commands.go`, the
+   `owner_id` block field in `internal/profile/telegram.go`,
+   the handler-struct fields in
+   `internal/commands/telegram_approvals.go`, and the
+   `IsDocument` field in `internal/telegram/bot.go`
+   (`MessageContext`);
    see docs/provenance.md §5.
    (The byte-identical descriptor assets are listed in (a).)
    License name: MIT.

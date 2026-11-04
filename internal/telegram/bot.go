@@ -111,14 +111,18 @@ type SendOptions struct {
 // handler. Media carries a user-sent file when the message has
 // one (MediaOf); Caption carries the message's caption, which
 // is where a media message's user text lives (a media message
-// has no Text).
+// has no Text). IsDocument reports whether the message carries
+// a document (msg.Document != nil): MediaOf cannot tell a
+// document from a photo, and the /login cookie-awaiting state
+// must intercept documents only, never photos.
 type MessageContext struct {
-	ChatID    int64
-	UserID    int64
-	Text      string
-	MessageID int
-	Media     *Media
-	Caption   string
+	ChatID     int64
+	UserID     int64
+	Text       string
+	MessageID  int
+	Media      *Media
+	Caption    string
+	IsDocument bool
 }
 
 // MessageHandlerFunc handles a plain allowlisted message. It runs
@@ -1204,12 +1208,13 @@ func (b *Bot) onMessage(ctx context.Context, upd *models.Update) {
 		return
 	}
 	err := b.handler(ctx, MessageContext{
-		ChatID:    msg.Chat.ID,
-		UserID:    senderID(upd),
-		Text:      msg.Text,
-		MessageID: msg.ID,
-		Media:     media,
-		Caption:   msg.Caption,
+		ChatID:     msg.Chat.ID,
+		UserID:     senderID(upd),
+		Text:       msg.Text,
+		MessageID:  msg.ID,
+		Media:      media,
+		Caption:    msg.Caption,
+		IsDocument: msg.Document != nil,
 	})
 	if err != nil {
 		b.logger.Error("telegram message handler error", "err", b.summarizeError(err), "update_id", upd.ID)

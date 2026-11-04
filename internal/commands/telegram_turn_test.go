@@ -32,6 +32,7 @@ import (
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 	"github.com/thoitiettxl-cyber/castctl/internal/profile"
 	"github.com/thoitiettxl-cyber/castctl/internal/telegram"
+	"github.com/thoitiettxl-cyber/castctl/internal/update"
 	"github.com/thoitiettxl-cyber/castctl/internal/wait"
 )
 
@@ -139,6 +140,43 @@ type telegramTurnFakeGateway struct {
 	fsRenameErr    error
 	fsDeleteCalls  []fsDeleteCall
 	fsDeleteErr    error
+	// Raw-call scripts (PR-F): per-call recordings and the
+	// scripted reply bytes for gw.Request; rawErr, when set,
+	// wins over the script. Without this override any
+	// gw.Request call would panic on the nil embedded Gateway.
+	rawCalls  []rawCall
+	rawScript []byte
+	rawErr    error
+}
+
+// rawCall is one gw.Request call the fake gateway saw.
+type rawCall struct {
+	Method     string
+	Body       any
+	PathParams map[string]string
+}
+
+// Request records the raw gateway call and answers the
+// scripted bytes (or rawErr). It copies the path params so a
+// later mutation by the caller cannot rewrite history.
+func (f *telegramTurnFakeGateway) Request(_ context.Context, method string, opts conn.RequestOptions) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	params := map[string]string{}
+	for k, v := range opts.PathParams {
+		params[k] = v
+	}
+	f.rawCalls = append(f.rawCalls, rawCall{Method: method, Body: opts.Body, PathParams: params})
+	if f.rawErr != nil {
+		return nil, f.rawErr
+	}
+	return append([]byte(nil), f.rawScript...), nil
+}
+
+func (f *telegramTurnFakeGateway) rawCallsSeen() []rawCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]rawCall(nil), f.rawCalls...)
 }
 
 // ideaExecuteCall is one api.idea-cards.execute call the fake
@@ -823,6 +861,15 @@ func runTelegramBotGated(t *testing.T, gw *telegramTurnFakeGateway, batches []st
 // explicit config JSON: tests that need toggles other than the
 // shared config's (auto_approve on) use it.
 func runTelegramBotWithConfig(t *testing.T, gw *telegramTurnFakeGateway, batches []string, configJSON string, gates []func(*cmdFakeTelegram) bool) (*telegramBotHarness, context.CancelFunc, chan int) {
+	return runTelegramBotWithConfigDeps(t, gw, batches, configJSON, gates, nil, nil)
+}
+
+// runTelegramBotWithConfigDeps adds injectable update deps
+// (PR-F /update tests) and an injectable bot logger (PR-F
+// /login no-leak tests) to runTelegramBotWithConfig. A nil
+// deps leaves Env.UpdateDeps unset; a nil logger leaves the
+// runtime logger in place.
+func runTelegramBotWithConfigDeps(t *testing.T, gw *telegramTurnFakeGateway, batches []string, configJSON string, gates []func(*cmdFakeTelegram) bool, deps *update.Deps, logger *slog.Logger) (*telegramBotHarness, context.CancelFunc, chan int) {
 	t.Helper()
 	fake := &cmdFakeTelegram{batches: batches, gates: gates}
 	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
@@ -841,12 +888,21 @@ func runTelegramBotWithConfig(t *testing.T, gw *telegramTurnFakeGateway, batches
 	}}
 	home, configFile := testHome(t, configJSON)
 	env := &Env{Stdout: &strings.Builder{}, Stderr: &strings.Builder{}, Getenv: mapGetenv(map[string]string{"CASTCTL_CONFIG": configFile})}
+	if deps != nil {
+		env.UpdateDeps = deps
+	}
+	if logger != nil {
+		env.Logger = logger
+	}
 	muse := conn.New(func(context.Context, conn.Config) (conn.Gateway, error) { return gw, nil })
 	env.BuildRuntime = func(ctx context.Context, loc *profile.ConfigLocation, prof *profile.Profile, env *Env) (*Runtime, error) {
 		// The status report needs a VM id without the
 		// FetchSessionInfo fallback (no cookies in tests).
 		prof.VMID = "vm-test"
-		return &Runtime{Profile: prof, Muse: muse, httpClientOverride: fakeClient}, nil
+		// Location mirrors production (defaultBuildRuntime):
+		// the /login cookie write resolves its base dir
+		// from it.
+		return &Runtime{Profile: prof, Location: loc, Muse: muse, httpClientOverride: fakeClient}, nil
 	}
 	ctx, cancelFn := context.WithCancel(context.Background())
 	codeCh := make(chan int, 1)
