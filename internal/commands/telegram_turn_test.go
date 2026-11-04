@@ -2150,6 +2150,28 @@ func TestDeliverFinalDocumentEditFailureSendsPreviewAndDocument(t *testing.T) {
 	}
 }
 
+func TestDeliverFinalDocumentEditAndSendFailureReturnsError(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	runner, fake := directTurnRunner(t, gw, 5*time.Second)
+	fake.editFailCount = 1
+	fake.failSends = true
+	text := strings.Repeat("a", 12000)
+	res := &wait.Result{FinalText: text, Outcome: "done"}
+	if err := runner.deliverFinal(context.Background(), 500, 100, "", "main chat", 10, res, false); err == nil {
+		t.Fatal("deliverFinal = nil; want the fallback Send error (watermark must not advance)")
+	}
+	if got := fake.methodCount("editMessageText"); got != 1 {
+		t.Errorf("editMessageText calls = %d; want 1 (the failed preview edit)", got)
+	}
+	if got := fake.methodCount("sendMessage"); got != 1 {
+		t.Errorf("sendMessage calls = %d; want 1 (the failed preview fallback)", got)
+	}
+	if got := len(fake.documentsSeen()); got != 0 {
+		t.Errorf("sendDocument calls = %d; want 0 (no document after the failed preview)", got)
+	}
+}
+
 func TestDeliverFinalDocumentFailureReturnsError(t *testing.T) {
 	t.Parallel()
 	gw := newTelegramTurnFakeGateway()
@@ -2526,6 +2548,62 @@ func TestTurnMediaDuplicateClaimBlocked(t *testing.T) {
 	}
 }
 
+func TestTurnMediaMarkupOnceOnTail(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.downloads = map[string][]byte{
+		"sandbox://workspace/pic.jpg": []byte("fake-jpeg-bytes"),
+	}
+	gw.addEvent(map[string]any{
+		"event_name": "message.assistant", "seq": int64(11),
+		"payload": map[string]any{
+			"display_text": "here", "status": "completed",
+			"data": map[string]any{"images": []any{map[string]any{
+				"path": "sandbox://workspace/pic.jpg", "mime": "image/jpeg",
+				"byte_len": int64(15),
+			}}},
+		},
+	})
+	runner, fake := turnRunnerNamed(t, gw)
+	res := &wait.Result{
+		Outcome: "needs_input",
+		Replies: []wait.Reply{{Seq: 11, Text: "pick?"}},
+	}
+	if err := runner.deliverFinal(context.Background(), 500, 100, "", "main chat", 10, res, false); err != nil {
+		t.Fatalf("deliverFinal = %v; want nil", err)
+	}
+	// The bubble edit carries the reply text with no markup.
+	edits := fake.editTexts()
+	if len(edits) != 1 || edits[0] != "pick?" {
+		t.Fatalf("edits = %q; want one bubble edit of the reply text", edits)
+	}
+	fake.mu.Lock()
+	editMarkups := append([]string(nil), fake.editMarkupJSON...)
+	sendMarkups := append([]string(nil), fake.sendMarkupJSON...)
+	sends := append([]string(nil), fake.sends...)
+	fake.mu.Unlock()
+	for _, m := range editMarkups {
+		if m != "" && m != "null" {
+			t.Errorf("bubble edit markup = %q; want none (buttons ride the tail)", m)
+		}
+	}
+	// The media send carries no markup.
+	media := fake.mediaSendsSeen()
+	if len(media) != 1 || media[0].Filename != "pic.jpg" {
+		t.Fatalf("media sends = %+v; want one sendPhoto of pic.jpg", media)
+	}
+	if media[0].HasMarkup {
+		t.Errorf("media send markup = %q; want none (buttons ride the tail)", media[0].MarkupJSON)
+	}
+	// Exactly one tail send carries the notes and the markup.
+	if len(sends) != 1 || !strings.Contains(sends[0], "Muse is asking") {
+		t.Fatalf("sends = %q; want exactly one tail send carrying the notes", sends)
+	}
+	if len(sendMarkups) != 1 || sendMarkups[0] == "" || sendMarkups[0] == "null" {
+		t.Errorf("tail send markups = %q; want exactly one markup (the turn's buttons)", sendMarkups)
+	}
+}
+
 func TestTurnMediaDownloadFailureReleasesClaim(t *testing.T) {
 	t.Parallel()
 	gw := newTelegramTurnFakeGateway()
@@ -2636,10 +2714,86 @@ func TestTurnMediaSendFailureReleasesClaim(t *testing.T) {
 	}
 }
 
+func TestTurnMediaDownloadFailureNoticeFixedClassOnly(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.mu.Lock()
+	gw.downloadErr = errors.New("boom: file at /secret/path/x.bin unavailable")
+	gw.mu.Unlock()
+	script := turnSubScript{
+		replyText: "file",
+		replyData: map[string]any{"files": []any{map[string]any{
+			"path": "sandbox://workspace/doc.pdf", "mime": "application/pdf",
+			"byte_len": int64(100),
+		}}},
+	}
+	gw.subScripts = []turnSubScript{script}
+	runner, fake := turnRunnerNamed(t, gw)
+	if err := runner.runTextTurn(context.Background(), 500, "send it"); err != nil {
+		t.Fatalf("runTextTurn = %v; want nil", err)
+	}
+	notice := ""
+	for _, s := range fake.sendsSeen() {
+		if strings.Contains(s, "could not be fetched") {
+			notice = s
+		}
+	}
+	if notice == "" {
+		t.Fatalf("sends = %q; want a fetch-failure notice", fake.sendsSeen())
+	}
+	if !strings.Contains(notice, "doc.pdf") || !strings.Contains(notice, "(error)") {
+		t.Errorf("notice = %q; want the filename and the fixed class label", notice)
+	}
+	for _, leak := range []string{"/secret", "x.bin", "boom", "unavailable"} {
+		if strings.Contains(notice, leak) {
+			t.Errorf("notice = %q; must not carry %q (path or raw error text)", notice, leak)
+		}
+	}
+}
+
+func TestTurnMediaSendFailureNoticeFixedClassOnly(t *testing.T) {
+	t.Parallel()
+	gw := newTelegramTurnFakeGateway()
+	gw.downloads = map[string][]byte{
+		"sandbox://workspace/pic.jpg": []byte("fake-jpeg-bytes"),
+	}
+	script := turnSubScript{
+		replyText: "pic",
+		replyData: map[string]any{"images": []any{map[string]any{
+			"path": "sandbox://workspace/pic.jpg", "mime": "image/jpeg",
+			"byte_len": int64(15),
+		}}},
+	}
+	gw.subScripts = []turnSubScript{script}
+	runner, fake := turnRunnerNamed(t, gw)
+	fake.mu.Lock()
+	fake.failPhoto = true
+	fake.failDocuments = true
+	fake.mu.Unlock()
+	if err := runner.runTextTurn(context.Background(), 500, "send it"); err != nil {
+		t.Fatalf("runTextTurn = %v; want nil", err)
+	}
+	notice := ""
+	for _, s := range fake.sendsSeen() {
+		if strings.Contains(s, "could not be sent") {
+			notice = s
+		}
+	}
+	if notice == "" {
+		t.Fatalf("sends = %q; want a send-failure notice", fake.sendsSeen())
+	}
+	if !strings.Contains(notice, "pic.jpg") || !strings.Contains(notice, "(bad request)") {
+		t.Errorf("notice = %q; want the filename and the fixed class label", notice)
+	}
+	if strings.Contains(notice, "wrong file type") {
+		t.Errorf("notice = %q; must not carry the Telegram API description", notice)
+	}
+}
+
 // runnerWithGateway builds a turn runner whose Muse connection is
 // the given gateway (for history-read behaviour the scripted
 // fake cannot express: paging, read failures, auth failures).
-func runnerWithGateway(t *testing.T, gw conn.Gateway) (*telegramTurnRunner, *cmdFakeTelegram) {
+func runnerWithGatewayFactory(t *testing.T, factory conn.Connector) (*telegramTurnRunner, *cmdFakeTelegram) {
 	t.Helper()
 	fake := &cmdFakeTelegram{}
 	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
@@ -2669,7 +2823,7 @@ func runnerWithGateway(t *testing.T, gw conn.Gateway) (*telegramTurnRunner, *cmd
 	if err != nil {
 		t.Fatal(err)
 	}
-	muse := conn.New(func(context.Context, conn.Config) (conn.Gateway, error) { return gw, nil })
+	muse := conn.New(factory)
 	runner := newTelegramTurnRunner(telegramTurnDeps{
 		env:        &Env{},
 		bot:        bot,
@@ -2681,6 +2835,13 @@ func runnerWithGateway(t *testing.T, gw conn.Gateway) (*telegramTurnRunner, *cmd
 		ackTimeout: 5 * time.Second,
 	})
 	return runner, fake
+}
+
+// runnerWithGateway is runnerWithGatewayFactory with a
+// gateway-returning connector (no lease-open failure).
+func runnerWithGateway(t *testing.T, gw conn.Gateway) (*telegramTurnRunner, *cmdFakeTelegram) {
+	t.Helper()
+	return runnerWithGatewayFactory(t, func(context.Context, conn.Config) (conn.Gateway, error) { return gw, nil })
 }
 
 // pagingHistoryGateway answers chat.history with the last
@@ -2754,6 +2915,41 @@ func TestTurnMediaHistoryPagingGrowsUntilBoundary(t *testing.T) {
 	}
 }
 
+func TestTurnMediaPagingIgnoresSeqLessEvents(t *testing.T) {
+	t.Parallel()
+	events := []map[string]any{}
+	for seq := int64(1); seq <= 204; seq++ {
+		ev := map[string]any{
+			"event_name": "message.assistant", "seq": seq,
+			"payload": map[string]any{"display_text": "later", "status": "completed"},
+		}
+		if seq == 2 {
+			ev["payload"] = map[string]any{
+				"display_text": "here", "status": "completed",
+				"data": map[string]any{"images": []any{map[string]any{
+					"path": "sandbox://workspace/pic.jpg", "mime": "image/jpeg",
+					"byte_len": int64(15),
+				}}},
+			}
+		}
+		events = append(events, ev)
+	}
+	// A seq-less newest event must not stop paging after the
+	// first window: the oldest seq is the oldest NUMERIC seq.
+	events = append(events, map[string]any{
+		"event_name": "message.assistant",
+		"payload":    map[string]any{"display_text": "no seq", "status": "completed"},
+	})
+	gw := &pagingHistoryGateway{events: events}
+	items, err := collectTurnMedia(context.Background(), gw, "", 1, 3, []int{200, 500, 1000})
+	if err != nil {
+		t.Fatalf("collectTurnMedia = %v; want nil", err)
+	}
+	if len(items) != 1 || items[0].seq != 2 || items[0].resource.Path != "sandbox://workspace/pic.jpg" {
+		t.Errorf("collected media = %+v; want the seq-2 pic (paging past the seq-less event)", items)
+	}
+}
+
 // failingHistoryGateway fails every chat.history read with a
 // scripted error.
 type failingHistoryGateway struct {
@@ -2805,5 +3001,42 @@ func TestTurnMediaHistoryAuthFailurePropagates(t *testing.T) {
 	}
 	if got := len(fake.editTexts()); got != 0 {
 		t.Errorf("edits = %d; want 0 (nothing is delivered before a fatal media-read failure)", got)
+	}
+}
+
+func TestTurnMediaLeaseFailureFallsBackToText(t *testing.T) {
+	t.Parallel()
+	runner, fake := runnerWithGatewayFactory(t, func(context.Context, conn.Config) (conn.Gateway, error) {
+		return nil, errors.New("connector dial failed")
+	})
+	res := &wait.Result{FinalText: "hello", Outcome: "done"}
+	if err := runner.deliverFinal(context.Background(), 500, 100, "", "main chat", 10, res, false); err != nil {
+		t.Fatalf("deliverFinal = %v; want nil (a lease-open failure delivers text-only)", err)
+	}
+	edits := fake.editTexts()
+	if len(edits) != 1 || edits[0] != "hello" {
+		t.Errorf("edits = %q; want the text-only delivery", edits)
+	}
+	if got := fake.methodCount("sendMessage"); got != 0 {
+		t.Errorf("sendMessage calls = %d; want 0", got)
+	}
+}
+
+func TestTurnMediaLeaseAuthFailurePropagates(t *testing.T) {
+	t.Parallel()
+	runner, fake := runnerWithGatewayFactory(t, func(context.Context, conn.Config) (conn.Gateway, error) {
+		return nil, conn.NewAuthError("login expired")
+	})
+	res := &wait.Result{FinalText: "hello", Outcome: "done"}
+	err := runner.deliverFinal(context.Background(), 500, 100, "", "main chat", 10, res, false)
+	var authErr *conn.AuthError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("deliverFinal = %v; want an auth error", err)
+	}
+	if got := len(fake.editTexts()); got != 0 {
+		t.Errorf("edits = %d; want 0 (nothing is delivered before a fatal lease failure)", got)
+	}
+	if got := fake.methodCount("sendMessage"); got != 0 {
+		t.Errorf("sendMessage calls = %d; want 0", got)
 	}
 }

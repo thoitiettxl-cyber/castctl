@@ -57,6 +57,10 @@ func TestFileKindFor(t *testing.T) {
 		{"no extension no mime", "README", "", 100, FileKindDocument},
 		{"double extension uses last", "archive.tar.gz", "", 100, FileKindDocument},
 		{"leading dot file has no extension", ".hidden", "", 100, FileKindDocument},
+		{"all dots before last dot is no extension", "..png", "", 100, FileKindDocument},
+		{"three leading dots is no extension", "...png", "", 100, FileKindDocument},
+		{"dots then name before last dot has extension", "..a.png", "", 100, FileKindPhoto},
+		{"all dots before last dot jpg is no extension", "..jpg", "", 100, FileKindDocument},
 		{"trailing dot", "file.", "", 100, FileKindDocument},
 		{"path prefix ignored for extension", "dir/sub/pic.jpg", "", 100, FileKindPhoto},
 	}
@@ -232,6 +236,9 @@ func TestSendFileFallbackOnBadRequest(t *testing.T) {
 	if call.Files["document"].Filename != "pic.jpg" {
 		t.Errorf("fallback filename = %q; want %q", call.Files["document"].Filename, "pic.jpg")
 	}
+	if call.Files["document"].Size != 4 {
+		t.Errorf("fallback file part size = %d; want 4 (a fresh reader over the full input)", call.Files["document"].Size)
+	}
 	if call.Form["caption"] != "cap" {
 		t.Errorf("fallback caption = %q; want %q", call.Form["caption"], "cap")
 	}
@@ -294,6 +301,11 @@ func TestSendFileNoFallbackForNonBadRequest(t *testing.T) {
 		}
 		if got := srv.count("sendPhoto"); got != 3 {
 			t.Errorf("sendPhoto calls = %d; want 3 (initial + 2 retries)", got)
+		}
+		for _, call := range srv.callsOf("sendPhoto") {
+			if call.Files["photo"].Size != 4 {
+				t.Errorf("retried file part size = %d; want 4 (a fresh reader over the full input)", call.Files["photo"].Size)
+			}
 		}
 		if got := len(tb.recordedSleeps()); got != 2 {
 			t.Errorf("sleeps = %d; want 2", got)

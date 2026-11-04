@@ -106,6 +106,9 @@ func fileExtension(name string) string {
 	if i <= 0 {
 		return ""
 	}
+	if strings.TrimLeft(name[:i], ".") == "" {
+		return ""
+	}
 	return name[i:]
 }
 

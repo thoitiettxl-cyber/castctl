@@ -6,6 +6,7 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/approvals"
@@ -783,8 +785,11 @@ func (e *bubbleEditor) editFinal(text string) {
 // FinalText-or-joined rule, but the interleaved path mirrors
 // Python's per-reply iteration. A media item's download or
 // send failure becomes a short notice and never holds the
-// watermark; only the main reply text and fatal (auth/cancel)
-// failures return an error.
+// watermark; only the main reply text and fatal (gateway
+// auth/cancel) failures return an error. A Telegram 401 on
+// a media send is a notice, not a gateway auth failure; a
+// gateway auth failure on the history re-read propagates
+// before any delivery.
 func (r *telegramTurnRunner) deliverFinal(ctx context.Context, chatID int64, bubbleID int, scope, title string, userSeq int64, res *wait.Result, stopped bool) error {
 	finalText := res.FinalText
 	if finalText == "" {
@@ -1007,14 +1012,43 @@ func historyEventMessageID(raw any) string {
 	return mid
 }
 
-// oldestHistorySeq is the smallest seq in a history page (0
-// when the page holds no numeric seq).
+// historySeq is eventSeq with presence: it reports whether
+// the event carries a numeric seq at all. The accepted shapes
+// mirror eventSeq (int64, json.Number, float64); a seq-less
+// event, or one with a non-numeric seq, reports absent.
+func historySeq(raw any) (int64, bool) {
+	ev, ok := raw.(map[string]any)
+	if !ok {
+		return 0, false
+	}
+	switch seq := ev["seq"].(type) {
+	case int64:
+		return seq, true
+	case json.Number:
+		n, _ := seq.Int64()
+		return n, true
+	case float64:
+		return int64(seq), true
+	default:
+		return 0, false
+	}
+}
+
+// oldestHistorySeq is the smallest NUMERIC seq in a history
+// page (0 when the page holds no numeric seq). An event
+// without a numeric seq is ignored: it must not force the
+// oldest seq to 0 and stop window growth after one page.
 func oldestHistorySeq(page []any) int64 {
 	var oldest int64
-	for i, raw := range page {
-		seq := eventSeq(raw)
-		if i == 0 || seq < oldest {
+	seen := false
+	for _, raw := range page {
+		seq, ok := historySeq(raw)
+		if !ok {
+			continue
+		}
+		if !seen || seq < oldest {
 			oldest = seq
+			seen = true
 		}
 	}
 	return oldest
@@ -1074,15 +1108,20 @@ func buildTurnSegments(res *wait.Result, finalText string, userSeq int64, items 
 // history re-read, the interleave, and the downloads all run
 // on one gateway lease (the sendDownloadStep precedent). It
 // reports (true, nil) when media was found and delivered,
-// (false, nil) when no media was found or the re-read failed
-// non-fatally (the caller falls back to text-only), and
-// (false, err) only for fatal failures (auth, cancellation,
-// or a failed main text segment). A non-fatal re-read failure
-// is warn-logged: the turn still delivers its text, and the
-// watermark still advances.
+// (false, nil) when no media was found, the re-read failed
+// non-fatally, or the gateway lease itself failed non-fatally
+// (the caller falls back to text-only), and (false, err) only
+// for fatal failures: a gateway auth failure, cancellation,
+// or a failed main text segment. A non-fatal re-read or lease
+// failure is warn-logged: the turn still delivers its text,
+// and the watermark still advances. A Telegram 401 on a media
+// send is not a gateway auth failure: it becomes a notice
+// inside deliverMediaItem and never propagates.
 func (r *telegramTurnRunner) deliverMediaTurn(ctx context.Context, chatID int64, bubbleID int, scope string, userSeq int64, res *wait.Result, finalText, notes string, markup models.ReplyMarkup) (bool, error) {
 	delivered := false
+	ran := false
 	err := r.deps.rt.Muse.WithGateway(ctx, func(gw conn.Gateway) error {
+		ran = true
 		items, err := collectTurnMedia(ctx, gw, scope, userSeq, deliveredTopSeq(userSeq, res), turnMediaHistoryLimits)
 		if err != nil {
 			var authErr *conn.AuthError
@@ -1104,14 +1143,26 @@ func (r *telegramTurnRunner) deliverMediaTurn(ctx context.Context, chatID int64,
 	if errors.Is(err, errMediaUnavailable) {
 		return false, nil
 	}
+	if !ran {
+		// The callback never ran: the lease itself failed
+		// (Connect/Live). Only a gateway auth failure or
+		// cancellation propagates; any other lease error
+		// falls back to text-only.
+		if isMediaFatal(err, ctx) {
+			return false, err
+		}
+		r.deps.logger.Warn("telegram turn media lease failed; delivering text only", "err", logging.SummarizeErr(err))
+		return false, nil
+	}
 	return false, err
 }
 
 // deliverMediaSegments delivers the interleaved segments:
 // the first text segment owns the bubble, a media-first turn
-// deletes the bubble best-effort, notes and buttons ride the
-// last segment, and a trailing tail message carries them when
-// the last segment is media (Python deliver_interleaved).
+// deletes the bubble best-effort, notes ride the last text
+// segment, and buttons ride exactly one message: the last
+// text segment, or a trailing tail message when the last
+// segment is media (Python deliver_interleaved).
 // There is no per-turn file cap. A failed text segment
 // returns an error; a failed media item becomes a notice
 // inside deliverMediaItem.
@@ -1121,10 +1172,15 @@ func (r *telegramTurnRunner) deliverMediaSegments(ctx context.Context, gw conn.G
 		last := &segments[len(segments)-1]
 		last.text = strings.TrimSpace(last.text + "\n\n" + notes)
 	}
+	// A tail is sent exactly when the last segment is media
+	// and there are notes or buttons to carry, so a media
+	// last segment never carries the markup itself: the tail
+	// does, exactly once.
+	tailWillBeSent := len(segments) > 0 && segments[len(segments)-1].isMedia && (notes != "" || markup != nil)
 	for i, seg := range segments {
 		last := i == len(segments)-1
 		var segMarkup models.ReplyMarkup
-		if last {
+		if last && !(seg.isMedia && tailWillBeSent) {
 			segMarkup = markup
 		}
 		if seg.isMedia {
@@ -1143,7 +1199,7 @@ func (r *telegramTurnRunner) deliverMediaSegments(ctx context.Context, gw conn.G
 			return err
 		}
 	}
-	if len(segments) > 0 && segments[len(segments)-1].isMedia && (notes != "" || markup != nil) {
+	if tailWillBeSent {
 		tail := notes
 		if tail == "" {
 			tail = "⬆️"
@@ -1163,7 +1219,7 @@ func (r *telegramTurnRunner) deliverMediaSegments(ctx context.Context, gw conn.G
 // ByteLen says so) and never sent: the chat gets the refusal
 // line pointing at castctl download. Failures become short
 // notices (filename + error class only); only a fatal
-// (auth/cancel) failure returns an error.
+// (gateway auth/cancel) failure returns an error.
 func (r *telegramTurnRunner) deliverMediaItem(ctx context.Context, gw conn.Gateway, chatID int64, scope string, res shared.Resource, markup models.ReplyMarkup) error {
 	name := shared.LocalName(res.Path, "")
 	var mime string
@@ -1231,8 +1287,11 @@ func downloadRef(res shared.Resource) any {
 }
 
 // isMediaFatal reports whether a media download/send failure
-// must fail the turn: an auth failure, or a cancelled
-// context. Any other failure becomes a notice.
+// must fail the turn: a gateway auth failure
+// (*conn.AuthError), or a cancelled context. Any other
+// failure becomes a notice — including a Telegram 401 on a
+// media send, which the library surfaces as its
+// ErrorUnauthorized sentinel, not a gateway auth failure.
 func isMediaFatal(err error, ctx context.Context) bool {
 	var authErr *conn.AuthError
 	return errors.As(err, &authErr) || ctx.Err() != nil
@@ -1249,13 +1308,54 @@ func (r *telegramTurnRunner) sendTooBigNotice(ctx context.Context, chatID int64,
 	}
 }
 
+// mediaFailureClass maps an error to the fixed class label
+// rendered in a media failure notice: a fixed vocabulary
+// only, never the Telegram API description, raw error text,
+// a path, or a URL. Telegram library errors map by sentinel
+// (a 429 maps by its typed error or sentinel); gateway
+// errors keep their fixed-shape LogSummary (status plus the
+// allowlist-validated error code, or a length); anything
+// else — including errors with no LogSummary, whose
+// SummarizeErr fallback would embed raw text — maps to the
+// single label "error".
+func mediaFailureClass(err error) string {
+	var tmr *bot.TooManyRequestsError
+	if errors.As(err, &tmr) {
+		return "too many requests"
+	}
+	switch {
+	case errors.Is(err, bot.ErrorBadRequest):
+		return "bad request"
+	case errors.Is(err, bot.ErrorForbidden):
+		return "forbidden"
+	case errors.Is(err, bot.ErrorUnauthorized):
+		return "unauthorized"
+	case errors.Is(err, bot.ErrorNotFound):
+		return "not found"
+	case errors.Is(err, bot.ErrorConflict):
+		return "conflict"
+	case errors.Is(err, bot.ErrorTooManyRequests):
+		return "too many requests"
+	}
+	var authErr *conn.AuthError
+	if errors.As(err, &authErr) {
+		return "auth failed"
+	}
+	var gwErr *conn.GatewayError
+	var connErr *conn.ConnectionError
+	if errors.As(err, &gwErr) || errors.As(err, &connErr) {
+		return logging.SummarizeErr(err)
+	}
+	return "error"
+}
+
 // sendMediaFailureNotice sends the short failure notice for
-// one file: the filename and the error class only (never the
+// one file: the filename and the fixed error class only (never the
 // path, the URL, or raw error text). The class is capped at
 // 200 runes, the Python truncation shape. A failed notice is
 // warn-logged, never returned.
 func (r *telegramTurnRunner) sendMediaFailureNotice(ctx context.Context, chatID int64, name, verb string, err error) {
-	text := fmt.Sprintf("📎 <b>%s</b> could not be %s (%s).", telegram.EscapeText(name), verb, truncateRunes(logging.SummarizeErr(err), 200))
+	text := fmt.Sprintf("📎 <b>%s</b> could not be %s (%s).", telegram.EscapeText(name), verb, truncateRunes(mediaFailureClass(err), 200))
 	if _, err := r.deps.bot.Send(ctx, chatID, text, telegram.SendOptions{Mode: telegram.HTMLModeHTML}); err != nil {
 		r.deps.logger.Warn("telegram media failure notice failed", "err", logging.SummarizeErr(err))
 	}

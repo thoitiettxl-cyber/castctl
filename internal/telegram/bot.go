@@ -445,7 +445,7 @@ func New(s Settings) (*Bot, error) {
 	uploadBase.Timeout = uploadClientTimeout
 	uploadClient, err := BoundClient(&uploadBase, PollTimeout)
 	if err != nil {
-		return nil, err
+		return nil, b.scrubErr(fmt.Errorf("telegram: bot upload construction failed: %w", err))
 	}
 	uploadOpts := []bot.Option{
 		bot.WithHTTPClient(PollTimeout, uploadClient),
