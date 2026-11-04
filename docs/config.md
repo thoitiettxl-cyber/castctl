@@ -424,20 +424,28 @@ approve-all buttons, resume after a decision), the core
 slash commands (`/help`, `/status`, `/chats`, `/main`, `/new`,
 `/history`, `/unread`, `/rename`, `/pin`, `/unpin`,
 `/archive`, `/unarchive`, `/delete`, `/watch` as a persisted
-toggle, `/files`), files users send to the bot (photos,
-documents, video, audio, voice, animations) saved to
-`telegram-inbox/` and told to Muse in a turn, and the
-persistent state file above. Very long
+toggle, `/files`, the read commands (`/feed`, `/goals`,
+`/goal`, `/ideas`, `/usage`, `/wake`), files users send to
+the bot (photos, documents, video, audio, voice,
+animations) saved to `telegram-inbox/` and told to Muse in
+a turn, and the persistent state file above. The read
+commands answer from the gateway: `/feed` lists feed units
+(10 by default, `/feed N` for N), `/goals` lists goals,
+`/goal <id>` shows one goal (long bodies arrive as a
+`goal.json` document), `/ideas` lists idea cards with
+Execute buttons, `/usage` shows plan usage, and `/wake`
+asks muse.ai to wake the VM. Very long
 replies are sent as a `muse-reply` document with a bubble
 preview instead of being split, and files Muse shows in a
 turn are downloaded and sent to the chat in seq order
 (photos, videos, audio, documents; the limits above apply).
 At startup the
-bot registers exactly the 19 wired commands as the `/` menu
+bot registers exactly the 25 wired commands as the `/` menu
 (`setMyCommands`): `start`, `help`, `stop`, `status`, `chats`,
 `main`, `new`, `history`, `unread`, `rename`, `pin`, `unpin`,
 `archive`, `unarchive`, `delete`, `approvals`, `autoapprove`,
-`watch`, `files`. A `setMyCommands` failure is only a warning: polling
+`watch`, `files`, `feed`, `goals`, `goal`, `ideas`, `usage`,
+`wake`. A `setMyCommands` failure is only a warning: polling
 starts regardless, and the menu is re-registered on the next
 start. `/delete`
 confirmation has no owner gate: any allowed user may confirm
@@ -451,8 +459,8 @@ handler context and are cancelled on shutdown, so the join
 waits only for teardown, not for a turn to run to
 completion.
 
-What this build does NOT wire (roadmap step 5b): `/fs`, `/feed`, `/goals`, `/goal`,
-`/ideas`, `/usage`, `/wake`, `/profile`, `/update`, `/watch`
+What this build does NOT wire (roadmap step 5b): `/fs`,
+`/profile`, `/update`, `/watch`
 forwarding/monitors, `/login`, `/raw`, and `telegram setup` /
 `install-service`. Turn media (files Muse shows, downloaded
 and sent) and user-sent media (files users send, saved to
@@ -460,7 +468,7 @@ and sent) and user-sent media (files users send, saved to
 not-wired reply naming step 5b, except `/login` and `/raw`,
 which answer that they are not available in this build.
 None of them appears in the `/` menu: the menu holds only
-the 19 wired commands listed above.
+the 25 wired commands listed above.
 
 ## The `keeper` section
 

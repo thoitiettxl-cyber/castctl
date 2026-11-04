@@ -950,6 +950,42 @@ passes no such flag); a same-second same-name collision
 fails at the gateway, as upstream. No state field is added
 (schema version unchanged).
 
+Read commands reimplement `cmd_feed`
+(`tgbot.py:2158-2164`), `cmd_goals` (`:2166-2172`),
+`cmd_goal` (`:2174-2188`), `cmd_ideas` (`:2190-2198`),
+`cb_idea_exec` (`:2200-2205`), `cmd_usage`
+(`:2207-2213`), and `cmd_wake` (`:2215-2218`), with
+`feed_rows`/`goal_rows`/`idea_rows`
+(`cli.py:1950-1974`), `summarize_usage`/`usage_lines`
+(`cli.py:569-596,625-647`), `idea_execute`
+(`cli.py:1977-1981`), and `wake_vm`
+(`cli.py:2128-2144`): `/feed` lists units with the
+`📰 <b>Feed</b>` header (default 10); `/goals` lists
+goals with the trailing `/goal <id> for details` line;
+`/goal <id>` shows one goal, bodies over 3000
+characters arriving as a `goal.json` document after
+the head line; `/ideas` sends the first 15 cards, each
+silent with one `▶️ Execute` button whose callback
+carries the card id and title server-side and executes
+via `api.idea-cards.execute` with the chat's current
+session (omitted when empty); `/usage` shows the
+`📊` usage lines; `/wake` shows the wake status and
+first 800 characters of the body JSON. Deviations:
+`/feed 0` and negative/non-numeric args all resolve
+to 10 (upstream passes 0 through, listing everything
+— deliberate override, brief-pinned); gateway and
+auth errors render as the bot's summarised
+class/length replies, NOT upstream's `str(e)[:300]`
+(and no owner-notify on auth failure); the
+`idea_exec` callback adds one typed field to
+`CallbackEntry` (card id; the title reuses the
+existing field); `/goal` answers the usage sentence
+for a whitespace-only arg (upstream calls goals.get
+with id=""); `/wake` body JSON is compact (no spaces
+after separators). No state field is added (schema
+version unchanged); the 6 commands leave the
+deferred map and join the `/` menu (19 → 25).
+
 Evaluation conditions applied (from the libpin report, all
 VERIFIED in tree): the bot is built with `WithHTTPClient` on a
 writer-bound client whose Transport proxy is explicitly nil
