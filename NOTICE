@@ -191,7 +191,11 @@ mistake these influences for vendored code.
    (`file_kind`/`doc_name`/`send_file`/`send_doc`) is reimplemented
    in `internal/telegram/files.go`, and turn delivery
    (`deliver_reply`/`deliver_interleaved`/`send_media`/media
-   claims) in `internal/commands/telegram_turn.go`;
+   claims) in `internal/commands/telegram_turn.go`; the `/files`
+   command (`cmd_files`) and its download callback (`cb_dl`)
+   are reimplemented in `internal/commands/telegram_commands.go`,
+   and the 6-file-per-turn cap (`MAX_FILES_PER_TURN`) in
+   `internal/commands/telegram_turn.go`;
    see docs/provenance.md §5.
    (The byte-identical descriptor assets are listed in (a).)
    License name: MIT.
