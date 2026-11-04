@@ -13,11 +13,11 @@
 use crate::safe_string::go_lower;
 
 /// How much of an error text classification ever inspects.
-/// Source: `internal/telegram/bot.go`, `summarizePrefixRunes`.
+/// Source: `internal/telegram/bot.go:1061`, `summarizePrefixRunes`.
 pub const SUMMARIZE_PREFIX_RUNES: usize = 256;
 
 /// The 20 summary classes, with Go's exact label spellings.
-/// Source: `internal/telegram/bot.go`, `classifyError` /
+/// Source: `internal/telegram/bot.go:817`, `classifyError` /
 /// `fallbackClass` / `summarizeClass` labels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorClass {
@@ -99,7 +99,9 @@ impl std::fmt::Display for ErrorClass {
 }
 
 /// First `n` runes of `s` without scanning the rest.
-/// Source: `internal/telegram/bot.go`, `firstRunes`.
+/// Not log-safe: returns raw input text; log only via
+/// [`summarize`] or [`crate::chain::summarize_error`].
+/// Source: `internal/telegram/bot.go:1065`, `firstRunes`.
 pub fn first_runes(s: &str, n: usize) -> &str {
     match s.char_indices().nth(n) {
         Some((i, _)) => &s[..i],
@@ -108,11 +110,16 @@ pub fn first_runes(s: &str, n: usize) -> &str {
 }
 
 /// Removes every occurrence of `token` from `s`. An empty
-/// token leaves `s` unchanged (Go `strings.ReplaceAll` with
-/// an empty old string would be a no-op here because the Bot
-/// token is never empty in practice; the guard also avoids
-/// Rust `str::replace` inserting at every boundary).
-/// Source: `internal/telegram/bot.go`, `Bot::scrub`.
+/// token leaves `s` unchanged: Go's `scrub` (`bot.go:1125`)
+/// guards `if b.token == "" { return s }`, and Go
+/// `strings.ReplaceAll` with an empty old pattern is NOT a
+/// no-op (it inserts at every boundary) — the guard, not the
+/// pattern, is what keeps the input unchanged. The guard
+/// also avoids Rust `str::replace` inserting at every
+/// boundary. Not log-safe: returns raw input text apart from
+/// the token replacement; log only via [`summarize`] or
+/// [`crate::chain::summarize_error`].
+/// Source: `internal/telegram/bot.go:1125`, `Bot::scrub`.
 pub fn scrub_text(s: &str, token: &str) -> String {
     if token.is_empty() {
         return s.to_string();
@@ -123,7 +130,7 @@ pub fn scrub_text(s: &str, token: &str) -> String {
 /// Renders one class/length summary. The decode classes keep
 /// the historical `"telegram poll error:"` prefix; every other
 /// class uses `"telegram error:"`.
-/// Source: `internal/telegram/bot.go`, `formatSummary`.
+/// Source: `internal/telegram/bot.go:750`, `formatSummary`.
 pub fn format_summary(class: ErrorClass, length: usize) -> String {
     match class {
         ErrorClass::ResponseDecodeFailure | ErrorClass::UpdateDecodeFailure => {
@@ -143,7 +150,7 @@ pub fn format_summary(class: ErrorClass, length: usize) -> String {
 
 /// Whether the prefix is one of the library's body-carrying
 /// errors (substring match, case-sensitive).
-/// Source: `internal/telegram/bot.go`, `isResponseBodyError`.
+/// Source: `internal/telegram/bot.go:1117`, `isResponseBodyError`.
 fn is_response_body_error(prefix: &str) -> bool {
     prefix.contains("decode response body")
         || prefix.contains("read response body")
@@ -154,7 +161,7 @@ fn is_response_body_error(prefix: &str) -> bool {
 /// prefix, case-sensitive. Kept only for callers with no
 /// error value (panic values); the typed path in `chain.rs`
 /// refuses bare-substring decode matches.
-/// Source: `internal/telegram/bot.go`, `summarizeClass`.
+/// Source: `internal/telegram/bot.go:1092`, `summarizeClass`.
 pub fn summarize_class(prefix: &str) -> ErrorClass {
     if is_response_body_error(prefix) {
         return ErrorClass::ResponseDecodeFailure;
@@ -181,7 +188,7 @@ pub fn summarize_class(prefix: &str) -> ErrorClass {
 /// scrub the first 256 runes, classify the scrubbed prefix
 /// with the string-only rules, count the runes of the whole
 /// message. Scrubbing happens AFTER truncation.
-/// Source: `internal/telegram/bot.go`, `Bot::summarize`.
+/// Source: `internal/telegram/bot.go:740`, `Bot::summarize`.
 pub fn summarize(msg: &str, token: &str) -> String {
     let class = summarize_class(&scrub_text(first_runes(msg, SUMMARIZE_PREFIX_RUNES), token));
     format_summary(class, msg.chars().count())
@@ -192,7 +199,7 @@ pub fn summarize(msg: &str, token: &str) -> String {
 /// Order is most specific first; `context deadline exceeded`
 /// precedes generic `deadline exceeded`, and the bare `dns`
 /// catch-all comes after the specific DNS phrases.
-/// Source: `internal/telegram/bot.go`, `fallbackClass`.
+/// Source: `internal/telegram/bot.go:1015`, `fallbackClass`.
 pub fn fallback_class(prefix: &str) -> ErrorClass {
     let lower = go_lower(prefix);
     for (phrase, class) in [
@@ -239,7 +246,7 @@ pub fn fallback_class(prefix: &str) -> ErrorClass {
 
 /// The decode class for one chain level's bounded prefix, or
 /// `None`. The marker must START the level's text.
-/// Source: `internal/telegram/bot.go`, `anchoredDecodeClass`.
+/// Source: `internal/telegram/bot.go:907`, `anchoredDecodeClass`.
 pub fn anchored_decode_class(prefix: &str) -> Option<ErrorClass> {
     if prefix.starts_with("error decode response body")
         || prefix.starts_with("error decode response result")
@@ -255,20 +262,20 @@ pub fn anchored_decode_class(prefix: &str) -> Option<ErrorClass> {
 
 /// The HTTP class for one chain level's bounded prefix, or
 /// `None`. Only the library's default-branch format, with the
-/// status code parsed from its anchored position.
-/// Source: `internal/telegram/bot.go`, `httpClassFromPrefix`.
+/// status code parsed from its anchored position. The code
+/// window is checked on BYTES (as Go does), never by slicing
+/// the `&str`, so a multibyte char straddling the window
+/// yields `None` instead of panicking.
+/// Source: `internal/telegram/bot.go:925`, `httpClassFromPrefix`.
 pub fn http_class_from_prefix(prefix: &str) -> Option<ErrorClass> {
     const MARKER: &str = "error response from telegram for method ";
     let rest = prefix.strip_prefix(MARKER)?;
     let i = rest.find(", ")?;
-    if rest.len() < i + 5 {
+    let code = rest.as_bytes().get(i + 2..i + 5)?;
+    if code.len() != 3 || !code.iter().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    let code = &rest[i + 2..i + 5];
-    if !code.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    match code.as_bytes()[0] {
+    match code[0] {
         b'4' => Some(ErrorClass::Http4xx),
         b'5' => Some(ErrorClass::Http5xx),
         _ => None,
@@ -278,7 +285,7 @@ pub fn http_class_from_prefix(prefix: &str) -> Option<ErrorClass> {
 /// Whether the inner error text of a `*url.Error` marks a TLS
 /// failure: the lowercased first 256 runes contain `tls:` or
 /// `certificate`.
-/// Source: `internal/telegram/bot.go`, `isTLSFailure`.
+/// Source: `internal/telegram/bot.go:999`, `isTLSFailure`.
 pub fn is_tls_failure_text(inner_text: &str) -> bool {
     let prefix = go_lower(first_runes(inner_text, SUMMARIZE_PREFIX_RUNES));
     prefix.contains("tls:") || prefix.contains("certificate")
@@ -448,5 +455,49 @@ mod tests {
         assert_eq!(scrub_text("abc", ""), "abc");
         assert_eq!(scrub_text("", ""), "");
         assert_eq!(scrub_text("aXbXc", "X"), "a***b***c");
+    }
+
+    // FIX-LOOP REGRESSION (Round 1 finding F1; not a ported
+    // case): `http_class_from_prefix` must not panic when a
+    // multibyte char straddles the 3-byte status-code window.
+    // Go checks bytes and yields no class; the Rust port must
+    // return `None`, never slice mid-char.
+    #[test]
+    fn regression_f1_multibyte_http_code_window() {
+        for prefix in [
+            "error response from telegram for method M, ééX",
+            "error response from telegram for method m, éé",
+            "error response from telegram for method ab, éé",
+        ] {
+            assert_eq!(
+                http_class_from_prefix(prefix),
+                None,
+                "http_class_from_prefix({prefix:?})"
+            );
+        }
+        // ASCII neighbours, kept passing.
+        assert_eq!(
+            http_class_from_prefix(
+                "error response from telegram for method getUpdates, 500 Internal Server Error"
+            ),
+            Some(ErrorClass::Http5xx)
+        );
+        assert_eq!(
+            http_class_from_prefix(
+                "error response from telegram for method sendMessage, 422 Unprocessable Entity"
+            ),
+            Some(ErrorClass::Http4xx)
+        );
+        for prefix in [
+            "error response from telegram for method getUpdates, 302 Found",
+            "error response from telegram for method getUpdates, 5",
+            "error response from telegram for method getUpdates, 5é0",
+        ] {
+            assert_eq!(
+                http_class_from_prefix(prefix),
+                None,
+                "http_class_from_prefix({prefix:?})"
+            );
+        }
     }
 }

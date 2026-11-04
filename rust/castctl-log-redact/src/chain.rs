@@ -13,6 +13,8 @@
 //! only scrubbed messages plus non-text fields; it holds no
 //! reference to pre-scrub text.
 
+use std::fmt;
+
 use crate::summarize::{
     ErrorClass, SUMMARIZE_PREFIX_RUNES, anchored_decode_class, fallback_class, first_runes,
     format_summary, http_class_from_prefix, is_tls_failure_text, scrub_text,
@@ -58,7 +60,10 @@ pub enum ErrnoKind {
 /// levels (wraps, `*url.Error` inners that are not themselves
 /// typed, `fmt.Errorf` leaves) classify only through their
 /// text in the anchored/fallback passes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is hand-written (see below): it never emits raw
+/// message text, which may carry tokens.
+#[derive(Clone, PartialEq, Eq)]
 pub enum LevelKind {
     /// No typed meaning; text only.
     Plain,
@@ -99,9 +104,48 @@ pub enum LevelKind {
     Eof,
 }
 
+impl fmt::Debug for LevelKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Defence in depth: message fields may carry tokens,
+        // so only their rune lengths are printed, never the
+        // text itself.
+        match self {
+            LevelKind::Plain => f.write_str("Plain"),
+            LevelKind::TooManyRequests {
+                message,
+                retry_after,
+            } => f
+                .debug_struct("TooManyRequests")
+                .field("message_len", &message.chars().count())
+                .field("retry_after", retry_after)
+                .finish(),
+            LevelKind::Migrate {
+                message,
+                migrate_to_chat_id,
+            } => f
+                .debug_struct("Migrate")
+                .field("message_len", &message.chars().count())
+                .field("migrate_to_chat_id", migrate_to_chat_id)
+                .finish(),
+            LevelKind::Sentinel(kind) => f.debug_tuple("Sentinel").field(kind).finish(),
+            LevelKind::ContextCanceled => f.write_str("ContextCanceled"),
+            LevelKind::ContextDeadlineExceeded => f.write_str("ContextDeadlineExceeded"),
+            LevelKind::DnsError => f.write_str("DnsError"),
+            LevelKind::NetTimeout => f.write_str("NetTimeout"),
+            LevelKind::TlsRecordHeader => f.write_str("TlsRecordHeader"),
+            LevelKind::UrlError => f.write_str("UrlError"),
+            LevelKind::Errno(kind) => f.debug_tuple("Errno").field(kind).finish(),
+            LevelKind::Eof => f.write_str("Eof"),
+        }
+    }
+}
+
 /// One level of an error chain: its own `Error()` text, its
 /// kind, and the levels reachable through `Unwrap`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is hand-written (see below): it reports only the
+/// rune length of the text, never the text itself.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ChainLevel {
     /// This level's own error text.
     pub text: String,
@@ -109,6 +153,20 @@ pub struct ChainLevel {
     pub kind: LevelKind,
     /// Unwrapped children, in Go's `Unwrap` order.
     pub children: Vec<ChainLevel>,
+}
+
+impl fmt::Debug for ChainLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Defence in depth: the text may carry tokens, so
+        // only its rune length is printed, never the text.
+        // Children use this same impl, so a whole chain's
+        // `Debug` output is token-free even unscrubbed.
+        f.debug_struct("ChainLevel")
+            .field("text_len", &self.text.chars().count())
+            .field("kind", &self.kind)
+            .field("children", &self.children)
+            .finish()
+    }
 }
 
 impl ChainLevel {
@@ -157,6 +215,7 @@ impl ErrorChain {
 /// scrubbed bounded prefix. Levels at depth 0..=32 are
 /// inspected; depth 32 is not expanded. Returns the first
 /// non-`None` label, or `None`.
+/// Source: `internal/telegram/bot.go:872`, `chainPrefixClass`.
 fn chain_prefix_class(
     chain: &ErrorChain,
     token: &str,
@@ -185,6 +244,7 @@ fn chain_prefix_class(
 
 /// Step-1 search with the correct per-class order, split out
 /// so the order is auditable against `classifyError`.
+/// Part of `internal/telegram/bot.go:817`, `classifyError`.
 fn step1_search(chain: &ErrorChain) -> Option<ErrorClass> {
     fn contains(chain: &ErrorChain, want: &dyn Fn(&LevelKind) -> bool) -> bool {
         let mut stack: Vec<&ChainLevel> = vec![&chain.root];
@@ -228,6 +288,7 @@ fn step1_search(chain: &ErrorChain) -> Option<ErrorClass> {
 
 /// Step-3 search: context classes, canceled before deadline,
 /// over the whole tree.
+/// Part of `internal/telegram/bot.go:817`, `classifyError`.
 fn step3_class(chain: &ErrorChain) -> Option<ErrorClass> {
     fn contains(chain: &ErrorChain, want: &dyn Fn(&LevelKind) -> bool) -> bool {
         let mut stack: Vec<&ChainLevel> = vec![&chain.root];
@@ -250,9 +311,27 @@ fn step3_class(chain: &ErrorChain) -> Option<ErrorClass> {
     None
 }
 
+/// The first `UrlError` level in pre-order DFS (children in
+/// unwrap order), matching Go `errors.As` for the first
+/// `*url.Error`. Used only by the URL-inner TLS step of
+/// `transport_class` (`bot.go:956`).
+fn first_url_error_level(chain: &ErrorChain) -> Option<&ChainLevel> {
+    let mut stack: Vec<&ChainLevel> = vec![&chain.root];
+    while let Some(level) = stack.pop() {
+        if matches!(level.kind, LevelKind::UrlError) {
+            return Some(level);
+        }
+        for child in level.children.iter().rev() {
+            stack.push(child);
+        }
+    }
+    None
+}
+
 /// Step-4 transport classification, in Go `transportClass`
 /// order: DNS, timeout, TLS record header, URL-inner TLS,
 /// errnos (refused, reset, unreachable group), EOF.
+/// Source: `internal/telegram/bot.go:956`, `transportClass`.
 fn transport_class(chain: &ErrorChain) -> Option<ErrorClass> {
     fn contains(chain: &ErrorChain, want: &dyn Fn(&LevelKind) -> bool) -> bool {
         let mut stack: Vec<&ChainLevel> = vec![&chain.root];
@@ -275,19 +354,17 @@ fn transport_class(chain: &ErrorChain) -> Option<ErrorClass> {
     if contains(chain, &|k| matches!(k, LevelKind::TlsRecordHeader)) {
         return Some(ErrorClass::Tls);
     }
-    // URL-inner TLS: any UrlError level whose first child
-    // (the inner error) has TLS-failure text.
-    let mut stack: Vec<&ChainLevel> = vec![&chain.root];
-    while let Some(level) = stack.pop() {
-        if matches!(level.kind, LevelKind::UrlError) {
-            if let Some(inner) = level.children.first() {
-                if is_tls_failure_text(&inner.text) {
-                    return Some(ErrorClass::Tls);
-                }
+    // URL-inner TLS: Go `transportClass` finds the FIRST
+    // `*url.Error` via `errors.As` (pre-order DFS, unwrap
+    // order) and checks ONLY that error's inner text (its
+    // first child here). Deeper UrlError levels are never
+    // consulted, even when the first one's inner text hides
+    // TLS text behind a wrapper.
+    if let Some(url_level) = first_url_error_level(chain) {
+        if let Some(inner) = url_level.children.first() {
+            if is_tls_failure_text(&inner.text) {
+                return Some(ErrorClass::Tls);
             }
-        }
-        for child in &level.children {
-            stack.push(child);
         }
     }
     if contains(chain, &|k| {
@@ -320,7 +397,7 @@ fn transport_class(chain: &ErrorChain) -> Option<ErrorClass> {
 /// Classifies a chain with Go's 7-step precedence, first
 /// match wins. `token` is the scrub token (empty when the
 /// caller has none).
-/// Source: `internal/telegram/bot.go`, `classifyError`.
+/// Source: `internal/telegram/bot.go:817`, `classifyError`.
 pub fn classify_error(chain: Option<&ErrorChain>, token: &str) -> ErrorClass {
     let Some(chain) = chain else {
         return ErrorClass::Unclassified;
@@ -349,7 +426,7 @@ pub fn classify_error(chain: Option<&ErrorChain>, token: &str) -> ErrorClass {
 /// Renders a chain as a class/length summary. `None`
 /// classifies as unclassified with length 0; otherwise the
 /// length is the rune count of the root (whole-error) text.
-/// Source: `internal/telegram/bot.go`, `summarizeError`.
+/// Source: `internal/telegram/bot.go:764`, `summarizeError`.
 pub fn summarize_error(chain: Option<&ErrorChain>, token: &str) -> String {
     match chain {
         None => format_summary(ErrorClass::Unclassified, 0),
@@ -360,6 +437,27 @@ pub fn summarize_error(chain: Option<&ErrorChain>, token: &str) -> String {
     }
 }
 
+/// The first level (pre-order DFS, children in unwrap
+/// order) whose kind satisfies `want`, or `None`. Matches Go
+/// `errors.As` visit order for the `scrubErr` preservation
+/// scans (`bot.go:1156`). Existence-only scans (steps 1/3/4)
+/// do not use this: their result is order-insensitive.
+fn first_match<'a>(
+    chain: &'a ErrorChain,
+    want: &dyn Fn(&LevelKind) -> bool,
+) -> Option<&'a ChainLevel> {
+    let mut stack: Vec<&'a ChainLevel> = vec![&chain.root];
+    while let Some(level) = stack.pop() {
+        if want(&level.kind) {
+            return Some(level);
+        }
+        for child in level.children.iter().rev() {
+            stack.push(child);
+        }
+    }
+    None
+}
+
 /// Returns a copy of `chain` with the token scrubbed out of
 /// the error text AND out of every preserved typed field.
 /// Transport/context kinds are deliberately dropped; only
@@ -368,62 +466,44 @@ pub fn summarize_error(chain: Option<&ErrorChain>, token: &str) -> String {
 /// and original id, sentinels in Go's listed order), as
 /// children of a new plain root carrying the scrubbed whole
 /// text. A `None` chain stays `None`.
-/// Source: `internal/telegram/bot.go`, `scrubErr`.
+/// Source: `internal/telegram/bot.go:1156`, `scrubErr`.
 pub fn scrub_chain(chain: Option<&ErrorChain>, token: &str) -> Option<ErrorChain> {
     let chain = chain?;
     let root_text = scrub_text(&chain.root.text, token);
     let mut unwraps: Vec<ChainLevel> = Vec::new();
-    // TMR first (errors.As order in Go's scrubErr).
-    let mut stack: Vec<&ChainLevel> = vec![&chain.root];
-    let mut tmr: Option<ChainLevel> = None;
-    while let Some(level) = stack.pop() {
+    // TMR first, in pre-order DFS (children in unwrap order),
+    // matching Go `errors.As` in `scrubErr`: the FIRST match
+    // wins, never the last.
+    if let Some(level) = first_match(chain, &|k| matches!(k, LevelKind::TooManyRequests { .. })) {
         if let LevelKind::TooManyRequests {
             message,
             retry_after,
         } = &level.kind
         {
-            if tmr.is_none() {
-                tmr = Some(ChainLevel::leaf(
-                    "",
-                    LevelKind::TooManyRequests {
-                        message: scrub_text(message, token),
-                        retry_after: *retry_after,
-                    },
-                ));
-            }
-        }
-        for child in &level.children {
-            stack.push(child);
+            unwraps.push(ChainLevel::leaf(
+                "",
+                LevelKind::TooManyRequests {
+                    message: scrub_text(message, token),
+                    retry_after: *retry_after,
+                },
+            ));
         }
     }
-    if let Some(t) = tmr {
-        unwraps.push(t);
-    }
-    // Migrate second.
-    let mut stack: Vec<&ChainLevel> = vec![&chain.root];
-    let mut mig: Option<ChainLevel> = None;
-    while let Some(level) = stack.pop() {
+    // Migrate second, same pre-order discipline.
+    if let Some(level) = first_match(chain, &|k| matches!(k, LevelKind::Migrate { .. })) {
         if let LevelKind::Migrate {
             message,
             migrate_to_chat_id,
         } = &level.kind
         {
-            if mig.is_none() {
-                mig = Some(ChainLevel::leaf(
-                    "",
-                    LevelKind::Migrate {
-                        message: scrub_text(message, token),
-                        migrate_to_chat_id: *migrate_to_chat_id,
-                    },
-                ));
-            }
+            unwraps.push(ChainLevel::leaf(
+                "",
+                LevelKind::Migrate {
+                    message: scrub_text(message, token),
+                    migrate_to_chat_id: *migrate_to_chat_id,
+                },
+            ));
         }
-        for child in &level.children {
-            stack.push(child);
-        }
-    }
-    if let Some(m) = mig {
-        unwraps.push(m);
     }
     // Sentinels in Go's listed order.
     for kind in [
@@ -1273,6 +1353,132 @@ mod tests {
         assert_eq!(
             classify_error(Some(&short), TOKEN),
             ErrorClass::Unclassified
+        );
+    }
+
+    // FIX-LOOP REGRESSION (Round 1 finding F1, typed path;
+    // not a ported case): a multibyte char in the HTTP
+    // code window must classify as unclassified through
+    // `classify_error`, never panic.
+    #[test]
+    fn regression_f1_multibyte_http_via_classify() {
+        let c = chain(plain("error response from telegram for method ab, éé"));
+        assert_eq!(classify_error(Some(&c), TOKEN), ErrorClass::Unclassified);
+    }
+
+    // FIX-LOOP REGRESSION (Round 1 finding F3a; not a
+    // ported case): Go `transportClass` checks only the
+    // FIRST `*url.Error`'s inner text. A hiding-wrapper
+    // outer UrlError over a TLS inner must stay
+    // unclassified; deeper UrlError levels are never
+    // consulted.
+    #[test]
+    fn regression_f3a_first_url_error_only() {
+        let inner_url = ChainLevel {
+            text: "hiding wrapper".to_string(),
+            kind: LevelKind::UrlError,
+            children: vec![plain("tls: bad certificate")],
+        };
+        let root = ChainLevel {
+            text: "outer".to_string(),
+            kind: LevelKind::UrlError,
+            children: vec![inner_url],
+        };
+        let c = chain(root);
+        assert_eq!(classify_error(Some(&c), TOKEN), ErrorClass::Unclassified);
+    }
+
+    // FIX-LOOP REGRESSION (Round 1 finding F3b; not a
+    // ported case): Go `scrubErr` via `errors.As` keeps the
+    // FIRST match in pre-order DFS. With two TMR children
+    // (and, separately, two Migrate children), the scrubbed
+    // chain must preserve the first, not the last.
+    #[test]
+    fn regression_f3b_scrub_keeps_first_match() {
+        let tmr_a = ChainLevel {
+            text: "msg A".to_string(),
+            kind: LevelKind::TooManyRequests {
+                message: "msg A".to_string(),
+                retry_after: 1,
+            },
+            children: vec![],
+        };
+        let tmr_b = ChainLevel {
+            text: "msg B".to_string(),
+            kind: LevelKind::TooManyRequests {
+                message: "msg B".to_string(),
+                retry_after: 2,
+            },
+            children: vec![],
+        };
+        let c = chain(ChainLevel::plain("x", vec![tmr_a, tmr_b]));
+        let scrubbed = scrub_chain(Some(&c), TOKEN).expect("scrub_chain of Some");
+        assert_eq!(scrubbed.root.children.len(), 1);
+        match &scrubbed.root.children[0].kind {
+            LevelKind::TooManyRequests {
+                message,
+                retry_after,
+            } => {
+                assert_eq!(message, "msg A");
+                assert_eq!(*retry_after, 1);
+            }
+            other => panic!("scrubbed child kind = {other:?}, want TooManyRequests A/1"),
+        }
+
+        let mig_a = ChainLevel {
+            text: "mig A".to_string(),
+            kind: LevelKind::Migrate {
+                message: "mig A".to_string(),
+                migrate_to_chat_id: 10,
+            },
+            children: vec![],
+        };
+        let mig_b = ChainLevel {
+            text: "mig B".to_string(),
+            kind: LevelKind::Migrate {
+                message: "mig B".to_string(),
+                migrate_to_chat_id: 20,
+            },
+            children: vec![],
+        };
+        let c = chain(ChainLevel::plain("x", vec![mig_a, mig_b]));
+        let scrubbed = scrub_chain(Some(&c), TOKEN).expect("scrub_chain of Some");
+        assert_eq!(scrubbed.root.children.len(), 1);
+        match &scrubbed.root.children[0].kind {
+            LevelKind::Migrate {
+                message,
+                migrate_to_chat_id,
+            } => {
+                assert_eq!(message, "mig A");
+                assert_eq!(*migrate_to_chat_id, 10);
+            }
+            other => panic!("scrubbed child kind = {other:?}, want Migrate A/10"),
+        }
+    }
+
+    // FIX-LOOP REGRESSION (Round 1 finding F5, hardening;
+    // not a ported case): `Debug` of an UNSCRUBBED chain must
+    // never emit raw message text (e.g. a token). Only
+    // lengths/kinds may appear.
+    #[test]
+    fn regression_f5_debug_never_prints_raw_text() {
+        let c = chain(ChainLevel {
+            text: format!("error carrying {TOKEN}"),
+            kind: LevelKind::TooManyRequests {
+                message: format!("server said {TOKEN}"),
+                retry_after: 5,
+            },
+            children: vec![plain(&format!("child {TOKEN}"))],
+        });
+        let debug = format!("{c:?}");
+        assert!(
+            !debug.contains(TOKEN),
+            "unscrubbed chain Debug leaked the token: {debug}"
+        );
+        let level_debug = format!("{:?}", c.root);
+        assert!(
+            !level_debug.contains(TOKEN),
+            "unscrubbed level Debug leaked the token: {level_debug}"
         );
     }
 }

@@ -11,8 +11,15 @@ use regex::Regex;
 use std::sync::OnceLock;
 use unescape::unescape_html;
 
+/// Telegram chunk size: one message carries at most this
+/// many chars (room for markup).
+/// Source: `internal/telegram/text.go:26` (`ChunkSize`).
 pub const CHUNK_SIZE: usize = 3800;
+/// Telegram's hard per-message limit, in chars.
+/// Source: `internal/telegram/text.go:30` (`TextLimit`).
 pub const TEXT_LIMIT: usize = 4096;
+/// File-caption limit, in chars.
+/// Source: `internal/telegram/text.go:34` (`CaptionLimit`).
 pub const CAPTION_LIMIT: usize = 1024;
 
 /// Escapes `&`, `<`, `>` only (quote=False).
@@ -241,11 +248,12 @@ pub fn split_text(text: &str) -> Vec<String> {
 ///
 /// Deliberate deviation (D-split0): `limit == 0` returns the whole
 /// text as one piece. Go loops forever on `limit == 0` (and on
-/// limits 1-2 when a cut lands at 0 with a space-led remainder);
-/// no test pins that behaviour. The cut-at-zero guard below keeps
-/// limits 1-2 terminating with the same pieces Go produces on
-/// every input where Go terminates (probe round 1: the Go probe
-/// hung 56s on `splitTextLimit("a b c d e f g h", 1)`).
+/// limits 1-2 when a cut lands at 0 with a space/letter-led
+/// remainder); no test pins that behaviour. The cut-at-zero guard
+/// below forces a hard cut ONLY when the remainder does not start
+/// with '\n' — the one non-progressing case. When the remainder
+/// starts with '\n', Go terminates (empty piece + newline strip)
+/// and the port reproduces its trace exactly.
 pub(crate) fn split_text_limit(text: &str, limit: usize) -> Vec<String> {
     if limit == 0 {
         return vec![text.to_string()];
@@ -253,28 +261,30 @@ pub(crate) fn split_text_limit(text: &str, limit: usize) -> Vec<String> {
     let mut r: Vec<char> = text.chars().collect();
     let mut pieces: Vec<String> = Vec::new();
     while r.len() > limit {
-        // `cut` is -1 when no break was found (Go `rfindRunes`
-        // returns -1); -1 < limit/3 always, so the next fallback
-        // runs, exactly as in Go.
-        let mut cut: isize = rfind_runes(&r, &['\n', '\n'], limit);
-        if cut < (limit / 3) as isize {
-            cut = rfind_runes(&r, &['\n'], limit);
-        }
-        if cut < (limit / 3) as isize {
-            cut = rfind_runes(&r, &[' '], limit);
-        }
-        if cut < (limit / 3) as isize {
-            cut = limit as isize;
-        }
-        if cut == 0 {
-            // Go accepts cut == 0 when limit/3 == 0 and then loops
-            // forever on a space-led remainder (empty piece, same
-            // remainder). Force the hard cut instead: progress is
-            // guaranteed and every terminating Go trace is unchanged
-            // (cut == 0 is only accepted by Go when limit < 3).
-            cut = limit as isize;
-        }
-        let cut = cut as usize;
+        // `None` when no break was found (Go `rfindRunes`
+        // returns -1); below the `limit / 3` threshold the next
+        // fallback runs, exactly as in Go. All comparisons are
+        // in `usize`: no `isize` cast, so no wrapping for huge
+        // limits (see safety finding S1).
+        let threshold = limit / 3;
+        let cut = rfind_runes(&r, &['\n', '\n'], limit)
+            .filter(|&c| c >= threshold)
+            .or_else(|| rfind_runes(&r, &['\n'], limit).filter(|&c| c >= threshold))
+            .or_else(|| rfind_runes(&r, &[' '], limit).filter(|&c| c >= threshold))
+            .unwrap_or(limit);
+        let cut = if cut == 0 && r.first() != Some(&'\n') {
+            // Go accepts cut == 0 when limit/3 == 0 and then
+            // loops forever on a space/letter-led remainder
+            // (empty piece, same remainder: the newline strip
+            // is identity). Force the hard cut only in that
+            // non-progressing case; a '\n'-led remainder
+            // progresses in Go and keeps Go's empty-piece
+            // trace here (cut == 0 is only accepted by Go
+            // when limit < 3).
+            limit
+        } else {
+            cut
+        };
         let piece: String = r[..cut].iter().collect();
         pieces.push(piece.trim_end_matches(char::is_whitespace).to_string());
         let rest = &r[cut..];
@@ -308,22 +318,27 @@ pub(crate) fn split_text_limit(text: &str, limit: usize) -> Vec<String> {
     fixed
 }
 
-/// Last match of `needle` fully inside `r[..limit]`, or -1.
-/// Mirrors Go `rfindRunes` (`text.go:208`).
-fn rfind_runes(r: &[char], needle: &[char], limit: usize) -> isize {
+/// Last match of `needle` fully inside `r[..limit]`, or `None`.
+/// Mirrors Go `rfindRunes` (`text.go:208`), with absence as
+/// `None` instead of Go's -1 sentinel.
+fn rfind_runes(r: &[char], needle: &[char], limit: usize) -> Option<usize> {
     if needle.is_empty() || limit < needle.len() {
-        return -1;
+        return None;
     }
     let end = limit.min(r.len());
-    let mut i = end as isize - needle.len() as isize;
-    while i >= 0 {
-        let start = i as usize;
-        if r[start..start + needle.len()] == *needle {
-            return i;
+    if end < needle.len() {
+        return None;
+    }
+    let mut i = end - needle.len();
+    loop {
+        if r[i..i + needle.len()] == *needle {
+            return Some(i);
+        }
+        if i == 0 {
+            return None;
         }
         i -= 1;
     }
-    -1
 }
 
 /// Longest fenced code-block body in chars (complete pairs only).
@@ -525,5 +540,45 @@ mod tests {
             !needs_document(&("```\n".to_string() + &"c".repeat(3000) + "```")),
             "NeedsDocument(code block 3000)"
         );
+    }
+
+    // FIX-LOOP REGRESSION (Round 1 finding F2; not a ported
+    // case): at limit 2, Go accepts cut == 0 and progresses
+    // when the remainder starts with '\n' (empty piece +
+    // newline strip). The cut-at-zero guard must fire only
+    // when the remainder does NOT start with '\n'.
+    #[test]
+    fn regression_f2_split_limit2_newline_led() {
+        assert_eq!(
+            split_text_limit("\nABC", 2),
+            vec!["".to_string(), "AB".to_string(), "C".to_string()]
+        );
+        assert_eq!(
+            split_text_limit("\nABCDEF", 2),
+            vec![
+                "".to_string(),
+                "AB".to_string(),
+                "CD".to_string(),
+                "EF".to_string()
+            ]
+        );
+        // Limit-0 guard unchanged: whole text, one piece.
+        assert_eq!(split_text_limit("abc", 0), vec!["abc".to_string()]);
+        // Space-led remainder: the documented deviation — Go
+        // hangs here, the port forces the hard cut and
+        // terminates.
+        assert_eq!(
+            split_text_limit(" aaaa", 2),
+            vec![" a".to_string(), "aa".to_string(), "a".to_string()]
+        );
+    }
+
+    // FIX-LOOP REGRESSION (Round 1 safety finding S1; not a
+    // ported case): a limit of `usize::MAX` must terminate
+    // (whole text, one piece) instead of wrapping through
+    // `isize` and panicking on an out-of-bounds cut.
+    #[test]
+    fn regression_s1_usize_max_limit_terminates() {
+        assert_eq!(split_text_limit("abc", usize::MAX), vec!["abc".to_string()]);
     }
 }

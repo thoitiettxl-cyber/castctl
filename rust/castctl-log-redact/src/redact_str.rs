@@ -12,11 +12,13 @@ use regex::Regex;
 use std::sync::OnceLock;
 
 /// Marker for URL userinfo: `<redacted>`.
-/// Source: `internal/redact/redact.go` (`Marker`).
+/// Source: `internal/redact/value.go:16` (`Marker`).
 pub const MARKER: &str = "<redacted>";
 
 /// Marker for every other redaction: `[redacted]`.
-/// Source: `internal/redact/redact.go` (`Redacted`).
+/// Source: the `"[redacted]"` literal in
+/// `internal/redact/string.go` (no `Redacted` symbol exists
+/// in Go).
 pub const REDACTED: &str = "[redacted]";
 
 fn re_query_token() -> &'static Regex {
@@ -87,7 +89,7 @@ fn re_url_userinfo() -> &'static Regex {
 /// cookie fragments (including JSON form), and Bearer tokens,
 /// labelled or bare. Idempotent. A `vm_id` query value, a
 /// `{"password": ...}` fragment, and plain email text survive.
-/// Source: `internal/redact/string.go:47` (`String`).
+/// Source: `internal/redact/string.go:59` (`String`).
 pub fn redact_string(s: &str) -> String {
     if s.is_empty() {
         return s.to_string();
@@ -119,7 +121,7 @@ pub fn redact_string(s: &str) -> String {
 /// host byte-identical. Only a `scheme://...@` pattern is
 /// redacted; an empty userinfo, a plain email, and an `@` in a
 /// path/query/fragment are unchanged. Idempotent.
-/// Source: `internal/redact/redact.go:119` (`RedactURLUserinfo`).
+/// Source: `internal/redact/redact.go:114` (`RedactURLUserinfo`).
 pub fn redact_url_userinfo(s: &str) -> String {
     if s.is_empty() {
         return s.to_string();
@@ -182,7 +184,7 @@ const SECRET_KEYS: &[&str] = &[
 /// Reports whether `key` names secret material. The comparison
 /// is case-insensitive and exact after lowercasing: `"Password"`
 /// matches, `"my_token"` and `"vmid"` do not.
-/// Source: `internal/redact/value.go:92` (`IsSecretKey`).
+/// Source: `internal/redact/value.go:93` (`IsSecretKey`).
 pub fn is_secret_key(key: &str) -> bool {
     // Go `strings.ToLower`: simple per-rune folding.
     let lower: String = key.chars().flat_map(|c| c.to_lowercase().next()).collect();

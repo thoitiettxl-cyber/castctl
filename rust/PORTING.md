@@ -92,15 +92,15 @@ no test pins one).
 | `SafeErr` (`safe.go:1028`) | `safe_err_text(Option<&str>)` | `None` → `""` (preserves Go nil; R2's `&str` proposal dropped the case) |
 | `redact.String` (`string.go`) | `redact_string` | 7 steps, split markers (`<redacted>` userinfo, `[redacted]` others) |
 | `redact.RedactURLUserinfo` | `redact_url_userinfo` | Greedy to last `@` |
-| `redact.IsSecretKey` (`value.go:92`) | `is_secret_key` | Exact-after-lowercase, 43 keys |
-| `redact.Marker` / `Redacted` | `MARKER` / `REDACTED` | |
-| `summarize` / `summarizeClass` / `formatSummary` (`bot.go`) | `summarize`, `summarize_class`, `format_summary` | String-only path; decode prefix `telegram poll error:` |
-| `fallbackClass` | `fallback_class` | Never matches decode phrases (load-bearing split) |
-| `anchoredDecodeClass` | `anchored_decode_class` | `HasPrefix` only |
-| `httpClassFromPrefix` | `http_class_from_prefix` | 3 ASCII digits at the anchored position |
-| `isTLSFailure` | `is_tls_failure_text` | Lowercased first 256 runes |
-| `classifyError` (7 steps) | `classify_error` + `ErrorChain`/`ChainLevel`/`LevelKind` | Tree model, depth cap 32 on anchored passes only |
-| `scrubErr` | `scrub_chain` | New owned chain; transport/context kinds dropped |
+| `redact.IsSecretKey` (`value.go:93`) | `is_secret_key` | Exact-after-lowercase, 43 keys |
+| `redact.Marker` (`value.go:16`) / `"[redacted]"` literal (`string.go`) | `MARKER` / `REDACTED` | No `Redacted` symbol exists in Go |
+| `summarize` (`bot.go:740`) / `summarizeClass` (`bot.go:1092`) / `formatSummary` (`bot.go:750`) | `summarize`, `summarize_class`, `format_summary` | String-only path; decode prefix `telegram poll error:` |
+| `fallbackClass` (`bot.go:1015`) | `fallback_class` | Never matches decode phrases (load-bearing split) |
+| `anchoredDecodeClass` (`bot.go:907`) | `anchored_decode_class` | `HasPrefix` only |
+| `httpClassFromPrefix` (`bot.go:925`) | `http_class_from_prefix` | 3 ASCII digits at the anchored position, checked on bytes |
+| `isTLSFailure` (`bot.go:999`) | `is_tls_failure_text` | Lowercased first 256 runes |
+| `classifyError` (7 steps, `bot.go:817`) | `classify_error` + `ErrorChain`/`ChainLevel`/`LevelKind` | Tree model, depth cap 32 on anchored passes only |
+| `scrub` (`bot.go:1125`) / `scrubErr` (`bot.go:1156`) | `scrub_text`, `scrub_chain` | New owned chain; transport/context kinds dropped; scrub keeps the first TMR/Migrate match in pre-order DFS |
 | `ErrorClass` (20 labels) | `ErrorClass` (20 variants) | Exact `Display` labels |
 | `net/url` slice for `redactParsedURL` | `url.rs` (private) | Hand-rolled (D-url); see §4 |
 
@@ -140,8 +140,33 @@ text, and no preview/snippet variant exists.
   returns the whole text as one piece; Go loops forever (observed:
   the Go probe hung 56 s on `splitTextLimit("a b c d e f g h", 1)`
   and was terminated). For limits 1–2 the Rust cutter forces a hard
-  cut when the break search lands at 0, instead of looping. No Go
-  case pins either behaviour.
+  cut when the break search lands at 0 ONLY if the remainder does
+  not start with `'\n'` (Round 1 fix F2): that is the one case
+  where Go loops forever with cut == 0 (the newline strip is
+  identity on a space/letter-led remainder). When the remainder
+  starts with `'\n'`, Go terminates (empty piece + newline strip)
+  and the port reproduces its trace exactly
+  (`split_text_limit("\nABCDEF", 2) == ["", "AB", "CD", "EF"]`).
+  No Go case pins either behaviour.
+- **Chain traversal contracts (Round 1 fixes F3a/F3b)** — the
+  URL-inner TLS step of `transport_class` checks ONLY the first
+  `*url.Error` level in pre-order DFS (Go `errors.As` in
+  `transportClass`, `bot.go:956`); deeper `UrlError` levels are
+  never consulted. The `scrub_chain` TMR/Migrate preservation
+  scans walk in pre-order DFS and keep the FIRST match (Go
+  `errors.As` in `scrubErr`, `bot.go:1156`), not the last.
+  Step-1/3/4 existence scans and `chain_prefix_class` DFS order
+  are unchanged (order-insensitive / verified matching Go).
+- **Pct-label lossy conversion (Round 1 finding F4, documented
+  difference, no behaviour change)** — `normalize_pct_labels`
+  EMITS the decoded label form (it is not match-only): when the
+  decoded label bytes are invalid UTF-8, Rust emits U+FFFD where
+  Go emits the raw bytes (e.g. `token%C3%28=` → Go keeps byte
+  `0xC3`, Rust emits U+FFFD). No invariant leak: the value
+  survives unredacted in both implementations (the malformed
+  label breaks the key=value pattern in both), and both are
+  idempotent on probed inputs. The pinned ASCII `%XX` corpus is
+  unaffected.
 - **D-safe** — `SafeString` is 12 passes (not 11); no 400-byte code
   cap (400 is a test assertion only); `summarize_class` does NOT
   lowercase (quirk preserved).
@@ -234,6 +259,48 @@ port, all re-verified after the fix:
    `char::is_whitespace` exactly; `strings.ToLower` = simple
    per-rune folding (reproduced by `go_lower`).
 
+### 6.4 Round 1 fix loop: review findings and their fixes
+
+Round 1 reviews (technical / safety / red-team) found three
+blocking parity breaks, fixed in the fix loop with RED-then-GREEN
+regression tests (labelled `regression_*`, outside the ported-case
+counts in §7):
+
+6. **F1 — multibyte HTTP code window** — `http_class_from_prefix`
+   sliced `&rest[i+2..i+5]` and panicked mid-char; Go checks bytes.
+   Fixed to byte-level digit checks (no `&str` slicing); regression
+   tests pin the three multibyte inputs to `None` plus ASCII
+   neighbours (500→`http 5xx`, 422→`http 4xx`, 302/5/`5é0`→`None`).
+7. **F2 — cut-at-zero guard scope** — the guard fired on every
+   cut == 0, falsifying Go's terminating `\n`-led traces at limit 2.
+   Fixed to the conditioned guard (see §4); regression tests pin
+   `"\nABC"`/`"\nABCDEF"` at limit 2, the limit-0 guard, and the
+   space-led deviation.
+8. **F3a/F3b — chain traversal discipline** — `transport_class`
+   scanned every `UrlError` level (Go: first only); `scrub_chain`
+   kept the LAST TMR/Migrate match (Go `errors.As`: first, in
+   pre-order DFS). Both fixed; regression tests pin the
+   hiding-wrapper chain (unclassified) and the two-TMR / two-Migrate
+   first-match preservation. See §4 for the traversal contracts.
+9. **F4 — pct-label lossy conversion** — documented difference, no
+   behaviour change; see §4. `normalize_pct_labels` EMITS the
+   decoded label form: invalid-UTF-8 decoded bytes become U+FFFD
+   in Rust where Go emits the raw bytes.
+10. **F5 — `Debug` hardening** — `ChainLevel`/`LevelKind` now have
+    hand-written `Debug` impls that print only rune lengths for
+    text/message fields, never raw text; a regression test asserts
+    an unscrubbed chain's `Debug` output is token-free.
+11. **S1/S3/C1 (docs/hygiene)** — Go `file:line` citations in
+    `castctl-log-redact` corrected (e.g. `string.go:59`,
+    `redact.go:114`, `value.go:93`, `Marker` at `value.go:16`;
+    `bot.go` line numbers added for every summarize/chain fn);
+    doc comments added to the three public consts in
+    `castctl-tg-text`; log-safety warnings added to the raw-text
+    primitives `first_runes`/`scrub_text`. `split_text_limit` no
+    longer casts limits through `isize` (safety S1): all cut
+    arithmetic is `usize` with `Option`-absence instead of a -1
+    sentinel; a regression test pins `limit == usize::MAX`.
+
 **Round-3 golden comparison (final):** 137 corpus lines
 (`SAFE` + `UNESC`, incl. marker URLs, DEL in URL, `[` in path,
 `!()*'` in path, `%25` zone IPv6, `%FF` bytes, JSON-scanner edges,
@@ -247,7 +314,10 @@ approximations in §4, never silent behaviour changes.
 
 Counts are Rust test functions / Go test functions; case counts are
 table entries. Probe tests are labelled `probe_*`, live outside the
-ported-case count, and are listed separately.
+ported-case count, and are listed separately. Fix-loop regression
+tests are labelled `regression_*` and likewise live outside the
+ported-case counts (see §6.4): 2 in `castctl-tg-text` (F2, S1) and
+5 in `castctl-log-redact` (F1 ×2, F3a, F3b, F5).
 
 ### 7.1 `castctl-tg-text` — 7 Go fns → 7 Rust fns, 20 assertions
 
