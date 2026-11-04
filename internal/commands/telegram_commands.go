@@ -73,6 +73,34 @@ var telegramDeferredCommands = map[string]bool{
 
 var commandNameRe = regexp.MustCompile(`^[a-z_]+$`)
 
+// telegramCommandMenu is the single source for the "/" menu
+// registered at startup (setMyCommands, see cmdTelegramRun):
+// exactly the commands runCommand wires, in dispatch order,
+// with short English descriptions. Deferred commands
+// (telegramDeferredCommands) and the not-available /login and
+// /raw are deliberately absent: the menu must never offer a
+// command that answers "not wired" or "not available".
+var telegramCommandMenu = []telegram.Command{
+	{Name: "start", Description: "Start the bot and show how to talk to Muse"},
+	{Name: "help", Description: "Show the command list and how to talk to Muse"},
+	{Name: "stop", Description: "Stop Muse's current turn in this chat"},
+	{Name: "status", Description: "Show Muse, chat, and toggle status"},
+	{Name: "chats", Description: "Open another chat or the main chat"},
+	{Name: "main", Description: "Switch back to the main chat"},
+	{Name: "new", Description: "Start a new side chat"},
+	{Name: "history", Description: "Show recent messages in this chat"},
+	{Name: "unread", Description: "Show unread counts"},
+	{Name: "rename", Description: "Rename the current side chat"},
+	{Name: "pin", Description: "Pin the current side chat"},
+	{Name: "unpin", Description: "Unpin the current side chat"},
+	{Name: "archive", Description: "Archive the current side chat"},
+	{Name: "unarchive", Description: "Unarchive the current side chat"},
+	{Name: "delete", Description: "Delete the current side chat (asks first)"},
+	{Name: "approvals", Description: "List pending approvals"},
+	{Name: "autoapprove", Description: "Show or change auto-approve settings"},
+	{Name: "watch", Description: "Show or change the watch flag"},
+}
+
 // dispatch routes one message: "/name args" to the command
 // table (Python on_message/run_command, tgbot.py:1013-1040),
 // anything else with non-blank text to a turn. The name is the

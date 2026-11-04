@@ -247,6 +247,14 @@ func cmdTelegramRun(ctx context.Context, env *Env, g *globalOpts, args []string)
 	if err != nil {
 		return err
 	}
+	// Register the "/" menu now that getMe has succeeded (New
+	// already called it): exactly the wired commands, no
+	// deferred or unavailable ones. A failure only warns —
+	// polling must start regardless, and the menu can be
+	// re-registered on the next start.
+	if err := bot.SetCommands(ctx, telegramCommandMenu); err != nil {
+		logger.Warn("telegram setMyCommands failed", "err", logging.SummarizeErr(err))
+	}
 	runner = newTelegramTurnRunner(telegramTurnDeps{
 		env:     env,
 		bot:     bot,

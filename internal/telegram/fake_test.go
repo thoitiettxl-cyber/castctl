@@ -23,6 +23,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
 )
 
 const fakeToken = "123456:FAKE-TOKEN-0123456789ABCD"
@@ -66,7 +69,11 @@ type fakeTelegramServer struct {
 	redirectTarget string
 	sendFailures   []scriptedFailure
 	editFailures   []scriptedFailure
-	editTextTrue   bool
+	// setMyCommandsFailures scripts setMyCommands errors in
+	// order (a 400 by default in the SetCommands failure
+	// test); empty means setMyCommands succeeds.
+	setMyCommandsFailures []scriptedFailure
+	editTextTrue          bool
 }
 
 func newFakeTelegramServer(t *testing.T) *fakeTelegramServer {
@@ -195,6 +202,25 @@ func (f *fakeTelegramServer) handle(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"ok":true,"result":{"message_id":%s,"chat":{"id":%s,"type":"private"},"date":0,"text":%s}}`,
 			form["message_id"], form["chat_id"], jsonString(form["text"]))
 	case "editMessageReplyMarkup", "answerCallbackQuery", "deleteMessage":
+		fmt.Fprint(w, `{"ok":true,"result":true}`)
+	case "setMyCommands":
+		// The commands JSON arrives as the "commands" multipart
+		// field; it is already recorded in f.calls by the
+		// handler prologue, so this case only decides the
+		// outcome. A scripted failure lets SetCommands tests
+		// prove the scrubbed-error path without a live server.
+		f.mu.Lock()
+		var fail *scriptedFailure
+		if len(f.setMyCommandsFailures) > 0 {
+			c := f.setMyCommandsFailures[0]
+			f.setMyCommandsFailures = f.setMyCommandsFailures[1:]
+			fail = &c
+		}
+		f.mu.Unlock()
+		if fail != nil {
+			writeFakeErrorParams(w, fail.Code, fail.Desc, fail.RetryAfter)
+			return
+		}
 		fmt.Fprint(w, `{"ok":true,"result":true}`)
 	default:
 		writeFakeError(w, 404, "Not Found")
@@ -514,3 +540,100 @@ func stopBot(t *testing.T, cancel context.CancelFunc, done chan error) error {
 }
 
 var errTestDecider = errors.New("test decider failure")
+
+// SetCommands tests: the menu registration call, its
+// pre-request validation, and its scrubbed-error path. The
+// fake records the "commands" multipart field, so the test
+// asserts the exact JSON the library sent, not a re-derived
+// copy of it.
+
+func TestSetCommandsRegistersMenu(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	cmds := []Command{
+		{Name: "start", Description: "Start the bot"},
+		{Name: "help", Description: "Show the command list"},
+	}
+	if err := tb.bot.SetCommands(context.Background(), cmds); err != nil {
+		t.Fatalf("SetCommands = %v; want nil", err)
+	}
+	calls := srv.callsOf("setMyCommands")
+	if len(calls) != 1 {
+		t.Fatalf("setMyCommands calls = %d; want 1", len(calls))
+	}
+	raw := calls[0].Form["commands"]
+	if raw == "" {
+		t.Fatal("setMyCommands recorded no commands field")
+	}
+	if strings.Contains(raw, fakeToken) {
+		t.Error("commands field carries the token")
+	}
+	var got []models.BotCommand
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("commands field %q is not BotCommand JSON: %v", raw, err)
+	}
+	want := []models.BotCommand{
+		{Command: "start", Description: "Start the bot"},
+		{Command: "help", Description: "Show the command list"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("commands = %+v; want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("commands[%d] = %+v; want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestSetCommandsRejectsInvalidCommand(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	tb := newTestBot(t, srv, nil)
+	cases := []struct {
+		name string
+		cmds []Command
+	}{
+		{"uppercase and dash", []Command{{Name: "Bad-Name", Description: "bad name"}}},
+		{"space", []Command{{Name: "has space", Description: "bad name"}}},
+		{"empty name", []Command{{Name: "", Description: "bad name"}}},
+		{"name over 32", []Command{{Name: strings.Repeat("a", 33), Description: "bad name"}}},
+		{"empty description", []Command{{Name: "ok", Description: ""}}},
+		{"description over 256", []Command{{Name: "ok", Description: strings.Repeat("x", 257)}}},
+		{"duplicate name", []Command{{Name: "ok", Description: "first"}, {Name: "ok", Description: "second"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tb.bot.SetCommands(context.Background(), tc.cmds); err == nil {
+				t.Errorf("SetCommands(%v) = nil; want an error", tc.cmds)
+			}
+		})
+	}
+	if got := srv.count("setMyCommands"); got != 0 {
+		t.Errorf("setMyCommands calls = %d after invalid inputs; want 0 (validation precedes any request)", got)
+	}
+}
+
+func TestSetCommandsFailureIsScrubbed(t *testing.T) {
+	t.Parallel()
+	srv := newFakeTelegramServer(t)
+	// Hostile server body: a 400 whose description embeds the
+	// fixture token. The returned error must keep the bad
+	// request class and lose the token.
+	srv.setMyCommandsFailures = []scriptedFailure{{Code: 400, Desc: "Bad Request: " + fakeToken}}
+	tb := newTestBot(t, srv, nil)
+	err := tb.bot.SetCommands(context.Background(), []Command{{Name: "start", Description: "Start the bot"}})
+	if err == nil {
+		t.Fatal("SetCommands = nil on a 400; want an error")
+	}
+	if !errors.Is(err, bot.ErrorBadRequest) {
+		t.Errorf("SetCommands error = %v; want errors.Is ErrorBadRequest", err)
+	}
+	if strings.Contains(err.Error(), fakeToken) {
+		t.Errorf("SetCommands error carries the token: %q", err.Error())
+	}
+	if got := srv.count("setMyCommands"); got != 1 {
+		t.Errorf("setMyCommands calls = %d; want 1", got)
+	}
+}
