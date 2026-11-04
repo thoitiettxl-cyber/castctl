@@ -356,8 +356,12 @@ func TestTelegramFSCatRuneBoundary(t *testing.T) {
 	// the concatenation is the one <pre> message.
 	h, cancel := runReadBot(t, gw)
 	defer cancel()
-	sends := sendFS(t, h, "/fs cat exact.txt")
-	joined := strings.Join(sends, "")
+	h.fake.setBatches([]string{telegramUpdate(1, 111, "/fs cat exact.txt")})
+	// Wait for BOTH split pieces: the wrapped send is 3828
+	// runes, so the bot's splitter delivers it in two pieces;
+	// returning on the first would race the second (PR-D F5).
+	waitFor(t, "2 sends", func() bool { return len(h.fake.sendsSeen()) >= 2 })
+	joined := strings.Join(h.fake.sendsSeen(), "")
 	want := "<b>/exact.txt</b>\n<pre>" + strings.Repeat("é", 3800) + "</pre>"
 	if joined != want {
 		t.Fatalf("joined sends = %d runes; want the one <pre> message with 3800 é", utf8.RuneCountInString(joined))
