@@ -44,14 +44,19 @@ package telegram
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -650,7 +655,7 @@ func (b *Bot) defaultHandler(_ context.Context, _ *bot.Bot, upd *models.Update) 
 // description, or raw update bytes — reaches a log line at any
 // level, whatever the error's shape or size.
 func (b *Bot) errorsHandler(err error) {
-	b.logger.Error("telegram poll error", "err", b.summarize(err.Error()))
+	b.logger.Error("telegram poll error", "err", b.summarizeError(err))
 }
 
 // summarize renders an error for a log line as a class/length
@@ -658,7 +663,8 @@ func (b *Bot) errorsHandler(err error) {
 // chosen from a small safe vocabulary (library error classes
 // and the response/update decode classes) detected in a
 // bounded prefix; an unrecognised shape renders with the
-// generic class. Detection only selects the label: the bound
+// "unclassified" label: no summary is ever labelless.
+// Detection only selects the label: the bound
 // does not depend on it, so an undetected shape is still
 // fragment-free. No fragment of the input is ever emitted:
 // summarize returns only fixed-vocabulary labels and the
@@ -681,24 +687,329 @@ func (b *Bot) errorsHandler(err error) {
 // Classification is untouched: 429 and parse-error
 // classification run on the raw error in
 // retryCall/isParseError before scrubbing, and summarize is
-// log-only. Callers must never log an error by unwrapping
+// log-only. summarizeError classifies the raw chain the same
+// way for its typed checks; only its string fallback reads
+// scrubbed text. Callers must never log an error by unwrapping
 // and printing: the scrubbed error type carries no raw chain
 // (see scrubErr), and %+v/%#v of a scrubbed error contain no
 // token.
 func (b *Bot) summarize(msg string) string {
-	length := utf8.RuneCountInString(msg)
-	prefix := b.scrub(firstRunes(msg, summarizePrefixRunes))
-	class := summarizeClass(prefix)
-	switch class {
-	case "response decode failure":
-		return fmt.Sprintf("telegram poll error: response decode failure message_length=%d", length)
-	case "update decode failure":
-		return fmt.Sprintf("telegram poll error: update decode failure message_length=%d", length)
-	case "":
-		return fmt.Sprintf("telegram error: message_length=%d", length)
-	default:
-		return fmt.Sprintf("telegram error: %s message_length=%d", class, length)
+	return formatSummary(summarizeClass(b.scrub(firstRunes(msg, summarizePrefixRunes))), utf8.RuneCountInString(msg))
+}
+
+// formatSummary renders one class/length summary. It is the
+// single format shared by summarize and summarizeError, so
+// the two paths cannot drift into two formats. The decode
+// classes keep the historical "telegram poll error:" prefix;
+// every other class uses "telegram error:". The class is
+// always a fixed-vocabulary label, never "".
+func formatSummary(class string, length int) string {
+	if class == "response decode failure" || class == "update decode failure" {
+		return fmt.Sprintf("telegram poll error: %s message_length=%d", class, length)
 	}
+	return fmt.Sprintf("telegram error: %s message_length=%d", class, length)
+}
+
+// summarizeError renders an error value for a log line as a
+// class/length summary only, never verbatim error text. It is
+// the typed counterpart of summarize, which takes a bare
+// string for panic values that carry no error value:
+// classification runs on the error chain first (see
+// classifyError) and the output shares formatSummary. A nil
+// error renders as unclassified with message_length=0.
+func (b *Bot) summarizeError(err error) string {
+	if err == nil {
+		return formatSummary("unclassified", 0)
+	}
+	return formatSummary(b.classifyError(err), utf8.RuneCountInString(err.Error()))
+}
+
+// classifyError selects the summary class label for err.
+//
+// Precedence, most specific first (deterministic; the first
+// match wins):
+//
+//  1. Telegram API classes by type: *TooManyRequestsError,
+//     the library sentinels via errors.Is (too many requests,
+//     bad request, forbidden, unauthorized, not found,
+//     conflict), and *MigrateError (a 400 migrate, which
+//     carries no sentinel in its chain).
+//  2. Decode failures by anchored chain markers: a chain
+//     level whose text starts with one of the library's
+//     decode formats ("error decode response body", "error
+//     decode response result", "error read response body"
+//     -> response decode failure; "error decode update" ->
+//     update decode failure). The marker must start a chain
+//     level: a server description that merely contains a
+//     decode phrase (after a sentinel or other prefix)
+//     never selects a decode class here, and no
+//     bare-substring decode check exists on this path.
+//  3. Context errors via errors.Is (context canceled,
+//     context deadline exceeded).
+//  4. Transport types via errors.As/Is: *net.DNSError ->
+//     dns, net.Error timeouts -> timeout, TLS record-header
+//     errors and TLS-marked transport failures -> tls,
+//     syscall errnos -> connection refused / connection
+//     reset / unreachable, io.EOF / io.ErrUnexpectedEOF ->
+//     eof.
+//  5. Telegram HTTP-status format, anchored per chain level
+//     ("error response from telegram for method <m>, <code>
+//     <description>") -> http 4xx / http 5xx.
+//  6. String fallback on the token-scrubbed first 256 runes
+//     of the whole error text, for errors whose chain was
+//     dropped by scrubErr or never carried a type (sentinel
+//     and transport phrases). Decode phrases are never
+//     matched here.
+//  7. "unclassified".
+//
+// Scrubbed errors (see scrubErr) preserve the step-1 chain
+// (TooManyRequestsError, MigrateError, the six sentinels) but
+// deliberately drop transport types, so a scrubbed transport
+// failure reaches step 6 on its text. Only the first 256
+// runes of any text are inspected for classification; the
+// rune count is one linear pass. No fragment of the error
+// text is ever returned: every label is from the fixed
+// vocabulary above.
+func (b *Bot) classifyError(err error) string {
+	if err == nil {
+		return "unclassified"
+	}
+	var tmr *bot.TooManyRequestsError
+	if errors.As(err, &tmr) {
+		return "too many requests"
+	}
+	if errors.Is(err, bot.ErrorTooManyRequests) {
+		return "too many requests"
+	}
+	var mig *bot.MigrateError
+	if errors.As(err, &mig) {
+		return "bad request"
+	}
+	for _, sentinel := range []struct {
+		err   error
+		label string
+	}{
+		{bot.ErrorBadRequest, "bad request"},
+		{bot.ErrorForbidden, "forbidden"},
+		{bot.ErrorUnauthorized, "unauthorized"},
+		{bot.ErrorNotFound, "not found"},
+		{bot.ErrorConflict, "conflict"},
+	} {
+		if errors.Is(err, sentinel.err) {
+			return sentinel.label
+		}
+	}
+	if class := b.chainPrefixClass(err, anchoredDecodeClass); class != "" {
+		return class
+	}
+	if errors.Is(err, context.Canceled) {
+		return "context canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "context deadline exceeded"
+	}
+	if class := transportClass(err); class != "" {
+		return class
+	}
+	if class := b.chainPrefixClass(err, httpClassFromPrefix); class != "" {
+		return class
+	}
+	return fallbackClass(b.scrub(firstRunes(err.Error(), summarizePrefixRunes)))
+}
+
+// chainPrefixClass walks err and every error reachable
+// through Unwrap() error / Unwrap() []error, applying fn to
+// each level's token-scrubbed bounded prefix, and returns the
+// first non-"" label fn reports, or "". The walk is
+// depth-capped (32) so a cyclic chain cannot loop; no
+// visited set is kept because an error value need not be
+// comparable. Only the first 256 runes of each level's text
+// are inspected.
+func (b *Bot) chainPrefixClass(err error, fn func(prefix string) string) string {
+	type item struct {
+		err   error
+		depth int
+	}
+	stack := []item{{err, 0}}
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if cur.err == nil || cur.depth > 32 {
+			continue
+		}
+		if class := fn(b.scrub(firstRunes(cur.err.Error(), summarizePrefixRunes))); class != "" {
+			return class
+		}
+		if cur.depth == 32 {
+			continue
+		}
+		switch u := cur.err.(type) {
+		case interface{ Unwrap() []error }:
+			for _, child := range u.Unwrap() {
+				stack = append(stack, item{child, cur.depth + 1})
+			}
+		case interface{ Unwrap() error }:
+			stack = append(stack, item{u.Unwrap(), cur.depth + 1})
+		}
+	}
+	return ""
+}
+
+// anchoredDecodeClass reports the decode class for one chain
+// level's bounded prefix, or "". The marker must start the
+// level's text, matching the library's fmt.Errorf formats in
+// raw_request.go / get_updates.go; a decode phrase anywhere
+// else in the text does not match.
+func anchoredDecodeClass(prefix string) string {
+	if strings.HasPrefix(prefix, "error decode response body") ||
+		strings.HasPrefix(prefix, "error decode response result") ||
+		strings.HasPrefix(prefix, "error read response body") {
+		return "response decode failure"
+	}
+	if strings.HasPrefix(prefix, "error decode update") {
+		return "update decode failure"
+	}
+	return ""
+}
+
+// httpClassFromPrefix reports the HTTP class for one chain
+// level's bounded prefix, or "". It matches only the
+// library's default-branch format ("error response from
+// telegram for method <m>, <code> <description>") with the
+// status code parsed from its anchored position, never a
+// bare status substring.
+func httpClassFromPrefix(prefix string) string {
+	const marker = "error response from telegram for method "
+	if !strings.HasPrefix(prefix, marker) {
+		return ""
+	}
+	rest := prefix[len(marker):]
+	i := strings.Index(rest, ", ")
+	if i < 0 || len(rest) < i+5 {
+		return ""
+	}
+	code := rest[i+2 : i+5]
+	for _, c := range code {
+		if c < '0' || c > '9' {
+			return ""
+		}
+	}
+	switch code[0] {
+	case '4':
+		return "http 4xx"
+	case '5':
+		return "http 5xx"
+	default:
+		return ""
+	}
+}
+
+// transportClass selects the transport class for err by type,
+// or "" when no transport type matches. It runs on the raw
+// chain: scrubbed errors deliberately drop these types (see
+// scrubErr), so a scrubbed transport failure falls through
+// to the string fallback in classifyError.
+func transportClass(err error) string {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "dns"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout"
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return "timeout"
+	}
+	var recHdr tls.RecordHeaderError
+	if errors.As(err, &recHdr) {
+		return "tls"
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && isTLSFailure(urlErr.Err) {
+		return "tls"
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return "connection refused"
+	}
+	if errors.Is(err, syscall.ECONNRESET) {
+		return "connection reset"
+	}
+	for _, unreachable := range []error{syscall.EHOSTUNREACH, syscall.ENETUNREACH, syscall.EHOSTDOWN, syscall.ENETDOWN} {
+		if errors.Is(err, unreachable) {
+			return "unreachable"
+		}
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return "eof"
+	}
+	return ""
+}
+
+// isTLSFailure reports whether err (the inner error of a
+// *url.Error, already known to be a transport failure) is a
+// TLS failure. crypto/tls handshake failures are mostly
+// untyped errors whose text starts with "tls:" or names a
+// certificate, so this inspects only the transport inner
+// error's bounded prefix — never a server description.
+func isTLSFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	prefix := strings.ToLower(firstRunes(err.Error(), summarizePrefixRunes))
+	return strings.Contains(prefix, "tls:") || strings.Contains(prefix, "certificate")
+}
+
+// fallbackClass selects a class from the token-scrubbed
+// bounded prefix of the whole error text, for errors with no
+// usable chain (scrubbed transport failures, handler
+// errors). Decode phrases are deliberately never matched
+// here: only the anchored chain check selects a decode
+// class, so a description embedding a decode phrase cannot
+// become one. Order is most specific first; a match only
+// selects a fixed-vocabulary label, never text.
+func fallbackClass(prefix string) string {
+	lower := strings.ToLower(prefix)
+	for _, pair := range []struct {
+		phrase string
+		label  string
+	}{
+		{"too many requests", "too many requests"},
+		{"bad request", "bad request"},
+		{"forbidden", "forbidden"},
+		{"unauthorized", "unauthorized"},
+		{"not found", "not found"},
+		{"conflict", "conflict"},
+		{"context deadline exceeded", "context deadline exceeded"},
+		{"context canceled", "context canceled"},
+		{"connection refused", "connection refused"},
+		{"connection reset", "connection reset"},
+		{"no route to host", "unreachable"},
+		{"host unreachable", "unreachable"},
+		{"network unreachable", "unreachable"},
+		{"network is unreachable", "unreachable"},
+		{"no such host", "dns"},
+		{"name resolution", "dns"},
+		{"server misbehaving", "dns"},
+		{"dns", "dns"},
+		{"connection timed out", "timeout"},
+		{"timed out", "timeout"},
+		{"deadline exceeded", "timeout"},
+		{"timeout", "timeout"},
+		{"tls:", "tls"},
+		{"certificate", "tls"},
+		{"handshake", "tls"},
+		{"unexpected eof", "eof"},
+		{" eof", "eof"},
+	} {
+		if strings.Contains(lower, pair.phrase) {
+			return pair.label
+		}
+	}
+	if lower == "eof" {
+		return "eof"
+	}
+	return "unclassified"
 }
 
 // summarizePrefixRunes bounds how much of an error text
@@ -720,13 +1031,20 @@ func firstRunes(s string, n int) string {
 
 // summarizeClass selects the summary class label from a
 // bounded, token-scrubbed prefix of the error text. It returns
-// "" for an unrecognised shape. The labels are a fixed
+// "unclassified" for an unrecognised shape. The labels are a fixed
 // safe vocabulary: no part of the input text is ever returned.
 // Class selection is by substring search in the prefix, so a
 // hostile fragment can mis-select the label (e.g. a 400
 // description embedding a decode-body phrase renders with
 // the response-decode class); the label is fixed-vocabulary
-// either way, so no fragment is emitted.
+// either way, so no fragment is emitted. This string-only
+// classification is kept only for callers with no error value
+// (panic values, and the claims.go log sites outside this
+// file's scope): callers with an error value use
+// summarizeError, whose typed classification refuses a
+// bare-substring decode match. The two classifiers are
+// deliberately not merged: TestSummarizeLoop4NoMethodField
+// pins this function's substring behaviour.
 func summarizeClass(prefix string) string {
 	if isResponseBodyError(prefix) {
 		return "response decode failure"
@@ -742,7 +1060,7 @@ func summarizeClass(prefix string) string {
 			return sentinel
 		}
 	}
-	return ""
+	return "unclassified"
 }
 
 // isResponseBodyError reports whether the examined prefix is
@@ -848,7 +1166,7 @@ func (b *Bot) onMessage(ctx context.Context, upd *models.Update) {
 		MessageID: msg.ID,
 	})
 	if err != nil {
-		b.logger.Error("telegram message handler error", "err", b.summarize(err.Error()), "update_id", upd.ID)
+		b.logger.Error("telegram message handler error", "err", b.summarizeError(err), "update_id", upd.ID)
 	}
 }
 
@@ -885,7 +1203,7 @@ func (b *Bot) onCallback(ctx context.Context, upd *models.Update) {
 		}
 	}
 	if err := b.answer(ctx, cq.ID, answerText); err != nil {
-		b.logger.Debug("telegram answerCallbackQuery failed", "err", b.summarize(err.Error()))
+		b.logger.Debug("telegram answerCallbackQuery failed", "err", b.summarizeError(err))
 	}
 	if !ok {
 		return
@@ -913,9 +1231,9 @@ func (b *Bot) onCallback(ctx context.Context, upd *models.Update) {
 		err = herr
 	}
 	if err != nil {
-		warning := "⚠️ " + EscapeText(truncateRunes(b.summarize(err.Error()), 600))
+		warning := "⚠️ " + EscapeText(truncateRunes(b.summarizeError(err), 600))
 		if _, werr := b.Send(ctx, chatID, warning, SendOptions{}); werr != nil {
-			b.logger.Debug("telegram callback warning failed", "err", b.summarize(werr.Error()))
+			b.logger.Debug("telegram callback warning failed", "err", b.summarizeError(werr))
 		}
 	}
 }
@@ -1363,7 +1681,7 @@ func (b *Bot) editTextCall(ctx context.Context, chatID int64, msgID int, text st
 // class.
 func (b *Bot) EditPlain(ctx context.Context, chatID int64, msgID int, text string) error {
 	if err := b.Edit(ctx, chatID, msgID, text, nil, HTMLModePlain); err != nil {
-		b.logger.Debug("telegram stream edit failed", "err", b.summarize(err.Error()))
+		b.logger.Debug("telegram stream edit failed", "err", b.summarizeError(err))
 		return nil
 	}
 	return nil
