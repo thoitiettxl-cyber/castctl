@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
@@ -452,7 +453,12 @@ func TestTelegramFSGetTooBig(t *testing.T) {
 	gw.fsReadScript = map[string][]byte{"big.bin": bytes.Repeat([]byte("x"), (49<<20)+1)}
 	h, cancel := runReadBot(t, gw)
 	defer cancel()
-	sends := sendFS(t, h, "/fs get big.bin")
+	h.fake.setBatches([]string{telegramUpdate(1, 111, "/fs get big.bin")})
+	// 60s budget: shuttling 49 MiB+ through the fake's
+	// base64 chunk loop is slow under -race and full-suite
+	// contention (the 10s default timed out at 11.3s).
+	waitForTimeout(t, "1 sends", 60*time.Second, func() bool { return len(h.fake.sendsSeen()) >= 1 })
+	sends := h.fake.sendsSeen()
 	if len(sends) != 1 || sends[0] != fsTooBigSentence {
 		t.Fatalf("sends = %q; want [%q]", sends, fsTooBigSentence)
 	}
