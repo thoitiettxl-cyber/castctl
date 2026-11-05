@@ -30,7 +30,8 @@ pub const ELFCLASS64: u8 = 2;
 /// Validate ELF bytes for `goarch` (`"amd64"` or `"arm64"`).
 /// Source: `validateELF` (`internal/update/extract.go:124-154`).
 pub fn validate_elf_bytes(b: &[u8], goarch: &str) -> Result<(), UpdateError> {
-    let invalid = || UpdateError::failure("update: the downloaded binary is not a valid ELF executable");
+    let invalid =
+        || UpdateError::failure("update: the downloaded binary is not a valid ELF executable");
     if b.len() < 64 {
         return Err(invalid());
     }
@@ -41,9 +42,7 @@ pub fn validate_elf_bytes(b: &[u8], goarch: &str) -> Result<(), UpdateError> {
         "amd64" => EM_X86_64,
         "arm64" => EM_AARCH64,
         _ => {
-            return Err(UpdateError::failure(
-                "update: unsupported architecture",
-            ));
+            return Err(UpdateError::failure("update: unsupported architecture"));
         }
     };
     // e_ident[EI_DATA] (byte 5): 1 = little-endian, 2 = big-endian.
@@ -83,10 +82,7 @@ pub fn validate_elf_bytes(b: &[u8], goarch: &str) -> Result<(), UpdateError> {
 /// Validate the ELF header of the file at `path`.
 /// Source: `validateELF` (`internal/update/extract.go:124-154`);
 /// the file is read through `std::fs`, never executed.
-pub fn validate_elf_file(
-    path: &std::path::Path,
-    goarch: &str,
-) -> Result<(), UpdateError> {
+pub fn validate_elf_file(path: &std::path::Path, goarch: &str) -> Result<(), UpdateError> {
     use std::io::Read;
     let mut f = std::fs::File::open(path).map_err(|_| {
         UpdateError::failure("update: the downloaded binary is not a valid ELF executable")
@@ -135,7 +131,9 @@ mod tests {
             "update: the downloaded binary is not a valid ELF executable"
         );
         // Too short.
-        assert!(validate_elf_bytes(&header(EM_X86_64, ET_EXEC, ELFCLASS64)[..10], "amd64").is_err());
+        assert!(
+            validate_elf_bytes(&header(EM_X86_64, ET_EXEC, ELFCLASS64)[..10], "amd64").is_err()
+        );
         // Wrong architecture.
         assert_eq!(
             validate_elf_bytes(&header(EM_AARCH64, ET_DYN, ELFCLASS64), "amd64")

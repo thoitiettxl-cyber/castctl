@@ -89,22 +89,15 @@ pub fn acquire_update_lock(dir: &Path) -> Result<LockOutcome, UpdateError> {
         UpdateError::failure(format!("update: cannot lock the update directory: {e}"))
     })?;
     if after.dev() != opened.dev() || after.ino() != opened.ino() {
-        return Err(UpdateError::failure(
-            "update lock file changed during open",
-        ));
+        return Err(UpdateError::failure("update lock file changed during open"));
     }
     use std::os::unix::io::AsRawFd;
     loop {
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if rc == 0 {
-            return Ok(LockOutcome::Held(UpdateLock {
-                _file: file,
-                path,
-            }));
+            return Ok(LockOutcome::Held(UpdateLock { _file: file, path }));
         }
-        let errno = std::io::Error::last_os_error()
-            .raw_os_error()
-            .unwrap_or(0);
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
         if errno == libc::EINTR {
             continue;
         }

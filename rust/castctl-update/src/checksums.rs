@@ -116,8 +116,7 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     const TEST_ASSET_NAME: &str = "castctl_0.6.4_linux_amd64.tar.gz";
-    const TEST_ASSET_HEX: &str =
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    const TEST_ASSET_HEX: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
     fn body(lines: &[&str]) -> Vec<u8> {
         format!("{}\n", lines.join("\n")).into_bytes()
@@ -158,8 +157,7 @@ mod tests {
             format!("\u{feff}{TEST_ASSET_HEX}  {TEST_ASSET_NAME}\n").into_bytes(),
         ];
         for b in bodies {
-            let m = parse_checksums(&b)
-                .unwrap_or_else(|_| panic!("body {b:?}"));
+            let m = parse_checksums(&b).unwrap_or_else(|_| panic!("body {b:?}"));
             assert!(m.contains_key(TEST_ASSET_NAME));
         }
     }
@@ -168,11 +166,7 @@ mod tests {
     /// (`checksums_test.go:84-95`).
     #[test]
     fn parse_checksums_uppercase_hex() {
-        let upper = format!(
-            "{}  {}\n",
-            TEST_ASSET_HEX.to_uppercase(),
-            TEST_ASSET_NAME
-        );
+        let upper = format!("{}  {}\n", TEST_ASSET_HEX.to_uppercase(), TEST_ASSET_NAME);
         let m = parse_checksums(upper.as_bytes()).unwrap();
         assert_eq!(m[TEST_ASSET_NAME], want_digest());
     }
@@ -250,9 +244,7 @@ mod tests {
             },
             {
                 let mut v = vec![0xff, 0xfe];
-                v.extend_from_slice(
-                    format!("{TEST_ASSET_HEX}  {TEST_ASSET_NAME}\n").as_bytes(),
-                );
+                v.extend_from_slice(format!("{TEST_ASSET_HEX}  {TEST_ASSET_NAME}\n").as_bytes());
                 v
             },
             format!("{TEST_ASSET_HEX}  {TEST_ASSET_NAME}\ngarbage line without hash\n")
@@ -304,10 +296,7 @@ mod tests {
     /// with `*` in text mode loses the `*`, exactly like Go.
     #[test]
     fn star_filename_loses_marker_like_go() {
-        let m = parse_checksums(
-            format!("{TEST_ASSET_HEX}  *foo\n").as_bytes(),
-        )
-        .unwrap();
+        let m = parse_checksums(format!("{TEST_ASSET_HEX}  *foo\n").as_bytes()).unwrap();
         assert!(m.contains_key("foo"));
         assert!(!m.contains_key("*foo"));
     }

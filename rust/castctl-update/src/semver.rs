@@ -68,10 +68,7 @@ fn check_dot_idents(s: &str, prerelease: bool) -> Result<(), UpdateError> {
         if id.is_empty() {
             return Err(UpdateError::failure(INVALID_VERSION_MSG));
         }
-        if !id
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || c == b'-')
-        {
+        if !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') {
             return Err(UpdateError::failure(INVALID_VERSION_MSG));
         }
         if prerelease && is_all_digits(id) && !is_numeric_ident(id) {
@@ -285,16 +282,24 @@ mod tests {
             ("1.0.0-0", "1.0.0-0"),
             ("1.0.0+build", "1.0.0+build"),
             ("1.0.0-alpha+001", "1.0.0-alpha+001"),
-            ("1.0.0+21AF26D3----117B344092BD", "1.0.0+21AF26D3----117B344092BD"),
+            (
+                "1.0.0+21AF26D3----117B344092BD",
+                "1.0.0+21AF26D3----117B344092BD",
+            ),
             ("1.0.0-alpha-beta", "1.0.0-alpha-beta"),
             ("1.0.0-0.3.7", "1.0.0-0.3.7"),
             ("1.0.0-x-y-z.-", "1.0.0-x-y-z.-"),
-            ("99999999999999999999999999.0.0", "99999999999999999999999999.0.0"),
-            ("1.99999999999999999999999999.0", "1.99999999999999999999999999.0"),
+            (
+                "99999999999999999999999999.0.0",
+                "99999999999999999999999999.0.0",
+            ),
+            (
+                "1.99999999999999999999999999.0",
+                "1.99999999999999999999999999.0",
+            ),
         ];
         for (input, canonical) in valid {
-            let parsed = parse_version(input)
-                .unwrap_or_else(|_| panic!("expected valid: {input}"));
+            let parsed = parse_version(input).unwrap_or_else(|_| panic!("expected valid: {input}"));
             assert_eq!(parsed.to_canonical(), *canonical, "input {input}");
         }
     }
@@ -352,10 +357,7 @@ mod tests {
             "...",
         ];
         for input in invalid {
-            assert!(
-                parse_version(input).is_err(),
-                "expected invalid: {input:?}"
-            );
+            assert!(parse_version(input).is_err(), "expected invalid: {input:?}");
         }
         // Over-long inputs (cap 128 bytes).
         assert!(parse_version(&"9".repeat(200)).is_err());
@@ -412,11 +414,7 @@ mod tests {
             ("1.0.0-rc.1", "1.0.0", -1),
         ];
         for (a, b, want) in pairs {
-            assert_eq!(
-                compare_versions(&v(a), &v(b)),
-                *want,
-                "{a} vs {b}"
-            );
+            assert_eq!(compare_versions(&v(a), &v(b)), *want, "{a} vs {b}");
         }
     }
 

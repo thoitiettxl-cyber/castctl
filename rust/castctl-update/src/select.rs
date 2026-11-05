@@ -69,7 +69,11 @@ pub struct Selection {
 /// Expected asset name: `castctl_<AssetVersion>_linux_<goarch>[ _no-plugin].tar.gz`.
 /// Source: `expectedAssetName` (`internal/update/update.go:602-608`).
 pub fn expected_asset_name(v: &Version, flavour: &str, goarch: &str) -> String {
-    let suffix = if flavour == "no-plugin" { "_no-plugin" } else { "" };
+    let suffix = if flavour == "no-plugin" {
+        "_no-plugin"
+    } else {
+        ""
+    };
     format!(
         "castctl_{}_linux_{}{}.tar.gz",
         v.asset_version(),
@@ -124,9 +128,7 @@ pub fn select_asset<'a>(
 
 /// Find exactly one `checksums.txt` asset.
 /// Source: `selectChecksumsAsset` (`internal/update/update.go:746-772`).
-pub fn select_checksums_asset<'a>(
-    rel: &'a ReleaseInfo,
-) -> Result<&'a ReleaseAsset, UpdateError> {
+pub fn select_checksums_asset<'a>(rel: &'a ReleaseInfo) -> Result<&'a ReleaseAsset, UpdateError> {
     let mut found: Option<&ReleaseAsset> = None;
     let mut count = 0;
     for a in &rel.assets {
@@ -236,9 +238,7 @@ pub fn decide(
 /// rule. A missing setting, conflicting duplicates, or any
 /// other value means "unknown": never guess.
 /// Source: `flavourFromBuildInfo` (`internal/update/update.go:330-360`).
-pub fn flavour_from_cgo_settings(
-    settings: &[(String, String)],
-) -> Option<&'static str> {
+pub fn flavour_from_cgo_settings(settings: &[(String, String)]) -> Option<&'static str> {
     let mut seen = false;
     let mut value = "";
     for (k, v) in settings {
@@ -306,7 +306,11 @@ impl ParsedUrl {
 /// and `checkRedirectPolicy` (`internal/update/update.go:423-458,774-793`).
 pub fn parse_url(raw: &str) -> Option<ParsedUrl> {
     let (scheme, rest) = raw.split_once("://")?;
-    if scheme.is_empty() || !scheme.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.') {
+    if scheme.is_empty()
+        || !scheme
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.')
+    {
         return None;
     }
     // Authority runs to the first '/', '?', or '#'.
@@ -340,10 +344,7 @@ pub fn parse_url(raw: &str) -> Option<ParsedUrl> {
             None => return None,
         }
     } else if let Some(i) = hostport.rfind(':') {
-        (
-            hostport[..i].to_string(),
-            hostport[i + 1..].to_string(),
-        )
+        (hostport[..i].to_string(), hostport[i + 1..].to_string())
     } else {
         (hostport.to_string(), String::new())
     };
@@ -421,10 +422,7 @@ pub enum RedirectRefusal {
 /// Source: `checkRedirectPolicy` (`internal/update/update.go:423-458`).
 /// Note (R1 Q3): `len(via) >= 5` refuses the 5th redirect,
 /// i.e. exactly 4 follows are allowed.
-pub fn check_redirect_policy(
-    target: &ParsedUrl,
-    via: &[ParsedUrl],
-) -> Result<(), RedirectRefusal> {
+pub fn check_redirect_policy(target: &ParsedUrl, via: &[ParsedUrl]) -> Result<(), RedirectRefusal> {
     if target.has_userinfo {
         return Err(RedirectRefusal::Userinfo);
     }
@@ -446,9 +444,9 @@ pub fn check_redirect_policy(
         return Ok(());
     }
     match target.host.as_str() {
-        "github.com"
-        | "release-assets.githubusercontent.com"
-        | "objects.githubusercontent.com" => Ok(()),
+        "github.com" | "release-assets.githubusercontent.com" | "objects.githubusercontent.com" => {
+            Ok(())
+        }
         _ => Err(RedirectRefusal::Forbidden),
     }
 }
@@ -638,9 +636,7 @@ mod tests {
             size: 10,
             state: "uploaded".to_string(),
         };
-        assert!(
-            select_checksums_asset(&rel(vec![good.clone(), chk.clone()])).is_ok()
-        );
+        assert!(select_checksums_asset(&rel(vec![good.clone(), chk.clone()])).is_ok());
         assert!(select_checksums_asset(&rel(vec![chk.clone(), chk])).is_err());
     }
 
@@ -656,10 +652,7 @@ mod tests {
         ] {
             assert!(validate_download_url(bad).is_err(), "{bad}");
         }
-        for good in [
-            "https://github.com/x/y",
-            "http://127.0.0.1:9/x",
-        ] {
+        for good in ["https://github.com/x/y", "http://127.0.0.1:9/x"] {
             assert!(validate_download_url(good).is_ok(), "{good}");
         }
         for bad in [
@@ -680,12 +673,15 @@ mod tests {
     fn decide_guard_order() {
         let current = parse_version("0.6.3").unwrap();
         let target = parse_version("0.6.4").unwrap();
-        let rel = rel(vec![good_asset(), ReleaseAsset {
-            name: "checksums.txt".to_string(),
-            url: "https://github.com/x/c".to_string(),
-            size: 10,
-            state: "uploaded".to_string(),
-        }]);
+        let rel = rel(vec![
+            good_asset(),
+            ReleaseAsset {
+                name: "checksums.txt".to_string(),
+                url: "https://github.com/x/c".to_string(),
+                size: 10,
+                state: "uploaded".to_string(),
+            },
+        ]);
         let sel = decide(
             &current,
             target.clone(),
@@ -841,11 +837,9 @@ mod tests {
         let port = parse_url("https://github.com:8443/x").unwrap();
         assert!(check_redirect_policy(&port, &via).is_err());
         // Boundary (Q3): exactly 4 follows allowed, 5th refuses.
-        let chain: Vec<ParsedUrl> =
-            (0..4).map(|_| origin.clone()).collect();
+        let chain: Vec<ParsedUrl> = (0..4).map(|_| origin.clone()).collect();
         assert!(check_redirect_policy(&same, &chain).is_ok());
-        let chain5: Vec<ParsedUrl> =
-            (0..5).map(|_| origin.clone()).collect();
+        let chain5: Vec<ParsedUrl> = (0..5).map(|_| origin.clone()).collect();
         assert_eq!(
             check_redirect_policy(&same, &chain5),
             Err(RedirectRefusal::TooManyRedirects)
@@ -857,10 +851,7 @@ mod tests {
     /// the [DEVIATION] note on `classify_transport_error`).
     #[test]
     fn classify_transport_error_tls_forms() {
-        assert_eq!(
-            classify_transport_error(TransportErrorKind::Tls),
-            "tls"
-        );
+        assert_eq!(classify_transport_error(TransportErrorKind::Tls), "tls");
         assert_eq!(
             classify_transport_error(TransportErrorKind::Redirect),
             "redirect"
@@ -877,14 +868,8 @@ mod tests {
             classify_transport_error(TransportErrorKind::ConnectionReset),
             "connection_reset"
         );
-        assert_eq!(
-            classify_transport_error(TransportErrorKind::Dns),
-            "dns"
-        );
-        assert_eq!(
-            classify_transport_error(TransportErrorKind::Dial),
-            "dial"
-        );
+        assert_eq!(classify_transport_error(TransportErrorKind::Dns), "dns");
+        assert_eq!(classify_transport_error(TransportErrorKind::Dial), "dial");
         assert_eq!(
             classify_transport_error(TransportErrorKind::Transport),
             "transport"

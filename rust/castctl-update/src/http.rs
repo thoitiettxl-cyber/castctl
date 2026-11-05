@@ -42,8 +42,7 @@ use std::time::Duration;
 
 use crate::error::{HttpError, UpdateError};
 use crate::select::{
-    TransportErrorKind, check_redirect_policy, classify_transport_error, parse_url,
-    ParsedUrl,
+    ParsedUrl, TransportErrorKind, check_redirect_policy, classify_transport_error, parse_url,
 };
 
 /// Dial timeout. Source: `update.go:391` (10s).
@@ -164,8 +163,7 @@ impl StdFetcher {
             .write_all(req.as_bytes())
             .and_then(|()| stream.flush())
             .map_err(|_| http_error_for(url, TransportErrorKind::Transport))?;
-        let (status, content_length, chunked, location) =
-            read_response_head(stream.as_mut(), url)?;
+        let (status, content_length, chunked, location) = read_response_head(stream.as_mut(), url)?;
         let body: Box<dyn Read> = Box::new(BodyReader {
             inner: stream,
             state: if chunked {
@@ -182,20 +180,17 @@ impl StdFetcher {
         Ok((status, content_length, chunked, location, body))
     }
 
-    fn connect(
-        url: &ParsedUrl,
-        timeout: Duration,
-    ) -> Result<Box<dyn ReadWrite>, HttpError> {
+    fn connect(url: &ParsedUrl, timeout: Duration) -> Result<Box<dyn ReadWrite>, HttpError> {
         let host = url.host.clone();
         let port: u16 = if url.port.is_empty() {
             if url.scheme == "https" { 443 } else { 80 }
         } else {
             url.port.parse().unwrap_or(0)
         };
-        let addrs: Vec<std::net::SocketAddr> =
-            (host.as_str(), port).to_socket_addrs().map_err(|_| {
-                http_error_for(url, TransportErrorKind::Dns)
-            })?.collect();
+        let addrs: Vec<std::net::SocketAddr> = (host.as_str(), port)
+            .to_socket_addrs()
+            .map_err(|_| http_error_for(url, TransportErrorKind::Dns))?
+            .collect();
         if addrs.is_empty() {
             return Err(http_error_for(url, TransportErrorKind::Dns));
         }
@@ -209,11 +204,8 @@ impl StdFetcher {
                     if url.scheme == "https" {
                         let name = rustls::pki_types::ServerName::try_from(host.clone())
                             .map_err(|_| http_error_for(url, TransportErrorKind::Tls))?;
-                        let conn = rustls::ClientConnection::new(
-                            tls_client_config(),
-                            name,
-                        )
-                        .map_err(|_| http_error_for(url, TransportErrorKind::Tls))?;
+                        let conn = rustls::ClientConnection::new(tls_client_config(), name)
+                            .map_err(|_| http_error_for(url, TransportErrorKind::Tls))?;
                         let mut tls = rustls::StreamOwned::new(conn, stream);
                         // Complete the handshake eagerly so a
                         // failure classifies as TLS, not as a
@@ -231,12 +223,8 @@ impl StdFetcher {
             }
         }
         let kind = match last_err.and_then(|e| e.raw_os_error()) {
-            Some(errno) if errno == libc::ECONNREFUSED => {
-                TransportErrorKind::ConnectionRefused
-            }
-            Some(errno) if errno == libc::ECONNRESET => {
-                TransportErrorKind::ConnectionReset
-            }
+            Some(errno) if errno == libc::ECONNREFUSED => TransportErrorKind::ConnectionRefused,
+            Some(errno) if errno == libc::ECONNRESET => TransportErrorKind::ConnectionReset,
             _ => TransportErrorKind::Dial,
         };
         Err(http_error_for(url, kind))
@@ -612,7 +600,12 @@ pub fn fetch_bytes(
                 if body.len() > cap {
                     // Go reads through a LimitReader(cap+1), so
                     // the reported length is exactly cap+1.
-                    return Err(http_error_status(&parsed, resp.status, "too_large", cap as i64 + 1));
+                    return Err(http_error_status(
+                        &parsed,
+                        resp.status,
+                        "too_large",
+                        cap as i64 + 1,
+                    ));
                 }
             }
             Err(e) => {
@@ -654,12 +647,14 @@ pub fn download_asset<W: std::io::Write>(
         path: String::new(),
         raw: url.to_string(),
     });
-    let mut resp = fetcher.get(url, user_agent, false, ASSET_TIMEOUT).map_err(|_| {
-        // Go: `wrapError(1, "update: download failed", httpError)` —
-        // the message is the fixed string; the httpError summary
-        // is the cause, not part of the message.
-        UpdateError::failure("update: download failed")
-    })?;
+    let mut resp = fetcher
+        .get(url, user_agent, false, ASSET_TIMEOUT)
+        .map_err(|_| {
+            // Go: `wrapError(1, "update: download failed", httpError)` —
+            // the message is the fixed string; the httpError summary
+            // is the cause, not part of the message.
+            UpdateError::failure("update: download failed")
+        })?;
     if resp.status != 200 {
         let mut counted = [0u8; 4096];
         let mut n = 0usize;
@@ -704,9 +699,8 @@ pub fn download_asset<W: std::io::Write>(
                     ));
                 }
                 hash.update(&chunk[..n]);
-                w.write_all(&chunk[..n]).map_err(|_| {
-                    UpdateError::failure("update: download failed")
-                })?;
+                w.write_all(&chunk[..n])
+                    .map_err(|_| UpdateError::failure("update: download failed"))?;
             }
             Err(_e) => {
                 // Go: `wrapError(1, "update: download failed",

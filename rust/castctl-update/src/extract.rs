@@ -113,9 +113,7 @@ pub fn extract_castctl<R: Read, W: std::io::Write>(
                 ));
             }
             let size = header.size().map_err(|_| {
-                UpdateError::failure(
-                    "update: the castctl archive member size is out of bounds",
-                )
+                UpdateError::failure("update: the castctl archive member size is out of bounds")
             })?;
             if size > MAX_EXTRACTED_BYTES {
                 return Err(UpdateError::failure(
@@ -126,9 +124,7 @@ pub fn extract_castctl<R: Read, W: std::io::Write>(
             let mut chunk = [0u8; 32 << 10];
             loop {
                 let n = entry.read(&mut chunk).map_err(|_| {
-                    UpdateError::failure(
-                        "update: failed to read the castctl archive member",
-                    )
+                    UpdateError::failure("update: failed to read the castctl archive member")
                 })?;
                 if n == 0 {
                     break;
@@ -141,9 +137,7 @@ pub fn extract_castctl<R: Read, W: std::io::Write>(
                 remaining -= n as u64;
                 hash.update(&chunk[..n]);
                 w.write_all(&chunk[..n]).map_err(|_| {
-                    UpdateError::failure(
-                        "update: failed to read the castctl archive member",
-                    )
+                    UpdateError::failure("update: failed to read the castctl archive member")
                 })?;
             }
             if remaining != 0 {
@@ -210,8 +204,8 @@ fn is_regular_a(header: &tar::Header) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flate2::write::GzEncoder;
     use flate2::Compression;
+    use flate2::write::GzEncoder;
     use std::io::Write;
     use tar::{Builder, EntryType, Header};
 
@@ -319,8 +313,7 @@ mod tests {
         ]);
         let (out, _) = extract(&gz).unwrap();
         assert_eq!(out, FAKE_ELF);
-        let only_traversal =
-            gzip_tar(&[("../castctl", EntryType::Regular, b"evil")]);
+        let only_traversal = gzip_tar(&[("../castctl", EntryType::Regular, b"evil")]);
         assert_eq!(
             extract(&only_traversal).unwrap_err().to_string(),
             "update: the downloaded archive has no castctl member"
@@ -368,12 +361,7 @@ mod tests {
         // PAX data: "16 path=../evil\n" (length includes itself).
         let pax_data = b"16 path=../evil\n";
         let mut tar_bytes = Vec::new();
-        tar_bytes.extend_from_slice(&raw_header(
-            "castctl",
-            b'x',
-            pax_data.len() as u64,
-            b"pax",
-        ));
+        tar_bytes.extend_from_slice(&raw_header("castctl", b'x', pax_data.len() as u64, b"pax"));
         tar_bytes.extend_from_slice(&pad512(pax_data));
         tar_bytes.extend_from_slice(&raw_header("castctl", b'0', FAKE_ELF.len() as u64, b""));
         tar_bytes.extend_from_slice(&pad512(FAKE_ELF));
@@ -407,7 +395,9 @@ mod tests {
             "update: the downloaded archive is not a valid gzip stream"
         );
         assert_eq!(
-            extract(b"plain text, not gzip at all").unwrap_err().to_string(),
+            extract(b"plain text, not gzip at all")
+                .unwrap_err()
+                .to_string(),
             "update: the downloaded archive is not a valid gzip stream"
         );
         // Bad gzip magic.
@@ -430,8 +420,9 @@ mod tests {
             "update: the castctl archive member size is out of bounds"
         );
         // Entry-count bomb: 70 members > 64.
-        let many: Vec<(&str, EntryType, &[u8])> =
-            (0..70).map(|_| ("f", EntryType::Regular, b"x" as &[u8])).collect();
+        let many: Vec<(&str, EntryType, &[u8])> = (0..70)
+            .map(|_| ("f", EntryType::Regular, b"x" as &[u8]))
+            .collect();
         // (names collide but the count check fires first on the
         // 65th entry, before any name rule matters)
         let gz = gzip_tar(&many);

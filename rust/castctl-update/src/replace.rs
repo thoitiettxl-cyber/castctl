@@ -112,11 +112,7 @@ pub const EXEC_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 /// verification; it proves the binary runs on this machine
 /// and reports the claimed version. It does NOT prove
 /// provenance (see the no-signature limitation in the docs).
-pub fn run_exec_check(
-    path: &Path,
-    want: &Version,
-    timeout: Duration,
-) -> Result<(), UpdateError> {
+pub fn run_exec_check(path: &Path, want: &Version, timeout: Duration) -> Result<(), UpdateError> {
     use std::process::{Command, Stdio};
     let mut child = Command::new(path)
         .arg("--version")
@@ -126,12 +122,11 @@ pub fn run_exec_check(
         .stderr(Stdio::null())
         .stdout(Stdio::piped())
         .spawn()
-        .map_err(|_| {
-            UpdateError::failure("update: cannot execute the downloaded binary")
-        })?;
-    let mut stdout = child.stdout.take().ok_or_else(|| {
-        UpdateError::failure("update: cannot check the downloaded binary")
-    })?;
+        .map_err(|_| UpdateError::failure("update: cannot execute the downloaded binary"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| UpdateError::failure("update: cannot check the downloaded binary"))?;
     // Read up to cap+1 bytes in a thread so a flooding child
     // cannot block the wait; the deadline is enforced by
     // polling `try_wait` (Go uses `CommandContext` + a pipe
@@ -211,11 +206,8 @@ pub fn run_exec_check(
 /// Note (coordinator decision, R1 Q4): `castctl v0.6.4` is
 /// ACCEPTED, because `ParseVersion` strips the `v`.
 pub fn check_version_output(out: &[u8], want: &Version) -> Result<(), UpdateError> {
-    let fail = || {
-        UpdateError::failure(
-            "update: the downloaded binary does not report the target version",
-        )
-    };
+    let fail =
+        || UpdateError::failure("update: the downloaded binary does not report the target version");
     for &b in out {
         if (b < 0x20 && b != b'\n') || b == 0x7f {
             return Err(fail());

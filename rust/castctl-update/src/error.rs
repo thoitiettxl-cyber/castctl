@@ -136,10 +136,7 @@ mod tests {
     #[test]
     fn exit_codes_match_go_contract() {
         assert_eq!(UpdateError::usage("update: no release found").code(), 2);
-        assert_eq!(
-            UpdateError::failure("update: download failed").code(),
-            1
-        );
+        assert_eq!(UpdateError::failure("update: download failed").code(), 1);
     }
 
     #[test]

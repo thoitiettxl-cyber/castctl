@@ -51,12 +51,10 @@ use crate::http::{
     download_asset, fetch_bytes,
 };
 use crate::lock::{LockOutcome, acquire_update_lock};
-use crate::replace::{
-    is_dir_sync_tolerable, open_for_sync, run_exec_check, sync_dir,
-};
+use crate::replace::{is_dir_sync_tolerable, open_for_sync, run_exec_check, sync_dir};
 use crate::select::{
-    ReleaseInfo, Selection, decide, fallback_tag_from_location_path,
-    flavour_from_cgo_settings, parse_url,
+    ReleaseInfo, Selection, decide, fallback_tag_from_location_path, flavour_from_cgo_settings,
+    parse_url,
 };
 use crate::semver::{Version, parse_version};
 
@@ -102,8 +100,7 @@ pub struct Deps {
     /// Failure-injection seam for the `--version` exec check.
     /// `None` means [`run_exec_check`]. Go: `execCheckFn`
     /// (`replace.go:33`).
-    pub exec_check_fn:
-        Option<fn(&Path, &Version, Duration) -> Result<(), UpdateError>>,
+    pub exec_check_fn: Option<fn(&Path, &Version, Duration) -> Result<(), UpdateError>>,
 }
 
 impl Default for Deps {
@@ -221,9 +218,7 @@ impl Updater {
             Err(e) => {
                 return Err(FetchReleaseError {
                     status: e.status,
-                    err: UpdateError::failure(
-                        "update: failed to fetch release information",
-                    ),
+                    err: UpdateError::failure("update: failed to fetch release information"),
                 });
             }
         };
@@ -257,9 +252,7 @@ impl Updater {
             Err(_) => {
                 return Err(FetchReleaseError {
                     status: 200,
-                    err: UpdateError::failure(
-                        "update: release information is malformed",
-                    ),
+                    err: UpdateError::failure("update: release information is malformed"),
                 });
             }
         };
@@ -288,14 +281,14 @@ impl Updater {
             "{}/thoitiettxl-cyber/castctl/releases/latest",
             self.github_base()
         );
-        let (status, location) = match self.fetcher.get_no_follow(
-            &url,
-            &self.user_agent(),
-            METADATA_TIMEOUT,
-        ) {
-            Ok(t) => t,
-            Err(_) => return Err(rate_limit_error()),
-        };
+        let (status, location) =
+            match self
+                .fetcher
+                .get_no_follow(&url, &self.user_agent(), METADATA_TIMEOUT)
+            {
+                Ok(t) => t,
+                Err(_) => return Err(rate_limit_error()),
+            };
         if !matches!(status, 301 | 302 | 303 | 307 | 308) {
             return Err(rate_limit_error());
         }
@@ -396,9 +389,7 @@ impl Updater {
         let target = match parse_version(&self.opts.target_version) {
             Ok(t) => t,
             Err(_) => {
-                return Err(UpdateError::usage(
-                    "update: invalid --version value",
-                ));
+                return Err(UpdateError::usage("update: invalid --version value"));
             }
         };
         if target.has_build() {
@@ -416,9 +407,7 @@ impl Updater {
             Ok(r) => r,
             Err(e) => {
                 if e.status == 403 {
-                    return self.fallback_selection(
-                        current, flavour, goarch, tag, target,
-                    );
+                    return self.fallback_selection(current, flavour, goarch, tag, target);
                 }
                 if e.status == 404 {
                     return Err(UpdateError::usage(
@@ -544,9 +533,8 @@ impl Updater {
                 ));
             }
         };
-        parse_checksums(&body).map_err(|_| {
-            UpdateError::failure("update: the checksums file is malformed")
-        })
+        parse_checksums(&body)
+            .map_err(|_| UpdateError::failure("update: the checksums file is malformed"))
     }
 
     /// Source: `install` (`replace.go:88-265`).
@@ -662,13 +650,12 @@ impl Updater {
             }
         };
         let extracted_hash = (|| -> std::result::Result<[u8; 32], UpdateError> {
-            let asset_file = std::fs::File::open(&asset_tmp_path).map_err(|_| {
-                UpdateError::failure("update: cannot re-read the downloaded asset")
-            })?;
+            let asset_file = std::fs::File::open(&asset_tmp_path)
+                .map_err(|_| UpdateError::failure("update: cannot re-read the downloaded asset"))?;
             let hash = extract_castctl(asset_file, &mut extracted_tmp)?;
-            extracted_tmp.sync_all().map_err(|_| {
-                UpdateError::failure("update: cannot sync the extracted binary")
-            })?;
+            extracted_tmp
+                .sync_all()
+                .map_err(|_| UpdateError::failure("update: cannot sync the extracted binary"))?;
             drop(extracted_tmp);
             Ok(hash)
         })();
@@ -704,11 +691,7 @@ impl Updater {
             return (Result::empty(), Err(e));
         }
         // Exec check AFTER checksum verification only.
-        let exec_check = self
-            .opts
-            .deps
-            .exec_check_fn
-            .unwrap_or(run_exec_check);
+        let exec_check = self.opts.deps.exec_check_fn.unwrap_or(run_exec_check);
         if let Err(e) = exec_check(&extracted_tmp_path, &sel.target, EXEC_CHECK_TIMEOUT) {
             let _ = std::fs::remove_file(&extracted_tmp_path);
             return (Result::empty(), Err(e));
@@ -739,12 +722,11 @@ impl Updater {
         // rename once, fsync the directory. The open
         // retries ETXTBSY briefly.
         let sync_result = (|| -> std::result::Result<(), UpdateError> {
-            let mut sync_file = open_for_sync(&extracted_tmp_path).map_err(|_| {
-                UpdateError::failure("update: cannot re-open the new binary")
-            })?;
-            sync_file.sync_all().map_err(|_| {
-                UpdateError::failure("update: cannot sync the new binary")
-            })?;
+            let mut sync_file = open_for_sync(&extracted_tmp_path)
+                .map_err(|_| UpdateError::failure("update: cannot re-open the new binary"))?;
+            sync_file
+                .sync_all()
+                .map_err(|_| UpdateError::failure("update: cannot sync the new binary"))?;
             drop(sync_file);
             Ok(())
         })();
@@ -837,9 +819,7 @@ impl Updater {
         if let Err(e) = extract_castctl(&asset_buf[..], &mut extracted_buf) {
             return (Result::empty(), Err(e));
         }
-        if let Err(e) =
-            crate::elf::validate_elf_bytes(&extracted_buf, goarch_name())
-        {
+        if let Err(e) = crate::elf::validate_elf_bytes(&extracted_buf, goarch_name()) {
             return (Result::empty(), Err(e));
         }
         res.target = sel.target.clone();
@@ -939,16 +919,13 @@ fn hash_file(path: &Path) -> std::io::Result<[u8; 32]> {
 fn resolve_target(exe_override: Option<&str>) -> std::result::Result<(PathBuf, u32), UpdateError> {
     let exe = match exe_override {
         Some(e) => PathBuf::from(e),
-        None => std::env::current_exe().map_err(|_| {
-            UpdateError::failure("update: cannot resolve the running binary")
-        })?,
+        None => std::env::current_exe()
+            .map_err(|_| UpdateError::failure("update: cannot resolve the running binary"))?,
     };
-    let resolved = std::fs::canonicalize(&exe).map_err(|_| {
-        UpdateError::failure("update: cannot resolve the running binary")
-    })?;
-    let meta = std::fs::metadata(&resolved).map_err(|_| {
-        UpdateError::failure("update: cannot resolve the running binary")
-    })?;
+    let resolved = std::fs::canonicalize(&exe)
+        .map_err(|_| UpdateError::failure("update: cannot resolve the running binary"))?;
+    let meta = std::fs::metadata(&resolved)
+        .map_err(|_| UpdateError::failure("update: cannot resolve the running binary"))?;
     if !meta.is_file() {
         return Err(UpdateError::failure(
             "update: cannot resolve the running binary",
@@ -1056,12 +1033,11 @@ pub fn run(mut opts: Options) -> (Result, std::result::Result<(), UpdateError>) 
         .http_fetcher
         .take()
         .unwrap_or_else(|| Box::new(StdFetcher));
-    let out: Box<dyn Write> = opts.stdout.take().unwrap_or_else(|| Box::new(std::io::sink()));
-    let mut updater = Updater {
-        opts,
-        fetcher,
-        out,
-    };
+    let out: Box<dyn Write> = opts
+        .stdout
+        .take()
+        .unwrap_or_else(|| Box::new(std::io::sink()));
+    let mut updater = Updater { opts, fetcher, out };
     // 5. Select the target release (latest or explicit, with
     // the 403 fallback). This may return a no-op result.
     let sel = match updater.select_release(&current, flavour, goarch) {
@@ -1105,9 +1081,10 @@ mod tests {
         let (_res, err) = run(opts);
         let err = err.expect_err("dev build must refuse");
         assert_eq!(err.code(), 2);
-        assert!(err
-            .to_string()
-            .starts_with("update: cannot determine running version"));
+        assert!(
+            err.to_string()
+                .starts_with("update: cannot determine running version")
+        );
     }
 
     /// Invalid current version refuses with code 2.
@@ -1115,10 +1092,7 @@ mod tests {
     fn invalid_current_version_refuses() {
         let opts = Options {
             deps: Deps {
-                cgo_settings: Some(vec![(
-                    "CGO_ENABLED".to_string(),
-                    "1".to_string(),
-                )]),
+                cgo_settings: Some(vec![("CGO_ENABLED".to_string(), "1".to_string())]),
                 ..Deps::default()
             },
             current_version: "not-a-version".to_string(),
