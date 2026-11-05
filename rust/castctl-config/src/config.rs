@@ -35,7 +35,12 @@ use std::collections::BTreeMap;
 /// sorted-name order (`ProfileNames`). Raw block values are preserved
 /// for faithful re-encoding; parsed sing-box option values are
 /// deferred (D-M2-1) and represented by their raw JSON only.
-#[derive(Debug, Clone, Default)]
+///
+/// `Debug` is hand-written (M1 F5 precedent): raw block values
+/// render as presence/count markers only — they may carry secrets
+/// (credentials, WireGuard keys) — never their content. The
+/// parsed `telegram` field is redacted by its own `Debug` impl.
+#[derive(Clone, Default)]
 pub struct SingleConfig {
     /// `default_profile` (empty when absent).
     pub default_profile: String,
@@ -71,6 +76,60 @@ pub struct SingleConfig {
     pub credentials: Option<CredentialsBlock>,
     /// Raw `credentials` value.
     pub credentials_raw: Option<JsonValue>,
+}
+
+impl std::fmt::Debug for SingleConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SingleConfig")
+            .field("default_profile", &self.default_profile)
+            .field("profiles", &self.profiles)
+            .field(
+                "outbounds_raw",
+                &crate::jsonvalue::raw_list_debug_marker(&self.outbounds_raw),
+            )
+            .field(
+                "endpoints_raw",
+                &crate::jsonvalue::raw_list_debug_marker(&self.endpoints_raw),
+            )
+            .field(
+                "dns_raw",
+                &crate::jsonvalue::raw_debug_marker(&self.dns_raw),
+            )
+            .field("wireguard_dns", &self.wireguard_dns)
+            .field(
+                "wireguard_dns_raw",
+                &crate::jsonvalue::raw_debug_marker(&self.wireguard_dns_raw),
+            )
+            .field("log", &self.log)
+            .field(
+                "log_raw",
+                &crate::jsonvalue::raw_debug_marker(&self.log_raw),
+            )
+            .field("telegram", &self.telegram)
+            .field(
+                "telegram_raw",
+                &crate::jsonvalue::raw_debug_marker(&self.telegram_raw),
+            )
+            .field(
+                "keeper_raw",
+                &crate::jsonvalue::raw_debug_marker(&self.keeper_raw),
+            )
+            .field(
+                "webui_raw",
+                &crate::jsonvalue::raw_debug_marker(&self.webui_raw),
+            )
+            .field("plugins", &self.plugins)
+            .field(
+                "plugins_raw",
+                &crate::jsonvalue::raw_debug_marker(&self.plugins_raw),
+            )
+            .field("credentials", &self.credentials)
+            .field(
+                "credentials_raw",
+                &crate::jsonvalue::raw_debug_marker(&self.credentials_raw),
+            )
+            .finish()
+    }
 }
 
 impl SingleConfig {
@@ -565,20 +624,19 @@ pub fn scan_legacy_config_file(
 
 /// `applyEnvFill` (`config.go:1046`): only when the key was absent:
 /// non-empty `MUSE_VM_ID` / `MUSE_NODE_ID` fill `vm_id` / `node_id`.
-/// A `None` getenv does nothing.
+/// `getenv`: `None` means the process environment (see the `Getenv`
+/// convention in `configlocation.rs`).
 pub fn apply_env_fill(p: &mut Profile, getenv: Getenv<'_>) {
-    let Some(getenv) = getenv else {
-        return;
-    };
+    let lookup = |key: &str| crate::configlocation::config_lookup_env(getenv, key);
     if !p.vm_id_present {
-        if let Some(v) = getenv("MUSE_VM_ID") {
+        if let Some(v) = lookup("MUSE_VM_ID") {
             if !v.is_empty() {
                 p.vm_id = v;
             }
         }
     }
     if !p.node_id_present {
-        if let Some(v) = getenv("MUSE_NODE_ID") {
+        if let Some(v) = lookup("MUSE_NODE_ID") {
             if !v.is_empty() {
                 p.node_id = v;
             }
@@ -686,7 +744,9 @@ pub fn profile_exists(base_dir: &str, name: &str, single: Option<&SingleConfig>)
 }
 
 /// `ResolveActiveProfile` (`config.go:1235`): flag > env >
-/// `default_profile` (must exist) > `"default"`.
+/// `default_profile` (must exist) > `"default"`. `getenv`:
+/// `None` means the process environment (see the `Getenv`
+/// convention in `configlocation.rs`).
 pub fn resolve_active_profile(
     base_dir: &str,
     flag: Option<&str>,
@@ -696,12 +756,10 @@ pub fn resolve_active_profile(
         let name = resolve_profile_name(flag, getenv)?;
         return load_profile(base_dir, &name, getenv);
     }
-    if let Some(getenv) = getenv {
-        if let Some(env) = getenv(PROFILE_ENV) {
-            if !go_trim_space(&env).is_empty() {
-                let name = validate_profile_name(go_trim_space(&env))?;
-                return load_profile(base_dir, &name, Some(getenv));
-            }
+    if let Some(env) = crate::configlocation::config_lookup_env(getenv, PROFILE_ENV) {
+        if !go_trim_space(&env).is_empty() {
+            let name = validate_profile_name(go_trim_space(&env))?;
+            return load_profile(base_dir, &name, getenv);
         }
     }
     let (single, found) = load_single_config(base_dir)?;
@@ -751,6 +809,26 @@ mod tests {
             rendered,
             "{\n  \"profiles\": {\n    \"default\": {\n      \"cookies_file\": \"/cfg/cookies.txt\",\n      \"auto_approve\": \"off\",\n      \"auto_allow_once\": false\n    }\n  }\n}\n"
         );
+    }
+
+    #[test]
+    fn test_debug_never_prints_secrets() {
+        // Fake secret-adjacent values (invented, never real
+        // credentials): the hand-written Debug impls must not
+        // print the token, the credential password, or the inline
+        // outbound raw JSON.
+        let cfg = parse(&format!(
+            "{{\"profiles\":{{\"default\":{{\"outbound\":{{\"type\":\"wireguard\",\"private_key\":\"SECRET-PRIVATE-KEY\"}}}}}},\"credentials\":[{{\"tag\":\"c1\",\"profile\":\"default\",\"username\":\"alice\",\"password\":\"SECRET-PASSWORD\"}}],\"telegram\":{{\"profile\":\"default\",\"token\":\"{FAKE_TOKEN}\",\"allowed_user_ids\":[111]}}}}"
+        ))
+        .unwrap();
+        let rendered = format!("{cfg:?}");
+        assert!(!rendered.contains("SECRET-PRIVATE-KEY"));
+        assert!(!rendered.contains("SECRET-PASSWORD"));
+        assert!(!rendered.contains(FAKE_TOKEN));
+        assert!(rendered.contains("[redacted]"));
+        // The parsed Profile's own Debug is redacted too.
+        let rendered_profile = format!("{:?}", cfg.profiles["default"]);
+        assert!(!rendered_profile.contains("SECRET-PRIVATE-KEY"));
     }
 
     #[test]

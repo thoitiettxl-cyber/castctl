@@ -70,19 +70,14 @@ pub fn validate_profile_name(name: &str) -> Result<String, ConfigError> {
 
 /// `ResolveProfileName` (`profile.go:47`): flag (even empty) >
 /// non-blank env value (trimmed) > `"default"`. `getenv` returns
-/// `None` for an unset variable; pass `None` to read the process
-/// environment.
+/// `None` for an unset variable; pass `None` as the whole getter
+/// to read the process environment (see the `Getenv` convention
+/// in `configlocation.rs`).
 pub fn resolve_profile_name(flag: Option<&str>, getenv: Getenv<'_>) -> Result<String, ConfigError> {
     if let Some(flag) = flag {
         return validate_profile_name(flag);
     }
-    if let Some(getenv) = getenv {
-        if let Some(env) = getenv(PROFILE_ENV) {
-            if !go_trim_space(&env).is_empty() {
-                return validate_profile_name(go_trim_space(&env));
-            }
-        }
-    } else if let Ok(env) = std::env::var(PROFILE_ENV) {
+    if let Some(env) = crate::configlocation::config_lookup_env(getenv, PROFILE_ENV) {
         if !go_trim_space(&env).is_empty() {
             return validate_profile_name(go_trim_space(&env));
         }
@@ -140,7 +135,7 @@ pub fn discover_profile_names(base_dir: &str) -> Result<Vec<String>, ConfigError
     let profiles_dir = go_join(&[base_dir, "profiles"]);
     let entries = match std::fs::read_dir(&profiles_dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(names),
+        Err(e) if crate::oserr::is_not_exist(&e) => return Ok(names),
         Err(e) => {
             return Err(crate::config_errorf!(
                 "list profiles: {}",
@@ -215,10 +210,12 @@ impl OutboundKind {
 /// A profile's resolved outbound selection (`outbound.go:34`,
 /// `OutboundRef`). For `Tag`, `Type`/`From` are resolved by the
 /// (deferred) tag graph and stay empty in M2. For `Inline`, `raw`
-/// holds the auto-tagged object JSON. No `Debug` impl prints `raw`
-/// beyond its length: inline objects may carry secret-adjacent
-/// fields.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// holds the auto-tagged object JSON.
+///
+/// `Debug` is hand-written (M1 F5 precedent): `raw` renders as a
+/// presence/kind marker only — inline objects may carry
+/// secret-adjacent fields — never its content.
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct OutboundRef {
     /// Selection kind.
     pub kind: OutboundKind,
@@ -230,6 +227,18 @@ pub struct OutboundRef {
     pub from: String,
     /// Inline object JSON (auto-tagged), or empty.
     pub raw: Option<JsonValue>,
+}
+
+impl std::fmt::Debug for OutboundRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutboundRef")
+            .field("kind", &self.kind)
+            .field("tag", &self.tag)
+            .field("typ", &self.typ)
+            .field("from", &self.from)
+            .field("raw", &crate::jsonvalue::raw_debug_marker(&self.raw))
+            .finish()
+    }
 }
 
 impl OutboundRef {
@@ -246,11 +255,13 @@ impl OutboundRef {
 }
 
 /// A resolved profile's settings (`profile.go:213`, `Profile`).
-/// `Debug` is derived: no field carries secret text except
-/// `cookies_file` paths and ids, which Go also displays; the raw
-/// `dns` value is a sing-box options object (no secrets by
-/// construction in the parse path, but see PORTING.md).
-#[derive(Debug, Clone, PartialEq, Default)]
+///
+/// `Debug` is hand-written (M1 F5 precedent): the raw `dns` value
+/// and the outbound ref render as presence/kind markers only —
+/// both may carry secret-adjacent fields — never their content.
+/// The remaining fields are names, paths, and ids, which Go also
+/// displays.
+#[derive(Clone, PartialEq, Default)]
 pub struct Profile {
     /// Profile name.
     pub name: String,
@@ -296,6 +307,35 @@ pub struct Profile {
     pub tls_engine_present: bool,
     /// Whether `dns` was present in the file.
     pub dns_present: bool,
+}
+
+impl std::fmt::Debug for Profile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Profile")
+            .field("name", &self.name)
+            .field("dir", &self.dir)
+            .field("config_file", &self.config_file)
+            .field("cookies_file", &self.cookies_file)
+            .field("chat_file", &self.chat_file)
+            .field("vm_id", &self.vm_id)
+            .field("node_id", &self.node_id)
+            .field("auto_approve", &self.auto_approve)
+            .field("auto_allow_once", &self.auto_allow_once)
+            .field("subscription_action_id", &self.subscription_action_id)
+            .field("fingerprint", &self.fingerprint)
+            .field("tls_engine", &self.tls_engine)
+            .field("dns", &crate::jsonvalue::raw_debug_marker(&self.dns))
+            .field("outbound", &self.outbound)
+            .field("source", &self.source)
+            .field("exists", &self.exists)
+            .field("config_found", &self.config_found)
+            .field("vm_id_present", &self.vm_id_present)
+            .field("node_id_present", &self.node_id_present)
+            .field("fingerprint_present", &self.fingerprint_present)
+            .field("tls_engine_present", &self.tls_engine_present)
+            .field("dns_present", &self.dns_present)
+            .finish()
+    }
 }
 
 /// `parseAutoAllowOnceValue` (`config.go:655`): a bool, or an
@@ -621,6 +661,26 @@ mod tests {
             JsonValue::Object(o) => o,
             _ => panic!("not object"),
         }
+    }
+
+    #[test]
+    fn test_discover_profile_names_enotdir_is_error() {
+        // `profiles/` as a regular file is ENOTDIR, not ENOENT:
+        // Go's os.IsNotExist is false, so discovery must error
+        // (`list profiles:`) instead of silently returning
+        // ["default"].
+        let dir =
+            std::env::temp_dir().join(format!("castctl-discover-enotdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("profiles"), b"x").unwrap();
+        let err = discover_profile_names(dir.to_str().unwrap()).unwrap_err();
+        assert!(
+            err.message.contains("list profiles:"),
+            "unexpected message: {}",
+            err.message
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -30,11 +30,13 @@ pub fn strerror(errno: i32) -> String {
         22 => "invalid argument",
         24 => "too many open files in system",
         26 => "text file busy",
+        27 => "file too large",
         28 => "no space left on device",
         30 => "read-only file system",
         31 => "too many links",
         32 => "broken pipe",
         36 => "file name too long",
+        39 => "directory not empty",
         40 => "too many levels of symbolic links",
         _ => return format!("os error {errno}"),
     };
@@ -71,6 +73,8 @@ mod tests {
         assert_eq!(strerror(13), "permission denied");
         assert_eq!(strerror(21), "is a directory");
         assert_eq!(strerror(20), "not a directory");
+        assert_eq!(strerror(27), "file too large");
+        assert_eq!(strerror(39), "directory not empty");
     }
 
     #[test]

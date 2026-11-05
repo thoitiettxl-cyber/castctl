@@ -14,7 +14,10 @@ use crate::jsonvalue::JsonValue;
 /// block was absent (bot off).
 ///
 /// Source: `internal/profile/telegram.go` (`TelegramConfig`).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+///
+/// `Debug` is hand-written (M1 F5 precedent): the token renders as
+/// `[redacted]` and is never printed by `{:?}`.
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct TelegramConfig {
     /// Linked profile name (required).
     pub profile: String,
@@ -32,20 +35,17 @@ pub struct TelegramConfig {
     pub owner_id_set: bool,
 }
 
-impl TelegramConfig {
-    /// Hand-written `Debug` that never prints the token (M1 F5
-    /// precedent: `Debug` impls must not leak secret-adjacent text).
-    /// The token field renders as `[redacted]`.
-    pub fn debug_redacted(&self) -> String {
-        format!(
-            "TelegramConfig {{ profile: {:?}, token: \"[redacted]\", allowed_user_ids: {:?}, auto_approve: {:?}, auto_allow_once: {:?}, owner_id: {:?}, owner_id_set: {:?} }}",
-            self.profile,
-            self.allowed_user_ids,
-            self.auto_approve,
-            self.auto_allow_once,
-            self.owner_id,
-            self.owner_id_set
-        )
+impl std::fmt::Debug for TelegramConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelegramConfig")
+            .field("profile", &self.profile)
+            .field("token", &"[redacted]")
+            .field("allowed_user_ids", &self.allowed_user_ids)
+            .field("auto_approve", &self.auto_approve)
+            .field("auto_allow_once", &self.auto_allow_once)
+            .field("owner_id", &self.owner_id)
+            .field("owner_id_set", &self.owner_id_set)
+            .finish()
     }
 }
 
@@ -387,6 +387,8 @@ mod tests {
     #[test]
     fn test_debug_never_prints_token() {
         let cfg = parse(&valid_json()).unwrap();
-        assert!(!cfg.debug_redacted().contains(FAKE_TOKEN));
+        let rendered = format!("{cfg:?}");
+        assert!(!rendered.contains(FAKE_TOKEN));
+        assert!(rendered.contains("[redacted]"));
     }
 }

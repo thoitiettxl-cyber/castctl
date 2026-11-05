@@ -29,12 +29,22 @@ pub struct ConfigLocation {
 
 /// Environment lookup: `Some(value)` when set, `None` when unset.
 /// Pass `None` as the whole getter to read the process environment
-/// (Go `nil` getenv = `os.LookupEnv`).
+/// (Go `nil` getenv = `os.LookupEnv` in `configLookupEnv`).
+///
+/// CONVENTION (fix-loop N-b): `None` ALWAYS means the process
+/// environment, everywhere in this crate — `resolve_profile_name`,
+/// `resolve_active_profile`, and `apply_env_fill` all consult the
+/// process environment when passed `None`, and consult only the
+/// supplied getter when passed `Some`. This matches Go production
+/// behaviour (callers pass `os.LookupEnv`); the Go nil-getenv
+/// guards (skip env entirely) do not apply to this API. Tests
+/// that need isolation must pass `Some` with a stub getter.
 pub type Getenv<'a> = Option<&'a dyn Fn(&str) -> Option<String>>;
 
 /// Read one variable through `getenv`, or the process environment
-/// when `getenv` is `None` (Go `configLookupEnv`).
-fn config_lookup_env(getenv: Getenv<'_>, key: &str) -> Option<String> {
+/// when `getenv` is `None` (Go `configLookupEnv`). See the
+/// `Getenv` convention above.
+pub(crate) fn config_lookup_env(getenv: Getenv<'_>, key: &str) -> Option<String> {
     match getenv {
         Some(getenv) => getenv(key),
         None => std::env::var_os(key).map(|v| v.to_string_lossy().into_owned()),
@@ -270,6 +280,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn test_none_getenv_reads_process_environment() {
+        // The Getenv convention: None means the process
+        // environment, not "skip env". PATH is always set in a
+        // test process, so no env mutation is needed to pin it.
+        let expected = std::env::var("PATH").ok();
+        assert_eq!(config_lookup_env(None, "PATH"), expected);
+        let stub = getenv_map(HashMap::new());
+        assert_eq!(config_lookup_env(Some(&stub), "PATH"), None);
     }
 
     #[test]
