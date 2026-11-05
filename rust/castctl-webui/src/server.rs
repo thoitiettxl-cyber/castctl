@@ -490,7 +490,17 @@ impl Server {
                 .map(|v| v.eq_ignore_ascii_case("websocket"))
                 .unwrap_or(false);
         if is_ws_upgrade {
-            return self.handle_ws_upgrade(req, peer).await;
+            // Go's `recoverer` wraps the whole router,
+            // including the WS handler: a panic is the
+            // fixed 500, never a dropped connection.
+            use futures_util::FutureExt;
+            return match std::panic::AssertUnwindSafe(self.handle_ws_upgrade(req, peer))
+                .catch_unwind()
+                .await
+            {
+                Ok(r) => r,
+                Err(_) => Ok(render_resp(&Method::GET, internal_resp())),
+            };
         }
         let headers = req.headers().clone();
         // Invalid escape: Go's stdlib 400s before any
@@ -538,9 +548,10 @@ impl Server {
         } else {
             Vec::new()
         };
-        let resp = self
-            .dispatch(&method, &path_raw, &path_decoded, &uri, &headers, peer, &body)
-            .await;
+        let resp = with_recover(
+            self.dispatch(&method, &path_raw, &path_decoded, &uri, &headers, peer, &body),
+        )
+        .await;
         Ok(render_resp(&method, resp))
     }
 
@@ -774,6 +785,26 @@ fn hex_val(b: u8) -> Option<u8> {
 enum BodyRead {
     OverCap,
     Transport,
+}
+
+/// Run a response future under Go's `recoverer`
+/// (`server.go:523`): a handler panic becomes the fixed
+/// 500 `internal_error`, never a dropped connection (Go
+/// writes the envelope and keeps serving). No reachable
+/// trigger exists on the current request path (the only
+/// request-path `expect` is the `log_gate` invariant in
+/// `logs.rs`, and the WS starter + chat-send future
+/// already guard themselves) — this is defence in depth,
+/// matching Go's root-router recoverer.
+async fn with_recover<Fut>(fut: Fut) -> Resp
+where
+    Fut: std::future::Future<Output = Resp>,
+{
+    use futures_util::FutureExt;
+    match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+        Ok(resp) => resp,
+        Err(_) => internal_resp(),
+    }
 }
 
 /// Read a request body frame by frame, stopping at
@@ -1133,6 +1164,22 @@ mod tests {
         // GET is ignored and the request succeeds.
         let resp = live_server_case("GET", "/api/v1/status", 2 * 1024 * 1024).await;
         assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn recoverer_maps_panic_to_fixed_500() {
+        // M2: Go's root-router recoverer turns any handler
+        // panic into the fixed 500 envelope.
+        let resp = with_recover(async { panic!("boom") }).await;
+        assert_eq!(resp.status, 500);
+        let body = String::from_utf8(resp.body).unwrap();
+        assert!(body.contains("internal_error"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn recoverer_passes_through_ok() {
+        let resp = with_recover(async { envelope_resp(200, JsonValue::Number("1".to_string())) }).await;
+        assert_eq!(resp.status, 200);
     }
 
 }
