@@ -220,7 +220,11 @@ pub fn shadow_copy_to_dir(file: &PluginFile, dir: &Path) -> Result<PathBuf, Plug
             return Err(e);
         }
     };
-    drop(tmp);
+    // NB: do NOT drop `tmp` here: dropping a
+    // `NamedTempFile` DELETES the file, and the rename
+    // below needs it. `tmp` stays alive until the
+    // rename completes; its Drop afterwards is a no-op
+    // (the temp path no longer exists).
     let target = shadow_path(dir, &file.id, &digest, &ext);
     if shadow_matches(&target, size, &digest) {
         let _ = std::fs::remove_file(&tmp_path);
@@ -399,7 +403,13 @@ mod tests {
             manifest_path: PathBuf::new(),
         };
         let err = shadow_copy_to_dir(&link, &dir).unwrap_err();
-        assert!(err.to_string().contains("must not be a symlink"));
+        // Go's hardening test asserts only that the
+        // error mentions "symlink"
+        // (`shadow_hardening_test.go:47`): the refusal
+        // fires in `refuse_symlinked_components`
+        // ("traverses a symlink at ..."), before the
+        // Lstat "must not be a symlink" layer.
+        assert!(err.to_string().contains("symlink"));
         // Hardlink source refuses.
         let hard = plugin_file(tmp.path(), "hard", b"x");
         std::fs::hard_link(&hard.path, tmp.path().join("hard2.so")).unwrap();
