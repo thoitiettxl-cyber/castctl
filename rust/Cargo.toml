@@ -173,7 +173,7 @@ async-trait = "=0.1.92"
 # 0.3.4, zeroize 1.9.1). 0.19.x was rejected: it needs
 # base64 0.23 (a second base64 major; the workspace pins
 # =0.22.1). Pin measured on cue 2026-11-05; see
-# rust/PORTING.md §M6b and docs/provenance.md §16.
+# rust/PORTING.md §M6b and docs/provenance.md §17.
 bcrypt = "=0.17.1"
 blowfish = "=0.9.1"
 # M6b: SHA-256 (bundle hash, config-file hash) and flock

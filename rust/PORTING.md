@@ -9890,3 +9890,356 @@ Rust thì nhanh hơn bao nhiêu" — câu trả lời thứ hai chỉ có ở it
 `md_to_html` (81% render chain), `split_text` collect `Vec<char>`, đo
 lại sau validation, item 5 đảo chiều lần nữa (caveat theo tải, không
 phải hotspot tối ưu), startup/binary đã đủ tốt, transport thật chưa đo.
+## M6b — Web UI port (crate `castctl-webui`, 2026-11-05/06)
+
+Port of Go `internal/webui` (49 API routes + static shell +
+guarded store) to a new Rust crate, wired into `castctl-cli`
+(`webui serve`). Base `dev-rust` `25a124e`; branch
+`feat/rust-m6b-webui`; head `2a5d851`. Go is ground truth
+(`internal/webui/*.go`, `internal/commands/webui.go`); the
+frontend dist is reused as-is (`webui/dist/index.html`,
+964,333 bytes, sha256
+`cd11d39afd03f48a8a96a576a03b2f2891963a1f56773ba2cf3745b4720c6cc7`).
+
+### M6b.1 Crate map + pins
+
+- New crate `rust/castctl-webui/` (`lib.rs` module map mirrors
+  the Go files): `error`, `go_json` (Go-compatible serializer,
+  HTML escaping ON), `go_decode`, `duration`, `auth`, `contain`,
+  `redact`, `ordered`, `merge`, `ratelimit`, `origin`, `config`,
+  `guarded`, `store`, `validate`, `static_shell` (byte-identical
+  `include_bytes!("../../../webui/dist/index.html")`),
+  `uidir`, `plugins`, `server`, `logs`, `endpoints`, `screencast`,
+  `chats`, `sections`, `cookies`, `keeper_status`, `handlers`
+  (all 49 routes).
+- Only NEW crates: `bcrypt =0.17.1` + `blowfish =0.9.1`
+  (lock diff vs base: pure additions, 55 lines, 0 removed;
+  verified on cue 2026-11-06, local lock md5 == cue lock md5).
+  Promoted without new NOTICE entries: `sha2 =0.10.9`, `libc`,
+  `http-body =1.1.0`, `tokio-tungstenite =0.30.0` (already in
+  lock). No axum/tower/mime/rust-embed/fs2/castctl-transport/
+  castctl-gateway. Server: hyper 1.8.1 + hyper-util + tokio.
+- `castctl-cli` gains the `castctl-webui` dep; `run.rs`
+  `serve_webui` mirrors the Go pre-serve sequence (resolve →
+  load → `resolve_webui` → empty token exit 2 → ui_dir FIRST
+  via `check_ui_dir` → hash-on-start → `Server::new` →
+  multi-thread tokio runtime → `bind` → `serve_on` +
+  `ctrl_c` → drain → exit 130). `castctl-rs/src/main.rs`
+  unchanged.
+- Auth: bcrypt cost **10** (Go `DefaultCost`, never the crate's
+  `DEFAULT_COST` 12), 72-byte limit on BYTES, verify errors →
+  false, fixed 401 for missing/malformed/wrong, no token ever
+  logged/echoed. Middleware order (pinned): rate-limit →
+  auth → Origin → timeout (30s, WS excluded). Rate limit:
+  fixed window 5/5m default, per remote addr, 429 +
+  `Retry-After`. API responses: `Cache-Control: no-store` +
+  `X-Content-Type-Options: nosniff`,
+  `Content-Type: application/json`; NO cookies, NO CORS
+  headers ever.
+- Store: single guarded-save funnel — legacy check → 409 on
+  `base_sha256` mismatch → containment on new values →
+  ordered marshal (stored key order kept, new keys appended
+  sorted) → full re-parse → hash-on-save → flock via libc +
+  atomic temp+rename + mode 0600 → token refresh. Unknown
+  fields preserved via `castctl-config` JsonValue/
+  OrderedObject.
+- Screencast: frame + trait seams only ("chưa nối", depends
+  on M6a keeper/Chrome); status/start report unavailable,
+  never fake success. Chats: handler logic ported with the
+  seam; see §M6b.5 for the CLI wiring decision.
+
+### M6b.2 Gates (cue, cargo/rustc 1.99.1, 2026-11-06, head `2a5d851`)
+
+`CARGO_TARGET_DIR=/tmp/mea-m6b-target`,
+`CARGO_PROFILE_DEV_DEBUG=0`,
+`CARGO_PROFILE_DEV_INCREMENTAL=false`. Verbatim exit lines
+from `/tmp/m6b-gates3.log`:
+
+```
+=== cargo fmt --check ===
+EXIT=0
+=== cargo build --workspace ===
+EXIT=0
+=== cargo test --workspace ===
+EXIT=0
+=== cargo clippy --workspace --all-targets -- -D warnings ===
+EXIT=0
+=== ALL GATES DONE ===
+```
+
+Test count: **682 passed, 0 failed** (baseline 568 → +114:
+113 new `castctl-webui` tests + 1 `castctl-cli`
+`test_failing_chat_deps_all_err`). Per-crate tail of the same
+log: `castctl-cli` 70 passed, `castctl-webui` 113 passed, all
+other crates unchanged and green.
+
+### M6b.3 Live parity gate (cue, Go `castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)` vs Rust debug `castctl-rs`)
+
+Driver: Python stdlib `http.client` (no redirect following,
+verbatim paths), ports Go 18317 / Rust 18318 (never live
+8317), throwaway config copies only, token random per run.
+Comparison: status exact; headers exact for Content-Type,
+Cache-Control, X-Content-Type-Options, Retry-After (429
+only); `Access-Control-Allow-*` and `Set-Cookie` must be
+ABSENT; JSON canonical (keys sorted, numbers as literals via
+`parse_int=str, parse_float=str`); normalisations:
+`listen_addr` → `<LISTEN>`, `config_path`/`config-dir` →
+`<CONFIGDIR>`, stored-file `sha256` → presence+format only
+(differs by bcrypt salt), bcrypt hashes → `<BCRYPT>`,
+`/status` version stamp stripped then bare-compared,
+`go_version`/`singbox_version` presence+type only,
+`bundle_sha256` STRICT, screencast `reason` recorded
+verbatim (loose), `available` strict.
+
+Run 1 (2026-11-06): 47/52 identical. Run 2 (2026-11-06,
+after the fixes in §M6b.4): **52/52 identical**
+(`Summary: 52/52 identical`, 0 `DIFF` lines in
+`/tmp/m6b-parity2.log`).
+
+| case | status | headers | body | note |
+|---|---|---|---|---|
+| 01-shell | MATCH (200/200) | MATCH | MATCH |  |
+| 02-status | MATCH (200/200) | MATCH | MATCH |  |
+| 03-status-noauth | MATCH (401/401) | MATCH | MATCH |  |
+| 04-status-bad | MATCH (401/401) | MATCH | MATCH |  |
+| 05-status-basic | MATCH (401/401) | MATCH | MATCH |  |
+| 06-status-bare | MATCH (401/401) | MATCH | MATCH |  |
+| 07-config | MATCH (200/200) | MATCH | MATCH |  |
+| 08-profiles | MATCH (200/200) | MATCH | MATCH |  |
+| 09-profile-one | MATCH (200/200) | MATCH | MATCH |  |
+| 10-profile-404 | MATCH (404/404) | MATCH | MATCH |  |
+| 11-telegram | MATCH (200/200) | MATCH | MATCH |  |
+| 12-keeper-settings | MATCH (200/200) | MATCH | MATCH |  |
+| 13-webui-settings | MATCH (200/200) | MATCH | MATCH |  |
+| 14-plugins | MATCH (200/200) | MATCH | MATCH |  |
+| 15-logs-disabled | MATCH (200/200) | MATCH | MATCH |  |
+| 16-keeper | MATCH (200/200) | MATCH | MATCH |  |
+| 17-screencast-status | MATCH (200/200) | MATCH | MATCH | reason differs (recorded verbatim), available matches |
+| 18-chats-404 | MATCH (404/404) | MATCH | MATCH |  |
+| 19-chats-502 | MATCH (502/502) | MATCH | MATCH |  |
+| 20-outbounds | MATCH (200/200) | MATCH | MATCH |  |
+| 21-endpoints | MATCH (200/200) | MATCH | MATCH |  |
+| 22-dns | MATCH (200/200) | MATCH | MATCH |  |
+| 23-status-405 | MATCH (405/405) | MATCH | MATCH |  |
+| 24-logs-405 | MATCH (405/405) | MATCH | MATCH |  |
+| 25-origin-403 | MATCH (403/403) | MATCH | MATCH |  |
+| 25b-origin-auth-first | MATCH (401/401) | MATCH | MATCH |  |
+| 26-validate-notjson | MATCH (200/200) | MATCH | MATCH |  |
+| 27-validate-badjson | MATCH (400/400) | MATCH | MATCH |  |
+| 27b-validate-unknown | MATCH (400/400) | MATCH | MATCH |  |
+| 28-unknown-api | MATCH (200/200) | MATCH | MATCH |  |
+| 28b-unknown-api-noauth | MATCH (401/401) | MATCH | MATCH |  |
+| 23b-profile-test | MATCH (501/501) | MATCH | MATCH |  |
+| 23c-outbound-test | MATCH (501/501) | MATCH | MATCH |  |
+| 15b-logs-seeded | MATCH (200/200) | MATCH | MATCH |  |
+| 29-uidir-shell | MATCH (200/200) | MATCH | MATCH |  |
+| 30-uidir-asset | MATCH (200/200) | MATCH | MATCH |  |
+| 31-uidir-traversal | MATCH (404/404) | MATCH | MATCH |  |
+| 31b-uidir-traversal-enc | MATCH (404/404) | MATCH | MATCH |  |
+| 31c-uidir-traversal-deep | MATCH (404/404) | MATCH | MATCH |  |
+| 32-uidir-hidden | MATCH (404/404) | MATCH | MATCH |  |
+| 33-uidir-missing | MATCH (200/200) | MATCH | MATCH |  |
+| 34-uidir-status | MATCH (200/200) | MATCH | MATCH |  |
+| RL-ratelimit | MATCH (0/0) | MATCH | MATCH |  |
+| 35-put-stale | MATCH (409/409) | MATCH | MATCH |  |
+| 36-put-noop | MATCH (200/200) | MATCH | MATCH |  |
+| 37-put-idle | MATCH (200/200) | MATCH | MATCH |  |
+| 37b-status-46800 | MATCH (200/200) | MATCH | MATCH |  |
+| 37c-file-diff | MATCH (0/0) | MATCH | MATCH |  |
+| 38-put-token | MATCH (200/200) | MATCH | MATCH |  |
+| 38b-old-token-401 | MATCH (401/401) | MATCH | MATCH |  |
+| 38c-new-token-200 | MATCH (200/200) | MATCH | MATCH |  |
+| 38d-file-diff | MATCH (0/0) | MATCH | MATCH |  |
+
+Matched raw bytes too where noted by the driver: 01-shell
+byte-identical; 38b raw==; 02/09/38c canonical MATCH with
+raw differing only by Go struct-vs-map key order (pinned
+rule: canonical comparison is the arbiter for those).
+
+### M6b.4 Run 1 → run 2: the five diffs, all closed
+
+1. **07-config** — root cause: `redact_raw_config` rendered
+   the redacted config text with the webui crate's
+   HTML-escaping encoder, so the inner text carried literal
+   `\u003credacted\u003e`. Go's `RedactRawConfig`
+   (`internal/profile/redact.go:58`) calls
+   `encodeOrderedJSONIndent`, whose scalar writer uses
+   `SetEscapeHTML(false)` (`marshalScalar`,
+   `internal/profile/jsonvalue.go:172`), so Go's inner text
+   carries literal `<redacted>`; only the OUTER envelope
+   encoder escapes it on the wire. Fix (`49fb811`):
+   `redact_raw_config` now uses
+   `castctl_config::jsonvalue::encode_ordered_json_indent`
+   (escape OFF). Verified: run 2 case 07 MATCH.
+2. **19-chats-502** — live Go returned 502 `upstream_error`,
+   Rust returned 501 `unavailable`. Root cause: Rust wired
+   `Chats=None` (Go's nil-seam branch, reachable only in
+   Go's unit tests); the live Go binary always wires its
+   gateway seam, and with no live session the seam call
+   fails → 502. Fix (`49fb811`): `castctl-cli` wires a
+   failing `ChatDeps` — all five fns return
+   `Err(ChatSeamError)` — pinned by
+   `test_failing_chat_deps_all_err`. Handlers untouched;
+   `test_server` unit tests still use `chats: None`.
+   Decision by the live-evidence rule (rule 1): follow
+   production, not the unit-test shape. Verified: run 2
+   case 19 MATCH (502/502).
+3. **RL-ratelimit** — harness expectation wrong, not a code
+   diff: both sides returned `[401×4, 429×3]`; the driver
+   expected `[401×5, 429×2]`. The readiness poll (`wait_up`
+   GET /status, no auth) consumes 1 failed attempt on each
+   side before the phase starts, so the 5th bad request is
+   already over the default limit of 5. Driver `want`
+   corrected to `[(401, None)]*4 + [(429, "300")]*3`.
+4. **37c-file-diff / 38d-file-diff** — driver normalisation
+   gap, not a code diff: the two config copies live in
+   different dirs and listen on different ports, and
+   `check_files` compared raw bytes. After bcrypt
+   normalisation the ONLY differences were the config-dir
+   path in `cookies_file` and the listen port — both
+   expected. Driver now replaces each side's config dir
+   with `<CONFIGDIR>` and its port with `<PORT>` before
+   comparing. (Side finding: Rust's saved file does NOT
+   expand profile defaults beyond Go — files identical
+   modulo salt/port/dir.)
+5. **Hyper timer** (found by parity run 1, fixed in
+   `49fb811`): hyper 1.8.1 panics
+   `header_read_timeout set, but no timer set` unless the
+   http1 builder gets an explicit
+   `.timer(hyper_util::rt::TokioTimer::new())`.
+
+### M6b.5 Fail-before proofs (all on cue, 2026-11-06)
+
+Each proof neutered ONE check on the cue copy only, ran
+its pinning test (expect exit 101), restored from backup,
+verified md5 against the local pristine file, and re-ran
+the webui suite green (113/113) afterwards. Script:
+`~/workspace/tmp/m6b-proofs.sh` (+ `/tmp/m6b-proofs.sh`
+on cue); logs `/tmp/proof-*.log` on cue.
+
+1. auth cost: `BCRYPT_COST` 10→12 → `fail_before_cost_is_ten`
+   red (`auth.rs:109`).
+2. auth bytes: `MAX_TOKEN_BYTES` 72→1000 →
+   `token_length_limit_is_bytes` red (`auth.rs:115`).
+3. rate limit: `*count >= attempts` → `false` →
+   `fail_before_rate_limit` red (`ratelimit.rs:220`).
+4. origin: `hostname.eq_ignore_ascii_case(req_host)` → `true`
+   → `fail_before_origin_check` red (`origin.rs:268`).
+5. containment: `path.strip_prefix(dir).is_ok()` → `true` →
+   `fail_before_dotdot_escape` red (`contain.rs:210`).
+6. ordered JSON: `overlay_ordered(&stored, doc)` → sorted-doc
+   clone → `fail_before_stored_order` red (`ordered.rs:148`).
+   Also covers unknown-field/order preservation.
+7. merge R1: `return Ok((stored_v.clone(), true))` → sentinel
+   literal → `fail_before_r1_keep` red (`merge.rs:531`).
+8. store mode: `write_file_atomic` `from_mode(0o600)` → 0o644
+   → `atomic_write_is_0600_and_renames` red
+   (`guarded.rs:310`).
+9. store lock: lock-file `from_mode(0o600)` → 0o644 →
+   `fail_before_flock` red (`guarded.rs:380`). Note: this
+   proves the lock-file mode enforcement, not the flock
+   exclusion itself; the concurrent-change guard is covered
+   by `save_refuses_concurrent_change`.
+10. embed hash: `sha256_hex(SHELL_BYTES)` → `sha256_hex(b"")`
+    → `bundle_hash_matches_measured_value` red
+    (`static_shell.rs:72`). The byte-identical test compares
+    `include_bytes!` output to the dist file on disk.
+
+### M6b.6 Deviations and approximations (deliberate, with Go citations)
+
+- [DEVIATION] Go chat-job-store `create` (`chats.go`)
+  loops forever when 33 jobs are already running (it only
+  evicts finished jobs and never gives up); Rust breaks out
+  when nothing can be evicted, so a 33rd concurrent send
+  fails fast instead of hanging the request. Safer by the
+  decision rules (rule 2); no live difference observed —
+  the parity set never holds 33 running jobs.
+- [DEVIATION — approximation] Hyper has no idle-timeout
+  knob: the 120s connection timeout is a wrapper around the
+  connection, not Go's `http.Server{IdleTimeout: 120s}`.
+  No legitimate connection exceeds it in this build (API
+  timeout is 30s; WS never upgrades with starter None).
+- [DEVIATION — edge] `ChatSendResult.replies`: Go nil →
+  `null` (no omitempty); Rust's empty `Vec` renders `[]`.
+  Unreachable in M6b (no live send; the seam always
+  errors), recorded for the future live seam.
+- [DEVIATION — edge] Bare zoned IPv6 in a WireGuard conf
+  (`fe80::1%eth0` without brackets): Go accepts, Rust
+  rejects. `parse_wireguard_conf` edge, no parity case.
+- WS upgrade origin failure: Go closes silently (gorilla
+  upgrade fails, no response); Rust returns a 403 envelope.
+  Reachable only when a starter is wired, which never
+  happens in M6b (starter is None).
+- Timeout semantics: Rust cancels the async handler future
+  on the 30s timeout; Go lets the handler goroutine run on
+  and discards its output. No observable difference
+  expected (chat sends continue in the job store).
+- CLI startup line: the Rust CLI buffers all output in
+  `ctx.out` until process exit (pre-existing M2 CLI
+  architecture), so `castctl: web UI listening on ...`
+  does not appear live. Go prints it to stderr
+  immediately.
+- `Deps.screencast_available` is wired by the CLI (Some
+  closure) but no handler reads it in M6b; handlers use
+  the in-crate `screencast_availability` directly.
+- Hash-on-start: an already-hashed token is used as-is,
+  file untouched (Go `hashWebUITokenOnStart` same).
+- Rate-limit readiness-poll consumption: the parity
+  driver's own poll consumes 1 failed attempt per side
+  (see §M6b.4 item 3) — a harness property, not a server
+  difference.
+- Numbers: compared as literals, never via float64
+  (M4c.10). Accepted limitation: `-0` collapses to `0` in
+  Rust (serde_json parses as i64 0) — pinned by test,
+  theoretical only, no real payload has `-0`.
+- Response encoding: Go `json.Encoder` escapes HTML + `\n`
+  (outer envelope); Go's config-file writer uses
+  `SetEscapeHTML(false)` (`internal/profile/jsonvalue.go:172`)
+  — matched by `castctl-config`. Key order: struct payloads
+  = declaration order; `map[string]any` payloads = keys
+  SORTED. Go `nil` slices encode as `null`, empty non-nil
+  as `[]` (keeper entries `[]`, telegram
+  `allowed_user_ids` `[]` when unconfigured, logs `entries`
+  `[]`, chat list/history nil → `[]`).
+- Go `time.Duration.String()`: 5m → `"5m0s"`, 12h →
+  `"12h0m0s"`, 300s → `"5m0s"` (implemented in
+  `duration.rs`).
+- Chi quirks preserved: exact segment matching,
+  case-sensitive; trailing slash (`/api/v1/status/`)
+  matches no route → shell 200 (authenticated);
+  percent-decoding of path with Go semantics; invalid
+  escape → 400 before handler; `/api/v1` exact →
+  middleware chain runs, then shell fallthrough; known API
+  path + wrong method → 405; unknown API path + any method
+  → shell 200 after middleware; non-API non-GET → 405;
+  non-API GET → shell. Authenticated unknown `/api/v1/*`
+  → 200 shell (Go quirk, preserved, not "fixed").
+
+### M6b.7 Chưa kiểm chứng
+
+- Live chats against a real Muse session: `POST .../send`
+  was excluded from the automated parity set (needs a live
+  gateway); only list (404/502) is proven live. The 202
+  job-view + worker-fails-`"upstream error"` shape of send
+  under the failing seam follows the handler code, not a
+  live observation.
+- Content-Length vs chunked behaviour on Go (Q8): Rust
+  implements the 2048-byte sniff rule; run 2 headers
+  matched on the compared set (Content-Length only
+  compared when bodies byte-identical).
+- Chi HEAD and trailing-slash/case behaviour (Q7): Rust
+  routes HEAD as GET with body stripped, unmeasured live.
+- Invalid percent-escape in request path: Rust returns
+  plain 400 body `invalid URL escape`; Go's exact body
+  unmeasured.
+- `TestScreencastWSKeyTextNotForwarded` exact assertion
+  (Q3); rename/delete of a keeper-referenced profile
+  refusal source (Q5, likely `validateKeeper` in the
+  saveGuarded re-parse — implemented in `validate.rs`).
+- Live screencast login: "chưa nối" (M6a keeper/Chrome
+  not wired; starter None; status/start report
+  unavailable).
+- Exact Go error-message texts for a few parse-error cases
+  beyond the parity set (e.g. Go `encoding/json` vs
+  serde_json texts); case 26 matched canonically, so the
+  covered cases are settled.
