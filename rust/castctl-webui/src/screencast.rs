@@ -754,6 +754,28 @@ pub fn handle_screencast_ws_http(
 /// (`Sec-WebSocket-Accept`), the origin check at upgrade
 /// time, the starter run, the terminal report, and the
 /// session release when the socket closes.
+
+/// Gorilla `Upgrader.returnError` bytes (no custom
+/// `Error` set on Go's upgrader): `Sec-WebSocket-Version:
+/// 13` + `http.Error` (plain-text status text + "\n").
+fn ws_handshake_error(status: u16, body: &[u8]) -> Resp {
+    Resp {
+        status,
+        headers: vec![
+            ("Sec-WebSocket-Version".to_string(), "13".to_string()),
+            (
+                "Content-Type".to_string(),
+                "text/plain; charset=utf-8".to_string(),
+            ),
+            (
+                "X-Content-Type-Options".to_string(),
+                "nosniff".to_string(),
+            ),
+        ],
+        body: body.to_vec(),
+    }
+}
+
 pub async fn handle_ws_upgrade(
     server: &std::sync::Arc<crate::server::Server>,
     mut req: hyper::Request<hyper::body::Incoming>,
@@ -772,10 +794,12 @@ pub async fn handle_ws_upgrade(
     };
     // Origin is checked at upgrade time in Go (the
     // gorilla upgrader's CheckOrigin): a disallowed origin
-    // closes the connection with no HTTP response. Here a
-    // 403 envelope is returned instead — the branch is
-    // unreachable in M6b (starter is None), so the
-    // difference is unobservable; see PORTING.md §M6b.
+    // gets a 403 plain-text `Forbidden\n` (gorilla
+    // returnError: Sec-WebSocket-Version: 13 +
+    // http.Error), NOT a silent close and NOT the JSON
+    // envelope. The branch is unreachable in M6b (starter
+    // is None), so the difference is unobservable; see
+    // PORTING.md §M6b.
     let origin = req
         .headers()
         .get("origin")
@@ -791,7 +815,7 @@ pub async fn handle_ws_upgrade(
         server.sessions.release(&profile);
         return Ok(crate::server::render_resp(
             &hyper::Method::GET,
-            error_resp(403, "forbidden", "cross-origin request rejected"),
+            ws_handshake_error(403, b"Forbidden\n"),
         ));
     }
     let key = match req.headers().get("sec-websocket-key") {
@@ -801,14 +825,7 @@ pub async fn handle_ws_upgrade(
                 server.sessions.release(&profile);
                 return Ok(crate::server::render_resp(
                     &hyper::Method::GET,
-                    Resp {
-                        status: 400,
-                        headers: vec![(
-                            "Content-Type".to_string(),
-                            "text/plain; charset=utf-8".to_string(),
-                        )],
-                        body: b"not a websocket handshake".to_vec(),
-                    },
+                    ws_handshake_error(400, b"Bad Request\n"),
                 ));
             }
         },
@@ -816,14 +833,7 @@ pub async fn handle_ws_upgrade(
             server.sessions.release(&profile);
             return Ok(crate::server::render_resp(
                 &hyper::Method::GET,
-                Resp {
-                    status: 400,
-                    headers: vec![(
-                        "Content-Type".to_string(),
-                        "text/plain; charset=utf-8".to_string(),
-                    )],
-                    body: b"not a websocket handshake".to_vec(),
-                },
+                ws_handshake_error(400, b"Bad Request\n"),
             ));
         }
     };
