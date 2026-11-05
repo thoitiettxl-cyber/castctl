@@ -3077,26 +3077,36 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
     it. The Rust `default_ws_url` returns the identical
     string, and the dial test asserts the literal on the
     string AND that no real token value reaches the wire.
-    Wire nuance: `http::Uri` (used by tokio-tungstenite's
-    `into_client_request`) cannot represent `<`/`>` in a
-    query, so `dial_gateway` percent-encodes the literal
-    to `%3Credacted%3E` before dialing; the server
-    decodes it back to `<redacted>`, so the query VALUE
-    is identical to Go's raw form. (Mechanism proven by
-    source, fix loop 2: `http` 1.x
+    Wire nuance — [SUPERSEDED in M4b, fix loop 1 (R-B1):
+    this paragraph as originally written claimed the
+    server decodes the encoded form back; that claim was
+    WRONG. The live edge returns 401 for the encoded form
+    and 502 for the literal (live probe on cue,
+    2026-11-05); the M4a test only proved the fake server
+    tolerates the encoded form. `dial_gateway` no longer
+    percent-encodes: the hand-written `ws_upgrade`
+    (`castctl-gateway/src/dial.rs`) sends the literal
+    verbatim, and the rewritten dial test asserts the
+    query value `== "<redacted>"` with no decode step.
+    See §M4b.2 deviation 1 and §M4b.3. A reader
+    implementing from the struck sentences would
+    reintroduce the 401.] What stays true: `http::Uri`
+    (used by tokio-tungstenite's `into_client_request`)
+    cannot represent `<`/`>` in a query. (Mechanism
+    proven by source, fix loop 2: `http` 1.x
     `src/uri/path.rs:444-462` `build_query_map` — WHATWG
     query-state allows 0x21 / 0x24–0x3B / 0x3D /
     0x3F–0x7E, so `<` = 0x3C and `>` = 0x3E are
     CLASS_INVALID — verified against the 1.5.0 source;
     the lock pins 1.3.1, and the behavioural separator
-    (raw-literal dial fails, encoded dials fine)
-    corroborates the mechanism against the locked build
-    — and tungstenite's
+    against the fake server (raw-literal dial fails with
+    URI-PARSE-ERR, encoded dials fine) corroborates the
+    mechanism against the locked build — and tungstenite's
     `IntoClientRequest for &str` is `parse::<Uri>()`.)
-    The dial test also asserts the decoded query value
-    equals `<redacted>` (fix loop 2, NB5 — decoded with
-    a two-sequence replace in the test; no URL parser is
-    a dependency of this crate). If later live proof
+    The dial test asserts the query value equals
+    `<redacted>` with no decode step (rewritten in M4b;
+    the fix-loop-2 NB5 two-sequence decode dance is
+    gone). If later live proof
     shows the gateway needs the real token, change
     `default_ws_url` in this one place and re-enable the
     token-URL test.
@@ -3469,8 +3479,15 @@ it (promoted to direct deps only), so `NOTICE` /
    any network call (Go fetches history first; M2 stub
    convention).
 8. `invite` stays fully stubbed (exit 1, `STUB_LINE`).
-9. A `Block` outbound fails at dispatch (exit 2); Go
-   builds it and fails at dial time.
+9. [FIXED in fix loop 1 — was a deviation, now matches
+   Go.] A `Block` outbound builds into `BlockDialer`
+   (`castctl-transport/src/dialer.rs`) and fails at dial
+   time with `ConnectionDown` ("dial <host>: operation
+   not permitted", mirroring sing-box's `syscall.EPERM`
+   — `protocol/block/outbound.go:37-40`), which the CLI
+   classifies as exit 1, exactly like Go's dial-time
+   failure. Before the fix it failed at dispatch
+   (exit 2).
 10. No keeper / refresh; no cookie writer
     (`WriteCookiesFile` deferred to M5 keeper).
 11. No DNS router is built (M3 system-resolver deviation
@@ -3564,10 +3581,25 @@ it (promoted to direct deps only), so `NOTICE` /
   11 extensions in rustls order. The edge terminates TLS
   and then 502s at the HTTP proxy (`server_connection_
   error`), so the fingerprint decides upstream routing,
-  not the handshake. rustls has no API for GREASE / ECH
-  / extension order, so it cannot mimic Chrome.
-  BoringSSL (already in the lock via honk, `boring` /
-  `tokio-boring` 5.2.0) implements GREASE
+  not the handshake. [CORRECTED in fix loop 1 (F1): the
+  original text said "rustls has no API for GREASE / ECH
+  / extension order" — that is FALSE on ECH. rustls
+  0.23.46 HAS an ECH API (`ClientConfig::with_ech()` /
+  `EchGreaseConfig`, including GREASE-ECH — vendored
+  source `src/client/builder.rs:27`,
+  `src/client/ech.rs:47`) but no cipher/group/keyshare
+  GREASE and no extension-order control; ML-KEM768
+  exists only via the aws-lc-rs provider, which the
+  ring-only rule forecloses — aws-lc-rs is banned from
+  the lock (rule in `rust/Cargo.toml:94-100`; this
+  paragraph is the PORTING record of the ban). The conclusion stands: rustls
+  cannot mimic Chrome. Cheaper control before the
+  BoringSSL probe: try an aws-lc-rs-provider rustls dial
+  — if the edge keys on size/MLKEM presence it may get
+  further than ring-provider rustls; if it keys on
+  GREASE/order, it will not. The probe, not the claim,
+  decides.] BoringSSL (already in the lock via honk,
+  `boring` / `tokio-boring` 5.2.0) implements GREASE
   (`ssl/encrypted_client_hello.cc`, `hs->grease_seed`)
   and is the candidate fix — a new TLS-architecture
   decision, not attempted in PR2.
@@ -3576,9 +3608,17 @@ it (promoted to direct deps only), so `NOTICE` /
   `error_length=36` while `usage` and `usage-raw` passed
   (same `fetch_subscription` path). The re-run passed
   all three (see §M4b.5). Treated as transient (likely a
-  blip during the FindActionID chunk fetch); cause not
-  pinned down, no repro. The 36-char message is a hyper
-  error string from `http.rs` (`truncate(..., 200)`).
+  blip during the FindActionID chunk fetch). [FIXED in
+  fix loop 1 (F3): the 36-char string is hyper's `error
+  reading a body from connection`
+  (`hyper-1.12.0/src/error.rs:547`, `Kind::Body`),
+  pinned by the `mid_body_abort_is_connection_error_
+  36_chars` test (`castctl-transport/tests/tls.rs`) — a
+  server-side reset mid-body, mapped to
+  `ConnectionError` (exit 1). The live recurrence itself
+  remains unreproduced; the re-run passed.] The 36-char
+  message is a hyper error string from `http.rs`
+  (`truncate(..., 200)`).
 - **Cue disk filled to 100% mid-task.** `rust/target/
   debug` reached 17 G (2255 files). Freed by deleting
   `target/debug`; the release binary was preserved and
@@ -3687,7 +3727,7 @@ exit code, raw stdout, JSON with keys sorted, stderr.
 | usage | 0 | 0 | MATCH | MATCH | byte-identical text, incl. `resets 2026-11-07 14:52 +07` |
 | usage --json | 0 | 0 | MATCH | MATCH | JSON-identical after key sort |
 | usage --raw | 0 | 0 | MATCH | MATCH | JSON-identical after key sort |
-| status, threads, threads --all, history --limit 3, history --limit 3 --raw, files --limit 3, feed, feed --raw, feed-status, feed-prompt, goals, ideas, unread | 0 | 1 | DIFF | N/A (no Rust output) | Rust stderr `castctl: conn: connection error error_length=47` — the WS upgrade gets HTTP 502 from the live edge (see blocker below) |
+| status, threads, threads --all, history --limit 3, history --limit 3 --raw, files --limit 3, feed, feed --raw, feed-status, feed-prompt, goals, ideas, unread | 0 | 1 | DIFF | N/A (no Rust output) | Rust stderr `castctl: conn: connection error error_length=45` — the WS upgrade gets HTTP 502 from the live edge (see blocker below); Go would print 45 for the same failure (fix loop 1, T-B1 — was 47 before the fix) |
 
 No fields were dropped for cue-test: the three usage
 commands match raw; the gateway commands produce no
@@ -3712,7 +3752,7 @@ Dropped fields (exactly these, nothing else):
 dropped; every other leaf matches.
 
 Drift proof (Go run twice, same field moves, no code
-change): `usage --json` Go×2, 5 s apart —
+change): `usage --json` Go×2, 4 s apart —
 `balance_units` 447188087 → 447186591 (−1496);
 `usage --raw` Go run 2 vs a later Go run —
 `topupBalance` 447305148 → 447183505 (−121643).
@@ -3734,10 +3774,16 @@ terminates TLS, then returns HTTP 502
 (`server_connection_error`) from its proxy. The
 ClientHello captures are in `gate-logs-m4b/
 live-evidence/` (`ch-go-ws.bin` 1748 B Chrome,
-`ch-rustls.bin` 251 B). rustls cannot mimic Chrome
-(no GREASE / ECH / extension order). BoringSSL
-(already in the lock via honk, GREASE in its source)
-is the candidate fix — a new TLS-architecture
+`ch-rustls.bin` 251 B). [CORRECTED in fix loop 1 (F1):
+rustls 0.23.46 HAS an ECH API
+(`ClientConfig::with_ech()` / `EchGreaseConfig`,
+including GREASE-ECH) but no cipher/group/keyshare
+GREASE and no extension-order control; ML-KEM768 exists
+only via the aws-lc-rs provider, foreclosed by the
+ring-only rule (aws-lc-rs banned — see §M4b.3). The
+conclusion stands: rustls cannot mimic Chrome.]
+BoringSSL (already in the lock via honk, GREASE in its
+source) is the candidate fix — a new TLS-architecture
 decision for Boss, NOT attempted in PR2. Consequence:
 all 13 gateway commands + `goal`/`idea` fail live
 with exit 1; the HTTPS path (`usage*`) is the only
@@ -3745,11 +3791,15 @@ live-parity proof in this PR.
 
 ### Secrets grep proof
 
-`grep -ri -E "hatch_sess|auth_token|cookie|bearer|
-token"` over every file in `gate-logs-m4b/` (gate
-logs, parity outputs, live evidence, scripts):
-occurrences — `hatch_sess` 4, `auth_token` 2,
-`cookie` 34, `bearer` 1, `token` 80. Every match is
+`grep -ri -o` per word over every file in
+`gate-logs-m4b/` (fix loop 1 recount, 2026-11-05 — the
+writer's counts were one gate-test log short):
+`hatch_sess` 4, `auth_token` 2, `cookie` 54,
+`bearer` 2, `token` 97. Command: `for w in
+hatch_sess auth_token cookie bearer token; do printf
+'%s: ' "$w"; grep -ri -o "$w" . | wc -l; done`
+(substring, case-insensitive, one line per match).
+Every match is
 a test name, a script identifier, the literal
 `<redacted>` placeholder, public feed article text,
 or the words `hatch_sess` / `cookie` inside a chat
@@ -3770,6 +3820,28 @@ header value appears in any log or in the PR.
   `chưa kiểm chứng`.
 - `goal`/`idea` on cue-test (no IDs were fetched
   there; covered on no.0 instead).
+- `wss://` literal-token bytes on the wire (fix loop
+  1, N4): unasserted — no TLS-server test harness
+  exists in the repo (no `TlsAcceptor` /
+  `ServerConfig` / `rcgen` in the lock), so a
+  TLS-wrapped upgrade cannot be recorded in-test.
+  `ws` and `wss` share `ws_upgrade` and the same URL
+  string, so the gap is small, but strictly the
+  TLS-wrapped request line is unasserted.
+- Python-probe evidence (fix loop 1, N3): the Python
+  502-vs-401 probe output has no saved log (report-only;
+  the script is in `gate-logs-m4b/probe-ws.py`) and the
+  Go auth-call ClientHello (SNI=muse.ai, claimed 1804 B)
+  has no file on cue or in `live-evidence/` (searched
+  `/tmp/*.bin` on cue, 2026-11-05). The Rust probe log
+  (`live-evidence/live-ws-probe.log`) is the surviving
+  evidence for the 502/401 contrast. The first-capture
+  DERP bin IS preserved
+  (`live-evidence/ch-derp-wrong-capture.bin` 1515 B +
+  `.log`, md5-verified against cue `/tmp/ch-go.bin`) —
+  it proves the first capture caught a Tailscale DERP
+  connection, not the gateway; it is NOT Go's
+  ClientHello.
 
 Logs: `gate-logs-m4b/parity-cue-test/`,
 `gate-logs-m4b/live-parity-no0-run2/` (108 files),
@@ -3794,7 +3866,9 @@ probe log, drift outputs).
 - `usage --json`'s one-off `ConnectionError`
   (`error_length=36`) in the first parity run: the
   re-run passed (see §M4b.3); root cause unpinned,
-  treated as transient.
+  treated as transient. (Fix loop 1: the 36-char string
+  is pinned by test as hyper's mid-body error; the live
+  recurrence is still unreproduced.)
 - Long-run behaviour (reconnect storms, heartbeat at the
   production 25s cadence through the CLI) was not waited;
   covered by threshold injection in M4a tests.

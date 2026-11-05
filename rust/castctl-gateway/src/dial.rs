@@ -110,6 +110,69 @@ pub fn default_ws_url(secure: bool, host: &str, vm_id: &str, _hatch_token: &str)
     )
 }
 
+/// Render Go's `handshakeFailureError` with a status token
+/// (`internal/gateway/handshake_log.go:41-46`): the validated
+/// token only, never peer text. E.g. kind `status_code`,
+/// token `502` renders the 45-char `gateway: websocket
+/// handshake: status_code=502`. Shared by `ws_error` (the
+/// tungstenite path) and `ws_upgrade` (the hand-written
+/// path) — one helper, so the M4a wording error cannot
+/// survive in one copy again (fix loop 1, T-B1).
+fn handshake_token_error(kind: &str, token: &str) -> TransportError {
+    TransportError::ConnectionError {
+        message: format!("gateway: websocket handshake: {kind}={token}"),
+    }
+}
+
+/// Render Go's fixed no-status handshake failure
+/// (`handshake_log.go:49-51`): 35 chars, no token.
+fn handshake_failed_error() -> TransportError {
+    TransportError::ConnectionError {
+        message: "gateway: websocket handshake failed".to_string(),
+    }
+}
+
+/// Map a raw WS status-line token to Go's handshake-failure
+/// rendering (`handshakeStatusToken`,
+/// `handshake_log.go:103-130`): `None` means 101 — proceed
+/// with the upgrade. A 3-digit code renders
+/// `status_code=NNN` (its decimal form must also be 3
+/// digits: `050` renders `status_code_length=2`, because Go
+/// stringifies the parsed code); a token-shaped but
+/// non-3-digit token renders `status_token_length=N`;
+/// anything else renders the fixed 35-char message. The
+/// token bytes never reach an output path.
+fn handshake_failure_for_status(token: &str) -> Option<TransportError> {
+    if token.len() == 3 && token.bytes().all(|b| b.is_ascii_digit()) {
+        // Three ASCII digits: compute the code from the
+        // bytes (no parse to fail).
+        let code = token
+            .bytes()
+            .fold(0u16, |acc, b| acc * 10 + u16::from(b - b'0'));
+        if code == 101 {
+            return None;
+        }
+        if code >= 100 {
+            return Some(handshake_token_error("status_code", &code.to_string()));
+        }
+        return Some(handshake_token_error(
+            "status_code_length",
+            &code.to_string().len().to_string(),
+        ));
+    }
+    if !token.is_empty()
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    {
+        return Some(handshake_token_error(
+            "status_token_length",
+            &token.len().to_string(),
+        ));
+    }
+    Some(handshake_failed_error())
+}
+
 /// Map a tungstenite error to the transport taxonomy without
 /// embedding peer text: a WS handshake failure renders the
 /// validated status only (Go `connector.go`
@@ -124,9 +187,7 @@ pub(crate) fn ws_error(err: tokio_tungstenite::tungstenite::Error) -> TransportE
     match &err {
         WsError::Http(resp) => {
             let status = resp.status().as_u16();
-            TransportError::ConnectionError {
-                message: format!("gateway: websocket handshake failed: status {status}"),
-            }
+            handshake_token_error("status_code", &status.to_string())
         }
         WsError::Io(_) => TransportError::ConnectionError {
             message: "gateway: websocket dial failed".to_string(),
@@ -494,15 +555,11 @@ where
     let text = std::str::from_utf8(head).map_err(|_| dial_failed())?;
     let mut lines = text.split("\r\n");
     let status_line = lines.next().unwrap_or("");
-    let status: u16 = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .ok_or_else(dial_failed)?;
-    if status != 101 {
-        return Err(TransportError::ConnectionError {
-            message: format!("gateway: websocket handshake failed: status {status}"),
-        });
+    let status_token = status_line.split_whitespace().nth(1).unwrap_or("");
+    // Go `handshakeStatusToken`: the token decides the
+    // failure rendering; `None` is 101 — proceed.
+    if let Some(err) = handshake_failure_for_status(status_token) {
+        return Err(err);
     }
     let expected = tokio_tungstenite::tungstenite::handshake::derive_accept_key(key.as_bytes());
     let mut accept_ok = false;
@@ -547,4 +604,90 @@ where
         transport,
         routes,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conn_message(err: &TransportError) -> &str {
+        match err {
+            TransportError::ConnectionError { message } => message,
+            other => panic!("want ConnectionError, got {other:?}"),
+        }
+    }
+
+    /// T-B1 (fix loop 1): `ws_error` must render Go's exact
+    /// `handshakeFailureError` text (`internal/gateway/
+    /// handshake_log.go:41-46`): `gateway: websocket
+    /// handshake: status_code=502` — 45 chars, NOT the 47-char
+    /// `gateway: websocket handshake failed: status 502` this
+    /// code rendered before the fix.
+    #[test]
+    fn ws_error_http_502_renders_go_45_chars() {
+        let resp = http::Response::builder()
+            .status(502)
+            .body(Some(Vec::new()))
+            .unwrap();
+        let err = tokio_tungstenite::tungstenite::Error::Http(Box::new(resp));
+        let mapped = ws_error(err);
+        let message = conn_message(&mapped).to_string();
+        assert_eq!(
+            message, "gateway: websocket handshake: status_code=502",
+            "ws_error Http arm must match Go byte-for-byte"
+        );
+        assert_eq!(message.len(), 45, "Go renders 45 chars for a 502");
+    }
+
+    #[test]
+    fn handshake_token_error_502_is_45_chars() {
+        let err = handshake_token_error("status_code", "502");
+        let message = conn_message(&err).to_string();
+        assert_eq!(message, "gateway: websocket handshake: status_code=502");
+        assert_eq!(message.len(), 45);
+    }
+
+    #[test]
+    fn handshake_failed_error_is_35_chars() {
+        let err = handshake_failed_error();
+        let message = conn_message(&err).to_string();
+        assert_eq!(message, "gateway: websocket handshake failed");
+        assert_eq!(message.len(), 35);
+    }
+
+    /// Every `handshakeStatusToken` branch
+    /// (`handshake_log.go:103-130`), pinned: 101 proceeds
+    /// (`None`); a 3-digit code renders `status_code`; a
+    /// leading-zero code renders the length of its decimal
+    /// form (`050` → `status_code_length=2`); a token-shaped
+    /// non-code renders its length; anything else renders
+    /// the fixed 35-char message (never the token bytes).
+    #[test]
+    fn handshake_failure_for_status_branches() {
+        assert!(handshake_failure_for_status("101").is_none());
+        assert_eq!(
+            conn_message(&handshake_failure_for_status("502").unwrap()),
+            "gateway: websocket handshake: status_code=502"
+        );
+        assert_eq!(
+            conn_message(&handshake_failure_for_status("050").unwrap()),
+            "gateway: websocket handshake: status_code_length=2"
+        );
+        assert_eq!(
+            conn_message(&handshake_failure_for_status("ABC").unwrap()),
+            "gateway: websocket handshake: status_token_length=3"
+        );
+        assert_eq!(
+            conn_message(&handshake_failure_for_status("1000").unwrap()),
+            "gateway: websocket handshake: status_token_length=4"
+        );
+        assert_eq!(
+            conn_message(&handshake_failure_for_status("").unwrap()),
+            "gateway: websocket handshake failed"
+        );
+        assert_eq!(
+            conn_message(&handshake_failure_for_status("<x>").unwrap()),
+            "gateway: websocket handshake failed"
+        );
+    }
 }

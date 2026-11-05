@@ -42,6 +42,13 @@ fn auth_message(err: &TransportError) -> Option<&str> {
     }
 }
 
+fn conn_message(err: &TransportError) -> Option<&str> {
+    match err {
+        TransportError::ConnectionError { message } => Some(message),
+        _ => None,
+    }
+}
+
 #[tokio::test]
 async fn connect_missing_cookies_is_auth() {
     let connector = GatewayConnector::new(Arc::new(DirectDialer::new()));
@@ -224,6 +231,94 @@ async fn dial_over_stream_sends_literal_redacted_token() {
     assert!(
         !request_line.contains("%3Credacted%3E"),
         "upgrade target must NOT percent-encode the token, got: {request_line}"
+    );
+    server.stop();
+}
+
+/// T-B1 (fix loop 1): a non-101 upgrade response renders
+/// Go's exact `handshakeFailureError` text
+/// (`internal/gateway/handshake_log.go:41-46`):
+/// `gateway: websocket handshake: status_code=502` — 45
+/// chars, NOT the 47-char `gateway: websocket handshake
+/// failed: status 502` this code rendered before the fix.
+/// The dial fails at the upgrade step (no 101), so the
+/// Noise step is never reached.
+#[tokio::test]
+async fn ws_upgrade_502_renders_go_45_chars() {
+    let server = RawUpgradeServer::start_with_response(Some(
+        "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    ))
+    .await;
+    let url = format!(
+        "ws://{}/v1/noise?vm_id=vm-test&auth_token=<redacted>",
+        server.addr
+    );
+    let target = DialTarget::new("127.0.0.1", server.addr.port());
+    let stream = DirectDialer::new().dial(&target).await.unwrap();
+    let err = dial_gateway_over_stream(stream, &url, routes())
+        .await
+        .unwrap_err();
+    let m = conn_message(&err).expect("want ConnectionError");
+    assert_eq!(
+        m, "gateway: websocket handshake: status_code=502",
+        "non-101 upgrade must match Go byte-for-byte"
+    );
+    assert_eq!(m.len(), 45, "Go renders 45 chars for a 502");
+    assert!(!server.sent_101(), "server must not have sent 101");
+    server.stop();
+}
+
+/// T-B1 (fix loop 1), no-status path: a response with no
+/// parseable status renders Go's fixed 35-char
+/// `gateway: websocket handshake failed`
+/// (`handshake_log.go:49-51`), NOT the 28-char
+/// `gateway: websocket dial failed` this code rendered
+/// before the fix.
+#[tokio::test]
+async fn ws_upgrade_unparseable_status_renders_go_fixed_message() {
+    let server = RawUpgradeServer::start_with_response(Some("GARBAGE\r\n\r\n")).await;
+    let url = format!(
+        "ws://{}/v1/noise?vm_id=vm-test&auth_token=<redacted>",
+        server.addr
+    );
+    let target = DialTarget::new("127.0.0.1", server.addr.port());
+    let stream = DirectDialer::new().dial(&target).await.unwrap();
+    let err = dial_gateway_over_stream(stream, &url, routes())
+        .await
+        .unwrap_err();
+    let m = conn_message(&err).expect("want ConnectionError");
+    assert_eq!(
+        m, "gateway: websocket handshake failed",
+        "unparseable status must render Go's fixed message"
+    );
+    assert_eq!(m.len(), 35, "Go renders 35 chars with no status");
+    server.stop();
+}
+
+/// T-B1 (fix loop 1), malformed-token path: Go's
+/// `handshakeStatusToken` renders a token-shaped but
+/// non-3-digit token as its length only
+/// (`handshake_log.go:121-124`):
+/// `gateway: websocket handshake: status_token_length=3`.
+#[tokio::test]
+async fn ws_upgrade_malformed_token_renders_length_only() {
+    let server = RawUpgradeServer::start_with_response(Some(
+        "HTTP/1.1 ABC Bad\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    ))
+    .await;
+    let url = format!(
+        "ws://{}/v1/noise?vm_id=vm-test&auth_token=<redacted>",
+        server.addr
+    );
+    let target = DialTarget::new("127.0.0.1", server.addr.port());
+    let stream = DirectDialer::new().dial(&target).await.unwrap();
+    let err = dial_gateway_over_stream(stream, &url, routes())
+        .await
+        .unwrap_err();
+    let m = conn_message(&err).expect("want ConnectionError");
+    assert_eq!(
+        m, "gateway: websocket handshake: status_token_length=3",
+        "malformed token must render its length only, never its bytes"
     );
     server.stop();
 }

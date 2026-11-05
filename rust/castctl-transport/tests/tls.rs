@@ -134,3 +134,56 @@ async fn request_tls_against_plain_http_server_is_connection_down() {
     );
     assert_eq!(err.exit_code(), 1);
 }
+
+/// F3 (fix loop 1): a server that aborts mid-body pins the
+/// `usage --json` transient (`error_length=36` in the first
+/// M4b parity run, cause unpinned at the time): hyper's body
+/// error is exactly `error reading a body from connection`
+/// (36 chars, `hyper-1.12.0/src/error.rs:547`
+/// `Kind::Body`), mapped to `ConnectionError` (exit 1) by
+/// `http_over_stream` — a server-side reset mid-body, not a
+/// client bug. The test must not hang: the request carries a
+/// 5s timeout and the server closes after the partial body.
+#[tokio::test]
+async fn mid_body_abort_is_connection_error_36_chars() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        // Consume the request, then promise 100 body bytes,
+        // send 10, and close — the body frame errors.
+        let mut buf = [0u8; 4096];
+        let _ = socket.read(&mut buf).await;
+        let _ = socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n0123456789",
+            )
+            .await;
+        let _ = socket.shutdown().await;
+    });
+    let client = http_client();
+    let target = DialTarget::new("127.0.0.1", port);
+    let err = client
+        .request(
+            http::Method::GET,
+            &target,
+            "/",
+            &[],
+            None,
+            Duration::from_secs(5),
+        )
+        .await
+        .expect_err("a mid-body abort must fail the request");
+    let message = match &err {
+        TransportError::ConnectionError { message } => message.clone(),
+        other => panic!("want ConnectionError, got {other:?}"),
+    };
+    assert_eq!(
+        message, "error reading a body from connection",
+        "hyper's mid-body error text, pinned"
+    );
+    assert_eq!(message.len(), 36, "the transient's error_length=36");
+    assert_eq!(err.exit_code(), 1);
+}

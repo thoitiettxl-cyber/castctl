@@ -16,9 +16,11 @@
 //!
 //! The URL carries the literal `auth_token=<redacted>`
 //! (mirroring Go `defaultWSURL`); no real token is ever in
-//! it. `dial_gateway` percent-encodes the `<`/`>` for the
-//! HTTP stack before dialing — the server decodes them back
-//! to `<redacted>` — and the URL is never stored or logged.
+//! it. `dial_gateway` sends the literal verbatim via the
+//! hand-written `ws_upgrade` (M4b: the M4a claim that the
+//! server decodes a percent-encoded form back was wrong —
+//! the live edge returns 401 for the encoded form), and
+//! the URL is never stored or logged.
 
 use castctl_gateway::dial::dial_gateway;
 use castctl_gateway::gateway::RequestOptions;

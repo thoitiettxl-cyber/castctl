@@ -54,7 +54,7 @@ pub mod tls;
 pub mod wireguard;
 
 pub use config::{Dispatch, TlsMode, dispatch_endpoint, dispatch_outbound};
-pub use dialer::{DIAL_TIMEOUT, DialTarget, Dialer, DirectDialer, HonkDialer};
+pub use dialer::{BlockDialer, DIAL_TIMEOUT, DialTarget, Dialer, DirectDialer, HonkDialer};
 pub use error::{BodySummary, TransportError};
 pub use http::{HttpClient, HttpResponse, MAX_RESPONSE_BODY};
 pub use retry::{RETRY_FOR, RETRY_PAUSE_INITIAL, RETRY_PAUSE_MAX, RetryPolicy};

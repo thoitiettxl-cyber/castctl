@@ -30,7 +30,11 @@ use tokio::task::JoinHandle;
 /// request header block (up to the blank line) of the first
 /// connection, verbatim; `sent_101` is true once a 101 was
 /// written (i.e. the request was well-formed enough to
-/// answer).
+/// answer). With `start_with_response`, the server answers
+/// every connection with the given bytes verbatim instead
+/// of a 101 (for handshake-failure tests: a 502, a
+/// malformed status line, …); `sent_101` stays false and
+/// the request head is still recorded.
 pub struct RawUpgradeServer {
     pub addr: SocketAddr,
     request_head: Arc<Mutex<Option<String>>>,
@@ -40,10 +44,18 @@ pub struct RawUpgradeServer {
 
 impl RawUpgradeServer {
     pub async fn start() -> Self {
+        Self::start_with_response(None).await
+    }
+
+    /// Start a server answering every connection with
+    /// `response` verbatim (no 101, no accept derivation).
+    /// `None` is the normal 101 behaviour of `start()`.
+    pub async fn start_with_response(response: Option<&str>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let request_head: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let sent_101: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+        let fixed2 = response.map(str::to_string);
         let head2 = Arc::clone(&request_head);
         let sent2 = Arc::clone(&sent_101);
         let accept_task = tokio::spawn(async move {
@@ -53,8 +65,9 @@ impl RawUpgradeServer {
                 };
                 let head3 = Arc::clone(&head2);
                 let sent3 = Arc::clone(&sent2);
+                let fixed3 = fixed2.clone();
                 tokio::spawn(async move {
-                    serve_one(stream, head3, sent3).await;
+                    serve_one(stream, head3, sent3, fixed3).await;
                 });
             }
         });
@@ -85,6 +98,7 @@ async fn serve_one(
     mut stream: tokio::net::TcpStream,
     head: Arc<Mutex<Option<String>>>,
     sent_101: Arc<Mutex<bool>>,
+    fixed_response: Option<String>,
 ) {
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 1024];
@@ -102,6 +116,11 @@ async fn serve_one(
     }
     let text = String::from_utf8_lossy(&buf).into_owned();
     *head.lock().unwrap() = Some(text.clone());
+    if let Some(response) = fixed_response {
+        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.shutdown().await;
+        return;
+    }
     let key = text
         .split("\r\n")
         .find_map(|line| line.strip_prefix("Sec-WebSocket-Key:"))

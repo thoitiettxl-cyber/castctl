@@ -41,8 +41,8 @@ use castctl_gateway::Gateway;
 use castctl_gateway::connector::GatewayConnector;
 use castctl_gateway::shared::{Connector, SharedConn};
 use castctl_transport::{
-    Dialer, DirectDialer, Dispatch, HonkDialer, HttpClient, TransportError, dispatch_endpoint,
-    dispatch_outbound,
+    BlockDialer, Dialer, DirectDialer, Dispatch, HonkDialer, HttpClient, TransportError,
+    dispatch_endpoint, dispatch_outbound,
 };
 
 use crate::network::{classify_auth_message, typed};
@@ -136,11 +136,10 @@ fn dispatch_err(e: TransportError) -> FlowErr {
 /// (via `dispatch_outbound`) or `endpoints` (via
 /// `dispatch_endpoint`, with the tag's `wireguard_dns`
 /// servers); `Inline` → the raw object (via
-/// `dispatch_outbound`). `Block` fails closed at dispatch
-/// (exit 2): Go would build the block outbound and fail at
-/// dial time, but a read command must never silently
-/// succeed through a blocking outbound, and failing at
-/// dispatch keeps the failure in the config-error bucket.
+/// `dispatch_outbound`). `Block` builds into a dialer that
+/// fails at dial time (exit 1), matching Go: sing-box's
+/// block outbound builds fine and returns `syscall.EPERM`
+/// on dial (fix loop 1; was exit 2 at dispatch).
 fn build_dialer(
     single: Option<&SingleConfig>,
     profile: &Profile,
@@ -186,7 +185,7 @@ fn build_dialer(
             .map(|d| -> Arc<dyn Dialer> { d })
             .map_err(dispatch_err),
         Dispatch::WireGuard(d) => Ok(d),
-        Dispatch::Block => Err(msg(2, "outbound type \"block\" is not dialable")),
+        Dispatch::Block => Ok(Arc::new(BlockDialer::new())),
     }
 }
 
@@ -370,18 +369,39 @@ mod tests {
         assert_eq!(flow_code(&err), 2);
     }
 
+    /// F4 (fix loop 1): a `Block` outbound BUILDS (Go builds
+    /// it — sing-box `protocol/block/outbound.go:37-40`
+    /// returns `syscall.EPERM` only at dial time) and fails
+    /// at DIAL time with `ConnectionDown`, which
+    /// `classify_error` maps to exit 1 — matching Go's
+    /// dial-time failure. The old behaviour (exit 2 at
+    /// dispatch) was deviation 9, now removed.
     #[test]
-    fn build_dialer_block_is_exit_2() {
+    fn build_dialer_block_builds_then_fails_at_dial() {
         let dir = temp_dir("block");
         write_config(
             &dir,
             r#"{"profiles":{"no1":{"outbound":"t1"}},"outbounds":[{"tag":"t1","type":"block"}]}"#,
         );
         let (single, profile) = load_fixture(&dir);
-        let err = build_dialer(single.as_ref(), &profile)
-            .err()
-            .expect("want dispatch error");
-        assert_eq!(flow_code(&err), 2);
+        let dialer = build_dialer(single.as_ref(), &profile)
+            .expect("a Block outbound must build; it fails at dial time, not dispatch");
+        let target = castctl_transport::DialTarget::new("127.0.0.1", 1);
+        let err = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(dialer.dial(&target))
+            .expect_err("dialing through a Block outbound must fail");
+        assert!(
+            matches!(err, TransportError::ConnectionDown { .. }),
+            "want ConnectionDown at dial time, got {err:?}"
+        );
+        assert_eq!(
+            flow_code(&crate::network::classify_error(&err)),
+            1,
+            "a dial-time Block failure is a runtime error (exit 1), not a dispatch error"
+        );
     }
 
     #[test]
