@@ -1868,4 +1868,43 @@ mod tests {
         let out = run_args(&["fs", "edit", "a", "b"]);
         assert_eq!(out.stderr, "castctl: unrecognized arguments: b\n");
     }
+
+    /// The M6b chat seam wired by `webui serve`: every call
+    /// fails closed, so the handlers report the fixed 502
+    /// `upstream_error` (the live Go binary's behaviour when
+    /// its gateway seam has no live session).
+    #[test]
+    fn test_failing_chat_deps_all_err() {
+        let deps = failing_chat_deps();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            assert!((deps.list_sessions)("muse01".to_string(), false).await.is_err());
+            assert!(
+                (deps.get_history)("muse01".to_string(), "s1".to_string(), 50)
+                    .await
+                    .is_err()
+            );
+            assert!((deps.start_session)("muse01".to_string(), "t".to_string())
+                .await
+                .is_err());
+            assert!(
+                (deps.session_op)(
+                    "muse01".to_string(),
+                    "s1".to_string(),
+                    "pin".to_string(),
+                    String::new(),
+                )
+                .await
+                .is_err()
+            );
+            assert!(
+                (deps.send_chat)("muse01".to_string(), "s1".to_string(), "hi".to_string())
+                    .await
+                    .is_err()
+            );
+        });
+    }
 }

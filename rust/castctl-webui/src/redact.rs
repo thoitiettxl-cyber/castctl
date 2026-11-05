@@ -116,8 +116,7 @@ pub fn redact_raw_config(data: &[u8]) -> Result<String, String> {
         redact_plugins_block(root);
     }
     let redacted = redact_value(&value);
-    castctl_config::jsonvalue::encode_ordered_json_indent(&redacted, 2)
-        .map_err(|e| e.message)
+    castctl_config::jsonvalue::encode_ordered_json_indent(&redacted, 2).map_err(|e| e.message)
 }
 
 fn is_header_map_key(key: &str) -> bool {
