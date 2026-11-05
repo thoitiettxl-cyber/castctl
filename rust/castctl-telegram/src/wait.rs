@@ -1242,15 +1242,28 @@ fn pending_approvals(ev: &Value) -> Option<Vec<Value>> {
 /// Extracted facts from one `task.status` event, or
 /// `None` when the event is not a usable root task status.
 /// Source: `internal/wait/waiter.go:88-145`.
-struct TaskStatusInfo {
-    status: String,
-    has_status: bool,
-    root_confirmed: bool,
-    root_agent_id: String,
-    active_subagent_count: Value,
+///
+/// Made public for the wait runner (`castctl-wait`): Go
+/// `internal/wait/runner.go` `checkState` calls
+/// `TaskStatusInfo` directly, and the runner must share
+/// the waiter's predicate, not re-implement it (M7a).
+pub struct TaskStatusInfo {
+    /// Lower-cased status string.
+    pub status: String,
+    /// Whether a non-empty status was present.
+    pub has_status: bool,
+    /// `root_agent_id` present and equal to `agent_id`.
+    pub root_confirmed: bool,
+    /// The root agent id (`""` when absent).
+    pub root_agent_id: String,
+    /// Raw `active_subagent_count` value (`Null` when
+    /// absent).
+    pub active_subagent_count: Value,
 }
 
-fn task_status_info(ev: &Value, thread: &str) -> Option<TaskStatusInfo> {
+/// Extracted facts from one `task.status` event (see
+/// [`TaskStatusInfo`]).
+pub fn task_status_info(ev: &Value, thread: &str) -> Option<TaskStatusInfo> {
     if event_name(ev) != "task.status" || !in_scope(ev, thread) {
         return None;
     }

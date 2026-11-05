@@ -18,6 +18,7 @@ members = [
     "castctl-fsclient",
     "castctl-deliver",
     "castctl-logging",
+    "castctl-wait",
 ]
 resolver = "2"
 

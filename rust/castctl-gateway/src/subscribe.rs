@@ -104,6 +104,20 @@ pub trait SubscribeHandler: Send {
     ) -> Pin<Box<dyn Future<Output = bool> + Send + '_>>;
 }
 
+/// Whether `b` is blank in Go's `bytes.TrimSpace` sense
+/// (`internal/gateway/calls.go` `SubscribeRaw`: blank lines
+/// are skipped, and a trailing partial is appended only when
+/// `len(bytes.TrimSpace(buf)) > 0`). Go trims Unicode
+/// whitespace; invalid UTF-8 bytes are never whitespace, so
+/// an undecodable buffer is never blank.
+#[must_use]
+pub fn is_blank_bytes(b: &[u8]) -> bool {
+    match std::str::from_utf8(b) {
+        Ok(s) => s.trim().is_empty(),
+        Err(_) => false,
+    }
+}
+
 /// A handler that only collects records (used by tests and
 /// by callers that do not need per-record work). Stops
 /// after `stop_after` records when set.

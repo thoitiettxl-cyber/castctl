@@ -970,7 +970,13 @@ impl Gateway {
     }
 
     /// Open a subscription and return the raw NDJSON record
-    /// bytes (Go `calls.go` `SubscribeRaw`). The handler's
+    /// bytes (Go `internal/gateway/calls.go:261-370`
+    /// `SubscribeRaw`). Defaults `:266-276` (max 100, idle
+    /// 10s, overall 120s); open + `OnOpen` `:278-283`;
+    /// `ShouldStop` + `next` 500ms `:290-297`; frame kinds
+    /// `:303-320`; line split + blank skip + `OnRecord`
+    /// `:322-338`; ended→forget else cancel `:341-345`;
+    /// trailing partial `:360-366`. The handler's
     /// `on_record` runs with each record the moment it
     /// arrives; a `true` return stops the subscription right
     /// there. `should_stop` is polled about every 500ms
@@ -986,7 +992,10 @@ impl Gateway {
     /// `on_open` has fired, connection loss surfaces as
     /// `ConnectionError` (that is what `next` returns).
     /// A loop error drops the gathered records and returns
-    /// the error, exactly as Go returns `nil, err`.
+    /// the error, exactly as Go returns `nil, err` — except
+    /// Go also tags the phase (`PhaseSentNoReply` /
+    /// `PhaseStreaming`, `:346-359`), which Rust does not
+    /// carry (`TransportError` has no phase field).
     pub async fn subscribe_raw(
         &self,
         method: &str,
@@ -995,7 +1004,7 @@ impl Gateway {
     ) -> Result<Vec<Vec<u8>>, TransportError> {
         use crate::subscribe::{
             DEFAULT_SUBSCRIBE_IDLE_TIMEOUT, DEFAULT_SUBSCRIBE_MAX_RECORDS,
-            DEFAULT_SUBSCRIBE_OVERALL_TIMEOUT, SUBSCRIBE_POLL_INTERVAL,
+            DEFAULT_SUBSCRIBE_OVERALL_TIMEOUT, SUBSCRIBE_POLL_INTERVAL, is_blank_bytes,
         };
         let max_records = if opts.max_records <= 0 {
             DEFAULT_SUBSCRIBE_MAX_RECORDS
@@ -1099,7 +1108,7 @@ impl Gateway {
                         };
                         let line: Vec<u8> = buf.drain(..=idx).collect();
                         let line = &line[..line.len() - 1];
-                        if line.iter().all(|b| b.is_ascii_whitespace()) {
+                        if is_blank_bytes(line) {
                             continue;
                         }
                         let rec = line.to_vec();
@@ -1134,11 +1143,14 @@ impl Gateway {
         } else {
             self.cancel_stream(sid, ServiceType::ServiceDaemon).await;
         }
+        // `saw_frame` decides Go's error phase (`calls.go:346-359`:
+        // `PhaseSentNoReply` vs `PhaseStreaming`); Rust carries no
+        // phase, so the flag is recorded and dropped here.
         let _ = saw_frame;
         if let Some(err) = loop_err {
             return Err(err);
         }
-        if !halted && !buf.iter().all(|b| b.is_ascii_whitespace()) && !buf.is_empty() {
+        if !halted && !is_blank_bytes(&buf) {
             let rec = buf.clone();
             records.push(rec.clone());
             handler.on_record(&rec).await;
