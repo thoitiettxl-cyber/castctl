@@ -3082,7 +3082,17 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
     query, so `dial_gateway` percent-encodes the literal
     to `%3Credacted%3E` before dialing; the server
     decodes it back to `<redacted>`, so the query VALUE
-    is identical to Go's raw form. If later live proof
+    is identical to Go's raw form. (Mechanism proven by
+    source, fix loop 2: `http-1.5.0`
+    `src/uri/path.rs:444-462` `build_query_map` — WHATWG
+    query-state allows 0x21 / 0x24–0x3B / 0x3D /
+    0x3F–0x7E, so `<` = 0x3C and `>` = 0x3E are
+    CLASS_INVALID — and tungstenite's
+    `IntoClientRequest for &str` is `parse::<Uri>()`.)
+    The dial test also asserts the decoded query value
+    equals `<redacted>` (fix loop 2, NB5 — decoded with
+    a two-sequence replace in the test; no URL parser is
+    a dependency of this crate). If later live proof
     shows the gateway needs the real token, change
     `default_ws_url` in this one place and re-enable the
     token-URL test.
@@ -3096,6 +3106,16 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
     mapping accordingly (Size / TooManyGroups →
     `Gateway(-1)` exit 3; TooManyPieces →
     `ConnectionError` exit 1).
+    Retry trade-off (fix loop 2, F4/NB2): mapping Pieces
+    to `ConnectionError` makes it retried iff the method
+    is safe (`should_retry`), where Go never retries a
+    reassembly error — bounded by the 30s budget,
+    safe-methods only, practically unreachable (the 64
+    MiB size cap is checked before the piece-count cap,
+    and the real gateway sends 60 kB pieces). The fully
+    faithful mapping (a distinct variant with
+    `exit_code() == 1` and `should_retry == false`) is
+    explicitly deferred to a later touch.
 14. `live()` replacement accounting (fix loop 1): when
     `live()` replaces a dead installed gateway it now
     does `drops++` + `mark_down(dead, false)` + `Close()`
@@ -3103,6 +3123,19 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
     (`conn.go:500-520`); the PR1 version overwrote the
     slot with none of the three. The stale test asserts
     `drops() == 1` after reconnect.
+    (Fix loop 2, F5/NB3: the same detach now also runs
+    when the reopen FAILS — Go detaches before opening,
+    so the drop is counted and the old gateway closed
+    even on open error; the new test asserts `drops() ==
+    1` and an empty slot after a failed reopen. The
+    `dead` fallback is Go `errGatewayClosed` ("closed",
+    `internal/conn/errors.go:313-315`) — fix loop 2,
+    NB4; the fix-loop-1 text "gateway connection
+    closed" was the wrong fallback for this path. The
+    other "gateway connection closed" strings in
+    `gateway.rs` are the generic closed-connection error
+    on the read/close paths, not this fallback, and are
+    unchanged.)
 
 ## M4a.3 Findings while writing (fail-before proofs + fixes)
 
@@ -3238,6 +3271,14 @@ technical N10 (lib.rs unwrap claim — narrowed) and N11
 (no-leak strengthening, ws_error routing, hand-written
 Debug, lib.rs claim) and N6 (parity temp file —
 `os.CreateTemp`).
+
+(Fix loop 2, 2026-11-05: also fixed and not listed
+below — F5/NB3 `live()` open-failure detach (drop
+counted + old gateway closed even when the reopen
+fails, tested) and NB4 `dead` fallback text (now
+"closed" as in Go). F4/NB2 (TooManyPieces retry
+trade-off) is recorded in §M4a.2 deviation 13, not
+fixed.)
 
 - wss:// never exercised; ALPN "same wire outcome" is
   inference, not measurement (red-team N1): only ws://

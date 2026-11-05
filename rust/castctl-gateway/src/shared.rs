@@ -405,10 +405,22 @@ impl SharedConn {
             self.drop_gateway(&gw).await;
         }
         // Slow path: open outside the lock, then install.
+        // Snapshot the slot first: Go `Live` detaches a dead
+        // installed gateway BEFORE opening (`conn.go:500-520`),
+        // so the drop is counted and the old gateway closed
+        // even when the reopen fails. Rust opens first and
+        // installs after, so remember the stale gateway here
+        // and detach it on the open-error path below (fix
+        // loop 2, F5/NB3). Only a dead gateway is detached:
+        // a live one installed meanwhile is kept, as in Go.
+        let stale_before_open = self.snapshot().filter(|gw| !gw.alive());
         let opened = self.open().await;
         let gw = match opened {
             Ok(gw) => gw,
             Err(e) => {
+                if let Some(old) = &stale_before_open {
+                    self.drop_dead(old).await;
+                }
                 if !matches!(e, TransportError::Auth { .. }) {
                     self.mark_down(&e, true);
                 }
@@ -452,12 +464,11 @@ impl SharedConn {
                     // records the outage (not a failed connect),
                     // and closes the old gateway after the new
                     // one is installed (`dead` falls back to
-                    // "gateway connection closed" when the old
-                    // gateway died without a recorded error).
+                    // Go `errGatewayClosed` ("closed") when the
+                    // old gateway died without a recorded
+                    // error — `internal/conn/errors.go:313-315`).
                     self.drops.fetch_add(1, Ordering::SeqCst);
-                    let dead = old.dead().unwrap_or(TransportError::ConnectionError {
-                        message: "gateway connection closed".to_string(),
-                    });
+                    let dead = Self::dead_error(&old);
                     self.mark_down(&dead, false);
                     old.close().await;
                 }
@@ -483,6 +494,39 @@ impl SharedConn {
     /// record the outage (not a failed connect), and close
     /// outside the lock.
     pub async fn drop_gateway(&self, gw: &Arc<Gateway>) {
+        let err = TransportError::ConnectionError {
+            message: "heartbeat failed".to_string(),
+        };
+        self.drop_with(gw, err).await;
+    }
+
+    /// Drop a dead installed gateway with its own recorded
+    /// death (Go `Live` detach, `conn.go:500-520`): same
+    /// slot-clear + drop count + outage record + close as
+    /// `drop_gateway`, but the mark-down cause is the dead
+    /// error, not the heartbeat failure. Used on the
+    /// `live()` open-error path (fix loop 2, F5/NB3).
+    async fn drop_dead(&self, gw: &Arc<Gateway>) {
+        let dead = Self::dead_error(gw);
+        self.drop_with(gw, dead).await;
+    }
+
+    /// The recorded death of a gateway, falling back to Go
+    /// `errGatewayClosed` ("closed") when it died without a
+    /// recorded error (`internal/conn/errors.go:313-315`).
+    fn dead_error(gw: &Arc<Gateway>) -> TransportError {
+        gw.dead().unwrap_or(TransportError::ConnectionError {
+            message: "closed".to_string(),
+        })
+    }
+
+    /// Shared drop body for `drop_gateway` / `drop_dead`:
+    /// clear the slot iff it still holds exactly `gw`, then
+    /// count the drop, record the outage (not a failed
+    /// connect), and close outside the lock. The `ptr_eq`
+    /// guard also prevents double-counting when another task
+    /// already dropped or replaced the gateway.
+    async fn drop_with(&self, gw: &Arc<Gateway>, err: TransportError) {
         let same = {
             let mut slot = match self.gateway.lock() {
                 Ok(slot) => slot,
@@ -498,9 +542,6 @@ impl SharedConn {
         };
         if same {
             self.drops.fetch_add(1, Ordering::SeqCst);
-            let err = TransportError::ConnectionError {
-                message: "heartbeat failed".to_string(),
-            };
             self.mark_down(&err, false);
             gw.close().await;
         }

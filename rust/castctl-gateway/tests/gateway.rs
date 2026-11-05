@@ -204,6 +204,22 @@ async fn dial_url_sends_redacted_literal_not_real_token() {
         target.contains("vm_id=vm-test"),
         "vm_id must survive: {target}"
     );
+    // Decoded level: the server-side query VALUE must be the
+    // literal Go sends raw. No URL/query parser is a
+    // dependency of this crate, so decode the two sequences
+    // `dial_gateway` emits (`%3C`/`%3E`) on the extracted
+    // value directly — a general URL parser is not needed
+    // for this one value (fix loop 2, NB5).
+    let query = target.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let token_value = query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("auth_token="))
+        .expect("auth_token present in the recorded target");
+    let decoded = token_value.replace("%3C", "<").replace("%3E", ">");
+    assert_eq!(
+        decoded, "<redacted>",
+        "decoded auth_token value must be the Go literal, got {decoded} (raw target {target})"
+    );
     gw.close().await;
     server.stop();
 }
@@ -461,6 +477,72 @@ async fn stale_probe_detects_dead_conn_and_reconnects() {
         shared.drops(),
         1,
         "replacing the dead installed gateway counts one drop"
+    );
+    server.stop();
+}
+
+#[tokio::test]
+async fn live_open_failure_drops_dead_installed_gateway() {
+    // Go `Live` (`conn.go:500-520` + open-error branch): a dead
+    // installed gateway is detached BEFORE opening — the drop is
+    // counted, the outage recorded with the dead error, and the
+    // old gateway closed even when the reopen FAILS. Rust opens
+    // first and installs after, so `live()` must do the same
+    // detach on the open-error path (fix loop 2, F5/NB3).
+    let server = FakeServer::start(Arc::new(|req| canned_json(&req.path))).await;
+    let conn = Arc::new(FlakyConnector {
+        url: server.ws_url(),
+        fail_times: AtomicU64::new(0),
+        attempts: AtomicU64::new(0),
+    });
+    let shared = Arc::new(SharedConn::with_policy(
+        Arc::clone(&conn) as Arc<dyn Connector>,
+        policy_fast(),
+        HEARTBEAT,
+    ));
+    // Warm the connection.
+    let out = shared
+        .call_json("connection.ping", RequestOptions::default())
+        .await
+        .unwrap();
+    assert!(json_str(&out).contains("pong"));
+    let gw = shared.snapshot().expect("gateway installed");
+    assert!(gw.alive());
+    // Kill the server side; the client reader must notice.
+    server.close_all();
+    let mut dead = false;
+    for _ in 0..20 {
+        sleep(Duration::from_millis(100)).await;
+        if !gw.alive() {
+            dead = true;
+            break;
+        }
+    }
+    assert!(
+        dead,
+        "gateway must report dead after the server dropped the conn"
+    );
+    assert_eq!(shared.drops(), 0, "no drop counted yet");
+    // The reopen now fails (one injected failure).
+    conn.fail_times.store(1, Ordering::SeqCst);
+    let err = shared.live().await.unwrap_err();
+    assert!(
+        matches!(err, TransportError::ConnectionDown { .. }),
+        "live() must return the injected open failure, got {err}"
+    );
+    // The dead installed gateway is detached even though the
+    // reopen failed: drop counted, slot cleared. (`close()`
+    // rides the same helper call as the counted drop; a
+    // missing close would leak the socket, observable only
+    // via a live peer — same scope as PR1.)
+    assert_eq!(
+        shared.drops(),
+        1,
+        "failed reopen still counts the drop of the dead installed gateway"
+    );
+    assert!(
+        shared.snapshot().is_none(),
+        "slot must be cleared after the failed reopen"
     );
     server.stop();
 }
