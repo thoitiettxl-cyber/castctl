@@ -1143,6 +1143,29 @@ fn cmd_webui(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), F
 /// which the CLI buffers until the process exits (M2
 /// architecture) — it does not appear live while the
 /// server runs.
+/// A chat seam with no Muse Runtime behind it: every call
+/// fails with [`ChatSeamError`], which the handlers map to
+/// the fixed 502 `upstream_error`. This is the M6b stand-in
+/// for Go's live gateway seam failing (no live session):
+/// list/history/start/op all 502, and send creates its job
+/// (202) whose worker then fails the same way. No chat text
+/// is ever served — there is none to serve.
+fn failing_chat_deps() -> castctl_webui::chats::ChatDeps {
+    use castctl_webui::chats::{ChatDeps, ChatSeamError};
+    fn fail<T>() -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, ChatSeamError>> + Send + 'static>,
+    > {
+        Box::pin(async move { Err(ChatSeamError) })
+    }
+    ChatDeps {
+        list_sessions: std::sync::Arc::new(|_, _| fail()),
+        get_history: std::sync::Arc::new(|_, _, _| fail()),
+        start_session: std::sync::Arc::new(|_, _| fail()),
+        session_op: std::sync::Arc::new(|_, _, _, _| fail()),
+        send_chat: std::sync::Arc::new(|_, _, _| fail()),
+    }
+}
+
 fn serve_webui(ctx: &mut Ctx<'_>, loc: &ConfigLocation) -> Result<(), FlowErr> {
     use castctl_config::jsonvalue::JsonValue;
     use castctl_webui::auth::{hash_token, looks_like_bcrypt_hash};
@@ -1289,7 +1312,15 @@ fn serve_webui(ctx: &mut Ctx<'_>, loc: &ConfigLocation) -> Result<(), FlowErr> {
         restore_cookies: None,
         screencast_available: Some(screencast_available),
         screencast_starter: None,
-        chats: None,
+        // Chats: no Muse Runtime exists in this build, but the
+        // production Go binary always wires a (live) chat seam,
+        // so the seam is present and every call fails closed
+        // with `upstream_error` (502) — exactly what the live
+        // Go server returns for a profile with no live session.
+        // Wiring None instead would report 501 `unavailable`
+        // (Go's nil-seam branch, reachable only in Go's unit
+        // tests), which no production Go server ever emits.
+        chats: Some(std::sync::Arc::new(failing_chat_deps())),
     })
     .map_err(|e| match e {
         NewServerError::UIDir(m) => msg(2, format!("webui serve: {m}")),

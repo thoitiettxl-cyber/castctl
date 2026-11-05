@@ -439,6 +439,7 @@ impl Server {
                         });
                         let conn = http1::Builder::new()
                             .header_read_timeout(READ_HEADER_TIMEOUT)
+                            .timer(hyper_util::rt::TokioTimer::new())
                             .serve_connection(io, service);
                         // Idle-timeout approximation (Go's
                         // `http.Server.IdleTimeout` closes idle

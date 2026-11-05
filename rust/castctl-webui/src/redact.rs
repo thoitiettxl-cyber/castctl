@@ -101,9 +101,12 @@ pub fn redact_plugins_block(root: &mut castctl_config::jsonvalue::OrderedObject)
 /// `RedactRawConfig` (`internal/profile/redact.go`):
 /// decode the stored document, redact the `plugins` block
 /// wholesale, then redact generically and render with
-/// 2-space indent (Go `json.MarshalIndent`, HTML escaping
-/// on, no trailing newline). The plugins round-trip edge
-/// is documented in Go, not hidden: a real top-level
+/// 2-space indent. Go renders this text with
+/// `SetEscapeHTML(false)` (`marshalScalar`, jsonvalue.go),
+/// so `<redacted>` stays literal — the envelope encoder
+/// (escaping on) is what turns it into `\u003c` on the wire.
+/// No trailing newline. The plugins round-trip edge is
+/// documented in Go, not hidden: a real top-level
 /// `fragment` key collapses on a PUT round-trip.
 pub fn redact_raw_config(data: &[u8]) -> Result<String, String> {
     let text = String::from_utf8_lossy(data).into_owned();
@@ -113,7 +116,8 @@ pub fn redact_raw_config(data: &[u8]) -> Result<String, String> {
         redact_plugins_block(root);
     }
     let redacted = redact_value(&value);
-    Ok(crate::go_json::encode_go_json_indent(&redacted))
+    castctl_config::jsonvalue::encode_ordered_json_indent(&redacted, 2)
+        .map_err(|e| e.message)
 }
 
 fn is_header_map_key(key: &str) -> bool {
