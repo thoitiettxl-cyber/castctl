@@ -19,6 +19,7 @@ members = [
     "castctl-deliver",
     "castctl-logging",
     "castctl-wait",
+    "castctl-dns",
 ]
 resolver = "2"
 

@@ -1,0 +1,13 @@
+[package]
+name = "castctl-dns"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Profile DNS client ported from castctl's Go internal/dns (M7a, scoped)"
+
+[dependencies]
+tokio = { workspace = true, features = ["time", "net"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net", "sync"] }
