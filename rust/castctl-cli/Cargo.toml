@@ -1,0 +1,9 @@
+[package]
+name = "castctl-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Command table, flag parsing, help/usage rendering, and exit mapping ported from castctl's Go internal/commands (M2, offline surface only)"
+
+[dependencies]
+castctl-config = { path = "../castctl-config" }
