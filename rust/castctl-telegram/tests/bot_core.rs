@@ -1671,6 +1671,80 @@ async fn malformed_updates_do_not_poison_the_loop() {
     );
 }
 
+/// Explicit JSON `null` fields must not poison the loop
+/// (fix loop 2, red R5): `null` decodes to Go's zero
+/// value, the good updates in the same batch are still
+/// handled, and the loop progresses. Covers every null
+/// shape — `chat: null`, `update_id: null`, callback
+/// `from: null`, `chat.id` / `chat.type: null`, a bare
+/// `null` array element — plus a follow-up good batch.
+#[tokio::test]
+async fn null_fields_do_not_poison_the_loop() {
+    let server = FakeServer::start().await;
+    let (state, _dir) = test_state("null-fields");
+    let services = Arc::new(FakeServices::new());
+    // Batch 1: every null shape at once, with good
+    // updates interleaved.
+    let null_chat = serde_json::json!({"update_id": 1, "message": {
+        "message_id": 1,
+        "from": {"id": ALLOWED_UID, "is_bot": false, "first_name": "T"},
+        "chat": null, "date": 0, "text": "null chat",
+    }});
+    let good = msg_update(2, 100, ALLOWED_UID, "good");
+    let null_from = serde_json::json!({"update_id": 3, "callback_query": {
+        "id": "q1", "from": null,
+        "message": {"message_id": 5, "from": {"id": ALLOWED_UID, "is_bot": false, "first_name": "T"}, "chat": {"id": 100, "type": "private"}, "date": 0, "text": "x"},
+        "data": "c:abcdefgh",
+    }});
+    let null_id = serde_json::json!({"update_id": null, "message": {
+        "message_id": 9,
+        "from": {"id": ALLOWED_UID, "is_bot": false, "first_name": "T"},
+        "chat": {"id": 100, "type": "private"},
+        "date": 0, "text": "null id",
+    }});
+    let null_chat_id = serde_json::json!({"update_id": 5, "message": {
+        "message_id": 1,
+        "from": {"id": ALLOWED_UID, "is_bot": false, "first_name": "T"},
+        "chat": {"id": null, "type": null},
+        "date": 0, "text": "null chat id",
+    }});
+    server
+        .behavior
+        .queue_raw_envelope(serde_json::json!({"ok": true, "result": [
+            null_chat, good, null_from, null_id, serde_json::Value::Null, null_chat_id,
+        ]}));
+    // Batch 2: a good update after the null batch.
+    server.behavior.queue_raw_envelope(serde_json::json!({
+        "ok": true, "result": [msg_update(6, 100, ALLOWED_UID, "after")],
+    }));
+    let bot = make_bot(
+        &server,
+        Arc::clone(&state),
+        Arc::clone(&services),
+        vec![ALLOWED_UID],
+        true,
+    )
+    .await;
+    let run = tokio::spawn({
+        let bot = Arc::clone(&bot);
+        async move { bot.run().await }
+    });
+    wait_until(Duration::from_secs(10), || {
+        services.call_count("start_turn") >= 5
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    bot.request_shutdown();
+    run.await.expect("run task").expect("run ok");
+    // Handled: "null chat" (chat 0), "good", "null id"
+    // (update_id 0), "null chat id" (chat 0), "after" = 5
+    // turns. The callback with `from: null` (uid 0) and
+    // the bare `null` element (zero update, uid 0) were
+    // dropped by the allowlist.
+    assert_eq!(services.call_count("start_turn"), 5);
+    assert_eq!(state.offset(), 6, "offset advances past the null batch");
+}
+
 /// `update_id` extremes must not wrap the offset (fix
 /// loop 1, red R4): `i64::MAX` saturates, 0 / -1 /
 /// `i64::MIN` are handled, and a restart polls with

@@ -175,6 +175,11 @@ impl Bot {
             ));
         }
         // `getMe` at construction (no `SkipGetMe` here).
+        // The shutdown signal is installed AFTER this call
+        // (below), so a 429 sleep during construction is
+        // uncancellable — but that window is moot: no `Bot`
+        // handle exists yet for anyone to call
+        // `request_shutdown` on (fix loop 2, red NIT 7).
         let _me = api.get_me().await?;
         let dispatcher = Arc::new(Dispatcher::new());
         // One shutdown signal for the poll loop, the 429
@@ -356,6 +361,16 @@ impl Bot {
     /// Source: `internal/telegram/bot.go:445-479` (the poll
     /// instance: `WithAllowedUpdates{message,
     /// callback_query}`, `WithInitialOffset`).
+    ///
+    /// Deliberate: an empty `Ok` batch is re-polled
+    /// immediately, with no pacing sleep (fix loop 2, red
+    /// NIT 5). In production this cannot spin: the server
+    /// holds an empty long poll for `POLL_TIMEOUT_SECS`
+    /// (25s) before answering, so the loop runs at ~0.04
+    /// req/s. Only a server/proxy returning empty batches
+    /// immediately would spin it — and Go's library (same
+    /// 26s poll timeout, `bot.go:62-67`) would spin
+    /// identically there. No pacing sleep is added.
     ///
     /// A second concurrent (or later) `run()` returns
     /// `"telegram: bot already started"`, like Go's

@@ -344,19 +344,13 @@ impl ClaimManager {
     /// performed the decide, `false` when already decided.
     pub async fn decide_once(&self, id: &str, decision: &str) -> Result<bool, BotError> {
         loop {
-            // Shutdown is checked at the TOP of every
-            // iteration, not only while waiting: a waiter
-            // woken by the owner's guard drop (the owner
-            // was cancelled by shutdown) must NOT elect
-            // itself owner and start a fresh RPC — without
-            // this check it raced shutdown and returned
-            // `Ok(true)` from a new instant RPC (found by
-            // the `waiter_cancelled_on_shutdown` test
-            // flaking under a full parallel run; fix loop
-            // 1 follow-up).
-            if self.shutdown_flag.load(Ordering::SeqCst) {
-                return Err(BotError::Cancelled);
-            }
+            // Decided is checked BEFORE shutdown: Go's
+            // `decideOnce` checks the decided set before
+            // observing ctx cancellation
+            // (`bot.go:1345-1397`), so an already-decided
+            // id returns `Ok(false)` even during shutdown
+            // — and no RPC can start from a decided id
+            // (fix loop 2, red NIT 4).
             let waiter = {
                 let inner = self.inner.lock().expect("claims lock");
                 if inner.decided.contains_key(id) {
@@ -364,6 +358,20 @@ impl ClaimManager {
                 }
                 inner.decide_inflight.get(id).cloned()
             };
+            // Shutdown is checked at the TOP of every
+            // iteration (after the decided check), not
+            // only while waiting: a waiter woken by the
+            // owner's guard drop (the owner was cancelled
+            // by shutdown) must NOT elect itself owner and
+            // start a fresh RPC — without this check it
+            // raced shutdown and returned `Ok(true)` from
+            // a new instant RPC (found by the
+            // `waiter_cancelled_on_shutdown` test flaking
+            // under a full parallel run; fix loop 1
+            // follow-up).
+            if self.shutdown_flag.load(Ordering::SeqCst) {
+                return Err(BotError::Cancelled);
+            }
             if let Some(entry) = waiter {
                 // Level-triggered wait: register the waiter
                 // BEFORE re-checking `done`, so a settle
@@ -436,6 +444,19 @@ impl ClaimManager {
     /// ids it decided.
     /// Source: `internal/telegram/claims.go:133-221`
     /// (`ApproveForever`).
+    ///
+    /// Known limitation (fix loop 2, red NIT 8): neither
+    /// this loop nor `await_claim` consults shutdown, and
+    /// the `Decider` trait takes no cancellation token —
+    /// a slow decider RPC here runs to completion even
+    /// after `request_shutdown()`. Go passes a cancellable
+    /// `ctx` into `Decide` (`claims.go:133-221`); the
+    /// `await_claim` timer-only wait IS Go parity (Go's
+    /// `awaitClaim` also waits on timer-only), but the
+    /// uncancellable RPC is a partial divergence, bounded
+    /// by the gateway RPC timeout. Fix when the trait
+    /// gains a shutdown/cancellation parameter (M4b/M5b);
+    /// do not retrofit silently.
     pub async fn approve_forever(
         &self,
         items: &[Approval],
@@ -1036,6 +1057,97 @@ mod tests {
             matches!(result, Err(BotError::Cancelled)),
             "waiter returns Cancelled, got {result:?}"
         );
+    }
+
+    /// Decider whose FIRST call panics inside the future
+    /// and whose later calls succeed. A panicking owner
+    /// must not leak the in-flight entry: the Drop guard
+    /// runs on unwind (Go's `defer` cleanup,
+    /// `bot.go:1345-1397`), the waiter becomes the owner
+    /// and retries the RPC (fix loop 2, red NIT 3 — the
+    /// abort path had a test, the panic path was only
+    /// code-verified).
+    struct PanickingDecider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Decider for PanickingDecider {
+        fn decide(
+            &self,
+            _approval_id: &str,
+            _decision: &str,
+        ) -> Pin<Box<dyn Future<Output = Result<(), BotError>> + Send + '_>> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if n == 0 {
+                    panic!("decider panics on first call");
+                }
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn decide_once_waiter_resolves_after_owner_panic() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let decider = Arc::new(PanickingDecider {
+            calls: Arc::clone(&calls),
+        });
+        let m = Arc::new(ClaimManager::new(decider, Duration::from_millis(50)));
+        // Owner and waiter race on the same id; exactly
+        // one of them owns the first (panicking) RPC, the
+        // other waits and retries.
+        let t1 = tokio::spawn({
+            let m = Arc::clone(&m);
+            async move { m.decide_once("p", "allow_always").await }
+        });
+        let t2 = tokio::spawn({
+            let m = Arc::clone(&m);
+            async move { m.decide_once("p", "allow_always").await }
+        });
+        let (r1, r2) = tokio::time::timeout(Duration::from_secs(5), async { (t1.await, t2.await) })
+            .await
+            .expect("neither caller may hang on a panicking decider");
+        // Exactly one task panicked (its JoinError) and
+        // the other decided (Ok(true)); a leaked entry
+        // would strand the waiter instead.
+        let mut panicked = 0;
+        let mut decided = 0;
+        for r in [r1, r2] {
+            match r {
+                Err(_) => panicked += 1,
+                Ok(Ok(true)) => decided += 1,
+                Ok(other) => panic!("unexpected decide_once outcome: {other:?}"),
+            }
+        }
+        assert_eq!(panicked, 1, "exactly one caller panics");
+        assert_eq!(decided, 1, "the other caller retries and decides");
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "RPC retried once");
+        assert!(m.is_decided("p"));
+    }
+
+    /// An already-decided id returns `Ok(false)` even
+    /// after shutdown (fix loop 2, red NIT 4): Go's
+    /// `decideOnce` checks the decided set before
+    /// observing ctx cancellation (`bot.go:1345-1397`),
+    /// and no RPC can start from a decided id.
+    #[tokio::test]
+    async fn decide_once_decided_before_shutdown() {
+        let (m, calls) = manager();
+        let m = Arc::new(m);
+        assert!(
+            m.decide_once("d", "allow_always")
+                .await
+                .expect("first decide")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        m.request_shutdown();
+        let again = m.decide_once("d", "allow_always").await;
+        assert!(
+            matches!(again, Ok(false)),
+            "decided id returns Ok(false) after shutdown, got {again:?}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "no second RPC");
     }
 
     /// First decision wins: a later `record_decided` (or

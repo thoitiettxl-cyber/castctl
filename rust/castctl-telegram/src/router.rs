@@ -212,8 +212,8 @@ pub enum CommandKind {
 /// work. (`/chats` is a seam: the picker rows come from
 /// `sessions.list`, a gateway call —
 /// `internal/commands/telegram_commands.go:423-447`.)
-/// `/raw` is a seam whose ONLY in-crate part is the route
-/// check: the handler parses the method, the SERVICE
+/// `/raw` is a seam whose ONLY in-crate part is parsing
+/// the method: the handler parses the method, the SERVICE
 /// checks the route against `gateway.DefaultRoutes()` and
 /// performs the gateway call (`telegram_owner.go:145-183`).
 #[must_use]

@@ -4329,20 +4329,24 @@ live `getMyCommands` record in
    the only signal left. `summary()` counts the raw
    error text's RUNES as Go does (`bot.go:764-770`)
    — length only, never the text itself, so no token
-   leaks through the count. Of the 20 `ErrorClass`
-   labels, 19 are emittable: `Dns` / `Tls` /
+   leaks through the count. All 20 `ErrorClass`
+   labels are emittable: `Dns` / `Tls` /
    `ConnectionRefused` / `ConnectionReset` /
    `Unreachable` / `Eof` come only via
    `fallback_class(message)` (reachable when the
    transport message matches — pinned by the
    `transport_connection_failures_classify_from_message`
-   test); every other label has a direct arm. The
-   ONE class this crate cannot emit:
-   - `ContextDeadlineExceeded`: no call site in this
-     crate applies a deadline to a poll/RPC (Go
-     emits it from `context.DeadlineExceeded`); the
-     429 sleep and the poll loop observe shutdown
-     instead, which maps to `ContextCanceled`.
+   test); every other label has a direct arm.
+   `ContextDeadlineExceeded` has no direct arm (no
+   call site in this crate applies a deadline to a
+   poll/RPC — Go emits it from
+   `context.DeadlineExceeded`; the 429 sleep and the
+   poll loop observe shutdown instead, which maps to
+   `ContextCanceled`), but it IS emittable via the
+   `fallback_class` phrase "context deadline
+   exceeded" (fix loop 2, tech N-N2 — the loop-1
+   claim "19/20, only `ContextDeadlineExceeded`
+   unreachable" was literally wrong).
 5. Plaintext-path download cap 16 MiB [DEVIATION,
    tests only]: `HttpClient` caps at 16 MiB
    (`MAX_RESPONSE_BODY`) and cannot be
@@ -4665,8 +4669,12 @@ Per-item fix + test (details in
    crates in the lock; deviation 3 rewritten.
 10. `error_class` gaps (tech B8): decode classes
     mapped in-crate (`format_summary` prefix);
-    deviation 4 lists the one unreachable class
-    (`ContextDeadlineExceeded`); `summary()` counts
+    deviation 4 corrected in fix loop 2 (tech N-N2):
+    all 20 labels are emittable —
+    `ContextDeadlineExceeded` has no direct arm but
+    is reachable via the `fallback_class` phrase
+    "context deadline exceeded" (the loop-1 "19/20"
+    claim was wrong); `summary()` counts
     raw-text runes (test pin fixed 22 → 32).
 11. Command table (tech B9): `/profile` FULL, local
     (`os.Stat` + format, Go
@@ -4707,9 +4715,19 @@ N15/N16/N17 (router/service contract docs:
 `fs_rm` text, `/new` no-session warning,
 `files_list` history order), N18 (`catch_unwind`
 around the `onOffset` hook).
-Deferred: none. Every NIT is either fixed or
-documented-in-place with its reason (N7 size
-hold, N2 observability, N15–N17 contracts).
+Deferred: exactly one — red N10 (`is_auth_error`,
+`commands.rs:90-95`, only matches
+`TransportError::Auth`): whether a real gateway auth
+failure surfaces as `TransportError::Auth` through
+the M4b seam services is unverified because the
+services do not exist yet. Pin with a test once M4b
+lands; do not guess the mapping. (Fix loop 2, tech
+N-N3 — the loop-1 section wrongly said "Deferred:
+none." while the fix-loop-1 report §3 listed this
+same N10 as deferred.) Everything else in the loop
+is either fixed or documented-in-place with its
+reason (N7 size hold, N2 observability, N15–N17
+contracts).
 Harness notes from the loop: the fake server
 paces empty `getUpdates` by 10ms (a running Bot
 otherwise hot-spins and starved a sibling test
@@ -4720,6 +4738,105 @@ test-authoring mistake was caught and fixed in
 the loop: a state test chmod'd the shared `/tmp`
 to 0755 (restored to 1777 on cue); state tests
 now use dedicated directories.
+
+### Fix loop 2 (re-review of loop 1)
+
+Re-review verdicts on loop 1: technical FAIL (only
+the lock edge below), safety FAIL (only the same
+lock edge), red-team FAIL (R5 below). Every loop-1
+BLOCKING fix was verified as real in code (12/12
+technical, B1/B2 safety, R1/R2/R4 red-team); the
+failures were one landing defect and one hole in
+the R3 fix itself.
+
+1. `Cargo.lock` stale (safety L1 / technical N-B1,
+   BLOCKING): `castctl-telegram/Cargo.toml` declared
+   `rand = { workspace = true }` but the committed
+   `rust/Cargo.lock` had no `"rand"` edge under
+   `castctl-telegram` — the loop-1 report checked
+   `git diff -- Cargo.lock` at the REPO ROOT, where
+   no `Cargo.lock` exists, and claimed "EMPTY". The
+   loop-1 gates therefore cannot have run on the
+   committed tree (any build rewrites the lock).
+   Fixed here: the lock gains exactly the `"rand"`
+   edge (no new crate version), committed, and all
+   gates re-run on the committed tree with `git
+   status` clean afterwards + `cargo build --locked`
+   passing. The loop-1 "EMPTY" claim is superseded
+   by this record; the loop-1 report file itself is
+   not rewritten (history stands, corrected going
+   forward).
+2. Explicit JSON `null` poisons the batch (red R5,
+   BLOCKING, novel): `#[serde(default)]` only fires
+   for ABSENT fields; a field present as `null`
+   still failed serde for every non-`Option` type
+   (`update_id`, `message_id`, `chat`, `date`,
+   `Chat.id`/`kind`, `User.id`/`first_name`/`is_bot`,
+   `CallbackQuery.id`/`from`, `PhotoSize`/`FileObject`
+   `.file_id`, bare `null` array elements, `null`
+   elements of nested vecs). Go's `encoding/json`
+   treats `null` as not-present (zero value), so Go
+   proceeds. Fixed with a `null_as_default`
+   `deserialize_with` helper on every non-`Option`
+   decode field, a `null_photo_vec` helper for
+   `photo` elements, and a `null` → zero-`Update`
+   arm in `get_updates`. Wrong-TYPE fields still
+   fail the whole batch (Go parity — unchanged).
+   Tests: every null shape in one batch with a good
+   update (unit + loop-level).
+3. Dispatcher residuals (red NITs 1+2, tech N-N1):
+   (a) the worker's `abandoned` check and pending
+   decrement now share ONE lock (two locks let
+   `shutdown()` drain `pending` between them,
+   counting an item dropped that was then
+   processed); (b) `shutdown()` early-returns when
+   already shut down, like Go
+   (`dispatcher.go:264-271`). Test: double-shutdown
+   with a gated processor (deterministic via a
+   probe enqueue proving the first shutdown's flag
+   is set).
+4. Panicking-decider test (red NIT 3): a decider
+   whose first call panics — the waiter still
+   resolves and the next `decide_once` retries the
+   RPC (calls==2). The panic path was code-verified
+   only in loop 1.
+5. `decide_once` checks `decided` BEFORE shutdown
+   (red NIT 4): Go's `decideOnce` checks the decided
+   set before observing ctx cancellation, so an
+   already-decided id returns `Ok(false)` even
+   during shutdown. One-line reorder, Go-verified
+   (`bot.go:1345-1397`); test pins it.
+6. Doc corrections (tech N-N2/N-N3/N-N4): deviation
+   4 is 20/20 emittable (see item 4 above); this
+   section's old "Deferred: none." contradicted the
+   loop-1 report — red N10 is the one deferred item
+   (M4b seam); the `/raw` comment now says the only
+   in-crate part is parsing the method.
+7. Deliberate decisions, documented not changed:
+   no empty-batch pacing in `run()` (red NIT 5 —
+   real Telegram long-polls 25s, Go would spin
+   identically on a fast-emptying proxy);
+   `download_file_bytes` has no 429 retry (red NIT
+   6 — Go's `DownloadMedia` does one `client.Do`,
+   non-200 is a plain error; `getFile` keeps the
+   normal `call_json` 429 retry); `getMe` runs
+   before the shutdown signal is installed (red
+   NIT 7 — moot, no `Bot` exists yet to shut down);
+   `approve_forever` / `await_claim` never consult
+   shutdown and the `Decider` trait has no
+   cancellation token (red NIT 8 — Go passes a
+   cancellable ctx; fix when the trait gains one,
+   M4b/M5b).
+
+CRITICAL PROCESS LESSON (fix loop 2): after ANY
+manifest change, always diff `rust/Cargo.lock`
+(never repo-root `Cargo.lock` — no such file
+exists) and always confirm `git status` is clean
+AFTER running the gates on the committed tree. A
+build that rewrites the lock means the gated tree
+was not the committed tree, and every gate claim
+in the report is void until re-run on the
+committed tree.
 
 ## Quy tắc quyết định (Boss, 2026-11-05 — standing)
 

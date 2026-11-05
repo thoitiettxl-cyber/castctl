@@ -363,15 +363,26 @@ impl Dispatcher {
                         // so counted-as-dropped items were
                         // still handled after shutdown
                         // returned (fix loop 1, tech B2 /
-                        // red R2).
-                        if this.inner.lock().is_ok_and(|i| i.abandoned) {
-                            continue;
-                        }
-                        {
+                        // red R2). The check and the pending
+                        // decrement share ONE lock: with two
+                        // separate locks `shutdown()` could
+                        // land between them, drain `pending`
+                        // (counting this item dropped), and
+                        // the worker would still process it
+                        // (fix loop 2, red NIT 1 / tech N-N1).
+                        let discard = {
                             let mut inner = this.inner.lock().expect("dispatcher lock");
-                            if let Some(pending) = inner.pending.get_mut(&chat_key) {
-                                *pending = pending.saturating_sub(1);
+                            if inner.abandoned {
+                                true
+                            } else {
+                                if let Some(pending) = inner.pending.get_mut(&chat_key) {
+                                    *pending = pending.saturating_sub(1);
+                                }
+                                false
                             }
+                        };
+                        if discard {
+                            continue;
                         }
                         // One task per item: a panic in the
                         // handler becomes a failed join (the
@@ -419,12 +430,23 @@ impl Dispatcher {
     /// a queue with no worker (no processor was ever set)
     /// would otherwise vanish uncounted (fix loop 1, red
     /// N9). A normal drain leaves `pending` empty, so the
-    /// clean-join count adds zero there.
+    /// clean-join count adds zero there. A second
+    /// concurrent (or later) call returns immediately
+    /// without recounting: Go's shutdown early-returns
+    /// when already shut down (`dispatcher.go:264-271`),
+    /// and without the guard a second call would drain
+    /// `pending` while the first call's workers are still
+    /// draining with `abandoned == false`, counting items
+    /// dropped that are then processed (fix loop 2,
+    /// red NIT 2).
     /// Source: `internal/telegram/dispatcher.go:264-304`
     /// (`shutdown`).
     pub async fn shutdown(self: &Arc<Self>) {
         let workers = {
             let mut inner = self.inner.lock().expect("dispatcher lock");
+            if inner.shutdown {
+                return;
+            }
             inner.shutdown = true;
             inner.queues.clear();
             std::mem::take(&mut inner.workers)
@@ -672,5 +694,103 @@ mod tests {
         }
         d.shutdown().await;
         assert_eq!(d.dropped(), 3, "buffered items are counted dropped");
+    }
+
+    /// Processor that blocks on item 1 until the test
+    /// releases the gate, and processes every other item
+    /// at once. The gate wait is registered (enable)
+    /// BEFORE signalling `started`, so the test's release
+    /// cannot be lost.
+    struct GatedProcessor {
+        handled: Arc<Mutex<Vec<i64>>>,
+        started: Arc<tokio::sync::Notify>,
+        gate: Arc<tokio::sync::Notify>,
+    }
+
+    impl UpdateProcessor for GatedProcessor {
+        fn process(self: Arc<Self>, update: Update) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+            let handled = Arc::clone(&self.handled);
+            let started = Arc::clone(&self.started);
+            let gate = Arc::clone(&self.gate);
+            Box::pin(async move {
+                if update.update_id == 1 {
+                    let notified = gate.notified();
+                    tokio::pin!(notified);
+                    let _ = notified.as_mut().enable();
+                    started.notify_waiters();
+                    notified.await;
+                }
+                handled.lock().expect("lock").push(update.update_id);
+            })
+        }
+    }
+
+    /// A second concurrent `shutdown()` must not recount
+    /// the buffered items (fix loop 2, red NIT 2): Go's
+    /// shutdown early-returns when already shut down
+    /// (`dispatcher.go:264-271`). Without the guard the
+    /// second call drains `pending` while the first
+    /// call's workers are still draining with `abandoned
+    /// == false`, so the 9 buffered items are counted
+    /// dropped AND then processed by the first call's
+    /// workers. The probe enqueue proves the first
+    /// shutdown has set its flag (it returns `Shutdown`
+    /// and counts exactly one drop); the probe id is
+    /// never asserted on.
+    #[tokio::test]
+    async fn double_shutdown_counts_leftovers_once() {
+        let d = Arc::new(Dispatcher::with_config(
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            1024,
+        ));
+        let handled = Arc::new(Mutex::new(Vec::new()));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let started_wait = Arc::clone(&started);
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let gate_release = Arc::clone(&gate);
+        d.set_processor(Arc::new(GatedProcessor {
+            handled: Arc::clone(&handled),
+            started,
+            gate,
+        }));
+        for id in 1..=10 {
+            assert_eq!(d.enqueue(update(id, 100)), EnqueueOutcome::Queued);
+        }
+        // Wait until the worker has TAKEN item 1 (pending
+        // is 9) before shutting down.
+        tokio::time::timeout(Duration::from_secs(5), started_wait.notified())
+            .await
+            .expect("worker starts item 1");
+        let d1 = Arc::clone(&d);
+        let first = tokio::spawn(async move { d1.shutdown().await });
+        while d.enqueue(update(999, 777)) != EnqueueOutcome::Shutdown {
+            tokio::task::yield_now().await;
+        }
+        // Second shutdown while the first is still blocked
+        // on the gate: it must return without recounting.
+        let d2 = Arc::clone(&d);
+        d2.shutdown().await;
+        assert_eq!(
+            d.dropped(),
+            1,
+            "only the probe enqueue is dropped so far; the 9 buffered items are not counted yet"
+        );
+        gate_release.notify_waiters();
+        first.await.expect("first shutdown");
+        // Let the worker drain items 2..=10 and exit.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mut got = handled.lock().expect("lock").clone();
+        got.retain(|id| *id != 999);
+        assert_eq!(
+            got,
+            (1..=10).collect::<Vec<i64>>(),
+            "all 10 items processed exactly once"
+        );
+        assert_eq!(
+            d.dropped(),
+            1,
+            "buffered items are never counted dropped on a clean drain"
+        );
     }
 }

@@ -514,14 +514,17 @@ impl BotApi {
     /// (`POLL_TIMEOUT_SECS`).
     ///
     /// Decode mirrors Go's `encoding/json` (fix loop 1,
-    /// red R3): a missing `result` (`null`) is an empty
-    /// batch, not an error; a `result` that is not an
-    /// array is a response decode failure (the whole batch
-    /// fails, as in Go); items decode one by one, so a
-    /// wrong-TYPE field fails the whole batch
-    /// (`UpdateDecode`, as in Go) while ABSENT fields
-    /// zero-fill via `#[serde(default)]` on `types.rs`
-    /// and the item proceeds.
+    /// red R3; fix loop 2, red R5): a missing `result`
+    /// (`null`) is an empty batch, not an error; a
+    /// `result` that is not an array is a response decode
+    /// failure (the whole batch fails, as in Go); items
+    /// decode one by one, so a wrong-TYPE field fails the
+    /// whole batch (`UpdateDecode`, as in Go) while
+    /// ABSENT or `null` fields zero-fill via
+    /// `null_as_default` on `types.rs` and the item
+    /// proceeds. A bare `null` array element decodes to
+    /// a zero `Update` (Go: a null element is a zero
+    /// value), never fails the batch.
     pub async fn get_updates(&self, offset: i64) -> Result<Vec<Update>, BotError> {
         let mut params = serde_json::json!({
             "timeout": POLL_TIMEOUT_SECS,
@@ -539,6 +542,10 @@ impl BotApi {
         };
         let mut updates = Vec::with_capacity(items.len());
         for item in items {
+            if item.is_null() {
+                updates.push(Update::default());
+                continue;
+            }
             let update: Update =
                 serde_json::from_value(item.clone()).map_err(|_| BotError::UpdateDecode)?;
             updates.push(update);
@@ -790,6 +797,13 @@ impl BotApi {
     /// `max_body` is the post-download gate cap (limit + 1);
     /// the TLS path honours it exactly, the plaintext path
     /// caps at the transport's 16 MiB (tests only).
+    ///
+    /// Deliberate: this GET has NO 429 retry — a 429 fails
+    /// fast (fix loop 2, red NIT 6). Go's `DownloadMedia`
+    /// performs exactly one `client.Do` and returns a plain
+    /// error on any non-200 (`inbound.go:172-221`); the
+    /// `getFile` call before it uses the normal `call_json`
+    /// 429 retry shared by all Bot API calls.
     pub async fn download_file_bytes(
         &self,
         file_path: &str,

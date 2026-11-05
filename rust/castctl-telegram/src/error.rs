@@ -163,11 +163,15 @@ impl BotError {
     /// (`bot.go:956-998`, `:1015-1056`): DNS/TLS/errno
     /// phrases in the message decide the class, and a
     /// message with no such phrase stays `Unclassified`.
-    /// The one class this crate can never emit is
-    /// `ContextDeadlineExceeded`: no deadline-exceeded
-    /// error surfaces distinctly here (deadlines arrive
-    /// as `Timeout`). Every other label of the 20-label
-    /// vocabulary is reachable.
+    /// All 20 labels of the vocabulary are reachable.
+    /// `ContextDeadlineExceeded` has no DIRECT arm — no
+    /// call site applies a deadline (deadlines arrive as
+    /// `Timeout`) — but it is still emittable via
+    /// `fallback_class`: a transport message containing
+    /// the phrase "context deadline exceeded" maps to it
+    /// (fix loop 2, tech N-N2 — the loop-1 claim "19/20,
+    /// only `ContextDeadlineExceeded` unreachable" was
+    /// literally wrong; the coverage is 20/20).
     #[must_use]
     pub fn error_class(&self) -> ErrorClass {
         match self {

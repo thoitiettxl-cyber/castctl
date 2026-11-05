@@ -14,21 +14,60 @@
 
 use serde::Deserialize;
 
+/// Deserialize a field as its default when the wire value
+/// is JSON `null` — or, with `#[serde(default)]`, when the
+/// field is absent. Go's `encoding/json` treats `null`
+/// into a non-nullable target as a no-op (zero value);
+/// serde's `#[serde(default)]` only fires for ABSENT
+/// fields, so a present `null` used to fail the whole
+/// batch decode and stall the poll loop forever (fix loop
+/// 2, red R5). A WRONG-TYPE value still fails the decode,
+/// as in Go: `Option::<T>::deserialize` errors on it
+/// instead of defaulting.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// `photo` (`Option<Vec<PhotoSize>>`) with the same
+/// null-as-default rule applied to the ELEMENTS: a
+/// `null` element decodes to a default `PhotoSize`
+/// (Go: a null array element is a zero value), while
+/// a `null` field still decodes to `None` and a
+/// wrong-type element still fails the decode.
+fn null_photo_vec<'de, D>(deserializer: D) -> Result<Option<Vec<PhotoSize>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(
+        Option::<Vec<Option<PhotoSize>>>::deserialize(deserializer)?.map(|items| {
+            items
+                .into_iter()
+                .map(|item| item.unwrap_or_default())
+                .collect()
+        }),
+    )
+}
+
 /// One `getUpdates` item.
 /// Source: go-telegram/bot `models.Update`, read at
 /// `internal/telegram/bot.go:555-568` (`processUpdate`).
 ///
 /// Absent fields decode to zero values, exactly like Go's
-/// `encoding/json` (fix loop 1, red R3): a message with
-/// no `chat` becomes `Chat{id: 0}`, its sender is 0, and
-/// the allowlist drops it — the batch proceeds. A field
-/// present with the WRONG TYPE still fails the whole
-/// decode, as in Go (the library's whole-array unmarshal
-/// fails); only absent fields are zero-filled.
-#[derive(Debug, Clone, Deserialize)]
+/// `encoding/json` (fix loop 1, red R3); a field present
+/// as explicit JSON `null` decodes to the same zero value
+/// (fix loop 2, red R5 — Go no-ops `null` into a
+/// non-nullable target). A field present with the WRONG
+/// TYPE still fails the whole decode, as in Go (the
+/// library's whole-array unmarshal fails); only absent
+/// and `null` fields are zero-filled.
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Update {
-    /// `update_id` (absent → 0, Go zero value).
-    #[serde(default)]
+    /// `update_id` (absent or `null` → 0, Go zero value).
+    #[serde(default, deserialize_with = "null_as_default")]
     pub update_id: i64,
     /// `message`, when present.
     #[serde(default)]
@@ -109,14 +148,14 @@ impl Update {
 /// Source: go-telegram/bot `models.User`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct User {
-    /// `id` (absent → 0, Go zero value).
-    #[serde(default)]
+    /// `id` (absent or `null` → 0, Go zero value).
+    #[serde(default, deserialize_with = "null_as_default")]
     pub id: i64,
     /// `is_bot`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub is_bot: bool,
     /// `first_name`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub first_name: String,
     /// `username`.
     #[serde(default)]
@@ -127,21 +166,21 @@ pub struct User {
 /// Source: go-telegram/bot `models.Chat`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Chat {
-    /// `id` (absent → 0, Go zero value).
-    #[serde(default)]
+    /// `id` (absent or `null` → 0, Go zero value).
+    #[serde(default, deserialize_with = "null_as_default")]
     pub id: i64,
     /// `type` (`private`, `group`, ...).
-    #[serde(default, rename = "type")]
+    #[serde(default, rename = "type", deserialize_with = "null_as_default")]
     pub kind: String,
 }
 
 /// One photo size entry.
 /// Source: go-telegram/bot `models.PhotoSize`, read at
 /// `internal/telegram/inbound.go:64-144` (`MediaOf`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct PhotoSize {
-    /// `file_id` (absent → "", Go zero value).
-    #[serde(default)]
+    /// `file_id` (absent or `null` → "", Go zero value).
+    #[serde(default, deserialize_with = "null_as_default")]
     pub file_id: String,
     /// `file_size`, when the server reports it.
     #[serde(default)]
@@ -154,8 +193,8 @@ pub struct PhotoSize {
 /// read at `internal/telegram/inbound.go:64-144`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct FileObject {
-    /// `file_id` (absent → "", Go zero value).
-    #[serde(default)]
+    /// `file_id` (absent or `null` → "", Go zero value).
+    #[serde(default, deserialize_with = "null_as_default")]
     pub file_id: String,
     /// `file_name`, when present.
     #[serde(default)]
@@ -174,17 +213,17 @@ pub struct FileObject {
 /// `internal/telegram/inbound.go:64-144` (`MediaOf`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct Message {
-    /// `message_id` (absent → 0, Go zero value).
-    #[serde(default)]
+    /// `message_id` (absent or `null` → 0, Go zero value).
+    #[serde(default, deserialize_with = "null_as_default")]
     pub message_id: i64,
     /// `from`.
     #[serde(default)]
     pub from: Option<User>,
-    /// `chat` (absent → `Chat{id: 0}`, Go zero value).
-    #[serde(default)]
+    /// `chat` (absent or `null` → `Chat{id: 0}`, Go zero value).
+    #[serde(default, deserialize_with = "null_as_default")]
     pub chat: Chat,
     /// `date` (unix seconds).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub date: i64,
     /// `text`.
     #[serde(default)]
@@ -192,8 +231,10 @@ pub struct Message {
     /// `caption`.
     #[serde(default)]
     pub caption: Option<String>,
-    /// `photo` sizes (last = largest).
-    #[serde(default)]
+    /// `photo` sizes (last = largest). A `null`
+    /// element decodes to a default `PhotoSize` (fix
+    /// loop 2, red R5).
+    #[serde(default, deserialize_with = "null_photo_vec")]
     pub photo: Option<Vec<PhotoSize>>,
     /// `document`.
     #[serde(default)]
@@ -225,12 +266,12 @@ pub struct Message {
 /// `internal/telegram/bot.go:1230-1303` (`onCallback`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct CallbackQuery {
-    /// `id` (needed to answer the query; absent → "").
-    #[serde(default)]
+    /// `id` (needed to answer the query; absent or `null` → "").
+    #[serde(default, deserialize_with = "null_as_default")]
     pub id: String,
-    /// `from` (absent → `User{id: 0}`, Go zero value —
-    /// the allowlist then drops the update).
-    #[serde(default)]
+    /// `from` (absent or `null` → `User{id: 0}`, Go zero
+    /// value — the allowlist then drops the update).
+    #[serde(default, deserialize_with = "null_as_default")]
     pub from: User,
     /// `message` (regular or inaccessible; absent for inline
     /// messages). Source: `internal/telegram/bot.go:633-646`
@@ -323,6 +364,47 @@ mod tests {
             {"update_id": "two", "message": {"message_id": 2, "chat": {"id": 100, "type": "private"}}},
         ]));
         assert!(batch.is_err(), "string update_id fails the batch");
+    }
+
+    /// A field present as explicit JSON `null` decodes
+    /// to the Go zero value, exactly like an ABSENT field
+    /// (fix loop 2, red R5): Go's `encoding/json`
+    /// no-ops `null` into a non-nullable target, while
+    /// bare `#[serde(default)]` only fires for absent
+    /// fields — so `null` used to fail the whole batch
+    /// decode and stall the poll loop forever. Every
+    /// null shape in the decode path is covered here;
+    /// the bare-`null` array element is covered at the
+    /// `get_updates` level (it never reaches this
+    /// `Vec<Update>` decode).
+    #[test]
+    fn explicit_null_fields_decode_to_zero_values_like_go() {
+        let batch: Vec<Update> = serde_json::from_value(serde_json::json!([
+            {"update_id": null, "message": {"message_id": null, "chat": null, "date": null, "from": null, "text": "a", "photo": [null, {"file_id": "p1"}]}},
+            {"update_id": 6, "message": {"message_id": 2, "from": {"id": 111, "first_name": null, "is_bot": null}, "chat": {"id": null, "type": null}, "date": 0, "text": "good"}},
+            {"update_id": 7, "callback_query": {"id": null, "from": null, "data": "c:x"}},
+        ]))
+        .expect("null fields decode");
+        let m0 = batch[0].message.as_ref().expect("message");
+        assert_eq!(batch[0].update_id, 0, "null update_id → 0");
+        assert_eq!(m0.message_id, 0, "null message_id → 0");
+        assert_eq!(m0.chat.id, 0, "null chat → zero Chat");
+        assert_eq!(m0.date, 0, "null date → 0");
+        assert!(m0.from.is_none(), "null from → None");
+        let photo = m0.photo.as_ref().expect("photo");
+        assert_eq!(photo.len(), 2, "null photo element kept as default");
+        assert_eq!(photo[0].file_id, "", "null photo element → empty file_id");
+        assert_eq!(photo[1].file_id, "p1");
+        let m1 = batch[1].message.as_ref().expect("message");
+        let from = m1.from.as_ref().expect("from");
+        assert_eq!(from.id, 111);
+        assert_eq!(from.first_name, "", "null first_name → empty");
+        assert!(!from.is_bot, "null is_bot → false");
+        assert_eq!(m1.chat.id, 0, "null chat.id → 0");
+        assert_eq!(m1.chat.kind, "", "null chat.type → empty");
+        let cb = batch[2].callback_query.as_ref().expect("callback");
+        assert_eq!(cb.id, "", "null callback id → empty");
+        assert_eq!(cb.from.id, 0, "null callback from → zero User");
     }
 
     /// `chat_key` for an edited-only update is the sender
