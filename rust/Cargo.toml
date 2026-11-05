@@ -9,6 +9,8 @@ members = [
     "castctl-transport",
     "castctl-gateway",
     "castctl-telegram",
+    "castctl-update",
+    "castctl-pluginhost",
     "castctl-rs",
     "castctl-keeper",
 ]
@@ -109,7 +111,28 @@ chrono = "=0.4.45"
 rustls = { version = "=0.23.46", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 tokio-rustls = { version = "=0.26.6", default-features = false, features = ["logging", "ring", "tls12"] }
 webpki-roots = "=0.26.11"
-# M4a: Stream/Sink traits + extension traits for the gateway
+# M6c: SHA-256 / hex / temp files / file lock. All already in
+# Cargo.lock (sha2 0.10.9 via snow, hex 0.4.3 via boringtun,
+# tempfile 3.27.0 via prost-build, libc 0.2.191); promoting them
+# adds no new crate. sha2 0.10.9 (not 0.11.1) is the
+# workspace-consistent line: M6a and M6b both pinned it, and
+# 0.11.1 exists only via honk-outbound (digest 0.11). After
+# promoting, `cargo tree -d` must show no duplicate sha2/digest
+# introduced by the M6c crates.
+sha2 = "=0.10.9"
+hex = "=0.4.3"
+tempfile = "=3.27.0"
+libc = "=0.2.191"
+# M6c: tar + flate2 are the ONLY new crates (measured on cue
+# 2026-11-05 in a scratch probe dir: `cargo add tar flate2`
+# resolved tar 0.4.46 / flate2 1.1.10, checksums
+# 3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840
+# / 6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb;
+# transitive miniz_oxide 0.9.1 + zlib-rs 0.6.8 + crc32fast 1.5.4
+# already in the lock). Default features: flate2's rust_backend
+# (miniz_oxide/zlib-rs), no system zlib.
+tar = "=0.4.46"
+flate2 = "=1.1.10"
 # reader/writer halves (tokio-tungstenite only re-exports the
 # concrete stream type; the traits must be direct deps).
 futures-core = "=0.3.34"
