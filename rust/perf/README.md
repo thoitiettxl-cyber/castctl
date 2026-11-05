@@ -550,7 +550,7 @@ rust-full. Mọi bảng trong mục này mô tả run9 (commit `740e2dc`,
 
 ### 1. Kích thước binary
 
-**Caption (run9):** commit `740e2dc19322c00c081d5c9dc0d7ca7ad8b762b6` (2026-11-05T18:19:48Z). Lệnh build: shell `cargo +1.99.1 build --release --locked -p castctl-rs`; full `RUSTFLAGS="-C strip=symbols" CARGO_TARGET_DIR=/tmp/perf-full-target cargo +1.99.1 build --release --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml`; LTO `cargo +1.99.1 build --profile release-lto --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml`. sha256 (đầy đủ, trong `summary.json` / record files): Go `c8ea009e49c5bffce3c6b971db0f9f86948ab3904f478da33d43b6b60a9bc374`, shell stripped `95d9be12e608e1c8f7b660f97ab4edc993da5939730e3feb3b5094b617de2776`, full stripped `b12911a545f530b837d375a0f07f167580e91e2206c2445b4d7e903ae13e002f`, full no-keep `9b6c28ed22a4dad06721e927ee965e6dac07a6201667f106c1171447f0295865`, full LTO `c985a9aa995392c2e9265b42bc7d72e3203ba92bb1f4a2c65eb5230a09f2d359`, bench `c8832c1845d9f9b53936af632053d8abe8400c0366a1f70fd249e4fae0937fc2`.
+**Caption (run9):** commit `740e2dc19322c00c081d5c9dc0d7ca7ad8b762b6` (2026-11-05T18:19:48Z). Lệnh build: shell `RUSTFLAGS="-C strip=symbols" cargo +1.99.1 build --release --locked -p castctl-rs`; full `RUSTFLAGS="-C strip=symbols" CARGO_TARGET_DIR=/tmp/perf-full-target cargo +1.99.1 build --release --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml`; LTO `cargo +1.99.1 build --profile release-lto --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml`; no-keep `RUSTFLAGS="-C strip=symbols" CARGO_TARGET_DIR=/tmp/perf-full-target cargo +1.99.1 build --release --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml --no-default-features`. sha256 (đầy đủ, trong `summary.json` / record files): Go `c8ea009e49c5bffce3c6b971db0f9f86948ab3904f478da33d43b6b60a9bc374`, shell stripped `95d9be12e608e1c8f7b660f97ab4edc993da5939730e3feb3b5094b617de2776`, full stripped `b12911a545f530b837d375a0f07f167580e91e2206c2445b4d7e903ae13e002f`, full no-keep `9b6c28ed22a4dad06721e927ee965e6dac07a6201667f106c1171447f0295865`, full LTO `c985a9aa995392c2e9265b42bc7d72e3203ba92bb1f4a2c65eb5230a09f2d359`, bench `c8832c1845d9f9b53936af632053d8abe8400c0366a1f70fd249e4fae0937fc2`.
 
 | | Go (full) | Rust shell (M4b, tham chiếu) | Rust full (transport+gateway) | Rust-full/Go | Rust-shell/Go (tham chiếu) |
 |---|---|---|---|---|---|
@@ -575,7 +575,7 @@ Hàng LTO không dùng cho tỉ lệ headline.
 
 ### 2. Startup (wall-clock, N=20, warmup 5)
 
-**Caption (run9):** commit `740e2dc19322c00c081d5c9dc0d7ca7ad8b762b6` (2026-11-05T18:19:48Z). Binary đo: Go `/usr/local/bin/castctl` 0.9.0 (prebuilt, sha256 `c8ea009e49c5bffce3c6b971db0f9f86948ab3904f478da33d43b6b60a9bc374`); shell build `cargo +1.99.1 build --release --locked -p castctl-rs` (sha256 stripped `95d9be12e608e1c8f7b660f97ab4edc993da5939730e3feb3b5094b617de2776`); full build `RUSTFLAGS="-C strip=symbols" CARGO_TARGET_DIR=/tmp/perf-full-target cargo +1.99.1 build --release --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml` (sha256 stripped `b12911a545f530b837d375a0f07f167580e91e2206c2445b4d7e903ae13e002f`). Lệnh đo: driver loop Python (warmup 5, N=20) — xem `summary.json: items.startup_rss`.
+**Caption (run9):** commit `740e2dc19322c00c081d5c9dc0d7ca7ad8b762b6` (2026-11-05T18:19:48Z). Binary đo: Go `/usr/local/bin/castctl` 0.9.0 (prebuilt, sha256 `c8ea009e49c5bffce3c6b971db0f9f86948ab3904f478da33d43b6b60a9bc374`); shell build `RUSTFLAGS="-C strip=symbols" cargo +1.99.1 build --release --locked -p castctl-rs` (sha256 stripped `95d9be12e608e1c8f7b660f97ab4edc993da5939730e3feb3b5094b617de2776`); full build `RUSTFLAGS="-C strip=symbols" CARGO_TARGET_DIR=/tmp/perf-full-target cargo +1.99.1 build --release --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml` (sha256 stripped `b12911a545f530b837d375a0f07f167580e91e2206c2445b4d7e903ae13e002f`). Lệnh đo: driver loop Python (warmup 5, N=20) — xem `summary.json: items.startup_rss`.
 
 | Lệnh | Go median (min–max) ms | Rust shell median (min–max) ms (tham chiếu) | Rust full median (min–max) ms | Rust-full/Go | Rust-shell/Go (tham chiếu) |
 |---|---|---|---|---|---|
@@ -606,20 +606,22 @@ không dùng làm kết luận, chỉ ghi để khỏi ai trích nhầm.
 
 ### 3. Peak RSS (GNU time, N=20) + wall `status`
 
-**Caption (run9):** commit `740e2dc19322c00c081d5c9dc0d7ca7ad8b762b6` (2026-11-05T18:19:48Z). Binary đo: Go `/usr/local/bin/castctl` 0.9.0 (sha256 `c8ea009e49c5bffce3c6b971db0f9f86948ab3904f478da33d43b6b60a9bc374`); shell `cargo +1.99.1 build --release --locked -p castctl-rs` (sha256 stripped `95d9be12e608e1c8f7b660f97ab4edc993da5939730e3feb3b5094b617de2776`); full `RUSTFLAGS="-C strip=symbols" CARGO_TARGET_DIR=/tmp/perf-full-target cargo +1.99.1 build --release --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml` (sha256 stripped `b12911a545f530b837d375a0f07f167580e91e2206c2445b4d7e903ae13e002f`). Lệnh đo: driver loop Python + GNU time `-v` (warmup 5, N=20) — xem `summary.json: items.startup_rss` / `items.parse_config_rss`.
+**Caption (run9):** commit `740e2dc19322c00c081d5c9dc0d7ca7ad8b762b6` (2026-11-05T18:19:48Z). Binary đo: Go `/usr/local/bin/castctl` 0.9.0 (sha256 `c8ea009e49c5bffce3c6b971db0f9f86948ab3904f478da33d43b6b60a9bc374`); shell `RUSTFLAGS="-C strip=symbols" cargo +1.99.1 build --release --locked -p castctl-rs` (sha256 stripped `95d9be12e608e1c8f7b660f97ab4edc993da5939730e3feb3b5094b617de2776`); full `RUSTFLAGS="-C strip=symbols" CARGO_TARGET_DIR=/tmp/perf-full-target cargo +1.99.1 build --release --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml` (sha256 stripped `b12911a545f530b837d375a0f07f167580e91e2206c2445b4d7e903ae13e002f`). Lệnh đo: driver loop Python + GNU time `-v` (warmup 5, N=20) — xem `summary.json: items.startup_rss` / `items.parse_config_rss`.
 
 | Lệnh | Go median (min–max) | Rust shell median (min–max) (tham chiếu) | Rust full median (min–max) | Rust-full/Go | Exit Go / shell / full |
 |---|---|---|---|---|---|
-| `--version` wall ms | 23.236 (16.629–29.925) | 5.505 (2.355–7.096) | 5.619 (4.371–8.037) | 0.242 | 0 / 0 / 0 |
+| `--version` wall ms | 23.236 (16.629–29.925) | 5.505 (2.355–7.096) | 5.619 (4.371–8.037) | 0.242\* | 0 / 0 / 0 |
 | `--version` RSS MiB | 30.346 (29.660–31.277) | 6.121 (6.035–6.336) | **6.230 (6.105–6.348)** | **0.205 (79% ít hơn)** | 0 / 0 / 0 |
-| `--help` wall ms | 9.201 (8.722–19.879) | 1.912 (1.817–2.446) | 1.889 (1.733–2.072) | 0.205 | 0 / 0 / 0 |
+| `--help` wall ms | 9.201 (8.722–19.879) | 1.912 (1.817–2.446) | 1.889 (1.733–2.072) | 0.205\* | 0 / 0 / 0 |
 | `--help` RSS MiB | 30.314 (29.594–30.969) | 6.047 (5.859–6.168) | **6.129 (6.027–6.273)** | **0.202** | 0 / 0 / 0 |
-| `status --config min` wall ms | 10.844 (10.473–12.062) | 3.511 (3.079–4.260) | 3.390 (3.151–3.889) | 0.313 | 2 / 2 / 2 |
+| `status --config min` wall ms | 10.844 (10.473–12.062) | 3.511 (3.079–4.260) | 3.390 (3.151–3.889) | 0.313\* | 2 / 2 / 2 |
 | `status --config min` RSS MiB | 32.594 (32.027–33.898) | 8.303 (8.004–8.484) | **8.236 (7.934–8.496)** | **0.253** | 2 / 2 / 2 |
-| `status --config large` wall ms | 38.329 (36.403–41.720) | 9.274 (8.891–9.852) | 9.047 (8.760–9.700) | 0.236 | 2 / 2 / 2 |
+| `status --config large` wall ms | 38.329 (36.403–41.720) | 9.274 (8.891–9.852) | 9.047 (8.760–9.700) | 0.236\* | 2 / 2 / 2 |
 | `status --config large` RSS MiB | 38.023 (37.266–38.715) | 10.305 (9.965–10.477) | **10.020 (9.867–10.250)** | **0.264** | 2 / 2 / 2 |
-| `status --config bad-JSON` wall ms | 10.154 (9.063–10.839) | 2.118 (1.815–2.189) | 2.153 (1.877–4.107) | 0.212 | 2 / 2 / 2 |
+| `status --config bad-JSON` wall ms | 10.154 (9.063–10.839) | 2.118 (1.815–2.189) | 2.153 (1.877–4.107) | 0.212\* | 2 / 2 / 2 |
 | `status --config bad-JSON` RSS MiB | 30.844 (30.031–31.406) | 6.664 (6.426–6.746) | **6.631 (6.504–6.750)** | **0.215** | 2 / 2 / 2 |
+
+\* Tỉ lệ wall lặp lại số §2 — xem caveat tải ở §2 (tỉ lệ tuyệt đối là số nhiễu theo tải; dùng RSS làm số ổn định).
 
 Ghi chú: Go `status` với config tốt KHÔNG offline-sạch — nó parse +
 validate rồi fail nhanh vì thiếu session (`{"error":"conn:
@@ -971,7 +973,7 @@ RSS shell `--version` 2.20→6.12 MiB (×2.8), RSS full `--version`
 5.42→6.23 MiB (+14.9%), RSS full `status` +19–62% (status nay làm
 việc thật, exit 2 thay vì stub exit 1 ở run8). (b) Tải: run9 chạy dưới
 loadavg 4.79→18.05 (session khác chạy test binary 196% CPU / 15.8G
-RSS), run8 chỉ 2.24→6.09. Số Rust §4 ổn định trong ±6% (parse-min
+RSS), run8 chỉ 2.24→7.73→6.09. Số Rust §4 ổn định trong ±6% (parse-min
 +1.9%, parse-large −1.1%, md-to-html +3.9%, split +0.5%, render
 +5.3%), nhưng số Go §4 ở 4 item lớn tăng 1.4–2.4× (parse-large +69%, MDToHTML
 +127%, render +140%, split +42%; min của Go parse-large 7.01M ≈
