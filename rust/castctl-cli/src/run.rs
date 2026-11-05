@@ -1132,12 +1132,15 @@ fn cmd_webui(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), F
 /// 1 runtime, 130 interrupt.
 ///
 /// Seams not yet wired ("chưa nối"): cookie import /
-/// restore and live chats are `None` (the handlers report
-/// 501); the screencast starter is `None` (status/start
-/// report unavailable, never fake success). The
-/// screencast availability seam is wired over the config
-/// file (keeper entry with a browser URL), matching the
-/// server's in-crate check.
+/// restore are `None` (the handlers report 501) and the
+/// screencast starter is `None` (status/start report
+/// unavailable, never fake success). Live chats ARE wired
+/// — as a failing seam that reports 502 (see the `chats`
+/// wiring below); `None` would report 501, which no
+/// production Go server ever emits. The screencast
+/// availability seam is wired over the config file (keeper
+/// entry with a browser URL), matching the server's
+/// in-crate check.
 ///
 /// NOTE: the startup line is pushed to `ctx.out.stderr`,
 /// which the CLI buffers until the process exits (M2
@@ -1286,6 +1289,11 @@ fn serve_webui(ctx: &mut Ctx<'_>, loc: &ConfigLocation) -> Result<(), FlowErr> {
             }
         }
     };
+    // The plaintext token is dead after the hash is
+    // computed: drop it now (Go clears
+    // `single.WebUI.Token = ""`) so it does not linger in
+    // scope for the server's whole lifetime.
+    drop(token);
     // Server construction: UIDirError → exit 2 (Go's
     // errCodef(2, "webui serve: %v", uidErr) — the doubled
     // "webui serve: webui: ..." prefix is Go's own text),
@@ -1308,6 +1316,13 @@ fn serve_webui(ctx: &mut Ctx<'_>, loc: &ConfigLocation) -> Result<(), FlowErr> {
         bundle_sha256: bundle_hash,
         ui_dir,
         cookies_files,
+        // Cookie import/restore stay None (501)
+        // deliberately, unlike chats: no faithful failing
+        // stand-in exists — a failing cookie seam would
+        // fabricate a 400 where the live Go server succeeds
+        // with 200 `saved: true` (the import path needs the
+        // real profile store, which lands with the keeper
+        // port). See PORTING §M6b.7.
         import_cookies: None,
         restore_cookies: None,
         screencast_available: Some(screencast_available),

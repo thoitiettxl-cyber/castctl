@@ -33,8 +33,11 @@ pub fn marshal_ordered(stored_raw: &[u8], doc: &JsonValue) -> Result<Vec<u8>, St
         let text = encode_ordered_json(&sorted).map_err(|e| e.message)?;
         return Ok(text.into_bytes());
     }
-    let stored_text = String::from_utf8(stored_raw.to_vec())
-        .map_err(|e| format!("stored config is not valid UTF-8: {e}"))?;
+    // Go decodes the stored document with encoding/json,
+    // which coerces invalid UTF-8 to U+FFFD per byte — a
+    // stored config with bad bytes still renders 200, so
+    // a strict from_utf8 (500) diverges (F-C6).
+    let stored_text = crate::go_decode::go_coerce_lossy(stored_raw);
     let stored = decode_ordered_json(stored_text.as_bytes())
         .map_err(|e| format!("stored config is invalid: {e}"))?;
     let overlaid = overlay_ordered(&stored, doc);

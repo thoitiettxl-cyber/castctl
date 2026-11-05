@@ -203,15 +203,18 @@ pub fn serve_ui_dir(config_dir: &Path, ui_dir: &str, method: &str, path: &str) -
         // FIFO, socket, device: fixed 404, never opened.
         return not_found_resp();
     }
-    let data = match std::fs::read(&resolved) {
-        Ok(data) => data,
+    // Open-then-verify on the OPENED fd (Go uidir.go:
+    // os.Open + f.Stat + os.SameFile): the file the fd
+    // refers to must be the one the Lstat saw, so a
+    // symlink swapped in between the Lstat and the open
+    // is refused — and the bytes come from that same fd,
+    // never from a second open of the path.
+    let mut f = match std::fs::File::open(&resolved) {
+        Ok(f) => f,
         Err(_) => return error_resp(500, "internal_error", "internal error"),
     };
-    // Open-then-verify: the opened file must be the same
-    // file the Lstat saw (same inode), so a symlink swapped
-    // in between the Lstat and the open is refused.
     if let Some(lst) = &lst
-        && let Ok(fst) = std::fs::metadata(&resolved)
+        && let Ok(fst) = f.metadata()
     {
         #[cfg(unix)]
         {
@@ -220,6 +223,10 @@ pub fn serve_ui_dir(config_dir: &Path, ui_dir: &str, method: &str, path: &str) -
                 return not_found_resp();
             }
         }
+    }
+    let mut data = Vec::new();
+    if std::io::Read::read_to_end(&mut f, &mut data).is_err() {
+        return error_resp(500, "internal_error", "internal error");
     }
     // Go uidir.go asset path sets exactly these four
     // headers — NOT the shell's text/html Content-Type
@@ -264,12 +271,14 @@ pub fn serve_ui_dir_shell(config_dir: &Path, root: &Path) -> Resp {
     if !lst.is_file() {
         return error_resp(500, "internal_error", "internal error");
     }
-    let data = match std::fs::read(&index) {
-        Ok(data) => data,
+    // Open-then-verify on the OPENED fd (Go uidir.go:
+    // os.Open + f.Stat + os.SameFile), same shape as the
+    // asset path: the bytes come from the verified fd.
+    let mut f = match std::fs::File::open(&index) {
+        Ok(f) => f,
         Err(_) => return error_resp(500, "internal_error", "internal error"),
     };
-    // Open-then-verify: same file the Lstat saw.
-    if let Ok(fst) = std::fs::metadata(&index) {
+    if let Ok(fst) = f.metadata() {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -277,6 +286,10 @@ pub fn serve_ui_dir_shell(config_dir: &Path, root: &Path) -> Resp {
                 return not_found_resp();
             }
         }
+    }
+    let mut data = Vec::new();
+    if std::io::Read::read_to_end(&mut f, &mut data).is_err() {
+        return error_resp(500, "internal_error", "internal error");
     }
     let headers = shell_headers();
     Resp {

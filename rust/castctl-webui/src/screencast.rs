@@ -407,7 +407,6 @@ pub struct ScreencastRegistry {
 #[derive(Debug)]
 pub enum MintError {
     Busy,
-    Random,
 }
 
 #[derive(Debug)]
@@ -629,7 +628,6 @@ pub fn handle_screencast_start(
             "screencast_busy",
             "a screencast session is already live for this profile",
         ),
-        Err(MintError::Random) => error_resp(500, "internal_error", "internal error"),
     }
 }
 

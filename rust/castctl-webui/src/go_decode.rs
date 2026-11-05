@@ -31,6 +31,25 @@ use crate::error::{ApiError, err_validation};
 use castctl_config::ConfigError;
 use castctl_config::jsonvalue::{JsonValue, decode_ordered_json};
 
+/// Coerce arbitrary bytes to a `String` the way Go's
+/// `encoding/json` does when it unmarshals a document:
+/// invalid UTF-8 becomes U+FFFD per byte (`utf8.DecodeRune`
+/// size 1), never an error. Rust's `from_utf8_lossy` is NOT
+/// equivalent: it replaces maximal subparts (a truncated
+/// 3-byte sequence becomes ONE U+FFFD; Go makes one per
+/// byte). Used for stored documents (F-C6) and log tails
+/// (F-D5).
+pub fn go_coerce_lossy(raw: &[u8]) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        let (r, size) = castctl_config::gostr::go_decode_rune(raw, i);
+        out.push(r);
+        i += size.max(1);
+    }
+    out
+}
+
 /// Go `encoding/json` max nesting depth (10000).
 const GO_MAX_DEPTH: usize = 10000;
 

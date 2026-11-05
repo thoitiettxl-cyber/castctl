@@ -522,7 +522,11 @@ impl Server {
         }
         let headers = req.headers().clone();
         // Invalid escape: Go's stdlib 400s before any
-        // handler — and before any body is read.
+        // handler — and before any body is read. The
+        // stdlib body is the status text (`400 Bad
+        // Request`); Content-Length is absent and the
+        // connection closes, which hyper cannot emit —
+        // recorded as a residual in PORTING §M6b.6.
         let path_decoded = match percent_decode_path(&path_raw) {
             Some(p) => p,
             None => {
@@ -534,7 +538,7 @@ impl Server {
                             "Content-Type".to_string(),
                             "text/plain; charset=utf-8".to_string(),
                         )],
-                        body: b"invalid URL escape".to_vec(),
+                        body: b"400 Bad Request".to_vec(),
                     },
                 ));
             }

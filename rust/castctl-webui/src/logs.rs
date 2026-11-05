@@ -407,6 +407,26 @@ fn disabled_envelope(reason: &str) -> Resp {
 
 /// GET /logs. `query` is the query string parsed into
 /// key/value pairs; `load` is the current config load.
+/// Read into `buf` until full or EOF, like Go's `ReadAt`
+/// (which tolerates EOF and leaves the rest of the buffer
+/// zeroed). `read_exact` 500s on a short read — a file
+/// truncated between the `metadata` size check and the read
+/// is a partial page in Go, not an error (F-D4). The buffer
+/// is never truncated: the tail stays zeroed, exactly as
+/// Go's pre-zeroed buffer does.
+fn read_full_or_eof(f: &mut fs::File, buf: &mut [u8]) -> Result<(), ApiError> {
+    use std::io::Read as _;
+    let mut n = 0;
+    while n < buf.len() {
+        match f.read(&mut buf[n..]) {
+            Ok(0) => break, // EOF: the rest stays zeroed.
+            Ok(m) => n += m,
+            Err(_) => return Err(err_internal()),
+        }
+    }
+    Ok(())
+}
+
 pub fn handle_get_logs(
     config_dir: &Path,
     load: &ConfigLoad,
@@ -417,7 +437,12 @@ pub fn handle_get_logs(
     if gate.disabled {
         return Ok(disabled_envelope(&gate.reason));
     }
-    let path = gate.path.expect("gate enabled implies a path");
+    // `log_gate` returns only two shapes (disabled, or
+    // enabled with a path); the invariant is checked
+    // explicitly rather than panicking on it.
+    let Some(path) = gate.path else {
+        return Err(err_internal());
+    };
     let mut limit = DEFAULT_LOG_LIMIT;
     if let Some(q) = query_value(query, "limit") {
         let n: i64 = q.parse().map_err(|_| err_validation("invalid limit"))?;
@@ -477,7 +502,7 @@ pub fn handle_get_logs(
         let mut data = vec![0u8; n as usize];
         f.seek(std::io::SeekFrom::Start(offset as u64))
             .map_err(|_| err_internal())?;
-        f.read_exact(&mut data).map_err(|_| err_internal())?;
+        read_full_or_eof(&mut f, &mut data)?;
         (data, offset)
     } else {
         let mut start_offset = 0i64;
@@ -488,7 +513,7 @@ pub fn handle_get_logs(
         let mut data = vec![0u8; n as usize];
         f.seek(std::io::SeekFrom::Start(start_offset as u64))
             .map_err(|_| err_internal())?;
-        f.read_exact(&mut data).map_err(|_| err_internal())?;
+        read_full_or_eof(&mut f, &mut data)?;
         (data, start_offset)
     };
 
@@ -499,7 +524,7 @@ pub fn handle_get_logs(
     // poll after its newline lands).
     let mut window_start = start_offset;
     let mut window_end = size;
-    let mut text = String::from_utf8_lossy(&data).into_owned();
+    let mut text = crate::go_decode::go_coerce_lossy(&data);
     if start_offset > 0 && !text.is_empty() {
         let mut one = [0u8; 1];
         if f.seek(std::io::SeekFrom::Start((start_offset - 1) as u64))
