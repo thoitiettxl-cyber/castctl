@@ -156,7 +156,7 @@ fn handle_conn(mut stream: TcpStream, state: Arc<Mutex<ServerState>>) {
     // that path before the shared lock scope.
     let chunked = {
         let s = state.lock().unwrap();
-        path == "/download/checksums.txt" && s.checksums_chunked
+        path.ends_with("/download/checksums.txt") && s.checksums_chunked
     };
     if chunked {
         let (status, body) = {
@@ -192,9 +192,12 @@ fn handle_conn(mut stream: TcpStream, state: Arc<Mutex<ServerState>>) {
             } else {
                 (404, Vec::new(), String::new())
             }
-        } else if path == "/download/castctl_0.6.4_linux_amd64.tar.gz" {
+        } else if path.ends_with("/download/castctl_0.6.4_linux_amd64.tar.gz") {
+            // `ends_with`: the fallback mode constructs
+            // download URLs with the full repo path
+            // (`/.../releases/download/<tag>/<asset>`).
             (s.asset_status, s.asset_bytes.clone(), String::new())
-        } else if path == "/download/checksums.txt" {
+        } else if path.ends_with("/download/checksums.txt") {
             (
                 s.checksums_status,
                 s.checksums_bytes.clone(),
