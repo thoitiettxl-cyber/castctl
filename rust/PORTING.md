@@ -6316,21 +6316,80 @@ for no seam benefit.
     (`runner.go:1023-1250`); Rust re-reads once
     after 1s, as in the first M5b version.
 25. **Proof-restore skips the follow-up exclusion
-    (fix loop 2).** Go's restore
-    (`runner.go:1162-1195`) applies the
-    `withinTurn` / `LatestUserSeq` exclusion; Rust
-    restores any proof reply missing from the final
-    read. Out of scope for this loop.
-26. **`deliver_final` media sends do not listen to
-    stop (fix loop 2, residual).** Each send is
-    bounded by the client timeout + 429 retries, but
-    a mid-flight media send is not cancelled by
-    /stop. Known limitation.
-27. **Per-window retry retries once on any non-auth
-    error (fix loop 2).** Matches Go's `readWindow`
-    (`history.go:269-278`), which retries non-fatal
-    errors — including non-auth transport errors —
-    once per window.
+    entirely (fix loop 2; corrected in review round
+    3).** Rust never runs Go's `LatestUserSeq` +
+    `withinTurn` step (`internal/wait/runner.go:
+    1105-1199`): (i) final replies after a newer
+    user message are NOT excluded, (ii) proof
+    replies restored into the final read pass
+    through no filter, (iii) the note `"replies
+    after a newer user message were excluded"`
+    never appears. User-visible consequence: a
+    user follow-up sent mid-turn can make the first
+    turn's final text / question / outcome pick up
+    the follow-up turn's replies. Known limitation,
+    no new loop.
+26. **`deliver_final` does not listen to stop (fix
+    loop 2, residual; scope corrected in review
+    round 3).** Not only media sends — every
+    send/edit in `deliver_final` (`turn.rs:2552`,
+    media items and long-reply text segments
+    alike) runs to completion once started; see
+    deviation 29 for the bounds. Known limitation.
+27. **Per-window retry is deliberate leniency, not
+    Go parity (fix loop 2; corrected in review
+    round 3).** Go's `HistoryReplies`
+    (`history.go:216-257`) calls `ReadHistory`
+    directly — 0 retries. The one-retry
+    `readWindow` (`history.go:259-278`) is used
+    only by `DeriveBoundary` / `LatestUserSeq`
+    (`history.go:95`, `~150`). Rust retries once
+    per window on any non-auth error. Consequence:
+    a transient error in one window is masked →
+    `Done` instead of `Timeout`; the recovered
+    replies are real, so the outcome is still
+    right — low harm. Known limitation.
+28. **`finish()` trailing edit does not listen to
+    stop (review round 3, Red B1).** The stop win
+    in the join `select!` does skip the trailing
+    edit (deviation 22 — that part stands), but
+    once the join arm wins, or when `turn_stop` is
+    `None`, the trailing `edit_plain` in
+    `finish()` (`turn.rs:1199-1202`) runs
+    unconditionally: no timeout, no stop race — so
+    a 429 storm on that final edit ignores /stop
+    for up to ~241s (3 attempts × 40s
+    `CLIENT_TIMEOUT` + 2 × 60.5s `retry_after`
+    sleeps) while the slot stays held and
+    `wait_turns` blocks behind it. The current
+    regression test feeds a single delta, so the
+    trailing edit is skipped (`text == shown`)
+    and this hole has no test coverage. Fix is
+    small (skip/race the trailing edit once
+    `turn_stop` is set — the flag is already in
+    scope) if taken as a follow-up. Known
+    limitation.
+29. **`deliver_final` is entirely deaf to stop
+    (review round 3, Red B2; extends deviation
+    26).** Not only media sends — every send/edit
+    in `deliver_final` (up to 6 media files,
+    multi-segment long text replies) ignores the
+    per-turn stop; each `send_file` up to ~481s
+    (3 × 120s `UPLOAD_TIMEOUT` + 2 × 60.5s),
+    each gateway download 300s, each JSON
+    send/edit ~241s; 6 files → ~2h theoretical,
+    ~15–25 min in a real storm. Real divergence
+    from Go: Go's `stopTurn` calls
+    `entry.cancel()` (`telegram_turn.go:437`);
+    `deliverFinal` / `deliverMediaSegments` /
+    `deliverMediaItem` all take the turn ctx and
+    `deliverMediaSegments` returns `ctx.Err()`
+    (`telegram_turn.go:1231`) — Go aborts
+    mid-delivery on stop, Rust runs to the end.
+    Retry sleeps listen only to the process
+    shutdown signal, not the per-turn stop. Known
+    limitation, follow-up (needs the stop passed
+    down into `deliver_final`).
 
 ## M5b.9 Fix loop 2 (2026-11-06, review round 2)
 
@@ -6421,6 +6480,18 @@ ignored terminal and `wait_follow` times out).
   bad escape in host/userinfo/fragment, bad escape
   in query OK, `HTTP://`, invalid port, `:8080`,
   empty port, IPv6, `%FF` byte round-trip).
+  Correction (review round 3, Safety N4): the
+  `HTTP://` acceptance is a deliberate deviation,
+  not Go parity — Go's `MediaPath` prefix gate
+  (`media.go:47-91`) only accepts lowercase
+  `http://` / `https://` and never calls `url.Parse`
+  on an uppercase-scheme ref (`HTTP://…` falls
+  through to the relative-path branch instead).
+  `url.Parse` does lowercase the scheme, but that
+  is irrelevant to the gate; the old `is_http_url`
+  comment said otherwise and is corrected. The
+  behaviour stays safe (full validation, result
+  still a `/media/raw/…` path).
 - Tech N3 (`collect_turn_media`): restructured to
   Go's merge-then-filter shape
   (`telegram_turn.go:930-1000`): empty page breaks
@@ -6493,6 +6564,34 @@ ignored terminal and `wait_follow` times out).
   the turn delivers `"edit:Hello"` and no
   gateway-error edit appears; the budget resets
   after recovery.
+
+Review round 3 follow-ups (recorded here, no code
+change in this commit):
+- Safety N1 (`oldest_seq` counts seq-less events):
+  UNCONFIRMED as a divergence. Direct check of
+  Go's `oldestSeq` (`history.go:313-328`) +
+  `seqOf` (`events.go:155-…`) shows Go also maps
+  a missing/non-numeric seq to 0 and takes the
+  min over all events — Rust's `oldest_seq`
+  (`turn.rs:271`) matches that exactly. The
+  presence-reporting Go function is `historySeq`
+  (`telegram_turn.go:1020-1035`), used at a
+  different call site. Follow-up: the reviewer to
+  name the exact Go call site, or drop the item.
+- Safety N2 (echo of `{decision}` / `{method}`):
+  no divergence found on direct check. Go's
+  `outcomeNotes` (`telegram_turn.go:1391-1426`)
+  echoes the same `"✅ auto-approved
+  (always/once): …"` line, and Go's `ownerRaw`
+  (`telegram_owner.go:202`) passes
+  `method+".json"` as the `replyLong` stem, same
+  as Rust. If the concern is user input reaching
+  a document name, note Go does the same and the
+  name is only used when the text exceeds 3800
+  runes. Follow-up only.
+- Safety N4 (scheme comment): corrected above —
+  `HTTP://` acceptance is a deliberate deviation,
+  `is_http_url` + test comments fixed.
 
 Gate (cue, fix loop 2, `/tmp/m5b-gate-fl2b.log` on
 cue): `cargo fmt --check` 0 (own fmt section,

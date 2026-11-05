@@ -323,9 +323,17 @@ pub fn media_path(path: &str, variants: Option<&SharedJson>) -> Result<String, T
     Ok(format!("/media/raw/{}", quote_python_bytes(&unquoted)))
 }
 
-/// Whether `s` is an http(s) URL: Go's `url.Parse`
-/// lowercases the scheme, so `HTTP://…` counts (probed
-/// 2026-11-06).
+/// Whether `s` is an http(s) URL: the scheme check is
+/// case-insensitive, so `HTTP://…` counts — a
+/// deliberate deviation from Go's `MediaPath`
+/// (`media.go:47-91`), whose prefix gate only accepts
+/// lowercase `http://` / `https://` and never calls
+/// `url.Parse` on an uppercase-scheme ref. (`url.Parse`
+/// does lowercase the scheme, but that is irrelevant
+/// to the gate; the old comment cited it as the
+/// reason — corrected in review round 3, Safety N4.)
+/// Behaviour stays safe: the URL is still fully
+/// validated and the result is a `/media/raw/…` path.
 fn is_http_url(s: &str) -> bool {
     match s.find("://") {
         Some(idx) => {
@@ -5551,8 +5559,9 @@ mod tests {
         assert!(media_path("https://h/a\tb.png", None).is_err());
         // A bad escape in the host fails the parse.
         assert!(media_path("https://ho%zzst/a.png", None).is_err());
-        // The scheme is case-insensitive (`url.Parse`
-        // lowercases it).
+        // The scheme is case-insensitive — a deliberate
+        // deviation from Go's `MediaPath` prefix gate
+        // (lowercase only); see `is_http_url`.
         assert_eq!(
             media_path("HTTP://h/a.png", None).unwrap(),
             "/media/raw/a.png"
