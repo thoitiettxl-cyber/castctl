@@ -1815,6 +1815,82 @@ and the explicit "Chưa kiểm chứng" list (no real
 WireGuard peer tested outside the process; IPv6 paths not
 end-to-end tested).
 
+## 15. snow + prost + tokio-tungstenite + rand + futures — LINKED (Rust artifact only, no copied code)
+
+M4a (gateway WS + Noise + protobuf, crate
+`castctl-gateway`, `rust/castctl-gateway/src/`). All are
+called as dependencies only; no snow / prost /
+tokio-tungstenite / rand / futures source code is copied
+into `rust/`. Versions are exact pins in `rust/Cargo.toml`
++ `Cargo.lock` (verified on cue, 2026-11-05; licenses read
+from each crate's pinned `Cargo.toml` in the cue registry).
+
+- snow `=0.10.0` — Apache-2.0 OR MIT,
+  <https://github.com/mcginty/snow>, lock checksum
+  `599b506ccc4aff8cf7844bc42cf783009a434c1e26c964432560fb6d6ad02d82`.
+  Noise XX_25519_AESGCM_SHA256 handshake + transport
+  (`noise.rs`: `InitiatorHandshake` / `ResponderHandshake`
+  / `NoiseTransport`). Default features (includes
+  `use-aes-gcm`, `use-sha2`, `use-curve25519`). No PSK, no
+  prologue, fresh static keypair per handshake, empty
+  payloads. **No formal audit of snow is known** — the
+  crate is used as-is; the handshake is covered by the
+  Cacophony test vector (tests/noise_vector.rs, 3/3) and
+  the cross-language parity gate (§M4a.4).
+- prost `=0.14.4` — Apache-2.0,
+  <https://github.com/tokio-rs/prost>, lock checksum
+  `528ac67416ff8646872a3c02cad9cc4ee5dc9f9540c9b10771855c95cb2e5ae1`.
+  Protobuf runtime (`proto.rs`).
+- prost-build `=0.14.4` — Apache-2.0, lock checksum
+  `03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042`.
+  Build-time only: `build.rs` runs `compile_fds` over the
+  repo's own committed `internal/proto/desc0.bin` +
+  `desc1.bin` (option (c) in the M4a brief). No `protoc`
+  binary is used (none exists on cue; Go removed it
+  deliberately). The generated `hatch.noise.rs` +
+  `ingress_rev_proxy.rs` are build artifacts, not
+  committed.
+- prost-types `=0.14.4` — Apache-2.0, lock checksum
+  `f94967dc7688f3054c7fac87473ffae4cc4c3904800e2d9f5b857246d8963b0a`.
+  Build-time only (FileDescriptorProto decoding in
+  `build.rs`).
+- tokio-tungstenite `=0.30.0` — MIT,
+  <https://github.com/snapview/tokio-tungstenite>, lock
+  checksum
+  `17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71`.
+  WebSocket client (`dial.rs`, `gateway.rs`). Default
+  features (connect + handshake only, no TLS) plus
+  `rustls-tls-webpki-roots` for wss://. Transitive:
+  tungstenite 0.30.0, rustls 0.23.46, webpki-roots 0.26.11
+  (checksum
+  `521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9`).
+- rand `=0.10.3` — MIT OR Apache-2.0, lock checksum
+  `65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af`.
+  Random chunk ids only (`framing.rs::new_chunk_id`: 8
+  random bytes as little-endian int64, as in Go
+  `newChunkID`).
+- futures-core / futures-sink / futures-util `=0.3.34` —
+  MIT OR Apache-2.0, lock checksums `92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e` /
+  `1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d` /
+  `0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc`.
+  Stream/Sink traits + extension traits for the WS halves
+  (`dial.rs`, `gateway.rs`); direct deps because
+  tokio-tungstenite does not re-export the traits.
+
+What M4a takes from these crates (behaviour only, no
+code): the Noise XX handshake + AEAD from snow (the Noise
+protocol itself is NOT reimplemented in castctl code);
+protobuf encode/decode from prost (types generated from
+the repo's own descriptors); the WebSocket client from
+tokio-tungstenite. Only the framing/envelope/SharedConn
+logic around them is castctl code. Algorithm provenance
+and every deviation from the Go implementation are
+recorded in `rust/PORTING.md` §M4a, including the
+research-note msg_3 mislabel correction, the asymmetric
+envelope finding, and the explicit "Chưa kiểm chứng" list
+(no live muse.ai peer; wss:// untested; no real
+WireGuard/outbound dial in this PR).
+
 ## Carried items (unresolved at the time of writing)
 
 - npm license check: not run — no license-checking tool present,
