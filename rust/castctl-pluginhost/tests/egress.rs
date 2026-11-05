@@ -25,9 +25,7 @@ use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
-use castctl_pluginhost::egress::{
-    DialFn, DialStream, EgressProxy, UpstreamTransport,
-};
+use castctl_pluginhost::egress::{DialFn, DialStream, EgressProxy, UpstreamTransport};
 use castctl_pluginhost::error::PluginHostError;
 use castctl_pluginhost::host::EgressProxyHandle;
 
@@ -131,9 +129,7 @@ async fn proxy_get(
     extra_headers: &[(&str, &str)],
     with_auth: bool,
 ) -> (StatusCode, http::HeaderMap, Bytes) {
-    let stream = tokio::net::TcpStream::connect(proxy.addr())
-        .await
-        .unwrap();
+    let stream = tokio::net::TcpStream::connect(proxy.addr()).await.unwrap();
     let io = TokioIo::new(stream);
     let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
         .handshake(io)
@@ -161,13 +157,8 @@ async fn proxy_get(
 
 /// Open a raw CONNECT tunnel; returns the reader after
 /// the status line + headers are drained.
-async fn connect_tunnel(
-    proxy: &EgressProxy,
-    target: &str,
-) -> BufReader<tokio::net::TcpStream> {
-    let mut conn = tokio::net::TcpStream::connect(proxy.addr())
-        .await
-        .unwrap();
+async fn connect_tunnel(proxy: &EgressProxy, target: &str) -> BufReader<tokio::net::TcpStream> {
+    let mut conn = tokio::net::TcpStream::connect(proxy.addr()).await.unwrap();
     conn.write_all(
         format!(
             "CONNECT {target} HTTP/1.1\r\nProxy-Authorization: {}\r\nHost: {target}\r\n\r\n",
@@ -218,8 +209,7 @@ async fn auth_required() {
     let upstream = Arc::new(FakeUpstream::new("ok"));
     let proxy = EgressProxy::new(upstream.clone(), None, "session-cookie").unwrap();
     // No credentials.
-    let (status, headers, _) =
-        proxy_get(&proxy, "http://example.invalid/path", &[], false).await;
+    let (status, headers, _) = proxy_get(&proxy, "http://example.invalid/path", &[], false).await;
     assert_eq!(status, StatusCode::PROXY_AUTHENTICATION_REQUIRED);
     assert_eq!(headers.get("Proxy-Authenticate").unwrap(), "Basic");
     // Wrong credentials (hand-set header; Go's client
@@ -288,9 +278,7 @@ async fn credentials_ephemeral_and_loopback() {
 async fn connect_without_dialer() {
     let upstream = Arc::new(FakeUpstream::new(""));
     let proxy = EgressProxy::new(upstream, None, "").unwrap();
-    let mut conn = tokio::net::TcpStream::connect(proxy.addr())
-        .await
-        .unwrap();
+    let mut conn = tokio::net::TcpStream::connect(proxy.addr()).await.unwrap();
     conn.write_all(
         format!(
             "CONNECT example.invalid:443 HTTP/1.1\r\nProxy-Authorization: {}\r\nHost: example.invalid:443\r\n\r\n",
@@ -344,12 +332,19 @@ async fn close_aborts_tunnels() {
     let start = std::time::Instant::now();
     let res = tokio::time::timeout(Duration::from_secs(2), reader.read(&mut [0u8; 1])).await;
     let elapsed = start.elapsed();
-    assert!(elapsed < Duration::from_millis(1500), "tunnel read after Close took {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "tunnel read after Close took {elapsed:?}"
+    );
     match res {
         Ok(Ok(0)) => {} // EOF: tunnel aborted.
         Ok(Ok(_)) => panic!("tunnel read after Close succeeded, want EOF/closed"),
         Ok(Err(e)) => {
-            assert_ne!(e.kind(), std::io::ErrorKind::TimedOut, "tunnel read timed out");
+            assert_ne!(
+                e.kind(),
+                std::io::ErrorKind::TimedOut,
+                "tunnel read timed out"
+            );
         }
         Err(_) => panic!("tunnel read after Close timed out: Close did not abort the tunnel"),
     }
@@ -411,7 +406,10 @@ async fn cookie_scope() {
 async fn strips_set_cookie_and_hop_tokens() {
     let upstream = Arc::new(FakeUpstream::new("ok"));
     upstream.set_response_headers(vec![
-        ("Set-Cookie".to_string(), "hatch_sess=SECRETVALUE; Path=/".to_string()),
+        (
+            "Set-Cookie".to_string(),
+            "hatch_sess=SECRETVALUE; Path=/".to_string(),
+        ),
         ("Connection".to_string(), "X-Hop".to_string()),
         ("X-Hop".to_string(), "hop-value".to_string()),
     ]);
@@ -472,12 +470,13 @@ async fn duplicate_connection_headers() {
         ("Connection".to_string(), "keep-alive".to_string()),
         ("Connection".to_string(), "X-Resp-Leak".to_string()),
         ("X-Resp-Leak".to_string(), "RESPLEAK".to_string()),
-        ("Set-Cookie".to_string(), "hatch_sess=SECRETVALUE; Path=/".to_string()),
+        (
+            "Set-Cookie".to_string(),
+            "hatch_sess=SECRETVALUE; Path=/".to_string(),
+        ),
     ]);
     let proxy = EgressProxy::new(upstream.clone(), None, "").unwrap();
-    let mut conn = tokio::net::TcpStream::connect(proxy.addr())
-        .await
-        .unwrap();
+    let mut conn = tokio::net::TcpStream::connect(proxy.addr()).await.unwrap();
     let raw = format!(
         "GET http://example.invalid/path HTTP/1.1\r\nHost: example.invalid\r\nProxy-Authorization: {}\r\nConnection: keep-alive\r\nConnection: X-Leak\r\nX-Leak: LEAKME\r\nX-Keep: yes\r\n\r\n",
         basic_auth(proxy.username(), proxy.password())

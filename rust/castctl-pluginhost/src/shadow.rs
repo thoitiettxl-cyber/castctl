@@ -63,9 +63,8 @@ pub fn shadow_root() -> PathBuf {
 /// Source: `shadowDir` (`shadow.go:61-76`).
 pub fn shadow_dir() -> Result<PathBuf, PluginHostError> {
     let dir = shadow_root().join(format!("pid-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| {
-        PluginHostError::failed(format!("cannot create shadow directory: {e}"))
-    })?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| PluginHostError::failed(format!("cannot create shadow directory: {e}")))?;
     // `create_dir_all` does not harden a pre-existing
     // directory: force 0700 and refuse another uid's.
     if let Ok(info) = std::fs::metadata(&dir) {
@@ -74,10 +73,7 @@ pub fn shadow_dir() -> Result<PathBuf, PluginHostError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(
-            &dir,
-            std::fs::Permissions::from_mode(0o700),
-        );
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
     Ok(dir)
 }
@@ -157,9 +153,8 @@ pub fn shadow_copy_to_dir(file: &PluginFile, dir: &Path) -> Result<PathBuf, Plug
     // them away lexically before the check could see them.
     refuse_symlinked_components(&file.path)?;
     let source = lexical_clean(&file.path);
-    let info = std::fs::symlink_metadata(&source).map_err(|e| {
-        PluginHostError::failed(format!("plugin file {source:?}: {e}"))
-    })?;
+    let info = std::fs::symlink_metadata(&source)
+        .map_err(|e| PluginHostError::failed(format!("plugin file {source:?}: {e}")))?;
     if info.file_type().is_symlink() {
         return Err(PluginHostError::invalid(format!(
             "plugin file {source:?} must not be a symlink"
@@ -179,18 +174,13 @@ pub fn shadow_copy_to_dir(file: &PluginFile, dir: &Path) -> Result<PathBuf, Plug
         .prefix(&format!("{SHADOW_TEMP_PREFIX}{}-", file.id))
         .suffix(&ext)
         .tempfile_in(dir)
-        .map_err(|e| {
-            PluginHostError::failed(format!("cannot create shadow temp file: {e}"))
-        })?;
+        .map_err(|e| PluginHostError::failed(format!("cannot create shadow temp file: {e}")))?;
     let tmp_path = tmp.path().to_path_buf();
     let copy_result = (|| -> Result<(u64, String), PluginHostError> {
-        let mut input = open_plugin_source(&source).map_err(|e| {
-            PluginHostError::failed(format!("cannot open plugin file: {e}"))
-        })?;
+        let mut input = open_plugin_source(&source)
+            .map_err(|e| PluginHostError::failed(format!("cannot open plugin file: {e}")))?;
         let info = input.metadata().map_err(|_| {
-            PluginHostError::invalid(format!(
-                "plugin file {source:?} is not a regular file"
-            ))
+            PluginHostError::invalid(format!("plugin file {source:?} is not a regular file"))
         })?;
         if !info.is_file() {
             return Err(PluginHostError::invalid(format!(
@@ -209,9 +199,7 @@ pub fn shadow_copy_to_dir(file: &PluginFile, dir: &Path) -> Result<PathBuf, Plug
                     size += n as u64;
                     hasher.update(&chunk[..n]);
                     tmp.write_all(&chunk[..n]).map_err(|e| {
-                        PluginHostError::failed(format!(
-                            "cannot write shadow temp file: {e}"
-                        ))
+                        PluginHostError::failed(format!("cannot write shadow temp file: {e}"))
                     })?;
                 }
                 Err(e) => {
@@ -221,9 +209,8 @@ pub fn shadow_copy_to_dir(file: &PluginFile, dir: &Path) -> Result<PathBuf, Plug
                 }
             }
         }
-        tmp.flush().map_err(|e| {
-            PluginHostError::failed(format!("cannot write shadow temp file: {e}"))
-        })?;
+        tmp.flush()
+            .map_err(|e| PluginHostError::failed(format!("cannot write shadow temp file: {e}")))?;
         Ok((size, hex::encode(hasher.finalize())))
     })();
     let (size, digest) = match copy_result {
@@ -250,14 +237,11 @@ pub fn shadow_copy_to_dir(file: &PluginFile, dir: &Path) -> Result<PathBuf, Plug
             // No shadow path in the message (Go wraps the
             // os error, which carries it; this port drops
             // the path-bearing cause).
-            return Err(PluginHostError::failed(
-                "remove stale shadow plugin",
-            ));
+            return Err(PluginHostError::failed("remove stale shadow plugin"));
         }
     }
     if let Err(e) = std::fs::rename(&tmp_path, &target) {
-        if e.kind() != std::io::ErrorKind::AlreadyExists
-            && !shadow_matches(&target, size, &digest)
+        if e.kind() != std::io::ErrorKind::AlreadyExists && !shadow_matches(&target, size, &digest)
         {
             let _ = std::fs::remove_file(&tmp_path);
             return Err(PluginHostError::failed("move shadow plugin"));

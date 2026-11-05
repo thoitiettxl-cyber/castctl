@@ -51,7 +51,10 @@ pub fn is_secret_key(key: &str) -> bool {
 /// Source: `isHeaderMapKey` (`value.go:200-209`).
 #[must_use]
 pub fn is_header_map_key(key: &str) -> bool {
-    matches!(key.to_ascii_lowercase().as_str(), "headers" | "extra_headers")
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "headers" | "extra_headers"
+    )
 }
 
 /// Recursively redact a JSON-shaped value and return
@@ -79,12 +82,8 @@ pub fn is_header_map_key(key: &str) -> bool {
 pub fn redact_value(v: &Value) -> Value {
     match v {
         Value::Null | Value::Bool(_) | Value::Number(_) => v.clone(),
-        Value::String(s) => {
-            Value::String(castctl_log_redact::redact_url_userinfo(s))
-        }
-        Value::Array(items) => {
-            Value::Array(items.iter().map(redact_value).collect())
-        }
+        Value::String(s) => Value::String(castctl_log_redact::redact_url_userinfo(s)),
+        Value::Array(items) => Value::Array(items.iter().map(redact_value).collect()),
         Value::Object(map) => {
             let mut out = serde_json::Map::new();
             for (k, child) in map {
@@ -303,8 +302,7 @@ mod tests {
         let v: Value = serde_json::json!({"headers": null});
         assert_eq!(redact_value(&v)["headers"], Value::Null);
         // Other strings get URL-userinfo redaction only.
-        let v: Value =
-            serde_json::json!({"server": "https://user:s3cret@proxy.invalid:1080"});
+        let v: Value = serde_json::json!({"server": "https://user:s3cret@proxy.invalid:1080"});
         let r = redact_value(&v);
         assert_eq!(
             r["server"],

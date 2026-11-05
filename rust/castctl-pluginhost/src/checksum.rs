@@ -54,7 +54,10 @@ pub fn parse_checksums(data: &[u8]) -> Result<BTreeMap<String, String>, PluginHo
                 "line {line_number}: invalid sha256"
             )));
         }
-        let name = fields[1].trim().strip_prefix('*').unwrap_or(fields[1].trim());
+        let name = fields[1]
+            .trim()
+            .strip_prefix('*')
+            .unwrap_or(fields[1].trim());
         if let Err(e) = validate_manifest_name(name) {
             return Err(PluginHostError::invalid(format!("line {line_number}: {e}")));
         }
@@ -77,15 +80,14 @@ pub fn validate_manifest_name(name: &str) -> Result<(), PluginHostError> {
             "invalid checksum name {name:?}"
         )));
     }
-    if Path::new(name).is_absolute()
-        || name.contains(['/', '\\'])
-        || name.contains("..")
-    {
+    if Path::new(name).is_absolute() || name.contains(['/', '\\']) || name.contains("..") {
         return Err(PluginHostError::invalid(format!(
             "invalid checksum name {name:?}"
         )));
     }
-    if Path::new(name).file_name().map(|n| n.to_string_lossy().into_owned())
+    if Path::new(name)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
         != Some(name.to_string())
     {
         return Err(PluginHostError::invalid(format!(
@@ -137,9 +139,8 @@ pub fn verify_file_checksum(
     refuse_symlinked_components(plugin_path)?;
     refuse_symlinked_components(manifest_path)?;
     let data = read_regular_file(plugin_path)?;
-    let manifest = read_regular_file(manifest_path).map_err(|_| {
-        PluginHostError::failed("read plugin checksums manifest")
-    })?;
+    let manifest = read_regular_file(manifest_path)
+        .map_err(|_| PluginHostError::failed("read plugin checksums manifest"))?;
     let checksums = parse_checksums(&manifest)?;
     let name = plugin_path
         .file_name()
@@ -165,9 +166,8 @@ pub fn verify_shadow_file_checksum(
 ) -> Result<(), PluginHostError> {
     validate_manifest_name(entry_name)?;
     refuse_symlinked_components(manifest_path)?;
-    let manifest = read_regular_file(manifest_path).map_err(|_| {
-        PluginHostError::failed("read plugin checksums manifest")
-    })?;
+    let manifest = read_regular_file(manifest_path)
+        .map_err(|_| PluginHostError::failed("read plugin checksums manifest"))?;
     let checksums = parse_checksums(&manifest)?;
     let expected = checksums
         .get(entry_name)
@@ -183,9 +183,9 @@ pub fn verify_shadow_file_checksum(
         // the shadow path (`compat.go:24-30`).
         PluginHostError::failed(format!("open plugin shadow file: {e}"))
     })?;
-    let info = f.metadata().map_err(|_| {
-        PluginHostError::invalid("plugin shadow file is not a regular file")
-    })?;
+    let info = f
+        .metadata()
+        .map_err(|_| PluginHostError::invalid("plugin shadow file is not a regular file"))?;
     if !info.is_file() {
         return Err(PluginHostError::invalid(
             "plugin shadow file is not a regular file",
@@ -201,9 +201,7 @@ pub fn verify_shadow_file_checksum(
                 Ok(0) => break,
                 Ok(n) => hasher.update(&chunk[..n]),
                 Err(_) => {
-                    return Err(PluginHostError::failed(
-                        "hash plugin shadow file",
-                    ));
+                    return Err(PluginHostError::failed("hash plugin shadow file"));
                 }
             }
         }
@@ -220,12 +218,11 @@ pub fn verify_shadow_file_checksum(
 /// regular-file re-check (`O_NOFOLLOW`), refusing symlinks.
 /// Source: `readRegularFile` (`checksum.go:183-193`).
 fn read_regular_file(path: &Path) -> Result<Vec<u8>, PluginHostError> {
-    let mut f = open_plugin_source(path).map_err(|e| {
-        PluginHostError::failed(format!("cannot open file: {e}"))
-    })?;
-    let info = f.metadata().map_err(|_| {
-        PluginHostError::invalid(format!("file {path:?} is not a regular file"))
-    })?;
+    let mut f = open_plugin_source(path)
+        .map_err(|e| PluginHostError::failed(format!("cannot open file: {e}")))?;
+    let info = f
+        .metadata()
+        .map_err(|_| PluginHostError::invalid(format!("file {path:?} is not a regular file")))?;
     if !info.is_file() {
         return Err(PluginHostError::invalid(format!(
             "file {path:?} is not a regular file"
@@ -233,9 +230,8 @@ fn read_regular_file(path: &Path) -> Result<Vec<u8>, PluginHostError> {
     }
     use std::io::Read;
     let mut data = Vec::new();
-    f.read_to_end(&mut data).map_err(|e| {
-        PluginHostError::failed(format!("cannot read file: {e}"))
-    })?;
+    f.read_to_end(&mut data)
+        .map_err(|e| PluginHostError::failed(format!("cannot read file: {e}")))?;
     Ok(data)
 }
 
@@ -266,10 +262,7 @@ mod tests {
         }
         assert!(parse_checksums(format!("{sum}  echo.so\n").as_bytes()).is_ok());
         // Blank lines, comments, `*` marker, uppercase hex.
-        let mixed = format!(
-            "# comment\n\n{}  *echo.so\n",
-            sum.to_uppercase()
-        );
+        let mixed = format!("# comment\n\n{}  *echo.so\n", sum.to_uppercase());
         let m = parse_checksums(mixed.as_bytes()).unwrap();
         assert!(m.contains_key("echo.so"));
     }
@@ -285,8 +278,7 @@ mod tests {
         let manifest = write_manifest(dir.path(), "echo.so", data);
         assert!(verify_shadow_file_checksum(&shadow, &manifest, "echo.so").is_ok());
         std::fs::write(&shadow, b"shadow-bytes-v2").unwrap();
-        let err =
-            verify_shadow_file_checksum(&shadow, &manifest, "echo.so").unwrap_err();
+        let err = verify_shadow_file_checksum(&shadow, &manifest, "echo.so").unwrap_err();
         assert!(err.to_string().contains("mismatch"));
         // A symlinked shadow path is refused.
         let real = dir.path().join("real.so");
@@ -328,8 +320,7 @@ mod tests {
             .join("castctl-pluginhost")
             .join("pid-424242")
             .join("castctl-plugin-echo-abc.so");
-        let err =
-            verify_shadow_file_checksum(&shadow, &manifest, "echo.so").unwrap_err();
+        let err = verify_shadow_file_checksum(&shadow, &manifest, "echo.so").unwrap_err();
         assert!(!err.to_string().contains("pid-424242"));
         assert!(!err.to_string().contains("castctl-pluginhost"));
         // Non-regular shadow file (a directory): same rule.
@@ -339,8 +330,7 @@ mod tests {
             .join("pid-424243")
             .join("castctl-plugin-echo-def.so");
         std::fs::create_dir_all(&shadow_dir).unwrap();
-        let err =
-            verify_shadow_file_checksum(&shadow_dir, &manifest, "echo.so").unwrap_err();
+        let err = verify_shadow_file_checksum(&shadow_dir, &manifest, "echo.so").unwrap_err();
         assert!(!err.to_string().contains("pid-424243"));
         assert!(!err.to_string().contains("castctl-pluginhost"));
     }

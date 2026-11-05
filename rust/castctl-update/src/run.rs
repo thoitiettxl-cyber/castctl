@@ -100,7 +100,8 @@ pub struct Deps {
     /// Failure-injection seam for the `--version` exec check.
     /// `None` means [`run_exec_check`]. Go: `execCheckFn`
     /// (`replace.go:33`).
-    pub exec_check_fn: Option<fn(&Path, &Version, Duration) -> std::result::Result<(), UpdateError>>,
+    pub exec_check_fn:
+        Option<fn(&Path, &Version, Duration) -> std::result::Result<(), UpdateError>>,
 }
 
 impl Default for Deps {
@@ -283,11 +284,10 @@ impl Updater {
             self.github_base()
         );
         let ua = self.user_agent();
-        let (status, location) =
-            match self.fetcher.get_no_follow(&url, &ua, METADATA_TIMEOUT) {
-                Ok(t) => t,
-                Err(_) => return Err(rate_limit_error()),
-            };
+        let (status, location) = match self.fetcher.get_no_follow(&url, &ua, METADATA_TIMEOUT) {
+            Ok(t) => t,
+            Err(_) => return Err(rate_limit_error()),
+        };
         if !matches!(status, 301 | 302 | 303 | 307 | 308) {
             return Err(rate_limit_error());
         }

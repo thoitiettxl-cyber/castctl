@@ -257,7 +257,11 @@ mod tests {
         // that do not fit are a test bug, not a fixture:
         // use a smaller huge size instead.
         let size_s = format!("{size:011o}\0");
-        assert_eq!(size_s.len(), 12, "size {size} does not fit in the octal field");
+        assert_eq!(
+            size_s.len(),
+            12,
+            "size {size} does not fit in the octal field"
+        );
         h[124..136].copy_from_slice(size_s.as_bytes());
         // mtime "00000000000\0"
         h[136..148].copy_from_slice(b"00000000000\0");

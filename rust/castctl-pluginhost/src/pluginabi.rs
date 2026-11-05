@@ -223,9 +223,7 @@ pub fn validate_registration(reg: &Registration) -> Result<u32, PluginHostError>
         reg.schema_version
     };
     if reg.metadata.name.is_empty() {
-        return Err(PluginHostError::invalid(
-            "plugin metadata name is required",
-        ));
+        return Err(PluginHostError::invalid("plugin metadata name is required"));
     }
     if reg.metadata.version.is_empty() {
         return Err(PluginHostError::invalid(
@@ -260,9 +258,7 @@ pub fn validate_registration(reg: &Registration) -> Result<u32, PluginHostError>
     }
     for cmd in &reg.commands {
         if cmd.name.is_empty() {
-            return Err(PluginHostError::invalid(
-                "plugin command name is required",
-            ));
+            return Err(PluginHostError::invalid("plugin command name is required"));
         }
         if has_control_chars(&cmd.name) {
             return Err(PluginHostError::invalid(
@@ -368,10 +364,7 @@ mod tests {
                 "plugin metadata author is required",
             ),
         ] {
-            assert_eq!(
-                validate_registration(&reg).unwrap_err().to_string(),
-                want
-            );
+            assert_eq!(validate_registration(&reg).unwrap_err().to_string(), want);
             reg.metadata.name = "x".to_string();
         }
         // Control characters in metadata.

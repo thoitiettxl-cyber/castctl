@@ -76,9 +76,7 @@ pub const LOADER_UNAVAILABLE_MESSAGE: &str = "plugin loading requires the Go bin
 /// `Loader.Open(file, host)` shape (file path in,
 /// client out) so a future Option A/B/C implementation
 /// can fill this seam without changing callers.
-pub fn open_plugin(
-    _path: &std::path::Path,
-) -> Result<(), PluginHostError> {
+pub fn open_plugin(_path: &std::path::Path) -> Result<(), PluginHostError> {
     Err(PluginHostError::LoaderUnavailable)
 }
 

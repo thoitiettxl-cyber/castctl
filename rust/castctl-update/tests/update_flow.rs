@@ -144,11 +144,7 @@ fn handle_conn(mut stream: TcpStream, state: Arc<Mutex<ServerState>>) {
     let text = String::from_utf8_lossy(&req);
     let mut lines = text.lines();
     let first = lines.next().unwrap_or("");
-    let path = first
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("")
-        .to_string();
+    let path = first.split_whitespace().nth(1).unwrap_or("").to_string();
     let has_auth = text
         .lines()
         .any(|l| l.to_ascii_lowercase().starts_with("authorization:"));
@@ -199,11 +195,7 @@ fn handle_conn(mut stream: TcpStream, state: Arc<Mutex<ServerState>>) {
             // tag sits between `download/` and the name).
             (s.asset_status, s.asset_bytes.clone(), String::new())
         } else if path.ends_with("/checksums.txt") {
-            (
-                s.checksums_status,
-                s.checksums_bytes.clone(),
-                String::new(),
-            )
+            (s.checksums_status, s.checksums_bytes.clone(), String::new())
         } else {
             (404, Vec::new(), String::new())
         }
@@ -448,10 +440,7 @@ fn install_newer_version_end_to_end() {
             0o755
         );
     }
-    let names: Vec<String> = dir_snapshot(&dir)
-        .into_iter()
-        .map(|(n, _)| n)
-        .collect();
+    let names: Vec<String> = dir_snapshot(&dir).into_iter().map(|(n, _)| n).collect();
     assert_eq!(names, vec![".castctl-update.lock", "castctl"]);
     assert!(stdout_text(&out).contains("castctl updated: 0.6.3 -> 0.6.4"));
     // No credentials ever sent.
@@ -465,8 +454,7 @@ fn checksum_mismatch_refuses_target_intact() {
     // Corrupt the checksums entry after the server started.
     {
         let mut s = server.state.lock().unwrap();
-        s.checksums_bytes =
-            checksums_txt("castctl_0.6.4_linux_amd64.tar.gz", &[0u8; 32]);
+        s.checksums_bytes = checksums_txt("castctl_0.6.4_linux_amd64.tar.gz", &[0u8; 32]);
     }
     let (_tmp, target) = make_target(work.path(), "0.6.3");
     let old_bytes = std::fs::read(&target).unwrap();
@@ -607,8 +595,7 @@ fn redirect_userinfo_refuses() {
     let (server, _new) = standard_server(work.path());
     {
         let mut s = server.state.lock().unwrap();
-        s.redirect_location =
-            Some(format!("http://user:pass@localhost:{other_port}/x"));
+        s.redirect_location = Some(format!("http://user:pass@localhost:{other_port}/x"));
     }
     let (_tmp, target) = make_target(work.path(), "0.6.3");
     let (opts, _out) = base_opts(&target, &server);
@@ -651,7 +638,10 @@ fn lock_held_fails_fast_zero_downloads() {
     let (_res, err) = run(opts);
     let err = err.expect_err("held lock must refuse");
     assert_eq!(err.code(), 1);
-    assert!(err.to_string().contains("another update is already in progress"));
+    assert!(
+        err.to_string()
+            .contains("another update is already in progress")
+    );
     assert_eq!(server.count("/download/checksums.txt"), 0);
 }
 
@@ -672,13 +662,13 @@ fn rename_failure_leaves_old_intact() {
     let (res, err) = run(opts);
     let err = err.expect_err("rename failure must surface");
     assert_eq!(err.code(), 1);
-    assert!(err.to_string().contains("cannot replace the running binary"));
+    assert!(
+        err.to_string()
+            .contains("cannot replace the running binary")
+    );
     assert!(!res.replaced);
     assert_eq!(std::fs::read(&target).unwrap(), old_bytes);
-    let names: Vec<String> = dir_snapshot(&dir)
-        .into_iter()
-        .map(|(n, _)| n)
-        .collect();
+    let names: Vec<String> = dir_snapshot(&dir).into_iter().map(|(n, _)| n).collect();
     assert_eq!(names, vec![".castctl-update.lock", "castctl"]);
 }
 
@@ -712,10 +702,13 @@ fn dir_sync_enotsup_succeeds_silently() {
     let (_tmp, target) = make_target(work.path(), "0.6.3");
     let (mut opts, _out) = base_opts(&target, &server);
     // ENOTSUP is errno 95 on Linux.
-    opts.deps.sync_dir_fn =
-        Some(|_| Err(std::io::Error::from_raw_os_error(95)));
+    opts.deps.sync_dir_fn = Some(|_| Err(std::io::Error::from_raw_os_error(95)));
     let (res, err) = run(opts);
-    assert!(err.is_ok(), "ENOTSUP dir-sync must succeed: {:?}", err.err());
+    assert!(
+        err.is_ok(),
+        "ENOTSUP dir-sync must succeed: {:?}",
+        err.err()
+    );
     assert!(res.replaced);
     assert_eq!(std::fs::read(&target).unwrap(), new_bytes);
 }
@@ -733,10 +726,12 @@ fn symlink_target_preserved() {
     let (res, err) = run(opts);
     assert!(err.is_ok(), "symlink install failed: {:?}", err.err());
     assert!(res.replaced);
-    assert!(std::fs::symlink_metadata(&link)
-        .unwrap()
-        .file_type()
-        .is_symlink());
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
     assert_eq!(std::fs::read_link(&link).unwrap(), real_target);
     assert_eq!(std::fs::read(&real_target).unwrap(), new_bytes);
 }
@@ -767,8 +762,8 @@ fn exec_check_fake_versions() {
     let stale = build_fake_binary(work.path(), "0.6.3", "ok");
     assert!(run_exec_check(&stale, &want, Duration::from_secs(10)).is_err());
     let hang = build_fake_binary(work.path(), "0.6.4", "hang");
-    let err = run_exec_check(&hang, &want, Duration::from_millis(200))
-        .expect_err("hang must time out");
+    let err =
+        run_exec_check(&hang, &want, Duration::from_millis(200)).expect_err("hang must time out");
     // Exact Go message (`replace.go:349`).
     assert_eq!(
         err.to_string(),
@@ -931,7 +926,10 @@ fn concurrent_runs_no_torn_state() {
     // error, no torn target, final bytes are the new binary.
     assert!(e1.is_ok(), "run 1 failed: {e1:?}");
     assert!(e2.is_ok(), "run 2 failed: {e2:?}");
-    let replaced_count = [r1.replaced, r2.replaced].into_iter().filter(|b| *b).count();
+    let replaced_count = [r1.replaced, r2.replaced]
+        .into_iter()
+        .filter(|b| *b)
+        .count();
     assert!(replaced_count >= 1, "at least one run must replace");
     let final_bytes = std::fs::read(&target).unwrap();
     assert_eq!(final_bytes, new_bytes, "torn target");

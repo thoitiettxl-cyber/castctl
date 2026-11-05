@@ -59,11 +59,7 @@ pub fn refuse_symlinked_components(path: &Path) -> Result<(), PluginHostError> {
         };
         cur.push(&name);
         let meta = std::fs::symlink_metadata(&cur).map_err(|e| {
-            PluginHostError::failed(format!(
-                "plugin path {}: {}",
-                cur.display(),
-                e
-            ))
+            PluginHostError::failed(format!("plugin path {}: {}", cur.display(), e))
         })?;
         if meta.file_type().is_symlink() {
             return Err(PluginHostError::invalid(format!(

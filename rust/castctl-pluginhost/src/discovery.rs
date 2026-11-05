@@ -212,8 +212,7 @@ fn plugin_file_preferred(candidate: &PluginFile, current: &PluginFile) -> bool {
     if current.version.is_empty() {
         return true;
     }
-    let (comparison, comparable) =
-        compare_plugin_versions(&candidate.version, &current.version);
+    let (comparison, comparable) = compare_plugin_versions(&candidate.version, &current.version);
     if !comparable {
         return candidate.version > current.version;
     }
@@ -232,11 +231,8 @@ pub fn discover(root: &Path) -> Result<Vec<PluginFile>, PluginHostError> {
         ));
     }
     let root = Path::new(root_trimmed);
-    let meta = std::fs::metadata(root).map_err(|e| {
-        PluginHostError::failed(format!(
-            "plugin discovery root {root:?}: {e}"
-        ))
-    })?;
+    let meta = std::fs::metadata(root)
+        .map_err(|e| PluginHostError::failed(format!("plugin discovery root {root:?}: {e}")))?;
     if !meta.is_dir() {
         return Err(PluginHostError::invalid(format!(
             "plugin discovery root {root:?} is not a directory"
@@ -377,10 +373,7 @@ mod tests {
     #[test]
     fn discover_platform_dir_wins_tie() {
         let tmp = tempfile::tempdir().unwrap();
-        let plat = tmp
-            .path()
-            .join(goos_name())
-            .join(goarch_name());
+        let plat = tmp.path().join(goos_name()).join(goarch_name());
         std::fs::create_dir_all(&plat).unwrap();
         touch(tmp.path(), "echo-v1.0.so");
         touch(&plat, "echo-v1.0.so");
@@ -398,8 +391,7 @@ mod tests {
     fn discover_symlink_entry_skipped() {
         let tmp = tempfile::tempdir().unwrap();
         touch(tmp.path(), "real.so");
-        std::os::unix::fs::symlink(tmp.path().join("real.so"), tmp.path().join("link.so"))
-            .unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("real.so"), tmp.path().join("link.so")).unwrap();
         let found = discover(tmp.path()).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "real");
