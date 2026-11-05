@@ -4,6 +4,9 @@ members = [
     "castctl-tg-files",
     "castctl-shared",
     "castctl-log-redact",
+    "castctl-config",
+    "castctl-cli",
+    "castctl-rs",
 ]
 resolver = "2"
 
