@@ -7,11 +7,15 @@ license.workspace = true
 description = "Command table, flag parsing, help/usage rendering, and exit mapping ported from castctl's Go internal/commands (M2, offline surface only)"
 
 [dependencies]
+castctl-approvals = { path = "../castctl-approvals" }
 castctl-config = { path = "../castctl-config" }
 castctl-gateway = { path = "../castctl-gateway" }
+castctl-logging = { path = "../castctl-logging" }
 castctl-shared = { path = "../castctl-shared" }
 castctl-transport = { path = "../castctl-transport" }
+castctl-wait = { path = "../castctl-wait" }
 castctl-webui = { path = "../castctl-webui" }
 chrono = { workspace = true }
+rand = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync", "signal"] }

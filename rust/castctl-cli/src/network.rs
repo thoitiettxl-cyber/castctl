@@ -343,7 +343,7 @@ pub(crate) fn indent_json(compact: &str) -> String {
 /// Go `%T` for a decoded JSON value (`callMap`'s
 /// not-an-object error). Numbers decode as `json.Number`
 /// (`decodeJSONValue` uses `UseNumber`), never `float64`.
-fn go_type_name(v: &SerdeValue) -> &'static str {
+pub(crate) fn go_type_name(v: &SerdeValue) -> &'static str {
     match v {
         SerdeValue::Null => "<nil>",
         SerdeValue::Bool(_) => "bool",

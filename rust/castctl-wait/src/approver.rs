@@ -16,17 +16,19 @@
 //! `Connect`) is the fatal error, else the first error
 //! when nothing was handled.
 //!
-//! The telegram `ApproveError.summary` is allowlisted,
-//! never raw error text (the turn runner logs it): a
-//! `TransportError` contributes its `log_summary()`, a
-//! `NoForeverError` contributes its structural display
-//! (`no forever option (offers [...])`), an auth failure
-//! contributes the fixed string `auth error`, and anything
-//! else contributes the fixed string `auto-approve
-//! failed`. The CLI's golden rendering of
-//! `auto_approve_errors` is pinned at wiring time
-//! against Go `wait.go`; adjust this mapping there if the
-//! Go rendering carries more.
+//! The telegram `ApproveError.summary` is Go's
+//! `logging.SummarizeErr` (`internal/commands/wait.go:
+//! toWaitResultJSON` renders `auto_approve_errors[].error`
+//! with it, and the turn runner logs the same summary):
+//! the `LogSummary` of the first body-carrying error in
+//! the chain (`conn: gateway status=<n> body_length=<n>`
+//! for gateway errors, `conn: auth_failed
+//! message_length=<n>` for auth), else `SafeString` of
+//! the error text — so a `NoForeverError` contributes its
+//! structural display (`no forever option (offers [...])`)
+//! verbatim. This is the `castctl-logging` rendering,
+//! not `TransportError::log_summary()` (whose Gateway arm
+//! keeps M3's `gateway error; body_length=...` shape).
 
 use std::error::Error as _;
 use std::future::Future;
@@ -109,20 +111,26 @@ fn find_transport(mut err: &(dyn std::error::Error + 'static)) -> Option<Transpo
     }
 }
 
-/// Allowlisted summary for one auto-approve error (see
-/// the module docs).
+/// Allowlisted summary for one auto-approve error: Go's
+/// `logging.SummarizeErr` (`castctl_logging::summarize_err`).
+/// In the CLI flow an auth decide error never reaches
+/// this rendering — it is the fatal error and aborts the
+/// run before the result JSON is written — but the same
+/// summary is logged by the turn runner, so it must still
+/// be Go's summary, not a fixed string.
 fn error_summary(err: &castctl_approvals::ApproveError) -> String {
     let inner: &(dyn std::error::Error + 'static) = err.err.as_ref();
-    if let Some(t) = find_transport(inner) {
-        if matches!(t, TransportError::Auth { .. }) {
-            return "auth error".to_string();
-        }
-        return t.log_summary();
-    }
-    if inner.downcast_ref::<NoForeverError>().is_some() {
-        return inner.to_string();
-    }
-    "auto-approve failed".to_string()
+    castctl_logging::summarize_err(Some(inner))
+}
+
+/// `Some(n)` when the error is a no-forever skip with `n`
+/// offered options, else `None` (see `error_summary`'s
+/// note on the CLI's structural skip rendering).
+fn skip_option_count(err: &castctl_approvals::ApproveError) -> Option<usize> {
+    let inner: &(dyn std::error::Error + 'static) = err.err.as_ref();
+    inner
+        .downcast_ref::<NoForeverError>()
+        .map(NoForeverError::option_count)
 }
 
 impl WaitApprover for AutoApproverAdapter {
@@ -170,6 +178,16 @@ impl WaitApprover for AutoApproverAdapter {
                     .map(|e| ApproveError {
                         approval_id: e.approval_id.clone(),
                         summary: error_summary(e),
+                        title: e.title.clone(),
+                        kind: e.kind.clone(),
+                        scope: e.scope.clone(),
+                        decision: e.decision.clone(),
+                        // A skip error renders structurally
+                        // in the CLI (`no forever option
+                        // option_count=n`); the count is
+                        // carried here because the summary
+                        // text alone does not expose it.
+                        option_count: skip_option_count(e),
                     })
                     .collect(),
                 fatal: None,
@@ -253,6 +271,10 @@ mod tests {
             out.errors[0].summary,
             "no forever option (offers [allow_once])"
         );
+        // M7a: the CLI golden output needs the full
+        // record, not just id + summary.
+        assert_eq!(out.errors[0].decision, "");
+        assert_eq!(out.errors[0].option_count, Some(1));
         assert!(out.fatal.is_none());
     }
 
@@ -279,7 +301,11 @@ mod tests {
             .approve(&[telegram_approval("A", &["allow_always"])])
             .await;
         assert!(out.fatal.is_some(), "auth must be fatal");
-        assert_eq!(out.errors[0].summary, "auth error");
+        assert_eq!(
+            out.errors[0].summary,
+            "conn: auth_failed message_length=7",
+            "Go SummarizeErr for AuthError: class + message length, no message bytes"
+        );
         assert!(matches!(
             out.fatal,
             Some(BotError::Transport(TransportError::Auth { .. }))

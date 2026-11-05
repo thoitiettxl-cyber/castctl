@@ -12,8 +12,10 @@
 //! `threads`, `history`, `files`, `feed`, `feed-status`,
 //! `feed-prompt`, `goals`, `goal`, `ideas`, `idea`, `unread`)
 //! through the gateway (`network`) over the per-profile runtime
-//! (`runtime`). No network, gateway, browser, or migrate
-//! execution is wired for any other command.
+//! (`runtime`), plus the M7a `wait` command (`wait`): the
+//! subscribe-driven wait over the same runtime. No network,
+//! gateway, browser, or migrate execution is wired for any
+//! other command.
 //!
 //! No `unsafe`, no `unwrap()`/`expect()` on external input. Every
 //! public item cites its Go source at base `dev-rust` `85a8d5e`.
@@ -24,5 +26,6 @@ pub mod parser;
 pub mod run;
 pub mod runtime;
 pub mod table;
+pub mod wait;
 
 pub use run::{Outcome, VERSION, run};

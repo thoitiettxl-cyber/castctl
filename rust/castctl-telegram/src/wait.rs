@@ -194,12 +194,39 @@ pub struct ApprovedRecord {
 /// One auto-approve error record.
 /// Source: `internal/approvals/approvals.go`
 /// (`ApproveError`).
+///
+/// M7a: the CLI's `auto_approve_errors` JSON
+/// (`internal/commands/wait.go: toWaitResultJSON`) and
+/// its structural stderr lines (`logAutoApproved`) need
+/// the full record — title, kind, scope, decision — and
+/// the skip option count, not just the id and the
+/// summary. M5b flattened this to `{approval_id,
+/// summary}` for the turn runner's log line
+/// (`turn.rs:3108` logs only those two); the fields below
+/// restore Go's shape so the CLI golden output is
+/// byte-identical. The adapter (`castctl-wait`'s
+/// `AutoApproverAdapter`) fills them from the
+/// `castctl-approvals` record; the waiter only clones
+/// them through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApproveError {
     /// Approval id.
     pub approval_id: String,
     /// Allowlist summary of the error (never raw text).
     pub summary: String,
+    /// Display title.
+    pub title: String,
+    /// Permission-question kind.
+    pub kind: String,
+    /// Permission-question scope.
+    pub scope: String,
+    /// Decision attempted ("" when skipped).
+    pub decision: String,
+    /// `Some(n)` when the underlying error is a
+    /// no-forever skip with `n` offered options (Go
+    /// `logAutoApproved` renders `no forever option
+    /// option_count=n`); `None` otherwise.
+    pub option_count: Option<usize>,
 }
 
 /// Result of offering fresh approvals to the approver.
