@@ -464,7 +464,8 @@ impl Server {
         Ok(())
     }
 
-    /// Hyper entry point: read the body (capped at 1 MiB +
+    /// Hyper entry point: validate the path, read the body
+    /// only when the route needs one (capped at 1 MiB +
     /// 1), dispatch, and render the [`Resp`] with Go's
     /// Content-Length/chunked rule. A WS upgrade is
     /// detected here and handed to the screencast module
@@ -492,13 +493,53 @@ impl Server {
             return self.handle_ws_upgrade(req, peer).await;
         }
         let headers = req.headers().clone();
-        let body_bytes = match req.collect().await {
-            Ok(collected) => collected.to_bytes(),
-            Err(_) => Bytes::new(),
+        // Invalid escape: Go's stdlib 400s before any
+        // handler — and before any body is read.
+        let path_decoded = match percent_decode_path(&path_raw) {
+            Some(p) => p,
+            None => {
+                return Ok(render_resp(
+                    &method,
+                    Resp {
+                        status: 400,
+                        headers: vec![(
+                            "Content-Type".to_string(),
+                            "text/plain; charset=utf-8".to_string(),
+                        )],
+                        body: b"invalid URL escape".to_vec(),
+                    },
+                ));
+            }
         };
-        let body: Vec<u8> = body_bytes.to_vec();
+        // Body policy (Go parity): only handlers that
+        // decode a body read one — `route_reads_body`
+        // mirrors Go's `decodeBody`/`bodyJSON` call sites
+        // exactly. A 405, an unknown path, a 501 stub and
+        // every GET never touch the body: the request is
+        // dropped unread (hyper closes the connection after
+        // the response, as Go does for unread bodies). A
+        // body read is capped at `MAX_BODY_BYTES` (1 MiB +
+        // 1, the largest Go per-handler cap) WHILE reading,
+        // so an over-cap body is the fixed 400 before
+        // dispatch — and before auth. The per-handler caps
+        // (64 KiB / 1 MiB) still apply at decode time.
+        let body: Vec<u8> = if crate::handlers::route_reads_body(&method, &path_raw) {
+            match read_capped_body(req).await {
+                Ok(b) => b,
+                Err(_) => {
+                    return Ok(render_resp(
+                        &method,
+                        api_error_resp(&crate::error::err_validation(
+                            "invalid JSON in request body",
+                        )),
+                    ));
+                }
+            }
+        } else {
+            Vec::new()
+        };
         let resp = self
-            .dispatch(&method, &path_raw, &uri, &headers, peer, &body)
+            .dispatch(&method, &path_raw, &path_decoded, &uri, &headers, peer, &body)
             .await;
         Ok(render_resp(&method, resp))
     }
@@ -508,41 +549,29 @@ impl Server {
     /// `r.URL.RawPath`, so `%2F` never splits a segment
     /// and an encoded static segment never matches
     /// (`/api/v1/%73tatus` is no route; `/profiles/a%2Fb`
-    /// is one param, not two segments). The DECODED path
-    /// (Go's `r.URL.Path`) is used only for the ui_dir
-    /// filesystem path and for the WS suffix check in
-    /// `dispatch_api` (Go's `requireAuth` tests the
-    /// decoded suffix). An invalid escape is a plain 400
-    /// before any handler (Go stdlib behaviour).
+    /// is one param, not two segments). `path_decoded` is
+    /// Go's `r.URL.Path` (validated by `handle_hyper` —
+    /// an invalid escape never reaches here); it is used
+    /// only for the ui_dir filesystem path and for the WS
+    /// suffix check in `dispatch_api` (Go's `requireAuth`
+    /// tests the decoded suffix).
     async fn dispatch(
         self: &Arc<Self>,
         method: &Method,
         path_raw: &str,
+        path_decoded: &str,
         uri: &hyper::Uri,
         headers: &hyper::HeaderMap,
         peer: SocketAddr,
         body: &[u8],
     ) -> Resp {
-        let path_decoded = match percent_decode_path(path_raw) {
-            Some(p) => p,
-            None => {
-                return Resp {
-                    status: 400,
-                    headers: vec![(
-                        "Content-Type".to_string(),
-                        "text/plain; charset=utf-8".to_string(),
-                    )],
-                    body: b"invalid URL escape".to_vec(),
-                };
-            }
-        };
         // The mount prefix is matched on the RAW path: an
         // encoded prefix (`/api%2fv1/...`) matches no mount
         // and falls through to the shell unauthenticated.
         let is_api = path_raw == "/api/v1" || path_raw.starts_with("/api/v1/");
         if is_api {
             return self
-                .dispatch_api(method, path_raw, &path_decoded, uri, headers, peer, body)
+                .dispatch_api(method, path_raw, path_decoded, uri, headers, peer, body)
                 .await;
         }
         // Non-API: GET → shell; anything else → 405.
@@ -735,6 +764,37 @@ fn hex_val(b: u8) -> Option<u8> {
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
+}
+
+/// Why a capped body read failed: over the cap, or a
+/// transport error mid-body. Both map to the same fixed
+/// 400 at the call site (Go's `decodeBody` also reports
+/// any read/decode failure as the fixed validation
+/// error).
+enum BodyRead {
+    OverCap,
+    Transport,
+}
+
+/// Read a request body frame by frame, stopping at
+/// `MAX_BODY_BYTES` (1 MiB + 1) WITHOUT allocating past
+/// it — Go's `http.MaxBytesReader` equivalent at the
+/// transport edge. Returns the bytes when the whole body
+/// fits, or an error (over-cap or transport) otherwise.
+/// Trailers are ignored, as Go's decoder ignores them.
+async fn read_capped_body(req: Request<Incoming>) -> Result<Vec<u8>, BodyRead> {
+    let mut body = req.into_body();
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| BodyRead::Transport)?;
+        if let Ok(data) = frame.into_data() {
+            if buf.len() + data.len() > MAX_BODY_BYTES {
+                return Err(BodyRead::OverCap);
+            }
+            buf.extend_from_slice(&data);
+        }
+    }
+    Ok(buf)
 }
 
 /// The hyper body type for responses.
@@ -944,4 +1004,135 @@ mod tests {
             );
         }
     }
+    /// Minimal valid config for the live-server tests: the
+    /// webui block allows 100 failed attempts so the tests
+    /// never trip the limiter.
+    const LIVE_FIXTURE: &str = r#"{
+  "default_profile": "muse01",
+  "profiles": {
+    "muse01": {
+      "cookies_file": "profiles/muse01/cookies.txt",
+      "outbound": "proxy-eu",
+      "fingerprint": "chrome"
+    }
+  },
+  "outbounds": [
+    {"type": "trojan", "tag": "proxy-eu", "server": "203.0.113.10", "server_port": 443, "password": "SECRET-TROJAN"}
+  ],
+  "dns": {"servers": [{"tag": "dns1", "type": "tcp", "server": "127.0.0.1", "server_port": 5353}], "final": "dns1"},
+  "webui": {"listen": "127.0.0.1:18318", "token": "plain-token", "login_rate_limit": {"attempts": 100, "window": "5m"}}
+}"#;
+
+    fn live_server(dir: &std::path::Path) -> Arc<Server> {
+        let token_hash = crate::auth::hash_token("plain-token").expect("hash test token");
+        Server::new(Deps {
+            config_dir: dir.to_path_buf(),
+            version: "0.9.0".to_string(),
+            listen_addr: "127.0.0.1:0".to_string(),
+            token_hash,
+            has_token: <redacted>
+            bundle_sha256: crate::static_shell::bundle_sha256(),
+            ui_dir: None,
+            cookies_files: Vec::new(),
+            import_cookies: None,
+            restore_cookies: None,
+            screencast_available: None,
+            screencast_starter: None,
+            chats: None,
+        })
+        .expect("test server builds")
+    }
+
+    /// One raw HTTP request over a fresh TCP connection;
+    /// returns the full response head + body as text.
+    /// The write may break early (the server can 400/405
+    /// while the client is still sending) — write errors
+    /// are ignored, the response is what is asserted.
+    async fn raw_request(port: u16, method: &str, path: &str, body_len: usize) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        let head = format!(
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer plain-token\r\nContent-Type: application/json\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n"
+        );
+        let _ = stream.write_all(head.as_bytes()).await;
+        let chunk = vec![b'x'; 65536];
+        let mut remaining = body_len;
+        while remaining > 0 {
+            let n = remaining.min(chunk.len());
+            if stream.write_all(&chunk[..n]).await.is_err() {
+                break;
+            }
+            remaining -= n;
+        }
+        let mut resp = Vec::new();
+        let _ = stream.read_to_end(&mut resp).await;
+        String::from_utf8_lossy(&resp).into_owned()
+    }
+
+    async fn live_server_case(method: &str, path: &str, body_len: usize) -> String {
+        // Unique scratch dir per call: cargo runs the
+        // live-server tests in parallel.
+        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "m6b-server-live-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), LIVE_FIXTURE).unwrap();
+        let server = live_server(&dir);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let srv = Arc::clone(&server);
+        let handle = tokio::spawn(async move {
+            let _ = srv.serve_on(listener).await;
+        });
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            raw_request(port, method, path, body_len),
+        )
+        .await
+        .expect("request completes");
+        server.request_shutdown();
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+        resp
+    }
+
+    #[tokio::test]
+    async fn over_cap_body_to_unknown_api_path_is_400() {
+        // R4 fail-before: with the cap wired, a 2 MiB body
+        // to an unknown API path is the fixed 400 BEFORE
+        // dispatch. With the cap removed (MAX_BODY_BYTES
+        // neutered huge), the body is read whole, dispatch
+        // falls through to the shell, and this test goes
+        // RED with 200 — that is the proof the cap, not
+        // the per-handler decode cap, is doing the work.
+        let resp = live_server_case("POST", "/api/v1/nope", 2 * 1024 * 1024).await;
+        assert!(resp.starts_with("HTTP/1.1 400"), "{resp}");
+        assert!(resp.contains("invalid JSON in request body"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn over_cap_body_to_wrong_method_is_405() {
+        // Routing precedes any body read: a 2 MiB body to
+        // a known path with the wrong method is a 405, not
+        // a 400 — Go never reads the body for a 405.
+        let resp = live_server_case("POST", "/api/v1/status", 2 * 1024 * 1024).await;
+        assert!(resp.starts_with("HTTP/1.1 405"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn body_on_get_is_ignored() {
+        // GET routes never read a body: a 2 MiB body on a
+        // GET is ignored and the request succeeds.
+        let resp = live_server_case("GET", "/api/v1/status", 2 * 1024 * 1024).await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    }
+
 }
