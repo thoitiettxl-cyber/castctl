@@ -5048,6 +5048,92 @@ M4b merged at `27a0eaf`; the seam services exist in
 the tree, the mapping is still unverified — deferred
 to the CLI-wiring follow-up.)
 
+## M5a.9 Rebase onto merged M4b (2026-11-05)
+
+M4b PR #67 merged by Boss himself (`27a0eaf`,
+2026-11-05T15:55:49Z; Boss-verified: fmt 0, clippy
+`--all-targets` 0, 467 test, release build 0). The
+remote moving under this branch is normal (Boss
+standing rule, 2026-11-05): rebase onto the new head
+and re-run the gates; stop only if a conflict touches
+a file that must not be edited, or another crate's
+tests fail for a reason outside the rebase scope.
+
+- M4b-base test count, measured on cue in a separate
+  clean checkout of `27a0eaf` (NOT the shared M4b
+  checkout): **467 passed, 0 failed** (29 suites),
+  matching Boss's 467 and M4b's own gate. Run with
+  `CARGO_PROFILE_DEV_DEBUG=0` +
+  `CARGO_PROFILE_DEV_INCREMENTAL=false` (disk-forced;
+  the default-profile build hit 100% disk, see below).
+- Rebase: the 6 M5a commits replayed onto `27a0eaf`
+  with exactly ONE conflict, `rust/PORTING.md` —
+  both sides had appended their section before
+  `## Quy tắc quyết định`; resolved by keeping BOTH,
+  M4b first, then M5a, no section dropped.
+  `rust/Cargo.toml` auto-merged (M4b's workspace dep
+  block + M5a's `"castctl-telegram"` member line);
+  `rust/Cargo.lock` auto-merged. No M4b src touched.
+- TLS swap (commits `192a675` + lock refresh
+  `3cf1b23`, head `3cf1b23`): temp `tls.rs` DELETED
+  (file + `mod tls;` + 6 direct deps), `BotApi`
+  rewired to M4b's `HttpClient::request_tls` (single
+  `HttpClient` + `use_tls` flag), `telegram_api_target`
+  moved into `api.rs`. ALPN `http/1.1` is M4b's
+  `tls_client_config`, pinned by M4b's own test
+  `tls_config_pins_http11_alpn` in
+  `castctl-transport`. The 3 deleted unit tests are
+  gone with the module; their coverage lives on in
+  M4b's transport tests (already in the 467).
+- LOCK STALE (pre-existing, found by this rebase):
+  the lock at `27a0eaf` (`d85537cd...`) does not
+  match M4b's manifests — M4b added manifest deps
+  without updating it. `cargo build --locked` fails
+  exit 101 on the PURE `27a0eaf` tree and on the
+  rebased tree before refresh (`cannot update the
+  lock file ... because --locked was passed`).
+  Commit `3cf1b23` refreshes it: adds M4b's missing
+  edges (transport rustls/tokio-rustls/webpki-roots,
+  gateway base64/bytes/castctl-config/http/regex/
+  tokio-rustls, cli castctl-gateway/castctl-shared/
+  castctl-transport/chrono/serde_json/tokio, shared
+  chrono/serde_json) AND drops the six edges the
+  TLS swap removed from `castctl-telegram`. No new
+  crate, no version change (verified by package-list
+  comparison). Lock md5 after gates:
+  `c5dfca3382a4e6ec40c6ed55087f527d`, identical
+  before/after the gates.
+- Gates on the committed tree `3cf1b23` (cue,
+  rustc/cargo 1.99.1): `cargo fmt --check` 0;
+  `cargo build --locked --workspace` 0 (run FIRST,
+  on the committed lock); `cargo build --workspace`
+  0; `cargo test --workspace` **560 passed,
+  0 failed, twice consecutively**; `cargo clippy
+  --workspace --all-targets -- -D warnings` 0.
+  Test-count math: 467 (M4b base) + 96 (M5a new)
+  − 3 (deleted TLS unit tests) = 560
+  (`castctl-telegram` lib 70 + `bot_core` 23 = 93).
+- DISK CAVEAT (environment, not code): the
+  default-profile `cargo test --workspace` does NOT
+  fit on cue's current disk — it hit 100% (81M free,
+  then 24K free) twice, failing at link time with
+  `ld terminated with signal 7 [Bus error]` /
+  `No space left on device (os error 28)` before any
+  test ran. Other sessions hold ~24G in `/tmp`
+  (`m4c-a` 15G, `castctl-rust-perf1` 9.4G — never
+  touched); only this task's own target dir was
+  cleaned. The two passing test runs therefore used
+  `CARGO_PROFILE_DEV_DEBUG=0` +
+  `CARGO_PROFILE_DEV_INCREMENTAL=false` (target
+  1.6G; the count is profile-independent). fmt /
+  build / `--locked` / clippy all ran on the
+  default profile. Re-run the default-profile test
+  when disk allows.
+- Reuse decisions and the download-cap consequence
+  are in §M5a.3 deviations 1, 5, 14, 15, 21 and
+  §M5a.4. Live `getMe` / `getMyCommands`: still
+  never verified — no bot token on cue (see §M5a.6).
+
 ## Quy tắc quyết định (Boss, 2026-11-05 — standing)
 
 Applies to the whole Rust port, not just M4a. Decide
