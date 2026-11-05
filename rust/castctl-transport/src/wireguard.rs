@@ -2714,7 +2714,19 @@ pub fn parse_wireguard_endpoint(
         None => None,
     };
     let mut peers = Vec::new();
-    if let Some(arr) = endpoint.get("peers").and_then(|v| v.as_array()) {
+    // Present-but-not-an-array is a Validation naming the
+    // field, not a silent empty list (NB-A; same wrong-type
+    // rule as the rest). Null counts as absent, as elsewhere.
+    let peers_arr = match endpoint.get("peers") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Array(arr)) => Some(arr),
+        Some(_) => {
+            return Err(validation(
+                "wireguard endpoint \"peers\" must be an array".to_string(),
+            ));
+        }
+    };
+    if let Some(arr) = peers_arr {
         for (peer_idx, peer) in arr.iter().enumerate() {
             if !peer.is_object() {
                 return Err(validation(format!(
@@ -3569,6 +3581,44 @@ mod tests {
                 .expect_err("negative keepalive must fail"),
         );
         assert!(msg.contains("persistent_keepalive_interval"), "got {msg}");
+    }
+
+    // (NB-A) `peers` present-but-not-an-array is a `Validation`
+    // naming the field — not the misleading "has no peers" from
+    // `new()` that the old silent-empty-list shape produced.
+    // `peers: null` still counts as absent (as elsewhere), so
+    // it keeps the "has no peers" error from `new()`.
+    #[test]
+    fn fake_wrong_typed_peers_is_validation() {
+        for bad in [r#""x""#, "123", "true", r#"{"public_key":"x"}"#] {
+            let json = fake_valid_endpoint_json().replacen(
+                r#""peers":["#,
+                &format!("\"peers\":{bad},\"_ignored\":["),
+                1,
+            );
+            let msg = validation_msg(
+                parse_wireguard_endpoint(&fake_json(&json), &[])
+                    .expect_err("wrong-typed peers must fail"),
+            );
+            assert!(msg.contains("peers"), "peers={bad}: got {msg}");
+            assert!(msg.contains("must be an array"), "peers={bad}: got {msg}");
+            assert!(
+                !msg.contains("has no peers"),
+                "peers={bad}: must name the wrong type, not the absent-peers symptom: got {msg}"
+            );
+        }
+        let json =
+            fake_valid_endpoint_json().replacen(r#""peers":["#, "\"peers\":null,\"_ignored\":[", 1);
+        let parsed = parse_wireguard_endpoint(&fake_json(&json), &[])
+            .expect("null peers counts as absent and still parses");
+        assert!(parsed.peers.is_empty(), "null peers must parse to no peers");
+        let msg = validation_msg(
+            WireGuardDialer::new(parsed).expect_err("a dialer with no peers must fail"),
+        );
+        assert!(
+            msg.contains("has no peers"),
+            "null peers counts as absent: got {msg}"
+        );
     }
 
     #[test]

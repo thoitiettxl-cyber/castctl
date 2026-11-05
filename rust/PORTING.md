@@ -2500,9 +2500,12 @@ both are called as dependencies only (see `docs/provenance.md`
   end the lookup — the next server in `wireguard_dns` is
   tried. A dead first server still consumes the dial
   timeout (no per-query timeout; deferred, §M3d.10).
-- Transaction ids are seeded from wall-clock nanoseconds
-  plus a process counter (never 0, never sequential from
-  dial to dial); replies are checked for txid, question
+- Transaction ids start per pump core/tunnel from a seed
+  (wall-clock nanoseconds plus a process-wide counter,
+  never 0) and then increment sequentially, one per query,
+  within that core — so txids ARE sequential within one
+  tunnel and only the starting value differs between
+  cores/tunnels; replies are checked for txid, question
   name, question type, AND source address (a reply from an
   address other than the queried server is ignored and the
   query stays pending). The TC (truncated) bit yields no

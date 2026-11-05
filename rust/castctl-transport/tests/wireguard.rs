@@ -15,6 +15,7 @@
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -132,6 +133,10 @@ struct FakeWgServer {
     /// Raw bytes the server task sends to the client from its
     /// own UDP socket (garbage-injection hook for the R-B4 test).
     inject_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    /// The last WireGuard DATA packet (type 4) the server sent
+    /// to the client, if any — a genuine encrypted packet from
+    /// this harness's own UDP traffic (NB-D replay test).
+    captured_data: Arc<Mutex<Option<Vec<u8>>>>,
     stop: Arc<AtomicBool>,
     join: JoinHandle<()>,
 }
@@ -141,6 +146,12 @@ impl FakeWgServer {
     /// socket, so they arrive with the peer as their source.
     fn inject(&self, bytes: &[u8]) {
         let _ = self.inject_tx.send(bytes.to_vec());
+    }
+
+    /// The last WireGuard DATA packet the server sent to the
+    /// client, if any (see `captured_data`).
+    fn captured_data_packet(&self) -> Option<Vec<u8>> {
+        self.captured_data.lock().ok().and_then(|g| g.clone())
     }
 
     /// The client's UDP socket address, as observed by the
@@ -193,6 +204,10 @@ struct FakeServerState {
     max_datagram: Arc<AtomicUsize>,
     peer_port: Arc<AtomicUsize>,
     inject_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    /// Last server→client WireGuard DATA packet (type 4), for
+    /// the NB-D replay test (recorded at flush, after a
+    /// successful send, so it was genuinely delivered).
+    captured_data: Arc<Mutex<Option<Vec<u8>>>>,
     stop: Arc<AtomicBool>,
     started: Instant,
     last_timers: Instant,
@@ -292,6 +307,7 @@ impl FakeWgServer {
         let max_datagram = Arc::new(AtomicUsize::new(0));
         let peer_port = Arc::new(AtomicUsize::new(0));
         let (inject_tx, inject_rx) = tokio::sync::mpsc::unbounded_channel();
+        let captured_data = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let state = FakeServerState {
             udp,
@@ -311,6 +327,7 @@ impl FakeWgServer {
             max_datagram: Arc::clone(&max_datagram),
             peer_port: Arc::clone(&peer_port),
             inject_rx,
+            captured_data: Arc::clone(&captured_data),
             stop: Arc::clone(&stop),
             started: Instant::now(),
             last_timers: Instant::now(),
@@ -323,6 +340,7 @@ impl FakeWgServer {
             max_datagram,
             peer_port,
             inject_tx,
+            captured_data,
             stop,
             join,
         }
@@ -530,6 +548,15 @@ async fn run_fake_server(mut st: FakeServerState) {
             for bytes in outbox.drain(..) {
                 if st.udp.send_to(&bytes, peer).await.is_err() {
                     break;
+                }
+                // (NB-D) Record the last delivered server→client
+                // WireGuard DATA packet (type 4) so the replay
+                // test can re-send a genuine, already-delivered
+                // packet verbatim at the client tunnel.
+                if bytes.first() == Some(&4) {
+                    if let Ok(mut slot) = st.captured_data.lock() {
+                        *slot = Some(bytes);
+                    }
                 }
             }
         } else {
@@ -741,7 +768,7 @@ async fn fake_wireguard_slow_reader_no_data_loss() {
     assert_eq!(got, payload, "slow-reader echo must be byte-exact");
 }
 
-// (T2) EOF after a full channel: the peer sends 768 KiB (>
+// (T2) EOF after a full channel: the peer sends 576 KiB (>
 // 512 KiB channel) then FINs. The EOF must be delivered after
 // the drain — not lost while the channel is full (which hung
 // `poll_read` on `Pending` forever), and not misreported as a
@@ -849,6 +876,54 @@ async fn fake_wireguard_bad_datagram_does_not_kill_tunnel() {
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
     fake_echo(&mut stream, b"after-garbage").await;
+}
+
+// (NB-D) Replayed-packet injection: a genuine server→client
+// WireGuard DATA packet, captured from this harness's own UDP
+// traffic and replayed verbatim, must be dropped as
+// `DuplicateCounter` — never fatal to the tunnel. The packet is
+// only replayed once it has been stable for 300 ms of idle, so
+// it is certainly already delivered (and its counter already
+// consumed): replaying a packet still in flight would be a
+// first delivery, not a replay.
+#[tokio::test]
+async fn fake_wireguard_replayed_data_packet_does_not_kill_tunnel() {
+    let server = FakeWgServer::start(None, false).await;
+    let dialer = WireGuardDialer::new(fake_client_cfg(&server, None, 0, fake_allow_all(), vec![]))
+        .expect("fake client cfg valid");
+    let mut stream = dialer
+        .dial(&DialTarget::new("10.0.0.1", 80))
+        .await
+        .expect("fake dial works");
+    fake_echo(&mut stream, b"before-replay").await;
+    // Settle: the captured packet must be stable across 300 ms
+    // of idle, proving it was delivered (and consumed) long ago.
+    let first = server
+        .captured_data_packet()
+        .expect("server must have sent a data packet during the echo");
+    assert_eq!(
+        first.first(),
+        Some(&4),
+        "captured packet must be a WireGuard data packet"
+    );
+    assert!(
+        first.len() > 32,
+        "captured packet must carry TCP payload, got {} bytes",
+        first.len()
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let replay = server
+        .captured_data_packet()
+        .expect("server must have sent a data packet during the echo");
+    assert_eq!(
+        replay, first,
+        "no new data packet may appear during idle; otherwise the replay would not be of an already-delivered packet"
+    );
+    // Replay the genuine packet verbatim, from the peer's own
+    // address (the inject hook sends from the server socket).
+    server.inject(&replay);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    fake_echo(&mut stream, b"after-replay").await;
 }
 
 // (NB20) PSK control for the mismatch test: both sides use the
