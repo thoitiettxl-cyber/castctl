@@ -476,23 +476,54 @@ pub async fn run_entries(
     on_tick: Option<OnTick>,
 ) -> Vec<RunResult> {
     let mut handles = Vec::new();
+    let mut tags = Vec::new();
     for deps in entries {
         let cancel = cancel.clone();
         let on_tick = on_tick.clone();
+        // Keep the tag outside the task: a `JoinError`
+        // carries no tag, and the entry is the only
+        // thing that identifies the failed task.
+        let tag = deps.tag.clone();
         handles.push(tokio::spawn(async move {
             run_entry_inner(deps, cancel, on_tick).await
         }));
+        // `handles` and `tags` stay in lockstep (one
+        // push each, same order).
+        tags.push(tag);
     }
     let mut results = Vec::new();
-    for h in handles {
+    for (h, tag) in handles.into_iter().zip(tags) {
         match h.await {
             Ok(r) => results.push(r),
-            Err(_) => results.push(RunResult {
-                tag: String::new(),
-                stopped: false,
-                ticks: 0,
-                last: None,
-            }),
+            // Red-team N4 (review round 2): a panicking
+            // task used to become a silent empty-tag
+            // result. The task is still reported the same
+            // way (Go has no equivalent — a Go panic
+            // crashes the process), but the failure is
+            // no longer silent. No log framework exists
+            // in this workspace (`log` has no logger
+            // anywhere, so `log::warn!` would discard),
+            // so the line goes to stderr, like Go's
+            // keeper logger. Only the tag and the
+            // panic/cancelled kind are printed — never
+            // the panic payload, which could carry
+            // arbitrary task data.
+            Err(e) => {
+                let kind = if e.is_panic() {
+                    "panicked"
+                } else if e.is_cancelled() {
+                    "cancelled"
+                } else {
+                    "failed"
+                };
+                eprintln!("keeper: tick task {tag} {kind} (no result recorded)");
+                results.push(RunResult {
+                    tag: String::new(),
+                    stopped: false,
+                    ticks: 0,
+                    last: None,
+                });
+            }
         }
     }
     results
@@ -501,6 +532,64 @@ pub async fn run_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn run_entries_reports_panicking_task() {
+        // Red-team N4 (review round 2): a tick task
+        // that panics used to become a silent empty-tag
+        // `RunResult`. The JoinError arm is now logged
+        // (stderr, no payload — see `run_entries`), and
+        // this test pins the arm's behaviour: the runner
+        // still returns one result per entry instead of
+        // hanging or propagating the panic. The panic is
+        // triggered deterministically: `tick()` calls
+        // `clock.now()` as its first statement, so a
+        // clock that panics there aborts the task before
+        // any disk or network access.
+        use crate::checker::CheckerFunc;
+        use crate::clock::Clock;
+        use std::pin::Pin;
+
+        struct PanickingClock;
+        impl Clock for PanickingClock {
+            fn now(&self) -> chrono::DateTime<chrono::Utc> {
+                panic!("panicking test clock");
+            }
+            fn sleep(
+                &self,
+                _d: std::time::Duration,
+                _cancel: &crate::clock::CancelFlag,
+            ) -> Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+                Box::pin(async { false })
+            }
+        }
+
+        let deps = TickDeps {
+            clock: Arc::new(PanickingClock),
+            tag: "no.0".to_string(),
+            interval: std::time::Duration::from_secs(60),
+            retry_backoff: Vec::new(),
+            wake_on_gateway_failure: false,
+            wake_attempts: 0,
+            credentials_configured: false,
+            base_dir: String::new(),
+            profile_name: String::new(),
+            checker: Arc::new(CheckerFunc(|_| Box::pin(async { unreachable!() }))),
+            exporter: None,
+            notifier: None,
+            gateway_probe: None,
+            wake: None,
+            relogin: None,
+            credential_provider: None,
+            jitter: None,
+            lock_timeout: std::time::Duration::from_secs(5),
+            before_state_save: None,
+        };
+        let results = run_entries(vec![deps], CancelFlag::new(), None).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tag, "");
+        assert_eq!(results[0].ticks, 0);
+    }
 
     #[test]
     fn owner_path_rejects_escape() {

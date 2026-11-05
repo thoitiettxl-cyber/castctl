@@ -617,8 +617,18 @@ impl RealReloginDriver {
         // only the exporter opts out with
         // `WithDetachOnCancel`. Best effort: the browser
         // may already be gone (and on the launch path the
-        // kill below destroys the tab anyway).
-        let _ = ctx.client.close_target(&ctx.target_id).await;
+        // kill below destroys the tab anyway). A failed
+        // close is logged, not swallowed silently
+        // (safety NIT-4, review round 2): a transient
+        // failure here leaks a tab with no trace
+        // otherwise. Only the target id and the error
+        // class are printed — no cookie or page data.
+        if let Err(e) = ctx.client.close_target(&ctx.target_id).await {
+            eprintln!(
+                "keeper: failed to close relogin target {}: {e}",
+                ctx.target_id
+            );
+        }
         if let Some(launched) = ctx.launched.take() {
             let _ = tokio::time::timeout(self.opts.timeouts.cancel_timeout, launched.kill()).await;
         }

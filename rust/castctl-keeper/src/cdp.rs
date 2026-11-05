@@ -156,6 +156,14 @@ pub const LIST_BODY_CAP: usize = 1024 * 1024;
 pub const CDP_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Keepalive Ping interval.
 pub const CDP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+/// Explicit cap for one incoming CDP WebSocket message
+/// (64 MiB). This is tungstenite 0.30.0's
+/// `WebSocketConfig::default()` value, set explicitly
+/// here so a tungstenite upgrade cannot change it
+/// silently (safety NIT-8, review round 2). The cap is
+/// enforced when tungstenite assembles a message
+/// (`protocol/mod.rs`: `check_max_size`).
+pub const CDP_WS_MAX_MESSAGE_SIZE: usize = 64 << 20;
 
 /// Whether the raw URL carries userinfo: an `@` in the
 /// AUTHORITY (before the first `/`). The `url` crate
@@ -167,12 +175,44 @@ fn has_userinfo(raw: &str) -> bool {
     authority.contains('@')
 }
 
+/// The port written explicitly in an authority
+/// (`host:port`), if any. The `url` crate drops a port
+/// equal to the scheme default (`ws`/`http` -> 80) at
+/// parse time (`Url::port()` -> `None`), while Go's
+/// `u.Port()` returns the written digits (`"80"`).
+/// An explicit default port still counts as present
+/// (Go accepts it); a missing port must stay an error
+/// (Go rejects it). Only the written digits are read —
+/// never the scheme default — so a missing port cannot
+/// be mistaken for an explicit one.
+fn explicit_port(authority: &str) -> Option<u16> {
+    // Userinfo is already rejected by the callers, but
+    // never let it confuse the host/port split.
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let port_str = if let Some(rest) = authority.strip_prefix('[') {
+        // IPv6 literal: `[::1]:80` — the port follows
+        // the closing bracket.
+        rest.split(']').nth(1)?.strip_prefix(':')?
+    } else {
+        // IPv4/hostname: the port follows the last `:`.
+        authority.rsplit_once(':')?.1
+    };
+    if port_str.is_empty() || !port_str.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    port_str.parse::<u16>().ok()
+}
+
 /// The shared loopback host/port check (Go
 /// `validateLoopbackURL`, `export_cdp.go:391-418`):
 /// loopback host (`net.ParseIP` + `IsLoopback`
 /// semantics, `localhost` allowed) and a port in
-/// 1..=65535. Returns the host (no brackets) and port.
-fn check_loopback_host_port(url: &url::Url) -> Result<(String, u16), CdpError> {
+/// 1..=65535. `authority` is the `host:port` text as
+/// written (see `raw_authority`): it is only used to
+/// tell an explicit default port (`:80`, dropped by
+/// the `url` crate) from a missing port. Returns the
+/// host (no brackets) and port.
+fn check_loopback_host_port(url: &url::Url, authority: &str) -> Result<(String, u16), CdpError> {
     let host = url
         .host_str()
         .ok_or_else(|| CdpError::Http("browser URL has no host".to_string()))?;
@@ -186,9 +226,16 @@ fn check_loopback_host_port(url: &url::Url) -> Result<(String, u16), CdpError> {
             "browser URL host {host} is not loopback"
         )));
     }
-    let port = url
-        .port()
-        .ok_or_else(|| CdpError::Http("browser URL has no port".to_string()))?;
+    let port = match url.port() {
+        Some(p) => p,
+        // `url` drops a port equal to the scheme
+        // default at parse time; Go's `u.Port()`
+        // returns the written digits, so an explicit
+        // `:80` still counts (Go accepts it) while a
+        // missing port stays an error (Go rejects it).
+        None => explicit_port(authority)
+            .ok_or_else(|| CdpError::Http("browser URL has no port".to_string()))?,
+    };
     if port == 0 {
         return Err(CdpError::Http("browser URL port out of range".to_string()));
     }
@@ -237,7 +284,7 @@ pub fn validate_loopback_base(raw: &str) -> Result<String, CdpError> {
             "browser URL must not contain userinfo".to_string(),
         ));
     }
-    let (_host, _port) = check_loopback_host_port(&url)?;
+    let (_host, _port) = check_loopback_host_port(&url, raw_authority(s))?;
     Ok(format!("http://{}", raw_authority(s)))
 }
 
@@ -261,7 +308,7 @@ pub fn validate_loopback_ws_url(raw: &str) -> Result<(), CdpError> {
             "browser URL must not contain userinfo".to_string(),
         ));
     }
-    check_loopback_host_port(&url)?;
+    check_loopback_host_port(&url, raw_authority(raw))?;
     Ok(())
 }
 
@@ -408,6 +455,7 @@ mod real {
     use super::*;
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
     struct Outgoing {
         id: u64,
@@ -450,11 +498,22 @@ mod real {
         /// discovery.
         pub async fn connect(ws_url: &str) -> Result<Self, CdpError> {
             validate_loopback_ws_url(ws_url)?;
-            let (ws, _) =
-                tokio::time::timeout(CDP_DIAL_TIMEOUT, tokio_tungstenite::connect_async(ws_url))
-                    .await
-                    .map_err(|_| CdpError::Timeout)?
-                    .map_err(|e| CdpError::Ws(e.to_string()))?;
+            // Explicit message cap (see
+            // `CDP_WS_MAX_MESSAGE_SIZE`): identical to
+            // `connect_async`'s defaults (`None, false`)
+            // except the cap is spelled out instead of
+            // inherited from tungstenite's default.
+            // `WebSocketConfig` is `#[non_exhaustive]`,
+            // so the cap is set with its builder method.
+            let ws_config =
+                WebSocketConfig::default().max_message_size(Some(CDP_WS_MAX_MESSAGE_SIZE));
+            let (ws, _) = tokio::time::timeout(
+                CDP_DIAL_TIMEOUT,
+                tokio_tungstenite::connect_async_with_config(ws_url, Some(ws_config), false),
+            )
+            .await
+            .map_err(|_| CdpError::Timeout)?
+            .map_err(|e| CdpError::Ws(e.to_string()))?;
             let (mut write, read) = ws.split();
             let (tx, mut rx) = mpsc::channel::<Outgoing>(64);
             let (browser_tx, _) = broadcast::channel::<CdpEvent>(256);
@@ -900,6 +959,72 @@ mod tests {
         assert!(validate_loopback_ws_url("ws://user@127.0.0.1:9226/devtools/browser/abc").is_err());
         assert!(validate_loopback_ws_url("ws://127.0.0.1/devtools/browser/abc").is_err());
         assert!(validate_loopback_ws_url("ws://127.0.0.1:0/devtools/browser/abc").is_err());
+    }
+
+    #[test]
+    fn validate_loopback_default_port_is_explicit() {
+        // N1 (review round 2): the `url` crate drops a
+        // port equal to the scheme default at parse time
+        // (`ws`/`http` -> 80), but Go's `u.Port()`
+        // returns the written digits, so an explicit
+        // `:80` still counts as a port (Go accepts it).
+        // A missing port must stay an error (Go rejects
+        // it). Probed against Go 1.26.8 `net/url` on cue
+        // 2026-11-06: `ws://127.0.0.1:80/x` -> port
+        // "80"; `ws://127.0.0.1/x` -> port "".
+        assert!(validate_loopback_ws_url("ws://127.0.0.1:80/devtools/browser/abc").is_ok());
+        assert!(validate_loopback_ws_url("ws://127.0.0.1:443/devtools/browser/abc").is_ok());
+        assert!(validate_loopback_ws_url("ws://127.0.0.1:080/devtools/browser/abc").is_ok());
+        assert!(validate_loopback_ws_url("ws://[::1]:80/devtools/browser/abc").is_ok());
+        assert_eq!(
+            validate_loopback_base("http://127.0.0.1:80").unwrap(),
+            "http://127.0.0.1:80"
+        );
+        assert_eq!(
+            validate_loopback_base("http://[::1]:80").unwrap(),
+            "http://[::1]:80"
+        );
+        // No port at all is still an error (Go:
+        // `u.Port() == ""`).
+        assert!(validate_loopback_ws_url("ws://127.0.0.1/devtools/browser/abc").is_err());
+        assert!(validate_loopback_base("http://127.0.0.1").is_err());
+    }
+
+    #[test]
+    fn validate_loopback_uppercase_scheme_matches_go() {
+        // Safety NIT-3 (review round 2) claimed Go
+        // rejects an uppercase scheme — WRONG. Go's
+        // `net/url.Parse` lowercases the scheme
+        // (probed on cue 2026-11-06, go1.26.8:
+        // `WS://127.0.0.1:9226/x` -> scheme "ws",
+        // `HTTP://127.0.0.1:9226/` -> scheme "http"),
+        // and the `url` crate does the same, so Rust
+        // already matches Go here. No code change;
+        // this pin locks the Go-parity behaviour so a
+        // future "fix" does not break it.
+        assert!(validate_loopback_ws_url("WS://127.0.0.1:9226/devtools/browser/abc").is_ok());
+        assert!(validate_loopback_ws_url("Ws://127.0.0.1:9226/devtools/browser/abc").is_ok());
+        assert_eq!(
+            validate_loopback_base("HTTP://127.0.0.1:9226").unwrap(),
+            "http://127.0.0.1:9226"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "chromedp")]
+    fn ws_max_message_size_is_explicit_64mib() {
+        // Safety NIT-8 (review round 2): the 64 MiB cap
+        // used to come from tungstenite's default; the
+        // connect path now sets it explicitly, so a
+        // tungstenite upgrade cannot change it silently.
+        // This pin fails if the library default ever
+        // moves away from the value we rely on.
+        use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+        assert_eq!(CDP_WS_MAX_MESSAGE_SIZE, 64 << 20);
+        assert_eq!(
+            WebSocketConfig::default().max_message_size,
+            Some(CDP_WS_MAX_MESSAGE_SIZE)
+        );
     }
 
     #[test]

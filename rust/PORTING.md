@@ -6177,12 +6177,23 @@ keeper lib 88, config lib 100).
   CLOSED in fix loop 1 by reading chromedp v0.21.0
   `allocate.go` source (`Headless` sets the bool flag;
   `flagArgs` renders a true bool bare, omits a false
-  bool). Still open: tungstenite Pong flush for
-  read-only clients; whether Chrome 9226's profile is
-  `no.0` (only user-data-dir + the live Muse tab seen).
-  CLOSED by the §M6a.9 probe: CDP WS handshake needs
-  no Origin header, and `Target.attachToTarget` with
-  `flatten: true` works.
+  bool). CLOSED in fix loop 2 by reading tungstenite
+  0.30.0 source: on a Ping frame the reader queues a
+  Pong in `additional_send` (`protocol/mod.rs`:
+  `OpCtl::Ping` → `set_additional(Frame::pong(..))`)
+  and the next `_write` flushes it (returning
+  `should_flush = true`); the keeper reader's
+  `continue` on `Message::Ping` therefore cannot lose
+  the Pong. Caveat: the flush rides on the next write
+  from the split write half (a CDP call, or the 30s
+  keepalive Ping — `SinkExt::send` flushes), so a
+  Pong can wait up to one keepalive interval; Chrome
+  DevTools rarely pings clients, and no stall was
+  observed. Whether Chrome 9226's profile is `no.0`
+  is still open (only user-data-dir + the live Muse
+  tab seen). CLOSED by the §M6a.9 probe: CDP WS
+  handshake needs no Origin header, and
+  `Target.attachToTarget` with `flatten: true` works.
 - Login/relogin live flow (fill/click/submit, harvest
   L1–L4, `waitForCookies`) — never run against a real
   Chrome; only the CDP read-only probe (§M6a.9) ran.
@@ -6200,7 +6211,7 @@ keeper lib 88, config lib 100).
 - Fix loop 1 known limitations (not fixed, by decision):
   R-2 click does not scroll-into-view, R-3 fill on a
   readonly field, R-5 `first_page_target` may pick the
-  restore tab (`relogin.rs`), C-7 Pong flush, S-2
+  restore tab (`relogin.rs`), S-2
   `pid_alive` EPERM (Rust treats it as alive — stricter
   than Go, fail-closed), S-9 cancel is a string
   (`"tick cancelled"`, not typed `ctx.Err()`), E-4
@@ -6208,7 +6219,10 @@ keeper lib 88, config lib 100).
   F10 `Target.closeTarget` is code-only (never run
   against a real tab), C-6 attach race window (a CDP
   event can arrive before the session map insert).
-  Pre-existing `unsafe` FFI (`run.rs:111` `libc::kill`,
+  C-7 Pong flush was in this list until fix loop 2
+  closed it by library evidence (see the headless/Pong
+  bullet above).
+  Pre-existing `unsafe` FFI (`run.rs:131` `libc::kill`,
   `lockfile.rs` `libc::flock`/`dup`) is out of scope.
 
 ## M6a.7 Fix loop (2026-11-05/06, writer)
@@ -6505,16 +6519,129 @@ Go-source evidence (see below). Gates after the fix
 - **NOT fixed, recorded as known limitations
   (§M6a.6):** R-2 click scroll-into-view, R-3 fill
   readonly, R-5 `first_page_target` may pick the
-  restore tab, C-7 Pong flush, S-2 `pid_alive` EPERM
+  restore tab, S-2 `pid_alive` EPERM
   (Rust is stricter — fail-closed deviation), S-9
   cancel as a string, E-4 `RefusingTransport`
   (additive, no Go counterpart), F10 live closeTarget
   (code only, never run against a real tab), C-6
   attach race window (event before the session map
-  insert). Pre-existing `unsafe` FFI in `run.rs:111`
+  insert). C-7 Pong flush left this list in fix loop
+  2 (closed by tungstenite-source evidence, §M6a.6). Pre-existing `unsafe` FFI in `run.rs:131`
   (`libc::kill`) and `lockfile.rs` (`libc::flock` /
   `dup`) is out of scope for this loop — disclosed,
   not changed.
+
+## M6a.11 Fix loop 2 (2026-11-06, review round 2)
+
+Round 2 was 3× PASS, 0 BLOCKING; this loop fixes only
+the cheap NITs (1 commit, no scope change):
+
+- **PR body base line** (technical N1): the draft
+  said `Base: dev-rust c7b1d34`; the base moved twice
+  during the loop — first to `25a124e` (#70 docs sweep
+  merged), then to `1602b12b` (M5b PR #71 merged while
+  this loop ran). The branch was rebased onto
+  `1602b12b` with 0 conflict (standing rule: dev-rust
+  advancing is normal, rebase + re-gate, do not stop);
+  baseline at the new base is 643 (counted
+  independently by test attributes: 643 at `1602b12b`,
+  765 at HEAD).
+- **Default port dropped** (red-team N1, safety
+  NIT-2): `check_loopback_host_port` used
+  `url.port()`, which is `None` for an explicit port
+  equal to the scheme default (`:80` for `ws`/`http`),
+  while Go's `u.Port()` returns `"80"`. Fixed by
+  reading the explicitly written port from the raw
+  authority (`explicit_port` in `cdp.rs`) when
+  `url.port()` is `None`; a missing port is still an
+  error, exactly as Go rejects it. Pinned by
+  `validate_loopback_default_port_is_explicit`
+  (`:80`, `:443`, `:080`, `[::1]:80` accept; no port
+  rejects). Note: the fix reads the written digits,
+  not `port_or_known_default()` as the review
+  suggested — same outcome, and it cannot mistake a
+  missing port for an explicit one.
+- **Uppercase scheme NOT changed** (safety NIT-3
+  REFUTED): the review claimed Go rejects `WS://`,
+  but a Go probe on cue (go1.26.8 `net/url`,
+  2026-11-06) shows `url.Parse` lowercases the
+  scheme (`"WS://…"` → scheme `"ws"`), and the
+  `url` crate does the same — Rust already matches
+  Go. No code change; pinned by
+  `validate_loopback_uppercase_scheme_matches_go` so
+  a future "fix" does not break parity.
+- **`max_message_size` explicit** (safety NIT-8):
+  `CdpClient::connect` now dials with
+  `connect_async_with_config` and an explicit 64 MiB
+  cap (`CDP_WS_MAX_MESSAGE_SIZE`), equal to
+  tungstenite 0.30.0's default (verified in the
+  registry source). `disable_nagle: false` is kept,
+  so the dial is otherwise identical to
+  `connect_async`. Pinned by
+  `ws_max_message_size_is_explicit_64mib`.
+- **`run_entries` JoinError logged** (red-team N4):
+  a panicking tick task no longer becomes a silent
+  empty-tag result — the tag + panic/cancelled kind
+  go to stderr (`eprintln!`). No log framework
+  exists in this workspace (`log` has no logger
+  anywhere, so `log::warn!` would discard silently);
+  the panic payload is never printed. The empty-tag
+  result itself is unchanged (Go has no equivalent —
+  a Go panic crashes the process). Pinned by
+  `run_entries_reports_panicking_task` (a clock that
+  panics in `now()`, the first thing `tick()` calls).
+  The "swallows panic into `RunResult`" nature is
+  still a known limitation — only the silence is
+  fixed.
+- **F10 close error logged** (safety NIT-4):
+  `teardown` logs a failed `close_target` to stderr
+  (target id + error class, no cookie/page data);
+  best-effort behaviour unchanged.
+- **PORTING cite fixed** (safety NIT-1):
+  `run.rs:111` → `run.rs:131` for `libc::kill`
+  (§M6a.6, §M6a.10).
+- **C-7 Pong closed** (red-team bonus): tungstenite
+  0.30.0 queues the Pong on Ping
+  (`protocol/mod.rs`: `OpCtl::Ping` →
+  `set_additional(Frame::pong(..))`) and flushes it
+  on the next `_write`; the keeper reader's
+  `continue` on `Message::Ping` cannot lose it.
+  Caveat kept in §M6a.6: the flush rides on the next
+  write (a CDP call or the 30s keepalive Ping).
+- **NOT changed, by triage:** N7 ANSI (Go parity —
+  Go strips the same 3 chars only), N9 Protocol echo
+  (Go echoes the peer message), technical N3
+  whitespace trim (marginal — `Url::parse` strips
+  surrounding whitespace while Go rejects it;
+  recorded here, not fixed), red-team N2 gateway-down
+  sha (pre-existing, fingerprint write-only), N3
+  driving-cookie name (needs expiry ≥ ~8.2e12 s),
+  N5–N9 (bootstrap params, strict version/target
+  fields, empty PATH element, frame lag-drop ack —
+  all latent, none reachable on a real page target).
+- Gates (cue, 1.99.1, `CARGO_TARGET_DIR=/tmp/castctl-rust-m6a-target`,
+  on the rebased tree `5a05ab8`, base `1602b12b`):
+  `cargo fmt --check` 0; `cargo test --workspace`
+  (lean profile `CARGO_PROFILE_DEV_DEBUG=0
+  CARGO_INCREMENTAL=false`, M5a precedent) **765 passed,
+  0 failed**, 38 binaries, 0 warnings; focused default
+  profile `-p castctl-keeper -p castctl-config` 212
+  passed (config 100, keeper lib 92, jar 3, tick 17);
+  `cargo clippy -p castctl-keeper -p castctl-config
+  --all-targets -- -D warnings` 0 (focused — the diff
+  touches only keeper; full-workspace clippy was 0 at
+  `8223a4e` and no other crate changed);
+  stub `--no-default-features` **111 passed** (91 lib +
+  3 jar + 17 tick). Baseline 643 + 102 M6a + 16 fix
+  loop 1 + 4 fix loop 2 = 765. (An earlier pre-rebase
+  run on base `25a124e` gave 690/0, 37 binaries:
+  568 + 122.) Disk note: an intermediate incremental
+  full run failed on ENOSPC (not code) because the
+  target dir mixed lean + default profiles and cargo
+  rebuilds the world on a profile switch; the final
+  numbers above are from a from-scratch lean run on
+  the rebased tree. The target dir was deleted right
+  after the gates.
 
 ## Quy tắc quyết định`; resolved by keeping BOTH,
   M4b first, then M5a, no section dropped.
