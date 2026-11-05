@@ -163,6 +163,12 @@ def main():
     os.makedirs(DATA, exist_ok=True)
     summary = {"date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                "machine": {}, "items": {}, "notes": [], "marks": {}}
+    # Commit sha of the tree being measured (M-perf-2): every table's
+    # caption cites this sha, so a stale measurement (run8 was measured
+    # pre-rebase at 3c45bfe but published on the rebased head) is
+    # detectable in one command. Recorded at run start, before any build.
+    _git_head = sh(["git", "rev-parse", "HEAD"], cwd=ROOT)
+    summary["commit"] = _git_head["stdout"].strip() if _git_head["exit"] == 0 else "unknown"
     def mark(key):
         summary["marks"][key] = {"time_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                                  "loadavg": loadavg()}
@@ -517,6 +523,14 @@ def main():
     bb = sh(CARGO + ["build", "--release", "--offline"],
             cwd=os.path.join(PERF, "bench"), timeout=1800)
     item4["rust_bench_build"] = bb
+    # Bench binary identity (M-perf-2): §4/§5 table captions cite the
+    # bench binary's sha256; the driver recorded only the build command
+    # before, so no caption could name the binary that produced the
+    # numbers. RS_BENCH honours CARGO_TARGET_DIR the same way the build
+    # does, so this path is the binary that was just built.
+    if bb["exit"] == 0 and os.path.isfile(RS_BENCH):
+        item4["rust_bench_binary"] = {"size_bytes": os.path.getsize(RS_BENCH),
+                                      "sha256": sha8(RS_BENCH)}
     rust_bench = {}
     rust_raw = {}
     if bb["exit"] == 0:
