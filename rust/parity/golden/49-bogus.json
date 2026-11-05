@@ -2,17 +2,18 @@
   "schema_version": 1,
   "id": "49-bogus",
   "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
   "argv": [
     "bogus"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-ga9hu12x/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-ga9hu12x/xdg",
+    "HOME": "/tmp/castctl-golden-07bpgoca/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-07bpgoca/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-ga9hu12x/work",
+  "cwd": "/tmp/castctl-golden-07bpgoca/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "",

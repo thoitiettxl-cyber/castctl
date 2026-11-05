@@ -2,18 +2,19 @@
   "schema_version": 1,
   "id": "04-invite-help",
   "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
   "argv": [
     "invite",
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-ov6o6lt8/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-ov6o6lt8/xdg",
+    "HOME": "/tmp/castctl-golden-taz9lmis/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-taz9lmis/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-ov6o6lt8/work",
+  "cwd": "/tmp/castctl-golden-taz9lmis/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl invite [--create] [--json]\n\nShow the active profile's invite code, or create one.\n\noptions:\n  --create  create a new invite code, then show it.\n  --json    print the invite object as JSON instead of text.\n",

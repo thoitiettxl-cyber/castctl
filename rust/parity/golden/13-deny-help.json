@@ -2,18 +2,19 @@
   "schema_version": 1,
   "id": "13-deny-help",
   "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
   "argv": [
     "deny",
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-p4lpwoc7/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-p4lpwoc7/xdg",
+    "HOME": "/tmp/castctl-golden-cjpjnmrt/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-cjpjnmrt/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-p4lpwoc7/work",
+  "cwd": "/tmp/castctl-golden-cjpjnmrt/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl deny ID [--always]\n\nDeny a pending request.\n\noptions:\n  --always       deny_always instead of deny.\n",

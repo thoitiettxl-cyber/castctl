@@ -2,18 +2,19 @@
   "schema_version": 1,
   "id": "28-session-start-help",
   "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
   "argv": [
     "session-start",
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-rto8wd4q/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-rto8wd4q/xdg",
+    "HOME": "/tmp/castctl-golden-tx9528cq/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-tx9528cq/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-rto8wd4q/work",
+  "cwd": "/tmp/castctl-golden-tx9528cq/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl session-start [--title TITLE]\n\nStart a new side chat. Prints the session object as JSON.\n\noptions:\n  --title TITLE  title for the new session.\n",

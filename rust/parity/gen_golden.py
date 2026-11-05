@@ -12,6 +12,7 @@ the F1 fixture config installed at $XDG_CONFIG_HOME/castctl/.
 Never hand-edit the golden files: re-run gen_golden.sh.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -21,12 +22,31 @@ import tempfile
 
 TIMEOUT_SECONDS = 10
 
+# F9(a): the generator only ever runs against this exact golden
+# binary. If the installed Go binary differs, generation fails
+# loudly instead of silently recording goldens from another build.
+EXPECTED_GO_VERSION = "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)"
+
+
+def canonical_digest(stdout: bytes, stderr: bytes, exit_code: int) -> str:
+    """sha256 over stdout + NUL + stderr + NUL + exit code (F9(b)).
+
+    The Rust parity test recomputes this from the golden records;
+    the two sides must agree byte-for-byte on the canonical form.
+    """
+    h = hashlib.sha256()
+    h.update(stdout)
+    h.update(b"\x00")
+    h.update(stderr)
+    h.update(b"\x00")
+    h.update(str(exit_code).encode("ascii"))
+    return h.hexdigest()
+
 
 def main() -> int:
     here = os.path.dirname(os.path.abspath(__file__))
     cases_path = os.path.join(here, "cases.json")
     golden_dir = os.path.join(here, "golden")
-    fixture_config = os.path.join(here, "fixtures", "config.json")
     go_bin = os.environ.get("GO_BIN", "/usr/local/bin/castctl")
 
     if not os.path.isfile(go_bin) or not os.access(go_bin, os.X_OK):
@@ -49,9 +69,23 @@ def main() -> int:
     )
     generated_by = version_proc.stdout.decode("utf-8", "replace").splitlines()
     generated_by = generated_by[0] if generated_by else ""
+    if (
+        version_proc.returncode != 0
+        or version_proc.stderr
+        or generated_by != EXPECTED_GO_VERSION
+    ):
+        print(
+            f"gen_golden: GO_BIN --version must be exactly {EXPECTED_GO_VERSION!r}; "
+            f"got exit={version_proc.returncode} stdout={generated_by!r} "
+            f"stderr={version_proc.stderr!r}",
+            file=sys.stderr,
+        )
+        return 2
 
     shutil.rmtree(golden_dir, ignore_errors=True)
     os.makedirs(golden_dir, exist_ok=True)
+
+    manifest = {"schema_version": 1, "generated_by": generated_by, "cases": {}}
 
     for case in cases:
         root = tempfile.mkdtemp(prefix="castctl-golden-")
@@ -63,7 +97,9 @@ def main() -> int:
             os.makedirs(home)
             os.makedirs(cfg_dir)
             os.makedirs(work)
-            shutil.copyfile(fixture_config, os.path.join(cfg_dir, "config.json"))
+            fixture_name = case.get("fixture", "config.json")
+            fixture_path = os.path.join(here, "fixtures", fixture_name)
+            shutil.copyfile(fixture_path, os.path.join(cfg_dir, "config.json"))
             with open(os.path.join(cfg_dir, "config.json"), "rb") as f:
                 config_before = f.read()
             env = {
@@ -115,6 +151,7 @@ def main() -> int:
                 "schema_version": 1,
                 "id": case["id"],
                 "generated_by": generated_by,
+                "fixture": fixture_name,
                 "argv": list(case["argv"]),
                 "env": dict(env),
                 "cwd": work,
@@ -124,6 +161,9 @@ def main() -> int:
                 "stderr": proc.stderr.decode("utf-8", "replace"),
                 "exit_code": proc.returncode,
             }
+            manifest["cases"][case["id"]] = canonical_digest(
+                proc.stdout, proc.stderr, proc.returncode
+            )
             with open(
                 os.path.join(golden_dir, case["id"] + ".json"),
                 "w",
@@ -135,7 +175,13 @@ def main() -> int:
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    written = sorted(os.listdir(golden_dir))
+    with open(os.path.join(golden_dir, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, ensure_ascii=False, sort_keys=True)
+        f.write("\n")
+
+    written = sorted(
+        n for n in os.listdir(golden_dir) if n.endswith(".json") and n != "manifest.json"
+    )
     if len(written) != len(cases):
         print(
             f"gen_golden: wrote {len(written)} files for {len(cases)} cases",

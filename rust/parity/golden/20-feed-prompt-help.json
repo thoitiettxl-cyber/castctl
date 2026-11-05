@@ -2,18 +2,19 @@
   "schema_version": 1,
   "id": "20-feed-prompt-help",
   "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
   "argv": [
     "feed-prompt",
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-nqxewebf/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-nqxewebf/xdg",
+    "HOME": "/tmp/castctl-golden-r3xfr_ox/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-r3xfr_ox/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-nqxewebf/work",
+  "cwd": "/tmp/castctl-golden-r3xfr_ox/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl feed-prompt\n\nShow the feed prompt as JSON. No options.\n",

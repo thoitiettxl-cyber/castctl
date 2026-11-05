@@ -2,18 +2,19 @@
   "schema_version": 1,
   "id": "05-redeem-help",
   "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
   "argv": [
     "redeem",
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-myobv5q4/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-myobv5q4/xdg",
+    "HOME": "/tmp/castctl-golden-4r5f3y_9/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-4r5f3y_9/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-myobv5q4/work",
+  "cwd": "/tmp/castctl-golden-4r5f3y_9/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl redeem CODE [--json]\n\nRedeem an invite code. The code is uppercased and validated\n(6-16 uppercase letters/digits) before any request.\n\noptions:\n  --json    print the result object as JSON instead of text.\n",

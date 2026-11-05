@@ -2,18 +2,19 @@
   "schema_version": 1,
   "id": "24-idea-help",
   "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
   "argv": [
     "idea",
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-r7cy7f4b/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-r7cy7f4b/xdg",
+    "HOME": "/tmp/castctl-golden-u8zlrzpo/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-u8zlrzpo/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-r7cy7f4b/work",
+  "cwd": "/tmp/castctl-golden-u8zlrzpo/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl idea ID\n\nShow one idea card as JSON.\n",

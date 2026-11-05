@@ -2,18 +2,19 @@
   "schema_version": 1,
   "id": "39-auth-help",
   "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
   "argv": [
     "auth",
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-ufsrsfl5/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-ufsrsfl5/xdg",
+    "HOME": "/tmp/castctl-golden-1msml_pi/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-1msml_pi/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-ufsrsfl5/work",
+  "cwd": "/tmp/castctl-golden-1msml_pi/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl auth <subcommand> [options]\n\nAuthentication helpers. \"auth export\" prints guidance only (exit 1,\nno writes). \"auth import\" reads cookies from stdin and writes the\nactive profile's cookies.txt (see \"castctl auth import --help\").\n\"auth login\" is the experimental screencast login (see \"castctl\nauth login --help\"; off by default). \"auth status\" reports the\nsession state from files only, no network (see \"castctl auth\nstatus --help\"). \"auth observe-login\" prints the read-only,\nredacted login-page inventory for the contract fixture (see\n\"castctl auth observe-login --help\").\n\nSubcommands: list, export, import, login, status, observe-login. Run \"castctl auth <subcommand> --help\"\nfor per-subcommand help.\n",

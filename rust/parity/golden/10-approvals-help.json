@@ -2,18 +2,19 @@
   "schema_version": 1,
   "id": "10-approvals-help",
   "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
   "argv": [
     "approvals",
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-fkaxco6a/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-fkaxco6a/xdg",
+    "HOME": "/tmp/castctl-golden-ly73w2r9/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-ly73w2r9/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-fkaxco6a/work",
+  "cwd": "/tmp/castctl-golden-ly73w2r9/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl approvals [--recent] [--raw] [--approve-all]\n\nList pending approvals (network access etc.) as JSON.\n\noptions:\n  --recent       also list recent decisions.\n  --raw          print the whole egress.approvals result as JSON.\n  --approve-all  approve every pending approval with allow_always\n                 (skips approvals with no forever option).\n",

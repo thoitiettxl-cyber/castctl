@@ -2,17 +2,18 @@
   "schema_version": 1,
   "id": "50-missing-redeem",
   "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
   "argv": [
     "redeem"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-s1zdpeor/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-s1zdpeor/xdg",
+    "HOME": "/tmp/castctl-golden-vj7uqv7j/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-vj7uqv7j/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-s1zdpeor/work",
+  "cwd": "/tmp/castctl-golden-vj7uqv7j/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "",

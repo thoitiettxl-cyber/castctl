@@ -2,18 +2,19 @@
   "schema_version": 1,
   "id": "26-unread-help",
   "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
   "argv": [
     "unread",
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-c_rsr13_/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-c_rsr13_/xdg",
+    "HOME": "/tmp/castctl-golden-cmjfzzsf/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-cmjfzzsf/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-c_rsr13_/work",
+  "cwd": "/tmp/castctl-golden-cmjfzzsf/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl unread\n\nShow unread counts as JSON. No options.\n",

@@ -2,18 +2,19 @@
   "schema_version": 1,
   "id": "18-feed-status-help",
   "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
   "argv": [
     "feed-status",
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-06sbw3uk/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-06sbw3uk/xdg",
+    "HOME": "/tmp/castctl-golden-19t5h7c2/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-19t5h7c2/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-06sbw3uk/work",
+  "cwd": "/tmp/castctl-golden-19t5h7c2/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl feed-status\n\nShow feed refresh status as JSON. No options.\n",

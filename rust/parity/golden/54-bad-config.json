@@ -2,18 +2,19 @@
   "schema_version": 1,
   "id": "54-bad-config",
   "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
   "argv": [
     "--config",
     "/nonexistent"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-pcbxxgif/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-pcbxxgif/xdg",
+    "HOME": "/tmp/castctl-golden-ziddu4xa/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-ziddu4xa/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-pcbxxgif/work",
+  "cwd": "/tmp/castctl-golden-ziddu4xa/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "",

@@ -2,18 +2,19 @@
   "schema_version": 1,
   "id": "03-usage-help",
   "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
   "argv": [
     "usage",
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-d07cez__/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-d07cez__/xdg",
+    "HOME": "/tmp/castctl-golden-kzbp6_zx/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-kzbp6_zx/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-d07cez__/work",
+  "cwd": "/tmp/castctl-golden-kzbp6_zx/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl usage [--json] [--raw]\n\nShow token usage for the active profile (subscription action).\n\noptions:\n  --json    print the summary object as JSON instead of the text lines.\n  --raw     print the raw subscription object as JSON.\n",

@@ -2,17 +2,18 @@
   "schema_version": 1,
   "id": "52-missing-seen",
   "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
   "argv": [
     "seen"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-girn05av/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-girn05av/xdg",
+    "HOME": "/tmp/castctl-golden-nfwi9x0c/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-nfwi9x0c/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-girn05av/work",
+  "cwd": "/tmp/castctl-golden-nfwi9x0c/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "",

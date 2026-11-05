@@ -498,7 +498,7 @@ naming the loop that establishes it (`parser.rs`, `consumeLong`).
 | `castctl-config` | `internal/profile/{config,jsonvalue,configlocation,errors,telegram,profile,fingerprint,log,guard,dns,keeper,webui,plugins,credentials,wireguard,outbound}.go` | Single-config parse/validate/render, profile entries, config-location resolution, Go `filepath`/`strings`/`strconv`/`encoding/json` semantics |
 | `castctl-cli` | `internal/commands/{commands,help,read,wait,deliver,chat,fs,keeper,telegram,update,webui,plugincheck,profilecmd,authimport,authlogin,authstatus,authobserve}.go`, `internal/deliver/authexport.go` (guidance const), `internal/logging/level.go` (summary identity) | Command table, flag parser, help/usage rendering, exit mapping, subcommand dispatchers, stub |
 | `castctl-rs` (bin) | `cmd/castctl/main.go` | Wires only the offline surface; `args_os` + lossy conversion |
-| `rust/parity/` (harness, not a crate) | — | `cases.json` (54 cases), `gen_golden.py`/`gen_golden.sh`, `fixtures/`, `golden/` (generated on cue), `castctl-rs/tests/parity.rs` |
+| `rust/parity/` (harness, not a crate) | — | `cases.json` (55 cases), `gen_golden.py`/`gen_golden.sh`, `fixtures/`, `golden/` (generated on cue, incl. `manifest.json`), `castctl-rs/tests/parity.rs` |
 
 ## M2.2 API mapping
 
@@ -517,9 +517,9 @@ index; the doc comments are authoritative.
 | `os` error texts (`*PathError`) | `oserr::{is_not_exist, strerror, os_message, stat_error_text, open_error_text}` | `IsNotExist` = raw errno ENOENT (2) only, not ENOTDIR |
 | `ValidateProfileName` / `ResolveProfileName` / `ProfilePaths` / `DiscoverProfileNames` / `Source` / `OutboundRef` / `parseProfileEntry` / `resolveCookiesFile` / `ensureInlineTag` / `parseAutoAllowOnceValue` (`profile.go`, `config.go:463,619,655,798`) | `profile::{validate_profile_name, resolve_profile_name, profile_paths, discover_profile_names, Source, OutboundKind, OutboundRef, Profile, parse_auto_allow_once_value, ensure_inline_tag, resolve_cookies_file, parse_profile_entry}` | `OutboundRef.Type` = raw `type` string if present, `From` empty (deferred tag graph); `" direct "` is a tag ref with spaces kept; inline auto-tag inserted right after `"type"` |
 | `ValidLogLevel` / log block (`log.go`, `level.go`) | `log::{LOG_LEVELS, valid_log_level, LogConfig, parse_log_block, render_log_block}` | Level value never echoed |
-| Telegram block + `validateTelegram` / `ResolveTelegram` (`telegram.go`) | `telegram::{TelegramConfig, valid_telegram_token_shape, parse_telegram_block, validate_telegram}` | Token shape `^[0-9]+:[A-Za-z0-9_-]{20,}$` ASCII-only on the stripped value; `Debug` is redacted, never prints the token |
+| Telegram block + `validateTelegram` / `ResolveTelegram` (`telegram.go`) | `telegram::{TelegramConfig, valid_telegram_token_shape, parse_telegram_block, validate_telegram}` | Token shape `^[0-9]+:[A-Za-z0-9_-]{20,}$` ASCII-only on the stripped value; hand-written `Debug` impl prints `[redacted]` for the token, never the token itself |
 | Keeper tag rule / plugin ID rule / keeper-webui-plugins-credentials shapes (`keeper.go:381`, `plugins.go`, `credentials.go`) | `blocks::{validate_keeper_tag, valid_plugin_id, validate_plugin_tag, validate_plugin_type, PluginEntry, CredentialEntry, PluginsBlock, CredentialsBlock, parse_wireguard_dns_map, check_keeper_shape, check_webui_shape, parse_plugins_block, parse_credentials_block, validate_plugins, validate_credentials, check_endpoint_wireguard_system}` | Credential username/password values are validated then DROPPED (secrets); plugin parse errors carry the DOUBLE `profile: ` prefix Go produces via `%v` (`plugins.go:176,185`); endpoint wireguard-`system:true` check is a raw-field approximation (only when `type=="wireguard"` string AND `system===true` bool) |
-| Fingerprint/TLS sets (`fingerprint.go`) | `fingerprint::{DEFAULT_FINGERPRINT, DEFAULT_TLS_ENGINE, valid_fingerprint, valid_tls_engine}` | Exact sets only, no fold/trim |
+| Fingerprint/TLS sets (`fingerprint.go`) | `fingerprint::{DEFAULT_FINGERPRINT, DEFAULT_TLS_ENGINE, validate_fingerprint_value, validate_tls_engine_value}` | Exact sets only, no fold/trim |
 | `ParseSingleConfig` / `buildSingleFileOrdered` / `buildProfileEntry` / `LoadSingleConfig` / `LoadProfile` / `ResolveActiveProfile` / `HasProfilesMarker` / `scanLegacyConfigFile` / `applyEnvFill` / `profileExists` (`config.go`) | `config::{SingleConfig, has_profiles_marker, parse_single_config, build_single_file_ordered, render_telegram_block, build_profile_entry, encode_single_config, load_single_config, scan_legacy_config_file, apply_env_fill, load_profile, profile_exists, resolve_active_profile}` | Tail checks run in Go order; deferred ones are skipped, never faked (see §M2.3) |
 | `ResolveConfigLocation` / `RequirePresent` / `userConfigDir` / `configHomeDir` (`configlocation.go`) | `configlocation::{ConfigLocation, Getenv, resolve_config_location}` + `ConfigLocation::require_present` | Plan9 `userConfigDir` branch not reproduced (no Rust target); env via `var_os` + lossy; relative-XDG warning + fallback reproduce the DOUBLE `profile: ` prefix exactly |
 
@@ -572,6 +572,20 @@ plugins tag/type presence+shape+dup; credentials required-keys
 +shape+dup; `validateTelegram`, `validateCredentials`,
 `validatePlugins` cross-checks; the G1 dns-coexistence refusal.
 
+Deferred keeper/webui check groups (no implementation; listed
+so the boundary is explicit): keeper — `parseKeeperBlock`
+(full entry parse: tag/profile/duration/interval/retry/
+relogin/observe fields and their defaults), `validateKeeper`
+(cross-checks: entry profile existence, keeper tag/profile
+refs, allowed-hosts, browser URL), `ResolveKeeper` /
+`KeeperEntryForProfile` / `Effective*` defaults;
+`validateKeeperBrowserURL` / `canonicalBrowserURL`; webui —
+`parseWebUIBlock` (listen/session/token/rate-limit fields),
+`validateWebUIListen`, `parseLoginRateLimitBlock`,
+`ResolveWebUI` / `EffectiveListen` / `EffectiveSessionIdleTimeout`
+/ `EffectiveLoginRateLimit`. Go tests: `keeper_test.go` (16),
+`webui_test.go` (13).
+
 ## M2.4 Decisions D-M2-1..D-M2-7 (as applied)
 
 - **D-M2-1** raw-preserve + deferred sing-box validation (§M2.3).
@@ -586,15 +600,19 @@ plugins tag/type presence+shape+dup; credentials required-keys
   keeps it via raw). Do not fix the bug.
 - **D-M2-3** — stub order: global scan → parse → positional
   checks → config-location resolution (basename/presence/
-  directory, warnings, exit 2) → stub (exit 1, one fixed stderr
-  line `castctl: not ported yet in the Rust port`, empty stdout,
-  no argv echo) → BEFORE active-profile resolution. The stub
-  wording is Rust-only by argument in the PR body: the command
-  exists in Go and is unported here, never "not implemented in
-  the Go port" (Go's deferred-table wording).
-- **D-M2-4** — 54 cases: 46 × `<cmd> --help` in `commandOrder` +
-  8 (`--version`, `--help`, `bogus`, `redeem`, `goal`, `seen`,
-  `--log-level xyz`, `--config /nonexistent`). The parity test
+  directory, warnings, exit 2) → config-file parse
+  (`LoadSingleConfig`, exit 2 on a bad config; fix-loop F5,
+  mirroring Go `resolveActive`/`runWithProfile`) → stub
+  (exit 1, one fixed stderr line `castctl: not ported yet in
+  the Rust port`, empty stdout, no argv echo) → BEFORE
+  active-profile resolution. The stub wording is Rust-only by
+  argument in the PR body: the command exists in Go and is
+  unported here, never "not implemented in the Go port" (Go's
+  deferred-table wording).
+- **D-M2-4** — 55 cases: 46 × `<cmd> --help` in `commandOrder` +
+  9 (`--version`, `--help`, `bogus`, `redeem`, `goal`, `seen`,
+  `--log-level xyz`, `--config /nonexistent`, and the fix-loop
+  F5 case `status` with a bad-JSON config). The parity test
   asserts golden count == argv-list length. The missing-
   positional trio is redeem/goal/seen (send behaves the same
   shape and is covered by unit tests, not golden).
@@ -624,13 +642,20 @@ plugins tag/type presence+shape+dup; credentials required-keys
   the PR body; do not fix by editing docs/NOTICE in this branch.
 - **Config-resolution exceptions** — `update`, `plugin check`,
   and `auth export` NEVER resolve config in Go (probed batch 4)
-  and do not in Rust either. Uniform stub order therefore
-  diverges from Go for exactly these three; documented, not
-  silently substituted.
+  and do not in Rust either; `config migrate` resolves config
+  location but never parses the file (it reads the legacy
+  layout itself). The code above is Go-faithful: the uniform
+  stub-order rule (stub after config-location resolution and
+  config parse) is the one place the stub paths diverge from
+  Go, and only in that the stub fires instead of profile
+  resolution. The three exceptions are documented, not silently
+  substituted.
 - **Pre-resolveConfig handler checks (Go-faithful, flagged)** —
   Go performs some checks before `resolveConfig`, and Rust
   reproduces them in the same position: `profile rm` without
-  `--yes`, `auth status` `--profile`+`--all`, keeper
+  `--yes`, `fs rm` without `--yes` (different message),
+  `profile add` `--outbound` + `--outbound-from-env`
+  mutual exclusion, `auth status` `--profile`+`--all`, keeper
   tag/profile exclusion, `config migrate --from` empty,
   `plugin check` tag validation, `auth login` experimental gate
   then the tag-off CDP gate, `auth observe-login` tag-off
@@ -650,6 +675,56 @@ plugins tag/type presence+shape+dup; credentials required-keys
   validation, `default_profile` existence, and `ensureNodeID`
   never run in M2; the stub fires first. A stubbed command with
   an invalid profile flag exits 1 in Rust where Go exits 2.
+- **Legacy flat config still stubs (F5 remainder)** — a valid
+  JSON config without the `profiles` marker is a legacy flat
+  file: Go's `LoadProfile` refuses it (legacy-layout error,
+  exit 2), but the M2 stub path only parses via
+  `LoadSingleConfig`, which reports "not found" for it, so the
+  stub fires (exit 1). Full `LoadProfile` behaviour (legacy
+  refusal, profile existence, env fill, outbound validation)
+  is a later milestone.
+- **`Debug` never prints secrets (fix-loop F1)** — hand-written
+  `Debug` impls for `TelegramConfig`, `SingleConfig`,
+  `Profile`, and `OutboundRef` print only lengths/markers
+  (token → `[redacted]`, raw blocks → presence/kind markers),
+  never credential or outbound content. Regression tests
+  assert `format!("{:?}")` contains neither the fake token nor
+  fake credential/outbound values.
+- **JSON nesting cap 10000 (fix-loop F2)** — decoder and
+  encoder mirror Go `encoding/json` `maxNestingDepth`: the
+  10001st nested container errors `exceeded max depth`
+  (decoder: `profile: invalid json: exceeded max depth`,
+  exit 2) instead of overflowing the stack. Probe-measured:
+  10000 `[` decode OK, 10001 errors. Both are ITERATIVE
+  (explicit stacks, no recursion per level): the first
+  recursive implementation overflowed the 8MB main stack at
+  depth 10000 on cue, so the cap alone did not prevent the
+  crash. The encoder-side message
+  (`profile: exceeded max depth`) is a Rust-side
+  approximation — Go's marshal-side depth behaviour was not
+  probed; only the clean-error/no-crash property is claimed.
+- **`Getenv=None` convention (fix-loop N-b)** — `None` ALWAYS
+  means the process environment, everywhere in
+  `castctl-config` (`resolve_profile_name`,
+  `resolve_active_profile`, `apply_env_fill`,
+  `resolve_config_location`): this matches Go production
+  behaviour (callers pass `os.LookupEnv`). The Go nil-getenv
+  guards (skip env entirely) do not apply to this API; tests
+  needing isolation pass `Some` with a stub getter.
+- **Harness no-write limitation (red-team H6)** — the
+  generator and the parity test assert the fixture config is
+  byte-identical and the work dir stays empty after each case,
+  but writes elsewhere under `$HOME`/`$XDG_CONFIG_HOME`
+  (outside the fixture config path) are not snapshotted. A
+  case that wrote elsewhere would go undetected; no case is
+  known to do so.
+- **`"dns": null` / `"dns": []` (probe N4)** — Go rejects
+  both at parse (`parse dns: expected json object start, but
+  starts with nil` / `cannot unmarshal array ...`), because
+  `parseDNS` validates the shape. Rust's deferred sing-box
+  handling (D-M2-1) stores the raw value without that check,
+  so these parse "successfully" here. Recorded as part of the
+  deferred-validation boundary, not fixed.
 - **Go map-iteration order** — Go's tail validation iterates a
   map for multi-violation cases (order unspecified); Rust
   iterates profiles in sorted order. Single-violation messages
@@ -659,18 +734,35 @@ plugins tag/type presence+shape+dup; credentials required-keys
   path always has raw JSON, so this branch is unreachable from
   parsed configs.
 - **Decoder messages outside the probed corpus** — the
-  `Token()`/scanner reproduction is verified against the full
-  corpus in `jsonvalue.rs` tests (incl. the `/tmp/m2dec3`
-  scratch-Go-program re-verification); messages for inputs
-  outside that corpus, `quoteChar` for control/Latin-1 bytes
-  outside the corpus, and deep UTF-8 lossy edges are
-  approximations. `json.Indent`'s error branch is unreachable
-  from the port's own compact output.
+  `Token()`/scanner reproduction is verified against the
+  corpus in `jsonvalue.rs` tests, probed against Go 1.27.3
+  (the toolchain that builds the golden binary; `go 1.27.3`
+  modules decode with jsonv2 semantics — the Go 1.26 v1
+  `stream.go` shapes do NOT apply). Key-position errors
+  (stray byte, non-string scalar, container open),
+  comma-anchored closer errors, and the missing-value error
+  follow the measured 1.27 behaviour. Six shapes keep the
+  older message forms as KNOWN DIVERGENCES (see
+  `test_decode_error_corpus_known_divergences`): truncated
+  input inside a container (`{`, `{"a":1` → Go "unexpected
+  end of JSON input", Rust "EOF"), number-context messages
+  (`1e}`, `1.}` → Go "in numeric literal"), and string-escape
+  messages (`"\q"`, `"\u12"` → Go "invalid escape sequence
+  ..." forms). `quoteChar` for control/Latin-1 bytes outside
+  the corpus, deep UTF-8 lossy edges, and the plan9 branch
+  remain approximations. `json.Indent`'s error branch is
+  unreachable from the port's own compact output. Probe N3
+  (fix loop): Go decodes a lone high surrogate
+  `"\uD800\u0041"` as U+FFFD + `A`, matching Rust — no fix
+  needed.
 - **`%q`/`IsPrint` for runes > 0xFF** — `go_quote`/`go_quote_char`
   reproduce the probed cases (incl. `0xFF`→`'ÿ'`, NBSP→
-  `'\u00a0'`, DEL→`'\x7f'`); unprobed runes follow Go's
-  `strconv.Quote`/`IsPrint` tables as implemented, not
-  byte-verified.
+  `'\u00a0'`, DEL→`'\x7f'`). Separator runes (Zs/Zl/Zp:
+  U+00A0, U+1680, U+2000–U+200A, U+2028, U+2029, U+202F,
+  U+205F, U+3000) are escaped, probe-verified against
+  `strconv.IsPrint` on cue (fix-loop F8). Other unprobed
+  categories (private-use, unassigned) remain an approximation:
+  Go rejects them, Rust currently treats them as printable.
 - **Non-UTF8 argv / env** — argv via `args_os` + lossy
   conversion; env values via `var_os` + lossy. Go receives
   raw bytes; a non-UTF8 argv token or env value is a documented
@@ -721,13 +813,55 @@ plugins tag/type presence+shape+dup; credentials required-keys
   test (fixture config bytes + empty work dir after each case).
 - Open: Q7 (producer of exit 124) — out of scope, note only.
 
+## M2.6b Fix-loop probes (round 1, all on cue)
+
+- S1/S3/S4 confirmations (isolated env, both binaries):
+  bad-JSON config + `status` → Go exit 2 `invalid json`,
+  Rust (pre-fix) exit 1 stub; `fs rm` without `--yes` → Go
+  exit 2 `refusing to delete without --yes`; `profile add`
+  with both outbound flags → Go exit 2 mutual-exclusion
+  (even with `--config /nonexistent`). All three fixed (F5/F6/F7).
+- D2/F8: Go escapes U+2028/U+2029/Zs in `%q`
+  (`strconv.IsPrint` probe: false for U+2028/29, U+00A0,
+  U+1680, U+2000–U+200A, U+202F, U+205F, U+3000, U+200B,
+  U+FEFF, U+00AD, private-use, unassigned; true for marks,
+  U+0020, U+00FF, U+20AC, emoji) — `go_is_print` extended.
+- N3: lone surrogate `"\uD800\u0041"` → U+FFFD + `A` in Go,
+  matching Rust. N4: `"dns": null` / `[]` rejected by Go
+  `parseDNS` — deferred-validation limitation, recorded.
+- F2 nesting: `decodeOrderedJSON` at 10000 `[` OK, 10001
+  errors `exceeded max depth`; `ParseSingleConfig` at 10000
+  errors (wrapper depth). The message text comes from Go's
+  stdlib scanner, not repo code.
+- Decoder re-probe (Go 1.27.3 toolchain): the full corpus +
+  key/comma/missing-value shapes were re-measured through
+  `decodeOrderedJSON` in the module (go 1.27.3, jsonv2
+  default). The Phase-2 corpus expectations for 11 shapes
+  were WRONG (they encoded Go 1.26 v1 `stream.go` reasoning,
+  verified against a scratch program outside the module):
+  key-position, comma-anchored, missing-value, truncation,
+  number-context, and escape messages all differ under
+  1.27. The implementation now matches Go 1.27 for every
+  probed shape except the six documented divergences
+  (§M2.5). Scratch dirs on cue: `/tmp/decprobe` (module
+  clone at `85a8d5e`), `/tmp/tokprobe` (standalone Token
+  probe, go 1.26 semantics — NOT authoritative).
+- H1/H7 tamper probes (after F9): editing one golden byte,
+  and editing one manifest digest, each make the parity test
+  FAIL with a manifest-digest assertion; restoring makes it
+  pass. The generator refuses a wrong-version `GO_BIN`
+  (exit 2, golden dir untouched).
+- Depth binary probes: 10000-deep config → clean exit 2
+  (`config must be a json object`, parsed OK, no crash);
+  10001-deep → clean exit 2 `exceeded max depth`.
+
 ## M2.7 Test mapping (cue counts; M1 crates unchanged)
 
 | Crate | Rust tests | Notes |
 |---|---|---|
-| `castctl-config` | 78 | Decoder corpus + trailing-data quirks + order/number/surrogate/indent rules; profile/config/telegram/log/blocks/configlocation rules; LoadProfile filesystem cases (single/legacy/stray/dir/env-fill); D19 regression; round-trip idempotence with raw key reorder + `<>&` |
-| `castctl-cli` | 41 | Parser (abbreviations, bundling, negative numbers, defaults, lists/pairs, help short-circuit); table (order, usage lines, int defaults); dispatch (2-/3-line shapes, dispatcher quirks, stub order, gates, approve/auto-approve/keeper/migrate checks, export guidance) |
-| `castctl-rs` | 1 integration (`parity.rs`) | 54/54 golden cases, 0 mismatches (see §M2.8) |
+| `castctl-config` | 85 | Decoder corpus (Go 1.27-verbatim + 6 known divergences) + trailing-data quirks + order/number/surrogate/indent rules; profile/config/telegram/log/blocks/configlocation rules; LoadProfile filesystem cases (single/legacy/stray/dir/env-fill); D19 regression; round-trip idempotence with raw key reorder + `<>&`; Debug-redaction, depth-cap, ENOTDIR, separator-quote, strerror, empty-number tests |
+| `castctl-cli` | 41 | Parser (abbreviations, bundling, negative numbers, defaults incl. int-set separation, lists/pairs, help short-circuit); table (order, usage lines, int defaults); dispatch (2-/3-line shapes, dispatcher quirks, stub order, gates, approve/auto-approve/keeper/migrate checks, export guidance, fs-rm/profile-add pre-checks) |
+| `castctl-rs` | 2 integration (`parity.rs`) | 55/55 golden cases, 0 mismatches (see §M2.8); SHA-256 known-answer test |
 | M1 crates | 46 + 7 + 2 + 10 | Unchanged counts, all green |
 
 Go test files consulted directly (behaviour pinned from code +
@@ -743,10 +877,14 @@ shapes. Deferred Go tests are listed in §M2.3.
 
 ## M2.8 Verification (on cue, rustc/cargo 1.97.1)
 
-Scratch: `/tmp/castctl-rust-m2-writer` (sources synced by tar
+Scratch: `/tmp/castctl-rust-m2-final` (sources synced by tar
 over SSH; `target/` never synced). Host key verified before the
 first login: `SHA256:6ExOBaFLBXhnN4GX3Qjh6DbdjJev2p7nR61IwERRhcs`
-— MATCHED.
+— MATCHED. Fix-loop round 1 (F1–F10 + nits, incl. the
+iterative decoder/encoder rewrite and the Go 1.27 decoder
+re-probe) verified here from the final local tree; the
+golden files + `manifest.json` in the repo are the output of
+`gen_golden.sh` on cue (55 cases).
 
 ```console
 $ cargo --version && rustc --version && cargo clippy --version && cargo fmt --version
@@ -759,15 +897,15 @@ castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)
 $ cargo build --workspace
 BUILD-EXIT=0
 $ sh parity/gen_golden.sh
-GEN-EXIT=0  (54 golden files written; count verified with ls)
+GEN-EXIT=0  (55 golden files + manifest.json written; count verified with ls)
 $ cargo test --workspace
 test result: ok. 41 passed; 0 failed  (castctl-cli)
-test result: ok. 78 passed; 0 failed  (castctl-config)
+test result: ok. 85 passed; 0 failed  (castctl-config)
 test result: ok. 46 passed; 0 failed  (castctl-log-redact)
 test result: ok. 7 passed; 0 failed   (castctl-shared)
 test result: ok. 2 passed; 0 failed   (castctl-tg-files)
 test result: ok. 10 passed; 0 failed  (castctl-tg-text)
-test result: ok. 1 passed; 0 failed   (parity integration, 54/54 cases, 0 mismatches)
+test result: ok. 2 passed; 0 failed   (parity integration: sha256 known-answer + golden_parity, 55/55 cases, 0 mismatches)
 TEST-EXIT=0
 $ cargo clippy --workspace --all-targets -- -D warnings
 CLIPPY-EXIT=0

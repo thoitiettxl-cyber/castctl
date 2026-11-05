@@ -2,18 +2,19 @@
   "schema_version": 1,
   "id": "45-webui-help",
   "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
   "argv": [
     "webui",
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-ozptf1l5/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-ozptf1l5/xdg",
+    "HOME": "/tmp/castctl-golden-y0p_eahw/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-y0p_eahw/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-ozptf1l5/work",
+  "cwd": "/tmp/castctl-golden-y0p_eahw/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl webui <subcommand> [options]\n\nWeb UI server: serve the castctl web UI (frontend + /api/v1)\non loopback only, with token auth. Requires a \"webui\" block in\nconfig.json (see docs/config.md); absent means no web UI.\n\nsubcommands:\n  serve     serve the web UI in the foreground until interrupted\n\nRun \"castctl webui serve --help\" for serve options.\n",

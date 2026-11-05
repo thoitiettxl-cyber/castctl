@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "55-bad-json-config",
+  "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "bad-config.json",
+  "argv": [
+    "status"
+  ],
+  "env": {
+    "HOME": "/tmp/castctl-golden-hjk3misc/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-hjk3misc/xdg",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "PATH": "/usr/bin:/bin"
+  },
+  "cwd": "/tmp/castctl-golden-hjk3misc/work",
+  "stdin": "empty",
+  "timeout_seconds": 10,
+  "stdout": "",
+  "stderr": "castctl: profile: invalid json: invalid character 'i' looking for beginning of value\n",
+  "exit_code": 2
+}
