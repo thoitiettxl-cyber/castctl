@@ -74,8 +74,13 @@ use tokio::net::TcpListener;
 pub const API_TIMEOUT: Duration = Duration::from_secs(30);
 /// `http.Server` ReadHeaderTimeout: 10s.
 pub const READ_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
-/// `http.Server` IdleTimeout: 120s (approximated by a
-/// per-connection timeout — see `serve`).
+/// `http.Server` IdleTimeout: 120s. Idle-BETWEEN-requests
+/// only in Go — it never cuts a connection mid-request
+/// and resets after every response. Hyper has no idle
+/// knob; the per-request header read timeout (10s) is the
+/// closest correct form, so idle keep-alive connections
+/// are cut at 10s, not 120s (stricter, fail-closed —
+/// recorded in PORTING §M6b.6; probe in §M6b.9).
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Largest request body any route accepts (1 MiB cap).
 pub const MAX_BODY_BYTES: usize = 1024 * 1024 + 1;
@@ -444,16 +449,29 @@ impl Server {
                             .header_read_timeout(READ_HEADER_TIMEOUT)
                             .timer(hyper_util::rt::TokioTimer::new())
                             .serve_connection(io, service);
-                        // Idle-timeout approximation (Go's
-                        // `http.Server.IdleTimeout` closes idle
-                        // keep-alive connections after 120s; hyper
-                        // has no such knob). The API timeout (30s)
-                        // and the WS exclusion bound every legitimate
-                        // request well below 120s, so the only
-                        // connections this can cut are idle ones —
-                        // except a WS, which never uses this path
-                        // (see `handle_hyper`).
-                        let _ = tokio::time::timeout(IDLE_TIMEOUT, conn).await;
+                        // No lifetime cap: Go's
+                        // `http.Server.IdleTimeout` (120s) is
+                        // idle-BETWEEN-requests only — it never
+                        // cuts a connection mid-request and
+                        // resets after every response. The
+                        // previous code wrapped the whole
+                        // connection in `timeout(IDLE_TIMEOUT,
+                        // conn)`, a lifetime cap from accept
+                        // that killed connections at 120s even
+                        // mid-request. Hyper has no idle knob;
+                        // the per-request header read timeout
+                        // (10s) also bounds the wait for the
+                        // next request's headers on a keep-alive
+                        // connection, so it is the closest
+                        // correct form. Residual: idle
+                        // keep-alive connections are cut at
+                        // 10s, not 120s — stricter
+                        // (fail-closed); see PORTING §M6b.6
+                        // and the probe in §M6b.9. A live WS
+                        // is unaffected either way: the
+                        // upgraded socket is detached from
+                        // this connection.
+                        let _ = conn.await;
                     });
                 }
                 _ = self.shutdown.notified() => break,
