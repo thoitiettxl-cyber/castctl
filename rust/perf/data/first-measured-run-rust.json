@@ -9,17 +9,17 @@
   "rss_method": "GNU time -v (thin parent); wait4 ru_maxrss kept as maxrss_kib_raw for audit only",
   "wall_ms": {
     "n": 1,
-    "median": 2.862872,
-    "min": 2.862872,
-    "max": 2.862872,
-    "mean": 2.862872
+    "median": 21.078627,
+    "min": 21.078627,
+    "max": 21.078627,
+    "mean": 21.078627
   },
   "peak_rss_mib": {
     "n": 1,
-    "median": 2.09765625,
-    "min": 2.09765625,
-    "max": 2.09765625,
-    "mean": 2.09765625
+    "median": 6.15625,
+    "min": 6.15625,
+    "max": 6.15625,
+    "mean": 6.15625
   },
   "exits": [
     0
@@ -29,9 +29,9 @@
   ],
   "runs": [
     {
-      "wall_ms": 2.862872,
-      "maxrss_kib": 2148,
-      "maxrss_kib_raw": 13880,
+      "wall_ms": 21.078627,
+      "maxrss_kib": 6304,
+      "maxrss_kib_raw": 13664,
       "exit": 0,
       "rss_exit": 0,
       "wait4": true,

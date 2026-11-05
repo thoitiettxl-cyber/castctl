@@ -1,47 +1,47 @@
 {
-  "record": "LTO variant build record (fix loop 1; the run8 summary only recorded the failed RUSTFLAGS LTO attempt, exit 101)",
-  "source_commit": "fc250db2612f52439125964263374af0a7a79092",
+  "record": "LTO variant build record (M-perf-2; the run9 summary only recorded the failed driver LTO attempt, exit 101)",
+  "source_commit": "740e2dc19322c00c081d5c9dc0d7ca7ad8b762b6",
   "host": "cue (Linux 6.18.38+ x86_64, 8 x Intel Xeon @ 2.50GHz)",
   "command": "cargo +1.99.1 build --profile release-lto --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml",
-  "start_utc": "2026-11-05T16:11:01Z",
-  "end_utc": "2026-11-05T16:15:57Z",
-  "duration_seconds": 247,
-  "target_dir": "/tmp/perf-fix1-target",
+  "start_utc": "2026-11-05T18:51:04Z",
+  "end_utc": "2026-11-05T18:56:19Z",
+  "duration_seconds": 315,
+  "target_dir": "/tmp/perf-full-target",
   "binary": {
-    "path": "/tmp/perf-fix1-target/release-lto/castctl-full",
-    "size_bytes": 10065944,
-    "sha256": "8c7378401fe6325a423370e85caa2601b6398b59ef2d0d0504404fd527321a94",
-    "size_A_stdout": "/tmp/perf-fix1-target/release-lto/castctl-full  :\nsection                  size       addr\n.interp                    28        736\n.note.ABI-tag              32        764\n.note.gnu.build-id         36        796\n.dynsym                  3936        832\n.gnu.version              328       4768\n.gnu.version_r            496       5096\n.gnu.hash                  28       5592\n.dynstr                  2426       5620\n.rela.dyn              346224       8048\n.rela.plt                1560     354272\n.gcc_except_table      339280     355832\n.rodata               1465280     696320\n.eh_frame_hdr           88892    2161600\n.eh_frame              631284    2250496\n.text                 6942120    2885888\n.init                      27    9828008\n.fini                      13    9828036\n.plt                     1056    9828064\n.tdata                    176    9833216\n.tbss                     184    9833392\n.fini_array                 8    9833392\n.init_array                16    9833400\n.data.rel.ro           229704    9833440\n.dynamic                  480   10063144\n.got                     2416   10063624\n.got.plt                  544   10066040\n.relro_padding           1384   10066584\n.tm_clone_table             0   10070680\n.data                    4920   10070688\n.bss                     5276   10075616\n.comment                  184          0\nTotal                10068338\n\n\n",
+    "path": "/tmp/perf-full-target/release-lto/castctl-full",
+    "size_bytes": 14197080,
+    "sha256": "c985a9aa995392c2e9265b42bc7d72e3203ba92bb1f4a2c65eb5230a09f2d359",
+    "size_A_stdout": "/tmp/perf-full-target/release-lto/castctl-full  :\nsection                  size       addr\n.interp                    28        736\n.note.ABI-tag              32        764\n.note.gnu.build-id         36        796\n.dynsym                  4080        832\n.gnu.version              340       4912\n.gnu.version_r            496       5252\n.gnu.hash                  28       5752\n.dynstr                  2477       5780\n.rela.dyn              568608       8264\n.rela.plt                1560     576872\n.gcc_except_table      440584     578432\n.rodata               2073280    1019904\n.eh_frame_hdr          117060    3093184\n.eh_frame              865320    3210248\n.text                 9695132    4079680\n.init                      27   13774812\n.fini                      13   13774840\n.plt                     1056   13774864\n.tdata                    176   13780016\n.tbss                     368   13780192\n.fini_array                 8   13780192\n.init_array                16   13780200\n.data.rel.ro           413192   13780224\n.dynamic                  480   14193416\n.got                     3008   14193896\n.got.plt                  544   14196904\n.relro_padding           3384   14197448\n.tm_clone_table             0   14201544\n.data                    5176   14201568\n.bss                     5276   14206752\n.comment                  184          0\nTotal                14201969\n\n\n",
     "sections": {
       ".interp": 28,
       ".note.ABI-tag": 32,
       ".note.gnu.build-id": 36,
-      ".dynsym": 3936,
-      ".gnu.version": 328,
+      ".dynsym": 4080,
+      ".gnu.version": 340,
       ".gnu.version_r": 496,
       ".gnu.hash": 28,
-      ".dynstr": 2426,
-      ".rela.dyn": 346224,
+      ".dynstr": 2477,
+      ".rela.dyn": 568608,
       ".rela.plt": 1560,
-      ".gcc_except_table": 339280,
-      ".rodata": 1465280,
-      ".eh_frame_hdr": 88892,
-      ".eh_frame": 631284,
-      ".text": 6942120,
+      ".gcc_except_table": 440584,
+      ".rodata": 2073280,
+      ".eh_frame_hdr": 117060,
+      ".eh_frame": 865320,
+      ".text": 9695132,
       ".init": 27,
       ".fini": 13,
       ".plt": 1056,
       ".tdata": 176,
-      ".tbss": 184,
+      ".tbss": 368,
       ".fini_array": 8,
       ".init_array": 16,
-      ".data.rel.ro": 229704,
+      ".data.rel.ro": 413192,
       ".dynamic": 480,
-      ".got": 2416,
+      ".got": 3008,
       ".got.plt": 544,
-      ".relro_padding": 1384,
+      ".relro_padding": 3384,
       ".tm_clone_table": 0,
-      ".data": 4920,
+      ".data": 5176,
       ".bss": 5276,
       ".comment": 184
     },
@@ -49,64 +49,28 @@
   },
   "version_check": {
     "argv": [
-      "/tmp/perf-fix1-target/release-lto/castctl-full",
+      "/tmp/perf-full-target/release-lto/castctl-full",
       "--version"
     ],
     "exit": 0,
     "stdout": "castctl 0.9.0\n",
     "stderr": ""
   },
-  "ratio_vs_go": 0.20926989721643294,
-  "shrink_vs_headline": 0.19646525766579281,
-  "text_shrink_vs_headline": 0.13001915879745712,
-  "comparison_vs_prose_numbers_in_fc250db": {
-    "size_bytes": {
-      "rebuilt": 10065944,
-      "prose": 10065944,
-      "match": true
-    },
-    "sha256": {
-      "rebuilt": "8c7378401fe6325a423370e85caa2601b6398b59ef2d0d0504404fd527321a94",
-      "prose_prefix": "8040a0c6",
-      "match": false
-    },
-    "text_bytes": {
-      "rebuilt": 6942120,
-      "prose": 6942120,
-      "match": true
-    },
-    "duration": {
-      "rebuilt_seconds": 247,
-      "prose": "4m 32s"
-    }
-  },
+  "ratio_vs_go": 0.295155772014376,
+  "shrink_vs_headline": 0.18785801662052903,
+  "text_shrink_vs_headline": 0.12886980505279183,
+  "driver_lto_failure_note": "run9 driver LTO (build_full_lto) exited 101 after 207.3 s: /tmp/perf-full-target was deleted MID-BUILD by Boss's disk cleanup (boring-sys cmake .o.d errors + panic at cmake-0.1.58/src/lib.rs:1132 in summary.json). Not a build defect: this manual retry with the same command exited 0.",
   "retention_note": "nm cannot run on the LTO binary (profile strips symbols); link retention is evidenced indirectly by .text size vs the no-keep .text plus the #[used] static mechanism (a linker cannot drop a function whose address sits in a retained static).",
   "byte_reproduction_check": {
-    "record": "Verification rebuild with the run8 target-dir name (/tmp/perf-full-target)",
-    "source_commit": "fc250db2612f52439125964263374af0a7a79092",
-    "host": "cue (Linux 6.18.38+ x86_64, 8 x Intel Xeon @ 2.50GHz)",
+    "record": "Second independent LTO build, same command, same target dir (warm-restore attempt 1, 2026-11-05T20:14:15Z, 4m19s)",
     "target_dir": "/tmp/perf-full-target",
-    "build": {
-      "command": "cargo +1.99.1 build --profile release-lto --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml",
-      "start_utc": "2026-11-05T16:26:36Z",
-      "end_utc": "2026-11-05T16:30:55Z",
-      "duration_seconds": 259.0
-    },
     "result": {
-      "size_bytes": 10065944,
-      "sha256": "8040a0c61b6df10ab92cb4cc81bfe49d81db88b8e52e0cb5417ddd5020706d04",
-      "prose_sha_prefix": "8040a0c6",
+      "size_bytes": 14197080,
+      "sha256": "c985a9aa995392c2e9265b42bc7d72e3203ba92bb1f4a2c65eb5230a09f2d359",
       "sha_match": true,
-      "text_bytes": 6942120,
-      "prose_text_bytes": 6942120,
-      "text_match": true,
-      "version_check": {
-        "exit": 0,
-        "stdout": "castctl 0.9.0\n",
-        "stderr": ""
-      }
+      "text_bytes": 9695132
     },
-    "note": "The fix-loop-1 rebuild in /tmp/perf-fix1-target produced sha 8c737840... (size and .text identical to the prose values) because BoringSSL __FILE__ strings embed the target-dir name; rebuilding with run8's exact target-dir name reproduces the prose sha 8040a0c6... exactly. See verification.json values merged here; the full verification doc is in nm-counts.json under byte_reproduction_check.",
-    "conclusion": "Unstripped sha match: True; stripped sha match: True; LTO sha match: True (size 10065944, .text match: True). The keep-binary sha differences seen in the /tmp/perf-fix1-target rebuild were caused ONLY by the target-dir name embedded in BoringSSL __FILE__ strings in .rodata: rebuilding with run8's exact target-dir name reproduces run8's sha256 exactly."
+    "conclusion": "LTO sha reproduces exactly across two independent builds at the pinned target dir.",
+    "run8_history": "Run8 LTO was 10,065,944 B, sha 8040a0c6..., .text 6,942,120 B (record preserved in git history of this file)."
   }
 }

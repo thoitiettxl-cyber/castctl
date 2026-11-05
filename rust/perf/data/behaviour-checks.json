@@ -1,22 +1,21 @@
 {
-  "record": "Behaviour checks on the rebuilt stripped full-keep binary (fix loop 1)",
-  "source_commit": "fc250db2612f52439125964263374af0a7a79092",
+  "record": "Behaviour checks on the run9 stripped full-keep binary (M-perf-2)",
+  "source_commit": "740e2dc19322c00c081d5c9dc0d7ca7ad8b762b6",
   "host": "cue (Linux 6.18.38+ x86_64, 8 x Intel Xeon @ 2.50GHz)",
   "full_binary": {
-    "path": "/tmp/fix1-keep-stripped",
-    "size_bytes": 12527080,
-    "sha256": "57e48df3a2904847eb77b0d18a10f15b1456622f0cf88bd166e2780449d5ff93"
+    "path": "/tmp/perf-full-target/release/castctl-full",
+    "size_bytes": 17481032,
+    "sha256": "b12911a545f530b837d375a0f07f167580e91e2206c2445b4d7e903ae13e002f"
   },
   "shell_binary": {
     "path": "/tmp/castctl-rust-perf1/rust/target/release/castctl-rs",
-    "size_bytes": 620968,
-    "sha256": "6f2708907caf4d3e3cbfb9b59142ade61dbb6a2610d9f9a3f3a3f777a3231363",
-    "note": "surviving run8 binary, NOT rebuilt"
+    "size_bytes": 17446696,
+    "sha256": "95d9be12e608e1c8f7b660f97ab4edc993da5939730e3feb3b5094b617de2776"
   },
   "checks": {
     "version": {
       "argv": [
-        "/tmp/fix1-keep-stripped",
+        "/tmp/perf-full-target/release/castctl-full",
         "--version"
       ],
       "exit": 0,
@@ -27,12 +26,13 @@
       "full_help_sha256": "cc65698a8fad6e79ea3e60a84007ab019f048e9fbc24bbb0f837f2584ce092e9",
       "shell_help_sha256": "cc65698a8fad6e79ea3e60a84007ab019f048e9fbc24bbb0f837f2584ce092e9",
       "byte_identical": true,
+      "note": "Help sha is IDENTICAL to run8 (cc65698a...): M4b's 13 commands are subcommands, top-level help unchanged.",
       "full_help_stdout": "usage: castctl [--profile NAME] [--config PATH] <command> [options]\n\nDrive your Muse personal agent from the terminal (Go port of muse-cli 0.6.1).\n\nGlobal options:\n  --profile NAME   profile to use: --profile flag, then CASTCTL_PROFILE,\n                   then the default_profile in the resolved config, then\n                   \"default\".\n  --config PATH    config file location. Precedence: --config PATH, then\n                   CASTCTL_CONFIG, then the platform config directory\n                   (XDG_CONFIG_HOME on Linux, ~/Library/Application\n                   Support on macOS, %AppData% on Windows) under\n                   \"castctl\". An explicit path names a config.json file;\n                   a missing explicit file or a directory is an error,\n                   except that \"config migrate --write\" may create it.\n                   The directory of the resolved file is the config home\n                   for the whole invocation (profiles, cookies, chat\n                   state). A relative --config path is relative to the\n                   current directory; no tilde expansion is performed.\n  --log-level LEVEL\n                   log level for this invocation: trace, debug, info,\n                   warn, error, fatal, or panic (\"warning\" is accepted\n                   as an alias for warn). Precedence: --log-level,\n                   then the \"log\" block in config.json, then the\n                   sing-box default (trace, stderr). An invalid level\n                   exits 2. See\n                   \"Log\" in docs/config.md.\n  --version        print \"castctl <version>\" and exit.\n  --help, -h       print this help and exit.\n\nCommands (PR4 wired send, wait, approvals and the chat REPL;\ntelegram run/status wired in the Telegram PR; update wired in the\nself-update PR):\n  chat, status, usage, invite, redeem, threads, history, send, wait,\n  approvals, approve, auto-approve, deny, files, download,\n  watch, feed, feed-status, feed-react, feed-prompt, goals, goal,\n  ideas, idea, idea-exec, unread, seen, session-start,\n  session-rename, session-pin, session-unpin, session-archive,\n  session-unarchive, session-delete, stop, wake, raw, fs, auth,\n  profile, config, telegram, keeper, update, webui\n\nRun \"castctl <command> --help\" for per-command help.\n\nAuthentication: no new login flow is implemented in this port yet.\nLogin research is pending; \"auth export\" prints guidance only. The\nfingerprint and tls_engine settings are recorded only: the runtime\nstays on the uTLS chrome fingerprint (see \"profile set-fingerprint\n--help\"). No browser is assumed: the screencast-login browser\ndependency is optional and runtime-detected, and no-browser setups\nfall back to auth import.\n",
       "shell_help_stdout": "usage: castctl [--profile NAME] [--config PATH] <command> [options]\n\nDrive your Muse personal agent from the terminal (Go port of muse-cli 0.6.1).\n\nGlobal options:\n  --profile NAME   profile to use: --profile flag, then CASTCTL_PROFILE,\n                   then the default_profile in the resolved config, then\n                   \"default\".\n  --config PATH    config file location. Precedence: --config PATH, then\n                   CASTCTL_CONFIG, then the platform config directory\n                   (XDG_CONFIG_HOME on Linux, ~/Library/Application\n                   Support on macOS, %AppData% on Windows) under\n                   \"castctl\". An explicit path names a config.json file;\n                   a missing explicit file or a directory is an error,\n                   except that \"config migrate --write\" may create it.\n                   The directory of the resolved file is the config home\n                   for the whole invocation (profiles, cookies, chat\n                   state). A relative --config path is relative to the\n                   current directory; no tilde expansion is performed.\n  --log-level LEVEL\n                   log level for this invocation: trace, debug, info,\n                   warn, error, fatal, or panic (\"warning\" is accepted\n                   as an alias for warn). Precedence: --log-level,\n                   then the \"log\" block in config.json, then the\n                   sing-box default (trace, stderr). An invalid level\n                   exits 2. See\n                   \"Log\" in docs/config.md.\n  --version        print \"castctl <version>\" and exit.\n  --help, -h       print this help and exit.\n\nCommands (PR4 wired send, wait, approvals and the chat REPL;\ntelegram run/status wired in the Telegram PR; update wired in the\nself-update PR):\n  chat, status, usage, invite, redeem, threads, history, send, wait,\n  approvals, approve, auto-approve, deny, files, download,\n  watch, feed, feed-status, feed-react, feed-prompt, goals, goal,\n  ideas, idea, idea-exec, unread, seen, session-start,\n  session-rename, session-pin, session-unpin, session-archive,\n  session-unarchive, session-delete, stop, wake, raw, fs, auth,\n  profile, config, telegram, keeper, update, webui\n\nRun \"castctl <command> --help\" for per-command help.\n\nAuthentication: no new login flow is implemented in this port yet.\nLogin research is pending; \"auth export\" prints guidance only. The\nfingerprint and tls_engine settings are recorded only: the runtime\nstays on the uTLS chrome fingerprint (see \"profile set-fingerprint\n--help\"). No browser is assumed: the screencast-login browser\ndependency is optional and runtime-detected, and no-browser setups\nfall back to auth import.\n"
     },
     "version_equals_x": {
       "argv": [
-        "/tmp/fix1-keep-stripped",
+        "/tmp/perf-full-target/release/castctl-full",
         "--version=x"
       ],
       "exit": 2,
@@ -41,7 +41,7 @@
     },
     "keep_linked_env_version": {
       "argv": [
-        "/tmp/fix1-keep-stripped",
+        "/tmp/perf-full-target/release/castctl-full",
         "--version"
       ],
       "exit": 0,
