@@ -3255,6 +3255,13 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
   parity client dialed with the literal
   `auth_token=<redacted>` URL (percent-encoded on the
   wire by `dial_gateway`).
+- SPDX header (fix loop 4, 2026-11-05 — CI Go đỏ cả 3 tag vì
+  `TestSPDXHeaders` fail): mọi file .go thêm vào repo (kể cả dưới
+  `rust/`) phải có header SPDX GPL-3.0-or-later —
+  `TestSPDXHeaders` quét toàn repo (repo root, không trừ thư mục
+  nào). `rust/parity/gateway_server/main.go` đã sửa từ
+  GPL-3.0-only sang GPL-3.0-or-later; các file `.rs` vẫn
+  GPL-3.0-only.
 
 ## M4a.5 Chưa kiểm chứng
 
