@@ -27,8 +27,9 @@
 
 use crate::config::{parse_webui_block, resolve_webui};
 use crate::duration::{HOUR_NS, MINUTE_NS, format_duration, parse_duration};
+use castctl_config::config::SingleConfig;
 use castctl_config::jsonvalue::JsonValue;
-use castctl_config::{SingleConfig, is_reserved_synthesized_tag, validate_profile_name};
+use castctl_config::profile::{is_reserved_synthesized_tag, validate_profile_name};
 use std::collections::HashMap;
 
 /// Default keeper tick cadence: 24h.
@@ -116,7 +117,7 @@ fn validate_keeper_browser_url(raw: &str) -> Result<(), String> {
         return Err("scheme must be http or ws".to_string());
     }
     let rest = &s[scheme_end + 3..];
-    let auth_end = rest.find(|c| c == '/' || c == '?' || c == '#').unwrap_or(rest.len());
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..auth_end];
     let tail = &rest[auth_end..];
     if tail.contains('?') || tail.contains('#') {
@@ -159,9 +160,8 @@ fn split_host_port(s: &str) -> Option<(&str, &str)> {
         }
         return Some((host, port));
     }
-    let mut parts = s.splitn(2, ':');
-    let host = parts.next()?;
-    let port = parts.next()?;
+    let (host, port) = s.split_once(':')?;
+
     if port.contains(':') {
         return None;
     }
@@ -183,12 +183,9 @@ fn canonical_browser(raw: &str) -> String {
         return raw.to_string();
     }
     let rest = &s[scheme_end + 3..];
-    let auth_end = rest.find(|c| c == '/' || c == '?' || c == '#').unwrap_or(rest.len());
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..auth_end];
-    let path = rest[auth_end..]
-        .split(|c| c == '?' || c == '#')
-        .next()
-        .unwrap_or("");
+    let path = rest[auth_end..].split(['?', '#']).next().unwrap_or("");
     let (host, port_str) = match split_host_port(authority) {
         Some((h, p)) => (h, p),
         None => return raw.to_string(),
@@ -229,12 +226,7 @@ fn normalize_allowed_host(raw: &str) -> Result<String, String> {
     Ok(s.to_string())
 }
 
-fn parse_keeper_duration(
-    i: usize,
-    key: &str,
-    s: &str,
-    max_ns: i64,
-) -> Result<i64, String> {
+fn parse_keeper_duration(i: usize, key: &str, s: &str, max_ns: i64) -> Result<i64, String> {
     if s.trim().is_empty() {
         return Err(config_error(format!(
             "\"keeper\" entry {i}: {key:?} must be a duration string"
@@ -324,9 +316,7 @@ pub fn parse_keeper_block(value: &JsonValue) -> Result<Vec<KeeperEntry>, String>
                         )));
                     }
                     validate_profile_name(s).map_err(|_| {
-                        config_error(format!(
-                            "\"keeper\" entry {i}: invalid profile name {s:?}"
-                        ))
+                        config_error(format!("\"keeper\" entry {i}: invalid profile name {s:?}"))
                     })?;
                     entry.profile = s.clone();
                 }
@@ -342,7 +332,9 @@ pub fn parse_keeper_block(value: &JsonValue) -> Result<Vec<KeeperEntry>, String>
                         )));
                     }
                     validate_keeper_browser_url(s).map_err(|e| {
-                        config_error(format!("\"keeper\" entry {i}: invalid \"browser\" URL: {e}"))
+                        config_error(format!(
+                            "\"keeper\" entry {i}: invalid \"browser\" URL: {e}"
+                        ))
                     })?;
                     entry.browser = s.trim().to_string();
                 }
@@ -448,7 +440,9 @@ pub fn parse_keeper_block(value: &JsonValue) -> Result<Vec<KeeperEntry>, String>
                     };
                     parse_keeper_duration(i, k, s, MAX_PROXY_DIAL_TIMEOUT_NS)?;
                 }
-                "relogin_match_timeout" | "relogin_cookie_timeout" | "observe_settle_timeout"
+                "relogin_match_timeout"
+                | "relogin_cookie_timeout"
+                | "observe_settle_timeout"
                 | "observe_timeout" => {
                     let JsonValue::Str(s) = val else {
                         return Err(config_error(format!(
@@ -534,12 +528,13 @@ pub fn parse_keeper_block(value: &JsonValue) -> Result<Vec<KeeperEntry>, String>
 /// at the outbound object's top level in the file).
 fn outbound_referenced_tags(obj: &castctl_config::jsonvalue::OrderedObject) -> Vec<String> {
     let mut refs: Vec<String> = Vec::new();
-    if let Some(JsonValue::Str(d)) = obj.get("detour") {
-        if !d.is_empty() {
-            refs.push(d.clone());
-        }
+    if let Some(JsonValue::Str(d)) = obj.get("detour")
+        && !d.is_empty()
+    {
+        refs.push(d.clone());
     }
-    let is_group = matches!(obj.get("type"), Some(JsonValue::Str(t)) if t == "selector" || t == "urltest");
+    let is_group =
+        matches!(obj.get("type"), Some(JsonValue::Str(t)) if t == "selector" || t == "urltest");
     if is_group {
         if let Some(JsonValue::Array(members)) = obj.get("outbounds") {
             for m in members {
@@ -548,10 +543,10 @@ fn outbound_referenced_tags(obj: &castctl_config::jsonvalue::OrderedObject) -> V
                 }
             }
         }
-        if let Some(JsonValue::Str(d)) = obj.get("default") {
-            if !d.is_empty() {
-                refs.push(d.clone());
-            }
+        if let Some(JsonValue::Str(d)) = obj.get("default")
+            && !d.is_empty()
+        {
+            refs.push(d.clone());
         }
     }
     refs
@@ -564,70 +559,60 @@ pub fn validate_tag_graph(cfg: &SingleConfig) -> Result<(), String> {
     let mut tags: HashMap<String, &str> = HashMap::new();
     // Reserved synthesized tags first, in Go's order:
     // outbounds, endpoints, inline profile outbounds.
-    if let Some(JsonValue::Array(obs)) = &cfg.outbounds_raw {
-        for ob in obs {
-            if let JsonValue::Object(o) = ob {
-                if let Some(JsonValue::Str(tag)) = o.get("tag") {
-                    if is_reserved_synthesized_tag(tag) {
-                        return Err(config_error(format!(
-                            "tag {tag:?} (outbound) is reserved for castctl's synthesised direct outbounds (castctl-direct:<profile>); rename the tag"
-                        )));
-                    }
-                }
-            }
+    for ob in &cfg.outbounds_raw {
+        if let JsonValue::Object(o) = ob
+            && let Some(JsonValue::Str(tag)) = o.get("tag")
+            && is_reserved_synthesized_tag(tag)
+        {
+            return Err(config_error(format!(
+                "tag {tag:?} (outbound) is reserved for castctl's synthesised direct outbounds (castctl-direct:<profile>); rename the tag"
+            )));
         }
     }
-    if let Some(JsonValue::Array(eps)) = &cfg.endpoints_raw {
-        for ep in eps {
-            if let JsonValue::Object(o) = ep {
-                if let Some(JsonValue::Str(tag)) = o.get("tag") {
-                    if is_reserved_synthesized_tag(tag) {
-                        return Err(config_error(format!(
-                            "tag {tag:?} (endpoint) is reserved for castctl's synthesised direct outbounds (castctl-direct:<profile>); rename the tag"
-                        )));
-                    }
-                }
-            }
+    for ep in &cfg.endpoints_raw {
+        if let JsonValue::Object(o) = ep
+            && let Some(JsonValue::Str(tag)) = o.get("tag")
+            && is_reserved_synthesized_tag(tag)
+        {
+            return Err(config_error(format!(
+                "tag {tag:?} (endpoint) is reserved for castctl's synthesised direct outbounds (castctl-direct:<profile>); rename the tag"
+            )));
         }
     }
     for (name, p) in cfg.profiles.iter() {
-        if let castctl_config::profile::OutboundKind::Inline = p.outbound.kind {
-            if is_reserved_synthesized_tag(&p.outbound.tag) {
-                return Err(config_error(format!(
-                    "tag {:?} (inline outbound for profile {}) is reserved for castctl's synthesised direct outbounds (castctl-direct:<profile>); rename the tag",
-                    p.outbound.tag, name
-                )));
-            }
+        if let castctl_config::profile::OutboundKind::Inline = p.outbound.kind
+            && is_reserved_synthesized_tag(&p.outbound.tag)
+        {
+            return Err(config_error(format!(
+                "tag {:?} (inline outbound for profile {}) is reserved for castctl's synthesised direct outbounds (castctl-direct:<profile>); rename the tag",
+                p.outbound.tag, name
+            )));
         }
     }
     // Duplicate tags, in Go's order: outbounds, endpoints,
     // inline profile outbounds.
-    if let Some(JsonValue::Array(obs)) = &cfg.outbounds_raw {
-        for ob in obs {
-            if let JsonValue::Object(o) = ob {
-                if let Some(JsonValue::Str(tag)) = o.get("tag") {
-                    if let Some(prev) = tags.get(tag) {
-                        return Err(config_error(format!(
-                            "duplicate outbound tag {tag:?} (already {prev})"
-                        )));
-                    }
-                    tags.insert(tag.clone(), "outbound");
-                }
+    for ob in &cfg.outbounds_raw {
+        if let JsonValue::Object(o) = ob
+            && let Some(JsonValue::Str(tag)) = o.get("tag")
+        {
+            if let Some(prev) = tags.get(tag) {
+                return Err(config_error(format!(
+                    "duplicate outbound tag {tag:?} (already {prev})"
+                )));
             }
+            tags.insert(tag.clone(), "outbound");
         }
     }
-    if let Some(JsonValue::Array(eps)) = &cfg.endpoints_raw {
-        for ep in eps {
-            if let JsonValue::Object(o) = ep {
-                if let Some(JsonValue::Str(tag)) = o.get("tag") {
-                    if let Some(prev) = tags.get(tag) {
-                        return Err(config_error(format!(
-                            "duplicate tag {tag:?} (already {prev})"
-                        )));
-                    }
-                    tags.insert(tag.clone(), "endpoint");
-                }
+    for ep in &cfg.endpoints_raw {
+        if let JsonValue::Object(o) = ep
+            && let Some(JsonValue::Str(tag)) = o.get("tag")
+        {
+            if let Some(prev) = tags.get(tag) {
+                return Err(config_error(format!(
+                    "duplicate tag {tag:?} (already {prev})"
+                )));
             }
+            tags.insert(tag.clone(), "endpoint");
         }
     }
     for (name, p) in cfg.profiles.iter() {
@@ -643,29 +628,27 @@ pub fn validate_tag_graph(cfg: &SingleConfig) -> Result<(), String> {
     }
     // Dangling profile outbound references.
     for (name, p) in cfg.profiles.iter() {
-        if let castctl_config::profile::OutboundKind::Tag = p.outbound.kind {
-            if !tags.contains_key(&p.outbound.tag) {
-                return Err(config_error(format!(
-                    "profile {name:?}: outbound tag {:?} does not exist",
-                    p.outbound.tag
-                )));
-            }
+        if let castctl_config::profile::OutboundKind::Tag = p.outbound.kind
+            && !tags.contains_key(&p.outbound.tag)
+        {
+            return Err(config_error(format!(
+                "profile {name:?}: outbound tag {:?} does not exist",
+                p.outbound.tag
+            )));
         }
     }
     // Dangling outbound references (detour / group members).
-    if let Some(JsonValue::Array(obs)) = &cfg.outbounds_raw {
-        for ob in obs {
-            if let JsonValue::Object(o) = ob {
-                let tag = match o.get("tag") {
-                    Some(JsonValue::Str(t)) => t.clone(),
-                    _ => String::new(),
-                };
-                for r in outbound_referenced_tags(o) {
-                    if !tags.contains_key(&r) {
-                        return Err(config_error(format!(
-                            "outbound {tag:?}: dangling reference: \"outbound\" {r:?} does not exist"
-                        )));
-                    }
+    for ob in &cfg.outbounds_raw {
+        if let JsonValue::Object(o) = ob {
+            let tag = match o.get("tag") {
+                Some(JsonValue::Str(t)) => t.clone(),
+                _ => String::new(),
+            };
+            for r in outbound_referenced_tags(o) {
+                if !tags.contains_key(&r) {
+                    return Err(config_error(format!(
+                        "outbound {tag:?}: dangling reference: \"outbound\" {r:?} does not exist"
+                    )));
                 }
             }
         }
@@ -761,8 +744,8 @@ pub fn parse_and_validate_config(
     data: &[u8],
     base_dir: &std::path::Path,
 ) -> Result<(SingleConfig, Vec<KeeperEntry>), String> {
-    let cfg = castctl_config::parse_single_config(data, base_dir)
-        .map_err(|e| e.message().to_string())?;
+    let cfg = castctl_config::config::parse_single_config(data, &base_dir.to_string_lossy())
+        .map_err(|e| e.message)?;
     let mut entries: Vec<KeeperEntry> = Vec::new();
     if let Some(raw) = &cfg.keeper_raw {
         entries = parse_keeper_block(raw)?;
@@ -778,7 +761,9 @@ pub fn parse_and_validate_config(
 
 /// `ResolveWebUI` on a parsed config (re-check without the
 /// config directory; see [`resolve_webui`]).
-pub fn resolve_webui_from_config(cfg: &SingleConfig) -> Result<Option<crate::config::WebUIConfig>, String> {
+pub fn resolve_webui_from_config(
+    cfg: &SingleConfig,
+) -> Result<Option<crate::config::WebUIConfig>, String> {
     resolve_webui(cfg.webui_raw.as_ref())
 }
 
@@ -797,7 +782,7 @@ mod tests {
         let (c, k) = cfg(
             r#"{"default_profile":"muse01","profiles":{"muse01":{"cookies_file":"profiles/muse01/cookies.txt","outbound":"proxy-eu"}},"outbounds":[{"type":"trojan","tag":"proxy-eu","server":"203.0.113.10","server_port":443,"password":"x"}],"webui":{"listen":"127.0.0.1:8317","token":"abc"}}"#,
         );
-        assert_eq!(c.default_profile, Some("muse01".to_string()));
+        assert_eq!(c.default_profile, "muse01".to_string());
         assert!(k.is_empty());
     }
 
@@ -808,7 +793,10 @@ mod tests {
             Path::new("/cfg"),
         )
         .unwrap_err();
-        assert!(err.contains("duplicate outbound tag \"x\" (already outbound)"), "{err}");
+        assert!(
+            err.contains("duplicate outbound tag \"x\" (already outbound)"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -818,7 +806,10 @@ mod tests {
             Path::new("/cfg"),
         )
         .unwrap_err();
-        assert!(err.contains("profile \"p\": outbound tag \"nope\" does not exist"), "{err}");
+        assert!(
+            err.contains("profile \"p\": outbound tag \"nope\" does not exist"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -828,13 +819,16 @@ mod tests {
             Path::new("/cfg"),
         )
         .unwrap_err();
-        assert!(err.contains("names profile \"ghost\", which does not exist"), "{err}");
+        assert!(
+            err.contains("names profile \"ghost\", which does not exist"),
+            "{err}"
+        );
     }
 
     #[test]
     fn keeper_entry_parses_and_effective_interval() {
         let (_, k) = cfg(
-            r#"{"profiles":{"p":{}},"keeper":[{"tag":"k1","profile":"p","browser":"http://127.0.0.1:9222","interval":"30m","notify":"telegram"}],"telegram":{"profile":"p","token":"x","allowed_user_ids":[1]}}"#,
+            r#"{"profiles":{"p":{}},"keeper":[{"tag":"k1","profile":"p","browser":"http://127.0.0.1:9222","interval":"30m","notify":"telegram"}],"telegram":{"profile":"p","token":"123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11","allowed_user_ids":[1]}}"#,
         );
         assert_eq!(k.len(), 1);
         assert_eq!(k[0].effective_interval_ns(), 30 * 60 * 1_000_000_000);
@@ -859,11 +853,13 @@ mod tests {
         // If the tag-graph check were dropped, a config
         // with a dangling outbound reference would parse
         // and serve: this pins the refusal.
-        assert!(parse_and_validate_config(
-            br#"{"profiles":{"p":{"outbound":"ghost"}}}"#,
-            Path::new("/cfg"),
-        )
-        .is_err());
-        let _ = decode_ordered_json("{}");
+        assert!(
+            parse_and_validate_config(
+                br#"{"profiles":{"p":{"outbound":"ghost"}}}"#,
+                Path::new("/cfg"),
+            )
+            .is_err()
+        );
+        let _ = decode_ordered_json(b"{}");
     }
 }

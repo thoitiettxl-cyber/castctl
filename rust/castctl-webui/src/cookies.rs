@@ -38,13 +38,13 @@ pub fn parse_cookies(raw: &str, path: &str) -> Result<String, String> {
         // line-based forms below, as in Go (a non-dict
         // JSON value is reported as AuthError by the jar
         // parse below).
-        if let Ok(value) = decode_ordered_json(trimmed) {
-            if let JsonValue::Object(obj) = &value {
-                if let Some(JsonValue::Object(cookies)) = obj.get("cookies") {
-                    return Ok(join_cookie_pairs(cookies));
-                }
-                return Ok(join_cookie_pairs(obj));
+        if let Ok(value) = decode_ordered_json(trimmed.as_bytes())
+            && let JsonValue::Object(obj) = &value
+        {
+            if let Some(JsonValue::Object(cookies)) = obj.get("cookies") {
+                return Ok(join_cookie_pairs(cookies));
             }
+            return Ok(join_cookie_pairs(obj));
         }
     }
     if trimmed.contains("hatch_sess=") || trimmed.contains("datr=") {

@@ -55,9 +55,10 @@ mod tests {
         // The embedded bytes must be exactly the file on
         // disk: a stale embed would serve a different shell
         // than the committed frontend.
-        let on_disk = std::fs::read(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../webui/dist/index.html"),
-        )
+        let on_disk = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../webui/dist/index.html"
+        ))
         .expect("webui/dist/index.html must exist");
         assert_eq!(SHELL_BYTES, on_disk.as_slice());
         assert_eq!(bundle_sha256(), sha256_hex(&on_disk));

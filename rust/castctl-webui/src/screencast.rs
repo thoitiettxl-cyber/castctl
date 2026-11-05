@@ -27,16 +27,17 @@
 // entry with a browser URL for the profile means
 // available, anything else names the missing entry.
 
-use crate::error::{err_validation, ApiError};
+use crate::error::{ApiError, err_validation};
 use crate::go_json::encode_go_json;
 use crate::origin::ws_origin_allowed;
 use crate::server::{Resp, envelope_resp, error_resp};
 use crate::store::{ConfigLoad, parse_loaded};
 use base64::Engine as _;
 use castctl_config::jsonvalue::{JsonValue, OrderedObject};
+use http_body_util::BodyExt;
 use rand::Rng as _;
-use std::path::Path;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -186,7 +187,7 @@ impl InputKind {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn from_name(s: &str) -> Option<Self> {
         match s {
             "mouse" => Some(InputKind::Mouse),
             "key" => Some(InputKind::Key),
@@ -252,7 +253,7 @@ pub struct WsInputMessage {
 /// kind/type vocabularies and the numeric bounds. Anything
 /// invalid is dropped silently by the caller.
 pub fn validate_ws_input(msg: &WsInputMessage) -> Option<InputEvent> {
-    match InputKind::from_str(&msg.kind)? {
+    match InputKind::from_name(&msg.kind)? {
         InputKind::Mouse => {
             if !matches!(
                 msg.mouse_type.as_str(),
@@ -384,7 +385,6 @@ pub fn phase_message(phase: SessionPhase, detail: &str) -> String {
 // --- session registry -----------------------------------------
 
 struct ScreencastSession {
-    token: String,
     profile: String,
     expires_at: Instant,
     live: bool,
@@ -404,11 +404,13 @@ pub struct ScreencastRegistry {
     inner: Mutex<RegistryInner>,
 }
 
+#[derive(Debug)]
 pub enum MintError {
     Busy,
     Random,
 }
 
+#[derive(Debug)]
 pub enum ConsumeError {
     Unknown,
     Busy,
@@ -426,9 +428,7 @@ impl ScreencastRegistry {
 
     pub fn mint(&self, profile_name: &str) -> Result<String, MintError> {
         let mut raw = [0u8; 32];
-        rand::rng()
-            .try_fill_bytes(&mut raw)
-            .map_err(|_| MintError::Random)?;
+        rand::rng().fill_bytes(&mut raw);
         let token = hex_encode(&raw);
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
@@ -438,17 +438,15 @@ impl ScreencastRegistry {
         inner
             .sessions
             .retain(|_, sess| sess.live || now <= sess.expires_at);
-        if let Some(existing) = inner.by_profile.get(profile_name) {
-            if let Some(sess) = inner.sessions.get(existing) {
-                if sess.live {
-                    return Err(MintError::Busy);
-                }
-            }
+        if let Some(existing) = inner.by_profile.get(profile_name)
+            && let Some(sess) = inner.sessions.get(existing)
+            && sess.live
+        {
+            return Err(MintError::Busy);
         }
         inner.sessions.insert(
             token.clone(),
             ScreencastSession {
-                token: token.clone(),
                 profile: profile_name.to_string(),
                 expires_at: now + SCREENCAST_SESSION_TTL,
                 live: false,
@@ -463,38 +461,43 @@ impl ScreencastRegistry {
     pub fn consume(&self, token: &str) -> Result<String, ConsumeError> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
-        let sess = inner.sessions.get_mut(token).ok_or(ConsumeError::Unknown)?;
-        if sess.consumed {
-            // Single-use: a replayed token is unknown, even
-            // while its session is live (the busy branch
-            // below is for a DIFFERENT token for the same
-            // profile).
-            return Err(ConsumeError::Unknown);
-        }
-        if now > sess.expires_at {
-            // Expired: drop it so a later mint is not
-            // blocked by a stale byProfile entry.
-            inner.sessions.remove(token);
-            return Err(ConsumeError::Unknown);
-        }
+        // Validate first, under a short borrow: the busy
+        // check below reads `by_profile` off the same map,
+        // so the session borrow must end before it.
+        let profile = {
+            let sess = inner.sessions.get_mut(token).ok_or(ConsumeError::Unknown)?;
+            if sess.consumed {
+                // Single-use: a replayed token is unknown,
+                // even while its session is live (the busy
+                // branch below is for a DIFFERENT token for
+                // the same profile).
+                return Err(ConsumeError::Unknown);
+            }
+            if now > sess.expires_at {
+                // Expired: drop it so a later mint is not
+                // blocked by a stale byProfile entry.
+                let _ = inner.sessions.remove(token);
+                return Err(ConsumeError::Unknown);
+            }
+            sess.profile.clone()
+        };
         // Busy check BEFORE marking consumed: a token
         // presented while another session is live must stay
         // consumable after the live session ends; burning
         // it here would strand the operator with an
         // "unknown session" error.
-        if let Some(existing) = inner.by_profile.get(&sess.profile).cloned() {
-            if let Some(other) = inner.sessions.get(&existing) {
-                if other.live {
-                    return Err(ConsumeError::Busy);
-                }
-            }
+        if let Some(existing) = inner.by_profile.get(&profile).cloned()
+            && let Some(other) = inner.sessions.get(&existing)
+            && other.live
+        {
+            return Err(ConsumeError::Busy);
         }
+        let sess = inner.sessions.get_mut(token).ok_or(ConsumeError::Unknown)?;
         sess.consumed = true;
         // Kept in the map while live: mint()'s busy check
         // reads it through byProfile. release() removes
         // both entries.
         sess.live = true;
-        let profile = sess.profile.clone();
         inner.by_profile.insert(profile.clone(), token.to_string());
         Ok(profile)
     }
@@ -552,9 +555,8 @@ pub fn screencast_availability(
         None => {
             return Ok((false, no_keeper_entry_msg(profile_name)));
         }
-        Some(raw) => crate::validate::parse_keeper_block(raw).map_err(|e| {
-            err_validation(crate::redact::safe_message_str(&e.to_string()))
-        })?,
+        Some(raw) => crate::validate::parse_keeper_block(raw)
+            .map_err(|e| err_validation(crate::error::safe_message_str(&e.to_string())))?,
     };
     for entry in &entries {
         if entry.profile == profile_name && !entry.browser.is_empty() {
@@ -573,17 +575,13 @@ pub fn handle_screencast_status(
     query: &[(String, String)],
 ) -> Result<Resp, ApiError> {
     let mut profile_name = crate::logs::query_value(query, "profile").unwrap_or_default();
-    if profile_name.is_empty() {
-        if load.state.found {
-            if let Ok((cfg, _)) = parse_loaded(load, config_dir) {
-                profile_name = cfg.default_profile.clone();
-            }
-        }
+    if profile_name.is_empty()
+        && load.state.found
+        && let Ok((cfg, _)) = parse_loaded(load, config_dir)
+    {
+        profile_name = cfg.default_profile.clone();
     }
-    let (available, reason) = match screencast_availability(config_dir, load, &profile_name) {
-        Ok(v) => v,
-        Err(e) => return Err(e),
-    };
+    let (available, reason) = screencast_availability(config_dir, load, &profile_name)?;
     let mut map = OrderedObject::new();
     map.set("available", JsonValue::Bool(available));
     map.set("profile", JsonValue::Str(profile_name));
@@ -646,7 +644,7 @@ pub fn ws_check_origin(origin: Option<&str>, request_host: &str) -> bool {
     if origin.is_empty() {
         return true;
     }
-    ws_origin_allowed(origin, request_host)
+    ws_origin_allowed(Some(origin), request_host)
 }
 
 /// GET /screencast/ws, pre-upgrade half: validate the
@@ -695,8 +693,7 @@ pub fn ws_pre_upgrade(
 /// `(ctx, profile, token, transport) -> LoginResult`.
 /// It is a plain function pointer type for now; the async
 /// runner wiring lands with the keeper port.
-pub type ScreencastStarter =
-    std::sync::Arc<dyn Fn(&str, &str) -> LoginResult + Send + Sync>;
+pub type ScreencastStarter = std::sync::Arc<dyn Fn(&str, &str) -> LoginResult + Send + Sync>;
 
 /// Render the terminal report for a finished session
 /// (Go handleScreencastWS): outcome enum only, plus
@@ -752,7 +749,7 @@ pub async fn handle_ws_upgrade(
     _peer: std::net::SocketAddr,
 ) -> Result<hyper::Response<crate::server::RespBody>, hyper::Error> {
     use base64::Engine as _;
-    use futures_util::{SinkExt, StreamExt};
+    use futures_util::SinkExt;
     use sha1::Digest as _;
 
     let query = crate::logs::parse_query(req.uri().query().unwrap_or(""));
@@ -848,8 +845,9 @@ pub async fn handle_ws_upgrade(
                 return;
             }
         };
+        let io = hyper_util::rt::TokioIo::new(upgraded);
         let mut ws = tokio_tungstenite::WebSocketStream::from_raw_socket(
-            upgraded,
+            io,
             tokio_tungstenite::tungstenite::protocol::Role::Server,
             None,
         )
@@ -864,10 +862,9 @@ pub async fn handle_ws_upgrade(
             .as_ref()
             .expect("starter present (checked above)")
             .clone();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            starter(&profile, &token)
-        }))
-        .unwrap_or_else(|_| LoginResult::failed());
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| starter(&profile, &token)))
+                .unwrap_or_else(|_| LoginResult::failed());
         let report = terminal_report(&result);
         let _ = ws
             .send(tokio_tungstenite::tungstenite::Message::Text(report.into()))
@@ -906,10 +903,14 @@ mod tests {
     fn registry_busy_token_stays_consumable() {
         let r = ScreencastRegistry::new();
         let tok_live = r.mint("muse01").unwrap();
+        // Minted while the first token is only reserved
+        // (not live yet): mint refuses only a LIVE
+        // session, so a second token exists to test the
+        // consume-time busy rule.
+        let tok2 = r.mint("muse01").unwrap();
         r.consume(&tok_live).unwrap();
         // A second token for the same profile: consume
         // refuses busy WITHOUT burning it.
-        let tok2 = r.mint("muse01").unwrap();
         assert!(matches!(r.consume(&tok2), Err(ConsumeError::Busy)));
         // After the live session ends, the second token
         // still consumes.
@@ -919,11 +920,13 @@ mod tests {
 
     #[test]
     fn validate_ws_input_allowlists() {
-        let mut m = WsInputMessage::default();
-        m.kind = "mouse".to_string();
-        m.mouse_type = "mousePressed".to_string();
-        m.button = "left".to_string();
-        m.click_count = 1;
+        let mut m = WsInputMessage {
+            kind: "mouse".to_string(),
+            mouse_type: "mousePressed".to_string(),
+            button: "left".to_string(),
+            click_count: 1,
+            ..Default::default()
+        };
         let ev = validate_ws_input(&m).unwrap();
         assert_eq!(ev.kind, InputKind::Mouse);
         m.mouse_type = "teleport".to_string();
@@ -968,13 +971,13 @@ mod tests {
     fn availability_no_keeper_entry() {
         let dir = std::env::temp_dir();
         let load = ConfigLoad {
-            raw: b"{}".to_vec(),
+            raw: b"{\"profiles\":{}}".to_vec(),
             hash: String::new(),
             state: crate::guarded::ConfigState {
                 found: true,
                 exists: true,
                 sha256: String::new(),
-                raw: b"{}".to_vec(),
+                raw: b"{\"profiles\":{}}".to_vec(),
                 base_dir: dir.clone(),
             },
         };

@@ -29,7 +29,11 @@ impl ApiError {
     /// Build one error. `msg` must already be fixed or
     /// SafeString'd by the caller.
     pub fn new(status: u16, typ: &'static str, msg: impl Into<String>) -> Self {
-        Self { status, typ, msg: msg.into() }
+        Self {
+            status,
+            typ,
+            msg: msg.into(),
+        }
     }
 }
 

@@ -28,6 +28,7 @@ use std::net::IpAddr;
 /// WITHOUT type/tag — the caller adds those) plus the
 /// captured DNS= server list (empty when the conf has no
 /// DNS= line).
+#[derive(Debug)]
 pub struct WgParsed {
     pub endpoint: JsonValue,
     pub dns_servers: Vec<String>,
@@ -38,6 +39,7 @@ pub struct WgParsed {
 /// the final structural checks (no [Interface], missing
 /// PrivateKey, peer missing a field) carry no line, so no
 /// hint is echoed for them.
+#[derive(Debug)]
 pub struct WgError {
     pub line: Option<usize>,
 }
@@ -464,7 +466,10 @@ mod tests {
             peer.get("address"),
             Some(&JsonValue::Str("203.0.113.10".to_string()))
         );
-        assert_eq!(peer.get("port"), Some(&JsonValue::Number("51820".to_string())));
+        assert_eq!(
+            peer.get("port"),
+            Some(&JsonValue::Number("51820".to_string()))
+        );
         assert_eq!(
             peer.get("public_key"),
             Some(&JsonValue::Str("FAKE-PUB".to_string()))

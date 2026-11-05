@@ -40,7 +40,7 @@
 use crate::auth::{parse_bearer_header, verify_token};
 use crate::chats::ChatDeps;
 use crate::config::{
-    WebUIConfig, DEFAULT_LOGIN_RATE_LIMIT_ATTEMPTS, DEFAULT_LOGIN_RATE_LIMIT_WINDOW_NS,
+    DEFAULT_LOGIN_RATE_LIMIT_ATTEMPTS, DEFAULT_LOGIN_RATE_LIMIT_WINDOW_NS, WebUIConfig,
     effective_login_rate_limit, effective_session_idle_timeout_ns,
 };
 use crate::error::ApiError;
@@ -62,7 +62,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response as HyperResponse, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -105,7 +105,10 @@ pub fn api_headers() -> Vec<(String, String)> {
 /// charset=utf-8` + no-store + nosniff.
 pub fn shell_headers() -> Vec<(String, String)> {
     vec![
-        ("Content-Type".to_string(), "text/html; charset=utf-8".to_string()),
+        (
+            "Content-Type".to_string(),
+            "text/html; charset=utf-8".to_string(),
+        ),
         ("Cache-Control".to_string(), "no-store".to_string()),
         ("X-Content-Type-Options".to_string(), "nosniff".to_string()),
     ]
@@ -171,7 +174,8 @@ pub fn forbidden_resp() -> Resp {
 /// attempts` with `Retry-After` = window seconds.
 pub fn rate_limited_resp(window: Duration) -> Resp {
     let mut resp = error_resp(429, "rate_limited", "too many failed login attempts");
-    resp.headers.push(("Retry-After".to_string(), retry_after_seconds(window)));
+    resp.headers
+        .push(("Retry-After".to_string(), retry_after_seconds(window)));
     resp
 }
 
@@ -187,7 +191,11 @@ pub fn internal_resp() -> Resp {
 
 /// The shell response (embedded bytes, shell headers).
 pub fn shell_resp() -> Resp {
-    Resp { status: 200, headers: shell_headers(), body: SHELL_BYTES.to_vec() }
+    Resp {
+        status: 200,
+        headers: shell_headers(),
+        body: SHELL_BYTES.to_vec(),
+    }
 }
 
 /// Screencast availability seam
@@ -196,8 +204,7 @@ pub fn shell_resp() -> Resp {
 /// build the seam is implemented over the config file
 /// (keeper entry with a browser URL); a nil seam means
 /// unavailable.
-pub type ScreencastAvailability =
-    Arc<dyn Fn(&str) -> (bool, String) + Send + Sync>;
+pub type ScreencastAvailability = Arc<dyn Fn(&str) -> (bool, String) + Send + Sync>;
 
 /// Cookie import seam (`Deps.ImportCookies` in Go):
 /// validates and writes cookies for a profile through the
@@ -274,7 +281,9 @@ impl Server {
             ));
         }
         if !deps.has_token || deps.token_hash.is_empty() {
-            return Err(NewServerError::Config("webui: no token configured".to_string()));
+            return Err(NewServerError::Config(
+                "webui: no token configured".to_string(),
+            ));
         }
         if let Some(ui_dir) = &deps.ui_dir {
             check_ui_dir(&deps.config_dir, ui_dir, &deps.cookies_files)
@@ -299,7 +308,10 @@ impl Server {
 
     /// The live Bearer comparator (read under a read lock).
     pub fn token_hash(&self) -> String {
-        self.token_hash.read().map(|g| g.clone()).unwrap_or_default()
+        self.token_hash
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// `authorized`: the `Authorization` header must start
@@ -474,10 +486,7 @@ impl Server {
             return self.handle_ws_upgrade(req, peer).await;
         }
         let headers = req.headers().clone();
-        let body_bytes = match req
-            .collect()
-            .await
-        {
+        let body_bytes = match req.collect().await {
             Ok(collected) => collected.to_bytes(),
             Err(_) => Bytes::new(),
         };
@@ -502,8 +511,8 @@ impl Server {
         body: &[u8],
     ) -> Resp {
         let path = match percent_decode_path(path_raw) {
-            Ok(p) => p,
-            Err(_) => {
+            Some(p) => p,
+            None => {
                 return Resp {
                     status: 400,
                     headers: vec![(
@@ -516,10 +525,16 @@ impl Server {
         };
         let is_api = path == "/api/v1" || path.starts_with("/api/v1/");
         if is_api {
-            return self.dispatch_api(method, &path, uri, headers, peer, body).await;
+            return self
+                .dispatch_api(method, &path, uri, headers, peer, body)
+                .await;
         }
         // Non-API: GET/HEAD → shell; anything else → 405.
-        let effective = if method == Method::HEAD { &Method::GET } else { method };
+        let effective = if method == Method::HEAD {
+            &Method::GET
+        } else {
+            method
+        };
         if *effective != Method::GET {
             return method_not_allowed_resp();
         }
@@ -549,9 +564,7 @@ impl Server {
         }
         let is_ws = path.ends_with("/screencast/ws");
         if !is_ws {
-            let auth = headers
-                .get("authorization")
-                .and_then(|v| v.to_str().ok());
+            let auth = headers.get("authorization").and_then(|v| v.to_str().ok());
             if !self.authorized(auth) {
                 {
                     let mut limiter = self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
@@ -565,7 +578,10 @@ impl Server {
             }
         }
         // Origin: mutating methods only.
-        if matches!(method, &Method::POST | &Method::PUT | &Method::PATCH | &Method::DELETE) {
+        if matches!(
+            method,
+            &Method::POST | &Method::PUT | &Method::PATCH | &Method::DELETE
+        ) {
             let origin = headers.get("origin").and_then(|v| v.to_str().ok());
             let host = headers
                 .get("host")
@@ -575,7 +591,11 @@ impl Server {
                 return forbidden_resp();
             }
         }
-        let effective = if method == Method::HEAD { &Method::GET } else { method };
+        let effective = if method == Method::HEAD {
+            &Method::GET
+        } else {
+            method
+        };
         // Timeout: 30s, WS excluded.
         let fut = self.route_api(effective, path, uri, headers, peer, body);
         if is_ws {
@@ -620,7 +640,11 @@ impl Server {
         match &self.deps.ui_dir {
             None => shell_resp(),
             Some(ui_dir) => {
-                let method_str = if method == Method::HEAD { "GET" } else { method.as_str() };
+                let method_str = if method == Method::HEAD {
+                    "GET"
+                } else {
+                    method.as_str()
+                };
                 serve_ui_dir(&self.deps.config_dir, ui_dir, method_str, path)
             }
         }
@@ -653,17 +677,17 @@ impl Server {
 /// decodes `r.URL.Path`: `%XX` sequences become bytes
 /// (a `+` stays a `+` in paths); an invalid escape is an
 /// error. The result is lossy UTF-8 for routing.
-pub fn percent_decode_path(raw: &str) -> Result<String, ()> {
+pub fn percent_decode_path(raw: &str) -> Option<String> {
     let bytes = raw.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
             if i + 2 >= bytes.len() {
-                return Err(());
+                return None;
             }
-            let hi = hex_val(bytes[i + 1]).ok_or(())?;
-            let lo = hex_val(bytes[i + 2]).ok_or(())?;
+            let hi = hex_val(bytes[i + 1])?;
+            let lo = hex_val(bytes[i + 2])?;
             out.push((hi << 4) | lo);
             i += 3;
         } else {
@@ -671,7 +695,7 @@ pub fn percent_decode_path(raw: &str) -> Result<String, ()> {
             i += 1;
         }
     }
-    Ok(String::from_utf8_lossy(&out).into_owned())
+    Some(String::from_utf8_lossy(&out).into_owned())
 }
 
 fn hex_val(b: u8) -> Option<u8> {
@@ -718,9 +742,8 @@ pub fn render_resp(method: &Method, resp: Resp) -> HyperResponse<RespBody> {
             .body(Full::new(body_bytes).map_err(|e| match e {}).boxed())
             .expect("Full response builds")
     } else {
-        let stream = stream_once(async move {
-            Ok::<_, hyper::Error>(http_body_util::Frame::data(body_bytes))
-        });
+        let stream =
+            stream_once(async move { Ok::<_, hyper::Error>(http_body::Frame::data(body_bytes)) });
         builder
             .body(StreamBody::new(stream).boxed())
             .expect("stream response builds")

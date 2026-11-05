@@ -86,7 +86,10 @@ impl KeeperStatus {
             obj.set("earliest_expiry", JsonValue::Str(rfc3339_nano(*t)));
         }
         if !self.driving_cookie.is_empty() {
-            obj.set("driving_cookie", JsonValue::Str(self.driving_cookie.clone()));
+            obj.set(
+                "driving_cookie",
+                JsonValue::Str(self.driving_cookie.clone()),
+            );
         }
         if let Some(t) = &self.driving_expiry {
             obj.set("driving_expiry", JsonValue::Str(rfc3339_nano(*t)));
@@ -171,7 +174,7 @@ fn load_state(profile_dir: &Path) -> Result<LoadState, String> {
         return Ok(LoadState::Fresh);
     }
     let text = String::from_utf8_lossy(&data).into_owned();
-    let value = match decode_ordered_json(&text) {
+    let value = match decode_ordered_json(text.as_bytes()) {
         Ok(v) => v,
         Err(_) => return Ok(LoadState::Corrupt),
     };
@@ -220,8 +223,9 @@ fn load_state(profile_dir: &Path) -> Result<LoadState, String> {
 /// an error; other failures (bad profile name, unreadable
 /// directory) are errors.
 pub fn read_status(config_dir: &Path, entry: &KeeperEntry) -> Result<KeeperStatus, String> {
-    let paths = castctl_config::profile_paths(&config_dir.to_string_lossy(), &entry.profile)
-        .map_err(|e| e.message().to_string())?;
+    let paths =
+        castctl_config::profile::profile_paths(&config_dir.to_string_lossy(), &entry.profile)
+            .map_err(|e| e.message)?;
     match load_state(Path::new(&paths.dir))? {
         LoadState::Fresh => Ok(KeeperStatus {
             tag: entry.tag.clone(),
@@ -292,8 +296,13 @@ mod tests {
         let st = read_status(&d, &entry("k1", "muse01")).unwrap();
         assert_eq!(st.last_tick_outcome, "never");
         assert!(!st.logged_out);
-        let JsonValue::Object(o) = st.to_json() else { panic!("object") };
-        assert_eq!(o.get("last_tick_outcome"), Some(&JsonValue::Str("never".to_string())));
+        let JsonValue::Object(o) = st.to_json() else {
+            panic!("object")
+        };
+        assert_eq!(
+            o.get("last_tick_outcome"),
+            Some(&JsonValue::Str("never".to_string()))
+        );
         // omitempty: no reason, no timestamps, no corrupt flag.
         assert!(o.get("keeper_stopped_reason").is_none());
         assert!(o.get("state_corrupt").is_none());
@@ -335,7 +344,9 @@ mod tests {
         assert!(st.logged_out);
         assert_eq!(st.last_tick_outcome, "ok");
         assert!(st.earliest_expiry.is_some());
-        let JsonValue::Object(o) = st.to_json() else { panic!("object") };
+        let JsonValue::Object(o) = st.to_json() else {
+            panic!("object")
+        };
         assert_eq!(
             o.get("earliest_expiry"),
             Some(&JsonValue::Str("2026-12-05T00:00:00Z".to_string()))

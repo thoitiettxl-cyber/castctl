@@ -96,9 +96,8 @@ pub fn check_ui_dir(
     cookies_files: &[String],
 ) -> Result<PathBuf, UIDirError> {
     let root = resolve_against(config_dir, ui_dir);
-    let md = std::fs::metadata(&root).map_err(|_| {
-        UIDirError("webui: ui_dir is not a readable directory".to_string())
-    })?;
+    let md = std::fs::metadata(&root)
+        .map_err(|_| UIDirError("webui: ui_dir is not a readable directory".to_string()))?;
     if !md.is_dir() {
         return Err(UIDirError(
             "webui: ui_dir is not a readable directory".to_string(),
@@ -121,9 +120,8 @@ pub fn check_ui_dir(
         }
     }
     let index = root.join("index.html");
-    let lst = std::fs::symlink_metadata(&index).map_err(|_| {
-        UIDirError("webui: ui_dir has no readable index.html".to_string())
-    })?;
+    let lst = std::fs::symlink_metadata(&index)
+        .map_err(|_| UIDirError("webui: ui_dir has no readable index.html".to_string()))?;
     if lst.file_type().is_symlink() || !lst.is_file() {
         return Err(UIDirError(
             "webui: ui_dir has no readable index.html".to_string(),
@@ -171,10 +169,10 @@ pub fn serve_ui_dir(config_dir: &Path, ui_dir: &str, method: &str, path: &str) -
     }
     // A symlink at the resolved path is refused.
     let lst = std::fs::symlink_metadata(&resolved).ok();
-    if let Some(lst) = &lst {
-        if lst.file_type().is_symlink() {
-            return not_found_resp();
-        }
+    if let Some(lst) = &lst
+        && lst.file_type().is_symlink()
+    {
+        return not_found_resp();
     }
     // Dotfiles are re-checked on the resolved,
     // root-relative path.
@@ -212,14 +210,14 @@ pub fn serve_ui_dir(config_dir: &Path, ui_dir: &str, method: &str, path: &str) -
     // Open-then-verify: the opened file must be the same
     // file the Lstat saw (same inode), so a symlink swapped
     // in between the Lstat and the open is refused.
-    if let Some(lst) = &lst {
-        if let Ok(fst) = std::fs::metadata(&resolved) {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                if lst.ino() != fst.ino() || lst.dev() != fst.dev() {
-                    return not_found_resp();
-                }
+    if let Some(lst) = &lst
+        && let Ok(fst) = std::fs::metadata(&resolved)
+    {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if lst.ino() != fst.ino() || lst.dev() != fst.dev() {
+                return not_found_resp();
             }
         }
     }
@@ -229,7 +227,11 @@ pub fn serve_ui_dir(config_dir: &Path, ui_dir: &str, method: &str, path: &str) -
         ui_dir_content_type(resolved.to_str().unwrap_or("")).to_string(),
     ));
     headers.push(("Content-Length".to_string(), data.len().to_string()));
-    Resp { status: 200, headers, body: data }
+    Resp {
+        status: 200,
+        headers,
+        body: data,
+    }
 }
 
 /// `serveUIDirShell`: serve the on-disk shell (the root's
@@ -266,5 +268,9 @@ pub fn serve_ui_dir_shell(config_dir: &Path, root: &Path) -> Resp {
         }
     }
     let headers = shell_headers();
-    Resp { status: 200, headers, body: data }
+    Resp {
+        status: 200,
+        headers,
+        body: data,
+    }
 }

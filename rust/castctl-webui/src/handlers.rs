@@ -36,8 +36,8 @@ use crate::chats::{chat_deps, chat_session_id, err_upstream_chat, require_chat_p
 use crate::cookies::cookies_format;
 use crate::endpoints::{parse_wireguard_conf, preview_endpoint, with_type_and_tag};
 use crate::error::{
-    ApiError, err_config_changed, err_internal, err_not_found, err_unavailable, err_upstream,
-    err_validation, safe_message_str,
+    ApiError, err_config_changed, err_internal, err_not_found, err_unavailable, err_validation,
+    safe_message_str,
 };
 use crate::go_decode::decode_first_value;
 use crate::keeper_status::{read_status, rfc3339 as keeper_rfc3339};
@@ -58,13 +58,13 @@ use crate::server::{
 };
 use crate::store::{
     ConfigLoad, SaveOutcome, config_source, legacy_profile_names_in, load_config, parse_loaded,
-    save_direct, save_merged, save_submitted, summarize_object, used_by_endpoint,
-    used_by_outbound,
+    save_direct, save_merged, save_submitted, summarize_object, used_by_endpoint, used_by_outbound,
 };
 use crate::validate::parse_and_validate_config;
+use castctl_config::config::SingleConfig;
 use castctl_config::jsonvalue::{JsonValue, OrderedObject};
 use castctl_config::profile::OutboundKind;
-use castctl_config::{SingleConfig, profile_paths, validate_profile_name};
+use castctl_config::profile::{profile_paths, validate_profile_name};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -122,13 +122,12 @@ pub async fn route(
             };
         }
         ["profiles", name, "rename"] => {
-            return known(Method::POST)
-                .unwrap_or_else(|| route_rename_profile(server, name, body));
+            return known(Method::POST).unwrap_or_else(|| route_rename_profile(server, name, body));
         }
         ["profiles", name, "set-default"] => {
             return known(Method::POST).unwrap_or_else(|| route_set_default_profile(server, name));
         }
-        ["profiles", name, "test"] => {
+        ["profiles", _name, "test"] => {
             return known(Method::POST).unwrap_or_else(|| {
                 RouteOutcome::Handled(error_resp(
                     501,
@@ -164,7 +163,7 @@ pub async fn route(
                 _ => RouteOutcome::MethodNotAllowed,
             };
         }
-        ["outbounds", tag, "test"] => {
+        ["outbounds", _tag, "test"] => {
             return known(Method::POST).unwrap_or_else(|| {
                 RouteOutcome::Handled(error_resp(
                     501,
@@ -323,9 +322,7 @@ fn obj_str(obj: &OrderedObject, key: &str) -> Option<String> {
 /// raw bytes give empty sections; a non-object document is
 /// a validation error; non-array sections and non-object
 /// elements are skipped.
-fn raw_sections(
-    load: &ConfigLoad,
-) -> Result<(Vec<OrderedObject>, Vec<OrderedObject>), ApiError> {
+fn raw_sections(load: &ConfigLoad) -> Result<(Vec<OrderedObject>, Vec<OrderedObject>), ApiError> {
     if load.raw.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -333,7 +330,7 @@ fn raw_sections(
     let doc = decode_first_value(text.as_bytes()).map_err(|e| {
         err_validation(format!(
             "stored config is invalid: {}",
-            safe_message_str(&e.message())
+            safe_message_str(&e.message)
         ))
     })?;
     let JsonValue::Object(root) = &doc else {
@@ -376,10 +373,10 @@ fn cookies_present(path: &str) -> bool {
 /// for a parsed document.
 fn tag_defined(cfg: &SingleConfig, tag: &str) -> bool {
     for raw in cfg.outbounds_raw.iter().chain(cfg.endpoints_raw.iter()) {
-        if let JsonValue::Object(obj) = raw {
-            if obj_str(obj, "tag").as_deref() == Some(tag) {
-                return true;
-            }
+        if let JsonValue::Object(obj) = raw
+            && obj_str(obj, "tag").as_deref() == Some(tag)
+        {
+            return true;
         }
     }
     false
@@ -420,15 +417,27 @@ fn handle_status(server: &Server) -> Result<Resp, ApiError> {
     map.set("config_path", JsonValue::Str(server.config_path()));
     map.set("config_source", JsonValue::Str(source));
     map.set("default_profile", JsonValue::Str(default_profile));
-    map.set("endpoint_count", JsonValue::Number(endpoint_count.to_string()));
+    map.set(
+        "endpoint_count",
+        JsonValue::Number(endpoint_count.to_string()),
+    );
     // Go reports the real runtime/sing-box versions; the
     // Rust build has no equivalent, so the documented
     // fallback strings are used (the parity harness checks
     // presence + type only).
     map.set("go_version", JsonValue::Str("unknown".to_string()));
-    map.set("listen_addr", JsonValue::Str(server.deps.listen_addr.clone()));
-    map.set("outbound_count", JsonValue::Number(outbound_count.to_string()));
-    map.set("profile_count", JsonValue::Number(profile_count.to_string()));
+    map.set(
+        "listen_addr",
+        JsonValue::Str(server.deps.listen_addr.clone()),
+    );
+    map.set(
+        "outbound_count",
+        JsonValue::Number(outbound_count.to_string()),
+    );
+    map.set(
+        "profile_count",
+        JsonValue::Number(profile_count.to_string()),
+    );
     map.set("remote_exposure", JsonValue::Bool(false));
     map.set(
         "session_idle_timeout_seconds",
@@ -537,15 +546,15 @@ fn profile_warnings(cfg: &SingleConfig, p: &castctl_config::profile::Profile) ->
         }
         Err(_) => {}
     }
-    if !p.config_file.is_empty() {
-        if let Ok(md) = std::fs::metadata(&p.config_file) {
-            let mode = md.permissions().mode() & 0o7777;
-            if mode != 0o600 {
-                warnings.push(format!(
-                    "config file {} has mode {:04o}, expected 0600",
-                    p.config_file, mode
-                ));
-            }
+    if !p.config_file.is_empty()
+        && let Ok(md) = std::fs::metadata(&p.config_file)
+    {
+        let mode = md.permissions().mode() & 0o7777;
+        if mode != 0o600 {
+            warnings.push(format!(
+                "config file {} has mode {:04o}, expected 0600",
+                p.config_file, mode
+            ));
         }
     }
     if p.outbound.kind == OutboundKind::Tag
@@ -574,18 +583,13 @@ fn detail_for(
     let mut entry = JsonValue::Object(OrderedObject::new());
     if !load.raw.is_empty() {
         let text = String::from_utf8_lossy(&load.raw).into_owned();
-        if let Ok(doc) = decode_first_value(text.as_bytes()) {
-            if let JsonValue::Object(root) = &doc {
-                if let Some(JsonValue::Object(profiles)) = root.get("profiles") {
-                    if let Some(JsonValue::Object(raw_entry)) = profiles.get(&p.name) {
-                        if let JsonValue::Object(redacted) =
-                            redact_value(&JsonValue::Object(raw_entry.clone()))
-                        {
-                            entry = JsonValue::Object(redacted);
-                        }
-                    }
-                }
-            }
+        if let Ok(doc) = decode_first_value(text.as_bytes())
+            && let JsonValue::Object(root) = &doc
+            && let Some(JsonValue::Object(profiles)) = root.get("profiles")
+            && let Some(JsonValue::Object(raw_entry)) = profiles.get(&p.name)
+            && let JsonValue::Object(redacted) = redact_value(&JsonValue::Object(raw_entry.clone()))
+        {
+            entry = JsonValue::Object(redacted);
         }
     }
     let mut paths = OrderedObject::new();
@@ -601,7 +605,10 @@ fn detail_for(
     obj.set("name", JsonValue::Str(p.name.clone()));
     obj.set("default", JsonValue::Bool(p.name == cfg.default_profile));
     obj.set("source", JsonValue::Str("single-file".to_string()));
-    obj.set("has_cookies", JsonValue::Bool(cookies_present(&p.cookies_file)));
+    obj.set(
+        "has_cookies",
+        JsonValue::Bool(cookies_present(&p.cookies_file)),
+    );
     obj.set("outbound_tag", outbound_tag_json(p));
     obj.set("fingerprint", JsonValue::Str(fingerprint_or_default(p)));
     obj.set("dir", JsonValue::Str(p.dir.clone()));
@@ -660,7 +667,9 @@ fn handle_list_profiles(server: &Server) -> Result<Resp, ApiError> {
 }
 
 fn route_get_profile(server: &Server, name: &str) -> RouteOutcome {
-    RouteOutcome::Handled(done(load_detail(server, name).map(|d| envelope_resp(200, d))))
+    RouteOutcome::Handled(done(
+        load_detail(server, name).map(|d| envelope_resp(200, d)),
+    ))
 }
 
 fn route_create_profile(server: &Server, body: &[u8]) -> RouteOutcome {
@@ -683,7 +692,7 @@ fn handle_create_profile(server: &Server, body: &[u8]) -> Result<Resp, ApiError>
     if let Err(e) = validate_profile_name(&name) {
         return Err(err_validation(format!(
             "invalid profile name: {}",
-            safe_message_str(&e.message().to_string())
+            safe_message_str(&e.message)
         )));
     }
     let load = load(server)?;
@@ -698,20 +707,24 @@ fn handle_create_profile(server: &Server, body: &[u8]) -> Result<Resp, ApiError>
         };
         let mut profiles = profiles_object(doc_obj)?;
         let mut entry = OrderedObject::new();
-        if let Some(cf) = &cookies_file {
-            if !cf.is_empty() {
-                entry.set("cookies_file".to_string(), JsonValue::Str(cf.clone()));
-            }
+        if let Some(cf) = &cookies_file
+            && !cf.is_empty()
+        {
+            entry.set("cookies_file".to_string(), JsonValue::Str(cf.clone()));
         }
-        if let Some(ob) = &outbound {
-            if !ob.is_empty() && ob != "direct" {
-                entry.set("outbound".to_string(), JsonValue::Str(ob.clone()));
-            }
+        if let Some(ob) = &outbound
+            && !ob.is_empty()
+            && ob != "direct"
+        {
+            entry.set("outbound".to_string(), JsonValue::Str(ob.clone()));
         }
         profiles.set(name_c.clone(), JsonValue::Object(entry));
         doc_obj.set("profiles".to_string(), JsonValue::Object(profiles));
         if set_default == Some(true) {
-            doc_obj.set("default_profile".to_string(), JsonValue::Str(name_c.clone()));
+            doc_obj.set(
+                "default_profile".to_string(),
+                JsonValue::Str(name_c.clone()),
+            );
         }
         Ok(())
     })?;
@@ -757,7 +770,11 @@ fn handle_patch_profile(server: &Server, name: &str, body: &[u8]) -> Result<Resp
         if let Some(b) = auto_approve {
             entry.set(
                 "auto_approve".to_string(),
-                JsonValue::Str(if b { "always".to_string() } else { "off".to_string() }),
+                JsonValue::Str(if b {
+                    "always".to_string()
+                } else {
+                    "off".to_string()
+                }),
             );
         }
         if let Some(b) = auto_allow_once {
@@ -791,17 +808,12 @@ fn route_delete_profile(server: &Server, name: &str, body: &[u8]) -> RouteOutcom
 }
 
 fn handle_delete_profile(server: &Server, name: &str, body: &[u8]) -> Result<Resp, ApiError> {
-    let (confirm, del_name) = decode_body_typed(
-        body,
-        BODY_CAP_64K,
-        &["confirm", "name"],
-        |obj| {
-            Ok((
-                req_bool(obj, "confirm")?,
-                req_string(obj, "name")?.unwrap_or_default(),
-            ))
-        },
-    )?;
+    let (confirm, del_name) = decode_body_typed(body, BODY_CAP_64K, &["confirm", "name"], |obj| {
+        Ok((
+            req_bool(obj, "confirm")?,
+            req_string(obj, "name")?.unwrap_or_default(),
+        ))
+    })?;
     if confirm != Some(true) || del_name != name {
         return Err(err_validation("delete requires {confirm: true, name}"));
     }
@@ -818,10 +830,10 @@ fn handle_delete_profile(server: &Server, name: &str, body: &[u8]) -> Result<Res
         let mut profiles = profiles_object(doc_obj)?;
         profiles.remove(&name_c);
         doc_obj.set("profiles".to_string(), JsonValue::Object(profiles));
-        if let Some(JsonValue::Str(def)) = doc_obj.get("default_profile") {
-            if def == &name_c {
-                doc_obj.remove("default_profile");
-            }
+        if let Some(JsonValue::Str(def)) = doc_obj.get("default_profile")
+            && def == &name_c
+        {
+            doc_obj.remove("default_profile");
         }
         Ok(())
     })?;
@@ -868,7 +880,10 @@ fn rewrite_renamed_cookies_file(
         return;
     }
     if Path::new(&value).is_absolute() {
-        entry.set("cookies_file".to_string(), JsonValue::Str(new_paths.cookies));
+        entry.set(
+            "cookies_file".to_string(),
+            JsonValue::Str(new_paths.cookies),
+        );
         return;
     }
     if let Some(rel) = path_relative_to(config_dir, Path::new(&new_paths.cookies)) {
@@ -897,7 +912,7 @@ fn handle_rename_profile(server: &Server, name: &str, body: &[u8]) -> Result<Res
     if let Err(e) = validate_profile_name(&to) {
         return Err(err_validation(format!(
             "invalid profile name: {}",
-            safe_message_str(&e.message().to_string())
+            safe_message_str(&e.message)
         )));
     }
     let load = load(server)?;
@@ -928,10 +943,10 @@ fn handle_rename_profile(server: &Server, name: &str, body: &[u8]) -> Result<Res
             profiles.set(to_c.clone(), entry_val);
         }
         doc_obj.set("profiles".to_string(), JsonValue::Object(profiles));
-        if let Some(JsonValue::Str(def)) = doc_obj.get("default_profile") {
-            if def == &old_c {
-                doc_obj.set("default_profile".to_string(), JsonValue::Str(to_c.clone()));
-            }
+        if let Some(JsonValue::Str(def)) = doc_obj.get("default_profile")
+            && def == &old_c
+        {
+            doc_obj.set("default_profile".to_string(), JsonValue::Str(to_c.clone()));
         }
         Ok(())
     })?;
@@ -956,7 +971,10 @@ fn handle_set_default_profile(server: &Server, name: &str) -> Result<Resp, ApiEr
         let JsonValue::Object(doc_obj) = doc else {
             return Err(err_validation("config document must be a JSON object"));
         };
-        doc_obj.set("default_profile".to_string(), JsonValue::Str(name_c.clone()));
+        doc_obj.set(
+            "default_profile".to_string(),
+            JsonValue::Str(name_c.clone()),
+        );
         Ok(())
     })?;
     refresh(server, &outcome);
@@ -981,7 +999,10 @@ fn resolve_cookies_file(server: &Server, name: &str) -> Result<(String, bool), A
     let load = load(server)?;
     if load.state.found {
         let (cfg, _) = parse_and_validate_config(&load.raw, cfg_dir(server)).map_err(|e| {
-            err_validation(format!("stored config is invalid: {}", safe_message_str(&e)))
+            err_validation(format!(
+                "stored config is invalid: {}",
+                safe_message_str(&e)
+            ))
         })?;
         if let Some(p) = cfg.profiles.get(name) {
             return Ok((p.cookies_file.clone(), false));
@@ -990,7 +1011,7 @@ fn resolve_cookies_file(server: &Server, name: &str) -> Result<(String, bool), A
     let paths = profile_paths(&cfg_dir(server).to_string_lossy(), name).map_err(|e| {
         err_validation(format!(
             "invalid profile name: {}",
-            safe_message_str(&e.message().to_string())
+            safe_message_str(&e.message)
         ))
     })?;
     let legacy_config = Path::new(&paths.dir).join("config.json");
@@ -1009,15 +1030,13 @@ fn handle_login_status(server: &Server, name: &str) -> Result<Resp, ApiError> {
     let present = cookies_present(&cookies_file);
     let mut format: JsonValue = JsonValue::Null;
     let mut parse_ok = false;
-    if present {
-        if let Ok(data) = std::fs::read(&cookies_file) {
-            // Values stay in-process: only the detected
-            // form and the parse verdict leave this handler.
-            let f = cookies_format(&data);
-            if !f.is_empty() {
-                format = JsonValue::Str(f.to_string());
-                parse_ok = true;
-            }
+    if present && let Ok(data) = std::fs::read(&cookies_file) {
+        // Values stay in-process: only the detected
+        // form and the parse verdict leave this handler.
+        let f = cookies_format(&data);
+        if !f.is_empty() {
+            format = JsonValue::Str(f.to_string());
+            parse_ok = true;
         }
     }
     // Keeper state (no network): the logged-out flag and
@@ -1026,21 +1045,18 @@ fn handle_login_status(server: &Server, name: &str) -> Result<Resp, ApiError> {
     let mut earliest_expiry: JsonValue = JsonValue::Null;
     let mut last_checked_at: JsonValue = JsonValue::Null;
     let mut logged_out = false;
-    if let Ok(load) = load(server) {
-        if load.state.found {
-            if let Ok((_, entries)) = parse_loaded(&load, cfg_dir(server)) {
-                if let Some(entry) = entries.iter().find(|e| e.profile == name) {
-                    if let Ok(st) = read_status(cfg_dir(server), entry) {
-                        logged_out = st.logged_out;
-                        if let Some(t) = st.earliest_expiry {
-                            earliest_expiry = JsonValue::Str(keeper_rfc3339(t));
-                        }
-                        if let Some(t) = st.last_checked_at {
-                            last_checked_at = JsonValue::Str(keeper_rfc3339(t));
-                        }
-                    }
-                }
-            }
+    if let Ok(load) = load(server)
+        && load.state.found
+        && let Ok((_, entries)) = parse_loaded(&load, cfg_dir(server))
+        && let Some(entry) = entries.iter().find(|e| e.profile == name)
+        && let Ok(st) = read_status(cfg_dir(server), entry)
+    {
+        logged_out = st.logged_out;
+        if let Some(t) = st.earliest_expiry {
+            earliest_expiry = JsonValue::Str(keeper_rfc3339(t));
+        }
+        if let Some(t) = st.last_checked_at {
+            last_checked_at = JsonValue::Str(keeper_rfc3339(t));
         }
     }
     let mut map = OrderedObject::new();
@@ -1061,17 +1077,12 @@ fn route_login_import(server: &Server, name: &str, body: &[u8]) -> RouteOutcome 
 }
 
 fn handle_login_import(server: &Server, name: &str, body: &[u8]) -> Result<Resp, ApiError> {
-    let (format, content) = decode_body_typed(
-        body,
-        BODY_CAP_1M,
-        &["format", "content"],
-        |obj| {
-            Ok((
-                req_string(obj, "format")?.unwrap_or_default(),
-                req_string(obj, "content")?.unwrap_or_default(),
-            ))
-        },
-    )?;
+    let (format, content) = decode_body_typed(body, BODY_CAP_1M, &["format", "content"], |obj| {
+        Ok((
+            req_string(obj, "format")?.unwrap_or_default(),
+            req_string(obj, "content")?.unwrap_or_default(),
+        ))
+    })?;
     if format != "text" && format != "file" {
         return Err(err_validation("format must be text or file"));
     }
@@ -1087,7 +1098,9 @@ fn handle_login_import(server: &Server, name: &str, body: &[u8]) -> Result<Resp,
         ));
     }
     let Some(seam) = &server.deps.import_cookies else {
-        return Err(err_unavailable("cookie import is unavailable in this build"));
+        return Err(err_unavailable(
+            "cookie import is unavailable in this build",
+        ));
     };
     if let Err(e) = seam(name, &content) {
         return Err(err_validation(safe_message_str(&e)));
@@ -1116,7 +1129,9 @@ fn handle_login_restore(server: &Server, name: &str) -> Result<Resp, ApiError> {
         ));
     }
     let Some(seam) = &server.deps.restore_cookies else {
-        return Err(err_unavailable("cookie restore is unavailable in this build"));
+        return Err(err_unavailable(
+            "cookie restore is unavailable in this build",
+        ));
     };
     match seam(name) {
         Err(e) => {
@@ -1244,10 +1259,10 @@ fn outbound_summary_after(server: &Server, tag: &str) -> JsonValue {
     let (raw_outbounds, _) = raw_sections(&load).unwrap_or_default();
     let by_tag = raw_by_tag(&raw_outbounds);
     for raw in &cfg.outbounds_raw {
-        if let JsonValue::Object(obj) = raw {
-            if obj_str(obj, "tag").as_deref() == Some(tag) {
-                return outbound_summary_for(&cfg, obj, &by_tag);
-            }
+        if let JsonValue::Object(obj) = raw
+            && obj_str(obj, "tag").as_deref() == Some(tag)
+        {
+            return outbound_summary_for(&cfg, obj, &by_tag);
         }
     }
     tag_only()
@@ -1265,10 +1280,10 @@ fn endpoint_summary_after(server: &Server, tag: &str) -> JsonValue {
     let (raw_outbounds, raw_endpoints) = raw_sections(&load).unwrap_or_default();
     let by_tag = raw_by_tag(&raw_endpoints);
     for raw in &cfg.endpoints_raw {
-        if let JsonValue::Object(obj) = raw {
-            if obj_str(obj, "tag").as_deref() == Some(tag) {
-                return endpoint_summary_for(&cfg, obj, &raw_outbounds, &by_tag);
-            }
+        if let JsonValue::Object(obj) = raw
+            && obj_str(obj, "tag").as_deref() == Some(tag)
+        {
+            return endpoint_summary_for(&cfg, obj, &raw_outbounds, &by_tag);
         }
     }
     tag_only()
@@ -1278,9 +1293,7 @@ fn endpoint_summary_after(server: &Server, tag: &str) -> JsonValue {
 /// Missing key → `None` (the 400 "must be an object" is
 /// the caller's); a present non-object → a decode error.
 fn section_body(body: &[u8], key: &str) -> Result<Option<JsonValue>, ApiError> {
-    decode_body_typed(body, BODY_CAP_1M, &[key], |obj| {
-        Ok(obj.get(key).cloned())
-    })
+    decode_body_typed(body, BODY_CAP_1M, &[key], |obj| Ok(obj.get(key).cloned()))
 }
 
 fn route_create_outbound(server: &Server, body: &[u8]) -> RouteOutcome {
@@ -1308,10 +1321,10 @@ fn handle_create_outbound(server: &Server, body: &[u8]) -> Result<Resp, ApiError
             _ => Vec::new(),
         };
         for elem in &arr {
-            if let JsonValue::Object(obj) = elem {
-                if obj_str(obj, "tag").as_deref() == Some(tag_c.as_str()) {
-                    return Err(err_validation("outbound already exists"));
-                }
+            if let JsonValue::Object(obj) = elem
+                && obj_str(obj, "tag").as_deref() == Some(tag_c.as_str())
+            {
+                return Err(err_validation("outbound already exists"));
             }
         }
         // A new element has no stored counterpart: any
@@ -1363,17 +1376,13 @@ fn handle_patch_outbound(server: &Server, tag: &str, body: &[u8]) -> Result<Resp
                 continue;
             };
             if obj_str(obj, "tag").as_deref() == Some(tag_c.as_str()) {
-                let merged = merge_node_at(
-                    Some(elem),
-                    &outbound_c,
-                    &format!("outbounds[{i}]"),
-                )
-                .map_err(|rej| {
-                    err_validation(format!(
-                        "redacted value at {} has no stored value to keep",
-                        rej.path
-                    ))
-                })?;
+                let merged = merge_node_at(Some(elem), &outbound_c, &format!("outbounds[{i}]"))
+                    .map_err(|rej| {
+                        err_validation(format!(
+                            "redacted value at {} has no stored value to keep",
+                            rej.path
+                        ))
+                    })?;
                 arr[i] = merged;
                 doc_obj.set("outbounds".to_string(), JsonValue::Array(arr));
                 return Ok(());
@@ -1403,11 +1412,11 @@ fn handle_delete_outbound(server: &Server, tag: &str) -> Result<Resp, ApiError> 
         let mut kept: Vec<JsonValue> = Vec::new();
         let mut found = false;
         for elem in arr {
-            if let JsonValue::Object(obj) = &elem {
-                if obj_str(obj, "tag").as_deref() == Some(tag_c.as_str()) {
-                    found = true;
-                    continue;
-                }
+            if let JsonValue::Object(obj) = &elem
+                && obj_str(obj, "tag").as_deref() == Some(tag_c.as_str())
+            {
+                found = true;
+                continue;
             }
             kept.push(elem);
         }
@@ -1443,7 +1452,7 @@ fn handle_validate_outbound(server: &Server, body: &[u8]) -> Result<Resp, ApiErr
         stored = decode_first_value(text.as_bytes()).map_err(|e| {
             err_validation(format!(
                 "stored config is invalid: {}",
-                safe_message_str(&e.message())
+                safe_message_str(&e.message)
             ))
         })?;
     }
@@ -1465,7 +1474,8 @@ fn handle_validate_outbound(server: &Server, body: &[u8]) -> Result<Resp, ApiErr
     };
     arr.push(JsonValue::Object(outbound));
     stored_obj.set("outbounds".to_string(), JsonValue::Array(arr));
-    let merged = castctl_config::jsonvalue::encode_ordered_json(&JsonValue::Object(stored_obj));
+    let merged = castctl_config::jsonvalue::encode_ordered_json(&JsonValue::Object(stored_obj))
+        .map_err(|e| err_validation(e.message))?;
     match parse_and_validate_config(merged.as_bytes(), cfg_dir(server)) {
         Ok(_) => Ok(valid_resp(true, &[])),
         Err(e) => Ok(valid_resp(false, &[safe_message_str(&e)])),
@@ -1546,10 +1556,10 @@ fn handle_create_endpoint(server: &Server, body: &[u8]) -> Result<Resp, ApiError
             _ => Vec::new(),
         };
         for elem in &arr {
-            if let JsonValue::Object(obj) = elem {
-                if obj_str(obj, "tag").as_deref() == Some(tag_c.as_str()) {
-                    return Err(err_validation("endpoint already exists"));
-                }
+            if let JsonValue::Object(obj) = elem
+                && obj_str(obj, "tag").as_deref() == Some(tag_c.as_str())
+            {
+                return Err(err_validation("endpoint already exists"));
             }
         }
         let merged = merge_node_at(None, &endpoint_c, "endpoints").map_err(|rej| {
@@ -1596,17 +1606,13 @@ fn handle_patch_endpoint(server: &Server, tag: &str, body: &[u8]) -> Result<Resp
                 continue;
             };
             if obj_str(obj, "tag").as_deref() == Some(tag_c.as_str()) {
-                let merged = merge_node_at(
-                    Some(elem),
-                    &endpoint_c,
-                    &format!("endpoints[{i}]"),
-                )
-                .map_err(|rej| {
-                    err_validation(format!(
-                        "redacted value at {} has no stored value to keep",
-                        rej.path
-                    ))
-                })?;
+                let merged = merge_node_at(Some(elem), &endpoint_c, &format!("endpoints[{i}]"))
+                    .map_err(|rej| {
+                        err_validation(format!(
+                            "redacted value at {} has no stored value to keep",
+                            rej.path
+                        ))
+                    })?;
                 arr[i] = merged;
                 doc_obj.set("endpoints".to_string(), JsonValue::Array(arr));
                 return Ok(());
@@ -1636,11 +1642,11 @@ fn handle_delete_endpoint(server: &Server, tag: &str) -> Result<Resp, ApiError> 
         let mut kept: Vec<JsonValue> = Vec::new();
         let mut found = false;
         for elem in arr {
-            if let JsonValue::Object(obj) = &elem {
-                if obj_str(obj, "tag").as_deref() == Some(tag_c.as_str()) {
-                    found = true;
-                    continue;
-                }
+            if let JsonValue::Object(obj) = &elem
+                && obj_str(obj, "tag").as_deref() == Some(tag_c.as_str())
+            {
+                found = true;
+                continue;
             }
             kept.push(elem);
         }
@@ -1661,17 +1667,13 @@ fn route_import_endpoint(server: &Server, body: &[u8]) -> RouteOutcome {
 }
 
 fn handle_import_endpoint(server: &Server, body: &[u8]) -> Result<Resp, ApiError> {
-    let (tag, conf_text, save) = decode_body_typed(
-        body,
-        BODY_CAP_64K,
-        &["tag", "conf_text", "save"],
-        |obj| {
+    let (tag, conf_text, save) =
+        decode_body_typed(body, BODY_CAP_64K, &["tag", "conf_text", "save"], |obj| {
             let tag = req_string(obj, "tag")?.unwrap_or_default();
             let conf_text = req_string(obj, "conf_text")?.unwrap_or_default();
             let save = req_bool(obj, "save")?.unwrap_or(false);
             Ok((tag, conf_text, save))
-        },
-    )?;
+        })?;
     if tag.trim().is_empty() {
         return Err(err_validation("endpoint tag is required"));
     }
@@ -1680,8 +1682,8 @@ fn handle_import_endpoint(server: &Server, body: &[u8]) -> Result<Resp, ApiError
             "endpoint tag must not have surrounding whitespace",
         ));
     }
-    let parsed = parse_wireguard_conf(conf_text.as_bytes())
-        .map_err(|e| err_validation(e.message()))?;
+    let parsed =
+        parse_wireguard_conf(conf_text.as_bytes()).map_err(|e| err_validation(e.message()))?;
     let mut endpoint = parsed.endpoint.clone();
     with_type_and_tag(&mut endpoint, &tag);
     if !save {
@@ -1703,10 +1705,10 @@ fn handle_import_endpoint(server: &Server, body: &[u8]) -> Result<Resp, ApiError
             _ => Vec::new(),
         };
         for elem in &arr {
-            if let JsonValue::Object(obj) = elem {
-                if obj_str(obj, "tag").as_deref() == Some(tag_c.as_str()) {
-                    return Err(err_validation("endpoint already exists"));
-                }
+            if let JsonValue::Object(obj) = elem
+                && obj_str(obj, "tag").as_deref() == Some(tag_c.as_str())
+            {
+                return Err(err_validation("endpoint already exists"));
             }
         }
         arr.push(endpoint.clone());
@@ -1719,7 +1721,10 @@ fn handle_import_endpoint(server: &Server, body: &[u8]) -> Result<Resp, ApiError
             wg_dns.set(
                 tag_c.clone(),
                 JsonValue::Array(
-                    dns_servers.iter().map(|s| JsonValue::Str(s.clone())).collect(),
+                    dns_servers
+                        .iter()
+                        .map(|s| JsonValue::Str(s.clone()))
+                        .collect(),
                 ),
             );
             doc_obj.set("wireguard_dns".to_string(), JsonValue::Object(wg_dns));
@@ -1748,7 +1753,10 @@ fn handle_get_config(server: &Server) -> Result<Resp, ApiError> {
     }
     let (cfg, _) = parse_loaded(&load, cfg_dir(server))?;
     let redacted = redact_raw_config(&load.raw).map_err(|e| {
-        err_validation(format!("stored config is invalid: {}", safe_message_str(&e)))
+        err_validation(format!(
+            "stored config is invalid: {}",
+            safe_message_str(&e)
+        ))
     })?;
     let mut map = OrderedObject::new();
     map.set("content", JsonValue::Str(redacted));
@@ -1765,17 +1773,13 @@ fn route_put_config(server: &Server, body: &[u8]) -> RouteOutcome {
 }
 
 fn handle_put_config(server: &Server, body: &[u8]) -> Result<Resp, ApiError> {
-    let (content, base_sha) = decode_body_typed(
-        body,
-        BODY_CAP_1M,
-        &["content", "base_sha256"],
-        |obj| {
+    let (content, base_sha) =
+        decode_body_typed(body, BODY_CAP_1M, &["content", "base_sha256"], |obj| {
             Ok((
                 req_string(obj, "content")?.unwrap_or_default(),
                 req_string(obj, "base_sha256")?.unwrap_or_default(),
             ))
-        },
-    )?;
+        })?;
     let submitted = decode_first_value(content.as_bytes())
         .map_err(|_| err_validation("config content is not valid JSON"))?;
     let load = load(server)?;
@@ -1810,12 +1814,11 @@ fn handle_get_dns(server: &Server) -> Result<Resp, ApiError> {
     let mut dns = JsonValue::Object(OrderedObject::new());
     if !load.raw.is_empty() {
         let text = String::from_utf8_lossy(&load.raw).into_owned();
-        if let Ok(doc) = decode_first_value(text.as_bytes()) {
-            if let JsonValue::Object(root) = &doc {
-                if let Some(JsonValue::Object(section)) = root.get("dns") {
-                    dns = JsonValue::Object(section.clone());
-                }
-            }
+        if let Ok(doc) = decode_first_value(text.as_bytes())
+            && let JsonValue::Object(root) = &doc
+            && let Some(JsonValue::Object(section)) = root.get("dns")
+        {
+            dns = JsonValue::Object(section.clone());
         }
     }
     let mut map = OrderedObject::new();
@@ -1847,16 +1850,13 @@ fn handle_put_dns(server: &Server, body: &[u8]) -> Result<Resp, ApiError> {
         return Err(err_config_changed());
     }
     let mut stored_section: Option<JsonValue> = None;
-    let mut stored_present = false;
     if !load.raw.is_empty() {
         let text = String::from_utf8_lossy(&load.raw).into_owned();
-        if let Ok(doc) = decode_first_value(text.as_bytes()) {
-            if let JsonValue::Object(root) = &doc {
-                if let Some(section) = root.get("dns") {
-                    stored_section = Some(section.clone());
-                    stored_present = true;
-                }
-            }
+        if let Ok(doc) = decode_first_value(text.as_bytes())
+            && let JsonValue::Object(root) = &doc
+            && let Some(section) = root.get("dns")
+        {
+            stored_section = Some(section.clone());
         }
     }
     let merged_section: Option<JsonValue> = if matches!(submitted, JsonValue::Null) {
@@ -2018,7 +2018,10 @@ fn handle_put_telegram(server: &Server, body: &[u8]) -> Result<Resp, ApiError> {
                     "telegram.profile is required when no default profile exists",
                 ));
             }
-            section.set("profile".to_string(), JsonValue::Str(default_profile.clone()));
+            section.set(
+                "profile".to_string(),
+                JsonValue::Str(default_profile.clone()),
+            );
         }
         if let Some(t) = &token {
             // Empty token = unchanged (write-only field).
@@ -2062,7 +2065,7 @@ fn handle_put_telegram(server: &Server, body: &[u8]) -> Result<Resp, ApiError> {
     refresh(server, &outcome);
     // Re-read for the response view (masked only, never
     // the token).
-    let load2 = load(server)?;
+    let load2 = load_config(cfg_dir(server))?;
     let (cfg2, _) = parse_loaded(&load2, cfg_dir(server))?;
     Ok(envelope_resp(200, telegram_view_from(&cfg2)))
 }
@@ -2083,9 +2086,8 @@ fn handle_get_keeper(server: &Server) -> Result<Resp, ApiError> {
         // with the safe message). A corrupt state file is
         // NOT an error — read_status returns a status with
         // state_corrupt set.
-        let st = read_status(cfg_dir(server), entry).map_err(|e| {
-            ApiError::new(500, "internal_error", safe_message_str(&e))
-        })?;
+        let st = read_status(cfg_dir(server), entry)
+            .map_err(|e| ApiError::new(500, "internal_error", safe_message_str(&e)))?;
         out.push(st.to_json());
     }
     Ok(envelope_resp(200, JsonValue::Array(out)))
@@ -2109,13 +2111,13 @@ async fn handle_list_chats(
     require_chat_profile(cfg_dir(server), profile)?;
     let deps = chat_deps(&server.deps.chats)?;
     let query = query_pairs(uri);
-    let include_archived = matches!(query_value(&query, "include_archived").as_deref(),
-        Some("1"))
-        || query_value(&query, "include_archived")
-            .map(|v| v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-    let sessions = deps
-        .list_sessions(profile.to_string(), include_archived)
+    let include_archived = matches!(
+        query_value(&query, "include_archived").as_deref(),
+        Some("1")
+    ) || query_value(&query, "include_archived")
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let sessions = (deps.list_sessions)(profile.to_string(), include_archived)
         .await
         .map_err(|_| err_upstream_chat())?;
     let out: Vec<JsonValue> = sessions.iter().map(|s| s.to_json()).collect();
@@ -2136,8 +2138,7 @@ async fn handle_start_chat(
         Ok(req_string(obj, "title")?.unwrap_or_default())
     })?;
     let deps = chat_deps(&server.deps.chats)?;
-    let id = deps
-        .start_session(profile.to_string(), title)
+    let id = (deps.start_session)(profile.to_string(), title)
         .await
         .map_err(|_| err_upstream_chat())?;
     let mut map = OrderedObject::new();
@@ -2151,7 +2152,9 @@ async fn route_get_chat_history(
     session: &str,
     uri: &hyper::Uri,
 ) -> RouteOutcome {
-    RouteOutcome::Handled(done(handle_get_chat_history(server, profile, session, uri).await))
+    RouteOutcome::Handled(done(
+        handle_get_chat_history(server, profile, session, uri).await,
+    ))
 }
 
 async fn handle_get_chat_history(
@@ -2173,12 +2176,7 @@ async fn handle_get_chat_history(
         limit = n;
     }
     let deps = chat_deps(&server.deps.chats)?;
-    let events = deps
-        .get_history(
-            profile.to_string(),
-            chat_session_id(session),
-            limit,
-        )
+    let events = (deps.get_history)(profile.to_string(), chat_session_id(session), limit)
         .await
         .map_err(|_| err_upstream_chat())?;
     let out: Vec<JsonValue> = events.iter().map(|e| e.to_json()).collect();
@@ -2222,8 +2220,8 @@ async fn handle_send_chat(
     let job_id = job.id.clone();
     tokio::spawn(async move {
         use futures_util::FutureExt;
-        let fut = deps_c.send_chat(profile_c, session_id, text);
-        let guarded = futures_util::future::AssertUnwindSafe(fut).catch_unwind();
+        let fut = (deps_c.send_chat)(profile_c, session_id, text);
+        let guarded = std::panic::AssertUnwindSafe(fut).catch_unwind();
         match tokio::time::timeout(
             std::time::Duration::from_secs(crate::chats::CHAT_JOB_TIMEOUT_SECS),
             guarded,
@@ -2231,19 +2229,13 @@ async fn handle_send_chat(
         .await
         {
             Err(_) => {
-                server_c
-                    .job_store
-                    .finish(&job_id, None, "send timed out");
+                server_c.job_store.finish(&job_id, None, "send timed out");
             }
             Ok(Err(_)) => {
-                server_c
-                    .job_store
-                    .finish(&job_id, None, "upstream error");
+                server_c.job_store.finish(&job_id, None, "upstream error");
             }
             Ok(Ok(Err(_))) => {
-                server_c
-                    .job_store
-                    .finish(&job_id, None, "upstream error");
+                server_c.job_store.finish(&job_id, None, "upstream error");
             }
             Ok(Ok(Ok(result))) => {
                 server_c.job_store.finish(&job_id, Some(result), "");
@@ -2271,7 +2263,9 @@ async fn route_chat_session_op(
     session: &str,
     body: &[u8],
 ) -> RouteOutcome {
-    RouteOutcome::Handled(done(handle_chat_session_op(server, profile, session, body).await))
+    RouteOutcome::Handled(done(
+        handle_chat_session_op(server, profile, session, body).await,
+    ))
 }
 
 async fn handle_chat_session_op(
@@ -2305,14 +2299,9 @@ async fn handle_chat_session_op(
         return Err(err_validation("title must not be empty for rename"));
     }
     let deps = chat_deps(&server.deps.chats)?;
-    deps.session_op(
-        profile.to_string(),
-        session_id,
-        op,
-        title,
-    )
-    .await
-    .map_err(|_| err_upstream_chat())?;
+    (deps.session_op)(profile.to_string(), session_id, op, title)
+        .await
+        .map_err(|_| err_upstream_chat())?;
     let mut map = OrderedObject::new();
     map.set("ok", JsonValue::Bool(true));
     Ok(envelope_resp(200, JsonValue::Object(map)))
@@ -2328,16 +2317,18 @@ fn route_get_keeper_settings(server: &Server) -> RouteOutcome {
 }
 
 fn route_put_keeper_settings(server: &Server, body: &[u8]) -> RouteOutcome {
-    RouteOutcome::Handled(match (|| {
-        let load = load(server)?;
-        handle_put_keeper_settings(cfg_dir(server), &load, body)
-    })() {
-        Ok((resp, outcome)) => {
-            refresh(server, &outcome);
-            resp
-        }
-        Err(e) => api_error_resp(&e),
-    })
+    RouteOutcome::Handled(
+        match (|| {
+            let load = load(server)?;
+            handle_put_keeper_settings(cfg_dir(server), &load, body)
+        })() {
+            Ok((resp, outcome)) => {
+                refresh(server, &outcome);
+                resp
+            }
+            Err(e) => api_error_resp(&e),
+        },
+    )
 }
 
 fn route_get_webui_settings(server: &Server) -> RouteOutcome {
@@ -2348,16 +2339,18 @@ fn route_get_webui_settings(server: &Server) -> RouteOutcome {
 }
 
 fn route_put_webui_settings(server: &Server, body: &[u8]) -> RouteOutcome {
-    RouteOutcome::Handled(match (|| {
-        let load = load(server)?;
-        handle_put_webui_settings(cfg_dir(server), &load, body)
-    })() {
-        Ok((resp, outcome)) => {
-            refresh(server, &outcome);
-            resp
-        }
-        Err(e) => api_error_resp(&e),
-    })
+    RouteOutcome::Handled(
+        match (|| {
+            let load = load(server)?;
+            handle_put_webui_settings(cfg_dir(server), &load, body)
+        })() {
+            Ok((resp, outcome)) => {
+                refresh(server, &outcome);
+                resp
+            }
+            Err(e) => api_error_resp(&e),
+        },
+    )
 }
 
 // --- logs -------------------------------------------------------
@@ -2418,12 +2411,13 @@ mod tests {
     use crate::server::Server;
 
     fn test_server(dir: &std::path::Path) -> Arc<Server> {
+        let token_hash = crate::auth::hash_token("plain-token").expect("hash test token");
         Server::new(crate::server::Deps {
             config_dir: dir.to_path_buf(),
             version: "0.9.0".to_string(),
             listen_addr: "127.0.0.1:18318".to_string(),
-            token_hash: String::new(),
-            has_token: false,
+            token_hash,
+            has_token: true,
             bundle_sha256: crate::static_shell::bundle_sha256(),
             ui_dir: None,
             cookies_files: Vec::new(),
@@ -2461,10 +2455,7 @@ mod tests {
 
     #[test]
     fn status_shape_counts_and_no_secret() {
-        let dir = std::env::temp_dir().join(format!(
-            "m6b-handlers-status-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("m6b-handlers-status-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         write_config(&dir, FIXTURE);
@@ -2484,10 +2475,8 @@ mod tests {
 
     #[test]
     fn outbound_list_redacts_and_counts_used_by() {
-        let dir = std::env::temp_dir().join(format!(
-            "m6b-handlers-outbounds-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("m6b-handlers-outbounds-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         write_config(&dir, FIXTURE);
@@ -2499,7 +2488,10 @@ mod tests {
         assert!(!body.contains("SECRET-TROJAN"), "{body}");
         let resp = handle_get_outbound(&server, "proxy-eu").expect("get renders");
         let body = String::from_utf8(resp.body).unwrap();
-        assert!(body.contains("\"password\":\"<redacted>\""), "{body}");
+        assert!(
+            body.contains("\"password\":\"\\u003credacted\\u003e\""),
+            "{body}"
+        );
         assert!(!body.contains("SECRET-TROJAN"), "{body}");
         let err = handle_get_outbound(&server, "nope").unwrap_err();
         assert_eq!(err.status, 404);
@@ -2508,10 +2500,7 @@ mod tests {
 
     #[test]
     fn config_get_redacts_token_and_reports_sha() {
-        let dir = std::env::temp_dir().join(format!(
-            "m6b-handlers-config-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("m6b-handlers-config-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         write_config(&dir, FIXTURE);
@@ -2525,10 +2514,8 @@ mod tests {
 
     #[test]
     fn telegram_view_unconfigured_shape() {
-        let dir = std::env::temp_dir().join(format!(
-            "m6b-handlers-telegram-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("m6b-handlers-telegram-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         write_config(&dir, FIXTURE);
@@ -2542,10 +2529,7 @@ mod tests {
 
     #[test]
     fn keeper_view_empty_when_no_block() {
-        let dir = std::env::temp_dir().join(format!(
-            "m6b-handlers-keeper-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("m6b-handlers-keeper-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         write_config(&dir, FIXTURE);
@@ -2558,10 +2542,7 @@ mod tests {
 
     #[test]
     fn chats_unknown_profile_404_without_seam() {
-        let dir = std::env::temp_dir().join(format!(
-            "m6b-handlers-chats-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("m6b-handlers-chats-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         write_config(&dir, FIXTURE);

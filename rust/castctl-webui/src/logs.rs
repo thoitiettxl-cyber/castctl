@@ -16,12 +16,13 @@
 // lines); a request with a cursor returns lines appended
 // after it.
 
-use crate::contain::{clean_path, resolve_against, resolve_path_best_effort, path_within};
-use crate::error::{err_internal, err_validation, ApiError};
-use crate::server::{envelope_resp, error_resp, Resp};
-use crate::store::{legacy_profile_names_in, profile_cookies_files, ConfigLoad};
+use crate::contain::{clean_path, path_within, resolve_against, resolve_path_best_effort};
+use crate::error::{ApiError, err_internal, err_validation};
+use crate::server::{Resp, envelope_resp, error_resp};
+use crate::store::{ConfigLoad, legacy_profile_names_in, profile_cookies_files};
+use castctl_config::jsonvalue::decode_ordered_json;
 use castctl_config::jsonvalue::{JsonValue, OrderedObject};
-use castctl_config::{decode_ordered_json, profile_paths};
+use castctl_config::profile::{Paths, profile_paths};
 use castctl_log_redact::safe_string;
 use regex::Regex;
 use std::fs;
@@ -67,9 +68,7 @@ fn re_bare() -> &'static Regex {
 
 fn re_tag() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^([A-Za-z0-9_.\-]+): (.*)$").expect("log tag regex compiles")
-    })
+    RE.get_or_init(|| Regex::new(r"^([A-Za-z0-9_.\-]+): (.*)$").expect("log tag regex compiles"))
 }
 
 fn re_ansi() -> &'static Regex {
@@ -114,23 +113,23 @@ pub fn parse_log_line(line: &str) -> LogEntry {
     let mut ts = String::new();
     let mut level = String::new();
     let mut rest = line.to_string();
-    if let Some(m) = re_full_ts().captures(&line) {
+    if let Some(m) = re_full_ts().captures(line) {
         ts = m[1].to_string();
         level = normalize_level(&m[2]);
         rest = m[3].to_string();
-    } else if let Some(m) = re_relative().captures(&line) {
+    } else if let Some(m) = re_relative().captures(line) {
         level = normalize_level(&m[1]);
         rest = m[2].to_string();
-    } else if let Some(m) = re_bare().captures(&line) {
+    } else if let Some(m) = re_bare().captures(line) {
         level = normalize_level(&m[1]);
         rest = m[2].to_string();
     }
     let mut kind = String::new();
-    if !level.is_empty() {
-        if let Some(m) = re_tag().captures(&rest) {
-            kind = m[1].to_string();
-            rest = m[2].to_string();
-        }
+    if !level.is_empty()
+        && let Some(m) = re_tag().captures(&rest)
+    {
+        kind = m[1].to_string();
+        rest = m[2].to_string();
     }
     LogEntry {
         ts: safe_string(&ts),
@@ -157,7 +156,7 @@ const VALID_LOG_LEVELS: [&str; 8] = [
 ];
 
 pub fn resolve_log_settings(
-    cfg: &castctl_config::SingleConfig,
+    cfg: &castctl_config::config::SingleConfig,
 ) -> Result<LogSettings, ApiError> {
     let block_present = cfg.log.is_some();
     let mut disabled = !block_present;
@@ -196,10 +195,18 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
     }
     let ra = std::fs::canonicalize(a)
         .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| clean_path(&a.to_string_lossy()));
+        .unwrap_or_else(|_| {
+            clean_path(Path::new(a.to_string_lossy().as_ref()))
+                .to_string_lossy()
+                .into_owned()
+        });
     let rb = std::fs::canonicalize(b)
         .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| clean_path(&b.to_string_lossy()));
+        .unwrap_or_else(|_| {
+            clean_path(Path::new(b.to_string_lossy().as_ref()))
+                .to_string_lossy()
+                .into_owned()
+        });
     ra == rb
 }
 
@@ -209,10 +216,7 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
 /// regular file or read, cannot be decoded as a JSON
 /// object, or carries a cookies_file that is present but
 /// not a string (null counts as absent, as in the parser).
-pub fn legacy_cookies_file_refusals(
-    config_dir: &Path,
-    paths: &castctl_config::Paths,
-) -> (Vec<String>, bool) {
+pub fn legacy_cookies_file_refusals(config_dir: &Path, paths: &Paths) -> (Vec<String>, bool) {
     let st = match fs::metadata(&paths.config) {
         Ok(st) => st,
         Err(_) => return (Vec::new(), true),
@@ -246,14 +250,16 @@ pub fn legacy_cookies_file_refusals(
     if !Path::new(&lexical).is_absolute() {
         lexical = format!("{}/{}", config_dir.to_string_lossy(), lexical);
     }
-    let lexical = clean_path(&lexical);
+    let lexical = clean_path(Path::new(&lexical))
+        .to_string_lossy()
+        .into_owned();
     let resolved_raw = resolve_against(config_dir, s);
     (
         vec![
             lexical.clone(),
             format!("{}.bak", lexical),
-            resolved_raw.clone(),
-            format!("{}.bak", resolved_raw),
+            resolved_raw.to_string_lossy().into_owned(),
+            format!("{}.bak", resolved_raw.display()),
         ],
         false,
     )
@@ -269,7 +275,7 @@ pub fn legacy_cookies_file_refusals(
 pub fn log_gate(
     config_dir: &Path,
     load: &ConfigLoad,
-    cfg: &castctl_config::SingleConfig,
+    cfg: &castctl_config::config::SingleConfig,
 ) -> Result<LogGate, ApiError> {
     let settings = resolve_log_settings(cfg)?;
     if settings.disabled {
@@ -298,19 +304,16 @@ pub fn log_gate(
     };
     let resolved = resolve_against(&base, &settings.output);
     // A7 identity guard.
-    let mut refused: Vec<String> = vec![format!(
-        "{}/config.json",
-        config_dir.to_string_lossy()
-    )];
+    let mut refused: Vec<String> = vec![format!("{}/config.json", config_dir.to_string_lossy())];
     for name in cfg.profile_names() {
-        if let Some(p) = cfg.profiles.get(name) {
-            if !p.cookies_file.is_empty() {
-                refused.push(p.cookies_file.clone());
-                refused.push(format!("{}.bak", p.cookies_file));
-            }
+        if let Some(p) = cfg.profiles.get(&name)
+            && !p.cookies_file.is_empty()
+        {
+            refused.push(p.cookies_file.clone());
+            refused.push(format!("{}.bak", p.cookies_file));
         }
     }
-    let legacy_names = match legacy_profile_names_in(config_dir) {
+    let legacy_names = match legacy_profile_names_in(config_dir, cfg) {
         Ok(names) => names,
         Err(_) => {
             // The refused set cannot be enumerated: fail
@@ -323,7 +326,7 @@ pub fn log_gate(
         }
     };
     for name in &legacy_names {
-        let paths = match profile_paths(config_dir, name) {
+        let paths = match profile_paths(&config_dir.to_string_lossy(), name) {
             Ok(p) => p,
             Err(_) => {
                 return Ok(LogGate {
@@ -357,18 +360,20 @@ pub fn log_gate(
     // cookies_file values, but a stored document written
     // before that rule — or a legacy override — can still
     // carry one.
-    if let Ok(JsonValue::Object(raw_doc)) = decode_ordered_json(&load.raw) {
-        for v in profile_cookies_files(&raw_doc) {
+    if let Ok(doc) = decode_ordered_json(&load.raw) {
+        for (_, v) in profile_cookies_files(&doc) {
             let mut lexical = v.clone();
             if !Path::new(&lexical).is_absolute() {
                 lexical = format!("{}/{}", config_dir.to_string_lossy(), lexical);
             }
-            let lexical = clean_path(&lexical);
+            let lexical = clean_path(Path::new(&lexical))
+                .to_string_lossy()
+                .into_owned();
             let resolved_raw = resolve_against(config_dir, &v);
             refused.push(lexical.clone());
-            refused.push(format!("{}.bak", lexical));
-            refused.push(resolved_raw.clone());
-            refused.push(format!("{}.bak", resolved_raw));
+            refused.push(format!("{lexical}.bak"));
+            refused.push(resolved_raw.to_string_lossy().into_owned());
+            refused.push(format!("{}.bak", resolved_raw.display()));
         }
     }
     let resolved_real = resolve_path_best_effort(Path::new(&resolved));
@@ -384,7 +389,7 @@ pub fn log_gate(
         }
     }
     Ok(LogGate {
-        path: Some(PathBuf::from(resolved)),
+        path: Some(resolved),
         disabled: false,
         reason: String::new(),
     })
@@ -552,7 +557,7 @@ pub fn handle_get_logs(
     // the window end; the cursor is the end offset of the
     // last delivered line, or the window end when nothing
     // remains undelivered.
-    let mut delivered: Vec<&LogLine> = Vec::new();
+    let delivered: Vec<&LogLine>;
     let mut more = false;
     let mut next_cursor = window_end;
     if cursor.is_empty() && filtered.len() as i64 > limit {
@@ -587,14 +592,15 @@ pub fn handle_get_logs(
 /// UI would destroy the only record of the server's own
 /// emissions. The refusal is explicit, not silent.
 pub fn handle_logs_delete_refused() -> Resp {
-    error_resp(405, "method_not_allowed", "logs cannot be cleared from the web UI")
+    error_resp(
+        405,
+        "method_not_allowed",
+        "logs cannot be cleared from the web UI",
+    )
 }
 
 pub fn query_value(query: &[(String, String)], key: &str) -> Option<String> {
-    query
-        .iter()
-        .find(|(k, _)| k == key)
-        .map(|(_, v)| v.clone())
+    query.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
 }
 
 /// Parse a raw query string the way Go's
@@ -723,10 +729,9 @@ mod tests {
 
     #[test]
     fn log_gate_disabled_no_block() {
-        let dir = std::env::temp_dir()
-            .join(format!("m6b-log-gate-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("m6b-log-gate-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
-        let cfg = castctl_config::SingleConfig::default();
+        let cfg = castctl_config::config::SingleConfig::default();
         let load = test_load(&dir, b"{}");
         let gate = log_gate(&dir, &load, &cfg).unwrap();
         assert!(gate.disabled);
@@ -736,22 +741,22 @@ mod tests {
 
     #[test]
     fn log_gate_refuses_config_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "m6b-log-refuse-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("m6b-log-refuse-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
-        fs::write(
-            dir.join("config.json"),
-            b"{\"log\": {\"output\": \"config.json\"}}",
-        )
-        .unwrap();
-        let cfg = castctl_config::parse_single_config(
-            b"{\"log\": {\"output\": \"config.json\"}}",
-            dir.to_str().unwrap(),
-        )
-        .unwrap();
-        let load = test_load(&dir, b"{\"log\": {\"output\": \"config.json\"}}");
+        // Absolute output pointing at the config file: the
+        // A7 identity guard refuses it whatever the process
+        // CWD is (a relative "config.json" resolves against
+        // the CWD, per Go logs.go, so it cannot pin this).
+        let output = dir.join("config.json");
+        let doc = format!(
+            "{{\"profiles\":{{}},\"log\": {{\"output\": \"{}\"}}}}",
+            output.to_string_lossy()
+        );
+        fs::write(dir.join("config.json"), doc.as_bytes()).unwrap();
+        let cfg =
+            castctl_config::config::parse_single_config(doc.as_bytes(), dir.to_str().unwrap())
+                .unwrap();
+        let load = test_load(&dir, doc.as_bytes());
         let gate = log_gate(&dir, &load, &cfg).unwrap();
         assert!(gate.disabled);
         assert_eq!(gate.reason, "log_output_refused");
@@ -760,18 +765,16 @@ mod tests {
 
     #[test]
     fn get_logs_missing_file_empty_page() {
-        let dir = std::env::temp_dir().join(format!(
-            "m6b-log-missing-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("m6b-log-missing-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let log_path = dir.join("castctl.log");
         let doc = format!(
-            "{{\"log\": {{\"output\": \"{}\"}}}}",
+            "{{\"profiles\":{{}},\"log\": {{\"output\": \"{}\"}}}}",
             log_path.to_string_lossy()
         );
-        let cfg = castctl_config::parse_single_config(doc.as_bytes(), dir.to_str().unwrap())
-            .unwrap();
+        let cfg =
+            castctl_config::config::parse_single_config(doc.as_bytes(), dir.to_str().unwrap())
+                .unwrap();
         let _ = cfg;
         let load = test_load(&dir, doc.as_bytes());
         let resp = handle_get_logs(&dir, &load, &[]).unwrap();
@@ -784,10 +787,7 @@ mod tests {
 
     #[test]
     fn get_logs_tail_and_cursor() {
-        let dir = std::env::temp_dir().join(format!(
-            "m6b-log-tail-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("m6b-log-tail-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let log_path = dir.join("castctl.log");
         {
@@ -797,7 +797,7 @@ mod tests {
             writeln!(f, "INFO third").unwrap();
         }
         let doc = format!(
-            "{{\"log\": {{\"output\": \"{}\"}}}}",
+            "{{\"profiles\":{{}},\"log\": {{\"output\": \"{}\"}}}}",
             log_path.to_string_lossy()
         );
         let load = test_load(&dir, doc.as_bytes());

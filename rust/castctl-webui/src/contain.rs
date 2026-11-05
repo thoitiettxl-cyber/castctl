@@ -91,10 +91,7 @@ pub fn resolve_path_best_effort(path: &Path) -> PathBuf {
 /// returns an error for different volumes on Windows; on
 /// Unix that case cannot occur.)
 pub fn path_within(path: &Path, dir: &Path) -> bool {
-    match path.strip_prefix(dir) {
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    path.strip_prefix(dir).is_ok()
 }
 
 /// `containedInDir(candidate, baseDir)`: resolve the

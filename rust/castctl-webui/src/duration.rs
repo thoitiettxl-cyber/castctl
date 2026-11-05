@@ -115,7 +115,7 @@ pub fn format_duration(d: i64) -> String {
         return "0s".to_string();
     }
     let neg = d < 0;
-    let mut u: u64 = d.unsigned_abs();
+    let u: u64 = d.unsigned_abs();
     let mut out = String::new();
     if neg {
         out.push('-');
@@ -130,13 +130,13 @@ pub fn format_duration(d: i64) -> String {
         } else if u < 1_000_000 {
             let (whole, frac) = (u / 1_000, u % 1_000);
             out.push_str(&format!("{whole}"));
-            push_frac(&mut out, frac, 3);
+            push_frac(&mut out, frac as i128, 3);
             out.push('µ');
             out.push('s');
         } else {
             let (whole, frac) = (u / 1_000_000, u % 1_000_000);
             out.push_str(&format!("{whole}"));
-            push_frac(&mut out, frac, 6);
+            push_frac(&mut out, frac as i128, 6);
             out.push_str("ms");
         }
         return out;
@@ -169,7 +169,7 @@ pub fn format_duration(d: i64) -> String {
 /// Append a Go `fmtFrac` fraction: `.` + digits with trailing
 /// zeros trimmed; nothing when the fraction is zero. `prec` is
 /// the digit count of the unit scale (3 = µs, 6 = ms, 9 = s).
-fn push_frac(out: &mut String, mut frac: i128, prec: u32) {
+fn push_frac(out: &mut String, frac: i128, prec: u32) {
     if frac == 0 {
         return;
     }

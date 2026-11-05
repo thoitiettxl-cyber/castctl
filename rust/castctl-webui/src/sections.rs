@@ -24,11 +24,9 @@
 use crate::auth::REDACTED_MARKER;
 use crate::config::{
     DEFAULT_LOGIN_RATE_LIMIT_ATTEMPTS, DEFAULT_LOGIN_RATE_LIMIT_WINDOW_NS,
-    DEFAULT_SESSION_IDLE_TIMEOUT_NS, MAX_LOGIN_RATE_LIMIT_ATTEMPTS,
-    MAX_LOGIN_RATE_LIMIT_WINDOW_NS, MAX_SESSION_IDLE_TIMEOUT_NS,
-    MIN_LOGIN_RATE_LIMIT_WINDOW_NS, MIN_SESSION_IDLE_TIMEOUT_NS,
-    effective_listen, effective_login_rate_limit,
-    effective_session_idle_timeout_ns, resolve_webui,
+    DEFAULT_SESSION_IDLE_TIMEOUT_NS, MAX_LOGIN_RATE_LIMIT_ATTEMPTS, MAX_LOGIN_RATE_LIMIT_WINDOW_NS,
+    MAX_SESSION_IDLE_TIMEOUT_NS, MIN_LOGIN_RATE_LIMIT_WINDOW_NS, MIN_SESSION_IDLE_TIMEOUT_NS,
+    effective_listen, effective_login_rate_limit, effective_session_idle_timeout_ns, resolve_webui,
 };
 use crate::duration::{format_duration, parse_duration};
 use crate::error::{ApiError, err_validation};
@@ -63,10 +61,7 @@ fn keeper_settings_entry_json(e: &crate::validate::KeeperEntry) -> JsonValue {
 
 /// GET /settings/keeper. Response map (sorted keys):
 /// `{entries, sha256}`.
-pub fn handle_get_keeper_settings(
-    config_dir: &Path,
-    load: &ConfigLoad,
-) -> Result<Resp, ApiError> {
+pub fn handle_get_keeper_settings(config_dir: &Path, load: &ConfigLoad) -> Result<Resp, ApiError> {
     let (_, entries) = parse_loaded(load, config_dir)?;
     let entries: Vec<JsonValue> = entries.iter().map(keeper_settings_entry_json).collect();
     let mut map = OrderedObject::new();
@@ -141,7 +136,7 @@ pub fn handle_put_keeper_settings(
         Ok(())
     })?;
     let mut map = OrderedObject::new();
-    map.set("sha256", JsonValue::Str(outcome.sha256));
+    map.set("sha256", JsonValue::Str(outcome.sha256.clone()));
     Ok((envelope_resp(200, JsonValue::Object(map)), outcome))
 }
 
@@ -187,16 +182,16 @@ fn parse_put_keeper_entry(elem: &JsonValue) -> Result<JsonValue, ApiError> {
     out.set("tag", JsonValue::Str(entry.tag));
     out.set("profile", JsonValue::Str(entry.profile));
     out.set("browser", JsonValue::Str(entry.browser));
-    if let Some(interval) = entry.interval {
-        if !interval.trim().is_empty() {
-            // Stored VERBATIM (not trimmed), as Go does.
-            out.set("interval", JsonValue::Str(interval));
-        }
+    if let Some(interval) = entry.interval
+        && !interval.trim().is_empty()
+    {
+        // Stored VERBATIM (not trimmed), as Go does.
+        out.set("interval", JsonValue::Str(interval));
     }
-    if let Some(notify) = entry.notify {
-        if !notify.is_empty() {
-            out.set("notify", JsonValue::Str(notify));
-        }
+    if let Some(notify) = entry.notify
+        && !notify.is_empty()
+    {
+        out.set("notify", JsonValue::Str(notify));
     }
     Ok(JsonValue::Object(out))
 }
@@ -212,10 +207,7 @@ fn parse_put_keeper_entry(elem: &JsonValue) -> Result<JsonValue, ApiError> {
 /// values (defaults applied). Note `listen` is "" when
 /// no block exists (the effective default applies only
 /// when a block is present).
-pub fn handle_get_webui_settings(
-    config_dir: &Path,
-    load: &ConfigLoad,
-) -> Result<Resp, ApiError> {
+pub fn handle_get_webui_settings(config_dir: &Path, load: &ConfigLoad) -> Result<Resp, ApiError> {
     let (cfg, _) = parse_loaded(load, config_dir)?;
     let mut listen = String::new();
     let mut ui_dir = String::new();
@@ -224,19 +216,19 @@ pub fn handle_get_webui_settings(
     let mut idle_ns = DEFAULT_SESSION_IDLE_TIMEOUT_NS;
     let mut attempts = DEFAULT_LOGIN_RATE_LIMIT_ATTEMPTS;
     let mut window_ns = DEFAULT_LOGIN_RATE_LIMIT_WINDOW_NS;
-    if let Some(raw) = &cfg.webui_raw {
-        if let Ok(Some(block)) = resolve_webui(Some(raw)) {
-            listen = effective_listen(&block);
-            ui_dir = block.ui_dir.clone();
-            token_set = !block.token.is_empty();
-            if token_set {
-                masked = "***".to_string();
-            }
-            idle_ns = effective_session_idle_timeout_ns(&block);
-            let (a, w) = effective_login_rate_limit(&block);
-            attempts = a;
-            window_ns = w;
+    if let Some(raw) = &cfg.webui_raw
+        && let Ok(Some(block)) = resolve_webui(Some(raw))
+    {
+        listen = effective_listen(&block);
+        ui_dir = block.ui_dir.clone();
+        token_set = !block.token.is_empty();
+        if token_set {
+            masked = "***".to_string();
         }
+        idle_ns = effective_session_idle_timeout_ns(&block);
+        let (a, w) = effective_login_rate_limit(&block);
+        attempts = a;
+        window_ns = w;
     }
     let mut limit = OrderedObject::new();
     limit.set("attempts", JsonValue::Number(attempts.to_string()));
@@ -319,9 +311,7 @@ pub fn handle_put_webui_settings(
                 Some(JsonValue::Object(nested)) => {
                     for key in nested.keys() {
                         if !matches!(key.as_str(), "attempts" | "window") {
-                            return Err(err_validation(
-                                "login_rate_limit must be an object",
-                            ));
+                            return Err(err_validation("login_rate_limit must be an object"));
                         }
                     }
                     let attempts = match nested.get("attempts") {
@@ -416,11 +406,9 @@ pub fn handle_put_webui_settings(
                 // with surrounding whitespace fails the
                 // full re-parse, as in Go.
                 let d = parse_duration(idle.trim()).map_err(|_| {
-                    err_validation(
-                        "session_idle_timeout must be a duration string from 1m to 720h",
-                    )
+                    err_validation("session_idle_timeout must be a duration string from 1m to 720h")
                 })?;
-                if d < MIN_SESSION_IDLE_TIMEOUT_NS || d > MAX_SESSION_IDLE_TIMEOUT_NS {
+                if !(MIN_SESSION_IDLE_TIMEOUT_NS..=MAX_SESSION_IDLE_TIMEOUT_NS).contains(&d) {
                     return Err(err_validation(
                         "session_idle_timeout must be a duration string from 1m to 720h",
                     ));
@@ -448,16 +436,15 @@ pub fn handle_put_webui_settings(
                 }
                 if let Some(w) = window {
                     if w.trim().is_empty() {
-                        return Err(err_validation(
-                            "login_rate_limit.window must not be empty",
-                        ));
+                        return Err(err_validation("login_rate_limit.window must not be empty"));
                     }
                     let d = parse_duration(w.trim()).map_err(|_| {
                         err_validation(
                             "login_rate_limit.window must be a duration string from 1s to 24h",
                         )
                     })?;
-                    if d < MIN_LOGIN_RATE_LIMIT_WINDOW_NS || d > MAX_LOGIN_RATE_LIMIT_WINDOW_NS
+                    if !(MIN_LOGIN_RATE_LIMIT_WINDOW_NS..=MAX_LOGIN_RATE_LIMIT_WINDOW_NS)
+                        .contains(&d)
                     {
                         return Err(err_validation(
                             "login_rate_limit.window must be a duration string from 1s to 24h",
@@ -473,7 +460,7 @@ pub fn handle_put_webui_settings(
         Ok(())
     })?;
     let mut map = OrderedObject::new();
-    map.set("sha256", JsonValue::Str(outcome.sha256));
+    map.set("sha256", JsonValue::Str(outcome.sha256.clone()));
     Ok((envelope_resp(200, JsonValue::Object(map)), outcome))
 }
 
@@ -504,13 +491,10 @@ mod tests {
 
     #[test]
     fn get_webui_settings_defaults() {
-        let dir = std::env::temp_dir().join(format!(
-            "m6b-sec-webui-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("m6b-sec-webui-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        write_config(&dir, b"{}");
-        let load = test_load(&dir, b"{}");
+        write_config(&dir, b"{\"profiles\":{}}");
+        let load = test_load(&dir, b"{\"profiles\":{}}");
         let resp = handle_get_webui_settings(&dir, &load).unwrap();
         let body = String::from_utf8(resp.body).unwrap();
         // No block: listen "" (not the effective default),
@@ -526,12 +510,9 @@ mod tests {
 
     #[test]
     fn put_webui_settings_idle_timeout() {
-        let dir = std::env::temp_dir().join(format!(
-            "m6b-sec-put-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("m6b-sec-put-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let raw = b"{\"webui\": {\"token\": \"t0\"}}";
+        let raw = b"{\"profiles\":{},\"webui\": {\"token\": \"t0\"}}";
         write_config(&dir, raw);
         let load = test_load(&dir, raw);
         let hash = crate::guarded::sha256_hex(raw);
@@ -552,23 +533,17 @@ mod tests {
 
     #[test]
     fn put_keeper_settings_null_deletes_block() {
-        let dir = std::env::temp_dir().join(format!(
-            "m6b-sec-keeper-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("m6b-sec-keeper-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let raw = b"{\"keeper\": [{\"tag\": \"k1\", \"profile\": \"muse01\", \"browser\": \"http://127.0.0.1:9222\"}]}";
+        let raw = b"{\"profiles\":{\"muse01\":{}},\"keeper\": [{\"tag\": \"k1\", \"profile\": \"muse01\", \"browser\": \"http://127.0.0.1:9222\"}]}";
         write_config(&dir, raw);
         let load = test_load(&dir, raw);
         let hash = crate::guarded::sha256_hex(raw);
-        let body = format!(
-            "{{\"entries\": null, \"base_sha256\": \"{}\"}}",
-            hash
-        );
+        let body = format!("{{\"entries\": null, \"base_sha256\": \"{}\"}}", hash);
         let (resp, _) = handle_put_keeper_settings(&dir, &load, body.as_bytes()).unwrap();
         assert_eq!(resp.status, 200);
         let saved = fs::read_to_string(dir.join("config.json")).unwrap();
-        assert!(!saved.contains("keeper"));
+        assert!(!saved.contains("\"keeper\""), "{saved}");
         let _ = fs::remove_dir_all(&dir);
     }
 }

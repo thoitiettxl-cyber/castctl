@@ -28,9 +28,7 @@ pub fn redact_value(value: &JsonValue) -> JsonValue {
     match value {
         JsonValue::Null | JsonValue::Bool(_) | JsonValue::Number(_) => value.clone(),
         JsonValue::Str(s) => JsonValue::Str(redact_url_userinfo(s)),
-        JsonValue::Array(items) => {
-            JsonValue::Array(items.iter().map(redact_value).collect())
-        }
+        JsonValue::Array(items) => JsonValue::Array(items.iter().map(redact_value).collect()),
         JsonValue::Object(obj) => {
             let mut out = castctl_config::jsonvalue::OrderedObject::new();
             for (k, child) in obj.iter() {
@@ -91,10 +89,7 @@ pub fn redact_plugins_block(root: &mut castctl_config::jsonvalue::OrderedObject)
                 }
             }
         }
-        let has_fragment = entry
-            .keys()
-            .iter()
-            .any(|k| k != "tag" && k != "type");
+        let has_fragment = entry.keys().iter().any(|k| k != "tag" && k != "type");
         if has_fragment {
             shown.set("fragment".to_string(), JsonValue::Str(MARKER.to_string()));
         }
@@ -112,8 +107,8 @@ pub fn redact_plugins_block(root: &mut castctl_config::jsonvalue::OrderedObject)
 /// `fragment` key collapses on a PUT round-trip.
 pub fn redact_raw_config(data: &[u8]) -> Result<String, String> {
     let text = String::from_utf8_lossy(data).into_owned();
-    let mut value = castctl_config::jsonvalue::decode_ordered_json(&text)
-        .map_err(|e| e.message().to_string())?;
+    let mut value =
+        castctl_config::jsonvalue::decode_ordered_json(text.as_bytes()).map_err(|e| e.message)?;
     if let JsonValue::Object(root) = &mut value {
         redact_plugins_block(root);
     }
@@ -161,10 +156,21 @@ mod tests {
             ("plain", JsonValue::Str("keep me".to_string())),
         ]);
         let r = redact_value(&v);
-        let JsonValue::Object(o) = r else { panic!("object") };
-        assert_eq!(o.get("password"), Some(&JsonValue::Str("<redacted>".to_string())));
-        assert_eq!(o.get("Password"), Some(&JsonValue::Str("<redacted>".to_string())));
-        assert_eq!(o.get("token"), Some(&JsonValue::Str("<redacted>".to_string())));
+        let JsonValue::Object(o) = r else {
+            panic!("object")
+        };
+        assert_eq!(
+            o.get("password"),
+            Some(&JsonValue::Str("<redacted>".to_string()))
+        );
+        assert_eq!(
+            o.get("Password"),
+            Some(&JsonValue::Str("<redacted>".to_string()))
+        );
+        assert_eq!(
+            o.get("token"),
+            Some(&JsonValue::Str("<redacted>".to_string()))
+        );
         assert_eq!(o.get("plain"), Some(&JsonValue::Str("keep me".to_string())));
         // Non-matching keys are not secrets.
         let v2 = obj(&[("my_token", JsonValue::Str("x".to_string()))]);
@@ -177,11 +183,21 @@ mod tests {
         let inner = obj(&[("X-Custom", JsonValue::Str("benign".to_string()))]);
         let v = obj(&[("headers", inner)]);
         let r = redact_value(&v);
-        let JsonValue::Object(o) = r else { panic!("object") };
-        let JsonValue::Object(h) = o.get("headers").unwrap() else { panic!("headers") };
-        assert_eq!(h.get("X-Custom"), Some(&JsonValue::Str("<redacted>".to_string())));
+        let JsonValue::Object(o) = r else {
+            panic!("object")
+        };
+        let JsonValue::Object(h) = o.get("headers").unwrap() else {
+            panic!("headers")
+        };
+        assert_eq!(
+            h.get("X-Custom"),
+            Some(&JsonValue::Str("<redacted>".to_string()))
+        );
         // custom_headers is NOT a header map.
-        let v2 = obj(&[("custom_headers", obj(&[("X-A", JsonValue::Str("v".to_string()))]))]);
+        let v2 = obj(&[(
+            "custom_headers",
+            obj(&[("X-A", JsonValue::Str("v".to_string()))]),
+        )]);
         assert_eq!(redact_value(&v2), v2);
     }
 
@@ -203,7 +219,7 @@ mod tests {
         // would survive redaction: this pins the rule.
         let v = obj(&[("private_key", JsonValue::Str("SECRET".to_string()))]);
         let r = redact_value(&v);
-        let text = castctl_config::jsonvalue::encode_ordered_json(&r);
+        let text = castctl_config::jsonvalue::encode_ordered_json(&r).unwrap();
         assert!(!text.contains("SECRET"), "leaked: {text}");
     }
 }

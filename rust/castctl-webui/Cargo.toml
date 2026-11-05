@@ -19,6 +19,7 @@ serde_json = { workspace = true }
 hyper = { workspace = true, features = ["server", "http1"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 http = { workspace = true }
+http-body = { workspace = true }
 http-body-util = { workspace = true }
 bytes = { workspace = true }
 tokio-tungstenite = { workspace = true }

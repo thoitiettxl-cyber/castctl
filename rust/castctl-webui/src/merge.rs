@@ -36,7 +36,7 @@ fn re_userinfo_span() -> &'static Regex {
     })
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct UserinfoSpan {
     /// Index of the first userinfo character (just after `://`).
     start: usize,
@@ -54,7 +54,11 @@ fn userinfo_spans(s: &str) -> Vec<UserinfoSpan> {
         let scheme = caps.get(1).expect("scheme group");
         let start = scheme.end();
         let at = whole.end() - 1;
-        spans.push(UserinfoSpan { start, at, range: start..at });
+        spans.push(UserinfoSpan {
+            start,
+            at,
+            range: start..at,
+        });
     }
     spans
 }
@@ -72,7 +76,7 @@ fn splice_userinfo(stored: &str, submitted: &str) -> Option<String> {
     if submitted_spans.len() != 1 {
         return None;
     }
-    let sub = submitted_spans[0];
+    let sub = submitted_spans[0].clone();
     if &submitted[sub.range.clone()] != MARKER {
         return None;
     }
@@ -103,7 +107,11 @@ impl std::fmt::Display for SentinelRejection {
 impl std::error::Error for SentinelRejection {}
 
 pub fn join_path(path: &str, key: &str) -> String {
-    if path.is_empty() { key.to_string() } else { format!("{path}.{key}") }
+    if path.is_empty() {
+        key.to_string()
+    } else {
+        format!("{path}.{key}")
+    }
 }
 
 pub fn join_index_path(path: &str, index: usize) -> String {
@@ -116,12 +124,16 @@ pub fn join_index_path(path: &str, index: usize) -> String {
 fn adopt_new(submitted: &JsonValue, path: &str) -> Result<JsonValue, SentinelRejection> {
     if let JsonValue::Str(s) = submitted {
         if s == MARKER {
-            return Err(SentinelRejection { path: path.to_string() });
+            return Err(SentinelRejection {
+                path: path.to_string(),
+            });
         }
         for sp in userinfo_spans(s) {
             let info = &s[sp.range.clone()];
             if info != MARKER && info.contains(MARKER) {
-                return Err(SentinelRejection { path: path.to_string() });
+                return Err(SentinelRejection {
+                    path: path.to_string(),
+                });
             }
         }
     }
@@ -167,8 +179,7 @@ fn json_deep_equal(a: &JsonValue, b: &JsonValue) -> bool {
             })
         }
         (JsonValue::Array(aa), JsonValue::Array(ab)) => {
-            aa.len() == ab.len()
-                && aa.iter().zip(ab.iter()).all(|(x, y)| json_deep_equal(x, y))
+            aa.len() == ab.len() && aa.iter().zip(ab.iter()).all(|(x, y)| json_deep_equal(x, y))
         }
         (JsonValue::Number(an), JsonValue::Number(bn)) => an == bn,
         (JsonValue::Str(x), JsonValue::Str(y)) => x == y,
@@ -195,19 +206,24 @@ fn check_element_identity(
         return Ok(());
     };
     for key in ["tag", "type", "username", "name", "address", "port"] {
-        let Some(stored_value) = stored_obj.get(key) else { continue };
-        let Some(merged_value) = merged_obj.get(key) else {
-            return Err(SentinelRejection { path: path.to_string() });
+        let Some(stored_value) = stored_obj.get(key) else {
+            continue;
         };
-        if key == "address" {
-            if let (JsonValue::Str(sv), JsonValue::Str(uv)) = (stored_value, merged_value) {
-                if !userinfo_spans(sv).is_empty() || !userinfo_spans(uv).is_empty() {
-                    continue;
-                }
-            }
+        let Some(merged_value) = merged_obj.get(key) else {
+            return Err(SentinelRejection {
+                path: path.to_string(),
+            });
+        };
+        if key == "address"
+            && let (JsonValue::Str(sv), JsonValue::Str(uv)) = (stored_value, merged_value)
+            && (!userinfo_spans(sv).is_empty() || !userinfo_spans(uv).is_empty())
+        {
+            continue;
         }
         if !json_deep_equal(stored_value, merged_value) {
-            return Err(SentinelRejection { path: path.to_string() });
+            return Err(SentinelRejection {
+                path: path.to_string(),
+            });
         }
     }
     Ok(())
@@ -226,16 +242,20 @@ fn merge_node(
 ) -> Result<(JsonValue, bool), SentinelRejection> {
     // Exact sentinel string (whole-value match after parse
     // only). R2 / R1 / R-A in order.
-    if let JsonValue::Str(s) = submitted {
-        if s == MARKER {
-            match stored {
-                None => return Err(SentinelRejection { path: path.to_string() }),
-                Some(stored_v) => {
-                    if secret_position {
-                        return Ok((stored_v.clone(), true));
-                    }
-                    return Ok((JsonValue::Str(MARKER.to_string()), false));
+    if let JsonValue::Str(s) = submitted
+        && s == MARKER
+    {
+        match stored {
+            None => {
+                return Err(SentinelRejection {
+                    path: path.to_string(),
+                });
+            }
+            Some(stored_v) => {
+                if secret_position {
+                    return Ok((stored_v.clone(), true));
                 }
+                return Ok((JsonValue::Str(MARKER.to_string()), false));
             }
         }
     }
@@ -243,8 +263,7 @@ fn merge_node(
         return Ok((adopt_new(submitted, path)?, false));
     };
 
-    if let (JsonValue::Object(stored_obj), JsonValue::Object(submitted_obj)) =
-        (stored_v, submitted)
+    if let (JsonValue::Object(stored_obj), JsonValue::Object(submitted_obj)) = (stored_v, submitted)
     {
         let mut out = castctl_config::jsonvalue::OrderedObject::new();
         let mut restored = false;
@@ -261,9 +280,7 @@ fn merge_node(
         return Ok((JsonValue::Object(out), restored));
     }
 
-    if let (JsonValue::Array(stored_arr), JsonValue::Array(submitted_arr)) =
-        (stored_v, submitted)
-    {
+    if let (JsonValue::Array(stored_arr), JsonValue::Array(submitted_arr)) = (stored_v, submitted) {
         let mut out: Vec<JsonValue> = Vec::with_capacity(submitted_arr.len());
         let mut restored = false;
         for (i, elem) in submitted_arr.iter().enumerate() {
@@ -299,12 +316,16 @@ fn merge_node(
             .iter()
             .any(|sp| &submitted_str[sp.range.clone()] == MARKER);
         if has_sentinel_span && (stored_spans.len() != 1 || submitted_spans.len() != 1) {
-            return Err(SentinelRejection { path: path.to_string() });
+            return Err(SentinelRejection {
+                path: path.to_string(),
+            });
         }
         for sp in &submitted_spans {
             let info = &submitted_str[sp.range.clone()];
             if info != MARKER && info.contains(MARKER) {
-                return Err(SentinelRejection { path: path.to_string() });
+                return Err(SentinelRejection {
+                    path: path.to_string(),
+                });
             }
         }
         if let Some(spliced) = splice_userinfo(stored_str, submitted_str) {
@@ -325,7 +346,10 @@ fn merge_node(
 /// `mergeConfig`: merge a submitted (redacted, edited)
 /// document against the stored document, per R1–R9. It
 /// never mutates either input.
-pub fn merge_config(stored: &JsonValue, submitted: &JsonValue) -> Result<JsonValue, SentinelRejection> {
+pub fn merge_config(
+    stored: &JsonValue,
+    submitted: &JsonValue,
+) -> Result<JsonValue, SentinelRejection> {
     let (merged, _) = merge_node(Some(stored), submitted, "", false)?;
     Ok(merged)
 }
@@ -367,9 +391,11 @@ pub fn find_sentinel_at_secret_position(
     match value {
         JsonValue::Array(items) => {
             for (i, elem) in items.iter().enumerate() {
-                if let Some(found) =
-                    find_sentinel_at_secret_position(elem, secret_position, &join_index_path(path, i))
-                {
+                if let Some(found) = find_sentinel_at_secret_position(
+                    elem,
+                    secret_position,
+                    &join_index_path(path, i),
+                ) {
                     return Some(found);
                 }
             }
@@ -402,7 +428,9 @@ pub fn check_whitespace_keys(value: &JsonValue, path: &str) -> Result<(), Sentin
         JsonValue::Object(obj) => {
             for (k, child) in obj.iter() {
                 if k.trim() != k {
-                    return Err(SentinelRejection { path: join_path(path, k) });
+                    return Err(SentinelRejection {
+                        path: join_path(path, k),
+                    });
                 }
                 check_whitespace_keys(child, &join_path(path, k))?;
             }
@@ -424,13 +452,14 @@ mod tests {
     use castctl_config::jsonvalue::{OrderedObject, decode_ordered_json};
 
     fn doc(json: &str) -> JsonValue {
-        decode_ordered_json(json).unwrap()
+        decode_ordered_json(json.as_bytes()).unwrap()
     }
 
     #[test]
     fn r1_sentinel_at_secret_keeps_stored() {
         let stored = doc(r#"{"outbounds":[{"tag":"eu","type":"trojan","password":"SECRET"}]}"#);
-        let submitted = doc(r#"{"outbounds":[{"tag":"eu","type":"trojan","password":"<redacted>"}]}"#);
+        let submitted =
+            doc(r#"{"outbounds":[{"tag":"eu","type":"trojan","password":"<redacted>"}]}"#);
         let merged = merge_config(&stored, &submitted).unwrap();
         assert_eq!(merged, stored);
     }
@@ -464,10 +493,7 @@ mod tests {
         // Edited host with a sentinel userinfo splices too.
         let submitted2 = doc(r#"{"url": "https://<redacted>@other/x"}"#);
         let merged2 = merge_config(&stored, &submitted2).unwrap();
-        assert_eq!(
-            merged2,
-            doc(r#"{"url": "https://user:pass@other/x"}"#)
-        );
+        assert_eq!(merged2, doc(r#"{"url": "https://user:pass@other/x"}"#));
     }
 
     #[test]
@@ -503,8 +529,7 @@ mod tests {
         let submitted = doc(r#"{"token": "<redacted>"}"#);
         let merged = merge_config(&stored, &submitted).unwrap();
         assert_eq!(
-            merged,
-            stored,
+            merged, stored,
             "merge must restore the stored token, not keep the sentinel"
         );
         assert_eq!(find_sentinel_at_secret_position(&merged, false, ""), None);
@@ -515,7 +540,8 @@ mod tests {
         // Stored outbound eu restored (password sentinel)
         // but its tag changed: R4 rejects.
         let stored = doc(r#"{"outbounds":[{"tag":"eu","type":"trojan","password":"SECRET"}]}"#);
-        let submitted = doc(r#"{"outbounds":[{"tag":"us","type":"trojan","password":"<redacted>"}]}"#);
+        let submitted =
+            doc(r#"{"outbounds":[{"tag":"us","type":"trojan","password":"<redacted>"}]}"#);
         let err = merge_config(&stored, &submitted).unwrap_err();
         assert_eq!(err.path, "outbounds[0]");
     }
@@ -528,7 +554,9 @@ mod tests {
         let stored = doc(r#"{"b": 1, "a": 2}"#);
         let submitted = doc(r#"{"a": 20, "b": 10}"#);
         let merged = merge_config(&stored, &submitted).unwrap();
-        let JsonValue::Object(o) = merged else { panic!("object") };
+        let JsonValue::Object(o) = merged else {
+            panic!("object")
+        };
         let keys: Vec<&str> = o.keys().iter().map(|k| k.as_str()).collect();
         assert_eq!(keys, ["a", "b"]);
         let _ = OrderedObject::new();

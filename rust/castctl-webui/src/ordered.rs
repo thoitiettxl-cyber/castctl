@@ -30,14 +30,17 @@ pub fn marshal_ordered(stored_raw: &[u8], doc: &JsonValue) -> Result<Vec<u8>, St
     if stored_raw.iter().all(|b| b.is_ascii_whitespace()) {
         let mut sorted = doc.clone();
         sort_keys_deep(&mut sorted);
-        return Ok(encode_ordered_json(&sorted).into_bytes());
+        let text = encode_ordered_json(&sorted).map_err(|e| e.message)?;
+        return Ok(text.into_bytes());
     }
     let stored_text = String::from_utf8(stored_raw.to_vec())
         .map_err(|e| format!("stored config is not valid UTF-8: {e}"))?;
-    let stored = decode_ordered_json(&stored_text)
+    let stored = decode_ordered_json(stored_text.as_bytes())
         .map_err(|e| format!("stored config is invalid: {e}"))?;
     let overlaid = overlay_ordered(&stored, doc);
-    Ok(encode_ordered_json(&overlaid).into_bytes())
+    Ok(encode_ordered_json(&overlaid)
+        .map_err(|e| e.message)?
+        .into_bytes())
 }
 
 /// `overlayOrdered(stored, doc)`: stored keys keep their
@@ -54,8 +57,12 @@ fn overlay_ordered(stored: &JsonValue, doc: &JsonValue) -> JsonValue {
                     out.set(k.clone(), overlay_ordered(stored_v, doc_v));
                 }
             }
-            let mut extra: Vec<&str> =
-                doc_obj.keys().iter().filter(|k| !stored_obj.has(k)).map(|k| k.as_str()).collect();
+            let mut extra: Vec<&str> = doc_obj
+                .keys()
+                .iter()
+                .filter(|k| !stored_obj.has(k))
+                .map(|k| k.as_str())
+                .collect();
             extra.sort_unstable();
             for k in extra {
                 let mut v = doc_obj.get(k).expect("extra key present").clone();
@@ -96,7 +103,7 @@ mod tests {
     fn stored_order_wins_new_keys_append_sorted() {
         let stored = br#"{"b": 1, "a": {"z": 1, "y": 2}, "c": [1, 2]}"#;
         let doc = decode_ordered_json(
-            r#"{"a": {"y": 20, "n": 1}, "d": {"q": 1, "p": 2}, "b": 10}"#,
+            r#"{"a": {"y": 20, "n": 1}, "d": {"q": 1, "p": 2}, "b": 10}"#.as_bytes(),
         )
         .unwrap();
         let out = marshal_ordered(stored, &doc).unwrap();
@@ -112,7 +119,7 @@ mod tests {
 
     #[test]
     fn empty_stored_renders_sorted() {
-        let doc = decode_ordered_json(r#"{"b": 1, "a": 2}"#).unwrap();
+        let doc = decode_ordered_json(r#"{"b": 1, "a": 2}"#.as_bytes()).unwrap();
         let out = marshal_ordered(b"  \n", &doc).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), r#"{"a":2,"b":1}"#);
     }
@@ -120,9 +127,10 @@ mod tests {
     #[test]
     fn arrays_overlay_positionally() {
         let stored = br#"{"arr": [{"tag": "x", "v": 1}, {"tag": "y"}]}"#;
-        let doc =
-            decode_ordered_json(r#"{"arr": [{"tag": "x", "v": 9, "n": 1}, {"tag": "y"}, {"tag": "z"}]}"#)
-                .unwrap();
+        let doc = decode_ordered_json(
+            r#"{"arr": [{"tag": "x", "v": 9, "n": 1}, {"tag": "y"}, {"tag": "z"}]}"#.as_bytes(),
+        )
+        .unwrap();
         let out = marshal_ordered(stored, &doc).unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
@@ -135,7 +143,7 @@ mod tests {
         // A plain sorted render would put "a" first; Go
         // keeps the stored order ("b" first). This pins it.
         let stored = br#"{"b": 1, "a": 2}"#;
-        let doc = decode_ordered_json(r#"{"a": 20, "b": 10}"#).unwrap();
+        let doc = decode_ordered_json(r#"{"a": 20, "b": 10}"#.as_bytes()).unwrap();
         let out = marshal_ordered(stored, &doc).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), r#"{"b":10,"a":20}"#);
     }

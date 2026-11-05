@@ -26,17 +26,16 @@
 // hand parser does not share), the decoders fall back to
 // the strict whole-input decode.
 
-use crate::error::{err_validation, ApiError};
-use castctl_config::jsonvalue::{JsonValue, decode_ordered_json};
+use crate::error::{ApiError, err_validation};
 use castctl_config::ConfigError;
+use castctl_config::jsonvalue::{JsonValue, decode_ordered_json};
 
 /// End offset (exclusive) of the first complete JSON value
 /// in `data`, or `None` when no complete value can be
 /// found. Leading whitespace is skipped; the offset is
 /// measured from the start of `data`.
 pub fn first_value_end(data: &[u8]) -> Option<usize> {
-    let mut stream = serde_json::Deserializer::from_slice(data)
-        .into_iter::<serde_json::Value>();
+    let mut stream = serde_json::Deserializer::from_slice(data).into_iter::<serde_json::Value>();
     match stream.next() {
         Some(Ok(_)) => Some(stream.byte_offset()),
         _ => None,
@@ -49,10 +48,10 @@ pub fn first_value_end(data: &[u8]) -> Option<usize> {
 /// (deep nesting), so valid documents are never rejected
 /// for a boundary-detection limitation.
 pub fn decode_first_value(data: &[u8]) -> Result<JsonValue, ConfigError> {
-    if let Some(end) = first_value_end(data) {
-        if let Ok(v) = decode_ordered_json(&data[..end]) {
-            return Ok(v);
-        }
+    if let Some(end) = first_value_end(data)
+        && let Ok(v) = decode_ordered_json(&data[..end])
+    {
+        return Ok(v);
     }
     decode_ordered_json(data)
 }
@@ -72,9 +71,7 @@ pub fn decode_body_value(data: &[u8]) -> Result<JsonValue, ApiError> {
     }
     // A trailing valid value is tolerated (Go's second
     // Decode succeeds); trailing garbage is rejected.
-    if first_value_end(rest_trimmed).is_some()
-        || decode_ordered_json(rest_trimmed).is_ok()
-    {
+    if first_value_end(rest_trimmed).is_some() || decode_ordered_json(rest_trimmed).is_ok() {
         return Ok(value);
     }
     Err(err())

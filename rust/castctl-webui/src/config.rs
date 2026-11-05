@@ -129,9 +129,8 @@ fn split_host_port(s: &str) -> Option<(&str, &str)> {
         }
         return Some((host, port));
     }
-    let mut parts = s.splitn(2, ':');
-    let host = parts.next()?;
-    let port = parts.next()?;
+    let (host, port) = s.split_once(':')?;
+
     if port.contains(':') {
         return None;
     }
@@ -142,9 +141,7 @@ fn split_host_port(s: &str) -> Option<(&str, &str)> {
 /// (`parseLoginRateLimitBlock`). Unknown nested keys are
 /// rejected; wrong types and out-of-bound values are config
 /// errors.
-pub fn parse_login_rate_limit_block(
-    value: &JsonValue,
-) -> Result<LoginRateLimitConfig, String> {
+pub fn parse_login_rate_limit_block(value: &JsonValue) -> Result<LoginRateLimitConfig, String> {
     let JsonValue::Object(obj) = value else {
         return Err(config_error("\"webui.login_rate_limit\" must be an object"));
     };
@@ -188,7 +185,7 @@ pub fn parse_login_rate_limit_block(
                         format_duration(MAX_LOGIN_RATE_LIMIT_WINDOW_NS)
                     ))
                 })?;
-                if d < MIN_LOGIN_RATE_LIMIT_WINDOW_NS || d > MAX_LOGIN_RATE_LIMIT_WINDOW_NS {
+                if !(MIN_LOGIN_RATE_LIMIT_WINDOW_NS..=MAX_LOGIN_RATE_LIMIT_WINDOW_NS).contains(&d) {
                     return Err(config_error(format!(
                         "\"webui.login_rate_limit.window\" must be a duration string from {} to {}",
                         format_duration(MIN_LOGIN_RATE_LIMIT_WINDOW_NS),
@@ -269,7 +266,7 @@ pub fn parse_webui_block(value: &JsonValue, base_dir: &Path) -> Result<WebUIConf
                         format_duration(MAX_SESSION_IDLE_TIMEOUT_NS)
                     ))
                 })?;
-                if d < MIN_SESSION_IDLE_TIMEOUT_NS || d > MAX_SESSION_IDLE_TIMEOUT_NS {
+                if !(MIN_SESSION_IDLE_TIMEOUT_NS..=MAX_SESSION_IDLE_TIMEOUT_NS).contains(&d) {
                     return Err(config_error(format!(
                         "\"webui.session_idle_timeout\" must be a duration string from {} to {}",
                         format_duration(MIN_SESSION_IDLE_TIMEOUT_NS),
@@ -355,13 +352,19 @@ pub fn effective_login_rate_limit(cfg: &WebUIConfig) -> (i64, i64) {
 pub fn encode_webui_block(cfg: &WebUIConfig) -> JsonValue {
     let mut out = castctl_config::jsonvalue::OrderedObject::new();
     if !cfg.listen.trim().is_empty() {
-        out.set("listen".to_string(), JsonValue::Str(cfg.listen.trim().to_string()));
+        out.set(
+            "listen".to_string(),
+            JsonValue::Str(cfg.listen.trim().to_string()),
+        );
     }
     if !cfg.token.is_empty() {
         out.set("token".to_string(), JsonValue::Str(cfg.token.clone()));
     }
     if !cfg.ui_dir.trim().is_empty() {
-        out.set("ui_dir".to_string(), JsonValue::Str(cfg.ui_dir.trim().to_string()));
+        out.set(
+            "ui_dir".to_string(),
+            JsonValue::Str(cfg.ui_dir.trim().to_string()),
+        );
     }
     if cfg.session_idle_timeout_set && cfg.session_idle_timeout_ns > 0 {
         out.set(
@@ -394,19 +397,19 @@ mod tests {
     use castctl_config::jsonvalue::decode_ordered_json;
 
     fn block(json: &str) -> JsonValue {
-        decode_ordered_json(json).unwrap()
+        decode_ordered_json(json.as_bytes()).unwrap()
     }
 
     #[test]
     fn parse_full_block() {
         let cfg = parse_webui_block(
-            &block(r#"{"listen":"127.0.0.1:8317","token":"abc","ui_dir":"ui","session_idle_timeout":"13h","login_rate_limit":{"attempts":100,"window":"5m"}}"#),
+            &block(r#"{"listen":"127.0.0.1:8317","token":"abc","ui_dir":"/ui","session_idle_timeout":"13h","login_rate_limit":{"attempts":100,"window":"5m"}}"#),
             Path::new("/cfg"),
         )
         .unwrap();
         assert_eq!(cfg.listen, "127.0.0.1:8317");
         assert_eq!(cfg.token, "abc");
-        assert_eq!(cfg.ui_dir, "ui");
+        assert_eq!(cfg.ui_dir, "/ui");
         assert_eq!(cfg.session_idle_timeout_ns, 13 * HOUR_NS);
         assert_eq!(effective_session_idle_timeout_ns(&cfg), 13 * HOUR_NS);
         let (a, w) = effective_login_rate_limit(&cfg);
@@ -441,8 +444,14 @@ mod tests {
             validate_listen("127.0.0.1").unwrap_err(),
             "must be a host:port with an explicit port"
         );
-        assert_eq!(validate_listen("127.0.0.1:0").unwrap_err(), "port out of range");
-        assert_eq!(validate_listen("127.0.0.1:65536").unwrap_err(), "port out of range");
+        assert_eq!(
+            validate_listen("127.0.0.1:0").unwrap_err(),
+            "port out of range"
+        );
+        assert_eq!(
+            validate_listen("127.0.0.1:65536").unwrap_err(),
+            "port out of range"
+        );
         assert_eq!(
             validate_listen("example.com:8317").unwrap_err(),
             "host must be loopback"
@@ -455,11 +464,8 @@ mod tests {
 
     #[test]
     fn ui_dir_overlap_rejected_at_parse() {
-        let err = parse_webui_block(
-            &block(r#"{"token":"abc","ui_dir":"."}"#),
-            Path::new("/cfg"),
-        )
-        .unwrap_err();
+        let err = parse_webui_block(&block(r#"{"token":"abc","ui_dir":"."}"#), Path::new("/cfg"))
+            .unwrap_err();
         assert!(err.contains("must not overlap"), "{err}");
         let err2 = parse_webui_block(
             &block(r#"{"token":"abc","ui_dir":"../cfg"}"#),
@@ -493,18 +499,18 @@ mod tests {
 
     #[test]
     fn unknown_keys_rejected() {
-        let err = parse_webui_block(
-            &block(r#"{"token":"abc","bogus":1}"#),
-            Path::new("/cfg"),
-        )
-        .unwrap_err();
+        let err = parse_webui_block(&block(r#"{"token":"abc","bogus":1}"#), Path::new("/cfg"))
+            .unwrap_err();
         assert!(err.contains("unknown webui config key"), "{err}");
         let err2 = parse_webui_block(
             &block(r#"{"token":"abc","login_rate_limit":{"bogus":1}}"#),
             Path::new("/cfg"),
         )
         .unwrap_err();
-        assert!(err2.contains("unknown webui.login_rate_limit config key"), "{err2}");
+        assert!(
+            err2.contains("unknown webui.login_rate_limit config key"),
+            "{err2}"
+        );
     }
 
     #[test]
@@ -515,10 +521,10 @@ mod tests {
         )
         .unwrap();
         let encoded = encode_webui_block(&cfg);
-        let text = castctl_config::jsonvalue::encode_ordered_json(&encoded);
+        let text = castctl_config::jsonvalue::encode_ordered_json(&encoded).unwrap();
         assert_eq!(
             text,
-            r#"{"listen":"127.0.0.1:8317","token":"abc","session_idle_timeout":"13h"}"#
+            r#"{"listen":"127.0.0.1:8317","token":"abc","session_idle_timeout":"13h0m0s"}"#
         );
     }
 

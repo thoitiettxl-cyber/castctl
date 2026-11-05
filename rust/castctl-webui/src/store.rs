@@ -23,22 +23,20 @@
 //! the parsed struct, so this port does the same.
 
 use crate::auth::{REDACTED_MARKER, hash_token, looks_like_bcrypt_hash};
-use crate::contain::{
-    contained_in_dir, path_within, resolve_against, resolve_path_best_effort,
-};
-use crate::error::{
-    ApiError, err_config_changed, err_internal, err_not_found, err_validation, safe_message,
-};
-use crate::guarded::{ConfigState, SaveError, sha256_hex};
+use crate::contain::{contained_in_dir, path_within, resolve_against, resolve_path_best_effort};
+use crate::error::{ApiError, err_config_changed, err_internal, err_not_found, err_validation};
+use crate::guarded::{ConfigState, SaveError};
 use crate::merge::{check_whitespace_keys, find_sentinel_at_secret_position, merge_config};
 use crate::ordered::marshal_ordered;
 use crate::validate::{KeeperEntry, parse_and_validate_config};
+use castctl_config::ConfigError;
+use castctl_config::config::{SingleConfig, encode_single_config};
 use castctl_config::jsonvalue::{
     JsonValue, OrderedObject, decode_ordered_json, encode_ordered_json,
 };
-use castctl_config::{SingleConfig, encode_single_config, profile_paths};
+use castctl_config::profile::profile_paths;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// One loaded config: raw bytes + hash + load state
 /// (`configLoad` in Go).
@@ -58,7 +56,10 @@ pub struct ConfigLoad {
 /// a delete is 409; any other read error is 500).
 pub fn load_config(config_dir: &Path) -> Result<ConfigLoad, ApiError> {
     let state = ConfigState::load(config_dir).map_err(|e| {
-        err_validation(format!("stored config is invalid: {}", safe_message_str(&e)))
+        err_validation(format!(
+            "stored config is invalid: {}",
+            safe_message_str(&e)
+        ))
     })?;
     let mut raw: Vec<u8> = Vec::new();
     if state.exists {
@@ -70,7 +71,11 @@ pub fn load_config(config_dir: &Path) -> Result<ConfigLoad, ApiError> {
             Err(_) => return Err(err_internal()),
         }
     }
-    Ok(ConfigLoad { raw, hash: state.sha256.clone(), state })
+    Ok(ConfigLoad {
+        raw,
+        hash: state.sha256.clone(),
+        state,
+    })
 }
 
 fn safe_message_str(msg: &str) -> String {
@@ -93,7 +98,10 @@ pub fn parse_loaded(
         return Err(err_not_found("no config file"));
     }
     parse_and_validate_config(&load.raw, config_dir).map_err(|e| {
-        err_validation(format!("stored config is invalid: {}", safe_message_str(&e)))
+        err_validation(format!(
+            "stored config is invalid: {}",
+            safe_message_str(&e)
+        ))
     })
 }
 
@@ -142,7 +150,7 @@ where
         stored = crate::go_decode::decode_first_value(text.as_bytes()).map_err(|e| {
             err_validation(format!(
                 "stored config is invalid: {}",
-                safe_message_str(&e.message())
+                safe_message_str(&e.message)
             ))
         })?;
     }
@@ -157,8 +165,7 @@ where
     mutate(&mut doc)?;
 
     // Containment on NEW cookies_file values only.
-    let stored_values: HashSet<&str> =
-        stored_cookies.values().map(|v| v.as_str()).collect();
+    let stored_values: HashSet<&str> = stored_cookies.values().map(|v| v.as_str()).collect();
     for (name, value) in profile_cookies_files(&doc) {
         if !stored_values.contains(value.as_str())
             && !is_own_cookies_file(config_dir, &name, &value)
@@ -167,23 +174,25 @@ where
         }
     }
     // B-1: a new or changed ui_dir is re-checked.
-    if let (Some(merged_ui_dir), _) = webui_ui_dir_value(&doc) {
-        if !merged_ui_dir.is_empty()
-            && (!stored_ui_dir_has || stored_ui_dir.as_deref() != Some(merged_ui_dir.as_str()))
-        {
-            reject_new_ui_dir(config_dir, &merged_ui_dir, &profile_cookies_files(&doc))?;
-        }
+    if let (Some(merged_ui_dir), _) = webui_ui_dir_value(&doc)
+        && !merged_ui_dir.is_empty()
+        && (!stored_ui_dir_has || stored_ui_dir.as_deref() != Some(merged_ui_dir.as_str()))
+    {
+        reject_new_ui_dir(config_dir, &merged_ui_dir, &profile_cookies_files(&doc))?;
     }
     if let Err(rej) = check_whitespace_keys(&doc, "") {
         return Err(err_validation(format!("invalid key at {}", rej.path)));
     }
     let merged = marshal_ordered(&load.raw, &doc).map_err(|_| err_internal())?;
     let (mut parsed, _) = parse_and_validate_config(&merged, config_dir).map_err(|e| {
-        err_validation(format!("merged config is invalid: {}", safe_message_str(&e)))
+        err_validation(format!(
+            "merged config is invalid: {}",
+            safe_message_str(&e)
+        ))
     })?;
     // R8 assertion on the merged document as written.
     let merged_text = String::from_utf8(merged.clone()).map_err(|_| err_internal())?;
-    let merged_doc = decode_ordered_json(&merged_text).map_err(|_| err_internal())?;
+    let merged_doc = decode_ordered_json(merged_text.as_bytes()).map_err(|_| err_internal())?;
     if let Some(path) = find_sentinel_at_secret_position(&merged_doc, false, "") {
         return Err(err_validation(format!(
             "redacted value at {path} has no stored value to keep"
@@ -194,27 +203,23 @@ where
     // reach here (R1 restores it, R8 rejects it), so a
     // Marker here is an internal error.
     let mut webui_token: Option<String> = None;
-    if let Some(JsonValue::Object(webui)) = parsed.webui_raw.as_ref() {
-        if let Some(JsonValue::Str(token)) = webui.get("token") {
-            if !token.is_empty() {
-                if !looks_like_bcrypt_hash(token) {
-                    if token == REDACTED_MARKER {
-                        return Err(err_internal());
-                    }
-                    let hash = hash_token(token).map_err(|e| {
-                        err_validation(format!(
-                            "webui token is invalid: {}",
-                            safe_message_str(&e)
-                        ))
-                    })?;
-                    if let Some(JsonValue::Object(webui_mut)) = parsed.webui_raw.as_mut() {
-                        webui_mut.set("token".to_string(), JsonValue::Str(hash.clone()));
-                    }
-                    webui_token = Some(hash);
-                } else {
-                    webui_token = Some(token.clone());
-                }
+    if let Some(JsonValue::Object(webui)) = parsed.webui_raw.as_ref()
+        && let Some(JsonValue::Str(token)) = webui.get("token")
+        && !token.is_empty()
+    {
+        if !looks_like_bcrypt_hash(token) {
+            if token == REDACTED_MARKER {
+                return Err(err_internal());
             }
+            let hash = hash_token(token).map_err(|e| {
+                err_validation(format!("webui token is invalid: {}", safe_message_str(&e)))
+            })?;
+            if let Some(JsonValue::Object(webui_mut)) = parsed.webui_raw.as_mut() {
+                webui_mut.set("token".to_string(), JsonValue::Str(hash.clone()));
+            }
+            webui_token = Some(hash);
+        } else {
+            webui_token = Some(token.clone());
         }
     }
     let encoded = encode_single_config(&parsed).map_err(|_| err_internal())?;
@@ -223,7 +228,11 @@ where
         SaveError::ConcurrentChange => err_config_changed(),
         SaveError::Internal => err_internal(),
     })?;
-    Ok(SaveOutcome { sha256: new_sha, webui_token, stored_had_token })
+    Ok(SaveOutcome {
+        sha256: new_sha,
+        webui_token,
+        stored_had_token,
+    })
 }
 
 /// `saveMerged`: save with a client-supplied base_sha256
@@ -277,7 +286,7 @@ pub fn save_submitted(
         stored = crate::go_decode::decode_first_value(text.as_bytes()).map_err(|e| {
             err_validation(format!(
                 "stored config is invalid: {}",
-                safe_message_str(&e.message())
+                safe_message_str(&e.message)
             ))
         })?;
     }
@@ -309,10 +318,10 @@ pub fn profile_cookies_files(doc: &JsonValue) -> HashMap<String, String> {
         return out;
     };
     for (name, entry) in profiles.iter() {
-        if let JsonValue::Object(entry_obj) = entry {
-            if let Some(JsonValue::Str(cookies)) = entry_obj.get("cookies_file") {
-                out.insert(name.clone(), cookies.clone());
-            }
+        if let JsonValue::Object(entry_obj) = entry
+            && let Some(JsonValue::Str(cookies)) = entry_obj.get("cookies_file")
+        {
+            out.insert(name.clone(), cookies.clone());
         }
     }
     out
@@ -404,12 +413,12 @@ pub fn reject_new_ui_dir(
             ));
         }
     }
-    if let Ok(md) = std::fs::symlink_metadata(root.join("index.html")) {
-        if md.file_type().is_symlink() {
-            return Err(err_validation(
-                "webui.ui_dir index.html must not be a symlink",
-            ));
-        }
+    if let Ok(md) = std::fs::symlink_metadata(root.join("index.html"))
+        && md.file_type().is_symlink()
+    {
+        return Err(err_validation(
+            "webui.ui_dir index.html must not be a symlink",
+        ));
     }
     Ok(())
 }
@@ -488,19 +497,18 @@ pub fn summarize_object(obj: &OrderedObject) -> String {
     };
     let mut host = String::new();
     for key in ["server", "address", "host"] {
-        if let Some(JsonValue::Str(s)) = obj.get(key) {
-            if !s.is_empty() {
-                host = s.clone();
-                break;
-            }
+        if let Some(JsonValue::Str(s)) = obj.get(key)
+            && !s.is_empty()
+        {
+            host = s.clone();
+            break;
         }
     }
-    if host.is_empty() {
-        if let Some(JsonValue::Array(items)) = obj.get("address") {
-            if let Some(JsonValue::Str(s)) = items.first() {
-                host = s.clone();
-            }
-        }
+    if host.is_empty()
+        && let Some(JsonValue::Array(items)) = obj.get("address")
+        && let Some(JsonValue::Str(s)) = items.first()
+    {
+        host = s.clone();
     }
     let mut port = String::new();
     for key in ["server_port", "port"] {
@@ -548,7 +556,7 @@ pub fn used_by_outbound(cfg: &SingleConfig, tag: &str) -> Vec<String> {
 pub fn used_by_endpoint(cfg: &SingleConfig, tag: &str) -> Vec<String> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut names: Vec<String> = Vec::new();
-    let mut add = |name: &str, seen: &mut HashSet<String>, names: &mut Vec<String>| {
+    let add = |name: &str, seen: &mut HashSet<String>, names: &mut Vec<String>| {
         if !name.is_empty() && seen.insert(name.to_string()) {
             names.push(name.to_string());
         }
@@ -558,17 +566,14 @@ pub fn used_by_endpoint(cfg: &SingleConfig, tag: &str) -> Vec<String> {
             add(name, &mut seen, &mut names);
         }
     }
-    if let Some(JsonValue::Array(obs)) = &cfg.outbounds_raw {
-        for ob in obs {
-            if let JsonValue::Object(o) = ob {
-                for key in ["detour", "endpoint"] {
-                    if let Some(JsonValue::Str(s)) = o.get(key) {
-                        if s == tag {
-                            if let Some(JsonValue::Str(t)) = o.get("tag") {
-                                add(t, &mut seen, &mut names);
-                            }
-                        }
-                    }
+    for ob in &cfg.outbounds_raw {
+        if let JsonValue::Object(o) = ob {
+            for key in ["detour", "endpoint"] {
+                if let Some(JsonValue::Str(s)) = o.get(key)
+                    && s == tag
+                    && let Some(JsonValue::Str(t)) = o.get("tag")
+                {
+                    add(t, &mut seen, &mut names);
                 }
             }
         }
@@ -580,6 +585,6 @@ pub fn used_by_endpoint(cfg: &SingleConfig, tag: &str) -> Vec<String> {
 /// Encode a [`JsonValue`] as compact JSON with Go's
 /// ordered encoder (no HTML escaping) — the display
 /// encoding for redacted config text.
-pub fn encode_ordered(value: &JsonValue) -> String {
+pub fn encode_ordered(value: &JsonValue) -> Result<String, ConfigError> {
     encode_ordered_json(value)
 }

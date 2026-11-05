@@ -43,9 +43,7 @@ pub const MASKED_PLACEHOLDER: &str = "***";
 /// (`internal/profile/webui_secret.go` `LooksLikeBcryptHash`).
 pub fn looks_like_bcrypt_hash(hash: &str) -> bool {
     hash.len() > 4
-        && (hash.starts_with("$2a$")
-            || hash.starts_with("$2b$")
-            || hash.starts_with("$2y$"))
+        && (hash.starts_with("$2a$") || hash.starts_with("$2b$") || hash.starts_with("$2y$"))
 }
 
 /// Hash a plaintext token with bcrypt cost 10. Returns an
@@ -80,9 +78,7 @@ pub fn verify_token(token: &str, hash: &str) -> bool {
 /// and fails there; both paths produce the same fixed 401.)
 pub fn parse_bearer_header(header: &str) -> Option<&str> {
     let presented = header.strip_prefix("Bearer ")?;
-    if presented.is_empty()
-        || presented.contains([' ', '\t', '\r', '\n'])
-    {
+    if presented.is_empty() || presented.contains([' ', '\t', '\r', '\n']) {
         return None;
     }
     Some(presented)
@@ -119,8 +115,8 @@ mod tests {
         assert!(hash_token(&"a".repeat(73)).is_err());
         // 72-byte limit on bytes, not chars: 25 three-byte
         // chars = 75 bytes -> too long.
-        assert!(hash_token(&"é".repeat(25)).is_err());
-        assert!(hash_token(&"é".repeat(24)).is_ok());
+        assert!(hash_token(&"€".repeat(25)).is_err());
+        assert!(hash_token(&"€".repeat(24)).is_ok());
         assert!(hash_token("").is_err());
     }
 

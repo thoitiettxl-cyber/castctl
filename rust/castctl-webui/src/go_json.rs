@@ -209,7 +209,7 @@ mod tests {
         // If the HTML escapes are dropped, a <redacted> marker
         // renders literally: this test pins Go's rendering.
         let v = JsonValue::Str("<redacted>".to_string());
-        assert_eq!(encode_go_json(&v), "\"\\u003credated\\u003e\"");
+        assert_eq!(encode_go_json(&v), "\"\\u003credacted\\u003e\"");
     }
 
     #[test]

@@ -45,7 +45,9 @@ impl Default for RateLimiter {
 impl RateLimiter {
     /// Build one limiter (empty store).
     pub fn new() -> Self {
-        Self { entries: HashMap::new() }
+        Self {
+            entries: HashMap::new(),
+        }
     }
 
     /// `exceeded(addr, attempts, window)`: true when the
@@ -117,7 +119,8 @@ impl RateLimiter {
 
     /// Drop entries whose window has expired.
     fn prune_expired(&mut self, window: Duration) {
-        self.entries.retain(|_, (_, started)| started.elapsed() < window);
+        self.entries
+            .retain(|_, (_, started)| started.elapsed() < window);
     }
 }
 
@@ -126,7 +129,11 @@ impl RateLimiter {
 /// window still tells the client to wait).
 pub fn retry_after_seconds(window: Duration) -> String {
     let secs = window.as_secs();
-    if secs < 1 { "1".to_string() } else { secs.to_string() }
+    if secs < 1 {
+        "1".to_string()
+    } else {
+        secs.to_string()
+    }
 }
 
 /// `clientKey`: the host part of a remote address
@@ -136,17 +143,17 @@ pub fn retry_after_seconds(window: Duration) -> String {
 /// returned as-is.
 pub fn host_part(remote_addr: &str) -> &str {
     if let Some(bracketed) = remote_addr.strip_prefix('[') {
-        if let Some(end) = bracketed.find(']') {
-            if bracketed[end + 1..].starts_with(':') {
-                return &bracketed[..end];
-            }
+        if let Some(end) = bracketed.find(']')
+            && bracketed[end + 1..].starts_with(':')
+        {
+            return &bracketed[..end];
         }
         return remote_addr;
     }
-    if remote_addr.matches(':').count() == 1 {
-        if let Some(idx) = remote_addr.rfind(':') {
-            return &remote_addr[..idx];
-        }
+    if remote_addr.matches(':').count() == 1
+        && let Some(idx) = remote_addr.rfind(':')
+    {
+        return &remote_addr[..idx];
     }
     remote_addr
 }

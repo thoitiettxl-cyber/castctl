@@ -115,8 +115,7 @@ impl ConfigState {
             }
         };
         let sha = sha256_hex(&data);
-        let marker = castctl_config::has_profiles_marker(&data)
-            .map_err(|e| e.message().to_string())?;
+        let marker = castctl_config::config::has_profiles_marker(&data).map_err(|e| e.message)?;
         if !marker {
             return Ok(ConfigState {
                 found: false,
@@ -127,8 +126,8 @@ impl ConfigState {
             });
         }
         // Marker present: the file must parse.
-        let _cfg = castctl_config::parse_single_config(&data, base_dir)
-            .map_err(|e| e.message().to_string())?;
+        let _cfg = castctl_config::config::parse_single_config(&data, &base_dir.to_string_lossy())
+            .map_err(|e| e.message)?;
         Ok(ConfigState {
             found: true,
             exists: true,
@@ -185,6 +184,7 @@ pub fn acquire_flock(base_dir: &Path) -> Result<std::fs::File, SaveError> {
         .create(true)
         .read(true)
         .write(true)
+        .truncate(true)
         .open(&lock_path)
         .map_err(|_| SaveError::Internal)?;
     #[cfg(unix)]
@@ -213,7 +213,9 @@ pub fn acquire_flock(base_dir: &Path) -> Result<std::fs::File, SaveError> {
 /// (mode 0600) + fsync + rename. The temp name carries the
 /// process id so concurrent writers never collide.
 pub fn write_file_atomic(path: &Path, data: &[u8]) -> Result<String, String> {
-    let dir = path.parent().ok_or_else(|| "no parent directory".to_string())?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| "no parent directory".to_string())?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let tmp_name = format!(".config.json.tmp.{}", std::process::id());
     let tmp_path = dir.join(tmp_name);
@@ -305,7 +307,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
         // No temp file left behind.
         let leftovers: Vec<_> = fs::read_dir(&dir)
@@ -343,7 +348,9 @@ mod tests {
         let path = dir.join("config.json");
         fs::write(&path, b"{\"profiles\":{}}\n").unwrap();
         let mut state = ConfigState::load(&dir).unwrap();
-        let hash = state.save(b"{\"profiles\":{},\"default_profile\":\"p\"}\n").unwrap();
+        let hash = state
+            .save(b"{\"profiles\":{},\"default_profile\":\"p\"}\n")
+            .unwrap();
         assert_eq!(hash, state.sha256);
         assert_eq!(
             fs::read(&path).unwrap(),
@@ -370,7 +377,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(&lock).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(&lock).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
         let _ = fs::remove_dir_all(&dir);
     }

@@ -3,7 +3,7 @@
 // Licensed under the GNU General Public License v3.0 only.
 
 //! Origin check (`internal/webui/origin.go` `allowedOrigin`
-//! + `internal/webui/screencast.go` `originHost` /
+//! and `internal/webui/screencast.go` `originHost` /
 //! `isLoopbackHost` / WS `CheckOrigin`).
 //!
 //! The two checks are DIFFERENT and must not be unified:
@@ -29,7 +29,7 @@ pub fn origin_host(origin: &str) -> String {
         Some(idx) => &origin[idx + 3..],
         None => origin,
     };
-    let end = rest.find(|c| c == '/' || c == '?' || c == '#').unwrap_or(rest.len());
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     rest[..end].to_string()
 }
 
@@ -67,12 +67,10 @@ fn parse_origin_authority(origin: &str) -> Option<(String, String)> {
     }
     let rest = if let Some(idx) = origin.find("://") {
         &origin[idx + 3..]
-    } else if let Some(stripped) = origin.strip_prefix("//") {
-        stripped
     } else {
-        return None;
+        origin.strip_prefix("//")?
     };
-    let end = rest.find(|c| c == '/' || c == '?' || c == '#').unwrap_or(rest.len());
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..end];
     if authority.is_empty() {
         return None;
@@ -90,14 +88,13 @@ fn parse_origin_authority(origin: &str) -> Option<(String, String)> {
         let after = &bracketed[close + 1..];
         if after.is_empty() {
             host.to_string()
-        } else if let Some(port) = after.strip_prefix(':') {
+        } else {
+            let port = after.strip_prefix(':')?;
             if port.is_empty() || port.bytes().all(|b| b.is_ascii_digit()) {
                 host.to_string()
             } else {
                 return None;
             }
-        } else {
-            return None;
         }
     } else {
         match authority.rfind(':') {
@@ -192,34 +189,73 @@ mod tests {
         // No Origin: allowed.
         assert!(api_origin_allowed(None, "127.0.0.1:8317"));
         // Loopback origins, any port: allowed.
-        assert!(api_origin_allowed(Some("http://127.0.0.1:3000"), "127.0.0.1:8317"));
-        assert!(api_origin_allowed(Some("http://localhost:3000"), "127.0.0.1:8317"));
-        assert!(api_origin_allowed(Some("http://[::1]:3000"), "127.0.0.1:8317"));
+        assert!(api_origin_allowed(
+            Some("http://127.0.0.1:3000"),
+            "127.0.0.1:8317"
+        ));
+        assert!(api_origin_allowed(
+            Some("http://localhost:3000"),
+            "127.0.0.1:8317"
+        ));
+        assert!(api_origin_allowed(
+            Some("http://[::1]:3000"),
+            "127.0.0.1:8317"
+        ));
         // Same host (port stripped): allowed.
-        assert!(api_origin_allowed(Some("https://example.com"), "example.com:8317"));
-        assert!(api_origin_allowed(Some("https://EXAMPLE.com"), "example.com:8317"));
+        assert!(api_origin_allowed(
+            Some("https://example.com"),
+            "example.com:8317"
+        ));
+        assert!(api_origin_allowed(
+            Some("https://EXAMPLE.com"),
+            "example.com:8317"
+        ));
         // Cross-origin: rejected.
-        assert!(!api_origin_allowed(Some("https://evil.example"), "127.0.0.1:8317"));
-        assert!(!api_origin_allowed(Some("https://evil.example"), "example.com:8317"));
+        assert!(!api_origin_allowed(
+            Some("https://evil.example"),
+            "127.0.0.1:8317"
+        ));
+        assert!(!api_origin_allowed(
+            Some("https://evil.example"),
+            "example.com:8317"
+        ));
         // Opaque "null" origin, userinfo, malformed: rejected.
         assert!(!api_origin_allowed(Some("null"), "127.0.0.1:8317"));
-        assert!(!api_origin_allowed(Some("https://user@127.0.0.1"), "127.0.0.1:8317"));
-        assert!(!api_origin_allowed(Some("http://example.com:abc"), "example.com:8317"));
+        assert!(!api_origin_allowed(
+            Some("https://user@127.0.0.1"),
+            "127.0.0.1:8317"
+        ));
+        assert!(!api_origin_allowed(
+            Some("http://example.com:abc"),
+            "example.com:8317"
+        ));
         assert!(!api_origin_allowed(Some("example.com"), "example.com:8317"));
     }
 
     #[test]
     fn ws_origin_is_port_sensitive() {
         // Same host AND port: allowed.
-        assert!(ws_origin_allowed(Some("http://127.0.0.1:8317"), "127.0.0.1:8317"));
+        assert!(ws_origin_allowed(
+            Some("http://127.0.0.1:8317"),
+            "127.0.0.1:8317"
+        ));
         // Loopback is allowed regardless of port (the
         // loopback branch, not the equality branch).
-        assert!(ws_origin_allowed(Some("http://127.0.0.1:3000"), "127.0.0.1:8317"));
+        assert!(ws_origin_allowed(
+            Some("http://127.0.0.1:3000"),
+            "127.0.0.1:8317"
+        ));
         // Non-loopback, same host, different port: the WS
         // check compares WITH the port, so this is rejected
         // — unlike the API check, which strips the port.
-        assert!(!ws_origin_allowed(Some("https://example.com:3000"), "example.com:8317"));
-        assert!(ws_origin_allowed(Some("https://example.com:8317"), "example.com:8317"));
+        assert!(!ws_origin_allowed(
+            Some("https://example.com:3000"),
+            "example.com:8317"
+        ));
+        assert!(ws_origin_allowed(
+            Some("https://example.com:8317"),
+            "example.com:8317"
+        ));
         // No Origin: allowed. Empty origin host: rejected.
         assert!(ws_origin_allowed(None, "127.0.0.1:8317"));
         assert!(!ws_origin_allowed(Some(""), "127.0.0.1:8317"));
@@ -229,7 +265,13 @@ mod tests {
     fn fail_before_origin_check() {
         // If the check were dropped, a cross-origin POST
         // would reach the handler; this pins the 403.
-        assert!(!api_origin_allowed(Some("https://evil.example"), "127.0.0.1:8317"));
-        assert!(!ws_origin_allowed(Some("https://evil.example:9999"), "127.0.0.1:8317"));
+        assert!(!api_origin_allowed(
+            Some("https://evil.example"),
+            "127.0.0.1:8317"
+        ));
+        assert!(!ws_origin_allowed(
+            Some("https://evil.example:9999"),
+            "127.0.0.1:8317"
+        ));
     }
 }

@@ -27,8 +27,7 @@
 // chat text enters an error envelope (errors carry fixed
 // messages only), and job state is memory-only.
 
-use crate::error::{err_not_found, err_unavailable, err_upstream, ApiError};
-use crate::server::{Resp, envelope_resp, error_resp};
+use crate::error::{ApiError, err_not_found, err_unavailable, err_upstream};
 use castctl_config::jsonvalue::{JsonValue, OrderedObject};
 use chrono::{DateTime, Utc};
 use rand::Rng as _;
@@ -209,6 +208,22 @@ pub struct ChatSeamError;
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
+type ListSessionsFn =
+    Arc<dyn Fn(String, bool) -> BoxFuture<Result<Vec<ChatSession>, ChatSeamError>> + Send + Sync>;
+type GetHistoryFn = Arc<
+    dyn Fn(String, String, i64) -> BoxFuture<Result<Vec<ChatEvent>, ChatSeamError>> + Send + Sync,
+>;
+type StartSessionFn =
+    Arc<dyn Fn(String, String) -> BoxFuture<Result<String, ChatSeamError>> + Send + Sync>;
+type SessionOpFn = Arc<
+    dyn Fn(String, String, String, String) -> BoxFuture<Result<(), ChatSeamError>> + Send + Sync,
+>;
+type SendChatFn = Arc<
+    dyn Fn(String, String, String) -> BoxFuture<Result<ChatSendResult, ChatSeamError>>
+        + Send
+        + Sync,
+>;
+
 /// `ChatDeps` are the injected chat seams, mirroring Go's
 /// struct of func fields. Each builds and closes its own
 /// Runtime per call and returns transport errors only:
@@ -218,40 +233,22 @@ type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 /// of serving fake data.
 pub struct ChatDeps {
     /// ListSessions returns the profile's sessions.list rows.
-    pub list_sessions: Arc<
-        dyn Fn(String, bool) -> BoxFuture<Result<Vec<ChatSession>, ChatSeamError>>
-            + Send
-            + Sync,
-    >,
+    pub list_sessions: ListSessionsFn,
     /// GetHistory returns one session's chat.history events,
     /// newest-first as the gateway returns them, capped at
     /// limit events.
-    pub get_history: Arc<
-        dyn Fn(String, String, i64) -> BoxFuture<Result<Vec<ChatEvent>, ChatSeamError>>
-            + Send
-            + Sync,
-    >,
+    pub get_history: GetHistoryFn,
     /// StartSession starts a new side chat and returns the
     /// server-assigned session id.
-    pub start_session: Arc<
-        dyn Fn(String, String) -> BoxFuture<Result<String, ChatSeamError>> + Send + Sync,
-    >,
+    pub start_session: StartSessionFn,
     /// SessionOp runs one session operation: rename, pin,
     /// unpin, archive, unarchive, or delete. Title is used
     /// only for rename.
-    pub session_op: Arc<
-        dyn Fn(String, String, String, String) -> BoxFuture<Result<(), ChatSeamError>>
-            + Send
-            + Sync,
-    >,
+    pub session_op: SessionOpFn,
     /// SendChat sends text and waits for the turn, bounded
     /// by the job timeout. It resolves the profile's
     /// auto_approve/auto_allow_once toggles as-is.
-    pub send_chat: Arc<
-        dyn Fn(String, String, String) -> BoxFuture<Result<ChatSendResult, ChatSeamError>>
-            + Send
-            + Sync,
-    >,
+    pub send_chat: SendChatFn,
 }
 
 // --- job store --------------------------------------------------
@@ -296,18 +293,12 @@ impl ChatJob {
         obj.set("profile", JsonValue::Str(self.profile.clone()));
         obj.set("session_id", JsonValue::Str(self.session_id.clone()));
         obj.set("status", JsonValue::Str(self.status.as_str().to_string()));
-        obj.set(
-            "created_at",
-            JsonValue::Str(rfc3339_nano(self.created_at)),
-        );
-        obj.set(
-            "updated_at",
-            JsonValue::Str(rfc3339_nano(self.updated_at)),
-        );
-        if self.status == ChatJobStatus::Done {
-            if let Some(r) = &self.result {
-                obj.set("result", r.to_json());
-            }
+        obj.set("created_at", JsonValue::Str(rfc3339_nano(self.created_at)));
+        obj.set("updated_at", JsonValue::Str(rfc3339_nano(self.updated_at)));
+        if self.status == ChatJobStatus::Done
+            && let Some(r) = &self.result
+        {
+            obj.set("result", r.to_json());
         }
         if self.status == ChatJobStatus::Failed {
             obj.set("error", JsonValue::Str(self.err.clone()));
@@ -382,15 +373,13 @@ impl ChatJobStore {
             if j.profile == profile_name && j.status == ChatJobStatus::Running {
                 return Err(ApiError {
                     status: 409,
-                    typ: "send_in_flight".to_string(),
+                    typ: "send_in_flight",
                     msg: "a send is already in flight for this profile".to_string(),
                 });
             }
         }
         let mut b = [0u8; 16];
-        rand::rng()
-            .try_fill_bytes(&mut b)
-            .map_err(|_| crate::error::err_internal())?;
+        rand::rng().fill_bytes(&mut b);
         let id = hex_encode(&b);
         let now = self.clock();
         let job = ChatJob {
@@ -468,12 +457,12 @@ impl ChatJobStore {
     /// prunes again.
     fn evict_oldest_finished_locked(&self, inner: &mut JobStoreInner) -> bool {
         for (i, id) in inner.order.iter().enumerate() {
-            if let Some(j) = inner.jobs.get(id) {
-                if j.status != ChatJobStatus::Running {
-                    let id = inner.order.remove(i);
-                    inner.jobs.remove(&id);
-                    return true;
-                }
+            if let Some(j) = inner.jobs.get(id)
+                && j.status != ChatJobStatus::Running
+            {
+                let id = inner.order.remove(i);
+                inner.jobs.remove(&id);
+                return true;
             }
         }
         false
@@ -511,10 +500,7 @@ pub fn chat_session_id(segment: &str) -> String {
 /// `requireChatProfile` validates that name is a profile
 /// key in the stored config. Unknown profiles 404 with a
 /// fixed message.
-pub fn require_chat_profile(
-    config_dir: &std::path::Path,
-    name: &str,
-) -> Result<(), ApiError> {
+pub fn require_chat_profile(config_dir: &std::path::Path, name: &str) -> Result<(), ApiError> {
     let load = crate::store::load_config(config_dir)?;
     let (cfg, _) = crate::store::parse_loaded(&load, config_dir)?;
     if !cfg.profiles.contains_key(name) {
@@ -553,8 +539,8 @@ mod tests {
         assert_eq!(rfc3339_nano(dt), "2026-11-05T12:00:00Z");
         let dt = dt + chrono::Duration::nanoseconds(123_400_000);
         assert_eq!(rfc3339_nano(dt), "2026-11-05T12:00:00.1234Z");
-        let dt = Utc.with_ymd_and_hms(2026, 11, 5, 12, 0, 0).unwrap()
-            + chrono::Duration::nanoseconds(1);
+        let dt =
+            Utc.with_ymd_and_hms(2026, 11, 5, 12, 0, 0).unwrap() + chrono::Duration::nanoseconds(1);
         assert_eq!(rfc3339_nano(dt), "2026-11-05T12:00:00.000000001Z");
     }
 

@@ -34,7 +34,7 @@
 //! | `config` | `internal/profile/webui.go` (typed block) |
 //! | `contain` | `contain.go` (path containment) |
 //! | `cookies` | `internal/gateway/cookies.go` (`ParseCookies`) |
-/// | `validate` | `ParseSingleConfig` tail (keeper/tags/refs) |
+//! | `validate` | `ParseSingleConfig` tail (keeper/tags/refs) |
 //! | `redact` | `internal/redact/value.go` `Value` |
 //! | `duration` | Go `time.ParseDuration` / `Duration.String` |
 //! | `go_json` | Go `encoding/json` response rendering |
