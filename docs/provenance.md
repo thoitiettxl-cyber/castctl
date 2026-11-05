@@ -1129,6 +1129,54 @@ RPC, which can still issue a second Decide RPC that the
 gateway may apply twice — gateway decide idempotency is
 unproven, and no rejection can be assumed.
 
+Rust port (M5b, 2026-11-05/06, branch
+`feat/rust-m5b-turns`, base `dev-rust 07e1c0d`):
+`rust/castctl-telegram` reimplements the same Go turn
+engine (`internal/commands/telegram_turn.go`,
+`wait.go`, `telegram_preview.go`; `internal/wait/`),
+approval decide path, and media delivery path
+described above — no new upstream is introduced, so
+no NOTICE entry is added. The port's deviations from
+the Go implementation (history-poll follow instead of
+`chat.subscribe`; runner-owned active-turn set; the
+`/fs get` "50 MB" wording kept verbatim; cap-6
+truncation; UTC `inbox_name`; Gate 1/2 download
+limits; the claim-storm residual; decide burns the
+button; no owner check on decide buttons, per Go;
+`auto_approve_errors` left empty by the claim
+approver; the elapsed-timer behaviour as implemented,
+not as commented; the dead `requireRunning` flag)
+are recorded in `rust/PORTING.md` §M5b, with the
+offline E2E (fake Bot API + real Go gateway) and the
+list of unproven items (live Bot API, live subscribe,
+gateway decide idempotency).
+
+Fix loop 1 (2026-11-06, review round 1): no new
+upstream is introduced — the loop only aligns the
+port with the same Go sources — so no NOTICE entry is
+added. One new deliberate deviation is recorded in
+`rust/PORTING.md` §M5b deviation 17: the follow-poll
+history-error budget (30s), derived from Go's ack
+deadline (`telegram_turn.go:175`) and the Runner's
+`ReconnectBudget` (`runner.go:30-31`); Go itself would
+wait to the 6h deadline and report a timeout, so the
+30s fail-fast is a documented departure, not a
+parity claim.
+
+Fix loop 2 (2026-11-06, review round 2): no new
+upstream is introduced — the loop only aligns the
+port with the same Go sources — so no NOTICE entry is
+added. New deliberate deviations are recorded in
+`rust/PORTING.md` §M5b deviations 20-27: the final
+note rides `outcome_notes` (Go surfaces it in CLI
+output); the `edit_final` fallback send and the
+`finish()` join race the turn stop instead of Go's
+detached-ctx delivery / unconditional join; the
+newest-N window assumption behind `history_replies`
+widening; the lag window stays a single 1s re-read;
+proof-restore skips Go's follow-up exclusion; and
+`deliver_final` media sends do not listen to stop.
+
 ## 6. cronet-go — EVALUATED-NOT-WIRED (graph-only; no code, no tag)
 
 Upstream: `github.com/sagernet/cronet-go`. License:
@@ -1716,7 +1764,9 @@ artifact's license:
   `profilecmd.go:901-929` is deliberately NOT used).
 - Deferred, not dropped: the WebSocket+Noise+protobuf
   gateway transport (`internal/gateway/stream.go` `open`,
-  stream phases), `DownloadFile`/`Ping`/subscriptions,
+  stream phases), `DownloadFile`/`Ping`/streaming
+  subscriptions (`chat.subscribe` — not the billing
+  `fetchSubscriptionAction`, which was ported in M4b),
   per-profile DNS router (direct dials use the system
   resolver in M3, not Go's fail-closed `ErrNoResolver`),
   HTTP/2 (`ForceAttemptHTTP2` has no M3 counterpart —

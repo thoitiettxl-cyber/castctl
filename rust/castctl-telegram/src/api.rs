@@ -261,7 +261,12 @@ impl BotApi {
     /// with the bot's signal; without it, retry sleeps
     /// are plain `tokio::time::sleep`s.
     pub fn set_shutdown_signal(&self, signal: Arc<ShutdownSignal>) {
-        *self.shutdown.lock().expect("shutdown lock") = Some(signal);
+        // A poisoned lock skips the install instead of
+        // panicking (Safety N5): retry sleeps then fall
+        // back to plain sleeps.
+        if let Ok(mut slot) = self.shutdown.lock() {
+            *slot = Some(signal);
+        }
     }
 
     /// Sleep `dur` unless the shutdown signal fires
@@ -269,7 +274,8 @@ impl BotApi {
     /// returns `BotError::Cancelled`, mirroring Go's
     /// `retryCall` returning `ctx.Err()`).
     async fn sleep_or_shutdown(&self, dur: Duration) -> bool {
-        let Some(signal) = self.shutdown.lock().expect("shutdown lock").clone() else {
+        let signal = self.shutdown.lock().ok().and_then(|guard| guard.clone());
+        let Some(signal) = signal else {
             tokio::time::sleep(dur).await;
             return true;
         };

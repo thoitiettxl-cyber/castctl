@@ -222,6 +222,61 @@ impl Drop for DecideInflightGuard<'_> {
     }
 }
 
+/// Drop guard for one `approve_forever` claim: releases
+/// the claim on EVERY exit — normal return, error
+/// return, and decider panic (the panic unwinds through
+/// the `decide` await, dropping this guard). Without it
+/// a panic leaves the id in `inflight`/`claimed`
+/// forever and every later call skips it silently.
+/// Mirrors Go's `defer failClaim` in `ApproveForever`
+/// (`internal/telegram/claims.go:125-215`). The drop is
+/// a no-op once the claim settled (both `record_claim`
+/// and `fail_claim` settle), so the loop needs no
+/// explicit disarm.
+struct ApproveClaimGuard<'a> {
+    mgr: &'a ClaimManager,
+    id: String,
+    claim: Arc<InflightClaim>,
+}
+
+impl ApproveClaimGuard<'_> {
+    fn new<'a>(
+        mgr: &'a ClaimManager,
+        id: &str,
+        claim: &Arc<InflightClaim>,
+    ) -> ApproveClaimGuard<'a> {
+        ApproveClaimGuard {
+            mgr,
+            id: id.to_string(),
+            claim: Arc::clone(claim),
+        }
+    }
+}
+
+impl Drop for ApproveClaimGuard<'_> {
+    fn drop(&mut self) {
+        if self.claim.is_settled() {
+            return;
+        }
+        // Never panic in a Drop (same rule as
+        // `DecideInflightGuard`): a poisoned lock only
+        // skips the map removal; the claim still settles
+        // so no waiter is stranded.
+        if let Ok(mut inner) = self.mgr.inner.lock()
+            && !self.claim.is_superseded()
+        {
+            if let Some(existing) = inner.inflight.get(&self.id)
+                && Arc::ptr_eq(existing, &self.claim)
+            {
+                inner.inflight.remove(&self.id);
+            }
+            inner.claimed.remove(&self.id);
+        }
+        self.claim.mark_failed();
+        self.claim.settle();
+    }
+}
+
 /// The claim manager: `decided` set, in-flight claims,
 /// `decideOnce` single-flight, auto-log.
 /// Source: the `Bot` claim fields
@@ -343,6 +398,17 @@ impl ClaimManager {
     /// (`decideOnce`). Returns `true` when this caller
     /// performed the decide, `false` when already decided.
     pub async fn decide_once(&self, id: &str, decision: &str) -> Result<bool, BotError> {
+        // Safety N7 (fix loop 2): defense in depth —
+        // validate the decision here too, not only in
+        // the callers (`decide_approval`,
+        // `GatewayDecider::decide`, `approvals.go:21-33`,
+        // `wait.go:1277-1293`). An unknown decision must
+        // never reach the decider RPC.
+        if !matches!(decision, "allow_always" | "allow_once" | "deny") {
+            return Err(BotError::Validation(
+                "telegram: unknown decision".to_string(),
+            ));
+        }
         loop {
             // Decided is checked BEFORE shutdown: Go's
             // `decideOnce` checks the decided set before
@@ -511,6 +577,11 @@ impl ClaimManager {
             }
         }
         for w in todo {
+            // The guard releases this claim if the
+            // `decide` await panics; explicit
+            // `fail_claim`/`record_claim` settle the claim
+            // and make the guard a no-op.
+            let _guard = ApproveClaimGuard::new(self, &w.approval.id, &w.claim);
             let Some(decision) = choose_auto_decision(&w.approval, auto_approve, auto_allow_once)
             else {
                 self.fail_claim(&w.approval.id, &w.claim);
@@ -918,6 +989,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn decide_once_rejects_unknown_decision() {
+        // Safety N7 (fix loop 2): defense in depth —
+        // `decide_once` validates the decision itself
+        // instead of trusting every caller to have done
+        // it (`decide_approval` / `GatewayDecider` already
+        // do). An unknown decision must never reach the
+        // decider RPC.
+        let (m, calls) = manager();
+        let err = m
+            .decide_once("x", "maybe_later")
+            .await
+            .expect_err("an unknown decision must fail");
+        assert!(
+            matches!(err, BotError::Validation(_)),
+            "unknown decision must be a Validation error, got {err:?}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "no decider RPC may run for an unknown decision"
+        );
+        assert!(!m.is_decided("x"));
+    }
+
+    #[tokio::test]
     async fn decide_once_is_single_flight() {
         let (m, calls) = manager();
         let m = Arc::new(m);
@@ -1124,6 +1220,46 @@ mod tests {
         assert_eq!(decided, 1, "the other caller retries and decides");
         assert_eq!(calls.load(Ordering::SeqCst), 2, "RPC retried once");
         assert!(m.is_decided("p"));
+    }
+
+    /// A decider panic inside `approve_forever` must
+    /// release the claim (Drop guard, mirroring Go's
+    /// `defer failClaim` in `ApproveForever`,
+    /// `internal/telegram/claims.go:125-215`): the id
+    /// stays retryable instead of being skipped forever
+    /// as "already claimed".
+    #[tokio::test]
+    async fn approve_forever_panicking_decider_releases_claim() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let decider = Arc::new(PanickingDecider {
+            calls: Arc::clone(&calls),
+        });
+        let m = Arc::new(ClaimManager::new(decider, Duration::from_millis(50)));
+        let approval = Approval {
+            id: "g1".to_string(),
+            options: None,
+            ..Default::default()
+        };
+        let handle = tokio::spawn({
+            let m = Arc::clone(&m);
+            let approval = approval.clone();
+            async move { m.approve_forever(&[approval], true, false).await }
+        });
+        assert!(
+            handle.await.is_err(),
+            "the decider panic must propagate out of approve_forever"
+        );
+        {
+            let inner = m.inner.lock().expect("claims lock");
+            assert!(
+                !inner.claimed.contains("g1") && !inner.inflight.contains_key("g1"),
+                "panicked decide must release the claim"
+            );
+        }
+        // The retry (decider's second call succeeds)
+        // decides the id.
+        let done = m.approve_forever(&[approval], true, false).await;
+        assert_eq!(done, vec!["g1".to_string()]);
     }
 
     /// An already-decided id returns `Ok(false)` even

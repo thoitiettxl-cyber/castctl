@@ -3372,10 +3372,16 @@ fixed.)
   `min(RetryFor, opts.Deadline, ctx deadline)`; Rust has
   no `Deadline` field and always retries for the full
   policy budget.
-- Subscribe/stream not ported in M4a (red-team N11 =
+- Subscribe/stream not ported in M4a — at the M4a base
+  only (red-team N11 =
   technical N3): no `SharedConn::subscribe_raw`, no
   public `Gateway::open_stream`, no `SubscribeJSON`;
-  only the constants exist.
+  only the constants exist. (True at the M4a base
+  `25a124e`; stale on the M5b branch: M5b `4782dc0`
+  added public `Gateway::open_stream`
+  (`gateway.rs:954`), a narrow deliver primitive for
+  `chat.stream` only — `subscribe_raw` /
+  `SubscribeJSON` / `chat.subscribe` are still absent.)
 - GET body→query drops array/object values; Go renders
   them with `%v` (red-team N12 = technical N6): a GET
   body containing a nested value drops the query key in
@@ -5970,6 +5976,1012 @@ tests fail for a reason outside the rebase scope.
   are in §M5a.3 deviations 1, 5, 14, 15, 21 and
   §M5a.4. Live `getMe` / `getMyCommands`: still
   never verified — no bot token on cue (see §M5a.6).
+
+## M5b — Telegram turn engine + two-way media + approvals (2026-11-05/06)
+
+M5b ports the turn engine of `internal/commands`
+(`telegram_turn.go`, `wait.go`, `telegram_preview.go`)
+plus the `internal/wait` core (`waiter.go`, `replies.go`,
+`reason.go`, `history.go`), the approval decide path
+(`telegram_approvals.go`, `internal/telegram/approvals.go`,
+`claims.go`), the media delivery path
+(`telegram_turn.go:793-1426`, `files.go`, `inbound.go`),
+and the production `BotServices` + `Decider` impls that
+M5a left as test doubles. Crate `rust/castctl-telegram`;
+branch `feat/rust-m5b-turns`; base `dev-rust 07e1c0d`.
+No Go production file is modified. One Go harness file
+is extended: `rust/parity/gateway_server/main.go`
+(`serve-e2e` mode, stateful scripted history). Go base
+`main 1396697` (same as M5a).
+
+## M5b.1 Crate map + pins
+
+- `preview.rs`: `StreamPreview` — `PREVIEW_TAIL_RUNES`
+  3300, initial status `"⏳ Muse is working…"`,
+  `format_elapsed_secs` (<60s `"Ns"`, <3600 `"Mm SSs"`,
+  else `"Hh MMm"`), part-key aliasing (first-seen wins),
+  `delta.message_start` resets a known key only,
+  `delta.presentation` ignored, online suppressed until
+  `seenWork`, app status wins over derived tool labels.
+- `wait.rs`: `Waiter` (approvals-first feed, F8 re-arm,
+  `seenRunning` gate, suspect terminals need history
+  proof via `Settle`), `replies_after` (literal
+  `message.assistant` + `completed` only), `user_ack`
+  (contains either way), `needs_input_reason` (34 wait
+  phrases, safety regex, gate regex — all literals from
+  `internal/wait/reason.go:24-169`, read verbatim
+  2026-11-05), `outcome_of` / `exit_code` (done 0,
+  needs_input/needs_approval 4, failed 2, timeout 124).
+- `turn.rs`: `TurnRunner` (one turn/chat, spawn gate,
+  stop registry, resumed guard), `BubbleEditor` (1s
+  ticker, throttle-before-render, text-compare,
+  shown/lastEdit written BEFORE the network call,
+  `editFinal` calls `finish()` first; the edit attempt
+  times out after 15s (`EDIT_FINAL_TIMEOUT`), and the
+  fallback send is one `call_json_timeout` call
+  (`api.rs:441-479`): up to 3 attempts × 40s
+  `CLIENT_TIMEOUT` + 2 × (60s max `retry_after` +
+  0.5s `RETRY_AFTER_PAD`) ≈ 241s — so the full
+  `edit_final` worst case is ≈ 15s + ≈ 241s ≈ 256s,
+  not "detached 15s" (corrected in fix loop 1, Red
+  N2). `deliver_send` (baseline 1+20, ack poll
+  100ms / 30s), `wait_follow` (see deviation 1),
+  `deliver_final` / `deliver_media_turn` /
+  `deliver_media_item` / `collect_turn_media` /
+  `build_turn_segments`, `outcome_notes`,
+  `final_markup`, `question_options` (widget → list →
+  generic 👍/👎/▶️), `media_path` (hand-rolled
+  `quote_python` + percent-decode), `doc_name`,
+  `turn_error_text`, `media_failure_class`.
+- `services.rs`: `GatewayBotServices` (production
+  `BotServices`: 10 real methods — `start_turn`,
+  `stop_turn`, `wait_turns`, `resume_turn`,
+  `inbound_media`, `pending_approvals`,
+  `decide_approval`, `files_list`, `download_file`,
+  `raw_call` — the other 19 return
+  `BotError::NotWired("<method>")`, listed here as the
+  M4b-gateway follow-up boundary; corrected in fix
+  loop 1, Tech N5 — the count was "9" with the same
+  10 names listed) and `GatewayDecider`
+  (one `egress.approval.decide` call, body exactly
+  `{"decision": "<decision>"}`; safe because that
+  method is deliberately NOT in `POST_READ_METHODS`,
+  so `safe_to_repeat` is false and no post-send retry
+  happens — matches Go's no-retry `callDecide`).
+- `castctl-gateway/src/gateway.rs`: forced addition
+  `Gateway::open_stream` (public, wraps private
+  `open(..., track=false)`; Go `stream.go` `open`).
+  No other gateway change. `open`/`next` stay private.
+- `tests/turn_e2e.rs`: env-gated offline E2E (see
+  M5b.6). Fake token literal
+  `123456:FAKE-TOKEN-TEST-ONLY-AAAA` only; no real
+  Telegram traffic, no token copied from anywhere.
+- `files.rs` (M5a file, additive only): pure
+  `truncate_caption` extracted from `send_file`
+  (identical `.take(CAPTION_LIMIT)` logic) so the
+  1023/1024/1025 boundary is unit-testable; no
+  behavior change.
+
+## M5b.2 BotServices home decision
+
+The production `BotServices` impl lives in
+`services.rs` inside `castctl-telegram` — no new crate,
+no workspace edit. Reason (self-decide rule, no
+evidence either way in the repo): the seam trait
+(`BotServices` in `router.rs`) and its impl stay in one
+crate; the impl needs `castctl-gateway`
+(`SharedConn`) + `castctl-shared`, and the gateway does
+not depend on telegram, so no cycle exists. A separate
+crate would add a workspace member + a dependency edge
+for no seam benefit.
+
+## M5b.3 Deviations from Go (deliberate, with citations)
+
+1. **No `chat.subscribe`; follow = history poll.**
+   The internal stream frame is already there at base:
+   private `Gateway::open` + `deliver_to_open_streams`
+   + the `streams` map keyed by sid
+   (`rust/castctl-gateway/src/gateway.rs:267,408,614`),
+   and this milestone adds one narrow deliver primitive,
+   `Gateway::open_stream` (`gateway.rs:954`, added by
+   this PR in `4782dc0`): it calls private `open` with
+   `track=false`, returns only the stream id, and returns
+   no receiver — it exists only to deliver `chat.stream`
+   (called from `turn.rs:2163` via `turn.rs:680-690`), not
+   to consume a stream. What Rust still lacks is a public
+   subscribe API: no `SubscribeRaw`
+   (`internal/gateway/calls.go:261`) / `SubscribeJSON`
+   (`calls.go:384`), no `SharedConn` subscribe retry
+   (`internal/conn/shared.go:304`, 3 attempts / 250ms
+   pause, `internal/conn/gateway.go:46,54`), and no
+   `chat.subscribe` follow-loop consumer
+   (`internal/wait/runner.go:513` `subscribeOnce`).
+   (The earlier wording of this deviation was wrong on
+   both counts: `open_stream` exists in
+   `castctl-gateway`, and `grep subscribe` hits the
+   billing `subscription.rs` / retry constants; only the
+   streaming subscribe is absent.) Porting the
+   full Go Runner (`internal/wait/runner.go` 1295
+   lines + `waiter.go` 768 + `replies.go` 366 +
+   `history.go` 345, with settle/checkState/endgame)
+   is out of scope for one M5b pass. Instead
+   `wait_follow` polls `chat.history` (limit 200)
+   every 1s, feeds new events (seq order) to the
+   ported `Waiter` + `StreamPreview`, tries `Settle`
+   on an ignored terminal with a `RepliesAfter` proof,
+   and does a final history read at finish. Bubble
+   updates therefore land at poll cadence, not on
+   push — up to ~2s after live (1s poll + 1s
+   `EDIT_THROTTLE`, `turn.rs:85`), versus about 1s in
+   Go (throttle only); the final text still comes from
+   the history re-read, as in Go.
+   M7a (separate branch `feat/rust-m7a-services`) is
+   building the subscribe API and will wire this state
+   machine to it; until then the poll stays. M7a adds
+   its own `open_stream` with the same shape (M7a
+   `gateway.rs:955` at `5868645`); the two must
+   converge (dedupe, not duplicate) on rebase.
+   Consequences of polling (mechanism verified from
+   source; frequency unmeasured — no live gateway data):
+   (a) an event is visible at most ~1s + one
+   `chat.history` RTT after it lands
+   (`turn.rs:2303` history(200), `:2398` 1s sleep),
+   versus immediately on Go's push
+   (`runner.go:583-613` `onRecord`);
+   (b) a held ignored (suspect) terminal is settled
+   late: Go re-proves it at most once per 5s
+   (`DefaultSettlePollInterval`, `runner.go:58` — a
+   minimum gate, not a schedule: the first proof
+   starts immediately) — per record (`trySettle`,
+   `runner.go:602`), per quiet subscribe iteration
+   (post-batch settle, `runner.go:456-470`), and by
+   ending the stream when the proof is due
+   (`runner.go:652-653`, which requires a proof
+   already read and a known boundary,
+   `runner.go:646-651`) — while Rust calls `settle`
+   only in the endgame (`turn.rs:2460-2461`,
+   `accept_replayed_failed` `:2445`), never inside
+   the poll loop, so a suspect terminal with no later
+   proven event behind it can sit until the 6h
+   `TURN_TIMEOUT` (`turn.rs:70`); and at the deadline
+   the endgame settle is skipped for a Timeout kind
+   (`turn.rs:2460`), so the held terminal is never
+   settled in that path;
+   (c) a burst of >200 new events inside one 1s
+   interval drops the older events out of the newest-200
+   window, so a terminal or an `approvals.*` event can
+   be missed outright and the turn runs to the 6h
+   timeout instead of Done / needs_approval (this
+   assumes the gateway returns the newest 200 — see
+   dev 23); a missed F8 re-arm event (`task.status`
+   `running`, root-confirmed) never clears the ignored
+   terminal (`wait.rs:991-1000`), and a missed
+   zero-subagent info event runs no clear for that missed
+   event (`wait.rs:987-989`), so `ignored_reason ==
+   "subagents"` stays set until another clearing event
+   arrives (running root-confirmed, `wait.rs:998-999`, or
+   replayed-failed via `clear_ignored()`,
+   `wait.rs:1217-1218`); the final read
+   + `proof_replies` restore only replies, not waiter
+   decisions (`turn.rs:2502-2523`);
+   (d) a reply landing in (1s, 2s] after Done can miss
+   the final text: Rust does a single re-read after 1s
+   (`turn.rs:2450-2458`) versus Go's 2s lag window
+   polled every 250ms (`runner.go:40,42`);
+   (e) `/stop` takes at most ~1s + one history RTT
+   (the 1s sleep at `turn.rs:2398` is a bare sleep; the
+   stop flag is checked at the top of the next loop,
+   `:2300-2302`);
+   (f) there is no 20s watchdog
+   (`DefaultRecheckAfter`, `runner.go:25`), no 60s
+   safety-net state check (`DefaultCheckEvery`,
+   `runner.go:45`), and no state check on a dead
+   gateway — a dead gateway fails the turn after 30s
+   instead (deviation 17), where Go runs one bounded
+   state check and waits on to the deadline. Polling
+   also loads the gateway at ~1 `chat.history` call per
+   second per turn in the follow loop (`turn.rs:2398`);
+   sending adds a bounded burst of up to ~10/s for at
+   most 30s while awaiting the delivery ack (`deliver_send`
+   polls `history(10)` every 100ms, `ACK_POLL` 100ms /
+   `ACK_TIMEOUT` 30s — `turn.rs:2169`, `:92`, `:74`);
+   whether the gateway rate-limits either cadence is
+   unmeasured.
+2. **Runner-owned active set.** `Bot::begin_turn` /
+   `end_turn` cannot be called by the runner because
+   `Bot::new` requires the services first (circular
+   construction); `Bot::new`'s signature is unchanged
+   (would break M5a tests). Two sets exist; the
+   runner's set drives all M5b decisions. Consequence
+   (verified from Go `telegram_turn.go:316-396`): Go's
+   `startResume` checks the bot core's second set
+   (`HasActiveTurn`) after acquiring the slot — in
+   Rust that check collapses into the slot wait.
+3. **`/fs get` "50 MB" wording kept verbatim.**
+   Go says `"Too big for Telegram (50 MB)."` at
+   `telegram_fs.go:334-335` while the gate is 49 MiB
+   (`files.go`); the `/files` download button says
+   `"Too big for Telegram (49 MB); use castctl
+   download."` (`telegram_commands.go:721,733`). Each
+   string is ported verbatim per call site, not
+   unified — the contradiction is Go's, not Rust's.
+4. **Cap 6 counted after dedupe, before claim — and
+   the send list IS truncated.** Go
+   (`telegram_turn.go:1145-1155`) appends the excess
+   note, then `items = items[:maxFilesPerTurn]`. The
+   first M5b version computed the note but sent all 7
+   files; the cap-6 edge-case test caught it
+   (2026-11-06) and the truncation was added. The
+   deviation vs Python (Go counts already-sent files
+   against the 6) is Go's behaviour, ported as-is.
+5. **`inbox_name` uses UTC, not local time** (M5a
+   deviation 6, inherited — the E2E fs.write path
+   `telegram-inbox/20261105-195242-photo.jpg` shows
+   UTC while cue local time was 2026-11-06 02:52+07).
+6. **Download Gate 1 checks the message-declared
+   size, not getFile `file_size`** (M5a deviation 21,
+   inherited); **Gate 2 is unreachable** at the
+   16 MiB `request_tls` cap (Go accepts files up to
+   20 MiB). No criterion lowered: the gates are
+   ported as written; the transport cap is the
+   blocker, recorded here for the follow-up.
+7. **Claim-storm residual, mirrored.** Go's
+   double-decide has 3 layers (registry Consume,
+   `decideOnce` single-flight cap 1024, approval
+   claim protocol `claimChainMax=3`, `ClaimWait`
+   15s); with 20 goroutines + a slow decider (150ms)
+   + ClaimWait 20ms, 20 Decide RPCs fire for one id
+   — gateway-side idempotency is REQUIRED and
+   unproven. Rust mirrors the same 3 layers
+   (`CallbackRegistry::consume`, `ClaimManager::
+   decide_once`, `approve_forever` claim chain), so
+   the same residual applies. [NEEDS-MEASUREMENT]
+   on a live gateway.
+8. **Decide burns the button.** `consume` happens
+   BEFORE the Decide RPC (Go `bot.go:1398-1446`;
+   M5a `commands.rs` `cb_decide`), so a failed Decide
+   still burns the button; retry needs a fresh
+   `/approvals` listing. Ported as-is.
+9. **No owner check on decide buttons — verified Go
+   behaviour, ported exactly.** Go has NO owner check
+   on decide buttons; the owner gate covers only
+   `profile`/`update`/`login`/`raw`
+   (`internal/commands/telegram_owner.go:65-73`);
+   `/approvals`, `/autoapprove` and decide buttons are
+   open to every allowlisted user, first tapper wins.
+   No owner check was added.
+10. **`approve_forever` swallows per-id decide
+    errors**, so `WaitResult.auto_approve_errors` is
+    always empty from the `ClaimApprover` used by the
+    waiter (decisions are still correct). The error
+    list is populated only by the waiter's own
+    approver path in Go; Rust's `ClaimManager::
+    approve_forever` returns just the approved ids.
+    Recorded, not fixed: changing the `ClaimManager`
+    API is a follow-up, not M5b.
+11. **Elapsed timer: the bubble is NOT re-edited
+    between deltas.** Go's code comment claims the
+    ticker refreshes the elapsed time, but
+    `telegram_turn.go:699-728` (`maybeEdit` returns
+    early when `!dirty`) means the elapsed timer
+    alone never triggers an edit. Rust ports the
+    actual behaviour.
+12. **`requireRunning` is a dead flag in Go**
+    (`internal/wait/waiter.go:151-156`,
+    `internal/commands/wait.go:253` "accepted, no live
+    effect") — no effect ported.
+13. **History-error swallow rule extended to follow
+    polls — now bounded (fix loop 1).** Go's ack-poll
+    rule (history errors swallowable only if
+    GatewayError/TimeoutError) is applied to the follow
+    polls too; any other history error fails the turn.
+    The follow poll additionally fails the turn after
+    `FOLLOW_HISTORY_ERROR_BUDGET` (30s) of continuous
+    swallowable errors — deviation 17.
+14. **M4c token fix: in base since the rebase onto
+    `c7b1d34` (2026-11-06) — OBSOLETE as a limitation.**
+    At the M5b base `07e1c0d`, `default_ws_url`
+    (`rust/castctl-gateway/src/dial.rs`) still sent the
+    literal token string; the real-token fix lived on
+    `feat/rust-m4c-chrome-tls` (PR #69). Boss merged
+    PR #69 on 2026-11-05 (dev-rust `c7b1d34`,
+    independently verified gates + live parity 13/13
+    on cue). M5b rebased onto `c7b1d34` on 2026-11-06,
+    so the fix is in the base: this is no longer a
+    known limitation. The offline E2E is unaffected:
+    the fake `gatewaytest.Server` does not validate
+    the WS token.
+15. **Editor stop flag (Rust-only bug, found by a
+    hang).** `BubbleEditor::finish` used a bare
+    `Notify::notify_waiters`; when `finish()` ran
+    before the loop task first polled, the wakeup was
+    lost and the loop waited forever
+    (`edit_final_falls_back_to_send_on_error` hung
+    >60s in the gates3 run, 2026-11-06). Fixed with
+    an `AtomicBool stopped` flag checked at the top
+    of each loop iteration; the flag is the authority,
+    the `Notify` is only a wakeup. Regression test
+    `finish_before_loop_starts_returns_promptly`.
+16. **serve-e2e query-string bug (harness, found by
+    the first E2E run).** The Rust gateway sends GET
+    params as a query string (`/chat/history?limit=10`
+    with an empty body); the scripted handler matched
+    paths exactly and parsed the limit from the body,
+    so every history call fell into the default case
+    and returned `{}` — the ack poll looped the full
+    30s. Fixed in the harness: strip the query before
+    matching, read the limit from the query when the
+    body has none.
+17. **Follow-poll history-error budget (fix loop 1,
+    deliberate deviation).** The follow poll has no
+    `chat.subscribe` to resubscribe on (deviation 1),
+    so a dead gateway would poll silently to the 6h
+    turn timeout with no notice, no backoff, no
+    escalation — and `wait_turns` joined without a
+    timeout, so shutdown hung too. The fix bounds
+    *consecutive* swallowable history errors in
+    `wait_follow` at `FOLLOW_HISTORY_ERROR_BUDGET =
+    30s`: the turn then fails with the gateway error
+    text (`editFinal` reports it, the slot is
+    released). The bound is derived from Go, not
+    invented — two independent anchors:
+    - the ack deadline, 30s
+      (`internal/commands/telegram_turn.go:175`);
+    - the Runner's `ReconnectBudget = 30s`
+      (`internal/wait/runner.go:30-31`) — the duration
+      Go tolerates a storm of failed resubscribes
+      before escalating to a bounded state check
+      (`noteFailure`, `runner.go:701-713`).
+    Go's push stream can recover on the next
+    resubscribe; the Rust history poll cannot, so at
+    the same 30s boundary the poll fails the turn
+    instead of escalating to a state check it does not
+    have. Backoff between error polls mirrors Go's
+    resubscribe pause: base 1s (`DefaultResubPause`,
+    `runner.go:33-34`), doubling with the shift capped
+    at 5 (max 32s, `runner.go:426-435`); with the 30s
+    budget the poll fails after ~31s. The backoff
+    sleep watches the stop notify (`select!`), so
+    /stop stays prompt. `wait_turns` now signals every
+    registered stop before joining, and a turn
+    registered after shutdown began is signalled at
+    registration — the join is bounded by the same
+    turn-cancellation rule as Go's `Wait`
+    (`telegram_turn.go:240-249`). Note the honest
+    difference: Go itself would wait to the 6h
+    deadline and report a timeout outcome
+    (`executeWait` catch-all → timeout,
+    `internal/commands/wait.go:349-360`); failing at
+    30s of continuous gateway errors is a deliberate,
+    documented choice to surface a dead gateway
+    instead of polling silently for hours.
+18. **`notified`/`resumed` are never pruned —
+    matching Go (known limitation, fix loop 1, Red
+    N4).** Go's `claims.go` `notified` set is only
+    ever added to, and the `resumed` map is never
+    pruned either. Rust matches both. The `tasks` vec
+    IS pruned (finished `JoinHandle`s are dropped
+    before pushing a new one); the `decided` set was
+    already capped at 1024 with oldest-first
+    eviction.
+19. **Fixed multipart boundary (Safety N7, NOT
+    fixed — follow-up).** The root cause is in M5a
+    (`castctl-transport` multipart construction),
+    outside the M5b diff; recorded here as a
+    follow-up, not fixed in this loop.
+20. **`outcome_notes` carries `res.note` (fix loop
+    2).** Go's `outcomeNotes`
+    (`telegram_turn.go:1391-1429`) never mentions
+    `res.Note`: the note surfaces in CLI wait output,
+    not the bubble. The bot bubble has no CLI, so
+    the note must ride the notes — otherwise a
+    final-read failure shows `"(no reply text)"`
+    with no explanation. The `"⌛ Still running
+    after 6h…"` line is suppressed when
+    `final_read_failed`: a final-read timeout is not
+    a 6h timeout.
+21. **`edit_final` fallback send races the turn
+    stop (fix loop 2).** Go runs the fallback send
+    on a detached 15s ctx and still attempts the
+    `"⏹ Stopped."` confirmation after /stop
+    (`telegram_turn.go:755-767`). Rust abandons the
+    fallback send on stop: in a 429 storm the
+    fallback would otherwise hold the slot ~241s
+    (3 attempts × 40s + 2 × 60.5s sleeps). The
+    primary edit keeps its 15s attempt, so the stop
+    confirmation is attempted once, not twice.
+22. **`finish()` stop-win abandons the join (fix
+    loop 2).** Go joins unconditionally
+    (`telegram_turn.go:728-745`) but is bounded
+    because the turn ctx cancels the in-flight
+    edit. Rust has no turn ctx; the stop is the
+    bound. The trailing edit is skipped on the stop
+    win — the in-flight edit already raced the same
+    stop in `maybe_edit`, so the loop exits on its
+    own.
+23. **`history_replies` newest-N assumption (fix
+    loop 2).** Widening assumes the gateway returns
+    the newest N events for `limit=N` — the same
+    assumption Go's `HistoryReplies` makes
+    (`history.go:216-257`). If a gateway returned
+    oldest-N or unsorted windows instead, widening
+    could not recover old replies and the exhaustion
+    note could fire spuriously. The E2E harness
+    returns all events regardless of limit (no
+    `has_more`), so widening is exercised only by
+    the unit tests' `WindowPort`.
+24. **Lag window stays a single 1s re-read (fix
+    loop 2).** Go polls to the lag-window end
+    (`runner.go:1023-1250`); Rust re-reads once
+    after 1s, as in the first M5b version.
+25. **Proof-restore skips the follow-up exclusion
+    entirely (fix loop 2; corrected in review round
+    3).** Rust never runs Go's `LatestUserSeq` +
+    `withinTurn` step (`internal/wait/runner.go:
+    1105-1199`): (i) final replies after a newer
+    user message are NOT excluded, (ii) proof
+    replies restored into the final read pass
+    through no filter, (iii) the note `"replies
+    after a newer user message were excluded"`
+    never appears. User-visible consequence: a
+    user follow-up sent mid-turn can make the first
+    turn's final text / question / outcome pick up
+    the follow-up turn's replies. Known limitation,
+    no new loop.
+26. **`deliver_final` does not listen to stop (fix
+    loop 2, residual; scope corrected in review
+    round 3).** Not only media sends — every
+    send/edit in `deliver_final` (`turn.rs:2566`,
+    media items and long-reply text segments
+    alike) runs to completion once started; see
+    deviation 29 for the bounds. Known limitation.
+27. **Per-window retry is deliberate leniency, not
+    Go parity (fix loop 2; corrected in review
+    round 3).** Go's `HistoryReplies`
+    (`history.go:216-257`) calls `ReadHistory`
+    directly — 0 retries. The one-retry
+    `readWindow` (`history.go:259-278`) is used
+    only by `DeriveBoundary` / `LatestUserSeq`
+    (`history.go:95`, `~150`). Rust retries once
+    per window on any non-auth error. Consequence:
+    a transient error in one window is masked →
+    `Done` instead of `Timeout`; the recovered
+    replies are real, so the outcome is still
+    right — low harm. Known limitation.
+28. **`finish()` trailing edit does not listen to
+    stop (review round 3, Red B1).** The stop win
+    in the join `select!` does skip the trailing
+    edit (deviation 22 — that part stands), but
+    once the join arm wins, or when `turn_stop` is
+    `None`, the trailing `edit_plain` in
+    `finish()` (`turn.rs:1203-1213`) runs
+    unconditionally: no timeout, no stop race — so
+    a 429 storm on that final edit ignores /stop
+    for up to ~241s (3 attempts × 40s
+    `CLIENT_TIMEOUT` + 2 × 60.5s `retry_after`
+    sleeps) while the slot stays held and
+    `wait_turns` blocks behind it. The current
+    regression test feeds a single delta, so the
+    trailing edit is skipped (`text == shown`)
+    and this hole has no test coverage. Fix is
+    small (skip/race the trailing edit once
+    `turn_stop` is set — the flag is already in
+    scope) if taken as a follow-up. Known
+    limitation.
+29. **`deliver_final` is entirely deaf to stop
+    (review round 3, Red B2; extends deviation
+    26).** Not only media sends — every send/edit
+    in `deliver_final` (up to 6 media files,
+    multi-segment long text replies) ignores the
+    per-turn stop; each `send_file` up to ~481s
+    (3 × 120s `UPLOAD_TIMEOUT` + 2 × 60.5s),
+    each gateway download 300s, each JSON
+    send/edit ~241s; 6 files → ~2h theoretical,
+    ~15–25 min in a real storm. Real divergence
+    from Go: Go's `stopTurn` calls
+    `entry.cancel()` (`telegram_turn.go:437`);
+    `deliverFinal` / `deliverMediaSegments` /
+    `deliverMediaItem` all take the turn ctx and
+    `deliverMediaSegments` returns `ctx.Err()`
+    (`telegram_turn.go:1231`) — Go aborts
+    mid-delivery on stop, Rust runs to the end.
+    Retry sleeps listen only to the process
+    shutdown signal, not the per-turn stop. Known
+    limitation, follow-up (needs the stop passed
+    down into `deliver_final`).
+
+## M5b.9 Fix loop 2 (2026-11-06, review round 2)
+
+Every BLOCKING from review round 2, fixed red-test
+first. Red run on cue (`cargo test -p
+castctl-telegram --lib`): **128 passed, 14 failed**
+— all 14 targeted (the `follow_backoff` test failed
+on its timing bound as predicted pre-fix; the three
+B3 fixtures were corrected after the red run — the
+`Waiter` needs a `running` event before a
+`completed` terminal, else the terminal is a suspect
+ignored terminal and `wait_follow` times out).
+
+- B1 (`python_float` scientific threshold, Tech
+  B-mới-1 = Red N1): decision now by decimal
+  exponent from `format!("{f:e}")` — scientific iff
+  exponent < -4 or >= 6; mantissa trimmed, form
+  `"{mantissa}e{exp:+03}"`; else Rust `{}` display
+  + `.0` if integral. Regression test pins 1e6,
+  1234567.0, 1e15, 1e20, 1750000000.0, 100000.0,
+  0.0001, 1e-5 (incl. negatives, 0.0) to the
+  probe-verified Go outputs. §M5b.8 Tech N4 claim
+  corrected (deviation: none — this is a bug fix).
+- B2 (final-read failure, Red B1): `wait_follow`'s
+  final section rewritten to Go
+  (`runner.go:1023-1250`): final read = 2 attempts
+  of `history_replies` (100ms between); on failure
+  replies are forced to `[]` and reconciliation is
+  skipped; `final_read_failed && kind == Done` →
+  `kind = Timeout`, `detail = waiter.status()`,
+  note `"could not read the final replies; run
+  \`castctl wait\` again"`; `WaitResult.note` is now
+  set (was always empty). `outcome_notes` carries
+  the note (deviation 20) and suppresses the 6h
+  timeout line on final-read failure, so
+  `deliver_final` shows the note instead of
+  `"(no reply text)"` when the final text is empty
+  but a note exists. Regression test: Done + reply,
+  then history Err ×2 → kind Timeout, outcome
+  `"timeout"`, exact note, exit 124, replies empty.
+- B3 (history widening + proof restore, Red B2):
+  `GatewayPort::history` now returns
+  `(Vec<Value>, bool)` (events + `has_more`), all
+  impls and test ports updated;
+  `TurnRunner::history_replies` widens
+  `HISTORY_LIMITS = [200, 500, 1000]`
+  (`history.go:50,216-257`), merges replies deduped
+  by (seq, message_id), sorts oldest-first, per-window
+  retry once on non-auth error (deviation 27),
+  empty page with `has_more` continues unless it is
+  the last window; exhaustion → note `"history window
+  exhausted at %d events; older replies may be
+  missed; run \`castctl wait\` again"` (largest
+  limit). Proof replies collected in the poll loop
+  are restored into the final read (final text wins
+  on collision), note `"final read missed the settle
+  proof reply; reporting the proof reply"`.
+  Caveat: newest-N assumption (deviation 23).
+  Regression tests: 251-event window recovers the
+  oldest reply; 1201-event window notes exhaustion
+  and keeps kind Done; proof reply restored.
+- B4 (`finish()` join + 429 sleep vs TurnStop, Red
+  B3): `TurnStop::wait()` (level-triggered,
+  enable-before-check); `BubbleEditor::finish`
+  `select!`s the join handle vs the stop — stop win
+  returns early, handle dropped (task detached),
+  trailing edit skipped (deviation 22);
+  `maybe_edit` races the streaming `edit_plain`
+  against the stop (dropping the future cancels the
+  in-flight Bot API call incl. its 429 retry sleep);
+  `edit_final` fallback `send` races the stop
+  (deviation 21); primary edit keeps its 15s
+  timeout. Regression tests: 60s streaming edit +
+  stop → finish returns <5s; 60s fallback send +
+  stop → `edit_final` returns <5s.
+- Tech N1/N2 = Safety N1 = Red N3 (`media_path`):
+  scheme check case-insensitive (`HTTP://` OK);
+  `http_escaped_path` validates like Go
+  `url.Parse` — control byte anywhere → None, bad
+  `%` escape anywhere except the query → None, port
+  validated (userinfo stripped, bracketed IPv6 OK,
+  unbracketed 0/1 colons only, port empty or
+  all-digits); `percent_decode` is bytewise
+  (`%FF` → one 0xFF byte, not U+FFFD) and
+  `media_path` works on bytes after decode,
+  re-quoting via `quote_python_bytes`. Regression
+  test pins the probe cases (control char in path,
+  bad escape in host/userinfo/fragment, bad escape
+  in query OK, `HTTP://`, invalid port, `:8080`,
+  empty port, IPv6, `%FF` byte round-trip).
+  Correction (review round 3, Safety N4): the
+  `HTTP://` acceptance is a deliberate deviation,
+  not Go parity — Go's `MediaPath` prefix gate
+  (`media.go:47-91`) only accepts lowercase
+  `http://` / `https://` and never calls `url.Parse`
+  on an uppercase-scheme ref (`HTTP://…` falls
+  through to the relative-path branch instead).
+  `url.Parse` does lowercase the scheme, but that
+  is irrelevant to the gate; the old `is_http_url`
+  comment said otherwise and is corrected. The
+  behaviour stays safe (full validation, result
+  still a `/media/raw/…` path).
+- Tech N3 (`collect_turn_media`): restructured to
+  Go's merge-then-filter shape
+  (`telegram_turn.go:930-1000`): empty page breaks
+  the widening (`:947-949`), dedupe key is now
+  (seq, event_name, message_id). The key change is
+  near-unobservable in Rust (the assistant filter
+  ran before the insert in the old shape, so the
+  name was constant there); implemented faithfully
+  and recorded here. Regression test: empty second
+  page stops the widening (no third history call).
+- Tech N4 = Safety N2 (spawn/shutdown race):
+  `spawn_mu` gate — the stopping check and the
+  slot insert hold one lock in `start_turn`, and
+  registration holds the same gate in
+  `start_turn`/`start_resume`; `wait_turns` sets
+  `stopping` and takes the task list under the
+  gate (Go `turnsMu`, `telegram_turn.go:240-249`).
+  A task spawned after shutdown began is aborted
+  and its slot cleared explicitly (an
+  aborted-before-first-poll task never creates its
+  `TurnSlotGuard`). Bound test: 10 concurrent
+  starts racing `wait_turns` → returns <10s
+  (passes on old code too — the race window is
+  tiny; the fix is structural).
+- Tech N5 (backoff cap): `wait_follow` error
+  backoff is capped at the remaining error budget
+  (`runner.go:426-435`); regression test pins the
+  slot freeing <800ms on a 300ms budget.
+- Safety N3 (`deliver_send`): checks `stop.stopped`
+  and returns `Err(BotError::Cancelled)` after the
+  baseline reads, before `open_stream`; regression
+  test uses a port whose `open_stream` panics.
+- Safety N4 (`edit_final` fallback send): covered
+  by B4 above (deviation 21).
+- Safety N5 (`.expect()` on Mutex locks in prod):
+  converted in `turn.rs` prod paths (`start_turn`
+  active, `push_task` tasks, `start_resume` active
+  + resumed, `run_text_turn`/`run_resume` stops +
+  resumed) and `api.rs` (`set_shutdown_signal`,
+  `sleep_or_shutdown` — poisoned = no signal →
+  plain sleep). M5a files (`claims.rs` decide-loop
+  locks, `dispatcher.rs`, `bot.rs`,
+  `registry.rs`) are untouched except the N7
+  validation — follow-up, recorded here.
+- Safety N6 (`raw_call`): serde error no longer
+  echoed; fixed string `"telegram: bad /raw
+  params"`; regression test pins the exact Debug.
+- Safety N7 (`decide_once`): validates the
+  decision at the top — only `allow_always` /
+  `allow_once` / `deny`, else `BotError::Validation`
+  before any decided-check or RPC (defense in
+  depth; Go's `decideOnce` itself does not validate,
+  its callers do). Regression test: unknown decision
+  → Validation, 0 decider RPCs, not decided.
+- Safety N8 (`TurnSlotGuard` in `start_resume`):
+  VERIFIED already-satisfied — the guard is created
+  immediately after the slot-wait `break`, before
+  the stale check (`turn.rs`, `start_resume`); no
+  code change, comment added.
+- Red N2 (E2E fake too easy): `FakeBotApi` now
+  answers the first `editMessageText` 429 +
+  `retry_after: 1` and an identical re-edit 400
+  `"Bad Request: message is not modified"`; new
+  test `m5b_e2e_fake_edit_failures` pins both
+  deterministically (3 edit requests: 429 + retry +
+  not-modified). The main E2E's first edit hits the
+  429 and recovers inside its 30s wait.
+- Red N4 (error-budget reset): regression test —
+  dead gateway ~2s, recovery, dead again ~2s →
+  the turn delivers `"edit:Hello"` and no
+  gateway-error edit appears; the budget resets
+  after recovery.
+
+Review round 3 follow-ups (recorded here, no code
+change in this commit):
+- Safety N1 (`oldest_seq` counts seq-less events):
+  UNCONFIRMED as a divergence. Direct check of
+  Go's `oldestSeq` (`history.go:313-328`) +
+  `seqOf` (`events.go:155-…`) shows Go also maps
+  a missing/non-numeric seq to 0 and takes the
+  min over all events — Rust's `oldest_seq`
+  (`turn.rs:275`) matches that exactly. The
+  presence-reporting Go function is `historySeq`
+  (`telegram_turn.go:1020-1035`), used at a
+  different call site. Follow-up: the reviewer to
+  name the exact Go call site, or drop the item.
+- Safety N2 (echo of `{decision}` / `{method}`):
+  no divergence found on direct check. Go's
+  `outcomeNotes` (`telegram_turn.go:1391-1426`)
+  echoes the same `"✅ auto-approved
+  (always/once): …"` line, and Go's `ownerRaw`
+  (`telegram_owner.go:202`) passes
+  `method+".json"` as the `replyLong` stem, same
+  as Rust. If the concern is user input reaching
+  a document name, note Go does the same and the
+  name is only used when the text exceeds 3800
+  runes. Follow-up only.
+- Safety N4 (scheme comment): corrected above —
+  `HTTP://` acceptance is a deliberate deviation,
+  `is_http_url` + test comments fixed.
+
+Gate (cue, fix loop 2, `/tmp/m5b-gate-fl2b.log` on
+cue): `cargo fmt --check` 0 (own fmt section,
+verbatim), `cargo build --workspace` 0, `cargo test
+--workspace` 0 — **643 passed, 0 failed** (627
+baseline after the rebase + 16 new: the 14 red
+tests + the Tech N4 bound test + the Red N2 fake
+test), `cargo clippy --workspace --all-targets -- -D
+warnings` 0, SPDX (`go test -run TestSPDXHeaders`,
+go 1.27.3 via `/usr/local/go/bin` + GOTOOLCHAIN=auto)
+0. The gate needed three runs: run 1 failed fmt (one
+`cargo fmt` diff in `api.rs`), 1 test
+(`follow_error_budget_resets_after_recovery` — the
+fixture's `completed` terminal had no preceding
+`running` event, so the `Waiter` stored it as a
+suspect ignored terminal and the poll loop never
+reached the final section; fixed by adding the
+`running` event, same as the B3 fixtures), and 4
+clippy findings (`unused_assignments` on the lag
+re-read, `type_complexity` on the spelled-out
+`history` future type — now the `HistoryFuture`
+alias — `collapsible_match` on the timeout arm,
+`manual_range_contains` on the exponent check);
+run 2 failed clippy only (`dead_code`: the fake's
+`last_edit`/`edit_429_done` were struct fields the
+struct never read — now locals in `start()`); run 3
+green. E2E re-run: §M5b.6, fix loop 2.
+
+## M5b.8 Fix loop 1 (2026-11-06, review round 1)
+
+Every BLOCKING from review round 1, fixed red-test
+first (the red run on cue: 111 passed, 17 failed —
+all 17 targeted; the two structurally-fixed items,
+the concurrent-`start_turn` race and the
+`start_resume` acquired guard, passed on old code
+too, as expected: the old race has no await between
+its two locks, and the old resume test set `stopping`
+before the resume started waiting):
+
+- B1 (ack poll swallows transient history errors):
+  `deliver_send` now loops on Gateway/Timeout errors
+  to the 30s deadline (`wait.go:920-929`,
+  `swallowableHistoryError` `wait.go:816-823`);
+  baseline reads still fail the send.
+- B2 (collect cap `upto`): `deliver_media_turn`
+  passes `Some(delivered_top_seq(user_seq, res))`
+  (`telegram_turn.go:1133`, filter `:960`). Two
+  round-1 tests called it with `user_seq=0` and an
+  empty `res` — under Go's cap that collects nothing,
+  so the fixtures now carry a covering reply (empty
+  text, no text segment).
+- B3 (media_path parity): rewritten to Go's order
+  (`media.go:47-91`): `variants.original` wins over a
+  non-empty path, `sandbox://` strip, http(s) URL →
+  `EscapedPath` (query/fragment dropped, bad `%`
+  escape fails the parse — probe-verified against
+  Go's `net/url`), TrimLeft `/`, strip `media/raw/`
+  once, unquote-only-if-valid (`PathUnescape` fails
+  on ANY bad escape, so the whole original is kept
+  and re-quoted — probe-verified), reject empty / any
+  `..` segment, re-quote with `/` safe. One test
+  expectation was corrected by the probe: a raw
+  space in an http URL parses fine
+  (`/a%20b.png`), it is not an error.
+- B4 (generic question values): `"Yes"` / `"No"` /
+  `"Go ahead"` (`telegram_turn.go:1518-1522`); labels
+  keep their emoji.
+- Red B1 (collect/final history error → silent lost
+  reply): a non-fatal collect error returns
+  `Ok(false)` (text-only fallback); a bad per-file
+  path is a "fetched" notice and the turn continues;
+  a `deliver_final` error is now reported with
+  `edit_final` error text in `run_text_turn` and
+  `run_resume` (Go returns the error without
+  `editFinal`, `telegram_turn.go:529-532`, but the
+  spawned task drops that `Err` — the user would see
+  nothing).
+- Red B3 (wait_follow silent to 6h): deviation 17
+  above.
+- Red B4 (start_turn TOCTOU): one critical section
+  for check+insert (`telegram_turn.go:271-280`).
+- Tech N1 (fmt): `cargo fmt` on the tree; the gate
+  log now has its own fmt section with verbatim
+  output (round 1's log had none).
+- Safety N1: file names HTML-escaped in both
+  notices (`telegram.EscapeText`,
+  `telegram_turn.go:1324-1330,1377-1380`).
+- Tech N2: `pending_approvals` empty-list fallback
+  → `pending` (`wait.go:1160-1164`, Python `or`
+  semantics; `turn.rs`/`wait.rs` event-payload
+  extractors are correct as-is — Go
+  `waiter.go:386-397` says an explicitly empty list
+  does NOT fall back there).
+- Tech N3: `widget_options` filters empty labels
+  BEFORE the 10-cap (`telegram_turn.go:1532-1548`).
+- Tech N4: `python_float` = Go `pythonFloat`
+  (`telegram_turn.go:1618-1637`): shortest
+  round-trip, `.0` for integral values, Go-style
+  `e+XX`/`e-XX` scientific form iff the decimal
+  exponent is < -4 or >= 6 (probe-verified against
+  Go's `strconv.FormatFloat(f, 'g', -1, 64)` — the
+  `[1e-4, 1e21)` claim in the first version of this
+  note was wrong; corrected in fix loop 2, §M5b.9).
+- Tech N5/N6: counts corrected — 10 real
+  `GatewayBotServices` methods (§M5b.1); the E2E
+  `/media/raw/e2e.png` GET count corrected in §M5b.6
+  (3, re-measured in the fix-loop-1 E2E re-run).
+- Tech N8: `safety_re` / `gate_prefix_re`
+  precompiled with `OnceLock<Regex>`.
+- Safety N5/Red N1: `start_resume` never clears a
+  slot it did not acquire (`telegram_turn.go:327-332`
+  `acquired` guard).
+- Red N2: the "Final edit 15s" claim corrected
+  (§M5b.1): worst case ≈ 256s (15s edit attempt +
+  ≈ 241s fallback send).
+- Red N4: `tasks` pruned; `notified`/`resumed`
+  recorded as matching Go (deviation 18).
+- Safety N3: `TurnSlotGuard` clears the slot on
+  Drop, including panic unwind (Go defers
+  `clearActive`, `telegram_turn.go:187-197,281-284`).
+- Safety N4: `ApproveClaimGuard` in
+  `approve_forever`'s todo loop releases the claim on
+  Drop unless it settled (mirrors the `decide_once`
+  guard; `fail_claim`/`record_claim` settle, so no
+  explicit disarm is needed).
+- Safety N8: `decide_approval` and
+  `GatewayDecider::decide` reject any decision
+  outside `allow_always`/`allow_once`/`deny`
+  (`approvals.go:21-33`, `wait.go:1277-1293`) before
+  any RPC.
+
+Not fixed (kept as known limitation): the M4c token
+fix is merged now (deviation 14) — the rebase onto
+dev-rust `c7b1d34` is pending the coordinator's
+decision, not done in this loop; Safety N7 multipart
+boundary (deviation 19, M5a follow-up).
+
+## M5b.4 classifyError
+
+No new mapping was written. The CLI side is M4b
+(`castctl-cli/src/network.rs:196` `classify_error`,
+`pub(crate)`, with tests pinning auth 2 / gateway 3 /
+timeout 4 / cancelled 130 empty / validation 2 /
+unsupported 1) and the bot side is M5a
+(`castctl-telegram/src/error.rs` `error_class` /
+`summary`, 20 labels). M5b pins the main classes
+byte-for-byte with additional tests (`turn_error_text`
+literals, `media_failure_class` literals, the
+too-big/failure notice literals) — it does not open
+M4b's `pub(crate)` and does not duplicate the
+mapping. Exit codes: AuthError 2, GatewayError 3,
+Timeout/DeadlineExceeded 4, Canceled 130 with empty
+text, ValidationError 2, ExportError 1, everything
+else 1; wait timeout 124, no-delivery-ack 5.
+
+## M5b.5 Gates (cue, 2026-11-06)
+
+Baseline (before any edit, `07e1c0d`): `cargo test
+--workspace` 560 passed, 0 failed
+(`/tmp/m5b-baseline.log`, 32 `test result: ok` lines).
+
+After (final, `/tmp/m5b-gates6.log`):
+
+- `cargo fmt --check`: 0 (FMT-OK; `cargo fmt` run on
+  cue before the gates).
+- `cargo build --workspace`: 0 (BUILD-EXIT:0).
+- `cargo test --workspace`: 0 (TEST-EXIT:0) — **601
+  passed, 0 failed**: 560 baseline + 35 M5b unit tests
+  (preview 10, wait 10, turn 13, services 2) + 5
+  edge-case tests added in fix loop 1 (cap-6, 49 MiB
+  pre-check ×2, busy reply, caption boundary) + 1
+  env-gated E2E test (skips without `M5B_E2E=1`).
+- `cargo clippy --workspace --all-targets -- -D
+  warnings`: 0 (CLIPPY-EXIT:0).
+
+All runs with `CARGO_TARGET_DIR=/root/v68-target`
+`CARGO_PROFILE_DEV_DEBUG=0`
+`CARGO_PROFILE_DEV_INCREMENTAL=false`
+(1.99.1 via `rust-toolchain.toml`).
+
+Fix loop 1 (after gates3-5): the `edit_final` hang
+(deviation 15), one `unnecessary_map_or` clippy
+finding, the cap-6 truncation bug (found by the
+edge-case test), the serve-e2e query-string bug
+(deviation 16), and the E2E phase-3 slot race
+(fresh chats + per-turn final-edit assertion).
+
+Fix loop 1 (review round 1, 2026-11-06,
+`/root/m5b-gate-fl1.log` on cue): `cargo fmt` 0,
+`cargo fmt --check` 0 (own fmt section, verbatim),
+`cargo build --workspace` 0, `cargo test
+--workspace` 0 — **619 passed, 0 failed** (601
+baseline + 18 new regression tests), `cargo clippy
+--workspace --all-targets -- -D warnings` 0 after
+two findings (a `collapsible_if` in the new claim
+guard, `approx_constant` on the `3.14159` float-test
+literal — both fixed, literal changed to `123.456`).
+Red run before the fixes: 111 passed, 17 failed
+(all 17 targeted). Same env as above.
+
+Fix loop 2 (review round 2, 2026-11-06,
+`/tmp/m5b-gate-fl2b.log` on cue): `cargo fmt
+--check` 0 (own fmt section, verbatim), `cargo
+build --workspace` 0, `cargo test --workspace` 0 —
+**643 passed, 0 failed** (627 baseline after the
+rebase onto `c7b1d34` + 16 new regression tests: the
+14 red tests + the Tech N4 spawn/shutdown bound test
++ the Red N2 fake-edit-failures test), `cargo clippy
+--workspace --all-targets -- -D warnings` 0, SPDX
+(`go test -run TestSPDXHeaders`, go 1.27.3 via
+`/usr/local/go/bin` + GOTOOLCHAIN=auto) 0. Red run
+before the fixes (`cargo test -p castctl-telegram
+--lib`): 128 passed, 14 failed (all 14 targeted).
+Three gate runs were needed: run 1 failed fmt (one
+`cargo fmt` diff in `api.rs`), 1 test (Red N4
+fixture: `completed` without a preceding `running`
+event — the `Waiter` treats it as a suspect ignored
+terminal, so the poll loop never reaches the final
+section), and 4 clippy findings (`unused_assignments`
+lag re-read, `type_complexity` on the `history`
+future type, `collapsible_match` timeout arm,
+`manual_range_contains` exponent check); run 2 failed
+clippy only (`dead_code` on two `FakeBotApi` struct
+fields). Same env as above.
+
+## M5b.6 Offline E2E (cue, 2026-11-06)
+
+Fake Bot API server (loopback, plaintext, in
+`tests/turn_e2e.rs`) + real Go gateway
+(`gateway_server serve-e2e`). One test, three
+sequential phases, 5.18s, `E2E-EXIT:0`:
+
+- Phase 1 (text turn): streaming edits (partial
+  `"Hel"` edit, then the full `"Hello from Muse"`
+  edit), 1 media sent (`sendPhoto`, `e2e.png`),
+  1 approval decided (`POST /approvals/a1/decide`,
+  body `{"decision":"allow_always"}`, exactly 1 RPC
+  in the server log).
+- Phase 2 (inbound media): `getFile` + file
+  download (4 bytes `FAKE`) + `fs.write`
+  `telegram-inbox/20261105-195242-photo.jpg`
+  (`data_base64 "RkFLRQ=="`) + follow turn.
+- Phase 3 (two parallel turns, fresh chats 333/444):
+  both delivered their final edits.
+
+Server-log counts for the run: decide RPC 1,
+fs.write 1, `/media/raw/e2e.png` gets 3, streams 4
+(corrected in fix loop 1, Tech N6 — the section said
+"gets 2"; the fix-loop-1 E2E re-run's `E2E SUMMARY`
+lists `mediaGets` with 3 entries, 4.27s,
+`E2E-EXIT:0`; the first run had 3: the phase-3 chats
+reused 111,
+whose slot had not been released yet after the
+phase-2 final edit, so "parallel one" got the busy
+reply instead of opening a stream — correct Go
+behaviour, wrong test setup; fixed by using fresh
+chats and asserting two final edits, one per turn).
+
+Verbatim trace: `/tmp/m5b-e2e-server.log` and
+`/tmp/m5b-e2e.log` on cue (copied to the report).
+
+Fix loop 2 re-run (2026-11-06,
+`/root/m5b-e2e-fl2.log` + `/root/m5b-e2e-server-fl2.log`
+on cue): gateway `127.0.0.1:33241`, 2 tests passed in
+4.77s, `E2E-EXIT:0` — `m5b_offline_turn_e2e` (same
+3 phases as above) and the new
+`m5b_e2e_fake_edit_failures` (429-once + identical
+re-edit, 3 edit requests). Server SUMMARY:
+`streams=4 decided=[a1:{"decision":"allow_always"}]
+fsWrites=[telegram-inbox/20261105-220804-photo.jpg]
+mediaGets=[/media/raw/e2e.png ×3]` — same counts as
+fix loop 1. The main E2E's first edit hits the
+fake's 429 and recovers inside its 30s wait.
+
+## M5b.7 Chưa kiểm chứng
+
+- Live Bot API thật: no bot token on cue; never
+  copied one; never sent a real message. The fake
+  server proves the turn logic against the Bot API
+  surface, not against Telegram.
+- Live gateway `chat.subscribe` (does not exist in
+  Rust yet — deviation 1) and live 429 retry on
+  `sendMessage`/`sendFile` (the 429 path is ported
+  from `bot.go:1534-1535` but never observed live).
+  The E2E fake now covers the 429-once + "message is
+  not modified" cases (Red N2, fix loop 2); the real
+  429-storm wall-time is still [NEEDS-MEASUREMENT].
+- Claim storm / gateway idempotency (deviation 7).
+- `goal`/`idea` and the other ~20 `NotWired`
+  service methods (M4b-gateway follow-up boundary).
+- `auto_approve_errors` population (deviation 10).
 
 ## Quy tắc quyết định (Boss, 2026-11-05 — standing)
 
