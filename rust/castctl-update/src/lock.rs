@@ -36,6 +36,7 @@ pub const LOCK_FILE_NAME: &str = ".castctl-update.lock";
 /// A held update lock. Dropping it closes the file, which
 /// releases the flock. The file is never deleted.
 /// Source: `acquireUpdateLock` (`internal/update/lock_unix.go:36-60`).
+#[derive(Debug)]
 pub struct UpdateLock {
     _file: File,
     /// The lock path, for diagnostics (never rendered to the user).
@@ -51,6 +52,7 @@ impl UpdateLock {
 }
 
 /// Outcome of [`acquire_update_lock`].
+#[derive(Debug)]
 pub enum LockOutcome {
     /// The lock is held by this caller.
     Held(UpdateLock),
