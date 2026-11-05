@@ -17,9 +17,10 @@ python3 rust/perf/measure_all.py "$@"
 # a workspace build) cannot be triggered by this rerun; this check only
 # reports. NOTE (M-perf-1): the full-bin build DOES compile boring-sys,
 # but its target dir is outside the repo — the driver refuses an
-# in-repo target dir at startup (measure_all.py:
-# _check_full_target_outside_repo) and defaults to the system temp dir
-# when CARGO_TARGET_DIR is unset — so no generated .go file can land
+# in-repo target dir before any build (measure_all.py:
+# _check_full_target_outside_repo; the guard does not fire under
+# --skip-build, where nothing is built) and defaults to the system temp
+# dir when CARGO_TARGET_DIR is unset — so no generated .go file can land
 # under the repo from this rerun either.
 if command -v go >/dev/null 2>&1; then
   _spdx_log="$(mktemp /tmp/perf0-spdx-check-XXXXXX.log)"

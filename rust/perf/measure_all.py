@@ -38,10 +38,16 @@ RS_BENCH = os.path.join(_TARGET_DIR or os.path.join(PERF, "bench", "target"),
 # runs so --skip-build works; whether it was cold is recorded in the
 # summary as full_target_cold). Never default to
 # rust/perf/full-bin/target (inside the repo). The driver REFUSES an
-# in-repo target dir at startup (see _check_full_target_outside_repo):
+# in-repo target dir before any build (see _check_full_target_outside_repo):
 # the "must be outside" rule is enforced in code, not just documented —
 # an operator who sets CARGO_TARGET_DIR to an in-repo path gets a loud
 # failure instead of a silent SPDX trap from generated .go files.
+# The guard runs only when a build will actually run: under --skip-build
+# nothing is built, so an in-repo target dir is only read (to find
+# existing binaries) and poses no .go-generation risk (fix loop 2,
+# safety NIT-1). A guard failure prints the error and exits 2 WITHOUT
+# writing summary.json, so a mistaken re-run cannot clobber the previous
+# run's numbers on disk (fix loop 2, red-team N4 / safety NIT-2).
 _FULL_TARGET_DIR = _TARGET_DIR or os.path.join(
     tempfile.gettempdir(), "perf-full-target")
 RS_FULL_BIN = os.path.join(_FULL_TARGET_DIR, "release", "castctl-full")
@@ -157,11 +163,17 @@ def main():
                                  "loadavg": loadavg()}
     # Full-bin target-dir guard: fail loudly before any build if the
     # target dir resolves inside the repo (see _check_full_target_outside_repo).
-    _guard_err = _check_full_target_outside_repo(_FULL_TARGET_DIR)
-    if _guard_err:
-        summary["notes"].append("full-bin target-dir guard FAILED: " + _guard_err)
-        json.dump(summary, open(os.path.join(DATA, "summary.json"), "w"), indent=2)
-        print(json.dumps(summary, indent=2)); return 2
+    # Gated on a build actually running (fix loop 2, safety NIT-1): under
+    # --skip-build no binary is built, so the guard does not fire.
+    # On failure: print the error + the stub summary and exit 2 WITHOUT
+    # writing summary.json, so the previous run's numbers on disk survive
+    # a mistaken re-run (fix loop 2, red-team N4 / safety NIT-2).
+    if not skip_build:
+        _guard_err = _check_full_target_outside_repo(_FULL_TARGET_DIR)
+        if _guard_err:
+            summary["notes"].append("full-bin target-dir guard FAILED: " + _guard_err)
+            print("full-bin target-dir guard FAILED: " + _guard_err, file=sys.stderr)
+            print(json.dumps(summary, indent=2)); return 2
     # Disk preflight: a full run builds release binaries; fail loudly
     # instead of dying mid-build on a shared disk. Threshold 1.0 GiB on
     # the filesystem that will hold the build outputs (CARGO_TARGET_DIR

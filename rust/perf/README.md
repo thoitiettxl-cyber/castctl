@@ -250,7 +250,7 @@ không phải `castctl_transport::`, vì symbol Rust đã mangle). Số đếm �
 `data/nm-counts.json` (rebuild fix loop 1 trên cue, 2026-11-05 —
 xem ghi chú tái lập ở cuối mục này); bảng dưới đây trích từ file đó:
 
-| Chuỗi | shell | full no-keep | full keep (run8) |
+| Chuỗi | shell | full no-keep | full keep (rebuild ≡ run8) |
 |---|---|---|---|
 | `castctl_transport` | 0 | 0 | **504** |
 | `castctl_gateway` | 0 | 0 | **62** |
@@ -263,11 +263,16 @@ xem ghi chú tái lập ở cuối mục này); bảng dưới đây trích từ
 | `snow` | 0 | 0 | **118** |
 | `hyper` | 0 | 0 | **0** |
 
+Cột "full keep" mang tên rebuild vì số đếm đo trên binary rebuild fix
+loop 1, không phải binary run8; `nm` đếm symbol, không đếm các byte
+chuỗi `.rodata` khác nhau giữa hai binary (xem "Tái lập sha"), nên số
+đếm chuyển được sang run8.
+
 Symbol riêng lẻ trong full keep (cùng phương pháp đếm chuỗi như bảng):
 `dispatch_outbound` 2, `ensure_tunnel` 1, `KEEP_TIER2` 1, `HonkDialer` 1,
-`WireGuardDialer` 15 (4 global `T` — `new`/`shared`/`check_allowed`/
-`Dialer::dial` — + 11 local `t` gồm monomorphization của `dial`/`dial_inner`
-và drop-glue; bản trước ghi 4 vì đếm nhầm chỉ symbol global),
+`WireGuardDialer` 15 (gồm cả symbol global và local — monomorphization
+của `dial`/`dial_inner` và drop-glue; bản trước ghi 4 vì đếm nhầm chỉ
+symbol global),
 `HttpClient` 1 (chính `HttpClient::request` — root Tier-2 giữ địa chỉ;
 constructor `new` bị inline nên không có symbol riêng),
 `RpcClient`/`DownTracker` 0 (constructor nhỏ bị inline, không phải lỗi).
@@ -376,16 +381,18 @@ kết luận.
 | `.text` | 21,017,769 B | 434,883 B | 7,979,624 B | 0.380 | 0.021 |
 | `.rodata` | 2,644,352 B | 74,708 B | 1,604,904 B | 0.607 | 0.028 |
 | A/B no-keep, stripped | — | — | 621,112 B (delta closure +11,905,968 B) | — | — |
-| LTO variant, stripped (`release-lto`) | — | — | 10,065,944 B (nhỏ hơn headline 19.6%) | 0.209 | — |
+| LTO variant, stripped (`release-lto`) * | — | — | 10,065,944 B (nhỏ hơn headline 19.6%) | 0.209 | — |
 
 `sha256`: Go `c8ea009e…`, shell stripped `6f270890…`, full stripped
 `b8aee622…`, full no-keep `9cb6d472…`, full LTO `8040a0c6…` (record đầy
 đủ trong `data/lto-build-record.json`; `summary.json` của run8 chỉ ghi
-lần build LTO gốc fail exit 101, không có số LTO). Hàng LTO: build tay
-trên cue sau run8 (`--profile release-lto`, 4m 32s, `--version` exit 0),
-cùng source với run8; fix loop 1 rebuild lại variant này và xác nhận
-size/`.text` khớp y, sha khớp y khi dùng đúng tên target dir của run8
-(xem `byte_reproduction_check` trong record). Driver đã sửa sang profile
+lần build LTO gốc fail exit 101, không có số LTO). Hàng LTO (*): build
+tay trên cue sau run8 (`--profile release-lto`, 4m 32s, `--version`
+exit 0), cùng source với run8; fix loop 1 rebuild lại variant này và
+xác nhận size/`.text` khớp y, sha khớp y khi dùng đúng tên target dir
+của run8 (xem `byte_reproduction_check` trong record). Thời gian build
+dao động theo tải: build gốc 4m 32s (272 s), rebuild fix loop 1: 247 s,
+byte-repro: 259 s. Driver đã sửa sang profile
 form để rerun sau tái lập được. Hàng LTO không dùng cho tỉ lệ headline.
 
 ### 2. Startup (wall-clock, N=20, warmup 5)
@@ -704,11 +711,15 @@ Item 5 dao động run-to-run cả hai phía (Rust 0.729–0.929) và tỉ lệ 
 dấu (0.90–1.08) — khẳng định kết luận "trong sai số". RSS Go
 `--version` **không** ổn định: bimodal theo session — 30.4 MiB ở
 run5–run7, 43.5 MiB ở run4, 47.7 MiB ở rerun độc lập; tỉ lệ RSS
-shell/Go dao động 0.046–0.073 theo session (xem §3). Run8 khớp run7 ở
-mọi headline trong ~5–6% (shell `--version` wall 0.901→0.866 ms, RSS
-2.14→2.20 MiB; Go 11.169→10.628 ms, 30.36→30.34 MiB) — ngoại lệ duy
-nhất nhích qua 5% là item 5 phía Rust (+5.06%, 0.830→0.872 ms/req) —
-trừ first
+shell/Go dao động 0.046–0.073 theo session (xem §3). Run8 khớp run7
+trong ±5% ở hầu hết các ô headline (không tính hàng n=1; §3 nói riêng
+bên dưới): §2 startup/RSS 7/8 ô N=20 trong ±5% (ngoại lệ duy nhất
+`--help` phía shell +7.0%, 0.867→0.927 ms), §4 logic thuần mọi ô trong
+±5% trừ render chain Go +6.7% (5.62→5.99 ms), item 5 Go +1.3% (item 5
+Rust +5.1%, 0.830→0.872 ms/req, là ngoại lệ thứ ba). Wall-clock
+`status` ở §3 nhiễu hơn: năm trong sáu ô drift +8–14% trên giá trị
+tuyệt đối nhỏ (Rust 0.9–2.9 ms, Go 11–46 ms; ô còn lại Go min −4.6%),
+trong khi RSS `status` khớp trong ±1.1% — trừ first
 measured run n=1 (Go wall 12.616→51.909 ms, xem §2).
 
 **Verify độc lập (rerun từ checkout sạch, `data/verify-rerun-summary.json`):**
