@@ -2948,3 +2948,215 @@ u64` dropped; the DNS `loop` + `match` became a `while
 let`. The historical gate transcripts in §M3.7, §M3c and
 §M3e.4 still show the plain form — that is what was
 actually run then, not an error to rewrite.
+
+## M4a — Gateway WS + Noise + protobuf (crate `castctl-gateway`, 2026-11-05)
+
+M4a ports `internal/gateway` (WS dial, Noise handshake,
+envelope/framing, Request/CallJSON/Ping/DownloadFile,
+streams) and `internal/conn` SharedConn (retry across
+reconnects, heartbeat, stale probe, down notice) to Rust,
+crate `rust/castctl-gateway`. Base `dev-rust 2c38b3e`;
+branch `feat/rust-m4a-gateway`. No Go file is modified;
+the only new Go file is the parity harness
+`rust/parity/gateway_server/main.go` (serve + client modes,
+built on `internal/gateway/gatewaytest.Server`).
+
+## M4a.1 Crate map + pins
+
+- `proto.rs`: prost-generated types from the committed
+  `internal/proto/desc0.bin` + `desc1.bin` via `build.rs` +
+  `compile_fds` (option (c)); no `protoc` (none on cue; Go
+  removed it deliberately). Probe passed BEFORE dependent
+  code: empty `json_name` accepted; generated
+  `hatch.noise.rs` + `ingress_rev_proxy.rs`.
+- `noise.rs`: snow, `Noise_XX_25519_AESGCM_SHA256`, fresh
+  static keypair per handshake, empty payloads, no PSK, no
+  prologue. **snow has no formal audit** — recorded, not
+  claimed otherwise; the handshake is covered by the
+  Cacophony vector (`tests/noise_vector.rs`, 3/3) and the
+  cross-language parity gate (§M4a.4).
+- `framing.rs`: `split_pieces` (60000), `marshal_transport_frame`,
+  `Reassembler` with the Go-only hardening caps (64 MiB /
+  16 groups / 32768 pieces).
+- `gateway.rs`: `Gateway` reader task, stream queues,
+  `open`/`next`/`request`/`call_json`/`ping`/`download_file`.
+- `shared.rs`: `SharedConn`, `DownTracker`, `Connector`
+  trait, heartbeat.
+- `dial.rs`: `default_ws_url`, `dial_gateway` (UA
+  `Chrome/153.0.0.0`, Origin `https://muse.ai`, 20s
+  upgrade bound, 20s handshake steps; the token URL is
+  parsed out and never stored/logged). The gateway-dial
+  TLS rule (DialTLS forces Enabled=true) lives at the
+  gateway-dial call site, NOT folded into `build_tls`.
+
+Pins (`rust/Cargo.toml`, exact; licenses read from each
+crate's pinned `Cargo.toml` in the cue registry,
+2026-11-05): snow `=0.10.0` (Apache-2.0 OR MIT),
+prost / prost-build / prost-types `=0.14.4` (Apache-2.0),
+tokio-tungstenite `=0.30.0` (MIT; feature
+`rustls-tls-webpki-roots`), rand `=0.10.3` (MIT OR
+Apache-2.0), futures-core / futures-sink / futures-util
+`=0.3.34` (MIT OR Apache-2.0). `Cargo.lock`: +30 packages,
+no pre-existing pin changed (the 14 removed lines are
+dependency-list lines re-sorted when new crates joined).
+See `docs/provenance.md` §15 and `NOTICE` (b).
+
+## M4a.2 Deviations from Go (deliberate, with citations)
+
+1. Single-Mutex `TransportState`: snow has no
+   split-transport API, unlike Go's separate `sendCS` /
+   `recvCS` (`gateway.go:241-...`, `noiseHandshake`).
+   One `TransportState` sits behind one `Mutex`
+   (`noise.rs`). Wire-identical; encrypt/decrypt cannot
+   proceed concurrently. API-shape deviation only.
+2. ALPN: Go pins `["http/1.1"]` for the WS dial
+   (`connector.go`, `dialWebSocket` — gorilla cannot
+   upgrade over h2). The rustls client used here sends NO
+   ALPN by default, so the server cannot negotiate h2 and
+   the upgrade stays HTTP/1.1. Same wire outcome,
+   different mechanism. If a peer ever requires an ALPN
+   offer, revisit.
+3. Dead classification simplified: Go `lost.go`
+   `classifyDeadLocked` distinguishes loss
+   (EOF/ECONNRESET/close 1006) → `ErrConnectionLost`
+   (`NotSent`, `StreamIDs`, `CloseCode`, `CloseReason`) —
+   vs clean close vs other errors; the `NotSent` bit
+   decides retry safety per in-flight call. Rust `fail()`
+   records the first fatal reader error verbatim and
+   `next()` wraps it as `ConnectionError` ("gateway
+   connection lost: <log_summary>"). Retry safety rests
+   on `SharedConn` `safe_to_repeat` + error kind, not on
+   a per-call sent/not-sent bit.
+4. No Phase: Go errors carry a Phase (`withPhase`,
+   `PhaseStreaming`); Rust `TransportError` carries none
+   — phase→exit mapping belongs to the CLI layer (M4+),
+   per `castctl-transport/src/error.rs` `exit_code` doc.
+5. `connects()` counts successful installs only
+   (measured: 2 failed + 1 good attempts → `connects()
+   == 1`; auth failure → 0). The counter is
+   install-based, not attempt-based.
+6. `probe_stale` short-circuits to alive when the
+   gateway was used within `HEARTBEAT` (25s) — same as Go
+   `probeStale` (`conn.go:445-475`), not a deviation; the
+   stale test therefore proves death via `alive() ==
+   false` + reconnect, not via the probe itself.
+7. Heartbeat never opens the first connection (same as
+   Go): ticks return early while `connects() == 0` and no
+   outage is recorded; the first call opens.
+8. `start_heartbeat` takes `&Arc<Self>`: a plain `&self`
+   cannot spawn a task holding the connection.
+9. `write_half` is `tokio::sync::Mutex`, not
+   `std::sync::Mutex`: the std guard is `!Send` and is
+   held across `send().await`. `live()` decides under
+   the std lock, then acts after dropping it
+   (`SlotDecision` enum).
+10. Gateway 3xx → `Gateway(status)` → exit 3 (Q5
+    settled); `RedirectRefused` (M3 HTTP-only) is NOT
+    reused for gateway.
+11. `Display` for `TransportError` echoes
+    caller-supplied messages (truncated to 200 chars) by
+    design, for the operator; `Debug` and `log_summary`
+    never echo message bytes (lengths only). The library
+    never puts a token/cookie into a message itself.
+
+## M4a.3 Findings while writing (fail-before proofs + fixes)
+
+- `research-noise.md` §5.1 mislabels the msg_3 plaintext
+  as `"hellosubmarine"` (14 bytes); the hex in that same
+  file decodes to `"yellowsubmarine"` (15 bytes; 15+16 tag
+  = 31 = len(msg_3)). The vector test FAILED first; the
+  test plaintext was fixed to the hex. The vector itself
+  was never edited, and the research file is NOT edited
+  in this PR — the correction is recorded here and in the
+  test comment.
+- The envelope is ASYMMETRIC (Go `gateway.go`
+  `sendEnvelope` vs `readFrame`; `gatewaytest/server.go`
+  `serveWS`): the client sends
+  `ServiceRequest{service, payload: ServiceFrame}` and
+  the server answers `ServiceResponse{payload:
+  ServiceFrame}`. The first Rust fake server guessed
+  symmetric; the client then dropped the connection
+  ("gateway connection lost"). Fixed to asymmetric.
+- Real route paths come from
+  `internal/proto/routes.json`, not `/v1/...` guesses:
+  connection.ping POST `/api/ping`; sessions.list GET
+  `/api/session/list`; chat.history GET `/chat/history`;
+  feed.list GET `/api/feed`; goals.list GET `/goals`.
+  The first canned maps used invented paths and returned
+  `{}` for every method (caught by the Go client run,
+  before the Rust client run).
+- The reassembler completes when the number of DISTINCT
+  indices reaches `total_chunks` (Go `framing.go`
+  `feed`): the first unit test expected completion only
+  after a duplicate overwrite post-completion; the test
+  was fixed (the overwrite must arrive while the group
+  is still incomplete).
+- `snow::NoiseParams.name` is a field, not a method.
+- `futures-core` / `futures-sink` / `futures-util` must
+  be direct deps: tokio-tungstenite does not re-export
+  the Stream/Sink traits.
+- Go on cue is 1.26.8 but `go.mod` requires >= 1.27.3
+  and `GOTOOLCHAIN=local` blocks the download; the
+  parity-server binary was built in the sandbox (go
+  1.27.3 + warm module cache) and copied to cue — the
+  binary runs on cue and the gate itself ran on cue.
+- `pkill -f "gateway_server serve"` self-matches the
+  SSH session (the pattern appears in the session's own
+  command line) and kills it: kill the server by exact
+  name (`pkill -x gateway_server`) instead.
+
+## M4a.4 Gates (cue, 2026-11-05)
+
+- `cargo fmt --check`: exit 0 (after `cargo fmt -p
+  castctl-gateway` on cue; formatted files copied back).
+- `cargo build --workspace`: exit 0.
+- `cargo test --workspace`: exit 0. BEFORE 304, AFTER
+  337 (+33, all in `castctl-gateway`: lib 13 +
+  integration 13 + golden 4 + noise 3).
+- `cargo clippy --workspace --all-targets -- -D
+  warnings`: exit 0 (after fixes: derivable `Default`
+  for `Body`; 2 collapsible `if`s → let-chains; let-else
+  → `?`; `live()` fast path via `.filter()`; `Install`
+  → `SlotDecision` for enum-variant-names; doc-list
+  indent in golden.rs; type aliases for the fake
+  server's record types).
+- Golden protobuf: 58/58 (`tests/golden.rs`
+  `golden_vectors_58_of_58`: encode==`.bin`,
+  decode==struct, encode(decode)==`.bin` per case, plus
+  presence / oneof / enum-names tests).
+- Parity gate (same Go `gatewaytest` server, 5 methods):
+  Go client vs Rust client outputs byte-identical
+  (`diff` empty; server `127.0.0.1:39345` on cue; both
+  clients exit 0).
+- Required other tests (all pass in
+  `tests/gateway.rs`): heartbeat sends at cadence
+  (2..=5 pings in 1.1s at a 300ms injected interval);
+  stale probe detects a dead conn and the next call
+  reconnects; retry within `RetryFor` (2 failed + 1 good
+  attempts); down notice after `DownNotice`/`DownFails`
+  (unit: 5th fail notifies; integration: `OnDown`
+  fires); no token/cookie leak into logs (`Gateway`
+  `Debug`, `TransportError` `Debug`/`log_summary`
+  contain no token); cancel mid-handshake does not hang
+  (aborted dial finishes < 2s); gateway 404 →
+  `Gateway(404)` → exit 3; unknown method →
+  `Validation` → exit 2; 200 kB chunked response with
+  shuffled pieces reassembles.
+
+## M4a.5 Chưa kiểm chứng
+
+- wss:// dial: only ws:// loopback tested; the rustls +
+  webpki-roots path is unexercised.
+- No live muse.ai peer; no real VM, cookies or tokens
+  (all fake: `hatch_sess=FAKE`, `AT-FAKE`, `HT-FAKE`).
+- No real WireGuard/outbound dial: the gateway dialed
+  direct loopback; profile-outbound routing is M4b
+  wiring, not this crate.
+- Go CI state for the new `main.go`: it compiles (`go
+  build` exit 0 in the sandbox) and `go vet` + `gofmt -l`
+  are clean, but no Go test/CI ran it in this PR.
+- snow has no formal audit (see §M4a.1).
+- Down-notice timing at production thresholds (60s / 5
+  fails) was not waited; covered by threshold injection.
+- Heartbeat at the production 25s cadence was not
+  waited; covered by the 300ms injection.

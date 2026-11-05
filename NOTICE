@@ -189,6 +189,38 @@ docs/provenance.md.
 - base64 (Rust) v0.22.1 — MIT OR Apache-2.0. Linked ONLY into
   the Rust artifact; strict Std-base64 decoding of WireGuard
   key strings. See docs/provenance.md §14.
+- snow (Rust) v0.10.0 — Apache-2.0 OR MIT, from
+  github.com/mcginty/snow, pinned `=0.10.0` in
+  rust/Cargo.toml. Linked ONLY into the Rust artifact (crate
+  castctl-gateway under rust/); no snow source is copied into
+  this tree. Noise XX_25519_AESGCM_SHA256 handshake +
+  transport for the gateway client. No formal audit of snow
+  is known; recorded in docs/provenance.md §15 and
+  rust/PORTING.md §M4a.
+- prost (Rust) v0.14.4 — Apache-2.0, from
+  github.com/tokio-rs/prost, pinned `=0.14.4` in
+  rust/Cargo.toml. Linked ONLY into the Rust artifact (crate
+  castctl-gateway); protobuf runtime. prost-build and
+  prost-types (both v0.14.4, Apache-2.0) are build-time
+  only: prost-build generates the message types from the
+  repo's own committed FileDescriptorProto binaries
+  (internal/proto/desc0.bin, desc1.bin); no protoc is used.
+  See docs/provenance.md §15.
+- tokio-tungstenite (Rust) v0.30.0 — MIT, from
+  github.com/snapview/tokio-tungstenite, pinned `=0.30.0`
+  in rust/Cargo.toml (feature `rustls-tls-webpki-roots`
+  for wss://). Linked ONLY into the Rust artifact (crate
+  castctl-gateway); WebSocket client. See
+  docs/provenance.md §15.
+- rand (Rust) v0.10.3 — MIT OR Apache-2.0. Linked ONLY
+  into the Rust artifact (crate castctl-gateway); random
+  NoiseTransportFrame chunk ids (8 bytes, little-endian
+  int64). See docs/provenance.md §15.
+- futures-core / futures-sink / futures-util (Rust)
+  v0.3.34 — MIT OR Apache-2.0. Linked ONLY into the Rust
+  artifact (crate castctl-gateway); the Stream/Sink
+  traits and extension traits for the gateway WS halves.
+  See docs/provenance.md §15.
 
 (c) Studied only — no code taken
 

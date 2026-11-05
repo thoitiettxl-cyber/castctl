@@ -7,6 +7,7 @@ members = [
     "castctl-config",
     "castctl-cli",
     "castctl-transport",
+    "castctl-gateway",
     "castctl-rs",
 ]
 resolver = "2"
@@ -65,6 +66,24 @@ base64 = "=0.22.1"
 # Noise/IK handshake, smoltcp = userspace TCP/IP stack.
 boringtun = "=0.7.1"
 smoltcp = "=0.14.0"
+# M4a: Noise XX gateway crypto (snow), protobuf (prost family),
+# WebSocket (tokio-tungstenite), randomness for chunk ids (rand).
+# All pinned exactly after measurement on cue (see
+# rust/PORTING.md §M4a); snow 0.10.0 / prost 0.14.4 /
+# tokio-tungstenite 0.30.0 / rand 0.10.3 are the latest on
+# crates.io at pin time (cargo search, 2026-11-05).
+snow = "=0.10.0"
+prost = "=0.14.4"
+prost-build = "=0.14.4"
+prost-types = "=0.14.4"
+tokio-tungstenite = "=0.30.0"
+rand = "=0.10.3"
+# M4a: Stream/Sink traits + extension traits for the gateway
+# reader/writer halves (tokio-tungstenite only re-exports the
+# concrete stream type; the traits must be direct deps).
+futures-core = "=0.3.34"
+futures-sink = "=0.3.34"
+futures-util = "=0.3.34"
 
 [patch.crates-io]
 # Replicated verbatim from honk's workspace Cargo.toml at the pinned
