@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! Lexical `filepath` operations on Unix paths, mirroring Go's
 //! `path/filepath` (which, on Linux, is the slash-separated lexical
 //! algorithm with no symlink resolution and no tilde expansion).

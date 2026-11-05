@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! Telegram file-kind and doc-name logic, ported from Go.
 //!
 //! Source: `internal/telegram/files.go` at `origin/main` `1396697`,

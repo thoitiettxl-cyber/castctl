@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! The 46-command table (`internal/commands/commands.go`,
 //! `commandOrder`, `registerFlags` calls in `read.go`, `wait.go`,
 //! `deliver.go`, `fs.go`, `keeper.go`, `telegram.go`, `update.go`,

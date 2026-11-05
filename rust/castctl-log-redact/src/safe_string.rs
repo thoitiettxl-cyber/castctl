@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! The 12-pass `SafeString` backstop, ported from Go
 //! `internal/logging/safe.go` (`SafeString`, `redactJSONSecrets`,
 //! `normalizePctLabels`, `redactURLAllQuery`, `SafeHost`).

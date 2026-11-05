@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! Hand-rolled argument parser mirroring Go's `argParser`
 //! (`internal/commands/commands.go:455-726` at base `dev-rust`
 //! `85a8d5e`): long abbreviations, `--flag=value`, bundled short

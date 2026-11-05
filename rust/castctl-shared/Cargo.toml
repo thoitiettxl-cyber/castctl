@@ -3,6 +3,7 @@ name = "castctl-shared"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 description = "History-event resource shaping ported from castctl's Go internal/shared/resources.go and values.go (M1, pure logic only)"
 
 [dependencies]

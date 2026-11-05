@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 // HTML5 named character references, generated mechanically from the Go
 // standard library tables (`html/entity.go`, `entity` / `entity2` maps, and
 // the Windows-1252 `replacementTable` in `html/escape.go`) as installed

@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! OS error text rendering matching Go's `%v` on `*PathError` /
 //! `*LinkError`: `<op> <path>: <strerror>`. Only the message text is
 //! reproduced; no error values cross the boundary.

@@ -3,4 +3,5 @@ name = "castctl-config"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 description = "Single-file config parse/validate/render and profile resolution ported from castctl's Go internal/profile (M2, config + profile load only; sing-box option validation deferred per D-M2-1)"

@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! History-event resource shaping, ported from Go
 //! `internal/shared/resources.go` and `values.go` (M1, pure logic).
 

@@ -1504,6 +1504,166 @@ removed castctl backend's secrecy guarantees (fixed shapes,
 allowlists, no token/cookie/config content in any field) had
 been castctl-written hardening with no SB-T counterpart.
 
+## 13. honk-outbound @9e31cc0 — LINKED (Rust artifact only, no copied code)
+
+Upstream: github.com/daeuniverse/honk, rev
+`9e31cc0bd28825afdc0e384dc989bc3f076e69cf` (`fix(dns):
+bound cached answer bytes per shard (#454)`, 2026-11-05
++0800; `main` HEAD at probe time). Verified with `git
+ls-remote https://github.com/daeuniverse/honk HEAD` and by the
+`Cargo.lock` entry (`git+https://github.com/daeuniverse/honk?
+rev=9e31cc0…`). License read from the upstream LICENSE file
+and `Cargo.toml` `[workspace.package] license =
+"GPL-3.0-only"` at that rev (workspace members: 6, not 3 —
+`honk-config`, `honk-ebpf-common`, `honk-nfqueue`,
+`honk-outbound`, `honk-core`, `honk-tool`; M3 depends only on
+`honk-outbound`, which pulls `honk-config` +
+`honk-ebpf-common`). Category (b) linked dependency: linked,
+no code copied. Note: the upstream workspace `repository`
+field still reads `https://github.com/Glassyiris/honk` while
+the remote used here is `daeuniverse/honk`.
+
+Pin mechanics (why the workspace root carries a `[patch]`):
+Cargo `[patch]` tables do not propagate through a git
+dependency, so honk's own `[patch.crates-io]` (boring-sys
+fork `3beb573b65ecaa69b7eefe3c2fecd074b97facd2` and
+quinn/quinn-proto fork `11f1de84c28305a3c98ace6d681c35219a8d1e6c`,
+both Glassyiris) is replicated verbatim in `rust/Cargo.toml`.
+Gate evidence on cue: `cargo tree -p castctl-transport`
+resolves `boring-sys 5.2.0`, `quinn 0.11.12` and
+`quinn-proto 0.11.19` to those git sources, not crates.io.
+Without the patch, the REALITY fork hooks
+(`SSL_set_client_hello_fixup_cb`,
+`SSL_set1_client_x25519_private_key` in honk `reality.rs`,
+`SSL_set_alps_use_new_codepoint` / `SSL_set1_client_key_shares`
+in honk `tls.rs`, `Bbr3Config` in honk `quic.rs`) would be
+silently lost. Decision: git-dep, not vendor — a trial
+`cargo vendor` on cue measured 387M / 281 dirs in 33.8s
+(honk-outbound 4.9M, honk-config 2.4M); vendor only if an
+offline-build requirement is proven, with honk's LICENSE
+preserved verbatim in the vendor dir.
+
+Mapping (castctl glue → honk API actually called):
+- `rust/castctl-transport/src/config.rs` (dispatch) ↔
+  `crates/honk-outbound/src/proxy/registry.rs`
+  (`ProxyRegistry::default_resolver`, `dial`) and
+  `crates/honk-config/src/node.rs` (`Node`,
+  `OutboundConfig`, `derive_id`) / `node/protocol.rs`
+  (`TlsOptions`, `StreamTransportOptions`, per-protocol
+  configs). Sing-box `socks` is translated to honk `socks5`
+  (`NodeProtocol::from_str` accepts only `"socks5"`).
+- `rust/castctl-transport/src/config.rs` (TLS/REALITY) ↔
+  `crates/honk-outbound/src/tls.rs` (`set_tls_mode`,
+  `set_utls_imitate` — process-global, Chrome only) and
+  `crates/honk-outbound/src/reality.rs`
+  (`parse_reality_config`: 32-byte X25519 key, even-length
+  hex short_id ≤ 8 bytes; key schedule per Xray-core).
+  Castctl `tls.utls.fingerprint` chrome (or absent, via the
+  `GatewayTLSOptions` default) → utls+chrome; any other
+  fingerprint, `tls_engine` stdlib/cronet, explicitly
+  disabled UTLS, or a present `spider_x` → `Unsupported`
+  fail-closed (honk's live REALITY path does not read
+  `spider_x`, and its `set_utls_imitate` would otherwise
+  silently fall back to Chrome). WS transports pin ALPN to
+  `["http/1.1"]` (Go `internal/gateway/connector.go:240`).
+- `rust/castctl-transport/src/dialer.rs` ↔ honk
+  `ProxyStream` (`stream: Box<dyn AsyncReadWrite>`,
+  `target_addr`, `target_domain`) and `quic.rs` + `quic/`
+  (quinn fork + BoringSSL crypto, shared by hysteria2/tuic).
+- `rust/castctl-transport/src/http.rs` / `rpc.rs` call NO
+  honk HTTP API (honk has none): the HTTP/1.1 client is
+  hyper over the dialed stream, and the RPC envelope/retry/
+  error rules are ported from castctl's own Go code (see
+  §13.1), not from honk.
+- `wireguard` → [NOT FOUND] in honk (`grep -rni
+  wireguard crates/honk-outbound/src
+  crates/honk-config/src` = 0 hits; the single repo hit is an
+  unrelated device-type comment in `honk-core`). M3 therefore
+  fails closed for wireguard ("→ M3d"); M3d writes userspace
+  WireGuard with boringtun, it does not come from honk.
+
+Deviations + deliberately not taken in M3:
+- honk protocols present but NOT mapped (scope decision
+  D-M3-3, not an oversight): `juicity`, `anytls` (both in
+  honk's registry), plus sing-box types with no honk
+  equivalent (`http`, `selector`, `urltest`, `snell`,
+  `naive`, `tor`, `ssh`, `shadowtls`) → `Unsupported`.
+  `selector`/`urltest` are sing-box group outbounds, not
+  protocols; honk's `group/` is a different (dae-config)
+  concept and is not equated with them.
+- Shadowsocks SIP003 plugin: honk config carries
+  `plugin`/`plugin_opts` fields but the dial path has no
+  plugin handling → non-empty plugin is `Unsupported`,
+  never silently ignored.
+- `detour` chains: not resolved in M3 → `Unsupported`.
+- Unknown JSON fields are ignored by the glue, while
+  sing-box `badjson` rejects them (M2 raw-preserve
+  philosophy, D-M2-1; strict validation still deferred).
+- Honk's Chrome-mode is process-global: two profiles with
+  different fingerprints/TLS modes in one process are an M3
+  limitation, recorded in `rust/PORTING.md` §M3.
+- VMess has no UDP packet slot in honk (`supports_udp:
+  never`); irrelevant to the TCP RPC client, recorded here
+  so a later UDP port does not assume it.
+- Build blocker at M3 submission (carried, not hidden):
+  honk at the pinned rev requires rustc ≥ 1.98 through
+  `aya 0.16.0` (required by `honk-ebpf-common`,
+  `aya = "0.16"` in honk's workspace), while cue has rustc
+  1.97.1. `cargo build` on cue fails with `aya@0.16.0
+  requires rustc 1.98.0` before compiling anything. The M3
+  brief forbids changing the sha or upgrading the cue
+  toolchain without a Boss decision, so M3 is submitted
+  with the crate + tests written but `cargo build/test/
+  clippy` on cue UNVERIFIED — the two options (upgrade cue
+  to ≥ 1.98, or pick an older honk sha) are for Boss to
+  decide. `cargo tree` (3 git sources) and `cargo fmt
+  --check` (clean, after `cargo fmt` on cue) DID pass on
+  cue; see `rust/PORTING.md` §M3 for the verbatim outputs.
+
+### 13.1 Ported from this repo's Go code (not upstream)
+
+These are behavior ports from castctl's own Go code, not
+third-party upstream, and they do not change the Go
+artifact's license:
+- Route table: `internal/gateway/routes.go`
+  (`DefaultRoutes`/`ParseRoutes`/`LookupRoute`),
+  `internal/conn/gateway.go:132-137,316-318`,
+  `internal/proto/routes.json` (258 entries at the M3
+  base; embedded at compile time via `include_str!`, not
+  re-typed).
+- HTTP client invariants: `internal/outbound/dialer.go:204-236`
+  (`HTTPClient`: `Proxy: nil`, 10s TLS handshake, 90s idle
+  — idle has no counterpart in M3's unpooled client) and
+  `internal/telegram/bot.go:316-352` (`BoundClient`,
+  `noFollowRedirect`).
+- Retry: `internal/conn/shared.go:148-221` (`retryCall`),
+  `internal/conn/gateway.go:21-55` (30s budget, 250ms
+  doubling to 4s), safe set (9 POST reads + GET).
+- TLS defaults: `internal/outbound/tls.go:16-76`
+  (`GatewayTLSOptions`: nil/empty → chrome; explicit
+  disable kept disabled — in M3, kept-disabled is
+  `Unsupported`, see §13 above).
+- Error mapping: `internal/conn/errors.go`,
+  `internal/gateway/summary.go` (allowlist summary, not the
+  outdated `payload[:500]` comment in `calls.go:72`),
+  `internal/commands/commands.go:268-337`
+  (`classifyError`; the `phaseExitCode` table in
+  `profilecmd.go:901-929` is deliberately NOT used).
+- Deferred, not dropped: the WebSocket+Noise+protobuf
+  gateway transport (`internal/gateway/stream.go` `open`,
+  stream phases), `DownloadFile`/`Ping`/subscriptions,
+  per-profile DNS router (direct dials use the system
+  resolver in M3, not Go's fail-closed `ErrNoResolver`),
+  HTTP/2 (`ForceAttemptHTTP2` has no M3 counterpart —
+  M3 is HTTP/1.1 only), and the M2.5 docs debt this
+  section + the root `NOTICE` honk entry close for the
+  Rust/honk part (the M2 note in `rust/PORTING.md` §M2.5
+  is history and is not rewritten).
+
+Boss decision, quoted verbatim (applies to §13 and
+`rust/NOTICE`): artifact Rust là GPL-3.0-only vì link honk;
+binary Go vẫn GPL-3.0-or-later; 2 artifact, 2 license.
+
 ## Carried items (unresolved at the time of writing)
 
 - npm license check: not run — no license-checking tool present,

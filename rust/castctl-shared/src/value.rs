@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! Decoded-JSON value model and the `values.go` shaping helpers.
 //!
 //! The Go code works on `any` values decoded from JSON. The Rust

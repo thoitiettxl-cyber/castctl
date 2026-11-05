@@ -972,3 +972,221 @@ branch); the Go tree is untouched (verified before commit). The
 `85a8d5eaa529237d38de1192d992261ed1db7557` before the branch was
 created, and `feat/rust-m2-config-cli` was absent on origin.
 Nothing was pushed; no PR was opened.
+
+---
+
+# Porting notes — Rust M3 (transport via honk, NO WireGuard)
+
+Scope: one new crate (`castctl-transport`) plus workspace wiring
+(honk pin + `[patch]` replication), SPDX headers on all 44 `.rs`
+files, `rust/LICENSE` (byte-identical to root `LICENSE`),
+`rust/NOTICE`, root `NOTICE` honk entry, and
+`docs/provenance.md` §13 — the last two close the M2.5 docs debt
+for the Rust/honk part (the §M2.5 note is history and is not
+rewritten). Base: `dev-rust` `664f26315c2481a5b4302b8d89f4e4c49f7ecefc`.
+Branch: `feat/rust-m3-transport`, LOCAL ONLY — nothing pushed,
+no PR opened, no merge (the parent task explicitly forbids
+push/PR/merge for this writer; the reviewer/parent decides the
+next step after the toolchain blocker below). No Go code was
+changed. Parent decisions D-M3-1..D-M3-8 (plan file
+`~/workspace/plans/active/castctl-rust-m3-transport.md`) were
+applied as written; the two PR split (M3, then M3d WireGuard)
+follows the plan: M3d is NOT in this branch.
+
+Toolchain (measured on cue, the only authoritative host):
+`rustc 1.97.1 (8bab26f4f 2026-07-14)`, `cargo 1.97.1`, edition
+2024, `resolver = "2"`, `rust-version = "1.85"`.
+`rust/Cargo.lock` is committed (updated: 276 packages).
+
+## M3.1 Crate map
+
+| Crate | Go source | Contents |
+|---|---|---|
+| `castctl-transport` | `internal/gateway/routes.go`, `internal/conn/gateway.go`, `internal/gateway/calls.go`, `internal/gateway/jsonutil.go`, `internal/gateway/stream.go`, `internal/gateway/summary.go`, `internal/conn/shared.go`, `internal/conn/errors.go`, `internal/outbound/dialer.go`, `internal/outbound/tls.go`, `internal/telegram/bot.go`, `internal/commands/commands.go`, `internal/profile/outbound.go` (dispatch shape only) + honk-outbound (engine, called not copied) | Route table, sing-box→honk dispatch + TLS/REALITY, Dialer trait + direct/honk dialers, HTTP/1.1 client over a dialer, retry policy, `call_json` RPC client |
+
+## M3.2 API mapping
+
+Every public item has a doc comment citing its Go source
+`file:line` at the M3 base. Items with no direct Go function
+counterpart (e.g. `RedirectRefused`, `TlsMode`,
+`Dispatch::Honk`) say so in their docs and cite the Go type /
+vocabulary they model; no Go function line is fabricated.
+
+| Go | Rust | Notes |
+|---|---|---|
+| `RouteTable.LookupRoute`, `ParseRoutes`, `DefaultRoutes` (`internal/gateway/routes.go:78-116`), `Route` (`internal/conn/gateway.go:132-137`), `Gateway.LookupRoute` (`internal/conn/gateway.go:316-318`), `internal/proto/routes.json` | `routes::{Route, Service, RouteTable::default_routes/parse/lookup_route, build_path, quote_path_param}` | Table embedded via `include_str!` of the Go JSON (258 entries at M3 base); first-wins duplicates; absent service → `daemon`; path quoting = Go `quotePython(v, "")` (`media.go:19-35`); query = `url.Values.Encode` (sorted keys) |
+| `parseOutbound` (`internal/profile/outbound.go:96-138`), `CreateOutbound`/`CreateEndpoint` (`internal/outbound/manager.go:243-272,479-494`), `GatewayTLSOptions`/`BuildTLSConfig` (`internal/outbound/tls.go:16-76`), WS ALPN pin (`internal/gateway/connector.go:240`) | `config::{Dispatch, TlsMode, dispatch_outbound, tls_mode_for, apply_tls_mode, validate_reality, decode_base64url}` | Subset only (D-M3-3): socks→socks5, shadowsocks, vmess, vless, trojan, hysteria2, tuic → honk; direct/block as before; wireguard → "→ M3d" error; all other types → `Unsupported`; detour → `Unsupported`; SS plugin → `Unsupported`; WS ALPN pinned `http/1.1`; unknown fields ignored (deviation, see §M3.3) |
+| `DialContext`/`Resolve`/`DialTLS`/`HTTPClient` (`internal/outbound/dialer.go:127-236`), `Manager.Dialer` (`internal/outbound/manager.go:585-597`) | `dialer::{Dialer, DialTarget, DirectDialer, HonkDialer, DIAL_TIMEOUT, resolve_target}` | `Dialer` is the M3d seam (object-safe boxed future); dial failure → `ConnectionDown`; DIAL_TIMEOUT 10s = Go `TLSHandshakeTimeout`; no proxy env reads anywhere in `src/` |
+| `BoundClient`/`noFollowRedirect` (`internal/telegram/bot.go:316-352`) | `http::{HttpClient, HttpResponse, MAX_RESPONSE_BODY}` | Hyper http1 client conn over the dialed stream; no proxy concept (structural, not a flag); ANY 3xx → `RedirectRefused`, never a second request; no cookie jar; one fresh stream per call (no pool → Go 90s idle / 100-conn pool have no counterpart); HTTP/1.1 only (Go `ForceAttemptHTTP2` not ported); 16 MiB body guard is M3-local, not Go parity |
+| `retryCall` (`internal/conn/shared.go:148-221`), `safeToRepeat`/`safeFor` (`:46-56,136-147`), constants (`internal/conn/gateway.go:21-55`) | `retry::{RetryPolicy, RETRY_FOR, RETRY_PAUSE_INITIAL, RETRY_PAUSE_MAX, POST_READ_METHODS, safe_to_repeat, should_retry, run_with_retry}` | Budget 30s (NOT a fixed attempt count — only `SubscribeRaw` has one: 3 attempts, not ported); ladder 250ms doubling to 4s; `ConnectionDown` always, `ConnectionError` only when safe; `Auth` never; Go's `gw()` reconnect branch is covered because a dial failure surfaces as `ConnectionDown` |
+| `CallJSON`/`Request` (`internal/gateway/calls.go:26-220`), `encodeBody`/`bodyToQuery`/`pythonStr` (`internal/gateway/jsonutil.go:28-138`), `buildPath`/`resolveRoute` (`internal/gateway/stream.go:188-220`), `summarizeBody`/`gatewayErrorFromSummary` (`internal/gateway/summary.go:213-224`) | `rpc::{RpcClient, DEFAULT_REQUEST_TIMEOUT, body_to_query, decode_response}` | HTTP-over-outbound RPC (D-M3-2), NOT the WS+Noise+protobuf gateway (deferred, see §M3.3); timeout 30s; GET body → query (nil dropped, bool `True`/`False`); empty body → `{}`; envelope `ok`/`result` rules verbatim; numbers via `serde_json::Number` (never `f64`); non-JSON/`ok:false` → `GatewayError(-1, summary)`; status non-2xx → `GatewayError(status, summary)`; NO body bytes in any error |
+| `AuthError`/`GatewayError`/`ConnectionDown`/`ConnectionError`/`TimeoutError` (`internal/conn/errors.go`), `ValidationError` (`internal/gateway/jsonutil.go`), `classifyError` (`internal/commands/commands.go:268-337`) | `error::{TransportError, BodySummary, validate_content_type, validate_error_code, truncate}` | `exit_code`: auth 2, gateway 3, timeout 4, cancel 130, validation 2, else 1 — NOT `phaseExitCode` (`profilecmd.go:901-929`, auth 3); `Display`/`Debug` (hand-written) print summaries only; `log_summary` prints class + lengths, never message bytes |
+
+## M3.3 Deferred / deviations (deliberate, not silent)
+
+- WS+Noise+protobuf gateway transport (`internal/gateway/stream.go`
+  `open`, phases `PhaseNotSent`/`PhaseSentNoReply`/`PhaseStreaming`):
+  DEFERRED. An HTTP client has no stream phases, so none are faked.
+- `RequestOptions` fields with no HTTP equivalent: `Route`
+  override (M3 always uses the table), separate `Query` input,
+  absolute `Deadline`, `Track`: not ported.
+- `DownloadFile` (300s), `Ping` (10s), subscriptions,
+  `CancelStream`, `OpenStream` (`safe=false`) / `DownloadFile`
+  (`safe=true`) retry variants: recorded in `retry.rs` docs,
+  not implemented (no such calls exist in M3).
+- Per-profile DNS router: M3 direct dials use the system
+  resolver, NOT Go's fail-closed `ErrNoResolver`
+  (`dialer.go:127-145`). Domain dials through `direct` are
+  therefore not fail-closed in M3; fixing that is M4 DNS work.
+- HTTP/2: not negotiated in M3 (hyper http1 only).
+- `tls_engine` stdlib/cronet, non-chrome fingerprints, explicit
+  UTLS disable, `spider_x`: `Unsupported` fail-closed (D-M3-4),
+  never silently mapped to Chrome.
+- Honk Chrome-mode is process-global: two profiles with
+  different TLS modes in one process are an M3 limitation.
+- Unknown sing-box JSON fields ignored (M2 raw-preserve),
+  while sing-box `badjson` rejects them.
+- `HonkDialer` requires `ProxyRegistry: Send + Sync` via the
+  `Dialer: Send + Sync` bound — UNVERIFIED until a build runs
+  (see blocker); if the registry is not `Sync`, the dialer will
+  need a lock or a non-`Sync` redesign, decided after the
+  toolchain decision, not pre-empted here.
+- No network CLI commands are wired in M3; `castctl-rs` still
+  builds the offline surface only (unchanged behaviour).
+
+## M3.4 Pin + license (Boss decision, verbatim)
+
+Pin: `honk-outbound = { git =
+"https://github.com/daeuniverse/honk", rev =
+"9e31cc0bd28825afdc0e384dc989bc3f076e69cf",
+features = ["rprx"] }` (workspace root; `honk-config` same
+rev), plus replicated `[patch.crates-io]` for `boring-sys`
+(Glassyiris `3beb573b65ecaa69b7eefe3c2fecd074b97facd2`)
+and `quinn`/`quinn-proto` (Glassyiris
+`11f1de84c28305a3c98ace6d681c35219a8d1e6c`). Choice:
+git-dep, NOT vendor. Reason + measurements (cue):
+`cargo vendor` trial in a temp dir took 33.8s and produced
+387M / 281 dirs (honk-outbound 4.9M, honk-config 2.4M);
+vendor only wins if an offline-build requirement is proven,
+which it is not for M3. New dep pins (exact, from the cue
+`Cargo.lock`): tokio `=1.48.0`, serde `=1.0.228`,
+serde_json `=1.0.145`, hyper `=1.8.1`, http `=1.3.1`,
+http-body-util `=0.1.3`, bytes `=1.11.0` (all matched the
+first cue resolution exactly — no pin had to be corrected).
+
+License (Boss decision, quoted verbatim): artifact Rust là
+GPL-3.0-only vì link honk; binary Go vẫn GPL-3.0-or-later;
+2 artifact, 2 license. Realisation: SPDX header
+`// SPDX-License-Identifier: GPL-3.0-only` + `// Copyright (c)
+2026 muse-cli contributors` (holder reused verbatim from
+the Go headers, which are uniform across the repo) on all
+44 `.rs` files (33 M1/M2 + 11 new, tests included);
+`[workspace.package] license = "GPL-3.0-only"` +
+`license.workspace = true` on all 8 crates;
+`rust/LICENSE` byte-identical to root `LICENSE`
+(sha256 `3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986`,
+674 lines, `cmp` clean); `rust/NOTICE`; root `NOTICE` §(b)
+honk entry + the sing-box sentence scoped to "The Go
+binary". "No unsafe" (D-M3-7): glue code in this crate
+contains zero `unsafe` by construction (grep check below
+is for the record; it could not be compiler-verified
+because of the blocker). The dependency tree DOES contain
+`unsafe` (honk-outbound alone: 65 hits in the probe) and C
+code (BoringSSL via boring-sys) — the Rust binary is NOT
+claimed unsafe-free anywhere in this PR.
+
+## M3.5 Verification on cue — BLOCKER (read this first)
+
+Gate 1 (PASSED on cue):
+```
+$ cargo tree -p castctl-transport --edges normal
+honk-config v0.1.0 (https://github.com/daeuniverse/honk?rev=9e31cc0bd28825afdc0e384dc989bc3f076e69cf#9e31cc0b)
+honk-outbound v0.1.0 (https://github.com/daeuniverse/honk?rev=9e31cc0bd28825afdc0e384dc989bc3f076e69cf#9e31cc0b)
+boring-sys v5.2.0 (https://github.com/Glassyiris/boring-sys?rev=3beb573b65ecaa69b7eefe3c2fecd074b97facd2#3beb573b)
+quinn v0.11.12 (https://github.com/Glassyiris/quinn?rev=11f1de84c28305a3c98ace6d681c35219a8d1e6c#11f1de84)
+quinn-proto v0.11.19 (https://github.com/Glassyiris/quinn?rev=11f1de84c28305a3c98ace6d681c35219a8d1e6c#11f1de84)
+```
+All three git sources resolve to the forks, not crates.io.
+`cargo tree` also resolved 276 packages (lock committed).
+
+Gate 2 (FAILED on cue — BLOCKER, work stopped here per the
+M3 brief: do NOT change the sha, do NOT upgrade the cue
+toolchain without a Boss decision):
+```
+$ cargo build -p castctl-transport
+error: rustc 1.97.1 is not supported by the following packages:
+  aya@0.16.0 requires rustc 1.98.0
+  aya-build@0.2.1 requires rustc 1.98.0
+  aya-ebpf-bindings@0.3.0 requires rustc 1.98.0
+  aya-ebpf-cty@0.4.0 requires rustc 1.98.0
+  aya-obj@0.6.0 requires rustc 1.98.0
+Either upgrade rustc or select compatible dependency versions with
+`cargo update <name>@<current-ver> --precise <compatible-ver>`
+```
+Root cause (verified, not guessed): honk's workspace pins
+`aya = "0.16"` (for `honk-ebpf-common`, pulled in by
+`honk-outbound`), honk's own `Cargo.lock` pins `aya
+0.16.0`, and honk's `rust-toolchain.toml` is `1.99.1`.
+Downgrading aya below 0.16 would violate honk's own version
+requirement, so there is no lock-only fix. Cue has only
+`1.97.1-x86_64-unknown-linux-gnu` (`rustup toolchain list`;
+no other toolchain installed). Consequences, stated
+plainly: `cargo build --workspace`, `cargo test
+--workspace`, `cargo clippy --workspace -- -D warnings`
+could NOT run on cue — cargo refuses before compiling
+anything, so even the non-honk modules are unverified by
+the compiler. `cargo fmt --check` DID run on cue and is
+clean (after `cargo fmt` on cue; formatted sources were
+synced back). Everything below that needs a compiler is
+therefore [CHƯA XÁC MINH], not passed:
+- All unit + integration tests (invariant tests, retry,
+  error mapping, token redaction, env-proxy, redirect).
+- Hyper compatibility with `Box<dyn AsyncReadWrite>`
+  (handshake over a honk stream) — code written against
+  the hyper 1.x API as documented, never compiled.
+- `HonkDialer: Send + Sync` (see §M3.3).
+- TLS parity (JA3/JA4 Go vs Rust), QUIC handshake, and
+  every build-time number (cold/warm build times are
+  unmeasured — no number is invented here).
+
+Two options for Boss (writer takes neither unilaterally):
+(a) upgrade the cue toolchain to rustc ≥ 1.98 (e.g.
+`rustup toolchain install` a newer stable) and re-run the
+full M3 gate; or (b) pick an older honk sha whose
+`honk-ebpf-common` does not require aya 0.16 / rustc 1.98,
+and re-run the gate with the new sha recorded everywhere
+the old one appears. Until one is chosen, this branch is
+LOCAL ONLY and must not be presented as passing.
+
+Static checks that DID run (no compiler needed):
+```
+$ find rust -name '*.rs' | wc -l
+44
+$ while read -r f; do head -3 "$f" | grep -q 'SPDX-License-Identifier: GPL-3.0-only' || echo "MISSING: $f"; done < <(find rust -name '*.rs' | sort)
+(no output — all 44 files carry the header)
+$ grep -rn 'GPL-3.0-or-later' rust --include='*.rs'
+(no output — no or-later in Rust sources)
+$ grep -rn 'HTTP_PROXY\|HTTPS_PROXY\|ALL_PROXY\|NO_PROXY' rust/castctl-transport/src
+(no hits outside the doc comment in dialer.rs that names
+the variables to forbid them — see the grep output in the
+writer report for the exact lines)
+$ grep -rn 'unsafe' rust/castctl-transport/src
+(no code hits; the word appears only in comments — the
+D-M3-7 rule statement and one test comment meaning
+"not safe-to-repeat", not the keyword)
+$ grep -rn 'unsafe {' rust/castctl-transport/src rust/castctl-transport/tests
+(no unsafe blocks in src/; the only two unsafe blocks are
+the env set_var/remove_var blocks in tests/env_proxy.rs,
+unsafe in edition 2024 by design, each with a SAFETY comment)
+$ grep -rn 'unwrap()\|expect(' rust/castctl-transport/src
+(all hits inside #[cfg(test)] modules, on static fixtures;
+zero in non-test code)
+$ cmp LICENSE rust/LICENSE && echo byte-identical
+byte-identical (sha256 3972dc97…dfb36986, 674 lines)
+```
+
+`git diff --stat` at submission is confined to `rust/`,
+`NOTICE` and `docs/provenance.md` (verified before commit;
+the Go tree is untouched). Nothing was pushed; no PR was
+opened; CI Go status is therefore "not run for this
+branch" — not claimed green.
