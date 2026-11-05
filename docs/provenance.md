@@ -1653,6 +1653,37 @@ Deviations + deliberately not taken in M3:
   proven working once verification is skipped, M3c
   NB9) while the Go control succeeded — parity
   findings, not gate failures.
+- M3e (one measurement round; see `rust/PORTING.md`
+  §M3e): dispatch now maps `tls.insecure` →
+  `quic.tls.skip_cert_verify` plus `tls.server_name` →
+  `quic.tls.sni` for hysteria2/tuic
+  (`rust/castctl-transport/src/config.rs`,
+  `dispatch_outbound`); `quic.tls.alpn` stays empty
+  because honk's QUIC client config rejects a non-empty
+  `tls.alpn` (`honk-outbound/src/quic.rs:348-353`).
+  Live on cue: `insecure:true` → handshake + echo OK
+  against the self-signed sing-box hysteria2 server;
+  absent/`false` → `QUIC connect (attempt 3)` fail with
+  no server-side inbound. TLS/REALITY JA4 (like +
+  standard, N=5) re-measured after the change are
+  byte-identical to the M3e baseline on all 20 captures
+  — the QUIC change causes zero TLS drift. The four
+  TLS gaps (cipher list `c009`/`c00a`,
+  extensions `0005`/`0012`, ALPS `4469` vs `44cd`,
+  REALITY TLS1.3-only profile) are NOT closed: each
+  fix sits inside honk (`tls.rs` `build_connector` /
+  `add_chrome_alps` / `build_reality_connector`,
+  `reality.rs` `setup_reality_ssl`) and no honk API
+  exposes them per node (grep over
+  `honk-config/src/` for cipher/alps/ocsp/sct = 0
+  hits); per the brief they are recorded as deviations
+  in `rust/PORTING.md` §M3e.3, not patched, not forked,
+  not vendored. No new dependency (NOTICE unchanged).
+  Also recorded in §M3e: `tls.enabled=false` on
+  hysteria2/tuic is not a dispatch error in this PR
+  (Go returns `ErrTLSRequired`; honk's QUIC path never
+  reads `tls.enabled`) — a separate decision, not
+  smuggled in here.
 
 ### 13.1 Ported from this repo's Go code (not upstream)
 
