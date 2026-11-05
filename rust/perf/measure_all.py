@@ -12,7 +12,7 @@ noted). Item 5 runs Rust first, then Go. Loadavg + timestamp are recorded
 before/after each item and each side in summary["marks"], so any drift
 between batches is visible in the committed data.
 """
-import hashlib, json, os, re, shutil, statistics, subprocess, sys, time
+import hashlib, json, os, re, shutil, statistics, subprocess, sys, tempfile, time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 PERF = os.path.join(ROOT, "rust", "perf")
@@ -29,6 +29,19 @@ RS_BIN = os.path.join(_TARGET_DIR or os.path.join(ROOT, "rust", "target"),
                       "release", "castctl-rs")
 RS_BENCH = os.path.join(_TARGET_DIR or os.path.join(PERF, "bench", "target"),
                         "release", "perf-bench")
+# Full-stack binary (M-perf-1): rust/perf/full-bin is a standalone crate
+# whose build compiles boring-sys (which generates .go files under its
+# target dir). TestSPDXHeaders walks the whole repo, so that target dir
+# MUST live outside the repo: it shares CARGO_TARGET_DIR when set (same
+# rule as RS_BIN), otherwise a stable path under the system temp dir
+# (operator-managed, like CARGO_TARGET_DIR itself — it persists across
+# runs so --skip-build works; whether it was cold is recorded in the
+# summary as full_target_cold). Never default to
+# rust/perf/full-bin/target (inside the repo).
+_FULL_TARGET_DIR = _TARGET_DIR or os.path.join(
+    tempfile.gettempdir(), "perf-full-target")
+RS_FULL_BIN = os.path.join(_FULL_TARGET_DIR, "release", "castctl-full")
+FULL_BIN_MANIFEST = os.path.join(PERF, "full-bin", "Cargo.toml")
 CARGO = ["cargo", "+1.99.1"]
 GO_ENV = dict(os.environ, PATH="/usr/local/go/bin:" + os.environ.get("PATH", ""),
               GOTOOLCHAIN="auto", GOFLAGS="-mod=readonly")
@@ -118,16 +131,40 @@ def main():
     # third-party deps) plus the small bench crate (regex/aho-corasick/
     # memchr); a probe debug build of castctl-config took 28 MiB of
     # target/. 1.0 GiB leaves ~3x headroom over that, and disk_free
-    # before/after is recorded in the summary.
+    # before/after is recorded in the summary. NOTE (M-perf-1): the
+    # full-bin closure (honk + boringtun + quinn + tokio + snow +
+    # prost, ~350 crates) is far larger — its target dir measured
+    # ~1.1 GiB on cue (run8 probe) — so the 1.0 GiB threshold above is
+    # checked against the FULL target filesystem when CARGO_TARGET_DIR
+    # is set (shared dir); with the default tempdir target the full
+    # build lands on the system temp filesystem instead, and its
+    # before/after free space is recorded separately as
+    # full_disk_free_gib_before/after below.
     _preflight_path = _TARGET_DIR or "/"
     while not os.path.isdir(_preflight_path):
         _preflight_path = os.path.dirname(_preflight_path) or "/"
     free_gib = shutil.disk_usage(_preflight_path).free / (1 << 30)
     summary["machine"]["cargo_target_dir"] = _TARGET_DIR or "default (rust/target)"
+    summary["machine"]["full_target_dir"] = _FULL_TARGET_DIR
+    summary["machine"]["full_target_cold"] = not os.path.isdir(
+        os.path.join(_FULL_TARGET_DIR, "release", "deps"))
     summary["machine"]["disk_free_gib_before"] = round(free_gib, 2)
+    _full_preflight_path = _FULL_TARGET_DIR
+    while not os.path.isdir(_full_preflight_path):
+        _full_preflight_path = os.path.dirname(_full_preflight_path) or "/"
+    summary["machine"]["full_disk_free_gib_before"] = round(
+        shutil.disk_usage(_full_preflight_path).free / (1 << 30), 2)
     if free_gib < 1.0:
         summary["notes"].append("disk preflight FAILED: %.2f GiB free on %s, need >= 1 GiB"
                                 % (free_gib, _preflight_path))
+        json.dump(summary, open(os.path.join(DATA, "summary.json"), "w"), indent=2)
+        print(json.dumps(summary, indent=2)); return 2
+    # Full-bin gate (M-perf-1): the full closure's target dir is ~1.1 GiB
+    # on cue, so the temp filesystem needs 2.0 GiB headroom, not 1.0.
+    _full_free = shutil.disk_usage(_full_preflight_path).free / (1 << 30)
+    if _full_free < 2.0:
+        summary["notes"].append("disk preflight FAILED: %.2f GiB free on %s, need >= 2 GiB (full-bin target)"
+                                % (_full_free, _full_preflight_path))
         json.dump(summary, open(os.path.join(DATA, "summary.json"), "w"), indent=2)
         print(json.dumps(summary, indent=2)); return 2
     m = sh(["uname", "-a"]); summary["machine"]["uname"] = m["stdout"].strip()
@@ -195,30 +232,118 @@ def main():
             summary.setdefault("size_breakdown", {})[name] = sh(["size", "-A", path])["stdout"]
         summary["notes"].append("build skipped (--skip-build)")
 
+    # ---- build Rust full-bin (M-perf-1): same recipe as the shell, plus
+    # the no-keep variant (--no-default-features) for the linkage A/B.
+    # Build order is chosen to minimise RUSTFLAGS-flip rebuilds (each
+    # flip recompiles the ~350-crate closure, ~3 min on cue): plain
+    # (no RUSTFLAGS) -> nokeep (RUSTFLAGS strip) -> headline
+    # (RUSTFLAGS strip, default features; only a relink after nokeep).
+    # The LTO variant is built last, after all measurements, so a slow
+    # or failing LTO build cannot block the run. CARGO_TARGET_DIR is
+    # forced to _FULL_TARGET_DIR (outside the repo) for every full-bin
+    # invocation — see the constants above for why.
+    def _full_env(**extra):
+        env = dict(os.environ, CARGO_TARGET_DIR=_FULL_TARGET_DIR)
+        env.update(extra)
+        return env
+    _full_cmd = CARGO + ["build", "--release", "--locked", "--offline",
+                         "--manifest-path", FULL_BIN_MANIFEST]
+    if not skip_build:
+        b3 = sh(_full_cmd, cwd=ROOT, env=_full_env(), timeout=3600)
+        summary["build_full_plain"] = b3
+        if b3["exit"] != 0:
+            summary["notes"].append("full-bin plain build FAILED; see build_full_plain")
+            json.dump(summary, open(os.path.join(DATA, "summary.json"), "w"), indent=2)
+            print(json.dumps(summary, indent=2)); return 2
+        full_plain = RS_FULL_BIN + "-plain"
+        shutil.copyfile(RS_FULL_BIN, full_plain)
+        summary["rust_full_unstripped"] = {"size_bytes": os.path.getsize(full_plain),
+                                           "sha256": sha8(full_plain)}
+        shutil.copyfile(RS_FULL_BIN, full_plain + "-gnu")
+        g3 = sh(["strip", full_plain + "-gnu"])
+        summary["rust_full_gnu_stripped"] = {"size_bytes": os.path.getsize(full_plain + "-gnu"),
+                                             "sha256": sha8(full_plain + "-gnu"), "strip": g3}
+        env3 = _full_env(RUSTFLAGS="-C strip=symbols")
+        b4 = sh(_full_cmd + ["--no-default-features"], cwd=ROOT, env=env3, timeout=3600)
+        summary["build_full_nokeep"] = b4
+        if b4["exit"] != 0:
+            summary["notes"].append("full-bin no-keep build FAILED; see build_full_nokeep")
+            json.dump(summary, open(os.path.join(DATA, "summary.json"), "w"), indent=2)
+            print(json.dumps(summary, indent=2)); return 2
+        full_nokeep = RS_FULL_BIN + "-nokeep"
+        shutil.copyfile(RS_FULL_BIN, full_nokeep)
+        summary["rust_full_nokeep"] = {"size_bytes": os.path.getsize(full_nokeep),
+                                       "sha256": sha8(full_nokeep)}
+        b5 = sh(_full_cmd, cwd=ROOT, env=env3, timeout=3600)
+        summary["build_full_stripped"] = b5
+        if b5["exit"] != 0:
+            summary["notes"].append("full-bin RUSTFLAGS strip build FAILED; see build_full_stripped")
+            json.dump(summary, open(os.path.join(DATA, "summary.json"), "w"), indent=2)
+            print(json.dumps(summary, indent=2)); return 2
+        summary["rust_full_strip_method"] = "RUSTFLAGS=-C strip=symbols"
+        summary["rust_full_binary"] = {"size_bytes": os.path.getsize(RS_FULL_BIN),
+                                       "sha256": sha8(RS_FULL_BIN),
+                                       "version": sh([RS_FULL_BIN, "--version"])["stdout"].strip()}
+        for name, path in (("go", GO_BIN), ("rust", RS_BIN), ("rust-full", RS_FULL_BIN)):
+            summary.setdefault("size_breakdown", {})[name] = sh(["size", "-A", path])["stdout"]
+    else:
+        if os.path.isfile(RS_FULL_BIN):
+            summary["rust_full_binary"] = {"size_bytes": os.path.getsize(RS_FULL_BIN),
+                                           "sha256": sha8(RS_FULL_BIN),
+                                           "version": sh([RS_FULL_BIN, "--version"])["stdout"].strip()}
+            full_plain = RS_FULL_BIN + "-plain"
+            if os.path.exists(full_plain):
+                summary["rust_full_unstripped"] = {"size_bytes": os.path.getsize(full_plain),
+                                                   "sha256": sha8(full_plain)}
+                summary["rust_full_gnu_stripped"] = {"size_bytes": os.path.getsize(full_plain + "-gnu"),
+                                                     "sha256": sha8(full_plain + "-gnu")}
+            full_nokeep = RS_FULL_BIN + "-nokeep"
+            if os.path.exists(full_nokeep):
+                summary["rust_full_nokeep"] = {"size_bytes": os.path.getsize(full_nokeep),
+                                               "sha256": sha8(full_nokeep)}
+            summary["rust_full_strip_method"] = "RUSTFLAGS=-C strip=symbols (binary from earlier full run)"
+        else:
+            summary["rust_full_binary"] = {"missing": "no full binary found; run without --skip-build"}
+            summary["notes"].append("rust-full binary MISSING in --skip-build mode; rust-full sides skipped")
+        for name, path in (("go", GO_BIN), ("rust", RS_BIN), ("rust-full", RS_FULL_BIN)):
+            if os.path.isfile(path):
+                summary.setdefault("size_breakdown", {})[name] = sh(["size", "-A", path])["stdout"]
+        summary["notes"].append("build skipped (--skip-build)")
+
     # First measured run, warmup=0 (NOT cold, NOT first-run after build):
     # both binaries already executed at least once above (--version probes
     # during machine setup + the strip build), so the page cache is warm.
     # N=1 each; only the warmup=0 first run of this invocation is recorded.
     first = {}
-    for name, path in (("go", GO_BIN), ("rust", RS_BIN)):
+    for name, path in (("go", GO_BIN), ("rust", RS_BIN), ("rust-full", RS_FULL_BIN)):
+        if not os.path.isfile(path):
+            first[name] = {"missing": True}
+            continue
         mark("before_first_measured_run_" + name)
         first[name] = measure("first-measured-run-" + name, [path, "--version"], runs=1, warmup=0)
         mark("after_first_measured_run_" + name)
     summary["items"]["first_measured_run_warmup0"] = first
 
-    # ---- items 2+3: startup + RSS, adjacent batches (Go batch, then Rust)
+    # ---- items 2+3: startup + RSS, adjacent batches (Go, then Rust
+    # shell, then Rust full — same adjacent-batch order every label).
+    # A side whose binary is missing is recorded, not measured.
     items23 = {}
-    for label, argv_go, argv_rs in [
-        ("version", [GO_BIN, "--version"], [RS_BIN, "--version"]),
-        ("help", [GO_BIN, "--help"], [RS_BIN, "--help"]),
+    for label, args in [
+        ("version", (("go", [GO_BIN, "--version"]),
+                     ("rust", [RS_BIN, "--version"]),
+                     ("rust-full", [RS_FULL_BIN, "--version"]))),
+        ("help", (("go", [GO_BIN, "--help"]),
+                  ("rust", [RS_BIN, "--help"]),
+                  ("rust-full", [RS_FULL_BIN, "--help"]))),
     ]:
-        mark("before_item2_" + label + "_go")
-        go_r = measure("item2-" + label + "-go", argv_go)
-        mark("after_item2_" + label + "_go")
-        mark("before_item2_" + label + "_rust")
-        rs_r = measure("item2-" + label + "-rust", argv_rs)
-        mark("after_item2_" + label + "_rust")
-        items23[label] = {"go": go_r, "rust": rs_r}
+        items23[label] = {}
+        for name, argv in args:
+            if not os.path.isfile(argv[0]):
+                items23[label][name] = {"missing": True}
+                continue
+            mark("before_item2_" + label + "_" + name)
+            items23[label][name] = measure("item2-" + label + "-" + name, argv)
+            mark("after_item2_" + label + "_" + name)
     summary["items"]["startup_rss"] = items23
     summary["machine"]["loadavg_mid"] = loadavg()
 
@@ -278,6 +403,23 @@ def main():
         mark("before_item3_status_bad_rust")
         parse["rust_bad"] = measure("item3-status-bad-rust", [RS_BIN, "--config", os.path.join(cfgdir_bad, "config.json"), "status"])
         mark("after_item3_status_bad_rust")
+        # rust-full runs the same castctl_cli::run on the same configs;
+        # the only difference is the bigger linked closure, which is
+        # exactly what this item measures for the third column.
+        if os.path.isfile(RS_FULL_BIN):
+            mark("before_item3_status_min_rust_full")
+            parse["rust_full_min"] = measure("item3-status-min-rust-full", [RS_FULL_BIN, "--config", os.path.join(cfgdir_min, "config.json"), "status"])
+            mark("after_item3_status_min_rust_full")
+            mark("before_item3_status_large_rust_full")
+            parse["rust_full_large"] = measure("item3-status-large-rust-full", [RS_FULL_BIN, "--config", os.path.join(cfgdir_large, "config.json"), "status"])
+            mark("after_item3_status_large_rust_full")
+            mark("before_item3_status_bad_rust_full")
+            parse["rust_full_bad"] = measure("item3-status-bad-rust-full", [RS_FULL_BIN, "--config", os.path.join(cfgdir_bad, "config.json"), "status"])
+            mark("after_item3_status_bad_rust_full")
+        else:
+            parse["rust_full_min"] = {"missing": True}
+            parse["rust_full_large"] = {"missing": True}
+            parse["rust_full_bad"] = {"missing": True}
         mark("before_item3_status_bad_go")
         parse["go_bad"] = measure("item3-status-bad-go", [GO_BIN, "--config", os.path.join(cfgdir_bad, "config.json"), "status"])
         mark("after_item3_status_bad_go")
@@ -340,6 +482,12 @@ def main():
         item4["notes"] = "Rust standalone bench crate FAILED to build; see rust_bench_build"
     item4["rust_ns_per_iter"] = rust_bench
     item4["rust_bench_raw"] = rust_raw
+    # No rust-full column: the bench crate measures the shared
+    # castctl-config code (parse/decode/MDToHTML) as pure logic, not a
+    # binary — rust-full links the same config code, so a third column
+    # would re-measure the same functions.
+    item4["no_rust_full_column"] = ("pure-logic benches run the shared castctl-config code, "
+                                     "not a binary; rust-full links the same code")
     summary["items"]["pure_logic"] = item4
     summary["machine"]["loadavg_after_item4"] = loadavg()
 
@@ -506,6 +654,13 @@ def main():
             try: socks_proc.wait(timeout=5)
             except Exception: socks_proc.kill()
         summary["items"]["transport_loopback"] = item5
+    # No rust-full column: the Rust side runs the standalone bench
+    # crate's socks5-get client (same honk dialer code the full binary
+    # links), not the castctl-full binary itself — the harness has no
+    # way to drive a transport request through the CLI binary.
+    summary["items"]["transport_loopback"]["no_rust_full_column"] = (
+        "Rust side is the bench crate's socks5-get client, "
+        "not the castctl-full binary; no CLI path drives a transport request")
 
     # ---- hyperfine cross-check (only if installed)
     hf = shutil.which("hyperfine")
@@ -513,12 +668,49 @@ def main():
     if hf:
         summary["hyperfine"]["version"] = summary["machine"].get("hyperfine_version")
         for key, label, args in (("version_bench", "version", ["--version"]), ("help", "help", ["--help"])):
+            cmds = [f"{GO_BIN} {' '.join(args)}", f"{RS_BIN} {' '.join(args)}"]
+            if os.path.isfile(RS_FULL_BIN):
+                cmds.append(f"{RS_FULL_BIN} {' '.join(args)}")
             r = sh([hf, "--warmup", "5", "--runs", "20", "--export-json",
-                    os.path.join(DATA, f"hyperfine-{label}.json"),
-                    f"{GO_BIN} {' '.join(args)}", f"{RS_BIN} {' '.join(args)}"], timeout=600)
-            summary["hyperfine"][key] = {"exit": r["exit"], "stdout": r["stdout"][-2000:]}
+                    os.path.join(DATA, f"hyperfine-{label}.json")] + cmds, timeout=600)
+            summary["hyperfine"][key] = {"exit": r["exit"], "stdout": r["stdout"][-2000:],
+                                         "commands": cmds}
+
+    # ---- LTO variant (M-perf-1, secondary row only): fat LTO + strip.
+    # Built LAST so a slow or failing LTO build cannot block the
+    # measurements above. LTO comes from the `release-lto` profile in
+    # full-bin/Cargo.toml — RUSTFLAGS `-C lto` is PROVEN broken for
+    # this closure (run8: `-C embed-bitcode=no` / `-C lto`
+    # incompatibility; manual probe: "lto cannot be used for
+    # `proc-macro` crate type without `-Zdylib-lto`" on zeroize_derive
+    # / serde_derive). The profile build writes to release-lto/, so it
+    # never touches the headline binary in release/ — no restore step.
+    if not skip_build:
+        try:
+            b6 = sh(CARGO + ["build", "--profile", "release-lto", "--locked", "--offline",
+                             "--manifest-path", FULL_BIN_MANIFEST],
+                    cwd=ROOT, env=_full_env(), timeout=3600)
+            summary["build_full_lto"] = b6
+            _lto_bin = os.path.join(_FULL_TARGET_DIR, "release-lto", "castctl-full")
+            if b6["exit"] == 0 and os.path.isfile(_lto_bin):
+                full_lto = RS_FULL_BIN + "-lto"
+                shutil.copyfile(_lto_bin, full_lto)
+                summary["rust_full_lto"] = {"size_bytes": os.path.getsize(full_lto),
+                                            "sha256": sha8(full_lto)}
+            else:
+                summary["notes"].append("full-bin LTO build FAILED; see build_full_lto (secondary row only)")
+        except Exception as e:
+            summary["build_full_lto"] = {"error": str(e)}
+            summary["notes"].append("full-bin LTO build FAILED with exception (secondary row only): %s" % e)
+    else:
+        full_lto = RS_FULL_BIN + "-lto"
+        if os.path.exists(full_lto):
+            summary["rust_full_lto"] = {"size_bytes": os.path.getsize(full_lto),
+                                        "sha256": sha8(full_lto)}
     summary["machine"]["loadavg_end"] = loadavg()
     summary["machine"]["disk_free_gib_after"] = round(shutil.disk_usage(_preflight_path).free / (1 << 30), 2)
+    summary["machine"]["full_disk_free_gib_after"] = round(
+        shutil.disk_usage(_full_preflight_path).free / (1 << 30), 2)
     json.dump(summary, open(os.path.join(DATA, "summary.json"), "w"), indent=2)
     print(json.dumps(summary, indent=2))
     return 0

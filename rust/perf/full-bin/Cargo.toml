@@ -1,0 +1,61 @@
+# Standalone full-stack binary (NOT a member of rust/Cargo.toml — perf scope
+# forbids editing it). Own [workspace] so cargo does not attach this crate
+# to the parent workspace; path deps resolve the crates' own workspace
+# (edition/license/dependency pins come from rust/Cargo.toml via inheritance,
+# exactly as rust/perf/bench/Cargo.toml does — precedent, builds on cue).
+[package]
+name = "perf-full"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "M-perf-1 apples-to-apples binary: castctl-cli + castctl-config + castctl-transport + castctl-gateway linked, CLI behaviour identical to castctl-rs"
+
+[workspace]
+
+[[bin]]
+name = "castctl-full"
+path = "src/main.rs"
+
+[features]
+default = ["keep-linked"]
+# keep-linked: link the transport+gateway closure into the binary (see
+# src/keep.rs). --no-default-features builds the same CLI with the
+# retention call compiled out: the size A/B control (see README §1).
+keep-linked = []
+
+[dependencies]
+castctl-cli = { path = "../../castctl-cli" }
+castctl-config = { path = "../../castctl-config" }
+castctl-transport = { path = "../../castctl-transport" }
+castctl-gateway = { path = "../../castctl-gateway" }
+# Direct deps for the retention roots ONLY (not product code):
+serde_json = "=1.0.145"          # json! literals for dispatch_* inputs
+tokio = { version = "=1.48.0", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
+
+[patch.crates-io]
+# REQUIRED, copied verbatim from rust/Cargo.toml: [patch] only applies
+# from the workspace root being built (this file), never from a path
+# dependency's own workspace. Without this, boring-sys/quinn resolve to
+# crates.io and the REALITY/QUIC fork hooks are silently lost — the
+# binary would measure the WRONG transport stack (see rust/Cargo.toml
+# comment M3: "the workspace root must replicate it").
+boring-sys = { git = "https://github.com/Glassyiris/boring-sys", rev = "3beb573b65ecaa69b7eefe3c2fecd074b97facd2" }
+quinn = { git = "https://github.com/Glassyiris/quinn", rev = "11f1de84c28305a3c98ace6d681c35219a8d1e6c" }
+quinn-proto = { git = "https://github.com/Glassyiris/quinn", rev = "11f1de84c28305a3c98ace6d681c35219a8d1e6c" }
+
+[profile.release]
+debug = false
+
+# Secondary LTO variant (M-perf-1): `cargo build --profile release-lto`.
+# LTO must come from the profile, NOT from RUSTFLAGS `-C lto`: the flag
+# applies to every crate including proc-macros (zeroize_derive,
+# serde_derive), which fail with "lto cannot be used for `proc-macro`
+# crate type without `-Zdylib-lto`" (probe 2026-11-05; the earlier
+# RUSTFLAGS attempt also failed with the `-C embed-bitcode=no` /
+# `-C lto` incompatibility). The profile form skips proc-macro crates.
+# The primary release profile stays LTO-free; headline ratios never
+# use this variant.
+[profile.release-lto]
+inherits = "release"
+lto = "fat"
+strip = "symbols"

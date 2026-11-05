@@ -11,10 +11,14 @@ set -eu
 cd "$(dirname "$0")/../.."
 python3 rust/perf/measure_all.py "$@"
 # Advisory read-only SPDX check (never fails the run): TestSPDXHeaders
-# scans .go files repo-wide. This script never creates .go files and never
-# runs a cargo workspace build, so the boring-sys trap (SPDX failures from
-# generated .go files under rust/target/ after a workspace build) cannot
-# be triggered by this rerun; this check only reports.
+# scans .go files repo-wide. This script never creates .go files UNDER
+# THE REPO and never runs a cargo workspace build, so the boring-sys
+# trap (SPDX failures from generated .go files under rust/target/ after
+# a workspace build) cannot be triggered by this rerun; this check only
+# reports. NOTE (M-perf-1): the full-bin build DOES compile boring-sys,
+# but its target dir is forced outside the repo (CARGO_TARGET_DIR when
+# set, else the system temp dir — see measure_all.py), so no generated
+# .go file can land under the repo from this rerun either.
 if command -v go >/dev/null 2>&1; then
   _spdx_log="$(mktemp /tmp/perf0-spdx-check-XXXXXX.log)"
   if PATH="/usr/local/go/bin:$PATH" GOTOOLCHAIN=auto GOFLAGS=-mod=readonly \

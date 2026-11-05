@@ -1,0 +1,41 @@
+{
+  "label": "first-measured-run-rust-full",
+  "argv": [
+    "/tmp/perf-full-target/release/castctl-full",
+    "--version"
+  ],
+  "env_note": "inherited (HOME/XDG isolated by caller)",
+  "warmup": 0,
+  "rss_method": "GNU time -v (thin parent); wait4 ru_maxrss kept as maxrss_kib_raw for audit only",
+  "wall_ms": {
+    "n": 1,
+    "median": 3.393222,
+    "min": 3.393222,
+    "max": 3.393222,
+    "mean": 3.393222
+  },
+  "peak_rss_mib": {
+    "n": 1,
+    "median": 5.48828125,
+    "min": 5.48828125,
+    "max": 5.48828125,
+    "mean": 5.48828125
+  },
+  "exits": [
+    0
+  ],
+  "rss_exits": [
+    0
+  ],
+  "runs": [
+    {
+      "wall_ms": 3.393222,
+      "maxrss_kib": 5620,
+      "maxrss_kib_raw": 13804,
+      "exit": 0,
+      "rss_exit": 0,
+      "wait4": true,
+      "timeout": false
+    }
+  ]
+}
