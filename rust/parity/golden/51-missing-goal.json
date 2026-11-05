@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "id": "51-missing-goal",
+  "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "argv": [
+    "goal"
+  ],
+  "env": {
+    "HOME": "/tmp/castctl-golden-_a24vrld/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-_a24vrld/xdg",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "PATH": "/usr/bin:/bin"
+  },
+  "cwd": "/tmp/castctl-golden-_a24vrld/work",
+  "stdin": "empty",
+  "timeout_seconds": 10,
+  "stdout": "",
+  "stderr": "castctl: the following arguments are required: id\n",
+  "exit_code": 2
+}

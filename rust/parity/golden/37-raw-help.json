@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "37-raw-help",
+  "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "argv": [
+    "raw",
+    "--help"
+  ],
+  "env": {
+    "HOME": "/tmp/castctl-golden-dj3eo8g_/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-dj3eo8g_/xdg",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "PATH": "/usr/bin:/bin"
+  },
+  "cwd": "/tmp/castctl-golden-dj3eo8g_/work",
+  "stdin": "empty",
+  "timeout_seconds": 10,
+  "stdout": "usage: castctl raw METHOD [--body JSON] [--param KEY=VALUE]... [--timeout SECONDS]\n\nCall any gateway method (escape hatch). Unknown methods exit 2. A\nbad --body or --param exits 2. A non-JSON reply is printed as text,\notherwise the reply prints as JSON.\n\noptions:\n  --body JSON         JSON request body (absent means no body).\n  --param KEY=VALUE   path parameter, repeatable.\n  --timeout SECONDS   request timeout in seconds (default 30).\n",
+  "stderr": "",
+  "exit_code": 0
+}

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "22-goal-help",
+  "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "argv": [
+    "goal",
+    "--help"
+  ],
+  "env": {
+    "HOME": "/tmp/castctl-golden-apgz41a8/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-apgz41a8/xdg",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "PATH": "/usr/bin:/bin"
+  },
+  "cwd": "/tmp/castctl-golden-apgz41a8/work",
+  "stdin": "empty",
+  "timeout_seconds": 10,
+  "stdout": "usage: castctl goal ID\n\nShow one goal as JSON.\n",
+  "stderr": "",
+  "exit_code": 0
+}

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "12-auto-approve-help",
+  "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "argv": [
+    "auto-approve",
+    "--help"
+  ],
+  "env": {
+    "HOME": "/tmp/castctl-golden-zmih0xhh/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-zmih0xhh/xdg",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "PATH": "/usr/bin:/bin"
+  },
+  "cwd": "/tmp/castctl-golden-zmih0xhh/work",
+  "stdin": "empty",
+  "timeout_seconds": 10,
+  "stdout": "usage: castctl auto-approve [on|always|off|status] [once on|off|status]\n\nLet wait/send approve every approval with allow_always (on|off|\nstatus); once on|off controls the allow_once fallback. With no\narguments, or status, prints the resolved settings as JSON.\nSettings persist in the active profile's single config file.\n\nPrecedence per toggle: per-call flag, MUSE_AUTO_APPROVE /\nMUSE_AUTO_ALLOW_ONCE, config. Defaults off.\n",
+  "stderr": "",
+  "exit_code": 0
+}

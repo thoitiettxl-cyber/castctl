@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "11-approve-help",
+  "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "argv": [
+    "approve",
+    "--help"
+  ],
+  "env": {
+    "HOME": "/tmp/castctl-golden-hr5ox7h_/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-hr5ox7h_/xdg",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "PATH": "/usr/bin:/bin"
+  },
+  "cwd": "/tmp/castctl-golden-hr5ox7h_/work",
+  "stdin": "empty",
+  "timeout_seconds": 10,
+  "stdout": "usage: castctl approve [ID] [--all] [--once|--session|--today|--always]\n\nApprove a pending request, or every pending approval with --all.\nThe decision defaults to allow_once.\n\noptions:\n  --all          approve every pending approval.\n  --once         allow_once (default).\n  --session      allow_session.\n  --today        allow_today.\n  --always       allow_always.\n",
+  "stderr": "",
+  "exit_code": 0
+}

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "07-history-help",
+  "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "argv": [
+    "history",
+    "--help"
+  ],
+  "env": {
+    "HOME": "/tmp/castctl-golden-zlxclza7/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-zlxclza7/xdg",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "PATH": "/usr/bin:/bin"
+  },
+  "cwd": "/tmp/castctl-golden-zlxclza7/work",
+  "stdin": "empty",
+  "timeout_seconds": 10,
+  "stdout": "usage: castctl history [--thread ID] [--limit N] [--raw] [--download DIR]\n\nRead chat messages as JSON.\n\noptions:\n  --thread ID    side chat session id (default: the main chat).\n  --limit N      number of events (default 10).\n  --raw          print the whole history object as JSON.\n  --download DIR also save files (images/videos) from these messages\n                 into DIR; with --raw the downloads are included in\n                 the object, otherwise {\"messages\": [...],\n                 \"downloads\": [...]} is printed.\n",
+  "stderr": "",
+  "exit_code": 0
+}

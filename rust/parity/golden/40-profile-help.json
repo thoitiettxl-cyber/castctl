@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "40-profile-help",
+  "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "argv": [
+    "profile",
+    "--help"
+  ],
+  "env": {
+    "HOME": "/tmp/castctl-golden-asuyepik/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-asuyepik/xdg",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "PATH": "/usr/bin:/bin"
+  },
+  "cwd": "/tmp/castctl-golden-asuyepik/work",
+  "stdin": "empty",
+  "timeout_seconds": 10,
+  "stdout": "usage: castctl profile <subcommand> [options]\n\nManage profiles. All writes go through the profile library's\natomic/flock/sha256 path; this command never writes config files\ndirectly.\n\nSubcommands: list, show, add, rm, set-outbound, set-fingerprint,\nset-tls-engine, test. Run \"castctl profile <subcommand> --help\"\nfor per-subcommand help.\n\nThe fingerprint and tls_engine settings are recorded only: the\nruntime stays on the uTLS chrome fingerprint regardless of what is\nstored (see \"profile set-fingerprint --help\" and\n\"profile set-tls-engine --help\").\n",
+  "stderr": "",
+  "exit_code": 0
+}

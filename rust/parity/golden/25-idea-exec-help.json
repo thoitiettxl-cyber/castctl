@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "25-idea-exec-help",
+  "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "argv": [
+    "idea-exec",
+    "--help"
+  ],
+  "env": {
+    "HOME": "/tmp/castctl-golden-_6s77b2t/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-_6s77b2t/xdg",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "PATH": "/usr/bin:/bin"
+  },
+  "cwd": "/tmp/castctl-golden-_6s77b2t/work",
+  "stdin": "empty",
+  "timeout_seconds": 10,
+  "stdout": "usage: castctl idea-exec ID [--thread ID]\n\nExecute an idea (the agent acts on it, full mode).\n\noptions:\n  --thread ID  side chat session id to run it in.\n",
+  "stderr": "",
+  "exit_code": 0
+}
