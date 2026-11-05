@@ -204,7 +204,7 @@ async fn dial_url_sends_redacted_literal_not_real_token() {
         target.contains("vm_id=vm-test"),
         "vm_id must survive: {target}"
     );
-    // Decoded level: the server-side query VALUE must be the
+    // Decoded level: the decoded query value must be the
     // literal Go sends raw. No URL/query parser is a
     // dependency of this crate, so decode the two sequences
     // `dial_gateway` emits (`%3C`/`%3E`) on the extracted

@@ -3083,11 +3083,15 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
     to `%3Credacted%3E` before dialing; the server
     decodes it back to `<redacted>`, so the query VALUE
     is identical to Go's raw form. (Mechanism proven by
-    source, fix loop 2: `http-1.5.0`
+    source, fix loop 2: `http` 1.x
     `src/uri/path.rs:444-462` `build_query_map` — WHATWG
     query-state allows 0x21 / 0x24–0x3B / 0x3D /
     0x3F–0x7E, so `<` = 0x3C and `>` = 0x3E are
-    CLASS_INVALID — and tungstenite's
+    CLASS_INVALID — verified against the 1.5.0 source;
+    the lock pins 1.3.1, and the behavioural separator
+    (raw-literal dial fails, encoded dials fine)
+    corroborates the mechanism against the locked build
+    — and tungstenite's
     `IntoClientRequest for &str` is `parse::<Uri>()`.)
     The dial test also asserts the decoded query value
     equals `<redacted>` (fix loop 2, NB5 — decoded with
@@ -3135,7 +3139,17 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
     other "gateway connection closed" strings in
     `gateway.rs` are the generic closed-connection error
     on the read/close paths, not this fallback, and are
-    unchanged.)
+    unchanged. Residuals, fix loop 3: the RECORDED
+    dead-error text still differs from Go's close
+    classification — Rust records "gateway connection
+    closed" via `fail()` on peer-close/EOF paths where Go
+    records receive-failed/`ErrConnectionLost`;
+    pre-existing, diagnostic-only. Detach timing on the
+    open-failure path: Go detaches before the open
+    attempt, Rust detaches after the failed open, so
+    `downSince` can start up to one connect-timeout
+    later; the end state after `live()` returns is
+    identical.)
 
 ## M4a.3 Findings while writing (fail-before proofs + fixes)
 
