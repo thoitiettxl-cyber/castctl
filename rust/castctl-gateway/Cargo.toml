@@ -23,12 +23,12 @@ regex = { workspace = true }
 http = { workspace = true }
 bytes = { workspace = true }
 # M4b (WS literal-token fix): base64 for the
-# Sec-WebSocket-Key + tokio-rustls for the manual TLS wrap
-# in dial.rs (the upgrade is written by hand, so the TLS
-# wrap no longer comes from tokio-tungstenite). Both already
-# in the lock.
+# Sec-WebSocket-Key. The manual TLS wrap in dial.rs no longer
+# uses tokio-rustls: since M4c it goes through
+# `castctl_transport::honk_tls_wrap` (honk/BoringSSL Chrome),
+# so this crate has no tokio-rustls dep. Both already in the
+# lock.
 base64 = { workspace = true }
-tokio-rustls = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
 serde_json = { workspace = true }
 snow = { workspace = true }
@@ -38,8 +38,9 @@ prost = { workspace = true }
 # upgrade is written by hand in dial.rs (M4b literal-token
 # fix), so tungstenite is used only for WS framing
 # (`from_partially_read`) + `derive_accept_key`; the TLS wrap
-# uses `castctl_transport::tls_client_config`, which pins ALPN
-# ["http/1.1"] for BOTH dials, matching Go (see dial.rs).
+# uses `castctl_transport::honk_tls_wrap` (M4c, honk/BoringSSL
+# Chrome), which pins ALPN ["http/1.1"] for BOTH dials,
+# matching Go (see dial.rs).
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 rand = { workspace = true }
 futures-core = { workspace = true }

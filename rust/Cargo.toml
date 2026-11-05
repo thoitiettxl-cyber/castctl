@@ -40,6 +40,10 @@ regex = "=1.13.1"
 # table does NOT propagate to a git dependency, so the workspace root
 # must replicate it, otherwise boring-sys/quinn resolve to crates.io
 # and the REALITY/QUIC fork hooks are silently lost.
+# M4c: the Chrome-parity fork (thoitiettxl-cyber/honk,
+# feat/chrome-tls-parity) was tried and REVERTED — the live 502
+# is not a TLS fingerprint (see rust/PORTING.md §M4c). Upstream
+# pin restored.
 honk-outbound = { git = "https://github.com/daeuniverse/honk", rev = "9e31cc0bd28825afdc0e384dc989bc3f076e69cf" }
 honk-config = { git = "https://github.com/daeuniverse/honk", rev = "9e31cc0bd28825afdc0e384dc989bc3f076e69cf" }
 # M3 HTTP/RPC stack versions are pinned exactly after the first cue

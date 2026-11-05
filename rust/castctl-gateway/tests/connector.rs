@@ -298,7 +298,7 @@ async fn ws_upgrade_502_renders_go_45_chars() {
 /// T-B1 (fix loop 1), no-status path: a response with no
 /// parseable status renders Go's fixed 35-char
 /// `gateway: websocket handshake failed`
-/// (`handshake_log.go:49-51`), NOT the 28-char
+/// (`handshake_log.go:49-51`), NOT the 30-char
 /// `gateway: websocket dial failed` this code rendered
 /// before the fix.
 #[tokio::test]
@@ -356,7 +356,7 @@ async fn ws_upgrade_malformed_token_renders_length_only() {
 /// gorilla returns the response non-nil on accept
 /// mismatch (`client.go:394-405`), so
 /// `handshakeStatusToken` takes the resp branch
-/// (`handshake_log.go:103-107`). NOT the 28-char
+/// (`handshake_log.go:103-107`). NOT the 30-char
 /// `gateway: websocket dial failed`.
 #[tokio::test]
 async fn ws_upgrade_bad_accept_renders_go_status_code_101() {
