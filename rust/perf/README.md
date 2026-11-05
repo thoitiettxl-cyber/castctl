@@ -474,7 +474,7 @@ mới): `castctl-full --version` → `castctl 0.9.0`, exit 0;
   hyper vào `castctl-cli` — xem bullet trên), claim này không còn
   đứng. Không phóng đại, không giấu.
 
-### Tái lập sha (run10 — pinned path, 2 lần độc lập)
+### Tái lập sha (run10 — pinned path, 2 lần chạy độc lập, cùng target dir ấm)
 
 Sha của binary keep phụ thuộc vào **cả hai path**: target dir và
 checkout (source path). Kích thước thì KHÔNG phụ thuộc vào path nào
@@ -490,7 +490,7 @@ trong hai — 17,475,048 B ở cả hai lần build run10, mọi section size
   relink. Giữa hai lần đó, build no-keep plain phụ (cho `nm`) đã ghi
   đè `/tmp/perf-full-target/release/castctl-full`; đúng 4 dòng
   Reproduce check rebuild lại và khôi phục đúng sha `851bb6b4…`. Sha
-  pinned-path tái lập được 2 lần độc lập ở head này.
+  pinned-path tái lập được 2 lần chạy độc lập (cùng target dir ấm) ở head này.
 - **(4c)/(4d) không đo lại ở run10:** cơ chế đã chứng minh ở run9
   vẫn đứng — checkout path là input của sha (19 chuỗi `file!()`
   absolute path + 1 hash cargo metadata trong `hatch.noise.rs`
@@ -559,7 +559,7 @@ size **17,475,048 B**, sha256
 Đã verify: 4 dòng này trên target dir ấm tái lập đúng size+sha
 (relink 0.30 s, ngay sau khi build no-keep plain phụ ghi đè binary
 headline — xem "Tái lập sha" bên trên); driver b5 cũng cho cùng
-size+sha (2 lần độc lập ở head này). Nếu checkout ở head mới hơn mà
+size+sha (2 lần chạy độc lập, cùng target dir ấm, ở head này). Nếu checkout ở head mới hơn mà
 chỉ đổi docs/data (tự verify bằng `git diff --name-only
 fbaa0d7..HEAD`: chỉ README/PORTING/data, không chạm .rs/.toml/lock)
 thì dòng 1 in head mới đó, size + sha vẫn phải khớp, vì binary chỉ
@@ -998,7 +998,8 @@ Item 5 dao động run-to-run cả hai phía và tỉ lệ đổi dấu theo t�
 run10: 0.91 dưới tải thấp) — xem "Run10 so với run9" bên dưới.
 RSS Go `--version` **không** ổn định: bimodal theo session — 30.4 MiB ở
 run5–run10, 43.5 MiB ở run4, 47.7 MiB ở rerun độc lập; tỉ lệ RSS
-shell/Go dao động 0.046–0.073 theo session (xem §3). Run8 khớp run7
+shell/Go dao động 0.046–0.073 theo session với shell tiền-M4b (~2.2 MiB);
+với shell run9/run10 (~6.1 MiB) khoảng đó là 0.128–0.202 (xem §3). Run8 khớp run7
 trong ±5% ở hầu hết các ô headline (không tính hàng n=1; §3 nói riêng
 bên dưới): §2 startup/RSS 7/8 ô N=20 trong ±5% (ngoại lệ duy nhất
 `--help` phía shell +7.0%, 0.867→0.927 ms), §4 logic thuần mọi ô trong
@@ -1023,7 +1024,7 @@ RSS), run8 chỉ 2.24→7.73→6.09. Số Rust §4 ổn định trong ±6% (pars
 +127%, render +140%, split +42%; min của Go parse-large 7.01M ≈
 median run8 — tải tăng dần giữa bench). Wall startup: Go `--version`
 +119% (10.63→23.24 ms) nhưng `--help` −15% (10.86→9.20 ms) trong
-cùng một run; shell `--version` +536% (0.87→5.51 ms), full +195%
+cùng một run; shell `--version` +535% (0.87→5.51 ms), full +195%
 (1.90→5.62 ms) — Go `--version` và `--help` lệch hướng nhau chứng tỏ
 wall 1–20 ms ở run9 bị scheduling jitter chi phối, không phải tốc độ
 thật; hyperfine cũng lệch với driver ở run9 (Go `--version` hyperfine
@@ -1046,9 +1047,10 @@ startup về gần mức run8 (tải thấp): Go `--version` 23.24→10.05 ms
 (−57%), full 5.62→2.39 ms (−57%); tỉ lệ gần như giữ nguyên (full/Go
 0.242→0.238) — ngoại lệ: `--help` phía Rust 1.889→2.247 ms (+19%)
 trong khi Go `--help` đứng yên 9.201→9.193 ms, nên tỉ lệ `--help`
-full/Go 0.205→0.244 (+19%); nguyên nhân chưa rõ (min–max run10 rộng
-hơn: 1.852–3.064 ms so với run9 1.733–2.072 ms — ghi nhận, không giải
-thích). Driver khớp hyperfine trong 9–29% ở run10 (run9 lệch tới 2×).
+full/Go 0.205→0.244 (+19%); nguyên nhân chưa rõ (phân phối tách rõ:
+15/20 lượt run10 nằm trên max run9 2.072 ms; 0/20 lượt run9 nằm trên
+median run10 2.247 ms; min–max run10 rộng hơn: 1.852–3.064 ms so với
+run9 1.733–2.072 ms — ghi nhận, không giải thích). Driver khớp hyperfine trong 9–29% ở run10 (run9 lệch tới 2×).
 (c) §4: số Go ở 4 item lớn giảm 31–55% (parse-large 12.42→7.50 ms,
 MDToHTML 12.11→5.73 ms, render 14.41→6.53 ms, split 790→544 µs) — về
 gần mức run8; số Rust ổn định trong ±7% (parse-large −3.1%,

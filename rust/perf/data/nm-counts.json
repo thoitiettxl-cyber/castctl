@@ -366,7 +366,7 @@
         "result": "NOT re-probed for run10. Run9's (4c)/(4d) proofs stand: checkout path is a sha input (19 file!() absolute paths + 1 cargo metadata hash in the hatch.noise.rs include path); cold-vs-warm does not affect sha. Run10 numbers come from the pinned path only."
       }
     },
-    "conclusion": "Size 17,475,048 B is stable across the two run10 builds (driver b5 + reproduce relink). Sha reproduces ONLY from checkout /tmp/castctl-rust-perf1 + target dir /tmp/perf-full-target (2x independent at this head). The run9 sha_reproduction record lives in git history of this file.",
+    "conclusion": "Size 17,475,048 B is stable across the two run10 builds (driver b5 + reproduce relink). Sha reproduces ONLY from checkout /tmp/castctl-rust-perf1 + target dir /tmp/perf-full-target (2 independent runs at this head, same warm target dir). The run9 sha_reproduction record lives in git history of this file.",
     "run9_history": "Run9 byte_reproduction_check (740e2dc, target dir /tmp/perf-full-target reproducing all four run9 shas) is preserved in git history of this file; this rewrite replaces it with the run10 record."
   },
   "nm": {
