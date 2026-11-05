@@ -6006,7 +6006,8 @@ Rust tốt hơn. Run7 là số chính thức; số RSS Rust của run4 (commit
 `wait4` kế thừa qua fork — đã chứng minh bằng probe) nên đã bị thay
 thế, còn wall-clock của run4 đo bằng `os.wait4` blocking là đúng
 (Rust `--version` 0.686–0.831 ms không thể ra từ lưới 5 ms) — wall
-drift run4→run7 là drift theo tải, tỉ lệ ổn định 0.081–0.088. Vòng
+drift run4→run7 là drift theo tải, tỉ lệ 0.081–0.088 trong cửa sổ
+run4–run7 (rerun độc lập đo 0.109, xem README mục Drift). Vòng
 poll WNOHANG gây lượng tử hoá 5 ms chỉ xuất hiện ở driver trung gian
 của fix loop 1 (run5, Rust median 5.448 ms), không phải phương pháp
 của run4; các vấn đề phương pháp do probe trong fix loop 1 phát hiện,
@@ -6044,6 +6045,11 @@ cache thật không đo (VM dùng chung); không có hàng cold trong bảng nà
 cue nên hotspot dựa trên breakdown số đo + lý do cấu trúc, không dựa
 trên CPU profile; (6) RSS đo bằng GNU time (thin parent); số RSS Rust
 run4/run5 (13.2 MiB) sai do floor của Python cha — số đúng ~2.1 MiB.
+RSS Go `--version` bimodal theo session — 30.4 MiB (run5–run7),
+43.5 MiB (run4), 47.7 MiB (rerun độc lập,
+`data/verify-rerun-summary.json`); tỉ lệ RSS Rust/Go theo session
+0.046–0.073, không phải một số duy nhất; tỉ lệ startup 0.081–0.109
+theo session; nguyên nhân chưa rõ (giả thuyết THP chưa kiểm chứng).
 Hotspot ưu tiên (xem `rust/perf/README.md`): validation parse-large
 (66% thời gian parse), `md_to_html` (78% render chain), `split_text`
 collect `Vec<char>`, đo lại sau validation, startup/binary đã đủ tốt,

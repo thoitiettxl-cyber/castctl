@@ -11,7 +11,8 @@ kế thừa qua fork, đã chứng minh bằng probe) — nên toàn bộ số R
 đã bị thay bằng run7. Wall-clock của run4 thì ĐÚNG: driver run4 dùng
 `os.wait4` blocking (không có vòng poll nào), và Rust `--version`
 0.686–0.831 ms không thể ra từ lưới 5 ms — wall drift run4→run7 (+34%
-Go / +23% Rust) là drift theo tải, tỉ lệ ổn định 0.081–0.088. Vòng poll
+Go / +23% Rust) là drift theo tải, tỉ lệ 0.081–0.088 trong cửa sổ
+run4–run7 (rerun độc lập đo 0.109, xem mục Drift). Vòng poll
 WNOHANG gây lượng tử hoá 5 ms chỉ xuất hiện ở driver trung gian của fix
 loop 1 (run5, Rust `--version` median 5.448 ms), không phải phương pháp
 của run4; các vấn đề phương pháp do probe trong fix loop 1 phát hiện,
@@ -214,13 +215,26 @@ large 2.681 ms so với min 0.877 ms.
 
 **Lịch sử số RSS (đọc kỹ trước khi trích):** số RSS Rust ở run4/run5
 (13.2 MiB) là SAI — đó là floor của Python cha (xem phương pháp đo);
-số đúng là ~2.1 MiB. Số RSS Go `--version` ở run4 (43.5 MiB) cũng
-không tái lập được: run5/run6/run7 đều đo 30.4 MiB (GNU time đối chiếu
-trực tiếp 30.1–30.9 MiB) với cùng binary (cùng sha256). Nguyên nhân
-chênh lệch run4 chưa rõ — giả thuyết (chưa kiểm chứng): Go 1.27 xin
-transparent huge page cho heap arena, RSS hạch toán cả page 2 MB dù
-chỉ dùng một phần; tuỳ trạng thái THP/fragmentation mà số hạch toán
-dao động. Tài liệu này dùng 30.4 MiB (3 run liên tiếp khớp nhau).
+số đúng là ~2.1 MiB. RSS Go `--version` là **bimodal theo session**
+(cùng binary, cùng sha256): run4 đo 43.5 MiB, run5/run6/run7 đều đo
+30.4 MiB, còn rerun độc lập (verify, `2026-11-05T14:26:32Z`, xem mục
+Drift) đo 47.7 MiB — tức 2/5 session ở mode cao (43.5, 47.7 MiB), 3/5
+ở mode thấp (30.4 MiB). Trong một session thì số ổn định chặt (verify:
+47.61–47.93 MiB trên cả 20 run; run7: 29.80–30.98 MiB). Hai phương
+pháp đo độc lập đồng thuận trong session verify: GNU time 47.74 MiB
+và `wait4` `maxrss_kib_raw` median 47.7 MiB, nên mode cao là thật,
+không phải lỗi đo. Nguyên nhân chưa rõ — giả thuyết (chưa kiểm
+chứng): Go 1.27 xin transparent huge page cho heap arena, RSS hạch
+toán cả page 2 MB dù chỉ dùng một phần; tuỳ trạng thái THP/fragmentation
+mà số hạch toán dao động; lúc probe `AnonHugePages` là 0 kB nên giả
+thuyết này không được xác nhận cũng không bị bác bỏ. Probe với đúng
+env cô lập của driver vẫn cho mode thấp (30.5–31.3 MiB, probe của
+verifier sau rerun, không nằm trong summary đã commit) nên env không
+phải nguyên nhân. **Hệ quả khi trích:** số RSS Go trong bảng trên là
+số của run7 (mode thấp, 30.4 MiB); tỉ lệ RSS Rust/Go dao động theo
+session **0.046–0.073** (run7: 0.071; verify: 0.046), không phải một
+số duy nhất. RSS Rust ổn định ~2.1–2.3 MiB xuyên suốt mọi session
+(run6/run7/verify ở `--version`: 2.14 / 2.14 / 2.22 MiB).
 
 ### 4. Logic thuần: parse config + render text Telegram
 
@@ -415,11 +429,30 @@ tăng theo kích thước fixture, không phải drift máy.
 Đọc: số Rust ở item 4 ổn định xuyên suốt (dao động ≤6% quanh median 4
 run, trừ parse-large tăng theo fixture); số Go dao động nhiều hơn theo
 tải máy (MDToHTML +17% run4→run7, parse-min −23%). Tỉ lệ startup
-Rust/Go ổn định 0.081–0.088 dù thời gian tuyệt đối drift +34% (Go)
-và +23% (Rust) run4→run7 theo tải. Item 5 dao động run-to-run cả hai
-phía (Rust 0.729–0.929) và tỉ lệ đổi dấu (0.90–1.08) — khẳng định kết
-luận "trong sai số". RSS Go `--version` ổn định 30.4 MiB ở run5–run7;
-run4 (43.5 MiB) là outlier chưa rõ nguyên nhân (xem §3).
+Rust/Go 0.081–0.088 ở run4–run7, nhưng rerun độc lập đo 0.109 (wall Go
+nhanh hơn 23–27% dù tải cao hơn — chưa giải thích được, xem bên dưới);
+thời gian tuyệt đối drift +34% (Go) và +23% (Rust) run4→run7 theo tải.
+Item 5 dao động run-to-run cả hai phía (Rust 0.729–0.929) và tỉ lệ đổi
+dấu (0.90–1.08) — khẳng định kết luận "trong sai số". RSS Go
+`--version` **không** ổn định: bimodal theo session — 30.4 MiB ở
+run5–run7, 43.5 MiB ở run4, 47.7 MiB ở rerun độc lập; tỉ lệ RSS
+Rust/Go dao động 0.046–0.073 theo session (xem §3).
+
+**Verify độc lập (rerun từ checkout sạch, `data/verify-rerun-summary.json`):**
+ngày 2026-11-05T14:26:32Z, `sh rust/perf/run.sh` không flag, exit 0, từ
+checkout sạch của head này trên cue; cùng binary hai phía (sha256 Go
+`c8ea009e…`, Rust `6f270890…` giống hệt run7); loadavg 1-phút 3.47–4.05
+(33 marks; run7: 0.48–1.00). Logic thuần drift trong ~10% so với run7
+(Go −3.1%…+7.4%, Rust −5.4%…−0.8%), item 5 Go +0.3% / Rust −0.4%,
+build 2.3 / 2.1 s, allocs <0.2%. Ngoài băng ~10%: wall startup Go nhanh
+hơn 23–27% (11.169→8.192 ms `--version`, 10.771→8.306 ms `--help`) dù
+tải cao gấp ~7× — ngược hướng mong đợi, chưa giải thích được; RSS Go
+`--version` 30.36→47.74 MiB (+57%), status-min 32.74→48.30 MiB,
+status-large 37.67→52.17 MiB, trong khi RSS Rust dao động vài %
+(2.14→2.22 MiB ở `--version`, 2.83→2.85 MiB ở status-large). Tỉ lệ
+startup 0.081→0.109, tỉ lệ RSS 0.071→0.046. Hướng kết luận không đổi
+(Rust vẫn nhanh hơn nhiều ở mọi headline), nhưng số tuyệt đối của Go
+không ổn định qua các session — xem §3.
 
 ## File trong `rust/perf/`
 
@@ -446,7 +479,8 @@ run4 (43.5 MiB) là outlier chưa rõ nguyên nhân (xem §3).
 - `data/` — số thô các lần chạy (run7 là số trong bảng trên;
   `run7-stdout.txt` là stdout thật của run7; `run5-summary.json` /
   `run6-summary.json` là summary đầy đủ của run5/run6 để đối chiếu
-  bảng Drift).
+  bảng Drift; `verify-rerun-summary.json` là summary đầy đủ của rerun
+  độc lập (2026-11-05T14:26:32Z) để đối chiếu drift).
 
 ## Chưa kiểm chứng / giới hạn (ghi rõ, không giấu)
 
@@ -458,9 +492,15 @@ run4 (43.5 MiB) là outlier chưa rõ nguyên nhân (xem §3).
 - Rust chưa có số allocation/op tương đương Go `ReportAllocs`.
 - Item 5 đo harness hand-roll, không phải outbound/gateway thật.
 - So sánh kích thước binary mang caveat scope M2 (xem §1).
-- Số RSS Go `--version` ở run4 (43.5 MiB) không tái lập được và chưa rõ
-  nguyên nhân (giả thuyết THP chưa kiểm chứng); số dùng ở đây là 30.4
-  MiB (run5–run7 khớp nhau, GNU time đối chiếu).
+- Số RSS Go `--version` bimodal theo session: 30.4 MiB (run5–run7) vs
+  43.5 MiB (run4) vs 47.7 MiB (rerun độc lập,
+  `data/verify-rerun-summary.json`); nguyên nhân chưa rõ (giả thuyết
+  THP chưa kiểm chứng — `AnonHugePages` 0 kB lúc probe; env cô lập
+  không phải nguyên nhân theo probe của verifier). Số RSS Go trong
+  bảng là số run7 (mode thấp); tỉ lệ RSS Rust/Go theo session là
+  0.046–0.073. Wall startup Go cũng drift −23…−27% ở rerun độc lập
+  dưới tải cao hơn — chưa giải thích được.
 - Run5/run6 được commit ở `data/run5-summary.json` /
-  `data/run6-summary.json` để đối chiếu drift; chỉ run7 là baseline
+  `data/run6-summary.json` để đối chiếu drift; rerun độc lập được
+  commit ở `data/verify-rerun-summary.json`; chỉ run7 là baseline
   chính thức.
