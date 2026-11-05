@@ -13,6 +13,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "tim
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { workspace = true, features = ["tokio"] }
 http = { workspace = true }
 http-body-util = { workspace = true }
 bytes = { workspace = true }

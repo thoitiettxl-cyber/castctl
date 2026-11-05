@@ -28,13 +28,13 @@ use std::time::Duration;
 
 use castctl_transport::dialer::{DialTarget, DirectDialer};
 use castctl_transport::rpc::RpcClient;
-use common::{FakeServer, Responder};
+use common::{FakeServer, RequestRecord, Responder};
 
 #[tokio::test]
 async fn env_proxy_is_ignored() {
-    let gateway = FakeServer::start(Arc::new(|_| {
+    let gateway = FakeServer::start(Arc::new(|_: &RequestRecord| {
         (
-            200,
+            200u16,
             vec![("content-type".to_string(), "application/json".to_string())],
             br#"{"ok":true,"result":{}}"#.to_vec(),
         )

@@ -81,11 +81,13 @@ impl DialTarget {
 /// - The returned stream's `Debug` must not print credentials;
 ///   honk `ProxyStream` internals are never Debug-printed here.
 pub trait Dialer: Send + Sync {
-    fn dial(
-        &self,
-        target: &DialTarget,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn AsyncReadWrite>, TransportError>> + Send + '_>>;
+    fn dial(&self, target: &DialTarget) -> DialFuture<'_>;
 }
+
+/// Boxed dial future (factored out so the trait and its impls do
+/// not repeat the full type; clippy::type_complexity).
+pub type DialFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Box<dyn AsyncReadWrite>, TransportError>> + Send + 'a>>;
 
 /// Direct dialer: plain TCP to the target. This is the `direct`
 /// outbound of Go `internal/profile/outbound.go:24-27` (a direct
@@ -130,11 +132,7 @@ pub async fn resolve_target(target: &DialTarget) -> Result<Vec<SocketAddr>, Tran
 }
 
 impl Dialer for DirectDialer {
-    fn dial(
-        &self,
-        target: &DialTarget,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn AsyncReadWrite>, TransportError>> + Send + '_>>
-    {
+    fn dial(&self, target: &DialTarget) -> DialFuture<'_> {
         let target = target.clone();
         Box::pin(async move {
             let addrs = resolve_target(&target).await?;
@@ -209,11 +207,7 @@ impl HonkDialer {
 }
 
 impl Dialer for HonkDialer {
-    fn dial(
-        &self,
-        target: &DialTarget,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn AsyncReadWrite>, TransportError>> + Send + '_>>
-    {
+    fn dial(&self, target: &DialTarget) -> DialFuture<'_> {
         let target = target.clone();
         let node = &self.node;
         let registry = &self.registry;

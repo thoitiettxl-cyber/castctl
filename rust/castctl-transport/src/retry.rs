@@ -25,6 +25,7 @@
 //!   retryable").
 //! - Everything else (`Gateway`, `Timeout`, `Validation`, …) →
 //!   return immediately.
+//!
 //! The `gw()` (reconnect) branch of Go `retryCall` retries any
 //! non-auth error until the budget runs out; M3's RPC layer has
 //! no separate reconnect step (each attempt re-dials), so the

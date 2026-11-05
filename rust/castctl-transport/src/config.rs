@@ -47,10 +47,11 @@ use honk_config::node::{
 use crate::error::TransportError;
 
 /// What `dispatch` decided for one outbound object.
-#[derive(Debug)]
+/// No derived Debug: the hand-written impl below prints
+/// protocol/host/port only, never node credentials.
 pub enum Dispatch {
     /// Dial through honk-outbound with this node.
-    Honk(Node),
+    Honk(Box<Node>),
     /// Direct dial (no proxy protocol).
     Direct,
     /// Always fail-closed (honk `Block` handler semantics: dial
@@ -189,17 +190,15 @@ pub fn validate_reality(
             }
             if let Some(sid) = short_id {
                 let sid = sid.trim();
-                if !sid.is_empty() {
-                    if sid.len() > 16
+                if !sid.is_empty()
+                    && (sid.len() > 16
                         || sid.len() % 2 != 0
-                        || !sid.chars().all(|c| c.is_ascii_hexdigit())
-                    {
-                        return Err(TransportError::Validation {
-                            message:
-                                "tls.reality.short_id must be even-length hex of at most 8 bytes"
-                                    .to_string(),
-                        });
-                    }
+                        || !sid.chars().all(|c| c.is_ascii_hexdigit()))
+                {
+                    return Err(TransportError::Validation {
+                        message: "tls.reality.short_id must be even-length hex of at most 8 bytes"
+                            .to_string(),
+                    });
                 }
             }
             Ok(())
@@ -525,15 +524,17 @@ pub fn dispatch_outbound(
             });
         }
     };
-    // Built from Default (which stamps created_at/updated_at via
-    // honk-config's own chrono use) so this crate needs no direct
+    // Built with ..Default::default() (which stamps created_at/updated_at
+    // via honk-config's own chrono use) so this crate needs no direct
     // chrono dependency for honk's timestamp fields.
-    let mut node = Node::default();
-    node.name = tag.to_string();
-    node.address = format!("{server}:{port}");
-    node.host = server.to_string();
-    node.port = port;
-    node.outbound = outbound_config;
+    let mut node = Node {
+        name: tag.to_string(),
+        address: format!("{server}:{port}"),
+        host: server.to_string(),
+        port,
+        outbound: outbound_config,
+        ..Default::default()
+    };
     // Stream-transport normalization (WS managed-header check,
     // transport vocab) — errors are validation errors, not panics.
     if let Err((field, msg)) = node.normalize_stream_transport() {
@@ -542,7 +543,7 @@ pub fn dispatch_outbound(
         });
     }
     node.id = node.derive_id();
-    Ok(Dispatch::Honk(node))
+    Ok(Dispatch::Honk(Box::new(node)))
 }
 
 fn get_u64(obj: &serde_json::Value, key: &str) -> Option<u64> {
@@ -682,7 +683,7 @@ mod tests {
     fn vless_reality_node_and_ss_plugin_rejected() {
         let key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         let d = dispatch_outbound(
-            &json(&format!(r#"{{"type":"vless","server":"127.0.0.1","server_port":443,"uuid":"11111111-1111-1111-1111-111111111111","flow":"xtls-rprx-vision","tls":{{"enabled":true,"server_name":"example.com","utls":{{"enabled":true,"fingerprint":"chrome"}},"reality":{{"enabled":true,"public_key":"{key}","short_id":"0123abcd"}}}}}}}"#)),
+            &json(&format!(r#"{{"type":"vless","server":"127.0.0.1","server_port":443,"uuid":"11111111-1111-1111-1111-111111111111","flow":"xtls-rprx-vision","tls":{{"enabled":true,"server_name":"example.com","utls":{{"enabled":true,"fingerprint":"chrome"}},"reality":{{"enabled":true,"public_key":"{key}","short_id":"0123abcd"}}}}}}"#)),
             None,
         )
         .expect("vless reality dispatch");

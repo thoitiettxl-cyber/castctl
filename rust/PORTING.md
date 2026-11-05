@@ -1190,3 +1190,372 @@ byte-identical (sha256 3972dc97…dfb36986, 674 lines)
 the Go tree is untouched). Nothing was pushed; no PR was
 opened; CI Go status is therefore "not run for this
 branch" — not claimed green.
+
+## M3.6 Toolchain pin 1.99.1 (Boss decision, hướng (a))
+
+Supersedes the 1.97.1 toolchain line above for the M3b
+rerun; the M3 submission history in §M3.5 is not rewritten.
+Reason for the pin, measured: honk at the pinned rev
+(`9e31cc0`) pulls `aya 0.16.0` through `honk-ebpf-common`
+(`aya = "0.16"` in honk's workspace; `Cargo.lock` reverse
+lookup shows only `honk-outbound` depends on
+`honk-ebpf-common`), and `aya 0.16.0` requires rustc >=
+1.98 — the exact M3 blocker error (`aya@0.16.0 requires
+rustc 1.98.0`, §M3.5). There is no lock-only fix (lowering
+aya would violate honk's own version requirement), and the
+sha is NOT changed (Boss direction: no sha change). 1.99.1
+is chosen because it matches honk's own
+`rust-toolchain.toml`; the pin lives in
+`rust/rust-toolchain.toml` (`channel = "1.99.1"`,
+components `clippy` + `rustfmt`, `profile = "minimal"`)
+so any machine reproduces the build without changing its
+default toolchain.
+
+Cue toolchain install (Boss direction, verbatim shape:
+`rustup toolchain install 1.99.1 --profile minimal`,
+then `rustup component add --toolchain 1.99.1 clippy
+rustfmt`), run on cue 2026-11-05:
+```
+$ rustup toolchain list   (before)
+1.97.1-x86_64-unknown-linux-gnu (active, default)
+$ rustup toolchain install 1.99.1 --profile minimal
+info: latest update on 2026-10-15 for version 1.99.1 (58cf8f9c3 2026-10-13)
+1.99.1-x86_64-unknown-linux-gnu installed - rustc 1.99.1 (58cf8f9c3 2026-10-13)
+$ rustup component list --toolchain 1.99.1 | grep -E "^(clippy|rustfmt)-"
+clippy-x86_64-unknown-linux-gnu (installed)
+rustfmt-x86_64-unknown-linux-gnu (installed)
+$ rustup toolchain list   (after)
+1.97.1-x86_64-unknown-linux-gnu (active, default)
+1.99.1-x86_64-unknown-linux-gnu
+$ rustc --version; cargo --version   (outside any rust/ dir)
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+cargo 1.97.1 (c980f4866 2026-06-30)
+$ cargo +1.99.1 --version; cargo +1.99.1 clippy --version; cargo +1.99.1 fmt --version
+cargo 1.99.1 (5f94df478 2026-08-27)
+clippy 0.1.99 (58cf8f9c35 2026-10-13)
+rustfmt 1.10.0-stable (58cf8f9c35 2026-10-13)
+```
+Default NOT changed, old toolchain NOT deleted (both
+lines above prove it). Side effect, recorded honestly:
+rustup itself self-updated 1.29.1 → 1.29.3 during the
+install check; that changes the rustup binary, not any
+toolchain or default. Whether the rustup shim on cue
+honors `rust/rust-toolchain.toml` (vs explicit
+`cargo +1.99.1` invocation) is probed in §M3.7 before
+any claim is made about the file.
+
+Transitive-only note (also in `rust/NOTICE` and
+`docs/provenance.md` §13): `aya` / `honk-ebpf-common`
+are transitive dependencies NOT used by castctl code —
+no castctl source imports them (grep clean in
+`rust/castctl-transport/{src,tests}` and the workspace
+`Cargo.toml`). The nuance, checked against the cargo git
+checkout on cue and recorded in §M3.7 (not assumed
+here): `aya` is pure transitive (no `aya::` reference
+in honk-outbound source either), while
+`honk-ebpf-common` IS used by honk-outbound itself
+(socket-mark constants in its direct dial path) —
+castctl never touches either crate.
+
+## M3.7 — Gate green on cue with toolchain 1.99.1 (M3b)
+
+Toolchain-shim proof (cue, `/tmp/castctl-rust-m3/rust`):
+`cargo --version` prints `cargo 1.99.1 (5f94df478
+2026-08-27)` and `rustup show` reports the toolchain
+active because it is "overridden by
+'/tmp/castctl-rust-m3/rust/rust-toolchain.toml'". The
+gates below therefore ran under 1.99.1 via the plain
+`cargo` shim, not via an explicit `cargo +1.99.1`
+invocation (that invocation was also verified in §M3.6
+and gives the same toolchain).
+
+Cue provisioning for the build (environment, not code):
+`cmake` 3.28.3 (`apt-get install -y cmake`, after the
+boring-sys build failed with "is `cmake` not
+installed?") and `libclang-dev` (libclang-18, after
+bindgen 0.72.1 failed with "Unable to find libclang");
+`ninja` still absent, `make` is the fallback generator.
+rustup self-updated 1.29.1 → 1.29.3 during the toolchain
+install; that changes the rustup binary, not any
+toolchain or default.
+
+Gate run "attempt 6" (cue, plain `cargo`, 1.99.1):
+- `cargo fmt` (apply) exit 0, then `cargo fmt --check`
+  exit 0 (formatting synced back to the local tree).
+- `cargo build --workspace` exit 0, cold, 1m 35s.
+- `cargo test --workspace` exit 0: 229 passed, 0 failed,
+  0 ignored — castctl-cli 41, castctl-config 87,
+  castctl-log-redact 46, castctl-rs 0, parity 2,
+  castctl-shared 7, castctl-tg-files 2, castctl-tg-text
+  10, castctl-transport lib 25, env_proxy 1, rpc 8,
+  doc-tests 0 (7 targets). Invariant tests present:
+  `env_proxy_is_ignored`, `redirect_is_refused_and_
+  second_server_gets_nothing`,
+  `token_in_request_body_never_appears_in_errors`,
+  retry-matrix tests.
+- `cargo clippy --workspace -- -D warnings` exit 0,
+  1m 07s, no `#[allow]` added (no blanket allows at all).
+
+Code fixes between the M3 submission and the green
+gate (all in `rust/castctl-transport`, no sha or
+toolchain change, no lowered criterion):
+- E0119 conflicting `Debug` impls for
+  `config::Dispatch`: removed `#[derive(Debug)]`, kept
+  the hand-written redacting impl (passwords never
+  printed; covered by
+  `dispatch_debug_never_prints_passwords`).
+- E0277 hyper `rt::Read/Write` not satisfied for honk's
+  tokio stream: wrapped the dialed stream with
+  `hyper_util::rt::TokioIo` (canonical hyper↔tokio
+  adapter, zero-copy wrapper) in `http.rs`; added
+  `hyper-util` to the workspace (`=0.1.20`, resolved on
+  cue to 0.1.20, checksum
+  `96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0`)
+  and to `castctl-transport` (`features = ["tokio"]`).
+  This resolves the writer's uncompiled hyper-handshake
+  uncertainty from §M3.
+- Format-string bug in the vless-reality test
+  (`config.rs`): one extra `}` removed from the tail.
+- `Dispatch::Honk(Box<Node>)` (was `Node`): fixes
+  clippy `large_enum_variant` (728-byte variant vs.
+  unit variants); construction updated to
+  `Box::new(node)`.
+- Merged nested reality `if`s into one `&&`
+  (`collapsible_if`); struct-literal `Node { …,
+  ..Default::default() }` init
+  (`field_reassign_with_default`); factored
+  `DialFuture<'a>` alias (`type_complexity`);
+  `split_once('/')` in `validate_content_type`
+  (`manual_split_once`, semantics identical);
+  blank doc line in `retry.rs` and moving the alias doc
+  after the trait (`doc_lazy_continuation` ×7 + ×2);
+  `200` → `200u16` and `|_: &RequestRecord|` closure
+  annotation in `tests/env_proxy.rs` (E0271 + Fn
+  generality); rustfmt normalization in `config.rs` /
+  `dialer.rs`.
+- Non-gate warning left as-is (recorded, not churned):
+  `cargo test` shows `field 'headers' is never read`
+  for `RequestRecord.headers` in
+  `tests/common/mod.rs:26` (rpc test target); the
+  clippy gate has no `--all-targets`, so it does not
+  fail the gate.
+
+Ebpf nuance (verified on cue, corrects the "only to
+satisfy the dependency graph" phrasing for one crate):
+- `aya` 0.16.0 (+ aya-build, aya-ebpf-bindings,
+  aya-ebpf-cty, aya-obj): pure transitive. No `aya::`
+  reference in honk-outbound source (grep empty in the
+  cue checkout
+  `crates/honk-outbound/src`); it enters only via
+  `honk-ebpf-common`'s own dependencies. Only
+  `honk-outbound` depends on `honk-ebpf-common`
+  (Cargo.lock reverse lookup).
+- `honk-ebpf-common`: NOT used by castctl code (grep
+  clean), but honk-outbound itself uses its constants
+  in the direct dial path: `CLASSIFIED_MARK` in
+  `proxy/direct.rs:32` (`DirectMark::socket_mark`,
+  used at lines 51/87) and `DAE_BYPASS_MARK` in
+  `util.rs:29`, plus a test-only import in
+  `proxy/packet/socket_mark_tests.rs:6`. It is a
+  live honk dependency (SO_MARK for direct sockets),
+  not dead weight inside honk. The Boss line stands
+  for castctl: neither crate is used by castctl code.
+
+## M3.8 — TLS / QUIC parity on cue (M3b, after the gate)
+
+Method (same parser both sides, so parser quirks
+cancel out): a record-only Python TCP listener on
+127.0.0.1 captures the first TLS record (ClientHello);
+a Python parser reports JA3 (classic, GREASE kept),
+JA4 (this parser: version from supported_versions,
+SNI d/i, 2-digit cipher/extension counts excluding
+SNI+ALPN, ALPN first+last char, GREASE→0000 BEFORE
+sorting, first 12 hex of SHA256 over sorted ciphers
+and over sorted extensions + presented-order
+signature algorithms), plus all raw ordered lists.
+N = 5 runs per side per row. Go side: scratch clone
+on cue (`/tmp/parity-go`, never in the repo tree) +
+throwaway test `TestZZParityClientHello` with the
+canonical castctl tags
+`with_utls,with_quic,with_wireguard,with_gvisor`
+(docs/development.md:10). Rust side: cue-only example
+`castctl-transport/examples/parity_dial.rs` (never
+committed; removed by the final local→cue sync).
+Fixture (ephemeral, same both sides): SNI
+`example.com`, trojan (plain TLS row) and vless +
+REALITY (reality row, short_id `0123abcd`, one
+ephemeral X25519 public key — public only, no
+private key generated or stored; password/UUID are
+fake test values). Cue Go notes: `/usr/local/bin/go`
+is a wrapper that exports `GOTOOLCHAIN=local`
+(castctl's go.mod needs ≥ 1.27.3, cue's go is 1.26.8),
+so parity used the real `/usr/local/go/bin/go` with
+`GOTOOLCHAIN=auto` (toolchain downloaded on demand);
+the wrapper itself was NOT modified. Reality key
+encoding differs between stacks: sing-box rejects
+the padded base64 form ("illegal base64 data at
+input byte 43", the trailing `=`), so the Go side
+used the same key bytes unpadded while honk accepts
+the padded form.
+
+Parser bug found by recomputation (disclosed, not
+hidden): the first JA4 implementation sorted cipher/
+extension lists BEFORE normalising GREASE, so the
+random GREASE value leaked into the hash through its
+sort position and JA4 varied run to run. Fixed to
+normalise-then-sort; all JA4 values below are the
+corrected ones. Raw fields (cipher/extension sets,
+groups, sigalgs) were never affected. JA3 varies per
+run on both sides by design (GREASE kept, presented
+order) — 5 distinct JA3 per side per row — so JA3
+equality is not the comparison; the stable sets are.
+
+TLS row (trojan, utls chrome both sides; SNI
+`example.com`, ALPN `[h2, http/1.1]` both sides):
+- Go JA4 (stable ×5):
+  `t13d1616h2_74c5f98c3854_f20eef27beb5`.
+  Rust JA4 (stable ×5):
+  `t13d1814h2_4be38248e33f_2ecda25e495a`.
+  JA4 differs (cipher count 16 vs 18, extension
+  count 16 vs 14) — a listed difference, NOT a gate
+  failure, and NOT claimed as a match.
+- Cipher sets (non-GREASE, sorted): Go 15 suites
+  `1301,1302,1303,c02b,c02c,c02f,c030,cca8,cca9,
+  c013,c014,009c,009d,002f,0035` (+1 GREASE = 16).
+  Rust 17 suites: the same 15 + `c009,c00a`
+  (ECDHE-ECDSA AES-SHA CBC suites utls-chrome does
+  not send) (+1 GREASE = 18).
+- Extension sets (non-GREASE, sorted): shared 11
+  `000a,000b,000d,0017,001b,0023,002b,002d,0033,
+  fe0d,ff01` (+ SNI `0000` + ALPN `0010` both sides).
+  Go-only: `0005` (status_request), `0012`
+  (signed_certificate_timestamp), `44cd`.
+  Rust-only: `4469`. `44cd`/`4469` are fixed
+  (present in all 5 runs on their side), 5-byte
+  payloads, and unidentified: source grep in
+  metacubex/utls v1.8.7 and boring-sys found no
+  literal; they are NOT claimed to be the same
+  extension (the 0x44xx proximity is not evidence).
+- Same both sides: supported_groups
+  `{11ec,001d,0017,0018}` (+ GREASE; `11ec` =
+  X25519MLKEM768), key_share groups
+  `{GREASE,11ec,001d}`, supported_versions
+  `{GREASE,0304,0303}`, signature_algorithms
+  `0403,0804,0401,0503,0805,0501,0806,0601`,
+  extension order fully permuted on every run
+  (no two runs share an order — both sides permute
+  like Chrome).
+- Record length: Go 1721–1817 bytes, Rust
+  1712–1776 bytes (variation within a side is
+  GREASE/session randomness, not a set change).
+
+REALITY row (vless + REALITY, utls chrome both sides):
+- Go JA4 = its TLS JA4 exactly
+  (`t13d1616h2_74c5f98c3854_f20eef27beb5`, ×5):
+  same cipher set, same extension set, same
+  sigalgs as Go TLS. Differences vs Go TLS: no
+  `11ec` group (supported_groups `{GREASE,001d,
+  0017,0018}`, key_share `{GREASE,001d}` — REALITY
+  drops the MLKEM768 hybrid, X25519 only) and much
+  smaller records (499–595 bytes, no MLKEM768 key
+  share).
+- Rust JA4 (stable ×5):
+  `t13d0412h2_16c83510387f_a735005f8dcf` — a
+  DIFFERENT, TLS-1.3-only profile: 3 + GREASE
+  ciphers (`1301,1302,1303` only), 12 + SNI + ALPN
+  extensions (includes `0005` + `0012` like Go,
+  lacks `0017` and `0023`), supported_groups
+  `{GREASE,11ec,001d}` (MLKEM768 KEPT, no
+  `0017`/`0018`), supported_versions `{GREASE,0304}`
+  only, record length 1706–1770 bytes. Honk's
+  REALITY ClientHello does not match sing-box/utls
+  chrome REALITY ClientHello — the largest parity
+  gap in this section, listed, not a gate failure.
+
+QUIC (hysteria2): controlled server = sing-box
+v1.14.4 installed on cue via `go install -tags
+with_quic,with_utls` (version string "unknown", as
+expected for a module install), hysteria2 inbound
+on 127.0.0.1:18900/18901, self-signed cert
+(SAN localhost + 127.0.0.1), password fake.
+- Go control client (sing-box hysteria2 outbound,
+  same server): handshake + auth + connect PROVEN
+  by the server log (`inbound connection from
+  127.0.0.1:38043`, `inbound connection to
+  127.0.0.1:18080`, `outbound connection to
+  127.0.0.1:18080`). Its echo round-trip then
+  failed with `read: EOF` (test-harness artifact,
+  not investigated further — the handshake proof
+  stands on the server log).
+- Rust honk client: handshake NOT proven. Dial
+  fails fast with `connection down: QUIC connect to
+  127.0.0.1:18900 (attempt 3)` (same on 18901),
+  and the server log shows NO Rust connection
+  attempt at all. Against a blackhole UDP listener
+  on 18902 the same client sends 26 valid-looking
+  QUIC v1 Initial packets (1200 bytes, 3 bursts =
+  3 attempts, DCIDs `38cc…`, `1575…`, `2c03…`)
+  and retransmits until the 30 s timeout — so
+  packets leave the client, and the sing-box
+  failure is a handshake-content mismatch
+  (ALPN / transport parameters / TLS profile
+  inside honk's Initial), NOT packet loss. The
+  Initial payload was NOT decrypted (QUIC Initial
+  keys are derivable from the DCID, but that
+  analysis was not done); the exact mismatching
+  field is an open question for Phase 3, and no
+  QUIC interop fix is attempted in M3b.
+- QUIC verdict: Rust QUIC handshake against a
+  controlled server: FAILED (with a working Go
+  control). This is a parity finding, not a gate
+  failure: the M3 gates are the four commands in
+  §M3.7, all green.
+
+## M3.9 — Build prerequisites on cue (supplement)
+
+What a fresh cue checkout needs before `cargo build
+--workspace` (all verified on cue; no other host is
+claimed):
+- Rust toolchain 1.99.1 via `rust/rust-toolchain.toml`
+  (rustup installs it on demand with profile minimal
+  + clippy/rustfmt; 1.97.1 stays the default on cue).
+- `cmake` 3.28.3 (`apt-get install -y cmake`):
+  boring-sys's build script shells out to cmake
+  (without it: "is `cmake` not installed?").
+  `ninja` is NOT installed on cue and NOT needed:
+  `make` is the fallback generator and the gates
+  pass with it (ninja would only speed the
+  BoringSSL build, not unblock it).
+- `libclang-dev` (`apt-get install -y libclang-dev`,
+  provides libclang-18): bindgen 0.72.1 needs
+  libclang to build boring-sys v5.2.0 (without it:
+  "Unable to find libclang ... set the
+  LIBCLANG_PATH environment variable ...").
+  `clang` (the compiler binary) is NOT installed on
+  cue and NOT needed: bindgen needs the shared
+  library, not the compiler driver.
+- `LIBCLANG_PATH` status, measured, not assumed:
+  after the libclang-dev install, the build passes
+  WITHOUT `LIBCLANG_PATH` (attempt-6 gates and the
+  final-verify gates both ran without it), because
+  bindgen finds the dev symlink
+  `/usr/lib/llvm-18/lib/libclang.so` (which points
+  at `/lib/x86_64-linux-gnu/libclang-18.so.18`;
+  ldconfig lists `libclang-18.so.18` and
+  `libclang-18.so`). The parent-supplied fallback
+  `LIBCLANG_PATH=/usr/lib/llvm-18/lib` was ALSO
+  tested and is a valid value (see the timing run
+  below — it succeeds with the variable exported),
+  but it was NOT the fix and is NOT required on
+  cue as configured; do not claim otherwise. The
+  earlier `warm2` bindgen failure predates the
+  libclang-dev install (the file did not exist at
+  all then), so it is not evidence that bindgen
+  cannot discover an existing libclang.
+- boring-sys first-build cost (measured on cue, 8
+  CPUs): `cargo clean -p boring-sys` removed 5527
+  files / 483.3 MiB, then `time LIBCLANG_PATH=
+  /usr/lib/llvm-18/lib cargo build -p boring-sys`
+  finished in real 0m 48.8 s (user 2m 27.2 s, sys
+  0m 26.6 s), exit 0. Full cold workspace build:
+  1m 31s–1m 35s (§M3.7, final verify).

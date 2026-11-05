@@ -28,6 +28,24 @@ Linked dependency (called, not copied):
   in the cargo cache. If vendoring is ever chosen, the original
   honk LICENSE must be preserved verbatim in the vendor dir.)
 
+Transitive-only, NOT used by castctl code:
+- aya 0.16.0 (plus aya-build, aya-ebpf-bindings, aya-ebpf-cty,
+  aya-obj) via honk-ebpf-common, which only honk-outbound
+  depends on (verified by reverse lookup in Cargo.lock).
+  No castctl source in rust/castctl-transport imports aya or
+  honk-ebpf-common (grep clean). Nuance (verified on cue
+  against the honk checkout, see rust/PORTING.md §M3.7):
+  aya itself is pure transitive (no `aya::` reference in
+  honk-outbound source), but honk-ebpf-common IS used by
+  honk-outbound's own direct dial path (socket-mark
+  constants `CLASSIFIED_MARK` / `DAE_BYPASS_MARK`) —
+  it is a live honk dependency, not dead weight inside
+  honk, and still never touched by castctl code. They set
+  the toolchain floor: aya 0.16.0 requires rustc >= 1.98,
+  so the Rust artifact pins toolchain 1.99.1 in
+  rust/rust-toolchain.toml (Boss decision, hướng (a); cue
+  keeps 1.97.1 as the default — see rust/PORTING.md §M3.6).
+
 Consequence (quyết định của Boss, nguyên văn):
   artifact Rust là GPL-3.0-only vì link honk; binary Go vẫn
   GPL-3.0-or-later; 2 artifact, 2 license.
@@ -75,3 +93,21 @@ Build status at M3 submission (see rust/PORTING.md §M3):
   >= 1.98, or pick an older honk sha) are recorded in
   rust/PORTING.md §M3 and in the M3 writer report. Nothing
   in this NOTICE claims a build that did not happen.
+
+Build status after M3b (Boss decision, hướng (a) — see
+rust/PORTING.md §M3.6–§M3.7; the M3-submission paragraph
+above is history and is not rewritten):
+- rustc 1.99.1 installed on cue alongside 1.97.1 (default
+  unchanged); `rust/rust-toolchain.toml` pins 1.99.1.
+- On cue, with plain `cargo` (shim honors the pin):
+  `cargo fmt --check` exit 0, `cargo build --workspace`
+  exit 0 (cold 1m 35s), `cargo test --workspace` exit 0
+  (229 passed, 0 failed), `cargo clippy --workspace --
+  -D warnings` exit 0. Cue provisioning for the build:
+  cmake 3.28.3 + libclang-18-dev.
+- TLS/QUIC parity is measured in rust/PORTING.md §M3.8
+  (TLS JA4 differs Go-vs-Rust, REALITY profiles differ
+  more, Rust QUIC handshake against a controlled
+  sing-box server FAILED while the Go control
+  succeeded) — parity differences are findings, not
+  gate failures.

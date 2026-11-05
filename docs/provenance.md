@@ -1523,6 +1523,23 @@ no code copied. Note: the upstream workspace `repository`
 field still reads `https://github.com/Glassyiris/honk` while
 the remote used here is `daeuniverse/honk`.
 
+Transitive-only, NOT used by castctl code: `aya 0.16.0`
+(plus `aya-build`, `aya-ebpf-bindings`, `aya-ebpf-cty`,
+`aya-obj`) enters the graph only via `honk-ebpf-common`,
+which only `honk-outbound` depends on (verified by reverse
+lookup in `Cargo.lock`); no castctl source imports `aya` or
+`honk-ebpf-common`. Nuance (verified on cue against the
+honk checkout, see `rust/PORTING.md` §M3.7): `aya` itself
+is pure transitive (no `aya::` reference in honk-outbound
+source), but `honk-ebpf-common` IS used by honk-outbound's
+own direct dial path (socket-mark constants) — a live
+honk dependency, never touched by castctl code. It still
+sets the toolchain floor: `aya 0.16.0` requires rustc
+>= 1.98, so M3b pins toolchain 1.99.1 in
+`rust/rust-toolchain.toml` (Boss decision, hướng (a);
+cue keeps 1.97.1 as the default — see `rust/PORTING.md`
+§M3.6).
+
 Pin mechanics (why the workspace root carries a `[patch]`):
 Cargo `[patch]` tables do not propagate through a git
 dependency, so honk's own `[patch.crates-io]` (boring-sys
@@ -1619,6 +1636,19 @@ Deviations + deliberately not taken in M3:
   decide. `cargo tree` (3 git sources) and `cargo fmt
   --check` (clean, after `cargo fmt` on cue) DID pass on
   cue; see `rust/PORTING.md` §M3 for the verbatim outputs.
+- Resolution in M3b (Boss decision, hướng (a); the
+  blocker paragraph above is history and is not
+  rewritten): rustc 1.99.1 installed on cue alongside
+  1.97.1 (default unchanged), `rust/rust-toolchain.toml`
+  pins 1.99.1, and all four gates pass on cue with
+  plain `cargo` (fmt, build cold 1m 35s, test 229
+  passed / 0 failed, clippy `-D warnings`) — see
+  `rust/PORTING.md` §M3.7. TLS/QUIC parity measured
+  after the gate (§M3.8): TLS JA4 differs Go-vs-Rust,
+  REALITY profiles differ more, and the Rust QUIC
+  handshake against a controlled sing-box server
+  FAILED while the Go control succeeded — parity
+  findings, not gate failures.
 
 ### 13.1 Ported from this repo's Go code (not upstream)
 

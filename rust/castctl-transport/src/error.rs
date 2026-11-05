@@ -73,9 +73,7 @@ pub fn validate_content_type(raw: &str) -> Option<String> {
     if first.is_empty() || first.len() > 64 {
         return None;
     }
-    let mut parts = first.splitn(2, '/');
-    let major = parts.next()?;
-    let minor = parts.next()?;
+    let (major, minor) = first.split_once('/')?;
     if major.is_empty()
         || minor.is_empty()
         || !major.chars().all(|c| {

@@ -50,6 +50,7 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::client::conn::http1::SendRequest;
+use hyper_util::rt::TokioIo;
 
 use crate::dialer::{DialTarget, Dialer};
 use crate::error::{BodySummary, TransportError, validate_content_type};
@@ -162,9 +163,13 @@ impl HttpClient {
         // Dial first: any failure here is ConnectionDown (Go:
         // nothing was sent yet, so the request is safe to repeat).
         let stream = self.dialer.dial(target).await?;
+        // hyper's rt::Read/Write are NOT blanket-implemented for
+        // tokio IO types: the canonical adapter is hyper-util's
+        // TokioIo (honk's stream is tokio AsyncRead+AsyncWrite,
+        // so this is a zero-copy wrapper, not a reimplementation).
         let (mut sender, conn): (SendRequest<Full<Bytes>>, _) =
             hyper::client::conn::http1::Builder::new()
-                .handshake(stream)
+                .handshake(TokioIo::new(stream))
                 .await
                 .map_err(|e| TransportError::ConnectionError {
                     message: crate::error::truncate(&e.to_string(), 200),
