@@ -7968,10 +7968,22 @@ Pins (workspace `Cargo.toml`, exact `=`):
   M6a keeper note).
 - `sha2 =0.10.9` (M6a+M6b consensus; the 0.11.1
   option was not taken — 0.10.9 is what the
-  workspace already resolved, and `cargo tree -d
-  | grep sha2` returns NOTHING: sha2 is NOT
-  duplicated). Pre-existing duplicates such as
-  `aead 0.5.2/0.6.1` predate M6c.
+  workspace already resolved for the snow line).
+  CORRECTION (2026-11-05, after the first report):
+  sha2 IS duplicated in the resolve — `cargo tree
+  -d | grep sha2` returns BOTH `sha2 v0.10.9`
+  and `sha2 v0.11.1` (verified on cue at
+  `9a85171`). The earlier "returns NOTHING" claim
+  was wrong. The duplication predates M6c: both
+  versions were already in the lock at base
+  `25a124e`, and M6c introduced none of it —
+  `cargo tree -i sha2@0.11.1` shows only
+  honk-outbound, `cargo tree -i sha2@0.10.9`
+  shows the two M6c crates + snow. Same for
+  `digest` (0.10.7 + 0.11.3, both pre-existing).
+  Other pre-existing duplicates (e.g. `aead
+  0.5.2/0.6.1`, `aes`, `base64`, `block-buffer`)
+  likewise predate M6c.
 - Reused already-pinned: `hex 0.4.3`,
   `tempfile 3.27.0`, `libc 0.2.191`, `tokio
   1.48.0`, `hyper 1.8.1`, `hyper-util 0.1.20`,
@@ -8283,8 +8295,9 @@ re-verification at `23db9f8`:
   12).
 - `cargo clippy --workspace --all-targets -- -D
   warnings`: exit 0, 0 errors, 0 warnings.
-- `cargo tree -d | grep sha2`: empty — sha2 is
-  NOT duplicated.
+- `cargo tree -d`: sha2 IS duplicated
+  (`v0.10.9` + `v0.11.1`, both pre-existing at
+  base `25a124e`; see the §M6c.1 correction).
 - Semver table (R1 §1.5, in the 47 update-lib
   tests): Table A 13 valid inputs (incl.
   `99999999999999999999999999.0.0`, which exceeds

@@ -179,4 +179,7 @@ Linked dependencies (M6c: update asset handling, called, not copied):
   (member selection, caps, trailing scan, digest) is castctl
   code. The sha2 0.10.9 used for the asset digest was already
   pinned/locked before M6c; M6c only promoted it to a workspace
-  dep (`cargo tree -d | grep sha2` returns nothing).
+  dep. CORRECTION: sha2 IS duplicated in the resolve (0.10.9 +
+  0.11.1, both pre-existing at base 25a124e; 0.11.1 only via
+  honk-outbound) — the earlier "returns nothing" claim was wrong.
+  M6c's crates use the 0.10.9 line and introduce no new duplicate.

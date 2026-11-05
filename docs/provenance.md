@@ -2128,10 +2128,17 @@ cue, which reads each crate's pinned `Cargo.toml`).
   tar/flate2 transitive.
 - sha2 `=0.10.9` was NOT newly added by M6c (it was
   already pinned/locked); M6c only promoted it to a
-  workspace dep. `cargo tree -d | grep sha2`
-  returns NOTHING: sha2 is NOT duplicated.
-  Pre-existing duplicates such as `aead 0.5.2/0.6.1`
-  predate M6c.
+  workspace dep. CORRECTION (2026-11-05, after the
+  first report): sha2 IS duplicated in the resolve —
+  `cargo tree -d | grep sha2` returns BOTH `sha2
+  v0.10.9` and `sha2 v0.11.1` (verified on cue at
+  `9a85171`); the earlier "returns NOTHING" claim was
+  wrong. Both versions were already in the lock at
+  base `25a124e`; M6c introduced none of it
+  (`cargo tree -i sha2@0.11.1` shows only
+  honk-outbound). Same for `digest` (0.10.7 +
+  0.11.3). Pre-existing duplicates such as `aead
+  0.5.2/0.6.1` likewise predate M6c.
 
 What M6c takes from these crates (behaviour only, no
 code): tar entry iteration + PAX/GNU-longname

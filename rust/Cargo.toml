@@ -116,9 +116,11 @@ webpki-roots = "=0.26.11"
 # tempfile 3.27.0 via prost-build, libc 0.2.191); promoting them
 # adds no new crate. sha2 0.10.9 (not 0.11.1) is the
 # workspace-consistent line: M6a and M6b both pinned it, and
-# 0.11.1 exists only via honk-outbound (digest 0.11). After
-# promoting, `cargo tree -d` must show no duplicate sha2/digest
-# introduced by the M6c crates.
+# 0.11.1 exists only via honk-outbound (digest 0.11).
+# NOTE: sha2 IS duplicated in the resolve (0.10.9 + 0.11.1)
+# and so is digest (0.10.7 + 0.11.3) — both pre-existing at
+# base 25a124e, verified by `cargo tree -d` on cue. M6c's
+# crates use the 0.10.9 line and introduce no new duplicate.
 sha2 = "=0.10.9"
 hex = "=0.4.3"
 tempfile = "=3.27.0"
