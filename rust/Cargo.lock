@@ -462,6 +462,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "castctl-telegram"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "castctl-config",
+ "castctl-log-redact",
+ "castctl-tg-files",
+ "castctl-tg-text",
+ "castctl-transport",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-rustls",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
 name = "castctl-tg-files"
 version = "0.1.0"
 dependencies = [
@@ -2304,6 +2326,7 @@ version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",

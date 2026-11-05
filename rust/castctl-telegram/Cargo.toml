@@ -1,0 +1,43 @@
+# Copyright (c) 2026 muse-cli contributors
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License v3.0 only.
+
+[package]
+name = "castctl-telegram"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Telegram bot core for the castctl Rust port (M5a): hand-rolled getUpdates long polling, dispatcher, 30-command routing table, state file, approvals and claims, ported from internal/telegram and internal/commands/telegram*.go. Turn streaming is M5b (seam only)."
+
+[dependencies]
+castctl-config = { path = "../castctl-config" }
+castctl-log-redact = { path = "../castctl-log-redact" }
+castctl-tg-files = { path = "../castctl-tg-files" }
+castctl-tg-text = { path = "../castctl-tg-text" }
+castctl-transport = { path = "../castctl-transport" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true, features = ["tokio"] }
+bytes = { workspace = true }
+# M5a (temporary TLS, parent decision — see PORTING.md §M5a):
+# `castctl-transport::HttpClient` is plaintext-only and the Bot
+# API is HTTPS-only, while the shared TLS code (`tls.rs` +
+# `request_tls`) exists only in uncommitted M4b. These three
+# direct deps are pinned exactly to the versions already in
+# `Cargo.lock` (via castctl-gateway's tokio-tungstenite
+# rustls-tls-webpki-roots feature); no new crate enters the
+# lock. On rebase after M4b merges, delete `tls.rs` and use
+# M4b's `tls_client_config` + `request_tls` instead.
+# rustls feature set mirrors M4b: ring only (enabling both
+# aws_lc_rs and ring makes ClientConfig::builder() panic).
+rustls = { version = "=0.23.46", default-features = false, features = ["logging", "ring", "std", "tls12"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["logging", "ring", "tls12"] }
+webpki-roots = "=0.26.11"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
