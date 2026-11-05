@@ -1881,15 +1881,21 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            assert!((deps.list_sessions)("muse01".to_string(), false).await.is_err());
+            assert!(
+                (deps.list_sessions)("muse01".to_string(), false)
+                    .await
+                    .is_err()
+            );
             assert!(
                 (deps.get_history)("muse01".to_string(), "s1".to_string(), 50)
                     .await
                     .is_err()
             );
-            assert!((deps.start_session)("muse01".to_string(), "t".to_string())
-                .await
-                .is_err());
+            assert!(
+                (deps.start_session)("muse01".to_string(), "t".to_string())
+                    .await
+                    .is_err()
+            );
             assert!(
                 (deps.session_op)(
                     "muse01".to_string(),
