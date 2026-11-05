@@ -21,12 +21,15 @@
 //!   shell — chi's mount fallthrough to the root NotFound
 //!   handler. Unauthenticated unknown `/api/v1` still 401s.
 //! - `GET /api/v1` (exact) falls through to the shell.
-//! - Non-API paths: GET (and HEAD, served as GET with the
-//!   body stripped) → shell / ui_dir; any other method →
-//!   405 envelope.
-//! - HEAD is routed as GET; the body is stripped before
-//!   sending, keeping the Content-Length the GET would have
-//!   produced (Go net/http behaviour).
+//! - Non-API paths: GET → shell / ui_dir; any other
+//!   method (HEAD included — chi does not map HEAD to
+//!   GET) → 405 envelope.
+//! - HEAD is never routed as GET: a known API path +
+//!   HEAD → 405, a non-API path + HEAD → 405, an unknown
+//!   API path + HEAD → shell fallthrough. The response
+//!   body is suppressed for HEAD (with the Content-Length
+//!   the GET would have produced) by `render_resp` —
+//!   Go net/http behaviour, not a routing rule.
 //!
 //! Response framing (Go net/http compat): Go buffers the
 //! first 2048 bytes of a response; a body that fits is sent
@@ -542,13 +545,11 @@ impl Server {
                 .dispatch_api(method, path_raw, &path_decoded, uri, headers, peer, body)
                 .await;
         }
-        // Non-API: GET/HEAD → shell; anything else → 405.
-        let effective = if method == Method::HEAD {
-            &Method::GET
-        } else {
-            method
-        };
-        if *effective != Method::GET {
+        // Non-API: GET → shell; anything else → 405.
+        // HEAD is NOT mapped to GET (chi has no GetHead
+        // opt-in installed; Go's own uidir_test pins HEAD
+        // → 405 for static paths).
+        if *method != Method::GET {
             return method_not_allowed_resp();
         }
         self.serve_static(&path_decoded, method)
@@ -612,13 +613,11 @@ impl Server {
                 return forbidden_resp();
             }
         }
-        let effective = if method == Method::HEAD {
-            &Method::GET
-        } else {
-            method
-        };
-        // Timeout: 30s, WS excluded.
-        let fut = self.route_api(effective, path, path_decoded, uri, headers, peer, body);
+        // Timeout: 30s, WS excluded. HEAD flows as an
+        // ordinary unregistered method: a known path
+        // answers 405 from the route table, an unknown
+        // path falls through to the shell.
+        let fut = self.route_api(method, path, path_decoded, uri, headers, peer, body);
         if is_ws {
             fut.await
         } else {
@@ -661,7 +660,12 @@ impl Server {
 
     /// The unauthenticated static shell (embedded, or the
     /// on-disk root when `ui_dir` is set). `method` is the
-    /// original request method (GET/HEAD only reach here).
+    /// original request method: non-API routing admits
+    /// only GET, but API fallthrough can reach here with
+    /// any method (HEAD included — unknown API path). The
+    /// ui_dir lookup treats HEAD as GET (Go's serveUIDir
+    /// does not branch on method); the HEAD body itself is
+    /// suppressed by `render_resp`.
     pub fn serve_static(&self, path: &str, method: &Method) -> Resp {
         match &self.deps.ui_dir {
             None => shell_resp(),
@@ -744,6 +748,12 @@ pub type RespBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 /// (a single-chunk stream, no Content-Length). HEAD
 /// responses keep the headers (with the Content-Length the
 /// GET would have produced) and send an empty body.
+/// This is NOT a HEAD→GET routing mapping — routing is
+/// decided before this point (HEAD reaches a 405 or a
+/// shell fallthrough); it reproduces Go net/http's HEAD
+/// body suppression, so it is kept deliberately (fix loop
+/// 1, R2): deleting it would send a body on HEAD
+/// responses.
 pub fn render_resp(method: &Method, resp: Resp) -> HyperResponse<RespBody> {
     let mut builder = HyperResponse::builder()
         .status(StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
