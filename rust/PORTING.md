@@ -3531,6 +3531,40 @@ it (promoted to direct deps only), so `NOTICE` /
 23. `dial_gateway_over_stream` takes a generic stream, not
     `Box<dyn AsyncReadWrite>` (avoids a honk-outbound
     dependency in the gateway crate).
+24. Oversized upgrade response (> 8192 B before `\r\n\r\n`)
+    renders the 28-char `gateway: websocket dial failed`
+    (`dial.rs` `ws_upgrade` oversize guard). Deliberate
+    DoS guard with NO Go equivalent: gorilla's
+    `ReadResponse` has no such cap, so there is no Go
+    rendering to match. [Recorded in fix loop 2 — the
+    fix-loop-1 report's blanket "inherently unmatchable"
+    justification for the `dial_failed()` sites was wrong
+    for the other sites (they go through the
+    handshake-failure path, `connector.go:292-311`); the
+    oversize guard is the ONE site where it is true.]
+25. `ws_upgrade` does not validate the `Upgrade: websocket`
+    / `Connection: upgrade` response headers (gorilla
+    rejects a 101 without them — `client.go:394-405` →
+    `ErrBadHandshake`, resp non-nil → Go renders
+    `status_code=101`; Rust proceeds if the accept key
+    matches, and the Noise handshake then fails later
+    with a different error). Leniency, not a
+    message-rendering issue. Also not handled: obs-fold
+    continuation lines (Go folds them into the previous
+    header's value; Rust checks each physical line
+    independently). Recorded as a follow-up, not fixed
+    in fix loop 2 (it changes acceptance, not just the
+    message).
+26. The tungstenite path (`ws_error`'s non-Http arms)
+    renders `dial_failed()` for a bad-accept failure too:
+    tungstenite returns a protocol error with no response
+    attached, so the status is not available to render
+    `status_code=101` (Go renders `status_code=101`
+    there as well). Non-blocking: the live dial path uses
+    the hand-written `ws_upgrade`, not a tungstenite
+    dial; fixing the tungstenite path needs plumbing the
+    status through. Recorded so the two paths do not
+    drift apart again.
 
 ## M4b.3 Findings
 
@@ -3598,7 +3632,12 @@ it (promoted to direct deps only), so `NOTICE` /
   — if the edge keys on size/MLKEM presence it may get
   further than ring-provider rustls; if it keys on
   GREASE/order, it will not. The probe, not the claim,
-  decides.] BoringSSL (already in the lock via honk,
+  decides. [CLARIFIED in fix loop 2 (N1): such a dial is
+  only sound as a separate scratch binary OUTSIDE the
+  workspace lock — enabling aws-lc-rs alongside ring in
+  this workspace makes provider resolution ambiguous and
+  panics at runtime (`Cargo.toml:94-100`); running the
+  probe here would violate the ban.] BoringSSL (already in the lock via honk,
   `boring` / `tokio-boring` 5.2.0) implements GREASE
   (`ssl/encrypted_client_hello.cc`, `hs->grease_seed`)
   and is the candidate fix — a new TLS-architecture
@@ -3644,6 +3683,50 @@ it (promoted to direct deps only), so `NOTICE` /
   `-D warnings` on its fields). `MutexGuard` held across
   `await` is flagged by clippy 1.99 even with an explicit
   `drop` — scope the lock in a block instead.
+- **Fix loop 2: stage-2 handshake errors match Go.**
+  The fix-loop-1 report's §1 exclusion ("`dial_failed()`
+  stays for TCP-dial / EOF / non-UTF8 / missing-accept
+  failures — Go's dial-error text there is the variable
+  wrapped transport error (`connector.go:275-277`)") was
+  WRONG: `:275-277` is the TCP-dial stage
+  (`dialer.WebSocketDial` failing, before any HTTP byte);
+  the `ws_upgrade` failures all happen after TCP
+  connect, inside gorilla's `DialContext`, and Go renders
+  them via `newHandshakeFailureError(resp, err)`
+  (`connector.go:292-311`). Fix loop 2 renders them
+  Go-faithfully: bad accept on a 101 →
+  `status_code=101` (gorilla returns resp non-nil,
+  `client.go:394-405`); post-connect write / read / EOF
+  failures → the fixed 35-char message (gorilla returns
+  `(nil, nil, err)`, `client.go:372-387`); the
+  non-UTF-8 arm is now byte-parsed (`check_upgrade_head`
+  in `dial.rs`): Go's `ReadResponse` + `textproto`
+  work on bytes and never validate UTF-8
+  (`net/http/response.go:158-206`,
+  `net/textproto/reader.go:521-596`), so a non-UTF-8
+  status token → fixed 35-char (Atoi fails →
+  malformed-status error → token-shape fails),
+  non-UTF-8 in a header VALUE is valid obs-text
+  (`validHeaderValueByte`, `reader.go:733`) → the
+  status-based rendering, and non-UTF-8 in a header KEY
+  fails the whole response (`canonicalMIMEHeaderKey`
+  ok=false) → fixed 35-char. Both re-reviewers were
+  partly right: the red-team was right that the arm
+  diverges (and right for the status-token case) but its
+  "always fixed 35-char" fix is wrong for header-value
+  garbage; the technical reviewer was right that no
+  SINGLE rendering covers the arm, but "do not touch"
+  was wrong — the per-position mapping is clean once
+  the head is parsed as bytes. The oversized-response
+  guard stays `dial_failed()` (deviation 24 — the one
+  site with no Go equivalent). The head check also
+  validates header well-formedness the way Go does
+  (colon present, valid field-name/value bytes, status
+  error deferred until the whole head validates), and
+  the accept value is trimmed of leading SP/HTAB only
+  (Go `bytes.TrimLeft`). Pinned by 7 integration tests
+  + 4 unit tests (13 cases) — see the fix-loop-2
+  report.
 
 ## M4b.4 Gates (cue, 2026-11-05, pre-rebase head 86a2142)
 

@@ -173,6 +173,156 @@ fn handshake_failure_for_status(token: &str) -> Option<TransportError> {
     Some(handshake_failed_error())
 }
 
+/// Map a raw WS status-line token (bytes) to Go's
+/// handshake-failure rendering. Go parses the response
+/// as bytes (`net/http` `ReadResponse` + `textproto`
+/// never validate UTF-8): a token that is not valid
+/// UTF-8 cannot be a 3-digit code nor token-shaped, so
+/// it renders the fixed 35-char message — the same
+/// fallthrough the `&str` mapping gives for a
+/// non-token-shaped token. A valid-UTF-8 but non-ASCII
+/// token (e.g. `ééé`) takes the same fallthrough inside
+/// `handshake_failure_for_status`.
+fn handshake_failure_for_status_bytes(token: &[u8]) -> Option<TransportError> {
+    match std::str::from_utf8(token) {
+        Ok(text) => handshake_failure_for_status(text),
+        Err(_) => Some(handshake_failed_error()),
+    }
+}
+
+/// One header field-name byte, the way Go's `textproto`
+/// validates it (`canonicalMIMEHeaderKey`,
+/// `reader.go`): a tchar (`!#$%&'*+-.^_`|~` + ASCII
+/// alnum) or a space (accepted uncanonicalized,
+/// go.dev/issue/34540). A byte >= 0x80 fails: Go
+/// rejects the whole response.
+fn is_header_key_byte(byte: u8) -> bool {
+    byte == b' '
+        || byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
+/// One header field-value byte, the way Go's `textproto`
+/// validates it (`validHeaderValueByte`,
+/// `reader.go:733`): HTAB / SP / VCHAR / obs-text
+/// (0x80-0xFF). A control byte other than HTAB, or DEL,
+/// fails: Go rejects the whole response.
+fn is_header_value_byte(byte: u8) -> bool {
+    byte == 0x09 || (0x20..=0x7e).contains(&byte) || byte >= 0x80
+}
+
+/// Extract the status token from a status line the way
+/// Go's `ReadResponse` does (`response.go:170-180`):
+/// cut on the first space, trim leading spaces, cut on
+/// the next space. No space at all → empty (Go renders
+/// `malformed HTTP response` → the fixed message, which
+/// is what the empty token maps to).
+fn status_token_from_line(line: &[u8]) -> &[u8] {
+    let Some(first) = line.iter().position(|&b| b == b' ') else {
+        return b"";
+    };
+    let rest = &line[first + 1..];
+    let rest = {
+        let mut start = 0;
+        while start < rest.len() && rest[start] == b' ' {
+            start += 1;
+        }
+        &rest[start..]
+    };
+    match rest.iter().position(|&b| b == b' ') {
+        Some(second) => &rest[..second],
+        None => rest,
+    }
+}
+
+/// Check a WS upgrade response head (bytes) the way Go's
+/// `http.ReadResponse` + gorilla `DialContext` do
+/// (`net/http/response.go:158-206`,
+/// `net/textproto/reader.go:521-596`,
+/// `gorilla/client.go:372-405`): the head is bytes,
+/// never UTF-8. Returns `Ok(())` when the status is 101
+/// and the accept key matches, else the Go-faithful
+/// handshake error. The status error is computed first
+/// but returned only after the header block validates —
+/// Go parses the whole head before returning the
+/// response, so a malformed header fails even a 502
+/// (`resp` nil → the fixed 35-char message).
+/// Well-formedness validated here: every header line has
+/// a colon, a valid field-name, and valid field-value
+/// bytes. NOT validated (gorilla checks Rust does not —
+/// see PORTING §M4b.2 deviation 25): the `Upgrade` /
+/// `Connection` header values, and obs-fold continuation
+/// lines (Go folds them into the previous value; each
+/// physical line is checked independently here).
+fn check_upgrade_head(head: &[u8], expected_accept: &str) -> Result<(), TransportError> {
+    let mut lines = head
+        .split(|&b| b == b'\n')
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line));
+    let status_line = lines.next().unwrap_or(b"");
+    let status_err = handshake_failure_for_status_bytes(status_token_from_line(status_line));
+    let mut accept_ok = false;
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        let Some(colon) = line.iter().position(|&b| b == b':') else {
+            // Go: `malformed MIME header line` → resp nil.
+            return Err(handshake_failed_error());
+        };
+        let (name, value) = (&line[..colon], &line[colon + 1..]);
+        if name.is_empty() || !name.iter().all(|&b| is_header_key_byte(b)) {
+            // Go: `canonicalMIMEHeaderKey` ok=false (empty
+            // key, or a byte that is not a tchar/space) →
+            // resp nil.
+            return Err(handshake_failed_error());
+        }
+        if !value.iter().all(|&b| is_header_value_byte(b)) {
+            // Go: `validHeaderValueByte` fails → resp nil.
+            return Err(handshake_failed_error());
+        }
+        // Go trims leading SP/HTAB only
+        // (`bytes.TrimLeft(v, " \t")`); a trailing space
+        // stays part of the value and mismatches the key.
+        let value = {
+            let mut start = 0;
+            while start < value.len() && matches!(value[start], b' ' | b'\t') {
+                start += 1;
+            }
+            &value[start..]
+        };
+        if name.eq_ignore_ascii_case(b"sec-websocket-accept") && value == expected_accept.as_bytes()
+        {
+            accept_ok = true;
+        }
+    }
+    if let Some(err) = status_err {
+        return Err(err);
+    }
+    if !accept_ok {
+        // Gorilla returns the response non-nil on accept
+        // mismatch (`client.go:394-405`) with StatusCode
+        // 101, so Go renders `status_code=101`.
+        return Err(handshake_token_error("status_code", "101"));
+    }
+    Ok(())
+}
+
 /// Map a tungstenite error to the transport taxonomy without
 /// embedding peer text: a WS handshake failure renders the
 /// validated status only (Go `connector.go`
@@ -417,7 +567,15 @@ fn upgrade_timeout() -> TransportError {
 }
 
 /// The generic WS-dial failure (tungstenite's non-HTTP arm
-/// in `ws_error`): the class only, never peer text.
+/// in `ws_error`, and the local-policy arms in `ws_upgrade`):
+/// the class only, never peer text. After fix loop 2 its
+/// only `ws_upgrade` uses are the URL-split failure
+/// (`split_ws_request_target`, a local input error — Go
+/// fails earlier at `splitWSURL`, a different path) and
+/// the oversized-response guard (a local DoS cap with no
+/// Go equivalent — see PORTING §M4b.2 deviation 24);
+/// post-connect I/O failures render Go's fixed 35-char
+/// handshake message instead.
 fn dial_failed() -> TransportError {
     TransportError::ConnectionError {
         message: "gateway: websocket dial failed".to_string(),
@@ -514,11 +672,14 @@ fn split_ws_request_target(url: &str) -> Option<(String, String)> {
 /// `from_partially_read`, so no frame bytes are lost).
 /// The request-target is sent VERBATIM (see
 /// `split_ws_request_target`); headers match Go
-/// `dialWebSocket` (User-Agent + Origin). A non-101 status
-/// is a `ConnectionError` carrying the status only (Go
-/// `newHandshakeFailureError`); any other failure is a
-/// `ConnectionError` with the error class only — the raw
-/// response bytes never reach an output path.
+/// `dialWebSocket` (User-Agent + Origin). Failures render
+/// Go's `newHandshakeFailureError` (`connector.go:292-311`):
+/// a non-101 status carries the status only, and a
+/// post-connect I/O failure (write / read / EOF before any
+/// status line) renders the fixed 35-char message — gorilla
+/// returns `(nil, nil, err)` there (`client.go:372-387`),
+/// so no status exists to render. The raw response bytes
+/// never reach an output path.
 async fn ws_upgrade<S>(mut stream: S, url: &str) -> Result<WebSocketStream<S>, TransportError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -532,15 +693,18 @@ where
     stream
         .write_all(request.as_bytes())
         .await
-        .map_err(|_| dial_failed())?;
-    stream.flush().await.map_err(|_| dial_failed())?;
+        .map_err(|_| handshake_failed_error())?;
+    stream.flush().await.map_err(|_| handshake_failed_error())?;
     // Read until the end of the response header block.
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 1024];
     let header_end = loop {
-        let n = stream.read(&mut chunk).await.map_err(|_| dial_failed())?;
+        let n = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|_| handshake_failed_error())?;
         if n == 0 {
-            return Err(dial_failed());
+            return Err(handshake_failed_error());
         }
         buf.extend_from_slice(&chunk[..n]);
         if buf.len() > MAX_UPGRADE_RESPONSE {
@@ -552,31 +716,11 @@ where
     };
     let head = &buf[..header_end];
     let leftover = buf[header_end..].to_vec();
-    let text = std::str::from_utf8(head).map_err(|_| dial_failed())?;
-    let mut lines = text.split("\r\n");
-    let status_line = lines.next().unwrap_or("");
-    let status_token = status_line.split_whitespace().nth(1).unwrap_or("");
-    // Go `handshakeStatusToken`: the token decides the
-    // failure rendering; `None` is 101 — proceed.
-    if let Some(err) = handshake_failure_for_status(status_token) {
-        return Err(err);
-    }
+    // Go parses the head as bytes (see
+    // `check_upgrade_head`); a non-UTF-8 byte anywhere
+    // in it is not a parse failure by itself.
     let expected = tokio_tungstenite::tungstenite::handshake::derive_accept_key(key.as_bytes());
-    let mut accept_ok = false;
-    for line in lines {
-        if line.is_empty() {
-            break;
-        }
-        if let Some((name, value)) = line.split_once(':')
-            && name.trim().eq_ignore_ascii_case("sec-websocket-accept")
-            && value.trim() == expected
-        {
-            accept_ok = true;
-        }
-    }
-    if !accept_ok {
-        return Err(dial_failed());
-    }
+    check_upgrade_head(head, &expected)?;
     Ok(WebSocketStream::from_partially_read(stream, leftover, Role::Client, None).await)
 }
 
@@ -688,6 +832,151 @@ mod tests {
         assert_eq!(
             conn_message(&handshake_failure_for_status("<x>").unwrap()),
             "gateway: websocket handshake failed"
+        );
+    }
+
+    fn head_message(result: Result<(), TransportError>) -> Option<String> {
+        result.err().map(|e| conn_message(&e).to_string())
+    }
+
+    fn accept_for(key: &[u8]) -> String {
+        tokio_tungstenite::tungstenite::handshake::derive_accept_key(key)
+    }
+
+    /// Fix loop 2: `check_upgrade_head` parses the head as
+    /// bytes the way Go's `ReadResponse` does — a 502 with
+    /// valid headers renders `status_code=502`; a 101 with
+    /// a wrong accept renders `status_code=101`; a 101 with
+    /// the right accept proceeds.
+    #[test]
+    fn check_upgrade_head_status_and_accept_branches() {
+        assert_eq!(
+            head_message(check_upgrade_head(
+                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n",
+                "anything"
+            )),
+            Some("gateway: websocket handshake: status_code=502".to_string())
+        );
+        assert_eq!(
+            head_message(check_upgrade_head(
+                b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: wrong\r\n\r\n",
+                "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+            )),
+            Some("gateway: websocket handshake: status_code=101".to_string())
+        );
+        let key = b"test-key-12345678";
+        let expected = accept_for(key);
+        let head = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {expected}\r\n\r\n"
+        );
+        assert!(check_upgrade_head(head.as_bytes(), &expected).is_ok());
+    }
+
+    /// Fix loop 2 (non-UTF-8 arm): a non-UTF-8 status
+    /// token renders the fixed message (Go: `Atoi` fails
+    /// → malformed-status error → token-shape fails);
+    /// non-UTF-8 in a header VALUE is valid obs-text, so
+    /// a 502 still renders `status_code=502`; non-UTF-8
+    /// in a header KEY fails the whole response (Go:
+    /// `canonicalMIMEHeaderKey` ok=false) → fixed
+    /// message; a non-UTF-8 accept value mismatches →
+    /// `status_code=101`; non-UTF-8 in an unrelated
+    /// header value with a correct accept proceeds.
+    #[test]
+    fn check_upgrade_head_non_utf8_branches() {
+        assert_eq!(
+            head_message(check_upgrade_head(
+                b"HTTP/1.1 \xff\xff\xff Bad\r\n\r\n",
+                "x"
+            )),
+            Some("gateway: websocket handshake failed".to_string())
+        );
+        assert_eq!(
+            head_message(check_upgrade_head(
+                b"HTTP/1.1 502 Bad Gateway\r\nX-Custom: \xff\xfe\r\n\r\n",
+                "x"
+            )),
+            Some("gateway: websocket handshake: status_code=502".to_string())
+        );
+        assert_eq!(
+            head_message(check_upgrade_head(
+                b"HTTP/1.1 502 Bad Gateway\r\nX-\xff: v\r\n\r\n",
+                "x"
+            )),
+            Some("gateway: websocket handshake failed".to_string())
+        );
+        assert_eq!(
+            head_message(check_upgrade_head(
+                b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: \xff\xff\r\n\r\n",
+                "x"
+            )),
+            Some("gateway: websocket handshake: status_code=101".to_string())
+        );
+        let key = b"test-key-12345678";
+        let expected = accept_for(key);
+        let mut head = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {expected}\r\n"
+        )
+        .into_bytes();
+        head.extend_from_slice(b"X-Custom: \xff\r\n\r\n");
+        assert!(check_upgrade_head(&head, &expected).is_ok());
+    }
+
+    /// Fix loop 2: header well-formedness is validated
+    /// the way Go's `ReadResponse` does — a header line
+    /// without a colon, an empty field-name, or a control
+    /// byte in a value fails the whole response (resp nil
+    /// → fixed message), even with a valid 502 status
+    /// line (Go parses the whole head before returning
+    /// it). A space before the colon is accepted (Go
+    /// go.dev/issue/34540) but never matches the accept
+    /// key.
+    #[test]
+    fn check_upgrade_head_malformed_header_is_fixed_message() {
+        assert_eq!(
+            head_message(check_upgrade_head(
+                b"HTTP/1.1 502 Bad Gateway\r\nBadHeader\r\n\r\n",
+                "x"
+            )),
+            Some("gateway: websocket handshake failed".to_string())
+        );
+        assert_eq!(
+            head_message(check_upgrade_head(
+                b"HTTP/1.1 502 Bad Gateway\r\n: v\r\n\r\n",
+                "x"
+            )),
+            Some("gateway: websocket handshake failed".to_string())
+        );
+        assert_eq!(
+            head_message(check_upgrade_head(
+                b"HTTP/1.1 502 Bad Gateway\r\nX-Custom: a\x00b\r\n\r\n",
+                "x"
+            )),
+            Some("gateway: websocket handshake failed".to_string())
+        );
+        // Space before the colon: accepted by Go, but the
+        // name (with its trailing space) never matches.
+        assert_eq!(
+            head_message(check_upgrade_head(
+                b"HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept : s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n",
+                "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+            )),
+            Some("gateway: websocket handshake: status_code=101".to_string())
+        );
+    }
+
+    /// Fix loop 2: the accept value is trimmed of leading
+    /// SP/HTAB only (Go `bytes.TrimLeft(v, " \t")`) — a
+    /// trailing space stays part of the value and
+    /// mismatches the key.
+    #[test]
+    fn check_upgrade_head_accept_trailing_space_mismatches() {
+        assert_eq!(
+            head_message(check_upgrade_head(
+                b"HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo= \r\n\r\n",
+                "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+            )),
+            Some("gateway: websocket handshake: status_code=101".to_string())
         );
     }
 }

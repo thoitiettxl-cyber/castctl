@@ -35,6 +35,8 @@ use tokio::task::JoinHandle;
 /// of a 101 (for handshake-failure tests: a 502, a
 /// malformed status line, …); `sent_101` stays false and
 /// the request head is still recorded.
+/// `start_with_response_bytes` is the same with raw bytes
+/// (for non-UTF-8 responses, which cannot be a `&str`).
 pub struct RawUpgradeServer {
     pub addr: SocketAddr,
     request_head: Arc<Mutex<Option<String>>>,
@@ -51,11 +53,17 @@ impl RawUpgradeServer {
     /// `response` verbatim (no 101, no accept derivation).
     /// `None` is the normal 101 behaviour of `start()`.
     pub async fn start_with_response(response: Option<&str>) -> Self {
+        Self::start_with_response_bytes(response.map(str::as_bytes)).await
+    }
+
+    /// Like `start_with_response`, but the response is raw
+    /// bytes — for non-UTF-8 handshake responses.
+    pub async fn start_with_response_bytes(response: Option<&[u8]>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let request_head: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let sent_101: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
-        let fixed2 = response.map(str::to_string);
+        let fixed2 = response.map(<[u8]>::to_vec);
         let head2 = Arc::clone(&request_head);
         let sent2 = Arc::clone(&sent_101);
         let accept_task = tokio::spawn(async move {
@@ -98,7 +106,7 @@ async fn serve_one(
     mut stream: tokio::net::TcpStream,
     head: Arc<Mutex<Option<String>>>,
     sent_101: Arc<Mutex<bool>>,
-    fixed_response: Option<String>,
+    fixed_response: Option<Vec<u8>>,
 ) {
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 1024];
@@ -117,7 +125,7 @@ async fn serve_one(
     let text = String::from_utf8_lossy(&buf).into_owned();
     *head.lock().unwrap() = Some(text.clone());
     if let Some(response) = fixed_response {
-        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.write_all(&response).await;
         let _ = stream.shutdown().await;
         return;
     }

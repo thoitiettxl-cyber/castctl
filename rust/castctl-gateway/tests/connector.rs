@@ -49,6 +49,33 @@ fn conn_message(err: &TransportError) -> Option<&str> {
     }
 }
 
+/// A server that RSTs the connection without reading it:
+/// accept, then drop the stream immediately, so the
+/// client's request bytes stay unread in the kernel
+/// receive buffer and Linux RSTs the connection (closing
+/// with unread data sends RST; reading first would give
+/// a clean FIN and just re-exercise the EOF arm).
+/// Lives here, not in `common/raw_upgrade.rs`, because
+/// clippy's per-target dead-code check would fail the
+/// targets that never construct it (fix loop 1 pattern).
+/// (`TcpStream::set_linger` is unstable, issue #88494 —
+/// the unread-data close is the stable way to force a
+/// RST.) The accept loop runs until the test binary
+/// exits; no stop handle is needed.
+async fn start_reset_server() -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            drop(stream);
+        }
+    });
+    addr
+}
+
 #[tokio::test]
 async fn connect_missing_cookies_is_auth() {
     let connector = GatewayConnector::new(Arc::new(DirectDialer::new()));
@@ -320,6 +347,204 @@ async fn ws_upgrade_malformed_token_renders_length_only() {
         m, "gateway: websocket handshake: status_token_length=3",
         "malformed token must render its length only, never its bytes"
     );
+    server.stop();
+}
+
+/// Fix loop 2 (B1): a 101 with a wrong
+/// `Sec-WebSocket-Accept` renders Go's
+/// `gateway: websocket handshake: status_code=101` —
+/// gorilla returns the response non-nil on accept
+/// mismatch (`client.go:394-405`), so
+/// `handshakeStatusToken` takes the resp branch
+/// (`handshake_log.go:103-107`). NOT the 28-char
+/// `gateway: websocket dial failed`.
+#[tokio::test]
+async fn ws_upgrade_bad_accept_renders_go_status_code_101() {
+    let server = RawUpgradeServer::start_with_response(Some(
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: wrong\r\n\r\n",
+    ))
+    .await;
+    let url = format!(
+        "ws://{}/v1/noise?vm_id=vm-test&auth_token=<redacted>",
+        server.addr
+    );
+    let target = DialTarget::new("127.0.0.1", server.addr.port());
+    let stream = DirectDialer::new().dial(&target).await.unwrap();
+    let err = dial_gateway_over_stream(stream, &url, routes())
+        .await
+        .unwrap_err();
+    let m = conn_message(&err).expect("want ConnectionError");
+    assert_eq!(
+        m, "gateway: websocket handshake: status_code=101",
+        "accept mismatch on a 101 must render Go's status_code=101"
+    );
+    assert_eq!(m.len(), 45, "Go renders 45 chars for a 101 accept mismatch");
+    server.stop();
+}
+
+/// Fix loop 2 (B2): a server that closes without sending
+/// any status line renders Go's fixed 35-char message —
+/// gorilla's `ReadResponse` returns `(nil, nil, err)` on
+/// EOF (`client.go:372-387`), so `handshakeStatusToken`
+/// finds no malformed-status token and `ok=false`
+/// (`handshake_log.go:49-51`).
+#[tokio::test]
+async fn ws_upgrade_eof_before_status_renders_go_fixed_message() {
+    let server = RawUpgradeServer::start_with_response(Some("")).await;
+    let url = format!(
+        "ws://{}/v1/noise?vm_id=vm-test&auth_token=<redacted>",
+        server.addr
+    );
+    let target = DialTarget::new("127.0.0.1", server.addr.port());
+    let stream = DirectDialer::new().dial(&target).await.unwrap();
+    let err = dial_gateway_over_stream(stream, &url, routes())
+        .await
+        .unwrap_err();
+    let m = conn_message(&err).expect("want ConnectionError");
+    assert_eq!(
+        m, "gateway: websocket handshake failed",
+        "EOF before any status line must render Go's fixed message"
+    );
+    assert_eq!(m.len(), 35, "Go renders 35 chars with no status");
+    server.stop();
+}
+
+/// Fix loop 2 (B2): a server that RSTs the connection
+/// before any status line renders the same fixed 35-char
+/// message — the read fails (`client.go:372-387` returns
+/// `(nil, nil, err)`), resp nil, no token. Which dial
+/// arm fires (write / read / EOF) depends on RST timing,
+/// but all three share the identical
+/// `handshake_failed_error()` call, so the message
+/// assertion pins the rendering either way.
+#[tokio::test]
+async fn ws_upgrade_reset_before_status_renders_go_fixed_message() {
+    let addr = start_reset_server().await;
+    let url = format!("ws://{addr}/v1/noise?vm_id=vm-test&auth_token=<redacted>");
+    let target = DialTarget::new("127.0.0.1", addr.port());
+    let stream = DirectDialer::new().dial(&target).await.unwrap();
+    let err = dial_gateway_over_stream(stream, &url, routes())
+        .await
+        .unwrap_err();
+    let m = conn_message(&err).expect("want ConnectionError");
+    assert_eq!(
+        m, "gateway: websocket handshake failed",
+        "RST before any status line must render Go's fixed message"
+    );
+    assert_eq!(m.len(), 35, "Go renders 35 chars with no status");
+}
+
+/// Fix loop 2 (non-UTF-8 arm, status token): Go parses
+/// the response as bytes (`net/http` `ReadResponse` +
+/// `textproto` never validate UTF-8); a non-UTF-8 status
+/// token fails `Atoi` → `malformed HTTP status code`
+/// error → the regex-extracted token fails
+/// `tokenShapeRe` (non-ASCII) → `ok=false` → the fixed
+/// 35-char message (`handshake_log.go:103-130`).
+#[tokio::test]
+async fn ws_upgrade_non_utf8_status_token_renders_go_fixed_message() {
+    let response: &[u8] = b"HTTP/1.1 \xff\xff\xff Bad\r\n\r\n";
+    let server = RawUpgradeServer::start_with_response_bytes(Some(response)).await;
+    let url = format!(
+        "ws://{}/v1/noise?vm_id=vm-test&auth_token=<redacted>",
+        server.addr
+    );
+    let target = DialTarget::new("127.0.0.1", server.addr.port());
+    let stream = DirectDialer::new().dial(&target).await.unwrap();
+    let err = dial_gateway_over_stream(stream, &url, routes())
+        .await
+        .unwrap_err();
+    let m = conn_message(&err).expect("want ConnectionError");
+    assert_eq!(
+        m, "gateway: websocket handshake failed",
+        "non-UTF-8 status token must render Go's fixed message"
+    );
+    assert_eq!(m.len(), 35, "Go renders 35 chars with no parseable token");
+    server.stop();
+}
+
+/// Fix loop 2 (non-UTF-8 arm, header value): non-UTF-8
+/// bytes in a header VALUE are valid obs-text
+/// (`textproto` `validHeaderValueByte`,
+/// `reader.go:733`), so the response still parses and
+/// Go renders the status-based form — here
+/// `status_code=502` for a 502, NOT the fixed message.
+#[tokio::test]
+async fn ws_upgrade_non_utf8_header_value_renders_go_status_code() {
+    let response: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\nX-Custom: \xff\xfe\r\n\r\n";
+    let server = RawUpgradeServer::start_with_response_bytes(Some(response)).await;
+    let url = format!(
+        "ws://{}/v1/noise?vm_id=vm-test&auth_token=<redacted>",
+        server.addr
+    );
+    let target = DialTarget::new("127.0.0.1", server.addr.port());
+    let stream = DirectDialer::new().dial(&target).await.unwrap();
+    let err = dial_gateway_over_stream(stream, &url, routes())
+        .await
+        .unwrap_err();
+    let m = conn_message(&err).expect("want ConnectionError");
+    assert_eq!(
+        m, "gateway: websocket handshake: status_code=502",
+        "non-UTF-8 in a header value must not hide the status"
+    );
+    assert_eq!(m.len(), 45, "Go renders 45 chars for a 502");
+    server.stop();
+}
+
+/// Fix loop 2 (non-UTF-8 arm, header key): a header
+/// KEY byte >= 0x80 fails `validHeaderFieldByte`, so
+/// `canonicalMIMEHeaderKey` returns ok=false and
+/// `ReadResponse` fails the whole response
+/// (`textproto/reader.go:521-596`) → resp nil → the
+/// fixed 35-char message, even with a valid 502 status
+/// line (Go parses the whole head before returning it).
+#[tokio::test]
+async fn ws_upgrade_non_utf8_header_key_renders_go_fixed_message() {
+    let response: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\nX-\xff: v\r\n\r\n";
+    let server = RawUpgradeServer::start_with_response_bytes(Some(response)).await;
+    let url = format!(
+        "ws://{}/v1/noise?vm_id=vm-test&auth_token=<redacted>",
+        server.addr
+    );
+    let target = DialTarget::new("127.0.0.1", server.addr.port());
+    let stream = DirectDialer::new().dial(&target).await.unwrap();
+    let err = dial_gateway_over_stream(stream, &url, routes())
+        .await
+        .unwrap_err();
+    let m = conn_message(&err).expect("want ConnectionError");
+    assert_eq!(
+        m, "gateway: websocket handshake failed",
+        "non-UTF-8 in a header key must fail the whole response in Go"
+    );
+    assert_eq!(m.len(), 35, "Go renders 35 chars with no response");
+    server.stop();
+}
+
+/// Fix loop 2 (non-UTF-8 arm, accept value): a 101
+/// whose `Sec-WebSocket-Accept` value is non-UTF-8
+/// cannot equal the computed key (ASCII base64), so
+/// gorilla returns `(nil, resp, ErrBadHandshake)`
+/// (`client.go:394-405`) → Go renders
+/// `status_code=101`.
+#[tokio::test]
+async fn ws_upgrade_non_utf8_accept_value_renders_go_status_code_101() {
+    let response: &[u8] = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: \xff\xff\r\n\r\n";
+    let server = RawUpgradeServer::start_with_response_bytes(Some(response)).await;
+    let url = format!(
+        "ws://{}/v1/noise?vm_id=vm-test&auth_token=<redacted>",
+        server.addr
+    );
+    let target = DialTarget::new("127.0.0.1", server.addr.port());
+    let stream = DirectDialer::new().dial(&target).await.unwrap();
+    let err = dial_gateway_over_stream(stream, &url, routes())
+        .await
+        .unwrap_err();
+    let m = conn_message(&err).expect("want ConnectionError");
+    assert_eq!(
+        m, "gateway: websocket handshake: status_code=101",
+        "non-UTF-8 accept value must mismatch and render status_code=101"
+    );
+    assert_eq!(m.len(), 45, "Go renders 45 chars for a 101 accept mismatch");
     server.stop();
 }
 
