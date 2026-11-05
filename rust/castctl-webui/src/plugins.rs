@@ -15,9 +15,10 @@ use crate::go_json::encode_go_json_line;
 use crate::server::{Resp, api_headers};
 use castctl_config::jsonvalue::{JsonValue, OrderedObject};
 
-/// `handleGetPlugins`: the fixed 200 response. Keys in Go
-/// struct order: available, plugins, reason (the Go struct
-/// declares them in that order — see `plugins.go`).
+/// `handleGetPlugins`: the fixed 200 response. Go writes
+/// a `map[string]any`, so encoding/json emits keys SORTED
+/// (available, plugins, reason) — there is no struct; the
+/// emitted bytes already match.
 pub fn handle_get_plugins() -> Resp {
     let mut data = OrderedObject::new();
     data.set("available".to_string(), JsonValue::Bool(false));

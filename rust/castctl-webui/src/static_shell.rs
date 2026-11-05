@@ -18,7 +18,7 @@
 //! `X-Content-Type-Options: nosniff`. No Content-Length
 //! is set here: Go's net/http sends bodies over its
 //! 2048-byte sniff buffer chunked (see [`crate::server`]
-//! `body_for_go_compat`), and the shell is 964 KiB.
+//! `render_resp`), and the shell is 964 KiB.
 
 use sha2::{Digest, Sha256};
 

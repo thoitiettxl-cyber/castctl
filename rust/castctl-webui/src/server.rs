@@ -179,11 +179,16 @@ pub fn forbidden_resp() -> Resp {
 }
 
 /// Fixed 429 `rate_limited` / `too many failed login
-/// attempts` with `Retry-After` = window seconds.
+/// attempts` with `Retry-After` = window seconds. Go sets
+/// Retry-After BEFORE writeError's headers, so it is
+/// emitted first (Retry-After, Content-Type,
+/// Cache-Control, X-Content-Type-Options).
 pub fn rate_limited_resp(window: Duration) -> Resp {
     let mut resp = error_resp(429, "rate_limited", "too many failed login attempts");
-    resp.headers
-        .push(("Retry-After".to_string(), retry_after_seconds(window)));
+    resp.headers.insert(
+        0,
+        ("Retry-After".to_string(), retry_after_seconds(window)),
+    );
     resp
 }
 

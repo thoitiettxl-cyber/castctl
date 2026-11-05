@@ -56,8 +56,16 @@ pub fn parse_duration(s: &str) -> Result<i64, String> {
             i += 1;
             let frac_start = i;
             while i < bytes.len() && bytes[i].is_ascii_digit() {
-                frac = frac * 10 + (bytes[i] - b'0') as i128;
-                frac_scale *= 10;
+                // Checked: an over-long fraction must error
+                // (Go's ParseDuration errors on overflow),
+                // never wrap or silently coerce to 0.
+                frac = frac
+                    .checked_mul(10)
+                    .and_then(|f| f.checked_add((bytes[i] - b'0') as i128))
+                    .ok_or_else(|| format!("time: invalid duration {s:?}"))?;
+                frac_scale = frac_scale
+                    .checked_mul(10)
+                    .ok_or_else(|| format!("time: invalid duration {s:?}"))?;
                 i += 1;
             }
             if i == frac_start {
@@ -67,12 +75,15 @@ pub fn parse_duration(s: &str) -> Result<i64, String> {
         if !has_digits {
             return Err(format!("time: invalid duration {s:?}"));
         }
+        // Checked: an over-long integer part must error
+        // (Go's ParseDuration errors on overflow), never
+        // silently coerce to 0 via unwrap_or(0).
         let int_part: i128 = rest[num_start..i]
             .split('.')
             .next()
             .unwrap_or("0")
             .parse()
-            .unwrap_or(0);
+            .map_err(|_| format!("time: invalid duration {s:?}"))?;
         // Unit.
         let unit_start = i;
         while i < bytes.len() && !bytes[i].is_ascii_digit() && bytes[i] != b'.' {
