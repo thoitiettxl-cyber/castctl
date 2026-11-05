@@ -2007,7 +2007,12 @@ fn handle_put_telegram(server: &Server, body: &[u8]) -> Result<Resp, ApiError> {
         |obj| {
             let profile = req_string(obj, "profile")?;
             let token = req_string(obj, "token")?;
-            let ids_raw = obj.get("allowed_user_ids").cloned();
+            // Go decodes JSON null into a nil slice: `null` means
+    // absent (ids unchanged), not an error.
+    let ids_raw = match obj.get("allowed_user_ids") {
+        Some(JsonValue::Null) | None => None,
+        Some(v) => Some(v.clone()),
+    };
             let auto_approve = req_bool(obj, "auto_approve")?;
             let auto_allow_once = req_bool(obj, "auto_allow_once")?;
             Ok((profile, token, ids_raw, auto_approve, auto_allow_once))

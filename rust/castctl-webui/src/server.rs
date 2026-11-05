@@ -896,6 +896,14 @@ pub fn decode_body_json(body: &[u8], max_bytes: usize) -> Result<JsonValue, ApiE
 /// generic [`JsonValue`], the top level must be an object,
 /// and unknown fields are rejected
 /// (`DisallowUnknownFields` in Go's `decodeBody`).
+///
+/// Go matches struct fields case-INSENSITIVELY, and
+/// case-variant duplicates collapse last-wins
+/// (`{"content":"a","Content":"b"}` decodes as `"b"`).
+/// The object is therefore folded by ASCII-lowercase key
+/// before the allow-list check and the extractor: the
+/// first position is kept, the last value wins (Go's
+/// duplicate-key rule, applied case-insensitively).
 pub fn decode_body_typed<F, T>(
     body: &[u8],
     max_bytes: usize,
@@ -909,12 +917,40 @@ where
     let JsonValue::Object(obj) = &value else {
         return Err(crate::error::err_validation("invalid JSON in request body"));
     };
+    let obj = fold_case_keys(obj);
     for key in obj.keys() {
-        if !allowed.contains(&key.as_str()) {
+        if !allowed
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(key.as_str()))
+        {
             return Err(crate::error::err_validation("invalid JSON in request body"));
         }
     }
-    extract(obj)
+    extract(&obj)
+}
+
+/// Fold an object's keys by ASCII-lowercase: the first
+/// position is kept, the last value wins. Used only for
+/// typed request bodies (Go struct decoding); stored
+/// documents keep their exact keys.
+fn fold_case_keys(obj: &castctl_config::jsonvalue::OrderedObject) -> OrderedObject {
+    let mut out = OrderedObject::new();
+    // Lowercase key -> first-seen original key.
+    let mut first_keys: Vec<(String, String)> = Vec::new();
+    for (k, v) in obj.iter() {
+        let lower = k.to_ascii_lowercase();
+        match first_keys.iter().find(|(l, _)| *l == lower) {
+            Some((_, first)) => {
+                let first = first.clone();
+                out.set(first, v.clone());
+            }
+            None => {
+                first_keys.push((lower, k.clone()));
+                out.set(k.clone(), v.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Extract a required string field, or a validation error
@@ -1180,6 +1216,33 @@ mod tests {
     async fn recoverer_passes_through_ok() {
         let resp = with_recover(async { envelope_resp(200, JsonValue::Number("1".to_string())) }).await;
         assert_eq!(resp.status, 200);
+    }
+
+    #[test]
+    fn decode_body_typed_is_case_insensitive() {
+        // F-C4: Go's DisallowUnknownFields matches struct
+        // fields case-insensitively.
+        let body = br#"{"Content": "x", "BASE_SHA256": "abc"}"#;
+        let out = decode_body_typed(body, BODY_CAP_64K, &["content", "base_sha256"], |obj| {
+            req_string(obj, "content")
+        })
+        .expect("case variants accepted");
+        assert_eq!(out, Some("x".to_string()));
+        // Case-variant duplicates collapse last-wins.
+        let body = br#"{"content": "a", "Content": "b"}"#;
+        let out = decode_body_typed(body, BODY_CAP_64K, &["content"], |obj| {
+            req_string(obj, "content")
+        })
+        .expect("duplicates collapse");
+        assert_eq!(out, Some("b".to_string()));
+        // Unknown fields are still rejected, any case.
+        let body = br#"{"content": "a", "BOGUS": 1}"#;
+        assert!(
+            decode_body_typed(body, BODY_CAP_64K, &["content"], |obj| {
+                req_string(obj, "content")
+            })
+            .is_err()
+        );
     }
 
 }
