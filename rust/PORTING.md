@@ -10243,3 +10243,40 @@ on cue); logs `/tmp/proof-*.log` on cue.
   beyond the parity set (e.g. Go `encoding/json` vs
   serde_json texts); case 26 matched canonically, so the
   covered cases are settled.
+
+### M6b.8 Late reader verification (2026-11-06)
+
+Three reader subagents delivered verbatim Go excerpts after
+the parity gate (`handlers.go`, `sections.go`, `chats.go`,
+`logs.go`, `endpoints.go`, `screencast.go`). Cross-checked
+against the Rust code; every flagged trap already matches:
+
+- PUT /dns merge error: Go's non-sentinel branch calls
+  `writeAPIError(w, err)` with the STALE `err` variable
+  (nil at that point → fixed 500 `internal_error`). The
+  branch is unreachable in practice — `mergeNode` fails
+  only with a sentinel rejection — and Rust's
+  `merge_node_at` returns only `SentinelRejection`, so the
+  400 sentinel message covers all reachable inputs.
+- PUT /settings/webui storage: `listen`/`ui_dir` stored
+  TRIMMED, token stored UNTRIMMED (whitespace → 400),
+  `session_idle_timeout`/`login_rate_limit.window` stored
+  VERBATIM after validating the trimmed parse (a value with
+  surrounding whitespace then fails the full re-parse, as
+  in Go). All four confirmed in `sections.rs`.
+- PUT /settings/telegram uses `saveDirect` (no
+  `base_sha256` / no 409), unlike DNS/keeper/webui which
+  use `saveMerged`. Confirmed in `handlers.rs`.
+- PUT /settings/keeper: missing `entries` → 400, `null`
+  → deletes the block, `[]` → empty array stored.
+  Confirmed in `sections.rs`.
+- GET /settings/webui with no `webui` block: `listen`/
+  `ui_dir`/`masked` stay `""`, `token_set` false, but idle
+  timeout / rate limit still show effective defaults
+  (12h / 5 attempts / 5m). Confirmed in `sections.rs`.
+- Chats: start returns **201** (not 200), send **202**;
+  both already in `chats.rs`. The reader also confirmed
+  `usedByEndpoint`'s tail (`store.go:672-690`): scan raw
+  outbounds for `detour`/`endpoint` == tag, add the
+  outbound's own tag, sort — matches `store.rs`
+  `used_by_endpoint` exactly.
