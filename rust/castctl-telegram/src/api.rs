@@ -513,18 +513,38 @@ impl BotApi {
     /// pollTimeout−1s per the library, i.e. 25s here
     /// (`POLL_TIMEOUT_SECS`).
     ///
-    /// Decode mirrors Go's `encoding/json` (fix loop 1,
-    /// red R3; fix loop 2, red R5): a missing `result`
-    /// (`null`) is an empty batch, not an error; a
-    /// `result` that is not an array is a response decode
-    /// failure (the whole batch fails, as in Go); items
-    /// decode one by one, so a wrong-TYPE field fails the
-    /// whole batch (`UpdateDecode`, as in Go) while
-    /// ABSENT or `null` fields zero-fill via
-    /// `null_as_default` on `types.rs` and the item
-    /// proceeds. A bare `null` array element decodes to
-    /// a zero `Update` (Go: a null element is a zero
-    /// value), never fails the batch.
+    /// Decode mirrors the pinned Bot API library
+    /// (`go-telegram/bot v1.27.1-.../get_updates.go`,
+    /// `decodeUpdate` — fix loop 3, red R6), NOT a
+    /// whole-array unmarshal: the envelope decodes to
+    /// raw items, then each item decodes on its own, "so
+    /// a single undecodable update does not reject the
+    /// whole batch". A missing `result` (`null`) is an
+    /// empty batch, not an error; a `result` that is not
+    /// an array is a response decode failure (the whole
+    /// batch fails, as in Go — the library's unmarshal
+    /// into `[]json.RawMessage` fails there too); ABSENT
+    /// or `null` fields zero-fill via `null_as_default`
+    /// on `types.rs` and the item proceeds. A bare `null`
+    /// array element decodes to a zero `Update` (Go: a
+    /// null element is a zero value), never fails the
+    /// batch. A WRONG-TYPE field fails only that item:
+    /// its `update_id` is read best-effort — readable,
+    /// the item is pushed as a skipped zero `Update`
+    /// carrying that id (the run loop advances the poll
+    /// offset past it and the allowlist drops it by
+    /// sender 0, exactly Go's skip-and-advance);
+    /// unreadable (wrong-type id, float id, non-object
+    /// element, missing id), it becomes a zero `Update`
+    /// (Go's `offsetStuck` case: offset unchanged, the
+    /// batch is re-requested at the long-poll cadence)
+    /// — and decoding CONTINUES with the rest of the
+    /// batch instead of returning `Err(UpdateDecode)`.
+    /// (The old doc here claimed a wrong-type field
+    /// fails the whole batch "as in Go" — that claim
+    /// was FALSE; the library decodes per item. Fix
+    /// loop 3 corrects the record; do not reintroduce
+    /// the old claim.)
     pub async fn get_updates(&self, offset: i64) -> Result<Vec<Update>, BotError> {
         let mut params = serde_json::json!({
             "timeout": POLL_TIMEOUT_SECS,
@@ -546,9 +566,27 @@ impl BotApi {
                 updates.push(Update::default());
                 continue;
             }
-            let update: Update =
-                serde_json::from_value(item.clone()).map_err(|_| BotError::UpdateDecode)?;
-            updates.push(update);
+            match serde_json::from_value(item.clone()) {
+                Ok(update) => updates.push(update),
+                Err(_) => {
+                    // Mirror the pinned library's
+                    // `decodeUpdate` (fix loop 3, red R6):
+                    // a single undecodable item must not
+                    // reject the whole batch. Read its id
+                    // best-effort; a readable id is pushed
+                    // as a skipped zero `Update` carrying
+                    // it (the run loop advances the offset
+                    // past it), an unreadable id becomes a
+                    // zero `Update` (Go's `offsetStuck`
+                    // case). Either way, keep decoding the
+                    // rest of the batch.
+                    let id = item.get("update_id").and_then(Value::as_i64).unwrap_or(0);
+                    updates.push(Update {
+                        update_id: id,
+                        ..Default::default()
+                    });
+                }
+            }
         }
         Ok(updates)
     }

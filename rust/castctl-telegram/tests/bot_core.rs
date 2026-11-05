@@ -1619,8 +1619,12 @@ async fn malformed_updates_do_not_poison_the_loop() {
     server.behavior.queue_raw_envelope(serde_json::json!({
         "ok": true, "result": [msg_update(5, 100, ALLOWED_UID, "after")],
     }));
-    // Batch 5: a wrong-TYPE item fails the whole batch (Go
-    // parity); the good item in it is lost with the batch.
+    // Batch 5: a wrong-TYPE item is SKIPPED per item
+    // (fix loop 3, red R6 — mirrors the pinned
+    // library's `decodeUpdate`); the good item in the
+    // same batch is still handled, and the offset
+    // advances past the poison (its id is unreadable,
+    // so the offset advances via the good item).
     let bad_type = serde_json::json!({"update_id": "six", "message": {
         "message_id": 6,
         "from": {"id": ALLOWED_UID, "is_bot": false, "first_name": "T"},
@@ -1648,26 +1652,113 @@ async fn malformed_updates_do_not_poison_the_loop() {
         async move { bot.run().await }
     });
     wait_until(Duration::from_secs(10), || {
-        services.call_count("start_turn") >= 5
+        services.call_count("start_turn") >= 6
     })
     .await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     bot.request_shutdown();
     run.await.expect("run task").expect("run ok");
     // Handled: "no chat" (chat 0), "good", "no id",
-    // "after", "last" = 5 turns. The callback missing
-    // `from` (uid 0) was dropped; "lost" died with its
-    // wrong-type batch.
-    assert_eq!(services.call_count("start_turn"), 5);
+    // "after", "lost" (the good item in the wrong-type
+    // batch — skipped poison, not a failed batch),
+    // "last" = 6 turns. The callback missing `from`
+    // (uid 0) was dropped; the wrong-type item itself
+    // (unreadable id) became a zero update, dropped by
+    // the allowlist.
+    assert_eq!(services.call_count("start_turn"), 6);
     assert!(
-        !services.calls().iter().any(|c| c.contains("lost")),
-        "the good item in a wrong-type batch is not handled, got {:?}",
+        services.calls().iter().any(|c| c.contains("lost")),
+        "the good item in a wrong-type batch IS handled, got {:?}",
         services.calls()
     );
     assert_eq!(
         state.offset(),
         8,
         "offset advances past the malformed batches"
+    );
+}
+
+/// A wrong-TYPE item is SKIPPED per item and the
+/// offset advances past it (fix loop 3, red R6):
+/// mirrors the pinned Bot API library's `decodeUpdate`
+/// (`go-telegram/bot v1.27.1-.../get_updates.go` —
+/// "decodes one update on its own, so a single
+/// undecodable update does not reject the whole batch").
+/// A readable id advances the offset past the poison
+/// even though the item itself is not delivered; an
+/// unreadable id (wrong-type id, non-object element,
+/// float id — Go's head-ID read fails on all of them)
+/// becomes a zero `Update`, dropped by the allowlist
+/// with the offset unchanged (Go's `offsetStuck` case),
+/// and the REST of the batch is still delivered.
+#[tokio::test]
+async fn wrong_type_items_are_skipped_like_go() {
+    let server = FakeServer::start().await;
+    let (state, _dir) = test_state("wrong-type-skip");
+    let services = Arc::new(FakeServices::new());
+    // Batch 1: readable id (5), wrong-type nested field
+    // (`chat` is a string, not an object) + a good update.
+    let bad_chat = serde_json::json!({"update_id": 5, "message": {
+        "message_id": 1,
+        "from": {"id": ALLOWED_UID, "is_bot": false, "first_name": "T"},
+        "chat": "oops",
+        "date": 0, "text": "bad",
+    }});
+    server.behavior.queue_raw_envelope(serde_json::json!({
+        "ok": true,
+        "result": [bad_chat, msg_update(6, 100, ALLOWED_UID, "good")],
+    }));
+    // Batch 2: a non-object element, a float `update_id`
+    // (5.5 — unreadable as i64), and a good update.
+    let float_id = serde_json::json!({"update_id": 5.5, "message": {
+        "message_id": 2,
+        "from": {"id": ALLOWED_UID, "is_bot": false, "first_name": "T"},
+        "chat": {"id": 100, "type": "private"},
+        "date": 0, "text": "float",
+    }});
+    server.behavior.queue_raw_envelope(serde_json::json!({
+        "ok": true,
+        "result": ["junk", float_id, msg_update(7, 100, ALLOWED_UID, "after")],
+    }));
+    let bot = make_bot(
+        &server,
+        Arc::clone(&state),
+        Arc::clone(&services),
+        vec![ALLOWED_UID],
+        true,
+    )
+    .await;
+    let run = tokio::spawn({
+        let bot = Arc::clone(&bot);
+        async move { bot.run().await }
+    });
+    wait_until(Duration::from_secs(10), || {
+        services.call_count("start_turn") >= 2
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    bot.request_shutdown();
+    run.await.expect("run task").expect("run ok");
+    // Handled: "good" (id 6) and "after" (id 7) = 2
+    // turns. The poison items were skipped, never
+    // delivered: "bad" (id 5, skipped, offset advanced
+    // past it), "junk" and "float" (unreadable ids,
+    // zero updates, dropped).
+    assert_eq!(services.call_count("start_turn"), 2);
+    assert!(
+        services.calls().iter().any(|c| c.contains("good")),
+        "good update after a readable-id poison is handled, got {:?}",
+        services.calls()
+    );
+    assert!(
+        services.calls().iter().any(|c| c.contains("after")),
+        "good update after unreadable-id poisons is handled, got {:?}",
+        services.calls()
+    );
+    assert_eq!(
+        state.offset(),
+        7,
+        "offset advances past both poison batches"
     );
 }
 

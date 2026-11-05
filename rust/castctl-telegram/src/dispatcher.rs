@@ -778,8 +778,30 @@ mod tests {
         );
         gate_release.notify_waiters();
         first.await.expect("first shutdown");
-        // Let the worker drain items 2..=10 and exit.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Wait until the worker has drained items 2..=10
+        // (fix loop 3, red NIT 3): the old sleep-then-
+        // assert was a scheduling margin, not a mechanism
+        // — poll the handled list with a bounded timeout
+        // instead. No `wait_until` helper exists in this
+        // unit-test module (the one in `bot_core.rs` is
+        // integration-test-only), so the loop is inline.
+        // The probe id 999 is excluded exactly like the
+        // final assert below (the probe loop may enqueue
+        // it more than once before the shutdown flag is
+        // set, so the raw handled length is 10 + N).
+        let start = std::time::Instant::now();
+        loop {
+            let mut got = handled.lock().expect("lock").clone();
+            got.retain(|id| *id != 999);
+            if got.len() == 10 {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "worker did not drain all 10 items within 5s, got {got:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         let mut got = handled.lock().expect("lock").clone();
         got.retain(|id| *id != 999);
         assert_eq!(

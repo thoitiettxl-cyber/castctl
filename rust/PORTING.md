@@ -4638,7 +4638,11 @@ Per-item fix + test (details in
    buffered items dropped AND never processed.
 3. Malformed updates (red R3): `#[serde(default)]`
    on id/chat/from/file_id (Go: absent → zero;
-   wrong-type still fails the whole batch).
+   wrong-type item is skipped per item — CORRECTED
+   by fix loop 3, red R6: the loop-1 record said
+   "wrong-type still fails the whole batch", which
+   was FALSE against the pinned library's per-item
+   `decodeUpdate`; see the Fix loop 3 section).
    Tests: missing chat, missing update_id, callback
    missing from, result-not-array, ok:true no
    result, wrong-type item.
@@ -4780,8 +4784,13 @@ the R3 fix itself.
    `deserialize_with` helper on every non-`Option`
    decode field, a `null_photo_vec` helper for
    `photo` elements, and a `null` → zero-`Update`
-   arm in `get_updates`. Wrong-TYPE fields still
-   fail the whole batch (Go parity — unchanged).
+   arm in `get_updates`. (The sentence this item
+   originally ended with — "Wrong-TYPE fields still
+   fail the whole batch (Go parity — unchanged)" —
+   was FALSE and is SUPERSEDED by fix loop 3, red
+   R6; see the Fix loop 3 section. A wrong-type
+   field fails only that item, per the pinned
+   library's `decodeUpdate`.)
    Tests: every null shape in one batch with a good
    update (unit + loop-level).
 3. Dispatcher residuals (red NITs 1+2, tech N-N1):
@@ -4837,6 +4846,120 @@ build that rewrites the lock means the gated tree
 was not the committed tree, and every gate claim
 in the report is void until re-run on the
 committed tree.
+
+### Fix loop 3 (re-review of loop 2)
+
+Re-review verdicts on loop 2: technical PASS,
+safety PASS, red-team FAIL (R6 below, novel). The
+R5 fix and both R2 residuals were verified as real
+in code; the failure was a pre-existing decode-path
+divergence whose "Go parity" justification —
+certified in review 2 and baked into a test name —
+was FALSE against the pinned library source.
+
+1. Wrong-TYPE field fails the whole batch (red R6,
+   BLOCKING, novel — the loop-2 report's "Wrong-TYPE
+   fields still fail the whole batch (Go parity)"
+   line and this section's loop-1 item 3 wording
+   are SUPERSEDED by this record; the loop-2
+   report file itself is not rewritten). The Rust
+   `get_updates` returned `Err(UpdateDecode)` on
+   the FIRST per-item decode failure, discarding
+   the whole batch; `run()` re-polled the same
+   offset forever, so one malformed update starved
+   every update at/after it. Go does not do that:
+   the repo's bot polls through the pinned library
+   (`go-telegram/bot v1.27.1-0.20261008103508-
+   f53bfe55a30b`, `go.mod:8`, no `replace`;
+   `internal/telegram/bot.go:519` calls
+   `b.api.Start(ctx)`), whose `get_updates.go`
+   decodes the envelope into `[]json.RawMessage`
+   and then each item separately in `decodeUpdate`
+   — "decodes one update on its own, so a single
+   undecodable update does not reject the whole
+   batch. On failure the id is still read when
+   possible, so the offset can move past it. A zero
+   id means it could not be read." The loop skips
+   an undecodable item and advances `lastUpdateID`
+   past any item whose id is readable; only an
+   unreadable id leaves the offset stuck (with an
+   exponential backoff, capped at 5s). Fixed here
+   by mirroring `decodeUpdate` in `get_updates`
+   (one spot, `api.rs` — NOT `types.rs`): on a
+   per-item decode failure, best-effort read
+   `update_id` (`item.get("update_id").and_then
+   (Value::as_i64)`); readable → push a skipped
+   zero `Update` carrying that id (the run loop's
+   `poll_offset.max(id + 1)` advances the offset
+   and the allowlist drops it by sender 0);
+   unreadable (wrong-type id, float id, non-object
+   element, missing id) → push a zero `Update`
+   (id 0, dropped, offset unchanged) — and CONTINUE
+   decoding the rest of the batch. This is a parity
+   fix, NOT a new deviation. Tests: both red-team
+   trigger batches at loop level (wrong-type id
+   `"six"` + good update id 7; readable id 5 with
+   wrong-type nested field `"chat": "oops"` + good
+   update id 6), plus edge cases in the same test
+   (a non-object element, a float `update_id` 5.5 —
+   Go's head-ID read fails on a float too, so the
+   Rust `as_i64 → None` matches). Both loop tests
+   failed BEFORE the fix (10s `wait_until` timeouts
+   — the good updates were never handled, the first
+   execution of the R6 triggers). The test
+   `wrong_type_fails_the_whole_decode_like_go` is
+   renamed to `wrong_type_fails_vec_decode`: the
+   `Vec<Update>`-level assertion stays true (serde's
+   `Vec` decode IS all-or-nothing), but the old name
+   baked the falsified parity claim into the suite
+   and must not be reintroduced. The existing
+   `malformed_updates_do_not_poison_the_loop` test
+   is updated to the new behaviour (its batch 5 now
+   expects the good item handled: 6 turns, not 5).
+   `BotError::UpdateDecode` is no longer
+   constructed by `get_updates`; the variant stays
+   (error-class mapping + `error.rs` tests still
+   reference it).
+2. `FileObject.file_id: null` had no test fixture
+   (tech N-N1): the loop-2 report claimed "every
+   null shape" but no `document: {"file_id": null}`
+   fixture existed in the unit or loop test. The
+   code was already correct (the helper is applied
+   at `types.rs:197`, the same generic helper as
+   every other `String` field); a 4th element with
+   a null document `file_id` is added to the unit
+   test, asserting `""`.
+3. Double-shutdown test used a wall-clock sleep
+   (red NIT 3): `sleep(500ms)` before the final
+   assert in `double_shutdown_counts_leftovers_once`
+   is replaced by a bounded wait-until loop on
+   `handled.len() == 10` (5s timeout). No
+   `wait_until` helper exists in the dispatcher
+   unit-test module (the one in `bot_core.rs` is
+   integration-test-only), so the loop is inline.
+4. `offsetStuck` backoff vs Rust's fixed 1s pause
+   (red NIT 4): DOCUMENTED, not changed. After the
+   R6 fix a poison batch produces NO error at all,
+   so no backoff is needed: Go re-requests the same
+   offset with exponential backoff (≤5s) when the
+   id is unreadable; Rust drops the zero-`Update`
+   and re-polls at the 25s long-poll cadence.
+   Equivalent outcome (no stall, no spin), no
+   backoff added.
+5. All-`null` batch repolls the same offset (tech
+   N-N2): RESOLVED by the library evidence, not a
+   gap. Go's `decodeUpdate` returns ID 0 for a
+   `null` element (`json.Unmarshal(null, &upd)` is
+   a no-op, `errDecode == nil`, then `upd.ID == 0`
+   → skip + `offsetStuck`), so Go ALSO does not
+   advance the offset past an all-`null` batch —
+   Go-identical behaviour. No code change.
+6. Owner-election `select!` race (red NIT 5):
+   NOT touched, not retrofitted silently. The
+   loop-3 diff does not touch `claims.rs`.
+
+Deferred NITs: exactly one — red N10 (`is_auth_error`,
+M4b seam), carried from loops 1–2.
 
 ## Quy tắc quyết định (Boss, 2026-11-05 — standing)
 

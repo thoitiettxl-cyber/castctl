@@ -355,10 +355,19 @@ mod tests {
     }
 
     /// A field present with the WRONG TYPE still fails
-    /// the whole decode, as in Go (fix loop 1, red R3):
-    /// only ABSENT fields are zero-filled.
+    /// the `Vec<Update>` decode itself (serde's `Vec`
+    /// decode is all-or-nothing — this assertion is
+    /// about the serde type, NOT about Go): at the
+    /// `get_updates` level the batch is NOT failed —
+    /// a wrong-typed item is skipped per item, mirroring
+    /// the pinned library's `decodeUpdate` (fix loop 3,
+    /// red R6). The old test name claimed this was "like
+    /// Go" at the batch level; that claim was FALSE
+    /// (the library decodes per item into
+    /// `[]json.RawMessage`), so the name is corrected
+    /// here and the old name must not be reintroduced.
     #[test]
-    fn wrong_type_fails_the_whole_decode_like_go() {
+    fn wrong_type_fails_vec_decode() {
         let batch: Result<Vec<Update>, _> = serde_json::from_value(serde_json::json!([
             {"update_id": 1, "message": {"message_id": 1, "chat": {"id": 100, "type": "private"}}},
             {"update_id": "two", "message": {"message_id": 2, "chat": {"id": 100, "type": "private"}}},
@@ -383,6 +392,7 @@ mod tests {
             {"update_id": null, "message": {"message_id": null, "chat": null, "date": null, "from": null, "text": "a", "photo": [null, {"file_id": "p1"}]}},
             {"update_id": 6, "message": {"message_id": 2, "from": {"id": 111, "first_name": null, "is_bot": null}, "chat": {"id": null, "type": null}, "date": 0, "text": "good"}},
             {"update_id": 7, "callback_query": {"id": null, "from": null, "data": "c:x"}},
+            {"update_id": 8, "message": {"message_id": 3, "from": {"id": 111, "first_name": "T"}, "chat": {"id": 100, "type": "private"}, "date": 0, "document": {"file_id": null}}},
         ]))
         .expect("null fields decode");
         let m0 = batch[0].message.as_ref().expect("message");
@@ -405,6 +415,9 @@ mod tests {
         let cb = batch[2].callback_query.as_ref().expect("callback");
         assert_eq!(cb.id, "", "null callback id → empty");
         assert_eq!(cb.from.id, 0, "null callback from → zero User");
+        let m3 = batch[3].message.as_ref().expect("message");
+        let doc = m3.document.as_ref().expect("document");
+        assert_eq!(doc.file_id, "", "null document file_id → empty");
     }
 
     /// `chat_key` for an edited-only update is the sender
