@@ -1729,7 +1729,7 @@ Boss decision, quoted verbatim (applies to §13 and
 `rust/NOTICE`): artifact Rust là GPL-3.0-only vì link honk;
 binary Go vẫn GPL-3.0-or-later; 2 artifact, 2 license.
 
-### M4c fork — `thoitiettxl-cyber/honk`, branch `feat/chrome-tls-parity` — REVERTED, NOT USED
+### M4c fork — `thoitiettxl-cyber/honk`, branch `feat/chrome-tls-parity` — REVERTED: NOT USED, NOT PINNED, DOES NOT AFFECT THE BUILD (experiment record only)
 
 Why a fork was tried: the live Meta edge answers the gateway
 WS upgrade with HTTP 502 for every non-Chrome ClientHello
@@ -1751,8 +1751,11 @@ cipher/ALPS/OCSP/SCT field) — the fix must live in
 honk-outbound. Full gate + numbers: `rust/PORTING.md`
 §M4c.
 
-Fork (still on GitHub for the record, NOT a dependency of
-this tree): https://github.com/thoitiettxl-cyber/honk,
+Fork (still on GitHub for the record only — NOT used, NOT
+pinned, does NOT affect this build: no `Cargo.toml` /
+`Cargo.lock` entry points at it, no code imports it, and
+the build is identical with or without the branch
+existing): https://github.com/thoitiettxl-cyber/honk,
 branch `feat/chrome-tls-parity`, head
 `802ccafb00eed5019516911a234cf1c57c653c3a`, base upstream
 `9e31cc0bd28825afdc0e384dc989bc3f076e69cf`. Exactly 4
@@ -1810,8 +1813,10 @@ incomplete.] Rust sent only the literal, so the edge
 502s the unauthenticated upgrade. The fork pointer was therefore reverted in the
 same PR (`rust/Cargo.toml` + `Cargo.lock` back to
 upstream `daeuniverse/honk` `9e31cc0b`); the fork
-branch remains for a possible future upstream PR, but
-this tree does not depend on it.
+branch remains only as a record of the experiment, for a
+possible future upstream PR — this tree does not use it,
+does not pin it, and the build does not depend on it in
+any way.
 
 Not patched: (d) REALITY TLS-1.3-only profile — no
 REALITY server was available for the live interop probe
@@ -1829,9 +1834,11 @@ already declared (e.g. `castctl-cli` → `castctl-gateway`
 /`castctl-shared`/`castctl-transport`/`chrono`/
 `serde_json`/`tokio`; `castctl-transport` → `rustls`/
 `tokio-rustls`/`webpki-roots`; `rustls` → `log`). Any
-cargo invocation rewrites those in; this PR's lock diff
-therefore contains the stale-edge fill plus the three
-honk `source` lines (upstream → fork). No crate version
+cargo invocation rewrites those in; the lock diff of the
+intermediate fork commit therefore contained the
+stale-edge fill plus the three honk `source` lines
+(upstream → fork). At the final head the lock points at
+upstream only (no fork line remains). No crate version
 changed.
 
 ## 14. boringtun + smoltcp + base64 — LINKED (Rust artifact only, no copied code)
