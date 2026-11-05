@@ -415,6 +415,12 @@ name = "castctl-cli"
 version = "0.1.0"
 dependencies = [
  "castctl-config",
+ "castctl-gateway",
+ "castctl-shared",
+ "castctl-transport",
+ "chrono",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -425,17 +431,23 @@ version = "0.1.0"
 name = "castctl-gateway"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "castctl-config",
  "castctl-transport",
  "futures-core",
  "futures-sink",
  "futures-util",
+ "http",
  "prost",
  "prost-build",
  "prost-types",
  "rand",
+ "regex",
  "serde_json",
  "snow",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
 ]
 
@@ -458,7 +470,9 @@ dependencies = [
 name = "castctl-shared"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "regex",
+ "serde_json",
 ]
 
 [[package]]
@@ -472,16 +486,10 @@ dependencies = [
  "castctl-tg-text",
  "castctl-transport",
  "http",
- "http-body-util",
- "hyper",
- "hyper-util",
  "rand",
- "rustls",
  "serde",
  "serde_json",
  "tokio",
- "tokio-rustls",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -511,10 +519,13 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "rustls",
  "serde",
  "serde_json",
  "smoltcp",
  "tokio",
+ "tokio-rustls",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
