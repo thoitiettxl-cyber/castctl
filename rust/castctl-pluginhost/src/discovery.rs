@@ -139,19 +139,19 @@ fn file_from_path(path: &Path, required_ext: &str) -> Option<PluginFile> {
     if let Some(idx) = name.rfind("-v")
         && idx > 0
     {
-            let candidate_id = &name[..idx];
-            let candidate_version = &name[idx + 2..];
-            if validate_plugin_id(candidate_id) {
-                if !valid_plugin_version(candidate_version) {
-                    // A "-v" suffix with a malformed
-                    // version is not a different id: the
-                    // file is skipped, never silently
-                    // discovered under an odd id.
-                    return None;
-                }
-                id = candidate_id.to_string();
-                version = candidate_version.to_string();
+        let candidate_id = &name[..idx];
+        let candidate_version = &name[idx + 2..];
+        if validate_plugin_id(candidate_id) {
+            if !valid_plugin_version(candidate_version) {
+                // A "-v" suffix with a malformed
+                // version is not a different id: the
+                // file is skipped, never silently
+                // discovered under an odd id.
+                return None;
             }
+            id = candidate_id.to_string();
+            version = candidate_version.to_string();
+        }
     }
     if !validate_plugin_id(&id) {
         return None;

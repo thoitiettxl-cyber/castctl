@@ -1058,7 +1058,7 @@ impl Host {
         )
     }
 
-        /// The guarded call: the call runs on a spawned
+    /// The guarded call: the call runs on a spawned
     /// thread, a recovered panic fuses the plugin, and
     /// a timeout abandons the call without killing the
     /// plugin thread.
@@ -1108,7 +1108,10 @@ impl Host {
             Ok(Outcome::Panicked(type_name)) => {
                 let reason = format!("{method} panic: {type_name}");
                 self.fuse(target.tag, &reason, target.path, target.generation);
-                Err(PluginHostError::failed(format!("plugin {:?}: {reason}", target.tag)))
+                Err(PluginHostError::failed(format!(
+                    "plugin {:?}: {reason}",
+                    target.tag
+                )))
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 self.fuse(
@@ -1122,7 +1125,10 @@ impl Host {
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let reason = format!("{method} panic: unknown");
                 self.fuse(target.tag, &reason, target.path, target.generation);
-                Err(PluginHostError::failed(format!("plugin {:?}: {reason}", target.tag)))
+                Err(PluginHostError::failed(format!(
+                    "plugin {:?}: {reason}",
+                    target.tag
+                )))
             }
         }
     }
@@ -1283,8 +1289,7 @@ mod tests {
     }
 
     /// The fake-client call hook: `fn(method, request) -> response`.
-    type CallHook =
-        Arc<dyn Fn(&str, &[u8]) -> Result<Vec<u8>, ClientError> + Send + Sync>;
+    type CallHook = Arc<dyn Fn(&str, &[u8]) -> Result<Vec<u8>, ClientError> + Send + Sync>;
 
     struct FakeClientInner {
         calls: Vec<(String, Vec<u8>)>,
@@ -1419,9 +1424,8 @@ mod tests {
     }
 
     /// The fake-loader open hook: `fn(file, host) -> client`.
-    type OpenFn = Arc<
-        dyn Fn(&PluginFile, &Host) -> Result<Arc<dyn Client>, PluginHostError> + Send + Sync,
-    >;
+    type OpenFn =
+        Arc<dyn Fn(&PluginFile, &Host) -> Result<Arc<dyn Client>, PluginHostError> + Send + Sync>;
 
     struct FakeLoaderInner {
         clients: HashMap<String, Arc<FakeClient>>,

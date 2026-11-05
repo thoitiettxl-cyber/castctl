@@ -233,16 +233,16 @@ pub fn shadow_copy_to_dir(file: &PluginFile, dir: &Path) -> Result<PathBuf, Plug
     if let Err(e) = std::fs::remove_file(&target)
         && e.kind() != std::io::ErrorKind::NotFound
     {
-            if shadow_matches(&target, size, &digest) {
-                let _ = std::fs::remove_file(&tmp_path);
-                return Ok(target);
-            }
-            let _ = std::fs::remove_file(&target);
+        if shadow_matches(&target, size, &digest) {
             let _ = std::fs::remove_file(&tmp_path);
-            // No shadow path in the message (Go wraps the
-            // os error, which carries it; this port drops
-            // the path-bearing cause).
-            return Err(PluginHostError::failed("remove stale shadow plugin"));
+            return Ok(target);
+        }
+        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_file(&tmp_path);
+        // No shadow path in the message (Go wraps the
+        // os error, which carries it; this port drops
+        // the path-bearing cause).
+        return Err(PluginHostError::failed("remove stale shadow plugin"));
     }
     if let Err(e) = std::fs::rename(&tmp_path, &target) {
         if e.kind() != std::io::ErrorKind::AlreadyExists && !shadow_matches(&target, size, &digest)

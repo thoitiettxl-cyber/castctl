@@ -798,15 +798,15 @@ pub fn parse_version_needs_count(
                 && !ver_str.is_empty()
                 && ver_str.as_bytes()[0].is_ascii_digit()
             {
-                    let v = parse_glibc_version(ver_str).map_err(|_| {
-                        PluginHostError::failed(format!(
-                            "unparseable glibc version {name:?}: refusing to load"
-                        ))
-                    })?;
-                    if !found || compare_glibc_version(v, max) > 0 {
-                        max = v;
-                        found = true;
-                    }
+                let v = parse_glibc_version(ver_str).map_err(|_| {
+                    PluginHostError::failed(format!(
+                        "unparseable glibc version {name:?}: refusing to load"
+                    ))
+                })?;
+                if !found || compare_glibc_version(v, max) > 0 {
+                    max = v;
+                    found = true;
+                }
                 // Non-numeric GLIBC_ names (GLIBC_PRIVATE,
                 // ...) carry no version requirement.
             }

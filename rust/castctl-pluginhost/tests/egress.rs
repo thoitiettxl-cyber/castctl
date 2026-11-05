@@ -81,11 +81,7 @@ impl FakeUpstream {
 }
 
 impl UpstreamTransport for FakeUpstream {
-    fn round_trip(
-        &self,
-        req: Request<Full<Bytes>>,
-    ) -> UpstreamResponseFuture<'_>
-    {
+    fn round_trip(&self, req: Request<Full<Bytes>>) -> UpstreamResponseFuture<'_> {
         Box::pin(async move {
             let (parts, body) = req.into_parts();
             let bytes = body.collect().await.unwrap().to_bytes();

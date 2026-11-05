@@ -87,17 +87,13 @@ pub trait UpstreamTransport: Send + Sync {
     /// Send `req` upstream and return the response.
     /// Any error becomes a 502 `"upstream error"` at
     /// the proxy.
-    fn round_trip(
-        &self,
-        req: Request<Full<Bytes>>,
-    ) -> UpstreamResponseFuture<'_>;
+    fn round_trip(&self, req: Request<Full<Bytes>>) -> UpstreamResponseFuture<'_>;
 }
 
 /// The future returned by
 /// [`UpstreamTransport::round_trip`].
-pub type UpstreamResponseFuture<'a> = Pin<
-    Box<dyn Future<Output = Result<Response<Full<Bytes>>, PluginHostError>> + Send + 'a>,
->;
+pub type UpstreamResponseFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Response<Full<Bytes>>, PluginHostError>> + Send + 'a>>;
 
 /// A byte stream that is both readable and writable:
 /// the single principal trait a CONNECT target needs.
@@ -631,11 +627,7 @@ fn strip_userinfo(uri: &http::Uri) -> http::Uri {
 pub struct HyperUpstream;
 
 impl UpstreamTransport for HyperUpstream {
-    fn round_trip(
-        &self,
-        req: Request<Full<Bytes>>,
-    ) -> UpstreamResponseFuture<'_>
-    {
+    fn round_trip(&self, req: Request<Full<Bytes>>) -> UpstreamResponseFuture<'_> {
         Box::pin(async move {
             let uri = req.uri().clone();
             if uri.scheme_str() == Some("https") {

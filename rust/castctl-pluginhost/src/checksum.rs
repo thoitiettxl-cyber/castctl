@@ -303,10 +303,7 @@ mod tests {
         let link = dir.path().join("via.so");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let err = verify_file_checksum(&link, &manifest).unwrap_err();
-        assert!(
-            err.to_string().contains("symlink"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("symlink"), "got: {err}");
     }
 
     /// Port of `TestVerifyShadowFileChecksumNoShadowPathLeak`
