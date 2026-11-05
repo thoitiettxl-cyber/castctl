@@ -6,9 +6,15 @@
 //! (`internal/profile/jsonvalue.go:22-209`) together with the two
 //! `encoding/json` machines they run on: the `Decoder.Token`
 //! token-state machine (`stream.go`, `tokenError` contexts) and the
-//! value scanner (`scanner.go` states). Error messages reproduce the
-//! probed corpus byte-for-byte; unprobed scanner edges are labelled
-//! `[DEVIATION]` in PORTING.md.
+//! value scanner (`scanner.go` states). Error messages reproduce
+//! the Go 1.27.3 corpus byte-for-byte (the toolchain that builds
+//! the golden binary; `go 1.27.3` modules decode with jsonv2
+//! semantics) EXCEPT the six documented divergences in
+//! `test_decode_error_corpus_known_divergences` (truncated-input,
+//! number-context, and string-escape messages); see PORTING.md
+//! §M2.5. Key-position, comma-anchored closer, and missing-value
+//! errors follow the measured Go 1.27.3 behaviour, which differs
+//! from the Go 1.26 v1 `stream.go` shapes.
 
 use crate::errors::ConfigError;
 use crate::gostr::{go_decode_rune, go_quote, go_quote_char};
@@ -41,6 +47,28 @@ impl JsonValue {
     pub fn is_null(&self) -> bool {
         matches!(self, JsonValue::Null)
     }
+}
+
+/// Debug marker for a raw stored JSON value: presence + container
+/// kind only, never content. Raw blocks may carry secret-adjacent
+/// fields (credentials, WireGuard keys), so container `Debug` impls
+/// must use this instead of printing the value itself.
+pub(crate) fn raw_debug_marker(value: &Option<JsonValue>) -> String {
+    match value {
+        None => "None".to_string(),
+        Some(JsonValue::Object(_)) => "[raw object]".to_string(),
+        Some(JsonValue::Array(a)) => format!("[raw array; {} elements]", a.len()),
+        Some(JsonValue::Str(_)) => "[raw string]".to_string(),
+        Some(JsonValue::Number(_)) => "[raw number]".to_string(),
+        Some(JsonValue::Bool(_)) => "[raw bool]".to_string(),
+        Some(JsonValue::Null) => "[raw null]".to_string(),
+    }
+}
+
+/// Debug marker for a raw stored JSON list: element count only,
+/// never content (see `raw_debug_marker`).
+pub(crate) fn raw_list_debug_marker(values: &[JsonValue]) -> String {
+    format!("[raw list; {} elements]", values.len())
 }
 
 /// An order-preserving JSON object: `set` appends a new key at the
@@ -225,6 +253,11 @@ impl<'a> TokenParser<'a> {
 
     /// `tokenError` (`stream.go:464`): the context depends on the
     /// token state; `ObjectStart` has NO context (bare message).
+    /// NOTE: this is the Go 1.26/v1 shape. Under the Go 1.27.3
+    /// toolchain (jsonv2 default for `go 1.27.3` modules, which
+    /// is what builds the golden binary), key-position errors
+    /// differ: see `token()`'s key-position arms below, which
+    /// reproduce the measured 1.27 behaviour (PORTING.md §M2.5).
     fn token_error(&self, b: u8) -> TokErr {
         let context = match self.state {
             TokenState::TopValue
@@ -240,12 +273,29 @@ impl<'a> TokenParser<'a> {
         TokErr::invalid_character(b, context)
     }
 
+    /// Key-position error (Go 1.27.3/jsonv2, probe-measured): a
+    /// byte that cannot start any token while an object member
+    /// name is expected reports "looking for beginning of
+    /// value", NOT the v1 bare/object-key-string contexts.
+    fn key_position_error(&self, b: u8) -> TokErr {
+        TokErr::invalid_character(b, " looking for beginning of value")
+    }
+
     /// `Decoder.Token` (`stream.go:370`).
     fn token(&mut self) -> Result<Token, TokErr> {
         loop {
             let c = self.peek()?;
             match c {
                 b'[' => {
+                    // Key position (Go 1.27.3/jsonv2): a container
+                    // open where a member name is expected is not a
+                    // name at all.
+                    if self.state == TokenState::ObjectStart || self.state == TokenState::ObjectKey
+                    {
+                        return Err(TokErr::Msg(
+                            "object member name must be a string".to_string(),
+                        ));
+                    }
                     if !self.token_value_allowed() {
                         return Err(self.token_error(c));
                     }
@@ -255,6 +305,27 @@ impl<'a> TokenParser<'a> {
                     return Ok(Token::Delim(b'['));
                 }
                 b']' => {
+                    // Key position (Go 1.27.3/jsonv2): a stray
+                    // closer where a member name is expected
+                    // reports "looking for beginning of value".
+                    if self.state == TokenState::ObjectStart || self.state == TokenState::ObjectKey
+                    {
+                        return Err(self.key_position_error(c));
+                    }
+                    // A value expected after `:` that turns out to
+                    // be the wrong closer reports the enclosing
+                    // pair context (Go 1.27.3/jsonv2): `{"a":]`
+                    // errors "after object key:value pair".
+                    if self.state == TokenState::ObjectValue {
+                        return Err(TokErr::invalid_character(c, " after object key:value pair"));
+                    }
+                    // A closer right after a comma (ArrayValue is
+                    // entered only via `,`) is reported at the
+                    // comma (Go 1.27.3/jsonv2): `[1,]` errors on
+                    // `,`, not `]`.
+                    if self.state == TokenState::ArrayValue {
+                        return Err(self.key_position_error(b','));
+                    }
                     if self.state != TokenState::ArrayStart && self.state != TokenState::ArrayComma
                     {
                         return Err(self.token_error(c));
@@ -265,6 +336,12 @@ impl<'a> TokenParser<'a> {
                     return Ok(Token::Delim(b']'));
                 }
                 b'{' => {
+                    if self.state == TokenState::ObjectStart || self.state == TokenState::ObjectKey
+                    {
+                        return Err(TokErr::Msg(
+                            "object member name must be a string".to_string(),
+                        ));
+                    }
                     if !self.token_value_allowed() {
                         return Err(self.token_error(c));
                     }
@@ -274,6 +351,18 @@ impl<'a> TokenParser<'a> {
                     return Ok(Token::Delim(b'{'));
                 }
                 b'}' => {
+                    // `}` where a value is expected after a key
+                    // reports the missing value (Go 1.27.3/jsonv2),
+                    // not an invalid-character error.
+                    if self.state == TokenState::ObjectValue {
+                        return Err(TokErr::Msg("missing value after object key".to_string()));
+                    }
+                    // `}` right after a comma (ObjectKey is entered
+                    // only via `,`) is reported at the comma, like
+                    // the `]` case above: `{"a":1,}` errors on `,`.
+                    if self.state == TokenState::ObjectKey {
+                        return Err(self.key_position_error(b','));
+                    }
                     if self.state != TokenState::ObjectStart
                         && self.state != TokenState::ObjectComma
                     {
@@ -285,6 +374,10 @@ impl<'a> TokenParser<'a> {
                     return Ok(Token::Delim(b'}'));
                 }
                 b':' => {
+                    if self.state == TokenState::ObjectStart || self.state == TokenState::ObjectKey
+                    {
+                        return Err(self.key_position_error(c));
+                    }
                     if self.state != TokenState::ObjectColon {
                         return Err(self.token_error(c));
                     }
@@ -298,6 +391,13 @@ impl<'a> TokenParser<'a> {
                     } else if self.state == TokenState::ObjectComma {
                         self.pos += 1;
                         self.state = TokenState::ObjectKey;
+                    } else if self.state == TokenState::ObjectStart
+                        || self.state == TokenState::ObjectKey
+                    {
+                        // Key position (Go 1.27.3/jsonv2): `{,}`
+                        // and `{"a":1,,}` report the comma with
+                        // "looking for beginning of value".
+                        return Err(self.key_position_error(c));
                     } else {
                         return Err(self.token_error(c));
                     }
@@ -315,6 +415,27 @@ impl<'a> TokenParser<'a> {
                     return Ok(Token::Str(s));
                 }
                 _ => {
+                    // Key position (Go 1.27.3/jsonv2): a scalar
+                    // where a member name is expected decodes as a
+                    // token, and the name check then fails with
+                    // "object member name must be a string" (the
+                    // assembler reports it from the unchanged
+                    // key state). Bytes that start no token error
+                    // via decode_any with the "looking for
+                    // beginning of value" context, matching Go.
+                    if self.state == TokenState::ObjectStart || self.state == TokenState::ObjectKey
+                    {
+                        let value = self.decode_any()?;
+                        return Ok(match value {
+                            JsonValue::Str(s) => Token::Str(s),
+                            JsonValue::Number(n) => Token::Number(n),
+                            JsonValue::Bool(b) => Token::Bool(b),
+                            JsonValue::Null => Token::Null,
+                            _ => {
+                                return Err(TokErr::Msg("unexpected token".to_string()));
+                            }
+                        });
+                    }
                     if !self.token_value_allowed() {
                         return Err(self.token_error(c));
                     }
@@ -560,41 +681,135 @@ impl<'a> TokenParser<'a> {
     }
 }
 
+/// Go `encoding/json` nesting cap (`scanner.go`, `maxNestingDepth`
+/// = 10000, "to prevent stack overflow"): the 10001st nested
+/// container errors `exceeded max depth` instead of overflowing
+/// the stack. Probe-measured on cue: a decode of exactly 10000
+/// `[` succeeds, 10001 fails (see PORTING.md §M2.5). `depth`
+/// counts enclosing containers.
+const MAX_NESTING_DEPTH: usize = 10000;
+
 /// `decodeOrderedValue` (`internal/profile/jsonvalue.go:63`).
+///
+/// Iterative: an explicit stack of open containers, NOT
+/// recursion. Go's 10000 nesting cap would overflow the Rust
+/// call stack long before the cap if every level cost a frame
+/// (measured on cue: stack overflow at depth 10000 on the 8MB
+/// main stack). The token machine (`TokenParser`) is already
+/// iterative; this loop only assembles values from its tokens.
+/// A `Str` token is an object key iff the parser state after
+/// the token is `ObjectColon` (key tokens set it; value strings
+/// run `tokenValueEnd` instead, landing in a comma state).
 fn decode_ordered_value(tp: &mut TokenParser<'_>) -> Result<JsonValue, TokErr> {
-    match tp.token()? {
-        Token::Delim(b'{') => {
-            let mut obj = OrderedObject::new();
-            while tp.more() {
-                let key = match tp.token()? {
-                    Token::Str(s) => s,
-                    _ => {
-                        return Err(TokErr::Msg("object key is not a string".to_string()));
+    enum Frame {
+        Object(OrderedObject, Option<String>),
+        Array(Vec<JsonValue>),
+    }
+    /// Attach a completed value to its parent frame, or return
+    /// it as the top-level value when the stack is empty.
+    fn complete(stack: &mut [Frame], value: JsonValue) -> Result<Option<JsonValue>, TokErr> {
+        match stack.last_mut() {
+            None => Ok(Some(value)),
+            Some(Frame::Array(arr)) => {
+                arr.push(value);
+                Ok(None)
+            }
+            Some(Frame::Object(obj, key)) => match key.take() {
+                Some(k) => {
+                    obj.set(k, value);
+                    Ok(None)
+                }
+                // A value with no pending key cannot come out of
+                // the token machine (values only follow a key +
+                // colon); defensive, never panics on input.
+                None => Err(TokErr::Msg("unexpected token".to_string())),
+            },
+        }
+    }
+    let mut stack: Vec<Frame> = Vec::new();
+    loop {
+        match tp.token()? {
+            Token::Delim(b'{') => {
+                // Stack length == enclosing containers, exactly
+                // the depth the recursive form counted.
+                if stack.len() >= MAX_NESTING_DEPTH {
+                    return Err(TokErr::Msg("exceeded max depth".to_string()));
+                }
+                stack.push(Frame::Object(OrderedObject::new(), None));
+            }
+            Token::Delim(b'[') => {
+                if stack.len() >= MAX_NESTING_DEPTH {
+                    return Err(TokErr::Msg("exceeded max depth".to_string()));
+                }
+                stack.push(Frame::Array(Vec::new()));
+            }
+            Token::Delim(b'}') => match stack.pop() {
+                Some(Frame::Object(obj, None)) => {
+                    let done = complete(&mut stack, JsonValue::Object(obj))?;
+                    if let Some(value) = done {
+                        return Ok(value);
                     }
-                };
-                let value = decode_ordered_value(tp)?;
-                obj.set(key, value);
+                }
+                _ => return Err(TokErr::Msg("unexpected token".to_string())),
+            },
+            Token::Delim(b']') => match stack.pop() {
+                Some(Frame::Array(arr)) => {
+                    let done = complete(&mut stack, JsonValue::Array(arr))?;
+                    if let Some(value) = done {
+                        return Ok(value);
+                    }
+                }
+                _ => return Err(TokErr::Msg("unexpected token".to_string())),
+            },
+            Token::Delim(d) => {
+                return Err(TokErr::Msg(format!(
+                    "unexpected delimiter {}",
+                    go_quote(&(d as char).to_string())
+                )));
             }
-            // The closing token: errors (mismatched `]`, EOF) propagate.
-            tp.token()?;
-            Ok(JsonValue::Object(obj))
-        }
-        Token::Delim(b'[') => {
-            let mut arr = Vec::new();
-            while tp.more() {
-                arr.push(decode_ordered_value(tp)?);
+            Token::Str(s) => {
+                if tp.state == TokenState::ObjectColon {
+                    match stack.last_mut() {
+                        Some(Frame::Object(_, key @ None)) => *key = Some(s),
+                        _ => {
+                            return Err(TokErr::Msg("object key is not a string".to_string()));
+                        }
+                    }
+                } else if let Some(value) = complete(&mut stack, JsonValue::Str(s))? {
+                    return Ok(value);
+                }
             }
-            tp.token()?;
-            Ok(JsonValue::Array(arr))
+            Token::Number(n) => {
+                if tp.state == TokenState::ObjectStart || tp.state == TokenState::ObjectKey {
+                    return Err(TokErr::Msg(
+                        "object member name must be a string".to_string(),
+                    ));
+                }
+                if let Some(value) = complete(&mut stack, JsonValue::Number(n))? {
+                    return Ok(value);
+                }
+            }
+            Token::Bool(b) => {
+                if tp.state == TokenState::ObjectStart || tp.state == TokenState::ObjectKey {
+                    return Err(TokErr::Msg(
+                        "object member name must be a string".to_string(),
+                    ));
+                }
+                if let Some(value) = complete(&mut stack, JsonValue::Bool(b))? {
+                    return Ok(value);
+                }
+            }
+            Token::Null => {
+                if tp.state == TokenState::ObjectStart || tp.state == TokenState::ObjectKey {
+                    return Err(TokErr::Msg(
+                        "object member name must be a string".to_string(),
+                    ));
+                }
+                if let Some(value) = complete(&mut stack, JsonValue::Null)? {
+                    return Ok(value);
+                }
+            }
         }
-        Token::Delim(d) => Err(TokErr::Msg(format!(
-            "unexpected delimiter {}",
-            go_quote(&(d as char).to_string())
-        ))),
-        Token::Str(s) => Ok(JsonValue::Str(s)),
-        Token::Number(n) => Ok(JsonValue::Number(n)),
-        Token::Bool(b) => Ok(JsonValue::Bool(b)),
-        Token::Null => Ok(JsonValue::Null),
     }
 }
 
@@ -618,13 +833,10 @@ pub fn decode_ordered_json(data: &[u8]) -> Result<JsonValue, ConfigError> {
         },
         TokErr::Msg(m) => crate::errors::config_error(format!("invalid json: {m}")),
     })?;
-    // Trailing-data check via More() semantics: skip spaces; a
-    // remaining byte that is not `]`/`}` is trailing data.
-    let mut pos = tp.pos;
-    while pos < data.len() && TokenParser::is_space(data[pos]) {
-        pos += 1;
-    }
-    if pos < data.len() && data[pos] != b']' && data[pos] != b'}' {
+    // Trailing-data check via More() semantics: a remaining byte
+    // that is not `]`/`}` is trailing data (Go's `More()` after
+    // the value; `{"a":1}}` and `[]]` decode successfully).
+    if tp.more() {
         return Err(crate::errors::config_error("invalid json: trailing data"));
     }
     Ok(value)
@@ -643,6 +855,9 @@ pub fn decode_ordered_object(data: &[u8]) -> Result<OrderedObject, ConfigError> 
 /// (used by the encoder for hand-built `Number` values; the parser
 /// only ever produces valid literals).
 fn is_valid_number_literal(literal: &str) -> bool {
+    if literal.is_empty() {
+        return false;
+    }
     let bytes = literal.as_bytes();
     let mut tp = TokenParser {
         input: bytes,
@@ -723,31 +938,63 @@ fn encode_scalar(value: &JsonValue) -> Result<String, ConfigError> {
     })
 }
 
+/// Container encode with the same nesting cap as the decoder
+/// (`MAX_NESTING_DEPTH`): a hand-built value deeper than the cap
+/// errors cleanly instead of overflowing the stack. The message is
+/// a Rust-side approximation (Go's marshal-side depth behaviour
+/// was not probed; see PORTING.md §M2.5).
+///
+/// Iterative, like the decoder: an explicit work stack, so
+/// encoding a 10000-deep value cannot overflow the call stack.
+/// `depth` counts enclosing containers, exactly as the recursive
+/// form counted it; output bytes are identical.
 fn encode_value(out: &mut String, value: &JsonValue) -> Result<(), ConfigError> {
-    match value {
-        JsonValue::Object(obj) => {
-            out.push('{');
-            for (i, (k, v)) in obj.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                encode_go_string(out, k);
+    enum Item<'v> {
+        Value(&'v JsonValue, usize),
+        Raw(&'static str),
+        Key(String),
+    }
+    let mut stack: Vec<Item<'_>> = vec![Item::Value(value, 0)];
+    while let Some(item) = stack.pop() {
+        match item {
+            Item::Raw(s) => out.push_str(s),
+            Item::Key(k) => {
+                encode_go_string(out, &k);
                 out.push(':');
-                encode_value(out, v)?;
             }
-            out.push('}');
-        }
-        JsonValue::Array(arr) => {
-            out.push('[');
-            for (i, elem) in arr.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
+            Item::Value(v, depth) => match v {
+                JsonValue::Object(obj) => {
+                    if depth >= MAX_NESTING_DEPTH {
+                        return Err(crate::errors::config_error("exceeded max depth"));
+                    }
+                    let mut items: Vec<Item<'_>> = vec![Item::Raw("{")];
+                    for (i, (k, child)) in obj.iter().enumerate() {
+                        if i > 0 {
+                            items.push(Item::Raw(","));
+                        }
+                        items.push(Item::Key(k.clone()));
+                        items.push(Item::Value(child, depth + 1));
+                    }
+                    items.push(Item::Raw("}"));
+                    stack.extend(items.into_iter().rev());
                 }
-                encode_value(out, elem)?;
-            }
-            out.push(']');
+                JsonValue::Array(arr) => {
+                    if depth >= MAX_NESTING_DEPTH {
+                        return Err(crate::errors::config_error("exceeded max depth"));
+                    }
+                    let mut items: Vec<Item<'_>> = vec![Item::Raw("[")];
+                    for (i, elem) in arr.iter().enumerate() {
+                        if i > 0 {
+                            items.push(Item::Raw(","));
+                        }
+                        items.push(Item::Value(elem, depth + 1));
+                    }
+                    items.push(Item::Raw("]"));
+                    stack.extend(items.into_iter().rev());
+                }
+                scalar => out.push_str(&encode_scalar(scalar)?),
+            },
         }
-        scalar => out.push_str(&encode_scalar(scalar)?),
     }
     Ok(())
 }
@@ -859,15 +1106,18 @@ mod tests {
         decode_ordered_json(input.as_bytes()).unwrap()
     }
 
-    /// The probed Go decode corpus (m2-probes.log §2): every case
-    /// with its verbatim Go error.
+    /// The probed Go decode corpus: every case with its verbatim
+    /// Go 1.27.3 error (the toolchain that builds the golden
+    /// binary; `go 1.27.3` modules decode with jsonv2 semantics).
+    /// Probed on cue via a scratch program calling
+    /// `decodeOrderedJSON` directly (see PORTING.md §M2.6).
+    /// Key-position shapes, the comma-anchored closer errors,
+    /// and the missing-value error are part of this table.
     #[test]
     fn test_decode_error_corpus() {
         let cases: &[(&str, &str)] = &[
             ("", "profile: invalid json: EOF"),
             (" ", "profile: invalid json: EOF"),
-            ("{", "profile: invalid json: EOF"),
-            ("{\"a\":1", "profile: invalid json: EOF"),
             ("tru", "profile: invalid json: unexpected EOF"),
             ("nul", "profile: invalid json: unexpected EOF"),
             ("-", "profile: invalid json: unexpected EOF"),
@@ -875,11 +1125,11 @@ mod tests {
             ("\"abc", "profile: invalid json: unexpected EOF"),
             (
                 "[1,]",
-                "profile: invalid json: invalid character ']' looking for beginning of value",
+                "profile: invalid json: invalid character ',' looking for beginning of value",
             ),
             (
                 "{\"a\":}",
-                "profile: invalid json: invalid character '}' looking for beginning of value",
+                "profile: invalid json: missing value after object key",
             ),
             (
                 "{\"a\":01}",
@@ -887,7 +1137,7 @@ mod tests {
             ),
             (
                 "{\"a\":1,}",
-                "profile: invalid json: invalid character '}' looking for beginning of object key string",
+                "profile: invalid json: invalid character ',' looking for beginning of value",
             ),
             (
                 "{\"a\" 1}",
@@ -897,8 +1147,14 @@ mod tests {
                 "[1 2]",
                 "profile: invalid json: invalid character '2' after array element",
             ),
-            ("{]", "profile: invalid json: invalid character ']'"),
-            ("{,}", "profile: invalid json: invalid character ','"),
+            (
+                "{]",
+                "profile: invalid json: invalid character ']' looking for beginning of value",
+            ),
+            (
+                "{,}",
+                "profile: invalid json: invalid character ',' looking for beginning of value",
+            ),
             (
                 "{\"a\":tru}",
                 "profile: invalid json: invalid character '}' in literal true (expecting 'e')",
@@ -912,24 +1168,8 @@ mod tests {
                 "profile: invalid json: invalid character 'x' in literal null (expecting 'l')",
             ),
             (
-                "1e}",
-                "profile: invalid json: invalid character '}' in exponent of numeric literal",
-            ),
-            (
                 "-}",
                 "profile: invalid json: invalid character '}' in numeric literal",
-            ),
-            (
-                "1.}",
-                "profile: invalid json: invalid character '}' after decimal point in numeric literal",
-            ),
-            (
-                "\"a\\q\"",
-                "profile: invalid json: invalid character 'q' in string escape code",
-            ),
-            (
-                "\"\\u12\"",
-                "profile: invalid json: invalid character '\"' in \\u hexadecimal character escape",
             ),
             ("{\"a\":1} x", "profile: invalid json: trailing data"),
             ("123 456", "profile: invalid json: trailing data"),
@@ -955,10 +1195,145 @@ mod tests {
                 "[,]",
                 "profile: invalid json: invalid character ',' looking for beginning of value",
             ),
+            (
+                "{invalid",
+                "profile: invalid json: invalid character 'i' looking for beginning of value",
+            ),
+            (
+                "{x}",
+                "profile: invalid json: invalid character 'x' looking for beginning of value",
+            ),
+            (
+                "{1}",
+                "profile: invalid json: object member name must be a string",
+            ),
+            (
+                "{true}",
+                "profile: invalid json: object member name must be a string",
+            ),
+            (
+                "{\"a\":1,1}",
+                "profile: invalid json: object member name must be a string",
+            ),
+            (
+                "{\"a\":1,x}",
+                "profile: invalid json: invalid character 'x' looking for beginning of value",
+            ),
+            (
+                "{[",
+                "profile: invalid json: object member name must be a string",
+            ),
+            (
+                "{{",
+                "profile: invalid json: object member name must be a string",
+            ),
+            (
+                "{\"a\":1,[",
+                "profile: invalid json: object member name must be a string",
+            ),
+            (
+                "{\"a\":1,,}",
+                "profile: invalid json: invalid character ',' looking for beginning of value",
+            ),
+            (
+                "[1,,2]",
+                "profile: invalid json: invalid character ',' looking for beginning of value",
+            ),
+            (
+                "{:}",
+                "profile: invalid json: invalid character ':' looking for beginning of value",
+            ),
+            (
+                "{\"a\"::1}",
+                "profile: invalid json: invalid character ':' looking for beginning of value",
+            ),
+            (
+                "{\"a\":]",
+                "profile: invalid json: invalid character ']' after object key:value pair",
+            ),
+            (
+                "{tru}",
+                "profile: invalid json: invalid character '}' in literal true (expecting 'e')",
+            ),
+            (
+                "{truex}",
+                "profile: invalid json: object member name must be a string",
+            ),
+            (
+                "[}",
+                "profile: invalid json: invalid character '}' looking for beginning of value",
+            ),
         ];
         for (input, want) in cases {
             assert_eq!(decode_err(input), *want, "input {input:?}");
         }
+    }
+
+    /// KNOWN DIVERGENCES from Go 1.27.3 (probe-measured, see
+    /// PORTING.md §M2.5): the implementation keeps the older
+    /// (Go 1.26/v1 `stream.go` + `scanner.go`) message shapes
+    /// for these inputs. Each case lists the measured Go 1.27
+    /// message in its comment; do not "fix" the expectation
+    /// without reimplementing the jsonv2 error model.
+    #[test]
+    fn test_decode_error_corpus_known_divergences() {
+        let cases: &[(&str, &str)] = &[
+            // Go 1.27: "unexpected end of JSON input".
+            ("{", "profile: invalid json: EOF"),
+            // Go 1.27: "unexpected end of JSON input".
+            ("{\"a\":1", "profile: invalid json: EOF"),
+            // Go 1.27: "invalid character '}' in numeric literal".
+            (
+                "1e}",
+                "profile: invalid json: invalid character '}' in exponent of numeric literal",
+            ),
+            // Go 1.27: "invalid character '}' in numeric literal".
+            (
+                "1.}",
+                "profile: invalid json: invalid character '}' after decimal point in numeric literal",
+            ),
+            // Go 1.27: "invalid escape sequence `\\q` in string".
+            (
+                "\"a\\q\"",
+                "profile: invalid json: invalid character 'q' in string escape code",
+            ),
+            // Go 1.27: "invalid escape sequence `\\u12\"` in string".
+            (
+                "\"\\u12\"",
+                "profile: invalid json: invalid character '\"' in \\u hexadecimal character escape",
+            ),
+        ];
+        for (input, want) in cases {
+            assert_eq!(decode_err(input), *want, "input {input:?}");
+        }
+    }
+
+    /// Nesting cap (F2, probe-measured on cue): exactly 10000
+    /// nested arrays decode; 10001 errors cleanly with Go's
+    /// message instead of overflowing the stack. A hand-built
+    /// value deeper than the cap fails to encode the same way.
+    #[test]
+    fn test_nesting_depth_cap() {
+        let at_cap = format!("{}{}", "[".repeat(10000), "]".repeat(10000));
+        assert!(decode_ordered_json(at_cap.as_bytes()).is_ok());
+        let over_cap = format!("{}{}", "[".repeat(10001), "]".repeat(10001));
+        assert_eq!(
+            decode_err(&over_cap),
+            "profile: invalid json: exceeded max depth"
+        );
+        let mut deep = JsonValue::Array(Vec::new());
+        for _ in 0..10001 {
+            deep = JsonValue::Array(vec![deep]);
+        }
+        assert_eq!(
+            encode_ordered_json(&deep).unwrap_err().message,
+            "profile: exceeded max depth"
+        );
+        let mut at = JsonValue::Array(Vec::new());
+        for _ in 0..9999 {
+            at = JsonValue::Array(vec![at]);
+        }
+        assert!(encode_ordered_json(&at).is_ok());
     }
 
     #[test]
@@ -1033,6 +1408,14 @@ mod tests {
         assert_eq!(encode_ordered_json(&v).unwrap(), "\"<>&\\u0001\u{7f}\"");
         let v = decode_ok("\"\\u2028\\u2029\"");
         assert_eq!(encode_ordered_json(&v).unwrap(), "\"\\u2028\\u2029\"");
+    }
+
+    #[test]
+    fn test_encode_empty_number_literal_rejected() {
+        // A hand-built empty number literal is invalid (the parser
+        // never produces one); encoding must error, not emit it.
+        let v = JsonValue::Number(String::new());
+        assert!(encode_ordered_json(&v).is_err());
     }
 
     #[test]

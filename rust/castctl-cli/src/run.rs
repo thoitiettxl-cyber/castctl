@@ -17,11 +17,13 @@
 //! Only the offline surface is wired. Every command that would
 //! need the network, the gateway, a browser, or migrate execution
 //! ends in the stub (exit 1) after the checks Go performs before
-//! touching those: global scan, parse, positional checks, and
-//! config-location resolution. The stub sits BEFORE
-//! active-profile resolution (D-M2-3).
+//! touching those: global scan, parse, positional checks,
+//! config-location resolution, and parsing the resolved config
+//! file (F5). The stub sits BEFORE active-profile resolution
+//! (D-M2-3).
 
 use castctl_config::blocks::valid_plugin_id;
+use castctl_config::config::load_single_config;
 use castctl_config::configlocation::{ConfigLocation, Getenv, resolve_config_location};
 use castctl_config::errors::ConfigError;
 use castctl_config::gostr::{go_quote, go_trim_space};
@@ -269,6 +271,34 @@ fn config_err(e: ConfigError) -> FlowErr {
     msg(e.code, e.message)
 }
 
+/// Parse the resolved single config (F5; Go `resolveActive` /
+/// `runWithProfile` → `LoadProfile` → `LoadSingleConfig`):
+/// every stub path that resolves config in Go also parses the
+/// file before resolving the active profile, so a bad config
+/// exits 2 here, before the stub. Profile resolution itself
+/// stays unimplemented in M2 — the `--profile nosuch`
+/// divergence stands. Callers that never resolve config in Go
+/// (`update`, `plugin check`, `auth export`, `config migrate`)
+/// must NOT call this. A legacy flat file (no `profiles`
+/// marker) parses as "not found" here, so it still stubs: Go's
+/// legacy-layout refusal is a remaining divergence (see
+/// PORTING.md §M2.8).
+fn load_resolved_config(loc: &ConfigLocation) -> Result<(), FlowErr> {
+    load_single_config(&loc.config_dir).map_err(config_err)?;
+    Ok(())
+}
+
+/// `resolve_config` + `load_resolved_config`: the full
+/// pre-profile gate for stub paths.
+fn resolve_and_load(
+    ctx: &mut Ctx<'_>,
+    g: &GlobalOpts,
+    allow_missing_create: bool,
+) -> Result<(), FlowErr> {
+    let loc = resolve_config(ctx, g, allow_missing_create)?;
+    load_resolved_config(&loc)
+}
+
 /// The M2 stub (D-M2-3): exactly one fixed stderr line, empty
 /// stdout, exit 1.
 fn stub(ctx: &mut Ctx<'_>) -> FlowErr {
@@ -483,7 +513,7 @@ fn run_inner(ctx: &mut Ctx<'_>, args: &[String]) -> Outcome {
 
 /// A `parseOrHelp` command: parse, positional/manual checks,
 /// `parseAutoToggles` for wait/send, then config-location
-/// resolution, then the stub.
+/// resolution + config parse, then the stub.
 fn cmd_plain(
     ctx: &mut Ctx<'_>,
     g: &GlobalOpts,
@@ -495,7 +525,7 @@ fn cmd_plain(
     if spec.name == "wait" || spec.name == "send" {
         parse_auto_toggles(&p)?;
     }
-    resolve_config(ctx, g, false)?;
+    resolve_and_load(ctx, g, false)?;
     Err(stub(ctx))
 }
 
@@ -688,7 +718,12 @@ fn cmd_fs(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), Flow
             }
         }
     }
-    resolve_config(ctx, g, false)?;
+    // `fs rm` refuses without --yes BEFORE config resolution
+    // (`fs.go:738`); note the message differs from `profile rm`.
+    if sub == "rm" && !p.bool("yes") {
+        return Err(msg(2, "refusing to delete without --yes"));
+    }
+    resolve_and_load(ctx, g, false)?;
     Err(stub(ctx))
 }
 
@@ -711,7 +746,7 @@ fn cmd_auth(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), Fl
         "list" => {
             let p = inline_parse(ctx, auth_sub_defs("list"), AUTH_LIST_HELP_TEXT, rest)?;
             check_positionals(&p, &[]).map_err(usage_err)?;
-            resolve_config(ctx, g, false)?;
+            resolve_and_load(ctx, g, false)?;
             Err(stub(ctx))
         }
         "export" => {
@@ -726,7 +761,7 @@ fn cmd_auth(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), Fl
         "import" => {
             let p = inline_parse(ctx, vec![], AUTH_IMPORT_HELP_TEXT, rest)?;
             check_positionals(&p, &[]).map_err(usage_err)?;
-            resolve_config(ctx, g, false)?;
+            resolve_and_load(ctx, g, false)?;
             Err(stub(ctx))
         }
         "login" => {
@@ -761,7 +796,7 @@ fn cmd_auth(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), Fl
                     "auth status: --profile and --all are mutually exclusive",
                 ));
             }
-            resolve_config(ctx, g, false)?;
+            resolve_and_load(ctx, g, false)?;
             Err(stub(ctx))
         }
         "observe-login" => {
@@ -843,7 +878,16 @@ fn cmd_profile(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(),
             ),
         ));
     }
-    resolve_config(ctx, g, false)?;
+    // `profile add` rejects --outbound together with
+    // --outbound-from-env BEFORE config resolution
+    // (`profilecmd.go:408-412`).
+    if sub == "add" && p.str_is_set("outbound") && p.bool("outbound-from-env") {
+        return Err(msg(
+            2,
+            "--outbound and --outbound-from-env are mutually exclusive",
+        ));
+    }
+    resolve_and_load(ctx, g, false)?;
     Err(stub(ctx))
 }
 
@@ -931,7 +975,7 @@ fn cmd_telegram(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<()
         ));
         return Err(msg_empty(2));
     }
-    resolve_config(ctx, g, false)?;
+    resolve_and_load(ctx, g, false)?;
     Err(stub(ctx))
 }
 
@@ -981,7 +1025,7 @@ fn cmd_keeper(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), 
     if !tag.is_empty() && !profile.is_empty() {
         return Err(msg(2, "keeper: --tag and --profile are mutually exclusive"));
     }
-    resolve_config(ctx, g, false)?;
+    resolve_and_load(ctx, g, false)?;
     Err(stub(ctx))
 }
 
@@ -1008,7 +1052,7 @@ fn cmd_webui(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), F
     }
     let p = inline_parse(ctx, vec![], WEBUI_SERVE_HELP_TEXT, &args[1..])?;
     check_positionals(&p, &[]).map_err(usage_err)?;
-    resolve_config(ctx, g, false)?;
+    resolve_and_load(ctx, g, false)?;
     Err(stub(ctx))
 }
 

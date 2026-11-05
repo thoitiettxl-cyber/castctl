@@ -192,6 +192,18 @@ impl Parsed {
         }
     }
 
+    /// Record an int flag's default value without marking it set
+    /// (Go `parse`: defaults only write `p.ints`, never `intSet`;
+    /// handlers use `intIsSet` to tell "user passed the flag"
+    /// from "default applied").
+    fn set_int_default(&mut self, name: &str, val: i64) {
+        if let Some(slot) = self.ints.iter_mut().find(|(k, _)| k == name) {
+            slot.1 = val;
+        } else {
+            self.ints.push((name.to_string(), val));
+        }
+    }
+
     fn push_list(&mut self, name: &str, val: String) {
         if let Some(slot) = self.lists.iter_mut().find(|(k, _)| k == name) {
             slot.1.push(val);
@@ -370,11 +382,12 @@ impl ArgParser {
             }
         }
         // Int-flag defaults for flags never set on the command line.
+        // Defaults must not mark the flag set (see set_int_default).
         for def in &self.defs {
             if def.kind == FlagKind::Int {
                 if let Some(d) = def.def_int {
                     if !p.int_is_set(def.name) {
-                        p.set_int(def.name, d);
+                        p.set_int_default(def.name, d);
                     }
                 }
             }
@@ -459,6 +472,12 @@ impl ArgParser {
             FlagKind::StringList => p.push_list(def.name, val),
             FlagKind::PairList => {
                 // PairList values only arrive via consumeLong.
+                // Go's setValue has no PairList case, so a short
+                // form would silently DROP the value; the arm is
+                // unreachable in practice because no PairList
+                // def has a short flag (the only one is fs
+                // --replace). Kept as debug_assert, no behaviour
+                // change.
                 debug_assert!(false, "pair list must go through consumeLong");
             }
         }
@@ -698,6 +717,9 @@ mod tests {
         assert_eq!(p.int_val("limit"), 10);
         assert_eq!(p.int_val("after-seq"), 0);
         assert!(!p.int_is_set("after-seq"));
+        // A defaulted flag holds its default value but is NOT set:
+        // handlers must be able to tell it from an explicit flag.
+        assert!(!p.int_is_set("limit"));
         let p = parse_ok(&ap, &["--limit", "3"]);
         assert_eq!(p.int_val("limit"), 3);
         assert!(p.int_is_set("limit"));

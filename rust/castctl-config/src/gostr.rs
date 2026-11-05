@@ -33,25 +33,37 @@ pub fn go_lower(s: &str) -> String {
 }
 
 /// Whether a rune is printable in Go's `strconv.IsPrint` sense, as
-/// approximated without Unicode category tables: control characters
-/// and a small set of format characters are not printable; everything
-/// else is treated as printable. This approximation only affects
-/// `%q` rendering of exotic runes; ASCII behaviour is exact.
+/// approximated without Unicode category tables: control characters,
+/// separator characters (Zs/Zl/Zp), and a set of format characters
+/// (Cf) are not printable; everything else is treated as printable.
+/// The Zs/Zl/Zp set is probe-verified on cue against
+/// `strconv.IsPrint` (U+00A0, U+1680, U+2000–U+200A, U+2028,
+/// U+2029, U+202F, U+205F, U+3000); other unprobed categories
+/// (private-use, unassigned) remain an approximation (see
+/// PORTING.md). ASCII behaviour is exact.
 ///
 /// Source: Go stdlib `strconv.IsPrint` (approximation; see PORTING.md).
 fn go_is_print(c: char) -> bool {
     if c.is_control() {
         return false;
     }
-    // Format characters Go's IsPrint rejects (Cf/Zl/Zp and friends).
-    // U+00AD soft hyphen and U+FEFF are the common cases.
+    // Separator characters Go's IsPrint rejects (Zs/Zl/Zp), plus
+    // format characters (Cf) and friends. U+00AD soft hyphen and
+    // U+FEFF are the common Cf cases.
     !matches!(
         c,
-        '\u{00ad}'
+        '\u{00a0}'
+            | '\u{00ad}'
             | '\u{061c}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200a}'
             | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{2029}'
             | '\u{202a}'..='\u{202e}'
+            | '\u{202f}'
+            | '\u{205f}'
             | '\u{2060}'..='\u{2064}'
+            | '\u{3000}'
             | '\u{feff}'
     )
 }
@@ -226,6 +238,22 @@ mod tests {
         assert_eq!(go_quote("a\nb\tc"), "\"a\\nb\\tc\"");
         assert_eq!(go_quote("\u{1}"), "\"\\x01\"");
         assert_eq!(go_quote("\u{7f}"), "\"\\x7f\"");
+    }
+
+    #[test]
+    fn test_go_quote_separators_escaped() {
+        // Zs/Zl/Zp are not printable in Go's strconv.IsPrint
+        // (probe-verified on cue); %q escapes them, never emits
+        // them raw.
+        assert_eq!(go_quote("bogus\u{2028}"), "\"bogus\\u2028\"");
+        assert_eq!(go_quote("bogus\u{2029}"), "\"bogus\\u2029\"");
+        assert_eq!(go_quote("bogus\u{a0}"), "\"bogus\\u00a0\"");
+        assert_eq!(go_quote("bogus\u{2003}"), "\"bogus\\u2003\"");
+        assert_eq!(go_quote("bogus\u{3000}"), "\"bogus\\u3000\"");
+        assert_eq!(go_quote("bogus\u{202f}"), "\"bogus\\u202f\"");
+        // Printable neighbours stay raw.
+        assert_eq!(go_quote("bogus\u{ff}"), "\"bogusÿ\"");
+        assert_eq!(go_quote("bogus\u{20ac}"), "\"bogus€\"");
     }
 
     #[test]
