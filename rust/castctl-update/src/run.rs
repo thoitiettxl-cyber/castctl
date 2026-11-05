@@ -723,7 +723,7 @@ impl Updater {
         // rename once, fsync the directory. The open
         // retries ETXTBSY briefly.
         let sync_result = (|| -> std::result::Result<(), UpdateError> {
-            let mut sync_file = open_for_sync(&extracted_tmp_path)
+            let sync_file = open_for_sync(&extracted_tmp_path)
                 .map_err(|_| UpdateError::failure("update: cannot re-open the new binary"))?;
             sync_file
                 .sync_all()

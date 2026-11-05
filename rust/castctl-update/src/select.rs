@@ -15,7 +15,7 @@
 //! live in `run.rs` and call these helpers.
 
 use crate::error::UpdateError;
-use crate::semver::{Version, compare_versions, parse_version};
+use crate::semver::{Version, compare_versions};
 
 /// One asset of a release.
 /// Source: Go `releaseAsset{name, url, size, state}`
@@ -566,6 +566,7 @@ fn percent_decode_path(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::semver::parse_version;
 
     fn good_asset() -> ReleaseAsset {
         ReleaseAsset {
