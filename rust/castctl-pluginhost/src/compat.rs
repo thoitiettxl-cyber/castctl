@@ -85,9 +85,8 @@ pub fn parse_glibc_version(s: &str) -> Result<GlibcVersion, PluginHostError> {
         patch: 0,
     };
     if parts.len() > 2 {
-        v.patch = leading_int(parts[2]).ok_or_else(|| {
-            PluginHostError::invalid(format!("invalid glibc version {s:?}"))
-        })?;
+        v.patch = leading_int(parts[2])
+            .ok_or_else(|| PluginHostError::invalid(format!("invalid glibc version {s:?}")))?;
     }
     Ok(v)
 }
@@ -196,9 +195,7 @@ impl Elf {
     /// data encoding, program headers, section headers,
     /// section names via the shstrtab.
     fn parse(data: Vec<u8>) -> Result<Elf, PluginHostError> {
-        let bad = |why: &str| {
-            PluginHostError::failed(format!("read plugin elf: {why}"))
-        };
+        let bad = |why: &str| PluginHostError::failed(format!("read plugin elf: {why}"));
         if data.len() < 16
             || data[0] != 0x7f
             || data[1] != b'E'
@@ -220,31 +217,36 @@ impl Elf {
         if data[6] != 1 {
             return Err(bad("invalid ELF version"));
         }
-        let u16h = |off: usize| read_u16(&data, off, big_endian).ok_or_else(|| bad("truncated ELF header"));
-        let u32h = |off: usize| read_u32(&data, off, big_endian).ok_or_else(|| bad("truncated ELF header"));
-        let u64h = |off: usize| read_u64(&data, off, big_endian).ok_or_else(|| bad("truncated ELF header"));
-        let (phoff, shoff, phentsize, mut phnum, shentsize, mut shnum, mut shstrndx) =
-            if class32 {
-                (
-                    u32h(28)? as u64,
-                    u32h(32)? as u64,
-                    u16h(42)? as usize,
-                    u16h(44)? as usize,
-                    u16h(46)? as usize,
-                    u16h(48)? as usize,
-                    u16h(50)? as usize,
-                )
-            } else {
-                (
-                    u64h(32)?,
-                    u64h(40)?,
-                    u16h(54)? as usize,
-                    u16h(56)? as usize,
-                    u16h(58)? as usize,
-                    u16h(60)? as usize,
-                    u16h(62)? as usize,
-                )
-            };
+        let u16h = |off: usize| {
+            read_u16(&data, off, big_endian).ok_or_else(|| bad("truncated ELF header"))
+        };
+        let u32h = |off: usize| {
+            read_u32(&data, off, big_endian).ok_or_else(|| bad("truncated ELF header"))
+        };
+        let u64h = |off: usize| {
+            read_u64(&data, off, big_endian).ok_or_else(|| bad("truncated ELF header"))
+        };
+        let (phoff, shoff, phentsize, mut phnum, shentsize, mut shnum, mut shstrndx) = if class32 {
+            (
+                u32h(28)? as u64,
+                u32h(32)? as u64,
+                u16h(42)? as usize,
+                u16h(44)? as usize,
+                u16h(46)? as usize,
+                u16h(48)? as usize,
+                u16h(50)? as usize,
+            )
+        } else {
+            (
+                u64h(32)?,
+                u64h(40)?,
+                u16h(54)? as usize,
+                u16h(56)? as usize,
+                u16h(58)? as usize,
+                u16h(60)? as usize,
+                u16h(62)? as usize,
+            )
+        };
         // Program headers.
         let mut progs = Vec::new();
         if phoff != 0 && phnum != 0 {
@@ -265,17 +267,28 @@ impl Elf {
                 let off = phoff as usize + i * phentsize;
                 let (typ, poff, vaddr, filesz) = if class32 {
                     (
-                        read_u32(&data, off, big_endian).ok_or_else(|| bad("truncated program header"))?,
-                        read_u32(&data, off + 4, big_endian).ok_or_else(|| bad("truncated program header"))? as u64,
-                        read_u32(&data, off + 8, big_endian).ok_or_else(|| bad("truncated program header"))? as u64,
-                        read_u32(&data, off + 16, big_endian).ok_or_else(|| bad("truncated program header"))? as u64,
+                        read_u32(&data, off, big_endian)
+                            .ok_or_else(|| bad("truncated program header"))?,
+                        read_u32(&data, off + 4, big_endian)
+                            .ok_or_else(|| bad("truncated program header"))?
+                            as u64,
+                        read_u32(&data, off + 8, big_endian)
+                            .ok_or_else(|| bad("truncated program header"))?
+                            as u64,
+                        read_u32(&data, off + 16, big_endian)
+                            .ok_or_else(|| bad("truncated program header"))?
+                            as u64,
                     )
                 } else {
                     (
-                        read_u32(&data, off, big_endian).ok_or_else(|| bad("truncated program header"))?,
-                        read_u64(&data, off + 8, big_endian).ok_or_else(|| bad("truncated program header"))?,
-                        read_u64(&data, off + 16, big_endian).ok_or_else(|| bad("truncated program header"))?,
-                        read_u64(&data, off + 32, big_endian).ok_or_else(|| bad("truncated program header"))?,
+                        read_u32(&data, off, big_endian)
+                            .ok_or_else(|| bad("truncated program header"))?,
+                        read_u64(&data, off + 8, big_endian)
+                            .ok_or_else(|| bad("truncated program header"))?,
+                        read_u64(&data, off + 16, big_endian)
+                            .ok_or_else(|| bad("truncated program header"))?,
+                        read_u64(&data, off + 32, big_endian)
+                            .ok_or_else(|| bad("truncated program header"))?,
                     )
                 };
                 progs.push(Prog {
@@ -309,23 +322,40 @@ impl Elf {
                 let off = shoff as usize + i * shentsize;
                 let (name, typ, addr, file_off, size, link, info) = if class32 {
                     (
-                        read_u32(&data, off, big_endian).ok_or_else(|| bad("truncated section header"))?,
-                        read_u32(&data, off + 4, big_endian).ok_or_else(|| bad("truncated section header"))?,
-                        read_u32(&data, off + 12, big_endian).ok_or_else(|| bad("truncated section header"))? as u64,
-                        read_u32(&data, off + 16, big_endian).ok_or_else(|| bad("truncated section header"))? as u64,
-                        read_u32(&data, off + 20, big_endian).ok_or_else(|| bad("truncated section header"))? as u64,
-                        read_u32(&data, off + 24, big_endian).ok_or_else(|| bad("truncated section header"))?,
-                        read_u32(&data, off + 28, big_endian).ok_or_else(|| bad("truncated section header"))?,
+                        read_u32(&data, off, big_endian)
+                            .ok_or_else(|| bad("truncated section header"))?,
+                        read_u32(&data, off + 4, big_endian)
+                            .ok_or_else(|| bad("truncated section header"))?,
+                        read_u32(&data, off + 12, big_endian)
+                            .ok_or_else(|| bad("truncated section header"))?
+                            as u64,
+                        read_u32(&data, off + 16, big_endian)
+                            .ok_or_else(|| bad("truncated section header"))?
+                            as u64,
+                        read_u32(&data, off + 20, big_endian)
+                            .ok_or_else(|| bad("truncated section header"))?
+                            as u64,
+                        read_u32(&data, off + 24, big_endian)
+                            .ok_or_else(|| bad("truncated section header"))?,
+                        read_u32(&data, off + 28, big_endian)
+                            .ok_or_else(|| bad("truncated section header"))?,
                     )
                 } else {
                     (
-                        read_u32(&data, off, big_endian).ok_or_else(|| bad("truncated section header"))?,
-                        read_u32(&data, off + 4, big_endian).ok_or_else(|| bad("truncated section header"))?,
-                        read_u64(&data, off + 16, big_endian).ok_or_else(|| bad("truncated section header"))?,
-                        read_u64(&data, off + 24, big_endian).ok_or_else(|| bad("truncated section header"))?,
-                        read_u64(&data, off + 32, big_endian).ok_or_else(|| bad("truncated section header"))?,
-                        read_u32(&data, off + 40, big_endian).ok_or_else(|| bad("truncated section header"))?,
-                        read_u32(&data, off + 44, big_endian).ok_or_else(|| bad("truncated section header"))?,
+                        read_u32(&data, off, big_endian)
+                            .ok_or_else(|| bad("truncated section header"))?,
+                        read_u32(&data, off + 4, big_endian)
+                            .ok_or_else(|| bad("truncated section header"))?,
+                        read_u64(&data, off + 16, big_endian)
+                            .ok_or_else(|| bad("truncated section header"))?,
+                        read_u64(&data, off + 24, big_endian)
+                            .ok_or_else(|| bad("truncated section header"))?,
+                        read_u64(&data, off + 32, big_endian)
+                            .ok_or_else(|| bad("truncated section header"))?,
+                        read_u32(&data, off + 40, big_endian)
+                            .ok_or_else(|| bad("truncated section header"))?,
+                        read_u32(&data, off + 44, big_endian)
+                            .ok_or_else(|| bad("truncated section header"))?,
                     )
                 };
                 raw_sections.push((name, typ, addr, file_off, size, link, info));
@@ -336,11 +366,7 @@ impl Elf {
             let (_, _, _, off, size, _, _) = raw_sections[shstrndx];
             let start = off as usize;
             let end = start.saturating_add(size as usize).min(data.len());
-            if start <= end {
-                &data[start..end]
-            } else {
-                &[]
-            }
+            if start <= end { &data[start..end] } else { &[] }
         } else {
             &[]
         };
@@ -389,12 +415,11 @@ impl Elf {
 /// Source: `isELFFile` (`compat.go:37-55`).
 pub fn is_elf_file(path: &Path) -> Result<bool, PluginHostError> {
     use std::io::Read;
-    let mut f = std::fs::File::open(path).map_err(|e| {
-        PluginHostError::failed(format!("cannot open plugin file: {e}"))
-    })?;
-    let info = f.metadata().map_err(|e| {
-        PluginHostError::failed(format!("cannot stat plugin file: {e}"))
-    })?;
+    let mut f = std::fs::File::open(path)
+        .map_err(|e| PluginHostError::failed(format!("cannot open plugin file: {e}")))?;
+    let info = f
+        .metadata()
+        .map_err(|e| PluginHostError::failed(format!("cannot stat plugin file: {e}")))?;
     if info.is_dir() {
         return Err(PluginHostError::failed("plugin file is a directory"));
     }
@@ -412,9 +437,8 @@ pub fn is_elf_file(path: &Path) -> Result<bool, PluginHostError> {
 /// be read, is an error: the loader must not guess.
 /// Source: `MaxRequiredGLIBC` (`compat.go:197-259`).
 pub fn max_required_glibc(path: &Path) -> Result<String, PluginHostError> {
-    let bytes = std::fs::read(path).map_err(|e| {
-        PluginHostError::failed(format!("read plugin elf: {e}"))
-    })?;
+    let bytes = std::fs::read(path)
+        .map_err(|e| PluginHostError::failed(format!("read plugin elf: {e}")))?;
     let elf = Elf::parse(bytes)?;
     max_required_glibc_in(&elf)
 }
@@ -575,15 +599,11 @@ fn dynamic_strtab_range(elf: &Elf) -> Result<Vec<u8>, PluginHostError> {
         }
         let start = off as usize;
         let end = start.saturating_add(strsz as usize);
-        return elf
-            .data
-            .get(start..end)
-            .map(|b| b.to_vec())
-            .ok_or_else(|| {
-                PluginHostError::failed(
-                    "cannot resolve DT_STRTAB: cannot read DT_STRTAB range: refusing to load",
-                )
-            });
+        return elf.data.get(start..end).map(|b| b.to_vec()).ok_or_else(|| {
+            PluginHostError::failed(
+                "cannot resolve DT_STRTAB: cannot read DT_STRTAB range: refusing to load",
+            )
+        });
     }
     Err(PluginHostError::failed(
         "cannot resolve DT_STRTAB: DT_STRTAB address is not covered by any PT_LOAD segment: refusing to load",
@@ -773,9 +793,7 @@ pub fn parse_version_needs_count(
             let name_off = u32at((aux_off + 8) as usize) as usize;
             let next = u32at((aux_off + 12) as usize) as i64;
             let name = cstring_at(strtab, name_off).map_err(|e| {
-                PluginHostError::failed(format!(
-                    "invalid version name offset {name_off}: {e}"
-                ))
+                PluginHostError::failed(format!("invalid version name offset {name_off}: {e}"))
             })?;
             if let Some(ver_str) = name.strip_prefix("GLIBC_") {
                 if !ver_str.is_empty() && ver_str.as_bytes()[0].is_ascii_digit() {
@@ -875,39 +893,34 @@ pub fn parse_version_needs(
 /// [DEVIATION] recorded in PORTING.md (no dlopen, no
 /// cgo) with the same fail-closed contract.
 pub fn running_libc_version() -> Result<GlibcVersion, PluginHostError> {
-    let maps = std::fs::read_to_string("/proc/self/maps").map_err(|e| {
-        PluginHostError::failed(format!("cannot read /proc/self/maps: {e}"))
-    })?;
+    let maps = std::fs::read_to_string("/proc/self/maps")
+        .map_err(|e| PluginHostError::failed(format!("cannot read /proc/self/maps: {e}")))?;
     let mut libc_path: Option<String> = None;
     for line in maps.lines() {
         if let Some(path) = line.split_whitespace().last() {
             let base = path.rsplit('/').next().unwrap_or(path);
-            if base.starts_with("libc.so.6")
-                || (base.starts_with("libc-") && base.ends_with(".so"))
+            if base.starts_with("libc.so.6") || (base.starts_with("libc-") && base.ends_with(".so"))
             {
                 libc_path = Some(path.to_string());
                 break;
             }
         }
     }
-    let path = libc_path.ok_or_else(|| {
-        PluginHostError::failed("no loaded libc.so.6 found in /proc/self/maps")
-    })?;
-    let bytes = std::fs::read(&path).map_err(|e| {
-        PluginHostError::failed(format!("cannot read loaded libc: {e}"))
-    })?;
+    let path = libc_path
+        .ok_or_else(|| PluginHostError::failed("no loaded libc.so.6 found in /proc/self/maps"))?;
+    let bytes = std::fs::read(&path)
+        .map_err(|e| PluginHostError::failed(format!("cannot read loaded libc: {e}")))?;
     let elf = Elf::parse(bytes)?;
     let Some(sec) = elf.section_by_name(".gnu.version_d") else {
         return Err(PluginHostError::failed(
             "loaded libc has no .gnu.version_d section",
         ));
     };
-    let data = elf.section_data(sec).map_err(|_| {
-        PluginHostError::failed("cannot read loaded libc version section")
-    })?;
-    let strtab = version_string_table(elf, sec).map_err(|_| {
-        PluginHostError::failed("cannot read loaded libc version string table")
-    })?;
+    let data = elf
+        .section_data(sec)
+        .map_err(|_| PluginHostError::failed("cannot read loaded libc version section"))?;
+    let strtab = version_string_table(&elf, sec)
+        .map_err(|_| PluginHostError::failed("cannot read loaded libc version string table"))?;
     let be = elf.big_endian;
     let mut max: Option<GlibcVersion> = None;
     let mut off: usize = 0;
@@ -949,9 +962,7 @@ pub fn running_libc_version() -> Result<GlibcVersion, PluginHostError> {
         }
         off += vd_next;
     }
-    max.ok_or_else(|| {
-        PluginHostError::failed("no GLIBC version defined in loaded libc")
-    })
+    max.ok_or_else(|| PluginHostError::failed("no GLIBC version defined in loaded libc"))
 }
 
 /// Refuse a plugin file whose highest required `GLIBC_`
@@ -1000,8 +1011,7 @@ mod tests {
     /// (`compat_test.go:18-70`).
     fn build_verneed(file_name: &str, versions: &[&str]) -> (Vec<u8>, Vec<u8>) {
         let mut strtab: Vec<u8> = vec![0];
-        let mut str_off: std::collections::HashMap<String, u32> =
-            std::collections::HashMap::new();
+        let mut str_off: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
         let mut add_str = |s: &str, strtab: &mut Vec<u8>| -> u32 {
             if let Some(off) = str_off.get(s) {
                 return *off;
@@ -1105,12 +1115,10 @@ mod tests {
     /// (`compat_test.go:107-140`).
     #[test]
     fn parse_version_needs_fail_closed() {
-        let (body, strtab) =
-            build_verneed("libc.so.6", &["GLIBC_2.34", "GLIBC_2.XX"]);
+        let (body, strtab) = build_verneed("libc.so.6", &["GLIBC_2.34", "GLIBC_2.XX"]);
         assert!(parse_version_needs(&body, &strtab, false).is_err());
         // Aux chain cut short of vn_cnt.
-        let (mut body, strtab) =
-            build_verneed("libc.so.6", &["GLIBC_2.2.5", "GLIBC_2.34"]);
+        let (mut body, strtab) = build_verneed("libc.so.6", &["GLIBC_2.2.5", "GLIBC_2.34"]);
         body[16 + 12..16 + 16].copy_from_slice(&0u32.to_le_bytes());
         assert!(parse_version_needs(&body, &strtab, false).is_err());
         // Out-of-range name offset.
@@ -1275,11 +1283,36 @@ mod tests {
     fn parse_version_needs_strtab_bound_scanner_rules() {
         let (body, base_strtab) = build_verneed("libc.so.6", &["GLIBC_2.17"]);
         let cases: &[(&str, &str, &str, bool)] = &[
-            ("unreferenced higher version counts", "GLIBC_2.99\0", "2.99", false),
-            ("unreferenced malformed version refuses", "GLIBC_2.XX\0", "", true),
-            ("non-numeric name stays ignored", "GLIBC_PRIVATE\0", "2.17", false),
-            ("version string inside a longer string counts", "XGLIBC_2.99\0", "2.99", false),
-            ("version string with letter suffix refuses", "GLIBC_2.34x\0", "", true),
+            (
+                "unreferenced higher version counts",
+                "GLIBC_2.99\0",
+                "2.99",
+                false,
+            ),
+            (
+                "unreferenced malformed version refuses",
+                "GLIBC_2.XX\0",
+                "",
+                true,
+            ),
+            (
+                "non-numeric name stays ignored",
+                "GLIBC_PRIVATE\0",
+                "2.17",
+                false,
+            ),
+            (
+                "version string inside a longer string counts",
+                "XGLIBC_2.99\0",
+                "2.99",
+                false,
+            ),
+            (
+                "version string with letter suffix refuses",
+                "GLIBC_2.34x\0",
+                "",
+                true,
+            ),
         ];
         for (name, extra, want, want_err) in cases {
             let mut strtab = base_strtab.clone();
@@ -1414,7 +1447,13 @@ mod tests {
             put16(&mut buf, 60, 4);
             put16(&mut buf, 62, 3);
         }
-        let write_phdr = |buf: &mut [u8], off: usize, typ: u32, file_off: u64, vaddr: u64, filesz: u64, flags: u32| {
+        let write_phdr = |buf: &mut [u8],
+                          off: usize,
+                          typ: u32,
+                          file_off: u64,
+                          vaddr: u64,
+                          filesz: u64,
+                          flags: u32| {
             if opts.class32 {
                 put32(buf, off, typ);
                 put32(buf, off + 4, file_off as u32);
@@ -1447,8 +1486,7 @@ mod tests {
                 6,
             );
         }
-        buf[verneed_off..verneed_off + opts.section.len()]
-            .copy_from_slice(&opts.section);
+        buf[verneed_off..verneed_off + opts.section.len()].copy_from_slice(&opts.section);
         buf[dynstr_off..dynstr_off + opts.strtab.len()].copy_from_slice(&opts.strtab);
         buf[shstr_off..shstr_off + shstr.len()].copy_from_slice(shstr);
         if opts.dynamic != "none" {
@@ -1472,7 +1510,17 @@ mod tests {
                 }
             }
         }
-        let write_shdr = |buf: &mut [u8], off: usize, name: u32, typ: u32, flags: u64, addr: u64, file_off: u64, size: u64, link: u32, info: u32, align: u64| {
+        let write_shdr = |buf: &mut [u8],
+                          off: usize,
+                          name: u32,
+                          typ: u32,
+                          flags: u64,
+                          addr: u64,
+                          file_off: u64,
+                          size: u64,
+                          link: u32,
+                          info: u32,
+                          align: u64| {
             if opts.class32 {
                 put32(buf, off, name);
                 put32(buf, off + 4, typ);

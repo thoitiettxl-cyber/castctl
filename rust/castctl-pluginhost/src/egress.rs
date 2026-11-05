@@ -74,7 +74,7 @@ use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::Service;
 use hyper_util::rt::TokioIo;
-use rand::RngCore;
+use rand::Rng;
 
 use crate::error::PluginHostError;
 use crate::host::EgressProxyHandle;
@@ -93,10 +93,21 @@ pub trait UpstreamTransport: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<Response<Full<Bytes>>, PluginHostError>> + Send + '_>>;
 }
 
+/// A byte stream that is both readable and writable:
+/// the single principal trait a CONNECT target needs.
+/// (`dyn AsyncRead + AsyncWrite` is not a valid trait
+/// object — two non-auto traits — so the pair is named
+/// once here.)
+/// Source: the `net.Conn` returned by the dial function
+/// (`egress.go:57`).
+pub trait AsyncReadWrite: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {}
+
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin> AsyncReadWrite for T {}
+
 /// A dialed CONNECT target: any async byte stream.
 /// Source: the `net.Conn` returned by the dial function
 /// (`egress.go:57`).
-pub type DialStream = Pin<Box<dyn tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin>>;
+pub type DialStream = Pin<Box<dyn AsyncReadWrite>>;
 
 /// The CONNECT dial function: dial `addr` (a `host:port`
 /// string) and return the target stream.
@@ -164,10 +175,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 fn random_credential() -> String {
     let mut raw = [0u8; 24];
     rand::rng().fill_bytes(&mut raw);
-    base64::Engine::encode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        raw,
-    )
+    base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, raw)
 }
 
 struct Inner {
@@ -211,15 +219,13 @@ impl EgressProxy {
     ) -> Result<EgressProxy, PluginHostError> {
         let username = random_credential();
         let password = random_credential();
-        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| {
-            PluginHostError::failed(format!("listen egress proxy: {e}"))
-        })?;
-        let addr = std_listener.local_addr().map_err(|e| {
-            PluginHostError::failed(format!("listen egress proxy: {e}"))
-        })?;
-        let listener = tokio::net::TcpListener::from_std(std_listener).map_err(|e| {
-            PluginHostError::failed(format!("listen egress proxy: {e}"))
-        })?;
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .map_err(|e| PluginHostError::failed(format!("listen egress proxy: {e}")))?;
+        let addr = std_listener
+            .local_addr()
+            .map_err(|e| PluginHostError::failed(format!("listen egress proxy: {e}")))?;
+        let listener = tokio::net::TcpListener::from_std(std_listener)
+            .map_err(|e| PluginHostError::failed(format!("listen egress proxy: {e}")))?;
         use std::os::unix::io::AsRawFd;
         let listener_fd = listener.as_raw_fd();
         let inner = Arc::new(Inner {
@@ -397,10 +403,9 @@ impl ProxyService {
         let Some(b64) = raw.strip_prefix("Basic ") else {
             return false;
         };
-        let Ok(decoded) = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            b64.trim(),
-        ) else {
+        let Ok(decoded) =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64.trim())
+        else {
             return false;
         };
         let Ok(text) = std::str::from_utf8(&decoded) else {
@@ -422,7 +427,9 @@ impl ProxyService {
                     b"proxy authentication required",
                 )))
                 .unwrap_or_else(|_| {
-                    Response::new(Full::new(Bytes::from_static(b"proxy authentication required")))
+                    Response::new(Full::new(Bytes::from_static(
+                        b"proxy authentication required",
+                    )))
                 });
         }
         if req.method() == http::Method::CONNECT {
@@ -517,13 +524,15 @@ impl ProxyService {
         let inner = Arc::clone(&self.inner);
         let id = inner.next_tunnel_id.fetch_add(1, Ordering::SeqCst);
         let handle = tokio::spawn(async move {
-            let mut upgraded = match upgrade.await {
+            // `Upgraded` speaks hyper's own Read/Write
+            // traits, not tokio's: adapt with TokioIo.
+            let mut upgraded = TokioIo::new(match upgrade.await {
                 Ok(u) => u,
                 Err(_) => {
                     drop(target);
                     return;
                 }
-            };
+            });
             // Track both tunnel ends so Close aborts the
             // tunnel. A tunnel that starts concurrently
             // with Close is shut down immediately.
@@ -576,7 +585,11 @@ fn strip_userinfo(uri: &http::Uri) -> http::Uri {
     let Some(authority) = uri.authority() else {
         return uri.clone();
     };
-    let host_port = authority.as_str().rsplit('@').next().unwrap_or(authority.as_str());
+    let host_port = authority
+        .as_str()
+        .rsplit('@')
+        .next()
+        .unwrap_or(authority.as_str());
     let mut builder = http::uri::Builder::new();
     if let Some(scheme) = uri.scheme() {
         builder = builder.scheme(scheme.clone());
@@ -607,9 +620,11 @@ impl UpstreamTransport for HyperUpstream {
             if uri.scheme_str() == Some("https") {
                 return Err(PluginHostError::failed("upstream error"));
             }
-            let authority = uri.authority().cloned().unwrap_or_default();
-            let host = authority.host().to_string();
-            let port = authority.port_u16().unwrap_or(80);
+            let host = uri
+                .authority()
+                .map(|a| a.host().to_string())
+                .unwrap_or_default();
+            let port = uri.authority().and_then(|a| a.port_u16()).unwrap_or(80);
             let stream = tokio::net::TcpStream::connect((host.as_str(), port))
                 .await
                 .map_err(|_| PluginHostError::failed("upstream error"))?;

@@ -134,7 +134,10 @@ pub struct StoppedLoader;
 
 impl Loader for StoppedLoader {
     fn open(&self, file: &PluginFile, _host: &Host) -> Result<Arc<dyn Client>, PluginHostError> {
-        loader::open_plugin(&file.path)
+        // `open_plugin` always refuses (see `loader.rs`);
+        // the `?` propagates its `LoaderUnavailable`.
+        loader::open_plugin(&file.path)?;
+        Err(PluginHostError::LoaderUnavailable)
     }
 }
 
@@ -160,7 +163,11 @@ pub trait EgressProxyHandle: Send + Sync {
 /// one path: each gets its own registration and its own
 /// host-side state.
 /// Source: `Desired` (`host.go:74-119`).
-#[derive(Debug, Clone)]
+///
+/// Manual `Debug`: `egress_proxy` is a trait object
+/// (`Arc<dyn EgressProxyHandle>`), which has no `Debug`
+/// impl; the proxy is shown by whether it is closed.
+#[derive(Clone)]
 pub struct Desired {
     /// Plugin tag.
     pub tag: String,
@@ -188,6 +195,24 @@ pub struct Desired {
     /// When set, names a checksums.txt manifest the
     /// binary must verify against before it is loaded.
     pub manifest_path: String,
+}
+
+impl std::fmt::Debug for Desired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Desired")
+            .field("tag", &self.tag)
+            .field("type_", &self.type_)
+            .field("path", &self.path)
+            .field("fragment", &self.fragment)
+            .field("identity", &self.identity)
+            .field("egress", &self.egress)
+            .field(
+                "egress_proxy_closed",
+                &self.egress_proxy.as_ref().map(|p| p.is_closed()),
+            )
+            .field("manifest_path", &self.manifest_path)
+            .finish()
+    }
 }
 
 impl Desired {
@@ -417,11 +442,7 @@ impl Host {
             state
                 .loaded
                 .values()
-                .filter(|lp| {
-                    lp.egress
-                        .as_ref()
-                        .is_some_and(|e| Arc::ptr_eq(e, p))
-                })
+                .filter(|lp| lp.egress.as_ref().is_some_and(|e| Arc::ptr_eq(e, p)))
                 .count()
         };
         if refs == 0 {
@@ -644,8 +665,7 @@ impl Host {
                         // outside the state lock.
                         existing.client.shutdown();
                         {
-                            let mut state =
-                                self.state.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                             state.loaded.insert(d.tag.clone(), replacement);
                             state.fused.remove(&d.tag);
                         }
@@ -890,8 +910,7 @@ impl Host {
         d: &Desired,
         in_map: bool,
     ) -> Result<(), PluginHostError> {
-        let (reg, schema) =
-            self.send_registration(lp, pluginabi::METHOD_PLUGIN_REGISTER, d)?;
+        let (reg, schema) = self.send_registration(lp, pluginabi::METHOD_PLUGIN_REGISTER, d)?;
         let old_egress = self.apply_registration(lp, d, &reg, schema);
         if in_map {
             self.store_loaded(&d.tag, lp.clone());
@@ -906,10 +925,7 @@ impl Host {
             egress.set_cookie_hosts(&reg.cookie_hosts);
         }
         if let Some(old) = old_egress {
-            let same = lp
-                .egress
-                .as_ref()
-                .is_some_and(|cur| Arc::ptr_eq(&old, cur));
+            let same = lp.egress.as_ref().is_some_and(|cur| Arc::ptr_eq(&old, cur));
             if !same {
                 self.maybe_close_egress(&old);
             }
@@ -926,8 +942,7 @@ impl Host {
         d: &Desired,
         in_map: bool,
     ) -> Result<(), PluginHostError> {
-        let (reg, schema) =
-            self.send_registration(lp, pluginabi::METHOD_PLUGIN_RECONFIGURE, d)?;
+        let (reg, schema) = self.send_registration(lp, pluginabi::METHOD_PLUGIN_RECONFIGURE, d)?;
         let old_egress = self.apply_registration(lp, d, &reg, schema);
         if in_map {
             self.store_loaded(&d.tag, lp.clone());
@@ -939,10 +954,7 @@ impl Host {
             egress.set_cookie_hosts(&reg.cookie_hosts);
         }
         if let Some(old) = old_egress {
-            let same = lp
-                .egress
-                .as_ref()
-                .is_some_and(|cur| Arc::ptr_eq(&old, cur));
+            let same = lp.egress.as_ref().is_some_and(|cur| Arc::ptr_eq(&old, cur));
             if !same {
                 self.maybe_close_egress(&old);
             }
@@ -1083,20 +1095,21 @@ impl Host {
             Ok(Outcome::Panicked(type_name)) => {
                 let reason = format!("{method} panic: {type_name}");
                 self.fuse(tag, &reason, path, generation);
-                Err(PluginHostError::failed(format!(
-                    "plugin {tag:?}: {reason}"
-                )))
+                Err(PluginHostError::failed(format!("plugin {tag:?}: {reason}")))
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                self.fuse(tag, &format!("call timed out or cancelled: {method}"), path, generation);
+                self.fuse(
+                    tag,
+                    &format!("call timed out or cancelled: {method}"),
+                    path,
+                    generation,
+                );
                 Err(PluginHostError::failed("context deadline exceeded"))
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let reason = format!("{method} panic: unknown");
                 self.fuse(tag, &reason, path, generation);
-                Err(PluginHostError::failed(format!(
-                    "plugin {tag:?}: {reason}"
-                )))
+                Err(PluginHostError::failed(format!("plugin {tag:?}: {reason}")))
             }
         }
     }
@@ -1174,9 +1187,7 @@ fn short_err(err: &PluginHostError) -> String {
 /// Source: `parseEnvelope` (`host.go:860-880`).
 fn parse_envelope(response: &[u8], tag: &str) -> Result<Vec<u8>, PluginHostError> {
     let env: Envelope = serde_json::from_slice(response).map_err(|e| {
-        PluginHostError::failed(format!(
-            "plugin {tag:?} returned invalid envelope: {e}"
-        ))
+        PluginHostError::failed(format!("plugin {tag:?} returned invalid envelope: {e}"))
     })?;
     if !env.ok {
         if let Some(err) = env.error {
@@ -1261,9 +1272,7 @@ mod tests {
     struct FakeClientInner {
         calls: Vec<(String, Vec<u8>)>,
         shutdowns: usize,
-        on_call: Option<
-            Arc<dyn Fn(&str, &[u8]) -> Result<Vec<u8>, ClientError> + Send + Sync>,
-        >,
+        on_call: Option<Arc<dyn Fn(&str, &[u8]) -> Result<Vec<u8>, ClientError> + Send + Sync>>,
         panic_methods: HashSet<String>,
         block_methods: HashSet<String>,
     }
@@ -1374,16 +1383,11 @@ mod tests {
                         },
                     ))
                 }
-                pluginabi::METHOD_PLUGIN_QUIESCE => {
-                    Ok(ok_response(serde_json::json!({})))
-                }
+                pluginabi::METHOD_PLUGIN_QUIESCE => Ok(ok_response(serde_json::json!({}))),
                 pluginabi::METHOD_PROVIDER_CALL => {
                     let req: serde_json::Value =
                         serde_json::from_slice(request).unwrap_or(serde_json::Value::Null);
-                    let input = req
-                        .get("input")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let input = req.get("input").and_then(|v| v.as_str()).unwrap_or("");
                     Ok(ok_response(
                         serde_json::json!({"payload": format!("echo:{input}")}),
                     ))
@@ -1459,11 +1463,7 @@ mod tests {
     }
 
     impl Loader for FakeLoader {
-        fn open(
-            &self,
-            file: &PluginFile,
-            host: &Host,
-        ) -> Result<Arc<dyn Client>, PluginHostError> {
+        fn open(&self, file: &PluginFile, host: &Host) -> Result<Arc<dyn Client>, PluginHostError> {
             let mut inner = self.inner.lock().unwrap();
             inner.opens.push(file.path.to_string_lossy().to_string());
             if let Some(f) = &inner.open_func {
@@ -1483,11 +1483,7 @@ mod tests {
     }
 
     impl Loader for Arc<FakeLoader> {
-        fn open(
-            &self,
-            file: &PluginFile,
-            host: &Host,
-        ) -> Result<Arc<dyn Client>, PluginHostError> {
+        fn open(&self, file: &PluginFile, host: &Host) -> Result<Arc<dyn Client>, PluginHostError> {
             (**self).open(file, host)
         }
     }
@@ -1530,10 +1526,7 @@ mod tests {
         }
     }
 
-    fn new_fake_host(
-        loader: Arc<FakeLoader>,
-        logs: Arc<Mutex<Vec<String>>>,
-    ) -> Host {
+    fn new_fake_host(loader: Arc<FakeLoader>, logs: Arc<Mutex<Vec<String>>>) -> Host {
         let logs_clone = Arc::clone(&logs);
         Host::new(Options {
             loader: Some(Box::new(Arc::clone(&loader))),
@@ -1630,10 +1623,7 @@ mod tests {
             r#"{"v":2}"#,
         )]);
         assert!(report.skipped.is_empty(), "{report:?}");
-        assert_eq!(
-            fake.call_count(pluginabi::METHOD_PLUGIN_RECONFIGURE),
-            1
-        );
+        assert_eq!(fake.call_count(pluginabi::METHOD_PLUGIN_RECONFIGURE), 1);
         assert_eq!(fake.call_count(pluginabi::METHOD_PLUGIN_REGISTER), 1);
         let req = fake
             .last_request(pluginabi::METHOD_PLUGIN_RECONFIGURE)
@@ -1693,17 +1683,9 @@ mod tests {
         let (loader, clients) = fake_setup(&["/plugins/v1.so", "/plugins/v2.so"]);
         let logs = Arc::new(Mutex::new(Vec::new()));
         let h = new_fake_host(Arc::clone(&loader), Arc::clone(&logs));
-        h.apply_config(vec![desired_with_fragment(
-            "echo",
-            "/plugins/v1.so",
-            "{}",
-        )]);
+        h.apply_config(vec![desired_with_fragment("echo", "/plugins/v1.so", "{}")]);
         let old = &clients["/plugins/v1.so"];
-        let report = h.apply_config(vec![desired_with_fragment(
-            "echo",
-            "/plugins/v2.so",
-            "{}",
-        )]);
+        let report = h.apply_config(vec![desired_with_fragment("echo", "/plugins/v2.so", "{}")]);
         assert!(report.skipped.is_empty(), "{report:?}");
         assert_eq!(old.call_count(pluginabi::METHOD_PLUGIN_QUIESCE), 1);
         assert_eq!(old.shutdowns(), 1);
@@ -1713,17 +1695,13 @@ mod tests {
         );
         // Replacement failure: the new image fails to
         // open, the old image is re-registered.
-        loader.set_open_err(
-            "/plugins/v3.so",
-            PluginHostError::failed("dlopen failed"),
-        );
-        let report = h.apply_config(vec![desired_with_fragment(
-            "echo",
-            "/plugins/v3.so",
-            "{}",
-        )]);
+        loader.set_open_err("/plugins/v3.so", PluginHostError::failed("dlopen failed"));
+        let report = h.apply_config(vec![desired_with_fragment("echo", "/plugins/v3.so", "{}")]);
         assert_eq!(report.skipped.len(), 1);
-        assert!(report.skipped[0].reason.contains("rolled back"), "{report:?}");
+        assert!(
+            report.skipped[0].reason.contains("rolled back"),
+            "{report:?}"
+        );
         assert!(h.loaded("echo").is_some(), "echo must stay loaded");
         assert_eq!(
             clients["/plugins/v2.so"].call_count(pluginabi::METHOD_PLUGIN_REGISTER),
@@ -1775,32 +1753,64 @@ mod tests {
             (
                 "schema higher rejected",
                 2,
-                Capabilities { provider: true, command_provider: false },
-                Metadata { name: "x".into(), version: "1".into(), author: "a".into(), github_repository: String::new() },
+                Capabilities {
+                    provider: true,
+                    command_provider: false,
+                },
+                Metadata {
+                    name: "x".into(),
+                    version: "1".into(),
+                    author: "a".into(),
+                    github_repository: String::new(),
+                },
                 false,
                 "not supported",
             ),
             (
                 "schema missing becomes 1",
                 0,
-                Capabilities { provider: true, command_provider: false },
-                Metadata { name: "x".into(), version: "1".into(), author: "a".into(), github_repository: String::new() },
+                Capabilities {
+                    provider: true,
+                    command_provider: false,
+                },
+                Metadata {
+                    name: "x".into(),
+                    version: "1".into(),
+                    author: "a".into(),
+                    github_repository: String::new(),
+                },
                 true,
                 "",
             ),
             (
                 "no capabilities rejected",
                 1,
-                Capabilities { provider: false, command_provider: false },
-                Metadata { name: "x".into(), version: "1".into(), author: "a".into(), github_repository: String::new() },
+                Capabilities {
+                    provider: false,
+                    command_provider: false,
+                },
+                Metadata {
+                    name: "x".into(),
+                    version: "1".into(),
+                    author: "a".into(),
+                    github_repository: String::new(),
+                },
                 false,
                 "at least one capability",
             ),
             (
                 "empty name rejected",
                 1,
-                Capabilities { provider: true, command_provider: false },
-                Metadata { name: "".into(), version: "1".into(), author: "a".into(), github_repository: String::new() },
+                Capabilities {
+                    provider: true,
+                    command_provider: false,
+                },
+                Metadata {
+                    name: "".into(),
+                    version: "1".into(),
+                    author: "a".into(),
+                    github_repository: String::new(),
+                },
                 false,
                 "name is required",
             ),
@@ -1831,7 +1841,10 @@ mod tests {
             let report = h.apply_config(vec![desired("p", "/plugins/p.so")]);
             let loaded = h.loaded("p");
             if *want_ok {
-                assert!(loaded.is_some() && report.skipped.is_empty(), "{name}: {report:?}");
+                assert!(
+                    loaded.is_some() && report.skipped.is_empty(),
+                    "{name}: {report:?}"
+                );
                 assert_eq!(loaded.unwrap().schema_version, 1, "{name}");
             } else {
                 assert!(loaded.is_none(), "{name}: must not load");
@@ -1880,8 +1893,7 @@ mod tests {
         let logs = Arc::new(Mutex::new(Vec::new()));
         let h = new_fake_host(Arc::clone(&loader), Arc::clone(&logs));
         h.apply_config(vec![desired("echo", "/plugins/echo.so")]);
-        clients["/plugins/echo.so"]
-            .set_block_methods(&[pluginabi::METHOD_PROVIDER_CALL]);
+        clients["/plugins/echo.so"].set_block_methods(&[pluginabi::METHOD_PROVIDER_CALL]);
         let start = Instant::now();
         let err = h
             .call(
@@ -1920,7 +1932,10 @@ mod tests {
                     "fake",
                     "0.1.0",
                     "plugintest",
-                    Capabilities { provider: true, command_provider: false },
+                    Capabilities {
+                        provider: true,
+                        command_provider: false,
+                    },
                 ));
             }
             Ok(error_response("upstream_down", "upstream is down"))
@@ -1937,7 +1952,10 @@ mod tests {
                     "fake",
                     "0.1.0",
                     "plugintest",
-                    Capabilities { provider: true, command_provider: false },
+                    Capabilities {
+                        provider: true,
+                        command_provider: false,
+                    },
                 ));
             }
             Ok(b"not json".to_vec())
@@ -1987,7 +2005,10 @@ mod tests {
             );
         }
         assert!(text.contains("\"outbound_hash\":\"abc123\""), "{text}");
-        assert!(text.contains("\"proxy_url\":\"http://127.0.0.1:0\""), "{text}");
+        assert!(
+            text.contains("\"proxy_url\":\"http://127.0.0.1:0\""),
+            "{text}"
+        );
         h.close();
     }
 
@@ -2023,7 +2044,10 @@ mod tests {
                 author: "a".into(),
                 github_repository: String::new(),
             },
-            capabilities: Capabilities { provider: false, command_provider: true },
+            capabilities: Capabilities {
+                provider: false,
+                command_provider: true,
+            },
             commands: vec![Command {
                 name: "fake-cmd".into(),
                 usage: "fake command".into(),
@@ -2036,9 +2060,8 @@ mod tests {
             error: None,
         })
         .unwrap();
-        clients["/plugins/cmd.so"].set_on_call(Arc::new(move |_method: &str, _req: &[u8]| {
-            Ok(env.clone())
-        }));
+        clients["/plugins/cmd.so"]
+            .set_on_call(Arc::new(move |_method: &str, _req: &[u8]| Ok(env.clone())));
         let mut d = desired("cmd", "/plugins/cmd.so");
         d.type_ = "cmd".to_string();
         let report = h.apply_config(vec![d]);
@@ -2059,9 +2082,10 @@ mod tests {
         h.apply_config(vec![desired("echo", "/plugins/echo.so")]);
         let fake = &clients["/plugins/echo.so"];
         fake.set_panic_methods(&[pluginabi::METHOD_PROVIDER_CALL]);
-        assert!(h
-            .call("echo", pluginabi::METHOD_PROVIDER_CALL, &[], None)
-            .is_err());
+        assert!(
+            h.call("echo", pluginabi::METHOD_PROVIDER_CALL, &[], None)
+                .is_err()
+        );
         let before = fake.call_count(pluginabi::METHOD_PROVIDER_CALL);
         let err = h
             .call("echo", pluginabi::METHOD_PROVIDER_CALL, &[], None)
@@ -2107,8 +2131,14 @@ mod tests {
             r#"{"n":2}"#,
         )]);
         assert_eq!(report.skipped.len(), 1);
-        assert!(report.skipped[0].reason.contains("rollback failed"), "{report:?}");
-        assert!(report.loaded.is_empty(), "fused tag reported Loaded: {report:?}");
+        assert!(
+            report.skipped[0].reason.contains("rollback failed"),
+            "{report:?}"
+        );
+        assert!(
+            report.loaded.is_empty(),
+            "fused tag reported Loaded: {report:?}"
+        );
         let reason = h.fused("echo").expect("must be fused");
         assert!(reason.contains("rollback"), "{reason}");
         assert!(h.loaded("echo").is_none(), "loaded entry must be deleted");
@@ -2138,14 +2168,15 @@ mod tests {
         assert_eq!(report.loaded.len(), 1, "{report:?}");
         assert!(report.skipped.is_empty());
         assert!(h.fused("echo").is_none());
-        assert!(h
-            .call(
+        assert!(
+            h.call(
                 "echo",
                 pluginabi::METHOD_PROVIDER_CALL,
                 br#"{"input":"ping"}"#,
                 None
             )
-            .is_ok());
+            .is_ok()
+        );
         h.close();
     }
 
@@ -2175,14 +2206,15 @@ mod tests {
         );
         let loaded = h.loaded("echo").expect("old image must stay loaded");
         assert_eq!(loaded.path, "/plugins/echo.so");
-        assert!(h
-            .call(
+        assert!(
+            h.call(
                 "echo",
                 pluginabi::METHOD_PROVIDER_CALL,
                 br#"{"input":"ping"}"#,
                 None
             )
-            .is_ok());
+            .is_ok()
+        );
         // The stale fuse entry is still recorded for the
         // new path.
         assert!(h.fused("echo").is_some());
@@ -2218,7 +2250,10 @@ mod tests {
         assert_eq!(report.skipped.len(), 1);
         assert!(report.loaded.is_empty(), "{report:?}");
         let reason = &report.skipped[0].reason;
-        assert!(!reason.contains(['\n', '\r', '\u{1b}']), "kept controls: {reason:?}");
+        assert!(
+            !reason.contains(['\n', '\r', '\u{1b}']),
+            "kept controls: {reason:?}"
+        );
         for r in reason.chars() {
             assert!(
                 !(('\u{80}'..='\u{9f}').contains(&r)),
@@ -2295,7 +2330,10 @@ mod tests {
                     "fake",
                     "0.1.0",
                     "plugintest",
-                    Capabilities { provider: true, command_provider: false },
+                    Capabilities {
+                        provider: true,
+                        command_provider: false,
+                    },
                 ));
             }
             Ok(error_response(
@@ -2332,7 +2370,10 @@ mod tests {
                         author: "plugintest".into(),
                         github_repository: String::new(),
                     },
-                    capabilities: Capabilities { provider: true, command_provider: false },
+                    capabilities: Capabilities {
+                        provider: true,
+                        command_provider: false,
+                    },
                     commands: vec![],
                     cookie_hosts: hosts.clone(),
                 };
@@ -2452,7 +2493,10 @@ mod tests {
         h.apply_config(vec![d1]);
         assert!(!proxy.is_closed(), "shared proxy must survive one detach");
         h.apply_config(vec![]);
-        assert!(proxy.is_closed(), "shared proxy must close after last detach");
+        assert!(
+            proxy.is_closed(),
+            "shared proxy must close after last detach"
+        );
         h.close();
     }
 
@@ -2477,7 +2521,10 @@ mod tests {
             r#"{"n":2}"#,
         )]);
         assert_eq!(report.loaded.len(), 1, "{report:?}");
-        assert!(!proxy.is_closed(), "nil-egress reconfigure must keep the proxy");
+        assert!(
+            !proxy.is_closed(),
+            "nil-egress reconfigure must keep the proxy"
+        );
         assert_eq!(proxy.cookie_hosts(), vec!["other.invalid"]);
         h.close();
     }
@@ -2563,10 +2610,16 @@ mod tests {
                     "fake",
                     "0.1.0",
                     "plugintest",
-                    Capabilities { provider: true, command_provider: false },
+                    Capabilities {
+                        provider: true,
+                        command_provider: false,
+                    },
                 ));
             }
-            Ok(error_response("bad\ncode\u{1b}[31m", "line1\nFORGED-LINE\u{1b}[31m"))
+            Ok(error_response(
+                "bad\ncode\u{1b}[31m",
+                "line1\nFORGED-LINE\u{1b}[31m",
+            ))
         }));
         let report = h.apply_config(vec![desired("echo", "/plugins/echo.so")]);
         assert_eq!(report.loaded.len(), 1, "{report:?}");
@@ -2622,9 +2675,16 @@ mod tests {
             "/plugins/echo.so",
             r#"{"n":2}"#,
         )]);
-        assert!(report.loaded.is_empty(), "report Loaded = {:?}, want empty", report.loaded);
+        assert!(
+            report.loaded.is_empty(),
+            "report Loaded = {:?}, want empty",
+            report.loaded
+        );
         assert_eq!(report.skipped.len(), 1);
-        assert!(report.skipped[0].reason.contains("rolled back"), "{report:?}");
+        assert!(
+            report.skipped[0].reason.contains("rolled back"),
+            "{report:?}"
+        );
         assert!(h.loaded("echo").is_none(), "Loaded() must be false");
         assert!(h.fused("echo").is_some(), "fuse must still be recorded");
         let err = h
@@ -2662,14 +2722,22 @@ mod tests {
             "/plugins/v2.so",
             r#"{"n":2}"#,
         )]);
-        assert!(report.loaded.is_empty(), "report Loaded = {:?}, want empty", report.loaded);
+        assert!(
+            report.loaded.is_empty(),
+            "report Loaded = {:?}, want empty",
+            report.loaded
+        );
         assert_eq!(report.skipped.len(), 1);
         assert!(
-            report.skipped[0].reason.contains("rolled back to previous image"),
+            report.skipped[0]
+                .reason
+                .contains("rolled back to previous image"),
             "{report:?}"
         );
         assert!(h.loaded("echo").is_none());
-        let reason = h.fused("echo").expect("quiesce-panic fuse must be recorded");
+        let reason = h
+            .fused("echo")
+            .expect("quiesce-panic fuse must be recorded");
         assert!(reason.contains("quiesce"), "{reason}");
         let err = h
             .call("echo", pluginabi::METHOD_PROVIDER_CALL, &[], None)
@@ -2722,7 +2790,10 @@ mod tests {
             );
             let _ = call_handle.join();
             assert!(h.fused("echo").is_some(), "iter {iter}: must stay fused");
-            assert!(h.loaded("echo").is_none(), "iter {iter}: Loaded() must be false");
+            assert!(
+                h.loaded("echo").is_none(),
+                "iter {iter}: Loaded() must be false"
+            );
             let before = new_fake.call_count(pluginabi::METHOD_PROVIDER_CALL);
             let err = h
                 .call("echo", pluginabi::METHOD_PROVIDER_CALL, &[], None)
@@ -2829,10 +2900,10 @@ mod tests {
 
     #[test]
     fn is_error_envelope_cases() {
-        assert!(is_error_envelope(
-            error_response("boom", "x").as_slice()
+        assert!(is_error_envelope(error_response("boom", "x").as_slice()));
+        assert!(!is_error_envelope(
+            ok_response(serde_json::json!({})).as_slice()
         ));
-        assert!(!is_error_envelope(ok_response(serde_json::json!({})).as_slice()));
         assert!(!is_error_envelope(b"not json"));
     }
 }
