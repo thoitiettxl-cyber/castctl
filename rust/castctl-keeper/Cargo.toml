@@ -1,0 +1,57 @@
+# Copyright (c) 2026 muse-cli contributors
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GNU General Public License v3.0 only.
+
+[package]
+name = "castctl-keeper"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Session keeper for the castctl Rust port (M6a): expiry detection via the cheap chain, CDP re-export, headless re-login, screencast login and per-profile state, ported from internal/keeper (20 files) + internal/profile keeper config, cookies-file lock and atomic write."
+
+[features]
+# Default: the real CDP client (tokio-tungstenite). The Go default
+# build is tag-off (no chromedp); the Rust default is ON so the
+# workspace gates exercise the real client, and
+# `--no-default-features` gives the Go tag-off behaviour (every
+# CDP entry point refuses with the typed unavailable error).
+default = ["chromedp"]
+chromedp = ["dep:tokio-tungstenite"]
+
+[dependencies]
+castctl-config = { path = "../castctl-config" }
+castctl-transport = { path = "../castctl-transport" }
+# M6a: the cheap chain reuses the gateway's hatch headers,
+# body summary, and timeout constants (no new `WithCookies`
+# variants are added to castctl-gateway — see PORTING §M6a).
+castctl-gateway = { path = "../castctl-gateway" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
+tokio-tungstenite = { workspace = true, optional = true }
+futures-util = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+url = { workspace = true }
+bytes = { workspace = true }
+# M6a: base64 for screencast frames (already in Cargo.lock
+# via boringtun; promoting it adds no new crate).
+base64 = { workspace = true }
+rand = { workspace = true }
+libc = { workspace = true }
+# M6a: SHA-256 for the cookies-file fingerprint in state
+# (`state.go:325-328`). sha2 0.10.9 is already in
+# Cargo.lock (via honk-outbound); promoting it adds no new
+# crate.
+sha2 = { workspace = true }
+# M6a: async fn in the Transport/Checker/Exporter traits
+# (object-safe dyn traits). async-trait 0.1.92 is already
+# in Cargo.lock; promoting it adds no new crate.
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }

@@ -10,6 +10,7 @@ members = [
     "castctl-gateway",
     "castctl-telegram",
     "castctl-rs",
+    "castctl-keeper",
 ]
 resolver = "2"
 
@@ -114,6 +115,14 @@ webpki-roots = "=0.26.11"
 futures-core = "=0.3.34"
 futures-sink = "=0.3.34"
 futures-util = "=0.3.34"
+# M6a: keeper workspace deps. All four are already in
+# Cargo.lock (url via tokio-tungstenite, libc via
+# tokio-tungstenite/hyper, async-trait via a transitive dep,
+# sha2 via honk-outbound); promoting them adds no new crate.
+url = "=2.5.8"
+libc = "=0.2.191"
+async-trait = "=0.1.92"
+sha2 = "=0.10.9"
 
 [patch.crates-io]
 # Replicated verbatim from honk's workspace Cargo.toml at the pinned

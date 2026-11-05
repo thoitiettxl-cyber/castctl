@@ -22,9 +22,11 @@ pub mod fingerprint;
 pub mod gopath;
 pub mod gostr;
 pub mod jsonvalue;
+pub mod keeper;
 pub mod log;
 pub mod oserr;
 pub mod profile;
 pub mod telegram;
 
+pub use blocks::LoginCredential;
 pub use errors::{ConfigError, config_error};

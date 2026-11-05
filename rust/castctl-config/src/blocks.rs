@@ -175,6 +175,24 @@ pub struct LoginCredential {
     pub password: String,
 }
 
+impl LoginCredential {
+    /// Zero the credential in place (Go
+    /// `LoginCredential.Clear`): overwrite both fields
+    /// with zeros, then clear them. Best effort: copies
+    /// already handed to a browser or a subprocess cannot
+    /// be scrubbed from here.
+    pub fn clear(&mut self) {
+        for b in unsafe { self.username.as_bytes_mut() } {
+            *b = 0;
+        }
+        for b in unsafe { self.password.as_bytes_mut() } {
+            *b = 0;
+        }
+        self.username.clear();
+        self.password.clear();
+    }
+}
+
 impl std::fmt::Debug for LoginCredential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Values are secrets: Debug never prints them.
