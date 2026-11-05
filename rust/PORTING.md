@@ -3372,7 +3372,8 @@ fixed.)
   `min(RetryFor, opts.Deadline, ctx deadline)`; Rust has
   no `Deadline` field and always retries for the full
   policy budget.
-- Subscribe/stream not ported in M4a (red-team N11 =
+- Subscribe/stream not ported in M4a — at the M4a base
+  only (red-team N11 =
   technical N3): no `SharedConn::subscribe_raw`, no
   public `Gateway::open_stream`, no `SubscribeJSON`;
   only the constants exist. (True at the M4a base
@@ -6086,9 +6087,9 @@ for no seam benefit.
    this PR in `4782dc0`): it calls private `open` with
    `track=false`, returns only the stream id, and returns
    no receiver — it exists only to deliver `chat.stream`
-   (called from `turn.rs:2159` via `turn.rs:676-686`), not
-   to consume a stream. What Rust still has no public API
-   for is a subscribe: no `SubscribeRaw`
+   (called from `turn.rs:2163` via `turn.rs:680-690`), not
+   to consume a stream. What Rust still lacks is a public
+   subscribe API: no `SubscribeRaw`
    (`internal/gateway/calls.go:261`) / `SubscribeJSON`
    (`calls.go:384`), no `SharedConn` subscribe retry
    (`internal/conn/shared.go:304`, 3 attempts / 250ms
@@ -6110,50 +6111,73 @@ for no seam benefit.
    on an ignored terminal with a `RepliesAfter` proof,
    and does a final history read at finish. Bubble
    updates therefore land at poll cadence, not on
-   push; the final text still comes from the history
-   re-read, as in Go.
+   push — about 2s after live (1s poll + 1s
+   `EDIT_THROTTLE`, `turn.rs:85`), versus about 1s in
+   Go (throttle only); the final text still comes from
+   the history re-read, as in Go.
    M7a (separate branch `feat/rust-m7a-services`) is
    building the subscribe API and will wire this state
-   machine to it; until then the poll stays.
+   machine to it; until then the poll stays. M7a adds
+   its own `open_stream` with the same shape (M7a
+   `gateway.rs:955` at `5868645`); the two must
+   converge (dedupe, not duplicate) on rebase.
    Consequences of polling (mechanism verified from
    source; frequency unmeasured — no live gateway data):
    (a) an event is visible at most ~1s + one
    `chat.history` RTT after it lands
-   (`turn.rs:2296` history(200), `:2392` 1s sleep),
+   (`turn.rs:2303` history(200), `:2398` 1s sleep),
    versus immediately on Go's push
-   (`runner.go:595-613` `onRecord`);
+   (`runner.go:583-613` `onRecord`);
    (b) a held ignored (suspect) terminal is settled
-   late: Go re-proves it every 5s
-   (`DefaultSettlePollInterval`, `runner.go:58`) —
-   per record (`trySettle`, `runner.go:602`), per quiet
-   subscribe iteration (post-batch settle,
-   `runner.go:456-470`), and by ending the stream when
-   the proof is due (`runner.go:652-653`) — while Rust
-   calls `settle` only in the endgame
-   (`turn.rs:2455`, `accept_replayed_failed` `:2439`),
-   never inside the poll loop, so a suspect terminal
-   with no later proven event behind it can sit until
-   the 6h `TURN_TIMEOUT` (`turn.rs:66`);
+   late: Go re-proves it at most once per 5s
+   (`DefaultSettlePollInterval`, `runner.go:58` — a
+   minimum gate, not a schedule: the first proof
+   starts immediately) — per record (`trySettle`,
+   `runner.go:602`), per quiet subscribe iteration
+   (post-batch settle, `runner.go:456-470`), and by
+   ending the stream when the proof is due
+   (`runner.go:652-653`, which requires a proof
+   already read and a known boundary,
+   `runner.go:646-651`) — while Rust calls `settle`
+   only in the endgame (`turn.rs:2460-2461`,
+   `accept_replayed_failed` `:2445`), never inside
+   the poll loop, so a suspect terminal with no later
+   proven event behind it can sit until the 6h
+   `TURN_TIMEOUT` (`turn.rs:70`); and at the deadline
+   the endgame settle is skipped for a Timeout kind
+   (`turn.rs:2460`), so the held terminal is never
+   settled in that path;
    (c) a burst of >200 new events inside one 1s
    interval drops the older events out of the newest-200
    window, so a terminal or an `approvals.*` event can
    be missed outright and the turn runs to the 6h
-   timeout instead of Done / needs_approval;
+   timeout instead of Done / needs_approval (this
+   assumes the gateway returns the newest 200 — see
+   dev 20/21); a missed F8 re-arm event (`task.status`
+   `running`, root-confirmed) never clears the ignored
+   terminal (`wait.rs:991-1000`), and a missed
+   zero-subagent info event leaves `ignored_reason ==
+   "subagents"` set (`wait.rs:987-989`); the final read
+   + `proof_replies` restore only replies, not waiter
+   decisions (`turn.rs:2502-2522`);
    (d) a reply landing in (1s, 2s] after Done can miss
    the final text: Rust does a single re-read after 1s
-   (`turn.rs:2446-2453`) versus Go's 2s lag window
+   (`turn.rs:2450-2458`) versus Go's 2s lag window
    polled every 250ms (`runner.go:40,42`);
    (e) `/stop` takes at most ~1s + one history RTT
-   (the 1s sleep at `turn.rs:2392` is a bare sleep; the
+   (the 1s sleep at `turn.rs:2398` is a bare sleep; the
    stop flag is checked at the top of the next loop,
-   `:2293-2295`);
+   `:2300-2302`);
    (f) there is no 20s watchdog
    (`DefaultRecheckAfter`, `runner.go:25`), no 60s
    safety-net state check (`DefaultCheckEvery`,
    `runner.go:45`), and no state check on a dead
    gateway — a dead gateway fails the turn after 30s
    instead (deviation 17), where Go runs one bounded
-   state check and waits on to the deadline.
+   state check and waits on to the deadline. Polling
+   also loads the gateway at ~1 `chat.history` call per
+   second per turn (`turn.rs:2398`); whether the
+   gateway rate-limits that cadence is unmeasured.
 2. **Runner-owned active set.** `Bot::begin_turn` /
    `end_turn` cannot be called by the runner because
    `Bot::new` requires the services first (circular
@@ -6398,7 +6422,7 @@ for no seam benefit.
 26. **`deliver_final` does not listen to stop (fix
     loop 2, residual; scope corrected in review
     round 3).** Not only media sends — every
-    send/edit in `deliver_final` (`turn.rs:2552`,
+    send/edit in `deliver_final` (`turn.rs:2566`,
     media items and long-reply text segments
     alike) runs to completion once started; see
     deviation 29 for the bounds. Known limitation.
@@ -6421,7 +6445,7 @@ for no seam benefit.
     edit (deviation 22 — that part stands), but
     once the join arm wins, or when `turn_stop` is
     `None`, the trailing `edit_plain` in
-    `finish()` (`turn.rs:1199-1202`) runs
+    `finish()` (`turn.rs:1203-1206`) runs
     unconditionally: no timeout, no stop race — so
     a 429 storm on that final edit ignores /stop
     for up to ~241s (3 attempts × 40s
@@ -6639,7 +6663,7 @@ change in this commit):
   `seqOf` (`events.go:155-…`) shows Go also maps
   a missing/non-numeric seq to 0 and takes the
   min over all events — Rust's `oldest_seq`
-  (`turn.rs:271`) matches that exactly. The
+  (`turn.rs:275`) matches that exactly. The
   presence-reporting Go function is `historySeq`
   (`telegram_turn.go:1020-1035`), used at a
   different call site. Follow-up: the reviewer to

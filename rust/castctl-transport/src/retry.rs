@@ -15,7 +15,7 @@
 //! brief's "number of retries" must therefore be answered in
 //! this form, not as a hard-coded "retry N times". Only
 //! `SubscribeRaw` has a fixed count (3 attempts, 250ms fixed
-//! pause), and it is NOT ported in M3 (no subscriptions yet).
+//! pause), and it is NOT ported in M3 (no streaming subscriptions yet).
 //!
 //! Retryability (Go `retryCall`, `fn()` branch):
 //! - `ConnectionDown` → retry for EVERY method (nothing sent).

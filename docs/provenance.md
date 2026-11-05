@@ -1766,7 +1766,7 @@ artifact's license:
   gateway transport (`internal/gateway/stream.go` `open`,
   stream phases), `DownloadFile`/`Ping`/streaming
   subscriptions (`chat.subscribe` — not the billing
-  `fetchSubscriptionAction`, which was ported in M2),
+  `fetchSubscriptionAction`, which was ported in M4b),
   per-profile DNS router (direct dials use the system
   resolver in M3, not Go's fail-closed `ErrNoResolver`),
   HTTP/2 (`ForceAttemptHTTP2` has no M3 counterpart —
