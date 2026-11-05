@@ -221,6 +221,12 @@ impl EgressProxy {
         let password = random_credential();
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0")
             .map_err(|e| PluginHostError::failed(format!("listen egress proxy: {e}")))?;
+        // `TcpListener::from_std` panics on a blocking
+        // socket (tokio#7172): switch it non-blocking
+        // first.
+        std_listener
+            .set_nonblocking(true)
+            .map_err(|e| PluginHostError::failed(format!("listen egress proxy: {e}")))?;
         let addr = std_listener
             .local_addr()
             .map_err(|e| PluginHostError::failed(format!("listen egress proxy: {e}")))?;

@@ -29,8 +29,12 @@ use castctl_pluginhost::egress::{DialFn, DialStream, EgressProxy, UpstreamTransp
 use castctl_pluginhost::error::PluginHostError;
 use castctl_pluginhost::host::EgressProxyHandle;
 
-/// The last request the fake upstream saw.
+/// The last request the fake upstream saw. `method`
+/// and `body` are recorded for fidelity with Go's
+/// `recordingRoundTripper` (which keeps the whole
+/// request); no test reads them yet.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct RecordedRequest {
     method: http::Method,
     uri: String,
