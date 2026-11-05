@@ -2002,3 +2002,270 @@ trên):
   `OutboundRealityOptions.Enabled bool` (252-256,
   plain bool) — tự kiểm, không còn dựa vào
   technical review cho claim này.
+
+## M3e — TLS/REALITY fingerprint + QUIC insecure opt-in (one measurement round)
+
+Scope: branch `feat/rust-m3e-fingerprint`, base `dev-rust`
+`e89ebe3` (M1/M2/M3 merged). One measurement round only, per the
+Boss brief: pull the Rust TLS/REALITY fingerprint as close to the
+Go one as the boring/honk API allows, and open the QUIC path by
+mapping `tls.insecure` to honk's `quic.tls.skip_cert_verify`.
+No Go code changed, honk sha unchanged (`9e31cc0`), no honk
+fork/vendor/patch. Harness reused from M3 (copied, not edited in
+place): `listener.py` / `parse.py` (JA4-like) /
+`ja4std-m3c.py` (standard JA4, FoxIO) / `run_tls.sh`
+(`$D=/tmp/m3e-parity`, Go scratch clone `/tmp/parity-go`,
+Rust binary `/tmp/castctl-rust-m3e/rust/target/debug/examples/
+parity_dial` — cue-only example, never committed). N=5 per
+(side, row); JA3 is not compared (GREASE + presented order make
+it vary per run); sets are compared GREASE-normalised.
+
+### M3e.1 QUIC: `tls.insecure` → `quic.tls.skip_cert_verify` — CLOSED (dispatch-level for hysteria2/tuic; live-proven for hysteria2 only)
+
+Change (`rust/castctl-transport/src/config.rs`, `dispatch_outbound`):
+the hysteria2 and tuic arms no longer build `quic:
+Default::default()`; they now build `QuicOptions { tls:
+TlsOptions { skip_cert_verify: tls.enabled &&
+tls.skip_cert_verify, sni:
+tls.sni.clone(), ..Default::default() }, ..Default::default() }`
+from the `build_tls` result already computed at `:481`
+(`skip_cert_verify` = `get_bool(tls, "insecure").unwrap_or(false)`,
+plain bool, absent = false, gated on the already-computed
+`tls.enabled` in the two QUIC arms — fix-loop round 1, F1 →
+fail-closed).
+
+Two deliberate decisions, both recorded here:
+
+- `sni` is mapped as well as `skip_cert_verify`. Honk's
+  hysteria2/tuic dial paths take the QUIC TLS server name from
+  `quic.tls.sni`, falling back to the node host
+  (`honk-outbound/src/proxy/hysteria2/mod.rs:606-610`,
+  `proxy/tuic.rs:457-462`; the name feeds `ssl.set_hostname` +
+  `SSL_set1_host` in `quic/boring.rs:626-633`). Leaving `sni`
+  unset would silently drop the configured `tls.server_name`
+  for QUIC while the TCP/TLS arms use it. `sni` is a plain
+  `Option<String>` with no ALPN interaction, so carrying it is
+  safe.
+- `alpn` is deliberately NOT copied. Honk's QUIC client config
+  rejects a non-empty `tls.alpn` on QUIC nodes
+  (`honk-outbound/src/quic.rs:348-353`, "TCP TLS ALPN is
+  unsupported for QUIC; use protocol-specific ALPN"); the
+  protocol ALPN (`h3` / `tuic`) is supplied by the dial path
+  itself. Copying the whole `TlsOptions` would break QUIC dial
+  for any node carrying a `tls.alpn` value.
+- `tls.enabled=false` (or an absent `tls` block) on
+  hysteria2/tuic is NOT turned into a dispatch error in this
+  PR, although Go returns `ErrTLSRequired`
+  (`sing-box@v1.14.4/protocol/hysteria2/outbound.go:50-57`).
+  Honk's QUIC path never reads `tls.enabled` (grep over
+  `honk-outbound/src/proxy/hysteria2/mod.rs`,
+  `proxy/tuic.rs`, `quic.rs` = 0 hits), and no M3 test
+  dispatches hysteria2/tuic at all, so adding the rejection
+  would be new dispatch behaviour smuggled into a
+  fingerprint-measurement PR. Recorded deviation: `skip_cert_verify`
+  is true only when `tls.enabled` is true AND `insecure:true` is
+  explicitly set (fix-loop round 1, F1: the carried value is gated
+  on the already-computed `enabled` in the two QUIC arms); with
+  `tls` absent/disabled, `skip_cert_verify` stays false, so a
+  self-signed/private-CA server still fails verification; only a
+  publicly-trusted cert would dial where Go refuses.
+  A dispatch-level `ErrTLSRequired` equivalent is a separate
+  decision for a later PR.
+
+Test: red → green. New unit test
+`config::tests::quic_insecure_maps_to_skip_cert_verify`
+(hysteria2 insecure true/absent/false/no-tls/alpn +
+enabled:false with insecure:true/absent, tuic true/absent)
+failed before the fix (`config.rs:881`, "insecure:true
+must set skip_cert_verify") and passes after. Fix-loop
+round 1 added the two `enabled:false` cases; the
+`enabled:false + insecure:true` case fails on the pre-fix
+code (RED log `/tmp/m3e-fix1-red.log`, panic
+"enabled:false + insecure:true must stay false") and
+passes after the gate. One test-side
+correction during green: a hysteria2 node with NO `tls` block
+has `quic.tls.sni == None`, not `Some(host)` — `build_tls`
+returns `TlsOptions::default()` when the tls object is absent,
+so no server-name default is applied; honk falls back to the
+node host at dial time, so the behaviour is still correct.
+
+Live proof on cue (sing-box hysteria2 `127.0.0.1:18900`,
+self-signed cert SAN `localhost` + `127.0.0.1`, echo TCP
+`127.0.0.1:18080`; cue-only example `quic_m3e.rs`, NEVER
+committed, dispatches the node JSON and does NOT call
+`node.tls_mut()` — the only variable between cases is the node
+JSON itself), 2026-11-05 05:51 UTC:
+
+- Case 1, `tls.insecure:true` → `dispatched quic tls:
+  skip_cert_verify=true sni=Some("localhost")`, `dial OK`,
+  `echo: read 2 bytes: [111, 107]` (`"ok"`); server log gained
+  `inbound connection from 127.0.0.1:36800`, `inbound
+  connection to 127.0.0.1:18080`, `outbound/direct[direct]:
+  outbound connection to 127.0.0.1:18080`.
+- Case 2, `insecure` absent → `skip_cert_verify=false`,
+  `dial err: connection down: QUIC connect to 127.0.0.1:18900
+  (attempt 3)`; server log gained NO new inbound lines.
+- Case 3, `insecure:false` → same failure as case 2
+  (`attempt 3`, no new server-log inbound).
+
+### M3e.2 TLS/REALITY re-measurement: QUIC change causes zero drift
+
+Baseline (unmodified tree, 20/20 captures ok, 0 fail) and
+re-measurement after the QUIC change (20/20 ok, 0 fail) are
+IDENTICAL on every compared field (JA4-like, JA4 standard,
+GREASE-normalised cipher/extension/group/key-share/version/
+sigalg sets, SNI, ALPN) for all 20 (side, row, run) pairs.
+Record lengths vary run to run (GREASE + key-share randomness)
+and are not compared. The task's "40 captures" is an
+arithmetic slip: the M3 design is 4 (side, row) combos × 5 runs
+= 20 captures; both M3e rounds ran all 20.
+
+| Row | Go JA4-like | Go standard | Rust JA4-like | Rust standard |
+|---|---|---|---|---|
+| TLS (trojan), before | `t13d1616h2_74c5f98c3854_f20eef27beb5` | `t13d1514h2_8daaf6152771_d8a2da3f94cd` | `t13d1814h2_4be38248e33f_2ecda25e495a` | `t13d1712h2_5b57614c22b0_a7c1ad54107f` |
+| TLS (trojan), after | same | same | same | same |
+| REALITY (vless), before | `t13d1616h2_74c5f98c3854_f20eef27beb5` | `t13d1514h2_8daaf6152771_d8a2da3f94cd` | `t13d0412h2_16c83510387f_a735005f8dcf` | `t13d0310h2_55b375c5d22e_6fb7db78d84a` |
+| REALITY (vless), after | same | same | same | same |
+
+Baseline matches the published M3 §1.7 numbers exactly on both
+JA4 columns, so the harness/tree did not drift before the change.
+
+Stable sets (run 1, GREASE shown as `0000`; identical before
+and after):
+
+- TLS Go: ciphers 16 (15+GREASE, no `c009`/`c00a`); ext
+  `0005,000a,000b,000d,0012,0017,001b,0023,002b,002d,0033,44cd,
+  fe0d,ff01` (+SNI/ALPN); groups `{GREASE,11ec,001d,0017,0018}`;
+  key_share `{GREASE,11ec,001d}`; versions `{GREASE,0304,0303}`;
+  sigalgs 8 (`0401,0403,0501,0503,0601,0804,0805,0806`).
+- TLS Rust: ciphers 18 (17+GREASE, extra `c009,c00a`); ext as
+  Go minus `0005,0012`, ALPS at `4469` instead of `44cd`
+  (payload identical `00 03 02 68 32`); groups/key_share/
+  versions/sigalgs identical to Go.
+- REALITY Go: = TLS Go, except groups `{GREASE,001d,0017,0018}`
+  and key_share `{GREASE,001d}` (group `11ec` dropped only).
+- REALITY Rust: ciphers 4 (3+GREASE: `1301,1302,1303`); ext
+  `0005,000a,000d,0012,001b,002b,002d,0033,4469,fe0d` (+SNI/ALPN,
+  missing `000b,0017,0023,ff01` vs Go); groups
+  `{GREASE,11ec,001d}`; key_share `{GREASE,11ec,001d}`;
+  versions `{GREASE,0304}`; sigalgs 9 (Go's 8 + `0807`).
+
+### M3e.3 Deviations — TLS (a)–(d) NOT closed in this round
+
+Verified from the castctl side (this round): a grep over
+`honk-config/src/` for `cipher_list|set_cipher|alps|ocsp|
+signed_cert|sct` returns 0 hits — `TlsOptions` carries only
+`enabled, sni, skip_cert_verify, ech_*, reality_*, pin_sha256,
+alpn` (`honk-config/src/node/protocol.rs:10-22`) — and the
+public honk-outbound TLS API is `set_tls_mode` /
+`set_utls_imitate` (process-global) plus `build_connector(node)`
+/ `build_reality_connector(chrome)` with no per-node
+cipher/extension/ALPS parameters
+(`honk-outbound/src/tls.rs:394-420,571,702`). The fixes below
+all sit inside honk; per the brief they are recorded as
+deviations, NOT patched, NOT forked, NOT vendored. Each needs a
+Boss decision on a honk patch before it can close.
+
+- **(a) Cipher list — deviation, needs honk patch.**
+  Rust TLS sends 18 ciphers (17+GREASE) vs Go 15+GREASE; the
+  extra two are `c009`/`c00a` (ECDHE-ECDSA AES-CBC-SHA).
+  The API exists (`boring` 5.2.0
+  `SslContextBuilder::set_cipher_list`, `src/ssl/mod.rs:1503-1511`)
+  and honk already owns the exact Chrome string without those
+  two suites (`CHROME_CIPHER_LIST`,
+  `honk-outbound/src/tls.rs:143-152`) and already calls it in
+  exactly one place — the REALITY connector (`tls.rs:715`).
+  The plain-TLS path (`build_connector`, `tls.rs:571-...`)
+  never calls it, so BoringSSL falls back to its default
+  `"ALL"` (`deps/boringssl/ssl/ssl_lib.cc:434`,
+  `include/openssl/ssl.h:1712-1714`), which includes the
+  non-deprecated `c009`/`c00a` (`ssl_cipher.cc:170-184`).
+  Fix (honk, +1 line): `builder.set_cipher_list(
+  CHROME_CIPHER_LIST)?;` in `build_connector`. NOT done here.
+- **(b) Extensions `0005`/`0012` — deviation, needs honk patch.**
+  Rust TLS lacks status_request (`0005`) and
+  signed_certificate_timestamp (`0012`); Go has both. There
+  is NO generic "add a ClientHello extension" hook in
+  BoringSSL (grep `add_clienthello_tlsext` in
+  `deps/boringssl/include/openssl/ssl.h` = 0 hits), but the
+  two dedicated APIs exist (`boring` 5.2.0
+  `enable_ocsp_stapling` / `enable_signed_cert_timestamps`,
+  `src/ssl/mod.rs:2053-2062`) and honk already calls both —
+  but only in `build_reality_connector` (`tls.rs:717-718`),
+  which is why the Rust REALITY row DOES carry `0005`+`0012`
+  while the plain-TLS row does not. Fix (honk, +2 lines):
+  the same two calls in `build_connector`. NOT done here.
+- **(c) ALPS codepoint — deviation, needs honk patch.**
+  Rust sends ALPS at `4469`, Go (Chrome 133) at `44cd`;
+  payload is byte-identical (`00 03 02 68 32`). Honk
+  hard-codes the old codepoint: `add_chrome_alps`
+  (`honk-outbound/src/tls.rs:269-282`, doc comment admits
+  "this compatibility choice is not parity") calls
+  `SSL_set_alps_use_new_codepoint(ssl.as_ptr(), 0)`; `0`
+  selects the old codepoint, `1` (also the BoringSSL
+  default) selects the new one
+  (`deps/boringssl/include/openssl/ssl.h:3499-3501`,
+  `include/openssl/tls1.h:118-119`: 17513 = `0x4469`,
+  17613 = `0x44cd`). Fix (honk, 1 argument): change `0` to
+  `1`, or drop the call; `add_chrome_alps` is called from
+  both the plain-TLS path (`tls.rs:201`) and the REALITY
+  path (`reality.rs:125`), so one change fixes both rows.
+  NOT done here.
+- **(d) REALITY profile — deviation, forced by honk's own
+  choices, needs honk patch + live interop probe.** Rust
+  REALITY is TLS1.3-only with 3+GREASE ciphers, versions
+  `{GREASE,0304}`, groups `{GREASE,11ec,001d}`, key_share
+  `{GREASE,11ec,001d}`, 9 sigalgs (extra `0807`); Go REALITY
+  keeps the full TLS profile and only drops group `11ec`
+  (`sing-box@v1.14.4/common/tls/reality_client.go:137-165`:
+  build HelloChrome_133, filter `X25519MLKEM768` out of the
+  supported-curves and key-share extensions, rebuild). The
+  Rust shape is forced by two honk choices, not by BoringSSL
+  and not by the REALITY protocol (Go is the counterexample
+  on the same protocol): (i) `build_reality_connector`
+  sets min TLS 1.3 (`honk-outbound/src/tls.rs:712`,
+  `set_min_proto_version(Some(SslVersion::TLS1_3))`, vs
+  TLS 1.2 in `base_builder`, `tls.rs:476-488`), which makes
+  BoringSSL skip the TLS-1.2 cipher loop entirely
+  (`deps/boringssl/ssl/handshake_client.cc:147`) and drop
+  the TLS-1.2-only extensions `ff01`/`0017`/`0023`/`000b`
+  (`deps/boringssl/ssl/extensions.cc:705,858-862,940,1823`);
+  (ii) `setup_reality_ssl` pins the groups list to
+  `X25519MLKEM768:X25519` with 2 key shares
+  (`honk-outbound/src/reality.rs:296-349`) and a sigalg list
+  that deliberately differs from Chrome (comment in code:
+  "deliberately differs from the Chrome-derived list").
+  Fix (honk): relax min version to TLS 1.2 in
+  `build_reality_connector` + change the groups list toward
+  Go (drop `11ec`, keep `001d,0017,0018`). That is a
+  handshake-behaviour change with interop risk (sealed
+  session_id / resumption / HRR interaction via
+  `reality_fixup_cb`, `reality.rs:255-295`, which seals once
+  and refuses to re-seal), so it needs a live probe against
+  a real REALITY server, not just a wire capture. NOT done
+  here. [NEEDS-MEASUREMENT]
+
+### M3e.4 Gates (cue, toolchain 1.99.1 per `rust/rust-toolchain.toml`)
+
+- `cargo fmt --check` exit 0.
+- `cargo build --workspace` exit 0.
+- `cargo test --workspace` exit 0: 243 passed, 0 failed (242
+  baseline + 1 new `quic_insecure_maps_to_skip_cert_verify`).
+- `cargo clippy --workspace -- -D warnings` exit 0.
+- `git diff --stat` only `rust/castctl-transport/src/
+  config.rs` (+ `rust/PORTING.md` §M3e + `docs/provenance.md`
+  §13 M3e note); no Go change, no honk sha change, no new
+  dependency (NOTICE unchanged — no new dep was added).
+- No new `unsafe`; no `unwrap()` on external input (the new
+  test's `expect` calls guard test fixtures, as in M3).
+- CI Go: not run for this branch in this round (no Go code
+  changed); recorded as not run, not claimed green.
+
+[CHƯA XÁC MINH] (carried from M3c, unchanged): QUIC Initial
+decrypt analysis; resolver order in the NB2/NB4 fallback
+tests. New in M3e: tuic live dial was NOT run (no tuic server
+on cue; the tuic mapping is covered by the dispatch unit test
+only, same code path as hysteria2 but a different honk dial
+path — `proxy/tuic.rs:487`); the REALITY honk-patch interop
+probe (§M3e.3(d)) was not run; Go CI for this branch was not
+run.
