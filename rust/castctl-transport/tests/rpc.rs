@@ -250,17 +250,22 @@ async fn get_body_becomes_query_and_path_params_are_escaped() {
         )
         .await
         .expect("GET call must succeed");
-    let records = server.records.lock().expect("records lock");
-    let record = records.last().expect("one request recorded");
-    assert_eq!(record.method, "GET");
-    assert!(
-        record.path.starts_with("/chat/history?"),
-        "path: {}",
-        record.path
-    );
-    assert!(record.path.contains("limit=10"), "path: {}", record.path);
-    assert!(record.path.contains("flag=True"), "path: {}", record.path);
-    drop(records);
+    // Scope the guard: it must be dropped before the
+    // `FakeServer::start` / `call_json` awaits below —
+    // holding a `MutexGuard` across an await point is a
+    // clippy error (`await_holding_lock`).
+    {
+        let records = server.records.lock().expect("records lock");
+        let record = records.last().expect("one request recorded");
+        assert_eq!(record.method, "GET");
+        assert!(
+            record.path.starts_with("/chat/history?"),
+            "path: {}",
+            record.path
+        );
+        assert!(record.path.contains("limit=10"), "path: {}", record.path);
+        assert!(record.path.contains("flag=True"), "path: {}", record.path);
+    }
 
     let server2 = FakeServer::start(json_responder(200, r#"{"ok":true}"#)).await;
     let client2 = client_for(server2.port);

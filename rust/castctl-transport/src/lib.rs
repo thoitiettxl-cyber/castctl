@@ -16,6 +16,7 @@
 //! | `routes` | Route table from `internal/proto/routes.json` |
 //! | `config` | Sing-box outbound JSON → honk `Node` dispatch + TLS/REALITY |
 //! | `dialer` | `Dialer` trait (the M3d seam), direct + honk dialers |
+//! | `wireguard` | Userspace WireGuard dialer (M3d): boringtun + smoltcp tunnel |
 //! | `http` | HTTP/1.1 client over a dialer (no proxy env, no redirects) |
 //! | `retry` | Retry budget/ladder + safe-to-repeat (from `internal/conn`) |
 //! | `rpc` | `call_json` HTTP-over-outbound RPC client |
@@ -49,11 +50,16 @@ pub mod http;
 pub mod retry;
 pub mod routes;
 pub mod rpc;
+pub mod wireguard;
 
-pub use config::{Dispatch, TlsMode, dispatch_outbound};
+pub use config::{Dispatch, TlsMode, dispatch_endpoint, dispatch_outbound};
 pub use dialer::{DIAL_TIMEOUT, DialTarget, Dialer, DirectDialer, HonkDialer};
 pub use error::{BodySummary, TransportError};
 pub use http::{HttpClient, HttpResponse, MAX_RESPONSE_BODY};
 pub use retry::{RETRY_FOR, RETRY_PAUSE_INITIAL, RETRY_PAUSE_MAX, RetryPolicy};
 pub use routes::{Route, RouteTable, Service};
 pub use rpc::{DEFAULT_REQUEST_TIMEOUT, RpcClient};
+pub use wireguard::{
+    Prefix, WIREGUARD_DATA_OVERHEAD, WIREGUARD_DEFAULT_MTU, WIREGUARD_MIN_DATAGRAM,
+    WireGuardConfig, WireGuardDialer, WireGuardPeerConfig, parse_wireguard_endpoint,
+};

@@ -38,6 +38,7 @@
 //!   `"socks"`).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use honk_config::node::{
     Hysteria2Config, Node, OutboundConfig, QuicOptions, ShadowsocksConfig, Socks5Config,
@@ -45,6 +46,7 @@ use honk_config::node::{
 };
 
 use crate::error::TransportError;
+use crate::wireguard::{WireGuardDialer, parse_wireguard_endpoint};
 
 /// What `dispatch` decided for one outbound object.
 /// No derived Debug: the hand-written impl below prints
@@ -58,6 +60,10 @@ pub enum Dispatch {
     /// fails; castctl has no `block` code of its own, the semantics
     /// come from the outbound type itself).
     Block,
+    /// Userspace WireGuard endpoint (M3d): dial through the
+    /// boringtun + smoltcp tunnel owned by this dialer. Declared
+    /// in `endpoints`, never in `outbounds`.
+    WireGuard(Arc<WireGuardDialer>),
 }
 
 /// TLS mode decision (plan decision D-M3-4). Honk's Chrome-mode is
@@ -470,7 +476,7 @@ pub fn dispatch_outbound(
         "block" => return Ok(Dispatch::Block),
         "wireguard" => {
             return Err(TransportError::Unsupported {
-                message: "wireguard outbound is not an outbound type (declare it in endpoints and reference its tag); userspace WireGuard dialing itself is M3d, not M3".to_string(),
+                message: "wireguard outbound is not an outbound type (declare it in endpoints and reference its tag)".to_string(),
             });
         }
         _ => {}
@@ -670,8 +676,31 @@ impl std::fmt::Debug for Dispatch {
                 .finish_non_exhaustive(),
             Dispatch::Direct => write!(f, "Direct"),
             Dispatch::Block => write!(f, "Block"),
+            Dispatch::WireGuard(d) => f
+                .debug_struct("WireGuard")
+                .field("tag", &d.tag())
+                .field("peer_host", &d.peer_host())
+                .field("peer_port", &d.peer_port())
+                .finish_non_exhaustive(),
         }
     }
+}
+
+/// Dispatch one sing-box WireGuard ENDPOINT object (M3d; Go:
+/// `internal/outbound/manager.go:479-494` `CreateEndpoint`).
+/// The endpoint JSON is flat (sing-box spellings); the DNS servers
+/// for this endpoint's tag come from top-level `"wireguard_dns"`
+/// (Go `internal/profile/dns.go` branch (2)) and are passed in as
+/// plain strings (IP literal or hostname — a hostname bootstraps
+/// once via the system resolver, see `wireguard.rs`).
+/// `system:true` is rejected by `WireGuardDialer::new` with the
+/// Go runtime text verbatim.
+pub fn dispatch_endpoint(
+    endpoint: &serde_json::Value,
+    wireguard_dns: &[String],
+) -> Result<Dispatch, TransportError> {
+    let cfg = parse_wireguard_endpoint(endpoint, wireguard_dns)?;
+    Ok(Dispatch::WireGuard(WireGuardDialer::shared(cfg)?))
 }
 
 #[cfg(test)]
@@ -701,7 +730,20 @@ mod tests {
         )
         .expect_err("wireguard must not dispatch in M3");
         assert!(matches!(err, TransportError::Unsupported { .. }));
-        assert!(format!("{err}").contains("M3d"));
+        assert!(format!("{err}").contains("not an outbound type"));
+        // And the endpoint path accepts the same shape as an
+        // endpoint (tested fully in `wireguard.rs` / the
+        // endpoint tests below). Fake keys: 32 bytes of 0x01 /
+        // 0x02, never real key material.
+        assert!(matches!(
+            dispatch_endpoint(
+                &json(
+                    r#"{"type":"wireguard","tag":"wg1","private_key":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=","address":["10.0.0.2/32"],"peers":[{"public_key":"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=","address":"127.0.0.1","port":51820,"allowed_ips":["0.0.0.0/0"]}]}"#
+                ),
+                &[]
+            ),
+            Ok(Dispatch::WireGuard(_))
+        ));
     }
 
     #[test]
@@ -1046,5 +1088,62 @@ mod tests {
         } else {
             panic!("expected Honk");
         }
+    }
+
+    // (c) system:true rejected via `dispatch_endpoint` with the
+    // exact Go runtime text (`internal/outbound/manager.go:486-488`).
+    // Fake keys: 32 bytes of 0x01 / 0x02, never real key material.
+    #[test]
+    fn fake_dispatch_endpoint_system_true_rejected() {
+        let err = dispatch_endpoint(
+            &json(r#"{"type":"wireguard","tag":"wg-fake","system":true,"private_key":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=","address":["10.0.0.2/32"],"peers":[{"public_key":"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=","address":"127.0.0.1","port":51820,"allowed_ips":["0.0.0.0/0"]}]}"#),
+            &[],
+        )
+        .expect_err("system:true must fail");
+        assert!(matches!(err, TransportError::Unsupported { .. }));
+        assert!(
+            format!("{err}").contains(
+                "outbound: wireguard endpoint with system:true is rejected: userspace WireGuard only"
+            ),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn fake_dispatch_endpoint_wg_quick_spelling_rejected() {
+        let err = dispatch_endpoint(
+            &json(r#"{"type":"wireguard","tag":"wg-fake","private_key":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=","address":["10.0.0.2/32"],"peers":[{"public_key":"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=","address":"127.0.0.1","port":51820,"allowed_ips":["0.0.0.0/0"],"preshared_key":"AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="}]}"#),
+            &[],
+        )
+        .expect_err("wg-quick spelling must fail");
+        assert!(matches!(err, TransportError::Validation { .. }));
+        assert!(format!("{err}").contains("did you mean \"pre_shared_key\""));
+    }
+
+    #[test]
+    fn fake_dispatch_endpoint_debug_never_prints_fake_keys() {
+        let d = dispatch_endpoint(
+            &json(r#"{"type":"wireguard","tag":"wg-fake","private_key":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=","address":["10.0.0.2/32"],"peers":[{"public_key":"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=","address":"127.0.0.1","port":51820,"allowed_ips":["0.0.0.0/0"],"pre_shared_key":"AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="}]}"#),
+            &[],
+        )
+        .expect("fake endpoint dispatches");
+        let text = format!("{d:?}");
+        assert!(!text.contains("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="));
+        assert!(!text.contains("AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="));
+        // The same bytes in other encodings: decimal (a derived
+        // Debug would print them), hex, URL-safe base64.
+        // [0x01; 32] → "1, 1", "01"×32; [0x02; 32] → "2, 2",
+        // "02"×32; [0x03; 32] → "3, 3", "03"×32. (Std and
+        // URL-safe base64 coincide for these bytes — no `+`/`/`
+        // appears — so the hex/decimal forms carry the check
+        // here; the wireguard.rs leak test covers a key whose
+        // URL-safe form genuinely differs, [0xFF; 32].)
+        assert!(!text.contains("1, 1"));
+        assert!(!text.contains("2, 2"));
+        assert!(!text.contains("3, 3"));
+        assert!(!text.contains(&"01".repeat(32)));
+        assert!(!text.contains(&"02".repeat(32)));
+        assert!(!text.contains(&"03".repeat(32)));
+        assert!(text.contains("wg-fake"));
     }
 }

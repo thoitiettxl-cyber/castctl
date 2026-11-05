@@ -117,3 +117,29 @@ above is history and is not rewritten):
   working once verification is skipped, M3c NB9) while
   the Go control succeeded) — parity
   differences are findings, not gate failures.
+
+Linked dependencies (M3d: userspace WireGuard, called, not copied):
+- boringtun 0.7.1, from https://github.com/cloudflare/boringtun,
+  pinned `=0.7.1` in the workspace (Cargo.lock checksum
+  15dd6a8a89cbe8997f37ca0cf035e6ea4d64cd2ecea4aed83ffb9f99f7126939),
+  license BSD-3-Clause. Used by crate `castctl-transport`
+  (`src/wireguard.rs`) as the WireGuard Noise_IKpsk2 engine:
+  handshake, session keys, data-packet AEAD. `default-features
+  = false`, no features: the `device` (TUN device) feature is
+  NOT enabled. No boringtun source code is copied into rust/.
+- smoltcp 0.14.0, from https://github.com/smoltcp-rs/smoltcp,
+  pinned `=0.14.0` in the workspace (Cargo.lock checksum
+  b6f8b28ad56c6e35524a37dd492af5d1a47e31e1a4d175cd12f89c075f01980f),
+  license 0BSD. Used by crate `castctl-transport`
+  (`src/wireguard.rs`) as the userspace TCP/IP stack on the
+  tunnel: `Interface`, `Device`, `SocketSet`, TCP/UDP sockets.
+  No smoltcp source code is copied into rust/.
+- base64 0.22.1, license MIT OR Apache-2.0 (Cargo.lock checksum
+  72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6).
+  Strict Std-base64 decoding of WireGuard key strings.
+  Already in the lock via boringtun; no new crate entered the
+  tree for M3d.
+  Transitive inventory for these three crates (versions +
+  licenses from `cargo metadata` on cue) is in
+  docs/provenance.md §14. The Noise_IKpsk2 key schedule and
+  the TCP state machine are NOT reimplemented in castctl code.

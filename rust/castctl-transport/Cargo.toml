@@ -17,6 +17,12 @@ hyper-util = { workspace = true, features = ["tokio"] }
 http = { workspace = true }
 http-body-util = { workspace = true }
 bytes = { workspace = true }
+# M3d: boringtun (Noise/IK, no `device` feature — no TUN device)
+# + smoltcp (userspace TCP/IP; minimal feature set, see below)
+# + base64 (strict Std decoding of WireGuard key strings).
+boringtun = { workspace = true, default-features = false }
+base64 = { workspace = true }
+smoltcp = { workspace = true, default-features = false, features = ["std", "log", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp", "socket-tcp-cubic", "async"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }
@@ -27,3 +33,10 @@ http = { workspace = true }
 # Test-only: lets integration tests implement Dialer (whose stream
 # type is honk's AsyncReadWrite) with counting wrappers.
 honk-outbound = { workspace = true, features = ["rprx"] }
+# Test-only (M3d): the integration test builds its own in-process
+# boringtun peer + smoltcp server stack, so it needs the same
+# libraries the dialer uses. Already pinned in the workspace and
+# in Cargo.lock; no new dependency is introduced.
+boringtun = { workspace = true, default-features = false }
+base64 = { workspace = true }
+smoltcp = { workspace = true, default-features = false, features = ["std", "log", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp", "socket-tcp-cubic", "async"] }

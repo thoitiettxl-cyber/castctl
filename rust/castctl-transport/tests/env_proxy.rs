@@ -94,6 +94,23 @@ async fn env_proxy_is_ignored() {
     }
     result.expect("request must succeed despite proxy env pointing at a dead proxy");
     assert_eq!(gateway.requests(), 1);
+    // The recorded request proves the gateway — not the proxy —
+    // served the exact request the client sent. (`fs.read` was
+    // called with no params, so the body is empty.) This read
+    // also keeps `RequestRecord`'s fields and `FakeServer`'s
+    // `records` live in this test binary: nothing else here
+    // reads them, and dead fields are a clippy error under
+    // `-D warnings` with `--all-targets`.
+    let record = gateway
+        .records
+        .lock()
+        .expect("records lock")
+        .last()
+        .expect("one request recorded")
+        .clone();
+    assert_eq!(record.method, "POST");
+    assert_eq!(record.path, "/fs/read");
+    assert!(record.body.is_empty());
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
         proxy_count.load(Ordering::SeqCst),

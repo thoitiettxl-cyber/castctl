@@ -2269,3 +2269,682 @@ only, same code path as hysteria2 but a different honk dial
 path — `proxy/tuic.rs:487`); the REALITY honk-patch interop
 probe (§M3e.3(d)) was not run; Go CI for this branch was not
 run.
+
+# Porting notes — Rust M3d (userspace WireGuard)
+
+## M3d.1 Crate map
+
+| File | Contents |
+| `castctl-transport/src/wireguard.rs` | `WireGuardConfig` / `WireGuardPeerConfig` (typed, sing-box spellings), `WireGuardDialer::new` + `impl Dialer`, `WgStream` (`AsyncRead`/`AsyncWrite`), one tokio pump task per dialer (`PumpCore`: boringtun `Tunn` + smoltcp `Interface` + `SocketSet`), hand-rolled DNS codec, `parse_wireguard_endpoint` JSON parser, unit tests |
+| `castctl-transport/src/config.rs` | `dispatch_endpoint(endpoint, wireguard_dns)` + `Dispatch::WireGuard(Arc<WireGuardDialer>)`; the `wireguard` arm in `dispatch_outbound` STAYS an error (message updated to `"not an outbound type"`) |
+| `castctl-transport/src/lib.rs` | `pub mod wireguard` + re-exports |
+| `castctl-transport/tests/wireguard.rs` | REAL data-path tests: in-process boringtun server + smoltcp server stack + TCP echo, loopback only |
+
+Design (one paragraph): a `WireGuardDialer` owns one tunnel
+(one boringtun `Tunn`, one UDP socket to the peer, one smoltcp
+`Interface`). A single tokio pump task owns the `Tunn` /
+`Interface` / sockets; `dial()` and `WgStream` talk to it over
+bounded channels (`CtrlMsg` control, per-stream data channels,
+cap 64). The pump is driven by smoltcp `poll_delay` capped at
+100 ms (never a fixed sleep alone). Backpressure: bytes already
+consumed from smoltcp by `recv_slice` are ACKed — the peer
+will never retransmit them — so a full stream channel parks
+them in a bounded per-socket pending buffer (`pending_rx`,
+plus `pending_eof` / `pending_failed`), retried on every cycle
+before any new `recv_slice`; nothing already consumed is ever
+dropped. (The M3d draft claimed "a full stream channel stops
+the pump draining smoltcp, so … nothing is dropped" — that was
+false: the drain ran first and the buffer was dropped on a
+full channel. Loop 1 fixed it; see §M3d.10.) Half-close: app
+shutdown defers the FIN (`shutdown_pending`) until the send
+queue drains, then smoltcp `close()` (FIN); read stays open;
+peer FIN → `poll_read Ok(0)`, observed promptly (the receive
+loop also probes in CloseWait/FinWait2/TimeWait, where
+`may_recv()` is false on an empty buffer — without the probe
+EOF waited for the 10 s TIME-WAIT close timer). Tunnel
+teardown → `ConnectionError` on the next read/write. Dropping
+a stream aborts its socket and sends an RST (`abort_socket`:
+the socket stays in the set for one more `poll` so smoltcp
+emits the single RST, then it is retired — removing it in the
+same cycle as `abort()` meant the RST was never sent, found
+by the keepalive test, §M3d.10). `WgStream` holds an
+`Arc<Tunnel>`, so dropping the dialer does not kill live
+streams; the pump stops when the last `Arc<Tunnel>` drops (or
+fatally errors, setting `dead` so the next dial rebuilds). One
+overall `dial_timeout` (default 10 s, `DIAL_TIMEOUT`) covers
+the WireGuard handshake + TCP connect inside the tunnel.
+
+## M3d.2 Pins + versions + why
+
+Workspace pins (exact, `rust/Cargo.toml` + `Cargo.lock`):
+
+- boringtun `=0.7.1` (BSD-3-Clause, Cloudflare,
+  <https://github.com/cloudflare/boringtun>, lock checksum
+  `15dd6a8a89cbe8997f37ca0cf035e6ea4d64cd2ecea4aed83ffb9f99f7126939`):
+  userspace WireGuard — the Noise_IKpsk2 handshake, session
+  keys, data packet AEAD. `default-features = false`, no
+  features: the `device` (TUN device, needs root) feature is
+  NOT enabled by castctl-transport (boringtun's `default = []`,
+  `device = ["socket2", "thiserror"]` in its `Cargo.toml:33-38`).
+  The lock lists the `device` feature's optional deps
+  (`ip_network`, `ip_network_table`, `nix`, `parking_lot`)
+  because Cargo.lock records all possible deps; they are not
+  built for this crate's use.
+- smoltcp `=0.14.0` (0BSD,
+  <https://github.com/smoltcp-rs/smoltcp>, lock checksum
+  `b6f8b28ad56c6e35524a37dd492af5d1a47e31e1a4d175cd12f89c075f01980f`):
+  userspace TCP/IP stack. Features: `std, log, medium-ip,
+  proto-ipv4, proto-ipv6, socket-tcp, socket-udp,
+  socket-tcp-cubic, async`. MSRV 1.91 (≤ 1.99.1); builds on
+  1.99.1, so the D10 fallback (`=0.13.1`) was NOT needed.
+- base64 `=0.22.1` (MIT OR Apache-2.0, lock checksum
+  `72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6`):
+  strict Std-base64 decoding of WireGuard key strings
+  (already in the lock via boringtun; no new crate entered
+  the tree for M3d).
+
+No boringtun / smoltcp source code is copied into `rust/`:
+both are called as dependencies only (see `docs/provenance.md`
+§14 for the full license inventory, taken from
+`cargo metadata` on cue).
+
+## M3d.3 Algorithm sources
+
+- The Noise_IKpsk2 key schedule and the TCP state machine are
+  NOT reimplemented: boringtun owns the handshake/session keys
+  and smoltcp owns TCP/IP. This module only maps castctl
+  config onto those two libraries and drives them.
+- Handshake test method (test (a)): boringtun's own two-`Tunn`
+  test shape (its `noise::tests` drive a client and a server
+  `Tunn` against each other the same way). No fixed published
+  vector is usable: handshake bytes contain ephemeral keys and
+  timestamps, so no byte-stable vector exists to assert
+  against; the deterministic-key handshake + data round-trip
+  IS the proof.
+- DNS codec: hand-rolled, RFC 1035 wire format (header + one
+  question, A/AAAA answers). No new dependency, no EDNS, no
+  CNAME chasing (documented limitation, §M3d.6).
+- `Tunn` API facts verified against the 0.7.1 registry source
+  on cue (not from docs.rs renderings):
+  `Tunn::new(StaticSecret, PublicKey, preshared_key:
+  Option<[u8; 32]>, persistent_keepalive: Option<u16>, index:
+  u32, rate_limiter: Option<Arc<RateLimiter>>)` (infallible);
+  `update_timers(&mut self, dst: &mut [u8]) -> TunnResult`;
+  `encapsulate(src, dst)` (queues the packet + returns the
+  initiation when no session exists);
+  `decapsulate(src_addr: Option<IpAddr>, datagram, dst)`
+  (repeat with an empty datagram until `Done`);
+  `format_handshake_initiation(dst, force_resend)`;
+  `time_since_last_handshake() -> Option<Duration>` (`Some`
+  iff a session is established — the D6 signal, so the D6
+  fallback was NOT needed);
+  `TunnResult = Done | Err(WireGuardError) |
+  WriteToNetwork(&mut [u8]) | WriteToTunnelV4(&mut [u8],
+  Ipv4Addr) | WriteToTunnelV6(&mut [u8], Ipv6Addr)`.
+  boringtun enforces NO AllowedIPs in `Tunn` (only in
+  `src/device/`, unused) — the caller enforces them. No
+  `set_preshared_key`: the PSK goes through `Tunn::new` only.
+  Non-zero reserved bytes are rejected on ingress:
+  `parse_incoming_packet` (`noise/mod.rs:128`) reads
+  `packet_type = u32::from_le_bytes(src[0..4])` and matches
+  `(1,148)/(2,92)/(3,64)/(4,_)`; non-zero reserved bytes 1–3
+  make the type match nothing → `Err(InvalidPacket)`.
+- smoltcp 0.14.0 API facts verified the same way:
+  `Interface::new(Config, device, now)`,
+  `poll` / `poll_delay -> Option<Duration>` / `poll_at` /
+  `context()` / `update_ip_addrs` / `routes_mut()`;
+  `Device` trait (`receive`, `transmit`, `capabilities()`);
+  `RxToken::consume(f: FnOnce(&[u8]))`,
+  `TxToken::consume(len, f: FnOnce(&mut [u8]))` (no timestamp,
+  no Result in 0.14); `Medium::Ip`, `HardwareAddress::Ip`;
+  `tcp::Socket::new(rx, tx)` with `SocketBuffer = RingBuffer`;
+  `connect(cx, remote, local)`, `close()` (FIN), `abort()`
+  (RST), `send_slice` / `recv_slice`, `may_send` / `may_recv`,
+  `state()`, `register_recv_waker` / `register_send_waker`
+  (`async` feature); `udp::Socket::new(rx, tx: PacketBuffer)`,
+  `bind`, `send_slice(data, meta)`, `recv_slice`;
+  `SocketSet::new(vec![])`, `add -> SocketHandle`.
+  `IFACE_MAX_ADDR_COUNT = 8` (`lib.rs:157`).
+  Routing: `route()` returns the destination itself when it
+  is in the same network as an interface address, else
+  `routes.lookup` (gateway). For `Medium::Ip`, `dispatch_ip`
+  never calls `lookup_hardware_addr` (Ethernet/IEEE only), so
+  the default-route gateway value is inert — M3d uses the
+  first tunnel address as the gateway placeholder.
+  `has_neighbor` returns true for any routed address under
+  `Medium::Ip`.
+- smoltcp 0.14 behaviours that differ from older docs (each
+  found by a failing test, §M3d.8):
+  `TcpSocket::connect` rejects local port 0
+  (`Err(ConnectError::Unaddressable)`, `socket/tcp.rs:1032-1034`)
+  — it does NOT assign an ephemeral port; the dialer takes
+  ports from a process-wide IANA-range counter
+  (`next_ephemeral_port`, 49152–65535).
+  UDP `bind` rejects port 0 the same way
+  (`BindError::Unaddressable`, `socket/udp.rs:219-221`).
+  `SocketSet::get_mut` returns `&mut T` directly and panics
+  on a stale handle (not `Option`); the pump guards it with
+  its own map membership (a handle in the map always has its
+  socket in the set — inserted together, removed together).
+  tokio 1.48 has NO `PollSender` / `poll_ready` in mpsc
+  (verified in the cue registry source); the write-waker
+  slot is a manual `Arc<Mutex<Option<Waker>>>` instead.
+- Loop-1 facts verified the same way (each found by a
+  failing test, §M3d.8/§M3d.10): boringtun `decapsulate`
+  returns `TunnResult::Err` (not a silent drop) for a
+  garbage/replayed datagram (`Tunn::parse_incoming_packet`,
+  `noise/mod.rs:128`), so the pump drops the datagram and
+  the tunnel survives; `encapsulate` returns `Done` only
+  when a handshake is already in progress
+  (`format_handshake_initiation`, `noise/mod.rs:438-440`) —
+  the packet was queued by `queue_packet` (depth-capped)
+  and is retried, not lost; `update_timers` returns
+  `Err(ConnectionExpired)` only after `set_expired()` +
+  `clear_all()` (`timers.rs:168+`), so the `Tunn` is
+  terminal and the pump must treat it as fatal + rebuild on
+  next dial. smoltcp: `may_recv()` is `Established`, or
+  `FinWait1|FinWait2`, else true only if the receive buffer
+  is non-empty (`socket/tcp.rs:1197-1205`) — so in
+  TimeWait/CloseWait/FinWait2 with an empty buffer a FIN is
+  only observed by calling `recv_slice` (which returns
+  `Finished` when `rx_fin_received`, `recv_error_check`,
+  `:1302-1314`); `CLOSE_DELAY = 10_000 ms` (`:301`),
+  `ACK_DELAY_DEFAULT = 10 ms` (`:300`); `close()` only
+  moves `Established → FinWait1` (`:1084-1105`) — the FIN
+  goes out after the transmit buffer drains, it does not
+  discard it; `abort()` moves the socket to `Closed` and
+  the NEXT `dispatch` sends exactly one RST and then clears
+  the tuple (`:2830-2840`), so the socket must stay in the
+  set for one more `poll` after `abort()` or no RST is ever
+  sent. boringtun timers: `REKEY_TIMEOUT = 5 s`,
+  `KEEPALIVE_TIMEOUT = 10 s` (`timers.rs:22-23`); the
+  non-persistent keepalive fires only when data was
+  received but nothing sent for 10 s; the persistent
+  keepalive fires every `persistent_keepalive` seconds.
+  smoltcp's initial retransmit timeout is ~1 s (observed:
+  the fake server retransmits an un-ACKed echo at ~1009 ms).
+
+## M3d.4 MTU arithmetic
+
+- Tunnel MTU default 1408 (sing-box default,
+  `transport/wireguard/endpoint.go:103-105`: `if options.MTU
+  == 0 { options.MTU = 1408 }`); absent/0 → 1408, >65535 →
+  `Validation`.
+- Inner IP packet ≤ MTU. boringtun adds exactly 32 bytes per
+  data packet: 4 (type) + 4 (sender index) + 8 (counter) + 16
+  (AEAD tag). Outer UDP datagram ≤ MTU + 32, plus outer IP/UDP
+  headers (20 + 8 for IPv4, 40 + 8 for IPv6) on the wire.
+- Every `encapsulate` output buffer is at least 148 bytes
+  (`WIREGUARD_MIN_DATAGRAM`): with no session yet,
+  `encapsulate` formats a 148-byte handshake initiation into
+  the SAME buffer (`noise/mod.rs:264-267`), so a smaller
+  buffer (e.g. a 40-byte SYN + 32 = 72) fails the first packet
+  with `Err` instead of queuing it (found by a failing test,
+  §M3d.8). `format_packet_data` PANICS on a too-small buffer
+  (`session.rs:196-199`), so the 148-byte floor is also the
+  panic guard.
+- smoltcp device MTU = tunnel MTU. smoltcp TCP socket buffers
+  (64 KiB each way) are independent of the MTU; they bound
+  in-flight stream data, not the wire packet size.
+
+## M3d.5 DNS behaviour
+
+- Domain dial targets resolve ONLY through `wireguard_dns`
+  servers, inside the tunnel, over a smoltcp UDP socket:
+  A query first, then AAAA if the A query answers nothing;
+  servers tried in order; one query at a time per dial;
+  timeout = the outer `dial_timeout` (no separate DNS
+  budget); responses matched by transaction id.
+- DNS failover (loop 1): a server that answers with an
+  error (or, for a dead server, the dial timeout) does NOT
+  end the lookup — the next server in `wireguard_dns` is
+  tried. A dead first server still consumes the dial
+  timeout (no per-query timeout; deferred, §M3d.10).
+- Transaction ids start per pump core/tunnel from a seed
+  (wall-clock nanoseconds plus a process-wide counter,
+  never 0) and then increment sequentially, one per query,
+  within that core — so txids ARE sequential within one
+  tunnel and only the starting value differs between
+  cores/tunnels; replies are checked for txid, question
+  name, question type, AND source address (a reply from an
+  address other than the queried server is ignored and the
+  query stays pending). The TC (truncated) bit yields no
+  answer — there is NO TCP fallback for truncated DNS
+  replies (documented limitation).
+- A `wireguard_dns` server entry may carry a `:port`
+  suffix, but the query ALWAYS goes to port 53: Go's
+  `buildWireGuardDNSOptions`
+  (`internal/profile/dns.go:392-412`) hardcodes
+  `server_port: 53` for every server regardless of the
+  entry text, and `validateWireGuardDNS` (`:585+`) accepts
+  any non-empty server string with no port validation — so
+  ignoring the port IS Go parity, not a deviation. A
+  hostname entry with a `:port` suffix has the suffix
+  stripped for the bootstrap lookup only (the query port
+  is still 53).
+- DNS queries are NOT subject to the dial-time allowed-IPs
+  check: the server is config-specified, not a dial target
+  (S5). The bootstrap cache for hostname servers is
+  per-dialer-lifetime; the config is static, so a cached
+  bootstrap never goes stale within a dialer's life (NB3).
+- No `wireguard_dns` → fail-closed `ConnectionDown`, NEVER a
+  system-resolver fallback for the target (Go
+  `internal/outbound/dialer.go:127-145` `ErrNoResolver`).
+- A `wireguard_dns` SERVER given as a hostname bootstraps
+  ONCE via the system resolver (`tokio::net::lookup_host`)
+  and is cached — the Go `bootstrap.go` rule, and the ONLY
+  system-resolver use in the dialer. Dial targets and the
+  peer endpoint never go through it.
+- CNAME is NOT chased: a response carrying only a CNAME (no
+  address record of the requested type) yields no IP.
+- The DNS sockets bind to the tunnel address of the server's
+  family, NOT 0.0.0.0: smoltcp's UDP egress uses the BOUND
+  address as the packet source, so a 0.0.0.0-bound socket
+  emits queries with source 0.0.0.0 and the reply can never
+  come back (found by a failing test, §M3d.8). With no tunnel
+  address of that family, the query fails fast instead of
+  hanging until the dial timeout.
+
+## M3d.6 Deviations from Go (deliberate, with citations)
+
+- Single peer only (parent D1): 0 peers → `Validation`
+  (stricter than Go, which accepts 0 peers at creation and
+  fails only at dial — a dialer with no peer can never dial);
+  2+ peers → `Unsupported` (boringtun `Tunn` is a
+  single-peer state machine).
+- `system:true` → `Unsupported` with the Go RUNTIME text
+  verbatim (`internal/outbound/manager.go:486-488`):
+  `"outbound: wireguard endpoint with system:true is
+  rejected: userspace WireGuard only"`. The parse-layer text
+  (`internal/profile/config.go:296-298`) is a different layer
+  and is not used here.
+- Domain peer endpoint → `ConnectionDown` at first dial,
+  never system-resolved (parent D4; Go probe §M3d.7).
+- Domain dial target with no `wireguard_dns` →
+  `ConnectionDown` (see §M3d.5).
+- Non-zero `reserved` → `Unsupported` (boringtun rejects
+  non-zero reserved on ingress, §M3d.3; patching the outgoing
+  bytes would break the handshake against any boringtun
+  peer, so there is no patch path — the in-process proof the
+  parent asked for cannot exist).
+- wg-quick spellings in endpoint JSON → `Validation` "did you
+  mean …" (parent D2): `preshared_key` → `pre_shared_key`,
+  `persistent_keepalive` →
+  `persistent_keepalive_interval`, a single `endpoint` string
+  → peer `address` + `port`. Never silently ignored.
+- Any non-empty `detour` → `Unsupported` (M3 rejects all
+  detours; `listen_port` + `detour` also conflict in Go).
+- Tunnel `address` required, non-empty (parent D8); a bare IP
+  is rejected — sing-box JSON uses `netip.ParsePrefix` ONLY
+  (the bare-IP → `/32`/`/128` rule exists only in castctl's
+  wg-quick converter,
+  `internal/outbound/wireguard_conf.go:247`, not in the JSON
+  schema).
+- `address` / `allowed_ips` (and any other Listable-typed
+  field) accept a bare string as a one-element list
+  (sing-box `Listable` shorthand), as well as the array form
+  (loop 1 fix: the M3d draft rejected the bare string — that
+  rejection was a deviation, now fixed; §M3d.10).
+- Wrong-typed JSON fields are `Validation` naming the field,
+  never silent defaults (loop 1 fix, §M3d.10): a
+  present-but-wrong-typed `mtu` / `keepalive` /
+  `listen_port` / `system` / `reserved` / `detour`, or a
+  non-string element in a string array, is a hard parse
+  error (Go JSON-unmarshals into a typed struct, so a
+  wrong-typed field is a hard parse error there too).
+- Tunnel address count ≤ 8 (smoltcp `IFACE_MAX_ADDR_COUNT`,
+  §M3d.3); smoltcp silently drops a 9th address, so the
+  dialer rejects longer lists fail-closed.
+- `persistent_keepalive_interval` in seconds, 0 = disabled;
+  passed as `Option<u16>` to `Tunn::new` (`None` when 0).
+- Allowed-IPs checked by the CALLER at dial time (target IP
+  must be inside the union of `allowed_ips`, family-strict,
+  before any packet is sent); boringtun `Tunn` enforces
+  nothing (§M3d.3).
+- Handshake signal: `time_since_last_handshake()` (§M3d.3);
+  the D6 fallback (TCP connect immediately under the overall
+  timeout) was NOT needed.
+- Keys are `[u8; 32]` after strict Std-base64 decode; the
+  `Debug` impls for config/dialer print lengths/presence
+  only, never key bytes; no key material appears in any
+  `Display`/`Debug`/error string (string-catch test).
+- Test keys are self-generated from fixed FAKE seeds only
+  (repeated-byte patterns); test names carry the `fake_`
+  prefix so a grep finds them as test-only.
+
+Loop-1 documented items (not code changes; reasons in the
+plan's triage):
+
+- Ingress allowed-IPs are NOT enforced (T-NB2): boringtun
+  `Tunn` does not enforce them (§M3d.3); a decryptable
+  packet is from the peer by construction, and smoltcp
+  drops packets not addressed to the interface.
+- Two tunnel addresses (NB6): ALL configured addresses go
+  on the smoltcp interface, but the FIRST address of each
+  family wins as the default-route gateway placeholder AND
+  the DNS socket bind address; a second address of the same
+  family is present for inbound matching but never used as
+  an egress/DNS source.
+- No NAT rebinding (NB11): the peer endpoint is fixed at
+  dial time; the pump never re-resolves or re-binds it.
+- The outer UDP socket binds the wildcard address (NB16):
+  normal for a client; the peer address is fixed per dial.
+- No concurrent-stream cap (S12): known limitation — any
+  number of streams may share one dialer/tunnel; no
+  backpressure exists between streams except the shared
+  64 KiB socket buffers and the per-stream 64-message
+  channels.
+- `poll_read` returning `Ok(0)` on an empty buffer is the
+  standard `AsyncRead` shape (T-NB8): it means "no data
+  right now, poll again", not EOF; EOF is signalled only by
+  the `Eof` message. Latent only.
+- A tiny MTU is not rejected (NB5): Go parity — the dial
+  times out instead of failing fast at parse time.
+- A single bad datagram vs a fatal error (S7): covered by
+  the R-B4 fix — a bad datagram is dropped, the tunnel
+  survives; only UDP transport (socket) errors stay fatal.
+  boringtun returns `TunnResult::Err` for a bad datagram
+  (it does not silently drop it), so the drop is the
+  pump's decision, documented here.
+- `encapsulate` returning `Done` (NB22, measured): the
+  packet was queued by boringtun (`queue_packet`,
+  depth-capped) and is retried via `send_queued_packet`
+  on the empty-datagram drain — queued, not lost.
+- Timer expiry (NB23, measured): `update_timers` returns
+  `Err(ConnectionExpired)` only after the session is
+  terminal (`set_expired()` + `clear_all()`), so fatal +
+  rebuild-on-next-dial is correct; there is no
+  recover-in-place path.
+- Unbounded queues (NB12/S13, deferred — see §M3d.10):
+  the per-stream channels are bounded (64 messages); the
+  smoltcp socket buffers are 64 KiB each way; the pump
+  drains at most 4 chunks per cycle per direction. No
+  drop policy for TCP data is invented — a slow reader
+  stalls the sender via the TCP window, it does not lose
+  data.
+
+## M3d.7 D4 Go probe (domain peer endpoint, on cue)
+
+Scratch test `TestZZD4DomainPeerNoDNSRouter` (tags
+`with_utls,with_quic,with_wireguard,with_gvisor`, scratch
+copy at `/tmp/d4-probe`, source
+`~/workspace/tmp/zz_d4_probe_test.go`, never in the repo
+tree): WG endpoint, peer address `"localhost"` (domain), no
+DNS router registered, `m.Start()` then direct
+`m.Endpoint("wg").DialContext(tcp, 10.0.0.1:80)`. **Go
+PANICS** — nil pointer dereference at
+`protocol/wireguard/endpoint.go:117` (`ep.dnsRouter.Lookup`
+on nil router), via `transport/wireguard/endpoint.go:229`
+(`SetEndpointResolverFunc`) ← `device/peer.go:412`
+`resolveEndpoints` ← `SendHandshakeInitiation`. Go does NOT
+bootstrap a domain peer via the system resolver; it fails
+closed (catastrophically). Per parent D4, M3d fails closed
+on a domain peer endpoint — `ConnectionDown` at first dial,
+never system-resolver bootstrap for the peer. DNS *server*
+hostnames (`wireguard_dns` entries) still bootstrap once via
+the system resolver (Go `bootstrap.go` rule, distinct from
+the peer endpoint).
+
+Side observation (out of scope, NOT probed further):
+creating the synthetic `castctl-dialer` outbound as
+`runtime.go:500-515` does (`direct` + `Detour = <endpoint
+tag>`) fails in the probe with ``outbound: create
+direct[via-wg]: `detour` is not supported in direct
+context`` — sing-box `protocol/direct/outbound.go:55`
+rejects any non-empty Detour in a direct outbound. Whether
+the production runtime path hits this was NOT probed; the
+D4 probe bypassed it by dialling the endpoint directly.
+
+## M3d.8 Tests + fail-before proofs
+
+Unit tests (`wireguard.rs`, 40 — the M3d draft said 27, the
+actual count at the draft commit was 28; loop 1 fixed the
+count, T-NB5, and added one more, the S6 hostname-strip
+test, I10) + config tests (3 new) + integration tests
+(`tests/wireguard.rs`, 16): (a) two-`Tunn` handshake + data
+round-trip with deterministic fake keys; (b) REAL data path
+— boringtun server + smoltcp server stack + TCP echo,
+loopback only, small echo + 64 KiB payload across MTU 1408
+intact (max UDP datagram asserted ≤ MTU + 32 + outer
+headers; measured max 1440), keepalive PINNED BY COUNT (keepalive=1 emits ≥2
+datagrams in a 3 s idle window, keepalive=0 emits 0 — the
+old sleep-2.5-s-and-re-dial shape passed with keepalive
+disabled and pinned nothing, so it was replaced), slow
+reader (1 MiB echo with no reads for 500 ms, byte-exact),
+EOF after a full channel (576 KiB + FIN, slow drain of one
+8 KiB read per 150 ms — longer than the pump's 100 ms
+`PUMP_TICK_CAP`, so the EOF `try_send` hits `Full` and
+must be retried via `pending_eof`; a 10 ms drain does not
+pin this, see the I2 entry in the fail-before log — byte-exact, no
+hang), stream survives its dialer being dropped, bad
+datagram (garbage + oversized + spoofed-source) does not
+kill the tunnel, both-sides-same-nonstandard-PSK control,
+DNS failover to the next server, DNS server port ignored
+(Go parity; the hostname-`:port` strip is pinned by a unit
+test, `localhost:5353` → loopback, since the `SocketAddr`
+arm already handled IP:port before loop 1), IPv6 AAAA + TCP echo end-to-end
+(fd00::1 / ::1); (c) `system:true` rejected via `new()` and
+via `dispatch_endpoint` with the exact Go text; (d) one test
+per required field (private_key, peer public_key, peer
+address, peer port, address, allowed_ips) + malformed
+base64 + wrong-length key; (e) PSK present vs absent both
+echo, plus the negative case (client PSK set, server unset)
+FAILS the handshake; (f) no-leakage string-catch test
+(base64, decimal, hex, and URL-safe base64 forms of the
+fake keys); (g) allowed-IPs dial-time rejection before any
+packet (server received zero datagrams). Target: in-tunnel DNS
+(`echo.test` → 10.0.0.1 via the fake in-tunnel DNS
+responder) + domain-target-without-DNS fail-closed +
+domain-peer fail-closed (against a LIVE server on
+`localhost`, so a system-resolving dialer would succeed
+and fail the test).
+
+Fail-before proofs: every test above has one, in
+`~/workspace/tmp/castctl-rust-m3d-notes/writer-fail-before-loop1.log`
+(one revert at a time, that test alone; the M3d draft's log
+`writer-fail-before.log` had cross-batch contamination and
+is superseded for the loop-1 tests).
+Bugs found BY the tests while writing M3d (all fixed in the
+same commit, each with a fail-before entry proving the test
+catches it):
+
+1. `Prefix::contains` shifted `u32::MAX << 32` for a `/0`
+   prefix (debug overflow panic) — `0.0.0.0/0` is the
+   commonest `allowed_ips` value, so this would have panicked
+   on the first real dial.
+2. `encapsulate` buffer too small (§M3d.4, 148-byte floor).
+3. TCP `connect` with local port 0 (§M3d.3).
+4. DNS socket bound to 0.0.0.0 (§M3d.5).
+5. The leakage string-catch initially only covered the base64
+   form; a derived `Debug` (decimal bytes) slipped through —
+   the test now also asserts the decimal forms
+   ("170, 170" / "187, 187" / "34, 34"), plus hex and
+   URL-safe base64 forms (loop 1, NB21).
+6. Deferred shutdown (loop 1, found by the EOF test):
+   `ShutdownWrite` processed while data was still queued
+   called `close()` immediately, and `may_send()` is false
+   after `close()` — so the queued data could never be fed
+   into smoltcp and the stream stalled forever. The pump
+   now defers the FIN (`shutdown_pending`) until the send
+   queue drains (the fake echo server had the same stall
+   shape and was fixed the same way).
+7. EOF tail loss (loop 1, found by the EOF test — a
+   HARNESS bug, not a pump bug): the fake echo server
+   closed its socket as soon as `pending_echo` emptied,
+   while 1240 bytes still sat unread in its smoltcp
+   receive buffer (the close check ran before the receive
+   loop in the same cycle); once `LastAck`/`Closed` the
+   echo arm never runs again, so the tail was lost and the
+   client saw a clean EOF 1240 bytes short. The server now
+   closes only when the receive buffer is also drained
+   (`!sock.may_recv()`); re-measured with the slow drain
+   the loss is 65,488 bytes — ~one full smoltcp receive
+   buffer (I4).
+8. RST never sent on abort (loop 1, found by the keepalive
+   test): `abort()` + immediate removal from the socket
+   set meant smoltcp never emitted the RST; the peer only
+   learned the connection died via its own ~1 s RTO
+   retransmit, and the RST that answered it came from the
+   interface (unknown tuple), not the socket. The pump now
+   retires aborted sockets one poll later
+   (`abort_socket`, `closing_prev`/`closing_next`).
+9. Prompt EOF (loop 1, found by the EOF test): the
+   receive loop only ran while `may_recv()` was true, so
+   after the buffer drained in TimeWait/CloseWait/FinWait2
+   `Finished` was never observed and EOF waited for the
+   10 s TIME-WAIT close timer (the fast-drain EOF test took
+   10.7 s; with the probe 0.67 s). The loop now also probes
+   in those states. (The EOF test now takes ~20 s total
+   because the slow drain — one 8 KiB read per 150 ms —
+   dominates; the EOF itself arrives promptly.)
+
+## M3d.9 Chưa kiểm chứng
+
+- No real WireGuard peer tested outside the process: no
+  sing-box peer, no real server, no interop claim. The
+  in-process boringtun server is the only peer the dialer
+  has ever spoken to.
+- IPv6 is end-to-end tested IN-PROCESS only (AAAA + TCP
+  echo over fd00::1 / ::1, loop 1): no real v6 peer, no
+  v6 DNS server, no v6 traffic outside the process.
+- No real DNS server: only the fake in-process responder
+  (A → 10.0.0.1, AAAA → fd00::1 on v6). No test against a
+  real resolver, no CNAME-chasing need ever exercised.
+- Keepalive is proven by PACKET COUNT (loop 1): ≥2
+  datagrams in a 3 s idle window with keepalive=1, 0 with
+  keepalive=0. The count pins the client pump's
+  boringtun keepalive, not the session lifetime.
+- No concurrent multi-stream test (two streams on one
+  dialer at once); no custom-MTU test (all tests use the
+  1408 default); no performance measurement (throughput /
+  latency / CPU).
+- The D4 side observation (direct + detour rejected by
+  sing-box, §M3d.7) was NOT probed further; whether the
+  production runtime path hits it is unknown.
+- `dial_timeout` is a single overall budget; per-phase
+  budgets (handshake vs DNS vs TCP connect) do not exist.
+  A dead first DNS server consumes the whole dial timeout
+  (no per-query timeout; S10 deferred, §M3d.10).
+
+## M3d.10 Fix loop 1 (2026-11-05, on top of `8f62c68`)
+
+Blocking findings fixed (one line each; file:line is at the
+loop-1 commit, test name + isolated fail-before in
+`writer-fail-before-loop1.log`):
+
+- T1/R-B1 receive backpressure data loss
+  (`wireguard.rs`, `SockState::pending_rx` +
+  `flush_pending`): bytes already consumed by `recv_slice`
+  are held and retried instead of dropped on a full
+  channel. Test: `fake_wireguard_slow_reader_no_data_loss`.
+- T2 EOF loss (`wireguard.rs`, `pending_eof` /
+  `pending_failed`): EOF/Failed are queued and retried
+  until delivered; `eof_sent` is never set before
+  delivery. Test: `fake_wireguard_eof_after_full_channel`.
+- T3 Listable shorthand (`wg_json_str_array`): a bare
+  string is a one-element list for `address` /
+  `allowed_ips`. Test:
+  `fake_listable_single_string_address_and_allowed_ips`.
+- R-B2 dialer drop kills streams (`WgStream` now holds
+  `Arc<Tunnel>`; the pump stops only when the last
+  `Arc<Tunnel>` drops). Test:
+  `fake_wireguard_stream_survives_dialer_drop`.
+- R-B3 wrong-typed JSON (`wg_json_*` now return
+  `Result`): present-but-wrong-typed fields are
+  `Validation` naming the field, never silent defaults.
+  Tests: one per field (`fake_wrong_typed_mtu_is_validation`
+  et al.).
+- R-B4 bad datagram kills tunnel (`handle_udp`): a
+  `TunnResult::Err` from decapsulation drops the datagram;
+  only UDP transport errors stay fatal. Test:
+  `fake_wireguard_bad_datagram_does_not_kill_tunnel`.
+- R-B5 keepalive test redesign: the old sleep-and-re-dial
+  shape passed with keepalive disabled; the test now
+  counts datagrams (≥2 in 3 s idle with keepalive=1, 0
+  with keepalive=0). Test:
+  `fake_wireguard_keepalive_emits_datagrams_during_idle`.
+- R-B6 fail-before hygiene: every fail-before re-run in
+  isolation (one revert at a time, that test alone) in
+  `writer-fail-before-loop1.log`; the draft log's
+  cross-batch contamination does not recur.
+
+Non-blocking fixes in loop 1: S1 (no raw config value in
+`parse_prefix` errors); S2/S3/S4 provenance
+(`ip_network_table` 0.2.0 BSD-2-Clause, not 0.5.0 MIT;
+`portable-atomic` 1.15.0 added; dangling "74 lines in the
+writer's notes" pointer removed — `docs/provenance.md`
+§14); NB19 (base64 key decode no longer trims
+whitespace); NB20 (both-sides-same-nonstandard-PSK
+control test); NB21 (leak catch extended to hex + URL-safe
+base64); S8 (`Prefix::contains` safe for any
+`prefix_len`); NB1/T-NB7 (DNS failover to the next
+server); NB2 (random-ish txid seed + txid/qname/qtype/
+source checks; TC = no TCP fallback); T-NB6
+(ephemeral-port wrap fixed with a CAS transition);
+NB13 (server records max UDP datagram length, asserted ≤
+MTU + overhead; measured max 1440); NB14 (AAAA end-to-end); S6/T-NB4 (Go
+`buildWireGuardDNSOptions` verified to hardcode port 53 —
+port ignored by design, Go parity; the hostname-`:port`
+strip for the bootstrap lookup is pinned by a unit test,
+`localhost:5353` → loopback — the S6 integration test
+uses an IP:port entry, which the `SocketAddr` arm already
+handled before loop 1, so it cannot pin the strip);
+T-NB5 (test counts:
+40 unit + 16 integration, §M3d.8).
+
+Documented in loop 1 (no code change): S5 (DNS queries
+exempt from the dial-time allowed-IPs check); T-NB2
+(ingress allowed-IPs not enforced); NB3 (DNS bootstrap
+cache per-dialer-lifetime); NB6 (first tunnel address per
+family wins for gateway + DNS bind); NB11 (no NAT
+rebinding); NB16 (outer UDP bind wildcard is normal);
+S12 (no concurrent-stream cap); T-NB8 (`poll_read` 0-byte
+shape); NB5 (tiny MTU not rejected, Go parity); S7
+(single bad datagram vs fatal, covered by R-B4); NB22
+(`encapsulate` `Done` = queued, measured); NB23
+(timer-expiry is terminal, measured) — all in §M3d.6.
+
+Deferred (explicit, not in loop 1): S10 (per-query DNS
+timeout beyond the overall `dial_timeout`); NB8
+(RST-after-half-close reported as clean EOF); NB10
+(write-waker sharing — fix only if a lost wakeup is
+demonstrated, otherwise documented as a known limitation);
+NB12/S13 (unbounded queues — bounded in practice by the
+64-message channels and 64 KiB socket buffers; no drop
+policy for TCP data is invented).
+
+Bugs found by the loop-1 tests (fixed in the loop-1
+commit, §M3d.8 items 6–9): the deferred-shutdown stall,
+the EOF tail loss (harness), the never-sent RST on abort,
+and the 10 s delayed EOF (prompt-EOF probe).
+
+## M3d.11 Clippy gate is `--all-targets` (2026-11-05, on top of `16bcbfc`)
+
+The clippy gate from now on is
+`cargo clippy --workspace --all-targets -- -D warnings`.
+The plain `--workspace` form does NOT cover test targets:
+Boss ran the `--all-targets` form and it failed with 10
+errors, all in test-only code, that the plain gate had
+been passing — 2 in `castctl-rs/tests/parity.rs`
+(`chunks_exact` with a constant chunk size, `:131`;
+collapsible `if`, `:427`), 3 in
+`castctl-transport/tests/common/mod.rs` (dead
+`RequestRecord` fields / `FakeServer.records`, and a `loop`
+that never loops), 1 in `castctl-transport/tests/rpc.rs`
+(`MutexGuard` held across an await), and 4 in
+`castctl-transport/tests/wireguard.rs` (redundant
+`.max(0) as u64` on an already-`u64` value, a `loop` +
+`match` that is a `while let`, and a collapsible `if`).
+All 10 were fixed by code (no `#[allow]`): `chunks_exact`
+→ `as_chunks::<64>().0` (same chunks — the padded message
+length is a multiple of 64 by construction); the two
+collapsible `if`s → let-chains; the dead fake-server
+fields are now asserted on in the `env_proxy` test
+(method/path/empty body of the exact request the client
+sent); the dead `loop` removed (every path returned, so
+removing it changes nothing); the guard scoped in a block
+so it drops before the awaits; the redundant `.max(0) as
+u64` dropped; the DNS `loop` + `match` became a `while
+let`. The historical gate transcripts in §M3.7, §M3c and
+§M3e.4 still show the plain form — that is what was
+actually run then, not an error to rewrite.

@@ -1729,6 +1729,92 @@ Boss decision, quoted verbatim (applies to §13 and
 `rust/NOTICE`): artifact Rust là GPL-3.0-only vì link honk;
 binary Go vẫn GPL-3.0-or-later; 2 artifact, 2 license.
 
+## 14. boringtun + smoltcp + base64 — LINKED (Rust artifact only, no copied code)
+
+M3d (userspace WireGuard, crate `castctl-transport`,
+`rust/castctl-transport/src/wireguard.rs`). All three are
+called as dependencies only; no boringtun / smoltcp / base64
+source code is copied into `rust/`. Versions are exact pins
+in `rust/Cargo.toml` + `Cargo.lock` (verified on cue with
+`cargo metadata` / `cargo tree`, 2026-11-05).
+
+- boringtun `=0.7.1` — BSD-3-Clause, Cloudflare,
+  <https://github.com/cloudflare/boringtun>, lock checksum
+  `15dd6a8a89cbe8997f37ca0cf035e6ea4d64cd2ecea4aed83ffb9f99f7126939`.
+  Userspace WireGuard: the Noise_IKpsk2 handshake, session
+  keys, data-packet AEAD. `default-features = false`, no
+  features: the `device` (TUN device, needs root) feature is
+  NOT enabled by castctl-transport (boringtun's `default =
+  []`, `device = ["socket2", "thiserror"]` in its
+  `Cargo.toml:33-38`). The lock lists the `device` feature's
+  optional deps (`ip_network`, `ip_network_table`, `nix`,
+  `parking_lot`) because Cargo.lock records all possible
+  deps; they are not built for this crate's use.
+- smoltcp `=0.14.0` — 0BSD,
+  <https://github.com/smoltcp-rs/smoltcp>, lock checksum
+  `b6f8b28ad56c6e35524a37dd492af5d1a47e31e1a4d175cd12f89c075f01980f`.
+  Userspace TCP/IP stack. Features: `std, log, medium-ip,
+  proto-ipv4, proto-ipv6, socket-tcp, socket-udp,
+  socket-tcp-cubic, async`. MSRV 1.91 (≤ toolchain 1.99.1).
+- base64 `=0.22.1` — MIT OR Apache-2.0, lock checksum
+  `72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6`.
+  Strict Std-base64 decoding of WireGuard key strings
+  (already in the lock via boringtun; no new crate entered
+  the tree for M3d).
+
+Transitive inventory (Cargo.lock entries for these three
+crates, licenses from `cargo metadata` on cue — the
+load-bearing subset is below, the rest are build/proc-macro
+crates; the full list is recoverable from `rust/Cargo.lock`):
+
+- boringtun's closure: aead 0.5.2 (MIT OR Apache-2.0),
+  base64 0.22.1 (MIT OR Apache-2.0), blake2 0.10.6 (MIT OR
+  Apache-2.0), chacha20poly1305 0.10.1 (Apache-2.0 OR MIT),
+  hex (MIT OR Apache-2.0), hmac 0.12.1 (MIT OR Apache-2.0),
+  libc 0.2.191 (MIT OR Apache-2.0), rand_core 0.6.4 (MIT OR
+  Apache-2.0), ring 0.17.14 (Apache-2.0 AND ISC), tracing
+  0.1.44 (MIT), tracing-core 0.1.36 (MIT),
+  tracing-attributes 0.1.31 (MIT), untrusted 0.9.0 (ISC),
+  x25519-dalek 2.0.1 (BSD-3-Clause), curve25519-dalek 4.1.3
+  (BSD-3-Clause), subtle 2.6.1 (BSD-3-Clause), zeroize 1.9.1
+  (Apache-2.0 OR MIT), getrandom 0.2.17 (MIT OR Apache-2.0),
+  cfg-if 1.0.5 (MIT OR Apache-2.0), digest 0.10.7 (MIT OR
+  Apache-2.0), cipher 0.4.4 (MIT OR Apache-2.0), chacha20
+  0.10.2 (MIT OR Apache-2.0), poly1305 0.8.0 (Apache-2.0 OR
+  MIT), portable-atomic 1.15.0 (Apache-2.0 OR MIT),
+  universal-hash 0.5.1 (MIT OR Apache-2.0),
+  generic-array 0.14.7 (MIT), typenum 1.20.1 (MIT OR
+  Apache-2.0), cpufeatures 0.2.17 (MIT OR Apache-2.0),
+  serde_core 1.0.228 (MIT OR Apache-2.0), plus the
+  `device`-feature-only optional deps listed above
+  (ip_network 0.4.1 BSD-2-Clause, ip_network_table
+  0.2.0 BSD-2-Clause, nix 0.31.3 MIT, parking_lot 0.12.5 MIT OR
+  Apache-2.0, parking_lot_core 0.9.12 MIT OR Apache-2.0,
+  lock_api 0.4.14 MIT OR Apache-2.0, scopeguard 1.2.0 MIT OR
+  Apache-2.0, smallvec 1.16.4 MIT OR Apache-2.0).
+- smoltcp's closure: bitflags 1.3.2 (MIT/Apache-2.0),
+  byteorder 1.5.0 (Unlicense OR MIT), cfg-if 1.0.5 (MIT OR
+  Apache-2.0), heapless 0.9.3 (MIT OR Apache-2.0), hash32
+  0.3.1 (MIT OR Apache-2.0), stable_deref_trait 1.2.1 (MIT OR
+  Apache-2.0), log 0.4.35 (MIT OR Apache-2.0), managed 0.8.0
+  (0BSD). (`defmt` is an optional smoltcp dep in the lock;
+  castctl-transport does not enable it.)
+- base64 has no runtime dependencies.
+
+What M3d takes from these crates (behaviour only, no code):
+the Noise_IKpsk2 handshake + session state machine from
+boringtun (`Tunn`, `TunnResult`, `x25519` keys) and the
+TCP/UDP/IP stack from smoltcp (`Interface`, `Device`,
+`SocketSet`, TCP/UDP sockets). The Noise_IKpsk2 key
+schedule and the TCP state machine are NOT reimplemented
+in castctl code. Algorithm provenance and every deviation
+from the Go implementation are recorded in
+`rust/PORTING.md` §M3d, including the D4 Go probe result
+(Go panics on a domain peer endpoint with no DNS router)
+and the explicit "Chưa kiểm chứng" list (no real
+WireGuard peer tested outside the process; IPv6 paths not
+end-to-end tested).
+
 ## Carried items (unresolved at the time of writing)
 
 - npm license check: not run — no license-checking tool present,
