@@ -569,7 +569,8 @@ pub fn dispatch_outbound(
                 disable_mtu_discovery: None,
                 // M3e: map the QUIC-relevant TLS fields from the
                 // `build_tls` result above. Only `skip_cert_verify`
-                // (from `tls.insecure`, plain bool, default false)
+                // (from `tls.insecure`, plain bool, default false,
+                // gated on `tls.enabled` — fix-loop round 1, F1)
                 // and `sni` (from `tls.server_name`, falling back to
                 // the server host) are carried: honk's hysteria2
                 // dial path takes the QUIC TLS server name from
@@ -579,9 +580,12 @@ pub fn dispatch_outbound(
                 // `alpn` is deliberately NOT copied: honk's QUIC
                 // client config rejects a non-empty `tls.alpn`
                 // (`honk-outbound/src/quic.rs:348-353`).
+                // `skip_cert_verify` is gated on `tls.enabled`
+                // (fix-loop round 1, F1): `enabled:false` +
+                // `insecure:true` must stay false.
                 quic: QuicOptions {
                     tls: TlsOptions {
-                        skip_cert_verify: tls.skip_cert_verify,
+                        skip_cert_verify: tls.enabled && tls.skip_cert_verify,
                         sni: tls.sni.clone(),
                         ..Default::default()
                     },
@@ -597,15 +601,16 @@ pub fn dispatch_outbound(
             init_stream_recv_window: None,
             init_conn_recv_window: None,
             // M3e: same mapping as hysteria2 above — only
-            // `skip_cert_verify` + `sni` from `build_tls`; `alpn`
-            // stays empty (honk rejects non-empty `tls.alpn` on
-            // QUIC nodes, `honk-outbound/src/quic.rs:348-353`).
+            // `skip_cert_verify` (gated on `tls.enabled`, F1) +
+            // `sni` from `build_tls`; `alpn` stays empty (honk
+            // rejects non-empty `tls.alpn` on QUIC nodes,
+            // `honk-outbound/src/quic.rs:348-353`).
             // The tuic dial path likewise reads the QUIC TLS
             // server name from `quic.tls.sni`
             // (`honk-outbound/src/proxy/tuic.rs:457-462`).
             quic: QuicOptions {
                 tls: TlsOptions {
-                    skip_cert_verify: tls.skip_cert_verify,
+                    skip_cert_verify: tls.enabled && tls.skip_cert_verify,
                     sni: tls.sni.clone(),
                     ..Default::default()
                 },
@@ -905,6 +910,9 @@ mod tests {
     /// (`honk-outbound/src/quic.rs:348-353`).
     /// RED before the fix: both arms build `quic: Default::default()`,
     /// so `skip_cert_verify` is always false and `sni` always `None`.
+    /// Fix-loop round 1 (F1): `skip_cert_verify` is gated on
+    /// `tls.enabled` in the two QUIC arms — `enabled:false` +
+    /// `insecure:true` stays false.
     #[test]
     fn quic_insecure_maps_to_skip_cert_verify() {
         // hysteria2, insecure:true -> skip true, sni = server_name.
@@ -943,6 +951,35 @@ mod tests {
             None,
         )
         .expect("hysteria2 insecure:false dispatch");
+        if let Dispatch::Honk(node) = d {
+            assert!(!node.tls().expect("hysteria2 has quic tls").skip_cert_verify);
+        } else {
+            panic!("expected Honk");
+        }
+        // hysteria2, enabled:false + insecure:true -> skip stays
+        // false (F1 fix-loop round 1 regression case): the gate is
+        // on `tls.enabled`, so an explicit insecure:true on a
+        // disabled tls block must NOT skip verification. This case
+        // FAILS on the pre-fix code (skip was true there).
+        let d = dispatch_outbound(
+            &json(r#"{"type":"hysteria2","server":"127.0.0.1","server_port":18900,"password":"pw","tls":{"enabled":false,"server_name":"localhost","insecure":true}}"#),
+            None,
+        )
+        .expect("hysteria2 disabled+insecure dispatch");
+        if let Dispatch::Honk(node) = d {
+            assert!(
+                !node.tls().expect("hysteria2 has quic tls").skip_cert_verify,
+                "enabled:false + insecure:true must stay false"
+            );
+        } else {
+            panic!("expected Honk");
+        }
+        // hysteria2, enabled:false + insecure absent -> skip false.
+        let d = dispatch_outbound(
+            &json(r#"{"type":"hysteria2","server":"127.0.0.1","server_port":18900,"password":"pw","tls":{"enabled":false,"server_name":"localhost"}}"#),
+            None,
+        )
+        .expect("hysteria2 disabled dispatch");
         if let Dispatch::Honk(node) = d {
             assert!(!node.tls().expect("hysteria2 has quic tls").skip_cert_verify);
         } else {

@@ -2020,16 +2020,19 @@ parity_dial` — cue-only example, never committed). N=5 per
 (side, row); JA3 is not compared (GREASE + presented order make
 it vary per run); sets are compared GREASE-normalised.
 
-### M3e.1 QUIC: `tls.insecure` → `quic.tls.skip_cert_verify` — CLOSED
+### M3e.1 QUIC: `tls.insecure` → `quic.tls.skip_cert_verify` — CLOSED (dispatch-level for hysteria2/tuic; live-proven for hysteria2 only)
 
 Change (`rust/castctl-transport/src/config.rs`, `dispatch_outbound`):
 the hysteria2 and tuic arms no longer build `quic:
 Default::default()`; they now build `QuicOptions { tls:
-TlsOptions { skip_cert_verify: tls.skip_cert_verify, sni:
+TlsOptions { skip_cert_verify: tls.enabled &&
+tls.skip_cert_verify, sni:
 tls.sni.clone(), ..Default::default() }, ..Default::default() }`
 from the `build_tls` result already computed at `:481`
 (`skip_cert_verify` = `get_bool(tls, "insecure").unwrap_or(false)`,
-plain bool, absent = false → fail-closed).
+plain bool, absent = false, gated on the already-computed
+`tls.enabled` in the two QUIC arms — fix-loop round 1, F1 →
+fail-closed).
 
 Two deliberate decisions, both recorded here:
 
@@ -2059,18 +2062,27 @@ Two deliberate decisions, both recorded here:
   `proxy/tuic.rs`, `quic.rs` = 0 hits), and no M3 test
   dispatches hysteria2/tuic at all, so adding the rejection
   would be new dispatch behaviour smuggled into a
-  fingerprint-measurement PR. Recorded deviation: with
-  `tls` absent/disabled, `skip_cert_verify` stays false, so
-  a self-signed/private-CA server still fails verification;
-  only a publicly-trusted cert would dial where Go refuses.
+  fingerprint-measurement PR. Recorded deviation: `skip_cert_verify`
+  is true only when `tls.enabled` is true AND `insecure:true` is
+  explicitly set (fix-loop round 1, F1: the carried value is gated
+  on the already-computed `enabled` in the two QUIC arms); with
+  `tls` absent/disabled, `skip_cert_verify` stays false, so a
+  self-signed/private-CA server still fails verification; only a
+  publicly-trusted cert would dial where Go refuses.
   A dispatch-level `ErrTLSRequired` equivalent is a separate
   decision for a later PR.
 
 Test: red → green. New unit test
 `config::tests::quic_insecure_maps_to_skip_cert_verify`
-(hysteria2 insecure true/absent/false/no-tls/alpn, tuic true/
-absent) failed before the fix (`config.rs:881`, "insecure:true
-must set skip_cert_verify") and passes after. One test-side
+(hysteria2 insecure true/absent/false/no-tls/alpn +
+enabled:false with insecure:true/absent, tuic true/absent)
+failed before the fix (`config.rs:881`, "insecure:true
+must set skip_cert_verify") and passes after. Fix-loop
+round 1 added the two `enabled:false` cases; the
+`enabled:false + insecure:true` case fails on the pre-fix
+code (RED log `/tmp/m3e-fix1-red.log`, panic
+"enabled:false + insecure:true must stay false") and
+passes after the gate. One test-side
 correction during green: a hysteria2 node with NO `tls` block
 has `quic.tls.sni == None`, not `Some(host)` — `build_tls`
 returns `TlsOptions::default()` when the tls object is absent,

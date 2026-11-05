@@ -1666,7 +1666,7 @@ Deviations + deliberately not taken in M3:
   absent/`false` → `QUIC connect (attempt 3)` fail with
   no server-side inbound. TLS/REALITY JA4 (like +
   standard, N=5) re-measured after the change are
-  byte-identical to the M3e baseline on all 20 captures
+  JA4-identical to the M3e baseline on all 20 captures
   — the QUIC change causes zero TLS drift. The four
   TLS gaps (cipher list `c009`/`c00a`,
   extensions `0005`/`0012`, ALPS `4469` vs `44cd`,
