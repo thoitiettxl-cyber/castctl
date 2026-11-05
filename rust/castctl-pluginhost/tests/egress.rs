@@ -23,7 +23,7 @@ use bytes::Bytes;
 use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use castctl_pluginhost::egress::{DialFn, DialStream, EgressProxy, UpstreamTransport};
 use castctl_pluginhost::error::PluginHostError;
