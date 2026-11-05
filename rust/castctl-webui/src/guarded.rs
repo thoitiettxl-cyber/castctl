@@ -173,27 +173,24 @@ pub enum SaveError {
 
 /// Acquire the inter-process flock on
 /// `baseDir/config.json.lock` (created mode 0600 when
-/// missing). Returns the open file; closing it releases
-/// the flock. The caller must already hold the in-process
-/// mutex. Fails closed on any error (Go fails closed on
-/// non-unix targets too).
+/// missing — the mode is set AT CREATION via
+/// `OpenOptionsExt::mode`, exactly like Go's `OpenFile
+/// (..., 0o600)`: a pre-existing lock file keeps its mode,
+/// it is never chmodded through a possible symlink, and
+/// the file is never truncated). Returns the open file;
+/// closing it releases the flock. The caller must already
+/// hold the in-process mutex. Fails closed on any error
+/// (Go fails closed on non-unix targets too).
 pub fn acquire_flock(base_dir: &Path) -> Result<std::fs::File, SaveError> {
     std::fs::create_dir_all(base_dir).map_err(|_| SaveError::Internal)?;
     let lock_path = base_dir.join("config.json.lock");
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(true)
-        .open(&lock_path)
-        .map_err(|_| SaveError::Internal)?;
     #[cfg(unix)]
-    {
-        // Go's OpenFile passes 0600 on creation; enforce it
-        // here too (the umask would otherwise leave 0644).
-        use std::os::unix::fs::PermissionsExt;
-        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
-    }
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).read(true).write(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    let file = opts.open(&lock_path).map_err(|_| SaveError::Internal)?;
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
@@ -210,36 +207,60 @@ pub fn acquire_flock(base_dir: &Path) -> Result<std::fs::File, SaveError> {
 }
 
 /// `writeFileAtomic`: temp file in the same directory
-/// (mode 0600) + fsync + rename. The temp name carries the
-/// process id so concurrent writers never collide.
+/// (mode 0600 at creation) + fsync + rename. The temp
+/// name carries a random suffix and is created with
+/// `O_EXCL` (`create_new`), like Go's `CreateTemp` — a
+/// pre-planted symlink at a predictable name is never
+/// followed. The temp file is removed on EVERY error path
+/// (Go's `fail()` removes it), never left behind with
+/// partial secret-bearing bytes.
 pub fn write_file_atomic(path: &Path, data: &[u8]) -> Result<String, String> {
     let dir = path
         .parent()
         .ok_or_else(|| "no parent directory".to_string())?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let tmp_name = format!(".config.json.tmp.{}", std::process::id());
-    let tmp_path = dir.join(tmp_name);
-    {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp_path)
-            .map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+    // Random suffix + O_EXCL, retrying on collision (the
+    // birthday bound makes a collision negligible, but the
+    // loop is the correct shape — never fall back to
+    // truncating an existing file).
+    use rand::Rng;
+    let mut tmp_path = PathBuf::new();
+    let mut last_err = String::new();
+    for _ in 0..10 {
+        let suffix: u64 = rand::rng().random();
+        tmp_path = dir.join(format!(".config.json.tmp.{suffix:016x}"));
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            f.set_permissions(std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| e.to_string())?;
+        opts.mode(0o600);
+        match opts.open(&tmp_path) {
+            Ok(f) => {
+                let write_result = {
+                    let mut f = f;
+                    f.write_all(data)
+                        .and_then(|()| f.sync_all())
+                        .map_err(|e| e.to_string())
+                };
+                if let Err(e) = write_result {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(e);
+                }
+                if let Err(e) = std::fs::rename(&tmp_path, path) {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(e.to_string());
+                }
+                return Ok(sha256_hex(data));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_err = e.to_string();
+                continue;
+            }
+            Err(e) => return Err(e.to_string()),
         }
-        f.write_all(data).map_err(|e| e.to_string())?;
-        f.sync_all().map_err(|e| e.to_string())?;
     }
-    std::fs::rename(&tmp_path, path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp_path);
-        e.to_string()
-    })?;
-    Ok(sha256_hex(data))
+    Err(last_err)
 }
 
 /// `UpdateSingleConfig`-style guarded read-modify-write:
@@ -321,6 +342,90 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+
+    #[test]
+    fn atomic_write_never_follows_predictable_symlink() {
+        // F-C2: the old fixed name `.config.json.tmp.<pid>`
+        // with create+truncate followed a pre-planted
+        // symlink and wrote secret-bearing bytes into its
+        // target. The new random name + O_EXCL never
+        // touches that path: plant the symlink and prove
+        // the victim file is untouched after a write.
+        let dir = tmpdir("castctl-webui-guarded-symlink");
+        let victim = dir.join("victim.txt");
+        fs::write(&victim, b"do not touch").unwrap();
+        let link = dir.join(format!(".config.json.tmp.{}", std::process::id()));
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        let path = dir.join("config.json");
+        let _ = write_file_atomic(&path, b"{\"a\": 1}\n").unwrap();
+        assert_eq!(fs::read(&victim).unwrap(), b"do not touch");
+        assert_eq!(fs::read(&path).unwrap(), b"{\"a\": 1}\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_write_removes_temp_on_error() {
+        // F-C7: a failed write leaves no temp file behind.
+        // Rename failure stands in for the write/sync
+        // failure (same remove_file call on every error
+        // path): the target is a directory, so the rename
+        // cannot succeed.
+        let dir = tmpdir("castctl-webui-guarded-tmperr");
+        let path = dir.join("config.json");
+        fs::create_dir_all(&path).unwrap();
+        assert!(write_file_atomic(&path, b"{\"a\": 1}\n").is_err());
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_saves_have_exactly_one_winner() {
+        // F-C9 (threads half): N concurrent saves on the
+        // same dir — exactly one succeeds, the rest get
+        // ConcurrentChange, and the file equals the
+        // winner's bytes. (Cross-process flock exclusion
+        // is not covered here: see PORTING §M6b.9.)
+        let dir = tmpdir("castctl-webui-guarded-conc");
+        let path = dir.join("config.json");
+        fs::write(&path, b"{\"profiles\":{}}\n").unwrap();
+        let n_threads = 8;
+        let dir = std::sync::Arc::new(dir);
+        let handles: Vec<_> = (0..n_threads)
+            .map(|i| {
+                let dir = std::sync::Arc::clone(&dir);
+                std::thread::spawn(move || {
+                    let mut state = ConfigState::load(&dir).unwrap();
+                    let payload = format!("{{\"profiles\":{{}}}}{}", " ".repeat(i));
+                    state.save(payload.as_bytes()).map(|_| payload)
+                })
+            })
+            .collect();
+        let mut winners = 0;
+        let mut losers = 0;
+        let mut winner_bytes: Option<Vec<u8>> = None;
+        for h in handles {
+            match h.join().expect("thread joins") {
+                Ok(payload) => {
+                    winners += 1;
+                    winner_bytes = Some(payload.into_bytes());
+                }
+                Err(SaveError::ConcurrentChange) => losers += 1,
+                Err(SaveError::Internal) => panic!("unexpected internal save error"),
+            }
+        }
+        assert_eq!(winners, 1, "exactly one save must win");
+        assert_eq!(losers, n_threads - 1);
+        assert_eq!(fs::read(&path).unwrap(), winner_bytes.unwrap());
+        let _ = fs::remove_dir_all(&*dir);
     }
 
     #[test]
