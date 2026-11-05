@@ -37,6 +37,7 @@ use castctl_transport::TransportError;
 use castctl_transport::retry::RetryPolicy;
 use castctl_transport::routes::{Route, Service};
 use common::{BadMsg2Server, BlackholeServer, FakeServer, RawUpgradeServer, Reply, canned_json};
+use tokio::net::TcpListener;
 use tokio::time::sleep;
 
 fn routes() -> Arc<castctl_transport::routes::RouteTable> {
@@ -199,6 +200,35 @@ fn ws_url_is_byte_exact_go_url() {
         "ws://h:1/v1/noise?vm_id=vm%2Fx%20y&auth_token=FAKE%2Btok%2Fen%3D1%202%C3%A9",
     );
     assert_eq!(url2.len(), 75, "hand-computed URL length");
+    // Fix loop 1 (technical NIT-1): `% & ? #`, empty token,
+    // unreserved passthrough, empty vm_id. Expected values
+    // computed by hand and cross-checked with Python
+    // `urllib.parse.quote(s, safe="")` — never with the code
+    // under test.
+    let url3 = default_ws_url(true, "hatch.metaaivm.com", "vm-test", "FAKE%tok&x?y#z");
+    assert_url_bytes_eq(
+        &url3,
+        "wss://hatch.metaaivm.com/v1/noise?vm_id=vm-test&auth_token=FAKE%25tok%26x%3Fy%23z",
+    );
+    assert_eq!(url3.len(), 81, "hand-computed URL length");
+    let url4 = default_ws_url(true, "hatch.metaaivm.com", "vm-test", "");
+    assert_url_bytes_eq(
+        &url4,
+        "wss://hatch.metaaivm.com/v1/noise?vm_id=vm-test&auth_token=",
+    );
+    assert_eq!(url4.len(), 59, "hand-computed URL length");
+    let url5 = default_ws_url(true, "hatch.metaaivm.com", "vm-test", "AZaz09_.-~");
+    assert_url_bytes_eq(
+        &url5,
+        "wss://hatch.metaaivm.com/v1/noise?vm_id=vm-test&auth_token=AZaz09_.-~",
+    );
+    assert_eq!(url5.len(), 69, "hand-computed URL length");
+    let url6 = default_ws_url(true, "hatch.metaaivm.com", "", "FAKE+tok/en=1 2é");
+    assert_url_bytes_eq(
+        &url6,
+        "wss://hatch.metaaivm.com/v1/noise?vm_id=&auth_token=FAKE%2Btok%2Fen%3D1%202%C3%A9",
+    );
+    assert_eq!(url6.len(), 81, "hand-computed URL length");
 }
 
 #[tokio::test]
@@ -277,6 +307,54 @@ async fn dial_url_sends_quoted_real_token_and_keeps_it_out_of_errors() {
         "auth_token value must be the quoted token"
     );
     server.stop();
+}
+
+#[tokio::test]
+async fn dial_wss_tls_failure_error_is_fixed_string_without_token() {
+    // Safety N5 (fix loop 1): a `wss://` dial against a
+    // plain-TCP listener fails the TLS handshake; the error
+    // must be the fixed 29-char string, never rustls text,
+    // and must not contain the token (raw or quoted). Fake
+    // token only — never a real one. This pins the mapping
+    // by test instead of by reading `rustls_tls_wrap`.
+    const FAKE_TOKEN: &str = "FAKE+tok/en=1 2é";
+    const QUOTED_TOKEN: &str = "FAKE%2Btok%2Fen%3D1%202%C3%A9";
+    // Plain-TCP listener: answers the first flight with a
+    // plaintext 400, so the rustls ClientHello fails the
+    // handshake fast (no 20 s upgrade timeout).
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf).await;
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await;
+        let _ = stream.shutdown().await;
+    });
+    let url = default_ws_url(true, &addr.to_string(), "vm-test", FAKE_TOKEN);
+    let err = dial_gateway(&url, routes()).await.unwrap_err();
+    let message = match &err {
+        TransportError::ConnectionError { message } => message.clone(),
+        other => panic!("want ConnectionError, got {other:?}"),
+    };
+    assert_eq!(message, "gateway: websocket TLS failed");
+    assert_eq!(message.len(), 29, "TLS failure is the fixed 29-char string");
+    let err_text = format!("{err} {err:?}");
+    assert!(
+        !err_text.contains(FAKE_TOKEN),
+        "TLS error must not leak the raw token"
+    );
+    assert!(
+        !err_text.contains(QUOTED_TOKEN),
+        "TLS error must not leak the quoted token"
+    );
 }
 
 #[tokio::test]

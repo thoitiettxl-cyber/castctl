@@ -139,7 +139,11 @@ pub(crate) async fn request_url(
     timeout: Duration,
 ) -> Result<castctl_transport::HttpResponse, TransportError> {
     let (secure, target, path) = split_url(url).ok_or_else(|| TransportError::Validation {
-        message: format!("invalid URL: {url}"),
+        // Fixed string on purpose (fix loop 1, safety N2):
+        // the CLI prints the `Validation` message verbatim,
+        // and a URL must never be echoed into an error —
+        // a future caller could pass a URL carrying a token.
+        message: "invalid URL".to_string(),
     })?;
     if secure {
         client
@@ -427,6 +431,30 @@ mod tests {
         assert_eq!(path, "/");
         assert!(split_url("ftp://x/y").is_none());
         assert!(split_url("not a url").is_none());
+    }
+
+    #[tokio::test]
+    async fn request_url_invalid_url_error_is_fixed_string() {
+        // Safety N2 (fix loop 1): `request_url` must not echo
+        // the URL into the `Validation` error — the CLI prints
+        // that message verbatim (`network.rs`
+        // `classify_error`), and a future caller could pass a
+        // URL carrying a token. The error is a fixed string.
+        // The client is never used: `split_url` fails first.
+        let client = HttpClient::new(std::sync::Arc::new(castctl_transport::DirectDialer::new()));
+        let url = "not a url?auth_token=FAKE-TOKEN-123";
+        let err = request_url(&client, Method::GET, url, &[], None, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        let message = match &err {
+            TransportError::Validation { message } => message,
+            other => panic!("want Validation, got {other:?}"),
+        };
+        assert_eq!(message, "invalid URL");
+        assert!(
+            !message.contains("FAKE-TOKEN-123"),
+            "error must not echo the URL"
+        );
     }
 
     #[test]

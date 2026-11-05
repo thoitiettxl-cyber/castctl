@@ -96,7 +96,14 @@ pub const WS_UPGRADE_TIMEOUT: Duration = Duration::from_secs(20);
 /// "3 verbs, 4 args, literal token" reading was wrong).
 /// The returned string carries the token, so it must never
 /// be logged — the dial error paths return fixed strings
-/// only, and `redact` strips `auth_token=...` from logs.
+/// only, and the workspace has no log macros (verified by
+/// grep: 0 `log::`/`tracing::`/`eprintln!`/`println!` in
+/// gateway/transport/cli `src`, outside the
+/// `valid_log_level` import in `run.rs:34`). `redact` is
+/// NOT wired in: `redact_string` has 0 callers and no crate
+/// depends on `castctl-log-redact` — the fixed-string
+/// errors are the protection, not redaction (see PORTING
+/// §M4c.7, fix loop 1 safety N1).
 pub fn default_ws_url(secure: bool, host: &str, vm_id: &str, hatch_token: &str) -> String {
     let scheme = if secure { "wss" } else { "ws" };
     format!(
