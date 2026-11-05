@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "54-bad-config",
+  "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
+  "argv": [
+    "--config",
+    "/nonexistent"
+  ],
+  "env": {
+    "HOME": "/tmp/castctl-golden-5jdljpf0/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-5jdljpf0/xdg",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "PATH": "/usr/bin:/bin"
+  },
+  "cwd": "/tmp/castctl-golden-5jdljpf0/work",
+  "stdin": "empty",
+  "timeout_seconds": 10,
+  "stdout": "",
+  "stderr": "castctl: --config path \"/nonexistent\" must name a config.json file\n",
+  "exit_code": 2
+}

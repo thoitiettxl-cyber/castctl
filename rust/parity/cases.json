@@ -1,0 +1,409 @@
+[
+  {
+    "id": "01-chat-help",
+    "argv": [
+      "chat",
+      "--help"
+    ]
+  },
+  {
+    "id": "02-status-help",
+    "argv": [
+      "status",
+      "--help"
+    ]
+  },
+  {
+    "id": "03-usage-help",
+    "argv": [
+      "usage",
+      "--help"
+    ]
+  },
+  {
+    "id": "04-invite-help",
+    "argv": [
+      "invite",
+      "--help"
+    ]
+  },
+  {
+    "id": "05-redeem-help",
+    "argv": [
+      "redeem",
+      "--help"
+    ]
+  },
+  {
+    "id": "06-threads-help",
+    "argv": [
+      "threads",
+      "--help"
+    ]
+  },
+  {
+    "id": "07-history-help",
+    "argv": [
+      "history",
+      "--help"
+    ]
+  },
+  {
+    "id": "08-send-help",
+    "argv": [
+      "send",
+      "--help"
+    ]
+  },
+  {
+    "id": "09-wait-help",
+    "argv": [
+      "wait",
+      "--help"
+    ]
+  },
+  {
+    "id": "10-approvals-help",
+    "argv": [
+      "approvals",
+      "--help"
+    ]
+  },
+  {
+    "id": "11-approve-help",
+    "argv": [
+      "approve",
+      "--help"
+    ]
+  },
+  {
+    "id": "12-auto-approve-help",
+    "argv": [
+      "auto-approve",
+      "--help"
+    ]
+  },
+  {
+    "id": "13-deny-help",
+    "argv": [
+      "deny",
+      "--help"
+    ]
+  },
+  {
+    "id": "14-files-help",
+    "argv": [
+      "files",
+      "--help"
+    ]
+  },
+  {
+    "id": "15-download-help",
+    "argv": [
+      "download",
+      "--help"
+    ]
+  },
+  {
+    "id": "16-watch-help",
+    "argv": [
+      "watch",
+      "--help"
+    ]
+  },
+  {
+    "id": "17-feed-help",
+    "argv": [
+      "feed",
+      "--help"
+    ]
+  },
+  {
+    "id": "18-feed-status-help",
+    "argv": [
+      "feed-status",
+      "--help"
+    ]
+  },
+  {
+    "id": "19-feed-react-help",
+    "argv": [
+      "feed-react",
+      "--help"
+    ]
+  },
+  {
+    "id": "20-feed-prompt-help",
+    "argv": [
+      "feed-prompt",
+      "--help"
+    ]
+  },
+  {
+    "id": "21-goals-help",
+    "argv": [
+      "goals",
+      "--help"
+    ]
+  },
+  {
+    "id": "22-goal-help",
+    "argv": [
+      "goal",
+      "--help"
+    ]
+  },
+  {
+    "id": "23-ideas-help",
+    "argv": [
+      "ideas",
+      "--help"
+    ]
+  },
+  {
+    "id": "24-idea-help",
+    "argv": [
+      "idea",
+      "--help"
+    ]
+  },
+  {
+    "id": "25-idea-exec-help",
+    "argv": [
+      "idea-exec",
+      "--help"
+    ]
+  },
+  {
+    "id": "26-unread-help",
+    "argv": [
+      "unread",
+      "--help"
+    ]
+  },
+  {
+    "id": "27-seen-help",
+    "argv": [
+      "seen",
+      "--help"
+    ]
+  },
+  {
+    "id": "28-session-start-help",
+    "argv": [
+      "session-start",
+      "--help"
+    ]
+  },
+  {
+    "id": "29-session-rename-help",
+    "argv": [
+      "session-rename",
+      "--help"
+    ]
+  },
+  {
+    "id": "30-session-pin-help",
+    "argv": [
+      "session-pin",
+      "--help"
+    ]
+  },
+  {
+    "id": "31-session-unpin-help",
+    "argv": [
+      "session-unpin",
+      "--help"
+    ]
+  },
+  {
+    "id": "32-session-archive-help",
+    "argv": [
+      "session-archive",
+      "--help"
+    ]
+  },
+  {
+    "id": "33-session-unarchive-help",
+    "argv": [
+      "session-unarchive",
+      "--help"
+    ]
+  },
+  {
+    "id": "34-session-delete-help",
+    "argv": [
+      "session-delete",
+      "--help"
+    ]
+  },
+  {
+    "id": "35-stop-help",
+    "argv": [
+      "stop",
+      "--help"
+    ]
+  },
+  {
+    "id": "36-wake-help",
+    "argv": [
+      "wake",
+      "--help"
+    ]
+  },
+  {
+    "id": "37-raw-help",
+    "argv": [
+      "raw",
+      "--help"
+    ]
+  },
+  {
+    "id": "38-fs-help",
+    "argv": [
+      "fs",
+      "--help"
+    ]
+  },
+  {
+    "id": "39-auth-help",
+    "argv": [
+      "auth",
+      "--help"
+    ]
+  },
+  {
+    "id": "40-profile-help",
+    "argv": [
+      "profile",
+      "--help"
+    ]
+  },
+  {
+    "id": "41-config-help",
+    "argv": [
+      "config",
+      "--help"
+    ]
+  },
+  {
+    "id": "42-telegram-help",
+    "argv": [
+      "telegram",
+      "--help"
+    ]
+  },
+  {
+    "id": "43-keeper-help",
+    "argv": [
+      "keeper",
+      "--help"
+    ]
+  },
+  {
+    "id": "44-update-help",
+    "argv": [
+      "update",
+      "--help"
+    ]
+  },
+  {
+    "id": "45-webui-help",
+    "argv": [
+      "webui",
+      "--help"
+    ]
+  },
+  {
+    "id": "46-plugin-help",
+    "argv": [
+      "plugin",
+      "--help"
+    ]
+  },
+  {
+    "id": "47-version",
+    "argv": [
+      "--version"
+    ]
+  },
+  {
+    "id": "48-help",
+    "argv": [
+      "--help"
+    ]
+  },
+  {
+    "id": "49-bogus",
+    "argv": [
+      "bogus"
+    ]
+  },
+  {
+    "id": "50-missing-redeem",
+    "argv": [
+      "redeem"
+    ]
+  },
+  {
+    "id": "51-missing-goal",
+    "argv": [
+      "goal"
+    ]
+  },
+  {
+    "id": "52-missing-seen",
+    "argv": [
+      "seen"
+    ]
+  },
+  {
+    "id": "53-bad-log-level",
+    "argv": [
+      "--log-level",
+      "xyz"
+    ]
+  },
+  {
+    "id": "54-bad-config",
+    "argv": [
+      "--config",
+      "/nonexistent"
+    ]
+  },
+  {
+    "id": "55-bad-json-config",
+    "argv": [
+      "status"
+    ],
+    "fixture": "bad-config.json"
+  },
+  {
+    "id": "56-decoder-truncated-array",
+    "argv": [
+      "status"
+    ],
+    "fixture": "decoder-truncated-array.json"
+  },
+  {
+    "id": "57-decoder-bad-exponent",
+    "argv": [
+      "status"
+    ],
+    "fixture": "decoder-bad-exponent.json"
+  },
+  {
+    "id": "58-decoder-bad-escape",
+    "argv": [
+      "status"
+    ],
+    "fixture": "decoder-bad-escape.json"
+  },
+  {
+    "id": "59-decoder-bad-unicode",
+    "argv": [
+      "status"
+    ],
+    "fixture": "decoder-bad-unicode.json"
+  }
+]

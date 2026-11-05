@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "09-wait-help",
+  "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
+  "argv": [
+    "wait",
+    "--help"
+  ],
+  "env": {
+    "HOME": "/tmp/castctl-golden-iy2jh5l0/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-iy2jh5l0/xdg",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "PATH": "/usr/bin:/bin"
+  },
+  "cwd": "/tmp/castctl-golden-iy2jh5l0/work",
+  "stdin": "empty",
+  "timeout_seconds": 10,
+  "stdout": "usage: castctl wait [--thread ID] [--after-seq N] [--timeout SECONDS] [--json] [--require-running] [--auto-approve|--no-auto-approve] [--auto-allow-once|--no-auto-allow-once]\n\nBlock until the agent's turn ends. Exit 0 turn done, 2 failed,\n4 needs a human (a question or a pending approval), 124 timeout.\n\noptions:\n  --thread ID    side chat session id (default: the main chat).\n  --after-seq N  only replies after this seq (default: read the\n                 boundary from history).\n  --timeout SECONDS\n                 give up after this long (default 600).\n  --json         print the result as JSON.\n  --require-running\n                 ignore an already-finished status until a new run\n                 starts (accepted; no live effect in this port).\n  --auto-approve approve pending approvals with allow_always and\n                 keep waiting (per-call override of the profile\n                 setting and MUSE_AUTO_APPROVE).\n  --no-auto-approve\n                 stop with exit 4 on approvals even if auto-approve\n                 is on.\n  --auto-allow-once\n                 when auto-approve is on, approve approvals with no\n                 forever option with allow_once and keep waiting.\n  --no-auto-allow-once\n                 leave approvals with no forever option for a human.\n",
+  "stderr": "",
+  "exit_code": 0
+}

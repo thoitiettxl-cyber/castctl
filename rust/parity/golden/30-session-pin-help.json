@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "30-session-pin-help",
+  "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
+  "argv": [
+    "session-pin",
+    "--help"
+  ],
+  "env": {
+    "HOME": "/tmp/castctl-golden-jtewhyj4/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-jtewhyj4/xdg",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "PATH": "/usr/bin:/bin"
+  },
+  "cwd": "/tmp/castctl-golden-jtewhyj4/work",
+  "stdin": "empty",
+  "timeout_seconds": 10,
+  "stdout": "usage: castctl session-rename ID TITLE\n       castctl session-pin ID\n       castctl session-unpin ID\n       castctl session-archive ID\n       castctl session-unarchive ID\n       castctl session-delete ID\n\nRename, pin, unpin, archive, unarchive or delete a session. Prints\nthe result as JSON. No options.\n",
+  "stderr": "",
+  "exit_code": 0
+}

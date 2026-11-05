@@ -12,10 +12,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "castctl-cli"
+version = "0.1.0"
+dependencies = [
+ "castctl-config",
+]
+
+[[package]]
+name = "castctl-config"
+version = "0.1.0"
+
+[[package]]
 name = "castctl-log-redact"
 version = "0.1.0"
 dependencies = [
  "regex",
+]
+
+[[package]]
+name = "castctl-rs"
+version = "0.1.0"
+dependencies = [
+ "castctl-cli",
+ "castctl-config",
 ]
 
 [[package]]

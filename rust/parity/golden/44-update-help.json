@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "44-update-help",
+  "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
+  "argv": [
+    "update",
+    "--help"
+  ],
+  "env": {
+    "HOME": "/tmp/castctl-golden-9_4u2n90/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-9_4u2n90/xdg",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "PATH": "/usr/bin:/bin"
+  },
+  "cwd": "/tmp/castctl-golden-9_4u2n90/work",
+  "stdin": "empty",
+  "timeout_seconds": 10,
+  "stdout": "usage: castctl update [--dry-run] [--version TAG] [--allow-downgrade] [--allow-prerelease]\n\nSelf-update castctl from the latest stable GitHub release.\n\nThe release asset matching this platform and build flavour is\ndownloaded, its sha256 is verified against the release\nchecksums.txt BEFORE any replace, the extracted binary is\nvalidated (ELF/arch sanity and an unsandboxed --version run of\nthe checksummed candidate), and only then the running binary\nis replaced atomically (same-directory rename, the resolved\ntarget's Perm() (0777 rwx) bits preserved, setuid/setgid/sticky\nbits dropped, fsync of file and directory). The resolved target\nis followed through symlinks, including out of the directory.\nEvery failure before the rename leaves the old binary intact\nand partial downloads are deleted; a directory-sync failure\nafter a successful rename returns an error with the new binary\nin place (durability unproven). There is no signature\nverification: GitHub releases carry no signatures, so the\nchecksums prove only that the bytes match what the release\npublished, over HTTPS.\n\nThe running build must be stamped (release -X flags): unstamped\ndev builds refuse with \"cannot determine running version\" in\nevery mode. The build flavour (glibc vs no-plugin) is read from\nthe build info CGO_ENABLED setting; an unknown flavour refuses.\nLinux only: no release assets exist for other platforms.\n\n  --dry-run          Report what would be downloaded, verified\n                     and replaced, without writing anything.\n                     Dry-run takes no lock and skips the exec\n                     check, the chmod, and the re-hash.\n  --version TAG      Update to a specific release tag (with or\n                     without a leading v). Must name a stable\n                     release unless --allow-prerelease is given.\n  --allow-downgrade  Allow installing an older version than the\n                     running one. Refused by default.\n  --allow-prerelease\n                     Allow a pre-release target. Refused by\n                     default.\n\nExit codes: 0 success, already-latest no-op, or dry-run report;\n2 = usage and policy refusals (no download, no replace; release\nmetadata may have been fetched first);\n1 operational failures (network, checksums, validation, replace).\n",
+  "stderr": "",
+  "exit_code": 0
+}

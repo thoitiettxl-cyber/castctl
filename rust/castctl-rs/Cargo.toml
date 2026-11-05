@@ -1,0 +1,10 @@
+[package]
+name = "castctl-rs"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "castctl Rust port binary (M2: offline CLI surface + not-ported-yet stubs)"
+
+[dependencies]
+castctl-cli = { path = "../castctl-cli" }
+castctl-config = { path = "../castctl-config" }

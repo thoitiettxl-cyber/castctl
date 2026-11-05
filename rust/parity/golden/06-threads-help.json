@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "06-threads-help",
+  "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
+  "argv": [
+    "threads",
+    "--help"
+  ],
+  "env": {
+    "HOME": "/tmp/castctl-golden-yupb79ga/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-yupb79ga/xdg",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "PATH": "/usr/bin:/bin"
+  },
+  "cwd": "/tmp/castctl-golden-yupb79ga/work",
+  "stdin": "empty",
+  "timeout_seconds": 10,
+  "stdout": "usage: castctl threads [--all]\n\nList chats and side chats as JSON rows.\n\noptions:\n  --all     include archived sessions.\n",
+  "stderr": "",
+  "exit_code": 0
+}

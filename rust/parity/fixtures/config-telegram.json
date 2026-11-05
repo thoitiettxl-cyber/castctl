@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "default": {}
+  },
+  "telegram": {
+    "profile": "default",
+    "token": "123456789:ABCDEFGHIJKLMNOPQRST",
+    "allowed_user_ids": [111],
+    "auto_approve": false,
+    "auto_allow_once": false
+  }
+}

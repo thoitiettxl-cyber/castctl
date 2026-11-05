@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "43-keeper-help",
+  "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
+  "argv": [
+    "keeper",
+    "--help"
+  ],
+  "env": {
+    "HOME": "/tmp/castctl-golden-1h3_f7zz/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-1h3_f7zz/xdg",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "PATH": "/usr/bin:/bin"
+  },
+  "cwd": "/tmp/castctl-golden-1h3_f7zz/work",
+  "stdin": "empty",
+  "timeout_seconds": 10,
+  "stdout": "usage: castctl keeper <subcommand> [options]\n\nSession keeper: watch profile cookies for expiry (cheap chain\nonly: GET /api/session -> POST /api/auth/check), re-export them\nfrom the attached browser when they die, and report. Requires a\n\"keeper\" block in config.json (see docs/config.md).\n\nsubcommands:\n  run       tick every entry in the foreground until interrupted\n  check     run one tick now (exit 0/2/3/4, see below)\n  status    show per-entry state from state files only (no network)\n\nselection (run/check/status):\n  --tag TAG          only the entry with this tag\n  --profile NAME     only the entry for this profile\n\nDefault cadence is 24h per entry (the \"interval\" key; the\nadaptive rule shortens it once a cookie expiry is observed).\n\ncheck exit codes:\n  0  healthy (or skipped: login in progress / lock held)\n  1  hard failure: lock (other than held), state-directory, or state-save failure (outcome \"error\", never skipped)\n  2  config error (no keeper block, dangling refs, bad selection)\n  3  entry stopped (auth expired) or export failed\n  4  tick timeout\n\nrun prints one summary line per tick to stdout. check prints\none JSON object per entry. status prints a JSON array.\n",
+  "stderr": "",
+  "exit_code": 0
+}

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "35-stop-help",
+  "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
+  "argv": [
+    "stop",
+    "--help"
+  ],
+  "env": {
+    "HOME": "/tmp/castctl-golden-8t6l9brj/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-8t6l9brj/xdg",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "PATH": "/usr/bin:/bin"
+  },
+  "cwd": "/tmp/castctl-golden-8t6l9brj/work",
+  "stdin": "empty",
+  "timeout_seconds": 10,
+  "stdout": "usage: castctl stop [--thread ID]\n\nStop Muse's current turn (like the app's Stop button).\n\noptions:\n  --thread ID  side chat session id (default: main chat).\n",
+  "stderr": "",
+  "exit_code": 0
+}
