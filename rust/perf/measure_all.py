@@ -33,11 +33,19 @@ CARGO = ["cargo", "+1.99.1"]
 GO_ENV = dict(os.environ, PATH="/usr/local/go/bin:" + os.environ.get("PATH", ""),
               GOTOOLCHAIN="auto", GOFLAGS="-mod=readonly")
 
+def _trunc(s, head=2000, tail=2000):
+    # Keep both ends: the head holds the identifying lines (binary path,
+    # version, first records), the tail the summary. A tail-only cut
+    # silently lost the head of `go version -m` output in run7 (see README).
+    if len(s) <= head + tail:
+        return s
+    return s[:head] + "\n[...truncated...]\n" + s[-tail:]
+
 def sh(cmd, env=None, cwd=None, timeout=1800):
     t0 = time.time()
     p = subprocess.run(cmd, env=env, cwd=cwd, capture_output=True, text=True, timeout=timeout)
     return {"cmd": cmd, "exit": p.returncode, "seconds": round(time.time() - t0, 1),
-            "stdout": p.stdout[-4000:], "stderr": p.stderr[-4000:]}
+            "stdout": _trunc(p.stdout), "stderr": _trunc(p.stderr)}
 
 def sha8(path):
     h = hashlib.sha256()
@@ -504,11 +512,11 @@ def main():
     summary["hyperfine"] = {"present": bool(hf)}
     if hf:
         summary["hyperfine"]["version"] = summary["machine"].get("hyperfine_version")
-        for label, args in (("version", ["--version"]), ("help", ["--help"])):
+        for key, label, args in (("version_bench", "version", ["--version"]), ("help", "help", ["--help"])):
             r = sh([hf, "--warmup", "5", "--runs", "20", "--export-json",
                     os.path.join(DATA, f"hyperfine-{label}.json"),
                     f"{GO_BIN} {' '.join(args)}", f"{RS_BIN} {' '.join(args)}"], timeout=600)
-            summary["hyperfine"][label] = {"exit": r["exit"], "stdout": r["stdout"][-2000:]}
+            summary["hyperfine"][key] = {"exit": r["exit"], "stdout": r["stdout"][-2000:]}
     summary["machine"]["loadavg_end"] = loadavg()
     summary["machine"]["disk_free_gib_after"] = round(shutil.disk_usage(_preflight_path).free / (1 << 30), 2)
     json.dump(summary, open(os.path.join(DATA, "summary.json"), "w"), indent=2)

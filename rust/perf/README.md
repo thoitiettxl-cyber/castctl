@@ -5,12 +5,20 @@ Baseline hiệu năng Go `castctl` 0.9.0 vs Rust `castctl-rs` (M2 CLI surface),
 tối ưu nằm ở mục Hotspot bên dưới và đều kèm số.
 
 Số trong tài liệu này là **run7** (`2026-11-05T12:15:19Z`, full rerun, xem
-mục Drift bên dưới). Run4 (commit `7f46964`) có hai lỗi phương pháp đo do
-review vòng 1 phát hiện — wall-clock bị lượng tử hoá 5 ms và RSS của Rust
-bị đội lên bởi RSS của tiến trình Python cha — nên toàn bộ số run4 về
-startup/RSS đã bị thay bằng run7. Run5 bị cùng hai lỗi đó; run6 dùng
-target dir còn ấm nên thời gian build không phải full build. Run7 là lần
-chạy đầy đủ đầu tiên sau khi sửa cả hai lỗi.
+mục Drift bên dưới). Số RSS Rust của run4 (commit `7f46964`, 13.2 MiB)
+là SAI — đó là floor của tiến trình Python cha (`ru_maxrss` từ `wait4`
+kế thừa qua fork, đã chứng minh bằng probe) — nên toàn bộ số RSS run4
+đã bị thay bằng run7. Wall-clock của run4 thì ĐÚNG: driver run4 dùng
+`os.wait4` blocking (không có vòng poll nào), và Rust `--version`
+0.686–0.831 ms không thể ra từ lưới 5 ms — wall drift run4→run7 (+34%
+Go / +23% Rust) là drift theo tải, tỉ lệ ổn định 0.081–0.088. Vòng poll
+WNOHANG gây lượng tử hoá 5 ms chỉ xuất hiện ở driver trung gian của fix
+loop 1 (run5, Rust `--version` median 5.448 ms), không phải phương pháp
+của run4; các vấn đề phương pháp do probe trong fix loop 1 phát hiện,
+không phải review vòng 1 (review vòng 1 đã kiểm chứng số run4 là đúng).
+Run6 dùng target dir còn ấm nên thời gian build của nó không phải full
+build. Run7 là lần chạy đầy đủ đầu tiên sau khi sửa lỗi RSS (backend
+GNU time) và loại vòng poll WNOHANG.
 
 ## Cách chạy lại toàn bộ (1 lệnh, trên cue, từ repo root)
 
@@ -27,13 +35,18 @@ sh rust/perf/run.sh [--skip-build] [--skip-item5]
 - `CARGO_TARGET_DIR`: driver tôn trọng biến này của cargo (xem
   `measure_all.py`). Mặc định là `rust/target`. Run7 dùng
   `CARGO_TARGET_DIR=/dev/shm/perf0-target` vì đĩa `/` của cue lúc đó đã
-  99% đầy (890 MB trống, session M4b đang build song song); target dir
-  chỉ 44 MB, dọn sau khi chạy xong.
+  99% đầy (850 MB trống theo `df_root` trong `summary.json`, session M4b
+  đang build song song); target dir ~41 MiB (delta trống trên /dev/shm:
+  7.82→7.78 GiB), dọn sau khi chạy xong.
 - Yêu cầu: `cargo +1.99.1` (pin `rust/rust-toolchain.toml`), Go qua
   `PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=auto`, `python3`,
   `/usr/bin/time` (BẮT BUỘC — đo RSS, xem phương pháp bên dưới).
   `hyperfine` (1.18.0) nếu có thì chạy thêm để đối chiếu startup; số
   chính vẫn là loop Python `measure.py` (không phụ thuộc tool ngoài).
+  Lưu ý: `summary.json: hyperfine.version` ở run7 vẫn là dict kết quả
+  benchmark `--version` (key này từng bị ghi đè bởi label benchmark —
+  driver đã đổi label thành `version_bench` cho lần chạy sau); version
+  của tool ghi ở `machine.hyperfine_version` mới là authoritative.
   Tooling trên cue: `apt-get install -y hyperfine time`, 2026-11-05
   (apt history End-Date 17:41:28 giờ địa phương): hyperfine
   1.18.0-2build1, GNU time 1.9-0.2build1. GNU `time` KHÔNG được dùng làm
@@ -65,16 +78,24 @@ sh rust/perf/run.sh [--skip-build] [--skip-item5]
   `summary.json: machine.meminfo`), loadavg 1-phút 0.48–1.00 trong lúc
   đo (4 snapshot: start 0.48, mid 0.53, after_item4 1.00, end 1.00;
   cộng 33 mark loadavg + timestamp trước/sau từng item và từng phía
-  trong `summary.json: marks`). Đĩa `/` 890 MB trống lúc chạy (99%
-  đầy); build outputs đặt trên `/dev/shm` (7.82 GiB trống trước,
-  7.78 GiB sau).
+  trong `summary.json: marks`). Đĩa `/` 850 MB trống lúc chạy (99%
+  đầy, theo `df_root` trong `summary.json`); build outputs đặt trên
+  `/dev/shm` (7.82 GiB trống trước, 7.78 GiB sau).
 - Go: `/usr/local/bin/castctl` 0.9.0 (`1396697 2026-11-04T21:38:36Z`),
   48,100,296 B. `go version -m` (ghi đầy đủ trong `summary.json`):
   `-buildmode=exe`, tags `with_utls,with_quic,with_wireguard,
   with_gvisor`, `-trimpath=true`, `CGO_ENABLED=1`, `GOARCH=amd64`.
   Output `go version -m` KHÔNG có dòng `-ldflags` nào nên tài liệu này
   không claim `-s -w` (claim đó ở run4 không có nguồn trong data).
-  Go toolchain 1.27.3.
+  Go toolchain 1.27.3. Lưu ý về độ đầy đủ của dữ liệu: trường
+  `go_binary_build_info` trong `summary.json` bị cắt ngắn (ở run7, hàm
+  `sh()` chỉ giữ 4000 ký tự cuối của stdout, nên phần đầu — đường dẫn
+  binary và vài dep đầu — bị mất; mọi field trích dẫn ở trên đều nằm
+  trong phần còn lại; driver đã đổi sang giữ đầu 2000 + cuối 2000 kèm
+  marker `[...truncated...]` cho lần chạy sau). Tương tự, `machine.gnu_time_version`
+  ghi self-report của binary GNU time (`time (GNU Time) UNKNOWN…`) còn
+  "1.9-0.2build1" là version gói apt — hai cách ghi version khác nhau,
+  không mâu thuẫn.
 - Rust: `castctl-rs` build từ `dev-rust` 96ce485 trên nhánh này,
   `cargo +1.99.1 build --release --locked -p castctl-rs`,
   `RUSTFLAGS="-C strip=symbols"` (số chính); build thường 2.3 s,
@@ -84,15 +105,18 @@ sh rust/perf/run.sh [--skip-build] [--skip-item5]
 - Env chuẩn mỗi lần chạy: `LC_ALL=C TZ=UTC`, HOME/XDG cô lập (tempdir,
   dọn trong `finally` sau mỗi lần đo), stdin `/dev/null`,
   `CASTCTL_CONFIG`/`CASTCTL_PROFILE` unset, timeout 10 s (ép bằng
-  SIGALRM — xem `measure.py`; đã probe: `/bin/sleep 30` bị kill đúng
-  1.002 s).
+  SIGALRM — xem `measure.py`).
 - Phương pháp wall+RSS (`measure.py`, đã sửa ở fix loop 1 sau khi probe
-  chứng minh phương pháp cũ sai):
+  chứng minh phương pháp đo RSS cũ sai — chỉ RSS, wall-clock không sai):
   - Wall-clock + exit code: spawn trực tiếp, `os.wait4` blocking ở
-    main thread. Một vòng poll WNOHANG từng bị dùng đã bị LOẠI bằng
-    probe: với sleep 5 ms nó lượng tử hoá mọi wall time theo lưới 5 ms
-    (Rust `--version` đo thành 5.45 ms thay vì ~0.9 ms; `/bin/true`
-    đo thành 5.35 ms).
+    main thread — cùng phương pháp với run4, và wall-clock của run4 là
+    đúng (xem phần mở đầu). Trong fix loop 1, một vòng poll WNOHANG
+    đã được THỬ làm phương án thay thế rồi LOẠI bằng probe: với sleep
+    5 ms nó lượng tử hoá mọi wall time theo lưới 5 ms — bằng chứng là
+    run5 (driver trung gian dùng vòng poll đó) đo Rust `--version`
+    median 5.448 ms, mọi run cụm ngay trên 5 ms (xem
+    `data/run5-summary.json`). Vòng poll đó không bao giờ là phương
+    pháp của run4.
   - Peak RSS: spawn RIÊNG dưới `/usr/bin/time -v -o <report>` (cha
     mỏng ~1–2 MB RSS nên floor ~1.3 MB). `ru_maxrss` từ `wait4` của
     tiến trình Python KHÔNG dùng được cho tiến trình nhỏ: probe
@@ -247,7 +271,11 @@ thu hẹp — đo lại sau bước đó (hotspot H4). Tương tự `MDToHTML`: 
 Cả hai cổng đều ephemeral (bind-0); proxy được verify bằng handshake
 SOCKS5 + CONNECT probe thật trước khi đo (`socks_check` trong
 `summary.json`: greeting/connect/body đều ok); process server được
-check `poll() is None` sau khi spawn.
+check `poll() is None` sau khi spawn. Giới hạn đã biết: `_free_port()`
+bind-rồi-đóng có race TOCTOU — tiến trình khác có thể chiếm cổng trước
+khi server bind; đã giảm nhẹ bằng `socks_check` (greeting + CONNECT +
+verify body) nên proxy lạ sẽ bị phát hiện trước khi đo, không đo nhầm
+trong im lặng.
 
 | | Go ms/req median (min–max) | Rust ms/req median (min–max) | Rust/Go |
 |---|---|---|---|
@@ -361,11 +389,15 @@ mean, exit code). Tái lập: chạy lại lệnh trên rồi diff
 
 ## Dao động giữa các lần chạy (run4 → run5 → run6 → run7, median)
 
-Run5 dùng phương pháp đo cũ (wall lượng tử hoá + RSS floor) nên số
-startup/RSS của nó KHÔNG dùng được; run6 dùng target dir còn ấm nên
+Run5 dùng driver trung gian của fix loop 1 (vòng poll WNOHANG gây lượng
+tử hoá wall 5 ms + RSS floor) nên số startup/RSS của nó KHÔNG dùng
+được — driver đó không phải phương pháp của run4 (run4 dùng `wait4`
+blocking, wall đúng, xem phần mở đầu); run6 dùng target dir còn ấm nên
 thời gian build của nó không phải full build. Chỉ item 4/5 (đo bằng
 harness nội bộ, không qua `measure.py`) so sánh được xuyên suốt cả
-4 run. Fixture parse-large đổi ở run5 (25,657 B / 140 outbounds →
+4 run. Summary run5 (`2026-11-05T12:05:39Z`) và run6
+(`2026-11-05T12:14:07Z`) được commit ở `data/run5-summary.json` /
+`data/run6-summary.json` để đối chiếu từng ô trong bảng này. Fixture parse-large đổi ở run5 (25,657 B / 140 outbounds →
 32,246 B / 180 outbounds + 10 endpoints) nên parse-large/decode-large
 tăng theo kích thước fixture, không phải drift máy.
 
@@ -377,7 +409,7 @@ tăng theo kích thước fixture, không phải drift máy.
 | SplitText Go / Rust (µs) | 518 / 266 | 593 / 271 | 606 / 271 | 551 / 281 |
 | Render chain Go / Rust (ms) | 5.24 / 1.085 | 6.46 / 1.074 | 5.42 / 1.092 | 5.62 / 1.114 |
 | Item 5 Go / Rust (ms/req) | 0.813 / 0.756 | 0.810 / 0.729 | 0.858 / 0.929 | 0.874 / 0.830 |
-| Startup `--version` tỉ lệ Rust/Go | 0.088 | (sai phương pháp) | 0.087 | 0.081 |
+| Startup `--version` tỉ lệ Rust/Go | 0.088 | (sai: wall lượng tử hoá) | 0.087 | 0.081 |
 | RSS `--version` Go / Rust (MiB) | 43.5 / (sai: floor) | 30.5 / (sai: floor) | 30.4 / 2.14 | 30.4 / 2.14 |
 
 Đọc: số Rust ở item 4 ổn định xuyên suốt (dao động ≤6% quanh median 4
@@ -412,7 +444,9 @@ run4 (43.5 MiB) là outlier chưa rõ nguyên nhân (xem §3).
   20261105), `body-1024.bin` (1024 B), `gen_fixtures.py` (generator
   deterministic — chạy lại để tái tạo fixture).
 - `data/` — số thô các lần chạy (run7 là số trong bảng trên;
-  `run7-stdout.txt` là stdout thật của run7).
+  `run7-stdout.txt` là stdout thật của run7; `run5-summary.json` /
+  `run6-summary.json` là summary đầy đủ của run5/run6 để đối chiếu
+  bảng Drift).
 
 ## Chưa kiểm chứng / giới hạn (ghi rõ, không giấu)
 
@@ -427,5 +461,6 @@ run4 (43.5 MiB) là outlier chưa rõ nguyên nhân (xem §3).
 - Số RSS Go `--version` ở run4 (43.5 MiB) không tái lập được và chưa rõ
   nguyên nhân (giả thuyết THP chưa kiểm chứng); số dùng ở đây là 30.4
   MiB (run5–run7 khớp nhau, GNU time đối chiếu).
-- Run5/run6 không phải số chính thức (xem mục Drift); chỉ run7 được
-  commit làm baseline.
+- Run5/run6 được commit ở `data/run5-summary.json` /
+  `data/run6-summary.json` để đối chiếu drift; chỉ run7 là baseline
+  chính thức.

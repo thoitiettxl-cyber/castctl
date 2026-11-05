@@ -5998,11 +5998,19 @@ Rust: `castctl-rs` build từ `dev-rust` 96ce485, `cargo +1.99.1 build
 --release --locked -p castctl-rs`, `RUSTFLAGS="-C strip=symbols"`
 (build thường 2.3 s, build strip 2.0 s, full build). Đo bằng
 `rust/perf/run.sh` (1 lệnh rerun); số thô: `rust/perf/data/*.json`;
-README: `rust/perf/README.md`. N=20 (startup/RSS), N=5 lần chạy process
-(logic thuần, item 5). Tỉ lệ Rust/Go < 1 = Rust tốt hơn. Run7 là số
-chính thức; run4 (commit `7f46964`) bị hai lỗi phương pháp đo (wall
-lượng tử hoá 5 ms; RSS Rust đội floor Python ~13 MB) nên số
-startup/RSS của nó đã bị thay thế (xem README mục Drift).
+README: `rust/perf/README.md`. N=20 (startup/RSS); logic thuần N=5
+(Go 1 process × 5 counts × 100 iters, Rust 5 process runs, adaptive
+K); item 5 N=5 lần chạy process × 20 request/lần. Tỉ lệ Rust/Go < 1 =
+Rust tốt hơn. Run7 là số chính thức; số RSS Rust của run4 (commit
+`7f46964`, 13.2 MiB) sai do floor của Python cha (`ru_maxrss` từ
+`wait4` kế thừa qua fork — đã chứng minh bằng probe) nên đã bị thay
+thế, còn wall-clock của run4 đo bằng `os.wait4` blocking là đúng
+(Rust `--version` 0.686–0.831 ms không thể ra từ lưới 5 ms) — wall
+drift run4→run7 là drift theo tải, tỉ lệ ổn định 0.081–0.088. Vòng
+poll WNOHANG gây lượng tử hoá 5 ms chỉ xuất hiện ở driver trung gian
+của fix loop 1 (run5, Rust median 5.448 ms), không phải phương pháp
+của run4; các vấn đề phương pháp do probe trong fix loop 1 phát hiện,
+không phải review vòng 1 (xem README mục Drift).
 
 | Mục | Go (median) | Rust (median) | Rust/Go |
 |---|---|---|---|

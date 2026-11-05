@@ -20,6 +20,7 @@ if command -v go >/dev/null 2>&1; then
   if PATH="/usr/local/go/bin:$PATH" GOTOOLCHAIN=auto GOFLAGS=-mod=readonly \
       timeout 300 go test -run TestSPDXHeaders -count=1 . >"$_spdx_log" 2>&1; then
     echo "SPDX check: PASS"
+    rm -f "$_spdx_log"
   else
     echo "SPDX check: FAIL (advisory only, rerun unaffected; see $_spdx_log)"
   fi
