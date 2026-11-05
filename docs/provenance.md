@@ -1764,7 +1764,9 @@ artifact's license:
   `profilecmd.go:901-929` is deliberately NOT used).
 - Deferred, not dropped: the WebSocket+Noise+protobuf
   gateway transport (`internal/gateway/stream.go` `open`,
-  stream phases), `DownloadFile`/`Ping`/subscriptions,
+  stream phases), `DownloadFile`/`Ping`/streaming
+  subscriptions (`chat.subscribe` — not the billing
+  `fetchSubscriptionAction`, which was ported in M2),
   per-profile DNS router (direct dials use the system
   resolver in M3, not Go's fail-closed `ErrNoResolver`),
   HTTP/2 (`ForceAttemptHTTP2` has no M3 counterpart —

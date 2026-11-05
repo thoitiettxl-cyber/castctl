@@ -18,10 +18,17 @@
 //!
 //! What is NOT here: the Runner's subscribe loop
 //! (`internal/wait/runner.go`, `chat.subscribe` NDJSON).
-//! There is no subscribe implementation anywhere in the
-//! Rust workspace yet, so the turn follow in `turn.rs`
-//! drives this state machine from `chat.history` polls
-//! instead (see PORTING.md §M5b deviation 1). The state
+//! Rust has no public subscribe API yet — no
+//! `SubscribeRaw` / `SubscribeJSON` and no
+//! `chat.subscribe` follow-loop consumer — so the turn
+//! follow in `turn.rs` drives this state machine from
+//! `chat.history` polls instead (see PORTING.md §M5b
+//! deviation 1). That is not the same as having no
+//! stream primitive at all: the internal stream frame
+//! (`deliver_to_open_streams` + the `streams` map) exists
+//! at base, and this milestone adds the narrow deliver
+//! primitive `Gateway::open_stream` (track=false, for
+//! `chat.stream` delivery only). The state
 //! machine itself is a faithful port: feed it events in
 //! arrival order and it decides exactly as Go does; the
 //! only deliberate difference is that the approver runs

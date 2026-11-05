@@ -3375,7 +3375,12 @@ fixed.)
 - Subscribe/stream not ported in M4a (red-team N11 =
   technical N3): no `SharedConn::subscribe_raw`, no
   public `Gateway::open_stream`, no `SubscribeJSON`;
-  only the constants exist.
+  only the constants exist. (True at the M4a base
+  `25a124e`; stale on the M5b branch: M5b `4782dc0`
+  added public `Gateway::open_stream`
+  (`gateway.rs:954`), a narrow deliver primitive for
+  `chat.stream` only — `subscribe_raw` /
+  `SubscribeJSON` / `chat.subscribe` are still absent.)
 - GET body→query drops array/object values; Go renders
   them with `%v` (red-team N12 = technical N6): a GET
   body containing a nested value drops the query key in
@@ -6072,10 +6077,29 @@ for no seam benefit.
 ## M5b.3 Deviations from Go (deliberate, with citations)
 
 1. **No `chat.subscribe`; follow = history poll.**
-   Rust has no subscribe implementation anywhere
-   (`grep subscribe` in `castctl-gateway`,
-   `castctl-transport`, `castctl-cli` is empty;
-   `SubscribeRaw` was not ported in M3). Porting the
+   The internal stream frame is already there at base:
+   private `Gateway::open` + `deliver_to_open_streams`
+   + the `streams` map keyed by sid
+   (`rust/castctl-gateway/src/gateway.rs:267,408,614`),
+   and this milestone adds one narrow deliver primitive,
+   `Gateway::open_stream` (`gateway.rs:954`, added by
+   this PR in `4782dc0`): it calls private `open` with
+   `track=false`, returns only the stream id, and returns
+   no receiver — it exists only to deliver `chat.stream`
+   (called from `turn.rs:2159` via `turn.rs:676-686`), not
+   to consume a stream. What Rust still has no public API
+   for is a subscribe: no `SubscribeRaw`
+   (`internal/gateway/calls.go:261`) / `SubscribeJSON`
+   (`calls.go:384`), no `SharedConn` subscribe retry
+   (`internal/conn/shared.go:304`, 3 attempts / 250ms
+   pause, `internal/conn/gateway.go:46,54`), and no
+   `chat.subscribe` follow-loop consumer
+   (`internal/wait/runner.go:513` `subscribeOnce`).
+   (The earlier wording of this deviation was wrong on
+   both counts: `open_stream` exists in
+   `castctl-gateway`, and `grep subscribe` hits the
+   billing `subscription.rs` / retry constants; only the
+   streaming subscribe is absent.) Porting the
    full Go Runner (`internal/wait/runner.go` 1295
    lines + `waiter.go` 768 + `replies.go` 366 +
    `history.go` 345, with settle/checkState/endgame)
@@ -6088,6 +6112,48 @@ for no seam benefit.
    updates therefore land at poll cadence, not on
    push; the final text still comes from the history
    re-read, as in Go.
+   M7a (separate branch `feat/rust-m7a-services`) is
+   building the subscribe API and will wire this state
+   machine to it; until then the poll stays.
+   Consequences of polling (mechanism verified from
+   source; frequency unmeasured — no live gateway data):
+   (a) an event is visible at most ~1s + one
+   `chat.history` RTT after it lands
+   (`turn.rs:2296` history(200), `:2392` 1s sleep),
+   versus immediately on Go's push
+   (`runner.go:595-613` `onRecord`);
+   (b) a held ignored (suspect) terminal is settled
+   late: Go re-proves it every 5s
+   (`DefaultSettlePollInterval`, `runner.go:58`) —
+   per record (`trySettle`, `runner.go:602`), per quiet
+   subscribe iteration (post-batch settle,
+   `runner.go:456-470`), and by ending the stream when
+   the proof is due (`runner.go:652-653`) — while Rust
+   calls `settle` only in the endgame
+   (`turn.rs:2455`, `accept_replayed_failed` `:2439`),
+   never inside the poll loop, so a suspect terminal
+   with no later proven event behind it can sit until
+   the 6h `TURN_TIMEOUT` (`turn.rs:66`);
+   (c) a burst of >200 new events inside one 1s
+   interval drops the older events out of the newest-200
+   window, so a terminal or an `approvals.*` event can
+   be missed outright and the turn runs to the 6h
+   timeout instead of Done / needs_approval;
+   (d) a reply landing in (1s, 2s] after Done can miss
+   the final text: Rust does a single re-read after 1s
+   (`turn.rs:2446-2453`) versus Go's 2s lag window
+   polled every 250ms (`runner.go:40,42`);
+   (e) `/stop` takes at most ~1s + one history RTT
+   (the 1s sleep at `turn.rs:2392` is a bare sleep; the
+   stop flag is checked at the top of the next loop,
+   `:2293-2295`);
+   (f) there is no 20s watchdog
+   (`DefaultRecheckAfter`, `runner.go:25`), no 60s
+   safety-net state check (`DefaultCheckEvery`,
+   `runner.go:45`), and no state check on a dead
+   gateway — a dead gateway fails the turn after 30s
+   instead (deviation 17), where Go runs one bounded
+   state check and waits on to the deadline.
 2. **Runner-owned active set.** `Bot::begin_turn` /
    `end_turn` cannot be called by the runner because
    `Bot::new` requires the services first (circular

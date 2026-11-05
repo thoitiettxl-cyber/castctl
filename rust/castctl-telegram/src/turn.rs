@@ -17,11 +17,15 @@
 //! (`SplitText`, `NeedsDocument`).
 //!
 //! [DEVIATION — no live subscribe] There is no
-//! `chat.subscribe` implementation anywhere in the Rust
-//! workspace (M3 did not port `SubscribeRaw`), so the
+//! `chat.subscribe` (NDJSON) consumer in Rust yet
+//! (M3 did not port `SubscribeRaw`), so the
 //! follow in [`TurnRunner::wait_follow`] polls
 //! `chat.history` every second instead of consuming the
-//! subscribe NDJSON stream. The state machine it feeds
+//! subscribe NDJSON stream. That is not the same as
+//! having no stream primitive: `Gateway::open_stream`
+//! (track=false, `chat.stream` delivery only, added by
+//! this milestone) exists, but it returns no receiver
+//! and cannot drive a follow loop. The state machine it feeds
 //! ([`crate::wait::Waiter`]) and the preview it feeds
 //! ([`crate::preview::StreamPreview`]) are faithful
 //! ports; bubble updates therefore arrive at poll
@@ -2251,7 +2255,9 @@ impl TurnRunner {
 
     /// Follow a turn to its end by polling `chat.history`
     /// every second (see the module-level deviation note:
-    /// no `chat.subscribe` exists in Rust yet). New events
+    /// no `chat.subscribe` consumer exists in Rust yet —
+    /// no `SubscribeRaw` / `SubscribeJSON`, only the
+    /// narrow `open_stream` deliver primitive). New events
     /// feed the preview and the waiter in seq order; the
     /// approver auto-decides fresh approvals; on a decided
     /// outcome a final history read (2 attempts) collects
