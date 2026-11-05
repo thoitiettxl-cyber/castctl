@@ -118,8 +118,6 @@ pub fn compare_glibc_version(a: GlibcVersion, b: GlibcVersion) -> i32 {
 // sections by name, program headers, byte order, class.
 // ---------------------------------------------------------------------------
 
-const SHT_GNU_VERNEED: u32 = 0x6fff_ffe;
-const SHT_GNU_VERDEF: u32 = 0x6fff_ffd;
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const DT_NULL: i64 = 0;
@@ -128,8 +126,6 @@ const DT_STRSZ: i64 = 10;
 
 #[derive(Debug, Clone)]
 struct Section {
-    typ: u32,
-    addr: u64,
     off: u64,
     size: u64,
     link: u32,
@@ -320,15 +316,15 @@ impl Elf {
             }
             for i in 0..shnum {
                 let off = shoff as usize + i * shentsize;
-                let (name, typ, addr, file_off, size, link, info) = if class32 {
+                // `sh_type` / `sh_addr` are not read: the
+                // walk locates `.gnu.version_r` /
+                // `.gnu.version_d` by name and uses only
+                // offset/size/link/info. Any truncation
+                // still errors at a later field read.
+                let (name, file_off, size, link, info) = if class32 {
                     (
                         read_u32(&data, off, big_endian)
                             .ok_or_else(|| bad("truncated section header"))?,
-                        read_u32(&data, off + 4, big_endian)
-                            .ok_or_else(|| bad("truncated section header"))?,
-                        read_u32(&data, off + 12, big_endian)
-                            .ok_or_else(|| bad("truncated section header"))?
-                            as u64,
                         read_u32(&data, off + 16, big_endian)
                             .ok_or_else(|| bad("truncated section header"))?
                             as u64,
@@ -344,10 +340,6 @@ impl Elf {
                     (
                         read_u32(&data, off, big_endian)
                             .ok_or_else(|| bad("truncated section header"))?,
-                        read_u32(&data, off + 4, big_endian)
-                            .ok_or_else(|| bad("truncated section header"))?,
-                        read_u64(&data, off + 16, big_endian)
-                            .ok_or_else(|| bad("truncated section header"))?,
                         read_u64(&data, off + 24, big_endian)
                             .ok_or_else(|| bad("truncated section header"))?,
                         read_u64(&data, off + 32, big_endian)
@@ -358,12 +350,12 @@ impl Elf {
                             .ok_or_else(|| bad("truncated section header"))?,
                     )
                 };
-                raw_sections.push((name, typ, addr, file_off, size, link, info));
+                raw_sections.push((name, file_off, size, link, info));
             }
         }
         // Section names via the shstrtab.
         let shstrtab: &[u8] = if shstrndx != 0 && shstrndx < raw_sections.len() {
-            let (_, _, _, off, size, _, _) = raw_sections[shstrndx];
+            let (_, off, size, _, _) = raw_sections[shstrndx];
             let start = off as usize;
             let end = start.saturating_add(size as usize).min(data.len());
             if start <= end { &data[start..end] } else { &[] }
@@ -372,9 +364,7 @@ impl Elf {
         };
         let sections = raw_sections
             .into_iter()
-            .map(|(name_off, typ, addr, off, size, link, info)| Section {
-                typ,
-                addr,
+            .map(|(name_off, off, size, link, info)| Section {
                 off,
                 size,
                 link,
