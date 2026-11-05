@@ -100,7 +100,7 @@ pub struct Deps {
     /// Failure-injection seam for the `--version` exec check.
     /// `None` means [`run_exec_check`]. Go: `execCheckFn`
     /// (`replace.go:33`).
-    pub exec_check_fn: Option<fn(&Path, &Version, Duration) -> Result<(), UpdateError>>,
+    pub exec_check_fn: Option<fn(&Path, &Version, Duration) -> std::result::Result<(), UpdateError>>,
 }
 
 impl Default for Deps {
@@ -207,10 +207,11 @@ impl Updater {
     /// Fetch and decode a release object.
     /// Source: `fetchRelease` (`update.go:795-814`).
     fn fetch_release(&mut self, url: &str) -> std::result::Result<ReleaseInfo, FetchReleaseError> {
+        let ua = self.user_agent();
         let body = match fetch_bytes(
             self.fetcher.as_mut(),
             url,
-            &self.user_agent(),
+            &ua,
             MAX_RELEASE_JSON_BYTES,
             METADATA_TIMEOUT,
         ) {
@@ -281,11 +282,9 @@ impl Updater {
             "{}/thoitiettxl-cyber/castctl/releases/latest",
             self.github_base()
         );
+        let ua = self.user_agent();
         let (status, location) =
-            match self
-                .fetcher
-                .get_no_follow(&url, &self.user_agent(), METADATA_TIMEOUT)
-            {
+            match self.fetcher.get_no_follow(&url, &ua, METADATA_TIMEOUT) {
                 Ok(t) => t,
                 Err(_) => return Err(rate_limit_error()),
             };
@@ -514,10 +513,11 @@ impl Updater {
         &mut self,
         sel: &Selection,
     ) -> std::result::Result<std::collections::BTreeMap<String, [u8; 32]>, UpdateError> {
+        let ua = self.user_agent();
         let body = match fetch_bytes(
             self.fetcher.as_mut(),
             &sel.checksums_url,
-            &self.user_agent(),
+            &ua,
             MAX_CHECKSUMS_BYTES,
             METADATA_TIMEOUT,
         ) {
@@ -612,10 +612,11 @@ impl Updater {
                 );
             }
         };
+        let ua = self.user_agent();
         let digest = download_asset(
             self.fetcher.as_mut(),
             &sel.asset_url,
-            &self.user_agent(),
+            &ua,
             sel.asset_size,
             &mut asset_tmp,
         );
@@ -734,7 +735,11 @@ impl Updater {
             let _ = std::fs::remove_file(&extracted_tmp_path);
             return (Result::empty(), Err(e));
         }
-        let rename = self.opts.deps.rename_fn.unwrap_or(std::fs::rename);
+        let rename = self
+            .opts
+            .deps
+            .rename_fn
+            .unwrap_or(|a, b| std::fs::rename(a, b));
         if let Err(e) = rename(&extracted_tmp_path, target) {
             let _ = std::fs::remove_file(&extracted_tmp_path);
             return (
@@ -797,10 +802,11 @@ impl Updater {
         };
         let want_digest = *want_digest;
         let mut asset_buf: Vec<u8> = Vec::new();
+        let ua = self.user_agent();
         let digest = match download_asset(
             self.fetcher.as_mut(),
             &sel.asset_url,
-            &self.user_agent(),
+            &ua,
             sel.asset_size,
             &mut asset_buf,
         ) {

@@ -639,14 +639,6 @@ pub fn download_asset<W: std::io::Write>(
     w: &mut W,
 ) -> Result<[u8; 32], UpdateError> {
     use sha2::{Digest, Sha256};
-    let parsed = parse_url(url).unwrap_or(ParsedUrl {
-        scheme: String::new(),
-        has_userinfo: false,
-        host: String::new(),
-        port: String::new(),
-        path: String::new(),
-        raw: url.to_string(),
-    });
     let mut resp = fetcher
         .get(url, user_agent, false, ASSET_TIMEOUT)
         .map_err(|_| {

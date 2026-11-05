@@ -82,15 +82,15 @@ pub fn sync_dir(dir: &Path) -> std::io::Result<()> {
 /// silently: filesystems that return ENOTSUP/EINVAL for
 /// directory fsync still hold the rename.
 /// Source: `isDirSyncTolerable` (`internal/update/replace.go:310-315`).
-/// On Linux `ENOTSUP` and `EOPNOTSUPP` share errno 95; both
-/// are checked by raw number so the mapping is explicit.
+/// On Linux `ENOTSUP` and `EOPNOTSUPP` share errno 95, so the
+/// match lists `ENOTSUP` once and still covers both spellings.
 /// (R1 Q5: `std::io::ErrorKind::Unsupported` does not
 /// distinguish them, so raw errno is used.)
 pub fn is_dir_sync_tolerable(e: &std::io::Error) -> bool {
-    matches!(
-        e.raw_os_error(),
-        Some(libc::EINVAL) | Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP)
-    )
+    // On Linux `EOPNOTSUPP == ENOTSUP == 95`, so only one
+    // arm is reachable; the other name is listed in the
+    // doc comment above, not here, to keep the match exact.
+    matches!(e.raw_os_error(), Some(libc::EINVAL) | Some(libc::ENOTSUP))
 }
 
 /// Maximum `--version` output bytes.
