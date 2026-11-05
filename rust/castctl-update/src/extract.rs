@@ -99,7 +99,13 @@ pub fn extract_castctl<R: Read, W: std::io::Write>(
             ));
         }
         let header = entry.header();
-        let name = header.path_bytes();
+        // The EFFECTIVE name: `Entry::path_bytes` applies
+        // PAX/GNU-longname overrides, while
+        // `Header::path_bytes` returns the raw header bytes
+        // (a PAX-renamed `castctl` would otherwise slip
+        // through with its old name). Type and size still
+        // come from the header itself.
+        let name = entry.path_bytes();
         if name.as_ref() == b"castctl" {
             if found {
                 return Err(UpdateError::failure(
@@ -247,8 +253,11 @@ mod tests {
         h[100..108].copy_from_slice(b"0000755\0");
         h[108..116].copy_from_slice(b"0000000\0");
         h[116..124].copy_from_slice(b"0000000\0");
-        // size: 11 octal digits + NUL
+        // size: 11 octal digits + NUL (12 bytes). Sizes
+        // that do not fit are a test bug, not a fixture:
+        // use a smaller huge size instead.
         let size_s = format!("{size:011o}\0");
+        assert_eq!(size_s.len(), 12, "size {size} does not fit in the octal field");
         h[124..136].copy_from_slice(size_s.as_bytes());
         // mtime "00000000000\0"
         h[136..148].copy_from_slice(b"00000000000\0");
@@ -302,20 +311,31 @@ mod tests {
     /// with traversal / absolute / dotted / case-variant
     /// names are inert when a valid `castctl` exists, and an
     /// archive with ONLY a traversal name has no member.
+    /// Built with raw headers: the `tar` crate's
+    /// `Header::set_path` refuses `..` names at fixture
+    /// build time, so the builder cannot express them.
     #[test]
     fn extract_traversal_other_members_inert() {
-        let gz = gzip_tar(&[
-            ("../castctl", EntryType::Regular, b"evil"),
-            ("/tmp/evil", EntryType::Regular, b"evil"),
-            ("./castctl", EntryType::Regular, b"evil"),
-            ("CASTCTL", EntryType::Regular, b"evil"),
-            ("castctl", EntryType::Regular, FAKE_ELF),
-        ]);
-        let (out, _) = extract(&gz).unwrap();
+        let mut tar_bytes = Vec::new();
+        for (name, data) in [
+            ("../castctl", b"evil" as &[u8]),
+            ("/tmp/evil", b"evil"),
+            ("./castctl", b"evil"),
+            ("CASTCTL", b"evil"),
+            ("castctl", FAKE_ELF),
+        ] {
+            tar_bytes.extend_from_slice(&raw_header(name, b'0', data.len() as u64, b""));
+            tar_bytes.extend_from_slice(&pad512(data));
+        }
+        tar_bytes.extend_from_slice(&[0u8; 1024]);
+        let (out, _) = extract(&gzip_bytes(&tar_bytes)).unwrap();
         assert_eq!(out, FAKE_ELF);
-        let only_traversal = gzip_tar(&[("../castctl", EntryType::Regular, b"evil")]);
+        let mut only = Vec::new();
+        only.extend_from_slice(&raw_header("../castctl", b'0', 4, b""));
+        only.extend_from_slice(&pad512(b"evil"));
+        only.extend_from_slice(&[0u8; 1024]);
         assert_eq!(
-            extract(&only_traversal).unwrap_err().to_string(),
+            extract(&gzip_bytes(&only)).unwrap_err().to_string(),
             "update: the downloaded archive has no castctl member"
         );
     }
@@ -411,9 +431,10 @@ mod tests {
             extract(&gz).unwrap_err().to_string(),
             "update: the downloaded archive has no castctl member"
         );
-        // Huge declared size refuses without allocating.
+        // Huge declared size refuses without allocating
+        // (4 GiB > 256 MiB cap; fits the 11-digit octal field).
         let mut tar_bytes = Vec::new();
-        tar_bytes.extend_from_slice(&raw_header("castctl", b'0', 1 << 40, b""));
+        tar_bytes.extend_from_slice(&raw_header("castctl", b'0', 1 << 32, b""));
         tar_bytes.extend_from_slice(&[0u8; 1024]);
         assert_eq!(
             extract(&gzip_bytes(&tar_bytes)).unwrap_err().to_string(),
