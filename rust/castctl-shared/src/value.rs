@@ -17,12 +17,18 @@ use std::sync::OnceLock;
 ///
 /// Numbers keep their spelling class: [`JsonValue::Int`] for
 /// integer spellings (Go `int64` / `json.Number` integer form),
-/// [`JsonValue::Float`] for float spellings (Go `float64` /
-/// `json.Number` float form). That split is what lets
-/// `as_int64` reproduce Go's integer-first, float-fallback
-/// conversion. There is deliberately no `UInt` variant: a Go
-/// `uint64` fixture value above `i64::MAX` has no M1 model;
-/// see `rust/PORTING.md`.
+/// [`JsonValue::Float`] for every other number, kept as its
+/// original literal text (Go `json.Number` float form). That
+/// split is what lets `as_int64` reproduce Go's
+/// integer-first, float-fallback conversion — and keeping the
+/// literal (instead of an `f64`) is what lets re-serialization
+/// reproduce Go's output byte-for-byte (`1.0` stays `1.0`,
+/// `1e3` stays `1e3`, `9007199254740993` stays exact). There
+/// is deliberately no `UInt` variant: a Go `uint64` fixture
+/// value above `i64::MAX` has no M1 model; it arrives here as
+/// a `Float` literal (exact text) and converts via `as_int64`
+/// exactly as Go's float fallback does; see
+/// `rust/PORTING.md` §M4c.10.
 #[derive(Debug, Clone, PartialEq)]
 pub enum JsonValue {
     /// JSON `null`.
@@ -31,8 +37,16 @@ pub enum JsonValue {
     Bool(bool),
     /// Integer-spelled number.
     Int(i64),
-    /// Float-spelled number.
-    Float(f64),
+    /// Any other JSON number, as its original literal text
+    /// (a float spelling, or an integer spelling above
+    /// `i64::MAX`). The literal is always a valid JSON number
+    /// token as decoded — never `NaN`/`Inf` — so the emitter
+    /// prints it verbatim, exactly as Go's `json.Number` does.
+    /// One exception, upstream of this enum: `-0` is
+    /// normalized to integer `0` by serde_json at parse time
+    /// and arrives here as `Int(0)` (Go emits `-0`); see
+    /// `rust/PORTING.md` §M4c.10.
+    Float(String),
     /// JSON string.
     Str(String),
     /// JSON array.
@@ -83,24 +97,31 @@ pub(crate) fn as_string(v: &JsonValue) -> Option<&str> {
 /// not numbers.
 /// Source: `internal/shared/values.go:37` (`asInt64`).
 ///
-/// The float arm reproduces Go's `int64(f)` on amd64 exactly:
-/// out-of-range values (either direction, including `1e100`)
-/// convert to `i64::MIN` — the x86 CVTTSD2SI indefinite value —
-/// rather than saturating as a Rust `as` cast would. Measured
-/// by probe P-6 on cue: `1e100` and `-1e100` both yield
-/// `i64::MIN` with `ok=true`; NaN/`±Inf` yield `ok=false`.
+/// The float arm parses the stored literal and reproduces
+/// Go's `int64(f)` on amd64 exactly: out-of-range values
+/// (either direction, including `1e100`) convert to
+/// `i64::MIN` — the x86 CVTTSD2SI indefinite value —
+/// rather than saturating as a Rust `as` cast would.
+/// Measured by probe P-6 on cue: `1e100` and `-1e100` both
+/// yield `i64::MIN` with `ok=true`; NaN/`±Inf` yield
+/// `ok=false`. A literal that parses to `±Inf` (e.g.
+/// `1e999`) yields `ok=false`: Go's `Float64()` returns
+/// `ErrRange` on overflow before the `IsInf` check, so
+/// `asInt64` returns false there; Rust reaches the same
+/// `None` via the infinite parse result.
 pub(crate) fn as_int64(v: &JsonValue) -> Option<i64> {
     match v {
         JsonValue::Int(n) => Some(*n),
-        JsonValue::Float(f) => {
+        JsonValue::Float(lit) => {
+            let f: f64 = lit.parse().ok()?;
             if f.is_nan() || f.is_infinite() {
                 None
-            } else if *f >= 9_223_372_036_854_775_808.0 || *f <= -9_223_372_036_854_775_808.0 {
+            } else if f >= 9_223_372_036_854_775_808.0 || f <= -9_223_372_036_854_775_808.0 {
                 // 2^63, as the nearest `f64`. Go `int64(f)` for
                 // |f| >= 2^63 is the indefinite value.
                 Some(i64::MIN)
             } else {
-                Some(*f as i64)
+                Some(f as i64)
             }
         }
         _ => None,
@@ -117,9 +138,11 @@ pub(crate) fn as_bool(v: &JsonValue) -> Option<bool> {
 }
 
 /// Python truthiness: null is false, `false`/`0`/`""`/empty
-/// array/object are false, everything else is true. A float
-/// NaN is true: it is not a number per `as_int64`, so it
-/// falls through to the default arm, as in Go.
+/// array/object are false, everything else is true. A number
+/// literal that does not convert to `i64` (e.g. `1e999`,
+/// which parses to `+Inf`) is true: it is not a number per
+/// `as_int64`, so it falls through to the default arm, as in
+/// Go (where a non-finite `float64` behaves the same).
 /// Source: `internal/shared/values.go:84` (`truthy`).
 pub(crate) fn truthy(v: &JsonValue) -> bool {
     match v {

@@ -885,6 +885,31 @@ mod tests {
     }
 
     #[test]
+    fn classify_error_connection_variants() {
+        // Safety N3 (fix loop 1): `ConnectionError` renders
+        // length-only; `ConnectionDown` renders its message
+        // (already truncated to 200 chars at construction in
+        // `castctl-transport/src/http.rs`), or the bare form
+        // when empty. Pins the CLI render so a future change
+        // cannot start echoing peer text here.
+        let (code, text) = flow_render(&classify_error(&TransportError::ConnectionError {
+            message: "gateway: websocket TLS failed".to_string(),
+        }));
+        assert_eq!(code, 1);
+        assert_eq!(text, "castctl: conn: connection error error_length=29\n");
+        let (code, text) = flow_render(&classify_error(&TransportError::ConnectionDown {
+            message: "boom".to_string(),
+        }));
+        assert_eq!(code, 1);
+        assert_eq!(text, "castctl: conn: connection down: boom\n");
+        let (code, text) = flow_render(&classify_error(&TransportError::ConnectionDown {
+            message: String::new(),
+        }));
+        assert_eq!(code, 1);
+        assert_eq!(text, "castctl: conn: connection down\n");
+    }
+
+    #[test]
     fn gateway_error_text_unknown_length() {
         let s = BodySummary {
             status: -1,

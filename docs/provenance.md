@@ -1729,6 +1729,121 @@ Boss decision, quoted verbatim (applies to §13 and
 `rust/NOTICE`): artifact Rust là GPL-3.0-only vì link honk;
 binary Go vẫn GPL-3.0-or-later; 2 artifact, 2 license.
 
+### M4c fork — `thoitiettxl-cyber/honk`, branch `feat/chrome-tls-parity` — REVERTED: NOT USED, NOT PINNED, DOES NOT AFFECT THE BUILD (experiment record only)
+
+Why a fork was tried: the live Meta edge answers the gateway
+WS upgrade with HTTP 502 for every non-Chrome ClientHello
+(rustls 251 B, honk plain connector 1730–1794 B but with
+the wrong JA4). Measured on cue, profile `no.0`, 3
+alternating Go/Rust pairs: Go exit 0 (101, byte-identical
+1909 B outputs) 3/3, Rust exit 1 (`error_length=45`,
+`status_code=502`) 3/3. The WS-row ClientHello diff
+(same parser both sides) is exactly 3 items, all inside
+the 4 M3e deviations — no other item (groups, sigalgs,
+key shares, ECH, ALPN, SNI all match Go): (a) ciphers
++`c009,c00a`; (b) extensions missing `0005`/`0012`; (c)
+ALPS: Go sends it at codepoint `0x44cd` (payload
+`0003026832`, advertising h2), honk sends none on the WS
+row (its `alps` gate requires an h2 ALPN offer, and the
+WS dial pins ALPN `["http/1.1"]`). No `TlsOptions` field
+can fix any of the three (`honk-config/src/` has no
+cipher/ALPS/OCSP/SCT field) — the fix must live in
+honk-outbound. Full gate + numbers: `rust/PORTING.md`
+§M4c.
+
+Fork (still on GitHub for the record only — NOT used, NOT
+pinned, does NOT affect this build: no `Cargo.toml` /
+`Cargo.lock` entry points at it, no code imports it, and
+the build is identical with or without the branch
+existing): https://github.com/thoitiettxl-cyber/honk,
+branch `feat/chrome-tls-parity`, head
+`802ccafb00eed5019516911a234cf1c57c653c3a`, base upstream
+`9e31cc0bd28825afdc0e384dc989bc3f076e69cf`. Exactly 4
+commits, all in `crates/honk-outbound/src/tls.rs`, one
+patch each (honk commit style: one imperative line, no
+body; reason + Go evidence per patch are recorded here
+and in PORTING §M4c, not in the honk message):
+
+- (a) `fix(tls): send Chrome cipher list on plain-TLS
+  connector` (`f64ab28`): `set_cipher_list(
+  CHROME_CIPHER_LIST)` in `build_connector`'s chrome
+  branch, mirroring `build_reality_connector`. BoringSSL's
+  default (`"ALL"`) adds `c009/c00a`; Go/uTLS Chrome
+  sends 15 suites, no `c009/c00a`.
+- (b) `fix(tls): enable OCSP stapling and SCT on
+  plain-TLS connector` (`8b8e1b5`):
+  `enable_ocsp_stapling()` +
+  `enable_signed_cert_timestamps()`, mirroring the
+  REALITY connector. Supplies ext `0005` + `0012`.
+- (c1) `fix(tls): use new ALPS codepoint 0x44cd`
+  (`814b05f`): `SSL_set_alps_use_new_codepoint(ssl, 1)`
+  in `add_chrome_alps` (was `0` = `0x4469`). Payload
+  unchanged (`h2` application settings).
+- (c2) `fix(tls): attach ALPS on every Chrome plain-TLS
+  dial` (`802ccaf`): the `alps` gate in
+  `build_connector` becomes `chrome` (was: only when the
+  ALPN offer contained `h2`). uTLS Chrome sends ALPS
+  unconditionally; the gate dropped it for http/1.1-only
+  dials. The REALITY path already calls
+  `add_chrome_alps` unconditionally, so this aligns the
+  plain path with it.
+
+Outcome (M4c, measured — the fork is NOT the answer):
+with the fork, the WS-row ClientHello is SET-identical
+to Go's (ciphers, exts, groups, sigalgs, key shares;
+JA4 cipher-hash + counts equal; full JA4 strings differ
+only by the per-connection extension permutation, which
+Go also does — see PORTING §M4c), and per-extension
+lengths are identical (ECH length is the only size
+variance, random on both sides). Live still 502
+(Rust exit 1, `error_length=45`, 2/2 fork-probe pairs +
+1 isolated run; Go exit 0 on the same edge IP
+57.144.151.197). Full-flow capture showed the real
+cause is NOT TLS at all: Go's WS upgrade request is
+longer than Rust's because Go sends the real token and
+Rust sent the literal. [CORRECTED — see PORTING
+§M4c.7: the `fmt.Sprintf` `%!(EXTRA string=<783-char-
+token>)` mechanism written here before was WRONG. Go
+`defaultWSURL` (`internal/gateway/connector.go:113-120`)
+is `fmt.Sprintf` with 4 verbs and 4 args —
+`auth_token=%s` — so the real hatch token rides in the
+URL, quoted `safe=""`. There is no EXTRA suffix. The
+M4a "literal token" finding was wrong, not merely
+incomplete.] Rust sent only the literal, so the edge
+502s the unauthenticated upgrade. The fork pointer was therefore reverted in the
+same PR (`rust/Cargo.toml` + `Cargo.lock` back to
+upstream `daeuniverse/honk` `9e31cc0b`); the fork
+branch remains only as a record of the experiment, for a
+possible future upstream PR — this tree does not use it,
+does not pin it, and the build does not depend on it in
+any way.
+
+Not patched: (d) REALITY TLS-1.3-only profile — no
+REALITY server was available for the live interop probe
+the change requires, so (d) stays an open deviation as
+in M3e. No honk source is copied into castctl; the fork
+keeps GPL-3.0-only. No upstream PR was opened for these
+patches (decision for a later task, not this one). The
+`[patch.crates-io]` boring-sys/quinn replication in
+`rust/Cargo.toml` is unchanged (the fork inherits honk's
+patch table, which still does not propagate).
+
+`Cargo.lock` note (M4c): the lock committed at `27a0eaf`
+was stale — it missed dependency edges the manifests
+already declared (e.g. `castctl-cli` → `castctl-gateway`
+/`castctl-shared`/`castctl-transport`/`chrono`/
+`serde_json`/`tokio`; `castctl-transport` → `rustls`/
+`tokio-rustls`/`webpki-roots`; `rustls` → `log`). Any
+cargo invocation rewrites those in; that is what the PR's
+lock diff against `27a0eaf` is — 17 added lines, all
+stale-edge fill, no honk line. The fork pin never reached
+any commit: the fork was tried and reverted inside the
+working tree, and the lock diff of the fork commit
+`fcafe4f` is empty (`git log --all -S
+'thoitiettxl-cyber' -- rust/Cargo.lock` returns 0
+commits). At the final head the lock points at upstream
+only (no fork line remains). No crate version changed.
+
 ## 14. boringtun + smoltcp + base64 — LINKED (Rust artifact only, no copied code)
 
 M3d (userspace WireGuard, crate `castctl-transport`,

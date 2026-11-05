@@ -17,6 +17,16 @@ Linked dependency (called, not copied):
   still names https://github.com/Glassyiris/honk while the
   remote used here is daeuniverse/honk — see
   docs/provenance.md §13).
+  (M4c: a Chrome-parity fork of honk
+  (thoitiettxl-cyber/honk, feat/chrome-tls-parity) was tried
+  and reverted in the same PR — the live 502 is a missing
+  token in the WS URL, not a TLS fingerprint; see
+  rust/PORTING.md §M4c and docs/provenance.md §13. The fork
+  is NOT used, NOT pinned, and does NOT affect this build in
+  any way: no Cargo.toml / Cargo.lock entry points at it and
+  no code imports it. The branch still exists on GitHub only
+  as a record of the experiment (for a possible future
+  upstream PR); this tree does not depend on it.)
   Used by crate `castctl-transport` as the transport engine for:
   socks5, shadowsocks, vmess, vless, trojan, hysteria2, tuic,
   direct, block (the M3 subset; honk also implements juicity

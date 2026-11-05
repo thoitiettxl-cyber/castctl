@@ -2986,7 +2986,8 @@ built on `internal/gateway/gatewaytest.Server`).
   `Chrome/153.0.0.0`, Origin `https://muse.ai`, 20s
   upgrade bound, 20s handshake steps; the URL carries the
   literal `auth_token=<redacted>` — never the real token —
-  see §M4a.2 deviation 12). The gateway-dial
+  see §M4a.2 deviation 12). [SUPERSEDED — see §M4c.7:
+  Go sends the real token; Rust now does too.] The gateway-dial
   TLS rule (DialTLS forces Enabled=true) lives at the
   gateway-dial call site, NOT folded into `build_tls`.
 
@@ -3064,6 +3065,9 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
     never echo message bytes (lengths only). The library
     never puts a token/cookie into a message itself.
 12. WS URL carries the literal `auth_token=<redacted>`
+    [SUPERSEDED — see §M4c.7: Go sends the real token
+    (`auth_token=%s`, 4 verbs, 4 args), not the literal;
+    the whole deviation below is wrong.]
     (fix loop 1, Boss decision 2026-11-05 — MIRROR GO
     byte-for-byte, NOT a formal match): Go
     `internal/gateway/connector.go:116` (`defaultWSURL`)
@@ -3110,6 +3114,19 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
     shows the gateway needs the real token, change
     `default_ws_url` in this one place and re-enable the
     token-URL test.
+    [SUPERSEDED in M4c — see §M4c.7: the condition above
+    is now met (Go source proves the token is sent; Rust
+    without it gets 502). The "3 verbs, 4 args" premise,
+    the "computed and silently discarded" mechanism, and
+    the "no evidence the gateway needs it" claim are all
+    wrong — the M4a reading mistook test redaction for
+    the URL builder, and display redaction hid `%s` as
+    `<redacted>` in the evidence. What stays true from
+    this deviation: `http::Uri` cannot represent `<`/`>`
+    in a query (mechanism proven by source), and the
+    hand-written `ws_upgrade` sends the target verbatim.
+    The fix is exactly the one place named here:
+    `default_ws_url` now renders the real token, quoted.]
 13. `TooManyPieces` → exit 1, not 3 (fix loop 1):
     Go `classifyError` (`commands.go:304-311,336`) gives
     exit 3 only to `ReassemblySizeError` and
@@ -3264,7 +3281,11 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
   `127.0.0.1:33727` ephemeral; both exit 0). The Rust
   parity client dialed with the literal
   `auth_token=<redacted>` URL (percent-encoded on the
-  wire by `dial_gateway`).
+  wire by `dial_gateway`). [SUPERSEDED — see §M4c.7:
+  the parity client used the wrong URL; Go sends the
+  real token. The byte-identical methods still stand —
+  they ran over a loopback fake server, not the live
+  edge.]
 - SPDX header (fix loop 4, 2026-11-05 — CI Go đỏ cả 3 tag vì
   `TestSPDXHeaders` fail): mọi file .go thêm vào repo (kể cả dưới
   `rust/`) phải có header SPDX GPL-3.0-or-later —
@@ -3435,22 +3456,22 @@ it (promoted to direct deps only), so `NOTICE` /
 
 ## M4b.2 Deviations from Go (deliberate, with citations)
 
-1. WS upgrade written by hand; literal token. Go
-   `defaultWSURL` (`connector.go:116`) sends the literal
-   `auth_token=<redacted>`; `http::Uri` rejects `<`/`>` in
-   the query, so the upgrade request is written as raw
-   HTTP/1.1 bytes (`dial.rs` `ws_upgrade`) and the response
-   is validated (101 + `Sec-WebSocket-Accept` via
-   tungstenite's `derive_accept_key`) before wrapping the
-   stream with `from_partially_read`. Live probe on cue
-   (2026-11-05): the edge returns 401 for the
-   percent-encoded `%3Credacted%3E` form and 502 (past the
-   token check) for the literal — the M4a claim that "the
-   server decodes it back" was wrong (the M4a test only
-   proved the fake server tolerates the encoded form).
-   The direct dial now also pins ALPN `["http/1.1"]` via
-   `tls_client_config` (M4b fix of the M4a no-ALPN
-   deviation).
+1. WS upgrade written by hand. [PARTLY SUPERSEDED — see
+   §M4c.7: Go `defaultWSURL` (`connector.go:113-120`)
+   sends the real token (`auth_token=%s`, 4 verbs, 4
+   args), NOT the literal — the 'literal token' premise
+   is wrong, and so is '502 (past the token check)': the
+   401/502 probe compared two spellings of a placeholder
+   (`%3Credacted%3E` → 401, literal → 502); both lack a
+   valid token, so 502 is the token-check failure, not a
+   pass.] `http::Uri` rejects `<`/`>` in the query, so
+   the upgrade request is written as raw HTTP/1.1 bytes
+   (`dial.rs` `ws_upgrade`) and the response is validated
+   (101 + `Sec-WebSocket-Accept` via tungstenite's
+   `derive_accept_key`) before wrapping the stream with
+   `from_partially_read`. The direct dial now also pins
+   ALPN `["http/1.1"]` via `tls_client_config` (M4b fix
+   of the M4a no-ALPN deviation).
 2. Q8 (decided by the parent per the decision principles):
    `Unsupported` → exit 2 ONLY for config parse/dispatch
    errors; runtime errors map to exit 1. Evidence: Go
@@ -3655,7 +3676,7 @@ it (promoted to direct deps only), so `NOTICE` /
 
 ## M4b.3 Findings
 
-- **The literal token, and the M4a claim was wrong.**
+- **The literal token — [SUPERSEDED — see §M4c.7].**
   M4a recorded that the live server "decodes
   `%3Credacted%3E` back to `<redacted>`". False: a raw-TLS
   Python probe on cue (identical headers, only the token
@@ -3674,6 +3695,11 @@ it (promoted to direct deps only), so `NOTICE` /
   `dial_gateway` (direct) and `dial_gateway_over_stream`
   use it; the direct dial now also pins ALPN
   `["http/1.1"]`, fixing the M4a no-ALPN deviation.
+  [Correction: the 401/502 measurements above stand, but
+  the conclusion is withdrawn — both forms lacked a valid
+  token, so neither proves anything about the upgrade
+  path. The fix is sending the real token (§M4c.7), not
+  the literal. The hand-written upgrade itself stays.]
 - **CRLF goes through `muse.write` / `muse.edit` only.**
   A Python edit script that rewrote `dial.rs` turned its
   `\r\n` literals into bare LFs (0 literal CR bytes in
@@ -3692,7 +3718,7 @@ it (promoted to direct deps only), so `NOTICE` /
   verbatim, answers 101, then closes — it does not speak
   Noise, so the dial fails at the Noise step with
   `ConnectionError`, which the tests assert).
-- **TLS fingerprint blocks the live gateway (see §M4b.5).**
+- **TLS fingerprint blocks the live gateway (see §M4b.5) — [SUPERSEDED — see §M4c.7].**
   rustls + literal token → 502; OpenSSL + literal → 502;
   Go/uTLS-Chrome + literal → 101. ClientHello captures
   (iptables REDIRECT + a Python listener on cue):
@@ -3729,6 +3755,15 @@ it (promoted to direct deps only), so `NOTICE` /
   (`ssl/encrypted_client_hello.cc`, `hs->grease_seed`)
   and is the candidate fix — a new TLS-architecture
   decision, not attempted in PR2.
+  [SUPERSEDED — see §M4c.7: the three-way contrast is
+  confounded — rustls + literal and OpenSSL + literal
+  both lacked the token, and Go sent the real token, so
+  'fingerprint decides upstream routing' was never
+  isolated. The ClientHello measurements (1748 B vs 251
+  B) stand; the conclusion does not. The M4c fork
+  (ClientHello set-identical, still 502) is consistent
+  with the token cause. Whether the fingerprint matters
+  at all is decided by the step-3 matrix (§M4c.8).]
 - **`usage --json`'s one-off `ConnectionError`.** First
   parity run: `usage --json` failed with
   `error_length=36` while `usage` and `usage-raw` passed
@@ -3939,6 +3974,8 @@ rewritten (the old wire assert expected
 `%3Credacted%3E`); the string-level assert
 (`default_ws_url` byte-for-byte == Go URL) and the
 value-level assert (query value == literal) are kept.
+[SUPERSEDED — see §M4c.7: the test is rewritten in M4c
+to send the real (fake-in-test) token, quoted.]
 Logs: `gate-logs-m4b/gate-{fmt,build,test,clippy}-m4b.log`.
 The gates are re-run after the rebase onto dev-rust;
 those logs are `gate-{fmt,build,test,clippy}-m4b-
@@ -4129,6 +4166,782 @@ probe log, drift outputs).
   production 25s cadence through the CLI) was not waited;
   covered by threshold injection in M4a tests.
 
+
+## M4c. Gateway qua honk Chrome TLS — swap xong, fork thử rồi revert: 502 không phải TLS
+
+Mục tiêu: `status` exit 0 + JSON khớp Go sau chuẩn hoá, rồi
+bảng 13 lệnh. Kết quả: FLOOR KHÔNG ĐẠT. `status` vẫn exit 1
+(`error_length=45`, `status_code=502`) sau khi ClientHello
+đã SET-identical với Go và sau fork Chrome-parity. Nguyên
+nhân thật: URL WS của Rust thiếu token thật — Go gửi
+token thật (`connector.go:113-120`, 4 verbs, 4 args),
+Rust gửi literal. Edge 502 vì upgrade không xác thực.
+(Câu chuyện `%!(EXTRA string=...)` trong §M4c.5 là SAI
+— xem §M4c.7; cả hai câu chuyện cũ đều bị rút lại.)
+Fork đã revert trong cùng PR; cây này trỏ lại upstream
+honk. Bước tiếp theo: mirror đúng byte URL của Go trong
+`default_ws_url` — làm trong task này, xem §M4c.7.
+
+### M4c.1 Thay đổi code (so với `27a0eaf`)
+
+- `rust/castctl-transport/src/tls.rs`: thêm
+  `honk_tls_wrap<S>(stream, host) -> Result<Box<dyn TlsStream>,
+  TransportError>` — dựng node honk tổng hợp
+  (`Node { host, outbound: AnyTls(AnyTlsConfig { tls:
+  TlsOptions { enabled: true, sni: Some(host),
+  alpn: ["http/1.1"], ..Default } }) }`) → `build_connector`
+  → `connect(host, stream)`; MỌI lỗi map về chuỗi cố định
+  `gateway: websocket TLS failed` (29 ký tự, xem hiệu
+  đính §M4c.2). Thêm `pub trait TlsStream: AsyncRead +
+  AsyncWrite + Send + Unpin {}` + blanket impl (cần vì
+  `Box<dyn AsyncRead + AsyncWrite>` không compile — E0225,
+  một trait object chỉ chứa một non-auto trait; honk's
+  `AsyncReadWrite` bị loại vì nó ép bound `Debug` lên
+  các chữ ký dial generic của gateway).
+  `tls_client_config()` giữ nguyên cho `http.rs` (chuỗi
+  HTTPS auth qua rustls đang pass live — KHÔNG swap).
+- `rust/castctl-transport/src/lib.rs`: export `TlsStream,
+  honk_tls_wrap` cạnh `tls_client_config`.
+- `rust/castctl-gateway/src/dial.rs`: `tls_wrap` gọi
+  `honk_tls_wrap`, trả `Box<dyn TlsStream>`; `dial_secure`
+  trả `WebSocketStream<Box<dyn TlsStream>>`; bỏ import
+  `tls_client_config` và mọi dùng `tokio_rustls`; nhánh
+  Tls của `ws_error` gọi `tls_failed()` (trước là literal
+  trùng lặp). `ws_upgrade` / Noise / `connector.rs` /
+  `http.rs` giữ nguyên. URL token literal giữ nguyên
+  trong commit này (đó là sai lầm — xem §M4c.7; fix
+  trong task tiếp theo).
+- `rust/castctl-gateway/Cargo.toml`: bỏ dep `tokio-rustls`
+  (chỉ `dial.rs` dùng); feature `rustls-tls-webpki-roots`
+  của `tokio-tungstenite` GIỮ (dọn riêng, xem plugpoint
+  §9.6).
+- Test mới (3): `rust/castctl-transport/tests/honk_tls.rs`
+  (`ClientHelloRecorder` + `parse_client_hello`; assert
+  SNI=`localhost`, ALPN=`["http/1.1"]`, GREASE cipher,
+  ext `fe0d`, group `11ec`, và handshake failure → đúng
+  chuỗi `gateway: websocket TLS failed` + exit 1);
+  `gateway_tls_connector_builds_for_host` (transport);
+  `tls_failed_is_29_chars` (gateway). TDD: RED quan sát
+  được trên cue (`E0432: unresolved import
+  castctl_transport::honk_tls_wrap`) rồi GREEN.
+
+Bẫy chrome-mode [STATIC]: `dispatch_outbound` return sớm
+với `"direct"` (`rust/castctl-transport/src/config.rs:477`)
+TRƯỚC khi `build_tls`/`apply_tls_mode` (`:324`) chạy.
+Profile `no.0` là direct → chrome mode KHÔNG BAO GIỜ được
+bật trong production path. Fix: `honk_tls_wrap` tự bật
+`set_tls_mode("utls")` + `set_utls_imitate("chrome")`
+(idempotent) trước `build_connector`. Không có fix này,
+mọi đo ClientHello sau swap đều vô nghĩa.
+
+### M4c.2 Hiệu đính [CORRECTED M4c]
+
+Đo bằng máy (`len()`): `"gateway: websocket TLS failed"`
+= **29** ký tự, `"gateway: websocket dial failed"` = **30**
+ký tự. M4b brief/docs nói 28 — sai, chưa từng được pin
+bằng test. §M4b.2 dòng 3535 vẫn ghi "28-char" (lịch sử,
+không viết lại theo lệ M4b); hiệu đính này là bản ghi
+chuẩn. 35-char handshake-failed, 45-char 502, 36-char
+hyper body là đúng. Không động deviation 28 (+DD) —
+"28" khác.
+
+### M4c.3 Gates (cue, 1.99.1, `CARGO_TARGET_DIR=/tmp/m4c-a/m4c-target`)
+
+- Baseline tại `27a0eaf` (trước đổi): fmt 0, build 0,
+  test **467 passed / 0 failed** (29 test binaries),
+  clippy `--workspace --all-targets -- -D warnings` 0.
+  Log: `/tmp/m4c-a/baseline-gates.log`.
+- Sau implement (upstream honk): fmt 0, build 0, test
+  **470 passed / 0 failed** (467 + 3 mới), clippy 0.
+  (5 lỗi rustfmt + 1 lỗi clippy `chunks_exact(2)` →
+  `as_chunks::<2>().0` đã sửa trước lần chạy này.)
+  Log: `/tmp/m4c-a/m4c-gates.log`.
+- Sau fork (thoitiettxl-cyber/honk `802ccafb`): fmt 0,
+  build 0, test **470 passed / 0 failed**, clippy 0;
+  `cargo tree -p castctl-transport` vẫn resolve
+  `boring-sys 5.2.0`, `quinn 0.11.12`, `quinn-proto
+  0.11.19` từ git Glassyiris. Log:
+  `/tmp/m4c-a/m4c-gates-fork.log`.
+- Sau revert (cây commit cuối, upstream honk): fmt 0,
+  build 0, test **470 passed / 0 failed**, clippy 0;
+  `cargo tree` trỏ lại `daeuniverse/honk`
+  `9e31cc0b`. Log: `/tmp/m4c-a/m4c-gates-final.log`.
+- Release build (fork): exit 0 (1m 51s), binary
+  23,307,832 B, md5 `2cd009948240cd05fb096dfa44e82907`
+  (`/tmp/castctl-rs-m4c`). Release build (revert):
+  exit 0 (14.14s, chỉ relink), binary 23,299,248 B,
+  md5 `95dc1a101927fd2fc800b8c616a9b790` — trùng binary
+  M4c-plain trước fork (cây code giống hệt, chỉ docs
+  khác). Log: `/tmp/m4c-a/m4c-release-final.log`.
+
+`Cargo.lock` note: lock commit tại `27a0eaf` đã stale —
+thiếu các edge mà manifest khai (vd `castctl-cli` →
+`castctl-gateway`/`castctl-shared`/`castctl-transport`/
+`chrono`/`serde_json`/`tokio`; `castctl-transport` →
+`rustls`/`tokio-rustls`/`webpki-roots`; `rustls` →
+`log`). Mọi lần cargo chạy đều tự điền; diff lock của
+PR này chỉ còn 17 dòng fill đó (không đổi version crate
+nào, 3 dòng `source` honk đã về upstream).
+
+### M4c.4 Fork Chrome-parity — đã thử, KHÔNG phải đáp án
+
+Fork-gate F0–F3 (số đo trên cue, profile `no.0`):
+
+- F0 (đủ điều kiện fork): ClientHello diff honk-plain vs
+  Go chỉ chứa đúng 3 mục trong 4 mục cho phép — (a)
+  cipher +`c009,c00a`, (b) thiếu ext `0005`/`0012`,
+  (c) ALPS: Go `44cd` (payload `0003026832`), honk
+  không có trên WS row (gate `alps` đòi h2 trong ALPN,
+  WS pin `["http/1.1"]`). Không có mục lạ. (d) REALITY:
+  không có server để probe live interop → KHÔNG làm.
+- F1 (live trước fork): Go `status` exit 0 3/3 (1909 B,
+  md5 `ab159233ad77373bdc1754c948b3fca7`, `vm_id
+  72d127a3-2e19-4c84-b073-9ed4b82102b9`, sessions 112);
+  Rust honk-plain exit 1 3/3 (`error_length=45`,
+  `status_code=502`). Không phải transient.
+- F2 (patch (c) tách đôi): patch (c) theo brief
+  (codepoint `0`→`1`) là KHÔNG ĐỦ trên WS row vì ALPS
+  không bao giờ được gắn ở đó. (c) tách thành (c1)
+  codepoint `0`→`1` trong `add_chrome_alps`
+  (`tls.rs:274`) + (c2) gate `alps` thành `let alps =
+  chrome;` (`tls.rs:608-613`) — uTLS HelloChrome_133
+  gửi ALPS vô điều kiện; path REALITY của honk đã gọi
+  `add_chrome_alps` vô điều kiện (`reality.rs:125`).
+  Không thêm mục mới ngoài diff đã đo.
+- F3 (JA4 WS row): xem §M4c.5 — parity đạt theo nghĩa
+  duy nhất khả thi (set + cipher-hash + counts); chuỗi
+  JA4 đầy đủ không thể bằng nhau vì CẢ HAI phía đều
+  permute thứ tự ext mỗi connection.
+
+Fork: `https://github.com/thoitiettxl-cyber/honk`,
+nhánh `feat/chrome-tls-parity`, head
+`802ccafb00eed5019516911a234cf1c57c653c3a`, base
+`9e31cc0bd28825afdc0e384dc989bc3f076e69cf`. 4 commit, đều
+trong `crates/honk-outbound/src/tls.rs`, mỗi patch 1
+commit, style honk (một dòng imperative, không body;
+lý do + dẫn chứng Go ghi ở đây và `docs/provenance.md`
+§13, không trong message): (a) `fix(tls): send Chrome
+cipher list on plain-TLS connector` (`f64ab28`,
+`set_cipher_list(CHROME_CIPHER_LIST)`); (b) `fix(tls):
+enable OCSP stapling and SCT on plain-TLS connector`
+(`8b8e1b5`, `enable_ocsp_stapling()` +
+`enable_signed_cert_timestamps()`); (c1) `fix(tls): use
+new ALPS codepoint 0x44cd` (`814b05f`, `0`→`1`);
+(c2) `fix(tls): attach ALPS on every Chrome plain-TLS
+dial` (`802ccaf`, gate → `chrome`). Không có test
+mới trong honk (verify ở castctl: JA4 + live 101, xem
+dưới). Không mở PR upstream (quyết định riêng sau).
+Nhánh fork vẫn tồn tại trên GitHub làm bằng chứng;
+cây castctl KHÔNG phụ thuộc vào nó nữa.
+
+Live sau fork (vẫn 502): Go exit 0 2/2 (1909 B,
+md5 `ab159233...` như cũ), Rust exit 1 2/2
+(`error_length=45`) + 1 lần isolated (rs-only). Kết
+luận fork-gate: **fork KHÔNG phải đáp án** — không
+stack thêm patch. Revert `rust/Cargo.toml` +
+`Cargo.lock` về upstream trong cùng PR.
+
+### M4c.5 Nguyên nhân thật: token trong URL (không phải TLS)
+
+Ba phát hiện đo được, theo thứ tự:
+
+1. **JA4-permutation.** Capture có kiểm soát (1 lần Go
+   riêng + 1 lần Rust riêng, sniffer riêng từng cửa
+   sổ): Go cũng permute thứ tự extension mỗi
+   connection (bin Go-only thứ tự khác bin Go phase-1,
+   cùng set). JA4 hash ext nên chuỗi JA4 đầy đủ không
+   bao giờ bằng nhau giữa hai lần chạy bất kỳ — mục
+   tiêu F3 "JA4 bằng nhau" như viết ban đầu là không
+   khả thi theo thiết kế. Mục tiêu đúng: set + hash
+   cipher + counts. Với fork, Rust đạt hết: cipher
+   15+GREASE (không `c009/c00a`), ext 18 (gồm `0005`,
+   `0012`, `44cd`), groups `{GREASE,11ec,001d,0017,
+   0018}`, sigalgs 8 giống hệt, key shares
+   GREASE(1 B)+`11ec`(1216 B)+`001d`(32 B); JA4
+   std `t13d1514ht_acb858a92679_*`, like
+   `t13d1616ht_fdd82fda8608_*` (cipher-hash giống Go,
+   ext-hash khác chỉ vì permutation). Per-extension
+   lengths cũng giống hệt (vd Go 1716 B vs Rust 1716 B:
+   mọi ext cùng length, kể cả `fe0d` 186 B; size
+   1716/1748/1780/1812 chỉ là độ dài ECH GREASE
+   payload ngẫu nhiên, cả hai phía đều vậy).
+   Cùng edge IP `57.144.151.197`: Go 101, Rust 502 —
+   loại trừ giả thuyết edge-IP.
+2. **Full-flow capture** (`sniff-full.py`, AF_PACKET,
+   log từng packet + reassemble 2 chiều; 2 lần Go +
+   1 lần Rust, mỗi lần 1 flow Go / 6 flow Rust do
+   retry): sau Finished, Go gửi 2 record app-data
+   `0x17:1203` + `0x17:106` (wire length), rồi mới
+   nhận 101 (172 B); Rust gửi 1 record 403 B rồi nhận
+   502 (172 B). Cả hai đều có flight [CCS+Finished]
+   64 B giống hệt. Wire length = plaintext + 17
+   (overhead AEAD TLS 1.3: 16 tag + 1 inner type;
+   kiểm chứng: record Finished 53 B = 36 B plaintext
+   (4 header + 32 verify_data SHA-256) + 17) — nên
+   plaintext: Go 1186 + 89 = **1275 B**, Rust 386 B;
+   chênh lệch **889 B**. [CORRECTED fix loop 1: bản cũ
+   ghi "Go 1186 B", "mang thêm 817 B" và "request tĩnh
+   cả hai phía đều là 386 B" là sai — 1203/106 là wire
+   length, không phải plaintext; 1186 B chỉ là record
+   đầu, và 386 B chỉ là request của Rust (probe Go cũ
+   dùng format 3-verbs sai nên cũng ra 386). Số đúng:
+   1275 − 386 = 889 = len(quoted token) − len(literal
+   10 ký tự), suy ra token đã quote dài ≈ 899 ký tự.
+   Record thứ hai là đuôi của request — xem "Mở"
+   cuối section này (đã giải, fix loop 1).]
+3. **Root cause — `%!(EXTRA string=...)`. [SUPERSEDED — see §M4c.7: this whole item is wrong.]** Go
+   `defaultWSURL` (`internal/gateway/connector.go:
+   115-117`): `fmt.Sprintf("%s://%s/v1/noise?vm_id=%s&
+   auth_token=<redacted>", scheme, host, quotePython(
+   vmID, ""), quotePython(hatchToken, ""))` — **3 verbs,
+   4 args**. Go `fmt` render arg thừa thành suffix
+   `%!(EXTRA string=<token>)` gắn vào URL. Probe Go
+   trên cue chứng minh verbatim: với token giả
+   `FAKETOKEN-1234567890`, URL thành
+   `...&auth_token=<redacted>%!(EXTRA string=
+   FAKETOKEN-1234567890)` (len 135). Suy ra token thật
+   dài 783 ký tự (1186 − 386 − 17 wrapper = 783).
+   M4a kết luận "Go gửi literal `auth_token=
+   <redacted>`" là CHƯA ĐỦ: param `auth_token` đúng
+   là literal, nhưng token thật vẫn lên wire trong
+   suffix EXTRA — và edge đọc token ở đó để xác thực
+   upgrade. Rust chỉ gửi literal → edge 502 upgrade
+   không xác thực. Điều này cũng giải thích vì sao
+   rustls (M4b), honk-plain và honk-fork đều 502 như
+   nhau (cả ba đều thiếu token), và vì sao `usage`
+   pass (dùng HTTPS muse.ai bằng cookie, không qua
+   URL WS).
+   [RETRACTED — see §M4c.7: Go sends the token via
+   `auth_token=%s` (4 verbs, 4 args); there is no
+   `%!(EXTRA...)` suffix. The 800/817 B arithmetic and
+   the "token is 783 chars" inference are withdrawn
+   with the story. The capture bins stay as
+   measurements; the attribution does not. What the
+   length gap really is: Go sends the quoted real
+   token, Rust sent the literal.]
+
+[RESOLVED fix loop 1 — record app-data thứ hai của
+Go, 106 B wire (89 B plaintext), gửi cùng timestamp
+5.312 với record đầu, trước 101 (5.409), tái hiện cả
+2 lần Go: là ĐUÔI CỦA REQUEST, không phải message
+riêng; Rust không cần gửi gì thêm.] Cơ chế: Go
+`crypto/tls` dynamic record sizing
+(`conn.go::maxPayloadSizeForWrite`): record app-data
+đầu tiên bị cap ở `tcpMSSEstimate(1208) − 5 (header)
+− 16 (AEAD) − 1 (content-type) = 1186` byte plaintext;
+phần còn lại (89 B) sang record thứ hai. Chứng minh:
+(a) log `sniff-go-full.log`: `5.312 c2s len=1208
+tls=[('0x17', 1203)]` + `5.312 c2s len=111
+tls=[('0x17', 106)]`, 101 ở 5.409; (b) đọc stdlib
+(`crypto/tls/conn.go`, `tcpMSSEstimate = 1208`,
+`maxPayloadSizeForWrite` trừ header + AEAD overhead
++ 1 byte ContentType ở TLS 1.3); (c) probe loopback
+chạy lại (`/tmp/rt-probe/main.go`, gorilla v1.5.3 +
+stdlib): `Write(1186)` → 1 record `[0x17:1203]`,
+`Write(1188)` → 2 record `[0x17:1203][0x17:19]`.
+Loại trừ Noise: gorilla `DialContext` chỉ `req.Write`
+1 lần rồi đọc; Noise chạy sau 101 theo thứ tự code.
+Nó KHÔNG phải nguyên nhân 502: edge trả 502 cho Rust
+sau ~107ms mà không chờ record này — quyết định 502
+dựa trên request.
+
+### M4c.6 Chưa kiểm chứng / bước tiếp theo
+
+- Bảng 13 lệnh + `goal`/`idea`: KHÔNG CHẠY (floor
+  `status` exit 0 chưa đạt; mọi lệnh gateway đều
+  502 cùng nguyên nhân). Không chạy lại cho đủ số —
+  vô nghĩa cho tới khi URL mang token.
+- Bước tiếp theo — LÀM TRONG TASK NÀY (§M4c.7):
+  `default_ws_url` (`rust/castctl-gateway/src/dial.rs:105`)
+  render đúng byte URL của Go:
+  `auth_token={quotePython(hatchToken, "")}` (dùng hatch
+  token thật — hiện hàm nhận `_hatch_token` và bỏ qua).
+  Đây là đảo ngược quyết định an ninh M4a — nhưng chính
+  quyết định M4a đã viết trước điều kiện lật: "if later
+  live proof shows the gateway needs the real token,
+  change 1 place + re-enable test". Live proof là source
+  Go (§M4c.7) + Rust thiếu token thì 502. Thay đổi gồm:
+  1 chỗ trong `default_ws_url` + viết lại test URL (3 test
+  a/b/c) + ma trận tách biến 4 tổ hợp (§M4c.8) + chạy lại
+  4 gates + live probe `status` (nếu 101 thì mới chạy
+  bảng 13 lệnh). Record 89 B pre-101 của Go (§M4c.5) đã
+  giải ở fix loop 1: đuôi request do dynamic record
+  sizing, không cần gửi thêm — live gate 15 label pass
+  mà không có nó.
+- (d) REALITY: vẫn là deviation mở (như M3e) — không
+  có server để probe live interop.
+- Upstream PR cho 4 patch fork: chưa mở; fork branch
+  còn đó, quyết định sau.
+- Disk trên cue: `/` còn ~5.4G sau release build
+  fork (đã dọn 1.5G `debug/incremental` + cache build
+  cũ 7.8G `/dev/shm/v67-target` + 11G
+  `/tmp/castctl-rust-m4/rust/target` — đều là cache
+  regenerable của PR đã merge, binary giữ lại;
+  xem báo cáo M4c).
+
+### M4c.7 Correction — Go gửi token thật; hai câu chuyện cũ đều SAI (2026-11-05, Boss đọc trực tiếp)
+
+- Sự thật (đọc từ source, không qua rendered text):
+  Go `internal/gateway/connector.go:113-120`:
+  `fmt.Sprintf("%s://%s/v1/noise?vm_id=%s&auth_token=%s",
+  scheme, host, quotePython(vmID, ""),
+  quotePython(hatchToken, ""))` — **4 verbs, 4 args**.
+  Token thật được URL-quote `safe=""` (comment trên:
+  'with the token URL-quoted (safe=""), as in
+  gateway.py'). `quotePython`
+  (`internal/gateway/media.go:19-38`): byte UTF-8,
+  unreserved `A-Za-z0-9_.-~` + safe literal, còn lại
+  `%XX` hoa — đúng semantics của Rust
+  `quote_path_param` (`castctl-transport/src/routes.rs:
+  148-158`). Bằng chứng bằng số (không tin rendered
+  text): trong `connector.go`,
+  `grep -c 'auth_token=%s'` = 1,
+  `grep -c 'auth_token=<redacted>'` = 0. Grep toàn
+  repo: mọi chuỗi `<redacted>` / `[redacted]` chỉ nằm
+  trong test redaction và `internal/redact/*` — không
+  có trong đường dựng URL.
+- Vì sao kết luận cũ sai: (a) Bẫy display redaction
+  (đã ghi 2 lần trong M4a, lần thứ 3 vẫn ngã): tooling
+  render `auth_token=<bất cứ gì>` thành
+  `auth_token=<redacted>` trong output exec/read — `sed`
+  in ra `<redacted>` ở chỗ file chứa `%s`. Chỉ
+  `grep -c` / độ dài / hash mới đáng tin. (b) M4a đọc
+  nhầm dòng test redaction thành đường dựng URL, rồi
+  ghi thành "3 verbs, 4 args" + "Boss decision: mirror
+  Go byte-for-byte" — quyết định đó dựa trên tiền đề
+  sai. (c) Câu chuyện `%!(EXTRA string=...)` trong
+  §M4c.5: dựng từ số đo capture (800 B chênh) + một
+  probe Go mà format string đưa vào là bản 3-verbs từ
+  bản ghi M4a sai — với format thật (4 verbs, 4 args)
+  Go không bao giờ sinh suffix `%!(EXTRA...)`. Probe
+  đó chỉ tái hiện bản ghi sai, không đo Go thật. Số
+  học 800/817 B và suy ra "token dài 783 ký tự" đều bị
+  rút lại cùng câu chuyện. Các bin capture vẫn là đo
+  thật (Go request dài hơn Rust), nhưng attribution
+  "800 B = suffix EXTRA" là sai — chênh lệch đúng là
+  889 B (Go request 1275 B − Rust 386 B), tức độ dài
+  token thật đã quote trừ literal 10 ký tự (Go gửi
+  token, Rust gửi literal); token đã quote dài
+  ≈ 899 ký tự (fix loop 1, xem §M4c.5).
+- Hệ quả: (i) M4a deviation 12, M4b.2 deviation 1,
+  M4b.3 "TLS fingerprint blocks the live gateway",
+  §M4c.5 item 3 và §M4c.6 "bước tiếp theo" cũ đều
+  SUPERSEDED (đánh dấu tại chỗ). (ii) M4b probe
+  401/502: cả hai spelling đều thiếu token hợp lệ —
+  401 là encoded-placeholder, 502 là
+  literal-placeholder; 502 là lỗi xác thực token,
+  KHÔNG phải "đã qua token check". (iii) So sánh 3
+  chiều M4b (rustls+literal → 502, OpenSSL+literal →
+  502, Go+literal → 101) bị confound hoàn toàn: Go
+  gửi token thật, hai bên kia không — 'fingerprint
+  decides' chưa từng được isolate. Fork M4c
+  (ClientHello set-identical, vẫn 502) nhất quán với
+  nguyên nhân token. TLS có cần Chrome hay không —
+  chỉ ma trận tách biến §M4c.8 mới trả lời được.
+  (iv) Điều kiện lật trong M4a ("if later live proof
+  shows the gateway needs the real token, change 1
+  place + re-enable test") nay đã đủ: live proof là
+  source Go + Rust thiếu token thì 502. Fix:
+  `default_ws_url` render `auth_token={quote(token)}`
+  — 1 chỗ, xem §M4c.7b.
+- Cái gì vẫn đúng: hand-written `ws_upgrade` (gửi
+  target verbatim); `http::Uri` reject `<>`
+  (mechanism); bẫy chrome-mode direct-profile; JA4
+  permutation (Go cũng permute); hiệu đính 29/30-char;
+  fork không phải đáp án (nhưng vì lý do khác: thiếu
+  token, không phải vì parity chưa đủ); bin capture và
+  số đo ClientHello.
+- An ninh (đảo ngược M4a, ghi rõ): token thật nay đi
+  trong URL WS — server/proxy log có thể thấy. Đây là
+  hành vi của Go production (0.9.0 relay turn thật qua
+  URL này), và edge yêu cầu nó (502 khi thiếu). Giảm
+  thiểu giữ nguyên: URL không bao giờ vào log/lỗi của
+  Rust — mọi error trên đường dial là chuỗi cố định
+  hoặc chỉ độ dài (test (b) bắt chuỗi error-text của
+  đường dial; các form 45/35/29-char được pin bằng unit
+  test), và workspace không có log macro nào (grep 0
+  trong `castctl-gateway/src`, `castctl-transport/src`,
+  `castctl-cli/src`, ngoài import `valid_log_level` ở
+  `run.rs:34`) nên không có sink log nào cho URL đi
+  tới. `redact` KHÔNG được nối dây (`redact_string` 0
+  caller, không crate nào depend `castctl-log-redact`)
+  — bảo vệ thật là fixed-string, không phải redaction
+  (fix loop 1, safety N1; xem cả doc `default_ws_url`
+  ở `dial.rs`). Token không lưu trên `Gateway`. Không
+  có cách khác đã chứng minh: literal → 502 ở cả 3 TLS
+  engine.
+
+### M4c.7b URL fix + test (task này)
+
+- `default_ws_url` dùng `quote_path_param` (đã đúng
+  semantics quotePython safe="") cho cả `vm_id` và
+  `hatch_token`:
+  `{scheme}://{host}/v1/noise?vm_id={quote(vm_id)}&auth_token={quote(token)}`.
+- Tests (TDD red trước): (a) byte-exact với hằng tự
+  tính tay bằng Python `quote(safe="")` — token giả
+  `FAKE+tok/en=1 2é` → quoted
+  `FAKE%2Btok%2Fen%3D1%202%C3%A9`, URL dài 88 ký tự
+  (fix loop 1 thêm case `% & ? #`, chuỗi rỗng,
+  passthrough unreserved, vm_id rỗng); (b) error-text
+  của đường dial fail không chứa token giả (raw lẫn
+  quoted) — phạm vi đúng của (b) là error-text của
+  gateway crate, không phải log output thật (workspace
+  không có logger để capture; xem §M4c.7); (c) URL
+  chứa token đã quote + request ghi lại bởi
+  RawUpgradeServer chứa token đã quote.
+- Quote với byte UTF-8 không hợp lệ: Go string có thể
+  chứa byte UTF-8 không hợp lệ (quote theo byte), Rust
+  `&str` không biểu diễn được — assessed non-issue:
+  token đi qua JSON nên luôn là UTF-8 hợp lệ, khác biệt
+  này không tới được (fix loop 1, red-team NIT-4).
+
+### M4c.8 Ma trận tách biến + quyết định TLS + live gate 13 lệnh (task này)
+
+Ma trận (cue, profile `no.0`, lệnh `status`, 1 lần/ô;
+Go ref exit 0, 1909 B):
+
+| tổ hợp | exit | stdout | kết luận |
+|---|---|---|---|
+| token + honk-chrome | 0 | 1905 B, md5 `511ca34f…` | 101 |
+| token + rustls | 0 | 1905 B, md5 `511ca34f…` (cmp IDENTICAL với ô honk) | 101 |
+| literal + honk-chrome | 502 | đã biết ở `851ff99` (3/3), không chạy lại | token thiếu → 502 |
+| literal + rustls | 502 | đã biết ở M4b, không chạy lại | token thiếu → 502 |
+
+Quyết định (quy tắc Boss: rustls+token = 101 → giữ
+rustls): **GIỮ RUSTLS, gỡ honk khỏi đường gateway.**
+Token là biến quyết định; TLS engine không phải. Ô
+rustls đo bằng switch tạm `CASTCTL_GATEWAY_TLS_ENGINE`
+(env var, chỉ sống trong lúc đo) + `rustls_tls_wrap`
+tạm trong `castctl-transport/src/tls.rs`; cả hai đã
+xóa. Giới hạn audit trail (fix loop 1, red-team
+NIT-2): không log nào trên cue ghi ô nào chạy engine
+nào, và switch tạm chưa từng được commit — attribution
+ô honk dựa vào record lúc đo. Kết luận giữ rustls
+không phụ thuộc ô đó: ô token+rustls → 101 được
+corroborate độc lập bởi live gate cuối (release binary
+md5 `6a43a62f…`, rustls-only, 15 label, md5 stdout
+trùng hệt `matrix-token-rustls.out`). Hai ô literal là
+số liệu cũ (đã disclose ở bảng trên), không chạy lại
+trong cùng cửa sổ. Code bên thua đã gỡ: `honk_tls_wrap`,
+`build_gateway_tls_connector`, test
+`gateway_tls_connector_builds_for_host`,
+`tests/honk_tls.rs` (3 tokio tests); `honk-outbound` /
+`honk-config` ở lại vì outbound dispatch vẫn dùng
+(M3). `tls_wrap` trong gateway `dial.rs` gọi
+`rustls_tls_wrap` vĩnh viễn. Không còn reference tới
+`honk_tls_wrap` / `build_gateway_tls_connector` /
+`CASTCTL_GATEWAY_TLS_ENGINE` trong `rust/` (grep 0,
+trừ PORTING history).
+
+Live gate (cue, profile `no.0`, binary release cuối
+md5 `6a43a62fd6ebe2c9ad64609701f81ac6`; Go 0.9.0;
+mỗi lệnh ≤2 lần; stderr cả hai bên đều rỗng):
+
+| lệnh | Go exit | Rust exit | khớp raw? | khớp sau chuẩn hoá? | khác biệt |
+|---|---|---|---|---|---|
+| status | 0 | 0 | không (1909 vs 1905 B) | giá trị JSON bằng nhau, xem ghi chú | `1.0` → `1`, 2 chỗ, 4 byte |
+| threads | 0 | 0 | có | có | — |
+| threads --all | 0 | 0 | có | có | — |
+| history --limit 3 | 0 | 0 | có | có | — |
+| history --limit 3 --raw | 0 | 0 | có | có | — |
+| files --limit 3 | 0 | 0 | có | có | — |
+| feed | 0 | 0 | có | có | — |
+| feed --raw | 0 | 0 | có | có | — |
+| feed-status | 0 | 0 | có | có | — |
+| feed-prompt | 0 | 0 | có | có | — |
+| goals | 0 | 0 | có | có | — |
+| ideas | 0 | 0 | có | có | — |
+| unread | 0 | 0 | có | có | — |
+| goal goal_62b884f95116 | 0 | 0 | có | có | — |
+| idea idea_0b270d463ca24cc2b863ffdc79b1ea30 | 0 | 0 | có | có | — |
+
+14/15 khớp raw byte-for-byte; `status` là lệnh duy
+nhất lệch, và chỉ lệch cách viết số. Chuẩn hoá trong
+bảng này không cần bỏ field nào: không có field thời
+gian nào đổi giữa hai lần chạy (cả hai lần chạy
+`status` mỗi bên đều byte-identical với lần đầu).
+
+Ghi chú `status` — `1.0` → `1` (đã biết từ M4b, không
+phải lỗi M4c): server gửi `size: 1.0` trong
+`bookmark_display_crop` (2 chỗ). Go decode bằng
+`json.Number` (`internal/gateway/calls.go:182`) nên
+giữ nguyên literal `1.0`. Rust qua bridge
+`from_serde` thành `JsonValue::Float(1.0)`, rồi
+`format_json_float` dùng Rust `Display` (`format!
+("{f}")`) nên ra `1`. Đã kiểm chứng: parse JSON hai
+bên bằng nhau (`json.load` equal: True), mỗi bên ổn
+định qua 2 lần chạy. Đây đúng là hạn chế đã ghi trong
+`bridge.rs` ("float-spelled literal is not preserved
+character-for-character") và PORTING §M4b — sửa cần
+giữ literal số trong model `JsonValue` (thay đổi
+shared serializer, ảnh hưởng mọi lệnh shaped), ngoài
+phạm vi M4c nên KHÔNG sửa ở đây; follow-up riêng.
+[FIXED pre-merge — xem §M4c.10: bridge nay giữ literal
+số trong model `JsonValue`, live gate sau fix 15/15
+byte-identical raw.]
+
+Gates (cue, 1.99.1, `CARGO_TARGET_DIR=/tmp/m4c-a/m4c-target`):
+`cargo fmt --check` 0; `cargo build --workspace` 0;
+`cargo test --workspace` **469 passed / 0 failed**
+(baseline 470 ở `851ff99`; net −1 = −1 test
+`tests/honk_tls.rs` −1 test
+`gateway_tls_connector_builds_for_host` (unit trong
+`tls.rs`) +1 test `ws_url_is_byte_exact_go_url` —
+[CORRECTED fix loop 1: bản cũ ghi −3/+3 là sai;
+`honk_tls.rs` ở `851ff99` chỉ có 1 test,
+`connector.rs` 20→20, `gateway.rs` 22→23, `tls.rs`
+unit 2→1]); `cargo clippy --workspace --all-targets
+-- -D warnings` 0; secret-grep 0 value-pattern;
+`cargo build --release -p castctl-rs` 0. Sự cố giữa
+chừng: `/` trên cue đầy 100% khi link debug
+(`ld terminated with signal 7 [Bus error]`) do cây
+debug `/tmp/m4c-a/m4c-target/debug` phình 15G + dir
+release cũ `/tmp/m4c-a/m4c-target-release` 1.3G (đều
+của session này) — đã xóa cả hai, build lại từ đầu,
+đĩa hồi ~10–17G.
+
+`Cargo.lock` (+17 dòng) là regeneration, không đổi
+version: `castctl-cli` nhận thêm dep
+`castctl-gateway`/`castctl-shared`/`castctl-transport`/
+`chrono`/`serde_json`/`tokio`; `castctl-gateway` thêm
+`base64`/`bytes`/`castctl-config`/`http`/`regex`;
+`castctl-shared` thêm `chrono`/`serde_json`;
+`castctl-transport` thêm `rustls`/`tokio-rustls`/
+`webpki-roots`; `rustls 0.23.46` thêm dep `log`
+(checksum không đổi). Không crate mới nào mang secret;
+`log` chỉ là facade và workspace không có log macro
+nào (fix loop 1, safety N4).
+
+Evidence (cue): ma trận
+`/tmp/m4c-a/live/matrix-token-honk.{out,err}`,
+`/tmp/m4c-a/live/matrix-token-rustls.{out,err}`; gate
+`/tmp/m4c-a/live/gate/go-*.out`, `rs-*.out` (+
+`*.err` rỗng, `*.exit`); logs
+`/tmp/m4c-a/gates-{fmt,build,test,clippy}.log`,
+`/tmp/m4c-a/m4c-release-final2.log`.
+
+GAP (fix loop 1): 4 file `.exit` thiếu trên cue
+(`go-goal.exit`, `go-idea.exit`, `go-status2.exit`,
+`rs-status2.exit`) — không log nào ghi exit code của
+đúng 4 lần chạy đó (grep `go-goal|go-idea|go-status2|
+rs-status2` trong `/tmp/m4c-a/*.log` = 0 hit), nên
+KHÔNG bịa file. Exit 0 của 4 lần chạy chỉ suy ra được
+(`.out` non-empty, cmp-identical với phía bên kia,
+`.err` rỗng).
+
+### M4c.9 Fix loop 1 — review round 1 (2026-11-05)
+
+1 commit, xử lý hết 15 NIT trong 13 hàng của 3 review vòng 1
+(technical 5, safety 5, red-team 5; 0 BLOCKING).
+Gates sau loop: xem §M4c.8 (cập nhật trong commit này).
+
+| # | NIT | Disposition |
+|---|---|---|
+| 1 | Technical NIT-2: số học test-count sai | fixed — §M4c.8 ghi số đúng: −1 `honk_tls.rs`, −1 `gateway_tls_connector_builds_for_host`, +1 `ws_url_is_byte_exact_go_url` (đếm lại từng file ở 2 head) |
+| 2 | Technical NIT-1: test (a) thiếu case | fixed — thêm 4 case (`% & ? #`, chuỗi rỗng, passthrough unreserved, vm_id rỗng) vào `ws_url_is_byte_exact_go_url`, hằng tự tính bằng Python `quote(safe="")` |
+| 3 | Technical NIT-4: claim (b) rộng hơn test | fixed — §M4c.7 + §M4c.7b thu hẹp đúng phạm vi: error-text của gateway crate, không phải log output thật |
+| 4 | Technical NIT-5 + red-team NIT-3: thiếu 4 file `.exit` | recorded as GAP — không log nào ghi exit code 4 lần chạy đó, KHÔNG bịa file (xem §M4c.8) |
+| 5 | Red-team NIT-1: số học request sai + 106 B | fixed — §M4c.5 số đúng (Go 1275 B, chênh 889 B, token ≈ 899 ký tự); 106 B ĐÃ GIẢI: đuôi request do dynamic record sizing (log + stdlib + probe chạy lại) |
+| 6 | Red-team NIT-4: quote byte UTF-8 không hợp lệ | recorded — assessed non-issue, 1 dòng trong §M4c.7b (token qua JSON nên luôn UTF-8 hợp lệ) |
+| 7 | Red-team NIT-5: `split_ws_url` fallback lặng về default port | recorded, noted — pre-existing, ngoài phạm vi, KHÔNG sửa (`dial.rs` `split_ws_url`: port parse fail → `(authority, default_port)` thay vì lỗi) |
+| 8 | Red-team NIT-2: ô literal cũ + ô rustls thiếu audit trail; technical NIT-3: ô token+honk thiếu corroboration độc lập | recorded — literal cells đã disclose; corroboration của ô token+rustls bằng live gate cuối ghi rõ trong §M4c.8; câu corroboration đó cũng bao phủ ô token+honk |
+| 9 | Safety N1: doc `redact` sai | fixed — doc `default_ws_url` (`dial.rs`) + §M4c.7 sửa đúng cơ chế (fixed-string + 0 log macro; `redact_string` 0 caller, không crate nào depend `castctl-log-redact`) |
+| 10 | Safety N2: `request_url` nhúng URL vào lỗi | fixed — `auth.rs` `request_url` trả chuỗi cố định `"invalid URL"`; red test `request_url_invalid_url_error_is_fixed_string` (TDD: FAIL trước, PASS sau) |
+| 11 | Safety N3: thiếu test render CLI | fixed — test `classify_error_connection_variants` (`network.rs`): ConnectionError length-only, ConnectionDown render message (đã truncate 200 ở construction) / bare khi rỗng |
+| 12 | Safety N4: lock diff rộng hơn draft | recorded — mô tả đúng 1 dòng trong §M4c.8 (regeneration, `log` cho rustls, checksum không đổi) |
+| 13 | Safety N5: thiếu test `wss://` TLS-fail | fixed — test `dial_wss_tls_failure_error_is_fixed_string_without_token` (`tests/gateway.rs`): dial `wss://` tới listener plain 127.0.0.1 → lỗi là chuỗi cố định 29-char, không chứa token |
+
+### M4c.10 Pre-merge fix — bridge giữ literal số, `status` 15/15 (Boss, 2026-11-05)
+
+Boss order trước khi merge PR #69: sửa luôn lệch `1.0`
+vs `1` trong PR này, không để thành follow-up — mục tiêu
+của port là output khớp Go, và bug ở bridge JSON (drop
+float literal) sẽ ảnh hưởng mọi lệnh khác có số thực.
+
+Điểm rơi (đã đo, 2 research độc lập đồng thuận):
+`from_serde` (`castctl-shared/src/bridge.rs:38-44`) —
+`as_f64()` → `Float(f64)` giết literal; `format_json_float`
+(`resources.rs:355`, `format!("{f}")`) chỉ là chỗ mất mát
+lộ ra (`1.0f64` → `"1"`). Sửa mỗi `format_json_float`
+không cứu được vì thông tin đã mất từ bước parse. Go phía
+bên kia: `decodeJSONValue` dùng `dec.UseNumber()`
+(`jsonutil.go:25-45`), `writeJSON` Encoder indent 2,
+không escape HTML — mọi số là literal string, phát
+verbatim.
+
+Quyết định shape — (i) `Float(f64)` → `Float(String)`
+literal, GIỮ `Int(i64)`:
+- Ít xâm lấn nhất: split Int/Float và semantics
+  integer-first của `as_int64` giữ nguyên cấu trúc; chỉ
+  payload của `Float` đổi kiểu. Không variant mới, không
+  chạm 5 điểm dựng `Int(v)` production, không đổi match
+  arm nào ngoài các chỗ dùng payload `Float`.
+- Cả hai fixture quyết định đều đúng: `9007199254740993`
+  (> 2^53, vừa `i64`) → `Int` (exact, như cũ);
+  `18446744073709551615` (> `i64::MAX`) →
+  `Float("18446744073709551615")` literal — sửa luôn lỗi
+  làm sai chữ số hiện tại (`...52000`).
+- Biến thể một variant `Num(String)` thay cả Int/Float
+  (research (b) đề xuất): sạch hơn về lý thuyết nhưng
+  chạm mọi match arm Int/Float và mọi điểm dựng số —
+  xâm lấn hơn mà không giữ đúng thêm case nào so với (i):
+  cả hai biến thể đều đọc literal từ
+  `Number::to_string()` trong `from_serde`, và literal
+  đó đã mất `-0` từ bước parse (xem `-0` dưới đây). (i)
+  được chọn vì ít xâm lấn hơn.
+- `RawValue` / `arbitrary_precision`: `arbitrary_precision`
+  đã bật workspace-wide (`rust/Cargo.toml:58`) — chính nó
+  khiến `Number` giữ literal; vấn đề không nằm ở serde mà
+  ở bridge vứt literal đi. `RawValue` cần feature mới +
+  đường decode riêng (gateway decode ra `Value`, không bao
+  giờ chứa `RawValue`) + vẫn phải đổi enum — xâm lấn hơn
+  ở mọi chiều, lợi ích 0 (`Number::to_string()` đã trả đúng
+  literal, đã đo). Không đổi `Cargo.toml`, không thêm dep.
+- `PartialEq` đổi theo literal (`1.0 != 1.00`,
+  `1e3 != 1000`), khớp `json.Number` (string type) — đã đo:
+  `Value("1.0") == Value("1.00")` → false.
+- NaN/Inf: sau đổi này không còn đường production nào dựng
+  `Float` từ `f64` (chỉ `from_serde` từ số JSON đã decode,
+  mà serde reject literal NaN/Inf) nên rule cũ "render
+  NaN/Inf thành `null`" không còn trigger nào tới được.
+  Literal parse ra `±Inf` (vd `1e999`) vẫn là token số JSON
+  hợp lệ và được emit verbatim, đúng như Go marshal
+  `json.Number("1e999")`; `as_int64` của nó trả `None`,
+  khớp hành vi cũ (`Float(inf)` → `None`).
+- `format_json_float` mất caller duy nhất (arm `Float`) nên
+  bị xóa cùng các case float của test
+  `probe_json_float_format`; phần pin string-escaping của
+  test đó giữ lại thành test riêng. Không còn `f64` nào
+  được format trong model này; nếu tương lai cần dựng số
+  từ `f64`, dùng `Number::from_f64(f).to_string()` (spelling
+  canonical kiểu Go, đã đo).
+
+Blast radius (tự grep toàn workspace trước khi đổi):
+chỉ `castctl-shared` match/dựng `JsonValue` shared trực
+tiếp. `castctl-telegram` 0 dùng shared `JsonValue`;
+`castctl-cli`/`castctl-gateway` chỉ dùng qua `from_serde`
++ helper `as_*`, không match variant (mọi `JsonValue::`
+khác trong hai crate đó là `castctl-config::JsonValue` /
+`serde_json::Value`). Fixture `event.rs:244`
+(`Float(42.0)`) → `Float("42.0")`, `sessions.rs:212`
+(`Float(1792821457000.0)`) → `Float("1792821457000.0")`
+— cả hai đi qua `as_int64` nên giá trị giữ nguyên.
+
+`as_int64` với literal (giữ đúng semantics Go, đã pin
+bằng test `from_serde_float_as_int64_follows_go`):
+
+| literal | kết quả | vì sao |
+|---|---|---|
+| `"1e3"` | 1000 | parse f64 → truncate |
+| `"1.0"`, `"0.0"`, `"-0.5"` | 1, 0, 0 | truncate về 0 |
+| `"9007199254740993"` | exact | vừa i64 |
+| `"9223372036854775808"`, `"1e100"` | `i64::MIN` | Go `int64(f)`, \|f\| ≥ 2^63 |
+| `"1e999"` | `None` | parse ra +Inf |
+
+Fixture test (TDD: đỏ trước trên code cũ — fixture
+`1.0` render `"size":1`, rồi xanh sau fix):
+`castctl-shared/tests/json_number_literals.rs`,
+`status_numbers_keep_go_literal_spelling` — chạy đường
+thật `from_serde` → `summarize_status` →
+`status_summary_to_json`, assert output text khớp byte
+với Go (chuỗi kỳ vọng viết tay, không tính lại bằng code
+đang test; output Go đầy đủ dán trong comment của test,
+đo bằng probe Go verbatim `decodeJSONValue` + `writeJSON`):
+
+| fixture (server gửi) | Go phát ra | Rust sau fix |
+|---|---|---|
+| `1.0` | `1.0` | `1.0` |
+| `0.0` | `0.0` | `0.0` |
+| `1e3` | `1e3` | `1e3` (discriminator: đường `f64` cho `1000`) |
+| `1.5` | `1.5` | `1.5` |
+| `9007199254740993` | `9007199254740993` | `9007199254740993` |
+| `1.50` | `1.50` | `1.50` |
+| `1E3` | `1E3` | `1E3` |
+| `18446744073709551615` | `18446744073709551615` | `18446744073709551615` |
+
+Known limitation — `-0` (vòng 3, đã chứng minh bằng
+probe, không fix được ở bridge): Go phát `-0` (đo bằng
+probe Go verbatim: `json.Number("-0")` marshal ra `-0`);
+Rust phát `0`. Nguyên nhân nằm ở bước parse, trước
+`from_serde`: serde_json 1.0.145 với
+`arbitrary_precision`, `parse_any_number` (`de.rs`) quét
+literal vào buffer rồi thử `buf.parse::<i64>()` trước —
+`"-0"` parse ra `Ok(0)` → `ParserNumber::I64(0)`, literal
+bị vứt. Probe Rust đo trực tiếp:
+`from_str::<Value>("-0")` cho `to_string() == "0"`,
+`as_i64() == Some(0)`, không phân biệt được với input
+`"0"`. Vì vậy special-case trong `from_serde` (đã thử:
+kiểm `n.to_string() == "-0"`) không bao giờ kích hoạt —
+test đỏ vẫn đỏ sau khi thêm code; code đó đã gỡ, không
+để lại dead code đánh lừa người sau. Biến thể
+`Num(String)` cũng không cứu được qua cùng đường decode
+(nó cũng chỉ đọc `to_string()`). Fix thật cần tầng decode
+(giữ raw number text bằng `RawValue` / custom number
+handling tại các điểm decode của gateway:
+`gateway.rs:903`, `auth.rs:188,255,309`,
+`subscription.rs:125`) — việc riêng, cần quyết định
+thiết kế riêng, không làm trong fix loop này. Không
+payload thực nào của server chứa `-0` (counts / sizes /
+timestamps đều không âm-zero); hành vi hiện tại được pin
+bằng test
+`from_serde_neg_zero_collapses_to_int_zero_known_limitation`.
+
+Live gate sau fix (cue, profile `no.0`, release binary
+md5 `be0614aa9460d29c3e9a7edbad5c6fe1`, Go 0.9.0; mỗi lệnh 1 lần/bên, đều trong
+giới hạn ≤2 lần; stderr cả hai bên đều rỗng, 0 byte):
+
+| lệnh | Go exit | Rust exit | khớp raw? | khác biệt |
+|---|---|---|---|---|
+| status | 0 | 0 | có (1909 B = 1909 B) | — (`"size": 1.0` cả hai, 2 chỗ) |
+| threads | 0 | 0 | có | — |
+| threads --all | 0 | 0 | có | — |
+| history --limit 3 | 0 | 0 | có | — |
+| history --limit 3 --raw | 0 | 0 | có | — |
+| files --limit 3 | 0 | 0 | có | — |
+| feed | 0 | 0 | có | — |
+| feed --raw | 0 | 0 | có | — |
+| feed-status | 0 | 0 | có | — |
+| feed-prompt | 0 | 0 | có | — |
+| goals | 0 | 0 | có | — |
+| ideas | 0 | 0 | có | — |
+| unread | 0 | 0 | có | — |
+| goal goal_62b884f95116 | 0 | 0 | có | — |
+| idea idea_0b270d463ca24cc2b863ffdc79b1ea30 | 0 | 0 | có | — |
+
+**15/15 byte-identical raw; không label nào regress.**
+Ghi chú `status` trong §M4c.8 ("follow-up riêng") nay đã
+lỗi thời — fix này chính là follow-up đó, làm trong cùng
+PR theo lệnh Boss. `seen_at_ms` là timestamp server-side
+đã lưu, ổn định giữa các lần chạy: giá trị
+`1793894108735` giống hệt trong cả 6 output `status` Go
+trên cue (gate, gate2, 3 probe cũ, go-full) và cả 2
+output Rust. `status` Go gate1 vs gate2 chỉ lệch ở
+`"sessions"`: 112 → 114 (live state đổi). Evidence:
+`/tmp/m4c-a/live/gate2/` (`go-*.out` / `rs-*.out` +
+`*.err` rỗng + `*.exit` đều 0).
+
+Gates (cue, 1.99.1, `CARGO_TARGET_DIR=/tmp/m4c-a/m4c-target`,
+ở head cuối sau fix): `cargo fmt --check` 0; `cargo
+build --workspace` 0; `cargo test --workspace` **567
+passed / 0 failed** (+2 so với 565 ở `2b70a07`: 1
+integration test mới + 1 unit test `as_int64` mới; test
+float cũ đổi tên/kỳ vọng, không đổi số lượng);
+`cargo clippy --workspace --all-targets -- -D warnings`
+0; `cargo build --release -p castctl-rs` 0 (binary md5
+`be0614aa9460d29c3e9a7edbad5c6fe1`). Flake ghi nhận: lần chạy test đầu fail 1
+test `castctl-cli` (`unknown_profile_is_typed_cookies_missing`,
+`create_dir_all` → `AlreadyExists`) — race có sẵn trong
+`temp_home` (`network.rs`: nhiều test song song dùng chung
+đường dẫn theo pid + `remove_dir_all` trong setup), không
+liên quan đến đổi này (diff không chạm `network.rs`); chạy
+lại không đổi code thì 567/0. Cơ chế (đọc từ code
+`network.rs:752-768`): 6 test dùng chung
+`temp_home("home")` qua `isolated_env()` — cùng một đường
+dẫn trong một process test (cargo chạy test song song nhiều
+thread, cùng pid); `remove_dir_all` trong setup của test B
+xóa HOME của test A đang chạy giữa chừng, nên A đọc
+config/cookies khác đi và fail flaky. (Số 469 trong §M4c.8 là
+trước rebase; sau rebase lên `07e1c0d` là 565.)
 
 ## M5a — Telegram bot core (crate `castctl-telegram`, 2026-11-05)
 

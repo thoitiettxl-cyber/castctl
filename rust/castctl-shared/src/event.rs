@@ -241,7 +241,7 @@ mod tests {
             (
                 "json.Number seq",
                 obj(&[
-                    ("seq", JsonValue::Float(42.0)),
+                    ("seq", JsonValue::Float("42.0".to_string())),
                     ("payload", obj(&[("display_text", s("x"))])),
                 ]),
                 EventRow {

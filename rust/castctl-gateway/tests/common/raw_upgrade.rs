@@ -7,7 +7,7 @@
 //! parsing), answers 101 with a correct
 //! `Sec-WebSocket-Accept`, then closes. It does NOT speak
 //! Noise — a dial against it fails at the Noise handshake
-//! step, which is exactly what the literal-token tests
+//! step, which is exactly what the token-URL tests
 //! expect (they assert on the upgrade bytes, not on a
 //! round-trip).
 //!
