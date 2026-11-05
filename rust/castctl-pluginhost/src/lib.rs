@@ -29,3 +29,15 @@
 //! bare `*char` method (`callbacks_unix.go:208,223,244`).
 //! There is no safe pure-Rust equivalent, and this task
 //! forbids `unsafe` outside libraries. See `loader.rs`.
+
+pub mod checksum;
+pub mod compat;
+pub mod discovery;
+pub mod error;
+pub mod identity;
+pub mod loader;
+pub mod paths;
+pub mod pluginabi;
+pub mod shadow;
+pub mod support;
+pub mod text;
