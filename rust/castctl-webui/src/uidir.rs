@@ -221,12 +221,23 @@ pub fn serve_ui_dir(config_dir: &Path, ui_dir: &str, method: &str, path: &str) -
             }
         }
     }
-    let mut headers = shell_headers();
-    headers.push((
-        "Content-Type".to_string(),
-        ui_dir_content_type(resolved.to_str().unwrap_or("")).to_string(),
-    ));
-    headers.push(("Content-Length".to_string(), data.len().to_string()));
+    // Go uidir.go asset path sets exactly these four
+    // headers — NOT the shell's text/html Content-Type
+    // (shell_headers() carries one, so building from it
+    // and pushing the real type produced TWO Content-Type
+    // headers, text/html first).
+    let headers = vec![
+        (
+            "Content-Type".to_string(),
+            ui_dir_content_type(resolved.to_str().unwrap_or("")).to_string(),
+        ),
+        ("Cache-Control".to_string(), "no-store".to_string()),
+        (
+            "X-Content-Type-Options".to_string(),
+            "nosniff".to_string(),
+        ),
+        ("Content-Length".to_string(), data.len().to_string()),
+    ];
     Resp {
         status: 200,
         headers,
@@ -272,5 +283,43 @@ pub fn serve_ui_dir_shell(config_dir: &Path, root: &Path) -> Resp {
         status: 200,
         headers,
         body: data,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn tmpdir() -> PathBuf {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "castctl-webui-uidir-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn asset_has_exactly_one_content_type() {
+        // F-B4: building asset headers from shell_headers()
+        // and pushing the real type produced TWO
+        // Content-Type headers (text/html first).
+        let dir = tmpdir();
+        let root = dir.join("ui");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("app.js"), b"console.log(1);\n").unwrap();
+        let resp = serve_ui_dir(&dir, "ui", "GET", "/app.js");
+        assert_eq!(resp.status, 200);
+        let cts: Vec<_> = resp
+            .headers
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("Content-Type"))
+            .collect();
+        assert_eq!(cts.len(), 1, "{:?}", resp.headers);
+        assert_eq!(cts[0].1, "text/javascript; charset=utf-8");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

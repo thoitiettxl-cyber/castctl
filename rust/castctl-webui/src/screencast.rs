@@ -717,11 +717,22 @@ pub fn handle_screencast_ws_http(
     starter_present: bool,
 ) -> Resp {
     match ws_pre_upgrade(registry, session, starter_present) {
-        Ok(_) => error_resp(
-            503,
-            "screencast_unavailable",
-            "screencast unavailable in this build (rebuild with -tags with_chromedp)",
-        ),
+        Ok(profile) => {
+            // The session was consumed by ws_pre_upgrade;
+            // the plain-HTTP path has no socket to run it
+            // on, so release the profile before answering
+            // 503 — otherwise the profile stays Busy and
+            // every later mint/upgrade for it fails (F-D6 /
+            // safety M-1). Latent in M6b (starter always
+            // None, so this arm is unreachable), but it
+            // must not ship as a strand.
+            registry.release(&profile);
+            error_resp(
+                503,
+                "screencast_unavailable",
+                "screencast unavailable in this build (rebuild with -tags with_chromedp)",
+            )
+        }
         Err(resp) => resp,
     }
 }
@@ -878,6 +889,20 @@ pub async fn handle_ws_upgrade(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn plain_http_ws_releases_session() {
+        // F-D6: with a starter present, a plain-HTTP GET
+        // to /screencast/ws consumed the session and
+        // returned 503 without releasing it — the profile
+        // stayed Busy forever. A second mint must succeed.
+        let r = ScreencastRegistry::new();
+        let tok = r.mint("muse01").unwrap();
+        let resp = handle_screencast_ws_http(&r, &tok, true);
+        assert_eq!(resp.status, 503);
+        assert!(r.mint("muse01").is_ok());
+    }
 
     #[test]
     fn registry_mint_consume_release() {
