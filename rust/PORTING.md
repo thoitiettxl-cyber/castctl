@@ -5985,42 +5985,43 @@ by principle and record the reason:
 3. Never lower gate criteria; never claim "match"
    without output.
 
-## Hiệu năng (baseline) — M-perf-2
+## Hiệu năng (baseline) — M-perf-3
 
-Ngày: 2026-11-05 (run9, `2026-11-05T18:19:48Z`, commit `740e2dc`).
+Ngày: 2026-11-05 (run10, `2026-11-05T21:45:03Z`, commit `fbaa0d7`).
 Máy: cue, Linux 6.18.38+ x86_64, 8 × Intel Xeon @ 2.50GHz, MemTotal
-24,788,940 kB (23.6 GiB), SwapTotal 0 kB, loadavg 1-phút 4.79 lúc bắt
-đầu, 9.40 giữa chừng, 18.05 lúc kết thúc (run8: 2.24 → 7.73 → 6.09 —
-run9 cao hơn ở mọi điểm; session khác chạy test binary 196% CPU /
-15.8G RSS trong lúc đo). Go: `/usr/local/bin/castctl` 0.9.0
-(`1396697 2026-11-04T21:38:36Z`), 48,100,296 B, sha256
-`c8ea009e…` (cùng binary với run7/run8); `go version -m` ghi trong
-`summary.json` (tags `with_utls,with_quic,with_wireguard,with_gvisor`,
-`-trimpath=true`, `CGO_ENABLED=1`; không có dòng `-ldflags` nên không
-claim `-s -w`). Rust: `castctl-rs` (CLI shell, nay đã có M4b: auth +
-13 commands) và `castctl-full` (CLI + config + transport/honk +
-gateway, `rust/perf/full-bin/`, standalone crate, `keep.rs` giữ
+24,788,940 kB (23.6 GiB), SwapTotal 0 kB, loadavg 1-phút 0.98 lúc bắt
+đầu, 5.46 giữa chừng, 1.69 lúc kết thúc (run9: 4.79 → 9.40 → 18.05 —
+run10 tải thấp hơn nhiều; run8: 2.24 → 7.73 → 6.09). Go:
+`/usr/local/bin/castctl` 0.9.0 (`1396697 2026-11-04T21:38:36Z`),
+48,100,296 B, sha256 `c8ea009e…` (cùng binary với run7/run8/run9);
+`go version -m` ghi trong `summary.json` (tags
+`with_utls,with_quic,with_wireguard,with_gvisor`, `-trimpath=true`,
+`CGO_ENABLED=1`; không có dòng `-ldflags` nên không claim `-s -w`).
+Rust: `castctl-rs` (CLI shell, M4b: auth + 13 commands; nay thêm M4c
++ M5a) và `castctl-full` (CLI + config + transport/honk + gateway,
+`rust/perf/full-bin/`, standalone crate, `keep.rs` giữ
 transport+gateway sống trong binary — chứng minh bằng size A/B +
-`nm`, xem `rust/perf/README.md`) build từ `dev-rust` 27a0eaf (M4b đã
-merge), `cargo +1.99.1 build --release --locked`, `RUSTFLAGS="-C
-strip=symbols"` (shell: build thường 187.4 s, build strip 189.4 s;
-full: plain 191.2 s, no-keep 217.8 s, strip 1.2 s, target dir lạnh —
-Boss đã dọn các target dir cũ trước run9 nên build đầu là cold).
-Full stripped sha256 `b12911a5…` (đầy đủ trong `summary.json`); shell
-stripped sha256 `95d9be12…`. Lock: commit riêng `c5b1dd9` regenerate
-cả hai `Cargo.lock` (+18/+25 dòng, 0 removals) — prerequisite cơ học
-cho `--locked` trong `run.sh` (xem README mục "Vì sao có run9").
-Đo bằng `rust/perf/run.sh` (1 lệnh rerun); số thô:
-`rust/perf/data/*.json` (run9 là số chính thức; run8 archive ở
-`data/run8-summary.json`, md5 `90730fd5a0b1265097c27d54d1eefe88`);
+`nm`, xem `rust/perf/README.md`) build từ `dev-rust` 25a124e (M4c PR
+#69 + M5a PR #68 + docs sweep PR #70 đã merge), `cargo +1.99.1 build
+--release --locked`, `RUSTFLAGS="-C strip=symbols"` (shell: build
+thường 154.8 s, build strip 160.4 s; full: plain 155.4 s, no-keep
+9.0 s, strip 1.1 s, target dir ấm — artifacts run9 còn đó).
+Full stripped sha256 `851bb6b4…` (đầy đủ trong `summary.json`); shell
+stripped sha256 `055263b9…`. Lock: full-bin lock regenerate ở commit
+riêng `fbaa0d7` (đúng 1 dòng xoá `tokio-rustls` khỏi gateway sau M4c —
+prerequisite cơ học cho `--locked` trong `run.sh`, vì rebase không
+conflict file này nhưng manifest đã đổi; xem README mục "Vì sao có
+run10"). Đo bằng `rust/perf/run.sh` (1 lệnh rerun); số thô:
+`rust/perf/data/*.json` (run10 là số chính thức; run9 archive ở
+`data/run9-summary.json`, md5 `9d84a70fe125e6fc9652c022146fb56e`);
 README: `rust/perf/README.md`. N=20 (startup/RSS); logic thuần N=5
 (Go 1 process × 5 counts × 100 iters, Rust 5 process runs, adaptive
 K); item 5 N=5 lần chạy process × 20 request/lần. Tỉ lệ headline LUÔN
 là rust-full/Go; cột shell chỉ là tham chiếu (không so được với Go
 full) và không xuất hiện trong kết luận. Tỉ lệ < 1 = rust-full tốt
-hơn. Run8 là số cũ (đo ở commit `3c45bfe`, trước rebase lên dev-rust
-27a0eaf — Boss rebuild ở head mới và thấy lệch +39%, xem README mục
-"Vì sao có run9"); số RSS Rust của run4 (commit `7f46964`, 13.2 MiB)
+hơn. Run9 là số cũ (đo ở commit `740e2dc`, trước rebase lên dev-rust
+25a124e — PR #66 conflict lock + CI không chạy ở head cũ, xem README
+mục "Vì sao có run10"); số RSS Rust của run4 (commit `7f46964`, 13.2 MiB)
 sai do floor của Python cha (`ru_maxrss` từ `wait4` kế thừa qua fork
 — đã chứng minh bằng probe) nên đã bị thay thế, còn wall-clock của
 run4 đo bằng `os.wait4` blocking là đúng (Rust `--version`
@@ -6032,71 +6033,73 @@ median 5.448 ms), không phải phương pháp của run4; các vấn đề phư
 pháp do probe trong fix loop 1 phát hiện, không phải review vòng 1
 (xem README mục Drift).
 
-**Caption (run9):** commit `740e2dc19322c00c081d5c9dc0d7ca7ad8b762b6` (2026-11-05T18:19:48Z). Lệnh build: shell `RUSTFLAGS="-C strip=symbols" cargo +1.99.1 build --release --locked -p castctl-rs`; full `RUSTFLAGS="-C strip=symbols" CARGO_TARGET_DIR=/tmp/perf-full-target cargo +1.99.1 build --release --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml`; LTO `cargo +1.99.1 build --profile release-lto --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml`; bench `cargo +1.99.1 build --release --offline` trong `rust/perf/bench/`. sha256 (đầy đủ): Go `c8ea009e49c5bffce3c6b971db0f9f86948ab3904f478da33d43b6b60a9bc374`, shell stripped `95d9be12e608e1c8f7b660f97ab4edc993da5939730e3feb3b5094b617de2776`, full stripped `b12911a545f530b837d375a0f07f167580e91e2206c2445b4d7e903ae13e002f`, full LTO `c985a9aa995392c2e9265b42bc7d72e3203ba92bb1f4a2c65eb5230a09f2d359`, bench `c8832c1845d9f9b53936af632053d8abe8400c0366a1f70fd249e4fae0937fc2` (item 4/5 phía Go chạy `go test` ephemeral — không có sha256 binary Go nào được ghi).
+**Caption (run10):** commit `fbaa0d7bff38748470e07e46927aaee62f4c06c7` (2026-11-05T21:45:03Z). Lệnh build: shell `RUSTFLAGS="-C strip=symbols" cargo +1.99.1 build --release --locked -p castctl-rs`; full `RUSTFLAGS="-C strip=symbols" CARGO_TARGET_DIR=/tmp/perf-full-target cargo +1.99.1 build --release --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml`; LTO `cargo +1.99.1 build --profile release-lto --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml`; bench `cargo +1.99.1 build --release --offline` trong `rust/perf/bench/`. sha256 (đầy đủ): Go `c8ea009e49c5bffce3c6b971db0f9f86948ab3904f478da33d43b6b60a9bc374`, shell stripped `055263b9d96045e1afb8275f06a7895d0b15528afec2dcc153db7e6a60ae2050`, full stripped `851bb6b4d28afe9435db0766566ecc67a80e7561775670abc7a0c26d64073eb7`, full LTO `3ff9948cbe39500dea7d6a065d268f259ed2b5749659aac9625e0c9cc5c1acf7`, bench `c8832c1845d9f9b53936af632053d8abe8400c0366a1f70fd249e4fae0937fc2` (item 4/5 phía Go chạy `go test` ephemeral — không có sha256 binary Go nào được ghi).
 
 | Mục | Go (full, median) | Rust shell (M4b, tham chiếu, median) | Rust full (median) | Rust-full/Go |
 |---|---|---|---|---|
-| Binary stripped | 48,100,296 B | 17,446,696 B | 17,481,032 B | 0.363 (2.75× nhỏ hơn) |
-| Binary chưa strip (Rust) | — | 23,210,896 B | 23,255,696 B | 0.483 |
-| Binary LTO variant, stripped * | — | — | 14,197,080 B | 0.295 |
-| Startup `--version` | 23.236 ms (16.629–29.925) | 5.505 ms (2.355–7.096) | 5.619 ms (4.371–8.037) | 0.242 (4.14×) |
-| Startup `--help` | 9.201 ms (8.722–19.879) | 1.912 ms (1.817–2.446) | 1.889 ms (1.733–2.072) | 0.205 (4.87×) |
-| Peak RSS `--version` (GNU time) | 30.35 MiB (29.66–31.28) | 6.12 MiB (6.04–6.34) | 6.23 MiB (6.11–6.35) | 0.205 (79% ít hơn) |
-| Peak RSS `--help` (GNU time) | 30.31 MiB (29.59–30.97) | 6.05 MiB (5.86–6.17) | 6.13 MiB (6.03–6.27) | 0.202 |
-| Peak RSS `status` bad-JSON gate | 30.84 MiB | 6.66 MiB | 6.63 MiB | 0.215 |
-| Parse config min (42 B) | 4,418 ns/iter | 2,559 ns/iter | — (cùng code với shell) | 0.58 (1.7×, shell) |
-| Parse config large (32,246 B) | 12,420,197 ns/iter | 1,165,842 ns/iter | — | 0.09 (10.6×, shell) |
-| `MDToHTML` (51,560 B) | 12,111,097 ns/iter | 921,148 ns/iter | — | 0.08 (13.1×, shell) |
-| `SplitText` (51,560 B) | 789,801 ns/iter | 272,123 ns/iter | — | 0.34 (2.9×, shell) |
-| Render chain | 14,411,628 ns/iter | 1,133,113 ns/iter | — | 0.08 (12.7×, shell) |
-| 1 request SOCKS5 loopback | 0.948 ms/req (0.816–2.280) | 3.973 ms/req (1.317–3.999) | — (harness, không phải binary) | 4.19 (Rust chậm hơn; harness) |
+| Binary stripped | 48,100,296 B | 17,440,616 B | 17,475,048 B | 0.363 (2.75× nhỏ hơn) |
+| Binary chưa strip (Rust) | — | 23,197,360 B | 23,245,712 B | 0.483 |
+| Binary LTO variant, stripped * | — | — | 14,137,784 B | 0.294 |
+| Startup `--version` | 10.051 ms (8.844–11.779) | 2.405 ms (2.021–3.565) | 2.391 ms (2.010–2.841) | 0.238 (4.20×) |
+| Startup `--help` | 9.193 ms (8.347–11.528) | 2.301 ms (1.954–2.828) | 2.247 ms (1.852–3.064) | 0.244 (4.09×) |
+| Peak RSS `--version` (GNU time) | 30.37 MiB (29.72–31.03) | 6.11 MiB (6.05–6.24) | 6.20 MiB (6.04–6.28) | 0.204 (80% ít hơn) |
+| Peak RSS `--help` (GNU time) | 30.50 MiB (29.91–30.97) | 6.00 MiB (5.93–6.14) | 6.12 MiB (5.96–6.19) | 0.201 |
+| Peak RSS `status` bad-JSON gate | 30.90 MiB | 6.68 MiB | 6.74 MiB | 0.218 |
+| Parse config min (42 B) | 4,440 ns/iter | 2,499 ns/iter | — (cùng code với shell) | 0.56 (1.8×, shell) |
+| Parse config large (32,246 B) | 7,500,259 ns/iter | 1,129,751 ns/iter | — | 0.15 (6.6×, shell) |
+| `MDToHTML` (51,560 B) | 5,727,317 ns/iter | 861,757 ns/iter | — | 0.15 (6.6×, shell) |
+| `SplitText` (51,560 B) | 544,487 ns/iter | 262,253 ns/iter | — | 0.48 (2.1×, shell) |
+| Render chain | 6,527,659 ns/iter | 1,068,073 ns/iter | — | 0.16 (6.1×, shell) |
+| 1 request SOCKS5 loopback | 0.782 ms/req (0.754–0.803) | 0.713 ms/req (0.705–0.787) | — (harness, không phải binary) | 0.91 (Rust nhanh hơn; harness) |
 
 Kết luận: rust-full nhanh hơn Go ngoài sai số ở binary/startup/RSS;
 logic thuần (item 4, cùng thuật toán, 2 cột — không có cột full vì
 bench đo trực tiếp cùng code `castctl-config`/`castctl-tg-text`)
-nhanh hơn 1.7–13.1× (kèm caveat tải ở (2) dưới đây); loopback SOCKS5
-ĐẢO CHIỀU so với run8: Rust nay chậm hơn Go 4.19× (3.973 vs
-0.948 ms/req), nguyên nhân chưa rõ — mục duy nhất rust-full/harness
-chậm hơn Go ngoài sai số trong baseline này, cần probe riêng.
-(* Hàng LTO: build tay trên cue sau run9 bằng profile `release-lto`
-(exit 0, 315 s, sha `c985a9aa…`), không phải phép đo run9 — run9
-driver LTO exit 101 do target dir bị xoá giữa build (xem README);
-record đầy đủ trong `rust/perf/data/lto-build-record.json`. Hàng
-item 4/5: tỉ lệ mang nhãn "(shell)"/"(harness)" là shell hoặc bench
-harness so với Go — cột rust-full là "—" vì không đo qua binary
-full; xem README §4/§5.) Caveat: (1) số 77.5× của run7 (shell vs Go
-full) là số thật nhưng trả lời sai câu hỏi — headline từ run9 là
-rust-full/Go = 0.363× (2.75× nhỏ hơn); headline run8 0.260× (3.84×)
-là số của cây cũ pre-rebase, giữ trong README mục Drift; (2)
+nhanh hơn 1.8–6.6× (kèm caveat tải ở (2) dưới đây); loopback SOCKS5
+ĐẢO CHIỀU LẦN NỮA so với run9: Rust nay nhanh hơn Go 0.91× (0.713 vs
+0.782 ms/req) — plateau 4 ms của run9 không tái lập dưới tải thấp,
+nhiều khả năng là artifact theo tải.
+(* Hàng LTO: driver build trên cue trong run10 bằng profile
+`release-lto` (exit 0, 257.6 s, sha `3ff9948c…`) — lần đầu driver LTO
+thành công; run9 driver LTO exit 101 do target dir bị xoá giữa build
+và số LTO run9 là retry tay; record đầy đủ trong
+`rust/perf/data/lto-build-record.json`. Hàng item 4/5: tỉ lệ mang nhãn
+"(shell)"/"(harness)" là shell hoặc bench harness so với Go — cột
+rust-full là "—" vì không đo qua binary full; xem README §4/§5.)
+Caveat: (1) số 77.5× của run7 (shell vs Go full) là số thật nhưng
+trả lời sai câu hỏi — headline từ run10 là rust-full/Go = 0.363×
+(2.75× nhỏ hơn, giữ nguyên so với run9); headline run8 0.260×
+(3.84×) là số của cây cũ pre-rebase, giữ trong README mục Drift; (2)
 parse-large/render: Go làm nhiều việc hơn (validate outbound sâu,
-52,155 allocs/op median; `MDToHTML` 4,796,123 B/op + 8,354 allocs/op
+52,162 allocs/op median; `MDToHTML` 4,860,922 B/op + 8,388 allocs/op
 median) còn Rust defer sing-box validation (D-M2-1) — đo lại sau khi
 Rust bổ sung validation; harness khác nhau (Go 1 process × 5 counts
 × 100 iters, Rust 5 process runs, adaptive K — K median và raw đầy đủ
-trong `summary.json`); **thêm caveat tải run9:** tỉ lệ §4 cải thiện
-mạnh so với run8 chủ yếu vì Go chậm đi dưới tải (số Go ở 3 item lớn
-tăng 1.7–2.4×, số Rust ổn định trong ±6%) — đừng trích "10.6×/13.1×" mà không kèm caveat
-này; (3) item 5 đo client hand-roll stdlib qua proxy Python, không
-phải outbound thật; N=5, chạy batch tuần tự Rust-trước-Go; đảo chiều
-run9 chưa có nguyên nhân; (4) cold cache thật không đo (VM dùng
-chung); không có hàng cold trong bảng này — first measured run N=1
-chỉ có trong README (`n=1, không dùng làm kết luận`); (5) không có
-`perf` trên cue nên hotspot dựa trên breakdown số đo + lý do cấu
-trúc, không dựa trên CPU profile; (6) RSS đo bằng GNU time (thin
-parent); số RSS Rust run4/run5 (13.2 MiB) sai do floor của Python cha
-— số đúng run9 ~6.1 MiB (shell), ~6.2 MiB (full). RSS Go `--version`
-bimodal theo session — 30.3–30.5 MiB (run5–run9), 43.5 MiB (run4),
-47.7 MiB (rerun độc lập, `data/verify-rerun-summary.json`); tỉ lệ RSS
-rust-full/Go theo session dao động (run9: 0.205; mode cao Go 47.7 MiB
-→ ~0.131), không phải một số duy nhất; wall startup ở run9 nhiễu
-theo tải (Go `--version` +119% nhưng `--help` −15% so với run8 trong
-cùng một run; driver lệch với hyperfine tới 2×) — RSS là metric ổn
-định nhất của run9; nguyên nhân chưa rõ (giả thuyết THP chưa kiểm
+trong `summary.json`); **thêm caveat tải run10:** tỉ lệ §4 thu hẹp so
+với run8/run9 vì Go nhanh lại dưới tải thấp (số Go ở 4 item lớn giảm
+31–55% so với run9, về gần mức run8; số Rust ổn định trong ±7%) —
+đừng trích "6.6×" mà không kèm caveat này; (3) item 5 đo client
+hand-roll stdlib qua proxy Python, không phải outbound thật; N=5,
+chạy batch tuần tự Rust-trước-Go; đảo chiều run10 chưa có cơ chế
+chính xác (nhiều khả năng artifact theo tải); (4) cold cache thật
+không đo (VM dùng chung); không có hàng cold trong bảng này — first
+measured run N=1 chỉ có trong README (`n=1, không dùng làm kết
+luận`); (5) không có `perf` trên cue nên hotspot dựa trên breakdown
+số đo + lý do cấu trúc, không dựa trên CPU profile; (6) RSS đo bằng
+GNU time (thin parent); số RSS Rust run4/run5 (13.2 MiB) sai do floor
+của Python cha — số đúng run10 ~6.1 MiB (shell), ~6.2 MiB (full). RSS
+Go `--version` bimodal theo session — 30.3–30.5 MiB (run5–run10),
+43.5 MiB (run4), 47.7 MiB (rerun độc lập,
+`data/verify-rerun-summary.json`); tỉ lệ RSS rust-full/Go theo
+session dao động (run10: 0.204; mode cao Go 47.7 MiB → ~0.130), không
+phải một số duy nhất; wall startup ở run10 ít nhiễu hơn run9 (driver
+khớp hyperfine trong 9–29%, so với lệch tới 2× ở run9) — RSS vẫn là
+metric ổn định nhất; nguyên nhân chưa rõ (giả thuyết THP chưa kiểm
 chứng). (7) M7: các số trên đo trên binary Rust chưa đủ bề mặt tính
 năng (`rust-full` vẫn thiếu bot+keeper+webui, dùng honk thay
 sing-box); sẽ đo lại ở M7 khi `castctl-rs` thay được binary Go. Trước
 M7, không dùng số này để khuyến nghị thay binary. Gap hyper của run8
-ĐÃ ĐÓNG: hyper có 537 symbol trong cả ba binary run9 (xem
+ĐÃ ĐÓNG: hyper có 536 symbol trong cả ba binary run10 (xem
 `rust/perf/README.md` mục `rust-full`) — rust-full không còn là lower
 bound ở chỗ này. Honesty line: rust-full KHÔNG phải "cùng engine,
 khác ngôn ngữ" — Go dùng sing-box làm engine, Rust dùng honk-outbound;
@@ -6106,5 +6109,5 @@ Rust thì nhanh hơn bao nhiêu" — câu trả lời thứ hai chỉ có ở it
 (pure-logic, cùng thuật toán). Hotspot ưu tiên (xem
 `rust/perf/README.md`): validation parse-large (66% thời gian parse),
 `md_to_html` (81% render chain), `split_text` collect `Vec<char>`, đo
-lại sau validation, probe nguyên nhân item 5 đảo chiều, startup/binary
-đã đủ tốt, transport thật chưa đo.
+lại sau validation, item 5 đảo chiều lần nữa (caveat theo tải, không
+phải hotspot tối ưu), startup/binary đã đủ tốt, transport thật chưa đo.
