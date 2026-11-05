@@ -548,6 +548,188 @@ async fn ws_upgrade_non_utf8_accept_value_renders_go_status_code_101() {
     server.stop();
 }
 
+/// Fix loop 3 (ordering): Go's `ReadResponse`
+/// returns a malformed-status error BEFORE parsing
+/// headers (`response.go:170-186`) — a malformed
+/// token + a malformed header renders the token
+/// length form (`status_token_length=3`), never the
+/// fixed message. Fix loop 2 deferred the status
+/// error until after the header block validated,
+/// which is true only for a valid code.
+#[tokio::test]
+async fn ws_upgrade_malformed_token_plus_bad_header_renders_go_status_token_length() {
+    let server =
+        RawUpgradeServer::start_with_response(Some("HTTP/1.1 ABC Bad\r\nBadHeader\r\n\r\n")).await;
+    let url = format!(
+        "ws://{}/v1/noise?vm_id=vm-test&auth_token=<redacted>",
+        server.addr
+    );
+    let target = DialTarget::new("127.0.0.1", server.addr.port());
+    let stream = DirectDialer::new().dial(&target).await.unwrap();
+    let err = dial_gateway_over_stream(stream, &url, routes())
+        .await
+        .unwrap_err();
+    let m = conn_message(&err).expect("want ConnectionError");
+    assert_eq!(
+        m, "gateway: websocket handshake: status_token_length=3",
+        "malformed token must win over a malformed header in Go"
+    );
+    server.stop();
+}
+
+/// Fix loop 3 (proto): Go validates the proto with
+/// `ParseHTTPVersion` (`response.go:186`) after the
+/// status code and before the headers — `FOO 502`
+/// renders the fixed 35-char message, not
+/// `status_code=502`.
+#[tokio::test]
+async fn ws_upgrade_bad_proto_renders_go_fixed_message() {
+    let server = RawUpgradeServer::start_with_response(Some("FOO 502 Bar\r\n\r\n")).await;
+    let url = format!(
+        "ws://{}/v1/noise?vm_id=vm-test&auth_token=<redacted>",
+        server.addr
+    );
+    let target = DialTarget::new("127.0.0.1", server.addr.port());
+    let stream = DirectDialer::new().dial(&target).await.unwrap();
+    let err = dial_gateway_over_stream(stream, &url, routes())
+        .await
+        .unwrap_err();
+    let m = conn_message(&err).expect("want ConnectionError");
+    assert_eq!(
+        m, "gateway: websocket handshake failed",
+        "bad proto must render Go's fixed message"
+    );
+    assert_eq!(m.len(), 35, "Go renders 35 chars with no response");
+    server.stop();
+}
+
+/// Fix loop 3 (first header line): Go's
+/// `readMIMEHeader` rejects a header block whose
+/// first line starts with SP/HTAB
+/// (`textproto/reader.go:538-545`) → resp nil → the
+/// fixed 35-char message, even with a valid 502
+/// status line.
+#[tokio::test]
+async fn ws_upgrade_leading_space_first_header_renders_go_fixed_message() {
+    let server = RawUpgradeServer::start_with_response(Some(
+        "HTTP/1.1 502 Bad Gateway\r\n X-Custom: v\r\n\r\n",
+    ))
+    .await;
+    let url = format!(
+        "ws://{}/v1/noise?vm_id=vm-test&auth_token=<redacted>",
+        server.addr
+    );
+    let target = DialTarget::new("127.0.0.1", server.addr.port());
+    let stream = DirectDialer::new().dial(&target).await.unwrap();
+    let err = dial_gateway_over_stream(stream, &url, routes())
+        .await
+        .unwrap_err();
+    let m = conn_message(&err).expect("want ConnectionError");
+    assert_eq!(
+        m, "gateway: websocket handshake failed",
+        "leading-space first header line must fail the whole response in Go"
+    );
+    assert_eq!(m.len(), 35, "Go renders 35 chars with no response");
+    server.stop();
+}
+
+/// Fix loop 3 (duplicate accept): Go consults
+/// `resp.Header.Get("Sec-Websocket-Accept")`, which
+/// returns the FIRST value — a 101 whose first
+/// accept header is wrong and second is right
+/// mismatches (`status_code=101`); Rust used to
+/// accept if ANY accept header matched. The second
+/// header must be the correctly derived key for the
+/// client's nonce (random per dial), so a fixed
+/// response cannot express this case — the server
+/// below derives the key from the request.
+#[tokio::test]
+async fn ws_upgrade_duplicate_accept_first_wrong_renders_go_status_code_101() {
+    let server = start_duplicate_accept_server().await;
+    let url = format!(
+        "ws://{}/v1/noise?vm_id=vm-test&auth_token=<redacted>",
+        server.addr
+    );
+    let target = DialTarget::new("127.0.0.1", server.addr.port());
+    let stream = DirectDialer::new().dial(&target).await.unwrap();
+    let err = dial_gateway_over_stream(stream, &url, routes())
+        .await
+        .unwrap_err();
+    let m = conn_message(&err).expect("want ConnectionError");
+    assert_eq!(
+        m, "gateway: websocket handshake: status_code=101",
+        "only the first Sec-WebSocket-Accept counts in Go"
+    );
+    assert_eq!(m.len(), 45, "Go renders 45 chars for a 101 accept mismatch");
+    server.stop();
+}
+
+/// A server answering 101 with a duplicated
+/// `Sec-WebSocket-Accept`: first "wrong", second the
+/// correctly derived key for the client's nonce. Lives
+/// here, not in `common/raw_upgrade.rs`, because the
+/// fixed-response harness cannot derive the key (random
+/// per dial) and clippy's per-target dead-code check
+/// fails targets that never construct a shared helper
+/// (fix loop 1 pattern). The accept loop is stopped by
+/// the test via `stop()`; the client side is bounded by
+/// the 20 s `WS_UPGRADE_TIMEOUT` either way.
+struct DuplicateAcceptServer {
+    addr: std::net::SocketAddr,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl DuplicateAcceptServer {
+    fn stop(&self) {
+        self.task.abort();
+    }
+}
+
+async fn start_duplicate_accept_server() -> DuplicateAcceptServer {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 1024];
+                loop {
+                    let Ok(n) = stream.read(&mut chunk).await else {
+                        return;
+                    };
+                    if n == 0 || buf.len() > 8192 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.windows(4).position(|w| w == b"\r\n\r\n").is_some() {
+                        break;
+                    }
+                }
+                let text = String::from_utf8_lossy(&buf).into_owned();
+                let Some(key) = text
+                    .split("\r\n")
+                    .find_map(|line| line.strip_prefix("Sec-WebSocket-Key:"))
+                    .map(str::trim)
+                else {
+                    return;
+                };
+                let accept =
+                    tokio_tungstenite::tungstenite::handshake::derive_accept_key(key.as_bytes());
+                let resp = format!(
+                    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: wrong\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+    DuplicateAcceptServer { addr, task }
+}
+
 #[tokio::test]
 async fn dial_over_stream_wss_attempts_tls() {
     // A plain-HTTP responder: it answers any first flight

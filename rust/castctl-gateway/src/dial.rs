@@ -227,6 +227,74 @@ fn is_header_value_byte(byte: u8) -> bool {
     byte == 0x09 || (0x20..=0x7e).contains(&byte) || byte >= 0x80
 }
 
+/// Whether a status token is exactly 3 ASCII digits —
+/// the only shape Go's `ReadResponse` accepts as a code
+/// (Go `isThreeDigitCode`,
+/// `internal/gateway/handshake_log.go:62-67`).
+fn is_three_digit_code(token: &[u8]) -> bool {
+    token.len() == 3 && token.iter().all(|b| b.is_ascii_digit())
+}
+
+/// Map a MALFORMED status token (not exactly 3 ASCII
+/// digits) to Go's rendering. Always returns an error:
+/// `handshake_failure_for_status_bytes` returns `None`
+/// only for 101, which is 3 digits, so the `None` arm
+/// is unreachable — it degrades to the fixed message
+/// rather than panicking, so a broken invariant can
+/// never leak peer text or crash on peer input.
+fn malformed_status_error(token: &[u8]) -> TransportError {
+    match handshake_failure_for_status_bytes(token) {
+        Some(err) => err,
+        None => handshake_failed_error(),
+    }
+}
+
+/// The proto field of a status line (bytes before the
+/// first space), the way Go's `ReadResponse` cuts it
+/// (`net/http/response.go:170`):
+/// `strings.Cut(line, " ")`. No space at all → empty
+/// (Go renders `malformed HTTP response` → the fixed
+/// message, which is what the empty token maps to —
+/// the token check runs first).
+fn status_proto_from_line(line: &[u8]) -> &[u8] {
+    match line.iter().position(|&b| b == b' ') {
+        Some(first) => &line[..first],
+        None => b"",
+    }
+}
+
+/// Mirror Go's `ParseHTTPVersion`
+/// (`net/http/request.go:827-847`): `HTTP/1.0`,
+/// `HTTP/1.1`, or `HTTP/X.Y` with single digits
+/// (exactly 8 bytes). Anything else is a malformed
+/// version → Go returns nil resp → the fixed message.
+fn valid_http_version(proto: &[u8]) -> bool {
+    matches!(
+        proto,
+        [b'H', b'T', b'T', b'P', b'/', major, b'.', minor]
+        if major.is_ascii_digit() && minor.is_ascii_digit()
+    )
+}
+
+/// Trim SP/HTAB from both ends of a header value, the
+/// way Go's `readContinuedLineSlice` trims the whole
+/// header line (`net/textproto/reader.go:108-119`).
+/// Applied to the VALUE after the colon, not to the
+/// whole line — trimming the line would wrongly accept
+/// a leading-space first header line, which Go rejects
+/// outright (see `check_upgrade_head`).
+fn trim_header_value(value: &[u8]) -> &[u8] {
+    let mut start = 0;
+    while start < value.len() && matches!(value[start], b' ' | b'\t') {
+        start += 1;
+    }
+    let mut end = value.len();
+    while end > start && matches!(value[end - 1], b' ' | b'\t') {
+        end -= 1;
+    }
+    &value[start..end]
+}
+
 /// Extract the status token from a status line the way
 /// Go's `ReadResponse` does (`response.go:170-180`):
 /// cut on the first space, trim leading spaces, cut on
@@ -258,31 +326,74 @@ fn status_token_from_line(line: &[u8]) -> &[u8] {
 /// `gorilla/client.go:372-405`): the head is bytes,
 /// never UTF-8. Returns `Ok(())` when the status is 101
 /// and the accept key matches, else the Go-faithful
-/// handshake error. The status error is computed first
-/// but returned only after the header block validates —
-/// Go parses the whole head before returning the
-/// response, so a malformed header fails even a 502
-/// (`resp` nil → the fixed 35-char message).
-/// Well-formedness validated here: every header line has
-/// a colon, a valid field-name, and valid field-value
-/// bytes. NOT validated (gorilla checks Rust does not —
-/// see PORTING §M4b.2 deviation 25): the `Upgrade` /
-/// `Connection` header values, and obs-fold continuation
-/// lines (Go folds them into the previous value; each
-/// physical line is checked independently here).
+/// handshake error. Order mirrors `ReadResponse`
+/// exactly: (1) a malformed status token (not exactly
+/// 3 ASCII digits) returns its mapping IMMEDIATELY —
+/// Go returns the malformed-status error before parsing
+/// headers; (2) a valid 3-digit code is checked for a
+/// valid proto (`ParseHTTPVersion`: `HTTP/1.0`,
+/// `HTTP/1.1`, or `HTTP/X.Y`, single digits) → fixed
+/// on failure; (3) the header block: the FIRST line
+/// must not start with SP/HTAB (Go: `malformed MIME
+/// header initial line`), every line has a colon (Go:
+/// `malformed MIME header: missing colon`), a
+/// non-empty field-name of tchar/space bytes, and valid
+/// field-value bytes — a malformed header fails even a
+/// 502, but ONLY for a valid code (step 1 already
+/// returned for a malformed token); (4) on a 101, the
+/// FIRST `Sec-WebSocket-Accept` header only (Go:
+/// `Header.Get` returns the first value), its value
+/// trimmed of SP/HTAB on BOTH ends (Go:
+/// `readContinuedLineSlice`'s `trim` +
+/// `bytes.TrimLeft`) — mismatch → `status_code=101`;
+/// otherwise the deferred status error is returned.
+/// Well-formedness NOT validated (gorilla checks Rust
+/// does not — see PORTING §M4b.2 deviation 25): the
+/// `Upgrade` / `Connection` header values, and obs-fold
+/// continuation lines (Go folds them into the previous
+/// value; each physical line is checked independently
+/// here). Also not handled (deviation 27): a bare-LF
+/// header terminator — Go's `ReadLine` accepts bare
+/// `\n`, Rust reads until `b"\r\n\r\n"`.
 fn check_upgrade_head(head: &[u8], expected_accept: &str) -> Result<(), TransportError> {
     let mut lines = head
         .split(|&b| b == b'\n')
         .map(|line| line.strip_suffix(b"\r").unwrap_or(line));
     let status_line = lines.next().unwrap_or(b"");
-    let status_err = handshake_failure_for_status_bytes(status_token_from_line(status_line));
+    let token = status_token_from_line(status_line);
+    // Step 1 — Go returns the malformed-status error
+    // before parsing headers (`response.go:170-186`).
+    if !is_three_digit_code(token) {
+        return Err(malformed_status_error(token));
+    }
+    let status_err = handshake_failure_for_status_bytes(token);
+    // Step 2 — Go validates the proto after the code
+    // and before the headers (`response.go:186`).
+    if !valid_http_version(status_proto_from_line(status_line)) {
+        return Err(handshake_failed_error());
+    }
     let mut accept_ok = false;
+    let mut seen_accept = false;
+    let mut first_header = true;
     for line in lines {
         if line.is_empty() {
             break;
         }
+        // Step 3 — Go's `readMIMEHeader` rejects a
+        // header block whose first line starts with
+        // SP/HTAB before any folding
+        // (`textproto/reader.go:538-545`, `Peek(1)` →
+        // `malformed MIME header initial line`) → resp
+        // nil → fixed message. A leading-space line
+        // AFTER the first is a continuation (deviation
+        // 25); a leading-space FIRST line is an error.
+        if first_header && matches!(line.first(), Some(b' ') | Some(b'\t')) {
+            return Err(handshake_failed_error());
+        }
+        first_header = false;
         let Some(colon) = line.iter().position(|&b| b == b':') else {
-            // Go: `malformed MIME header line` → resp nil.
+            // Go: `malformed MIME header: missing colon`
+            // (`mustHaveFieldNameColon`) → resp nil.
             return Err(handshake_failed_error());
         };
         let (name, value) = (&line[..colon], &line[colon + 1..]);
@@ -296,19 +407,17 @@ fn check_upgrade_head(head: &[u8], expected_accept: &str) -> Result<(), Transpor
             // Go: `validHeaderValueByte` fails → resp nil.
             return Err(handshake_failed_error());
         }
-        // Go trims leading SP/HTAB only
-        // (`bytes.TrimLeft(v, " \t")`); a trailing space
-        // stays part of the value and mismatches the key.
-        let value = {
-            let mut start = 0;
-            while start < value.len() && matches!(value[start], b' ' | b'\t') {
-                start += 1;
+        // Step 4 — only the FIRST accept header counts
+        // (Go: `Header.Get` returns `vv[0]`), and its
+        // value is trimmed on BOTH ends (Go:
+        // `readContinuedLineSlice`'s `trim` +
+        // `bytes.TrimLeft`). The trim is of the VALUE
+        // after the colon, not of the whole line.
+        if !seen_accept && name.eq_ignore_ascii_case(b"sec-websocket-accept") {
+            seen_accept = true;
+            if trim_header_value(value) == expected_accept.as_bytes() {
+                accept_ok = true;
             }
-            &value[start..]
-        };
-        if name.eq_ignore_ascii_case(b"sec-websocket-accept") && value == expected_accept.as_bytes()
-        {
-            accept_ok = true;
         }
     }
     if let Some(err) = status_err {
@@ -927,8 +1036,14 @@ mod tests {
     /// without a colon, an empty field-name, or a control
     /// byte in a value fails the whole response (resp nil
     /// → fixed message), even with a valid 502 status
-    /// line (Go parses the whole head before returning
-    /// it). A space before the colon is accepted (Go
+    /// line. [CORRECTED in fix loop 3: this "whole head"
+    /// rule holds only for a VALID status code — Go
+    /// returns a malformed-status error before parsing
+    /// headers, so a malformed token + a malformed header
+    /// renders the token/length form, not the fixed
+    /// message; see
+    /// `check_upgrade_head_malformed_token_returns_immediately`.]
+    /// A space before the colon is accepted (Go
     /// go.dev/issue/34540) but never matches the accept
     /// key.
     #[test]
@@ -965,18 +1080,165 @@ mod tests {
         );
     }
 
-    /// Fix loop 2: the accept value is trimmed of leading
-    /// SP/HTAB only (Go `bytes.TrimLeft(v, " \t")`) — a
-    /// trailing space stays part of the value and
-    /// mismatches the key.
+    /// Fix loop 3: Go trims the accept value on BOTH
+    /// ends — every header line passes through `trim()`
+    /// in `readContinuedLineSlice`
+    /// (`textproto/reader.go:108-119`, leading AND
+    /// trailing SP/HTAB) before `readMIMEHeader` splits
+    /// on the colon, so a correct key with a trailing
+    /// space or tab MATCHES in Go and the upgrade
+    /// proceeds. Fix loop 2's "leading only" rule was
+    /// wrong, and this test pinned the wrong behaviour
+    /// — flipped to assert the Go behaviour. The trim
+    /// is of the VALUE after the colon, not of the whole
+    /// line (trimming the line would wrongly accept a
+    /// leading-space first header line, which Go rejects
+    /// outright — see the first-header test below).
     #[test]
-    fn check_upgrade_head_accept_trailing_space_mismatches() {
+    fn check_upgrade_head_accept_trailing_space_matches() {
+        assert!(check_upgrade_head(
+            b"HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo= \r\n\r\n",
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        )
+        .is_ok());
+        assert!(check_upgrade_head(
+            b"HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\t\r\n\r\n",
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        )
+        .is_ok());
+    }
+
+    /// Fix loop 3 (ordering): Go's `ReadResponse`
+    /// returns a malformed-status error BEFORE parsing
+    /// headers (`response.go:170-186`) — the status
+    /// error is NOT deferred when the token is malformed.
+    /// A malformed token + a malformed header renders the
+    /// token/length form, never the fixed message.
+    /// Precedence check: `FOO ABC` still renders the
+    /// token length (the status error comes before the
+    /// version check too).
+    #[test]
+    fn check_upgrade_head_malformed_token_returns_immediately() {
         assert_eq!(
             head_message(check_upgrade_head(
-                b"HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo= \r\n\r\n",
-                "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+                b"HTTP/1.1 ABC Bad\r\nBadHeader\r\n\r\n",
+                "x"
             )),
+            Some("gateway: websocket handshake: status_token_length=3".to_string())
+        );
+        assert_eq!(
+            head_message(check_upgrade_head(
+                b"HTTP/1.1 1000 Bad\r\nBadHeader\r\n\r\n",
+                "x"
+            )),
+            Some("gateway: websocket handshake: status_token_length=4".to_string())
+        );
+        assert_eq!(
+            head_message(check_upgrade_head(
+                b"HTTP/1.1 ABC Bad\r\nX-\xff: v\r\n\r\n",
+                "x"
+            )),
+            Some("gateway: websocket handshake: status_token_length=3".to_string())
+        );
+        assert_eq!(
+            head_message(check_upgrade_head(b"FOO ABC Bar\r\n\r\n", "x")),
+            Some("gateway: websocket handshake: status_token_length=3".to_string())
+        );
+    }
+
+    /// Fix loop 3 (proto): Go validates the proto with
+    /// `ParseHTTPVersion` (`response.go:186`,
+    /// `request.go:827-847`) after the status code and
+    /// before the headers — only `HTTP/1.0`, `HTTP/1.1`,
+    /// or `HTTP/X.Y` (single digits, exactly 8 bytes)
+    /// pass. A bad proto renders the fixed message, even
+    /// with a valid code and a bad header (version check
+    /// precedes header parsing).
+    #[test]
+    fn check_upgrade_head_bad_proto_is_fixed_message() {
+        assert_eq!(
+            head_message(check_upgrade_head(b"XYZ 502 Bad\r\n\r\n", "x")),
+            Some("gateway: websocket handshake failed".to_string())
+        );
+        assert_eq!(
+            head_message(check_upgrade_head(b"HTTP/1 502 Bad\r\n\r\n", "x")),
+            Some("gateway: websocket handshake failed".to_string())
+        );
+        assert_eq!(
+            head_message(check_upgrade_head(b"HTTP/1.1.1 502 Bad\r\n\r\n", "x")),
+            Some("gateway: websocket handshake failed".to_string())
+        );
+        assert_eq!(
+            head_message(check_upgrade_head(b"FOO 502 Bad\r\nBadHeader\r\n\r\n", "x")),
+            Some("gateway: websocket handshake failed".to_string())
+        );
+        assert_eq!(
+            head_message(check_upgrade_head(b"HTTP/9.9 502 Bad\r\n\r\n", "x")),
+            Some("gateway: websocket handshake: status_code=502".to_string())
+        );
+        assert_eq!(
+            head_message(check_upgrade_head(b"HTTP/1.0 502 Bad\r\n\r\n", "x")),
+            Some("gateway: websocket handshake: status_code=502".to_string())
+        );
+    }
+
+    /// Fix loop 3 (duplicate accept): Go consults
+    /// `resp.Header.Get("Sec-Websocket-Accept")` and
+    /// `MIMEHeader.Get` returns the FIRST value
+    /// (`vv[0]`) — only the first accept header counts.
+    /// First-wrong/second-right mismatches
+    /// (`status_code=101`); first-right/second-wrong
+    /// proceeds.
+    #[test]
+    fn check_upgrade_head_duplicate_accept_first_only() {
+        let key = b"test-key-12345678";
+        let expected = accept_for(key);
+        let head = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: wrong\r\nSec-WebSocket-Accept: {expected}\r\n\r\n"
+        );
+        assert_eq!(
+            head_message(check_upgrade_head(head.as_bytes(), &expected)),
             Some("gateway: websocket handshake: status_code=101".to_string())
+        );
+        let head = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: {expected}\r\nSec-WebSocket-Accept: wrong\r\n\r\n"
+        );
+        assert!(check_upgrade_head(head.as_bytes(), &expected).is_ok());
+    }
+
+    /// Fix loop 3 (first header line): Go's
+    /// `readMIMEHeader` rejects a header block whose
+    /// first line starts with SP/HTAB before any folding
+    /// (`textproto/reader.go:538-545`, `Peek(1)` →
+    /// `malformed MIME header initial line`) → resp nil
+    /// → fixed message. A leading-space line AFTER the
+    /// first is a continuation (deviation 25, recorded);
+    /// a leading-space FIRST line is an error. A
+    /// spaces-only first line errors in Go too (Rust
+    /// coincides there via the no-colon rule, but pin it
+    /// anyway).
+    #[test]
+    fn check_upgrade_head_leading_space_first_header_is_fixed_message() {
+        assert_eq!(
+            head_message(check_upgrade_head(
+                b"HTTP/1.1 502 Bad Gateway\r\n X-Custom: v\r\n\r\n",
+                "x"
+            )),
+            Some("gateway: websocket handshake failed".to_string())
+        );
+        assert_eq!(
+            head_message(check_upgrade_head(
+                b"HTTP/1.1 502 Bad Gateway\r\n\tX-Custom: v\r\n\r\n",
+                "x"
+            )),
+            Some("gateway: websocket handshake failed".to_string())
+        );
+        assert_eq!(
+            head_message(check_upgrade_head(
+                b"HTTP/1.1 502 Bad Gateway\r\n   \r\n\r\n",
+                "x"
+            )),
+            Some("gateway: websocket handshake failed".to_string())
         );
     }
 }

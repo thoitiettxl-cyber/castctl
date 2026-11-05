@@ -3554,7 +3554,16 @@ it (promoted to direct deps only), so `NOTICE` /
     header's value; Rust checks each physical line
     independently). Recorded as a follow-up, not fixed
     in fix loop 2 (it changes acceptance, not just the
-    message).
+    message). NOTE (fix loop 3): the leading-space
+    FIRST header line is NOT part of this deviation —
+    Go rejects it outright (`malformed MIME header
+    initial line`, `textproto/reader.go:538-545`), while
+    a leading-space line AFTER the first is a
+    continuation (the obs-fold gap above). Fix loop 3
+    implements the first-line rejection in
+    `check_upgrade_head` (first header line starting
+    with SP/HTAB → fixed message); only the obs-fold
+    continuation case remains open here.
 26. The tungstenite path (`ws_error`'s non-Http arms)
     renders `dial_failed()` for a bad-accept failure too:
     tungstenite returns a protocol error with no response
@@ -3565,6 +3574,17 @@ it (promoted to direct deps only), so `NOTICE` /
     dial; fixing the tungstenite path needs plumbing the
     status through. Recorded so the two paths do not
     drift apart again.
+27. Bare-LF header terminator: `ws_upgrade` reads until
+    `b"\r\n\r\n"` (`dial.rs` read loop); Go's `ReadLine`
+    accepts bare `\n` (verified by a Go probe in fix
+    loop 3: a `502` response with bare-LF endings parses
+    to resp 502). A bare-LF response never terminates
+    the Rust read loop → EOF → fixed 35-char message,
+    where Go renders the status. Pre-existing M4b code,
+    untouched by fix loops 1–3, never claimed
+    Go-faithful. Recorded as a follow-up; fixing it
+    means changing the read loop, out of this loop's
+    scope.
 
 ## M4b.3 Findings
 
@@ -3722,10 +3742,90 @@ it (promoted to direct deps only), so `NOTICE` /
   site with no Go equivalent). The head check also
   validates header well-formedness the way Go does
   (colon present, valid field-name/value bytes, status
-  error deferred until the whole head validates), and
+  error deferred until the whole head validates
+  [CORRECTED in fix loop 3: deferred only for a valid
+  3-digit code — Go returns a malformed-status error
+  before parsing headers, so a malformed token +
+  malformed header renders the token/length form, not
+  the fixed message]), and
   the accept value is trimmed of leading SP/HTAB only
-  (Go `bytes.TrimLeft`). Pinned by 7 integration tests
+  (Go `bytes.TrimLeft`) [CORRECTED in fix loop 3:
+  trimmed on BOTH ends — every header line passes
+  through `trim()` in `readContinuedLineSlice`
+  (`textproto/reader.go:108-119`) before the colon
+  split, so a trailing space/tab on a correct accept
+  key still matches]. Pinned by 7 integration tests
   + 4 unit tests (13 cases) — see the fix-loop-2
+  report.
+- **Fix loop 3: `check_upgrade_head` matches Go's
+  `ReadResponse` order.** Both fix-loop-2 re-reviewers
+  (technical FAIL B1–B4, red-team FAIL B1–B5) found
+  the same five divergences in the byte-parser, each
+  verified against Go 1.27.3 source AND a probe
+  program calling `http.ReadResponse` on exact byte
+  inputs (this loop's probe: `/tmp/goprobe-fl3/`,
+  22 cases — all five claims re-derived, none taken
+  from the reviews): (1) ORDERING — Go returns a
+  malformed-status error BEFORE parsing headers
+  (`response.go:170-186`), so a malformed token +
+  malformed header renders the token/length form
+  (`ABC` + no-colon header → `status_token_length=3`,
+  `1000` → `status_token_length=4`), not the fixed
+  message; fix loop 2's "status error deferred until
+  the whole head validates" is true only for a VALID
+  code — the fix returns a malformed token's mapping
+  immediately. (2) PROTO — Go validates it with
+  `ParseHTTPVersion` (`response.go:186`,
+  `request.go:827-847`) after the code and before the
+  headers: `FOO 502`, `HTTP/1 502`, `HTTP/1.1.1 502`
+  → fixed; `HTTP/9.9` and `HTTP/1.0` → resp 502; the
+  fix adds a `valid_http_version` mirror (exactly 8
+  bytes, `HTTP/` + digit + `.` + digit). Precedence:
+  `FOO ABC` still renders `status_token_length=3`
+  (status error first). (3) ACCEPT TRIM — Go trims
+  BOTH ends (`readContinuedLineSlice`'s `trim` +
+  `TrimLeft`): a correct key with a trailing space or
+  tab MATCHES and proceeds; fix loop 2's "leading
+  only" rule was wrong, and its unit test pinned the
+  wrong behaviour — flipped to assert a match. The
+  trim is of the VALUE after the colon, not of the
+  whole line. (4) DUPLICATE ACCEPT — Go's
+  `Header.Get` returns the FIRST value: first-wrong /
+  second-right mismatches (`status_code=101`); only
+  the first accept header counts now. The
+  integration test needs a server that derives the
+  correct key from the client's random nonce — a
+  fixed response cannot express it (a first draft
+  with the RFC example key passed pre-fix for the
+  wrong reason: neither header matched the random
+  key); the test uses a new local helper,
+  `start_duplicate_accept_server` in `connector.rs`.
+  (5) FIRST HEADER LINE — Go rejects a first line
+  starting with SP/HTAB (`readMIMEHeader`'s `Peek(1)`
+  check, `reader.go:538-545` →
+  `malformed MIME header initial line`) → fixed; the
+  fix rejects it in `check_upgrade_head`. The two
+  reviewers differed in detail (red-team: only SP
+  needs the new rule, "HTAB already matches";
+  technical: reject SP/HTAB) — this loop's probe
+  shows Go errors on BOTH, and Rust's key-byte check
+  already rejects a HTAB-first line via a different
+  rule, so the explicit first-line check covers both
+  (harmless duplication, one rule in one place). The
+  five fixes compose into one order: malformed token
+  → proto → headers (with first-line rejection) →
+  accept (both-ends trim, first-only) → deferred
+  status error. Also fixed in this loop: the no-colon
+  error text is `malformed MIME header: missing
+  colon`, not `malformed MIME header line`
+  (`dial.rs` comment). Recorded, not fixed: the
+  bare-LF terminator (deviation 27, pre-existing).
+  The `start_reset_server` / `serve_one` no-stop-handle
+  observation stands recorded (client side bounded by
+  the 20 s upgrade timeout; tasks die with the test
+  binary) — the new duplicate-accept server DOES
+  expose `stop()`. Pinned by 4 new integration tests
+  + 5 new/renamed unit tests — see the fix-loop-3
   report.
 
 ## M4b.4 Gates (cue, 2026-11-05, pre-rebase head 86a2142)
