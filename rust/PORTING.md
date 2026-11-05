@@ -1016,11 +1016,11 @@ vocabulary they model; no Go function line is fabricated.
 |---|---|---|
 | `RouteTable.LookupRoute`, `ParseRoutes`, `DefaultRoutes` (`internal/gateway/routes.go:78-116`), `Route` (`internal/conn/gateway.go:132-137`), `Gateway.LookupRoute` (`internal/conn/gateway.go:316-318`), `internal/proto/routes.json` | `routes::{Route, Service, RouteTable::default_routes/parse/lookup_route, build_path, quote_path_param}` | Table embedded via `include_str!` of the Go JSON (258 entries at M3 base); first-wins duplicates; absent service → `daemon`; path quoting = Go `quotePython(v, "")` (`media.go:19-35`); query = `url.Values.Encode` (sorted keys) |
 | `parseOutbound` (`internal/profile/outbound.go:96-138`), `CreateOutbound`/`CreateEndpoint` (`internal/outbound/manager.go:243-272,479-494`), `GatewayTLSOptions`/`BuildTLSConfig` (`internal/outbound/tls.go:16-76`), WS ALPN pin (`internal/gateway/connector.go:240`) | `config::{Dispatch, TlsMode, dispatch_outbound, tls_mode_for, apply_tls_mode, validate_reality, decode_base64url}` | Subset only (D-M3-3): socks→socks5, shadowsocks, vmess, vless, trojan, hysteria2, tuic → honk; direct/block as before; wireguard → "→ M3d" error; all other types → `Unsupported`; detour → `Unsupported`; SS plugin → `Unsupported`; WS ALPN pinned `http/1.1`; unknown fields ignored (deviation, see §M3.3) |
-| `DialContext`/`Resolve`/`DialTLS`/`HTTPClient` (`internal/outbound/dialer.go:127-236`), `Manager.Dialer` (`internal/outbound/manager.go:585-597`) | `dialer::{Dialer, DialTarget, DirectDialer, HonkDialer, DIAL_TIMEOUT, resolve_target}` | `Dialer` is the M3d seam (object-safe boxed future); dial failure → `ConnectionDown`; DIAL_TIMEOUT 10s = Go `TLSHandshakeTimeout`; no proxy env reads anywhere in `src/` |
-| `BoundClient`/`noFollowRedirect` (`internal/telegram/bot.go:316-352`) | `http::{HttpClient, HttpResponse, MAX_RESPONSE_BODY}` | Hyper http1 client conn over the dialed stream; no proxy concept (structural, not a flag); ANY 3xx → `RedirectRefused`, never a second request; no cookie jar; one fresh stream per call (no pool → Go 90s idle / 100-conn pool have no counterpart); HTTP/1.1 only (Go `ForceAttemptHTTP2` not ported); 16 MiB body guard is M3-local, not Go parity |
-| `retryCall` (`internal/conn/shared.go:148-221`), `safeToRepeat`/`safeFor` (`:46-56,136-147`), constants (`internal/conn/gateway.go:21-55`) | `retry::{RetryPolicy, RETRY_FOR, RETRY_PAUSE_INITIAL, RETRY_PAUSE_MAX, POST_READ_METHODS, safe_to_repeat, should_retry, run_with_retry}` | Budget 30s (NOT a fixed attempt count — only `SubscribeRaw` has one: 3 attempts, not ported); ladder 250ms doubling to 4s; `ConnectionDown` always, `ConnectionError` only when safe; `Auth` never; Go's `gw()` reconnect branch is covered because a dial failure surfaces as `ConnectionDown` |
-| `CallJSON`/`Request` (`internal/gateway/calls.go:26-220`), `encodeBody`/`bodyToQuery`/`pythonStr` (`internal/gateway/jsonutil.go:28-138`), `buildPath`/`resolveRoute` (`internal/gateway/stream.go:188-220`), `summarizeBody`/`gatewayErrorFromSummary` (`internal/gateway/summary.go:213-224`) | `rpc::{RpcClient, DEFAULT_REQUEST_TIMEOUT, body_to_query, decode_response}` | HTTP-over-outbound RPC (D-M3-2), NOT the WS+Noise+protobuf gateway (deferred, see §M3.3); timeout 30s; GET body → query (nil dropped, bool `True`/`False`); empty body → `{}`; envelope `ok`/`result` rules verbatim; numbers via `serde_json::Number` (never `f64`); non-JSON/`ok:false` → `GatewayError(-1, summary)`; status non-2xx → `GatewayError(status, summary)`; NO body bytes in any error |
-| `AuthError`/`GatewayError`/`ConnectionDown`/`ConnectionError`/`TimeoutError` (`internal/conn/errors.go`), `ValidationError` (`internal/gateway/jsonutil.go`), `classifyError` (`internal/commands/commands.go:268-337`) | `error::{TransportError, BodySummary, validate_content_type, validate_error_code, truncate}` | `exit_code`: auth 2, gateway 3, timeout 4, cancel 130, validation 2, else 1 — NOT `phaseExitCode` (`profilecmd.go:901-929`, auth 3); `Display`/`Debug` (hand-written) print summaries only; `log_summary` prints class + lengths, never message bytes |
+| `DialContext`/`Resolve`/`DialTLS`/`HTTPClient` (`internal/outbound/dialer.go:127-236`), `Manager.Dialer` (`internal/outbound/manager.go:585-597`) | `dialer::{Dialer, DialTarget, DirectDialer, HonkDialer, DIAL_TIMEOUT, resolve_target}` | `Dialer` is the M3d seam (object-safe boxed future); dial failure → `ConnectionDown`; DIAL_TIMEOUT 10s = Go `TLSHandshakeTimeout`; no proxy env reads anywhere in `src/`; both dialers try EVERY resolved address (M3c: a per-address timeout no longer aborts the whole dial — only after all addresses fail is the result `ConnectionDown`) |
+| `BoundClient`/`noFollowRedirect` (`internal/telegram/bot.go:316-352`) | `http::{HttpClient, HttpResponse, MAX_RESPONSE_BODY}` | Hyper http1 client conn over the dialed stream; no proxy concept (structural, not a flag); ANY 3xx → `RedirectRefused`, never a second request; no cookie jar; one fresh stream per call (no pool → Go 90s idle / 100-conn pool have no counterpart); HTTP/1.1 only (Go `ForceAttemptHTTP2` not ported); hyper handshake failure → `ConnectionDown` (nothing sent yet, M3c); 16 MiB body guard is M3-local, not Go parity, enforced DURING the read (frame-by-frame stream cap, M3c — the old collect-then-check order could OOM first); over-cap body → `Gateway` (exit 3, never retried) |
+| `retryCall` (`internal/conn/shared.go:148-221`), `safeToRepeat`/`safeFor` (`:46-56,136-147`), constants (`internal/conn/gateway.go:21-55`) | `retry::{RetryPolicy, RETRY_FOR, RETRY_PAUSE_INITIAL, RETRY_PAUSE_MAX, POST_READ_METHODS, safe_to_repeat, should_retry, run_with_retry}` | Budget 30s (NOT a fixed attempt count — only `SubscribeRaw` has one: 3 attempts, not ported); ladder 250ms doubling to 4s; `ConnectionDown` always, `ConnectionError` only when safe; `Auth` never; Go's `gw()` reconnect branch is covered because a dial failure surfaces as `ConnectionDown`; the RPC layer additionally wraps the whole call in the request timeout (M3c overall cap — per-attempt timeouts alone reset every attempt and could stretch the call past it) |
+| `CallJSON`/`Request` (`internal/gateway/calls.go:26-220`), `encodeBody`/`bodyToQuery`/`pythonStr` (`internal/gateway/jsonutil.go:28-138`), `buildPath`/`resolveRoute` (`internal/gateway/stream.go:188-220`), `summarizeBody`/`gatewayErrorFromSummary` (`internal/gateway/summary.go:213-224`) | `rpc::{RpcClient, DEFAULT_REQUEST_TIMEOUT, body_to_query, decode_response}` | HTTP-over-outbound RPC (D-M3-2), NOT the WS+Noise+protobuf gateway (deferred, see §M3.3); timeout 30s; GET body → query (nil dropped, top-level bool `True`/`False`, nested values via `pythonStr` `%v` — M3c, the old "Go does not define" doc was wrong); empty body → `{}`; envelope `ok`/`result` rules verbatim (M3c: only a BOOLEAN false `ok` errors; `result` wins with `ok` absent or non-bool); numbers via `serde_json::Number` + `arbitrary_precision` (never `f64`, literals kept past u64 — M3c); non-JSON/boolean-false-`ok` → `GatewayError(-1, summary)`; status non-2xx → `GatewayError(status, summary)`; NO body bytes in any error |
+| `AuthError`/`GatewayError`/`ConnectionDown`/`ConnectionError`/`TimeoutError` (`internal/conn/errors.go`), `ValidationError` (`internal/gateway/jsonutil.go`), `classifyError` (`internal/commands/commands.go:268-337`) | `error::{TransportError, BodySummary, validate_content_type, validate_error_code, truncate}` | `exit_code`: auth 2, gateway 3, timeout 4, cancel 130, validation 2, else 1 — NOT `phaseExitCode` (`profilecmd.go:901-929`, auth 3); `Display`/`Debug` (hand-written) print summaries only; `log_summary` prints class + lengths, never message bytes; `RedirectRefused` carries no `Location` value (M3c: nothing reads one); `Unsupported` → 1 here — the CLI layer must map config rejections to 2 itself (M3c: documented in `error.rs` and here, code unchanged) |
 
 ## M3.3 Deferred / deviations (deliberate, not silent)
 
@@ -1053,6 +1053,53 @@ vocabulary they model; no Go function line is fabricated.
   toolchain decision, not pre-empted here.
 - No network CLI commands are wired in M3; `castctl-rs` still
   builds the offline surface only (unchanged behaviour).
+- TLS `enabled` has TWO different Go rules, and `build_tls`
+  follows only one (M3c, NB6): the OUTBOUND path parses
+  sing-box JSON, where `OutboundUTLSOptions` /
+  `OutboundRealityOptions` are pointers and their `Enabled`
+  fields are plain bools — a missing block means "apply
+  the Go default", a present block with a missing field
+  means false (sing-box v1.14.4 `option/tls.go`,
+  `common/tls/client.go:103`, `reality_client.go:60`).
+  The GATEWAY-dial path (`internal/outbound/dialer.go`
+  `DialTLS`, `:161-168`) is different: it FORCES
+  `Enabled=true` whenever TLS is requested at all
+  (`BuildTLSConfig`, `internal/outbound/tls.go:56-60`,
+  returns nil when `!Enabled`). Porting the gateway-dial
+  rule is M4 work at the gateway-dial call site — it
+  must NOT be folded into `build_tls`, which serves
+  the outbound path.
+- `HonkDialer::new` bypasses dispatch (M3c, NB10,
+  watch-item for M4): a caller that builds a `Node` by
+  hand and passes it to `HonkDialer::new` skips
+  `dispatch_outbound` validation AND `apply_tls_mode`,
+  so it dials with honk's default TLS mode, not
+  Chrome-mode. M4 must route node construction through
+  dispatch or restrict the constructor. Related: QUIC
+  nodes (hysteria2/tuic) NEVER pass `apply_tls_mode`
+  (`build_tls` is TCP/TLS only), so QUIC-TLS mode is
+  always honk's default regardless of profile — the
+  profile's TLS settings do not reach QUIC dials.
+- 3xx exit code is an M4 decision (M3c, NB13):
+  `RedirectRefused` maps to exit 1 (the generic bucket)
+  now; whether a gateway 3xx should stay 1 or become
+  exit 3 (gateway error, Go's classification for
+  gateway HTTP failures) must be settled explicitly
+  in M4, not inherited silently.
+- `Unsupported` → exit 1 vs Go config-parse → exit 2
+  (M3c, N6): code UNCHANGED — this crate has no CLI,
+  so the CLI layer must map config rejections to 2
+  itself (documented in `error.rs` `Unsupported` docs
+  and in the §M3.2 error row).
+- QUIC `tls.insecure` is not mapped by dispatch
+  (M3c, NB9 follow-up): hysteria2/tuic dispatch uses
+  `quic: Default::default()`, so node QUIC TLS
+  verification is always on (webpki roots) and a
+  self-signed or private-CA server cannot work
+  through dispatch, even though sing-box hysteria2
+  outbound HAS `tls.insecure` (the Go control used
+  it). Mapping it is future work, explicit opt-in
+  only — see §M3.8 for the proof.
 
 ## M3.4 Pin + license (Boss decision, verbatim)
 
@@ -1367,12 +1414,23 @@ Method (same parser both sides, so parser quirks
 cancel out): a record-only Python TCP listener on
 127.0.0.1 captures the first TLS record (ClientHello);
 a Python parser reports JA3 (classic, GREASE kept),
-JA4 (this parser: version from supported_versions,
-SNI d/i, 2-digit cipher/extension counts excluding
-SNI+ALPN, ALPN first+last char, GREASE→0000 BEFORE
-sorting, first 12 hex of SHA256 over sorted ciphers
-and over sorted extensions + presented-order
+JA4-like (this parser's variant: version from
+supported_versions, SNI d/i, 2-digit cipher/
+extension counts excluding SNI+ALPN, ALPN first+last
+char of the first advertised value, GREASE→0000
+BEFORE sorting, first 12 hex of SHA256 over sorted
+ciphers and over sorted extensions + presented-order
 signature algorithms), plus all raw ordered lists.
+Standard JA4 (FoxIO: GREASE excluded ENTIRELY from
+lists and counts, same hash construction otherwise,
+ALPN = first advertised value's first+last char)
+was recomputed from the SAME captures in M3c with
+an independent script (`notes/parity/ja4std-m3c.py`,
+kept outside the repo tree for re-review); the
+alternative ALPN convention (first char of the
+first value + last char of the LAST value) would
+give `h1` instead of `h2` in the ALPN field and is
+not the column published here.
 N = 5 runs per side per row. Go side: scratch clone
 on cue (`/tmp/parity-go`, never in the repo tree) +
 throwaway test `TestZZParityClientHello` with the
@@ -1410,15 +1468,33 @@ run on both sides by design (GREASE kept, presented
 order) — 5 distinct JA3 per side per row — so JA3
 equality is not the comparison; the stable sets are.
 
+M3c label correction (NB7): the M3b values were
+called "JA4", but the parser's GREASE→0000-then-sort
++ count-with-GREASE convention is NOT standard JA4
+(FoxIO excludes GREASE entirely from lists and
+counts). The M3b values are relabelled JA4-like
+above, and the standard-JA4 column was recomputed
+from the same captures with an independent script
+(fresh TLS walk + JA4 construction, kept as
+`notes/parity/ja4std-m3c.py` outside the repo tree
+for re-review). The parity
+conclusion is unchanged under both variants: Go ≠
+Rust on both rows.
+
 TLS row (trojan, utls chrome both sides; SNI
 `example.com`, ALPN `[h2, http/1.1]` both sides):
-- Go JA4 (stable ×5):
+- Go JA4-like (stable ×5):
   `t13d1616h2_74c5f98c3854_f20eef27beb5`.
-  Rust JA4 (stable ×5):
+  Rust JA4-like (stable ×5):
   `t13d1814h2_4be38248e33f_2ecda25e495a`.
-  JA4 differs (cipher count 16 vs 18, extension
-  count 16 vs 14) — a listed difference, NOT a gate
-  failure, and NOT claimed as a match.
+  Standard JA4 (same captures, GREASE excluded
+  entirely, recomputed independently in M3c): Go
+  `t13d1514h2_8daaf6152771_d8a2da3f94cd`, Rust
+  `t13d1712h2_5b57614c22b0_a7c1ad54107f`.
+  Fingerprints differ under BOTH variants (JA4-like
+  cipher count 16 vs 18, extension count 16 vs 14;
+  standard 15 vs 17, 14 vs 12) — a listed difference,
+  NOT a gate failure, and NOT claimed as a match.
 - Cipher sets (non-GREASE, sorted): Go 15 suites
   `1301,1302,1303,c02b,c02c,c02f,c030,cca8,cca9,
   c013,c014,009c,009d,002f,0035` (+1 GREASE = 16).
@@ -1429,13 +1505,19 @@ TLS row (trojan, utls chrome both sides; SNI
   `000a,000b,000d,0017,001b,0023,002b,002d,0033,
   fe0d,ff01` (+ SNI `0000` + ALPN `0010` both sides).
   Go-only: `0005` (status_request), `0012`
-  (signed_certificate_timestamp), `44cd`.
-  Rust-only: `4469`. `44cd`/`4469` are fixed
-  (present in all 5 runs on their side), 5-byte
-  payloads, and unidentified: source grep in
-  metacubex/utls v1.8.7 and boring-sys found no
-  literal; they are NOT claimed to be the same
-  extension (the 0x44xx proximity is not evidence).
+  (signed_certificate_timestamp). Rust-only: none —
+  `44cd` (Go) and `4469` (Rust) are the SAME
+  extension, ALPS: both are fixed (present in all 5
+  runs on their side) with byte-identical 5-byte
+  payloads `00 03 02 68 32` (ALPS advertising `h2`),
+  and honk attaches ALPS at codepoint 0x4469 (see
+  research-honk) while utls-chrome uses the older
+  0x44cd codepoint. Confidence: measured from the
+  captures + the honk anchor; utls source was NOT
+  grepped for the literal, so this is identification
+  by payload + anchor, not by source proof. After
+  unifying ALPS, the TLS-row extension difference
+  is exactly Go-only `0005` + `0012`.
 - Same both sides: supported_groups
   `{11ec,001d,0017,0018}` (+ GREASE; `11ec` =
   X25519MLKEM768), key_share groups
@@ -1450,8 +1532,10 @@ TLS row (trojan, utls chrome both sides; SNI
   GREASE/session randomness, not a set change).
 
 REALITY row (vless + REALITY, utls chrome both sides):
-- Go JA4 = its TLS JA4 exactly
-  (`t13d1616h2_74c5f98c3854_f20eef27beb5`, ×5):
+- Go JA4-like = its TLS JA4-like exactly
+  (`t13d1616h2_74c5f98c3854_f20eef27beb5`, ×5),
+  and Go standard JA4 = its TLS standard JA4
+  (`t13d1514h2_8daaf6152771_d8a2da3f94cd`, ×5):
   same cipher set, same extension set, same
   sigalgs as Go TLS. Differences vs Go TLS: no
   `11ec` group (supported_groups `{GREASE,001d,
@@ -1459,12 +1543,16 @@ REALITY row (vless + REALITY, utls chrome both sides):
   drops the MLKEM768 hybrid, X25519 only) and much
   smaller records (499–595 bytes, no MLKEM768 key
   share).
-- Rust JA4 (stable ×5):
-  `t13d0412h2_16c83510387f_a735005f8dcf` — a
+- Rust JA4-like (stable ×5):
+  `t13d0412h2_16c83510387f_a735005f8dcf`, standard
+  JA4 (stable ×5):
+  `t13d0310h2_55b375c5d22e_6fb7db78d84a` — a
   DIFFERENT, TLS-1.3-only profile: 3 + GREASE
   ciphers (`1301,1302,1303` only), 12 + SNI + ALPN
   extensions (includes `0005` + `0012` like Go,
-  lacks `0017` and `0023`), supported_groups
+  ALPS at `4469` = Go's `44cd` with the same
+  `00 03 02 68 32` payload, lacks `000b`, `0017`,
+  `0023` and `ff01`), supported_groups
   `{GREASE,11ec,001d}` (MLKEM768 KEPT, no
   `0017`/`0018`), supported_versions `{GREASE,0304}`
   only, record length 1706–1770 bytes. Honk's
@@ -1487,7 +1575,7 @@ on 127.0.0.1:18900/18901, self-signed cert
   failed with `read: EOF` (test-harness artifact,
   not investigated further — the handshake proof
   stands on the server log).
-- Rust honk client: handshake NOT proven. Dial
+- Rust honk client, M3b: handshake NOT proven. Dial
   fails fast with `connection down: QUIC connect to
   127.0.0.1:18900 (attempt 3)` (same on 18901),
   and the server log shows NO Rust connection
@@ -1496,20 +1584,71 @@ on 127.0.0.1:18900/18901, self-signed cert
   QUIC v1 Initial packets (1200 bytes, 3 bursts =
   3 attempts, DCIDs `38cc…`, `1575…`, `2c03…`)
   and retransmits until the 30 s timeout — so
-  packets leave the client, and the sing-box
-  failure is a handshake-content mismatch
-  (ALPN / transport parameters / TLS profile
-  inside honk's Initial), NOT packet loss. The
-  Initial payload was NOT decrypted (QUIC Initial
-  keys are derivable from the DCID, but that
-  analysis was not done); the exact mismatching
-  field is an open question for Phase 3, and no
-  QUIC interop fix is attempted in M3b.
+  packets leave the client, and the failure is NOT
+  packet loss. The M3b report attributed it to a
+  handshake-content mismatch (ALPN / transport
+  parameters / TLS profile inside honk's Initial);
+  that attribution was UNPROVEN (the Initial
+  payload was NOT decrypted — QUIC Initial keys are
+  derivable from the DCID, but that analysis was
+  not done).
+- Rust honk client, M3c (NB9, decisive): the
+  content-mismatch attribution is REFUTED. On a
+  fresh controlled server (same shape: sing-box
+  v1.14.4, hysteria2 127.0.0.1:18900, self-signed
+  cert SAN localhost + 127.0.0.1, password fake,
+  echo on 18080), the dispatch-default client
+  reproduces the M3b failure verbatim
+  (`QUIC connect to 127.0.0.1:18900 (attempt 3)`),
+  while the SAME client with ONLY node-level
+  `quic.tls.skip_cert_verify = true` (set via
+  `Node::tls_mut()` in a cue-only harness, never
+  through dispatch) dials OK and echoes
+  (`read 2 bytes: [111, 107]` = "ok"). The server
+  log shows no connection for the failing case
+  (the client aborts before auth, so sing-box never
+  logs an inbound connection) and the full
+  connection + data path for the passing case.
+  Root cause of the M3b failure: client-side
+  certificate verification — honk verifies the
+  server cert against its webpki-only root store
+  (`tls.rs` `root_store`, Mozilla roots, NOT the
+  system store), so a self-signed server cert is
+  rejected; the Go control worked because it used
+  `tls.insecure=true`. Packets, ALPN, transport
+  parameters and the TLS profile were all fine —
+  the handshake completes and data flows once
+  verification is skipped. The Go control was NOT
+  re-run in M3c: the passing Rust run against the
+  same server subsumes its role (proving the server
+  works). Artifacts (cue-only harness + run log +
+  server log): `notes/parity/quic_m3c.rs`,
+  `quic-m3c-runs.log`, `quic-m3c-server.log`.
+  Follow-up, NOT in this loop: M3 dispatch maps
+  hysteria2 with `quic: Default::default()` and
+  never surfaces an insecure option, while sing-box
+  hysteria2 outbound HAS `tls.insecure`. Mapping
+  `tls.insecure` → node `quic.tls.skip_cert_verify`
+  is future work and must stay explicit opt-in,
+  never a default. Also note for that work: honk's
+  webpki-only store means even a private CA trusted
+  by the system would fail; only skip (or a
+  publicly-trusted cert) works through honk today.
 - QUIC verdict: Rust QUIC handshake against a
-  controlled server: FAILED (with a working Go
-  control). This is a parity finding, not a gate
-  failure: the M3 gates are the four commands in
-  §M3.7, all green.
+  controlled server through DISPATCH: FAILED (the
+  dispatch path cannot skip verification, so a
+  self-signed server cannot work through it); the
+  honk QUIC stack itself is PROVEN working once
+  verification is skipped. This is a parity finding,
+  not a gate failure: the M3 gates are the four
+  commands in §M3.7, all green.
+- Go control scope note (M3b, kept): the Go control
+  proved handshake + auth + connect by server log
+  only — its echo round-trip failed with
+  `read: EOF` (harness artifact), so the Go control
+  proves no data path. Data-path QUIC is now proven
+  on the Rust side (M3c echo above), not on the Go
+  side.
 
 ## M3.9 — Build prerequisites on cue (supplement)
 
@@ -1519,6 +1658,17 @@ claimed):
 - Rust toolchain 1.99.1 via `rust/rust-toolchain.toml`
   (rustup installs it on demand with profile minimal
   + clippy/rustfmt; 1.97.1 stays the default on cue).
+  MSRV note (M3c, NB11): `rust-version` in
+  `rust/Cargo.toml` is 1.98, not the M3-submission
+  1.85 — honk pulls aya 0.16.0 via honk-ebpf-common,
+  and aya 0.16 requires rustc ≥ 1.98. The pin only
+  works through the RUSTUP SHIM: a standalone cargo
+  install ignores `rust-toolchain.toml` entirely and
+  stays on its own toolchain, so on a machine with
+  only cargo 1.97.1 the build fails on aya with a
+  confusing "requires rustc 1.98" error before
+  compiling anything. Always run plain `cargo` (the
+  shim) from inside `rust/` so the pin applies.
 - `cmake` 3.28.3 (`apt-get install -y cmake`):
   boring-sys's build script shells out to cmake
   (without it: "is `cmake` not installed?").
@@ -1552,6 +1702,28 @@ claimed):
   libclang-dev install (the file did not exist at
   all then), so it is not evidence that bindgen
   cannot discover an existing libclang.
+  Two M3c clarifications (NB12), both about what
+  the measurements do NOT prove: (a) the
+  `LIBCLANG_PATH` trial ran WITH libclang-dev
+  already installed, so it does NOT prove that
+  `LIBCLANG_PATH` alone substitutes for libclang-dev
+  on a fresh machine — a fresh machine still needs
+  the `apt-get install -y cmake libclang-dev` step
+  above (the Boss-ordered sequence — try
+  `LIBCLANG_PATH` first, apt only if it fails — is
+  preserved as history; its outcome was that apt
+  was needed and is sufficient). (b) Runtime lib vs
+  dev symlink: the runtime package provides only the
+  versioned soname (`libclang-18.so.18`, seen via
+  ldconfig); bindgen needs the UNVERSIONED dev
+  symlink `libclang.so` that only libclang-dev
+  installs — pointing `LIBCLANG_PATH` at a directory
+  holding just the versioned soname does NOT satisfy
+  bindgen. This reconciles the two observations that
+  looked contradictory: the file Boss saw existing
+  was the dev symlink AFTER the install, while the
+  `warm2` failure happened BEFORE the install, when
+  no libclang of either kind was present.
 - boring-sys first-build cost (measured on cue, 8
   CPUs): `cargo clean -p boring-sys` removed 5527
   files / 483.3 MiB, then `time LIBCLANG_PATH=
@@ -1559,3 +1731,274 @@ claimed):
   finished in real 0m 48.8 s (user 2m 27.2 s, sys
   0m 26.6 s), exit 0. Full cold workspace build:
   1m 31s–1m 35s (§M3.7, final verify).
+
+## M3.10 — Fix loop vòng 1 (M3c, trên `feab242`)
+
+Phase 3 review của M3 (technical FAIL với 2 blocking,
+safety PASS với 2 non-blocking, red-team FAIL với 1
+blocking) được sửa trong loop này. Mọi thay đổi đều
+trong `rust/`, `NOTICE`, `docs/provenance.md`; không
+đổi sha honk, không đổi toolchain pin (1.99.1), không
+sửa Go, không wire CLI mạng, không WireGuard. Test
+mới được viết ĐỎ trước rồi sửa cho xanh ở những chỗ
+có thể (blocking T-B1/T-B2/R-B1 đều có test mới).
+
+Blocking (đã sửa):
+- T-B1 — `rpc.rs decode_response` theo đúng thứ tự Go
+  `CallJSON`: chỉ `ok` BOOLEAN false mới lỗi; còn lại
+  có `result` là trả `result` (kể cả `ok` vắng mặt hay
+  non-bool). Test mới:
+  `decode_result_without_ok_and_with_non_bool_ok`.
+  Claim "verbatim" ở §M3.2 giờ mới đúng.
+- T-B2 — `config.rs build_tls` phân biệt block vắng vs
+  field vắng: `utls` vắng → `None` (default chrome);
+  block có mặt → `Some(field.unwrap_or(false))` (thiếu
+  field = tắt → `Unsupported`); reality chỉ bật khi
+  `tls.enabled && reality.enabled == Some(true)`; TLS
+  tắt ⇒ reality fields `None` (trước đây honk
+  `TlsOptions::is_secure()` = enabled OR reality key
+  present sẽ chạy REALITY handshake cho node tắt TLS).
+  Test mới: `tls_presence_block_vs_field` (4 trường
+  hợp: utls thiếu field → `Unsupported`; utls vắng →
+  default; reality thiếu field → không key; TLS tắt +
+  reality bật → không key; control dương: TLS bật +
+  reality bật → có key).
+- R-B1 — `http.rs` đọc body theo frame với cap trong
+  lúc đọc (trước đây `collect()` rồi mới kiểm tra >
+  16 MiB → OOM trước khi câu if chạy). Vượt cap →
+  `Gateway` (exit 3, không retry được: retry sẽ tải
+  lại đúng body quá lớn tới hết budget; quyết định
+  này khớp class server-side failure của Go, và
+  `BodySummary` cho trường hợp này mang
+  `body_length` None — độ dài thật không biết, chỉ
+  biết vượt cap — thay vì ghi MAX+1 như độ dài thật).
+  Test mới: `oversized_body_is_gateway_exit_3_not_success`
+  (17 MiB) và `endless_body_aborts_early_with_gateway_error`
+  (chunked vô hạn, abort sớm, không đọc hết).
+
+Non-blocking (đã sửa):
+- N1 (= red NB1) — hyper handshake failure →
+  `ConnectionDown` (chưa gửi byte request nào, Go
+  "nothing sent"). Test trực tiếp cho nhánh handshake
+  không quan sát được ở tầng HTTP/1.1 (xem [CHƯA XÁC
+  MINH]); test mới pin phía đối chứng:
+  `send_after_peer_close_is_connection_error_not_down`
+  (lỗi SAU khi gửi là `ConnectionError`, không phải
+  `ConnectionDown`).
+- N2 — bật `serde_json` feature `arbitrary_precision`
+  (chỉ `castctl-transport` dùng serde_json trong
+  workspace nên an toàn); test mới
+  `decode_numbers_beyond_u64_keep_literal` (2^64 và
+  thập phân dài giữ literal; `json!` không tạo được
+  số > u64 nên fixture là JSON text thô).
+- N3 (= red NB5) — `body_to_query` implement `%v` cho
+  giá trị lồng (`pythonStr` default branch): array
+  `[elem elem]`, object `map[k:v …]` key đã sort,
+  bool lồng `true`/`false` (khác top-level
+  `True`/`False`), null lồng `<nil>`; doc cũ "Go does
+  not define" là SAI và đã sửa. Test mới
+  `get_body_to_query_nested_python_str`; test cũ assert
+  nested → lỗi đã đổi theo.
+- N4 — `routes.rs` doc sửa: duplicate bị drop, `len()`
+  đếm distinct (không còn câu "duplicates still count
+  toward the total").
+- N5 — `tests/common/mod.rs` bỏ field
+  `RequestRecord.headers` (không test nào đọc) + code
+  populate nó; header vẫn được parse local để lấy
+  `content-length`.
+- N6 — KHÔNG đổi code; doc đã có trong `error.rs`
+  (`Unsupported`: "CLI layer must map config
+  rejections to 2 itself") và đã bổ sung vào §M3.2 —
+  trạng thái: documented/verified.
+- Safety NB-1 — `HttpResponse` viết tay `Debug` chỉ in
+  status + body length (mẫu `BodySummary`); test mới
+  `http_response_debug_hides_headers_and_body`
+  (Set-Cookie + body secret không xuất hiện).
+- Safety NB-2 — bỏ field `location` khỏi
+  `RedirectRefused` (thành unit variant): grep xác
+  nhận không code nào trong crate đọc field (chỉ doc
+  ở `http.rs`, code tạo lỗi, và test dùng pattern
+  `{..}`); pattern test đã đổi thành unit.
+- Red NB2 — `DirectDialer`: timeout 10s của 1 addr
+  không còn trả `Timeout` ngay; thử hết addrs, hết
+  thì `ConnectionDown`. Test mới
+  `direct_dialer_unanswered_address_is_connection_down_not_timeout`
+  (10.255.255.1, tối đa 10s khi thật sự treo) và
+  `direct_dialer_falls_back_to_working_address`
+  (localhost, caveat thứ tự resolver — xem dưới).
+- Red NB3 — `call_json` bọc toàn bộ `run_with_retry`
+  trong `tokio::time::timeout` bằng request timeout
+  (overall cap; expiry → `Timeout`, không retry).
+  Test mới `overall_timeout_caps_retrying_slow_failures`
+  (server đóng không đáp: retry budget 5s, request
+  timeout 300ms → lỗi `Timeout` sau ~300ms, đã retry
+  ≥ 2 lần trước khi cap cắt).
+- Red NB4 — `HonkDialer` lặp qua mọi addr thay vì
+  chỉ `addrs[0]`. Test mới
+  `honk_dialer_falls_back_to_working_address` (direct
+  node qua registry, localhost; cùng caveat resolver).
+- Red NB6 — KHÔNG đổi code `build_tls`: hai đường
+  TLS khác nhau thật (xem §M3.3) — outbound parse
+  theo sing-box pointer semantics, gateway DialTLS ép
+  `Enabled=true` là việc M4. Trạng thái: documented.
+- Red NB7 — nhãn "JA4" của M3b đổi thành JA4-like;
+  cột JA4 CHUẨN (GREASE loại hoàn toàn) recompute
+  từ cùng captures bằng script độc lập
+  (`notes/parity/ja4std-m3c.py`, ngoài cây repo):
+  Go TLS/REALITY
+  `t13d1514h2_8daaf6152771_d8a2da3f94cd`, Rust TLS
+  `t13d1712h2_5b57614c22b0_a7c1ad54107f`, Rust
+  REALITY `t13d0310h2_55b375c5d22e_6fb7db78d84a`
+  (ổn định ×5 mỗi hàng; ALPN = ký tự đầu+cuối của
+  giá trị ALPN đầu tiên; biến thể first-of-first +
+  last-of-last cho `h1` được ghi chú trong §M3.8).
+  Kết luận parity (Go ≠ Rust) ĐỨNG dưới cả hai
+  biến thể. `rust/NOTICE` + `docs/provenance.md`
+  cập nhật nhãn tương ứng; root `NOTICE` không nhắc
+  JA4 nên không đổi.
+- Red NB8 — `44cd` (Go) / `4469` (Rust) là CÙNG ALPS:
+  payload byte-identical `00 03 02 68 32` cả hai
+  hàng, honk gắn ALPS ở 0x4469 (anchor
+  research-honk). Mức tin cậy: đo từ .bin + anchor,
+  chưa grep source utls nên không tuyệt đối. Sau khi
+  hợp nhất ALPS, diff hàng TLS còn Go-only `0005` +
+  `0012`; hàng REALITY còn Go-only `000b`, `0017`,
+  `0023`, `ff01`.
+- Red NB9 — ĐÃ CHỨNG MINH BẰNG THỰC NGHIỆM (không
+  còn là giả thuyết): trên server đối chứng mới
+  (sing-box v1.14.4, hysteria2 127.0.0.1:18900,
+  cert tự ký SAN localhost + 127.0.0.1, echo
+  18080), client dispatch-default tái hiện đúng lỗi
+  M3b (`QUIC connect to 127.0.0.1:18900 (attempt
+  3)`); cùng client chỉ khác
+  `quic.tls.skip_cert_verify = true` (đặt qua
+  `Node::tls_mut()` trong harness chỉ-trên-cue, không
+  qua dispatch) thì dial OK + echo "ok" (2 byte
+  [111, 107]). Kết luận: chẩn đoán "content
+  mismatch" của M3b bị BÁC — nguyên nhân là verify
+  chứng chỉ client-side (honk chỉ tin webpki roots,
+  không dùng system store). Verdict cập nhật: QUIC
+  qua DISPATCH vẫn FAILED (dispatch không có đường
+  skip verify); bản thân stack QUIC của honk đã
+  ĐƯỢC CHỨNG MINH là làm việc khi skip verify.
+  Wording §M3.8 đã sửa theo; artifact:
+  `notes/parity/quic_m3c.rs` (harness, sha256
+  741f9118…e0de0d, byte-identical với bản chạy
+  trên cue), `quic-m3c-runs.log`,
+  `quic-m3c-server.log` (server log không có
+  connection cho case lỗi, có đủ connection + data
+  path cho case pass). Go control KHÔNG chạy lại
+  trong M3c: run Rust pass trên cùng server đã thay
+  vai trò chứng minh server làm việc. Follow-up
+  (ngoài loop): map `tls.insecure` → skip_cert_verify,
+  explicit opt-in only — xem §M3.3.
+- Red NB10 — chỉ document (§M3.3 watch-item M4):
+  `HonkDialer::new` bypass validation +
+  `apply_tls_mode`; node QUIC không bao giờ qua
+  `apply_tls_mode` nên mode QUIC-TLS luôn là default
+  của honk. Không đổi API.
+- Red NB11 — `rust-version` 1.85 → 1.98 trong
+  `rust/Cargo.toml` (workspace duy nhất có dòng này;
+  mọi crate con đều `rust-version.workspace = true`);
+  §M3.9 thêm tiền đề rustup shim (cargo standalone
+  bỏ qua `rust-toolchain.toml`, kẹt 1.97.1 → fail
+  aya khó hiểu). §M3 intro (dòng 998) giữ nguyên
+  1.85 vì đó là record lúc nộp M3, không viết lại
+  lịch sử.
+- Red NB12 — §M3.9 làm rõ: (a) lần thử LIBCLANG_PATH
+  có sẵn libclang-dev nên không chứng minh nó thay
+  được libclang-dev trên máy mới (máy mới vẫn cần
+  apt cmake + libclang-dev; thứ tự Boss chỉ đạo giữ
+  nguyên như lịch sử); (b) runtime lib (versioned
+  soname `libclang-18.so.18`) vs dev symlink
+  (`libclang.so`, chỉ libclang-dev mới có) mà bindgen
+  cần — hòa giải: file Boss thấy tồn tại là dev
+  symlink SAU khi cài, lỗi `warm2` xảy ra TRƯỚC khi
+  cài khi chưa có libclang nào.
+- Red NB13 — chỉ document (§M3.3 + doc variant trong
+  `error.rs`): 3xx → `RedirectRefused` exit 1 hiện
+  tại; M4 phải chốt 1 vs 3 explicitly. Không đổi code.
+- Red NB14 — `decode_base64url` siết cho khớp Go:
+  whitespace bất kỳ đâu → lỗi (Go chỉ bỏ qua \r\n
+  nhưng key thật không chứa whitespace nào nên siết
+  toàn bộ là fail-closed, đã ghi rõ trong doc),
+  độ dài ≡ 1 mod 4 → lỗi, bit thừa ≠ 0 → lỗi, data
+  sau padding và padding sai độ dài → lỗi. Padding
+  đúng chuẩn vẫn được chấp nhận (key test cũ
+  43×`A` + `=` vẫn pass). Test mới
+  `base64url_rejects_what_go_rejects`.
+
+Clippy repair ngoài danh sách finding (bắt buộc để
+gate xanh, hệ quả trực tiếp của NB11): nâng
+`rust-version` 1.85 → 1.98 làm clippy 0.1.99 BẬT LẠI
+lint `collapsible_if` dạng let-chain (với MSRV 1.85,
+clippy kìm lint này vì let-chain cần rustc ≥ 1.88;
+với 1.98 thì lint bật) — 22 lỗi ở code M1/M2 không
+đụng tới (castctl-config 18, castctl-shared 4) làm
+gate clippy fail ở vòng đầu. Bằng chứng cơ chế:
+chạy clippy trên cây pristine `feab242` (MSRV 1.85)
+trên cue → exit 0, 0 lỗi, trong khi cùng lệnh trên
+cây M3c → 22 lỗi; toolchain giống nhau (rustc
+1.99.1, clippy 0.1.99). Cách sửa: `cargo clippy
+--fix --workspace` trên cue (tổng 40 chỗ: 18 config
++ 4 shared + 10 log-redact + 3 cli + 5 transport
+— config 2, http 2, retry 1 — trong đó các crate phụ
+thuộc chỉ lộ lỗi sau khi root đã sửa, vì vòng gate
+đầu dừng ở config/shared trước), sync ngược về
+local, review toàn bộ diff: mọi hunk đều là collapse
+if lồng thành let-chain (`if A { if let … }` →
+`if A && let …`), không dòng logic nào bị xóa hay
+đổi (chỉ header `if` và dấu `}` thừa biến mất;
+semantics short-circuit giữ nguyên). Các file đổi
+thêm ngoài danh sách finding: castctl-config (5
+file), castctl-shared (2), castctl-log-redact (3),
+castctl-cli (2) — tất cả đều chỉ chứa collapse cơ
+học này, không sửa logic, không đổi API. Không dùng
+`#[allow]` để bịt lint.
+
+Gate trên cue ở head M3c (chạy từ `/tmp/castctl-rust-m3`,
+cargo shim 1.99.1 nhờ `rust-toolchain.toml`, trên đúng
+cây sẽ commit):
+- `cargo fmt --check` exit 0 (sau `cargo fmt` trên
+  cue: vòng đầu fmt exit 1 vì output của `cargo
+  clippy --fix` không đúng rustfmt — toàn bộ diff
+  fmt chỉ đặt lại dấu `{` của let-chain, không đổi
+  logic; sau fmt, cả 4 gate chạy lại trên cây này).
+- `cargo build --workspace` exit 0.
+- `cargo test --workspace` exit 0: 242 passed, 0
+  failed (229 cũ + 13 test mới: transport lib 34,
+  rpc 12; xem §M3.10 trên).
+- `cargo clippy --workspace -- -D warnings` exit 0,
+  0 error.
+Vòng gate trước fmt (cùng cây trừ whitespace fmt)
+cũng cho build 0 / test 242 / clippy 0, chỉ fmt 1 —
+nên số test không đổi sau fmt.
+
+[CHƯA XÁC MINH] (giữ nguyên tới khi có bằng chứng):
+- Thứ tự resolver trong test fallback NB2/NB4: nếu
+  resolver trả 127.0.0.1 trước, test pass mà không
+  exercise fallback thật — giới hạn này được ghi
+  trong test và báo cáo, không giấu.
+- QUIC Initial decrypt (phân tích ALPN/transport
+  params/SNI từ capture blackhole): chưa làm trong
+  M3b và chưa làm trong M3c; sau kết quả NB9 thì
+  phân tích này không còn cần để xác định nguyên
+  nhân (cert verify đã chứng minh), nhưng vẫn là
+  việc mở nếu ai muốn đối chiếu payload Initial.
+
+Đã xác minh trong M3c (không còn trong danh sách
+trên):
+- Hyper 1.8.1 `Builder::handshake` (http1) chỉ tạo
+  channel + Conn + Dispatcher rồi trả `Ok`, không
+  thực hiện I/O nào — đọc trực tiếp source trên cue
+  (`/usr/local/cargo/registry/src/.../hyper-1.8.1/
+  src/client/conn/http1.rs:514-570`). Đây là cơ sở
+  cho nhận xét "test trực tiếp nhánh handshake là
+  không quan sát được ở tầng HTTP/1.1".
+- Sing-box v1.14.4 `option/tls.go` trên cue module
+  cache: `UTLS *OutboundUTLSOptions` và `Reality
+  *OutboundRealityOptions` (dòng 134-135, pointer),
+  `OutboundUTLSOptions.Enabled bool` (247-249) và
+  `OutboundRealityOptions.Enabled bool` (252-256,
+  plain bool) — tự kiểm, không còn dựa vào
+  technical review cho claim này.

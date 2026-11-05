@@ -16,10 +16,11 @@ mod common;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use castctl_transport::dialer::{DialTarget, Dialer, DirectDialer};
 use castctl_transport::error::TransportError;
+use castctl_transport::http::HttpClient;
 use castctl_transport::retry::RetryPolicy;
 use castctl_transport::rpc::RpcClient;
 use common::{FakeServer, Responder};
@@ -133,7 +134,7 @@ async fn redirect_is_refused_and_second_server_gets_nothing() {
         .call_json("fs.read", None, &[])
         .await
         .expect_err("redirect must be refused");
-    assert!(matches!(err, TransportError::RedirectRefused { .. }));
+    assert!(matches!(err, TransportError::RedirectRefused));
     assert_eq!(first.requests(), 1);
     // No second request was ever issued, even though the client
     // knew the Location (Go noFollowRedirect invariant).
@@ -299,4 +300,219 @@ async fn token_in_request_body_never_appears_in_errors() {
     let records = server.records.lock().expect("records lock");
     let body = String::from_utf8_lossy(&records.last().expect("record").body);
     assert!(body.contains(fake_token));
+}
+
+/// Raw TCP server that reads one request's headers, then closes
+/// without responding. Returns (port, accept count). Used by the
+/// N1 and NB3 tests below.
+async fn spawn_close_server() -> (u16, Arc<AtomicUsize>) {
+    use tokio::io::AsyncReadExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("INVARIANT: close server binds");
+    let port = listener.local_addr().expect("INVARIANT: addr").port();
+    let count = Arc::new(AtomicUsize::new(0));
+    let count_clone = Arc::clone(&count);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            count_clone.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut byte = [0u8; 1];
+                while buf.len() < 65536 {
+                    match socket.read(&mut byte).await {
+                        Ok(0) => return,
+                        Ok(_) => {
+                            buf.push(byte[0]);
+                            if buf.ends_with(b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                }
+                // Close without responding: dropping the socket
+                // is the whole behavior.
+            });
+        }
+    });
+    (port, count)
+}
+
+#[tokio::test]
+async fn oversized_body_is_gateway_exit_3_not_success() {
+    // 17 MiB > the 16 MiB cap: the client must fail with a
+    // gateway error (exit 3, never retried), not buffer the
+    // body and succeed.
+    let big = vec![b'x'; 17 * 1024 * 1024];
+    let server = FakeServer::start(Arc::new(move |_| {
+        (
+            200,
+            vec![("content-type".to_string(), "application/json".to_string())],
+            big.clone(),
+        )
+    }))
+    .await;
+    let err = client_for(server.port)
+        .call_json("fs.read", None, &[])
+        .await
+        .expect_err("17 MiB body must fail");
+    assert!(
+        matches!(err, TransportError::Gateway(_)),
+        "over-cap body must be Gateway, got {err:?}"
+    );
+    assert_eq!(err.exit_code(), 3);
+    assert_eq!(server.requests(), 1, "gateway errors are never retried");
+}
+
+#[tokio::test]
+async fn endless_body_aborts_early_with_gateway_error() {
+    // A chunked body that never ends: the client must abort at
+    // the cap (Gateway, exit 3) instead of buffering forever or
+    // OOMing. The generous 20s bound only guards against a
+    // hang; the cap is hit after ~16 MiB on loopback, far faster.
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("INVARIANT: endless server binds");
+    let port = listener.local_addr().expect("INVARIANT: addr").port();
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        while buf.len() < 65536 {
+            match socket.read(&mut byte).await {
+                Ok(0) => return,
+                Ok(_) => {
+                    buf.push(byte[0]);
+                    if buf.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                Err(_) => return,
+            }
+        }
+        if socket
+            .write_all(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n")
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let chunk = vec![b'y'; 8192];
+        loop {
+            if socket.write_all(b"2000\r\n").await.is_err() {
+                return;
+            }
+            if socket.write_all(&chunk).await.is_err() {
+                return;
+            }
+            if socket.write_all(b"\r\n").await.is_err() {
+                return;
+            }
+            if socket.flush().await.is_err() {
+                return;
+            }
+        }
+    });
+    let client = HttpClient::new(Arc::new(DirectDialer::new()));
+    let start = Instant::now();
+    let err = client
+        .request(
+            http::Method::GET,
+            &DialTarget::new("127.0.0.1", port),
+            "/ping",
+            &[],
+            None,
+            Duration::from_secs(60),
+        )
+        .await
+        .expect_err("endless body must fail");
+    assert!(
+        matches!(err, TransportError::Gateway(_)),
+        "endless body must be Gateway, got {err:?}"
+    );
+    assert_eq!(err.exit_code(), 3);
+    assert!(
+        start.elapsed() < Duration::from_secs(20),
+        "client must abort at the cap, not read forever: {:?}",
+        start.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn send_after_peer_close_is_connection_error_not_down() {
+    // The peer reads the request, then closes without a
+    // response: the request WAS sent, so the failure is
+    // ConnectionError (reply possibly lost) — the contrast to
+    // the handshake branch, which maps to ConnectionDown
+    // because nothing was sent yet. (An HTTP/1.1 handshake
+    // performs no I/O, so a direct handshake-failure test is
+    // not observable at this layer; the handshake mapping is
+    // pinned by code review + the dial-failure tests instead.)
+    let (port, _) = spawn_close_server().await;
+    let client = HttpClient::new(Arc::new(DirectDialer::new()));
+    let err = client
+        .request(
+            http::Method::GET,
+            &DialTarget::new("127.0.0.1", port),
+            "/ping",
+            &[],
+            None,
+            Duration::from_secs(5),
+        )
+        .await
+        .expect_err("closed peer must fail");
+    assert!(
+        matches!(err, TransportError::ConnectionError { .. }),
+        "post-send close must be ConnectionError, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn overall_timeout_caps_retrying_slow_failures() {
+    // Every attempt fails fast with ConnectionError (retryable
+    // for this safe GET method). The retry budget (5s) is far
+    // above the request timeout (300ms): without an overall
+    // cap the call would run ~5s; with the wrapper it must
+    // surface Timeout at ~300ms, after having retried (more
+    // than one accept proves retries were in flight when the
+    // cap fired).
+    let (port, count) = spawn_close_server().await;
+    let client = RpcClient::new(
+        Arc::new(DirectDialer::new()),
+        DialTarget::new("127.0.0.1", port),
+        common::test_routes(),
+    )
+    .with_timeout(Duration::from_millis(300))
+    .with_retry_policy(RetryPolicy {
+        budget: Duration::from_secs(5),
+        pause_initial: Duration::from_millis(5),
+        pause_max: Duration::from_millis(5),
+    });
+    let start = Instant::now();
+    let err = client
+        .call_json("connection.ping", None, &[])
+        .await
+        .expect_err("must fail");
+    let elapsed = start.elapsed();
+    assert!(
+        matches!(err, TransportError::Timeout { .. }),
+        "overall cap must surface Timeout, got {err:?}"
+    );
+    assert_eq!(err.exit_code(), 4);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "overall timeout must fire near 300ms, took {elapsed:?}"
+    );
+    assert!(
+        count.load(Ordering::SeqCst) >= 2,
+        "retries must have happened before the cap: {}",
+        count.load(Ordering::SeqCst)
+    );
 }

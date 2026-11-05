@@ -27,10 +27,13 @@
 //!   stream frames to HTTP statuses);
 //! - `internal/gateway/jsonutil.go:28-48` (`decodeJSONValue`:
 //!   numbers stay integers/`json.Number`, never `float64` —
-//!   `serde_json::Number` preserves the literal the same way,
-//!   and trailing data after a JSON value is an error),
-//!   `:98-118` (GET body → query, nil dropped, bool as
-//!   Python `True`/`False`), `:70-96` (`encodeBody`: nil → no
+//!   `serde_json::Number` with the `arbitrary_precision`
+//!   feature preserves the literal the same way, including
+//!   numbers outside the i64/u64 range, and trailing data
+//!   after a JSON value is an error),
+//!   `:98-118` (GET body → query, nil dropped, top-level bool
+//!   as Python `True`/`False`, nested values via `pythonStr`
+//!   `%v`), `:70-96` (`encodeBody`: nil → no
 //!   bytes, raw bytes/string → verbatim, else JSON marshal);
 //! - `internal/gateway/stream.go:188-208` (`buildPath`),
 //!   `:213-220` (`resolveRoute`: explicit override wins, unknown
@@ -140,12 +143,13 @@ impl RpcClient {
         &self.routes
     }
 
-    /// Call a gateway method. Returns the decoded JSON value:
-    /// for `{"ok":true,"result":…}` the `result` field; for
-    /// `{"ok":true}` without `result`, the whole value; for an
-    /// empty body, `{}`; otherwise the whole decoded value.
-    /// `{"ok":false}` → `GatewayError(-1, summary)` where the
-    /// summary carries only the enum-gated `error` field.
+    /// Call a gateway method. Returns the decoded JSON value,
+    /// following Go `CallJSON` exactly: only a BOOLEAN false
+    /// `ok` is an error (`GatewayError(-1, summary)` where the
+    /// summary carries only the enum-gated `error` field); any
+    /// other object with a `result` field returns `result`
+    /// (whether `ok` is true, non-bool, or absent); otherwise
+    /// the whole decoded value; an empty body → `{}`.
     pub async fn call_json(
         &self,
         method: &str,
@@ -198,26 +202,39 @@ impl RpcClient {
         let http = self.http.clone();
         let target = self.target.clone();
         let path = path.clone();
-        let response = run_with_retry(policy, safe, move || {
-            let http = http.clone();
-            let target = target.clone();
-            let path = path.clone();
-            let headers = headers.clone();
-            let body_bytes = body_bytes.clone();
-            let method = http_method.clone();
-            async move {
-                http.request(
-                    method,
-                    &target,
-                    &path,
-                    &headers,
-                    body_bytes.map(bytes::Bytes::from),
-                    timeout,
-                )
-                .await
-            }
-        })
-        .await?;
+        // Overall cap: the retry loop's per-attempt timeout
+        // resets every attempt, so without this wrapper a slow
+        // peer could stretch the call past the request timeout
+        // (accumulated pauses + one full attempt). Go bounds the
+        // whole call by the context deadline (`effectiveTimeout`,
+        // `calls.go:34-45`); this wrapper is that deadline.
+        // Expiry is a `Timeout` error, never retried.
+        let response = tokio::time::timeout(
+            timeout,
+            run_with_retry(policy, safe, move || {
+                let http = http.clone();
+                let target = target.clone();
+                let path = path.clone();
+                let headers = headers.clone();
+                let body_bytes = body_bytes.clone();
+                let method = http_method.clone();
+                async move {
+                    http.request(
+                        method,
+                        &target,
+                        &path,
+                        &headers,
+                        body_bytes.map(bytes::Bytes::from),
+                        timeout,
+                    )
+                    .await
+                }
+            }),
+        )
+        .await
+        .map_err(|_| TransportError::Timeout {
+            message: "request timed out".to_string(),
+        })??;
         // Status outside 200–299 → GatewayError(status, summary).
         // The body bytes are measured for the summary, never
         // kept in the error.
@@ -248,12 +265,13 @@ fn parse_http_method(verb: &str) -> Result<Method, TransportError> {
 }
 
 /// Convert a GET body to query pairs (Go `bodyToQuery` +
-/// `pythonStr`): the body must be a JSON object; null values are
-/// dropped; bools render `True`/`False`; numbers render as their
-/// literal; strings pass through; anything else (arrays, nested
-/// objects) renders as Go's `pythonStr` would for a non-scalar —
-/// which Go does not define for urlencode, so M3 rejects it as a
-/// validation error rather than inventing a rendering.
+/// `pythonStr`, `internal/gateway/jsonutil.go`): the body must be
+/// a JSON object; null values are dropped; top-level bools render
+/// Python `True`/`False`; numbers render as their literal;
+/// strings pass through; nested values render with Go's `%v`
+/// default branch of `pythonStr` (arrays `[elem elem]`, objects
+/// `map[k:v …]` with keys sorted as Go's `fmt` sorts map keys,
+/// nested bools `true`/`false`, nested null `<nil>`).
 pub fn body_to_query(body: &Value) -> Result<Vec<(String, String)>, TransportError> {
     let obj = body.as_object().ok_or_else(|| TransportError::Validation {
         message: "GET body must be a map to convert to query".to_string(),
@@ -272,14 +290,48 @@ pub fn body_to_query(body: &Value) -> Result<Vec<(String, String)>, TransportErr
             )),
             Value::Number(n) => out.push((k.clone(), n.to_string())),
             Value::String(s) => out.push((k.clone(), s.clone())),
-            _ => {
-                return Err(TransportError::Validation {
-                    message: "GET body values must be scalars to convert to query".to_string(),
-                });
-            }
+            Value::Array(_) | Value::Object(_) => out.push((k.clone(), python_str(v))),
         }
     }
     Ok(out)
+}
+
+/// Render a nested value the way Go's `fmt.Sprintf("%v", v)`
+/// renders it (the default branch of `pythonStr`). Note the
+/// top-level/nested asymmetry, which mirrors Go exactly:
+/// top-level bools are Python `True`/`False` (handled in
+/// `body_to_query`), but a bool NESTED inside an array or object
+/// goes through `%v` and renders `true`/`false`; nested null
+/// renders `<nil>` (Go prints a nil interface that way), while
+/// top-level null is dropped before it can reach here. Map keys
+/// are sorted explicitly (Go's `fmt` sorts map keys) rather than
+/// relying on `serde_json::Map` ordering.
+fn python_str(v: &Value) -> String {
+    match v {
+        Value::Null => "<nil>".to_string(),
+        Value::Bool(b) => {
+            if *b {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        }
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.clone(),
+        Value::Array(items) => {
+            let parts: Vec<String> = items.iter().map(python_str).collect();
+            format!("[{}]", parts.join(" "))
+        }
+        Value::Object(map) => {
+            let mut pairs: Vec<(&String, &Value)> = map.iter().collect();
+            pairs.sort_by(|a, b| a.0.cmp(b.0));
+            let parts: Vec<String> = pairs
+                .iter()
+                .map(|(k, v)| format!("{k}:{}", python_str(v)))
+                .collect();
+            format!("map[{}]", parts.join(" "))
+        }
+    }
 }
 
 /// Extract the enum-gated `error` field from a JSON body, if the
@@ -292,13 +344,15 @@ fn extract_error_field(body: &[u8]) -> Option<String> {
     validate_error_code(code)
 }
 
-/// Decode a successful response body (Go `CallJSON` decode):
+/// Decode a successful response body (Go `CallJSON` decode,
+/// `internal/gateway/calls.go:186-220`, in Go's order):
 /// empty body → `{}`; JSON value → the value, with numbers kept
 /// as literals; trailing data after the value → error;
 /// non-JSON → `GatewayError(-1, summary)` (label + length only);
-/// `{"ok":false}` → `GatewayError(-1, summary)` with the gated
-/// `error` field; `{"ok":true}` → `result` when present, else
-/// the whole value; `ok` non-bool or absent → the whole value.
+/// `{"ok":false}` with `ok` a BOOLEAN false → `GatewayError(-1,
+/// summary)` with the gated `error` field; any other object
+/// with a `result` field → `result` (whether `ok` is true,
+/// non-bool, or absent); otherwise the whole value.
 pub fn decode_response(body: &[u8]) -> Result<Value, TransportError> {
     if body.is_empty() {
         return Ok(Value::Object(Map::new()));
@@ -308,21 +362,18 @@ pub fn decode_response(body: &[u8]) -> Result<Value, TransportError> {
         TransportError::Gateway(BodySummary::new(-1, Some(body), ""))
     })?;
     if let Some(obj) = value.as_object() {
-        if let Some(ok) = obj.get("ok") {
-            if let Some(ok_bool) = ok.as_bool() {
-                if ok_bool {
-                    if let Some(result) = obj.get("result") {
-                        return Ok(result.clone());
-                    }
-                    return Ok(value);
-                }
-                let mut summary = BodySummary::new(-1, Some(body), "");
-                summary.error_code = obj
-                    .get("error")
-                    .and_then(|e| e.as_str())
-                    .and_then(validate_error_code);
-                return Err(TransportError::Gateway(summary));
-            }
+        // Only a BOOLEAN false `ok` is an error. Every other
+        // shape falls through to the `result` rule below.
+        if obj.get("ok").and_then(Value::as_bool) == Some(false) {
+            let mut summary = BodySummary::new(-1, Some(body), "");
+            summary.error_code = obj
+                .get("error")
+                .and_then(|e| e.as_str())
+                .and_then(validate_error_code);
+            return Err(TransportError::Gateway(summary));
+        }
+        if let Some(result) = obj.get("result") {
+            return Ok(result.clone());
         }
     }
     Ok(value)
@@ -378,6 +429,36 @@ mod tests {
     }
 
     #[test]
+    fn decode_result_without_ok_and_with_non_bool_ok() {
+        // Go `CallJSON`: only a BOOLEAN false `ok` is an error.
+        // An object with `result` but no `ok` returns `result`.
+        assert_eq!(
+            decode_response(br#"{"result":{"a":1}}"#).expect("result without ok"),
+            serde_json::json!({"a": 1})
+        );
+        // Same for a non-bool `ok`: `result` still wins.
+        assert_eq!(
+            decode_response(br#"{"ok":"yes","result":42}"#).expect("result with non-bool ok"),
+            serde_json::json!(42)
+        );
+    }
+
+    #[test]
+    fn decode_numbers_beyond_u64_keep_literal() {
+        // Without `arbitrary_precision`, a number above u64::MAX
+        // decodes as f64 and its literal is lost (2^64 becomes
+        // 1.8446744073709552e19). With it, the literal survives.
+        // NOTE: `serde_json::json!` cannot build such a number
+        // (its macro only makes i64/u64/f64), so the fixture is
+        // raw JSON text parsed by `decode_response` itself.
+        let value = decode_response(br#"{"n": 18446744073709551616}"#).expect("2^64");
+        assert_eq!(value["n"].to_string(), "18446744073709551616");
+        let value =
+            decode_response(br#"{"d": 1.123456789012345678901234567890}"#).expect("long decimal");
+        assert_eq!(value["d"].to_string(), "1.123456789012345678901234567890");
+    }
+
+    #[test]
     fn get_body_to_query_rules() {
         let q = body_to_query(&serde_json::json!({"a": 1, "b": true, "c": null, "d": "x"}))
             .expect("query");
@@ -386,7 +467,27 @@ mod tests {
         assert!(q.contains(&("d".to_string(), "x".to_string())));
         assert!(!q.iter().any(|(k, _)| k == "c"));
         assert!(body_to_query(&serde_json::json!([1, 2])).is_err());
-        assert!(body_to_query(&serde_json::json!({"a": {"nested": 1}})).is_err());
+    }
+
+    #[test]
+    fn get_body_to_query_nested_python_str() {
+        // Go `pythonStr` default branch (`fmt %v`): nested
+        // values render, they are NOT rejected.
+        let q = body_to_query(
+            &serde_json::json!({"a": {"x": 1, "y": true}, "b": [1, 2], "c": null, "d": true}),
+        )
+        .expect("query");
+        assert!(q.contains(&("a".to_string(), "map[x:1 y:true]".to_string())));
+        assert!(q.contains(&("b".to_string(), "[1 2]".to_string())));
+        assert!(q.contains(&("d".to_string(), "True".to_string())));
+        assert!(!q.iter().any(|(k, _)| k == "c"));
+        // Map keys sort (Go `fmt` sorts map keys); nested bools
+        // use `%v` (`true`/`false`, NOT Python `True`/`False`);
+        // nested null renders `<nil>`.
+        let q = body_to_query(&serde_json::json!({"z": {"b": 2, "a": 1}, "n": [null, false]}))
+            .expect("query");
+        assert!(q.contains(&("z".to_string(), "map[a:1 b:2]".to_string())));
+        assert!(q.contains(&("n".to_string(), "[<nil> false]".to_string())));
     }
 
     #[test]

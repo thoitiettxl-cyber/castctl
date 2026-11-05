@@ -119,14 +119,14 @@ pub fn go_quote(s: &str) -> String {
 /// literal inside backticks; a truncated multi-byte sequence at
 /// the span edge renders per invalid byte.
 pub fn go_quote_escape_span(span: &[u8]) -> String {
-    if let Ok(s) = std::str::from_utf8(span) {
-        if s.chars().all(|c| c != ' ' && c != '`' && go_is_print(c)) {
-            let mut out = String::with_capacity(span.len() + 2);
-            out.push('`');
-            out.push_str(s);
-            out.push('`');
-            return out;
-        }
+    if let Ok(s) = std::str::from_utf8(span)
+        && s.chars().all(|c| c != ' ' && c != '`' && go_is_print(c))
+    {
+        let mut out = String::with_capacity(span.len() + 2);
+        out.push('`');
+        out.push_str(s);
+        out.push('`');
+        return out;
     }
     let mut out = String::with_capacity(span.len() + 2);
     out.push('"');

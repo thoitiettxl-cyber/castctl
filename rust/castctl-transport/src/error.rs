@@ -146,8 +146,16 @@ pub enum TransportError {
     /// `http.Client` error; M3 gives it its own variant so callers
     /// can distinguish "refused redirect" from other failures.
     /// It maps to exit code 1 (the generic bucket in
-    /// `classifyError`), like any unlisted error.
-    RedirectRefused { location: String },
+    /// `classifyError`), like any unlisted error. Whether a 3xx
+    /// from the gateway should stay exit 1 or become exit 3
+    /// (gateway error, Go's classification for gateway HTTP
+    /// failures) is an M4 CLI decision — M4 must settle it
+    /// explicitly and not let the default leak through silently.
+    /// The variant deliberately carries NO `Location` value: no
+    /// code in this crate reads one, and storing a server-chosen
+    /// URL on an error that might be logged would leak redirect
+    /// targets for no benefit.
+    RedirectRefused,
     /// The requested protocol / TLS mode / config shape is not
     /// supported by this transport (fail-closed). No Go counterpart
     /// as an error type: Go rejects these at config parse
@@ -173,7 +181,7 @@ impl TransportError {
             TransportError::ConnectionError { .. } => "connection_error",
             TransportError::Timeout { .. } => "timeout",
             TransportError::Validation { .. } => "validation",
-            TransportError::RedirectRefused { .. } => "redirect_refused",
+            TransportError::RedirectRefused => "redirect_refused",
             TransportError::Unsupported { .. } => "unsupported",
             TransportError::Cancelled => "cancelled",
         }
@@ -239,7 +247,7 @@ impl TransportError {
             TransportError::Validation { message } => {
                 format!("conn: validation error_length={}", message.len())
             }
-            TransportError::RedirectRefused { .. } => "conn: redirect_refused".to_string(),
+            TransportError::RedirectRefused => "conn: redirect_refused".to_string(),
             TransportError::Unsupported { message } => {
                 format!("conn: unsupported error_length={}", message.len())
             }
@@ -267,7 +275,7 @@ impl std::fmt::Display for TransportError {
             TransportError::Validation { message } => {
                 write!(f, "validation: {}", truncate(message, 200))
             }
-            TransportError::RedirectRefused { .. } => {
+            TransportError::RedirectRefused => {
                 write!(f, "redirect refused: redirects are not followed")
             }
             TransportError::Unsupported { message } => {
@@ -292,7 +300,7 @@ impl std::fmt::Debug for TransportError {
             TransportError::ConnectionError { .. } => write!(f, "ConnectionError"),
             TransportError::Timeout { .. } => write!(f, "Timeout"),
             TransportError::Validation { .. } => write!(f, "Validation"),
-            TransportError::RedirectRefused { .. } => write!(f, "RedirectRefused"),
+            TransportError::RedirectRefused => write!(f, "RedirectRefused"),
             TransportError::Unsupported { .. } => write!(f, "Unsupported"),
             TransportError::Cancelled => write!(f, "Cancelled"),
         }

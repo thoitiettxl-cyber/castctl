@@ -79,10 +79,10 @@ pub const POST_READ_METHODS: &[&str] = &[
 /// no route at all, only the explicit set is consulted (Go
 /// `safeFor` falls back to `safeToRepeat(method, nil)`).
 pub fn safe_to_repeat(method: &str, route: Option<&Route>) -> bool {
-    if let Some(route) = route {
-        if route.http.eq_ignore_ascii_case("get") {
-            return true;
-        }
+    if let Some(route) = route
+        && route.http.eq_ignore_ascii_case("get")
+    {
+        return true;
     }
     POST_READ_METHODS.contains(&method)
 }
@@ -145,10 +145,12 @@ impl Default for RetryPolicy {
 
 /// Run `attempt` under the retry policy, sleeping between retries
 /// (sleep is cancellable only by the caller's own deadline — M3
-/// has no context object; the RPC layer bounds the whole call with
-/// its request timeout instead, and `run_with_retry` additionally
-/// stops when the elapsed time plus the next pause would exceed
-/// the budget, mirroring Go's `now + pause > budget` check).
+/// has no context object; the RPC layer wraps the whole call in
+/// a `tokio::time::timeout` of the request timeout, so the call
+/// can never stretch past it however many attempts the budget
+/// would allow, and `run_with_retry` additionally stops when
+/// the elapsed time plus the next pause would exceed the
+/// budget, mirroring Go's `now + pause > budget` check).
 /// Returns the first success, or the last error when the error is
 /// not retryable or the budget is exhausted.
 pub async fn run_with_retry<T, F, Fut>(

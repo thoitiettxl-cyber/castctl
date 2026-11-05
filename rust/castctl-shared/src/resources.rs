@@ -101,10 +101,10 @@ fn sandbox_re() -> &'static Regex {
 /// Source: `internal/shared/resources.go:182` (`resourcePath`).
 fn resource_path(item: &JsonObject) -> String {
     let mut resolved = string_field(item, "path").to_string();
-    if resolved.is_empty() {
-        if let Some(variants) = item.get("variants").and_then(as_map) {
-            resolved = string_field(variants, "original").to_string();
-        }
+    if resolved.is_empty()
+        && let Some(variants) = item.get("variants").and_then(as_map)
+    {
+        resolved = string_field(variants, "original").to_string();
     }
     if resolved.starts_with("sandbox://") || resolved.contains("/media/raw/") {
         resolved
@@ -158,10 +158,10 @@ impl Collector {
         if let Some(v) = string_ptr_field(m, "label") {
             r.label = Some(v);
         }
-        if let Some(v) = m.get("variants") {
-            if *v != JsonValue::Null {
-                r.variants = Some(v.clone());
-            }
+        if let Some(v) = m.get("variants")
+            && *v != JsonValue::Null
+        {
+            r.variants = Some(v.clone());
         }
     }
 }

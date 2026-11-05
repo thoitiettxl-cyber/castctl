@@ -73,12 +73,19 @@ pub enum TlsMode {
 
 /// Decide the TLS mode from the castctl inputs, WITHOUT touching
 /// global state (pure, unit-testable). Inputs:
-/// - `utls_enabled`: `None` = no `tls.utls` block (Go
-///   `GatewayTLSOptions` default: enabled + chrome); `Some(false)`
-///   = explicitly disabled (kept disabled in Go, and REALITY then
-///   fails inside sing-box — in M3 this is fail-closed
-///   `Unsupported` because honk has no per-node "TLS without
-///   Chrome-mode" switch);
+/// - `utls_enabled`: `None` = no `tls.utls` block (sing-box
+///   `OutboundUTLSOptions` is a pointer: nil means Go applies
+///   its default, enabled + chrome); `Some(false)` = the block
+///   is present and its plain-bool `enabled` field is false OR
+///   absent (a missing field on a present block defaults to
+///   false, exactly like an explicit disable) — in M3 this is
+///   fail-closed `Unsupported` because honk has no per-node
+///   "TLS without Chrome-mode" switch. NOTE: this is the
+///   outbound path only. The gateway-dial path
+///   (`internal/outbound/dialer.go` `DialTLS`) forces
+///   `Enabled=true` when TLS is requested at all — a different
+///   rule for a different call site, ported in M4, not here
+///   (see PORTING.md §M3.3);
 /// - `fingerprint`: the `tls.utls.fingerprint` value after the Go
 ///   default (empty means chrome);
 /// - `profile_engine`: the castctl profile `tls_engine` value
@@ -140,32 +147,68 @@ pub fn apply_tls_mode(mode: TlsMode) -> Result<(), TransportError> {
 
 /// Decode base64url (no padding required) into bytes. Written here
 /// instead of adding a `base64` dependency for one validation: the
-/// alphabet and padding rules are exactly RFC 4648 §5.
+/// alphabet and padding rules are exactly RFC 4648 §5, with Go's
+/// decoder strictness for the cases that matter for keys —
+/// whitespace anywhere, a data length ≡ 1 mod 4, and non-zero
+/// trailing bits are all rejected, as Go rejects them. One
+/// deliberate fail-closed divergence: Go ignores `\r` and `\n`
+/// but rejects other whitespace; this decoder rejects ALL
+/// whitespace (a legitimate key never contains any, so the extra
+/// strictness cannot reject a valid key). Padding, when present,
+/// must be 1–2 trailing `=` with the matching data length
+/// (1 pad ↔ data ≡ 3 mod 4, 2 pads ↔ data ≡ 2 mod 4); anything
+/// after padding is rejected.
 pub fn decode_base64url(input: &str) -> Result<Vec<u8>, TransportError> {
-    let cleaned: String = input.chars().filter(|c| !c.is_whitespace()).collect();
-    let mut values: Vec<u8> = Vec::with_capacity(cleaned.len() * 3 / 4 + 3);
+    let invalid = || TransportError::Validation {
+        message: "reality public_key is not valid base64url".to_string(),
+    };
+    let mut values: Vec<u8> = Vec::with_capacity(input.len() * 3 / 4 + 3);
     let mut acc: u32 = 0;
     let mut nbits = 0u32;
-    for c in cleaned.chars() {
+    let mut data_len = 0usize;
+    let mut padding = 0usize;
+    for c in input.chars() {
+        if c == '=' {
+            padding += 1;
+            if padding > 2 {
+                return Err(invalid());
+            }
+            continue;
+        }
+        if padding > 0 {
+            // Data after padding.
+            return Err(invalid());
+        }
+        if c.is_whitespace() {
+            return Err(invalid());
+        }
         let v = match c {
             'A'..='Z' => c as u32 - 'A' as u32,
             'a'..='z' => c as u32 - 'a' as u32 + 26,
             '0'..='9' => c as u32 - '0' as u32 + 52,
             '-' => 62,
             '_' => 63,
-            '=' => break,
-            _ => {
-                return Err(TransportError::Validation {
-                    message: "reality public_key is not valid base64url".to_string(),
-                });
-            }
+            _ => return Err(invalid()),
         };
+        data_len += 1;
         acc = (acc << 6) | v;
         nbits += 6;
         if nbits >= 8 {
             nbits -= 8;
             values.push((acc >> nbits) as u8);
         }
+    }
+    if data_len % 4 == 1 {
+        return Err(invalid());
+    }
+    match (padding, data_len % 4) {
+        (0, _) | (1, 3) | (2, 2) => {}
+        _ => return Err(invalid()),
+    }
+    // Trailing bits of the final partial quantum must be zero
+    // (Go rejects e.g. "AAB": the last value's low bits are 01).
+    if nbits > 0 && (acc & ((1u32 << nbits) - 1)) != 0 {
+        return Err(invalid());
     }
     Ok(values)
 }
@@ -248,7 +291,15 @@ fn build_tls(
     };
     let enabled = get_bool(tls, "enabled").unwrap_or(false);
     let utls = tls.get("utls");
-    let utls_enabled = utls.and_then(|u| get_bool(u, "enabled"));
+    // Presence matters, not just the value: sing-box
+    // `OutboundUTLSOptions` is a POINTER, so a missing `utls`
+    // block means "UTLS nil" (Go default: enabled + chrome,
+    // `None` here), while a PRESENT block with a missing
+    // `enabled` field means the plain-bool field defaults to
+    // false (`Some(false)` here). Collapsing the two cases
+    // (the old `and_then(get_bool)`) made a present-but-empty
+    // block silently take the nil default.
+    let utls_enabled = utls.map(|u| get_bool(u, "enabled").unwrap_or(false));
     let fingerprint = utls.and_then(|u| get_str(u, "fingerprint"));
     let reality = tls.get("reality");
     let spider_x_present = reality
@@ -268,7 +319,15 @@ fn build_tls(
     }
     let reality_key = reality.and_then(|r| get_str(r, "public_key"));
     let reality_sid = reality.and_then(|r| get_str(r, "short_id"));
-    let reality_enabled = reality.and_then(|r| get_bool(r, "enabled")).unwrap_or(true);
+    // REALITY is on only when TLS itself is enabled AND the
+    // reality block explicitly enables it (`field == Some(true)`).
+    // The old `unwrap_or(true)` turned a missing `enabled` field
+    // into REALITY-on, and the fields were filled even when TLS
+    // was disabled — honk's `TlsOptions::is_secure()` (enabled OR
+    // a reality key present) would then have run a REALITY
+    // handshake for a TLS-disabled node. With this gate, TLS
+    // disabled ⇒ reality fields None, whatever the block says.
+    let reality_enabled = enabled && reality.and_then(|r| get_bool(r, "enabled")) == Some(true);
     if reality_enabled {
         validate_reality(reality_key, reality_sid)?;
     }
@@ -288,22 +347,20 @@ fn build_tls(
     if transport_type == "ws" {
         alpn = vec!["http/1.1".to_string()];
     }
-    if let Some(ech) = tls.get("ech") {
-        if ech
+    if let Some(ech) = tls.get("ech")
+        && (ech
             .get("config")
             .and_then(|v| v.as_str())
             .is_some_and(|s| !s.is_empty())
             || ech
                 .get("config_path")
                 .and_then(|v| v.as_str())
-                .is_some_and(|s| !s.is_empty())
-        {
-            return Err(TransportError::Unsupported {
-                message:
-                    "tls.ech config values are not mapped in M3 (ECH GREASE via Chrome-mode only)"
-                        .to_string(),
-            });
-        }
+                .is_some_and(|s| !s.is_empty()))
+    {
+        return Err(TransportError::Unsupported {
+            message: "tls.ech config values are not mapped in M3 (ECH GREASE via Chrome-mode only)"
+                .to_string(),
+        });
     }
     Ok(TlsOptions {
         enabled,
@@ -425,12 +482,12 @@ pub fn dispatch_outbound(
     let tag = get_str(outbound, "tag").unwrap_or("");
     let outbound_config = match otype {
         "socks" => {
-            if let Some(v) = get_u64(outbound, "version") {
-                if v != 5 {
-                    return Err(TransportError::Unsupported {
-                        message: format!("socks version {v} is not supported (only socks5)"),
-                    });
-                }
+            if let Some(v) = get_u64(outbound, "version")
+                && v != 5
+            {
+                return Err(TransportError::Unsupported {
+                    message: format!("socks version {v} is not supported (only socks5)"),
+                });
             }
             OutboundConfig::Socks5(Socks5Config {
                 username: get_str(outbound, "username").map(str::to_string),
@@ -661,6 +718,100 @@ mod tests {
         assert!(validate_reality(Some("AAAA"), None).is_err()); // not 32 bytes
         assert!(validate_reality(None, Some("01")).is_err()); // sid without key
         assert!(validate_reality(None, None).is_ok());
+    }
+
+    #[test]
+    fn tls_presence_block_vs_field() {
+        // A `utls` block PRESENT but without an `enabled` field
+        // means the plain-bool field defaults to false, i.e.
+        // explicitly disabled → fail-closed Unsupported. It must
+        // NOT silently take the block-absent (nil → chrome)
+        // default.
+        let err = dispatch_outbound(
+            &json(r#"{"type":"trojan","server":"127.0.0.1","server_port":443,"password":"pw","tls":{"enabled":true,"server_name":"example.com","utls":{"fingerprint":"chrome"}}}"#),
+            None,
+        )
+        .expect_err("present utls block without enabled must fail closed");
+        assert!(matches!(err, TransportError::Unsupported { .. }));
+        // A `utls` block ABSENT takes the default (chrome).
+        let d = dispatch_outbound(
+            &json(r#"{"type":"trojan","server":"127.0.0.1","server_port":443,"password":"pw","tls":{"enabled":true,"server_name":"example.com"}}"#),
+            None,
+        )
+        .expect("absent utls block must take the default");
+        assert!(matches!(d, Dispatch::Honk(_)));
+        // A `reality` block PRESENT but without `enabled` means
+        // REALITY off: the node carries no reality key.
+        let key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let d = dispatch_outbound(
+            &json(&format!(r#"{{"type":"trojan","server":"127.0.0.1","server_port":443,"password":"pw","tls":{{"enabled":true,"server_name":"example.com","utls":{{"enabled":true,"fingerprint":"chrome"}},"reality":{{"public_key":"{key}","short_id":"0123abcd"}}}}}}"#)),
+            None,
+        )
+        .expect("reality without enabled dispatches");
+        if let Dispatch::Honk(node) = d {
+            assert_eq!(
+                node.tls().expect("trojan has tls").reality_public_key,
+                None,
+                "reality without enabled must not set a key"
+            );
+        } else {
+            panic!("expected Honk");
+        }
+        // TLS disabled + reality explicitly enabled: the node
+        // still carries NO reality key (TLS off ⇒ REALITY off).
+        let d = dispatch_outbound(
+            &json(&format!(r#"{{"type":"trojan","server":"127.0.0.1","server_port":443,"password":"pw","tls":{{"enabled":false,"server_name":"example.com","utls":{{"enabled":true,"fingerprint":"chrome"}},"reality":{{"enabled":true,"public_key":"{key}","short_id":"0123abcd"}}}}}}"#)),
+            None,
+        )
+        .expect("tls disabled dispatches");
+        if let Dispatch::Honk(node) = d {
+            let tls = node.tls().expect("trojan has tls");
+            assert!(!tls.enabled);
+            assert_eq!(
+                tls.reality_public_key, None,
+                "tls disabled must not set a reality key"
+            );
+        } else {
+            panic!("expected Honk");
+        }
+        // Positive control: TLS on + reality on ⇒ key present.
+        let d = dispatch_outbound(
+            &json(&format!(r#"{{"type":"trojan","server":"127.0.0.1","server_port":443,"password":"pw","tls":{{"enabled":true,"server_name":"example.com","utls":{{"enabled":true,"fingerprint":"chrome"}},"reality":{{"enabled":true,"public_key":"{key}","short_id":"0123abcd"}}}}}}"#)),
+            None,
+        )
+        .expect("reality enabled dispatches");
+        if let Dispatch::Honk(node) = d {
+            assert_eq!(
+                node.tls()
+                    .expect("trojan has tls")
+                    .reality_public_key
+                    .as_deref(),
+                Some(key),
+                "reality enabled must set the key"
+            );
+        } else {
+            panic!("expected Honk");
+        }
+    }
+
+    #[test]
+    fn base64url_rejects_what_go_rejects() {
+        // 2 zero bytes, trailing bits zero: valid.
+        assert_eq!(decode_base64url("AAA").expect("AAA").len(), 2);
+        // Non-zero trailing bits: Go rejects ("AAB" ends 01).
+        assert!(decode_base64url("AAB").is_err());
+        // Data length ≡ 1 mod 4: Go rejects.
+        assert!(decode_base64url("A").is_err());
+        // Whitespace anywhere: Go rejects space/tab; this
+        // decoder additionally rejects \n (fail-closed — a real
+        // key never contains any whitespace).
+        assert!(decode_base64url("AA AA").is_err());
+        assert!(decode_base64url("AA\tAA").is_err());
+        assert!(decode_base64url("AA\nAA").is_err());
+        // Data after padding: Go rejects.
+        assert!(decode_base64url("AB=C").is_err());
+        // Padding inconsistent with data length: Go rejects.
+        assert!(decode_base64url("AAAA=").is_err());
     }
 
     #[test]

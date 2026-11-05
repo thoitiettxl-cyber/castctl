@@ -72,8 +72,10 @@ pub struct RouteTable {
 impl RouteTable {
     /// Parse the embedded `routes.json` (the Go file, via
     /// `include_str!`). Entries without a `method` are skipped;
-    /// on a duplicate method the FIRST entry wins, but duplicates
-    /// still count toward the total (Go `ParseRoutes`).
+    /// on a duplicate method the FIRST entry wins and later
+    /// duplicates are dropped, so `len()` counts distinct
+    /// methods only (the entries vector never holds a
+    /// duplicate).
     pub fn default_routes() -> Result<Self, TransportError> {
         // Path is relative to this file: src/ -> crate root ->
         // rust/ -> repo root -> internal/proto/routes.json.
@@ -99,7 +101,7 @@ impl RouteTable {
                 continue;
             };
             if entries.iter().any(|e| e.method == method) {
-                continue; // first wins, duplicates still counted by caller
+                continue; // first wins; duplicates are dropped, not counted
             }
             let http = entry
                 .get("http")

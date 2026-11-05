@@ -20,6 +20,10 @@ bytes = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }
+# Test-only: lets integration tests drive HttpClient directly
+# (its request method takes http::Method). Already pinned in the
+# workspace and in Cargo.lock; no new dependency is introduced.
+http = { workspace = true }
 # Test-only: lets integration tests implement Dialer (whose stream
 # type is honk's AsyncReadWrite) with counting wrappers.
 honk-outbound = { workspace = true, features = ["rprx"] }

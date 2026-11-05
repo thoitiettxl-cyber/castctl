@@ -106,8 +106,14 @@ above is history and is not rewritten):
   -D warnings` exit 0. Cue provisioning for the build:
   cmake 3.28.3 + libclang-18-dev.
 - TLS/QUIC parity is measured in rust/PORTING.md §M3.8
-  (TLS JA4 differs Go-vs-Rust, REALITY profiles differ
-  more, Rust QUIC handshake against a controlled
-  sing-box server FAILED while the Go control
-  succeeded) — parity differences are findings, not
-  gate failures.
+  (TLS JA4-like and standard JA4 differ Go-vs-Rust —
+  M3c label correction: the M3b "JA4" values were a
+  GREASE→0000 variant, relabelled JA4-like, with a
+  standard-JA4 column recomputed from the same
+  captures — REALITY profiles differ more, Rust QUIC
+  through dispatch against a controlled sing-box
+  server FAILED (dispatch has no way to skip cert
+  verification; the honk QUIC stack itself was proven
+  working once verification is skipped, M3c NB9) while
+  the Go control succeeded) — parity
+  differences are findings, not gate failures.

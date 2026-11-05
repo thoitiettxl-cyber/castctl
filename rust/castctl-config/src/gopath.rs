@@ -25,11 +25,11 @@ pub fn go_clean(path: &str) -> String {
         match elem {
             "" | "." => {}
             ".." => {
-                if let Some(last) = out.last() {
-                    if *last != ".." {
-                        out.pop();
-                        continue;
-                    }
+                if let Some(last) = out.last()
+                    && *last != ".."
+                {
+                    out.pop();
+                    continue;
                 }
                 if !rooted {
                     out.push("..");

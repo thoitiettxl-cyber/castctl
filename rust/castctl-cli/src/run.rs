@@ -260,10 +260,8 @@ fn resolve_config(
             ),
         ));
     }
-    if !allow_missing_create {
-        if let Err(e) = loc.require_present() {
-            return Err(config_err(e));
-        }
+    if !allow_missing_create && let Err(e) = loc.require_present() {
+        return Err(config_err(e));
     }
     Ok(loc)
 }

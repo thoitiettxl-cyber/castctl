@@ -109,10 +109,10 @@ fn user_config_dir(getenv: Getenv<'_>) -> Result<String, UserConfigDirError> {
 /// when non-blank there, else the process home directory. The error
 /// carries the `profile: ` prefix (Go `newConfigErrorf`).
 fn config_home_dir(getenv: Getenv<'_>) -> Result<String, ConfigError> {
-    if let Some(v) = config_lookup_env(getenv, "HOME") {
-        if !go_trim_space(&v).is_empty() {
-            return Ok(v);
-        }
+    if let Some(v) = config_lookup_env(getenv, "HOME")
+        && !go_trim_space(&v).is_empty()
+    {
+        return Ok(v);
     }
     match std::env::var_os("HOME") {
         Some(home) => {
@@ -186,10 +186,10 @@ pub fn resolve_config_location(
     if !go_trim_space(explicit_path).is_empty() {
         return resolve_explicit_path(explicit_path);
     }
-    if let Some(v) = config_lookup_env(getenv, "CASTCTL_CONFIG") {
-        if !go_trim_space(&v).is_empty() {
-            return resolve_explicit_path(&v);
-        }
+    if let Some(v) = config_lookup_env(getenv, "CASTCTL_CONFIG")
+        && !go_trim_space(&v).is_empty()
+    {
+        return resolve_explicit_path(&v);
     }
     let mut warnings: Vec<String> = Vec::new();
     let dir = match user_config_dir(getenv) {

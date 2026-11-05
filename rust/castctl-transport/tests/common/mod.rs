@@ -18,12 +18,16 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-/// One recorded request.
+/// One recorded request. Headers are parsed (for
+/// `content-length`) but NOT stored: no test reads them, and
+/// keeping a `headers` field nobody reads only invites a
+/// future reader to assume request headers are asserted
+/// somewhere. If a test ever needs them, add the field back
+/// with a test that reads it.
 #[derive(Debug, Clone)]
 pub struct RequestRecord {
     pub method: String,
     pub path: String,
-    pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
 }
 
@@ -118,12 +122,7 @@ impl FakeServer {
                                 Err(_) => return,
                             }
                         }
-                        let record = RequestRecord {
-                            method,
-                            path,
-                            headers,
-                            body,
-                        };
+                        let record = RequestRecord { method, path, body };
                         count.fetch_add(1, Ordering::SeqCst);
                         records
                             .lock()

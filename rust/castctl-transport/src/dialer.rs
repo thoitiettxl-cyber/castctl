@@ -143,10 +143,17 @@ impl Dialer for DirectDialer {
                         return Ok(Box::new(stream) as Box<dyn AsyncReadWrite>);
                     }
                     Ok(Err(e)) => last_err = Some(e),
+                    // A per-address timeout does NOT abort the
+                    // whole dial: the next address may answer.
+                    // Only when every address failed (refused or
+                    // timed out) is the result ConnectionDown —
+                    // a timeout on one address is not, by itself,
+                    // a `Timeout` error for the whole call.
                     Err(_) => {
-                        return Err(TransportError::Timeout {
-                            message: format!("dial {} timed out", target.host),
-                        });
+                        last_err = Some(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!("dial {addr} timed out"),
+                        ));
                     }
                 }
             }
@@ -213,22 +220,33 @@ impl Dialer for HonkDialer {
         let registry = &self.registry;
         Box::pin(async move {
             let addrs = resolve_target(&target).await?;
-            let addr = addrs[0];
             let domain = if target.host.parse::<std::net::IpAddr>().is_ok() {
                 None
             } else {
                 Some(target.host.as_str())
             };
-            let stream = registry
-                .dial(node, addr, domain, DIAL_TIMEOUT)
-                .await
-                .map_err(|e| TransportError::ConnectionDown {
-                    // Honk dial errors name host/protocol only; the
-                    // message is bounded so a peer-controlled string
-                    // cannot grow a log line unboundedly.
-                    message: crate::error::truncate(&e.to_string(), 200),
-                })?;
-            Ok(stream.stream)
+            // Try every resolved address, not just the first: a
+            // resolver may return an unreachable family first
+            // (e.g. ::1 with no IPv6 listener) while a later
+            // address works. Only the last failure is reported.
+            // (The message is stored, not the error value, so no
+            // anyhow type needs naming here.)
+            let mut last_message = String::new();
+            for addr in addrs {
+                match registry.dial(node, addr, domain, DIAL_TIMEOUT).await {
+                    Ok(stream) => return Ok(stream.stream),
+                    Err(e) => {
+                        // Honk dial errors name host/protocol
+                        // only; the message is bounded so a
+                        // peer-controlled string cannot grow a
+                        // log line unboundedly.
+                        last_message = crate::error::truncate(&e.to_string(), 200);
+                    }
+                }
+            }
+            Err(TransportError::ConnectionDown {
+                message: last_message,
+            })
         })
     }
 }
@@ -247,6 +265,75 @@ mod tests {
             .await
             .expect_err("loopback port 1 must refuse");
         assert!(matches!(err, TransportError::ConnectionDown { .. }));
+    }
+
+    #[tokio::test]
+    async fn direct_dialer_unanswered_address_is_connection_down_not_timeout() {
+        // 10.255.255.1 answers nothing: the per-address connect
+        // either times out at DIAL_TIMEOUT or fails fast, but
+        // the dialer must NOT return Timeout — it tries every
+        // address and reports ConnectionDown. (This test takes
+        // up to DIAL_TIMEOUT when the address truly hangs; that
+        // wait is the behavior under test.)
+        let dialer = DirectDialer::new();
+        let err = dialer
+            .dial(&DialTarget::new("10.255.255.1", 1))
+            .await
+            .expect_err("blackhole address must fail");
+        assert!(
+            matches!(err, TransportError::ConnectionDown { .. }),
+            "a timed-out address must surface as ConnectionDown, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_dialer_falls_back_to_working_address() {
+        // Listener on IPv4 loopback only. Dialing "localhost"
+        // may resolve ::1 first; the dialer must fall through
+        // to 127.0.0.1 instead of failing on the first address.
+        // (If the resolver returns 127.0.0.1 first, this passes
+        // without exercising the fallback — resolver order is
+        // environment-dependent.)
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("INVARIANT: fallback listener binds");
+        let port = listener
+            .local_addr()
+            .expect("INVARIANT: listener has addr")
+            .port();
+        let dialer = DirectDialer::new();
+        let stream = dialer
+            .dial(&DialTarget::new("localhost", port))
+            .await
+            .expect("direct dial must reach the IPv4 listener");
+        drop(stream);
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn honk_dialer_falls_back_to_working_address() {
+        // Same fallback rule, through the honk dialer with a
+        // direct node (the registry's Direct handler dials the
+        // resolved address itself). Same resolver-order caveat
+        // as the direct-dialer test above.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("INVARIANT: fallback listener binds");
+        let port = listener
+            .local_addr()
+            .expect("INVARIANT: listener has addr")
+            .port();
+        let node = Node {
+            outbound: honk_config::node::OutboundConfig::Direct,
+            ..Node::default()
+        };
+        let dialer = HonkDialer::new(node).expect("INVARIANT: honk registry builds");
+        let stream = dialer
+            .dial(&DialTarget::new("localhost", port))
+            .await
+            .expect("honk direct dial must reach the IPv4 listener");
+        drop(stream);
+        drop(listener);
     }
 
     #[test]

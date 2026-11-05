@@ -46,7 +46,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::client::conn::http1::SendRequest;
@@ -60,19 +60,38 @@ use crate::error::{BodySummary, TransportError, validate_content_type};
 /// Go's HTTP path has no such bound in `Dialer.HTTPClient`, while
 /// its gateway (WebSocket) path has separate reassembly limits.
 /// 16 MiB is large enough for any JSON RPC envelope and small
-/// enough to bound memory; exceeding it is a `ConnectionError`
-/// (transport failure after sending), not a gateway error.
+/// enough to bound memory. The cap is enforced DURING the read
+/// (see `request_inner`): the body is streamed frame by frame and
+/// the read aborts as soon as the running total would exceed the
+/// cap — the previous `collect()`-then-check order buffered the
+/// whole body first and could OOM on a hostile oversized body
+/// before the check ever ran. Exceeding the cap is a `Gateway`
+/// error (server-side failure, exit 3, never retried: a retry
+/// would deterministically re-download the same oversized body
+/// until the budget ran out), not a `ConnectionError`.
 pub const MAX_RESPONSE_BODY: usize = 16 * 1024 * 1024;
 
 /// One HTTP response: status, headers and the full body bytes.
 /// The body bytes are held only for the caller to decode; they are
 /// NEVER copied into an error (see `rpc::call_json`, which
 /// summarizes instead).
-#[derive(Debug)]
 pub struct HttpResponse {
     pub status: StatusCode,
     pub headers: HeaderMap,
     pub body: Bytes,
+}
+
+// Hand-written Debug (no derive): a derived Debug would print all
+// response headers (including a server-sent `Set-Cookie`) and the
+// full body bytes. Only status + body length are printed,
+// mirroring `BodySummary`.
+impl std::fmt::Debug for HttpResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpResponse")
+            .field("status", &self.status)
+            .field("body_length", &self.body.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl HttpResponse {
@@ -101,6 +120,17 @@ impl HttpResponse {
     }
 }
 
+/// Raw Content-Type header value of a header map ("" when absent
+/// or non-ASCII — `BodySummary::new` validates it anyway).
+/// Same extraction as `HttpResponse::content_type`, for the
+/// over-cap path where no `HttpResponse` exists yet.
+fn content_type_of(headers: &HeaderMap) -> &str {
+    headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+}
+
 /// HTTP client bound to one dialer (one profile outbound).
 /// Hand-written Debug: the dialer may be a `HonkDialer` whose
 /// node holds credentials, and `Arc<dyn Dialer>` has no Debug
@@ -126,12 +156,17 @@ impl HttpClient {
     /// status returns `RedirectRefused` (the response body is
     /// dropped, never treated as success).
     ///
-    /// `timeout` bounds the whole request (dial + send + read),
-    /// mirroring Go's per-call timeouts at the RPC layer
-    /// (`DefaultRequestTimeout = 30s`, `internal/gateway/calls.go`).
+    /// `timeout` bounds one attempt (dial + send + read). The
+    /// RPC layer wraps the whole call (all attempts) in the same
+    /// timeout (see `rpc::call_json`); Go's per-call timeout at
+    /// the RPC layer is `DefaultRequestTimeout = 30s`
+    /// (`internal/gateway/calls.go`).
     /// A timeout maps to `TransportError::Timeout` (never retried).
     /// A dial failure maps to `ConnectionDown` (nothing sent);
-    /// a failure after the stream opened maps to
+    /// a hyper handshake failure also maps to `ConnectionDown`
+    /// (no request bytes have been sent yet — Go
+    /// `internal/conn/errors.go:207-214`, "nothing sent" rule);
+    /// a failure once the request has been sent maps to
     /// `ConnectionError` (reply possibly lost) — the distinction
     /// `retry::should_retry` depends on.
     pub async fn request(
@@ -171,7 +206,11 @@ impl HttpClient {
             hyper::client::conn::http1::Builder::new()
                 .handshake(TokioIo::new(stream))
                 .await
-                .map_err(|e| TransportError::ConnectionError {
+                // Handshake failure is ConnectionDown, not
+                // ConnectionError: the HTTP handshake happens
+                // before any request bytes are sent, so the
+                // request is safe to repeat for every method.
+                .map_err(|e| TransportError::ConnectionDown {
                     message: crate::error::truncate(&e.to_string(), 200),
                 })?;
         // The connection task must be driven; dropping it would
@@ -217,35 +256,52 @@ impl HttpClient {
         let (parts, body) = resp.into_parts();
         let status = parts.status;
         // Redirects are refused, never followed (Go
-        // `noFollowRedirect`). The Location value is kept only as
-        // a short, bounded diagnostic in the error — and even that
-        // is NOT printed by Display (see error.rs).
+        // `noFollowRedirect`). The Location value is NOT stored
+        // on the error: no code in this crate reads it, and
+        // storing a server-chosen URL on an error that might be
+        // logged would leak redirect targets for no benefit.
+        // Drain nothing: the connection is dropped with the
+        // response; no second request is ever issued.
         if status.is_redirection() {
-            let location = parts
-                .headers
-                .get(http::header::LOCATION)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .to_string();
-            // Drain nothing: the connection is dropped with the
-            // response; no second request is ever issued.
-            return Err(TransportError::RedirectRefused {
-                location: crate::error::truncate(&location, 200),
-            });
+            return Err(TransportError::RedirectRefused);
         }
         let headers = parts.headers;
-        let collected = body
-            .collect()
-            .await
-            .map_err(|e| TransportError::ConnectionError {
-                message: crate::error::truncate(&e.to_string(), 200),
-            })?;
-        let body_bytes = collected.to_bytes();
-        if body_bytes.len() > MAX_RESPONSE_BODY {
-            return Err(TransportError::ConnectionError {
-                message: "response body exceeds limit".to_string(),
-            });
+        // Capped streaming read: frames are consumed one at a
+        // time and the read aborts as soon as the running total
+        // would exceed MAX_RESPONSE_BODY — the body is never
+        // buffered past the cap, so an endless or multi-GiB body
+        // cannot OOM this process. A body over the cap is a
+        // Gateway error (server-side failure, exit 3, never
+        // retried); the true length is unknown, so the summary
+        // carries body_length None, never a guessed number.
+        let mut body = body;
+        let mut out: Vec<u8> = Vec::new();
+        loop {
+            match body.frame().await {
+                Some(Ok(frame)) => {
+                    // `into_data` is Result, not Option: data
+                    // frames are Ok(data), trailer frames are
+                    // Err(frame) and carry no data to count.
+                    if let Ok(data) = frame.into_data() {
+                        if out.len() + data.remaining() > MAX_RESPONSE_BODY {
+                            return Err(TransportError::Gateway(BodySummary::new(
+                                status.as_u16() as i32,
+                                None,
+                                content_type_of(&headers),
+                            )));
+                        }
+                        out.extend_from_slice(&data);
+                    }
+                }
+                Some(Err(e)) => {
+                    return Err(TransportError::ConnectionError {
+                        message: crate::error::truncate(&e.to_string(), 200),
+                    });
+                }
+                None => break,
+            }
         }
+        let body_bytes = Bytes::from(out);
         Ok(HttpResponse {
             status,
             headers,
@@ -280,5 +336,30 @@ mod tests {
             host_header(&DialTarget::new("127.0.0.1", 18080)),
             "127.0.0.1:18080"
         );
+    }
+
+    #[test]
+    fn http_response_debug_hides_headers_and_body() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::SET_COOKIE,
+            HeaderValue::from_static("session=SECRET-COOKIE-123"),
+        );
+        let resp = HttpResponse {
+            status: StatusCode::OK,
+            headers,
+            body: Bytes::from_static(b"SECRET-BODY-456"),
+        };
+        let dbg = format!("{resp:?}");
+        assert!(
+            !dbg.contains("SECRET-COOKIE-123"),
+            "debug must not print headers: {dbg}"
+        );
+        assert!(
+            !dbg.contains("SECRET-BODY-456"),
+            "debug must not print body bytes: {dbg}"
+        );
+        assert!(dbg.contains("200"), "debug: {dbg}");
+        assert!(dbg.contains("body_length"), "debug: {dbg}");
     }
 }

@@ -1644,10 +1644,14 @@ Deviations + deliberately not taken in M3:
   plain `cargo` (fmt, build cold 1m 35s, test 229
   passed / 0 failed, clippy `-D warnings`) — see
   `rust/PORTING.md` §M3.7. TLS/QUIC parity measured
-  after the gate (§M3.8): TLS JA4 differs Go-vs-Rust,
-  REALITY profiles differ more, and the Rust QUIC
-  handshake against a controlled sing-box server
-  FAILED while the Go control succeeded — parity
+  after the gate (§M3.8): TLS JA4-like and standard
+  JA4 differ Go-vs-Rust (M3c label correction, see
+  §M3.8), REALITY profiles differ more, and the Rust
+  QUIC handshake through dispatch against a controlled
+  sing-box server FAILED (dispatch has no way to skip
+  cert verification; the honk QUIC stack itself was
+  proven working once verification is skipped, M3c
+  NB9) while the Go control succeeded — parity
   findings, not gate failures.
 
 ### 13.1 Ported from this repo's Go code (not upstream)

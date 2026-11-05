@@ -13,7 +13,12 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85"
+# M3c: the real MSRV is 1.98 — honk pulls aya 0.16.0 via
+# honk-ebpf-common, and aya 0.16 requires rustc >= 1.98. The
+# previous "1.85" was the M3 submission value, never re-checked
+# against the honk dependency graph; a 1.97.1-only machine fails
+# the build before compiling anything (see PORTING.md §M3.9).
+rust-version = "1.98"
 # M3: the Rust artifact links honk-outbound (GPL-3.0-only), so the
 # Rust artifact is GPL-3.0-only. The Go binary stays GPL-3.0-or-later;
 # two artifacts, two licenses (Boss decision, quoted verbatim in
@@ -40,7 +45,11 @@ honk-config = { git = "https://github.com/daeuniverse/honk", rev = "9e31cc0bd288
 # filled in by the M3 writer from the committed Cargo.lock.
 tokio = "=1.48.0"
 serde = "=1.0.228"
-serde_json = "=1.0.145"
+# M3c: `arbitrary_precision` keeps JSON numbers as literals
+# (Go `json.Number` parity) instead of losing numbers outside
+# i64/u64 to float64 rounding — without it, a gateway number
+# above u64::MAX silently changed value on decode.
+serde_json = { version = "=1.0.145", features = ["arbitrary_precision"] }
 hyper = "=1.8.1"
 # M3b: canonical hyper<->tokio IO adapter (TokioIo), resolved
 # on cue to 0.1.20 (see rust/PORTING.md §M3.7).
