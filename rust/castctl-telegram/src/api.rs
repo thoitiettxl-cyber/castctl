@@ -15,12 +15,14 @@
 //! The Go bot uses the go-telegram/bot library, which hides
 //! the HTTP layer. This port hand-rolls the loop on
 //! `castctl-transport` (`HttpClient::request` for plaintext
-//! tests, `tls::TlsHttpClient` for production HTTPS — see
-//! `tls.rs` for why the TLS path lives here). It does NOT use
-//! `RpcClient::call_json`: that client's route table is the
-//! gateway's (258 entries from `internal/proto/routes.json`)
-//! and its envelope decoding is the gateway's, not the Bot
-//! API's (`{"ok":true,"result":[...]}` vs gateway envelopes).
+//! tests, `HttpClient::request_tls` for production HTTPS —
+//! M4b's shared TLS path, reused on the M5a rebase; the
+//! temporary in-crate TLS module was deleted then). It does
+//! NOT use `RpcClient::call_json`: that client's route table
+//! is the gateway's (258 entries from
+//! `internal/proto/routes.json`) and its envelope decoding is
+//! the gateway's, not the Bot API's (`{"ok":true,
+//! "result":[...]}` vs gateway envelopes).
 //!
 //! Security invariant: the token travels only in the request
 //! path (`/bot<token>/<method>`), exactly as the Bot API
@@ -39,7 +41,6 @@ use serde_json::Value;
 
 use crate::error::BotError;
 use crate::send::InlineKeyboardMarkup;
-use crate::tls::{TlsHttpClient, telegram_api_target};
 use crate::types::Update;
 
 /// Long-poll `timeout` parameter sent to `getUpdates`
@@ -200,6 +201,14 @@ impl BotApiConfig {
     }
 }
 
+/// The default Bot API target. Moved here from the deleted
+/// temporary `tls.rs` on the M5a rebase onto merged M4b.
+/// Source: `internal/telegram/bot.go:191-274` (`Settings.ServerURL`:
+/// empty means the library default `https://api.telegram.org`).
+fn telegram_api_target() -> DialTarget {
+    DialTarget::new("api.telegram.org", 443)
+}
+
 /// One Bot API client bound to a profile outbound.
 ///
 /// Hand-written `Debug`: the token renders as `[redacted]`
@@ -208,8 +217,8 @@ impl BotApiConfig {
 pub struct BotApi {
     token: String,
     target: DialTarget,
-    plain: Option<HttpClient>,
-    tls: Option<TlsHttpClient>,
+    client: HttpClient,
+    use_tls: bool,
     client_timeout: Duration,
     upload_timeout: Duration,
     shutdown: Mutex<Option<Arc<ShutdownSignal>>>,
@@ -220,7 +229,7 @@ impl std::fmt::Debug for BotApi {
         f.debug_struct("BotApi")
             .field("token", &"[redacted]")
             .field("target", &self.target)
-            .field("use_tls", &self.tls.is_some())
+            .field("use_tls", &self.use_tls)
             .field("client_timeout", &self.client_timeout)
             .field("upload_timeout", &self.upload_timeout)
             .finish_non_exhaustive()
@@ -236,26 +245,14 @@ impl BotApi {
     /// binding a dialer to the Bot API base URL.
     #[must_use]
     pub fn new(dialer: Arc<dyn Dialer>, config: BotApiConfig) -> Self {
-        if config.use_tls {
-            Self {
-                token: config.token,
-                target: config.target,
-                plain: None,
-                tls: Some(TlsHttpClient::new(dialer)),
-                client_timeout: config.client_timeout,
-                upload_timeout: config.upload_timeout,
-                shutdown: Mutex::new(None),
-            }
-        } else {
-            Self {
-                token: config.token,
-                target: config.target,
-                plain: Some(HttpClient::new(dialer)),
-                tls: None,
-                client_timeout: config.client_timeout,
-                upload_timeout: config.upload_timeout,
-                shutdown: Mutex::new(None),
-            }
+        Self {
+            token: config.token,
+            target: config.target,
+            client: HttpClient::new(dialer),
+            use_tls: config.use_tls,
+            client_timeout: config.client_timeout,
+            upload_timeout: config.upload_timeout,
+            shutdown: Mutex::new(None),
         }
     }
 
@@ -307,47 +304,37 @@ impl BotApi {
         timeout: Duration,
         max_body: Option<usize>,
     ) -> Result<castctl_transport::HttpResponse, TransportError> {
+        // `max_body` is currently honoured by NEITHER path:
+        // both `HttpClient::request` and `request_tls` cap at
+        // the transport's 16 MiB (`MAX_RESPONSE_BODY`). The
+        // parameter is retained for the call shape (the only
+        // caller passes `None`); the download path documents
+        // the consequence in `download_file_bytes` — see
+        // PORTING §M5a deviation 20.
+        let _ = max_body;
         let headers = [("Content-Type".to_string(), "application/json".to_string())];
-        match (&self.plain, &self.tls) {
-            (Some(plain), None) => {
-                plain
-                    .request(
-                        http::Method::POST,
-                        &self.target,
-                        path,
-                        &headers,
-                        Some(body),
-                        timeout,
-                    )
-                    .await
-            }
-            (None, Some(tls)) => {
-                if let Some(cap) = max_body {
-                    tls.request_with_body_cap(
-                        http::Method::POST,
-                        &self.target,
-                        path,
-                        &headers,
-                        Some(body),
-                        timeout,
-                        cap,
-                    )
-                    .await
-                } else {
-                    tls.request(
-                        http::Method::POST,
-                        &self.target,
-                        path,
-                        &headers,
-                        Some(body),
-                        timeout,
-                    )
-                    .await
-                }
-            }
-            _ => Err(TransportError::Validation {
-                message: "bot api client has no transport".to_string(),
-            }),
+        if self.use_tls {
+            self.client
+                .request_tls(
+                    http::Method::POST,
+                    &self.target,
+                    path,
+                    &headers,
+                    Some(body),
+                    timeout,
+                )
+                .await
+        } else {
+            self.client
+                .request(
+                    http::Method::POST,
+                    &self.target,
+                    path,
+                    &headers,
+                    Some(body),
+                    timeout,
+                )
+                .await
         }
     }
 
@@ -357,32 +344,19 @@ impl BotApi {
         timeout: Duration,
         max_body: Option<usize>,
     ) -> Result<castctl_transport::HttpResponse, TransportError> {
-        match (&self.plain, &self.tls) {
-            (Some(plain), None) => {
-                plain
-                    .request(http::Method::GET, &self.target, path, &[], None, timeout)
-                    .await
-            }
-            (None, Some(tls)) => {
-                if let Some(cap) = max_body {
-                    tls.request_with_body_cap(
-                        http::Method::GET,
-                        &self.target,
-                        path,
-                        &[],
-                        None,
-                        timeout,
-                        cap,
-                    )
-                    .await
-                } else {
-                    tls.request(http::Method::GET, &self.target, path, &[], None, timeout)
-                        .await
-                }
-            }
-            _ => Err(TransportError::Validation {
-                message: "bot api client has no transport".to_string(),
-            }),
+        // See `post_json`: `max_body` is not honoured by
+        // either transport path (both cap at 16 MiB); the
+        // download consequence is documented in
+        // `download_file_bytes` — PORTING §M5a deviation 20.
+        let _ = max_body;
+        if self.use_tls {
+            self.client
+                .request_tls(http::Method::GET, &self.target, path, &[], None, timeout)
+                .await
+        } else {
+            self.client
+                .request(http::Method::GET, &self.target, path, &[], None, timeout)
+                .await
         }
     }
 
@@ -739,21 +713,9 @@ impl BotApi {
                 "Content-Type".to_string(),
                 format!("multipart/form-data; boundary={boundary}"),
             )];
-            let resp = match (&self.plain, &self.tls) {
-                (Some(plain), None) => {
-                    plain
-                        .request(
-                            http::Method::POST,
-                            &self.target,
-                            &path,
-                            &headers,
-                            Some(body),
-                            self.upload_timeout,
-                        )
-                        .await?
-                }
-                (None, Some(tls)) => {
-                    tls.request(
+            let resp = if self.use_tls {
+                self.client
+                    .request_tls(
                         http::Method::POST,
                         &self.target,
                         &path,
@@ -762,12 +724,17 @@ impl BotApi {
                         self.upload_timeout,
                     )
                     .await?
-                }
-                _ => {
-                    return Err(BotError::Validation(
-                        "bot api client has no transport".to_string(),
-                    ));
-                }
+            } else {
+                self.client
+                    .request(
+                        http::Method::POST,
+                        &self.target,
+                        &path,
+                        &headers,
+                        Some(body),
+                        self.upload_timeout,
+                    )
+                    .await?
             };
             let result = Self::decode_envelope(resp.status, &resp.headers, &resp.body);
             match result {
@@ -833,8 +800,20 @@ impl BotApi {
     /// error, never stored (see `files.rs`).
     /// Source: `internal/telegram/inbound.go:172-221`.
     /// `max_body` is the post-download gate cap (limit + 1);
-    /// the TLS path honours it exactly, the plaintext path
-    /// caps at the transport's 16 MiB (tests only).
+    /// NEITHER transport path honours it — both
+    /// `HttpClient::request` and `request_tls` cap at the
+    /// transport's 16 MiB (`MAX_RESPONSE_BODY`). A file whose
+    /// real size is in (16 MiB, 20 MiB] therefore fails at
+    /// the transport with `BotError::Transport` instead of
+    /// downloading and hitting Gate 2's clear
+    /// `BotError::Validation("file exceeds the 20 MiB
+    /// download limit")` — Go ACCEPTS such a file, so this
+    /// is a rebase [DEVIATION] from Go (PORTING §M5a
+    /// deviation 20). Raising the cap needs a parameterised
+    /// cap in `castctl-transport` (M4b's crate; out of scope
+    /// for this rebase per Boss: do not edit M4b's src).
+    /// Gate 1 (getFile reported size > 20 MiB, refused
+    /// before download) still works.
     ///
     /// Deliberate: this GET has NO 429 retry — a 429 fails
     /// fast (fix loop 2, red NIT 6). Go's `DownloadMedia`

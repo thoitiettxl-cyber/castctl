@@ -4154,8 +4154,6 @@ crate `rust/castctl-telegram`. Base `dev-rust
 - `types.rs`: `Update`/`Message`/`CallbackQuery`/
   `MessageContext` (`sender_id()` callback-first,
   `chat_key()`).
-- `tls.rs`: TEMPORARY minimal TLS HTTP client
-  (parent decision 1 — see §M5a.3 deviation 1).
 - `api.rs`: `BotApi` (`getUpdates` timeout param 25,
   `allowed_updates` message+callback_query only,
   `getMe`, send/edit/delete/answer, `setMyCommands`,
@@ -4219,7 +4217,11 @@ webpki-roots `=0.26.11`, ring `=0.17.14`. So no
 M5a (the M3d/M4a pattern applies only when a new
 direct dep is added). `rust/Cargo.toml`: exactly one
 new member line (`"castctl-telegram"`, after
-`"castctl-gateway"`).
+`"castctl-gateway"`). (Pre-rebase record at
+`e25bca9`; the rebase onto merged M4b deleted the
+temporary `tls.rs` and its direct deps — see
+§M5a.3 deviation 1 and §M5a.9 for the rebased lock
+diff.)
 
 ## M5a.2 Command table (30 rows)
 
@@ -4274,16 +4276,22 @@ live `getMyCommands` record in
 ## M5a.3 Deviations from Go (deliberate, with citations)
 
 1. TEMPORARY TLS module (`tls.rs`, parent decision
-   1): `HttpClient` is plaintext-only and the Bot API
-   is HTTPS-only, and the TLS code (`tls.rs` +
-   `request_tls`) exists only in uncommitted M4b.
-   This crate carries a MINIMAL `TlsHttpClient`
-   (rustls + tokio-rustls + webpki-roots, ring only —
-   enabling both `aws_lc_rs` + `ring` makes
-   `ClientConfig::builder()` panic at runtime,
-   M4b-measured). On rebase onto merged M4b: reuse
-   M4b `tls.rs` + `request_tls` and DELETE this
-   module. Do NOT touch `castctl-transport`.
+   1): `HttpClient` was plaintext-only and the Bot
+   API is HTTPS-only, while the TLS code (`tls.rs` +
+   `request_tls`) existed only in uncommitted M4b.
+   DONE on the rebase onto merged M4b (`27a0eaf`):
+   the module is DELETED (`castctl-telegram/src/
+   tls.rs` gone, `mod tls;` gone, direct deps
+   rustls / tokio-rustls / webpki-roots / hyper /
+   hyper-util / http-body-util removed from the
+   crate manifest), `BotApi` now uses M4b's
+   `HttpClient::request_tls` (`castctl-transport`,
+   ALPN `http/1.1` via `tls_client_config`, pinned
+   by M4b's own test `tls_config_pins_http11_alpn`),
+   and `telegram_api_target()` moved into `api.rs`.
+   `castctl-transport` was NOT touched (Boss rule:
+   do not edit M4b's src) — see deviation 21 for
+   the one consequence of that (download cap).
 2. 5xx bounded backoff in the poll loop [DEVIATION]:
    Go's bot core has NO 5xx retry — a 5xx surfaces
    to `errorsHandler` (log-only) and the library polls
@@ -4347,13 +4355,13 @@ live `getMyCommands` record in
    exceeded" (fix loop 2, tech N-N2 — the loop-1
    claim "19/20, only `ContextDeadlineExceeded`
    unreachable" was literally wrong).
-5. Plaintext-path download cap 16 MiB [DEVIATION,
-   tests only]: `HttpClient` caps at 16 MiB
-   (`MAX_RESPONSE_BODY`) and cannot be
-   parameterised. The TLS path honours Go's 20 MiB+1
-   gate exactly (`request_with_body_cap`). Production
-   always uses TLS, so the 16 MiB cap never binds
-   there.
+5. Download cap 16 MiB on BOTH paths [DEVIATION]:
+   `HttpClient::request` AND `request_tls` cap at
+   16 MiB (`MAX_RESPONSE_BODY`); neither can be
+   parameterised from this crate. (Pre-rebase, the
+   temporary TLS module honoured the 20 MiB+1 gate
+   exactly; the rebase removed that path — see
+   deviation 21 for the consequence.)
 6. `inbox_name` uses a UTC prefix [DEVIATION]: Go
    uses local time (`inbound.go:146-170`); this
    crate has no tz database, so the
@@ -4395,11 +4403,30 @@ live `getMyCommands` record in
 14. No `classifyError` port: M4b owns
     `classify_error` in `castctl-cli/network.rs`
     (`internal/commands/commands.go:241-360`); this
-    crate must not port a second one.
+    crate must not port a second one. Rebase
+    outcome (M4b merged at `27a0eaf`):
+    `classify_error` is `pub(crate) fn
+    classify_error(err: &TransportError) -> FlowErr`
+    (`network.rs:196`), so it is NOT directly
+    reusable from `castctl-telegram` — expanding
+    M4b's just-merged API is out of scope. The
+    in-crate `error_class` mapping is KEPT (tested,
+    20/20 labels emittable via `format_summary` /
+    `fallback_class` — see §M5a.4). It could be
+    reused only if `classify_error` moves to a shared
+    crate in a future PR; until then the two
+    mappings coexist by design.
 15. `WireGuard` dispatch: no `WireGuard(Arc<...>)`
-    → `Arc<dyn Dialer>` conversion helper exists on
-    `dev-rust` (M4b-only, uncommitted); this crate
+    → `Arc<dyn Dialer>` conversion helper existed on
+    `dev-rust` at M5a write time (M4b-only,
+    uncommitted then); this crate
     writes its own 5-line match in-crate if needed.
+    Rebase outcome: the "if needed" never
+    triggered — this crate has ZERO WireGuard
+    references, so nothing was written. M4b's
+    transport exports `dispatch_endpoint` /
+    `dispatch_outbound` publicly if a future need
+    arises.
 16. Poll offset vs state offset: the in-memory poll
     offset advances past EVERY update received
     (strangers included), mirroring the Go library,
@@ -4448,6 +4475,35 @@ live `getMyCommands` record in
     500 body cannot wedge the poll loop into a
     1s-pause retry storm. Any OTHER undecodable body
     maps to `ResponseDecode` (the Go behaviour).
+21. Download cap is 16 MiB on the production TLS
+    path too [DEVIATION, rebase onto merged M4b]:
+    the deleted temporary TLS module honoured the
+    20 MiB+1 gate exactly (`request_with_body_cap`);
+    M4b's `request_tls` caps at the fixed
+    `MAX_RESPONSE_BODY` (16 MiB,
+    `castctl-transport/src/http.rs`, `http_over_stream`)
+    with no parameter, and Boss's rule for this
+    rebase forbids editing M4b's src — so NO
+    parameterised-cap variant was added. A file
+    whose real size is in (16 MiB, 20 MiB] now fails
+    at the transport with `BotError::Transport`
+    (`TransportError::Gateway` + body summary)
+    instead of downloading and hitting Gate 2's
+    clear `BotError::Validation("file exceeds the
+    20 MiB download limit")`; Go ACCEPTS such a
+    file. Gate 1 (getFile reported size > 20 MiB,
+    refused before download) still works, and the
+    `max_body` parameter is retained on
+    `download_file_bytes` / `get_path` / `post_json`
+    for the call shape (currently honoured by
+    neither path). Follow-up (not this rebase): a
+    parameterised cap in `castctl-transport` owned
+    by a transport PR. The 3 unit tests of the
+    deleted module are gone with it; their coverage
+    lives on in M4b's transport tests
+    (`tls_config_pins_http11_alpn`,
+    `host_header_rules`) already counted in the
+    467-test M4b base.
 
 ## M5a.4 Reuse verification (read, not re-ported)
 
@@ -4492,6 +4548,30 @@ live `getMyCommands` record in
   `String` in `BotApiConfig`, and only the shape
   check `castctl_config::telegram::valid_telegram_token_shape`
   is reused. `config.json` is never re-parsed here.
+  M4b did not change `TelegramConfig` (verified by
+  grepping the M4b diff — no Telegram hits), so
+  this still holds after the rebase.
+- Rebase reuse decisions (onto merged M4b,
+  `27a0eaf` — see §M5a.9): TLS REUSED
+  (`HttpClient::request_tls` + `tls_client_config`,
+  ALPN `http/1.1` pinned by M4b's
+  `tls_config_pins_http11_alpn`); `classify_error`
+  NOT reused — `pub(crate)` in `castctl-cli`, see
+  §M5a.3 deviation 14; `credential_for_profile`
+  NOT reused — it is M4b's login-credential API
+  (`LoginCredential` username/password for
+  profiles, `castctl-config/src/config.rs:165`),
+  not a bot-token API, and this crate takes the
+  token as a `String`; `castctl-gateway/src/
+  summary.rs` NOT reused — it is M4b's gateway
+  allowlist body summary (port of
+  `internal/gateway/summary.go`), a different thing
+  from this crate's `BotError::summary()`
+  (`summarizeError` port); `dispatch_endpoint` /
+  `dispatch_outbound` NOT reused — this crate never
+  touches WireGuard (deviation 15). No M4b code was
+  duplicated into this crate and no M4b code was
+  moved.
 
 ## M5a.5 Gates (cue, 2026-11-05; fix loop 1 same day)
 
@@ -4723,9 +4803,13 @@ Deferred: exactly one — red N10 (`is_auth_error`,
 `commands.rs:90-95`, only matches
 `TransportError::Auth`): whether a real gateway auth
 failure surfaces as `TransportError::Auth` through
-the M4b seam services is unverified because the
-services do not exist yet. Pin with a test once M4b
-lands; do not guess the mapping. (Fix loop 2, tech
+the M4b seam services is unverified. (Rebase
+update: M4b HAS landed — `27a0eaf` — so the seam
+services exist in the tree now (`castctl-gateway`);
+the mapping itself is still unverified and still
+deferred, now to the CLI-wiring follow-up, not to
+M4b landing. Pin with a test then; do not guess the
+mapping.) (Fix loop 2, tech
 N-N3 — the loop-1 section wrongly said "Deferred:
 none." while the fix-loop-1 report §3 listed this
 same N10 as deferred.) Everything else in the loop
@@ -4959,7 +5043,10 @@ was FALSE against the pinned library source.
    loop-3 diff does not touch `claims.rs`.
 
 Deferred NITs: exactly one — red N10 (`is_auth_error`,
-M4b seam), carried from loops 1–2.
+M4b seam), carried from loops 1–2. (Rebase update:
+M4b merged at `27a0eaf`; the seam services exist in
+the tree, the mapping is still unverified — deferred
+to the CLI-wiring follow-up.)
 
 ## Quy tắc quyết định (Boss, 2026-11-05 — standing)
 

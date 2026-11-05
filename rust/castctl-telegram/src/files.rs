@@ -186,9 +186,11 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// (`DownloadMedia`).
 ///
 /// Gate 2 is a [DEVIATION]: upstream has no post-download
-/// gate. The plaintext test path caps bodies at the
-/// transport's 16 MiB (see `tls.rs`); the production TLS
-/// path honours the 20 MiB + 1 cap exactly.
+/// gate. Both transport paths cap bodies at 16 MiB
+/// (`MAX_RESPONSE_BODY`), so Gate 2 only ever observes
+/// files up to that size; a file in (16 MiB, 20 MiB] fails
+/// at the transport instead (see `api.rs`,
+/// `download_file_bytes` — PORTING §M5a deviation 20).
 pub async fn download_media(api: &BotApi, media: &InboxMedia) -> Result<Vec<u8>, BotError> {
     // Go `DownloadMedia` (`inbound.go:172-221`) errors
     // first on a nil/empty file id — before any `getFile`

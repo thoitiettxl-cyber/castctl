@@ -16,7 +16,6 @@
 //! | Module | Contents |
 //! | `error` | `BotError` taxonomy + allowlist summary |
 //! | `types` | Bot API wire types (`Update`, `Message`, `CallbackQuery`, media) |
-//! | `tls` | TEMPORARY minimal TLS HTTP client (parent decision, see `tls.rs`; delete on M4b rebase) |
 //! | `api` | `BotApi`: Bot API calls, 429 retry, envelope decode, multipart upload |
 //! | `send` | `Send` / `SendMD` / `Edit` / `EditPlain` / `Delete` / `answer` surface |
 //! | `state` | `telegram-state.json` v1 store (atomic save, toggles, sent-media) |
@@ -36,8 +35,9 @@
 //!   through `castctl-log-redact` summaries.
 //! - No proxy environment variables are ever read: HTTP goes
 //!   through the supplied `castctl-transport` dialer only
-//!   (`HttpClient` for plaintext tests, `tls::TlsHttpClient`
-//!   for production HTTPS). Redirects are never followed.
+//!   (`HttpClient::request` for plaintext tests,
+//!   `HttpClient::request_tls` for production HTTPS).
+//!   Redirects are never followed.
 //! - Offset is persisted BEFORE handling (at-most-once per
 //!   update id); a crash mid-handle loses that update instead
 //!   of redelivering it (`internal/telegram/state.go:13-47`).
@@ -60,7 +60,6 @@ pub mod registry;
 pub mod router;
 pub mod send;
 pub mod state;
-pub mod tls;
 pub mod types;
 
 pub use api::{BotApi, BotApiConfig};
