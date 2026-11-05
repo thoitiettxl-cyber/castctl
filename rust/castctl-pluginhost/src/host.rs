@@ -2882,19 +2882,19 @@ mod tests {
         let env: Envelope = serde_json::from_slice(&out).unwrap();
         assert!(env.ok);
         assert_eq!(env.result, Some(serde_json::json!({})));
-        let logs = logs.lock().unwrap();
-        assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0], "warn:hello world");
-        drop(logs);
+        let guard = logs.lock().unwrap();
+        assert_eq!(guard.len(), 1);
+        assert_eq!(guard[0], "warn:hello world");
+        drop(guard);
         // Empty message -> "plugin log"; unknown level -> info.
         let out = h.dispatch_host_call(
             pluginabi::METHOD_HOST_LOG,
             br#"{"level":"bogus","message":"   "}"#,
         );
         assert!(serde_json::from_slice::<Envelope>(&out).unwrap().ok);
-        let logs = logs.lock().unwrap();
-        assert_eq!(logs.len(), 2);
-        assert_eq!(logs[1], "info:plugin log");
+        let guard = logs.lock().unwrap();
+        assert_eq!(guard.len(), 2);
+        assert_eq!(guard[1], "info:plugin log");
         h.close();
     }
 

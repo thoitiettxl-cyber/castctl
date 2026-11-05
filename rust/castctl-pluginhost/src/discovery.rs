@@ -401,7 +401,7 @@ mod tests {
     fn discover_root_errors() {
         let tmp = tempfile::tempdir().unwrap();
         // Missing root fails closed.
-        assert!(discover(tmp.path().join("no-such")).is_err());
+        assert!(discover(&tmp.path().join("no-such")).is_err());
         // A file is not a directory.
         let f = tmp.path().join("f");
         std::fs::write(&f, b"x").unwrap();

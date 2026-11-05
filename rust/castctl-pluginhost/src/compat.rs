@@ -296,7 +296,7 @@ impl Elf {
             }
         }
         // Section headers.
-        let mut raw_sections: Vec<(u32, u32, u64, u64, u64, u32, u32)> = Vec::new();
+        let mut raw_sections: Vec<(u32, u64, u64, u32, u32)> = Vec::new();
         if shoff != 0 && shentsize != 0 {
             // Extended numbering: shnum 0 means the real
             // count is section 0's sh_size; shstrndx
@@ -1090,7 +1090,7 @@ mod tests {
 
     /// Port of `TestParseVersionNeeds` (`compat_test.go:77-105`).
     #[test]
-    fn parse_version_needs() {
+    fn parse_version_needs_cases() {
         let (body, strtab) =
             build_verneed("libc.so.6", &["GLIBC_2.17", "GLIBC_2.34", "GLIBC_PRIVATE"]);
         assert_eq!(parse_version_needs(&body, &strtab, false).unwrap(), "2.34");
@@ -1387,25 +1387,28 @@ mod tests {
         let vaddr_base: u64 = if opts.class32 { 0x0804_8000 } else { 0x400_000 };
         let mut buf = vec![0u8; file_size];
         let put16 = |buf: &mut [u8], off: usize, v: u16| {
-            buf[off..off + 2].copy_from_slice(if opts.big_endian {
-                &v.to_be_bytes()
+            let bytes = if opts.big_endian {
+                v.to_be_bytes()
             } else {
-                &v.to_le_bytes()
-            });
+                v.to_le_bytes()
+            };
+            buf[off..off + 2].copy_from_slice(&bytes);
         };
         let put32 = |buf: &mut [u8], off: usize, v: u32| {
-            buf[off..off + 4].copy_from_slice(if opts.big_endian {
-                &v.to_be_bytes()
+            let bytes = if opts.big_endian {
+                v.to_be_bytes()
             } else {
-                &v.to_le_bytes()
-            });
+                v.to_le_bytes()
+            };
+            buf[off..off + 4].copy_from_slice(&bytes);
         };
         let put64 = |buf: &mut [u8], off: usize, v: u64| {
-            buf[off..off + 8].copy_from_slice(if opts.big_endian {
-                &v.to_be_bytes()
+            let bytes = if opts.big_endian {
+                v.to_be_bytes()
             } else {
-                &v.to_le_bytes()
-            });
+                v.to_le_bytes()
+            };
+            buf[off..off + 8].copy_from_slice(&bytes);
         };
         buf[0..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
         buf[4] = if opts.class32 { 1 } else { 2 };

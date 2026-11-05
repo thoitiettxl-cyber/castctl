@@ -239,6 +239,7 @@ fn read_regular_file(path: &Path) -> Result<Vec<u8>, PluginHostError> {
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+    use std::path::PathBuf;
 
     fn write_manifest(dir: &Path, name: &str, data: &[u8]) -> PathBuf {
         let sum = hex::encode(Sha256::digest(data));
