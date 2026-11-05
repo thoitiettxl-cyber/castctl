@@ -347,27 +347,6 @@ fn clean_path(path: &str) -> String {
     result
 }
 
-/// Go `encoding/json` float formatting for one finite float.
-// The `abs != 0.0` guard makes the range form inequivalent
-// (`!(1e-6..1e21).contains(&0.0)` is true), so the manual
-// comparison is kept deliberately.
-#[allow(clippy::manual_range_contains)]
-fn format_json_float(f: f64) -> String {
-    let abs = f.abs();
-    if abs != 0.0 && (abs < 1e-6 || abs >= 1e21) {
-        let s = format!("{f:e}");
-        if let Some(pos) = s.find('e') {
-            let (mantissa, exp) = s.split_at(pos + 1);
-            if !exp.starts_with('-') {
-                return format!("{mantissa}+{exp}");
-            }
-        }
-        s
-    } else {
-        format!("{f}")
-    }
-}
-
 /// Escapes a string the way Go's `encoding/json` does:
 /// `"`/`\`/control chars, plus U+2028/U+2029 as `\u2028` /
 /// `\u2029`. `<`, `>`, `&` are escaped as `\u00XX` only when
@@ -400,25 +379,23 @@ pub(crate) fn escape_json_string(s: &str, out: &mut String, escape_html: bool) {
 }
 
 /// Serializes a JSON value the way Go's `encoding/json` does
-/// (object keys sorted, same string escaping). Floats use Go's
-/// `encoding/json` float format: shortest round-trip digits,
-/// scientific notation when `|f| < 1e-6` or `|f| >= 1e21`, with
-/// the exponent's leading zero stripped (`1e-7`, `1e+21`).
-/// Non-finite floats serialize as `null` (Go would error;
-/// no pinned case covers this).
+/// (object keys sorted, same string escaping). Numbers keep
+/// their literal spelling: [`JsonValue::Float`] stores the
+/// original text (Go `json.Number` parity) and is emitted
+/// verbatim — `1.0` stays `1.0`, `1e3` stays `1e3`. A literal
+/// that parses to `±Inf` (e.g. `1e999`) is still a valid JSON
+/// number token and is emitted verbatim, exactly as Go's
+/// `json.Number` marshals it; there is no `f64` value in this
+/// model, so the old "non-finite floats serialize as `null`"
+/// rule has no reachable trigger anymore (see
+/// `rust/PORTING.md` §M4c.10).
 /// `escape_html` is threaded to [`escape_json_string`].
 pub(crate) fn write_json_value(v: &JsonValue, out: &mut String, escape_html: bool) {
     match v {
         JsonValue::Null => out.push_str("null"),
         JsonValue::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         JsonValue::Int(n) => out.push_str(&n.to_string()),
-        JsonValue::Float(f) => {
-            if f.is_nan() || f.is_infinite() {
-                out.push_str("null");
-            } else {
-                out.push_str(&format_json_float(*f));
-            }
-        }
+        JsonValue::Float(lit) => out.push_str(lit),
         JsonValue::Str(s) => escape_json_string(s, out, escape_html),
         JsonValue::Array(items) => {
             out.push('[');
@@ -923,34 +900,13 @@ mod tests {
         }
     }
 
-    // Differential probes (NOT ported Go cases): float/escaping
-    // goldens measured against Go `encoding/json` on cue (probe P-6
-    // follow-up). No Go test pins variant floats; these guard the
-    // hand-rolled serializer's float format only.
+    // Differential probe (NOT a ported Go case): string
+    // escaping measured against Go `encoding/json` on cue.
+    // (The float-format cases that used to live here were
+    // deleted with `format_json_float` in §M4c.10: numbers
+    // are literals now, no `f64` is ever formatted.)
     #[test]
-    // The long literal is the Go golden input verbatim;
-    // its rounded value is what the golden pins.
-    #[allow(clippy::excessive_precision)]
-    fn probe_json_float_format() {
-        let cases: &[(f64, &str)] = &[
-            (1.5, "1.5"),
-            (1e21, "1e+21"),
-            (1e-7, "1e-7"),
-            (0.000001, "0.000001"),
-            (123456789.123456789, "123456789.12345679"),
-            (1e100, "1e+100"),
-            (0.1, "0.1"),
-            (0.0, "0"),
-            (-0.0, "-0"),
-            (-1.5e-7, "-1.5e-7"),
-            (1e20, "100000000000000000000"),
-        ];
-        for (f, want) in cases {
-            assert_eq!(format_json_float(*f), *want, "float {f}");
-            let mut out = String::new();
-            write_json_value(&JsonValue::Float(*f), &mut out, true);
-            assert_eq!(out, *want, "json float {f}");
-        }
+    fn probe_json_string_escaping() {
         let mut out = String::new();
         escape_json_string("<a>&\u{2028}\u{2029}\u{1}\u{7f}é", &mut out, true);
         assert_eq!(

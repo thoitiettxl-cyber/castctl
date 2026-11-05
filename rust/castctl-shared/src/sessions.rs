@@ -209,7 +209,10 @@ mod tests {
             "sessions",
             arr(&[obj(&[
                 ("session_id", s("s1")),
-                ("updated_at_ms", JsonValue::Float(1792821457000.0)),
+                (
+                    "updated_at_ms",
+                    JsonValue::Float("1792821457000.0".to_string()),
+                ),
             ])]),
         )]);
         let rows = session_rows(&d, false, &utc());
