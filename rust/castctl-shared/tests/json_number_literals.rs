@@ -20,6 +20,13 @@
 //! | 1E3                    | 1E3                    |
 //! | 18446744073709551615   | 18446744073709551615   |
 //!
+//! `-0` is deliberately NOT in this table: Go emits `-0`,
+//! but serde_json normalizes it to integer `0` at parse
+//! time (see `rust/PORTING.md` §M4c.10), so no bridge
+//! special-case can preserve it — the minus is gone before
+//! `from_serde` runs. Pinned as a known limitation in
+//! `bridge::tests::from_serde_neg_zero_collapses_to_int_zero_known_limitation`.
+//!
 //! Full Go output for `1.0` (len 133, measured):
 //! ```json
 //! {

@@ -42,6 +42,10 @@ pub enum JsonValue {
     /// `i64::MAX`). The literal is always a valid JSON number
     /// token as decoded — never `NaN`/`Inf` — so the emitter
     /// prints it verbatim, exactly as Go's `json.Number` does.
+    /// One exception, upstream of this enum: `-0` is
+    /// normalized to integer `0` by serde_json at parse time
+    /// and arrives here as `Int(0)` (Go emits `-0`); see
+    /// `rust/PORTING.md` §M4c.10.
     Float(String),
     /// JSON string.
     Str(String),
@@ -101,8 +105,10 @@ pub(crate) fn as_string(v: &JsonValue) -> Option<&str> {
 /// Measured by probe P-6 on cue: `1e100` and `-1e100` both
 /// yield `i64::MIN` with `ok=true`; NaN/`±Inf` yield
 /// `ok=false`. A literal that parses to `±Inf` (e.g.
-/// `1e999`) yields `ok=false`, as Go's float fallback does
-/// for a non-finite `float64`.
+/// `1e999`) yields `ok=false`: Go's `Float64()` returns
+/// `ErrRange` on overflow before the `IsInf` check, so
+/// `asInt64` returns false there; Rust reaches the same
+/// `None` via the infinite parse result.
 pub(crate) fn as_int64(v: &JsonValue) -> Option<i64> {
     match v {
         JsonValue::Int(n) => Some(*n),

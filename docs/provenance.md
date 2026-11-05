@@ -1834,12 +1834,15 @@ already declared (e.g. `castctl-cli` → `castctl-gateway`
 /`castctl-shared`/`castctl-transport`/`chrono`/
 `serde_json`/`tokio`; `castctl-transport` → `rustls`/
 `tokio-rustls`/`webpki-roots`; `rustls` → `log`). Any
-cargo invocation rewrites those in; the lock diff of the
-intermediate fork commit therefore contained the
-stale-edge fill plus the three honk `source` lines
-(upstream → fork). At the final head the lock points at
-upstream only (no fork line remains). No crate version
-changed.
+cargo invocation rewrites those in; that is what the PR's
+lock diff against `27a0eaf` is — 17 added lines, all
+stale-edge fill, no honk line. The fork pin never reached
+any commit: the fork was tried and reverted inside the
+working tree, and the lock diff of the fork commit
+`fcafe4f` is empty (`git log --all -S
+'thoitiettxl-cyber' -- rust/Cargo.lock` returns 0
+commits). At the final head the lock points at upstream
+only (no fork line remains). No crate version changed.
 
 ## 14. boringtun + smoltcp + base64 — LINKED (Rust artifact only, no copied code)
 

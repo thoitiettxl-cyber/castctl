@@ -13,8 +13,13 @@
 //! other number becomes [`JsonValue::Float`] carrying its
 //! original literal text (`serde_json` with
 //! `arbitrary_precision` keeps the literal, so
-//! `n.to_string()` returns it verbatim). Object keys iterate
-//! sorted (both models sort: `serde_json::Value` without
+//! `n.to_string()` returns it verbatim) — with one known
+//! exception: `-0` is normalized to integer `0` by
+//! serde_json at parse time (`parse_any_number` tries
+//! `i64` first), so it arrives here as `Int(0)` and
+//! re-emits `0`, while Go emits `-0`. See
+//! `rust/PORTING.md` §M4c.10. Object keys iterate sorted
+//! (both models sort: `serde_json::Value` without
 //! `preserve_order` is a `BTreeMap`, as is
 //! [`JsonValue::Object`]).
 //!
@@ -115,6 +120,25 @@ mod tests {
     }
 
     #[test]
+    fn from_serde_neg_zero_collapses_to_int_zero_known_limitation() {
+        // KNOWN LIMITATION (PORTING §M4c.10), pinned so it
+        // cannot silently change: serde_json 1.0.145
+        // normalizes "-0" to integer 0 at parse time
+        // (`parse_any_number` tries `i64` first), so the
+        // Value reaching from_serde is indistinguishable
+        // from input "0" (`to_string()` is "0", `as_i64()`
+        // is Some(0)). No special-case here can recover the
+        // minus — it is already gone. Go emits "-0"
+        // verbatim (json.Number). A real fix needs the
+        // decode layer (RawValue / custom number handling
+        // in the gateway), not this bridge.
+        let v: SerdeValue = serde_json::from_str("-0").unwrap();
+        assert_eq!(from_serde(&v), JsonValue::Int(0));
+        let w: SerdeValue = serde_json::from_str("0").unwrap();
+        assert_eq!(from_serde(&v), from_serde(&w));
+    }
+
+    #[test]
     fn from_serde_float_as_int64_follows_go() {
         // Go asInt64 float fallback, via the stored literal:
         // truncate toward zero; out-of-range -> i64::MIN;
@@ -130,6 +154,9 @@ mod tests {
         assert_eq!(lit("1e100"), Some(i64::MIN));
         assert_eq!(lit("-1e100"), Some(i64::MIN));
         assert_eq!(lit("1e999"), None);
+        // "-0" keeps its literal as Float but still
+        // converts to 0, like Go asInt64 (0, true).
+        assert_eq!(lit("-0"), Some(0));
     }
 
     #[test]

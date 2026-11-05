@@ -4784,7 +4784,11 @@ literal, GIỮ `Int(i64)`:
 - Biến thể một variant `Num(String)` thay cả Int/Float
   (research (b) đề xuất): sạch hơn về lý thuyết nhưng
   chạm mọi match arm Int/Float và mọi điểm dựng số —
-  xâm lấn hơn mà không giữ đúng thêm case nào so với (i).
+  xâm lấn hơn mà không giữ đúng thêm case nào so với (i):
+  cả hai biến thể đều đọc literal từ
+  `Number::to_string()` trong `from_serde`, và literal
+  đó đã mất `-0` từ bước parse (xem `-0` dưới đây). (i)
+  được chọn vì ít xâm lấn hơn.
 - `RawValue` / `arbitrary_precision`: `arbitrary_precision`
   đã bật workspace-wide (`rust/Cargo.toml:58`) — chính nó
   khiến `Number` giữ literal; vấn đề không nằm ở serde mà
@@ -4855,8 +4859,35 @@ với Go (chuỗi kỳ vọng viết tay, không tính lại bằng code
 | `1E3` | `1E3` | `1E3` |
 | `18446744073709551615` | `18446744073709551615` | `18446744073709551615` |
 
+Known limitation — `-0` (vòng 3, đã chứng minh bằng
+probe, không fix được ở bridge): Go phát `-0` (đo bằng
+probe Go verbatim: `json.Number("-0")` marshal ra `-0`);
+Rust phát `0`. Nguyên nhân nằm ở bước parse, trước
+`from_serde`: serde_json 1.0.145 với
+`arbitrary_precision`, `parse_any_number` (`de.rs`) quét
+literal vào buffer rồi thử `buf.parse::<i64>()` trước —
+`"-0"` parse ra `Ok(0)` → `ParserNumber::I64(0)`, literal
+bị vứt. Probe Rust đo trực tiếp:
+`from_str::<Value>("-0")` cho `to_string() == "0"`,
+`as_i64() == Some(0)`, không phân biệt được với input
+`"0"`. Vì vậy special-case trong `from_serde` (đã thử:
+kiểm `n.to_string() == "-0"`) không bao giờ kích hoạt —
+test đỏ vẫn đỏ sau khi thêm code; code đó đã gỡ, không
+để lại dead code đánh lừa người sau. Biến thể
+`Num(String)` cũng không cứu được qua cùng đường decode
+(nó cũng chỉ đọc `to_string()`). Fix thật cần tầng decode
+(giữ raw number text bằng `RawValue` / custom number
+handling tại các điểm decode của gateway:
+`gateway.rs:903`, `auth.rs:188,255,309`,
+`subscription.rs:125`) — việc riêng, cần quyết định
+thiết kế riêng, không làm trong fix loop này. Không
+payload thực nào của server chứa `-0` (counts / sizes /
+timestamps đều không âm-zero); hành vi hiện tại được pin
+bằng test
+`from_serde_neg_zero_collapses_to_int_zero_known_limitation`.
+
 Live gate sau fix (cue, profile `no.0`, release binary
-md5 `be0614aa…`, Go 0.9.0; mỗi lệnh 1 lần/bên, đều trong
+md5 `be0614aa9460d29c3e9a7edbad5c6fe1`, Go 0.9.0; mỗi lệnh 1 lần/bên, đều trong
 giới hạn ≤2 lần; stderr cả hai bên đều rỗng, 0 byte):
 
 | lệnh | Go exit | Rust exit | khớp raw? | khác biệt |
@@ -4880,10 +4911,12 @@ giới hạn ≤2 lần; stderr cả hai bên đều rỗng, 0 byte):
 **15/15 byte-identical raw; không label nào regress.**
 Ghi chú `status` trong §M4c.8 ("follow-up riêng") nay đã
 lỗi thời — fix này chính là follow-up đó, làm trong cùng
-PR theo lệnh Boss. `status` Go mới vs `status` Go ở gate
-cũ lệch ở `seen_at_ms` (field thời gian, đổi theo giờ
-thực) — trong gate này Go và Rust chạy sát nhau nên thấy
-cùng giá trị, khớp nhau cả field đó. Evidence:
+PR theo lệnh Boss. `seen_at_ms` là timestamp server-side
+đã lưu, ổn định giữa các lần chạy: giá trị
+`1793894108735` giống hệt trong cả 6 output `status` Go
+trên cue (gate, gate2, 3 probe cũ, go-full) và cả 2
+output Rust. `status` Go gate1 vs gate2 chỉ lệch ở
+`"sessions"`: 112 → 114 (live state đổi). Evidence:
 `/tmp/m4c-a/live/gate2/` (`go-*.out` / `rs-*.out` +
 `*.err` rỗng + `*.exit` đều 0).
 
@@ -4895,13 +4928,19 @@ integration test mới + 1 unit test `as_int64` mới; test
 float cũ đổi tên/kỳ vọng, không đổi số lượng);
 `cargo clippy --workspace --all-targets -- -D warnings`
 0; `cargo build --release -p castctl-rs` 0 (binary md5
-`be0614aa…`). Flake ghi nhận: lần chạy test đầu fail 1
+`be0614aa9460d29c3e9a7edbad5c6fe1`). Flake ghi nhận: lần chạy test đầu fail 1
 test `castctl-cli` (`unknown_profile_is_typed_cookies_missing`,
 `create_dir_all` → `AlreadyExists`) — race có sẵn trong
 `temp_home` (`network.rs`: nhiều test song song dùng chung
 đường dẫn theo pid + `remove_dir_all` trong setup), không
 liên quan đến đổi này (diff không chạm `network.rs`); chạy
-lại không đổi code thì 567/0. (Số 469 trong §M4c.8 là
+lại không đổi code thì 567/0. Cơ chế (đọc từ code
+`network.rs:752-768`): 6 test dùng chung
+`temp_home("home")` qua `isolated_env()` — cùng một đường
+dẫn trong một process test (cargo chạy test song song nhiều
+thread, cùng pid); `remove_dir_all` trong setup của test B
+xóa HOME của test A đang chạy giữa chừng, nên A đọc
+config/cookies khác đi và fail flaky. (Số 469 trong §M4c.8 là
 trước rebase; sau rebase lên `07e1c0d` là 565.)
 
 ## M5a — Telegram bot core (crate `castctl-telegram`, 2026-11-05)
