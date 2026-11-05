@@ -4676,6 +4676,9 @@ character-for-character") và PORTING §M4b — sửa cần
 giữ literal số trong model `JsonValue` (thay đổi
 shared serializer, ảnh hưởng mọi lệnh shaped), ngoài
 phạm vi M4c nên KHÔNG sửa ở đây; follow-up riêng.
+[FIXED pre-merge — xem §M4c.10: bridge nay giữ literal
+số trong model `JsonValue`, live gate sau fix 15/15
+byte-identical raw.]
 
 Gates (cue, 1.99.1, `CARGO_TARGET_DIR=/tmp/m4c-a/m4c-target`):
 `cargo fmt --check` 0; `cargo build --workspace` 0;
@@ -4747,6 +4750,159 @@ Gates sau loop: xem §M4c.8 (cập nhật trong commit này).
 | 11 | Safety N3: thiếu test render CLI | fixed — test `classify_error_connection_variants` (`network.rs`): ConnectionError length-only, ConnectionDown render message (đã truncate 200 ở construction) / bare khi rỗng |
 | 12 | Safety N4: lock diff rộng hơn draft | recorded — mô tả đúng 1 dòng trong §M4c.8 (regeneration, `log` cho rustls, checksum không đổi) |
 | 13 | Safety N5: thiếu test `wss://` TLS-fail | fixed — test `dial_wss_tls_failure_error_is_fixed_string_without_token` (`tests/gateway.rs`): dial `wss://` tới listener plain 127.0.0.1 → lỗi là chuỗi cố định 29-char, không chứa token |
+
+### M4c.10 Pre-merge fix — bridge giữ literal số, `status` 15/15 (Boss, 2026-11-05)
+
+Boss order trước khi merge PR #69: sửa luôn lệch `1.0`
+vs `1` trong PR này, không để thành follow-up — mục tiêu
+của port là output khớp Go, và bug ở bridge JSON (drop
+float literal) sẽ ảnh hưởng mọi lệnh khác có số thực.
+
+Điểm rơi (đã đo, 2 research độc lập đồng thuận):
+`from_serde` (`castctl-shared/src/bridge.rs:38-44`) —
+`as_f64()` → `Float(f64)` giết literal; `format_json_float`
+(`resources.rs:355`, `format!("{f}")`) chỉ là chỗ mất mát
+lộ ra (`1.0f64` → `"1"`). Sửa mỗi `format_json_float`
+không cứu được vì thông tin đã mất từ bước parse. Go phía
+bên kia: `decodeJSONValue` dùng `dec.UseNumber()`
+(`jsonutil.go:25-45`), `writeJSON` Encoder indent 2,
+không escape HTML — mọi số là literal string, phát
+verbatim.
+
+Quyết định shape — (i) `Float(f64)` → `Float(String)`
+literal, GIỮ `Int(i64)`:
+- Ít xâm lấn nhất: split Int/Float và semantics
+  integer-first của `as_int64` giữ nguyên cấu trúc; chỉ
+  payload của `Float` đổi kiểu. Không variant mới, không
+  chạm 5 điểm dựng `Int(v)` production, không đổi match
+  arm nào ngoài các chỗ dùng payload `Float`.
+- Cả hai fixture quyết định đều đúng: `9007199254740993`
+  (> 2^53, vừa `i64`) → `Int` (exact, như cũ);
+  `18446744073709551615` (> `i64::MAX`) →
+  `Float("18446744073709551615")` literal — sửa luôn lỗi
+  làm sai chữ số hiện tại (`...52000`).
+- Biến thể một variant `Num(String)` thay cả Int/Float
+  (research (b) đề xuất): sạch hơn về lý thuyết nhưng
+  chạm mọi match arm Int/Float và mọi điểm dựng số —
+  xâm lấn hơn mà không giữ đúng thêm case nào so với (i).
+- `RawValue` / `arbitrary_precision`: `arbitrary_precision`
+  đã bật workspace-wide (`rust/Cargo.toml:58`) — chính nó
+  khiến `Number` giữ literal; vấn đề không nằm ở serde mà
+  ở bridge vứt literal đi. `RawValue` cần feature mới +
+  đường decode riêng (gateway decode ra `Value`, không bao
+  giờ chứa `RawValue`) + vẫn phải đổi enum — xâm lấn hơn
+  ở mọi chiều, lợi ích 0 (`Number::to_string()` đã trả đúng
+  literal, đã đo). Không đổi `Cargo.toml`, không thêm dep.
+- `PartialEq` đổi theo literal (`1.0 != 1.00`,
+  `1e3 != 1000`), khớp `json.Number` (string type) — đã đo:
+  `Value("1.0") == Value("1.00")` → false.
+- NaN/Inf: sau đổi này không còn đường production nào dựng
+  `Float` từ `f64` (chỉ `from_serde` từ số JSON đã decode,
+  mà serde reject literal NaN/Inf) nên rule cũ "render
+  NaN/Inf thành `null`" không còn trigger nào tới được.
+  Literal parse ra `±Inf` (vd `1e999`) vẫn là token số JSON
+  hợp lệ và được emit verbatim, đúng như Go marshal
+  `json.Number("1e999")`; `as_int64` của nó trả `None`,
+  khớp hành vi cũ (`Float(inf)` → `None`).
+- `format_json_float` mất caller duy nhất (arm `Float`) nên
+  bị xóa cùng các case float của test
+  `probe_json_float_format`; phần pin string-escaping của
+  test đó giữ lại thành test riêng. Không còn `f64` nào
+  được format trong model này; nếu tương lai cần dựng số
+  từ `f64`, dùng `Number::from_f64(f).to_string()` (spelling
+  canonical kiểu Go, đã đo).
+
+Blast radius (tự grep toàn workspace trước khi đổi):
+chỉ `castctl-shared` match/dựng `JsonValue` shared trực
+tiếp. `castctl-telegram` 0 dùng shared `JsonValue`;
+`castctl-cli`/`castctl-gateway` chỉ dùng qua `from_serde`
++ helper `as_*`, không match variant (mọi `JsonValue::`
+khác trong hai crate đó là `castctl-config::JsonValue` /
+`serde_json::Value`). Fixture `event.rs:244`
+(`Float(42.0)`) → `Float("42.0")`, `sessions.rs:212`
+(`Float(1792821457000.0)`) → `Float("1792821457000.0")`
+— cả hai đi qua `as_int64` nên giá trị giữ nguyên.
+
+`as_int64` với literal (giữ đúng semantics Go, đã pin
+bằng test `from_serde_float_as_int64_follows_go`):
+
+| literal | kết quả | vì sao |
+|---|---|---|
+| `"1e3"` | 1000 | parse f64 → truncate |
+| `"1.0"`, `"0.0"`, `"-0.5"` | 1, 0, 0 | truncate về 0 |
+| `"9007199254740993"` | exact | vừa i64 |
+| `"9223372036854775808"`, `"1e100"` | `i64::MIN` | Go `int64(f)`, \|f\| ≥ 2^63 |
+| `"1e999"` | `None` | parse ra +Inf |
+
+Fixture test (TDD: đỏ trước trên code cũ — fixture
+`1.0` render `"size":1`, rồi xanh sau fix):
+`castctl-shared/tests/json_number_literals.rs`,
+`status_numbers_keep_go_literal_spelling` — chạy đường
+thật `from_serde` → `summarize_status` →
+`status_summary_to_json`, assert output text khớp byte
+với Go (chuỗi kỳ vọng viết tay, không tính lại bằng code
+đang test; output Go đầy đủ dán trong comment của test,
+đo bằng probe Go verbatim `decodeJSONValue` + `writeJSON`):
+
+| fixture (server gửi) | Go phát ra | Rust sau fix |
+|---|---|---|
+| `1.0` | `1.0` | `1.0` |
+| `0.0` | `0.0` | `0.0` |
+| `1e3` | `1e3` | `1e3` (discriminator: đường `f64` cho `1000`) |
+| `1.5` | `1.5` | `1.5` |
+| `9007199254740993` | `9007199254740993` | `9007199254740993` |
+| `1.50` | `1.50` | `1.50` |
+| `1E3` | `1E3` | `1E3` |
+| `18446744073709551615` | `18446744073709551615` | `18446744073709551615` |
+
+Live gate sau fix (cue, profile `no.0`, release binary
+md5 `be0614aa…`, Go 0.9.0; mỗi lệnh 1 lần/bên, đều trong
+giới hạn ≤2 lần; stderr cả hai bên đều rỗng, 0 byte):
+
+| lệnh | Go exit | Rust exit | khớp raw? | khác biệt |
+|---|---|---|---|---|
+| status | 0 | 0 | có (1909 B = 1909 B) | — (`"size": 1.0` cả hai, 2 chỗ) |
+| threads | 0 | 0 | có | — |
+| threads --all | 0 | 0 | có | — |
+| history --limit 3 | 0 | 0 | có | — |
+| history --limit 3 --raw | 0 | 0 | có | — |
+| files --limit 3 | 0 | 0 | có | — |
+| feed | 0 | 0 | có | — |
+| feed --raw | 0 | 0 | có | — |
+| feed-status | 0 | 0 | có | — |
+| feed-prompt | 0 | 0 | có | — |
+| goals | 0 | 0 | có | — |
+| ideas | 0 | 0 | có | — |
+| unread | 0 | 0 | có | — |
+| goal goal_62b884f95116 | 0 | 0 | có | — |
+| idea idea_0b270d463ca24cc2b863ffdc79b1ea30 | 0 | 0 | có | — |
+
+**15/15 byte-identical raw; không label nào regress.**
+Ghi chú `status` trong §M4c.8 ("follow-up riêng") nay đã
+lỗi thời — fix này chính là follow-up đó, làm trong cùng
+PR theo lệnh Boss. `status` Go mới vs `status` Go ở gate
+cũ lệch ở `seen_at_ms` (field thời gian, đổi theo giờ
+thực) — trong gate này Go và Rust chạy sát nhau nên thấy
+cùng giá trị, khớp nhau cả field đó. Evidence:
+`/tmp/m4c-a/live/gate2/` (`go-*.out` / `rs-*.out` +
+`*.err` rỗng + `*.exit` đều 0).
+
+Gates (cue, 1.99.1, `CARGO_TARGET_DIR=/tmp/m4c-a/m4c-target`,
+ở head cuối sau fix): `cargo fmt --check` 0; `cargo
+build --workspace` 0; `cargo test --workspace` **567
+passed / 0 failed** (+2 so với 565 ở `2b70a07`: 1
+integration test mới + 1 unit test `as_int64` mới; test
+float cũ đổi tên/kỳ vọng, không đổi số lượng);
+`cargo clippy --workspace --all-targets -- -D warnings`
+0; `cargo build --release -p castctl-rs` 0 (binary md5
+`be0614aa…`). Flake ghi nhận: lần chạy test đầu fail 1
+test `castctl-cli` (`unknown_profile_is_typed_cookies_missing`,
+`create_dir_all` → `AlreadyExists`) — race có sẵn trong
+`temp_home` (`network.rs`: nhiều test song song dùng chung
+đường dẫn theo pid + `remove_dir_all` trong setup), không
+liên quan đến đổi này (diff không chạm `network.rs`); chạy
+lại không đổi code thì 567/0. (Số 469 trong §M4c.8 là
+trước rebase; sau rebase lên `07e1c0d` là 565.)
 
 ## M5a — Telegram bot core (crate `castctl-telegram`, 2026-11-05)
 
