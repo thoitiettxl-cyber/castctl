@@ -9,9 +9,11 @@
 //! state on disk. The lock is held only for a short
 //! read-modify-write window (`DefaultLockTimeout = 5s`):
 //! a lock acquisition that exceeds it is a hard error, not
-//! a wait. The state-only lock (`lock_state_only`) omits
-//! the cookies-file lock, so a corrupted or missing cookies
-//! file can never block a recovery write.
+//! a wait. The state-only lock (`lock_state_only`) takes
+//! the cookies-file lock but does NOT read the cookies
+//! file, so a corrupted or missing cookies file can never
+//! block a recovery write (Go `lockStateOnly`,
+//! `tick.go:422-455`).
 
 use std::time::Duration;
 
@@ -111,17 +113,25 @@ impl Store {
         })
     }
 
-    /// Lock the state only (`store.go:152-205`): no
-    /// cookies-file lock, so a corrupted or missing cookies
-    /// file can never block a recovery write. A missing or
-    /// corrupt state file yields a fresh state with
+    /// Lock the state only (`store.go:152-205`): the
+    /// cookies-file lock IS taken (Go `lockStateOnly`,
+    /// `tick.go:422-455`), but the cookies file is NOT
+    /// read, so a corrupted or missing cookies file can
+    /// never block a recovery write. A missing or corrupt
+    /// state file yields a fresh state with
     /// `state_corrupt = true`.
     pub fn lock_state_only(&self) -> Result<LockedStore<'_>, KeeperError> {
+        let guard = lock_cookies_file(
+            &self.base_dir,
+            &self.profile_name,
+            &self.cookies_path,
+            self.lock_timeout,
+        )?;
         let (state, cookies, jar_form, is_jar, file_missing, raw, state_corrupt) =
             self.read_locked(true)?;
         Ok(LockedStore {
             store: self,
-            _guard: None,
+            _guard: Some(guard),
             state,
             cookies,
             jar_form,
@@ -177,8 +187,21 @@ impl Store {
         // else is corrupt: fail closed (`tick.go:456-493`).
         // An empty file is an empty jar.
         let (cookies, is_jar) = classify_cookies_file(&raw, &self.cookies_path)?;
-        let jar_form = serialize_jar(&cookies);
-        Ok((state, cookies, jar_form?, is_jar, false, raw, state_corrupt))
+        // No serialisation here (F9): Go only serialises
+        // when it is about to write (`tick.go:456-490`), so
+        // a one-line/JSON file whose value holds a tab or
+        // newline locks and reads fine — it only fails if
+        // a write is attempted. `jar_form` stays empty
+        // until `save_jar` fills it.
+        Ok((
+            state,
+            cookies,
+            Vec::new(),
+            is_jar,
+            false,
+            raw,
+            state_corrupt,
+        ))
     }
 }
 
@@ -271,11 +294,16 @@ impl<'a> LockedStore<'a> {
     /// never rewritten (the stop path preserves the jar
     /// byte-identically, K-LIVE-2). The state file is
     /// ALWAYS rewritten when `save_jar` runs — callers
-    /// that only read must not call it.
-    pub fn save_jar(&mut self) -> Result<(), KeeperError> {
+    /// that only read must not call it. Returns whether
+    /// the cookies file was rewritten AND a previous file
+    /// existed (Go `saveJar`'s `changed`: the
+    /// `WriteCookiesFile` backup flag — `false` when the
+    /// file is created for the first time, S-10).
+    pub fn save_jar(&mut self) -> Result<bool, KeeperError> {
         let jar = serialize_jar(&self.cookies)?;
+        let mut wrote = false;
         if jar != self.raw {
-            let _ = write_cookies_file(
+            wrote = write_cookies_file(
                 &self.store.base_dir,
                 &self.store.profile_name,
                 &self.store.cookies_path,
@@ -285,7 +313,8 @@ impl<'a> LockedStore<'a> {
             self.jar_form = jar;
         }
         self.state.cookies_sha256 = sha256_hex(&self.raw);
-        self.save_state()
+        self.save_state()?;
+        Ok(wrote)
     }
 
     /// Persist the state file only (no cookies write).
@@ -403,9 +432,70 @@ mod tests {
         std::fs::create_dir_all(&store.profile_dir).unwrap();
         std::fs::write(store.cookies_path.clone(), b"not a jar\n").unwrap();
         let mut ls = store.lock_state_only().expect("state-only lock");
-        assert!(!ls.has_lock());
+        // F7: the state-only lock DOES hold the
+        // cookies-file lock (Go `lockStateOnly`) — it just
+        // never reads the cookies file.
+        assert!(ls.has_lock());
         ls.state.last_tick_outcome = crate::state::OUTCOME_SKIPPED.to_string();
         ls.save_state().expect("state save works without cookies");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn lock_reads_one_line_file_with_tab_value() {
+        // F9: a one-line/JSON cookies file whose value
+        // holds a tab (JSON-escaped `\t`) locks and reads
+        // fine — serialisation happens only on write, as
+        // in Go (`tick.go:456-490`). The pre-fix
+        // serialize-at-lock failed here: `serialize_jar`
+        // rejects a tab in a value, so even a read-only
+        // tick could not lock the file.
+        let base = tmpbase();
+        let store = Store::new(&base, "default", "", Duration::from_secs(5)).unwrap();
+        std::fs::create_dir_all(&store.profile_dir).unwrap();
+        std::fs::write(
+            store.cookies_path.clone(),
+            b"{\"hatch_sess\": \"a\\tb\", \"other\": \"c\\nd\"}\n",
+        )
+        .unwrap();
+        let mut ls = store.lock().expect("lock reads tab/newline values");
+        assert_eq!(ls.cookies.len(), 2);
+        assert_eq!(ls.cookies[0].value, "a\tb");
+        assert_eq!(ls.cookies[1].value, "c\nd");
+        // The write side still fails closed (the jar
+        // format cannot hold the bytes) — only the lock
+        // is fixed, not the write.
+        assert!(ls.save_jar().is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn save_jar_reports_first_write_as_not_wrote() {
+        // S-10: Go `saveJar` returns the backup flag, so
+        // creating the file for the first time reports
+        // `wrote=false` — even though bytes were written
+        // and the sha covers them.
+        let base = tmpbase();
+        let store = Store::new(&base, "default", "", Duration::from_secs(5)).unwrap();
+        let mut ls = store.lock().expect("lock");
+        assert!(ls.file_missing);
+        ls.cookies.push(StoredCookie {
+            domain: ".muse.ai".to_string(),
+            path: "/".to_string(),
+            secure: true,
+            http_only: false,
+            expires: 1_800_000_000,
+            name: "hatch_sess".to_string(),
+            value: "v".to_string(),
+        });
+        assert!(!ls.save_jar().expect("save"));
+        assert!(!ls.state.cookies_sha256.is_empty());
+        drop(ls);
+        // Second write (file exists): backup exists, so
+        // `wrote=true`.
+        let mut ls2 = store.lock().expect("re-lock");
+        ls2.cookies[0].value = "v2".to_string();
+        assert!(ls2.save_jar().expect("save again"));
         let _ = std::fs::remove_dir_all(&base);
     }
 }

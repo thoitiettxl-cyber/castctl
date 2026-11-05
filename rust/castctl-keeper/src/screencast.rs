@@ -66,11 +66,16 @@ pub fn http_base_from_browser_url(browser_url: &str) -> Result<String, KeeperErr
         url::Url::parse(raw).map_err(|_| KeeperError::Other("invalid browser URL".to_string()))?;
     match u.scheme() {
         "http" | "ws" => {
-            let host = u
-                .host_str()
-                .ok_or_else(|| KeeperError::Other("invalid browser URL".to_string()))?;
-            let port = u.port().map(|p| format!(":{p}")).unwrap_or_default();
-            Ok(format!("http://{host}{port}"))
+            // The host:port exactly as written: the `url`
+            // crate normalizes an IPv6 literal
+            // (`::ffff:127.0.0.1` → `::ffff:7f00:1`)
+            // while Go keeps it as written (F4). The
+            // parsed URL above already validated the
+            // scheme; the loopback check happens in the
+            // discovery callers.
+            let after_scheme = raw.split_once("://").map(|(_, r)| r).unwrap_or(raw);
+            let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+            Ok(format!("http://{authority}"))
         }
         _ => Err(KeeperError::Other(
             "browser URL scheme must be http or ws".to_string(),
@@ -321,17 +326,18 @@ impl ScreencastRunner for LaunchRunner {
 
     fn exporter(&self) -> Result<Box<dyn Exporter>, KeeperError> {
         let dir = browser_profile_dir(&self.base_dir, &self.profile_name)?;
-        let port = crate::launch::debug_port_from_file(&dir)?;
-        // The port-file exporter resolves the debug port
-        // from the DevToolsActivePort file, then discovers
-        // the WebSocket URL via /json/version like any
-        // attach (Go `portFileExporter`).
-        Ok(new_cdp_exporter(&format!("http://127.0.0.1:{port}/")))
+        // The port file is read at `Export()` time, not
+        // here (Go `portFileExporter`, `launch.go:62-104`):
+        // the browser is launched after the runner is
+        // built, so the file does not exist yet.
+        Ok(Box::new(crate::export::PortFileExporter::new(&dir)))
     }
 }
 
 async fn wait_for_debug_port(profile_dir: &str) -> Result<String, KeeperError> {
-    for _ in 0..50 {
+    // 10s total (100 x 100ms): the attach timeout
+    // (`CDP_DIAL_TIMEOUT`), not 5s (R-8).
+    for _ in 0..100 {
         if let Ok(port) = crate::launch::debug_port_from_file(profile_dir) {
             let base = format!("http://127.0.0.1:{port}/");
             if let Ok(url) = discover_websocket_url(&base).await {
@@ -426,7 +432,7 @@ pub async fn serve_screencast(
                     Ok(CdpEvent { method, params, .. }) if method == "Page.screencastFrame" => {
                         let data_b64 = params.get("data").and_then(|v| v.as_str()).unwrap_or("");
                         let data = base64_decode(data_b64);
-                        let frame_session = params.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                        let frame_session = params.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0);
                         let (width, height) = params.get("metadata")
                             .map(|m| (
                                 m.get("deviceWidth").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
@@ -443,6 +449,13 @@ pub async fn serve_screencast(
                         ).await;
                     }
                     Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // A lagged receiver missed frames,
+                        // not the end of the stream: keep
+                        // serving (C-5). Only `Closed`
+                        // ends the session.
+                        continue;
+                    }
                     Err(_) => {
                         break RunnerResult {
                             outcome: LoginOutcome::Failed,
@@ -566,6 +579,17 @@ mod tests {
         );
         assert!(http_base_from_browser_url("wss://127.0.0.1:9226").is_err());
         assert!(http_base_from_browser_url("ftp://127.0.0.1:21").is_err());
+        // F4: an IPv6 literal renders bracketed exactly
+        // once (`http://[::1]:9226`, not `[[::1]]` —
+        // `host_str()` already keeps the brackets).
+        assert_eq!(
+            http_base_from_browser_url("http://[::1]:9226/").unwrap(),
+            "http://[::1]:9226"
+        );
+        assert_eq!(
+            http_base_from_browser_url("ws://[::ffff:127.0.0.1]:9226/x").unwrap(),
+            "http://[::ffff:127.0.0.1]:9226"
+        );
     }
 
     #[test]

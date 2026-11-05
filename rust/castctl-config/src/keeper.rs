@@ -179,66 +179,74 @@ const KEEPER_ENTRY_KEYS: [&str; 23] = [
 // ---------------------------------------------------------------------------
 
 /// Parse a Go `time.ParseDuration` string, returning
-/// nanoseconds (`i64`). Mirrors Go exactly: a possibly
-/// signed sequence of decimal numbers, each with a unit
-/// suffix (`ns`, `us`/`µs`/`μs`, `ms`, `s`, `m`, `h`);
-/// the bare string `"0"` is allowed with no unit. Errors
-/// never echo the input.
+/// nanoseconds (`i64`). Mirrors Go `time/format.go`
+/// (`ParseDuration`, `leadingInt`, `leadingFraction`,
+/// go1.27) exactly, including its overflow shape: the
+/// accumulator is `u64`, the integer part errors when it
+/// would exceed `1<<63`, the fraction is `f64`
+/// (`f * (unit / scale)`, digits past the `u64` limit
+/// are dropped AND stop growing the scale), the sign is
+/// applied last (so `-9223372036854775808ns` is
+/// `i64::MIN`). Errors never echo the input.
 pub fn parse_go_duration(s: &str) -> Result<i64, String> {
-    if s.is_empty() {
-        return Err("time: invalid duration \"\"".to_string());
-    }
-    let b = s.as_bytes();
-    let mut i = 0usize;
+    let mut rest = s;
     let mut neg = false;
-    if b[0] == b'-' || b[0] == b'+' {
-        neg = b[0] == b'-';
-        i = 1;
-        if i == b.len() {
-            return Err("time: invalid duration".to_string());
+    if !rest.is_empty() {
+        let c = rest.as_bytes()[0];
+        if c == b'-' || c == b'+' {
+            neg = c == b'-';
+            rest = &rest[1..];
         }
     }
-    if s == "0" {
+    // Special case: if all that is left is "0", this is
+    // zero — after the sign is stripped, so "-0"/"+0"
+    // are 0 (Go `ParseDuration`).
+    if rest == "0" {
         return Ok(0);
     }
-    let mut total: i128 = 0;
-    while i < b.len() {
-        // Integer part (at least one digit).
-        let start = i;
-        while i < b.len() && b[i].is_ascii_digit() {
-            i += 1;
-        }
-        if i == start {
+    if rest.is_empty() {
+        return Err("time: invalid duration".to_string());
+    }
+    let mut d: u64 = 0;
+    while !rest.is_empty() {
+        let b0 = rest.as_bytes()[0];
+        if !(b0 == b'.' || b0.is_ascii_digit()) {
             return Err("time: invalid duration".to_string());
         }
-        let int_part: i128 = s[start..i]
-            .parse::<i128>()
-            .map_err(|_| "time: invalid duration".to_string())?;
-        // Optional fraction.
-        let mut frac: i128 = 0;
-        let mut frac_scale: i128 = 1;
-        if i < b.len() && b[i] == b'.' {
-            i += 1;
-            let fstart = i;
-            while i < b.len() && b[i].is_ascii_digit() {
-                i += 1;
-            }
-            if i == fstart {
-                return Err("time: invalid duration".to_string());
-            }
-            let frac_str = &s[fstart..i];
-            frac = frac_str
-                .parse::<i128>()
-                .map_err(|_| "time: invalid duration".to_string())?;
-            frac_scale = 10i128.pow(frac_str.len() as u32);
+        let (mut v, rem) = leading_int(rest)?;
+        let pre = rem.len() != rest.len();
+        rest = rem;
+        let mut f: u64 = 0;
+        let mut scale: f64 = 1.0;
+        let mut post = false;
+        if !rest.is_empty() && rest.as_bytes()[0] == b'.' {
+            rest = &rest[1..];
+            let (f0, scale0, rem2) = leading_fraction(rest);
+            f = f0;
+            scale = scale0;
+            post = rem2.len() != rest.len();
+            rest = rem2;
         }
-        // Unit.
-        let ustart = i;
-        while i < b.len() && !b[i].is_ascii_digit() && b[i] != b'.' {
+        if !pre && !post {
+            // No digits (e.g. ".s" or "-.s").
+            return Err("time: invalid duration".to_string());
+        }
+        // Consume unit (up to the next '.' or digit).
+        let mut i = 0usize;
+        let rb = rest.as_bytes();
+        while i < rb.len() {
+            let c = rb[i];
+            if c == b'.' || c.is_ascii_digit() {
+                break;
+            }
             i += 1;
         }
-        let unit = &s[ustart..i];
-        let unit_ns: i128 = match unit {
+        if i == 0 {
+            return Err("time: missing unit in duration".to_string());
+        }
+        let u = &rest[..i];
+        rest = &rest[i..];
+        let unit: u64 = match u {
             "ns" => 1,
             "us" | "µs" | "μs" => 1_000,
             "ms" => 1_000_000,
@@ -247,16 +255,91 @@ pub fn parse_go_duration(s: &str) -> Result<i64, String> {
             "h" => 3_600_000_000_000,
             _ => return Err("time: unknown unit".to_string()),
         };
-        total += int_part * unit_ns + frac * unit_ns / frac_scale;
-        if total > i64::MAX as i128 {
+        if v > (1u64 << 63) / unit {
+            return Err("time: invalid duration".to_string());
+        }
+        v *= unit;
+        if f > 0 {
+            // `f < scale` always (f has at most as many
+            // digits as scale's exponent), so this is
+            // `< unit <= 3.6e12` — safely in `u64` range.
+            v += (f as f64 * (unit as f64 / scale)) as u64;
+            if v > 1u64 << 63 {
+                return Err("time: invalid duration".to_string());
+            }
+        }
+        // Go adds into a `u64` and checks `d > 1<<63`:
+        // the sum can only wrap at exactly `2^64`
+        // (`d == v == 1<<63`), which Go reads back as 0.
+        // `wrapping_add` mirrors that arithmetic.
+        d = d.wrapping_add(v);
+        if d > 1u64 << 63 {
             return Err("time: invalid duration".to_string());
         }
     }
-    let out = if neg { -total } else { total };
-    if out > i64::MAX as i128 || out < i64::MIN as i128 {
+    if neg {
+        // `d == 1<<63` negates to `i64::MIN` (Go
+        // `-Duration(d)`); `wrapping_neg` is exact here.
+        return Ok((d as i64).wrapping_neg());
+    }
+    if d > (1u64 << 63) - 1 {
         return Err("time: invalid duration".to_string());
     }
-    Ok(out as i64)
+    Ok(d as i64)
+}
+
+/// Go `leadingInt`: consume `[0-9]*`, erroring when the
+/// value would exceed `1<<63` (the check is `>` on both
+/// the pre-multiply guard and the result, so exactly
+/// `1<<63` is accepted and rejected later by the unit
+/// / final checks).
+fn leading_int(s: &str) -> Result<(u64, &str), String> {
+    let b = s.as_bytes();
+    let mut i = 0usize;
+    let mut x: u64 = 0;
+    while i < b.len() && b[i].is_ascii_digit() {
+        if x > (1u64 << 63) / 10 {
+            return Err("time: invalid duration".to_string());
+        }
+        x = x * 10 + (b[i] - b'0') as u64;
+        if x > 1u64 << 63 {
+            return Err("time: invalid duration".to_string());
+        }
+        i += 1;
+    }
+    Ok((x, &s[i..]))
+}
+
+/// Go `leadingFraction`: consume `[0-9]*`; on overflow
+/// it stops accumulating precision — the extra digits
+/// are dropped AND the scale stops growing.
+fn leading_fraction(s: &str) -> (u64, f64, &str) {
+    let b = s.as_bytes();
+    let mut i = 0usize;
+    let mut x: u64 = 0;
+    let mut scale: f64 = 1.0;
+    let mut overflow = false;
+    while i < b.len() && b[i].is_ascii_digit() {
+        if overflow {
+            i += 1;
+            continue;
+        }
+        if x > ((1u64 << 63) - 1) / 10 {
+            overflow = true;
+            i += 1;
+            continue;
+        }
+        let y = x * 10 + (b[i] - b'0') as u64;
+        if y > 1u64 << 63 {
+            overflow = true;
+            i += 1;
+            continue;
+        }
+        x = y;
+        scale *= 10.0;
+        i += 1;
+    }
+    (x, scale, &s[i..])
 }
 
 /// Format nanoseconds the way Go `time.Duration.String`
@@ -413,31 +496,56 @@ fn parse_allowed_hosts(v: &JsonValue) -> Result<Vec<String>, ConfigError> {
 /// (`keeper.go:744-782`). It names the rule violated,
 /// never the URL's credentials. Query strings and
 /// fragments are rejected: a CDP debug URL carries
-/// neither.
+/// neither. Mirrors Go's `url.Parse` shape by hand:
+/// scheme is case-insensitive (Go lowercases it);
+/// userinfo is an `@` in the AUTHORITY only (Go
+/// `u.User != nil` — an `@` in the path is accepted);
+/// a `?` rejects even with an empty query (Go
+/// `ForceQuery`); a `#` rejects only with a non-empty
+/// fragment (Go `Fragment != ""`); a non-numeric port
+/// is unparseable (Go `validOptionalPort`), a numeric
+/// port out of 1..=65535 is out of range.
 pub fn validate_keeper_browser_url(raw: &str) -> Result<(), String> {
     let s = go_trim_space(raw);
+    if s.bytes()
+        .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+    {
+        return Err("unparseable URL".to_string());
+    }
     let (scheme, rest) = match s.split_once("://") {
         Some((sc, r)) => (sc, r),
         None => return Err("unparseable URL".to_string()),
     };
-    if scheme != "http" && scheme != "ws" {
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("ws") {
         return Err("scheme must be http or ws".to_string());
     }
-    if rest.contains('@') {
+    let (authority, tail) = match rest.split_once('/') {
+        Some((a, t)) => (a, format!("/{t}")),
+        None => (rest, String::new()),
+    };
+    if authority.contains('@') {
         return Err("must not carry userinfo".to_string());
     }
-    if rest.contains('?') || rest.contains('#') {
+    let (before_frag, frag) = match tail.split_once('#') {
+        Some((b, f)) => (b, Some(f)),
+        None => (tail.as_str(), None),
+    };
+    if let Some(f) = frag
+        && !f.is_empty()
+    {
         return Err("must not carry a query or fragment".to_string());
     }
-    let (hostport, _path) = match rest.split_once('/') {
-        Some((hp, p)) => (hp, p),
-        None => (rest, ""),
-    };
-    if hostport.is_empty() {
+    if before_frag.contains('?') {
+        return Err("must not carry a query or fragment".to_string());
+    }
+    if !valid_percent_escapes(before_frag) {
+        return Err("unparseable URL".to_string());
+    }
+    if authority.is_empty() {
         return Err("missing host".to_string());
     }
     // Split host / port (IPv6 bracketed form supported).
-    let (host, port) = if let Some(h) = hostport.strip_prefix('[') {
+    let (host, port) = if let Some(h) = authority.strip_prefix('[') {
         match h.split_once(']') {
             Some((ip, after)) => {
                 let p = after.strip_prefix(':').unwrap_or("");
@@ -445,16 +553,19 @@ pub fn validate_keeper_browser_url(raw: &str) -> Result<(), String> {
             }
             None => return Err("unparseable URL".to_string()),
         }
-    } else if let Some((h, p)) = hostport.rsplit_once(':') {
+    } else if let Some((h, p)) = authority.rsplit_once(':') {
         (h.to_string(), p.to_string())
     } else {
-        (hostport.to_string(), String::new())
+        (authority.to_string(), String::new())
     };
     if host.is_empty() {
         return Err("missing host".to_string());
     }
     if port.is_empty() {
         return Err("missing port".to_string());
+    }
+    if !port.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("unparseable URL".to_string());
     }
     let port_n: i64 = match port.parse() {
         Ok(n) => n,
@@ -466,7 +577,7 @@ pub fn validate_keeper_browser_url(raw: &str) -> Result<(), String> {
     if is_loopback_ip(&host) {
         return Ok(());
     }
-    if is_ip_literal(&host) {
+    if host.parse::<std::net::IpAddr>().is_ok() {
         return Err("host must be loopback".to_string());
     }
     if host.eq_ignore_ascii_case("localhost") {
@@ -475,30 +586,67 @@ pub fn validate_keeper_browser_url(raw: &str) -> Result<(), String> {
     Err("host must be loopback".to_string())
 }
 
-fn is_ip_literal(host: &str) -> bool {
-    // IPv4 dotted quad, or IPv6 (contains ':').
-    host.contains(':') || {
-        let parts: Vec<&str> = host.split('.').collect();
-        parts.len() == 4
-            && parts
-                .iter()
-                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+/// Go `net.ParseIP(host)` + `ip.IsLoopback()`
+/// (`keeper.go:774-779`): `std::net::IpAddr`'s parser
+/// rejects leading-zero octets and octets > 255
+/// exactly like Go's `parseIPv4`, and the explicit
+/// v4-mapped check covers `::ffff:127.x` (Go
+/// `IsLoopback` is true for it; `std`'s
+/// `Ipv6Addr::is_loopback` is `::1` only). Shared by
+/// the CDP discovery validator (`castctl-keeper`).
+pub fn is_loopback_ip(host: &str) -> bool {
+    let Ok(ip) = host.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback(),
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
     }
 }
 
-fn is_loopback_ip(host: &str) -> bool {
-    if host.contains(':') {
-        // IPv6 loopback is exactly ::1 (Go `ip.IsLoopback`
-        // also accepts ::ffff:127.0.0.1; keep the common
-        // forms).
-        return host == "::1" || host == "0:0:0:0:0:0:0:1";
+/// Every `%` in `s` must start a two-hex-digit escape
+/// (Go `url.Parse` rejects bad escapes).
+fn valid_percent_escapes(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let ok = b.get(i + 1).is_some_and(|c| c.is_ascii_hexdigit())
+                && b.get(i + 2).is_some_and(|c| c.is_ascii_hexdigit());
+            if !ok {
+                return false;
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
     }
-    let parts: Vec<&str> = host.split('.').collect();
-    parts.len() == 4
-        && parts[0] == "127"
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    true
+}
+
+/// Percent-decode a path the way Go's `url.Parse`
+/// fills `u.Path`: `%XX` → byte, `+` stays `+`.
+/// `None` on a bad escape or non-UTF-8 bytes (the
+/// caller falls back to the raw string, like Go
+/// `canonicalBrowser`).
+fn decode_path(path: &str) -> Option<String> {
+    let b = path.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let d1 = (*b.get(i + 1)? as char).to_digit(16)?;
+            let d2 = (*b.get(i + 2)? as char).to_digit(16)?;
+            out.push((d1 * 16 + d2) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// Render the duplicate-browser dedup key for a
@@ -506,7 +654,9 @@ fn is_loopback_ip(host: &str) -> bool {
 /// path (`keeper.go:784-821`). The scheme is NOT part of
 /// the key: `http://` and `ws://` spellings denote the
 /// same DevTools endpoint. `localhost` and `127.0.0.1`
-/// are deliberately NOT merged.
+/// are deliberately NOT merged. Go uses `u.Path` (the
+/// percent-DECODED path) with ONE trailing slash
+/// stripped (`TrimSuffix`).
 pub fn canonical_browser_url(raw: &str) -> Result<String, String> {
     validate_keeper_browser_url(raw)?;
     let s = go_trim_space(raw);
@@ -526,31 +676,32 @@ pub fn canonical_browser_url(raw: &str) -> Result<String, String> {
     } else {
         (hostport.to_lowercase(), String::new())
     };
-    let host = if is_ip_literal(&host) {
-        // Normalise IPv4/IPv6 spelling (Go `ip.String()`):
-        // strip leading zeros in IPv4 octets, expand IPv6
-        // loopback.
+    let host = if host.parse::<std::net::IpAddr>().is_ok() {
+        // Normalise IP spelling (Go `ip.String()`):
+        // v4-mapped `::ffff:127.0.0.1` renders
+        // `127.0.0.1`, expanded `::1` renders `::1`.
         normalize_ip(&host)
     } else {
         host
     };
     let port_n: i64 = port.parse().map_err(|_| "port out of range".to_string())?;
-    let path = path.trim_end_matches('/');
+    // The path ends at the fragment (`#` starts it in
+    // Go; validation already allows only an empty one).
+    let path = path.split('#').next().unwrap_or("");
+    let path = decode_path(path).ok_or_else(|| "unparseable URL".to_string())?;
+    let path = path.strip_suffix('/').unwrap_or(&path);
     Ok(format!("{host}:{port_n}{path}"))
 }
 
 fn normalize_ip(host: &str) -> String {
-    if host.contains(':') {
-        if host == "::1" || host == "0:0:0:0:0:0:0:1" {
-            return "::1".to_string();
-        }
-        return host.to_string();
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4.to_string(),
+        Ok(std::net::IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => v6.to_string(),
+        },
+        Err(_) => host.to_string(),
     }
-    host.split('.')
-        .map(|p| p.trim_start_matches('0'))
-        .map(|p| if p.is_empty() { "0" } else { p })
-        .collect::<Vec<_>>()
-        .join(".")
 }
 
 /// `canonical_browser_url` with a raw-string fallback:
@@ -1093,6 +1244,57 @@ pub fn validate_keeper(
     Ok(())
 }
 
+/// Check a keeper entry's `credentials` reference
+/// against the parsed credentials block: the tag must
+/// exist, and the referenced entry must name the keeper
+/// entry's own profile (a credential for another
+/// profile must never be submitted for this one).
+/// Go `validateCredentialRefs`
+/// (`credentials.go:303-332`), called from the
+/// `ParseSingleConfig` tail (after `validateKeeper` +
+/// `validateCredentials`, `config.go:451`) and from
+/// `ResolveKeeper` (`keeper.go:870`). A nil
+/// credentials block with a reference present is a
+/// dangling reference. Messages name tags/profiles
+/// only, never values.
+pub fn validate_credential_refs(
+    keeper: Option<&KeeperConfig>,
+    credentials: Option<&crate::blocks::CredentialsBlock>,
+) -> Result<(), ConfigError> {
+    let Some(k) = keeper else {
+        return Ok(());
+    };
+    for e in &k.entries {
+        if e.credentials.is_empty() {
+            continue;
+        }
+        let Some(block) = credentials else {
+            return Err(crate::config_errorf!(
+                "keeper: entry {} references credentials {}, but no \"credentials\" block exists",
+                go_quote(&e.tag),
+                go_quote(&e.credentials)
+            ));
+        };
+        let Some(cred) = block.entries.iter().find(|c| c.tag == e.credentials) else {
+            return Err(crate::config_errorf!(
+                "keeper: entry {} references credentials {}, which does not exist",
+                go_quote(&e.tag),
+                go_quote(&e.credentials)
+            ));
+        };
+        if cred.profile != e.profile {
+            return Err(crate::config_errorf!(
+                "keeper: entry {} references credentials {} for profile {}, not {}",
+                go_quote(&e.tag),
+                go_quote(&e.credentials),
+                go_quote(&cred.profile),
+                go_quote(&e.profile)
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Return the keeper entry for a profile name, or `None`
 /// when no entry names it (`keeper.go:887-897`).
 pub fn keeper_entry_for_profile<'a>(
@@ -1466,8 +1668,46 @@ mod tests {
         assert!(parse_go_duration("").is_err());
         assert!(parse_go_duration("5").is_err());
         assert!(parse_go_duration("5x").is_err());
-        assert!(parse_go_duration("9223372036854775807ns").is_ok());
+        assert_eq!(
+            parse_go_duration("9223372036854775807ns").unwrap(),
+            i64::MAX
+        );
         assert!(parse_go_duration("9223372036854775808ns").is_err());
+    }
+
+    #[test]
+    fn go_duration_go_parity_pins() {
+        // K-2: Go `time.ParseDuration` accepts all of
+        // these; the pre-fix parser rejected them.
+        assert_eq!(parse_go_duration(".5s").unwrap(), 500_000_000);
+        assert_eq!(parse_go_duration("1.s").unwrap(), 1_000_000_000);
+        assert_eq!(parse_go_duration("-0").unwrap(), 0);
+        assert_eq!(parse_go_duration("+0").unwrap(), 0);
+        assert_eq!(
+            parse_go_duration("-9223372036854775808ns").unwrap(),
+            i64::MIN
+        );
+        // Fraction of only zeros: Go's `leadingFraction`
+        // never overflows on zeros, so this is 1s (the
+        // pre-fix `10i128.pow(45)` panicked/wrapped).
+        assert_eq!(
+            parse_go_duration("1.000000000000000000000000000000000000000000000s").unwrap(),
+            1_000_000_000
+        );
+        // Integer part past 2^63: Go errors.
+        assert!(parse_go_duration("100000000000000000000000000000000000000h").is_err());
+        // u64 wrap quirk, probed against Go 1.27 on cue:
+        // two 2^63ns parts wrap the u64 accumulator to 0
+        // with NO error (Go `ParseDuration` adds into a
+        // `uint64` and only checks `d > 1<<63` after each
+        // part — the second add wraps exactly to 0).
+        assert_eq!(
+            parse_go_duration("9223372036854775808ns9223372036854775808ns").unwrap(),
+            0
+        );
+        assert!(parse_go_duration(".s").is_err());
+        assert!(parse_go_duration("-").is_err());
+        assert!(parse_go_duration("1").is_err());
     }
 
     #[test]
@@ -1530,6 +1770,70 @@ mod tests {
         assert_ne!(
             canonical_browser_url("http://localhost:9222").unwrap(),
             canonical_browser_url("http://127.0.0.1:9222").unwrap()
+        );
+    }
+
+    #[test]
+    fn browser_url_go_parity_pins() {
+        // K-3: Go `net.ParseIP` rejects leading-zero
+        // octets and octets > 255; `std::net::IpAddr`
+        // does the same.
+        assert!(validate_keeper_browser_url("http://127.0.0.01:9222").is_err());
+        assert!(validate_keeper_browser_url("http://127.0.0.256:9222").is_err());
+        assert!(validate_keeper_browser_url("http://127.0.0.999:9222").is_err());
+        // K-3: IPv4-mapped loopback is loopback in Go
+        // (`ip.IsLoopback`).
+        assert!(validate_keeper_browser_url("http://[::ffff:127.0.0.1]:9222").is_ok());
+        assert!(validate_keeper_browser_url("http://[::1]:9222").is_ok());
+        assert!(validate_keeper_browser_url("http://[0:0:0:0:0:0:0:1]:9222").is_ok());
+        assert!(validate_keeper_browser_url("http://[::ffff:192.168.0.1]:9222").is_err());
+        // K-3: an '@' in the PATH is not userinfo (Go
+        // `u.User == nil`); an '@' in the authority is.
+        assert!(validate_keeper_browser_url("http://127.0.0.1:9222/@x").is_ok());
+        assert!(validate_keeper_browser_url("http://user@127.0.0.1:9222/").is_err());
+        // Scheme is case-insensitive (Go lowercases it).
+        assert!(validate_keeper_browser_url("HTTP://127.0.0.1:9222").is_ok());
+        assert!(validate_keeper_browser_url("WS://localhost:9222").is_ok());
+        // A bare '?' rejects (Go `ForceQuery`); a bare
+        // '#' does not (Go `Fragment == ""`).
+        assert!(validate_keeper_browser_url("http://127.0.0.1:9222/?").is_err());
+        assert!(validate_keeper_browser_url("http://127.0.0.1:9222/#").is_ok());
+        assert!(validate_keeper_browser_url("http://127.0.0.1:9222/#x").is_err());
+        // Bad percent-escape in the path: Go `url.Parse`
+        // rejects it.
+        assert!(validate_keeper_browser_url("http://127.0.0.1:9222/%zz").is_err());
+        // Non-numeric port: Go `validOptionalPort`
+        // rejects it at parse time.
+        assert!(validate_keeper_browser_url("http://127.0.0.1:abc").is_err());
+        assert!(validate_keeper_browser_url("http://127.0.0.1:0").is_err());
+        assert!(validate_keeper_browser_url("http://127.0.0.1:65536").is_err());
+        assert!(validate_keeper_browser_url("http://127.0.0.1:65535").is_ok());
+        // A "127.0.0.1.evil.com" suffix host is not
+        // loopback (Go `ParseIP` returns nil, not
+        // `localhost`).
+        assert!(validate_keeper_browser_url("http://127.0.0.1.evil.com:9222").is_err());
+        // K-4: canonical strips ONE trailing slash and
+        // uses the percent-decoded path (Go `u.Path` +
+        // `TrimSuffix`).
+        assert_eq!(
+            canonical_browser_url("http://127.0.0.1:9222//").unwrap(),
+            "127.0.0.1:9222/"
+        );
+        assert_eq!(
+            canonical_browser_url("http://127.0.0.1:9222/a//").unwrap(),
+            "127.0.0.1:9222/a/"
+        );
+        assert_eq!(
+            canonical_browser_url("http://127.0.0.1:9222/a%2Fb").unwrap(),
+            "127.0.0.1:9222/a/b"
+        );
+        assert_eq!(
+            canonical_browser_url("http://[::ffff:127.0.0.1]:9222").unwrap(),
+            "127.0.0.1:9222"
+        );
+        assert_eq!(
+            canonical_browser_url("http://[0:0:0:0:0:0:0:1]:9222").unwrap(),
+            "::1:9222"
         );
     }
 

@@ -281,7 +281,7 @@ pub fn snapshot_script(
         .map(|b| BlockerArg {
             selector: b.selector.clone(),
             keyword: b.keyword.clone(),
-            kind: b.kind.as_str().to_string(),
+            kind: b.kind.clone(),
         })
         .collect();
     let blk_json = serde_json::to_string(&args)
@@ -366,20 +366,6 @@ async fn snapshot_match(
     snapshot_decision(contract, &res).map_err(SnapshotMatchError::Decision)
 }
 
-/// Whether a snapshot error is a named blocker signal (as
-/// opposed to a plain `contract_mismatch`): only a named
-/// blocker signal stops a wait loop immediately; a
-/// mismatch polls to the deadline
-/// (`contract.go:isBlockerSignal`).
-fn is_blocker_signal(err: &SnapshotMatchError) -> bool {
-    match err {
-        SnapshotMatchError::Decision(SnapshotDecisionError::Blocker(b)) => {
-            b.detail != "contract_mismatch"
-        }
-        _ => false,
-    }
-}
-
 /// Whether one read level's cookie set passes the same
 /// pre-write gate the tick applies to CDP exports
 /// (`relogin_chromedp.go:usableSession`): convert with
@@ -433,6 +419,11 @@ pub struct RealReloginDriver {
 struct BrowserContext {
     client: CdpClient,
     session: CdpSession,
+    /// The fresh target this context created
+    /// (`Target.createTarget`): teardown closes it
+    /// (chromedp's default cancel closes the tab; only
+    /// the exporter opts out with `WithDetachOnCancel`).
+    target_id: String,
     launched: Option<LaunchedChrome>,
     created_dir: Option<String>,
     inbound_cleanup: Option<Box<dyn FnOnce() + Send + Sync>>,
@@ -506,6 +497,7 @@ impl RealReloginDriver {
         Ok(BrowserContext {
             client,
             session,
+            target_id,
             launched: None,
             created_dir: None,
             inbound_cleanup: None,
@@ -558,9 +550,10 @@ impl RealReloginDriver {
                 })?;
         // Discover the debug port from the
         // DevToolsActivePort file (Chrome writes it once
-        // the debug listener is up); poll briefly.
+        // the debug listener is up); poll briefly (10s
+        // total, the attach timeout — R-8).
         let mut ws_url: Option<String> = None;
-        for _ in 0..50 {
+        for _ in 0..100 {
             if let Ok(port) = crate::launch::debug_port_from_file(&dir) {
                 let base = format!("http://127.0.0.1:{port}/");
                 if let Ok(url) = discover_websocket_url(&base).await {
@@ -605,6 +598,7 @@ impl RealReloginDriver {
         Ok(BrowserContext {
             client,
             session,
+            target_id,
             launched: Some(launched),
             created_dir: if created { Some(dir) } else { None },
             inbound_cleanup: cleanup,
@@ -618,6 +612,13 @@ impl RealReloginDriver {
     /// retry).
     async fn teardown(&self, mut ctx: BrowserContext, failed: bool) {
         let _ = ctx.session.detach().await;
+        // Chromedp's default cancel detaches THEN closes
+        // the target (`chromedp.go:676-693`, `:269-280`);
+        // only the exporter opts out with
+        // `WithDetachOnCancel`. Best effort: the browser
+        // may already be gone (and on the launch path the
+        // kill below destroys the tab anyway).
+        let _ = ctx.client.close_target(&ctx.target_id).await;
         if let Some(launched) = ctx.launched.take() {
             let _ = tokio::time::timeout(self.opts.timeouts.cancel_timeout, launched.kill()).await;
         }
@@ -655,14 +656,19 @@ impl RealReloginDriver {
             match snapshot_match(session, contract).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    if is_blocker_signal(&e)
-                        && let SnapshotMatchError::Decision(SnapshotDecisionError::Blocker(b)) = e
-                    {
-                        return Err(ReloginError::Blocker(b));
-                    }
+                    // Only a NAMED blocker signal stops
+                    // immediately (Go `isBlockerSignal`,
+                    // `contract.go:147-170` — the Go set
+                    // `blocker_signal|blocker_selector|
+                    // blocker_keyword|contract_bad_selector`);
+                    // a `contract_mismatch` polls to the
+                    // deadline like any transient state.
                     match e {
                         SnapshotMatchError::Decision(SnapshotDecisionError::Blocker(b)) => {
-                            last_mismatch = Some(b)
+                            if crate::contract::is_blocker_signal(&b) {
+                                return Err(ReloginError::Blocker(b));
+                            }
+                            last_mismatch = Some(b);
                         }
                         SnapshotMatchError::Decision(SnapshotDecisionError::NotEstablished) => {
                             last_err = Some(ReloginError::Other(
@@ -711,9 +717,9 @@ impl RealReloginDriver {
             // timeout. A `contract_mismatch` AFTER submit is
             // NOT a blocker: the page navigated away from
             // the form (likely a successful login).
-            if let Err(e) = snapshot_match(&ctx.session, contract).await
-                && is_blocker_signal(&e)
-                && let SnapshotMatchError::Decision(SnapshotDecisionError::Blocker(b)) = e
+            if let Err(SnapshotMatchError::Decision(SnapshotDecisionError::Blocker(b))) =
+                snapshot_match(&ctx.session, contract).await
+                && crate::contract::is_blocker_signal(&b)
             {
                 return Err(ReloginError::Blocker(b));
             }
@@ -1222,7 +1228,7 @@ mod tests {
         let blockers = vec![LoginBlockerSignal {
             selector: ".captcha".to_string(),
             keyword: "captcha".to_string(),
-            kind: NoticeKind::Captcha,
+            kind: "captcha".to_string(),
         }];
         let script = snapshot_script(&selectors, &blockers).unwrap();
         assert!(script.contains("document.querySelectorAll"));

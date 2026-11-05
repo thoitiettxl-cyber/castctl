@@ -353,7 +353,8 @@ pub async fn tick(deps: &TickDeps, cancel: &CancelFlag) -> TickResult {
     }
     if ls.state.keeper_stopped {
         let pending = ls.state.warn_pending;
-        let kind = NoticeKind::parse_kind(&ls.state.warn_kind).unwrap_or(NoticeKind::LoggedOut);
+        let raw_kind = ls.state.warn_kind.clone();
+        let kind = NoticeKind::parse_kind(&raw_kind).unwrap_or(NoticeKind::LoggedOut);
         let last = ls.state.last_tick_outcome.clone();
         drop(ls);
         if pending
@@ -364,7 +365,7 @@ pub async fn tick(deps: &TickDeps, cancel: &CancelFlag) -> TickResult {
                 .is_ok()
             && let Ok(mut ls2) = store.lock()
         {
-            ls2.state.mark_warn_sent(kind, clock.now());
+            ls2.state.mark_warn_sent_raw(&raw_kind, clock.now());
             let _ = save_tick_state(&store, &mut ls2, &deps.before_state_save);
         }
         // The outcome is the last recorded outcome (the
@@ -709,10 +710,9 @@ pub async fn tick(deps: &TickDeps, cancel: &CancelFlag) -> TickResult {
             // `save_jar` serialises `ls.cookies`: point it
             // at the merged set first.
             ls.cookies = merged.clone();
-            let before = ls.raw.clone();
             match ls.save_jar() {
-                Ok(()) => {
-                    wrote = ls.raw != before;
+                Ok(w) => {
+                    wrote = w;
                     written = data;
                 }
                 Err(e) => return fail_save_result("save", e, false, base, corrupt_seen),
@@ -727,10 +727,9 @@ pub async fn tick(deps: &TickDeps, cancel: &CancelFlag) -> TickResult {
         };
         if should_write {
             ls.cookies = merged.clone();
-            let before = ls.raw.clone();
             match ls.save_jar() {
-                Ok(()) => {
-                    wrote = ls.raw != before;
+                Ok(w) => {
+                    wrote = w;
                     written = data;
                 }
                 Err(e) => return fail_save_result("save", e, false, base, corrupt_seen),
@@ -749,12 +748,13 @@ pub async fn tick(deps: &TickDeps, cancel: &CancelFlag) -> TickResult {
                 && should_write
             {
                 ls.cookies = merged.clone();
-                let before = ls.raw.clone();
-                if let Err(e) = ls.save_jar() {
-                    return fail_save_result("save", e, false, base, corrupt_seen);
+                match ls.save_jar() {
+                    Ok(w) => {
+                        wrote = w;
+                        written = data;
+                    }
+                    Err(e) => return fail_save_result("save", e, false, base, corrupt_seen),
                 }
-                wrote = ls.raw != before;
-                written = data;
             }
             // A serialisation failure degrades to no-write:
             // the file keeps its form, the state still
@@ -916,9 +916,8 @@ async fn record_gateway_down(
             && let Ok(_data) = serialize_jar(&merged)
         {
             ls.cookies = merged.clone();
-            let before = ls.raw.clone();
             match ls.save_jar() {
-                Ok(()) => wrote = ls.raw != before,
+                Ok(w) => wrote = w,
                 Err(serr) => {
                     return TickResult {
                         outcome: OUTCOME_ERROR.to_string(),
@@ -1050,6 +1049,13 @@ async fn record_transient(
     before: &Option<Arc<dyn Fn() + Send + Sync>>,
     corrupt_seen: bool,
 ) -> TickResult {
+    // Go `recordTransient` (`tick.go:1099-1123`) has no
+    // accumulated flag: a lock failure returns NO
+    // `StateCorrupt` (false), and success returns only
+    // the NEW lock's `ls.stateCorrupt` — the caller's
+    // `corrupt_seen` is ignored (S-7). The parameter
+    // stays for call-site symmetry.
+    let _ = corrupt_seen;
     let mut ls = match store.lock() {
         Ok(ls) => ls,
         Err(e) => {
@@ -1066,7 +1072,7 @@ async fn record_transient(
                     cookies_seen: 0,
                     skipped: 0,
                     next_delay: base,
-                    state_corrupt: corrupt_seen,
+                    state_corrupt: false,
                     error: Some(KeeperError::Other(err.to_string())),
                 };
             }
@@ -1082,12 +1088,12 @@ async fn record_transient(
                 cookies_seen: 0,
                 skipped: 0,
                 next_delay: base,
-                state_corrupt: corrupt_seen,
+                state_corrupt: false,
                 error: Some(KeeperError::Other(format!("{e}; {err}"))),
             };
         }
     };
-    let state_corrupt = ls.state_corrupt || corrupt_seen;
+    let state_corrupt = ls.state_corrupt;
     let now2 = clock.now();
     let st = &mut ls.state;
     st.last_checked_at = Some(now2);
@@ -1353,7 +1359,8 @@ pub async fn notify_stopped(deps: &TickDeps, cancel: &CancelFlag) {
         return;
     };
     let pending = ls.state.warn_pending;
-    let kind = NoticeKind::parse_kind(&ls.state.warn_kind).unwrap_or(NoticeKind::LoggedOut);
+    let raw_kind = ls.state.warn_kind.clone();
+    let kind = NoticeKind::parse_kind(&raw_kind).unwrap_or(NoticeKind::LoggedOut);
     drop(ls);
     if !pending {
         return;
@@ -1366,7 +1373,7 @@ pub async fn notify_stopped(deps: &TickDeps, cancel: &CancelFlag) {
         return;
     }
     if let Ok(mut ls2) = store.lock() {
-        ls2.state.mark_warn_sent(kind, deps.clock.now());
+        ls2.state.mark_warn_sent_raw(&raw_kind, deps.clock.now());
         let _ = save_tick_state(&store, &mut ls2, &deps.before_state_save);
     }
 }

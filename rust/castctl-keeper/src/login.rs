@@ -280,6 +280,11 @@ impl LoginSession {
         let mut hint_sent = false;
         let mut poll = tokio::time::interval(poll_interval);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // `tokio::time::interval` ticks immediately; Go
+        // (`login.go:140-238`) uses `clock.After(pollInterval)`,
+        // so the first hint arrives after one interval (R-4).
+        // Consume the immediate tick before the loop.
+        poll.tick().await;
         let deadline = tokio::time::sleep(timeout);
         tokio::pin!(deadline);
         let outcome = loop {
@@ -541,25 +546,25 @@ impl LoginSession {
                 out.push(b'\n');
             }
         }
-        let tmp_name = format!(
-            ".login-audit-{}.tmp",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
+        // Temp name carries pid + counter + nanos (S-5);
+        // mode 0600 from the moment of creation (S-1).
+        let tmp_name = format!(".login-audit-{}.tmp", crate::lockfile::temp_suffix());
         let tmp_path = std::path::Path::new(&store.profile_dir).join(tmp_name);
         {
             use std::io::Write;
-            use std::os::unix::fs::PermissionsExt;
-            let Ok(mut tmp) = std::fs::File::create(&tmp_path) else {
+            use std::os::unix::fs::OpenOptionsExt;
+            let Ok(mut tmp) = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp_path)
+            else {
                 return;
             };
             if tmp.write_all(&out).is_err() {
                 let _ = std::fs::remove_file(&tmp_path);
                 return;
             }
-            let _ = tmp.set_permissions(std::fs::Permissions::from_mode(0o600));
         }
         let _ = std::fs::rename(&tmp_path, &path);
     }
@@ -588,7 +593,7 @@ pub fn save_login_cookies(
     }
     let data = serialize_jar(&merged)?;
     ls.cookies = merged.clone();
-    ls.save_jar()?;
+    let _ = ls.save_jar()?;
     let st = &mut ls.state;
     st.logged_out = false;
     st.keeper_stopped = false;

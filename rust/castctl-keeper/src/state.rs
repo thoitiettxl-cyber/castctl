@@ -20,15 +20,17 @@
 //!
 //! [DEVIATION] Go's `json.MarshalIndent` escapes `<`, `>`
 //! and `&` in strings (`\u003c` etc.); `serde_json` does
-//! not. Profile and cookie names are charset-validated at
-//! parse time and cannot contain them, so no byte differs
-//! in practice; the deviation is recorded, not worked
-//! around.
+//! not. `setcookie.rs` `is_token_char` INCLUDES `b'&'`,
+//! and `jar.rs` does not limit name charset, so a state
+//! file CAN differ byte-for-byte from Go's; the difference
+//! is byte-only (both parsers read the same values), so
+//! the state is semantically identical when loaded. The
+//! deviation is recorded, not worked around.
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -37,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 use crate::error::KeeperError;
-use crate::jar::{StoredCookie, driving_cookie, earliest_expiry};
+use crate::jar::{StoredCookie, driving_cookie, earliest_expiry, epoch_to_datetime};
 use crate::notify::NoticeKind;
 
 /// Frozen schema version (`state.go:38`).
@@ -78,6 +80,19 @@ pub const OUTCOME_ERROR: &str = "error";
 /// `skip_serializing_if` helper for `omitempty` bools.
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// `serde(default)` only fills a MISSING field; an
+/// explicit `null` still fails. Go decodes `null` into a
+/// nil map, which reads as empty (S-6).
+fn null_as_empty_map<'de, D, K, V>(de: D) -> Result<BTreeMap<K, V>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    K: serde::Deserialize<'de> + Ord,
+    V: serde::Deserialize<'de>,
+{
+    let opt = Option::<BTreeMap<K, V>>::deserialize(de)?;
+    Ok(opt.unwrap_or_default())
 }
 
 /// RFC 3339 serde for `DateTime<Utc>` / `Option<DateTime<Utc>>`
@@ -199,7 +214,11 @@ pub struct SessionState {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last_tick_stage: String,
     /// Per-cookie observed records, keyed by name.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_empty_map",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub cookies: BTreeMap<String, CookieState>,
     /// Earliest expiry in the set.
     #[serde(
@@ -274,7 +293,11 @@ pub struct SessionState {
     pub warned_at: Option<DateTime<Utc>>,
     /// Per-(incident, kind) dedup record: the
     /// episode-scoped authority.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_empty_map",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub warned_kinds: BTreeMap<String, WarnedKind>,
 }
 
@@ -352,8 +375,24 @@ impl SessionState {
     /// sync. Other kinds' entries are untouched
     /// (`state.go:205-217`).
     pub fn mark_warn_sent(&mut self, kind: NoticeKind, now: DateTime<Utc>) {
+        self.mark_warn_sent_raw(kind.as_str(), now);
+    }
+
+    /// `mark_warn_sent` for a RAW kind string from state:
+    /// Go `NotifyStopped` (`tick.go`) passes
+    /// `NoticeKind(ls.state.WarnKind)` — the raw string —
+    /// into the dedup bookkeeping, and `NoticeKind` is a
+    /// string type there, so an unknown kind stays
+    /// unknown in state. Rust's `NoticeKind` is a closed
+    /// enum and cannot carry it, so the notifier is still
+    /// called with the parsed kind (unknown kinds map to
+    /// `LoggedOut`, whose notice text Go renders for any
+    /// unknown kind via its `NoticeText` default branch),
+    /// but the stored `warn_kind` is NOT rewritten to
+    /// `"logged_out"` (S-8).
+    pub fn mark_warn_sent_raw(&mut self, raw: &str, now: DateTime<Utc>) {
         self.warned_kinds.insert(
-            kind.as_str().to_string(),
+            raw.to_string(),
             WarnedKind {
                 sent: true,
                 at: Some(now),
@@ -361,7 +400,7 @@ impl SessionState {
         );
         self.warn_pending = false;
         self.warn_sent = true;
-        self.warn_kind = kind.as_str().to_string();
+        self.warn_kind = raw.to_string();
         self.warned_at = Some(now);
     }
 
@@ -387,11 +426,7 @@ impl SessionState {
                 expires_at: if c.is_session() {
                     None
                 } else {
-                    Some(
-                        chrono::TimeZone::timestamp_opt(&Utc, c.expires, 0)
-                            .single()
-                            .expect("valid epoch"),
-                    )
+                    Some(epoch_to_datetime(c.expires))
                 },
                 session: c.is_session(),
                 last_seen: now,
@@ -457,23 +492,19 @@ pub fn save_state(profile_dir: &str, st: &SessionState) -> Result<(), KeeperErro
     let path = state_path(profile_dir);
     let dir = Path::new(profile_dir);
     // Temp file in the same directory (unique name; Go uses
-    // os.CreateTemp with ".session-state-*.tmp").
-    let tmp_name = format!(
-        ".session-state-{}.tmp",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
+    // os.CreateTemp with ".session-state-*.tmp"). Mode 0600
+    // from the moment of creation (S-1); the name carries
+    // pid + counter + nanos (S-5).
+    let tmp_name = format!(".session-state-{}.tmp", crate::lockfile::temp_suffix());
     let tmp_path = dir.join(tmp_name);
     {
         let mut tmp = OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .open(&tmp_path)?;
         tmp.write_all(data.as_bytes())?;
         tmp.sync_all()?;
-        tmp.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         // `File::sync_all` + close before rename (Go syncs
         // before rename so a crash cannot leave a torn file).
     }
@@ -502,6 +533,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use std::os::unix::fs::PermissionsExt;
 
     fn tmpdir() -> PathBuf {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -567,6 +599,37 @@ mod tests {
         let err = load_state(dir.to_str().unwrap()).unwrap_err();
         assert!(err.to_string().contains("version 2 is not supported"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_null_maps_are_empty() {
+        // S-6: Go decodes `"cookies": null` into a nil
+        // map, which reads as empty; serde `default`
+        // alone fails on an explicit null.
+        let dir = tmpdir();
+        std::fs::write(
+            state_path(dir.to_str().unwrap()),
+            b"{\"version\": 1, \"cookies\": null, \"warned_kinds\": null}",
+        )
+        .unwrap();
+        let st = load_state(dir.to_str().unwrap()).expect("null maps load as empty");
+        assert!(st.cookies.is_empty());
+        assert!(st.warned_kinds.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mark_warn_sent_raw_keeps_unknown_kind() {
+        // S-8: a hand-edited state with an unknown kind
+        // keeps the raw kind in bookkeeping instead of
+        // being rewritten to "logged_out".
+        let now = Utc.with_ymd_and_hms(2026, 11, 5, 0, 0, 0).unwrap();
+        let mut st = SessionState::new();
+        st.mark_warn_sent_raw("bogus_kind", now);
+        assert_eq!(st.warn_kind, "bogus_kind");
+        assert!(st.warn_sent);
+        assert!(!st.warn_pending);
+        assert!(st.warned_kinds.contains_key("bogus_kind"));
     }
 
     #[test]

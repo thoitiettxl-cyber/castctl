@@ -148,13 +148,24 @@ fn validate_stored_cookie(c: &StoredCookie) -> Result<(), KeeperError> {
 /// number only — never the row contents. Duplicate keys:
 /// last row wins.
 pub fn parse_jar(data: &[u8]) -> Result<Vec<StoredCookie>, KeeperError> {
-    let text = String::from_utf8_lossy(data);
     let mut out: Vec<StoredCookie> = Vec::new();
-    for (i, raw_line) in text.split('\n').enumerate() {
-        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
-        if line.is_empty() || line.starts_with('#') {
+    for (i, raw_line) in data.split(|b| *b == b'\n').enumerate() {
+        let raw_line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+        if raw_line.is_empty() || raw_line.first() == Some(&b'#') {
+            // Comments (including `#HttpOnly_` rows) are
+            // dropped before any decoding, as in Go — a
+            // stray non-UTF-8 byte in a comment is skipped,
+            // not an error.
             continue;
         }
+        // Go `string(data)` keeps arbitrary bytes, but a
+        // Rust `StoredCookie` is UTF-8: a data row that is
+        // not valid UTF-8 fails closed with its line
+        // number, instead of lossy-converting the bytes
+        // to U+FFFD and silently corrupting the value on
+        // the next serialise (J-2).
+        let line = std::str::from_utf8(raw_line)
+            .map_err(|_| KeeperError::JarParse(format!("jar line {}: invalid UTF-8", i + 1)))?;
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() != 7 {
             return Err(KeeperError::JarParse(format!(
@@ -410,6 +421,31 @@ pub fn replace_with_export(
     (kept, dropped)
 }
 
+/// Convert an epoch expiry to a `DateTime<Utc>` the way
+/// Go `time.Unix(sec, 0)` would: Go never panics on
+/// out-of-range seconds, but chrono's range is ±262,143
+/// years, so values outside it saturate to `MAX_UTC` /
+/// `MIN_UTC`. Ordering is preserved (a far-future expiry
+/// still sorts after every in-range one), and the
+/// expired/not-expired decision at any realistic `now`
+/// is unchanged: a far-future cookie is NOT treated as
+/// expired, a far-past one IS — exactly as Go decides.
+/// (F1: the previous `.expect("valid epoch")` panicked
+/// on a jar row with `expires=10^14` or `i64::MAX`,
+/// which `parse_jar` accepts.)
+pub fn epoch_to_datetime(expires: i64) -> DateTime<Utc> {
+    match Utc.timestamp_opt(expires, 0) {
+        chrono::LocalResult::Single(dt) => dt,
+        _ => {
+            if expires > 0 {
+                DateTime::<Utc>::MAX_UTC
+            } else {
+                DateTime::<Utc>::MIN_UTC
+            }
+        }
+    }
+}
+
 /// Earliest non-session expiry in the set, or `None` when
 /// the set has no dated cookie (`jar.go:442-455`). Past
 /// expiries count.
@@ -417,11 +453,7 @@ pub fn earliest_expiry(cookies: &[StoredCookie]) -> Option<DateTime<Utc>> {
     cookies
         .iter()
         .filter(|c| !c.is_session())
-        .map(|c| {
-            Utc.timestamp_opt(c.expires, 0)
-                .single()
-                .expect("valid epoch")
-        })
+        .map(|c| epoch_to_datetime(c.expires))
         .min()
 }
 
@@ -443,14 +475,7 @@ pub fn earliest_filtered_expiry(cookies: &[StoredCookie]) -> Option<DateTime<Utc
 pub fn driving_cookie(cookies: &[StoredCookie]) -> (String, Option<DateTime<Utc>>) {
     for c in cookies {
         if c.name == "hatch_sess" && !c.is_session() {
-            return (
-                c.name.clone(),
-                Some(
-                    Utc.timestamp_opt(c.expires, 0)
-                        .single()
-                        .expect("valid epoch"),
-                ),
-            );
+            return (c.name.clone(), Some(epoch_to_datetime(c.expires)));
         }
     }
     let earliest = earliest_expiry(cookies);
@@ -458,13 +483,7 @@ pub fn driving_cookie(cookies: &[StoredCookie]) -> (String, Option<DateTime<Utc>
         return (String::new(), None);
     };
     for c in cookies {
-        if !c.is_session()
-            && Utc
-                .timestamp_opt(c.expires, 0)
-                .single()
-                .expect("valid epoch")
-                == earliest
-        {
+        if !c.is_session() && epoch_to_datetime(c.expires) == earliest {
             return (c.name.clone(), Some(earliest));
         }
     }
@@ -477,13 +496,7 @@ pub fn driving_cookie(cookies: &[StoredCookie]) -> (String, Option<DateTime<Utc>
 pub fn cookie_header(cookies: &[StoredCookie], now: DateTime<Utc>) -> String {
     let mut parts: Vec<String> = Vec::new();
     for c in cookies {
-        if !c.is_session()
-            && !Utc
-                .timestamp_opt(c.expires, 0)
-                .single()
-                .expect("valid epoch")
-                .gt(&now)
-        {
+        if !c.is_session() && !epoch_to_datetime(c.expires).gt(&now) {
             continue;
         }
         parts.push(format!("{}={}", c.name, c.value));
@@ -812,6 +825,61 @@ mod tests {
         assert!(parse_jar(bad_exp.as_bytes()).is_err());
         let bad_flag = "muse.ai\tFALSE\t/\tMAYBE\t0\tx\ty\n";
         assert!(parse_jar(bad_flag.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn non_utf8_jar_row_fails_closed() {
+        // J-2: a non-UTF-8 byte in a data row fails
+        // closed with the line number (never lossy U+FFFD
+        // corruption); the same byte in a comment line is
+        // skipped, as in Go.
+        let mut bad = b"# Netscape HTTP Cookie File\n.muse.ai\tTRUE\t/\tFALSE\t1790000000\thatch_sess\tv-\xff\n"
+            .to_vec();
+        let err = parse_jar(&bad).unwrap_err();
+        assert!(
+            err.to_string().contains("jar line 2: invalid UTF-8"),
+            "{}",
+            err
+        );
+        bad = b"# comment with a bad byte \xff\n.muse.ai\tTRUE\t/\tFALSE\t1790000000\thatch_sess\tv-ok\n"
+            .to_vec();
+        let parsed = parse_jar(&bad).expect("comment byte skipped");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].value, "v-ok");
+    }
+
+    #[test]
+    fn far_future_expiry_does_not_panic() {
+        // F1: a jar row with `expires=i64::MAX` (or
+        // `10^14`, from the CDP f64→i64 saturation path)
+        // parses, and no tick-time expiry read panics:
+        // Go `time.Unix` never panics, so the value
+        // saturates to chrono's MAX and still counts as
+        // unexpired.
+        let input = "# Netscape HTTP Cookie File\n\
+                     .muse.ai\tTRUE\t/\tFALSE\t9223372036854775807\thatch_sess\tv-hatch_sess\n\
+                     .muse.ai\tTRUE\t/\tFALSE\t100000000000000\tother\tv-other\n";
+        let parsed = parse_jar(input.as_bytes()).expect("parses");
+        assert_eq!(parsed.len(), 2);
+        let now = utc(2026, 11, 5, 0, 0, 0);
+        assert_eq!(earliest_expiry(&parsed), Some(DateTime::<Utc>::MAX_UTC));
+        let (name, exp) = driving_cookie(&parsed);
+        assert_eq!(name, "hatch_sess");
+        assert_eq!(exp, Some(DateTime::<Utc>::MAX_UTC));
+        let header = cookie_header(&parsed, now);
+        assert!(header.contains("hatch_sess="), "{header}");
+        assert!(header.contains("other="), "{header}");
+        // A far-past expiry saturates to MIN and counts
+        // as expired (skipped from the header).
+        let past = vec![cookie("old", ".muse.ai", "/", -100_000_000_000_000)];
+        assert_eq!(earliest_expiry(&past), Some(DateTime::<Utc>::MIN_UTC));
+        assert_eq!(cookie_header(&past, now), "");
+        assert_eq!(epoch_to_datetime(i64::MAX), DateTime::<Utc>::MAX_UTC);
+        assert_eq!(epoch_to_datetime(i64::MIN), DateTime::<Utc>::MIN_UTC);
+        assert_eq!(
+            epoch_to_datetime(1_790_000_000),
+            Utc.with_ymd_and_hms(2026, 9, 21, 14, 13, 20).unwrap()
+        );
     }
 
     #[test]

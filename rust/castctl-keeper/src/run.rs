@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::clock::{CancelFlag, Clock};
 use crate::error::KeeperError;
-use crate::lockfile::lock_short_file;
+use crate::lockfile::{lock_short_file, write_file_0600};
 use crate::notify::NoticeKind;
 use crate::state::{OUTCOME_OK, STOPPED_STATE_CORRUPT, load_state};
 use crate::tick::{TickDeps, TickResult, notify_stopped, tick};
@@ -86,18 +86,34 @@ pub fn owner_path(profile_dir: &str, tag: &str) -> Result<String, KeeperError> {
 }
 
 fn clean_path(p: &str) -> String {
+    // Go `filepath.Clean`: `""` -> `"."`, a leading
+    // `..` is KEPT (not popped past the root), a rooted
+    // `..` is dropped, `"."` and duplicate slashes are
+    // removed, a trailing slash is dropped (S-3). The old
+    // code popped on an empty stack, turning `"../x"`
+    // into `"x"` and `"a/../../etc"` into `"etc"`.
+    if p.is_empty() {
+        return ".".to_string();
+    }
+    let rooted = p.starts_with('/');
     let mut out: Vec<&str> = Vec::new();
     for part in p.split('/') {
         match part {
             "" | "." => {}
             ".." => {
-                out.pop();
+                if !out.is_empty() && out[out.len() - 1] != ".." {
+                    out.pop();
+                } else if !rooted {
+                    out.push("..");
+                }
             }
             s => out.push(s),
         }
     }
-    if p.starts_with('/') {
+    if rooted {
         format!("/{}", out.join("/"))
+    } else if out.is_empty() {
+        ".".to_string()
     } else {
         out.join("/")
     }
@@ -190,11 +206,9 @@ pub async fn acquire_single_flight(
             heartbeat_unix: now,
         })
         .map_err(|e| KeeperError::Other(e.to_string()))?;
-        std::fs::write(&path, data).map_err(KeeperError::Io)?;
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-        }
+        // 0600 from the moment of creation (S-1): the
+        // owner file carries a live PID + heartbeat.
+        write_file_0600(&path, data.as_bytes())?;
     }
     let stop = CancelFlag::new();
     let stop2 = stop.clone();
@@ -252,7 +266,7 @@ fn refresh_owner(path: &str, pid: i32, clock: &Arc<dyn Clock>) -> bool {
         Ok(d) => d,
         Err(_) => return false,
     };
-    std::fs::write(path, data).is_ok()
+    write_file_0600(path, data.as_bytes()).is_ok()
 }
 
 /// Remove the owner file under the short flock, only when
@@ -492,6 +506,22 @@ mod tests {
     fn owner_path_rejects_escape() {
         assert!(owner_path("/tmp/base", "no.0").is_ok());
         assert!(owner_path("/tmp/base", "../evil").is_err());
+    }
+
+    #[test]
+    fn clean_path_go_parity_pins() {
+        // Go `filepath.Clean` (S-3).
+        assert_eq!(clean_path(""), ".");
+        assert_eq!(clean_path("../x"), "../x");
+        assert_eq!(clean_path("a/../../etc"), "../etc");
+        assert_eq!(clean_path(".."), "..");
+        assert_eq!(clean_path("/"), "/");
+        assert_eq!(clean_path("a/.."), ".");
+        assert_eq!(clean_path("/../x"), "/x");
+        assert_eq!(clean_path("a//b"), "a/b");
+        assert_eq!(clean_path("./x"), "x");
+        assert_eq!(clean_path("x/"), "x");
+        assert_eq!(clean_path("a/b/../c"), "a/c");
     }
 
     #[test]

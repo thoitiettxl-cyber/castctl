@@ -78,7 +78,7 @@ impl fmt::Display for ReloginError {
             ReloginError::Blocker(b) => write!(f, "{b}"),
             ReloginError::Unavailable => write!(
                 f,
-                "headless re-login unavailable in this build (rebuild with -tags with_chromedp)"
+                "headless re-login unavailable in this build (rebuild with the chromedp feature enabled)"
             ),
             ReloginError::Other(m) => write!(f, "{m}"),
         }
@@ -159,15 +159,15 @@ impl fmt::Display for KeeperError {
             KeeperError::StateCorrupt(m) => write!(f, "session state corrupt: {m}"),
             KeeperError::ReexportUnavailable => write!(
                 f,
-                "re-export unavailable in this build (rebuild with -tags with_chromedp)"
+                "re-export unavailable in this build (rebuild with the chromedp feature enabled)"
             ),
             KeeperError::ReloginUnavailable => write!(
                 f,
-                "headless re-login unavailable in this build (rebuild with -tags with_chromedp)"
+                "headless re-login unavailable in this build (rebuild with the chromedp feature enabled)"
             ),
             KeeperError::LaunchUnavailable => write!(
                 f,
-                "launch fallback unavailable: no profile-inbound plumbing at this base (S2 gate)"
+                "launch fallback unavailable: no profile-inbound plumbing at this base (S2 gate); attach to an already-running Chrome via the keeper browser URL, or use auth import"
             ),
             KeeperError::ContractNotEstablished => write!(
                 f,

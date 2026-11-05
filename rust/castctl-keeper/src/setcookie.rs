@@ -8,24 +8,31 @@
 //! Set-Cookie value with `http.ParseSetCookie`; unparseable
 //! values are skipped and counted).
 //!
-//! Grammar (Go `net/http` `parseSetCookie`, stdlib):
-//! `name=value; attr=value; ...`. The name is an RFC 7230
-//! token; the value is a quoted string or a run of value
-//! bytes (`0x20 < b < 0x7f`, `b != ';'`). Attributes are
-//! case-insensitive; `Domain`, `Path`, `Expires` (HTTP date),
-//! `Max-Age` (integer; an invalid value is ignored, exactly
-//! like Go), `Secure`, `HttpOnly` are modeled; `SameSite`,
-//! `Partitioned` and unknown attributes are ignored (the
-//! jar format has no columns for them — `jar.go:26-37`).
+//! Grammar (Go `net/http` `ParseSetCookie`,
+//! `parseCookieValue`, `validCookieValueByte`, go1.27):
+//! the value is split on `;` NAIVELY (a quoted `;` does
+//! NOT protect the cookie — `x="a;b"` is dropped
+//! whole); the name is `TrimString`'d and must be an RFC
+//! 7230 token; the value is NOT trimmed (a leading space
+//! is kept) and must be value bytes (`0x20 <= b < 0x7f`,
+//! not `"`/`;`/backslash) after stripping one pair of
+//! surrounding quotes — no unescaping (`\"` is invalid).
+//! A bare attribute (no `=`) has an empty value; an
+//! attribute whose value holds an invalid byte is skipped
+//! and the cookie kept. `Max-Age` follows Go's `Atoi`
+//! rule: invalid or leading-zero-with-nonzero-value is
+//! ignored, `<= 0` becomes `-1` (delete). `Expires`
+//! tries exactly two layouts (RFC1123, then
+//! `Mon, 02-Jan-2006 15:04:05 MST`).
 
 use chrono::{DateTime, TimeZone, Utc};
 
 /// One parsed Set-Cookie value (the `http.Cookie` fields the
 /// keeper uses). `max_age` is `None` when the attribute is
-/// absent; Go cannot distinguish absent from `Max-Age=0`
-/// (both read `MaxAge 0`), so [`crate::jar::
-/// effective_set_cookie`] treats `None` and `Some(0)` the
-/// same.
+/// absent or ignored; `Some(-1)` means delete (Go
+/// `MaxAge <= 0` after `ParseSetCookie`, which maps
+/// `Max-Age=0` to `-1`); `Some(n > 0)` is seconds.
+/// Go's `ParseSetCookie` never yields `Some(0)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedCookie {
     /// Cookie name.
@@ -70,31 +77,51 @@ fn is_token_char(b: u8) -> bool {
         )
 }
 
+/// Go `validCookieValueByte`: `0x20 <= b < 0x7f`,
+/// not `"`, `;` or `\`. Space (`0x20`) IS allowed.
 fn is_value_byte(b: u8) -> bool {
-    0x20 < b && b < 0x7f && b != b';'
+    (0x20..0x7f).contains(&b) && b != b'"' && b != b';' && b != b'\\'
+}
+
+/// Go `textproto.TrimString`: trim ASCII space and tab
+/// from both ends (`net/http` `ParseSetCookie` trims
+/// every part and the name this way; the VALUE is never
+/// trimmed).
+fn trim_ascii_spaces(b: &[u8]) -> &[u8] {
+    let mut start = 0;
+    let mut end = b.len();
+    while start < end && (b[start] == b' ' || b[start] == b'\t') {
+        start += 1;
+    }
+    while end > start && (b[end - 1] == b' ' || b[end - 1] == b'\t') {
+        end -= 1;
+    }
+    &b[start..end]
 }
 
 /// Parse one Set-Cookie header value. Returns `None` when
 /// the value is unparseable (the caller counts it as
 /// skipped). The input must be one header value, not a
-/// comma-joined pair.
+/// comma-joined pair. Mirrors Go `ParseSetCookie`
+/// step by step (see the module docs).
 pub fn parse_set_cookie(header: &str) -> Option<ParsedCookie> {
-    let bytes = header.as_bytes();
-    let mut parts = split_semicolons(bytes);
-    if parts.is_empty() {
+    // Go splits NAIVELY on ';' (no quote awareness).
+    let line = trim_ascii_spaces(header.as_bytes());
+    if line.is_empty() {
         return None;
     }
-    let first = parts.remove(0);
-    let first = trim_ascii_spaces(first);
+    let mut parts = line.split(|&b| b == b';');
+    let first = trim_ascii_spaces(parts.next()?);
     let eq = first.iter().position(|&b| b == b'=')?;
-    let name = &first[..eq];
+    let name = trim_ascii_spaces(&first[..eq]);
     if name.is_empty() || !name.iter().all(|&b| is_token_char(b)) {
         return None;
     }
-    let raw_value = trim_ascii_spaces(&first[eq + 1..]);
-    let value = parse_cookie_value(raw_value)?;
+    // The value is NOT trimmed: Go passes it to
+    // `parseCookieValue` as cut (a leading space is kept).
+    let value = parse_cookie_value(&first[eq + 1..], true)?;
     let mut out = ParsedCookie {
-        name: String::from_utf8_lossy(name).into_owned(),
+        name: ascii_string(name),
         value,
         domain: None,
         path: None,
@@ -108,137 +135,106 @@ pub fn parse_set_cookie(header: &str) -> Option<ParsedCookie> {
         if attr.is_empty() {
             continue;
         }
+        // A bare attribute (no '=') has an empty value
+        // (Go `strings.Cut` returns `""`).
         let (key, val) = match attr.iter().position(|&b| b == b'=') {
-            Some(i) => (&attr[..i], Some(trim_ascii_spaces(&attr[i + 1..]))),
-            None => (attr, None),
+            Some(i) => (&attr[..i], &attr[i + 1..]),
+            None => (attr, &[][..]),
         };
-        let key_lc = String::from_utf8_lossy(key).to_ascii_lowercase();
-        match key_lc.as_str() {
-            "domain" => {
-                let v = val?;
-                out.domain = Some(String::from_utf8_lossy(v).into_owned());
-            }
-            "path" => {
-                let v = val?;
-                out.path = Some(String::from_utf8_lossy(v).into_owned());
-            }
-            "expires" => {
-                let v = val?;
-                let s = String::from_utf8_lossy(v);
-                out.expires = parse_http_date(&s);
-            }
-            "max-age" => {
-                let v = val?;
-                let s = String::from_utf8_lossy(v);
-                if let Ok(n) = s.trim().parse::<i64>() {
-                    out.max_age = Some(n);
+        // Non-ASCII attribute names are skipped (Go
+        // `ascii.ToLower` reports non-ASCII).
+        if !key.is_ascii() {
+            continue;
+        }
+        // An attribute value holding an invalid byte
+        // skips the ATTRIBUTE (Go `Unparsed`), not the
+        // cookie. Quotes are NOT stripped here (Go
+        // `allowDoubleQuote=false`).
+        let Some(val) = parse_cookie_value(val, false) else {
+            continue;
+        };
+        let key_lc = key.to_ascii_lowercase();
+        match key_lc.as_slice() {
+            b"domain" => out.domain = Some(val),
+            b"path" => out.path = Some(val),
+            b"expires" => out.expires = parse_http_date(&val),
+            b"max-age" => {
+                // Go: `secs, err := strconv.Atoi(val)`;
+                // invalid, or `secs != 0 && val[0] == '0'`,
+                // ignores the attribute; `secs <= 0`
+                // becomes -1 (delete).
+                if let Ok(secs) = val.parse::<i64>() {
+                    if secs != 0 && val.as_bytes().first() == Some(&b'0') {
+                        // Leading zero with a nonzero
+                        // value: ignored.
+                    } else if secs <= 0 {
+                        out.max_age = Some(-1);
+                    } else {
+                        out.max_age = Some(secs);
+                    }
                 }
                 // Invalid Max-Age is ignored (Go does the
                 // same: only a successful Atoi sets MaxAge).
             }
-            "secure" => out.secure = true,
-            "httponly" => out.http_only = true,
+            b"secure" => out.secure = true,
+            b"httponly" => out.http_only = true,
             _ => {}
         }
     }
     Some(out)
 }
 
-/// Split on `;`, respecting a quoted value that contains
-/// `;` (Go's `parseSetCookie` splits the same way: the
-/// value parser consumes the quoted string first).
-fn split_semicolons(input: &[u8]) -> Vec<&[u8]> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut in_quotes = false;
-    let mut i = 0;
-    while i < input.len() {
-        match input[i] {
-            b'"' if !in_quotes => in_quotes = true,
-            b'"' if in_quotes => {
-                // A quote closes unless escaped.
-                if i == 0 || input[i - 1] != b'\\' {
-                    in_quotes = false;
-                }
-            }
-            b';' if !in_quotes => {
-                parts.push(&input[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    parts.push(&input[start..]);
-    parts
+/// Bytes that passed a byte-level check are ASCII by
+/// construction; render them 1:1 without lossy
+/// conversion (Go strings keep the bytes).
+fn ascii_string(b: &[u8]) -> String {
+    b.iter().map(|&c| c as char).collect()
 }
 
-fn trim_ascii_spaces(b: &[u8]) -> &[u8] {
-    let mut s = 0;
-    let mut e = b.len();
-    while s < e && (b[s] == b' ' || b[s] == b'\t') {
-        s += 1;
-    }
-    while e > s && (b[e - 1] == b' ' || b[e - 1] == b'\t') {
-        e -= 1;
-    }
-    &b[s..e]
-}
-
-/// Parse a cookie value: quoted (`"..."` with `\"`/`\\`
-/// escapes) or unquoted value bytes.
-fn parse_cookie_value(raw: &[u8]) -> Option<String> {
-    if raw.is_empty() {
-        return Some(String::new());
-    }
-    if raw[0] == b'"' {
-        if raw.len() < 2 || raw[raw.len() - 1] != b'"' {
-            return None;
-        }
-        let inner = &raw[1..raw.len() - 1];
-        let mut out = Vec::with_capacity(inner.len());
-        let mut i = 0;
-        while i < inner.len() {
-            if inner[i] == b'\\' && i + 1 < inner.len() {
-                out.push(inner[i + 1]);
-                i += 2;
-            } else if inner[i] == b'"' {
-                return None;
-            } else {
-                out.push(inner[i]);
-                i += 1;
-            }
-        }
-        return Some(String::from_utf8_lossy(&out).into_owned());
+/// Parse a cookie value per Go `parseCookieValue`:
+/// strip ONE pair of surrounding quotes when
+/// `allow_double_quote` (and only then — no unescaping:
+/// a `\` or inner `"` is an invalid byte), then every
+/// byte must satisfy [`is_value_byte`].
+fn parse_cookie_value(raw: &[u8], allow_double_quote: bool) -> Option<String> {
+    let mut raw = raw;
+    if allow_double_quote && raw.len() > 1 && raw[0] == b'"' && raw[raw.len() - 1] == b'"' {
+        raw = &raw[1..raw.len() - 1];
     }
     if !raw.iter().all(|&b| is_value_byte(b)) {
         return None;
     }
-    Some(String::from_utf8_lossy(raw).into_owned())
+    Some(ascii_string(raw))
 }
 
-/// Parse an HTTP date (`Expires` attribute). Layouts tried
-/// in order (Go `time.Parse` in `parseSetCookie` tries
-/// RFC1123, then RFC850, then ANSIC):
-/// - `Mon, 02 Jan 2006 15:04:05 GMT`
-/// - `Monday, 02-Jan-06 15:04:05 GMT`
-/// - `Mon Jan  2 15:04:05 2006`
+/// Parse an HTTP date (`Expires` attribute). Go
+/// `ParseSetCookie` tries exactly two layouts
+/// (`time.RFC1123`, then `Mon, 02-Jan-2006 15:04:05
+/// MST`): ANSIC and 2-digit-year forms are NOT tried
+/// and leave `Expires` zero, i.e. absent.
 ///
-/// Returns the epoch, or `None` when no layout matches (Go
-/// then leaves `Expires` zero, i.e. absent).
+/// Returns the epoch, or `None` when no layout matches.
 pub fn parse_http_date(s: &str) -> Option<i64> {
     let s = s.trim();
     // chrono's `%Z` parses `GMT`/`UTC`; `%e` accepts a
     // space-padded day.
-    const FORMATS: &[&str] = &[
-        "%a, %d %b %Y %H:%M:%S %Z",
-        "%A, %d-%b-%y %H:%M:%S %Z",
-        "%a %b %e %H:%M:%S %Y",
-        "%a, %d %b %y %H:%M:%S %Z",
-    ];
+    const FORMATS: &[&str] = &["%a, %d %b %Y %H:%M:%S %Z", "%a, %d-%b-%Y %H:%M:%S %Z"];
     for fmt in FORMATS {
+        let fmt2 = fmt.replace(" %Z", "");
         if let Ok(dt) = DateTime::parse_from_str(s, fmt) {
-            return Some(dt.timestamp());
+            // chrono's `%a` accepts full weekday names
+            // ("Wednesday") and `%Y` accepts short years
+            // ("26"); Go's two layouts accept neither.
+            // Re-format the parsed value and require it
+            // to equal the input (minus the zone): this
+            // also enforces weekday/date consistency,
+            // which Go checks and chrono does not.
+            if let Some((head, _)) = s.rsplit_once(' ')
+                && dt.format(&fmt2).to_string() == head
+            {
+                return Some(dt.timestamp());
+            }
+            continue;
         }
         // `%Z` fails on some chrono builds for `GMT`; retry
         // with the literal zone stripped.
@@ -246,11 +242,10 @@ pub fn parse_http_date(s: &str) -> Option<i64> {
             .strip_suffix(" GMT")
             .or_else(|| s.strip_suffix(" UTC"))
             .or_else(|| s.strip_suffix(" UT"))
+            && let Ok(naive) = chrono::NaiveDateTime::parse_from_str(stripped, &fmt2)
+            && naive.format(&fmt2).to_string() == stripped
         {
-            let fmt2 = fmt.replace(" %Z", "");
-            if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(stripped, &fmt2) {
-                return Some(Utc.from_utc_datetime(&naive).timestamp());
-            }
+            return Some(Utc.from_utc_datetime(&naive).timestamp());
         }
     }
     None
@@ -298,11 +293,72 @@ mod tests {
     }
 
     #[test]
-    fn parse_quoted_value_and_semicolon_inside() {
-        let c = parse_set_cookie("x=\"a;b\"; Path=/").expect("parses");
-        assert_eq!(c.value, "a;b");
-        let c2 = parse_set_cookie("x=\"a\\\"b\"; Path=/").expect("parses");
-        assert_eq!(c2.value, "a\"b");
+    fn parse_quoted_value_go_parity() {
+        // Go splits on ';' NAIVELY: a quoted ';' does
+        // NOT protect the cookie — the whole value is
+        // dropped.
+        assert!(parse_set_cookie("x=\"a;b\"; Path=/").is_none());
+        // No unescaping: a backslash inside quotes is an
+        // invalid value byte, so the whole value is
+        // dropped.
+        assert!(parse_set_cookie("x=\"a\\\"b\"; Path=/").is_none());
+        // A clean quoted value strips one pair of quotes.
+        let c = parse_set_cookie("x=\"abc\"; Path=/").expect("parses");
+        assert_eq!(c.value, "abc");
+        let c = parse_set_cookie("x=\"a b\"").expect("parses");
+        assert_eq!(c.value, "a b");
+        let c = parse_set_cookie("x=\"\"").expect("parses");
+        assert_eq!(c.value, "");
+    }
+
+    #[test]
+    fn parse_go_parity_pins() {
+        // (f) The value is NOT trimmed: a leading space
+        // is kept (Go `parseCookieValue` on the cut
+        // value). The NAME is trimmed (Go
+        // `TrimString(name)`).
+        let c = parse_set_cookie("x= v").expect("parses");
+        assert_eq!(c.value, " v");
+        let c = parse_set_cookie("x =y").expect("parses");
+        assert_eq!(c.name, "x");
+        assert_eq!(c.value, "y");
+        // Unquoted space is a valid value byte (0x20).
+        let c = parse_set_cookie("x=a b").expect("parses");
+        assert_eq!(c.value, "a b");
+        // DEL (0x7f) is not a value byte.
+        assert!(parse_set_cookie("x=a\x7f").is_none());
+        // (c) A bare attribute (no '=') has an empty
+        // value: Secure sets, Domain becomes "" — the
+        // cookie is kept.
+        let c = parse_set_cookie("x=y; Secure").expect("parses");
+        assert!(c.secure);
+        let c = parse_set_cookie("x=y; Domain").expect("parses");
+        assert_eq!(c.domain.as_deref(), Some(""));
+        let c = parse_set_cookie("x=y; Foo").expect("parses");
+        assert_eq!(c.name, "x");
+        // An attribute value with an invalid byte skips
+        // the ATTRIBUTE, not the cookie (Go `Unparsed`).
+        let c = parse_set_cookie("x=y; Domain=a\"b").expect("parses");
+        assert_eq!(c.domain, None);
+        let c = parse_set_cookie("x=y; Path=/a\\b").expect("parses");
+        assert_eq!(c.path, None);
+        // (d) `Max-Age= 3600`: Atoi rejects the space,
+        // so the attribute is ignored.
+        let c = parse_set_cookie("x=y; Max-Age= 3600").expect("parses");
+        assert_eq!(c.max_age, None);
+        // (e) Expires tries exactly two layouts: ANSIC
+        // and 2-digit-year forms are absent in Go.
+        let c = parse_set_cookie("x=y; Expires=Wed Oct 21 07:28:00 2026").expect("parses");
+        assert_eq!(c.expires, None);
+        let c = parse_set_cookie("x=y; Expires=Wed, 21 Oct 26 07:28:00 GMT").expect("parses");
+        assert_eq!(c.expires, None);
+        // Go's second layout takes the abbreviated
+        // weekday only ("Wednesday" is unparsed).
+        let c = parse_set_cookie("x=y; Expires=Wed, 21-Oct-2026 07:28:00 GMT").expect("parses");
+        assert_eq!(c.expires, Some(1792567680));
+        let c =
+            parse_set_cookie("x=y; Expires=Wednesday, 21-Oct-2026 07:28:00 GMT").expect("parses");
+        assert_eq!(c.expires, None);
     }
 
     #[test]
@@ -317,8 +373,21 @@ mod tests {
     fn parse_invalid_max_age_ignored_not_rejected() {
         let c = parse_set_cookie("x=y; Max-Age=banana").expect("parses");
         assert_eq!(c.max_age, None);
+        // F8: Go maps `Max-Age<=0` to -1 (delete).
         let c2 = parse_set_cookie("x=y; Max-Age=0").expect("parses");
-        assert_eq!(c2.max_age, Some(0));
+        assert_eq!(c2.max_age, Some(-1));
+        // Leading zero with a nonzero value: ignored.
+        let c3 = parse_set_cookie("x=y; Max-Age=03600").expect("parses");
+        assert_eq!(c3.max_age, None);
+        // "00" is zero, so it is -1, not ignored.
+        let c4 = parse_set_cookie("x=y; Max-Age=00").expect("parses");
+        assert_eq!(c4.max_age, Some(-1));
+        let c5 = parse_set_cookie("x=y; Max-Age=01").expect("parses");
+        assert_eq!(c5.max_age, None);
+        let c6 = parse_set_cookie("x=y; Max-Age=-5").expect("parses");
+        assert_eq!(c6.max_age, Some(-1));
+        let c7 = parse_set_cookie("x=y; Max-Age=+5").expect("parses");
+        assert_eq!(c7.max_age, Some(5));
     }
 
     #[test]

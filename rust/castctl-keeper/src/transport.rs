@@ -22,7 +22,6 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 use tokio::sync::{Mutex, Notify, broadcast};
 
@@ -73,8 +72,9 @@ impl SessionPhase {
 pub struct Frame {
     /// Raw JPEG bytes.
     pub data: Vec<u8>,
-    /// CDP screencast frame id.
-    pub session_id: i32,
+    /// CDP screencast frame id (Go `Frame.SessionID` is
+    /// `int64`).
+    pub session_id: i64,
     /// Frame width in pixels.
     pub width: i32,
     /// Frame height in pixels.
@@ -301,11 +301,6 @@ impl Transport for RefusingTransport {
     }
 }
 
-/// How long `send_phase` waits before giving up
-/// (transport.go uses a bounded send; the exact bound is
-/// internal to the runner, not the protocol).
-pub const PHASE_SEND_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// Validate an input event against the allowlists
 /// (`screencast.go:96-120`): mouse types
 /// `{mousePressed, mouseReleased, mouseMoved, mouseWheel}`,
@@ -356,7 +351,7 @@ mod tests {
     #[tokio::test]
     async fn fake_transport_latest_only_counts_drops() {
         let t = FakeTransport::new();
-        let f = |id: i32| Frame {
+        let f = |id: i64| Frame {
             data: vec![1, 2, 3],
             session_id: id,
             width: 780,

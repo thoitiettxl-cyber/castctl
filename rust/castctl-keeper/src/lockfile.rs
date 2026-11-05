@@ -41,6 +41,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -67,23 +68,63 @@ impl LockGuard {
 }
 
 /// Create the profile directory with Go's `EnsureProfileDir`
-/// semantics (`profile.go:113-137`): `MkdirAll` at 0700,
-/// then `Chmod` 0700 unconditionally. Returns the profile
-/// dir path.
+/// semantics (`profile.go:113-137`): the `profiles/` parent
+/// is created at 0700 when missing and NEVER chmodded
+/// afterwards (S-4); the profile dir itself is created at
+/// 0700 and chmodded 0700 unconditionally (Go does both).
+/// Returns the profile dir path.
 pub fn ensure_profile_dir(base_dir: &str, profile_name: &str) -> Result<String, KeeperError> {
     let paths = castctl_config::profile::profile_paths(base_dir, profile_name)?;
     let dir = Path::new(&paths.dir);
     if profile_name != castctl_config::profile::DEFAULT_PROFILE_NAME
         && let Some(parent) = dir.parent()
     {
-        std::fs::create_dir_all(parent)
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(parent)
             .map_err(|e| KeeperError::StateDir(format!("{}: {}", parent.display(), e)))?;
-        set_mode_0700(parent)?;
     }
     std::fs::create_dir_all(dir)
         .map_err(|e| KeeperError::StateDir(format!("{}: {}", dir.display(), e)))?;
     set_mode_0700(dir)?;
     Ok(paths.dir)
+}
+
+/// Temp-file name suffix: pid + a process-wide atomic
+/// counter + wall-clock nanos (S-5). Nanos alone can
+/// collide across processes (and across fast successive
+/// calls in one process on a coarse clock); the pid and
+/// counter close both windows. Go uses `os.CreateTemp`
+/// (random suffix); this is the same shape without a
+/// randomness dependency.
+pub fn temp_suffix() -> String {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{}-{}", std::process::id(), n, nanos)
+}
+
+/// Write `data` to `path` (create or truncate) with mode
+/// 0600 from the moment of creation (S-1): Go uses
+/// `os.CreateTemp` (0600 at creation) / `os.WriteFile`
+/// with 0600. The mode applies at creation; a pre-existing
+/// file keeps its mode (callers here only write files they
+/// created 0600, or files under the short flock).
+pub fn write_file_0600(path: &str, data: &[u8]) -> Result<(), KeeperError> {
+    let mut f = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(KeeperError::Io)?;
+    f.write_all(data).map_err(KeeperError::Io)?;
+    f.sync_all().map_err(KeeperError::Io)?;
+    Ok(())
 }
 
 fn set_mode_0700(p: &Path) -> Result<(), KeeperError> {
@@ -140,8 +181,13 @@ fn ensure_cookies_parent(
         let parent = Path::new(cookies_path)
             .parent()
             .ok_or_else(|| KeeperError::Other("cookies path has no parent".to_string()))?;
-        std::fs::create_dir_all(parent).map_err(KeeperError::Io)?;
-        set_mode_0700(parent)?;
+        // Go `os.MkdirAll(..., 0o700)`: 0700 at creation
+        // only, never chmod an existing parent (S-4).
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(parent)
+            .map_err(KeeperError::Io)?;
     } else {
         let parent = Path::new(cookies_path)
             .parent()
@@ -318,13 +364,7 @@ pub fn write_cookies_file(
 /// Write `data` to a temp file in `dir` (0600, fsynced) and
 /// return its path. The caller renames or removes it.
 fn write_temp_file(dir: &Path, data: &[u8]) -> Result<PathBuf, KeeperError> {
-    let name = format!(
-        ".cookies-{}.tmp",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
+    let name = format!(".cookies-{}.tmp", temp_suffix());
     let path = dir.join(name);
     let mut f = OpenOptions::new()
         .write(true)

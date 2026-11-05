@@ -93,11 +93,15 @@ impl CdpExporter {
     }
 
     /// Resolve the WebSocket URL for the browser: a `ws://`
-    /// / `wss://` value is used as-is; an `http://` value
-    /// goes through `/json/version` discovery.
+    /// value is used as-is after loopback validation
+    /// (Go `DiscoverWebSocketURL`); `wss://` is rejected
+    /// fail-closed there, never dialed. An `http://`
+    /// value goes through `/json/version` discovery.
     async fn ws_url(&self) -> Result<String, KeeperError> {
         if self.browser_url.starts_with("ws://") || self.browser_url.starts_with("wss://") {
-            return Ok(self.browser_url.clone());
+            let url = self.browser_url.trim();
+            crate::cdp::validate_loopback_ws_url(url).map_err(KeeperError::from)?;
+            return Ok(url.to_string());
         }
         discover_websocket_url(&self.browser_url)
             .await
@@ -114,6 +118,11 @@ impl CdpExporter {
         let mut first_page: Option<String> = None;
         for t in &targets {
             if t.target_type != "page" {
+                continue;
+            }
+            // A page target with an empty id cannot be
+            // attached to (C-6).
+            if t.id.is_empty() {
                 continue;
             }
             if first_page.is_none() {
@@ -248,6 +257,35 @@ impl Exporter for CdpExporter {
                 }
             }
         }
+    }
+}
+
+/// An exporter that resolves the debug port from the
+/// `DevToolsActivePort` file only when `export()` runs
+/// (Go `portFileExporter`, `launch.go:62-104`): the
+/// browser is launched after the runner is built, so the
+/// file does not exist yet at exporter-creation time.
+/// Delegates to a [`CdpExporter`] built from the resolved
+/// `http://127.0.0.1:port/` base.
+pub struct PortFileExporter {
+    profile_dir: String,
+}
+
+impl PortFileExporter {
+    pub fn new(profile_dir: &str) -> Self {
+        Self {
+            profile_dir: profile_dir.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl Exporter for PortFileExporter {
+    async fn export(&self) -> Result<Vec<ExportedCookie>, KeeperError> {
+        let port = crate::launch::debug_port_from_file(&self.profile_dir)?;
+        new_cdp_exporter(&format!("http://127.0.0.1:{port}/"))
+            .export()
+            .await
     }
 }
 

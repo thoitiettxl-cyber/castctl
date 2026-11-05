@@ -1781,10 +1781,8 @@ binary Go vẫn GPL-3.0-or-later; 2 artifact, 2 license.
 
 ### M4c fork — `thoitiettxl-cyber/honk`, branch `feat/chrome-tls-parity` — REVERTED: NOT USED, NOT PINNED, DOES NOT AFFECT THE BUILD (experiment record only)
 
-Why a fork was tried (working hypothesis at the time —
-DISPROVEN, see Outcome below: the 502 was the missing token,
-not the fingerprint): the live Meta edge was observed
-returning HTTP 502 for the non-Chrome ClientHellos tried
+Why a fork was tried: the live Meta edge answers the gateway
+WS upgrade with HTTP 502 for every non-Chrome ClientHello
 (rustls 251 B, honk plain connector 1730–1794 B but with
 the wrong JA4). Measured on cue, profile `no.0`, 3
 alternating Go/Rust pairs: Go exit 0 (101, byte-identical

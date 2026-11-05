@@ -49,7 +49,13 @@ pub struct LoginContractStep {
 /// One recorded blocker signal (`contract.go:50-58`): a CSS
 /// selector whose presence means the page is blocked, or a
 /// page-text keyword (lowercase substring) with the same
-/// meaning. `kind` is the closed [`NoticeKind`] for the alert.
+/// meaning. `kind` is the RAW notice-kind string from the
+/// contract JSON: Go's `NoticeKind` is a string type, so an
+/// unknown kind parses fine there; Rust's `NoticeKind` is a
+/// closed enum, so the field stays a `String` and use sites
+/// parse it (unknown → `Blocked`, empty → no hit). A
+/// contract with an unknown kind must load, not fail the
+/// whole parse (E-5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoginBlockerSignal {
     /// Selector signal, if any.
@@ -58,8 +64,9 @@ pub struct LoginBlockerSignal {
     /// Keyword signal, if any.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub keyword: String,
-    /// Closed notice kind for the alert.
-    pub kind: NoticeKind,
+    /// Raw notice kind for the alert.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
 }
 
 /// The recorded login-form contract for one provider login
@@ -170,14 +177,12 @@ pub fn snapshot_decision(
             "contract_bad_selector",
         )));
     }
-    let mut blocked_kind = NoticeKind::Blocked;
+    let mut blocked_kind = String::new();
     let mut blocked_detail = String::new();
-    let mut have_block = false;
     for sig in &contract.blockers {
-        if let Some(detail) = res.hits.get(sig.kind.as_str()) {
-            blocked_kind = sig.kind;
+        if let Some(detail) = res.hits.get(&sig.kind) {
+            blocked_kind = sig.kind.clone();
             blocked_detail = format!("blocker_{detail}");
-            have_block = true;
             break;
         }
     }
@@ -187,7 +192,7 @@ pub fn snapshot_decision(
     // entry; both paths treat it the same).
     match_decision(
         contract,
-        if have_block { Some(blocked_kind) } else { None },
+        parse_blocked_kind(&blocked_kind),
         &blocked_detail,
         &res.counts,
     )
@@ -215,6 +220,18 @@ pub fn is_blocker_signal(b: &ReloginBlocker) -> bool {
 enum DecisionError {
     NotEstablished,
     Blocker(ReloginBlocker),
+}
+
+/// Parse a raw blocker-signal kind for [`match_decision`]:
+/// empty means no hit (Go's `blockedKind == ""` falls
+/// through to the step checks); an unknown kind blocks as
+/// `Blocked` (the same gate `match_decision` applies).
+fn parse_blocked_kind(raw: &str) -> Option<NoticeKind> {
+    if raw.is_empty() {
+        None
+    } else {
+        Some(NoticeKind::parse_kind(raw).unwrap_or(NoticeKind::Blocked))
+    }
 }
 
 /// The ONE blocker/mismatch decision shared by
@@ -270,11 +287,11 @@ pub fn match_contract(contract: &LoginContract, snap: &PageSnapshot) -> Result<(
     if !contract.observed {
         return Err(KeeperError::ContractNotEstablished);
     }
-    let mut blocked_kind: Option<NoticeKind> = None;
+    let mut blocked_kind: Option<String> = None;
     let mut blocked_detail = String::new();
     for sig in &contract.blockers {
         if !sig.selector.is_empty() && snap.counts.get(&sig.selector).copied().unwrap_or(0) > 0 {
-            blocked_kind = Some(sig.kind);
+            blocked_kind = Some(sig.kind.clone());
             blocked_detail = "blocker_selector".to_string();
             break;
         }
@@ -284,12 +301,17 @@ pub fn match_contract(contract: &LoginContract, snap: &PageSnapshot) -> Result<(
                 .to_lowercase()
                 .contains(&sig.keyword.to_lowercase())
         {
-            blocked_kind = Some(sig.kind);
+            blocked_kind = Some(sig.kind.clone());
             blocked_detail = "blocker_keyword".to_string();
             break;
         }
     }
-    match match_decision(contract, blocked_kind, &blocked_detail, &snap.counts) {
+    match match_decision(
+        contract,
+        blocked_kind.as_deref().and_then(parse_blocked_kind),
+        &blocked_detail,
+        &snap.counts,
+    ) {
         Ok(()) => Ok(()),
         Err(DecisionError::NotEstablished) => Err(KeeperError::ContractNotEstablished),
         Err(DecisionError::Blocker(b)) => Err(KeeperError::Blocked(b)),
@@ -490,7 +512,7 @@ mod tests {
         c.blockers = vec![LoginBlockerSignal {
             selector: "div.captcha".to_string(),
             keyword: String::new(),
-            kind: NoticeKind::Captcha,
+            kind: "captcha".to_string(),
         }];
         let mut snap = PageSnapshot::default();
         snap.counts.insert("div.captcha".to_string(), 1);
@@ -501,12 +523,57 @@ mod tests {
         c2.blockers = vec![LoginBlockerSignal {
             selector: String::new(),
             keyword: "verify you are human".to_string(),
-            kind: NoticeKind::Captcha,
+            kind: "captcha".to_string(),
         }];
         let snap2 = PageSnapshot {
             counts: HashMap::new(),
             visible_text: "Please VERIFY YOU ARE HUMAN to continue".to_string(),
         };
         assert!(match_contract(&c2, &snap2).is_err());
+    }
+
+    #[test]
+    fn unknown_and_empty_blocker_kinds_are_lenient() {
+        // E-5: a contract JSON with an unknown kind loads
+        // (Go's `NoticeKind` is a string type); the hit
+        // blocks as `Blocked` (the gate in
+        // `match_decision`). An empty kind hit falls
+        // through to the step checks, like Go.
+        let c: LoginContract = serde_json::from_str(
+            r#"{"version":1,"observed":true,"login_url":"https://muse.ai/","steps":[{"action":"fill","selector":"form input","field":"username"}],"blockers":[{"selector":"div.captcha","kind":"bogus_kind"}]}"#,
+        )
+        .expect("unknown kind parses");
+        assert_eq!(c.blockers[0].kind, "bogus_kind");
+        let mut snap = PageSnapshot::default();
+        snap.counts.insert("div.captcha".to_string(), 1);
+        snap.counts.insert("form input".to_string(), 1);
+        let err = match_contract(&c, &snap).unwrap_err();
+        assert!(err.to_string().contains("blocked"));
+
+        let mut c2 = observed_contract();
+        c2.blockers = vec![LoginBlockerSignal {
+            selector: "div.captcha".to_string(),
+            keyword: String::new(),
+            kind: String::new(),
+        }];
+        // Empty-kind hit + step selectors matching exactly
+        // once: no block (falls through to step checks).
+        let mut snap2 = PageSnapshot::default();
+        snap2.counts.insert("div.captcha".to_string(), 1);
+        snap2.counts.insert("form input[aria-label]".to_string(), 1);
+        snap2
+            .counts
+            .insert("form button[type=\"submit\"]".to_string(), 1);
+        assert!(match_contract(&c2, &snap2).is_ok());
+        // Same hit, but a step selector missing: the
+        // mismatch (not the blocker) decides. Assert the
+        // TYPED detail, not the display string — the
+        // display is kind-only per Go (`relogin.go:53-58`).
+        let mut snap3 = PageSnapshot::default();
+        snap3.counts.insert("div.captcha".to_string(), 1);
+        match match_contract(&c2, &snap3).unwrap_err() {
+            KeeperError::Blocked(b) => assert_eq!(b.detail, "contract_mismatch"),
+            other => panic!("expected a contract_mismatch blocker, got {other}"),
+        }
     }
 }
