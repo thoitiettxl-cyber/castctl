@@ -4728,7 +4728,7 @@ KHÔNG bịa file. Exit 0 của 4 lần chạy chỉ suy ra được
 
 ### M4c.9 Fix loop 1 — review round 1 (2026-11-05)
 
-1 commit, xử lý hết 13 NIT của 3 review vòng 1
+1 commit, xử lý hết 15 NIT trong 13 hàng của 3 review vòng 1
 (technical 5, safety 5, red-team 5; 0 BLOCKING).
 Gates sau loop: xem §M4c.8 (cập nhật trong commit này).
 
@@ -4741,7 +4741,7 @@ Gates sau loop: xem §M4c.8 (cập nhật trong commit này).
 | 5 | Red-team NIT-1: số học request sai + 106 B | fixed — §M4c.5 số đúng (Go 1275 B, chênh 889 B, token ≈ 899 ký tự); 106 B ĐÃ GIẢI: đuôi request do dynamic record sizing (log + stdlib + probe chạy lại) |
 | 6 | Red-team NIT-4: quote byte UTF-8 không hợp lệ | recorded — assessed non-issue, 1 dòng trong §M4c.7b (token qua JSON nên luôn UTF-8 hợp lệ) |
 | 7 | Red-team NIT-5: `split_ws_url` fallback lặng về default port | recorded, noted — pre-existing, ngoài phạm vi, KHÔNG sửa (`dial.rs` `split_ws_url`: port parse fail → `(authority, default_port)` thay vì lỗi) |
-| 8 | Red-team NIT-2: ô literal cũ + ô rustls thiếu audit trail | recorded — literal cells đã disclose; corroboration của ô token+rustls bằng live gate cuối ghi rõ trong §M4c.8 |
+| 8 | Red-team NIT-2: ô literal cũ + ô rustls thiếu audit trail; technical NIT-3: ô token+honk thiếu corroboration độc lập | recorded — literal cells đã disclose; corroboration của ô token+rustls bằng live gate cuối ghi rõ trong §M4c.8; câu corroboration đó cũng bao phủ ô token+honk |
 | 9 | Safety N1: doc `redact` sai | fixed — doc `default_ws_url` (`dial.rs`) + §M4c.7 sửa đúng cơ chế (fixed-string + 0 log macro; `redact_string` 0 caller, không crate nào depend `castctl-log-redact`) |
 | 10 | Safety N2: `request_url` nhúng URL vào lỗi | fixed — `auth.rs` `request_url` trả chuỗi cố định `"invalid URL"`; red test `request_url_invalid_url_error_is_fixed_string` (TDD: FAIL trước, PASS sau) |
 | 11 | Safety N3: thiếu test render CLI | fixed — test `classify_error_connection_variants` (`network.rs`): ConnectionError length-only, ConnectionDown render message (đã truncate 200 ở construction) / bare khi rỗng |
