@@ -3563,7 +3563,22 @@ it (promoted to direct deps only), so `NOTICE` /
     implements the first-line rejection in
     `check_upgrade_head` (first header line starting
     with SP/HTAB → fixed message); only the obs-fold
-    continuation case remains open here.
+    continuation case remains open here. NOTE (docs
+    follow-up): obs-fold can also corrupt the accept
+    value itself — a continuation line after a correct
+    `Sec-WebSocket-Accept` folds into the accept value
+    in Go (`Header.Get` returns `"<key> X-Extra: v"`
+    → mismatch → `status_code=101`), while Rust treats
+    the continuation as its own header line and the
+    accept stays matched → proceeds. This flips an
+    ACCEPTANCE decision, not just a message. The mirror
+    case coincides: a continuation accept line after a
+    wrong accept folds to `"wrong Sec-WebSocket-Accept:
+    <key>"` in Go → mismatch → `status_code=101`, and
+    Rust also renders `status_code=101` (it does not
+    count the leading-space name as an accept header).
+    Verified by a Go probe in the docs follow-up
+    (notes dir: `goprobe-plusdd/`).
 26. The tungstenite path (`ws_error`'s non-Http arms)
     renders `dial_failed()` for a bad-accept failure too:
     tungstenite returns a protocol error with no response
@@ -3585,6 +3600,58 @@ it (promoted to direct deps only), so `NOTICE` /
     Go-faithful. Recorded as a follow-up; fixing it
     means changing the read loop, out of this loop's
     scope.
+28. Signed 3-char status tokens (`+DD`, 100 tokens
+    `+00`..`+99`): Go's `ReadResponse` accepts a status
+    token iff `len==3 && Atoi ok && >= 0`
+    (`net/http/response.go:170-186`); `strconv.Atoi`
+    accepts a leading `+`, so `+50`/`+01`/`+99`/`+00`
+    are VALID codes (resp 50/1/99/0) and gorilla's resp
+    branch renders `status_code_length=2` for 10–99
+    and `=1` for 0–9 (never `status_code`, never
+    `None`, since the code is < 100 and ≠ 101).
+    Rust's step-1 gate (`is_three_digit_code`,
+    `dial.rs` — "exactly 3 ASCII digits") rejects
+    `'+'` → malformed → the fixed 35-char message
+    `gateway: websocket handshake failed`. Root cause:
+    fix loop 3 (and both fix-loop-2 reviewers, and the
+    fix-loop-3 brief) equated "valid code" with
+    "exactly 3 ASCII digits", citing Go's
+    `isThreeDigitCode`
+    (`internal/gateway/handshake_log.go:62-67`) — but
+    that function governs what the log extractor emits
+    as a token, not what `ReadResponse` accepts as a
+    code; the `is_three_digit_code` doc comment in
+    `dial.rs` states the false rule as Go-derived.
+    The divergence only manifests when the headers
+    parse cleanly: `+50` + bad header → fixed in both
+    (the header error masks the code difference).
+    Recorded as a deviation (final re-review round 3:
+    safety PASS, technical PASS, red-team FAIL on this
+    one family; loop 3 of max 3 was closed, so no
+    loop 4 to land the fix). The fix, fully specified
+    for a future change: in step 1, a token is a valid
+    code iff `len==3 && Atoi ok && >= 0`, i.e. 3 ASCII
+    digits OR `+` + 2 ASCII digits, routed through the
+    existing deferred-status-error path (so ordering
+    vs proto/headers stays Go-faithful); pin with unit
+    tests (`+50` → length 2, `+01` → length 1,
+    `+99` → length 2, `+00` → length 1, `+50` + bad
+    header → fixed) + an integration test via
+    `start_with_response_bytes`. Pathological input
+    class: no real server sends signed status codes;
+    the live edge sends well-formed responses.
+    Evidence: red-team probe
+    (`/tmp/goprobe-fl3-rt/out.txt`, md5
+    `64d2dac61b5d20c738cc36fb8cd762b4`; 69-case battery
+    `/tmp/goprobe-fl3-rt2/out.txt`, md5
+    `bb7d86540aa002728dc0aaa2ba404019`), parent probe
+    (`/tmp/goprobe-parent/main.go`), docs-follow-up
+    probe (saved in the notes dir:
+    `goprobe-plusdd/main.go` + `out.txt`). The
+    fix-loop-3 report's "22 cases" probe claim is NOT
+    cited here (unverifiable: only 17 `==` blocks
+    shown; `/tmp/goprobe-fl3/out.txt` exists on
+    neither VM).
 
 ## M4b.3 Findings
 
@@ -3815,7 +3882,13 @@ it (promoted to direct deps only), so `NOTICE` /
   five fixes compose into one order: malformed token
   → proto → headers (with first-line rejection) →
   accept (both-ends trim, first-only) → deferred
-  status error. Also fixed in this loop: the no-colon
+  status error. NOTE (docs follow-up): this paragraph's
+  step-1 "malformed token" gate equates "valid code"
+  with "exactly 3 ASCII digits" — that premise is wrong
+  for signed `+DD` tokens (Go accepts `+00`..`+99` as
+  valid codes); see deviation 28 for the exact family,
+  both renderings, and the specified fix. Also fixed in
+  this loop: the no-colon
   error text is `malformed MIME header: missing
   colon`, not `malformed MIME header line`
   (`dial.rs` comment). Recorded, not fixed: the
