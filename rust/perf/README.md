@@ -68,7 +68,7 @@ giữ nguyên và nhấn mạnh.
 Boss rebuild PR #66 ở head `3ba3d6a` trên cue, đúng lệnh README, và
 headline size KHÔNG tái lập: ông đo được 17,481,032 B (sha
 `7f816189…`) trong khi README ghi 12,527,080 B (sha `b8aee622…`) —
-lệch +4,954 KB (+39%). Chẩn đoán của Boss đúng: run8 đo ở commit
+lệch +4,954 KB (+39.5%). Chẩn đoán của Boss đúng: run8 đo ở commit
 `3c45bfe`, tức TRƯỚC khi rebase lên `dev-rust` `27a0eaf` (M4b merge:
 CLI auth + 13 commands, ~11k dòng). Rebase nằm trong `3ba3d6a` nên
 bảng run8 mô tả cây cũ. Đây là lần thứ hai lỗi "số cũ, cây mới" xảy
@@ -81,9 +81,10 @@ của binary bench — hai field này trước đây không có ở đâu).
 Run9 xác nhận chẩn đoán: shell stripped 17,446,696 B (run8: 620,968 B
 — lớn hơn 28.1×, vì M4b link cả auth + transport/honk/boring-sys
 vào `castctl-rs`), full stripped 17,481,032 B — SIZE BẰNG CHÍNH XÁC
-số Boss đo, sha `b12911a5…` (khác sha của Boss vì target dir khác:
-`/tmp/perf-full-target` so với `/root/v66b-target` của ông — xem mục
-`rust-full`, phần tái lập sha). Tỉ lệ headline từ run9 là 0.363×
+số Boss đo, sha `b12911a5…` (khác sha của Boss vì cả checkout path
+lẫn target dir đều khác: `/tmp/castctl-rust-perf1` +
+`/tmp/perf-full-target` so với `/tmp/v66/c` + `/root/v66b-target`
+của ông — xem mục `rust-full`, phần tái lập sha). Tỉ lệ headline từ run9 là 0.363×
 (2.75× nhỏ hơn), KHÔNG phải 0.260× (3.84×) của run8. Số run8 giữ
 nguyên trong mục Drift (commit `3c45bfe`, lý do pre-rebase) — không
 xoá, không sửa tay.
@@ -188,7 +189,8 @@ sh rust/perf/run.sh [--skip-build] [--skip-item5]
 - Máy: cue, `Linux 6.18.38+ x86_64`, 8 × Intel Xeon @ 2.50GHz,
   MemTotal 24,788,940 kB (23.6 GiB), SwapTotal 0 kB (ghi trong
   `summary.json: machine.meminfo`), loadavg 1-phút 4.79 lúc bắt đầu,
-  7.21 giữa chừng, 18.05 lúc kết thúc (cao hơn run8 2.24–7.73 — build
+  9.40 giữa chừng, 18.05 lúc kết thúc (cao hơn run8 ở mọi điểm — run8
+  2.24 → 7.73 → 6.09 — build
   full-bin biên dịch ~350 crate song song CỘNG các session khác đang
   build/test song song trên cue, trong đó có một test binary M5a chạy
   196% CPU / 15.8G RSS; cộng 45 mark loadavg + timestamp trước/sau
@@ -211,9 +213,12 @@ sh rust/perf/run.sh [--skip-build] [--skip-item5]
   (sau rebase lên `dev-rust` `27a0eaf`, M4b đã merge),
   `cargo +1.99.1 build --release --locked -p castctl-rs`,
   `RUSTFLAGS="-C strip=symbols"` (số chính); build thường 187.4 s,
-  build strip 189.4 s (full build, target dir lạnh — chậm hơn run8
-  2.4/2.1 s vì closure giờ chứa cả transport/honk/boring-sys, không
-  còn stdlib-only, và vì tải máy lúc build).
+  build strip 189.4 s (full build, target dir lạnh — run8 chỉ mất
+  2.4/2.1 s vì target dir ấm, chỉ relink; chênh +185.0/+187.3 s, chủ
+  yếu do cold-vs-warm. Closure M4b lớn hơn (transport/honk/
+  boring-sys, không còn stdlib-only) làm build cold tuyệt đối dài
+  hơn, không giải thích được delta so với relink ấm 2.4 s; tải máy
+  lúc build cũng góp phần).
 - Rust full: `castctl-full` build từ `rust/perf/full-bin/` (standalone
   crate, `[workspace]` riêng, path deps `castctl-cli` +
   `castctl-config` + `castctl-transport` + `castctl-gateway`,
@@ -304,9 +309,11 @@ tiếp (unit test offline của transport crate gọi `HonkDialer::new`, và
 link sẵn toàn bộ closure (auth + transport/honk + gateway) nên thêm
 deps mà không keep chỉ đổi −160 B (full no-keep NHỎ hơn shell 160 B —
 hai `main` khác nhau, mức nhiễu); bật `keep-linked` thì to thêm
-**34,496 B** so với no-keep. Cơ chế giữ-link vẫn hoạt động (xem (b):
-các root Tier 1/2 có mặt trong binary keep, vắng trong no-keep), nhưng
-con số 20.17× của run8 không còn ý nghĩa — nó đo "shell M2 chưa link
+**34,496 B** so với no-keep. Cơ chế giữ-link vẫn hoạt động ở nghĩa
+hẹp (xem (b): chỉ đúng 2 root Tier 1/2 vắng trong no-keep —
+`KEEP_TIER2` 1 vs 0 và `RpcClient` 1 vs 0; 6 root còn lại đã có trong
+no-keep vì M4b link cùng closure vào CLI — keep chỉ giữ thêm ~83 dòng
+`nm` và 34,496 B), nhưng con số 20.17× của run8 không còn ý nghĩa — nó đo "shell M2 chưa link
 gì" so với "full keep", còn run9 đo "keep root giữ thêm bao nhiêu"
 trên nền closure đã link sẵn. Unstripped: shell 23,210,896 B, full
 no-keep 23,210,528 B, full keep 23,255,696 B (kích thước + sha256 của
@@ -384,7 +391,7 @@ không đổi); `--version=x` → stderr + exit 2;
   (`[profile.release-lto]`, `inherits = "release"`, `lto = "fat"`,
   `strip = "symbols"` trong `full-bin/Cargo.toml`) — profile form bỏ
   qua proc-macro. Build tay trên cue sau run8 với profile này:
-  exit 0, 4m 32s, 10,065,944 B (xem hàng LTO ở §1). Fix loop 1 rebuild
+  exit 0, 4m 32s, 10,065,944 B (số run8; hàng LTO ở §1 nay là số run9). Fix loop 1 rebuild
   lại variant này bằng đúng lệnh profile-form (record đầy đủ trong
   `data/lto-build-record.json`): size 10,065,944 B và `.text`
   6,942,120 B khớp y prose. Driver đã đổi sang profile form để rerun
@@ -408,14 +415,16 @@ không đổi); `--version=x` → stderr + exit 2;
   của run8 bị thu hồi cho run9. (Phần còn lại của phân tích run8 vẫn
   đúng: root Tier-2 giữ địa chỉ `async fn` chỉ giữ constructor —
   nhưng ở head mới, hyper đã vào binary bằng đường khác.)
-- **Khoảng trống đã công bố: hyper client machinery (0 symbol).**
+- **Run8 (đã thu hồi ở run9): khoảng trống hyper client machinery (0 symbol).**
   Entry `HttpClient::request` trong `#[used]` static KHÔNG giữ được
   hyper: địa chỉ của một `async fn` chỉ giữ constructor của future,
   không giữ code `poll` điều khiển hyper — mà poll nó thì cần I/O
-  thật, điều không root nào được làm. Nên rust-full là **lower bound**
+  thật, điều không root nào được làm. Nên ở run8 rust-full là **lower bound**
   của binary M7 ở đúng một chỗ này: nó chứa `HttpClient::new` +
   type `http::Request/Response` nhưng không chứa state machine client
-  của hyper. Không phóng đại, không giấu.
+  của hyper. Ở run9 hyper đã vào binary bằng đường khác (M4b link
+  hyper vào `castctl-cli` — xem bullet trên), claim này không còn
+  đứng. Không phóng đại, không giấu.
 
 ### Tái lập sha (run9 — 5 check thực nghiệm, R1 §6)
 
@@ -436,7 +445,7 @@ khác dòng tên file).
 - **(4a) Rebuild dãy b3→b4→b5** bằng đúng lệnh driver, sau khi
   `/tmp/perf-full-target` bị xoá → headline 17,481,032 B, sha
   `b12911a5…`; plain 23,255,696 B (`55c4bdae…`), plain-gnu 17,481,024 B
-  (`201ff340…`), nokeep 17,446,536 B (`9b6c28ed…`). Ba lần build độc
+  (`201ff340…`), nokeep 17,446,536 B (`9b6c28ed…`). Bốn lần build độc
   lập (run9 b5, rebuild tay, cold single, warm-restore retry) cho cùng
   một sha — sha pinned-path tái lập được 4 lần độc lập.
 - **(4c) Checkout khác, cùng target dir:** cold single build từ
@@ -455,42 +464,18 @@ khác dòng tên file).
   không ăn theo checkout) nên 145 chuỗi `__FILE__` BoringSSL
   byte-identical; `hatch.noise.rs` và `bindings.rs` sinh ra cũng
   byte-identical (so sha256 trực tiếp).
-- **(4b) Target dir của Boss, checkout chính:** lệnh y hệt Boss
-  (`CARGO_TARGET_DIR=/root/v66b-target`, fresh dir, checkout
-  `/tmp/castctl-rust-perf1`) → 17,481,032 B, sha **`7f816189…`** —
-  KHỚP CHÍNH XÁC sha Boss đo (build 3m47s). Nhưng: bản copy giữ lại
-  sau đó cho sha **`b2961462…`** (size vẫn 17,481,032 B; strings vẫn
-  nhất quán: 146× `v66b-target`, 19× `castctl-rust-perf1`, gateway
-  hash `1d46a2198ebe64b2`), và rebuild lạnh lặp lại từ cùng inputs cho
-  `b2961462…` lần nữa (hai lần độc lập). Source (HEAD 740e2dc,
-  working tree sạch ngoài file data run9), toolchain (cargo/rustc
-  1.99.1, cùng commit hash như run9 ghi), và output build-script đều
-  đã verify giống hệt nhau — **nguyên nhân đổi sha chưa rõ** (ứng
-  viên: một session khác rebuild đè vào cùng target dir trong lúc đĩa
-  cue ở 99% và tải cao; hoặc một input nondeterministic chưa xác
-  định). Hệ quả thực dụng: **sha ở target dir `/root/v66b-target`
-  không ổn định theo thời gian, không dùng làm cross-check**; chỉ sha
-  ở pinned path `/tmp/perf-full-target` (tái lập 4 lần độc lập: run9
-  b5, rebuild tay b3→b4→b5, cold single (4d), warm-restore retry
-  b3→b4→b5 sau build (4c) — lần retry này tái lập cả 4 sha: headline
-  `b12911a5…`, plain `55c4bdae…`, plain-gnu `201ff340…`, nokeep
-  `9b6c28ed…`) mới dùng được. Size 17,481,032 B thì ổn định ở mọi path và mọi lần
-  build — đó là cross-check bền. (Dự đoán cũ "+435 B vì path dài hơn
-  3 ký tự × 145 chuỗi" là SAI: so `size -A` trực tiếp cho thấy mọi
-  section giống hệt nhau giữa hai target dir dù tổng độ dài chuỗi
-  target-path chênh 584 B — cơ chế bù trừ chưa rõ, chỉ ghi là quan
-  sát.)
+- **(4b) Target dir của Boss — ĐÍNH CHÍNH ở fix loop 1: lần đầu là đo nhiễm, không phải sha bất ổn.** Lần chạy đầu (checkout `/tmp/castctl-rust-perf1`, target dir `/root/v66b-target` KHÔNG xoá trước — chữ "fresh dir" ở bản trước là ghi sai) cho sha `7f816189…`, khớp chính xác sha Boss đo. Điều này KHÔNG THỂ là build lạnh thật: theo (4c), checkout path là input của sha — binary build từ `/tmp/castctl-rust-perf1` phải chứa 19 chuỗi `file!()` với path đó, không thể cho ra sha của binary build từ `/tmp/v66/c`. Lần đầu chỉ có thể là cargo reuse artifact của Boss còn trong target dir chưa xoá (hoặc sha đọc từ binary cũ chưa bị thay) — bằng chứng quyết định (strings của binary lần đầu) đã mất cùng `rm -rf /root/v66b-target` sau đó, nên không phân biệt được hai khả năng này; cả hai đều là nhiễm, không phải tái lập. Bằng chứng sau đó nhất quán với nhiễm: bản copy giữ lại cho sha `b2961462…` (strings: 146× `v66b-target`, 19× `castctl-rust-perf1`, gateway hash `1d46a2198ebe64b2` — đúng inputs của writer), và rebuild lạnh lặp lại từ cùng inputs cho `b2961462…` lần nữa (hai lần độc lập). **Probe quyết định (fix loop 1):** recreate checkout `/tmp/v66/c` ở commit `3ba3d6a` + lock full-bin regenerate (md5 `f3d74ba6…`, byte-identical với lock Boss tự regen), `rm -rf /root/v66b-target`, chạy đúng lệnh Boss → 17,481,032 B, sha **`7f816189…`** (build 3m12s, exit 0; strings của binary probe: 19× `v66/c`, 0× `castctl-rust-perf1`, 146× `v66b-target`; bản copy `/tmp/perf2-4b-probe-stripped` cùng sha; log `/tmp/perf2-4b-probe.log`). Kết luận đúng: **sha là hàm xác định của (checkout path, target dir)** — `7f816189…` tái lập được từ đúng inputs của Boss (2× độc lập: Boss + probe này); `b2961462…` là sha đúng cho (checkout `/tmp/castctl-rust-perf1`, target `/root/v66b-target`) (2×); `b12911a5…` cho (checkout `/tmp/castctl-rust-perf1`, target `/tmp/perf-full-target`) (4×). Câu "sha ở `/root/v66b-target` không ổn định theo thời gian" ở bản trước bị RÚT LẠI — không có bằng chứng nào cho bất ổn; chỉ có một lần đo nhiễm. Hệ quả thực dụng không đổi: chỉ sha ở pinned path `/tmp/perf-full-target` (tái lập 4 lần độc lập: run9 b5, rebuild tay b3→b4→b5, cold single (4d), warm-restore retry b3→b4→b5 (sau build (4c)) — lần retry này tái lập cả 4 sha: headline `b12911a5…`, plain `55c4bdae…`, plain-gnu `201ff340…`, nokeep `9b6c28ed…`) mới dùng được trong Reproduce check. Size 17,481,032 B thì ổn định ở mọi path và mọi lần build — đó là cross-check bền. (Dự đoán cũ "+435 B vì path dài hơn 3 ký tự × 145 chuỗi" là SAI: so `size -A` trực tiếp cho thấy mọi section giống hệt nhau giữa hai target dir dù tổng độ dài chuỗi target-path chênh 584 B — cơ chế bù trừ chưa rõ, chỉ ghi là quan sát.)
 
 Lịch sử run8 (giữ để đối chiếu): rebuild từ source fc250db với tên
 target dir khác (`/tmp/perf-fix1-target`) cho cùng size, sha khác
 (unstripped `687af3f7…` ≠ run8 `2809a25f…`, stripped `57e48df3…` ≠
 `b8aee622…`, LTO `8c737840…` ≠ `8040a0c6…`); rebuild với đúng tên
 target dir của run8 (`/tmp/perf-full-target`) khớp cả ba sha. Số liệu
-đầy đủ trong `data/nm-counts.json` (`comparison_vs_committed_run8`,
-`sha_mismatch_explanation`, `byte_reproduction_check`) và
-`data/lto-build-record.json` — các file này nay là record của run8,
-record run9 nằm trong cùng file ở mục mới (xem `nm-counts.json`
-phiên bản run9).
+đầy đủ trong `data/nm-counts.json` (`comparison_vs_run8`,
+`sha_reproduction`, `nm`) và `data/lto-build-record.json`
+(`byte_reproduction_check` — sha LTO tái lập 2× độc lập); record run8
+cũ còn trong git history của các file này
+(`git show 3ba3d6a:rust/perf/data/nm-counts.json`).
 
 ### Build recipe (tái lập)
 
@@ -518,7 +503,11 @@ phiên bản run9).
 ### Reproduce check (run9 — đúng 4 dòng, checkout + target dir đều pin)
 
 Chạy 4 dòng dưới đây, verbatim, trên cue, từ checkout đã đo run9
-(`/tmp/castctl-rust-perf1`, head `740e2dc`):
+(`/tmp/castctl-rust-perf1`, head `740e2dc`). Nếu checkout này đã bị
+dọn khỏi cue (đĩa hay đầy — lúc fix loop 1 nó đã không còn), clone
+lại nhánh này ở head `740e2dc` vào đúng path `/tmp/castctl-rust-perf1`
+rồi mới chạy — path checkout là input của sha nên không được dùng
+path khác.
 
 ```sh
 cd /tmp/castctl-rust-perf1 && git rev-parse HEAD
@@ -535,7 +524,11 @@ size **17,481,032 B**, sha256
 cold single build (`rm -rf` target dir trước) cũng tái lập đúng
 size+sha; rebuild dãy b3→b4→b5 cũng vậy, hai lần độc lập (rebuild
 tay và warm-restore retry — lần retry tái lập cả 4 sha) (xem "Tái
-lập sha" bên trên).
+lập sha" bên trên). Nếu checkout ở head mới hơn mà chỉ đổi
+docs/data (6a1e11e trở đi — tự verify bằng `git diff --name-only
+740e2dc..HEAD`: chỉ README/PORTING/data, không chạm .rs/.toml/lock)
+thì dòng 1 in head mới đó, size + sha vẫn phải khớp, vì binary chỉ
+đổi khi source/lock đổi.
 
 **Nếu sha khác → bảng đã cũ, phải đo lại chứ không được sửa số tay.**
 Câu này áp cho đúng 4 dòng trên (checkout `/tmp/castctl-rust-perf1`
@@ -557,7 +550,9 @@ rust-full. Mọi bảng trong mục này mô tả run9 (commit `740e2dc`,
 
 ### 1. Kích thước binary
 
-| | Go (full) | Rust shell (M2, tham chiếu) | Rust full (transport+gateway) | Rust-full/Go | Rust-shell/Go (tham chiếu) |
+**Caption (run9):** commit `740e2dc19322c00c081d5c9dc0d7ca7ad8b762b6` (2026-11-05T18:19:48Z). Lệnh build: shell `cargo +1.99.1 build --release --locked -p castctl-rs`; full `RUSTFLAGS="-C strip=symbols" CARGO_TARGET_DIR=/tmp/perf-full-target cargo +1.99.1 build --release --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml`; LTO `cargo +1.99.1 build --profile release-lto --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml`. sha256 (đầy đủ, trong `summary.json` / record files): Go `c8ea009e49c5bffce3c6b971db0f9f86948ab3904f478da33d43b6b60a9bc374`, shell stripped `95d9be12e608e1c8f7b660f97ab4edc993da5939730e3feb3b5094b617de2776`, full stripped `b12911a545f530b837d375a0f07f167580e91e2206c2445b4d7e903ae13e002f`, full no-keep `9b6c28ed22a4dad06721e927ee965e6dac07a6201667f106c1171447f0295865`, full LTO `c985a9aa995392c2e9265b42bc7d72e3203ba92bb1f4a2c65eb5230a09f2d359`, bench `c8832c1845d9f9b53936af632053d8abe8400c0366a1f70fd249e4fae0937fc2`.
+
+| | Go (full) | Rust shell (M4b, tham chiếu) | Rust full (transport+gateway) | Rust-full/Go | Rust-shell/Go (tham chiếu) |
 |---|---|---|---|---|---|
 | Stripped (`-C strip=symbols`) | 48,100,296 B (45.87 MiB) | 17,446,696 B (16.64 MiB) | **17,481,032 B (16.67 MiB)** | **0.363 (2.75× nhỏ hơn)** | 0.363 |
 | Chưa strip | — | 23,210,896 B | 23,255,696 B | 0.483 | 0.483 |
@@ -580,10 +575,14 @@ Hàng LTO không dùng cho tỉ lệ headline.
 
 ### 2. Startup (wall-clock, N=20, warmup 5)
 
+**Caption (run9):** commit `740e2dc19322c00c081d5c9dc0d7ca7ad8b762b6` (2026-11-05T18:19:48Z). Binary đo: Go `/usr/local/bin/castctl` 0.9.0 (prebuilt, sha256 `c8ea009e49c5bffce3c6b971db0f9f86948ab3904f478da33d43b6b60a9bc374`); shell build `cargo +1.99.1 build --release --locked -p castctl-rs` (sha256 stripped `95d9be12e608e1c8f7b660f97ab4edc993da5939730e3feb3b5094b617de2776`); full build `RUSTFLAGS="-C strip=symbols" CARGO_TARGET_DIR=/tmp/perf-full-target cargo +1.99.1 build --release --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml` (sha256 stripped `b12911a545f530b837d375a0f07f167580e91e2206c2445b4d7e903ae13e002f`). Lệnh đo: driver loop Python (warmup 5, N=20) — xem `summary.json: items.startup_rss`.
+
 | Lệnh | Go median (min–max) ms | Rust shell median (min–max) ms (tham chiếu) | Rust full median (min–max) ms | Rust-full/Go | Rust-shell/Go (tham chiếu) |
 |---|---|---|---|---|---|
-| `--version` | 23.236 (16.629–29.925) | 5.505 (2.355–7.096) | **5.619 (4.371–8.037)** | **0.242 (4.14× nhanh hơn)** | 0.237 |
-| `--help` | 9.201 (8.722–19.879) | 1.912 (1.817–2.446) | **1.889 (1.733–2.072)** | **0.205 (4.87× nhanh hơn)** | 0.208 |
+| `--version` | 23.236 (16.629–29.925) | 5.505 (2.355–7.096) | **5.619 (4.371–8.037)** | **0.242\* (4.14× nhanh hơn\*)** | 0.237 |
+| `--help` | 9.201 (8.722–19.879) | 1.912 (1.817–2.446) | **1.889 (1.733–2.072)** | **0.205\* (4.87× nhanh hơn\*)** | 0.208 |
+
+\* Tỉ lệ startup tuyệt đối của run9 là số nhiễu theo tải (driver vs hyperfine lệch tới 2×) — trích kèm caveat này; dùng RSS (§3) làm số ổn định. Xem prose ngay dưới.
 | First measured run, warmup=0, sau probe `--version` (KHÔNG cold, KHÔNG sau build), N=1 `--version` — **n=1, không dùng làm kết luận** | 65.893 | 21.079 | 10.288 | 0.156 | 0.320 |
 
 Đối chiếu hyperfine 1.18.0 (N=20, median, 3 lệnh trong MỘT invocation):
@@ -606,6 +605,8 @@ ngay trước khi đo — suy luận, chưa chứng minh; và vì là n=1 nên n
 không dùng làm kết luận, chỉ ghi để khỏi ai trích nhầm.
 
 ### 3. Peak RSS (GNU time, N=20) + wall `status`
+
+**Caption (run9):** commit `740e2dc19322c00c081d5c9dc0d7ca7ad8b762b6` (2026-11-05T18:19:48Z). Binary đo: Go `/usr/local/bin/castctl` 0.9.0 (sha256 `c8ea009e49c5bffce3c6b971db0f9f86948ab3904f478da33d43b6b60a9bc374`); shell `cargo +1.99.1 build --release --locked -p castctl-rs` (sha256 stripped `95d9be12e608e1c8f7b660f97ab4edc993da5939730e3feb3b5094b617de2776`); full `RUSTFLAGS="-C strip=symbols" CARGO_TARGET_DIR=/tmp/perf-full-target cargo +1.99.1 build --release --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml` (sha256 stripped `b12911a545f530b837d375a0f07f167580e91e2206c2445b4d7e903ae13e002f`). Lệnh đo: driver loop Python + GNU time `-v` (warmup 5, N=20) — xem `summary.json: items.startup_rss` / `items.parse_config_rss`.
 
 | Lệnh | Go median (min–max) | Rust shell median (min–max) (tham chiếu) | Rust full median (min–max) | Rust-full/Go | Exit Go / shell / full |
 |---|---|---|---|---|---|
@@ -673,6 +674,8 @@ run9; RSS shell ổn định ~6.1 MiB (run6/run7/verify ở `--version`:
 
 ### 4. Logic thuần: parse config + render text Telegram
 
+**Caption (run9):** commit `740e2dc19322c00c081d5c9dc0d7ca7ad8b762b6` (2026-11-05T18:19:48Z). Lệnh đo: Go `go test -bench . -benchtime=100x -count=5 -run ^$ ./rust/perf/go-bench/` (test binary ephemeral — không có sha256 binary Go nào được ghi); Rust `cargo +1.99.1 build --release --offline` trong `rust/perf/bench/` → binary `perf-bench` 3,178,400 B, sha256 `c8832c1845d9f9b53936af632053d8abe8400c0366a1f70fd249e4fae0937fc2` (ghi trong `summary.json: items.pure_logic.rust_bench_binary`). Không có cột rust-full (bench đo trực tiếp cùng code cả hai phía đều link).
+
 Replicate khác nhau nên đây là **so sánh thực dụng, không phải cùng một
 bộ đếm**: Go item 4 là 1 process × 5 counts × 100 iters (`go test
 -benchtime=100x -count=5`, `rust/perf/go-bench/bench_test.go`); Rust
@@ -708,10 +711,10 @@ không chạm tới).
 **Cảnh báo khi đọc tỉ lệ §4 run9:** tỉ lệ cải thiện mạnh so với run8
 (parse-large 0.16→0.09, MDToHTML 0.17→0.08, render 0.18→0.08) CHỦ
 YẾU VÌ GO CHẬM ĐI DƯỚI TẢI, không phải vì Rust nhanh lên. Số Go run9
-tăng 1.7–2.4× so với run8 (MDToHTML 5.34M→12.11M ns, render
+ở 3 item lớn tăng 1.7–2.4× so với run8 (MDToHTML 5.34M→12.11M ns, render
 5.99M→14.41M, parse-large 7.35M→12.42M; min của parse-large Go
 7.01M ≈ median run8 — tải tăng dần giữa bench), trong khi số Rust
-ổn định trong ±5% (parse-large 1.178M→1.166M, md-to-html 0.886M→
+ổn định trong ±6% (parse-large 1.178M→1.166M, md-to-html 0.886M→
 0.921M, render 1.076M→1.133M). Tỉ lệ run9 vẫn là số đo thật của run9,
 nhưng đừng trích "Rust nhanh hơn 10.6×" mà không kèm caveat tải này;
 so sánh công bằng nhất giữa hai run là phía Rust (ổn định) và phía
@@ -730,6 +733,8 @@ thu hẹp — đo lại sau bước đó (hotspot H4). Tương tự `MDToHTML`: 
 đương `ReportAllocs` cho Rust ở đây).
 
 ### 5. Độ trễ 1 request qua transport loopback (SOCKS5 local)
+
+**Caption (run9):** commit `740e2dc19322c00c081d5c9dc0d7ca7ad8b762b6` (2026-11-05T18:19:48Z). Lệnh đo: Rust `[perf-bench, "socks5-get"]` (binary `perf-bench` 3,178,400 B, sha256 `c8832c1845d9f9b53936af632053d8abe8400c0366a1f70fd249e4fae0937fc2`, build `cargo +1.99.1 build --release --offline` trong `rust/perf/bench/`); Go `go test -run TestSocks5Get -count=1 -v ./rust/perf/go-bench/` (test binary ephemeral — không có sha256 binary Go nào được ghi). N=5 lần chạy process × 20 request/lần. Không có cột rust-full (harness, không phải binary).
 
 Định nghĩa: 1 × TCP CONNECT tới SOCKS5 `127.0.0.1:<ephemeral>` (no-auth)
 → CONNECT tới HTTP origin `127.0.0.1:<ephemeral>` → `GET /body-1024.bin`
@@ -758,9 +763,12 @@ Setup (spawn + verify hai server) hết 1.5 s; đo 13.1 s; tổng 14.6 s
 adjacent batches. **Đảo chiều so với run8** (khi đó 0.885 vs 0.872,
 tỉ lệ 0.99, trong sai số): phía Rust run9 là 3.973 ms/req — lượt đầu
 1.317 ms rồi bốn lượt sau plateau ở 3.964–3.999 ms (dao động chỉ
-±0.5%). Loadavg lúc đo item 5 là 11.39 cho CẢ hai phía (marks
+±0.5%). Loadavg 1-phút lúc đo item 5 là 11.39 cho CẢ hai phía (marks
 `before/after_item5_*` cùng một giây cho lượt Rust, 13 s cho lượt
-Go) nên tải KHÔNG giải thích được chênh lệch. Nguyên nhân chưa rõ —
+Go), nên tải nền ổn định không phải ứng viên chính giải thích chênh
+lệch — nhưng loadavg 1-phút là metric thô, không loại trừ được
+contention dưới-phút. Phía Go cũng có một lượt outlier 2.280 ms
+(2.4× median 0.948 ms); prose này ghi nhận mà chưa điều tra. Nguyên nhân chưa rõ —
 chưa kiểm chứng: có thể là hồi quy thật ở phía Rust sau M4b (bench
 binary nay link closure lớn hơn), hoặc artifact của harness Rust
 (dừng ở ~4 ms plateau gợi ý một độ trễ hệ thống, không phải nhiễu
@@ -800,8 +808,8 @@ chỗ — Go item 5 nay chạy với HOME thật (ghi trong `measure_all.py`).
   số, và cần probe riêng trước khi kết luận.
 - Lợi thế parse-large (10.6×) và render (12.7×) một phần là do Go làm
   nhiều việc hơn (validate sâu, alloc churn) và Rust defer validation —
-  và một phần lớn là do Go chậm đi dưới tải ở run9 (số Go tăng
-  1.7–2.4× so với run8 trong khi số Rust ổn định ±5%) — không phải
+  và một phần lớn là do Go chậm đi dưới tải ở run9 (số Go ở 3 item lớn
+  tăng 1.7–2.4× so với run8 trong khi số Rust ổn định trong ±6%) — không phải
   toàn bộ là "Rust nhanh hơn". Đo lại sau khi Rust bổ sung validation,
   và đừng trích tỉ lệ §4 mà không kèm caveat tải.
 - Con số cũ "77.5× nhỏ hơn" (run7, shell vs Go full) vẫn đúng về mặt
@@ -878,7 +886,7 @@ hyperfine --version:  Go median 10.7 ms vs shell 2.31 ms vs full 7.1 ms
 hyperfine --help:     Go median 16.42 ms vs shell 4.54 ms vs full 4.33 ms
 summary.json: date 2026-11-05T18:19:48Z, commit 740e2dc, machine cue 8x Xeon 2.50GHz,
   MemTotal 24788940 kB, SwapTotal 0 kB, go 0.9.0 (1396697), cargo 1.99.1,
-  go 1.27.3, hyperfine 1.18.0, loadavg start 4.79 / mid 7.21 / end 18.05,
+  go 1.27.3, hyperfine 1.18.0, loadavg start 4.79 / mid 9.40 / end 18.05,
   disk / 9.69 -> 8.73 GiB
 item5: status measured, rust 3.973 ms/req (1.317-3.999),
   go 0.948 ms/req (0.816-2.280); setup 1.5 s, measure 13.1 s
@@ -890,7 +898,11 @@ Stdout thật đầy đủ: `rust/perf/data/run9-stdout.txt` (157,971 B — chí
 là JSON dump của `summary.json` (157,881 B; lần build LTO gốc fail nằm
 trong mảng `notes` của JSON, không phải một dòng stdout riêng) cộng
 dòng `SPDX check: FAIL …` (90 B); JSON trong log khớp byte với
-`summary.json` đã commit, md5 `9d84a70fe125e6fc9652c022146fb56e`). Số thô
+`summary.json` đã commit, md5 `9d84a70fe125e6fc9652c022146fb56e`).
+Dòng SPDX FAIL này là check advisory trong `run.sh` lúc rerun
+(target dir đã chứa file `.go` của boring-sys sau build); gate SPDX
+chính thức PASS trên checkout sạch, chạy TRƯỚC mọi build — xem Điều
+kiện đo. Đừng đọc dòng cuối file stdout như gate fail. Số thô
 đầy đủ: `rust/perf/data/*.json` (mỗi file ghi từng lần chạy,
 median/min/max/mean, exit code). Tái lập: chạy lại lệnh trên rồi diff
 `data/summary.json` với file đã commit. Lưu ý: lần chạy này có một
@@ -959,10 +971,10 @@ RSS shell `--version` 2.20→6.12 MiB (×2.8), RSS full `--version`
 5.42→6.23 MiB (+14.9%), RSS full `status` +19–62% (status nay làm
 việc thật, exit 2 thay vì stub exit 1 ở run8). (b) Tải: run9 chạy dưới
 loadavg 4.79→18.05 (session khác chạy test binary 196% CPU / 15.8G
-RSS), run8 chỉ 2.24→6.09. Số Rust §4 ổn định trong ±5% (parse-min
-+1.9%, parse-large −1.0%, md-to-html +3.9%, split +0.5%, render
-+5.3%), nhưng số Go §4 tăng 1.7–2.4× (parse-large +69%, MDToHTML
-+127%, render +141%, split +42%; min của Go parse-large 7.01M ≈
+RSS), run8 chỉ 2.24→6.09. Số Rust §4 ổn định trong ±6% (parse-min
++1.9%, parse-large −1.1%, md-to-html +3.9%, split +0.5%, render
++5.3%), nhưng số Go §4 ở 4 item lớn tăng 1.4–2.4× (parse-large +69%, MDToHTML
++127%, render +140%, split +42%; min của Go parse-large 7.01M ≈
 median run8 — tải tăng dần giữa bench). Wall startup: Go `--version`
 +119% (10.63→23.24 ms) nhưng `--help` −15% (10.86→9.20 ms) trong
 cùng một run; shell `--version` +536% (0.87→5.51 ms), full +195%
@@ -970,8 +982,8 @@ cùng một run; shell `--version` +536% (0.87→5.51 ms), full +195%
 wall 1–20 ms ở run9 bị scheduling jitter chi phối, không phải tốc độ
 thật; hyperfine cũng lệch với driver ở run9 (Go `--version` hyperfine
 10.7 ms vs driver 23.2 ms; full 7.1 vs 5.6 ms), ngược với run8 khi hai
-phương pháp đồng thuận. RSS Go ổn định ±1% ở mọi ô (mode thấp) —
-RSS là metric đáng tin nhất của run9. Item 5 là drift lớn nhất:
+phương pháp đồng thuận. RSS Go ổn định ±1% ở mọi ô trừ status-min
+(−1.5%) (mode thấp) — RSS là metric đáng tin nhất của run9. Item 5 là drift lớn nhất:
 Rust 0.872→3.973 ms/req (+356%), tỉ lệ 0.99→4.19, đảo chiều kết
 luận; Go chỉ +7.1% (0.885→0.948). **Hướng kết luận đổi ở đúng hai
 chỗ so với run8: item 5 (Rust nay chậm hơn) và headline size
@@ -1081,14 +1093,16 @@ không ổn định qua các session — xem §3.
   checkout ở cùng path; size 17,481,032 B ổn định mọi path và là
   cross-check bền. Cơ chế bù size khi độ dài path đổi (±584 B string
   mà `.rodata` không đổi) chưa giải thích được — chỉ ghi nhận.
-- Anomaly (4b): rebuild lạnh với đúng lệnh của Boss ở
-  `/root/v66b-target` cho sha `7f816189…` (đúng sha Boss đo), nhưng
-  rebuild lạnh lặp lại cùng lệnh/cùng dir sau đó cho sha
-  `b2961462…` (cùng size) — nguyên nhân chưa rõ (đĩa dao động mạnh,
-  session khác build song song; không loại trừ input không xác định).
-  Sha ở `/root/v66b-target` không ổn định theo thời gian, không dùng
-  làm cross-check; chỉ sha ở pinned path `/tmp/perf-full-target`
-  (tái lập 3×) được dùng trong Reproduce check.
+- Anomaly (4b) — ĐÃ GIẢI QUYẾT ở fix loop 1 (xem mục "Tái lập sha"):
+  lần đầu khớp sha Boss `7f816189…` là đo nhiễm — target dir
+  `/root/v66b-target` không xoá trước nên cargo reuse artifact của
+  Boss (bằng chứng quyết định đã mất cùng `rm -rf` sau đó). Probe
+  quyết định (recreate `/tmp/v66/c` ở `3ba3d6a` + lock regenerate,
+  `rm -rf` target dir, đúng lệnh Boss) tái lập đúng `7f816189…` — sha
+  là hàm xác định của (checkout path, target dir), không bất ổn theo
+  thời gian. Câu "không ổn định" ở bản trước bị rút lại. Chỉ sha ở
+  pinned path `/tmp/perf-full-target` (tái lập 4×) được dùng trong
+  Reproduce check.
 - Kiểm tra `nm` trên binary LTO không chạy trực tiếp được (profile
   strip symbols); giữ-link ở LTO chỉ được chứng minh gián tiếp qua
   `.text` + cơ chế `#[used]` static (xem mục `rust-full`; record build
