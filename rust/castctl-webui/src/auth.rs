@@ -18,9 +18,16 @@
 //! - The 72-byte limit is on BYTES of the token (not chars).
 //! - `LooksLikeBcryptHash`: length > 4 and a `$2a$` / `$2b$` /
 //!   `$2y$` prefix.
-//! - Verify errors (including `PasswordTooLong` / malformed
-//!   hash) are all `false`: a missing, malformed or wrong
-//!   token produces the same fixed 401.
+//! - Verify errors (malformed hash, wrong token) are all
+//!   `false`: a missing, malformed or wrong token produces
+//!   the same fixed 401. There is no `PasswordTooLong` on
+//!   the verify path — Go's `CompareHashAndPassword`
+//!   truncates an over-72-byte password to its first 72
+//!   bytes (x/crypto/bcrypt only ever reads 18 key words
+//!   in `expandKeyWithSalt`), and the bcrypt crate's
+//!   `verify` truncates identically. The 72-byte rejection
+//!   lives in `hash_token` only, matching Go's
+//!   `GenerateFromPassword`.
 //! - The token is never logged or echoed; only the bcrypt
 //!   hash is ever persisted.
 
@@ -60,12 +67,15 @@ pub fn hash_token(token: &str) -> Result<String, String> {
 }
 
 /// Verify a presented token against a stored hash. Every
-/// failure — wrong token, malformed hash, too-long token — is
-/// `false` (`VerifyWebUIToken`).
+/// failure — wrong token, malformed hash — is `false`
+/// (`VerifyWebUIToken`). There is deliberately NO length
+/// pre-check here: Go's `CompareHashAndPassword` truncates
+/// a >72-byte password to its first 72 bytes, so a 73-byte
+/// token whose first 72 bytes match verifies; the bcrypt
+/// crate's `verify` truncates identically. The 72-byte
+/// rejection lives in `hash_token` only, matching Go's
+/// `GenerateFromPassword`.
 pub fn verify_token(token: &str, hash: &str) -> bool {
-    if token.len() > MAX_TOKEN_BYTES {
-        return false;
-    }
     bcrypt::verify(token, hash).unwrap_or(false)
 }
 
@@ -107,6 +117,20 @@ mod tests {
         // the stored bytes differ from Go's — this pins 10.
         let hash = hash_token("cost-check").expect("hash");
         assert!(hash.starts_with("$2b$10$"), "hash was {hash}");
+    }
+
+
+    #[test]
+    fn verify_truncates_over_72_bytes() {
+        // F-A1: Go's CompareHashAndPassword truncates a
+        // >72-byte password to its first 72 bytes, so a
+        // 73-byte token whose first 72 bytes match verifies
+        // (even when byte 73 differs); a token differing
+        // inside the first 72 does not.
+        let hash = hash_token(&"a".repeat(72)).expect("hash");
+        assert!(verify_token(&"a".repeat(73), &hash));
+        assert!(verify_token(&format!("{}b", "a".repeat(72)), &hash));
+        assert!(!verify_token(&format!("b{}", "a".repeat(71)), &hash));
     }
 
     #[test]

@@ -657,12 +657,20 @@ impl Server {
                 limiter.record_success(&client_key);
             }
         }
-        // Origin: mutating methods only.
+        // Origin: mutating methods only. An empty Origin
+        // header is allowed by Go's requireSameOrigin
+        // short-circuit (origin == "" → next), so it is
+        // treated as absent here; api_origin_allowed
+        // itself still rejects "" (Go's allowedOrigin("")
+        // == false) and must not change.
         if matches!(
             method,
             &Method::POST | &Method::PUT | &Method::PATCH | &Method::DELETE
         ) {
-            let origin = headers.get("origin").and_then(|v| v.to_str().ok());
+            let origin = headers
+                .get("origin")
+                .and_then(|v| v.to_str().ok())
+                .filter(|s| !s.is_empty());
             let host = headers
                 .get("host")
                 .and_then(|v| v.to_str().ok())

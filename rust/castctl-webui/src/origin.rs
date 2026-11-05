@@ -50,7 +50,19 @@ pub fn is_loopback_host(host: &str) -> bool {
         return true;
     }
     match h.parse::<std::net::IpAddr>() {
-        Ok(ip) => ip.is_loopback(),
+        Ok(ip) => {
+            // Go's `net.ParseIP(host).IsLoopback()` maps
+            // an IPv4-mapped IPv6 address
+            // (`::ffff:127.0.0.1`) through `To4()` first,
+            // so it is loopback; std's `is_loopback()` on
+            // the V6 form is false.
+            if let std::net::IpAddr::V6(v6) = ip
+                && let Some(v4) = v6.to_ipv4_mapped()
+            {
+                return v4.is_loopback();
+            }
+            ip.is_loopback()
+        }
         Err(_) => false,
     }
 }
@@ -132,17 +144,42 @@ pub fn api_origin_allowed(origin: Option<&str>, host: &str) -> bool {
     if hostname.is_empty() {
         return false;
     }
-    // Request host: SplitHostPort when possible, then trim
-    // brackets; compare case-insensitively.
-    let mut req_host = host;
-    if let Some(idx) = host.rfind(':') {
-        let (h, port) = (&host[..idx], &host[idx + 1..]);
-        if !h.contains(':') && port.bytes().all(|b| b.is_ascii_digit()) {
-            req_host = h;
-        }
-    }
+    // Request host: `net.SplitHostPort` when possible,
+    // then trim brackets; compare case-insensitively.
+    // On a split error Go keeps the host as-is.
+    let req_host = split_host_port(host).unwrap_or(host);
     let req_host = req_host.trim_matches(|c| c == '[' || c == ']');
     hostname.eq_ignore_ascii_case(req_host)
+}
+
+/// `net.SplitHostPort` for a request Host: a bracketed
+/// IPv6 host yields the text up to `]`; a bare host splits
+/// at the last `:` only when the port is all digits and the
+/// host part holds no `:`. `None` when Go would error
+/// (missing port, non-digit port, missing `]`, bare IPv6
+/// with too many colons) — the caller then keeps the host
+/// as-is, exactly as Go does on error.
+fn split_host_port(host: &str) -> Option<&str> {
+    if let Some(bracketed) = host.strip_prefix('[') {
+        let close = bracketed.find(']')?;
+        let after = &bracketed[close + 1..];
+        if after.is_empty() {
+            return None;
+        }
+        let port = after.strip_prefix(':')?;
+        if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        Some(&bracketed[..close])
+    } else {
+        let idx = host.rfind(':')?;
+        let h = &host[..idx];
+        let port = &host[idx + 1..];
+        if h.contains(':') || port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        Some(h)
+    }
 }
 
 /// WS `CheckOrigin` (`screencast.go`): true when the origin
@@ -274,4 +311,55 @@ mod tests {
             "127.0.0.1:8317"
         ));
     }
+    #[test]
+    fn mapped_v6_loopback_is_loopback() {
+        // F-A2: Go's net.ParseIP(...).IsLoopback() maps
+        // ::ffff:127.0.0.1 through To4() first.
+        assert!(is_loopback_host("::ffff:127.0.0.1"));
+        assert!(is_loopback_host("::ffff:127.0.0.1:3000"));
+        assert!(api_origin_allowed(
+            Some("http://[::ffff:127.0.0.1]:3000"),
+            "127.0.0.1:8317"
+        ));
+        // A mapped non-loopback address is not loopback.
+        assert!(!is_loopback_host("::ffff:192.0.2.1"));
+    }
+
+    #[test]
+    fn ipv6_request_host_with_port() {
+        // F-A4: Go's SplitHostPort on the request Host:
+        // [::1]:8317 compares as ::1.
+        assert!(api_origin_allowed(
+            Some("http://[::1]:3000"),
+            "[::1]:8317"
+        ));
+        assert!(api_origin_allowed(
+            Some("http://127.0.0.1:3000"),
+            "127.0.0.1:8317"
+        ));
+        // A bare ::1 request host (no port) is kept as-is
+        // by Go's SplitHostPort error path and still
+        // matches after trimming.
+        assert!(api_origin_allowed(Some("http://[::1]:3000"), "[::1]"));
+    }
+
+    #[test]
+    fn uppercase_scheme_origin_is_parsed() {
+        // Safety L-2 premise check: the reviewer assumed
+        // an uppercase scheme (`HTTP://...`) defeats the
+        // scheme strip. It does not — `find("://")`
+        // matches the (lowercase) separator symbols, so
+        // the origin parses and the loopback rule applies.
+        // Recorded, not "fixed": the check is already
+        // scheme-agnostic and fail-closed either way.
+        assert!(api_origin_allowed(
+            Some("HTTP://127.0.0.1:3000"),
+            "127.0.0.1:8317"
+        ));
+        assert!(api_origin_allowed(
+            Some("HTTP://[::1]:3000"),
+            "[::1]:8317"
+        ));
+    }
+
 }
