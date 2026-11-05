@@ -69,13 +69,14 @@ pub enum LockOutcome {
 pub fn acquire_update_lock(dir: &Path) -> Result<LockOutcome, UpdateError> {
     use std::os::unix::fs::OpenOptionsExt;
     let path = dir.join(LOCK_FILE_NAME);
-    if let Ok(meta) = std::fs::symlink_metadata(&path) {
-        if meta.file_type().is_symlink() {
-            return Err(UpdateError::failure("update lock file is a symlink"));
-        }
+    if let Ok(meta) = std::fs::symlink_metadata(&path)
+        && meta.file_type().is_symlink()
+    {
+        return Err(UpdateError::failure("update lock file is a symlink"));
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .mode(0o600)

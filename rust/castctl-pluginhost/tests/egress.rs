@@ -25,7 +25,9 @@ use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
-use castctl_pluginhost::egress::{DialFn, DialStream, EgressProxy, UpstreamTransport};
+use castctl_pluginhost::egress::{
+    DialFn, DialStream, EgressProxy, UpstreamResponseFuture, UpstreamTransport,
+};
 use castctl_pluginhost::error::PluginHostError;
 use castctl_pluginhost::host::EgressProxyHandle;
 
@@ -86,7 +88,7 @@ impl UpstreamTransport for FakeUpstream {
     fn round_trip(
         &self,
         req: Request<Full<Bytes>>,
-    ) -> Pin<Box<dyn Future<Output = Result<Response<Full<Bytes>>, PluginHostError>> + Send + '_>>
+    ) -> UpstreamResponseFuture<'_>
     {
         Box::pin(async move {
             let (parts, body) = req.into_parts();

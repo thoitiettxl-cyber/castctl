@@ -232,8 +232,12 @@ impl Desired {
     }
 }
 
+/// The host log callback: `fn(level, message)`.
+type LogFn = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
 /// Options configuring a `Host`.
 /// Source: `Options` (`host.go:121-130`).
+#[derive(Default)]
 pub struct Options {
     /// Overrides the default (STOPPED) loader; tests
     /// use a fake. `None` means the default loader.
@@ -241,16 +245,7 @@ pub struct Options {
     /// Receives host.log callback entries and lifecycle
     /// warnings. It must not block: it may be called
     /// from a plugin thread. `None` discards.
-    pub log: Option<Arc<dyn Fn(&str, &str) + Send + Sync>>,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Options {
-            loader: None,
-            log: None,
-        }
-    }
+    pub log: Option<LogFn>,
 }
 
 /// The host-side view of a registered plugin.
@@ -343,10 +338,19 @@ struct HostState {
 /// Source: `Host` (`host.go:132-149`).
 pub struct Host {
     loader: Box<dyn Loader>,
-    log: Option<Arc<dyn Fn(&str, &str) + Send + Sync>>,
+    log: Option<LogFn>,
     apply_mu: Mutex<()>,
     state: Mutex<HostState>,
     egress_mu: Mutex<Vec<Arc<dyn EgressProxyHandle>>>,
+}
+
+/// Identifies one loaded plugin image for a guarded
+/// call: the tag, the image path, and its generation.
+/// A panic or timeout fuses exactly this image.
+struct CallTarget<'a> {
+    tag: &'a str,
+    path: &'a str,
+    generation: u64,
 }
 
 impl Host {
@@ -403,16 +407,17 @@ impl Host {
         if !lp.registered {
             return None;
         }
-        if let Some(entry) = state.fused.get(tag) {
-            if entry.path == lp.path && entry.generation == lp.generation {
-                return None;
-            }
+        if let Some(entry) = state.fused.get(tag)
+            && entry.path == lp.path
+            && entry.generation == lp.generation
+        {
+            return None;
         }
         Some(LoadedPlugin {
             tag: lp.desired.tag.clone(),
             type_: lp.desired.type_.clone(),
             metadata: lp.metadata.clone(),
-            capabilities: lp.capabilities.clone(),
+            capabilities: lp.capabilities,
             schema_version: lp.schema,
             commands: lp.commands.clone(),
             path: lp.path.clone(),
@@ -551,14 +556,14 @@ impl Host {
             // fused (skipped), a different path replaces
             // and clears the fuse.
             if is_fused {
-                if let Some(fuse) = &fuse_entry {
-                    if fuse.path == d.path {
-                        report.skipped.push(Skipped {
-                            tag: d.tag.clone(),
-                            reason: format!("fused: {}", strip_control_chars(&fuse.reason)),
-                        });
-                        continue;
-                    }
+                if let Some(fuse) = &fuse_entry
+                    && fuse.path == d.path
+                {
+                    report.skipped.push(Skipped {
+                        tag: d.tag.clone(),
+                        reason: format!("fused: {}", strip_control_chars(&fuse.reason)),
+                    });
+                    continue;
                 }
                 self.state
                     .lock()
@@ -615,7 +620,7 @@ impl Host {
                 }
                 // Different image: quiesce before replace.
                 // A quiesce failure is logged, never fatal.
-                if let Err(_) = self.quiesce(&existing) {
+                if self.quiesce(&existing).is_err() {
                     self.logf("warn", &format!("plugin quiesce failed for tag {}", d.tag));
                 }
                 match self.load_one(&d) {
@@ -725,14 +730,13 @@ impl Host {
         // otherwise make the panicking image callable
         // again. When no image is loaded the fuse is
         // recorded as-is.
-        if let Some(cur) = state.loaded.get(tag) {
-            if let Some(existing) = state.fused.get(tag) {
-                if existing.path == cur.path && existing.generation == cur.generation {
-                    if path != cur.path || generation != cur.generation {
-                        return;
-                    }
-                }
-            }
+        if let Some(cur) = state.loaded.get(tag)
+            && let Some(existing) = state.fused.get(tag)
+            && existing.path == cur.path
+            && existing.generation == cur.generation
+            && (path != cur.path || generation != cur.generation)
+        {
+            return;
         }
         state.fused.insert(
             tag.to_string(),
@@ -886,7 +890,7 @@ impl Host {
         schema: u32,
     ) -> Option<Arc<dyn EgressProxyHandle>> {
         lp.metadata = reg.metadata.clone();
-        lp.capabilities = reg.capabilities.clone();
+        lp.capabilities = reg.capabilities;
         lp.schema = schema;
         lp.commands = reg.commands.clone();
         lp.desired = d.clone();
@@ -1002,15 +1006,14 @@ impl Host {
             // fast with the stored fuse reason. Only a
             // fuse recorded for this image's own path and
             // generation fail-fasts.
-            if is_fused {
-                if let Some(fuse) = fuse_entry {
-                    if !ok || (fuse.path == path && fuse.generation == generation) {
-                        return Err(PluginHostError::failed(format!(
-                            "plugin {tag:?} is fused: {}",
-                            fuse.reason
-                        )));
-                    }
-                }
+            if is_fused
+                && let Some(fuse) = fuse_entry
+                && (!ok || (fuse.path == path && fuse.generation == generation))
+            {
+                return Err(PluginHostError::failed(format!(
+                    "plugin {tag:?} is fused: {}",
+                    fuse.reason
+                )));
             }
             (client, path, generation)
         };
@@ -1019,7 +1022,17 @@ impl Host {
                 "plugin {tag:?} is not loaded"
             )));
         };
-        self.call_envelope_client(&client, method, request, tag, &path, generation, timeout)
+        self.call_envelope_client(
+            &client,
+            method,
+            request,
+            CallTarget {
+                tag,
+                path: &path,
+                generation,
+            },
+            timeout,
+        )
     }
 
     /// The guarded call for a loaded entry
@@ -1036,14 +1049,16 @@ impl Host {
             &lp.client,
             method,
             request,
-            &lp.desired.tag,
-            &lp.path,
-            lp.generation,
+            CallTarget {
+                tag: &lp.desired.tag,
+                path: &lp.path,
+                generation: lp.generation,
+            },
             None,
         )
     }
 
-    /// The guarded call: the call runs on a spawned
+        /// The guarded call: the call runs on a spawned
     /// thread, a recovered panic fuses the plugin, and
     /// a timeout abandons the call without killing the
     /// plugin thread.
@@ -1053,9 +1068,7 @@ impl Host {
         client: &Arc<dyn Client>,
         method: &str,
         request: &[u8],
-        tag: &str,
-        path: &str,
-        generation: u64,
+        target: CallTarget<'_>,
         timeout: Option<Duration>,
     ) -> Result<Vec<u8>, PluginHostError> {
         enum Outcome {
@@ -1090,26 +1103,26 @@ impl Host {
             None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
         };
         match received {
-            Ok(Outcome::Ok(bytes)) => parse_envelope(&bytes, tag),
+            Ok(Outcome::Ok(bytes)) => parse_envelope(&bytes, target.tag),
             Ok(Outcome::Transport(e)) => Err(e),
             Ok(Outcome::Panicked(type_name)) => {
                 let reason = format!("{method} panic: {type_name}");
-                self.fuse(tag, &reason, path, generation);
-                Err(PluginHostError::failed(format!("plugin {tag:?}: {reason}")))
+                self.fuse(target.tag, &reason, target.path, target.generation);
+                Err(PluginHostError::failed(format!("plugin {:?}: {reason}", target.tag)))
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 self.fuse(
-                    tag,
+                    target.tag,
                     &format!("call timed out or cancelled: {method}"),
-                    path,
-                    generation,
+                    target.path,
+                    target.generation,
                 );
                 Err(PluginHostError::failed("context deadline exceeded"))
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let reason = format!("{method} panic: unknown");
-                self.fuse(tag, &reason, path, generation);
-                Err(PluginHostError::failed(format!("plugin {tag:?}: {reason}")))
+                self.fuse(target.tag, &reason, target.path, target.generation);
+                Err(PluginHostError::failed(format!("plugin {:?}: {reason}", target.tag)))
             }
         }
     }
@@ -1269,10 +1282,14 @@ mod tests {
         serde_json::to_vec(&pluginabi::new_error_envelope(code, message)).unwrap()
     }
 
+    /// The fake-client call hook: `fn(method, request) -> response`.
+    type CallHook =
+        Arc<dyn Fn(&str, &[u8]) -> Result<Vec<u8>, ClientError> + Send + Sync>;
+
     struct FakeClientInner {
         calls: Vec<(String, Vec<u8>)>,
         shutdowns: usize,
-        on_call: Option<Arc<dyn Fn(&str, &[u8]) -> Result<Vec<u8>, ClientError> + Send + Sync>>,
+        on_call: Option<CallHook>,
         panic_methods: HashSet<String>,
         block_methods: HashSet<String>,
     }
@@ -1294,10 +1311,7 @@ mod tests {
             })
         }
 
-        fn set_on_call(
-            &self,
-            f: Arc<dyn Fn(&str, &[u8]) -> Result<Vec<u8>, ClientError> + Send + Sync>,
-        ) {
+        fn set_on_call(&self, f: CallHook) {
             self.inner.lock().unwrap().on_call = Some(f);
         }
 
@@ -1404,17 +1418,16 @@ mod tests {
         }
     }
 
+    /// The fake-loader open hook: `fn(file, host) -> client`.
+    type OpenFn = Arc<
+        dyn Fn(&PluginFile, &Host) -> Result<Arc<dyn Client>, PluginHostError> + Send + Sync,
+    >;
+
     struct FakeLoaderInner {
         clients: HashMap<String, Arc<FakeClient>>,
         open_err: HashMap<String, PluginHostError>,
         opens: Vec<String>,
-        open_func: Option<
-            Arc<
-                dyn Fn(&PluginFile, &Host) -> Result<Arc<dyn Client>, PluginHostError>
-                    + Send
-                    + Sync,
-            >,
-        >,
+        open_func: Option<OpenFn>,
     }
 
     pub struct FakeLoader {
@@ -2355,9 +2368,7 @@ mod tests {
         h.close();
     }
 
-    fn register_with_hosts(
-        hosts: Vec<String>,
-    ) -> Arc<dyn Fn(&str, &[u8]) -> Result<Vec<u8>, ClientError> + Send + Sync> {
+    fn register_with_hosts(hosts: Vec<String>) -> CallHook {
         Arc::new(move |method: &str, _req: &[u8]| {
             if method == pluginabi::METHOD_PLUGIN_REGISTER
                 || method == pluginabi::METHOD_PLUGIN_RECONFIGURE

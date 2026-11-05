@@ -99,12 +99,11 @@ fn decode_rune(b: &[u8]) -> (char, usize) {
         return ('\u{FFFD}', 0);
     }
     for len in 1..=4.min(b.len()) {
-        if let Ok(s) = std::str::from_utf8(&b[..len]) {
-            if let Some(c) = s.chars().next() {
-                if c.len_utf8() == len {
-                    return (c, len);
-                }
-            }
+        if let Ok(s) = std::str::from_utf8(&b[..len])
+            && let Some(c) = s.chars().next()
+            && c.len_utf8() == len
+        {
+            return (c, len);
         }
     }
     ('\u{FFFD}', 1)

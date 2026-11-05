@@ -76,6 +76,7 @@ pub fn is_header_map_key(key: &str) -> bool {
 ///     key is touched.
 ///   - Null, bools, and numbers are returned unchanged.
 ///   - The secret rule wins over the header rule.
+///
 /// Source: `redact.Value` / `redactChild` /
 /// `redactHeaders` (`value.go:147-226`).
 #[must_use]

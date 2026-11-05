@@ -230,8 +230,9 @@ pub fn shadow_copy_to_dir(file: &PluginFile, dir: &Path) -> Result<PathBuf, Plug
         let _ = std::fs::remove_file(&tmp_path);
         return Ok(target);
     }
-    if let Err(e) = std::fs::remove_file(&target) {
-        if e.kind() != std::io::ErrorKind::NotFound {
+    if let Err(e) = std::fs::remove_file(&target)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
             if shadow_matches(&target, size, &digest) {
                 let _ = std::fs::remove_file(&tmp_path);
                 return Ok(target);
@@ -242,7 +243,6 @@ pub fn shadow_copy_to_dir(file: &PluginFile, dir: &Path) -> Result<PathBuf, Plug
             // os error, which carries it; this port drops
             // the path-bearing cause).
             return Err(PluginHostError::failed("remove stale shadow plugin"));
-        }
     }
     if let Err(e) = std::fs::rename(&tmp_path, &target) {
         if e.kind() != std::io::ErrorKind::AlreadyExists && !shadow_matches(&target, size, &digest)

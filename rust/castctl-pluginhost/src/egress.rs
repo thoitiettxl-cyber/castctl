@@ -90,8 +90,14 @@ pub trait UpstreamTransport: Send + Sync {
     fn round_trip(
         &self,
         req: Request<Full<Bytes>>,
-    ) -> Pin<Box<dyn Future<Output = Result<Response<Full<Bytes>>, PluginHostError>> + Send + '_>>;
+    ) -> UpstreamResponseFuture<'_>;
 }
+
+/// The future returned by
+/// [`UpstreamTransport::round_trip`].
+pub type UpstreamResponseFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<Response<Full<Bytes>>, PluginHostError>> + Send + 'a>,
+>;
 
 /// A byte stream that is both readable and writable:
 /// the single principal trait a CONNECT target needs.
@@ -628,7 +634,7 @@ impl UpstreamTransport for HyperUpstream {
     fn round_trip(
         &self,
         req: Request<Full<Bytes>>,
-    ) -> Pin<Box<dyn Future<Output = Result<Response<Full<Bytes>>, PluginHostError>> + Send + '_>>
+    ) -> UpstreamResponseFuture<'_>
     {
         Box::pin(async move {
             let uri = req.uri().clone();

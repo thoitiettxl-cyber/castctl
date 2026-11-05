@@ -159,9 +159,9 @@ pub fn compare_versions(a: &Version, b: &Version) -> i32 {
         return c;
     }
     match (&a.pre, &b.pre) {
-        (None, None) => return 0,
-        (None, Some(_)) => return 1, // release > prerelease
-        (Some(_), None) => return -1,
+        (None, None) => 0,
+        (None, Some(_)) => 1, // release > prerelease
+        (Some(_), None) => -1,
         (Some(ap), Some(bp)) => {
             for i in 0..ap.len().min(bp.len()) {
                 let x = &ap[i];
@@ -190,7 +190,7 @@ pub fn compare_versions(a: &Version, b: &Version) -> i32 {
             if ap.len() > bp.len() {
                 return 1;
             }
-            return 0;
+            0
         }
     }
 }

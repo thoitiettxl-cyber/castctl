@@ -106,7 +106,7 @@ pub fn select_asset<'a>(
                 "update: the matching release asset has no usable size",
             ));
         }
-        if validate_download_url(&a.url).is_err() {
+        if !validate_download_url(&a.url) {
             return Err(UpdateError::failure(
                 "update: the matching release asset has an unusable download URL",
             ));
@@ -128,7 +128,7 @@ pub fn select_asset<'a>(
 
 /// Find exactly one `checksums.txt` asset.
 /// Source: `selectChecksumsAsset` (`internal/update/update.go:746-772`).
-pub fn select_checksums_asset<'a>(rel: &'a ReleaseInfo) -> Result<&'a ReleaseAsset, UpdateError> {
+pub fn select_checksums_asset(rel: &ReleaseInfo) -> Result<&ReleaseAsset, UpdateError> {
     let mut found: Option<&ReleaseAsset> = None;
     let mut count = 0;
     for a in &rel.assets {
@@ -136,7 +136,7 @@ pub fn select_checksums_asset<'a>(rel: &'a ReleaseInfo) -> Result<&'a ReleaseAss
             continue;
         }
         count += 1;
-        if validate_download_url(&a.url).is_err() {
+        if !validate_download_url(&a.url) {
             return Err(UpdateError::failure(
                 "update: the checksums file has an unusable download URL",
             ));
@@ -314,9 +314,7 @@ pub fn parse_url(raw: &str) -> Option<ParsedUrl> {
         return None;
     }
     // Authority runs to the first '/', '?', or '#'.
-    let auth_end = rest
-        .find(|c| c == '/' || c == '?' || c == '#')
-        .unwrap_or(rest.len());
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..auth_end];
     let after = &rest[auth_end..];
     if authority.is_empty() {
@@ -334,25 +332,17 @@ pub fn parse_url(raw: &str) -> Option<ParsedUrl> {
     // `Hostname()` only for the bracketed form's inner part —
     // see `is_loopback_host`).
     let (host, port) = if let Some(stripped) = hostport.strip_prefix('[') {
-        match stripped.find(']') {
-            Some(end) => {
-                let host = &stripped[..end];
-                let rest = &stripped[end + 1..];
-                let port = rest.strip_prefix(':').unwrap_or("");
-                (host.to_string(), port.to_string())
-            }
-            None => return None,
-        }
+        let end = stripped.find(']')?;
+        let host = &stripped[..end];
+        let rest = &stripped[end + 1..];
+        let port = rest.strip_prefix(':').unwrap_or("");
+        (host.to_string(), port.to_string())
     } else if let Some(i) = hostport.rfind(':') {
         (hostport[..i].to_string(), hostport[i + 1..].to_string())
     } else {
         (hostport.to_string(), String::new())
     };
-    let path = after
-        .split(|c| c == '?' || c == '#')
-        .next()
-        .unwrap_or("")
-        .to_string();
+    let path = after.split(['?', '#']).next().unwrap_or("").to_string();
     Some(ParsedUrl {
         scheme: scheme.to_ascii_lowercase(),
         has_userinfo: userinfo,
@@ -382,19 +372,26 @@ pub fn is_loopback_host(host: &str) -> bool {
 /// userinfo is refused before any request: the stdlib client
 /// would otherwise send an `Authorization` header derived
 /// from the URL.
+///
+/// Returns `bool`, not `Result<(), ()>`: Go's
+/// `validateDownloadURL` returns one fixed error
+/// (`"invalid download URL"`, `update.go:774-793`) for every
+/// refusal, and every caller only tests accept/refuse.
 /// Source: `validateDownloadURL` (`internal/update/update.go:774-793`).
-pub fn validate_download_url(raw: &str) -> Result<(), ()> {
-    let parsed = parse_url(raw).ok_or(())?;
+pub fn validate_download_url(raw: &str) -> bool {
+    let Some(parsed) = parse_url(raw) else {
+        return false;
+    };
     if parsed.host.is_empty() || parsed.has_userinfo {
-        return Err(());
+        return false;
     }
     if parsed.scheme == "https" {
-        return Ok(());
+        return true;
     }
     if parsed.scheme == "http" && is_loopback_host(&parsed.host) {
-        return Ok(());
+        return true;
     }
-    Err(())
+    false
 }
 
 /// Redirect-policy refusal reasons.
@@ -651,10 +648,10 @@ mod tests {
             "https://user@github.com/x/y",
             "http://user:pass@127.0.0.1:9/x",
         ] {
-            assert!(validate_download_url(bad).is_err(), "{bad}");
+            assert!(!validate_download_url(bad), "{bad}");
         }
         for good in ["https://github.com/x/y", "http://127.0.0.1:9/x"] {
-            assert!(validate_download_url(good).is_ok(), "{good}");
+            assert!(validate_download_url(good), "{good}");
         }
         for bad in [
             "/download/x",
@@ -663,7 +660,7 @@ mod tests {
             "http://example.com/x",
             "https://",
         ] {
-            assert!(validate_download_url(bad).is_err(), "{bad}");
+            assert!(!validate_download_url(bad), "{bad}");
         }
     }
 

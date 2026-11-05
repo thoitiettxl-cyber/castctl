@@ -582,7 +582,16 @@ fn dynamic_strtab_range(elf: &Elf) -> Result<Vec<u8>, PluginHostError> {
             continue;
         }
         let off = p.off + rel;
-        if off < p.off || off + strsz < off || off + strsz > file_size {
+        // Checked arithmetic: the C-style `off + strsz < off`
+        // overflow test would panic in a Rust debug build
+        // on overflow instead of refusing, so an overflowing
+        // range refuses explicitly here.
+        let Some(end) = off.checked_add(strsz) else {
+            return Err(PluginHostError::failed(
+                "cannot resolve DT_STRTAB: DT_STRTAB range exceeds file size: refusing to load",
+            ));
+        };
+        if off < p.off || end > file_size {
             return Err(PluginHostError::failed(
                 "cannot resolve DT_STRTAB: DT_STRTAB range exceeds file size: refusing to load",
             ));
@@ -785,8 +794,10 @@ pub fn parse_version_needs_count(
             let name = cstring_at(strtab, name_off).map_err(|e| {
                 PluginHostError::failed(format!("invalid version name offset {name_off}: {e}"))
             })?;
-            if let Some(ver_str) = name.strip_prefix("GLIBC_") {
-                if !ver_str.is_empty() && ver_str.as_bytes()[0].is_ascii_digit() {
+            if let Some(ver_str) = name.strip_prefix("GLIBC_")
+                && !ver_str.is_empty()
+                && ver_str.as_bytes()[0].is_ascii_digit()
+            {
                     let v = parse_glibc_version(ver_str).map_err(|_| {
                         PluginHostError::failed(format!(
                             "unparseable glibc version {name:?}: refusing to load"
@@ -796,7 +807,6 @@ pub fn parse_version_needs_count(
                         max = v;
                         found = true;
                     }
-                }
                 // Non-numeric GLIBC_ names (GLIBC_PRIVATE,
                 // ...) carry no version requirement.
             }
@@ -929,17 +939,16 @@ pub fn running_libc_version() -> Result<GlibcVersion, PluginHostError> {
             }
             let name_off = read_u32(data, aux_off, be).unwrap_or(0) as usize;
             let next = read_u32(data, aux_off + 4, be).unwrap_or(0) as usize;
-            if let Ok(name) = cstring_at(&strtab, name_off) {
-                if let Some(ver) = name.strip_prefix("GLIBC_") {
-                    if !ver.is_empty() && ver.as_bytes()[0].is_ascii_digit() {
-                        if let Ok(v) = parse_glibc_version(ver) {
-                            max = Some(match max {
-                                Some(m) if compare_glibc_version(v, m) <= 0 => m,
-                                _ => v,
-                            });
-                        }
-                    }
-                }
+            if let Ok(name) = cstring_at(&strtab, name_off)
+                && let Some(ver) = name.strip_prefix("GLIBC_")
+                && !ver.is_empty()
+                && ver.as_bytes()[0].is_ascii_digit()
+                && let Ok(v) = parse_glibc_version(ver)
+            {
+                max = Some(match max {
+                    Some(m) if compare_glibc_version(v, m) <= 0 => m,
+                    _ => v,
+                });
             }
             if next == 0 {
                 break;
@@ -1230,12 +1239,11 @@ mod tests {
         let mut section = verneed_header(1, 16, 32, false);
         section.extend_from_slice(&verneed_aux(0, 16, false));
         section.extend_from_slice(&verneed_aux(11, 0, false));
-        match parse_version_needs(&section, &strtab, false) {
-            Ok(got) => assert!(
+        if let Ok(got) = parse_version_needs(&section, &strtab, false) {
+            assert!(
                 at_least_version(&got, "2.34"),
                 "got max {got:?}, want >= 2.34 or refusal"
-            ),
-            Err(_) => {}
+            );
         }
     }
 
@@ -1258,12 +1266,11 @@ mod tests {
         section.extend_from_slice(&slot16);
         section.extend_from_slice(&verneed_aux(0, 0, false));
         section.extend_from_slice(&slot48);
-        match parse_version_needs(&section, &strtab, false) {
-            Ok(got) => assert!(
+        if let Ok(got) = parse_version_needs(&section, &strtab, false) {
+            assert!(
                 at_least_version(&got, "2.99"),
                 "got max {got:?}, want >= 2.99 or refusal"
-            ),
-            Err(_) => {}
+            );
         }
     }
 
@@ -1606,12 +1613,11 @@ mod tests {
             section: red_section(false),
             strtab: red_strtab,
         });
-        match max_required_glibc(&path) {
-            Ok(got) => assert!(
+        if let Ok(got) = max_required_glibc(&path) {
+            assert!(
                 at_least_version(&got, "2.34"),
                 "crafted ELF red-team: got {got:?}, want >= 2.34 or refusal"
-            ),
-            Err(_) => {}
+            );
         }
         // Verifier tiling section.
         let mut slot16 = vec![0u8; 16];
@@ -1637,12 +1643,11 @@ mod tests {
             section: tiling,
             strtab: tiling_strtab,
         });
-        match max_required_glibc(&path) {
-            Ok(got) => assert!(
+        if let Ok(got) = max_required_glibc(&path) {
+            assert!(
                 at_least_version(&got, "2.99"),
                 "crafted ELF tiling: got {got:?}, want >= 2.99 or refusal"
-            ),
-            Err(_) => {}
+            );
         }
         // Well-formed controls: single entry naming GLIBC_2.17.
         let control_strtab = b"\0GLIBC_2.17\0".to_vec();

@@ -66,9 +66,14 @@ static UPDATE_MU: Mutex<()> = Mutex::new(());
 /// `internal/update/update.go:41-43`.
 pub const EXEC_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Failure-injection seam type for the `--version` exec
+/// check (`replace.go:33`).
+type ExecCheckFn = fn(&Path, &Version, Duration) -> std::result::Result<(), UpdateError>;
+
 /// Dependencies of one run. Mirrors Go's `Deps`
 /// (`internal/update/update.go:63-75`) with the adaptations
 /// noted in the module docs.
+#[derive(Default)]
 pub struct Deps {
     /// HTTP fetcher; `None` means the production
     /// [`StdFetcher`]. Go: `HTTPClient *http.Client`.
@@ -100,23 +105,7 @@ pub struct Deps {
     /// Failure-injection seam for the `--version` exec check.
     /// `None` means [`run_exec_check`]. Go: `execCheckFn`
     /// (`replace.go:33`).
-    pub exec_check_fn:
-        Option<fn(&Path, &Version, Duration) -> std::result::Result<(), UpdateError>>,
-}
-
-impl Default for Deps {
-    fn default() -> Self {
-        Deps {
-            http_fetcher: None,
-            executable: None,
-            cgo_settings: None,
-            api_base: String::new(),
-            github_base: String::new(),
-            rename_fn: None,
-            sync_dir_fn: None,
-            exec_check_fn: None,
-        }
-    }
+    pub exec_check_fn: Option<ExecCheckFn>,
 }
 
 /// Options for one run. Mirrors Go's `Options`

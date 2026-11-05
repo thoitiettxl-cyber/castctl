@@ -134,6 +134,10 @@ fn tls_client_config() -> Arc<rustls::ClientConfig> {
 /// No direct Go type counterpart: Go's `*http.Client` is the
 /// stdlib; this is the Rust-side equivalent built from the
 /// same parameters (`newUpdateClient`, `update.go:383-409`).
+/// One response head: (status, content_length, chunked,
+/// location, body).
+type ResponseHead = (u16, Option<u64>, bool, Option<String>, Box<dyn Read>);
+
 pub struct StdFetcher;
 
 impl StdFetcher {
@@ -144,7 +148,7 @@ impl StdFetcher {
         user_agent: &str,
         accept_api: bool,
         timeout: Duration,
-    ) -> Result<(u16, Option<u64>, bool, Option<String>, Box<dyn Read>), HttpError> {
+    ) -> Result<ResponseHead, HttpError> {
         let mut stream = Self::connect(url, timeout)?;
         let path = if url.path.is_empty() {
             "/".to_string()
@@ -296,10 +300,10 @@ fn resolve_redirect(current: &ParsedUrl, location: &str) -> Option<ParsedUrl> {
     if location.is_empty() {
         return None;
     }
-    if let Some(abs) = parse_url(location) {
-        if !abs.scheme.is_empty() {
-            return Some(abs);
-        }
+    if let Some(abs) = parse_url(location)
+        && !abs.scheme.is_empty()
+    {
+        return Some(abs);
     }
     let base = format!("{}://{}", current.scheme, current.authority());
     if let Some(path) = location.strip_prefix('/') {
@@ -668,14 +672,13 @@ pub fn download_asset<W: std::io::Write>(
         let _ = n;
         return Err(UpdateError::failure("update: download failed"));
     }
-    if expected_size > 0 {
-        if let Some(len) = resp.content_length {
-            if len as i64 != expected_size {
-                return Err(UpdateError::failure(
-                    "update: download size does not match the release metadata",
-                ));
-            }
-        }
+    if expected_size > 0
+        && let Some(len) = resp.content_length
+        && len as i64 != expected_size
+    {
+        return Err(UpdateError::failure(
+            "update: download size does not match the release metadata",
+        ));
     }
     let mut hash = Sha256::new();
     let mut total: u64 = 0;
