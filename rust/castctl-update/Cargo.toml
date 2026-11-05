@@ -23,3 +23,10 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Integration tests use the same crates as the lib (tar
+# builder, checksums hex, sha256): integration tests can
+# only see dev-dependencies, not the lib's own deps.
+hex = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
+sha2 = { workspace = true }
