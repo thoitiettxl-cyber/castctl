@@ -2986,7 +2986,7 @@ built on `internal/gateway/gatewaytest.Server`).
   `Chrome/153.0.0.0`, Origin `https://muse.ai`, 20s
   upgrade bound, 20s handshake steps; the URL carries the
   literal `auth_token=<redacted>` — never the real token —
-  see §M4a.2 deviation 12). [SUPERSEDED — see §M4c.7:
+  see §M4a.2 deviation 12). [SUPERSEDED 2026-11-05 — see §M4c.7:
   Go sends the real token; Rust now does too.] The gateway-dial
   TLS rule (DialTLS forces Enabled=true) lives at the
   gateway-dial call site, NOT folded into `build_tls`.
@@ -3065,7 +3065,7 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
     never echo message bytes (lengths only). The library
     never puts a token/cookie into a message itself.
 12. WS URL carries the literal `auth_token=<redacted>`
-    [SUPERSEDED — see §M4c.7: Go sends the real token
+    [SUPERSEDED 2026-11-05 — see §M4c.7: Go sends the real token
     (`auth_token=%s`, 4 verbs, 4 args), not the literal;
     the whole deviation below is wrong.]
     (fix loop 1, Boss decision 2026-11-05 — MIRROR GO
@@ -3081,7 +3081,7 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
     it. The Rust `default_ws_url` returns the identical
     string, and the dial test asserts the literal on the
     string AND that no real token value reaches the wire.
-    Wire nuance — [SUPERSEDED in M4b, fix loop 1 (R-B1):
+    Wire nuance — [SUPERSEDED 2026-11-05 in M4b, fix loop 1 (R-B1):
     this paragraph as originally written claimed the
     server decodes the encoded form back; that claim was
     WRONG. The live edge returns 401 for the encoded form
@@ -3114,7 +3114,7 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
     shows the gateway needs the real token, change
     `default_ws_url` in this one place and re-enable the
     token-URL test.
-    [SUPERSEDED in M4c — see §M4c.7: the condition above
+    [SUPERSEDED 2026-11-05 in M4c — see §M4c.7: the condition above
     is now met (Go source proves the token is sent; Rust
     without it gets 502). The "3 verbs, 4 args" premise,
     the "computed and silently discarded" mechanism, and
@@ -3281,7 +3281,7 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
   `127.0.0.1:33727` ephemeral; both exit 0). The Rust
   parity client dialed with the literal
   `auth_token=<redacted>` URL (percent-encoded on the
-  wire by `dial_gateway`). [SUPERSEDED — see §M4c.7:
+  wire by `dial_gateway`). [SUPERSEDED 2026-11-05 — see §M4c.7:
   the parity client used the wrong URL; Go sends the
   real token. The byte-identical methods still stand —
   they ran over a loopback fake server, not the live
@@ -3456,7 +3456,7 @@ it (promoted to direct deps only), so `NOTICE` /
 
 ## M4b.2 Deviations from Go (deliberate, with citations)
 
-1. WS upgrade written by hand. [PARTLY SUPERSEDED — see
+1. WS upgrade written by hand. [PARTLY SUPERSEDED 2026-11-05 — see
    §M4c.7: Go `defaultWSURL` (`connector.go:113-120`)
    sends the real token (`auth_token=%s`, 4 verbs, 4
    args), NOT the literal — the 'literal token' premise
@@ -3484,7 +3484,9 @@ it (promoted to direct deps only), so `NOTICE` /
    cannot speak h2 — same request/response over HTTP/1.1.
 4. TLS via rustls, not Go's uTLS Chrome fingerprint: the
    ClientHello differs from Go's. Live evidence (§M4b.5):
-   the gateway + HTTPS paths pass against the live edge.
+   the HTTPS paths pass against the live edge; the gateway path
+   got 502 in M4b (missing token, not the fingerprint — see
+   §M4c.7) and passes since M4c (live gate 15/15, §M4c.8).
 5. `BodySummary` has no Payload text field: the
    VM-unavailable case is carried as `error_code:
    Some("vm_unavailable")`. Go's `GatewayError.Error()`
@@ -3676,7 +3678,7 @@ it (promoted to direct deps only), so `NOTICE` /
 
 ## M4b.3 Findings
 
-- **The literal token — [SUPERSEDED — see §M4c.7].**
+- **The literal token — [SUPERSEDED 2026-11-05 — see §M4c.7].**
   M4a recorded that the live server "decodes
   `%3Credacted%3E` back to `<redacted>`". False: a raw-TLS
   Python probe on cue (identical headers, only the token
@@ -3718,7 +3720,7 @@ it (promoted to direct deps only), so `NOTICE` /
   verbatim, answers 101, then closes — it does not speak
   Noise, so the dial fails at the Noise step with
   `ConnectionError`, which the tests assert).
-- **TLS fingerprint blocks the live gateway (see §M4b.5) — [SUPERSEDED — see §M4c.7].**
+- **TLS fingerprint blocks the live gateway (see §M4b.5) — [SUPERSEDED 2026-11-05 — see §M4c.7].**
   rustls + literal token → 502; OpenSSL + literal → 502;
   Go/uTLS-Chrome + literal → 101. ClientHello captures
   (iptables REDIRECT + a Python listener on cue):
@@ -3755,7 +3757,7 @@ it (promoted to direct deps only), so `NOTICE` /
   (`ssl/encrypted_client_hello.cc`, `hs->grease_seed`)
   and is the candidate fix — a new TLS-architecture
   decision, not attempted in PR2.
-  [SUPERSEDED — see §M4c.7: the three-way contrast is
+  [SUPERSEDED 2026-11-05 — see §M4c.7: the three-way contrast is
   confounded — rustls + literal and OpenSSL + literal
   both lacked the token, and Go sent the real token, so
   'fingerprint decides upstream routing' was never
@@ -3974,7 +3976,7 @@ rewritten (the old wire assert expected
 `%3Credacted%3E`); the string-level assert
 (`default_ws_url` byte-for-byte == Go URL) and the
 value-level assert (query value == literal) are kept.
-[SUPERSEDED — see §M4c.7: the test is rewritten in M4c
+[SUPERSEDED 2026-11-05 — see §M4c.7: the test is rewritten in M4c
 to send the real (fake-in-test) token, quoted.]
 Logs: `gate-logs-m4b/gate-{fmt,build,test,clippy}-m4b.log`.
 The gates are re-run after the rebase onto dev-rust;
@@ -4059,12 +4061,15 @@ values (`3B tokens left`, `10% used`).
 
 ### Blocker: the live gateway is unreachable from Rust
 
-Root cause, proven (see §M4b.3): the Meta edge
-requires a Chrome TLS fingerprint. Go dials with
+[SUPERSEDED 2026-11-05 — see §M4c.7: the blocker was the missing token in the WS URL, not the TLS fingerprint. The measurements below stand; the root-cause attribution and the BoringSSL-as-candidate-fix framing do not. The gateway path passes since M4c (live gate 15/15, §M4c.8/§M4c.10).]
+
+Root cause as believed in M4b (WRONG — see note above): the Meta edge
+was thought to require a Chrome TLS fingerprint. Go dials with
 uTLS HelloChrome → 101. Rust (rustls) and Python
-(OpenSSL) send non-Chrome ClientHellos → the edge
-terminates TLS, then returns HTTP 502
-(`server_connection_error`) from its proxy. The
+(OpenSSL) sent non-Chrome ClientHellos and got HTTP 502
+(`server_connection_error`) from the edge proxy — at the time read as
+fingerprint-caused routing; M4c proved the 502 was the missing token
+(the same dials with the real token get 101). The
 ClientHello captures are in `gate-logs-m4b/
 live-evidence/` (`ch-go-ws.bin` 1748 B Chrome,
 `ch-rustls.bin` 251 B). [CORRECTED in fix loop 1 (F1):
@@ -4074,7 +4079,8 @@ including GREASE-ECH) but no cipher/group/keyshare
 GREASE and no extension-order control; ML-KEM768 exists
 only via the aws-lc-rs provider, foreclosed by the
 ring-only rule (aws-lc-rs banned — see §M4b.3). The
-conclusion stands: rustls cannot mimic Chrome.]
+narrow claim stands: rustls cannot mimic Chrome's ClientHello —
+that is a fact about rustls, not the cause of the 502.]
 BoringSSL (already in the lock via honk, GREASE in its
 source) is the candidate fix — a new TLS-architecture
 decision for Boss, NOT attempted in PR2. Consequence:
@@ -4105,7 +4111,9 @@ header value appears in any log or in the PR.
 ### Unverified (live)
 
 - The entire gateway path (all 13 commands +
-  `goal`/`idea`) — blocked, not merely untested.
+  `goal`/`idea`) — blocked in M4b, not merely untested.
+  [SUPERSEDED 2026-11-05: unblocked in M4c; live gate 15/15,
+  see §M4c.8.]
 - Write-path commands (`history --download`,
   `invite`, chat/send, keeper, login, update).
 - Transport (socks/vless/...): both live profiles
@@ -4152,10 +4160,11 @@ probe log, drift outputs).
   transport is `chưa kiểm chứng` until a transport is set
   up on cue.
 - The live gateway path (all 13 commands + `goal` /
-  `idea`): BLOCKED by the TLS fingerprint, see §M4b.5
-  — not merely untested. The ClientHello capture WAS
-  done (Go 1748 B Chrome vs rustls 251 B); the
-  BoringSSL fix is a Boss decision, not attempted here.
+  `idea`): [SUPERSEDED 2026-11-05 — see §M4c.7/§M4c.8: it was
+  BLOCKED in M4b by the missing token, not the TLS fingerprint;
+  the live gate ran in M4c and is 15/15 byte-identical.] The
+  ClientHello capture WAS done (Go 1748 B Chrome vs rustls
+  251 B); no BoringSSL/TLS fix was needed.
 - `usage --json`'s one-off `ConnectionError`
   (`error_length=36`) in the first parity run: the
   re-run passed (see §M4b.3); root cause unpinned,
@@ -4389,7 +4398,7 @@ Ba phát hiện đo được, theo thứ tự:
    10 ký tự), suy ra token đã quote dài ≈ 899 ký tự.
    Record thứ hai là đuôi của request — xem "Mở"
    cuối section này (đã giải, fix loop 1).]
-3. **Root cause — `%!(EXTRA string=...)`. [SUPERSEDED — see §M4c.7: this whole item is wrong.]** Go
+3. **Root cause — `%!(EXTRA string=...)`. [SUPERSEDED 2026-11-05 — see §M4c.7: this whole item is wrong.]** Go
    `defaultWSURL` (`internal/gateway/connector.go:
    115-117`): `fmt.Sprintf("%s://%s/v1/noise?vm_id=%s&
    auth_token=<redacted>", scheme, host, quotePython(
@@ -4411,7 +4420,7 @@ Ba phát hiện đo được, theo thứ tự:
    nhau (cả ba đều thiếu token), và vì sao `usage`
    pass (dùng HTTPS muse.ai bằng cookie, không qua
    URL WS).
-   [RETRACTED — see §M4c.7: Go sends the token via
+   [RETRACTED 2026-11-05 — see §M4c.7: Go sends the token via
    `auth_token=%s` (4 verbs, 4 args); there is no
    `%!(EXTRA...)` suffix. The 800/817 B arithmetic and
    the "token is 783 chars" inference are withdrawn
