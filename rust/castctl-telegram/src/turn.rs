@@ -112,6 +112,14 @@ pub const MAX_FILES_PER_TURN: usize = 6;
 /// Turn-media history windows, tried in order.
 /// Source: `internal/commands/telegram_turn.go:901`.
 pub const TURN_MEDIA_HISTORY_LIMITS: [i64; 3] = [200, 500, 1000];
+
+/// The final-read window growth, mirroring Go's
+/// `DefaultHistoryLimits` (`internal/wait/history.go:50`):
+/// 200, then 500, then 1000 events. The gateway is
+/// assumed to return the newest N events for limit N
+/// (the same assumption Go's `HistoryReplies` makes —
+/// see PORTING §M5b deviation 20).
+pub const HISTORY_LIMITS: [i64; 3] = [200, 500, 1000];
 /// Busy reply for a second turn in the same chat.
 /// Source: `internal/commands/telegram_turn.go:278`.
 pub const BUSY_REPLY: &str = "⏳ Muse is already working in this chat. Use /stop to interrupt it.";
@@ -258,6 +266,12 @@ pub fn delivered_top_seq(user_seq: i64, res: &WaitResult) -> i64 {
     top
 }
 
+/// Oldest `seq` in a history window (0 when empty).
+/// Source: `internal/wait/history.go:305-318` (`oldestSeq`).
+fn oldest_seq(events: &[Value]) -> i64 {
+    events.iter().map(seq_of).min().unwrap_or(0)
+}
+
 /// Resolve a sandbox media reference to its
 /// `/media/raw/…` download path.
 /// Source: `internal/gateway/media.go:47-91`
@@ -284,7 +298,7 @@ pub fn media_path(path: &str, variants: Option<&SharedJson>) -> Result<String, T
     let owned;
     if let Some(rest) = rel.strip_prefix("sandbox://") {
         rel = rest;
-    } else if rel.starts_with("http://") || rel.starts_with("https://") {
+    } else if is_http_url(rel) {
         owned = http_escaped_path(rel).ok_or_else(|| TransportError::Validation {
             message: format!("bad sandbox path: ref_length={}", refstr.len()),
         })?;
@@ -294,30 +308,77 @@ pub fn media_path(path: &str, variants: Option<&SharedJson>) -> Result<String, T
     let rel = rel.strip_prefix("media/raw/").unwrap_or(rel);
     // `url.PathUnescape` (`media.go:67-69`): unquote only
     // when the whole string unquotes; on any bad escape
-    // keep the original string.
-    let unquoted = percent_decode(rel).unwrap_or_else(|| rel.to_string());
-    if unquoted.is_empty() || unquoted.split('/').any(|seg| seg == "..") {
+    // keep the original string. The decode is bytewise:
+    // `%FF` decodes to the single byte 0xFF (Go keeps it
+    // as a byte in the string), NOT to the U+FFFD
+    // replacement — the re-quote below turns it back into
+    // `%FF` (fix loop 2, Tech N1/N2).
+    let unquoted: Vec<u8> =
+        percent_decode(rel.as_bytes()).unwrap_or_else(|| rel.as_bytes().to_vec());
+    if unquoted.is_empty() || unquoted.split(|b| *b == b'/').any(|seg| seg == b"..") {
         return Err(TransportError::Validation {
             message: format!("bad sandbox path: ref_length={}", refstr.len()),
         });
     }
-    Ok(format!("/media/raw/{}", quote_python(&unquoted)))
+    Ok(format!("/media/raw/{}", quote_python_bytes(&unquoted)))
+}
+
+/// Whether `s` is an http(s) URL: Go's `url.Parse`
+/// lowercases the scheme, so `HTTP://…` counts (probed
+/// 2026-11-06).
+fn is_http_url(s: &str) -> bool {
+    match s.find("://") {
+        Some(idx) => {
+            let scheme = &s[..idx];
+            scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+        }
+        None => false,
+    }
 }
 
 /// The escaped path of an http(s) URL, Go `url.Parse` +
 /// `EscapedPath` (`media.go:56-63`): the query/fragment
-/// are dropped; any bad `%` escape fails the parse.
-/// (Verified against Go's `net/url` by probe, see
-/// PORTING §M5b.) The returned path is still
-/// percent-encoded; the caller's unquote + re-quote
+/// are dropped; a control character anywhere, a bad `%`
+/// escape anywhere except the query, or an invalid port
+/// fails the parse (probed against Go's `net/url`
+/// 2026-11-06; see PORTING §M5b). The returned path is
+/// still percent-encoded; the caller's unquote + re-quote
 /// normalizes it exactly like Go's `PathUnescape` +
 /// `quotePython` pair.
 fn http_escaped_path(url: &str) -> Option<String> {
+    if url.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return None;
+    }
     let after_scheme = url.split_once("://")?.1;
     let path_start = after_scheme.find('/').unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..path_start];
+    if !valid_port(authority) || !valid_escapes(authority) {
+        return None;
+    }
     let path_and_rest = &after_scheme[path_start..];
+    let (before_query, query_frag) = match path_and_rest.find('?') {
+        Some(q) => (&path_and_rest[..q], Some(&path_and_rest[q + 1..])),
+        None => (path_and_rest, None),
+    };
+    if !valid_escapes(before_query) {
+        return None;
+    }
+    // The query is not escape-validated (Go keeps
+    // `RawQuery` raw); a fragment after it is.
+    if let Some(qf) = query_frag
+        && let Some(f) = qf.find('#')
+        && !valid_escapes(&qf[f..])
+    {
+        return None;
+    }
     let path = path_and_rest.split(['?', '#']).next().unwrap_or("");
-    let bytes = path.as_bytes();
+    Some(path.to_string())
+}
+
+/// Whether every `%` in `s` starts a valid `%XX`
+/// escape.
+fn valid_escapes(s: &str) -> bool {
+    let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
@@ -325,37 +386,60 @@ fn http_escaped_path(url: &str) -> Option<String> {
                 || hex_val(bytes[i + 1]).is_none()
                 || hex_val(bytes[i + 2]).is_none()
             {
-                return None;
+                return false;
             }
             i += 3;
         } else {
             i += 1;
         }
     }
-    Some(path.to_string())
+    true
+}
+
+/// Whether the authority's port (if any) is valid: empty
+/// or all digits; a bracketed IPv6 host keeps its colons.
+fn valid_port(authority: &str) -> bool {
+    let hostport = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    if let Some(rest) = hostport.strip_prefix('[') {
+        let Some(end) = rest.find(']') else {
+            return false;
+        };
+        let after = &rest[end + 1..];
+        return after.is_empty()
+            || (after.starts_with(':') && after[1..].bytes().all(|b| b.is_ascii_digit()));
+    }
+    match hostport.matches(':').count() {
+        0 => true,
+        1 => {
+            let port = hostport.split_once(':').map_or("", |(_, p)| p);
+            port.bytes().all(|b| b.is_ascii_digit())
+        }
+        _ => false,
+    }
 }
 
 /// Percent-decode `%XX` sequences, Go's
 /// `url.PathUnescape`: `None` when ANY escape is bad
-/// (the caller then keeps the original string).
-fn percent_decode(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+/// (the caller then keeps the original string). The
+/// result is bytes: a decoded byte need not be valid
+/// UTF-8 (`%FF` -> one 0xFF byte).
+fn percent_decode(s: &[u8]) -> Option<Vec<u8>> {
+    let mut out: Vec<u8> = Vec::with_capacity(s.len());
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            if i + 2 >= bytes.len() {
+    while i < s.len() {
+        if s[i] == b'%' {
+            if i + 2 >= s.len() {
                 return None;
             }
-            let (h, l) = (hex_val(bytes[i + 1])?, hex_val(bytes[i + 2])?);
+            let (h, l) = (hex_val(s[i + 1])?, hex_val(s[i + 2])?);
             out.push(h * 16 + l);
             i += 3;
         } else {
-            out.push(bytes[i]);
+            out.push(s[i]);
             i += 1;
         }
     }
-    Some(String::from_utf8_lossy(&out).into_owned())
+    Some(out)
 }
 
 fn hex_val(b: u8) -> Option<u8> {
@@ -371,12 +455,17 @@ fn hex_val(b: u8) -> Option<u8> {
 /// unreserved + `/` pass through, everything else is
 /// `%XX` (uppercase hex).
 /// Source: `internal/gateway/media.go` (`quotePython`).
-fn quote_python(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
+/// Hand-rolled `urllib.parse.quote(safe="/")` over bytes:
+/// unreserved + `/` pass through, everything else is
+/// `%XX` (uppercase hex). Bytewise so a decoded 0xFF
+/// byte re-quotes to `%FF` instead of going through a
+/// lossy UTF-8 conversion.
+fn quote_python_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    for b in bytes {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                out.push(b as char);
+                out.push(*b as char);
             }
             _ => out.push_str(&format!("%{b:02X}")),
         }
@@ -468,18 +557,23 @@ pub struct WaitResult {
     pub auto_approve_errors: Vec<ApproveError>,
 }
 
+/// Boxed future for `GatewayPort::history`: the
+/// events plus `has_more`. Aliased because the spelled-out
+/// type trips `clippy::type_complexity`.
+type HistoryFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(Vec<Value>, bool), BotError>> + Send + 'a>>;
+
 /// The gateway surface a turn needs. Two impls exist:
 /// [`SharedGatewayPort`] (production, over the shared
 /// connection) and [`DirectGatewayPort`] (tests / E2E,
 /// over one `Gateway`).
 pub trait GatewayPort: Send + Sync {
     /// `chat.history` events (the `chat_events` list),
-    /// oldest first, in the thread when given.
-    fn history(
-        &self,
-        limit: i64,
-        thread: &str,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Value>, BotError>> + Send + '_>>;
+    /// oldest first, in the thread when given, plus
+    /// whether the gateway holds more events than the
+    /// window (`has_more`, Go `historyAdapter.ReadHistory`,
+    /// `internal/commands/wait.go:186-201`).
+    fn history(&self, limit: i64, thread: &str) -> HistoryFuture<'_>;
 
     /// Open `chat.stream` (tracked = false: nobody reads
     /// the stream's own frames; the turn is followed on
@@ -534,11 +628,7 @@ impl SharedGatewayPort {
 }
 
 impl GatewayPort for SharedGatewayPort {
-    fn history(
-        &self,
-        limit: i64,
-        thread: &str,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Value>, BotError>> + Send + '_>> {
+    fn history(&self, limit: i64, thread: &str) -> HistoryFuture<'_> {
         let conn = Arc::clone(&self.conn);
         let thread = thread.to_string();
         Box::pin(async move {
@@ -565,7 +655,13 @@ impl GatewayPort for SharedGatewayPort {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            Ok(events)
+            // Go `historyAdapter` (`wait.go:186-201`): a
+            // non-bool `has_more` reads as false.
+            let has_more = obj
+                .get("has_more")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Ok((events, has_more))
         })
     }
 
@@ -661,11 +757,7 @@ impl DirectGatewayPort {
 }
 
 impl GatewayPort for DirectGatewayPort {
-    fn history(
-        &self,
-        limit: i64,
-        thread: &str,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Value>, BotError>> + Send + '_>> {
+    fn history(&self, limit: i64, thread: &str) -> HistoryFuture<'_> {
         let gw = Arc::clone(&self.gw);
         let thread = thread.to_string();
         Box::pin(async move {
@@ -688,11 +780,16 @@ impl GatewayPort for DirectGatewayPort {
                     "gateway: chat.history result is not an object".to_string(),
                 ));
             };
-            Ok(obj
+            let events = obj
                 .get("chat_events")
                 .and_then(Value::as_array)
                 .cloned()
-                .unwrap_or_default())
+                .unwrap_or_default();
+            let has_more = obj
+                .get("has_more")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Ok((events, has_more))
         })
     }
 
@@ -960,6 +1057,12 @@ struct EditorInner {
     preview: Arc<StreamPreview>,
     signal: Notify,
     stop: Notify,
+    /// The turn's stop entry (fix loop 2, Red B3): the
+    /// streaming loop's `maybe_edit` and `finish()` race
+    /// their network calls against it, so a 429-storm
+    /// edit cannot hold the slot past /stop. `None` in
+    /// tests that drive the editor without a turn.
+    turn_stop: Option<Arc<TurnStop>>,
     /// Stop flag: the authority for loop exit.
     /// `notify_waiters` only wakes tasks already
     /// waiting, so a `finish()` that runs before this
@@ -986,6 +1089,7 @@ impl BubbleEditor {
         chat_id: i64,
         message_id: i64,
         preview: Arc<StreamPreview>,
+        turn_stop: Option<Arc<TurnStop>>,
     ) -> Self {
         let inner = Arc::new(EditorInner {
             sink,
@@ -994,6 +1098,7 @@ impl BubbleEditor {
             preview,
             signal: Notify::new(),
             stop: Notify::new(),
+            turn_stop,
             stopped: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             shown: Mutex::new(String::new()),
@@ -1051,7 +1156,32 @@ impl BubbleEditor {
         self.inner.stopped.store(true, Ordering::SeqCst);
         self.inner.stop.notify_waiters();
         if let Some(handle) = self.handle.take() {
-            let _ = handle.await;
+            // Join the loop, unless the turn stop wins
+            // first: a loop stuck in a 429-storm
+            // `maybe_edit` must not hold the slot past
+            // /stop. Go's `finish` joins unconditionally,
+            // but Go's join is bounded because the turn
+            // ctx cancels the in-flight edit — Rust has no
+            // such ctx, so the stop is the bound (see
+            // PORTING §M5b deviation 22). On a stop win
+            // the handle is dropped (the task is
+            // detached) and the trailing edit is skipped:
+            // the in-flight edit already raced the same
+            // stop in `maybe_edit`, so the loop exits on
+            // its own.
+            match &self.inner.turn_stop {
+                Some(stop) => {
+                    tokio::select! {
+                        _ = handle => {}
+                        () = stop.wait() => {
+                            return;
+                        }
+                    }
+                }
+                None => {
+                    let _ = handle.await;
+                }
+            }
         }
         let (text, dirty) = self.inner.preview.render_and_clear(Instant::now());
         let shown = self
@@ -1093,17 +1223,36 @@ impl BubbleEditor {
         match edited {
             Ok(Ok(())) => {}
             _ => {
-                let _ = sink
-                    .send(
-                        chat_id,
-                        &text,
-                        SendOptions {
-                            mode: HtmlMode::Markdown,
-                            markup: markup2,
-                            ..Default::default()
-                        },
-                    )
-                    .await;
+                // [DEVIATION] Go's `editFinal` runs the
+                // fallback send on a detached 15s ctx, so
+                // it still attempts the "Stopped."
+                // confirmation after /stop. Rust races the
+                // send against the turn stop instead: in a
+                // 429 storm the unbounded fallback (3
+                // attempts x 40s + sleeps, ~241s) would
+                // otherwise hold the slot for minutes after
+                // /stop. The primary edit above already
+                // had its 15s attempt to land the text.
+                let send = sink.send(
+                    chat_id,
+                    &text,
+                    SendOptions {
+                        mode: HtmlMode::Markdown,
+                        markup: markup2,
+                        ..Default::default()
+                    },
+                );
+                match &self.inner.turn_stop {
+                    Some(stop) => {
+                        tokio::select! {
+                            _ = send => {}
+                            () = stop.wait() => {}
+                        }
+                    }
+                    None => {
+                        let _ = send.await;
+                    }
+                }
             }
         }
     }
@@ -1140,10 +1289,27 @@ async fn maybe_edit(inner: &Arc<EditorInner>) {
     if let Ok(mut l) = inner.last_edit.lock() {
         *l = Some(Instant::now());
     }
-    inner
-        .sink
-        .edit_plain(inner.chat_id, inner.message_id, &text, None)
-        .await;
+    // The streaming edit races the turn stop: a
+    // 429-storm `edit_plain` (3 attempts x 40s + sleeps)
+    // must not hold the loop — and therefore `finish()`'s
+    // join — past /stop. Dropping the future cancels the
+    // in-flight Bot API call, including its retry sleep.
+    match &inner.turn_stop {
+        Some(stop) => {
+            tokio::select! {
+                () = inner
+                    .sink
+                    .edit_plain(inner.chat_id, inner.message_id, &text, None) => {}
+                () = stop.wait() => {}
+            }
+        }
+        None => {
+            inner
+                .sink
+                .edit_plain(inner.chat_id, inner.message_id, &text, None)
+                .await;
+        }
+    }
 }
 
 /// The wait approver over the claim manager: fresh
@@ -1249,6 +1415,13 @@ pub struct TurnRunner {
     stops: Mutex<HashMap<i64, Arc<TurnStop>>>,
     resumed: Mutex<HashMap<(i64, String), i64>>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Spawn/shutdown gate: the `stopping` check and the
+    /// task registration hold this one lock together, so
+    /// `wait_turns` can never take the task list between
+    /// them and miss a task (Go's `turnsMu`,
+    /// `telegram_turn.go:240-249`). Lock order: this
+    /// gate is always taken before `active` / `tasks`.
+    spawn_mu: Mutex<()>,
     stopping: AtomicBool,
     /// Bound on continuous swallowable history errors
     /// in `wait_follow` (see
@@ -1289,6 +1462,29 @@ pub struct TurnStop {
     pub notify: Notify,
 }
 
+impl TurnStop {
+    /// Whether the turn was stopped.
+    #[must_use]
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+
+    /// Wait for the stop, level-triggered: the waiter is
+    /// registered (`enable()`) BEFORE the flag is
+    /// re-checked, so a stop landing between the check
+    /// and the wait cannot be lost (the same shape as
+    /// `ShutdownSignal::wait` in `api.rs`).
+    pub async fn wait(&self) {
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        let _ = notified.as_mut().enable();
+        if self.stopped.load(Ordering::SeqCst) {
+            return;
+        }
+        notified.await;
+    }
+}
+
 impl TurnRunner {
     /// Build a runner. `block_auto_approve` /
     /// `block_auto_allow_once` are the handler-config
@@ -1322,6 +1518,7 @@ impl TurnRunner {
             stops: Mutex::new(HashMap::new()),
             resumed: Mutex::new(HashMap::new()),
             tasks: Mutex::new(Vec::new()),
+            spawn_mu: Mutex::new(()),
             stopping: AtomicBool::new(false),
             follow_error_budget_ms: std::sync::atomic::AtomicU64::new(
                 FOLLOW_HISTORY_ERROR_BUDGET.as_millis() as u64,
@@ -1374,17 +1571,27 @@ impl TurnRunner {
     /// Source: `internal/commands/telegram_turn.go:262-295`
     /// (`startTurn`).
     pub async fn start_turn(self: &Arc<Self>, chat_id: i64, text: String) {
-        if self.stopping.load(Ordering::SeqCst) {
-            return;
-        }
         // Go `startTurn` (`telegram_turn.go:271-280`)
         // holds ONE lock for the busy check and the slot
         // insert: a single critical section, no await
         // inside (a `std::sync::MutexGuard` is not
         // `Send`), so two concurrent starts cannot both
-        // pass the check.
+        // pass the check. The stopping check joins the
+        // same critical section under the spawn gate
+        // (fix loop 2, Tech N4): `wait_turns` cannot
+        // interleave between the check and the
+        // registration below.
         let busy = {
-            let mut active = self.active.lock().expect("active lock");
+            let Ok(_gate) = self.spawn_mu.lock() else {
+                // Poisoned gate: fail closed, refuse the turn.
+                return;
+            };
+            if self.stopping.load(Ordering::SeqCst) {
+                return;
+            }
+            let Ok(mut active) = self.active.lock() else {
+                return;
+            };
             if active.contains(&chat_id) {
                 true
             } else {
@@ -1412,7 +1619,23 @@ impl TurnRunner {
             let stopped = this.run_text_turn(chat_id, &text).await;
             let _ = stopped;
         });
-        self.push_task(handle);
+        // Register under the same gate: if shutdown began
+        // after the spawn, abort instead of leaving the
+        // task unjoined (its slot is cleared explicitly;
+        // the guard drops with the aborted future too).
+        {
+            let Ok(_gate) = self.spawn_mu.lock() else {
+                handle.abort();
+                self.clear_active(chat_id);
+                return;
+            };
+            if self.stopping.load(Ordering::SeqCst) {
+                handle.abort();
+                self.clear_active(chat_id);
+                return;
+            }
+            self.push_task(handle);
+        }
     }
 
     /// Record a spawned turn task, dropping finished
@@ -1421,10 +1644,17 @@ impl TurnRunner {
     /// `decided` set is already capped at 1024, and
     /// `notified`/`resumed` intentionally match Go,
     /// which never prunes them either — see PORTING).
+    /// Callers hold the spawn gate: registration is
+    /// atomic with the stopping check (fix loop 2,
+    /// Tech N4).
     fn push_task(&self, handle: tokio::task::JoinHandle<()>) {
-        let mut tasks = self.tasks.lock().expect("tasks lock");
-        tasks.retain(|h| !h.is_finished());
-        tasks.push(handle);
+        if let Ok(mut tasks) = self.tasks.lock() {
+            tasks.retain(|h| !h.is_finished());
+            tasks.push(handle);
+        }
+        // A poisoned tasks lock drops the handle: the
+        // task still runs and its slot guard still
+        // clears, so only the shutdown join loses it.
     }
 
     /// Schedule a resume-follow under the same
@@ -1450,7 +1680,13 @@ impl TurnRunner {
             let deadline = Instant::now() + RESUME_SLOT_WAIT;
             loop {
                 {
-                    let mut active = this.active.lock().expect("active lock");
+                    // A poisoned active lock drops the
+                    // resume instead of panicking (Safety
+                    // N5): the slot state is already
+                    // corrupt from the earlier panic.
+                    let Ok(mut active) = this.active.lock() else {
+                        return;
+                    };
                     if !active.contains(&chat_id) {
                         active.insert(chat_id);
                         break;
@@ -1480,11 +1716,19 @@ impl TurnRunner {
             // was just acquired, so that check collapses
             // into the slot wait above. See PORTING.md §M5b
             // deviation 2.
-            let stale = {
-                let resumed = this.resumed.lock().expect("resumed lock");
-                resumed
+            // Safety N8 (verified, fix loop 2): the
+            // `TurnSlotGuard` above is created immediately
+            // after the slot-wait `break`, before this
+            // stale check — the guard clears the slot on
+            // every exit path, including this one.
+            let stale = match this.resumed.lock() {
+                Ok(resumed) => resumed
                     .get(&(chat_id, session_id.clone()))
-                    .is_some_and(|last| after_seq <= *last)
+                    .is_some_and(|last| after_seq <= *last),
+                // Poisoned resumed lock: fail closed, drop
+                // the resume instead of risking a duplicate
+                // follow (Safety N5).
+                Err(_) => true,
             };
             if stale {
                 this.drop_resume(chat_id, "stale-resume").await;
@@ -1493,7 +1737,21 @@ impl TurnRunner {
             this.run_resume(chat_id, &session_id, &title, after_seq)
                 .await;
         });
-        self.push_task(handle);
+        // Register under the spawn gate, as in
+        // `start_turn`: if shutdown began after the spawn,
+        // abort instead of leaving the task unjoined (its
+        // slot guard drops with the aborted future).
+        {
+            let Ok(_gate) = self.spawn_mu.lock() else {
+                handle.abort();
+                return;
+            };
+            if self.stopping.load(Ordering::SeqCst) {
+                handle.abort();
+                return;
+            }
+            self.push_task(handle);
+        }
     }
 
     async fn drop_resume(&self, chat_id: i64, reason: &str) {
@@ -1526,17 +1784,27 @@ impl TurnRunner {
     /// Source: `internal/commands/telegram_turn.go:240-249`
     /// (`Wait`).
     pub async fn wait_turns(&self) {
-        self.stopping.store(true, Ordering::SeqCst);
+        // Set stopping and take the task list under the
+        // spawn gate, so no start can register a task
+        // between them (Go `Wait`,
+        // `telegram_turn.go:240-249`; fix loop 2, Tech
+        // N4). The stops are signalled after the gate is
+        // released: the stops lock is never taken under
+        // the gate, so the order cannot deadlock.
+        let handles = {
+            let _gate = self.spawn_mu.lock().ok();
+            self.stopping.store(true, Ordering::SeqCst);
+            match self.tasks.lock() {
+                Ok(mut tasks) => std::mem::take(&mut *tasks),
+                Err(_) => Vec::new(),
+            }
+        };
         if let Ok(stops) = self.stops.lock() {
             for entry in stops.values() {
                 entry.stopped.store(true, Ordering::SeqCst);
                 entry.notify.notify_waiters();
             }
         }
-        let handles = {
-            let mut tasks = self.tasks.lock().expect("tasks lock");
-            std::mem::take(&mut *tasks)
-        };
         for h in handles {
             let _ = h.await;
         }
@@ -1597,8 +1865,12 @@ impl TurnRunner {
             notify: Notify::new(),
         });
         {
-            let mut stops = self.stops.lock().expect("stops lock");
-            stops.insert(chat_id, Arc::clone(&stop));
+            // A poisoned stops lock skips registration
+            // instead of panicking (Safety N5): the turn
+            // runs, but /stop cannot find it.
+            if let Ok(mut stops) = self.stops.lock() {
+                stops.insert(chat_id, Arc::clone(&stop));
+            }
         }
         self.signal_if_stopping(&stop);
         let preview = Arc::new(StreamPreview::new(Instant::now()));
@@ -1627,6 +1899,7 @@ impl TurnRunner {
             chat_id,
             bubble_id,
             Arc::clone(&preview),
+            Some(Arc::clone(&stop)),
         );
         let user_seq = match self.deliver_send(chat_id, &scope, text, &stop).await {
             Ok(seq) => seq,
@@ -1719,8 +1992,12 @@ impl TurnRunner {
             notify: Notify::new(),
         });
         {
-            let mut stops = self.stops.lock().expect("stops lock");
-            stops.insert(chat_id, Arc::clone(&stop));
+            // See `run_text_turn`: a poisoned stops lock
+            // skips registration instead of panicking
+            // (Safety N5).
+            if let Ok(mut stops) = self.stops.lock() {
+                stops.insert(chat_id, Arc::clone(&stop));
+            }
         }
         self.signal_if_stopping(&stop);
         let preview = Arc::new(StreamPreview::new(Instant::now()));
@@ -1747,6 +2024,7 @@ impl TurnRunner {
             chat_id,
             bubble_id,
             Arc::clone(&preview),
+            Some(Arc::clone(&stop)),
         );
         let (auto_approve, auto_allow_once) = self.toggles(chat_id);
         let res = match self
@@ -1777,8 +2055,13 @@ impl TurnRunner {
         // cannot re-fire this follow. A failed follow
         // records nothing, so it stays retryable.
         {
-            let mut resumed = self.resumed.lock().expect("resumed lock");
-            resumed.insert((chat_id, session_id.to_string()), after_seq);
+            // A poisoned resumed lock skips the record
+            // instead of panicking (Safety N5): a stale
+            // re-tap stays possible, the follow itself
+            // still delivers.
+            if let Ok(mut resumed) = self.resumed.lock() {
+                resumed.insert((chat_id, session_id.to_string()), after_seq);
+            }
         }
         editor.finish().await;
         let stopped = stop.stopped.load(Ordering::SeqCst);
@@ -1839,13 +2122,13 @@ impl TurnRunner {
         text: &str,
         stop: &Arc<TurnStop>,
     ) -> Result<Option<i64>, BotError> {
-        let baseline_events = self.port.history(1, scope).await?;
+        let baseline_events = self.port.history(1, scope).await?.0;
         let baseline = baseline_events
             .iter()
             .filter_map(history_seq)
             .max()
             .unwrap_or(0);
-        let baseline20 = self.port.history(20, scope).await?;
+        let baseline20 = self.port.history(20, scope).await?.0;
         let baseline = baseline20
             .iter()
             .filter_map(history_seq)
@@ -1859,6 +2142,12 @@ impl TurnRunner {
         if !scope.is_empty() {
             body["session_id"] = Value::String(scope.to_string());
         }
+        // Safety N3 (fix loop 2): check the stop BEFORE
+        // opening the stream — a turn stopped during the
+        // baseline reads must not start new work.
+        if stop.stopped.load(Ordering::SeqCst) {
+            return Err(BotError::Cancelled);
+        }
         self.port.open_stream(body).await?;
         let deadline = Instant::now() + ACK_TIMEOUT;
         loop {
@@ -1866,7 +2155,7 @@ impl TurnRunner {
                 return Err(BotError::Cancelled);
             }
             let events = match self.port.history(10, scope).await {
-                Ok(events) => events,
+                Ok((events, _)) => events,
                 Err(e) => {
                     // Go `deliverSend`
                     // (`internal/commands/wait.go:920-929`):
@@ -1891,6 +2180,65 @@ impl TurnRunner {
             }
             tokio::time::sleep(ACK_POLL).await;
         }
+    }
+
+    /// Widening final history read, mirroring Go's
+    /// `HistoryReplies` (`internal/wait/history.go:216-257`)
+    /// over [`HISTORY_LIMITS`]. Returns `(replies,
+    /// exhausted, events)`: replies deduped by (seq,
+    /// message_id), oldest-first; `exhausted` when the
+    /// last window still reports `has_more`; `events` is
+    /// every window's events concatenated (for the
+    /// replayed-failed proof). Each window is retried
+    /// once on a non-auth error (Go's `readWindow`,
+    /// `history.go:269-278`); an auth error fails the
+    /// read at once.
+    async fn history_replies(
+        &self,
+        scope: &str,
+        after_seq: i64,
+    ) -> Result<(Vec<Reply>, bool, Vec<Value>), BotError> {
+        let mut merged: Vec<Reply> = Vec::new();
+        let mut seen: HashSet<(i64, String)> = HashSet::new();
+        let mut all_events: Vec<Value> = Vec::new();
+        let mut exhausted = false;
+        for (i, limit) in HISTORY_LIMITS.iter().enumerate() {
+            let (events, has_more) = match self.port.history(*limit, scope).await {
+                Ok(pair) => pair,
+                Err(e) => {
+                    if is_auth_error(&e) {
+                        return Err(e);
+                    }
+                    self.port.history(*limit, scope).await?
+                }
+            };
+            if events.is_empty() {
+                if has_more && i + 1 < HISTORY_LIMITS.len() {
+                    continue;
+                }
+                if has_more {
+                    exhausted = true;
+                }
+                break;
+            }
+            all_events.extend(events.iter().cloned());
+            for rp in replies_after(&events, after_seq, None) {
+                if seen.insert((rp.seq, rp.message_id.clone())) {
+                    merged.push(rp);
+                }
+            }
+            if !has_more {
+                break;
+            }
+            if oldest_seq(&events) <= after_seq {
+                break;
+            }
+            if i + 1 == HISTORY_LIMITS.len() {
+                exhausted = true;
+            }
+        }
+        merged.sort_by_key(|r| r.seq);
+        Ok((merged, exhausted, all_events))
     }
 
     /// Follow a turn to its end by polling `chat.history`
@@ -1930,12 +2278,16 @@ impl TurnRunner {
         // deviation 17 for the bound's Go anchors.
         let mut first_error_at: Option<Instant> = None;
         let mut consecutive_errors: u32 = 0;
+        // Replies seen live (poll/streaming): the settle
+        // proof Go restores into the final read when the
+        // window missed it (`runner.go:1162-1195`).
+        let mut proof_replies: Vec<Reply> = Vec::new();
         loop {
             if stop.stopped.load(Ordering::SeqCst) {
                 return Err(BotError::Cancelled);
             }
             let events = match self.port.history(200, scope).await {
-                Ok(events) => {
+                Ok((events, _)) => {
                     first_error_at = None;
                     consecutive_errors = 0;
                     events
@@ -1956,10 +2308,14 @@ impl TurnRunner {
                     // Go's resubscribe backoff
                     // (`internal/wait/runner.go:426-435`):
                     // base 1s, doubling with the shift capped
-                    // at 5 (max 32s). The sleep watches the
-                    // stop notify so /stop stays prompt.
+                    // at 5 (max 32s), capped at the remaining
+                    // budget (fix loop 2, Tech N5). The sleep
+                    // watches the stop notify so /stop stays
+                    // prompt.
                     let shift = consecutive_errors.saturating_sub(1).min(5);
                     let pause = Duration::from_secs(1u64 << shift);
+                    let remaining = self.follow_error_budget().saturating_sub(first.elapsed());
+                    let pause = pause.min(remaining);
                     if stop.stopped.load(Ordering::SeqCst) {
                         return Err(BotError::Cancelled);
                     }
@@ -1978,6 +2334,17 @@ impl TurnRunner {
                 .cloned()
                 .collect();
             fresh.sort_by_key(seq_of);
+            // Proof replies: every reply this poll saw, so
+            // the final read can restore one it missed
+            // (Go `proofReplies`, `runner.go:1162-1195`).
+            for rp in replies_after(&fresh, after_seq, None) {
+                if !proof_replies
+                    .iter()
+                    .any(|k| k.seq == rp.seq && k.message_id == rp.message_id)
+                {
+                    proof_replies.push(rp);
+                }
+            }
             for ev in &fresh {
                 last_seen = last_seen.max(seq_of(ev));
                 preview.feed(ev);
@@ -2016,16 +2383,24 @@ impl TurnRunner {
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        // Final history read (2 attempts), then the
-        // endgame: settle a suspect terminal, accept a
-        // replayed failure, lag window for a done outcome
-        // with zero replies, fail-closed timeout.
+        // Final history read (2 attempts of the widening
+        // read), then the endgame: settle a suspect
+        // terminal, accept a replayed failure, lag window
+        // for a done outcome with zero replies, proof
+        // restore, fail-closed timeout.
+        // Source: `internal/wait/runner.go:1023-1250`
+        // (`Runner.finish`).
         let mut events: Vec<Value> = Vec::new();
         let mut final_read_failed = false;
+        let mut final_exhausted = false;
+        let mut replies: Vec<Reply> = Vec::new();
         for _ in 0..2 {
-            match self.port.history(200, scope).await {
-                Ok(ev) => {
+            match self.history_replies(scope, after_seq).await {
+                Ok((rs, exhausted, ev)) => {
+                    replies = rs;
                     events = ev;
+                    final_exhausted = exhausted;
+                    final_read_failed = false;
                     break;
                 }
                 Err(_) => {
@@ -2034,7 +2409,6 @@ impl TurnRunner {
                 }
             }
         }
-        let replies = replies_after(&events, after_seq, None);
         let mut kind = match &outcome {
             Some(o) => o.kind,
             None => WaitKind::Timeout,
@@ -2059,14 +2433,16 @@ impl TurnRunner {
                 detail = o.detail;
             }
         }
-        if kind == WaitKind::Done && replies.is_empty() {
+        if !final_read_failed && kind == WaitKind::Done && replies.is_empty() {
             // Lag window: one more read after a second.
+            // Go polls to the end of its lag window;
+            // Rust keeps the single 1s re-read it already
+            // had (the final read above already widened).
             tokio::time::sleep(Duration::from_secs(1)).await;
-            if let Ok(ev) = self.port.history(200, scope).await {
-                events = ev;
+            if let Ok((rs, _, _)) = self.history_replies(scope, after_seq).await {
+                replies = rs;
             }
         }
-        let replies = replies_after(&events, after_seq, None);
         if matches!(kind, WaitKind::Done | WaitKind::Failed)
             && let Some(o) = waiter.settle(&replies)
         {
@@ -2081,6 +2457,62 @@ impl TurnRunner {
                 .as_ref()
                 .map(|o| o.approvals.clone())
                 .unwrap_or_default();
+        }
+        // Endgame reconciliation, Go's note precedence
+        // (`runner.go:1197-1239`): the window-exhaustion
+        // note, then boundary-unknown, then the
+        // final-read-failed note (which wins over both),
+        // then the proof-restore note (which wins over
+        // exhaustion only, never over the other two).
+        // When the final read fails, reconciliation is
+        // skipped entirely and the proof is lost to the
+        // fail-closed Timeout below.
+        let boundary_unknown = waiter.boundary_unknown();
+        let mut note = String::new();
+        if final_exhausted && !boundary_unknown {
+            note = format!(
+                "history window exhausted at {} events; older replies may be missed; run `castctl wait` again",
+                HISTORY_LIMITS[HISTORY_LIMITS.len() - 1]
+            );
+        }
+        if boundary_unknown {
+            replies = Vec::new();
+            note = "turn-end boundary unknown: history could not be read, so no replies are reported; run `castctl wait` again"
+                .to_string();
+        }
+        if final_read_failed {
+            // A failed read reports no replies at all (Go
+            // keeps the nil replies of the failed read).
+            replies = Vec::new();
+            note = "could not read the final replies; run `castctl wait` again".to_string();
+        } else if !boundary_unknown && !proof_replies.is_empty() {
+            // Restore proof replies the final read missed,
+            // deduped by (seq, message_id); the final
+            // read's text wins on a key collision (it is
+            // already in `replies`, so only missing keys
+            // are appended).
+            let mut missing: Vec<Reply> = Vec::new();
+            for rp in &proof_replies {
+                if !replies
+                    .iter()
+                    .any(|k| k.seq == rp.seq && k.message_id == rp.message_id)
+                {
+                    missing.push(rp.clone());
+                }
+            }
+            if !missing.is_empty() {
+                replies.extend(missing);
+                replies.sort_by_key(|r| r.seq);
+                note = "final read missed the settle proof reply; reporting the proof reply"
+                    .to_string();
+            }
+        }
+        // Fail-closed: a failed final read turns Done
+        // into Timeout (`runner.go:1204-1206`); the
+        // detail is the waiter's last stored status.
+        if final_read_failed && kind == WaitKind::Done {
+            kind = WaitKind::Timeout;
+            detail = waiter.status().unwrap_or("").to_string();
         }
         let final_text = replies.last().map(|r| r.text.clone()).unwrap_or_default();
         let needs_input_reason = replies
@@ -2098,7 +2530,7 @@ impl TurnRunner {
             final_text,
             replies,
             final_read_failed,
-            note: String::new(),
+            note,
             approvals,
             needs_input_reason,
             question,
@@ -2289,42 +2721,52 @@ impl TurnRunner {
         user_seq: i64,
         upto: Option<i64>,
     ) -> Result<Vec<(i64, Resource)>, BotError> {
-        let mut out: Vec<(i64, Resource)> = Vec::new();
-        let mut seen_event: HashSet<(i64, String)> = HashSet::new();
-        let mut seen_path: HashSet<String> = HashSet::new();
+        // Go `collectTurnMedia`
+        // (`telegram_turn.go:930-1000`): windows widen over
+        // `turnMediaHistoryLimits`; an empty page ends the
+        // widening (`:947-949`); events dedupe by (seq,
+        // event_name, message_id) across the growing
+        // windows, and only then are the assistant /
+        // completed / media filters applied.
+        let mut seen_event: HashSet<(i64, String, String)> = HashSet::new();
+        let mut merged: Vec<Value> = Vec::new();
         for limit in TURN_MEDIA_HISTORY_LIMITS {
-            let events = self.port.history(limit, scope).await?;
-            let mut sorted = events.clone();
-            sorted.sort_by_key(seq_of);
-            let oldest = sorted.iter().filter_map(history_seq).min();
-            let mut rows: Vec<(i64, Resource)> = Vec::new();
-            for ev in &sorted {
-                let seq = seq_of(ev);
-                if seq <= user_seq || upto.is_some_and(|u| seq > u) {
-                    continue;
-                }
-                if ev.get("event_name").and_then(Value::as_str) != Some("message.assistant") {
-                    continue;
-                }
-                if payload_status(ev) != Some("completed".to_string()) {
-                    continue;
-                }
-                if is_self_referential(ev) {
-                    continue;
-                }
-                let mid = first_truthy_id(ev);
-                if !seen_event.insert((seq, mid)) {
-                    continue;
-                }
-                for res in event_resources(&from_serde(ev)) {
-                    if seen_path.insert(res.path.clone()) {
-                        rows.push((seq, res));
-                    }
+            let page = self.port.history(limit, scope).await?.0;
+            if page.is_empty() {
+                break;
+            }
+            for ev in &page {
+                let key = (seq_of(ev), event_name(ev), first_truthy_id(ev));
+                if seen_event.insert(key) {
+                    merged.push(ev.clone());
                 }
             }
-            out.extend(rows);
-            if oldest.is_some_and(|o| o <= user_seq) {
+            let oldest = page.iter().map(seq_of).min().unwrap_or(0);
+            if oldest <= user_seq {
                 break;
+            }
+        }
+        merged.sort_by_key(seq_of);
+        let mut out: Vec<(i64, Resource)> = Vec::new();
+        let mut seen_path: HashSet<String> = HashSet::new();
+        for ev in &merged {
+            let seq = seq_of(ev);
+            if seq <= user_seq || upto.is_some_and(|u| seq > u) {
+                continue;
+            }
+            if ev.get("event_name").and_then(Value::as_str) != Some("message.assistant") {
+                continue;
+            }
+            if payload_status(ev) != Some("completed".to_string()) {
+                continue;
+            }
+            if is_self_referential(ev) {
+                continue;
+            }
+            for res in event_resources(&from_serde(ev)) {
+                if seen_path.insert(res.path.clone()) {
+                    out.push((seq, res));
+                }
             }
         }
         out.sort_by_key(|(seq, _)| *seq);
@@ -2646,7 +3088,11 @@ pub fn outcome_notes(res: &WaitResult, stopped: bool) -> Vec<String> {
                 notes.push(format!("⚠️ Muse's turn ended: {}", res.status));
             }
         }
-        "timeout" => {
+        // A timeout caused by a failed final read is
+        // explained by the note below, not by the 6h
+        // line: the turn did not run for 6 hours, its
+        // final replies could not be read.
+        "timeout" if !res.final_read_failed => {
             notes.push("⌛ Still running after 6h…".to_string());
         }
         _ => {}
@@ -2656,6 +3102,16 @@ pub fn outcome_notes(res: &WaitResult, stopped: bool) -> Vec<String> {
             "⚠️ could not auto-approve {}: {}",
             e.approval_id, e.summary
         ));
+    }
+    // [DEVIATION] Go's `outcomeNotes`
+    // (`telegram_turn.go:1391-1429`) never mentions
+    // `res.Note`: the note surfaces in the CLI wait
+    // output, not the bubble. The bot bubble has no CLI,
+    // so a note (final-read failure, window exhaustion,
+    // proof restore) must ride the notes or the user
+    // never sees it.
+    if !res.note.is_empty() {
+        notes.push(res.note.clone());
     }
     notes
 }
@@ -2771,11 +3227,15 @@ fn widget_options(w: &crate::wait::Widget) -> Vec<(String, String)> {
 /// Go `pythonFloat` (`telegram_turn.go:1618-1637`):
 /// `strconv.FormatFloat(f, 'g', -1, 64)` — the shortest
 /// digits that round-trip — with `.0` appended when the
-/// result has no `.`, `e`, or `E`. Rust's `{}` display
-/// is the same shortest round-trip in the normal range;
-/// outside it Go switches to scientific form with an
-/// explicit `e+XX`/`e-XX` exponent, which `{}` never
-/// produces, so that range is formatted by hand.
+/// result has no `.`, `e`, or `E`. Go's `'g'` uses %e
+/// when the decimal exponent is < -4 or >= 6 (probed
+/// against Go 2026-11-06: 1e6 -> "1e+06", 1234567.0 ->
+/// "1.234567e+06", 1e15 -> "1e+15", 100000.0 ->
+/// "100000", 0.0001 -> "0.0001", 1e-5 -> "1e-05").
+/// The exponent comes from Rust's `{f:e}` (the same
+/// shortest digits); the decision is the exponent, NOT
+/// the magnitude — the old `[1e-4, 1e21)` magnitude rule
+/// was wrong for 1e6..1e21 (fix loop 2, Tech B-mới-1).
 fn python_float(f: f64) -> String {
     if f.is_nan() {
         return "nan".to_string();
@@ -2787,15 +3247,20 @@ fn python_float(f: f64) -> String {
             "-inf".to_string()
         };
     }
-    if f != 0.0 && (f.abs() >= 1e21 || f.abs() < 1e-4) {
+    if f != 0.0 {
         // Go 'g' with precision -1 uses %e for these
-        // magnitudes: shortest digits, exponent with a
+        // exponents: shortest digits, exponent with a
         // sign and at least two digits.
-        let s = format!("{f:e}");
-        let (mantissa, exp) = s.split_once('e').unwrap_or((&s, "0"));
-        let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
-        let exp: i32 = exp.parse().unwrap_or(0);
-        return format!("{mantissa}e{exp:+03}");
+        let sci = format!("{f:e}");
+        let exp: i32 = sci
+            .split_once('e')
+            .and_then(|(_, e)| e.parse().ok())
+            .unwrap_or(0);
+        if !(-4..6).contains(&exp) {
+            let (mantissa, _) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
+            let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+            return format!("{mantissa}e{exp:+03}");
+        }
     }
     let s = format!("{f}");
     if s.contains('.') || s.contains('e') || s.contains('E') {
@@ -3637,7 +4102,7 @@ mod tests {
     async fn editor_throttles_to_one_edit_per_second() {
         let sink = Arc::new(RecordingSink::new());
         let preview = Arc::new(StreamPreview::new(Instant::now()));
-        let mut editor = BubbleEditor::start(sink.clone(), 1, 7, Arc::clone(&preview));
+        let mut editor = BubbleEditor::start(sink.clone(), 1, 7, Arc::clone(&preview), None);
         // Three rapid feeds: the loop must edit at most
         // twice (first edit + one after the 1s tick).
         for i in 0..3 {
@@ -3670,13 +4135,9 @@ mod tests {
     }
 
     impl GatewayPort for TestPort {
-        fn history(
-            &self,
-            _limit: i64,
-            _thread: &str,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<Value>, BotError>> + Send + '_>> {
+        fn history(&self, _limit: i64, _thread: &str) -> HistoryFuture<'_> {
             let script = self.history_script.clone();
-            Box::pin(async move { Ok(script) })
+            Box::pin(async move { Ok((script, false)) })
         }
 
         fn open_stream(
@@ -3759,11 +4220,7 @@ mod tests {
     }
 
     impl GatewayPort for QueuePort {
-        fn history(
-            &self,
-            _limit: i64,
-            _thread: &str,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<Value>, BotError>> + Send + '_>> {
+        fn history(&self, _limit: i64, _thread: &str) -> HistoryFuture<'_> {
             let step = {
                 let mut q = self.queue.lock().expect("queue lock");
                 match q.pop_front() {
@@ -3780,7 +4237,7 @@ mod tests {
                         .unwrap_or_else(|e| e.into_inner().clone()),
                 }
             };
-            Box::pin(async move { step })
+            Box::pin(async move { step.map(|events| (events, false)) })
         }
 
         fn open_stream(
@@ -3828,11 +4285,7 @@ mod tests {
     struct PanicPort;
 
     impl GatewayPort for PanicPort {
-        fn history(
-            &self,
-            _limit: i64,
-            _thread: &str,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<Value>, BotError>> + Send + '_>> {
+        fn history(&self, _limit: i64, _thread: &str) -> HistoryFuture<'_> {
             Box::pin(async move { panic!("test port panics on history") })
         }
 
@@ -3871,6 +4324,264 @@ mod tests {
             _method: &str,
         ) -> Pin<Box<dyn Future<Output = Result<bool, BotError>> + Send + '_>> {
             Box::pin(async move { Ok(true) })
+        }
+    }
+
+    /// A port whose history returns the newest `limit`
+    /// events of a fixed log, with Go's `has_more` (more
+    /// events exist than the window holds) — the
+    /// gateway's newest-N assumption
+    /// (`internal/wait/history.go`).
+    struct WindowPort {
+        events: Vec<Value>,
+    }
+
+    impl GatewayPort for WindowPort {
+        fn history(&self, limit: i64, _thread: &str) -> HistoryFuture<'_> {
+            let n = self.events.len();
+            let take = (limit.max(0) as usize).min(n);
+            let window = self.events[n - take..].to_vec();
+            let has_more = n > take;
+            Box::pin(async move { Ok((window, has_more)) })
+        }
+
+        fn open_stream(
+            &self,
+            _body: Value,
+        ) -> Pin<Box<dyn Future<Output = Result<i64, BotError>> + Send + '_>> {
+            Box::pin(async move { Ok(1) })
+        }
+
+        fn call_json(
+            &self,
+            _method: &str,
+            _opts: RequestOptions,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, BotError>> + Send + '_>> {
+            Box::pin(async move { Ok(json!({})) })
+        }
+
+        fn download_file(
+            &self,
+            _path: &str,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, BotError>> + Send + '_>> {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+
+        fn write_file(
+            &self,
+            _path: &str,
+            _data: &[u8],
+        ) -> Pin<Box<dyn Future<Output = Result<(), BotError>> + Send + '_>> {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn has_route(
+            &self,
+            _method: &str,
+        ) -> Pin<Box<dyn Future<Output = Result<bool, BotError>> + Send + '_>> {
+            Box::pin(async move { Ok(true) })
+        }
+    }
+
+    /// A port whose history answers from a script but
+    /// whose `open_stream` panics: `deliver_send` must
+    /// never reach it once the turn is stopped.
+    struct PanicOpenPort {
+        history_script: Vec<Value>,
+    }
+
+    impl GatewayPort for PanicOpenPort {
+        fn history(&self, _limit: i64, _thread: &str) -> HistoryFuture<'_> {
+            let script = self.history_script.clone();
+            Box::pin(async move { Ok((script, false)) })
+        }
+
+        fn open_stream(
+            &self,
+            _body: Value,
+        ) -> Pin<Box<dyn Future<Output = Result<i64, BotError>> + Send + '_>> {
+            Box::pin(async move { panic!("test port panics on open_stream") })
+        }
+
+        fn call_json(
+            &self,
+            _method: &str,
+            _opts: RequestOptions,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, BotError>> + Send + '_>> {
+            Box::pin(async move { Ok(json!({})) })
+        }
+
+        fn download_file(
+            &self,
+            _path: &str,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, BotError>> + Send + '_>> {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+
+        fn write_file(
+            &self,
+            _path: &str,
+            _data: &[u8],
+        ) -> Pin<Box<dyn Future<Output = Result<(), BotError>> + Send + '_>> {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn has_route(
+            &self,
+            _method: &str,
+        ) -> Pin<Box<dyn Future<Output = Result<bool, BotError>> + Send + '_>> {
+            Box::pin(async move { Ok(true) })
+        }
+    }
+
+    /// A sink whose `edit_plain` / `send` block for a
+    /// configured duration (a 429 storm that never
+    /// answers): `finish()` / `edit_final` must still
+    /// return promptly once the turn stop fires.
+    struct SlowSink {
+        edit_delay: Duration,
+        send_delay: Duration,
+        fail_edit: AtomicBool,
+        edit_started: AtomicBool,
+        edit_started_notify: Notify,
+        send_started: AtomicBool,
+        send_started_notify: Notify,
+        calls: StdMutex<Vec<String>>,
+    }
+
+    impl SlowSink {
+        fn new(edit_delay: Duration, send_delay: Duration) -> Self {
+            Self {
+                edit_delay,
+                send_delay,
+                fail_edit: AtomicBool::new(false),
+                edit_started: AtomicBool::new(false),
+                edit_started_notify: Notify::new(),
+                send_started: AtomicBool::new(false),
+                send_started_notify: Notify::new(),
+                calls: StdMutex::new(Vec::new()),
+            }
+        }
+
+        /// Wait until the slow `edit_plain` started (the
+        /// test is vacuous without it: `finish()` would
+        /// return fast for the wrong reason).
+        async fn wait_edit_started(&self) {
+            let notified = self.edit_started_notify.notified();
+            tokio::pin!(notified);
+            let _ = notified.as_mut().enable();
+            if self.edit_started.load(Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
+
+        /// Wait until the slow `send` started.
+        async fn wait_send_started(&self) {
+            let notified = self.send_started_notify.notified();
+            tokio::pin!(notified);
+            let _ = notified.as_mut().enable();
+            if self.send_started.load(Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    impl BotSink for SlowSink {
+        fn send(
+            &self,
+            _chat_id: i64,
+            text: &str,
+            _opts: SendOptions,
+        ) -> Pin<Box<dyn Future<Output = Result<i64, BotError>> + Send + '_>> {
+            let text = text.to_string();
+            let calls = &self.calls;
+            let delay = self.send_delay;
+            self.send_started.store(true, Ordering::SeqCst);
+            self.send_started_notify.notify_waiters();
+            Box::pin(async move {
+                calls
+                    .lock()
+                    .map(|mut c| c.push(format!("send:{text}")))
+                    .ok();
+                tokio::time::sleep(delay).await;
+                Ok(99)
+            })
+        }
+
+        fn edit(
+            &self,
+            _chat_id: i64,
+            _message_id: i64,
+            text: &str,
+            _mode: HtmlMode,
+            _markup: Option<InlineKeyboardMarkup>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), BotError>> + Send + '_>> {
+            let text = text.to_string();
+            let calls = &self.calls;
+            let fail = self.fail_edit.load(Ordering::SeqCst);
+            Box::pin(async move {
+                calls
+                    .lock()
+                    .map(|mut c| c.push(format!("edit:{text}")))
+                    .ok();
+                if fail {
+                    Err(BotError::Validation("boom".to_string()))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+
+        fn edit_plain(
+            &self,
+            _chat_id: i64,
+            _message_id: i64,
+            text: &str,
+            _markup: Option<InlineKeyboardMarkup>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            let text = text.to_string();
+            let calls = &self.calls;
+            let delay = self.edit_delay;
+            self.edit_started.store(true, Ordering::SeqCst);
+            self.edit_started_notify.notify_waiters();
+            Box::pin(async move {
+                calls
+                    .lock()
+                    .map(|mut c| c.push(format!("edit:{text}")))
+                    .ok();
+                tokio::time::sleep(delay).await;
+            })
+        }
+
+        fn delete(
+            &self,
+            _chat_id: i64,
+            _message_id: i64,
+        ) -> Pin<Box<dyn Future<Output = Result<(), BotError>> + Send + '_>> {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn send_file(
+            &self,
+            _chat_id: i64,
+            name: &str,
+            data: &[u8],
+            _mime: &str,
+            _caption: &str,
+            _opts: &SendOptions,
+        ) -> Pin<Box<dyn Future<Output = Result<i64, BotError>> + Send + '_>> {
+            let name = name.to_string();
+            let len = data.len();
+            let calls = &self.calls;
+            Box::pin(async move {
+                calls
+                    .lock()
+                    .map(|mut c| c.push(format!("send_file:{name}:{len}")))
+                    .ok();
+                Ok(100)
+            })
         }
     }
 
@@ -4119,7 +4830,7 @@ mod tests {
     async fn finish_before_loop_starts_returns_promptly() {
         let sink = Arc::new(RecordingSink::new());
         let preview = Arc::new(StreamPreview::new(Instant::now()));
-        let mut editor = BubbleEditor::start(sink.clone(), 1, 7, preview);
+        let mut editor = BubbleEditor::start(sink.clone(), 1, 7, preview, None);
         // No yield before finish: the loop task has not
         // run yet, so a notify-only stop would be lost
         // and finish would hang forever (regression:
@@ -4135,7 +4846,7 @@ mod tests {
         let sink = Arc::new(RecordingSink::new());
         sink.fail_edit.store(true, Ordering::SeqCst);
         let preview = Arc::new(StreamPreview::new(Instant::now()));
-        let mut editor = BubbleEditor::start(sink.clone(), 1, 7, preview);
+        let mut editor = BubbleEditor::start(sink.clone(), 1, 7, preview, None);
         editor.edit_final("final text", None).await;
         let calls = sink.calls.lock().unwrap().clone();
         assert!(
@@ -4543,5 +5254,470 @@ mod tests {
             "deliver failure must be reported in the bubble, calls={calls:?}"
         );
         runner.wait_turns().await;
+    }
+
+    // --- Fix loop 2 (review round 2), RED first. ---
+
+    #[test]
+    fn python_float_go_scientific_threshold() {
+        // Go `strconv.FormatFloat(f, 'g', -1, 64)` uses %e
+        // when the decimal exponent is < -4 or >= 6 —
+        // probed against Go 2026-11-06 (fix loop 2, Tech
+        // B-mới-1 / Red N1). The old Rust rule keyed on
+        // magnitude ([1e-4, 1e21)) and got 1e6..1e21 wrong.
+        assert_eq!(python_float(1e6), "1e+06");
+        assert_eq!(python_float(1234567.0), "1.234567e+06");
+        assert_eq!(python_float(1e15), "1e+15");
+        assert_eq!(python_float(1e20), "1e+20");
+        assert_eq!(python_float(1750000000.0), "1.75e+09");
+        assert_eq!(python_float(100000.0), "100000.0");
+        assert_eq!(python_float(0.0001), "0.0001");
+        assert_eq!(python_float(1e-5), "1e-05");
+        // Boundary neighbours from the same probe run.
+        assert_eq!(python_float(999999.0), "999999.0");
+        assert_eq!(python_float(1234567.89), "1.23456789e+06");
+        assert_eq!(python_float(0.000123456), "0.000123456");
+        assert_eq!(python_float(1.23456e-5), "1.23456e-05");
+        assert_eq!(python_float(-1e6), "-1e+06");
+        assert_eq!(python_float(0.0), "0.0");
+    }
+
+    /// Drive `wait_follow` directly: poll sees a Done
+    /// terminal with a reply, then the final history
+    /// read fails twice.
+    async fn wait_follow_with(
+        runner: &Arc<TurnRunner>,
+        sink: &Arc<RecordingSink>,
+        after_seq: i64,
+    ) -> WaitResult {
+        let stop = Arc::new(TurnStop {
+            stopped: AtomicBool::new(false),
+            notify: Notify::new(),
+        });
+        let preview = Arc::new(StreamPreview::new(Instant::now()));
+        let sink_dyn: Arc<dyn BotSink> = sink.clone();
+        let mut editor = BubbleEditor::start(
+            sink_dyn,
+            111,
+            7,
+            Arc::clone(&preview),
+            Some(Arc::clone(&stop)),
+        );
+        let res = tokio::time::timeout(
+            Duration::from_secs(30),
+            runner.wait_follow(
+                111,
+                "",
+                after_seq,
+                Duration::from_secs(60),
+                &preview,
+                &mut editor,
+                false,
+                false,
+                &stop,
+            ),
+        )
+        .await
+        .expect("wait_follow must return")
+        .expect("wait_follow must not fail");
+        editor.finish().await;
+        res
+    }
+
+    #[tokio::test]
+    async fn final_read_failure_turns_done_into_timeout_with_note() {
+        // Go `internal/wait/runner.go:1204-1206,1216-1219`:
+        // a failed final read turns a Done kind into
+        // Timeout with the exact note — never a silent
+        // Done with an empty reply list.
+        let sink = Arc::new(RecordingSink::new());
+        let done_events = vec![
+            task_event(7, "running"),
+            assistant_text_event(8, "Hello"),
+            task_event(9, "completed"),
+        ];
+        let port = Arc::new(QueuePort::new(vec![
+            Ok(done_events),
+            Err(gateway_error()),
+            Err(gateway_error()),
+        ]));
+        let (runner, _state) = runner_with("final-read-fail", port, Arc::clone(&sink));
+        let res = wait_follow_with(&runner, &sink, 6).await;
+        assert!(res.final_read_failed, "final read must be flagged");
+        assert!(
+            matches!(res.kind, WaitKind::Timeout),
+            "final-read failure turns Done into Timeout, got {:?}",
+            res.kind
+        );
+        assert_eq!(res.outcome, "timeout");
+        assert_eq!(
+            res.note,
+            "could not read the final replies; run `castctl wait` again"
+        );
+        assert_eq!(res.exit_code, 124);
+        assert!(
+            res.replies.is_empty(),
+            "a failed final read reports no replies — the proof \
+             is lost to the fail-closed Timeout (Go runner.go), \
+             not silently restored; replies={:?}",
+            res.replies
+        );
+        // And the bubble must show the note, never
+        // "(no reply text)" overwriting the streamed reply.
+        let notes = outcome_notes(&res, false);
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("could not read the final replies")),
+            "outcome notes must carry the final-read note, notes={notes:?}"
+        );
+        assert!(
+            !notes.iter().any(|n| n.contains("Still running after 6h")),
+            "a final-read timeout is not a 6h timeout, notes={notes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn final_read_widens_window_to_recover_oldest_reply() {
+        // Go `HistoryReplies` (`internal/wait/history.go:216-257`):
+        // windows [200, 500, 1000]. 251 events; the
+        // newest-200 window hides the reply at seq 101.
+        let sink = Arc::new(RecordingSink::new());
+        let mut events = vec![user_event(100, "hi")];
+        events.push(assistant_text_event(101, "first reply"));
+        for seq in 102..350 {
+            events.push(json!({
+                "seq": seq,
+                "event_name": "delta.text_append",
+                "payload": {"text": "x", "message_id": "m1"}
+            }));
+        }
+        // A running event inside the newest-200 window: the
+        // Waiter only accepts a terminal it has seen run
+        // (otherwise it is a suspect ignored terminal).
+        events.push(task_event(200, "running"));
+        events.push(task_event(350, "completed"));
+        let port = Arc::new(WindowPort { events });
+        let (runner, _state) = runner_with("widen", port, Arc::clone(&sink));
+        let res = wait_follow_with(&runner, &sink, 100).await;
+        assert!(
+            matches!(res.kind, WaitKind::Done),
+            "kind must stay Done, got {:?}",
+            res.kind
+        );
+        assert!(
+            res.replies
+                .iter()
+                .any(|r| r.seq == 101 && r.text == "first reply"),
+            "widened final read must recover the oldest reply, replies={:?}",
+            res.replies
+        );
+        assert!(
+            res.note.is_empty(),
+            "no exhaustion note when the widened window covers the turn, note={}",
+            res.note
+        );
+    }
+
+    #[tokio::test]
+    async fn final_read_window_exhaustion_is_noted_not_silent() {
+        // 1201 events; even the 1000-window cannot reach
+        // the reply at seq 101, and the poll never saw it
+        // either — the loss must be noted, not silent.
+        let sink = Arc::new(RecordingSink::new());
+        let mut events = vec![user_event(100, "hi")];
+        events.push(assistant_text_event(101, "old reply"));
+        for seq in 102..1300 {
+            events.push(json!({
+                "seq": seq,
+                "event_name": "delta.text_append",
+                "payload": {"text": "x", "message_id": "m1"}
+            }));
+        }
+        events.push(task_event(1200, "running"));
+        events.push(task_event(1300, "completed"));
+        let port = Arc::new(WindowPort { events });
+        let (runner, _state) = runner_with("exhausted", port, Arc::clone(&sink));
+        let res = wait_follow_with(&runner, &sink, 100).await;
+        assert!(
+            matches!(res.kind, WaitKind::Done),
+            "kind must stay Done, got {:?}",
+            res.kind
+        );
+        assert_eq!(
+            res.note,
+            "history window exhausted at 1000 events; older replies may be missed; run `castctl wait` again"
+        );
+    }
+
+    #[tokio::test]
+    async fn final_read_restores_proof_reply_seen_in_poll() {
+        // Go `runner.go:1162-1195`: a proof reply the
+        // final read no longer contains is restored into
+        // it with a note, never silently dropped.
+        let sink = Arc::new(RecordingSink::new());
+        let port = Arc::new(QueuePort::new(vec![
+            Ok(vec![
+                task_event(95, "running"),
+                assistant_text_event(101, "proof reply"),
+                task_event(102, "completed"),
+            ]),
+            Ok(vec![task_event(102, "completed")]),
+        ]));
+        let (runner, _state) = runner_with("restore", port, Arc::clone(&sink));
+        let res = wait_follow_with(&runner, &sink, 90).await;
+        assert!(
+            res.replies
+                .iter()
+                .any(|r| r.seq == 101 && r.text == "proof reply"),
+            "proof reply seen in the poll must be restored, replies={:?}",
+            res.replies
+        );
+        assert_eq!(
+            res.note,
+            "final read missed the settle proof reply; reporting the proof reply"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_returns_promptly_when_stop_fires_during_streaming_edit() {
+        // Red B3: the editor loop is stuck in a 60s
+        // `edit_plain` (a 429 storm); /stop must free
+        // `finish()` in seconds, not after the edit.
+        let sink = Arc::new(SlowSink::new(Duration::from_secs(60), Duration::ZERO));
+        let preview = Arc::new(StreamPreview::new(Instant::now()));
+        let stop = Arc::new(TurnStop {
+            stopped: AtomicBool::new(false),
+            notify: Notify::new(),
+        });
+        let sink_dyn: Arc<dyn BotSink> = sink.clone();
+        let mut editor = BubbleEditor::start(
+            sink_dyn,
+            1,
+            7,
+            Arc::clone(&preview),
+            Some(Arc::clone(&stop)),
+        );
+        editor.feed(&json!({
+            "seq": 10,
+            "event_name": "delta.text_append",
+            "payload": {"text": "hello", "message_id": "m10"}
+        }));
+        tokio::time::timeout(Duration::from_secs(5), sink.wait_edit_started())
+            .await
+            .expect("slow streaming edit must start");
+        stop.stopped.store(true, Ordering::SeqCst);
+        stop.notify.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(5), editor.finish())
+            .await
+            .expect("finish must return promptly on stop, not wait out the 429-storm edit");
+    }
+
+    #[tokio::test]
+    async fn edit_final_fallback_send_returns_promptly_on_stop() {
+        // Red B3 / Safety N4: the primary edit fails and
+        // the fallback send blocks for 60s (429 storm);
+        // /stop mid-send must end `edit_final` in seconds.
+        let sink = Arc::new(SlowSink::new(Duration::ZERO, Duration::from_secs(60)));
+        sink.fail_edit.store(true, Ordering::SeqCst);
+        let preview = Arc::new(StreamPreview::new(Instant::now()));
+        let stop = Arc::new(TurnStop {
+            stopped: AtomicBool::new(false),
+            notify: Notify::new(),
+        });
+        let sink2: Arc<dyn BotSink> = sink.clone();
+        let stop2 = Arc::clone(&stop);
+        let handle = tokio::spawn(async move {
+            let mut editor = BubbleEditor::start(sink2, 1, 7, preview, Some(stop2));
+            editor.edit_final("final text", None).await;
+        });
+        tokio::time::timeout(Duration::from_secs(5), sink.wait_send_started())
+            .await
+            .expect("fallback send must start");
+        stop.stopped.store(true, Ordering::SeqCst);
+        stop.notify.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("edit_final must return promptly on stop")
+            .expect("edit_final task must not panic");
+    }
+
+    #[test]
+    fn media_path_http_validation_and_byte_decode() {
+        // Go `url.Parse` + `PathUnescape`
+        // (`internal/gateway/media.go:47-91`), probed
+        // against Go 2026-11-06 (fix loop 2, Tech N1/N2).
+        // A control character anywhere fails the parse.
+        assert!(media_path("https://h/a\tb.png", None).is_err());
+        // A bad escape in the host fails the parse.
+        assert!(media_path("https://ho%zzst/a.png", None).is_err());
+        // The scheme is case-insensitive (`url.Parse`
+        // lowercases it).
+        assert_eq!(
+            media_path("HTTP://h/a.png", None).unwrap(),
+            "/media/raw/a.png"
+        );
+        // `%FF` is one byte, not UTF-8: Go decodes it to
+        // `"\xff"` and re-quotes it back to `%FF`, not to
+        // the U+FFFD replacement (`%EF%BF%BD`).
+        assert_eq!(
+            media_path("sandbox://%FF.png", None).unwrap(),
+            "/media/raw/%FF.png"
+        );
+        assert_eq!(
+            media_path("https://h/%FF.png", None).unwrap(),
+            "/media/raw/%FF.png"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_turn_media_stops_on_empty_page() {
+        // Go `collectTurnMedia`
+        // (`telegram_turn.go:947-949`): an empty page ends
+        // the widening — the next window must not be read.
+        let sink = Arc::new(RecordingSink::new());
+        let mut files = std::collections::HashMap::new();
+        files.insert("/media/raw/f10.png".to_string(), b"PNG!".to_vec());
+        files.insert("/media/raw/f20.png".to_string(), b"PNG!".to_vec());
+        let port = Arc::new(
+            QueuePort::new(vec![
+                Ok(vec![media_event(10, "m10", "sandbox://f10.png", 4)]),
+                Ok(vec![]),
+                Ok(vec![media_event(20, "m20", "sandbox://f20.png", 4)]),
+            ])
+            .with_files(files),
+        );
+        let (runner, _state) = runner_with("empty-page", port, Arc::clone(&sink));
+        let media = runner.collect_turn_media("", 0, None).await.unwrap();
+        assert_eq!(media.len(), 1, "media past the empty page must not be read");
+        assert_eq!(media[0].1.path, "sandbox://f10.png");
+    }
+
+    #[tokio::test]
+    async fn follow_backoff_capped_at_remaining_budget() {
+        // Go `runner.go:426-435`: the resubscribe backoff
+        // is capped at the remaining deadline. With a
+        // 300ms budget the first 1s pause would already
+        // overshoot it; the turn must fail in ~300ms, not
+        // ~1000ms.
+        let sink = Arc::new(RecordingSink::new());
+        let port = Arc::new(QueuePort::new(vec![
+            Ok(vec![user_event(5, "old")]),
+            Ok(vec![user_event(5, "old")]),
+            Ok(vec![user_event(6, "hi")]),
+            Err(gateway_error()),
+        ]));
+        let (runner, _state) = runner_with("backoff-cap", port, Arc::clone(&sink));
+        runner.set_follow_error_budget(Duration::from_millis(300));
+        let start = Instant::now();
+        runner.start_turn(111, "hi".to_string()).await;
+        assert!(
+            wait_until_slot_free(&runner, 111, Duration::from_secs(8)).await,
+            "turn must end"
+        );
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "backoff must be capped at the remaining budget: failed after {elapsed:?}, want <800ms"
+        );
+        runner.wait_turns().await;
+    }
+
+    #[tokio::test]
+    async fn follow_error_budget_resets_after_recovery() {
+        // Red N4: a gateway dead for just under the
+        // budget that then recovers must NOT fail the
+        // turn — and after recovery a second storm gets a
+        // fresh full budget instead of failing on the
+        // first error of the old window. Budget scaled to
+        // 3s (production 30s); storms span ~2s each.
+        let sink = Arc::new(RecordingSink::new());
+        let done_events = vec![
+            task_event(8, "running"),
+            assistant_text_event(9, "Hello"),
+            task_event(10, "completed"),
+        ];
+        let port = Arc::new(QueuePort::new(vec![
+            Ok(vec![user_event(5, "old")]),
+            Ok(vec![user_event(5, "old")]),
+            Ok(vec![user_event(6, "hi")]),
+            Err(gateway_error()),
+            Err(gateway_error()),
+            Ok(vec![]),
+            Err(gateway_error()),
+            Err(gateway_error()),
+            Ok(done_events),
+        ]));
+        let (runner, _state) = runner_with("budget-reset", port, Arc::clone(&sink));
+        runner.set_follow_error_budget(Duration::from_secs(3));
+        runner.start_turn(111, "hi".to_string()).await;
+        assert!(
+            wait_until_slot_free(&runner, 111, Duration::from_secs(15)).await,
+            "turn must finish after the gateway recovers"
+        );
+        let calls = sink.calls.lock().unwrap().clone();
+        assert!(
+            calls.iter().any(|c| c == "edit:Hello"),
+            "recovered turn must deliver its reply, calls={calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.contains("Could not reach Muse")),
+            "recovered turn must not report a gateway error, calls={calls:?}"
+        );
+        runner.wait_turns().await;
+    }
+
+    #[tokio::test]
+    async fn deliver_send_checks_stop_before_open_stream() {
+        // Safety N3: a stopped turn must cancel before
+        // opening the stream, not after.
+        let sink = Arc::new(RecordingSink::new());
+        let port = Arc::new(PanicOpenPort {
+            history_script: vec![user_event(5, "old")],
+        });
+        let (runner, _state) = runner_with("stop-open", port, Arc::clone(&sink));
+        let stop = Arc::new(TurnStop {
+            stopped: AtomicBool::new(true),
+            notify: Notify::new(),
+        });
+        let err = runner.deliver_send(111, "", "hello", &stop).await;
+        assert!(
+            matches!(err, Err(BotError::Cancelled)),
+            "stopped send must cancel before opening the stream, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_turns_bounded_under_concurrent_starts() {
+        // Tech N4 (fix loop 2): starts racing shutdown
+        // must not leave `wait_turns` hanging on a task
+        // it never registered (Go `turnsMu`,
+        // `telegram_turn.go:240-249`). The script acks
+        // every turn, so each started turn ends promptly
+        // once `wait_turns` signals its stop.
+        let sink = Arc::new(RecordingSink::new());
+        let port = Arc::new(TestPort {
+            history_script: vec![user_event(6, "hi")],
+            files: std::collections::HashMap::new(),
+        });
+        let (runner, _state) = runner_with("race-shutdown", port, Arc::clone(&sink));
+        let waiter = {
+            let r = Arc::clone(&runner);
+            tokio::spawn(async move { r.wait_turns().await })
+        };
+        let mut starts = Vec::new();
+        for chat in 111..121 {
+            let r = Arc::clone(&runner);
+            starts.push(tokio::spawn(async move {
+                r.start_turn(chat, "hi".to_string()).await;
+            }));
+        }
+        for s in starts {
+            let _ = s.await;
+        }
+        tokio::time::timeout(Duration::from_secs(10), waiter)
+            .await
+            .expect("wait_turns must return promptly under concurrent starts")
+            .expect("waiter must not panic");
     }
 }

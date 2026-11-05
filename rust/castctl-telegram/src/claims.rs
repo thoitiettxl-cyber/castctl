@@ -398,6 +398,17 @@ impl ClaimManager {
     /// (`decideOnce`). Returns `true` when this caller
     /// performed the decide, `false` when already decided.
     pub async fn decide_once(&self, id: &str, decision: &str) -> Result<bool, BotError> {
+        // Safety N7 (fix loop 2): defense in depth —
+        // validate the decision here too, not only in
+        // the callers (`decide_approval`,
+        // `GatewayDecider::decide`, `approvals.go:21-33`,
+        // `wait.go:1277-1293`). An unknown decision must
+        // never reach the decider RPC.
+        if !matches!(decision, "allow_always" | "allow_once" | "deny") {
+            return Err(BotError::Validation(
+                "telegram: unknown decision".to_string(),
+            ));
+        }
         loop {
             // Decided is checked BEFORE shutdown: Go's
             // `decideOnce` checks the decided set before
@@ -975,6 +986,31 @@ mod tests {
         let done2 = m.approve_forever(&[approval("a1")], true, false).await;
         assert_eq!(done2, vec!["a1".to_string()]);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn decide_once_rejects_unknown_decision() {
+        // Safety N7 (fix loop 2): defense in depth —
+        // `decide_once` validates the decision itself
+        // instead of trusting every caller to have done
+        // it (`decide_approval` / `GatewayDecider` already
+        // do). An unknown decision must never reach the
+        // decider RPC.
+        let (m, calls) = manager();
+        let err = m
+            .decide_once("x", "maybe_later")
+            .await
+            .expect_err("an unknown decision must fail");
+        assert!(
+            matches!(err, BotError::Validation(_)),
+            "unknown decision must be a Validation error, got {err:?}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "no decider RPC may run for an unknown decision"
+        );
+        assert!(!m.is_decided("x"));
     }
 
     #[tokio::test]

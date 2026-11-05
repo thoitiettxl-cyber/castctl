@@ -354,7 +354,7 @@ impl BotServices for GatewayBotServices {
         let port = Arc::clone(&self.port);
         let scope = self.state.chat(chat_id).session_id;
         Box::pin(async move {
-            let events = port.history(40, &scope).await?;
+            let events = port.history(40, &scope).await?.0;
             Ok(files_list_rows(&events))
         })
     }
@@ -459,8 +459,12 @@ impl BotServices for GatewayBotServices {
             let params: Value = if params_json.trim().is_empty() {
                 Value::Object(Default::default())
             } else {
+                // Fixed string: the serde error can carry
+                // a fragment of the caller's input, which
+                // must never reach an error string
+                // (Safety N6, fix loop 2).
                 serde_json::from_str(&params_json)
-                    .map_err(|e| BotError::Validation(format!("telegram: bad /raw params: {e}")))?
+                    .map_err(|_| BotError::Validation("telegram: bad /raw params".to_string()))?
             };
             let v = port
                 .call_json(
@@ -694,9 +698,10 @@ mod tests {
             &self,
             _limit: i64,
             _thread: &str,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<Value>, BotError>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = Result<(Vec<Value>, bool), BotError>> + Send + '_>>
+        {
             let script = self.history_script.clone();
-            Box::pin(async move { Ok(script) })
+            Box::pin(async move { Ok((script, false)) })
         }
 
         fn open_stream(
@@ -770,5 +775,24 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "egress.approval.decide");
         assert_eq!(calls[0].1, json!({ "decision": "allow_once" }));
+    }
+
+    #[tokio::test]
+    async fn raw_call_bad_params_is_fixed_string() {
+        // Safety N6 (fix loop 2): a bad `/raw` JSON body
+        // must not echo the serde error (which can carry
+        // a fragment of the caller's input); the message
+        // is a fixed string.
+        let port = Arc::new(ScriptedPort::new(Vec::new()));
+        let services = services_with(port);
+        let err = services
+            .raw_call("chat.history", "{not json")
+            .await
+            .expect_err("bad JSON params must fail");
+        assert_eq!(
+            format!("{err:?}"),
+            "Validation(\"telegram: bad /raw params\")",
+            "serde detail must not leak into the error, got {err:?}"
+        );
     }
 }

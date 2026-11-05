@@ -20,6 +20,16 @@
 //! Rust-side observations (edit counts/texts, sendPhoto,
 //! `claims.is_decided`, getFile + file download).
 //!
+//! The fake is deliberately not too easy (Red N2, fix
+//! loop 2): the FIRST `editMessageText` it sees is
+//! answered 429 + `retry_after: 1` (the client's retry
+//! must recover), and an edit whose text is identical
+//! to the last edit of the same (chat, message) is
+//! answered 400 `"Bad Request: message is not modified"`
+//! (the client must swallow it, Go `bot.go:1662-1699`).
+//! `m5b_e2e_fake_edit_failures` pins both cases
+//! deterministically without the gateway.
+//!
 //! One test, sequential phases (the Go script is shared
 //! state, so phases must not run in parallel):
 //!   1. text turn: streaming edits (partial text first,
@@ -46,6 +56,7 @@ use castctl_telegram::claims::{ClaimManager, Decider};
 use castctl_telegram::files::InboxMedia;
 use castctl_telegram::registry::CallbackRegistry;
 use castctl_telegram::router::BotServices;
+use castctl_telegram::send::{HtmlMode, SendOptions, Sender};
 use castctl_telegram::services::{GatewayBotServices, GatewayDecider};
 use castctl_telegram::state::TelegramStateStore;
 use castctl_telegram::turn::{DirectGatewayPort, SenderSink, TurnRunner};
@@ -88,6 +99,11 @@ impl FakeBotApi {
         let next_message_id = AtomicI64::new(1);
         let counter = Arc::new(AtomicI64::new(1));
         let counter_clone = Arc::clone(&counter);
+        let last_edit: Arc<Mutex<HashMap<(String, String), String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let last_edit_clone = Arc::clone(&last_edit);
+        let edit_429_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let edit_429_clone = Arc::clone(&edit_429_done);
         tokio::spawn(async move {
             loop {
                 let Ok((mut socket, _)) = listener.accept().await else {
@@ -95,6 +111,8 @@ impl FakeBotApi {
                 };
                 let records = Arc::clone(&records_clone);
                 let counter = Arc::clone(&counter_clone);
+                let last_edit = Arc::clone(&last_edit_clone);
+                let edit_429_done = Arc::clone(&edit_429_clone);
                 tokio::spawn(async move {
                     let mut buf = Vec::new();
                     let mut byte = [0u8; 1];
@@ -193,6 +211,53 @@ impl FakeBotApi {
                                 "date": 0, "text": "",
                             }))
                         }
+                        // Red N2 (fix loop 2): the first edit
+                        // ever is a 429 with retry_after 1
+                        // (client retry must recover); an
+                        // edit identical to the last edit of
+                        // the same (chat, message) is a 400
+                        // "message is not modified" (client
+                        // must swallow it).
+                        "editMessageText" => {
+                            let body_json: Value =
+                                serde_json::from_slice(&body).unwrap_or(Value::Null);
+                            let chat_id = body_json
+                                .get("chat_id")
+                                .map(|v| v.to_string())
+                                .unwrap_or_default();
+                            let message_id = body_json
+                                .get("message_id")
+                                .map(|v| v.to_string())
+                                .unwrap_or_default();
+                            let text = body_json
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string();
+                            if !edit_429_done.swap(true, Ordering::SeqCst) {
+                                let err_body = serde_json::json!({
+                                    "ok": false, "error_code": 429,
+                                    "description": "Too Many Requests: retry after 1",
+                                    "parameters": {"retry_after": 1},
+                                });
+                                (429, serde_json::to_vec(&err_body).expect("json"))
+                            } else {
+                                let mut seen = last_edit.lock().expect("last edit lock");
+                                match seen.get(&(chat_id.clone(), message_id.clone())) {
+                                    Some(prev) if *prev == text => {
+                                        let err_body = serde_json::json!({
+                                            "ok": false, "error_code": 400,
+                                            "description": "Bad Request: message is not modified",
+                                        });
+                                        (400, serde_json::to_vec(&err_body).expect("json"))
+                                    }
+                                    _ => {
+                                        seen.insert((chat_id, message_id), text);
+                                        ok(Value::Bool(true))
+                                    }
+                                }
+                            }
+                        }
                         _ => ok(Value::Bool(true)),
                     };
                     records.lock().expect("records lock").push(rec);
@@ -206,6 +271,10 @@ impl FakeBotApi {
                 });
             }
         });
+        // `last_edit` / `edit_429_done` live only as
+        // locals above: their clones move into the accept
+        // loop (Red N2). They are not struct fields — the
+        // struct never reads them back.
         Self {
             port,
             records,
@@ -413,4 +482,40 @@ async fn m5b_offline_turn_e2e() {
     runner.wait_turns().await;
     let _ = std::fs::remove_file(&state_path);
     let _ = bot.next_message_id;
+}
+
+/// Red N2 (fix loop 2): the fake's 429-once and
+/// "message is not modified" cases, pinned without the
+/// gateway. First edit: 429 + retry_after 1, the client
+/// retries and delivers; second edit, identical text:
+/// 400 not-modified, swallowed as `Ok`.
+#[tokio::test]
+async fn m5b_e2e_fake_edit_failures() {
+    let bot = FakeBotApi::start().await;
+    let api = Arc::new(BotApi::new(
+        Arc::new(DirectDialer::new()) as Arc<dyn Dialer>,
+        BotApiConfig::plaintext(
+            FAKE_TOKEN.to_string(),
+            DialTarget::new("127.0.0.1", bot.port),
+        ),
+    ));
+    let sender = Sender::new(&api);
+    let mid = sender
+        .send(111, "seed", SendOptions::default())
+        .await
+        .expect("send seed message");
+    sender
+        .edit(111, mid, "same text", HtmlMode::Plain, None)
+        .await
+        .expect("first edit must recover from the fake 429");
+    sender
+        .edit(111, mid, "same text", HtmlMode::Plain, None)
+        .await
+        .expect("identical re-edit must be swallowed as Ok");
+    assert_eq!(
+        bot.count_method("editMessageText"),
+        3,
+        "expected 429 + retry + not-modified, got {:?}",
+        bot.request_bodies("editMessageText")
+    );
 }

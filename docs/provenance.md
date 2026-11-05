@@ -1163,6 +1163,20 @@ wait to the 6h deadline and report a timeout, so the
 30s fail-fast is a documented departure, not a
 parity claim.
 
+Fix loop 2 (2026-11-06, review round 2): no new
+upstream is introduced — the loop only aligns the
+port with the same Go sources — so no NOTICE entry is
+added. New deliberate deviations are recorded in
+`rust/PORTING.md` §M5b deviations 20-27: the final
+note rides `outcome_notes` (Go surfaces it in CLI
+output); the `edit_final` fallback send and the
+`finish()` join race the turn stop instead of Go's
+detached-ctx delivery / unconditional join; the
+newest-N window assumption behind `history_replies`
+widening; the lag window stays a single 1s re-read;
+proof-restore skips Go's follow-up exclusion; and
+`deliver_final` media sends do not listen to stop.
+
 ## 6. cronet-go — EVALUATED-NOT-WIRED (graph-only; no code, no tag)
 
 Upstream: `github.com/sagernet/cronet-go`. License:
