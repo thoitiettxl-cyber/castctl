@@ -310,7 +310,7 @@ impl BotApi {
         // parameter is retained for the call shape (the only
         // caller passes `None`); the download path documents
         // the consequence in `download_file_bytes` — see
-        // PORTING §M5a deviation 20.
+        // PORTING §M5a deviation 21.
         let _ = max_body;
         let headers = [("Content-Type".to_string(), "application/json".to_string())];
         if self.use_tls {
@@ -347,7 +347,7 @@ impl BotApi {
         // See `post_json`: `max_body` is not honoured by
         // either transport path (both cap at 16 MiB); the
         // download consequence is documented in
-        // `download_file_bytes` — PORTING §M5a deviation 20.
+        // `download_file_bytes` — PORTING §M5a deviation 21.
         let _ = max_body;
         if self.use_tls {
             self.client
@@ -809,11 +809,11 @@ impl BotApi {
     /// `BotError::Validation("file exceeds the 20 MiB
     /// download limit")` — Go ACCEPTS such a file, so this
     /// is a rebase [DEVIATION] from Go (PORTING §M5a
-    /// deviation 20). Raising the cap needs a parameterised
+    /// deviation 21). Raising the cap needs a parameterised
     /// cap in `castctl-transport` (M4b's crate; out of scope
     /// for this rebase per Boss: do not edit M4b's src).
-    /// Gate 1 (getFile reported size > 20 MiB, refused
-    /// before download) still works.
+    /// Gate 1 (message-declared size > 20 MiB, refused
+    /// before download — see `files.rs`) still works.
     ///
     /// Deliberate: this GET has NO 429 retry — a 429 fails
     /// fast (fix loop 2, red NIT 6). Go's `DownloadMedia`

@@ -1370,10 +1370,11 @@ impl CommandHandler {
             // >1 MiB BEFORE any download. Only a file whose
             // declared size LIES (≤1 MiB declared, actually
             // larger) reaches the download, and
-            // `download_media` caps the read at 20 MiB + 1
-            // and refuses — so the hold is bounded and
-            // transient, and a lying declaration is the only
-            // way to hold more than 1 MiB.
+            // `download_media` caps the read at 16 MiB (the
+            // transport's `MAX_RESPONSE_BODY`) and refuses,
+            // so the hold is bounded and transient, and a
+            // lying declaration is the only way to hold more
+            // than 1 MiB.
             let data = download_media(&self.api, media).await?;
             if data.len() as i64 > LOGIN_COOKIES_LIMIT {
                 return self

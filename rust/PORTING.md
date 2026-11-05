@@ -4129,6 +4129,7 @@ probe log, drift outputs).
   production 25s cadence through the CLI) was not waited;
   covered by threshold injection in M4a tests.
 
+
 ## M5a — Telegram bot core (crate `castctl-telegram`, 2026-11-05)
 
 M5a ports `internal/telegram` (bot core: long polling,
@@ -4491,9 +4492,16 @@ live `getMyCommands` record in
     instead of downloading and hitting Gate 2's
     clear `BotError::Validation("file exceeds the
     20 MiB download limit")`; Go ACCEPTS such a
-    file. Gate 1 (getFile reported size > 20 MiB,
-    refused before download) still works, and the
-    `max_body` parameter is retained on
+    file. Gate 1 (message-declared size > 20 MiB,
+    refused before download) still works — note it
+    checks the size declared on the message, NOT
+    `getFile`'s reported `file_size` (pre-existing
+    divergence from Go, which reads `getFile`;
+    see `files.rs` — the two agree for a consistent
+    server). Gate 2 is UNREACHABLE while the transport
+    caps at 16 MiB (`bytes.len()` can never exceed
+    20 MiB); it revives unchanged if the parameterised
+    cap lands. The `max_body` parameter is retained on
     `download_file_bytes` / `get_path` / `post_json`
     for the call shape (currently honoured by
     neither path). Follow-up (not this rebase): a
@@ -4503,7 +4511,10 @@ live `getMyCommands` record in
     lives on in M4b's transport tests
     (`tls_config_pins_http11_alpn`,
     `host_header_rules`) already counted in the
-    467-test M4b base.
+    467-test M4b base; the third deleted test
+    (`tls_config_builds_without_panic`) is subsumed
+    by the ALPN test, which calls the same
+    `tls_client_config()` constructor.
 
 ## M5a.4 Reuse verification (read, not re-ported)
 
@@ -5113,6 +5124,10 @@ tests fail for a reason outside the rebase scope.
   Test-count math: 467 (M4b base) + 96 (M5a new)
   − 3 (deleted TLS unit tests) = 560
   (`castctl-telegram` lib 70 + `bot_core` 23 = 93).
+  Re-verified on the final head `82119e3`
+  (PORTING-only delta vs `3cf1b23`): fmt 0,
+  `build --locked` 0, test 560/0 (see rebase-report
+  §7).
 - DISK CAVEAT (environment, not code): the
   default-profile `cargo test --workspace` does NOT
   fit on cue's current disk — it hit 100% (81M free,

@@ -174,10 +174,12 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 /// Download one inbound media file: `getFile` via the poll
 /// instance, then GET of the file URL via the 120s upload
-/// client. Gate 1 refuses when `getFile`'s reported size >
-/// `DOWNLOAD_LIMIT`, before downloading; empty `file_path`
-/// = fetch failure. Gate 2 reads through a limit at cap+1
-/// and refuses when more than `DOWNLOAD_LIMIT` bytes arrive.
+/// client. Gate 1 refuses when the message-declared size
+/// (`media.size`) > `DOWNLOAD_LIMIT`, before downloading;
+/// empty `file_path` = fetch failure. Gate 2 reads through
+/// a limit at cap+1 and refuses when more than
+/// `DOWNLOAD_LIMIT` bytes arrive — but it is currently
+/// UNREACHABLE (see below).
 /// The download URL contains the token: never logged, never
 /// interpolated into an error, never stored; every error
 /// leaving here is a scrubbed copy. A non-200 file response
@@ -185,12 +187,26 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// Source: `internal/telegram/inbound.go:172-221`
 /// (`DownloadMedia`).
 ///
+/// Gate 1 is a [DEVIATION]: Go reads `getFile`'s reported
+/// `file_size` (`file.FileSize > DownloadLimit`,
+/// `inbound.go:172-221`); this crate checks the size
+/// declared on the message attachment instead, and never
+/// reads `getFile`'s `file_size`. The two agree for a
+/// consistent server (one backend, one file); they differ
+/// only if Telegram reports contradictory sizes — message
+/// declares >20 MiB while `getFile` reports ≤20 MiB (Rust
+/// refuses, Go accepts), or the reverse (Go refuses
+/// pre-download, Rust downloads and succeeds if the real
+/// size is ≤16 MiB, else fails at the transport cap).
+///
 /// Gate 2 is a [DEVIATION]: upstream has no post-download
 /// gate. Both transport paths cap bodies at 16 MiB
-/// (`MAX_RESPONSE_BODY`), so Gate 2 only ever observes
-/// files up to that size; a file in (16 MiB, 20 MiB] fails
-/// at the transport instead (see `api.rs`,
-/// `download_file_bytes` — PORTING §M5a deviation 20).
+/// (`MAX_RESPONSE_BODY`), so `bytes.len()` never exceeds
+/// `DOWNLOAD_LIMIT` and Gate 2 can never fire — it is dead
+/// code until the parameterised cap lands (then it revives
+/// unchanged). A file in (16 MiB, 20 MiB] fails at the
+/// transport instead (see `api.rs`,
+/// `download_file_bytes` — PORTING §M5a deviation 21).
 pub async fn download_media(api: &BotApi, media: &InboxMedia) -> Result<Vec<u8>, BotError> {
     // Go `DownloadMedia` (`inbound.go:172-221`) errors
     // first on a nil/empty file id — before any `getFile`
