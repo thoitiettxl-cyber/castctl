@@ -939,6 +939,35 @@ impl Gateway {
         Self::decode_call_json(&raw)
     }
 
+    /// Open a `chat.stream` (or any method) as an
+    /// untracked stream and return its stream id (Go
+    /// `stream.go` `open` with `track=false`). The
+    /// caller never reads the stream's own frames — the
+    /// turn is followed on `chat.history` instead — so
+    /// no receiver is returned; cancel the stream with
+    /// [`Gateway::cancel_stream_for`].
+    ///
+    /// FORCED ADDITION (M5b): `open` is private and no
+    /// public stream API existed; the turn engine needs
+    /// exactly this to deliver a message. See PORTING.md
+    /// §M5b and the PR draft.
+    pub async fn open_stream(
+        &self,
+        method: &str,
+        body: Option<JsonValue>,
+    ) -> Result<i64, TransportError> {
+        let bytes = match body {
+            Some(v) => Some(
+                serde_json::to_vec(&v).map_err(|e| TransportError::Validation {
+                    message: format!("gateway: stream body is not JSON: {e}"),
+                })?,
+            ),
+            None => None,
+        };
+        let (sid, _, _) = self.open(method, &[], bytes, &[], None, false).await?;
+        Ok(sid)
+    }
+
     /// The web app's heartbeat: `connection.ping` with
     /// `{"presence":"away"}`, bounded by timeout (10s default
     /// when the timeout is zero) (Go `calls.go` `Ping`).

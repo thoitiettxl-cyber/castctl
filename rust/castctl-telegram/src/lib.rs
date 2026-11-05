@@ -56,11 +56,15 @@ pub mod commands;
 pub mod dispatcher;
 pub mod error;
 pub mod files;
+pub mod preview;
 pub mod registry;
 pub mod router;
 pub mod send;
+pub mod services;
 pub mod state;
+pub mod turn;
 pub mod types;
+pub mod wait;
 
 pub use api::{BotApi, BotApiConfig};
 pub use approvals::{Approval, approval_text, choose_auto_decision, describe_approval};
@@ -80,5 +84,11 @@ pub use router::{
     is_known_command, is_owner_command, is_valid_command_name, parse_command,
 };
 pub use send::{HtmlMode, InlineKeyboardButton, InlineKeyboardMarkup, SendOptions, Sender};
+pub use services::{GatewayBotServices, GatewayDecider};
 pub use state::{ChatEntry, TelegramStateStore, state_path_for_profile_dir};
+pub use turn::{
+    BUSY_REPLY, BubbleEditor, ClaimApprover, DirectGatewayPort, GatewayPort, SenderSink,
+    SharedGatewayPort, TURN_TIMEOUT, TurnRunner, TurnSegment, WaitResult,
+};
 pub use types::{CallbackQuery, Chat, Message, Update, User};
+pub use wait::{Outcome, Reply, WaitKind, Waiter};

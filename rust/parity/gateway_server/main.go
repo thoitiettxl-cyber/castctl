@@ -3,18 +3,24 @@
 // Licensed under the GNU General Public License v3.0 or later.
 
 // Command gateway_server is the M4a cross-language parity
-// harness: one binary, two modes, no production code touched
+// harness: one binary, three modes, no production code touched
 // (this file is the ONLY new Go file in the PR; it builds on
 // the existing internal/gateway/gatewaytest.Server and the Go
 // gateway Connector — no Go file is modified).
 //
-//	serve  — start a fake gateway server (gatewaytest.Server)
-//	         with canned JSON per path, print READY addr=<addr>
-//	         and serve until SIGINT/SIGTERM.
-//	client — connect the GO gateway client to a running server
-//	         (serve mode, or any gatewaytest server) and call
-//	         the methods given on the command line, printing one
-//	         line per method: "<method>\t<compact JSON result>".
+//	serve     — start a fake gateway server (gatewaytest.Server)
+//	          with canned JSON per path, print READY addr=<addr>
+//	          and serve until SIGINT/SIGTERM.
+//	serve-e2e — start a STATEFUL fake gateway for the M5b Rust
+//	          turn E2E (rust/castctl-telegram/tests/turn_e2e.rs):
+//	          scripted history that evolves per call (user ack
+//	          echo, streaming deltas, assistant reply + media,
+//	          one pending approval), decide/fs.write logging to
+//	          stderr, media bytes for /media/raw/*.
+//	client    — connect the GO gateway client to a running server
+//	          (serve mode, or any gatewaytest server) and call
+//	          the methods given on the command line, printing one
+//	          line per method: "<method>\t<compact JSON result>".
 //
 // The Rust parity client (castctl-gateway example
 // parity_client) prints the same lines against the same
@@ -25,6 +31,7 @@
 // Usage:
 //
 //	gateway_server serve
+//	gateway_server serve-e2e
 //	gateway_server client <addr> <method> [method ...]
 package main
 
@@ -36,6 +43,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -112,6 +122,209 @@ func runServe() error {
 	return nil
 }
 
+// ----------------------------------------------------------------
+// serve-e2e: scripted history for the M5b Rust turn E2E.
+// ----------------------------------------------------------------
+
+// e2eState is the script's append-only event log. Every
+// history call returns all events logged so far; follow
+// stages are appended lazily on the 2nd and 3rd history
+// calls after each stream open, so the Rust turn's 1s
+// follow poll sees the deltas in two separate polls
+// (streaming edits are spread across ticks, not batched).
+type e2eState struct {
+	mu sync.Mutex
+	// events is the append-only log (marshalled per call).
+	events []json.RawMessage
+	// nextSeq allocates history seqs, 10 apart.
+	nextSeq int64
+	// streams opened so far; streamTexts[k] is the k-th
+	// stream's user text (echoed back as its user event).
+	streams     int
+	streamTexts []string
+	// histSinceStream counts chat.history calls since the
+	// latest stream opened.
+	histSinceStream int
+	// decide/fs.write/media observations, for the E2E log.
+	decided   []string
+	fsWrites  []string
+	mediaGets []string
+}
+
+func (s *e2eState) allocSeq() int64 {
+	seq := s.nextSeq
+	s.nextSeq += 10
+	return seq
+}
+
+func (s *e2eState) event(seq int64, name string, payload string) {
+	s.events = append(s.events, json.RawMessage(fmt.Sprintf(
+		`{"seq":%d,"event_name":%q,"payload":%s}`, seq, name, payload)))
+}
+
+// history returns the current log, appending the next
+// follow stage when the call is a follow poll
+// (limit == 200: the turn's 1s poll; ack polls use
+// limit 10 and baselines 1/20, and must never advance
+// the stages). Callers must hold s.mu.
+func (s *e2eState) history(limit int64) string {
+	if s.streams == 0 {
+		return `{"chat_events":[]}`
+	}
+	if limit == 200 {
+		s.histSinceStream++
+	}
+	switch s.histSinceStream {
+	case 2:
+		// Follow poll 1: first delta + running.
+		seq := s.allocSeq()
+		s.event(seq, "delta.text_append", `{"text":"Hel","message_id":"m1"}`)
+		seq = s.allocSeq()
+		s.event(seq, "task.status", `{"status":"running","root_agent_id":"root1","agent_id":"root1"}`)
+	case 3:
+		// Follow poll 2: rest of the delta, the completed
+		// reply (with one media file), one pending
+		// approval, then the terminal status.
+		seq := s.allocSeq()
+		s.event(seq, "delta.text_append", `{"text":"lo","message_id":"m1"}`)
+		seq = s.allocSeq()
+		s.event(seq, "message.assistant", `{"status":"completed","display_text":"Hello from Muse","message_id":"m1","data":{"images":[{"path":"sandbox://e2e.png","mime":"image/png","byte_len":4,"label":"e2e image"}]}}`)
+		seq = s.allocSeq()
+		s.event(seq, "approvals.pending", `{"pending_approvals":[{"approval_id":"a1","display":{"summary_title":"Run shell","permission_question":{"text":"Allow Muse to run?"},"decision_options":[{"kind":"allow_always"},{"kind":"allow_once"},{"kind":"deny"}]}}]}`)
+		seq = s.allocSeq()
+		s.event(seq, "task.status", `{"status":"completed","root_agent_id":"root1","agent_id":"root1"}`)
+	}
+	var b strings.Builder
+	b.WriteString(`{"chat_events":[`)
+	for i, ev := range s.events {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.Write(ev)
+	}
+	b.WriteString(`]}`)
+	return b.String()
+}
+
+func e2eHandler(st *e2eState) gatewaytest.Handler {
+	return gatewaytest.HandlerFunc(func(req *pb.ApplicationRequest, service pb.ServiceType) gatewaytest.Response {
+		// The Rust gateway sends GET params as a query
+		// string (chat.history arrives as
+		// "/chat/history?limit=10" with an empty body),
+		// so split the path before exact matching and
+		// read the limit from the query when the body
+		// has none. (Without this, every history call
+		// hit the default case and returned {}, and the
+		// ack poll looped the full 30s — observed in the
+		// first E2E run, 2026-11-06.)
+		path, query := req.Path, ""
+		if i := strings.IndexByte(path, '?'); i >= 0 {
+			path, query = path[:i], path[i+1:]
+		}
+		limitFromQuery := func() int64 {
+			for _, kv := range strings.Split(query, "&") {
+				if k, v, ok := strings.Cut(kv, "="); ok && k == "limit" {
+					if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+						return n
+					}
+				}
+			}
+			return 0
+		}
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		reply := func(body string) gatewaytest.Response {
+			fmt.Fprintf(os.Stderr, "E2E %s %s %s\n", req.Verb, path, truncateLog(string(req.Body), 200))
+			return gatewaytest.Response{Frames: []*pb.ServiceFrame{
+				gatewaytest.ResponseFrame(0, 200, []byte(`{"ok":true,"result":`+body+`}`), true),
+			}}
+		}
+		raw := func(body []byte) gatewaytest.Response {
+			fmt.Fprintf(os.Stderr, "E2E %s %s %s\n", req.Verb, path, truncateLog(string(req.Body), 200))
+			return gatewaytest.Response{Frames: []*pb.ServiceFrame{
+				gatewaytest.ResponseFrame(0, 200, body, true),
+			}}
+		}
+		switch {
+		case path == "/chat/history":
+			var body struct {
+				Limit int64 `json:"limit"`
+			}
+			_ = json.Unmarshal(req.Body, &body)
+			limit := body.Limit
+			if limit == 0 {
+				limit = limitFromQuery()
+			}
+			return reply(st.history(limit))
+		case path == "/chat/stream":
+			// Record the sent text for the ack echo.
+			var body struct {
+				Items []struct {
+					Text string `json:"text"`
+				} `json:"items"`
+			}
+			_ = json.Unmarshal(req.Body, &body)
+			text := ""
+			if len(body.Items) > 0 {
+				text = body.Items[0].Text
+			}
+			st.streams++
+			st.streamTexts = append(st.streamTexts, text)
+			st.histSinceStream = 0
+			seq := st.allocSeq()
+			st.event(seq, "message.user", fmt.Sprintf(`{"display_text":%q,"content":%q}`, text, text))
+			return reply(`{}`)
+		case path == "/approvals":
+			return reply(`{"pending_approvals":[{"approval_id":"a1","display":{"summary_title":"Run shell","permission_question":{"text":"Allow Muse to run?"},"decision_options":[{"kind":"allow_always"},{"kind":"allow_once"},{"kind":"deny"}]}}]}`)
+		case strings.HasPrefix(path, "/approvals/") && strings.HasSuffix(path, "/decide"):
+			id := strings.TrimSuffix(strings.TrimPrefix(path, "/approvals/"), "/decide")
+			st.decided = append(st.decided, id+":"+string(req.Body))
+			fmt.Fprintf(os.Stderr, "E2E DECIDE %s %s\n", id, string(req.Body))
+			return reply(`{}`)
+		case path == "/fs/write":
+			var body struct {
+				Path string `json:"path"`
+			}
+			_ = json.Unmarshal(req.Body, &body)
+			st.fsWrites = append(st.fsWrites, body.Path)
+			fmt.Fprintf(os.Stderr, "E2E FS-WRITE %s\n", body.Path)
+			return reply(`{}`)
+		case strings.HasPrefix(path, "/media/raw/"):
+			st.mediaGets = append(st.mediaGets, path)
+			return raw([]byte("PNG!"))
+		case path == "/chat/cancel":
+			return reply(`{"cancelled":true}`)
+		default:
+			return reply(`{}`)
+		}
+	})
+}
+
+func truncateLog(s string, n int) string {
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
+}
+
+func runServeE2E() error {
+	st := &e2eState{nextSeq: 10}
+	server, err := gatewaytest.NewServer(e2eHandler(st))
+	if err != nil {
+		return err
+	}
+	defer server.Close()
+	fmt.Printf("READY addr=%s\n", server.Addr())
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	<-stop
+	st.mu.Lock()
+	fmt.Fprintf(os.Stderr, "E2E SUMMARY streams=%d decided=%v fsWrites=%v mediaGets=%v\n",
+		st.streams, st.decided, st.fsWrites, st.mediaGets)
+	st.mu.Unlock()
+	return nil
+}
+
 func runClient(addr string, methods []string) error {
 	auth := &gatewaytest.CannedAuth{VMID: "vm-test", AccessToken: "AT-FAKE", HatchToken: "HT-FAKE"}
 	dialer := &plainDialer{auth: auth}
@@ -163,13 +376,15 @@ func runClient(addr string, methods []string) error {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: gateway_server serve | client <addr> <method> [method ...]")
+		fmt.Fprintln(os.Stderr, "usage: gateway_server serve | serve-e2e | client <addr> <method> [method ...]")
 		os.Exit(2)
 	}
 	var err error
 	switch os.Args[1] {
 	case "serve":
 		err = runServe()
+	case "serve-e2e":
+		err = runServeE2E()
 	case "client":
 		if len(os.Args) < 4 {
 			fmt.Fprintln(os.Stderr, "usage: gateway_server client <addr> <method> [method ...]")

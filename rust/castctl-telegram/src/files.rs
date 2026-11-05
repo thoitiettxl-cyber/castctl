@@ -235,6 +235,16 @@ pub async fn download_media(api: &BotApi, media: &InboxMedia) -> Result<Vec<u8>,
     Ok(bytes.to_vec())
 }
 
+/// Truncate a caption to `CAPTION_LIMIT` (1024) runes,
+/// with NO `…` suffix. Pure helper so the boundary is
+/// unit-testable without a Bot API server; `send_file`
+/// below calls exactly this.
+/// Source: `internal/telegram/files.go:169-191`.
+#[must_use]
+pub(crate) fn truncate_caption(caption: &str) -> String {
+    caption.chars().take(CAPTION_LIMIT).collect()
+}
+
 /// Send a file: kind via `FileKindFor(name, mime,
 /// len(data))`; caption truncated to `CaptionLimit` runes,
 /// sent plain (no `parse_mode`); `opts.Markup` attached,
@@ -270,7 +280,7 @@ pub async fn send_file(
         castctl_tg_files::FileKind::Video => "sendVideo",
         castctl_tg_files::FileKind::Audio => "sendAudio",
     };
-    let caption_trunc: String = caption.chars().take(CAPTION_LIMIT).collect();
+    let caption_trunc = truncate_caption(caption);
     let result = api
         .send_file_multipart(
             method,
@@ -314,6 +324,22 @@ pub fn exceeds_upload_limit(size: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_caption_boundary_1023_1024_1025() {
+        // Go `files.go`: caption cut at 1024 runes, no
+        // `…` suffix. 1023 passes through whole, 1024 is
+        // unchanged, 1025 loses exactly its last rune.
+        let under: String = "a".repeat(1023);
+        let at: String = "b".repeat(1024);
+        let over: String = "c".repeat(1024) + "X";
+        assert_eq!(truncate_caption(&under).chars().count(), 1023);
+        assert_eq!(truncate_caption(&at), at);
+        let cut = truncate_caption(&over);
+        assert_eq!(cut.chars().count(), 1024);
+        assert_eq!(cut, "c".repeat(1024));
+        assert!(!cut.ends_with('…'));
+    }
 
     fn message_with_photo() -> Message {
         serde_json::from_str(
