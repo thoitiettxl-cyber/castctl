@@ -34,6 +34,7 @@ pub mod checksum;
 pub mod compat;
 pub mod discovery;
 pub mod error;
+pub mod host;
 pub mod identity;
 pub mod loader;
 pub mod paths;
