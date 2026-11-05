@@ -1763,9 +1763,9 @@ in `rust/Cargo.toml` + `Cargo.lock` (verified on cue with
   the tree for M3d).
 
 Transitive inventory (Cargo.lock entries for these three
-crates, licenses from `cargo metadata` on cue — the full
-list is 74 lines in the writer's notes; the load-bearing
-subset is below, the rest are build/proc-macro crates):
+crates, licenses from `cargo metadata` on cue — the
+load-bearing subset is below, the rest are build/proc-macro
+crates; the full list is recoverable from `rust/Cargo.lock`):
 
 - boringtun's closure: aead 0.5.2 (MIT OR Apache-2.0),
   base64 0.22.1 (MIT OR Apache-2.0), blake2 0.10.6 (MIT OR
@@ -1781,13 +1781,14 @@ subset is below, the rest are build/proc-macro crates):
   cfg-if 1.0.5 (MIT OR Apache-2.0), digest 0.10.7 (MIT OR
   Apache-2.0), cipher 0.4.4 (MIT OR Apache-2.0), chacha20
   0.10.2 (MIT OR Apache-2.0), poly1305 0.8.0 (Apache-2.0 OR
-  MIT), universal-hash 0.5.1 (MIT OR Apache-2.0),
+  MIT), portable-atomic 1.15.0 (Apache-2.0 OR MIT),
+  universal-hash 0.5.1 (MIT OR Apache-2.0),
   generic-array 0.14.7 (MIT), typenum 1.20.1 (MIT OR
   Apache-2.0), cpufeatures 0.2.17 (MIT OR Apache-2.0),
   serde_core 1.0.228 (MIT OR Apache-2.0), plus the
   `device`-feature-only optional deps listed above
   (ip_network 0.4.1 BSD-2-Clause, ip_network_table
-  0.5.0 MIT, nix 0.31.3 MIT, parking_lot 0.12.5 MIT OR
+  0.2.0 BSD-2-Clause, nix 0.31.3 MIT, parking_lot 0.12.5 MIT OR
   Apache-2.0, parking_lot_core 0.9.12 MIT OR Apache-2.0,
   lock_api 0.4.14 MIT OR Apache-2.0, scopeguard 1.2.0 MIT OR
   Apache-2.0, smallvec 1.16.4 MIT OR Apache-2.0).

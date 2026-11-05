@@ -42,7 +42,7 @@
 //!   (checked before any TCP packet is sent); boringtun enforces
 //!   no AllowedIPs itself, so this module does.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
@@ -119,6 +119,15 @@ impl Prefix {
     /// matches only v4 prefixes, a v6 target only v6 prefixes (Go
     /// `netip.Prefix.Contains` is family-strict the same way).
     pub fn contains(&self, ip: IpAddr) -> bool {
+        // Direct construction can set any `prefix_len` (pub
+        // fields); an out-of-range length matches nothing
+        // instead of underflowing the shift below (debug panic
+        // / release wrap).
+        match (self.addr, ip) {
+            (IpAddr::V4(..), IpAddr::V4(_)) if self.prefix_len > 32 => return false,
+            (IpAddr::V6(..), IpAddr::V6(_)) if self.prefix_len > 128 => return false,
+            _ => {}
+        }
         match (self.addr, ip) {
             (IpAddr::V4(net), IpAddr::V4(addr)) => {
                 if self.prefix_len == 0 {
@@ -153,28 +162,27 @@ impl Prefix {
 /// error message.
 fn parse_prefix(value: &str, field: &str) -> Result<Prefix, TransportError> {
     let validation = |msg: String| TransportError::Validation { message: msg };
+    // Errors name the FIELD only, never the value: a key pasted
+    // by mistake into an address/allowed_ips field must not be
+    // echoed into an error string.
     let (addr_s, len_s) = value.split_once('/').ok_or_else(|| {
         validation(format!(
-            "wireguard {field} {value:?} is not a CIDR prefix (bare IP addresses are not accepted; use /32 for IPv4 or /128 for IPv6)"
+            "wireguard {field} is not a CIDR prefix (bare IP addresses are not accepted; use /32 for IPv4 or /128 for IPv6)"
         ))
     })?;
-    let addr: IpAddr = addr_s.parse().map_err(|_| {
-        validation(format!(
-            "wireguard {field} {value:?} is not a valid CIDR prefix"
-        ))
-    })?;
-    let prefix_len: u8 = len_s.parse().map_err(|_| {
-        validation(format!(
-            "wireguard {field} {value:?} is not a valid CIDR prefix"
-        ))
-    })?;
+    let addr: IpAddr = addr_s
+        .parse()
+        .map_err(|_| validation(format!("wireguard {field} is not a valid CIDR prefix")))?;
+    let prefix_len: u8 = len_s
+        .parse()
+        .map_err(|_| validation(format!("wireguard {field} is not a valid CIDR prefix")))?;
     let max = match addr {
         IpAddr::V4(_) => 32,
         IpAddr::V6(_) => 128,
     };
     if prefix_len > max {
         return Err(validation(format!(
-            "wireguard {field} {value:?} has a prefix length larger than {max}"
+            "wireguard {field} has a prefix length larger than {max}"
         )));
     }
     Ok(Prefix { addr, prefix_len })
@@ -188,8 +196,10 @@ fn parse_prefix(value: &str, field: &str) -> Result<Prefix, TransportError> {
 /// config field for the error message; the key value is never
 /// included in any error.
 fn decode_key_32(value: &str, field: &str) -> Result<[u8; 32], TransportError> {
+    // No whitespace trim: Go's `base64.StdEncoding` rejects
+    // surrounding whitespace, so M3d rejects it too.
     let decoded = BASE64_STD
-        .decode(value.trim())
+        .decode(value)
         .map_err(|_| TransportError::Validation {
             message: format!("wireguard endpoint {field} is not valid base64"),
         })?;
@@ -693,6 +703,14 @@ impl WireGuardDialer {
     /// (with optional `:port`, default 53) directly; a hostname
     /// bootstraps once via the system resolver (Go `bootstrap.go`
     /// rule) and is cached.
+    ///
+    /// The port in an entry is IGNORED, Go parity: Go's
+    /// `buildWireGuardDNSOptions`
+    /// (`internal/profile/dns.go:392-412`) hardcodes
+    /// `server_port: 53` for every server regardless of the
+    /// entry text, so M3d always queries port 53 (see PORTING
+    /// §M3d.5). A hostname carrying a `:port` suffix still
+    /// resolves by its hostname part.
     async fn dns_server_ip(&self, entry: &str) -> Result<IpAddr, TransportError> {
         let entry = entry.trim();
         if entry.is_empty() {
@@ -706,13 +724,23 @@ impl WireGuardDialer {
         if let Ok(ip) = entry.parse::<IpAddr>() {
             return Ok(ip);
         }
+        // Hostname, optionally with a `:port` suffix (port
+        // ignored, see above): strip one trailing `:digits`.
+        let host = match entry.rsplit_once(':') {
+            Some((h, p))
+                if !h.is_empty() && !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                h
+            }
+            _ => entry,
+        };
         {
             let cache = self.dns_bootstrap.lock().await;
-            if let Some(ip) = cache.get(entry) {
+            if let Some(ip) = cache.get(host) {
                 return Ok(*ip);
             }
         }
-        let mut addrs = tokio::net::lookup_host((entry, 53)).await.map_err(|_| {
+        let mut addrs = tokio::net::lookup_host((host, 53)).await.map_err(|_| {
             TransportError::ConnectionDown {
                 message: "wireguard dns server hostname could not be resolved".to_string(),
             }
@@ -720,10 +748,7 @@ impl WireGuardDialer {
         let found = addrs.next().map(|addr| addr.ip());
         match found {
             Some(ip) => {
-                self.dns_bootstrap
-                    .lock()
-                    .await
-                    .insert(entry.to_string(), ip);
+                self.dns_bootstrap.lock().await.insert(host.to_string(), ip);
                 Ok(ip)
             }
             None => Err(TransportError::ConnectionDown {
@@ -785,7 +810,14 @@ impl WireGuardDialer {
                         // No answer of this type from this server:
                         // try the next server, then the next qtype.
                     }
-                    Ok(Err(e)) => return Err(e),
+                    // A hard error from ONE server (dead server,
+                    // no socket for its family, send failure) is
+                    // NOT the answer: try the next server instead
+                    // of failing the whole resolution. (A server
+                    // that never answers at all still consumes
+                    // the dial timeout — there is no per-query
+                    // timeout by design, see PORTING §M3d.5.)
+                    Ok(Err(_)) => continue,
                     Err(_) => {
                         return Err(TransportError::ConnectionDown {
                             message: "wireguard tunnel is down".to_string(),
@@ -858,6 +890,7 @@ impl WireGuardDialer {
             })??;
         Ok(Box::new(WgStream::new(
             handle,
+            Arc::clone(&tunnel),
             tunnel.ctrl_tx.clone(),
             data_tx,
             Arc::clone(&tunnel.kick),
@@ -902,13 +935,39 @@ fn next_tunn_index() -> u32 {
 /// dialer must always supply a real port from this counter.
 static EPHEMERAL_PORT_NEXT: AtomicU16 = AtomicU16::new(49152);
 
-fn next_ephemeral_port() -> u16 {
-    let p = EPHEMERAL_PORT_NEXT.fetch_add(1, Ordering::Relaxed);
-    if (49152..=65535).contains(&p) {
-        p
+/// Pure transition for the ephemeral-port counter: given the
+/// stored value, the port to hand out and the value to store
+/// next. The counter wraps 65535 → 49152; a stored value outside
+/// the IANA range (only reachable right after the u16 wrap, see
+/// below) restarts at 49152. Unit-tested directly — the old code
+/// did the out-of-range reset with a racy load/store pair, so
+/// two threads racing at the wrap both stored 49153 and both
+/// returned 49152.
+fn next_ephemeral_port_transition(stored: u16) -> (u16, u16) {
+    if (49152..=65535).contains(&stored) {
+        let next = if stored == 65535 { 49152 } else { stored + 1 };
+        (stored, next)
     } else {
-        EPHEMERAL_PORT_NEXT.store(49153, Ordering::Relaxed);
-        49152
+        (49152, 49153)
+    }
+}
+
+fn next_ephemeral_port() -> u16 {
+    // CAS loop: the load/compute/store is one atomic step, so
+    // two threads can never observe the same out-of-range value
+    // and hand out the same port.
+    loop {
+        let current = EPHEMERAL_PORT_NEXT.load(Ordering::Relaxed);
+        let (port, next) = next_ephemeral_port_transition(current);
+        match EPHEMERAL_PORT_NEXT.compare_exchange(
+            current,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return port,
+            Err(_) => continue,
+        }
     }
 }
 
@@ -939,6 +998,17 @@ impl Dialer for WireGuardDialer {
 /// exactly like a `TcpStream`.
 pub struct WgStream {
     handle: smoltcp::iface::SocketHandle,
+    /// The tunnel this stream runs on. Holding the `Arc` keeps
+    /// the pump alive while any stream lives: dropping the
+    /// dialer must NOT kill live streams (the `Dialer` trait
+    /// promises nothing about the dialer outliving its
+    /// streams, and `DirectDialer`/`HonkDialer` streams
+    /// survive dialer drop). The pump stops only when the last
+    /// `Arc<Tunnel>` — dialer's plus every live stream's —
+    /// drops.
+    #[allow(dead_code)] // Held, never read: keeping the `Arc`
+    // alive IS the use (it keeps the pump task running).
+    tunnel: Arc<Tunnel>,
     /// Plain control sender (used by `Drop` for `Close`).
     ctrl_tx: mpsc::Sender<CtrlMsg>,
     /// Data sender (stream → pump). `try_send` + the shared
@@ -960,6 +1030,7 @@ pub struct WgStream {
 impl WgStream {
     fn new(
         handle: smoltcp::iface::SocketHandle,
+        tunnel: Arc<Tunnel>,
         ctrl_tx: mpsc::Sender<CtrlMsg>,
         data_tx: mpsc::Sender<Bytes>,
         kick: Arc<Notify>,
@@ -968,6 +1039,7 @@ impl WgStream {
     ) -> Self {
         Self {
             handle,
+            tunnel,
             ctrl_tx,
             data_tx,
             kick,
@@ -1309,13 +1381,68 @@ fn dns_skip_name(buf: &[u8], mut pos: usize) -> Option<usize> {
     }
 }
 
+/// Read a DNS name at `pos`, following compression pointers.
+/// Returns the canonical (lowercase, dot-joined, no trailing
+/// dot) name bytes and the position after the name.
+fn dns_read_name(buf: &[u8], mut pos: usize) -> Option<(Vec<u8>, usize)> {
+    let mut out = Vec::new();
+    let mut jumped = false;
+    let mut next = 0usize;
+    let mut steps = 0usize;
+    loop {
+        steps += 1;
+        if steps > 128 || pos >= buf.len() {
+            return None;
+        }
+        let len = buf[pos] as usize;
+        if len == 0 {
+            return Some((out, if jumped { next } else { pos + 1 }));
+        }
+        if len & 0xC0 == 0xC0 {
+            if pos + 1 >= buf.len() {
+                return None;
+            }
+            let target = ((len & 0x3F) << 8) | buf[pos + 1] as usize;
+            if !jumped {
+                next = pos + 2;
+                jumped = true;
+            }
+            pos = target;
+        } else if len & 0xC0 == 0 {
+            if pos + 1 + len > buf.len() {
+                return None;
+            }
+            if !out.is_empty() {
+                out.push(b'.');
+            }
+            out.extend(
+                buf[pos + 1..pos + 1 + len]
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase()),
+            );
+            pos += 1 + len;
+        } else {
+            return None;
+        }
+    }
+}
+
 /// Parse a DNS response: check the transaction id, QR bit and
-/// rcode, skip the question section, collect A/AAAA rdata of the
-/// requested type. Returns an empty vec when the response carries
-/// no answer of that type (the caller then tries the next server
-/// / qtype). A CNAME without a matching address record is NOT
-/// chased (documented limitation, see PORTING.md §M3d).
-fn dns_parse_response(buf: &[u8], txid: u16, qtype: u16) -> Option<Vec<IpAddr>> {
+/// rcode, the TC (truncated) bit, and that the question section
+/// asks for `expected_name` with `qtype`; skip the question
+/// section, collect A/AAAA rdata of the requested type. Returns
+/// an empty vec when the response carries no answer of that type
+/// (the caller then tries the next server / qtype). A CNAME
+/// without a matching address record is NOT chased (documented
+/// limitation, see PORTING.md §M3d). A truncated response
+/// returns `None` (same as "no answer" to the caller — there is
+/// no TCP fallback, see PORTING §M3d.5).
+fn dns_parse_response(
+    buf: &[u8],
+    txid: u16,
+    qtype: u16,
+    expected_name: &str,
+) -> Option<Vec<IpAddr>> {
     if buf.len() < 12 {
         return None;
     }
@@ -1327,13 +1454,25 @@ fn dns_parse_response(buf: &[u8], txid: u16, qtype: u16) -> Option<Vec<IpAddr>> 
     if flags & 0x8000 == 0 || flags & 0x000F != 0 {
         return None; // not a response, or an error rcode
     }
+    if flags & 0x0200 != 0 {
+        return None; // truncated: no usable answer, no TCP fallback
+    }
     let qdcount = u16::from_be_bytes([buf[4], buf[5]]) as usize;
     let ancount = u16::from_be_bytes([buf[6], buf[7]]) as usize;
+    let expected = expected_name.trim_end_matches('.').to_ascii_lowercase();
     let mut pos = 12usize;
-    for _ in 0..qdcount {
-        pos = dns_skip_name(buf, pos)?;
+    for qi in 0..qdcount {
+        let (name, after) = dns_read_name(buf, pos)?;
+        if qi == 0 && name != expected.as_bytes() {
+            return None; // response is for a different question
+        }
+        pos = after;
         if pos + 4 > buf.len() {
             return None;
+        }
+        let q_qtype = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
+        if qi == 0 && q_qtype != qtype {
+            return None; // response is for a different qtype
         }
         pos += 4;
     }
@@ -1383,17 +1522,72 @@ struct SockState {
     eof_sent: bool,
     /// The app asked for a graceful close (FIN sent).
     shutdown_sent: bool,
+    /// The app asked for a graceful close, but data was still
+    /// queued: the FIN is deferred until the queue drains.
+    /// Closing immediately would stall the queued data forever:
+    /// after `close()` smoltcp's `may_send()` is false, so the
+    /// send loop below refuses to feed anything more into the
+    /// socket (found by the EOF-after-full-channel test —
+    /// shutdown right after a large write sent almost nothing).
+    shutdown_pending: bool,
     peer_fin_seen: bool,
     /// Partially-sent chunk + offset (smoltcp `send_slice` may
     /// write fewer bytes than offered).
     pending_tx: Option<(Bytes, usize)>,
+    /// Chunk already consumed from smoltcp by `recv_slice`
+    /// (TCP-ACKed — the peer will NEVER retransmit it) that
+    /// could not be delivered because `net_tx` was full.
+    /// Retried on every cycle before any new `recv_slice`;
+    /// NEVER dropped. Dropping it would punch a hole in the
+    /// byte stream with no error (the loop-1 bug: the old code
+    /// `break`s on `Full` and the chunk fell out of scope).
+    pending_rx: Option<Bytes>,
+    /// The peer's FIN was seen but `Eof` could not be
+    /// delivered yet (channel full). Retried every cycle;
+    /// `eof_sent` is set ONLY when the `Eof` actually lands —
+    /// never before, or the stream hangs on `Pending` forever.
+    pending_eof: bool,
+    /// Same treatment for `Failed` (socket closed without FIN).
+    pending_failed: bool,
+    /// The smoltcp socket is gone (Closed state cleaned up)
+    /// but undelivered messages remain; the state survives in
+    /// the map until they land, then it is removed.
+    socket_gone: bool,
     /// Set when this cycle drained data for this socket (drives
     /// the write-waker wakeup at the end of the cycle).
     data_drained: bool,
 }
 
-/// The pump's synchronous core: boringtun + smoltcp + sockets.
-/// Owned by exactly one tokio task; nothing else touches it.
+/// One outstanding in-tunnel DNS query: the reply channel plus
+/// what the response must match (question name, qtype, and the
+/// server it was sent to — a reply from any other source is
+/// ignored, not parsed).
+struct PendingDns {
+    reply: oneshot::Sender<Result<Vec<IpAddr>, TransportError>>,
+    name: String,
+    qtype: u16,
+    server: IpAddr,
+}
+
+/// First DNS transaction id for a new pump core: seeded from
+/// wall time (plus a process-wide counter so two cores started
+/// in the same nanosecond still differ). The old code started
+/// every core at txid 1 — predictable; inside an authenticated
+/// tunnel that is only defense-in-depth, but the seed is free.
+static DNS_TXID_COUNTER: AtomicU16 = AtomicU16::new(0);
+
+fn next_dns_txid_start() -> u16 {
+    use std::sync::OnceLock;
+    static SEED: OnceLock<u16> = OnceLock::new();
+    let seed = *SEED.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| (d.as_nanos() as u16) ^ ((d.as_nanos() >> 16) as u16))
+            .unwrap_or(0x5eed)
+    });
+    let start = seed.wrapping_add(DNS_TXID_COUNTER.fetch_add(1, Ordering::Relaxed));
+    if start == 0 { 1 } else { start }
+}
 struct PumpCore {
     tunn: Tunn,
     device: QueueDevice,
@@ -1405,7 +1599,7 @@ struct PumpCore {
     dns_v4: Option<smoltcp::iface::SocketHandle>,
     dns_v6: Option<smoltcp::iface::SocketHandle>,
     /// Outstanding DNS queries by transaction id.
-    pending_dns: HashMap<u16, oneshot::Sender<Result<Vec<IpAddr>, TransportError>>>,
+    pending_dns: HashMap<u16, PendingDns>,
     dns_txid: u16,
     peer: SocketAddr,
     /// Max inner IP packet size (= config MTU).
@@ -1420,9 +1614,26 @@ struct PumpCore {
     handshake_tx: watch::Sender<bool>,
     handshake_done: bool,
     dead: Arc<AtomicBool>,
+    /// Sockets aborted in the previous cycle, whose RST the
+    /// poll at the top of this cycle emitted: retired at the
+    /// end of this cycle (see `abort_socket`).
+    closing_prev: HashSet<smoltcp::iface::SocketHandle>,
+    /// Sockets aborted in this cycle: promoted to
+    /// `closing_prev` at the end of the cycle.
+    closing_next: HashSet<smoltcp::iface::SocketHandle>,
     /// Wall-clock base for smoltcp time (millis since pump start).
     started: std::time::Instant,
     last_timers: std::time::Instant,
+}
+
+/// Outcome of `PumpCore::flush_pending` (see its docs).
+enum PendingFlush {
+    /// Nothing pending, or everything pending landed.
+    Delivered,
+    /// The channel is still full; retry next cycle.
+    Blocked,
+    /// The stream is gone; drop the state.
+    StreamGone,
 }
 
 impl PumpCore {
@@ -1482,7 +1693,7 @@ impl PumpCore {
             dns_v4: None,
             dns_v6: None,
             pending_dns: HashMap::new(),
-            dns_txid: 0,
+            dns_txid: next_dns_txid_start(),
             peer,
             mtu: cfg.mtu as usize,
             // The first tunnel address of each family doubles as
@@ -1493,6 +1704,8 @@ impl PumpCore {
             handshake_tx,
             handshake_done: false,
             dead,
+            closing_prev: HashSet::new(),
+            closing_next: HashSet::new(),
             started: std::time::Instant::now(),
             last_timers: std::time::Instant::now(),
         })
@@ -1526,15 +1739,23 @@ impl PumpCore {
             }
             let _ = st.net_tx.try_send(NetMsg::Failed);
         }
-        for (_, reply) in self.pending_dns.drain() {
-            let _ = reply.send(Err(TransportError::ConnectionDown {
+        for (_, pending) in self.pending_dns.drain() {
+            let _ = pending.reply.send(Err(TransportError::ConnectionDown {
                 message: message.to_string(),
             }));
         }
     }
 
     /// Feed one UDP datagram from the peer through boringtun.
-    /// Returns `Err` only on a fatal tunnel error.
+    /// A bad datagram (garbage, truncated, replayed, wrong key)
+    /// is DROPPED, never fatal: boringtun returns
+    /// `TunnResult::Err` for it (`parse_incoming_packet`,
+    /// `noise/mod.rs:128`, verified against the 0.7.1 registry
+    /// source on cue), and WireGuard semantics drop invalid
+    /// packets — one spoofed datagram must not kill every live
+    /// stream. Returns `Err` only on a fatal tunnel error
+    /// (none from decapsulation today; the signature is kept
+    /// for the egress side).
     fn handle_udp(&mut self, datagram: &[u8], send: &mut dyn FnMut(&[u8])) -> Result<(), String> {
         // Drive the datagram through decapsulate, repeating with
         // an empty datagram until `Done` (boringtun's contract:
@@ -1555,8 +1776,13 @@ impl PumpCore {
                 TunnResult::WriteToTunnelV4(bytes, _) | TunnResult::WriteToTunnelV6(bytes, _) => {
                     self.device.rx_queue.push_back(bytes.to_vec());
                 }
-                TunnResult::Err(e) => {
-                    return Err(format!("wireguard decapsulate failed: {e:?}"));
+                TunnResult::Err(_) => {
+                    // Drop this datagram and stop draining it:
+                    // nothing it carried was valid, and the
+                    // empty-datagram repeat would only re-drive
+                    // the same failure. The tunnel and all live
+                    // streams survive.
+                    break;
                 }
             }
         }
@@ -1593,6 +1819,28 @@ impl PumpCore {
         {
             send(bytes);
         }
+    }
+
+    /// Abort a socket AND get its RST out. smoltcp sends
+    /// exactly one RST for a `Closed` socket (then clears its
+    /// tuple), but only if the socket is still in the set when
+    /// `poll` runs — removing it in the same cycle as `abort()`
+    /// (the old code) meant the RST was never transmitted and
+    /// the peer only learned the connection died via its own
+    /// RTO, ~1 s later (observed in the keepalive test: the
+    /// peer retransmitted the echo, and the RST that answered
+    /// it came from the interface, not the socket). So an
+    /// aborted socket stays in the set: it goes to
+    /// `closing_next`, is promoted to `closing_prev` at the
+    /// end of the cycle, the next cycle's `poll` emits the
+    /// RST, and it is retired at the end of that cycle. The
+    /// `TcpState` is dropped by the caller (the stream is
+    /// gone); only the smoltcp socket lingers, and `poll`
+    /// is a no-op for it once the RST is sent (tuple cleared).
+    fn abort_socket(&mut self, handle: smoltcp::iface::SocketHandle) {
+        let sock = self.sockets.get_mut::<smol_tcp::Socket>(handle);
+        sock.abort();
+        self.closing_next.insert(handle);
     }
 
     /// Drive boringtun timers (keepalive + handshake retransmit).
@@ -1702,8 +1950,13 @@ impl PumpCore {
                                 pending_open: Some(reply),
                                 eof_sent: false,
                                 shutdown_sent: false,
+                                shutdown_pending: false,
                                 peer_fin_seen: false,
                                 pending_tx: None,
+                                pending_rx: None,
+                                pending_eof: false,
+                                pending_failed: false,
+                                socket_gone: false,
                                 data_drained: false,
                             },
                         );
@@ -1721,18 +1974,31 @@ impl PumpCore {
                 // the pump's own map is the guard: a handle in
                 // the map always has its socket in the set.
                 if self.tcp.contains_key(&handle) {
-                    let sock = self.sockets.get_mut::<smol_tcp::Socket>(handle);
-                    sock.close();
-                    if let Some(st) = self.tcp.get_mut(&handle) {
-                        st.shutdown_sent = true;
+                    // Defer the FIN while data is still queued:
+                    // `close()` makes `may_send()` false, so a
+                    // FIN now would strand the queued bytes in
+                    // `data_rx`/`pending_tx` forever (nothing
+                    // would ever feed them into the socket).
+                    let should_defer = match self.tcp.get(&handle) {
+                        Some(st) => st.pending_tx.is_some() || !st.data_rx.is_empty(),
+                        None => false,
+                    };
+                    if should_defer {
+                        if let Some(st) = self.tcp.get_mut(&handle) {
+                            st.shutdown_pending = true;
+                        }
+                    } else {
+                        let sock = self.sockets.get_mut::<smol_tcp::Socket>(handle);
+                        sock.close();
+                        if let Some(st) = self.tcp.get_mut(&handle) {
+                            st.shutdown_sent = true;
+                        }
                     }
                 }
             }
             CtrlMsg::Close { handle } => {
                 if self.tcp.contains_key(&handle) {
-                    let sock = self.sockets.get_mut::<smol_tcp::Socket>(handle);
-                    sock.abort();
-                    self.sockets.remove(handle);
+                    self.abort_socket(handle);
                     self.tcp.remove(&handle);
                 }
             }
@@ -1773,7 +2039,15 @@ impl PumpCore {
                 let sock = self.sockets.get_mut::<smol_udp::Socket>(handle);
                 let sent = sock.send_slice(&query, meta).is_ok();
                 if sent {
-                    self.pending_dns.insert(txid, reply);
+                    self.pending_dns.insert(
+                        txid,
+                        PendingDns {
+                            reply,
+                            name,
+                            qtype,
+                            server,
+                        },
+                    );
                 } else {
                     let _ = reply.send(Err(TransportError::ConnectionDown {
                         message: "wireguard dns query failed".to_string(),
@@ -1782,6 +2056,59 @@ impl PumpCore {
             }
         }
         true
+    }
+
+    /// Retry delivering anything pending for this socket
+    /// (`pending_rx`, then `Eof`, then `Failed`), in order.
+    /// `Blocked` means the channel is still full — the caller
+    /// must NOT consume more from smoltcp until the next cycle.
+    /// `StreamGone` means the receiver is gone; the caller
+    /// drops the state.
+    fn flush_pending(st: &mut SockState) -> PendingFlush {
+        if let Some(chunk) = st.pending_rx.take() {
+            match st.net_tx.try_send(NetMsg::Data(chunk)) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(msg)) => {
+                    // `Full` returns the message, so the chunk
+                    // is recovered, not lost.
+                    if let NetMsg::Data(bytes) = msg {
+                        st.pending_rx = Some(bytes);
+                    }
+                    return PendingFlush::Blocked;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    return PendingFlush::StreamGone;
+                }
+            }
+        }
+        if st.pending_eof {
+            match st.net_tx.try_send(NetMsg::Eof) {
+                Ok(()) => {
+                    st.pending_eof = false;
+                    st.eof_sent = true;
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    return PendingFlush::Blocked;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    return PendingFlush::StreamGone;
+                }
+            }
+        }
+        if st.pending_failed {
+            match st.net_tx.try_send(NetMsg::Failed) {
+                Ok(()) => {
+                    st.pending_failed = false;
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    return PendingFlush::Blocked;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    return PendingFlush::StreamGone;
+                }
+            }
+        }
+        PendingFlush::Delivered
     }
 
     /// One synchronous pump cycle: poll smoltcp, service sockets,
@@ -1801,15 +2128,28 @@ impl PumpCore {
                 continue;
             };
             let mut keep = true;
+            // The smoltcp socket is already gone but messages
+            // remain undelivered: only retry the delivery, never
+            // touch the (removed) socket. This branch runs
+            // BEFORE the `is_closed` check below — that check
+            // would `get_mut` a socket that no longer exists.
+            if st.socket_gone {
+                match Self::flush_pending(&mut st) {
+                    PendingFlush::Delivered => continue, // drop the state
+                    PendingFlush::Blocked => {
+                        self.tcp.insert(handle, st);
+                        continue;
+                    }
+                    PendingFlush::StreamGone => continue, // drop the state
+                }
+            }
             // The stream went away: abort + drop. (`net_tx` is
             // the pump→stream sender; dropping the stream drops
             // the receiver, so `is_closed` observes it even when
             // the explicit `Close` message was lost because the
             // control channel was full.)
             if st.net_tx.is_closed() {
-                let sock = self.sockets.get_mut::<smol_tcp::Socket>(handle);
-                sock.abort();
-                self.sockets.remove(handle);
+                self.abort_socket(handle);
                 continue;
             }
             // The handle came from the map, so its socket is in
@@ -1840,9 +2180,43 @@ impl PumpCore {
                 self.tcp.insert(handle, st);
                 continue;
             }
+            // Retry anything pending from an earlier cycle
+            // BEFORE consuming more from smoltcp. A blocked
+            // flush means the stream channel is still full:
+            // skip the receive drain this cycle (the send side
+            // below still runs — it is independent).
+            let mut rx_blocked = false;
+            match Self::flush_pending(&mut st) {
+                PendingFlush::Delivered => {}
+                PendingFlush::Blocked => rx_blocked = true,
+                PendingFlush::StreamGone => {
+                    // `sock` is borrowed here, so the abort is
+                    // inline: same contract as `abort_socket`
+                    // (RST on the next poll, retired after).
+                    sock.abort();
+                    self.closing_next.insert(handle);
+                    continue;
+                }
+            }
             // Receive: drain up to a bounded batch per cycle.
+            // The extra state match is the prompt-EOF probe: once
+            // the receive buffer drains, `may_recv()` is false in
+            // CloseWait/FinWait2/TimeWait, so without it the loop
+            // would never call `recv_slice` again and `Finished`
+            // would only be observed when the 10 s TIME-WAIT
+            // close timer fires (EOF delayed up to 10 s). In
+            // those states `recv_slice` returns `Finished` on an
+            // empty buffer (or the last bytes, if any), so the
+            // probe costs one cheap call per cycle at most.
             let mut recv_chunks = 0;
-            while recv_chunks < 4 && sock.may_recv() {
+            while !rx_blocked
+                && recv_chunks < 4
+                && (sock.may_recv()
+                    || matches!(
+                        sock.state(),
+                        State::CloseWait | State::FinWait2 | State::TimeWait
+                    ))
+            {
                 let mut buf = [0u8; READ_CHUNK];
                 match sock.recv_slice(&mut buf) {
                     Ok(0) => break,
@@ -1853,12 +2227,19 @@ impl PumpCore {
                             .try_send(NetMsg::Data(Bytes::copy_from_slice(&buf[..n])))
                         {
                             Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                // Backpressure: stop draining.
-                                // The bytes stay in smoltcp's
-                                // receive buffer, so the TCP
-                                // window shrinks; nothing is
-                                // dropped or acked-and-discarded.
+                            Err(mpsc::error::TrySendError::Full(msg)) => {
+                                // Backpressure: `recv_slice`
+                                // ALREADY consumed these bytes
+                                // (ACKed — the peer will not
+                                // retransmit), so the chunk is
+                                // held in `pending_rx` and
+                                // retried next cycle. Dropping
+                                // it would corrupt the stream.
+                                // (`Full` returns the message,
+                                // so nothing is lost here.)
+                                if let NetMsg::Data(bytes) = msg {
+                                    st.pending_rx = Some(bytes);
+                                }
                                 break;
                             }
                             Err(mpsc::error::TrySendError::Closed(_)) => break,
@@ -1866,9 +2247,18 @@ impl PumpCore {
                     }
                     Err(smol_tcp::RecvError::Finished) => {
                         st.peer_fin_seen = true;
-                        if !st.eof_sent {
-                            st.eof_sent = true;
-                            let _ = st.net_tx.try_send(NetMsg::Eof);
+                        if !st.eof_sent && !st.pending_eof {
+                            match st.net_tx.try_send(NetMsg::Eof) {
+                                Ok(()) => st.eof_sent = true,
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    // `eof_sent` stays false:
+                                    // the EOF is retried until
+                                    // it lands (see
+                                    // `flush_pending`).
+                                    st.pending_eof = true;
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => {}
+                            }
                         }
                         break;
                     }
@@ -1914,17 +2304,38 @@ impl PumpCore {
                     }
                 }
             }
+            // Deferred graceful close: the app asked to shut
+            // down while data was queued; the queue is empty
+            // now, so the FIN can go. (Only now — `close()`
+            // flips `may_send()` off, so closing earlier would
+            // strand the queued bytes.)
+            if st.shutdown_pending && st.pending_tx.is_none() && st.data_rx.is_empty() {
+                st.shutdown_pending = false;
+                st.shutdown_sent = true;
+                sock.close();
+            }
             // Socket closed underneath us: clean EOF only when
             // the peer's FIN was seen (or we shut down); a reset
-            // without FIN is a failure, not an EOF.
+            // without FIN is a failure, not an EOF. The terminal
+            // message is queued as pending and retried until it
+            // lands; the state survives (with `socket_gone`) if
+            // the channel is full, instead of dropping the
+            // sender and turning a clean EOF into a
+            // `ConnectionReset` on the stream.
             if sock.state() == State::Closed {
                 if !st.eof_sent && !st.peer_fin_seen && !st.shutdown_sent {
-                    let _ = st.net_tx.try_send(NetMsg::Failed);
-                } else if !st.eof_sent {
-                    let _ = st.net_tx.try_send(NetMsg::Eof);
+                    st.pending_failed = true;
+                } else if !st.eof_sent && !st.pending_eof {
+                    st.pending_eof = true;
                 }
                 self.sockets.remove(handle);
-                keep = false;
+                match Self::flush_pending(&mut st) {
+                    PendingFlush::Delivered => keep = false,
+                    PendingFlush::Blocked => {
+                        st.socket_gone = true;
+                    }
+                    PendingFlush::StreamGone => keep = false,
+                }
             }
             // Wake a parked writer whose channel gained space.
             if st.data_drained {
@@ -1946,42 +2357,40 @@ impl PumpCore {
             // to the set (and DNS sockets are never removed).
             let sock = self.sockets.get_mut::<smol_udp::Socket>(handle);
             let mut buf = [0u8; 2048];
-            while let Ok((n, _)) = sock.recv_slice(&mut buf) {
+            while let Ok((n, meta)) = sock.recv_slice(&mut buf) {
                 // The txid is the first two bytes; the
-                // full parse validates it again.
+                // full parse validates it again, plus the
+                // question name/qtype and the source.
                 if n < 2 {
                     continue;
                 }
                 let txid = u16::from_be_bytes([buf[0], buf[1]]);
-                if let Some(reply) = self.pending_dns.remove(&txid) {
-                    // The qtype is not stored per query:
-                    // the dialer only ever has one
-                    // outstanding query per family at a
-                    // time per dial, and it retries A then
-                    // AAAA sequentially — but a late A
-                    // response must not be parsed as AAAA.
-                    // The response's own answer section is
-                    // parsed for BOTH types and the caller
-                    // takes what it asked for: parse as A
-                    // first, then AAAA, and return
-                    // whichever is non-empty. (A response
-                    // to an A query never carries AAAA
-                    // records for the same name in
-                    // practice; a response carrying both
-                    // is answered with the A set, which
-                    // the A-then-AAAA dial order prefers
-                    // anyway.)
-                    let mut ips = dns_parse_response(&buf[..n], txid, 1).unwrap_or_default();
-                    if ips.is_empty() {
-                        ips = dns_parse_response(&buf[..n], txid, 28).unwrap_or_default();
-                    }
-                    let _ = reply.send(Ok(ips));
+                let Some(pending) = self.pending_dns.get(&txid) else {
+                    continue;
+                };
+                // A reply from any source other than the server
+                // queried is ignored (the query stays pending —
+                // the real reply may still arrive).
+                let src_ip = IpAddr::from(meta.endpoint.addr);
+                if src_ip != pending.server {
+                    continue;
                 }
+                // The key was just checked present (single-threaded
+                // pump: nothing removes it between the `get` and
+                // this `remove`); the `else` is unreachable defence,
+                // not an `expect()` on external input.
+                let Some(pending) = self.pending_dns.remove(&txid) else {
+                    continue;
+                };
+                let ips = dns_parse_response(&buf[..n], txid, pending.qtype, &pending.name)
+                    .unwrap_or_default();
+                let _ = pending.reply.send(Ok(ips));
             }
         }
         // Drop DNS queries whose dialer went away (overall
         // timeout fired): their oneshot receivers are closed.
-        self.pending_dns.retain(|_, reply| !reply.is_closed());
+        self.pending_dns
+            .retain(|_, pending| !pending.reply.is_closed());
         // Drop pending opens whose dialer went away the same way.
         let mut dead_opens = Vec::new();
         for (handle, st) in self.tcp.iter() {
@@ -1994,9 +2403,7 @@ impl PumpCore {
         for handle in dead_opens {
             // The handle came from the map, so its socket is in
             // the set (inserted together, removed together).
-            let sock = self.sockets.get_mut::<smol_tcp::Socket>(handle);
-            sock.abort();
-            self.sockets.remove(handle);
+            self.abort_socket(handle);
             self.tcp.remove(&handle);
         }
         // Drain device egress: every emitted IP packet goes
@@ -2004,6 +2411,16 @@ impl PumpCore {
         while let Some(packet) = self.device.tx_queue.pop_front() {
             self.send_ip_packet(&packet, send)?;
         }
+        // Retire sockets aborted in a previous cycle: the
+        // `poll` at the top of this cycle already emitted
+        // their RST (smoltcp clears the tuple after sending
+        // it, so a further poll is a no-op for them). Sockets
+        // aborted in THIS cycle move to `closing_prev` so
+        // their RST goes out on the next cycle's poll.
+        for handle in self.closing_prev.drain() {
+            self.sockets.remove(handle);
+        }
+        std::mem::swap(&mut self.closing_prev, &mut self.closing_next);
         self.drive_timers(send)?;
         self.check_handshake();
         Ok(())
@@ -2139,24 +2556,83 @@ async fn send_outbox(udp: &UdpSocket, peer: SocketAddr, outbox: &mut VecDeque<Ve
 /// JSON helpers for the endpoint parser (the `serde_json::Value`
 /// object shape is the sing-box flat endpoint JSON; Go:
 /// `internal/profile/outbound.go` `parseEndpoint`).
-fn wg_json_str<'a>(obj: &'a serde_json::Value, key: &str) -> Option<&'a str> {
-    obj.get(key).and_then(|v| v.as_str())
+///
+/// Absent vs present-but-wrong-typed are distinguished: a field
+/// present with the wrong JSON type is a `Validation` naming the
+/// field, never a silent default (Go JSON-unmarshals into a typed
+/// struct, so a wrong-typed field is a hard parse error there).
+fn wg_json_str<'a>(
+    obj: &'a serde_json::Value,
+    key: &str,
+) -> Result<Option<&'a str>, TransportError> {
+    match obj.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => match v.as_str() {
+            Some(s) => Ok(Some(s)),
+            None => Err(TransportError::Validation {
+                message: format!("wireguard endpoint \"{key}\" must be a string"),
+            }),
+        },
+    }
 }
 
-fn wg_json_u64(obj: &serde_json::Value, key: &str) -> Option<u64> {
-    obj.get(key).and_then(|v| v.as_u64())
+fn wg_json_u64(obj: &serde_json::Value, key: &str) -> Result<Option<u64>, TransportError> {
+    match obj.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => match v.as_u64() {
+            Some(n) => Ok(Some(n)),
+            None => Err(TransportError::Validation {
+                message: format!("wireguard endpoint \"{key}\" must be a non-negative integer"),
+            }),
+        },
+    }
 }
 
-fn wg_json_bool(obj: &serde_json::Value, key: &str) -> Option<bool> {
-    obj.get(key).and_then(|v| v.as_bool())
+fn wg_json_bool(obj: &serde_json::Value, key: &str) -> Result<Option<bool>, TransportError> {
+    match obj.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => match v.as_bool() {
+            Some(b) => Ok(Some(b)),
+            None => Err(TransportError::Validation {
+                message: format!("wireguard endpoint \"{key}\" must be a boolean"),
+            }),
+        },
+    }
 }
 
-fn wg_json_str_array(obj: &serde_json::Value, key: &str) -> Option<Vec<String>> {
-    obj.get(key).and_then(|v| v.as_array()).map(|arr| {
-        arr.iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect()
-    })
+/// sing-box `Listable[T]`: a bare string is a one-element list,
+/// an array is a list; anything else (or a non-string element)
+/// is a `Validation` naming the field. `peers` is NOT `Listable`
+/// and stays array-only.
+fn wg_json_str_array(
+    obj: &serde_json::Value,
+    key: &str,
+) -> Result<Option<Vec<String>>, TransportError> {
+    match obj.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(vec![s.clone()])),
+        Some(serde_json::Value::Array(arr)) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for v in arr {
+                match v.as_str() {
+                    Some(s) => out.push(s.to_string()),
+                    None => {
+                        return Err(TransportError::Validation {
+                            message: format!(
+                                "wireguard endpoint \"{key}\" must be a string or an array of strings"
+                            ),
+                        });
+                    }
+                }
+            }
+            Ok(Some(out))
+        }
+        Some(_) => Err(TransportError::Validation {
+            message: format!(
+                "wireguard endpoint \"{key}\" must be a string or an array of strings"
+            ),
+        }),
+    }
 }
 
 /// Parse a sing-box flat WireGuard endpoint JSON object into a
@@ -2180,7 +2656,7 @@ pub fn parse_wireguard_endpoint(
     wireguard_dns: &[String],
 ) -> Result<WireGuardConfig, TransportError> {
     let validation = |message: String| TransportError::Validation { message };
-    match wg_json_str(endpoint, "type") {
+    match wg_json_str(endpoint, "type")? {
         Some("wireguard") => {}
         Some(other) => {
             return Err(validation(format!(
@@ -2207,27 +2683,31 @@ pub fn parse_wireguard_endpoint(
             "wireguard endpoint uses wg-quick spelling \"endpoint\"; did you mean peer \"address\" + \"port\"".to_string(),
         ));
     }
-    if wg_json_str(endpoint, "detour").is_some_and(|d| !d.is_empty()) {
+    // A non-string `detour` is a Validation (wrong type), not
+    // silently ignored; a non-empty string detour is Unsupported.
+    if let Some(d) = wg_json_str(endpoint, "detour")?
+        && !d.is_empty()
+    {
         return Err(TransportError::Unsupported {
             message: "wireguard endpoint detour chains are not supported".to_string(),
         });
     }
-    let tag = wg_json_str(endpoint, "tag").unwrap_or("").to_string();
-    let system = wg_json_bool(endpoint, "system").unwrap_or(false);
+    let tag = wg_json_str(endpoint, "tag")?.unwrap_or("").to_string();
+    let system = wg_json_bool(endpoint, "system")?.unwrap_or(false);
     let mut address = Vec::new();
-    for value in wg_json_str_array(endpoint, "address").unwrap_or_default() {
+    for value in wg_json_str_array(endpoint, "address")?.unwrap_or_default() {
         address.push(parse_prefix(&value, "address")?);
     }
-    let private_key = match wg_json_str(endpoint, "private_key") {
+    let private_key = match wg_json_str(endpoint, "private_key")? {
         Some(s) => decode_key_32(s, "private_key")?,
         None => [0u8; 32], // `WireGuardDialer::new` names the field
     };
-    let mtu = match wg_json_u64(endpoint, "mtu") {
+    let mtu = match wg_json_u64(endpoint, "mtu")? {
         Some(n) => u32::try_from(n)
             .map_err(|_| validation("wireguard endpoint \"mtu\" is out of range".to_string()))?,
         None => 0, // `WireGuardDialer::new` maps 0 → 1408
     };
-    let listen_port = match wg_json_u64(endpoint, "listen_port") {
+    let listen_port = match wg_json_u64(endpoint, "listen_port")? {
         Some(n) => Some(u16::try_from(n).map_err(|_| {
             validation("wireguard endpoint \"listen_port\" is out of range".to_string())
         })?),
@@ -2235,7 +2715,13 @@ pub fn parse_wireguard_endpoint(
     };
     let mut peers = Vec::new();
     if let Some(arr) = endpoint.get("peers").and_then(|v| v.as_array()) {
-        for peer in arr {
+        for (peer_idx, peer) in arr.iter().enumerate() {
+            if !peer.is_object() {
+                return Err(validation(format!(
+                    "wireguard peer {} must be an object",
+                    peer_idx + 1
+                )));
+            }
             // wg-quick spellings, peer level (D2).
             if peer.get("preshared_key").is_some() {
                 return Err(validation(
@@ -2252,26 +2738,26 @@ pub fn parse_wireguard_endpoint(
                     "wireguard peer uses wg-quick spelling \"endpoint\"; did you mean \"address\" + \"port\"".to_string(),
                 ));
             }
-            let endpoint_host = wg_json_str(peer, "address").unwrap_or("").to_string();
-            let endpoint_port = match wg_json_u64(peer, "port") {
+            let endpoint_host = wg_json_str(peer, "address")?.unwrap_or("").to_string();
+            let endpoint_port = match wg_json_u64(peer, "port")? {
                 Some(n) => u16::try_from(n).map_err(|_| {
                     validation("wireguard peer \"port\" is out of range".to_string())
                 })?,
                 None => 0, // `WireGuardDialer::new` names the field
             };
-            let public_key = match wg_json_str(peer, "public_key") {
+            let public_key = match wg_json_str(peer, "public_key")? {
                 Some(s) => decode_key_32(s, "public_key")?,
                 None => [0u8; 32], // `WireGuardDialer::new` names it
             };
-            let preshared_key = match wg_json_str(peer, "pre_shared_key") {
+            let preshared_key = match wg_json_str(peer, "pre_shared_key")? {
                 Some(s) => Some(decode_key_32(s, "pre_shared_key")?),
                 None => None,
             };
             let mut allowed_ips = Vec::new();
-            for value in wg_json_str_array(peer, "allowed_ips").unwrap_or_default() {
+            for value in wg_json_str_array(peer, "allowed_ips")?.unwrap_or_default() {
                 allowed_ips.push(parse_prefix(&value, "allowed_ips")?);
             }
-            let persistent_keepalive = match wg_json_u64(peer, "persistent_keepalive_interval") {
+            let persistent_keepalive = match wg_json_u64(peer, "persistent_keepalive_interval")? {
                 Some(n) => u16::try_from(n).map_err(|_| {
                     validation(
                         "wireguard peer \"persistent_keepalive_interval\" is out of range"
@@ -2281,7 +2767,14 @@ pub fn parse_wireguard_endpoint(
                 None => 0,
             };
             let mut reserved = [0u8; 3];
-            if let Some(arr) = peer.get("reserved").and_then(|v| v.as_array()) {
+            // Present-but-not-an-array is a Validation, not
+            // silent zeros (same wrong-type rule as the rest).
+            if let Some(v) = peer.get("reserved") {
+                let arr = v.as_array().ok_or_else(|| {
+                    validation(
+                        "wireguard peer \"reserved\" must be an array of 3 byte values".to_string(),
+                    )
+                })?;
                 if arr.len() != 3 {
                     return Err(validation(
                         "wireguard peer \"reserved\" must have exactly 3 bytes".to_string(),
@@ -2752,8 +3245,21 @@ mod tests {
     // Std base64 the config layer accepts.
     #[test]
     fn fake_debug_and_errors_never_print_fake_keys() {
+        use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
         let priv_b64 = BASE64_STD.encode([0xAAu8; 32]);
         let psk_b64 = BASE64_STD.encode([0xBBu8; 32]);
+        let pub_b64 = BASE64_STD.encode([0x22u8; 32]);
+        // Other encodings of the same bytes: hex, URL-safe
+        // base64 (padded and unpadded). No prod path produces
+        // them today, but the catch must not depend on that.
+        let hex_of = |key: [u8; 32]| -> String { key.iter().map(|b| format!("{b:02x}")).collect() };
+        let priv_hex = hex_of([0xAAu8; 32]);
+        let psk_hex = hex_of([0xBBu8; 32]);
+        let pub_hex = hex_of([0x22u8; 32]);
+        let priv_b64url = URL_SAFE.encode([0xAAu8; 32]);
+        let psk_b64url = URL_SAFE.encode([0xBBu8; 32]);
+        let priv_b64url_nopad = URL_SAFE_NO_PAD.encode([0xAAu8; 32]);
+        let psk_b64url_nopad = URL_SAFE_NO_PAD.encode([0xBBu8; 32]);
         let mut cfg = fake_cfg();
         cfg.private_key = [0xAA; 32];
         cfg.peers[0].preshared_key = Some([0xBB; 32]);
@@ -2806,6 +3312,52 @@ mod tests {
                 !text.contains("34, 34"),
                 "leaked fake peer public key bytes in: {text}"
             );
+            for (label, form) in [
+                ("private key base64url", priv_b64url.as_str()),
+                ("preshared key base64url", psk_b64url.as_str()),
+                ("private key base64url-nopad", priv_b64url_nopad.as_str()),
+                ("preshared key base64url-nopad", psk_b64url_nopad.as_str()),
+                ("private key hex", priv_hex.as_str()),
+                ("preshared key hex", psk_hex.as_str()),
+                ("peer public key hex", pub_hex.as_str()),
+            ] {
+                assert!(!text.contains(form), "leaked fake {label} in: {text}");
+            }
+            // The peer public key's Std-base64 form must not
+            // appear either (it is not in the Debug output by
+            // design — lengths only).
+            assert!(
+                !text.contains(&pub_b64),
+                "leaked fake peer public key in: {text}"
+            );
+        }
+        // The 0xAA/0xBB keys above encode identically in Std
+        // and URL-safe base64 (no `+`/`/` appears), so the
+        // URL-safe assertions above would be vacuous without a
+        // key whose encodings differ: [0xFF; 32] encodes with
+        // `/` in Std and `_` in URL-safe. Prove the two forms
+        // differ first, then assert neither appears.
+        let ff_std = BASE64_STD.encode([0xFFu8; 32]);
+        let ff_url = URL_SAFE.encode([0xFFu8; 32]);
+        let ff_url_nopad = URL_SAFE_NO_PAD.encode([0xFFu8; 32]);
+        assert_ne!(ff_std, ff_url, "test setup: encodings must differ");
+        assert_ne!(ff_std, ff_url_nopad, "test setup: encodings must differ");
+        let mut cfg_ff = fake_cfg();
+        cfg_ff.private_key = [0xFF; 32];
+        let dialer_ff = WireGuardDialer::new(cfg_ff.clone()).expect("fake cfg valid");
+        for text in [format!("{cfg_ff:?}"), format!("{dialer_ff:?}")] {
+            for (label, form) in [
+                ("0xFF key std base64", ff_std.as_str()),
+                ("0xFF key base64url", ff_url.as_str()),
+                ("0xFF key base64url-nopad", ff_url_nopad.as_str()),
+                ("0xFF key hex", hex_of([0xFFu8; 32]).as_str()),
+            ] {
+                assert!(!text.contains(form), "leaked fake {label} in: {text}");
+            }
+            assert!(
+                !text.contains("255, 255"),
+                "leaked fake key bytes in: {text}"
+            );
         }
     }
 
@@ -2829,7 +3381,7 @@ mod tests {
         resp.extend_from_slice(&60u32.to_be_bytes()); // TTL
         resp.extend_from_slice(&4u16.to_be_bytes());
         resp.extend_from_slice(&[10, 0, 0, 1]);
-        let ips = dns_parse_response(&resp, 0x1234, 1).expect("fake response parses");
+        let ips = dns_parse_response(&resp, 0x1234, 1, "echo.test").expect("fake response parses");
         assert_eq!(ips, vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))]);
     }
 
@@ -2845,7 +3397,7 @@ mod tests {
         resp.extend_from_slice(&0u16.to_be_bytes());
         resp.extend_from_slice(&query[12..]);
         assert!(
-            dns_parse_response(&resp, 0x9999, 1).is_none(),
+            dns_parse_response(&resp, 0x9999, 1, "echo.test").is_none(),
             "wrong txid must not parse"
         );
     }
@@ -2867,7 +3419,7 @@ mod tests {
         resp.extend_from_slice(&60u32.to_be_bytes());
         resp.extend_from_slice(&2u16.to_be_bytes());
         resp.extend_from_slice(&[0xC0, 0x0C]);
-        let ips = dns_parse_response(&resp, 0x1234, 1).expect("fake response parses");
+        let ips = dns_parse_response(&resp, 0x1234, 1, "echo.test").expect("fake response parses");
         assert!(
             ips.is_empty(),
             "CNAME without an address record must yield no IP (not chased)"
@@ -2896,5 +3448,287 @@ mod tests {
                 .expect("fake /0 parses")
                 .contains(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)))
         );
+    }
+
+    // (S8) `Prefix::contains` with a directly-constructed
+    // out-of-range length matches nothing instead of
+    // underflowing the shift (debug panic / release wrap).
+    #[test]
+    fn fake_prefix_contains_rejects_oversize_len() {
+        let v4_over = Prefix {
+            addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)),
+            prefix_len: 33,
+        };
+        assert!(!v4_over.contains(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        // The guard's load-bearing case: without it the `>= 32`
+        // branch below would return `net == addr` (true) for an
+        // out-of-range prefix, i.e. a /33 would "contain" its
+        // own network address. An invalid prefix matches nothing.
+        assert!(!v4_over.contains(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0))));
+        let v6_over = Prefix {
+            addr: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0)),
+            prefix_len: 129,
+        };
+        assert!(!v6_over.contains(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))));
+        assert!(!v6_over.contains(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0))));
+        // And `/0` still contains its own family (the path the
+        // old shift bug broke).
+        let v4_zero = Prefix {
+            addr: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+            prefix_len: 0,
+        };
+        assert!(v4_zero.contains(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+    }
+
+    // (S1) `parse_prefix` errors name the FIELD, never the
+    // value: a distinctive value must not appear in the message.
+    #[test]
+    fn fake_parse_prefix_errors_name_field_not_value() {
+        for bad in ["192.0.2.99", "192.0.2.99/99", "not-a-prefix"] {
+            let err = parse_prefix(bad, "allowed_ips").expect_err("bad prefix must fail");
+            let text = format!("{err}");
+            assert!(text.contains("allowed_ips"), "got {text}");
+            assert!(!text.contains("192.0.2.99"), "value leaked: {text}");
+            assert!(!text.contains("not-a-prefix"), "value leaked: {text}");
+        }
+    }
+
+    // (NB19) Go's `base64.StdEncoding` rejects surrounding
+    // whitespace, so a padded key is a Validation here too.
+    #[test]
+    fn fake_decode_key_32_rejects_surrounding_whitespace() {
+        let cfg = fake_json(
+            r#"{"type":"wireguard","tag":"wg-fake","private_key":" AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE= ","address":["10.0.0.2/32"],"peers":[{"public_key":"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=","address":"127.0.0.1","port":51820,"allowed_ips":["0.0.0.0/0"]}]}"#,
+        );
+        let msg =
+            validation_msg(parse_wireguard_endpoint(&cfg, &[]).expect_err("padded key must fail"));
+        assert!(msg.contains("private_key"), "got {msg}");
+    }
+
+    // (T3) sing-box `Listable` shorthand: a bare string is a
+    // one-element list for `address` and `allowed_ips`.
+    #[test]
+    fn fake_listable_single_string_address_and_allowed_ips() {
+        let cfg = fake_json(
+            r#"{"type":"wireguard","tag":"wg-fake","private_key":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=","address":"10.0.0.2/32","peers":[{"public_key":"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=","address":"127.0.0.1","port":51820,"allowed_ips":"0.0.0.0/0"}]}"#,
+        );
+        let parsed = parse_wireguard_endpoint(&cfg, &[]).expect("shorthand must parse");
+        assert_eq!(parsed.address.len(), 1);
+        assert_eq!(parsed.peers[0].allowed_ips.len(), 1);
+        WireGuardDialer::new(parsed).expect("shorthand config must build a dialer");
+        // The array form still works (regression guard).
+        let cfg_arr = fake_json(
+            r#"{"type":"wireguard","tag":"wg-fake","private_key":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=","address":["10.0.0.2/32"],"peers":[{"public_key":"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=","address":"127.0.0.1","port":51820,"allowed_ips":["0.0.0.0/0"]}]}"#,
+        );
+        parse_wireguard_endpoint(&cfg_arr, &[]).expect("array form must still parse");
+    }
+
+    // (R-B3) Wrong-typed optional fields are `Validation`
+    // naming the field, never silent defaults. One test per
+    // field; each JSON differs from the valid shape in exactly
+    // that field.
+    fn fake_valid_endpoint_json() -> String {
+        r#"{"type":"wireguard","tag":"wg-fake","private_key":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=","address":["10.0.0.2/32"],"peers":[{"public_key":"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=","address":"127.0.0.1","port":51820,"allowed_ips":["0.0.0.0/0"]}]}"#.to_string()
+    }
+
+    #[test]
+    fn fake_wrong_typed_mtu_is_validation() {
+        for bad in [r#""9000""#, "-1", "1408.0", "true"] {
+            let json = fake_valid_endpoint_json().replacen(
+                r#""address":["10.0.0.2/32"]"#,
+                &format!(r#""address":["10.0.0.2/32"],"mtu":{bad}"#),
+                1,
+            );
+            let msg = validation_msg(
+                parse_wireguard_endpoint(&fake_json(&json), &[])
+                    .expect_err("wrong-typed mtu must fail"),
+            );
+            assert!(msg.contains("mtu"), "mtu={bad}: got {msg}");
+        }
+    }
+
+    #[test]
+    fn fake_wrong_typed_keepalive_is_validation() {
+        let json = fake_valid_endpoint_json().replacen(
+            r#""port":51820"#,
+            r#""port":51820,"persistent_keepalive_interval":"25""#,
+            1,
+        );
+        let msg = validation_msg(
+            parse_wireguard_endpoint(&fake_json(&json), &[])
+                .expect_err("wrong-typed keepalive must fail"),
+        );
+        assert!(msg.contains("persistent_keepalive_interval"), "got {msg}");
+        let json = fake_valid_endpoint_json().replacen(
+            r#""port":51820"#,
+            r#""port":51820,"persistent_keepalive_interval":-1"#,
+            1,
+        );
+        let msg = validation_msg(
+            parse_wireguard_endpoint(&fake_json(&json), &[])
+                .expect_err("negative keepalive must fail"),
+        );
+        assert!(msg.contains("persistent_keepalive_interval"), "got {msg}");
+    }
+
+    #[test]
+    fn fake_wrong_typed_listen_port_and_system_is_validation() {
+        let json = fake_valid_endpoint_json().replacen(
+            r#""address":["10.0.0.2/32"]"#,
+            r#""address":["10.0.0.2/32"],"listen_port":"51820""#,
+            1,
+        );
+        let msg = validation_msg(
+            parse_wireguard_endpoint(&fake_json(&json), &[])
+                .expect_err("wrong-typed listen_port must fail"),
+        );
+        assert!(msg.contains("listen_port"), "got {msg}");
+        let json = fake_valid_endpoint_json().replacen(
+            r#""tag":"wg-fake""#,
+            r#""tag":"wg-fake","system":"true""#,
+            1,
+        );
+        let msg = validation_msg(
+            parse_wireguard_endpoint(&fake_json(&json), &[])
+                .expect_err("wrong-typed system must fail"),
+        );
+        assert!(msg.contains("system"), "got {msg}");
+    }
+
+    #[test]
+    fn fake_wrong_typed_reserved_and_detour_is_validation() {
+        let json = fake_valid_endpoint_json().replacen(
+            r#""port":51820"#,
+            r#""port":51820,"reserved":"abc""#,
+            1,
+        );
+        let msg = validation_msg(
+            parse_wireguard_endpoint(&fake_json(&json), &[])
+                .expect_err("non-array reserved must fail"),
+        );
+        assert!(msg.contains("reserved"), "got {msg}");
+        let json = fake_valid_endpoint_json().replacen(
+            r#""tag":"wg-fake""#,
+            r#""tag":"wg-fake","detour":123"#,
+            1,
+        );
+        let msg = validation_msg(
+            parse_wireguard_endpoint(&fake_json(&json), &[])
+                .expect_err("non-string detour must fail"),
+        );
+        assert!(msg.contains("detour"), "got {msg}");
+    }
+
+    #[test]
+    fn fake_non_string_array_element_is_validation() {
+        let json = fake_valid_endpoint_json().replacen(
+            r#""address":["10.0.0.2/32"]"#,
+            r#""address":["10.0.0.2/32",123]"#,
+            1,
+        );
+        let msg = validation_msg(
+            parse_wireguard_endpoint(&fake_json(&json), &[])
+                .expect_err("non-string address element must fail"),
+        );
+        assert!(msg.contains("address"), "got {msg}");
+        let json = fake_valid_endpoint_json().replacen(
+            r#""allowed_ips":["0.0.0.0/0"]"#,
+            r#""allowed_ips":["0.0.0.0/0",true]"#,
+            1,
+        );
+        let msg = validation_msg(
+            parse_wireguard_endpoint(&fake_json(&json), &[])
+                .expect_err("non-string allowed_ips element must fail"),
+        );
+        assert!(msg.contains("allowed_ips"), "got {msg}");
+    }
+
+    // (NB2) DNS response validation: a truncated response, a
+    // response for a different question name, and a response
+    // for a different qtype all parse to `None`.
+    fn fake_dns_response(
+        txid: u16,
+        flags: u16,
+        qname: &str,
+        qtype: u16,
+        answer_ip: [u8; 4],
+    ) -> Vec<u8> {
+        let query = dns_encode_query(qname, qtype, txid).expect("fake query encodes");
+        let mut resp = Vec::new();
+        resp.extend_from_slice(&txid.to_be_bytes());
+        resp.extend_from_slice(&flags.to_be_bytes());
+        resp.extend_from_slice(&1u16.to_be_bytes());
+        resp.extend_from_slice(&1u16.to_be_bytes());
+        resp.extend_from_slice(&0u16.to_be_bytes());
+        resp.extend_from_slice(&0u16.to_be_bytes());
+        resp.extend_from_slice(&query[12..]);
+        resp.extend_from_slice(&[0xC0, 0x0C]);
+        resp.extend_from_slice(&1u16.to_be_bytes());
+        resp.extend_from_slice(&1u16.to_be_bytes());
+        resp.extend_from_slice(&60u32.to_be_bytes());
+        resp.extend_from_slice(&4u16.to_be_bytes());
+        resp.extend_from_slice(&answer_ip);
+        resp
+    }
+
+    #[test]
+    fn fake_dns_parse_rejects_truncated_wrong_name_and_wrong_qtype() {
+        // Truncated (TC bit set) with an otherwise valid answer.
+        let resp = fake_dns_response(0x1234, 0x8380, "echo.test", 1, [10, 0, 0, 1]);
+        assert!(
+            dns_parse_response(&resp, 0x1234, 1, "echo.test").is_none(),
+            "truncated response must not parse"
+        );
+        // Right txid/qtype, wrong question name.
+        let resp = fake_dns_response(0x1234, 0x8180, "other.test", 1, [10, 0, 0, 1]);
+        assert!(
+            dns_parse_response(&resp, 0x1234, 1, "echo.test").is_none(),
+            "response for another name must not parse"
+        );
+        // Right name, question asked for AAAA while we asked A.
+        let resp = fake_dns_response(0x1234, 0x8180, "echo.test", 28, [10, 0, 0, 1]);
+        assert!(
+            dns_parse_response(&resp, 0x1234, 1, "echo.test").is_none(),
+            "response for another qtype must not parse"
+        );
+        // Control: the same bytes with matching name/qtype and
+        // no TC bit parse fine.
+        let resp = fake_dns_response(0x1234, 0x8180, "echo.test", 1, [10, 0, 0, 1]);
+        let ips = dns_parse_response(&resp, 0x1234, 1, "echo.test").expect("control parses");
+        assert_eq!(ips, vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))]);
+    }
+
+    // (S6) A hostname DNS server entry with a `:port` suffix is
+    // resolved by stripping the port first (the query port is
+    // always 53 — Go parity). `localhost:5353` must resolve to a
+    // loopback address; without the strip the bootstrap lookup of
+    // "localhost:5353" fails. (`localhost` resolves via /etc/hosts
+    // on any Linux; either family is accepted.)
+    #[tokio::test]
+    async fn fake_dns_server_ip_strips_port_for_hostname() {
+        let dialer = WireGuardDialer::new(fake_cfg()).expect("fake cfg valid");
+        let ip = dialer
+            .dns_server_ip("localhost:5353")
+            .await
+            .expect("localhost:5353 must resolve after stripping the port");
+        assert!(
+            ip == IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)) || ip == IpAddr::V6(Ipv6Addr::LOCALHOST),
+            "localhost must resolve to a loopback address, got {ip}"
+        );
+    }
+
+    // (T-NB6) Ephemeral-port counter transitions, including the
+    // u16 wrap: the pure transition is what the CAS loop
+    // applies, so these cases pin the wrap behaviour exactly.
+    #[test]
+    fn fake_ephemeral_port_transition_at_wrap() {
+        assert_eq!(next_ephemeral_port_transition(49152), (49152, 49153));
+        assert_eq!(next_ephemeral_port_transition(49153), (49153, 49154));
+        assert_eq!(next_ephemeral_port_transition(65534), (65534, 65535));
+        assert_eq!(next_ephemeral_port_transition(65535), (65535, 49152));
+        // Out-of-range stored values (only reachable transiently
+        // at the wrap) restart at the bottom of the range.
+        assert_eq!(next_ephemeral_port_transition(0), (49152, 49153));
+        assert_eq!(next_ephemeral_port_transition(49151), (49152, 49153));
     }
 }

@@ -1130,6 +1130,20 @@ mod tests {
         let text = format!("{d:?}");
         assert!(!text.contains("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="));
         assert!(!text.contains("AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="));
+        // The same bytes in other encodings: decimal (a derived
+        // Debug would print them), hex, URL-safe base64.
+        // [0x01; 32] → "1, 1", "01"×32; [0x02; 32] → "2, 2",
+        // "02"×32; [0x03; 32] → "3, 3", "03"×32. (Std and
+        // URL-safe base64 coincide for these bytes — no `+`/`/`
+        // appears — so the hex/decimal forms carry the check
+        // here; the wireguard.rs leak test covers a key whose
+        // URL-safe form genuinely differs, [0xFF; 32].)
+        assert!(!text.contains("1, 1"));
+        assert!(!text.contains("2, 2"));
+        assert!(!text.contains("3, 3"));
+        assert!(!text.contains(&"01".repeat(32)));
+        assert!(!text.contains(&"02".repeat(32)));
+        assert!(!text.contains(&"03".repeat(32)));
         assert!(text.contains("wg-fake"));
     }
 }
