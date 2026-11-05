@@ -8262,12 +8262,12 @@ Settled probes (2026-11-05, on cue):
 ## M6c.4 Gates (cue, 2026-11-05)
 
 Toolchain 1.99.1 via `rust/rust-toolchain.toml`;
-`CARGO_TARGET_DIR=/tmp/m6c-target`. Head
-`1a25c04` (`fix(rust-m6c): last clippy error —
-Error::other in egress test`); the full test run
-below is at `9d5b9c2` (code-identical except the
-1-line egress-test `Error::other` change) and the
-clippy/fmt runs at `1a25c04`:
+`CARGO_TARGET_DIR=/tmp/m6c-target`. All five gates
+exit 0 on the final head `23db9f8` (docs commit;
+no code changed vs `1a25c04`). The same counts
+were measured earlier at `9d5b9c2` (test) and
+`1a25c04` (clippy/fmt); the full run below is the
+re-verification at `23db9f8`:
 
 - `cargo fmt --check`: exit 0.
 - `cargo build --locked --workspace`: exit 0.
