@@ -24,6 +24,7 @@
 //! `cbDecide`, `cbApproveAll`).
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use castctl_tg_text::{CHUNK_SIZE, escape_text};
@@ -111,6 +112,11 @@ pub struct CommandHandlerConfig {
     pub block_auto_approve: bool,
     /// Block `auto_allow_once` value.
     pub block_auto_allow_once: bool,
+    /// Cookies file of the linked profile (for `/profile`'s
+    /// `os.Stat` presence check; empty = no file).
+    pub cookies_file: PathBuf,
+    /// Configured VM id, shown by `/profile` when non-empty.
+    pub vm_id: String,
 }
 
 /// The command handler: routing + gates + full handlers.
@@ -1185,10 +1191,27 @@ impl CommandHandler {
         }
     }
 
-    /// `/profile` (seam; Go is display-only, no gateway call).
-    /// Source: `internal/commands/telegram_owner.go:87`.
+    /// `/profile` (FULL, local: Go is display-only, no
+    /// gateway call — `os.Stat` on the cookies file +
+    /// format the text; fix loop 1, tech B9).
+    /// Source: `internal/commands/telegram_owner.go:87-101`
+    /// (`ownerProfile`).
     async fn owner_profile(&self, chat_id: i64) -> Result<(), BotError> {
-        let text = self.services.profile_text().await?;
+        let present = match std::fs::metadata(&self.config.cookies_file) {
+            Ok(m) => m.is_file() && m.len() > 0,
+            Err(_) => false,
+        };
+        let mut text = format!(
+            "Serving profile: <b>{}</b>",
+            escape_text(&self.config.profile_name)
+        );
+        if !self.config.vm_id.is_empty() {
+            text += &format!(" (VM <code>{}</code>)", escape_text(&self.config.vm_id));
+        }
+        text += &format!(
+            ".\nCookies: {}.\nProfile switching is not available from chat; edit the telegram block's profile and restart the bot.",
+            if present { "present" } else { "missing" }
+        );
         let _ = self
             .sender()
             .send(chat_id, &text, SendOptions::default())
@@ -1342,6 +1365,15 @@ impl CommandHandler {
                     .await
                     .map(|()| true);
             }
+            // Size note (fix loop 1, safety N7 — documented,
+            // not changed): the declared size above refuses
+            // >1 MiB BEFORE any download. Only a file whose
+            // declared size LIES (≤1 MiB declared, actually
+            // larger) reaches the download, and
+            // `download_media` caps the read at 20 MiB + 1
+            // and refuses — so the hold is bounded and
+            // transient, and a lying declaration is the only
+            // way to hold more than 1 MiB.
             let data = download_media(&self.api, media).await?;
             if data.len() as i64 > LOGIN_COOKIES_LIMIT {
                 return self
@@ -1361,20 +1393,47 @@ impl CommandHandler {
                 .await
                 .map(|()| true);
         }
-        let reply = self
+        // Go `takeAwaitingCookies` (`telegram_owner.go:295-371`):
+        // a save failure gets ONE fixed sentence and the
+        // error is otherwise swallowed — the bot keeps
+        // running, nothing changed (fix loop 1, safety N6).
+        // The error class is only logged in Go (no logger
+        // here), never shown to the user.
+        match self
             .services
             .save_login_cookies(mc.chat_id, mc.user_id, &text)
-            .await?;
-        let _ = self
-            .sender()
-            .send(mc.chat_id, &reply, SendOptions::default())
-            .await?;
+            .await
+        {
+            Err(_) => {
+                return self
+                    .send_text(
+                        mc.chat_id,
+                        "⚠️ Could not save the cookies; nothing changed. /login to retry.",
+                    )
+                    .await
+                    .map(|()| true);
+            }
+            Ok(reply) => {
+                let _ = self
+                    .sender()
+                    .send(mc.chat_id, &reply, SendOptions::default())
+                    .await?;
+            }
+        }
         Ok(true)
     }
 
-    /// Handle one callback query: answer FIRST, then
-    /// dispatch. Unknown registry entry → answer text
+    /// Handle one callback query: answer EXACTLY ONCE,
+    /// then dispatch. Unknown registry entry → answer text
     /// `This button expired; run the command again.`
+    /// For `decide`/`approve_all` the consume happens
+    /// BEFORE the answer, and the answer text follows the
+    /// lookup/consume outcome: a raced second tap gets the
+    /// expired text ONCE (it must not also get the empty
+    /// answer from before the consume — the old code
+    /// answered "" first and expired second, so a raced
+    /// tap got two `answerCallbackQuery` calls; fix loop 1,
+    /// red N6).
     /// Source: `internal/telegram/bot.go:1230-1303`
     /// (`onCallback`).
     pub async fn handle_callback(&self, cb: &CallbackQuery) -> Result<(), BotError> {
@@ -1396,12 +1455,10 @@ impl CommandHandler {
                 .await;
             return Ok(());
         };
-        // Answer first (empty text for a live button).
-        let _ = self.sender().answer(&cb.id, "").await;
         match entry.action.as_str() {
             "decide" | "approve_all" => {
-                // Consume-before-RPC: first tap wins; a
-                // double-tap gets "expired".
+                // Consume-before-answer: first tap wins; a
+                // double-tap gets "expired" (and only that).
                 let Some(entry) = self.registry.consume(&data) else {
                     let _ = self
                         .sender()
@@ -1409,6 +1466,7 @@ impl CommandHandler {
                         .await;
                     return Ok(());
                 };
+                let _ = self.sender().answer(&cb.id, "").await;
                 let result = if entry.action == "decide" {
                     self.cb_decide(chat_id, message_id, &entry).await
                 } else {
@@ -1419,8 +1477,14 @@ impl CommandHandler {
                 }
                 Ok(())
             }
-            "profile" => Ok(()), // Defensive drop: no profile action is ever registered.
+            "profile" => {
+                // Defensive drop: no profile action is ever
+                // registered.
+                let _ = self.sender().answer(&cb.id, "").await;
+                Ok(())
+            }
             action => {
+                let _ = self.sender().answer(&cb.id, "").await;
                 let handled = self
                     .handle_callback_action(chat_id, message_id, &entry, action)
                     .await;
@@ -1732,7 +1796,7 @@ impl CommandHandler {
     /// HTML-escaped>`.
     /// Source: `internal/telegram/bot.go:1295-1302`.
     async fn callback_warning(&self, chat_id: i64, e: &BotError) {
-        let summary = e.summary(self.api.token());
+        let summary = e.summary();
         let trunc: String = summary.chars().take(600).collect();
         let _ = self
             .sender()
@@ -1792,13 +1856,17 @@ fn parse_feed_limit(arg: &str) -> usize {
 }
 
 /// Base name of a path (Go `dlFileName` / `path.Base`).
-/// No direct Go function counterpart in the bot core file
-/// list; `dlFileName` is used by `files` /
-/// `downloadFile` (`internal/commands/telegram_commands.go:664-756`).
+/// `internal/commands/telegram_commands.go:809-815`:
+/// strip the `?query`, trim trailing `/`, `path.Base`,
+/// empty / `.` / `/` → `"file"`. The old code returned
+/// the whole path when the base was empty (fix loop 1,
+/// tech N7).
 fn dl_file_name(path: &str) -> String {
-    let base = path.rsplit('/').next().unwrap_or(path);
-    if base.is_empty() {
-        path.to_string()
+    let no_query = path.split('?').next().unwrap_or(path);
+    let trimmed = no_query.trim_end_matches('/');
+    let base = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    if base.is_empty() || base == "." || base == "/" {
+        "file".to_string()
     } else {
         base.to_string()
     }
@@ -1893,5 +1961,15 @@ mod tests {
     fn dl_file_name_is_base() {
         assert_eq!(dl_file_name("/a/b/c.txt"), "c.txt");
         assert_eq!(dl_file_name("plain"), "plain");
+        // Go `dlFileName`: strip query, trim trailing
+        // slashes, empty / "." / "/" → "file" (fix loop
+        // 1, tech N7).
+        assert_eq!(dl_file_name("/a/b/c.txt?x=1&y=2"), "c.txt");
+        assert_eq!(dl_file_name("/a/b/dir/"), "dir");
+        assert_eq!(dl_file_name("/a/b/dir///"), "dir");
+        assert_eq!(dl_file_name(""), "file");
+        assert_eq!(dl_file_name("/"), "file");
+        assert_eq!(dl_file_name("///"), "file");
+        assert_eq!(dl_file_name("?q=1"), "file");
     }
 }

@@ -35,7 +35,9 @@ use castctl_telegram::state::TelegramStateStore;
 use castctl_telegram::types::MessageContext;
 use castctl_telegram::{
     Approval, Bot, BotApi, BotApiConfig, BotSettings, COMMAND_HELP_TEXT, COMMAND_MENU,
-    CallbackRegistry, ChatEntry, CommandHandler, CommandHandlerConfig,
+    CallbackEntry, CallbackQuery, CallbackRegistry, ChatEntry, CommandHandler,
+    CommandHandlerConfig, HtmlMode, InboxMedia, InlineKeyboardButton, InlineKeyboardMarkup,
+    SendOptions, Sender,
 };
 use castctl_transport::{DialTarget, Dialer, DirectDialer};
 use serde_json::Value;
@@ -76,8 +78,21 @@ impl RequestRecord {
 /// 429/500 failures, and a message-id counter.
 struct FakeBehavior {
     updates: Mutex<VecDeque<Value>>,
+    /// Full `getUpdates` envelopes, served verbatim one
+    /// per poll (fix loop 1, red R3/R4 tests): each entry
+    /// is the whole response body, e.g. `{"ok": true,
+    /// "result": [...]}` or `{"ok": true}` (no result).
+    raw_envelopes: Mutex<VecDeque<Value>>,
     fail_429: Mutex<HashMap<String, (u32, i64)>>,
     fail_500: Mutex<HashMap<String, u32>>,
+    /// 500 responses with an EMPTY body (fix loop 1, red
+    /// N1): the client must still take the 5xx ladder,
+    /// not fail the decode.
+    fail_500_empty: Mutex<HashMap<String, u32>>,
+    /// 400 "can't parse entities" for `sendMessage` /
+    /// `editMessageText` calls carrying `parse_mode:
+    /// "HTML"` (fix loop 1, tech B5 tests).
+    fail_parse_html: Mutex<HashMap<String, u32>>,
     next_message_id: AtomicI64,
 }
 
@@ -85,8 +100,11 @@ impl FakeBehavior {
     fn new() -> Self {
         Self {
             updates: Mutex::new(VecDeque::new()),
+            raw_envelopes: Mutex::new(VecDeque::new()),
             fail_429: Mutex::new(HashMap::new()),
             fail_500: Mutex::new(HashMap::new()),
+            fail_500_empty: Mutex::new(HashMap::new()),
+            fail_parse_html: Mutex::new(HashMap::new()),
             next_message_id: AtomicI64::new(1),
         }
     }
@@ -98,6 +116,13 @@ impl FakeBehavior {
             .push_back(update);
     }
 
+    fn queue_raw_envelope(&self, envelope: Value) {
+        self.raw_envelopes
+            .lock()
+            .expect("behavior lock")
+            .push_back(envelope);
+    }
+
     fn fail_429(&self, method: &str, times: u32, retry_after: i64) {
         self.fail_429
             .lock()
@@ -107,6 +132,20 @@ impl FakeBehavior {
 
     fn fail_500(&self, method: &str, times: u32) {
         self.fail_500
+            .lock()
+            .expect("behavior lock")
+            .insert(method.to_string(), times);
+    }
+
+    fn fail_500_empty(&self, method: &str, times: u32) {
+        self.fail_500_empty
+            .lock()
+            .expect("behavior lock")
+            .insert(method.to_string(), times);
+    }
+
+    fn fail_parse_html(&self, method: &str, times: u32) {
+        self.fail_parse_html
             .lock()
             .expect("behavior lock")
             .insert(method.to_string(), times);
@@ -132,6 +171,16 @@ impl FakeBehavior {
             return (429, serde_json::to_vec(&body).expect("json"));
         }
         if let Some(remaining) = self
+            .fail_500_empty
+            .lock()
+            .expect("behavior lock")
+            .get_mut(&method)
+            && *remaining > 0
+        {
+            *remaining -= 1;
+            return (500, Vec::new());
+        }
+        if let Some(remaining) = self
             .fail_500
             .lock()
             .expect("behavior lock")
@@ -150,11 +199,51 @@ impl FakeBehavior {
             let body = serde_json::json!({"ok": true, "result": result});
             (200, serde_json::to_vec(&body).expect("json"))
         };
+        // 400 "can't parse entities" for HTML attempts
+        // (Markdown-fallback tests): only when the call
+        // carries parse_mode "HTML".
+        let parse_fails = |rec: &RequestRecord| -> bool {
+            let is_html = rec.json().get("parse_mode").and_then(Value::as_str) == Some("HTML");
+            if !is_html {
+                return false;
+            }
+            self.fail_parse_html
+                .lock()
+                .expect("behavior lock")
+                .get_mut(&method)
+                .is_some_and(|remaining| {
+                    if *remaining > 0 {
+                        *remaining -= 1;
+                        true
+                    } else {
+                        false
+                    }
+                })
+        };
+        let parse_error = || -> (u16, Vec<u8>) {
+            let body = serde_json::json!({
+                "ok": false,
+                "error_code": 400,
+                "description": "Bad Request: can't parse entities: Character '>' is reserved and must be escaped with the preceding '\\'",
+            });
+            (400, serde_json::to_vec(&body).expect("json"))
+        };
         match method.as_str() {
             "getMe" => ok(serde_json::json!({
                 "id": 1, "is_bot": true, "first_name": "Test", "username": "testbot",
             })),
             "getUpdates" => {
+                // A queued raw envelope wins over the
+                // update queue: served verbatim, one per
+                // poll, with no offset filtering.
+                if let Some(envelope) = self
+                    .raw_envelopes
+                    .lock()
+                    .expect("behavior lock")
+                    .pop_front()
+                {
+                    return (200, serde_json::to_vec(&envelope).expect("json"));
+                }
                 let offset = rec
                     .json()
                     .get("offset")
@@ -173,6 +262,9 @@ impl FakeBehavior {
                 ok(Value::Array(batch))
             }
             "sendMessage" => {
+                if parse_fails(rec) {
+                    return parse_error();
+                }
                 let mid = self.next_message_id.fetch_add(1, Ordering::SeqCst);
                 let chat_id = rec
                     .json()
@@ -185,10 +277,28 @@ impl FakeBehavior {
                     "date": 0, "text": "",
                 }))
             }
+            "editMessageText" => {
+                if parse_fails(rec) {
+                    return parse_error();
+                }
+                ok(Value::Bool(true))
+            }
             "getMyCommands" => ok(Value::Array(vec![])),
             "getFile" => ok(serde_json::json!({
                 "file_id": "f1", "file_path": "x/y", "file_size": 4,
             })),
+            // Multipart uploads return a message object,
+            // like sendMessage (the body is multipart, not
+            // JSON, so `chat_id` reads as 0 here — the
+            // tests only assert the message id + body).
+            "sendDocument" | "sendPhoto" | "sendVideo" | "sendAudio" => {
+                let mid = self.next_message_id.fetch_add(1, Ordering::SeqCst);
+                ok(serde_json::json!({
+                    "message_id": mid,
+                    "chat": {"id": 0, "type": "private"},
+                    "date": 0, "text": "",
+                }))
+            }
             _ => ok(Value::Bool(true)),
         }
     }
@@ -269,6 +379,22 @@ impl FakeServer {
                     let method = path.rsplit('/').next().unwrap_or("").to_string();
                     let rec = RequestRecord { method, body };
                     let (status, resp_body) = behavior.respond(&rec);
+                    if rec.method == "getUpdates"
+                        && resp_body.as_slice() == b"{\"ok\":true,\"result\":[]}"
+                    {
+                        // Empty poll: pace the loop like a
+                        // long-poll (10ms). Without this a
+                        // running Bot re-polls with zero
+                        // delay and spins the executor at
+                        // thousands of polls/sec; under a
+                        // full parallel run that starved a
+                        // sibling test past its 10s wait
+                        // (offset test flaked 2/3 full runs,
+                        // passed alone in 0.03s). Production
+                        // polls long-poll up to POLL_TIMEOUT,
+                        // so the pacing models reality.
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
                     records.lock().expect("records lock").push(rec);
                     let resp = format!(
                         "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -318,6 +444,77 @@ impl FakeServer {
             .filter_map(|r| r.json().get("text")?.as_str().map(str::to_string))
             .collect()
     }
+
+    /// All `answerCallbackQuery` texts so far, in order
+    /// (empty string when the call carried no text).
+    fn answer_texts(&self) -> Vec<String> {
+        self.records
+            .lock()
+            .expect("records lock")
+            .iter()
+            .filter(|r| r.method == "answerCallbackQuery")
+            .map(|r| {
+                r.json()
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// Raw body of the last request to `method`, as text
+    /// (for multipart assertions: the body is not JSON).
+    fn last_request_body(&self, method: &str) -> Option<String> {
+        self.records
+            .lock()
+            .expect("records lock")
+            .iter()
+            .rev()
+            .find(|r| r.method == method)
+            .map(|r| String::from_utf8_lossy(&r.body).into_owned())
+    }
+
+    /// `text` params of all requests to `method` so far,
+    /// in order.
+    fn request_texts(&self, method: &str) -> Vec<String> {
+        self.records
+            .lock()
+            .expect("records lock")
+            .iter()
+            .filter(|r| r.method == method)
+            .filter_map(|r| r.json().get("text")?.as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// `parse_mode` params of all requests to `method` so
+    /// far, in order (`None` when the call carried none).
+    fn request_parse_modes(&self, method: &str) -> Vec<Option<String>> {
+        self.records
+            .lock()
+            .expect("records lock")
+            .iter()
+            .filter(|r| r.method == method)
+            .map(|r| {
+                r.json()
+                    .get("parse_mode")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    /// `offset` params of all `getUpdates` requests so far,
+    /// in order.
+    fn get_updates_offsets(&self) -> Vec<i64> {
+        self.records
+            .lock()
+            .expect("records lock")
+            .iter()
+            .filter(|r| r.method == "getUpdates")
+            .map(|r| r.json().get("offset").and_then(Value::as_i64).unwrap_or(0))
+            .collect()
+    }
 }
 
 // ----------------------------------------------------------------
@@ -340,10 +537,12 @@ struct FakeServicesInner {
     files: Vec<SharedFileRow>,
     approvals: Vec<Approval>,
     fs_outcome: Option<FsOutcome>,
-    profile: String,
     update: String,
     raw: String,
     save_cookies: String,
+    /// When true, `save_login_cookies` fails (fix loop 1,
+    /// safety N6 test).
+    save_cookies_err: bool,
     downloaded: DownloadedFile,
     stop_result: bool,
 }
@@ -370,10 +569,10 @@ impl Default for FakeServicesInner {
             files: Vec::new(),
             approvals: Vec::new(),
             fs_outcome: None,
-            profile: String::new(),
             update: String::new(),
             raw: String::new(),
             save_cookies: String::new(),
+            save_cookies_err: false,
             downloaded: DownloadedFile {
                 name: String::new(),
                 data: Vec::new(),
@@ -400,7 +599,6 @@ impl Default for FakeServices {
                 goal: "{}".to_string(),
                 usage: "usage".to_string(),
                 wake: "wake".to_string(),
-                profile: "Serving profile: <b>no1</b>.".to_string(),
                 update: "update ok".to_string(),
                 raw: "{}".to_string(),
                 save_cookies: "✅ Cookies saved and working (VM <code>v1</code>).".to_string(),
@@ -442,6 +640,10 @@ impl FakeServices {
             .iter()
             .filter(|c| c.starts_with(prefix))
             .count()
+    }
+
+    fn set_save_cookies_fail(&self, fail: bool) {
+        self.inner.lock().expect("services lock").save_cookies_err = fail;
     }
 }
 
@@ -662,12 +864,6 @@ impl BotServices for FakeServices {
         Box::pin(async move { Ok(format!("🗑 Deleted {path}")) })
     }
 
-    fn profile_text(&self) -> Pin<Box<dyn Future<Output = Result<String, BotError>> + Send + '_>> {
-        self.record("profile_text".to_string());
-        let t = self.get(|i| i.profile.clone());
-        Box::pin(async move { Ok(t) })
-    }
-
     fn update_check(&self) -> Pin<Box<dyn Future<Output = Result<String, BotError>> + Send + '_>> {
         self.record("update_check".to_string());
         let t = self.get(|i| i.update.clone());
@@ -692,8 +888,14 @@ impl BotServices for FakeServices {
     ) -> Pin<Box<dyn Future<Output = Result<String, BotError>> + Send + '_>> {
         self.record(format!("save_login_cookies:{chat_id}:{user_id}"));
         let _ = cookies_text;
-        let t = self.get(|i| i.save_cookies.clone());
-        Box::pin(async move { Ok(t) })
+        let (fail, t) = self.get(|i| (i.save_cookies_err, i.save_cookies.clone()));
+        Box::pin(async move {
+            if fail {
+                Err(BotError::Validation("simulated save failure".to_string()))
+            } else {
+                Ok(t)
+            }
+        })
     }
 
     fn inbound_media(
@@ -739,12 +941,22 @@ fn test_claims() -> Arc<ClaimManager> {
 }
 
 fn test_config(owner_set: bool) -> CommandHandlerConfig {
+    test_config_with_cookies(owner_set, PathBuf::new(), String::new())
+}
+
+fn test_config_with_cookies(
+    owner_set: bool,
+    cookies_file: PathBuf,
+    vm_id: String,
+) -> CommandHandlerConfig {
     CommandHandlerConfig {
         profile_name: "no1".to_string(),
         owner_id: OWNER_UID,
         owner_id_set: owner_set,
         block_auto_approve: false,
         block_auto_allow_once: false,
+        cookies_file,
+        vm_id,
     }
 }
 
@@ -819,13 +1031,22 @@ fn make_handler(
     state: Arc<TelegramStateStore>,
     services: Arc<FakeServices>,
 ) -> CommandHandler {
+    make_handler_with_config(server, state, services, test_config(true))
+}
+
+fn make_handler_with_config(
+    server: &FakeServer,
+    state: Arc<TelegramStateStore>,
+    services: Arc<FakeServices>,
+    config: CommandHandlerConfig,
+) -> CommandHandler {
     CommandHandler::new(
         test_api(server.port),
         state,
         Arc::new(CallbackRegistry::new()),
         test_claims(),
         services as Arc<dyn BotServices>,
-        test_config(true),
+        config,
     )
 }
 
@@ -890,7 +1111,7 @@ async fn routing_table_all_30() {
         ("usage", "", "call:usage_text"),
         ("wake", "", "call:wake"),
         ("fs", "ls /", "call:fs_run:100:ls /"),
-        ("profile", "", "call:profile_text"),
+        ("profile", "", "send:Serving profile: <b>no1</b>."),
         ("update", "", "call:update_check"),
         ("login", "", "send:🔑 Send the muse.ai cookies now"),
         ("raw", "chat.list", "call:raw_call:chat.list:"),
@@ -988,7 +1209,12 @@ async fn offset_persists_across_restart() {
         let bot = Arc::clone(&bot);
         async move { bot.run().await }
     });
-    wait_until(Duration::from_secs(5), || {
+    // 10s, not 5s: under a full parallel run (8 cores,
+    // ~20 hot poll loops + the lib suite) this test once
+    // starved past 5s with zero turns, then passed alone
+    // in 0.03s — the wait is a scheduling margin, not a
+    // behaviour bound (fix loop 1 flake-hardening).
+    wait_until(Duration::from_secs(10), || {
         services.call_count("start_turn") >= 2
     })
     .await;
@@ -1018,7 +1244,7 @@ async fn offset_persists_across_restart() {
         let bot = Arc::clone(&bot2);
         async move { bot.run().await }
     });
-    wait_until(Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(10), || {
         services.call_count("start_turn") >= 3
     })
     .await;
@@ -1191,7 +1417,11 @@ async fn stranger_rejection_three_cases() {
         async move { bot.run().await }
     });
     wait_until(Duration::from_secs(5), || {
-        services.has_call("profile_text") && server.send_texts().len() >= 3
+        server
+            .send_texts()
+            .iter()
+            .any(|t| t.starts_with("Serving profile:"))
+            && server.send_texts().len() >= 3
     })
     .await;
     // Let the stranger updates arrive and be dropped.
@@ -1199,12 +1429,15 @@ async fn stranger_rejection_three_cases() {
     bot.request_shutdown();
     run.await.expect("run task").expect("run ok");
 
-    assert_eq!(
-        services.call_count("profile_text"),
-        1,
-        "only the owner ran /profile"
-    );
     let sends = server.send_texts();
+    assert_eq!(
+        sends
+            .iter()
+            .filter(|t| t.starts_with("Serving profile:"))
+            .count(),
+        1,
+        "only the owner ran /profile, got {sends:?}"
+    );
     assert!(
         sends
             .iter()
@@ -1273,8 +1506,13 @@ fn token_never_in_debug_or_display() {
         "BotError Display must never print the Api description"
     );
     assert!(
-        !err.summary(FAKE_TOKEN).contains(FAKE_TOKEN),
+        !err.summary().contains(FAKE_TOKEN),
         "BotError summary must be fixed-vocabulary only"
+    );
+    let cfg = BotApiConfig::plaintext(FAKE_TOKEN.to_string(), DialTarget::new("127.0.0.1", 1));
+    assert!(
+        !format!("{cfg:?}").contains(FAKE_TOKEN),
+        "BotApiConfig Debug must redact the token (fix loop 1, safety B2)"
     );
     let settings = BotSettings {
         allowed_user_ids: vec![ALLOWED_UID],
@@ -1324,4 +1562,581 @@ async fn set_commands_validation_zero_calls() {
     // A valid menu goes through exactly once.
     bot.set_menu_commands().await.expect("valid menu");
     assert_eq!(server.count_method("setMyCommands"), 1);
+}
+
+// ----------------------------------------------------------------
+// Fix loop 1: malformed updates (red R3), offset overflow
+// (red R4), 5xx empty body (red N1), 429 cancellation
+// (tech B6), Markdown fallback (tech B5), /profile local
+// (tech B9), raced decide tap (red N6), send_file markup
+// (tech N6), download_media fast error (tech N14),
+// /login save failure (safety N6), double start (tech N9)
+// ----------------------------------------------------------------
+
+/// Malformed shapes in one batch must not poison the loop
+/// (fix loop 1, red R3): absent fields decode to Go's
+/// zero values, good updates in the same batch are still
+/// handled, and the loop progresses past a failed batch.
+#[tokio::test]
+async fn malformed_updates_do_not_poison_the_loop() {
+    let server = FakeServer::start().await;
+    let (state, _dir) = test_state("malformed");
+    let services = Arc::new(FakeServices::new());
+    // Batch 1: message missing `chat`, a good update, a
+    // callback missing `from`, an update missing
+    // `update_id`.
+    let no_chat = serde_json::json!({"update_id": 1, "message": {
+        "message_id": 1,
+        "from": {"id": ALLOWED_UID, "is_bot": false, "first_name": "T"},
+        "date": 0, "text": "no chat",
+    }});
+    let good = msg_update(2, 100, ALLOWED_UID, "good");
+    let no_from = serde_json::json!({"update_id": 3, "callback_query": {
+        "id": "q1",
+        "message": {"message_id": 5, "from": {"id": ALLOWED_UID, "is_bot": false, "first_name": "T"}, "chat": {"id": 100, "type": "private"}, "date": 0, "text": "x"},
+        "data": "c:abcdefgh",
+    }});
+    let no_id = serde_json::json!({"message": {
+        "message_id": 9,
+        "from": {"id": ALLOWED_UID, "is_bot": false, "first_name": "T"},
+        "chat": {"id": 100, "type": "private"},
+        "date": 0, "text": "no id",
+    }});
+    server.behavior.queue_raw_envelope(
+        serde_json::json!({"ok": true, "result": [no_chat, good, no_from, no_id]}),
+    );
+    // Batch 2: `result` not an array → the whole batch
+    // fails (Go parity: wrong-type fails the decode), but
+    // the loop continues.
+    server
+        .behavior
+        .queue_raw_envelope(serde_json::json!({"ok": true, "result": "not-an-array"}));
+    // Batch 3: `ok: true` with no `result` → empty batch.
+    server
+        .behavior
+        .queue_raw_envelope(serde_json::json!({"ok": true}));
+    // Batch 4: a good update after the malformed ones.
+    server.behavior.queue_raw_envelope(serde_json::json!({
+        "ok": true, "result": [msg_update(5, 100, ALLOWED_UID, "after")],
+    }));
+    // Batch 5: a wrong-TYPE item fails the whole batch (Go
+    // parity); the good item in it is lost with the batch.
+    let bad_type = serde_json::json!({"update_id": "six", "message": {
+        "message_id": 6,
+        "from": {"id": ALLOWED_UID, "is_bot": false, "first_name": "T"},
+        "chat": {"id": 100, "type": "private"},
+        "date": 0, "text": "bad",
+    }});
+    server.behavior.queue_raw_envelope(serde_json::json!({
+        "ok": true,
+        "result": [bad_type, msg_update(7, 100, ALLOWED_UID, "lost")],
+    }));
+    // Batch 6: the loop still progresses after the failed batch.
+    server.behavior.queue_raw_envelope(serde_json::json!({
+        "ok": true, "result": [msg_update(8, 100, ALLOWED_UID, "last")],
+    }));
+    let bot = make_bot(
+        &server,
+        Arc::clone(&state),
+        Arc::clone(&services),
+        vec![ALLOWED_UID],
+        true,
+    )
+    .await;
+    let run = tokio::spawn({
+        let bot = Arc::clone(&bot);
+        async move { bot.run().await }
+    });
+    wait_until(Duration::from_secs(10), || {
+        services.call_count("start_turn") >= 5
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    bot.request_shutdown();
+    run.await.expect("run task").expect("run ok");
+    // Handled: "no chat" (chat 0), "good", "no id",
+    // "after", "last" = 5 turns. The callback missing
+    // `from` (uid 0) was dropped; "lost" died with its
+    // wrong-type batch.
+    assert_eq!(services.call_count("start_turn"), 5);
+    assert!(
+        !services.calls().iter().any(|c| c.contains("lost")),
+        "the good item in a wrong-type batch is not handled, got {:?}",
+        services.calls()
+    );
+    assert_eq!(
+        state.offset(),
+        8,
+        "offset advances past the malformed batches"
+    );
+}
+
+/// `update_id` extremes must not wrap the offset (fix
+/// loop 1, red R4): `i64::MAX` saturates, 0 / -1 /
+/// `i64::MIN` are handled, and a restart polls with
+/// offset `i64::MAX` without replaying anything.
+#[tokio::test]
+async fn offset_overflow_max_update_id() {
+    let server = FakeServer::start().await;
+    let (state, dir) = test_state("overflow");
+    let services = Arc::new(FakeServices::new());
+    server.behavior.queue_raw_envelope(serde_json::json!({
+        "ok": true,
+        "result": [
+            msg_update(i64::MAX, 100, ALLOWED_UID, "max"),
+            msg_update(0, 100, ALLOWED_UID, "zero"),
+            msg_update(-1, 100, ALLOWED_UID, "minus one"),
+            msg_update(i64::MIN, 100, ALLOWED_UID, "min"),
+        ],
+    }));
+    let bot = make_bot(
+        &server,
+        Arc::clone(&state),
+        Arc::clone(&services),
+        vec![ALLOWED_UID],
+        true,
+    )
+    .await;
+    let run = tokio::spawn({
+        let bot = Arc::clone(&bot);
+        async move { bot.run().await }
+    });
+    wait_until(Duration::from_secs(5), || {
+        services.call_count("start_turn") >= 4
+    })
+    .await;
+    bot.request_shutdown();
+    run.await.expect("run task").expect("run ok");
+    assert_eq!(
+        state.offset(),
+        i64::MAX,
+        "offset saturates at MAX, never wraps"
+    );
+
+    // Restart from the same state file: the next poll asks
+    // with offset MAX and nothing is replayed.
+    let polls_before = server.count_method("getUpdates");
+    let path = dir.join("telegram-state.json");
+    let state2 = Arc::new(TelegramStateStore::load(path).expect("state reload"));
+    assert_eq!(state2.offset(), i64::MAX);
+    let bot2 = make_bot(
+        &server,
+        Arc::clone(&state2),
+        Arc::clone(&services),
+        vec![ALLOWED_UID],
+        true,
+    )
+    .await;
+    let run2 = tokio::spawn({
+        let bot = Arc::clone(&bot2);
+        async move { bot.run().await }
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    bot2.request_shutdown();
+    run2.await.expect("run task").expect("run ok");
+    let new_offsets = &server.get_updates_offsets()[polls_before..];
+    assert!(
+        !new_offsets.is_empty() && new_offsets.iter().all(|o| *o == i64::MAX),
+        "restart polls with offset MAX, got {new_offsets:?}"
+    );
+    assert_eq!(
+        services.call_count("start_turn"),
+        4,
+        "no update is replayed after restart"
+    );
+}
+
+/// A 5xx with an EMPTY (non-JSON) body still takes the
+/// 5xx backoff ladder (fix loop 1, red N1).
+#[tokio::test]
+async fn backoff_5xx_empty_body_retries() {
+    let server = FakeServer::start().await;
+    server.behavior.fail_500_empty("getUpdates", 2);
+    let (state, _dir) = test_state("backoff5xxempty");
+    let services = Arc::new(FakeServices::new());
+    server
+        .behavior
+        .queue_update(msg_update(40, 100, ALLOWED_UID, "hello"));
+    let bot = make_bot(
+        &server,
+        state,
+        Arc::clone(&services),
+        vec![ALLOWED_UID],
+        true,
+    )
+    .await;
+    let run = tokio::spawn({
+        let bot = Arc::clone(&bot);
+        async move { bot.run().await }
+    });
+    wait_until(Duration::from_secs(5), || {
+        services.call_count("start_turn") >= 1
+    })
+    .await;
+    bot.request_shutdown();
+    run.await.expect("run task").expect("run ok");
+    assert!(
+        server.count_method("getUpdates") >= 3,
+        "2x500-empty retried, then success"
+    );
+    assert_eq!(
+        services.call_count("start_turn"),
+        1,
+        "the update is handled exactly once"
+    );
+}
+
+/// A 429 retry sleep on the handler path is cancelled by
+/// shutdown (fix loop 1, tech B6): one attempt, no 60s
+/// wait, `Cancelled` out.
+#[tokio::test]
+async fn handler_429_sleep_cancelled_by_shutdown() {
+    let server = FakeServer::start().await;
+    server.behavior.fail_429("sendMessage", 1, 60);
+    let api = test_api(server.port);
+    let signal = castctl_telegram::api::ShutdownSignal::new();
+    api.set_shutdown_signal(Arc::clone(&signal));
+    let start = Instant::now();
+    let task = tokio::spawn({
+        let api = Arc::clone(&api);
+        async move {
+            api.send_message_params(serde_json::json!({"chat_id": 100, "text": "hi"}))
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    signal.request();
+    let result = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("must not hang on the 60s sleep")
+        .expect("join");
+    assert!(
+        matches!(result, Err(BotError::Cancelled)),
+        "expected Cancelled, got {result:?}"
+    );
+    assert!(start.elapsed() < Duration::from_secs(5));
+    assert_eq!(
+        server.count_method("sendMessage"),
+        1,
+        "no retry after the cancel"
+    );
+}
+
+/// A 429 retry sleep on the poll path is cancelled by
+/// shutdown (fix loop 1, tech B6): the run returns
+/// promptly instead of sleeping 60s.
+#[tokio::test]
+async fn poll_429_sleep_cancelled_by_shutdown() {
+    let server = FakeServer::start().await;
+    server.behavior.fail_429("getUpdates", 1, 60);
+    let (state, _dir) = test_state("poll429");
+    let services = Arc::new(FakeServices::new());
+    let bot = make_bot(&server, state, services, vec![ALLOWED_UID], true).await;
+    let start = Instant::now();
+    let run = tokio::spawn({
+        let bot = Arc::clone(&bot);
+        async move { bot.run().await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    bot.request_shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("run must return promptly, not sleep 60s")
+        .expect("join")
+        .expect("run ok");
+    assert!(start.elapsed() < Duration::from_secs(5));
+    assert_eq!(
+        server.count_method("getUpdates"),
+        1,
+        "one poll, no retry after the cancel"
+    );
+}
+
+/// A second `run()` returns "telegram: bot already
+/// started" (fix loop 1, tech N9).
+#[tokio::test]
+async fn double_start_returns_already_started() {
+    let server = FakeServer::start().await;
+    let (state, _dir) = test_state("doublestart");
+    let services = Arc::new(FakeServices::new());
+    let bot = make_bot(&server, state, services, vec![ALLOWED_UID], true).await;
+    let run = tokio::spawn({
+        let bot = Arc::clone(&bot);
+        async move { bot.run().await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let err = bot.run().await.expect_err("second run must fail");
+    assert!(
+        err.to_string().contains("telegram: bot already started"),
+        "{err}"
+    );
+    bot.request_shutdown();
+    run.await.expect("join").expect("first run ok");
+}
+
+/// Markdown fallback sends the ORIGINAL markdown text
+/// (fix loop 1, tech B5); HTML fallback strips tags; an
+/// over-limit Markdown body is truncated to 4096 runes
+/// without losing its markdown.
+#[tokio::test]
+async fn markdown_fallback_keeps_original_text() {
+    let server = FakeServer::start().await;
+    let api = test_api(server.port);
+    let sender = Sender::new(&api);
+    // Markdown: HTML attempt fails once; the fallback must
+    // be the original "**bold** and more", with no parse_mode.
+    server.behavior.fail_parse_html("sendMessage", 1);
+    sender
+        .send_md(100, "**bold** and more", SendOptions::default())
+        .await
+        .expect("send_md");
+    assert_eq!(server.count_method("sendMessage"), 2);
+    assert_eq!(
+        server.request_parse_modes("sendMessage"),
+        vec![Some("HTML".to_string()), None],
+        "first attempt HTML, fallback plain"
+    );
+    assert_eq!(
+        server
+            .request_texts("sendMessage")
+            .last()
+            .map(String::as_str),
+        Some("**bold** and more"),
+        "Markdown fallback keeps the original text"
+    );
+    // HTML: the fallback strips tags.
+    server.behavior.fail_parse_html("sendMessage", 1);
+    sender
+        .send(100, "<b>bold</b>", SendOptions::default())
+        .await
+        .expect("send html");
+    assert_eq!(
+        server.last_send_text().as_deref(),
+        Some("bold"),
+        "HTML fallback strips tags"
+    );
+    // Over-limit Markdown via `send_one` (no splitting):
+    // the HTML attempt is skipped and the original is
+    // truncated to 4096 runes.
+    let long = format!("**bold**{}", "x".repeat(5000));
+    let before = server.count_method("sendMessage");
+    sender
+        .send_one(
+            100,
+            &long,
+            SendOptions {
+                mode: HtmlMode::Markdown,
+                ..SendOptions::default()
+            },
+        )
+        .await
+        .expect("send long md");
+    assert_eq!(server.count_method("sendMessage"), before + 1);
+    let last = server.last_send_text().expect("last text");
+    assert_eq!(last.chars().count(), 4096);
+    assert!(
+        last.starts_with("**bold**"),
+        "truncated original keeps its markdown"
+    );
+    // Edit fallback, same rule.
+    server.behavior.fail_parse_html("editMessageText", 1);
+    sender
+        .edit(100, 5, "**bold**", HtmlMode::Markdown, None)
+        .await
+        .expect("edit md");
+    assert_eq!(server.count_method("editMessageText"), 2);
+    assert_eq!(
+        server
+            .request_texts("editMessageText")
+            .last()
+            .map(String::as_str),
+        Some("**bold**"),
+        "edit fallback keeps the original markdown"
+    );
+}
+
+/// `/profile` is local (fix loop 1, tech B9): cookies
+/// present + VM id from the config, no service call.
+#[tokio::test]
+async fn profile_local_reports_cookies_and_vm() {
+    let server = FakeServer::start().await;
+    let dir = test_dir("profile");
+    let cookies = dir.join("cookies.txt");
+    std::fs::write(&cookies, "hatch_sess=x").expect("write cookies");
+    let services = Arc::new(FakeServices::new());
+    let (state, _dir) = test_state("profile-state");
+    let handler = make_handler_with_config(
+        &server,
+        Arc::clone(&state),
+        Arc::clone(&services),
+        test_config_with_cookies(true, cookies, "vm-9".to_string()),
+    );
+    handler
+        .dispatch_message(mc(100, OWNER_UID, "/profile"))
+        .await
+        .expect("dispatch");
+    assert_eq!(
+        server.last_send_text().as_deref(),
+        Some(
+            "Serving profile: <b>no1</b> (VM <code>vm-9</code>).\nCookies: present.\nProfile switching is not available from chat; edit the telegram block's profile and restart the bot."
+        )
+    );
+    // Missing cookies + no VM id: same local path.
+    let handler2 = make_handler(&server, state, Arc::clone(&services));
+    handler2
+        .dispatch_message(mc(100, OWNER_UID, "/profile"))
+        .await
+        .expect("dispatch");
+    assert_eq!(
+        server.last_send_text().as_deref(),
+        Some(
+            "Serving profile: <b>no1</b>.\nCookies: missing.\nProfile switching is not available from chat; edit the telegram block's profile and restart the bot."
+        )
+    );
+}
+
+/// Two concurrent taps on one decide button answer
+/// exactly once each — one empty, one "expired" (fix
+/// loop 1, red N6) — and the confirm is sent once.
+#[tokio::test]
+async fn raced_decide_tap_answers_once_each() {
+    let server = FakeServer::start().await;
+    let services = Arc::new(FakeServices::new());
+    let (state, _dir) = test_state("racedecide");
+    let registry = Arc::new(CallbackRegistry::new());
+    let handler = Arc::new(CommandHandler::new(
+        test_api(server.port),
+        state,
+        Arc::clone(&registry),
+        test_claims(),
+        services as Arc<dyn BotServices>,
+        test_config(true),
+    ));
+    let data = registry.register(CallbackEntry {
+        action: "decide".to_string(),
+        approval_id: "ap1".to_string(),
+        decision: "allow_always".to_string(),
+        ..CallbackEntry::default()
+    });
+    let cb: CallbackQuery = serde_json::from_value(serde_json::json!({
+        "id": "q1",
+        "from": {"id": OWNER_UID, "is_bot": false, "first_name": "O"},
+        "data": data,
+        "message": {"message_id": 7, "from": {"id": OWNER_UID, "is_bot": false, "first_name": "O"}, "chat": {"id": 100, "type": "private"}, "date": 0, "text": "x"},
+    }))
+    .expect("callback parses");
+    let (r1, r2) = tokio::join!(handler.handle_callback(&cb), handler.handle_callback(&cb));
+    r1.expect("first tap");
+    r2.expect("second tap");
+    assert_eq!(
+        server.count_method("answerCallbackQuery"),
+        2,
+        "exactly two answers, one per tap"
+    );
+    let mut answers = server.answer_texts();
+    answers.sort();
+    assert_eq!(
+        answers,
+        vec![
+            "".to_string(),
+            "This button expired; run the command again.".to_string()
+        ],
+        "one empty answer, one expired — never two of either"
+    );
+    assert_eq!(
+        server
+            .send_texts()
+            .iter()
+            .filter(|t| t.contains("Always allowed"))
+            .count(),
+        1,
+        "the confirm is sent once"
+    );
+}
+
+/// `send_file` keeps `opts.markup` through to the
+/// multipart body (fix loop 1, tech N6).
+#[tokio::test]
+async fn send_file_keeps_markup_in_multipart() {
+    let server = FakeServer::start().await;
+    let api = test_api(server.port);
+    let markup = InlineKeyboardMarkup {
+        inline_keyboard: vec![vec![InlineKeyboardButton::new("Tap me", "c:abcdefgh")]],
+    };
+    castctl_telegram::files::send_file(
+        &api,
+        100,
+        "doc.txt",
+        b"hello",
+        "",
+        "cap",
+        &SendOptions {
+            markup: Some(markup),
+            ..SendOptions::default()
+        },
+    )
+    .await
+    .expect("send_file");
+    assert_eq!(server.count_method("sendDocument"), 1);
+    let body = server
+        .last_request_body("sendDocument")
+        .expect("sendDocument recorded");
+    assert!(
+        body.contains("reply_markup"),
+        "multipart must carry reply_markup, got {body}"
+    );
+    assert!(
+        body.contains("c:abcdefgh"),
+        "multipart must carry the callback data, got {body}"
+    );
+}
+
+/// `download_media` fast-errors on an empty `file_id`
+/// before any `getFile` call (fix loop 1, tech N14).
+#[tokio::test]
+async fn download_media_empty_file_id_fast_errors() {
+    let server = FakeServer::start().await;
+    let api = test_api(server.port);
+    let media = InboxMedia {
+        file_id: String::new(),
+        name: "x".to_string(),
+        mime_type: None,
+        size: None,
+        kind: "document".to_string(),
+    };
+    let err = castctl_telegram::files::download_media(&api, &media)
+        .await
+        .expect_err("empty file_id must fail");
+    assert!(
+        err.to_string().contains("telegram: no file to download"),
+        "{err}"
+    );
+    assert_eq!(
+        server.count_method("getFile"),
+        0,
+        "no getFile call before the fast error"
+    );
+}
+
+/// A `/login` save failure gets Go's fixed sentence (fix
+/// loop 1, safety N6).
+#[tokio::test]
+async fn login_save_failure_fixed_sentence() {
+    let server = FakeServer::start().await;
+    let services = Arc::new(FakeServices::new());
+    services.set_save_cookies_fail(true);
+    let (state, _dir) = test_state("loginfail");
+    let handler = make_handler(&server, state, services);
+    handler
+        .dispatch_message(mc(100, OWNER_UID, "/login"))
+        .await
+        .expect("login");
+    handler
+        .dispatch_message(mc(100, OWNER_UID, "hatch_sess=abc; other=def"))
+        .await
+        .expect("cookies");
+    assert_eq!(
+        server.last_send_text().as_deref(),
+        Some("⚠️ Could not save the cookies; nothing changed. /login to retry.")
+    );
 }

@@ -66,7 +66,7 @@ pub mod types;
 pub use api::{BotApi, BotApiConfig};
 pub use approvals::{Approval, approval_text, choose_auto_decision, describe_approval};
 pub use bot::{Bot, BotSettings, POLL_TIMEOUT};
-pub use claims::{AutoLogEntry, ClaimManager};
+pub use claims::{AutoLogEntry, ClaimManager, NotifyPending, notify_pending};
 pub use commands::{COMMAND_HELP_TEXT, CommandHandler, CommandHandlerConfig, is_auth_error};
 pub use dispatcher::{
     DISPATCHER_DEDUPE_WINDOW, DISPATCHER_IDLE_TIMEOUT, DISPATCHER_QUEUE_DEPTH,
@@ -80,6 +80,6 @@ pub use router::{
     NewChatOutcome, OWNER_ONLY_SENTENCE, SessionOp, SessionRow, SharedFileRow, command_kind,
     is_known_command, is_owner_command, is_valid_command_name, parse_command,
 };
-pub use send::{HtmlMode, SendOptions};
+pub use send::{HtmlMode, InlineKeyboardButton, InlineKeyboardMarkup, SendOptions, Sender};
 pub use state::{ChatEntry, TelegramStateStore, state_path_for_profile_dir};
 pub use types::{CallbackQuery, Chat, Message, Update, User};

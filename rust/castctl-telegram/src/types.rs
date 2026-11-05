@@ -17,9 +17,18 @@ use serde::Deserialize;
 /// One `getUpdates` item.
 /// Source: go-telegram/bot `models.Update`, read at
 /// `internal/telegram/bot.go:555-568` (`processUpdate`).
+///
+/// Absent fields decode to zero values, exactly like Go's
+/// `encoding/json` (fix loop 1, red R3): a message with
+/// no `chat` becomes `Chat{id: 0}`, its sender is 0, and
+/// the allowlist drops it — the batch proceeds. A field
+/// present with the WRONG TYPE still fails the whole
+/// decode, as in Go (the library's whole-array unmarshal
+/// fails); only absent fields are zero-filled.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Update {
-    /// `update_id`.
+    /// `update_id` (absent → 0, Go zero value).
+    #[serde(default)]
     pub update_id: i64,
     /// `message`, when present.
     #[serde(default)]
@@ -88,18 +97,20 @@ impl Update {
         if let Some(m) = &self.message {
             return m.chat.id;
         }
-        if let Some(m) = &self.edited_message {
-            return m.chat.id;
-        }
+        // Edited messages have no chat key of their own:
+        // Go `chatKey` falls through to `senderID`
+        // (`bot.go:633-644`) — the edited chat id is NOT
+        // used (fix loop 1, tech N4).
         self.sender_id()
     }
 }
 
 /// A Telegram user.
 /// Source: go-telegram/bot `models.User`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct User {
-    /// `id`.
+    /// `id` (absent → 0, Go zero value).
+    #[serde(default)]
     pub id: i64,
     /// `is_bot`.
     #[serde(default)]
@@ -114,9 +125,10 @@ pub struct User {
 
 /// A Telegram chat.
 /// Source: go-telegram/bot `models.Chat`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Chat {
-    /// `id`.
+    /// `id` (absent → 0, Go zero value).
+    #[serde(default)]
     pub id: i64,
     /// `type` (`private`, `group`, ...).
     #[serde(default, rename = "type")]
@@ -128,7 +140,8 @@ pub struct Chat {
 /// `internal/telegram/inbound.go:64-144` (`MediaOf`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct PhotoSize {
-    /// `file_id`.
+    /// `file_id` (absent → "", Go zero value).
+    #[serde(default)]
     pub file_id: String,
     /// `file_size`, when the server reports it.
     #[serde(default)]
@@ -141,7 +154,8 @@ pub struct PhotoSize {
 /// read at `internal/telegram/inbound.go:64-144`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct FileObject {
-    /// `file_id`.
+    /// `file_id` (absent → "", Go zero value).
+    #[serde(default)]
     pub file_id: String,
     /// `file_name`, when present.
     #[serde(default)]
@@ -160,12 +174,14 @@ pub struct FileObject {
 /// `internal/telegram/inbound.go:64-144` (`MediaOf`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct Message {
-    /// `message_id`.
+    /// `message_id` (absent → 0, Go zero value).
+    #[serde(default)]
     pub message_id: i64,
     /// `from`.
     #[serde(default)]
     pub from: Option<User>,
-    /// `chat`.
+    /// `chat` (absent → `Chat{id: 0}`, Go zero value).
+    #[serde(default)]
     pub chat: Chat,
     /// `date` (unix seconds).
     #[serde(default)]
@@ -209,9 +225,12 @@ pub struct Message {
 /// `internal/telegram/bot.go:1230-1303` (`onCallback`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct CallbackQuery {
-    /// `id` (needed to answer the query).
+    /// `id` (needed to answer the query; absent → "").
+    #[serde(default)]
     pub id: String,
-    /// `from`.
+    /// `from` (absent → `User{id: 0}`, Go zero value —
+    /// the allowlist then drops the update).
+    #[serde(default)]
     pub from: User,
     /// `message` (regular or inaccessible; absent for inline
     /// messages). Source: `internal/telegram/bot.go:633-646`
@@ -266,5 +285,54 @@ mod tests {
                 .expect("fixture parses");
         assert_eq!(upd.sender_id(), 0);
         assert_eq!(upd.chat_key(), 100);
+    }
+
+    /// Absent fields decode to Go zero values instead of
+    /// failing the decode (fix loop 1, red R3): a message
+    /// with no `chat`, an update with no `update_id`, a
+    /// callback with no `from` — each decodes, and the
+    /// allowlist drops it by sender id 0.
+    #[test]
+    fn absent_fields_decode_to_zero_values_like_go() {
+        let upd: Update =
+            serde_json::from_str(r#"{"update_id": 99, "message": {"message_id": 1}}"#)
+                .expect("missing chat decodes");
+        assert_eq!(upd.message.as_ref().expect("message").chat.id, 0);
+        assert_eq!(upd.sender_id(), 0);
+        let upd: Update = serde_json::from_str(
+            r#"{"message": {"message_id": 1, "from": {"id": 11}, "chat": {"id": 100, "type": "private"}}}"#,
+        )
+        .expect("missing update_id decodes");
+        assert_eq!(upd.update_id, 0);
+        assert_eq!(upd.sender_id(), 11);
+        let upd: Update = serde_json::from_str(
+            r#"{"update_id": 99, "callback_query": {"id": "q", "data": "c:abc"}}"#,
+        )
+        .expect("missing callback from decodes");
+        assert_eq!(upd.callback_query.as_ref().expect("callback").from.id, 0);
+        assert_eq!(upd.sender_id(), 0);
+    }
+
+    /// A field present with the WRONG TYPE still fails
+    /// the whole decode, as in Go (fix loop 1, red R3):
+    /// only ABSENT fields are zero-filled.
+    #[test]
+    fn wrong_type_fails_the_whole_decode_like_go() {
+        let batch: Result<Vec<Update>, _> = serde_json::from_value(serde_json::json!([
+            {"update_id": 1, "message": {"message_id": 1, "chat": {"id": 100, "type": "private"}}},
+            {"update_id": "two", "message": {"message_id": 2, "chat": {"id": 100, "type": "private"}}},
+        ]));
+        assert!(batch.is_err(), "string update_id fails the batch");
+    }
+
+    /// `chat_key` for an edited-only update is the sender
+    /// id, like Go `chatKey` (fix loop 1, tech N4).
+    #[test]
+    fn chat_key_edited_message_is_sender_id() {
+        let upd: Update = serde_json::from_str(
+            r#"{"update_id": 9, "edited_message": {"message_id": 1, "from": {"id": 33}, "chat": {"id": 100, "type": "private"}}}"#,
+        )
+        .expect("fixture parses");
+        assert_eq!(upd.chat_key(), 33);
     }
 }

@@ -19,7 +19,7 @@
 //! printed by `Display`/`Debug` and never logged. Use
 //! [`BotError::summary`] for any log line.
 
-use castctl_log_redact::{ErrorClass, format_summary};
+use castctl_log_redact::{ErrorClass, fallback_class, format_summary};
 use castctl_transport::TransportError;
 
 /// Errors a bot operation can return.
@@ -68,6 +68,23 @@ pub enum BotError {
     /// Source: `internal/telegram/bot.go:507-523` (`Start`
     /// returns `ctx.Err()`).
     Cancelled,
+    /// A Bot API response body/result could not be
+    /// decoded. Fixed vocabulary by construction (no
+    /// server text is stored). Maps to
+    /// `ResponseDecodeFailure` (`telegram poll error:`
+    /// prefix in the summary).
+    /// Source: `internal/telegram/bot.go:900-915`
+    /// (`anchoredDecodeClass`: `error decode response
+    /// body` / `error decode response result` /
+    /// `error read response body`).
+    ResponseDecode,
+    /// One `getUpdates` item could not be decoded.
+    /// Fixed vocabulary by construction. Maps to
+    /// `UpdateDecodeFailure` (`telegram poll error:`
+    /// prefix in the summary).
+    /// Source: `internal/telegram/bot.go:900-915`
+    /// (`anchoredDecodeClass`: `error decode update`).
+    UpdateDecode,
 }
 
 impl BotError {
@@ -133,13 +150,24 @@ impl BotError {
     /// shape allows (`internal/telegram/bot.go:817-871`).
     /// 429/400/401/403/404/409 map to the matching sentinel
     /// classes; other HTTP statuses map to `http 4xx`/`http 5xx`.
-    /// Transport errors map by variant; `ConnectionDown` /
-    /// `ConnectionError` collapse to `Unclassified` because
-    /// `TransportError` does not preserve the DNS/TLS/errno
-    /// distinction Go's `transportClass` reads from the live
-    /// error type — a known limitation, recorded in
-    /// PORTING.md §M5a (the class is fixed-vocabulary either
-    /// way; only the label granularity is lost).
+    /// Decode failures are typed at construction
+    /// (`ResponseDecode` / `UpdateDecode`), which is the
+    /// structural equivalent of Go's anchored-decode rule —
+    /// the rule itself (`anchored_decode_class`) is not
+    /// called, because this crate never builds the
+    /// `ErrorChain` values `classify_error` operates on
+    /// (see PORTING §M5a.4). Transport `ConnectionDown` /
+    /// `ConnectionError` are classified from their message
+    /// with `fallback_class`, mirroring Go's
+    /// `transportClass` + string fallback
+    /// (`bot.go:956-998`, `:1015-1056`): DNS/TLS/errno
+    /// phrases in the message decide the class, and a
+    /// message with no such phrase stays `Unclassified`.
+    /// The one class this crate can never emit is
+    /// `ContextDeadlineExceeded`: no deadline-exceeded
+    /// error surfaces distinctly here (deadlines arrive
+    /// as `Timeout`). Every other label of the 20-label
+    /// vocabulary is reachable.
     #[must_use]
     pub fn error_class(&self) -> ErrorClass {
         match self {
@@ -158,7 +186,11 @@ impl BotError {
                 },
                 TransportError::Timeout { .. } => ErrorClass::Timeout,
                 TransportError::Cancelled => ErrorClass::ContextCanceled,
-                _ => ErrorClass::Unclassified,
+                TransportError::ConnectionDown { message }
+                | TransportError::ConnectionError { message } => fallback_class(message),
+                TransportError::Validation { .. }
+                | TransportError::RedirectRefused
+                | TransportError::Unsupported { .. } => ErrorClass::Unclassified,
             },
             BotError::Api { code, .. } => match *code {
                 429 => ErrorClass::TooManyRequests,
@@ -171,6 +203,8 @@ impl BotError {
                 s if (400..=499).contains(&s) => ErrorClass::Http4xx,
                 _ => ErrorClass::Unclassified,
             },
+            BotError::ResponseDecode => ErrorClass::ResponseDecodeFailure,
+            BotError::UpdateDecode => ErrorClass::UpdateDecodeFailure,
             BotError::Validation(_) | BotError::State(_) | BotError::NotWired(_) => {
                 ErrorClass::Unclassified
             }
@@ -178,19 +212,53 @@ impl BotError {
         }
     }
 
+    /// Rune count of the error's underlying text, for
+    /// [`BotError::summary`]. The rule is: count the text
+    /// the variant stores (the Api description, the
+    /// transport message, the local message); variants
+    /// that store no text count 0. Only the COUNT is ever
+    /// emitted — the text itself never is — so a token or
+    /// a 30KB body can influence the count but never leak
+    /// through it. This mirrors Go `summarizeError`
+    /// (`bot.go:764-770`), which counts the runes of the
+    /// raw error text; the lengths are comparable in
+    /// signal (a long body yields a large count) but not
+    /// byte-identical to Go's, because Go's `err.Error()`
+    /// includes library framing (method/status) this port
+    /// does not reproduce.
+    fn raw_text_len(&self) -> usize {
+        match self {
+            BotError::Api { description, .. } => description.chars().count(),
+            BotError::Transport(e) => match e {
+                TransportError::Auth { message }
+                | TransportError::ConnectionDown { message }
+                | TransportError::ConnectionError { message }
+                | TransportError::Timeout { message }
+                | TransportError::Validation { message }
+                | TransportError::Unsupported { message } => message.chars().count(),
+                TransportError::Gateway(_)
+                | TransportError::RedirectRefused
+                | TransportError::Cancelled => 0,
+            },
+            BotError::Validation(m) | BotError::State(m) => m.chars().count(),
+            BotError::NotWired(name) => name.chars().count(),
+            BotError::ResponseDecode | BotError::UpdateDecode | BotError::Cancelled => 0,
+        }
+    }
+
     /// Allowlist summary for a log line: fixed-vocabulary label
     /// plus a rune count, never raw text.
     /// Source: `internal/telegram/bot.go:764-770`
     /// (`summarizeError` = `formatSummary(classifyError(err),
-    /// runeCount(err))`). The rune count here is the length of
-    /// the safe `Display` text, not of any server body.
+    /// runeCount(err))`). The count is over the raw error
+    /// text (see [`BotError::raw_text_len`]), never over a
+    /// scrubbed rendering. There is deliberately NO token
+    /// parameter: a count cannot leak a token, and the old
+    /// ignored `_token` parameter wrongly suggested the
+    /// summary scrubbed one (fix loop 1, safety N3).
     #[must_use]
-    pub fn summary(&self, _token: &str) -> String {
-        let text = self.to_string();
-        let count = text.chars().count();
-        // The rune count is over the safe `Display` text only;
-        // nothing verbatim from any server body is emitted.
-        format_summary(self.error_class(), count)
+    pub fn summary(&self) -> String {
+        format_summary(self.error_class(), self.raw_text_len())
     }
 }
 
@@ -215,6 +283,8 @@ impl std::fmt::Debug for BotError {
             BotError::State(m) => f.debug_tuple("State").field(m).finish(),
             BotError::NotWired(s) => f.debug_tuple("NotWired").field(s).finish(),
             BotError::Cancelled => write!(f, "Cancelled"),
+            BotError::ResponseDecode => write!(f, "ResponseDecode"),
+            BotError::UpdateDecode => write!(f, "UpdateDecode"),
         }
     }
 }
@@ -229,6 +299,8 @@ impl std::fmt::Display for BotError {
             BotError::State(msg) => write!(f, "state error: {msg}"),
             BotError::NotWired(name) => write!(f, "command {name} is not wired yet"),
             BotError::Cancelled => write!(f, "cancelled"),
+            BotError::ResponseDecode => write!(f, "response decode failure"),
+            BotError::UpdateDecode => write!(f, "update decode failure"),
         }
     }
 }
@@ -244,8 +316,11 @@ impl From<TransportError> for BotError {
 impl From<serde_json::Error> for BotError {
     fn from(_e: serde_json::Error) -> Self {
         // Never carry the serde message: it can quote the
-        // offending input bytes.
-        BotError::Validation("response decode failure".to_string())
+        // offending input bytes. A generic JSON decode
+        // failure is a response decode failure; update
+        // decode sites map explicitly to `UpdateDecode`
+        // instead of using this conversion.
+        BotError::ResponseDecode
     }
 }
 
@@ -274,6 +349,12 @@ mod tests {
         assert_eq!(err.error_class(), ErrorClass::BadRequest);
     }
 
+    /// `summary()` counts the runes of the raw error
+    /// text, not of the safe `Display` text (fix loop 1,
+    /// tech B8): the 429 description below is 32 runes, so
+    /// `message_length=32` — the old test pinned 22, the
+    /// length of the `Display` string, which carried no
+    /// diagnostic signal at all.
     #[test]
     fn summary_is_fixed_vocabulary_only() {
         let err = BotError::Api {
@@ -281,10 +362,72 @@ mod tests {
             description: "Too Many Requests: retry after 5".to_string(),
             retry_after: Some(5),
         };
-        let s = err.summary("123456:fake-token-value");
-        assert_eq!(s, "telegram error: too many requests message_length=22");
+        let s = err.summary();
+        assert_eq!(s, "telegram error: too many requests message_length=32");
         assert!(!s.contains("123456"));
         assert!(!s.contains("fake-token"));
+    }
+
+    /// The count stays sensitive to body size: a long
+    /// server description yields a large `message_length`
+    /// (the diagnostic signal the old `Display`-length
+    /// count lost), while the text itself never appears.
+    #[test]
+    fn summary_count_tracks_raw_text_length() {
+        let long = "x".repeat(5000);
+        let err = BotError::Api {
+            code: 400,
+            description: long,
+            retry_after: None,
+        };
+        let s = err.summary();
+        assert_eq!(s, "telegram error: bad request message_length=5000");
+        assert!(!s.contains('x'));
+    }
+
+    /// Decode failures map to the decode classes with the
+    /// `telegram poll error:` prefix (fix loop 1, tech B8).
+    #[test]
+    fn decode_failures_map_to_decode_classes() {
+        assert_eq!(
+            BotError::ResponseDecode.error_class(),
+            ErrorClass::ResponseDecodeFailure
+        );
+        assert_eq!(
+            BotError::UpdateDecode.error_class(),
+            ErrorClass::UpdateDecodeFailure
+        );
+        assert_eq!(
+            BotError::ResponseDecode.summary(),
+            "telegram poll error: response decode failure message_length=0"
+        );
+        assert_eq!(
+            BotError::UpdateDecode.summary(),
+            "telegram poll error: update decode failure message_length=0"
+        );
+    }
+
+    /// Transport connection failures classify from their
+    /// message phrases, mirroring Go's `transportClass` +
+    /// fallback (fix loop 1, tech B8).
+    #[test]
+    fn transport_connection_failures_classify_from_message() {
+        let refused = BotError::Transport(TransportError::ConnectionDown {
+            message: "dial tcp: connection refused".to_string(),
+        });
+        assert_eq!(refused.error_class(), ErrorClass::ConnectionRefused);
+        let dns = BotError::Transport(TransportError::ConnectionError {
+            message: "dial tcp: lookup api.telegram.org: no such host".to_string(),
+        });
+        assert_eq!(dns.error_class(), ErrorClass::Dns);
+        let tls = BotError::Transport(TransportError::ConnectionDown {
+            message: "tls: handshake failure".to_string(),
+        });
+        assert_eq!(tls.error_class(), ErrorClass::Tls);
+        let unknown = BotError::Transport(TransportError::ConnectionDown {
+            message: "something unrecognised happened".to_string(),
+        });
+        assert_eq!(unknown.error_class(), ErrorClass::Unclassified);
     }
 
     #[test]

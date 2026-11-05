@@ -186,9 +186,40 @@ impl Dispatcher {
 
     /// Set the update processor (called once, right after
     /// the owning `Bot` exists — the dispatcher needs to
-    /// call back into the bot).
-    pub fn set_processor(&self, processor: Arc<dyn UpdateProcessor>) {
-        *self.processor.lock().expect("dispatcher lock") = Some(processor);
+    /// call back into the bot). Queues that already exist
+    /// (enqueued before any processor was set) get their
+    /// workers spawned now, so they are no longer wedged
+    /// silently (fix loop 1, tech N10). The `Arc`
+    /// receiver is what lets this spawn workers on this
+    /// dispatcher; `Bot::new` and the tests all hold one.
+    pub fn set_processor(self: &Arc<Self>, processor: Arc<dyn UpdateProcessor>) {
+        let pending_queues: Vec<(i64, mpsc::Receiver<Update>)> = {
+            let mut inner = self.inner.lock().expect("dispatcher lock");
+            *self.processor.lock().expect("dispatcher lock") = Some(Arc::clone(&processor));
+            let mut v = Vec::new();
+            for (key, queue) in inner.queues.iter_mut() {
+                if let Some(rx) = queue.rx.take() {
+                    v.push((*key, rx));
+                }
+            }
+            v
+        };
+        let mut handles = Vec::new();
+        for (chat_key, rx) in pending_queues {
+            handles.push(Self::spawn_worker_arc(
+                Arc::clone(self),
+                chat_key,
+                rx,
+                Arc::clone(&processor),
+            ));
+        }
+        if !handles.is_empty() {
+            self.inner
+                .lock()
+                .expect("dispatcher lock")
+                .workers
+                .extend(handles);
+        }
     }
 
     /// Set the offset hook: called synchronously in
@@ -259,8 +290,13 @@ impl Dispatcher {
         let hook = self.on_offset.lock().expect("dispatcher lock").clone();
         if is_new_max && let Some(hook) = hook {
             // Called under the dispatcher lock, exactly
-            // as Go does (`dispatcher.go:100-114`).
-            hook(update_id);
+            // as Go does (`dispatcher.go:100-114`). A
+            // panicking hook must not poison the lock and
+            // wedge every later enqueue: it is caught here
+            // (Go's `recoverMiddleware` logs and continues;
+            // this crate has no logger, so the panic is
+            // swallowed — fix loop 1, tech N18).
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook(update_id)));
         }
         if !inner.queues.contains_key(&chat_key) {
             let processor = self.processor.lock().expect("dispatcher lock").clone();
@@ -317,6 +353,20 @@ impl Dispatcher {
                 let item = tokio::time::timeout(this.idle_timeout, rx.recv()).await;
                 match item {
                     Ok(Some(update)) => {
+                        // Abandoned FIRST, before any work:
+                        // after `shutdown()` counted the
+                        // buffered items as dropped, workers
+                        // discard them without spawning the
+                        // processor — exactly as Go does
+                        // (`dispatcher.go:225-262`). The old
+                        // code checked after `handle.await`,
+                        // so counted-as-dropped items were
+                        // still handled after shutdown
+                        // returned (fix loop 1, tech B2 /
+                        // red R2).
+                        if this.inner.lock().is_ok_and(|i| i.abandoned) {
+                            continue;
+                        }
                         {
                             let mut inner = this.inner.lock().expect("dispatcher lock");
                             if let Some(pending) = inner.pending.get_mut(&chat_key) {
@@ -330,11 +380,6 @@ impl Dispatcher {
                         // recover (`dispatcher.go:255-262`).
                         let handle = tokio::spawn(processor.clone().process(update));
                         let _ = handle.await;
-                        if this.inner.lock().is_ok_and(|i| i.abandoned) {
-                            // Shutdown abandoned the drain:
-                            // discard without double-counting.
-                            continue;
-                        }
                     }
                     Ok(None) => {
                         // Channel closed: shutdown.
@@ -368,7 +413,13 @@ impl Dispatcher {
     /// Shut down: close every queue, wait for the drain or
     /// the shutdown timeout, then abandon the remainder
     /// (counted as dropped, workers discard without
-    /// double-counting).
+    /// double-counting). Leftovers are counted on BOTH
+    /// exits: on timeout (the Go path,
+    /// `dispatcher.go:264-304`) and on a clean join, where
+    /// a queue with no worker (no processor was ever set)
+    /// would otherwise vanish uncounted (fix loop 1, red
+    /// N9). A normal drain leaves `pending` empty, so the
+    /// clean-join count adds zero there.
     /// Source: `internal/telegram/dispatcher.go:264-304`
     /// (`shutdown`).
     pub async fn shutdown(self: &Arc<Self>) {
@@ -387,22 +438,34 @@ impl Dispatcher {
             .await
             .is_err()
         {
-            let leftovers: Vec<(i64, i64, i64)> = {
+            {
                 let mut inner = self.inner.lock().expect("dispatcher lock");
                 inner.abandoned = true;
-                let mut v = Vec::new();
-                let pending: Vec<(i64, usize)> = inner.pending.drain().collect();
-                for (chat, count) in pending {
-                    if count > 0 {
-                        inner.dropped += count as i64;
-                        v.push((chat, count as i64, inner.dropped));
-                    }
-                }
-                v
-            };
-            for (chat, count, total) in leftovers {
-                self.call_on_dropped(chat, count, total);
             }
+            self.count_leftovers();
+        } else {
+            self.count_leftovers();
+        }
+    }
+
+    /// Drain `pending` into `dropped` and report each
+    /// chat's leftover count via `on_dropped`. Called by
+    /// [`Dispatcher::shutdown`] on either exit.
+    fn count_leftovers(&self) {
+        let leftovers: Vec<(i64, i64, i64)> = {
+            let mut inner = self.inner.lock().expect("dispatcher lock");
+            let mut v = Vec::new();
+            let pending: Vec<(i64, usize)> = inner.pending.drain().collect();
+            for (chat, count) in pending {
+                if count > 0 {
+                    inner.dropped += count as i64;
+                    v.push((chat, count as i64, inner.dropped));
+                }
+            }
+            v
+        };
+        for (chat, count, total) in leftovers {
+            self.call_on_dropped(chat, count, total);
         }
     }
 }
@@ -500,5 +563,114 @@ mod tests {
         assert_eq!(d.enqueue(update(66, 100)), EnqueueOutcome::Dropped);
         assert_eq!(d.dropped(), 2);
         d.shutdown().await;
+    }
+
+    /// Slow processor: one chat worker is stuck on the
+    /// first item when shutdown times out (50ms). The
+    /// buffered items must be counted dropped AND must
+    /// never reach the processor — the old code checked
+    /// `abandoned` after `handle.await` and handled them
+    /// after `shutdown()` had returned (fix loop 1,
+    /// tech B2 / red R2).
+    struct SlowProcessor {
+        handled: Arc<Mutex<Vec<i64>>>,
+        delay: Duration,
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    impl UpdateProcessor for SlowProcessor {
+        fn process(self: Arc<Self>, update: Update) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+            let handled = Arc::clone(&self.handled);
+            let delay = self.delay;
+            let started = Arc::clone(&self.started);
+            Box::pin(async move {
+                started.notify_waiters();
+                tokio::time::sleep(delay).await;
+                handled.lock().expect("lock").push(update.update_id);
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_abandon_discards_buffered_without_processing() {
+        let d = Arc::new(Dispatcher::with_config(
+            Duration::from_secs(60),
+            Duration::from_millis(50),
+            1024,
+        ));
+        let handled = Arc::new(Mutex::new(Vec::new()));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let started_wait = Arc::clone(&started);
+        d.set_processor(Arc::new(SlowProcessor {
+            handled: Arc::clone(&handled),
+            delay: Duration::from_millis(200),
+            started,
+        }));
+        for id in 1..=10 {
+            assert_eq!(d.enqueue(update(id, 100)), EnqueueOutcome::Queued);
+        }
+        // Wait until the worker has TAKEN item 1 (pending
+        // is 9) before shutting down; otherwise the test
+        // races the worker start and item 1 itself may be
+        // the discarded one.
+        tokio::time::timeout(Duration::from_secs(5), started_wait.notified())
+            .await
+            .expect("worker starts item 1");
+        let start = std::time::Instant::now();
+        d.shutdown().await;
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "shutdown must return at the timeout, took {:?}",
+            start.elapsed()
+        );
+        // Let the worker observe `abandoned` and exit.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            *handled.lock().expect("lock"),
+            vec![1],
+            "only the in-flight item is processed; buffered items are discarded"
+        );
+        assert_eq!(
+            d.dropped(),
+            9,
+            "the 9 buffered items are counted dropped exactly once"
+        );
+    }
+
+    /// `set_processor` after enqueues spawns workers for
+    /// the pre-existing queues (fix loop 1, tech N10).
+    #[tokio::test]
+    async fn set_processor_spawns_workers_for_existing_queues() {
+        let d = Arc::new(Dispatcher::with_config(
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            1024,
+        ));
+        let _ = d.enqueue(update(1, 100));
+        let _ = d.enqueue(update(2, 100));
+        let handled = Arc::new(Mutex::new(Vec::new()));
+        d.set_processor(Arc::new(RecordingProcessor {
+            handled: Arc::clone(&handled),
+        }));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(*handled.lock().expect("lock"), vec![1, 2]);
+        d.shutdown().await;
+    }
+
+    /// Shutdown with no workers counts the pending
+    /// leftovers instead of losing them silently
+    /// (fix loop 1, red N9).
+    #[tokio::test]
+    async fn shutdown_without_workers_counts_leftovers() {
+        let d = Arc::new(Dispatcher::with_config(
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            1024,
+        ));
+        for id in 1..=3 {
+            assert_eq!(d.enqueue(update(id, 100)), EnqueueOutcome::Queued);
+        }
+        d.shutdown().await;
+        assert_eq!(d.dropped(), 3, "buffered items are counted dropped");
     }
 }

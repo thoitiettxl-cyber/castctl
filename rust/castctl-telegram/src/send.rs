@@ -191,13 +191,13 @@ impl<'a> Sender<'a> {
             {
                 Ok(id) => Ok(id),
                 Err(e) if e.is_parse_error() => {
-                    let plain = truncate_runes(&strip_tags(&html_text), TEXT_LIMIT);
+                    let plain = fallback_text(opts.mode, text, &html_text);
                     self.send_message_call(chat_id, &plain, None, &opts).await
                 }
                 Err(e) => Err(e),
             }
         } else {
-            let plain = truncate_runes(&strip_tags(&html_text), TEXT_LIMIT);
+            let plain = fallback_text(opts.mode, text, &html_text);
             self.send_message_call(chat_id, &plain, None, &opts).await
         }
     }
@@ -272,7 +272,7 @@ impl<'a> Sender<'a> {
             {
                 Ok(()) => Ok(()),
                 Err(e) if e.is_parse_error() => {
-                    let plain = truncate_runes(&strip_tags(&html_text), TEXT_LIMIT);
+                    let plain = fallback_text(mode, text, &html_text);
                     self.edit_call(chat_id, message_id, &plain, None, markup)
                         .await
                 }
@@ -280,7 +280,7 @@ impl<'a> Sender<'a> {
                 Err(e) => Err(e),
             }
         } else {
-            let plain = truncate_runes(&strip_tags(&html_text), TEXT_LIMIT);
+            let plain = fallback_text(mode, text, &html_text);
             self.edit_call(chat_id, message_id, &plain, None, markup)
                 .await
         }
@@ -400,6 +400,22 @@ pub fn truncate_runes(s: &str, limit: usize) -> String {
         s.to_string()
     } else {
         s.chars().take(limit).collect()
+    }
+}
+
+/// Fallback text for `send_one` / `edit` when the HTML
+/// attempt fails to parse or the body is over
+/// `TEXT_LIMIT`. Go strips tags ONLY in HTML mode
+/// (`bot.go:1597-1627` `sendOne`, `:1662-1699` `Edit`):
+/// in Markdown mode the ORIGINAL markdown text is sent
+/// unchanged (truncated to 4096 runes) — e.g. `**bold**`
+/// stays `**bold**`, it does not become `bold` (fix loop
+/// 1, tech B5 — the old code stripped in both modes).
+fn fallback_text(mode: HtmlMode, text: &str, html_text: &str) -> String {
+    match mode {
+        HtmlMode::Markdown => truncate_runes(text, TEXT_LIMIT),
+        HtmlMode::Html => truncate_runes(&strip_tags(html_text), TEXT_LIMIT),
+        HtmlMode::Plain => truncate_runes(text, TEXT_LIMIT),
     }
 }
 

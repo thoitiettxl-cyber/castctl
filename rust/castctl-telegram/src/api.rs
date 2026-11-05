@@ -29,7 +29,8 @@
 //! HTTP layer, so a token-bearing path is never re-sent to a
 //! second host.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -37,6 +38,7 @@ use castctl_transport::{DialTarget, Dialer, HttpClient, TransportError};
 use serde_json::Value;
 
 use crate::error::BotError;
+use crate::send::InlineKeyboardMarkup;
 use crate::tls::{TlsHttpClient, telegram_api_target};
 use crate::types::Update;
 
@@ -82,7 +84,11 @@ pub const FILE_DOWNLOAD_PREFIX: &str = "/file/bot";
 /// counterpart: Go spreads these across `Settings`
 /// (`internal/telegram/bot.go:191-274`) and the two library
 /// instances built in `New` (`:358-481`).
-#[derive(Debug, Clone)]
+///
+/// Hand-written `Debug`: the token renders as `[redacted]`
+/// (same pattern as [`BotApi`]; fix loop 1, safety B2 —
+/// the derived `Debug` used to print the token verbatim).
+#[derive(Clone)]
 pub struct BotApiConfig {
     /// Bot token (shape-checked by the caller, never logged).
     /// Source: `internal/telegram/bot.go:63-65` (`botTokenShape`).
@@ -104,6 +110,68 @@ pub struct BotApiConfig {
     /// Per-attempt timeout for upload/download calls (default
     /// [`UPLOAD_TIMEOUT`]).
     pub upload_timeout: Duration,
+}
+
+impl std::fmt::Debug for BotApiConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BotApiConfig")
+            .field("token", &"[redacted]")
+            .field("target", &self.target)
+            .field("use_tls", &self.use_tls)
+            .field("client_timeout", &self.client_timeout)
+            .field("upload_timeout", &self.upload_timeout)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Shutdown signal shared with a [`BotApi`] so 429 retry
+/// sleeps can be cancelled instead of blocking shutdown
+/// for up to 60.5s (fix loop 1, tech B6 / red N7). Go's
+/// `sleepOrDone` (`internal/telegram/bot.go:1507-1546`)
+/// respects `ctx` cancellation on every retry path; this
+/// is the Rust equivalent. `Bot::new` installs the bot's
+/// own signal; a client without one sleeps plainly
+/// (standalone/handler tests).
+pub struct ShutdownSignal {
+    flag: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl ShutdownSignal {
+    /// New unset signal.
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            flag: AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+        })
+    }
+
+    /// Fire the signal (idempotent).
+    pub fn request(&self) {
+        self.flag.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    /// Whether the signal has fired.
+    #[must_use]
+    pub fn is_set(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+    }
+
+    /// Wait for the signal. The waiter is registered
+    /// (`enable()`) BEFORE the flag is re-checked, so a
+    /// request between the check and the wait cannot be
+    /// lost.
+    pub async fn wait(&self) {
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        let _ = notified.as_mut().enable();
+        if self.flag.load(Ordering::SeqCst) {
+            return;
+        }
+        notified.await;
+    }
 }
 
 impl BotApiConfig {
@@ -144,6 +212,7 @@ pub struct BotApi {
     tls: Option<TlsHttpClient>,
     client_timeout: Duration,
     upload_timeout: Duration,
+    shutdown: Mutex<Option<Arc<ShutdownSignal>>>,
 }
 
 impl std::fmt::Debug for BotApi {
@@ -175,6 +244,7 @@ impl BotApi {
                 tls: Some(TlsHttpClient::new(dialer)),
                 client_timeout: config.client_timeout,
                 upload_timeout: config.upload_timeout,
+                shutdown: Mutex::new(None),
             }
         } else {
             Self {
@@ -184,7 +254,31 @@ impl BotApi {
                 tls: None,
                 client_timeout: config.client_timeout,
                 upload_timeout: config.upload_timeout,
+                shutdown: Mutex::new(None),
             }
+        }
+    }
+
+    /// Install the shutdown signal for 429 retry sleeps
+    /// (see [`ShutdownSignal`]). `Bot::new` calls this
+    /// with the bot's signal; without it, retry sleeps
+    /// are plain `tokio::time::sleep`s.
+    pub fn set_shutdown_signal(&self, signal: Arc<ShutdownSignal>) {
+        *self.shutdown.lock().expect("shutdown lock") = Some(signal);
+    }
+
+    /// Sleep `dur` unless the shutdown signal fires
+    /// first. Returns `false` when cancelled (the caller
+    /// returns `BotError::Cancelled`, mirroring Go's
+    /// `retryCall` returning `ctx.Err()`).
+    async fn sleep_or_shutdown(&self, dur: Duration) -> bool {
+        let Some(signal) = self.shutdown.lock().expect("shutdown lock").clone() else {
+            tokio::time::sleep(dur).await;
+            return true;
+        };
+        tokio::select! {
+            () = signal.wait() => false,
+            () = tokio::time::sleep(dur) => true,
         }
     }
 
@@ -295,14 +389,31 @@ impl BotApi {
     /// Decode one Bot API envelope into its `result`, or the
     /// `Api` error it carries. The body bytes are never copied
     /// into the error; `description` is held, never printed
-    /// (see `error.rs`).
+    /// (see `error.rs`). An undecodable body on a 5xx status
+    /// maps to the 5xx `Api` error (the status is
+    /// authoritative, so the poll loop takes the 5xx ladder
+    /// instead of spinning at 1 req/s — fix loop 1, red N1;
+    /// a [DEVIATION] from Go, whose library reports a
+    /// response decode failure there — see PORTING §M5a.3).
+    /// Any other undecodable body is `ResponseDecode`.
     fn decode_envelope(
         status: http::StatusCode,
         headers: &http::HeaderMap,
         body: &[u8],
     ) -> Result<Value, BotError> {
-        let value: Value = serde_json::from_slice(body)
-            .map_err(|_| BotError::Validation("response decode failure".to_string()))?;
+        let value: Value = match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(_) => {
+                if status.is_server_error() {
+                    return Err(BotError::Api {
+                        code: status.as_u16() as i32,
+                        description: String::new(),
+                        retry_after: None,
+                    });
+                }
+                return Err(BotError::ResponseDecode);
+            }
+        };
         let ok = value.get("ok").and_then(Value::as_bool).unwrap_or(false);
         if ok {
             return Ok(value.get("result").cloned().unwrap_or(Value::Null));
@@ -339,12 +450,11 @@ impl BotApi {
     /// present, 1..=60, at most 2 retries, sleeping
     /// `retry_after + 0.5s` between attempts.
     ///
-    /// Cancellation: the sleep is a plain `tokio::time::sleep`
-    /// (no ctx is plumbed through this layer); callers that
-    /// must stay shutdown-responsive wrap the call in
-    /// `tokio::select!` against the shutdown signal (the poll
-    /// loop does — see `bot.rs`). A dropped future cancels
-    /// the sleep.
+    /// Cancellation: the retry sleep respects the shutdown
+    /// signal installed by [`BotApi::set_shutdown_signal`]
+    /// (Go `sleepOrDone`); a cancelled sleep returns
+    /// `BotError::Cancelled` instead of waiting out up to
+    /// 60.5s. Dropping the future cancels the sleep too.
     pub async fn call_json(&self, method: &str, params: Value) -> Result<Value, BotError> {
         self.call_json_timeout(method, params, self.client_timeout)
             .await
@@ -375,11 +485,15 @@ impl BotApi {
                     if (1..=MAX_RETRY_AFTER_SECS).contains(&retry_after)
                         && attempt < MAX_429_RETRIES
                     {
-                        tokio::time::sleep(
-                            Duration::from_secs(u64::try_from(retry_after).unwrap_or(0))
-                                + RETRY_AFTER_PAD,
-                        )
-                        .await;
+                        if !self
+                            .sleep_or_shutdown(
+                                Duration::from_secs(u64::try_from(retry_after).unwrap_or(0))
+                                    + RETRY_AFTER_PAD,
+                            )
+                            .await
+                        {
+                            return Err(BotError::Cancelled);
+                        }
                         continue;
                     }
                     return Err(result.unwrap_err());
@@ -398,6 +512,16 @@ impl BotApi {
     /// `WithInitialOffset`); the `timeout` parameter is
     /// pollTimeout−1s per the library, i.e. 25s here
     /// (`POLL_TIMEOUT_SECS`).
+    ///
+    /// Decode mirrors Go's `encoding/json` (fix loop 1,
+    /// red R3): a missing `result` (`null`) is an empty
+    /// batch, not an error; a `result` that is not an
+    /// array is a response decode failure (the whole batch
+    /// fails, as in Go); items decode one by one, so a
+    /// wrong-TYPE field fails the whole batch
+    /// (`UpdateDecode`, as in Go) while ABSENT fields
+    /// zero-fill via `#[serde(default)]` on `types.rs`
+    /// and the item proceeds.
     pub async fn get_updates(&self, offset: i64) -> Result<Vec<Update>, BotError> {
         let mut params = serde_json::json!({
             "timeout": POLL_TIMEOUT_SECS,
@@ -407,7 +531,18 @@ impl BotApi {
             params["offset"] = serde_json::json!(offset);
         }
         let result = self.call_json("getUpdates", params).await?;
-        let updates: Vec<Update> = serde_json::from_value(result)?;
+        if result.is_null() {
+            return Ok(Vec::new());
+        }
+        let Some(items) = result.as_array() else {
+            return Err(BotError::ResponseDecode);
+        };
+        let mut updates = Vec::with_capacity(items.len());
+        for item in items {
+            let update: Update =
+                serde_json::from_value(item.clone()).map_err(|_| BotError::UpdateDecode)?;
+            updates.push(update);
+        }
         Ok(updates)
     }
 
@@ -511,7 +646,11 @@ impl BotApi {
     /// `sendVideo` / `sendAudio`). A FRESH multipart body is
     /// built per retry attempt (the body bytes are consumed
     /// building the request; reusing one would upload an
-    /// empty part on retry).
+    /// empty part on retry). `markup` is attached to every
+    /// method, as Go's `sendFileKind` does
+    /// (`files.go:192-264`) — the old code dropped it
+    /// (fix loop 1, tech N6). The 429 retry sleep respects
+    /// the shutdown signal (see [`BotApi::call_json`]).
     /// Source: `internal/telegram/files.go:192-264`
     /// (`sendFileKind`). The arity mirrors Go's
     /// `sendFileKind` signature; bundling the fields
@@ -526,6 +665,7 @@ impl BotApi {
         caption: &str,
         reply_to: i64,
         silent: bool,
+        markup: Option<InlineKeyboardMarkup>,
     ) -> Result<i64, BotError> {
         let path = self.method_path(method);
         let boundary = "----castctl-telegram-form-boundary-7d3a9f2e";
@@ -540,7 +680,15 @@ impl BotApi {
         };
         for attempt in 0..=MAX_429_RETRIES {
             let body = multipart_body(
-                boundary, part_name, chat_id, filename, data, caption, reply_to, silent,
+                boundary,
+                part_name,
+                chat_id,
+                filename,
+                data,
+                caption,
+                reply_to,
+                silent,
+                markup.as_ref(),
             );
             let headers = [(
                 "Content-Type".to_string(),
@@ -595,11 +743,15 @@ impl BotApi {
                     if (1..=MAX_RETRY_AFTER_SECS).contains(&retry_after)
                         && attempt < MAX_429_RETRIES
                     {
-                        tokio::time::sleep(
-                            Duration::from_secs(u64::try_from(retry_after).unwrap_or(0))
-                                + RETRY_AFTER_PAD,
-                        )
-                        .await;
+                        if !self
+                            .sleep_or_shutdown(
+                                Duration::from_secs(u64::try_from(retry_after).unwrap_or(0))
+                                    + RETRY_AFTER_PAD,
+                            )
+                            .await
+                        {
+                            return Err(BotError::Cancelled);
+                        }
                         continue;
                     }
                     return Err(result.unwrap_err());
@@ -667,7 +819,8 @@ impl BotApi {
 /// Fields mirror Go `sendFileKind`
 /// (`internal/telegram/files.go:192-264`): `chat_id`,
 /// `caption` (plain, no `parse_mode`), `disable_notification`
-/// when silent, `reply_parameters` when replying, then the
+/// when silent, `reply_parameters` when replying,
+/// `reply_markup` when a keyboard is attached, then the
 /// file part. The file part Content-Type is
 /// `application/octet-stream` — Go's deviation (the library
 /// always writes the stdlib multipart default; Python sets
@@ -684,6 +837,7 @@ fn multipart_body(
     caption: &str,
     reply_to: i64,
     silent: bool,
+    markup: Option<&InlineKeyboardMarkup>,
 ) -> Bytes {
     let mut out = Vec::with_capacity(data.len() + 512);
     let field = |out: &mut Vec<u8>, name: &str, value: &str| {
@@ -704,6 +858,9 @@ fn multipart_body(
     if reply_to != 0 {
         let reply = serde_json::json!({"message_id": reply_to}).to_string();
         field(&mut out, "reply_parameters", &reply);
+    }
+    if let Some(markup) = markup {
+        field(&mut out, "reply_markup", &markup.to_json().to_string());
     }
     out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
     out.extend_from_slice(

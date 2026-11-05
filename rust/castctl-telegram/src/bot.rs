@@ -23,9 +23,8 @@ use std::time::Duration;
 
 use castctl_config::telegram::valid_telegram_token_shape;
 use castctl_transport::TransportError;
-use tokio::sync::Notify;
 
-use crate::api::BotApi;
+use crate::api::{BotApi, ShutdownSignal};
 use crate::claims::ClaimManager;
 use crate::commands::{CommandHandler, CommandHandlerConfig};
 use crate::dispatcher::{Dispatcher, UpdateProcessor};
@@ -112,9 +111,13 @@ pub struct Bot {
     /// the loop is between selects would be lost and the
     /// loop would poll forever. The flag makes the
     /// request durable; the `Notify` only wakes a
-    /// sleeping poll early.
-    shutdown_flag: AtomicBool,
-    shutdown_notify: Notify,
+    /// sleeping poll early. Shared with the API client
+    /// (429 retry sleeps) via one [`ShutdownSignal`].
+    shutdown_signal: Arc<ShutdownSignal>,
+    /// Whether `run()` has started (Go `Start`'s
+    /// `started` guard, `bot.go:505-523`: a second start
+    /// returns `"telegram: bot already started"`).
+    started: AtomicBool,
     backoff_ladder: Vec<Duration>,
 }
 
@@ -174,6 +177,11 @@ impl Bot {
         // `getMe` at construction (no `SkipGetMe` here).
         let _me = api.get_me().await?;
         let dispatcher = Arc::new(Dispatcher::new());
+        // One shutdown signal for the poll loop, the 429
+        // retry sleeps (installed on the API client), and
+        // the claims manager's `decide_once` waiters.
+        let shutdown_signal = ShutdownSignal::new();
+        api.set_shutdown_signal(Arc::clone(&shutdown_signal));
         let handler = CommandHandler::new(
             Arc::clone(&api),
             Arc::clone(&state),
@@ -192,8 +200,8 @@ impl Bot {
             dispatcher: Arc::clone(&dispatcher),
             allowed,
             active_turns: Mutex::new(HashSet::new()),
-            shutdown_flag: AtomicBool::new(false),
-            shutdown_notify: Notify::new(),
+            shutdown_signal,
+            started: AtomicBool::new(false),
             backoff_ladder: if settings.backoff_ladder.is_empty() {
                 DEFAULT_5XX_BACKOFF.to_vec()
             } else {
@@ -243,7 +251,13 @@ impl Bot {
     /// Number of updates dropped (queue-full / shutdown /
     /// no-processor). No direct Go getter counterpart: Go
     /// reports drops only via the `onDropped` hook; this
-    /// counter mirrors `Dispatcher::dropped`.
+    /// counter mirrors `Dispatcher::dropped`. No
+    /// `on_dropped` hook is wired in this crate (there is
+    /// no logger to send it to — Go's contract is "the log
+    /// is the only observability for the loss",
+    /// `dispatcher.go:100-122`), so this counter is the
+    /// ONLY observability for drops until a logger lands
+    /// (fix loop 1, red N2).
     #[must_use]
     pub fn dropped(&self) -> i64 {
         self.dispatcher.dropped()
@@ -312,12 +326,25 @@ impl Bot {
     /// Signal the poll loop to stop. The in-flight poll is
     /// cancelled via `tokio::select!`; a 429 sleep inside
     /// `call_json` is cancelled the same way (the future
-    /// is dropped). The flag (not just the `Notify`) is
-    /// what the loop checks, so a request made while the
-    /// loop is between selects is never lost.
+    /// is dropped, and the sleep itself observes the
+    /// signal). The flag (not just the `Notify`) is what
+    /// the loop checks, so a request made while the loop
+    /// is between selects is never lost. Also signals the
+    /// claims manager, so `decide_once` waiters return
+    /// `Cancelled` instead of hanging.
     pub fn request_shutdown(&self) {
-        self.shutdown_flag.store(true, Ordering::SeqCst);
-        self.shutdown_notify.notify_waiters();
+        self.shutdown_signal.request();
+        self.claims.request_shutdown();
+    }
+
+    /// Wait for shutdown. The waiter is registered
+    /// (`enable()`) BEFORE the flag is re-checked, so a
+    /// request landing between the loop-top flag check and
+    /// the `select!` is still observed promptly instead
+    /// of waiting out one poll (up to 40s) — fix loop 1,
+    /// red N5.
+    async fn shutdown_wait(&self) {
+        self.shutdown_signal.wait().await;
     }
 
     /// Run the long-poll loop until shutdown is requested
@@ -329,7 +356,20 @@ impl Bot {
     /// Source: `internal/telegram/bot.go:445-479` (the poll
     /// instance: `WithAllowedUpdates{message,
     /// callback_query}`, `WithInitialOffset`).
+    ///
+    /// A second concurrent (or later) `run()` returns
+    /// `"telegram: bot already started"`, like Go's
+    /// `Start` (`bot.go:505-523`); the guard is never
+    /// reset. Offset arithmetic saturates: an
+    /// `update_id` of `i64::MAX` advances the poll offset
+    /// to `i64::MAX`, never wraps to `i64::MIN` (fix
+    /// loop 1, red R4).
     pub async fn run(self: &Arc<Self>) -> Result<(), BotError> {
+        if self.started.swap(true, Ordering::SeqCst) {
+            return Err(BotError::Validation(
+                "telegram: bot already started".to_string(),
+            ));
+        }
         let mut backoff_idx = 0usize;
         // In-memory poll offset: advances past EVERY update
         // received (strangers included), mirroring the Go
@@ -337,28 +377,32 @@ impl Bot {
         // each update to the handler. The STATE offset only
         // advances for accepted updates, via the
         // dispatcher's `onOffset` hook.
-        let mut poll_offset = self.state.offset() + 1;
+        let mut poll_offset = self.state.offset().saturating_add(1);
         loop {
-            if self.shutdown_flag.load(Ordering::SeqCst) {
+            if self.shutdown_signal.is_set() {
                 break;
             }
             let poll = self.api.get_updates(poll_offset);
             let result = tokio::select! {
-                _ = self.shutdown_notify.notified() => break,
+                () = self.shutdown_wait() => break,
                 r = poll => r,
             };
             match result {
                 Ok(updates) => {
                     backoff_idx = 0;
                     for update in updates {
-                        poll_offset = poll_offset.max(update.update_id + 1);
+                        poll_offset = poll_offset.max(update.update_id.saturating_add(1));
                         // Allowlist BEFORE enqueue: a stranger
                         // is dropped SILENTLY — no reply, no
                         // state change, never reaches the
                         // dispatcher, never advances the
-                        // offset hook.
+                        // offset hook. `uid == 0` (no sender)
+                        // is dropped unconditionally, as Go's
+                        // `allowlistMiddleware` does
+                        // (`bot.go:651-667`).
                         // Source: `internal/telegram/bot.go:651-667`.
-                        if !self.allowed.contains(&update.sender_id()) {
+                        let uid = update.sender_id();
+                        if uid == 0 || !self.allowed.contains(&uid) {
                             continue;
                         }
                         let _ = self.dispatcher.enqueue(update);
@@ -369,13 +413,13 @@ impl Bot {
                     let wait = ladder[backoff_idx.min(ladder.len() - 1)];
                     backoff_idx = backoff_idx.saturating_add(1);
                     tokio::select! {
-                        _ = self.shutdown_notify.notified() => break,
+                        () = self.shutdown_wait() => break,
                         () = tokio::time::sleep(wait) => {}
                     }
                 }
                 Err(_) => {
                     tokio::select! {
-                        _ = self.shutdown_notify.notified() => break,
+                        () = self.shutdown_wait() => break,
                         () = tokio::time::sleep(POLL_ERROR_PAUSE) => {}
                     }
                 }
@@ -388,9 +432,18 @@ impl Bot {
 
     /// Process one accepted update: callback first, else
     /// message, else ignore (no logger in this crate).
+    /// The allowlist is enforced here as defence-in-depth
+    /// for any future direct caller (the poll loop already
+    /// gates before enqueue; Go's `allowlistMiddleware`
+    /// wraps the handler so all paths pass it —
+    /// `bot.go:651-667`; fix loop 1, safety N4).
     /// Source: `internal/telegram/bot.go` (`processUpdate`
     /// / `onMessage` / `onCallback` dispatch).
     async fn process_update(self: &Arc<Self>, update: Update) {
+        let uid = update.sender_id();
+        if uid == 0 || !self.allowed.contains(&uid) {
+            return;
+        }
         if let Some(cb) = update.callback_query {
             let _ = self.handler.handle_callback(&cb).await;
             return;

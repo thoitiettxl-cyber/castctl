@@ -78,7 +78,6 @@ pub struct CallbackRegistry {
 struct RegistryInner {
     entries: HashMap<String, CallbackEntry>,
     order: Vec<String>,
-    counter: u64,
 }
 
 impl CallbackRegistry {
@@ -89,7 +88,6 @@ impl CallbackRegistry {
             inner: Mutex::new(RegistryInner {
                 entries: HashMap::new(),
                 order: Vec::new(),
-                counter: 0,
             }),
         }
     }
@@ -104,18 +102,24 @@ impl CallbackRegistry {
     /// (`Register`).
     ///
     /// Randomness: Go uses `crypto/rand` and panics on
-    /// failure (unrecoverable for an unguessable token). This
-    /// port derives tokens from time + an atomic counter +
-    /// the process id — no `rand` dependency is added for a
-    /// token that only needs to be unguessable within one
-    /// process lifetime, and a collision is detected by the
-    /// map lookup and retried. This is a deliberate, small
-    /// deviation, recorded in PORTING.md §M5a.
+    /// failure (unrecoverable for an unguessable token).
+    /// This port reads 6 bytes from `rand` (the OS CSPRNG
+    /// via `rand::random`, which panics if the OS RNG is
+    /// unavailable — the same fail-closed shape as Go's
+    /// panic). The token is NOT a function of time,
+    /// counter, or pid: an earlier draft derived it from
+    /// those (fix loop 1, safety B1), which made it
+    /// predictable in principle. Note the actual
+    /// exploitability: there is no API injection channel
+    /// for callback forgery — Telegram only emits
+    /// `callback_query` updates for buttons the bot itself
+    /// sent, so the server already knows every token.
+    /// The CSPRNG is Go parity + defence-in-depth, not a
+    /// fix for a demonstrated forgery.
     pub fn register(&self, entry: CallbackEntry) -> String {
         let mut inner = self.inner.lock().expect("registry lock");
         loop {
-            let token = next_token(inner.counter);
-            inner.counter = inner.counter.wrapping_add(1);
+            let token = next_token();
             let data = format!("c:{token}");
             if inner.entries.contains_key(&data) {
                 continue;
@@ -195,19 +199,16 @@ fn evict_oldest(inner: &mut RegistryInner) {
     }
 }
 
-/// 8-char base64url token from time + counter + pid.
-/// See `register` for why this is not `crypto/rand`.
-fn next_token(counter: u64) -> String {
+/// 8-char base64url token from 6 CSPRNG bytes (see
+/// `register`): the bytes are read from `rand` (OS
+/// randomness), never derived from time, counter, or pid.
+fn next_token() -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos() as u64);
-    let mut x =
-        nanos ^ counter.wrapping_mul(0x9e3779b97f4a7c15) ^ ((std::process::id() as u64) << 32);
-    // xorshift64* mix.
-    x ^= x >> 12;
-    x ^= x << 25;
-    x ^= x >> 27;
+    let bytes: [u8; CALLBACK_TOKEN_BYTES] = rand::random();
+    let mut x: u64 = 0;
+    for (i, b) in bytes.iter().enumerate() {
+        x |= (*b as u64) << (8 * i);
+    }
     let mut out = String::with_capacity(8);
     for _ in 0..8 {
         out.push(ALPHABET[(x & 63) as usize] as char);
@@ -337,6 +338,36 @@ mod tests {
                 ..CallbackEntry::default()
             });
             assert!(seen.insert(data));
+        }
+    }
+
+    /// Tokens minted back-to-back — including across two
+    /// registries at the same instant — differ and keep
+    /// the `c:` + 8 base64url-char shape. With the old
+    /// time+counter+pid construction two registries could
+    /// mint related tokens; with the CSPRNG they are
+    /// independent draws (fix loop 1, safety B1).
+    #[test]
+    fn tokens_differ_across_registries_at_the_same_instant() {
+        let a = CallbackRegistry::new();
+        let b = CallbackRegistry::new();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..100 {
+            for reg in [&a, &b] {
+                let data = reg.register(CallbackEntry {
+                    action: "noop".to_string(),
+                    ..CallbackEntry::default()
+                });
+                assert_eq!(data.len(), 10, "c: + 8 chars");
+                assert!(data.starts_with("c:"));
+                assert!(
+                    data[2..]
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                    "base64url only, got {data}"
+                );
+                assert!(seen.insert(data), "no token repeats");
+            }
         }
     }
 }

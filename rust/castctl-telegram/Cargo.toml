@@ -24,6 +24,13 @@ http-body-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true, features = ["tokio"] }
 bytes = { workspace = true }
+# Callback tokens use `crypto/rand` parity (Go
+# `internal/telegram/approvals.go:285-341`): `rand` is
+# already a workspace dependency (used by
+# `castctl-gateway`) and already in `Cargo.lock`, so this
+# adds zero new crates to the lock (fix loop 1, safety
+# B1 / tech B7).
+rand = { workspace = true }
 # M5a (temporary TLS, parent decision — see PORTING.md §M5a):
 # `castctl-transport::HttpClient` is plaintext-only and the Bot
 # API is HTTPS-only, while the shared TLS code (`tls.rs` +

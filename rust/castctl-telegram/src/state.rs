@@ -21,6 +21,8 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -74,7 +76,11 @@ pub fn sent_media_key(profile: &str, chat_id: i64, session_id: &str, path: &str)
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatEntry {
     /// Session id ("" = main chat).
-    #[serde(default, rename = "session_id")]
+    #[serde(
+        default,
+        rename = "session_id",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub session_id: String,
     /// Display title.
     #[serde(default)]
@@ -83,34 +89,49 @@ pub struct ChatEntry {
 
 /// The on-disk state file.
 /// Source: `internal/telegram/state.go:109-129`
-/// (`telegramStateFile`).
+/// (`telegramStateFile`). Serialization skips zero/empty/
+/// nil fields, exactly like Go's `omitempty`
+/// (fix loop 1, tech N3): a fresh store writes only
+/// `{"version": 1}`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct StateFile {
     /// Schema version (must be 1).
     #[serde(default)]
     version: i64,
     /// Last handled `update_id`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     offset: i64,
     /// Chat mappings, keyed by decimal chat id string.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     chats: BTreeMap<String, ChatEntry>,
     /// Watermarks, keyed by [`watermark_key`].
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     watermarks: BTreeMap<String, i64>,
     /// Runtime `auto_approve` toggle (nil = never toggled,
     /// block values apply).
-    #[serde(default, rename = "auto_approve")]
+    #[serde(
+        default,
+        rename = "auto_approve",
+        skip_serializing_if = "Option::is_none"
+    )]
     auto_approve: Option<bool>,
     /// Runtime `auto_allow_once` toggle (nil = never toggled).
-    #[serde(default, rename = "auto_allow_once")]
+    #[serde(
+        default,
+        rename = "auto_allow_once",
+        skip_serializing_if = "Option::is_none"
+    )]
     auto_allow_once: Option<bool>,
     /// Runtime `watch` toggle (nil = never toggled).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     watch: Option<bool>,
     /// Claimed sent-media keys, oldest first, cap 500.
-    #[serde(default, rename = "sent_media")]
+    #[serde(default, rename = "sent_media", skip_serializing_if = "Vec::is_empty")]
     sent_media: Vec<String>,
+}
+
+fn is_zero(v: &i64) -> bool {
+    *v == 0
 }
 
 /// The effective toggles: block values overlaid with the
@@ -224,12 +245,40 @@ impl TelegramStateStore {
                         .get("watermarks")
                         .and_then(|w| w.as_object())
                         .map_or(0, |o| o.len());
+                    // Go `state.go:188-215` also reports the
+                    // offset and the runtime-toggle count in
+                    // the refusal (fix loop 1, tech N3).
+                    let offset = value.get("offset").and_then(|o| o.as_i64()).unwrap_or(0);
+                    let toggles = ["auto_approve", "auto_allow_once", "watch"]
+                        .iter()
+                        .filter(|k| value.get(**k).is_some_and(|v| !v.is_null()))
+                        .count();
                     return Err(BotError::State(format!(
-                        "unknown telegram state version {version} (would discard {chats} chats, {watermarks} watermarks)"
+                        "unknown telegram state version {version} (would discard {chats} chats, {watermarks} watermarks, offset {offset}, and {toggles} runtime toggles)"
                     )));
                 }
-                let file: StateFile = serde_json::from_value(value)
-                    .map_err(|_| BotError::State("corrupt telegram state file".to_string()))?;
+                // Body type-mismatch (valid JSON, wrong field
+                // type) → fresh store + corrupt, like Go's
+                // `state.go:240-242`: the in-memory shape is
+                // rebuilt from scratch, so a wrong-type
+                // field is unrecoverable, while the file (and
+                // the caller's data) is preserved for the
+                // operator to inspect. Only the version
+                // SHAPE (non-integer literal) and an unknown
+                // numeric version refuse (above).
+                let file: StateFile = match serde_json::from_value(value) {
+                    Ok(f) => f,
+                    Err(_) => {
+                        return Ok(Self {
+                            path,
+                            inner: Mutex::new(StateFile {
+                                version: STATE_VERSION,
+                                ..StateFile::default()
+                            }),
+                            corrupt: true,
+                        });
+                    }
+                };
                 Ok(Self {
                     path,
                     inner: Mutex::new(file),
@@ -251,9 +300,19 @@ impl TelegramStateStore {
         &self.path
     }
 
-    /// Atomic save: whole file, `MarshalIndent` + `\n`, temp
-    /// file + fsync + `Chmod(0600)` + rename in the same
-    /// directory, `MkdirAll(dir, 0700)`.
+    /// Atomic save: whole file, `MarshalIndent` + `\n`,
+    /// unique temp file (0600 at creation) + fsync +
+    /// rename in the same directory, `MkdirAll(dir, 0700)`
+    /// only when the directory is created. The temp is
+    /// unique per save (pid + atomic counter + nanos,
+    /// `create_new`, like Go's `os.CreateTemp(dir,
+    /// ".telegram-state-*.tmp")` — `state.go:273-310` —
+    /// fix loop 1, tech B3) and removed on any error
+    /// before the rename. The directory is chmod'd 0700
+    /// ONLY when it did not exist: re-chmod'ing a
+    /// pre-existing profile dir on every save could
+    /// silently tighten (or, on a shared dir, fight) the
+    /// operator's permissions.
     /// Source: `internal/telegram/state.go:273-310`
     /// (`saveLocked`).
     fn save_locked(&self, file: &StateFile) -> Result<(), BotError> {
@@ -261,57 +320,46 @@ impl TelegramStateStore {
             .path
             .parent()
             .ok_or_else(|| BotError::State("state path has no parent".to_string()))?;
-        fs::create_dir_all(dir).map_err(|e| {
-            BotError::State(format!("cannot create state dir: {}", io_error_kind(&e)))
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
-        }
-        let text = serde_json::to_string_pretty(file)
-            .map_err(|_| BotError::State("cannot encode state file".to_string()))?;
-        let tmp_path = self.path.with_extension("json.tmp");
-        {
-            let mut tmp = fs::File::create(&tmp_path).map_err(|e| {
-                BotError::State(format!(
-                    "cannot write state temp file: {}",
-                    io_error_kind(&e)
-                ))
-            })?;
-            tmp.write_all(text.as_bytes()).map_err(|e| {
-                BotError::State(format!(
-                    "cannot write state temp file: {}",
-                    io_error_kind(&e)
-                ))
-            })?;
-            tmp.write_all(b"\n").map_err(|e| {
-                BotError::State(format!(
-                    "cannot write state temp file: {}",
-                    io_error_kind(&e)
-                ))
-            })?;
-            tmp.sync_all().map_err(|e| {
-                BotError::State(format!(
-                    "cannot fsync state temp file: {}",
-                    io_error_kind(&e)
-                ))
+        if !dir.exists() {
+            fs::create_dir_all(dir).map_err(|e| {
+                BotError::State(format!("cannot create state dir: {}", io_error_kind(&e)))
             })?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                tmp.set_permissions(fs::Permissions::from_mode(0o600))
-                    .map_err(|e| {
-                        BotError::State(format!(
-                            "cannot chmod state temp file: {}",
-                            io_error_kind(&e)
-                        ))
-                    })?;
+                let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
             }
         }
+        let text = serde_json::to_string_pretty(file)
+            .map_err(|_| BotError::State("cannot encode state file".to_string()))?;
+        let (tmp_path, mut tmp) = create_unique_temp(dir)?;
+        let mut guard = TempGuard {
+            path: tmp_path.clone(),
+            armed: true,
+        };
+        tmp.write_all(text.as_bytes()).map_err(|e| {
+            BotError::State(format!(
+                "cannot write state temp file: {}",
+                io_error_kind(&e)
+            ))
+        })?;
+        tmp.write_all(b"\n").map_err(|e| {
+            BotError::State(format!(
+                "cannot write state temp file: {}",
+                io_error_kind(&e)
+            ))
+        })?;
+        tmp.sync_all().map_err(|e| {
+            BotError::State(format!(
+                "cannot fsync state temp file: {}",
+                io_error_kind(&e)
+            ))
+        })?;
+        drop(tmp);
         fs::rename(&tmp_path, &self.path).map_err(|e| {
             BotError::State(format!("cannot rename state file: {}", io_error_kind(&e)))
         })?;
+        guard.disarm();
         Ok(())
     }
 
@@ -480,9 +528,11 @@ impl TelegramStateStore {
         while guard.sent_media.len() > SENT_MEDIA_CAP {
             guard.sent_media.remove(0);
         }
-        // Save failure keeps the in-memory claim (Go: the
-        // claim stays in memory; the next save retries it).
-        let _ = self.save_locked(&guard);
+        // Go `ClaimSentMedia` returns the save error
+        // (`state.go:413-448`); the in-memory claim still
+        // stands on save failure (next mutation retries
+        // the save) — fix loop 1, tech N2.
+        self.save_locked(&guard)?;
         Ok(true)
     }
 
@@ -499,7 +549,10 @@ impl TelegramStateStore {
         let before = guard.sent_media.len();
         guard.sent_media.retain(|k| k != key);
         if guard.sent_media.len() != before {
-            let _ = self.save_locked(&guard);
+            // Go `ReleaseSentMedia` returns the save error
+            // when the key was present (`state.go:449-458`)
+            // — fix loop 1, tech N2.
+            self.save_locked(&guard)?;
         }
         Ok(())
     }
@@ -517,6 +570,69 @@ fn truncate_runes(s: &str, limit: usize) -> String {
     } else {
         s.chars().take(limit).collect()
     }
+}
+
+/// A save temp file that is removed unless the rename
+/// succeeded. `Drop` never panics (the remove result is
+/// ignored — a leftover temp is harmless, and a panicking
+/// drop during unwind would abort).
+struct TempGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl TempGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TempGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Create a UNIQUE temp file in `dir` for one save, like
+/// Go's `os.CreateTemp(dir, ".telegram-state-*.tmp")`
+/// (`state.go:273-310`): pid + atomic counter + nanos,
+/// `create_new` (no clobber), mode 0600 from creation
+/// (unix). Retries on name collision; any other error is
+/// returned.
+fn create_unique_temp(dir: &Path) -> Result<(PathBuf, fs::File), BotError> {
+    static SAVE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..100 {
+        let n = SAVE_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+        let path = dir.join(format!(
+            ".telegram-state-{}-{n}-{nanos}.tmp",
+            std::process::id()
+        ));
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        match opts.open(&path) {
+            Ok(f) => return Ok((path, f)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(BotError::State(format!(
+                    "cannot write state temp file: {}",
+                    io_error_kind(&e)
+                )));
+            }
+        }
+    }
+    Err(BotError::State(
+        "cannot create unique state temp file".to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -572,6 +688,123 @@ mod tests {
         fs::write(&path, r#"{"version": 2, "offset": 9}"#).expect("write");
         let err = TelegramStateStore::load(path).expect_err("must refuse");
         assert!(err.to_string().contains("unknown telegram state version 2"));
+    }
+
+    /// Go's refusal names the offset and the runtime
+    /// toggles at stake (fix loop 1, tech N3).
+    #[test]
+    fn unknown_version_error_carries_offset_and_toggles() {
+        let path = tmp_path();
+        fs::write(
+            &path,
+            r#"{"version": 2, "offset": 9, "chats": {"7": {"title": "t"}}, "watermarks": {"main": 3}, "auto_approve": true, "watch": false}"#,
+        )
+        .expect("write");
+        let err = TelegramStateStore::load(path).expect_err("must refuse");
+        let msg = err.to_string();
+        assert!(msg.contains("offset 9"), "{msg}");
+        assert!(msg.contains("1 chats"), "{msg}");
+        assert!(msg.contains("1 watermarks"), "{msg}");
+        assert!(msg.contains("2 runtime toggles"), "{msg}");
+    }
+
+    /// Valid JSON, wrong field TYPE → fresh store +
+    /// corrupt, like Go `state.go:240-242` (fix loop 1,
+    /// tech B3). The file is preserved on disk.
+    #[test]
+    fn body_type_mismatch_is_fresh_and_flagged() {
+        for body in [
+            r#"{"version": 1, "chats": "oops"}"#,
+            r#"{"version": 1, "offset": "42"}"#,
+            r#"{"version": 1, "watermarks": [1, 2]}"#,
+        ] {
+            let path = tmp_path();
+            fs::write(&path, body).expect("write");
+            let store = TelegramStateStore::load(path.clone()).expect("load");
+            assert!(store.corrupt(), "body {body}");
+            assert_eq!(store.offset(), 0);
+            assert!(path.exists(), "file preserved for the operator");
+        }
+    }
+
+    /// Concurrent saves from two stores on the same path
+    /// all succeed and leave no `*.tmp` behind (unique
+    /// temp per save, fix loop 1, tech B3).
+    #[test]
+    fn concurrent_saves_leave_no_temp_files() {
+        use std::sync::Arc;
+        // Dedicated directory: the shared temp dir holds
+        // other tests' in-flight temps, which must not be
+        // counted here.
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "castctl-telegram-state-concurrent-{}-{n}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("telegram-state.json");
+        let a = Arc::new(TelegramStateStore::load(path.clone()).expect("load a"));
+        let b = Arc::new(TelegramStateStore::load(path.clone()).expect("load b"));
+        let mut handles = Vec::new();
+        for i in 0..16 {
+            let s = if i % 2 == 0 {
+                Arc::clone(&a)
+            } else {
+                Arc::clone(&b)
+            };
+            handles.push(std::thread::spawn(move || {
+                s.note_offset(i).expect("save");
+            }));
+        }
+        for h in handles {
+            h.join().expect("thread");
+        }
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temps: {leftovers:?}");
+        let reloaded = TelegramStateStore::load(path).expect("reload");
+        assert!(reloaded.offset() >= 0);
+    }
+
+    /// A save must not chmod a pre-existing directory
+    /// (fix loop 1, tech B3): 0755 stays 0755. Uses a
+    /// DEDICATED directory — never the shared temp dir
+    /// itself (an earlier draft chmod'd `/tmp`).
+    #[cfg(unix)]
+    #[test]
+    fn save_does_not_chmod_existing_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "castctl-telegram-state-chmod-{}-{n}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("dir");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let path = dir.join("telegram-state.json");
+        let store = TelegramStateStore::load(path).expect("load");
+        store.note_offset(7).expect("save");
+        let mode = fs::metadata(&dir).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "dir perms must be untouched");
+    }
+
+    /// Fresh store serializes like Go's `omitempty` (fix
+    /// loop 1, tech N3): only `version` is written.
+    #[test]
+    fn serialize_skips_nulls_like_go_omitempty() {
+        let path = tmp_path();
+        let store = TelegramStateStore::load(path.clone()).expect("load");
+        store.set_watermark("main", 5).expect("save");
+        let text = fs::read_to_string(&path).expect("read");
+        assert!(text.contains("watermarks"), "{text}");
+        assert!(!text.contains("offset"), "{text}");
+        assert!(!text.contains("auto_approve"), "{text}");
+        assert!(!text.contains("sent_media"), "{text}");
+        assert!(!text.contains("session_id"), "{text}");
     }
 
     #[test]

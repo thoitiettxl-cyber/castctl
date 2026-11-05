@@ -68,11 +68,14 @@ pub const TLS_ALPN_HTTP1: &[u8] = b"http/1.1";
 pub fn tls_client_config() -> Arc<ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    Arc::new(
-        ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
-    )
+    let mut cfg = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    // The const existed but was never applied (fix loop
+    // 1, safety N1): the doc promised ALPN `http/1.1`
+    // while the handshake offered nothing.
+    cfg.alpn_protocols = vec![TLS_ALPN_HTTP1.to_vec()];
+    Arc::new(cfg)
 }
 
 /// HTTPS/1.1 client over an outbound dialer: the TLS twin of
@@ -293,6 +296,12 @@ pub fn telegram_api_target() -> DialTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tls_client_config_offers_http1_alpn() {
+        let cfg = tls_client_config();
+        assert_eq!(cfg.alpn_protocols, vec![b"http/1.1".to_vec()]);
+    }
 
     #[test]
     fn host_header_rules() {

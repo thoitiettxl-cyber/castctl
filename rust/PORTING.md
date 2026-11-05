@@ -4257,10 +4257,12 @@ fully implemented.
 | 24 | usage | seam | usage read (M4b) |
 | 25 | wake | seam | wake (M4b) |
 | 26 | fs | seam | op runs in service (M4b); text/file/rm-confirm render full |
-| 27 | profile | seam | owner gate full; body is display-only (M4b seam — no gateway call in Go either) |
+| 27 | profile | full | local `os.Stat` on the cookies file + format (`telegram_owner.go:87-101`); no gateway call, no service (fix loop 1, tech B9) |
 | 28 | update | seam | owner gate full; dry-run check (M4b) |
 | 29 | login | full* | arming + instruction full; save + probe is a seam (`save_login_cookies`) |
-| 30 | raw | seam | owner gate + route check full; gateway call (M4b seam) |
+| 30 | raw | seam | owner gate full; route check in service (M4b seam); gateway call (M4b seam) |
+
+Full 8 / seam 22 (was 7 / 23 before fix loop 1).
 
 There is NO `telegram sync-commands` subcommand in
 Go — none was invented. The 30 are verified from
@@ -4293,22 +4295,54 @@ live `getMyCommands` record in
    — 2×500 then success, update still handled; the
    429 path has its own test with request count +
    timing).
-3. Registry tokens are NOT `crypto/rand`
-   [DEVIATION]: no `rand` dep was added for a token
-   that only needs to be unguessable within one
-   process lifetime. Tokens derive from time nanos +
-   atomic counter + pid via an xorshift64* mix into 8
-   base64url chars; collisions are detected by map
-   lookup and retried. The 6-byte shape and the `c:`
-   prefix are unchanged.
-4. `ConnectionDown` / `ConnectionError` →
-   `Unclassified` in `BotError::error_class()`:
-   `TransportError` drops the DNS/TLS/errno
-   distinction Go's `transportClass` reads, so the
-   bot core cannot recover it. The summary stays
-   fixed-vocabulary (`telegram error: unclassified
-   message_length=<N>`); no secret or transport
-   detail leaks.
+3. Registry tokens ARE `crypto/rand` parity (fix
+   loop 1, safety B1 / tech B7 / red N3): 6 bytes
+   from `rand` 0.10.3 (already a workspace dep, used
+   by `castctl-gateway`, already in `Cargo.lock` —
+   one dep line in `castctl-telegram/Cargo.toml`,
+   zero new crates in the lock), base64url, 8 chars,
+   `c:` prefix, collision-retry loop. `rand::random`
+   panics if the OS RNG is unavailable, mirroring
+   Go's panic on `crypto/rand` failure. The earlier
+   draft derived tokens from time + counter + pid
+   (predictable in principle); that construction is
+   gone. Note on exploitability: there is NO API
+   injection channel for callback forgery — Telegram
+   only emits `callback_query` updates for buttons
+   the bot itself sent, so the server already knows
+   every token. The CSPRNG is Go parity +
+   defence-in-depth, not a fix for a demonstrated
+   forgery.
+4. `error_class()` mapping (fix loop 1, tech B8):
+   decode failures map in-crate to
+   `ResponseDecodeFailure` / `UpdateDecodeFailure`
+   with the `telegram poll error: ` prefix via
+   `format_summary` (from `castctl-log-redact` —
+   see §M5a.4 for why the mapping is in-crate);
+   `ConnectionDown` / `ConnectionError` classify
+   from the message via `fallback_class` (dns /
+   timeout / tls / refused / reset / unreachable /
+   eof), falling back to `Unclassified` when the
+   message matches nothing — `TransportError` drops
+   the DNS/TLS/errno distinction Go's
+   `transportClass` reads, so the message text is
+   the only signal left. `summary()` counts the raw
+   error text's RUNES as Go does (`bot.go:764-770`)
+   — length only, never the text itself, so no token
+   leaks through the count. Of the 20 `ErrorClass`
+   labels, 19 are emittable: `Dns` / `Tls` /
+   `ConnectionRefused` / `ConnectionReset` /
+   `Unreachable` / `Eof` come only via
+   `fallback_class(message)` (reachable when the
+   transport message matches — pinned by the
+   `transport_connection_failures_classify_from_message`
+   test); every other label has a direct arm. The
+   ONE class this crate cannot emit:
+   - `ContextDeadlineExceeded`: no call site in this
+     crate applies a deadline to a poll/RPC (Go
+     emits it from `context.DeadlineExceeded`); the
+     429 sleep and the poll loop observe shutdown
+     instead, which maps to `ContextCanceled`.
 5. Plaintext-path download cap 16 MiB [DEVIATION,
    tests only]: `HttpClient` caps at 16 MiB
    (`MAX_RESPONSE_BODY`) and cannot be
@@ -4398,6 +4432,18 @@ live `getMyCommands` record in
     running, pending approvals are NOT notified and
     never notified later for those ids — no reminder
     queue (`claims.go:335-412`). Mirrored as-is.
+20. 5xx with an undecodable body takes the 5xx
+    ladder [DEVIATION, fix loop 1, red N1]: Go's
+    `getUpdates` decode fails the whole call on a
+    non-JSON 5xx body (the error surfaces to
+    `errorsHandler`, log-only, and the library polls
+    again with no backoff). This crate maps an
+    undecodable 5xx body to `Api{code: status,
+    description: "", retry_after: None}` and backs
+    off on the ladder (deviation 2), so an empty
+    500 body cannot wedge the poll loop into a
+    1s-pause retry storm. Any OTHER undecodable body
+    maps to `ResponseDecode` (the Go behaviour).
 
 ## M5a.4 Reuse verification (read, not re-ported)
 
@@ -4415,8 +4461,15 @@ live `getMyCommands` record in
   `SUMMARIZE_PREFIX_RUNES = 256`, the anchored-decode
   rule (decode classes only via anchored chain check,
   never string fallback) and the scrub-chain-dropping
-  behaviour (`bot.go:1125-1200`). No gap found — the
-  other crate was NOT extended.
+  behaviour (`bot.go:1125-1200`). This crate USES
+  `format_summary` and `fallback_class` from it, but
+  NOT `classify_error` / the anchored rule: those
+  operate on `ErrorChain` values, which this crate
+  never constructs (its errors are typed
+  `BotError` variants, not anyhow chains), so the
+  decode-class mapping is done in-crate in
+  `BotError::error_class` (fix loop 1, tech B8).
+  No gap found — the other crate was NOT extended.
 - `castctl-tg-text` reused as-is (M1 parity
   complete — `escape_text`, `split_text` CHUNK_SIZE
   3800, `strip_tags`, `button_text` 64 chars).
@@ -4429,26 +4482,31 @@ live `getMyCommands` record in
   gateway-only and was NOT used for the Bot API
   (route table lookup would fail; envelope decoding
   differs).
-- `castctl-config::TelegramConfig` is accepted from
-  the caller (`&TelegramConfig`); `config.json` is
-  never re-parsed here. Token shape via
-  `castctl_config::telegram::valid_telegram_token_shape`.
+- `castctl-config::TelegramConfig` is NOT used
+  in-crate (fix loop 1, tech N11 — the M5a draft
+  claimed otherwise): the token arrives as a plain
+  `String` in `BotApiConfig`, and only the shape
+  check `castctl_config::telegram::valid_telegram_token_shape`
+  is reused. `config.json` is never re-parsed here.
 
-## M5a.5 Gates (cue, 2026-11-05)
+## M5a.5 Gates (cue, 2026-11-05; fix loop 1 same day)
 
 All four gates exit 0 on the final code (toolchain
 1.99.1 via `rust/rust-toolchain.toml`):
 
 - `cargo fmt --check --all`: exit 0.
 - `cargo build --workspace`: exit 0, 0 warnings.
-- `cargo test --workspace`: exit 0. BEFORE 347,
-  AFTER 402 (+55, all in `castctl-telegram`: lib
-  46 + integration `tests/bot_core.rs` 9). The
-  BEFORE count was measured with a clean-checkout
-  run on cue (`/tmp/castctl-rust-m5a-baseline.log`,
-  347 passed, 0 failed) — it disagrees by 1 with
-  PORTING §M4a.4's "AFTER 346" (fix loop 1); cause
-  not established, possibly a test added in a later
+- `cargo test --workspace`: exit 0. Fix loop 1:
+  BEFORE 402 (measured on the writer's head,
+  `/tmp/castctl-rust-m5a-baseline-fixloop1.log`),
+  AFTER 437 (+35, all in `castctl-telegram`: lib
+  +23, integration `tests/bot_core.rs` +12). The
+  writer's BEFORE 347 was measured with a
+  clean-checkout run on cue
+  (`/tmp/castctl-rust-m5a-baseline.log`, 347 passed,
+  0 failed) — it disagrees by 1 with PORTING
+  §M4a.4's "AFTER 346" (fix loop 1); cause not
+  established, possibly a test added in a later
   `dev-rust` commit. The comparison here uses the
   measured 347, not the recorded 346.
 - `cargo clippy --workspace --all-targets -- -D
@@ -4550,6 +4608,118 @@ All four gates exit 0 on the final code (toolchain
    (range arms → guards); one `doc_lazy_continuation`
    (reworded `+` list item); two dead test fields
    (`FakeServer.count`, `RequestRecord.path`).
+
+## M5a.8 Fix loop 1 (2026-11-05, after the three Phase 3 reviews)
+
+All 12 BLOCKING items fixed, all cheap NITs fixed.
+Per-item fix + test (details in
+`~/workspace/tmp/castctl-rust-m5a/fix-loop1-report.md`):
+
+1. `decide_once` (tech B1 / red R1): level-triggered
+   wait (`DecideInflight { done, notify }`),
+   `DecideInflightGuard` Drop cleanup on EVERY exit
+   incl. decider panic, waiter observes shutdown.
+   Follow-up found during the loop: a waiter woken
+   by the owner's shutdown-cancelled guard drop
+   re-elected itself owner and returned `Ok(true)`
+   — fixed with a shutdown-flag check at the top of
+   the `decide_once` loop. Tests: stress (5 rounds
+   × 8 waiters), owner-abort takeover,
+   waiter-cancelled-on-shutdown, `set_decided`
+   first-wins, claim-storm count (asserts 20, does
+   NOT fix the storm).
+2. Dispatcher shutdown (tech B2 / red R2):
+   `abandoned` checked BEFORE processing each item.
+   Test: slow processor, 50ms shutdown timeout,
+   buffered items dropped AND never processed.
+3. Malformed updates (red R3): `#[serde(default)]`
+   on id/chat/from/file_id (Go: absent → zero;
+   wrong-type still fails the whole batch).
+   Tests: missing chat, missing update_id, callback
+   missing from, result-not-array, ok:true no
+   result, wrong-type item.
+4. Offset overflow (red R4): `saturating_add(1)` at
+   both offset sites; only other `+ 1` is the
+   download-cap `+ 1` (not an update id). Test with
+   `i64::MAX` / 0 / -1 / `i64::MIN` + restart
+   (polls with offset `MAX`, no replay).
+5. State load (tech B3): body type-mismatch →
+   fresh + corrupt (Go `state.go:240-242`); unique
+   temp per save (`create_new`, 0600 at creation,
+   removed on error); dir chmod 0700 only when
+   creating; `omitempty` serialisation; unknown-
+   version error carries offset + toggle counts;
+   `claim/release_sent_media` return the save
+   error. Parity fixes, not deviations.
+6. `set_decided` first-wins (tech B4, Go
+   `bot.go:1310-1324`).
+7. Markdown fallback (tech B5): Markdown mode sends
+   the ORIGINAL text; only HTML strips tags. Test
+   with `**bold**` (send + edit + over-limit).
+8. 429 sleep cancellable (tech B6 / red N7): one
+   `ShutdownSignal` shared by the poll loop and the
+   API client (`call_json_timeout`,
+   `send_file_multipart`); tests on both paths.
+9. Registry token CSPRNG (safety B1 / tech B7 /
+   red N3): `rand` 0.10.3, one dep line, zero new
+   crates in the lock; deviation 3 rewritten.
+10. `error_class` gaps (tech B8): decode classes
+    mapped in-crate (`format_summary` prefix);
+    deviation 4 lists the one unreachable class
+    (`ContextDeadlineExceeded`); `summary()` counts
+    raw-text runes (test pin fixed 22 → 32).
+11. Command table (tech B9): `/profile` FULL, local
+    (`os.Stat` + format, Go
+    `telegram_owner.go:87-101`); `/raw` = "route
+    check in service (M4b seam)". Table 8 full /
+    22 seam. `profile_text` removed from
+    `BotServices`.
+12. `BotApiConfig` Debug (safety B2): hand-written,
+    token redacted; `token_never_in_debug_or_display`
+    covers it.
+NITs fixed in the same loop: safety N1 (ALPN
+applied — the doc promised it, the builder did not
+set it), N3 (`summary()` drops the token param),
+N4 (allowlist in `process_update`), N5 (uid==0
+drop), N6 (`/login` save failure → Go's fixed
+sentence), N7 (20 MiB hold documented, not
+changed), N8 (temp 0600 at creation); red N1 (5xx
+empty body → 5xx ladder, deviation 20), N2
+(`dropped()` documented as the only
+observability), N5 (shutdown re-checked inside
+`select!` via `shutdown_wait()`), N6 (single
+answer on raced decide tap), N8 (storm count
+asserted), N9 (no-worker leftovers counted);
+tech N1 (`notify_pending` → struct; clippy
+`too_many_arguments` allows now 3, not 4 — the
+4th was `notify_pending`'s, removed by the fix),
+N2 (claim/release return save errors), N3
+(omitempty + unknown-version counts), N4
+(`chat_key` edited → sender id), N6 (markup kept
+through multipart), N7 (`dl_file_name` Go
+semantics), N9 (double-start guard), N10
+(`set_processor` spawns workers for pre-existing
+queues), N11 (`TelegramConfig` not used in-crate),
+N12 (`int_field` truncates float64), N13
+(voice/video_note file_name forced `""`), N14
+(`download_media` fast-errors on empty file_id),
+N15/N16/N17 (router/service contract docs:
+`fs_rm` text, `/new` no-session warning,
+`files_list` history order), N18 (`catch_unwind`
+around the `onOffset` hook).
+Deferred: none. Every NIT is either fixed or
+documented-in-place with its reason (N7 size
+hold, N2 observability, N15–N17 contracts).
+Harness notes from the loop: the fake server
+paces empty `getUpdates` by 10ms (a running Bot
+otherwise hot-spins and starved a sibling test
+past its wait under full parallel runs); the
+`offset_persists_across_restart` waits are 10s
+(scheduling margin, not a behaviour bound). One
+test-authoring mistake was caught and fixed in
+the loop: a state test chmod'd the shared `/tmp`
+to 0755 (restored to 1777 on cue); state tests
+now use dedicated directories.
 
 ## Quy tắc quyết định (Boss, 2026-11-05 — standing)
 

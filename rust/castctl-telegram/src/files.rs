@@ -94,8 +94,13 @@ pub fn media_of(msg: &Message) -> Option<InboxMedia> {
     ];
     for (kind, obj, ext) in candidates {
         if let Some(file) = obj {
+            // Go returns `""` for the file name of voice
+            // and video_note (`inbound.go:100-110`), so
+            // those ALWAYS take the derived name, even if
+            // the object carries a `file_name` (fix loop
+            // 1, tech N13).
             let name = match &file.file_name {
-                Some(n) if !n.is_empty() => n.clone(),
+                Some(n) if !n.is_empty() && kind != "voice" && kind != "video_note" => n.clone(),
                 _ => format!("{kind}-{}{ext}", msg.message_id),
             };
             return Some(InboxMedia {
@@ -185,6 +190,14 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// transport's 16 MiB (see `tls.rs`); the production TLS
 /// path honours the 20 MiB + 1 cap exactly.
 pub async fn download_media(api: &BotApi, media: &InboxMedia) -> Result<Vec<u8>, BotError> {
+    // Go `DownloadMedia` (`inbound.go:172-221`) errors
+    // first on a nil/empty file id — before any `getFile`
+    // call (fix loop 1, tech N14).
+    if media.file_id.is_empty() {
+        return Err(BotError::Validation(
+            "telegram: no file to download".to_string(),
+        ));
+    }
     if let Some(size) = media.size
         && size > DOWNLOAD_LIMIT
     {
@@ -249,6 +262,7 @@ pub async fn send_file(
             &caption_trunc,
             opts.reply_to,
             opts.silent,
+            opts.markup.clone(),
         )
         .await;
     match result {
@@ -262,6 +276,7 @@ pub async fn send_file(
                 &caption_trunc,
                 opts.reply_to,
                 opts.silent,
+                opts.markup.clone(),
             )
             .await
         }
@@ -306,6 +321,24 @@ mod tests {
         .expect("fixture parses");
         let media = media_of(&msg).expect("media");
         assert_eq!(media.name, "document-4");
+    }
+
+    /// Go returns `""` for voice/video_note file names
+    /// (`inbound.go:100-110`), so the derived name always
+    /// wins — even when the object carries a `file_name`
+    /// (fix loop 1, tech N13).
+    #[test]
+    fn media_of_voice_and_video_note_ignore_file_name() {
+        let msg: Message = serde_json::from_str(
+            r#"{"message_id": 3, "chat": {"id": 1, "type": "private"}, "voice": {"file_id": "v1", "file_name": "should-be-ignored.ogg", "mime_type": "audio/ogg"}}"#,
+        )
+        .expect("fixture parses");
+        assert_eq!(media_of(&msg).expect("media").name, "voice-3.ogg");
+        let msg: Message = serde_json::from_str(
+            r#"{"message_id": 4, "chat": {"id": 1, "type": "private"}, "video_note": {"file_id": "vn1", "file_name": "ignored.mp4"}}"#,
+        )
+        .expect("fixture parses");
+        assert_eq!(media_of(&msg).expect("media").name, "video_note-4.mp4");
     }
 
     #[test]

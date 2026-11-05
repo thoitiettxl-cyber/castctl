@@ -33,6 +33,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -172,11 +173,53 @@ impl InflightClaim {
 struct ClaimInner {
     decided: HashMap<String, String>,
     decided_order: Vec<String>,
-    decide_inflight: HashMap<String, Arc<Notify>>,
+    decide_inflight: HashMap<String, Arc<DecideInflight>>,
     claimed: HashSet<String>,
     inflight: HashMap<String, Arc<InflightClaim>>,
     notified: HashSet<String>,
     auto_log: Vec<AutoLogEntry>,
+}
+
+/// One in-flight `decide_once` entry: a level flag plus
+/// the edge-triggered `Notify`. The flag is what makes the
+/// wait level-triggered — a settle that lands before the
+/// waiter registers is still observed via `done` (see
+/// `decide_once`), where the old code waited on a bare
+/// `Notify` and could sleep forever on a lost wakeup.
+/// Source: Go's closed channel in `decideOnce`
+/// (`internal/telegram/bot.go:1345-1397`).
+struct DecideInflight {
+    done: AtomicBool,
+    notify: Notify,
+}
+
+/// Drop guard for a `decide_once` owner: removes the
+/// in-flight entry, marks it done, and wakes waiters on
+/// EVERY exit — normal return, error return, shutdown
+/// cancellation, and decider panic (the panic unwinds
+/// through the `decide` await, dropping this guard).
+/// Mirrors Go's `defer` in `decideOnce`
+/// (`internal/telegram/bot.go:1371-1380`).
+struct DecideInflightGuard<'a> {
+    mgr: &'a ClaimManager,
+    id: String,
+    entry: Arc<DecideInflight>,
+}
+
+impl Drop for DecideInflightGuard<'_> {
+    fn drop(&mut self) {
+        // Never panic in a Drop: a poisoned lock only
+        // skips the map removal; `done` + notify still run
+        // so no waiter is stranded.
+        if let Ok(mut inner) = self.mgr.inner.lock()
+            && let Some(cur) = inner.decide_inflight.get(&self.id)
+            && Arc::ptr_eq(cur, &self.entry)
+        {
+            inner.decide_inflight.remove(&self.id);
+        }
+        self.entry.done.store(true, Ordering::SeqCst);
+        self.entry.notify.notify_waiters();
+    }
 }
 
 /// The claim manager: `decided` set, in-flight claims,
@@ -187,6 +230,13 @@ pub struct ClaimManager {
     decider: Arc<dyn Decider>,
     claim_wait: Duration,
     inner: Mutex<ClaimInner>,
+    /// Shutdown flag for `decide_once` waiters (and the
+    /// owner RPC): durable, like `Bot`'s flag — a request
+    /// made while no waiter is registered is still
+    /// observed. Set by [`ClaimManager::request_shutdown`],
+    /// which `Bot::request_shutdown` calls.
+    shutdown_flag: AtomicBool,
+    shutdown_notify: Notify,
 }
 
 impl std::fmt::Debug for ClaimManager {
@@ -219,7 +269,33 @@ impl ClaimManager {
                 notified: HashSet::new(),
                 auto_log: Vec::new(),
             }),
+            shutdown_flag: AtomicBool::new(false),
+            shutdown_notify: Notify::new(),
         }
+    }
+
+    /// Signal shutdown to `decide_once` waiters and to an
+    /// in-flight owner RPC. Idempotent; waiters observe it
+    /// even when the request lands before they register
+    /// (the flag), and promptly when they are already
+    /// waiting (the `Notify`).
+    pub fn request_shutdown(&self) {
+        self.shutdown_flag.store(true, Ordering::SeqCst);
+        self.shutdown_notify.notify_waiters();
+    }
+
+    /// Wait for shutdown. The waiter is registered
+    /// (`enable()`) BEFORE the flag is re-checked, so a
+    /// request between the check and the wait cannot be
+    /// lost — the same pattern as `await_claim` below.
+    async fn shutdown_wait(&self) {
+        let notified = self.shutdown_notify.notified();
+        tokio::pin!(notified);
+        let _ = notified.as_mut().enable();
+        if self.shutdown_flag.load(Ordering::SeqCst) {
+            return;
+        }
+        notified.await;
     }
 
     /// The claim wait in effect.
@@ -258,50 +334,94 @@ impl ClaimManager {
     /// second caller for the SAME id waits on the in-flight
     /// signal then re-checks; different ids proceed
     /// concurrently. A failed RPC records nothing (retry
-    /// stays possible).
+    /// stays possible). A waiter (or the owner RPC) that
+    /// observes shutdown returns `Err(Cancelled)` instead
+    /// of waiting forever; a decider panic cannot leak the
+    /// in-flight entry — the [`DecideInflightGuard`] runs
+    /// on every exit, so the next caller retries the RPC.
     /// Source: `internal/telegram/bot.go:1345-1397`
     /// (`decideOnce`). Returns `true` when this caller
     /// performed the decide, `false` when already decided.
     pub async fn decide_once(&self, id: &str, decision: &str) -> Result<bool, BotError> {
         loop {
+            // Shutdown is checked at the TOP of every
+            // iteration, not only while waiting: a waiter
+            // woken by the owner's guard drop (the owner
+            // was cancelled by shutdown) must NOT elect
+            // itself owner and start a fresh RPC — without
+            // this check it raced shutdown and returned
+            // `Ok(true)` from a new instant RPC (found by
+            // the `waiter_cancelled_on_shutdown` test
+            // flaking under a full parallel run; fix loop
+            // 1 follow-up).
+            if self.shutdown_flag.load(Ordering::SeqCst) {
+                return Err(BotError::Cancelled);
+            }
             let waiter = {
                 let inner = self.inner.lock().expect("claims lock");
                 if inner.decided.contains_key(id) {
                     return Ok(false);
                 }
-                match inner.decide_inflight.get(id) {
-                    Some(notify) => Some(Arc::clone(notify)),
-                    None => None,
-                }
+                inner.decide_inflight.get(id).cloned()
             };
-            if let Some(notify) = waiter {
-                notify.notified().await;
-                continue;
+            if let Some(entry) = waiter {
+                // Level-triggered wait: register the waiter
+                // BEFORE re-checking `done`, so a settle
+                // between the map read and the wait cannot
+                // be lost (the old bare-`Notify` wait slept
+                // forever in exactly that window).
+                let notified = entry.notify.notified();
+                tokio::pin!(notified);
+                let _ = notified.as_mut().enable();
+                if entry.done.load(Ordering::SeqCst) {
+                    continue;
+                }
+                tokio::select! {
+                    () = notified => continue,
+                    () = self.shutdown_wait() => return Err(BotError::Cancelled),
+                }
             }
-            {
+            let entry = {
                 let mut inner = self.inner.lock().expect("claims lock");
                 if inner.decided.contains_key(id) {
                     return Ok(false);
                 }
-                if inner.decide_inflight.contains_key(id) {
-                    continue;
+                match inner.decide_inflight.get(id) {
+                    Some(_) => None,
+                    None => {
+                        let entry = Arc::new(DecideInflight {
+                            done: AtomicBool::new(false),
+                            notify: Notify::new(),
+                        });
+                        inner
+                            .decide_inflight
+                            .insert(id.to_string(), Arc::clone(&entry));
+                        Some(entry)
+                    }
                 }
-                inner
-                    .decide_inflight
-                    .insert(id.to_string(), Arc::new(Notify::new()));
-            }
-            let result = self.decider.decide(id, decision).await;
-            let notify = {
-                let mut inner = self.inner.lock().expect("claims lock");
-                let notify = inner.decide_inflight.remove(id);
-                if result.is_ok() {
-                    set_decided_locked(&mut inner, id, decision);
-                }
-                notify
             };
-            if let Some(notify) = notify {
-                notify.notify_waiters();
+            let Some(entry) = entry else {
+                // Lost the race to become owner; wait on the
+                // winner's entry.
+                continue;
+            };
+            let guard = DecideInflightGuard {
+                mgr: self,
+                id: id.to_string(),
+                entry,
+            };
+            let result = tokio::select! {
+                r = self.decider.decide(id, decision) => r,
+                () = self.shutdown_wait() => {
+                    drop(guard);
+                    return Err(BotError::Cancelled);
+                }
+            };
+            if result.is_ok() {
+                let mut inner = self.inner.lock().expect("claims lock");
+                set_decided_locked(&mut inner, id, decision);
             }
+            drop(guard);
             return match result {
                 Ok(()) => Ok(true),
                 Err(e) => Err(e),
@@ -544,12 +664,15 @@ impl ClaimManager {
 
 /// Record a decision in the `decided` set with oldest-first
 /// eviction at the cap. Caller must hold the manager lock.
+/// First decision wins: an id already decided is left
+/// untouched.
 /// Source: `internal/telegram/bot.go:1304-1324`
 /// (`setDecidedLocked`).
 fn set_decided_locked(inner: &mut ClaimInner, id: &str, decision: &str) {
-    if !inner.decided.contains_key(id) {
-        inner.decided_order.push(id.to_string());
+    if inner.decided.contains_key(id) {
+        return;
     }
+    inner.decided_order.push(id.to_string());
     inner.decided.insert(id.to_string(), decision.to_string());
     while inner.decided_order.len() > DECIDED_CAP {
         if let Some(oldest) = inner.decided_order.first().cloned() {
@@ -598,6 +721,29 @@ pub fn log_approval_id(id: &str, token: &str) -> String {
     scrubbed
 }
 
+/// Inputs to [`notify_pending`], bundled so the call
+/// does not carry eight positional arguments (the Go
+/// original is a method on `Bot`, which already holds
+/// all of these as fields).
+pub struct NotifyPending<'a> {
+    /// Bot API client (sends the notifications/buttons).
+    pub api: &'a BotApi,
+    /// Callback registry (mints the button tokens).
+    pub registry: &'a CallbackRegistry,
+    /// Claim manager (decides + tracks `decided`).
+    pub claims: &'a ClaimManager,
+    /// Effective `auto_approve` toggle.
+    pub auto_approve: bool,
+    /// Effective `auto_allow_once` toggle.
+    pub auto_allow_once: bool,
+    /// Whether any chat has an active turn.
+    pub any_active_turn: bool,
+    /// Chat to notify.
+    pub chat_id: i64,
+    /// Pending approvals to consider.
+    pub items: &'a [Approval],
+}
+
 /// Auto-decide newly pending approvals, notify the chat
 /// once per decided approval, then send undecidable
 /// approvals as buttons — unless a turn is running, in
@@ -606,17 +752,15 @@ pub fn log_approval_id(id: &str, token: &str) -> String {
 /// keeps no record).
 /// Source: `internal/telegram/claims.go:335-412`
 /// (`NotifyPending`).
-#[allow(clippy::too_many_arguments)]
-pub async fn notify_pending(
-    api: &BotApi,
-    registry: &CallbackRegistry,
-    claims: &ClaimManager,
-    auto_approve: bool,
-    auto_allow_once: bool,
-    any_active_turn: bool,
-    chat_id: i64,
-    items: &[Approval],
-) {
+pub async fn notify_pending(ctx: &NotifyPending<'_>) {
+    let api = ctx.api;
+    let registry = ctx.registry;
+    let claims = ctx.claims;
+    let auto_approve = ctx.auto_approve;
+    let auto_allow_once = ctx.auto_allow_once;
+    let any_active_turn = ctx.any_active_turn;
+    let chat_id = ctx.chat_id;
+    let items = ctx.items;
     let sender = Sender::new(api);
     let mut remaining: Vec<Approval> = items.to_vec();
     if auto_approve {
@@ -767,6 +911,203 @@ mod tests {
         assert!(!r2.expect("r2"));
         assert!(!r3.expect("r3"));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Stress: N concurrent waiters + a fast decider,
+    /// repeated — no waiter may hang on a lost wakeup
+    /// (fix loop 1, tech B1 / red R1). Each round must
+    /// finish inside the timeout with exactly one RPC.
+    #[tokio::test]
+    async fn decide_once_stress_waiters_never_hang() {
+        for _round in 0..5 {
+            let (m, calls) = manager();
+            let m = Arc::new(m);
+            let mut tasks = Vec::new();
+            for _ in 0..8 {
+                let mm = Arc::clone(&m);
+                tasks.push(tokio::spawn(async move {
+                    mm.decide_once("x", "allow_always").await
+                }));
+            }
+            let joined = tokio::time::timeout(Duration::from_secs(5), async {
+                let mut performed = 0;
+                for t in tasks {
+                    if t.await.expect("task").expect("decide") {
+                        performed += 1;
+                    }
+                }
+                performed
+            })
+            .await;
+            let performed = joined.expect("no waiter may hang");
+            assert_eq!(performed, 1, "exactly one caller decides");
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    /// Decider whose FIRST call blocks forever (until its
+    /// gate fires) and later calls succeed at once. The
+    /// gate is never fired in the tests below: the first
+    /// call only ends when its owner task is aborted.
+    struct BlockingDecider {
+        calls: Arc<AtomicUsize>,
+        gate: Arc<tokio::sync::Notify>,
+    }
+
+    impl Decider for BlockingDecider {
+        fn decide(
+            &self,
+            _approval_id: &str,
+            _decision: &str,
+        ) -> Pin<Box<dyn Future<Output = Result<(), BotError>> + Send + '_>> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            let gate = Arc::clone(&self.gate);
+            Box::pin(async move {
+                if n == 0 {
+                    gate.notified().await;
+                }
+                Ok(())
+            })
+        }
+    }
+
+    fn blocking_manager() -> (ClaimManager, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let decider = Arc::new(BlockingDecider {
+            calls: Arc::clone(&calls),
+            gate: Arc::new(tokio::sync::Notify::new()),
+        });
+        (ClaimManager::new(decider, Duration::from_millis(50)), calls)
+    }
+
+    /// Dropping/cancelling the owner mid-RPC must not
+    /// strand the waiter: the Drop guard releases the
+    /// in-flight entry, the waiter becomes the owner and
+    /// decides (fix loop 1, tech B1 / red R1 trigger B).
+    #[tokio::test]
+    async fn decide_once_waiter_resolves_after_owner_abort() {
+        let (m, calls) = blocking_manager();
+        let m = Arc::new(m);
+        let owner = tokio::spawn({
+            let m = Arc::clone(&m);
+            async move { m.decide_once("y", "allow_always").await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "owner is in the RPC");
+        let waiter = tokio::spawn({
+            let m = Arc::clone(&m);
+            async move { m.decide_once("y", "allow_always").await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        owner.abort();
+        let _ = owner.await;
+        let decided = tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("waiter must resolve after the owner is gone")
+            .expect("waiter task")
+            .expect("waiter decide");
+        assert!(decided, "waiter becomes the owner and decides");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(m.is_decided("y"));
+    }
+
+    /// A waiter observing shutdown returns `Cancelled`
+    /// instead of waiting forever (fix loop 1, tech B1).
+    #[tokio::test]
+    async fn decide_once_waiter_cancelled_on_shutdown() {
+        let (m, _calls) = blocking_manager();
+        let m = Arc::new(m);
+        let _owner = tokio::spawn({
+            let m = Arc::clone(&m);
+            async move { m.decide_once("z", "allow_always").await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let waiter = tokio::spawn({
+            let m = Arc::clone(&m);
+            async move { m.decide_once("z", "allow_always").await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        m.request_shutdown();
+        let result = tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("waiter must resolve on shutdown")
+            .expect("waiter task");
+        assert!(
+            matches!(result, Err(BotError::Cancelled)),
+            "waiter returns Cancelled, got {result:?}"
+        );
+    }
+
+    /// First decision wins: a later `record_decided` (or
+    /// `decide_once`) for the same id must not overwrite
+    /// it (fix loop 1, tech B4; Go `bot.go:1310-1324`).
+    #[test]
+    fn set_decided_first_wins() {
+        let (m, _calls) = manager();
+        m.record_decided("a", "allow_always");
+        m.record_decided("a", "deny");
+        let snapshot = m.decided_snapshot();
+        assert_eq!(snapshot.get("a").map(String::as_str), Some("allow_always"));
+    }
+
+    /// Decider that sleeps 150ms per call, for the storm
+    /// test below.
+    struct SlowDecider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Decider for SlowDecider {
+        fn decide(
+            &self,
+            _approval_id: &str,
+            _decision: &str,
+        ) -> Pin<Box<dyn Future<Output = Result<(), BotError>> + Send + '_>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                Ok(())
+            })
+        }
+    }
+
+    /// Claim-storm magnitude, mirroring Go's
+    /// `TestApproveForeverClaimStormDocumentedResidual`
+    /// (20 goroutines, 150ms decider, 20ms ClaimWait →
+    /// 20 decider calls). This test ASSERTS the count; it
+    /// does not fix the storm, which Go documents as a
+    /// residual of the timeout-takeover protocol
+    /// (fix loop 1, red N8).
+    #[tokio::test]
+    async fn approve_forever_claim_storm_count() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let decider = Arc::new(SlowDecider {
+            calls: Arc::clone(&calls),
+        });
+        let m = Arc::new(ClaimManager::new(decider, Duration::from_millis(20)));
+        // Start all 20 callers at once so none sees the
+        // decision before it even starts waiting.
+        let barrier = Arc::new(tokio::sync::Barrier::new(20));
+        let mut tasks = Vec::new();
+        for _ in 0..20 {
+            let mm = Arc::clone(&m);
+            let b = Arc::clone(&barrier);
+            tasks.push(tokio::spawn(async move {
+                b.wait().await;
+                mm.approve_forever(&[approval("a1")], true, false).await
+            }));
+        }
+        let joined = tokio::time::timeout(Duration::from_secs(10), async {
+            for t in tasks {
+                let _ = t.await;
+            }
+        })
+        .await;
+        joined.expect("storm tasks finish");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            20,
+            "Go residual: every concurrent caller decides"
+        );
     }
 
     #[test]

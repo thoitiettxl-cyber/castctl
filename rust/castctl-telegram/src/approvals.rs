@@ -73,9 +73,28 @@ fn dict_field(v: &Value) -> &Value {
     if v.is_object() { v } else { &Value::Null }
 }
 
+/// Read an integer field from a raw approval JSON object.
+/// Go's `intField` (`approvals.go:63-75`) takes
+/// `json.Number` (exact), `float64` truncated via
+/// `int64(v)`, `int64`/`int` passthrough, else 0 — so a
+/// `1.7e12` float becomes `1700000000000`, not 0 (fix
+/// loop 1, tech N12).
 fn int_field(m: &Value, key: &str) -> i64 {
     match m.get(key) {
-        Some(Value::Number(n)) => n.as_i64().unwrap_or(0),
+        Some(Value::Number(n)) => {
+            if let Some(i) = n.as_i64() {
+                i
+            } else if let Some(f) = n.as_f64() {
+                // `as` truncates toward zero, like Go's
+                // `int64(v)`; NaN/±Inf saturate to 0
+                // (Go's float→int on out-of-range is
+                // implementation-defined, but serde floats
+                // from JSON are always finite).
+                f as i64
+            } else {
+                0
+            }
+        }
         _ => 0,
     }
 }
@@ -257,6 +276,17 @@ mod tests {
             Some(vec!["allow_always".to_string(), "deny".to_string()])
         );
         assert!(offers_forever(&a));
+    }
+
+    #[test]
+    fn int_field_truncates_float64_like_go() {
+        // Go `intField`: float64 → int64(v) truncation.
+        let raw = serde_json::json!({"request_expires_at_ms": 1.7e12});
+        assert_eq!(describe_approval(&raw).expires_at_ms, 1_700_000_000_000);
+        let raw = serde_json::json!({"request_expires_at_ms": 12345.9});
+        assert_eq!(describe_approval(&raw).expires_at_ms, 12345);
+        let raw = serde_json::json!({"request_expires_at_ms": "12345"});
+        assert_eq!(describe_approval(&raw).expires_at_ms, 0);
     }
 
     #[test]

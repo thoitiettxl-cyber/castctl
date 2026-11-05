@@ -206,19 +206,25 @@ pub enum CommandKind {
 /// Full: `start`, `help`, `main`, `delete` (prompt only —
 /// the confirm goes through the seam), `autoapprove`,
 /// `watch`, `login` (arming only — saving cookies is a
-/// seam). Everything else is a seam: the router admits and
-/// gates it, the service does the work. (`/chats` is a seam:
-/// the picker rows come from `sessions.list`, a gateway call
-/// — `internal/commands/telegram_commands.go:423-447`.)
+/// seam), `profile` (local `os.Stat` + format, no gateway
+/// call — fix loop 1, tech B9). Everything else is a seam:
+/// the router admits and gates it, the service does the
+/// work. (`/chats` is a seam: the picker rows come from
+/// `sessions.list`, a gateway call —
+/// `internal/commands/telegram_commands.go:423-447`.)
+/// `/raw` is a seam whose ONLY in-crate part is the route
+/// check: the handler parses the method, the SERVICE
+/// checks the route against `gateway.DefaultRoutes()` and
+/// performs the gateway call (`telegram_owner.go:145-183`).
 #[must_use]
 pub fn command_kind(name: &str) -> Option<CommandKind> {
     match name {
-        "start" | "help" | "main" | "delete" | "autoapprove" | "watch" | "login" => {
+        "start" | "help" | "main" | "delete" | "autoapprove" | "watch" | "login" | "profile" => {
             Some(CommandKind::Full)
         }
         "stop" | "status" | "chats" | "new" | "history" | "unread" | "rename" | "pin" | "unpin"
         | "archive" | "unarchive" | "approvals" | "files" | "feed" | "goals" | "goal" | "ideas"
-        | "usage" | "wake" | "fs" | "profile" | "update" | "raw" => Some(CommandKind::Seam),
+        | "usage" | "wake" | "fs" | "update" | "raw" => Some(CommandKind::Seam),
         _ => None,
     }
 }
@@ -308,6 +314,13 @@ pub struct IdeaCard {
 /// (`newChat`): the session id from `session_id` / `id` /
 /// `session.session_id` in that order; empty id → the
 /// warning reply, no switch.
+///
+/// CONTRACT (fix loop 1, tech N16 — documented, shape
+/// unchanged): when `session_id` is empty the service
+/// MUST return `reply` carrying Go's warning,
+/// `"⚠️ Muse returned no session id: <code>…[:300]…</code>"`
+/// (`telegram_commands.go:549-594`); the handler does not
+/// invent it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewChatOutcome {
     /// New session id ("" = none returned).
@@ -513,9 +526,15 @@ pub trait BotServices: Send + Sync {
         decision: &str,
     ) -> Pin<Box<dyn Future<Output = Result<(), BotError>> + Send + '_>>;
 
-    /// List recent files for `/files` (last 40 history
-    /// events → rows, reversed, deduped by path, capped at
-    /// 12 by the handler).
+    /// List recent files for `/files`.
+    ///
+    /// CONTRACT (fix loop 1, tech N17 — documented, shape
+    /// unchanged): the service returns rows in HISTORY
+    /// order (oldest first, last 40 history events); the
+    /// HANDLER reverses them (newest first), dedupes by
+    /// path, and caps at 12 (`telegram_commands.go:664-682`).
+    /// The service must NOT pre-reverse: the handler's
+    /// reverse is the contract.
     /// Source: `internal/commands/telegram_commands.go:664-682`
     /// (`files`).
     fn files_list(
@@ -590,6 +609,13 @@ pub trait BotServices: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<FsOutcome, BotError>> + Send + '_>>;
 
     /// Delete a path for the `fs_rm` button.
+    ///
+    /// CONTRACT (fix loop 1, tech N15 — documented, shape
+    /// unchanged): the service returns the EDIT text, which
+    /// the handler sends as the edit of the confirm
+    /// message: `"🗑 Deleted /<path>"` (`telegram_fs.go:393-413`
+    /// `fsRm` returns that text; it is NOT a generic
+    /// success sentence).
     /// Source: `internal/commands/telegram_fs.go:393-413`
     /// (`fsRm`).
     fn fs_delete(
@@ -598,22 +624,22 @@ pub trait BotServices: Send + Sync {
         recursive: bool,
     ) -> Pin<Box<dyn Future<Output = Result<String, BotError>> + Send + '_>>;
 
-    /// `/profile` reply body (display-only: name + VM id +
-    /// cookies present/missing; no gateway call in Go).
-    /// Source: `internal/commands/telegram_owner.go:87`
-    /// (`ownerProfile`).
-    fn profile_text(&self) -> Pin<Box<dyn Future<Output = Result<String, BotError>> + Send + '_>>;
-
     /// `/update` reply body (dry-run check only; never
     /// replaces the binary).
     /// Source: `internal/commands/telegram_owner.go:107`
     /// (`ownerUpdate`).
     fn update_check(&self) -> Pin<Box<dyn Future<Output = Result<String, BotError>> + Send + '_>>;
 
-    /// `/raw` reply body (route checked before the gateway
-    /// opens; the handler owns the route check only when a
-    /// route table is available — until M4b, the service
-    /// performs it).
+    /// `/raw` reply body.
+    ///
+    /// CONTRACT: the route check lives in the SERVICE
+    /// (M4b seam) — the service checks the method against
+    /// `gateway.DefaultRoutes()` and performs the gateway
+    /// call (`telegram_owner.go:145-183` `ownerRaw`); the
+    /// handler only parses the method out of the arg. The
+    /// old doc claimed the handler owns the check "when a
+    /// route table is available" — it never does (fix loop
+    /// 1, tech B9).
     /// Source: `internal/commands/telegram_owner.go:145`
     /// (`ownerRaw`).
     fn raw_call(
@@ -674,8 +700,8 @@ mod tests {
             .iter()
             .filter(|e| command_kind(e.name) == Some(CommandKind::Seam))
             .count();
-        assert_eq!(full, 7);
-        assert_eq!(seam, 23);
+        assert_eq!(full, 8);
+        assert_eq!(seam, 22);
         assert_eq!(full + seam, 30);
     }
 
