@@ -156,7 +156,7 @@ fn handle_conn(mut stream: TcpStream, state: Arc<Mutex<ServerState>>) {
     // that path before the shared lock scope.
     let chunked = {
         let s = state.lock().unwrap();
-        path.ends_with("/download/checksums.txt") && s.checksums_chunked
+        path.ends_with("/checksums.txt") && s.checksums_chunked
     };
     if chunked {
         let (status, body) = {
@@ -192,12 +192,13 @@ fn handle_conn(mut stream: TcpStream, state: Arc<Mutex<ServerState>>) {
             } else {
                 (404, Vec::new(), String::new())
             }
-        } else if path.ends_with("/download/castctl_0.6.4_linux_amd64.tar.gz") {
+        } else if path.ends_with("/castctl_0.6.4_linux_amd64.tar.gz") {
             // `ends_with`: the fallback mode constructs
             // download URLs with the full repo path
-            // (`/.../releases/download/<tag>/<asset>`).
+            // (`/.../releases/download/<tag>/<asset>`, the
+            // tag sits between `download/` and the name).
             (s.asset_status, s.asset_bytes.clone(), String::new())
-        } else if path.ends_with("/download/checksums.txt") {
+        } else if path.ends_with("/checksums.txt") {
             (
                 s.checksums_status,
                 s.checksums_bytes.clone(),
@@ -634,10 +635,6 @@ fn rate_limit_fallback_installs() {
     let (_tmp, target) = make_target(work.path(), "0.6.3");
     let (opts, _out) = base_opts(&target, &server);
     let (res, err) = run(opts);
-    eprintln!(
-        "DEBUG fallback counts: {:?}",
-        server.state.lock().unwrap().counts
-    );
     assert!(err.is_ok(), "fallback install failed: {:?}", err.err());
     assert!(res.replaced);
     assert_eq!(std::fs::read(&target).unwrap(), new_bytes);
