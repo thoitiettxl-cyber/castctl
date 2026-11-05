@@ -348,7 +348,10 @@ fn sha256_of(data: &[u8]) -> [u8; 32] {
 /// `version`, mode 0755. Returns (tempdir, target path).
 fn make_target(dir: &Path, version: &str) -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir_in(dir).unwrap();
-    let bin = build_fake_binary(tmp.path(), version, "ok");
+    // Build the fake binary in the WORK dir, not the target
+    // dir: the target dir must contain only `castctl` (plus
+    // the lock file after a run) for the litter assertions.
+    let bin = build_fake_binary(dir, version, "ok");
     let target = tmp.path().join("castctl");
     std::fs::copy(&bin, &target).unwrap();
     #[cfg(unix)]
@@ -762,7 +765,11 @@ fn exec_check_fake_versions() {
     let hang = build_fake_binary(work.path(), "0.6.4", "hang");
     let err = run_exec_check(&hang, &want, Duration::from_millis(200))
         .expect_err("hang must time out");
-    assert!(err.to_string().contains("timed out"));
+    // Exact Go message (`replace.go:349`).
+    assert_eq!(
+        err.to_string(),
+        "update: the downloaded binary did not answer --version in time"
+    );
     let flood = build_fake_binary(work.path(), "0.6.4", "flood");
     assert!(run_exec_check(&flood, &want, Duration::from_secs(10)).is_err());
     let exit1 = build_fake_binary(work.path(), "0.6.4", "exit1");
