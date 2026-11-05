@@ -61,9 +61,13 @@ where
 /// as explicit JSON `null` decodes to the same zero value
 /// (fix loop 2, red R5 — Go no-ops `null` into a
 /// non-nullable target). A field present with the WRONG
-/// TYPE still fails the whole decode, as in Go (the
-/// library's whole-array unmarshal fails); only absent
-/// and `null` fields are zero-filled.
+/// TYPE still fails the `Vec<Update>` decode itself
+/// (serde is all-or-nothing); at the `get_updates`
+/// level the item is skipped per item (fix loop 3,
+/// red R6 — the library decodes `[]json.RawMessage`
+/// then per item via `decodeUpdate`, never a
+/// whole-array unmarshal). Only absent and `null`
+/// fields are zero-filled.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Update {
     /// `update_id` (absent or `null` → 0, Go zero value).
