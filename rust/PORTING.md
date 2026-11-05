@@ -2917,3 +2917,34 @@ Bugs found by the loop-1 tests (fixed in the loop-1
 commit, §M3d.8 items 6–9): the deferred-shutdown stall,
 the EOF tail loss (harness), the never-sent RST on abort,
 and the 10 s delayed EOF (prompt-EOF probe).
+
+## M3d.11 Clippy gate is `--all-targets` (2026-11-05, on top of `16bcbfc`)
+
+The clippy gate from now on is
+`cargo clippy --workspace --all-targets -- -D warnings`.
+The plain `--workspace` form does NOT cover test targets:
+Boss ran the `--all-targets` form and it failed with 10
+errors, all in test-only code, that the plain gate had
+been passing — 2 in `castctl-rs/tests/parity.rs`
+(`chunks_exact` with a constant chunk size, `:131`;
+collapsible `if`, `:427`), 3 in
+`castctl-transport/tests/common/mod.rs` (dead
+`RequestRecord` fields / `FakeServer.records`, and a `loop`
+that never loops), 1 in `castctl-transport/tests/rpc.rs`
+(`MutexGuard` held across an await), and 4 in
+`castctl-transport/tests/wireguard.rs` (redundant
+`.max(0) as u64` on an already-`u64` value, a `loop` +
+`match` that is a `while let`, and a collapsible `if`).
+All 10 were fixed by code (no `#[allow]`): `chunks_exact`
+→ `as_chunks::<64>().0` (same chunks — the padded message
+length is a multiple of 64 by construction); the two
+collapsible `if`s → let-chains; the dead fake-server
+fields are now asserted on in the `env_proxy` test
+(method/path/empty body of the exact request the client
+sent); the dead `loop` removed (every path returned, so
+removing it changes nothing); the guard scoped in a block
+so it drops before the awaits; the redundant `.max(0) as
+u64` dropped; the DNS `loop` + `match` became a `while
+let`. The historical gate transcripts in §M3.7, §M3c and
+§M3e.4 still show the plain form — that is what was
+actually run then, not an error to rewrite.

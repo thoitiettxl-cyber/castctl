@@ -128,7 +128,7 @@ fn sha256_hex(data: &[u8]) -> String {
         msg.push(0);
     }
     msg.extend_from_slice(&bit_len.to_be_bytes());
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
         for i in 0..16 {
             w[i] = u32::from_be_bytes([
@@ -424,15 +424,16 @@ fn strip_version_stamp(text: &str) -> String {
     if !line.starts_with("castctl ") {
         return text.to_string();
     }
-    if let Some(idx) = line.find(" (") {
-        if line[idx + 2..].ends_with(')') && !line[idx + 2..].contains('(') {
-            lines = vec![&line[..idx]];
-            let mut out = lines.join("\n");
-            if text.ends_with('\n') {
-                out.push('\n');
-            }
-            return out;
+    if let Some(idx) = line.find(" (")
+        && line[idx + 2..].ends_with(')')
+        && !line[idx + 2..].contains('(')
+    {
+        lines = vec![&line[..idx]];
+        let mut out = lines.join("\n");
+        if text.ends_with('\n') {
+            out.push('\n');
         }
+        return out;
     }
     text.to_string()
 }

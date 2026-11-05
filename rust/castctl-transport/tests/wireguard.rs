@@ -358,7 +358,7 @@ async fn run_fake_server(mut st: FakeServerState) {
         let delay = st
             .iface
             .poll_delay(now, &st.sockets)
-            .map(|d| Duration::from_millis(d.total_millis().max(0) as u64))
+            .map(|d| Duration::from_millis(d.total_millis()))
             .unwrap_or(Duration::from_millis(100))
             .min(Duration::from_millis(100));
         tokio::select! {
@@ -470,55 +470,50 @@ async fn run_fake_server(mut st: FakeServerState) {
         if let Some(handle) = st.dns_handle {
             let sock = st.sockets.get_mut::<smol_udp::Socket>(handle);
             let mut buf = [0u8; 2048];
-            loop {
-                match sock.recv_slice(&mut buf) {
-                    Ok((n, meta)) => {
-                        if n < 16 {
-                            continue;
-                        }
-                        let qtype = u16::from_be_bytes([buf[n - 4], buf[n - 3]]);
-                        let txid = [buf[0], buf[1]];
-                        let (ancount, answer): (u16, Vec<u8>) = match (qtype, st.server_ip) {
-                            (1, IpAddr::V4(a)) => {
-                                let mut ans = Vec::new();
-                                ans.extend_from_slice(&[0xC0, 0x0C]);
-                                ans.extend_from_slice(&1u16.to_be_bytes());
-                                ans.extend_from_slice(&1u16.to_be_bytes());
-                                ans.extend_from_slice(&60u32.to_be_bytes());
-                                ans.extend_from_slice(&4u16.to_be_bytes());
-                                ans.extend_from_slice(&a.octets());
-                                (1, ans)
-                            }
-                            (28, IpAddr::V6(a)) => {
-                                let mut ans = Vec::new();
-                                ans.extend_from_slice(&[0xC0, 0x0C]);
-                                ans.extend_from_slice(&28u16.to_be_bytes());
-                                ans.extend_from_slice(&1u16.to_be_bytes());
-                                ans.extend_from_slice(&60u32.to_be_bytes());
-                                ans.extend_from_slice(&16u16.to_be_bytes());
-                                ans.extend_from_slice(&a.octets());
-                                (1, ans)
-                            }
-                            _ => (0, Vec::new()),
-                        };
-                        let mut resp = Vec::new();
-                        resp.extend_from_slice(&txid);
-                        resp.extend_from_slice(&0x8180u16.to_be_bytes());
-                        resp.extend_from_slice(&1u16.to_be_bytes());
-                        resp.extend_from_slice(&ancount.to_be_bytes());
-                        resp.extend_from_slice(&0u16.to_be_bytes());
-                        resp.extend_from_slice(&0u16.to_be_bytes());
-                        resp.extend_from_slice(&buf[12..n]);
-                        resp.extend_from_slice(&answer);
-                        let reply_meta = smol_udp::UdpMetadata {
-                            endpoint: meta.endpoint,
-                            local_address: None,
-                            meta: smoltcp::phy::PacketMeta::default(),
-                        };
-                        let _ = sock.send_slice(&resp, reply_meta);
-                    }
-                    Err(_) => break,
+            while let Ok((n, meta)) = sock.recv_slice(&mut buf) {
+                if n < 16 {
+                    continue;
                 }
+                let qtype = u16::from_be_bytes([buf[n - 4], buf[n - 3]]);
+                let txid = [buf[0], buf[1]];
+                let (ancount, answer): (u16, Vec<u8>) = match (qtype, st.server_ip) {
+                    (1, IpAddr::V4(a)) => {
+                        let mut ans = Vec::new();
+                        ans.extend_from_slice(&[0xC0, 0x0C]);
+                        ans.extend_from_slice(&1u16.to_be_bytes());
+                        ans.extend_from_slice(&1u16.to_be_bytes());
+                        ans.extend_from_slice(&60u32.to_be_bytes());
+                        ans.extend_from_slice(&4u16.to_be_bytes());
+                        ans.extend_from_slice(&a.octets());
+                        (1, ans)
+                    }
+                    (28, IpAddr::V6(a)) => {
+                        let mut ans = Vec::new();
+                        ans.extend_from_slice(&[0xC0, 0x0C]);
+                        ans.extend_from_slice(&28u16.to_be_bytes());
+                        ans.extend_from_slice(&1u16.to_be_bytes());
+                        ans.extend_from_slice(&60u32.to_be_bytes());
+                        ans.extend_from_slice(&16u16.to_be_bytes());
+                        ans.extend_from_slice(&a.octets());
+                        (1, ans)
+                    }
+                    _ => (0, Vec::new()),
+                };
+                let mut resp = Vec::new();
+                resp.extend_from_slice(&txid);
+                resp.extend_from_slice(&0x8180u16.to_be_bytes());
+                resp.extend_from_slice(&1u16.to_be_bytes());
+                resp.extend_from_slice(&ancount.to_be_bytes());
+                resp.extend_from_slice(&0u16.to_be_bytes());
+                resp.extend_from_slice(&0u16.to_be_bytes());
+                resp.extend_from_slice(&buf[12..n]);
+                resp.extend_from_slice(&answer);
+                let reply_meta = smol_udp::UdpMetadata {
+                    endpoint: meta.endpoint,
+                    local_address: None,
+                    meta: smoltcp::phy::PacketMeta::default(),
+                };
+                let _ = sock.send_slice(&resp, reply_meta);
             }
         }
         // Drain device egress through boringtun. Same minimum as
@@ -553,10 +548,10 @@ async fn run_fake_server(mut st: FakeServerState) {
                 // WireGuard DATA packet (type 4) so the replay
                 // test can re-send a genuine, already-delivered
                 // packet verbatim at the client tunnel.
-                if bytes.first() == Some(&4) {
-                    if let Ok(mut slot) = st.captured_data.lock() {
-                        *slot = Some(bytes);
-                    }
+                if bytes.first() == Some(&4)
+                    && let Ok(mut slot) = st.captured_data.lock()
+                {
+                    *slot = Some(bytes);
                 }
             }
         } else {
