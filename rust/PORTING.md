@@ -5984,3 +5984,43 @@ by principle and record the reason:
    option and record the deviation with evidence.
 3. Never lower gate criteria; never claim "match"
    without output.
+
+## Hiệu năng (baseline) — M-perf-0
+
+Ngày: 2026-11-05. Máy: cue, Linux 6.18.38+ x86_64, 8 × Intel Xeon @
+2.50GHz, 23 Gi RAM, no swap. Go: `/usr/local/bin/castctl` 0.9.0
+(`1396697 2026-11-04T21:38:36Z`), 48,100,296 B, `-s -w`. Rust:
+`castctl-rs` build từ `dev-rust` 96ce485, `cargo +1.99.1 build --release
+--locked -p castctl-rs`, `RUSTFLAGS="-C strip=symbols"`. Đo bằng
+`rust/perf/run.sh` (1 lệnh rerun); số thô: `rust/perf/data/*.json`;
+README: `rust/perf/README.md`. N=20 (startup/RSS), N=5 lần chạy process
+(logic thuần, item 5). Tỉ lệ Rust/Go < 1 = Rust tốt hơn.
+
+| Mục | Go (median) | Rust (median) | Rust/Go |
+|---|---|---|---|
+| Binary stripped | 48,100,296 B | 620,968 B | 0.0129 (77.5× nhỏ hơn) |
+| Binary chưa strip (Rust) | — | 778,936 B | 0.0162 |
+| Startup `--version` | 8.321 ms (7.644–10.023) | 0.731 ms (0.686–0.831) | 0.088 (11.4×) |
+| Startup `--help` | 7.936 ms (7.569–9.125) | 0.744 ms (0.662–1.000) | 0.094 (10.7×) |
+| Peak RSS `--help` | 43.5 MiB (42.5–43.6) | 13.2 MiB (13.2–13.2) | 0.30 (70% ít hơn) |
+| Peak RSS `status` bad-JSON gate | 43.6 MiB | 13.1 MiB | 0.30 |
+| Parse config min (42 B) | 5,882 ns/iter | 2,517 ns/iter | 0.43 (2.3×) |
+| Parse config large (25,657 B) | 5,109,444 ns/iter | 933,791 ns/iter | 0.18 (5.5×) |
+| `MDToHTML` (51,560 B) | 4,615,838 ns/iter | 873,318 ns/iter | 0.19 (5.3×) |
+| `SplitText` (51,560 B) | 517,752 ns/iter | 266,445 ns/iter | 0.51 (1.9×) |
+| Render chain | 5,239,473 ns/iter | 1,085,378 ns/iter | 0.21 (4.8×) |
+| 1 request SOCKS5 loopback | 0.813 ms/req (0.784–0.970) | 0.756 ms/req (0.745–0.897) | 0.93 (7%, trong sai số) |
+
+Kết luận: Rust nhanh hơn Go ngoài sai số ở binary/startup/RSS/logic
+thuần; loopback SOCKS5 trong sai số. Caveat: (1) binary Go chứa toàn bộ
+castctl còn Rust M2 mới chỉ có CLI surface + config — 77× sẽ thu hẹp
+khi port thêm; (2) parse-large/render: Go làm nhiều việc hơn (validate
+outbound sâu, 41,734 allocs/op; `MDToHTML` 4.86 MB/op + 8,390
+allocs/op) còn Rust defer sing-box validation (D-M2-1) — đo lại sau khi
+Rust bổ sung validation; (3) item 5 đo client hand-roll stdlib qua proxy
+Python, không phải outbound thật; (4) cold cache thật không đo (VM dùng
+chung); (5) không có `perf` trên cue nên hotspot dựa trên breakdown số
+đo + lý do cấu trúc, không dựa trên CPU profile. Hotspot ưu tiên (xem
+`rust/perf/README.md`): validation parse-large (69% thời gian parse),
+`md_to_html` (80% render chain), `split_text` collect `Vec<char>`,
+đo lại sau validation, startup/binary đã đủ tốt, transport thật chưa đo.
