@@ -73,7 +73,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::Service;
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use rand::Rng;
 
 use crate::error::PluginHostError;
@@ -271,8 +271,12 @@ impl EgressProxy {
                 inner: Arc::clone(&inner),
             };
             tokio::spawn(async move {
+                // `header_read_timeout` panics without a
+                // timer (`hyper::common::time`): the
+                // 10s ReadHeaderTimeout needs TokioTimer.
                 let _ = http1::Builder::new()
                     .header_read_timeout(std::time::Duration::from_secs(10))
+                    .timer(TokioTimer::new())
                     .serve_connection(io, service)
                     .await;
             });
