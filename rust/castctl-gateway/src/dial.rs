@@ -14,10 +14,10 @@
 //! bound) → run the Noise XX handshake as initiator (20s per
 //! step) → return a live `Gateway`. On any failure the socket
 //! is closed and the error returned. The WS URL carries the
-//! literal `auth_token=<redacted>` (Boss decision 2026-11-05:
-//! mirror Go `defaultWSURL`, `connector.go:116` — the real
-//! hatch token is never put in the URL, never stored on the
-//! `Gateway`, and never logged; see `default_ws_url`).
+//! real hatch token, URL-quoted (Go `defaultWSURL`,
+//! `connector.go:113-120`; see `rust/PORTING.md` §M4c.7).
+//! The URL is never logged and never stored on the
+//! `Gateway`; see `default_ws_url`).
 //!
 //! Gateway-dial TLS rule (M3c NB6, `internal/outbound/
 //! dialer.go:161-168` `DialTLS`): whenever TLS is requested
@@ -35,21 +35,23 @@
 //! HTTP/1.1. BOTH dials here pin ALPN `["http/1.1"]` now via
 //! `castctl_transport::honk_tls_wrap` (M4c): honk's BoringSSL
 //! Chrome connector, SNI = the WS host. The M4b rustls wrap
-//! sent a 251-byte ClientHello the live edge answers with
-//! HTTP 502; the honk wrap sends the Chrome fingerprint Go
-//! sends (see `rust/PORTING.md` §M4c). rustls stays only for
-//! the HTTPS auth chain (`http.rs`), not for this dial.
+//! sent a 251-byte ClientHello (vs Go's Chrome fingerprint);
+//! whether the fingerprint matters to the live edge was never
+//! isolated — every 502 so far lacked the token too (see
+//! `rust/PORTING.md` §M4c.7; the step-3 matrix decides).
+//! rustls stays only for the HTTPS auth chain (`http.rs`),
+//! not for this dial.
 //!
-//! Literal token on the wire (M4b): the upgrade request is
+//! Hand-written upgrade (M4b): the upgrade request is
 //! written BY HAND (`ws_upgrade`), not through tungstenite's
 //! request builder, because `http::Uri` rejects `<`/`>` in
-//! the query and the gateway URL carries a literal
-//! `auth_token=<redacted>` exactly as Go sends it. The live
-//! edge returns 401 for the percent-encoded `%3Credacted%3E`
-//! form (live probe on cue, 2026-11-05), so encoding it is
-//! not an option; the M4a claim that "the server decodes it
-//! back" was wrong — the M4a test only proved the fake
-//! server tolerates the encoded form.
+//! the query and the request-target must go out verbatim
+//! (Go writes it verbatim too). The old reason — a literal
+//! `auth_token=<redacted>` in the URL — was wrong (see
+//! `rust/PORTING.md` §M4c.7: Go sends the real token,
+//! quoted); the M4b probe (401 for `%3Credacted%3E`, 502
+//! for the literal) compared two token-less spellings, so
+//! neither result constrains the quoted-token form.
 //! Cancellation: dropping the `dial_gateway` future aborts
 //! the dial/handshake at the next await (all steps are
 //! cancel-safe `tokio::time::timeout` + WS I/O); the socket
@@ -89,24 +91,21 @@ pub const GATEWAY_HOST: &str = "hatch.metaaivm.com";
 /// `WSUpgradeTimeout`).
 pub const WS_UPGRADE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Build `ws(s)://<host>/v1/noise?vm_id=..&auth_token=<redacted>`,
-/// mirroring Go `defaultWSURL` (`connector.go:116`) byte for
-/// byte: the format string has 3 verbs and 4 args, so the
-/// quoted hatch token is computed and silently discarded by
-/// `Sprintf` — Go sends the literal, and so does this
-/// function (Boss decision 2026-11-05: Go 0.9.0 production
-/// relays real turns through that URL; sending the real token
-/// would leak it to server/proxy logs with no evidence the
-/// gateway needs it). `hatch_token` is accepted for call-site
-/// compatibility and deliberately NOT sent: if later live
-/// proof shows the gateway needs the real token, change this
-/// one place and re-enable the token-URL test. The returned
-/// string carries no secret.
-pub fn default_ws_url(secure: bool, host: &str, vm_id: &str, _hatch_token: &str) -> String {
+/// Build `ws(s)://<host>/v1/noise?vm_id=..&auth_token=..`,
+/// mirroring Go `defaultWSURL` (`connector.go:113-120`)
+/// byte for byte: 4 verbs, 4 args — the real hatch token,
+/// URL-quoted (`safe=""`, Python `quote`), goes into
+/// `auth_token` (see `rust/PORTING.md` §M4c.7; the M4a
+/// "3 verbs, 4 args, literal token" reading was wrong).
+/// The returned string carries the token, so it must never
+/// be logged — the dial error paths return fixed strings
+/// only, and `redact` strips `auth_token=...` from logs.
+pub fn default_ws_url(secure: bool, host: &str, vm_id: &str, hatch_token: &str) -> String {
     let scheme = if secure { "wss" } else { "ws" };
     format!(
-        "{scheme}://{host}/v1/noise?vm_id={}&auth_token=<redacted>",
+        "{scheme}://{host}/v1/noise?vm_id={}&auth_token={}",
         quote_path_param(vm_id),
+        quote_path_param(hatch_token),
     )
 }
 
@@ -533,17 +532,16 @@ where
 
 /// Dial one gateway: WS upgrade + Noise handshake, returning
 /// a live `Gateway` (Go `dialGateway`). `url` is never stored
-/// or logged (with `default_ws_url` it carries the literal
-/// `auth_token=<redacted>`; see the module docs). `routes` is
+/// or logged (with `default_ws_url` it carries the real
+/// token, quoted; see the module docs). `routes` is
 /// the route table the gateway uses for `resolveRoute`.
 /// `secure` selects `wss` vs `ws` only through the URL
 /// scheme — a `wss://` URL always uses TLS (gateway-dial TLS
 /// rule, see the module docs).
 /// Wire note (M4b): the upgrade is written by hand
-/// (`ws_upgrade`) so the request-target carries the literal
-/// `auth_token=<redacted>` Go sends raw — `http::Uri`
-/// cannot represent `<>`, and the live edge returns 401 for
-/// the percent-encoded form. The direct dial pins ALPN
+/// (`ws_upgrade`) so the request-target goes out verbatim —
+/// `http::Uri` cannot represent `<>`, and Go writes the
+/// target verbatim too. The direct dial pins ALPN
 /// `["http/1.1"]` via `honk_tls_wrap`, matching Go (M4c
 /// engine swap; M4b fix of the M4a no-ALPN deviation).
 pub async fn dial_gateway(
@@ -592,8 +590,7 @@ pub async fn dial_gateway(
 /// (honk BoringSSL Chrome — matching Go's pin and its
 /// fingerprint, M4c), while `ws://` upgrades plain. The
 /// upgrade is written by hand (`ws_upgrade`) so the
-/// request-target carries the literal `auth_token=<redacted>`
-/// Go sends raw (M4b).
+/// request-target goes out verbatim (M4b).
 pub async fn dial_gateway_over_stream<S>(
     stream: S,
     url: &str,
@@ -751,8 +748,7 @@ const MAX_UPGRADE_RESPONSE: usize = 8192;
 
 /// Split a ws(s) URL into (authority, request-target) with
 /// plain string ops — `http::Uri` rejects `<`/`>` in the
-/// query, and the gateway URL carries a literal
-/// `auth_token=<redacted>` exactly as Go sends it. The
+/// query, and the target must go out verbatim. The
 /// target is returned verbatim and is never logged.
 /// `None` on a malformed URL (no scheme, empty authority).
 fn split_ws_request_target(url: &str) -> Option<(String, String)> {

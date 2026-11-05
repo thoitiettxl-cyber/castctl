@@ -10,7 +10,7 @@
 //!   real Noise + real protobuf).
 //! - `bad_servers`: the garbage-handshake and blackhole
 //!   servers (M4a negative tests).
-//! - `raw_upgrade`: the raw 101 server (M4b literal-token
+//! - `raw_upgrade`: the raw 101 server (M4b token-URL
 //!   tests — records the upgrade bytes verbatim, no URI
 //!   parsing).
 

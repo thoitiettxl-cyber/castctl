@@ -156,41 +156,77 @@ async fn call_json_roundtrip_five_methods() {
     server.stop();
 }
 
-#[tokio::test]
-async fn dial_url_sends_redacted_literal_not_real_token() {
-    // Boss decision 2026-11-05: mirror Go byte-for-byte. Go
-    // `internal/gateway/connector.go:116` (`defaultWSURL`)
-    // sends the literal `auth_token=<redacted>`; the real
-    // hatch token is computed and silently discarded by
-    // `Sprintf` (3 verbs, 4 args); `TestDefaultWSURL` pins
-    // the literal, and the Go 0.9.0 production binary relays
-    // real turns through that URL. The Rust URL must carry
-    // the same literal and never the real token value.
-    let server = RawUpgradeServer::start().await;
-    let url = default_ws_url(
-        false,
-        &server.addr.to_string(),
-        "vm-test",
-        "REAL-TOKEN-SECRET-XYZ",
-    );
-    // String level: byte-for-byte the Go URL (raw literal).
+/// Assert two byte strings are equal without printing
+/// either: a failure reports only the first differing
+/// byte index (and the lengths). The WS URL carries a
+/// token, so a plain `assert_eq!` on URLs would print
+/// the token into the test output — and display
+/// redaction would render both sides identically
+/// anyway, hiding the diff.
+fn assert_url_bytes_eq(actual: &str, expected: &str) {
     assert_eq!(
-        url,
-        format!(
-            "ws://{}/v1/noise?vm_id=vm-test&auth_token=<redacted>",
-            server.addr
-        ),
-        "default_ws_url must mirror Go defaultWSURL"
+        actual.len(),
+        expected.len(),
+        "URL length differs: got {} want {}",
+        actual.len(),
+        expected.len()
+    );
+    for (i, (a, e)) in actual.bytes().zip(expected.bytes()).enumerate() {
+        assert_eq!(a, e, "URL first differs at byte index {i}");
+    }
+}
+
+#[test]
+fn ws_url_is_byte_exact_go_url() {
+    // Go `internal/gateway/connector.go:113-120`
+    // (`defaultWSURL`, 4 verbs, 4 args): the real hatch
+    // token is URL-quoted (`safe=""`, Python `quote`) into
+    // `auth_token`. Expected values below were computed by
+    // hand and cross-checked with Python
+    // `urllib.parse.quote(s, safe="")` — never with the
+    // code under test. Fake token exercises `+` `/` `=`
+    // space and a non-ASCII byte (`é` → `%C3%A9`).
+    let url = default_ws_url(true, "hatch.metaaivm.com", "vm-test", "FAKE+tok/en=1 2é");
+    assert_url_bytes_eq(
+        &url,
+        "wss://hatch.metaaivm.com/v1/noise?vm_id=vm-test&auth_token=FAKE%2Btok%2Fen%3D1%202%C3%A9",
+    );
+    assert_eq!(url.len(), 88, "hand-computed URL length");
+    // vm_id is quoted the same way (Go quotes it too).
+    let url2 = default_ws_url(false, "h:1", "vm/x y", "FAKE+tok/en=1 2é");
+    assert_url_bytes_eq(
+        &url2,
+        "ws://h:1/v1/noise?vm_id=vm%2Fx%20y&auth_token=FAKE%2Btok%2Fen%3D1%202%C3%A9",
+    );
+    assert_eq!(url2.len(), 75, "hand-computed URL length");
+}
+
+#[tokio::test]
+async fn dial_url_sends_quoted_real_token_and_keeps_it_out_of_errors() {
+    // Go sends the real token, quoted (PORTING §M4c.7).
+    // Fake token only — never a real one. The quoted form
+    // is the wire form; the raw form must appear nowhere
+    // (URL, request, error).
+    const FAKE_TOKEN: &str = "FAKE+tok/en=1 2é";
+    const QUOTED_TOKEN: &str = "FAKE%2Btok%2Fen%3D1%202%C3%A9";
+    let server = RawUpgradeServer::start().await;
+    let url = default_ws_url(false, &server.addr.to_string(), "vm-test", FAKE_TOKEN);
+    // String level: the URL carries the quoted token.
+    assert!(
+        url.contains(QUOTED_TOKEN),
+        "URL must carry the quoted token"
+    );
+    assert!(
+        !url.contains(FAKE_TOKEN),
+        "URL must not carry the raw token"
     );
     // Wire level: the dial upgrades against the raw server
-    // (the fake server's tungstenite handshake parses the
-    // target with `http::Uri`, which rejects `<>`, so it
-    // cannot accept — or record — a literal token). The
-    // upgrade itself succeeds; the dial then fails at the
-    // Noise handshake because the raw server does not speak
-    // Noise. The live edge returns 401 for the
-    // percent-encoded `%3Credacted%3E` form (M4b live probe
-    // on cue, 2026-11-05), so the dial must NOT encode it.
+    // (it records the request bytes verbatim, then answers
+    // 101). The upgrade itself succeeds; the dial then
+    // fails at the Noise handshake because the raw server
+    // does not speak Noise. The recorded request must carry
+    // the quoted token verbatim — and the failure must not
+    // leak the token in any form.
     let err = dial_gateway(&url, routes()).await.unwrap_err();
     assert!(
         matches!(err, TransportError::ConnectionError { .. }),
@@ -200,28 +236,30 @@ async fn dial_url_sends_redacted_literal_not_real_token() {
         server.sent_101(),
         "raw server must have answered 101 (upgrade well-formed)"
     );
+    let err_text = format!("{err} {err:?}");
+    assert!(
+        !err_text.contains(FAKE_TOKEN),
+        "dial error must not leak the raw token"
+    );
+    assert!(
+        !err_text.contains(QUOTED_TOKEN),
+        "dial error must not leak the quoted token"
+    );
     let head = server.request_head().expect("upgrade request recorded");
     let request_line = head.lines().next().unwrap_or("");
     assert!(
-        request_line.contains("auth_token=<redacted>"),
-        "dialed URL must carry the literal Go token, got: {request_line}"
+        request_line.contains(QUOTED_TOKEN),
+        "dialed URL must carry the quoted token on the wire"
     );
     assert!(
-        !request_line.contains("%3Credacted%3E"),
-        "dialed URL must NOT percent-encode the token, got: {request_line}"
+        !request_line.contains(FAKE_TOKEN),
+        "dialed URL must not carry the raw token on the wire"
     );
-    assert!(
-        !head.contains("REAL-TOKEN-SECRET-XYZ"),
-        "dialed URL must not carry the real token"
-    );
-    assert!(
-        request_line.contains("vm_id=vm-test"),
-        "vm_id must survive: {request_line}"
-    );
-    // Value level: the query value itself is the literal Go
-    // sends raw (no decoding step — the wire form IS the
-    // literal now; the M4a manual `%3C`/`%3E` decode is gone
-    // with the percent-encoding).
+    assert!(request_line.contains("vm_id=vm-test"), "vm_id must survive");
+    // Value level: the query value itself is the quoted
+    // token Go sends (no decoding step — the wire form IS
+    // the quoted value). Compared as bytes so a failure
+    // cannot print the token.
     let target = request_line.split_whitespace().nth(1).unwrap_or("");
     let query = target.split_once('?').map(|(_, q)| q).unwrap_or("");
     let token_value = query
@@ -229,8 +267,14 @@ async fn dial_url_sends_redacted_literal_not_real_token() {
         .find_map(|pair| pair.strip_prefix("auth_token="))
         .expect("auth_token present in the recorded target");
     assert_eq!(
-        token_value, "<redacted>",
-        "auth_token value must be the Go literal, got {token_value} (raw target {target})"
+        token_value.len(),
+        QUOTED_TOKEN.len(),
+        "auth_token value length must match the quoted token"
+    );
+    assert_eq!(
+        token_value.as_bytes(),
+        QUOTED_TOKEN.as_bytes(),
+        "auth_token value must be the quoted token"
     );
     server.stop();
 }

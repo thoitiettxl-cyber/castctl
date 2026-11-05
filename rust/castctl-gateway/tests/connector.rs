@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use castctl_gateway::connector::GatewayConnector;
-use castctl_gateway::dial::dial_gateway_over_stream;
+use castctl_gateway::dial::{default_ws_url, dial_gateway_over_stream};
 use castctl_gateway::gateway::RequestOptions;
 use castctl_transport::{DialTarget, Dialer, DirectDialer, RouteTable, TransportError};
 use fake_server::{FakeServer, canned_json};
@@ -146,9 +146,8 @@ async fn connect_full_chain_over_fakes() {
         .unwrap();
     // The auth chain discovered vm-test from /api/session
     // (no vm_id was given); the WS upgrade carried it. The
-    // recorded target is the wire form (the literal token —
-    // see the M4a dial test, which asserts the literal
-    // token on the recorded target).
+    // recorded target is the wire form of the override URL
+    // (a test fixture — see below, not Go's URL).
     // Clone the recorded targets out and drop the lock guard
     // before any await below.
     let target = {
@@ -158,11 +157,12 @@ async fn connect_full_chain_over_fakes() {
     };
     assert!(target.contains("vm_id=vm-test"), "{target}");
     // The override URL is the fake server's own ws_url, which
-    // carries the fake token FAKE-TOKEN-123 (not the literal —
-    // the literal path is covered by the M4a dial test).
+    // carries the fixture token FAKE-TOKEN-123. The override
+    // ignores the hatch token by construction, so the "HT"
+    // from the fake auth chain must not appear — this pins
+    // the fixture, not Go behaviour (Go's own URL carries
+    // the real token, PORTING §M4c.7).
     assert!(target.contains("auth_token=FAKE-TOKEN-123"), "{target}");
-    // The real hatch token from the fake auth chain ("HT")
-    // must never reach the dialed URL.
     assert!(!target.contains("auth_token=HT"), "{target}");
     // The auth chain made exactly its 3 calls, with the
     // right headers: cookies on session, Bearer on hatch.
@@ -221,21 +221,18 @@ async fn dial_over_stream_plain_ws_ping() {
     server.stop();
 }
 
-/// The WS upgrade request-target carries the literal
-/// `auth_token=<redacted>` Go sends — the live edge returns
-/// 401 for the percent-encoded `%3Credacted%3E` form (M4b
-/// live probe on cue, 2026-11-05), so the dial must NOT
-/// encode it, even though `http::Uri` cannot represent `<>`.
-/// The raw server records the request bytes verbatim (the
-/// fake server's tungstenite handshake cannot parse a
-/// literal `<>` target).
+/// The WS upgrade request-target is sent verbatim by the
+/// hand-written upgrade: whatever `default_ws_url` built
+/// (the quoted real token, PORTING §M4c.7) must arrive
+/// byte-for-byte, with no re-encoding by an intermediate
+/// URI parse. The raw server records the request bytes
+/// verbatim. Fake token only.
 #[tokio::test]
-async fn dial_over_stream_sends_literal_redacted_token() {
+async fn dial_over_stream_sends_quoted_token_verbatim() {
     let server = RawUpgradeServer::start().await;
-    let url = format!(
-        "ws://{}/v1/noise?vm_id=vm-test&auth_token=<redacted>",
-        server.addr
-    );
+    const FAKE_TOKEN: &str = "FAKE+tok/en=1 2é";
+    const QUOTED_TOKEN: &str = "FAKE%2Btok%2Fen%3D1%202%C3%A9";
+    let url = default_ws_url(false, &server.addr.to_string(), "vm-test", FAKE_TOKEN);
     let target = DialTarget::new("127.0.0.1", server.addr.port());
     let stream = DirectDialer::new().dial(&target).await.unwrap();
     let err = dial_gateway_over_stream(stream, &url, routes())
@@ -249,15 +246,24 @@ async fn dial_over_stream_sends_literal_redacted_token() {
         server.sent_101(),
         "raw server must have answered 101 (upgrade well-formed)"
     );
+    let err_text = format!("{err} {err:?}");
+    assert!(
+        !err_text.contains(FAKE_TOKEN),
+        "dial error must not leak the raw token"
+    );
+    assert!(
+        !err_text.contains(QUOTED_TOKEN),
+        "dial error must not leak the quoted token"
+    );
     let head = server.request_head().expect("upgrade request recorded");
     let request_line = head.lines().next().unwrap_or("");
     assert!(
-        request_line.contains("auth_token=<redacted>"),
-        "upgrade target must carry the literal token, got: {request_line}"
+        request_line.contains(QUOTED_TOKEN),
+        "upgrade target must carry the quoted token verbatim"
     );
     assert!(
-        !request_line.contains("%3Credacted%3E"),
-        "upgrade target must NOT percent-encode the token, got: {request_line}"
+        !request_line.contains(FAKE_TOKEN),
+        "upgrade target must not carry the raw token"
     );
     server.stop();
 }
