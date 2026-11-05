@@ -634,6 +634,10 @@ fn rate_limit_fallback_installs() {
     let (_tmp, target) = make_target(work.path(), "0.6.3");
     let (opts, _out) = base_opts(&target, &server);
     let (res, err) = run(opts);
+    eprintln!(
+        "DEBUG fallback counts: {:?}",
+        server.state.lock().unwrap().counts
+    );
     assert!(err.is_ok(), "fallback install failed: {:?}", err.err());
     assert!(res.replaced);
     assert_eq!(std::fs::read(&target).unwrap(), new_bytes);
