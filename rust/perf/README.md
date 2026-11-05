@@ -76,8 +76,10 @@ sh rust/perf/run.sh [--skip-build] [--skip-item5]
   `measure_all.py`). Mặc định là `rust/target` cho shell/bench.
   **Riêng `rust-full` bắt buộc target dir ngoài repo** (cùng biến khi
   set, else `tempfile.gettempdir()/perf-full-target`, ghi trong
-  `summary.json: machine.full_target_dir`): build full-bin biên dịch
-  boring-sys, sinh file `.go` dưới target dir; `TestSPDXHeaders` walk
+  `summary.json: machine.full_target_dir`) — driver từ chối target dir
+  trong repo ngay lúc khởi động (`_check_full_target_outside_repo`
+  trong `measure_all.py`), không chỉ ghi trong tài liệu: build full-bin
+  biên dịch boring-sys, sinh file `.go` dưới target dir; `TestSPDXHeaders` walk
   toàn repo chỉ skip thư mục dot nên target dir trong repo sẽ làm FAIL
   check SPDX chạy cuối `run.sh`. Run8 dùng `/tmp/perf-full-target`
   (cold, 2.2 GiB lúc xong) vì `CARGO_TARGET_DIR` không set; shell build
@@ -132,7 +134,7 @@ sh rust/perf/run.sh [--skip-build] [--skip-item5]
   MemTotal 24,788,940 kB (23.6 GiB), SwapTotal 0 kB (ghi trong
   `summary.json: machine.meminfo`), loadavg 1-phút 2.24 lúc bắt đầu,
   7.73 giữa chừng, 6.09 lúc kết thúc (cao hơn run7 0.48–1.00 — build
-  full-bin biên dịch ~350 crate song song; cộng 33 mark loadavg +
+  full-bin biên dịch ~350 crate song song; cộng 45 mark loadavg +
   timestamp trước/sau từng item và từng phía trong
   `summary.json: marks`). Đĩa `/` 12.6 GiB trống lúc chạy; build
   outputs: shell trên `rust/target`, full trên `/tmp/perf-full-target`
@@ -221,6 +223,11 @@ public (`dispatch_outbound`/`dispatch_endpoint`,
 `uuid_v4()`, build tokio runtime rồi drop) với input dummy đã ghi rõ là
 dummy, không bao giờ dial/bind/đọc file/mạng. Tier 2 chỉ lấy ĐỊA CHỈ
 hàm (`WireGuardDialer::dial`, `HttpClient::request`), không gọi.
+Lưu ý: `HonkDialer::new` gọi `ProxyRegistry::default_resolver()` trong
+crate honk (source ngoài, không đọc trực tiếp) và `tokio::runtime::Builder`
+chỉ build rồi drop sau env guard — hai hành vi này được kiểm chứng gián
+tiếp (unit test offline của transport crate gọi `HonkDialer::new`, và
+`keep_linked()` không bao giờ chạy lúc đo), không phải bằng đọc source.
 
 ### Chứng minh linkage (probe trên cue, 2026-11-05, trước khi đo)
 
@@ -231,13 +238,17 @@ hàm (`WireGuardDialer::dial`, `HttpClient::request`), không gọi.
 to thêm 144 B; bật `keep-linked` thì to thêm **11,905,968 B**. Nếu
 `(c)−(a) ≈ 0` thì cơ chế giữ-link đã fail — ở đây nó to gấp 20.17×,
 cơ chế hoạt động. Unstripped: shell 778,936 B, full no-keep 779,096 B,
-full keep 16,811,376 B. `.text`/`.rodata` (stripped): shell 434,883 /
+full keep 16,811,376 B (kích thước + sha256 của cả ba ghi trong
+`data/nm-counts.json`). `.text`/`.rodata` (stripped): shell 434,883 /
 74,708 B; full keep 7,979,624 / 1,604,904 B.
 
 (b) **Bảng `nm`** (đếm symbol chứa chuỗi, trên binary **chưa strip**;
 `nm` trên binary đã strip trả về rỗng nên không dùng được — lỗi phương
 pháp đã gặp một lần trong lúc probe; và pattern phải là chuỗi trần,
-không phải `castctl_transport::`, vì symbol Rust đã mangle):
+không phải `castctl_transport::`, vì symbol Rust đã mangle). Số đếm đầy
+đủ, kèm binary size/sha và lệnh build, ghi trong
+`data/nm-counts.json` (rebuild fix loop 1 trên cue, 2026-11-05 —
+xem ghi chú tái lập ở cuối mục này); bảng dưới đây trích từ file đó:
 
 | Chuỗi | shell | full no-keep | full keep (run8) |
 |---|---|---|---|
@@ -252,10 +263,14 @@ không phải `castctl_transport::`, vì symbol Rust đã mangle):
 | `snow` | 0 | 0 | **118** |
 | `hyper` | 0 | 0 | **0** |
 
-Symbol riêng lẻ trong full keep: `dispatch_outbound` 2,
-`ensure_tunnel` 1, `KEEP_TIER2` 1, `HonkDialer` 1,
-`WireGuardDialer` 4. (`HttpClient`/`RpcClient`/`DownTracker` 0 =
-constructor nhỏ bị inline, không phải lỗi.)
+Symbol riêng lẻ trong full keep (cùng phương pháp đếm chuỗi như bảng):
+`dispatch_outbound` 2, `ensure_tunnel` 1, `KEEP_TIER2` 1, `HonkDialer` 1,
+`WireGuardDialer` 15 (4 global `T` — `new`/`shared`/`check_allowed`/
+`Dialer::dial` — + 11 local `t` gồm monomorphization của `dial`/`dial_inner`
+và drop-glue; bản trước ghi 4 vì đếm nhầm chỉ symbol global),
+`HttpClient` 1 (chính `HttpClient::request` — root Tier-2 giữ địa chỉ;
+constructor `new` bị inline nên không có symbol riêng),
+`RpcClient`/`DownTracker` 0 (constructor nhỏ bị inline, không phải lỗi).
 
 (c) **Patch check:** `cargo tree -i boring-sys` /
 `cargo tree -i quinn` đều trỏ về git Glassyiris
@@ -263,19 +278,23 @@ constructor nhỏ bị inline, không phải lỗi.)
 `honk rev 9e31cc0…`); `full-bin/Cargo.lock` (354 package, commit kèm
 crate) chứa đúng các rev đó.
 
-(d) **Hành vi:** `castctl-full --version` → `castctl 0.9.0`, exit 0;
-`--help` byte-identical với shell (`cmp` pass); `--version=x` →
-stderr + exit 2; `PERF_KEEP_LINKED=1 --version` in giống hệt, exit 0.
+(d) **Hành vi** (ghi trong `data/behaviour-checks.json`, rebuild fix
+loop 1): `castctl-full --version` → `castctl 0.9.0`, exit 0;
+`--help` byte-identical với shell (`cmp` pass — cùng sha256
+`cc65698a…`); `--version=x` → stderr + exit 2;
+`PERF_KEEP_LINKED=1 --version` in giống hệt, exit 0.
 
 ### Hai điều probe chứng minh là SAI, và một khoảng trống đã công bố
 
-- **Address-taking + `black_box` KHÔNG giữ được code.** Build chỉ có
-  Tier 2 dạng này cho ra binary byte-identical về kích thước
-  (16,272,088 B) và `nm` không đổi (boringtun 0, hyper 0) — compiler
-  loại bỏ. Chỉ `#[used] static` chứa địa chỉ hàm mới giữ được (Tier 2
-  hiện tại): boringtun 0→98, smoltcp 2→185, `ensure_tunnel` xuất hiện,
-  +543,384 B unstripped. Lịch sử này ghi trong `keep.rs` để lần sau
-  khỏi thử lại cách đã fail.
+- **Address-taking + `black_box` KHÔNG giữ được code.** Probe trên
+  cue: build chỉ có Tier 2 dạng này cho ra binary không đổi kích
+  thước/nm — compiler loại bỏ (số trung gian của probe này không được
+  giữ lại nên không trích con số ở đây; hai con số trung gian từng ghi
+  ở bản trước — 16,272,088 B và +543,384 B — đã bị gỡ vì cộng lại lệch
+  4,096 B so với kích thước unstripped đã commit). Chỉ `#[used]` static
+  chứa địa chỉ hàm mới giữ được (Tier 2 hiện tại) — số đếm `nm` đầy đủ
+  của binary keep ghi trong `data/nm-counts.json` (xem (b)). Lịch sử
+  này ghi trong `keep.rs` để lần sau khỏi thử lại cách đã fail.
 - **LTO qua `RUSTFLAGS -C lto` KHÔNG build được closure này.** Run8
   fail trong 0.5 s (`options '-C embed-bitcode=no' and '-C lto' are
   incompatible`); sửa thêm `-C embed-bitcode=yes` thì fail tiếp
@@ -285,9 +304,12 @@ stderr + exit 2; `PERF_KEEP_LINKED=1 --version` in giống hệt, exit 0.
   (`[profile.release-lto]`, `inherits = "release"`, `lto = "fat"`,
   `strip = "symbols"` trong `full-bin/Cargo.toml`) — profile form bỏ
   qua proc-macro. Build tay trên cue sau run8 với profile này:
-  exit 0, 4m 32s, 10,065,944 B (xem hàng LTO ở §1). Driver đã đổi sang
-  profile form để rerun sau tái lập được; `summary.json` của run8 vẫn
-  ghi đúng lần fail gốc (`build_full_lto`, exit 101).
+  exit 0, 4m 32s, 10,065,944 B (xem hàng LTO ở §1). Fix loop 1 rebuild
+  lại variant này bằng đúng lệnh profile-form (record đầy đủ trong
+  `data/lto-build-record.json`): size 10,065,944 B và `.text`
+  6,942,120 B khớp y prose. Driver đã đổi sang profile form để rerun
+  sau tái lập được; `summary.json` của run8 vẫn ghi đúng lần fail gốc
+  (`build_full_lto`, exit 101).
 - **Khoảng trống đã công bố: hyper client machinery (0 symbol).**
   Entry `HttpClient::request` trong `#[used]` static KHÔNG giữ được
   hyper: địa chỉ của một `async fn` chỉ giữ constructor của future,
@@ -296,6 +318,25 @@ stderr + exit 2; `PERF_KEEP_LINKED=1 --version` in giống hệt, exit 0.
   của binary M7 ở đúng một chỗ này: nó chứa `HttpClient::new` +
   type `http::Request/Response` nhưng không chứa state machine client
   của hyper. Không phóng đại, không giấu.
+
+### Tái lập sha (fix loop 1)
+
+Rebuild lại binary keep hai lần từ cùng source fc250db, cùng recipe,
+chỉ khác tên target dir. Với `/tmp/perf-fix1-target`: unstripped
+16,811,376 B (sha `687af3f7…` ≠ run8 `2809a25f…`), stripped 12,527,080 B
+(sha `57e48df3…` ≠ run8 `b8aee622…`), LTO 10,065,944 B (sha `8c737840…`
+≠ prose `8040a0c6…`) — mọi kích thước và section đều khớp y run8, chỉ
+sha lệch. Nguyên nhân đã chứng minh: BoringSSL biên dịch `__FILE__`
+thành chuỗi literal trong `.rodata` trỏ vào target dir (145 chuỗi
+trong binary keep, 0 chuỗi trong binary no-keep); hai tên dir dài bằng
+nhau (21 ký tự) nên kích thước khớp y mà byte khác nhau. Bằng chứng:
+binary no-keep (không link boring-sys) reproduce y hệt sha run8
+(`9cb6d472…`). Rebuild lại với đúng tên target dir của run8
+(`/tmp/perf-full-target`): cả ba sha khớp y hệt run8 (unstripped
+`2809a25f…`, stripped `b8aee622…`, LTO `8040a0c6…`). Số liệu đầy đủ
+trong `data/nm-counts.json` (`comparison_vs_committed_run8`,
+`sha_mismatch_explanation`, `byte_reproduction_check`) và
+`data/lto-build-record.json`.
 
 ### Build recipe (tái lập)
 
@@ -316,6 +357,7 @@ stderr + exit 2; `PERF_KEEP_LINKED=1 --version` in giống hệt, exit 0.
   qua LTO theo construction (linker không thể drop hàm mà địa chỉ của
   nó nằm trong static được giữ). Đây là điểm lệch so với kế hoạch gốc
   (kế hoạch đòi nm cả hai variant); ghi rõ ở đây thay vì giả vờ đã nm.
+  `.text` LTO nay có record: `data/lto-build-record.json`.
 
 ## Bảng số (run8)
 
@@ -337,13 +379,14 @@ kết luận.
 | LTO variant, stripped (`release-lto`) | — | — | 10,065,944 B (nhỏ hơn headline 19.6%) | 0.209 | — |
 
 `sha256`: Go `c8ea009e…`, shell stripped `6f270890…`, full stripped
-`b8aee622…`, full no-keep `9cb6d472…`, full LTO `8040a0c6…` (full trong
-`data/summary.json`, trừ LTO — xem ghi chú). Hàng LTO: build tay trên
-cue sau run8 (`--profile release-lto`, 4m 32s, `--version` exit 0),
-cùng source với run8; `summary.json` của run8 ghi lần build LTO gốc
-bằng RUSTFLAGS đã fail (exit 101, xem mục `rust-full`); driver đã sửa
-sang profile form để rerun sau tái lập được. Hàng LTO không dùng cho
-tỉ lệ headline.
+`b8aee622…`, full no-keep `9cb6d472…`, full LTO `8040a0c6…` (record đầy
+đủ trong `data/lto-build-record.json`; `summary.json` của run8 chỉ ghi
+lần build LTO gốc fail exit 101, không có số LTO). Hàng LTO: build tay
+trên cue sau run8 (`--profile release-lto`, 4m 32s, `--version` exit 0),
+cùng source với run8; fix loop 1 rebuild lại variant này và xác nhận
+size/`.text` khớp y, sha khớp y khi dùng đúng tên target dir của run8
+(xem `byte_reproduction_check` trong record). Driver đã sửa sang profile
+form để rerun sau tái lập được. Hàng LTO không dùng cho tỉ lệ headline.
 
 ### 2. Startup (wall-clock, N=20, warmup 5)
 
@@ -355,11 +398,11 @@ tỉ lệ headline.
 
 Đối chiếu hyperfine 1.18.0 (N=20, median, 3 lệnh trong MỘT invocation):
 `--version` Go 11.0 ms vs shell 0.7 ms vs **full 1.7 ms**
-(full/Go 0.155); `--help` Go 10.8 ms vs shell 0.8 ms vs **full 1.8 ms**
+(full/Go 0.158); `--help` Go 10.8 ms vs shell 0.8 ms vs **full 1.8 ms**
 (0.167). Khớp loop Python.
 Lưu ý hàng n=1: wall first-run ở run8 cao bất thường ở cả ba phía so
 với median (Go 51.909 ms ≈ 4.9× median 10.628 ms; shell 3.3×; full
-1.8×) trong khi run7 first-run Go chỉ 12.616 ms ≈ median run7. Cơ chế
+1.8×) trong khi run7 first-run Go chỉ 12.616 ms (≈1.1× median run7 11.169 ms). Cơ chế
 có thể là page cache bị build full-bin (~350 crate, 2.2 GiB target)
 đẩy ra ngay trước khi đo — suy luận, chưa chứng minh; và vì là n=1
 nên nó không dùng làm kết luận, chỉ ghi để khỏi ai trích nhầm.
@@ -395,7 +438,7 @@ còn `ParseSingleConfig` thì chấp nhận `FAKE-PRIVKEY` (bench parse-large
 pass). Đường so sánh sạch nhất cho parse là bad-JSON gate (cả ba đều
 dừng ở parse, exit 2). RSS full tăng nhẹ theo config (min 5.557 →
 large 6.176 MiB, +0.62 MiB — chi phí parse thật trên closure lớn);
-RSS Go tăng +4.9 MiB từ min → large (+7.3 MiB so với `--version`).
+RSS Go tăng +4.72 MiB từ min → large (33.096 → 37.812 MiB; +7.47 MiB so với `--version` 30.342 MiB).
 Wall-clock cũng thấy chi phí parse của full: `status` large 4.251 ms
 so với min 2.124 ms; Go large 46.132 ms so với min 12.369 ms (Go
 large chậm hẳn vì fail ở tạo endpoint sau khi parse+validate).
@@ -567,7 +610,8 @@ chỗ — Go item 5 nay chạy với HOME thật (ghi trong `measure_all.py`).
    Rủi ro: không có — đây là follow-up đo, không phải sửa code.
 5. **Startup của rust-full: 1.9 ms, không đáng tối ưu thêm lúc này.**
    Bằng chứng số: full `--version` 1.904 ms (shell 0.866 ms — closure
-   lớn hơn tốn ~1 ms init/reloc: `.rela.dyn` 576 KB so với shell 22 KB);
+   lớn hơn tốn ~1 ms init/reloc theo suy luận từ kích thước section,
+   chưa đo trực tiếp: `.rela.dyn` 576 KB so với shell 22 KB);
    phần lớn còn lại là spawn process + dynamic loader. Lợi ích tối đa
    ~1 ms tuyệt đối. Chi phí: thấp–trung bình (`-C
    target-cpu=native` bị CẤM ở PR này; static musl đổi cả toolchain).
@@ -604,13 +648,22 @@ SPDX check: PASS
 ```
 
 Stdout thật đầy đủ: `rust/perf/data/run8-stdout.txt` (147,054 B — chính
-là JSON dump của `summary.json` cộng dòng LTO-fail và dòng SPDX; JSON
-trong log khớp byte với `summary.json` đã commit). Số thô đầy đủ:
+là JSON dump của `summary.json` (147,036 B; lần build LTO gốc fail nằm
+trong mảng `notes` của JSON, không phải một dòng stdout riêng) cộng
+dòng `SPDX check: PASS` (18 B); JSON trong log khớp byte với
+`summary.json` đã commit). Số thô đầy đủ:
 `rust/perf/data/*.json` (mỗi file ghi từng lần chạy, median/min/max/
 mean, exit code). Tái lập: chạy lại lệnh trên rồi diff
 `data/summary.json` với file đã commit. Lưu ý: lần chạy này có một
 note duy nhất trong summary — LTO build gốc fail (xem mục `rust-full`);
-mọi phép đo khác exit như kỳ vọng.
+mọi phép đo khác exit như kỳ vọng. Lưu ý thêm: `summary.json` còn key
+`rust_full_binary_after_lto_restore` (cùng size+sha với
+`rust_full_binary`) — artifact của driver lúc chạy run8 (khi đó còn
+bước restore binary headline sau lần LTO fail); driver đã commit
+(`measure_all.py`) không còn bước restore đó và không set key này
+nữa (LTO nay build ra `release-lto/` riêng, không đụng binary
+headline) — key chỉ còn là dữ liệu lịch sử trong summary run8, không
+được set lại ở rerun.
 
 ## Dao động giữa các lần chạy (run4 → run5 → run6 → run7 → run8, median)
 
@@ -652,8 +705,10 @@ dấu (0.90–1.08) — khẳng định kết luận "trong sai số". RSS Go
 `--version` **không** ổn định: bimodal theo session — 30.4 MiB ở
 run5–run7, 43.5 MiB ở run4, 47.7 MiB ở rerun độc lập; tỉ lệ RSS
 shell/Go dao động 0.046–0.073 theo session (xem §3). Run8 khớp run7 ở
-mọi headline trong ~5% (shell `--version` wall 0.901→0.866 ms, RSS
-2.14→2.20 MiB; Go 11.169→10.628 ms, 30.36→30.34 MiB) — trừ first
+mọi headline trong ~5–6% (shell `--version` wall 0.901→0.866 ms, RSS
+2.14→2.20 MiB; Go 11.169→10.628 ms, 30.36→30.34 MiB) — ngoại lệ duy
+nhất nhích qua 5% là item 5 phía Rust (+5.06%, 0.830→0.872 ms/req) —
+trừ first
 measured run n=1 (Go wall 12.616→51.909 ms, xem §2).
 
 **Verify độc lập (rerun từ checkout sạch, `data/verify-rerun-summary.json`):**
@@ -708,7 +763,10 @@ không ổn định qua các session — xem §3.
   summary đầy đủ của run7 để đối chiếu bảng Drift;
   `run5-summary.json` / `run6-summary.json` là summary đầy đủ của
   run5/run6; `verify-rerun-summary.json` là summary đầy đủ của rerun
-  độc lập (2026-11-05T14:26:32Z) để đối chiếu drift).
+  độc lập (2026-11-05T14:26:32Z) để đối chiếu drift; `nm-counts.json`
+  / `lto-build-record.json` / `behaviour-checks.json` là record của
+  fix loop 1 (rebuild + `nm` + behaviour checks trên cue, 2026-11-05 —
+  xem mục `rust-full`).
 
 ## Chưa kiểm chứng / giới hạn (ghi rõ, không giấu)
 
@@ -721,7 +779,7 @@ không ổn định qua các session — xem §3.
 - Item 5 đo harness hand-roll, không phải outbound/gateway thật.
 - So sánh kích thước binary mang caveat M7 (xem đầu tài liệu):
   rust-full vẫn thiếu bot+keeper+webui, dùng honk thay sing-box.
-- Số RSS Go `--version` bimodal theo session: 30.4 MiB (run5–run8) vs
+- Số RSS Go `--version` bimodal theo session: 30.3–30.5 MiB (run5–run8) vs
   43.5 MiB (run4) vs 47.7 MiB (rerun độc lập,
   `data/verify-rerun-summary.json`); nguyên nhân chưa rõ (giả thuyết
   THP chưa kiểm chứng — `AnonHugePages` 0 kB lúc probe; env cô lập
@@ -739,7 +797,9 @@ không ổn định qua các session — xem §3.
   lower bound của binary M7 ở đúng chỗ này.
 - Kiểm tra `nm` trên binary LTO không chạy trực tiếp được (profile
   strip symbols); giữ-link ở LTO chỉ được chứng minh gián tiếp qua
-  `.text` + cơ chế `#[used]` static (xem mục `rust-full`).
+  `.text` + cơ chế `#[used]` static (xem mục `rust-full`; record build
+  LTO đầy đủ trong `data/lto-build-record.json` — size 10,065,944 B,
+  `.text` 6,942,120 B, `--version` exit 0).
 - Run5/run6 được commit ở `data/run5-summary.json` /
   `data/run6-summary.json` để đối chiếu drift; run7 ở
   `data/run7-summary.json`; rerun độc lập được commit ở

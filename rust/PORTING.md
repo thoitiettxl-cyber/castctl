@@ -6026,23 +6026,28 @@ không phải review vòng 1 (xem README mục Drift).
 |---|---|---|---|---|
 | Binary stripped | 48,100,296 B | 620,968 B | 12,527,080 B | 0.260 (3.84× nhỏ hơn) |
 | Binary chưa strip (Rust) | — | 778,936 B | 16,811,376 B | 0.350 |
-| Binary LTO variant, stripped | — | — | 10,065,944 B | 0.209 |
+| Binary LTO variant, stripped * | — | — | 10,065,944 B | 0.209 |
 | Startup `--version` | 10.628 ms (9.809–11.611) | 0.866 ms (0.770–1.271) | 1.904 ms (1.691–2.908) | 0.179 (5.6×) |
 | Startup `--help` | 10.858 ms (9.710–11.975) | 0.927 ms (0.820–1.121) | 2.089 ms (1.789–2.591) | 0.192 (5.2×) |
 | Peak RSS `--version` (GNU time) | 30.34 MiB (29.72–30.97) | 2.20 MiB (2.10–2.32) | 5.42 MiB (5.20–5.51) | 0.179 (82% ít hơn) |
 | Peak RSS `--help` (GNU time) | 30.22 MiB (29.59–30.97) | 2.25 MiB (2.18–2.38) | 5.40 MiB (5.20–5.47) | 0.179 |
 | Peak RSS `status` bad-JSON gate | 30.78 MiB | 2.35 MiB | 5.56 MiB | 0.181 |
-| Parse config min (42 B) | 4,548 ns/iter | 2,512 ns/iter | — (cùng code với shell) | 0.55 (1.8×) |
-| Parse config large (32,246 B) | 7,346,472 ns/iter | 1,178,401 ns/iter | — | 0.16 (6.2×) |
-| `MDToHTML` (51,560 B) | 5,344,879 ns/iter | 886,299 ns/iter | — | 0.17 (6.0×) |
-| `SplitText` (51,560 B) | 554,710 ns/iter | 270,775 ns/iter | — | 0.49 (2.0×) |
-| Render chain | 5,994,828 ns/iter | 1,075,627 ns/iter | — | 0.18 (5.6×) |
-| 1 request SOCKS5 loopback | 0.885 ms/req (0.818–0.919) | 0.872 ms/req (0.797–0.921) | — (harness, không phải binary) | 0.99 (1%, trong sai số) |
+| Parse config min (42 B) | 4,548 ns/iter | 2,512 ns/iter | — (cùng code với shell) | 0.55 (1.8×, shell) |
+| Parse config large (32,246 B) | 7,346,472 ns/iter | 1,178,401 ns/iter | — | 0.16 (6.2×, shell) |
+| `MDToHTML` (51,560 B) | 5,344,879 ns/iter | 886,299 ns/iter | — | 0.17 (6.0×, shell) |
+| `SplitText` (51,560 B) | 554,710 ns/iter | 270,775 ns/iter | — | 0.49 (2.0×, shell) |
+| Render chain | 5,994,828 ns/iter | 1,075,627 ns/iter | — | 0.18 (5.6×, shell) |
+| 1 request SOCKS5 loopback | 0.885 ms/req (0.818–0.919) | 0.872 ms/req (0.797–0.921) | — (harness, không phải binary) | 0.99 (1%, trong sai số; harness) |
 
 Kết luận: rust-full nhanh hơn Go ngoài sai số ở binary/startup/RSS;
 logic thuần (item 4, cùng thuật toán, 2 cột — không có cột full vì
 bench đo trực tiếp cùng code `castctl-config`/`castctl-tg-text`)
-nhanh hơn 1.8–6.2×; loopback SOCKS5 trong sai số. Caveat: (1) số
+nhanh hơn 1.8–6.2×; loopback SOCKS5 trong sai số.
+(* Hàng LTO: build tay trên cue sau run8 bằng profile `release-lto`,
+không phải phép đo run8 — record đầy đủ trong
+`rust/perf/data/lto-build-record.json`. Hàng item 4/5: tỉ lệ mang nhãn
+"(shell)"/"(harness)" là shell hoặc bench harness so với Go — cột
+rust-full là "—" vì không đo qua binary full; xem README §4/§5.) Caveat: (1) số
 77.5× của run7 (shell vs Go full) là số thật nhưng trả lời sai câu
 hỏi — headline từ run8 là rust-full/Go = 0.260× (3.84× nhỏ hơn);
 (2) parse-large/render: Go làm nhiều việc hơn (validate outbound sâu,
@@ -6058,7 +6063,7 @@ làm kết luận`); (5) không có `perf` trên cue nên hotspot dựa trên
 breakdown số đo + lý do cấu trúc, không dựa trên CPU profile;
 (6) RSS đo bằng GNU time (thin parent); số RSS Rust run4/run5
 (13.2 MiB) sai do floor của Python cha — số đúng ~2.1 MiB (shell),
-~5.4 MiB (full). RSS Go `--version` bimodal theo session — 30.4 MiB
+~5.4 MiB (full). RSS Go `--version` bimodal theo session — 30.3–30.5 MiB
 (run5–run8), 43.5 MiB (run4), 47.7 MiB (rerun độc lập,
 `data/verify-rerun-summary.json`); tỉ lệ RSS rust-full/Go theo session
 dao động (run8: 0.179; mode cao Go 47.7 MiB → ~0.114), không phải một
@@ -6067,7 +6072,10 @@ nhân chưa rõ (giả thuyết THP chưa kiểm chứng). (7) M7: các số tr�
 trên binary Rust chưa đủ bề mặt tính năng (`rust-full` vẫn thiếu
 bot+keeper+webui, dùng honk thay sing-box); sẽ đo lại ở M7 khi
 `castctl-rs` thay được binary Go. Trước M7, không dùng số này để
-khuyến nghị thay binary. Honesty line: rust-full KHÔNG phải "cùng
+khuyến nghị thay binary. Thêm nữa: hyper client machinery vắng mặt
+trong rust-full (0 symbol trong `nm` — xem `rust/perf/README.md` mục
+`rust-full`), nên rust-full là lower bound của binary M7 ở đúng chỗ
+này. Honesty line: rust-full KHÔNG phải "cùng
 engine, khác ngôn ngữ" — Go dùng sing-box làm engine, Rust dùng
 honk-outbound; items 1–3 trả lời "binary Rust mang full stack đã port
 thì nặng bao nhiêu so với binary Go full", không trả lời "cùng engine

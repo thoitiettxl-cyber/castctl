@@ -37,7 +37,11 @@ RS_BENCH = os.path.join(_TARGET_DIR or os.path.join(PERF, "bench", "target"),
 # (operator-managed, like CARGO_TARGET_DIR itself — it persists across
 # runs so --skip-build works; whether it was cold is recorded in the
 # summary as full_target_cold). Never default to
-# rust/perf/full-bin/target (inside the repo).
+# rust/perf/full-bin/target (inside the repo). The driver REFUSES an
+# in-repo target dir at startup (see _check_full_target_outside_repo):
+# the "must be outside" rule is enforced in code, not just documented —
+# an operator who sets CARGO_TARGET_DIR to an in-repo path gets a loud
+# failure instead of a silent SPDX trap from generated .go files.
 _FULL_TARGET_DIR = _TARGET_DIR or os.path.join(
     tempfile.gettempdir(), "perf-full-target")
 RS_FULL_BIN = os.path.join(_FULL_TARGET_DIR, "release", "castctl-full")
@@ -45,6 +49,28 @@ FULL_BIN_MANIFEST = os.path.join(PERF, "full-bin", "Cargo.toml")
 CARGO = ["cargo", "+1.99.1"]
 GO_ENV = dict(os.environ, PATH="/usr/local/go/bin:" + os.environ.get("PATH", ""),
               GOTOOLCHAIN="auto", GOFLAGS="-mod=readonly")
+
+def _check_full_target_outside_repo(target_dir, root=ROOT):
+    """Refuse an in-repo full-bin target dir (fix loop 1, red-team N6).
+
+    Returns an error string when target_dir resolves inside root, else
+    None. The full-bin build compiles boring-sys, which generates .go
+    files under its target dir; TestSPDXHeaders walks the whole repo
+    (only dot-dirs skipped), so an in-repo target dir fails the SPDX
+    check at the end of run.sh. The driver trusts CARGO_TARGET_DIR when
+    set, so without this guard an operator typo would silently plant
+    the trap — fail loudly instead. realpath() resolves symlinks
+    (/tmp is a symlink on some systems) and works for paths that do
+    not exist yet.
+    """
+    t = os.path.realpath(target_dir)
+    r = os.path.realpath(root)
+    if t == r or t.startswith(r + os.sep):
+        return ("full-bin target dir %s resolves inside the repo %s; "
+                "set CARGO_TARGET_DIR outside the repo (or unset it for "
+                "the system temp dir default) — see measure_all.py"
+                % (target_dir, root))
+    return None
 
 def _trunc(s, head=2000, tail=2000):
     # Keep both ends: the head holds the identifying lines (binary path,
@@ -93,6 +119,12 @@ def isolated_env():
     os.makedirs(home, exist_ok=True); os.makedirs(xdg, exist_ok=True)
     env = dict(os.environ, LC_ALL="C", TZ="UTC", HOME=home, XDG_CONFIG_HOME=xdg)
     env.pop("CASTCTL_CONFIG", None); env.pop("CASTCTL_PROFILE", None)
+    # PERF_KEEP_LINKED must never leak into a measurement: a stray export
+    # in the operator's shell would make every measured castctl-full run
+    # keep_linked() first (~0.1-1 ms of extra construction work on the
+    # measured startup path, per keep.rs). Run8 was collected with the
+    # var unset, so no committed number is affected by adding this scrub.
+    env.pop("PERF_KEEP_LINKED", None)
     return env, [home, xdg]
 
 def cleanup_dirs(dirs):
@@ -123,6 +155,13 @@ def main():
     def mark(key):
         summary["marks"][key] = {"time_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                                  "loadavg": loadavg()}
+    # Full-bin target-dir guard: fail loudly before any build if the
+    # target dir resolves inside the repo (see _check_full_target_outside_repo).
+    _guard_err = _check_full_target_outside_repo(_FULL_TARGET_DIR)
+    if _guard_err:
+        summary["notes"].append("full-bin target-dir guard FAILED: " + _guard_err)
+        json.dump(summary, open(os.path.join(DATA, "summary.json"), "w"), indent=2)
+        print(json.dumps(summary, indent=2)); return 2
     # Disk preflight: a full run builds release binaries; fail loudly
     # instead of dying mid-build on a shared disk. Threshold 1.0 GiB on
     # the filesystem that will hold the build outputs (CARGO_TARGET_DIR
@@ -311,7 +350,7 @@ def main():
         summary["notes"].append("build skipped (--skip-build)")
 
     # First measured run, warmup=0 (NOT cold, NOT first-run after build):
-    # both binaries already executed at least once above (--version probes
+    # all three binaries already executed at least once above (--version probes
     # during machine setup + the strip build), so the page cache is warm.
     # N=1 each; only the warmup=0 first run of this invocation is recorded.
     first = {}
