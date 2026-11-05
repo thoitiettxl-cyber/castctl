@@ -2079,7 +2079,13 @@ fn route_get_keeper(server: &Server) -> RouteOutcome {
 fn handle_get_keeper(server: &Server) -> Result<Resp, ApiError> {
     let load = load(server)?;
     let (_, entries) = parse_loaded(&load, cfg_dir(server))?;
-    let mut out: Vec<JsonValue> = Vec::new();
+    // Go `handleGetKeeper` (handlers.go:1629-1655) wraps each
+    // entry in `keeperEntryView{tag, profile, browser,
+    // interval_seconds, notify, status}` and sorts by tag.
+    // The bare `Status` objects previously pushed here are
+    // the wrong document: the frontend reads
+    // `entry.browser` / `entry.status.*` from the wrapper.
+    let mut views: Vec<(String, JsonValue)> = Vec::new();
     for entry in &entries {
         // A ReadStatus error is a 500 (Go writes the plain
         // error through writeAPIError: 500 internal_error
@@ -2088,8 +2094,20 @@ fn handle_get_keeper(server: &Server) -> Result<Resp, ApiError> {
         // state_corrupt set.
         let st = read_status(cfg_dir(server), entry)
             .map_err(|e| ApiError::new(500, "internal_error", safe_message_str(&e)))?;
-        out.push(st.to_json());
+        let mut view = OrderedObject::new();
+        view.set("tag", JsonValue::Str(entry.tag.clone()));
+        view.set("profile", JsonValue::Str(entry.profile.clone()));
+        view.set("browser", JsonValue::Str(entry.browser.clone()));
+        view.set(
+            "interval_seconds",
+            JsonValue::Number((entry.effective_interval_ns() / 1_000_000_000).to_string()),
+        );
+        view.set("notify", JsonValue::Str(entry.notify.clone()));
+        view.set("status", st.to_json());
+        views.push((entry.tag.clone(), JsonValue::Object(view)));
     }
+    views.sort_by(|a, b| a.0.cmp(&b.0));
+    let out: Vec<JsonValue> = views.into_iter().map(|(_, v)| v).collect();
     Ok(envelope_resp(200, JsonValue::Array(out)))
 }
 
@@ -2524,6 +2542,43 @@ mod tests {
         let body = String::from_utf8(resp.body).unwrap();
         assert!(body.contains("\"configured\":false"), "{body}");
         assert!(body.contains("\"allowed_user_ids\":[]"), "{body}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keeper_view_wraps_and_sorts_by_tag() {
+        // R1: Go returns keeperEntryView{tag, profile,
+        // browser, interval_seconds, notify, status}
+        // sorted by tag — not bare Status objects in
+        // config order. Two entries, stored out of order.
+        let dir = std::env::temp_dir()
+            .join(format!("m6b-handlers-keeper2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fixture = FIXTURE.replacen(
+            r#""webui":"#,
+            r#""keeper": [{"tag": "b", "profile": "muse01", "browser": "http://127.0.0.1:9222", "interval": "1h", "notify": "telegram"}, {"tag": "a", "profile": "muse01", "browser": "http://127.0.0.1:9223"}], "webui":"#,
+            1,
+        );
+        write_config(&dir, &fixture);
+        let server = test_server(&dir);
+        let resp = handle_get_keeper(&server).expect("keeper renders");
+        let body = String::from_utf8(resp.body).unwrap();
+        // Sorted by tag: "a" (default 24h interval) first.
+        let a = body.find(r#""tag":"a""#).expect("entry a present");
+        let b = body.find(r#""tag":"b""#).expect("entry b present");
+        assert!(a < b, "entries must be sorted by tag: {body}");
+        assert!(
+            body.contains(r#""browser":"http://127.0.0.1:9223""#),
+            "{body}"
+        );
+        assert!(body.contains(r#""interval_seconds":86400"#), "{body}");
+        assert!(body.contains(r#""interval_seconds":3600"#), "{body}");
+        assert!(body.contains(r#""notify":"telegram""#), "{body}");
+        // The status is NESTED under "status", with the
+        // fresh-entry outcome.
+        assert!(body.contains(r#""status":{"tag":"a""#), "{body}");
+        assert!(body.contains(r#""last_tick_outcome":"never""#), "{body}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
