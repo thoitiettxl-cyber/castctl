@@ -463,3 +463,325 @@ clean. `git diff --stat` shows only additions under `rust/`; the Go
 tree is untouched (verified before commit). The `dev-rust` branch
 was verified on origin at `13966975d116d54ae090464d7005e04b86e223ab`
 before this work branched from it.
+
+---
+
+# Porting notes — Rust M2 (config + CLI surface)
+
+Scope: two new crates (`castctl-config`, `castctl-cli`) plus the
+`castctl-rs` binary and the `rust/parity/` golden harness, ported
+from Go at `dev-rust` `85a8d5eaa529237d38de1192d992261ed1db7557`
+(branch `feat/rust-m2-config-cli`, local only, never pushed). No Go
+code was changed. Parent decisions D-M2-1..D-M2-7 (plan file
+`~/workspace/plans/active/castctl-rust-m2.md`) were applied as
+written; §5 records the places where Go's own pre-handler order
+differs from the generic stub-order statement, implemented
+Go-faithfully and flagged, not silently substituted.
+
+Toolchain (measured on cue, the only authoritative host):
+`rustc 1.97.1 (8bab26f4f 2026-07-14)`, `cargo 1.97.1`,
+`clippy 0.1.97`, `rustfmt 1.9.0-stable`, edition 2024,
+`resolver = "2"`, `rust-version = "1.85"`. No new dependencies:
+the workspace still has the sole M1 dep `regex = "=1.13.1"`. No
+serde, no `url` crate, no network crates. `rust/Cargo.lock` is
+committed (updated for the three new workspace members). No
+`unsafe` anywhere in `src` (grep = 0; the only two `unsafe`
+mentions are doc comments stating the rule). No `unwrap()` on
+external input; the single non-test `expect` guards a
+parser-internal invariant and carries an `INVARIANT:` comment
+naming the loop that establishes it (`parser.rs`, `consumeLong`).
+
+## M2.1 Crate map
+
+| Crate | Go source | Contents |
+|---|---|---|
+| `castctl-config` | `internal/profile/{config,jsonvalue,configlocation,errors,telegram,profile,fingerprint,log,guard,dns,keeper,webui,plugins,credentials,wireguard,outbound}.go` | Single-config parse/validate/render, profile entries, config-location resolution, Go `filepath`/`strings`/`strconv`/`encoding/json` semantics |
+| `castctl-cli` | `internal/commands/{commands,help,read,wait,deliver,chat,fs,keeper,telegram,update,webui,plugincheck,profilecmd,authimport,authlogin,authstatus,authobserve}.go`, `internal/deliver/authexport.go` (guidance const), `internal/logging/level.go` (summary identity) | Command table, flag parser, help/usage rendering, exit mapping, subcommand dispatchers, stub |
+| `castctl-rs` (bin) | `cmd/castctl/main.go` | Wires only the offline surface; `args_os` + lossy conversion |
+| `rust/parity/` (harness, not a crate) | — | `cases.json` (54 cases), `gen_golden.py`/`gen_golden.sh`, `fixtures/`, `golden/` (generated on cue), `castctl-rs/tests/parity.rs` |
+
+## M2.2 API mapping
+
+Every public item has a doc comment citing its Go source
+`file:line` at the M2 base. The mapping below is the crate-level
+index; the doc comments are authoritative.
+
+### `castctl-config`
+
+| Go | Rust | Notes |
+|---|---|---|
+| `decodeOrderedJSON` / `decodeOrderedValue` / `orderedObject` / `rawOf` / `marshalScalar` / `encodeSingleConfig` (`jsonvalue.go`, `guard.go:283`) | `jsonvalue::{JsonValue, OrderedObject, decode_ordered_json, decode_ordered_object, encode_ordered_json, encode_ordered_json_indent, raw_of, encode_go_string}` | Token-state-machine decoder reproducing `encoding/json` `Decoder.Token` + scanner states; number literals preserved verbatim; indent-2 + exactly one trailing `\n` |
+| `strings.TrimSpace` / `ToLower` / `strconv.Quote` / `QuoteRune` / `ParseInt` / `utf8.DecodeRune` | `gostr::{go_trim_space, go_lower, go_quote, go_quote_char, go_parse_int64, go_decode_rune}` | `quoteChar` is Go's `encoding/json` scanner form (`'"'` unescaped, `'\''` escaped), NOT `strconv.QuoteRune` — the corpus probe decided this |
+| `filepath.Clean/Join/Dir/Base/IsAbs/Rel` | `gopath::{go_clean, go_join, go_dir, go_base, go_is_abs, go_rel, is_inside_dir}` | `go_rel` returns `None` on mixed absolute/relative (Go error value never surfaced by callers) |
+| `Error` / `newConfigError` / `newInvalidProfileError` / `newLegacyLayoutError` / `ExitCode` (`errors.go`) | `errors::{ConfigError, config_error, config_errorf, invalid_profile_error, legacy_layout_error, refuse_error}` | `refuse_error` is migrate-only, unused in M2 |
+| `os` error texts (`*PathError`) | `oserr::{is_not_exist, strerror, os_message, stat_error_text, open_error_text}` | `IsNotExist` = raw errno ENOENT (2) only, not ENOTDIR |
+| `ValidateProfileName` / `ResolveProfileName` / `ProfilePaths` / `DiscoverProfileNames` / `Source` / `OutboundRef` / `parseProfileEntry` / `resolveCookiesFile` / `ensureInlineTag` / `parseAutoAllowOnceValue` (`profile.go`, `config.go:463,619,655,798`) | `profile::{validate_profile_name, resolve_profile_name, profile_paths, discover_profile_names, Source, OutboundKind, OutboundRef, Profile, parse_auto_allow_once_value, ensure_inline_tag, resolve_cookies_file, parse_profile_entry}` | `OutboundRef.Type` = raw `type` string if present, `From` empty (deferred tag graph); `" direct "` is a tag ref with spaces kept; inline auto-tag inserted right after `"type"` |
+| `ValidLogLevel` / log block (`log.go`, `level.go`) | `log::{LOG_LEVELS, valid_log_level, LogConfig, parse_log_block, render_log_block}` | Level value never echoed |
+| Telegram block + `validateTelegram` / `ResolveTelegram` (`telegram.go`) | `telegram::{TelegramConfig, valid_telegram_token_shape, parse_telegram_block, validate_telegram}` | Token shape `^[0-9]+:[A-Za-z0-9_-]{20,}$` ASCII-only on the stripped value; `Debug` is redacted, never prints the token |
+| Keeper tag rule / plugin ID rule / keeper-webui-plugins-credentials shapes (`keeper.go:381`, `plugins.go`, `credentials.go`) | `blocks::{validate_keeper_tag, valid_plugin_id, validate_plugin_tag, validate_plugin_type, PluginEntry, CredentialEntry, PluginsBlock, CredentialsBlock, parse_wireguard_dns_map, check_keeper_shape, check_webui_shape, parse_plugins_block, parse_credentials_block, validate_plugins, validate_credentials, check_endpoint_wireguard_system}` | Credential username/password values are validated then DROPPED (secrets); plugin parse errors carry the DOUBLE `profile: ` prefix Go produces via `%v` (`plugins.go:176,185`); endpoint wireguard-`system:true` check is a raw-field approximation (only when `type=="wireguard"` string AND `system===true` bool) |
+| Fingerprint/TLS sets (`fingerprint.go`) | `fingerprint::{DEFAULT_FINGERPRINT, DEFAULT_TLS_ENGINE, valid_fingerprint, valid_tls_engine}` | Exact sets only, no fold/trim |
+| `ParseSingleConfig` / `buildSingleFileOrdered` / `buildProfileEntry` / `LoadSingleConfig` / `LoadProfile` / `ResolveActiveProfile` / `HasProfilesMarker` / `scanLegacyConfigFile` / `applyEnvFill` / `profileExists` (`config.go`) | `config::{SingleConfig, has_profiles_marker, parse_single_config, build_single_file_ordered, render_telegram_block, build_profile_entry, encode_single_config, load_single_config, scan_legacy_config_file, apply_env_fill, load_profile, profile_exists, resolve_active_profile}` | Tail checks run in Go order; deferred ones are skipped, never faked (see §M2.3) |
+| `ResolveConfigLocation` / `RequirePresent` / `userConfigDir` / `configHomeDir` (`configlocation.go`) | `configlocation::{ConfigLocation, Getenv, resolve_config_location}` + `ConfigLocation::require_present` | Plan9 `userConfigDir` branch not reproduced (no Rust target); env via `var_os` + lossy; relative-XDG warning + fallback reproduce the DOUBLE `profile: ` prefix exactly |
+
+### `castctl-cli`
+
+| Go | Rust | Notes |
+|---|---|---|
+| `commandOrder` / `commandSpec` / `registerFlags` / `usageLine` | `table::{COMMAND_ORDER, CommandSpec, PositionalSpec, command_table, command_spec}` | The short `help` field is never printed and is not ported; session-op commands share one help text (not deduped) |
+| `flagDef` / `intFlag` / `argParser` / `findLong` / `findShort` / `consumeLong` / `looksLikeNegativeNumber` / `setValue` / `checkPositionals` | `parser::{FlagKind, FlagDef, bool_flag, str_flag, int_flag, int_flag_no_def, Parsed, ParserError, ParseOutcome, ArgParser, check_positionals}` | Short flags index BYTES (Go `rest[0]`); `-h` in a bundle shows help immediately; help after `--` is not help |
+| `scanGlobal` / `globalOpts` / `versionString` | `run::{GlobalOpts, VERSION, scan_global}` | `VERSION = "0.9.0"` (D-M2-7); prefix-branch order log-level → profile/config → help → version; `--vers`/`--hel` exact forms kept |
+| `resolveConfig` | `run::resolve_config` | Warnings printed before basename/presence errors; `allowMissingCreate` only for migrate `--write`/`--from` |
+| `parseOrHelp` / `profileParse` / `fsParse` / inline parsers / `usageErr` / `classifyError` (plain branch) / `errCode` / `errHelpShown` | `run::{parse_or_help, profile_parse, fs_parse, inline_parse, usage_err, run}` | 3-line / 2-line / 1-line stderr shapes per parser family, pinned by tests; `errCode(2, nil)` prints NOTHING extra |
+| `cmdFS` / `fsDefs` / `fsPositionals` | `run::cmd_fs`, `table::{FS_SUBCOMMANDS, fs_defs, fs_positional_names}` | |
+| `cmdAuth` / auth subcommand parsers | `run::cmd_auth`, `table::{auth_sub_defs, auth_sub_help}` | `auth export` prints `ExportGuidance` verbatim, exit 1, no config resolution, no positional check |
+| `cmdProfile` / `profileParse` | `run::cmd_profile`, `table::{PROFILE_SUBCOMMANDS, profile_sub_defs, profile_sub_help}` | `rm --yes` refusal precedes config resolution |
+| `cmdConfig` / `cmdConfigMigrate` | `run::cmd_config` | `--from` empty check precedes resolution; migrate execution dropped (D-M2-5) |
+| `cmdTelegram` / `cmdTelegramRun` / `cmdTelegramStatus` | `run::cmd_telegram`, `table::TELEGRAM_SUBCOMMANDS` | Takes-no-args error is 1 line, `errCode(2, nil)` |
+| `cmdKeeper` / `parseKeeperSelection` | `run::cmd_keeper`, `table::{KEEPER_SUBCOMMANDS, keeper_sub_help}` | Tag/profile mutual exclusion after positionals, before resolution |
+| `cmdWebUI` / `cmdWebUIServe` | `run::cmd_webui` | Unknown subcommand appends full `webuiHelpText` (only dispatcher that does) |
+| `cmdPlugin` / `cmdPluginCheck` / `pluginhost.ValidatePluginID` | `run::cmd_plugin` | No-arg prints help text ONLY on stderr; tag validated (`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`) before the stub; no config resolution |
+| `approveDecision` / `parseAutoToggles` / `cmdAutoApprove` checks / `feed-react` manual check | `run::{approve_decision, parse_auto_toggles, check_spec_positionals}` | Check order preserved (positionals → decision/toggles → state/once) |
+| `ExportGuidance` (`deliver/authexport.go`) | `run::EXPORT_GUIDANCE` | Verbatim const; printed + `\n` (Go `Fprintln` of the classify text) |
+| Help texts (74 consts) | `help_texts` (generated) | Mechanically extracted from the Go sources by `/tmp/gen_help.py`; `updateHelpText` appended by the same mechanical extraction (the generator pass missed `update.go`); `telegramBotHelpText` is a Telegram bot message, NOT CLI help, and is correctly absent. `inviteHelpText` lacks `--raw` while the usage line has it — both kept verbatim |
+
+## M2.3 Deferred (D-M2-1): raw-preserve + no sing-box validation
+
+The blocks below are stored as raw compact JSON and re-rendered
+verbatim. Sing-box option parsing/validation is NOT recreated (no
+hand-written sing-box schema): an invalid sing-box config that Go
+rejects at exit 2 parses "successfully" in Rust. Never claim full
+parity for invalid sing-box configs. Deferred areas and the Go
+tests that cover them:
+
+| Deferred area | Go tests covering it (base `85a8d5e`) |
+|---|---|
+| Tag graph: duplicate/dangling/detour/selector/reserved-prefix checks, `validateTagGraph` | `internal/profile/config_test.go` (25 tests), `outbound_test.go` (3) |
+| G1 coexistence is PARTIALLY implemented (top-level `dns` + per-profile `dns` refusal); the remaining G1 tag-shape cases | `config_test.go`, `dns_test.go` (21) |
+| Profile DNS, WireGuard DNS, WireGuard private keys (`validateProfileDNS`, `validateWireGuardDNS`, `validateWireGuardPrivateKeys`) | `dns_test.go`, `wireguard_test.go` (7), `dns_distribute_test.go` |
+| Sing-box outbound/endpoint/DNS option parsing (types, enums, unknown fields) | sing-box upstream option tests (external dep, not in this repo) + `outbound_test.go` |
+| Keeper cross-checks (`validateKeeper`), credential refs (`validateCredentialRefs`), keeper/webui deep field validation | `keeper_test.go` (16), `credentials_test.go` (7), `webui_test.go` (13) |
+| `rawProfiles` (migrate-clone-only in Go) | `migrate_test.go` (30) — Rust does not store it; render never uses it |
+| `config migrate` execution (legacy parse, refuse-overwrite, node_id generation, DNS author/distribute, lock + atomic 0600 write) | `migrate_test.go` (30), `guard_test.go` (10) |
+| Synthesised render for keeper/webui/plugins/credentials/outbounds/endpoints/dns (no-raw branches) | `config_test.go`, `guard_test.go` — without raw JSON those blocks are omitted; unreachable from the parse path, which always captures raw |
+
+Implemented instead (fixed-message, string-field-only): array
+shape for outbounds/endpoints; the wireguard-`system:true`
+raw-field approximation; `wireguard_dns` full shape parse;
+`log`/`telegram` full parse; keeper/webui array/object shape;
+plugins tag/type presence+shape+dup; credentials required-keys
++shape+dup; `validateTelegram`, `validateCredentials`,
+`validatePlugins` cross-checks; the G1 dns-coexistence refusal.
+
+## M2.4 Decisions D-M2-1..D-M2-7 (as applied)
+
+- **D-M2-1** raw-preserve + deferred sing-box validation (§M2.3).
+  P-1 decoder messages: verbatim for the whole probed corpus
+  (§M2.6); no unmapped message was encountered, so no
+  `[DEVIATION]` label was needed; messages outside the probed
+  corpus are approximations (§M2.5).
+- **D-M2-2 / D19** — the synthesised telegram render drops
+  `owner_id` EXACTLY like Go (`config.go:1411-1421`): regression
+  test `test_telegram_d19_synthesized_render_drops_owner_id`
+  (hand-built config renders without it; parsed-from-file config
+  keeps it via raw). Do not fix the bug.
+- **D-M2-3** — stub order: global scan → parse → positional
+  checks → config-location resolution (basename/presence/
+  directory, warnings, exit 2) → stub (exit 1, one fixed stderr
+  line `castctl: not ported yet in the Rust port`, empty stdout,
+  no argv echo) → BEFORE active-profile resolution. The stub
+  wording is Rust-only by argument in the PR body: the command
+  exists in Go and is unported here, never "not implemented in
+  the Go port" (Go's deferred-table wording).
+- **D-M2-4** — 54 cases: 46 × `<cmd> --help` in `commandOrder` +
+  8 (`--version`, `--help`, `bogus`, `redeem`, `goal`, `seen`,
+  `--log-level xyz`, `--config /nonexistent`). The parity test
+  asserts golden count == argv-list length. The missing-
+  positional trio is redeem/goal/seen (send behaves the same
+  shape and is covered by unit tests, not golden).
+- **D-M2-5** — `config migrate` execution DROPPED. Kept:
+  `config --help`, `config migrate --help`, dispatcher usage
+  errors, parse + positional + `--from` checks, resolution with
+  `allowMissingCreate`; parse-successful migrate → stub.
+- **D-M2-6** — the 34 subcommand `--help` cases are NOT in the
+  golden set and were NOT required dispatch work; they fall out
+  of the dispatcher tables and were probe-verified 34/34
+  byte-identical on cue (not golden). Recorded here, not in the
+  golden count.
+- **D-M2-7** — version const `0.9.0`, bare `castctl 0.9.0` (Go
+  `commands.go` `Version` var + `-X` stamp mechanism; code
+  default is `0.6.1`, the installed binary is stamped `0.9.0`).
+  N2 CORRECTED from R3: strip the optional
+  ` (<commit> <date>)` stamp suffix from the `--version` line on
+  BOTH sides and compare `castctl <version>` exactly. R3's
+  `(VERSION)` token form would mismatch an unstamped binary.
+
+## M2.5 Deviations and approximations
+
+- **AGENTS.md rules 5/6 deviation (brief override)** — the M2
+  scope is `rust/` ONLY: no `docs/*` update and no
+  `docs/provenance.md` + NOTICE update ride along, although the
+  repo's AGENTS.md rules 5/6 require them. Recorded here and in
+  the PR body; do not fix by editing docs/NOTICE in this branch.
+- **Config-resolution exceptions** — `update`, `plugin check`,
+  and `auth export` NEVER resolve config in Go (probed batch 4)
+  and do not in Rust either. Uniform stub order therefore
+  diverges from Go for exactly these three; documented, not
+  silently substituted.
+- **Pre-resolveConfig handler checks (Go-faithful, flagged)** —
+  Go performs some checks before `resolveConfig`, and Rust
+  reproduces them in the same position: `profile rm` without
+  `--yes`, `auth status` `--profile`+`--all`, keeper
+  tag/profile exclusion, `config migrate --from` empty,
+  `plugin check` tag validation, `auth login` experimental gate
+  then the tag-off CDP gate, `auth observe-login` tag-off
+  relogin gate. The CDP/relogin gates reflect the default
+  release build (no `with_chromedp` tag in the release
+  workflow); a tag-on build behaves differently by design.
+- **Pre-config checks NOT reproduced (documented divergences)**
+  — `raw` route-table lookup / `--body` JSON parse / `--param`
+  `k=v` check (Q8: route lookup first, then body, then params;
+  all before config resolution), `fs` path `Norm` checks,
+  `profile set-outbound` file read, `auth import` stdin
+  read + cookie validation. In Rust the stub fires after config
+  resolution instead. `auth import` with bad stdin input and a
+  bad config therefore reports the config error in Rust where
+  Go reports the stdin error.
+- **Stub before active-profile resolution** — `--profile nosuch`
+  validation, `default_profile` existence, and `ensureNodeID`
+  never run in M2; the stub fires first. A stubbed command with
+  an invalid profile flag exits 1 in Rust where Go exits 2.
+- **Go map-iteration order** — Go's tail validation iterates a
+  map for multi-violation cases (order unspecified); Rust
+  iterates profiles in sorted order. Single-violation messages
+  are identical; multi-violation order may differ.
+- **`wireguard_dns` non-raw render order** — Go marshals a map
+  (random order); Rust renders stored input order. The parse
+  path always has raw JSON, so this branch is unreachable from
+  parsed configs.
+- **Decoder messages outside the probed corpus** — the
+  `Token()`/scanner reproduction is verified against the full
+  corpus in `jsonvalue.rs` tests (incl. the `/tmp/m2dec3`
+  scratch-Go-program re-verification); messages for inputs
+  outside that corpus, `quoteChar` for control/Latin-1 bytes
+  outside the corpus, and deep UTF-8 lossy edges are
+  approximations. `json.Indent`'s error branch is unreachable
+  from the port's own compact output.
+- **`%q`/`IsPrint` for runes > 0xFF** — `go_quote`/`go_quote_char`
+  reproduce the probed cases (incl. `0xFF`→`'ÿ'`, NBSP→
+  `'\u00a0'`, DEL→`'\x7f'`); unprobed runes follow Go's
+  `strconv.Quote`/`IsPrint` tables as implemented, not
+  byte-verified.
+- **Non-UTF8 argv / env** — argv via `args_os` + lossy
+  conversion; env values via `var_os` + lossy. Go receives
+  raw bytes; a non-UTF8 argv token or env value is a documented
+  approximation.
+- **Plan9 `userConfigDir` branch** — not reproduced (no Rust
+  target); the Unix branch applies. Documented, unprobed.
+- **No signal handling** — SIGINT → exit 130 (`main.go:38`,
+  `classifyError` on `context.Canceled`) is not ported in M2.
+- **Indexmap decision (R3 P15 / R1 P-8)** — NO indexmap. `Vec`
+  suffices: `test_ordered_object_set_semantics`
+  (duplicate-key last-wins/first-position) and
+  `test_decode_values_and_order` pin the only ordering
+  operations the port needs. No measurement was required
+  because no dependency was added; no `Cargo.lock` dep diff
+  exists to report.
+- **`marshalScalar` on malformed hand-built numbers (R1 P-3)**
+  — not on the parse path; Rust returns
+  `json: invalid number literal %q`, documented.
+
+## M2.6 Probes (all on cue unless noted; log in `~/workspace/tmp/castctl-rust-m2-notes/m2-probes.log`)
+
+- Batches 1–3 (binary surface), stdlib probes
+  (`encoding/json` scanner/stream/decode sources + the
+  `/tmp/m2dec3` scratch Go program re-verifying the full decode
+  error corpus, Go 1.26.8), batch 4 (config exceptions +
+  34 subcommand helps + stdout byte counts).
+- Batch 5 (2026-11-05): Q6 empty token `""` and lone `-`
+  (empty → chat/auth-failure path, no hang, no stdin read;
+  `-` → invalid choice, 46 names); Q4 `config migrate`
+  dry-run prints the migration-report JSON, exit 0, no write,
+  and `--write` migrates (observed, D-M2-5 unchanged); Q8
+  `raw chat.history --param nokey` → 1-line
+  `bad --param 'nokey': expected k=v` exit 2 (route lookup
+  precedes the param check; unknown method reports 258 known
+  methods); `raw … --param` with no value → 3-line parse error.
+- 34 subcommand `--help` cases: Go vs Rust binary, isolated
+  env, byte-compare of stdout/stderr/exit code — TOTAL=34,
+  MISMATCHES=0 (probe, not golden).
+- P-14: `CARGO_BIN_EXE_castctl-rs` (dash spelling) confirmed
+  via a throwaway probe test on cue (underscore spelling is
+  `None`); the probe file was deleted after the run.
+- P-15: no indexmap measurement needed (see §M2.5).
+- P-1/P-3/P-6/P-7/P-10/P-11: corpus-verbatim decoder messages;
+  P-3 documented; P-6 N/A by design (no sing-box errors are
+  emitted); P-7 documented (§M2.5); P-10 LoadProfile
+  filesystem cases covered by temp-dir tests in `config.rs`;
+  P-11 no-write asserted by both the generator and the parity
+  test (fixture config bytes + empty work dir after each case).
+- Open: Q7 (producer of exit 124) — out of scope, note only.
+
+## M2.7 Test mapping (cue counts; M1 crates unchanged)
+
+| Crate | Rust tests | Notes |
+|---|---|---|
+| `castctl-config` | 78 | Decoder corpus + trailing-data quirks + order/number/surrogate/indent rules; profile/config/telegram/log/blocks/configlocation rules; LoadProfile filesystem cases (single/legacy/stray/dir/env-fill); D19 regression; round-trip idempotence with raw key reorder + `<>&` |
+| `castctl-cli` | 41 | Parser (abbreviations, bundling, negative numbers, defaults, lists/pairs, help short-circuit); table (order, usage lines, int defaults); dispatch (2-/3-line shapes, dispatcher quirks, stub order, gates, approve/auto-approve/keeper/migrate checks, export guidance) |
+| `castctl-rs` | 1 integration (`parity.rs`) | 54/54 golden cases, 0 mismatches (see §M2.8) |
+| M1 crates | 46 + 7 + 2 + 10 | Unchanged counts, all green |
+
+Go test files consulted directly (behaviour pinned from code +
+probes, not 1:1 test ports): `internal/profile/` —
+`config_test.go`, `telegram_test.go`, `jsonvalue_test.go`,
+`configlocation_test.go`, `profile_test.go`, `log_test.go`,
+`plugins_test.go`, `credentials_test.go`, `keeper_test.go`,
+`webui_test.go`, `dns_test.go`, `wireguard_test.go`,
+`outbound_test.go`, `guard_test.go`, `migrate_test.go`,
+`autoapprove_test.go`, `errors_test.go`, `fingerprint_test.go`;
+`internal/commands/` handler tests for the parser/dispatcher
+shapes. Deferred Go tests are listed in §M2.3.
+
+## M2.8 Verification (on cue, rustc/cargo 1.97.1)
+
+Scratch: `/tmp/castctl-rust-m2-writer` (sources synced by tar
+over SSH; `target/` never synced). Host key verified before the
+first login: `SHA256:6ExOBaFLBXhnN4GX3Qjh6DbdjJev2p7nR61IwERRhcs`
+— MATCHED.
+
+```console
+$ cargo --version && rustc --version && cargo clippy --version && cargo fmt --version
+cargo 1.97.1 (c980f4866 2026-06-30)
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+clippy 0.1.97
+rustfmt 1.9.0-stable
+$ /usr/local/bin/castctl --version
+castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)
+$ cargo build --workspace
+BUILD-EXIT=0
+$ sh parity/gen_golden.sh
+GEN-EXIT=0  (54 golden files written; count verified with ls)
+$ cargo test --workspace
+test result: ok. 41 passed; 0 failed  (castctl-cli)
+test result: ok. 78 passed; 0 failed  (castctl-config)
+test result: ok. 46 passed; 0 failed  (castctl-log-redact)
+test result: ok. 7 passed; 0 failed   (castctl-shared)
+test result: ok. 2 passed; 0 failed   (castctl-tg-files)
+test result: ok. 10 passed; 0 failed  (castctl-tg-text)
+test result: ok. 1 passed; 0 failed   (parity integration, 54/54 cases, 0 mismatches)
+TEST-EXIT=0
+$ cargo clippy --workspace --all-targets -- -D warnings
+CLIPPY-EXIT=0
+$ cargo fmt --check
+FMT-EXIT=0
+$ cargo doc --workspace --no-deps
+DOC-EXIT=0
+$ grep -rn unsafe (src) → 0 code hits (2 doc-comment mentions of the rule)
+```
+
+`git diff --stat` shows only `rust/` (plus the new `rust/`
+crates/harness as untracked additions, committed on the feature
+branch); the Go tree is untouched (verified before commit). The
+`dev-rust` base was verified on origin at
+`85a8d5eaa529237d38de1192d992261ed1db7557` before the branch was
+created, and `feat/rust-m2-config-cli` was absent on origin.
+Nothing was pushed; no PR was opened.
