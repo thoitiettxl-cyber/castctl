@@ -1,0 +1,19 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
+[package]
+name = "castctl-logging"
+version = "0.1.0"
+edition = "2021"
+description = "Log factory, levels, slog bridge and error summarising, ported from Go internal/logging (remainder) and internal/profile ResolveLogSettings"
+license = "GPL-3.0-only"
+
+[dependencies]
+castctl-config = { path = "../castctl-config" }
+castctl-log-redact = { path = "../castctl-log-redact" }
+castctl-transport = { path = "../castctl-transport" }
+chrono = { workspace = true }
+
+[dev-dependencies]
+castctl-transport = { path = "../castctl-transport" }

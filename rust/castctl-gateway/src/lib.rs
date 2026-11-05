@@ -38,6 +38,7 @@ pub mod gateway;
 pub mod noise;
 pub mod proto;
 pub mod shared;
+pub mod subscribe;
 pub mod subscription;
 pub mod summary;
 
@@ -63,6 +64,11 @@ pub use shared::{
     HEARTBEAT, HEARTBEAT_PING_TIMEOUT, HEARTBEAT_STOP_TIMEOUT, MAX_SUBSCRIBE_ATTEMPTS, RETRY_FOR,
     RETRY_PAUSE_INITIAL, RETRY_PAUSE_MAX, STALE_PING_TIMEOUT, SUBSCRIBE_RETRY_PAUSE, SharedConn,
     heartbeat_tick,
+};
+pub use subscribe::{
+    CollectHandler, DEFAULT_SUBSCRIBE_IDLE_TIMEOUT, DEFAULT_SUBSCRIBE_MAX_RECORDS,
+    DEFAULT_SUBSCRIBE_OVERALL_TIMEOUT, SUBSCRIBE_POLL_INTERVAL, SubscribeHandler,
+    SubscribeOptions,
 };
 pub use subscription::{
     ActionIDStore, DEFAULT_SUBSCRIPTION_ACTION_ID, SUBSCRIPTION_ACTION_NAME, SUBSCRIPTION_PAGE,

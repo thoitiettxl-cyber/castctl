@@ -1,0 +1,18 @@
+[package]
+name = "castctl-deliver"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Offline library commands ported from castctl's Go internal/deliver (M7a)"
+
+[dependencies]
+castctl-config = { path = "../castctl-config" }
+castctl-gateway = { path = "../castctl-gateway" }
+castctl-transport = { path = "../castctl-transport" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

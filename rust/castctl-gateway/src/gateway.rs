@@ -73,6 +73,7 @@ use crate::proto::{
     ApplicationRequest, Header, Reset, ResetCode, ServiceFrame, ServiceFrameKind, ServiceRequest,
     ServiceResponse, ServiceType, service_type,
 };
+use crate::subscribe::{SubscribeHandler, SubscribeOptions};
 use castctl_transport::error::{BodySummary, TransportError, validate_error_code};
 use castctl_transport::routes::{Route, RouteTable, Service, build_path};
 
@@ -966,6 +967,183 @@ impl Gateway {
         };
         let (sid, _, _) = self.open(method, &[], bytes, &[], None, false).await?;
         Ok(sid)
+    }
+
+    /// Open a subscription and return the raw NDJSON record
+    /// bytes (Go `calls.go` `SubscribeRaw`). The handler's
+    /// `on_record` runs with each record the moment it
+    /// arrives; a `true` return stops the subscription right
+    /// there. `should_stop` is polled about every 500ms
+    /// even while no records arrive. `on_open` runs once the
+    /// subscription request is on the wire. Records are
+    /// split on `\n`; blank lines are skipped; a trailing
+    /// partial buffer is appended as one record (with an
+    /// `on_record` call, whose return is ignored there)
+    /// unless the subscription was halted. A subscription
+    /// that ends is forgotten; one that is stopped is reset
+    /// (the connection stays up). `ConnectionDown` is
+    /// returned only when the stream never opened: once
+    /// `on_open` has fired, connection loss surfaces as
+    /// `ConnectionError` (that is what `next` returns).
+    /// A loop error drops the gathered records and returns
+    /// the error, exactly as Go returns `nil, err`.
+    pub async fn subscribe_raw(
+        &self,
+        method: &str,
+        opts: SubscribeOptions,
+        handler: &mut dyn SubscribeHandler,
+    ) -> Result<Vec<Vec<u8>>, TransportError> {
+        use crate::subscribe::{
+            DEFAULT_SUBSCRIBE_IDLE_TIMEOUT, DEFAULT_SUBSCRIBE_MAX_RECORDS,
+            DEFAULT_SUBSCRIBE_OVERALL_TIMEOUT, SUBSCRIBE_POLL_INTERVAL,
+        };
+        let max_records = if opts.max_records <= 0 {
+            DEFAULT_SUBSCRIBE_MAX_RECORDS
+        } else {
+            opts.max_records
+        };
+        let idle_timeout = if opts.idle_timeout.as_nanos() == 0 {
+            DEFAULT_SUBSCRIBE_IDLE_TIMEOUT
+        } else {
+            opts.idle_timeout
+        };
+        let overall_timeout = if opts.overall_timeout.as_nanos() == 0 {
+            DEFAULT_SUBSCRIBE_OVERALL_TIMEOUT
+        } else {
+            opts.overall_timeout
+        };
+        let body = match opts.body {
+            Some(v) => Some(
+                serde_json::to_vec(&v).map_err(|e| TransportError::Validation {
+                    message: format!("gateway: subscribe body is not JSON: {e}"),
+                })?,
+            ),
+            None => None,
+        };
+        let (sid, _, rx) = self
+            .open(
+                method,
+                &opts.path_params,
+                body,
+                &opts.query,
+                opts.route.as_ref(),
+                true,
+            )
+            .await?;
+        let mut rx = match rx {
+            Some(rx) => rx,
+            None => {
+                // Tracked open always returns a receiver.
+                self.forget(sid);
+                return Err(TransportError::ConnectionError {
+                    message: "gateway: tracked stream has no queue".to_string(),
+                });
+            }
+        };
+        handler.on_open();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut records: Vec<Vec<u8>> = Vec::new();
+        let deadline = Instant::now() + overall_timeout;
+        let mut idle_deadline = Instant::now() + idle_timeout;
+        let mut halted = false;
+        let mut ended = false;
+        let mut saw_frame = false;
+        let mut loop_err: Option<TransportError> = None;
+        'outer: while !halted
+            && Instant::now() < deadline
+            && (records.len() as i64) < max_records
+        {
+            if handler.should_stop() {
+                halted = true;
+                break;
+            }
+            match self.next(sid, &mut rx, SUBSCRIBE_POLL_INTERVAL).await {
+                Ok(Some(frame)) => {
+                    saw_frame = true;
+                    idle_deadline = Instant::now() + idle_timeout;
+                    match frame.kind {
+                        Some(ServiceFrameKind::Response(resp)) => {
+                            if !resp.body.is_empty() {
+                                buf.extend_from_slice(&resp.body);
+                            }
+                            if resp.end_body {
+                                ended = true;
+                                if buf.is_empty() {
+                                    break 'outer;
+                                }
+                            }
+                        }
+                        Some(ServiceFrameKind::BodyChunk(chunk)) => {
+                            buf.extend_from_slice(&chunk.data);
+                            if chunk.end_body {
+                                ended = true;
+                            }
+                        }
+                        Some(ServiceFrameKind::Reset(_)) => {
+                            // A reset ends the stream without
+                            // splitting the buffered lines:
+                            // the trailing-partial rule below
+                            // still appends the whole buffer
+                            // as one record, as Go does.
+                            ended = true;
+                            break 'outer;
+                        }
+                        _ => {
+                            // Other kinds are ignored; the
+                            // loop continues.
+                        }
+                    }
+                    loop {
+                        let Some(idx) = buf.iter().position(|b| *b == b'\n') else {
+                            break;
+                        };
+                        let line: Vec<u8> = buf.drain(..=idx).collect();
+                        let line = &line[..line.len() - 1];
+                        if line.iter().all(|b| b.is_ascii_whitespace()) {
+                            continue;
+                        }
+                        let rec = line.to_vec();
+                        records.push(rec.clone());
+                        if handler.on_record(&rec).await {
+                            halted = true;
+                            break;
+                        }
+                        if (records.len() as i64) >= max_records {
+                            break;
+                        }
+                    }
+                    if ended {
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    // Queue empty for the poll interval (Go
+                    // `errQueueEmpty`): idle bound decides.
+                    if Instant::now() > idle_deadline {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    loop_err = Some(e);
+                    break;
+                }
+            }
+        }
+        if ended {
+            self.forget(sid);
+        } else {
+            self.cancel_stream(sid, ServiceType::ServiceDaemon).await;
+        }
+        let _ = saw_frame;
+        if let Some(err) = loop_err {
+            return Err(err);
+        }
+        if !halted && !buf.iter().all(|b| b.is_ascii_whitespace()) && !buf.is_empty() {
+            let rec = buf.clone();
+            records.push(rec.clone());
+            handler.on_record(&rec).await;
+        }
+        Ok(records)
     }
 
     /// The web app's heartbeat: `connection.ping` with

@@ -36,6 +36,7 @@ use serde_json::Value as JsonValue;
 use tokio::task::JoinHandle;
 
 use crate::gateway::{Gateway, RequestOptions};
+use crate::subscribe::{SubscribeHandler, SubscribeOptions};
 use castctl_transport::error::TransportError;
 use castctl_transport::retry::{RetryPolicy, should_retry};
 use castctl_transport::routes::Route;
@@ -656,6 +657,92 @@ impl SharedConn {
             async move { gw.request(&method, opts).await }
         })
         .await
+    }
+
+    /// Open a subscription on the current connection (Go
+    /// `internal/conn/shared.go` `SubscribeRaw`). Only a
+    /// connection that is down before the stream opens is
+    /// retried here, at most `MAX_SUBSCRIBE_ATTEMPTS`
+    /// attempts in total, with a fixed
+    /// `SUBSCRIBE_RETRY_PAUSE` between attempts. Any other
+    /// error — including a `ConnectionDown` raised after
+    /// the stream opened, which the gateway surfaces as
+    /// `ConnectionError` instead — propagates at once. An
+    /// `Auth` error propagates at once. (Go sleeps with
+    /// `sleepOrDone(ctx, ...)`; this layer has no
+    /// cancellation handle, so the pause is a plain sleep —
+    /// the wait runner owns cancellation at its own level.)
+    pub async fn subscribe_raw(
+        &self,
+        method: &str,
+        opts: SubscribeOptions,
+        handler: &mut dyn SubscribeHandler,
+    ) -> Result<Vec<Vec<u8>>, TransportError> {
+        let mut last_err: Option<TransportError> = None;
+        for attempt in 0..MAX_SUBSCRIBE_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(SUBSCRIBE_RETRY_PAUSE).await;
+            }
+            let gw = match self.live().await {
+                Ok(gw) => gw,
+                Err(e) => {
+                    if matches!(e, TransportError::Auth { .. }) {
+                        return Err(e);
+                    }
+                    if matches!(e, TransportError::ConnectionDown { .. })
+                        && attempt < MAX_SUBSCRIBE_ATTEMPTS - 1
+                    {
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
+            match gw.subscribe_raw(method, opts.clone(), handler).await {
+                Ok(records) => return Ok(records),
+                Err(e) => {
+                    if matches!(e, TransportError::Auth { .. }) {
+                        return Err(e);
+                    }
+                    if matches!(e, TransportError::ConnectionDown { .. })
+                        && attempt < MAX_SUBSCRIBE_ATTEMPTS - 1
+                    {
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        match last_err {
+            Some(e) => Err(e),
+            None => Err(TransportError::ConnectionDown {
+                message: "gateway connection is down".to_string(),
+            }),
+        }
+    }
+
+    /// Open a subscription and return decoded records, with
+    /// no conn-level retry (Go `shared.go` `SubscribeJSON`:
+    /// the gateway's own subscribe drops bad JSON lines).
+    /// Numbers decode with `arbitrary_precision` (literals
+    /// preserved, never float64) — the same guarantee as
+    /// Go `decodeJSONValue` with `UseNumber`.
+    pub async fn subscribe_json(
+        &self,
+        method: &str,
+        opts: SubscribeOptions,
+        handler: &mut dyn SubscribeHandler,
+    ) -> Result<Vec<JsonValue>, TransportError> {
+        let gw = self.live().await?;
+        let raw = gw.subscribe_raw(method, opts, handler).await?;
+        let mut out = Vec::with_capacity(raw.len());
+        for line in raw {
+            if let Ok(v) = serde_json::from_slice::<JsonValue>(&line) {
+                out.push(v);
+            }
+        }
+        Ok(out)
     }
 
     /// One ping on the current connection, with no retry (Go
