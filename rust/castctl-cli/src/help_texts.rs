@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 // Help and usage texts, extracted VERBATIM from the Go sources at
 // the M2 base (dev-rust 85a8d5e) by /tmp/gen_help.py (mechanical
 // extraction from backtick raw-string consts; nothing retyped).

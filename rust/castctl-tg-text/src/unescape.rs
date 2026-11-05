@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 // HTML entity unescaping: a byte-level port of Go's `html.UnescapeString`
 // (`html/escape.go`, `unescapeEntity`), driven by the mechanically
 // extracted tables in `entities.rs`.

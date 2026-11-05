@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! The 12-pass `SafeString` backstop, ported from Go
 //! `internal/logging/safe.go` (`SafeString`, `redactJSONSecrets`,
 //! `normalizePctLabels`, `redactURLAllQuery`, `SafeHost`).
@@ -222,14 +226,14 @@ fn decode_quoted_key(raw: &[u8]) -> Vec<u8> {
             let n = raw[i + 1];
             match n {
                 b'u' => {
-                    if i + 6 <= raw.len() {
-                        if let Some(v) = parse_hex(&raw[i + 2..i + 6]) {
-                            let ch = char::from_u32(v as u32).unwrap_or('\u{fffd}');
-                            let mut buf = [0u8; 4];
-                            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-                            i += 6;
-                            continue;
-                        }
+                    if i + 6 <= raw.len()
+                        && let Some(v) = parse_hex(&raw[i + 2..i + 6])
+                    {
+                        let ch = char::from_u32(v as u32).unwrap_or('\u{fffd}');
+                        let mut buf = [0u8; 4];
+                        out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                        i += 6;
+                        continue;
                     }
                     out.push(c);
                     i += 1;
@@ -245,12 +249,13 @@ fn decode_quoted_key(raw: &[u8]) -> Vec<u8> {
             i += 2;
             continue;
         }
-        if c == b'%' && i + 3 <= raw.len() {
-            if let Some(v) = parse_hex(&raw[i + 1..i + 3]) {
-                out.push(v as u8);
-                i += 3;
-                continue;
-            }
+        if c == b'%'
+            && i + 3 <= raw.len()
+            && let Some(v) = parse_hex(&raw[i + 1..i + 3])
+        {
+            out.push(v as u8);
+            i += 3;
+            continue;
         }
         out.push(c);
         i += 1;
@@ -559,23 +564,24 @@ fn scan_pct_word(s: &[u8], start: usize) -> (usize, Vec<u8>, bool) {
     let mut i = start;
     while i < s.len() && decoded.len() <= 128 {
         let c = s[i];
-        if c == b'%' && i + 3 <= s.len() {
-            if let Some(v) = parse_hex(&s[i + 1..i + 3]) {
-                let v = v as u8;
-                if v == b'=' || v == b':' {
+        if c == b'%'
+            && i + 3 <= s.len()
+            && let Some(v) = parse_hex(&s[i + 1..i + 3])
+        {
+            let v = v as u8;
+            if v == b'=' || v == b':' {
+                break;
+            }
+            if v == b'%' && i + 5 <= s.len() {
+                let nxt = String::from_utf8_lossy(&s[i + 3..i + 5]).to_lowercase();
+                if nxt == "3d" || nxt == "3a" {
                     break;
                 }
-                if v == b'%' && i + 5 <= s.len() {
-                    let nxt = String::from_utf8_lossy(&s[i + 3..i + 5]).to_lowercase();
-                    if nxt == "3d" || nxt == "3a" {
-                        break;
-                    }
-                }
-                decoded.push(v);
-                encoded = true;
-                i += 3;
-                continue;
             }
+            decoded.push(v);
+            encoded = true;
+            i += 3;
+            continue;
         }
         if c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-') {
             decoded.push(c);

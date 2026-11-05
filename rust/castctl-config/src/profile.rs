@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! Profile names, paths, entries, and outbound references.
 //!
 //! Sources at base `dev-rust` `85a8d5e`: `internal/profile/profile.go`
@@ -77,10 +81,10 @@ pub fn resolve_profile_name(flag: Option<&str>, getenv: Getenv<'_>) -> Result<St
     if let Some(flag) = flag {
         return validate_profile_name(flag);
     }
-    if let Some(env) = crate::configlocation::config_lookup_env(getenv, PROFILE_ENV) {
-        if !go_trim_space(&env).is_empty() {
-            return validate_profile_name(go_trim_space(&env));
-        }
+    if let Some(env) = crate::configlocation::config_lookup_env(getenv, PROFILE_ENV)
+        && !go_trim_space(&env).is_empty()
+    {
+        return validate_profile_name(go_trim_space(&env));
     }
     Ok(DEFAULT_PROFILE_NAME.to_string())
 }

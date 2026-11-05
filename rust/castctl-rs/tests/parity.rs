@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! Golden parity test (M2): runs the built `castctl-rs` binary
 //! over the 59 argv cases in `rust/parity/cases.json` and compares
 //! stdout/stderr/exit code byte-for-byte with the golden files in

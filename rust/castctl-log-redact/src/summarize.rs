@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! String-only error summarisation, ported from Go
 //! `internal/telegram/bot.go` (`summarize`, `summarizeClass`,
 //! `formatSummary`, `fallbackClass`, `anchoredDecodeClass`,

@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! Telegram message-text formatting, ported from Go.
 //!
 //! Source: `internal/telegram/text.go` at `origin/main` `1396697`.

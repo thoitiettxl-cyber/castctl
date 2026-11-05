@@ -1,0 +1,10 @@
+# M3b: pin the Rust toolchain for reproducible builds. honk at the
+# pinned rev pulls aya 0.16.0 via honk-ebpf-common, which requires
+# rustc >= 1.98; 1.99.1 matches honk's own rust-toolchain.toml.
+# On cue this toolchain is installed alongside 1.97.1, which stays
+# the default; on other machines rustup installs it on demand
+# (profile minimal + clippy/rustfmt components).
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

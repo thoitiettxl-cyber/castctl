@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! Order-preserving JSON values: decode preserving key order and
 //! number literals, compact encode, and 2-space indent encode.
 //!

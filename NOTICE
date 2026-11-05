@@ -116,7 +116,17 @@ docs/provenance.md.
   without prior consent." (LICENSE sha256
   650d5e3b99a446fb38e820fa87a49562e0c79eab868fff58618ac487a58e554c.)
   Used as a library and as the config schema; no sing-box source is
-  copied. Castctl itself is licensed GPL-3.0-or-later (see LICENSE).
+  copied. The Go binary (castctl itself) is licensed
+  GPL-3.0-or-later (see LICENSE). The Rust binary is a separate
+  artifact, GPL-3.0-only (see rust/NOTICE).
+
+- honk-outbound (Rust) — GPL-3.0-only, from
+  github.com/daeuniverse/honk, rev
+  9e31cc0bd28825afdc0e384dc989bc3f076e69cf. Linked ONLY into
+  the Rust artifact (crate castctl-transport under rust/); no
+  honk source is copied into this tree. The Rust binary is
+  therefore GPL-3.0-only (see rust/NOTICE); this does not change
+  the Go binary's license.
 - github.com/sagernet/sing
   v0.9.7-0.20261023115459-5dc452e537bf — GPL-3.0-or-later.
 - github.com/sagernet/sing-tun

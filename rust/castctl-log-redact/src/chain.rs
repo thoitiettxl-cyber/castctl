@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! Typed error-chain classification, ported from Go
 //! `internal/telegram/bot.go` (`classifyError`,
 //! `chainPrefixClass`, `transportClass`, `scrubErr`).
@@ -379,12 +383,11 @@ fn transport_class(chain: &ErrorChain) -> Option<ErrorClass> {
     // first child here). Deeper UrlError levels are never
     // consulted, even when the first one's inner text hides
     // TLS text behind a wrapper.
-    if let Some(url_level) = first_url_error_level(chain) {
-        if let Some(inner) = url_level.children.first() {
-            if is_tls_failure_text(&inner.text) {
-                return Some(ErrorClass::Tls);
-            }
-        }
+    if let Some(url_level) = first_url_error_level(chain)
+        && let Some(inner) = url_level.children.first()
+        && is_tls_failure_text(&inner.text)
+    {
+        return Some(ErrorClass::Tls);
     }
     if contains(chain, &|k| {
         matches!(k, LevelKind::Errno(ErrnoKind::ConnRefused))
@@ -493,36 +496,34 @@ pub fn scrub_chain(chain: Option<&ErrorChain>, token: &str) -> Option<ErrorChain
     // TMR first, in pre-order DFS (children in unwrap order),
     // matching Go `errors.As` in `scrubErr`: the FIRST match
     // wins, never the last.
-    if let Some(level) = first_match(chain, &|k| matches!(k, LevelKind::TooManyRequests { .. })) {
-        if let LevelKind::TooManyRequests {
+    if let Some(level) = first_match(chain, &|k| matches!(k, LevelKind::TooManyRequests { .. }))
+        && let LevelKind::TooManyRequests {
             message,
             retry_after,
         } = &level.kind
-        {
-            unwraps.push(ChainLevel::leaf(
-                "",
-                LevelKind::TooManyRequests {
-                    message: scrub_text(message, token),
-                    retry_after: *retry_after,
-                },
-            ));
-        }
+    {
+        unwraps.push(ChainLevel::leaf(
+            "",
+            LevelKind::TooManyRequests {
+                message: scrub_text(message, token),
+                retry_after: *retry_after,
+            },
+        ));
     }
     // Migrate second, same pre-order discipline.
-    if let Some(level) = first_match(chain, &|k| matches!(k, LevelKind::Migrate { .. })) {
-        if let LevelKind::Migrate {
+    if let Some(level) = first_match(chain, &|k| matches!(k, LevelKind::Migrate { .. }))
+        && let LevelKind::Migrate {
             message,
             migrate_to_chat_id,
         } = &level.kind
-        {
-            unwraps.push(ChainLevel::leaf(
-                "",
-                LevelKind::Migrate {
-                    message: scrub_text(message, token),
-                    migrate_to_chat_id: *migrate_to_chat_id,
-                },
-            ));
-        }
+    {
+        unwraps.push(ChainLevel::leaf(
+            "",
+            LevelKind::Migrate {
+                message: scrub_text(message, token),
+                migrate_to_chat_id: *migrate_to_chat_id,
+            },
+        ));
     }
     // Sentinels in Go's listed order.
     for kind in [

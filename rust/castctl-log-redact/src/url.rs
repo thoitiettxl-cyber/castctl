@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! A narrow hand-rolled port of the `net/url` slice used by
 //! `redactParsedURL` (`internal/logging/safe.go`): parse, query
 //! rebuild, fragment replacement, and `URL.String`
@@ -171,10 +175,10 @@ fn parse_host(hostport: &str) -> Result<String, UrlParseError> {
         Some(i) => (&hostport[..i], Some(&hostport[i + 1..])),
         None => (hostport, None),
     };
-    if let Some(port) = port_part {
-        if !port.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(UrlParseError);
-        }
+    if let Some(port) = port_part
+        && !port.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(UrlParseError);
     }
     let decoded = unescape_bytes(host_part.as_bytes())?;
     for &b in &decoded {
@@ -259,12 +263,12 @@ fn validate_ipv6_literal(inside: &str) -> Result<(), UrlParseError> {
     // An embedded IPv4 dotted quad counts as two groups.
     let mut total = groups.len();
     let mut ipv4 = false;
-    if let Some(last) = groups.last() {
-        if last.contains('.') {
-            validate_ipv4(last)?;
-            ipv4 = true;
-            total += 1;
-        }
+    if let Some(last) = groups.last()
+        && last.contains('.')
+    {
+        validate_ipv4(last)?;
+        ipv4 = true;
+        total += 1;
     }
     for (idx, g) in groups.iter().enumerate() {
         if idx == groups.len() - 1 && ipv4 {
@@ -487,10 +491,10 @@ fn query_sep_index(seg: &str) -> Option<usize> {
     let mut best: Option<usize> = bytes.iter().position(|&b| b == b'=');
     let lower: Vec<u8> = bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
     for sep in ["%253d", "%3d"] {
-        if let Some(idx) = find_subslice(&lower, sep.as_bytes()) {
-            if best.is_none_or(|b| idx < b) {
-                best = Some(idx);
-            }
+        if let Some(idx) = find_subslice(&lower, sep.as_bytes())
+            && best.is_none_or(|b| idx < b)
+        {
+            best = Some(idx);
         }
     }
     best

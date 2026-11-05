@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! Log scrubbing and error classification, ported from Go
 //! `internal/logging/safe.go`, `internal/redact/*`, and the
 //! `internal/telegram/bot.go` summarize region.

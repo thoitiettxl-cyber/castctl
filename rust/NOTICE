@@ -1,0 +1,119 @@
+NOTICE — castctl Rust artifact (rust/)
+
+This artifact is licensed GPL-3.0-only. It is a SEPARATE artifact
+from the Go binary, which remains GPL-3.0-or-later. Do not merge
+the two licenses into one statement.
+
+Linked dependency (called, not copied):
+- honk-outbound, from https://github.com/daeuniverse/honk,
+  pinned rev 9e31cc0bd28825afdc0e384dc989bc3f076e69cf
+  (workspace Cargo.toml + Cargo.lock; also pins the replicated
+  [patch.crates-io] forks boring-sys
+  3beb573b65ecaa69b7eefe3c2fecd074b97facd2 and quinn/quinn-proto
+  11f1de84c28305a3c98ace6d681c35219a8d1e6c, both from
+  github.com/Glassyiris),
+  license GPL-3.0-only (honk LICENSE + workspace Cargo.toml
+  `license = "GPL-3.0-only"`; the upstream `repository` field
+  still names https://github.com/Glassyiris/honk while the
+  remote used here is daeuniverse/honk — see
+  docs/provenance.md §13).
+  Used by crate `castctl-transport` as the transport engine for:
+  socks5, shadowsocks, vmess, vless, trojan, hysteria2, tuic,
+  direct, block (the M3 subset; honk also implements juicity
+  and anytls, which M3 deliberately does NOT map — see
+  docs/provenance.md §13 deviations).
+  No honk source code is copied into rust/ as castctl code.
+  (M3 chose git-dep, not vendor: a trial `cargo vendor` on cue
+  measured 387M / 281 dirs / 33.8s, vs a few MB of git checkouts
+  in the cargo cache. If vendoring is ever chosen, the original
+  honk LICENSE must be preserved verbatim in the vendor dir.)
+
+Transitive-only, NOT used by castctl code:
+- aya 0.16.0 (plus aya-build, aya-ebpf-bindings, aya-ebpf-cty,
+  aya-obj) via honk-ebpf-common, which only honk-outbound
+  depends on (verified by reverse lookup in Cargo.lock).
+  No castctl source in rust/castctl-transport imports aya or
+  honk-ebpf-common (grep clean). Nuance (verified on cue
+  against the honk checkout, see rust/PORTING.md §M3.7):
+  aya itself is pure transitive (no `aya::` reference in
+  honk-outbound source), but honk-ebpf-common IS used by
+  honk-outbound's own direct dial path (socket-mark
+  constants `CLASSIFIED_MARK` / `DAE_BYPASS_MARK`) —
+  it is a live honk dependency, not dead weight inside
+  honk, and still never touched by castctl code. They set
+  the toolchain floor: aya 0.16.0 requires rustc >= 1.98,
+  so the Rust artifact pins toolchain 1.99.1 in
+  rust/rust-toolchain.toml (Boss decision, hướng (a); cue
+  keeps 1.97.1 as the default — see rust/PORTING.md §M3.6).
+
+Consequence (quyết định của Boss, nguyên văn):
+  artifact Rust là GPL-3.0-only vì link honk; binary Go vẫn
+  GPL-3.0-or-later; 2 artifact, 2 license.
+
+Ported from this repo's Go code (behavior reimplemented, not
+honk code):
+- Route table: internal/gateway/routes.go LookupRoute,
+  internal/conn/gateway.go:316 (method → http/path/service,
+  from internal/proto/routes.json, 258 entries at the M3 base).
+- HTTP client invariants: internal/telegram/bot.go BoundClient
+  + noFollowRedirect (no proxy env, no redirect following).
+- Retry policy: internal/conn/shared.go retryCall +
+  internal/conn/gateway.go constants (30s budget, 250ms
+  doubling to 4s cap, safe set of 9 POST reads + GET).
+- TLS/REALITY config: tls.utls.fingerprint, tls.reality.*
+  (internal/outbound/tls.go GatewayTLSOptions default chrome;
+  honk boring Chrome-mode + REALITY path, no protocol
+  reimplementation).
+- Error mapping + exit codes: internal/commands/commands.go
+  classifyError (auth 2, gateway 3, timeout 4, cancel 130,
+  validation 2, else 1); the phaseExitCode table
+  (profilecmd.go:901-929) is NOT used here.
+
+What is NOT in this artifact (M3 scope):
+- No network CLI commands wired (M4); castctl-rs still builds
+  the offline CLI surface only.
+- No bot/keeper/webui.
+- No WireGuard: honk has no WireGuard outbound, and M3 does
+  not implement it. Userspace WireGuard (boringtun) is M3d,
+  a separate PR after M3 (see the M3 plan's D-M3/M3d split).
+- "No unsafe" covers castctl glue code only (plan D-M3-7):
+  the dependency tree (honk/boring/quinn, including C
+  BoringSSL code) contains unsafe code and C builds. Do not
+  claim the Rust binary is unsafe-free.
+
+Build status at M3 submission (see rust/PORTING.md §M3):
+- `cargo tree` on cue confirms all three git sources (honk +
+  boring-sys fork + quinn fork).
+- `cargo build/test/clippy` on cue DO NOT PASS yet: honk at
+  the pinned rev requires rustc >= 1.98 via aya 0.16.0
+  (honk-ebpf-common), but cue has rustc 1.97.1, and the M3
+  brief forbids changing the sha or upgrading the cue
+  toolchain without a Boss decision. The blocker, the exact
+  error, and the two options (upgrade cue toolchain to
+  >= 1.98, or pick an older honk sha) are recorded in
+  rust/PORTING.md §M3 and in the M3 writer report. Nothing
+  in this NOTICE claims a build that did not happen.
+
+Build status after M3b (Boss decision, hướng (a) — see
+rust/PORTING.md §M3.6–§M3.7; the M3-submission paragraph
+above is history and is not rewritten):
+- rustc 1.99.1 installed on cue alongside 1.97.1 (default
+  unchanged); `rust/rust-toolchain.toml` pins 1.99.1.
+- On cue, with plain `cargo` (shim honors the pin):
+  `cargo fmt --check` exit 0, `cargo build --workspace`
+  exit 0 (cold 1m 35s), `cargo test --workspace` exit 0
+  (229 passed, 0 failed), `cargo clippy --workspace --
+  -D warnings` exit 0. Cue provisioning for the build:
+  cmake 3.28.3 + libclang-18-dev.
+- TLS/QUIC parity is measured in rust/PORTING.md §M3.8
+  (TLS JA4-like and standard JA4 differ Go-vs-Rust —
+  M3c label correction: the M3b "JA4" values were a
+  GREASE→0000 variant, relabelled JA4-like, with a
+  standard-JA4 column recomputed from the same
+  captures — REALITY profiles differ more, Rust QUIC
+  through dispatch against a controlled sing-box
+  server FAILED (dispatch has no way to skip cert
+  verification; the honk QUIC stack itself was proven
+  working once verification is skipped, M3c NB9) while
+  the Go control succeeded) — parity
+  differences are findings, not gate failures.

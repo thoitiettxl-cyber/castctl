@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! Dispatch: `scanGlobal`, `resolveConfig`, the eight
 //! subcommand dispatchers, `classifyError`'s plain branch, and the
 //! M2 stub (D-M2-3).
@@ -256,10 +260,8 @@ fn resolve_config(
             ),
         ));
     }
-    if !allow_missing_create {
-        if let Err(e) = loc.require_present() {
-            return Err(config_err(e));
-        }
+    if !allow_missing_create && let Err(e) = loc.require_present() {
+        return Err(config_err(e));
     }
     Ok(loc)
 }

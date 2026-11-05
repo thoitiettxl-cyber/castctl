@@ -1,0 +1,29 @@
+[package]
+name = "castctl-transport"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Transport glue for the castctl Rust port (M3): outbound dispatch via honk-outbound, HTTP-over-outbound client, gateway RPC client call_json, retry policy ported from internal/conn. Protocols are NOT reimplemented here; honk-outbound is called as a dependency."
+
+[dependencies]
+honk-outbound = { workspace = true, features = ["rprx"] }
+honk-config = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+http = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }
+# Test-only: lets integration tests drive HttpClient directly
+# (its request method takes http::Method). Already pinned in the
+# workspace and in Cargo.lock; no new dependency is introduced.
+http = { workspace = true }
+# Test-only: lets integration tests implement Dialer (whose stream
+# type is honk's AsyncReadWrite) with counting wrappers.
+honk-outbound = { workspace = true, features = ["rprx"] }

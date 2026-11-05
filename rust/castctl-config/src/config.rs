@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! The parsed single-file config: parse, render, load, and
 //! active-profile resolution.
 //!
@@ -476,10 +480,10 @@ pub fn build_profile_entry(p: &Profile) -> Result<OrderedObject, ConfigError> {
     if p.tls_engine_present || te != crate::fingerprint::DEFAULT_TLS_ENGINE {
         entry.set("tls_engine".to_string(), JsonValue::Str(te.to_string()));
     }
-    if p.dns_present {
-        if let Some(dns) = &p.dns {
-            entry.set("dns".to_string(), dns.clone());
-        }
+    if p.dns_present
+        && let Some(dns) = &p.dns
+    {
+        entry.set("dns".to_string(), dns.clone());
     }
     match p.outbound.kind {
         crate::profile::OutboundKind::Tag => {
@@ -628,19 +632,17 @@ pub fn scan_legacy_config_file(
 /// convention in `configlocation.rs`).
 pub fn apply_env_fill(p: &mut Profile, getenv: Getenv<'_>) {
     let lookup = |key: &str| crate::configlocation::config_lookup_env(getenv, key);
-    if !p.vm_id_present {
-        if let Some(v) = lookup("MUSE_VM_ID") {
-            if !v.is_empty() {
-                p.vm_id = v;
-            }
-        }
+    if !p.vm_id_present
+        && let Some(v) = lookup("MUSE_VM_ID")
+        && !v.is_empty()
+    {
+        p.vm_id = v;
     }
-    if !p.node_id_present {
-        if let Some(v) = lookup("MUSE_NODE_ID") {
-            if !v.is_empty() {
-                p.node_id = v;
-            }
-        }
+    if !p.node_id_present
+        && let Some(v) = lookup("MUSE_NODE_ID")
+        && !v.is_empty()
+    {
+        p.node_id = v;
     }
 }
 
@@ -656,12 +658,11 @@ pub fn load_profile(
     let paths = profile_paths(base_dir, name)?;
     let (single, found) = load_single_config(base_dir)?;
     let mut p: Option<Profile> = None;
-    if found {
-        if let Some(single) = &single {
-            if let Some(entry) = single.profiles.get(name) {
-                p = Some(entry.clone());
-            }
-        }
+    if found
+        && let Some(single) = &single
+        && let Some(entry) = single.profiles.get(name)
+    {
+        p = Some(entry.clone());
     }
     if p.is_none() {
         if !(found && name == DEFAULT_PROFILE_NAME) {
@@ -710,10 +711,10 @@ pub fn load_profile(
             ..Default::default()
         },
     };
-    if let Ok(meta) = std::fs::metadata(&paths.dir) {
-        if meta.is_dir() {
-            p.exists = true;
-        }
+    if let Ok(meta) = std::fs::metadata(&paths.dir)
+        && meta.is_dir()
+    {
+        p.exists = true;
     }
     apply_env_fill(&mut p, getenv);
     Ok(p)
@@ -724,10 +725,10 @@ pub fn load_profile(
 /// counts) — a legacy file counts as existence too, though
 /// `LoadProfile` still refuses to read it.
 pub fn profile_exists(base_dir: &str, name: &str, single: Option<&SingleConfig>) -> bool {
-    if let Some(single) = single {
-        if single.profiles.contains_key(name) {
-            return true;
-        }
+    if let Some(single) = single
+        && single.profiles.contains_key(name)
+    {
+        return true;
     }
     let Ok(paths) = profile_paths(base_dir, name) else {
         return false;
@@ -735,10 +736,10 @@ pub fn profile_exists(base_dir: &str, name: &str, single: Option<&SingleConfig>)
     if std::fs::metadata(&paths.config).is_ok() {
         return true;
     }
-    if let Ok(meta) = std::fs::metadata(&paths.dir) {
-        if meta.is_dir() {
-            return true;
-        }
+    if let Ok(meta) = std::fs::metadata(&paths.dir)
+        && meta.is_dir()
+    {
+        return true;
     }
     false
 }
@@ -756,26 +757,25 @@ pub fn resolve_active_profile(
         let name = resolve_profile_name(flag, getenv)?;
         return load_profile(base_dir, &name, getenv);
     }
-    if let Some(env) = crate::configlocation::config_lookup_env(getenv, PROFILE_ENV) {
-        if !go_trim_space(&env).is_empty() {
-            let name = validate_profile_name(go_trim_space(&env))?;
-            return load_profile(base_dir, &name, getenv);
-        }
+    if let Some(env) = crate::configlocation::config_lookup_env(getenv, PROFILE_ENV)
+        && !go_trim_space(&env).is_empty()
+    {
+        let name = validate_profile_name(go_trim_space(&env))?;
+        return load_profile(base_dir, &name, getenv);
     }
     let (single, found) = load_single_config(base_dir)?;
-    if found {
-        if let Some(single) = &single {
-            if !single.default_profile.is_empty() {
-                let name = single.default_profile.clone();
-                if !profile_exists(base_dir, &name, Some(single)) {
-                    return Err(config_errorf!(
-                        "default_profile {} does not exist",
-                        go_quote(&name)
-                    ));
-                }
-                return load_profile(base_dir, &name, getenv);
-            }
+    if found
+        && let Some(single) = &single
+        && !single.default_profile.is_empty()
+    {
+        let name = single.default_profile.clone();
+        if !profile_exists(base_dir, &name, Some(single)) {
+            return Err(config_errorf!(
+                "default_profile {} does not exist",
+                go_quote(&name)
+            ));
         }
+        return load_profile(base_dir, &name, getenv);
     }
     load_profile(base_dir, DEFAULT_PROFILE_NAME, getenv)
 }

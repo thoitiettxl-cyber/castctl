@@ -972,3 +972,1033 @@ branch); the Go tree is untouched (verified before commit). The
 `85a8d5eaa529237d38de1192d992261ed1db7557` before the branch was
 created, and `feat/rust-m2-config-cli` was absent on origin.
 Nothing was pushed; no PR was opened.
+
+---
+
+# Porting notes — Rust M3 (transport via honk, NO WireGuard)
+
+Scope: one new crate (`castctl-transport`) plus workspace wiring
+(honk pin + `[patch]` replication), SPDX headers on all 44 `.rs`
+files, `rust/LICENSE` (byte-identical to root `LICENSE`),
+`rust/NOTICE`, root `NOTICE` honk entry, and
+`docs/provenance.md` §13 — the last two close the M2.5 docs debt
+for the Rust/honk part (the §M2.5 note is history and is not
+rewritten). Base: `dev-rust` `664f26315c2481a5b4302b8d89f4e4c49f7ecefc`.
+Branch: `feat/rust-m3-transport`, LOCAL ONLY — nothing pushed,
+no PR opened, no merge (the parent task explicitly forbids
+push/PR/merge for this writer; the reviewer/parent decides the
+next step after the toolchain blocker below). No Go code was
+changed. Parent decisions D-M3-1..D-M3-8 (plan file
+`~/workspace/plans/active/castctl-rust-m3-transport.md`) were
+applied as written; the two PR split (M3, then M3d WireGuard)
+follows the plan: M3d is NOT in this branch.
+
+Toolchain (measured on cue, the only authoritative host):
+`rustc 1.97.1 (8bab26f4f 2026-07-14)`, `cargo 1.97.1`, edition
+2024, `resolver = "2"`, `rust-version = "1.85"`.
+`rust/Cargo.lock` is committed (updated: 276 packages).
+
+## M3.1 Crate map
+
+| Crate | Go source | Contents |
+|---|---|---|
+| `castctl-transport` | `internal/gateway/routes.go`, `internal/conn/gateway.go`, `internal/gateway/calls.go`, `internal/gateway/jsonutil.go`, `internal/gateway/stream.go`, `internal/gateway/summary.go`, `internal/conn/shared.go`, `internal/conn/errors.go`, `internal/outbound/dialer.go`, `internal/outbound/tls.go`, `internal/telegram/bot.go`, `internal/commands/commands.go`, `internal/profile/outbound.go` (dispatch shape only) + honk-outbound (engine, called not copied) | Route table, sing-box→honk dispatch + TLS/REALITY, Dialer trait + direct/honk dialers, HTTP/1.1 client over a dialer, retry policy, `call_json` RPC client |
+
+## M3.2 API mapping
+
+Every public item has a doc comment citing its Go source
+`file:line` at the M3 base. Items with no direct Go function
+counterpart (e.g. `RedirectRefused`, `TlsMode`,
+`Dispatch::Honk`) say so in their docs and cite the Go type /
+vocabulary they model; no Go function line is fabricated.
+
+| Go | Rust | Notes |
+|---|---|---|
+| `RouteTable.LookupRoute`, `ParseRoutes`, `DefaultRoutes` (`internal/gateway/routes.go:78-116`), `Route` (`internal/conn/gateway.go:132-137`), `Gateway.LookupRoute` (`internal/conn/gateway.go:316-318`), `internal/proto/routes.json` | `routes::{Route, Service, RouteTable::default_routes/parse/lookup_route, build_path, quote_path_param}` | Table embedded via `include_str!` of the Go JSON (258 entries at M3 base); first-wins duplicates; absent service → `daemon`; path quoting = Go `quotePython(v, "")` (`media.go:19-35`); query = `url.Values.Encode` (sorted keys) |
+| `parseOutbound` (`internal/profile/outbound.go:96-138`), `CreateOutbound`/`CreateEndpoint` (`internal/outbound/manager.go:243-272,479-494`), `GatewayTLSOptions`/`BuildTLSConfig` (`internal/outbound/tls.go:16-76`), WS ALPN pin (`internal/gateway/connector.go:240`) | `config::{Dispatch, TlsMode, dispatch_outbound, tls_mode_for, apply_tls_mode, validate_reality, decode_base64url}` | Subset only (D-M3-3): socks→socks5, shadowsocks, vmess, vless, trojan, hysteria2, tuic → honk; direct/block as before; wireguard → "→ M3d" error; all other types → `Unsupported`; detour → `Unsupported`; SS plugin → `Unsupported`; WS ALPN pinned `http/1.1`; unknown fields ignored (deviation, see §M3.3) |
+| `DialContext`/`Resolve`/`DialTLS`/`HTTPClient` (`internal/outbound/dialer.go:127-236`), `Manager.Dialer` (`internal/outbound/manager.go:585-597`) | `dialer::{Dialer, DialTarget, DirectDialer, HonkDialer, DIAL_TIMEOUT, resolve_target}` | `Dialer` is the M3d seam (object-safe boxed future); dial failure → `ConnectionDown`; DIAL_TIMEOUT 10s = Go `TLSHandshakeTimeout`; no proxy env reads anywhere in `src/`; both dialers try EVERY resolved address (M3c: a per-address timeout no longer aborts the whole dial — only after all addresses fail is the result `ConnectionDown`) |
+| `BoundClient`/`noFollowRedirect` (`internal/telegram/bot.go:316-352`) | `http::{HttpClient, HttpResponse, MAX_RESPONSE_BODY}` | Hyper http1 client conn over the dialed stream; no proxy concept (structural, not a flag); ANY 3xx → `RedirectRefused`, never a second request; no cookie jar; one fresh stream per call (no pool → Go 90s idle / 100-conn pool have no counterpart); HTTP/1.1 only (Go `ForceAttemptHTTP2` not ported); hyper handshake failure → `ConnectionDown` (nothing sent yet, M3c); 16 MiB body guard is M3-local, not Go parity, enforced DURING the read (frame-by-frame stream cap, M3c — the old collect-then-check order could OOM first); over-cap body → `Gateway` (exit 3, never retried) |
+| `retryCall` (`internal/conn/shared.go:148-221`), `safeToRepeat`/`safeFor` (`:46-56,136-147`), constants (`internal/conn/gateway.go:21-55`) | `retry::{RetryPolicy, RETRY_FOR, RETRY_PAUSE_INITIAL, RETRY_PAUSE_MAX, POST_READ_METHODS, safe_to_repeat, should_retry, run_with_retry}` | Budget 30s (NOT a fixed attempt count — only `SubscribeRaw` has one: 3 attempts, not ported); ladder 250ms doubling to 4s; `ConnectionDown` always, `ConnectionError` only when safe; `Auth` never; Go's `gw()` reconnect branch is covered because a dial failure surfaces as `ConnectionDown`; the RPC layer additionally wraps the whole call in the request timeout (M3c overall cap — per-attempt timeouts alone reset every attempt and could stretch the call past it) |
+| `CallJSON`/`Request` (`internal/gateway/calls.go:26-220`), `encodeBody`/`bodyToQuery`/`pythonStr` (`internal/gateway/jsonutil.go:28-138`), `buildPath`/`resolveRoute` (`internal/gateway/stream.go:188-220`), `summarizeBody`/`gatewayErrorFromSummary` (`internal/gateway/summary.go:213-224`) | `rpc::{RpcClient, DEFAULT_REQUEST_TIMEOUT, body_to_query, decode_response}` | HTTP-over-outbound RPC (D-M3-2), NOT the WS+Noise+protobuf gateway (deferred, see §M3.3); timeout 30s; GET body → query (nil dropped, top-level bool `True`/`False`, nested values via `pythonStr` `%v` — M3c, the old "Go does not define" doc was wrong); empty body → `{}`; envelope `ok`/`result` rules verbatim (M3c: only a BOOLEAN false `ok` errors; `result` wins with `ok` absent or non-bool); numbers via `serde_json::Number` + `arbitrary_precision` (never `f64`, literals kept past u64 — M3c); non-JSON/boolean-false-`ok` → `GatewayError(-1, summary)`; status non-2xx → `GatewayError(status, summary)`; NO body bytes in any error |
+| `AuthError`/`GatewayError`/`ConnectionDown`/`ConnectionError`/`TimeoutError` (`internal/conn/errors.go`), `ValidationError` (`internal/gateway/jsonutil.go`), `classifyError` (`internal/commands/commands.go:268-337`) | `error::{TransportError, BodySummary, validate_content_type, validate_error_code, truncate}` | `exit_code`: auth 2, gateway 3, timeout 4, cancel 130, validation 2, else 1 — NOT `phaseExitCode` (`profilecmd.go:901-929`, auth 3); `Display`/`Debug` (hand-written) print summaries only; `log_summary` prints class + lengths, never message bytes; `RedirectRefused` carries no `Location` value (M3c: nothing reads one); `Unsupported` → 1 here — the CLI layer must map config rejections to 2 itself (M3c: documented in `error.rs` and here, code unchanged) |
+
+## M3.3 Deferred / deviations (deliberate, not silent)
+
+- WS+Noise+protobuf gateway transport (`internal/gateway/stream.go`
+  `open`, phases `PhaseNotSent`/`PhaseSentNoReply`/`PhaseStreaming`):
+  DEFERRED. An HTTP client has no stream phases, so none are faked.
+- `RequestOptions` fields with no HTTP equivalent: `Route`
+  override (M3 always uses the table), separate `Query` input,
+  absolute `Deadline`, `Track`: not ported.
+- `DownloadFile` (300s), `Ping` (10s), subscriptions,
+  `CancelStream`, `OpenStream` (`safe=false`) / `DownloadFile`
+  (`safe=true`) retry variants: recorded in `retry.rs` docs,
+  not implemented (no such calls exist in M3).
+- Per-profile DNS router: M3 direct dials use the system
+  resolver, NOT Go's fail-closed `ErrNoResolver`
+  (`dialer.go:127-145`). Domain dials through `direct` are
+  therefore not fail-closed in M3; fixing that is M4 DNS work.
+- HTTP/2: not negotiated in M3 (hyper http1 only).
+- `tls_engine` stdlib/cronet, non-chrome fingerprints, explicit
+  UTLS disable, `spider_x`: `Unsupported` fail-closed (D-M3-4),
+  never silently mapped to Chrome.
+- Honk Chrome-mode is process-global: two profiles with
+  different TLS modes in one process are an M3 limitation.
+- Unknown sing-box JSON fields ignored (M2 raw-preserve),
+  while sing-box `badjson` rejects them.
+- `HonkDialer` requires `ProxyRegistry: Send + Sync` via the
+  `Dialer: Send + Sync` bound — UNVERIFIED until a build runs
+  (see blocker); if the registry is not `Sync`, the dialer will
+  need a lock or a non-`Sync` redesign, decided after the
+  toolchain decision, not pre-empted here.
+- No network CLI commands are wired in M3; `castctl-rs` still
+  builds the offline surface only (unchanged behaviour).
+- TLS `enabled` has TWO different Go rules, and `build_tls`
+  follows only one (M3c, NB6): the OUTBOUND path parses
+  sing-box JSON, where `OutboundUTLSOptions` /
+  `OutboundRealityOptions` are pointers and their `Enabled`
+  fields are plain bools — a missing block means "apply
+  the Go default", a present block with a missing field
+  means false (sing-box v1.14.4 `option/tls.go`,
+  `common/tls/client.go:103`, `reality_client.go:60`).
+  The GATEWAY-dial path (`internal/outbound/dialer.go`
+  `DialTLS`, `:161-168`) is different: it FORCES
+  `Enabled=true` whenever TLS is requested at all
+  (`BuildTLSConfig`, `internal/outbound/tls.go:56-60`,
+  returns nil when `!Enabled`). Porting the gateway-dial
+  rule is M4 work at the gateway-dial call site — it
+  must NOT be folded into `build_tls`, which serves
+  the outbound path.
+- `HonkDialer::new` bypasses dispatch (M3c, NB10,
+  watch-item for M4): a caller that builds a `Node` by
+  hand and passes it to `HonkDialer::new` skips
+  `dispatch_outbound` validation AND `apply_tls_mode`,
+  so it dials with honk's default TLS mode, not
+  Chrome-mode. M4 must route node construction through
+  dispatch or restrict the constructor. Related: QUIC
+  nodes (hysteria2/tuic) NEVER pass `apply_tls_mode`
+  (`build_tls` is TCP/TLS only), so QUIC-TLS mode is
+  always honk's default regardless of profile — the
+  profile's TLS settings do not reach QUIC dials.
+- 3xx exit code is an M4 decision (M3c, NB13):
+  `RedirectRefused` maps to exit 1 (the generic bucket)
+  now; whether a gateway 3xx should stay 1 or become
+  exit 3 (gateway error, Go's classification for
+  gateway HTTP failures) must be settled explicitly
+  in M4, not inherited silently.
+- `Unsupported` → exit 1 vs Go config-parse → exit 2
+  (M3c, N6): code UNCHANGED — this crate has no CLI,
+  so the CLI layer must map config rejections to 2
+  itself (documented in `error.rs` `Unsupported` docs
+  and in the §M3.2 error row).
+- QUIC `tls.insecure` is not mapped by dispatch
+  (M3c, NB9 follow-up): hysteria2/tuic dispatch uses
+  `quic: Default::default()`, so node QUIC TLS
+  verification is always on (webpki roots) and a
+  self-signed or private-CA server cannot work
+  through dispatch, even though sing-box hysteria2
+  outbound HAS `tls.insecure` (the Go control used
+  it). Mapping it is future work, explicit opt-in
+  only — see §M3.8 for the proof.
+
+## M3.4 Pin + license (Boss decision, verbatim)
+
+Pin: `honk-outbound = { git =
+"https://github.com/daeuniverse/honk", rev =
+"9e31cc0bd28825afdc0e384dc989bc3f076e69cf",
+features = ["rprx"] }` (workspace root; `honk-config` same
+rev), plus replicated `[patch.crates-io]` for `boring-sys`
+(Glassyiris `3beb573b65ecaa69b7eefe3c2fecd074b97facd2`)
+and `quinn`/`quinn-proto` (Glassyiris
+`11f1de84c28305a3c98ace6d681c35219a8d1e6c`). Choice:
+git-dep, NOT vendor. Reason + measurements (cue):
+`cargo vendor` trial in a temp dir took 33.8s and produced
+387M / 281 dirs (honk-outbound 4.9M, honk-config 2.4M);
+vendor only wins if an offline-build requirement is proven,
+which it is not for M3. New dep pins (exact, from the cue
+`Cargo.lock`): tokio `=1.48.0`, serde `=1.0.228`,
+serde_json `=1.0.145`, hyper `=1.8.1`, http `=1.3.1`,
+http-body-util `=0.1.3`, bytes `=1.11.0` (all matched the
+first cue resolution exactly — no pin had to be corrected).
+
+License (Boss decision, quoted verbatim): artifact Rust là
+GPL-3.0-only vì link honk; binary Go vẫn GPL-3.0-or-later;
+2 artifact, 2 license. Realisation: SPDX header
+`// SPDX-License-Identifier: GPL-3.0-only` + `// Copyright (c)
+2026 muse-cli contributors` (holder reused verbatim from
+the Go headers, which are uniform across the repo) on all
+44 `.rs` files (33 M1/M2 + 11 new, tests included);
+`[workspace.package] license = "GPL-3.0-only"` +
+`license.workspace = true` on all 8 crates;
+`rust/LICENSE` byte-identical to root `LICENSE`
+(sha256 `3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986`,
+674 lines, `cmp` clean); `rust/NOTICE`; root `NOTICE` §(b)
+honk entry + the sing-box sentence scoped to "The Go
+binary". "No unsafe" (D-M3-7): glue code in this crate
+contains zero `unsafe` by construction (grep check below
+is for the record; it could not be compiler-verified
+because of the blocker). The dependency tree DOES contain
+`unsafe` (honk-outbound alone: 65 hits in the probe) and C
+code (BoringSSL via boring-sys) — the Rust binary is NOT
+claimed unsafe-free anywhere in this PR.
+
+## M3.5 Verification on cue — BLOCKER (read this first)
+
+Gate 1 (PASSED on cue):
+```
+$ cargo tree -p castctl-transport --edges normal
+honk-config v0.1.0 (https://github.com/daeuniverse/honk?rev=9e31cc0bd28825afdc0e384dc989bc3f076e69cf#9e31cc0b)
+honk-outbound v0.1.0 (https://github.com/daeuniverse/honk?rev=9e31cc0bd28825afdc0e384dc989bc3f076e69cf#9e31cc0b)
+boring-sys v5.2.0 (https://github.com/Glassyiris/boring-sys?rev=3beb573b65ecaa69b7eefe3c2fecd074b97facd2#3beb573b)
+quinn v0.11.12 (https://github.com/Glassyiris/quinn?rev=11f1de84c28305a3c98ace6d681c35219a8d1e6c#11f1de84)
+quinn-proto v0.11.19 (https://github.com/Glassyiris/quinn?rev=11f1de84c28305a3c98ace6d681c35219a8d1e6c#11f1de84)
+```
+All three git sources resolve to the forks, not crates.io.
+`cargo tree` also resolved 276 packages (lock committed).
+
+Gate 2 (FAILED on cue — BLOCKER, work stopped here per the
+M3 brief: do NOT change the sha, do NOT upgrade the cue
+toolchain without a Boss decision):
+```
+$ cargo build -p castctl-transport
+error: rustc 1.97.1 is not supported by the following packages:
+  aya@0.16.0 requires rustc 1.98.0
+  aya-build@0.2.1 requires rustc 1.98.0
+  aya-ebpf-bindings@0.3.0 requires rustc 1.98.0
+  aya-ebpf-cty@0.4.0 requires rustc 1.98.0
+  aya-obj@0.6.0 requires rustc 1.98.0
+Either upgrade rustc or select compatible dependency versions with
+`cargo update <name>@<current-ver> --precise <compatible-ver>`
+```
+Root cause (verified, not guessed): honk's workspace pins
+`aya = "0.16"` (for `honk-ebpf-common`, pulled in by
+`honk-outbound`), honk's own `Cargo.lock` pins `aya
+0.16.0`, and honk's `rust-toolchain.toml` is `1.99.1`.
+Downgrading aya below 0.16 would violate honk's own version
+requirement, so there is no lock-only fix. Cue has only
+`1.97.1-x86_64-unknown-linux-gnu` (`rustup toolchain list`;
+no other toolchain installed). Consequences, stated
+plainly: `cargo build --workspace`, `cargo test
+--workspace`, `cargo clippy --workspace -- -D warnings`
+could NOT run on cue — cargo refuses before compiling
+anything, so even the non-honk modules are unverified by
+the compiler. `cargo fmt --check` DID run on cue and is
+clean (after `cargo fmt` on cue; formatted sources were
+synced back). Everything below that needs a compiler is
+therefore [CHƯA XÁC MINH], not passed:
+- All unit + integration tests (invariant tests, retry,
+  error mapping, token redaction, env-proxy, redirect).
+- Hyper compatibility with `Box<dyn AsyncReadWrite>`
+  (handshake over a honk stream) — code written against
+  the hyper 1.x API as documented, never compiled.
+- `HonkDialer: Send + Sync` (see §M3.3).
+- TLS parity (JA3/JA4 Go vs Rust), QUIC handshake, and
+  every build-time number (cold/warm build times are
+  unmeasured — no number is invented here).
+
+Two options for Boss (writer takes neither unilaterally):
+(a) upgrade the cue toolchain to rustc ≥ 1.98 (e.g.
+`rustup toolchain install` a newer stable) and re-run the
+full M3 gate; or (b) pick an older honk sha whose
+`honk-ebpf-common` does not require aya 0.16 / rustc 1.98,
+and re-run the gate with the new sha recorded everywhere
+the old one appears. Until one is chosen, this branch is
+LOCAL ONLY and must not be presented as passing.
+
+Static checks that DID run (no compiler needed):
+```
+$ find rust -name '*.rs' | wc -l
+44
+$ while read -r f; do head -3 "$f" | grep -q 'SPDX-License-Identifier: GPL-3.0-only' || echo "MISSING: $f"; done < <(find rust -name '*.rs' | sort)
+(no output — all 44 files carry the header)
+$ grep -rn 'GPL-3.0-or-later' rust --include='*.rs'
+(no output — no or-later in Rust sources)
+$ grep -rn 'HTTP_PROXY\|HTTPS_PROXY\|ALL_PROXY\|NO_PROXY' rust/castctl-transport/src
+(no hits outside the doc comment in dialer.rs that names
+the variables to forbid them — see the grep output in the
+writer report for the exact lines)
+$ grep -rn 'unsafe' rust/castctl-transport/src
+(no code hits; the word appears only in comments — the
+D-M3-7 rule statement and one test comment meaning
+"not safe-to-repeat", not the keyword)
+$ grep -rn 'unsafe {' rust/castctl-transport/src rust/castctl-transport/tests
+(no unsafe blocks in src/; the only two unsafe blocks are
+the env set_var/remove_var blocks in tests/env_proxy.rs,
+unsafe in edition 2024 by design, each with a SAFETY comment)
+$ grep -rn 'unwrap()\|expect(' rust/castctl-transport/src
+(all hits inside #[cfg(test)] modules, on static fixtures;
+zero in non-test code)
+$ cmp LICENSE rust/LICENSE && echo byte-identical
+byte-identical (sha256 3972dc97…dfb36986, 674 lines)
+```
+
+`git diff --stat` at submission is confined to `rust/`,
+`NOTICE` and `docs/provenance.md` (verified before commit;
+the Go tree is untouched). Nothing was pushed; no PR was
+opened; CI Go status is therefore "not run for this
+branch" — not claimed green.
+
+## M3.6 Toolchain pin 1.99.1 (Boss decision, hướng (a))
+
+Supersedes the 1.97.1 toolchain line above for the M3b
+rerun; the M3 submission history in §M3.5 is not rewritten.
+Reason for the pin, measured: honk at the pinned rev
+(`9e31cc0`) pulls `aya 0.16.0` through `honk-ebpf-common`
+(`aya = "0.16"` in honk's workspace; `Cargo.lock` reverse
+lookup shows only `honk-outbound` depends on
+`honk-ebpf-common`), and `aya 0.16.0` requires rustc >=
+1.98 — the exact M3 blocker error (`aya@0.16.0 requires
+rustc 1.98.0`, §M3.5). There is no lock-only fix (lowering
+aya would violate honk's own version requirement), and the
+sha is NOT changed (Boss direction: no sha change). 1.99.1
+is chosen because it matches honk's own
+`rust-toolchain.toml`; the pin lives in
+`rust/rust-toolchain.toml` (`channel = "1.99.1"`,
+components `clippy` + `rustfmt`, `profile = "minimal"`)
+so any machine reproduces the build without changing its
+default toolchain.
+
+Cue toolchain install (Boss direction, verbatim shape:
+`rustup toolchain install 1.99.1 --profile minimal`,
+then `rustup component add --toolchain 1.99.1 clippy
+rustfmt`), run on cue 2026-11-05:
+```
+$ rustup toolchain list   (before)
+1.97.1-x86_64-unknown-linux-gnu (active, default)
+$ rustup toolchain install 1.99.1 --profile minimal
+info: latest update on 2026-10-15 for version 1.99.1 (58cf8f9c3 2026-10-13)
+1.99.1-x86_64-unknown-linux-gnu installed - rustc 1.99.1 (58cf8f9c3 2026-10-13)
+$ rustup component list --toolchain 1.99.1 | grep -E "^(clippy|rustfmt)-"
+clippy-x86_64-unknown-linux-gnu (installed)
+rustfmt-x86_64-unknown-linux-gnu (installed)
+$ rustup toolchain list   (after)
+1.97.1-x86_64-unknown-linux-gnu (active, default)
+1.99.1-x86_64-unknown-linux-gnu
+$ rustc --version; cargo --version   (outside any rust/ dir)
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+cargo 1.97.1 (c980f4866 2026-06-30)
+$ cargo +1.99.1 --version; cargo +1.99.1 clippy --version; cargo +1.99.1 fmt --version
+cargo 1.99.1 (5f94df478 2026-08-27)
+clippy 0.1.99 (58cf8f9c35 2026-10-13)
+rustfmt 1.10.0-stable (58cf8f9c35 2026-10-13)
+```
+Default NOT changed, old toolchain NOT deleted (both
+lines above prove it). Side effect, recorded honestly:
+rustup itself self-updated 1.29.1 → 1.29.3 during the
+install check; that changes the rustup binary, not any
+toolchain or default. Whether the rustup shim on cue
+honors `rust/rust-toolchain.toml` (vs explicit
+`cargo +1.99.1` invocation) is probed in §M3.7 before
+any claim is made about the file.
+
+Transitive-only note (also in `rust/NOTICE` and
+`docs/provenance.md` §13): `aya` / `honk-ebpf-common`
+are transitive dependencies NOT used by castctl code —
+no castctl source imports them (grep clean in
+`rust/castctl-transport/{src,tests}` and the workspace
+`Cargo.toml`). The nuance, checked against the cargo git
+checkout on cue and recorded in §M3.7 (not assumed
+here): `aya` is pure transitive (no `aya::` reference
+in honk-outbound source either), while
+`honk-ebpf-common` IS used by honk-outbound itself
+(socket-mark constants in its direct dial path) —
+castctl never touches either crate.
+
+## M3.7 — Gate green on cue with toolchain 1.99.1 (M3b)
+
+Toolchain-shim proof (cue, `/tmp/castctl-rust-m3/rust`):
+`cargo --version` prints `cargo 1.99.1 (5f94df478
+2026-08-27)` and `rustup show` reports the toolchain
+active because it is "overridden by
+'/tmp/castctl-rust-m3/rust/rust-toolchain.toml'". The
+gates below therefore ran under 1.99.1 via the plain
+`cargo` shim, not via an explicit `cargo +1.99.1`
+invocation (that invocation was also verified in §M3.6
+and gives the same toolchain).
+
+Cue provisioning for the build (environment, not code):
+`cmake` 3.28.3 (`apt-get install -y cmake`, after the
+boring-sys build failed with "is `cmake` not
+installed?") and `libclang-dev` (libclang-18, after
+bindgen 0.72.1 failed with "Unable to find libclang");
+`ninja` still absent, `make` is the fallback generator.
+rustup self-updated 1.29.1 → 1.29.3 during the toolchain
+install; that changes the rustup binary, not any
+toolchain or default.
+
+Gate run "attempt 6" (cue, plain `cargo`, 1.99.1):
+- `cargo fmt` (apply) exit 0, then `cargo fmt --check`
+  exit 0 (formatting synced back to the local tree).
+- `cargo build --workspace` exit 0, cold, 1m 35s.
+- `cargo test --workspace` exit 0: 229 passed, 0 failed,
+  0 ignored — castctl-cli 41, castctl-config 87,
+  castctl-log-redact 46, castctl-rs 0, parity 2,
+  castctl-shared 7, castctl-tg-files 2, castctl-tg-text
+  10, castctl-transport lib 25, env_proxy 1, rpc 8,
+  doc-tests 0 (7 targets). Invariant tests present:
+  `env_proxy_is_ignored`, `redirect_is_refused_and_
+  second_server_gets_nothing`,
+  `token_in_request_body_never_appears_in_errors`,
+  retry-matrix tests.
+- `cargo clippy --workspace -- -D warnings` exit 0,
+  1m 07s, no `#[allow]` added (no blanket allows at all).
+
+Code fixes between the M3 submission and the green
+gate (all in `rust/castctl-transport`, no sha or
+toolchain change, no lowered criterion):
+- E0119 conflicting `Debug` impls for
+  `config::Dispatch`: removed `#[derive(Debug)]`, kept
+  the hand-written redacting impl (passwords never
+  printed; covered by
+  `dispatch_debug_never_prints_passwords`).
+- E0277 hyper `rt::Read/Write` not satisfied for honk's
+  tokio stream: wrapped the dialed stream with
+  `hyper_util::rt::TokioIo` (canonical hyper↔tokio
+  adapter, zero-copy wrapper) in `http.rs`; added
+  `hyper-util` to the workspace (`=0.1.20`, resolved on
+  cue to 0.1.20, checksum
+  `96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0`)
+  and to `castctl-transport` (`features = ["tokio"]`).
+  This resolves the writer's uncompiled hyper-handshake
+  uncertainty from §M3.
+- Format-string bug in the vless-reality test
+  (`config.rs`): one extra `}` removed from the tail.
+- `Dispatch::Honk(Box<Node>)` (was `Node`): fixes
+  clippy `large_enum_variant` (728-byte variant vs.
+  unit variants); construction updated to
+  `Box::new(node)`.
+- Merged nested reality `if`s into one `&&`
+  (`collapsible_if`); struct-literal `Node { …,
+  ..Default::default() }` init
+  (`field_reassign_with_default`); factored
+  `DialFuture<'a>` alias (`type_complexity`);
+  `split_once('/')` in `validate_content_type`
+  (`manual_split_once`, semantics identical);
+  blank doc line in `retry.rs` and moving the alias doc
+  after the trait (`doc_lazy_continuation` ×7 + ×2);
+  `200` → `200u16` and `|_: &RequestRecord|` closure
+  annotation in `tests/env_proxy.rs` (E0271 + Fn
+  generality); rustfmt normalization in `config.rs` /
+  `dialer.rs`.
+- Non-gate warning left as-is (recorded, not churned):
+  `cargo test` shows `field 'headers' is never read`
+  for `RequestRecord.headers` in
+  `tests/common/mod.rs:26` (rpc test target); the
+  clippy gate has no `--all-targets`, so it does not
+  fail the gate.
+
+Ebpf nuance (verified on cue, corrects the "only to
+satisfy the dependency graph" phrasing for one crate):
+- `aya` 0.16.0 (+ aya-build, aya-ebpf-bindings,
+  aya-ebpf-cty, aya-obj): pure transitive. No `aya::`
+  reference in honk-outbound source (grep empty in the
+  cue checkout
+  `crates/honk-outbound/src`); it enters only via
+  `honk-ebpf-common`'s own dependencies. Only
+  `honk-outbound` depends on `honk-ebpf-common`
+  (Cargo.lock reverse lookup).
+- `honk-ebpf-common`: NOT used by castctl code (grep
+  clean), but honk-outbound itself uses its constants
+  in the direct dial path: `CLASSIFIED_MARK` in
+  `proxy/direct.rs:32` (`DirectMark::socket_mark`,
+  used at lines 51/87) and `DAE_BYPASS_MARK` in
+  `util.rs:29`, plus a test-only import in
+  `proxy/packet/socket_mark_tests.rs:6`. It is a
+  live honk dependency (SO_MARK for direct sockets),
+  not dead weight inside honk. The Boss line stands
+  for castctl: neither crate is used by castctl code.
+
+## M3.8 — TLS / QUIC parity on cue (M3b, after the gate)
+
+Method (same parser both sides, so parser quirks
+cancel out): a record-only Python TCP listener on
+127.0.0.1 captures the first TLS record (ClientHello);
+a Python parser reports JA3 (classic, GREASE kept),
+JA4-like (this parser's variant: version from
+supported_versions, SNI d/i, 2-digit cipher/
+extension counts excluding SNI+ALPN, ALPN first+last
+char of the first advertised value, GREASE→0000
+BEFORE sorting, first 12 hex of SHA256 over sorted
+ciphers and over sorted extensions + presented-order
+signature algorithms), plus all raw ordered lists.
+Standard JA4 (FoxIO: GREASE excluded ENTIRELY from
+lists and counts, same hash construction otherwise,
+ALPN = first advertised value's first+last char)
+was recomputed from the SAME captures in M3c with
+an independent script (`notes/parity/ja4std-m3c.py`,
+kept outside the repo tree for re-review); the
+alternative ALPN convention (first char of the
+first value + last char of the LAST value) would
+give `h1` instead of `h2` in the ALPN field and is
+not the column published here.
+N = 5 runs per side per row. Go side: scratch clone
+on cue (`/tmp/parity-go`, never in the repo tree) +
+throwaway test `TestZZParityClientHello` with the
+canonical castctl tags
+`with_utls,with_quic,with_wireguard,with_gvisor`
+(docs/development.md:10). Rust side: cue-only example
+`castctl-transport/examples/parity_dial.rs` (never
+committed; removed by the final local→cue sync).
+Fixture (ephemeral, same both sides): SNI
+`example.com`, trojan (plain TLS row) and vless +
+REALITY (reality row, short_id `0123abcd`, one
+ephemeral X25519 public key — public only, no
+private key generated or stored; password/UUID are
+fake test values). Cue Go notes: `/usr/local/bin/go`
+is a wrapper that exports `GOTOOLCHAIN=local`
+(castctl's go.mod needs ≥ 1.27.3, cue's go is 1.26.8),
+so parity used the real `/usr/local/go/bin/go` with
+`GOTOOLCHAIN=auto` (toolchain downloaded on demand);
+the wrapper itself was NOT modified. Reality key
+encoding differs between stacks: sing-box rejects
+the padded base64 form ("illegal base64 data at
+input byte 43", the trailing `=`), so the Go side
+used the same key bytes unpadded while honk accepts
+the padded form.
+
+Parser bug found by recomputation (disclosed, not
+hidden): the first JA4 implementation sorted cipher/
+extension lists BEFORE normalising GREASE, so the
+random GREASE value leaked into the hash through its
+sort position and JA4 varied run to run. Fixed to
+normalise-then-sort; all JA4 values below are the
+corrected ones. Raw fields (cipher/extension sets,
+groups, sigalgs) were never affected. JA3 varies per
+run on both sides by design (GREASE kept, presented
+order) — 5 distinct JA3 per side per row — so JA3
+equality is not the comparison; the stable sets are.
+
+M3c label correction (NB7): the M3b values were
+called "JA4", but the parser's GREASE→0000-then-sort
++ count-with-GREASE convention is NOT standard JA4
+(FoxIO excludes GREASE entirely from lists and
+counts). The M3b values are relabelled JA4-like
+above, and the standard-JA4 column was recomputed
+from the same captures with an independent script
+(fresh TLS walk + JA4 construction, kept as
+`notes/parity/ja4std-m3c.py` outside the repo tree
+for re-review). The parity
+conclusion is unchanged under both variants: Go ≠
+Rust on both rows.
+
+TLS row (trojan, utls chrome both sides; SNI
+`example.com`, ALPN `[h2, http/1.1]` both sides):
+- Go JA4-like (stable ×5):
+  `t13d1616h2_74c5f98c3854_f20eef27beb5`.
+  Rust JA4-like (stable ×5):
+  `t13d1814h2_4be38248e33f_2ecda25e495a`.
+  Standard JA4 (same captures, GREASE excluded
+  entirely, recomputed independently in M3c): Go
+  `t13d1514h2_8daaf6152771_d8a2da3f94cd`, Rust
+  `t13d1712h2_5b57614c22b0_a7c1ad54107f`.
+  Fingerprints differ under BOTH variants (JA4-like
+  cipher count 16 vs 18, extension count 16 vs 14;
+  standard 15 vs 17, 14 vs 12) — a listed difference,
+  NOT a gate failure, and NOT claimed as a match.
+- Cipher sets (non-GREASE, sorted): Go 15 suites
+  `1301,1302,1303,c02b,c02c,c02f,c030,cca8,cca9,
+  c013,c014,009c,009d,002f,0035` (+1 GREASE = 16).
+  Rust 17 suites: the same 15 + `c009,c00a`
+  (ECDHE-ECDSA AES-SHA CBC suites utls-chrome does
+  not send) (+1 GREASE = 18).
+- Extension sets (non-GREASE, sorted): shared 11
+  `000a,000b,000d,0017,001b,0023,002b,002d,0033,
+  fe0d,ff01` (+ SNI `0000` + ALPN `0010` both sides).
+  Go-only: `0005` (status_request), `0012`
+  (signed_certificate_timestamp). Rust-only: none —
+  `44cd` (Go) and `4469` (Rust) are the SAME
+  extension, ALPS: both are fixed (present in all 5
+  runs on their side) with byte-identical 5-byte
+  payloads `00 03 02 68 32` (ALPS advertising `h2`),
+  and honk attaches ALPS at codepoint 0x4469 (see
+  research-honk) while utls-chrome uses the older
+  0x44cd codepoint. Confidence: measured from the
+  captures + the honk anchor; utls source was NOT
+  grepped for the literal, so this is identification
+  by payload + anchor, not by source proof. After
+  unifying ALPS, the TLS-row extension difference
+  is exactly Go-only `0005` + `0012`.
+- Same both sides: supported_groups
+  `{11ec,001d,0017,0018}` (+ GREASE; `11ec` =
+  X25519MLKEM768), key_share groups
+  `{GREASE,11ec,001d}`, supported_versions
+  `{GREASE,0304,0303}`, signature_algorithms
+  `0403,0804,0401,0503,0805,0501,0806,0601`,
+  extension order fully permuted on every run
+  (no two runs share an order — both sides permute
+  like Chrome).
+- Record length: Go 1721–1817 bytes, Rust
+  1712–1776 bytes (variation within a side is
+  GREASE/session randomness, not a set change).
+
+REALITY row (vless + REALITY, utls chrome both sides):
+- Go JA4-like = its TLS JA4-like exactly
+  (`t13d1616h2_74c5f98c3854_f20eef27beb5`, ×5),
+  and Go standard JA4 = its TLS standard JA4
+  (`t13d1514h2_8daaf6152771_d8a2da3f94cd`, ×5):
+  same cipher set, same extension set, same
+  sigalgs as Go TLS. Differences vs Go TLS: no
+  `11ec` group (supported_groups `{GREASE,001d,
+  0017,0018}`, key_share `{GREASE,001d}` — REALITY
+  drops the MLKEM768 hybrid, X25519 only) and much
+  smaller records (499–595 bytes, no MLKEM768 key
+  share).
+- Rust JA4-like (stable ×5):
+  `t13d0412h2_16c83510387f_a735005f8dcf`, standard
+  JA4 (stable ×5):
+  `t13d0310h2_55b375c5d22e_6fb7db78d84a` — a
+  DIFFERENT, TLS-1.3-only profile: 3 + GREASE
+  ciphers (`1301,1302,1303` only), 12 + SNI + ALPN
+  extensions (includes `0005` + `0012` like Go,
+  ALPS at `4469` = Go's `44cd` with the same
+  `00 03 02 68 32` payload, lacks `000b`, `0017`,
+  `0023` and `ff01`), supported_groups
+  `{GREASE,11ec,001d}` (MLKEM768 KEPT, no
+  `0017`/`0018`), supported_versions `{GREASE,0304}`
+  only, record length 1706–1770 bytes. Honk's
+  REALITY ClientHello does not match sing-box/utls
+  chrome REALITY ClientHello — the largest parity
+  gap in this section, listed, not a gate failure.
+
+QUIC (hysteria2): controlled server = sing-box
+v1.14.4 installed on cue via `go install -tags
+with_quic,with_utls` (version string "unknown", as
+expected for a module install), hysteria2 inbound
+on 127.0.0.1:18900/18901, self-signed cert
+(SAN localhost + 127.0.0.1), password fake.
+- Go control client (sing-box hysteria2 outbound,
+  same server): handshake + auth + connect PROVEN
+  by the server log (`inbound connection from
+  127.0.0.1:38043`, `inbound connection to
+  127.0.0.1:18080`, `outbound connection to
+  127.0.0.1:18080`). Its echo round-trip then
+  failed with `read: EOF` (test-harness artifact,
+  not investigated further — the handshake proof
+  stands on the server log).
+- Rust honk client, M3b: handshake NOT proven. Dial
+  fails fast with `connection down: QUIC connect to
+  127.0.0.1:18900 (attempt 3)` (same on 18901),
+  and the server log shows NO Rust connection
+  attempt at all. Against a blackhole UDP listener
+  on 18902 the same client sends 26 valid-looking
+  QUIC v1 Initial packets (1200 bytes, 3 bursts =
+  3 attempts, DCIDs `38cc…`, `1575…`, `2c03…`)
+  and retransmits until the 30 s timeout — so
+  packets leave the client, and the failure is NOT
+  packet loss. The M3b report attributed it to a
+  handshake-content mismatch (ALPN / transport
+  parameters / TLS profile inside honk's Initial);
+  that attribution was UNPROVEN (the Initial
+  payload was NOT decrypted — QUIC Initial keys are
+  derivable from the DCID, but that analysis was
+  not done).
+- Rust honk client, M3c (NB9, decisive): the
+  content-mismatch attribution is REFUTED. On a
+  fresh controlled server (same shape: sing-box
+  v1.14.4, hysteria2 127.0.0.1:18900, self-signed
+  cert SAN localhost + 127.0.0.1, password fake,
+  echo on 18080), the dispatch-default client
+  reproduces the M3b failure verbatim
+  (`QUIC connect to 127.0.0.1:18900 (attempt 3)`),
+  while the SAME client with ONLY node-level
+  `quic.tls.skip_cert_verify = true` (set via
+  `Node::tls_mut()` in a cue-only harness, never
+  through dispatch) dials OK and echoes
+  (`read 2 bytes: [111, 107]` = "ok"). The server
+  log shows no connection for the failing case
+  (the client aborts before auth, so sing-box never
+  logs an inbound connection) and the full
+  connection + data path for the passing case.
+  Root cause of the M3b failure: client-side
+  certificate verification — honk verifies the
+  server cert against its webpki-only root store
+  (`tls.rs` `root_store`, Mozilla roots, NOT the
+  system store), so a self-signed server cert is
+  rejected; the Go control worked because it used
+  `tls.insecure=true`. Packets, ALPN, transport
+  parameters and the TLS profile were all fine —
+  the handshake completes and data flows once
+  verification is skipped. The Go control was NOT
+  re-run in M3c: the passing Rust run against the
+  same server subsumes its role (proving the server
+  works). Artifacts (cue-only harness + run log +
+  server log): `notes/parity/quic_m3c.rs`,
+  `quic-m3c-runs.log`, `quic-m3c-server.log`.
+  Follow-up, NOT in this loop: M3 dispatch maps
+  hysteria2 with `quic: Default::default()` and
+  never surfaces an insecure option, while sing-box
+  hysteria2 outbound HAS `tls.insecure`. Mapping
+  `tls.insecure` → node `quic.tls.skip_cert_verify`
+  is future work and must stay explicit opt-in,
+  never a default. Also note for that work: honk's
+  webpki-only store means even a private CA trusted
+  by the system would fail; only skip (or a
+  publicly-trusted cert) works through honk today.
+- QUIC verdict: Rust QUIC handshake against a
+  controlled server through DISPATCH: FAILED (the
+  dispatch path cannot skip verification, so a
+  self-signed server cannot work through it); the
+  honk QUIC stack itself is PROVEN working once
+  verification is skipped. This is a parity finding,
+  not a gate failure: the M3 gates are the four
+  commands in §M3.7, all green.
+- Go control scope note (M3b, kept): the Go control
+  proved handshake + auth + connect by server log
+  only — its echo round-trip failed with
+  `read: EOF` (harness artifact), so the Go control
+  proves no data path. Data-path QUIC is now proven
+  on the Rust side (M3c echo above), not on the Go
+  side.
+
+## M3.9 — Build prerequisites on cue (supplement)
+
+What a fresh cue checkout needs before `cargo build
+--workspace` (all verified on cue; no other host is
+claimed):
+- Rust toolchain 1.99.1 via `rust/rust-toolchain.toml`
+  (rustup installs it on demand with profile minimal
+  + clippy/rustfmt; 1.97.1 stays the default on cue).
+  MSRV note (M3c, NB11): `rust-version` in
+  `rust/Cargo.toml` is 1.98, not the M3-submission
+  1.85 — honk pulls aya 0.16.0 via honk-ebpf-common,
+  and aya 0.16 requires rustc ≥ 1.98. The pin only
+  works through the RUSTUP SHIM: a standalone cargo
+  install ignores `rust-toolchain.toml` entirely and
+  stays on its own toolchain, so on a machine with
+  only cargo 1.97.1 the build fails on aya with a
+  confusing "requires rustc 1.98" error before
+  compiling anything. Always run plain `cargo` (the
+  shim) from inside `rust/` so the pin applies.
+- `cmake` 3.28.3 (`apt-get install -y cmake`):
+  boring-sys's build script shells out to cmake
+  (without it: "is `cmake` not installed?").
+  `ninja` is NOT installed on cue and NOT needed:
+  `make` is the fallback generator and the gates
+  pass with it (ninja would only speed the
+  BoringSSL build, not unblock it).
+- `libclang-dev` (`apt-get install -y libclang-dev`,
+  provides libclang-18): bindgen 0.72.1 needs
+  libclang to build boring-sys v5.2.0 (without it:
+  "Unable to find libclang ... set the
+  LIBCLANG_PATH environment variable ...").
+  `clang` (the compiler binary) is NOT installed on
+  cue and NOT needed: bindgen needs the shared
+  library, not the compiler driver.
+- `LIBCLANG_PATH` status, measured, not assumed:
+  after the libclang-dev install, the build passes
+  WITHOUT `LIBCLANG_PATH` (attempt-6 gates and the
+  final-verify gates both ran without it), because
+  bindgen finds the dev symlink
+  `/usr/lib/llvm-18/lib/libclang.so` (which points
+  at `/lib/x86_64-linux-gnu/libclang-18.so.18`;
+  ldconfig lists `libclang-18.so.18` and
+  `libclang-18.so`). The parent-supplied fallback
+  `LIBCLANG_PATH=/usr/lib/llvm-18/lib` was ALSO
+  tested and is a valid value (see the timing run
+  below — it succeeds with the variable exported),
+  but it was NOT the fix and is NOT required on
+  cue as configured; do not claim otherwise. The
+  earlier `warm2` bindgen failure predates the
+  libclang-dev install (the file did not exist at
+  all then), so it is not evidence that bindgen
+  cannot discover an existing libclang.
+  Two M3c clarifications (NB12), both about what
+  the measurements do NOT prove: (a) the
+  `LIBCLANG_PATH` trial ran WITH libclang-dev
+  already installed, so it does NOT prove that
+  `LIBCLANG_PATH` alone substitutes for libclang-dev
+  on a fresh machine — a fresh machine still needs
+  the `apt-get install -y cmake libclang-dev` step
+  above (the Boss-ordered sequence — try
+  `LIBCLANG_PATH` first, apt only if it fails — is
+  preserved as history; its outcome was that apt
+  was needed and is sufficient). (b) Runtime lib vs
+  dev symlink: the runtime package provides only the
+  versioned soname (`libclang-18.so.18`, seen via
+  ldconfig); bindgen needs the UNVERSIONED dev
+  symlink `libclang.so` that only libclang-dev
+  installs — pointing `LIBCLANG_PATH` at a directory
+  holding just the versioned soname does NOT satisfy
+  bindgen. This reconciles the two observations that
+  looked contradictory: the file Boss saw existing
+  was the dev symlink AFTER the install, while the
+  `warm2` failure happened BEFORE the install, when
+  no libclang of either kind was present.
+- boring-sys first-build cost (measured on cue, 8
+  CPUs): `cargo clean -p boring-sys` removed 5527
+  files / 483.3 MiB, then `time LIBCLANG_PATH=
+  /usr/lib/llvm-18/lib cargo build -p boring-sys`
+  finished in real 0m 48.8 s (user 2m 27.2 s, sys
+  0m 26.6 s), exit 0. Full cold workspace build:
+  1m 31s–1m 35s (§M3.7, final verify).
+
+## M3.10 — Fix loop vòng 1 (M3c, trên `feab242`)
+
+Phase 3 review của M3 (technical FAIL với 2 blocking,
+safety PASS với 2 non-blocking, red-team FAIL với 1
+blocking) được sửa trong loop này. Mọi thay đổi đều
+trong `rust/`, `NOTICE`, `docs/provenance.md`; không
+đổi sha honk, không đổi toolchain pin (1.99.1), không
+sửa Go, không wire CLI mạng, không WireGuard. Test
+mới được viết ĐỎ trước rồi sửa cho xanh ở những chỗ
+có thể (blocking T-B1/T-B2/R-B1 đều có test mới).
+
+Blocking (đã sửa):
+- T-B1 — `rpc.rs decode_response` theo đúng thứ tự Go
+  `CallJSON`: chỉ `ok` BOOLEAN false mới lỗi; còn lại
+  có `result` là trả `result` (kể cả `ok` vắng mặt hay
+  non-bool). Test mới:
+  `decode_result_without_ok_and_with_non_bool_ok`.
+  Claim "verbatim" ở §M3.2 giờ mới đúng.
+- T-B2 — `config.rs build_tls` phân biệt block vắng vs
+  field vắng: `utls` vắng → `None` (default chrome);
+  block có mặt → `Some(field.unwrap_or(false))` (thiếu
+  field = tắt → `Unsupported`); reality chỉ bật khi
+  `tls.enabled && reality.enabled == Some(true)`; TLS
+  tắt ⇒ reality fields `None` (trước đây honk
+  `TlsOptions::is_secure()` = enabled OR reality key
+  present sẽ chạy REALITY handshake cho node tắt TLS).
+  Test mới: `tls_presence_block_vs_field` (4 trường
+  hợp: utls thiếu field → `Unsupported`; utls vắng →
+  default; reality thiếu field → không key; TLS tắt +
+  reality bật → không key; control dương: TLS bật +
+  reality bật → có key).
+- R-B1 — `http.rs` đọc body theo frame với cap trong
+  lúc đọc (trước đây `collect()` rồi mới kiểm tra >
+  16 MiB → OOM trước khi câu if chạy). Vượt cap →
+  `Gateway` (exit 3, không retry được: retry sẽ tải
+  lại đúng body quá lớn tới hết budget; quyết định
+  này khớp class server-side failure của Go, và
+  `BodySummary` cho trường hợp này mang
+  `body_length` None — độ dài thật không biết, chỉ
+  biết vượt cap — thay vì ghi MAX+1 như độ dài thật).
+  Test mới: `oversized_body_is_gateway_exit_3_not_success`
+  (17 MiB) và `endless_body_aborts_early_with_gateway_error`
+  (chunked vô hạn, abort sớm, không đọc hết).
+
+Non-blocking (đã sửa):
+- N1 (= red NB1) — hyper handshake failure →
+  `ConnectionDown` (chưa gửi byte request nào, Go
+  "nothing sent"). Test trực tiếp cho nhánh handshake
+  không quan sát được ở tầng HTTP/1.1 (xem [CHƯA XÁC
+  MINH]); test mới pin phía đối chứng:
+  `send_after_peer_close_is_connection_error_not_down`
+  (lỗi SAU khi gửi là `ConnectionError`, không phải
+  `ConnectionDown`).
+- N2 — bật `serde_json` feature `arbitrary_precision`
+  (chỉ `castctl-transport` dùng serde_json trong
+  workspace nên an toàn); test mới
+  `decode_numbers_beyond_u64_keep_literal` (2^64 và
+  thập phân dài giữ literal; `json!` không tạo được
+  số > u64 nên fixture là JSON text thô).
+- N3 (= red NB5) — `body_to_query` implement `%v` cho
+  giá trị lồng (`pythonStr` default branch): array
+  `[elem elem]`, object `map[k:v …]` key đã sort,
+  bool lồng `true`/`false` (khác top-level
+  `True`/`False`), null lồng `<nil>`; doc cũ "Go does
+  not define" là SAI và đã sửa. Test mới
+  `get_body_to_query_nested_python_str`; test cũ assert
+  nested → lỗi đã đổi theo.
+- N4 — `routes.rs` doc sửa: duplicate bị drop, `len()`
+  đếm distinct (không còn câu "duplicates still count
+  toward the total").
+- N5 — `tests/common/mod.rs` bỏ field
+  `RequestRecord.headers` (không test nào đọc) + code
+  populate nó; header vẫn được parse local để lấy
+  `content-length`.
+- N6 — KHÔNG đổi code; doc đã có trong `error.rs`
+  (`Unsupported`: "CLI layer must map config
+  rejections to 2 itself") và đã bổ sung vào §M3.2 —
+  trạng thái: documented/verified.
+- Safety NB-1 — `HttpResponse` viết tay `Debug` chỉ in
+  status + body length (mẫu `BodySummary`); test mới
+  `http_response_debug_hides_headers_and_body`
+  (Set-Cookie + body secret không xuất hiện).
+- Safety NB-2 — bỏ field `location` khỏi
+  `RedirectRefused` (thành unit variant): grep xác
+  nhận không code nào trong crate đọc field (chỉ doc
+  ở `http.rs`, code tạo lỗi, và test dùng pattern
+  `{..}`); pattern test đã đổi thành unit.
+- Red NB2 — `DirectDialer`: timeout 10s của 1 addr
+  không còn trả `Timeout` ngay; thử hết addrs, hết
+  thì `ConnectionDown`. Test mới
+  `direct_dialer_unanswered_address_is_connection_down_not_timeout`
+  (10.255.255.1, tối đa 10s khi thật sự treo) và
+  `direct_dialer_falls_back_to_working_address`
+  (localhost, caveat thứ tự resolver — xem dưới).
+- Red NB3 — `call_json` bọc toàn bộ `run_with_retry`
+  trong `tokio::time::timeout` bằng request timeout
+  (overall cap; expiry → `Timeout`, không retry).
+  Test mới `overall_timeout_caps_retrying_slow_failures`
+  (server đóng không đáp: retry budget 5s, request
+  timeout 300ms → lỗi `Timeout` sau ~300ms, đã retry
+  ≥ 2 lần trước khi cap cắt).
+- Red NB4 — `HonkDialer` lặp qua mọi addr thay vì
+  chỉ `addrs[0]`. Test mới
+  `honk_dialer_falls_back_to_working_address` (direct
+  node qua registry, localhost; cùng caveat resolver).
+- Red NB6 — KHÔNG đổi code `build_tls`: hai đường
+  TLS khác nhau thật (xem §M3.3) — outbound parse
+  theo sing-box pointer semantics, gateway DialTLS ép
+  `Enabled=true` là việc M4. Trạng thái: documented.
+- Red NB7 — nhãn "JA4" của M3b đổi thành JA4-like;
+  cột JA4 CHUẨN (GREASE loại hoàn toàn) recompute
+  từ cùng captures bằng script độc lập
+  (`notes/parity/ja4std-m3c.py`, ngoài cây repo):
+  Go TLS/REALITY
+  `t13d1514h2_8daaf6152771_d8a2da3f94cd`, Rust TLS
+  `t13d1712h2_5b57614c22b0_a7c1ad54107f`, Rust
+  REALITY `t13d0310h2_55b375c5d22e_6fb7db78d84a`
+  (ổn định ×5 mỗi hàng; ALPN = ký tự đầu+cuối của
+  giá trị ALPN đầu tiên; biến thể first-of-first +
+  last-of-last cho `h1` được ghi chú trong §M3.8).
+  Kết luận parity (Go ≠ Rust) ĐỨNG dưới cả hai
+  biến thể. `rust/NOTICE` + `docs/provenance.md`
+  cập nhật nhãn tương ứng; root `NOTICE` không nhắc
+  JA4 nên không đổi.
+- Red NB8 — `44cd` (Go) / `4469` (Rust) là CÙNG ALPS:
+  payload byte-identical `00 03 02 68 32` cả hai
+  hàng, honk gắn ALPS ở 0x4469 (anchor
+  research-honk). Mức tin cậy: đo từ .bin + anchor,
+  chưa grep source utls nên không tuyệt đối. Sau khi
+  hợp nhất ALPS, diff hàng TLS còn Go-only `0005` +
+  `0012`; hàng REALITY còn Go-only `000b`, `0017`,
+  `0023`, `ff01`.
+- Red NB9 — ĐÃ CHỨNG MINH BẰNG THỰC NGHIỆM (không
+  còn là giả thuyết): trên server đối chứng mới
+  (sing-box v1.14.4, hysteria2 127.0.0.1:18900,
+  cert tự ký SAN localhost + 127.0.0.1, echo
+  18080), client dispatch-default tái hiện đúng lỗi
+  M3b (`QUIC connect to 127.0.0.1:18900 (attempt
+  3)`); cùng client chỉ khác
+  `quic.tls.skip_cert_verify = true` (đặt qua
+  `Node::tls_mut()` trong harness chỉ-trên-cue, không
+  qua dispatch) thì dial OK + echo "ok" (2 byte
+  [111, 107]). Kết luận: chẩn đoán "content
+  mismatch" của M3b bị BÁC — nguyên nhân là verify
+  chứng chỉ client-side (honk chỉ tin webpki roots,
+  không dùng system store). Verdict cập nhật: QUIC
+  qua DISPATCH vẫn FAILED (dispatch không có đường
+  skip verify); bản thân stack QUIC của honk đã
+  ĐƯỢC CHỨNG MINH là làm việc khi skip verify.
+  Wording §M3.8 đã sửa theo; artifact:
+  `notes/parity/quic_m3c.rs` (harness, sha256
+  741f9118…e0de0d, byte-identical với bản chạy
+  trên cue), `quic-m3c-runs.log`,
+  `quic-m3c-server.log` (server log không có
+  connection cho case lỗi, có đủ connection + data
+  path cho case pass). Go control KHÔNG chạy lại
+  trong M3c: run Rust pass trên cùng server đã thay
+  vai trò chứng minh server làm việc. Follow-up
+  (ngoài loop): map `tls.insecure` → skip_cert_verify,
+  explicit opt-in only — xem §M3.3.
+- Red NB10 — chỉ document (§M3.3 watch-item M4):
+  `HonkDialer::new` bypass validation +
+  `apply_tls_mode`; node QUIC không bao giờ qua
+  `apply_tls_mode` nên mode QUIC-TLS luôn là default
+  của honk. Không đổi API.
+- Red NB11 — `rust-version` 1.85 → 1.98 trong
+  `rust/Cargo.toml` (workspace duy nhất có dòng này;
+  mọi crate con đều `rust-version.workspace = true`);
+  §M3.9 thêm tiền đề rustup shim (cargo standalone
+  bỏ qua `rust-toolchain.toml`, kẹt 1.97.1 → fail
+  aya khó hiểu). §M3 intro (dòng 998) giữ nguyên
+  1.85 vì đó là record lúc nộp M3, không viết lại
+  lịch sử.
+- Red NB12 — §M3.9 làm rõ: (a) lần thử LIBCLANG_PATH
+  có sẵn libclang-dev nên không chứng minh nó thay
+  được libclang-dev trên máy mới (máy mới vẫn cần
+  apt cmake + libclang-dev; thứ tự Boss chỉ đạo giữ
+  nguyên như lịch sử); (b) runtime lib (versioned
+  soname `libclang-18.so.18`) vs dev symlink
+  (`libclang.so`, chỉ libclang-dev mới có) mà bindgen
+  cần — hòa giải: file Boss thấy tồn tại là dev
+  symlink SAU khi cài, lỗi `warm2` xảy ra TRƯỚC khi
+  cài khi chưa có libclang nào.
+- Red NB13 — chỉ document (§M3.3 + doc variant trong
+  `error.rs`): 3xx → `RedirectRefused` exit 1 hiện
+  tại; M4 phải chốt 1 vs 3 explicitly. Không đổi code.
+- Red NB14 — `decode_base64url` siết cho khớp Go:
+  whitespace bất kỳ đâu → lỗi (Go chỉ bỏ qua \r\n
+  nhưng key thật không chứa whitespace nào nên siết
+  toàn bộ là fail-closed, đã ghi rõ trong doc),
+  độ dài ≡ 1 mod 4 → lỗi, bit thừa ≠ 0 → lỗi, data
+  sau padding và padding sai độ dài → lỗi. Padding
+  đúng chuẩn vẫn được chấp nhận (key test cũ
+  43×`A` + `=` vẫn pass). Test mới
+  `base64url_rejects_what_go_rejects`.
+
+Clippy repair ngoài danh sách finding (bắt buộc để
+gate xanh, hệ quả trực tiếp của NB11): nâng
+`rust-version` 1.85 → 1.98 làm clippy 0.1.99 BẬT LẠI
+lint `collapsible_if` dạng let-chain (với MSRV 1.85,
+clippy kìm lint này vì let-chain cần rustc ≥ 1.88;
+với 1.98 thì lint bật) — 22 lỗi ở code M1/M2 không
+đụng tới (castctl-config 18, castctl-shared 4) làm
+gate clippy fail ở vòng đầu. Bằng chứng cơ chế:
+chạy clippy trên cây pristine `feab242` (MSRV 1.85)
+trên cue → exit 0, 0 lỗi, trong khi cùng lệnh trên
+cây M3c → 22 lỗi; toolchain giống nhau (rustc
+1.99.1, clippy 0.1.99). Cách sửa: `cargo clippy
+--fix --workspace` trên cue (tổng 40 chỗ: 18 config
++ 4 shared + 10 log-redact + 3 cli + 5 transport
+— config 2, http 2, retry 1 — trong đó các crate phụ
+thuộc chỉ lộ lỗi sau khi root đã sửa, vì vòng gate
+đầu dừng ở config/shared trước), sync ngược về
+local, review toàn bộ diff: mọi hunk đều là collapse
+if lồng thành let-chain (`if A { if let … }` →
+`if A && let …`), không dòng logic nào bị xóa hay
+đổi (chỉ header `if` và dấu `}` thừa biến mất;
+semantics short-circuit giữ nguyên). Các file đổi
+thêm ngoài danh sách finding: castctl-config (5
+file), castctl-shared (2), castctl-log-redact (3),
+castctl-cli (2) — tất cả đều chỉ chứa collapse cơ
+học này, không sửa logic, không đổi API. Không dùng
+`#[allow]` để bịt lint.
+
+Gate trên cue ở head M3c (chạy từ `/tmp/castctl-rust-m3`,
+cargo shim 1.99.1 nhờ `rust-toolchain.toml`, trên đúng
+cây sẽ commit):
+- `cargo fmt --check` exit 0 (sau `cargo fmt` trên
+  cue: vòng đầu fmt exit 1 vì output của `cargo
+  clippy --fix` không đúng rustfmt — toàn bộ diff
+  fmt chỉ đặt lại dấu `{` của let-chain, không đổi
+  logic; sau fmt, cả 4 gate chạy lại trên cây này).
+- `cargo build --workspace` exit 0.
+- `cargo test --workspace` exit 0: 242 passed, 0
+  failed (229 cũ + 13 test mới: transport lib 34,
+  rpc 12; xem §M3.10 trên).
+- `cargo clippy --workspace -- -D warnings` exit 0,
+  0 error.
+Vòng gate trước fmt (cùng cây trừ whitespace fmt)
+cũng cho build 0 / test 242 / clippy 0, chỉ fmt 1 —
+nên số test không đổi sau fmt.
+
+[CHƯA XÁC MINH] (giữ nguyên tới khi có bằng chứng):
+- Thứ tự resolver trong test fallback NB2/NB4: nếu
+  resolver trả 127.0.0.1 trước, test pass mà không
+  exercise fallback thật — giới hạn này được ghi
+  trong test và báo cáo, không giấu.
+- QUIC Initial decrypt (phân tích ALPN/transport
+  params/SNI từ capture blackhole): chưa làm trong
+  M3b và chưa làm trong M3c; sau kết quả NB9 thì
+  phân tích này không còn cần để xác định nguyên
+  nhân (cert verify đã chứng minh), nhưng vẫn là
+  việc mở nếu ai muốn đối chiếu payload Initial.
+
+Đã xác minh trong M3c (không còn trong danh sách
+trên):
+- Hyper 1.8.1 `Builder::handshake` (http1) chỉ tạo
+  channel + Conn + Dispatcher rồi trả `Ok`, không
+  thực hiện I/O nào — đọc trực tiếp source trên cue
+  (`/usr/local/cargo/registry/src/.../hyper-1.8.1/
+  src/client/conn/http1.rs:514-570`). Đây là cơ sở
+  cho nhận xét "test trực tiếp nhánh handshake là
+  không quan sát được ở tầng HTTP/1.1".
+- Sing-box v1.14.4 `option/tls.go` trên cue module
+  cache: `UTLS *OutboundUTLSOptions` và `Reality
+  *OutboundRealityOptions` (dòng 134-135, pointer),
+  `OutboundUTLSOptions.Enabled bool` (247-249) và
+  `OutboundRealityOptions.Enabled bool` (252-256,
+  plain bool) — tự kiểm, không còn dựa vào
+  technical review cho claim này.

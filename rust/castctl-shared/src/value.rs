@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! Decoded-JSON value model and the `values.go` shaping helpers.
 //!
 //! The Go code works on `any` values decoded from JSON. The Rust
@@ -209,10 +213,10 @@ pub(crate) fn bool_ptr_field(m: &JsonObject, key: &str) -> Option<bool> {
 #[allow(dead_code)]
 pub(crate) fn first_string(vs: &[&JsonValue]) -> String {
     for v in vs {
-        if let Some(s) = as_string(v) {
-            if !s.is_empty() {
-                return s.to_string();
-            }
+        if let Some(s) = as_string(v)
+            && !s.is_empty()
+        {
+            return s.to_string();
         }
     }
     String::new()
@@ -224,10 +228,10 @@ pub(crate) fn first_string(vs: &[&JsonValue]) -> String {
 /// Source: `internal/shared/event.go:64` (`firstStringPtr`).
 pub(crate) fn first_string_ptr(vs: &[&JsonValue]) -> Option<String> {
     for v in vs {
-        if let Some(s) = as_string(v) {
-            if !s.is_empty() {
-                return Some(s.to_string());
-            }
+        if let Some(s) = as_string(v)
+            && !s.is_empty()
+        {
+            return Some(s.to_string());
         }
     }
     None

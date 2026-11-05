@@ -6,13 +6,24 @@ members = [
     "castctl-log-redact",
     "castctl-config",
     "castctl-cli",
+    "castctl-transport",
     "castctl-rs",
 ]
 resolver = "2"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85"
+# M3c: the real MSRV is 1.98 — honk pulls aya 0.16.0 via
+# honk-ebpf-common, and aya 0.16 requires rustc >= 1.98. The
+# previous "1.85" was the M3 submission value, never re-checked
+# against the honk dependency graph; a 1.97.1-only machine fails
+# the build before compiling anything (see PORTING.md §M3.9).
+rust-version = "1.98"
+# M3: the Rust artifact links honk-outbound (GPL-3.0-only), so the
+# Rust artifact is GPL-3.0-only. The Go binary stays GPL-3.0-or-later;
+# two artifacts, two licenses (Boss decision, quoted verbatim in
+# rust/NOTICE and docs/provenance.md §13).
+license = "GPL-3.0-only"
 
 [workspace.dependencies]
 # regex is the sole dependency of the M1 workspace. Reason: Go's
@@ -22,3 +33,34 @@ rust-version = "1.85"
 # constructs it supports (no backreferences, no lookaround).
 # Pinned exactly after measurement on cue (rustc 1.97.1).
 regex = "=1.13.1"
+# M3: honk-outbound is the transport engine (called, not copied).
+# Pinned by git rev; see [patch.crates-io] below — honk's own patch
+# table does NOT propagate to a git dependency, so the workspace root
+# must replicate it, otherwise boring-sys/quinn resolve to crates.io
+# and the REALITY/QUIC fork hooks are silently lost.
+honk-outbound = { git = "https://github.com/daeuniverse/honk", rev = "9e31cc0bd28825afdc0e384dc989bc3f076e69cf" }
+honk-config = { git = "https://github.com/daeuniverse/honk", rev = "9e31cc0bd28825afdc0e384dc989bc3f076e69cf" }
+# M3 HTTP/RPC stack versions are pinned exactly after the first cue
+# build resolves them (see rust/PORTING.md §M3); the pins below are
+# filled in by the M3 writer from the committed Cargo.lock.
+tokio = "=1.48.0"
+serde = "=1.0.228"
+# M3c: `arbitrary_precision` keeps JSON numbers as literals
+# (Go `json.Number` parity) instead of losing numbers outside
+# i64/u64 to float64 rounding — without it, a gateway number
+# above u64::MAX silently changed value on decode.
+serde_json = { version = "=1.0.145", features = ["arbitrary_precision"] }
+hyper = "=1.8.1"
+# M3b: canonical hyper<->tokio IO adapter (TokioIo), resolved
+# on cue to 0.1.20 (see rust/PORTING.md §M3.7).
+hyper-util = "=0.1.20"
+http = "=1.3.1"
+http-body-util = "=0.1.3"
+bytes = "=1.11.0"
+
+[patch.crates-io]
+# Replicated verbatim from honk's workspace Cargo.toml at the pinned
+# rev (required: see the comment on honk-outbound above).
+boring-sys = { git = "https://github.com/Glassyiris/boring-sys", rev = "3beb573b65ecaa69b7eefe3c2fecd074b97facd2" }
+quinn = { git = "https://github.com/Glassyiris/quinn", rev = "11f1de84c28305a3c98ace6d681c35219a8d1e6c" }
+quinn-proto = { git = "https://github.com/Glassyiris/quinn", rev = "11f1de84c28305a3c98ace6d681c35219a8d1e6c" }

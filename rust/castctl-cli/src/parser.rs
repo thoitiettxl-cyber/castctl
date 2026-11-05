@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! Hand-rolled argument parser mirroring Go's `argParser`
 //! (`internal/commands/commands.go:455-726` at base `dev-rust`
 //! `85a8d5e`): long abbreviations, `--flag=value`, bundled short
@@ -384,12 +388,11 @@ impl ArgParser {
         // Int-flag defaults for flags never set on the command line.
         // Defaults must not mark the flag set (see set_int_default).
         for def in &self.defs {
-            if def.kind == FlagKind::Int {
-                if let Some(d) = def.def_int {
-                    if !p.int_is_set(def.name) {
-                        p.set_int_default(def.name, d);
-                    }
-                }
+            if def.kind == FlagKind::Int
+                && let Some(d) = def.def_int
+                && !p.int_is_set(def.name)
+            {
+                p.set_int_default(def.name, d);
             }
         }
         Ok(ParseOutcome {

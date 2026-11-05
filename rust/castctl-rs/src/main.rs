@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 //! `castctl` Rust port binary (M2): wires only the offline CLI
 //! surface from `castctl-cli`. `main` mirrors `cmd/castctl/main.go`
 //! (`os.Exit(commands.Run(...))`); signal handling (exit 130 on
