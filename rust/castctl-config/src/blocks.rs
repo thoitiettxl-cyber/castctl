@@ -160,6 +160,68 @@ pub struct CredentialsBlock {
     pub entries: Vec<CredentialEntry>,
 }
 
+/// One stored login credential (username + password) for a
+/// profile. This is the ONLY value-read shape for credentials:
+/// presence checks use `CredentialsBlock` (tag/profile only)
+/// and never materialise a value.
+///
+/// Source: `internal/profile/credentials.go:239`
+/// (`CredentialForProfile` returns `LoginCredential`).
+#[derive(Clone, PartialEq, Eq)]
+pub struct LoginCredential {
+    /// Login username.
+    pub username: String,
+    /// Login password.
+    pub password: String,
+}
+
+impl std::fmt::Debug for LoginCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Values are secrets: Debug never prints them.
+        f.debug_struct("LoginCredential")
+            .field("username", &"[redacted]")
+            .field("password", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Read the stored login credential for a profile from the
+/// retained raw `credentials` value: the first entry whose
+/// `profile` matches wins, exactly like Go's
+/// `CredentialForProfile` loop (`credentials.go:239`). The
+/// parsed block holds tag/profile only, so the raw value is
+/// the only value source. Entries are validated at parse time
+/// (username/password are non-empty strings); a matching entry
+/// whose values are not strings yields `None` defensively
+/// rather than panicking.
+pub fn credential_from_raw(raw: &JsonValue, profile: &str) -> Option<LoginCredential> {
+    let arr = match raw {
+        JsonValue::Array(arr) => arr,
+        _ => return None,
+    };
+    for elem in arr {
+        let JsonValue::Object(obj) = elem else {
+            continue;
+        };
+        let Some(JsonValue::Str(p)) = obj.get("profile") else {
+            continue;
+        };
+        if p != profile {
+            continue;
+        }
+        let (Some(JsonValue::Str(username)), Some(JsonValue::Str(password))) =
+            (obj.get("username"), obj.get("password"))
+        else {
+            return None;
+        };
+        return Some(LoginCredential {
+            username: username.clone(),
+            password: password.clone(),
+        });
+    }
+    None
+}
+
 /// `parseWireGuardDNSMap` (`internal/profile/dns.go`): shape only —
 /// an object mapping endpoint tag to an array of server-address
 /// strings. Tag existence and endpoint type are deferred
@@ -673,5 +735,50 @@ mod tests {
             check_endpoint_wireguard_system(&value("{\"type\":\"wireguard\",\"tag\":\"w\"}"))
                 .is_ok()
         );
+    }
+
+    // Ported from internal/profile/credentials.go
+    // CredentialForProfile (first profile match wins) and
+    // HasCredentialForProfile (presence-only). Values are
+    // fake (never real credentials).
+    #[test]
+    fn test_credential_from_raw_first_match_wins() {
+        let raw = value(
+            "[{\"tag\":\"c1\",\"profile\":\"no1\",\"username\":\"alice\",\"password\":\"pw-one\"},{\"tag\":\"c2\",\"profile\":\"no1\",\"username\":\"bob\",\"password\":\"pw-two\"},{\"tag\":\"c3\",\"profile\":\"other\",\"username\":\"carol\",\"password\":\"pw-three\"}]",
+        );
+        assert_eq!(
+            credential_from_raw(&raw, "no1"),
+            Some(LoginCredential {
+                username: "alice".to_string(),
+                password: "pw-one".to_string(),
+            })
+        );
+        assert_eq!(
+            credential_from_raw(&raw, "other"),
+            Some(LoginCredential {
+                username: "carol".to_string(),
+                password: "pw-three".to_string(),
+            })
+        );
+        assert_eq!(credential_from_raw(&raw, "missing"), None);
+        assert_eq!(credential_from_raw(&value("[]"), "no1"), None);
+        assert_eq!(credential_from_raw(&value("{}"), "no1"), None);
+        // A matching entry with non-string values yields None
+        // (defensive; parse-time validation rejects this).
+        let bad =
+            value("[{\"tag\":\"c1\",\"profile\":\"no1\",\"username\":1,\"password\":\"pw\"}]");
+        assert_eq!(credential_from_raw(&bad, "no1"), None);
+    }
+
+    #[test]
+    fn test_login_credential_debug_never_prints_values() {
+        let cred = LoginCredential {
+            username: "alice".to_string(),
+            password: "SECRET-PASSWORD".to_string(),
+        };
+        let rendered = format!("{cred:?}");
+        assert!(!rendered.contains("alice"), "{rendered}");
+        assert!(!rendered.contains("SECRET-PASSWORD"), "{rendered}");
+        assert!(rendered.contains("[redacted]"), "{rendered}");
     }
 }

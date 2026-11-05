@@ -27,7 +27,7 @@
 //! (D-M2-3).
 
 use castctl_config::blocks::valid_plugin_id;
-use castctl_config::config::load_single_config;
+use castctl_config::config::{SingleConfig, load_single_config};
 use castctl_config::configlocation::{ConfigLocation, Getenv, resolve_config_location};
 use castctl_config::errors::ConfigError;
 use castctl_config::gostr::{go_quote, go_trim_space};
@@ -89,20 +89,26 @@ pub struct GlobalOpts {
 /// message is non-empty, and prints nothing when it is empty.
 /// `Exit` returns a bare exit code with no classify line (the
 /// `auth export` guidance, which is itself the classify text).
-enum FlowErr {
+/// `Verbatim` is Go's typed-auth JSON line (`classifyError`'s
+/// `typedAuthError` / bare `AuthError` branch): the text is
+/// printed to stderr exactly as-is (one compact JSON line, no
+/// `castctl: ` prefix), plus a trailing newline (M4b).
+#[derive(Debug)]
+pub(crate) enum FlowErr {
     HelpShown,
     Msg { code: i32, message: Option<String> },
     Exit(i32),
+    Verbatim { code: i32, text: String },
 }
 
-fn msg(code: i32, message: impl Into<String>) -> FlowErr {
+pub(crate) fn msg(code: i32, message: impl Into<String>) -> FlowErr {
     FlowErr::Msg {
         code,
         message: Some(message.into()),
     }
 }
 
-fn msg_empty(code: i32) -> FlowErr {
+pub(crate) fn msg_empty(code: i32) -> FlowErr {
     FlowErr::Msg {
         code,
         message: None,
@@ -118,9 +124,9 @@ fn usage_err(pe: ParserError) -> FlowErr {
 
 /// The outcome under construction, threaded through handlers the
 /// way Go threads `Env` stdout/stderr writers.
-struct Ctx<'a> {
-    out: Outcome,
-    getenv: Getenv<'a>,
+pub(crate) struct Ctx<'a> {
+    pub(crate) out: Outcome,
+    pub(crate) getenv: Getenv<'a>,
 }
 
 impl<'a> Ctx<'a> {
@@ -269,7 +275,7 @@ fn resolve_config(
 /// A `profile.Error` / `ConfigError` through `classifyError`: exit
 /// 2, one `castctl: <message>` line (the message already carries
 /// the `profile: ` prefix exactly once).
-fn config_err(e: ConfigError) -> FlowErr {
+pub(crate) fn config_err(e: ConfigError) -> FlowErr {
     msg(e.code, e.message)
 }
 
@@ -299,6 +305,22 @@ fn resolve_and_load(
 ) -> Result<(), FlowErr> {
     let loc = resolve_config(ctx, g, allow_missing_create)?;
     load_resolved_config(&loc)
+}
+
+/// `resolve_config` + config parse, returning the parsed single
+/// config (M4b network path): the runtime builder needs the
+/// parsed config (outbounds/endpoints for tag dispatch), so
+/// unlike `resolve_and_load` this keeps it. `None` is a legacy
+/// flat file (no `profiles` marker): the runtime builder's
+/// profile resolution refuses it with exit 2, as Go's
+/// `LoadProfile` does.
+pub(crate) fn resolve_and_load_single(
+    ctx: &mut Ctx<'_>,
+    g: &GlobalOpts,
+) -> Result<(ConfigLocation, Option<SingleConfig>), FlowErr> {
+    let loc = resolve_config(ctx, g, false)?;
+    let (single, _found) = load_single_config(&loc.config_dir).map_err(config_err)?;
+    Ok((loc, single))
 }
 
 /// The M2 stub (D-M2-3): exactly one fixed stderr line, empty
@@ -503,6 +525,13 @@ fn run_inner(ctx: &mut Ctx<'_>, args: &[String]) -> Outcome {
         Err(FlowErr::Exit(code)) => {
             ctx.out.code = code;
         }
+        Err(FlowErr::Verbatim { code, text }) => {
+            if !text.is_empty() {
+                ctx.out.stderr.push_str(&text);
+                ctx.out.stderr.push('\n');
+            }
+            ctx.out.code = code;
+        }
         Err(FlowErr::Msg { code, message }) => {
             if let Some(m) = message {
                 ctx.out.stderr.push_str(&format!("castctl: {m}\n"));
@@ -513,9 +542,35 @@ fn run_inner(ctx: &mut Ctx<'_>, args: &[String]) -> Outcome {
     std::mem::take(&mut ctx.out)
 }
 
+/// The 13 read-only commands (M4b): they run the network path.
+/// `invite` is NOT here: it stays fully stubbed (it has
+/// `--create`, a POST). `history --download` is NOT here either:
+/// it is checked separately below and stubbed.
+const READ_COMMANDS: [&str; 13] = [
+    "status",
+    "usage",
+    "threads",
+    "history",
+    "files",
+    "feed",
+    "feed-status",
+    "feed-prompt",
+    "goals",
+    "goal",
+    "ideas",
+    "idea",
+    "unread",
+];
+
 /// A `parseOrHelp` command: parse, positional/manual checks,
 /// `parseAutoToggles` for wait/send, then config-location
-/// resolution + config parse, then the stub.
+/// resolution + config parse, then the stub — except the 13
+/// read-only commands (M4b), which run the network path, and
+/// the two excluded forms (`history --download`, which writes
+/// files, and `invite`, which can POST): those resolve + load
+/// and then take the M2 stub (exit 1, `STUB_LINE`), the same
+/// placement as every other stub — after parse/positionals,
+/// before any network call.
 fn cmd_plain(
     ctx: &mut Ctx<'_>,
     g: &GlobalOpts,
@@ -526,6 +581,17 @@ fn cmd_plain(
     check_spec_positionals(ctx, spec, &p)?;
     if spec.name == "wait" || spec.name == "send" {
         parse_auto_toggles(&p)?;
+    }
+    if READ_COMMANDS.contains(&spec.name) {
+        if spec.name == "history" && !p.str("download").is_empty() {
+            resolve_and_load(ctx, g, false)?;
+            return Err(stub(ctx));
+        }
+        return crate::network::run_network_command(ctx, g, spec, &p);
+    }
+    if spec.name == "invite" {
+        resolve_and_load(ctx, g, false)?;
+        return Err(stub(ctx));
     }
     resolve_and_load(ctx, g, false)?;
     Err(stub(ctx))
@@ -1223,7 +1289,7 @@ mod tests {
         // NOT fail (non-explicit locations always pass) — the
         // stub fires.
         let (_home, map) = isolated_env();
-        let out = run_env(&["--log-level", "warn", "status"], map);
+        let out = run_env(&["--log-level", "warn", "chat"], map);
         assert_eq!(out.code, 1);
         assert_eq!(out.stderr, STUB_LINE);
     }
@@ -1347,7 +1413,7 @@ mod tests {
         // passes (Go: non-explicit always passes) — the stub
         // fires with exit 1.
         let (_home, map) = isolated_env();
-        let out = run_env(&["status"], map);
+        let out = run_env(&["chat"], map);
         assert_eq!(out.code, 1);
         assert_eq!(out.stderr, STUB_LINE);
         // Explicit location with a correct basename but a missing
@@ -1372,7 +1438,7 @@ mod tests {
             "XDG_CONFIG_HOME".to_string(),
             home.join(".config").to_str().unwrap().to_string(),
         );
-        let out = run_env(&["status"], map);
+        let out = run_env(&["chat"], map);
         assert_eq!(out.code, 1);
         assert_eq!(out.stdout, "");
         assert_eq!(out.stderr, STUB_LINE);

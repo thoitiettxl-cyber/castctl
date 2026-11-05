@@ -51,9 +51,11 @@ use http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::dialer::{DialTarget, Dialer};
 use crate::error::{BodySummary, TransportError, validate_content_type};
+use crate::tls::tls_client_config;
 
 /// Maximum response body accepted in one call. This is an M3-local
 /// guard against an unbounded peer body, NOT a Go parity value:
@@ -138,6 +140,9 @@ fn content_type_of(headers: &HeaderMap) -> &str {
 #[derive(Clone)]
 pub struct HttpClient {
     dialer: Arc<dyn Dialer>,
+    /// Shared rustls client config (Mozilla roots, ALPN
+    /// `http/1.1`), built once per client for `request_tls`.
+    tls_config: Arc<rustls::ClientConfig>,
 }
 
 impl std::fmt::Debug for HttpClient {
@@ -148,7 +153,66 @@ impl std::fmt::Debug for HttpClient {
 
 impl HttpClient {
     pub fn new(dialer: Arc<dyn Dialer>) -> Self {
-        Self { dialer }
+        Self {
+            dialer,
+            tls_config: tls_client_config(),
+        }
+    }
+
+    /// Perform one HTTPS request through the outbound: dial,
+    /// wrap the stream in TLS (SNI = the target host, ALPN
+    /// `http/1.1`), then run one HTTP/1.1 exchange over it.
+    /// A TLS handshake failure maps to `ConnectionDown`
+    /// (nothing sent, mirroring the hyper-handshake rule in
+    /// `request_inner`); the redirect, cap and error rules
+    /// are the same as `request`. The `Host` header and the
+    /// SNI name both come from `target`.
+    pub async fn request_tls(
+        &self,
+        method: Method,
+        target: &DialTarget,
+        path: &str,
+        headers: &[(String, String)],
+        body: Option<Bytes>,
+        timeout: Duration,
+    ) -> Result<HttpResponse, TransportError> {
+        let work = self.request_tls_inner(method, target, path, headers, body);
+        match tokio::time::timeout(timeout, work).await {
+            Ok(result) => result,
+            Err(_) => Err(TransportError::Timeout {
+                message: "https request timed out".to_string(),
+            }),
+        }
+    }
+
+    async fn request_tls_inner(
+        &self,
+        method: Method,
+        target: &DialTarget,
+        path: &str,
+        headers: &[(String, String)],
+        body: Option<Bytes>,
+    ) -> Result<HttpResponse, TransportError> {
+        // Dial first: any failure here is ConnectionDown (Go:
+        // nothing was sent yet, so the request is safe to repeat).
+        let stream = self.dialer.dial(target).await?;
+        // TLS wrap: SNI is the target host (an IP literal yields
+        // an IpAddress name, for which rustls sends no SNI —
+        // correct per RFC 6066). A handshake failure is
+        // ConnectionDown: no request bytes have been sent yet.
+        let connector = tokio_rustls::TlsConnector::from(Arc::clone(&self.tls_config));
+        let server_name = rustls::pki_types::ServerName::try_from(target.host.as_str())
+            .map_err(|_| TransportError::Validation {
+                message: "invalid TLS server name".to_string(),
+            })?
+            .to_owned();
+        let tls_stream = connector.connect(server_name, stream).await.map_err(|e| {
+            TransportError::ConnectionDown {
+                message: crate::error::truncate(&e.to_string(), 200),
+            }
+        })?;
+        self.http_over_stream(tls_stream, method, target, path, headers, body)
+            .await
     }
 
     /// Perform one HTTP request through the outbound and return
@@ -198,6 +262,28 @@ impl HttpClient {
         // Dial first: any failure here is ConnectionDown (Go:
         // nothing was sent yet, so the request is safe to repeat).
         let stream = self.dialer.dial(target).await?;
+        self.http_over_stream(stream, method, target, path, headers, body)
+            .await
+    }
+
+    /// One HTTP/1.1 exchange over an already-connected stream
+    /// (plain from `request_inner`, TLS-wrapped from
+    /// `request_tls_inner`). The handshake, redirect, cap and
+    /// error rules are shared: a hyper handshake failure is
+    /// `ConnectionDown` (no request bytes sent yet), a failure
+    /// once the request has been sent is `ConnectionError`.
+    async fn http_over_stream<S>(
+        &self,
+        stream: S,
+        method: Method,
+        target: &DialTarget,
+        path: &str,
+        headers: &[(String, String)],
+        body: Option<Bytes>,
+    ) -> Result<HttpResponse, TransportError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         // hyper's rt::Read/Write are NOT blanket-implemented for
         // tokio IO types: the canonical adapter is hyper-util's
         // TokioIo (honk's stream is tokio AsyncRead+AsyncWrite,

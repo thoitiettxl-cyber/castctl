@@ -12,16 +12,34 @@ description = "Gateway transport for the castctl Rust port (M4a): WebSocket + No
 
 [dependencies]
 castctl-transport = { path = "../castctl-transport" }
+# M4b: order-preserving JSON (decode_ordered_json) for the
+# cookie-file parser only — the gateway uses the config
+# crate's JSON value model, never its config loading.
+castctl-config = { path = "../castctl-config" }
+# M4b: regex for the subscription bundle scan (FindActionID);
+# http::Method/HeaderMap + bytes::Bytes for the HTTPS
+# side-paths (doHatch/callAction). All already in the lock.
+regex = { workspace = true }
+http = { workspace = true }
+bytes = { workspace = true }
+# M4b (WS literal-token fix): base64 for the
+# Sec-WebSocket-Key + tokio-rustls for the manual TLS wrap
+# in dial.rs (the upgrade is written by hand, so the TLS
+# wrap no longer comes from tokio-tungstenite). Both already
+# in the lock.
+base64 = { workspace = true }
+tokio-rustls = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
 serde_json = { workspace = true }
 snow = { workspace = true }
 prost = { workspace = true }
 # tokio-tungstenite default features are connect+handshake only
-# (no TLS); wss:// dial needs rustls-tls-webpki-roots. Go pins
-# ALPN ["http/1.1"] for the WS dial; the rustls client used
-# here sends NO ALPN by default, so the server cannot
-# negotiate h2 and the upgrade stays HTTP/1.1 — same wire
-# outcome, different mechanism (see dial.rs + PORTING.md §M4a).
+# (no TLS); wss:// dial needs rustls-tls-webpki-roots. The WS
+# upgrade is written by hand in dial.rs (M4b literal-token
+# fix), so tungstenite is used only for WS framing
+# (`from_partially_read`) + `derive_accept_key`; the TLS wrap
+# uses `castctl_transport::tls_client_config`, which pins ALPN
+# ["http/1.1"] for BOTH dials, matching Go (see dial.rs).
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 rand = { workspace = true }
 futures-core = { workspace = true }

@@ -29,15 +29,27 @@
 //! `ws://` URL always dials plain (the fake-server case).
 //! There is no code path that dials `wss://` without TLS.
 //!
-//! ALPN deviation: Go pins ALPN `["http/1.1"]` for the WS dial
-//! because the uTLS Chrome preset offers `h2` first and gorilla
-//! only speaks HTTP/1.1. The rustls client used here sends NO
-//! ALPN by default, so the server cannot negotiate `h2` and
-//! the upgrade proceeds as HTTP/1.1 — the same wire outcome
-//! by a different mechanism. If a future fingerprint change
-//! makes this client offer ALPN, the pin must be revisited
-//! (see PORTING.md §M4a).
+//! ALPN (M4b fix of the M4a deviation): Go pins ALPN
+//! `["http/1.1"]` for the WS dial because the uTLS Chrome
+//! preset offers `h2` first and gorilla only speaks
+//! HTTP/1.1. BOTH dials here pin ALPN `["http/1.1"]` now:
+//! the over-stream dial via `castctl_transport::
+//! tls_client_config` (M4b), and the direct dial via the
+//! same config (the M4a direct dial sent NO ALPN, which
+//! happened to produce the same wire outcome — the server
+//! cannot negotiate `h2` without an ALPN offer — but the
+//! pin is now explicit, matching Go).
 //!
+//! Literal token on the wire (M4b): the upgrade request is
+//! written BY HAND (`ws_upgrade`), not through tungstenite's
+//! request builder, because `http::Uri` rejects `<`/`>` in
+//! the query and the gateway URL carries a literal
+//! `auth_token=<redacted>` exactly as Go sends it. The live
+//! edge returns 401 for the percent-encoded `%3Credacted%3E`
+//! form (live probe on cue, 2026-11-05), so encoding it is
+//! not an option; the M4a claim that "the server decodes it
+//! back" was wrong — the M4a test only proved the fake
+//! server tolerates the encoded form.
 //! Cancellation: dropping the `dial_gateway` future aborts
 //! the dial/handshake at the next await (all steps are
 //! cancel-safe `tokio::time::timeout` + WS I/O); the socket
@@ -47,14 +59,18 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::protocol::Role;
 
 use crate::gateway::Gateway;
 use crate::noise::{HANDSHAKE_TIMEOUT, InitiatorHandshake, NoiseTransport};
 use castctl_transport::error::TransportError;
 use castctl_transport::routes::{RouteTable, quote_path_param};
+use castctl_transport::tls_client_config;
 
 /// Chrome/153 Mac user agent (Go `internal/gateway/auth.go:21`
 /// `UserAgent`).
@@ -200,58 +216,323 @@ where
 /// Dial one gateway: WS upgrade + Noise handshake, returning
 /// a live `Gateway` (Go `dialGateway`). `url` is never stored
 /// or logged (with `default_ws_url` it carries the literal
-/// `auth_token=<redacted>`, never a real token); `routes` is
+/// `auth_token=<redacted>`; see the module docs). `routes` is
 /// the route table the gateway uses for `resolveRoute`.
 /// `secure` selects `wss` vs `ws` only through the URL
 /// scheme — a `wss://` URL always uses TLS (gateway-dial TLS
 /// rule, see the module docs).
-/// Wire note: `http::Uri` (used by `into_client_request`)
-/// cannot represent `<`/`>` in a query, so the `<redacted>`
-/// literal Go sends raw is percent-encoded here
-/// (`%3Credacted%3E`) before dialing — the server decodes
-/// it back to `<redacted>`, so the query VALUE is identical
-/// to Go's; only the literal is ever encoded (a `vm_id` is
-/// already quoted by `default_ws_url`, and no real token is
-/// ever in the URL).
+/// Wire note (M4b): the upgrade is written by hand
+/// (`ws_upgrade`) so the request-target carries the literal
+/// `auth_token=<redacted>` Go sends raw — `http::Uri`
+/// cannot represent `<>`, and the live edge returns 401 for
+/// the percent-encoded form. The direct dial pins ALPN
+/// `["http/1.1"]` via `tls_client_config`, matching Go
+/// (M4b fix of the M4a no-ALPN deviation).
 pub async fn dial_gateway(
     url: &str,
     routes: Arc<RouteTable>,
 ) -> Result<Arc<Gateway>, TransportError> {
-    let encoded = url.replace("<redacted>", "%3Credacted%3E");
-    let mut request = encoded.as_str().into_client_request().map_err(ws_error)?;
-    request.headers_mut().insert(
-        "User-Agent",
-        GATEWAY_USER_AGENT
-            .parse()
-            .map_err(|_| TransportError::ConnectionError {
-                message: "gateway: invalid user agent header".to_string(),
-            })?,
-    );
-    request.headers_mut().insert(
-        "Origin",
-        GATEWAY_ORIGIN
-            .parse()
-            .map_err(|_| TransportError::ConnectionError {
-                message: "gateway: invalid origin header".to_string(),
-            })?,
-    );
-    let (ws, _) = match tokio::time::timeout(
-        WS_UPGRADE_TIMEOUT,
-        tokio_tungstenite::connect_async(request),
-    )
-    .await
-    {
-        Ok(Ok(pair)) => pair,
-        Ok(Err(e)) => return Err(ws_error(e)),
-        Err(_) => {
-            return Err(TransportError::Timeout {
-                message: format!(
-                    "gateway websocket upgrade: no answer in {}s",
-                    WS_UPGRADE_TIMEOUT.as_secs()
-                ),
+    let (host, port) = split_ws_url(url).ok_or_else(|| TransportError::Validation {
+        message: "invalid websocket URL".to_string(),
+    })?;
+    let secure = match url.split_once("://") {
+        Some(("wss", _)) => true,
+        Some(("ws", _)) => false,
+        _ => {
+            return Err(TransportError::Validation {
+                message: "invalid websocket URL".to_string(),
             });
         }
     };
+    // The two branches yield different stream types
+    // (`TlsStream<TcpStream>` vs `TcpStream`), so each
+    // completes the dial (Noise handshake) on its own type.
+    if secure {
+        let ws = match tokio::time::timeout(WS_UPGRADE_TIMEOUT, dial_secure(url, &host, port)).await
+        {
+            Ok(Ok(ws)) => ws,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err(upgrade_timeout()),
+        };
+        complete_dial(ws, routes).await
+    } else {
+        let ws = match tokio::time::timeout(WS_UPGRADE_TIMEOUT, dial_plain(url, &host, port)).await
+        {
+            Ok(Ok(ws)) => ws,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err(upgrade_timeout()),
+        };
+        complete_dial(ws, routes).await
+    }
+}
+
+/// Dial one gateway over an already-connected stream (Go
+/// `dialWebSocket` + `dialGateway` via the outbound dialer):
+/// WS upgrade over the given stream + Noise handshake. The
+/// stream is the outbound-dialed connection (plain TCP to the
+/// WS host:port); the TLS wrap happens HERE for `wss://`
+/// (ALPN-pinned rustls client — matching Go's pin), while
+/// `ws://` upgrades plain. The upgrade is written by hand
+/// (`ws_upgrade`) so the request-target carries the literal
+/// `auth_token=<redacted>` Go sends raw (M4b).
+pub async fn dial_gateway_over_stream<S>(
+    stream: S,
+    url: &str,
+    routes: Arc<RouteTable>,
+) -> Result<Arc<Gateway>, TransportError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    let secure = match url.split_once("://") {
+        Some(("wss", _)) => true,
+        Some(("ws", _)) => false,
+        _ => {
+            return Err(TransportError::Validation {
+                message: "invalid websocket URL".to_string(),
+            });
+        }
+    };
+    // The two branches yield different stream types
+    // (`TlsStream<S>` vs `S`), so each completes the dial
+    // (Noise handshake) on its own type.
+    if secure {
+        let (host, _port) = split_ws_url(url).ok_or_else(|| TransportError::Validation {
+            message: "invalid websocket URL".to_string(),
+        })?;
+        let ws = match tokio::time::timeout(WS_UPGRADE_TIMEOUT, async {
+            let tls = tls_wrap(stream, &host).await?;
+            ws_upgrade(tls, url).await
+        })
+        .await
+        {
+            Ok(Ok(ws)) => ws,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err(upgrade_timeout()),
+        };
+        complete_dial(ws, routes).await
+    } else {
+        let ws = match tokio::time::timeout(WS_UPGRADE_TIMEOUT, ws_upgrade(stream, url)).await {
+            Ok(Ok(ws)) => ws,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err(upgrade_timeout()),
+        };
+        complete_dial(ws, routes).await
+    }
+}
+
+/// Extracts the host and port from a `ws(s)` URL, applying
+/// the scheme defaults (443 for wss, 80 for ws). Go
+/// `splitWSURL` (`connector.go`).
+pub fn split_ws_url(url: &str) -> Option<(String, u16)> {
+    let (scheme, rest) = url.split_once("://")?;
+    let default_port = match scheme {
+        "wss" => 443,
+        "ws" => 80,
+        _ => return None,
+    };
+    let authority = rest.split('/').next()?;
+    if authority.is_empty() {
+        return None;
+    }
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() => match p.parse::<u16>() {
+            Ok(n) => (h, n),
+            Err(_) => (authority, default_port),
+        },
+        _ => (authority, default_port),
+    };
+    Some((host.to_string(), port))
+}
+
+/// The WS-upgrade timeout error, shared by the direct and
+/// over-stream dials.
+fn upgrade_timeout() -> TransportError {
+    TransportError::Timeout {
+        message: format!(
+            "gateway websocket upgrade: no answer in {}s",
+            WS_UPGRADE_TIMEOUT.as_secs()
+        ),
+    }
+}
+
+/// The generic WS-dial failure (tungstenite's non-HTTP arm
+/// in `ws_error`): the class only, never peer text.
+fn dial_failed() -> TransportError {
+    TransportError::ConnectionError {
+        message: "gateway: websocket dial failed".to_string(),
+    }
+}
+
+/// The WS TLS failure (tungstenite's TLS arm in `ws_error`).
+fn tls_failed() -> TransportError {
+    TransportError::ConnectionError {
+        message: "gateway: websocket TLS failed".to_string(),
+    }
+}
+
+/// TCP-connect to a WS host:port. Failure is a
+/// `ConnectionError` (see `dial_failed`), matching Go
+/// `dialWebSocket` (the dialer error is a `ConnectionError`,
+/// not `ConnectionDown`).
+async fn tcp_connect(host: &str, port: u16) -> Result<tokio::net::TcpStream, TransportError> {
+    tokio::net::TcpStream::connect((host, port))
+        .await
+        .map_err(|_| dial_failed())
+}
+
+/// TLS-wrap a stream for a `wss://` dial, with the
+/// ALPN-pinned rustls client (`tls_client_config`) and SNI =
+/// the WS host (Go pins ALPN `["http/1.1"]` for the WS dial).
+async fn tls_wrap<S>(
+    stream: S,
+    host: &str,
+) -> Result<tokio_rustls::client::TlsStream<S>, TransportError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    // Owned form: `connect` needs a `ServerName<'static>`
+    // (the stream holds it for the connection lifetime);
+    // `TryFrom<&str>` only borrows the caller's `host`.
+    let name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|_| tls_failed())?;
+    tokio_rustls::TlsConnector::from(tls_client_config())
+        .connect(name, stream)
+        .await
+        .map_err(|_| tls_failed())
+}
+
+/// TCP-connect + TLS-wrap + upgrade for a direct `wss://` dial.
+async fn dial_secure(
+    url: &str,
+    host: &str,
+    port: u16,
+) -> Result<WebSocketStream<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>, TransportError>
+{
+    let tcp = tcp_connect(host, port).await?;
+    let tls = tls_wrap(tcp, host).await?;
+    ws_upgrade(tls, url).await
+}
+
+/// TCP-connect + upgrade for a direct `ws://` dial.
+async fn dial_plain(
+    url: &str,
+    host: &str,
+    port: u16,
+) -> Result<WebSocketStream<tokio::net::TcpStream>, TransportError> {
+    let tcp = tcp_connect(host, port).await?;
+    ws_upgrade(tcp, url).await
+}
+
+/// Maximum HTTP response header block accepted during the WS
+/// upgrade (a 101 response is a few hundred bytes; anything
+/// larger is not a WS handshake).
+const MAX_UPGRADE_RESPONSE: usize = 8192;
+
+/// Split a ws(s) URL into (authority, request-target) with
+/// plain string ops — `http::Uri` rejects `<`/`>` in the
+/// query, and the gateway URL carries a literal
+/// `auth_token=<redacted>` exactly as Go sends it. The
+/// target is returned verbatim and is never logged.
+/// `None` on a malformed URL (no scheme, empty authority).
+fn split_ws_request_target(url: &str) -> Option<(String, String)> {
+    let (_scheme, rest) = url.split_once("://")?;
+    let (authority, target) = match rest.split_once('/') {
+        Some((a, t)) => (a, format!("/{t}")),
+        None => (rest, "/".to_string()),
+    };
+    if authority.is_empty() {
+        return None;
+    }
+    Some((authority.to_string(), target))
+}
+
+/// Perform the WS upgrade by writing the HTTP/1.1 request
+/// bytes directly and reading the response headers, then
+/// wrap the stream as a `WebSocketStream` (leftover bytes
+/// after the header block are handed to tungstenite via
+/// `from_partially_read`, so no frame bytes are lost).
+/// The request-target is sent VERBATIM (see
+/// `split_ws_request_target`); headers match Go
+/// `dialWebSocket` (User-Agent + Origin). A non-101 status
+/// is a `ConnectionError` carrying the status only (Go
+/// `newHandshakeFailureError`); any other failure is a
+/// `ConnectionError` with the error class only — the raw
+/// response bytes never reach an output path.
+async fn ws_upgrade<S>(mut stream: S, url: &str) -> Result<WebSocketStream<S>, TransportError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let (authority, target) = split_ws_request_target(url).ok_or_else(dial_failed)?;
+    let key_bytes: [u8; 16] = rand::random();
+    let key = base64::engine::general_purpose::STANDARD.encode(key_bytes);
+    let request = format!(
+        "GET {target} HTTP/1.1\r\nHost: {authority}\r\nConnection: Upgrade\r\nOrigin: {GATEWAY_ORIGIN}\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\nUpgrade: websocket\r\nUser-Agent: {GATEWAY_USER_AGENT}\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|_| dial_failed())?;
+    stream.flush().await.map_err(|_| dial_failed())?;
+    // Read until the end of the response header block.
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 1024];
+    let header_end = loop {
+        let n = stream.read(&mut chunk).await.map_err(|_| dial_failed())?;
+        if n == 0 {
+            return Err(dial_failed());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() > MAX_UPGRADE_RESPONSE {
+            return Err(dial_failed());
+        }
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos + 4;
+        }
+    };
+    let head = &buf[..header_end];
+    let leftover = buf[header_end..].to_vec();
+    let text = std::str::from_utf8(head).map_err(|_| dial_failed())?;
+    let mut lines = text.split("\r\n");
+    let status_line = lines.next().unwrap_or("");
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(dial_failed)?;
+    if status != 101 {
+        return Err(TransportError::ConnectionError {
+            message: format!("gateway: websocket handshake failed: status {status}"),
+        });
+    }
+    let expected = tokio_tungstenite::tungstenite::handshake::derive_accept_key(key.as_bytes());
+    let mut accept_ok = false;
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.trim().eq_ignore_ascii_case("sec-websocket-accept")
+            && value.trim() == expected
+        {
+            accept_ok = true;
+        }
+    }
+    if !accept_ok {
+        return Err(dial_failed());
+    }
+    Ok(WebSocketStream::from_partially_read(stream, leftover, Role::Client, None).await)
+}
+
+/// Runs the Noise handshake over an established WS connection
+/// and returns the live `Gateway`. Shared by the direct and
+/// over-stream dials.
+async fn complete_dial<S>(
+    ws: tokio_tungstenite::WebSocketStream<S>,
+    routes: Arc<RouteTable>,
+) -> Result<Arc<Gateway>, TransportError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
     let (mut write_half, mut read_half) = ws.split();
     let transport = match noise_handshake(&mut read_half, &mut write_half).await {
         Ok(t) => t,

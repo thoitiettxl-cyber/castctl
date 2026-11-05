@@ -3382,6 +3382,424 @@ fixed.)
   the Rust crate has no logger — the CLI layer owns
   observability.
 
+## M4b — CLI auth + read-only commands (2026-11-05)
+
+M4b ports the gateway auth chain (`internal/gateway/cookies.go`,
+`auth.go`, `subscription.go`, `connector.go`, `summary.go`), the
+profile credentials API (`internal/profile/credentials.go`), and
+the 13 read-only commands from `internal/commands/read.go` plus
+the CLI runtime / error taxonomy (`commands.go` `classifyError`,
+`runtime.go`), into `rust/castctl-gateway` (new modules) and
+`rust/castctl-cli` (new `network.rs` / `runtime.rs`). Base is
+`dev-rust` after PR1 merged (96ce485); branch
+`feat/rust-m4b-cli-auth`. No Go file is modified. No new crate
+enters the lock: chrono 0.4.45, rustls 0.23.46, tokio-rustls
+0.26.6, webpki-roots 0.26.11 and base64 0.22.1 were already in
+it (promoted to direct deps only), so `NOTICE` /
+`docs/provenance.md` are untouched.
+
+## M4b.1 Crate map
+
+- `castctl-shared`: `timefmt.rs` (chrono `Local` + a
+  hand-rolled TZif abbreviation reader), `status.rs`,
+  `sessions.rs`, `event.rs`, `feed.rs`, `usage.rs`,
+  `bridge.rs` (`from_serde`: gateway `serde_json::Value` →
+  shared `JsonValue`).
+- `castctl-config`: `credential_for_profile` (value read,
+  first profile match wins) + `has_credential_for_profile`
+  (presence-only) + `LoginCredential` (hand-written `Debug`
+  that never prints values).
+- `castctl-transport`: `tls.rs` (`tls_client_config`, ALPN
+  `["http/1.1"]`), `http.rs` `request_tls` (dial → rustls
+  wrap with SNI → hyper http1).
+- `castctl-gateway`: `summary.rs` (allowlist summary),
+  `cookies.rs` (3 forms), `auth.rs` (hatch chain),
+  `subscription.rs` (`FetchSubscription`, `callAction`,
+  `ParseRSCResult`, `FindActionID`), `connector.rs`
+  (`GatewayConnector`), `dial.rs` (hand-written WS upgrade
+  — see deviation 1).
+- `castctl-cli`: `runtime.rs` (`build_runtime`,
+  `ProfileConnector` adapter, `Runtime::cookies()`),
+  `network.rs` (`classify_error`, the 13 handlers,
+  `indent_json`).
+
+## M4b.2 Deviations from Go (deliberate, with citations)
+
+1. WS upgrade written by hand; literal token. Go
+   `defaultWSURL` (`connector.go:116`) sends the literal
+   `auth_token=<redacted>`; `http::Uri` rejects `<`/`>` in
+   the query, so the upgrade request is written as raw
+   HTTP/1.1 bytes (`dial.rs` `ws_upgrade`) and the response
+   is validated (101 + `Sec-WebSocket-Accept` via
+   tungstenite's `derive_accept_key`) before wrapping the
+   stream with `from_partially_read`. Live probe on cue
+   (2026-11-05): the edge returns 401 for the
+   percent-encoded `%3Credacted%3E` form and 502 (past the
+   token check) for the literal — the M4a claim that "the
+   server decodes it back" was wrong (the M4a test only
+   proved the fake server tolerates the encoded form).
+   The direct dial now also pins ALPN `["http/1.1"]` via
+   `tls_client_config` (M4b fix of the M4a no-ALPN
+   deviation).
+2. Q8 (decided by the parent per the decision principles):
+   `Unsupported` → exit 2 ONLY for config parse/dispatch
+   errors; runtime errors map to exit 1. Evidence: Go
+   `defaultBuildRuntime` maps setup errors to `errCode(2)`
+   (LoadSingleConfig, ResolveLogSettings, NewManager,
+   ResolveProfileDNS, dns.New, dnsClient.Start, mgr.Dialer)
+   except `mgr.Start` → 3, while runtime errors go through
+   `classifyError`.
+3. HTTPS via hyper http1 only: Go negotiates h2, Rust
+   cannot speak h2 — same request/response over HTTP/1.1.
+4. TLS via rustls, not Go's uTLS Chrome fingerprint: the
+   ClientHello differs from Go's. Live evidence (§M4b.5):
+   the gateway + HTTPS paths pass against the live edge.
+5. `BodySummary` has no Payload text field: the
+   VM-unavailable case is carried as `error_code:
+   Some("vm_unavailable")`. Go's `GatewayError.Error()`
+   (`internal/conn/errors.go`) never prints Payload — the
+   payload matters only for `classifyConnError`'s substring
+   check, which the marker replaces.
+6. `SessionInfo` / `ParseRSCResult` numbers are
+   `serde_json::Value`, not Go `json.Number` literals:
+   number-literal spelling (e.g. `1.50` → `1.5`) is not
+   preserved through shaped outputs; values stay
+   numerically identical.
+7. `history --download` → exit 1 "not ported yet" BEFORE
+   any network call (Go fetches history first; M2 stub
+   convention).
+8. `invite` stays fully stubbed (exit 1, `STUB_LINE`).
+9. A `Block` outbound fails at dispatch (exit 2); Go
+   builds it and fails at dial time.
+10. No keeper / refresh; no cookie writer
+    (`WriteCookiesFile` deferred to M5 keeper).
+11. No DNS router is built (M3 system-resolver deviation
+    carries over).
+12. Cookie / chunk bodies via `String::from_utf8_lossy`
+    (Go strings hold arbitrary bytes; invalid UTF-8 is
+    replaced, not rejected).
+13. `FindActionID` derives the chunk base from the page
+    URL's scheme+authority (Go hardcodes
+    `https://muse.ai`; identical in production).
+14. "could not find fetchSubscriptionAction" /
+    "subscription is not an object" `GatewayError`s carry
+    no payload text (Go's `Error()` never prints Payload).
+15. The CLI renders `GatewayError` via its own Go-exact
+    `Error()` builder (`network.rs`
+    `gateway_error_text`), NOT `TransportError::log_summary()`
+    (whose gateway shape is the M4a `render()` deviation).
+16. `ConnectionError`'s `error_length` is the inner
+    message's length (loop-6: the CLI never prints the
+    message; the length is the only observable).
+17. Empty feed / ideas / threads / files / goals rows emit
+    `[]`, never `null` (handlers replace nil slices).
+    Corrects the Batch A note that said feed/ideas emit
+    `null`.
+18. `from_serde` number-literal spelling is not preserved
+    (see 6).
+19. `serde_json` float exponent spelling on passthrough
+    outputs (`1e21` vs Go `1e+21`): values numerically
+    identical, spelling differs.
+20. `\b` / `\f` / U+2028 / U+2029: exact via the CLI
+    indenter (Go `json.Marshal` rules); shaped serializers
+    were already exact.
+21. Local time via chrono `Local` + a hand-rolled TZif
+    abbreviation reader: chrono `%Z` gives `"+07:00"`,
+    not `"ICT"` — the Asia/Ho_Chi_Minh tzfile has no "ICT"
+    abbreviation (verified with `zdump -v` and a Python
+    TZif parse on cue, plus a Go probe program).
+22. `do_hatch` / `callAction` / `fetch_text` derive TLS
+    from the URL scheme (https → `request_tls`, http →
+    `request`); no separate tls flag.
+23. `dial_gateway_over_stream` takes a generic stream, not
+    `Box<dyn AsyncReadWrite>` (avoids a honk-outbound
+    dependency in the gateway crate).
+
+## M4b.3 Findings
+
+- **The literal token, and the M4a claim was wrong.**
+  M4a recorded that the live server "decodes
+  `%3Credacted%3E` back to `<redacted>`". False: a raw-TLS
+  Python probe on cue (identical headers, only the token
+  spelling differs, vm_id from the Go status output)
+  returned `401 Unauthorized` for the encoded form and
+  `502 Bad Gateway` for the literal form, twice each,
+  interleaved with Go `status` (exit 0 twice) — not
+  backend flapping. The fix is a hand-written WS upgrade
+  in `castctl-gateway/src/dial.rs` (`ws_upgrade`): the
+  request-target is sent verbatim (plain string split, no
+  `http::Uri`), the response must be 101 with a correct
+  `Sec-WebSocket-Accept` (via tungstenite's
+  `derive_accept_key`), leftover bytes after the header
+  block are preserved with
+  `WebSocketStream::from_partially_read`. Both
+  `dial_gateway` (direct) and `dial_gateway_over_stream`
+  use it; the direct dial now also pins ALPN
+  `["http/1.1"]`, fixing the M4a no-ALPN deviation.
+- **CRLF goes through `muse.write` / `muse.edit` only.**
+  A Python edit script that rewrote `dial.rs` turned its
+  `\r\n` literals into bare LFs (0 literal CR bytes in
+  the file), so the upgrade request had no `\r\n` and the
+  server waited forever → 20s timeout on all 3 dial
+  tests. Fixed with `muse.edit` (`\\r\\n` in JSON);
+  verified 12 sequences, 0 literal CR bytes. Never build
+  a CRLF-carrying file through a Python edit script.
+- **The FakeServer cannot record a literal `<>` upgrade.**
+  Tungstenite's server handshake parses the target with
+  `http::Uri` (`server.rs:158`), which rejects `<>`, so
+  the M4a FakeServer cannot accept or record a
+  literal-token upgrade at all. The literal-token tests
+  use a new harness, `tests/common/raw_upgrade.rs`
+  (`RawUpgradeServer`: records raw request bytes
+  verbatim, answers 101, then closes — it does not speak
+  Noise, so the dial fails at the Noise step with
+  `ConnectionError`, which the tests assert).
+- **TLS fingerprint blocks the live gateway (see §M4b.5).**
+  rustls + literal token → 502; OpenSSL + literal → 502;
+  Go/uTLS-Chrome + literal → 101. ClientHello captures
+  (iptables REDIRECT + a Python listener on cue):
+  Go WS dial 1748 B, uTLS HelloChrome (GREASE cipher +
+  extensions + groups + key share, ECH, ALPN http/1.1
+  only); rustls 251 B, no GREASE, no ECH, no MLKEM768,
+  11 extensions in rustls order. The edge terminates TLS
+  and then 502s at the HTTP proxy (`server_connection_
+  error`), so the fingerprint decides upstream routing,
+  not the handshake. rustls has no API for GREASE / ECH
+  / extension order, so it cannot mimic Chrome.
+  BoringSSL (already in the lock via honk, `boring` /
+  `tokio-boring` 5.2.0) implements GREASE
+  (`ssl/encrypted_client_hello.cc`, `hs->grease_seed`)
+  and is the candidate fix — a new TLS-architecture
+  decision, not attempted in PR2.
+- **`usage --json`'s one-off `ConnectionError`.** First
+  parity run: `usage --json` failed with
+  `error_length=36` while `usage` and `usage-raw` passed
+  (same `fetch_subscription` path). The re-run passed
+  all three (see §M4b.5). Treated as transient (likely a
+  blip during the FindActionID chunk fetch); cause not
+  pinned down, no repro. The 36-char message is a hyper
+  error string from `http.rs` (`truncate(..., 200)`).
+- **Cue disk filled to 100% mid-task.** `rust/target/
+  debug` reached 17 G (2255 files). Freed by deleting
+  `target/debug`; the release binary was preserved and
+  backed up to `/tmp/castctl-rs-m4b`.
+- **Display redaction, third time.** A connector-test
+  failure and the probe output both rendered a real
+  token as `auth_token=<redacted>` while the bytes were
+  different. Byte-level checks (`grep -c`, Python byte
+  lists) are the only reliable verification for token
+  URLs.
+- **Go ghost profiles synthesise defaults.** An explicit
+  `--profile nosuch` does NOT error: `LoadProfile`
+  synthesises `SourceNone` defaults for a ghost name.
+  Only `default_profile` naming a nonexistent profile
+  errors. Rust matches (verified by test).
+- **Test-harness findings.** The shared FakeServer
+  deadlocks on a binary ClientHello (it reads until
+  `\r\n\r\n`, which a ClientHello never contains) —
+  plain-HTTP fakes live in `tests/http_fake.rs` instead.
+  Per-target clippy dead-code forced splitting
+  `tests/common/mod.rs` in both gateway and transport
+  (a target that never constructs a server trips
+  `-D warnings` on its fields). `MutexGuard` held across
+  `await` is flagged by clippy 1.99 even with an explicit
+  `drop` — scope the lock in a block instead.
+
+## M4b.4 Gates (cue, 2026-11-05, pre-rebase head 86a2142)
+
+All four exit 0, no `#[allow]`:
+
+- `cargo fmt --check` → 0.
+- `cargo build --workspace` → 0.
+- `cargo test --workspace` → 0, **440 passed** (baseline
+  347 → **+93**).
+- `cargo clippy --workspace --all-targets -- -D warnings`
+  → 0.
+
+Per-crate final counts (from the gate log):
+
+| crate | tests | new in M4b |
+|---|---|---|
+| castctl-cli | 68 | +27 |
+| castctl-config | 90 | +3 |
+| castctl-gateway | 76 (lib 32 + auth 4 + connector 6 + gateway 22 + golden 4 + noise 3 + subscription 5) | +33 (lib +18, integration +15) |
+| castctl-shared | 35 | +28 |
+| castctl-transport | 111 (lib 80 + env_proxy 1 + rpc 12 + tls 1 + wireguard 17) | +2 (lib +1, tls integration +1) |
+| pre-existing (log_redact 46, tg_text 10, tg_files 2, rs parity 2) | 60 | 0 |
+| **total** | **440** | **+93** |
+
+New tests by file: `castctl-shared` (`timefmt`, `status`,
+`sessions`, `event`, `feed`, `usage`, `bridge`);
+`castctl-config` credential tests; `castctl-cli`
+`network.rs` / `runtime.rs`; `castctl-gateway`
+`summary.rs`, `cookies.rs`, `auth.rs` (unit + `tests/
+auth.rs`), `subscription.rs` (unit + `tests/
+subscription.rs`), `connector.rs` (unit + `tests/
+connector.rs`, incl. the literal-token test against
+`RawUpgradeServer`); `castctl-transport` `tls.rs` (unit)
++ `tests/tls.rs`. The M4a gateway test
+`dial_url_sends_redacted_literal_not_real_token` was
+rewritten (the old wire assert expected
+`%3Credacted%3E`); the string-level assert
+(`default_ws_url` byte-for-byte == Go URL) and the
+value-level assert (query value == literal) are kept.
+Logs: `gate-logs-m4b/gate-{fmt,build,test,clippy}-m4b.log`.
+The gates are re-run after the rebase onto dev-rust;
+those logs are `gate-{fmt,build,test,clippy}-m4b-
+rebased.log` and the result is in the writer report.
+
+## M4b.5 Live test trên cue (2026-11-05)
+
+Binaries: Go 0.9.0 `/usr/local/bin/castctl` (1396697 B);
+Rust release `/tmp/castctl-rust-m4/rust/target/release/
+castctl-rs` (23204064 B, built 19:46, backed up to
+`/tmp/castctl-rs-m4b`). Read-only commands only; no
+chat/send, approval, update, login, or keeper. Max 2
+runs per command (run 1 on no.0 died mid-run: ssh exit
+255 after `status` + `usage`; run 2 completed all 16
+labels + `goal`/`idea` separately).
+
+Profiles:
+
+- cue-test: config `/root/castctl-live-test/config.json`
+  (600), cookies `.../profiles/cue-test/cookies.txt`
+  (0600, `hatch_sess` valid until 2026-12-05T03:11:56Z,
+  12 cookies), direct dial (no outbound), vm_id from
+  FetchSessionInfo.
+- no.0 (Boss's live profile): config `/root/.config/
+  castctl/config.json` written by Boss (minimal:
+  default_profile + no.0 entry, cookies_file,
+  node_id `a4d787ca4a5a87d9`, auto_approve=always).
+  Do NOT modify it. Cookies `/root/.config/castctl/
+  profiles/no.0/cookies.txt` (2809 B). Boss proved
+  authenticated: `castctl --profile no.0 status`
+  returns vm_id `72d127a3-2e19-4c84-b073-9ed4b82102b9`,
+  sessions=110, exit 0.
+
+### cue-test parity (controlled comparison)
+
+16 labels, Go `--config ... --profile cue-test <cmd>`
+vs Rust release (same form). `compare.py` compares
+exit code, raw stdout, JSON with keys sorted, stderr.
+
+| command | Go | Rust | raw | normalized | note |
+|---|---|---|---|---|---|
+| usage | 0 | 0 | MATCH | MATCH | byte-identical text, incl. `resets 2026-11-07 14:52 +07` |
+| usage --json | 0 | 0 | MATCH | MATCH | JSON-identical after key sort |
+| usage --raw | 0 | 0 | MATCH | MATCH | JSON-identical after key sort |
+| status, threads, threads --all, history --limit 3, history --limit 3 --raw, files --limit 3, feed, feed --raw, feed-status, feed-prompt, goals, ideas, unread | 0 | 1 | DIFF | N/A (no Rust output) | Rust stderr `castctl: conn: connection error error_length=47` — the WS upgrade gets HTTP 502 from the live edge (see blocker below) |
+
+No fields were dropped for cue-test: the three usage
+commands match raw; the gateway commands produce no
+Rust output to normalize.
+
+### no.0 live gate
+
+18 labels (16 + `goal goal_62b884f95116` + `idea
+idea_0b270d463ca24cc2b863ffdc79b1ea30`, IDs taken from
+Go's `goals`/`ideas` outputs). Same pattern:
+
+| command | Go | Rust | raw | after dropping volatile fields | note |
+|---|---|---|---|---|---|
+| usage | 0 | 0 | MATCH | MATCH | — |
+| usage --json | 0 | 0 | DIFF | MATCH after dropping `bonus_tokens.balance_units` | drift (proven below) |
+| usage --raw | 0 | 0 | DIFF | MATCH after dropping `topupBalance` | drift (proven below) |
+| goal, idea, status, threads, threads --all, history --limit 3, history --limit 3 --raw, files --limit 3, feed, feed --raw, feed-status, feed-prompt, goals, ideas, unread | 0 | 1 | DIFF | N/A (no Rust output) | same 502 blocker |
+
+Dropped fields (exactly these, nothing else):
+`bonus_tokens.balance_units` (usage --json) and
+`topupBalance` (usage --raw). No other field was
+dropped; every other leaf matches.
+
+Drift proof (Go run twice, same field moves, no code
+change): `usage --json` Go×2, 5 s apart —
+`balance_units` 447188087 → 447186591 (−1496);
+`usage --raw` Go run 2 vs a later Go run —
+`topupBalance` 447305148 → 447183505 (−121643).
+Run-2 Go-vs-Rust gaps are the same direction and
+scale: `balance_units` 447329611 → 447318242
+(−11369), `topupBalance` 447305148 → 447276676
+(−28472). The counters fall continuously because the
+Boss's live session consumes tokens; the text `usage`
+output still MATCHes raw because it prints rounded
+values (`3B tokens left`, `10% used`).
+
+### Blocker: the live gateway is unreachable from Rust
+
+Root cause, proven (see §M4b.3): the Meta edge
+requires a Chrome TLS fingerprint. Go dials with
+uTLS HelloChrome → 101. Rust (rustls) and Python
+(OpenSSL) send non-Chrome ClientHellos → the edge
+terminates TLS, then returns HTTP 502
+(`server_connection_error`) from its proxy. The
+ClientHello captures are in `gate-logs-m4b/
+live-evidence/` (`ch-go-ws.bin` 1748 B Chrome,
+`ch-rustls.bin` 251 B). rustls cannot mimic Chrome
+(no GREASE / ECH / extension order). BoringSSL
+(already in the lock via honk, GREASE in its source)
+is the candidate fix — a new TLS-architecture
+decision for Boss, NOT attempted in PR2. Consequence:
+all 13 gateway commands + `goal`/`idea` fail live
+with exit 1; the HTTPS path (`usage*`) is the only
+live-parity proof in this PR.
+
+### Secrets grep proof
+
+`grep -ri -E "hatch_sess|auth_token|cookie|bearer|
+token"` over every file in `gate-logs-m4b/` (gate
+logs, parity outputs, live evidence, scripts):
+occurrences — `hatch_sess` 4, `auth_token` 2,
+`cookie` 34, `bearer` 1, `token` 80. Every match is
+a test name, a script identifier, the literal
+`<redacted>` placeholder, public feed article text,
+or the words `hatch_sess` / `cookie` inside a chat
+message that discusses cookies by name (no value).
+Value-carrying patterns are all zero:
+`hatch_sess=<value>` 0, `Bearer <value>` 0,
+`Cookie:` header 0. No cookie, token, or auth
+header value appears in any log or in the PR.
+
+### Unverified (live)
+
+- The entire gateway path (all 13 commands +
+  `goal`/`idea`) — blocked, not merely untested.
+- Write-path commands (`history --download`,
+  `invite`, chat/send, keeper, login, update).
+- Transport (socks/vless/...): both live profiles
+  dial direct; a command needing transport is
+  `chưa kiểm chứng`.
+- `goal`/`idea` on cue-test (no IDs were fetched
+  there; covered on no.0 instead).
+
+Logs: `gate-logs-m4b/parity-cue-test/`,
+`gate-logs-m4b/live-parity-no0-run2/` (108 files),
+`gate-logs-m4b/live-parity-no0-run2.log`,
+`gate-logs-m4b/live-evidence/` (ClientHello bins,
+probe log, drift outputs).
+
+## M4b.6 Chưa kiểm chứng
+
+- Write-path commands are NOT live-tested in this PR
+  (`history --download`, `invite`, chat/send, keeper,
+  login, update): read-only only, by the PR scope.
+- No transport (socks/vless/...) live test: the live
+  profiles dial direct (no outbound). A command needing
+  transport is `chưa kiểm chứng` until a transport is set
+  up on cue.
+- The live gateway path (all 13 commands + `goal` /
+  `idea`): BLOCKED by the TLS fingerprint, see §M4b.5
+  — not merely untested. The ClientHello capture WAS
+  done (Go 1748 B Chrome vs rustls 251 B); the
+  BoringSSL fix is a Boss decision, not attempted here.
+- `usage --json`'s one-off `ConnectionError`
+  (`error_length=36`) in the first parity run: the
+  re-run passed (see §M4b.3); root cause unpinned,
+  treated as transient.
+- Long-run behaviour (reconnect storms, heartbeat at the
+  production 25s cadence through the CLI) was not waited;
+  covered by threshold injection in M4a tests.
+
+
 ## Quy tắc quyết định (Boss, 2026-11-05 — standing)
 
 Applies to the whole Rust port, not just M4a. Decide

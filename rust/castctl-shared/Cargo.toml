@@ -8,3 +8,10 @@ description = "History-event resource shaping ported from castctl's Go internal/
 
 [dependencies]
 regex.workspace = true
+# M4b: local-time rendering (see timefmt.rs) + the
+# serde_json -> JsonValue bridge for gateway values
+# (bridge.rs). Both are already pinned in Cargo.lock
+# (chrono via honk-config, serde_json workspace-wide);
+# no new crate enters the tree.
+chrono = { workspace = true, default-features = false, features = ["clock", "std"] }
+serde_json = { workspace = true }

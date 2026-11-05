@@ -369,9 +369,14 @@ fn format_json_float(f: f64) -> String {
 }
 
 /// Escapes a string the way Go's `encoding/json` does:
-/// `"`/`\`/control chars, plus `<`, `>`, `&` and U+2028/U+2029
-/// as `\u00XX` escapes.
-fn escape_json_string(s: &str, out: &mut String) {
+/// `"`/`\`/control chars, plus U+2028/U+2029 as `\u2028` /
+/// `\u2029`. `<`, `>`, `&` are escaped as `\u00XX` only when
+/// `escape_html` is true (Go's default); `writeJSON`
+/// (`commands.go:411`, `SetEscapeHTML(false)`) passes them
+/// through raw, so the M4b row serializers pass false.
+/// M1 callers (`file_row_to_json`) keep passing true: their
+/// pinned goldens are the escaped form.
+pub(crate) fn escape_json_string(s: &str, out: &mut String, escape_html: bool) {
     out.push('"');
     for c in s.chars() {
         match c {
@@ -380,9 +385,9 @@ fn escape_json_string(s: &str, out: &mut String) {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            '<' => out.push_str("\\u003c"),
-            '>' => out.push_str("\\u003e"),
-            '&' => out.push_str("\\u0026"),
+            '<' if escape_html => out.push_str("\\u003c"),
+            '>' if escape_html => out.push_str("\\u003e"),
+            '&' if escape_html => out.push_str("\\u0026"),
             '\u{2028}' => out.push_str("\\u2028"),
             '\u{2029}' => out.push_str("\\u2029"),
             c if (c as u32) < 0x20 => {
@@ -401,7 +406,8 @@ fn escape_json_string(s: &str, out: &mut String) {
 /// the exponent's leading zero stripped (`1e-7`, `1e+21`).
 /// Non-finite floats serialize as `null` (Go would error;
 /// no pinned case covers this).
-fn write_json_value(v: &JsonValue, out: &mut String) {
+/// `escape_html` is threaded to [`escape_json_string`].
+pub(crate) fn write_json_value(v: &JsonValue, out: &mut String, escape_html: bool) {
     match v {
         JsonValue::Null => out.push_str("null"),
         JsonValue::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
@@ -413,14 +419,14 @@ fn write_json_value(v: &JsonValue, out: &mut String) {
                 out.push_str(&format_json_float(*f));
             }
         }
-        JsonValue::Str(s) => escape_json_string(s, out),
+        JsonValue::Str(s) => escape_json_string(s, out, escape_html),
         JsonValue::Array(items) => {
             out.push('[');
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
                 }
-                write_json_value(item, out);
+                write_json_value(item, out, escape_html);
             }
             out.push(']');
         }
@@ -430,9 +436,9 @@ fn write_json_value(v: &JsonValue, out: &mut String) {
                 if i > 0 {
                     out.push(',');
                 }
-                escape_json_string(k, out);
+                escape_json_string(k, out, escape_html);
                 out.push(':');
-                write_json_value(val, out);
+                write_json_value(val, out, escape_html);
             }
             out.push('}');
         }
@@ -457,16 +463,16 @@ pub fn file_row_to_json(row: &FileRow) -> String {
     }
     out.push_str(",\"message_id\":");
     match &row.message_id {
-        Some(s) => escape_json_string(s, &mut out),
+        Some(s) => escape_json_string(s, &mut out, true),
         None => out.push_str("null"),
     }
     out.push_str(",\"path\":");
-    escape_json_string(&row.path, &mut out);
+    escape_json_string(&row.path, &mut out, true);
     out.push_str(",\"kind\":");
-    escape_json_string(&row.kind, &mut out);
+    escape_json_string(&row.kind, &mut out, true);
     if let Some(mime) = &row.mime {
         out.push_str(",\"mime\":");
-        escape_json_string(mime, &mut out);
+        escape_json_string(mime, &mut out, true);
     }
     if let Some(n) = row.byte_len {
         out.push_str(",\"byte_len\":");
@@ -474,11 +480,11 @@ pub fn file_row_to_json(row: &FileRow) -> String {
     }
     if let Some(label) = &row.label {
         out.push_str(",\"label\":");
-        escape_json_string(label, &mut out);
+        escape_json_string(label, &mut out, true);
     }
     if let Some(variants) = &row.variants {
         out.push_str(",\"variants\":");
-        write_json_value(variants, &mut out);
+        write_json_value(variants, &mut out, true);
     }
     out.push('}');
     out
@@ -942,11 +948,11 @@ mod tests {
         for (f, want) in cases {
             assert_eq!(format_json_float(*f), *want, "float {f}");
             let mut out = String::new();
-            write_json_value(&JsonValue::Float(*f), &mut out);
+            write_json_value(&JsonValue::Float(*f), &mut out, true);
             assert_eq!(out, *want, "json float {f}");
         }
         let mut out = String::new();
-        escape_json_string("<a>&\u{2028}\u{2029}\u{1}\u{7f}é", &mut out);
+        escape_json_string("<a>&\u{2028}\u{2029}\u{1}\u{7f}é", &mut out, true);
         assert_eq!(
             out, "\"\\u003ca\\u003e\\u0026\\u2028\\u2029\\u0001\u{7f}é\"",
             "json string escaping"

@@ -8,3 +8,9 @@ description = "Command table, flag parsing, help/usage rendering, and exit mappi
 
 [dependencies]
 castctl-config = { path = "../castctl-config" }
+castctl-gateway = { path = "../castctl-gateway" }
+castctl-shared = { path = "../castctl-shared" }
+castctl-transport = { path = "../castctl-transport" }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
