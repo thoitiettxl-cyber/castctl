@@ -71,7 +71,7 @@ impl NoticeKind {
 
     /// Parse a kind string; `None` when outside the closed
     /// set.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_kind(s: &str) -> Option<Self> {
         Some(match s {
             "logged_out" => NoticeKind::LoggedOut,
             "re-exported" => NoticeKind::Reexported,
@@ -113,7 +113,7 @@ pub fn valid_notice_kind(kind: NoticeKind) -> bool {
 
 /// Whether a kind string is in the closed set.
 pub fn valid_notice_kind_str(kind: &str) -> bool {
-    NoticeKind::from_str(kind).is_some()
+    NoticeKind::parse_kind(kind).is_some()
 }
 
 /// Sends one fixed-content notice. Implementations live in
@@ -216,10 +216,10 @@ mod tests {
     fn closed_set_round_trips() {
         assert_eq!(ALL_NOTICE_KINDS.len(), 9);
         for k in ALL_NOTICE_KINDS {
-            assert_eq!(NoticeKind::from_str(k.as_str()), Some(*k));
+            assert_eq!(NoticeKind::parse_kind(k.as_str()), Some(*k));
             assert!(valid_notice_kind(*k));
         }
-        assert_eq!(NoticeKind::from_str("bogus"), None);
+        assert_eq!(NoticeKind::parse_kind("bogus"), None);
         assert!(!valid_notice_kind_str("bogus"));
     }
 }

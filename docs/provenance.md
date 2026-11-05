@@ -2058,6 +2058,32 @@ envelope finding, and the explicit "Chưa kiểm chứng" list
 (no live muse.ai peer; wss:// untested; no real
 WireGuard/outbound dial in this PR).
 
+## 16. M6a keeper port — no new upstream dependency
+
+M6a (`rust/castctl-keeper`, branch `feat/rust-m6a-keeper`,
+base `dev-rust c7b1d34`) ports the repo's own Go keeper
+code (`internal/keeper`, `internal/profile/keeper.go`,
+`internal/profile/cookies.go`, `cookielock.go`) to Rust.
+No third-party code was copied and no new crate entered
+`Cargo.lock`: every dependency was already locked by an
+earlier milestone and is covered elsewhere in this file —
+`tokio-tungstenite =0.30.0` (§15), `base64` (§14),
+`hyper` / `hyper-util` / `http` / `http-body-util`
+(pre-existing workspace HTTP stack, used by
+`castctl-transport`), `url`, `libc`, `sha2`, `async-trait`
+(pre-existing workspace deps). `NOTICE` needed no change
+(no new dep). The M4c JsonValue bridge change
+(`castctl-shared`, `Float(String)`) does not affect the
+keeper: its only JsonValue use is
+`castctl_config::jsonvalue::JsonValue` (the config
+crate's own M2 type, `Number(String)`), and neither
+`castctl-config` nor `castctl-keeper` depends on
+`castctl-shared` (verified by grep; pinned by the
+`lenient_forms` test). Algorithm provenance and every
+deviation from the Go implementation are recorded in
+`rust/PORTING.md` §M6a.
+
+
 ## Carried items (unresolved at the time of writing)
 
 - npm license check: not run — no license-checking tool present,

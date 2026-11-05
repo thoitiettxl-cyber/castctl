@@ -223,6 +223,7 @@ fn parse_cookie_value(raw: &[u8]) -> Option<String> {
 /// - `Mon, 02 Jan 2006 15:04:05 GMT`
 /// - `Monday, 02-Jan-06 15:04:05 GMT`
 /// - `Mon Jan  2 15:04:05 2006`
+///
 /// Returns the epoch, or `None` when no layout matches (Go
 /// then leaves `Expires` zero, i.e. absent).
 pub fn parse_http_date(s: &str) -> Option<i64> {

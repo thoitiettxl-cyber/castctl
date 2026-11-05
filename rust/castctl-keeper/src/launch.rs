@@ -98,10 +98,10 @@ pub fn resolve_browser_path(flag_path: &str) -> String {
     if !flag_path.is_empty() {
         return flag_path.to_string();
     }
-    if let Ok(env) = std::env::var(CHROMIUM_PATH_ENV) {
-        if !env.is_empty() {
-            return env;
-        }
+    if let Ok(env) = std::env::var(CHROMIUM_PATH_ENV)
+        && !env.is_empty()
+    {
+        return env;
     }
     String::new()
 }
@@ -258,15 +258,14 @@ mod tests {
 
     #[test]
     fn debug_port_file_parsing() {
-        let d =
-            std::env::temp_dir().join(format!(
-                "castctl-keeper-launch-test-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
+        let d = std::env::temp_dir().join(format!(
+            "castctl-keeper-launch-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let ds = d.to_str().unwrap();

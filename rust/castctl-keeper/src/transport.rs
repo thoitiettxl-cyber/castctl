@@ -276,6 +276,12 @@ impl RefusingTransport {
     }
 }
 
+impl Default for RefusingTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl Transport for RefusingTransport {
     async fn send_frame(&self, _frame: Frame) {

@@ -506,8 +506,11 @@ mod tests {
     fn tmpdir() -> PathBuf {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let p = std::env::temp_dir()
-            .join(format!("castctl-keeper-state-test-{}-{}", std::process::id(), n));
+        let p = std::env::temp_dir().join(format!(
+            "castctl-keeper-state-test-{}-{}",
+            std::process::id(),
+            n
+        ));
         std::fs::create_dir_all(&p).unwrap();
         p
     }

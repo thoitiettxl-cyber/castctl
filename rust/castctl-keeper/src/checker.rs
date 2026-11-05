@@ -50,7 +50,7 @@ pub const AUTH_CHECK_URL: &str = "https://muse.ai/api/auth/check";
 /// updates observed, in step order (session response
 /// first, then auth/check), the count of unparseable
 /// Set-Cookie values, and the step error (if any).
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct CheckOutcome {
     pub updates: Vec<CookieUpdate>,
     pub skipped: usize,
@@ -388,16 +388,6 @@ fn split_url(url: &str) -> Option<(bool, DialTarget, String)> {
         }
     };
     Some((secure, DialTarget::new(&host, port), path))
-}
-
-impl Default for CheckOutcome {
-    fn default() -> Self {
-        Self {
-            updates: Vec::new(),
-            skipped: 0,
-            error: None,
-        }
-    }
 }
 
 /// A clock that always returns the same instant (for

@@ -94,10 +94,9 @@ pub async fn resolve_screencast_target(http_base: &str) -> Result<String, Keeper
         if let Some(host) = url::Url::parse(&t.url)
             .ok()
             .and_then(|u| u.host_str().map(|h| h.to_lowercase()))
+            && SCREENCAST_HOSTS.contains(&host.as_str())
         {
-            if SCREENCAST_HOSTS.contains(&host.as_str()) {
-                matches.push(t);
-            }
+            matches.push(t);
         }
     }
     match matches.len() {

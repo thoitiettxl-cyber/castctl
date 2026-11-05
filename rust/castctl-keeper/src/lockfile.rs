@@ -40,8 +40,8 @@
 //! (`flock_other.go`).
 
 use std::fs::{File, OpenOptions};
-use std::os::unix::fs::OpenOptionsExt;
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -73,12 +73,12 @@ impl LockGuard {
 pub fn ensure_profile_dir(base_dir: &str, profile_name: &str) -> Result<String, KeeperError> {
     let paths = castctl_config::profile::profile_paths(base_dir, profile_name)?;
     let dir = Path::new(&paths.dir);
-    if profile_name != castctl_config::profile::DEFAULT_PROFILE_NAME {
-        if let Some(parent) = dir.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| KeeperError::StateDir(format!("{}: {}", parent.display(), e)))?;
-            set_mode_0700(parent)?;
-        }
+    if profile_name != castctl_config::profile::DEFAULT_PROFILE_NAME
+        && let Some(parent) = dir.parent()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| KeeperError::StateDir(format!("{}: {}", parent.display(), e)))?;
+        set_mode_0700(parent)?;
     }
     std::fs::create_dir_all(dir)
         .map_err(|e| KeeperError::StateDir(format!("{}: {}", dir.display(), e)))?;
@@ -180,10 +180,13 @@ pub fn lock_cookies_file(
     let cookies_path = clean_abs(cookies_path);
     ensure_cookies_parent(base_dir, profile_name, &cookies_path)?;
     let lock_path = format!("{cookies_path}.lock");
+    // The lock file is only ever flocked, never read or
+    // written: create it if missing, never truncate it.
     let f = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .mode(0o600)
         .open(&lock_path)?;
     acquire_flock(&f, timeout)
@@ -195,10 +198,13 @@ pub fn lock_cookies_file(
 /// owner file's lock; it takes no lock-file suffix and never
 /// deletes the file.
 pub fn lock_short_file(path: &str, timeout: Duration) -> Result<LockGuard, KeeperError> {
+    // As above: the file is a flock identity only, never
+    // truncated.
     let f = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .mode(0o600)
         .open(path)?;
     acquire_flock(&f, timeout)
@@ -296,11 +302,11 @@ pub fn write_cookies_file(
             return Err(e);
         }
         backup = true;
-    } else if let Err(e) = std::fs::metadata(&cookies_path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(KeeperError::Io(e));
-        }
+    } else if let Err(e) = std::fs::metadata(&cookies_path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(KeeperError::Io(e));
     }
     if let Err(e) = std::fs::rename(&tmp_path, &cookies_path) {
         let _ = std::fs::remove_file(&tmp_path);
@@ -340,12 +346,12 @@ fn sync_dir(dir: &Path) {
 /// Copy the previous cookies file to `bak` BEFORE the new
 /// file is renamed over the destination (`cookies.go:120-194`).
 fn backup_cookies_file(cookies_path: &str, bak: &str) -> Result<(), KeeperError> {
-    if let Ok(st) = std::fs::metadata(bak) {
-        if st.is_dir() {
-            return Err(KeeperError::Other(format!(
-                "backup path {bak:?} is a directory"
-            )));
-        }
+    if let Ok(st) = std::fs::metadata(bak)
+        && st.is_dir()
+    {
+        return Err(KeeperError::Other(format!(
+            "backup path {bak:?} is a directory"
+        )));
     }
     let lst = std::fs::symlink_metadata(cookies_path)?;
     let dir = Path::new(bak)
@@ -383,8 +389,11 @@ mod tests {
         // another's files). The counter makes each dir private.
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let p = std::env::temp_dir()
-            .join(format!("castctl-keeper-lock-test-{}-{}", std::process::id(), n));
+        let p = std::env::temp_dir().join(format!(
+            "castctl-keeper-lock-test-{}-{}",
+            std::process::id(),
+            n
+        ));
         std::fs::create_dir_all(&p).unwrap();
         p
     }
@@ -476,7 +485,7 @@ mod tests {
         // Second write: previous bytes preserved in .bak.
         assert!(write_cookies_file(base_s, "default", cpath, b"v2").unwrap());
         assert_eq!(
-            std::fs::read_to_string(&format!("{cpath}.bak")).unwrap(),
+            std::fs::read_to_string(format!("{cpath}.bak")).unwrap(),
             "v1"
         );
         assert_eq!(std::fs::read_to_string(cpath).unwrap(), "v2");

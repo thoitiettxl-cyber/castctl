@@ -624,13 +624,11 @@ impl RealReloginDriver {
         if let Some(cleanup) = ctx.inbound_cleanup.take() {
             cleanup();
         }
-        if failed {
-            if let Some(dir) = ctx.created_dir.take() {
+        if failed && let Some(dir) = ctx.created_dir.take() {
+            let _ = std::fs::remove_dir_all(&dir);
+            if std::fs::symlink_metadata(&dir).is_ok() {
+                tokio::time::sleep(self.opts.timeouts.poll_interval).await;
                 let _ = std::fs::remove_dir_all(&dir);
-                if std::fs::symlink_metadata(&dir).is_ok() {
-                    tokio::time::sleep(self.opts.timeouts.poll_interval).await;
-                    let _ = std::fs::remove_dir_all(&dir);
-                }
             }
         }
     }
@@ -657,10 +655,10 @@ impl RealReloginDriver {
             match snapshot_match(session, contract).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    if is_blocker_signal(&e) {
-                        if let SnapshotMatchError::Decision(SnapshotDecisionError::Blocker(b)) = e {
-                            return Err(ReloginError::Blocker(b));
-                        }
+                    if is_blocker_signal(&e)
+                        && let SnapshotMatchError::Decision(SnapshotDecisionError::Blocker(b)) = e
+                    {
+                        return Err(ReloginError::Blocker(b));
                     }
                     match e {
                         SnapshotMatchError::Decision(SnapshotDecisionError::Blocker(b)) => {
@@ -713,12 +711,11 @@ impl RealReloginDriver {
             // timeout. A `contract_mismatch` AFTER submit is
             // NOT a blocker: the page navigated away from
             // the form (likely a successful login).
-            if let Err(e) = snapshot_match(&ctx.session, contract).await {
-                if is_blocker_signal(&e) {
-                    if let SnapshotMatchError::Decision(SnapshotDecisionError::Blocker(b)) = e {
-                        return Err(ReloginError::Blocker(b));
-                    }
-                }
+            if let Err(e) = snapshot_match(&ctx.session, contract).await
+                && is_blocker_signal(&e)
+                && let SnapshotMatchError::Decision(SnapshotDecisionError::Blocker(b)) = e
+            {
+                return Err(ReloginError::Blocker(b));
             }
             match self.harvest(ctx).await {
                 Ok(cookies) if has_hatch_sess(&cookies) => return Ok(cookies),

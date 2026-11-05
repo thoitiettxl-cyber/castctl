@@ -119,10 +119,10 @@ impl CdpExporter {
             if first_page.is_none() {
                 first_page = Some(t.id.clone());
             }
-            if let Some(host) = host_of_url(&t.url) {
-                if EXPORT_HOSTS.contains(&host.as_str()) {
-                    muse_pages.push(t.id.clone());
-                }
+            if let Some(host) = host_of_url(&t.url)
+                && EXPORT_HOSTS.contains(&host.as_str())
+            {
+                muse_pages.push(t.id.clone());
             }
         }
         if !muse_pages.is_empty() {

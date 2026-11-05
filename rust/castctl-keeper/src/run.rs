@@ -172,17 +172,16 @@ pub async fn acquire_single_flight(
         // Short flock hold: check + update only. The lock
         // is released before the caller sleeps or ticks.
         let raw = std::fs::read(&path).unwrap_or_default();
-        if !raw.is_empty() {
-            if let Ok(owner) = serde_json::from_slice::<OwnerFile>(&raw) {
-                if owner.pid > 0 {
-                    let age = clock.now().timestamp() - owner.heartbeat_unix;
-                    if age <= OWNER_STALE_AFTER.as_secs() as i64 && pid_alive(owner.pid) {
-                        return Err(KeeperError::Other(format!(
-                            "keeper entry {tag:?} is already running (pid {})",
-                            owner.pid
-                        )));
-                    }
-                }
+        if !raw.is_empty()
+            && let Ok(owner) = serde_json::from_slice::<OwnerFile>(&raw)
+            && owner.pid > 0
+        {
+            let age = clock.now().timestamp() - owner.heartbeat_unix;
+            if age <= OWNER_STALE_AFTER.as_secs() as i64 && pid_alive(owner.pid) {
+                return Err(KeeperError::Other(format!(
+                    "keeper entry {tag:?} is already running (pid {})",
+                    owner.pid
+                )));
             }
         }
         let now = clock.now().timestamp();
@@ -425,12 +424,14 @@ async fn run_entry_inner(deps: TickDeps, cancel: CancelFlag, on_tick: Option<OnT
             // this recovery closes a real incident. A
             // first-tick or routine self-healing recovery
             // stays silent.
-            if res.ticks > 1 && !prev_outcome.is_empty() && prev_outcome != OUTCOME_OK {
-                if let Some(notifier) = &deps.notifier {
-                    let _ = notifier
-                        .notify(NoticeKind::Reexported, &deps.profile_name, &cancel)
-                        .await;
-                }
+            if res.ticks > 1
+                && !prev_outcome.is_empty()
+                && prev_outcome != OUTCOME_OK
+                && let Some(notifier) = &deps.notifier
+            {
+                let _ = notifier
+                    .notify(NoticeKind::Reexported, &deps.profile_name, &cancel)
+                    .await;
             }
         }
         if cancel.is_cancelled() {
@@ -502,15 +503,14 @@ mod tests {
     #[tokio::test]
     async fn single_flight_second_acquire_refuses() {
         use crate::clock::RealClock;
-        let base =
-            std::env::temp_dir().join(format!(
-                "castctl-keeper-flight-test-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
+        let base = std::env::temp_dir().join(format!(
+            "castctl-keeper-flight-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let dir = base.to_str().unwrap();

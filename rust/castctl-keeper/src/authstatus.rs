@@ -78,10 +78,14 @@ pub struct AuthStatus {
 /// the report (expired — there is nothing to authenticate
 /// with). A corrupt file returns an error naming the file
 /// only, never its bytes.
+/// What [`cookie_expiry_metadata`] reports: (driving cookie
+/// name, driving expiry, cookies seen, file missing).
+pub type ExpiryMetadata = (String, Option<DateTime<Utc>>, usize, bool);
+
 pub fn cookie_expiry_metadata(
     cookies_path: &str,
     _now: DateTime<Utc>,
-) -> Result<(String, Option<DateTime<Utc>>, usize, bool), KeeperError> {
+) -> Result<ExpiryMetadata, KeeperError> {
     let raw = match std::fs::read(cookies_path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -158,11 +162,11 @@ pub fn derive_auth_status(
         // State expiry metadata wins when the file has
         // none (e.g. the file was replaced since the last
         // tick): prefer the state's driving record.
-        if driving_expiry.is_none() {
-            if let Some(exp) = st.driving_expiry {
-                out.driving_cookie = st.driving_cookie.clone();
-                out.driving_expiry = Some(exp);
-            }
+        if driving_expiry.is_none()
+            && let Some(exp) = st.driving_expiry
+        {
+            out.driving_cookie = st.driving_cookie.clone();
+            out.driving_expiry = Some(exp);
         }
     }
     match out.driving_expiry {

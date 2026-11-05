@@ -518,15 +518,15 @@ impl LoginSession {
             return;
         };
         let mut records: Vec<AuditRecord> = Vec::new();
-        if let Ok(raw) = std::fs::read(&path) {
-            if !raw.is_empty() {
-                for line in raw.split(|b| *b == b'\n') {
-                    if line.is_empty() {
-                        continue;
-                    }
-                    if let Ok(r) = serde_json::from_slice::<AuditRecord>(line) {
-                        records.push(r);
-                    }
+        if let Ok(raw) = std::fs::read(&path)
+            && !raw.is_empty()
+        {
+            for line in raw.split(|b| *b == b'\n') {
+                if line.is_empty() {
+                    continue;
+                }
+                if let Ok(r) = serde_json::from_slice::<AuditRecord>(line) {
+                    records.push(r);
                 }
             }
         }
@@ -658,15 +658,14 @@ mod tests {
 
     #[test]
     fn save_login_cookies_validates_and_records_provenance() {
-        let base =
-            std::env::temp_dir().join(format!(
-                "castctl-keeper-login-test-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
+        let base = std::env::temp_dir().join(format!(
+            "castctl-keeper-login-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let base_s = base.to_str().unwrap();

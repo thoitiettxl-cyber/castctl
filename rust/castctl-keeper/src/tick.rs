@@ -256,10 +256,10 @@ pub fn validate_exported_set(merged: &[StoredCookie], now: DateTime<Utc>) -> boo
         return false;
     }
     let _ = filtered;
-    if let Some(earliest) = earliest_filtered_expiry(merged) {
-        if !earliest.gt(&now) {
-            return false;
-        }
+    if let Some(earliest) = earliest_filtered_expiry(merged)
+        && !earliest.gt(&now)
+    {
+        return false;
     }
     true
 }
@@ -353,22 +353,19 @@ pub async fn tick(deps: &TickDeps, cancel: &CancelFlag) -> TickResult {
     }
     if ls.state.keeper_stopped {
         let pending = ls.state.warn_pending;
-        let kind = NoticeKind::from_str(&ls.state.warn_kind).unwrap_or(NoticeKind::LoggedOut);
+        let kind = NoticeKind::parse_kind(&ls.state.warn_kind).unwrap_or(NoticeKind::LoggedOut);
         let last = ls.state.last_tick_outcome.clone();
         drop(ls);
-        if pending {
-            if let Some(notifier) = &deps.notifier {
-                if notifier
-                    .notify(kind, &deps.profile_name, cancel)
-                    .await
-                    .is_ok()
-                {
-                    if let Ok(mut ls2) = store.lock() {
-                        ls2.state.mark_warn_sent(kind, clock.now());
-                        let _ = save_tick_state(&store, &mut ls2, &deps.before_state_save);
-                    }
-                }
-            }
+        if pending
+            && let Some(notifier) = &deps.notifier
+            && notifier
+                .notify(kind, &deps.profile_name, cancel)
+                .await
+                .is_ok()
+            && let Ok(mut ls2) = store.lock()
+        {
+            ls2.state.mark_warn_sent(kind, clock.now());
+            let _ = save_tick_state(&store, &mut ls2, &deps.before_state_save);
         }
         // The outcome is the last recorded outcome (the
         // sticky stop persists across ticks).
@@ -444,31 +441,33 @@ pub async fn tick(deps: &TickDeps, cancel: &CancelFlag) -> TickResult {
     }
 
     // Phase 2a: auto-wake.
-    if check_err.is_none() && deps.gateway_probe.is_some() && deps.wake_on_gateway_failure {
-        if let Err(werr) = attempt_wake_gateway(deps, cancel).await {
-            if is_auth_error(&werr) {
-                check_err = Some(werr);
-            } else if cancel.is_cancelled() {
-                return fail_result(
-                    OUTCOME_ERROR,
-                    "gateway",
-                    KeeperError::Other("tick cancelled".to_string()),
-                    base,
-                    corrupt_seen,
-                );
-            } else {
-                return record_gateway_down(
-                    &clock,
-                    &store,
-                    base,
-                    &updates,
-                    jar_form,
-                    file_missing,
-                    werr,
-                    &deps.before_state_save,
-                )
-                .await;
-            }
+    if check_err.is_none()
+        && deps.gateway_probe.is_some()
+        && deps.wake_on_gateway_failure
+        && let Err(werr) = attempt_wake_gateway(deps, cancel).await
+    {
+        if is_auth_error(&werr) {
+            check_err = Some(werr);
+        } else if cancel.is_cancelled() {
+            return fail_result(
+                OUTCOME_ERROR,
+                "gateway",
+                KeeperError::Other("tick cancelled".to_string()),
+                base,
+                corrupt_seen,
+            );
+        } else {
+            return record_gateway_down(
+                &clock,
+                &store,
+                base,
+                &updates,
+                jar_form,
+                file_missing,
+                werr,
+                &deps.before_state_save,
+            )
+            .await;
         }
     }
 
@@ -483,7 +482,7 @@ pub async fn tick(deps: &TickDeps, cancel: &CancelFlag) -> TickResult {
             return fail_result(
                 OUTCOME_TRANSIENT_ERROR,
                 "session",
-                KeeperError::Other(format!("check failed: {}", check_err.unwrap().to_string())),
+                KeeperError::Other(format!("check failed: {}", check_err.unwrap())),
                 base,
                 corrupt_seen,
             );
@@ -548,90 +547,90 @@ pub async fn tick(deps: &TickDeps, cancel: &CancelFlag) -> TickResult {
         }
         // 2) Headless re-login, when configured. Exactly
         // one driver invocation per tick.
-        if check_err.is_some() {
-            if let Some(driver) = &deps.relogin {
-                match try_relogin(deps, driver.as_ref(), &snapshot_cookies, now).await {
-                    Ok((rel_exported, rel_dropped)) => {
-                        exported = rel_exported;
-                        export_dropped = rel_dropped;
-                        let (merged, _) = replace_with_export(&snapshot_cookies, &exported);
-                        if !validate_exported_set(&merged, now) {
-                            return stop_entry(
-                                &clock,
-                                &store,
-                                base,
-                                STOPPED_AUTH_ERROR,
-                                Some(NoticeKind::Failed),
-                                check_err.unwrap(),
-                                &deps.before_state_save,
-                            )
-                            .await;
+        if check_err.is_some()
+            && let Some(driver) = &deps.relogin
+        {
+            match try_relogin(deps, driver.as_ref(), &snapshot_cookies, now).await {
+                Ok((rel_exported, rel_dropped)) => {
+                    exported = rel_exported;
+                    export_dropped = rel_dropped;
+                    let (merged, _) = replace_with_export(&snapshot_cookies, &exported);
+                    if !validate_exported_set(&merged, now) {
+                        return stop_entry(
+                            &clock,
+                            &store,
+                            base,
+                            STOPPED_AUTH_ERROR,
+                            Some(NoticeKind::Failed),
+                            check_err.unwrap(),
+                            &deps.before_state_save,
+                        )
+                        .await;
+                    }
+                    let header2 = cookie_header(&merged, now);
+                    let outcome2: CheckOutcome = deps.checker.check(&header2).await;
+                    updates.extend(outcome2.updates);
+                    match outcome2.error {
+                        None => {
+                            recovered = true;
+                            check_err = None;
                         }
-                        let header2 = cookie_header(&merged, now);
-                        let outcome2: CheckOutcome = deps.checker.check(&header2).await;
-                        updates.extend(outcome2.updates);
-                        match outcome2.error {
-                            None => {
-                                recovered = true;
-                                check_err = None;
+                        Some(e2) => {
+                            if !is_auth_error(&e2) {
+                                return record_transient(
+                                    &clock,
+                                    &store,
+                                    base,
+                                    e2,
+                                    "auth_check",
+                                    &deps.before_state_save,
+                                    corrupt_seen,
+                                )
+                                .await;
                             }
-                            Some(e2) => {
-                                if !is_auth_error(&e2) {
-                                    return record_transient(
-                                        &clock,
-                                        &store,
-                                        base,
-                                        e2,
-                                        "auth_check",
-                                        &deps.before_state_save,
-                                        corrupt_seen,
-                                    )
-                                    .await;
-                                }
-                                check_err = Some(e2);
-                            }
+                            check_err = Some(e2);
                         }
                     }
-                    Err(TryReloginError::Blocker(b)) => {
-                        return stop_entry(
-                            &clock,
-                            &store,
-                            base,
-                            STOPPED_AUTH_ERROR,
-                            Some(b.kind),
-                            check_err.unwrap(),
-                            &deps.before_state_save,
-                        )
-                        .await;
-                    }
-                    Err(TryReloginError::Unavailable) => {
-                        return stop_entry(
-                            &clock,
-                            &store,
-                            base,
-                            STOPPED_AUTH_ERROR,
-                            Some(NoticeKind::Blocked),
-                            check_err.unwrap(),
-                            &deps.before_state_save,
-                        )
-                        .await;
-                    }
-                    Err(TryReloginError::Other) => {
-                        return stop_entry(
-                            &clock,
-                            &store,
-                            base,
-                            STOPPED_AUTH_ERROR,
-                            Some(NoticeKind::ReloginFailed),
-                            check_err.unwrap(),
-                            &deps.before_state_save,
-                        )
-                        .await;
-                    }
+                }
+                Err(TryReloginError::Blocker(b)) => {
+                    return stop_entry(
+                        &clock,
+                        &store,
+                        base,
+                        STOPPED_AUTH_ERROR,
+                        Some(b.kind),
+                        check_err.unwrap(),
+                        &deps.before_state_save,
+                    )
+                    .await;
+                }
+                Err(TryReloginError::Unavailable) => {
+                    return stop_entry(
+                        &clock,
+                        &store,
+                        base,
+                        STOPPED_AUTH_ERROR,
+                        Some(NoticeKind::Blocked),
+                        check_err.unwrap(),
+                        &deps.before_state_save,
+                    )
+                    .await;
+                }
+                Err(TryReloginError::Other) => {
+                    return stop_entry(
+                        &clock,
+                        &store,
+                        base,
+                        STOPPED_AUTH_ERROR,
+                        Some(NoticeKind::ReloginFailed),
+                        check_err.unwrap(),
+                        &deps.before_state_save,
+                    )
+                    .await;
                 }
             }
         }
-        if check_err.is_some() {
+        if let Some(err) = check_err {
             // No re-login configured (or no exporter and no
             // driver): stop. When credentials are configured
             // but this build has no driver, the stop kind is
@@ -647,7 +646,7 @@ pub async fn tick(deps: &TickDeps, cancel: &CancelFlag) -> TickResult {
                 base,
                 stop_reason(file_missing),
                 kind,
-                check_err.unwrap(),
+                err,
                 &deps.before_state_save,
             )
             .await;
@@ -746,16 +745,16 @@ pub async fn tick(deps: &TickDeps, cancel: &CancelFlag) -> TickResult {
         merged = apply_updates(&ls.cookies, &updates);
         if !updates.is_empty() {
             should_write = !ls.file_missing || !merged.is_empty();
-            if let Ok(data) = serialize_jar(&merged) {
-                if should_write {
-                    ls.cookies = merged.clone();
-                    let before = ls.raw.clone();
-                    if let Err(e) = ls.save_jar() {
-                        return fail_save_result("save", e, false, base, corrupt_seen);
-                    }
-                    wrote = ls.raw != before;
-                    written = data;
+            if let Ok(data) = serialize_jar(&merged)
+                && should_write
+            {
+                ls.cookies = merged.clone();
+                let before = ls.raw.clone();
+                if let Err(e) = ls.save_jar() {
+                    return fail_save_result("save", e, false, base, corrupt_seen);
                 }
+                wrote = ls.raw != before;
+                written = data;
             }
             // A serialisation failure degrades to no-write:
             // the file keeps its form, the state still
@@ -831,13 +830,13 @@ async fn attempt_wake_gateway(deps: &TickDeps, cancel: &CancelFlag) -> Result<()
         let Some(wake) = &deps.wake else {
             return Err(last_err);
         };
-        if let Err(werr) = wake.wake().await {
-            if is_auth_error(&werr) {
-                return Err(werr);
-            }
-            // A failed wake request still counts as an
-            // attempt: re-probe below; the probe decides.
+        if let Err(werr) = wake.wake().await
+            && is_auth_error(&werr)
+        {
+            return Err(werr);
         }
+        // A failed wake request still counts as an
+        // attempt: re-probe below; the probe decides.
         if cancel.is_cancelled() {
             return Err(TransportError::Timeout {
                 message: "tick cancelled".to_string(),
@@ -913,29 +912,29 @@ async fn record_gateway_down(
     let mut wrote = false;
     if !updates.is_empty() {
         merged = apply_updates(&ls.cookies, updates);
-        if !ls.file_missing || !merged.is_empty() {
-            if let Ok(_data) = serialize_jar(&merged) {
-                ls.cookies = merged.clone();
-                let before = ls.raw.clone();
-                match ls.save_jar() {
-                    Ok(()) => wrote = ls.raw != before,
-                    Err(serr) => {
-                        return TickResult {
-                            outcome: OUTCOME_ERROR.to_string(),
-                            stage: "save".to_string(),
-                            stopped: false,
-                            recovered: false,
-                            wrote_cookies: false,
-                            dropped: 0,
-                            cdp_dropped: 0,
-                            exported: 0,
-                            cookies_seen: 0,
-                            skipped: 0,
-                            next_delay: base,
-                            state_corrupt,
-                            error: Some(KeeperError::Other(format!("{serr}; {err}"))),
-                        };
-                    }
+        if (!ls.file_missing || !merged.is_empty())
+            && let Ok(_data) = serialize_jar(&merged)
+        {
+            ls.cookies = merged.clone();
+            let before = ls.raw.clone();
+            match ls.save_jar() {
+                Ok(()) => wrote = ls.raw != before,
+                Err(serr) => {
+                    return TickResult {
+                        outcome: OUTCOME_ERROR.to_string(),
+                        stage: "save".to_string(),
+                        stopped: false,
+                        recovered: false,
+                        wrote_cookies: false,
+                        dropped: 0,
+                        cdp_dropped: 0,
+                        exported: 0,
+                        cookies_seen: 0,
+                        skipped: 0,
+                        next_delay: base,
+                        state_corrupt,
+                        error: Some(KeeperError::Other(format!("{serr}; {err}"))),
+                    };
                 }
             }
         }
@@ -1354,7 +1353,7 @@ pub async fn notify_stopped(deps: &TickDeps, cancel: &CancelFlag) {
         return;
     };
     let pending = ls.state.warn_pending;
-    let kind = NoticeKind::from_str(&ls.state.warn_kind).unwrap_or(NoticeKind::LoggedOut);
+    let kind = NoticeKind::parse_kind(&ls.state.warn_kind).unwrap_or(NoticeKind::LoggedOut);
     drop(ls);
     if !pending {
         return;

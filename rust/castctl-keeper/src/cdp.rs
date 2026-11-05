@@ -234,9 +234,17 @@ where
     tokio::spawn(async move {
         let _ = conn.await;
     });
+    // Origin-form request-target + explicit Host: Chrome's
+    // DevTools HTTP server answers 404 to absolute-form
+    // targets (verified on cue 2026-11-06: curl
+    // `--request-target http://127.0.0.1:9226/json/version`
+    // -> 404, origin-form -> 200). Hyper sends the
+    // absolute URI as the target when the request URI is
+    // absolute, so the path goes in alone here.
     let req = http::Request::builder()
         .method(http::Method::GET)
-        .uri(format!("{base}{path}"))
+        .uri(path)
+        .header("Host", hostport)
         .header("Accept", "application/json")
         .body(http_body_util::Empty::<bytes::Bytes>::new())
         .map_err(|e| CdpError::Http(e.to_string()))?;
@@ -288,6 +296,11 @@ mod real {
         responder: oneshot::Sender<Result<Value, CdpError>>,
     }
 
+    /// In-flight JSON-RPC calls by id: the reader task
+    /// completes the matching oneshot when the response
+    /// arrives.
+    type PendingCalls = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, CdpError>>>>>;
+
     struct Shared {
         tx: mpsc::Sender<Outgoing>,
         next_id: AtomicU64,
@@ -326,8 +339,7 @@ mod real {
                 browser_events: browser_tx,
                 sessions: Arc::new(Mutex::new(HashMap::new())),
             });
-            let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, CdpError>>>>> =
-                Arc::new(Mutex::new(HashMap::new()));
+            let pending: PendingCalls = Arc::new(Mutex::new(HashMap::new()));
             // Reader: route responses by id, events by
             // sessionId.
             {
@@ -562,8 +574,8 @@ mod real {
         /// §3.2): Runtime, Log, Network, Inspector, Page,
         /// DOM and CSS on the target, `Target.setDiscoverTargets`
         /// + `Target.setAutoAttach`, `Page.setLifecycleEventsEnabled`,
-        /// and the constant `Runtime.evaluate("self")`. The
-        /// order matches the wire order chromedp emits.
+        ///   and the constant `Runtime.evaluate("self")`. The
+        ///   order matches the wire order chromedp emits.
         pub async fn bootstrap(&self) -> Result<(), CdpError> {
             let empty = || Value::Object(Default::default());
             self.call("Runtime.enable", empty()).await?;

@@ -56,7 +56,7 @@ impl Backoff {
     ) -> Self {
         let jitter: Arc<dyn Fn() -> f64 + Send + Sync> = match jitter {
             Some(j) => j,
-            None => Arc::new(|| rand::random::<f64>()),
+            None => Arc::new(rand::random::<f64>),
         };
         let ladder = if ladder.is_empty() {
             DEFAULT_BACKOFF_LADDER.to_vec()

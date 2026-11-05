@@ -53,7 +53,7 @@ pub use backoff::{BACKOFF_MAX_RETRIES, Backoff, DEFAULT_BACKOFF_LADDER, next_del
 pub use cdp::{
     CdpClient, CdpError, CdpEvent, CdpSession, TargetInfo, discover_websocket_url, list_targets,
 };
-pub use checker::{AUTH_CHECK_URL, SESSION_CHECK_URL, CheckOutcome, Checker, GatewayChecker};
+pub use checker::{AUTH_CHECK_URL, CheckOutcome, Checker, GatewayChecker, SESSION_CHECK_URL};
 pub use clock::{CancelFlag, Clock, FakeClock, RealClock};
 pub use contract::{
     LoginBlockerSignal, LoginContract, LoginContractStep, PageSnapshot, SnapshotDecisionError,

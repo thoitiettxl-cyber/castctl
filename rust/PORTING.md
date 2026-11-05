@@ -5908,7 +5908,416 @@ tests fail for a reason outside the rebase scope.
 - Rebase: the 6 M5a commits replayed onto `27a0eaf`
   with exactly ONE conflict, `rust/PORTING.md` —
   both sides had appended their section before
-  `## Quy tắc quyết định`; resolved by keeping BOTH,
+  `## M6a — Session keeper (crate `castctl-keeper`, 2026-11-05/06)
+
+M6a ports Go `internal/keeper` (~20 files, ~12k lines: tick
+decision loop, Netscape jar, CDP export, relogin driver,
+screencast runners, login session, notify kinds) plus the
+keeper config block from `internal/profile/keeper.go` and
+the cookie jar/lock helpers from `internal/profile/cookies.go`
++ `cookielock.go`, to Rust, crate `rust/castctl-keeper`.
+Base `dev-rust c7b1d34` (M4c #69 merged by Boss; M6a was
+first written on `07e1c0d` and rebased onto `c7b1d34` with
+no conflicts — see §M6a.8). Branch
+`feat/rust-m6a-keeper`. No Go file is modified; no `.go`
+file was added; no new crate entered `Cargo.lock`.
+Go base `main` at `c7b1d34` (keeper files unchanged by
+M4c; M4c touched only gateway/shared/transport + docs).
+
+## M6a.1 Crate map + pins
+
+| Rust module | Go source |
+|---|---|
+| `clock.rs` (`Clock`, `CancelFlag`, `RealClock`, `FakeClock`) | `internal/keeper/clock.go` + `context.Context` (see dev. 1) |
+| `error.rs` (`KeeperError`, `ReloginBlocker`, `ReloginError`) | `internal/keeper/errors.go`, `relogin.go:48-58` |
+| `backoff.rs` | `internal/keeper/backoff.go` |
+| `jar.rs` (`StoredCookie`, `parse_jar`, `serialize_jar`, `effective_set_cookie`, `replace_with_export`, `parse_cookies_lenient`) | `internal/keeper/jar.go`, `internal/profile/cookies.go` (lenient form = gateway `parse_cookies`) |
+| `setcookie.rs` | `internal/gateway/authcookies.go` (`http.ParseSetCookie` grammar) |
+| `lockfile.rs` (`LockGuard`, `lock_cookies_file`, `write_cookies_file`) | `internal/profile/cookielock.go`, `cookies.go` |
+| `store.rs` (`Store`, `LockedStore`, `classify_cookies_file`) | `internal/keeper/tick.go` (`Store`/`LockedStore` shape), `classifyCookiesFile` |
+| `state.rs` (`SessionState`, `load_state`, `save_state`) | `internal/keeper/state.go` |
+| `checker.rs` (`GatewayChecker`, `CheckOutcome`) | `internal/keeper/tick.go:60-84` + `internal/gateway/authcookies.go` |
+| `tick.rs` (`tick`, `TickDeps`, `TickResult`) | `internal/keeper/tick.go` (whole file) |
+| `run.rs` (`run_entries`, `run_entry`, `acquire_single_flight`, `read_status`) | `internal/keeper/run.go` |
+| `cdp.rs` (`CdpClient`, `CdpSession`, discovery) | `internal/keeper/export_cdp.go` (chromedp bootstrap, wire-observed 2026-10-31) |
+| `export.rs` (`CdpExporter`, 3-level read) | `internal/keeper/export_cdp.go` |
+| `relogin.rs` (`RealReloginDriver`, `StubReloginDriver`, snapshot/inventory scripts) | `internal/keeper/relogin_chromedp.go`, `relogin.go`, `relogin_stub.go` |
+| `launch.rs` (`resolve_browser_path`, launch flags, `LaunchedChrome`) | `internal/keeper/launch.go` |
+| `screencast.rs` (`AttachRunner`, `LaunchRunner`, `serve_screencast`) | `internal/keeper/screencast.go`, `launch.go` |
+| `login.rs` (`LoginSession`, audit) | `internal/keeper/login.go` |
+| `contract.rs` (`LoginContract`, `match_contract`, `validate_contract`) | `internal/keeper/contract.go` + fixture `testdata/login-contract.v1.json` (verbatim) |
+| `transport.rs` (`Transport`, `FakeTransport`, phases) | `internal/keeper/transport.go` |
+| `notify.rs` (`NoticeKind`, `notice_text`, `Notifier`) | `internal/keeper/notify.go` |
+| `authstatus.rs` (`AuthStatus`, `derive_auth_status`) | `internal/keeper/authstatus.go` |
+| `castctl-config/src/keeper.rs` (`KeeperEntry`, `KeeperConfig`, `parse_go_duration`, `format_go_duration`, `Effective*`, `parse_keeper_block`, `validate_keeper`) | `internal/profile/keeper.go` (full 1188-line file) |
+
+Feature `chromedp` (default ON) selects the real CDP
+client; `--no-default-features` gives the Go
+`//go:build !with_chromedp` stub branch (typed
+unavailable errors, same public names).
+
+## M6a.2 Public additions to other crates (minimal)
+
+Only `castctl-config` gained public surface (see PR body
+for the list): `pub mod keeper` + `parse_go_duration`,
+`format_go_duration`, `KeeperEntry`, `KeeperConfig`,
+`parse_keeper_block`, `validate_keeper`,
+`keeper_entry_for_profile`, `encode_keeper_block`,
+`validate_keeper_tag`, `LoginCredential::clear()` and the
+root re-export `pub use blocks::LoginCredential;`.
+`SingleConfig.keeper: Option<KeeperConfig>` (+ `keeper_raw`
+kept), `resolve_keeper()`, `keeper_entry_for_profile()`.
+No other crate was modified. No `WithCookies` variant
+was added to `castctl-gateway` (decision: checker lives
+in keeper, reusing only pub `castctl_gateway::auth::`
+(`hatch_headers`, `summarize_body`,
+`summary_to_body_summary`, `AUTH_TIMEOUT`,
+`HATCH_MAX_BODY`, `VM_UNAVAILABLE_LABEL`, `MUSE_AI_BASE`)
+and `castctl_gateway::summary::`).
+
+## M6a.3 Deviations from Go (deliberate, with citations)
+
+1. **Async tick + `CancelFlag`, not `context.Context`.**
+   Go tick is synchronous with `ctx`; Rust tick is
+   `async` on tokio. Cancellation is `CancelFlag`
+   (`Arc<(AtomicBool, Notify)>`, `child()` for scoped
+   cancellation) instead of `context.Context`. Behaviour:
+   identical decision points (ctx-cancel → hard error,
+   `tick.go` ladder/cancel cases); the tick_table case_07
+   pins it.
+2. **`TickDeps` carries resolved values, not
+   `*profile.KeeperEntry`.** `interval`, `retry_backoff`,
+   `wake_on_gateway_failure`, `wake_attempts`,
+   `credentials_configured`, `tag`. The tick never
+   re-reads the entry; same shape serves tests without a
+   config file. Behaviour-identical.
+3. **State JSON escaping.** Go `json.MarshalIndent`
+   escapes `<`, `>`, `&` (`\u003c` etc.); `serde_json`
+   does not. Profile/cookie names are charset-validated
+   at parse time and cannot contain them, so no byte
+   differs in practice. Recorded, not fixed.
+4. **Relogin fill/click without chromedp.** Rust has no
+   chromedp. Fill = DOM focus + `Input.insertText`
+   (clear via select-all + Backspace key events); click =
+   `DOM.getBoxModel` centre + mouse events. Pure CDP
+   domains, no extra JS beyond Go's fixed scripts.
+   Live fill/click never run (see §M6a.6).
+5. **Headless relogin flag `--headless=new`.**
+   Go uses `chromedp.Headless` (`relogin_chromedp.go:291`);
+   which Chrome flag that maps to (`--headless=new` vs
+   `--headless`) is [CHƯA KIỂM CHỨNG]. Launch runner
+   keeps `--headless` for relogin, visible window for
+   launch/screencast (`launch.go:162`), never
+   `--enable-automation` (Go `enable-automation=false`,
+   `launch.go:186-196`).
+6. **`ReloginBlocker` display is kind-only, faithful to
+   Go.** Go `ReloginBlocker.Error()` is `"re-login
+   blocked: %s"` (kind only, `relogin.go:53-58`); the
+   fixed detail (`contract_mismatch`, …) is NOT in the
+   string. The contract test asserts the typed
+   `b.detail`, not the string (an earlier draft asserted
+   the string — wrong, fixed in §M6a.7).
+7. **`MarkWarnPending` repeat-pending returns `true`,
+   faithful to Go.** Go `state.go:168-180` returns false
+   only when the kind was already SENT in the episode; a
+   repeat pending re-records and returns true. An earlier
+   draft test asserted false — wrong, fixed in §M6a.7.
+8. **No gateway WS reuse.** No in-repo WS-frame code
+   exists to split (framing is `tokio-tungstenite`
+   0.30.0, external); `dial.rs` `ws_upgrade` /
+   `check_upgrade_head` / `ws_error` are gateway-specific.
+   Keeper depends directly on `tokio-tungstenite`
+   (already in the lock, 0 new crates).
+9. **CDP discovery via hyper http1 handshake, not the
+   legacy client.** `hyper_util::client::legacy::Client`
+   needs the `client` feature, which the workspace does
+   not enable; discovery uses
+   `hyper::client::conn::http1::handshake` +
+   `hyper_util::rt::TokioIo`, same shape as
+   `castctl-transport/src/http.rs`. Caps enforced:
+   64 KiB `/json/version`, 1 MiB `/json/list`, 5s timeout.
+10. **`Notifier::notify` is `#[async_trait]`.** The
+    RPITIT form (`-> impl Future`) is not dyn-compatible
+    with `Arc<dyn Notifier>`; signature is now
+    `async fn notify(&self, kind, profile_name, cancel:
+    &CancelFlag)`.
+11. **`KeeperError` is NOT `Clone`** (contains
+    `std::io::Error`). Tick-table fakes replay scripts by
+    pop-or-default instead of cloning the front element.
+12. **CLI wiring deferred.** Crate + config only in M6a;
+    `keeper run/check/status` and `auth login` CLI bodies
+    are a documented follow-up (production checker needs
+    the profile outbound dialer from CLI machinery).
+    `keeper::run` / `check` / `status` are exposed as
+    library functions.
+13. **`run.rs` `clean_path` is hand-rolled** (split on
+    `/`, pop on `..`) rather than Go `filepath.Clean`;
+    edge inputs (trailing slash, empty) are untested.
+14. **`refresh_cookie_records` uses
+    `.expect("valid epoch")`** on
+    `timestamp_opt(...).single()` — an out-of-range
+    expiry would panic. Known sharp edge, unverified.
+15. **Jar `flag` column.** The Netscape 7th-column
+    "domain flag" is written `TRUE` unconditionally by
+    `serialize_jar`; there is no `flag` field on
+    `StoredCookie` (an early draft had one in test
+    literals — removed, §M6a.7).
+16. **M4c JsonValue bridge: NO effect on keeper
+    (verified, not assumed).** M4c changed
+    `castctl-shared::JsonValue` (`bridge.rs`: `Float(f64)`
+    → `Float(String)`, numeric literals kept). Keeper's
+    only JsonValue use is `jar.rs`
+    (`parse_cookies_lenient` / `cookie_value_string`),
+    which uses `castctl_config::jsonvalue::JsonValue` —
+    the config crate's OWN M2 type (`Number(String)`,
+    literal preserved since M2, mirroring Go
+    `internal/profile/jsonvalue.go`), NOT the shared
+    type. Verified by grep: neither `castctl-config` nor
+    `castctl-keeper` depends on `castctl-shared`.
+    Pinned by test: `lenient_forms` asserts JSON scalars
+    `42` → `"42"`, `1.50` → `"1.50"`, `true` → `"True"`,
+    `null` → `"None"`.
+
+## M6a.4 Gates (cue, 1.99.1, `CARGO_TARGET_DIR=/tmp/castctl-rust-m6a-target`)
+
+Base `c7b1d34` (after rebase, §M6a.8). Baseline at
+`c7b1d34` is **568** (467 M4b + 93 M5a + 5 M4c + 2
+literal-fix + 1 -0-pinning, per the M4c gate at
+`8ee7251`; confirmed arithmetically: workspace total
+670 − 102 new M6a tests = 568).
+
+- `cargo fmt --check`: 0 (after one format pass on the
+  post-rebase tree).
+- `cargo build --workspace`: 0 errors, 0 warnings.
+- `cargo test --workspace`: 0 failed, **670 passed**
+  (568 baseline + 95 keeper + 7 config-keeper).
+  Per-target: keeper lib 75, `jar_roundtrip` 3,
+  `tick_table` 17, config keeper 7.
+- `cargo clippy --workspace --all-targets -- -D warnings`:
+  0 errors, 0 warnings — after fixing 40 initial
+  findings (24 `collapsible_if`, 4 `doc_lazy_continuation`,
+  3 `type_complexity`, 2 `suspicious_open_options`, 1
+  `should_implement_trait`, 1 `derivable_impls`, 1
+  `new_without_default`, 1 `redundant_closure`, 1
+  `needless_borrows_for_generic_args`, 1
+  `unnecessary_unwrap`, 1 `to_string_in_format_args`;
+  29 fixed by `cargo clippy --fix`, 11 by hand — see
+  §M6a.7). The `--fix` run also reflowed let-chains;
+  `cargo fmt` was re-run after it.
+- `cargo test -p castctl-keeper --no-default-features`
+  (stub branch): 0 failed, 95 passed (75 lib + 3 jar +
+  17 tick) — same counts as the default-features run.
+
+## M6a.5 Test mapping
+
+- Tick decision table: `tests/tick_table.rs`, 17 cases
+  (01 token_ok, 02 auth recovered by export, 03 auth stop
+  no exporter/relogin + jar byte-identical, 04
+  export_failed keeps ticking, 05 transient ladder
+  exhausted, 06 transient recovers on retry, 07 cancelled
+  → error, 08 login fresh flag skips, 09 stale flag
+  recovers, 10 sticky stop persists + notifies LoggedOut
+  + clears warn_pending, 11 state corrupt recovered, 12
+  cookies missing → stop `cookies_missing`, 13 lock held
+  → skipped/lock, 14 export invalid set stops, 15 relogin
+  blocker captcha stops with warn_kind captcha, 16
+  relogin unavailable → stopped/blocked, 17 gateway-down
+  persists updates, outcome `transient_error` stage
+  `gateway`). Fakes: `script_checker` (CheckerFunc over
+  VecDeque, pop-or-default replay), `ScriptExporter`,
+  `ScriptRelogin`, `RecordingNotifier`, `DownProbe`.
+- Jar: `tests/jar_roundtrip.rs`, 3 tests (literal
+  round-trip byte-identical, strict short-row rejection
+  with line number, concurrent writes 8 threads × 25
+  appends → 200 rows, no loss) + lib `jar::tests` (16).
+- Config keeper: `castctl-config/src/keeper.rs`, 7
+  tests (duration round-trip incl. `24h`, `500ms`,
+  `1h30m`, `1.5s`, `0`, overflow rejection;
+  `format_go_duration` `0`→`"0s"`, `24h`→`"24h0m0s"`,
+  `500ms`, `1.5s`, `1m30s`, `1µs`, negative).
+
+## M6a.6 Chưa kiểm chứng
+
+- `chromedp.Headless` (v0.21) → which Chrome flag
+  (`--headless=new` vs `--headless`); tungstenite Pong
+  flush for read-only clients; whether Chrome 9226's
+  profile is `no.0` (only user-data-dir + the live Muse
+  tab seen). CLOSED by the §M6a.9 probe: CDP WS handshake
+  needs no Origin header, and `Target.attachToTarget`
+  with `flatten: true` works.
+- Login/relogin live flow (fill/click/submit, harvest
+  L1–L4, `waitForCookies`) — never run against a real
+  Chrome; only the CDP read-only probe (§M6a.9) ran.
+- Screencast relay end-to-end (M6b wiring); Telegram
+  sink wiring (command layer, not in M6a); CLI wiring
+  (`keeper run/check/status`, `auth login` bodies).
+- K-LIVE-2 family: relogin Storage-poll bug — NOT
+  claimed fixed; code has empty-read fall-through guard
+  + per-level gate, but no comparison against the
+  original bug list / PR #33 was run.
+- `cargo fmt` / `clippy` baseline at `c7b1d34` was not
+  run in isolation (workspace gates run on the rebased
+  branch only); Go test assertion details for
+  tick/jar/export tests were not re-read (only test names).
+
+## M6a.7 Fix loop (2026-11-05/06, writer)
+
+Nine lib-test failures on the first `cargo test -p
+castctl-keeper` run (66 passed, 9 failed), all fixed
+with evidence, no gate lowered:
+
+1. **Shared pid-based tmpdirs (6 tests).** `tmpbase()`
+   in `lockfile.rs` / `store.rs` / `state.rs` (and
+   `login.rs`, `launch.rs`, `run.rs`) used
+   `temp_dir/<name>-<pid>` + `remove_dir_all` at setup;
+   parallel tests in one process share the pid, so one
+   test deleted another's files (same `temp_home` race
+   shape as the pre-existing castctl-cli flake). Fix:
+   per-call unique dir (static atomic counter +
+   pid). The `lock_timeout_when_held` failure was the
+   same race (lock file recreated after dir removal).
+2. **`StoredCookie` has no `flag` field (4 sites).**
+   Test literals carried a `flag: true` that never
+   existed on the struct; removed, `http_only: false`
+   added (dev. 15).
+3. **`load_state` not in scope** (`login.rs` test) —
+   added `use crate::state::load_state;` to the test
+   module.
+4. **`LockGuard` / `SingleFlight` need `Debug`**
+   (tests use `unwrap_err`) — `#[derive(Debug)]` added
+   (both hold only `Debug` fields).
+5. **`std::env::set_var` / `remove_var` are unsafe in
+   edition 2024** (`launch.rs` test) — wrapped in
+   `unsafe {}`.
+6. **Contract test asserted the wrong string** — Go
+   `ReloginBlocker.Error()` is kind-only (dev. 6);
+   test now asserts typed `b.detail ==
+   "contract_mismatch"`.
+7. **Warn-dedup test asserted the wrong return** — Go
+   `MarkWarnPending` returns true on repeat-pending
+   (dev. 7); test fixed to match Go.
+8. **`drop` before re-lock (2 tests).** `store.rs`
+   tests re-locked while the first `LockedStore` guard
+   was alive; same-process second flock blocks to the
+   5s timeout. Fix: `drop(ls)` before re-lock (test
+   only; production code never double-locks).
+9. **Test fakes needed `Clone` that `KeeperError`
+   cannot provide** (`tick_table.rs`) — fakes now
+   pop-or-default (dev. 11); `ExportedCookie` literals
+   gained the missing `http_only` / `session` fields.
+
+Disk incidents during the gates: cue `/` hit 100%
+(169M free) during the first full test run — linker
+`collect2: fatal error: ld terminated with signal 7
+[Bus error]` on other crates' test binaries. Cause was
+disk pressure, not code. Freed by removing the
+incremental cache (956M) and stale target dirs from
+finished work (`perf-full-target`, `castctl-rust-perf1`,
+`castctl-rust-m5a-target` — build cache only, sources
+live in git). Later the disk recovered to 17G free.
+A second incident note: the first full-run log captured
+only stderr (`2>log` without stdout redirect); the run
+was repeated with `> log 2>&1` to get a verbatim log.
+
+Clippy fix loop (2026-11-06): the first `cargo clippy
+--workspace --all-targets -- -D warnings` run failed with
+40 errors, all in `castctl-keeper` (baseline crates clean):
+24 `collapsible_if`, 4 `doc_lazy_continuation`, 3
+`type_complexity`, 2 `suspicious_open_options`, 1
+`should_implement_trait` (`NoticeKind::from_str` renamed
+to `parse_kind` — the std `FromStr` trait returns
+`Result`, ours returns `Option`), 1 `derivable_impls`
+(`CheckOutcome::default` → `#[derive(Default)]`), 1
+`new_without_default` (`RefusingTransport`), 1
+`redundant_closure`, 1 `needless_borrows_for_generic_args`,
+1 `unnecessary_unwrap` (`tick.rs`: `is_some` + `unwrap`
+→ `if let Some(err)`), 1 `to_string_in_format_args`.
+29 were fixed by `cargo clippy --fix --allow-dirty`, 11
+by hand (3 type aliases: `ExpiryMetadata`,
+`PendingCalls`, `LockedRead`; 4 doc-continuation
+indents; 2 explicit `.truncate(false)` on lock files —
+the lock file is a flock identity only, never read or
+written, so never truncated; the `parse_kind` rename;
+the `if let` rewrite). Full test suite re-run after the
+fixes: 670/0. One `--fix` side effect: it reflowed
+let-chains, so `cargo fmt` was re-run after it.
+
+Rebase regression caught (2026-11-06): after the rebase,
+a stale local draft tarball (rooted at `07e1c0d`) was
+transferred over the rebased tree and clobbered
+`rust/Cargo.toml` — dropping M4c's 4-line honk comment
+(and risking `Cargo.lock`). Caught by `git diff`
+before the next gate; both files restored from HEAD
+(`git checkout -- rust/Cargo.toml rust/Cargo.lock`) and
+verified clean. No other M4c file was in the draft
+tarball, so nothing else was touched.
+
+## M6a.8 Rebase onto merged M4c (2026-11-05/06)
+
+While M6a was in progress, Boss merged PR #69 (M4c);
+`dev-rust` moved `07e1c0d` → `c7b1d34`. Per the
+standing rule, the branch was rebased (commit
+`96fc71d` → `9be0fd9`, zero conflicts) and all gates
+re-run on the new head; the work did not stop. M4c's
+surface (`castctl-gateway/src/auth.rs` +30,
+`dial.rs`, `castctl-shared` bridge/value, `NOTICE`,
+`PORTING.md` §M4c) does not touch keeper code except
+through the `castctl_gateway::auth` imports, which
+still compile (build gate 0). Baseline re-measured:
+568 (see §M6a.4). §M4c now exists on dev-rust and was
+read before writing this section. Docs sweep PR #70
+(doc-only) and perf PR #66 were still open at rebase
+time and do not affect M6a.
+
+## M6a.9 CDP live probe (cue, read-only, Chrome 9226)
+
+Run 2026-11-06: `cargo run -p castctl-keeper --example
+cdp_probe` (new file `castctl-keeper/examples/cdp_probe.rs`,
+read-only by construction: no navigate, no open/close, no
+evaluate, no cookie/token/page content printed). Chrome
+155.0.8059.39 (running since Nov 03, `--headless=new`,
+`--user-data-dir=/root/castctl-live-test/cdp-chrome`).
+Verbatim output:
+
+```
+version: browser=Chrome/155.0.8059.39 protocol=1.3
+targets: count=3
+  target: type=page title="Chat — Mea" url=https://muse.ai/
+  target: type=browser_ui title="Omnibox Popup" url=chrome://omnibox-popup.top-chrome/
+  target: type=browser_ui title="Omnibox Popup" url=chrome://omnibox-popup.top-chrome/omnibox_popup_aim.html
+ws: connected to browser target
+Browser.getVersion: product=Chrome/155.0.8059.39 protocol=1.3
+attached: target=1C1C81A51E37FA47003E486EB7005242 session=5E797234DBE5883A1CFF9781A817C28A
+Target.getTargetInfo: type=page url=https://muse.ai/
+detached
+PROBE OK
+```
+
+`PROBE_EXIT:0`. This proves: discovery HTTP, WS
+connect (no Origin header needed — tokio-tungstenite
+sends none and Chrome accepts), `Browser.getVersion`,
+`Target.attachToTarget` with `flatten: true`, a session
+call (`Target.getTargetInfo`), and detach — against the
+live Muse tab. Two [CHƯA KIỂM CHỨNG] items from §M6a.6
+are closed by this run (WS handshake Origin, `flatten:
+true`); the full chromedp bootstrap enable set is NOT
+proven (deliberately not run: it includes
+`Target.setAutoAttach` + `Page.startScreencast`, which
+would change state on the live tab).
+
+Probe bug found and fixed: the first run failed with
+`GET /json/version -> 404` while curl returned 200.
+Root cause: hyper sends the absolute URI as the
+request-target when the request URI is absolute, and
+Chrome's DevTools server 404s absolute-form targets
+(verified: curl `--request-target
+http://127.0.0.1:9226/json/version` -> 404, origin-form
+-> 200). Fix: discovery requests now use origin-form
+URI + explicit `Host` header (`cdp.rs`). The transport
+client (proxy path) is unaffected — absolute-form is
+correct for proxies.
+
+## Quy tắc quyết định`; resolved by keeping BOTH,
   M4b first, then M5a, no section dropped.
   `rust/Cargo.toml` auto-merged (M4b's workspace dep
   block + M5a's `"castctl-telegram"` member line);

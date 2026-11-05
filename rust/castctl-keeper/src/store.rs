@@ -22,6 +22,19 @@ use crate::jar::{StoredCookie, parse_cookies_lenient, parse_jar, serialize_jar};
 use crate::lockfile::{LockGuard, ensure_profile_dir, lock_cookies_file, write_cookies_file};
 use crate::state::{SessionState, load_state, save_state, sha256_hex, state_path};
 
+/// What [`Store::read_locked`] returns: (state, cookies,
+/// serialised jar bytes, is-jar form, file missing, raw file
+/// bytes, state corrupt).
+pub type LockedRead = (
+    SessionState,
+    Vec<StoredCookie>,
+    Vec<u8>,
+    bool,
+    bool,
+    Vec<u8>,
+    bool,
+);
+
 /// The store for one keeper entry: its profile paths and
 /// lock timeout (`store.go:30-41`). The profile and entry
 /// data is resolved at construction; the lock is taken per
@@ -123,21 +136,7 @@ impl Store {
     /// file entirely (still verifies the state dir exists).
     /// A missing cookies file yields an empty jar and
     /// `file_missing = true` (`store.go:88-205`).
-    fn read_locked(
-        &self,
-        state_only: bool,
-    ) -> Result<
-        (
-            SessionState,
-            Vec<StoredCookie>,
-            Vec<u8>,
-            bool,
-            bool,
-            Vec<u8>,
-            bool,
-        ),
-        KeeperError,
-    > {
+    fn read_locked(&self, state_only: bool) -> Result<LockedRead, KeeperError> {
         // The state dir must exist before any read/write.
         ensure_profile_dir(&self.base_dir, &self.profile_name)
             .map_err(|e| KeeperError::StateDir(e.to_string()))?;
@@ -319,8 +318,11 @@ mod tests {
     fn tmpbase() -> String {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let p = std::env::temp_dir()
-            .join(format!("castctl-keeper-store-test-{}-{}", std::process::id(), n));
+        let p = std::env::temp_dir().join(format!(
+            "castctl-keeper-store-test-{}-{}",
+            std::process::id(),
+            n
+        ));
         std::fs::create_dir_all(&p).unwrap();
         p.to_str().unwrap().to_string()
     }

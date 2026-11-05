@@ -1003,6 +1003,19 @@ mod tests {
         assert_eq!(json[0].value, "abc");
         let json_nested = parse_cookies_lenient(r#"{"cookies": {"hatch_sess": "abc"}}"#).unwrap();
         assert_eq!(json_nested.len(), 1);
+        // Non-string JSON scalars render Python-style, numbers
+        // keeping their literal spelling (config JsonValue
+        // `Number(String)`, M2 — NOT the shared JsonValue the
+        // M4c bridge changed; verified by grep: neither
+        // castctl-config nor castctl-keeper depends on
+        // castctl-shared).
+        let json_scalars =
+            parse_cookies_lenient(r#"{"n": 42, "f": 1.50, "b": true, "z": null}"#).unwrap();
+        assert_eq!(json_scalars.len(), 4);
+        assert_eq!(json_scalars[0].value, "42");
+        assert_eq!(json_scalars[1].value, "1.50");
+        assert_eq!(json_scalars[2].value, "True");
+        assert_eq!(json_scalars[3].value, "None");
         assert!(parse_cookies_lenient("garbage without equals").is_err());
     }
 
