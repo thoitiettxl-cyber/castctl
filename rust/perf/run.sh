@@ -19,7 +19,9 @@ python3 rust/perf/measure_all.py "$@"
 # but its target dir is outside the repo — the driver refuses an
 # in-repo target dir before any build (measure_all.py:
 # _check_full_target_outside_repo; the guard does not fire under
-# --skip-build, where nothing is built) and defaults to the system temp
+# --skip-build, where no .go-generating build runs — the workspace,
+# full-bin and LTO builds are skipped, and the bench build that still
+# runs has no boring-sys in its closure) and defaults to the system temp
 # dir when CARGO_TARGET_DIR is unset — so no generated .go file can land
 # under the repo from this rerun either.
 if command -v go >/dev/null 2>&1; then

@@ -715,7 +715,7 @@ shell/Go dao động 0.046–0.073 theo session (xem §3). Run8 khớp run7
 trong ±5% ở hầu hết các ô headline (không tính hàng n=1; §3 nói riêng
 bên dưới): §2 startup/RSS 7/8 ô N=20 trong ±5% (ngoại lệ duy nhất
 `--help` phía shell +7.0%, 0.867→0.927 ms), §4 logic thuần mọi ô trong
-±5% trừ render chain Go +6.7% (5.62→5.99 ms), item 5 Go +1.3% (item 5
+±5% trừ render chain Go +6.7% (5.62→5.99 ms) (ngoại lệ thứ hai), item 5 Go +1.3% (item 5
 Rust +5.1%, 0.830→0.872 ms/req, là ngoại lệ thứ ba). Wall-clock
 `status` ở §3 nhiễu hơn: năm trong sáu ô drift +8–14% trên giá trị
 tuyệt đối nhỏ (Rust 0.9–2.9 ms, Go 11–46 ms; ô còn lại Go min −4.6%),

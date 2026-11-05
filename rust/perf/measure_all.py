@@ -42,10 +42,15 @@ RS_BENCH = os.path.join(_TARGET_DIR or os.path.join(PERF, "bench", "target"),
 # the "must be outside" rule is enforced in code, not just documented —
 # an operator who sets CARGO_TARGET_DIR to an in-repo path gets a loud
 # failure instead of a silent SPDX trap from generated .go files.
-# The guard runs only when a build will actually run: under --skip-build
-# nothing is built, so an in-repo target dir is only read (to find
-# existing binaries) and poses no .go-generation risk (fix loop 2,
-# safety NIT-1). A guard failure prints the error and exits 2 WITHOUT
+# The guard runs only when a build that can generate .go files will
+# actually run: under --skip-build the workspace, full-bin and LTO builds
+# are skipped, so no .go-generating build runs. (The item-4 bench build
+# still runs, and with an in-repo CARGO_TARGET_DIR it writes ordinary
+# artifacts there — but its closure, castctl-config + castctl-tg-text /
+# regex, has no boring-sys, so it cannot generate .go files.) An in-repo
+# target dir therefore poses no .go-generation risk (fix loop 2, safety
+# NIT-1; wording narrowed fix loop 3, safety round-3 NIT-1). A guard
+# failure prints the error and exits 2 WITHOUT
 # writing summary.json, so a mistaken re-run cannot clobber the previous
 # run's numbers on disk (fix loop 2, red-team N4 / safety NIT-2).
 _FULL_TARGET_DIR = _TARGET_DIR or os.path.join(
@@ -163,8 +168,10 @@ def main():
                                  "loadavg": loadavg()}
     # Full-bin target-dir guard: fail loudly before any build if the
     # target dir resolves inside the repo (see _check_full_target_outside_repo).
-    # Gated on a build actually running (fix loop 2, safety NIT-1): under
-    # --skip-build no binary is built, so the guard does not fire.
+    # Gated on a .go-generating build actually running (fix loop 2,
+    # safety NIT-1): under --skip-build the workspace, full-bin and LTO
+    # builds are skipped, so the guard does not fire. (The bench build
+    # still runs, but its closure has no boring-sys — see header comment.)
     # On failure: print the error + the stub summary and exit 2 WITHOUT
     # writing summary.json, so the previous run's numbers on disk survive
     # a mistaken re-run (fix loop 2, red-team N4 / safety NIT-2).
