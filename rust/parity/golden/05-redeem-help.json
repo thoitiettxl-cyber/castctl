@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-4r5f3y_9/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-4r5f3y_9/xdg",
+    "HOME": "/tmp/castctl-golden-spg_xjqb/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-spg_xjqb/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-4r5f3y_9/work",
+  "cwd": "/tmp/castctl-golden-spg_xjqb/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl redeem CODE [--json]\n\nRedeem an invite code. The code is uppercased and validated\n(6-16 uppercase letters/digits) before any request.\n\noptions:\n  --json    print the result object as JSON instead of text.\n",

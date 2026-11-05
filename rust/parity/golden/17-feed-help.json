@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-7yb59k2n/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-7yb59k2n/xdg",
+    "HOME": "/tmp/castctl-golden-on43g_10/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-on43g_10/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-7yb59k2n/work",
+  "cwd": "/tmp/castctl-golden-on43g_10/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl feed [--limit N] [--raw]\n\nList feed units as JSON rows.\n\noptions:\n  --limit N  number of units (when set, also sent as the query limit).\n  --raw      print the whole feed.list object as JSON.\n",

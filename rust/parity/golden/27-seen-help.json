@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-40csyu1u/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-40csyu1u/xdg",
+    "HOME": "/tmp/castctl-golden-2ve2c6hh/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-2ve2c6hh/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-40csyu1u/work",
+  "cwd": "/tmp/castctl-golden-2ve2c6hh/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl seen THREAD\n\nMark a thread seen. Prints the result as JSON.\n",

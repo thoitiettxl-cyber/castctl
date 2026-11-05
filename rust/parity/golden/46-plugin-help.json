@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-l54ftezk/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-l54ftezk/xdg",
+    "HOME": "/tmp/castctl-golden-wg7fxgkz/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-wg7fxgkz/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-l54ftezk/work",
+  "cwd": "/tmp/castctl-golden-wg7fxgkz/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl plugin check <path> [--tag TAG] [--type TYPE]\n\nLoad one plugin binary through the real plugin loader and run a\nsingle provider call against it. This is the on-device check\nrun inside Droidspaces with the normal linux/arm64 castctl\nbinary (see docs/plugins.md): it prints one line per\nstage (dlopen, init, register, provider.call, shutdown), plus\nany host.log lines the plugin emits (printed as plugin log lines).\nCommand-only plugins skip the provider.call stage (it is\nprinted as skipped, not failed). It loads no config, starts no\nservices, writes no config or cookies, and logs no secrets.\nExit 0 when every stage passes, exit 2 otherwise.\n",

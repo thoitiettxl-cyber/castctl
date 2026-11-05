@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-1msml_pi/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-1msml_pi/xdg",
+    "HOME": "/tmp/castctl-golden-3k2alfe6/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-3k2alfe6/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-1msml_pi/work",
+  "cwd": "/tmp/castctl-golden-3k2alfe6/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl auth <subcommand> [options]\n\nAuthentication helpers. \"auth export\" prints guidance only (exit 1,\nno writes). \"auth import\" reads cookies from stdin and writes the\nactive profile's cookies.txt (see \"castctl auth import --help\").\n\"auth login\" is the experimental screencast login (see \"castctl\nauth login --help\"; off by default). \"auth status\" reports the\nsession state from files only, no network (see \"castctl auth\nstatus --help\"). \"auth observe-login\" prints the read-only,\nredacted login-page inventory for the contract fixture (see\n\"castctl auth observe-login --help\").\n\nSubcommands: list, export, import, login, status, observe-login. Run \"castctl auth <subcommand> --help\"\nfor per-subcommand help.\n",

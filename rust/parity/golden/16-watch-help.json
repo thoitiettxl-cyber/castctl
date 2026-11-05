@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-8nmxwb_i/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-8nmxwb_i/xdg",
+    "HOME": "/tmp/castctl-golden-0ov5_vg6/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-0ov5_vg6/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-8nmxwb_i/work",
+  "cwd": "/tmp/castctl-golden-0ov5_vg6/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl watch [--timeout SECONDS] [--n N] [--all] [--thread ID]\n\nTail live agent events: one JSON row per event as it arrives.\n\noptions:\n  --timeout SECONDS  idle and overall timeout in seconds (default 60).\n  --n N              maximum records (default 50).\n  --all              include agent.status events (dropped by default).\n  --thread ID        side chat session id (default: main chat).\n",

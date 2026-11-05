@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-lv5eewd1/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-lv5eewd1/xdg",
+    "HOME": "/tmp/castctl-golden-k6czn6gi/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-k6czn6gi/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-lv5eewd1/work",
+  "cwd": "/tmp/castctl-golden-k6czn6gi/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl telegram <subcommand> [options]\n\nTelegram bot that operates your Muse, polling through the profile\nlinked by the \"telegram\" block in config.json.\n\nsubcommands:\n  run       poll the Bot API until interrupted (Ctrl-C).\n  status    show the telegram block configuration (offline).\n\n\"run\" serves the profile named by the block's \"profile\" field,\nnever the active profile: --profile or CASTCTL_PROFILE naming a\ndifferent profile is an error. Allowed users talk to Muse with\nplain messages; /help in the chat lists the bot commands.\n",

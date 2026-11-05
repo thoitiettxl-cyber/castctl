@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-h_a1b3ny/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-h_a1b3ny/xdg",
+    "HOME": "/tmp/castctl-golden-1nuh26a6/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-1nuh26a6/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-h_a1b3ny/work",
+  "cwd": "/tmp/castctl-golden-1nuh26a6/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl send TEXT [--thread ID] [--wait SECONDS] [--until-done] [--text] [--ack-timeout SECONDS] [--download DIR] [--auto-approve|--no-auto-approve] [--auto-allow-once|--no-auto-allow-once]\n\nSend the agent a message and wait for the turn. Exits 5 when no\ndelivery ack arrives within --ack-timeout; otherwise the wait\nexit codes apply (0 done, 2 failed, 4 needs a human, 124 timeout).\n\noptions:\n  --thread ID    side chat session id (default: the main chat).\n  --wait SECONDS wait this long for the turn (default 90; 0 means\n                 return once delivered).\n  --until-done   wait up to 24h instead of --wait.\n  --text         print the reply as plain text instead of JSON.\n  --ack-timeout SECONDS\n                 give up waiting for the delivery ack after this\n                 long (default 30).\n  --download DIR also save files (images/videos) from the turn's\n                 replies into DIR.\n  --auto-approve, --no-auto-approve, --auto-allow-once,\n  --no-auto-allow-once\n                 as in castctl wait.\n",

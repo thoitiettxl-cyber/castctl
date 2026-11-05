@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-taz9lmis/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-taz9lmis/xdg",
+    "HOME": "/tmp/castctl-golden-j3gt2v76/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-j3gt2v76/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-taz9lmis/work",
+  "cwd": "/tmp/castctl-golden-j3gt2v76/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl invite [--create] [--json]\n\nShow the active profile's invite code, or create one.\n\noptions:\n  --create  create a new invite code, then show it.\n  --json    print the invite object as JSON instead of text.\n",

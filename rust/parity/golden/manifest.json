@@ -54,7 +54,11 @@
     "52-missing-seen": "7c23ab5db42babb306585d15c0aa147d90825ddef7d1c35d4a0d8b0b1cade93a",
     "53-bad-log-level": "8f4b0a6393fe82ef31daf5ac25d2e16c3de7e344d55972d68e192433833c5f3c",
     "54-bad-config": "69a93c191183a65541211341d77fcef6c727c574b16166075fbdc15145a103b7",
-    "55-bad-json-config": "0c3ed61168b9c1bc91323afd7db4ab2ff19b741d6846cff3ac1c2d69bfd484d7"
+    "55-bad-json-config": "0c3ed61168b9c1bc91323afd7db4ab2ff19b741d6846cff3ac1c2d69bfd484d7",
+    "56-decoder-truncated-array": "42fe9d6e5b4bdd61d79c90d2b3674786fc07eb0f28df4f8f22f4f0a667a31bbc",
+    "57-decoder-bad-exponent": "91b22b41a75bf52256eb054a0f5b2bcf020f38e4044bd0cb04d401be1b56d79b",
+    "58-decoder-bad-escape": "0af891716c5ece8b2223cc88d76a2e15c7a21e76390ecdfb6470274d489cee4c",
+    "59-decoder-bad-unicode": "eb417cb8c4958b5fb22afda0362bbc765abb4278c680964e98e7280ecc9395d7"
   },
   "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
   "schema_version": 1

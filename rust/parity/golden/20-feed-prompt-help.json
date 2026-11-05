@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-r3xfr_ox/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-r3xfr_ox/xdg",
+    "HOME": "/tmp/castctl-golden-mstumdnu/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-mstumdnu/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-r3xfr_ox/work",
+  "cwd": "/tmp/castctl-golden-mstumdnu/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl feed-prompt\n\nShow the feed prompt as JSON. No options.\n",

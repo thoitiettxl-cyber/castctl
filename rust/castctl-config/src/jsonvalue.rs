@@ -7,17 +7,16 @@
 //! `encoding/json` machines they run on: the `Decoder.Token`
 //! token-state machine (`stream.go`, `tokenError` contexts) and the
 //! value scanner (`scanner.go` states). Error messages reproduce
-//! the Go 1.27.3 corpus byte-for-byte (the toolchain that builds
-//! the golden binary; `go 1.27.3` modules decode with jsonv2
-//! semantics) EXCEPT the six documented divergences in
-//! `test_decode_error_corpus_known_divergences` (truncated-input,
-//! number-context, and string-escape messages); see PORTING.md
-//! §M2.5. Key-position, comma-anchored closer, and missing-value
-//! errors follow the measured Go 1.27.3 behaviour, which differs
-//! from the Go 1.26 v1 `stream.go` shapes.
+//! the Go binary's messages byte-for-byte as measured by direct
+//! binary comparison on cue (see PORTING.md §M2.5), including
+//! the state-dependent truncated-input rule, the single
+//! numeric-literal context, and the backticked escape-sequence
+//! spans. Key-position, comma-anchored closer, and missing-value
+//! errors follow the measured Go behaviour, which differs from
+//! the Go 1.26 v1 `stream.go` shapes.
 
 use crate::errors::ConfigError;
-use crate::gostr::{go_decode_rune, go_quote, go_quote_char};
+use crate::gostr::{go_decode_rune, go_quote, go_quote_char, go_quote_escape_span};
 
 /// A JSON value. Numbers keep their literal spelling (Go
 /// `json.Number`); objects keep insertion order (Go
@@ -253,11 +252,9 @@ impl<'a> TokenParser<'a> {
 
     /// `tokenError` (`stream.go:464`): the context depends on the
     /// token state; `ObjectStart` has NO context (bare message).
-    /// NOTE: this is the Go 1.26/v1 shape. Under the Go 1.27.3
-    /// toolchain (jsonv2 default for `go 1.27.3` modules, which
-    /// is what builds the golden binary), key-position errors
-    /// differ: see `token()`'s key-position arms below, which
-    /// reproduce the measured 1.27 behaviour (PORTING.md §M2.5).
+    /// Key-position states do NOT use this: see `token()`'s
+    /// key-position arms, which reproduce the binary-measured
+    /// behaviour (PORTING.md §M2.5).
     fn token_error(&self, b: u8) -> TokErr {
         let context = match self.state {
             TokenState::TopValue
@@ -273,10 +270,10 @@ impl<'a> TokenParser<'a> {
         TokErr::invalid_character(b, context)
     }
 
-    /// Key-position error (Go 1.27.3/jsonv2, probe-measured): a
-    /// byte that cannot start any token while an object member
-    /// name is expected reports "looking for beginning of
-    /// value", NOT the v1 bare/object-key-string contexts.
+    /// Key-position error (binary-measured): a byte that cannot
+    /// start any token while an object member name is expected
+    /// reports "looking for beginning of value", NOT the bare /
+    /// object-key-string contexts.
     fn key_position_error(&self, b: u8) -> TokErr {
         TokErr::invalid_character(b, " looking for beginning of value")
     }
@@ -284,10 +281,29 @@ impl<'a> TokenParser<'a> {
     /// `Decoder.Token` (`stream.go:370`).
     fn token(&mut self) -> Result<Token, TokErr> {
         loop {
-            let c = self.peek()?;
+            // Truncated input at a token boundary: the Go binary
+            // reports plain `EOF` only while it is waiting for a
+            // value or a key's colon (TopValue/ObjectColon/
+            // ObjectValue); in every other state (inside a
+            // container, after a value, after a comma) it reports
+            // "unexpected end of JSON input". Probe-measured on
+            // cue across all token states; see
+            // `test_decode_eof_vs_unexpected_end`.
+            let c = match self.peek() {
+                Ok(c) => c,
+                Err(TokErr::Eof) => {
+                    return Err(match self.state {
+                        TokenState::TopValue
+                        | TokenState::ObjectColon
+                        | TokenState::ObjectValue => TokErr::Eof,
+                        _ => TokErr::Msg("unexpected end of JSON input".to_string()),
+                    });
+                }
+                Err(e) => return Err(e),
+            };
             match c {
                 b'[' => {
-                    // Key position (Go 1.27.3/jsonv2): a container
+                    // Key position (binary-measured): a container
                     // open where a member name is expected is not a
                     // name at all.
                     if self.state == TokenState::ObjectStart || self.state == TokenState::ObjectKey
@@ -305,7 +321,7 @@ impl<'a> TokenParser<'a> {
                     return Ok(Token::Delim(b'['));
                 }
                 b']' => {
-                    // Key position (Go 1.27.3/jsonv2): a stray
+                    // Key position (binary-measured): a stray
                     // closer where a member name is expected
                     // reports "looking for beginning of value".
                     if self.state == TokenState::ObjectStart || self.state == TokenState::ObjectKey
@@ -314,14 +330,14 @@ impl<'a> TokenParser<'a> {
                     }
                     // A value expected after `:` that turns out to
                     // be the wrong closer reports the enclosing
-                    // pair context (Go 1.27.3/jsonv2): `{"a":]`
+                    // pair context (binary-measured): `{"a":]`
                     // errors "after object key:value pair".
                     if self.state == TokenState::ObjectValue {
                         return Err(TokErr::invalid_character(c, " after object key:value pair"));
                     }
                     // A closer right after a comma (ArrayValue is
                     // entered only via `,`) is reported at the
-                    // comma (Go 1.27.3/jsonv2): `[1,]` errors on
+                    // comma (binary-measured): `[1,]` errors on
                     // `,`, not `]`.
                     if self.state == TokenState::ArrayValue {
                         return Err(self.key_position_error(b','));
@@ -352,7 +368,7 @@ impl<'a> TokenParser<'a> {
                 }
                 b'}' => {
                     // `}` where a value is expected after a key
-                    // reports the missing value (Go 1.27.3/jsonv2),
+                    // reports the missing value (binary-measured),
                     // not an invalid-character error.
                     if self.state == TokenState::ObjectValue {
                         return Err(TokErr::Msg("missing value after object key".to_string()));
@@ -394,7 +410,7 @@ impl<'a> TokenParser<'a> {
                     } else if self.state == TokenState::ObjectStart
                         || self.state == TokenState::ObjectKey
                     {
-                        // Key position (Go 1.27.3/jsonv2): `{,}`
+                        // Key position (binary-measured): `{,}`
                         // and `{"a":1,,}` report the comma with
                         // "looking for beginning of value".
                         return Err(self.key_position_error(c));
@@ -415,7 +431,7 @@ impl<'a> TokenParser<'a> {
                     return Ok(Token::Str(s));
                 }
                 _ => {
-                    // Key position (Go 1.27.3/jsonv2): a scalar
+                    // Key position (binary-measured): a scalar
                     // where a member name is expected decodes as a
                     // token, and the name check then fails with
                     // "object member name must be a string" (the
@@ -536,7 +552,7 @@ impl<'a> TokenParser<'a> {
             if !self.input[self.pos].is_ascii_digit() {
                 return Err(TokErr::invalid_character(
                     self.input[self.pos],
-                    " after decimal point in numeric literal",
+                    " in numeric literal",
                 ));
             }
             while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
@@ -559,7 +575,7 @@ impl<'a> TokenParser<'a> {
             if !self.input[self.pos].is_ascii_digit() {
                 return Err(TokErr::invalid_character(
                     self.input[self.pos],
-                    " in exponent of numeric literal",
+                    " in numeric literal",
                 ));
             }
             while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
@@ -590,6 +606,7 @@ impl<'a> TokenParser<'a> {
                     return Ok(out);
                 }
                 b'\\' => {
+                    let escape_start = self.pos;
                     self.pos += 1;
                     if self.pos >= self.input.len() {
                         return Err(TokErr::UnexpectedEof);
@@ -606,7 +623,7 @@ impl<'a> TokenParser<'a> {
                         b'/' => out.push('/'),
                         b'"' => out.push('"'),
                         b'u' => {
-                            let unit = self.decode_hex4()?;
+                            let unit = self.decode_hex4_span(escape_start)?;
                             if (0xd800..0xdc00).contains(&unit) {
                                 // High surrogate: combine with a
                                 // following \uDC00-\uDFFF escape.
@@ -637,7 +654,15 @@ impl<'a> TokenParser<'a> {
                             }
                         }
                         _ => {
-                            return Err(TokErr::invalid_character(e, " in string escape code"));
+                            // Invalid simple escape: the Go binary
+                            // reports the two-byte escape sequence
+                            // (`\` + the offending byte), quoted
+                            // per `go_quote_escape_span`.
+                            let span = &self.input[escape_start..self.pos];
+                            return Err(TokErr::Msg(format!(
+                                "invalid escape sequence {} in string",
+                                go_quote_escape_span(span)
+                            )));
                         }
                     }
                 }
@@ -655,7 +680,11 @@ impl<'a> TokenParser<'a> {
 
     /// Four hex digits after `\u` (`stateInStringEscU*`): a
     /// non-hex byte errors with `in \u hexadecimal character escape`;
-    /// EOF is `UnexpectedEof`.
+    /// EOF is `UnexpectedEof`. Used ONLY for the surrogate-pair
+    /// lookahead, where the caller swallows the error and falls
+    /// back to U+FFFD; the primary `\u` path uses
+    /// `decode_hex4_span`, which reports the Go binary's
+    /// `invalid escape sequence` span form.
     fn decode_hex4(&mut self) -> Result<u32, TokErr> {
         let mut value: u32 = 0;
         for _ in 0..4 {
@@ -672,6 +701,41 @@ impl<'a> TokenParser<'a> {
                         b,
                         " in \\u hexadecimal character escape",
                     ));
+                }
+            };
+            value = value * 16 + digit;
+            self.pos += 1;
+        }
+        Ok(value)
+    }
+
+    /// Primary `\u` scan: four hex digits, but a non-hex byte
+    /// reports the Go binary's `invalid escape sequence` form,
+    /// with a fixed six-byte span starting at the backslash
+    /// (`\` + `u` + the next four bytes, truncated at end of
+    /// input) — measured on cue: the span extends past the
+    /// offending byte and past the closing quote when the
+    /// window covers them. EOF before the four slots fill (with
+    /// no non-hex byte seen) is `UnexpectedEof`, as in
+    /// `decode_hex4`.
+    fn decode_hex4_span(&mut self, escape_start: usize) -> Result<u32, TokErr> {
+        let mut value: u32 = 0;
+        for _ in 0..4 {
+            if self.pos >= self.input.len() {
+                return Err(TokErr::UnexpectedEof);
+            }
+            let b = self.input[self.pos];
+            let digit = match b {
+                b'0'..=b'9' => (b - b'0') as u32,
+                b'a'..=b'f' => (b - b'a' + 10) as u32,
+                b'A'..=b'F' => (b - b'A' + 10) as u32,
+                _ => {
+                    let end = (escape_start + 6).min(self.input.len());
+                    let span = &self.input[escape_start..end];
+                    return Err(TokErr::Msg(format!(
+                        "invalid escape sequence {} in string",
+                        go_quote_escape_span(span)
+                    )));
                 }
             };
             value = value * 16 + digit;
@@ -1107,12 +1171,11 @@ mod tests {
     }
 
     /// The probed Go decode corpus: every case with its verbatim
-    /// Go 1.27.3 error (the toolchain that builds the golden
-    /// binary; `go 1.27.3` modules decode with jsonv2 semantics).
-    /// Probed on cue via a scratch program calling
-    /// `decodeOrderedJSON` directly (see PORTING.md §M2.6).
-    /// Key-position shapes, the comma-anchored closer errors,
-    /// and the missing-value error are part of this table.
+    /// Go binary error, measured by direct binary comparison on
+    /// cue (`--config <fixture> status`, byte-for-byte stdout /
+    /// stderr / exit code; see PORTING.md §M2.5). Key-position
+    /// shapes, the comma-anchored closer errors, and the
+    /// missing-value error are part of this table.
     #[test]
     fn test_decode_error_corpus() {
         let cases: &[(&str, &str)] = &[
@@ -1263,48 +1326,159 @@ mod tests {
                 "[}",
                 "profile: invalid json: invalid character '}' looking for beginning of value",
             ),
+            // Truncated input inside a container (fix-loop round
+            // 2, shape A): "unexpected end of JSON input".
+            ("{", "profile: invalid json: unexpected end of JSON input"),
+            (
+                "{\"a\":1",
+                "profile: invalid json: unexpected end of JSON input",
+            ),
+            // Number-context errors (shape B): one context.
+            (
+                "1e}",
+                "profile: invalid json: invalid character '}' in numeric literal",
+            ),
+            (
+                "1.}",
+                "profile: invalid json: invalid character '}' in numeric literal",
+            ),
+            // String-escape errors (shapes C/D): backticked spans.
+            (
+                "\"a\\q\"",
+                "profile: invalid json: invalid escape sequence `\\q` in string",
+            ),
+            (
+                "\"\\u12\"",
+                "profile: invalid json: invalid escape sequence `\\u12\"` in string",
+            ),
         ];
         for (input, want) in cases {
             assert_eq!(decode_err(input), *want, "input {input:?}");
         }
     }
 
-    /// KNOWN DIVERGENCES from Go 1.27.3 (probe-measured, see
-    /// PORTING.md §M2.5): the implementation keeps the older
-    /// (Go 1.26/v1 `stream.go` + `scanner.go`) message shapes
-    /// for these inputs. Each case lists the measured Go 1.27
-    /// message in its comment; do not "fix" the expectation
-    /// without reimplementing the jsonv2 error model.
+    /// Truncated-input rule (shape A, binary-measured on cue):
+    /// plain `EOF` only while waiting for a value or a key's
+    /// colon; "unexpected end of JSON input" in every other
+    /// token state; "unexpected EOF" mid-token (string,
+    /// literal, number).
     #[test]
-    fn test_decode_error_corpus_known_divergences() {
+    fn test_decode_eof_vs_unexpected_end() {
+        for input in [
+            "", " ", "{\"a\":", "{\"a\": ", "{\"a\"", "{\"a\" ", "{\"k\":",
+        ] {
+            assert_eq!(
+                decode_err(input),
+                "profile: invalid json: EOF",
+                "input {input:?}"
+            );
+        }
+        for input in [
+            "{",
+            "{ ",
+            "{\"a\":1",
+            "{\"a\":1 ",
+            "{\"a\":1,",
+            "{\"a\":1, ",
+            "[",
+            "[1",
+            "[1,",
+            "[1, 2",
+            "{\"k\": [1, 2",
+            "{\"k\": [",
+            "{\"a\": {}",
+            "[[1]",
+        ] {
+            assert_eq!(
+                decode_err(input),
+                "profile: invalid json: unexpected end of JSON input",
+                "input {input:?}"
+            );
+        }
+        for input in [
+            "\"abc",
+            "{\"k\": \"abc",
+            "tru",
+            "{\"k\": tru",
+            "-",
+            "1e",
+            "1.",
+        ] {
+            assert_eq!(
+                decode_err(input),
+                "profile: invalid json: unexpected EOF",
+                "input {input:?}"
+            );
+        }
+    }
+
+    /// Escape-sequence spans (shapes C/D, binary-measured on
+    /// cue): simple escapes quote the two-byte sequence;
+    /// `\u` errors quote the six-byte window from the
+    /// backslash, truncated at end of input; EOF inside the
+    /// window with no bad byte is "unexpected EOF".
+    #[test]
+    fn test_decode_escape_sequence_spans() {
         let cases: &[(&str, &str)] = &[
-            // Go 1.27: "unexpected end of JSON input".
-            ("{", "profile: invalid json: EOF"),
-            // Go 1.27: "unexpected end of JSON input".
-            ("{\"a\":1", "profile: invalid json: EOF"),
-            // Go 1.27: "invalid character '}' in numeric literal".
             (
-                "1e}",
-                "profile: invalid json: invalid character '}' in exponent of numeric literal",
+                "{\"k\": \"a\\q\"}",
+                "profile: invalid json: invalid escape sequence `\\q` in string",
             ),
-            // Go 1.27: "invalid character '}' in numeric literal".
             (
-                "1.}",
-                "profile: invalid json: invalid character '}' after decimal point in numeric literal",
+                "{\"k\": \"a\\qXYZ\"}",
+                "profile: invalid json: invalid escape sequence `\\q` in string",
             ),
-            // Go 1.27: "invalid escape sequence `\\q` in string".
             (
-                "\"a\\q\"",
-                "profile: invalid json: invalid character 'q' in string escape code",
+                "{\"k\": \"a\\x\"}",
+                "profile: invalid json: invalid escape sequence `\\x` in string",
             ),
-            // Go 1.27: "invalid escape sequence `\\u12\"` in string".
             (
-                "\"\\u12\"",
-                "profile: invalid json: invalid character '\"' in \\u hexadecimal character escape",
+                "{\"k\": \"a\\ \"}",
+                "profile: invalid json: invalid escape sequence \"\\\\ \" in string",
+            ),
+            (
+                "{\"k\": \"\\ug123\"}",
+                "profile: invalid json: invalid escape sequence `\\ug123` in string",
+            ),
+            (
+                "{\"k\": \"\\u12g3\"}",
+                "profile: invalid json: invalid escape sequence `\\u12g3` in string",
+            ),
+            (
+                "{\"k\": \"\\u12\", \"j\": 1}",
+                "profile: invalid json: invalid escape sequence `\\u12\",` in string",
+            ),
+            (
+                "{\"k\": \"\\u12\"}",
+                "profile: invalid json: invalid escape sequence `\\u12\"}` in string",
+            ),
+            (
+                "{\"k\": \"\\u123\"}",
+                "profile: invalid json: invalid escape sequence `\\u123\"` in string",
+            ),
+            (
+                "{\"k\": \"\\u12\\u34\"}",
+                "profile: invalid json: invalid escape sequence `\\u12\\u` in string",
+            ),
+            (
+                "{\"k\": \"\\u12g\"}",
+                "profile: invalid json: invalid escape sequence `\\u12g\"` in string",
+            ),
+            (
+                "{\"k\": \"\\u12x\"}",
+                "profile: invalid json: invalid escape sequence `\\u12x\"` in string",
             ),
         ];
         for (input, want) in cases {
             assert_eq!(decode_err(input), *want, "input {input:?}");
+        }
+        // EOF inside the \u window with no bad byte: unexpected EOF.
+        for input in ["{\"k\": \"\\u12", "{\"k\": \"\\u123", "{\"k\": \"\\u"] {
+            assert_eq!(
+                decode_err(input),
+                "profile: invalid json: unexpected EOF",
+                "input {input:?}"
+            );
         }
     }
 

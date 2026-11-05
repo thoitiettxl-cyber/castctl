@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "59-decoder-bad-unicode",
+  "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "decoder-bad-unicode.json",
+  "argv": [
+    "status"
+  ],
+  "env": {
+    "HOME": "/tmp/castctl-golden-43fvuh6t/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-43fvuh6t/xdg",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "PATH": "/usr/bin:/bin"
+  },
+  "cwd": "/tmp/castctl-golden-43fvuh6t/work",
+  "stdin": "empty",
+  "timeout_seconds": 10,
+  "stdout": "",
+  "stderr": "castctl: profile: invalid json: invalid escape sequence `\\u12\"}` in string\n",
+  "exit_code": 2
+}

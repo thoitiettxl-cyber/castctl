@@ -377,5 +377,33 @@
       "status"
     ],
     "fixture": "bad-config.json"
+  },
+  {
+    "id": "56-decoder-truncated-array",
+    "argv": [
+      "status"
+    ],
+    "fixture": "decoder-truncated-array.json"
+  },
+  {
+    "id": "57-decoder-bad-exponent",
+    "argv": [
+      "status"
+    ],
+    "fixture": "decoder-bad-exponent.json"
+  },
+  {
+    "id": "58-decoder-bad-escape",
+    "argv": [
+      "status"
+    ],
+    "fixture": "decoder-bad-escape.json"
+  },
+  {
+    "id": "59-decoder-bad-unicode",
+    "argv": [
+      "status"
+    ],
+    "fixture": "decoder-bad-unicode.json"
   }
 ]

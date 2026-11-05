@@ -105,6 +105,64 @@ pub fn go_quote(s: &str) -> String {
     out
 }
 
+/// Quote a raw byte span for a Go JSON `invalid escape sequence`
+/// error, measured byte-for-byte against the Go binary on cue:
+/// the span is backquoted iff it is valid UTF-8 and every rune is
+/// printable (`go_is_print`) and is neither a space nor a backtick;
+/// otherwise it is rendered with `strconv.Quote` semantics over
+/// the decoded runes, with each invalid UTF-8 byte as `\xHH`.
+/// A span containing a complete printable rune (e.g. `é`) stays
+/// literal inside backticks; a truncated multi-byte sequence at
+/// the span edge renders per invalid byte.
+pub fn go_quote_escape_span(span: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(span) {
+        if s.chars().all(|c| c != ' ' && c != '`' && go_is_print(c)) {
+            let mut out = String::with_capacity(span.len() + 2);
+            out.push('`');
+            out.push_str(s);
+            out.push('`');
+            return out;
+        }
+    }
+    let mut out = String::with_capacity(span.len() + 2);
+    out.push('"');
+    let mut i = 0;
+    while i < span.len() {
+        let (ch, size) = go_decode_rune(span, i);
+        if size == 1 && span[i] >= 0x80 {
+            // Invalid UTF-8 byte: Go writes \xHH for the byte.
+            out.push_str(&format!("\\x{:02x}", span[i]));
+            i += 1;
+            continue;
+        }
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{7}' => out.push_str("\\a"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{b}' => out.push_str("\\v"),
+            c if go_is_print(c) => out.push(c),
+            c => {
+                let n = c as u32;
+                if n < 0x80 {
+                    out.push_str(&format!("\\x{n:02x}"));
+                } else if n <= 0xffff {
+                    out.push_str(&format!("\\u{n:04x}"));
+                } else {
+                    out.push_str(&format!("\\U{n:08x}"));
+                }
+            }
+        }
+        i += size;
+    }
+    out.push('"');
+    out
+}
+
 /// Go `quoteChar`: a byte rendered as a single-quoted rune, the form
 /// `encoding/json` uses in `invalid character %c` messages. The byte
 /// is treated as a Latin-1 rune (so byte `0xFF` renders as `ÿ`).
@@ -254,6 +312,29 @@ mod tests {
         // Printable neighbours stay raw.
         assert_eq!(go_quote("bogus\u{ff}"), "\"bogusÿ\"");
         assert_eq!(go_quote("bogus\u{20ac}"), "\"bogus€\"");
+    }
+
+    #[test]
+    fn test_go_quote_escape_span() {
+        // Backtick form: printable spans, including a complete
+        // non-ASCII printable rune and quote/comma/brace bytes.
+        assert_eq!(go_quote_escape_span(b"\\q"), "`\\q`");
+        assert_eq!(go_quote_escape_span(b"\\u12\"}"), "`\\u12\"}`");
+        assert_eq!(go_quote_escape_span("é".as_bytes()), "`é`");
+        assert_eq!(go_quote_escape_span("\\u12é".as_bytes()), "`\\u12é`");
+        // %q form: space, backtick, controls, DEL, invalid bytes,
+        // and non-printable runes force double quotes.
+        assert_eq!(go_quote_escape_span(b"\\ "), "\"\\\\ \"");
+        assert_eq!(go_quote_escape_span(b"\\`"), "\"\\\\`\"");
+        assert_eq!(go_quote_escape_span(b"\\\t"), "\"\\\\\\t\"");
+        assert_eq!(go_quote_escape_span(b"\\\x7f"), "\"\\\\\\x7f\"");
+        assert_eq!(go_quote_escape_span(b"\\\xc3"), "\"\\\\\\xc3\"");
+        assert_eq!(go_quote_escape_span("\u{a0}".as_bytes()), "\"\\u00a0\"");
+        assert_eq!(go_quote_escape_span("\u{2028}".as_bytes()), "\"\\u2028\"");
+        assert_eq!(
+            go_quote_escape_span(b"\\u12\xe2\x80"),
+            "\"\\\\u12\\xe2\\x80\""
+        );
     }
 
     #[test]

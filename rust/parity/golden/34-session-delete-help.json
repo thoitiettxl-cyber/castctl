@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-d6ycrdcz/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-d6ycrdcz/xdg",
+    "HOME": "/tmp/castctl-golden-mvr13wjx/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-mvr13wjx/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-d6ycrdcz/work",
+  "cwd": "/tmp/castctl-golden-mvr13wjx/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl session-rename ID TITLE\n       castctl session-pin ID\n       castctl session-unpin ID\n       castctl session-archive ID\n       castctl session-unarchive ID\n       castctl session-delete ID\n\nRename, pin, unpin, archive, unarchive or delete a session. Prints\nthe result as JSON. No options.\n",

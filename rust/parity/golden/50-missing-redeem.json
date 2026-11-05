@@ -7,13 +7,13 @@
     "redeem"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-vj7uqv7j/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-vj7uqv7j/xdg",
+    "HOME": "/tmp/castctl-golden-l8675h8o/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-l8675h8o/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-vj7uqv7j/work",
+  "cwd": "/tmp/castctl-golden-l8675h8o/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "",

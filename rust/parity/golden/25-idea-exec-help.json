@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-ybkfkn10/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-ybkfkn10/xdg",
+    "HOME": "/tmp/castctl-golden-k34gpjyc/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-k34gpjyc/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-ybkfkn10/work",
+  "cwd": "/tmp/castctl-golden-k34gpjyc/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl idea-exec ID [--thread ID]\n\nExecute an idea (the agent acts on it, full mode).\n\noptions:\n  --thread ID  side chat session id to run it in.\n",

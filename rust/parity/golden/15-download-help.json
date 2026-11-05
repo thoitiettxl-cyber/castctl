@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-njbz53ns/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-njbz53ns/xdg",
+    "HOME": "/tmp/castctl-golden-kn5pmuty/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-kn5pmuty/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-njbz53ns/work",
+  "cwd": "/tmp/castctl-golden-kn5pmuty/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl download REF [-o DIR] [--thread ID] [--limit N] [-f]\n\nDownload a file the agent produced: a sandbox:// path, a media URL,\na message id, or a history seq. Prints the save rows as JSON. Any\nrow error exits 3; no file found exits 1.\n\noptions:\n  -o, --output DIR  directory to save into (default .).\n  --thread ID       side chat to search for a message id/seq.\n  --limit N         messages to search for a message id/seq\n                    (default 50).\n  -f, --force       overwrite existing files.\n",

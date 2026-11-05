@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-p0ou23kz/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-p0ou23kz/xdg",
+    "HOME": "/tmp/castctl-golden-3u7llpnd/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-3u7llpnd/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-p0ou23kz/work",
+  "cwd": "/tmp/castctl-golden-3u7llpnd/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl goals\n\nList goals as JSON rows. No options.\n",

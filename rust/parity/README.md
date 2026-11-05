@@ -1,7 +1,7 @@
 # Parity harness (M2)
 
 Byte-for-byte comparison of the Rust binary against the Go binary
-over the 55 offline argv cases in `cases.json` (the single source
+over the 59 offline argv cases in `cases.json` (the single source
 of truth for the case list).
 
 ## Regenerate (on cue, one command)
@@ -22,18 +22,21 @@ Each case runs with an isolated HOME/XDG, a minimal environment
 (`HOME`, `XDG_CONFIG_HOME`, `LC_ALL=C`, `TZ=UTC`, `PATH`),
 stdin `/dev/null`, a 10s timeout, cwd = a fresh fixture work dir,
 and the case's fixture config (default `fixtures/config.json`,
-NO `log` block; case 55 uses `fixtures/bad-config.json`)
+NO `log` block; case 55 uses `fixtures/bad-config.json`, cases
+56–59 use the four `decoder-*.json` fixtures)
 installed at `$XDG_CONFIG_HOME/castctl/config.json`.
 `CASTCTL_CONFIG`/`CASTCTL_PROFILE` are unset (the environment is
 cleared first).
 
-## Cases (55)
+## Cases (59)
 
-46 × `<command> --help` in `commandOrder`, plus 9: `--version`,
+46 × `<command> --help` in `commandOrder`, plus 13: `--version`,
 `--help`, `bogus`, `redeem` (missing positional), `goal` (missing
 positional), `seen` (missing positional), `--log-level xyz`,
 `--config /nonexistent`, `status` with a bad-JSON config
-(F5: exercises the config-parse gate before the stub).
+(F5: exercises the config-parse gate before the stub), and 4 ×
+`status` with a decoder-message fixture (cases 56–59: truncated
+array, bad exponent, bad string escape, incomplete `\u` escape).
 
 ## Normalisations (comparison only, applied to both sides)
 

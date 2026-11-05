@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "56-decoder-truncated-array",
+  "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "decoder-truncated-array.json",
+  "argv": [
+    "status"
+  ],
+  "env": {
+    "HOME": "/tmp/castctl-golden-w1wocq72/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-w1wocq72/xdg",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "PATH": "/usr/bin:/bin"
+  },
+  "cwd": "/tmp/castctl-golden-w1wocq72/work",
+  "stdin": "empty",
+  "timeout_seconds": 10,
+  "stdout": "",
+  "stderr": "castctl: profile: invalid json: unexpected end of JSON input\n",
+  "exit_code": 2
+}

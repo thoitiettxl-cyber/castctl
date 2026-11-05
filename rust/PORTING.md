@@ -733,28 +733,33 @@ refs, allowed-hosts, browser URL), `ResolveKeeper` /
   (random order); Rust renders stored input order. The parse
   path always has raw JSON, so this branch is unreachable from
   parsed configs.
-- **Decoder messages outside the probed corpus** — the
-  `Token()`/scanner reproduction is verified against the
-  corpus in `jsonvalue.rs` tests, probed against Go 1.27.3
-  (the toolchain that builds the golden binary; `go 1.27.3`
-  modules decode with jsonv2 semantics — the Go 1.26 v1
-  `stream.go` shapes do NOT apply). Key-position errors
-  (stray byte, non-string scalar, container open),
-  comma-anchored closer errors, and the missing-value error
-  follow the measured 1.27 behaviour. Six shapes keep the
-  older message forms as KNOWN DIVERGENCES (see
-  `test_decode_error_corpus_known_divergences`): truncated
-  input inside a container (`{`, `{"a":1` → Go "unexpected
-  end of JSON input", Rust "EOF"), number-context messages
-  (`1e}`, `1.}` → Go "in numeric literal"), and string-escape
-  messages (`"\q"`, `"\u12"` → Go "invalid escape sequence
-  ..." forms). `quoteChar` for control/Latin-1 bytes outside
-  the corpus, deep UTF-8 lossy edges, and the plan9 branch
-  remain approximations. `json.Indent`'s error branch is
-  unreachable from the port's own compact output. Probe N3
-  (fix loop): Go decodes a lone high surrogate
-  `"\uD800\u0041"` as U+FFFD + `A`, matching Rust — no fix
-  needed.
+- **Decoder messages (binary-measured, fix-loop round 2)** —
+  the `Token()`/scanner reproduction is verified against the
+  corpus in `jsonvalue.rs` tests, measured byte-for-byte
+  against the installed Go binary on cue (`/usr/local/bin/
+  castctl` 0.9.0 @1396697, isolated HOME/XDG, `--config
+  <fixture> status`) — NOT against toolchain-version
+  reasoning. Four shapes were fixed in round 2 after direct
+  binary probes (see §M2.6c): (A) truncated input reports
+  plain `EOF` only while waiting for a value or a key's
+  colon, and "unexpected end of JSON input" in every other
+  token state; (B) number errors use the single context
+  "in numeric literal" for fraction and exponent alike;
+  (C) a bad simple escape reports `invalid escape sequence`
+  with the two-byte span, quoted per `go_quote_escape_span`;
+  (D) a bad `\u` escape reports the same form with a fixed
+  six-byte span from the backslash (truncated at end of
+  input), while EOF inside the window with no bad byte is
+  "unexpected EOF". Span quoting: backticks iff the span is
+  valid UTF-8 and every rune is printable and neither a
+  space nor a backtick; otherwise `%q` over the decoded
+  runes with invalid bytes as `\xHH`. Outside the probed
+  corpus, `quoteChar` for control/Latin-1 bytes, deep UTF-8
+  lossy edges, and the plan9 branch remain approximations.
+  `json.Indent`'s error branch is unreachable from the
+  port's own compact output. Probe N3 (fix loop): Go decodes
+  a lone high surrogate `"\uD800\u0041"` as U+FFFD + `A`,
+  matching Rust — no fix needed.
 - **`%q`/`IsPrint` for runes > 0xFF** — `go_quote`/`go_quote_char`
   reproduce the probed cases (incl. `0xFF`→`'ÿ'`, NBSP→
   `'\u00a0'`, DEL→`'\x7f'`). Separator runes (Zs/Zl/Zp:
@@ -841,9 +846,11 @@ refs, allowed-hosts, browser URL), `ResolveKeeper` /
   verified against a scratch program outside the module):
   key-position, comma-anchored, missing-value, truncation,
   number-context, and escape messages all differ under
-  1.27. The implementation now matches Go 1.27 for every
-  probed shape except the six documented divergences
-  (§M2.5). Scratch dirs on cue: `/tmp/decprobe` (module
+  1.27. The implementation then matched Go 1.27 for every
+  probed shape except six documented divergences (§M2.5);
+  those six were fixed in round 2 by direct binary probes
+  (§M2.6c), and the corpus tests now pin the binary-measured
+  messages. Scratch dirs on cue: `/tmp/decprobe` (module
   clone at `85a8d5e`), `/tmp/tokprobe` (standalone Token
   probe, go 1.26 semantics — NOT authoritative).
 - H1/H7 tamper probes (after F9): editing one golden byte,
@@ -855,13 +862,54 @@ refs, allowed-hosts, browser URL), `ResolveKeeper` /
   (`config must be a json object`, parsed OK, no crash);
   10001-deep → clean exit 2 `exceeded max depth`.
 
+## M2.6c Fix-loop probes (round 2, all on cue, Go binary only)
+
+Ground truth: the installed Go binary only — no reviewer
+notes, no toolchain-version reasoning. Each probe ran Go
+with an isolated HOME/XDG, minimal env, stdin `/dev/null`,
+cwd = fresh work dir, argv `--config <fixture> status`.
+
+- (A) Truncation state rule, 36 variants + 21 nested-state
+  confirmations: `EOF` at TopValue (empty/whitespace),
+  ObjectColon (after a key), ObjectValue (after `:`);
+  "unexpected end of JSON input" at ObjectStart,
+  ObjectKey (after a comma in an object), ObjectComma
+  (after a value), ArrayStart, ArrayValue (after a comma
+  in an array), ArrayComma (after an element), including
+  nested states; "unexpected EOF" mid-token (unterminated
+  string, literal, number).
+- (B) Number errors, 21 variants: every bad character in
+  the fraction and in the exponent (sign or digits, any
+  delimiter) reports "in numeric literal"; `-}`/`-x`
+  likewise; EOF mid-number is "unexpected EOF".
+- (C) Simple escapes, 14 variants + byte probes: span is
+  exactly `\` + the offending byte (byte, not rune);
+  measured for `q x 0 ' space DEL 0x01 0xC3 0x80` and
+  with trailing input.
+- (D) `\u` escapes, 21 variants: span is six bytes from
+  the backslash (fewer at end of input); a non-hex byte
+  anywhere in the four slots errors with the span even at
+  EOF; EOF with no bad byte is "unexpected EOF".
+- Span quoting, 24 + 10 + 3 hex-checked variants: backtick
+  form iff the span is valid UTF-8 and all runes are
+  printable, non-space, non-backtick (incl. complete `é`,
+  `€`, CJK literal); `%q` form for space, tab, CR, VT,
+  FF, control bytes, DEL, backtick, invalid bytes
+  (`\xHH` per byte), NBSP and U+2028 (complete but
+  non-printable, rendered `\u00a0`/`\u2028`).
+- Re-verification: all 92 + 45 + 10 + 3 probe cases and
+  all 26 decoder-probe fixtures re-run against the fixed
+  Rust binary — 0 decoder mismatches; the 5 non-decoder
+  mismatches (legacy-layout/runtime vs stub) are
+  unchanged in kind (see §M2.5, F5 remainder).
+
 ## M2.7 Test mapping (cue counts; M1 crates unchanged)
 
 | Crate | Rust tests | Notes |
 |---|---|---|
-| `castctl-config` | 85 | Decoder corpus (Go 1.27-verbatim + 6 known divergences) + trailing-data quirks + order/number/surrogate/indent rules; profile/config/telegram/log/blocks/configlocation rules; LoadProfile filesystem cases (single/legacy/stray/dir/env-fill); D19 regression; round-trip idempotence with raw key reorder + `<>&`; Debug-redaction, depth-cap, ENOTDIR, separator-quote, strerror, empty-number tests |
+| `castctl-config` | 87 | Decoder corpus (binary-measured Go messages, incl. the round-2 state-dependent EOF rule, single number context, and escape-sequence spans) + trailing-data quirks + order/number/surrogate/indent rules; profile/config/telegram/log/blocks/configlocation rules; LoadProfile filesystem cases (single/legacy/stray/dir/env-fill); D19 regression; round-trip idempotence with raw key reorder + `<>&`; Debug-redaction, depth-cap, ENOTDIR, separator-quote, strerror, empty-number tests |
 | `castctl-cli` | 41 | Parser (abbreviations, bundling, negative numbers, defaults incl. int-set separation, lists/pairs, help short-circuit); table (order, usage lines, int defaults); dispatch (2-/3-line shapes, dispatcher quirks, stub order, gates, approve/auto-approve/keeper/migrate checks, export guidance, fs-rm/profile-add pre-checks) |
-| `castctl-rs` | 2 integration (`parity.rs`) | 55/55 golden cases, 0 mismatches (see §M2.8); SHA-256 known-answer test |
+| `castctl-rs` | 2 integration (`parity.rs`) | 59/59 golden cases, 0 mismatches (see §M2.8); SHA-256 known-answer test |
 | M1 crates | 46 + 7 + 2 + 10 | Unchanged counts, all green |
 
 Go test files consulted directly (behaviour pinned from code +
@@ -877,14 +925,15 @@ shapes. Deferred Go tests are listed in §M2.3.
 
 ## M2.8 Verification (on cue, rustc/cargo 1.97.1)
 
-Scratch: `/tmp/castctl-rust-m2-final` (sources synced by tar
-over SSH; `target/` never synced). Host key verified before the
-first login: `SHA256:6ExOBaFLBXhnN4GX3Qjh6DbdjJev2p7nR61IwERRhcs`
+Scratch: `/tmp/dfix2` (sources synced by tar over SSH;
+`target/` never synced). Host key verified before the first
+login: `SHA256:6ExOBaFLBXhnN4GX3Qjh6DbdjJev2p7nR61IwERRhcs`
 — MATCHED. Fix-loop round 1 (F1–F10 + nits, incl. the
-iterative decoder/encoder rewrite and the Go 1.27 decoder
-re-probe) verified here from the final local tree; the
-golden files + `manifest.json` in the repo are the output of
-`gen_golden.sh` on cue (55 cases).
+iterative decoder/encoder rewrite) and fix-loop round 2
+(decoder messages A–D, binary-measured on cue) verified here
+from the final local tree; the golden files +
+`manifest.json` in the repo are the output of
+`gen_golden.sh` on cue (59 cases).
 
 ```console
 $ cargo --version && rustc --version && cargo clippy --version && cargo fmt --version
@@ -897,15 +946,15 @@ castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)
 $ cargo build --workspace
 BUILD-EXIT=0
 $ sh parity/gen_golden.sh
-GEN-EXIT=0  (55 golden files + manifest.json written; count verified with ls)
+GEN-EXIT=0  (59 golden files + manifest.json written; count verified with ls)
 $ cargo test --workspace
 test result: ok. 41 passed; 0 failed  (castctl-cli)
-test result: ok. 85 passed; 0 failed  (castctl-config)
+test result: ok. 87 passed; 0 failed  (castctl-config)
 test result: ok. 46 passed; 0 failed  (castctl-log-redact)
 test result: ok. 7 passed; 0 failed   (castctl-shared)
 test result: ok. 2 passed; 0 failed   (castctl-tg-files)
 test result: ok. 10 passed; 0 failed  (castctl-tg-text)
-test result: ok. 2 passed; 0 failed   (parity integration: sha256 known-answer + golden_parity, 55/55 cases, 0 mismatches)
+test result: ok. 2 passed; 0 failed   (parity integration: sha256 known-answer + golden_parity, 59/59 cases, 0 mismatches)
 TEST-EXIT=0
 $ cargo clippy --workspace --all-targets -- -D warnings
 CLIPPY-EXIT=0

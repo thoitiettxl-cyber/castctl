@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-e3_egzbr/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-e3_egzbr/xdg",
+    "HOME": "/tmp/castctl-golden-yupb79ga/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-yupb79ga/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-e3_egzbr/work",
+  "cwd": "/tmp/castctl-golden-yupb79ga/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl threads [--all]\n\nList chats and side chats as JSON rows.\n\noptions:\n  --all     include archived sessions.\n",

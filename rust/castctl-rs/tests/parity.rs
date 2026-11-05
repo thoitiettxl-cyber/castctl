@@ -1,5 +1,5 @@
 //! Golden parity test (M2): runs the built `castctl-rs` binary
-//! over the 55 argv cases in `rust/parity/cases.json` and compares
+//! over the 59 argv cases in `rust/parity/cases.json` and compares
 //! stdout/stderr/exit code byte-for-byte with the golden files in
 //! `rust/parity/golden/` (generated on cue by
 //! `rust/parity/gen_golden.sh` from the Go binary), after the
@@ -613,7 +613,11 @@ fn golden_parity() {
         bin.display()
     );
     let cases = load_cases();
-    assert_eq!(cases.len(), 55, "argv-list length (D-M2-4 + F5 case)");
+    assert_eq!(
+        cases.len(),
+        59,
+        "argv-list length (D-M2-4 + F5 case + 4 decoder cases)"
+    );
     verify_manifest(&cases);
     // F9(c): the Rust --version output (unstripped) is exactly
     // `castctl 0.9.0`, and the golden --version case agrees after
