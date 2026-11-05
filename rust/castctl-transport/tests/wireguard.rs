@@ -862,7 +862,7 @@ async fn fake_wireguard_bad_datagram_does_not_kill_tunnel() {
     // Garbage from the peer's address (passes the src==peer
     // gate, fails boringtun decapsulation) + a 2000-byte
     // datagram (truncated by the mtu+32 recv buffer).
-    let garbage: Vec<u8> = (0..64).map(|i| (0xDEu8.wrapping_add(i as u8))).collect();
+    let garbage: Vec<u8> = (0..64).map(|i| 0xDEu8.wrapping_add(i as u8)).collect();
     server.inject(&garbage);
     server.inject(&vec![0u8; 2000]);
     tokio::time::sleep(Duration::from_millis(300)).await;
