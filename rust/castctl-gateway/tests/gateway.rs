@@ -24,18 +24,19 @@ mod common;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use castctl_gateway::Gateway;
-use castctl_gateway::dial::dial_gateway;
+use castctl_gateway::dial::{default_ws_url, dial_gateway};
 use castctl_gateway::gateway::RequestOptions;
 use castctl_gateway::shared::{
     Connector, DownDecision, DownTracker, HEARTBEAT, RETRY_FOR, SharedConn,
 };
 use castctl_transport::TransportError;
 use castctl_transport::retry::RetryPolicy;
-use common::{BlackholeServer, FakeServer, Reply, canned_json};
+use castctl_transport::routes::{Route, Service};
+use common::{BadMsg2Server, BlackholeServer, FakeServer, Reply, canned_json};
 use tokio::time::sleep;
 
 fn routes() -> Arc<castctl_transport::routes::RouteTable> {
@@ -152,6 +153,62 @@ async fn call_json_roundtrip_five_methods() {
 }
 
 #[tokio::test]
+async fn dial_url_sends_redacted_literal_not_real_token() {
+    // Boss decision 2026-11-05: mirror Go byte-for-byte. Go
+    // `internal/gateway/connector.go:116` (`defaultWSURL`)
+    // sends the literal `auth_token=<redacted>` — the quoted
+    // hatch token is computed and silently discarded by
+    // `Sprintf` (3 verbs, 4 args); `TestDefaultWSURL` pins
+    // the literal, and the Go 0.9.0 production binary relays
+    // real turns through that URL. The Rust URL must carry
+    // the same literal and never the real token value. The
+    // fake server records the raw upgrade request-target, so
+    // this asserts on the wire URL, not on a helper.
+    let server = FakeServer::start(Arc::new(|req| canned_json(&req.path))).await;
+    let url = default_ws_url(
+        false,
+        &server.addr.to_string(),
+        "vm-test",
+        "REAL-TOKEN-SECRET-XYZ",
+    );
+    // String level: byte-for-byte the Go URL (raw literal).
+    assert_eq!(
+        url,
+        format!(
+            "ws://{}/v1/noise?vm_id=vm-test&auth_token=<redacted>",
+            server.addr
+        ),
+        "default_ws_url must mirror Go defaultWSURL"
+    );
+    let gw = dial_gateway(&url, routes()).await.unwrap();
+    // Clone the recorded target out and drop the lock guard
+    // before any await (`gw.close().await` below).
+    let target = {
+        let targets = server.request_targets.lock().unwrap();
+        assert_eq!(targets.len(), 1, "one WS upgrade, got {targets:?}");
+        targets[0].clone()
+    };
+    // Wire level: `http::Uri` cannot represent `<`/`>` so
+    // `dial_gateway` percent-encodes the literal on the wire;
+    // the server decodes `%3C`/`%3E` back to `<redacted>`, the
+    // same query value Go sends raw.
+    assert!(
+        target.contains("auth_token=%3Credacted%3E"),
+        "dialed URL must carry the encoded Go literal, got {target}"
+    );
+    assert!(
+        !target.contains("REAL-TOKEN-SECRET-XYZ"),
+        "dialed URL must not carry the real token, got {target}"
+    );
+    assert!(
+        target.contains("vm_id=vm-test"),
+        "vm_id must survive: {target}"
+    );
+    gw.close().await;
+    server.stop();
+}
+
+#[tokio::test]
 async fn call_json_unknown_method_is_validation() {
     let server = FakeServer::start(Arc::new(|req| canned_json(&req.path))).await;
     let gw = dial_gateway(&server.ws_url(), routes()).await.unwrap();
@@ -200,6 +257,95 @@ async fn call_json_ok_false_is_gateway() {
         matches!(err, TransportError::Gateway(_)),
         "ok=false must be Gateway, got {err:?}"
     );
+    server.stop();
+}
+
+#[tokio::test]
+async fn call_json_redirect_is_gateway_exit_3() {
+    // Explicit 3xx (not just the 404 case): Go
+    // `calls.go:168-174` maps ANY non-2xx status to
+    // `GatewayError(status)` → exit 3.
+    let server = FakeServer::start(Arc::new(|_| Reply::json(301, r#"{"ok":true}"#))).await;
+    let gw = dial_gateway(&server.ws_url(), routes()).await.unwrap();
+    let err = gw
+        .call_json("sessions.list", RequestOptions::default())
+        .await
+        .unwrap_err();
+    match &err {
+        TransportError::Gateway(summary) => assert_eq!(summary.status, 301),
+        other => panic!("want Gateway(301), got {other:?}"),
+    }
+    assert_eq!(err.exit_code(), 3);
+    server.stop();
+}
+
+#[tokio::test]
+async fn call_json_non_json_body_is_gateway_exit_3() {
+    // Non-JSON 200 body: `decode_call_json` maps it to
+    // `Gateway(-1)` → exit 3.
+    let server = FakeServer::start(Arc::new(|_| Reply::json(200, "this is not json"))).await;
+    let gw = dial_gateway(&server.ws_url(), routes()).await.unwrap();
+    let err = gw
+        .call_json("sessions.list", RequestOptions::default())
+        .await
+        .unwrap_err();
+    match &err {
+        TransportError::Gateway(summary) => assert_eq!(summary.status, -1),
+        other => panic!("want Gateway(-1), got {other:?}"),
+    }
+    assert_eq!(err.exit_code(), 3);
+    server.stop();
+}
+
+#[tokio::test]
+async fn call_json_reset_is_gateway_exit_3() {
+    // A stream `Reset` mid-call maps to `Gateway(-1)` →
+    // exit 3 (the `Reset` frame ends the stream with a
+    // gateway error, it is not a connection failure).
+    let server = FakeServer::start(Arc::new(|_| Reply {
+        reset: Some((3, "boom".to_string())),
+        ..Reply::json(200, "{}")
+    }))
+    .await;
+    let gw = dial_gateway(&server.ws_url(), routes()).await.unwrap();
+    let err = gw
+        .call_json("sessions.list", RequestOptions::default())
+        .await
+        .unwrap_err();
+    match &err {
+        TransportError::Gateway(summary) => assert_eq!(summary.status, -1),
+        other => panic!("want Gateway(-1), got {other:?}"),
+    }
+    assert_eq!(err.exit_code(), 3);
+    server.stop();
+}
+
+#[tokio::test]
+async fn request_timeout_is_timeout_exit_4() {
+    // The server never answers: the call must fail with
+    // `TimeoutError` (exit 4) at the 200ms deadline, not
+    // hang and not a `ConnectionError`.
+    let server = FakeServer::start(Arc::new(|_| Reply {
+        never_reply: true,
+        ..Reply::json(200, "{}")
+    }))
+    .await;
+    let gw = dial_gateway(&server.ws_url(), routes()).await.unwrap();
+    let err = gw
+        .request(
+            "sessions.list",
+            RequestOptions {
+                timeout: Duration::from_millis(200),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, TransportError::Timeout { .. }),
+        "want Timeout, got {err:?}"
+    );
+    assert_eq!(err.exit_code(), 4);
     server.stop();
 }
 
@@ -308,6 +454,85 @@ async fn stale_probe_detects_dead_conn_and_reconnects() {
         .unwrap();
     assert!(json_str(&out).contains("pong"));
     assert_eq!(shared.connects(), 2, "one warm + one reconnect");
+    // Go `Live` (`conn.go:500-520`): replacing the dead
+    // installed gateway counts one drop (and records the
+    // outage + closes the old gateway).
+    assert_eq!(
+        shared.drops(),
+        1,
+        "replacing the dead installed gateway counts one drop"
+    );
+    server.stop();
+}
+
+#[tokio::test]
+async fn probe_stale_or_uses_injectable_interval() {
+    // Go `conn.go:445-452` `probeStale`: EITHER axis fresh
+    // (last recv OR last use within `heartbeatInterval`)
+    // means alive without a probe; only when BOTH are quiet
+    // does it send a ping. The probe interval is the
+    // SharedConn's injectable `heartbeat_interval` (300ms
+    // here), not the 25s `HEARTBEAT` constant. This test
+    // proves both branches: branch 1 (one axis fresh → no
+    // ping) and branch 2 (both stale → exactly one ping).
+    let interval = Duration::from_millis(300);
+    let drop_pings = Arc::new(AtomicBool::new(false));
+    let drop = Arc::clone(&drop_pings);
+    let server = FakeServer::start(Arc::new(move |req| {
+        if drop.load(Ordering::SeqCst) && req.path == "/api/ping" {
+            Reply {
+                never_reply: true,
+                ..Reply::json(200, "{}")
+            }
+        } else {
+            canned_json(&req.path)
+        }
+    }))
+    .await;
+    let conn = Arc::new(FlakyConnector {
+        url: server.ws_url(),
+        fail_times: AtomicU64::new(0),
+        attempts: AtomicU64::new(0),
+    });
+    let shared = Arc::new(SharedConn::with_policy(conn, policy_fast(), interval));
+    let out = shared
+        .call_json("connection.ping", RequestOptions::default())
+        .await
+        .unwrap();
+    assert!(json_str(&out).contains("pong"));
+    let gw = shared.snapshot().expect("gateway installed");
+    // Both axes stale (450ms > 300ms), then a dropped ping:
+    // the send refreshes `last_used` only, `last_recv` stays
+    // stale — exactly one axis fresh.
+    sleep(Duration::from_millis(450)).await;
+    drop_pings.store(true, Ordering::SeqCst);
+    let err = gw.ping(Duration::from_millis(100)).await.unwrap_err();
+    assert!(matches!(err, TransportError::Timeout { .. }));
+    assert_eq!(err.exit_code(), 4);
+    let before = server.ping_count.load(Ordering::SeqCst);
+    // Branch 1: one axis fresh → alive, no probe ping sent.
+    assert!(
+        shared.probe_stale(&gw).await,
+        "one axis fresh must be alive without a probe"
+    );
+    assert_eq!(
+        server.ping_count.load(Ordering::SeqCst),
+        before,
+        "branch 1 must not send a ping"
+    );
+    // Both axes stale again; the probe must ping (and the
+    // ping answers → alive).
+    sleep(Duration::from_millis(450)).await;
+    drop_pings.store(false, Ordering::SeqCst);
+    assert!(
+        shared.probe_stale(&gw).await,
+        "both stale but ping answers must be alive"
+    );
+    assert_eq!(
+        server.ping_count.load(Ordering::SeqCst),
+        before + 1,
+        "branch 2 must send exactly one probe ping"
+    );
     server.stop();
 }
 
@@ -339,6 +564,90 @@ async fn retry_within_budget_then_succeeds() {
         "2 failed + 1 good connect attempts"
     );
     assert_eq!(shared.connects(), 1);
+    server.stop();
+}
+
+#[tokio::test]
+async fn unsafe_method_is_not_retried_on_connection_error() {
+    // Handler: close the conn without answering for both
+    // the unsafe write and the safe read — the in-flight
+    // call fails with `ConnectionError` either way.
+    let server = FakeServer::start(Arc::new(|req| {
+        if req.path == "/chat/send" || req.path == "/api/session/list" {
+            Reply {
+                close_without_reply: true,
+                ..Reply::json(200, "{}")
+            }
+        } else {
+            canned_json(&req.path)
+        }
+    }))
+    .await;
+    let conn = Arc::new(FlakyConnector {
+        url: server.ws_url(),
+        fail_times: AtomicU64::new(0),
+        attempts: AtomicU64::new(0),
+    });
+    let shared = Arc::new(SharedConn::with_policy(conn, policy_fast(), HEARTBEAT));
+    let out = shared
+        .call_json("connection.ping", RequestOptions::default())
+        .await
+        .unwrap();
+    assert!(json_str(&out).contains("pong"));
+    // Unsafe write (POST `chat.send`, not one of the 9 POST
+    // reads): the `ConnectionError` must NOT be retried —
+    // exactly one attempt reaches the server.
+    let route = Route {
+        method: "chat.send".to_string(),
+        http: "POST".to_string(),
+        path: "/chat/send".to_string(),
+        service: Service::Daemon,
+    };
+    let err = shared
+        .call_json(
+            "chat.send",
+            RequestOptions {
+                route: Some(route),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, TransportError::ConnectionError { .. }),
+        "want ConnectionError, got {err:?}"
+    );
+    let sends = server
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, path, _)| path == "/chat/send")
+        .count();
+    assert_eq!(sends, 1, "unsafe method: exactly 1 attempt, got {sends}");
+    // Sensitivity control: the same failure on a safe GET is
+    // retried inside the 2s budget — the harness can observe
+    // retries, so the 1 above is the safety rule, not a dead
+    // retry path.
+    let err = shared
+        .call_json("sessions.list", RequestOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, TransportError::ConnectionError { .. }),
+        "want ConnectionError, got {err:?}"
+    );
+    let lists = server
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, path, _)| path == "/api/session/list")
+        .count();
+    assert!(
+        lists > 1,
+        "safe method must be retried, got {lists} attempts"
+    );
     server.stop();
 }
 
@@ -427,12 +736,42 @@ async fn no_token_or_cookie_in_debug() {
     let gw = dial_gateway(&server.ws_url(), routes()).await.unwrap();
     let dbg = format!("{gw:?}");
     assert!(
+        dbg.starts_with("Gateway { alive:"),
+        "Gateway Debug shape is pinned: {dbg}"
+    );
+    assert!(
+        !dbg.contains("auth_token"),
+        "Gateway Debug must not name the token param: {dbg}"
+    );
+    assert!(
         !dbg.contains("FAKE-TOKEN-123"),
         "Gateway Debug must not leak the token: {dbg}"
     );
     assert!(
         !dbg.contains("hatch_sess"),
         "Gateway Debug must not leak cookies: {dbg}"
+    );
+    // SharedConn Debug prints counts only (the connector
+    // owns credentials); same absence + shape pin.
+    let shared = SharedConn::with_policy(
+        Arc::new(FlakyConnector {
+            url: server.ws_url(),
+            fail_times: AtomicU64::new(0),
+            attempts: AtomicU64::new(0),
+        }),
+        policy_fast(),
+        HEARTBEAT,
+    );
+    let sdbg = format!("{shared:?}");
+    assert!(
+        sdbg.starts_with("SharedConn { connects:"),
+        "SharedConn Debug shape is pinned: {sdbg}"
+    );
+    assert!(
+        !sdbg.contains("auth_token")
+            && !sdbg.contains("FAKE-TOKEN-123")
+            && !sdbg.contains("hatch_sess"),
+        "SharedConn Debug must not leak secrets: {sdbg}"
     );
     // TransportError Debug is hand-written and prints no
     // message bodies at all — and neither does log_summary
@@ -465,6 +804,28 @@ async fn cancel_mid_handshake_does_not_hang() {
         start.elapsed()
     );
     server.stop();
+}
+
+#[tokio::test]
+async fn dial_bad_msg2_is_connection_error() {
+    // Truncated (5 bytes), empty (0 bytes) and oversized
+    // (70000 bytes) msg2: the Noise handshake must fail
+    // with `ConnectionError`, never hang or panic. A valid
+    // XX msg2 with an empty payload is 48 bytes, so all
+    // three are malformed by length alone.
+    for (name, payload) in [
+        ("truncated", vec![0xAA; 5]),
+        ("empty", vec![]),
+        ("oversized", vec![0xAA; 70_000]),
+    ] {
+        let server = BadMsg2Server::start(payload).await;
+        let err = dial_gateway(&server.ws_url(), routes()).await.unwrap_err();
+        assert!(
+            matches!(err, TransportError::ConnectionError { .. }),
+            "{name} msg2 must be ConnectionError, got {err:?}"
+        );
+        server.stop();
+    }
 }
 
 #[tokio::test]

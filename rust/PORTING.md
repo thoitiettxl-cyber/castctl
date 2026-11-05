@@ -2984,8 +2984,9 @@ built on `internal/gateway/gatewaytest.Server`).
   trait, heartbeat.
 - `dial.rs`: `default_ws_url`, `dial_gateway` (UA
   `Chrome/153.0.0.0`, Origin `https://muse.ai`, 20s
-  upgrade bound, 20s handshake steps; the token URL is
-  parsed out and never stored/logged). The gateway-dial
+  upgrade bound, 20s handshake steps; the URL carries the
+  literal `auth_token=<redacted>` — never the real token —
+  see §M4a.2 deviation 12). The gateway-dial
   TLS rule (DialTLS forces Enabled=true) lives at the
   gateway-dial call site, NOT folded into `build_tls`.
 
@@ -3035,11 +3036,15 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
    (measured: 2 failed + 1 good attempts → `connects()
    == 1`; auth failure → 0). The counter is
    install-based, not attempt-based.
-6. `probe_stale` short-circuits to alive when the
-   gateway was used within `HEARTBEAT` (25s) — same as Go
-   `probeStale` (`conn.go:445-475`), not a deviation; the
-   stale test therefore proves death via `alive() ==
-   false` + reconnect, not via the probe itself.
+6. `probe_stale` (fix loop 1, 2026-11-05): the PR1
+   version used AND against the hardcoded `HEARTBEAT`
+   (25s) and claimed "same as Go" — false as implemented.
+   Go `probeStale` (`conn.go:445-452`) is two early
+   returns, i.e. EITHER axis fresh (OR) against
+   `m.heartbeatInterval`. The fix uses `||` and
+   `self.heartbeat_interval`; the test proves both
+   branches (one axis fresh → no ping; both stale →
+   exactly one probe ping).
 7. Heartbeat never opens the first connection (same as
    Go): ticks return early while `connects() == 0` and no
    outage is recorded; the first call opens.
@@ -3058,6 +3063,46 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
     design, for the operator; `Debug` and `log_summary`
     never echo message bytes (lengths only). The library
     never puts a token/cookie into a message itself.
+12. WS URL carries the literal `auth_token=<redacted>`
+    (fix loop 1, Boss decision 2026-11-05 — MIRROR GO
+    byte-for-byte, NOT a formal match): Go
+    `internal/gateway/connector.go:116` (`defaultWSURL`)
+    builds the URL with 3 format verbs and 4 args, so
+    the quoted hatch token is computed and silently
+    discarded by `Sprintf`; `TestDefaultWSURL` pins the
+    literal; and the Go 0.9.0 production binary on 3
+    hosts relays real turns through that URL — proven-live
+    behaviour. Sending the real token would leak it to
+    server/proxy logs with no evidence the gateway needs
+    it. The Rust `default_ws_url` returns the identical
+    string, and the dial test asserts the literal on the
+    string AND that no real token value reaches the wire.
+    Wire nuance: `http::Uri` (used by tokio-tungstenite's
+    `into_client_request`) cannot represent `<`/`>` in a
+    query, so `dial_gateway` percent-encodes the literal
+    to `%3Credacted%3E` before dialing; the server
+    decodes it back to `<redacted>`, so the query VALUE
+    is identical to Go's raw form. If later live proof
+    shows the gateway needs the real token, change
+    `default_ws_url` in this one place and re-enable the
+    token-URL test.
+13. `TooManyPieces` → exit 1, not 3 (fix loop 1):
+    Go `classifyError` (`commands.go:304-311,336`) gives
+    exit 3 only to `ReassemblySizeError` and
+    `TooManyUnfinishedGroupsError`; `TooManyPiecesError`
+    has no branch (and no `ExitCode` method) and falls
+    through to the default exit 1. Rust
+    `ReassemblyError::into_transport_error` splits the
+    mapping accordingly (Size / TooManyGroups →
+    `Gateway(-1)` exit 3; TooManyPieces →
+    `ConnectionError` exit 1).
+14. `live()` replacement accounting (fix loop 1): when
+    `live()` replaces a dead installed gateway it now
+    does `drops++` + `mark_down(dead, false)` + `Close()`
+    of the old gateway, mirroring Go `Live`
+    (`conn.go:500-520`); the PR1 version overwrote the
+    slot with none of the three. The stale test asserts
+    `drops() == 1` after reconnect.
 
 ## M4a.3 Findings while writing (fail-before proofs + fixes)
 
@@ -3126,8 +3171,10 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
   presence / oneof / enum-names tests).
 - Parity gate (same Go `gatewaytest` server, 5 methods):
   Go client vs Rust client outputs byte-identical
-  (`diff` empty; server `127.0.0.1:39345` on cue; both
-  clients exit 0).
+  (`diff` empty; the server binds `127.0.0.1:0`
+  (ephemeral) and prints the actual port per run — the
+  39345 / 45717 in earlier notes are two runs' ports;
+  both clients exit 0).
 - Required other tests (all pass in
   `tests/gateway.rs`): heartbeat sends at cadence
   (2..=5 pings in 1.1s at a 300ms injected interval);
@@ -3142,6 +3189,25 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
   `Gateway(404)` → exit 3; unknown method →
   `Validation` → exit 2; 200 kB chunked response with
   shuffled pieces reassembles.
+- Fix loop 1 (2026-11-05, same gates, all exit 0):
+  `cargo fmt --check`, `cargo build --workspace`,
+  `cargo test --workspace` (BEFORE 337, AFTER 346, +9,
+  all in `castctl-gateway`: lib 14 (+1
+  `noise_transport_debug_renders_shape_only`) +
+  integration 21 (+8: B1 token-URL, probe_stale both
+  branches, unsafe no-retry, 3xx, non-JSON, Reset, msg2,
+  request-timeout)), `cargo clippy --workspace
+  --all-targets -- -D warnings` (after fixes: named
+  `Callback` struct impl instead of a closure —
+  `result_large_err` on the 136-byte `ErrorResponse` —
+  and scoping the `request_targets` lock guard before
+  `gw.close().await` — `await_holding_lock`). Parity
+  gate re-run: same Go server, 5 methods, Go client vs
+  Rust client byte-identical (`diff` empty; server
+  `127.0.0.1:33727` ephemeral; both exit 0). The Rust
+  parity client dialed with the literal
+  `auth_token=<redacted>` URL (percent-encoded on the
+  wire by `dial_gateway`).
 
 ## M4a.5 Chưa kiểm chứng
 
@@ -3160,3 +3226,110 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
   fails) was not waited; covered by threshold injection.
 - Heartbeat at the production 25s cadence was not
   waited; covered by the 300ms injection.
+
+## M4a.6 Hạn chế đã ghi nhận (fix loop 1, 2026-11-05 — không sửa)
+
+One line each + reason. Fixed in this loop and NOT
+listed here: red-team N3 (unsafe no-retry test — added),
+N4 (3xx / non-JSON / Reset / msg2 / timeout tests —
+added), N8 (live() accounting — §M4a.2 deviation 14);
+technical N10 (lib.rs unwrap claim — narrowed) and N11
+(parity port + generation comment — fixed); safety N1–N4
+(no-leak strengthening, ws_error routing, hand-written
+Debug, lib.rs claim) and N6 (parity temp file —
+`os.CreateTemp`).
+
+- wss:// never exercised; ALPN "same wire outcome" is
+  inference, not measurement (red-team N1): only ws://
+  loopback tested; rustls+webpki-roots vs Go's uTLS
+  Chrome preset are different TLS stacks — a
+  fingerprint-filtering real peer could reject Rust.
+- Parity gate is narrow: 5 happy-path unary calls only
+  (red-team N2): no non-2xx, BodyChunk, Reset, chunked /
+  large, subscribe, auth chain, or routes beyond the 5;
+  the parity handler ignores `service`, so a Rust bug in
+  service selection is invisible to the gate.
+- Reset code is dropped from the error (red-team N5 =
+  technical N5): Go's reset summary carries `code` +
+  `reason_length`; Rust keeps only `body_length =
+  reason.len()` in `Gateway(-1)` — exit code same,
+  operator diagnostics differ.
+- WS-upgrade timeout → exit 4, Go → exit 1; no overall
+  connect bound (red-team N6 = technical N1):
+  `CONNECT_TIMEOUT` (60s) is a const only, nothing
+  enforces it; worst case one `dial_gateway` is ~80s
+  (20s upgrade + 3× 20s handshake steps) vs Go's 60s.
+- `Gateway::close()` doc overclaims; the reader task can
+  leak on a non-cooperative peer (red-team N7 =
+  technical N9): dropping the `JoinHandle` detaches
+  instead of aborting; closing the write half only sends
+  a WS Close frame and does not close the TCP transport,
+  so a peer ignoring Close frames leaves the reader
+  blocked forever. `close()` can also block
+  indefinitely acquiring the write-half lock (Go bounds
+  it at 2s).
+- Heartbeat has no panic restart and no generation guard
+  (red-team N9 = technical N2): a panicking tick leaves
+  `heartbeat_running == true` forever (later
+  `start_heartbeat` is a no-op); `stop_heartbeat` clears
+  the flag before the task exits, so a start in the
+  window can create a second loop.
+- `Deadline` (absolute) is dropped, undocumented
+  (red-team N10): Go's retry budget is
+  `min(RetryFor, opts.Deadline, ctx deadline)`; Rust has
+  no `Deadline` field and always retries for the full
+  policy budget.
+- Subscribe/stream not ported in M4a (red-team N11 =
+  technical N3): no `SharedConn::subscribe_raw`, no
+  public `Gateway::open_stream`, no `SubscribeJSON`;
+  only the constants exist.
+- GET body→query drops array/object values; Go renders
+  them with `%v` (red-team N12 = technical N6): a GET
+  body containing a nested value drops the query key in
+  Rust but sends `key=[1 2]` / `key=map[…]` in Go.
+- `read_bounded` rejects non-Binary WS messages; Go
+  accepts any message type as msg2 (red-team N13 =
+  technical N7): a Text frame carrying valid msg2 bytes
+  succeeds in Go, fails in Rust.
+- Golden presence test decodes back only 2 of 4 fields
+  (red-team N14): encode pins all four tags, decode-back
+  asserts only `chunk_id` / `payload`.
+- Heartbeat cadence integration range admits ~1.5× slop
+  (red-team N15): 2..=5 pings in 1.1s at 300ms (expect
+  ≈3); the formula itself is pinned exactly by the unit
+  test.
+- `sent_any` is write-only dead state (technical N4):
+  set before the first write (for the dropped
+  `ErrConnectionLost` classification, deviation 3) but
+  never read.
+- WS Ping/Pong relies on implicit tungstenite behaviour,
+  untested (technical N8): no test sends a WS Ping to
+  the Rust client; Go installs explicit ping/pong/close
+  handlers.
+- No concurrent-request test (technical N12):
+  `send_envelope` holds the write mutex per piece, not
+  per envelope (Go holds `sendMu` across the whole
+  envelope), so concurrent envelopes can interleave
+  pieces; the reassembler tolerates it by design, but
+  envelope atomicity is untested.
+- `new_chunk_id` has no error path (technical N13): Go
+  returns an error if the OS RNG fails; Rust uses
+  `rand::random()` with no fallible API.
+- No logging in the crate at all (technical N14): Go
+  `markDown` logs a Warn and the retry loop logs debugs;
+  the Rust crate has no logger — the CLI layer owns
+  observability.
+
+## Quy tắc quyết định (Boss, 2026-11-05 — standing)
+
+Applies to the whole Rust port, not just M4a. Decide
+everything and own it; if evidence is missing, decide
+by principle and record the reason:
+
+1. Live/production evidence → follow production.
+2. No evidence → match Go byte-for-byte (Go is the
+   ground truth of this project), unless matching Go
+   creates a clear security hole → choose the safer
+   option and record the deviation with evidence.
+3. Never lower gate criteria; never claim "match"
+   without output.

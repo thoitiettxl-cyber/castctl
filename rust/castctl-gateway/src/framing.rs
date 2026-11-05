@@ -57,10 +57,10 @@ pub const MAX_PIECES_PER_GROUP: usize = 32768;
 /// One reassembly cap failure. Mirrors the three Go types
 /// (`ReassemblySizeError`, `TooManyUnfinishedGroupsError`,
 /// `TooManyPiecesError` in `framing.go`); `classifyError`
-/// maps the first two to exit 3, and the third is a stream
-/// failure of the same class, so all three convert to
-/// `TransportError::Gateway` with status -1 (no body bytes,
-/// no payload content — only ids, sizes and limits).
+/// maps the first two to exit 3, while the third has no
+/// branch (and no `ExitCode` method on the Go type) and so
+/// falls through to the default exit 1. The split is kept in
+/// `into_transport_error` below.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReassemblyError {
     /// One message (or group) would exceed the size cap.
@@ -93,22 +93,39 @@ pub enum ReassemblyError {
 }
 
 impl ReassemblyError {
-    /// Convert to the transport error taxonomy. All three are
-    /// stream failures (exit 3, like Go's
+    /// Convert to the transport error taxonomy. Size and
+    /// TooManyGroups are stream failures (exit 3, like Go's
     /// `ReassemblySizeError` / `TooManyUnfinishedGroupsError`
-    /// branches in `classifyError`); the reader delivers them
-    /// to the open streams and keeps reading.
+    /// branches in `classifyError`); TooManyPieces has no
+    /// branch there and falls through to the default exit 1,
+    /// so it converts to a plain `ConnectionError` with a
+    /// fixed message (no payload content — only ids, sizes
+    /// and limits). The reader delivers them to the open
+    /// streams and keeps reading.
     pub fn into_transport_error(self) -> TransportError {
-        let body_length = match self {
-            ReassemblyError::Size { size, .. } => Some(size),
-            _ => None,
-        };
-        TransportError::Gateway(BodySummary {
-            status: -1,
-            body_length,
-            content_type: None,
-            error_code: None,
-        })
+        match self {
+            ReassemblyError::TooManyPieces {
+                chunk_id,
+                pieces,
+                limit,
+            } => TransportError::ConnectionError {
+                message: format!(
+                    "gateway: chunk group {chunk_id} held {pieces} distinct pieces (limit {limit})"
+                ),
+            },
+            ReassemblyError::Size { size, .. } => TransportError::Gateway(BodySummary {
+                status: -1,
+                body_length: Some(size),
+                content_type: None,
+                error_code: None,
+            }),
+            _ => TransportError::Gateway(BodySummary {
+                status: -1,
+                body_length: None,
+                content_type: None,
+                error_code: None,
+            }),
+        }
     }
 }
 
@@ -452,6 +469,11 @@ mod tests {
                 limit: 3
             }
         );
+        // Go `classifyError` has NO `TooManyPiecesError`
+        // branch (and the Go type has no `ExitCode` method),
+        // so it falls through to the default exit 1 — unlike
+        // Size / TooManyGroups, which map to exit 3.
+        assert_eq!(err.into_transport_error().exit_code(), 1);
     }
 
     #[test]

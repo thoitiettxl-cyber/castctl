@@ -422,7 +422,7 @@ impl SharedConn {
         // runtime, which requires `Send`).
         enum SlotDecision {
             Use(Arc<Gateway>),
-            New,
+            New(Option<Arc<Gateway>>),
             Poisoned,
         }
         let decision = match self.gateway.lock() {
@@ -433,8 +433,8 @@ impl SharedConn {
                     SlotDecision::Use(Arc::clone(existing))
                 }
                 _ => {
-                    *slot = Some(Arc::clone(&gw));
-                    SlotDecision::New
+                    let replaced = slot.replace(Arc::clone(&gw));
+                    SlotDecision::New(replaced)
                 }
             },
             Err(_) => SlotDecision::Poisoned,
@@ -444,8 +444,23 @@ impl SharedConn {
                 let _ = gw.close().await;
                 existing
             }
-            SlotDecision::New => {
+            SlotDecision::New(replaced) => {
                 self.connects.fetch_add(1, Ordering::SeqCst);
+                if let Some(old) = replaced {
+                    // Go `Live` (`conn.go:500-520`): replacing
+                    // a dead installed gateway counts the drop,
+                    // records the outage (not a failed connect),
+                    // and closes the old gateway after the new
+                    // one is installed (`dead` falls back to
+                    // "gateway connection closed" when the old
+                    // gateway died without a recorded error).
+                    self.drops.fetch_add(1, Ordering::SeqCst);
+                    let dead = old.dead().unwrap_or(TransportError::ConnectionError {
+                        message: "gateway connection closed".to_string(),
+                    });
+                    self.mark_down(&dead, false);
+                    old.close().await;
+                }
                 gw
             }
             SlotDecision::Poisoned => {
@@ -491,19 +506,18 @@ impl SharedConn {
         }
     }
 
-    /// Stale probe (Go `conn.go:445-475` `probeStale`): a
-    /// gateway used or heard-from within `HEARTBEAT` is alive
-    /// without a probe (a zero timestamp counts as age 0,
-    /// "just now" — here the timestamps are always set at
-    /// construction, so the quiet case is the live one). If
-    /// both are quiet for longer, a ping with
-    /// `STALE_PING_TIMEOUT` settles it. The probe never drops
-    /// the gateway itself; the caller does.
+    /// Stale probe (Go `conn.go:445-452` `probeStale`): a
+    /// gateway used OR heard-from within `heartbeat_interval`
+    /// is alive without a probe (two early returns in Go —
+    /// either axis fresh short-circuits). Only when both are
+    /// quiet for longer does a ping with `STALE_PING_TIMEOUT`
+    /// settle it. The probe never drops the gateway itself;
+    /// the caller does.
     pub async fn probe_stale(&self, gw: &Arc<Gateway>) -> bool {
         let now = Instant::now();
         let recv_age = now.duration_since(gw.last_recv());
         let used_age = now.duration_since(gw.last_used());
-        if recv_age <= HEARTBEAT && used_age <= HEARTBEAT {
+        if recv_age <= self.heartbeat_interval || used_age <= self.heartbeat_interval {
             return true;
         }
         gw.ping(STALE_PING_TIMEOUT).await.is_ok()

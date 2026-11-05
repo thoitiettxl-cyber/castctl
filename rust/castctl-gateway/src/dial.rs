@@ -13,10 +13,11 @@
 //! Flow: build the WS URL → dial the WebSocket (20s upgrade
 //! bound) → run the Noise XX handshake as initiator (20s per
 //! step) → return a live `Gateway`. On any failure the socket
-//! is closed and the error returned. No hatch token is retained
-//! after the handshake: the URL string (which carries
-//! `auth_token`) is a local of this function only, is never
-//! stored on the `Gateway`, and is never logged.
+//! is closed and the error returned. The WS URL carries the
+//! literal `auth_token=<redacted>` (Boss decision 2026-11-05:
+//! mirror Go `defaultWSURL`, `connector.go:116` — the real
+//! hatch token is never put in the URL, never stored on the
+//! `Gateway`, and never logged; see `default_ws_url`).
 //!
 //! Gateway-dial TLS rule (M3c NB6, `internal/outbound/
 //! dialer.go:161-168` `DialTLS`): whenever TLS is requested
@@ -72,18 +73,24 @@ pub const GATEWAY_HOST: &str = "hatch.metaaivm.com";
 /// `WSUpgradeTimeout`).
 pub const WS_UPGRADE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Build `ws(s)://<host>/v1/noise?vm_id=..&auth_token=..`
-/// with the token URL-quoted (`safe=""`), as in Go
-/// `defaultWSURL` (`connector.go:137-146`). The returned
-/// string carries the hatch token: callers must never log it
-/// (this function is the only place that builds it, and
-/// `dial_gateway` drops it before returning).
-pub fn default_ws_url(secure: bool, host: &str, vm_id: &str, hatch_token: &str) -> String {
+/// Build `ws(s)://<host>/v1/noise?vm_id=..&auth_token=<redacted>`,
+/// mirroring Go `defaultWSURL` (`connector.go:116`) byte for
+/// byte: the format string has 3 verbs and 4 args, so the
+/// quoted hatch token is computed and silently discarded by
+/// `Sprintf` — Go sends the literal, and so does this
+/// function (Boss decision 2026-11-05: Go 0.9.0 production
+/// relays real turns through that URL; sending the real token
+/// would leak it to server/proxy logs with no evidence the
+/// gateway needs it). `hatch_token` is accepted for call-site
+/// compatibility and deliberately NOT sent: if later live
+/// proof shows the gateway needs the real token, change this
+/// one place and re-enable the token-URL test. The returned
+/// string carries no secret.
+pub fn default_ws_url(secure: bool, host: &str, vm_id: &str, _hatch_token: &str) -> String {
     let scheme = if secure { "wss" } else { "ws" };
     format!(
-        "{scheme}://{host}/v1/noise?vm_id={}&auth_token={}",
+        "{scheme}://{host}/v1/noise?vm_id={}&auth_token=<redacted>",
         quote_path_param(vm_id),
-        quote_path_param(hatch_token),
     )
 }
 
@@ -93,8 +100,10 @@ pub fn default_ws_url(secure: bool, host: &str, vm_id: &str, hatch_token: &str) 
 /// `newHandshakeFailureError`); other failures are
 /// `ConnectionError` with the error class only. The raw error
 /// text (which may embed a peer status line) never reaches an
-/// output path.
-fn ws_error(err: tokio_tungstenite::tungstenite::Error) -> TransportError {
+/// output path. Shared with `gateway.rs`: the read loop and
+/// `write_ws` route mid-connection WS errors through here too
+/// (same class, no peer text).
+pub(crate) fn ws_error(err: tokio_tungstenite::tungstenite::Error) -> TransportError {
     use tokio_tungstenite::tungstenite::Error as WsError;
     match &err {
         WsError::Http(resp) => {
@@ -189,17 +198,27 @@ where
 }
 
 /// Dial one gateway: WS upgrade + Noise handshake, returning
-/// a live `Gateway` (Go `dialGateway`). `url` carries the
-/// auth token and is never stored or logged; `routes` is the
-/// route table the gateway uses for `resolveRoute`.
+/// a live `Gateway` (Go `dialGateway`). `url` is never stored
+/// or logged (with `default_ws_url` it carries the literal
+/// `auth_token=<redacted>`, never a real token); `routes` is
+/// the route table the gateway uses for `resolveRoute`.
 /// `secure` selects `wss` vs `ws` only through the URL
 /// scheme — a `wss://` URL always uses TLS (gateway-dial TLS
 /// rule, see the module docs).
+/// Wire note: `http::Uri` (used by `into_client_request`)
+/// cannot represent `<`/`>` in a query, so the `<redacted>`
+/// literal Go sends raw is percent-encoded here
+/// (`%3Credacted%3E`) before dialing — the server decodes
+/// it back to `<redacted>`, so the query VALUE is identical
+/// to Go's; only the literal is ever encoded (a `vm_id` is
+/// already quoted by `default_ws_url`, and no real token is
+/// ever in the URL).
 pub async fn dial_gateway(
     url: &str,
     routes: Arc<RouteTable>,
 ) -> Result<Arc<Gateway>, TransportError> {
-    let mut request = url.into_client_request().map_err(ws_error)?;
+    let encoded = url.replace("<redacted>", "%3Credacted%3E");
+    let mut request = encoded.as_str().into_client_request().map_err(ws_error)?;
     request.headers_mut().insert(
         "User-Agent",
         GATEWAY_USER_AGENT

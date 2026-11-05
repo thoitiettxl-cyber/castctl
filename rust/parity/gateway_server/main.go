@@ -36,7 +36,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -116,8 +115,21 @@ func runServe() error {
 func runClient(addr string, methods []string) error {
 	auth := &gatewaytest.CannedAuth{VMID: "vm-test", AccessToken: "AT-FAKE", HatchToken: "HT-FAKE"}
 	dialer := &plainDialer{auth: auth}
-	cookiesFile := filepath.Join(os.TempDir(), "parity-cookies.txt")
-	if err := os.WriteFile(cookiesFile, []byte(fakeCookie), 0o600); err != nil {
+	// Unique temp file (0600), not a fixed name: two parity
+	// runs must never share — or clobber — each other's
+	// cookie file.
+	cookiesTmp, err := os.CreateTemp("", "parity-cookies-*.txt")
+	if err != nil {
+		return err
+	}
+	cookiesFile := cookiesTmp.Name()
+	if _, err := cookiesTmp.Write([]byte(fakeCookie)); err != nil {
+		cookiesTmp.Close()
+		os.Remove(cookiesFile)
+		return err
+	}
+	if err := cookiesTmp.Close(); err != nil {
+		os.Remove(cookiesFile)
 		return err
 	}
 	defer os.Remove(cookiesFile)

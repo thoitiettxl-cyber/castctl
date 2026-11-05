@@ -66,6 +66,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+use crate::dial::ws_error;
 use crate::framing::{Reassembler, marshal_transport_frame, new_chunk_id, split_pieces};
 use crate::noise::NoiseTransport;
 use crate::proto::{
@@ -96,7 +97,7 @@ pub const DEFAULT_PING_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One queued item for a stream: a frame, or a fatal error
 /// delivered to a blocked caller (Go `stream.go` `queuedItem`).
-#[derive(Debug)]
+/// No `Debug`: the frame may carry response bytes.
 enum StreamItem {
     Frame(ServiceFrame),
     Err(TransportError),
@@ -109,7 +110,7 @@ enum StreamItem {
 /// unless they came in as `json.Number`); `serde_json::Value`
 /// with the workspace `arbitrary_precision` feature keeps
 /// numbers as literals.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub enum Body {
     /// No body.
     #[default]
@@ -122,6 +123,19 @@ pub enum Body {
     /// without `preserve_order` is a `BTreeMap`, as in Go's
     /// `json.Marshal` on a `map[string]any`).
     Json(JsonValue),
+}
+
+// Hand-written Debug: a body may carry request payload bytes,
+// so Debug prints kind/length only, never the bytes.
+impl std::fmt::Debug for Body {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Body::None => write!(f, "None"),
+            Body::Bytes(b) => write!(f, "Bytes(len={})", b.len()),
+            Body::Text(s) => write!(f, "Text(len={})", s.len()),
+            Body::Json(_) => write!(f, "Json"),
+        }
+    }
 }
 
 impl Body {
@@ -147,7 +161,7 @@ impl Body {
 /// Options for one unary call (Go `internal/conn/gateway.go`
 /// `RequestOptions`, minus `Deadline` — the absolute deadline
 /// belongs to `SharedConn::retry_call`, not to the gateway).
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct RequestOptions {
     /// `{k}` path parameters.
     pub path_params: Vec<(String, String)>,
@@ -161,6 +175,23 @@ pub struct RequestOptions {
     pub timeout: Duration,
     /// Explicit route override (wins over the table lookup).
     pub route: Option<Route>,
+}
+
+// Hand-written Debug: counts/flags only — path params, query
+// values and the body may carry caller data, so none of them
+// is printed (the body prints kind/length only, via its own
+// Debug; the route prints presence only, its path template
+// never appears).
+impl std::fmt::Debug for RequestOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestOptions")
+            .field("path_params", &self.path_params.len())
+            .field("body", &self.body)
+            .field("query", &self.query.len())
+            .field("timeout", &self.timeout)
+            .field("route", &self.route.is_some())
+            .finish()
+    }
 }
 
 /// Render one scalar the way Python's `str()` does, for GET
@@ -215,11 +246,12 @@ type WsWriteHalf =
 
 /// Generation counter for gateways (Go `gateway.go`
 /// `gatewayGenerations`): bumped per gateway so a stale stream
-/// queue item can never leak into a new connection. This
-/// implementation tracks the generation per gateway (a reader
-/// that belongs to a closed gateway simply stops delivering);
-/// cross-gateway generation fencing lives in `SharedConn`,
-/// which drops the old gateway before installing a new one.
+/// queue item can never leak into a new connection. Fencing is
+/// structural, not checked: each gateway owns its own stream
+/// queues, and a reader that belongs to a closed gateway
+/// simply stops delivering; `SharedConn` never bumps or
+/// compares generations — on replacement it drops and closes
+/// the old gateway (see `SharedConn::live`).
 static GATEWAY_GENERATIONS: AtomicU64 = AtomicU64::new(0);
 
 /// One authenticated, multiplexed gateway connection.
@@ -410,9 +442,7 @@ impl Gateway {
                     if self.closed.load(Ordering::SeqCst) {
                         return;
                     }
-                    self.fail(TransportError::ConnectionError {
-                        message: format!("gateway receive failed: {e}"),
-                    });
+                    self.fail(ws_error(e));
                     return;
                 }
                 None => {
@@ -490,9 +520,7 @@ impl Gateway {
         let fut = half.send(WsMessage::Binary(data.to_vec().into()));
         match tokio::time::timeout(WRITE_DEADLINE, fut).await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(TransportError::ConnectionError {
-                message: format!("gateway send failed: {e}"),
-            }),
+            Ok(Err(e)) => Err(ws_error(e)),
             Err(_) => Err(TransportError::ConnectionError {
                 message: "gateway send timed out".to_string(),
             }),
@@ -1004,9 +1032,8 @@ impl Gateway {
 }
 
 // Hand-written Debug: a gateway holds Noise key material (via
-// the transport) and, at dial time, the URL carried the auth
-// token — the URL itself is never stored (see `dial.rs`), but
-// Debug still prints only shape, never any peer text.
+// the transport); the dial URL is never stored (see `dial.rs`),
+// but Debug still prints only shape, never any peer text.
 impl std::fmt::Debug for Gateway {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let streams = self.streams.lock().map(|s| s.len()).unwrap_or(0);

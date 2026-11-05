@@ -20,7 +20,7 @@ use std::time::Duration;
 use castctl_gateway::framing::{Reassembler, marshal_transport_frame, new_chunk_id, split_pieces};
 use castctl_gateway::noise::ResponderHandshake;
 use castctl_gateway::proto::{
-    ApplicationRequest, ApplicationResponse, Header, NoiseTransportFrame, ServiceFrame,
+    ApplicationRequest, ApplicationResponse, Header, NoiseTransportFrame, Reset, ServiceFrame,
     ServiceFrameKind, ServiceRequest, ServiceResponse,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -28,6 +28,9 @@ use prost::Message;
 use tokio::net::TcpListener;
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::tungstenite::handshake::server::{
+    Callback, ErrorResponse, Request, Response,
+};
 
 /// What the fake server answers for one request.
 #[derive(Debug, Clone)]
@@ -40,6 +43,15 @@ pub struct Reply {
     /// Send the NoiseTransportFrame pieces in reverse order
     /// (reassembly must not depend on arrival order).
     pub shuffle_pieces: bool,
+    /// Never answer this request at all (the client's call
+    /// times out; the connection stays up).
+    pub never_reply: bool,
+    /// Close the connection without answering (the client's
+    /// in-flight call fails with `ConnectionError`).
+    pub close_without_reply: bool,
+    /// Answer with a stream `Reset` instead of a `Response`
+    /// (code, reason).
+    pub reset: Option<(i32, String)>,
 }
 
 impl Reply {
@@ -50,6 +62,9 @@ impl Reply {
             end_body: true,
             close_after: false,
             shuffle_pieces: false,
+            never_reply: false,
+            close_without_reply: false,
+            reset: None,
         }
     }
 }
@@ -89,6 +104,10 @@ pub struct FakeServer {
     pub requests: Arc<Mutex<Vec<RequestRecord>>>,
     /// Headers of every request, in arrival order.
     pub headers_seen: Arc<Mutex<Vec<HeaderRecord>>>,
+    /// Raw WS upgrade request-targets (`/v1/noise?...`), in
+    /// connection order — lets tests assert on the URL the
+    /// client actually dialed.
+    pub request_targets: Arc<Mutex<Vec<String>>>,
     accept_task: JoinHandle<()>,
     conn_tasks: Arc<Mutex<Vec<AbortHandle>>>,
     listener: Arc<Mutex<Option<TcpListener>>>,
@@ -102,11 +121,13 @@ impl FakeServer {
         let ping_count = Arc::new(AtomicU64::new(0));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let headers_seen = Arc::new(Mutex::new(Vec::new()));
+        let request_targets = Arc::new(Mutex::new(Vec::new()));
         let conn_tasks: Arc<Mutex<Vec<AbortHandle>>> = Arc::new(Mutex::new(Vec::new()));
         let listener2 = Arc::clone(&listener);
         let ping2 = Arc::clone(&ping_count);
         let req2 = Arc::clone(&requests);
         let hdr2 = Arc::clone(&headers_seen);
+        let targets2 = Arc::clone(&request_targets);
         let conns2 = Arc::clone(&conn_tasks);
         let accept_task = tokio::spawn(async move {
             let listener = listener2.lock().unwrap().take().unwrap();
@@ -118,8 +139,9 @@ impl FakeServer {
                 let ping = Arc::clone(&ping2);
                 let req = Arc::clone(&req2);
                 let hdr = Arc::clone(&hdr2);
+                let targets = Arc::clone(&targets2);
                 let task = tokio::spawn(async move {
-                    serve_conn(stream, h, ping, req, hdr).await;
+                    serve_conn(stream, h, ping, req, hdr, targets).await;
                 });
                 conns2.lock().unwrap().push(task.abort_handle());
             }
@@ -132,6 +154,7 @@ impl FakeServer {
             accept_task,
             conn_tasks,
             listener,
+            request_targets,
         }
     }
 
@@ -158,14 +181,33 @@ impl FakeServer {
     }
 }
 
+/// Records the raw WS upgrade request-target, then accepts
+/// unchanged. A named `Callback` impl (not a closure): the
+/// `ErrorResponse` in its return type is 136 bytes, and
+/// clippy's `result_large_err` fires on a closure returning
+/// it, while a trait-method implementation keeps the
+/// signature the trait dictates.
+struct RecordTarget {
+    targets: Arc<Mutex<Vec<String>>>,
+}
+
+impl Callback for RecordTarget {
+    fn on_request(self, req: &Request, resp: Response) -> Result<Response, ErrorResponse> {
+        self.targets.lock().unwrap().push(req.uri().to_string());
+        Ok(resp)
+    }
+}
+
 async fn serve_conn(
     stream: tokio::net::TcpStream,
     handler: HandlerFn,
     ping_count: Arc<AtomicU64>,
     requests: Arc<Mutex<Vec<RequestRecord>>>,
     headers_seen: Arc<Mutex<Vec<HeaderRecord>>>,
+    request_targets: Arc<Mutex<Vec<String>>>,
 ) {
-    let ws = match tokio_tungstenite::accept_async(stream).await {
+    let targets = Arc::clone(&request_targets);
+    let ws = match tokio_tungstenite::accept_hdr_async(stream, RecordTarget { targets }).await {
         Ok(ws) => ws,
         Err(_) => return,
     };
@@ -249,6 +291,12 @@ async fn serve_conn(
                 .collect(),
         );
         let reply = handler(&app_req);
+        if reply.never_reply {
+            continue;
+        }
+        if reply.close_without_reply {
+            return;
+        }
         let app_resp = ApplicationResponse {
             status: reply.status,
             headers: vec![Header {
@@ -258,9 +306,15 @@ async fn serve_conn(
             body: reply.body,
             end_body: reply.end_body,
         };
-        let out_sf = ServiceFrame {
-            stream_id: sf.stream_id,
-            kind: Some(ServiceFrameKind::Response(app_resp)),
+        let out_sf = match reply.reset {
+            Some((code, reason)) => ServiceFrame {
+                stream_id: sf.stream_id,
+                kind: Some(ServiceFrameKind::Reset(Reset { code, reason })),
+            },
+            None => ServiceFrame {
+                stream_id: sf.stream_id,
+                kind: Some(ServiceFrameKind::Response(app_resp)),
+            },
         };
         // Server -> client envelope: ServiceResponse,
         // NOT ServiceRequest (see the note above).
@@ -290,6 +344,49 @@ async fn serve_conn(
         if reply.close_after {
             return;
         }
+    }
+}
+
+/// A server that answers the Noise handshake with garbage:
+/// it completes the WS upgrade, reads msg1, then sends the
+/// given bytes as msg2 and closes. Used to prove a
+/// truncated/empty/oversized msg2 is a `ConnectionError`,
+/// never a hang or a panic.
+pub struct BadMsg2Server {
+    pub addr: SocketAddr,
+    accept_task: JoinHandle<()>,
+}
+
+impl BadMsg2Server {
+    pub async fn start(payload: Vec<u8>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept_task = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let payload = payload.clone();
+                tokio::spawn(async move {
+                    let mut ws = match tokio_tungstenite::accept_async(stream).await {
+                        Ok(ws) => ws,
+                        Err(_) => return,
+                    };
+                    let _ = ws.next().await;
+                    let _ = ws.send(WsMessage::Binary(payload.into())).await;
+                    let _ = ws.close(None).await;
+                });
+            }
+        });
+        BadMsg2Server { addr, accept_task }
+    }
+
+    pub fn ws_url(&self) -> String {
+        format!("ws://{}/v1/noise", self.addr)
+    }
+
+    pub fn stop(self) {
+        self.accept_task.abort();
     }
 }
 

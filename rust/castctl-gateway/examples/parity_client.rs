@@ -14,8 +14,11 @@
 //!     "ws://127.0.0.1:PORT/v1/noise?vm_id=vm-test&auth_token=HT-FAKE" \
 //!     connection.ping sessions.list chat.history feed.list goals.list
 //!
-//! The token in the URL is fake (HT-FAKE); it is never stored
-//! or logged — `dial_gateway` parses it out and drops it.
+//! The URL carries the literal `auth_token=<redacted>`
+//! (mirroring Go `defaultWSURL`); no real token is ever in
+//! it. `dial_gateway` percent-encodes the `<`/`>` for the
+//! HTTP stack before dialing — the server decodes them back
+//! to `<redacted>` — and the URL is never stored or logged.
 
 use castctl_gateway::dial::dial_gateway;
 use castctl_gateway::gateway::RequestOptions;

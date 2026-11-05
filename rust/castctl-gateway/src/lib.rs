@@ -17,7 +17,9 @@
 //!
 //! Invariants (each has a test; see PORTING.md §M4a):
 //! - No `unsafe` in this crate's code; no `unwrap()`/`expect()` on
-//!   external input in non-test code.
+//!   external input in runtime code (`build.rs` unwraps only the
+//!   committed descriptor files `desc0.bin`/`desc1.bin` — a bad
+//!   file fails the build, it never reaches runtime).
 //! - Errors are `castctl_transport::TransportError` (same taxonomy
 //!   and exit codes as Go `classifyError`); a gateway 3xx is
 //!   `Gateway(status)` → exit 3, never `RedirectRefused`.

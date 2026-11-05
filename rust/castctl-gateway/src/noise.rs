@@ -303,4 +303,23 @@ mod tests {
         let dbg = format!("{hs:?}");
         assert_eq!(dbg, "InitiatorHandshake");
     }
+
+    #[test]
+    fn noise_transport_debug_renders_shape_only() {
+        // Full in-process handshake with the crate's own
+        // handshake types; the resulting transport's Debug
+        // must be exactly the shape, with no key material.
+        let mut init = InitiatorHandshake::new().unwrap();
+        let mut resp = ResponderHandshake::new().unwrap();
+        let msg1 = init.msg1().unwrap();
+        resp.read_msg1(&msg1).unwrap();
+        let msg2 = resp.msg2().unwrap();
+        init.read_msg2(&msg2).unwrap();
+        let msg3 = init.msg3().unwrap();
+        resp.read_msg3(&msg3).unwrap();
+        let transport = init.into_transport().unwrap();
+        assert_eq!(format!("{transport:?}"), "NoiseTransport");
+        let transport2 = resp.into_transport().unwrap();
+        assert_eq!(format!("{transport2:?}"), "NoiseTransport");
+    }
 }
