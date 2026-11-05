@@ -8,10 +8,12 @@
 //! (`DialContext`, `Resolve`, `DialTLS`, `HTTPClient`) and
 //! `internal/outbound/manager.go:585-597` (`Manager.Dialer`).
 //!
-//! The trait is the seam M3d will implement for WireGuard: a
-//! `WgDialer` will dial TCP through a boringtun+smoltcp tunnel and
-//! return the same stream type. M3 does NOT implement WireGuard
-//! (see `config::dispatch_outbound`, which fails closed for it).
+//! The trait is the seam M3d implements for WireGuard:
+//! `wireguard::WireGuardDialer` dials TCP through a
+//! boringtun+smoltcp tunnel and returns the same stream type.
+//! M3 does NOT implement WireGuard in the outbound path
+//! (see `config::dispatch_outbound`, which fails closed for it);
+//! the endpoint path is `config::dispatch_endpoint`.
 //!
 //! Stream type: honk's `Box<dyn AsyncReadWrite>` (plain TCP or
 //! TLS/protocol-wrapped). A `TcpStream` satisfies the blanket
@@ -69,7 +71,7 @@ impl DialTarget {
 }
 
 /// The dialer trait. Object-safe (boxed future) so `RpcClient` can
-/// hold `Arc<dyn Dialer>` and M3d can add a `WgDialer` without
+/// hold `Arc<dyn Dialer>` and M3d adds a `WireGuardDialer` without
 /// changing the RPC layer.
 ///
 /// Contract, mirroring Go's dialer rules:

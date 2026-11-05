@@ -175,6 +175,20 @@ docs/provenance.md.
 - github.com/bufbuild/protocompile v0.14.1 — Apache License 2.0.
   Build-time only, in the nested internal/proto/generate module;
   not linked into the castctl binary.
+- boringtun (Rust) v0.7.1 — BSD-3-Clause, from
+  github.com/cloudflare/boringtun, pinned `=0.7.1` in
+  rust/Cargo.toml. Linked ONLY into the Rust artifact (crate
+  castctl-transport under rust/); no boringtun source is copied
+  into this tree. The `device` (TUN device) feature is NOT
+  enabled. See docs/provenance.md §14.
+- smoltcp (Rust) v0.14.0 — 0BSD, from
+  github.com/smoltcp-rs/smoltcp, pinned `=0.14.0` in
+  rust/Cargo.toml. Linked ONLY into the Rust artifact (crate
+  castctl-transport under rust/); no smoltcp source is copied
+  into this tree. See docs/provenance.md §14.
+- base64 (Rust) v0.22.1 — MIT OR Apache-2.0. Linked ONLY into
+  the Rust artifact; strict Std-base64 decoding of WireGuard
+  key strings. See docs/provenance.md §14.
 
 (c) Studied only — no code taken
 
