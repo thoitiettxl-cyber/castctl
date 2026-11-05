@@ -292,14 +292,18 @@ fn build_fake_binary(dir: &Path, version: &str, mode: &str) -> PathBuf {
     let out_path = dir.join(format!("fake-{version}-{mode}"));
     std::fs::write(&src_path, fake_binary_source(version, mode)).unwrap();
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
-    let status = std::process::Command::new(rustc)
+    let output = std::process::Command::new(&rustc)
         .arg("-O")
         .arg("-o")
         .arg(&out_path)
         .arg(&src_path)
-        .status()
+        .output()
         .unwrap();
-    assert!(status.success(), "rustc failed for {version}/{mode}");
+    assert!(
+        output.status.success(),
+        "rustc {rustc} failed for {version}/{mode}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
