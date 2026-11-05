@@ -263,8 +263,13 @@ mod tests {
         h[136..148].copy_from_slice(b"00000000000\0");
         h[156] = entry_type;
         if !extra.is_empty() {
-            // ustar magic for PAX-capable readers
+            // ustar magic + version "00": the `tar` crate
+            // only treats a header as an extension header
+            // (PAX `x` / GNU longname) when BOTH match
+            // (`is_ustar` checks magic AND version). A
+            // magic-only header is yielded as a plain entry.
             h[257..263].copy_from_slice(b"ustar\0");
+            h[263..265].copy_from_slice(b"00");
         }
         // checksum: sum with the checksum field as spaces
         h[148..156].copy_from_slice(b"        ");
