@@ -3077,26 +3077,36 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
     it. The Rust `default_ws_url` returns the identical
     string, and the dial test asserts the literal on the
     string AND that no real token value reaches the wire.
-    Wire nuance: `http::Uri` (used by tokio-tungstenite's
-    `into_client_request`) cannot represent `<`/`>` in a
-    query, so `dial_gateway` percent-encodes the literal
-    to `%3Credacted%3E` before dialing; the server
-    decodes it back to `<redacted>`, so the query VALUE
-    is identical to Go's raw form. (Mechanism proven by
-    source, fix loop 2: `http` 1.x
+    Wire nuance — [SUPERSEDED in M4b, fix loop 1 (R-B1):
+    this paragraph as originally written claimed the
+    server decodes the encoded form back; that claim was
+    WRONG. The live edge returns 401 for the encoded form
+    and 502 for the literal (live probe on cue,
+    2026-11-05); the M4a test only proved the fake server
+    tolerates the encoded form. `dial_gateway` no longer
+    percent-encodes: the hand-written `ws_upgrade`
+    (`castctl-gateway/src/dial.rs`) sends the literal
+    verbatim, and the rewritten dial test asserts the
+    query value `== "<redacted>"` with no decode step.
+    See §M4b.2 deviation 1 and §M4b.3. A reader
+    implementing from the struck sentences would
+    reintroduce the 401.] What stays true: `http::Uri`
+    (used by tokio-tungstenite's `into_client_request`)
+    cannot represent `<`/`>` in a query. (Mechanism
+    proven by source, fix loop 2: `http` 1.x
     `src/uri/path.rs:444-462` `build_query_map` — WHATWG
     query-state allows 0x21 / 0x24–0x3B / 0x3D /
     0x3F–0x7E, so `<` = 0x3C and `>` = 0x3E are
     CLASS_INVALID — verified against the 1.5.0 source;
     the lock pins 1.3.1, and the behavioural separator
-    (raw-literal dial fails, encoded dials fine)
-    corroborates the mechanism against the locked build
-    — and tungstenite's
+    against the fake server (raw-literal dial fails with
+    URI-PARSE-ERR, encoded dials fine) corroborates the
+    mechanism against the locked build — and tungstenite's
     `IntoClientRequest for &str` is `parse::<Uri>()`.)
-    The dial test also asserts the decoded query value
-    equals `<redacted>` (fix loop 2, NB5 — decoded with
-    a two-sequence replace in the test; no URL parser is
-    a dependency of this crate). If later live proof
+    The dial test asserts the query value equals
+    `<redacted>` with no decode step (rewritten in M4b;
+    the fix-loop-2 NB5 two-sequence decode dance is
+    gone). If later live proof
     shows the gateway needs the real token, change
     `default_ws_url` in this one place and re-enable the
     token-URL test.
@@ -3381,6 +3391,744 @@ fixed.)
   `markDown` logs a Warn and the retry loop logs debugs;
   the Rust crate has no logger — the CLI layer owns
   observability.
+
+## M4b — CLI auth + read-only commands (2026-11-05)
+
+M4b ports the gateway auth chain (`internal/gateway/cookies.go`,
+`auth.go`, `subscription.go`, `connector.go`, `summary.go`), the
+profile credentials API (`internal/profile/credentials.go`), and
+the 13 read-only commands from `internal/commands/read.go` plus
+the CLI runtime / error taxonomy (`commands.go` `classifyError`,
+`runtime.go`), into `rust/castctl-gateway` (new modules) and
+`rust/castctl-cli` (new `network.rs` / `runtime.rs`). Base is
+`dev-rust` after PR1 merged (96ce485); branch
+`feat/rust-m4b-cli-auth`. No Go file is modified. No new crate
+enters the lock: chrono 0.4.45, rustls 0.23.46, tokio-rustls
+0.26.6, webpki-roots 0.26.11 and base64 0.22.1 were already in
+it (promoted to direct deps only), so `NOTICE` /
+`docs/provenance.md` are untouched.
+
+## M4b.1 Crate map
+
+- `castctl-shared`: `timefmt.rs` (chrono `Local` + a
+  hand-rolled TZif abbreviation reader), `status.rs`,
+  `sessions.rs`, `event.rs`, `feed.rs`, `usage.rs`,
+  `bridge.rs` (`from_serde`: gateway `serde_json::Value` →
+  shared `JsonValue`).
+- `castctl-config`: `credential_for_profile` (value read,
+  first profile match wins) + `has_credential_for_profile`
+  (presence-only) + `LoginCredential` (hand-written `Debug`
+  that never prints values).
+- `castctl-transport`: `tls.rs` (`tls_client_config`, ALPN
+  `["http/1.1"]`), `http.rs` `request_tls` (dial → rustls
+  wrap with SNI → hyper http1).
+- `castctl-gateway`: `summary.rs` (allowlist summary),
+  `cookies.rs` (3 forms), `auth.rs` (hatch chain),
+  `subscription.rs` (`FetchSubscription`, `callAction`,
+  `ParseRSCResult`, `FindActionID`), `connector.rs`
+  (`GatewayConnector`), `dial.rs` (hand-written WS upgrade
+  — see deviation 1).
+- `castctl-cli`: `runtime.rs` (`build_runtime`,
+  `ProfileConnector` adapter, `Runtime::cookies()`),
+  `network.rs` (`classify_error`, the 13 handlers,
+  `indent_json`).
+
+## M4b.2 Deviations from Go (deliberate, with citations)
+
+1. WS upgrade written by hand; literal token. Go
+   `defaultWSURL` (`connector.go:116`) sends the literal
+   `auth_token=<redacted>`; `http::Uri` rejects `<`/`>` in
+   the query, so the upgrade request is written as raw
+   HTTP/1.1 bytes (`dial.rs` `ws_upgrade`) and the response
+   is validated (101 + `Sec-WebSocket-Accept` via
+   tungstenite's `derive_accept_key`) before wrapping the
+   stream with `from_partially_read`. Live probe on cue
+   (2026-11-05): the edge returns 401 for the
+   percent-encoded `%3Credacted%3E` form and 502 (past the
+   token check) for the literal — the M4a claim that "the
+   server decodes it back" was wrong (the M4a test only
+   proved the fake server tolerates the encoded form).
+   The direct dial now also pins ALPN `["http/1.1"]` via
+   `tls_client_config` (M4b fix of the M4a no-ALPN
+   deviation).
+2. Q8 (decided by the parent per the decision principles):
+   `Unsupported` → exit 2 ONLY for config parse/dispatch
+   errors; runtime errors map to exit 1. Evidence: Go
+   `defaultBuildRuntime` maps setup errors to `errCode(2)`
+   (LoadSingleConfig, ResolveLogSettings, NewManager,
+   ResolveProfileDNS, dns.New, dnsClient.Start, mgr.Dialer)
+   except `mgr.Start` → 3, while runtime errors go through
+   `classifyError`.
+3. HTTPS via hyper http1 only: Go negotiates h2, Rust
+   cannot speak h2 — same request/response over HTTP/1.1.
+4. TLS via rustls, not Go's uTLS Chrome fingerprint: the
+   ClientHello differs from Go's. Live evidence (§M4b.5):
+   the gateway + HTTPS paths pass against the live edge.
+5. `BodySummary` has no Payload text field: the
+   VM-unavailable case is carried as `error_code:
+   Some("vm_unavailable")`. Go's `GatewayError.Error()`
+   (`internal/conn/errors.go`) never prints Payload — the
+   payload matters only for `classifyConnError`'s substring
+   check, which the marker replaces.
+6. `SessionInfo` / `ParseRSCResult` numbers are
+   `serde_json::Value`, not Go `json.Number` literals:
+   number-literal spelling (e.g. `1.50` → `1.5`) is not
+   preserved through shaped outputs; values stay
+   numerically identical.
+7. `history --download` → exit 1 "not ported yet" BEFORE
+   any network call (Go fetches history first; M2 stub
+   convention).
+8. `invite` stays fully stubbed (exit 1, `STUB_LINE`).
+9. [FIXED in fix loop 1 — was a deviation, now matches
+   Go.] A `Block` outbound builds into `BlockDialer`
+   (`castctl-transport/src/dialer.rs`) and fails at dial
+   time with `ConnectionDown` ("dial <host>: operation
+   not permitted", mirroring sing-box's `syscall.EPERM`
+   — `protocol/block/outbound.go:37-40`), which the CLI
+   classifies as exit 1, exactly like Go's dial-time
+   failure. Before the fix it failed at dispatch
+   (exit 2).
+10. No keeper / refresh; no cookie writer
+    (`WriteCookiesFile` deferred to M5 keeper).
+11. No DNS router is built (M3 system-resolver deviation
+    carries over).
+12. Cookie / chunk bodies via `String::from_utf8_lossy`
+    (Go strings hold arbitrary bytes; invalid UTF-8 is
+    replaced, not rejected).
+13. `FindActionID` derives the chunk base from the page
+    URL's scheme+authority (Go hardcodes
+    `https://muse.ai`; identical in production).
+14. "could not find fetchSubscriptionAction" /
+    "subscription is not an object" `GatewayError`s carry
+    no payload text (Go's `Error()` never prints Payload).
+15. The CLI renders `GatewayError` via its own Go-exact
+    `Error()` builder (`network.rs`
+    `gateway_error_text`), NOT `TransportError::log_summary()`
+    (whose gateway shape is the M4a `render()` deviation).
+16. `ConnectionError`'s `error_length` is the inner
+    message's length (loop-6: the CLI never prints the
+    message; the length is the only observable).
+17. Empty feed / ideas / threads / files / goals rows emit
+    `[]`, never `null` (handlers replace nil slices).
+    Corrects the Batch A note that said feed/ideas emit
+    `null`.
+18. `from_serde` number-literal spelling is not preserved
+    (see 6).
+19. `serde_json` float exponent spelling on passthrough
+    outputs (`1e21` vs Go `1e+21`): values numerically
+    identical, spelling differs.
+20. `\b` / `\f` / U+2028 / U+2029: exact via the CLI
+    indenter (Go `json.Marshal` rules); shaped serializers
+    were already exact.
+21. Local time via chrono `Local` + a hand-rolled TZif
+    abbreviation reader: chrono `%Z` gives `"+07:00"`,
+    not `"ICT"` — the Asia/Ho_Chi_Minh tzfile has no "ICT"
+    abbreviation (verified with `zdump -v` and a Python
+    TZif parse on cue, plus a Go probe program).
+22. `do_hatch` / `callAction` / `fetch_text` derive TLS
+    from the URL scheme (https → `request_tls`, http →
+    `request`); no separate tls flag.
+23. `dial_gateway_over_stream` takes a generic stream, not
+    `Box<dyn AsyncReadWrite>` (avoids a honk-outbound
+    dependency in the gateway crate).
+24. Oversized upgrade response (> 8192 B before `\r\n\r\n`)
+    renders the 28-char `gateway: websocket dial failed`
+    (`dial.rs` `ws_upgrade` oversize guard). Deliberate
+    DoS guard with NO Go equivalent: gorilla's
+    `ReadResponse` has no such cap, so there is no Go
+    rendering to match. [Recorded in fix loop 2 — the
+    fix-loop-1 report's blanket "inherently unmatchable"
+    justification for the `dial_failed()` sites was wrong
+    for the other sites (they go through the
+    handshake-failure path, `connector.go:292-311`); the
+    oversize guard is the ONE site where it is true.]
+25. `ws_upgrade` does not validate the `Upgrade: websocket`
+    / `Connection: upgrade` response headers (gorilla
+    rejects a 101 without them — `client.go:394-405` →
+    `ErrBadHandshake`, resp non-nil → Go renders
+    `status_code=101`; Rust proceeds if the accept key
+    matches, and the Noise handshake then fails later
+    with a different error). Leniency, not a
+    message-rendering issue. Also not handled: obs-fold
+    continuation lines (Go folds them into the previous
+    header's value; Rust checks each physical line
+    independently). Recorded as a follow-up, not fixed
+    in fix loop 2 (it changes acceptance, not just the
+    message). NOTE (fix loop 3): the leading-space
+    FIRST header line is NOT part of this deviation —
+    Go rejects it outright (`malformed MIME header
+    initial line`, `textproto/reader.go:538-545`), while
+    a leading-space line AFTER the first is a
+    continuation (the obs-fold gap above). Fix loop 3
+    implements the first-line rejection in
+    `check_upgrade_head` (first header line starting
+    with SP/HTAB → fixed message); only the obs-fold
+    continuation case remains open here. NOTE (docs
+    follow-up): obs-fold can also corrupt the accept
+    value itself — a continuation line after a correct
+    `Sec-WebSocket-Accept` folds into the accept value
+    in Go (`Header.Get` returns `"<key> X-Extra: v"`
+    → mismatch → `status_code=101`), while Rust treats
+    the continuation as its own header line and the
+    accept stays matched → proceeds. This flips an
+    ACCEPTANCE decision, not just a message. The mirror
+    case coincides: a continuation accept line after a
+    wrong accept folds to `"wrong Sec-WebSocket-Accept:
+    <key>"` in Go → mismatch → `status_code=101`, and
+    Rust also renders `status_code=101` (it does not
+    count the leading-space name as an accept header).
+    Verified by a Go probe in the docs follow-up
+    (notes dir: `goprobe-plusdd/`).
+26. The tungstenite path (`ws_error`'s non-Http arms)
+    renders `dial_failed()` for a bad-accept failure too:
+    tungstenite returns a protocol error with no response
+    attached, so the status is not available to render
+    `status_code=101` (Go renders `status_code=101`
+    there as well). Non-blocking: the live dial path uses
+    the hand-written `ws_upgrade`, not a tungstenite
+    dial; fixing the tungstenite path needs plumbing the
+    status through. Recorded so the two paths do not
+    drift apart again.
+27. Bare-LF header terminator: `ws_upgrade` reads until
+    `b"\r\n\r\n"` (`dial.rs` read loop); Go's `ReadLine`
+    accepts bare `\n` (verified by a Go probe in fix
+    loop 3: a `502` response with bare-LF endings parses
+    to resp 502). A bare-LF response never terminates
+    the Rust read loop → EOF → fixed 35-char message,
+    where Go renders the status. Pre-existing M4b code,
+    untouched by fix loops 1–3, never claimed
+    Go-faithful. Recorded as a follow-up; fixing it
+    means changing the read loop, out of this loop's
+    scope.
+28. Signed 3-char status tokens (`+DD`, 100 tokens
+    `+00`..`+99`): Go's `ReadResponse` accepts a status
+    token iff `len==3 && Atoi ok && >= 0`
+    (`net/http/response.go:170-186`); `strconv.Atoi`
+    accepts a leading `+`, so `+50`/`+01`/`+99`/`+00`
+    are VALID codes (resp 50/1/99/0) and gorilla's resp
+    branch renders `status_code_length=2` for 10–99
+    and `=1` for 0–9 (never `status_code`, never
+    `None`, since the code is < 100 and ≠ 101).
+    Rust's step-1 gate (`is_three_digit_code`,
+    `dial.rs` — "exactly 3 ASCII digits") rejects
+    `'+'` → malformed → the fixed 35-char message
+    `gateway: websocket handshake failed`. Root cause:
+    fix loop 3 (and both fix-loop-2 reviewers, and the
+    fix-loop-3 brief) equated "valid code" with
+    "exactly 3 ASCII digits", citing Go's
+    `isThreeDigitCode`
+    (`internal/gateway/handshake_log.go:62-67`) — but
+    that function governs what the log extractor emits
+    as a token, not what `ReadResponse` accepts as a
+    code; the `is_three_digit_code` doc comment in
+    `dial.rs` states the false rule as Go-derived.
+    The divergence only manifests when the headers
+    parse cleanly: `+50` + bad header → fixed in both
+    (the header error masks the code difference).
+    Recorded as a deviation (final re-review round 3:
+    safety PASS, technical PASS, red-team FAIL on this
+    one family; loop 3 of max 3 was closed, so no
+    loop 4 to land the fix). The fix, fully specified
+    for a future change: in step 1, a token is a valid
+    code iff `len==3 && Atoi ok && >= 0`, i.e. 3 ASCII
+    digits OR `+` + 2 ASCII digits, routed through the
+    existing deferred-status-error path (so ordering
+    vs proto/headers stays Go-faithful); pin with unit
+    tests (`+50` → length 2, `+01` → length 1,
+    `+99` → length 2, `+00` → length 1, `+50` + bad
+    header → fixed) + an integration test via
+    `start_with_response_bytes`. Pathological input
+    class: no real server sends signed status codes;
+    the live edge sends well-formed responses.
+    Evidence: red-team probe
+    (`/tmp/goprobe-fl3-rt/out.txt`, md5
+    `64d2dac61b5d20c738cc36fb8cd762b4`; 69-case battery
+    `/tmp/goprobe-fl3-rt2/out.txt`, md5
+    `bb7d86540aa002728dc0aaa2ba404019`), parent probe
+    (`/tmp/goprobe-parent/main.go`), docs-follow-up
+    probe (saved in the notes dir:
+    `goprobe-plusdd/main.go` + `out.txt`). The
+    fix-loop-3 report's "22 cases" probe claim is NOT
+    cited here (unverifiable: only 17 `==` blocks
+    shown; `/tmp/goprobe-fl3/out.txt` exists on
+    neither VM).
+
+## M4b.3 Findings
+
+- **The literal token, and the M4a claim was wrong.**
+  M4a recorded that the live server "decodes
+  `%3Credacted%3E` back to `<redacted>`". False: a raw-TLS
+  Python probe on cue (identical headers, only the token
+  spelling differs, vm_id from the Go status output)
+  returned `401 Unauthorized` for the encoded form and
+  `502 Bad Gateway` for the literal form, twice each,
+  interleaved with Go `status` (exit 0 twice) — not
+  backend flapping. The fix is a hand-written WS upgrade
+  in `castctl-gateway/src/dial.rs` (`ws_upgrade`): the
+  request-target is sent verbatim (plain string split, no
+  `http::Uri`), the response must be 101 with a correct
+  `Sec-WebSocket-Accept` (via tungstenite's
+  `derive_accept_key`), leftover bytes after the header
+  block are preserved with
+  `WebSocketStream::from_partially_read`. Both
+  `dial_gateway` (direct) and `dial_gateway_over_stream`
+  use it; the direct dial now also pins ALPN
+  `["http/1.1"]`, fixing the M4a no-ALPN deviation.
+- **CRLF goes through `muse.write` / `muse.edit` only.**
+  A Python edit script that rewrote `dial.rs` turned its
+  `\r\n` literals into bare LFs (0 literal CR bytes in
+  the file), so the upgrade request had no `\r\n` and the
+  server waited forever → 20s timeout on all 3 dial
+  tests. Fixed with `muse.edit` (`\\r\\n` in JSON);
+  verified 12 sequences, 0 literal CR bytes. Never build
+  a CRLF-carrying file through a Python edit script.
+- **The FakeServer cannot record a literal `<>` upgrade.**
+  Tungstenite's server handshake parses the target with
+  `http::Uri` (`server.rs:158`), which rejects `<>`, so
+  the M4a FakeServer cannot accept or record a
+  literal-token upgrade at all. The literal-token tests
+  use a new harness, `tests/common/raw_upgrade.rs`
+  (`RawUpgradeServer`: records raw request bytes
+  verbatim, answers 101, then closes — it does not speak
+  Noise, so the dial fails at the Noise step with
+  `ConnectionError`, which the tests assert).
+- **TLS fingerprint blocks the live gateway (see §M4b.5).**
+  rustls + literal token → 502; OpenSSL + literal → 502;
+  Go/uTLS-Chrome + literal → 101. ClientHello captures
+  (iptables REDIRECT + a Python listener on cue):
+  Go WS dial 1748 B, uTLS HelloChrome (GREASE cipher +
+  extensions + groups + key share, ECH, ALPN http/1.1
+  only); rustls 251 B, no GREASE, no ECH, no MLKEM768,
+  11 extensions in rustls order. The edge terminates TLS
+  and then 502s at the HTTP proxy (`server_connection_
+  error`), so the fingerprint decides upstream routing,
+  not the handshake. [CORRECTED in fix loop 1 (F1): the
+  original text said "rustls has no API for GREASE / ECH
+  / extension order" — that is FALSE on ECH. rustls
+  0.23.46 HAS an ECH API (`ClientConfig::with_ech()` /
+  `EchGreaseConfig`, including GREASE-ECH — vendored
+  source `src/client/builder.rs:27`,
+  `src/client/ech.rs:47`) but no cipher/group/keyshare
+  GREASE and no extension-order control; ML-KEM768
+  exists only via the aws-lc-rs provider, which the
+  ring-only rule forecloses — aws-lc-rs is banned from
+  the lock (rule in `rust/Cargo.toml:94-100`; this
+  paragraph is the PORTING record of the ban). The conclusion stands: rustls
+  cannot mimic Chrome. Cheaper control before the
+  BoringSSL probe: try an aws-lc-rs-provider rustls dial
+  — if the edge keys on size/MLKEM presence it may get
+  further than ring-provider rustls; if it keys on
+  GREASE/order, it will not. The probe, not the claim,
+  decides. [CLARIFIED in fix loop 2 (N1): such a dial is
+  only sound as a separate scratch binary OUTSIDE the
+  workspace lock — enabling aws-lc-rs alongside ring in
+  this workspace makes provider resolution ambiguous and
+  panics at runtime (`Cargo.toml:94-100`); running the
+  probe here would violate the ban.] BoringSSL (already in the lock via honk,
+  `boring` / `tokio-boring` 5.2.0) implements GREASE
+  (`ssl/encrypted_client_hello.cc`, `hs->grease_seed`)
+  and is the candidate fix — a new TLS-architecture
+  decision, not attempted in PR2.
+- **`usage --json`'s one-off `ConnectionError`.** First
+  parity run: `usage --json` failed with
+  `error_length=36` while `usage` and `usage-raw` passed
+  (same `fetch_subscription` path). The re-run passed
+  all three (see §M4b.5). Treated as transient (likely a
+  blip during the FindActionID chunk fetch). [FIXED in
+  fix loop 1 (F3): the 36-char string is hyper's `error
+  reading a body from connection`
+  (`hyper-1.12.0/src/error.rs:547`, `Kind::Body`),
+  pinned by the `mid_body_abort_is_connection_error_
+  36_chars` test (`castctl-transport/tests/tls.rs`) — a
+  server-side reset mid-body, mapped to
+  `ConnectionError` (exit 1). The live recurrence itself
+  remains unreproduced; the re-run passed.] The 36-char
+  message is a hyper error string from `http.rs`
+  (`truncate(..., 200)`).
+- **Cue disk filled to 100% mid-task.** `rust/target/
+  debug` reached 17 G (2255 files). Freed by deleting
+  `target/debug`; the release binary was preserved and
+  backed up to `/tmp/castctl-rs-m4b`.
+- **Display redaction, third time.** A connector-test
+  failure and the probe output both rendered a real
+  token as `auth_token=<redacted>` while the bytes were
+  different. Byte-level checks (`grep -c`, Python byte
+  lists) are the only reliable verification for token
+  URLs.
+- **Go ghost profiles synthesise defaults.** An explicit
+  `--profile nosuch` does NOT error: `LoadProfile`
+  synthesises `SourceNone` defaults for a ghost name.
+  Only `default_profile` naming a nonexistent profile
+  errors. Rust matches (verified by test).
+- **Test-harness findings.** The shared FakeServer
+  deadlocks on a binary ClientHello (it reads until
+  `\r\n\r\n`, which a ClientHello never contains) —
+  plain-HTTP fakes live in `tests/http_fake.rs` instead.
+  Per-target clippy dead-code forced splitting
+  `tests/common/mod.rs` in both gateway and transport
+  (a target that never constructs a server trips
+  `-D warnings` on its fields). `MutexGuard` held across
+  `await` is flagged by clippy 1.99 even with an explicit
+  `drop` — scope the lock in a block instead.
+- **Fix loop 2: stage-2 handshake errors match Go.**
+  The fix-loop-1 report's §1 exclusion ("`dial_failed()`
+  stays for TCP-dial / EOF / non-UTF8 / missing-accept
+  failures — Go's dial-error text there is the variable
+  wrapped transport error (`connector.go:275-277`)") was
+  WRONG: `:275-277` is the TCP-dial stage
+  (`dialer.WebSocketDial` failing, before any HTTP byte);
+  the `ws_upgrade` failures all happen after TCP
+  connect, inside gorilla's `DialContext`, and Go renders
+  them via `newHandshakeFailureError(resp, err)`
+  (`connector.go:292-311`). Fix loop 2 renders them
+  Go-faithfully: bad accept on a 101 →
+  `status_code=101` (gorilla returns resp non-nil,
+  `client.go:394-405`); post-connect write / read / EOF
+  failures → the fixed 35-char message (gorilla returns
+  `(nil, nil, err)`, `client.go:372-387`); the
+  non-UTF-8 arm is now byte-parsed (`check_upgrade_head`
+  in `dial.rs`): Go's `ReadResponse` + `textproto`
+  work on bytes and never validate UTF-8
+  (`net/http/response.go:158-206`,
+  `net/textproto/reader.go:521-596`), so a non-UTF-8
+  status token → fixed 35-char (Atoi fails →
+  malformed-status error → token-shape fails),
+  non-UTF-8 in a header VALUE is valid obs-text
+  (`validHeaderValueByte`, `reader.go:733`) → the
+  status-based rendering, and non-UTF-8 in a header KEY
+  fails the whole response (`canonicalMIMEHeaderKey`
+  ok=false) → fixed 35-char. Both re-reviewers were
+  partly right: the red-team was right that the arm
+  diverges (and right for the status-token case) but its
+  "always fixed 35-char" fix is wrong for header-value
+  garbage; the technical reviewer was right that no
+  SINGLE rendering covers the arm, but "do not touch"
+  was wrong — the per-position mapping is clean once
+  the head is parsed as bytes. The oversized-response
+  guard stays `dial_failed()` (deviation 24 — the one
+  site with no Go equivalent). The head check also
+  validates header well-formedness the way Go does
+  (colon present, valid field-name/value bytes, status
+  error deferred until the whole head validates
+  [CORRECTED in fix loop 3: deferred only for a valid
+  3-digit code — Go returns a malformed-status error
+  before parsing headers, so a malformed token +
+  malformed header renders the token/length form, not
+  the fixed message]), and
+  the accept value is trimmed of leading SP/HTAB only
+  (Go `bytes.TrimLeft`) [CORRECTED in fix loop 3:
+  trimmed on BOTH ends — every header line passes
+  through `trim()` in `readContinuedLineSlice`
+  (`textproto/reader.go:108-119`) before the colon
+  split, so a trailing space/tab on a correct accept
+  key still matches]. Pinned by 7 integration tests
+  + 4 unit tests (13 cases) — see the fix-loop-2
+  report.
+- **Fix loop 3: `check_upgrade_head` matches Go's
+  `ReadResponse` order.** Both fix-loop-2 re-reviewers
+  (technical FAIL B1–B4, red-team FAIL B1–B5) found
+  the same five divergences in the byte-parser, each
+  verified against Go 1.27.3 source AND a probe
+  program calling `http.ReadResponse` on exact byte
+  inputs (this loop's probe: `/tmp/goprobe-fl3/`,
+  22 cases — all five claims re-derived, none taken
+  from the reviews): (1) ORDERING — Go returns a
+  malformed-status error BEFORE parsing headers
+  (`response.go:170-186`), so a malformed token +
+  malformed header renders the token/length form
+  (`ABC` + no-colon header → `status_token_length=3`,
+  `1000` → `status_token_length=4`), not the fixed
+  message; fix loop 2's "status error deferred until
+  the whole head validates" is true only for a VALID
+  code — the fix returns a malformed token's mapping
+  immediately. (2) PROTO — Go validates it with
+  `ParseHTTPVersion` (`response.go:186`,
+  `request.go:827-847`) after the code and before the
+  headers: `FOO 502`, `HTTP/1 502`, `HTTP/1.1.1 502`
+  → fixed; `HTTP/9.9` and `HTTP/1.0` → resp 502; the
+  fix adds a `valid_http_version` mirror (exactly 8
+  bytes, `HTTP/` + digit + `.` + digit). Precedence:
+  `FOO ABC` still renders `status_token_length=3`
+  (status error first). (3) ACCEPT TRIM — Go trims
+  BOTH ends (`readContinuedLineSlice`'s `trim` +
+  `TrimLeft`): a correct key with a trailing space or
+  tab MATCHES and proceeds; fix loop 2's "leading
+  only" rule was wrong, and its unit test pinned the
+  wrong behaviour — flipped to assert a match. The
+  trim is of the VALUE after the colon, not of the
+  whole line. (4) DUPLICATE ACCEPT — Go's
+  `Header.Get` returns the FIRST value: first-wrong /
+  second-right mismatches (`status_code=101`); only
+  the first accept header counts now. The
+  integration test needs a server that derives the
+  correct key from the client's random nonce — a
+  fixed response cannot express it (a first draft
+  with the RFC example key passed pre-fix for the
+  wrong reason: neither header matched the random
+  key); the test uses a new local helper,
+  `start_duplicate_accept_server` in `connector.rs`.
+  (5) FIRST HEADER LINE — Go rejects a first line
+  starting with SP/HTAB (`readMIMEHeader`'s `Peek(1)`
+  check, `reader.go:538-545` →
+  `malformed MIME header initial line`) → fixed; the
+  fix rejects it in `check_upgrade_head`. The two
+  reviewers differed in detail (red-team: only SP
+  needs the new rule, "HTAB already matches";
+  technical: reject SP/HTAB) — this loop's probe
+  shows Go errors on BOTH, and Rust's key-byte check
+  already rejects a HTAB-first line via a different
+  rule, so the explicit first-line check covers both
+  (harmless duplication, one rule in one place). The
+  five fixes compose into one order: malformed token
+  → proto → headers (with first-line rejection) →
+  accept (both-ends trim, first-only) → deferred
+  status error. NOTE (docs follow-up): this paragraph's
+  step-1 "malformed token" gate equates "valid code"
+  with "exactly 3 ASCII digits" — that premise is wrong
+  for signed `+DD` tokens (Go accepts `+00`..`+99` as
+  valid codes); see deviation 28 for the exact family,
+  both renderings, and the specified fix. Also fixed in
+  this loop: the no-colon
+  error text is `malformed MIME header: missing
+  colon`, not `malformed MIME header line`
+  (`dial.rs` comment). Recorded, not fixed: the
+  bare-LF terminator (deviation 27, pre-existing).
+  The `start_reset_server` / `serve_one` no-stop-handle
+  observation stands recorded (client side bounded by
+  the 20 s upgrade timeout; tasks die with the test
+  binary) — the new duplicate-accept server DOES
+  expose `stop()`. Pinned by 4 new integration tests
+  + 5 new/renamed unit tests — see the fix-loop-3
+  report.
+
+## M4b.4 Gates (cue, 2026-11-05, pre-rebase head 86a2142)
+
+All four exit 0, no `#[allow]`:
+
+- `cargo fmt --check` → 0.
+- `cargo build --workspace` → 0.
+- `cargo test --workspace` → 0, **440 passed** (baseline
+  347 → **+93**).
+- `cargo clippy --workspace --all-targets -- -D warnings`
+  → 0.
+
+Per-crate final counts (from the gate log):
+
+| crate | tests | new in M4b |
+|---|---|---|
+| castctl-cli | 68 | +27 |
+| castctl-config | 90 | +3 |
+| castctl-gateway | 76 (lib 32 + auth 4 + connector 6 + gateway 22 + golden 4 + noise 3 + subscription 5) | +33 (lib +18, integration +15) |
+| castctl-shared | 35 | +28 |
+| castctl-transport | 111 (lib 80 + env_proxy 1 + rpc 12 + tls 1 + wireguard 17) | +2 (lib +1, tls integration +1) |
+| pre-existing (log_redact 46, tg_text 10, tg_files 2, rs parity 2) | 60 | 0 |
+| **total** | **440** | **+93** |
+
+New tests by file: `castctl-shared` (`timefmt`, `status`,
+`sessions`, `event`, `feed`, `usage`, `bridge`);
+`castctl-config` credential tests; `castctl-cli`
+`network.rs` / `runtime.rs`; `castctl-gateway`
+`summary.rs`, `cookies.rs`, `auth.rs` (unit + `tests/
+auth.rs`), `subscription.rs` (unit + `tests/
+subscription.rs`), `connector.rs` (unit + `tests/
+connector.rs`, incl. the literal-token test against
+`RawUpgradeServer`); `castctl-transport` `tls.rs` (unit)
++ `tests/tls.rs`. The M4a gateway test
+`dial_url_sends_redacted_literal_not_real_token` was
+rewritten (the old wire assert expected
+`%3Credacted%3E`); the string-level assert
+(`default_ws_url` byte-for-byte == Go URL) and the
+value-level assert (query value == literal) are kept.
+Logs: `gate-logs-m4b/gate-{fmt,build,test,clippy}-m4b.log`.
+The gates are re-run after the rebase onto dev-rust;
+those logs are `gate-{fmt,build,test,clippy}-m4b-
+rebased.log` and the result is in the writer report.
+
+## M4b.5 Live test trên cue (2026-11-05)
+
+Binaries: Go 0.9.0 `/usr/local/bin/castctl` (1396697 B);
+Rust release `/tmp/castctl-rust-m4/rust/target/release/
+castctl-rs` (23204064 B, built 19:46, backed up to
+`/tmp/castctl-rs-m4b`). Read-only commands only; no
+chat/send, approval, update, login, or keeper. Max 2
+runs per command (run 1 on no.0 died mid-run: ssh exit
+255 after `status` + `usage`; run 2 completed all 16
+labels + `goal`/`idea` separately).
+
+Profiles:
+
+- cue-test: config `/root/castctl-live-test/config.json`
+  (600), cookies `.../profiles/cue-test/cookies.txt`
+  (0600, `hatch_sess` valid until 2026-12-05T03:11:56Z,
+  12 cookies), direct dial (no outbound), vm_id from
+  FetchSessionInfo.
+- no.0 (Boss's live profile): config `/root/.config/
+  castctl/config.json` written by Boss (minimal:
+  default_profile + no.0 entry, cookies_file,
+  node_id `a4d787ca4a5a87d9`, auto_approve=always).
+  Do NOT modify it. Cookies `/root/.config/castctl/
+  profiles/no.0/cookies.txt` (2809 B). Boss proved
+  authenticated: `castctl --profile no.0 status`
+  returns vm_id `72d127a3-2e19-4c84-b073-9ed4b82102b9`,
+  sessions=110, exit 0.
+
+### cue-test parity (controlled comparison)
+
+16 labels, Go `--config ... --profile cue-test <cmd>`
+vs Rust release (same form). `compare.py` compares
+exit code, raw stdout, JSON with keys sorted, stderr.
+
+| command | Go | Rust | raw | normalized | note |
+|---|---|---|---|---|---|
+| usage | 0 | 0 | MATCH | MATCH | byte-identical text, incl. `resets 2026-11-07 14:52 +07` |
+| usage --json | 0 | 0 | MATCH | MATCH | JSON-identical after key sort |
+| usage --raw | 0 | 0 | MATCH | MATCH | JSON-identical after key sort |
+| status, threads, threads --all, history --limit 3, history --limit 3 --raw, files --limit 3, feed, feed --raw, feed-status, feed-prompt, goals, ideas, unread | 0 | 1 | DIFF | N/A (no Rust output) | Rust stderr `castctl: conn: connection error error_length=45` — the WS upgrade gets HTTP 502 from the live edge (see blocker below); Go would print 45 for the same failure (fix loop 1, T-B1 — was 47 before the fix) |
+
+No fields were dropped for cue-test: the three usage
+commands match raw; the gateway commands produce no
+Rust output to normalize.
+
+### no.0 live gate
+
+18 labels (16 + `goal goal_62b884f95116` + `idea
+idea_0b270d463ca24cc2b863ffdc79b1ea30`, IDs taken from
+Go's `goals`/`ideas` outputs). Same pattern:
+
+| command | Go | Rust | raw | after dropping volatile fields | note |
+|---|---|---|---|---|---|
+| usage | 0 | 0 | MATCH | MATCH | — |
+| usage --json | 0 | 0 | DIFF | MATCH after dropping `bonus_tokens.balance_units` | drift (proven below) |
+| usage --raw | 0 | 0 | DIFF | MATCH after dropping `topupBalance` | drift (proven below) |
+| goal, idea, status, threads, threads --all, history --limit 3, history --limit 3 --raw, files --limit 3, feed, feed --raw, feed-status, feed-prompt, goals, ideas, unread | 0 | 1 | DIFF | N/A (no Rust output) | same 502 blocker |
+
+Dropped fields (exactly these, nothing else):
+`bonus_tokens.balance_units` (usage --json) and
+`topupBalance` (usage --raw). No other field was
+dropped; every other leaf matches.
+
+Drift proof (Go run twice, same field moves, no code
+change): `usage --json` Go×2, 4 s apart —
+`balance_units` 447188087 → 447186591 (−1496);
+`usage --raw` Go run 2 vs a later Go run —
+`topupBalance` 447305148 → 447183505 (−121643).
+Run-2 Go-vs-Rust gaps are the same direction and
+scale: `balance_units` 447329611 → 447318242
+(−11369), `topupBalance` 447305148 → 447276676
+(−28472). The counters fall continuously because the
+Boss's live session consumes tokens; the text `usage`
+output still MATCHes raw because it prints rounded
+values (`3B tokens left`, `10% used`).
+
+### Blocker: the live gateway is unreachable from Rust
+
+Root cause, proven (see §M4b.3): the Meta edge
+requires a Chrome TLS fingerprint. Go dials with
+uTLS HelloChrome → 101. Rust (rustls) and Python
+(OpenSSL) send non-Chrome ClientHellos → the edge
+terminates TLS, then returns HTTP 502
+(`server_connection_error`) from its proxy. The
+ClientHello captures are in `gate-logs-m4b/
+live-evidence/` (`ch-go-ws.bin` 1748 B Chrome,
+`ch-rustls.bin` 251 B). [CORRECTED in fix loop 1 (F1):
+rustls 0.23.46 HAS an ECH API
+(`ClientConfig::with_ech()` / `EchGreaseConfig`,
+including GREASE-ECH) but no cipher/group/keyshare
+GREASE and no extension-order control; ML-KEM768 exists
+only via the aws-lc-rs provider, foreclosed by the
+ring-only rule (aws-lc-rs banned — see §M4b.3). The
+conclusion stands: rustls cannot mimic Chrome.]
+BoringSSL (already in the lock via honk, GREASE in its
+source) is the candidate fix — a new TLS-architecture
+decision for Boss, NOT attempted in PR2. Consequence:
+all 13 gateway commands + `goal`/`idea` fail live
+with exit 1; the HTTPS path (`usage*`) is the only
+live-parity proof in this PR.
+
+### Secrets grep proof
+
+`grep -ri -o` per word over every file in
+`gate-logs-m4b/` (fix loop 1 recount, 2026-11-05 — the
+writer's counts were one gate-test log short):
+`hatch_sess` 4, `auth_token` 2, `cookie` 54,
+`bearer` 2, `token` 97. Command: `for w in
+hatch_sess auth_token cookie bearer token; do printf
+'%s: ' "$w"; grep -ri -o "$w" . | wc -l; done`
+(substring, case-insensitive, one line per match).
+Every match is
+a test name, a script identifier, the literal
+`<redacted>` placeholder, public feed article text,
+or the words `hatch_sess` / `cookie` inside a chat
+message that discusses cookies by name (no value).
+Value-carrying patterns are all zero:
+`hatch_sess=<value>` 0, `Bearer <value>` 0,
+`Cookie:` header 0. No cookie, token, or auth
+header value appears in any log or in the PR.
+
+### Unverified (live)
+
+- The entire gateway path (all 13 commands +
+  `goal`/`idea`) — blocked, not merely untested.
+- Write-path commands (`history --download`,
+  `invite`, chat/send, keeper, login, update).
+- Transport (socks/vless/...): both live profiles
+  dial direct; a command needing transport is
+  `chưa kiểm chứng`.
+- `goal`/`idea` on cue-test (no IDs were fetched
+  there; covered on no.0 instead).
+- `wss://` literal-token bytes on the wire (fix loop
+  1, N4): unasserted — no TLS-server test harness
+  exists in the repo (no `TlsAcceptor` /
+  `ServerConfig` / `rcgen` in the lock), so a
+  TLS-wrapped upgrade cannot be recorded in-test.
+  `ws` and `wss` share `ws_upgrade` and the same URL
+  string, so the gap is small, but strictly the
+  TLS-wrapped request line is unasserted.
+- Python-probe evidence (fix loop 1, N3): the Python
+  502-vs-401 probe output has no saved log (report-only;
+  the script is in `gate-logs-m4b/probe-ws.py`) and the
+  Go auth-call ClientHello (SNI=muse.ai, claimed 1804 B)
+  has no file on cue or in `live-evidence/` (searched
+  `/tmp/*.bin` on cue, 2026-11-05). The Rust probe log
+  (`live-evidence/live-ws-probe.log`) is the surviving
+  evidence for the 502/401 contrast. The first-capture
+  DERP bin IS preserved
+  (`live-evidence/ch-derp-wrong-capture.bin` 1515 B +
+  `.log`, md5-verified against cue `/tmp/ch-go.bin`) —
+  it proves the first capture caught a Tailscale DERP
+  connection, not the gateway; it is NOT Go's
+  ClientHello.
+
+Logs: `gate-logs-m4b/parity-cue-test/`,
+`gate-logs-m4b/live-parity-no0-run2/` (108 files),
+`gate-logs-m4b/live-parity-no0-run2.log`,
+`gate-logs-m4b/live-evidence/` (ClientHello bins,
+probe log, drift outputs).
+
+## M4b.6 Chưa kiểm chứng
+
+- Write-path commands are NOT live-tested in this PR
+  (`history --download`, `invite`, chat/send, keeper,
+  login, update): read-only only, by the PR scope.
+- No transport (socks/vless/...) live test: the live
+  profiles dial direct (no outbound). A command needing
+  transport is `chưa kiểm chứng` until a transport is set
+  up on cue.
+- The live gateway path (all 13 commands + `goal` /
+  `idea`): BLOCKED by the TLS fingerprint, see §M4b.5
+  — not merely untested. The ClientHello capture WAS
+  done (Go 1748 B Chrome vs rustls 251 B); the
+  BoringSSL fix is a Boss decision, not attempted here.
+- `usage --json`'s one-off `ConnectionError`
+  (`error_length=36`) in the first parity run: the
+  re-run passed (see §M4b.3); root cause unpinned,
+  treated as transient. (Fix loop 1: the 36-char string
+  is pinned by test as hyper's mid-body error; the live
+  recurrence is still unreproduced.)
+- Long-run behaviour (reconnect storms, heartbeat at the
+  production 25s cadence through the CLI) was not waited;
+  covered by threshold injection in M4a tests.
+
 
 ## Quy tắc quyết định (Boss, 2026-11-05 — standing)
 

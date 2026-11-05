@@ -29,13 +29,22 @@
 //! - One Noise ciphertext = one WS binary message; plaintext is a
 //!   `NoiseTransportFrame` chunked at 60000 bytes.
 
+pub mod auth;
+pub mod connector;
+pub mod cookies;
 pub mod dial;
 pub mod framing;
 pub mod gateway;
 pub mod noise;
 pub mod proto;
 pub mod shared;
+pub mod subscription;
+pub mod summary;
 
+pub use auth::{SessionInfo, fetch_access_token, fetch_hatch_token, fetch_session_info};
+pub use connector::GatewayConnector;
+pub use cookies::{CookieLoadError, load_cookies, parse_cookies};
+pub use dial::dial_gateway_over_stream;
 pub use dial::{GATEWAY_HOST, GATEWAY_ORIGIN, GATEWAY_USER_AGENT, default_ws_url, dial_gateway};
 pub use framing::{
     MAX_PIECES_PER_GROUP, MAX_REASSEMBLED_SIZE, MAX_UNFINISHED_GROUPS, Reassembler,
@@ -55,3 +64,8 @@ pub use shared::{
     RETRY_PAUSE_INITIAL, RETRY_PAUSE_MAX, STALE_PING_TIMEOUT, SUBSCRIBE_RETRY_PAUSE, SharedConn,
     heartbeat_tick,
 };
+pub use subscription::{
+    ActionIDStore, DEFAULT_SUBSCRIPTION_ACTION_ID, SUBSCRIPTION_ACTION_NAME, SUBSCRIPTION_PAGE,
+    SubscriptionOptions, fetch_subscription, find_action_id, parse_rsc_result,
+};
+pub use summary::{Summary, summarize_body, summarize_parsed_body};

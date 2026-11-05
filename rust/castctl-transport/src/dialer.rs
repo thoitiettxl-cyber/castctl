@@ -170,6 +170,37 @@ impl Dialer for DirectDialer {
     }
 }
 
+/// Block dialer: a `block` outbound that builds fine and
+/// fails at dial time (Go `internal/outbound` → sing-box
+/// `protocol/block/outbound.go:37-40`: `DialContext` logs
+/// the blocked destination and returns `syscall.EPERM`,
+/// "operation not permitted"). The failure is a
+/// `ConnectionDown` — the dial-stage mapping this codebase
+/// uses (`DirectDialer`, `HttpClient::request_inner`) —
+/// which the CLI classifies as exit 1, matching Go's
+/// dial-time failure (fix loop 1; before this, the CLI
+/// failed a `Block` outbound at dispatch with exit 2,
+/// deviation 9 in `rust/PORTING.md` §M4b.2).
+#[derive(Debug, Default)]
+pub struct BlockDialer;
+
+impl BlockDialer {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Dialer for BlockDialer {
+    fn dial(&self, target: &DialTarget) -> DialFuture<'_> {
+        let target = target.clone();
+        Box::pin(async move {
+            Err(TransportError::ConnectionDown {
+                message: format!("dial {}: operation not permitted", target.host),
+            })
+        })
+    }
+}
+
 /// Honk dialer: dial through a honk-outbound node built by
 /// `config::dispatch_outbound`. Holds the registry (built once by
 /// `ProxyRegistry::default_resolver`) and the node.

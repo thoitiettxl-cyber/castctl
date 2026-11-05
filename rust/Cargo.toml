@@ -78,6 +78,31 @@ prost-build = "=0.14.4"
 prost-types = "=0.14.4"
 tokio-tungstenite = "=0.30.0"
 rand = "=0.10.3"
+# M4b: local-time rendering (`threads.updated`,
+# `usage.resets_at`, `UsageLines` TZ abbreviation) via
+# chrono::Local (real tzdata, matching Go `time.Local`).
+# chrono 0.4.45 is already in Cargo.lock via honk-config;
+# promoting it adds no new crate. Features are minimal:
+# `clock` (Local) + `std`; no `serde`, no `wasmbind`.
+chrono = "=0.4.45"
+# M4b: HTTPS over an outbound (FetchSessionInfo /
+# FetchAccessToken / FetchHatchToken / FetchSubscription):
+# rustls + tokio-rustls + webpki-roots (Mozilla roots).
+# All three are already in Cargo.lock via tokio-tungstenite
+# 0.30.0 (rustls 0.23.46 with ring, tokio-rustls 0.26.6,
+# webpki-roots 0.26.11); promoting them adds no new crate.
+# DEFAULT FEATURES ARE OFF on purpose: rustls's default is
+# `aws_lc_rs` and tokio-rustls's default is `aws_lc_rs` too;
+# enabling either alongside `ring` makes
+# `CryptoProvider::from_crate_features()` ambiguous and
+# `ClientConfig::builder()` panics at runtime (measured
+# 2026-11-05: both providers enabled -> "Could not
+# automatically determine the process-level CryptoProvider").
+# The only provider is `ring`, matching tokio-tungstenite's
+# selection; `aws-lc-rs` must never enter the lock.
+rustls = { version = "=0.23.46", default-features = false, features = ["logging", "ring", "std", "tls12"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["logging", "ring", "tls12"] }
+webpki-roots = "=0.26.11"
 # M4a: Stream/Sink traits + extension traits for the gateway
 # reader/writer halves (tokio-tungstenite only re-exports the
 # concrete stream type; the traits must be direct deps).

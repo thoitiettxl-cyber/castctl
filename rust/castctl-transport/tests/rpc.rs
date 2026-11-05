@@ -23,7 +23,7 @@ use castctl_transport::error::TransportError;
 use castctl_transport::http::HttpClient;
 use castctl_transport::retry::RetryPolicy;
 use castctl_transport::rpc::RpcClient;
-use common::{FakeServer, Responder};
+use common::fake_server::{FakeServer, Responder};
 
 fn client_for(port: u16) -> RpcClient {
     RpcClient::new(

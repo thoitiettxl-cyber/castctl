@@ -154,6 +154,30 @@ impl SingleConfig {
     pub fn raw_endpoints(&self) -> Vec<JsonValue> {
         self.endpoints_raw.clone()
     }
+
+    /// The stored login credential for a profile, or `None`
+    /// when no credentials entry names it. This is the ONLY
+    /// value-read path for credentials (Go
+    /// `CredentialForProfile`, `credentials.go:239`); callers
+    /// that only need presence must use
+    /// [`has_credential_for_profile`](Self::has_credential_for_profile),
+    /// which never materialises a value.
+    pub fn credential_for_profile(
+        &self,
+        profile_name: &str,
+    ) -> Option<crate::blocks::LoginCredential> {
+        let raw = self.credentials_raw.as_ref()?;
+        crate::blocks::credential_from_raw(raw, profile_name)
+    }
+
+    /// Whether a credentials entry names the profile, without
+    /// materialising any value (Go `HasCredentialForProfile`,
+    /// `credentials.go:258`).
+    pub fn has_credential_for_profile(&self, profile_name: &str) -> bool {
+        self.credentials
+            .as_ref()
+            .is_some_and(|block| block.entries.iter().any(|e| e.profile == profile_name))
+    }
 }
 
 const SINGLE_TOP_LEVEL_KEYS: [&str; 12] = [
@@ -829,6 +853,28 @@ mod tests {
         // The parsed Profile's own Debug is redacted too.
         let rendered_profile = format!("{:?}", cfg.profiles["default"]);
         assert!(!rendered_profile.contains("SECRET-PRIVATE-KEY"));
+    }
+
+    #[test]
+    fn test_credential_for_profile_and_presence() {
+        // Fake credentials (never real values).
+        let cfg = parse(
+            "{\"profiles\":{\"no1\":{},\"other\":{}},\"credentials\":[{\"tag\":\"c1\",\"profile\":\"no1\",\"username\":\"alice\",\"password\":\"pw-one\"},{\"tag\":\"c2\",\"profile\":\"other\",\"username\":\"carol\",\"password\":\"pw-three\"}]}",
+        )
+        .unwrap();
+        let cred = cfg
+            .credential_for_profile("no1")
+            .expect("credential present");
+        assert_eq!(cred.username, "alice");
+        assert_eq!(cred.password, "pw-one");
+        assert!(cfg.credential_for_profile("missing").is_none());
+        assert!(cfg.has_credential_for_profile("no1"));
+        assert!(cfg.has_credential_for_profile("other"));
+        assert!(!cfg.has_credential_for_profile("missing"));
+        // No credentials block at all: both read paths are empty.
+        let bare = parse("{\"profiles\":{\"no1\":{}}}").unwrap();
+        assert!(bare.credential_for_profile("no1").is_none());
+        assert!(!bare.has_credential_for_profile("no1"));
     }
 
     #[test]

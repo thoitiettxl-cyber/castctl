@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use castctl_transport::dialer::{DialTarget, DirectDialer};
 use castctl_transport::rpc::RpcClient;
-use common::{FakeServer, RequestRecord, Responder};
+use common::fake_server::{FakeServer, RequestRecord, Responder};
 
 #[tokio::test]
 async fn env_proxy_is_ignored() {

@@ -23,6 +23,15 @@ bytes = { workspace = true }
 boringtun = { workspace = true, default-features = false }
 base64 = { workspace = true }
 smoltcp = { workspace = true, default-features = false, features = ["std", "log", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp", "socket-tcp-cubic", "async"] }
+# M4b: HTTPS over an outbound (rustls + tokio-rustls +
+# webpki-roots; all already in Cargo.lock via
+# tokio-tungstenite — no new crate). The provider selection
+# (`ring` only, no default features) lives on the workspace
+# dep (see rust/Cargo.toml): enabling a second provider
+# makes ClientConfig::builder() panic at runtime.
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+webpki-roots = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }

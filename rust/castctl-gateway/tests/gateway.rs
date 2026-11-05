@@ -36,7 +36,7 @@ use castctl_gateway::shared::{
 use castctl_transport::TransportError;
 use castctl_transport::retry::RetryPolicy;
 use castctl_transport::routes::{Route, Service};
-use common::{BadMsg2Server, BlackholeServer, FakeServer, Reply, canned_json};
+use common::{BadMsg2Server, BlackholeServer, FakeServer, RawUpgradeServer, Reply, canned_json};
 use tokio::time::sleep;
 
 fn routes() -> Arc<castctl_transport::routes::RouteTable> {
@@ -107,6 +107,10 @@ impl Connector for AlwaysAuthConnector {
 async fn call_json_roundtrip_five_methods() {
     let server = FakeServer::start(Arc::new(|req| canned_json(&req.path))).await;
     let gw = dial_gateway(&server.ws_url(), routes()).await.unwrap();
+    // Exactly one WS upgrade opened this gateway (no
+    // reconnects: all five calls reuse the same connection).
+    // This also keeps `request_targets` read in this target.
+    assert_eq!(server.request_targets.lock().unwrap().len(), 1);
     for (method, want) in [
         ("connection.ping", "\"pong\":true"),
         ("sessions.list", "\"sessions\""),
@@ -156,15 +160,13 @@ async fn call_json_roundtrip_five_methods() {
 async fn dial_url_sends_redacted_literal_not_real_token() {
     // Boss decision 2026-11-05: mirror Go byte-for-byte. Go
     // `internal/gateway/connector.go:116` (`defaultWSURL`)
-    // sends the literal `auth_token=<redacted>` — the quoted
+    // sends the literal `auth_token=<redacted>`; the real
     // hatch token is computed and silently discarded by
     // `Sprintf` (3 verbs, 4 args); `TestDefaultWSURL` pins
     // the literal, and the Go 0.9.0 production binary relays
     // real turns through that URL. The Rust URL must carry
-    // the same literal and never the real token value. The
-    // fake server records the raw upgrade request-target, so
-    // this asserts on the wire URL, not on a helper.
-    let server = FakeServer::start(Arc::new(|req| canned_json(&req.path))).await;
+    // the same literal and never the real token value.
+    let server = RawUpgradeServer::start().await;
     let url = default_ws_url(
         false,
         &server.addr.to_string(),
@@ -180,47 +182,56 @@ async fn dial_url_sends_redacted_literal_not_real_token() {
         ),
         "default_ws_url must mirror Go defaultWSURL"
     );
-    let gw = dial_gateway(&url, routes()).await.unwrap();
-    // Clone the recorded target out and drop the lock guard
-    // before any await (`gw.close().await` below).
-    let target = {
-        let targets = server.request_targets.lock().unwrap();
-        assert_eq!(targets.len(), 1, "one WS upgrade, got {targets:?}");
-        targets[0].clone()
-    };
-    // Wire level: `http::Uri` cannot represent `<`/`>` so
-    // `dial_gateway` percent-encodes the literal on the wire;
-    // the server decodes `%3C`/`%3E` back to `<redacted>`, the
-    // same query value Go sends raw.
+    // Wire level: the dial upgrades against the raw server
+    // (the fake server's tungstenite handshake parses the
+    // target with `http::Uri`, which rejects `<>`, so it
+    // cannot accept — or record — a literal token). The
+    // upgrade itself succeeds; the dial then fails at the
+    // Noise handshake because the raw server does not speak
+    // Noise. The live edge returns 401 for the
+    // percent-encoded `%3Credacted%3E` form (M4b live probe
+    // on cue, 2026-11-05), so the dial must NOT encode it.
+    let err = dial_gateway(&url, routes()).await.unwrap_err();
     assert!(
-        target.contains("auth_token=%3Credacted%3E"),
-        "dialed URL must carry the encoded Go literal, got {target}"
+        matches!(err, TransportError::ConnectionError { .. }),
+        "dial must fail at the Noise step, not the upgrade: {err:?}"
     );
     assert!(
-        !target.contains("REAL-TOKEN-SECRET-XYZ"),
-        "dialed URL must not carry the real token, got {target}"
+        server.sent_101(),
+        "raw server must have answered 101 (upgrade well-formed)"
+    );
+    let head = server.request_head().expect("upgrade request recorded");
+    let request_line = head.lines().next().unwrap_or("");
+    assert!(
+        request_line.contains("auth_token=<redacted>"),
+        "dialed URL must carry the literal Go token, got: {request_line}"
     );
     assert!(
-        target.contains("vm_id=vm-test"),
-        "vm_id must survive: {target}"
+        !request_line.contains("%3Credacted%3E"),
+        "dialed URL must NOT percent-encode the token, got: {request_line}"
     );
-    // Decoded level: the decoded query value must be the
-    // literal Go sends raw. No URL/query parser is a
-    // dependency of this crate, so decode the two sequences
-    // `dial_gateway` emits (`%3C`/`%3E`) on the extracted
-    // value directly — a general URL parser is not needed
-    // for this one value (fix loop 2, NB5).
+    assert!(
+        !head.contains("REAL-TOKEN-SECRET-XYZ"),
+        "dialed URL must not carry the real token"
+    );
+    assert!(
+        request_line.contains("vm_id=vm-test"),
+        "vm_id must survive: {request_line}"
+    );
+    // Value level: the query value itself is the literal Go
+    // sends raw (no decoding step — the wire form IS the
+    // literal now; the M4a manual `%3C`/`%3E` decode is gone
+    // with the percent-encoding).
+    let target = request_line.split_whitespace().nth(1).unwrap_or("");
     let query = target.split_once('?').map(|(_, q)| q).unwrap_or("");
     let token_value = query
         .split('&')
         .find_map(|pair| pair.strip_prefix("auth_token="))
         .expect("auth_token present in the recorded target");
-    let decoded = token_value.replace("%3C", "<").replace("%3E", ">");
     assert_eq!(
-        decoded, "<redacted>",
-        "decoded auth_token value must be the Go literal, got {decoded} (raw target {target})"
+        token_value, "<redacted>",
+        "auth_token value must be the Go literal, got {token_value} (raw target {target})"
     );
-    gw.close().await;
     server.stop();
 }
 
