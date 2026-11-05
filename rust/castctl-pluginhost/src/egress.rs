@@ -274,10 +274,15 @@ impl EgressProxy {
                 // `header_read_timeout` panics without a
                 // timer (`hyper::common::time`): the
                 // 10s ReadHeaderTimeout needs TokioTimer.
+                // `with_upgrades` is REQUIRED for CONNECT:
+                // without it the upgrade future fails with
+                // `ManualUpgrade` ("upgrade expected but
+                // low level API in use").
                 let _ = http1::Builder::new()
                     .header_read_timeout(std::time::Duration::from_secs(10))
                     .timer(TokioTimer::new())
                     .serve_connection(io, service)
+                    .with_upgrades()
                     .await;
             });
         }
