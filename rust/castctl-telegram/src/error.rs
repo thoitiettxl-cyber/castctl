@@ -321,9 +321,11 @@ impl From<serde_json::Error> for BotError {
     fn from(_e: serde_json::Error) -> Self {
         // Never carry the serde message: it can quote the
         // offending input bytes. A generic JSON decode
-        // failure is a response decode failure; update
-        // decode sites map explicitly to `UpdateDecode`
-        // instead of using this conversion.
+        // failure is a response decode failure. The
+        // `UpdateDecode` variant is retained for the
+        // error-class vocabulary, but no production site
+        // constructs it anymore: per-item decode failures
+        // are skipped, not returned (fix loop 3, red R6).
         BotError::ResponseDecode
     }
 }
