@@ -7717,7 +7717,733 @@ fake's 429 and recovers inside its 30s wait.
 - `goal`/`idea` and the other ~20 `NotWired`
   service methods (M4b-gateway follow-up boundary).
 - `auto_approve_errors` population (deviation 10).
+## M6c — Update + pluginhost (crates `castctl-update` + `castctl-pluginhost`, 2026-11-05)
 
+M6c ports `internal/update` (self-update: semver,
+checksums, extract, lock, replace, update flow) and the
+PURE layers of `internal/pluginhost` (pluginabi types,
+discovery, shadow copy, checksum, compat/ELF gate,
+paths, text, identity, host lifecycle, egress proxy)
+plus `internal/pluginabi` and the JSON-value redactor
+of `internal/redact/value.go` to Rust, crates
+`rust/castctl-update` and `rust/castctl-pluginhost`.
+Base `dev-rust 25a124e`; branch
+`feat/rust-m6c-update-plugins`. No Go file is
+modified; no `.go` harness file was added. The dlopen
+loader is STOPPED, not ported (see §M6c.2 deviation
+21): a safe pure-Rust port is impossible. CLI wiring
+(`internal/commands/update.go` flags/help/exit
+mapping, Telegram `/update` caller) is OUT of scope;
+the crate API stays compatible with a later wiring
+(`run(Options)`-equivalent).
+
+## M6c.1 Crate map + pins
+
+`castctl-update` (`src/`):
+
+- `error.rs`: `UpdateError::{Usage, Failure}` with
+  `code()` 2/1; `HttpError{op, host, path, status,
+  class, body_len}` with `summary()` (Go
+  `httpError.summary()` verbatim format).
+- `semver.rs`: hand-rolled parser, `Version{major/
+  minor/patch: String, pre: Vec<String>, build:
+  String}` exactly like Go `semver.go:32-38`;
+  compare by (length, lexicographic), never parse to
+  int; error always `"update: invalid version"`. No
+  `Default` / zero-value rendering as `".."`.
+- `checksums.rs`: update-flavour parser (64 KiB cap,
+  NUL/invalid-UTF-8 refuse, one BOM stripped, blank
+  lines skipped, 64 hex case-insensitive, one
+  optional `*`, identical duplicate idempotent,
+  conflicting/malformed duplicate refuses whole
+  file, 0 entries refuses).
+- `elf.rs`: hand-rolled 64-byte header validation
+  (ET_EXEC/ET_DYN, EM_X86_64 62 / EM_AARCH64 183).
+- `extract.rs`: `MultiGzDecoder` + `tar::Archive`
+  (gzip-magic peek, `'\x00'` typeflag also regular
+  via raw header byte 156, effective name via
+  `Entry::path_bytes()` for PAX/GNU-longname
+  overrides, trailing scan 32 KiB chunks, 64-entry
+  cap, 256 MiB cap, link/device members refuse
+  anywhere, duplicate refuses).
+- `lock.rs`: `acquire_update_lock` +
+  `LockOutcome::{Held, AlreadyHeld}`; `flock`
+  `LOCK_EX|LOCK_NB` via direct `libc::flock`,
+  0600, never deleted, symlink refuses,
+  Lstat-vs-fstat identity re-check.
+- `replace.rs`: `open_for_sync_with` (ETXTBSY retry,
+  200ms budget, 5ms doubling to 20ms max),
+  `sync_dir`, `is_dir_sync_tolerable` (raw errno
+  EINVAL 22 / ENOTSUP 95 only), `run_exec_check`
+  (empty env, `Dir` = file's parent, stdin null,
+  stderr discarded, stdout piped, reader thread,
+  poll `try_wait` every 5ms; order: deadline →
+  read error → len > 64 KiB → non-zero exit →
+  `check_version_output`), `check_version_output`.
+- `select.rs`: hand-rolled minimal URL parser
+  (`ParsedUrl`); `select_asset` +
+  `select_checksums_asset`, `validate_download_url`,
+  `decide`, `check_redirect_policy` (max 4 follows),
+  `classify_transport_error`,
+  `fallback_tag_from_location_path`,
+  `flavour_from_cgo_settings`.
+- `http.rs`: `Fetcher` trait (`get` +
+  `get_no_follow`); `StdFetcher` (std `TcpStream`,
+  connect 10s, read/write timeouts; https via
+  rustls `StreamOwned` + webpki roots, ALPN
+  `http/1.1`, handshake completed eagerly;
+  HTTP/1.1 + Content-Length + chunked +
+  `Connection: close`; redirect loop;
+  `User-Agent: castctl/<version>`,
+  `Accept: application/vnd.github+json` except the
+  download leg; never sends credentials; DNS
+  failure → `Dns`, rustls failure → `Tls`,
+  ECONNREFUSED/ECONNRESET via raw errno).
+  `fetch_bytes` (cap+1 → `too_large` with body_len
+  exactly cap+1) and `download_asset` (10 min,
+  `Accept` deleted, size checks, stream+hash,
+  fixed message `"update: download failed"`).
+- `run.rs`: `Deps{http_fetcher, executable,
+  cgo_settings, api_base, github_base, rename_fn,
+  sync_dir_fn, exec_check_fn}` (failure-injection
+  seams are `Option<fn>` fields, mirroring Go's
+  package vars `renameFunc`/`syncDirFunc`/
+  `execCheckFn`), `Options`, `Result`, `run(opts)`
+  implementing Go `run()` steps 0–6 in order
+  (stamped check FIRST, before ParseVersion;
+  flavour; platform linux amd64/arm64;
+  `resolveTarget` via `canonicalize` + regular
+  file + `Perm()`; non-executable → code 1;
+  `selectRelease`; noop prints
+  `"castctl is up to date: {current}"`;
+  dry_run/install), `install` (lock held for the
+  whole pipeline via guard; checksums → download
+  to temp 0600 O_EXCL → digest compare → extract
+  to temp 2 → sync+close → remove asset temp →
+  chmod = old `Perm()` BEFORE exec check → validateELF
+  → exec check → re-hash pre-rename → fsync via
+  `open_for_sync` → single rename → fsync dir;
+  tolerable → silent success, other error →
+  `Replaced=true` + `"durability"` error),
+  `dry_run` (5 output lines verbatim),
+  `fetch_checksums` (404 → `"update: the release
+  has no checksums file"`), `hash_file`,
+  `create_temp_file` (`.castctl-update-*`, 0600,
+  O_EXCL, time+pid suffix, 100 retries),
+  `rate_limit_error`, crate-level `Mutex`
+  mirroring Go's `updateMu`.
+- `tests/update_flow.rs`: 22 integration tests
+  (fake server + `rustc`-built fake binary +
+  e2e install).
+
+`castctl-pluginhost` (`src/`):
+
+- `error.rs`: `PluginHostError::{Invalid(String),
+  LoaderUnavailable, Failed(String)}`; the
+  `LoaderUnavailable` message is
+  `"plugin loading requires the Go binary (Option A:
+  keep the Go binary as plugin host, Rust delegates
+  plugin check)"`.
+- `pluginabi.rs`: full port of
+  `internal/pluginabi/pluginabi.go` (`ABI_VERSION
+  = 1`, `SCHEMA_VERSION = 1`, `ENTRY_SYMBOL =
+  "castctl_plugin_init"`, 8 method constants,
+  `Envelope`, `PluginError`, `Metadata`,
+  `Capabilities`, `Command`, `Registration`,
+  `Identity`, `Egress`, `RegisterRequest`,
+  `validate_registration`, `valid_cookie_host`).
+- `paths.rs`: `refuseSymlinkedComponents` (`".."`
+  refused BEFORE Clean; relative paths made
+  absolute by cwd concatenation, NOT Join; Lstat
+  EVERY component), `check_hardlink` (Nlink > 1
+  refuses), `check_shadow_dir_ownership`,
+  `pid_alive` (`kill(pid, 0)` nil or EPERM),
+  `open_plugin_source` (O_RDONLY|O_NOFOLLOW).
+- `discovery.rs`: `PluginFile`,
+  `validate_plugin_id`
+  (`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`),
+  `plugin_extension` (`.so` / `.dylib` / `.dll`),
+  `file_from_path`, `compare_plugin_versions`
+  (numeric segments, missing = 0, non-numeric →
+  incomparable → lexical fallback),
+  `plugin_file_preferred`, `discover`.
+- `shadow.rs`: `SHADOW_PREFIX
+  "castctl-plugin-"`, `SHADOW_TEMP_PREFIX
+  ".castctl-plugin-"`, `shadow_root()` =
+  `<tmp>/castctl-pluginhost`, `shadow_dir()` =
+  `pid-<pid>` 0700, `cleanup_shadow_dir()`,
+  `sweep_stale_shadow_dirs()` (only dead-pid
+  `pid-*` dirs, never own dir), static
+  `SWEEP_ONCE`, `shadow_copy`,
+  `shadow_copy_to_dir` (refuse symlinked
+  components BEFORE Clean; Lstat: symlink /
+  non-regular / hardlink refuse; temp
+  `.castctl-plugin-<id>-*` + hash simultaneously;
+  `shadow_matches` (size + sha256) → return
+  target; race-safe rename), `shadow_path`,
+  `remove_shadow_file`, `shadow_matches`.
+- `checksum.rs`: manifest format DIFFERS from
+  update (skip blank/`#`, strip `*`, 64 lowercase
+  hex, bare basename only — no abs, no `/\`, no
+  `..`, no dup — error `line %d:...`);
+  `parse_checksums`, `validate_manifest_name`,
+  `verify_checksum`, `verify_file_checksum`
+  (refuse symlinks on both paths first),
+  `verify_shadow_file_checksum` (lookup by
+  original basename, open shadow via O_NOFOLLOW +
+  regular re-check), `read_regular_file`.
+- `compat.rs`: hand-rolled ELF parser (32/64-bit,
+  LE/BE, program + section headers, shstrtab,
+  extended numbering); `max_required_glibc`,
+  `version_string_table`,
+  `dynamic_strtab_range`, `scan_strtab_versions`,
+  `parse_version_needs_count` (verbatim walk),
+  `parse_version_needs`,
+  `running_libc_version` (see §M6c.2 deviation
+  13), `check_plugin_compat`, `parse_glibc_version`,
+  `compare_glibc_version`.
+- `text.rs`: `MAX_PLUGIN_TEXT_LEN = 4096`,
+  `MAX_HOST_METHOD_LEN = 256`, `truncate_runes`,
+  `cap_plugin_text`, `cap_before_redact`,
+  `safe_plugin_text` = cap → `safe_string` → cap
+  (cap BEFORE redact), `strip_control_chars_bytes`
+  (Go `utf8.DecodeRuneInString` semantics, invalid
+  → U+FFFD consuming 1 byte, CSI dropped, C0/DEL/C1
+  dropped, `\n/\r/\t` → space),
+  `plugin_call_error`, `scrub_shadow_path`.
+- `identity.rs`: NEW JSON-value redactor over
+  `serde_json::Value` (secret key → wholesale
+  `"<redacted>"`, header-map key → every value
+  `"<redacted>"`, other strings →
+  `redact_url_userinfo` only, arrays/objects
+  rebuilt element-wise, null/bool/numbers
+  unchanged, secret rule wins over header rule);
+  `canonical_json` (Go `encoding/json`: sorted
+  keys, HTML escaping, float64 numbers),
+  `stripped_outbound_hash`, `new_plugin_identity`.
+- `loader.rs`: STOPPED scope — documents the
+  limit, exposes `LOADER_UNAVAILABLE_MESSAGE`,
+  `open_plugin` / `check_plugin` always
+  `Err(LoaderUnavailable)`; Options A/B/C.
+- `support.rs`: `support_value()` → `"0"`,
+  `support_plugins()` → false (see §M6c.2
+  deviation 7).
+- `host.rs`: `Client` trait, `ClientError::
+  {Transport, Panicked}`, `Loader` trait,
+  `StoppedLoader`, `EgressProxyHandle` trait,
+  `Desired`, `Options`, `LoadedPlugin`,
+  `Skipped`, `ApplyReport`, `FusedEntry`,
+  `LoadedEntry`, `Host` (`apply_config` in
+  verbatim Go order, `fused_for_loaded`, `fuse`,
+  `next_generation`, `store_loaded`, `load_one`,
+  `send_registration`, `apply_registration`,
+  `register`/`reconfigure`, `quiesce`,
+  `call`/`call_envelope`/`call_envelope_client`,
+  `dispatch_host_call`, `short_err`,
+  `parse_envelope`, `is_error_envelope`) +
+  `FakeClient`/`FakeLoader`/`FakeEgress` ports of
+  `internal/plugintest/fake.go` (in `mod tests`).
+- `egress.rs`: tokio + hyper 1.8 + hyper-util
+  0.1.20, hand-rolled `Service` (no tower);
+  `UpstreamTransport` trait + `HyperUpstream`
+  (hyper http1 handshake); `EgressProxy`
+  (loopback `127.0.0.1:0`, ephemeral Basic creds
+  24 random bytes base64 RawURLEncoding,
+  `header_read_timeout` 10s via hyper http1
+  builder + `TokioTimer`, `SetCookieHosts`,
+  `cookieAllowed`, auth gate 407 +
+  `Proxy-Authenticate: Basic`, CONNECT tunnel,
+  close aborts tunnels).
+- `tests/egress.rs`: 12 integration tests ported
+  from `egress_test.go`.
+
+Pins (workspace `Cargo.toml`, exact `=`):
+
+- NEW direct deps: `tar =0.4.46` (lock checksum
+  `3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840`),
+  `flate2 =1.1.10` (lock checksum
+  `6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb`).
+  Both MIT OR Apache-2.0; provenance §17 (renumbered from §16
+  in the rebase onto dev-rust 6a399f7, where upstream §16 is the
+  M6a keeper note).
+- `sha2 =0.10.9` (M6a+M6b consensus; the 0.11.1
+  option was not taken — 0.10.9 is what the
+  workspace already resolved, and `cargo tree -d
+  | grep sha2` returns NOTHING: sha2 is NOT
+  duplicated). Pre-existing duplicates such as
+  `aead 0.5.2/0.6.1` predate M6c.
+- Reused already-pinned: `hex 0.4.3`,
+  `tempfile 3.27.0`, `libc 0.2.191`, `tokio
+  1.48.0`, `hyper 1.8.1`, `hyper-util 0.1.20`,
+  `http 1.3.1`, `http-body-util 0.1.3`, `bytes
+  1.11.0`, `serde 1.0.228`, `serde_json 1.0.145`,
+  `rand 0.10.3`, `base64 0.22.1`, `chrono 0.4.45`,
+  `regex 1.13.1`, `rustls 0.23.46`,
+  `tokio-rustls 0.26.6`, `webpki-roots 0.26.11`.
+  `object 0.40.0` was NOT needed (hand-rolled ELF
+  parser in both crates). No `semver`, `zip`,
+  `fs2`, `fd-lock`, `minisign`, `ed25519`,
+  `libloading` crate was added.
+- Lock diff (commit `81111b8`): purely additive —
+  **115 insertions, 0 deletions, 0 version
+  changes**: adler2 2.0.1, filetime 0.2.29, flate2
+  1.1.10, httpdate 1.0.3, miniz_oxide 0.9.1,
+  simd-adler32 0.3.10, tar 0.4.46, xattr 1.7.0,
+  zlib-rs 0.6.8, plus the two new workspace
+  members castctl-update 0.1.0 +
+  castctl-pluginhost 0.1.0. (httpdate is a
+  newly-resolved transitive of the hyper-util
+  tokio feature set.)
+
+## M6c.2 Deviations from Go (deliberate, with citations)
+
+1. [DEVIATION] TLS error mapping (Q6): Rust maps
+   every rustls handshake/verification failure to
+   class `"tls"`. Go maps a REAL handshake failure
+   to `"transport"`, because Go's `isTLSError`
+   uses `errors.As` to `*x509.UnknownAuthorityError`
+   while the real error is a value inside
+   `*tls.CertificateVerificationError` inside
+   `*url.Error` — pinned by Go
+   `TestClassifyTransportErrorRealHandshake`
+   (`edge_test.go:940-991`). Rust test pins the
+   Rust taxonomy; a live rustls-vs-self-signed-server
+   test was NOT done (see §M6c.5).
+2. [DEVIATION] TCP keepalive 30s not set: std has
+   no keepalive API and `socket2` is not in the
+   lock. The client sends `Connection: close`, so
+   behaviour is unchanged. Go: `newUpdateClient`
+   (`update.go`, dial 10s, keepalive 30s).
+3. [DEVIATION] TLS handshake timeout is enforced
+   by the socket read timeout, not a separate
+   timer. Go: TLS handshake 10s
+   (`newUpdateClient`).
+4. [DEVIATION] Envelope result is
+   `serde_json::Value`, not raw bytes: Go uses
+   `json.RawMessage`; Rust re-serialises with
+   sorted keys. Go: `Envelope`
+   (`pluginabi.go`).
+5. [DEVIATION] `Deps` carries a boxed `Fetcher`
+   + CGO settings pairs. Go carries
+   `*http.Client` + `*debug.BuildInfo`
+   (`update.go:63-75`).
+6. [DEVIATION] Fragment parse-fail-fast: the host
+   parses the desired fragment to JSON and an
+   invalid fragment fails fast at the host. Go
+   sends raw bytes via `json.RawMessage` for the
+   plugin to reject. Go: `ApplyConfig` /
+   `sendRegistration` (`host.go`).
+7. [DEVIATION] `support_value()` returns `"0"`.
+   Go returns `"1"` on cgo builds
+   (`support.go`); a Rust binary cannot dlopen,
+   so `"0"` is the honest value (the Go `"0"`
+   applies to stub builds).
+8. [DEVIATION] Egress `IdleTimeout` 120s has no
+   direct hyper equivalent; not implemented. Go:
+   `EgressProxy` (`egress.go`).
+9. [DEVIATION] Egress request bodies are buffered
+   into `Full<Bytes>` before the upstream call. Go
+   streams; no limit is applied, matching Go's
+   no-limit. Go: `serveForward` (`egress.go`).
+10. [DEVIATION] Egress listener close uses
+    `libc::shutdown` on the listener fd + aborts
+    the accept-loop task + aborts tracked tunnels:
+    tokio has no listener close. Go closes the
+    listener + server (`egress.go:Close`).
+    `TcpListener::from_std` requires
+    `set_nonblocking(true)` first (tokio#7172).
+11. [DEVIATION] hyper `header_read_timeout`
+    requires a `TokioTimer` — hyper panics
+    ("timeout `header_read_timeout` set, but no
+    timer set") without one — and CONNECT requires
+    `.with_upgrades()` on the served connection
+    (else `ManualUpgrade`). Both found by failing
+    tests on cue; Go sets the timeouts on
+    `http.Server` directly (`egress.go`).
+12. [DEVIATION] The hyper-util legacy client is
+    NOT used (it needs the `client-legacy`
+    feature, which the workspace does not enable);
+    the production upstream dials via the hyper
+    http1 handshake pattern from
+    `castctl-transport/src/http.rs:292`. HTTPS
+    upstreams refuse — the Go wiring's upstream
+    handles TLS via the profile outbound; the Rust
+    wiring injects its own transport. Go:
+    `http.RoundTripper` (`egress.go:56`).
+13. [DEVIATION] `running_libc_version` does NOT
+    dlopen: it parses `/proc/self/maps` to find
+    the loaded `libc.so.6` path, then hand-rolls
+    the ELF parse of its `.gnu.version_d`
+    (Verdef) entries; max defined `GLIBC_x.y` ≈
+    running version. Any failure → error →
+    fail-closed, like Go `version_other.go`. Go:
+    `runningLibcVersion` (`compat.go`, dlopen
+    `gnu_get_libc_version`).
+14. [DEVIATION] `ClientError::Panicked` models Go
+    panic-injection as an error variant, NOT a
+    real panic; a real Rust panic inside a client
+    call is still recovered by `catch_unwind`,
+    type reported like Go's `%T` (`&str`/`String`
+    → `"string"`, else `"unknown"`). Go:
+    `plugintest/fake.go` panic injection.
+15. [DEVIATION] `EgressProxyHandle` trait
+    (`set_cookie_hosts`, `close`, `is_closed`)
+    exists so host tests need no async runtime;
+    the concrete `egress::EgressProxy` implements
+    it. No Go counterpart (Go's `EgressProxy`
+    is concrete; `host.go` uses it directly).
+16. [DEVIATION] `ApplyConfig` takes no `ctx`: the
+    Rust `call` takes `timeout: Option<Duration>`
+    instead. Go: `ApplyConfig(ctx, ...)`
+    (`host.go`).
+17. [DEVIATION] Host state is cloned and written
+    back (`LoadedEntry` is `Clone` via `Arc`
+    client/egress): Rust cannot hold a map entry
+    across lock releases the way Go holds a
+    `*loadedPlugin`. Go: `Host` (`host.go:132-149`).
+18. [DEVIATION] Checksum errors never embed the
+    shadow path (Go wraps os errors carrying it;
+    this port drops the path-bearing cause), and
+    `read_regular_file` errors for the plugin file
+    omit the path (Go returns the raw os error
+    with path); manifest-read errors are the fixed
+    `"read plugin checksums manifest"`. Go:
+    `checksum.go`, `openErrorWithoutPath`.
+19. [DEVIATION] Identity invalid-UTF-8 JSON: Go
+    replaces with U+FFFD and succeeds; Rust
+    `serde_json::from_slice` errors
+    `"invalid json"`. Numbers render through
+    float64 like Go (literal spelling lost — same
+    as Go). Go: `redact.Value` (`value.go`).
+20. [DEVIATION] `validate_download_url` returns
+    `bool`, not `Result<(), ()>`: Go's
+    `validateDownloadURL` returns one fixed error
+    (`"invalid download URL"`,
+    `update.go:774-793`) for every refusal, and
+    every caller only tests accept/refuse.
+21. [DEVIATION] LOADER — STOPPED SUB-SCOPE. The
+    Go loader is dlopen + C ABI
+    (`loader_unix.go:168`, NOT `plugin.Open` —
+    grep 0 hits), and a safe pure-Rust port is
+    impossible: unsafe FFI + a SIGSEGV/SIGBUS
+    signal guard around a bare `*char` method
+    (`callbacks_unix.go:208,223,244`), no safe
+    Rust equivalent, and the task forbids
+    `unsafe` outside libraries. `loader.rs`
+    documents the limit, exposes the typed
+    `LoaderUnavailable` error, and proposes
+    Options A/B/C from the Phase 1 report R2 §7
+    (A RECOMMENDED: keep the Go binary as plugin
+    host, Rust delegates `plugin check`; B
+    subprocess protocol v2; C small C shim /
+    `libloading` in a dedicated unsafe crate).
+    The 4 SKIP tests (2 SIGSEGV-guard +
+    1 `TestBoundedCStringLen` + 1 stub-loader)
+    stay SKIP with the reason recorded; the 12
+    dlopen harness tests (`loader_test.go`,
+    `origin_test.go`, `race_sharing_test.go`) are
+    recorded as NOT PORTABLE under the current ABI
+    with the exact reason, not silently dropped.
+22. [DEVIATION] The DT_STRTAB overflow test uses
+    checked arithmetic (`off.checked_add(strsz)`):
+    the C-style `off + strsz < off` test would
+    panic in a Rust debug build on overflow
+    instead of refusing. An overflowing range
+    refuses explicitly; same refusal set as Go.
+    Go: `dynamicStrtabRange` (`compat.go`).
+23. `tempfile` is a production dependency
+    (`shadow_copy_to_dir` builds its temp file
+    with `tempfile::Builder`), not a dev-dep; and
+    `hyper`/`hyper-util` features are declared on
+    the `castctl-pluginhost` crate itself
+    (relying on another crate's feature
+    unification broke `-p` builds:
+    `hyper::client` / `hyper::server` /
+    `hyper_util::rt::TokioIo` unresolved).
+24. `shadow_copy_to_dir` keeps the `NamedTempFile`
+    alive until the rename completes: its `Drop`
+    DELETES the temp file, so dropping before the
+    rename fails with `"move shadow plugin"`.
+    Go: `shadowCopyToDir` (`shadow.go`).
+25. Compat dead-code removal: `SHT_GNU_VERNEED` /
+    `SHT_GNU_VERDEF` consts and `Section.typ` /
+    `Section.addr` fields are gone — the walk
+    locates sections by name and uses only
+    off/size/link/info.
+26. `call_envelope_client` bundles
+    (tag, path, generation) into a `CallTarget`
+    struct (clippy `too_many_arguments`, 8/7);
+    Go's `callEnvelopeClient` takes the same 7
+    params (`host.go:819-857`).
+27. `redact.Value` is NEW work in this crate: the
+    JSON-value redactor was explicitly excluded
+    from `castctl-log-redact`, so it lives in
+    `castctl-pluginhost/src/identity.rs`, reusing
+    `castctl_log_redact::is_secret_key`
+    (`redact_str.rs:192`). Go: `internal/redact/
+    value.go`.
+
+Settled probes (2026-11-05, on cue):
+
+- Q1 gzip multistream: Go `gzip.Reader` is
+  multistream, so a second gzip member's bytes
+  reach the trailing scan and refuse. Chosen
+  `flate2::read::MultiGzDecoder`; pinned by
+  test `second_gzip_member_refuses`.
+- Q2 checksums.txt separator: `curl -sL
+  https://github.com/thoitiettxl-cyber/castctl/
+  releases/download/v0.9.0/checksums.txt | od -c`
+  on cue: 4 lines, `<64 hex><space><space>
+  <name>\n` — two spaces, text mode (no `*`), LF.
+  (Without `-L` returns empty — GitHub
+  302-redirects.)
+- Q3 redirect 4-vs-5 boundary: unit test
+  (`via.len() >= 5` refuses the 5th redirect,
+  exactly 4 follows allowed — matches Go
+  `checkRedirectPolicy`).
+- Q5 dir-sync errno: raw errno 22/95
+  (`EINVAL`/`ENOTSUP`; on Linux `EOPNOTSUPP ==
+  ENOTSUP == 95`).
+- Q7 ETXTBSY: 200 exec→open rounds pass on cue
+  (`open_for_sync_after_real_exec_200_rounds`).
+- Q9 fallbackTag %-escape: `%2F` decodes to `/`
+  then refuses, like Go (unit test).
+- Fake binary for the update harness: decision
+  (a) — small Rust helper binary built by
+  cargo/rustc in the crate's test harness
+  (self-contained; a real ELF64 printing
+  `castctl <version>`), NOT keeping `go build`
+  testdata. Modes `ok`/`hang`/`flood`/`exit1`.
+- `safe_string` cost: measured by the passing
+  `safe_plugin_text_large_input_bounded` test
+  (5MB + 50MB, <5s each) — the 5s bound stands.
+- Sweep test touches global state: isolated with
+  a static Mutex (`SWEEP_TEST_MU`) — never
+  touches the real shadow root beyond dead-pid
+  dirs.
+- `tar` crate PAX parity: verified — PAX path
+  override applies via `Entry::path_bytes()`
+  (NOT `Header::path_bytes()`, which returns raw
+  header bytes); GNU longname likewise. Pinned
+  by `extract_pax_override_refuses`.
+- Go `wrapError` message is just the fixed `msg`
+  (cause attached via `Unwrap`, not rendered):
+  Rust `UpdateError::failure(msg)` matches, e.g.
+  download failures are exactly
+  `"update: download failed"`.
+
+## M6c.3 Reuse verification (read, not re-ported)
+
+- `castctl_log_redact::is_secret_key`
+  (`redact_str.rs:192`) and `safe_string` are
+  reused by `identity.rs` / `text.rs` (cap BEFORE
+  redact — `safe_string` is superlinear).
+- `castctl-transport/src/http.rs:292` hyper http1
+  handshake pattern is the production upstream
+  for `egress.rs`; `castctl-transport/src/tls.rs:
+  57-59` `ClientConfig::builder().with_root_
+  certificates(webpki roots)` pattern is the
+  `StdFetcher` TLS setup.
+- `castctl-telegram/src/error.rs:28-60`
+  `BotError` pattern is the model for both crates'
+  single error enums with `Display` that never
+  leaks server body / URL / secrets / shadow paths.
+- `castctl-config/src/blocks.rs:100`
+  `validate_plugin_tag` and the M2
+  `validate_plugin_type` / `PluginsBlock` are
+  reused, not duplicated; the M6b
+  `handle_get_plugins` stub (`200
+  {available:false}`) is NOT wired — out of scope.
+- `castctl-telegram`'s `request_tls` 16 MiB cap
+  deviation (M5a deviation 21) does NOT apply
+  here: the update fetcher streams with its own
+  256 MiB asset cap (`maxAssetBytes`).
+
+## M6c.4 Gates (cue, 2026-11-05)
+
+Toolchain 1.99.1 via `rust/rust-toolchain.toml`;
+`CARGO_TARGET_DIR=/tmp/m6c-target`. Head
+`1a25c04` (`fix(rust-m6c): last clippy error —
+Error::other in egress test`); the full test run
+below is at `9d5b9c2` (code-identical except the
+1-line egress-test `Error::other` change) and the
+clippy/fmt runs at `1a25c04`:
+
+- `cargo fmt --check`: exit 0.
+- `cargo build --locked --workspace`: exit 0.
+- `cargo build --workspace`: exit 0, 0 warnings.
+- `cargo test --workspace`: exit 0.
+  **728 passed, 0 failed** (39 suites) vs the
+  Step-0 baseline **568 passed, 0 failed @25a124e**
+  (coordinator-measured on cue — authoritative;
+  PORTING.md's 560/567 are stale/older heads).
+  Math: 568 + 160 new = 728 (castctl-update lib
+  47 + `tests/update_flow.rs` 22 +
+  castctl-pluginhost lib 79 + `tests/egress.rs`
+  12).
+- `cargo clippy --workspace --all-targets -- -D
+  warnings`: exit 0, 0 errors, 0 warnings.
+- `cargo tree -d | grep sha2`: empty — sha2 is
+  NOT duplicated.
+- Semver table (R1 §1.5, in the 47 update-lib
+  tests): Table A 13 valid inputs (incl.
+  `99999999999999999999999999.0.0`, which exceeds
+  u64::MAX — the decisive proof against the
+  `semver` crate) + Table B 20 invalid groups
+  (40+ inputs, incl. the 128-byte cap) + Table C
+  15 compare pairs with exact -1/0/1 + an 8-chain
+  all-pairs ordering + Table D accessors
+  (`AssetVersion` core+pre, no build) + the
+  zero-value trap (no `Version{}` rendering as
+  `".."`). All pass.
+- Mandatory tests (all pass): discovery 0/1/many
+  + broken plugin; shadow copy content+perms;
+  bad checksum → refuse; path traversal in plugin
+  name → refuse; replace failure-injection
+  (partial write, rename failure, wrong perms) →
+  old binary intact; checksums (uppercase hex,
+  BOM, duplicates); `checkVersionOutput` 17 cases
+  + `castctl v0.6.4` accept; extract
+  traversal/link/PAX/trailing-data; lock held +
+  lock symlink refuse.
+
+## M6c.5 Chưa kiểm chứng
+
+- Q6 live TLS test: a rustls client against a
+  local self-signed TLS server on cue was NOT
+  run. The Rust `"tls"` mapping (§M6c.2 deviation
+  1) is pinned by unit tests only; the live
+  behaviour against a real handshake failure is
+  unverified.
+- Update flow against the real github.com release
+  endpoint: verified against a fake/offline server
+  only (fake release JSON + fake asset +
+  checksums). No real network download was run.
+- Live plugin load: the loader is STOPPED (§M6c.2
+  deviation 21) — no dlopen, no real plugin was
+  ever loaded by the Rust code. Options A/B/C
+  await a Boss decision.
+- Egress HTTPS upstream: refuses by design (§M6c.2
+  deviation 12); the Go wiring handles TLS via
+  the profile outbound.
+- Egress `IdleTimeout` 120s behaviour: no hyper
+  equivalent (§M6c.2 deviation 8).
+- `cargo tree -d` full duplicate list: only sha2
+  was checked; pre-existing duplicates (e.g.
+  `aead 0.5.2/0.6.1`) predate M6c and were not
+  audited here.
+
+## M6c.6 Findings while writing (fail-before proofs + fixes)
+
+1. `shadow_copy_to_dir`: `drop(tmp)` on the
+   `NamedTempFile` DELETED the temp file before
+   the rename → `"move shadow plugin"`. Fixed by
+   keeping `tmp` alive until the rename completes
+   (its Drop afterwards is a no-op).
+2. Shadow symlink test over-asserted `"must not
+   be a symlink"` — the refusal fires first in
+   `refuse_symlinked_components` (`"traverses a
+   symlink at..."`). Go's hardening test
+   (`shadow_hardening_test.go:47`) asserts only
+   `Contains(err, "symlink")`; test fixed to
+   match Go.
+3. `tar` crate: a header is an extension header
+   only when `is_ustar()` holds — magic `ustar\0`
+   AND version `00`; a magic-only fixture header
+   is yielded as a plain entry. Test fixture
+   `raw_header` now writes both.
+4. `raw_header` asserts the size fits the 11-digit
+   octal field (1<<40 does NOT fit — use 1<<32).
+5. Fake-server routing must match by filename
+   suffix (`ends_with("/checksums.txt")`,
+   `ends_with("/castctl_0.6.4_linux_amd64.tar.gz")`),
+   NOT by `/download/<name>` suffix: fallback
+   download URLs carry the tag mid-path
+   (`/.../releases/download/<tag>/<name>`).
+   Release JSON sizes must be the true served
+   sizes (download refuses on Content-Length
+   mismatch); `make_target` must build the fake
+   binary in the work dir, not the target tempdir
+   (litter assertions).
+6. Egress: hyper panics without a timer when
+   `header_read_timeout` is set (`TokioTimer`
+   required); plain `serve_connection` answers
+   CONNECT with `ManualUpgrade`
+   (`.with_upgrades()` required); `TcpListener::
+   from_std` panics on a blocking socket
+   (`set_nonblocking(true)` first, tokio#7172).
+   All three found by failing tests on cue, each
+   with a debug probe before the fix.
+7. `rand::RngCore` is NOT re-exported at the
+   crate root in rand 0.10 (compiler suggests
+   `rand::Rng`).
+8. Test fn `parse_version_needs()` shadowed the
+   production fn (18 E0061 + cascading errors) →
+   renamed test to `parse_version_needs_cases`.
+9. `put16/put32/put64` test helpers: bind endian
+   bytes before `copy_from_slice` (E0716
+   temporaries).
+10. An early `install` draft double-acquired the
+    lock and dropped the guard (lock not held
+    during install) + a scope guard deleted the
+    asset temp right after download — both fixed;
+    current code acquires once and keeps the
+    guard alive.
+11. Lock diff gap (found 2026-11-05): the local
+    `rust/Cargo.lock` had NEVER been
+    regenerated/committed for M6c (no `tar`, no
+    `castctl-update`/`castctl-pluginhost`
+    entries) — `cargo build --locked --workspace`
+    failed with "cannot update the lock file …
+    because --locked was passed" until the
+    cue-side regenerated lock was copied back and
+    committed at `81111b8`.
+12. scp destination gotcha: scp to
+    `/tmp/m6c-writer/` puts the bundle at
+    `/tmp/m6c-writer/<name>.bundle`, NOT
+    `/tmp/m6c-writer.bundle` — an early fetch
+    read the stale bundle at the old path and
+    landed on `b164b5d`; fixed by fetching the
+    correct path. Also: `git checkout FETCH_HEAD`
+    aborts when the cue working tree has a dirty
+    `rust/Cargo.lock` even if byte-identical —
+    discard it first.
+
+## M6c.7 Fix loop 1 — clippy (2026-11-05)
+
+First clippy run at `81111b8`: CLIPPY-EXIT 101,
+59 unique errors (19 `collapsible_if`, 9
+`type_complexity`, 4 `single_match`, 4
+`needless_return`, 3 redundant slicing, 2
+clone-on-Copy, 2 manual char comparison, 2
+`derivable_impl`, 2 doc-list-indent, 1 C-overflow
+(`compat.rs:585`), 1 `result_unit_err`, 1
+`too_many_arguments`, 1 `question_mark`, 1
+`needless_lifetimes`, 1
+`redundant_pattern_matching`, 1
+`create-without-truncate`, 1 `to_string` in
+`assert!`). Fixed by type aliases
+(`ResponseHead`, `ExecCheckFn`, `LogFn`,
+`CallHook`, `OpenFn`, `UpstreamResponseFuture`)
++ a `CallTarget` struct for the 8-arg
+`call_envelope_client` + checked arithmetic for
+the DT_STRTAB overflow test + `bool` for
+`validate_download_url` + derived `Default` for
+`Deps`/`Options` + let-chain collapses.
+Re-run at `5368d01` found 3 more: 3 compile
+errors E0277 in extract tests (the
+redundant-slicing fix overshot: `FAKE_ELF` is
+`&[u8]`, so `&FAKE_ELF[..]` → `FAKE_ELF`, not
+`&FAKE_ELF` — `&&[u8]` has no `Read` impl) + 2
+`io_other_error` in `update_flow.rs`
+(`Error::new(ErrorKind::Other, ..)` →
+`Error::other(..)`). Re-run at `9d5b9c2` (after
+`cargo fmt` on cue + copy-back): all gates green
+except 1 more `io_other_error` in
+`tests/egress.rs`. Fixed at `1a25c04`:
+`cargo fmt --check` 0, `cargo clippy --workspace
+--all-targets -- -D warnings` 0. No blanket
+allows were added; no criteria were lowered.
 ## Quy tắc quyết định (Boss, 2026-11-05 — standing)
 
 Applies to the whole Rust port, not just M4a. Decide

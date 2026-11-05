@@ -2081,7 +2081,69 @@ crate's own M2 type, `Number(String)`), and neither
 deviation from the Go implementation are recorded in
 `rust/PORTING.md` §M6a.
 
+## 17. tar + flate2 — LINKED (Rust artifact only, no copied code)
 
+M6c (update + pluginhost, crates `castctl-update` +
+`castctl-pluginhost`, `rust/castctl-update/src/` +
+`rust/castctl-pluginhost/src/`). Both are called as
+dependencies only; no tar / flate2 source code is
+copied into `rust/`. Versions are exact pins in
+`rust/Cargo.toml` + `Cargo.lock` (verified on cue,
+2026-11-05; licenses read from `cargo metadata` on
+cue, which reads each crate's pinned `Cargo.toml`).
+
+- tar `=0.4.46` — MIT OR Apache-2.0,
+  <https://github.com/composefs/tar-rs>, lock checksum
+  `3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840`.
+  Tar archive reading for the update asset
+  (`extract.rs`: `tar::Archive`; gzip-magic peek,
+  `'\x00'` typeflag also regular via raw header byte
+  156, effective name via `Entry::path_bytes()` for
+  PAX/GNU-longname overrides, 64-entry cap, 256 MiB
+  cap, link/device members refuse anywhere,
+  duplicate refuses). PAX parity verified against Go
+  `archive/tar` (see `rust/PORTING.md` §M6c.6 item 3
+  for the `is_ustar()` fixture gotcha).
+- flate2 `=1.1.10` — MIT OR Apache-2.0,
+  <https://github.com/rust-lang/flate2-rs>, lock checksum
+  `6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb`.
+  Gzip decoding for the update asset (`extract.rs`:
+  `flate2::read::MultiGzDecoder` — Go `gzip.Reader`
+  is multistream, so a second gzip member's bytes
+  reach the trailing scan and refuse; pinned by test
+  `second_gzip_member_refuses`).
+- Transitives (all resolved by the lock, versions +
+  licenses from `cargo metadata` on cue): adler2
+  `=2.0.1` — 0BSD OR MIT OR Apache-2.0; crc32fast
+  `=1.5.4` — MIT OR Apache-2.0 (already in the lock
+  before M6c); filetime `=0.2.29` — MIT/Apache-2.0
+  (tar: mtime preservation); miniz_oxide `=0.9.1` —
+  MIT OR Zlib OR Apache-2.0 (flate2: pure-Rust
+  DEFLATE); simd-adler32 `=0.3.10` — MIT
+  (miniz_oxide); xattr `=1.7.0` — MIT OR Apache-2.0
+  (tar: extended attributes); zlib-rs `=0.6.8` —
+  Zlib (flate2: zlib backend). `httpdate 1.0.3` also
+  entered the lock with this PR, but it is a
+  hyper-util transitive (tokio feature set), not a
+  tar/flate2 transitive.
+- sha2 `=0.10.9` was NOT newly added by M6c (it was
+  already pinned/locked); M6c only promoted it to a
+  workspace dep. `cargo tree -d | grep sha2`
+  returns NOTHING: sha2 is NOT duplicated.
+  Pre-existing duplicates such as `aead 0.5.2/0.6.1`
+  predate M6c.
+
+What M6c takes from these crates (behaviour only, no
+code): tar entry iteration + PAX/GNU-longname
+handling from tar; multistream gzip decoding from
+flate2. Only the validation around them (member
+selection, caps, trailing scan, digest) is castctl
+code. Every deviation from the Go implementation is
+recorded in `rust/PORTING.md` §M6c, including the
+loader STOP (dlopen + C ABI, no safe Rust port) and
+the explicit "Chưa kiểm chứng" list (no live TLS
+handshake test; no real github.com download; no live
+plugin load).
 ## Carried items (unresolved at the time of writing)
 
 - npm license check: not run — no license-checking tool present,
