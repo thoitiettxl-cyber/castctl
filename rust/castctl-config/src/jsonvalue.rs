@@ -114,6 +114,18 @@ impl OrderedObject {
         }
     }
 
+    /// Remove `key`, returning its value if it was present
+    /// (Go `orderedObject.delete`, `jsonvalue.go`).
+    pub fn remove(&mut self, key: &str) -> Option<JsonValue> {
+        match self.keys.iter().position(|k| k == key) {
+            Some(i) => {
+                self.keys.remove(i);
+                Some(self.values.remove(i))
+            }
+            None => None,
+        }
+    }
+
     /// Keys in insertion order.
     pub fn keys(&self) -> &[String] {
         &self.keys

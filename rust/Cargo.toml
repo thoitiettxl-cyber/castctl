@@ -11,6 +11,7 @@ members = [
     "castctl-telegram",
     "castctl-update",
     "castctl-pluginhost",
+    "castctl-webui",
     "castctl-rs",
     "castctl-keeper",
 ]
@@ -163,6 +164,26 @@ futures-util = "=0.3.34"
 # be a duplicate TOML key, so they are not repeated here.
 url = "=2.5.8"
 async-trait = "=0.1.92"
+# M6b: bcrypt Bearer-token verify/hash for the web UI server
+# (`internal/profile/webui_secret.go`: bcrypt DefaultCost 10,
+# 72-byte limit). bcrypt 0.17.1 adds exactly two new crates
+# (bcrypt + blowfish); every other dep is already locked at a
+# satisfying version (base64 0.22.1, subtle 2.6.1, getrandom
+# 0.3.4, zeroize 1.9.1). 0.19.x was rejected: it needs
+# base64 0.23 (a second base64 major; the workspace pins
+# =0.22.1). Pin measured on cue 2026-11-05; see
+# rust/PORTING.md §M6b and docs/provenance.md §16.
+bcrypt = "=0.17.1"
+blowfish = "=0.9.1"
+# M6b: SHA-256 (bundle hash, config-file hash) and flock
+# (guarded config save) use the sha2/libc lines promoted
+# above by M6a (same versions 0.10.9 / 0.2.191; do NOT pick
+# sha2 0.11.1, also in the lock — 0.10.9 is the
+# workspace-consistent line).
+# M6b: SHA-1 for the screencast WebSocket handshake
+# (`Sec-WebSocket-Accept`, RFC 6455) — already in the lock
+# via tungstenite 0.30.0; promoting it adds no new crate.
+sha1 = "=0.11.0"
 
 [patch.crates-io]
 # Replicated verbatim from honk's workspace Cargo.toml at the pinned
