@@ -8,6 +8,7 @@ members = [
     "castctl-cli",
     "castctl-transport",
     "castctl-gateway",
+    "castctl-telegram",
     "castctl-rs",
 ]
 resolver = "2"

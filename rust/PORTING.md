@@ -4130,6 +4130,1025 @@ probe log, drift outputs).
   covered by threshold injection in M4a tests.
 
 
+## M5a — Telegram bot core (crate `castctl-telegram`, 2026-11-05)
+
+M5a ports `internal/telegram` (bot core: long polling,
+dispatcher, state file, approvals, claims, files,
+inbound media) and the Bot-API-side command handlers of
+`internal/commands` (routing, allowlist/owner gates,
+callbacks, `/help`, `/start`, `/main`, `/delete` prompt,
+`/autoapprove`, `/watch`, `/login` arming) to Rust,
+crate `rust/castctl-telegram`. Base `dev-rust
+96ce485` (M4a merged); branch
+`feat/rust-m5a-bot-core`. No Go file is modified; no
+`.go` harness file was added. Go base `main 1396697`.
+
+## M5a.1 Crate map + pins
+
+- `error.rs`: `BotError` (`Transport`, `Api{code,
+  description (held, never printed), retry_after}`,
+  `Validation`, `State`, `NotWired`, `Cancelled`);
+  `Display` never prints the Api description;
+  `error_class()` maps structurally;
+  `summary()` = `format_summary(error_class,
+  rune_count(Display))`.
+- `types.rs`: `Update`/`Message`/`CallbackQuery`/
+  `MessageContext` (`sender_id()` callback-first,
+  `chat_key()`).
+- `api.rs`: `BotApi` (`getUpdates` timeout param 25,
+  `allowed_updates` message+callback_query only,
+  `getMe`, send/edit/delete/answer, `setMyCommands`,
+  `getMyCommands`, multipart upload with a fresh body
+  per retry attempt, `getFile` + download); 429 retry
+  exactly per Go `retryCall` (`bot.go:1527-1546`).
+- `send.rs`: `Send` (split >3800 via
+  `castctl-tg-text::split_text`, keyboard only on last
+  piece), `SendMD`, `sendOne` HTML-then-plain fallback
+  (4096 cap), `Edit` (swallows "message is not
+  modified"), `EditPlain` (swallows ALL errors — Go
+  deviation, mirrored), `Delete`, `answer`,
+  `validate_commands` (before any request).
+- `state.rs`: `telegram-state.json` v1 (atomic save:
+  temp + fsync + chmod 0600 + rename, dir 0700;
+  corrupt JSON → fresh + corrupt flag; unknown
+  version → refuse startup; non-integer version
+  shape → refuse with ≤32-rune echo; toggles as
+  pointers; `sent_media` cap 500; offset
+  monotonic-max only).
+- `dispatcher.rs`: per-chat FIFO workers, dedupe
+  window 1024 (in-memory only), queue depth 64 (full
+  queue drops the NEWEST, counts it), idle reap 5m,
+  shutdown drain bounded 10s, offset-before-handle
+  (`onOffset` under lock, before handling, whether or
+  not the queue accepted it).
+- `registry.rs`: `CallbackRegistry` cap 3000, `c:`
+  token, consume-before-RPC, `ApprovalMarkup` /
+  `ApproveAllMarkup`.
+- `approvals.rs`: `Approval` / `DescribeApproval` /
+  `ChooseAutoDecision` / `ApprovalText`.
+- `claims.rs`: `ApproveForever` / `awaitClaim` /
+  `recordClaim` / `failClaim` / `NotifyPending` /
+  `AutoLog` cap 51, `decideOnce` single-flight per id,
+  decided cap 1024 oldest-first.
+- `files.rs`: `SendFile` / `sendFileKind`,
+  `MediaOf` / `InboxName` / `DownloadMedia` (20 MiB,
+  TWO gates), `/files` list cap 12, history window
+  last 40 events.
+- `router.rs`: the 30-command table
+  (`COMMAND_MENU`), parse, owner gate, `BotServices`
+  seam trait (M5b turn runner + M4b gateway).
+- `commands.rs`: `CommandHandler` (full handlers +
+  seam dispatch + callbacks, `/help` byte-identical
+  to Go).
+- `bot.rs`: `Bot` (construction calls `getMe` once;
+  poll loop; allowlist BEFORE enqueue; turn
+  tracking; shutdown).
+
+Pins: the `Cargo.lock` diff for M5a is exactly the new
+member entry (`[[package]] castctl-telegram 0.1.0`
+with its 16 dependencies, all already-locked crates)
+plus one added edge, rustls → `log` (the `logging`
+feature this crate enables, M4b's feature set; `log`
+was already in the lock). NO new crate version
+entered the lock and NO pin changed — the TLS direct
+deps are pinned exactly to the versions already in
+the lock: rustls `=0.23.46`, tokio-rustls `=0.26.6`,
+webpki-roots `=0.26.11`, ring `=0.17.14`. So no
+`NOTICE` / `docs/provenance.md` entry is needed for
+M5a (the M3d/M4a pattern applies only when a new
+direct dep is added). `rust/Cargo.toml`: exactly one
+new member line (`"castctl-telegram"`, after
+`"castctl-gateway"`). (Pre-rebase record at
+`e25bca9`; the rebase onto merged M4b deleted the
+temporary `tls.rs` and its direct deps — see
+§M5a.3 deviation 1 and §M5a.9 for the rebased lock
+diff.)
+
+## M5a.2 Command table (30 rows)
+
+`full` = Bot-API-side complete in this crate.
+`seam` = handler renders/admits/gates, the work goes
+through `BotServices` (gateway = M4b wiring, turn
+runner = M5b). Never claim a seam-only command is
+fully implemented.
+
+| # | Command | full/seam | Reason |
+|---|---------|-----------|--------|
+| 1 | start | full | fixed reply (`telegram_commands.go:237-240`) |
+| 2 | help | full | `telegramBotHelpText` byte-identical (`:40-64`) |
+| 3 | stop | seam | `stopTurn` (M5b) |
+| 4 | status | seam | sessions + unread + identity + probe (M4b/M5b) |
+| 5 | chats | seam | `listChatSessions` gateway read (M4b); picker render full |
+| 6 | main | full | state mapping + fixed reply |
+| 7 | new | seam | `SessionStart` (M4b/M5b); mapping write full |
+| 8 | history | seam | history read (M4b); N clamp [1,50] full |
+| 9 | unread | seam | `chat.unread_count` (M4b); 3500-rune truncate full |
+| 10 | rename | seam | gateway op (M4b); title write full |
+| 11 | pin | seam | gateway op (M4b) |
+| 12 | unpin | seam | gateway op (M4b) |
+| 13 | archive | seam | gateway op (M4b); mapping reset full |
+| 14 | unarchive | seam | gateway op (M4b) |
+| 15 | delete | full* | prompt + confirm keyboard full; confirm tap runs `delete_chat` (M4b seam). NO owner gate (see §M5a.3 deviation 9) |
+| 16 | approvals | seam | `egress.approvals` read (M4b); render + buttons full |
+| 17 | autoapprove | full | state file only, never rewrites `config.json` |
+| 18 | watch | full | state-file flag only; forwarding is roadmap step 5b, NOT implemented |
+| 19 | files | seam | history read (M4b); reverse/dedupe/cap-12 render full |
+| 20 | feed | seam | feed read (M4b); limit sanitise full |
+| 21 | goals | seam | goals read (M4b) |
+| 22 | goal | seam | `goals.get` (M4b); head + `<pre>` / `goal.json` render full |
+| 23 | ideas | seam | list/execute (M4b); first-15 render + `▶️ Execute` button full |
+| 24 | usage | seam | usage read (M4b) |
+| 25 | wake | seam | wake (M4b) |
+| 26 | fs | seam | op runs in service (M4b); text/file/rm-confirm render full |
+| 27 | profile | full | local `os.Stat` on the cookies file + format (`telegram_owner.go:87-101`); no gateway call, no service (fix loop 1, tech B9) |
+| 28 | update | seam | owner gate full; dry-run check (M4b) |
+| 29 | login | full* | arming + instruction full; save + probe is a seam (`save_login_cookies`) |
+| 30 | raw | seam | owner gate full; route check in service (M4b seam); gateway call (M4b seam) |
+
+Full 8 / seam 22 (was 7 / 23 before fix loop 1).
+
+There is NO `telegram sync-commands` subcommand in
+Go — none was invented. The 30 are verified from
+`telegramCommandMenu` + `runCommand`
+(`telegram_commands.go:73-118`, `:154-235`) and the
+live `getMyCommands` record in
+`CASTCTL-CONTEXT.md` (menu "/" live = 30).
+
+## M5a.3 Deviations from Go (deliberate, with citations)
+
+1. TEMPORARY TLS module (`tls.rs`, parent decision
+   1): `HttpClient` was plaintext-only and the Bot
+   API is HTTPS-only, while the TLS code (`tls.rs` +
+   `request_tls`) existed only in uncommitted M4b.
+   DONE on the rebase onto merged M4b (`27a0eaf`):
+   the module is DELETED (`castctl-telegram/src/
+   tls.rs` gone, `mod tls;` gone, direct deps
+   rustls / tokio-rustls / webpki-roots / hyper /
+   hyper-util / http-body-util removed from the
+   crate manifest), `BotApi` now uses M4b's
+   `HttpClient::request_tls` (`castctl-transport`,
+   ALPN `http/1.1` via `tls_client_config`, pinned
+   by M4b's own test `tls_config_pins_http11_alpn`),
+   and `telegram_api_target()` moved into `api.rs`.
+   `castctl-transport` was NOT touched (Boss rule:
+   do not edit M4b's src) — see deviation 21 for
+   the one consequence of that (download cap).
+2. 5xx bounded backoff in the poll loop [DEVIATION]:
+   Go's bot core has NO 5xx retry — a 5xx surfaces
+   to `errorsHandler` (log-only) and the library polls
+   again. This crate backs off on the ladder 1s, 2s,
+   4s, 8s, 16s, 30s (capped), reset on the first
+   successful poll, so a sick upstream does not
+   hot-loop. Ladder + reset are tested
+   (`tests/bot_core.rs`: `backoff_5xx_poll_loop_retries`
+   — 2×500 then success, update still handled; the
+   429 path has its own test with request count +
+   timing).
+3. Registry tokens ARE `crypto/rand` parity (fix
+   loop 1, safety B1 / tech B7 / red N3): 6 bytes
+   from `rand` 0.10.3 (already a workspace dep, used
+   by `castctl-gateway`, already in `Cargo.lock` —
+   one dep line in `castctl-telegram/Cargo.toml`,
+   zero new crates in the lock), base64url, 8 chars,
+   `c:` prefix, collision-retry loop. `rand::random`
+   panics if the OS RNG is unavailable, mirroring
+   Go's panic on `crypto/rand` failure. The earlier
+   draft derived tokens from time + counter + pid
+   (predictable in principle); that construction is
+   gone. Note on exploitability: there is NO API
+   injection channel for callback forgery — Telegram
+   only emits `callback_query` updates for buttons
+   the bot itself sent, so the server already knows
+   every token. The CSPRNG is Go parity +
+   defence-in-depth, not a fix for a demonstrated
+   forgery.
+4. `error_class()` mapping (fix loop 1, tech B8):
+   decode failures map in-crate to
+   `ResponseDecodeFailure` / `UpdateDecodeFailure`
+   with the `telegram poll error: ` prefix via
+   `format_summary` (from `castctl-log-redact` —
+   see §M5a.4 for why the mapping is in-crate);
+   `ConnectionDown` / `ConnectionError` classify
+   from the message via `fallback_class` (dns /
+   timeout / tls / refused / reset / unreachable /
+   eof), falling back to `Unclassified` when the
+   message matches nothing — `TransportError` drops
+   the DNS/TLS/errno distinction Go's
+   `transportClass` reads, so the message text is
+   the only signal left. `summary()` counts the raw
+   error text's RUNES as Go does (`bot.go:764-770`)
+   — length only, never the text itself, so no token
+   leaks through the count. All 20 `ErrorClass`
+   labels are emittable: `Dns` / `Tls` /
+   `ConnectionRefused` / `ConnectionReset` /
+   `Unreachable` / `Eof` come only via
+   `fallback_class(message)` (reachable when the
+   transport message matches — pinned by the
+   `transport_connection_failures_classify_from_message`
+   test); every other label has a direct arm.
+   `ContextDeadlineExceeded` has no direct arm (no
+   call site in this crate applies a deadline to a
+   poll/RPC — Go emits it from
+   `context.DeadlineExceeded`; the 429 sleep and the
+   poll loop observe shutdown instead, which maps to
+   `ContextCanceled`), but it IS emittable via the
+   `fallback_class` phrase "context deadline
+   exceeded" (fix loop 2, tech N-N2 — the loop-1
+   claim "19/20, only `ContextDeadlineExceeded`
+   unreachable" was literally wrong).
+5. Download cap 16 MiB on BOTH paths [DEVIATION]:
+   `HttpClient::request` AND `request_tls` cap at
+   16 MiB (`MAX_RESPONSE_BODY`); neither can be
+   parameterised from this crate. (Pre-rebase, the
+   temporary TLS module honoured the 20 MiB+1 gate
+   exactly; the rebase removed that path — see
+   deviation 21 for the consequence.)
+6. `inbox_name` uses a UTC prefix [DEVIATION]: Go
+   uses local time (`inbound.go:146-170`); this
+   crate has no tz database, so the
+   `<YYYYmmdd-HHMMSS>-` prefix is UTC. The prefix is
+   only a filename disambiguator.
+7. `EditPlain` swallows ALL errors (Go deviation,
+   mirrored, `bot.go:1701-1724`): not "fixed".
+8. Claim-storm residual mirrored, NOT fixed
+   (`claims.go` takeover semantics): a slow decider
+   + short `ClaimWait` lets every concurrent caller
+   time out, take over, and decide the same id (20
+   goroutines, 150ms decider, 20ms ClaimWait → 20
+   decider calls). Gateway-side idempotency is
+   REQUIRED in step 5.
+9. `/delete` has NO owner gate (documented
+   asymmetry, Python parity, Boss-approved
+   2026-11-01 — `telegram_commands.go:930-951`).
+   Do not add one.
+10. `/fs get` refusal wording kept verbatim:
+    `Too big for Telegram (50 MB).`
+    (`telegram_fs.go:330-334`, gate is 49 MiB) vs
+    `downloadFile`'s `Too big for Telegram (49 MB);
+    use castctl download.`
+    (`telegram_commands.go:711-720`). The
+    inconsistency is Go's, copied, not "fixed".
+11. `currentThread` side-chat sentence kept
+    verbatim: `That works on side chats. Open one
+    with /chats or make one with /new.`
+    (`telegram_commands.go:853-861`).
+12. `setMyCommands` validation: all entries
+    validated BEFORE any request (name
+    `^[a-z0-9_]{1,32}$`, no dupes, description
+    1–256 runes); failure only warns at the caller —
+    here the error is returned and zero API calls
+    are made (`bot.go:1786-1816`).
+13. No CLI wiring (parent decision 2):
+    `telegram run` / `status` stays a stub in
+    `castctl-cli` — NOT edited here. Follow-up.
+14. No `classifyError` port: M4b owns
+    `classify_error` in `castctl-cli/network.rs`
+    (`internal/commands/commands.go:241-360`); this
+    crate must not port a second one. Rebase
+    outcome (M4b merged at `27a0eaf`):
+    `classify_error` is `pub(crate) fn
+    classify_error(err: &TransportError) -> FlowErr`
+    (`network.rs:196`), so it is NOT directly
+    reusable from `castctl-telegram` — expanding
+    M4b's just-merged API is out of scope. The
+    in-crate `error_class` mapping is KEPT (tested,
+    20/20 labels emittable via `format_summary` /
+    `fallback_class` — see §M5a.4). It could be
+    reused only if `classify_error` moves to a shared
+    crate in a future PR; until then the two
+    mappings coexist by design.
+15. `WireGuard` dispatch: no `WireGuard(Arc<...>)`
+    → `Arc<dyn Dialer>` conversion helper existed on
+    `dev-rust` at M5a write time (M4b-only,
+    uncommitted then); this crate
+    writes its own 5-line match in-crate if needed.
+    Rebase outcome: the "if needed" never
+    triggered — this crate has ZERO WireGuard
+    references, so nothing was written. M4b's
+    transport exports `dispatch_endpoint` /
+    `dispatch_outbound` publicly if a future need
+    arises.
+16. Poll offset vs state offset: the in-memory poll
+    offset advances past EVERY update received
+    (strangers included), mirroring the Go library,
+    which advances its offset after handing each
+    update to the handler. The STATE offset only
+    advances for accepted updates, via the
+    dispatcher's `onOffset` hook. A stranger update
+    is therefore re-fetched and re-dropped after a
+    restart — harmless, and exactly Go's behaviour
+    (strangers "never advance the offset hook",
+    `bot.go:651-667`).
+17. `ApproveForever`'s once-per-id warning log has
+    no sink: Go logs a warning when an approval
+    offers no forever option (`claims.go:133-221`);
+    this crate has no logger, so the warning cannot
+    be emitted. The claim is still released exactly
+    as Go does; the `warned` set was removed as dead
+    state rather than kept unread.
+18. Mirrored Go deviations (not introduced here):
+    `DownloadMedia` Gate 2 reads through a
+    LimitReader at cap+1 although upstream (Python)
+    has no second gate (`inbound.go:172-221`);
+    `sendDocument` fallback ONLY on `ErrorBadRequest`
+    when kind ≠ document, exactly once;
+    `opts.Mode` ignored; no size limit enforced in
+    `SendFile` itself (`files.go:169-264`); the file
+    part Content-Type is `application/octet-stream`
+    (the Go library's stdlib multipart default;
+    Python sets it from the filename,
+    `src/muse_cli/tgapi.py:161-172`); in-memory
+    dedupe window 1024 is lost on restart (Go-added
+    deviation vs Python, kept).
+19. `notify_pending` early-return: when a turn is
+    running, pending approvals are NOT notified and
+    never notified later for those ids — no reminder
+    queue (`claims.go:335-412`). Mirrored as-is.
+20. 5xx with an undecodable body takes the 5xx
+    ladder [DEVIATION, fix loop 1, red N1]: Go's
+    `getUpdates` decode fails the whole call on a
+    non-JSON 5xx body (the error surfaces to
+    `errorsHandler`, log-only, and the library polls
+    again with no backoff). This crate maps an
+    undecodable 5xx body to `Api{code: status,
+    description: "", retry_after: None}` and backs
+    off on the ladder (deviation 2), so an empty
+    500 body cannot wedge the poll loop into a
+    1s-pause retry storm. Any OTHER undecodable body
+    maps to `ResponseDecode` (the Go behaviour).
+21. Download cap is 16 MiB on the production TLS
+    path too [DEVIATION, rebase onto merged M4b]:
+    the deleted temporary TLS module honoured the
+    20 MiB+1 gate exactly (`request_with_body_cap`);
+    M4b's `request_tls` caps at the fixed
+    `MAX_RESPONSE_BODY` (16 MiB,
+    `castctl-transport/src/http.rs`, `http_over_stream`)
+    with no parameter, and Boss's rule for this
+    rebase forbids editing M4b's src — so NO
+    parameterised-cap variant was added. A file
+    whose real size is in (16 MiB, 20 MiB] now fails
+    at the transport with `BotError::Transport`
+    (`TransportError::Gateway` + body summary)
+    instead of downloading and hitting Gate 2's
+    clear `BotError::Validation("file exceeds the
+    20 MiB download limit")`; Go ACCEPTS such a
+    file. Gate 1 (message-declared size > 20 MiB,
+    refused before download) still works — note it
+    checks the size declared on the message, NOT
+    `getFile`'s reported `file_size` (pre-existing
+    divergence from Go, which reads `getFile`;
+    see `files.rs` — the two agree for a consistent
+    server). Gate 2 is UNREACHABLE while the transport
+    caps at 16 MiB (`bytes.len()` can never exceed
+    20 MiB); it revives unchanged if the parameterised
+    cap lands. The `max_body` parameter is retained on
+    `download_file_bytes` / `get_path` / `post_json`
+    for the call shape (currently honoured by
+    neither path). Follow-up (not this rebase): a
+    parameterised cap in `castctl-transport` owned
+    by a transport PR. The 3 unit tests of the
+    deleted module are gone with it; their coverage
+    lives on in M4b's transport tests
+    (`tls_config_pins_http11_alpn`,
+    `host_header_rules`) already counted in the
+    467-test M4b base; the third deleted test
+    (`tls_config_builds_without_panic`) is subsumed
+    by the ALPN test, which calls the same
+    `tls_client_config()` constructor.
+
+## M5a.4 Reuse verification (read, not re-ported)
+
+- `castctl-log-redact::ErrorClass` covers all 20
+  labels (verified by reading
+  `castctl-log-redact/src/summarize.rs`: TooManyRequests,
+  BadRequest, Forbidden, Unauthorized, NotFound,
+  Conflict, ResponseDecodeFailure,
+  UpdateDecodeFailure, Timeout, Dns, Tls,
+  ConnectionRefused, ConnectionReset, Unreachable,
+  Eof, ContextCanceled, ContextDeadlineExceeded,
+  Http5xx, Http4xx, Unclassified) + `label()`,
+  `format_summary` (decode classes get
+  `telegram poll error: `, others `telegram error: `),
+  `SUMMARIZE_PREFIX_RUNES = 256`, the anchored-decode
+  rule (decode classes only via anchored chain check,
+  never string fallback) and the scrub-chain-dropping
+  behaviour (`bot.go:1125-1200`). This crate USES
+  `format_summary` and `fallback_class` from it, but
+  NOT `classify_error` / the anchored rule: those
+  operate on `ErrorChain` values, which this crate
+  never constructs (its errors are typed
+  `BotError` variants, not anyhow chains), so the
+  decode-class mapping is done in-crate in
+  `BotError::error_class` (fix loop 1, tech B8).
+  No gap found — the other crate was NOT extended.
+- `castctl-tg-text` reused as-is (M1 parity
+  complete — `escape_text`, `split_text` CHUNK_SIZE
+  3800, `strip_tags`, `button_text` 64 chars).
+- `castctl-tg-files` reused (`file_kind_for`,
+  `FileKind`, `UPLOAD_LIMIT` 49 MiB, `PHOTO_LIMIT`
+  10 MiB).
+- `castctl-transport::HttpClient::request` reused
+  for plaintext tests (no proxy env, no redirect,
+  16 MiB body cap). `RpcClient::call_json` is
+  gateway-only and was NOT used for the Bot API
+  (route table lookup would fail; envelope decoding
+  differs).
+- `castctl-config::TelegramConfig` is NOT used
+  in-crate (fix loop 1, tech N11 — the M5a draft
+  claimed otherwise): the token arrives as a plain
+  `String` in `BotApiConfig`, and only the shape
+  check `castctl_config::telegram::valid_telegram_token_shape`
+  is reused. `config.json` is never re-parsed here.
+  M4b did not change `TelegramConfig` (verified by
+  grepping the M4b diff — no Telegram hits), so
+  this still holds after the rebase.
+- Rebase reuse decisions (onto merged M4b,
+  `27a0eaf` — see §M5a.9): TLS REUSED
+  (`HttpClient::request_tls` + `tls_client_config`,
+  ALPN `http/1.1` pinned by M4b's
+  `tls_config_pins_http11_alpn`); `classify_error`
+  NOT reused — `pub(crate)` in `castctl-cli`, see
+  §M5a.3 deviation 14; `credential_for_profile`
+  NOT reused — it is M4b's login-credential API
+  (`LoginCredential` username/password for
+  profiles, `castctl-config/src/config.rs:165`),
+  not a bot-token API, and this crate takes the
+  token as a `String`; `castctl-gateway/src/
+  summary.rs` NOT reused — it is M4b's gateway
+  allowlist body summary (port of
+  `internal/gateway/summary.go`), a different thing
+  from this crate's `BotError::summary()`
+  (`summarizeError` port); `dispatch_endpoint` /
+  `dispatch_outbound` NOT reused — this crate never
+  touches WireGuard (deviation 15). No M4b code was
+  duplicated into this crate and no M4b code was
+  moved.
+
+## M5a.5 Gates (cue, 2026-11-05; fix loop 1 same day)
+
+All four gates exit 0 on the final code (toolchain
+1.99.1 via `rust/rust-toolchain.toml`):
+
+- `cargo fmt --check --all`: exit 0.
+- `cargo build --workspace`: exit 0, 0 warnings.
+- `cargo test --workspace`: exit 0. Fix loop 1:
+  BEFORE 402 (measured on the writer's head,
+  `/tmp/castctl-rust-m5a-baseline-fixloop1.log`),
+  AFTER 437 (+35, all in `castctl-telegram`: lib
+  +23, integration `tests/bot_core.rs` +12). The
+  writer's BEFORE 347 was measured with a
+  clean-checkout run on cue
+  (`/tmp/castctl-rust-m5a-baseline.log`, 347 passed,
+  0 failed) — it disagrees by 1 with PORTING
+  §M4a.4's "AFTER 346" (fix loop 1); cause not
+  established, possibly a test added in a later
+  `dev-rust` commit. The comparison here uses the
+  measured 347, not the recorded 346.
+- `cargo clippy --workspace --all-targets -- -D
+  warnings`: exit 0, 0 errors, 0 warnings (after
+  the fix loop in §M5a.7 item 5).
+- Required tests (all pass in
+  `tests/bot_core.rs`): routing 30/30 + unknown
+  name + `@botname` + upper-case; offset persists
+  across restart (no update handled twice);
+  duplicate update in one batch handled once; 429
+  backoff (3 `sendMessage` requests, elapsed ≥ 3s
+  for two `retry_after=1` + 0.5s sleeps); 5xx poll
+  backoff (2×500 then success, update handled
+  once); stranger rejection (owner admitted,
+  allowed non-owner refused ONLY the 4 owner
+  commands with the fixed sentence, stranger
+  dropped silently with no state change — offset
+  stays at the last accepted id); `/help` sent text
+  byte-identical to Go (constant pinned by the
+  `help_text_matches_go_verbatim` unit test);
+  token never in any `Debug`/`Display`/summary;
+  `SetCommands` validation rejects bad names,
+  dupes, overlong/empty descriptions with zero
+  `setMyCommands` calls (valid menu: exactly 1).
+
+## M5a.6 Chưa kiểm chứng
+
+- Live `getMe` / `getMyCommands`: no bot token exists
+  on cue (config has 0 token keys,
+  `/root/.secrets` does not exist). Re-run when a
+  token becomes lawfully available on cue:
+  `castctl telegram run` (once CLI wiring lands) or
+  the `get_me` / `get_my_commands` calls against
+  `api.telegram.org`. NEVER send a real Telegram
+  message to any user; never print/log/commit a token.
+- Turn streaming is M5b (seam only, via the
+  `BotServices` trait). No turn was run live.
+- CLI wiring follow-up (`telegram run` / `status`
+  stub in `castctl-cli`, see §M5a.3 deviation 13).
+- The 5xx backoff ladder at production thresholds
+  (30s cap) was not waited; covered by threshold
+  injection in the poll loop (50ms ladder in tests).
+- `EditPlain` swallowing all errors, the claim-storm
+  residual, and the `/delete` no-owner-gate asymmetry
+  are mirrored from Go, not live-proven here.
+
+## M5a.7 Findings while writing (fail-before proofs + fixes)
+
+1. `BotError` derived `Debug` printed the `Api`
+   description (server text), contradicting the module
+   doc and the `api_display_never_prints_description`
+   test. Fixed with a hand-written `Debug` that
+   renders the description as `[redacted]`
+   (`error.rs`); `Display` already printed only the
+   code.
+2. Dispatcher channel closed without a processor:
+   `enqueue` dropped the `mpsc::Receiver` at the end
+   of the queue-creation block when no processor was
+   set, so EVERY send failed closed and the queue
+   could never fill to its depth of 64
+   (`full_queue_drops_newest` failed at the first
+   fill assert). Fixed by holding the receiver in
+   `ChatQueue` until a worker takes it
+   (`dispatcher.rs`). Production always sets the
+   processor in `Bot::new` before the first enqueue,
+   so this only bit the no-processor test path — the
+   test, not the code, was the spec.
+3. State-test temp paths collided across runs:
+   `tmp_path()` used a per-process counter starting at
+   0, so a previous `cargo test` run's saved file
+   (toggles written by `set_toggles`) was re-loaded
+   and `toggles_nil_means_block_values_win` failed on
+   a stale `Some(false)`. Fixed by including the pid
+   in the temp name (`state.rs`); `bot_core.rs` test
+   dirs already did this.
+4. Poll-loop shutdown could hang forever: `Bot::run`
+   selected on `Notify::notified()`, but
+   `notify_waiters()` wakes only waiters that are
+   CURRENTLY waiting — a shutdown requested while the
+   loop was between selects was lost, and the loop
+   polled forever (`offset_persists_across_restart`
+   and `stranger_rejection_three_cases` ran past 60s
+   with no progress; the tests that passed had won
+   the race). Fixed with a durable `AtomicBool`
+   shutdown flag checked at the top of every
+   iteration; the `Notify` only wakes a sleeping poll
+   early (`bot.rs`).
+5. Clippy fix loop (2026-11-05, 38 errors → 0):
+   `cargo clippy --fix` on cue applied the
+   mechanical fixes (collapsible `if`s, `map_or` →
+   `is_some_and` / `unwrap_or`, range `contains`,
+   `div_ceil`, `bool_assert_comparison`, needless
+   lifetimes, redundant casts); the diff was reviewed
+   hunk by hunk after pulling it back. Hand-fixed:
+   three `too_many_arguments` (arity mirrors Go's
+   `sendFileKind` / `HttpClient::request` signatures
+   — `#[allow]` with the reason, same precedent as
+   `NotifyPending`); two `match_overlapping_arm`
+   (range arms → guards); one `doc_lazy_continuation`
+   (reworded `+` list item); two dead test fields
+   (`FakeServer.count`, `RequestRecord.path`).
+
+## M5a.8 Fix loop 1 (2026-11-05, after the three Phase 3 reviews)
+
+All 12 BLOCKING items fixed, all cheap NITs fixed.
+Per-item fix + test (details in
+`~/workspace/tmp/castctl-rust-m5a/fix-loop1-report.md`):
+
+1. `decide_once` (tech B1 / red R1): level-triggered
+   wait (`DecideInflight { done, notify }`),
+   `DecideInflightGuard` Drop cleanup on EVERY exit
+   incl. decider panic, waiter observes shutdown.
+   Follow-up found during the loop: a waiter woken
+   by the owner's shutdown-cancelled guard drop
+   re-elected itself owner and returned `Ok(true)`
+   — fixed with a shutdown-flag check at the top of
+   the `decide_once` loop. Tests: stress (5 rounds
+   × 8 waiters), owner-abort takeover,
+   waiter-cancelled-on-shutdown, `set_decided`
+   first-wins, claim-storm count (asserts 20, does
+   NOT fix the storm).
+2. Dispatcher shutdown (tech B2 / red R2):
+   `abandoned` checked BEFORE processing each item.
+   Test: slow processor, 50ms shutdown timeout,
+   buffered items dropped AND never processed.
+3. Malformed updates (red R3): `#[serde(default)]`
+   on id/chat/from/file_id (Go: absent → zero;
+   wrong-type item is skipped per item — CORRECTED
+   by fix loop 3, red R6: the loop-1 record said
+   "wrong-type still fails the whole batch", which
+   was FALSE against the pinned library's per-item
+   `decodeUpdate`; see the Fix loop 3 section).
+   Tests: missing chat, missing update_id, callback
+   missing from, result-not-array, ok:true no
+   result, wrong-type item.
+4. Offset overflow (red R4): `saturating_add(1)` at
+   both offset sites; only other `+ 1` is the
+   download-cap `+ 1` (not an update id). Test with
+   `i64::MAX` / 0 / -1 / `i64::MIN` + restart
+   (polls with offset `MAX`, no replay).
+5. State load (tech B3): body type-mismatch →
+   fresh + corrupt (Go `state.go:240-242`); unique
+   temp per save (`create_new`, 0600 at creation,
+   removed on error); dir chmod 0700 only when
+   creating; `omitempty` serialisation; unknown-
+   version error carries offset + toggle counts;
+   `claim/release_sent_media` return the save
+   error. Parity fixes, not deviations.
+6. `set_decided` first-wins (tech B4, Go
+   `bot.go:1310-1324`).
+7. Markdown fallback (tech B5): Markdown mode sends
+   the ORIGINAL text; only HTML strips tags. Test
+   with `**bold**` (send + edit + over-limit).
+8. 429 sleep cancellable (tech B6 / red N7): one
+   `ShutdownSignal` shared by the poll loop and the
+   API client (`call_json_timeout`,
+   `send_file_multipart`); tests on both paths.
+9. Registry token CSPRNG (safety B1 / tech B7 /
+   red N3): `rand` 0.10.3, one dep line, zero new
+   crates in the lock; deviation 3 rewritten.
+10. `error_class` gaps (tech B8): decode classes
+    mapped in-crate (`format_summary` prefix);
+    deviation 4 corrected in fix loop 2 (tech N-N2):
+    all 20 labels are emittable —
+    `ContextDeadlineExceeded` has no direct arm but
+    is reachable via the `fallback_class` phrase
+    "context deadline exceeded" (the loop-1 "19/20"
+    claim was wrong); `summary()` counts
+    raw-text runes (test pin fixed 22 → 32).
+11. Command table (tech B9): `/profile` FULL, local
+    (`os.Stat` + format, Go
+    `telegram_owner.go:87-101`); `/raw` = "route
+    check in service (M4b seam)". Table 8 full /
+    22 seam. `profile_text` removed from
+    `BotServices`.
+12. `BotApiConfig` Debug (safety B2): hand-written,
+    token redacted; `token_never_in_debug_or_display`
+    covers it.
+NITs fixed in the same loop: safety N1 (ALPN
+applied — the doc promised it, the builder did not
+set it), N3 (`summary()` drops the token param),
+N4 (allowlist in `process_update`), N5 (uid==0
+drop), N6 (`/login` save failure → Go's fixed
+sentence), N7 (20 MiB hold documented, not
+changed), N8 (temp 0600 at creation); red N1 (5xx
+empty body → 5xx ladder, deviation 20), N2
+(`dropped()` documented as the only
+observability), N5 (shutdown re-checked inside
+`select!` via `shutdown_wait()`), N6 (single
+answer on raced decide tap), N8 (storm count
+asserted), N9 (no-worker leftovers counted);
+tech N1 (`notify_pending` → struct; clippy
+`too_many_arguments` allows now 3, not 4 — the
+4th was `notify_pending`'s, removed by the fix),
+N2 (claim/release return save errors), N3
+(omitempty + unknown-version counts), N4
+(`chat_key` edited → sender id), N6 (markup kept
+through multipart), N7 (`dl_file_name` Go
+semantics), N9 (double-start guard), N10
+(`set_processor` spawns workers for pre-existing
+queues), N11 (`TelegramConfig` not used in-crate),
+N12 (`int_field` truncates float64), N13
+(voice/video_note file_name forced `""`), N14
+(`download_media` fast-errors on empty file_id),
+N15/N16/N17 (router/service contract docs:
+`fs_rm` text, `/new` no-session warning,
+`files_list` history order), N18 (`catch_unwind`
+around the `onOffset` hook).
+Deferred: exactly one — red N10 (`is_auth_error`,
+`commands.rs:90-95`, only matches
+`TransportError::Auth`): whether a real gateway auth
+failure surfaces as `TransportError::Auth` through
+the M4b seam services is unverified. (Rebase
+update: M4b HAS landed — `27a0eaf` — so the seam
+services exist in the tree now (`castctl-gateway`);
+the mapping itself is still unverified and still
+deferred, now to the CLI-wiring follow-up, not to
+M4b landing. Pin with a test then; do not guess the
+mapping.) (Fix loop 2, tech
+N-N3 — the loop-1 section wrongly said "Deferred:
+none." while the fix-loop-1 report §3 listed this
+same N10 as deferred.) Everything else in the loop
+is either fixed or documented-in-place with its
+reason (N7 size hold, N2 observability, N15–N17
+contracts).
+Harness notes from the loop: the fake server
+paces empty `getUpdates` by 10ms (a running Bot
+otherwise hot-spins and starved a sibling test
+past its wait under full parallel runs); the
+`offset_persists_across_restart` waits are 10s
+(scheduling margin, not a behaviour bound). One
+test-authoring mistake was caught and fixed in
+the loop: a state test chmod'd the shared `/tmp`
+to 0755 (restored to 1777 on cue); state tests
+now use dedicated directories.
+
+### Fix loop 2 (re-review of loop 1)
+
+Re-review verdicts on loop 1: technical FAIL (only
+the lock edge below), safety FAIL (only the same
+lock edge), red-team FAIL (R5 below). Every loop-1
+BLOCKING fix was verified as real in code (12/12
+technical, B1/B2 safety, R1/R2/R4 red-team); the
+failures were one landing defect and one hole in
+the R3 fix itself.
+
+1. `Cargo.lock` stale (safety L1 / technical N-B1,
+   BLOCKING): `castctl-telegram/Cargo.toml` declared
+   `rand = { workspace = true }` but the committed
+   `rust/Cargo.lock` had no `"rand"` edge under
+   `castctl-telegram` — the loop-1 report checked
+   `git diff -- Cargo.lock` at the REPO ROOT, where
+   no `Cargo.lock` exists, and claimed "EMPTY". The
+   loop-1 gates therefore cannot have run on the
+   committed tree (any build rewrites the lock).
+   Fixed here: the lock gains exactly the `"rand"`
+   edge (no new crate version), committed, and all
+   gates re-run on the committed tree with `git
+   status` clean afterwards + `cargo build --locked`
+   passing. The loop-1 "EMPTY" claim is superseded
+   by this record; the loop-1 report file itself is
+   not rewritten (history stands, corrected going
+   forward).
+2. Explicit JSON `null` poisons the batch (red R5,
+   BLOCKING, novel): `#[serde(default)]` only fires
+   for ABSENT fields; a field present as `null`
+   still failed serde for every non-`Option` type
+   (`update_id`, `message_id`, `chat`, `date`,
+   `Chat.id`/`kind`, `User.id`/`first_name`/`is_bot`,
+   `CallbackQuery.id`/`from`, `PhotoSize`/`FileObject`
+   `.file_id`, bare `null` array elements, `null`
+   elements of nested vecs). Go's `encoding/json`
+   treats `null` as not-present (zero value), so Go
+   proceeds. Fixed with a `null_as_default`
+   `deserialize_with` helper on every non-`Option`
+   decode field, a `null_photo_vec` helper for
+   `photo` elements, and a `null` → zero-`Update`
+   arm in `get_updates`. (The sentence this item
+   originally ended with — "Wrong-TYPE fields still
+   fail the whole batch (Go parity — unchanged)" —
+   was FALSE and is SUPERSEDED by fix loop 3, red
+   R6; see the Fix loop 3 section. A wrong-type
+   field fails only that item, per the pinned
+   library's `decodeUpdate`.)
+   Tests: every null shape in one batch with a good
+   update (unit + loop-level).
+3. Dispatcher residuals (red NITs 1+2, tech N-N1):
+   (a) the worker's `abandoned` check and pending
+   decrement now share ONE lock (two locks let
+   `shutdown()` drain `pending` between them,
+   counting an item dropped that was then
+   processed); (b) `shutdown()` early-returns when
+   already shut down, like Go
+   (`dispatcher.go:264-271`). Test: double-shutdown
+   with a gated processor (deterministic via a
+   probe enqueue proving the first shutdown's flag
+   is set).
+4. Panicking-decider test (red NIT 3): a decider
+   whose first call panics — the waiter still
+   resolves and the next `decide_once` retries the
+   RPC (calls==2). The panic path was code-verified
+   only in loop 1.
+5. `decide_once` checks `decided` BEFORE shutdown
+   (red NIT 4): Go's `decideOnce` checks the decided
+   set before observing ctx cancellation, so an
+   already-decided id returns `Ok(false)` even
+   during shutdown. One-line reorder, Go-verified
+   (`bot.go:1345-1397`); test pins it.
+6. Doc corrections (tech N-N2/N-N3/N-N4): deviation
+   4 is 20/20 emittable (see item 4 above); this
+   section's old "Deferred: none." contradicted the
+   loop-1 report — red N10 is the one deferred item
+   (M4b seam); the `/raw` comment now says the only
+   in-crate part is parsing the method.
+7. Deliberate decisions, documented not changed:
+   no empty-batch pacing in `run()` (red NIT 5 —
+   real Telegram long-polls 25s, Go would spin
+   identically on a fast-emptying proxy);
+   `download_file_bytes` has no 429 retry (red NIT
+   6 — Go's `DownloadMedia` does one `client.Do`,
+   non-200 is a plain error; `getFile` keeps the
+   normal `call_json` 429 retry); `getMe` runs
+   before the shutdown signal is installed (red
+   NIT 7 — moot, no `Bot` exists yet to shut down);
+   `approve_forever` / `await_claim` never consult
+   shutdown and the `Decider` trait has no
+   cancellation token (red NIT 8 — Go passes a
+   cancellable ctx; fix when the trait gains one,
+   M4b/M5b).
+
+CRITICAL PROCESS LESSON (fix loop 2): after ANY
+manifest change, always diff `rust/Cargo.lock`
+(never repo-root `Cargo.lock` — no such file
+exists) and always confirm `git status` is clean
+AFTER running the gates on the committed tree. A
+build that rewrites the lock means the gated tree
+was not the committed tree, and every gate claim
+in the report is void until re-run on the
+committed tree.
+
+### Fix loop 3 (re-review of loop 2)
+
+Re-review verdicts on loop 2: technical PASS,
+safety PASS, red-team FAIL (R6 below, novel). The
+R5 fix and both R2 residuals were verified as real
+in code; the failure was a pre-existing decode-path
+divergence whose "Go parity" justification —
+certified in review 2 and baked into a test name —
+was FALSE against the pinned library source.
+
+1. Wrong-TYPE field fails the whole batch (red R6,
+   BLOCKING, novel — the loop-2 report's "Wrong-TYPE
+   fields still fail the whole batch (Go parity)"
+   line and this section's loop-1 item 3 wording
+   are SUPERSEDED by this record; the loop-2
+   report file itself is not rewritten). The Rust
+   `get_updates` returned `Err(UpdateDecode)` on
+   the FIRST per-item decode failure, discarding
+   the whole batch; `run()` re-polled the same
+   offset forever, so one malformed update starved
+   every update at/after it. Go does not do that:
+   the repo's bot polls through the pinned library
+   (`go-telegram/bot v1.27.1-0.20261008103508-
+   f53bfe55a30b`, `go.mod:8`, no `replace`;
+   `internal/telegram/bot.go:519` calls
+   `b.api.Start(ctx)`), whose `get_updates.go`
+   decodes the envelope into `[]json.RawMessage`
+   and then each item separately in `decodeUpdate`
+   — "decodes one update on its own, so a single
+   undecodable update does not reject the whole
+   batch. On failure the id is still read when
+   possible, so the offset can move past it. A zero
+   id means it could not be read." The loop skips
+   an undecodable item and advances `lastUpdateID`
+   past any item whose id is readable; only an
+   unreadable id leaves the offset stuck (with an
+   exponential backoff, capped at 5s). Fixed here
+   by mirroring `decodeUpdate` in `get_updates`
+   (one spot, `api.rs` — NOT `types.rs`): on a
+   per-item decode failure, best-effort read
+   `update_id` (`item.get("update_id").and_then
+   (Value::as_i64)`); readable → push a skipped
+   zero `Update` carrying that id (the run loop's
+   `poll_offset.max(id + 1)` advances the offset
+   and the allowlist drops it by sender 0);
+   unreadable (wrong-type id, float id, non-object
+   element, missing id) → push a zero `Update`
+   (id 0, dropped, offset unchanged) — and CONTINUE
+   decoding the rest of the batch. This is a parity
+   fix, NOT a new deviation. Tests: both red-team
+   trigger batches at loop level (wrong-type id
+   `"six"` + good update id 7; readable id 5 with
+   wrong-type nested field `"chat": "oops"` + good
+   update id 6), plus edge cases in the same test
+   (a non-object element, a float `update_id` 5.5 —
+   Go's head-ID read fails on a float too, so the
+   Rust `as_i64 → None` matches). Both loop tests
+   failed BEFORE the fix (10s `wait_until` timeouts
+   — the good updates were never handled, the first
+   execution of the R6 triggers). The test
+   `wrong_type_fails_the_whole_decode_like_go` is
+   renamed to `wrong_type_fails_vec_decode`: the
+   `Vec<Update>`-level assertion stays true (serde's
+   `Vec` decode IS all-or-nothing), but the old name
+   baked the falsified parity claim into the suite
+   and must not be reintroduced. The existing
+   `malformed_updates_do_not_poison_the_loop` test
+   is updated to the new behaviour (its batch 5 now
+   expects the good item handled: 6 turns, not 5).
+   `BotError::UpdateDecode` is no longer
+   constructed by `get_updates`; the variant stays
+   (error-class mapping + `error.rs` tests still
+   reference it).
+2. `FileObject.file_id: null` had no test fixture
+   (tech N-N1): the loop-2 report claimed "every
+   null shape" but no `document: {"file_id": null}`
+   fixture existed in the unit or loop test. The
+   code was already correct (the helper is applied
+   at `types.rs:197`, the same generic helper as
+   every other `String` field); a 4th element with
+   a null document `file_id` is added to the unit
+   test, asserting `""`.
+3. Double-shutdown test used a wall-clock sleep
+   (red NIT 3): `sleep(500ms)` before the final
+   assert in `double_shutdown_counts_leftovers_once`
+   is replaced by a bounded wait-until loop on
+   `handled.len() == 10` (5s timeout). No
+   `wait_until` helper exists in the dispatcher
+   unit-test module (the one in `bot_core.rs` is
+   integration-test-only), so the loop is inline.
+4. `offsetStuck` backoff vs Rust's fixed 1s pause
+   (red NIT 4): DOCUMENTED, not changed. After the
+   R6 fix a poison batch produces NO error at all,
+   so no backoff is needed: Go re-requests the same
+   offset with exponential backoff (≤5s) when the
+   id is unreadable; Rust drops the zero-`Update`
+   and re-polls at the 25s long-poll cadence.
+   Equivalent outcome (no stall, no spin), no
+   backoff added.
+5. All-`null` batch repolls the same offset (tech
+   N-N2): RESOLVED by the library evidence, not a
+   gap. Go's `decodeUpdate` returns ID 0 for a
+   `null` element (`json.Unmarshal(null, &upd)` is
+   a no-op, `errDecode == nil`, then `upd.ID == 0`
+   → skip + `offsetStuck`), so Go ALSO does not
+   advance the offset past an all-`null` batch —
+   Go-identical behaviour. No code change.
+6. Owner-election `select!` race (red NIT 5):
+   NOT touched, not retrofitted silently. The
+   loop-3 diff does not touch `claims.rs`.
+
+Deferred NITs: exactly one — red N10 (`is_auth_error`,
+M4b seam), carried from loops 1–2. (Rebase update:
+M4b merged at `27a0eaf`; the seam services exist in
+the tree, the mapping is still unverified — deferred
+to the CLI-wiring follow-up.)
+
+## M5a.9 Rebase onto merged M4b (2026-11-05)
+
+M4b PR #67 merged by Boss himself (`27a0eaf`,
+2026-11-05T15:55:49Z; Boss-verified: fmt 0, clippy
+`--all-targets` 0, 467 test, release build 0). The
+remote moving under this branch is normal (Boss
+standing rule, 2026-11-05): rebase onto the new head
+and re-run the gates; stop only if a conflict touches
+a file that must not be edited, or another crate's
+tests fail for a reason outside the rebase scope.
+
+- M4b-base test count, measured on cue in a separate
+  clean checkout of `27a0eaf` (NOT the shared M4b
+  checkout): **467 passed, 0 failed** (29 suites),
+  matching Boss's 467 and M4b's own gate. Run with
+  `CARGO_PROFILE_DEV_DEBUG=0` +
+  `CARGO_PROFILE_DEV_INCREMENTAL=false` (disk-forced;
+  the default-profile build hit 100% disk, see below).
+- Rebase: the 6 M5a commits replayed onto `27a0eaf`
+  with exactly ONE conflict, `rust/PORTING.md` —
+  both sides had appended their section before
+  `## Quy tắc quyết định`; resolved by keeping BOTH,
+  M4b first, then M5a, no section dropped.
+  `rust/Cargo.toml` auto-merged (M4b's workspace dep
+  block + M5a's `"castctl-telegram"` member line);
+  `rust/Cargo.lock` auto-merged. No M4b src touched.
+- TLS swap (commits `192a675` + lock refresh
+  `3cf1b23`, head `3cf1b23`): temp `tls.rs` DELETED
+  (file + `mod tls;` + 6 direct deps), `BotApi`
+  rewired to M4b's `HttpClient::request_tls` (single
+  `HttpClient` + `use_tls` flag), `telegram_api_target`
+  moved into `api.rs`. ALPN `http/1.1` is M4b's
+  `tls_client_config`, pinned by M4b's own test
+  `tls_config_pins_http11_alpn` in
+  `castctl-transport`. The 3 deleted unit tests are
+  gone with the module; their coverage lives on in
+  M4b's transport tests (already in the 467).
+- LOCK STALE (pre-existing, found by this rebase):
+  the lock at `27a0eaf` (`d85537cd...`) does not
+  match M4b's manifests — M4b added manifest deps
+  without updating it. `cargo build --locked` fails
+  exit 101 on the PURE `27a0eaf` tree and on the
+  rebased tree before refresh (`cannot update the
+  lock file ... because --locked was passed`).
+  Commit `3cf1b23` refreshes it: adds M4b's missing
+  edges (transport rustls/tokio-rustls/webpki-roots,
+  gateway base64/bytes/castctl-config/http/regex/
+  tokio-rustls, cli castctl-gateway/castctl-shared/
+  castctl-transport/chrono/serde_json/tokio, shared
+  chrono/serde_json) AND drops the six edges the
+  TLS swap removed from `castctl-telegram`. No new
+  crate, no version change (verified by package-list
+  comparison). Lock md5 after gates:
+  `c5dfca3382a4e6ec40c6ed55087f527d`, identical
+  before/after the gates.
+- Gates on the committed tree `3cf1b23` (cue,
+  rustc/cargo 1.99.1): `cargo fmt --check` 0;
+  `cargo build --locked --workspace` 0 (run FIRST,
+  on the committed lock); `cargo build --workspace`
+  0; `cargo test --workspace` **560 passed,
+  0 failed, twice consecutively**; `cargo clippy
+  --workspace --all-targets -- -D warnings` 0.
+  Test-count math: 467 (M4b base) + 96 (M5a new)
+  − 3 (deleted TLS unit tests) = 560
+  (`castctl-telegram` lib 70 + `bot_core` 23 = 93).
+  Re-verified on the final head `82119e3`
+  (PORTING-only delta vs `3cf1b23`): fmt 0,
+  `build --locked` 0, test 560/0 (see rebase-report
+  §7).
+- DISK CAVEAT (environment, not code): the
+  default-profile `cargo test --workspace` does NOT
+  fit on cue's current disk — it hit 100% (81M free,
+  then 24K free) twice, failing at link time with
+  `ld terminated with signal 7 [Bus error]` /
+  `No space left on device (os error 28)` before any
+  test ran. Other sessions hold ~24G in `/tmp`
+  (`m4c-a` 15G, `castctl-rust-perf1` 9.4G — never
+  touched); only this task's own target dir was
+  cleaned. The two passing test runs therefore used
+  `CARGO_PROFILE_DEV_DEBUG=0` +
+  `CARGO_PROFILE_DEV_INCREMENTAL=false` (target
+  1.6G; the count is profile-independent). fmt /
+  build / `--locked` / clippy all ran on the
+  default profile. Re-run the default-profile test
+  when disk allows.
+- Reuse decisions and the download-cap consequence
+  are in §M5a.3 deviations 1, 5, 14, 15, 21 and
+  §M5a.4. Live `getMe` / `getMyCommands`: still
+  never verified — no bot token on cue (see §M5a.6).
+
 ## Quy tắc quyết định (Boss, 2026-11-05 — standing)
 
 Applies to the whole Rust port, not just M4a. Decide

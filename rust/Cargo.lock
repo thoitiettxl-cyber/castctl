@@ -415,6 +415,12 @@ name = "castctl-cli"
 version = "0.1.0"
 dependencies = [
  "castctl-config",
+ "castctl-gateway",
+ "castctl-shared",
+ "castctl-transport",
+ "chrono",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -425,17 +431,23 @@ version = "0.1.0"
 name = "castctl-gateway"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "castctl-config",
  "castctl-transport",
  "futures-core",
  "futures-sink",
  "futures-util",
+ "http",
  "prost",
  "prost-build",
  "prost-types",
  "rand",
+ "regex",
  "serde_json",
  "snow",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
 ]
 
@@ -458,7 +470,26 @@ dependencies = [
 name = "castctl-shared"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "regex",
+ "serde_json",
+]
+
+[[package]]
+name = "castctl-telegram"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "castctl-config",
+ "castctl-log-redact",
+ "castctl-tg-files",
+ "castctl-tg-text",
+ "castctl-transport",
+ "http",
+ "rand",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -488,10 +519,13 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "rustls",
  "serde",
  "serde_json",
  "smoltcp",
  "tokio",
+ "tokio-rustls",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -2304,6 +2338,7 @@ version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
