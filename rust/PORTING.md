@@ -6111,7 +6111,7 @@ for no seam benefit.
    on an ignored terminal with a `RepliesAfter` proof,
    and does a final history read at finish. Bubble
    updates therefore land at poll cadence, not on
-   push — about 2s after live (1s poll + 1s
+   push — up to ~2s after live (1s poll + 1s
    `EDIT_THROTTLE`, `turn.rs:85`), versus about 1s in
    Go (throttle only); the final text still comes from
    the history re-read, as in Go.
@@ -6153,13 +6153,17 @@ for no seam benefit.
    be missed outright and the turn runs to the 6h
    timeout instead of Done / needs_approval (this
    assumes the gateway returns the newest 200 — see
-   dev 20/21); a missed F8 re-arm event (`task.status`
+   dev 23); a missed F8 re-arm event (`task.status`
    `running`, root-confirmed) never clears the ignored
    terminal (`wait.rs:991-1000`), and a missed
-   zero-subagent info event leaves `ignored_reason ==
-   "subagents"` set (`wait.rs:987-989`); the final read
+   zero-subagent info event runs no clear for that missed
+   event (`wait.rs:987-989`), so `ignored_reason ==
+   "subagents"` stays set until another clearing event
+   arrives (running root-confirmed, `wait.rs:998-999`, or
+   replayed-failed via `clear_ignored()`,
+   `wait.rs:1217-1218`); the final read
    + `proof_replies` restore only replies, not waiter
-   decisions (`turn.rs:2502-2522`);
+   decisions (`turn.rs:2502-2523`);
    (d) a reply landing in (1s, 2s] after Done can miss
    the final text: Rust does a single re-read after 1s
    (`turn.rs:2450-2458`) versus Go's 2s lag window
@@ -6176,8 +6180,13 @@ for no seam benefit.
    instead (deviation 17), where Go runs one bounded
    state check and waits on to the deadline. Polling
    also loads the gateway at ~1 `chat.history` call per
-   second per turn (`turn.rs:2398`); whether the
-   gateway rate-limits that cadence is unmeasured.
+   second per turn in the follow loop (`turn.rs:2398`);
+   sending adds a bounded burst of up to ~10/s for at
+   most 30s while awaiting the delivery ack (`deliver_send`
+   polls `history(10)` every 100ms, `ACK_POLL` 100ms /
+   `ACK_TIMEOUT` 30s — `turn.rs:2169`, `:92`, `:74`);
+   whether the gateway rate-limits either cadence is
+   unmeasured.
 2. **Runner-owned active set.** `Bot::begin_turn` /
    `end_turn` cannot be called by the runner because
    `Bot::new` requires the services first (circular
@@ -6445,7 +6454,7 @@ for no seam benefit.
     edit (deviation 22 — that part stands), but
     once the join arm wins, or when `turn_stop` is
     `None`, the trailing `edit_plain` in
-    `finish()` (`turn.rs:1203-1206`) runs
+    `finish()` (`turn.rs:1203-1213`) runs
     unconditionally: no timeout, no stop race — so
     a 429 storm on that final edit ignores /stop
     for up to ~241s (3 attempts × 40s
