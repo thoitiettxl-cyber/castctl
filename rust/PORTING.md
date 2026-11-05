@@ -6179,21 +6179,19 @@ for no seam benefit.
     The follow poll additionally fails the turn after
     `FOLLOW_HISTORY_ERROR_BUDGET` (30s) of continuous
     swallowable errors — deviation 17.
-14. **M4c token fix: MERGED 2026-11-05, rebase
-    pending.** At the M5b base `07e1c0d`,
-    `rust/castctl-gateway/src/dial.rs:105`
-    `default_ws_url` still sends the literal
-    `auth_token=<redacted>`; the fix (real token
-    URL-quoted `safe=""`) lived on
+14. **M4c token fix: in base since the rebase onto
+    `c7b1d34` (2026-11-06) — OBSOLETE as a limitation.**
+    At the M5b base `07e1c0d`, `default_ws_url`
+    (`rust/castctl-gateway/src/dial.rs`) still sent the
+    literal token string; the real-token fix lived on
     `feat/rust-m4c-chrome-tls` (PR #69). Boss merged
     PR #69 on 2026-11-05 (dev-rust `c7b1d34`,
     independently verified gates + live parity 13/13
-    on cue). M5b does NOT rebase onto the new head in
-    this loop (fix loop 1 forbids rebase); the rebase
-    is pending the coordinator's decision after
-    re-review. The offline E2E is unaffected: the fake
-    `gatewaytest.Server` does not validate the WS
-    token.
+    on cue). M5b rebased onto `c7b1d34` on 2026-11-06,
+    so the fix is in the base: this is no longer a
+    known limitation. The offline E2E is unaffected:
+    the fake `gatewaytest.Server` does not validate
+    the WS token.
 15. **Editor stop flag (Rust-only bug, found by a
     hang).** `BubbleEditor::finish` used a bare
     `Notify::notify_waiters`; when `finish()` ran
