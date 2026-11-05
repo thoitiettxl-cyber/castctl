@@ -474,9 +474,11 @@ impl Server {
         let method = req.method().clone();
         let uri = req.uri().clone();
         let path_raw = uri.path().to_string();
-        let path = percent_decode_path(&path_raw).unwrap_or_default();
+        // The WS upgrade is a chi route: it matches the RAW
+        // path, so an encoded `/screencast%2fws` is NOT an
+        // upgrade (it falls through to the shell instead).
         let is_ws_upgrade = method == Method::GET
-            && path == "/api/v1/screencast/ws"
+            && path_raw == "/api/v1/screencast/ws"
             && req
                 .headers()
                 .get("upgrade")
@@ -498,10 +500,17 @@ impl Server {
         Ok(render_resp(&method, resp))
     }
 
-    /// Route + middleware dispatch. `path_raw` is the raw
-    /// (still percent-encoded) request path; it is decoded
-    /// here (Go's `r.URL.Path` is decoded; an invalid
-    /// escape is a plain 400 before any handler).
+    /// Route + middleware dispatch. Routing uses the RAW
+    /// (still percent-encoded) request path: chi routes on
+    /// `r.URL.RawPath`, so `%2F` never splits a segment
+    /// and an encoded static segment never matches
+    /// (`/api/v1/%73tatus` is no route; `/profiles/a%2Fb`
+    /// is one param, not two segments). The DECODED path
+    /// (Go's `r.URL.Path`) is used only for the ui_dir
+    /// filesystem path and for the WS suffix check in
+    /// `dispatch_api` (Go's `requireAuth` tests the
+    /// decoded suffix). An invalid escape is a plain 400
+    /// before any handler (Go stdlib behaviour).
     async fn dispatch(
         self: &Arc<Self>,
         method: &Method,
@@ -511,7 +520,7 @@ impl Server {
         peer: SocketAddr,
         body: &[u8],
     ) -> Resp {
-        let path = match percent_decode_path(path_raw) {
+        let path_decoded = match percent_decode_path(path_raw) {
             Some(p) => p,
             None => {
                 return Resp {
@@ -524,10 +533,13 @@ impl Server {
                 };
             }
         };
-        let is_api = path == "/api/v1" || path.starts_with("/api/v1/");
+        // The mount prefix is matched on the RAW path: an
+        // encoded prefix (`/api%2fv1/...`) matches no mount
+        // and falls through to the shell unauthenticated.
+        let is_api = path_raw == "/api/v1" || path_raw.starts_with("/api/v1/");
         if is_api {
             return self
-                .dispatch_api(method, &path, uri, headers, peer, body)
+                .dispatch_api(method, path_raw, &path_decoded, uri, headers, peer, body)
                 .await;
         }
         // Non-API: GET/HEAD → shell; anything else → 405.
@@ -539,17 +551,20 @@ impl Server {
         if *effective != Method::GET {
             return method_not_allowed_resp();
         }
-        self.serve_static(&path, method)
+        self.serve_static(&path_decoded, method)
     }
 
     /// The `/api/v1` pipeline: rate-limit → auth → Origin
     /// → timeout → route. Runs for every path under the
     /// mount, including unknown ones (they fall through to
-    /// the shell after the middleware).
+    /// the shell after the middleware). `path` is the raw
+    /// path (routing); `path_decoded` is Go's `r.URL.Path`
+    /// (WS suffix check + shell fallthrough).
     async fn dispatch_api(
         self: &Arc<Self>,
         method: &Method,
         path: &str,
+        path_decoded: &str,
         uri: &hyper::Uri,
         headers: &hyper::HeaderMap,
         peer: SocketAddr,
@@ -563,7 +578,12 @@ impl Server {
                 return rate_limited_resp(window);
             }
         }
-        let is_ws = path.ends_with("/screencast/ws");
+        // The WS path skips Bearer auth (Go's requireAuth
+        // tests the DECODED `r.URL.Path` suffix, so an
+        // encoded `/screencast%2fws` also skips auth — but
+        // it then matches no route and falls through to
+        // the shell, exactly as in Go).
+        let is_ws = path_decoded.ends_with("/screencast/ws");
         if !is_ws {
             let auth = headers.get("authorization").and_then(|v| v.to_str().ok());
             if !self.authorized(auth) {
@@ -598,7 +618,7 @@ impl Server {
             method
         };
         // Timeout: 30s, WS excluded.
-        let fut = self.route_api(effective, path, uri, headers, peer, body);
+        let fut = self.route_api(effective, path, path_decoded, uri, headers, peer, body);
         if is_ws {
             fut.await
         } else {
@@ -613,15 +633,18 @@ impl Server {
 
     /// Route one authenticated `/api/v1` request to its
     /// handler. A known path with a wrong method is a 405;
-    /// an unknown path falls through to the shell. The full
-    /// decoded path is passed (not pre-split segments): a
-    /// trailing slash is a different path in chi — e.g.
-    /// `/api/v1/status/` matches no route and falls
-    /// through — and pre-splitting would erase it.
+    /// an unknown path falls through to the shell. `path`
+    /// is the RAW path (chi routes on RawPath — a trailing
+    /// slash is a different path, e.g. `/api/v1/status/`
+    /// matches no route and falls through); `path_decoded`
+    /// is Go's `r.URL.Path`, passed to the shell
+    /// fallthrough so the ui_dir filesystem lookup sees
+    /// the decoded path.
     async fn route_api(
         self: &Arc<Self>,
         method: &Method,
         path: &str,
+        path_decoded: &str,
         uri: &hyper::Uri,
         headers: &hyper::HeaderMap,
         peer: SocketAddr,
@@ -630,7 +653,9 @@ impl Server {
         match crate::handlers::route(self, method, path, uri, headers, peer, body).await {
             crate::handlers::RouteOutcome::Handled(resp) => resp,
             crate::handlers::RouteOutcome::MethodNotAllowed => method_not_allowed_resp(),
-            crate::handlers::RouteOutcome::Fallthrough => self.serve_static(path, method),
+            crate::handlers::RouteOutcome::Fallthrough => {
+                self.serve_static(path_decoded, method)
+            }
         }
     }
 
@@ -828,3 +853,85 @@ pub const BODY_CAP_64K: usize = 64 * 1024;
 /// create/patch/validate, config PUT/validate, DNS,
 /// keeper-settings PUT, endpoint import).
 pub const BODY_CAP_1M: usize = 1024 * 1024;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hyper_uri_path_keeps_raw_encoding() {
+        // R3 probe (not an assumption): hyper's `Uri::path`
+        // returns the request-target path verbatim — no
+        // percent-decoding. Routing on this value reproduces
+        // chi's RawPath behaviour; decoding it first would
+        // let `%2F` split segments.
+        let uri: hyper::Uri = "/api/v1/profiles/a%2Fb".parse().unwrap();
+        assert_eq!(uri.path(), "/api/v1/profiles/a%2Fb");
+        let uri: hyper::Uri = "/api/v1/%73tatus".parse().unwrap();
+        assert_eq!(uri.path(), "/api/v1/%73tatus");
+        let uri: hyper::Uri = "/api%2fv1/status".parse().unwrap();
+        assert_eq!(uri.path(), "/api%2fv1/status");
+        let uri: hyper::Uri = "/api/v1/status".parse().unwrap();
+        assert_eq!(uri.path(), "/api/v1/status");
+    }
+
+    #[test]
+    fn route_reads_body_table() {
+        // R4 classifier: exactly the Go handlers that call
+        // decodeBody/bodyJSON read a body; every other
+        // route (GETs, 501 test stubs, restore, set-default,
+        // screencast start, DELETE outbound/endpoint) never
+        // does — Go returns 405/shell without reading.
+        use hyper::Method;
+        let yes = [
+            (Method::POST, "/api/v1/profiles"),
+            (Method::PATCH, "/api/v1/profiles/main"),
+            (Method::DELETE, "/api/v1/profiles/main"),
+            (Method::POST, "/api/v1/profiles/main/rename"),
+            (Method::POST, "/api/v1/profiles/main/login/import"),
+            (Method::POST, "/api/v1/outbounds"),
+            (Method::POST, "/api/v1/outbounds/validate"),
+            (Method::PATCH, "/api/v1/outbounds/tag"),
+            (Method::POST, "/api/v1/endpoints"),
+            (Method::POST, "/api/v1/endpoints/import"),
+            (Method::PATCH, "/api/v1/endpoints/tag"),
+            (Method::PUT, "/api/v1/config"),
+            (Method::POST, "/api/v1/config/validate"),
+            (Method::PUT, "/api/v1/dns"),
+            (Method::PUT, "/api/v1/settings/telegram"),
+            (Method::PUT, "/api/v1/settings/keeper"),
+            (Method::PUT, "/api/v1/settings/webui"),
+            (Method::POST, "/api/v1/chats/main"),
+            (Method::POST, "/api/v1/chats/main/sess/send"),
+            (Method::POST, "/api/v1/chats/main/sess/op"),
+        ];
+        for (m, p) in yes {
+            assert!(
+                crate::handlers::route_reads_body(&m, p),
+                "{m} {p} must read a body"
+            );
+        }
+        let no = [
+            (Method::GET, "/api/v1/status"),
+            (Method::GET, "/api/v1/profiles"),
+            (Method::GET, "/api/v1/profiles/main"),
+            (Method::DELETE, "/api/v1/outbounds/tag"),
+            (Method::DELETE, "/api/v1/endpoints/tag"),
+            (Method::POST, "/api/v1/profiles/main/test"),
+            (Method::POST, "/api/v1/outbounds/tag/test"),
+            (Method::POST, "/api/v1/profiles/main/login/restore"),
+            (Method::POST, "/api/v1/profiles/main/set-default"),
+            (Method::POST, "/api/v1/screencast/main/start"),
+            (Method::POST, "/api/v1/status"),
+            (Method::POST, "/api/v1/nope"),
+            (Method::GET, "/api/v1/screencast/ws"),
+            (Method::PUT, "/api/v1/status"),
+        ];
+        for (m, p) in no {
+            assert!(
+                !crate::handlers::route_reads_body(&m, p),
+                "{m} {p} must NOT read a body"
+            );
+        }
+    }
+}

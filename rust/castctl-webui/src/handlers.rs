@@ -8,15 +8,20 @@
 //! screencast — plus the chi route table.
 //!
 //! Routing is exact-segment matching, case-sensitive, on
-//! the decoded path (Go's `r.URL.Path` is decoded; a
-//! trailing slash is a different path — `/api/v1/status/`
-//! matches no route and falls through to the shell). A
-//! known path with a wrong method is a 405; an unknown
-//! path falls through to the 200 shell (Go quirk —
-//! preserved, not "fixed"). Static segments win over
-//! `{param}` segments at the same position (chi): e.g.
-//! `GET /chats/jobs/{job}` beats `GET
-//! /chats/{profile}/{session}`, and `POST
+//! the RAW path (chi routes on `r.URL.RawPath`: `%2F`
+//! never splits a segment, an encoded static segment
+//! never matches a route, and params stay raw —
+//! `/profiles/a%2Fb` is one param `"a%2Fb"`, not two
+//! segments). A trailing slash is a different path —
+//! `/api/v1/status/` matches no route and falls through
+//! to the shell. A known path with a wrong method is a
+//! 405; an unknown path falls through to the 200 shell
+//! (Go quirk — preserved, not "fixed"). The decoded path
+//! (Go's `r.URL.Path`) is used only for the ui_dir
+//! filesystem path (see `server::serve_static`). Static
+//! segments win over `{param}` segments at the same
+//! position (chi): e.g. `GET /chats/jobs/{job}` beats
+//! `GET /chats/{profile}/{session}`, and `POST
 //! /outbounds/validate` beats `POST /outbounds/{tag}`
 //! (which has no POST route at all).
 //!
@@ -77,9 +82,11 @@ pub enum RouteOutcome {
 }
 
 /// Route one authenticated `/api/v1` request. `path` is
-/// the decoded request path (`/api/v1/...`); segments are
+/// the RAW request path (`/api/v1/...`); segments are
 /// matched exactly, keeping empty segments (a trailing
-/// slash defeats the match, as in chi).
+/// slash defeats the match, as in chi), and params keep
+/// their raw percent-encoding (Go never decodes them:
+/// `chi.URLParam` is a raw substring).
 pub async fn route(
     server: &Arc<Server>,
     method: &hyper::Method,
@@ -284,6 +291,43 @@ pub async fn route(
         _ => {}
     }
     RouteOutcome::Fallthrough
+}
+
+/// Whether the handler for (method, raw path) reads a
+/// request body in Go (`decodeBody`/`bodyJSON`). The
+/// transport layer uses this to decide whether to read
+/// the body at all: Go reads bodies only inside handlers
+/// — a 405, an unknown path, a 501 test stub, restore,
+/// set-default, screencast start, and DELETE
+/// outbound/endpoint never touch the body. (DELETE
+/// /profiles/{name} DOES read one: `handleDeleteProfile`
+/// decodes a 64 KiB body.) The segment patterns mirror
+/// `route()` exactly; keep the two in sync.
+pub fn route_reads_body(method: &hyper::Method, path: &str) -> bool {
+    use hyper::Method;
+    let segs: Vec<&str> = path.split('/').collect();
+    let rest: &[&str] = if segs.len() >= 3 { &segs[3..] } else { &[] };
+    match rest {
+        ["profiles"] => *method == Method::POST,
+        ["profiles", _] => matches!(method, &Method::PATCH | &Method::DELETE),
+        ["profiles", _, "rename"] => *method == Method::POST,
+        ["profiles", _, "login", "import"] => *method == Method::POST,
+        ["outbounds"] => *method == Method::POST,
+        ["outbounds", "validate"] => *method == Method::POST,
+        ["outbounds", _] => *method == Method::PATCH,
+        ["endpoints"] => *method == Method::POST,
+        ["endpoints", "import"] => *method == Method::POST,
+        ["endpoints", _] => *method == Method::PATCH,
+        ["config"] => *method == Method::PUT,
+        ["config", "validate"] => *method == Method::POST,
+        ["dns"] => *method == Method::PUT,
+        ["settings", "telegram"] | ["settings", "keeper"] | ["settings", "webui"] => {
+            *method == Method::PUT
+        }
+        ["chats", _] => *method == Method::POST,
+        ["chats", _, _, "send"] | ["chats", _, _, "op"] => *method == Method::POST,
+        _ => false,
+    }
 }
 
 // --- shared helpers -------------------------------------------
