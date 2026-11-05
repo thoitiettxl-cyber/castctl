@@ -29,18 +29,15 @@
 //! `ws://` URL always dials plain (the fake-server case).
 //! There is no code path that dials `wss://` without TLS.
 //!
-//! ALPN (M4b fix of the M4a deviation, M4c engine swap): Go
-//! pins ALPN `["http/1.1"]` for the WS dial because the uTLS
-//! Chrome preset offers `h2` first and gorilla only speaks
-//! HTTP/1.1. BOTH dials here pin ALPN `["http/1.1"]` now via
-//! `castctl_transport::honk_tls_wrap` (M4c): honk's BoringSSL
-//! Chrome connector, SNI = the WS host. The M4b rustls wrap
-//! sent a 251-byte ClientHello (vs Go's Chrome fingerprint);
-//! whether the fingerprint matters to the live edge was never
-//! isolated — every 502 so far lacked the token too (see
-//! `rust/PORTING.md` §M4c.7; the step-3 matrix decides).
-//! rustls stays only for the HTTPS auth chain (`http.rs`),
-//! not for this dial.
+//! ALPN (M4b fix of the M4a deviation): Go pins ALPN
+//! `["http/1.1"]` for the WS dial because the uTLS Chrome
+//! preset offers `h2` first and gorilla only speaks
+//! HTTP/1.1. BOTH dials here pin ALPN `["http/1.1"]` via
+//! `castctl_transport::rustls_tls_wrap`. The M4c honk swap
+//! is gone — the live matrix (PORTING §M4c.8) proved the
+//! token, not the fingerprint, decides the upgrade, so
+//! rustls (simpler, already the HTTPS engine) does the WS
+//! dial too.
 //!
 //! Hand-written upgrade (M4b): the upgrade request is
 //! written BY HAND (`ws_upgrade`), not through tungstenite's
@@ -72,7 +69,7 @@ use crate::gateway::Gateway;
 use crate::noise::{HANDSHAKE_TIMEOUT, InitiatorHandshake, NoiseTransport};
 use castctl_transport::error::TransportError;
 use castctl_transport::routes::{RouteTable, quote_path_param};
-use castctl_transport::{TlsStream, honk_tls_wrap};
+use castctl_transport::{TlsStream, rustls_tls_wrap};
 
 /// Chrome/153 Mac user agent (Go `internal/gateway/auth.go:21`
 /// `UserAgent`).
@@ -542,8 +539,8 @@ where
 /// (`ws_upgrade`) so the request-target goes out verbatim —
 /// `http::Uri` cannot represent `<>`, and Go writes the
 /// target verbatim too. The direct dial pins ALPN
-/// `["http/1.1"]` via `honk_tls_wrap`, matching Go (M4c
-/// engine swap; M4b fix of the M4a no-ALPN deviation).
+/// `["http/1.1"]` via `rustls_tls_wrap`, matching Go (M4b
+/// fix of the M4a no-ALPN deviation; M4c matrix kept rustls).
 pub async fn dial_gateway(
     url: &str,
     routes: Arc<RouteTable>,
@@ -561,7 +558,7 @@ pub async fn dial_gateway(
         }
     };
     // The two branches yield different stream types
-    // (boxed honk TLS stream vs `TcpStream`), so each
+    // (boxed rustls TLS stream vs `TcpStream`), so each
     // completes the dial (Noise handshake) on its own type.
     if secure {
         let ws = match tokio::time::timeout(WS_UPGRADE_TIMEOUT, dial_secure(url, &host, port)).await
@@ -587,8 +584,8 @@ pub async fn dial_gateway(
 /// WS upgrade over the given stream + Noise handshake. The
 /// stream is the outbound-dialed connection (plain TCP to the
 /// WS host:port); the TLS wrap happens HERE for `wss://`
-/// (honk BoringSSL Chrome — matching Go's pin and its
-/// fingerprint, M4c), while `ws://` upgrades plain. The
+/// (rustls — matching Go's ALPN pin, M4c matrix), while `ws://`
+/// upgrades plain. The
 /// upgrade is written by hand (`ws_upgrade`) so the
 /// request-target goes out verbatim (M4b).
 pub async fn dial_gateway_over_stream<S>(
@@ -609,7 +606,7 @@ where
         }
     };
     // The two branches yield different stream types
-    // (boxed honk TLS stream vs `S`), so each completes the
+    // (boxed rustls TLS stream vs `S`), so each completes the
     // dial (Noise handshake) on its own type.
     if secure {
         let (host, _port) = split_ws_url(url).ok_or_else(|| TransportError::Validation {
@@ -704,20 +701,22 @@ async fn tcp_connect(host: &str, port: u16) -> Result<tokio::net::TcpStream, Tra
         .map_err(|_| dial_failed())
 }
 
-/// TLS-wrap a stream for a `wss://` dial with honk's
-/// BoringSSL Chrome connector (`honk_tls_wrap`: SNI = the WS
-/// host, ALPN pinned `["http/1.1"]`, matching Go). The
-/// wrapped stream is type-erased (`TlsStream`, a transport
-/// trait) so this crate stays honk-free (PORTING §M4b.2 dev
-/// 23: the generic-`S` dial avoids a honk dependency in the
-/// gateway crate) and the failure rendering stays here: any
-/// honk failure is already the fixed 29-char `tls_failed()`
-/// string.
+/// TLS-wrap a stream for a `wss://` dial with rustls
+/// (`rustls_tls_wrap`: SNI = the WS host, ALPN pinned
+/// `["http/1.1"]`, matching Go). The wrapped stream is
+/// type-erased (`TlsStream`, a transport trait) so this crate
+/// stays engine-free (PORTING §M4b.2 dev 23: the generic-`S`
+/// dial avoids a TLS-engine dependency in the gateway crate)
+/// and the failure rendering stays here: any rustls failure
+/// is already the fixed 29-char `tls_failed()` string.
 async fn tls_wrap<S>(stream: S, host: &str) -> Result<Box<dyn TlsStream>, TransportError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
-    honk_tls_wrap(stream, host).await
+    // Matrix winner (M4c step 3, PORTING §M4c.8): rustls +
+    // real token → 101, byte-identical output to honk +
+    // real token — so the simpler rustls path stays.
+    rustls_tls_wrap(stream, host).await
 }
 
 /// TCP-connect + TLS-wrap + upgrade for a direct `wss://` dial.
@@ -899,7 +898,7 @@ mod tests {
 
     #[test]
     fn tls_failed_is_29_chars() {
-        // M4c: the honk TLS failure (transport) and the
+        // M4c: the TLS failure (transport) and the
         // tungstenite TLS arm (`ws_error`, above) must render
         // the same fixed string — byte-identical to
         // `gateway_ws_tls_failed` in castctl-transport.

@@ -4554,6 +4554,103 @@ xác định (chưa làm).
   lẫn quoted); (c) URL chứa token đã quote + request
   ghi lại bởi RawUpgradeServer chứa token đã quote.
 
+### M4c.8 Ma trận tách biến + quyết định TLS + live gate 13 lệnh (task này)
+
+Ma trận (cue, profile `no.0`, lệnh `status`, 1 lần/ô;
+Go ref exit 0, 1909 B):
+
+| tổ hợp | exit | stdout | kết luận |
+|---|---|---|---|
+| token + honk-chrome | 0 | 1905 B, md5 `511ca34f…` | 101 |
+| token + rustls | 0 | 1905 B, md5 `511ca34f…` (cmp IDENTICAL với ô honk) | 101 |
+| literal + honk-chrome | 502 | đã biết ở `851ff99` (3/3), không chạy lại | token thiếu → 502 |
+| literal + rustls | 502 | đã biết ở M4b, không chạy lại | token thiếu → 502 |
+
+Quyết định (quy tắc Boss: rustls+token = 101 → giữ
+rustls): **GIỮ RUSTLS, gỡ honk khỏi đường gateway.**
+Token là biến quyết định; TLS engine không phải. Ô
+rustls đo bằng switch tạm `CASTCTL_GATEWAY_TLS_ENGINE`
+(env var, chỉ sống trong lúc đo) + `rustls_tls_wrap`
+tạm trong `castctl-transport/src/tls.rs`; cả hai đã
+xóa. Code bên thua đã gỡ: `honk_tls_wrap`,
+`build_gateway_tls_connector`, test
+`gateway_tls_connector_builds_for_host`,
+`tests/honk_tls.rs` (3 tokio tests); `honk-outbound` /
+`honk-config` ở lại vì outbound dispatch vẫn dùng
+(M3). `tls_wrap` trong gateway `dial.rs` gọi
+`rustls_tls_wrap` vĩnh viễn. Không còn reference tới
+`honk_tls_wrap` / `build_gateway_tls_connector` /
+`CASTCTL_GATEWAY_TLS_ENGINE` trong `rust/` (grep 0,
+trừ PORTING history).
+
+Live gate (cue, profile `no.0`, binary release cuối
+md5 `6a43a62fd6ebe2c9ad64609701f81ac6`; Go 0.9.0;
+mỗi lệnh ≤2 lần; stderr cả hai bên đều rỗng):
+
+| lệnh | Go exit | Rust exit | khớp raw? | khớp sau chuẩn hoá? | khác biệt |
+|---|---|---|---|---|---|
+| status | 0 | 0 | không (1909 vs 1905 B) | giá trị JSON bằng nhau, xem ghi chú | `1.0` → `1`, 2 chỗ, 4 byte |
+| threads | 0 | 0 | có | có | — |
+| threads --all | 0 | 0 | có | có | — |
+| history --limit 3 | 0 | 0 | có | có | — |
+| history --limit 3 --raw | 0 | 0 | có | có | — |
+| files --limit 3 | 0 | 0 | có | có | — |
+| feed | 0 | 0 | có | có | — |
+| feed --raw | 0 | 0 | có | có | — |
+| feed-status | 0 | 0 | có | có | — |
+| feed-prompt | 0 | 0 | có | có | — |
+| goals | 0 | 0 | có | có | — |
+| ideas | 0 | 0 | có | có | — |
+| unread | 0 | 0 | có | có | — |
+| goal goal_62b884f95116 | 0 | 0 | có | có | — |
+| idea idea_0b270d463ca24cc2b863ffdc79b1ea30 | 0 | 0 | có | có | — |
+
+14/15 khớp raw byte-for-byte; `status` là lệnh duy
+nhất lệch, và chỉ lệch cách viết số. Chuẩn hoá trong
+bảng này không cần bỏ field nào: không có field thời
+gian nào đổi giữa hai lần chạy (cả hai lần chạy
+`status` mỗi bên đều byte-identical với lần đầu).
+
+Ghi chú `status` — `1.0` → `1` (đã biết từ M4b, không
+phải lỗi M4c): server gửi `size: 1.0` trong
+`bookmark_display_crop` (2 chỗ). Go decode bằng
+`json.Number` (`internal/gateway/calls.go:182`) nên
+giữ nguyên literal `1.0`. Rust qua bridge
+`from_serde` thành `JsonValue::Float(1.0)`, rồi
+`format_json_float` dùng Rust `Display` (`format!
+("{f}")`) nên ra `1`. Đã kiểm chứng: parse JSON hai
+bên bằng nhau (`json.load` equal: True), mỗi bên ổn
+định qua 2 lần chạy. Đây đúng là hạn chế đã ghi trong
+`bridge.rs` ("float-spelled literal is not preserved
+character-for-character") và PORTING §M4b — sửa cần
+giữ literal số trong model `JsonValue` (thay đổi
+shared serializer, ảnh hưởng mọi lệnh shaped), ngoài
+phạm vi M4c nên KHÔNG sửa ở đây; follow-up riêng.
+
+Gates (cue, 1.99.1, `CARGO_TARGET_DIR=/tmp/m4c-a/m4c-target`):
+`cargo fmt --check` 0; `cargo build --workspace` 0;
+`cargo test --workspace` **469 passed / 0 failed**
+(baseline 470 ở `851ff99`; net −1 = −3 tests
+`tests/honk_tls.rs` −1
+`gateway_tls_connector_builds_for_host` +3 tests fix
+URL §M4c.7b); `cargo clippy --workspace --all-targets
+-- -D warnings` 0; secret-grep 0 value-pattern;
+`cargo build --release -p castctl-rs` 0. Sự cố giữa
+chừng: `/` trên cue đầy 100% khi link debug
+(`ld terminated with signal 7 [Bus error]`) do cây
+debug `/tmp/m4c-a/m4c-target/debug` phình 15G + dir
+release cũ `/tmp/m4c-a/m4c-target-release` 1.3G (đều
+của session này) — đã xóa cả hai, build lại từ đầu,
+đĩa hồi ~10–17G.
+
+Evidence (cue): ma trận
+`/tmp/m4c-a/live/matrix-token-honk.{out,err}`,
+`/tmp/m4c-a/live/matrix-token-rustls.{out,err}`; gate
+`/tmp/m4c-a/live/gate/go-*.out`, `rs-*.out` (+
+`*.err` rỗng, `*.exit`); logs
+`/tmp/m4c-a/gates-{fmt,build,test,clippy}.log`,
+`/tmp/m4c-a/m4c-release-final2.log`.
+
 ## M5a — Telegram bot core (crate `castctl-telegram`, 2026-11-05)
 
 M5a ports `internal/telegram` (bot core: long polling,

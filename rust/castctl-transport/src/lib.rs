@@ -60,7 +60,7 @@ pub use http::{HttpClient, HttpResponse, MAX_RESPONSE_BODY};
 pub use retry::{RETRY_FOR, RETRY_PAUSE_INITIAL, RETRY_PAUSE_MAX, RetryPolicy};
 pub use routes::{Route, RouteTable, Service};
 pub use rpc::{DEFAULT_REQUEST_TIMEOUT, RpcClient};
-pub use tls::{TLS_ALPN_HTTP1, TlsStream, honk_tls_wrap, tls_client_config};
+pub use tls::{TLS_ALPN_HTTP1, TlsStream, rustls_tls_wrap, tls_client_config};
 pub use wireguard::{
     Prefix, WIREGUARD_DATA_OVERHEAD, WIREGUARD_DEFAULT_MTU, WIREGUARD_MIN_DATAGRAM,
     WireGuardConfig, WireGuardDialer, WireGuardPeerConfig, parse_wireguard_endpoint,

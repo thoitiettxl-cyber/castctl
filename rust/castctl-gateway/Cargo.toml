@@ -22,11 +22,11 @@ castctl-config = { path = "../castctl-config" }
 regex = { workspace = true }
 http = { workspace = true }
 bytes = { workspace = true }
-# M4b (WS literal-token fix): base64 for the
-# Sec-WebSocket-Key. The manual TLS wrap in dial.rs no longer
-# uses tokio-rustls: since M4c it goes through
-# `castctl_transport::honk_tls_wrap` (honk/BoringSSL Chrome),
-# so this crate has no tokio-rustls dep. Both already in the
+# M4b: base64 for the Sec-WebSocket-Key. The manual TLS
+# wrap in dial.rs uses `castctl_transport::rustls_tls_wrap`
+# (restored in M4c step 3 — the honk swap is gone; the live
+# matrix proved the token decides, not the fingerprint), so
+# this crate has no tokio-rustls dep. Both already in the
 # lock.
 base64 = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
@@ -35,12 +35,11 @@ snow = { workspace = true }
 prost = { workspace = true }
 # tokio-tungstenite default features are connect+handshake only
 # (no TLS); wss:// dial needs rustls-tls-webpki-roots. The WS
-# upgrade is written by hand in dial.rs (M4b literal-token
-# fix), so tungstenite is used only for WS framing
-# (`from_partially_read`) + `derive_accept_key`; the TLS wrap
-# uses `castctl_transport::honk_tls_wrap` (M4c, honk/BoringSSL
-# Chrome), which pins ALPN ["http/1.1"] for BOTH dials,
-# matching Go (see dial.rs).
+# upgrade is written by hand in dial.rs (M4b), so tungstenite
+# is used only for WS framing (`from_partially_read`) +
+# `derive_accept_key`; the TLS wrap uses
+# `castctl_transport::rustls_tls_wrap`, which pins ALPN
+# ["http/1.1"] for BOTH dials, matching Go (see dial.rs).
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 rand = { workspace = true }
 futures-core = { workspace = true }
