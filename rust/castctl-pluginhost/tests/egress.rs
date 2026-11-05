@@ -193,10 +193,9 @@ fn pipe_dial(server_side: tokio::io::DuplexStream) -> DialFn {
             let mut guard = slot.lock().unwrap();
             match guard.take() {
                 Some(s) => Ok(Box::pin(s) as DialStream),
-                None => Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("dial called twice for {addr}"),
-                )),
+                None => Err(std::io::Error::other(format!(
+                    "dial called twice for {addr}"
+                ))),
             }
         })
     })
