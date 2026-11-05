@@ -468,4 +468,21 @@ mod tests {
             Some(&JsonValue::Number("9007199254740993".to_string()))
         );
     }
+    #[test]
+    fn go_coerce_lossy_is_per_byte() {
+        // F-D5/F-C6: a truncated 3-byte sequence is TWO
+        // U+FFFD (one per byte, Go DecodeRune), where
+        // Rust's from_utf8_lossy gives ONE (maximal
+        // subpart).
+        assert_eq!(go_coerce_lossy(b"\xe2\x82"), "\u{fffd}\u{fffd}");
+        assert_eq!(
+            go_coerce_lossy(b"a\xffb"),
+            "a\u{fffd}b"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(b"\xe2\x82").into_owned(),
+            "\u{fffd}"
+        );
+    }
+
 }

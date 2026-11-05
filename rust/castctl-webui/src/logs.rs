@@ -841,4 +841,24 @@ mod tests {
         assert!(handle_get_logs(&dir, &load, &q).is_err());
         let _ = fs::remove_dir_all(&dir);
     }
+    #[test]
+    fn read_full_or_eof_tolerates_truncation() {
+        // F-D4: a file truncated between the size check
+        // and the read yields a partial page, not a 500:
+        // the buffer stays full-length with a zero tail.
+        let dir = std::env::temp_dir().join(format!(
+            "castctl-webui-logs-trunc-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.log");
+        std::fs::write(&path, b"abc").unwrap();
+        let mut f = fs::File::open(&path).unwrap();
+        let mut buf = vec![0u8; 8];
+        read_full_or_eof(&mut f, &mut buf).unwrap();
+        assert_eq!(buf, b"abc\0\0\0\0\0");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }
