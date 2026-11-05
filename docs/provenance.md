@@ -1795,17 +1795,19 @@ lengths are identical (ECH length is the only size
 variance, random on both sides). Live still 502
 (Rust exit 1, `error_length=45`, 2/2 fork-probe pairs +
 1 isolated run; Go exit 0 on the same edge IP
-57.144.151.197). Full-flow capture then proved the real
+57.144.151.197). Full-flow capture showed the real
 cause is NOT TLS at all: Go's WS upgrade request is
-1186 B plaintext vs Rust's 386 B — the 800 B difference
-is Go's `fmt.Sprintf` `%!(EXTRA string=<783-char-token>)`
-suffix (3 verbs, 4 args in `defaultWSURL`,
-`internal/gateway/connector.go:115-117`), i.e. the real
-hatch token rides in the URL while `auth_token=` carries
-the literal `<redacted>`. Rust sends only the literal,
-so the edge 502s the unauthenticated upgrade. The
-M4a "literal token" finding was incomplete (see PORTING
-§M4c). The fork pointer was therefore reverted in the
+longer than Rust's because Go sends the real token and
+Rust sent the literal. [CORRECTED — see PORTING
+§M4c.7: the `fmt.Sprintf` `%!(EXTRA string=<783-char-
+token>)` mechanism written here before was WRONG. Go
+`defaultWSURL` (`internal/gateway/connector.go:113-120`)
+is `fmt.Sprintf` with 4 verbs and 4 args —
+`auth_token=%s` — so the real hatch token rides in the
+URL, quoted `safe=""`. There is no EXTRA suffix. The
+M4a "literal token" finding was wrong, not merely
+incomplete.] Rust sent only the literal, so the edge
+502s the unauthenticated upgrade. The fork pointer was therefore reverted in the
 same PR (`rust/Cargo.toml` + `Cargo.lock` back to
 upstream `daeuniverse/honk` `9e31cc0b`); the fork
 branch remains for a possible future upstream PR, but

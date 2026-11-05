@@ -2986,7 +2986,8 @@ built on `internal/gateway/gatewaytest.Server`).
   `Chrome/153.0.0.0`, Origin `https://muse.ai`, 20s
   upgrade bound, 20s handshake steps; the URL carries the
   literal `auth_token=<redacted>` — never the real token —
-  see §M4a.2 deviation 12). The gateway-dial
+  see §M4a.2 deviation 12). [SUPERSEDED — see §M4c.7:
+  Go sends the real token; Rust now does too.] The gateway-dial
   TLS rule (DialTLS forces Enabled=true) lives at the
   gateway-dial call site, NOT folded into `build_tls`.
 
@@ -3064,6 +3065,9 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
     never echo message bytes (lengths only). The library
     never puts a token/cookie into a message itself.
 12. WS URL carries the literal `auth_token=<redacted>`
+    [SUPERSEDED — see §M4c.7: Go sends the real token
+    (`auth_token=%s`, 4 verbs, 4 args), not the literal;
+    the whole deviation below is wrong.]
     (fix loop 1, Boss decision 2026-11-05 — MIRROR GO
     byte-for-byte, NOT a formal match): Go
     `internal/gateway/connector.go:116` (`defaultWSURL`)
@@ -3110,6 +3114,19 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
     shows the gateway needs the real token, change
     `default_ws_url` in this one place and re-enable the
     token-URL test.
+    [SUPERSEDED in M4c — see §M4c.7: the condition above
+    is now met (Go source proves the token is sent; Rust
+    without it gets 502). The "3 verbs, 4 args" premise,
+    the "computed and silently discarded" mechanism, and
+    the "no evidence the gateway needs it" claim are all
+    wrong — the M4a reading mistook test redaction for
+    the URL builder, and display redaction hid `%s` as
+    `<redacted>` in the evidence. What stays true from
+    this deviation: `http::Uri` cannot represent `<`/`>`
+    in a query (mechanism proven by source), and the
+    hand-written `ws_upgrade` sends the target verbatim.
+    The fix is exactly the one place named here:
+    `default_ws_url` now renders the real token, quoted.]
 13. `TooManyPieces` → exit 1, not 3 (fix loop 1):
     Go `classifyError` (`commands.go:304-311,336`) gives
     exit 3 only to `ReassemblySizeError` and
@@ -3264,7 +3281,11 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
   `127.0.0.1:33727` ephemeral; both exit 0). The Rust
   parity client dialed with the literal
   `auth_token=<redacted>` URL (percent-encoded on the
-  wire by `dial_gateway`).
+  wire by `dial_gateway`). [SUPERSEDED — see §M4c.7:
+  the parity client used the wrong URL; Go sends the
+  real token. The byte-identical methods still stand —
+  they ran over a loopback fake server, not the live
+  edge.]
 - SPDX header (fix loop 4, 2026-11-05 — CI Go đỏ cả 3 tag vì
   `TestSPDXHeaders` fail): mọi file .go thêm vào repo (kể cả dưới
   `rust/`) phải có header SPDX GPL-3.0-or-later —
@@ -3435,22 +3456,22 @@ it (promoted to direct deps only), so `NOTICE` /
 
 ## M4b.2 Deviations from Go (deliberate, with citations)
 
-1. WS upgrade written by hand; literal token. Go
-   `defaultWSURL` (`connector.go:116`) sends the literal
-   `auth_token=<redacted>`; `http::Uri` rejects `<`/`>` in
-   the query, so the upgrade request is written as raw
-   HTTP/1.1 bytes (`dial.rs` `ws_upgrade`) and the response
-   is validated (101 + `Sec-WebSocket-Accept` via
-   tungstenite's `derive_accept_key`) before wrapping the
-   stream with `from_partially_read`. Live probe on cue
-   (2026-11-05): the edge returns 401 for the
-   percent-encoded `%3Credacted%3E` form and 502 (past the
-   token check) for the literal — the M4a claim that "the
-   server decodes it back" was wrong (the M4a test only
-   proved the fake server tolerates the encoded form).
-   The direct dial now also pins ALPN `["http/1.1"]` via
-   `tls_client_config` (M4b fix of the M4a no-ALPN
-   deviation).
+1. WS upgrade written by hand. [PARTLY SUPERSEDED — see
+   §M4c.7: Go `defaultWSURL` (`connector.go:113-120`)
+   sends the real token (`auth_token=%s`, 4 verbs, 4
+   args), NOT the literal — the 'literal token' premise
+   is wrong, and so is '502 (past the token check)': the
+   401/502 probe compared two spellings of a placeholder
+   (`%3Credacted%3E` → 401, literal → 502); both lack a
+   valid token, so 502 is the token-check failure, not a
+   pass.] `http::Uri` rejects `<`/`>` in the query, so
+   the upgrade request is written as raw HTTP/1.1 bytes
+   (`dial.rs` `ws_upgrade`) and the response is validated
+   (101 + `Sec-WebSocket-Accept` via tungstenite's
+   `derive_accept_key`) before wrapping the stream with
+   `from_partially_read`. The direct dial now also pins
+   ALPN `["http/1.1"]` via `tls_client_config` (M4b fix
+   of the M4a no-ALPN deviation).
 2. Q8 (decided by the parent per the decision principles):
    `Unsupported` → exit 2 ONLY for config parse/dispatch
    errors; runtime errors map to exit 1. Evidence: Go
@@ -3655,7 +3676,7 @@ it (promoted to direct deps only), so `NOTICE` /
 
 ## M4b.3 Findings
 
-- **The literal token, and the M4a claim was wrong.**
+- **The literal token — [SUPERSEDED — see §M4c.7].**
   M4a recorded that the live server "decodes
   `%3Credacted%3E` back to `<redacted>`". False: a raw-TLS
   Python probe on cue (identical headers, only the token
@@ -3674,6 +3695,11 @@ it (promoted to direct deps only), so `NOTICE` /
   `dial_gateway` (direct) and `dial_gateway_over_stream`
   use it; the direct dial now also pins ALPN
   `["http/1.1"]`, fixing the M4a no-ALPN deviation.
+  [Correction: the 401/502 measurements above stand, but
+  the conclusion is withdrawn — both forms lacked a valid
+  token, so neither proves anything about the upgrade
+  path. The fix is sending the real token (§M4c.7), not
+  the literal. The hand-written upgrade itself stays.]
 - **CRLF goes through `muse.write` / `muse.edit` only.**
   A Python edit script that rewrote `dial.rs` turned its
   `\r\n` literals into bare LFs (0 literal CR bytes in
@@ -3692,7 +3718,7 @@ it (promoted to direct deps only), so `NOTICE` /
   verbatim, answers 101, then closes — it does not speak
   Noise, so the dial fails at the Noise step with
   `ConnectionError`, which the tests assert).
-- **TLS fingerprint blocks the live gateway (see §M4b.5).**
+- **TLS fingerprint blocks the live gateway (see §M4b.5) — [SUPERSEDED — see §M4c.7].**
   rustls + literal token → 502; OpenSSL + literal → 502;
   Go/uTLS-Chrome + literal → 101. ClientHello captures
   (iptables REDIRECT + a Python listener on cue):
@@ -3729,6 +3755,15 @@ it (promoted to direct deps only), so `NOTICE` /
   (`ssl/encrypted_client_hello.cc`, `hs->grease_seed`)
   and is the candidate fix — a new TLS-architecture
   decision, not attempted in PR2.
+  [SUPERSEDED — see §M4c.7: the three-way contrast is
+  confounded — rustls + literal and OpenSSL + literal
+  both lacked the token, and Go sent the real token, so
+  'fingerprint decides upstream routing' was never
+  isolated. The ClientHello measurements (1748 B vs 251
+  B) stand; the conclusion does not. The M4c fork
+  (ClientHello set-identical, still 502) is consistent
+  with the token cause. Whether the fingerprint matters
+  at all is decided by the step-3 matrix (§M4c.8).]
 - **`usage --json`'s one-off `ConnectionError`.** First
   parity run: `usage --json` failed with
   `error_length=36` while `usage` and `usage-raw` passed
@@ -3939,6 +3974,8 @@ rewritten (the old wire assert expected
 `%3Credacted%3E`); the string-level assert
 (`default_ws_url` byte-for-byte == Go URL) and the
 value-level assert (query value == literal) are kept.
+[SUPERSEDED — see §M4c.7: the test is rewritten in M4c
+to send the real (fake-in-test) token, quoted.]
 Logs: `gate-logs-m4b/gate-{fmt,build,test,clippy}-m4b.log`.
 The gates are re-run after the rebase onto dev-rust;
 those logs are `gate-{fmt,build,test,clippy}-m4b-
@@ -4136,14 +4173,14 @@ Mục tiêu: `status` exit 0 + JSON khớp Go sau chuẩn hoá, rồi
 bảng 13 lệnh. Kết quả: FLOOR KHÔNG ĐẠT. `status` vẫn exit 1
 (`error_length=45`, `status_code=502`) sau khi ClientHello
 đã SET-identical với Go và sau fork Chrome-parity. Nguyên
-nhân thật (chứng minh bằng wire, §M4c.5): URL WS của Go
-mang token thật qua `fmt.Sprintf` `%!(EXTRA string=...)`,
-Rust chỉ gửi literal `<redacted>` — edge 502 vì upgrade
-không xác thực, không phải vì fingerprint TLS. Fork đã
-revert trong cùng PR; cây này trỏ lại upstream honk.
-Bước tiếp theo (quyết định riêng, không làm trong PR này):
-mirror đúng byte URL của Go trong `default_ws_url` —
-xem §M4c.6.
+nhân thật: URL WS của Rust thiếu token thật — Go gửi
+token thật (`connector.go:113-120`, 4 verbs, 4 args),
+Rust gửi literal. Edge 502 vì upgrade không xác thực.
+(Câu chuyện `%!(EXTRA string=...)` trong §M4c.5 là SAI
+— xem §M4c.7; cả hai câu chuyện cũ đều bị rút lại.)
+Fork đã revert trong cùng PR; cây này trỏ lại upstream
+honk. Bước tiếp theo: mirror đúng byte URL của Go trong
+`default_ws_url` — làm trong task này, xem §M4c.7.
 
 ### M4c.1 Thay đổi code (so với `27a0eaf`)
 
@@ -4172,7 +4209,8 @@ xem §M4c.6.
   Tls của `ws_error` gọi `tls_failed()` (trước là literal
   trùng lặp). `ws_upgrade` / Noise / `connector.rs` /
   `http.rs` giữ nguyên. URL token literal giữ nguyên
-  (`auth_token=<redacted>`, không qua `http::Uri`).
+  trong commit này (đó là sai lầm — xem §M4c.7; fix
+  trong task tiếp theo).
 - `rust/castctl-gateway/Cargo.toml`: bỏ dep `tokio-rustls`
   (chỉ `dial.rs` dùng); feature `rustls-tls-webpki-roots`
   của `tokio-tungstenite` GIỮ (dọn riêng, xem plugpoint
@@ -4345,7 +4383,7 @@ Ba phát hiện đo được, theo thứ tự:
    kiểm chứng: record Finished 53 B = 36 B plaintext
    (4 header + 32 verify_data SHA-256) + 17).
    Vậy plaintext thật: Go 1186 B, Rust 386 B.
-3. **Root cause — `%!(EXTRA string=...)`.** Go
+3. **Root cause — `%!(EXTRA string=...)`. [SUPERSEDED — see §M4c.7: this whole item is wrong.]** Go
    `defaultWSURL` (`internal/gateway/connector.go:
    115-117`): `fmt.Sprintf("%s://%s/v1/noise?vm_id=%s&
    auth_token=<redacted>", scheme, host, quotePython(
@@ -4367,6 +4405,14 @@ Ba phát hiện đo được, theo thứ tự:
    nhau (cả ba đều thiếu token), và vì sao `usage`
    pass (dùng HTTPS muse.ai bằng cookie, không qua
    URL WS).
+   [RETRACTED — see §M4c.7: Go sends the token via
+   `auth_token=%s` (4 verbs, 4 args); there is no
+   `%!(EXTRA...)` suffix. The 800/817 B arithmetic and
+   the "token is 783 chars" inference are withdrawn
+   with the story. The capture bins stay as
+   measurements; the attribution does not. What the
+   length gap really is: Go sends the quoted real
+   token, Rust sent the literal.]
 
 Mở: record app-data thứ hai của Go, 106 B wire
 (89 B plaintext), gửi 1ms sau request, trước 101,
@@ -4387,25 +4433,22 @@ xác định (chưa làm).
   `status` exit 0 chưa đạt; mọi lệnh gateway đều
   502 cùng nguyên nhân). Không chạy lại cho đủ số —
   vô nghĩa cho tới khi URL mang token.
-- Bước tiếp theo (quyết định riêng của Boss/parent,
-  KHÔNG làm trong PR này): `default_ws_url`
-  (`rust/castctl-gateway/src/dial.rs:105`) phải render
-  đúng byte URL của Go, tức append
-  `%!(EXTRA string={quotePython(hatchToken, "")})`
-  (dùng hatch token thật — hiện hàm nhận
-  `_hatch_token` và bỏ qua). Đây là đảo ngược quyết
-  định an ninh M4a ("gửi token thật trong URL leak
-  secret ra log/proxy") — nhưng chính quyết định M4a
-  đã viết trước điều kiện lật: "if later live proof
-  shows the gateway needs the real token, change 1
-  place + re-enable test". Live proof giờ đã có
-  (§M4c.5). Thay đổi gồm: 1 chỗ trong `default_ws_url`
-  + cập nhật test URL (test chẩn đoán duplex đã chứng
-  minh request hiện tại là 386 B đúng format cũ) +
-  chạy lại 4 gates + live probe `status` (nếu 101 thì
-  mới chạy bảng 13 lệnh). Lưu ý: record 89 B pre-101
-  của Go (§M4c.5) có thể cũng cần thiết sau 101 —
-  chỉ probe với URL đã fix mới trả lời được.
+- Bước tiếp theo — LÀM TRONG TASK NÀY (§M4c.7):
+  `default_ws_url` (`rust/castctl-gateway/src/dial.rs:105`)
+  render đúng byte URL của Go:
+  `auth_token={quotePython(hatchToken, "")}` (dùng hatch
+  token thật — hiện hàm nhận `_hatch_token` và bỏ qua).
+  Đây là đảo ngược quyết định an ninh M4a — nhưng chính
+  quyết định M4a đã viết trước điều kiện lật: "if later
+  live proof shows the gateway needs the real token,
+  change 1 place + re-enable test". Live proof là source
+  Go (§M4c.7) + Rust thiếu token thì 502. Thay đổi gồm:
+  1 chỗ trong `default_ws_url` + viết lại test URL (3 test
+  a/b/c) + ma trận tách biến 4 tổ hợp (§M4c.8) + chạy lại
+  4 gates + live probe `status` (nếu 101 thì mới chạy
+  bảng 13 lệnh). Lưu ý: record 89 B pre-101 của Go
+  (§M4c.5) có thể cũng cần thiết sau 101 — chỉ probe với
+  URL đã fix mới trả lời được.
 - (d) REALITY: vẫn là deviation mở (như M3e) — không
   có server để probe live interop.
 - Upstream PR cho 4 patch fork: chưa mở; fork branch
@@ -4416,6 +4459,100 @@ xác định (chưa làm).
   `/tmp/castctl-rust-m4/rust/target` — đều là cache
   regenerable của PR đã merge, binary giữ lại;
   xem báo cáo M4c).
+
+### M4c.7 Correction — Go gửi token thật; hai câu chuyện cũ đều SAI (2026-11-05, Boss đọc trực tiếp)
+
+- Sự thật (đọc từ source, không qua rendered text):
+  Go `internal/gateway/connector.go:113-120`:
+  `fmt.Sprintf("%s://%s/v1/noise?vm_id=%s&auth_token=%s",
+  scheme, host, quotePython(vmID, ""),
+  quotePython(hatchToken, ""))` — **4 verbs, 4 args**.
+  Token thật được URL-quote `safe=""` (comment trên:
+  'with the token URL-quoted (safe=""), as in
+  gateway.py'). `quotePython`
+  (`internal/gateway/media.go:19-38`): byte UTF-8,
+  unreserved `A-Za-z0-9_.-~` + safe literal, còn lại
+  `%XX` hoa — đúng semantics của Rust
+  `quote_path_param` (`castctl-transport/src/routes.rs:
+  148-158`). Bằng chứng bằng số (không tin rendered
+  text): trong `connector.go`,
+  `grep -c 'auth_token=%s'` = 1,
+  `grep -c 'auth_token=<redacted>'` = 0. Grep toàn
+  repo: mọi chuỗi `<redacted>` / `[redacted]` chỉ nằm
+  trong test redaction và `internal/redact/*` — không
+  có trong đường dựng URL.
+- Vì sao kết luận cũ sai: (a) Bẫy display redaction
+  (đã ghi 2 lần trong M4a, lần thứ 3 vẫn ngã): tooling
+  render `auth_token=<bất cứ gì>` thành
+  `auth_token=<redacted>` trong output exec/read — `sed`
+  in ra `<redacted>` ở chỗ file chứa `%s`. Chỉ
+  `grep -c` / độ dài / hash mới đáng tin. (b) M4a đọc
+  nhầm dòng test redaction thành đường dựng URL, rồi
+  ghi thành "3 verbs, 4 args" + "Boss decision: mirror
+  Go byte-for-byte" — quyết định đó dựa trên tiền đề
+  sai. (c) Câu chuyện `%!(EXTRA string=...)` trong
+  §M4c.5: dựng từ số đo capture (800 B chênh) + một
+  probe Go mà format string đưa vào là bản 3-verbs từ
+  bản ghi M4a sai — với format thật (4 verbs, 4 args)
+  Go không bao giờ sinh suffix `%!(EXTRA...)`. Probe
+  đó chỉ tái hiện bản ghi sai, không đo Go thật. Số
+  học 800/817 B và suy ra "token dài 783 ký tự" đều bị
+  rút lại cùng câu chuyện. Các bin capture vẫn là đo
+  thật (Go request dài hơn Rust), nhưng attribution
+  "800 B = suffix EXTRA" là sai — chênh lệch đúng là
+  độ dài token thật đã quote (Go gửi token, Rust gửi
+  literal).
+- Hệ quả: (i) M4a deviation 12, M4b.2 deviation 1,
+  M4b.3 "TLS fingerprint blocks the live gateway",
+  §M4c.5 item 3 và §M4c.6 "bước tiếp theo" cũ đều
+  SUPERSEDED (đánh dấu tại chỗ). (ii) M4b probe
+  401/502: cả hai spelling đều thiếu token hợp lệ —
+  401 là encoded-placeholder, 502 là
+  literal-placeholder; 502 là lỗi xác thực token,
+  KHÔNG phải "đã qua token check". (iii) So sánh 3
+  chiều M4b (rustls+literal → 502, OpenSSL+literal →
+  502, Go+literal → 101) bị confound hoàn toàn: Go
+  gửi token thật, hai bên kia không — 'fingerprint
+  decides' chưa từng được isolate. Fork M4c
+  (ClientHello set-identical, vẫn 502) nhất quán với
+  nguyên nhân token. TLS có cần Chrome hay không —
+  chỉ ma trận tách biến §M4c.8 mới trả lời được.
+  (iv) Điều kiện lật trong M4a ("if later live proof
+  shows the gateway needs the real token, change 1
+  place + re-enable test") nay đã đủ: live proof là
+  source Go + Rust thiếu token thì 502. Fix:
+  `default_ws_url` render `auth_token={quote(token)}`
+  — 1 chỗ, xem §M4c.7b.
+- Cái gì vẫn đúng: hand-written `ws_upgrade` (gửi
+  target verbatim); `http::Uri` reject `<>`
+  (mechanism); bẫy chrome-mode direct-profile; JA4
+  permutation (Go cũng permute); hiệu đính 29/30-char;
+  fork không phải đáp án (nhưng vì lý do khác: thiếu
+  token, không phải vì parity chưa đủ); bin capture và
+  số đo ClientHello.
+- An ninh (đảo ngược M4a, ghi rõ): token thật nay đi
+  trong URL WS — server/proxy log có thể thấy. Đây là
+  hành vi của Go production (0.9.0 relay turn thật qua
+  URL này), và edge yêu cầu nó (502 khi thiếu). Giảm
+  thiểu giữ nguyên: URL không bao giờ vào log/lỗi của
+  Rust (test (b) bắt chuỗi), token không lưu trên
+  `Gateway`, `redact` vẫn xoá `auth_token=...` khỏi
+  log. Không có cách khác đã chứng minh: literal → 502
+  ở cả 3 TLS engine.
+
+### M4c.7b URL fix + test (task này)
+
+- `default_ws_url` dùng `quote_path_param` (đã đúng
+  semantics quotePython safe="") cho cả `vm_id` và
+  `hatch_token`:
+  `{scheme}://{host}/v1/noise?vm_id={quote(vm_id)}&auth_token={quote(token)}`.
+- Tests (TDD red trước): (a) byte-exact với hằng tự
+  tính tay bằng Python `quote(safe="")` — token giả
+  `FAKE+tok/en=1 2é` → quoted
+  `FAKE%2Btok%2Fen%3D1%202%C3%A9`, URL dài 88 ký tự;
+  (b) error của dial fail không chứa token giả (raw
+  lẫn quoted); (c) URL chứa token đã quote + request
+  ghi lại bởi RawUpgradeServer chứa token đã quote.
 
 ## M5a — Telegram bot core (crate `castctl-telegram`, 2026-11-05)
 
