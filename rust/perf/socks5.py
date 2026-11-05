@@ -37,10 +37,23 @@ async def handle(reader, writer):
             return
         atyp = req[3]
         if atyp == 1:
-            addr = ".".join(str(b) for b in await reader.readexactly(4))
+            raw_ip = await reader.readexactly(4)
+            # Loopback-only proxy: reject any CONNECT target outside
+            # 127.0.0.0/8. The bench clients only ever ask for 127.0.0.1.
+            if raw_ip[0] != 127:
+                writer.write(b"\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00")
+                await writer.drain()
+                return
+            addr = ".".join(str(b) for b in raw_ip)
         elif atyp == 3:
+            # Domain names are rejected: the target must be a loopback
+            # IPv4 literal, resolvable without a DNS lookup.
             ln = (await reader.readexactly(1))[0]
-            addr = (await reader.readexactly(ln)).decode()
+            await reader.readexactly(ln)
+            await reader.readexactly(2)
+            writer.write(b"\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00")
+            await writer.drain()
+            return
         else:
             return
         port = int.from_bytes(await reader.readexactly(2), "big")

@@ -3,9 +3,11 @@
 
 Outputs (same dir):
   config-min.json   - copy of rust/parity/fixtures/config.json (minimal)
-  config-large.json - 50 profiles + 140 outbounds (10x every-protocol set
-                      from internal/profile/config_test.go validOutbounds,
-                      tags made unique). Synthetic, labelled as such.
+  config-large.json - 50 profiles + 180 outbounds + 10 endpoints (10x the
+                      19-protocol set from internal/profile/config_test.go
+                      validOutbounds: 18 outbound types + 1 wireguard
+                      endpoint, tags made unique). Synthetic, labelled
+                      as such.
   message-long.md   - ~50KB Markdown corpus (headings/bold/links/fences).
   body-1024.bin     - 1024-byte body served by the item-5 HTTP origin.
 No secrets: all tokens/passwords are the literal FAKE-* placeholders
@@ -31,17 +33,36 @@ base_outbounds = [
     {"type": "shadowtls", "tag": "stls-1", "server": "203.0.113.18", "server_port": 443, "version": 3, "password": "FAKE-PW"},
     {"type": "naive", "tag": "naive-1", "server": "203.0.113.19", "server_port": 443, "username": "FAKE-USER", "password": "FAKE-PW"},
     {"type": "direct", "tag": "direct-1"},
+    # The 4 remaining outbound types from validOutbounds (probe 2026-11-05:
+    # all 19 types parse cleanly on both Go ParseSingleConfig and Rust
+    # parse_single_config). selector/urltest members must reference tags
+    # that exist in the file; they are rewritten per-rep below.
+    {"type": "tor", "tag": "tor-1"},
+    {"type": "block", "tag": "block-1"},
+    {"type": "selector", "tag": "sel-1", "outbounds": ["proxy-sg", "direct-1"]},
+    {"type": "urltest", "tag": "ut-1", "outbounds": ["proxy-sg"], "url": "https://example.com/", "interval": "1m"},
 ]
+# wireguard is an ENDPOINT, not an outbound (Go test puts validOutbounds
+# ["wireguard-ep"] in the "endpoints" array, never in "outbounds").
+wireguard_ep = {"type": "wireguard", "tag": "wg-home", "address": ["10.0.0.2/32"], "private_key": "FAKE-PRIVKEY", "peers": [{"address": "203.0.113.10", "port": 51820, "public_key": "FAKE-PUBKEY", "allowed_ips": ["0.0.0.0/0"]}]}
 outbounds = []
+endpoints = []
 for rep in range(10):
     for ob in base_outbounds:
         o = dict(ob)
         o["tag"] = f"{ob['tag']}-r{rep}"
+        if o["type"] == "selector":
+            o["outbounds"] = [f"proxy-sg-r{rep}", f"direct-1-r{rep}"]
+        elif o["type"] == "urltest":
+            o["outbounds"] = [f"proxy-sg-r{rep}"]
         outbounds.append(o)
+    e = dict(wireguard_ep)
+    e["tag"] = f"wg-home-r{rep}"
+    endpoints.append(e)
 profiles = {}
 for i in range(50):
     profiles[f"p{i:03d}"] = {"outbound": f"proxy-sg-r{i % 10}"}
-cfg = {"default_profile": "p000", "profiles": profiles, "outbounds": outbounds}
+cfg = {"default_profile": "p000", "profiles": profiles, "outbounds": outbounds, "endpoints": endpoints}
 with open(os.path.join(HERE, "config-large.json"), "w") as f:
     json.dump(cfg, f, indent=1, sort_keys=False)
 with open(os.path.join(HERE, "config-min.json"), "w") as f:

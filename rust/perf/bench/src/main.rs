@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 // M-perf-0 pure-logic timing harness (stdlib only).
 // Modes: parse-min | parse-large | decode-large | md-to-html | split-text
 //        | render-chain | socks5-get
@@ -41,8 +45,18 @@ fn timed<F: FnMut() -> usize>(label: &str, mut f: F) {
 }
 
 fn socks5_get() {
-    let proxy = std::env::var("PERF_SOCKS5_ADDR").unwrap_or("127.0.0.1:1080".into());
-    let http_addr = std::env::var("PERF_HTTP_ADDR").unwrap_or("127.0.0.1:18080".into());
+    // Both addresses are REQUIRED env vars: there is no safe default.
+    // A stale default (127.0.0.1:18080) once pointed at another session's
+    // server; a manual run without env must fail loudly, not probe a
+    // foreign loopback service.
+    let proxy = std::env::var("PERF_SOCKS5_ADDR").unwrap_or_else(|_| {
+        eprintln!("PERF_SOCKS5_ADDR is required (e.g. 127.0.0.1:<ephemeral>)");
+        std::process::exit(2);
+    });
+    let http_addr = std::env::var("PERF_HTTP_ADDR").unwrap_or_else(|_| {
+        eprintln!("PERF_HTTP_ADDR is required (e.g. 127.0.0.1:<ephemeral>)");
+        std::process::exit(2);
+    });
     let runs: usize = std::env::var("PERF_SOCKS5_RUNS")
         .unwrap_or("20".into())
         .parse()
@@ -79,10 +93,7 @@ fn one_request(proxy: &str, http_addr: &str) -> std::io::Result<usize> {
     let mut buf = [0u8; 2];
     s.read_exact(&mut buf)?;
     if buf != [5, 0] {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "no-auth rejected",
-        ));
+        return Err(std::io::Error::other("no-auth rejected"));
     }
     let mut req = vec![5, 1, 0, 1];
     let (host, port) = http_addr.rsplit_once(':').unwrap();
@@ -95,10 +106,7 @@ fn one_request(proxy: &str, http_addr: &str) -> std::io::Result<usize> {
     let mut hdr = [0u8; 10];
     s.read_exact(&mut hdr)?;
     if hdr[1] != 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "CONNECT failed",
-        ));
+        return Err(std::io::Error::other("CONNECT failed"));
     }
     s.write_all(b"GET /body-1024.bin HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?;
     let mut body = Vec::new();
@@ -106,10 +114,7 @@ fn one_request(proxy: &str, http_addr: &str) -> std::io::Result<usize> {
     let text = String::from_utf8_lossy(&body);
     let n = text.split("\r\n\r\n").nth(1).map_or(0, |b| b.len());
     if n != 1024 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("body len {n}, want 1024"),
-        ));
+        return Err(std::io::Error::other(format!("body len {n}, want 1024")));
     }
     Ok(n)
 }

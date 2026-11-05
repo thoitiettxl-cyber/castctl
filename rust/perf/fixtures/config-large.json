@@ -277,6 +277,31 @@
    "tag": "direct-1-r0"
   },
   {
+   "type": "tor",
+   "tag": "tor-1-r0"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r0"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r0",
+   "outbounds": [
+    "proxy-sg-r0",
+    "direct-1-r0"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r0",
+   "outbounds": [
+    "proxy-sg-r0"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
+  },
+  {
    "type": "socks",
    "tag": "proxy-sg-r1",
    "server": "127.0.0.1",
@@ -398,6 +423,31 @@
   {
    "type": "direct",
    "tag": "direct-1-r1"
+  },
+  {
+   "type": "tor",
+   "tag": "tor-1-r1"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r1"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r1",
+   "outbounds": [
+    "proxy-sg-r1",
+    "direct-1-r1"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r1",
+   "outbounds": [
+    "proxy-sg-r1"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
   },
   {
    "type": "socks",
@@ -523,6 +573,31 @@
    "tag": "direct-1-r2"
   },
   {
+   "type": "tor",
+   "tag": "tor-1-r2"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r2"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r2",
+   "outbounds": [
+    "proxy-sg-r2",
+    "direct-1-r2"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r2",
+   "outbounds": [
+    "proxy-sg-r2"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
+  },
+  {
    "type": "socks",
    "tag": "proxy-sg-r3",
    "server": "127.0.0.1",
@@ -644,6 +719,31 @@
   {
    "type": "direct",
    "tag": "direct-1-r3"
+  },
+  {
+   "type": "tor",
+   "tag": "tor-1-r3"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r3"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r3",
+   "outbounds": [
+    "proxy-sg-r3",
+    "direct-1-r3"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r3",
+   "outbounds": [
+    "proxy-sg-r3"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
   },
   {
    "type": "socks",
@@ -769,6 +869,31 @@
    "tag": "direct-1-r4"
   },
   {
+   "type": "tor",
+   "tag": "tor-1-r4"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r4"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r4",
+   "outbounds": [
+    "proxy-sg-r4",
+    "direct-1-r4"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r4",
+   "outbounds": [
+    "proxy-sg-r4"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
+  },
+  {
    "type": "socks",
    "tag": "proxy-sg-r5",
    "server": "127.0.0.1",
@@ -890,6 +1015,31 @@
   {
    "type": "direct",
    "tag": "direct-1-r5"
+  },
+  {
+   "type": "tor",
+   "tag": "tor-1-r5"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r5"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r5",
+   "outbounds": [
+    "proxy-sg-r5",
+    "direct-1-r5"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r5",
+   "outbounds": [
+    "proxy-sg-r5"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
   },
   {
    "type": "socks",
@@ -1015,6 +1165,31 @@
    "tag": "direct-1-r6"
   },
   {
+   "type": "tor",
+   "tag": "tor-1-r6"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r6"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r6",
+   "outbounds": [
+    "proxy-sg-r6",
+    "direct-1-r6"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r6",
+   "outbounds": [
+    "proxy-sg-r6"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
+  },
+  {
    "type": "socks",
    "tag": "proxy-sg-r7",
    "server": "127.0.0.1",
@@ -1136,6 +1311,31 @@
   {
    "type": "direct",
    "tag": "direct-1-r7"
+  },
+  {
+   "type": "tor",
+   "tag": "tor-1-r7"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r7"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r7",
+   "outbounds": [
+    "proxy-sg-r7",
+    "direct-1-r7"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r7",
+   "outbounds": [
+    "proxy-sg-r7"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
   },
   {
    "type": "socks",
@@ -1261,6 +1461,31 @@
    "tag": "direct-1-r8"
   },
   {
+   "type": "tor",
+   "tag": "tor-1-r8"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r8"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r8",
+   "outbounds": [
+    "proxy-sg-r8",
+    "direct-1-r8"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r8",
+   "outbounds": [
+    "proxy-sg-r8"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
+  },
+  {
    "type": "socks",
    "tag": "proxy-sg-r9",
    "server": "127.0.0.1",
@@ -1382,6 +1607,213 @@
   {
    "type": "direct",
    "tag": "direct-1-r9"
+  },
+  {
+   "type": "tor",
+   "tag": "tor-1-r9"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r9"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r9",
+   "outbounds": [
+    "proxy-sg-r9",
+    "direct-1-r9"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r9",
+   "outbounds": [
+    "proxy-sg-r9"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
+  }
+ ],
+ "endpoints": [
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r0",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r1",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r2",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r3",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r4",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r5",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r6",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r7",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r8",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r9",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
   }
  ]
 }

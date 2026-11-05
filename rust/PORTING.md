@@ -5987,40 +5987,56 @@ by principle and record the reason:
 
 ## Hiệu năng (baseline) — M-perf-0
 
-Ngày: 2026-11-05. Máy: cue, Linux 6.18.38+ x86_64, 8 × Intel Xeon @
-2.50GHz, 23 Gi RAM, no swap. Go: `/usr/local/bin/castctl` 0.9.0
-(`1396697 2026-11-04T21:38:36Z`), 48,100,296 B, `-s -w`. Rust:
-`castctl-rs` build từ `dev-rust` 96ce485, `cargo +1.99.1 build --release
---locked -p castctl-rs`, `RUSTFLAGS="-C strip=symbols"`. Đo bằng
+Ngày: 2026-11-05 (run7, `2026-11-05T12:15:19Z`). Máy: cue, Linux
+6.18.38+ x86_64, 8 × Intel Xeon @ 2.50GHz, MemTotal 24,788,940 kB
+(23.6 GiB), SwapTotal 0 kB, loadavg 1-phút 0.48–1.00. Go:
+`/usr/local/bin/castctl` 0.9.0 (`1396697 2026-11-04T21:38:36Z`),
+48,100,296 B; `go version -m` ghi trong `summary.json` (tags
+`with_utls,with_quic,with_wireguard,with_gvisor`, `-trimpath=true`,
+`CGO_ENABLED=1`; không có dòng `-ldflags` nên không claim `-s -w`).
+Rust: `castctl-rs` build từ `dev-rust` 96ce485, `cargo +1.99.1 build
+--release --locked -p castctl-rs`, `RUSTFLAGS="-C strip=symbols"`
+(build thường 2.3 s, build strip 2.0 s, full build). Đo bằng
 `rust/perf/run.sh` (1 lệnh rerun); số thô: `rust/perf/data/*.json`;
 README: `rust/perf/README.md`. N=20 (startup/RSS), N=5 lần chạy process
-(logic thuần, item 5). Tỉ lệ Rust/Go < 1 = Rust tốt hơn.
+(logic thuần, item 5). Tỉ lệ Rust/Go < 1 = Rust tốt hơn. Run7 là số
+chính thức; run4 (commit `7f46964`) bị hai lỗi phương pháp đo (wall
+lượng tử hoá 5 ms; RSS Rust đội floor Python ~13 MB) nên số
+startup/RSS của nó đã bị thay thế (xem README mục Drift).
 
 | Mục | Go (median) | Rust (median) | Rust/Go |
 |---|---|---|---|
 | Binary stripped | 48,100,296 B | 620,968 B | 0.0129 (77.5× nhỏ hơn) |
 | Binary chưa strip (Rust) | — | 778,936 B | 0.0162 |
-| Startup `--version` | 8.321 ms (7.644–10.023) | 0.731 ms (0.686–0.831) | 0.088 (11.4×) |
-| Startup `--help` | 7.936 ms (7.569–9.125) | 0.744 ms (0.662–1.000) | 0.094 (10.7×) |
-| Peak RSS `--help` | 43.5 MiB (42.5–43.6) | 13.2 MiB (13.2–13.2) | 0.30 (70% ít hơn) |
-| Peak RSS `status` bad-JSON gate | 43.6 MiB | 13.1 MiB | 0.30 |
-| Parse config min (42 B) | 5,882 ns/iter | 2,517 ns/iter | 0.43 (2.3×) |
-| Parse config large (25,657 B) | 5,109,444 ns/iter | 933,791 ns/iter | 0.18 (5.5×) |
-| `MDToHTML` (51,560 B) | 4,615,838 ns/iter | 873,318 ns/iter | 0.19 (5.3×) |
-| `SplitText` (51,560 B) | 517,752 ns/iter | 266,445 ns/iter | 0.51 (1.9×) |
-| Render chain | 5,239,473 ns/iter | 1,085,378 ns/iter | 0.21 (4.8×) |
-| 1 request SOCKS5 loopback | 0.813 ms/req (0.784–0.970) | 0.756 ms/req (0.745–0.897) | 0.93 (7%, trong sai số) |
+| Startup `--version` | 11.169 ms (9.790–13.090) | 0.901 ms (0.814–1.335) | 0.081 (12.4×) |
+| Startup `--help` | 10.771 ms (9.545–13.707) | 0.867 ms (0.765–1.146) | 0.080 (12.4×) |
+| Peak RSS `--version` (GNU time) | 30.36 MiB (29.80–30.98) | 2.14 MiB (2.00–2.38) | 0.071 (93% ít hơn) |
+| Peak RSS `--help` (GNU time) | 30.30 MiB (29.74–31.17) | 2.21 MiB (2.04–2.36) | 0.073 |
+| Peak RSS `status` bad-JSON gate | 30.77 MiB | 2.33 MiB | 0.076 |
+| Parse config min (42 B) | 4,511 ns/iter | 2,553 ns/iter | 0.57 (1.8×) |
+| Parse config large (32,246 B) | 7,146,253 ns/iter | 1,162,514 ns/iter | 0.16 (6.1×) |
+| `MDToHTML` (51,560 B) | 5,405,424 ns/iter | 872,425 ns/iter | 0.16 (6.2×) |
+| `SplitText` (51,560 B) | 550,978 ns/iter | 281,451 ns/iter | 0.51 (2.0×) |
+| Render chain | 5,619,489 ns/iter | 1,114,199 ns/iter | 0.20 (5.0×) |
+| 1 request SOCKS5 loopback | 0.874 ms/req (0.766–1.071) | 0.830 ms/req (0.736–0.995) | 0.95 (5%, trong sai số) |
 
 Kết luận: Rust nhanh hơn Go ngoài sai số ở binary/startup/RSS/logic
 thuần; loopback SOCKS5 trong sai số. Caveat: (1) binary Go chứa toàn bộ
 castctl còn Rust M2 mới chỉ có CLI surface + config — 77× sẽ thu hẹp
 khi port thêm; (2) parse-large/render: Go làm nhiều việc hơn (validate
-outbound sâu, 41,734 allocs/op; `MDToHTML` 4.86 MB/op + 8,390
-allocs/op) còn Rust defer sing-box validation (D-M2-1) — đo lại sau khi
-Rust bổ sung validation; (3) item 5 đo client hand-roll stdlib qua proxy
-Python, không phải outbound thật; (4) cold cache thật không đo (VM dùng
-chung); (5) không có `perf` trên cue nên hotspot dựa trên breakdown số
-đo + lý do cấu trúc, không dựa trên CPU profile. Hotspot ưu tiên (xem
-`rust/perf/README.md`): validation parse-large (69% thời gian parse),
-`md_to_html` (80% render chain), `split_text` collect `Vec<char>`,
-đo lại sau validation, startup/binary đã đủ tốt, transport thật chưa đo.
+outbound sâu, 52,163 allocs/op median; `MDToHTML` 4,861,632 B/op +
+8,389 allocs/op median) còn Rust defer sing-box validation (D-M2-1) —
+đo lại sau khi Rust bổ sung validation; harness khác nhau (Go 1 process
+× 5 counts × 100 iters, Rust 5 process runs, adaptive K — K median và
+raw đầy đủ trong `summary.json`); (3) item 5 đo client hand-roll stdlib
+qua proxy Python, không phải outbound thật; N=5, chạy batch tuần tự
+Rust-trước-Go (load phẳng 1.00 trong suốt item 5 ở run7); (4) cold
+cache thật không đo (VM dùng chung); không có hàng cold trong bảng này
+— first measured run N=1 chỉ có trong README; (5) không có `perf` trên
+cue nên hotspot dựa trên breakdown số đo + lý do cấu trúc, không dựa
+trên CPU profile; (6) RSS đo bằng GNU time (thin parent); số RSS Rust
+run4/run5 (13.2 MiB) sai do floor của Python cha — số đúng ~2.1 MiB.
+Hotspot ưu tiên (xem `rust/perf/README.md`): validation parse-large
+(66% thời gian parse), `md_to_html` (78% render chain), `split_text`
+collect `Vec<char>`, đo lại sau validation, startup/binary đã đủ tốt,
+transport thật chưa đo.
