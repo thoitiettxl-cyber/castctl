@@ -13,9 +13,6 @@
 //! and returns a configurable response — the Rust
 //! equivalent of `recordingRoundTripper`.
 
-use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,7 +25,6 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use castctl_pluginhost::egress::{
     DialFn, DialStream, EgressProxy, UpstreamResponseFuture, UpstreamTransport,
 };
-use castctl_pluginhost::error::PluginHostError;
 use castctl_pluginhost::host::EgressProxyHandle;
 
 /// The last request the fake upstream saw. `method`

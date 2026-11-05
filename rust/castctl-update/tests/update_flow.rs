@@ -653,12 +653,7 @@ fn rename_failure_leaves_old_intact() {
     let dir = target.parent().unwrap().to_path_buf();
     let old_bytes = std::fs::read(&target).unwrap();
     let (mut opts, _out) = base_opts(&target, &server);
-    opts.deps.rename_fn = Some(|_, _| {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "injected rename failure",
-        ))
-    });
+    opts.deps.rename_fn = Some(|_, _| Err(std::io::Error::other("injected rename failure")));
     let (res, err) = run(opts);
     let err = err.expect_err("rename failure must surface");
     assert_eq!(err.code(), 1);
@@ -678,12 +673,7 @@ fn dir_sync_failure_reports_replaced() {
     let (server, new_bytes) = standard_server(work.path());
     let (_tmp, target) = make_target(work.path(), "0.6.3");
     let (mut opts, _out) = base_opts(&target, &server);
-    opts.deps.sync_dir_fn = Some(|_| {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "injected dir-sync failure",
-        ))
-    });
+    opts.deps.sync_dir_fn = Some(|_| Err(std::io::Error::other("injected dir-sync failure")));
     let (res, err) = run(opts);
     let err = err.expect_err("dir-sync failure must surface");
     assert_eq!(err.code(), 1);

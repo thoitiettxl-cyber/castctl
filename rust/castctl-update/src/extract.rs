@@ -488,7 +488,7 @@ mod tests {
             h.set_entry_type(EntryType::Regular);
             h.set_mode(0o755);
             h.set_cksum();
-            b.append(&h, &FAKE_ELF).unwrap();
+            b.append(&h, FAKE_ELF).unwrap();
             b.finish().unwrap();
         }
         tar_bytes.extend_from_slice(b"GARBAGE-NONZERO");
@@ -514,7 +514,7 @@ mod tests {
                 h.set_entry_type(EntryType::Regular);
                 h.set_mode(0o755);
                 h.set_cksum();
-                b.append(&h, &FAKE_ELF).unwrap();
+                b.append(&h, FAKE_ELF).unwrap();
                 b.finish().unwrap();
             }
             tar_bytes.extend(std::iter::repeat_n(0u8, tail_len));
@@ -532,7 +532,7 @@ mod tests {
             h.set_entry_type(EntryType::Regular);
             h.set_mode(0o755);
             h.set_cksum();
-            b.append(&h, &FAKE_ELF).unwrap();
+            b.append(&h, FAKE_ELF).unwrap();
             b.finish().unwrap();
         }
         tar_bytes.extend(std::iter::repeat_n(0u8, 5000));
