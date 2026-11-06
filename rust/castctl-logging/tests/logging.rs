@@ -31,8 +31,8 @@ use std::sync::{Arc, Mutex};
 
 use castctl_config::log::LogConfig;
 use castctl_logging::{
-    Level, Settings, SlogLevel, SlogValue, emit, new_factory, resolve_log_settings,
-    safe_err_for_level, summarize_err,
+    emit, new_factory, resolve_log_settings, safe_err_for_level, summarize_err, Level, Settings,
+    SlogLevel, SlogValue,
 };
 use castctl_transport::{BodySummary, TransportError};
 
@@ -294,9 +294,10 @@ fn full_ts_prefix(line: &str) -> bool {
         && b[22] == b':'
         && digits(23..25)
         && b[25] == b' '
-        && line[26..].split(' ').next().is_some_and(|l| {
-            matches!(l, "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR")
-        })
+        && line[26..]
+            .split(' ')
+            .next()
+            .is_some_and(|l| matches!(l, "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR"))
 }
 
 fn rel_ts_prefix(line: &str) -> bool {
@@ -414,10 +415,8 @@ fn temp_dir(tag: &str) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "castctl-logging-{tag}-{}-{n}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("castctl-logging-{tag}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -595,7 +594,10 @@ fn emit_redacts() {
     h.close();
     let got = buf.take();
     for v in [FIX_VMID, FIX_HATCH_TOKEN] {
-        assert!(!got.contains(v), "emitted output contains fixture value {v:?}: {got:?}");
+        assert!(
+            !got.contains(v),
+            "emitted output contains fixture value {v:?}: {got:?}"
+        );
     }
     assert_contains(&got, "event=ws_handshake");
     assert_contains(&got, "auth_token=[redacted]");
@@ -654,7 +656,10 @@ fn slog_bridge_filtering_and_redaction() {
     let got = strip_ansi(&buf.take());
     assert_contains(&got, "slog-debug-probe");
     for v in [FIX_VMID, FIX_HATCH_TOKEN, FIX_COOKIE_VAL] {
-        assert!(!got.contains(v), "slog output contains fixture value {v:?}: {got:?}");
+        assert!(
+            !got.contains(v),
+            "slog output contains fixture value {v:?}: {got:?}"
+        );
     }
     assert_contains(&got, "[redacted]");
 
@@ -665,7 +670,13 @@ fn slog_bridge_filtering_and_redaction() {
     let buf = SharedBuf::default();
     let h = factory("error", &buf);
     let sl = h.slog_logger("castctl");
-    sl.error("slog-error-probe", &[("err", SlogValue::error(std::io::Error::new(std::io::ErrorKind::Other, "boom")))]);
+    sl.error(
+        "slog-error-probe",
+        &[(
+            "err",
+            SlogValue::error(std::io::Error::new(std::io::ErrorKind::Other, "boom")),
+        )],
+    );
     sl.warn("slog-warn-probe", &[]);
     h.close();
     let got = strip_ansi(&buf.take());
@@ -762,13 +773,14 @@ fn factory_refused_paths() {
     let alias = dir.join("alias.json");
     std::os::unix::fs::symlink(&config_path, &alias).unwrap();
     assert!(
-        new_factory(settings(alias.to_str().unwrap()), Some(Box::new(buf.clone()))).is_err(),
+        new_factory(
+            settings(alias.to_str().unwrap()),
+            Some(Box::new(buf.clone()))
+        )
+        .is_err(),
         "NewFactory(Output=symlink-to-config) = ok, want error"
     );
-    assert_eq!(
-        std::fs::read_to_string(&config_path).unwrap(),
-        orig_config
-    );
+    assert_eq!(std::fs::read_to_string(&config_path).unwrap(), orig_config);
 
     // Symlink to an ORDINARY target: NOT refused; the line
     // lands in the target through the link.
@@ -776,11 +788,18 @@ fn factory_refused_paths() {
     std::fs::write(&target, b"prior\n").unwrap();
     let link = dir.join("link.log");
     std::os::unix::fs::symlink(&target, &link).unwrap();
-    let h = new_factory(settings(link.to_str().unwrap()), Some(Box::new(buf.clone()))).unwrap();
+    let h = new_factory(
+        settings(link.to_str().unwrap()),
+        Some(Box::new(buf.clone())),
+    )
+    .unwrap();
     h.logger("castctl").info("symlink-target-probe");
     h.close();
     let data = std::fs::read_to_string(&target).unwrap();
-    assert!(data.contains("symlink-target-probe"), "symlink target {data:?}");
+    assert!(
+        data.contains("symlink-target-probe"),
+        "symlink target {data:?}"
+    );
 
     // Non-regular file: NOT refused on that basis. /dev/null is
     // the portable character device.
@@ -803,14 +822,20 @@ fn factory_sink_redacts_singbox_lines() {
         "wireguard: setup failed: wss://gateway.example.invalid/v1/noise?vm_id={FIX_VMID}&auth_token={FIX_HATCH_TOKEN} private_key={FIX_WG_PRIV} public_key={FIX_WG_PUB}"
     );
     let scan = |got: &str, loc: &str| {
-        assert!(!got.is_empty(), "{loc} capture empty: positive control failed");
+        assert!(
+            !got.is_empty(),
+            "{loc} capture empty: positive control failed"
+        );
         for v in [FIX_VMID, FIX_HATCH_TOKEN, FIX_WG_PRIV, FIX_WG_PUB] {
             assert!(
                 !got.contains(v),
                 "{loc} capture contains fixture value {v:?}: {got:?}"
             );
         }
-        assert!(got.contains("[redacted]"), "{loc} capture {got:?}, want a [redacted] marker");
+        assert!(
+            got.contains("[redacted]"),
+            "{loc} capture {got:?}, want a [redacted] marker"
+        );
         // WG public key: at most the 8-char prefix may survive.
         assert!(
             got.contains(&format!("public_key={}", &FIX_WG_PUB[..8])),
@@ -1047,7 +1072,10 @@ fn summarize_err() {
 
 #[test]
 fn safe_err_for_level() {
-    let payload = format!("{{\"token\": \"LOGFIX-LEVEL-83af10\"}} and {}", "tailword ".repeat(200));
+    let payload = format!(
+        "{{\"token\": \"LOGFIX-LEVEL-83af10\"}} and {}",
+        "tailword ".repeat(200)
+    );
     let gw = gateway_500(&payload);
     for level in [
         Level::TRACE,
@@ -1074,10 +1102,7 @@ fn slog_bridge_above_trace_summarizes_body() {
     let h = factory("info", &buf);
     let logger = h.slog_logger("castctl");
     let gw = gateway_500(LEVEL_BODY_PAYLOAD);
-    logger.info(
-        "gateway probe",
-        &[("err", SlogValue::error(gw))],
-    );
+    logger.info("gateway probe", &[("err", SlogValue::error(gw))]);
     h.close();
     let got = buf.take();
     assert!(!got.is_empty(), "capture empty: positive control failed");
@@ -1102,7 +1127,7 @@ fn slog_bridge_trace_summarizes_body() {
     );
     let gw = gateway_500(&payload);
     logger.log(
-        SlogLevel( SlogLevel::DEBUG.0 - 4),
+        SlogLevel(SlogLevel::DEBUG.0 - 4),
         "trace-body-probe",
         &[("err", SlogValue::error(gw))],
     );
@@ -1395,7 +1420,8 @@ fn resolve_log_settings() {
             );
             continue;
         }
-        let got = got.unwrap_or_else(|e| panic!("{name}: ResolveLogSettings = {e}, want {:?}", want));
+        let got =
+            got.unwrap_or_else(|e| panic!("{name}: ResolveLogSettings = {e}, want {:?}", want));
         assert_eq!(got, want.unwrap(), "{name}: ResolveLogSettings mismatch");
     }
 }
@@ -1415,6 +1441,12 @@ fn wrap_err_redacts_display_but_keeps_source() {
         wrapped.to_string()
     );
     assert!(wrapped.to_string().contains("[redacted]"));
-    assert!(wrapped.source().is_some(), "WrapErr must expose the original via source()");
-    assert!(castctl_logging::wrap_err(None).is_none(), "WrapErr(nil) must be None");
+    assert!(
+        wrapped.source().is_some(),
+        "WrapErr must expose the original via source()"
+    );
+    assert!(
+        castctl_logging::wrap_err(None).is_none(),
+        "WrapErr(nil) must be None"
+    );
 }
