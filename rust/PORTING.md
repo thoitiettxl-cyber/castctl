@@ -14383,3 +14383,106 @@ this commit for the record itself):
   PASS, full re-run 1439/0 — a flake, not a
   regression; this loop's diff touches no
   castctl-update code.)
+
+#### Fix loop 2 (round-2 review, 2026-11-06)
+
+Round-2 verdicts: technical PASS (0 BLOCKING, 0 new
+nits), safety PASS (0 BLOCKING, 0 new nits), red-team
+FAIL — 1 BLOCKING (B1) + 3 nits
+(N-R2R1/N-R2R2/N-R2R3). All four fixed in this loop
+(commits `07f2efa`, `250dcab`, and this commit for the
+record itself):
+
+- B1 (BLOCKING, FIXED — not recorded as a deviation):
+  Go `encoding/json` Marshal escapes `<>&` (HTML ON)
+  and U+2028/U+2029 in every request body; Rust sent
+  them raw. Probe evidence (pre-fix code, real
+  harness, fresh binaries): send case `send-weird2`
+  (text `a"b <c> d&e ünïcode ✓`) — Go logs
+  `a\"b \u003cc\u003e d\u0026e ünïcode ✓`, Rust logs the
+  raw `<c> d&e`; `send-u2028` (`a\u2028b\u2029c`) differs
+  the same way; both exit 0, stdout byte-identical —
+  zero functional effect, but a byte divergence in
+  exactly the dimension the N-R1 gate polices, with
+  extremely common input. The fs probe decided the
+  fix location: `fs ls 'a<b'` differs too (Go
+  `{"path":"a\u003cb"}` vs Rust `{"path":"a<b"}`) —
+  the gap is SYSTEMIC, every request body carrying
+  user text, so the fix belongs at the COMMON gateway
+  serialisation point, not in `send.rs`. New single
+  home `rust/castctl-shared/src/go_json.rs`:
+  `to_go_json_bytes` (recursive `serde_json::Value`
+  serialiser — keys sorted explicitly, HTML escaping
+  ON, U+2028/U+2029 escaped, numbers verbatim via
+  `arbitrary_precision`) + `escape_go_marshal_string`
+  / `escape_stdout_string` (moved verbatim from
+  `network.rs`, which now re-exports them). All three
+  gateway serialisation sites use it: `Body::encode`
+  Json arm (`gateway.rs:152`), `open_stream` (`:962`),
+  `subscribe_raw` body (`:1026`). `castctl-gateway`
+  newly depends on `castctl-shared` (no cycle: shared
+  depends only on regex/chrono/serde_json). 5 new unit
+  tests in `go_json.rs` (marshal escapes, stdout form,
+  stream-body bytes, key sort + number literals incl.
+  `1e3`, U+2028/U+2029). Permanent harness cases:
+  `send-weird2`, `send-u2028`, `send-newline` (see
+  N-R2R1) + `fs-ls-lt-path`. RED proven pre-fix (send
+  8 PASS + 3 FAIL, fs `<` FAIL); GREEN post-fix (send
+  **11/11**, m7b **121/121**; both sides log
+  byte-identical bodies — weird2
+  `\u003c\u003e \u0026`, u2028 `\u2028\u2029`, fs
+  `{"path":"a\u003cb"}`).
+  Adjacent, out of scope: `castctl-telegram`
+  `api.rs:455` still uses `serde_json::to_vec` (same
+  class, different server/crate — needs its own probe;
+  recorded here, not fixed). The gateway GET-query
+  path (`bodyToQuery`) is URL encoding, not JSON —
+  not part of B1.
+- N-R2R1 (harness, FIXED): all 4 runners used
+  `readarray` + `print(a)` — a `\n` in a case arg
+  split into 2 argv and the driver took only args[0].
+  All 4 runners now pass args NUL-separated
+  (`readarray -t -d ''`, generator writes each arg +
+  `\0`). CORRECTION to the round-1 claim: "send
+  newline/quote/unicode byte-identical" was VACUOUS
+  for the newline part — both sides sent only
+  `"line1"` (server logs prove it: `grep -c line2`
+  = 0 both sides); the content never went on the
+  wire. The quote/unicode part without newline is
+  proven by `send-weird2`. The new REAL newline case
+  `send-newline` (text `line1\nline2 "quoted"
+  ünïcode ✓`) proves the full text reaches the wire:
+  GREEN post-fix, `line2` appears 1× in both server
+  logs (pre-fix it was 0 both sides).
+- N-R2R2 (runner, FIXED): `run_send_wait_cases.sh`
+  `set -u` + unset `$expected_body` when dial=false
+  and the case fails → the script aborted instead of
+  reporting. `expected_body=""` is now initialised
+  before the `if [ "$dial" = true ]` block. Proof (a
+  scratch dial=false case + a stub Rust driver that
+  forces FAIL; scratch proof in `/tmp/nr2r2-proof/`,
+  not committed — no dial=false case exists in the
+  tree): the pre-fix copy aborts
+  (`run-prefix.sh: line 302: expected_body: unbound
+  variable`, no `tier-a:` summary); the fixed runner
+  prints `FAIL nr2r2-dialfalse ...`,
+  `--- expected stream-body (nr2r2-dialfalse): [] ---`,
+  `tier-a: pass=0 fail=1`, exit 1.
+- N-R2R3 (draft, FIXED): the PR draft's Known
+  limitations now lists the §9 item: `fs get`
+  MkdirAll failure modes beyond the covered path.
+- Re-gate at head `250dcab` (code-final; this docs
+  commit changes no code): SPDX ok; fmt 0; build 0;
+  test **1444/0** (63 suites); clippy 0; harness m7b
+  **121/121**, send --wait **11/11**, watch **5/5**, wait
+  **11/11**; help **46/46**. (Two environment/test
+  notes, neither a regression: the first full gate run
+  failed one new unit test — the `1e3` literal test,
+  because `json!` coerces `1e3` to f64 1000.0 at
+  construction; fixed by parsing the literal with
+  `from_str` — and the examples link step failed with
+  `ld terminated with signal 7 [Bus error]` when the
+  disk hit 100% (336M free); the run's own incremental
+  cache was deleted and the examples re-linked, exit
+  0. The full test suite was then re-run clean,
+  1444/0.))
