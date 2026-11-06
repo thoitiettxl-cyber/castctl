@@ -451,7 +451,9 @@ async fn history_result(
 pub(crate) struct CmdOut {
     /// Bytes for stdout.
     pub stdout: String,
-    /// Bytes for stderr (approveAll lines only).
+    /// Bytes for stderr (approveAll lines; on a mid-loop
+    /// decide failure, those lines plus the rendered error
+    /// text — see `render_flow_err`).
     pub stderr: String,
     /// Process exit code (0 = success).
     pub code: i32,
@@ -1085,10 +1087,13 @@ async fn decide_approval(
 /// approval (skipped / approved); the rows render as
 /// `approvedJSON` (empty fields → null). A decide error
 /// aborts the loop and propagates.
-async fn approve_all(rt: &Runtime, decision: &str) -> Result<(Vec<String>, String), FlowErr> {
+async fn approve_all(
+    rt: &Runtime,
+    decision: &str,
+    stderr: &mut String,
+) -> Result<Vec<String>, FlowErr> {
     let (_raw, pend) = pending_approvals(rt).await?;
     let mut done: Vec<String> = Vec::new();
-    let mut stderr = String::new();
     for item in &pend {
         let d = describe_approval(&from_serde(item));
         if decision == "allow_always" && !offers_forever(&d) {
@@ -1103,7 +1108,7 @@ async fn approve_all(rt: &Runtime, decision: &str) -> Result<(Vec<String>, Strin
         done.push(approved_json(&id, &title, &kind, &scope, decision));
         stderr.push_str(&approved_line(&id, decision, &title, &kind, &scope));
     }
-    Ok((done, stderr))
+    Ok(done)
 }
 
 /// `{"approved": [...]}` (`wait.go:1240`,
@@ -1122,10 +1127,23 @@ fn approved_list_json(rows: &[String]) -> String {
 /// empty).
 async fn cmd_approvals(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
     if p.bool("approve-all") {
-        let (done, stderr) = approve_all(rt, "allow_always").await?;
-        let mut out = CmdOut::out(write_json_text(&approved_list_json(&done)));
-        out.stderr = stderr;
-        return Ok(out);
+        let mut stderr = String::new();
+        match approve_all(rt, "allow_always", &mut stderr).await {
+            Ok(done) => {
+                let mut out = CmdOut::out(write_json_text(&approved_list_json(&done)));
+                out.stderr = stderr;
+                return Ok(out);
+            }
+            Err(e) => {
+                let (code, text) = render_flow_err(&e);
+                stderr.push_str(&text);
+                return Ok(CmdOut {
+                    stdout: String::new(),
+                    stderr,
+                    code,
+                });
+            }
+        }
     }
     let (raw, pend) = pending_approvals(rt).await?;
     if p.bool("raw") {
@@ -1201,10 +1219,23 @@ fn approve_decision_str(p: &Parsed) -> Result<String, FlowErr> {
 async fn cmd_approve(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
     let decision = approve_decision_str(p)?;
     if p.bool("all") {
-        let (done, stderr) = approve_all(rt, &decision).await?;
-        let mut out = CmdOut::out(write_json_text(&approved_list_json(&done)));
-        out.stderr = stderr;
-        return Ok(out);
+        let mut stderr = String::new();
+        match approve_all(rt, &decision, &mut stderr).await {
+            Ok(done) => {
+                let mut out = CmdOut::out(write_json_text(&approved_list_json(&done)));
+                out.stderr = stderr;
+                return Ok(out);
+            }
+            Err(e) => {
+                let (code, text) = render_flow_err(&e);
+                stderr.push_str(&text);
+                return Ok(CmdOut {
+                    stdout: String::new(),
+                    stderr,
+                    code,
+                });
+            }
+        }
     }
     let id = p.positionals.first().cloned().unwrap_or_default();
     let res = decide_approval(rt, &id, &decision).await?;
@@ -1794,7 +1825,33 @@ pub(crate) fn run_network_command(
     Ok(())
 }
 
-/// The driver seam (M7b, D-M7b-2): run one command
+/// Render a `FlowErr` exactly as `run_inner` does
+/// (`run.rs`): the (exit code, stderr text) pair. Used by
+/// the approve-all handlers, which must keep `approveAll`'s
+/// already-printed lines on stderr even when a later decide
+/// fails (Go prints those lines directly to stderr as the
+/// loop runs, so they survive a mid-loop error; `run_inner`
+/// would drop them if the handler returned `Err`).
+pub(crate) fn render_flow_err(e: &FlowErr) -> (i32, String) {
+    match e {
+        FlowErr::HelpShown => (0, String::new()),
+        FlowErr::Exit(code) => (*code, String::new()),
+        FlowErr::Verbatim { code, text } => {
+            if text.is_empty() {
+                (*code, String::new())
+            } else {
+                (*code, format!("{text}\n"))
+            }
+        }
+        FlowErr::Msg { code, message } => (
+            *code,
+            message
+                .as_ref()
+                .map(|m| format!("castctl: {m}\n"))
+                .unwrap_or_default(),
+        ),
+    }
+}
 /// against an already-built runtime (a fake gateway /
 /// fake muse.ai base in tests) and return
 /// (stdout, stderr, exit code), rendering `FlowErr`
