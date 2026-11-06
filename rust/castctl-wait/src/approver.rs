@@ -30,7 +30,6 @@
 //! not `TransportError::log_summary()` (whose Gateway arm
 //! keeps M3's `gateway error; body_length=...` shape).
 
-use std::error::Error as _;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -119,7 +118,7 @@ fn find_transport(mut err: &(dyn std::error::Error + 'static)) -> Option<Transpo
 /// summary is logged by the turn runner, so it must still
 /// be Go's summary, not a fixed string.
 fn error_summary(err: &castctl_approvals::ApproveError) -> String {
-    let inner: &(dyn std::error::Error + 'static) = err.err.as_ref();
+    let inner: &(dyn std::error::Error + 'static) = &**err.err;
     castctl_logging::summarize_err(Some(inner))
 }
 
@@ -127,7 +126,7 @@ fn error_summary(err: &castctl_approvals::ApproveError) -> String {
 /// offered options, else `None` (see `error_summary`'s
 /// note on the CLI's structural skip rendering).
 fn skip_option_count(err: &castctl_approvals::ApproveError) -> Option<usize> {
-    let inner: &(dyn std::error::Error + 'static) = err.err.as_ref();
+    let inner: &(dyn std::error::Error + 'static) = &**err.err;
     inner
         .downcast_ref::<NoForeverError>()
         .map(NoForeverError::option_count)

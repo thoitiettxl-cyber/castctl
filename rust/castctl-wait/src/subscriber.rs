@@ -8,6 +8,14 @@
 //! retry). Which one the CLI dials is decided at wiring
 //! time against `internal/commands/wait.go` (see
 //! `docs/`); both are provided here.
+//!
+//! The impls are on the bare types (`Gateway`,
+//! `SharedConn`), not on `Arc<..>`: the
+//! `gateway_subscriber` / `shared_subscriber` helpers
+//! coerce `Arc<Gateway>` → `Arc<dyn Subscriber>` by
+//! unsize, which requires the INNER type to implement
+//! the trait. (An earlier draft implemented the trait
+//! for `Arc<..>` and the coercion failed to compile.)
 
 use std::future::Future;
 use std::pin::Pin;
@@ -19,37 +27,40 @@ use castctl_transport::TransportError;
 
 use crate::runner::Subscriber;
 
-impl Subscriber for Arc<Gateway> {
-    fn subscribe_raw(
-        &self,
-        method: &str,
+impl Subscriber for Gateway {
+    fn subscribe_raw<'a>(
+        &'a self,
+        method: &'a str,
         opts: SubscribeOptions,
-        handler: &mut dyn SubscribeHandler,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send + '_>> {
-        let this = Arc::clone(self);
-        let method = method.to_string();
-        Box::pin(async move { this.subscribe_raw(&method, opts, handler).await })
+        handler: &'a mut dyn SubscribeHandler,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send + 'a>>
+    {
+        // Inherent `Gateway::subscribe_raw` takes
+        // precedence over this trait method in
+        // resolution; there is no recursion here.
+        Box::pin(async move { self.subscribe_raw(method, opts, handler).await })
     }
 
     fn close(&self) -> Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send + '_>> {
-        let this = Arc::clone(self);
         Box::pin(async move {
-            this.close().await;
+            self.close().await;
             Ok(())
         })
     }
 }
 
-impl Subscriber for Arc<SharedConn> {
-    fn subscribe_raw(
-        &self,
-        method: &str,
+impl Subscriber for SharedConn {
+    fn subscribe_raw<'a>(
+        &'a self,
+        method: &'a str,
         opts: SubscribeOptions,
-        handler: &mut dyn SubscribeHandler,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send + '_>> {
-        let this = Arc::clone(self);
-        let method = method.to_string();
-        Box::pin(async move { this.subscribe_raw(&method, opts, handler).await })
+        handler: &'a mut dyn SubscribeHandler,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send + 'a>>
+    {
+        // Inherent `SharedConn::subscribe_raw` takes
+        // precedence over this trait method in
+        // resolution; there is no recursion here.
+        Box::pin(async move { self.subscribe_raw(method, opts, handler).await })
     }
 
     fn close(&self) -> Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send + '_>> {

@@ -84,13 +84,16 @@ pub const HISTORY_READ_FLOOR: Duration = Duration::from_millis(100);
 pub trait Subscriber: Send + Sync {
     /// Subscribe and return the raw NDJSON record bytes.
     /// The handler's `on_record` runs with each record
-    /// the moment it arrives.
-    fn subscribe_raw(
-        &self,
-        method: &str,
+    /// the moment it arrives. The method string, the
+    /// handler borrow and the subscriber borrow share one
+    /// lifetime `'a` (the future is awaited immediately at
+    /// every call site), so no owned copies are needed.
+    fn subscribe_raw<'a>(
+        &'a self,
+        method: &'a str,
         opts: SubscribeOptions,
-        handler: &mut dyn SubscribeHandler,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send + '_>>;
+        handler: &'a mut dyn SubscribeHandler,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send + 'a>>;
 
     /// Close after use. The Runner ignores the result
     /// (Go: `_ = sub.Close()`), but the interface keeps
@@ -1383,7 +1386,10 @@ impl SubscribeHandler for RunnerHandler<'_> {
         self.runner.should_stop(&self.cancel)
     }
 
-    fn on_record(&mut self, record: &[u8]) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+    fn on_record<'a>(
+        &'a mut self,
+        record: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
             if self.runner.waiter.result().is_some() {
                 return true;
@@ -1433,7 +1439,10 @@ impl SubscribeHandler for CheckHandler {
         self.cancel.is_set()
     }
 
-    fn on_record(&mut self, record: &[u8]) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+    fn on_record<'a>(
+        &'a mut self,
+        record: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         let ev = decode_record(record);
         let thread = self.thread.clone();
         let found = &mut self.found;
@@ -1632,12 +1641,12 @@ mod tests {
     }
 
     impl Subscriber for FakeSubscriber {
-        fn subscribe_raw(
-            &self,
-            _method: &str,
+        fn subscribe_raw<'a>(
+            &'a self,
+            _method: &'a str,
             opts: SubscribeOptions,
-            handler: &mut dyn SubscribeHandler,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send + '_>>
+            handler: &'a mut dyn SubscribeHandler,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send + 'a>>
         {
             let is_check = opts.max_records == 50;
             if is_check {
