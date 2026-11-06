@@ -19,7 +19,8 @@ use std::time::Duration;
 
 use base64::Engine;
 use castctl_fsclient::{
-    Entry, Fs, FsError, FsGateway, WriteResult, decode_entries, norm, number_value,
+    Entry, Fs, FsError, FsGateway, WriteResult, decode_entries, go_json_string, norm,
+    number_value,
 };
 use serde_json::{Value, json};
 
@@ -810,6 +811,28 @@ fn write_result_json() {
         bytes_written: 8,
     };
     assert_eq!(r.to_json(), r#"{"path":"/g.bin","bytes_written":8}"#);
+}
+
+/// Go `encoding/json` short escapes (PR-2: the R3-B1 bug
+/// class — `go_json_string` rendered `\u0008`/`\u000c`
+/// where Go emits `\b`/`\f`). Expected values are Go
+/// `json.Marshal` literals, not recomputed here.
+#[test]
+fn go_json_string_backspace_formfeed() {
+    assert_eq!(go_json_string("\u{8}"), "\"\\b\"");
+    assert_eq!(go_json_string("\u{c}"), "\"\\f\"");
+    // The other short escapes were already correct.
+    assert_eq!(go_json_string("\n\r\t"), "\"\\n\\r\\t\"");
+    // An entry name carrying a control char renders
+    // through the same escaper (server-controlled names).
+    assert_eq!(
+        Entry {
+            name: "a\u{8}b".to_string(),
+            ..Default::default()
+        }
+        .to_json(),
+        r#"{"name":"a\bb"}"#
+    );
 }
 
 #[test]

@@ -245,10 +245,10 @@ pub fn go_type_name(v: &Value) -> &'static str {
 
 /// Escape one string the way Go's `encoding/json`
 /// marshals it: `"` → `\"`, `\` → `\\`, control chars →
-/// `\n` / `\r` / `\t` / `\u00XX`, and `<` `>` `&` →
-/// `\u003c` `\u003e` `\u0026` (HTML escaping is ON for
-/// plain `json.Marshal` — unlike the wait output, which
-/// sets `SetEscapeHTML(false)`).
+/// `\b` / `\f` / `\n` / `\r` / `\t` / `\u00XX`, and `<`
+/// `>` `&` → `\u003c` `\u003e` `\u0026` (HTML escaping is
+/// ON for plain `json.Marshal` — unlike the wait output,
+/// which sets `SetEscapeHTML(false)`).
 pub fn go_json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -256,6 +256,11 @@ pub fn go_json_string(s: &str) -> String {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            // Go `encoding/json` short escapes
+            // (`appendString`, `encode.go:1012-1015`):
+            // `\b` and `\f` are NOT `\u0008`/`\u000c`.
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
