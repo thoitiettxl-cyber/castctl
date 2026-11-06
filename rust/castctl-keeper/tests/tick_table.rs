@@ -541,3 +541,33 @@ async fn case_17_gateway_down_persists_updates() {
     // path), unlike the transient path.
     assert!(h.read_jar().contains("v2"));
 }
+
+#[tokio::test]
+async fn case_18_tick_writes_configured_cookies_file() {
+    // M7e regression test for D-M7e-2: the tick ignored a
+    // configured `cookies_file` (it passed "" to `Store::new`,
+    // so it always read/wrote the profile default). The jar
+    // lives ONLY at the configured path — the default file
+    // does not exist — so a tick that ignores the configured
+    // path cannot reach the jar at all.
+    let h = Harness::new("18");
+    let configured = h.base.join("custom-cookies.txt");
+    std::fs::write(&configured, jar_text(&[hatch("old", NOW - 3600)])).unwrap();
+    let mut deps = h.deps(script_checker(vec![auth_outcome(), ok_outcome()]));
+    deps.cookies_path = configured.to_str().unwrap().to_string();
+    deps.exporter = Some(Arc::new(ScriptExporter {
+        script: std::sync::Mutex::new(VecDeque::from(vec![Ok(vec![exported_hatch(
+            HATCH_EXP as f64,
+        )])])),
+    }));
+    let r = tick(&deps, &CancelFlag::new()).await;
+    assert_eq!(r.outcome, "ok");
+    assert!(r.recovered);
+    assert!(r.wrote_cookies);
+    // The CONFIGURED file carries the exported value …
+    let written = std::fs::read_to_string(&configured).unwrap();
+    assert!(written.contains("fresh-value"));
+    assert!(!written.contains("old"));
+    // … and the default file was never created.
+    assert!(!h.profile_dir().join("cookies.txt").exists());
+}
