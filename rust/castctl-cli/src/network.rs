@@ -2235,7 +2235,10 @@ mod tests {
             warning: None,
         };
         let out = save_row_to_json(&row);
-        assert!(out.contains("\"path\":\"sandbox://media/raw/a&b.jpg\""), "{out}");
+        assert!(
+            out.contains("\"path\":\"sandbox://media/raw/a&b.jpg\""),
+            "{out}"
+        );
         assert!(out.contains("\"file\":\"/tmp/dl/a&b.jpg\""), "{out}");
         assert!(!out.contains("\\u0026"), "{out}");
     }
@@ -2336,10 +2339,7 @@ mod tests {
         // slices `[a b]`, null `<nil>`, bools `true`/`false`
         // (unlike the top-level bool arm's `True`/`False`).
         assert_eq!(stringify_id(None), "");
-        assert_eq!(
-            stringify_id(Some(&serde_json::json!({"x": 1}))),
-            "map[x:1]"
-        );
+        assert_eq!(stringify_id(Some(&serde_json::json!({"x": 1}))), "map[x:1]");
         assert_eq!(
             stringify_id(Some(&serde_json::json!({"b": 2, "a": 1}))),
             "map[a:1 b:2]"
@@ -2360,14 +2360,8 @@ mod tests {
             stringify_id(Some(&serde_json::json!({"x": "s"}))),
             "map[x:s]"
         );
-        assert_eq!(
-            stringify_id(Some(&serde_json::json!(true))),
-            "True"
-        );
-        assert_eq!(
-            stringify_id(Some(&serde_json::json!(false))),
-            "False"
-        );
+        assert_eq!(stringify_id(Some(&serde_json::json!(true))), "True");
+        assert_eq!(stringify_id(Some(&serde_json::json!(false))), "False");
         assert_eq!(stringify_id(Some(&serde_json::json!(42))), "42");
     }
 

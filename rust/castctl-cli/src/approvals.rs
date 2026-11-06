@@ -281,10 +281,7 @@ pub fn approval_json(d: &DescribedApproval) -> String {
     match &d.options {
         Some(options) => {
             out.push('[');
-            let parts: Vec<String> = options
-                .iter()
-                .map(|o| escape_stdout_string(o))
-                .collect();
+            let parts: Vec<String> = options.iter().map(|o| escape_stdout_string(o)).collect();
             out.push_str(&parts.join(","));
             out.push(']');
         }
@@ -585,18 +582,17 @@ mod tests {
     fn approval_json_no_html_escape() {
         // B2 regression: stdout JSON is Go `writeJSON`
         // (`SetEscapeHTML(false)`) — `<`/`>`/`&` render raw.
-        let a = Approval {
-            id: "ap1".to_string(),
-            kind: Some("network_access".to_string()),
+        let a = DescribedApproval {
+            approval_id: Some("ap1".to_string()),
             title: Some("Mạng <&> Co".to_string()),
-            body: Some("a <b> & c".to_string()),
-            expires_at: None,
-            options: vec!["<opt>".to_string()],
+            question: Some("a <b> & c".to_string()),
+            kind: Some("network_access".to_string()),
+            options: Some(vec!["<opt>".to_string()]),
             ..Default::default()
         };
         let out = approval_json(&a);
         assert!(out.contains("\"title\":\"Mạng <&> Co\""), "{out}");
-        assert!(out.contains("\"body\":\"a <b> & c\""), "{out}");
+        assert!(out.contains("\"question\":\"a <b> & c\""), "{out}");
         assert!(out.contains("\"options\":[\"<opt>\"]"), "{out}");
         assert!(!out.contains("\\u003c"), "{out}");
     }

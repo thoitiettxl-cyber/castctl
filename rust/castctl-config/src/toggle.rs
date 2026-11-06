@@ -245,8 +245,7 @@ fn read_config_bytes(path: &str) -> Result<Vec<u8>, ConfigError> {
 /// refuses to truncate a pre-existing file. Mirrors Go
 /// `os.CreateTemp(dir, ".tmp-*")` (`config.go:1634`).
 fn temp_suffix() -> String {
-    static TEMP_COUNTER: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(0);
+    static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -457,11 +456,7 @@ mod tests {
         let rc = unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) };
         assert_eq!(rc, 0, "mkfifo failed");
         let e = read_config_bytes(fifo.to_str().unwrap()).unwrap_err();
-        assert!(
-            e.message.contains("is not a regular file"),
-            "{}",
-            e.message
-        );
+        assert!(e.message.contains("is not a regular file"), "{}", e.message);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
