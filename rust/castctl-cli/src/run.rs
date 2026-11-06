@@ -44,11 +44,41 @@ use crate::table::{
     profile_sub_defs, profile_sub_help,
 };
 
-/// The Rust `--version` payload (D-M2-7): the bare version, no
-/// stamp. Go's `commands.go` `Version` var defaults to `0.6.1` and
-/// release builds stamp `0.9.0` via `-X`; the Rust const is the
-/// stamped release version the golden binary reports.
+/// The version number. Go keeps `Version`/`Commit`/`BuildDate` as
+/// vars stamped with `-X` at release time and renders
+/// `Version (Commit BuildDate)` whenever a stamp is set
+/// (`internal/commands/commands.go:71-76`). The Rust port derives the
+/// same stamps from git in `build.rs` (`CASTCTL_BUILD_COMMIT` /
+/// `CASTCTL_BUILD_DATE`), so a git checkout renders the same shape as
+/// a stamped Go release; without git metadata the bare version is
+/// printed, exactly like an unstamped Go build.
 pub const VERSION: &str = "0.9.0";
+
+/// Length of the short commit Go stamps into `Commit`
+/// (`-X ...Commit=<short hash>`; the release binary reports 7 chars).
+const SHORT_COMMIT_LEN: usize = 7;
+
+/// `versionString` (`internal/commands/commands.go:71-76`): the bare
+/// version when both stamps are empty, else `VERSION (Commit Date)`
+/// with the joined pieces trimmed. Go renders the build date as
+/// RFC3339 UTC (`...Z`) while `git log --format=%cI` renders a UTC
+/// commit as `+00:00`, so that suffix is normalised to `Z` to keep the
+/// rendered shape identical.
+fn version_string(commit: &str, date: &str) -> String {
+    let commit = commit.trim();
+    // `get` keeps a non-ASCII byte boundary from panicking; the stamp
+    // is a hex hash, so the fallback is unreachable in practice.
+    let commit = commit.get(..SHORT_COMMIT_LEN).unwrap_or(commit);
+    let date = date.trim();
+    let date = match date.strip_suffix("+00:00") {
+        Some(head) => format!("{head}Z"),
+        None => date.to_string(),
+    };
+    if commit.is_empty() && date.is_empty() {
+        return VERSION.to_string();
+    }
+    format!("{VERSION} ({})", format!("{commit} {date}").trim())
+}
 
 /// `ExportGuidance` (`internal/deliver/authexport.go`): the fixed
 /// guidance `auth export` prints on stderr with exit 1. Verbatim.
@@ -331,7 +361,10 @@ fn scan_global(ctx: &mut Ctx<'_>, args: &[String]) -> Scan {
                 ));
                 return Scan::Done(2);
             }
-            ctx.out.stdout.push_str(&format!("castctl {VERSION}\n"));
+            ctx.out.stdout.push_str(&format!(
+                "castctl {}\n",
+                version_string(env!("CASTCTL_BUILD_COMMIT"), env!("CASTCTL_BUILD_DATE"))
+            ));
             return Scan::Done(0);
         } else if tok == "--help" || tok == "-h" || tok == "--hel" {
             ctx.out.stdout.push_str(GLOBAL_HELP_TEXT);
@@ -419,7 +452,10 @@ fn scan_global(ctx: &mut Ctx<'_>, args: &[String]) -> Scan {
                 ctx.out.stdout.push_str(GLOBAL_HELP_TEXT);
                 return Scan::Done(0);
             } else if "version".starts_with(name) {
-                ctx.out.stdout.push_str(&format!("castctl {VERSION}\n"));
+                ctx.out.stdout.push_str(&format!(
+                    "castctl {}\n",
+                    version_string(env!("CASTCTL_BUILD_COMMIT"), env!("CASTCTL_BUILD_DATE"))
+                ));
                 return Scan::Done(0);
             } else {
                 ctx.out
@@ -1793,23 +1829,66 @@ mod tests {
         (home, map)
     }
 
+    /// The `--version` line the binary must print, built from the same
+    /// stamps the binary uses (Go renders a stamped build the same way,
+    /// `internal/commands/commands.go:71-76`).
+    fn version_line() -> String {
+        format!(
+            "castctl {}\n",
+            version_string(env!("CASTCTL_BUILD_COMMIT"), env!("CASTCTL_BUILD_DATE"))
+        )
+    }
+
+    #[test]
+    fn version_string_matches_go_rendering() {
+        // Go: bare version when neither stamp is set.
+        assert_eq!(version_string("", ""), "0.9.0");
+        // Go: short commit only.
+        assert_eq!(version_string("1396697", ""), "0.9.0 (1396697)");
+        // Go: date only, RFC3339 UTC.
+        assert_eq!(
+            version_string("", "2026-11-04T21:38:36Z"),
+            "0.9.0 (2026-11-04T21:38:36Z)"
+        );
+        // Go release shape: short hash + UTC date.
+        assert_eq!(
+            version_string("1396697abc", "2026-11-04T21:38:36Z"),
+            "0.9.0 (1396697 2026-11-04T21:38:36Z)"
+        );
+        // `git log --format=%cI` renders UTC as +00:00; Go writes Z.
+        assert_eq!(
+            version_string("1396697abc", "2026-11-04T21:38:36+00:00"),
+            "0.9.0 (1396697 2026-11-04T21:38:36Z)"
+        );
+        // Non-UTC offsets are preserved verbatim.
+        assert_eq!(
+            version_string("1396697", "2026-11-04T21:38:36+07:00"),
+            "0.9.0 (1396697 2026-11-04T21:38:36+07:00)"
+        );
+        // Whitespace is trimmed like Go's strings.TrimSpace.
+        assert_eq!(
+            version_string("  1396697  ", "  2026-11-04T21:38:36Z  "),
+            "0.9.0 (1396697 2026-11-04T21:38:36Z)"
+        );
+    }
+
     #[test]
     fn test_version_and_global_help() {
         let out = run_args(&["--version"]);
         assert_eq!(
             out,
             Outcome {
-                stdout: "castctl 0.9.0\n".to_string(),
+                stdout: version_line(),
                 stdout_bytes: Vec::new(),
                 stderr: String::new(),
                 code: 0
             }
         );
         let out = run_args(&["--vers"]);
-        assert_eq!(out.stdout, "castctl 0.9.0\n");
+        assert_eq!(out.stdout, version_line());
         assert_eq!(out.code, 0);
         let out = run_args(&["--v"]);
-        assert_eq!(out.stdout, "castctl 0.9.0\n");
+        assert_eq!(out.stdout, version_line());
         let out = run_args(&["--help"]);
         assert_eq!(out.stdout, GLOBAL_HELP_TEXT);
         assert_eq!(out.code, 0);
@@ -1823,7 +1902,7 @@ mod tests {
     #[test]
     fn test_version_with_value_rejected() {
         let out = run_args(&["--vers=x"]);
-        assert_eq!(out.stdout, "castctl 0.9.0\n");
+        assert_eq!(out.stdout, version_line());
         let out = run_args(&["--version=x"]);
         assert_eq!(out.code, 2);
         assert_eq!(
