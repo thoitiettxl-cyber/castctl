@@ -13196,7 +13196,9 @@ New supporting code:
   (tokio TcpListener, hand-rolled HTTP/1.1, request recording).
 - `rust/castctl-gateway/src/media.rs` — `media_path` from
   `internal/gateway/media.go:47-91` (copied via
-  `castctl-telegram/src/turn.rs:282-360`, see deviation D5).
+  `castctl-telegram/src/turn.rs:282-360`; the M5b
+  case-insensitive scheme gate was NOT carried over — D5 was
+  fixed to Go's lowercase-only gate in fix loop 1).
 - `rust/castctl-shared/src/invite.rs` — `summarize_invite` +
   ordered JSON render, from `internal/shared/invite.go:39`
   (reads RAW API field names: `invite_state`, `code`,
@@ -13293,8 +13295,14 @@ New supporting code:
 ### M7b.3 Deviations (deliberate, with evidence)
 
 - **D1 — `raw --body` error text**: serde's error message vs
-  Go's decoder message differ. Recorded; fake tests use valid
-  `--body` only.
+  Go's decoder message differ (Go `invalid character 'b'
+  looking for beginning of object key string`, Rust `key must
+  be a string at line 1 column 2` — same exit 2). Fix loop 1
+  pinned it in the harness known-diff mode
+  (`rust/parity/known_diff/rt-raw-badbody.{go,rs}.err`): each
+  side's stderr is pinned against its own file instead of
+  compared side-to-side; stdout, exit, logs, and downloads
+  still compare byte-identical.
 - **D2 — auto-approve writer preserves input; Go
   normalizes.** Go `LoadProfile` fills defaults and
   `buildSingleFileOrdered` re-encodes from the loaded struct:
@@ -13316,21 +13324,33 @@ New supporting code:
   info: %w` (`internal/deliver/wake.go:89`); typed errors
   classify identically with or without wraps, so the wraps are
   not observable in exit code / typed output.
-- **D4 — `stringifyID` fallback approximation**: Go
-  `stringifyID` covers nil/string/json.Number/int64/float64/
-  bool; Rust covers the same cases observed in fixtures; an
-  unlisted JSON type falls back to compact rendering.
-- **D5 — `media_path` `is_http_url` deviation carried from
-  M5b**: case-insensitive http(s) scheme gate (copied from
-  `castctl-telegram/src/turn.rs:282-360`, which deviates from
-  Go `internal/gateway/media.go:47-91` the same way).
-- **D6 — Go driver WS URL uses the REAL token; M7a drivers
-  carry the literal `auth_token=<redacted>`.** Gorilla sends
-  the raw `<`/`>` in the query and the Go server answers the
-  WS handshake 400, while the Rust client percent-encodes them
-  and connects — so the literal breaks the Go side only. The
-  M7a `wait_driver` (Go + Rust) carries the same latent bug;
-  reported to parent, not fixed here (out of scope).
+- **D4 — `stringifyID` fallback** [FIXED in fix loop 1]: Go
+  `stringifyID` falls back to `fmt.Sprintf("%v", v)`; Rust
+  now renders Go `%v` (`map[x:1]`, `[a b]`, `<nil>`, bools
+  `true`/`false` inside `%v` — unlike the top-level bool arm's
+  `True`/`False`) instead of compact JSON
+  (`network.rs: go_percent_v`). Regression:
+  `stringify_id_percent_v` + harness `rt-download-seq-obj`.
+- **D5 — `media_path` `is_http_url` deviation** [FIXED in fix
+  loop 1]: the scheme gate is now lowercase-only, matching Go
+  `internal/gateway/media.go:56` (`media.rs: is_http_url`).
+  The M5b telegram copy (`castctl-telegram/src/turn.rs:282-360`)
+  still carries the case-insensitive gate — out of this PR's
+  scope, not changed here. Regression: `media_path_literals`
+  (uppercase `HTTP://`/`HTTPS://`) + harness
+  `rt-download-http-upper`.
+- **D6 — Go driver WS URL token** [FIXED in fix loop 1,
+  wording corrected]: the token is the CANNED `HT-FAKE` from
+  `gatewaytest.CannedAuth`, not a real credential — "real"
+  meant "from the auth chain, not the literal placeholder".
+  Both drivers now interpolate it (`m7b_driver/main.go`,
+  `m7b_driver.rs`); the `%!(EXTRA string=HT-FAKE)` Sprintf
+  bug is fixed, and no `auth_token` string appears in harness
+  logs. The M7a "handshake 400" half (whether the literal
+  actually breaks the M7a Go driver's handshake) is
+  UNVERIFIED by this PR — the M7a `wait_driver` (Go + Rust)
+  still carries the literal; reported to parent, not fixed
+  here (out of scope).
 - **D7 — `writeMergedJSON` nested shape verified by probe**:
   a temporary Go probe test (created, run, deleted 2026-11-06;
   Go tree verified clean after) showed nested values render
@@ -13476,4 +13496,174 @@ Own target deleted after the final gate: `rm -rf
   Go build hash/commit (`castctl 0.9.0 (1396697
   2026-11-04T21:38:36Z)`) — observed, out of PR-1 scope, not
   changed.
-- `raw --body` invalid-JSON error text (D1) — no fake case.
+- `raw --body` invalid-JSON error text (D1) — now pinned in
+  the harness known-diff mode (fix loop 1); see §M7b.9.
+
+### M7b.9 Fix loop 1 (round-1 reviews, 2026-11-06)
+
+Head `42d1e45` (8 commits on `feat/rust-m7b-cli-wiring`,
+base `dev-rust` `6a399f7` — verified unchanged, no rebase).
+Review verdicts at `6c4816d`: technical PASS-WITH-NITS,
+safety PASS-WITH-NITS, red-team FAIL (B1–B6). All 6
+BLOCKING fixed with a regression test each; technical
+N1–N4 fixed; safety N1–N5 addressed; red-team N1–N2 fixed;
+D1 pinned in the harness known-diff mode (target met).
+
+- **B1** `approved_line` counts title BYTES (`title.len()`,
+  Go `len`, `wait.go:374`), not runes. Test:
+  `approved_line_title_length_is_bytes` ("Mạng lưới" → 14).
+- **B2** stdout JSON does not HTML-escape `<>&` (new
+  `escape_stdout_string`, Go `writeJSON`
+  `SetEscapeHTML(false)`, `commands.go:411`): `approval_json`,
+  `approved_json`, auto-approve status, `save_row_to_json`.
+  Wire bodies and typed auth JSON keep
+  `escape_go_marshal_string`. Tests:
+  `approval_json_no_html_escape`,
+  `save_row_to_json_no_html_escape`,
+  `status_does_not_html_escape_path` + harness
+  `rt-approvals-weird`, `rt-download-htmlname`.
+- **B3** `media_path` failure inside `save_resources` is a
+  row error + continue (exit 3 when any row errors), not
+  exit 2 with no rows (`resources.go:267`). Harness
+  `rt-download-dotdot`, `rt-download-empty-sandbox`.
+- **B4** filesystem error text is Go-style: lowercase
+  `strerror` via shared `oserr` (`network.rs`
+  `io_error_text`, `toggle.rs` `io_error_text`),
+  `open <path>: <reason>` (cookies loader,
+  `cookies.go:38`), `mkdir <path>: <reason>` with
+  `create_dir_all` EEXIST-on-a-file mapped to ENOTDIR (Go
+  `MkdirAll`), `rename <old> <new>: <reason>` wrapped as Go
+  does (`save resources: rename <tmp>: rename <tmp> <dest>:
+  <reason>`). Full message closes Go's 182 exactly (was
+  135); verified live against the golden Go binary on the
+  same config (both `message_length=88` for a 6-char path).
+  Tests: `io_error_text_is_lowercase_strerror`,
+  `mkdir_error_text_maps_file_to_not_a_directory`,
+  `load_cookies_missing_file_go_path_error`,
+  `download_missing_cookies_is_typed_json_with_go_length`.
+- **B5** `stringifyID` fallback is Go `%v`
+  (`network.rs: go_percent_v`: `map[x:1]`, `[a b]`,
+  `<nil>`, bools `true`/`false` inside `%v`), not compact
+  JSON. Test `stringify_id_percent_v` + harness
+  `rt-download-seq-obj`. D4 closed.
+- **B6** `media_path` scheme gate is lowercase-only
+  (`media.go:56`); the M5b telegram copy
+  (`turn.rs:282-360`) still carries the case-insensitive
+  gate — out of scope, not changed. Test
+  `media_path_literals` (uppercase `HTTP://`/`HTTPS://`) +
+  harness `rt-download-http-upper`. D5 closed.
+- **N1** all ~25 wrong Go file:line citations corrected,
+  each verified against `git show 6a399f7` (not copied
+  blindly from the review); PORTING §M7b.1 Rust-side line
+  numbers re-grepped after the edits.
+- **N2** `TODO(chat/send/watch)` at the `run.rs` stub
+  fallthrough, one line each naming the blocker.
+- **N3** invite citations carry verified line numbers
+  (FetchInvite `:30`, CreateInvite `:61`,
+  RedeemInviteCode `:98`, WakeVM `:52`, SummarizeInvite
+  `:39`, InviteReward `:10`, InviteSummary `:19`,
+  filterRedeemFailureBody `:141`).
+- **N4** `detail_rows` comment reworded to "last row wins
+  (Go map assignment)".
+- **S-N1** `m7b_driver.rs` cookies file mode 0600 set
+  explicitly (was a wrong comment over `fs::write`).
+- **S-N2** config temp file: random suffix + `create_new`
+  (O_EXCL) + age-gated (>1h) stale cleanup (Go
+  `os.CreateTemp` + deferred `Remove`).
+- **S-N3** nested-call deadlock doc note in `toggle.rs`
+  (Go `guard.go:183`).
+- **S-N4** `read_config_bytes` stat-guarded vs FIFO
+  (`config.go:827`); test
+  `read_config_bytes_refuses_fifo_without_blocking`
+  (`libc::mkfifo` in the test only — the loop's one new
+  `unsafe`, test-only).
+- **S-N5 / RT-N1** both drivers interpolate the CANNED
+  `HT-FAKE` token in the WS URL (D6 reworded: not a real
+  credential); the Go driver's Sprintf arg-count bug (2
+  verbs, 3 args → `%!(EXTRA string=HT-FAKE)`) is fixed.
+  No `auth_token` string appears in harness logs
+  (re-grepped after the fix). The M7a "handshake 400" half
+  stays unverified — the M7a `wait_driver` still carries
+  the literal.
+- **RT-N2** Go driver `classifyError` mirrors the auth
+  taxonomy (`classifyAuthType`, `commands.go:361/390`).
+  No harness case exercises it (the fake server always
+  handshakes; wake-401 is a normal result, not an auth
+  error — `doHatch` returns the status, `wake.go:62`).
+- **D1** pinned in the harness known-diff mode
+  (`rust/parity/known_diff/rt-raw-badbody.{go,rs}.err`;
+  runner compares each side to its own file). All 27
+  red-team attack cases promoted to `m7b_cases/rt-*.json`
+  (26 byte-comparison + 1 known-diff).
+- **S-N6** the real invite code in
+  `/tmp/m7b-live/live-invite.{go,rs}.out` was deleted after
+  the gates (value never reproduced anywhere).
+- **S-N7** first-round aa-* runs (in `/tmp/m7b-live/`,
+  writer only described aa2-*): aa-status exit 0/0,
+  stdout identical modulo the embedded config path
+  (aa-go vs aa-rs dirs), stderr identical; aa-off/aa-on/
+  aa-once exit 2/2, stdout+stderr byte-identical
+  (`profile "default" does not exist in the single config
+  file` — the toggle write path requires the profile entry).
+- **S-N8/N9/N10** noted, no action: `Runtime` pub +
+  pub `http_base` is a confined driver seam (no production
+  flag/env/config sets it); `raw` echoes server bytes by
+  design (matches Go); cue disk 23G free at safety-review
+  time (17G–19G during this loop; dipped to 6.9G once
+  while other sessions built — above the 6G floor, no
+  cleaning needed; own target removed after the gates).
+
+Gates (cue, head `78c4511`):
+`cargo fmt --check` 0; `cargo build --workspace` 0;
+`cargo test --workspace` **796 passed, 0 failed**
+(baseline 786 → +10 new tests; logs
+`/tmp/m7b-fl1-test3.log`, `/tmp/m7b-fl1-fmt3.log`,
+`/tmp/m7b-fl1-build3.log`); `cargo clippy --workspace
+--all-targets -- -D warnings` 0
+(`/tmp/m7b-fl1-clippy3.log`); `go test -run
+TestSPDXHeaders -count=1 .` ok (`/tmp/m7b-fl1-spdx.log`).
+Fake-server harness: **69/69 PASS** (42 original + 26
+rt-* byte-comparison + 1 known-diff D1;
+`bash rust/parity/run_m7b_cases.sh /tmp/m7b-fl1-tier-a`,
+log `/tmp/m7b-fl1-harness.log`). Live re-verification
+(cue, profile `no.0`, golden Go 0.9.0 vs Rust
+`/tmp/m7b-target/debug/castctl-rs`, outputs under
+`/tmp/m7b-fl1-live/`): approvals list, invite read-only,
+auto-approve status, download no-files — 4/4
+byte-identical; 45/45 per-command `--help` + global
+`--help` byte-identical (46/46 as counted in PR-1; the
+check loop additionally covered 5 parenthetical words
+from the help text, also identical). `git diff --stat`
+vs `6c4816d`: only `rust/` (44 files, +1193/−181);
+`docs/provenance.md` unchanged (no scope change);
+`NOTICE` unchanged; Go tree untouched. No new `unsafe`
+in production code (only the test-only `mkfifo`); no
+`unwrap()`/`expect()` on external input (all added uses
+are in tests); no secrets in the diff (re-grepped; the
+only `AT-` match is the false positive inside
+"stat-guarded").
+
+Follow-ups found during fix loop 1 (NOT fixed, out of
+scope — for the parent to triage):
+- **F1** With no `default_profile` and no `"default"`
+  entry, Go errors (`profile "default" does not exist in
+  the single config file`) while Rust synthesizes a
+  `"default"` profile (`load_profile`, `config.rs:761`,
+  cookies at `<base>/cookies.txt`). Proven live: Go exit
+  2 with the error; Rust exit 2 with typed
+  `cookies_missing` `message_length=142` for the
+  synthesized path. Affects only configs that omit both;
+  every harness/test config sets `default_profile`
+  explicitly. Deciding whether Rust should error like Go
+  is a design call, not a fix-loop-1 item.
+- **F2** `toggle.rs` `write config: <reason>` wrap: Go's
+  `writeFileAtomic` returns the raw `*LinkError`
+  (`rename <tmp> <path>: <reason>`) with no `write config:`
+  prefix, while Rust wraps both write and rename errors
+  with `write config: `. Whether the CLI surfaces Go's
+  raw text needs a Go CLI probe on a failing toggle
+  write; left as-is (no harness case exercises it).
+- **F3** `readRegularFile`'s `%q` quoting: `toggle.rs`
+  uses the crate's existing plain-`{}` `config path …`
+  phrasing (as in `config.rs`), not Go's `%q` quoting.
+  Cosmetic; no case pins it.
