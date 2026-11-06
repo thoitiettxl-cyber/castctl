@@ -14042,9 +14042,11 @@ files) alongside the 3 new case files (113 + 5 = 118).
 
 ### M7b.12 PR-2: chat + send + watch + fs (2026-11-06)
 
-Branch `feat/rust-m7b-pr2`, stacked on the rebased PR-1
-branch (`36c5443`, see below); PR targets `dev-rust`
-and states it stacks on #76 (merge #76 first).
+Branch `feat/rust-m7b-pr2`; rebased onto `dev-rust`
+`0173436` (PR #76 merged 2026-11-06 — the PR-1 stack
+dropped out, only the 16 PR-2 commits replayed; see
+"Rebase onto 0173436" at the end of this section).
+PR targets `dev-rust` directly (no stacking).
 Scope per parent decisions D-M7b-PR2-1..7 (plan
 `~/workspace/plans/active/castctl-rust-m7b-pr2.md`):
 `chat`, `send` (incl. `--wait` via M7a's Runner),
@@ -14486,3 +14488,41 @@ record itself):
   cache was deleted and the examples re-linked, exit
   0. The full test suite was then re-run clean,
   1444/0.))
+
+#### Rebase onto 0173436 (#76 merged, 2026-11-06)
+
+PR #76 merged -> `dev-rust` `0173436`. Rebased with
+`git rebase --onto origin/dev-rust 36c5443
+feat/rust-m7b-pr2`: the 16 PR-2 commits replayed
+cleanly, **zero conflicts**, PR-1 stack dropped out
+(patch-id skip); head `03f7808`, then one docs commit
+`edd064c` (provenance: PR-2 section 20 -> 21, base line
+-> `dev-rust` 0173436 — dev-rust already holds M7b
+as §20). Merge-base `0173436`; diff `0173436..edd064c`
+**88 files +9407/-180**, only `rust/` +
+`docs/provenance.md`; Go tree untouched. `Cargo.lock`
+diff vs `0173436`: exactly 2 lines (the
+`castctl-shared` edge for `castctl-gateway` and the
+`castctl-fsclient` edge for `castctl-cli` — no new
+crate entered the lockfile).
+Re-gate at head `edd064c` (cue): SPDX ok; fmt 0;
+build 0; test **1470/0** (65 suites — 1444 + M6c-b's
+26 loader tests); clippy 0; harness m7b **121/121**,
+send --wait **11/11**, watch **5/5**, wait **11/11**;
+help **46/46** byte-identical; live 4/4 (approvals /
+invite / auto-approve / download-nofiles) + fs ls
+478 B byte-identical + fs cat SOUL.md 1537 B
+byte-identical + watch shape-identical (same 3 event
+types in order) + send --wait scratch shape-identical
+(reply `probe-ok` both sides) + chat scripted REPL
+1355 B byte-identical + chat Ctrl-C at prompt 144 B
+byte-identical; `chat.json` restored after every
+probe (md5 verified). (Two environment notes, neither
+a regression: the first full test run died mid-suite
+at 1118 passed / 42 suites when the disk hit 100% —
+not a code failure; own incremental cache freed,
+re-run clean 1470/0. The Ctrl-C probe driver crashed
+twice with `ValueError: flush of closed file` — a
+driver bug: `p.stdin.close()` before `communicate()`;
+fixed by not closing stdin manually, re-run
+byte-identical.)
