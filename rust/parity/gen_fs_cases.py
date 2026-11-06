@@ -72,6 +72,12 @@ case(
 )
 case("fs-ls-long", ["fs", "ls", "-l"], {"/fs/list": LIST})
 case("fs-ls-path", ["fs", "ls", "sub"], {"/fs/list": LIST})
+case("fs-ls-lt-path", ["fs", "ls", "a<b"], {"/fs/list": LIST})
+# ^ Fix loop 2, B1 probe: a `<` in a request path. Go's
+# encoding/json escapes it (\u003c) in the fs.list body; the
+# pre-fix Rust sent it raw. The m7b harness diffs the logged
+# request-body bytes, so this case fails until the gateway
+# serialisation matches Go.
 case("fs-tree", ["fs", "tree"], {"/fs/list": TREE_LIST})
 case("fs-tree-json", ["fs", "tree", "--json"], {"/fs/list": TREE_LIST})
 case(

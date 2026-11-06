@@ -47,6 +47,40 @@ def done_subscribes():
     return [{"delay_ms": 0, "drop": False, "end_body": True, "frames": DONE_FRAMES}]
 
 
+def stages_user(text, assistant):
+    """Like stages(), but the ack user event carries `text`
+    (the sent text) so the deliver ack matches it."""
+    user = {"event_name": "message.user", "payload": {"display_text": text}, "seq": 5}
+    return [
+        {"events": [], "from_call": 1, "has_more": False},
+        {"events": [user], "from_call": 3, "has_more": False},
+        {"events": [user, assistant], "from_call": 5, "has_more": False},
+    ]
+
+
+def go_escape_text(s):
+    """Go encoding/json string escaping (HTML ON) for one string
+    value, as json.dumps would emit it, then <>& and U+2028/U+2029
+    escaped. Returns the QUOTED string. The literal it builds is
+    cross-checked against the REAL Go driver output by the harness
+    on every run (go-stream-body-mismatch-expected), so a mistake
+    here fails loudly on the Go side, never silently."""
+    out = json.dumps(s, ensure_ascii=False)
+    out = out.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    out = out.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    return out
+
+
+def stream_body_for(text, thread=""):
+    """Expected chat.stream request-body bytes for `text`
+    (and `thread`), computed by the Go escaping rules above."""
+    body = ('{"capabilities":{},"items":[{"text":' + go_escape_text(text)
+            + ',"type":"text"}],"node_id":"wait-driver"}')
+    if thread:
+        body = body[:-1] + ',"session_id":' + go_escape_text(thread) + '}'
+    return body
+
+
 # Expected chat.stream request-body bytes, hand-written from the
 # Go source (internal/commands/wait.go deliverSend: params map
 # capabilities/items/node_id, session_id iff thread != ""; Go
@@ -59,6 +93,12 @@ def done_subscribes():
 # proves it (round-1 N-R1).
 STREAM_BODY = '{"capabilities":{},"items":[{"text":"hello","type":"text"}],"node_id":"wait-driver"}'
 STREAM_BODY_THREAD = '{"capabilities":{},"items":[{"text":"hello","type":"text"}],"node_id":"wait-driver","session_id":"t1"}'
+
+# The helper above must reproduce the hand-written literals
+# exactly; if it does not, the generator fails loudly here
+# instead of writing wrong expected bodies.
+assert stream_body_for("hello") == STREAM_BODY
+assert stream_body_for("hello", "t1") == STREAM_BODY_THREAD
 
 
 def case(name, args, script, stream_body=STREAM_BODY):
@@ -111,5 +151,31 @@ case("send-download-empty", ["--wait", "5", "--ack-timeout", "5", "--download", 
 case("send-thread", ["--thread", "t1", "--wait", "5", "--ack-timeout", "5", "hello"],
      {"history_stages": stages(ASST), "subscribes": done_subscribes(), "thread": "t1"},
      STREAM_BODY_THREAD)
+
+# 9. Fix loop 2, B1: text with <>& — Go's encoding/json escapes
+# them in the chat.stream body (\u003c/\u003e/\u0026); the pre-fix
+# Rust sent them raw. The ack event carries the same text so
+# the deliver ack matches. (Text from the round-2 red-team
+# probe rt-send-weird2.)
+TEXT_WEIRD2 = 'a"b <c> d&e ünïcode ✓'
+case("send-weird2", ["--wait", "5", "--ack-timeout", "5", TEXT_WEIRD2],
+     {"history_stages": stages_user(TEXT_WEIRD2, ASST), "subscribes": done_subscribes(), "thread": ""},
+     stream_body_for(TEXT_WEIRD2))
+
+# 10. Fix loop 2, B1: U+2028/U+2029 — Go escapes them even with
+# SetEscapeHTML(false); serde_json does not.
+TEXT_U2028 = "a\u2028b\u2029c"  # real U+2028/U+2029 chars, written as escapes (invisible in source)
+case("send-u2028", ["--wait", "5", "--ack-timeout", "5", TEXT_U2028],
+     {"history_stages": stages_user(TEXT_U2028, ASST), "subscribes": done_subscribes(), "thread": ""},
+     stream_body_for(TEXT_U2028))
+
+# 11. Fix loop 2, N-R2R1: a real newline in the text — proves the
+# runner passes one argv (the old readarray+print split it) and
+# the body carries the \n escape on both sides. (Round-1's
+# newline claim was vacuous: both sides sent only "line1".)
+TEXT_NEWLINE = 'line1\nline2 "quoted" ünïcode ✓'
+case("send-newline", ["--wait", "5", "--ack-timeout", "5", TEXT_NEWLINE],
+     {"history_stages": stages_user(TEXT_NEWLINE, ASST), "subscribes": done_subscribes(), "thread": ""},
+     stream_body_for(TEXT_NEWLINE))
 
 print("wrote", len(os.listdir(OUT)), "cases in", OUT)

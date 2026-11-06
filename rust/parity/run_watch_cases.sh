@@ -150,7 +150,13 @@ subscribes_count() {
 for case in "$CASES"/*.json; do
     name=$(basename "$case" .json)
     cp "$case" "$OUT/$name.case.json"
-    readarray -t ARGS < <(python3 -c "import json,sys; [print(a) for a in json.load(open(sys.argv[1]))['args']]" "$case")
+    # NUL-separated arg passing (fix loop 2, N-R2R1): the old
+    # `print(a)` form split any arg containing a newline into
+    # two argv elements, so a newline case silently tested only
+    # its first line. `readarray -d ''` (bash 4.4+) + NUL bytes
+    # carry each arg verbatim (argv cannot contain NUL anyway,
+    # so the delimiter is exact).
+    readarray -t -d '' ARGS < <(python3 -c "import json,sys; [sys.stdout.buffer.write((a + '\0').encode('utf-8')) for a in json.load(open(sys.argv[1]))['args']]" "$case")
     # "dial": false marks a case that never dials (e.g.
     # parse-error-only); default true. The >=1-call and
     # subscribes>=1 rules are skipped for such cases.

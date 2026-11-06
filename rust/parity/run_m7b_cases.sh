@@ -121,7 +121,13 @@ for case in $case_files; do
     [ -f "$case" ] || { echo "no such case: $case" >&2; exit 1; }
     name=$(basename "$case" .json)
     cp "$case" "$OUT/$name.case.json"
-    readarray -t ARGS < <(python3 -c "import json,sys; [print(a) for a in json.load(open(sys.argv[1]))['args']]" "$case")
+    # NUL-separated arg passing (fix loop 2, N-R2R1): the old
+    # `print(a)` form split any arg containing a newline into
+    # two argv elements, so a newline case silently tested only
+    # its first line. `readarray -d ''` (bash 4.4+) + NUL bytes
+    # carry each arg verbatim (argv cannot contain NUL anyway,
+    # so the delimiter is exact).
+    readarray -t -d '' ARGS < <(python3 -c "import json,sys; [sys.stdout.buffer.write((a + '\0').encode('utf-8')) for a in json.load(open(sys.argv[1]))['args']]" "$case")
     start=$(date +%s)
 
     # PR-2: per-case seed files (`fs put`) + stdin bytes (`fs write`).
