@@ -1,0 +1,28 @@
+{
+ "args": [
+  "--thread",
+  "does-not-exist-123",
+  "--timeout",
+  "5",
+  "--json"
+ ],
+ "name": "e5-nonexistent-thread",
+ "script": {
+  "history_stages": [
+   {
+    "events": [],
+    "from_call": 1,
+    "has_more": false
+   }
+  ],
+  "subscribes": [
+   {
+    "delay_ms": 0,
+    "drop": false,
+    "end_body": false,
+    "frames": []
+   }
+  ],
+  "thread": "does-not-exist-123"
+ }
+}

@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-7mn7ymsk/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-7mn7ymsk/xdg",
+    "HOME": "/tmp/castctl-golden-za_nzm2h/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-za_nzm2h/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-7mn7ymsk/work",
+  "cwd": "/tmp/castctl-golden-za_nzm2h/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl idea ID\n\nShow one idea card as JSON.\n",

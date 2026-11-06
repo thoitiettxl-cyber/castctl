@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-8t6l9brj/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-8t6l9brj/xdg",
+    "HOME": "/tmp/castctl-golden-toq9wsex/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-toq9wsex/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-8t6l9brj/work",
+  "cwd": "/tmp/castctl-golden-toq9wsex/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl stop [--thread ID]\n\nStop Muse's current turn (like the app's Stop button).\n\noptions:\n  --thread ID  side chat session id (default: main chat).\n",

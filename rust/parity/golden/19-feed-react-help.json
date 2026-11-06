@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-5p9cycz3/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-5p9cycz3/xdg",
+    "HOME": "/tmp/castctl-golden-u1w_43xz/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-u1w_43xz/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-5p9cycz3/work",
+  "cwd": "/tmp/castctl-golden-u1w_43xz/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl feed-react UNIT [REACTION]\n\nReact to a feed unit. REACTION defaults to \"love\".\n",

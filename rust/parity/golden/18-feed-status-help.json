@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-kgzcgint/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-kgzcgint/xdg",
+    "HOME": "/tmp/castctl-golden-az802umv/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-az802umv/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-kgzcgint/work",
+  "cwd": "/tmp/castctl-golden-az802umv/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl feed-status\n\nShow feed refresh status as JSON. No options.\n",

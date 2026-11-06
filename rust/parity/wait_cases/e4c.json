@@ -1,0 +1,56 @@
+{
+ "args": [
+  "--after-seq",
+  "99999",
+  "--timeout",
+  "5",
+  "--json"
+ ],
+ "name": "e4c-after-seq-late-reply",
+ "script": {
+  "history_stages": [
+   {
+    "events": [
+     {
+      "event_name": "message.user",
+      "payload": {
+       "display_text": "hi"
+      },
+      "seq": 40
+     },
+     {
+      "event_name": "message.assistant",
+      "payload": {
+       "display_text": "done",
+       "status": "completed"
+      },
+      "seq": 42
+     },
+     {
+      "event_name": "message.assistant",
+      "payload": {
+       "display_text": "late",
+       "status": "completed"
+      },
+      "seq": 100000
+     }
+    ],
+    "from_call": 1,
+    "has_more": false
+   }
+  ],
+  "subscribes": [
+   {
+    "delay_ms": 0,
+    "drop": false,
+    "end_body": true,
+    "frames": [
+     "{\"event\":\"task.status\",\"seq\":100000,\"payload\":{\"status\":\"running\",\"root_agent_id\":\"R\",\"agent_id\":\"R\"}}",
+     "{\"event_name\":\"message.assistant\",\"seq\":100000,\"payload\":{\"status\":\"completed\",\"display_text\":\"late\"}}",
+     "{\"event\":\"task.status\",\"seq\":100001,\"payload\":{\"status\":\"completed\",\"root_agent_id\":\"R\",\"agent_id\":\"R\"}}"
+    ]
+   }
+  ],
+  "thread": ""
+ }
+}

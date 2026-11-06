@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-kp379tih/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-kp379tih/xdg",
+    "HOME": "/tmp/castctl-golden-lzf0ziqg/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-lzf0ziqg/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-kp379tih/work",
+  "cwd": "/tmp/castctl-golden-lzf0ziqg/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl session-start [--title TITLE]\n\nStart a new side chat. Prints the session object as JSON.\n\noptions:\n  --title TITLE  title for the new session.\n",

@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-526w8r1y/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-526w8r1y/xdg",
+    "HOME": "/tmp/castctl-golden-nviu8t8i/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-nviu8t8i/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-526w8r1y/work",
+  "cwd": "/tmp/castctl-golden-nviu8t8i/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl ideas\n\nList idea cards as JSON rows. No options.\n",

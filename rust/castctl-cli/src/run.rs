@@ -567,12 +567,12 @@ const READ_COMMANDS: [&str; 13] = [
 /// A `parseOrHelp` command: parse, positional/manual checks,
 /// `parseAutoToggles` for wait/send, then config-location
 /// resolution + config parse, then the stub — except the 13
-/// read-only commands (M4b), which run the network path, and
-/// the two excluded forms (`history --download`, which writes
-/// files, and `invite`, which can POST): those resolve + load
-/// and then take the M2 stub (exit 1, `STUB_LINE`), the same
-/// placement as every other stub — after parse/positionals,
-/// before any network call.
+/// read-only commands (M4b), which run the network path, `wait`
+/// (M7a), which runs the wait path, and the two excluded forms
+/// (`history --download`, which writes files, and `invite`, which
+/// can POST): those resolve + load and then take the M2 stub
+/// (exit 1, `STUB_LINE`), the same placement as every other
+/// stub — after parse/positionals, before any network call.
 fn cmd_plain(
     ctx: &mut Ctx<'_>,
     g: &GlobalOpts,
@@ -583,6 +583,9 @@ fn cmd_plain(
     check_spec_positionals(ctx, spec, &p)?;
     if spec.name == "wait" || spec.name == "send" {
         parse_auto_toggles(&p)?;
+    }
+    if spec.name == "wait" {
+        return crate::wait::run_wait_command(ctx, g, &p);
     }
     if READ_COMMANDS.contains(&spec.name) {
         if spec.name == "history" && !p.str("download").is_empty() {

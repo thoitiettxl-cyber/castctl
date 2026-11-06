@@ -1,0 +1,26 @@
+{
+ "args": [
+  "--timeout",
+  "5",
+  "--json"
+ ],
+ "name": "e1-timeout-before-message",
+ "script": {
+  "history_stages": [
+   {
+    "events": [],
+    "from_call": 1,
+    "has_more": false
+   }
+  ],
+  "subscribes": [
+   {
+    "delay_ms": 0,
+    "drop": false,
+    "end_body": false,
+    "frames": []
+   }
+  ],
+  "thread": ""
+ }
+}

@@ -11,6 +11,7 @@ license.workspace = true
 description = "Telegram bot core for the castctl Rust port (M5a): hand-rolled getUpdates long polling, dispatcher, 30-command routing table, state file, approvals and claims, ported from internal/telegram and internal/commands/telegram*.go. Turn streaming is M5b (seam only)."
 
 [dependencies]
+castctl-approvals = { path = "../castctl-approvals" }
 castctl-config = { path = "../castctl-config" }
 castctl-gateway = { path = "../castctl-gateway" }
 castctl-log-redact = { path = "../castctl-log-redact" }

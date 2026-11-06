@@ -1,0 +1,38 @@
+{
+ "args": [
+  "--after-seq",
+  "10",
+  "--timeout",
+  "10",
+  "--json"
+ ],
+ "name": "e3-connection-lost-timeout",
+ "script": {
+  "history_stages": [
+   {
+    "events": [
+     {
+      "event_name": "message.user",
+      "payload": {
+       "display_text": "hi"
+      },
+      "seq": 10
+     }
+    ],
+    "from_call": 1,
+    "has_more": false
+   }
+  ],
+  "subscribes": [
+   {
+    "delay_ms": 0,
+    "drop": true,
+    "end_body": false,
+    "frames": [
+     "{\"event\":\"task.status\",\"seq\":11,\"payload\":{\"status\":\"running\",\"root_agent_id\":\"R\",\"agent_id\":\"R\"}}"
+    ]
+   }
+  ],
+  "thread": ""
+ }
+}

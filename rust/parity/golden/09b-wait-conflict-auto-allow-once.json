@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "09b-wait-conflict-auto-allow-once",
+  "generated_by": "castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)",
+  "fixture": "config.json",
+  "argv": [
+    "wait",
+    "--auto-allow-once",
+    "--no-auto-allow-once"
+  ],
+  "env": {
+    "HOME": "/tmp/castctl-golden-ydouvkfl/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-ydouvkfl/xdg",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "PATH": "/usr/bin:/bin"
+  },
+  "cwd": "/tmp/castctl-golden-ydouvkfl/work",
+  "stdin": "empty",
+  "timeout_seconds": 10,
+  "stdout": "",
+  "stderr": "castctl: argument --no-auto-allow-once: not allowed with argument --auto-allow-once\n",
+  "exit_code": 2
+}

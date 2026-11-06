@@ -17,6 +17,14 @@
 //	          echo, streaming deltas, assistant reply + media,
 //	          one pending approval), decide/fs.write logging to
 //	          stderr, media bytes for /media/raw/*.
+//	serve-wait — start a STATEFUL fake gateway for the M7a Rust
+//	          wait Tier A goldens: scripted chat.history windows
+//	          (staged by history call count) + scripted
+//	          chat.subscribe NDJSON frames (staged by subscribe
+//	          call count, with delay / end-body / drop). One
+//	          shared script file (JSON) is the determinism
+//	          contract: the Go wait_driver and the Rust
+//	          wait_driver example both dial this server.
 //	client    — connect the GO gateway client to a running server
 //	          (serve mode, or any gatewaytest server) and call
 //	          the methods given on the command line, printing one
@@ -32,6 +40,7 @@
 //
 //	gateway_server serve
 //	gateway_server serve-e2e
+//	gateway_server serve-wait <script.json>
 //	gateway_server client <addr> <method> [method ...]
 package main
 
@@ -41,8 +50,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -325,6 +336,250 @@ func runServeE2E() error {
 	return nil
 }
 
+// ----------------------------------------------------------------
+// serve-wait: scripted history + subscribe for the M7a Rust
+// wait Tier A goldens (parity-live.md §3).
+// ----------------------------------------------------------------
+
+// waitScript is the shared script file (JSON) consumed by the
+// serve-wait handler. It is the determinism contract: the Go
+// wait_driver and the Rust wait_driver example both dial a
+// server running this script, with the same argv, and their
+// outputs must be byte-identical.
+//
+//   - history_stages: chat.history answers, staged by history
+//     call count. The applicable stage is the LAST one whose
+//     from_call <= the call number (1-based); if none applies
+//     the answer is empty with has_more=false. Scripted
+//     histories are smaller than any Runner window (200/500/
+//     1000), so the requested limit never binds and is only
+//     logged.
+//   - subscribes: chat.subscribe answers, staged by subscribe
+//     call count. Beyond the list the LAST entry repeats, so a
+//     resubscribing Runner sees a stable answer. frames are
+//     NDJSON lines (one JSON object per line, no trailing
+//     newline in the file; the server joins them with "\n" and
+//     appends a trailing "\n"). end_body ends the stream
+//     cleanly (Response EndBody=true); drop closes the whole
+//     WS connection AFTER sending the frames (gatewaytest
+//     CloseAfter — CloseWithoutReply would send nothing).
+//     frames=[] with end_body=false and drop=false is pure
+//     silence: the server sends nothing and the client's idle
+//     timeout ends the batch.
+type waitScript struct {
+	Thread        string             `json:"thread"`
+	HistoryStages []waitHistoryStage `json:"history_stages"`
+	Subscribes    []waitSubscribe    `json:"subscribes"`
+}
+
+type waitHistoryStage struct {
+	FromCall int               `json:"from_call"`
+	Events   []json.RawMessage `json:"events"`
+	HasMore  bool              `json:"has_more"`
+}
+
+type waitSubscribe struct {
+	DelayMs int      `json:"delay_ms"`
+	Frames  []string `json:"frames"`
+	EndBody bool     `json:"end_body"`
+	Drop    bool     `json:"drop"`
+}
+
+type waitState struct {
+	mu             sync.Mutex
+	script         *waitScript
+	historyCalls   int
+	subscribeCalls int
+}
+
+// waitHistoryResult is the chat.history result object the
+// Runner's HistoryReader parses: chat_events + has_more
+// (internal/commands/wait.go callHistoryEvents reads
+// chat_events; the Runner also needs has_more).
+type waitHistoryResult struct {
+	Events  []json.RawMessage `json:"chat_events"`
+	HasMore bool              `json:"has_more"`
+}
+
+func (s *waitState) historyStage() waitHistoryStage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stage := waitHistoryStage{FromCall: 1, Events: []json.RawMessage{}, HasMore: false}
+	for _, st := range s.script.HistoryStages {
+		if st.FromCall <= s.historyCalls {
+			stage = st
+		}
+	}
+	return stage
+}
+
+func (s *waitState) nextSubscribe() waitSubscribe {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	list := s.script.Subscribes
+	if len(list) == 0 {
+		return waitSubscribe{}
+	}
+	// subscribeCalls is 1-based (incremented before this call);
+	// index 0-based and repeat the last entry beyond the list.
+	idx := s.subscribeCalls - 1
+	if idx >= len(list) {
+		idx = len(list) - 1
+	}
+	return list[idx]
+}
+
+func waitHandler(st *waitState) gatewaytest.Handler {
+	return gatewaytest.HandlerFunc(func(req *pb.ApplicationRequest, service pb.ServiceType) gatewaytest.Response {
+		// Request() turns a GET body into a query string, so
+		// a chat.history call arrives as
+		// "/chat/history?limit=200" — match on the path
+		// without the query, or the exact-match cases below
+		// never fire and the request falls through to the
+		// canned default handler (which answers {} with no
+		// log line, so the call is invisible in the counts).
+		path := req.Path
+		if i := strings.IndexByte(path, '?'); i >= 0 {
+			path = path[:i]
+		}
+		switch path {
+		case "/chat/history":
+			st.mu.Lock()
+			st.historyCalls++
+			call := st.historyCalls
+			st.mu.Unlock()
+			stage := st.historyStage()
+			var limit int
+			var sessionID string
+			var bodyMap map[string]any
+			if err := json.Unmarshal(req.Body, &bodyMap); err == nil {
+				if l, ok := bodyMap["limit"].(float64); ok {
+					limit = int(l)
+				}
+				if sid, ok := bodyMap["session_id"].(string); ok {
+					sessionID = sid
+				}
+			}
+			// GET calls carry limit/session_id in the query
+			// (the body was moved there by Request); the
+			// body parse above stays first so a real body
+			// still wins.
+			if u, err := url.Parse(req.Path); err == nil {
+				q := u.Query()
+				if limit == 0 {
+					if l, err := strconv.Atoi(q.Get("limit")); err == nil {
+						limit = l
+					}
+				}
+				if sessionID == "" {
+					sessionID = q.Get("session_id")
+				}
+			}
+			events := stage.Events
+			if events == nil {
+				events = []json.RawMessage{}
+			}
+			result, err := json.Marshal(waitHistoryResult{Events: events, HasMore: stage.HasMore})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "WAIT history call=%d marshal error: %v\n", call, err)
+				return gatewaytest.Response{Frames: []*pb.ServiceFrame{
+					gatewaytest.ResponseFrame(0, 500, []byte(`{"ok":false,"error":"marshal"}`), true),
+				}}
+			}
+			fmt.Fprintf(os.Stderr, "WAIT history call=%d limit=%d session_id=%q events=%d has_more=%v\n",
+				call, limit, sessionID, len(events), stage.HasMore)
+			envelope := `{"ok":true,"result":` + string(result) + `}`
+			return gatewaytest.Response{Frames: []*pb.ServiceFrame{
+				gatewaytest.ResponseFrame(0, 200, []byte(envelope), true),
+			}}
+		case "/chat/subscribe":
+			st.mu.Lock()
+			st.subscribeCalls++
+			call := st.subscribeCalls
+			st.mu.Unlock()
+			sub := st.nextSubscribe()
+			fmt.Fprintf(os.Stderr, "WAIT subscribe #%d delay_ms=%d frames=%d end_body=%v drop=%v\n",
+				call, sub.DelayMs, len(sub.Frames), sub.EndBody, sub.Drop)
+			if sub.DelayMs > 0 {
+				time.Sleep(time.Duration(sub.DelayMs) * time.Millisecond)
+			}
+			if len(sub.Frames) == 0 && !sub.EndBody && !sub.Drop {
+				// Pure silence: send nothing; the client's idle
+				// timeout ends the batch (E1).
+				return gatewaytest.Response{}
+			}
+			payload := ""
+			if len(sub.Frames) > 0 {
+				payload = strings.Join(sub.Frames, "\n") + "\n"
+			}
+			return gatewaytest.Response{
+				Frames: []*pb.ServiceFrame{
+					gatewaytest.ResponseFrame(0, 200, []byte(payload), sub.EndBody),
+				},
+				CloseAfter: sub.Drop,
+			}
+		default:
+			return handler().Handle(req, service)
+		}
+	})
+}
+
+func runServeWait(scriptPath string) error {
+	raw, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return fmt.Errorf("wait script: %w", err)
+	}
+	var script waitScript
+	// Case files nest the script under "script"
+	// (args+name+script); unmarshalling the file straight
+	// into waitScript leaves HistoryStages and Subscribes
+	// empty, so every subscribe serves silence and no case
+	// can ever complete. A bare waitScript file is still
+	// accepted. When both are present the envelope wins
+	// (round-2 R2-4).
+	var envelope struct {
+		Script *waitScript `json:"script"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return fmt.Errorf("wait script %s: %w", scriptPath, err)
+	}
+	if envelope.Script != nil {
+		script = *envelope.Script
+	} else if err := json.Unmarshal(raw, &script); err != nil {
+		return fmt.Errorf("wait script %s: %w", scriptPath, err)
+	}
+	// An empty script (no stages AND no subscribes) is a
+	// broken case file, not a silent script: both drivers
+	// would time out identically and the harness would
+	// PASS a case that tests nothing (round-2 R2-4).
+	// Fail at load instead.
+	if len(script.HistoryStages) == 0 && len(script.Subscribes) == 0 {
+		return fmt.Errorf("wait script %s: empty script (no history_stages and no subscribes)", scriptPath)
+	}
+	// `historyStage()` picks the last stage with
+	// `from_call <= historyCalls`, so stages must be
+	// ordered by `from_call` — sort once at load time
+	// instead of trusting file order (red-team F12).
+	sort.SliceStable(script.HistoryStages, func(i, j int) bool {
+		return script.HistoryStages[i].FromCall < script.HistoryStages[j].FromCall
+	})
+	st := &waitState{script: &script}
+	server, err := gatewaytest.NewServer(waitHandler(st))
+	if err != nil {
+		return err
+	}
+	defer server.Close()
+	fmt.Printf("READY addr=%s\n", server.Addr())
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	<-stop
+	st.mu.Lock()
+	fmt.Fprintf(os.Stderr, "WAIT SUMMARY history_calls=%d subscribes=%d\n",
+		st.historyCalls, st.subscribeCalls)
+	st.mu.Unlock()
+	return nil
+}
+
 func runClient(addr string, methods []string) error {
 	auth := &gatewaytest.CannedAuth{VMID: "vm-test", AccessToken: "AT-FAKE", HatchToken: "HT-FAKE"}
 	dialer := &plainDialer{auth: auth}
@@ -376,7 +631,7 @@ func runClient(addr string, methods []string) error {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: gateway_server serve | serve-e2e | client <addr> <method> [method ...]")
+		fmt.Fprintln(os.Stderr, "usage: gateway_server serve | serve-e2e | serve-wait <script.json> | client <addr> <method> [method ...]")
 		os.Exit(2)
 	}
 	var err error
@@ -385,6 +640,12 @@ func main() {
 		err = runServe()
 	case "serve-e2e":
 		err = runServeE2E()
+	case "serve-wait":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: gateway_server serve-wait <script.json>")
+			os.Exit(2)
+		}
+		err = runServeWait(os.Args[2])
 	case "client":
 		if len(os.Args) < 4 {
 			fmt.Fprintln(os.Stderr, "usage: gateway_server client <addr> <method> [method ...]")

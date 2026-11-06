@@ -63,6 +63,29 @@
     ]
   },
   {
+    "argv": [
+      "wait",
+      "--auto-approve",
+      "--no-auto-approve"
+    ],
+    "id": "09a-wait-conflict-auto-approve"
+  },
+  {
+    "argv": [
+      "wait",
+      "--auto-allow-once",
+      "--no-auto-allow-once"
+    ],
+    "id": "09b-wait-conflict-auto-allow-once"
+  },
+  {
+    "argv": [
+      "wait",
+      "extra-positional"
+    ],
+    "id": "09c-wait-extra-positional"
+  },
+  {
     "id": "10-approvals-help",
     "argv": [
       "approvals",

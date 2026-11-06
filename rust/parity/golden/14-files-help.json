@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-mvnopuuh/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-mvnopuuh/xdg",
+    "HOME": "/tmp/castctl-golden-ikx30bhx/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-ikx30bhx/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-mvnopuuh/work",
+  "cwd": "/tmp/castctl-golden-ikx30bhx/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl files [--thread ID] [--limit N]\n\nList files (images/videos) in recent messages as JSON rows.\n\noptions:\n  --thread ID  side chat session id (default: the main chat).\n  --limit N    number of events (default 20).\n",

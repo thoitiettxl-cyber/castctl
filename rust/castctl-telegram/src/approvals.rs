@@ -52,6 +52,32 @@ pub struct Approval {
     pub options: Option<Vec<String>>,
 }
 
+/// Convert a wait-core description into the bot-side
+/// normalisation (M7a, decision D-1). The two structs stay
+/// separate on purpose: `DescribedApproval` keeps the
+/// nil-vs-present-`""` id distinction and an `Option<f64>`
+/// expiry, which `Approval` cannot carry (`id: String`,
+/// `expires_at_ms: i64`). The conversion flattens them
+/// the same way the bot's own `describe_approval` does:
+/// a missing id becomes `""`, expiry truncates toward
+/// zero (Rust `as`, like Go's `int64(v)`). Callers that
+/// key on id presence must use the `DescribedApproval`,
+/// never this conversion.
+impl From<&castctl_approvals::DescribedApproval> for Approval {
+    fn from(d: &castctl_approvals::DescribedApproval) -> Self {
+        Approval {
+            id: d.id_str().to_string(),
+            title: d.title_str().to_string(),
+            question: d.question_str().to_string(),
+            kind: d.kind_str().to_string(),
+            scope: d.scope_str().to_string(),
+            why: d.why.as_deref().unwrap_or("").to_string(),
+            expires_at_ms: d.expires_at_ms.map(|f| f as i64).unwrap_or(0),
+            options: d.options.clone(),
+        }
+    }
+}
+
 /// The resume triple carried by a decide button.
 /// Source: `internal/telegram/approvals.go:214-222`
 /// (`ResumeTriple`); `None` `after_seq` = no resume.
@@ -248,6 +274,37 @@ pub fn approval_text(d: &Approval) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_described_approval_flattens() {
+        // M7a D-1: the conversion flattens nil-vs-"" (both
+        // become "") and truncates expiry toward zero, like
+        // the bot's own describe_approval.
+        let d = castctl_approvals::describe_approval(&serde_json::json!({
+            "approval_id": "ap1",
+            "display": {
+                "summary_title": "T",
+                "permission_question": {"text": "{assistant}?", "kind": "shell", "scope": "s"},
+                "short_explanation": "W",
+            },
+            "decision_options": [{"kind": "allow_always"}],
+            "request_expires_at_ms": 12345.9,
+        }));
+        let a = Approval::from(&d);
+        assert_eq!(a.id, "ap1");
+        assert_eq!(a.title, "T");
+        assert_eq!(a.question, "Muse?");
+        assert_eq!(a.kind, "shell");
+        assert_eq!(a.scope, "s");
+        assert_eq!(a.why, "W");
+        assert_eq!(a.expires_at_ms, 12345);
+        assert_eq!(a.options, Some(vec!["allow_always".to_string()]));
+        // Missing id / expiry flatten to "" / 0.
+        let empty = Approval::from(&castctl_approvals::DescribedApproval::default());
+        assert_eq!(empty.id, "");
+        assert_eq!(empty.expires_at_ms, 0);
+        assert_eq!(empty.options, None);
+    }
 
     #[test]
     fn describe_approval_full_shape() {

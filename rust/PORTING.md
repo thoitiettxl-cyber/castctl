@@ -6852,10 +6852,11 @@ for no seam benefit.
    the history re-read, as in Go.
    M7a (separate branch `feat/rust-m7a-services`) is
    building the subscribe API and will wire this state
-   machine to it; until then the poll stays. M7a adds
-   its own `open_stream` with the same shape (M7a
-   `gateway.rs:955` at `5868645`); the two must
-   converge (dedupe, not duplicate) on rebase.
+   machine to it; until then the poll stays. M7a had
+   added its own `open_stream` with the same shape (M7a
+   `gateway.rs:955` at `5868645`); the two converged on
+   rebase (kept M5b's, dropped M7a's — see §M7a.1 /
+   §M7a.2).
    Consequences of polling (mechanism verified from
    source; frequency unmeasured — no live gateway data):
    (a) an event is visible at most ~1s + one
@@ -9749,6 +9750,704 @@ per the Boss rule; gate logs kept on cue
 gated head `73f0df8` for parent verification.
 NOTE for the verifier: a rebuild needs ~13G
 free — check `df -h /` first.
+
+## M7a — Services port: wait Runner + subscribe, fsclient, approvals, deliver, logging, dns (2026-11-05/06)
+
+Branch `feat/rust-m7a-services`, base `dev-rust` @
+`b3fbe5a` (rebased 2026-11-06 from `0233095`; rebase
+chain `1602b12` → `6a399f7` → `0233095` → `b3fbe5a` —
+M6a PR #72 + perf PR #66, then M6c PR #73, then M6b
+PR #74 merged in turn — see §M7a.1). Scope: Go `internal/wait` (Runner/history/clock +
+`chat.subscribe` NDJSON) + `internal/fsclient` +
+`internal/approvals` + `internal/deliver` +
+`internal/logging` (unported remainder) +
+`internal/dns` (scoped). No Go change; diff only
+`rust/`, `docs/provenance.md`, `NOTICE`.
+
+## M7a.1 Scope: ported vs reused (wait) + stacking
+
+M5b already ported `internal/wait/waiter.go`,
+`replies.go`, `events.go`, `outcome.go`, `reason.go`
+into `rust/castctl-telegram/src/wait.rs` (PR #71,
+merged). M7a does NOT re-port them. M7a ports:
+
+| Go file | Rust home |
+|---|---|
+| `internal/wait/runner.go` (1,295 lines) | `rust/castctl-wait/src/runner.rs` |
+| `internal/wait/history.go` | `rust/castctl-wait/src/history.rs` |
+| `internal/wait/clock.go` | no `Clock` trait — tokio time directly, paused time is the fake clock (see dev. 4) |
+| `internal/wait/events.go` `decode_record` + `QuestionOf` (the two fns M5b did NOT port) | `rust/castctl-wait/src/events.rs` |
+| `internal/wait/waiter.go` `FeedRecord` (fix loop 1: round-1 review found it missing) | `rust/castctl-wait/src/runner.rs` `feed_record` (no production caller either side, like Go) |
+| `internal/wait/doc.go` | docs in `rust/castctl-wait/src/lib.rs` |
+| `chat.subscribe` NDJSON (`internal/gateway/calls.go` `SubscribeRaw`, `internal/conn/shared.go`) | `rust/castctl-gateway/src/subscribe.rs` + `Gateway::subscribe_raw` + `SharedConn::subscribe_raw`/`subscribe_json` |
+
+Stacking: the branch was first stacked on M5b
+`299be6d` (then rebased onto M5b `e05c22d`), and
+rebased onto merged `dev-rust` `1602b12` after PR #71
+merged — the rebase was clean, no conflicts, and the
+M5b commits dropped out (they are upstream now).
+Rebased again 2026-11-06 onto `dev-rust` `6a399f7`
+(M6a PR #72 + perf PR #66 merged since `1602b12`):
+one conflict, `rust/Cargo.toml` members list only
+(upstream added `castctl-keeper`, M7a added
+approvals/fsclient/deliver/logging) — resolved by
+keeping both lists; `docs/provenance.md` and
+`rust/PORTING.md` merged clean. `git log` head after
+rebase: M7a commits only on top of `6a399f7`.
+Rebased again 2026-11-06 onto `dev-rust` `0233095`
+(M6c PR #73 merged): 27/29 commits replayed cleanly;
+only conflict was `rust/Cargo.lock` at the lock-regen
+commit — skipped (`git rebase --skip`) and the lock
+regenerated afterwards (`cargo generate-lockfile`,
++236/−3 on cue, purely additive). M6c touched no
+telegram/gateway/wait files, so the subscribe seam
+was unaffected.
+Rebased again 2026-11-06 onto `dev-rust` `b3fbe5a`
+(M6b PR #74 merged): 47 commits replayed; one
+content conflict, `rust/castctl-cli/Cargo.toml`
+(M6b added `castctl-webui`, M7a added `castctl-wait`
+in the same alphabetical block — kept both) plus the
+same `rust/Cargo.lock` regen-commit skip as the M6c
+rebase (lock regenerated after: +81/−3, 6 M7a crates
++ second itertools 0.13.0, 3 deletions are itertools
+version qualifications only). `git log` head after
+rebase: M7a commits only on top of `b3fbe5a`.
+
+Converge `open_stream`: exactly ONE
+`Gateway::open_stream` exists, at
+`rust/castctl-gateway/src/gateway.rs:955` — M5b's
+("FORCED ADDITION (M5b)", added by M5b commit
+`4782dc0`, `track=false`, delivers `chat.stream`).
+The M7a WIP had added an `open_stream` of the same
+shape/signature; the rebase kept M5b's verbatim
+(the M7a diff vs `1602b12` adds only the
+`subscribe` import + `subscribe_raw`). No duplicate
+helper exists: `subscribe.rs` is M7a's new file
+(`SubscribeOptions`/`SubscribeHandler`), while
+`subscription.rs` is M5b's billing file (Next.js
+`fetchSubscriptionAction`), untouched.
+
+## M7a.2 Subscribe: what existed, what was added
+
+Before M7a, at base `25a124e`, Rust had ONLY
+internal plumbing: `streams:
+Mutex<HashMap<i64, mpsc::UnboundedSender<StreamItem>>>`
+(`gateway.rs:267`) + `fn deliver_to_open_streams`
+(`:408`, parity with Go `deliverToOpenStreams`).
+There was no `subscribe.rs`, no `Gateway::open_stream`,
+no `subscribe_raw` in any Rust file; `subscription.rs`
+is billing, not streaming. (An earlier claim that
+these existed at base was FALSE — it grepped a tree
+the writer was actively modifying. Base claims must
+be verified via `git show origin/dev-rust:...`.)
+
+M7a added, on that plumbing:
+
+- `rust/castctl-gateway/src/subscribe.rs` (new):
+  `SubscribeOptions` (path_params, body, query,
+  route, max_records, idle/overall timeouts),
+  `SubscribeHandler` trait (`on_open`,
+  `should_stop`, async `on_record` returning
+  `bool`), `CollectHandler`, constants
+  (`DEFAULT_SUBSCRIBE_MAX_RECORDS=100`,
+  `DEFAULT_SUBSCRIBE_IDLE_TIMEOUT=10s`,
+  `DEFAULT_SUBSCRIBE_OVERALL_TIMEOUT=120s`,
+  `SUBSCRIBE_POLL_INTERVAL=500ms`).
+- `Gateway::subscribe_raw` (`gateway.rs:999`):
+  verified line-by-line against Go
+  `internal/gateway/calls.go:261-370` — defaults
+  (`:266-276`), open + OnOpen (`:278-283`), loop +
+  ShouldStop-first + `next` 500ms (`:290-297`),
+  Response/BodyChunk/Reset (`:303-320`), line split
+  + blank skip + OnRecord + maxRecords (`:322-338`),
+  ended→forget else cancel (`:341-345`),
+  trailing partial (`:360-366`), loopErr drops
+  records (`:346-359`).
+- `SharedConn::subscribe_raw` (`shared.rs:675`):
+  3 attempts, 250ms pause, retry only
+  `ConnectionDown`, Auth never retried (Go
+  `internal/conn/shared.go:296-360`);
+  `SharedConn::subscribe_json` (`shared.rs:731`):
+  no retry, drops bad JSON lines.
+
+Differences vs Go `SubscribeRaw`/`Runner`
+(Go `file:line` + reason):
+
+1. Error phase not carried: Go tags
+   `PhaseSentNoReply`/`PhaseStreaming`
+   (`calls.go:346-359`); Rust `TransportError` has
+   no phase field. `saw_frame` is kept then
+   dropped with a comment. No CLI output includes
+   a phase.
+2. Retry pause is a plain `tokio::time::sleep`,
+   not Go `sleepOrDone` (this layer has no cancel
+   handle): cancel during the 250ms pause is
+   delayed at most 250ms + at most one redundant
+   `live()` attempt; the Runner checks cancel
+   immediately after `subscribe_raw` returns.
+3. Blank-line check uses Unicode trim
+   (`from_utf8` + `trim()`; invalid UTF-8 counts
+   as non-blank, like Go `bytes.TrimSpace`).
+   (Found + fixed during the line-by-line
+   verification; the first draft was ASCII-only.)
+4. `SubscribeHandler::on_record` is async; Go's
+   `OnRecord` is sync. The wait Runner's record
+   handler must do async history reads per record;
+   the async callback is the faithful equivalent
+   and does not block the executor.
+5. `decode_record` invalid-UTF-8 deviation: Go
+   coerces invalid UTF-8 in strings to U+FFFD
+   and decodes; serde_json rejects invalid UTF-8
+   → `None`.
+6. Close is awaited directly, not deferred via a
+   Drop guard: a panic in `SubscribeRaw` would
+   skip close, but the Subscriber contract
+   forbids panics; awaited close keeps
+   fake-subscriber `closed` counts deterministic
+   in tests.
+7. `decode_record`/`question_of` live in
+   `castctl-wait` (`events.rs`), NOT in M5b's
+   `wait.rs` — keeps M5b's file untouched except
+   the `task_status_info` exposure (dev. 12).
+
+## M7a.3 Crate map
+
+| Crate | Ports |
+|---|---|
+| `castctl-gateway` (+`subscribe.rs`) | `SubscribeRaw`/`SubscribeJSON` (+ M5b `open_stream` kept) |
+| `castctl-wait` (new) | Runner/history/clock + `decode_record`/`question_of` + `AutoApproverAdapter` |
+| `castctl-approvals` (new) | `DescribedApproval`, `AutoApprover`, `NoForeverError` |
+| `castctl-fsclient` (new) | 12 methods + editor (`apply_replace`, `split_editor_command`, `fmt_size`, `edit_in_editor`) |
+| `castctl-deliver` (new) | session ops, stop, wake, auth-list, auth-export guidance |
+| `castctl-logging` (new) | factory/`Handle`/`Settings`/`Emit`/`openLogFile` + slog bridge + `SummarizeErr`/`SafeErrForLevel`/`WrapErr` |
+| `castctl-dns` (new) | API + bootstrap + lifecycle; sing-box router behind a stub trait |
+| `castctl-cli` (`src/wait.rs`) | `castctl wait` wiring (+ `send` stays stubbed) |
+
+`pluginabi` is NOT ported: M6c already has
+`rust/castctl-pluginhost/src/pluginabi.rs` (866 lines,
+COMMITTED in `dev-rust` — M6c PR #73 merged
+2026-11-06, head `8b271ee`, in base `b3fbe5a`).
+The boundary is FIRM, not provisional: M7a must not
+re-port it; the seam is the committed file.
+
+## M7a.4 Deviations from Go (deliberate, with citations)
+
+1. Runner crate placement: new crate
+   `castctl-wait` depending on `castctl-telegram`
+   (Waiter/WaitApprover/Reply/Outcome/WaitKind/
+   `BotError`), `castctl-gateway`, `castctl-transport`,
+   `castctl-approvals`. The Runner is CLI-driven,
+   not bot-driven, so it gets its own crate rather
+   than living in the bot crate.
+2. Cancellation: Go `context.Context` → Rust
+   `Cancel` (AtomicBool + Notify); `sleepCtx`
+   selects on notify; CLI sets the flag on SIGINT.
+3. Fake clock: NO `Clock` trait — tokio paused
+   time (`#[tokio::test(start_paused = true)]` +
+   `tokio::time::advance()`) is the synctest
+   equivalent; the Runner uses `tokio::time::Instant`
+   / `sleep` / `timeout` directly.
+4. History-read timeout semantics: the Runner
+   wraps reader calls in `tokio::time::timeout`;
+   on timeout treat as history-read transport
+   error (errHistoryRead path), NOT cancellation,
+   unless the cancelled flag is set — matches Go
+   (historyCtx timeout surfaces as a reader
+   transport error; only the runner's own ctx
+   death is cancellation). Derivation reads use
+   the wait deadline instead (timeout → Deadline
+   error → unknown boundary).
+5. `Config` negative durations: Rust `Duration`
+   cannot be negative, so `recheck_after` /
+   `check_every` use `Option<Duration>` — None =
+   disabled (Go -1), Some(ZERO) = default (Go 0);
+   other durations zero → default (covers Go's
+   negative → default clamp observably).
+6. Only `DeriveBoundary` retries history reads
+   (1 retry on transport error, 2 attempts
+   total). `LatestUserSeq` / `HistoryReplies`
+   call the reader directly and propagate errors
+   at once — matches Go `history.go`.
+7. Chunk sizes (fsclient) are constructor/test
+   parameters, not mutable globals (same values).
+8. Deliver bodies use ordered `JsonValue` (not
+   `serde_json::Value`) so ported tests compare
+   exact body JSON; replies stay `serde_json::Value`.
+9. Telegram conversion placement deviates from
+   the Phase 1 decision D-1's letter: the `From`
+   impl lives in the telegram crate, not
+   `to_telegram_approval()` in approvals, for
+   layering (no cycle, no bot crate in the CLI
+   dependency tree).
+10. `summarize_err` Gateway rendering deviates
+    from `TransportError::log_summary()` (M3) —
+    uses Go's literal (`conn: gateway status=<n>
+    body_length=<n>`); M3's rendering kept as-is.
+    Warning (red-team F13, no action for M7a): no
+    later caller may route a Gateway error through
+    `log_summary()` expecting Go's literal — the
+    log-boundary path must keep using
+    `summarize_err`'s own Gateway rendering.
+11. `Handle::close` returns `()` (Rust `File`
+    has no fallible close); no pre-Start buffering
+    in the Rust factory (Go's `NewFactory` starts
+    the factory itself, so the buffer is
+    unobservable).
+12. M5b `wait.rs` edits (additive only):
+    `TaskStatusInfo` + `task_status_info` made
+    `pub` (the Runner must share the waiter's
+    predicate, not re-implement it); telegram
+    `ApproveError` extended with `title`, `kind`,
+    `scope`, `decision`, `option_count` (M5b had
+    flattened it to `{approval_id, summary}` for
+    the turn runner's log line; the CLI's
+    `auto_approve_errors` JSON and
+    `logAutoApproved` need the full record).
+13. CLI dial is the `SharedConn` lease (3-attempt
+    retry) per `Muse.Connect`
+    (`internal/conn/conn.go:576-585`), NOT a fresh
+    `Gateway`.
+14. `ensure_node_id` persist step NOT implemented
+    — no single-config update primitive exists in
+    Rust; re-encoding would drop unknown
+    fields/formatting. Generated id kept in memory
+    only. Unobservable for live Tier B (`no.0`'s
+    node_id already persisted → early return both
+    sides).
+15. Approver summary = `castctl_logging::summarize_err`
+    (Go's `logging.SummarizeErr`, verified against
+    `wait.go: toWaitResultJSON`).
+16. Decide RPC via `Handle::block_on` inside
+    `spawn_blocking` (must be proven on cue —
+    approval goldens; fallback is a fresh
+    current-thread runtime per connect).
+17. `go_float_literal` exponent shapes differ
+    from Go `%g` for |f|≥1e21 (unobservable for ms
+    timestamps); widget id/options nested
+    containers render compact JSON (Go `%v` renders
+    Go syntax, nondeterministic for maps).
+18. `rand::random` panics on OS RNG failure
+    (tree idiom; Go returns the error instead).
+19. DNS: traits `DnsTransport`/`DnsRouter` +
+    `TcpDnsTransport`/`SingleServerRouter`; async
+    `Client::new`; 5s timeouts verbatim; Go New
+    checks partially unrepresentable
+    (manager/registry) — factory is a required
+    constructor argument; TLS/HTTPS/local/hosts/
+    fakeip fail closed at construction;
+    Lookup-before-Start errors (Rust-side text);
+    unknown final_tag → construction error
+    (fail-closed; Go's exact behaviour unpinned
+    by ported tests); empty final_tag → first
+    server; no log factory. AAAA-after-A
+    best-effort is unpinned by the ported tests.
+20. AuthList JSON: Rust uses serde derive (no
+    HTML escaping) where Go's `json.Marshal`
+    escapes `<>&` — unobservable for real profile
+    paths.
+21. Local-filesystem error text differs from Go's
+    `*PathError` rendering (Rust `io::Error`
+    prints `No such file or directory (os error
+    2)`); error kind and operation are the same.
+22. `fsclient` `..` block: `Norm` CLAMPS `..`
+    away (`../etc`→`etc`, `..`→`""` root), error
+    unreachable for rooted input. Go's Telegram `/fs`
+    layer additionally rejects pre-collapse `..` with
+    the fixed sentence `⚠️ path traversal not allowed`
+    — that reject is NOT ported in Rust (no Rust
+    equivalent exists yet; see dev 30 for the seam gap
+    and the condition that must land with `/fs` wiring).
+    The two layers stay distinct; only the clamp is
+    ported here.
+23. `TestGatewaySubscribeFeedsWaiter` NOT ported
+    as a Rust unit test: the Rust fake gateway
+    server lives in `castctl-gateway/tests/common/`
+    (test-only, not importable from another crate);
+    its intent (Runner consumes a real gateway
+    through SubscribeRaw) is covered by gate (b)
+    live proof. `TestIsNilSubscriber` has no Rust
+    equivalent (no reflection nil-interface;
+    `Option<T>` makes typed-nil impossible).
+    `TestAutoApproverZeroAndNilGuards` nil-receiver
+    half not ported (no null receivers in Rust).
+    fsclient cancelled-context sub-assertion not
+    ported (no ctx in Rust — drop-based
+    cancellation). Deliver
+    `TestWakeFuncMatchesGatewayWakeVM` + Wake
+    context-cancellation subtest not ported (no Rust
+    `gateway.WakeVM`; no ctx).
+24. Go tests ported 1:1 per package (wait scope
+    is 94 fns: runner 36 + history 6 + decode 1 +
+    gateway 2 (2 Go fns, 1 ported, 1 unported — see
+    dev 23) + redesign 23 + loop2 24 + loop3 2;
+    waiter/replies/reason/events/outcome tests
+    already ported by M5b in wait.rs); fsclient
+    18; approvals 17; deliver 14; logging 16
+    factory + 5 level + 1 allowlist remainder;
+    dns 9 portable + 1 extra Rust-only test
+    (`client_nil_bootstrap_is_error`, no Go
+    counterpart) (23 need the outbound manager
+    — recorded as unported with reason).
+25. Connect-time `AuthError` re-boxing (red-team
+    F1, HIGH — FIXED in fix loop 1): `AutoApprover`
+    used to re-box the connect error from its text
+    per item, losing the `TransportError::Auth`
+    type, so `as_approver` could not find it and the
+    wait exited 124 instead of 2. Fixed: the
+    connect error is stored once behind an `Arc`
+    and the `Arc` is cloned per item
+    (`err_for_shared`); `as_approver` now yields
+    `res.err` as `TransportError::Auth` and the
+    adapter yields `BotError::Transport(Auth)`.
+    Tests: `auto_approver_auth_error_propagates_and_stops`
+    (connect half, now asserting the downcast) +
+    `adapter_connect_auth_error_is_fatal_transport`.
+26. `fs put` symlink-to-directory root (red-team
+    F2, MEDIUM — FIXED in fix loop 1): `put` used
+    `metadata` (follows links) and walked the
+    target tree; Go's `filepath.WalkDir` Lstats
+    the root and never descends into a symlink
+    root. Fixed: `put` Lstats the root after the
+    recursive check and returns `Ok(vec![])`
+    without walking. Test:
+    `fs_put_symlink_to_dir_root_uploads_nothing`.
+27. DNS bootstrap budget (red-team F7, LOW —
+    FIXED in fix loop 1): `substitute_address`
+    wrapped EACH bootstrap call in its own 5 s
+    timeout; Go has ONE shared 5 s `bootstrapCtx`
+    for the whole `substituteBootstrap` loop
+    (`client.go:143-147`). Fixed: one deadline is
+    computed in `substitute_bootstrap` and passed
+    down (`timeout_at`). Test:
+    `bootstrap_budget_is_shared_across_servers`
+    (paused time: two 3 s bootstraps must fail at
+    5 s total).
+28. DNS wire validation (red-team F8, LOW — FIXED
+    in fix loop 1): `encode_name` wrote
+    `label.len() as u8` with no check (a long
+    label wrapped its length byte) and the framed
+    query length could wrap as `u16`. Fixed:
+    `encode_query` returns `Result` and rejects a
+    label over 63 octets or a name over 255 wire
+    octets with `DnsError::Protocol`; the transport
+    validates before any I/O. Tests:
+    `overlong_label_is_protocol_error`,
+    `overlong_name_is_protocol_error`,
+    `max_length_name_encodes` (255 octets, at the
+    limit). Round-2 R2-1 (LOW — FIXED in fix loop
+    2): `encode_name` also skipped empty labels,
+    so `"a..b"` encoded as `"a.b"`. Fixed: an
+    empty label is `DnsError::Protocol`, except
+    the root (`""` or `"."` → one zero octet),
+    matching Go miekg/dns `packDomainName`
+    (v1.1.72, msg.go: leading dot or two dots
+    back to back is `ErrRdata`). No charset check:
+    `packDomainName` copies label bytes verbatim,
+    so a space in a label is legal here —
+    `castctl-transport`'s `dns_encode_query` is
+    stricter than Go and is not copied. Tests:
+    `empty_label_is_protocol_error`,
+    `root_name_encodes`.
+29. `Fs::get` recursive writes server-supplied
+    `rel` parts with no `..` check (safety F-2,
+    LOW — ACCEPTED, no behaviour change): a
+    malicious or buggy server could make `get -r`
+    write outside the destination (Zip-Slip
+    shape). This is byte-for-byte Go parity
+    (`fsclient.go:631` does the same `filepath.Join`
+    with server-supplied parts and no check), and
+    the server is the user's own Muse gateway
+    (trusted, already controls every byte served).
+    Hardening it would be a deliberate deviation
+    from Go, so it is recorded here and left as
+    Go does it.
+30. Telegram-layer pre-collapse `..` reject
+    (safety F-3, MEDIUM — KNOWN SEAM GAP, out of
+    scope for M7a): Go rejects pre-collapse `..`
+    at the Telegram layer
+    (`internal/commands/telegram_fs.go:60-93`)
+    while `fsclient.Norm` only clamps. No Rust
+    equivalent exists: `castctl-telegram` does not
+    depend on `castctl-fsclient` and the `/fs`
+    surface is not wired in M7a (M7b territory).
+    The reject MUST land when `/fs` is wired, else
+    `/fs cat ../x` will silently read the clamped
+    path (`x`) instead of erroring as Go does.
+
+## M7a.5 Tier A harness (fixture goldens)
+
+CLI-vs-fixture is IMPOSSIBLE (GatewayHost constant,
+no env/config override; /etc/hosts rejected), so
+Tier A runs drivers against ONE scripted server
+binary (`rust/parity/gateway_server serve-wait`),
+one shared script file per case
+(`rust/parity/wait_cases/*.json` — the determinism
+contract), fresh server process per driver run
+(script state is per-process).
+
+- Go driver (`rust/parity/wait_driver/main.go`,
+  SPDX GPL-3.0-or-later): runs Go `wait.Runner`
+  via `conn.Muse` + SharedConn lease, re-encodes
+  `wait.Result` with local structs copying field
+  order from `wait.go: waitResultJSON`, duplicates
+  the text rendering. Drift bounded by Tier B.
+- Rust driver (`rust/castctl-cli/examples/wait_driver.rs`):
+  runs the `castctl-wait` Runner via SharedConn +
+  fake connector, renders with the PRODUCTION
+  `to_wait_result_json` / `print_wait_text`
+  (made `pub` for the driver — the only external
+  caller).
+- Canonical form: compact JSON + trailing `\n` on
+  stdout (the CLI's indented form is pinned
+  separately by Tier B raw bytes + the M2
+  `write_json_text` goldens). Exit code =
+  result exit code.
+- Cases: N2–N5 + E1–E5 (+ E3-recover variant);
+  N1 is the existing golden `09-wait-help`; N6 +
+  E5-live are Tier B; N7 is three usage-error cases
+  in `cases.json` (`09a`/`09b`/`09c`). N7's
+  `--timeout 601` sub-case was DROPPED: there is
+  no max validation in `wait.go` (flag def
+  `intFlag("timeout", 0, 600)` carries only a
+  default; the Runner clamps only `<=0` to 600),
+  so `--timeout 601` is accepted, not exit 2.
+- Harness: `rust/parity/run_wait_cases.sh`
+  (fresh server per driver run, PID kill, `cmp`
+  on stdout/stderr/exit, PASS/FAIL table). Fix
+  loop 1 verdict (red-team F3/F4/F5): the two
+  server logs must agree on the WAIT SUMMARY
+  counts (`history_calls`/`subscribes`) — a
+  read-count divergence FAILs even when the
+  outputs match; each driver runs under a 60 s
+  watchdog whose kill is recorded separately from
+  the driver's own exit code (`<case>.{go,rs}.timeout`:
+  `ok`|`killed`) and FAILs the case (a watchdog
+  kill is a harness timeout, never a legitimate
+  wait 124); each server must print its WAIT
+  SUMMARY with at least one call (a server that
+  died after READY prints no summary — the
+  dead-server mask).
+- Fixture bugs found by probing the runs (all
+  fixture-only, fixed in `4388777`, Tier A run 4:
+  11/11 after): (a) `runServeWait` unmarshalled the
+  case file straight into `waitScript` while cases
+  nest the script under `"script"` — subscribes
+  were always empty; unwrap the envelope, bare
+  `waitScript` still accepted. (b) `Request()`
+  turns a GET body into a query string, so
+  `chat.history` arrives as
+  `/chat/history?limit=200` and the handler's
+  exact-match switch missed it, falling through to
+  the canned default handler (`{}` with no log
+  line) — match on the path without the query and
+  read `limit`/`session_id` from the query too.
+  (c) The Go driver created its `Muse` without
+  `WithConfig`: `Connect(cfg)` does not store cfg
+  (only `WithConfig`/`Reload` do), so `muse.Call`
+  — which Connects with nil — fell back to the
+  zero Config when the dead gateway had to reopen
+  (e3: finish's history read failed `no cookies
+  at : ...`); the real CLI sets `WithConfig`
+  (`commands/runtime.go:360,366`).
+
+## M7a.6 Gates (cue — all PASS 2026-11-06 at base `b3fbe5a`, branch head `b8e4c9a`)
+
+Rebase chain for the numbers below: gates were first
+measured at `0233095` (test r10/r11: 1198/0; clippy r18:
+exit 0; Tier A run 4: 11/11), then `dev-rust` moved to
+`b3fbe5a` (M6b PR #74 merged) and the FULL gate was
+re-run at the new head (test r12, clippy post-rebase,
+Tier A run 5). The r10/r11 numbers are superseded;
+the numbers in this section are the re-run ones.
+
+- `go test -run TestSPDXHeaders -count=1 .` (cue,
+  BEFORE any workspace build): PASS (exit 0,
+  2026-11-06).
+- `cargo fmt --check`: PASS (exit 0, post-rebase).
+- `cargo build --workspace`: PASS (exit 0, 1m55s,
+  post-rebase).
+- `cargo test --workspace --no-fail-fast`: PASS
+  (exit 0, 2026-11-06, r12): **1349 passed, 0 failed,
+  63 result lines, 44 test binaries** (log
+  `/tmp/m7a-test-r12.log` on cue; the 63 result lines
+  are 44 binary runs + 19 doc-test runs — verified by
+  counting `Running` lines, not by carrying over the
+  r10/r11 count of 43). 1349 = 1198 (r11 at
+  `0233095`) + 151 (M6b's webui tests, exactly M6b's
+  reported 1136 − 985): the rebase added M6b's tests
+  and all of them pass; no M7a and no M6b regression.
+  (Earlier partial count 543/545 in r7 was fail-fast
+  truncation, not a real gap — see writer report §15.)
+- `cargo clippy --workspace --all-targets -- -D warnings`:
+  PASS (exit 0, 0 warnings/errors, 1m24s, post-rebase,
+  log `/tmp/m7a-clippy-post-rebase.log`). Clippy fix
+  history: 8 layers (r10–r18) — dns `collapsible_if` /
+  doc continuation, logging `manual_range_patterns` /
+  `io::Error::other` / `type_complexity`, approvals /
+  fsclient / gateway `collapsible_if`, deliver
+  `derivable_impls` (WakeDeps), wait
+  `type_complexity` aliases (`HistoryReadFuture`,
+  `SubscribeRawFuture`, `OnEventFn`, `TerminalPred`,
+  `WakeSeen`) + the stray-quote E0107 (regex wrote
+  `'a'` for lifetime `'a`, found by hex dump).
+- `cargo build -p castctl-cli --example wait_driver`:
+  PASS (exit 0).
+- Go fixture: `gofmt -l` clean; `go vet` + `go build`
+  gateway_server + wait_driver OK.
+- Tier A goldens (`rust/parity/run_wait_cases.sh`,
+  11 cases): **11/11 PASS, harness exit 0** (run 5,
+  `/tmp/m7a-tier-a5`, log `/tmp/m7a-tier-a5.log`).
+  Run history: run 1 0/11 (Go driver called
+  `muse.Connect(ctx, nil)` — connector reads
+  `CookiesFile` from per-call config, nil falls back
+  to the empty Muse config; fixed by passing
+  `&conn.Config{CookiesFile: ...}`); run 2 0/11
+  (stdout/exit/server counts identical, only the
+  non-deterministic slog "gateway connected" line
+  differed — fixed with a discard logger via
+  `conn.WithLogger`); run 3 10/11 (e3: Go exit 2
+  `auth_failed` vs Rust 124 — see §M7a.5); run 4
+  11/11 at `0233095`; run 5 11/11 at `b3fbe5a`.
+  Verdict rules F3/F4/F5 proven by negative controls
+  (all 5 controls trigger with exactly their reasons
+  after the dot→dash verdict fix).
+- Tier B live: **PASS 2026-11-06** (release binary
+  `cargo build --release -p castctl-rs`, exit 0, 3m22s,
+  `/tmp/m7a-target/release/castctl-rs`, `--version`
+  `castctl 0.9.0`): N6 idle wait + E5 nonexistent
+  thread, both void-free and byte-identical Go vs
+  Rust (evidence `/tmp/m7a-live/` on cue). N6:
+  `--after-seq 25756 --timeout 5 --json`, exit
+  124/124, stdout md5
+  `b8f545a02b05f2a304fb99fe580655e2` both, stderr
+  empty both, history `[23087, 25582, 25756]`
+  unmoved. E5: `--thread does-not-exist-123
+  --timeout 5 --json`, exit 124/124, stdout md5
+  `cb149c0246a62b87505c84d4fba563fe` both, stderr
+  empty both; direct `history` on the unknown thread
+  errors exit 3 (`gateway status=400
+  body_length=77`) before and after. Subscribe
+  proof (gate (b)): PROVEN — see §M7a.7.
+
+- Fix loop 2 (round-2 reviews, branch head
+  `b8e4c9a`, same base `b3fbe5a`): SPDX PASS (exit
+  0, before any build), `cargo fmt --check` PASS
+  (exit 0), `cargo build --workspace` PASS (exit 0,
+  1m51s), `cargo test --workspace --no-fail-fast`
+  PASS (exit 0, r15): **1351 passed, 0 failed, 63
+  result lines** (log `/tmp/m7a-test-r15.log` on
+  cue; 1351 = 1349 + 2 new R2-1 tests
+  `empty_label_is_protocol_error`,
+  `root_name_encodes`, both ok; the 2 R2-5
+  precondition asserts are in the existing
+  settle-pending tests, both ok),
+  `cargo clippy --workspace --all-targets -- -D warnings`
+  PASS (exit 0, log `/tmp/m7a-clippy-fl2.log`),
+  Tier A run 6 **11/11 PASS** (log
+  `/tmp/m7a-tier-a6.log`, server counts identical
+  to run 5; the new R2-2 WAIT-lines diff is
+  non-vacuous — e2 has 3 WAIT lines per side,
+  identical). `gofmt -l` clean, `go vet` + `go
+  build` of both parity binaries OK.
+  - r13 flake (NOT a regression): the first full
+    run at the fix-loop-2 head failed once with
+    `shadow::tests::shadow_dir_is_0700`
+    (`castctl-pluginhost`, M6c code — no M7a file
+    involved), 1350 passed / 1 failed. Cause by
+    reading: the test and
+    `sweep_removes_only_dead_pid_dirs` share the
+    per-process `pid-<pid>` shadow dir, and only
+    the sweep test takes `SWEEP_TEST_MU`; the
+    shadow test cleans the dir while the sweep
+    test recreates it. Isolated re-run of the
+    pluginhost binary: 94/0; full re-runs r14 and
+    r15: 1351/0. Same race family as M6c's known
+    flakes (`sweep_removes_only_dead_pid_dirs`,
+    `hostile_latest_tag_refuses_without_echo`).
+    Not fixed: M6c test code, out of M7a scope.
+  - Clippy caught a real error in the first NIT-1
+    attempt (empty line after a doc comment when
+    the const was inserted below the struct docs);
+    fixed by moving the const above the struct
+    doc comment with a plain `//` comment
+    (amended into the NIT-1 commit).
+  - Negative controls re-run against the CURRENT
+    verdict (7 controls, script
+    `~/workspace/tmp/m7a-verdict-control-fl2.sh`,
+    verdict block verified verbatim, 55 lines):
+    a F3 counts-diverge, b F4 rs-watchdog-kill,
+    c F5 go-summary-missing, d F5 both-0-0 (dial),
+    e all-good PASS, f (NEW, R2-2) WAIT-lines
+    differ → FAIL `server-wait-lines-differ`,
+    g (NEW, R2-3) both-0-0 with `dial: false` →
+    PASS. R2-4 load probes on cue: empty envelope
+    and bare `{}` both fail at load (exit 1,
+    "empty script"); stages-only and
+    subscribes-only both reach READY.
+  - Tier B live and the subscribe probe were NOT
+    re-run: no fix-loop-2 change touches the live
+    path (R2-1 DNS encoder, R2-2/3/4 harness-only,
+    R2-5 tests-only, NIT-1 driver literal).
+
+## M7a.7 Chưa kiểm chứng
+
+- Subscribe proof (gate (b)) — PROVEN 2026-11-06
+  (two real turns on the live gateway, side thread
+  `694803a6-7b89-4e9c-89a5-945872b5c3cf`, created via
+  REPL `/new`): turn 1 (Go `send "Say ok"`,
+  delivered `user_seq 26703`) observed by the clean
+  Rust release `wait` as Done/completed (exit 0);
+  turn 2 (delivered `user_seq 26712`) observed by
+  the instrumented release `wait` as Done/completed
+  with reply `ok` seq 26704 (boundary derived
+  26703). The instrumented run's stderr is the
+  literal trace — three records through
+  `RunnerHandler::on_record` (which runs ONLY for
+  subscribe-stream records; history reads never
+  pass through it):
+  `M7A-PROBE-SUBSCRIBE name=model_lock.updated
+  seq=29777`, `name=agent.status seq=29779`,
+  `name=task.status seq=29780`. The probe was a
+  temporary `eprintln!` (name + seq only, never
+  payload), REVERTED before commit — `git diff`
+  clean of it. The trace gap that forced the probe:
+  the Rust CLI emits ZERO log bytes at
+  `--log-level trace` (measured on `status` and on
+  the wait run; the Go binary emits 3906 bytes on
+  the same command — the flag is parsed/validated
+  but no logger is wired in `castctl-cli/src/run.rs`).
+  That is a Rust-CLI logging gap, not an M7a
+  blocker; recorded here, not fixed (out of scope).
+- `Handle::block_on` from inside `spawn_blocking`
+  (CLI approver decide path) — unproven until cue
+  compile + approval goldens run.
+- `send --wait` wiring (Target, not Floor) — not
+  started; explicit follow-up.
+- The 15s WakeTimeout enforcement via
+  `tokio::time::timeout` is untested at the 15s
+  value (testing it would take 15s).
+- `egress.approval.decide` server-side idempotency
+  — unproven; keep claim sets regardless.
+- Rust `SafeString` keeping exactly the 8-char
+  prefix for `public_key=` (test
+  `factory_sink_redacts_singbox_lines` asserts it
+  — verify on cue).
+- M5b deviation (not M7a's to fix): Rust does not
+  call settle in the poll loop → suspect terminal
+  can hang until the 6h deadline.
+
+Resolved during Tier B (moved out of this list):
+- Live behaviour for a nonexistent thread (E5):
+  direct `history` on an unknown thread errors
+  (exit 3, `gateway status=400 body_length=77`);
+  `wait` on it gives exit 124 with
+  `final_read_failed=true` + note `could not read
+  the final replies; run `castctl wait` again` —
+  byte-identical Go vs Rust (md5
+  `cb149c0246a62b87505c84d4fba563fe`).
+- `cookies_file` is ABSOLUTE in the live config
+  (`/root/.config/castctl/profiles/no.0/cookies.txt`);
+  Tier B cwd is irrelevant.
 
 ## Quy tắc quyết định (Boss, 2026-11-05 — standing)
 

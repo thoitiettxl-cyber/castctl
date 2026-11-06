@@ -1,0 +1,15 @@
+[package]
+name = "castctl-dns"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Profile DNS client ported from castctl's Go internal/dns (M7a, scoped)"
+
+[dependencies]
+tokio = { workspace = true, features = ["time", "net"] }
+
+[dev-dependencies]
+# "test-util" gates `Builder::start_paused` + `tokio::time::advance`,
+# used by the bootstrap-budget test. Test-only (see castctl-wait).
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net", "sync", "test-util"] }

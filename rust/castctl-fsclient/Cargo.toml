@@ -1,0 +1,17 @@
+[package]
+name = "castctl-fsclient"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "System Files client ported from castctl's Go internal/fsclient (M7a)"
+
+[dependencies]
+base64 = { workspace = true }
+castctl-config = { path = "../castctl-config" }
+castctl-transport = { path = "../castctl-transport" }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+castctl-transport = { path = "../castctl-transport" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
