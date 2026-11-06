@@ -9,7 +9,12 @@
 # example with the case argv against the same script, and
 # compare stdout bytes + stderr bytes + exit code + the
 # gateway request log (M7B lines) + the HTTP request log
-# (M7B-HTTP lines) + the downloaded file trees.
+# (M7B-HTTP lines) + the downloaded file trees. A case with
+# per-side expected stderr in rust/parity/known_diff/
+# (<name>.go.err / <name>.rs.err) is a KNOWN DIFFERENCE
+# (D1): each side's stderr is pinned against its own file
+# instead of compared side-to-side; everything else still
+# compares byte-identical.
 #
 # Usage:
 #   run_m7b_cases.sh [out-dir] [case-glob ...]
@@ -154,7 +159,18 @@ for case in $case_files; do
     elapsed=$(( $(date +%s) - start ))
     ok=1
     cmp -s "$OUT/$name.go.out" "$OUT/$name.rs.out" || ok=0
-    cmp -s "$OUT/$name.go.err" "$OUT/$name.rs.err" || ok=0
+    if [ -f "$DIR/known_diff/$name.go.err" ] && [ -f "$DIR/known_diff/$name.rs.err" ]; then
+        # Known difference (D1): the two sides intentionally
+        # differ in this one stderr line (Go vs serde JSON
+        # decoder text); pin each side's exact text instead
+        # of comparing them to each other. Everything else
+        # (stdout, exit, logs, downloads) still compares
+        # byte-identical.
+        cmp -s "$OUT/$name.go.err" "$DIR/known_diff/$name.go.err" || ok=0
+        cmp -s "$OUT/$name.rs.err" "$DIR/known_diff/$name.rs.err" || ok=0
+    else
+        cmp -s "$OUT/$name.go.err" "$OUT/$name.rs.err" || ok=0
+    fi
     [ "$(cat "$OUT/$name.go.exit")" = "$(cat "$OUT/$name.rs.exit")" ] || ok=0
     cmp -s "$OUT/$name-go.server.err" "$OUT/$name-rs.server.err" || ok=0
     cmp -s "$OUT/$name.go.http.err" "$OUT/$name.rs.http.err" || ok=0
@@ -169,7 +185,12 @@ for case in $case_files; do
         echo "--- stdout diff ($name) ---"
         diff "$OUT/$name.go.out" "$OUT/$name.rs.out" | head -20 || true
         echo "--- stderr diff ($name) ---"
-        diff "$OUT/$name.go.err" "$OUT/$name.rs.err" | head -20 || true
+        if [ -f "$DIR/known_diff/$name.go.err" ] && [ -f "$DIR/known_diff/$name.rs.err" ]; then
+            diff "$OUT/$name.go.err" "$DIR/known_diff/$name.go.err" | head -20 || true
+            diff "$OUT/$name.rs.err" "$DIR/known_diff/$name.rs.err" | head -20 || true
+        else
+            diff "$OUT/$name.go.err" "$OUT/$name.rs.err" | head -20 || true
+        fi
         echo "--- gateway-log diff ($name) ---"
         diff "$OUT/$name-go.server.err" "$OUT/$name-rs.server.err" | head -20 || true
         echo "--- http-log diff ($name) ---"

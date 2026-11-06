@@ -1,0 +1,32 @@
+{
+  "args": ["approvals", "--approve-all"],
+  "gateway": {
+    "/approvals": {
+      "status": 200,
+      "result": {
+        "pending_approvals": [
+          {
+            "approval_id": "ap1",
+            "display": {
+              "summary_title": "Mạng lưới",
+              "permission_question": {"text": "{assistant} wants net", "kind": "network_access", "scope": "x.com"}
+            },
+            "payload": {"type": "p"},
+            "decision_options": [{"kind": "allow_once"}, {"kind": "allow_always"}, {"kind": "deny"}]
+          },
+          {
+            "approval_id": "ap2",
+            "display": {
+              "summary_title": "Shell",
+              "permission_question": {"text": "{assistant} wants shell", "kind": "shell", "scope": "host"}
+            },
+            "payload": {"type": "p"},
+            "decision_options": [{"kind": "allow_once"}, {"kind": "deny"}]
+          }
+        ]
+      }
+    },
+    "/approvals/ap1/decide": {"status": 200, "result": {"decided": true, "approval_id": "ap1"}},
+    "/approvals/ap2/decide": {"status": 200, "result": {"decided": true, "approval_id": "ap2"}}
+  }
+}

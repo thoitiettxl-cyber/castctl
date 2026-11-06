@@ -1,0 +1,6 @@
+{
+  "args": ["redeem", "ABC123", "--json"],
+  "http": {
+    "/api/hatch/invite-code/redeem": {"status": 200, "body": "{\"success\":true,\"redemptionStatus\":\"granted\",\"nested\":{\"a\":1,\"b\":[1,2],\"c\":{\"d\":\"x\"}}}"}
+  }
+}

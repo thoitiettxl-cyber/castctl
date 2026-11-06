@@ -1,0 +1,6 @@
+{
+  "args": ["invite"],
+  "http": {
+    "/api/hatch/invite": {"status": 200, "body": "not json at all"}
+  }
+}

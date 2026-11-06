@@ -14,7 +14,7 @@
 //!
 //! The connection mirrors the real CLI: a `SharedConn` over
 //! a fake connector that dials the scripted server with the
-//! literal fake token, and an `HttpClient` over a plain-TCP
+//! canned fake token (HT-FAKE, as the Go driver does), and
 //! `DirectDialer` pointed at the fake HTTP server via the
 //! driver's `http_base` override (production never sees a
 //! gateway host flag/env/config — D-M7b-2).
@@ -29,6 +29,8 @@
 //! driver takes the same flag). All credentials here are fake.
 
 use std::future::Future;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -42,9 +44,11 @@ use castctl_gateway::shared::{Connector, SharedConn};
 use castctl_transport::{DirectDialer, HttpClient, RouteTable, TransportError};
 
 /// Fake connector: dial the scripted server once per
-/// `connect()` with the literal fake token, exactly as the
-/// M4a `parity_client` example does. No real credentials are
-/// ever involved.
+/// `connect()` with the canned fake token, exactly as the
+/// M4a `parity_client` example does and as the Go driver
+/// does with its canned auth (`gatewaytest.CannedAuth`:
+/// VMID "vm-test", AccessToken "AT-FAKE", HatchToken
+/// "HT-FAKE"). No real credentials are ever involved.
 struct FakeConnector {
     url: String,
     routes: Arc<RouteTable>,
@@ -137,7 +141,7 @@ async fn main() {
         }
     };
     let url = format!(
-        "ws://{}/v1/noise?vm_id=vm-test&auth_token=<redacted>",
+        "ws://{}/v1/noise?vm_id=vm-test&auth_token=HT-FAKE",
         args.addr
     );
     let shared = Arc::new(SharedConn::new(Arc::new(FakeConnector { url, routes })));
@@ -146,14 +150,23 @@ async fn main() {
         std::process::exit(1);
     }
 
-    // Fake cookies file (0600 by create; the content is the
-    // same fake cookie the Go driver writes).
+    // Fake cookies file, mode 0600 set explicitly (the
+    // content is the same fake cookie the Go driver writes).
     let cookies_path = std::env::temp_dir().join(format!(
         "m7b-driver-cookies-{}-{}.txt",
         std::process::id(),
         cmd.replace('/', "_")
     ));
-    if let Err(e) = std::fs::write(&cookies_path, "hatch_sess=FAKE; datr=FAKE") {
+    if let Err(e) = (|| -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&cookies_path)?;
+        f.write_all(b"hatch_sess=FAKE; datr=FAKE")?;
+        Ok(())
+    })() {
         eprintln!("m7b_driver: cookies: {e}");
         std::process::exit(1);
     }

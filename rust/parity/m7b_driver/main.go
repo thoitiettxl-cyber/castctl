@@ -124,6 +124,34 @@ func errCodef(code int, format string, args ...any) error {
 // DeadlineExceeded, Canceled, validation, ExitCode-bearing,
 // else 1. The typed-JSON form is json.Marshal of a
 // map[string]string, so keys sort (error before type).
+// classifyAuthType mirrors internal/commands/classifyAuthMessage
+// (commands.go:390) plus the "read cookies file" backstop from
+// classifyConnError (commands.go:361): the typed auth taxonomy
+// by message substring. The error field stays
+// logging.SummarizeErr, as before — only the type varies.
+// No harness case exercises this: the fake gateway server
+// always handshakes, so a connect-path AuthError is not
+// scriptable here (same limit as the Rust side, whose
+// classifier is unit-tested instead).
+func classifyAuthType(msg string) string {
+	switch {
+	case strings.Contains(msg, "read cookies file"),
+		strings.Contains(msg, "could not parse cookies"),
+		strings.Contains(msg, "no cookies"),
+		strings.Contains(msg, "empty cookies"):
+		return "cookies_missing"
+	case strings.Contains(msg, "api/session"),
+		strings.Contains(msg, "VM unavailable"):
+		return "session_unavailable"
+	case strings.Contains(msg, "auth/check"):
+		return "auth_check_failed"
+	case strings.Contains(msg, "hatch/token"):
+		return "hatch_token_failed"
+	default:
+		return "auth_failed"
+	}
+}
+
 func classifyError(err error) (int, string) {
 	if err == nil {
 		return 0, ""
@@ -138,7 +166,7 @@ func classifyError(err error) (int, string) {
 	var auth *conn.AuthError
 	if errors.As(err, &auth) {
 		msg := logging.SummarizeErr(err)
-		b, _ := json.Marshal(map[string]string{"type": "auth_failed", "error": msg})
+		b, _ := json.Marshal(map[string]string{"type": classifyAuthType(auth.Error()), "error": msg})
 		return 2, string(b)
 	}
 	var gw *conn.GatewayError
@@ -1136,14 +1164,16 @@ func run() int {
 		dialer,
 		gateway.WithWebSocketSecure(false),
 		gateway.WithWSURL(func(vmID, token string) string {
-			// The REAL hatch token, URL-quoted by the
-			// connector's caller contract (defaultWSURL sends
-			// the real token, URL-quoted safe=""). Do NOT copy
-			// the "<redacted>" literal the M7a drivers carry:
-			// gorilla sends the raw `<`/`>` in the query and
-			// the Go server answers the handshake 400, while
-			// the Rust client percent-encodes them and connects
-			// — so the literal breaks the Go side only. (The
+			// The canned hatch token from CannedAuth,
+			// interpolated (it needs no URL-quoting). Do
+			// NOT put the placeholder literal the M7a
+			// drivers carry in the format string: Sprintf
+			// then has 2 verbs for 3 args and appends
+			// `%!(EXTRA string=HT-FAKE)`, and gorilla sends
+			// the raw `<`/`>` in the query while the Go
+			// server answers the handshake 400 (the Rust
+			// client percent-encodes them and connects) —
+			// so the literal breaks the Go side only. (The
 			// M7a wait_driver carries the same latent bug.)
 			return fmt.Sprintf("ws://%s/v1/noise?vm_id=%s&auth_token=%s", *addr, vmID, token)
 		}),

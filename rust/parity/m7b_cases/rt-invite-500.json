@@ -1,0 +1,6 @@
+{
+  "args": ["invite"],
+  "http": {
+    "/api/hatch/invite": {"status": 500, "body": "{\"error\":\"boom\"}"}
+  }
+}

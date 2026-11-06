@@ -1,0 +1,6 @@
+{
+  "args": ["raw", "chat.history"],
+  "gateway": {
+    "/chat/history": {"status": 200, "result": {"messages": [{"role": "user", "text": "a<b>&c"}]}}
+  }
+}
