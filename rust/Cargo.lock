@@ -451,9 +451,12 @@ dependencies = [
 name = "castctl-cli"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "bytes",
  "castctl-approvals",
  "castctl-config",
  "castctl-deliver",
+ "castctl-dns",
  "castctl-fsclient",
  "castctl-gateway",
  "castctl-keeper",
@@ -466,8 +469,11 @@ dependencies = [
  "castctl-wait",
  "castctl-webui",
  "chrono",
+ "http",
  "rand",
+ "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
 ]
 
@@ -475,7 +481,10 @@ dependencies = [
 name = "castctl-config"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "castctl-log-redact",
  "libc",
+ "rand",
  "sha2 0.10.9",
 ]
 

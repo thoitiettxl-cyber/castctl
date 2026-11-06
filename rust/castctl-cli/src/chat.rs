@@ -771,7 +771,7 @@ mod tests {
     use castctl_gateway::shared::{Connector, SharedConn};
     use castctl_telegram::Approval as TelegramApproval;
     use castctl_telegram::wait::WaitKind;
-    use castctl_transport::{DirectDialer, HttpClient, TransportError};
+    use castctl_transport::{Dialer, DirectDialer, HttpClient, TransportError};
 
     /// A connector that never connects (the no-network
     /// branches must never call it).
@@ -797,9 +797,10 @@ mod tests {
 
     fn test_runtime() -> Runtime {
         let connector = Arc::new(DeadConnector);
-        let http = HttpClient::new(Arc::new(DirectDialer::new()));
+        let dialer: Arc<dyn Dialer> = Arc::new(DirectDialer::new());
+        let http = HttpClient::new(Arc::clone(&dialer));
         let shared = Arc::new(SharedConn::new(connector));
-        Runtime::new(Profile::default(), http, shared)
+        Runtime::new(Profile::default(), dialer, http, shared)
     }
 
     fn temp_path(tag: &str) -> std::path::PathBuf {

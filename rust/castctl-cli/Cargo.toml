@@ -11,10 +11,16 @@ castctl-approvals = { path = "../castctl-approvals" }
 castctl-config = { path = "../castctl-config" }
 # M7b PR-3: `auth list` renders `deliver`'s profile list.
 castctl-deliver = { path = "../castctl-deliver" }
+castctl-dns = { path = "../castctl-dns" }
 castctl-fsclient = { path = "../castctl-fsclient" }
 castctl-gateway = { path = "../castctl-gateway" }
 # M7b PR-3: `auth status` reads keeper expiry/state, `auth
 # import` writes through the keeper cookie lock + reset.
+# M7d: default features (chromedp ON) so the keeper's CDP
+# re-export and headless re-login are real in this build.
+# [DEVIATION] vs Go's release build (no `with_chromedp`
+# tag): Go release cannot re-export; this build can. See
+# PORTING.md §M7d.
 castctl-keeper = { path = "../castctl-keeper" }
 castctl-logging = { path = "../castctl-logging" }
 castctl-shared = { path = "../castctl-shared" }
@@ -28,7 +34,12 @@ castctl-webui = { path = "../castctl-webui" }
 # through `Host::apply_config` (see `run.rs`
 # `cmd_plugin`).
 castctl-pluginhost = { path = "../castctl-pluginhost" }
+bytes = { workspace = true }
 chrono = { workspace = true }
+async-trait = { workspace = true }
+http = { workspace = true }
+sha2 = { workspace = true }
 rand = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync", "signal"] }

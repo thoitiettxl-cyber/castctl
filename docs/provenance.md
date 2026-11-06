@@ -2353,6 +2353,37 @@ without `with_chromedp`; `auth status` headless is
 computed against that shipped-binary model, never the
 keeper crate's `CDP_AVAILABLE`).
 
+## 23. M7d subcommands (profile ×8 + config migrate + telegram ×2 + keeper ×3) — no new upstream dependency
+
+M7d (`rust/castctl-cli` + `rust/castctl-config`,
+branch `feat/rust-m7d-subcommands`, base `dev-rust`
+682df84, rebased onto 5fa66c9 after M7b PR-3 merged) wires `profile` list/show/add/rm/set-outbound/
+set-fingerprint/set-tls-engine/test, `config migrate`,
+`telegram` run/status, and `keeper` run/check/status
+from the `not ported yet` stubs to the repo's own Go
+handlers (`internal/profile/` — `cmd_profile.go`,
+`config.go`, `profilecmd.go`, `migrate.go`,
+`dns_distribute.go`, `wireguard.go`, `envproxy.go`;
+`internal/commands/cmd_config.go`,
+`cmd_telegram.go`, `cmd_keeper.go`;
+`internal/keeper/`; `internal/telegram/`;
+`internal/runtime/`). No third-party code was copied
+and no new crate entered `Cargo.lock` (`Cargo.lock`
+diff is dependency edges only, for crates already in
+the workspace: `rand`, `base64`, `castctl-log-redact`,
+`castctl-dns`, `castctl-keeper`, `http`, `sha2`,
+`bytes`, `async-trait`). `NOTICE` needed no change
+(no new dep). Algorithm provenance and every
+deviation from the Go implementation are recorded in
+`rust/PORTING.md` §M7d (notably: the CLI build
+enables castctl-keeper's default features, i.e.
+chromedp ON, while the Go release build has no
+`with_chromedp` tag; `telegram run` construction
+errors render go-telegram/bot text byte-for-byte,
+verified against `go-telegram/bot v1.27.1` source and
+measured live; the poll-loop path still renders
+Rust `BotError` text, unprobed).
+
 ## Carried items (unresolved at the time of writing)
 
 - npm license check: not run — no license-checking tool present,

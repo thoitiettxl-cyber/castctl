@@ -62,6 +62,11 @@ use castctl_gateway::cookies::{CookieLoadError, load_cookies};
 pub struct Runtime {
     /// The resolved active profile.
     pub profile: Profile,
+    /// The outbound dialer the profile's traffic goes
+    /// through (M7d: the profile-test DNS phase and the
+    /// keeper gateway probe dial through it directly;
+    /// `http` below is built on the same dialer).
+    pub dialer: Arc<dyn Dialer>,
     /// The dialer's HTTP client (HTTPS auth chain,
     /// `FetchSubscription`, `FetchSessionInfo`).
     pub http: HttpClient,
@@ -139,13 +144,45 @@ fn dispatch_err(e: TransportError) -> FlowErr {
     msg(2, e.to_string())
 }
 
+/// Build the dialer for one tagged outbound/endpoint entry
+/// (Go `createOutbounds` for a single tag): outbounds via
+/// `dispatch_outbound`, endpoints via `dispatch_endpoint`
+/// (with the tag's `wireguard_dns` servers). A dispatch
+/// failure is exit 2 (Q8 option (b)): the config named
+/// something unbuildable.
+pub(crate) fn dialer_for_tag(
+    single: &SingleConfig,
+    tag: &str,
+    profile_engine: Option<&str>,
+) -> Result<Arc<dyn Dialer>, FlowErr> {
+    let dispatch = if let Some(raw) = find_raw(&single.outbounds_raw, tag) {
+        dispatch_outbound(&config_to_serde(raw), profile_engine).map_err(dispatch_err)?
+    } else if let Some(raw) = find_raw(&single.endpoints_raw, tag) {
+        let servers: Vec<String> = single
+            .wireguard_dns
+            .iter()
+            .find(|(t, _)| t == tag)
+            .map(|(_, s)| s.clone())
+            .unwrap_or_default();
+        dispatch_endpoint(&config_to_serde(raw), &servers).map_err(dispatch_err)?
+    } else {
+        return Err(msg(2, format!("outbound tag {tag:?} not found")));
+    };
+    match dispatch {
+        Dispatch::Direct => Ok(Arc::new(DirectDialer::new())),
+        Dispatch::Honk(node) => HonkDialer::shared(*node)
+            .map(|d| -> Arc<dyn Dialer> { d })
+            .map_err(dispatch_err),
+        Dispatch::WireGuard(d) => Ok(d),
+        Dispatch::Block => Ok(Arc::new(BlockDialer::new())),
+    }
+}
+
 /// Build the dialer for the profile's outbound selection (Go
 /// `defaultBuildRuntime` → `createOutbounds` /
 /// `connectorConfig` → `identityForProfile`): `Direct` →
-/// `DirectDialer`; `Tag` → the named entry in `outbounds`
-/// (via `dispatch_outbound`) or `endpoints` (via
-/// `dispatch_endpoint`, with the tag's `wireguard_dns`
-/// servers); `Inline` → the raw object (via
+/// `DirectDialer`; `Tag` → the named entry (see
+/// [`dialer_for_tag`]); `Inline` → the raw object (via
 /// `dispatch_outbound`). `Block` builds into a dialer that
 /// fails at dial time (exit 1), matching Go: sing-box's
 /// block outbound builds fine and returns `syscall.EPERM`
@@ -164,20 +201,7 @@ fn build_dialer(
                     format!("outbound tag {tag:?} cannot resolve without a config file"),
                 )
             })?;
-            if let Some(raw) = find_raw(&single.outbounds_raw, tag) {
-                dispatch_outbound(&config_to_serde(raw), Some(profile.tls_engine.as_str()))
-                    .map_err(dispatch_err)?
-            } else if let Some(raw) = find_raw(&single.endpoints_raw, tag) {
-                let servers: Vec<String> = single
-                    .wireguard_dns
-                    .iter()
-                    .find(|(t, _)| t == tag)
-                    .map(|(_, s)| s.clone())
-                    .unwrap_or_default();
-                dispatch_endpoint(&config_to_serde(raw), &servers).map_err(dispatch_err)?
-            } else {
-                return Err(msg(2, format!("outbound tag {tag:?} not found")));
-            }
+            return dialer_for_tag(single, tag, Some(profile.tls_engine.as_str()));
         }
         OutboundKind::Inline => {
             let raw = profile
@@ -223,6 +247,7 @@ pub(crate) fn build_runtime(
     let shared = Arc::new(SharedConn::new(Arc::new(adapter)));
     Ok(Runtime {
         profile,
+        dialer,
         http,
         shared,
         http_base: MUSE_AI_BASE.to_string(),
@@ -233,10 +258,18 @@ impl Runtime {
     /// Build a runtime from its parts (M7b driver seam):
     /// the base is the production `MUSE_AI_BASE`; the
     /// driver overwrites `http_base` with the fake
-    /// server's base after construction.
-    pub fn new(profile: Profile, http: HttpClient, shared: Arc<SharedConn>) -> Self {
+    /// server's base after construction. The dialer is
+    /// the one `http` was built on (the driver passes the
+    /// same `DirectDialer` it used for the client).
+    pub fn new(
+        profile: Profile,
+        dialer: Arc<dyn Dialer>,
+        http: HttpClient,
+        shared: Arc<SharedConn>,
+    ) -> Self {
         Self {
             profile,
+            dialer,
             http,
             shared,
             http_base: MUSE_AI_BASE.to_string(),
@@ -244,7 +277,60 @@ impl Runtime {
     }
 }
 
+/// The inner message behind a cookies failure: the text
+/// `logging.SummarizeErr` would render for the phase error
+/// in `profile test` (Go `redactMessage` on the
+/// `*typedAuthError`: no `LogSummary` method, so the inner
+/// error text passes through `SafeString` verbatim).
+/// `Missing` is the `cookies_missing` family (stat/empty/
+/// read); `Parse` is the unparseable-file message.
+pub(crate) enum CookiesFailure {
+    Missing(String),
+    Parse(String),
+}
+
 impl Runtime {
+    /// Read the cookies file, returning the inner failure
+    /// message instead of the typed JSON error. Shared by
+    /// [`Runtime::cookies`] (which renders the typed JSON)
+    /// and `profile test` (which renders the message as a
+    /// phase error, exit 3 via `phaseExitCode`).
+    pub(crate) fn cookies_raw(&self) -> Result<String, CookiesFailure> {
+        let path = &self.profile.cookies_file;
+        match std::fs::metadata(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CookiesFailure::Missing(
+                    "cookies_missing: no cookies file (run `castctl auth export` for guidance)"
+                        .to_string(),
+                ));
+            }
+            Err(_) => {
+                return Err(CookiesFailure::Missing(
+                    "cookies_missing: cannot access cookies file".to_string(),
+                ));
+            }
+            Ok(m) if m.len() == 0 => {
+                return Err(CookiesFailure::Missing(
+                    "cookies_missing: cookies file is empty".to_string(),
+                ));
+            }
+            Ok(_) => {}
+        }
+        match load_cookies(path) {
+            Ok(c) => {
+                if c.trim().is_empty() {
+                    Err(CookiesFailure::Missing(
+                        "cookies_missing: cookies file is empty".to_string(),
+                    ))
+                } else {
+                    Ok(c)
+                }
+            }
+            Err(CookieLoadError::Read(m)) => Err(CookiesFailure::Missing(m)),
+            Err(CookieLoadError::Parse(m)) => Err(CookiesFailure::Parse(m)),
+        }
+    }
+
     /// `Runtime.Cookies` (`runtime.go`): the file must exist
     /// and be non-empty, then parse. Failures are typed
     /// `cookies_missing` (exit 2) so dispatch never prints a
@@ -256,40 +342,10 @@ impl Runtime {
     /// the parse case (Go's `classifyAuthMessage` on the
     /// `AuthError`).
     pub(crate) fn cookies(&self) -> Result<String, FlowErr> {
-        let path = &self.profile.cookies_file;
-        match std::fs::metadata(path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(typed(
-                    "cookies_missing",
-                    "cookies_missing: no cookies file (run `castctl auth export` for guidance)",
-                ));
-            }
-            Err(_) => {
-                return Err(typed(
-                    "cookies_missing",
-                    "cookies_missing: cannot access cookies file",
-                ));
-            }
-            Ok(m) if m.len() == 0 => {
-                return Err(typed(
-                    "cookies_missing",
-                    "cookies_missing: cookies file is empty",
-                ));
-            }
-            Ok(_) => {}
-        }
-        match load_cookies(path) {
-            Ok(c) => {
-                if c.trim().is_empty() {
-                    return Err(typed(
-                        "cookies_missing",
-                        "cookies_missing: cookies file is empty",
-                    ));
-                }
-                Ok(c)
-            }
-            Err(CookieLoadError::Read(m)) => Err(typed("cookies_missing", &m)),
-            Err(CookieLoadError::Parse(m)) => Err(classify_auth_message(&m)),
+        match self.cookies_raw() {
+            Ok(c) => Ok(c),
+            Err(CookiesFailure::Missing(m)) => Err(typed("cookies_missing", &m)),
+            Err(CookiesFailure::Parse(m)) => Err(classify_auth_message(&m)),
         }
     }
 }

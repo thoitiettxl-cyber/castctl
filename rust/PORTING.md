@@ -14894,3 +14894,303 @@ lockfile — no new crate).
   during the rebase (14G free at the worst point, 12G at the
   final gate); builds waited per the disk rule; own target
   deleted after the final gate (logs kept).
+
+## M7d — profile ×8 + config migrate + telegram ×2 + keeper ×3 (2026-11-06)
+
+Branch `feat/rust-m7d-subcommands`; base `dev-rust`
+`682df84` (M7c PR #81 merged 2026-11-06), rebased onto
+`5fa66c9` (M7b PR-3, PR #82, merged 2026-11-06) — conflicts
+in `run.rs` (cmd_config + migrate tests), `lib.rs`, CLI
+`Cargo.toml`, `PORTING.md`, `Cargo.lock`, and
+`docs/provenance.md`, all resolved per the rebase rules
+(M7d wins for migrate; PR-3 kept for update / auth /
+download / fallthrough). The rebase retired the M2 stub
+helper (`stub()` + `STUB_LINE` removed from `run.rs` —
+zero call sites remain; likewise the pre-profile gate
+`resolve_and_load` + `load_resolved_config`, whose last
+callers PR-3 removed from `cmd_auth`). PR targets `dev-rust` directly. Scope per parent plan
+`~/workspace/plans/active/castctl-rust-m7d-subcommands.md`:
+`profile` list/show/add/rm/set-outbound/set-fingerprint/
+set-tls-engine/test, `config migrate`, `telegram` run/status,
+`keeper` run/check/status. Out of scope (PR-3, merged as PR #82 during
+this rebase): `update`, `auth` ×4, `history --download`,
+fallthrough stub — kept from `dev-rust` at rebase.
+
+### M7d.1 What was built
+
+- `rust/castctl-config/src/toggle.rs`: general guarded-writer
+  API reusing the private helpers (`read_config_bytes`,
+  `write_file_atomic`, `sha256_hex`, `temp_suffix`,
+  `remove_stale_temp_files`, `io_error_text`): `ConfigState`,
+  `load_config_state`, `ConfigLock` + `lock_config_dir`,
+  `update_single_config`, `write_single_config_locked`,
+  `refuse_unmigrated`, `generate_node_id`. `read_config_state`
+  runs `validate_single_config` after parsing, matching Go's
+  `readConfigState` (`guard.go:101`, full `ParseSingleConfig`).
+- `rust/castctl-config/src/redact.rs`: `redact_value` /
+  `redact_profile` over ordered `JsonValue` (secret keys
+  wholesale, header maps, URL-userinfo; order preserved).
+- `rust/castctl-config/src/taggraph.rs`: Go-faithful
+  `validate_tag_graph` (fills `outbound.from`/`typ`).
+- `rust/castctl-config/src/dnsvalidate.rs`: `DnsSource`,
+  `DnsServer`, `ResolvedDns`, `resolve_profile_dns`,
+  `validate_profile_dns`, `validate_wireguard_dns`,
+  `validate_wireguard_private_keys`, `validate_single_config`,
+  `detour_chain`, `outbound_identity_for_config`.
+- `rust/castctl-config/src/profile_ops.rs`: `AddProfileOptions`,
+  `add_profile`, `remove_profile`, `set_outbound`,
+  `set_fingerprint`, `set_tls_engine`, `outbound_from_env`,
+  `resolve_telegram`.
+- `rust/castctl-config/src/migrate.rs`: `MigrateProfile`,
+  `MigrateResult`, `render_migrate_result`, `migrate`,
+  `migrate_from` — verified line-by-line against Go
+  `internal/profile/migrate.go` (1342 lines) +
+  `dns_distribute.go` (277 lines).
+- `rust/castctl-cli/src/profilecmd.rs`: list/show/add/rm/
+  set-outbound/set-fingerprint/set-tls-engine + config migrate.
+- `rust/castctl-cli/src/profiletest.rs`: `profile test`
+  (DNS/HTTPS/egress/gateway phases; see §M7d.3).
+- `rust/castctl-cli/src/keepercmd.rs`: run/check/status.
+- `rust/castctl-cli/src/telegramcmd.rs`: run/status.
+- `rust/castctl-cli/src/runtime.rs`: `Runtime.dialer`
+  (`Arc<dyn Dialer>`, pub), `dialer_for_tag`, `CookiesFailure`
+  + `cookies_raw()` (shared by `cookies()` and profile test).
+- `rust/castctl-cli/src/run.rs`: the 4 dispatchers wired;
+  set-outbound positionals fixed to `["name","file"]` (R1
+  finding; M2 stub said `["name","value"]`).
+- `castctl-cli/Cargo.toml`: + `castctl-keeper` (default
+  features, chromedp ON), `castctl-dns`, `http`, `sha2`,
+  `bytes`, `async-trait`. `castctl-config/Cargo.toml`: +
+  `rand`, `base64`, `castctl-log-redact` (all already in
+  the workspace lockfile — no new crate, NOTICE unchanged;
+  `Cargo.lock` diff is edges only).
+
+### M7d.2 Decisions (self-decide, recorded)
+
+- D-M7d-1: scope = the 14 subcommands above; PR-3 sites untouched.
+- D-M7d-2: rebase onto a moving dev-rust head, re-gate; never stop
+  because the remote moved. On conflict at PR-3 sites keep the
+  dev-rust side. (PR #82 was still OPEN at commit time; if it
+  merges before this PR, rebase onto the new head and re-gate.)
+- D-M7d-3: stub-count criterion counts dispatch *functions* in the
+  brief ("≤2: cmd_update + cmd_auth") but grep sites are the honest
+  Floor: 6 (`history --download`, fallthrough, `update`, `auth` ×3).
+  PR body states both counts.
+- D-M7d-4: write-path tests use temp-dir config copies via
+  `--config` only — never profile `no.0` or `~/.config/castctl`.
+- D-M7d-7: Go REJECTS unknown top-level/inner config keys (R3
+  probes + Go source); the brief's "preserve unknown fields"
+  yields to Go. The Rust parse still accepts some configs Go
+  would reject at load (unknown inner keys, invalid sing-box
+  outbound options) — residual D-M2-1 gap, not fixed in M7d;
+  the write path validates with the new Go-faithful tag-graph +
+  WireGuard-key checks.
+- D-M7d-8: no `--dry-run` on profile write commands (Go has none);
+  only `config migrate` is dry-run-by-default.
+- Write rendering: M7d uses Go-faithful re-encode via
+  `build_single_file_ordered` + `encode_single_config`
+  (canonical order, trailing newline), NOT the toggle in-place
+  edit (that deviation stays scoped to auto-approve, §M7b).
+  `profile add` is two writes with a residual partial-profile
+  window — do not promise atomic add+outbound. No `.bak` for
+  config.json (refuse-before-write + atomic rename; migrate
+  leaves legacy files untouched as the backup).
+- `config_lookup_env` (`castctl-config/src/configlocation.rs`)
+  was `pub(crate)` but the CLI legitimately needs it
+  (`CASTCTL_PROFILE` / `MUSE_NODE_ID` through the same seam);
+  made `pub` (one-word change, no behaviour change).
+- Validation placement: Go `ParseSingleConfig` runs
+  validateTagGraph → G1 → validateProfileDNS →
+  validateWireGuardDNS → validateWireGuardPrivateKeys →
+  validateTelegram → validateKeeper (+ credentials/refs/
+  plugins). Rust parse already runs G1/telegram/keeper/
+  credentials/refs/plugins, so M7d `validate_single_config` =
+  tag graph → profile DNS → WG DNS → WG keys only.
+  Read paths run the full chain via `load_single_validated`;
+  mutation closures run exactly what Go runs.
+- Double `profile: ` prefix is REAL Go behaviour
+  (`errors.go:113`: `Error()` returns the message WITH the
+  prefix, and the tag-graph wrap adds it again); Rust
+  reproduces it byte-for-byte, tests expect it, and the
+  live probe confirms it (`profile list` on a dangling
+  detour: `castctl: profile: outbound "o1": profile:
+  dangling reference: detour "ghost" does not exist`,
+  exit 2, both sides).
+- `telegram run` construction errors render go-telegram/bot
+  text (`telegramcmd.rs::go_telegram_construction_api_text`,
+  verified against `bot@v1.27.1-.../raw_request.go` +
+  `bot.go:97` and measured live: fake-token getMe 401 →
+  `telegram: bot construction failed: error call getMe,
+  unauthorized, Unauthorized`, exit 1, byte-identical).
+  The shared `BotError` Display keeps its never-print-
+  server-text rule everywhere else (notably the poll-loop
+  path, still Rust text, unprobed).
+
+### M7d.3 Deviations (deliberate, with Go behaviour stated)
+
+- [DEVIATION] CLI adds `castctl-keeper` with default features
+  (chromedp ON). Go's release build has no `with_chromedp`
+  tag, so Go release cannot re-export; this build can.
+- [DEVIATION] `profile test` node_id: Go passes a temp node_id
+  to the gateway probe; Rust passes none (no node_id param in
+  the gateway crate). Unobservable in test output.
+- [DEVIATION] `profile test` gateway phase uses a fresh
+  `GatewayConnector` connect + close (Go does the same), but
+  the Rust DNS phase blocks UDP/TLS/hosts/fakeip/unknown server
+  types (Dialer is TCP-only; no UDP dialer, no raw-TLS-stream
+  seam) — recorded as blocked, never faked.
+- [DEVIATION] `profile test` egress class/kind mapping is from
+  `TransportError` message substrings (approximation; Go
+  classifies from the error chain). Warning only, non-fatal.
+- [DEVIATION] `telegram run` startup line and `telegram:
+  polling stopped` appear only at process exit (CLI buffers
+  `ctx.out`; same M2 limitation as `webui serve`). Go prints
+  them live.
+- [DEVIATION] `telegram run` poll-loop (`Start`) failures exit 1
+  with Rust `BotError` text (`telegram api error 401`,
+  `transport error: ...`); Go wraps them as
+  `error call getUpdates, ...`. Unprobed (construction path
+  now matches Go byte-for-byte; see §M7d.2).
+- [DEVIATION] Embedded keeper (telegram run) tick lines are
+  buffered and summary-shaped, not Go's structured slog
+  `keeper tick` line.
+- [DEVIATION] Keeper check/status time fields render as `Z`
+  (Rust `DateTime<Utc>`); Go echoes the stored local offset
+  (`+07:00`). Instants equal.
+- [DEVIATION] Keeper check timing: Rust checker 20s/request
+  bound fails a dead-outbound tick at ~20s, not Go's full 90s
+  check timeout; exit code + stderr text still match Go.
+- [DEVIATION] Telegram bot core retries 5xx with the default
+  ladder (`DEFAULT_5XX_BACKOFF`); Go's core has no 5xx retry
+  (M5 deviation, pre-existing).
+- [DEVIATION] `set_outbound` non-string `tag` fails closed with
+  own text `outbound "tag" must be a string` (Go's sing-box
+  parse would reject differently; Rust stores after structural
+  checks only).
+- [DEVIATION] Migrate legacy malformed-JSON inner text is the
+  Rust tokenizer's (shape matches Go; M2 family).
+- [DEVIATION] `generate_node_id` RNG failure returns
+  `config_errorf!("generate node_id: {e}")` with the `profile: `
+  prefix; Go returns the raw crypto/rand error. Practically
+  unreachable path.
+
+### M7d.4 Fix round — 19 test failures → 3 real code bugs (cue, 2026-11-06)
+
+The first full gate run after wiring was 1551 passed / 19
+failed. Every failure was decided against Go source (and,
+where the source was ambiguous, a live Go binary probe on
+cue). Three were real Rust bugs, fixed in code; the other
+sixteen were test premises that contradicted Go, fixed in
+the tests (each fix cites the Go file:line or probe):
+
+- BUG 1 — `profile list` reported `exists: false` for a
+  single-file profile whose directory exists. `run_list`
+  used the parsed single entry verbatim; Go's `LoadProfile`
+  sets `Exists` from the dir stat on EVERY path
+  (`config.go:1219`). Fixed: re-stat the dir for
+  single-entry rows too.
+- BUG 2 — `canonical_wireguard_key` missed padding-bit
+  key variants (`"...A="` vs `"...B="`). The Rust `base64`
+  crate rejects non-zero padding bits (`InvalidLastSymbol`);
+  Go's `StdEncoding.DecodeString` ignores them, so both
+  decode to 32 zero bytes (`wireguard.go:153`). Fixed:
+  strict decode first, then mask the unused low bits of
+  the last data character (2 bits for one `=` pad, 4 for
+  two) and retry.
+- BUG 3 — `set_outbound` (tagged) returned the profile
+  with `typ`/`from` empty. Go mutates the map entry IN
+  PLACE (`p` is a pointer into `cfg.Profiles`), so
+  `validateTagGraph` resolves From/Type on the NEW
+  outbound before `SetOutbound` clones it
+  (`profilecmd.go:291`, `config.go:739`). The Rust
+  closure cloned first, validated the stale map entry,
+  and inserted after. Fixed: insert before validating,
+  re-read the entry after (same pattern as `add_profile`).
+- Test-premise corrections (all verified vs Go): add/rm
+  duplicate/unknown errors carry the `profile: ` prefix
+  (`newConfigErrorf`, R3 transcript); a `{}` flat file IS
+  a legacy layout for `LoadProfile` (whole-command
+  refusal, exit 2); `show` on `{"profiles":{}}`
+  synthesises with 2 warnings (cookies missing + config
+  mode 0644, `profilecmd.go:348`); `rule_server` keyword
+  matches substrings; ipify "unexpected body" is only
+  for empty/whitespace bodies; DNS phase server/source
+  only on success; `state_corrupt` is `omitempty` (absent
+  when false); never-ticked `last_tick_outcome` is
+  `"never"` (`state.go:246`); `config migrate --write`
+  on an empty layout synthesises the `default` legacy
+  profile (verified live vs the Go binary); same-tag WG
+  sharing across two profiles IS an error (verified live:
+  Go exits 2 with the same message); `single_dns_detour`
+  returns the profile's own tag (a→proxy + b→sel has NO
+  single detour); `envProxyError` redacts URL userinfo
+  (`redact.String`); `validateTelegram` runs at parse
+  (`config.go:442`); the 4 stub-era `run.rs` tests now
+  assert wired migrate behaviour. The shared
+  pid-based `temp_home` also raced once migrate started
+  writing files — it is now unique per call.
+- Clippy (`--all-targets -- -D warnings`, rust 1.99.0 on
+  cue): 34 lints total, all in M7d files, all fixed as
+  suggested (collapsible ifs, redundant closures,
+  `field_reassign_with_default` struct literals,
+  `is_multiple_of`, while-let, needless borrows, one
+  unused `mut` in a dnsvalidate test, plus 14 in
+  `castctl-cli`: a `type_complexity` return type factored
+  into a module-level `ReloginParts` alias — a `type`
+  alias inside the `impl` block would be an unstable
+  inherent associated type, so it lives at module scope
+  — one `question_mark`, collapsible ifs, two identical
+  outcome arms merged into one
+  (`OUTCOME_TRANSIENT_ERROR || OUTCOME_ERROR`, bodies
+  were textually identical), doc-list indentation, one
+  needless borrow). The `cargo fmt` pass after the
+  alias collapsed `wire_relogin`'s signature to one
+  line. One clippy round exposed a gate-hygiene gap,
+  not a code bug: the final gate re-ran without
+  `CASTCTL_TEST_GO`, so `loader_live` (pluginhost,
+  untouched by M7d) failed 22/22 on the bare `go`
+  1.26.8 wrapper (`GOTOOLCHAIN=local`); with
+  `CASTCTL_TEST_GO=/usr/local/go/bin/go` the suite
+  passes and the full run is green — see §M7d.5.
+
+### M7d.5 Gates (cue, 2026-11-06)
+
+- Baseline at `682df84`: test 1471/0 (M7c gates).
+- SPDX: `ok github.com/thoitiettxl-cyber/castctl 0.047s`
+  (via `/usr/local/go/bin/go`; bare `go` is 1.26.8).
+- fmt: 0; build: 0; test: **1570/0** (66 suites);
+  clippy: 0 (`--workspace --all-targets -- -D warnings`,
+  rust 1.99.0 on cue; 19 lints in `castctl-config` +
+  1 unused-mut + 14 in `castctl-cli`, all fixed as
+  suggested — see §M7d.4).
+- `grep -c 'stub(ctx)' rust/castctl-cli/src/run.rs` = 6
+  (618 history --download, 626 fallthrough, 804 update,
+  868/883/918 auth).
+- `git diff --stat`: only `rust/` + `docs/provenance.md`
+  (NOTICE unchanged — no new crate entered the lockfile;
+  `Cargo.lock` diff is dependency edges only).
+- Live parity probes on cue (Go 0.9.0 binary vs Rust
+  debug binary, temp dirs only, fake credentials only):
+  `telegram run` fake-token 401 byte-identical (exit 1);
+  `--outbound-from-env` marshal bytes byte-identical
+  (exit 0; node_id random both sides);
+  dangling-detour double `profile: ` prefix
+  byte-identical (exit 2); `profile test` direct-outbound
+  DNS success (`server: castctl-doh`, `source: default`,
+  exit 3 on the cookies-missing HTTPS phase, stderr text
+  identical — resolved IPs differ by DNS rotation);
+  `profile list` on a same-tag WG-sharing config exits 2
+  with the identical sharing message (Go); `config
+  migrate --write` on an empty layout byte-identical
+  shape (synthesised `default` legacy profile).
+
+### M7d.6 Chưa kiểm chứng
+
+- profile-test full success (gateway phase needs a valid
+  session + cookies).
+- keeper check/run healthy path; keeper re-export /
+  headless re-login (needs running Chrome + real account).
+- `telegram run` poll-loop (`Start`) error text vs Go
+  (construction path now matches; poll path unprobed).
+- `telegram run` live polling with a real token (never
+  with a fake token beyond getMe).

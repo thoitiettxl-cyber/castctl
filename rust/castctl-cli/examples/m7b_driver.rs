@@ -44,7 +44,7 @@ use castctl_config::gostr::go_quote;
 use castctl_config::profile::Profile;
 use castctl_gateway::dial::dial_gateway;
 use castctl_gateway::shared::{Connector, SharedConn};
-use castctl_transport::{DirectDialer, HttpClient, RouteTable, TransportError};
+use castctl_transport::{Dialer, DirectDialer, HttpClient, RouteTable, TransportError};
 
 /// Fake connector: dial the scripted server once per
 /// `connect()` with the canned fake token, exactly as the
@@ -183,8 +183,9 @@ async fn main() {
         ..Default::default()
     };
 
-    let http = HttpClient::new(Arc::new(DirectDialer::new()));
-    let mut rt = Runtime::new(profile, http, Arc::clone(&shared));
+    let dialer: Arc<dyn Dialer> = Arc::new(DirectDialer::new());
+    let http = HttpClient::new(Arc::clone(&dialer));
+    let mut rt = Runtime::new(profile, dialer, http, Arc::clone(&shared));
     rt.http_base = format!("http://{}", args.http_addr);
 
     let parser = ArgParser {

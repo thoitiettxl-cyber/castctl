@@ -1,0 +1,18 @@
+{
+  "default_profile": "default",
+  "profiles": {
+    "default": {
+      "cookies_file": "/tmp/m7d-probes/legacy-src/cookies.txt",
+      "vm_id": "FAKE-VM",
+      "node_id": "MAIN-NODE",
+      "auto_approve": "always",
+      "auto_allow_once": false
+    },
+    "muse01": {
+      "cookies_file": "/tmp/m7d-probes/legacy-src/profiles/muse01/cookies.txt",
+      "node_id": "MUSE01-NODE",
+      "auto_approve": "off",
+      "auto_allow_once": false
+    }
+  }
+}

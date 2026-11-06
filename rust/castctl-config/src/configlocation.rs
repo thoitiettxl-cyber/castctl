@@ -47,8 +47,11 @@ pub type Getenv<'a> = Option<&'a dyn Fn(&str) -> Option<String>>;
 
 /// Read one variable through `getenv`, or the process environment
 /// when `getenv` is `None` (Go `configLookupEnv`). See the
-/// `Getenv` convention above.
-pub(crate) fn config_lookup_env(getenv: Getenv<'_>, key: &str) -> Option<String> {
+/// `Getenv` convention above. Public because the CLI reads
+/// `CASTCTL_PROFILE` / `MUSE_NODE_ID` through the same seam
+/// (profilecmd, telegramcmd); it takes no secrets and
+/// returns the raw value.
+pub fn config_lookup_env(getenv: Getenv<'_>, key: &str) -> Option<String> {
     match getenv {
         Some(getenv) => getenv(key),
         None => std::env::var_os(key).map(|v| v.to_string_lossy().into_owned()),

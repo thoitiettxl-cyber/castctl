@@ -9,6 +9,15 @@ description = "Single-file config parse/validate/render and profile resolution p
 [dependencies]
 # libc (flock) and sha2 (sha256 guard) are already pinned workspace
 # deps (libc via tokio-tungstenite, sha2 via honk-outbound); promoting
-# them here adds no new crate (M7b, toggle writer).
+# them here adds no new crate (M7b, toggle writer). rand is the
+# workspace-pinned RNG for node_id generation (M7d).
 libc = { workspace = true }
+rand = { workspace = true }
 sha2 = { workspace = true }
+# castctl-log-redact carries the exact Go 43-key secret set
+# (internal/redact/value.go:44) plus URL-userinfo redaction;
+# the ordered-JSON walk lives here, over JsonValue (M7d).
+# base64 is the workspace-pinned crate for canonical
+# WireGuard key comparison (M7d, dnsvalidate.rs).
+castctl-log-redact = { path = "../castctl-log-redact" }
+base64 = { workspace = true }
