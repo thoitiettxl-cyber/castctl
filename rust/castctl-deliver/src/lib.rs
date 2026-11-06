@@ -39,7 +39,6 @@ use std::error::Error;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use castctl_config::errors::ConfigError;
 use castctl_config::jsonvalue::{JsonValue, OrderedObject};

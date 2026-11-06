@@ -123,7 +123,7 @@ impl fmt::Debug for RedactedError {
 
 impl fmt::Display for RedactedError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&safe_string(self.inner.to_string()))
+        f.write_str(&safe_string(&self.inner.to_string()))
     }
 }
 
