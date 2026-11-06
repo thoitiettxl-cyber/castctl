@@ -25,7 +25,10 @@ pub use feed::{
     FeedRow, GoalRow, IdeaRow, feed_row_to_json, feed_rows, goal_row_to_json, goal_rows,
     idea_row_to_json, idea_rows,
 };
-pub use lenient_json::{Kind, LenientError, Parsed};
+pub use lenient_json::{
+    FirstError, Kind, LenientError, Parsed, apply_bool_field, apply_i64_field,
+    apply_raw_field, apply_str_field, go_fold_name,
+};
 pub use resources::{FileRow, Resource, event_resources, file_row_to_json, file_rows, local_name};
 pub use sessions::{SessionRow, session_row_to_json, session_rows};
 pub use status::{StatusSummary, status_summary_to_json, summarize_status};

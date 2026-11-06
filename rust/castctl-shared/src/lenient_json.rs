@@ -6,22 +6,42 @@
 //!
 //! Go's `json.Unmarshal` is lenient where `serde_json` is
 //! strict, and the M6c crates must match Go on untrusted
-//! input (fix loop 2, red-team R2-B1/B2/B3):
+//! input. The model is Go's `encoding/json` decoder
+//! itself (`decode.go:object`, `literalStore`, `saveError`,
+//! `fold.go:foldName`, `scanner.go:pushParseState`), NOT
+//! "last-wins + null is a no-op" — that fix-loop-2 model
+//! was WRONG (phase-3 round-3 R3-B1/B2/B3/B4) and is
+//! replaced here by sequential apply:
 //!
-//! - a JSON `null` is a no-op everywhere: a field, an
-//!   array element, or the whole document decodes to the
-//!   zero value (Go `encoding/json`: `null` unmarshals
-//!   into any Go value without effect);
-//! - duplicate keys are last-wins (Go keeps the last
-//!   occurrence; serde derive refuses with
-//!   `duplicate field`);
+//! - occurrences are applied IN DOCUMENT ORDER, one at
+//!   a time, each against the field it resolves to;
+//! - a key resolves to a field by EXACT match first,
+//!   then by case-insensitive match on the folded name
+//!   (Go `foldName`: ASCII letters fold to uppercase,
+//!   any other rune folds to the smallest rune in its
+//!   `unicode.SimpleFold` orbit — so Kelvin sign U+212A
+//!   folds to `K` and long-s U+017F folds to `S`, NOT
+//!   ASCII-only lowercase);
+//! - `null` is a no-op for SCALAR fields (string /
+//!   bool / int keep the previously applied value)
+//!   but RESETS pointer / slice fields to nil / empty
+//!   (Go `literalStore`: only Interface / Pointer /
+//!   Map / Slice are zeroed by `null`); a `RawMessage`
+//!   field keeps the last raw bytes INCLUDING the
+//!   literal `null` (Go `RawMessage.UnmarshalJSON`
+//!   copies the bytes verbatim);
+//! - a type error on ANY occurrence is saved (Go
+//!   `saveError`: the FIRST error only) and decoding
+//!   CONTINUES — the struct keeps whatever later
+//!   valid occurrences applied, but `Unmarshal`
+//!   still returns the saved error at the end;
 //! - invalid UTF-8 bytes inside a string are coerced to
 //!   U+FFFD, one per bad byte (Go `utf8.DecodeRune`
 //!   semantics — the same rule `castctl-pluginhost`
 //!   already uses in `text.rs::decode_rune`);
-//! - type errors still refuse: a string where Go wants
-//!   an int, a number where Go wants a bool, and so on
-//!   are decode errors, exactly like Go.
+//! - nesting depth is capped at 10000 containers
+//!   inclusive (Go `scanner.go:maxNestingDepth`);
+//!   the 10001st open container is a syntax error.
 //!
 //! This cannot be a serde `Deserialize` impl:
 //! `serde_json::from_slice` validates UTF-8 for the
@@ -34,9 +54,10 @@
 //! The scanner is iterative (explicit `Expect` state +
 //! a stack of open containers), never recursive, so a
 //! hostile deeply-nested value cannot exhaust the
-//! stack: Go accepts nesting to depth 10000 and so
-//! does this parser. Typed decoders built on top of
-//! it recurse only over known shallow shapes
+//! stack; the depth cap above is Go's, not a stack
+//! guard. Typed decoders built on top of it
+//! (`match_fields` + the `apply_*_field` helpers +
+//! `FirstError`) recurse only over known shallow shapes
 //! (envelope / release / asset / error objects).
 //!
 //! What this parser does NOT do: it keeps the raw byte
@@ -47,6 +68,11 @@
 //! pays for — or trips over — string decoding.
 
 use std::fmt;
+
+/// Go `encoding/json` `scanner.go:maxNestingDepth`:
+/// at most 10000 open containers, inclusive — the
+/// 10001st is `exceeded max depth`.
+const MAX_NESTING_DEPTH: usize = 10_000;
 
 /// The error of a lenient decode: a short message with
 /// a byte offset, never echoing input bytes (hostile
@@ -59,7 +85,13 @@ impl LenientError {
         LenientError(format!("invalid JSON at byte {pos}: {what}"))
     }
 
-    fn typed(what: &str) -> Self {
+    /// A type error (Go `cannot unmarshal`): the first
+    /// one saved wins the decode (see `FirstError`).
+    /// Public so typed decoders in other crates can
+    /// record a composite-field type error (e.g. an
+    /// object where a slice was expected) in the same
+    /// first-error slot as a scalar one.
+    pub fn typed(what: &str) -> Self {
         LenientError(format!("type error: {what}"))
     }
 }
@@ -217,16 +249,42 @@ impl<'a> Parsed<'a> {
         }
     }
 
-    /// The LAST occurrence of `name` in an object (Go
-    /// last-wins), or `None` when absent. Duplicate
-    /// keys never error.
-    pub fn field(&self, name: &str) -> Result<Option<Parsed<'a>>, LenientError> {
-        Ok(self
-            .fields()?
-            .into_iter()
-            .rev()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v))
+    /// Every occurrence of a KNOWN field of this object,
+    /// in document order, as `(index into names, value)`.
+    /// A key resolves to a field the way Go's
+    /// `encoding/json` resolves it (`decode.go:object`):
+    /// exact match against the whole field set first,
+    /// then case-insensitive match on the folded name
+    /// (`go_fold_name`) — again against the whole set,
+    /// first field wins on a fold collision. Unknown
+    /// keys are skipped (Go skips their values without
+    /// a type error). One pass over the object: callers
+    /// that apply occurrences sequentially call this
+    /// once, never `fields()` in a loop.
+    ///
+    /// This is the shared sequential-apply entry point
+    /// (fix loop 3, R3-B1/B2/B3): typed decoders iterate
+    /// the returned occurrences in order and apply each
+    /// one with the `apply_*_field` helpers, recording
+    /// the first type error in a `FirstError`.
+    pub fn match_fields(
+        &self,
+        names: &[&str],
+    ) -> Result<Vec<(usize, Parsed<'a>)>, LenientError> {
+        let folded: Vec<String> = names.iter().map(|n| go_fold_name(n)).collect();
+        let mut out = Vec::new();
+        for (key, value) in self.fields()? {
+            if let Some(idx) = names.iter().position(|n| *n == key) {
+                out.push((idx, value));
+            } else if let Some(idx) = folded
+                .iter()
+                .position(|f| *f == go_fold_name(&key))
+            {
+                out.push((idx, value));
+            }
+            // Else unknown: skipped, like Go.
+        }
+        Ok(out)
     }
 
     /// The elements of an array, in order. A `null`
@@ -261,6 +319,189 @@ impl<'a> Parsed<'a> {
     }
 }
 
+/// Go `encoding/json` `foldName` (`fold.go`): the
+/// folded name of `s`, such that `go_fold_name(x) ==
+/// go_fold_name(y)` exactly when Go considers `x` and
+/// `y` equal case-insensitively. ASCII letters fold
+/// to uppercase; any other rune folds to the smallest
+/// rune in its `unicode.SimpleFold` orbit
+/// (`foldRune`).
+///
+/// The orbit minimum is found by walking the
+/// single-char lower/upper neighbours of each rune
+/// (Go's orbit is generated by case mappings; a
+/// multi-char mapping such as `ß` → `SS` is NOT a
+/// simple fold, so it contributes no neighbour and
+/// `ß` folds to itself, like Go). Pinned by
+/// `fold_match_is_go_foldname`: ASCII, Kelvin sign
+/// U+212A → `K`, long-s U+017F → `S`.
+#[must_use]
+pub fn go_fold_name(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        out.push(go_fold_rune(c));
+    }
+    out
+}
+
+/// Go `encoding/json` `foldRune` (`fold.go`): the
+/// smallest rune in the `unicode.SimpleFold` orbit of
+/// `r`. ASCII letters fold to uppercase; any other
+/// rune folds to the orbit minimum found by the walk
+/// in `go_fold_name`.
+fn go_fold_rune(r: char) -> char {
+    if r.is_ascii() {
+        return r.to_ascii_uppercase();
+    }
+    // BFS over the orbit via single-char case
+    // neighbours; the orbit is tiny (≤ 4 runes in
+    // Unicode data), the visited cap is a belt-and-
+    // braces bound, never reached in practice.
+    let mut best = r;
+    let mut seen: Vec<char> = vec![r];
+    let mut stack: Vec<char> = vec![r];
+    while let Some(x) = stack.pop() {
+        if x < best {
+            best = x;
+        }
+        if seen.len() >= 16 {
+            break;
+        }
+        for next in [single_lower(x), single_upper(x)] {
+            if let Some(n) = next
+                && !seen.contains(&n)
+            {
+                seen.push(n);
+                stack.push(n);
+            }
+        }
+    }
+    best
+}
+
+/// The single-char lowercase of `c`, or `None` when
+/// the lowercase mapping is empty or multi-char (and
+/// therefore not a simple fold).
+fn single_lower(c: char) -> Option<char> {
+    let mut it = c.to_lowercase();
+    match (it.next(), it.next()) {
+        (Some(l), None) => Some(l),
+        _ => None,
+    }
+}
+
+/// The single-char uppercase of `c`, or `None` when
+/// the uppercase mapping is empty or multi-char (and
+/// therefore not a simple fold).
+fn single_upper(c: char) -> Option<char> {
+    let mut it = c.to_uppercase();
+    match (it.next(), it.next()) {
+        (Some(u), None) => Some(u),
+        _ => None,
+    }
+}
+
+/// Go `encoding/json` `saveError` (`decode.go`):
+/// keeps the FIRST type error only; decoding
+/// continues and the saved error is returned at the
+/// end, even when a later occurrence applied cleanly
+/// (fix loop 3, R3-B3). Typed decoders record into
+/// this instead of returning on the first bad
+/// occurrence.
+#[derive(Debug, Default)]
+pub struct FirstError(pub Option<LenientError>);
+
+impl FirstError {
+    /// Record `err` unless an earlier error was
+    /// already saved (Go keeps the first).
+    pub fn record(&mut self, err: LenientError) {
+        if self.0.is_none() {
+            self.0 = Some(err);
+        }
+    }
+
+    /// Record the error of a single-occurrence apply,
+    /// if it failed.
+    pub fn record_result(&mut self, r: Result<(), LenientError>) {
+        if let Err(e) = r {
+            self.record(e);
+        }
+    }
+
+    /// Record an error produced by a nested decode,
+    /// if any.
+    pub fn record_opt(&mut self, err: Option<LenientError>) {
+        if let Some(e) = err {
+            self.record(e);
+        }
+    }
+
+    /// The saved error as an `Option`, for a nested
+    /// decode to hand up to its caller (the caller
+    /// records it and keeps applying).
+    #[must_use]
+    pub fn into_option(self) -> Option<LenientError> {
+        self.0
+    }
+
+    /// The saved error, if any — the decode refuses
+    /// with this even when later occurrences applied.
+    #[must_use]
+    pub fn into_result<T>(self, value: T) -> Result<T, LenientError> {
+        match self.0 {
+            Some(e) => Err(e),
+            None => Ok(value),
+        }
+    }
+}
+
+/// Apply one occurrence of a STRING field, Go
+/// `encoding/json` `literalStore` rules
+/// (`decode.go`): `null` is a no-op (the current
+/// value is kept — fix loop 3, R3-B2); a string sets
+/// it; anything else is a type error (returned, the
+/// slot untouched).
+pub fn apply_str_field(slot: &mut String, v: Parsed<'_>) -> Result<(), LenientError> {
+    if v.is_null() {
+        return Ok(());
+    }
+    *slot = v.as_str()?;
+    Ok(())
+}
+
+/// Apply one occurrence of a BOOL field: `null` is a
+/// no-op; a bool literal sets it; anything else is a
+/// type error.
+pub fn apply_bool_field(slot: &mut bool, v: Parsed<'_>) -> Result<(), LenientError> {
+    if v.is_null() {
+        return Ok(());
+    }
+    *slot = v.as_bool()?;
+    Ok(())
+}
+
+/// Apply one occurrence of an `i64` field: `null` is
+/// a no-op; a plain integer literal sets it
+/// (`1e3` / `1.0` / overflow refuse, like Go into
+/// `int64`); anything else is a type error.
+pub fn apply_i64_field(slot: &mut i64, v: Parsed<'_>) -> Result<(), LenientError> {
+    if v.is_null() {
+        return Ok(());
+    }
+    *slot = v.as_i64()?;
+    Ok(())
+}
+
+/// Apply one occurrence of a `RawMessage` field (the
+/// envelope `result`): EVERY occurrence sets the raw
+/// bytes, including the literal `null` (4 bytes) —
+/// Go `RawMessage.UnmarshalJSON` copies the bytes
+/// verbatim, and `null` into a `RawMessage` does NOT
+/// zero it. Never a type error.
+pub fn apply_raw_field(slot: &mut Option<Vec<u8>>, v: Parsed<'_>) {
+    *slot = Some(v.as_raw().to_vec());
+}
+
 /// What the scanner expects next. `Key` (after a comma
 /// in an object) must be a string — unlike `KeyOrEnd`
 /// (right after `{`) it does not accept `}`: a trailing
@@ -277,13 +518,13 @@ enum Expect {
 
 /// Skip JSON whitespace (`space`, `\t`, `\n`, `\r`
 /// only — Go's `encoding/json` accepts no other
-/// whitespace). Errors on end of input.
+/// whitespace). Returns the first non-whitespace
+/// position, which may be `input.len()` (end of
+/// input); callers treat that as "unexpected end of
+/// input" via `.get(pos)`.
 fn skip_ws(input: &[u8], mut pos: usize) -> Result<usize, LenientError> {
     while pos < input.len() && matches!(input[pos], b' ' | b'\t' | b'\n' | b'\r') {
         pos += 1;
-    }
-    if pos > input.len() {
-        return Err(LenientError::at(pos, "unexpected end of input"));
     }
     Ok(pos)
 }
@@ -292,8 +533,10 @@ fn skip_ws(input: &[u8], mut pos: usize) -> Result<usize, LenientError> {
 /// value starting at or after `start` (leading
 /// whitespace skipped). Iterative: an explicit stack
 /// of open containers (`b'{'` / `b'['`), so nesting
-/// depth is bounded only by input length, never by
-/// the call stack.
+/// depth is bounded by Go's `maxNestingDepth`
+/// (10000, inclusive — the 10001st open container
+/// errors `exceeded max depth`, like Go's scanner),
+/// never by the call stack.
 fn value_span(input: &[u8], start: usize) -> Result<(usize, usize), LenientError> {
     let mut stack: Vec<u8> = Vec::new();
     let mut expect = Expect::Value;
@@ -323,12 +566,18 @@ fn value_span(input: &[u8], start: usize) -> Result<(usize, usize), LenientError
                     }
                     b'{' => {
                         stack.push(b'{');
+                        if stack.len() > MAX_NESTING_DEPTH {
+                            return Err(LenientError::at(pos, "exceeded max depth"));
+                        }
                         pos += 1;
                         expect = Expect::KeyOrEnd;
                         continue;
                     }
                     b'[' => {
                         stack.push(b'[');
+                        if stack.len() > MAX_NESTING_DEPTH {
+                            return Err(LenientError::at(pos, "exceeded max depth"));
+                        }
                         pos += 1;
                         expect = Expect::ValueOrEnd;
                         continue;
@@ -681,6 +930,20 @@ mod tests {
         Parsed::parse_document(input).unwrap()
     }
 
+    /// The value of the LAST occurrence of `name`
+    /// (exact or fold match) — the value Go's
+    /// sequential apply leaves in the slot when every
+    /// occurrence is valid. Test helper only; typed
+    /// decoders use `match_fields` + `apply_*_field`
+    /// and must NOT read a field through this.
+    fn last_occurrence<'a>(d: &Parsed<'a>, name: &str) -> Option<Parsed<'a>> {
+        d.match_fields(&[name])
+            .unwrap()
+            .into_iter()
+            .last()
+            .map(|(_, v)| v)
+    }
+
     #[test]
     fn document_null_is_a_value() {
         let d = doc(b"null");
@@ -689,11 +952,124 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_keys_are_last_wins() {
+    fn sequential_occurrences_keep_document_order() {
+        // Duplicate keys apply in document order; with
+        // only valid occurrences the last one wins.
         let d = doc(br#"{"a":1,"a":2,"b":"x","b":"y"}"#);
-        assert_eq!(d.field("a").unwrap().unwrap().as_i64().unwrap(), 2);
-        assert_eq!(d.field("b").unwrap().unwrap().as_str().unwrap(), "y");
+        assert_eq!(last_occurrence(&d, "a").unwrap().as_i64().unwrap(), 2);
+        assert_eq!(last_occurrence(&d, "b").unwrap().as_str().unwrap(), "y");
         assert_eq!(d.fields().unwrap().len(), 4);
+        // ... and `match_fields` reports every
+        // occurrence, in order, not just the last.
+        let occ = d.match_fields(&["a", "b"]).unwrap();
+        assert_eq!(occ.len(), 4);
+        assert_eq!(occ[0].0, 0);
+        assert_eq!(occ[1].0, 0);
+        assert_eq!(occ[2].0, 1);
+        assert_eq!(occ[3].0, 1);
+        assert_eq!(occ[1].1.as_i64().unwrap(), 2);
+        // A key spelled with an escape resolves to the
+        // same field (technical F-4): the escaped
+        // duplicate is a second occurrence, last wins.
+        let d = doc(br#"{"tag_name":"a","tag_\u006eame":"b"}"#);
+        let occ = d.match_fields(&["tag_name"]).unwrap();
+        assert_eq!(occ.len(), 2);
+        assert_eq!(occ[1].1.as_str().unwrap(), "b");
+    }
+
+    #[test]
+    fn fold_match_is_go_foldname() {
+        // Go `foldName` (fold.go): ASCII letters fold
+        // to uppercase; Kelvin sign U+212A folds to
+        // `K`, long-s U+017F folds to `S`.
+        assert_eq!(go_fold_name("ok"), "OK");
+        assert_eq!(go_fold_name("Ok"), "OK");
+        assert_eq!(go_fold_name("o\u{212a}"), "OK");
+        assert_eq!(go_fold_name("\u{17f}ize"), "SIZE");
+        assert_eq!(go_fold_name("tag_name"), "TAG_NAME");
+        // `ß` has no simple fold: it folds to itself,
+        // NOT to `SS` (the multi-char uppercase is not
+        // a simple fold).
+        assert_eq!(go_fold_name("\u{df}"), "\u{df}");
+        // Exact match wins over fold match: a key that
+        // is exactly `ok` resolves to `ok` even when a
+        // fold-only field is listed first.
+        let d = doc(br#"{"ok":true}"#);
+        let occ = d.match_fields(&["OK", "ok"]).unwrap();
+        assert_eq!(occ.len(), 1);
+        assert_eq!(occ[0].0, 1);
+        // Fold-only keys resolve in document order.
+        let d = doc("{\"OK\":true,\"Ok\":false}".as_bytes());
+        let occ = d.match_fields(&["ok"]).unwrap();
+        assert_eq!(occ.len(), 2);
+        assert!(occ[0].1.as_bool().unwrap());
+        assert!(!occ[1].1.as_bool().unwrap());
+        // Kelvin-sign and long-s keys fold-match.
+        let d = doc("{\"o\u{212a}\":false}".as_bytes());
+        assert_eq!(d.match_fields(&["ok"]).unwrap().len(), 1);
+        let d = doc("{\"\u{17f}ize\":7}".as_bytes());
+        let occ = d.match_fields(&["size"]).unwrap();
+        assert_eq!(occ.len(), 1);
+        assert_eq!(occ[0].1.as_i64().unwrap(), 7);
+    }
+
+    #[test]
+    fn sequential_apply_first_type_error_wins() {
+        // Go `saveError`: a type error on a non-last
+        // occurrence is saved and refuses at the end
+        // even when a later occurrence is valid — but
+        // the later valid value IS applied to the slot
+        // (R3-B3).
+        let d = doc(br#"{"tag":123,"tag":"v0.6.4"}"#);
+        let occ = d.match_fields(&["tag"]).unwrap();
+        let mut slot = String::new();
+        let mut first = FirstError::default();
+        for (_, v) in occ {
+            first.record_result(apply_str_field(&mut slot, v));
+        }
+        assert_eq!(slot, "v0.6.4");
+        assert!(first.into_result(()).is_err());
+        // `null` on a scalar is a no-op (R3-B2): the
+        // previously applied value survives.
+        let d = doc(br#"{"tag":"v0.6.4","tag":null}"#);
+        let occ = d.match_fields(&["tag"]).unwrap();
+        let mut slot = String::new();
+        let mut first = FirstError::default();
+        for (_, v) in occ {
+            first.record_result(apply_str_field(&mut slot, v));
+        }
+        assert_eq!(slot, "v0.6.4");
+        assert!(first.into_result(()).is_ok());
+        // A type error on the LAST occurrence refuses
+        // too, and the slot keeps the earlier value.
+        let d = doc(br#"{"tag":"v0.6.4","tag":123}"#);
+        let occ = d.match_fields(&["tag"]).unwrap();
+        let mut slot = String::new();
+        let mut first = FirstError::default();
+        for (_, v) in occ {
+            first.record_result(apply_str_field(&mut slot, v));
+        }
+        assert_eq!(slot, "v0.6.4");
+        assert!(first.into_result(()).is_err());
+        // `null` first, valid later: applies normally.
+        let d = doc(br#"{"ok":null,"ok":true}"#);
+        let occ = d.match_fields(&["ok"]).unwrap();
+        let mut slot = false;
+        let mut first = FirstError::default();
+        for (_, v) in occ {
+            first.record_result(apply_bool_field(&mut slot, v));
+        }
+        assert!(slot);
+        assert!(first.into_result(()).is_ok());
+        // RawMessage keeps the last raw bytes including
+        // literal `null`.
+        let d = doc(br#"{"result":2,"result":null}"#);
+        let occ = d.match_fields(&["result"]).unwrap();
+        let mut slot: Option<Vec<u8>> = None;
+        for (_, v) in occ {
+            apply_raw_field(&mut slot, v);
+        }
+        assert_eq!(slot.as_deref(), Some(b"null".as_slice()));
     }
 
     #[test]
@@ -701,7 +1077,7 @@ mod tests {
         // One 0xFF byte -> one U+FFFD.
         let d = doc(b"{\"s\":\"a\xffb\"}");
         assert_eq!(
-            d.field("s").unwrap().unwrap().as_str().unwrap(),
+            last_occurrence(&d, "s").unwrap().as_str().unwrap(),
             "a\u{FFFD}b"
         );
         // Truncated 2-byte sequence [E2, 82] -> TWO U+FFFD
@@ -710,39 +1086,39 @@ mod tests {
         // this parser does not use it).
         let d = doc(b"{\"s\":\"\xe2\x82\"}");
         assert_eq!(
-            d.field("s").unwrap().unwrap().as_str().unwrap(),
+            last_occurrence(&d, "s").unwrap().as_str().unwrap(),
             "\u{FFFD}\u{FFFD}"
         );
         // Valid multi-byte stays intact.
         let d = doc("{\"s\":\"caf\u{e9}\"}".as_bytes());
         assert_eq!(
-            d.field("s").unwrap().unwrap().as_str().unwrap(),
+            last_occurrence(&d, "s").unwrap().as_str().unwrap(),
             "caf\u{e9}"
         );
         // A genuine U+FFFD (EF BF BD) stays one char.
         let d = doc(b"{\"s\":\"\xef\xbf\xbd\"}");
-        assert_eq!(d.field("s").unwrap().unwrap().as_str().unwrap(), "\u{FFFD}");
+        assert_eq!(last_occurrence(&d, "s").unwrap().as_str().unwrap(), "\u{FFFD}");
     }
 
     #[test]
     fn lone_surrogate_escapes_coerce() {
         let d = doc(br#"{"s":"\ud800"}"#);
-        assert_eq!(d.field("s").unwrap().unwrap().as_str().unwrap(), "\u{FFFD}");
+        assert_eq!(last_occurrence(&d, "s").unwrap().as_str().unwrap(), "\u{FFFD}");
         let d = doc(br#"{"s":"\ud800\udc00"}"#);
         assert_eq!(
-            d.field("s").unwrap().unwrap().as_str().unwrap(),
+            last_occurrence(&d, "s").unwrap().as_str().unwrap(),
             "\u{10000}"
         );
         let d = doc("{\"s\":\"Aé\"}".as_bytes());
-        assert_eq!(d.field("s").unwrap().unwrap().as_str().unwrap(), "A\u{e9}");
+        assert_eq!(last_occurrence(&d, "s").unwrap().as_str().unwrap(), "A\u{e9}");
     }
 
     #[test]
     fn type_errors_still_refuse() {
         let d = doc(br#"{"size":"x","tag":123,"ok":1}"#);
-        assert!(d.field("size").unwrap().unwrap().as_i64().is_err());
-        assert!(d.field("tag").unwrap().unwrap().as_str().is_err());
-        assert!(d.field("ok").unwrap().unwrap().as_bool().is_err());
+        assert!(last_occurrence(&d, "size").unwrap().as_i64().is_err());
+        assert!(last_occurrence(&d, "tag").unwrap().as_str().is_err());
+        assert!(last_occurrence(&d, "ok").unwrap().as_bool().is_err());
         assert!(doc(b"1e3").as_i64().is_err());
         assert!(doc(b"1.0").as_i64().is_err());
         assert!(doc(b"9223372036854775808").as_i64().is_err());
@@ -781,17 +1157,17 @@ mod tests {
     fn raw_spans_keep_bytes_verbatim() {
         let d = doc(br#"{"ok":true,"result":{"b":1,"a":2}}"#);
         assert_eq!(
-            d.field("result").unwrap().unwrap().as_raw(),
+            last_occurrence(&d, "result").unwrap().as_raw(),
             br#"{"b":1,"a":2}"#
         );
         let d = doc(b"{\"ok\":true,\"result\":\"a\xffb\"}");
-        assert_eq!(d.field("result").unwrap().unwrap().as_raw(), b"\"a\xffb\"");
+        assert_eq!(last_occurrence(&d, "result").unwrap().as_raw(), b"\"a\xffb\"");
         // Null stays 4 raw bytes, distinct from absent.
         let d = doc(br#"{"ok":true,"result":null}"#);
-        let r = d.field("result").unwrap().unwrap();
+        let r = last_occurrence(&d, "result").unwrap();
         assert!(r.is_null());
         assert_eq!(r.as_raw(), b"null");
-        assert!(doc(br#"{"ok":true}"#).field("result").unwrap().is_none());
+        assert!(last_occurrence(&doc(br#"{"ok":true}"#), "result").is_none());
     }
 
     #[test]
@@ -808,6 +1184,29 @@ mod tests {
             input.extend(std::iter::repeat_n(b'}', depth));
             let d = Parsed::parse_document(&input).unwrap();
             assert_eq!(d.kind(), Kind::Object);
+        }
+        // Boundary (fix loop 3, R3-B4 / NB-R3-5): Go
+        // `maxNestingDepth` is 10000 INCLUSIVE — total
+        // depth 10000 accepts, 10001 refuses — for
+        // objects AND arrays.
+        for (depth, ok) in [(9999, true), (10000, true), (10001, false)] {
+            for (open, close) in [(b'{', b'}'), (b'[', b']')] {
+                let mut input = Vec::new();
+                for _ in 0..depth {
+                    input.push(open);
+                    if open == b'{' {
+                        input.extend_from_slice(b"\"a\":");
+                    }
+                }
+                input.extend_from_slice(b"1");
+                input.extend(std::iter::repeat_n(close, depth));
+                let parsed = Parsed::parse_document(&input);
+                assert_eq!(
+                    parsed.is_ok(),
+                    ok,
+                    "depth {depth} with {open} must accept={ok}"
+                );
+            }
         }
         // ... nor does an unbalanced deep input hang or panic.
         let mut input = vec![b'['; 5000];
@@ -828,6 +1227,6 @@ mod tests {
     #[test]
     fn unknown_fields_with_bad_bytes_are_skipped() {
         let d = doc(b"{\"ok\":true,\"zzz\":\"a\xff\",\"zzz\":2}");
-        assert!(d.field("ok").unwrap().unwrap().as_bool().unwrap());
+        assert!(last_occurrence(&d, "ok").unwrap().as_bool().unwrap());
     }
 }

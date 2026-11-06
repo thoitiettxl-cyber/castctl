@@ -12,7 +12,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use castctl_shared::lenient_json::{Kind, Parsed};
+use castctl_shared::lenient_json::{
+    FirstError, Kind, LenientError, Parsed, apply_bool_field, apply_raw_field,
+    apply_str_field,
+};
 
 use crate::error::PluginHostError;
 
@@ -121,21 +124,29 @@ pub struct DecodedEnvelope {
 }
 
 /// Decode one response envelope with Go
-/// `encoding/json` leniency (fix loop 2, R2-B2/R2-B3),
+/// `encoding/json` leniency (fix loop 3, R3-B1/B2/B3),
 /// via the shared byte-level parser
-/// (`castctl_shared::lenient_json`):
+/// (`castctl_shared::lenient_json`): occurrences apply
+/// sequentially in document order, keys match exact
+/// first then Unicode-fold (`go_fold_name`), `null`
+/// is a no-op for the scalar `ok` but resets the
+/// pointer `error` to `None`, `result` keeps its raw
+/// bytes verbatim (Go `json.RawMessage`), and the
+/// FIRST type error on ANY occurrence is saved and
+/// refuses at the end even when a later occurrence
+/// is valid (Go `saveError`).
 ///
 /// - a missing `ok` is `false`; an explicit `null`
 ///   `ok` is `false` too (Go no-ops `null`);
 /// - a whole-document `null` decodes to the zero
 ///   envelope (Go no-ops it);
-/// - duplicate keys are last-wins, at every level;
 /// - invalid UTF-8 in strings coerces to U+FFFD
 ///   (Go `utf8.DecodeRune`), while `result` keeps
 ///   its raw bytes verbatim (Go `json.RawMessage`);
 /// - type errors still refuse (`"ok": "x"`,
 ///   `"error": {"code": 123}`), like Go's
-///   `cannot unmarshal` errors.
+///   `cannot unmarshal` errors — including a type
+///   error on a NON-LAST occurrence.
 ///
 /// The error is a short message (byte offset + what
 /// was expected, never input bytes); callers prefix
@@ -152,53 +163,65 @@ pub fn decode_envelope(input: &[u8]) -> Result<DecodedEnvelope, String> {
     if doc.kind() != Kind::Object {
         return Err("top-level value is not an object".to_string());
     }
-    let ok = match doc.field("ok").map_err(|e| e.to_string())? {
-        None => false,
-        Some(v) if v.is_null() => false,
-        Some(v) => v.as_bool().map_err(|e| format!("field 'ok': {e}"))?,
+    let mut env = DecodedEnvelope {
+        ok: false,
+        result: None,
+        error: None,
     };
-    let result = doc
-        .field("result")
+    let mut first = FirstError::default();
+    for (idx, v) in doc
+        .match_fields(&["ok", "result", "error"])
         .map_err(|e| e.to_string())?
-        .map(|v| v.as_raw().to_vec());
-    let error = match doc.field("error").map_err(|e| e.to_string())? {
-        None => None,
-        Some(v) if v.is_null() => None,
-        Some(v) => {
-            if v.kind() != Kind::Object {
-                return Err("field 'error': expected an object".to_string());
+    {
+        match idx {
+            0 => first.record_result(apply_bool_field(&mut env.ok, v)),
+            1 => apply_raw_field(&mut env.result, v),
+            _ => {
+                if v.is_null() {
+                    // Go `literalStore`: `null` zeroes
+                    // a pointer field — a previous error
+                    // object is reset (R3-B2).
+                    env.error = None;
+                } else if v.kind() != Kind::Object {
+                    first.record(LenientError::typed(
+                        "field 'error': expected an object",
+                    ));
+                } else {
+                    let (error, nested) =
+                        decode_plugin_error(&v).map_err(|e| e.to_string())?;
+                    env.error = Some(error);
+                    first.record_opt(nested);
+                }
             }
-            Some(PluginError {
-                code: lenient_string_field(&v, "code")?,
-                message: lenient_string_field(&v, "message")?,
-                retryable: lenient_bool_field(&v, "retryable")?,
-            })
         }
+    }
+    first.into_result(env).map_err(|e| e.to_string())
+}
+
+/// Decode one plugin error object, sequentially: the
+/// partial object plus the first type error, if any.
+/// The caller keeps applying later occurrences and
+/// refuses with the saved error at the end (Go
+/// `saveError` — a type error on a non-last `code`
+/// still refuses even when a later `code` is valid,
+/// R3-B3).
+fn decode_plugin_error(
+    obj: &Parsed<'_>,
+) -> Result<(PluginError, Option<LenientError>), LenientError> {
+    let mut error = PluginError {
+        code: String::new(),
+        message: String::new(),
+        retryable: false,
     };
-    Ok(DecodedEnvelope { ok, result, error })
-}
-
-/// A string field of a leniently decoded object:
-/// absent or `null` is `""` (Go zero value); a
-/// present string decodes lossily; anything else is
-/// a type error.
-fn lenient_string_field(obj: &Parsed<'_>, name: &str) -> Result<String, String> {
-    match obj.field(name).map_err(|e| e.to_string())? {
-        None => Ok(String::new()),
-        Some(v) if v.is_null() => Ok(String::new()),
-        Some(v) => v.as_str().map_err(|e| format!("field '{name}': {e}")),
+    let mut first = FirstError::default();
+    for (idx, v) in obj.match_fields(&["code", "message", "retryable"])? {
+        match idx {
+            0 => first.record_result(apply_str_field(&mut error.code, v)),
+            1 => first.record_result(apply_str_field(&mut error.message, v)),
+            _ => first.record_result(apply_bool_field(&mut error.retryable, v)),
+        }
     }
-}
-
-/// A bool field of a leniently decoded object:
-/// absent or `null` is `false`; anything else must
-/// be a bool literal.
-fn lenient_bool_field(obj: &Parsed<'_>, name: &str) -> Result<bool, String> {
-    match obj.field(name).map_err(|e| e.to_string())? {
-        None => Ok(false),
-        Some(v) if v.is_null() => Ok(false),
-        Some(v) => v.as_bool().map_err(|e| format!("field '{name}': {e}")),
-    }
+    Ok((error, first.into_option()))
 }
 
 /// Build a raw JSON value from a serialisable value.
@@ -684,6 +707,145 @@ mod tests {
             &b"{\"ok\":true,\"result\":1} trailing"[..],
         ] {
             assert!(decode_envelope(bad).is_err(), "must refuse {bad:?}");
+        }
+    }
+
+    /// Fix loop 3, R3-B1: Go matches keys
+    /// case-insensitively (exact first, then
+    /// `foldName` — Unicode simple-fold, NOT
+    /// ASCII-only lowercase), at EVERY level.
+    #[test]
+    fn decode_envelope_fold_keys_match_go() {
+        // Fold-key alone.
+        let env = decode_envelope(br#"{"OK":true,"result":2}"#).unwrap();
+        assert!(env.ok);
+        assert_eq!(env.result.as_deref(), Some(b"2".as_slice()));
+        let env = decode_envelope(br#"{"Ok":true,"result":2}"#).unwrap();
+        assert!(env.ok);
+        let env = decode_envelope(br#"{"ok":true,"RESULT":5}"#).unwrap();
+        assert_eq!(env.result.as_deref(), Some(b"5".as_slice()));
+        // Fold-key inside the nested `error` object.
+        let env = decode_envelope(
+            br#"{"ok":false,"ERROR":{"code":"boom","message":"m"}}"#,
+        )
+        .unwrap();
+        assert_eq!(env.error.as_ref().unwrap().code, "boom");
+        assert_eq!(env.error.as_ref().unwrap().message, "m");
+        let env = decode_envelope(
+            br#"{"ok":false,"error":{"CODE":"boom","MESSAGE":"m"}}"#,
+        )
+        .unwrap();
+        assert_eq!(env.error.as_ref().unwrap().code, "boom");
+        assert_eq!(env.error.as_ref().unwrap().message, "m");
+        let env = decode_envelope(
+            br#"{"ok":false,"error":{"code":"boom","message":"m","RETRYABLE":true}}"#,
+        )
+        .unwrap();
+        assert!(env.error.as_ref().unwrap().retryable);
+        // Kelvin sign U+212A folds to `k`.
+        let env = decode_envelope("{\"ok\":true,\"result\":1,\"o\u{212a}\":false}".as_bytes())
+            .unwrap();
+        assert!(!env.ok);
+        // Fold-key duplicated with the exact key, both
+        // orders: apply order decides (Go applies each
+        // occurrence in document order).
+        let env = decode_envelope(br#"{"ok":true,"OK":false}"#).unwrap();
+        assert!(!env.ok);
+        let env = decode_envelope(br#"{"OK":false,"ok":true}"#).unwrap();
+        assert!(env.ok);
+        // A fold-key that matches nothing is skipped.
+        let env = decode_envelope(br#"{"OK":true,"ZZZ":1,"result":1}"#).unwrap();
+        assert!(env.ok);
+    }
+
+    /// Fix loop 3, R3-B2: `null` as the LAST occurrence
+    /// of a duplicated key — Go no-ops it for scalar
+    /// fields (the previously applied value survives)
+    /// but RESETS the pointer `error` to nil.
+    #[test]
+    fn decode_envelope_null_last_keeps_scalars_resets_pointer() {
+        // Scalar `ok`: null-last keeps `true`.
+        let env = decode_envelope(br#"{"ok":true,"ok":null,"result":1}"#).unwrap();
+        assert!(env.ok);
+        assert_eq!(env.result.as_deref(), Some(b"1".as_slice()));
+        // Scalar `code` / `message` / `retryable`
+        // inside `error`: null-last keeps the value.
+        let env = decode_envelope(
+            br#"{"ok":false,"error":{"code":"boom","code":null,"message":"m"}}"#,
+        )
+        .unwrap();
+        assert_eq!(env.error.as_ref().unwrap().code, "boom");
+        let env = decode_envelope(
+            br#"{"ok":false,"error":{"code":"boom","message":"m","message":null}}"#,
+        )
+        .unwrap();
+        assert_eq!(env.error.as_ref().unwrap().message, "m");
+        let env = decode_envelope(
+            br#"{"ok":false,"error":{"code":"boom","message":"m","retryable":true,"retryable":null}}"#,
+        )
+        .unwrap();
+        assert!(env.error.as_ref().unwrap().retryable);
+        // Pointer `error`: null-last RESETS it.
+        let env = decode_envelope(
+            br#"{"ok":false,"error":{"code":"boom","message":"m"},"error":null}"#,
+        )
+        .unwrap();
+        assert!(env.error.is_none());
+        // Controls: null FIRST still applies the later
+        // valid occurrence; null-first on the pointer
+        // still applies the later object.
+        let env = decode_envelope(br#"{"ok":null,"ok":true,"result":1}"#).unwrap();
+        assert!(env.ok);
+        let env = decode_envelope(
+            br#"{"ok":false,"error":null,"error":{"code":"boom","message":"m"}}"#,
+        )
+        .unwrap();
+        assert_eq!(env.error.as_ref().unwrap().code, "boom");
+    }
+
+    /// Fix loop 3, R3-B3: a type error on a NON-LAST
+    /// occurrence is saved (Go `saveError`) and
+    /// refuses at the end even when a later occurrence
+    /// is valid — the struct keeps the later value,
+    /// but the decode still errors.
+    #[test]
+    fn decode_envelope_first_type_error_still_refuses() {
+        for bad in [
+            &br#"{"ok":"x","ok":true,"result":1}"#[..],
+            &br#"{"ok":false,"error":{"code":123,"code":"boom","message":"m"}}"#[..],
+            &br#"{"ok":false,"error":{"code":"boom","message":"m","retryable":"yes","retryable":true}}"#[..],
+            // Fold × type-error interaction.
+            &br#"{"OK":"x","ok":true,"result":1}"#[..],
+        ] {
+            assert!(decode_envelope(bad).is_err(), "must refuse {bad:?}");
+            assert!(!crate::host::is_error_envelope(bad));
+        }
+        // Control: a type error on the LAST occurrence
+        // still refuses (already pinned above).
+        assert!(decode_envelope(br#"{"ok":true,"ok":"x"}"#).is_err());
+    }
+
+    /// Fix loop 3, R3-B4: Go `maxNestingDepth` is
+    /// 10000 INCLUSIVE — total depth 10000 accepts,
+    /// 10001 refuses. The envelope object itself is
+    /// depth 1, so `result` nested 9999 deep is
+    /// total 10000 (accept) and 10000 deep is total
+    /// 10001 (refuse).
+    #[test]
+    fn decode_envelope_depth_cap_matches_go() {
+        for (arrays, ok) in [(9999, true), (10000, false)] {
+            let mut input = b"{\"ok\":true,\"result\":".to_vec();
+            input.extend(std::iter::repeat_n(b'[', arrays));
+            input.extend_from_slice(b"1");
+            input.extend(std::iter::repeat_n(b']', arrays));
+            input.extend_from_slice(b"}");
+            let decoded = decode_envelope(&input);
+            assert_eq!(
+                decoded.is_ok(),
+                ok,
+                "envelope result depth {arrays} (total {}) must accept={ok}",
+                arrays + 1
+            );
         }
     }
 

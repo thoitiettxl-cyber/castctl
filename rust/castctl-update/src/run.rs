@@ -42,7 +42,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use castctl_shared::lenient_json::{Kind, Parsed};
+use castctl_shared::lenient_json::{
+    FirstError, Kind, LenientError, Parsed, apply_bool_field, apply_i64_field,
+    apply_str_field,
+};
 
 use crate::checksums::parse_checksums;
 use crate::elf::validate_elf_file;
@@ -858,13 +861,18 @@ impl Result {
 }
 
 /// Decode a release body into [`ReleaseInfo`] with Go
-/// `encoding/json` leniency (fix loop 2, R2-B1/R2-B3):
-/// a whole-document `null` is the zero release, a
-/// `null` asset element is the zero asset, duplicate
-/// keys are last-wins, invalid UTF-8 in strings
-/// coerces to U+FFFD — and every type error refuses,
-/// so `fetch_release` still maps it to code-1
-/// `malformed`. See the comment in `fetch_release`.
+/// `encoding/json` leniency (fix loop 3, R3-B1/B2/B3):
+/// occurrences apply sequentially in document order,
+/// keys match exact first then Unicode-fold
+/// (`go_fold_name`), `null` is a no-op for the scalar
+/// `tag_name` / `draft` / `prerelease` but resets the
+/// slice `assets` to empty, a whole-document `null`
+/// is the zero release, a `null` asset element is the
+/// zero asset, invalid UTF-8 in strings coerces to
+/// U+FFFD — and the FIRST type error on ANY occurrence
+/// is saved and refuses (code-1 `malformed` via
+/// `fetch_release`) even when a later occurrence is
+/// valid. See the comment in `fetch_release`.
 fn decode_release(body: &[u8]) -> std::result::Result<ReleaseInfo, String> {
     let doc = Parsed::parse_document(body).map_err(|e| e.to_string())?;
     if doc.is_null() {
@@ -878,85 +886,109 @@ fn decode_release(body: &[u8]) -> std::result::Result<ReleaseInfo, String> {
     if doc.kind() != Kind::Object {
         return Err("top-level value is not an object".to_string());
     }
-    let tag = release_string_field(&doc, "tag_name")?;
-    let draft = release_bool_field(&doc, "draft")?;
-    let prerelease = release_bool_field(&doc, "prerelease")?;
-    let assets = match doc.field("assets").map_err(|e| e.to_string())? {
-        None => Vec::new(),
-        Some(v) if v.is_null() => Vec::new(),
-        Some(v) => {
-            let mut out = Vec::new();
-            for el in v.elements().map_err(|e| e.to_string())? {
-                out.push(decode_asset(&el)?);
-            }
-            out
-        }
+    let mut rel = ReleaseInfo {
+        tag: String::new(),
+        draft: false,
+        prerelease: false,
+        assets: Vec::new(),
     };
-    Ok(ReleaseInfo {
-        tag,
-        draft,
-        prerelease,
-        assets,
-    })
+    let mut first = FirstError::default();
+    for (idx, v) in doc
+        .match_fields(&["tag_name", "draft", "prerelease", "assets"])
+        .map_err(|e| e.to_string())?
+    {
+        match idx {
+            0 => first.record_result(apply_str_field(&mut rel.tag, v)),
+            1 => first.record_result(apply_bool_field(&mut rel.draft, v)),
+            2 => first.record_result(apply_bool_field(&mut rel.prerelease, v)),
+            _ => {
+                if v.is_null() {
+                    // Go `literalStore`: `null` zeroes
+                    // a slice field — previously applied
+                    // assets are reset (R3-B2).
+                    rel.assets = Vec::new();
+                } else if v.kind() != Kind::Array {
+                    first.record(LenientError::typed(
+                        "field 'assets': expected an array",
+                    ));
+                } else {
+                    let (assets, nested) =
+                        decode_assets(&v).map_err(|e| e.to_string())?;
+                    rel.assets = assets;
+                    first.record_opt(nested);
+                }
+            }
+        }
+    }
+    first.into_result(rel).map_err(|e| e.to_string())
 }
 
-/// Decode one asset element: `null` is the zero asset
-/// (Go no-ops it, so `[null, <valid>, ...]` still
-/// installs — R2-B1); anything else must be an object
-/// with Go-typed fields.
-fn decode_asset(el: &Parsed<'_>) -> std::result::Result<crate::select::ReleaseAsset, String> {
-    if el.is_null() {
-        return Ok(crate::select::ReleaseAsset {
-            name: String::new(),
-            url: String::new(),
-            size: 0,
-            state: String::new(),
-        });
+/// Decode the `assets` array, sequentially: each
+/// element decodes in order, a `null` element is the
+/// zero asset (Go no-ops it, so `[null, <valid>,
+/// ...]` still installs — R2-B1), a non-object element
+/// is a type error (recorded, the element stays the
+/// zero asset, decoding continues — Go `saveError`).
+/// Returns the assets plus the first type error, if
+/// any; the caller refuses with it at the end.
+fn decode_assets(
+    arr: &Parsed<'_>,
+) -> std::result::Result<(Vec<crate::select::ReleaseAsset>, Option<LenientError>), LenientError>
+{
+    let mut out = Vec::new();
+    let mut first = FirstError::default();
+    for el in arr.elements()? {
+        if el.is_null() {
+            out.push(zero_asset());
+            continue;
+        }
+        if el.kind() != Kind::Object {
+            first.record(LenientError::typed("asset element is not an object"));
+            out.push(zero_asset());
+            continue;
+        }
+        let (asset, nested) = decode_asset(&el)?;
+        out.push(asset);
+        first.record_opt(nested);
     }
-    if el.kind() != Kind::Object {
-        return Err("asset element is not an object".to_string());
-    }
-    Ok(crate::select::ReleaseAsset {
-        name: release_string_field(el, "name")?,
-        url: release_string_field(el, "browser_download_url")?,
-        size: release_i64_field(el, "size")?,
-        state: release_string_field(el, "state")?,
-    })
+    Ok((out, first.into_option()))
 }
 
-/// A string field of a leniently decoded release
-/// object: absent or `null` is `""` (Go zero value);
-/// a present string decodes lossily; anything else is
-/// a type error.
-fn release_string_field(obj: &Parsed<'_>, name: &str) -> std::result::Result<String, String> {
-    match obj.field(name).map_err(|e| e.to_string())? {
-        None => Ok(String::new()),
-        Some(v) if v.is_null() => Ok(String::new()),
-        Some(v) => v.as_str().map_err(|e| format!("field '{name}': {e}")),
-    }
-}
-
-/// A bool field of a leniently decoded release object:
-/// absent or `null` is `false`; anything else must be
-/// a bool literal.
-fn release_bool_field(obj: &Parsed<'_>, name: &str) -> std::result::Result<bool, String> {
-    match obj.field(name).map_err(|e| e.to_string())? {
-        None => Ok(false),
-        Some(v) if v.is_null() => Ok(false),
-        Some(v) => v.as_bool().map_err(|e| format!("field '{name}': {e}")),
+/// The zero asset: what Go leaves for a `null`
+/// element or an element whose decode failed with a
+/// type error.
+fn zero_asset() -> crate::select::ReleaseAsset {
+    crate::select::ReleaseAsset {
+        name: String::new(),
+        url: String::new(),
+        size: 0,
+        state: String::new(),
     }
 }
 
-/// An `i64` field of a leniently decoded release
-/// object: absent or `null` is `0`; a present number
-/// must be a plain integer literal (Go unmarshalling
-/// into `int64` refuses `1e3`/`1.0`/overflow).
-fn release_i64_field(obj: &Parsed<'_>, name: &str) -> std::result::Result<i64, String> {
-    match obj.field(name).map_err(|e| e.to_string())? {
-        None => Ok(0),
-        Some(v) if v.is_null() => Ok(0),
-        Some(v) => v.as_i64().map_err(|e| format!("field '{name}': {e}")),
+/// Decode one asset OBJECT, sequentially: the partial
+/// asset plus the first type error, if any. The caller
+/// keeps decoding later elements and refuses with the
+/// saved error at the end (Go `saveError` — a type
+/// error on a non-last `size` still refuses even when
+/// a later `size` is valid, R3-B3).
+fn decode_asset(
+    el: &Parsed<'_>,
+) -> std::result::Result<
+    (crate::select::ReleaseAsset, Option<LenientError>),
+    LenientError,
+> {
+    let mut asset = zero_asset();
+    let mut first = FirstError::default();
+    for (idx, v) in el.match_fields(&["name", "browser_download_url", "size", "state"])? {
+        match idx {
+            0 => first.record_result(apply_str_field(&mut asset.name, v)),
+            1 => first.record_result(apply_str_field(&mut asset.url, v)),
+            2 => first.record_result(apply_i64_field(&mut asset.size, v)),
+            _ => first.record_result(apply_str_field(&mut asset.state, v)),
+        }
     }
+    Ok((asset, first.into_option()))
 }
 
 /// The rate-limit error. Source: `rateLimitError`

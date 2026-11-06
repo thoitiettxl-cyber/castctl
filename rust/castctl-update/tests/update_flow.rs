@@ -1344,6 +1344,264 @@ fn release_json_type_errors_still_malformed() {
     }
 }
 
+/// The good release JSON (with `PLACEHOLDER*` markers
+/// for the server URLs and sizes, filled by
+/// `set_release_override`), shared by the fix-loop-3
+/// regression tests so each trigger is one line.
+const GOOD_RELEASE_TEMPLATE: &str = r#"{"tag_name":"v0.6.4","draft":false,"prerelease":false,"assets":[{"name":"castctl_0.6.4_linux_amd64.tar.gz","browser_download_url":"PLACEHOLDER","size":PLACEHOLDER_SIZE,"state":"uploaded"},{"name":"checksums.txt","browser_download_url":"PLACEHOLDER_SUMS","size":PLACEHOLDER_SUMS_SIZE,"state":"uploaded"}]}"#;
+
+/// Run the update flow once against a fake server
+/// serving `template` (with `PLACEHOLDER*` markers)
+/// as the release JSON; returns `(replaced, err,
+/// target_bytes, new_bytes)`.
+fn run_release_template(
+    template: &str,
+) -> (
+    bool,
+    std::result::Result<(), castctl_update::error::UpdateError>,
+    Vec<u8>,
+    Vec<u8>,
+) {
+    let work = tempfile::tempdir().unwrap();
+    let (server, new_bytes) = standard_server(work.path());
+    set_release_override(&server, template);
+    let (_tmp, target) = make_target(work.path(), "0.6.3");
+    let (opts, _out) = base_opts(&target, &server);
+    let (res, err) = run(opts);
+    let target_bytes = std::fs::read(&target).unwrap_or_default();
+    (res.replaced, err, target_bytes, new_bytes)
+}
+
+/// Fix loop 3, R3-B1: Go matches release/asset keys
+/// case-insensitively (exact first, then `foldName`),
+/// so a fold-spelled release installs exactly when
+/// Go installs it — including draft / prerelease /
+/// not-uploaded releases Go refuses.
+#[test]
+fn release_json_fold_keys_match_go() {
+    // Fold-spelled tag installs.
+    let (replaced, err, target_bytes, new_bytes) =
+        run_release_template(&GOOD_RELEASE_TEMPLATE.replace("tag_name", "TAG_NAME"));
+    assert!(err.is_ok(), "fold tag must install: {:?}", err.err());
+    assert!(replaced);
+    assert_eq!(target_bytes, new_bytes);
+    // Fold-spelled draft refuses (code 2, not install).
+    let template = GOOD_RELEASE_TEMPLATE
+        .replace("\"draft\":false", "\"DRAFT\":true");
+    let (_replaced, err, _, _) = run_release_template(&template);
+    let err = err.expect_err("fold draft must refuse");
+    assert_eq!(err.code(), 2);
+    assert_eq!(
+        err.to_string(),
+        "update: the latest release is not a stable release; refusing to install it"
+    );
+    // Fold-spelled prerelease refuses.
+    let template = GOOD_RELEASE_TEMPLATE
+        .replace("\"prerelease\":false", "\"PRERELEASE\":true");
+    let (_replaced, err, _, _) = run_release_template(&template);
+    let err = err.expect_err("fold prerelease must refuse");
+    assert_eq!(err.code(), 2);
+    // Fold-spelled ASSETS installs.
+    let (replaced, err, target_bytes, new_bytes) =
+        run_release_template(&GOOD_RELEASE_TEMPLATE.replace("assets", "ASSETS"));
+    assert!(err.is_ok(), "fold assets must install: {:?}", err.err());
+    assert!(replaced);
+    assert_eq!(target_bytes, new_bytes);
+    // Fold-spelled asset fields install (name, url,
+    // size, state all upper-case).
+    let template = GOOD_RELEASE_TEMPLATE
+        .replace("\"name\"", "\"NAME\"")
+        .replace("\"browser_download_url\"", "\"BROWSER_DOWNLOAD_URL\"")
+        .replace("\"size\"", "\"SIZE\"")
+        .replace("\"state\"", "\"STATE\"");
+    let (replaced, err, target_bytes, new_bytes) = run_release_template(&template);
+    assert!(err.is_ok(), "fold asset fields must install: {:?}", err.err());
+    assert!(replaced);
+    assert_eq!(target_bytes, new_bytes);
+    // Fold-spelled asset state `draft` refuses: the
+    // asset is not uploaded (Go reads the state).
+    let template = GOOD_RELEASE_TEMPLATE.replace(
+        "\"state\":\"uploaded\"",
+        "\"STATE\":\"draft\"",
+    );
+    let (_replaced, err, _, _) = run_release_template(&template);
+    let err = err.expect_err("fold draft state must refuse");
+    assert_eq!(err.code(), 2);
+    assert_eq!(
+        err.to_string(),
+        "update: the matching release asset is not uploaded"
+    );
+    // Long-s U+017F folds to `s`: `ſize` is the size.
+    let template = GOOD_RELEASE_TEMPLATE.replace("\"size\"", "\"\u{17f}ize\"");
+    let (replaced, err, target_bytes, new_bytes) = run_release_template(&template);
+    assert!(err.is_ok(), "long-s size must install: {:?}", err.err());
+    assert!(replaced);
+    assert_eq!(target_bytes, new_bytes);
+}
+
+/// Fix loop 3, R3-B2: `null` as the LAST occurrence
+/// of a duplicated key — Go no-ops it for scalar
+/// fields (the previously applied value survives)
+/// but RESETS the slice `assets` to empty.
+#[test]
+fn release_json_null_last_keeps_scalars_resets_slice() {
+    // Scalar tag: null-last keeps `v0.6.4` -> install.
+    let template = GOOD_RELEASE_TEMPLATE.replace(
+        "\"tag_name\":\"v0.6.4\"",
+        "\"tag_name\":\"v0.6.4\",\"tag_name\":null",
+    );
+    let (replaced, err, target_bytes, new_bytes) = run_release_template(&template);
+    assert!(err.is_ok(), "null-last tag must install: {:?}", err.err());
+    assert!(replaced);
+    assert_eq!(target_bytes, new_bytes);
+    // Scalar draft: null-last keeps `true` -> code 2
+    // not-stable (must NOT install).
+    let template = GOOD_RELEASE_TEMPLATE.replace(
+        "\"draft\":false",
+        "\"draft\":true,\"draft\":null",
+    );
+    let (_replaced, err, _, _) = run_release_template(&template);
+    let err = err.expect_err("null-last draft must refuse");
+    assert_eq!(err.code(), 2);
+    assert_eq!(
+        err.to_string(),
+        "update: the latest release is not a stable release; refusing to install it"
+    );
+    // Scalar prerelease: null-last keeps `true`.
+    let template = GOOD_RELEASE_TEMPLATE.replace(
+        "\"prerelease\":false",
+        "\"prerelease\":true,\"prerelease\":null",
+    );
+    let (_replaced, err, _, _) = run_release_template(&template);
+    let err = err.expect_err("null-last prerelease must refuse");
+    assert_eq!(err.code(), 2);
+    // Asset size: null-last keeps the size -> install.
+    let template = GOOD_RELEASE_TEMPLATE.replace(
+        "\"size\":PLACEHOLDER_SIZE",
+        "\"size\":PLACEHOLDER_SIZE,\"size\":null",
+    );
+    let (replaced, err, target_bytes, new_bytes) = run_release_template(&template);
+    assert!(err.is_ok(), "null-last size must install: {:?}", err.err());
+    assert!(replaced);
+    assert_eq!(target_bytes, new_bytes);
+    // Asset name: null-last keeps the name -> install.
+    let template = GOOD_RELEASE_TEMPLATE.replace(
+        "\"name\":\"castctl_0.6.4_linux_amd64.tar.gz\"",
+        "\"name\":\"castctl_0.6.4_linux_amd64.tar.gz\",\"name\":null",
+    );
+    let (replaced, err, target_bytes, new_bytes) = run_release_template(&template);
+    assert!(err.is_ok(), "null-last name must install: {:?}", err.err());
+    assert!(replaced);
+    assert_eq!(target_bytes, new_bytes);
+    // Slice `assets`: null-last RESETS it -> code 2
+    // no-match. (`}}` in the format string is one
+    // literal `}`; the base is the template minus its
+    // final `}`.)
+    let base = &GOOD_RELEASE_TEMPLATE[..GOOD_RELEASE_TEMPLATE.len() - 1];
+    let template = format!("{base},\"assets\":null}}");
+    let (_replaced, err, _, _) = run_release_template(&template);
+    let err = err.expect_err("null-last assets must refuse");
+    assert_eq!(err.code(), 2);
+    assert_eq!(
+        err.to_string(),
+        "update: no release asset matches this platform and build flavour"
+    );
+    // Controls: null FIRST still installs / resets.
+    let template = GOOD_RELEASE_TEMPLATE.replace(
+        "\"tag_name\":\"v0.6.4\"",
+        "\"tag_name\":null,\"tag_name\":\"v0.6.4\"",
+    );
+    let (replaced, err, _, _) = run_release_template(&template);
+    assert!(err.is_ok(), "null-first tag must install: {:?}", err.err());
+    assert!(replaced);
+    let template = GOOD_RELEASE_TEMPLATE
+        .replacen("\"assets\":", "\"assets\":null,\"assets\":", 1);
+    let (replaced, err, _, _) = run_release_template(&template);
+    assert!(err.is_ok(), "null-first assets must install: {:?}", err.err());
+    assert!(replaced);
+}
+
+/// Fix loop 3, R3-B3: a type error on a NON-LAST
+/// occurrence is saved (Go `saveError`) and refuses
+/// with code 1 `malformed` even when a later
+/// occurrence is valid.
+#[test]
+fn release_json_first_type_error_still_malformed() {
+    for (label, template) in [
+        (
+            "numeric tag then valid tag",
+            GOOD_RELEASE_TEMPLATE.replace(
+                "\"tag_name\":\"v0.6.4\"",
+                "\"tag_name\":123,\"tag_name\":\"v0.6.4\"",
+            ),
+        ),
+        (
+            "numeric draft then valid draft",
+            GOOD_RELEASE_TEMPLATE
+                .replace("\"draft\":false", "\"draft\":1,\"draft\":false"),
+        ),
+        (
+            "string prerelease then valid prerelease",
+            GOOD_RELEASE_TEMPLATE.replace(
+                "\"prerelease\":false",
+                "\"prerelease\":\"yes\",\"prerelease\":false",
+            ),
+        ),
+        (
+            "string size then valid size",
+            GOOD_RELEASE_TEMPLATE.replace(
+                "\"size\":PLACEHOLDER_SIZE",
+                "\"size\":\"x\",\"size\":PLACEHOLDER_SIZE",
+            ),
+        ),
+        (
+            "numeric asset name then valid name",
+            GOOD_RELEASE_TEMPLATE.replace(
+                "\"name\":\"castctl_0.6.4_linux_amd64.tar.gz\"",
+                "\"name\":123,\"name\":\"castctl_0.6.4_linux_amd64.tar.gz\"",
+            ),
+        ),
+        (
+            "numeric tag then null tag (code 1, not 2)",
+            GOOD_RELEASE_TEMPLATE.replace(
+                "\"tag_name\":\"v0.6.4\"",
+                "\"tag_name\":123,\"tag_name\":null",
+            ),
+        ),
+    ] {
+        let (_replaced, err, _, _) = run_release_template(&template);
+        let err = err.expect_err(&format!("{label} must refuse"));
+        assert_eq!(err.code(), 1, "{label}");
+        assert_eq!(err.to_string(), "update: release information is malformed", "{label}");
+    }
+}
+
+/// Fix loop 3, R3-B4: Go `maxNestingDepth` is 10000
+/// INCLUSIVE — a release JSON whose unknown field
+/// nests 9999 deep (total 10000) still decodes
+/// (code 2 no-match, assets empty), while 10000 deep
+/// (total 10001) is a syntax error (code 1
+/// `malformed`).
+#[test]
+fn release_json_depth_cap_matches_go() {
+    for (arrays, code) in [(9999, 2), (10000, 1)] {
+        let mut deep = String::new();
+        for _ in 0..arrays {
+            deep.push('[');
+        }
+        deep.push('1');
+        for _ in 0..arrays {
+            deep.push(']');
+        }
+        let template = format!(
+            "{{\"tag_name\":\"v0.6.4\",\"draft\":false,\"prerelease\":false,\"assets\":[],\"zzz\":{deep}}}"
+        );
+        let (_replaced, err, _, _) = run_release_template(&template);
+        let err = err.expect_err("deep release must refuse");
+        assert_eq!(err.code(), code, "unknown-field depth {arrays} (total {})", arrays + 1);
+    }
+}
+
 /// Safety F6a (fix loop 1): a hostile latest tag that is
 /// not a version refuses with code 2 and the tag never
 /// appears in the error.

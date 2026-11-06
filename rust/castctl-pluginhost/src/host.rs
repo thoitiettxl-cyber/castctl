@@ -1209,12 +1209,15 @@ fn short_err(err: &PluginHostError) -> String {
 /// `json.RawMessage` keeps both apart).
 ///
 /// Decoded with Go `encoding/json` leniency
-/// (`pluginabi::decode_envelope`, fix loop 2,
-/// R2-B2/R2-B3): invalid UTF-8 in strings coerces to
-/// U+FFFD while `result` keeps its raw bytes verbatim,
-/// duplicate keys are last-wins, and a whole-document
-/// `null` is the zero envelope. Type errors still
-/// refuse as `invalid envelope`.
+/// (`pluginabi::decode_envelope`, fix loop 3,
+/// R3-B1/B2/B3): occurrences apply sequentially in
+/// document order, keys match exact first then
+/// Unicode-fold, `null` is a no-op for the scalar
+/// `ok` but resets the pointer `error`, invalid
+/// UTF-8 in strings coerces to U+FFFD while `result`
+/// keeps its raw bytes verbatim, and the first type
+/// error on any occurrence refuses as `invalid
+/// envelope` even when a later occurrence is valid.
 /// Source: `parseEnvelope` (`host.go:860-880`).
 fn parse_envelope(response: &[u8], tag: &str) -> Result<Vec<u8>, PluginHostError> {
     let env = crate::pluginabi::decode_envelope(response).map_err(|e| {
@@ -3119,6 +3122,56 @@ mod tests {
             &br#"{"ok":"x"}"#[..],
             &br#"{"ok":true,"error":{"code":123}}"#[..],
             &b"[1]"[..],
+        ] {
+            let err = parse_envelope(bad, "x").unwrap_err();
+            assert!(err.to_string().contains("invalid envelope"), "{err}");
+            assert!(!is_error_envelope(bad));
+        }
+    }
+
+    /// Fix loop 3 (R3-B1/B2/B3): the sequential-apply
+    /// model, observed through `parse_envelope` /
+    /// `is_error_envelope`.
+    #[test]
+    fn parse_envelope_sequential_apply_matches_go() {
+        // R3-B1: fold-key `OK` applies.
+        assert_eq!(
+            parse_envelope(br#"{"OK":true,"result":2}"#, "x").unwrap(),
+            b"2"
+        );
+        // R3-B1: fold-key duplicated with the exact key
+        // in the wrong order — Go applies `OK`→false
+        // last, so the envelope fails.
+        let err =
+            parse_envelope(br#"{"ok":true,"OK":false,"result":1}"#, "x").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "plugin \"x\" returned a failed envelope without an error"
+        );
+        // R3-B2: `null` as the last `error` occurrence
+        // RESETS the pointer — the plugin error is gone,
+        // so this is a failed envelope without an error
+        // (and not an error envelope).
+        let input = br#"{"ok":false,"error":{"code":"boom","message":"m"},"error":null}"#;
+        let err = parse_envelope(input, "x").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "plugin \"x\" returned a failed envelope without an error"
+        );
+        assert!(!is_error_envelope(input));
+        // R3-B2 control: scalar `ok` keeps `true`
+        // when `null` comes last.
+        assert_eq!(
+            parse_envelope(br#"{"ok":true,"ok":null,"result":1}"#, "x").unwrap(),
+            b"1"
+        );
+        // R3-B3: a type error on a non-last occurrence
+        // refuses as `invalid envelope` even though a
+        // later occurrence is valid.
+        for bad in [
+            &br#"{"ok":"x","ok":true,"result":1}"#[..],
+            &br#"{"OK":"x","ok":true,"result":1}"#[..],
+            &br#"{"ok":false,"error":{"code":123,"code":"boom","message":"m"}}"#[..],
         ] {
             let err = parse_envelope(bad, "x").unwrap_err();
             assert!(err.to_string().contains("invalid envelope"), "{err}");
