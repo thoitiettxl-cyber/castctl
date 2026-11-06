@@ -1,0 +1,12 @@
+{
+  "args": [
+    "raw",
+    "chat.history"
+  ],
+  "gateway": {
+    "/chat/history": {
+      "status": 200,
+      "raw_b64": "cGxhaW4gdGV4dAo="
+    }
+  }
+}

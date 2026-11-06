@@ -1,0 +1,12 @@
+{
+  "args": [
+    "redeem",
+    "ABC123"
+  ],
+  "http": {
+    "/api/hatch/invite-code/redeem": {
+      "status": 200,
+      "body": "{\"success\":true,\"redemptionStatus\":\"granted\"}"
+    }
+  }
+}

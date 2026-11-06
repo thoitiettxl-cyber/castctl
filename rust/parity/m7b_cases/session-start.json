@@ -1,0 +1,16 @@
+{
+  "args": [
+    "session-start",
+    "--title",
+    "hello"
+  ],
+  "gateway": {
+    "/session/start": {
+      "status": 200,
+      "result": {
+        "session_id": "s-1",
+        "title": "hello"
+      }
+    }
+  }
+}

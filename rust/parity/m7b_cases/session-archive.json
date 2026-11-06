@@ -1,0 +1,14 @@
+{
+  "args": [
+    "session-archive",
+    "s-1"
+  ],
+  "gateway": {
+    "/session/archive": {
+      "status": 200,
+      "result": {
+        "ok": true
+      }
+    }
+  }
+}

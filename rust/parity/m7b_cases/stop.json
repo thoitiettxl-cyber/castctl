@@ -1,0 +1,13 @@
+{
+  "args": [
+    "stop"
+  ],
+  "gateway": {
+    "/chat/cancel": {
+      "status": 200,
+      "result": {
+        "cancelled": true
+      }
+    }
+  }
+}

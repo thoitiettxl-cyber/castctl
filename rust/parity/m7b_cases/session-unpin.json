@@ -1,0 +1,14 @@
+{
+  "args": [
+    "session-unpin",
+    "s-1"
+  ],
+  "gateway": {
+    "/session/unpin": {
+      "status": 200,
+      "result": {
+        "ok": true
+      }
+    }
+  }
+}

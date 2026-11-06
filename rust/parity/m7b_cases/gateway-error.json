@@ -1,0 +1,11 @@
+{
+  "args": [
+    "session-start"
+  ],
+  "gateway": {
+    "/session/start": {
+      "status": 502,
+      "body": "{\"ok\":false,\"error\":\"boom\"}"
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "args": [
+    "download",
+    "zzz"
+  ],
+  "gateway": {
+    "/chat/history": {
+      "status": 200,
+      "result": {
+        "chat_events": [],
+        "has_more": false
+      }
+    }
+  }
+}

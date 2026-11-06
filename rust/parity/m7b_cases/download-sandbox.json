@@ -1,0 +1,12 @@
+{
+  "args": [
+    "download",
+    "sandbox://media/raw/pic.jpg"
+  ],
+  "gateway": {
+    "/media/raw/pic.jpg": {
+      "status": 200,
+      "raw_b64": "aGVsbG8tYnl0ZXM="
+    }
+  }
+}

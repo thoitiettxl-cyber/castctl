@@ -1,0 +1,16 @@
+{
+  "args": [
+    "deny",
+    "ap1",
+    "--always"
+  ],
+  "gateway": {
+    "/approvals/ap1/decide": {
+      "status": 200,
+      "result": {
+        "decided": true,
+        "approval_id": "ap1"
+      }
+    }
+  }
+}

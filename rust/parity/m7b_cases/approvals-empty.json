@@ -1,0 +1,13 @@
+{
+  "args": [
+    "approvals"
+  ],
+  "gateway": {
+    "/approvals": {
+      "status": 200,
+      "result": {
+        "pending_approvals": []
+      }
+    }
+  }
+}
