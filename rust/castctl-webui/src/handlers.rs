@@ -2605,7 +2605,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let fixture = FIXTURE.replacen(
             r#""webui":"#,
-            r#""keeper": [{"tag": "b", "profile": "muse01", "browser": "http://127.0.0.1:9222", "interval": "1h", "notify": "telegram"}, {"tag": "a", "profile": "muse01", "browser": "http://127.0.0.1:9223"}], "telegram": {"profile": "muse01", "token": "123456789:ABCDEFGHIJKLMNOPQRST", "allowed_user_ids": [1]}, "webui":"#,
+            r#""keeper": [{"tag": "b", "profile": "muse01", "browser": "http://127.0.0.1:9222", "interval": "1h", "notify": "telegram"}, {"tag": "a", "profile": "muse02", "browser": "http://127.0.0.1:9223"}], "telegram": {"profile": "muse01", "token": "123456789:ABCDEFGHIJKLMNOPQRST", "allowed_user_ids": [1]}, "webui":"#,
+            1,
+        );
+        // Go's config validation forbids two keeper entries
+        // naming the same profile, so entry "a" uses a
+        // second profile added to this test's fixture only.
+        let fixture = fixture.replacen(
+            "\"fingerprint\": \"chrome\"\n    }\n  },",
+            "\"fingerprint\": \"chrome\"\n    },\n    \"muse02\": {\n      \"cookies_file\": \"profiles/muse02/cookies.txt\",\n      \"outbound\": \"proxy-eu\",\n      \"fingerprint\": \"chrome\"\n    }\n  },",
             1,
         );
         write_config(&dir, &fixture);
