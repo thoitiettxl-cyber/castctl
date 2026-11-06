@@ -72,7 +72,7 @@ fn connect_ok(decide: Arc<castctl_approvals::Decider>) -> Box<castctl_approvals:
 }
 
 #[test]
-fn describe_approval() {
+fn describe_approval_cases() {
     let cases: Vec<(&str, serde_json::Value, DescribedApproval)> = vec![
         (
             "full approval",
@@ -195,7 +195,7 @@ fn describe_approval_non_finite_expiry_is_none() {
 }
 
 #[test]
-fn choose_auto_decision() {
+fn choose_auto_decision_cases() {
     let with_opts = |opts: &[&str]| DescribedApproval {
         options: Some(opts.iter().map(|o| o.to_string()).collect()),
         ..Default::default()
