@@ -65,9 +65,22 @@ pub struct DnsMessage {
     pub answers: Vec<Answer>,
 }
 
-/// Encode one question (RD set, QDCOUNT 1).
-#[must_use]
-pub fn encode_query(id: u16, name: &str, qtype: u16) -> Vec<u8> {
+/// Max octets of one DNS name on the wire, length
+/// bytes + root zero included (RFC 1035 §2.3.4).
+const MAX_NAME_WIRE_LEN: usize = 255;
+/// Max octets of one label (RFC 1035 §2.3.4).
+const MAX_LABEL_LEN: usize = 63;
+
+/// Encode one question (RD set, QDCOUNT 1). Names Go
+/// would reject are rejected here instead of emitting
+/// corrupt wire bytes: a label over 63 octets, or a
+/// name over 255 octets on the wire, is
+/// `DnsError::Protocol` (red-team F8, fix loop 1; Go
+/// validates via sing-box / miekg/dns before sending).
+/// The bound also keeps the query far below 64 KiB, so
+/// the 2-byte length prefix in `transport.rs` cannot
+/// wrap.
+pub fn encode_query(id: u16, name: &str, qtype: u16) -> Result<Vec<u8>, DnsError> {
     let mut out = Vec::with_capacity(32);
     out.extend_from_slice(&id.to_be_bytes());
     out.extend_from_slice(&0x0100u16.to_be_bytes()); // RD
@@ -75,21 +88,37 @@ pub fn encode_query(id: u16, name: &str, qtype: u16) -> Vec<u8> {
     out.extend_from_slice(&0u16.to_be_bytes()); // ANCOUNT
     out.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
     out.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
-    encode_name(&mut out, name);
+    encode_name(&mut out, name)?;
     out.extend_from_slice(&qtype.to_be_bytes());
     out.extend_from_slice(&QCLASS_IN.to_be_bytes());
-    out
+    Ok(out)
 }
 
-fn encode_name(out: &mut Vec<u8>, name: &str) {
+fn encode_name(out: &mut Vec<u8>, name: &str) -> Result<(), DnsError> {
+    // Wire length: one length byte per label + the
+    // labels + the root zero.
+    let mut wire_len = 1;
     for label in name.trim_end_matches('.').split('.') {
         if label.is_empty() {
             continue;
+        }
+        if label.len() > MAX_LABEL_LEN {
+            return Err(DnsError::Protocol(format!(
+                "DNS label too long: {} bytes (max {MAX_LABEL_LEN})",
+                label.len()
+            )));
+        }
+        wire_len += 1 + label.len();
+        if wire_len > MAX_NAME_WIRE_LEN {
+            return Err(DnsError::Protocol(format!(
+                "DNS name too long: over {MAX_NAME_WIRE_LEN} octets on the wire"
+            )));
         }
         out.push(label.len() as u8);
         out.extend_from_slice(label.as_bytes());
     }
     out.push(0);
+    Ok(())
 }
 
 /// Decode one DNS message (query or response).
@@ -245,13 +274,53 @@ mod tests {
 
     #[test]
     fn round_trip_query() {
-        let q = encode_query(0x1234, "gateway.test", QTYPE_A);
+        let q = encode_query(0x1234, "gateway.test", QTYPE_A).expect("valid name encodes");
         let msg = decode_message(&q).expect("query must decode");
         assert_eq!(msg.id, 0x1234);
         assert_eq!(msg.questions.len(), 1);
         assert_eq!(msg.questions[0].name, "gateway.test");
         assert_eq!(msg.questions[0].qtype, QTYPE_A);
         assert_eq!(msg.questions[0].qclass, QCLASS_IN);
+    }
+
+    #[test]
+    fn overlong_label_is_protocol_error() {
+        // Red-team F8: a label over 63 octets used to
+        // be written with a wrapped length byte (a
+        // 300-octet label became 44) and emit a corrupt
+        // query.
+        let long = "a".repeat(64);
+        assert!(matches!(
+            encode_query(1, &format!("{long}.test"), QTYPE_A),
+            Err(DnsError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn overlong_name_is_protocol_error() {
+        // 4 labels of 63 octets: 4*(1+63)+1 = 257
+        // wire octets, over the 255 limit.
+        let name = vec!["a".repeat(63); 4].join(".");
+        assert!(matches!(
+            encode_query(1, &name, QTYPE_A),
+            Err(DnsError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn max_length_name_encodes() {
+        // 3 labels of 63 + 1 of 61: 3*(1+63)+(1+61)+1
+        // = 255 wire octets, exactly at the limit.
+        let name = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61)
+        );
+        let q = encode_query(1, &name, QTYPE_A).expect("255-octet name must encode");
+        let msg = decode_message(&q).expect("query must decode");
+        assert_eq!(msg.questions[0].name, name);
     }
 
     #[test]

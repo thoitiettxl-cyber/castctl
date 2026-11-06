@@ -2,13 +2,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Licensed under the GNU General Public License v3.0 only.
 
-//! Subscription primitives (M7a): `Gateway::subscribe_raw` and
-//! `Gateway::open_stream`, ported from Go
-//! `internal/gateway/calls.go` (`SubscribeRaw`, `OpenStream`)
-//! with options/callbacks from `internal/conn`
-//! (`SubscribeOptions`, `OpenStreamOptions`) and the retry
-//! wrapper from `internal/conn/shared.go`
-//! (`SharedConn.SubscribeRaw`).
+//! Subscription primitives (M7a): the `SubscribeOptions` /
+//! `SubscribeHandler` types behind `Gateway::subscribe_raw`
+//! (`gateway.rs`) and `SharedConn::subscribe_raw` /
+//! `subscribe_json` (`shared.rs`), ported from Go
+//! `internal/gateway/calls.go` (`SubscribeRaw`) and
+//! `internal/conn/shared.go` (`SharedConn.SubscribeRaw` /
+//! `SubscribeJSON`) with options from `internal/conn`
+//! (`SubscribeOptions`). (`OpenStream` is NOT here: it
+//! is M5b's `Gateway::open_stream` in `gateway.rs:955`.)
 //!
 //! Go `SubscribeOptions` carries its callbacks as struct
 //! fields (`OnOpen`, `ShouldStop`, `OnRecord`); Rust has no

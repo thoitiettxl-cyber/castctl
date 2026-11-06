@@ -14,7 +14,7 @@
 //! `waiter.go`, `replies.go`, `events.go`, `outcome.go` and
 //! `reason.go` into `castctl-telegram/src/wait.rs`; this crate
 //! ports what M5b explicitly left out — the Runner, the history
-//! readers, `decode_record`, `question_of`, and the subscribe
+//! readers, `decode_record`, `question_of`, `feed_record`, and the subscribe
 //! wiring — and connects them to M5b's state machine.
 //!
 //! ## `context.Context` → [`Cancel`]
@@ -67,7 +67,8 @@ pub use history::{
     latest_user_seq,
 };
 pub use runner::{
-    Config, ConfigError, DialFn, RunError, Runner, Subscriber, WaitResult, is_auth_error,
+    Config, ConfigError, DialFn, RunError, Runner, Subscriber, WaitResult, feed_record,
+    is_auth_error,
 };
 
 use std::fmt;

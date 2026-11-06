@@ -600,6 +600,38 @@ async fn fs_read_chunk_eof_default_and_bad_base64() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
+async fn fs_put_symlink_to_dir_root_uploads_nothing() {
+    // Red-team F2: Go's `filepath.WalkDir` Lstats the
+    // root, so a symlink-to-directory root is skipped
+    // and nothing is uploaded (`fsclient.go:707-738`).
+    let gw = FakeGateway::new(&[]);
+    let f = new_fs(Arc::clone(&gw));
+    let root = temp_dir("put-symlink-root");
+    let real_dir = root.join("real");
+    std::fs::create_dir_all(&real_dir).unwrap();
+    std::fs::write(real_dir.join("a.txt"), b"A").unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&real_dir, root.join("linkdir")).unwrap();
+    }
+    let res = f
+        .put(&root.join("linkdir"), "remote/up", true, true)
+        .await
+        .unwrap();
+    assert!(
+        res.is_empty(),
+        "symlink-to-dir root must upload nothing, got {res:?}"
+    );
+    assert!(
+        gw.calls().is_empty(),
+        "symlink-to-dir root must make zero remote writes, got {:?}",
+        gw.calls()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
 async fn fs_put_skips_symlink_to_dir() {
     let gw = FakeGateway::new(&[]);
     let f = new_fs(Arc::clone(&gw));

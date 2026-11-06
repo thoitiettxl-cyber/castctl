@@ -57,13 +57,24 @@ pub async fn default_bootstrap(host: String) -> Result<Vec<IpAddr>, DnsError> {
 /// Returns the servers with substituted addresses, or
 /// the first bootstrap failure wrapped as
 /// `dns: bootstrap for server %q: %w` (the server TAG).
+///
+/// ONE shared 5 s deadline covers the whole loop (Go
+/// `client.go:143-147`: a single `bootstrapCtx` with a
+/// 5 s timeout wraps the entire `substituteBootstrap`
+/// call). Per-server timeouts would let N slow servers
+/// take N*5 s before failing (red-team F7, fix loop 1).
+/// (`default_bootstrap` keeps its own inner 5 s timeout
+/// around the system lookup, as Go's
+/// `BootstrapLookupWithLogger` does — the shared
+/// deadline above is the outer budget.)
 pub async fn substitute_bootstrap(
     servers: &[DnsServer],
     bootstrap: &BootstrapFn,
 ) -> Result<Vec<DnsServer>, DnsError> {
+    let deadline = tokio::time::Instant::now() + BOOTSTRAP_TIMEOUT;
     let mut out = Vec::with_capacity(servers.len());
     for server in servers {
-        let kind = substitute_server_address(&server.kind, bootstrap)
+        let kind = substitute_server_address(&server.kind, bootstrap, deadline)
             .await
             .map_err(|e| DnsError::Bootstrap {
                 server: server.tag.clone(),
@@ -80,13 +91,14 @@ pub async fn substitute_bootstrap(
 async fn substitute_server_address(
     kind: &DnsServerKind,
     bootstrap: &BootstrapFn,
+    deadline: tokio::time::Instant,
 ) -> Result<DnsServerKind, DnsError> {
     match kind {
         DnsServerKind::Tcp {
             server,
             server_port,
         } => {
-            let server = substitute_address(server, None, bootstrap).await?;
+            let server = substitute_address(server, None, bootstrap, deadline).await?;
             Ok(DnsServerKind::Tcp {
                 server,
                 server_port: *server_port,
@@ -98,7 +110,8 @@ async fn substitute_server_address(
             server_name,
         } => {
             let mut name = server_name.clone();
-            let server = substitute_address(server, Some(&mut name), bootstrap).await?;
+            let server =
+                substitute_address(server, Some(&mut name), bootstrap, deadline).await?;
             Ok(DnsServerKind::Tls {
                 server,
                 server_port: *server_port,
@@ -111,7 +124,8 @@ async fn substitute_server_address(
             server_name,
         } => {
             let mut name = server_name.clone();
-            let server = substitute_address(server, Some(&mut name), bootstrap).await?;
+            let server =
+                substitute_address(server, Some(&mut name), bootstrap, deadline).await?;
             Ok(DnsServerKind::Https {
                 server,
                 server_port: *server_port,
@@ -136,12 +150,17 @@ async fn substitute_address(
     host: &str,
     server_name: Option<&mut String>,
     bootstrap: &BootstrapFn,
+    deadline: tokio::time::Instant,
 ) -> Result<String, DnsError> {
     if !is_domain(host) {
         return Ok(host.to_string());
     }
     let original = host.to_string();
-    let addrs = tokio::time::timeout(BOOTSTRAP_TIMEOUT, bootstrap(original.clone()))
+    // The shared loop deadline (see
+    // `substitute_bootstrap`): the bootstrap call for
+    // this server gets only the time left in the single
+    // 5 s budget, not a fresh 5 s.
+    let addrs = tokio::time::timeout_at(deadline, bootstrap(original.clone()))
         .await
         .map_err(|_| DnsError::message("context deadline exceeded"))??;
     if addrs.is_empty() {
@@ -330,6 +349,52 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "dns: bootstrap for server \"dns1\": bootstrap failed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bootstrap_budget_is_shared_across_servers() {
+        // Red-team F7: Go's single `bootstrapCtx` (5 s)
+        // covers the whole `substituteBootstrap` loop
+        // (`client.go:143-147`). Two servers whose
+        // hostnames each take 3 s to resolve must fail
+        // at 5 s total; per-server budgets would take
+        // 6 s and succeed. Paused time keeps the test
+        // instant (the clock is advanced past the
+        // deadline instead of sleeping in real time).
+        let slow: BootstrapFn = Arc::new(move |_host: String| {
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                Ok(vec!["192.0.2.1".parse().expect("ip")])
+            })
+        });
+        let servers = vec![
+            DnsServer {
+                tag: "dns1".to_string(),
+                kind: DnsServerKind::Tcp {
+                    server: "a.test".to_string(),
+                    server_port: 53,
+                },
+            },
+            DnsServer {
+                tag: "dns2".to_string(),
+                kind: DnsServerKind::Tcp {
+                    server: "b.test".to_string(),
+                    server_port: 53,
+                },
+            },
+        ];
+        let slow2 = Arc::clone(&slow);
+        let handle =
+            tokio::spawn(async move { substitute_bootstrap(&servers, &slow2).await });
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let err = handle
+            .await
+            .expect("bootstrap task")
+            .expect_err("shared 5 s budget must fail the second server");
+        assert!(
+            err.to_string().contains("context deadline exceeded"),
+            "shared-budget error = {err}"
         );
     }
 

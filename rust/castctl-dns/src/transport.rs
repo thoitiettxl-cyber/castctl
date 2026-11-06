@@ -89,9 +89,13 @@ impl DnsTransport for TcpDnsTransport {
         qtype: u16,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<IpAddr>, DnsError>> + Send + '_>> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let query = encode_query(id, domain, qtype);
+        let domain = domain.to_string();
         let addr = self.addr;
         Box::pin(async move {
+            // Validated before any I/O: an over-long
+            // name is rejected here, never framed and
+            // sent (red-team F8).
+            let query = encode_query(id, &domain, qtype)?;
             let mut stream = tokio::net::TcpStream::connect(addr).await?;
             let mut framed = Vec::with_capacity(query.len() + 2);
             framed.extend_from_slice(&(query.len() as u16).to_be_bytes());

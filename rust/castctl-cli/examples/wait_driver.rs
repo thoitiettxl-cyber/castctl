@@ -230,9 +230,19 @@ async fn main() {
         after_seq: args.after_seq,
         has_after_seq: args.has_after_seq,
         timeout: Duration::from_secs(args.timeout_secs.max(0) as u64),
-        dial: Some(Arc::new(move |_cancel| {
+        dial: Some(Arc::new(move |cancel| {
             let sub = Arc::clone(&subscriber);
-            Box::pin(async move { Ok(Some(sub)) })
+            Box::pin(async move {
+                // The connection is already live (dialled
+                // above); the only cancel to honour here
+                // is one that fired before the Runner's
+                // first subscribe (technical F5: the
+                // closure used to ignore it entirely).
+                if cancel.is_set() {
+                    return Err(TransportError::Cancelled);
+                }
+                Ok(Some(sub))
+            })
         })),
         history: Some(history),
         ..Default::default()

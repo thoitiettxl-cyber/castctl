@@ -156,10 +156,13 @@ fn question_text(v: Option<&Value>) -> Option<String> {
 /// `expiresAtMS`). Only numbers count; a bool is an int
 /// in Python, so `true` counts as 1 and `false` as 0.
 /// Numeric strings are not numbers (`None`). Any other
-/// type means "no expiry".
+/// type means "no expiry". A non-finite float (e.g.
+/// `1e999`, which parses to `inf`) is out of range for
+/// Go's `json.Number.Float64()` and counts as no expiry
+/// (red-team F11).
 fn expires_at_ms(v: Option<&Value>) -> Option<f64> {
     match v? {
-        Value::Number(n) => n.as_f64(),
+        Value::Number(n) => n.as_f64().filter(|f| f.is_finite()),
         Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
         _ => None,
     }
@@ -561,13 +564,27 @@ impl AutoApprover {
     }
 
     fn err_for(item: &DescribedApproval, decision: &str, err: BoxError) -> ApproveError {
+        Self::err_for_shared(item, decision, Arc::new(err))
+    }
+
+    /// Like `err_for`, but the error value is already
+    /// shared: every record carries the SAME error, not
+    /// a copy (used for the connect failure, where one
+    /// error object is recorded on every item — Go
+    /// `errFor` with the same error object,
+    /// `approvals.go:461-466`).
+    fn err_for_shared(
+        item: &DescribedApproval,
+        decision: &str,
+        err: Arc<BoxError>,
+    ) -> ApproveError {
         ApproveError {
             approval_id: item.id_str().to_string(),
             title: item.title_str().to_string(),
             kind: item.kind_str().to_string(),
             scope: item.scope_str().to_string(),
             decision: decision.to_string(),
-            err: Arc::new(err),
+            err,
         }
     }
 
@@ -593,14 +610,24 @@ impl AutoApprover {
         let (decide, close) = match connect() {
             Ok(pair) => pair,
             Err(e) => {
-                // The connect error is shared: re-box it per
-                // item from its text (a boxed error cannot be
-                // cloned). Each record carries the same text.
-                let text = e.to_string();
+                // The connect error is shared behind one
+                // `Arc`: every record carries the SAME
+                // error value, so `as_approver` still
+                // finds a `TransportError::Auth` in the
+                // chain and the wait exits 2, as in Go
+                // (`errFor` records the same error
+                // object on every item). Re-boxing from
+                // the error TEXT here used to lose the
+                // type and turn a connect-time auth
+                // failure into a synthetic 124
+                // (red-team F1, fix loop 1).
+                let shared: Arc<BoxError> = Arc::new(e);
                 for item in items {
-                    outcome
-                        .errors
-                        .push(Self::err_for(item, "", Box::from(text.clone())));
+                    outcome.errors.push(Self::err_for_shared(
+                        item,
+                        "",
+                        Arc::clone(&shared),
+                    ));
                 }
                 return outcome;
             }
@@ -619,15 +646,19 @@ impl AutoApprover {
                     Some(id) => (true, id.clone()),
                     None => (false, String::new()),
                 };
-                let already_warned = match self.warned.lock() {
-                    Ok(mut warned) => {
-                        let already = warned.get(&key).copied().unwrap_or(false);
-                        if !already {
-                            warned.insert(key, true);
-                        }
-                        already
+                // A poisoned mutex still holds the set:
+                // recover it instead of falling back to
+                // "not warned" (which would emit a
+                // duplicate warning) — the fail-closed
+                // direction (safety NIT-1).
+                let already_warned = {
+                    let mut warned =
+                        self.warned.lock().unwrap_or_else(|e| e.into_inner());
+                    let already = warned.get(&key).copied().unwrap_or(false);
+                    if !already {
+                        warned.insert(key, true);
                     }
-                    Err(_) => false,
+                    already
                 };
                 if !already_warned {
                     outcome.errors.push(Self::err_for(
@@ -641,15 +672,21 @@ impl AutoApprover {
                 continue;
             }
             if let Some(id) = &item.approval_id {
-                let claimed = match self.decided.lock() {
-                    Ok(mut decided) => {
-                        let claimed = decided.contains(id.as_str());
-                        if !claimed {
-                            decided.insert(id.clone());
-                        }
-                        claimed
+                // A poisoned mutex still holds the set:
+                // recover it instead of falling back to
+                // "not claimed" (which would re-decide
+                // the id) — the fail-closed direction
+                // (safety NIT-1).
+                let claimed = {
+                    let mut decided = self
+                        .decided
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let claimed = decided.contains(id.as_str());
+                    if !claimed {
+                        decided.insert(id.clone());
                     }
-                    Err(_) => false,
+                    claimed
                 };
                 if claimed {
                     continue;

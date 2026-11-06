@@ -124,12 +124,22 @@ fn error_summary(err: &castctl_approvals::ApproveError) -> String {
 
 /// `Some(n)` when the error is a no-forever skip with `n`
 /// offered options, else `None` (see `error_summary`'s
-/// note on the CLI's structural skip rendering).
+/// note on the CLI's structural skip rendering). Walks
+/// the `source()` chain like `find_transport` above —
+/// Go uses `errors.As` here (`wait.go:489-491`), so a
+/// `NoForeverError` wrapped by a future layer must
+/// still be found; a direct downcast would silently
+/// miss it and the CLI would render the full offers
+/// text on stderr instead of the structural line
+/// (red-team F10 / technical F2, fix loop 1).
 fn skip_option_count(err: &castctl_approvals::ApproveError) -> Option<usize> {
-    let inner: &(dyn std::error::Error + 'static) = &**err.err;
-    inner
-        .downcast_ref::<NoForeverError>()
-        .map(NoForeverError::option_count)
+    let mut inner: &(dyn std::error::Error + 'static) = &**err.err;
+    loop {
+        if let Some(no_forever) = inner.downcast_ref::<NoForeverError>() {
+            return Some(no_forever.option_count());
+        }
+        inner = inner.source()?;
+    }
 }
 
 impl WaitApprover for AutoApproverAdapter {
@@ -308,6 +318,98 @@ mod tests {
             out.fatal,
             Some(BotError::Transport(TransportError::Auth { .. }))
         ));
+    }
+
+    #[tokio::test]
+    async fn adapter_connect_auth_error_is_fatal_transport() {
+        // Red-team F1 (fix loop 1): a CONNECT-time
+        // AuthError must reach the adapter as
+        // `BotError::Transport(Auth)` — the CLI exits 2.
+        // Before the fix the connect error was re-boxed
+        // from its text in `AutoApprover::approve`, so
+        // `as_approver` could not find the Auth in the
+        // chain and the adapter fell through to
+        // `BotError::Validation("auto-approve failed")`
+        // (synthetic 124). This test drives the real
+        // `AutoApprover` (connect fails Auth) through
+        // the real adapter, end to end.
+        let aa = Arc::new(AutoApprover::new(
+            Some(Box::new(|| {
+                Err(Box::new(TransportError::Auth {
+                    message: "expired".to_string(),
+                }) as castctl_approvals::BoxError)
+            })),
+            false,
+        ));
+        let adapter = AutoApproverAdapter::new(&aa);
+        let out = adapter
+            .approve(&[telegram_approval("A", &["allow_always"])])
+            .await;
+        assert_eq!(
+            out.errors[0].summary, "conn: auth_failed message_length=7",
+            "connect-auth error must keep its type all the way to the summary"
+        );
+        assert!(
+            matches!(
+                out.fatal,
+                Some(BotError::Transport(TransportError::Auth { .. }))
+            ),
+            "connect auth must be fatal Transport(Auth)"
+        );
+    }
+
+    /// Test-only wrapper: a `NoForeverError` behind one
+    /// `source()` layer, for the chain-walk test below.
+    struct WrappedNoForever(NoForeverError);
+
+    impl std::fmt::Display for WrappedNoForever {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "wrapped: {}", self.0)
+        }
+    }
+
+    impl std::fmt::Debug for WrappedNoForever {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "WrappedNoForever({:?})", self.0)
+        }
+    }
+
+    impl std::error::Error for WrappedNoForever {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[tokio::test]
+    async fn adapter_skip_count_walks_error_chain() {
+        // Red-team F10 / technical F2: `skip_option_count`
+        // must find a `NoForeverError` wrapped one layer
+        // deep (Go uses `errors.As`), or the CLI renders
+        // the full offers text on stderr instead of the
+        // structural `option_count=n` line.
+        let adapter = AutoApproverAdapter::from_approver(Box::new(|items| {
+            let mut res = ApprovalResult::default();
+            res.errors.push(castctl_approvals::ApproveError {
+                approval_id: items[0].approval_id.clone().unwrap_or_default(),
+                title: String::new(),
+                kind: String::new(),
+                scope: String::new(),
+                decision: String::new(),
+                err: Arc::new(WrappedNoForever(NoForeverError {
+                    options: vec!["allow_once".to_string(), "deny".to_string()],
+                })),
+            });
+            res
+        }));
+        let out = adapter
+            .approve(&[telegram_approval("B", &["allow_once", "deny"])])
+            .await;
+        assert_eq!(out.errors.len(), 1);
+        assert_eq!(
+            out.errors[0].option_count,
+            Some(2),
+            "wrapped NoForeverError must still yield its option count"
+        );
     }
 
     #[test]

@@ -27,8 +27,8 @@ use castctl_gateway::subscribe::{SubscribeHandler, SubscribeOptions};
 use castctl_telegram::Approval as TelegramApproval;
 use castctl_telegram::BotError;
 use castctl_telegram::wait::{
-    ApproveError, ApprovedRecord, Reply, WaitApprover, WaitKind, Waiter, exit_code, in_scope,
-    is_failed_status, needs_input_reason, outcome_of, payload, task_status_info,
+    ApproveError, ApprovedRecord, Outcome, Reply, WaitApprover, WaitKind, Waiter, exit_code,
+    in_scope, is_failed_status, needs_input_reason, outcome_of, payload, task_status_info,
 };
 use castctl_transport::TransportError;
 use serde_json::{Value, json};
@@ -542,7 +542,7 @@ impl Runner {
             self.settle_tried = false;
             self.last_progress = Instant::now();
             self.online_armed = false;
-            self.subscribe_once(&cancel).await?;
+            self.subscribe_once(&cancel, deadline).await?;
             if let Some(e) = self.pending_err.take() {
                 return Err(e);
             }
@@ -601,10 +601,19 @@ impl Runner {
     /// A nil error means the subscription ended without a
     /// transport failure; the `Waiter` may still be
     /// waiting. (Go `runner.go` `subscribeOnce`.)
-    async fn subscribe_once(&mut self, cancel: &Cancel) -> Result<(), RunError> {
-        // INVARIANT: `run` sets `deadline` before the
-        // loop; `subscribe_once` only runs inside it.
-        let deadline = self.deadline.expect("deadline set by run");
+    ///
+    /// The deadline is a parameter, not read from
+    /// `self.deadline`: `run` computes it once and is the
+    /// only caller, so there is no `expect()` on an
+    /// internal field here (technical F10, fix loop 1).
+    /// `self.deadline` still exists for the derivation
+    /// and the endgame paths that need it after `run`
+    /// returns the local.
+    async fn subscribe_once(
+        &mut self,
+        cancel: &Cancel,
+        deadline: Instant,
+    ) -> Result<(), RunError> {
         let left = deadline
             .saturating_duration_since(Instant::now())
             .max(Duration::from_secs(1));
@@ -1366,6 +1375,24 @@ impl Runner {
         }
         Ok(res)
     }
+}
+
+/// Parse one NDJSON record and feed it to the `Waiter`
+/// (Go `Waiter.FeedRecord`, `internal/wait/waiter.go:671`):
+/// unparseable input and non-object JSON change no state
+/// and return `None`, as in Go; decoding is
+/// `decode_record`'s job, this function only feeds the
+/// decoded event. It has no production caller in Go
+/// either — the Runner inlines decode+feed — and none
+/// here; it exists so the ported API surface is complete
+/// (technical F1, fix loop 1).
+pub async fn feed_record(
+    waiter: &mut Waiter,
+    approver: Option<&dyn WaitApprover>,
+    record: &[u8],
+) -> Option<Outcome> {
+    let ev = decode_record(record)?;
+    waiter.feed(&ev, approver).await
 }
 
 /// The `SubscribeHandler` the Runner feeds records
@@ -3274,6 +3301,51 @@ mod tests {
         assert_eq!(res.outcome, "needs_input");
         assert_eq!(res.exit_code, 4);
         assert_eq!(res.needs_input_reason, "widget");
+    }
+
+    #[tokio::test]
+    async fn feed_record_malformed_input_changes_no_state() {
+        use castctl_telegram::wait::Waiter;
+        // Port of Go `TestFeedTraceI` (`waiter_test.go`):
+        // malformed input changes no state; a real
+        // running record feeds and sets SeenRunning
+        // only. (Technical F1: `FeedRecord` was missing
+        // from the port; fix loop 1 adds it.)
+        let mut w = Waiter::new("");
+        assert!(feed_record(&mut w, None, b"{\"status\": \"completed\"").await.is_none());
+        assert!(feed_record(&mut w, None, b"42").await.is_none());
+        assert!(
+            feed_record(&mut w, None, b"{\"event\": \"task.status\", \"payload\": \"junk\"}")
+                .await
+                .is_none()
+        );
+        assert!(
+            feed_record(
+                &mut w,
+                None,
+                b"{\"event\":\"task.status\",\"payload\":{\"status\":\"completed\"}} {\"x\":1}"
+            )
+            .await
+            .is_none()
+        );
+        assert!(!w.seen_running(), "malformed input must change no state");
+        assert_eq!(w.status(), None, "malformed input must change no state");
+        // A real record works, with json.Number seqs.
+        let out = feed_record(
+            &mut w,
+            None,
+            b"{\"event\":\"task.status\",\"seq\":120,\"payload\":{\"status\":\"running\",\"root_agent_id\":\"R\",\"agent_id\":\"R\"}}",
+        )
+        .await;
+        assert!(out.is_none(), "running record = {out:?}");
+        // A running record teaches SeenRunning only: its
+        // stream seq is never stored as boundary evidence
+        // (Go loop-2 F1). Rust has no `after_seq`
+        // accessor — the boundary is only observable via
+        // `set_boundary` / `boundary_unknown`, and a
+        // running record touches neither.
+        assert!(w.seen_running(), "running record must set SeenRunning");
+        assert_eq!(w.status(), Some("running"));
     }
 
     #[tokio::test]

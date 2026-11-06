@@ -909,6 +909,24 @@ impl<G: FsGateway> Fs<G> {
                     local.display()
                 )));
             }
+            // Lstat the root BEFORE walking: Go's
+            // `filepath.WalkDir` Lstats the root, so a
+            // symlink-to-directory root is a symlink
+            // entry (not a directory entry) and the walk
+            // never descends — nothing is uploaded
+            // (`fsclient.go:707-738`). `metadata` above
+            // follows the link, so without this check
+            // the whole target tree would be uploaded
+            // (red-team F2, fix loop 1). The
+            // recursive check above stays first: Go
+            // errors on a non-recursive folder put
+            // before walking.
+            let root_is_symlink = std::fs::symlink_metadata(local)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+            if root_is_symlink {
+                return Ok(vec![]);
+            }
             let items = walk_local_dir(local)?;
             let mut done = Vec::new();
             for item in items {

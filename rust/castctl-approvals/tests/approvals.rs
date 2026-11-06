@@ -178,6 +178,23 @@ fn describe_approval() {
 }
 
 #[test]
+fn describe_approval_non_finite_expiry_is_none() {
+    // Red-team F11: Go's `expiresAtMS` returns nil for
+    // an out-of-range `json.Number` (`1e999` fails
+    // `Float64()`); Rust must not render it as `inf`.
+    // Parsed from text so the number keeps its literal
+    // (a `json!(1e999)` literal would already be
+    // non-finite at construction time).
+    let input: serde_json::Value =
+        serde_json::from_str(r#"{"request_expires_at_ms": 1e999}"#).unwrap();
+    let got = describe_approval(&input);
+    assert_eq!(
+        got.expires_at_ms, None,
+        "1e999 expiry must be no expiry, not inf"
+    );
+}
+
+#[test]
 fn choose_auto_decision() {
     let with_opts = |opts: &[&str]| DescribedApproval {
         options: Some(opts.iter().map(|o| o.to_string()).collect()),
@@ -480,6 +497,18 @@ fn auto_approver_auth_error_propagates_and_stops() {
     assert!(
         res2.err_is_auth(),
         "connect-AuthError Err must be an AuthError"
+    );
+    // The fatal error itself must BE the AuthError, not
+    // a re-boxed copy of its text (red-team F1): the
+    // adapter downcasts it to `BotError::Transport(Auth)`
+    // and the CLI exits 2.
+    let fatal = res2.err.as_ref().expect("connect auth must set res.err");
+    assert!(
+        matches!(
+            fatal.downcast_ref::<TransportError>(),
+            Some(TransportError::Auth { .. })
+        ),
+        "connect-AuthError res.err must downcast to TransportError::Auth"
     );
 }
 
