@@ -597,6 +597,10 @@ impl Server {
     /// only for the ui_dir filesystem path and for the WS
     /// suffix check in `dispatch_api` (Go's `requireAuth`
     /// tests the decoded suffix).
+    // Arity mirrors Go's handler signature (method, raw +
+    // decoded path, uri, headers, peer, body); precedent:
+    // castctl-telegram's #[allow]s on the same lint.
+    #[allow(clippy::too_many_arguments)]
     async fn dispatch(
         self: &Arc<Self>,
         method: &Method,
@@ -623,7 +627,7 @@ impl Server {
         if *method != Method::GET {
             return method_not_allowed_resp();
         }
-        self.serve_static(&path_decoded, method)
+        self.serve_static(path_decoded, method)
     }
 
     /// The `/api/v1` pipeline: rate-limit → auth → Origin
@@ -632,6 +636,7 @@ impl Server {
     /// the shell after the middleware). `path` is the raw
     /// path (routing); `path_decoded` is Go's `r.URL.Path`
     /// (WS suffix check + shell fallthrough).
+    #[allow(clippy::too_many_arguments)]
     async fn dispatch_api(
         self: &Arc<Self>,
         method: &Method,
@@ -718,6 +723,7 @@ impl Server {
     /// is Go's `r.URL.Path`, passed to the shell
     /// fallthrough so the ui_dir filesystem lookup sees
     /// the decoded path.
+    #[allow(clippy::too_many_arguments)]
     async fn route_api(
         self: &Arc<Self>,
         method: &Method,
@@ -968,21 +974,15 @@ where
 /// typed request bodies (Go struct decoding); stored
 /// documents keep their exact keys.
 fn fold_case_keys(obj: &castctl_config::jsonvalue::OrderedObject) -> OrderedObject {
+    // Keys are normalized to ASCII-lowercase: Go struct
+    // decoding matches field names case-insensitively, and
+    // the typed extractors below look up lowercase names
+    // ("content", "base_sha256"). `OrderedObject::set`
+    // replaces in place, so the first position is kept and
+    // the last value wins (Go: later duplicate wins).
     let mut out = OrderedObject::new();
-    // Lowercase key -> first-seen original key.
-    let mut first_keys: Vec<(String, String)> = Vec::new();
     for (k, v) in obj.iter() {
-        let lower = k.to_ascii_lowercase();
-        match first_keys.iter().find(|(l, _)| *l == lower) {
-            Some((_, first)) => {
-                let first = first.clone();
-                out.set(first, v.clone());
-            }
-            None => {
-                first_keys.push((lower, k.clone()));
-                out.set(k.clone(), v.clone());
-            }
-        }
+        out.set(k.to_ascii_lowercase(), v.clone());
     }
     out
 }

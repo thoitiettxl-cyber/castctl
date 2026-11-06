@@ -226,11 +226,10 @@ pub fn write_file_atomic(path: &Path, data: &[u8]) -> Result<String, String> {
     // loop is the correct shape — never fall back to
     // truncating an existing file).
     use rand::RngExt;
-    let mut tmp_path = PathBuf::new();
     let mut last_err = String::new();
     for _ in 0..10 {
         let suffix: u64 = rand::rng().random();
-        tmp_path = dir.join(format!(".config.json.tmp.{suffix:016x}"));
+        let tmp_path = dir.join(format!(".config.json.tmp.{suffix:016x}"));
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create_new(true);
         #[cfg(unix)]
@@ -398,11 +397,19 @@ mod tests {
         fs::write(&path, b"{\"profiles\":{}}\n").unwrap();
         let n_threads = 8;
         let dir = std::sync::Arc::new(dir);
+        // Barrier: every thread must load the INITIAL file
+        // before any thread saves. Without it a thread that
+        // loads after another thread's save holds the NEW
+        // sha and legitimately wins too (that is the
+        // load-then-save contract, not an exclusion bug).
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(n_threads));
         let handles: Vec<_> = (0..n_threads)
             .map(|i| {
                 let dir = std::sync::Arc::clone(&dir);
+                let barrier = std::sync::Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     let mut state = ConfigState::load(&dir).unwrap();
+                    barrier.wait();
                     let payload = format!("{{\"profiles\":{{}}}}{}", " ".repeat(i));
                     state.save(payload.as_bytes()).map(|_| payload)
                 })

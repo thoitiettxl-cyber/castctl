@@ -2605,7 +2605,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let fixture = FIXTURE.replacen(
             r#""webui":"#,
-            r#""keeper": [{"tag": "b", "profile": "muse01", "browser": "http://127.0.0.1:9222", "interval": "1h", "notify": "telegram"}, {"tag": "a", "profile": "muse01", "browser": "http://127.0.0.1:9223"}], "webui":"#,
+            r#""keeper": [{"tag": "b", "profile": "muse01", "browser": "http://127.0.0.1:9222", "interval": "1h", "notify": "telegram"}, {"tag": "a", "profile": "muse01", "browser": "http://127.0.0.1:9223"}], "telegram": {"profile": "muse01", "token": "123456789:ABCDEFGHIJKLMNOPQRST", "allowed_user_ids": [1]}, "webui":"#,
             1,
         );
         write_config(&dir, &fixture);

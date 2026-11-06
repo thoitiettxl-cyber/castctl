@@ -314,15 +314,22 @@ mod tests {
     #[test]
     fn mapped_v6_loopback_is_loopback() {
         // F-A2: Go's net.ParseIP(...).IsLoopback() maps
-        // ::ffff:127.0.0.1 through To4() first.
-        assert!(is_loopback_host("::ffff:127.0.0.1"));
+        // ::ffff:127.0.0.1 through To4() first — but only
+        // in the bracketed form a URL origin carries
+        // ("[::ffff:127.0.0.1]:3000"). The BARE form is
+        // not loopback in Go either: isLoopbackHost strips
+        // at the LAST ':' (port strip) and is left with
+        // "::ffff" — the same quirk as bare "::1", which
+        // the code replicates rather than fixing.
+        assert!(is_loopback_host("[::ffff:127.0.0.1]:3000"));
         assert!(is_loopback_host("::ffff:127.0.0.1:3000"));
+        assert!(!is_loopback_host("::ffff:127.0.0.1"));
         assert!(api_origin_allowed(
             Some("http://[::ffff:127.0.0.1]:3000"),
             "127.0.0.1:8317"
         ));
         // A mapped non-loopback address is not loopback.
-        assert!(!is_loopback_host("::ffff:192.0.2.1"));
+        assert!(!is_loopback_host("[::ffff:192.0.2.1]:3000"));
     }
 
     #[test]

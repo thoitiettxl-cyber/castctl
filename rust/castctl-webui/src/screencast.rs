@@ -770,7 +770,6 @@ fn ws_handshake_error(status: u16, body: &[u8]) -> Resp {
 /// (`Sec-WebSocket-Accept`), the origin check at upgrade
 /// time, the starter run, the terminal report, and the
 /// session release when the socket closes.
-
 pub async fn handle_ws_upgrade(
     server: &std::sync::Arc<crate::server::Server>,
     mut req: hyper::Request<hyper::body::Incoming>,

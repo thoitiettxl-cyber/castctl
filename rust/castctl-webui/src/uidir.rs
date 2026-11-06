@@ -321,7 +321,12 @@ mod tests {
         let root = dir.join("ui");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("app.js"), b"console.log(1);\n").unwrap();
-        let resp = serve_ui_dir(&dir, "ui", "GET", "/app.js");
+        // The ui root must live OUTSIDE the config dir
+        // (uidir_root_overlaps_config refuses a root
+        // inside it), so the config dir is a sibling.
+        let cfg = dir.join("cfg");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let resp = serve_ui_dir(&cfg, &root.to_string_lossy(), "GET", "/app.js");
         assert_eq!(resp.status, 200);
         let cts: Vec<_> = resp
             .headers
