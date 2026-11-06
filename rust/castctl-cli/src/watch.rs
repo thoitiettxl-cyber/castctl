@@ -31,13 +31,15 @@
 //! Go's stdlib `encoding/json` uses the `\b`/`\f`
 //! short forms, exactly like `castctl_fsclient::
 //! go_json_string` (the fs custom encoder agrees with
-//! stdlib here). `printWatchRow` still needs the local
-//! `go_json_string_stdlib` below, not that function
-//! and not `serde_json::to_string`: `writeWatchField`
-//! (`json.Marshal`) HTML-escapes `<>&` while
-//! `marshalJSONLine` (`SetEscapeHTML(false)`, for
-//! event/seq) does not, and neither reuse target
-//! carries that flag.
+//! stdlib here). The string leaf reuses the network
+//! escapers (`escape_go_marshal_string` for field
+//! values, `json.Marshal` HTML ON; `escape_stdout_string`
+//! for event/seq, `SetEscapeHTML(false)` HTML OFF).
+//! U+2028/U+2029 are escaped in BOTH forms — Go escapes
+//! them even with HTML off (verified by a `go run`
+//! probe against `SetEscapeHTML(false)`); the first
+//! version of the local escaper wrongly passed them
+//! through raw when HTML was off.
 //!
 //! No `unsafe`, no `unwrap()`/`expect()` on external input.
 
@@ -48,7 +50,9 @@ use std::time::Duration;
 use castctl_gateway::subscribe::{SubscribeHandler, SubscribeOptions};
 use serde_json::Value;
 
-use crate::network::{CmdOut, classify_conn_error, render_flow_err};
+use crate::network::{
+    CmdOut, classify_conn_error, escape_go_marshal_string, escape_stdout_string, render_flow_err,
+};
 use crate::parser::Parsed;
 use crate::run::{FlowErr, GlobalOpts, msg, resolve_and_load_single};
 use crate::runtime::{Runtime, build_runtime};
@@ -57,46 +61,21 @@ use crate::runtime::{Runtime, build_runtime};
 /// `printWatchRow` scans them (Go `read.go:703`).
 const WATCH_TEXT_KEYS: [&str; 5] = ["display_text", "content", "text", "activity_text", "status"];
 
-/// Go `encoding/json` string escaping for one string
-/// (quoted, `"`-wrapped): `"` → `\"`, `\` → `\\`,
-/// `\n`/`\r`/`\t`/`\b`/`\f` short (Go's stdlib DOES use
-/// the `\b`/`\f` short forms — the harness proved it
-/// against the first version of this function, which
-/// wrongly rendered `\u0008`/`\u000c`), every other
-/// control byte `< 0x20` → `\u00XX` (lowercase hex).
-/// With `html_escape`, `<`/`>`/`&` → `\u003c`/`\u003e`/
-/// `\u0026` and U+2028/U+2029 → `\u2028`/`\u2029` (Go's
-/// `json.Marshal`); without it they pass through raw
-/// (Go's `marshalJSONLine`, `SetEscapeHTML(false)`).
-/// 0x7F is never escaped. A local escaper (not
-/// `serde_json::to_string`, which never HTML-escapes)
-/// is needed for exactly that flag.
+/// The string leaf of `go_json_compact`: Go
+/// `encoding/json` escaping, HTML ON for field values
+/// (`writeWatchField`, `json.Marshal`) and HTML OFF
+/// for event/seq (`marshalJSONLine`,
+/// `SetEscapeHTML(false)`). Both reuse the network
+/// escapers; U+2028/U+2029 are escaped in both forms
+/// (Go escapes them even with HTML off — verified by
+/// a `go run` probe against `SetEscapeHTML(false)`).
 #[must_use]
-pub fn go_json_string_stdlib(s: &str, html_escape: bool) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\x08' => out.push_str("\\b"),
-            '\x0c' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            '<' if html_escape => out.push_str("\\u003c"),
-            '>' if html_escape => out.push_str("\\u003e"),
-            '&' if html_escape => out.push_str("\\u0026"),
-            '\u{2028}' if html_escape => out.push_str("\\u2028"),
-            '\u{2029}' if html_escape => out.push_str("\\u2029"),
-            c => out.push(c),
-        }
+pub(crate) fn go_json_string(s: &str, html_escape: bool) -> String {
+    if html_escape {
+        escape_go_marshal_string(s)
+    } else {
+        escape_stdout_string(s)
     }
-    out.push('"');
-    out
 }
 
 /// Compact JSON for one decoded value, Go
@@ -112,7 +91,7 @@ pub fn go_json_compact(v: &Value, html_escape: bool) -> String {
         Value::Bool(true) => "true".to_string(),
         Value::Bool(false) => "false".to_string(),
         Value::Number(n) => n.as_str().to_string(),
-        Value::String(s) => go_json_string_stdlib(s, html_escape),
+        Value::String(s) => go_json_string(s, html_escape),
         Value::Array(items) => {
             let inner: Vec<String> = items
                 .iter()
@@ -126,7 +105,7 @@ pub fn go_json_compact(v: &Value, html_escape: bool) -> String {
                 .map(|(k, val)| {
                     format!(
                         "{}:{}",
-                        go_json_string_stdlib(k, html_escape),
+                        go_json_string(k, html_escape),
                         go_json_compact(val, html_escape)
                     )
                 })
@@ -223,9 +202,9 @@ pub fn print_watch_row(line: &[u8], show_all: bool) -> Option<String> {
             }
             let rendered = trunc_runes(&python_str(v), 300);
             out.push(',');
-            out.push_str(&go_json_string_stdlib(k, true));
+            out.push_str(&escape_go_marshal_string(k));
             out.push(':');
-            out.push_str(&go_json_string_stdlib(&rendered, true));
+            out.push_str(&escape_go_marshal_string(&rendered));
         }
     }
     out.push_str("}\n");
@@ -594,14 +573,11 @@ mod tests {
             got,
             "{\"event\":\"m\",\"seq\":1,\"display_text\":\"A\\bB\\fC\\nD\\tE\"}\n"
         );
-        assert_eq!(go_json_string_stdlib("A\x08B\x0cC", true), "\"A\\bB\\fC\"");
-        assert_eq!(
-            go_json_string_stdlib("<>&", true),
-            "\"\\u003c\\u003e\\u0026\""
-        );
-        assert_eq!(go_json_string_stdlib("<>&", false), "\"<>&\"");
-        assert_eq!(go_json_string_stdlib("\u{2028}", true), "\"\\u2028\"");
-        assert_eq!(go_json_string_stdlib("\u{2028}", false), "\"\u{2028}\"");
+        assert_eq!(escape_go_marshal_string("A\x08B\x0cC"), "\"A\\bB\\fC\"");
+        assert_eq!(escape_go_marshal_string("<>&"), "\"\\u003c\\u003e\\u0026\"");
+        assert_eq!(escape_stdout_string("<>&"), "\"<>&\"");
+        assert_eq!(escape_go_marshal_string("\u{2028}"), "\"\\u2028\"");
+        assert_eq!(escape_stdout_string("\u{2028}"), "\"\\u2028\"");
     }
 
     #[test]
