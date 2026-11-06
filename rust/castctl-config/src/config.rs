@@ -12,9 +12,9 @@
 //! `scanLegacyConfigFile`, `applyEnvFill`, `profileExists`).
 
 use crate::blocks::{
-    CredentialsBlock, PluginsBlock, check_endpoint_wireguard_system, check_keeper_shape,
-    check_webui_shape, parse_credentials_block, parse_plugins_block, parse_wireguard_dns_map,
-    validate_credentials, validate_plugins,
+    CredentialsBlock, PluginsBlock, check_endpoint_wireguard_system, check_webui_shape,
+    parse_credentials_block, parse_plugins_block, parse_wireguard_dns_map, validate_credentials,
+    validate_plugins,
 };
 use crate::config_errorf;
 use crate::configlocation::Getenv;
@@ -24,6 +24,10 @@ use crate::gostr::{go_lower, go_quote, go_trim_space};
 use crate::jsonvalue::{
     JsonValue, OrderedObject, decode_ordered_json, decode_ordered_object, encode_ordered_json,
     encode_ordered_json_indent, raw_of,
+};
+use crate::keeper::{
+    KeeperConfig, KeeperEntry, encode_keeper_block, parse_keeper_block, validate_credential_refs,
+    validate_keeper,
 };
 use crate::log::{LogConfig, parse_log_block, render_log_block};
 use crate::oserr::{is_not_exist, open_error_text, stat_error_text};
@@ -68,7 +72,10 @@ pub struct SingleConfig {
     pub telegram: Option<TelegramConfig>,
     /// Raw `telegram` value.
     pub telegram_raw: Option<JsonValue>,
-    /// Raw `keeper` value (shape-checked only).
+    /// Parsed `keeper` block (M6a: full parse, was
+    /// shape-only before).
+    pub keeper: Option<KeeperConfig>,
+    /// Raw `keeper` value.
     pub keeper_raw: Option<JsonValue>,
     /// Raw `webui` value (shape-checked only).
     pub webui_raw: Option<JsonValue>,
@@ -141,6 +148,31 @@ impl SingleConfig {
     /// `config.go:83`).
     pub fn profile_names(&self) -> Vec<String> {
         self.profiles.keys().cloned().collect()
+    }
+
+    /// Return the parsed `keeper` block, or `None` when
+    /// the block is absent (feature off). The
+    /// cross-reference checks are re-run here so callers
+    /// that receive a hand-built `SingleConfig` get the
+    /// same dangling-reference refusal parse gives
+    /// (`keeper.go:869-885`).
+    pub fn resolve_keeper(&self) -> Result<Option<&KeeperConfig>, ConfigError> {
+        if self.keeper.is_none() {
+            return Ok(None);
+        }
+        validate_keeper(
+            self.keeper.as_ref(),
+            |name| self.profiles.contains_key(name),
+            self.telegram.is_some(),
+        )?;
+        validate_credential_refs(self.keeper.as_ref(), self.credentials.as_ref())?;
+        Ok(self.keeper.as_ref())
+    }
+
+    /// Return the keeper entry for a profile name, or
+    /// `None` when no entry names it (`keeper.go:887-897`).
+    pub fn keeper_entry_for_profile(&self, profile_name: &str) -> Option<&KeeperEntry> {
+        crate::keeper::keeper_entry_for_profile(self.keeper.as_ref(), profile_name)
     }
 
     /// Defensive copies of the stored outbound JSON (Go
@@ -290,7 +322,7 @@ pub fn parse_single_config(data: &[u8], base_dir: &str) -> Result<SingleConfig, 
     }
     if let Some(v) = obj.get("keeper") {
         let _ = raw_of(v)?;
-        check_keeper_shape(v)?;
+        cfg.keeper = Some(parse_keeper_block(v)?);
         cfg.keeper_raw = Some(v.clone());
     }
     if let Some(v) = obj.get("webui") {
@@ -343,12 +375,21 @@ pub fn parse_single_config(data: &[u8], base_dir: &str) -> Result<SingleConfig, 
         let tg = tg.clone();
         validate_telegram(&tg, |name| cfg.profiles.contains_key(name))?;
     }
-    // validateKeeper: deferred (keeper entries are raw-only).
+    if cfg.keeper.is_some() {
+        validate_keeper(
+            cfg.keeper.as_ref(),
+            |name| cfg.profiles.contains_key(name),
+            cfg.telegram.is_some(),
+        )?;
+    }
     if let Some(creds) = &cfg.credentials {
         let creds = creds.clone();
         validate_credentials(&creds, |name| cfg.profiles.contains_key(name))?;
     }
-    // validateCredentialRefs: deferred (keeper entries are raw-only).
+    // validateCredentialRefs: the keeper entry's
+    // `credentials` tag must exist and name this
+    // entry's own profile (Go `config.go:451`).
+    validate_credential_refs(cfg.keeper.as_ref(), cfg.credentials.as_ref())?;
     if let Some(plugins) = &cfg.plugins {
         let plugins = plugins.clone();
         validate_plugins(&plugins)?;
@@ -416,6 +457,8 @@ pub fn build_single_file_ordered(cfg: &SingleConfig) -> Result<OrderedObject, Co
     }
     if let Some(raw) = &cfg.keeper_raw {
         root.set("keeper".to_string(), raw.clone());
+    } else if let Some(k) = &cfg.keeper {
+        root.set("keeper".to_string(), encode_keeper_block(k));
     }
     if let Some(raw) = &cfg.webui_raw {
         root.set("webui".to_string(), raw.clone());
@@ -875,6 +918,58 @@ mod tests {
         let bare = parse("{\"profiles\":{\"no1\":{}}}").unwrap();
         assert!(bare.credential_for_profile("no1").is_none());
         assert!(!bare.has_credential_for_profile("no1"));
+    }
+
+    #[test]
+    fn test_credential_refs_for_keeper_entries() {
+        // Fake credentials (never real values).
+        let base = r#"{"profiles":{"no1":{},"other":{}},"credentials":[{"tag":"c1","profile":"no1","username":"alice","password":"pw-one"},{"tag":"c2","profile":"other","username":"carol","password":"pw-three"}]}"#;
+        // Tag exists and names this entry's own profile:
+        // parses.
+        let cfg = parse(&format!(
+            r#"{},"keeper":[{{"tag":"k1","profile":"no1","credentials":"c1"}}]}}"#,
+            &base[..base.len() - 1]
+        ))
+        .unwrap();
+        assert!(cfg.resolve_keeper().unwrap().is_some());
+        // Dangling tag: config error, exit 2.
+        let err = parse(&format!(
+            r#"{},"keeper":[{{"tag":"k1","profile":"no1","credentials":"c9"}}]}}"#,
+            &base[..base.len() - 1]
+        ))
+        .unwrap_err();
+        assert!(err.message.contains("does not exist"), "{}", err.message);
+        // Tag of another profile: config error.
+        let err = parse(&format!(
+            r#"{},"keeper":[{{"tag":"k1","profile":"no1","credentials":"c2"}}]}}"#,
+            &base[..base.len() - 1]
+        ))
+        .unwrap_err();
+        assert!(err.message.contains("not"), "{}", err.message);
+        // Reference with no credentials block at all.
+        let err = parse(
+            r#"{"profiles":{"no1":{}},"keeper":[{"tag":"k1","profile":"no1","credentials":"c1"}]}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.message.contains("no \"credentials\" block exists"),
+            "{}",
+            err.message
+        );
+        // `resolve_keeper` re-runs the check on a
+        // hand-built config (Go `ResolveKeeper`).
+        let mut hand = SingleConfig::default();
+        hand.profiles
+            .insert("no1".to_string(), crate::profile::Profile::default());
+        hand.keeper = Some(KeeperConfig {
+            entries: vec![KeeperEntry {
+                tag: "k1".to_string(),
+                profile: "no1".to_string(),
+                credentials: "c9".to_string(),
+                ..KeeperEntry::default()
+            }],
+        });
+        assert!(hand.resolve_keeper().is_err());
     }
 
     #[test]

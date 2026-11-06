@@ -175,6 +175,20 @@ pub struct LoginCredential {
     pub password: String,
 }
 
+impl LoginCredential {
+    /// Clear the credential in place (Go
+    /// `LoginCredential.Clear`, `credentials.go:225-228`):
+    /// assign the empty string to both fields. Go does
+    /// NOT zero the backing bytes — and neither does
+    /// this: `String::clear` keeps the capacity, so the
+    /// old bytes stay in the allocation until it is
+    /// dropped. No `unsafe` is used.
+    pub fn clear(&mut self) {
+        self.username.clear();
+        self.password.clear();
+    }
+}
+
 impl std::fmt::Debug for LoginCredential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Values are secrets: Debug never prints them.
@@ -261,26 +275,6 @@ pub fn parse_wireguard_dns_map(
         out.push((tag.clone(), servers));
     }
     Ok(out)
-}
-
-/// Shape check for the `keeper` block: array of objects. All deeper
-/// field validation is deferred (D-M2-1).
-///
-/// Source: `internal/profile/keeper.go` (`parseKeeperBlock` head).
-pub fn check_keeper_shape(value: &JsonValue) -> Result<(), ConfigError> {
-    let arr = match value {
-        JsonValue::Array(arr) => arr,
-        _ => return Err(config_error("\"keeper\" must be an array of entries")),
-    };
-    for (i, elem) in arr.iter().enumerate() {
-        if !matches!(elem, JsonValue::Object(_)) {
-            return Err(crate::config_errorf!(
-                "\"keeper\" entry {} must be an object",
-                i
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// Shape check for the `webui` block: object only. Deeper validation

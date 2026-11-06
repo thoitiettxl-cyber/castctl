@@ -451,6 +451,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "castctl-keeper"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "castctl-config",
+ "castctl-gateway",
+ "castctl-transport",
+ "chrono",
+ "futures-util",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "rand",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
+]
+
+[[package]]
 name = "castctl-log-redact"
 version = "0.1.0"
 dependencies = [

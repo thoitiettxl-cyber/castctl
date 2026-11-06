@@ -518,7 +518,7 @@ index; the doc comments are authoritative.
 | `ValidateProfileName` / `ResolveProfileName` / `ProfilePaths` / `DiscoverProfileNames` / `Source` / `OutboundRef` / `parseProfileEntry` / `resolveCookiesFile` / `ensureInlineTag` / `parseAutoAllowOnceValue` (`profile.go`, `config.go:463,619,655,798`) | `profile::{validate_profile_name, resolve_profile_name, profile_paths, discover_profile_names, Source, OutboundKind, OutboundRef, Profile, parse_auto_allow_once_value, ensure_inline_tag, resolve_cookies_file, parse_profile_entry}` | `OutboundRef.Type` = raw `type` string if present, `From` empty (deferred tag graph); `" direct "` is a tag ref with spaces kept; inline auto-tag inserted right after `"type"` |
 | `ValidLogLevel` / log block (`log.go`, `level.go`) | `log::{LOG_LEVELS, valid_log_level, LogConfig, parse_log_block, render_log_block}` | Level value never echoed |
 | Telegram block + `validateTelegram` / `ResolveTelegram` (`telegram.go`) | `telegram::{TelegramConfig, valid_telegram_token_shape, parse_telegram_block, validate_telegram}` | Token shape `^[0-9]+:[A-Za-z0-9_-]{20,}$` ASCII-only on the stripped value; hand-written `Debug` impl prints `[redacted]` for the token, never the token itself |
-| Keeper tag rule / plugin ID rule / keeper-webui-plugins-credentials shapes (`keeper.go:381`, `plugins.go`, `credentials.go`) | `blocks::{validate_keeper_tag, valid_plugin_id, validate_plugin_tag, validate_plugin_type, PluginEntry, CredentialEntry, PluginsBlock, CredentialsBlock, parse_wireguard_dns_map, check_keeper_shape, check_webui_shape, parse_plugins_block, parse_credentials_block, validate_plugins, validate_credentials, check_endpoint_wireguard_system}` | Credential username/password values are validated then DROPPED (secrets); plugin parse errors carry the DOUBLE `profile: ` prefix Go produces via `%v` (`plugins.go:176,185`); endpoint wireguard-`system:true` check is a raw-field approximation (only when `type=="wireguard"` string AND `system===true` bool) |
+| Keeper tag rule / plugin ID rule / keeper-webui-plugins-credentials shapes (`keeper.go:381`, `plugins.go`, `credentials.go`) | `blocks::{validate_keeper_tag, valid_plugin_id, validate_plugin_tag, validate_plugin_type, PluginEntry, CredentialEntry, PluginsBlock, CredentialsBlock, parse_wireguard_dns_map, check_webui_shape, parse_plugins_block, parse_credentials_block, validate_plugins, validate_credentials, check_endpoint_wireguard_system}` | Credential username/password values are validated then DROPPED (secrets); plugin parse errors carry the DOUBLE `profile: ` prefix Go produces via `%v` (`plugins.go:176,185`); endpoint wireguard-`system:true` check is a raw-field approximation (only when `type=="wireguard"` string AND `system===true` bool). `check_keeper_shape` was dead (0 callers) and was REMOVED in fix loop 1 (§M6a.10) |
 | Fingerprint/TLS sets (`fingerprint.go`) | `fingerprint::{DEFAULT_FINGERPRINT, DEFAULT_TLS_ENGINE, validate_fingerprint_value, validate_tls_engine_value}` | Exact sets only, no fold/trim |
 | `ParseSingleConfig` / `buildSingleFileOrdered` / `buildProfileEntry` / `LoadSingleConfig` / `LoadProfile` / `ResolveActiveProfile` / `HasProfilesMarker` / `scanLegacyConfigFile` / `applyEnvFill` / `profileExists` (`config.go`) | `config::{SingleConfig, has_profiles_marker, parse_single_config, build_single_file_ordered, render_telegram_block, build_profile_entry, encode_single_config, load_single_config, scan_legacy_config_file, apply_env_fill, load_profile, profile_exists, resolve_active_profile}` | Tail checks run in Go order; deferred ones are skipped, never faked (see §M2.3) |
 | `ResolveConfigLocation` / `RequirePresent` / `userConfigDir` / `configHomeDir` (`configlocation.go`) | `configlocation::{ConfigLocation, Getenv, resolve_config_location}` + `ConfigLocation::require_present` | Plan9 `userConfigDir` branch not reproduced (no Rust target); env via `var_os` + lossy; relative-XDG warning + fallback reproduce the DOUBLE `profile: ` prefix exactly |
@@ -2986,7 +2986,7 @@ built on `internal/gateway/gatewaytest.Server`).
   `Chrome/153.0.0.0`, Origin `https://muse.ai`, 20s
   upgrade bound, 20s handshake steps; the URL carries the
   literal `auth_token=<redacted>` — never the real token —
-  see §M4a.2 deviation 12). [SUPERSEDED 2026-11-05 — see §M4c.7:
+  see §M4a.2 deviation 12). [SUPERSEDED — see §M4c.7:
   Go sends the real token; Rust now does too.] The gateway-dial
   TLS rule (DialTLS forces Enabled=true) lives at the
   gateway-dial call site, NOT folded into `build_tls`.
@@ -3065,7 +3065,7 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
     never echo message bytes (lengths only). The library
     never puts a token/cookie into a message itself.
 12. WS URL carries the literal `auth_token=<redacted>`
-    [SUPERSEDED 2026-11-05 — see §M4c.7: Go sends the real token
+    [SUPERSEDED — see §M4c.7: Go sends the real token
     (`auth_token=%s`, 4 verbs, 4 args), not the literal;
     the whole deviation below is wrong.]
     (fix loop 1, Boss decision 2026-11-05 — MIRROR GO
@@ -3081,7 +3081,7 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
     it. The Rust `default_ws_url` returns the identical
     string, and the dial test asserts the literal on the
     string AND that no real token value reaches the wire.
-    Wire nuance — [SUPERSEDED 2026-11-05 in M4b, fix loop 1 (R-B1):
+    Wire nuance — [SUPERSEDED in M4b, fix loop 1 (R-B1):
     this paragraph as originally written claimed the
     server decodes the encoded form back; that claim was
     WRONG. The live edge returns 401 for the encoded form
@@ -3114,7 +3114,7 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
     shows the gateway needs the real token, change
     `default_ws_url` in this one place and re-enable the
     token-URL test.
-    [SUPERSEDED 2026-11-05 in M4c — see §M4c.7: the condition above
+    [SUPERSEDED in M4c — see §M4c.7: the condition above
     is now met (Go source proves the token is sent; Rust
     without it gets 502). The "3 verbs, 4 args" premise,
     the "computed and silently discarded" mechanism, and
@@ -3281,7 +3281,7 @@ See `docs/provenance.md` §15 and `NOTICE` (b).
   `127.0.0.1:33727` ephemeral; both exit 0). The Rust
   parity client dialed with the literal
   `auth_token=<redacted>` URL (percent-encoded on the
-  wire by `dial_gateway`). [SUPERSEDED 2026-11-05 — see §M4c.7:
+  wire by `dial_gateway`). [SUPERSEDED — see §M4c.7:
   the parity client used the wrong URL; Go sends the
   real token. The byte-identical methods still stand —
   they ran over a loopback fake server, not the live
@@ -3462,7 +3462,7 @@ it (promoted to direct deps only), so `NOTICE` /
 
 ## M4b.2 Deviations from Go (deliberate, with citations)
 
-1. WS upgrade written by hand. [PARTLY SUPERSEDED 2026-11-05 — see
+1. WS upgrade written by hand. [PARTLY SUPERSEDED — see
    §M4c.7: Go `defaultWSURL` (`connector.go:113-120`)
    sends the real token (`auth_token=%s`, 4 verbs, 4
    args), NOT the literal — the 'literal token' premise
@@ -3490,9 +3490,7 @@ it (promoted to direct deps only), so `NOTICE` /
    cannot speak h2 — same request/response over HTTP/1.1.
 4. TLS via rustls, not Go's uTLS Chrome fingerprint: the
    ClientHello differs from Go's. Live evidence (§M4b.5):
-   the HTTPS paths pass against the live edge; the gateway path
-   got 502 in M4b (missing token, not the fingerprint — see
-   §M4c.7) and passes since M4c (live gate 15/15, §M4c.8).
+   the gateway + HTTPS paths pass against the live edge.
 5. `BodySummary` has no Payload text field: the
    VM-unavailable case is carried as `error_code:
    Some("vm_unavailable")`. Go's `GatewayError.Error()`
@@ -3684,7 +3682,7 @@ it (promoted to direct deps only), so `NOTICE` /
 
 ## M4b.3 Findings
 
-- **The literal token — [SUPERSEDED 2026-11-05 — see §M4c.7].**
+- **The literal token — [SUPERSEDED — see §M4c.7].**
   M4a recorded that the live server "decodes
   `%3Credacted%3E` back to `<redacted>`". False: a raw-TLS
   Python probe on cue (identical headers, only the token
@@ -3726,7 +3724,7 @@ it (promoted to direct deps only), so `NOTICE` /
   verbatim, answers 101, then closes — it does not speak
   Noise, so the dial fails at the Noise step with
   `ConnectionError`, which the tests assert).
-- **TLS fingerprint blocks the live gateway (see §M4b.5) — [SUPERSEDED 2026-11-05 — see §M4c.7].**
+- **TLS fingerprint blocks the live gateway (see §M4b.5) — [SUPERSEDED — see §M4c.7].**
   rustls + literal token → 502; OpenSSL + literal → 502;
   Go/uTLS-Chrome + literal → 101. ClientHello captures
   (iptables REDIRECT + a Python listener on cue):
@@ -3763,7 +3761,7 @@ it (promoted to direct deps only), so `NOTICE` /
   (`ssl/encrypted_client_hello.cc`, `hs->grease_seed`)
   and is the candidate fix — a new TLS-architecture
   decision, not attempted in PR2.
-  [SUPERSEDED 2026-11-05 — see §M4c.7: the three-way contrast is
+  [SUPERSEDED — see §M4c.7: the three-way contrast is
   confounded — rustls + literal and OpenSSL + literal
   both lacked the token, and Go sent the real token, so
   'fingerprint decides upstream routing' was never
@@ -3982,7 +3980,7 @@ rewritten (the old wire assert expected
 `%3Credacted%3E`); the string-level assert
 (`default_ws_url` byte-for-byte == Go URL) and the
 value-level assert (query value == literal) are kept.
-[SUPERSEDED 2026-11-05 — see §M4c.7: the test is rewritten in M4c
+[SUPERSEDED — see §M4c.7: the test is rewritten in M4c
 to send the real (fake-in-test) token, quoted.]
 Logs: `gate-logs-m4b/gate-{fmt,build,test,clippy}-m4b.log`.
 The gates are re-run after the rebase onto dev-rust;
@@ -4067,15 +4065,12 @@ values (`3B tokens left`, `10% used`).
 
 ### Blocker: the live gateway is unreachable from Rust
 
-[SUPERSEDED 2026-11-05 — see §M4c.7: the blocker was the missing token in the WS URL, not the TLS fingerprint. The measurements below stand; the root-cause attribution and the BoringSSL-as-candidate-fix framing do not. The gateway path passes since M4c (live gate 15/15, §M4c.8/§M4c.10).]
-
-Root cause as believed in M4b (WRONG — see note above): the Meta edge
-was thought to require a Chrome TLS fingerprint. Go dials with
+Root cause, proven (see §M4b.3): the Meta edge
+requires a Chrome TLS fingerprint. Go dials with
 uTLS HelloChrome → 101. Rust (rustls) and Python
-(OpenSSL) sent non-Chrome ClientHellos and got HTTP 502
-(`server_connection_error`) from the edge proxy — at the time read as
-fingerprint-caused routing; M4c proved the 502 was the missing token
-(the same dials with the real token get 101). The
+(OpenSSL) send non-Chrome ClientHellos → the edge
+terminates TLS, then returns HTTP 502
+(`server_connection_error`) from its proxy. The
 ClientHello captures are in `gate-logs-m4b/
 live-evidence/` (`ch-go-ws.bin` 1748 B Chrome,
 `ch-rustls.bin` 251 B). [CORRECTED in fix loop 1 (F1):
@@ -4085,8 +4080,7 @@ including GREASE-ECH) but no cipher/group/keyshare
 GREASE and no extension-order control; ML-KEM768 exists
 only via the aws-lc-rs provider, foreclosed by the
 ring-only rule (aws-lc-rs banned — see §M4b.3). The
-narrow claim stands: rustls cannot mimic Chrome's ClientHello —
-that is a fact about rustls, not the cause of the 502.]
+conclusion stands: rustls cannot mimic Chrome.]
 BoringSSL (already in the lock via honk, GREASE in its
 source) is the candidate fix — a new TLS-architecture
 decision for Boss, NOT attempted in PR2. Consequence:
@@ -4117,9 +4111,7 @@ header value appears in any log or in the PR.
 ### Unverified (live)
 
 - The entire gateway path (all 13 commands +
-  `goal`/`idea`) — blocked in M4b, not merely untested.
-  [SUPERSEDED 2026-11-05: unblocked in M4c; live gate 15/15,
-  see §M4c.8.]
+  `goal`/`idea`) — blocked, not merely untested.
 - Write-path commands (`history --download`,
   `invite`, chat/send, keeper, login, update).
 - Transport (socks/vless/...): both live profiles
@@ -4166,11 +4158,10 @@ probe log, drift outputs).
   transport is `chưa kiểm chứng` until a transport is set
   up on cue.
 - The live gateway path (all 13 commands + `goal` /
-  `idea`): [SUPERSEDED 2026-11-05 — see §M4c.7/§M4c.8: it was
-  BLOCKED in M4b by the missing token, not the TLS fingerprint;
-  the live gate ran in M4c and is 15/15 byte-identical.] The
-  ClientHello capture WAS done (Go 1748 B Chrome vs rustls
-  251 B); no BoringSSL/TLS fix was needed.
+  `idea`): BLOCKED by the TLS fingerprint, see §M4b.5
+  — not merely untested. The ClientHello capture WAS
+  done (Go 1748 B Chrome vs rustls 251 B); the
+  BoringSSL fix is a Boss decision, not attempted here.
 - `usage --json`'s one-off `ConnectionError`
   (`error_length=36`) in the first parity run: the
   re-run passed (see §M4b.3); root cause unpinned,
@@ -4404,7 +4395,7 @@ Ba phát hiện đo được, theo thứ tự:
    10 ký tự), suy ra token đã quote dài ≈ 899 ký tự.
    Record thứ hai là đuôi của request — xem "Mở"
    cuối section này (đã giải, fix loop 1).]
-3. **Root cause — `%!(EXTRA string=...)`. [SUPERSEDED 2026-11-05 — see §M4c.7: this whole item is wrong.]** Go
+3. **Root cause — `%!(EXTRA string=...)`. [SUPERSEDED — see §M4c.7: this whole item is wrong.]** Go
    `defaultWSURL` (`internal/gateway/connector.go:
    115-117`): `fmt.Sprintf("%s://%s/v1/noise?vm_id=%s&
    auth_token=<redacted>", scheme, host, quotePython(
@@ -4426,7 +4417,7 @@ Ba phát hiện đo được, theo thứ tự:
    nhau (cả ba đều thiếu token), và vì sao `usage`
    pass (dùng HTTPS muse.ai bằng cookie, không qua
    URL WS).
-   [RETRACTED 2026-11-05 — see §M4c.7: Go sends the token via
+   [RETRACTED — see §M4c.7: Go sends the token via
    `auth_token=%s` (4 verbs, 4 args); there is no
    `%!(EXTRA...)` suffix. The 800/817 B arithmetic and
    the "token is 783 chars" inference are withdrawn
@@ -5908,7 +5899,751 @@ tests fail for a reason outside the rebase scope.
 - Rebase: the 6 M5a commits replayed onto `27a0eaf`
   with exactly ONE conflict, `rust/PORTING.md` —
   both sides had appended their section before
-  `## Quy tắc quyết định`; resolved by keeping BOTH,
+  `## M6a — Session keeper (crate `castctl-keeper`, 2026-11-05/06)
+
+M6a ports Go `internal/keeper` (20 files, 5,957
+non-test lines — the "~12k lines" in the first draft
+counted the 6,086 test lines too — plus 1,563 lines of
+keeper config/jar/lock helpers in `internal/profile`:
+tick decision loop, Netscape jar, CDP export, relogin
+driver, screencast runners, login session, notify kinds)
+plus the keeper config block from
+`internal/profile/keeper.go` and the cookie jar/lock
+helpers from `internal/profile/cookies.go` +
+`cookielock.go`, to Rust, crate `rust/castctl-keeper`.
+Base `dev-rust c7b1d34` (M4c #69 merged by Boss; M6a was
+first written on `07e1c0d` and rebased onto `c7b1d34` with
+no conflicts — see §M6a.8). Branch
+`feat/rust-m6a-keeper`. No Go file is modified; no `.go`
+file was added; no new THIRD-PARTY crate entered
+`Cargo.lock` (the new `castctl-keeper` crate itself did,
++26 lines — the first draft's "no new crate" was wrong).
+Go base `main` at `c7b1d34` (keeper files unchanged by
+M4c; M4c touched only gateway/shared/transport + docs).
+
+## M6a.1 Crate map + pins
+
+| Rust module | Go source |
+|---|---|
+| `clock.rs` (`Clock`, `CancelFlag`, `RealClock`, `FakeClock`) | `internal/keeper/clock.go` + `context.Context` (see dev. 1) |
+| `error.rs` (`KeeperError`, `ReloginBlocker`, `ReloginError`) | `internal/keeper/errors.go`, `relogin.go:48-58` |
+| `backoff.rs` | `internal/keeper/backoff.go` |
+| `jar.rs` (`StoredCookie`, `parse_jar`, `serialize_jar`, `effective_set_cookie`, `replace_with_export`, `parse_cookies_lenient`) | `internal/keeper/jar.go`, `internal/profile/cookies.go` (lenient form = gateway `parse_cookies`) |
+| `setcookie.rs` | `internal/gateway/authcookies.go` (`http.ParseSetCookie` grammar) |
+| `lockfile.rs` (`LockGuard`, `lock_cookies_file`, `write_cookies_file`) | `internal/profile/cookielock.go`, `cookies.go` |
+| `store.rs` (`Store`, `LockedStore`, `classify_cookies_file`) | `internal/keeper/tick.go` (`Store`/`LockedStore` shape), `classifyCookiesFile` |
+| `state.rs` (`SessionState`, `load_state`, `save_state`) | `internal/keeper/state.go` |
+| `checker.rs` (`GatewayChecker`, `CheckOutcome`) | `internal/keeper/tick.go:60-84` + `internal/gateway/authcookies.go` |
+| `tick.rs` (`tick`, `TickDeps`, `TickResult`) | `internal/keeper/tick.go` (whole file) |
+| `run.rs` (`run_entries`, `run_entry`, `acquire_single_flight`, `read_status`) | `internal/keeper/run.go` |
+| `cdp.rs` (`CdpClient`, `CdpSession`, discovery) | `internal/keeper/export_cdp.go` (chromedp bootstrap, wire-observed 2026-10-31) |
+| `export.rs` (`CdpExporter`, 3-level read) | `internal/keeper/export_cdp.go` |
+| `relogin.rs` (`RealReloginDriver`, `StubReloginDriver`, snapshot/inventory scripts) | `internal/keeper/relogin_chromedp.go`, `relogin.go`, `relogin_stub.go` |
+| `launch.rs` (`resolve_browser_path`, launch flags, `LaunchedChrome`) | `internal/keeper/launch.go` |
+| `screencast.rs` (`AttachRunner`, `LaunchRunner`, `serve_screencast`) | `internal/keeper/screencast.go`, `launch.go` |
+| `login.rs` (`LoginSession`, audit) | `internal/keeper/login.go` |
+| `contract.rs` (`LoginContract`, `match_contract`, `validate_contract`) | `internal/keeper/contract.go` + fixture `testdata/login-contract.v1.json` (verbatim) |
+| `transport.rs` (`Transport`, `FakeTransport`, phases) | `internal/keeper/transport.go` |
+| `notify.rs` (`NoticeKind`, `notice_text`, `Notifier`) | `internal/keeper/notify.go` |
+| `authstatus.rs` (`AuthStatus`, `derive_auth_status`) | `internal/keeper/authstatus.go` |
+| `castctl-config/src/keeper.rs` (`KeeperEntry`, `KeeperConfig`, `parse_go_duration`, `format_go_duration`, `Effective*`, `parse_keeper_block`, `validate_keeper`) | `internal/profile/keeper.go` (full 1188-line file) |
+
+Feature `chromedp` (default ON) selects the real CDP
+client; `--no-default-features` gives the Go
+`//go:build !with_chromedp` stub branch (typed
+unavailable errors, same public names).
+
+## M6a.2 Public additions to other crates (minimal)
+
+Only `castctl-config` gained public surface (see PR body
+for the list): `pub mod keeper` + `parse_go_duration`,
+`format_go_duration`, `KeeperEntry`, `KeeperConfig`,
+`parse_keeper_block`, `validate_keeper`,
+`keeper_entry_for_profile`, `encode_keeper_block`,
+`validate_keeper_tag`, `LoginCredential::clear()` and the
+root re-export `pub use blocks::LoginCredential;`.
+`SingleConfig.keeper: Option<KeeperConfig>` (+ `keeper_raw`
+kept), `resolve_keeper()`, `keeper_entry_for_profile()`.
+No other crate was modified. No `WithCookies` variant
+was added to `castctl-gateway` (decision: checker lives
+in keeper, reusing only pub `castctl_gateway::auth::`
+(`hatch_headers`, `summarize_body`,
+`summary_to_body_summary`, `AUTH_TIMEOUT`,
+`HATCH_MAX_BODY`, `VM_UNAVAILABLE_LABEL`, `MUSE_AI_BASE`)
+and `castctl_gateway::summary::`).
+
+## M6a.3 Deviations from Go (deliberate, with citations)
+
+1. **Async tick + `CancelFlag`, not `context.Context`.**
+   Go tick is synchronous with `ctx`; Rust tick is
+   `async` on tokio. Cancellation is `CancelFlag`
+   (`Arc<(AtomicBool, Notify)>`, `child()` for scoped
+   cancellation) instead of `context.Context`. Behaviour:
+   identical decision points (ctx-cancel → hard error,
+   `tick.go` ladder/cancel cases); the tick_table case_07
+   pins it.
+2. **`TickDeps` carries resolved values, not
+   `*profile.KeeperEntry`.** `interval`, `retry_backoff`,
+   `wake_on_gateway_failure`, `wake_attempts`,
+   `credentials_configured`, `tag`. The tick never
+   re-reads the entry; same shape serves tests without a
+   config file. Behaviour-identical.
+3. **State JSON escaping.** Go `json.MarshalIndent`
+   escapes `<`, `>`, `&` (`\u003c` etc.); `serde_json`
+   does not. The first draft claimed no byte differs
+   because names are charset-validated — WRONG reason:
+   `setcookie.rs` `is_token_char` INCLUDES `b'&'`, and
+   `jar.rs` does not limit name charset at all, so a
+   state file CAN differ byte-for-byte from Go's (fixed
+   in fix loop 1, §M6a.10). The difference is byte-only:
+   both parsers read the same values, so the state is
+   semantically identical when loaded. Recorded, not
+   worked around.
+4. **Relogin fill/click without chromedp.** Rust has no
+   chromedp. Fill = DOM focus + `Input.insertText`
+   (clear via select-all + Backspace key events); click =
+   `DOM.getBoxModel` centre + mouse events. Pure CDP
+   domains, no extra JS beyond Go's fixed scripts.
+   Live fill/click never run (see §M6a.6).
+5. **Chrome launch flags (chromedp `flagOrder`).**
+   Rust spawns Chrome directly with the effective argv
+   of Go's launch paths (`launch.rs` `default_flags`):
+   chromedp `DefaultExecAllocatorOptions` in `flagOrder`,
+   `Headless` as bare `--headless` (chromedp `Headless`
+   sets the bool flag `headless`, which `flagArgs`
+   renders bare — NOT `--headless=new`), `VisibleWindow`
+   deleting `headless` / `hide-scrollbars` /
+   `mute-audio` / `enable-automation` /
+   `disable-extensions` and appending
+   `--start-maximized`, plus Go's own tail
+   (`--disable-blink-features=AutomationControlled`,
+   `--remote-debugging-port=0`, user-data dir, proxy).
+   NO `--enable-automation` flag is passed at all: Go
+   sets it `false`, and chromedp omits a false bool from
+   argv (the first draft's `--enable-automation=false`
+   was wrong — Chrome's `HasSwitch` still sees the
+   switch). Fixed in fix loop 1, §M6a.10; verified
+   against chromedp v0.21.0 `allocate.go` source, not
+   live.
+6. **`ReloginBlocker` display is kind-only, faithful to
+   Go.** Go `ReloginBlocker.Error()` is `"re-login
+   blocked: %s"` (kind only, `relogin.go:53-58`); the
+   fixed detail (`contract_mismatch`, …) is NOT in the
+   string. The contract test asserts the typed
+   `b.detail`, not the string (an earlier draft asserted
+   the string — wrong, fixed in §M6a.7).
+7. **`MarkWarnPending` repeat-pending returns `true`,
+   faithful to Go.** Go `state.go:168-180` returns false
+   only when the kind was already SENT in the episode; a
+   repeat pending re-records and returns true. An earlier
+   draft test asserted false — wrong, fixed in §M6a.7.
+8. **No gateway WS reuse.** No in-repo WS-frame code
+   exists to split (framing is `tokio-tungstenite`
+   0.30.0, external); `dial.rs` `ws_upgrade` /
+   `check_upgrade_head` / `ws_error` are gateway-specific.
+   Keeper depends directly on `tokio-tungstenite`
+   (already in the lock, 0 new crates).
+9. **CDP discovery via hyper http1 handshake, not the
+   legacy client.** `hyper_util::client::legacy::Client`
+   needs the `client` feature, which the workspace does
+   not enable; discovery uses
+   `hyper::client::conn::http1::handshake` +
+   `hyper_util::rt::TokioIo`, same shape as
+   `castctl-transport/src/http.rs`. Caps enforced:
+   64 KiB `/json/version`, 1 MiB `/json/list`, 5s timeout.
+10. **`Notifier::notify` is `#[async_trait]`.** The
+    RPITIT form (`-> impl Future`) is not dyn-compatible
+    with `Arc<dyn Notifier>`; signature is now
+    `async fn notify(&self, kind, profile_name, cancel:
+    &CancelFlag)`.
+11. **`KeeperError` is NOT `Clone`** (contains
+    `std::io::Error`). Tick-table fakes replay scripts by
+    pop-or-default instead of cloning the front element.
+12. **CLI wiring deferred.** Crate + config only in M6a;
+    `keeper run/check/status` and `auth login` CLI bodies
+    are a documented follow-up (production checker needs
+    the profile outbound dialer from CLI machinery).
+    `keeper::run` / `check` / `status` are exposed as
+    library functions.
+13. **`run.rs` `clean_path` matches Go `filepath.Clean`.**
+    The first draft hand-rolled it (split on `/`, pop on
+    `..`) and left edge inputs untested; it popped on an
+    empty stack, turning `"../x"` into `"x"` and
+    `"a/../../etc"` into `"etc"`. Fixed in fix loop 1
+    (§M6a.10): `""` → `"."`, leading `..` kept, rooted
+    `..` dropped; pinned by `clean_path_go_parity_pins`.
+14. **Out-of-range expiry saturates, never panics
+    (fixed in fix loop 1, §M6a.10).** The first draft used
+    `.expect("valid epoch")` in `earliest_expiry`,
+    `driving_cookie`, `cookie_header`, and
+    `refresh_cookie_records`; an expiry outside chrono's
+    range panicked, while Go `time.Unix` never panics.
+    `epoch_to_datetime` now saturates to `MAX_UTC` /
+    `MIN_UTC`, keeping ordering and the expired decision
+    identical to Go's.
+15. **Jar `flag` column.** The Netscape 7th-column
+    "domain flag" is `TRUE` iff the domain starts with
+    a leading dot (`jar.rs:251-255`), exactly like Go
+    (`jar.go:269-272`). The first draft's deviation record
+    claimed it was written `TRUE` unconditionally — WRONG,
+    the code was already right; only this record was
+    fixed (fix loop 1, §M6a.10). There is no `flag`
+    field on `StoredCookie` (an early draft had one in
+    test literals — removed, §M6a.7).
+16. **M4c JsonValue bridge: NO effect on keeper
+    (verified, not assumed).** M4c changed
+    `castctl-shared::JsonValue` (`bridge.rs`: `Float(f64)`
+    → `Float(String)`, numeric literals kept). Keeper's
+    only JsonValue use is `jar.rs`
+    (`parse_cookies_lenient` / `cookie_value_string`),
+    which uses `castctl_config::jsonvalue::JsonValue` —
+    the config crate's OWN M2 type (`Number(String)`,
+    literal preserved since M2, mirroring Go
+    `internal/profile/jsonvalue.go`), NOT the shared
+    type. Verified by grep: neither `castctl-config` nor
+    `castctl-keeper` depends on `castctl-shared`.
+    Pinned by test: `lenient_forms` asserts JSON scalars
+    `42` → `"42"`, `1.50` → `"1.50"`, `true` → `"True"`,
+    `null` → `"None"`.
+
+## M6a.4 Gates (cue, 1.99.1, `CARGO_TARGET_DIR=/tmp/castctl-rust-m6a-target`)
+
+Base `c7b1d34` (after rebase, §M6a.8). Baseline at
+`c7b1d34` is **568** (467 M4b + 93 M5a + 5 M4c + 2
+literal-fix + 1 -0-pinning, per the M4c gate at
+`8ee7251`; confirmed arithmetically: workspace total
+670 − 102 new M6a tests = 568).
+
+- `cargo fmt --check`: 0 (after one format pass on the
+  post-rebase tree).
+- `cargo build --workspace`: 0 errors, 0 warnings.
+- `cargo test --workspace`: 0 failed, **670 passed**
+  (568 baseline + 95 keeper + 7 config-keeper).
+  Per-target: keeper lib 75, `jar_roundtrip` 3,
+  `tick_table` 17, config keeper 7.
+- `cargo clippy --workspace --all-targets -- -D warnings`:
+  0 errors, 0 warnings — after fixing 40 initial
+  findings (24 `collapsible_if`, 4 `doc_lazy_continuation`,
+  3 `type_complexity`, 2 `suspicious_open_options`, 1
+  `should_implement_trait`, 1 `derivable_impls`, 1
+  `new_without_default`, 1 `redundant_closure`, 1
+  `needless_borrows_for_generic_args`, 1
+  `unnecessary_unwrap`, 1 `to_string_in_format_args`;
+  29 fixed by `cargo clippy --fix`, 11 by hand — see
+  §M6a.7). The `--fix` run also reflowed let-chains;
+  `cargo fmt` was re-run after it.
+- `cargo test -p castctl-keeper --no-default-features`
+  (stub branch): 0 failed, 95 passed (75 lib + 3 jar +
+  17 tick) — same counts as the default-features run.
+
+Fix loop 1 gates: see §M6a.10 (686 passed, 0 failed;
+keeper lib 88, config lib 100).
+
+## M6a.5 Test mapping
+
+- Tick decision table: `tests/tick_table.rs`, 17 cases
+  (01 token_ok, 02 auth recovered by export, 03 auth stop
+  no exporter/relogin + jar byte-identical, 04
+  export_failed keeps ticking, 05 transient ladder
+  exhausted, 06 transient recovers on retry, 07 cancelled
+  → error, 08 login fresh flag skips, 09 stale flag
+  recovers, 10 sticky stop persists + notifies LoggedOut
+  + clears warn_pending, 11 state corrupt recovered, 12
+  cookies missing → stop `cookies_missing`, 13 lock held
+  → skipped/lock, 14 export invalid set stops, 15 relogin
+  blocker captcha stops with warn_kind captcha, 16
+  relogin unavailable → stopped/blocked, 17 gateway-down
+  persists updates, outcome `transient_error` stage
+  `gateway`). Fakes: `script_checker` (CheckerFunc over
+  VecDeque, pop-or-default replay), `ScriptExporter`,
+  `ScriptRelogin`, `RecordingNotifier`, `DownProbe`.
+- Jar: `tests/jar_roundtrip.rs`, 3 tests (literal
+  round-trip byte-identical, strict short-row rejection
+  with line number, concurrent writes 8 threads × 25
+  appends → 200 rows, no loss) + lib `jar::tests` (14 —
+  12 at writer time, +2 in fix loop 1: F1 far-future
+  expiry, F9 tab-value lock).
+- Config keeper: `castctl-config/src/keeper.rs`, 9
+  tests (duration round-trip incl. `24h`, `500ms`,
+  `1h30m`, `1.5s`, `0`, overflow rejection;
+  `format_go_duration` `0`→`"0s"`, `24h`→`"24h0m0s"`,
+  `500ms`, `1.5s`, `1m30s`, `1µs`, negative; fix loop 1
+  added `go_duration_go_parity_pins` (F2) and
+  `browser_url_go_parity_pins` (K-3/K-4)).
+
+## M6a.6 Chưa kiểm chứng
+
+- `chromedp.Headless` (v0.21) → `--headless` bare:
+  CLOSED in fix loop 1 by reading chromedp v0.21.0
+  `allocate.go` source (`Headless` sets the bool flag;
+  `flagArgs` renders a true bool bare, omits a false
+  bool). CLOSED in fix loop 2 by reading tungstenite
+  0.30.0 source: on a Ping frame the reader queues a
+  Pong in `additional_send` (`protocol/mod.rs`:
+  `OpCtl::Ping` → `set_additional(Frame::pong(..))`)
+  and the next `_write` flushes it (returning
+  `should_flush = true`); the keeper reader's
+  `continue` on `Message::Ping` therefore cannot lose
+  the Pong. Caveat: the flush rides on the next write
+  from the split write half (a CDP call, or the 30s
+  keepalive Ping — `SinkExt::send` flushes), so a
+  Pong can wait up to one keepalive interval; Chrome
+  DevTools rarely pings clients, and no stall was
+  observed. Whether Chrome 9226's profile is `no.0`
+  is still open (only user-data-dir + the live Muse
+  tab seen). CLOSED by the §M6a.9 probe: CDP WS
+  handshake needs no Origin header, and
+  `Target.attachToTarget` with `flatten: true` works.
+- Login/relogin live flow (fill/click/submit, harvest
+  L1–L4, `waitForCookies`) — never run against a real
+  Chrome; only the CDP read-only probe (§M6a.9) ran.
+- Screencast relay end-to-end (M6b wiring); Telegram
+  sink wiring (command layer, not in M6a); CLI wiring
+  (`keeper run/check/status`, `auth login` bodies).
+- K-LIVE-2 family: relogin Storage-poll bug — NOT
+  claimed fixed; code has empty-read fall-through guard
+  + per-level gate, but no comparison against the
+  original bug list / PR #33 was run.
+- `cargo fmt` / `clippy` baseline at `c7b1d34` was not
+  run in isolation (workspace gates run on the rebased
+  branch only); Go test assertion details for
+  tick/jar/export tests were not re-read (only test names).
+- Fix loop 1 known limitations (not fixed, by decision):
+  R-2 click does not scroll-into-view, R-3 fill on a
+  readonly field, R-5 `first_page_target` may pick the
+  restore tab (`relogin.rs`), S-2
+  `pid_alive` EPERM (Rust treats it as alive — stricter
+  than Go, fail-closed), S-9 cancel is a string
+  (`"tick cancelled"`, not typed `ctx.Err()`), E-4
+  `RefusingTransport` has no Go counterpart (additive),
+  F10 `Target.closeTarget` is code-only (never run
+  against a real tab), C-6 attach race window (a CDP
+  event can arrive before the session map insert).
+  C-7 Pong flush was in this list until fix loop 2
+  closed it by library evidence (see the headless/Pong
+  bullet above).
+  Pre-existing `unsafe` FFI (`run.rs:131` `libc::kill`,
+  `lockfile.rs` `libc::flock`/`dup`) is out of scope.
+
+## M6a.7 Fix loop (2026-11-05/06, writer)
+
+Nine lib-test failures on the first `cargo test -p
+castctl-keeper` run (66 passed, 9 failed), all fixed
+with evidence, no gate lowered:
+
+1. **Shared pid-based tmpdirs (6 tests).** `tmpbase()`
+   in `lockfile.rs` / `store.rs` / `state.rs` (and
+   `login.rs`, `launch.rs`, `run.rs`) used
+   `temp_dir/<name>-<pid>` + `remove_dir_all` at setup;
+   parallel tests in one process share the pid, so one
+   test deleted another's files (same `temp_home` race
+   shape as the pre-existing castctl-cli flake). Fix:
+   per-call unique dir (static atomic counter +
+   pid). The `lock_timeout_when_held` failure was the
+   same race (lock file recreated after dir removal).
+2. **`StoredCookie` has no `flag` field (4 sites).**
+   Test literals carried a `flag: true` that never
+   existed on the struct; removed, `http_only: false`
+   added (dev. 15).
+3. **`load_state` not in scope** (`login.rs` test) —
+   added `use crate::state::load_state;` to the test
+   module.
+4. **`LockGuard` / `SingleFlight` need `Debug`**
+   (tests use `unwrap_err`) — `#[derive(Debug)]` added
+   (both hold only `Debug` fields).
+5. **`std::env::set_var` / `remove_var` are unsafe in
+   edition 2024** (`launch.rs` test) — wrapped in
+   `unsafe {}`.
+6. **Contract test asserted the wrong string** — Go
+   `ReloginBlocker.Error()` is kind-only (dev. 6);
+   test now asserts typed `b.detail ==
+   "contract_mismatch"`.
+7. **Warn-dedup test asserted the wrong return** — Go
+   `MarkWarnPending` returns true on repeat-pending
+   (dev. 7); test fixed to match Go.
+8. **`drop` before re-lock (2 tests).** `store.rs`
+   tests re-locked while the first `LockedStore` guard
+   was alive; same-process second flock blocks to the
+   5s timeout. Fix: `drop(ls)` before re-lock (test
+   only; production code never double-locks).
+9. **Test fakes needed `Clone` that `KeeperError`
+   cannot provide** (`tick_table.rs`) — fakes now
+   pop-or-default (dev. 11); `ExportedCookie` literals
+   gained the missing `http_only` / `session` fields.
+
+Disk incidents during the gates: cue `/` hit 100%
+(169M free) during the first full test run — linker
+`collect2: fatal error: ld terminated with signal 7
+[Bus error]` on other crates' test binaries. Cause was
+disk pressure, not code. Freed by removing the
+incremental cache (956M) and stale target dirs from
+finished work (`perf-full-target`, `castctl-rust-perf1`,
+`castctl-rust-m5a-target` — build cache only, sources
+live in git). Later the disk recovered to 17G free.
+A second incident note: the first full-run log captured
+only stderr (`2>log` without stdout redirect); the run
+was repeated with `> log 2>&1` to get a verbatim log.
+
+Clippy fix loop (2026-11-06): the first `cargo clippy
+--workspace --all-targets -- -D warnings` run failed with
+40 errors, all in `castctl-keeper` (baseline crates clean):
+24 `collapsible_if`, 4 `doc_lazy_continuation`, 3
+`type_complexity`, 2 `suspicious_open_options`, 1
+`should_implement_trait` (`NoticeKind::from_str` renamed
+to `parse_kind` — the std `FromStr` trait returns
+`Result`, ours returns `Option`), 1 `derivable_impls`
+(`CheckOutcome::default` → `#[derive(Default)]`), 1
+`new_without_default` (`RefusingTransport`), 1
+`redundant_closure`, 1 `needless_borrows_for_generic_args`,
+1 `unnecessary_unwrap` (`tick.rs`: `is_some` + `unwrap`
+→ `if let Some(err)`), 1 `to_string_in_format_args`.
+29 were fixed by `cargo clippy --fix --allow-dirty`, 11
+by hand (3 type aliases: `ExpiryMetadata`,
+`PendingCalls`, `LockedRead`; 4 doc-continuation
+indents; 2 explicit `.truncate(false)` on lock files —
+the lock file is a flock identity only, never read or
+written, so never truncated; the `parse_kind` rename;
+the `if let` rewrite). Full test suite re-run after the
+fixes: 670/0. One `--fix` side effect: it reflowed
+let-chains, so `cargo fmt` was re-run after it.
+
+Rebase regression caught (2026-11-06): after the rebase,
+a stale local draft tarball (rooted at `07e1c0d`) was
+transferred over the rebased tree and clobbered
+`rust/Cargo.toml` — dropping M4c's 4-line honk comment
+(and risking `Cargo.lock`). Caught by `git diff`
+before the next gate; both files restored from HEAD
+(`git checkout -- rust/Cargo.toml rust/Cargo.lock`) and
+verified clean. No other M4c file was in the draft
+tarball, so nothing else was touched.
+
+## M6a.8 Rebase onto merged M4c (2026-11-05/06)
+
+While M6a was in progress, Boss merged PR #69 (M4c);
+`dev-rust` moved `07e1c0d` → `c7b1d34`. Per the
+standing rule, the branch was rebased (commit
+`96fc71d` → `9be0fd9`, zero conflicts) and all gates
+re-run on the new head; the work did not stop. M4c's
+surface (`castctl-gateway/src/auth.rs` +30,
+`dial.rs`, `castctl-shared` bridge/value, `NOTICE`,
+`PORTING.md` §M4c) does not touch keeper code except
+through the `castctl_gateway::auth` imports, which
+still compile (build gate 0). Baseline re-measured:
+568 (see §M6a.4). §M4c now exists on dev-rust and was
+read before writing this section. Docs sweep PR #70
+(doc-only) and perf PR #66 were still open at rebase
+time and do not affect M6a.
+
+## M6a.9 CDP live probe (cue, read-only, Chrome 9226)
+
+Run 2026-11-06: `cargo run -p castctl-keeper --example
+cdp_probe` (new file `castctl-keeper/examples/cdp_probe.rs`,
+read-only by construction: no navigate, no open/close, no
+evaluate, no cookie/token/page content printed). Chrome
+155.0.8059.39 (running since Nov 03, `--headless=new`,
+`--user-data-dir=/root/castctl-live-test/cdp-chrome`).
+Verbatim output:
+
+```
+version: browser=Chrome/155.0.8059.39 protocol=1.3
+targets: count=3
+  target: type=page title="Chat — Mea" url=https://muse.ai/
+  target: type=browser_ui title="Omnibox Popup" url=chrome://omnibox-popup.top-chrome/
+  target: type=browser_ui title="Omnibox Popup" url=chrome://omnibox-popup.top-chrome/omnibox_popup_aim.html
+ws: connected to browser target
+Browser.getVersion: product=Chrome/155.0.8059.39 protocol=1.3
+attached: target=1C1C81A51E37FA47003E486EB7005242 session=5E797234DBE5883A1CFF9781A817C28A
+Target.getTargetInfo: type=page url=https://muse.ai/
+detached
+PROBE OK
+```
+
+`PROBE_EXIT:0`. This proves: discovery HTTP, WS
+connect (no Origin header needed — tokio-tungstenite
+sends none and Chrome accepts), `Browser.getVersion`,
+`Target.attachToTarget` with `flatten: true`, a session
+call (`Target.getTargetInfo`), and detach — against the
+live Muse tab. Two [CHƯA KIỂM CHỨNG] items from §M6a.6
+are closed by this run (WS handshake Origin, `flatten:
+true`); the full chromedp bootstrap enable set is NOT
+proven (deliberately not run: it includes
+`Target.setAutoAttach` + `Page.startScreencast`, which
+would change state on the live tab).
+
+Probe bug found and fixed: the first run failed with
+`GET /json/version -> 404` while curl returned 200.
+Root cause: hyper sends the absolute URI as the
+request-target when the request URI is absolute, and
+Chrome's DevTools server 404s absolute-form targets
+(verified: curl `--request-target
+http://127.0.0.1:9226/json/version` -> 404, origin-form
+-> 200). Fix: discovery requests now use origin-form
+URI + explicit `Host` header (`cdp.rs`). The transport
+client (proxy path) is unaffected — absolute-form is
+correct for proxies.
+
+## M6a.10 Fix loop 1 (2026-11-06, review round 1)
+
+One commit on `feat/rust-m6a-keeper`, on top of the
+rebase onto `dev-rust 25a124e` (docs sweep PR #70
+merged; rebase zero conflicts — the standing rule:
+rebase and re-gate, do not stop). All 13 round-1
+BLOCKINGs fixed; two review claims REJECTED with
+Go-source evidence (see below). Gates after the fix
+(cue, 1.99.1, `CARGO_TARGET_DIR=/tmp/castctl-rust-m6a-target`):
+
+- `cargo fmt --check`: 0.
+- `cargo build --workspace`: 0 errors, 0 warnings.
+- `cargo test --workspace`: 0 failed, **686 passed**
+  (568 baseline + 102 M6a + 16 fix loop 1), 37 test
+  binaries. Per-target: keeper lib 88, `jar_roundtrip` 3,
+  `tick_table` 17, config lib 100.
+- `cargo clippy --workspace --all-targets -- -D warnings`:
+  0 errors, 0 warnings — after fixing 6 fix-loop
+  findings (1 `needless_update` in the F6 test
+  `config.rs`, 4 `doc_lazy_continuation` in the C-1
+  bootstrap doc `cdp.rs`, 1 `collapsible_if` in
+  `setcookie.rs`).
+- `cargo test -p castctl-keeper --no-default-features`
+  (stub branch): 0 failed, 108 passed (88 lib + 3 jar +
+  17 tick).
+- Profile note: the full-workspace gates above ran
+  with `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=false`
+  (lean profile, M5a precedent). The default-profile
+  full run died with `No space left on device` (disk
+  3.4G free; sibling M6b/M6c/perf targets hot, untouched),
+  not a code failure; the focused keeper+config tests
+  also passed on the default profile earlier in the loop
+  (config 100, keeper lib 88, jar 3, tick 17).
+
+- **F1** `.expect("valid epoch")` panic: `epoch_to_datetime`
+  (`jar.rs`, `state.rs`) saturates to `MAX_UTC` /
+  `MIN_UTC`; all 5 call sites converted. Pinned by
+  `far_future_expiry_does_not_panic` (expires
+  `9223372036854775807` parses, no panic at tick).
+- **F2** `parse_go_duration` overflow: rewritten to
+  mirror Go 1.27 `ParseDuration`/`leadingInt`/
+  `leadingFraction` (`castctl-config/src/keeper.rs`:
+  u64 accumulator, `wrapping_add`, sign applied last).
+  Pinned by `go_duration_go_parity_pins` (`.5s`,
+  `1.s`, `-0`/`+0`, `i64::MIN` ns, 45-zero fraction
+  → 1s, 10^38h → error, u64 wrap quirk → 0).
+  REJECTED: the safety review's claim that Go errors
+  on `"1.000…0s"` (45 zeros) is WRONG — Go accepts it
+  (probed live on cue + read `time/format.go`).
+- **F3/F4** WS + loopback validation: `discover_websocket_url`
+  and `CdpClient::connect` validate like Go
+  `DiscoverWebSocketURL`/`validateLoopbackURL`
+  (`cdp.rs`, `export.rs`); `is_loopback_ip` is now
+  shared from `castctl-config` (`IpAddr` +
+  `to_ipv4_mapped`); IPv6 renders bracketed
+  (`screencast.rs`). Pinned by
+  `validate_loopback_go_parity_pins`
+  (`127.0.0.1.evil.com` rejected, `[::1]` and
+  `[::ffff:127.0.0.1]` accepted, `wss://`/userinfo/
+  bad port rejected).
+- **F5** `unsafe` in `LoginCredential::clear`: removed,
+  plain `.clear()`; the Go comment corrected (Go only
+  assigns `""`, does not zero).
+- **F6** `validateCredentialRefs` implemented
+  (`keeper.rs`, `config.rs`): called at parse tail and
+  in `resolve_keeper`, with Go's exact three messages;
+  the stale deferred comment removed. Pinned by
+  `test_credential_refs_for_keeper_entries`.
+- **F7** `lock_state_only` takes the lock
+  (`store.rs`): `LockCookiesFile` without reading the
+  cookies file, like Go `tick.go:422-455`. Pinned by
+  `lock_state_only_recovers_from_corrupt_cookies`.
+- **F8** Max-Age: `parse_set_cookie` mirrors Go
+  `net/http/cookie.go` (`Max-Age<=0` → delete,
+  leading-zero → ignore). Pinned by
+  `parse_go_parity_pins`.
+- **F9** serialize-at-lock removed (`store.rs`):
+  `read_locked` no longer serialises; `save_jar`
+  returns Go `saveJar`'s `changed` (backup flag).
+  Pinned by `lock_reads_one_line_file_with_tab_value`
+  (JSON-escaped tab/newline values lock fine; only
+  the write fails closed).
+- **F10** teardown closes the tab: `BrowserContext`
+  carries `target_id`; `teardown` calls
+  `Target.closeTarget` best-effort after `detach()`
+  (both attach and launch paths). Live close NOT
+  verified — see §M6a.6.
+- **F11** docs deviation 15: the code was already
+  right (flag iff leading dot, `jar.go:269-272`); only
+  the record was wrong — fixed here and in
+  writer-report §7.15.
+- **F12** docs deviation 3: the "no byte differs"
+  reason was wrong (`is_token_char` includes `&`);
+  state JSON CAN differ byte-for-byte, semantically
+  identical when loaded — fixed in PORTING §M6a.3.3,
+  `state.rs` module doc, and the PR body.
+- **F13** PR body claims corrected: 5,957 non-test Go
+  lines (not "~12k"), no new THIRD-PARTY crate in the
+  lock (the new crate itself did enter), true bootstrap
+  call order, "full keeper.go port" only true after F6,
+  loopback-validated discovery only true after F3/F4.
+  Disclosure: round-1 B1 (the `.expect` panic) fixed.
+- **Non-blocking fixed:** J-1 Set-Cookie parser (6
+  points, Go `ParseSetCookie` grammar), J-2
+  `from_utf8_lossy` → per-line fail-closed,
+  C-1 bootstrap order + `Page.getFrameTree` /
+  `DOM.getDocument`, C-2 `TargetInfo` optional fields,
+  C-3 discovery (exactly 200, trailing data, one 5s
+  deadline), C-5 `Lagged` does not abort the session,
+  C-6 detach removes from the map + skip empty page
+  id, R-1 shared `is_blocker_signal`, R-4 hint poll
+  first tick after one interval, R-6 full chromedp
+  `flagOrder` argv (bare `--headless`, no
+  `--enable-automation` at all), R-7 chromedp binary
+  search order, R-8 debug-port wait 10s, R-9 lazy
+  `PortFileExporter`, R-11 `Frame.session_id` i64,
+  K-3/K-4 browser-URL validation + canonicalisation,
+  K-6 `check_keeper_shape` removed (dead), S-1 temp
+  files 0600 at creation, S-3 `clean_path` = Go
+  `filepath.Clean`, S-4 parent dirs never chmodded,
+  S-5 temp names carry pid + counter, S-6 `"cookies":
+  null` → empty map, S-7 `record_transient`
+  `state_corrupt` per Go, S-8 raw warn kind kept in
+  bookkeeping, S-10 `wrote_cookies` = backup flag.
+  REJECTED (partial): the red-team claim that the sha
+  is empty on first write is WRONG — Go sets
+  `ls.raw = data` in `saveJar`, so the sha is
+  `sha(data)`; only `wrote_cookies` differed.
+  E-1 `LaunchUnavailable` remedy text, E-2 no more
+  `-tags with_chromedp` wording (Rust `chromedp`
+  feature instead), E-3 `PHASE_SEND_TIMEOUT` removed,
+  E-5 `LoginBlockerSignal.kind` is now a raw `String`
+  (unknown kinds load; unknown → `Blocked`, empty →
+  no hit).
+- **NOT fixed, recorded as known limitations
+  (§M6a.6):** R-2 click scroll-into-view, R-3 fill
+  readonly, R-5 `first_page_target` may pick the
+  restore tab, S-2 `pid_alive` EPERM
+  (Rust is stricter — fail-closed deviation), S-9
+  cancel as a string, E-4 `RefusingTransport`
+  (additive, no Go counterpart), F10 live closeTarget
+  (code only, never run against a real tab), C-6
+  attach race window (event before the session map
+  insert). C-7 Pong flush left this list in fix loop
+  2 (closed by tungstenite-source evidence, §M6a.6). Pre-existing `unsafe` FFI in `run.rs:131`
+  (`libc::kill`) and `lockfile.rs` (`libc::flock` /
+  `dup`) is out of scope for this loop — disclosed,
+  not changed.
+
+## M6a.11 Fix loop 2 (2026-11-06, review round 2)
+
+Round 2 was 3× PASS, 0 BLOCKING; this loop fixes only
+the cheap NITs (1 commit, no scope change):
+
+- **PR body base line** (technical N1): the draft
+  said `Base: dev-rust c7b1d34`; the base moved twice
+  during the loop — first to `25a124e` (#70 docs sweep
+  merged), then to `1602b12b` (M5b PR #71 merged while
+  this loop ran). The branch was rebased onto
+  `1602b12b` with 0 conflict (standing rule: dev-rust
+  advancing is normal, rebase + re-gate, do not stop);
+  baseline at the new base is 643 (counted
+  independently by test attributes: 643 at `1602b12b`,
+  765 at HEAD).
+- **Default port dropped** (red-team N1, safety
+  NIT-2): `check_loopback_host_port` used
+  `url.port()`, which is `None` for an explicit port
+  equal to the scheme default (`:80` for `ws`/`http`),
+  while Go's `u.Port()` returns `"80"`. Fixed by
+  reading the explicitly written port from the raw
+  authority (`explicit_port` in `cdp.rs`) when
+  `url.port()` is `None`; a missing port is still an
+  error, exactly as Go rejects it. Pinned by
+  `validate_loopback_default_port_is_explicit`
+  (`:80`, `:443`, `:080`, `[::1]:80` accept; no port
+  rejects). Note: the fix reads the written digits,
+  not `port_or_known_default()` as the review
+  suggested — same outcome, and it cannot mistake a
+  missing port for an explicit one.
+- **Uppercase scheme NOT changed** (safety NIT-3
+  REFUTED): the review claimed Go rejects `WS://`,
+  but a Go probe on cue (go1.26.8 `net/url`,
+  2026-11-06) shows `url.Parse` lowercases the
+  scheme (`"WS://…"` → scheme `"ws"`), and the
+  `url` crate does the same — Rust already matches
+  Go. No code change; pinned by
+  `validate_loopback_uppercase_scheme_matches_go` so
+  a future "fix" does not break parity.
+- **`max_message_size` explicit** (safety NIT-8):
+  `CdpClient::connect` now dials with
+  `connect_async_with_config` and an explicit 64 MiB
+  cap (`CDP_WS_MAX_MESSAGE_SIZE`), equal to
+  tungstenite 0.30.0's default (verified in the
+  registry source). `disable_nagle: false` is kept,
+  so the dial is otherwise identical to
+  `connect_async`. Pinned by
+  `ws_max_message_size_is_explicit_64mib`.
+- **`run_entries` JoinError logged** (red-team N4):
+  a panicking tick task no longer becomes a silent
+  empty-tag result — the tag + panic/cancelled kind
+  go to stderr (`eprintln!`). No log framework
+  exists in this workspace (`log` has no logger
+  anywhere, so `log::warn!` would discard silently);
+  the panic payload is never printed. The empty-tag
+  result itself is unchanged (Go has no equivalent —
+  a Go panic crashes the process). Pinned by
+  `run_entries_reports_panicking_task` (a clock that
+  panics in `now()`, the first thing `tick()` calls).
+  The "swallows panic into `RunResult`" nature is
+  still a known limitation — only the silence is
+  fixed.
+- **F10 close error logged** (safety NIT-4):
+  `teardown` logs a failed `close_target` to stderr
+  (target id + error class, no cookie/page data);
+  best-effort behaviour unchanged.
+- **PORTING cite fixed** (safety NIT-1):
+  `run.rs:111` → `run.rs:131` for `libc::kill`
+  (§M6a.6, §M6a.10).
+- **C-7 Pong closed** (red-team bonus): tungstenite
+  0.30.0 queues the Pong on Ping
+  (`protocol/mod.rs`: `OpCtl::Ping` →
+  `set_additional(Frame::pong(..))`) and flushes it
+  on the next `_write`; the keeper reader's
+  `continue` on `Message::Ping` cannot lose it.
+  Caveat kept in §M6a.6: the flush rides on the next
+  write (a CDP call or the 30s keepalive Ping).
+- **NOT changed, by triage:** N7 ANSI (Go parity —
+  Go strips the same 3 chars only), N9 Protocol echo
+  (Go echoes the peer message), technical N3
+  whitespace trim (marginal — `Url::parse` strips
+  surrounding whitespace while Go rejects it;
+  recorded here, not fixed), red-team N2 gateway-down
+  sha (pre-existing, fingerprint write-only), N3
+  driving-cookie name (needs expiry ≥ ~8.2e12 s),
+  N5–N9 (bootstrap params, strict version/target
+  fields, empty PATH element, frame lag-drop ack —
+  all latent, none reachable on a real page target).
+- Gates (cue, 1.99.1, `CARGO_TARGET_DIR=/tmp/castctl-rust-m6a-target`,
+  on the rebased tree `5a05ab8`, base `1602b12b`):
+  `cargo fmt --check` 0; `cargo test --workspace`
+  (lean profile `CARGO_PROFILE_DEV_DEBUG=0
+  CARGO_INCREMENTAL=false`, M5a precedent) **765 passed,
+  0 failed**, 38 binaries, 0 warnings; focused default
+  profile `-p castctl-keeper -p castctl-config` 212
+  passed (config 100, keeper lib 92, jar 3, tick 17);
+  `cargo clippy -p castctl-keeper -p castctl-config
+  --all-targets -- -D warnings` 0 (focused — the diff
+  touches only keeper; full-workspace clippy was 0 at
+  `8223a4e` and no other crate changed);
+  stub `--no-default-features` **111 passed** (91 lib +
+  3 jar + 17 tick). Baseline 643 + 102 M6a + 16 fix
+  loop 1 + 4 fix loop 2 = 765. (An earlier pre-rebase
+  run on base `25a124e` gave 690/0, 37 binaries:
+  568 + 122.) Disk note: an intermediate incremental
+  full run failed on ENOSPC (not code) because the
+  target dir mixed lean + default profiles and cargo
+  rebuilds the world on a profile switch; the final
+  numbers above are from a from-scratch lean run on
+  the rebased tree. The target dir was deleted right
+  after the gates.
+
+## Quy tắc quyết định`; resolved by keeping BOTH,
   M4b first, then M5a, no section dropped.
   `rust/Cargo.toml` auto-merged (M4b's workspace dep
   block + M5a's `"castctl-telegram"` member line);
