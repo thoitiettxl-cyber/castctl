@@ -47,6 +47,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -384,7 +386,23 @@ func run() int {
 			return fmt.Sprintf("ws://%s/v1/noise?vm_id=%s&auth_token=%s", *addr, vmID, token)
 		}),
 	)
-	muse := conn.New(connect)
+	muse := conn.New(connect,
+		// WithConfig stores the cookies file in the Muse:
+		// Connect(cfg) does NOT (conn.go: Connect only
+		// passes cfg to Live). Without it, muse.Call —
+		// which Connects with nil — falls back to the zero
+		// Config when the shared gateway is dead and must
+		// reopen (e3: after a drop, finish's history read
+		// fails "no cookies at : ..."). The real CLI sets
+		// WithConfig (commands/runtime.go).
+		conn.WithConfig(conn.Config{CookiesFile: cookiesFile}),
+		// Silence the connector's default slog line ("gateway
+		// connected seconds=..."): its timestamp and duration
+		// are non-deterministic and the Rust driver logs
+		// nothing on connect, so the line can never match
+		// byte-for-byte. The fixture compares driver stderr,
+		// not connector internals.
+		conn.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
 	ctx := context.Background()
 	// The connector reads the cookies file from the per-call
 	// conn.Config (gateway/connector.go: LoadCookies). A nil

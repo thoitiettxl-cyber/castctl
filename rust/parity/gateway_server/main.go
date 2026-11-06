@@ -50,6 +50,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -430,7 +431,18 @@ func (s *waitState) nextSubscribe() waitSubscribe {
 
 func waitHandler(st *waitState) gatewaytest.Handler {
 	return gatewaytest.HandlerFunc(func(req *pb.ApplicationRequest, service pb.ServiceType) gatewaytest.Response {
-		switch req.Path {
+		// Request() turns a GET body into a query string, so
+		// a chat.history call arrives as
+		// "/chat/history?limit=200" — match on the path
+		// without the query, or the exact-match cases below
+		// never fire and the request falls through to the
+		// canned default handler (which answers {} with no
+		// log line, so the call is invisible in the counts).
+		path := req.Path
+		if i := strings.IndexByte(path, '?'); i >= 0 {
+			path = path[:i]
+		}
+		switch path {
 		case "/chat/history":
 			st.mu.Lock()
 			st.historyCalls++
@@ -446,6 +458,21 @@ func waitHandler(st *waitState) gatewaytest.Handler {
 				}
 				if sid, ok := bodyMap["session_id"].(string); ok {
 					sessionID = sid
+				}
+			}
+			// GET calls carry limit/session_id in the query
+			// (the body was moved there by Request); the
+			// body parse above stays first so a real body
+			// still wins.
+			if u, err := url.Parse(req.Path); err == nil {
+				q := u.Query()
+				if limit == 0 {
+					if l, err := strconv.Atoi(q.Get("limit")); err == nil {
+						limit = l
+					}
+				}
+				if sessionID == "" {
+					sessionID = q.Get("session_id")
 				}
 			}
 			events := stage.Events
@@ -503,7 +530,21 @@ func runServeWait(scriptPath string) error {
 		return fmt.Errorf("wait script: %w", err)
 	}
 	var script waitScript
-	if err := json.Unmarshal(raw, &script); err != nil {
+	// Case files nest the script under "script"
+	// (args+name+script); unmarshalling the file straight
+	// into waitScript leaves HistoryStages and Subscribes
+	// empty, so every subscribe serves silence and no case
+	// can ever complete. A bare waitScript file is still
+	// accepted.
+	var envelope struct {
+		Script *waitScript `json:"script"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return fmt.Errorf("wait script %s: %w", scriptPath, err)
+	}
+	if envelope.Script != nil {
+		script = *envelope.Script
+	} else if err := json.Unmarshal(raw, &script); err != nil {
 		return fmt.Errorf("wait script %s: %w", scriptPath, err)
 	}
 	// `historyStage()` picks the last stage with
