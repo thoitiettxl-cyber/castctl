@@ -17,9 +17,9 @@
 #   M7A_RS_DRIVER   Rust wait_driver example (default
 #                   /tmp/m7a-target/debug/examples/wait_driver)
 #
-# Outputs in <out-dir>: <case>.{go,rs}.{out,err,exit},
-# <case>.{go,rs}.{timeout,elapsed_ms},
-# <case>.server-{go,rs}.{log,err}, and a PASS/FAIL table on
+# Outputs in <out-dir>: <case>-{go,rs}.{out,err,exit},
+# <case>-{go,rs}.{timeout,elapsed_ms},
+# <case>-{go,rs}.server.{log,err}, and a PASS/FAIL table on
 # stdout. Exit 0 iff every case passes.
 #
 # Verdict per case (fix loop 1, red-team F3/F4/F5):
@@ -148,18 +148,18 @@ for case in "$CASES"/*.json; do
     elapsed=$(( $(date +%s) - start ))
     ok=1
     reason=""
-    cmp -s "$OUT/$name.go.out" "$OUT/$name.rs.out" || { ok=0; reason="$reason stdout;"; }
-    cmp -s "$OUT/$name.go.err" "$OUT/$name.rs.err" || { ok=0; reason="$reason stderr;"; }
-    [ "$(cat "$OUT/$name.go.exit")" = "$(cat "$OUT/$name.rs.exit")" ] || { ok=0; reason="$reason exit go=$(cat "$OUT/$name.go.exit") rs=$(cat "$OUT/$name.rs.exit");"; }
+    cmp -s "$OUT/$name-go.out" "$OUT/$name-rs.out" || { ok=0; reason="$reason stdout;"; }
+    cmp -s "$OUT/$name-go.err" "$OUT/$name-rs.err" || { ok=0; reason="$reason stderr;"; }
+    [ "$(cat "$OUT/$name-go.exit")" = "$(cat "$OUT/$name-rs.exit")" ] || { ok=0; reason="$reason exit go=$(cat "$OUT/$name-go.exit") rs=$(cat "$OUT/$name-rs.exit");"; }
     # F4: a watchdog kill is a harness failure, whatever
     # the exit codes say (both drivers hanging yields
     # 124 + empty output on both sides, which used to
     # PASS). Belt and braces: elapsed >= 59 s also
     # fails, in case the marker write ever races.
-    [ "$(cat "$OUT/$name.go.timeout")" = ok ] || { ok=0; reason="$reason go-driver-watchdog-kill;"; }
-    [ "$(cat "$OUT/$name.rs.timeout")" = ok ] || { ok=0; reason="$reason rs-driver-watchdog-kill;"; }
-    [ "$(cat "$OUT/$name.go.elapsed_ms")" -lt 59000 ] || { ok=0; reason="$reason go-driver-elapsed>=59s;"; }
-    [ "$(cat "$OUT/$name.rs.elapsed_ms")" -lt 59000 ] || { ok=0; reason="$reason rs-driver-elapsed>=59s;"; }
+    [ "$(cat "$OUT/$name-go.timeout")" = ok ] || { ok=0; reason="$reason go-driver-watchdog-kill;"; }
+    [ "$(cat "$OUT/$name-rs.timeout")" = ok ] || { ok=0; reason="$reason rs-driver-watchdog-kill;"; }
+    [ "$(cat "$OUT/$name-go.elapsed_ms")" -lt 59000 ] || { ok=0; reason="$reason go-driver-elapsed>=59s;"; }
+    [ "$(cat "$OUT/$name-rs.elapsed_ms")" -lt 59000 ] || { ok=0; reason="$reason rs-driver-elapsed>=59s;"; }
     # F3: the server logs must agree on read counts.
     go_sum=$(summary_counts "$OUT/$name-go.server.err")
     rs_sum=$(summary_counts "$OUT/$name-rs.server.err")
@@ -174,15 +174,15 @@ for case in "$CASES"/*.json; do
     [ "$go_sum" = "$rs_sum" ] || { ok=0; reason="$reason server-counts go=[$go_sum] rs=[$rs_sum];"; }
     if [ "$ok" = 1 ]; then
         pass=$((pass + 1))
-        echo "PASS $name (exit=$(cat "$OUT/$name.go.exit"), ${elapsed}s, server history_calls/subscribes=[$go_sum])"
+        echo "PASS $name (exit=$(cat "$OUT/$name-go.exit"), ${elapsed}s, server history_calls/subscribes=[$go_sum])"
     else
         fail=$((fail + 1))
         failed_cases="$failed_cases $name"
-        echo "FAIL $name (go exit=$(cat "$OUT/$name.go.exit") rs exit=$(cat "$OUT/$name.rs.exit"), ${elapsed}s, reason: $reason)"
+        echo "FAIL $name (go exit=$(cat "$OUT/$name-go.exit") rs exit=$(cat "$OUT/$name-rs.exit"), ${elapsed}s, reason: $reason)"
         echo "--- stdout diff ($name) ---"
-        diff "$OUT/$name.go.out" "$OUT/$name.rs.out" | head -20 || true
+        diff "$OUT/$name-go.out" "$OUT/$name-rs.out" | head -20 || true
         echo "--- stderr diff ($name) ---"
-        diff "$OUT/$name.go.err" "$OUT/$name.rs.err" | head -20 || true
+        diff "$OUT/$name-go.err" "$OUT/$name-rs.err" | head -20 || true
         echo "--- server summaries ($name): go=[$go_sum] rs=[$rs_sum] ---"
     fi
 done
