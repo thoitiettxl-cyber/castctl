@@ -33,7 +33,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::load_single_config;
 use crate::config_errorf;
-use crate::errors::{ConfigError, ErrorKind, config_error};
+use crate::errors::{ConfigError, ErrorKind, config_error, raw_io_error};
 use crate::gopath::go_join;
 use crate::gostr::go_quote;
 use crate::jsonvalue::{JsonValue, decode_ordered_json, encode_ordered_json_indent};
@@ -108,9 +108,14 @@ fn update_single_profile_field(
         ));
     }
     // lockConfigDir (guard.go:226): mkdir the base dir,
-    // open the lock file (0600), flock exclusive.
+    // open the lock file (0600), flock exclusive. The
+    // mkdir/open arms return their errors RAW in Go (exit
+    // 1, `mkdir`/`open <path>: ...`); only the flock arm
+    // is wrapped (`newConfigErrorf("lock config: %v")` —
+    // exit 2, `profile: lock config: ...`). The Rust
+    // code mirrors that split (R2-B2 audit).
     std::fs::create_dir_all(base_dir)
-        .map_err(|e| config_errorf!("lock config: {}", io_error_text(&e)))?;
+        .map_err(|e| raw_io_error(crate::oserr::mkdir_error_text(base_dir, &e)))?;
     let lock_path = go_join(&[base_dir, "config.json.lock"]);
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
@@ -119,7 +124,7 @@ fn update_single_profile_field(
         .truncate(false)
         .mode(0o600)
         .open(&lock_path)
-        .map_err(|e| config_errorf!("lock config: {}", io_error_text(&e)))?;
+        .map_err(|e| raw_io_error(crate::oserr::open_error_text(&lock_path, &e)))?;
     // SAFETY: `flock` on a valid open file descriptor;
     // LOCK_EX blocks until the lock is held. This is the
     // crate's only `unsafe` call (the inter-process lock
@@ -288,7 +293,13 @@ fn remove_stale_temp_files(dir: &Path) {
 }
 
 /// Atomic write: temp file in the same directory (mode
-/// 0600) + rename, mirroring Go `writeFileAtomic`.
+/// 0600) + rename, mirroring Go `writeFileAtomic`
+/// (`config.go:1634`). Errors are RAW `*PathError` /
+/// `*LinkError` (exit 1, no `profile: ` prefix, no
+/// `write config: ` wrap): Go returns them unwrapped
+/// from `writeTempFile` (`open`/`write`/`sync`) and
+/// `os.Rename` (`rename <tmp> <path>:`) — red-team
+/// round-2 R2-B2.
 fn write_file_atomic(path: &str, data: &[u8]) -> Result<(), ConfigError> {
     let dir = Path::new(path)
         .parent()
@@ -306,23 +317,34 @@ fn write_file_atomic(path: &str, data: &[u8]) -> Result<(), ConfigError> {
             Ok(f) => break (candidate, f),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
-                return Err(config_errorf!("write config: {}", io_error_text(&e)));
+                return Err(raw_io_error(crate::oserr::open_error_text(
+                    &candidate.to_string_lossy(),
+                    &e,
+                )));
             }
         }
     };
-    let write_result = (|| -> std::io::Result<()> {
+    let tmp_s = tmp.to_string_lossy();
+    {
         use std::io::Write;
-        f.write_all(data)?;
-        f.sync_all()?;
-        Ok(())
-    })();
-    if let Err(e) = write_result {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(config_errorf!("write config: {}", io_error_text(&e)));
+        if let Err(e) = f.write_all(data) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(raw_io_error(crate::oserr::write_error_text(
+                &tmp_s, &e,
+            )));
+        }
+        if let Err(e) = f.sync_all() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(raw_io_error(crate::oserr::sync_error_text(
+                &tmp_s, &e,
+            )));
+        }
     }
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(config_errorf!("write config: {}", io_error_text(&e)));
+        return Err(raw_io_error(crate::oserr::rename_error_text(
+            &tmp_s, path, &e,
+        )));
     }
     Ok(())
 }
@@ -424,6 +446,61 @@ mod tests {
         // Bad name.
         let e = set_auto_approve(dir.to_str().unwrap(), ".bad.", "always").unwrap_err();
         assert_eq!(e.kind, ErrorKind::InvalidProfile);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_file_atomic_errors_are_raw_exit_1() {
+        // R2-B2: Go's `writeFileAtomic` (`config.go:1634`)
+        // returns raw `*PathError` / `*LinkError` — exit 1,
+        // no `profile: ` prefix, no `write config: ` wrap.
+        let dir = temp_dir("writefail");
+        // (a) Rename arm: the target path is a directory.
+        // Go's `os.Rename` pre-check reports EEXIST
+        // ("file exists") for a directory destination.
+        let target = dir.join("config.json");
+        std::fs::create_dir_all(&target).unwrap();
+        let e = write_file_atomic(target.to_str().unwrap(), b"{}\n").unwrap_err();
+        assert_eq!(e.code, 1, "message: {}", e.message);
+        assert!(e.message.starts_with("rename "), "message: {}", e.message);
+        assert!(e.message.ends_with(": file exists"), "message: {}", e.message);
+        assert!(!e.message.contains("profile:"), "message: {}", e.message);
+        assert!(!e.message.contains("write config:"), "message: {}", e.message);
+        // (b) Temp-create arm: the parent directory does
+        // not exist.
+        let missing = dir.join("nope").join("config.json");
+        let e = write_file_atomic(missing.to_str().unwrap(), b"{}\n").unwrap_err();
+        assert_eq!(e.code, 1, "message: {}", e.message);
+        assert!(e.message.starts_with("open "), "message: {}", e.message);
+        assert!(
+            e.message.ends_with(": no such file or directory"),
+            "message: {}",
+            e.message
+        );
+        assert!(!e.message.contains("profile:"), "message: {}", e.message);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lock_open_error_is_raw_exit_1() {
+        // R2-B2 audit: Go's `lockConfigDir` returns the
+        // lock-file open error raw (`guard.go:226`), like
+        // the write arms — exit 1, `open <lock>: ...`,
+        // no `lock config: ` wrap. (The flock arm stays
+        // wrapped: Go wraps it with `newConfigErrorf(
+        // "lock config: %v")`.)
+        let dir = temp_dir("lockfail");
+        write_config(
+            &dir,
+            "{\n  \"default_profile\": \"no.0\",\n  \"profiles\": {\n    \"no.0\": {\"auto_approve\": \"off\"}\n  }\n}\n",
+        );
+        std::fs::create_dir_all(dir.join("config.json.lock")).unwrap();
+        let e = set_auto_approve(dir.to_str().unwrap(), "no.0", "always").unwrap_err();
+        assert_eq!(e.code, 1, "message: {}", e.message);
+        assert!(e.message.starts_with("open "), "message: {}", e.message);
+        assert!(e.message.ends_with(": is a directory"), "message: {}", e.message);
+        assert!(!e.message.contains("profile:"), "message: {}", e.message);
+        assert!(!e.message.contains("lock config:"), "message: {}", e.message);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

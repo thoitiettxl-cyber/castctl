@@ -279,8 +279,10 @@ pub(crate) fn resolve_config(
 }
 
 /// A `profile.Error` / `ConfigError` through `classifyError`: exit
-/// 2, one `castctl: <message>` line (the message already carries
-/// the `profile: ` prefix exactly once).
+/// `e.code`, one `castctl: <message>` line. A profile error is
+/// exit 2 and the message already carries the `profile: ` prefix
+/// exactly once; a raw I/O error (`raw_io_error`, fix loop 2) is
+/// exit 1 with the Go `*PathError` / `*LinkError` text verbatim.
 pub(crate) fn config_err(e: ConfigError) -> FlowErr {
     msg(e.code, e.message)
 }

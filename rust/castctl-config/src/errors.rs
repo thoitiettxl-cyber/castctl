@@ -6,11 +6,15 @@
 //! `profile.Error`.
 //!
 //! Source: `internal/profile/errors.go` at base `dev-rust` `85a8d5e`.
-//! This package only produces code 2 (plus 0 for no error, via
-//! `exit_code`); the CLI layer maps other codes for other error
-//! families. The `Debug` impl prints only the message: messages
-//! never carry secret values by construction (see PORTING.md §M2),
-//! and no `Debug` output of a config value is ever produced.
+//! This package produces code 2 for `profile.Error` values (plus 0
+//! for no error, via `exit_code`); write-phase I/O errors that Go
+//! returns unwrapped (`*PathError` / `*LinkError` from
+//! `writeFileAtomic` and from the mkdir/open arms of
+//! `lockConfigDir`) are code 1 with the message verbatim — see
+//! `raw_io_error`. The `Debug` impl prints only the message:
+//! messages never carry secret values by construction (see
+//! PORTING.md §M2), and no `Debug` output of a config value is
+//! ever produced.
 
 /// Error kinds, mirroring the Go sentinel `Kind` strings
 /// (`internal/profile/errors.go:126-143`).
@@ -28,6 +32,14 @@ pub enum ErrorKind {
     ConcurrentChange,
     /// `legacy_layout` (`ErrLegacyLayout`).
     LegacyLayout,
+    /// Rust-side marker for a raw I/O error that Go returns
+    /// unwrapped (not a `*profile.Error`): `*PathError` /
+    /// `*LinkError` from `writeFileAtomic` and from the
+    /// mkdir/open arms of `lockConfigDir`. No Go `Kind`
+    /// string exists for these errors; the marker exists
+    /// only so the code-1 shape is explicit in the type.
+    /// `as_str` returns `"raw_io"` for it (Rust-side only).
+    RawIo,
 }
 
 impl ErrorKind {
@@ -40,6 +52,7 @@ impl ErrorKind {
             ErrorKind::RefuseOverwrite => "refuse_overwrite",
             ErrorKind::ConcurrentChange => "concurrent_change",
             ErrorKind::LegacyLayout => "legacy_layout",
+            ErrorKind::RawIo => "raw_io",
         }
     }
 }
@@ -50,7 +63,8 @@ impl ErrorKind {
 /// returns the message; `ExitCode()` returns the code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigError {
-    /// Process exit code (always 2 for this type).
+    /// Process exit code: 2 for a `profile.Error`, 1 for a
+    /// raw I/O error (`raw_io_error`).
     pub code: i32,
     /// Error kind (Go sentinel kind).
     pub kind: ErrorKind,
@@ -80,6 +94,23 @@ pub fn config_error(msg: impl Into<String>) -> ConfigError {
         code: 2,
         kind: ErrorKind::ConfigParse,
         message: format!("profile: {}", msg.into()),
+    }
+}
+
+/// A raw I/O error, mirroring Go errors that bypass
+/// `newConfigError`: `*PathError` / `*LinkError` from
+/// `writeFileAtomic` (`config.go:1634`) and from the
+/// mkdir/open arms of `lockConfigDir` (`guard.go:226`).
+/// Exit code 1, message verbatim (no `profile: ` prefix).
+/// The CLI surfaces it as a plain `castctl: <message>`
+/// line, exactly like Go's `cmdAutoApprove` returning a
+/// non-`profile.Error` (`wait.go:1365`) — red-team
+/// round-2 R2-B2.
+pub fn raw_io_error(msg: impl Into<String>) -> ConfigError {
+    ConfigError {
+        code: 1,
+        kind: ErrorKind::RawIo,
+        message: msg.into(),
     }
 }
 
