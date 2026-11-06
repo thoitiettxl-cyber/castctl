@@ -267,19 +267,13 @@ impl<'a> Parsed<'a> {
     /// the returned occurrences in order and apply each
     /// one with the `apply_*_field` helpers, recording
     /// the first type error in a `FirstError`.
-    pub fn match_fields(
-        &self,
-        names: &[&str],
-    ) -> Result<Vec<(usize, Parsed<'a>)>, LenientError> {
+    pub fn match_fields(&self, names: &[&str]) -> Result<Vec<(usize, Parsed<'a>)>, LenientError> {
         let folded: Vec<String> = names.iter().map(|n| go_fold_name(n)).collect();
         let mut out = Vec::new();
         for (key, value) in self.fields()? {
             if let Some(idx) = names.iter().position(|n| *n == key) {
                 out.push((idx, value));
-            } else if let Some(idx) = folded
-                .iter()
-                .position(|f| *f == go_fold_name(&key))
-            {
+            } else if let Some(idx) = folded.iter().position(|f| *f == go_fold_name(&key)) {
                 out.push((idx, value));
             }
             // Else unknown: skipped, like Go.
@@ -446,7 +440,8 @@ impl FirstError {
 
     /// The saved error, if any — the decode refuses
     /// with this even when later occurrences applied.
-    #[must_use]
+    /// (No `#[must_use]`: `Result` is already `#[must_use]`,
+    /// and clippy's `double_must_use` fires otherwise.)
     pub fn into_result<T>(self, value: T) -> Result<T, LenientError> {
         match self.0 {
             Some(e) => Err(e),
@@ -1097,20 +1092,29 @@ mod tests {
         );
         // A genuine U+FFFD (EF BF BD) stays one char.
         let d = doc(b"{\"s\":\"\xef\xbf\xbd\"}");
-        assert_eq!(last_occurrence(&d, "s").unwrap().as_str().unwrap(), "\u{FFFD}");
+        assert_eq!(
+            last_occurrence(&d, "s").unwrap().as_str().unwrap(),
+            "\u{FFFD}"
+        );
     }
 
     #[test]
     fn lone_surrogate_escapes_coerce() {
         let d = doc(br#"{"s":"\ud800"}"#);
-        assert_eq!(last_occurrence(&d, "s").unwrap().as_str().unwrap(), "\u{FFFD}");
+        assert_eq!(
+            last_occurrence(&d, "s").unwrap().as_str().unwrap(),
+            "\u{FFFD}"
+        );
         let d = doc(br#"{"s":"\ud800\udc00"}"#);
         assert_eq!(
             last_occurrence(&d, "s").unwrap().as_str().unwrap(),
             "\u{10000}"
         );
         let d = doc("{\"s\":\"Aé\"}".as_bytes());
-        assert_eq!(last_occurrence(&d, "s").unwrap().as_str().unwrap(), "A\u{e9}");
+        assert_eq!(
+            last_occurrence(&d, "s").unwrap().as_str().unwrap(),
+            "A\u{e9}"
+        );
     }
 
     #[test]
@@ -1161,7 +1165,10 @@ mod tests {
             br#"{"b":1,"a":2}"#
         );
         let d = doc(b"{\"ok\":true,\"result\":\"a\xffb\"}");
-        assert_eq!(last_occurrence(&d, "result").unwrap().as_raw(), b"\"a\xffb\"");
+        assert_eq!(
+            last_occurrence(&d, "result").unwrap().as_raw(),
+            b"\"a\xffb\""
+        );
         // Null stays 4 raw bytes, distinct from absent.
         let d = doc(br#"{"ok":true,"result":null}"#);
         let r = last_occurrence(&d, "result").unwrap();

@@ -43,8 +43,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use castctl_shared::lenient_json::{
-    FirstError, Kind, LenientError, Parsed, apply_bool_field, apply_i64_field,
-    apply_str_field,
+    FirstError, Kind, LenientError, Parsed, apply_bool_field, apply_i64_field, apply_str_field,
 };
 
 use crate::checksums::parse_checksums;
@@ -908,12 +907,9 @@ fn decode_release(body: &[u8]) -> std::result::Result<ReleaseInfo, String> {
                     // assets are reset (R3-B2).
                     rel.assets = Vec::new();
                 } else if v.kind() != Kind::Array {
-                    first.record(LenientError::typed(
-                        "field 'assets': expected an array",
-                    ));
+                    first.record(LenientError::typed("field 'assets': expected an array"));
                 } else {
-                    let (assets, nested) =
-                        decode_assets(&v).map_err(|e| e.to_string())?;
+                    let (assets, nested) = decode_assets(&v).map_err(|e| e.to_string())?;
                     rel.assets = assets;
                     first.record_opt(nested);
                 }
@@ -933,8 +929,7 @@ fn decode_release(body: &[u8]) -> std::result::Result<ReleaseInfo, String> {
 /// any; the caller refuses with it at the end.
 fn decode_assets(
     arr: &Parsed<'_>,
-) -> std::result::Result<(Vec<crate::select::ReleaseAsset>, Option<LenientError>), LenientError>
-{
+) -> std::result::Result<(Vec<crate::select::ReleaseAsset>, Option<LenientError>), LenientError> {
     let mut out = Vec::new();
     let mut first = FirstError::default();
     for el in arr.elements()? {
@@ -974,10 +969,7 @@ fn zero_asset() -> crate::select::ReleaseAsset {
 /// a later `size` is valid, R3-B3).
 fn decode_asset(
     el: &Parsed<'_>,
-) -> std::result::Result<
-    (crate::select::ReleaseAsset, Option<LenientError>),
-    LenientError,
-> {
+) -> std::result::Result<(crate::select::ReleaseAsset, Option<LenientError>), LenientError> {
     let mut asset = zero_asset();
     let mut first = FirstError::default();
     for (idx, v) in el.match_fields(&["name", "browser_download_url", "size", "state"])? {

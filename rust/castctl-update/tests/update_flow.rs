@@ -1386,8 +1386,7 @@ fn release_json_fold_keys_match_go() {
     assert!(replaced);
     assert_eq!(target_bytes, new_bytes);
     // Fold-spelled draft refuses (code 2, not install).
-    let template = GOOD_RELEASE_TEMPLATE
-        .replace("\"draft\":false", "\"DRAFT\":true");
+    let template = GOOD_RELEASE_TEMPLATE.replace("\"draft\":false", "\"DRAFT\":true");
     let (_replaced, err, _, _) = run_release_template(&template);
     let err = err.expect_err("fold draft must refuse");
     assert_eq!(err.code(), 2);
@@ -1396,8 +1395,7 @@ fn release_json_fold_keys_match_go() {
         "update: the latest release is not a stable release; refusing to install it"
     );
     // Fold-spelled prerelease refuses.
-    let template = GOOD_RELEASE_TEMPLATE
-        .replace("\"prerelease\":false", "\"PRERELEASE\":true");
+    let template = GOOD_RELEASE_TEMPLATE.replace("\"prerelease\":false", "\"PRERELEASE\":true");
     let (_replaced, err, _, _) = run_release_template(&template);
     let err = err.expect_err("fold prerelease must refuse");
     assert_eq!(err.code(), 2);
@@ -1415,15 +1413,16 @@ fn release_json_fold_keys_match_go() {
         .replace("\"size\"", "\"SIZE\"")
         .replace("\"state\"", "\"STATE\"");
     let (replaced, err, target_bytes, new_bytes) = run_release_template(&template);
-    assert!(err.is_ok(), "fold asset fields must install: {:?}", err.err());
+    assert!(
+        err.is_ok(),
+        "fold asset fields must install: {:?}",
+        err.err()
+    );
     assert!(replaced);
     assert_eq!(target_bytes, new_bytes);
     // Fold-spelled asset state `draft` refuses: the
     // asset is not uploaded (Go reads the state).
-    let template = GOOD_RELEASE_TEMPLATE.replace(
-        "\"state\":\"uploaded\"",
-        "\"STATE\":\"draft\"",
-    );
+    let template = GOOD_RELEASE_TEMPLATE.replace("\"state\":\"uploaded\"", "\"STATE\":\"draft\"");
     let (_replaced, err, _, _) = run_release_template(&template);
     let err = err.expect_err("fold draft state must refuse");
     assert_eq!(err.code(), 2);
@@ -1456,10 +1455,8 @@ fn release_json_null_last_keeps_scalars_resets_slice() {
     assert_eq!(target_bytes, new_bytes);
     // Scalar draft: null-last keeps `true` -> code 2
     // not-stable (must NOT install).
-    let template = GOOD_RELEASE_TEMPLATE.replace(
-        "\"draft\":false",
-        "\"draft\":true,\"draft\":null",
-    );
+    let template =
+        GOOD_RELEASE_TEMPLATE.replace("\"draft\":false", "\"draft\":true,\"draft\":null");
     let (_replaced, err, _, _) = run_release_template(&template);
     let err = err.expect_err("null-last draft must refuse");
     assert_eq!(err.code(), 2);
@@ -1514,10 +1511,13 @@ fn release_json_null_last_keeps_scalars_resets_slice() {
     let (replaced, err, _, _) = run_release_template(&template);
     assert!(err.is_ok(), "null-first tag must install: {:?}", err.err());
     assert!(replaced);
-    let template = GOOD_RELEASE_TEMPLATE
-        .replacen("\"assets\":", "\"assets\":null,\"assets\":", 1);
+    let template = GOOD_RELEASE_TEMPLATE.replacen("\"assets\":", "\"assets\":null,\"assets\":", 1);
     let (replaced, err, _, _) = run_release_template(&template);
-    assert!(err.is_ok(), "null-first assets must install: {:?}", err.err());
+    assert!(
+        err.is_ok(),
+        "null-first assets must install: {:?}",
+        err.err()
+    );
     assert!(replaced);
 }
 
@@ -1537,8 +1537,7 @@ fn release_json_first_type_error_still_malformed() {
         ),
         (
             "numeric draft then valid draft",
-            GOOD_RELEASE_TEMPLATE
-                .replace("\"draft\":false", "\"draft\":1,\"draft\":false"),
+            GOOD_RELEASE_TEMPLATE.replace("\"draft\":false", "\"draft\":1,\"draft\":false"),
         ),
         (
             "string prerelease then valid prerelease",
@@ -1572,7 +1571,11 @@ fn release_json_first_type_error_still_malformed() {
         let (_replaced, err, _, _) = run_release_template(&template);
         let err = err.expect_err(&format!("{label} must refuse"));
         assert_eq!(err.code(), 1, "{label}");
-        assert_eq!(err.to_string(), "update: release information is malformed", "{label}");
+        assert_eq!(
+            err.to_string(),
+            "update: release information is malformed",
+            "{label}"
+        );
     }
 }
 
@@ -1598,7 +1601,12 @@ fn release_json_depth_cap_matches_go() {
         );
         let (_replaced, err, _, _) = run_release_template(&template);
         let err = err.expect_err("deep release must refuse");
-        assert_eq!(err.code(), code, "unknown-field depth {arrays} (total {})", arrays + 1);
+        assert_eq!(
+            err.code(),
+            code,
+            "unknown-field depth {arrays} (total {})",
+            arrays + 1
+        );
     }
 }
 

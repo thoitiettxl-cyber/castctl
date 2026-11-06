@@ -13,8 +13,7 @@
 use serde::{Deserialize, Serialize};
 
 use castctl_shared::lenient_json::{
-    FirstError, Kind, LenientError, Parsed, apply_bool_field, apply_raw_field,
-    apply_str_field,
+    FirstError, Kind, LenientError, Parsed, apply_bool_field, apply_raw_field, apply_str_field,
 };
 
 use crate::error::PluginHostError;
@@ -183,12 +182,9 @@ pub fn decode_envelope(input: &[u8]) -> Result<DecodedEnvelope, String> {
                     // object is reset (R3-B2).
                     env.error = None;
                 } else if v.kind() != Kind::Object {
-                    first.record(LenientError::typed(
-                        "field 'error': expected an object",
-                    ));
+                    first.record(LenientError::typed("field 'error': expected an object"));
                 } else {
-                    let (error, nested) =
-                        decode_plugin_error(&v).map_err(|e| e.to_string())?;
+                    let (error, nested) = decode_plugin_error(&v).map_err(|e| e.to_string())?;
                     env.error = Some(error);
                     first.record_opt(nested);
                 }
@@ -725,16 +721,12 @@ mod tests {
         let env = decode_envelope(br#"{"ok":true,"RESULT":5}"#).unwrap();
         assert_eq!(env.result.as_deref(), Some(b"5".as_slice()));
         // Fold-key inside the nested `error` object.
-        let env = decode_envelope(
-            br#"{"ok":false,"ERROR":{"code":"boom","message":"m"}}"#,
-        )
-        .unwrap();
+        let env =
+            decode_envelope(br#"{"ok":false,"ERROR":{"code":"boom","message":"m"}}"#).unwrap();
         assert_eq!(env.error.as_ref().unwrap().code, "boom");
         assert_eq!(env.error.as_ref().unwrap().message, "m");
-        let env = decode_envelope(
-            br#"{"ok":false,"error":{"CODE":"boom","MESSAGE":"m"}}"#,
-        )
-        .unwrap();
+        let env =
+            decode_envelope(br#"{"ok":false,"error":{"CODE":"boom","MESSAGE":"m"}}"#).unwrap();
         assert_eq!(env.error.as_ref().unwrap().code, "boom");
         assert_eq!(env.error.as_ref().unwrap().message, "m");
         let env = decode_envelope(
@@ -743,8 +735,8 @@ mod tests {
         .unwrap();
         assert!(env.error.as_ref().unwrap().retryable);
         // Kelvin sign U+212A folds to `k`.
-        let env = decode_envelope("{\"ok\":true,\"result\":1,\"o\u{212a}\":false}".as_bytes())
-            .unwrap();
+        let env =
+            decode_envelope("{\"ok\":true,\"result\":1,\"o\u{212a}\":false}".as_bytes()).unwrap();
         assert!(!env.ok);
         // Fold-key duplicated with the exact key, both
         // orders: apply order decides (Go applies each
@@ -770,10 +762,9 @@ mod tests {
         assert_eq!(env.result.as_deref(), Some(b"1".as_slice()));
         // Scalar `code` / `message` / `retryable`
         // inside `error`: null-last keeps the value.
-        let env = decode_envelope(
-            br#"{"ok":false,"error":{"code":"boom","code":null,"message":"m"}}"#,
-        )
-        .unwrap();
+        let env =
+            decode_envelope(br#"{"ok":false,"error":{"code":"boom","code":null,"message":"m"}}"#)
+                .unwrap();
         assert_eq!(env.error.as_ref().unwrap().code, "boom");
         let env = decode_envelope(
             br#"{"ok":false,"error":{"code":"boom","message":"m","message":null}}"#,
@@ -786,20 +777,18 @@ mod tests {
         .unwrap();
         assert!(env.error.as_ref().unwrap().retryable);
         // Pointer `error`: null-last RESETS it.
-        let env = decode_envelope(
-            br#"{"ok":false,"error":{"code":"boom","message":"m"},"error":null}"#,
-        )
-        .unwrap();
+        let env =
+            decode_envelope(br#"{"ok":false,"error":{"code":"boom","message":"m"},"error":null}"#)
+                .unwrap();
         assert!(env.error.is_none());
         // Controls: null FIRST still applies the later
         // valid occurrence; null-first on the pointer
         // still applies the later object.
         let env = decode_envelope(br#"{"ok":null,"ok":true,"result":1}"#).unwrap();
         assert!(env.ok);
-        let env = decode_envelope(
-            br#"{"ok":false,"error":null,"error":{"code":"boom","message":"m"}}"#,
-        )
-        .unwrap();
+        let env =
+            decode_envelope(br#"{"ok":false,"error":null,"error":{"code":"boom","message":"m"}}"#)
+                .unwrap();
         assert_eq!(env.error.as_ref().unwrap().code, "boom");
     }
 

@@ -26,8 +26,8 @@ pub use feed::{
     idea_row_to_json, idea_rows,
 };
 pub use lenient_json::{
-    FirstError, Kind, LenientError, Parsed, apply_bool_field, apply_i64_field,
-    apply_raw_field, apply_str_field, go_fold_name,
+    FirstError, Kind, LenientError, Parsed, apply_bool_field, apply_i64_field, apply_raw_field,
+    apply_str_field, go_fold_name,
 };
 pub use resources::{FileRow, Resource, event_resources, file_row_to_json, file_rows, local_name};
 pub use sessions::{SessionRow, session_row_to_json, session_rows};

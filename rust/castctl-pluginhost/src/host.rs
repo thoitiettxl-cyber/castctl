@@ -3142,8 +3142,7 @@ mod tests {
         // R3-B1: fold-key duplicated with the exact key
         // in the wrong order — Go applies `OK`→false
         // last, so the envelope fails.
-        let err =
-            parse_envelope(br#"{"ok":true,"OK":false,"result":1}"#, "x").unwrap_err();
+        let err = parse_envelope(br#"{"ok":true,"OK":false,"result":1}"#, "x").unwrap_err();
         assert_eq!(
             err.to_string(),
             "plugin \"x\" returned a failed envelope without an error"
