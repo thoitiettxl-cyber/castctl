@@ -10428,7 +10428,7 @@ recorded here with its evidence. Commits are on
 | Tech N1 plugins comment | Fixed: Go uses `map[string]any` (sorted keys), not a struct | `5f8d0e4` | — |
 | Tech N2 serve_on idle comment | Fixed with F-B5 rewrite | `3dd0f00` | — |
 | Tech N3 proof script stale | Fixed: seds target `MAX_TOKEN_BYTES` / current `.mode(0o600)` lines; md5 before/after + restore verification; proof 11 added | — (script `~/workspace/tmp/m6b-proofs.sh`) | re-run 11/11 on cue |
-| Tech N4 429 `Retry-After` order | Fixed: inserted first (Go sets it before `writeError`) | `5f8d0e4` | parity 429 header order |
+| Tech N4 429 `Retry-After` order | Fixed (premise corrected in verification): Go sets `Retry-After` before `writeError` in code, but net/http serializes headers SORTED by key — the 429 wire order is Cache-Control, Content-Type, Retry-After, X-Content-Type-Options (writeError sets Content-Type, Cache-Control, X-Content-Type-Options, `server.go:622-624`, so insertion order cannot explain it). `render_resp` now sorts every response's headers by lowercase key; `rate_limited_resp`'s insert-first became a plain push | `5f8d0e4` (insert-first) + `7a5a75d` (sort in `render_resp`) | parity 429 header order (check corrected: Go == Rust wire order, all four present — the old check required Retry-After first) |
 | Tech N5 plaintext token in scope | Fixed: `drop(token)` after `token_hash` (Go clears `single.WebUI.Token`) | `5c67148` | — |
 | Tech M5 "47 API routes" | Fixed: Go registers 49 (`server.go:258 routes()` counted); the draft file is untracked scratch — fix on disk only, not committed | — (untracked `research-go-webui.md`) | count: 49 `api.*` registrations |
 | static_shell stale `body_for_go_compat` | Fixed: reference is `render_resp` | `5f8d0e4` | — |
