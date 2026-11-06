@@ -9568,6 +9568,188 @@ after this loop, so a verification rebuild needs
 at loop end) and free space before rebuilding.
 
 
+## M6c.11 Rebase onto merged dev-rust 6a399f7 (2026-11-06)
+
+`dev-rust` advanced `25a124e` → `6a399f7`
+(merges #71 M5b @1602b12b, #72 M6a @9fc93c5,
+#66 M-perf). Per the standing rule the branch
+`feat/rust-m6c-update-plugins` was rebased, not
+stopped: 59 commits replayed onto `6a399f7`,
+no stop condition hit (no conflict outside
+`rust/` + `docs/provenance.md` + `NOTICE`, no
+other crate's test failed for a reason outside
+M6c scope).
+
+Conflicts (2 stops, both docs-only, both in
+scope):
+
+- Commit `23db9f8`: `docs/provenance.md` —
+  upstream §16 is the M6a keeper note, ours §16
+  is M6c tar+flate2; kept BOTH, M6c renumbered
+  to §17 (and the §M6c.1 cross-ref `provenance
+  §16` → `§17` with a renumber note).
+  `rust/PORTING.md` — HEAD side is the whole
+  §M5b section, ours side §§M6c–M6c.7; kept
+  BOTH, M5b first, M6c after.
+- Commit `688e6f2`: both files, HEAD side
+  empty — kept the M6c additions (§M6c.8 +
+  fix-loop-1 nix provenance paragraph).
+
+Auto-merge trap (NOT a conflict): git
+auto-merged `rust/Cargo.toml` with no conflict
+but silently DUPLICATED two pins — `libc
+=0.2.191` and `sha2 =0.10.9` appear in both
+the M6a block and the M6c block (identical
+pins). The first gate run at the rebased head
+`d7ab7f2` failed every cargo command at the
+metadata stage (`cargo metadata` error:
+`duplicate key --> Cargo.toml:161:1`, fmt exit
+1, build/locked/test/clippy exit 101, 0 tests
+ran). Fixed in `73f0df8` (this loop's only
+code-touching commit): the two duplicate lines
+were dropped from the M6a block with a comment
+recording why; no version or dependency-set
+change, lock untouched, TOML re-verified by
+parse locally. `Cargo.lock` diff vs `6a399f7`
+is purely additive (+12 packages: the 2 M6c
+crates + adler2, filetime, flate2, httpdate,
+memoffset, miniz_oxide, simd-adler32, tar,
+xattr, zlib-rs; 0 removed/changed version
+lines). Lesson: after any auto-merge of the
+workspace `Cargo.toml`, a duplicate-key check
+(`cargo metadata` / TOML parse) is mandatory
+— git reports no conflict for it.
+
+Baseline MEASURED on cue at `6a399f7` (fresh
+clone `/tmp/m6c-rebase-baseline`, rustc/cargo
+1.99.1, `CARGO_TARGET_DIR=/tmp/m6c-baseline-target`):
+**765 passed, 0 failed** (38 test-result
+lines), exit 0. Per-suite: cli 69, config
+100, gateway lib 46 + auth 4 + connector 20
++ gateway 24 + golden 4 + http_fake 0 +
+noise_vector 3 + subscription 5, keeper lib 92
++ jar_roundtrip 3 + tick_table 17, log-redact
+46, castctl-rs 0, parity 2, shared 37 +
+json_number_literals 1, telegram lib 143 +
+bot_core 23 + turn_e2e 2, tg-files 2, tg-text
+10, transport lib 80 + env_proxy 1 + rpc 12
++ tls 2 + wireguard 17.
+
+Gates at `73f0df8` (clean cue checkout
+`/tmp/m6c-rebase/castctl-rust-m6c`, `git
+rev-parse HEAD` + empty `git status --short`
+verified BEFORE the gates;
+`CARGO_TARGET_DIR=/tmp/m6c-target`):
+
+- `cargo fmt --check`: exit 0.
+- `cargo build --locked --workspace`: exit 0.
+- `cargo build --workspace`: exit 0.
+- `cargo test --workspace`: exit 0 on the
+  third full run — **985 passed, 0 failed**
+  (44 test-result lines). See the flake note
+  below for runs 1–2.
+- `cargo clippy --workspace --all-targets --
+  -D warnings`: exit 0.
+- `grep -rn "unsafe {"` over the M6c crates'
+  non-test src: 0 (only doc-comment mentions
+  of the word, as in loop 3).
+- Per-suite (green run): cli 69, config 100,
+  gateway lib 46 + auth 4 + connector 20 +
+  gateway 24 + golden 4 + http_fake 0 +
+  noise_vector 3 + subscription 5, keeper lib
+  92 + jar_roundtrip 3 + tick_table 17,
+  log-redact 46, pluginhost lib 94 + egress 12,
+  castctl-rs 0, parity 2, shared 49 +
+  json_number_literals 1, telegram lib 143 +
+  bot_core 23 + turn_e2e 2, tg-files 2, tg-text
+  10, transport lib 80 + env_proxy 1 + rpc 12
+  + tls 2 + wireguard 17, update lib 59 +
+  update_flow 43. Delta vs baseline: +220 =
+  shared 37→49 (+12), pluginhost lib 94 +
+  egress 12 + update lib 59 + update_flow 43
+  (all new).
+- `git diff --stat 6a399f7...HEAD`: 36 files,
+  +20686/−4 (the +4/−2 vs the pre-rebase
+  +20682/−2 is exactly the duplicate-pin fix
+  in `73f0df8`).
+
+Flake note (2 single-test failures, a
+different test on each of the first two full
+runs at the SAME head `73f0df8`, NO code
+change between runs; both pass on isolated
+re-run at the same head):
+
+- Run B: `update_flow`
+  `hostile_latest_tag_refuses_without_echo` —
+  `err.code()` 1 vs expected 2 (42 passed / 1
+  failed, suite 64.50s). Isolated re-run:
+  ok in 1.46s. Exact transient cause NOT
+  proven (the assertion fires before the
+  error string is printed); the run returned
+  code 1 (a failure-class error: transport /
+  malformed) instead of code 2 (version
+  refusal) under full-workspace parallel load.
+- Run C: pluginhost lib
+  `shadow::tests::sweep_removes_only_dead_pid_dirs`
+  — `own dir must survive` (93 passed / 1
+  failed; cargo stops after the first failing
+  target, so only 526 tests were counted).
+  Isolated re-run: ok in 0.00s. Mechanism
+  READ from the code (not fixed — out of
+  rebase scope, needs a fix-loop decision):
+  `shadow_root()` is the SHARED
+  `/tmp/castctl-pluginhost`; `Host::close()`
+  (`host.rs:489`) and `shadow_dir_is_0700`
+  call `cleanup_shadow_dir()`, which does
+  `remove_dir_all(pid-{own pid})`
+  unconditionally — the same pid the sweep
+  test uses for its `own` dir. At least 9
+  host tests call `h.close()` (host.rs:1637,
+  1709, 1744, 1757, 1779, 1893, 1920, 1951,
+  2002, 2047); lib tests run in parallel
+  threads and only the sweep test holds
+  `SWEEP_TEST_MU`, so a concurrent close can
+  delete the sweep test's own dir mid-test.
+  The sweep itself cannot do it — it skips
+  its own pid (`shadow.rs:121`).
+- Run D (same head, same clean checkout):
+  985/0, exit 0. The two failures are
+  therefore recorded as flakes with the
+  mechanism above, not as regressions; the
+  sweep race is a real latent test-isolation
+  bug in M6c code (pre-existing, passed
+  788/0 once at `cb9d69d`), not a rebase
+  regression.
+
+Disk rule (Boss, 2026-11-05/06): `df -h /`
+before every build; < 6G free → clean only
+own scratch/target first. `df` readings this
+loop (free / use%): baseline start 19G / 74%
+→ baseline end 7.6G / 90% → after deleting
+`/tmp/m6c-baseline-target` (8.6G) 16G / 78%
+→ checkout verify 26G / 65% (another session
+freed space in between — nothing of theirs
+touched) → gates run B start 24G / 67%,
+during tests 7.4G / 90%, during clippy 6.2G /
+92% (above the 6G line, no cleanup needed) →
+after gates 17G / 78% (another session's
+cleanup) → retest3 25G / 66% → 24G / 68%.
+`/tmp/m6c-target` deleted after the final gate
+per the Boss rule; gate logs kept on cue
+(`/tmp/m6c-rebase-baseline.log`,
+`/tmp/m6c-rebase-baseline-test.log`,
+`/tmp/m6c-rebase-gates.log`,
+`/tmp/m6c-rebase-test.log`,
+`/tmp/m6c-rebase-retest.log`,
+`/tmp/m6c-rebase-test2.log`,
+`/tmp/m6c-rebase-retest3.log`,
+`/tmp/m6c-rebase-test3.log`, bundle
+`/tmp/m6c-rebase.bundle`); checkout
+`/tmp/m6c-rebase/castctl-rust-m6c` kept at the
+gated head `73f0df8` for parent verification.
+NOTE for the verifier: a rebuild needs ~13G
+free — check `df -h /` first.
+
 ## Quy tắc quyết định (Boss, 2026-11-05 — standing)
 
 Applies to the whole Rust port, not just M4a. Decide
