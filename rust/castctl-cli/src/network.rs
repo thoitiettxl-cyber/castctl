@@ -80,6 +80,7 @@ use crate::parser::Parsed;
 use crate::run::{Ctx, FlowErr, GlobalOpts, msg, msg_empty, resolve_and_load_single};
 use crate::runtime::{Runtime, build_runtime};
 use crate::table::CommandSpec;
+use castctl_config::jsonvalue::{JsonValue, OrderedObject};
 use castctl_gateway::gateway::{Body, RequestOptions};
 
 /// One compact JSON line, Go `json.Marshal` on a
@@ -571,7 +572,7 @@ fn ordered_body(pairs: &[(&str, String)]) -> Body {
 /// go:297`): the allowlist summary only, never peer text.
 /// Auth and Cancelled never reach a row (they propagate);
 /// they are rendered here only for completeness.
-fn summarize_transport_error(err: &TransportError) -> String {
+pub(crate) fn summarize_transport_error(err: &TransportError) -> String {
     match err {
         TransportError::Auth { message } => auth_summary(message),
         TransportError::Gateway(summary) => gateway_error_text(summary),
@@ -1575,7 +1576,7 @@ fn event_matches_ref(ev: &SerdeValue, ref_: &str) -> bool {
 /// skipped, bytes, error, warning; `None` fields are
 /// omitted (`omitempty`).
 #[derive(Debug, Clone, Default)]
-struct SaveRow {
+pub(crate) struct SaveRow {
     /// Resource path that was downloaded.
     path: String,
     /// Absolute local path saved to (or would-be, on failure).
@@ -1616,6 +1617,35 @@ fn save_row_to_json(row: &SaveRow) -> String {
     out
 }
 
+/// The `SaveRow` shape as an ordered JSON value (same
+/// field order and omission rules as `save_row_to_json`):
+/// `path`, `file`, `skipped?`, `bytes?`, `error?`,
+/// `warning?`. Used by `send`'s `downloads` array; the
+/// download command keeps the string form.
+pub(crate) fn save_row_json(row: &SaveRow) -> JsonValue {
+    let mut pairs: Vec<(&str, JsonValue)> = vec![
+        ("path", JsonValue::Str(row.path.clone())),
+        ("file", JsonValue::Str(row.file.clone())),
+    ];
+    if let Some(skipped) = &row.skipped {
+        pairs.push(("skipped", JsonValue::Str(skipped.clone())));
+    }
+    if let Some(bytes) = row.bytes {
+        pairs.push(("bytes", JsonValue::Number(bytes.to_string())));
+    }
+    if let Some(error) = &row.error {
+        pairs.push(("error", JsonValue::Str(error.clone())));
+    }
+    if let Some(warning) = &row.warning {
+        pairs.push(("warning", JsonValue::Str(warning.clone())));
+    }
+    let mut o = OrderedObject::new();
+    for (k, v) in pairs {
+        o.set(k.to_string(), v);
+    }
+    JsonValue::Object(o)
+}
+
 /// `SaveResources` (`internal/shared/resources.go:267`):
 /// mkdir the directory (0777), skip existing
 /// destinations unless overwrite, download each resource
@@ -1627,7 +1657,7 @@ fn save_row_to_json(row: &SaveRow) -> String {
 /// allowlist summary only); an auth failure or a
 /// cancelled context propagates, as does any local
 /// filesystem failure (`save resources: …`).
-async fn save_resources(
+pub(crate) async fn save_resources(
     rt: &Runtime,
     resources: &[Resource],
     directory: &str,
