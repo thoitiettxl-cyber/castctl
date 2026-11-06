@@ -45,7 +45,12 @@ pub const METHOD_HOST_LOG: &str = "host.log";
 /// explicit `null` (4 bytes) all survive, where a
 /// `serde_json::Value` would re-serialise with sorted
 /// keys and lose the null-vs-absent distinction.)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `RawValue` implements neither `PartialEq` nor
+/// `Eq`, so equality is hand-written: `result`
+/// compares by its raw bytes (`.get()`), which is
+/// exactly the Go `bytes.Equal` semantics on
+/// `json.RawMessage`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
     /// `ok` — missing means `false`, like Go's zero
     /// value (`json.Unmarshal` leaves a missing field
@@ -68,6 +73,17 @@ pub struct Envelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<PluginError>,
 }
+
+impl PartialEq for Envelope {
+    fn eq(&self, other: &Self) -> bool {
+        self.ok == other.ok
+            && self.error == other.error
+            && self.result.as_ref().map(|r| r.get())
+                == other.result.as_ref().map(|r| r.get())
+    }
+}
+
+impl Eq for Envelope {}
 
 /// Deserialise a present `result` field as raw bytes.
 /// Present-but-`null` becomes `Some(RawValue("null"))`;

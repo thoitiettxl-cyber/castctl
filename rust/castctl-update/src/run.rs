@@ -224,12 +224,16 @@ impl Updater {
         // `null` field used to fail the whole decode as
         // code-1 `malformed`, while Go continues to the
         // code-2 paths).
-        fn null_default<'de, D, T>(d: D) -> Result<T, D::Error>
+        fn null_default<'de, D, T>(d: D) -> std::result::Result<T, D::Error>
         where
             D: serde::Deserializer<'de>,
             T: serde::Deserialize<'de> + Default,
         {
-            let opt = Option::<T>::deserialize(d)?;
+            // Fully qualified: this module defines its
+            // own `Result` struct (the update outcome),
+            // which shadows `std::result::Result`, and
+            // `serde::Deserialize` is not imported here.
+            let opt = <Option<T> as serde::Deserialize>::deserialize(d)?;
             Ok(opt.unwrap_or_default())
         }
         #[derive(serde::Deserialize)]
