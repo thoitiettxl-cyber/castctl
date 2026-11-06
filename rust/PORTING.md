@@ -10875,3 +10875,45 @@ header slot array, which is why `MAX_HEADERS` is 10,000
   origin "403-vs-silent-close") live outside the repo;
   the parent must correct them in the draft — flagged in
   the fix-loop-2 handoff.
+
+#### Đối chiếu sau handoff (reconciliation, 2026-11-06)
+
+- A late background test result (790 passed, 0 failed,
+  clippy exit=0) arrived after the handoff. It ran on a
+  cue source copy synced at an intermediate head
+  (`e1dbc39`/`d4d8425`: 783 + 7 new tests = 790), before
+  the last 3 tests landed (2× HEAD Content-Length in
+  `ef78d44`, >10,000 headers → 431 in `e79c220`). It does
+  NOT contradict the 793 claim.
+- Independent confirmation, two runs at the final head
+  `3fdb486`: (a) the loop's own final gates run
+  (fmt/build/test/clippy all exit 0, 793 passed, 0
+  failed); (b) a clean re-run with a fresh target dir
+  (`CARGO_TARGET_DIR=/tmp/mea-m6b-fix2-target`,
+  `rustup run 1.99.1`, `CARGO_PROFILE_DEV_DEBUG=0`,
+  `CARGO_PROFILE_DEV_INCREMENTAL=false`) — verbatim:
+  `fmt exit=0`, `build exit=0`, `test exit=0`
+  (36 suites, `passed=793 failed=0`), `clippy exit=0`.
+  Log `/tmp/mea-m6b-fix2-gates.log` on cue (75,091 bytes,
+  kept).
+- Disk (Boss DISK RULE 2026-11-05/06: target in
+  `/tmp/<name>-target`, delete own target after the final
+  gate, keep logs; `df < 6G` → clean first and report):
+  cue `/` was 95% full (3.8–4.1G free) during the loop's
+  disk-full episode; Boss cleaned it to 16G free (79%);
+  11G free (86%) right after the reconciliation gates
+  (own target 1.8G; ~3G more was consumed by sibling
+  sessions' activity during the ~4 min run, not
+  attributed); 12G free (84%) after deleting the own
+  target dir and the cue source copy. Sibling targets
+  `/tmp/m6c-target` (13G) and `/tmp/m7b-target` (9.7G)
+  were never touched; `/tmp/mea-m6b-repo` predates this
+  loop and was left alone; no `/tmp/go-build*` dirs
+  existed to clean.
+- Other late background results all match §M6b.10 as
+  recorded, no new information: parity run 1, 75/76
+  (case 61 DIFF, stale garbage-prefix probe); parity
+  run 3, 76/76 identical; fail-before proofs 10/10 exit
+  101, restore-ok; proof 11 wired VmHWM +6,584 KiB on
+  the re-run (vs +6,436 KiB recorded — run-to-run
+  variance, both ~6.4 MB vs neutered +71,600 KiB).
