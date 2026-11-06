@@ -15060,6 +15060,19 @@ fallthrough stub — kept from `dev-rust` at rebase.
 - [DEVIATION] Keeper check timing: Rust checker 20s/request
   bound fails a dead-outbound tick at ~20s, not Go's full 90s
   check timeout; exit code + stderr text still match Go.
+  (N3, fix loop 2, documented not fixed.) The post-cancel
+  await has no deadline of its own: after the 90s bound
+  fires, `check_entries` awaits the tick to completion, so
+  the wall clock can exceed 90s by up to one in-flight
+  phase (worst single phase: observe, 90s; checker
+  ~20s/request, CDP attach 10s, relogin match/cookie 30s
+  each). Go aborts everything at 90s via
+  `context.WithTimeout` (`internal/commands/keeper.go:714`).
+  Exit code is still 4. Bounding the await would need a
+  fabricated tick result to print the row (Go always prints
+  the real tick result), and making the tick abort
+  mid-request needs a transport-seam change — both out of
+  scope; the overrun is bounded, not unbounded.
 - [DEVIATION] Telegram bot core retries 5xx with the default
   ladder (`DEFAULT_5XX_BACKOFF`); Go's core has no 5xx retry
   (M5 deviation, pre-existing).
@@ -15093,8 +15106,17 @@ fallthrough stub — kept from `dev-rust` at rebase.
   aborts the request via its signal `ctx` and exits
   promptly. `keeper check` IS prompt (the `select!` arm
   fires on cancel regardless of the tick). Second-SIGINT
-  disposition unprobed (moot: the process exits on the
-  first SIGINT's path).
+  disposition (N2, fix loop 2, settled by code
+  reading, not live): a second SIGINT inside the window
+  is swallowed — the watcher is one-shot (its task ends
+  after the first signal) and tokio's installed Ctrl-C
+  handler drops signals while no listener is registered,
+  so there is nothing to force the exit; the process
+  still exits 130 when the in-flight request times out
+  (~6s). A force-exit on second SIGINT was considered
+  and rejected: it would skip the graceful flush +
+  single-flight release that fix loop 1 proved, for a
+  ~6s wait. SIGTERM/SIGKILL still terminate at once.
 - [DEVIATION] `profile test` timeout-path error texts
   (N1, fix loop 1, partly fixed): the egress and HTTPS
   OUTER timeout arms now render Go's wrapped texts
@@ -15300,3 +15322,71 @@ fix-loop report
 - N3/N4/N6 — documented in §M7d.3 (no code change).
 - N7 — stale M2 stub docs in `run.rs` fixed (module doc
   + `cmd_plain` doc now describe the wired dispatch).
+
+### M7d.8 Fix loop 2 (review 2, 2026-11-06)
+
+Review 2 (safety) verdict BLOCKING on S1; fixed here
+in one commit on top of `8f269aa` (PR #85 head). Test
+count 1597/0 → 1598/0 (66 suites; +1 S1 test). Gates
+re-run on cue, all exit 0 — see the fix-loop report
+(`~/workspace/tmp/castctl-rust-m7d-notes/fixloop2-report.md`).
+
+- S1 — `profile test` with no config file resolved via
+  the system resolver (FIXED): `dns_lookup`'s `None` arm
+  now returns the Go `ErrNoResolver` text + exit 2,
+  matching Go byte-for-byte
+  (`internal/outbound/dialer.go:27,146-152`;
+  `internal/commands/runtime.go:40-44`;
+  `internal/commands/profilecmd.go:928-930`). The three
+  comments that justified the system-resolver fallback
+  (module doc, `dns_lookup` doc, `system_lookup` doc)
+  are corrected. New test
+  `run_test_no_config_fails_closed_no_resolver`
+  (`XDG_CONFIG_HOME` at an empty temp dir, no config
+  written): RED first (exit 3, DNS-OK via the system
+  resolver), GREEN after (exit 2 + Go text, 0.00s, no
+  network). Live on cue (M3, review 2): Go `profile
+  test` vs Rust `profile test` with no config — stdout
+  AND stderr byte-identical, both exit 2. This is a fix,
+  not a deviation: the behaviour now matches Go.
+- N1 — `Mutex::lock().unwrap()` ×2 in the telegram
+  SIGINT watcher (FIXED): both sites use
+  `.lock().unwrap_or_else(|e| e.into_inner())`. No
+  behaviour change. No `unwrap()` remains in production
+  code in the M7d diff (verified by grep; the rest are
+  in `#[cfg(test)]` modules or safe `unwrap_or*` forms).
+- N4 — `Profile` Debug printed `vm_id`/`node_id`/
+  `subscription_action_id` raw (FIXED): the three fields
+  now render `"[redacted]"` when present (empty stays
+  `""`), matching the token convention in the
+  `TelegramConfig` Debug impl. `SingleConfig` Debug
+  prints profiles through `Profile`'s impl, so it
+  inherits the redaction. No test depended on the raw
+  values (`test_debug_never_prints_secrets` asserts only
+  secret absence).
+- N2 — second SIGINT during the hung-tick window
+  (DOCUMENTED, no code): settled in §M7d.3 — swallowed
+  (one-shot watcher; tokio handler drops signals with
+  no listener); the process still exits 130 when the
+  in-flight request times out (~6s). Force-exit on
+  second SIGINT was considered and rejected (it would
+  skip the graceful flush + single-flight release that
+  fix loop 1 proved).
+- N3 — `keeper check` post-cancel await has no deadline
+  (DOCUMENTED, no code): quantified in §M7d.3 — wall
+  clock can exceed 90s by up to one in-flight phase
+  (worst: observe, 90s); exit code still 4. Bounding it
+  would need a fabricated tick result; making the tick
+  abort mid-request needs a transport-seam change.
+
+Full-suite flake (not a code issue):
+`install_newer_version_end_to_end` (`castctl-update`,
+fake server) failed once in the first full run (42
+passed / 1 failed in that suite), passed alone (2.26s)
+and passed in the full re-run (1598/0). None of this
+loop's files are in that crate's path.
+
+Note: `dev-rust` moved during this loop to `57fc7be`
+(PR #84, version stamp, `run.rs` only). PR #85 will
+need a rebase onto it; not done here (one commit on
+`feat/rust-m7d-fixloop1`, no push).
