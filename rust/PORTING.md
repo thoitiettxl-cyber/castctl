@@ -11462,8 +11462,74 @@ bcrypt 0.17.1, blowfish 0.9.1, tar 0.4.46, flate2
 (sha2, libc, bcrypt, blowfish, tar, flate2, nix, sha1).
 
 `git diff --stat origin/dev-rust...HEAD`: 37 files,
-+16,662/−21 (before this rebase's doc edits), all in
-`rust/` + `NOTICE` + `docs/provenance.md`, zero `.go`
-files — no SPDX check needed.
++16,741/−21, all in `rust/` + `NOTICE` +
+`docs/provenance.md`, zero `.go` files — no SPDX check
+needed.
 
-#### Gates at the rebased head (cue, `rustup run 1.99.1`, to be filled after the run)
+#### Gates at the rebased head `e2a724a` (cue, `rustup run 1.99.1`, `CARGO_TARGET_DIR=/tmp/mea-m6b-rebase2-target`, `CARGO_PROFILE_DEV_DEBUG=0`, `CARGO_PROFILE_DEV_INCREMENTAL=false`)
+
+```
+fmt exit=0
+build exit=0
+test exit=0        (1136 passed, 0 failed, workspace-wide, run 3 below)
+clippy exit=0      (--workspace --all-targets -- -D warnings)
+```
+
+Before/after: 916 passed at `325ba0f` (base `6a399f7`)
+→ 1136 at `e2a724a` (base `0233095`). Arithmetic:
+985 (M6c tree at base: 765 + 220) + 151 (M6b: 150
+webui lib + 1 fix loop 3) = 1136, exactly the measured
+total. Per-crate spot values from run 3:
+`castctl-webui` lib 150 passed (unchanged by the
+rebase), `castctl-update` lib 59 + `update_flow` 43.
+Logs: `/tmp/mea-m6b-rebase2-gates.log` (run 2),
+`/tmp/mea-m6b-rebase2-test.log` (run 2),
+`/tmp/mea-m6b-rebase2-gates3.log` + `-test3.log`
+(run 3) — all on cue, kept.
+
+Two incidents in the gate runs, both recorded honestly:
+
+- Stray `]` in `Cargo.lock` (my merge error): the
+  `e8460f1` conflict resolution kept the shared closing
+  bracket after the `>>>>>>>` marker AND added my own,
+  so the rebased tree at `1ddbd99` did not parse
+  (`missing table open, expected `[``, build exit 101
+  in gate run 1 — fmt passed first only because
+  `cargo fmt` does not read the lock). Fixed by
+  deleting the one extra bracket (commit `e2a724a`,
+  verified with `tomllib` locally: 341 packages, all
+  expected versions present, then re-transferred and
+  re-gated). Lesson: a regex package-name check does
+  NOT prove a lock merge — parse it (`tomllib` /
+  `cargo metadata --offline`) before transferring.
+- Flake `hardlink_keeps_old_inode` (M6c
+  `castctl-update/tests/update_flow.rs:781`): failed
+  ONCE in gate run 2 with `install failed:
+  Some(Failure("update: cannot execute the downloaded
+  binary"))` — the `run_exec_check` spawn in
+  `replace.rs:125`. No rebase interaction: the rebase
+  touches no `castctl-update` code, the other 42
+  suite tests passed in the same run, and the test
+  passed 3/3 alone plus 43/43 for the whole
+  `update_flow` suite on re-run, then 43/43 again in
+  gate run 3. Root cause NOT proven (the spawn error
+  is mapped to a generic failure, hiding the errno;
+  most likely transient resource contention under
+  full-workspace parallel load — the suite compiles
+  fake binaries with `rustc` while 30+ other suites
+  run). Recorded as a test-only flake, third known
+  one in this area alongside M6c's
+  `sweep_removes_only_dead_pid_dirs` and
+  `hostile_latest_tag_refuses_without_echo`. Cargo's
+  fail-fast meant the webui suite (alphabetically
+  last) never ran in run 2 — run 3 was needed for the
+  true total. No code was changed for either incident.
+
+Disk (Boss DISK RULE): cue `/` was 9.7G free before
+the build (above the 6G line, no cleaning needed);
+13G free after the final gate. Own target
+(`/tmp/mea-m6b-rebase2-target`) + source copy
+(`/tmp/mea-m6b-rebase2`) deleted after the final gate,
+logs kept. Fingerprint verified against the pinned
+`~/workspace/tmp/cue-known_hosts`
+(`SHA256:6ExOBaFLBXhnN4GX3Qjh6DbdjJev2p7nR61IwERRhcs`).
