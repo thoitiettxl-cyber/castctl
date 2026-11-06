@@ -25,6 +25,7 @@ bytes = { workspace = true }
 rand = { workspace = true }
 base64 = { workspace = true }
 libc = { workspace = true }
+nix = { workspace = true }
 # Production use (shadow_copy_to_dir builds its temp
 # file with tempfile::Builder): a regular dependency,
 # not a dev-dependency.

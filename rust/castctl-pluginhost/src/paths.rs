@@ -116,7 +116,7 @@ pub fn check_hardlink(meta: &std::fs::Metadata) -> Result<(), PluginHostError> {
 /// another uid. Source: `checkShadowDirOwnership`
 /// (`hardlink_unix.go:44-55`).
 pub fn check_shadow_dir_ownership(meta: &std::fs::Metadata) -> Result<(), PluginHostError> {
-    if meta.uid() != unsafe { libc::getuid() } {
+    if meta.uid() != nix::unistd::getuid().as_raw() {
         return Err(PluginHostError::invalid(
             "shadow directory is owned by another user",
         ));
@@ -133,11 +133,14 @@ pub fn pid_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
     }
-    let rc = unsafe { libc::kill(pid, 0) };
-    if rc == 0 {
-        return true;
+    // Signal `None` = existence check only, no signal
+    // is sent (`kill(pid, 0)`); `EPERM` still means the
+    // process exists (alive, other uid).
+    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
+        Ok(()) => true,
+        Err(nix::errno::Errno::EPERM) => true,
+        Err(_) => false,
     }
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// Open a plugin artifact refusing symlinks at open time

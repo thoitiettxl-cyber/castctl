@@ -14,14 +14,17 @@
 //! check-to-flock window (`lock_unix.go:21-27`) — that
 //! residual is kept, not "fixed", per the decision rules.
 //!
-//! Flock choice (R3 §3.3): `libc::flock` directly, not
-//! `fslock` 0.2.1 or `nix` 0.31.3. Reason: the Go code needs
-//! (a) the raw fd for the EINTR-retry loop and the
-//! EWOULDBLOCK → held distinction, (b) the Lstat-vs-fstat
-//! identity re-check on the same fd, and (c) close-to-
-//! release semantics — all three are one `libc::flock` call
-//! plus std metadata, with no wrapper API to verify.
-//! `libc` 0.2.191 is already in `Cargo.lock` (via `nix`).
+//! Flock choice (R3 §3.3, revised fix loop 1): `nix`
+//! 0.31.3 `fcntl::Flock` — the safe wrapper for the
+//! `flock(2)` call Go makes directly. `Flock::lock`
+//! takes the `File` by value and returns it on error,
+//! so the EINTR-retry loop keeps the same fd; the
+//! returned `Flock<File>` unlocks on drop and derefs to
+//! the `File`, so the Lstat-vs-fstat identity re-check
+//! and close-to-release semantics are unchanged. `libc`
+//! 0.2.191 stays a dependency for the errno constants
+//! used elsewhere in this crate (`ETXTBSY`, `EINVAL`,
+//! `ENOTSUP`), not for any `unsafe` call.
 
 use std::fs::File;
 use std::os::unix::fs::MetadataExt;
@@ -33,12 +36,13 @@ use crate::error::UpdateError;
 /// Source: `lockFileName` (`internal/update/replace.go:27`).
 pub const LOCK_FILE_NAME: &str = ".castctl-update.lock";
 
-/// A held update lock. Dropping it closes the file, which
-/// releases the flock. The file is never deleted.
+/// A held update lock. Dropping it unlocks explicitly
+/// (`Flock` drops with `LOCK_UN`) and then closes the
+/// file, which releases the flock. The file is never deleted.
 /// Source: `acquireUpdateLock` (`internal/update/lock_unix.go:36-60`).
 #[derive(Debug)]
 pub struct UpdateLock {
-    _file: File,
+    _lock: nix::fcntl::Flock<File>,
     /// The lock path, for diagnostics (never rendered to the user).
     path: PathBuf,
 }
@@ -94,22 +98,36 @@ pub fn acquire_update_lock(dir: &Path) -> Result<LockOutcome, UpdateError> {
     if after.dev() != opened.dev() || after.ino() != opened.ino() {
         return Err(UpdateError::failure("update lock file changed during open"));
     }
-    use std::os::unix::io::AsRawFd;
+    // EINTR-retry loop over the non-blocking exclusive
+    // flock (`Flock::lock` returns the `File` on error,
+    // so the retry keeps the same fd; it makes exactly
+    // one `flock(2)` call and does NOT retry EINTR
+    // itself — the loop here is the retry).
+    use nix::errno::Errno;
+    use nix::fcntl::{Flock, FlockArg};
+    let mut file = file;
     loop {
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if rc == 0 {
-            return Ok(LockOutcome::Held(UpdateLock { _file: file, path }));
+        match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+            Ok(locked) => {
+                return Ok(LockOutcome::Held(UpdateLock {
+                    _lock: locked,
+                    path,
+                }));
+            }
+            Err((f, errno)) => {
+                file = f;
+                if errno == Errno::EINTR {
+                    continue;
+                }
+                if errno == Errno::EWOULDBLOCK {
+                    return Ok(LockOutcome::AlreadyHeld);
+                }
+                return Err(UpdateError::failure(format!(
+                    "update: cannot lock the update directory: {}",
+                    errno as i32
+                )));
+            }
         }
-        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-        if errno == libc::EINTR {
-            continue;
-        }
-        if errno == libc::EWOULDBLOCK {
-            return Ok(LockOutcome::AlreadyHeld);
-        }
-        return Err(UpdateError::failure(format!(
-            "update: cannot lock the update directory: {errno}"
-        )));
     }
 }
 

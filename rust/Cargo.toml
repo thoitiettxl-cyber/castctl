@@ -58,7 +58,7 @@ serde = "=1.0.228"
 # (Go `json.Number` parity) instead of losing numbers outside
 # i64/u64 to float64 rounding — without it, a gateway number
 # above u64::MAX silently changed value on decode.
-serde_json = { version = "=1.0.145", features = ["arbitrary_precision"] }
+serde_json = { version = "=1.0.145", features = ["arbitrary_precision", "raw_value"] }
 hyper = "=1.8.1"
 # M3b: canonical hyper<->tokio IO adapter (TokioIo), resolved
 # on cue to 0.1.20 (see rust/PORTING.md §M3.7).
@@ -135,6 +135,19 @@ libc = "=0.2.191"
 # (miniz_oxide/zlib-rs), no system zlib.
 tar = "=0.4.46"
 flate2 = "=1.1.10"
+# M6c fix loop 1: `nix` 0.31.3 promoted from a transitive
+# (boringtun) to a direct dependency: its safe wrappers
+# replace the 4 production `unsafe` blocks (Flock for the
+# update lock, getuid/kill for paths, shutdown for the
+# egress listener close, close for the extracted-temp
+# close check). Already in the lock (checksum
+# cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d);
+# the `socket` feature adds ONE new lock entry, `memoffset`
+# 0.9.1 (no deps of its own), used only for `shutdown`.
+# No other feature pulls a new crate (`fs`/`process`/
+# `signal`/`user` need only bitflags/cfg-if/libc).
+# Default features are off: nix's default is empty.
+nix = { version = "=0.31.3", default-features = false, features = ["fs", "process", "signal", "socket", "user"] }
 # reader/writer halves (tokio-tungstenite only re-exports the
 # concrete stream type; the traits must be direct deps).
 futures-core = "=0.3.34"

@@ -16,6 +16,7 @@ hex = { workspace = true }
 tar = { workspace = true }
 flate2 = { workspace = true }
 libc = { workspace = true }
+nix = { workspace = true }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

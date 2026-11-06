@@ -334,20 +334,37 @@ impl EgressProxy {
     }
 
     /// Stop the proxy. Credentials die with it. The
-    /// listener socket is shut down directly as well as
-    /// through the accept task: aborting the task alone
-    /// leaves a scheduling window in which a dial could
-    /// still complete. `Close` also aborts in-flight
-    /// CONNECT tunnels by aborting their copy tasks
-    /// (dropping both ends): hyper does NOT close
-    /// hijacked connections, so without tunnel tracking
+    /// listener socket is shut down FIRST, while the
+    /// accept loop still owns the listener: shutting
+    /// down after aborting the accept task would race
+    /// the listener drop, and a reused fd number could
+    /// make `shutdown` hit an unrelated socket (the
+    /// accept task drops the listener on abort, and the
+    /// fd number can be recycled by another thread in
+    /// between). `Close` also aborts in-flight CONNECT
+    /// tunnels by aborting their copy tasks (dropping
+    /// both ends): hyper does NOT close hijacked
+    /// connections, so without tunnel tracking
     /// revocation would block new connections only.
-    /// Idempotent.
+    /// Residual (recorded in PORTING §M6c.2 deviation
+    /// 10): a non-CONNECT request already accepted
+    /// still completes after `Close` — Go's `Close`
+    /// closes active connections too, Rust does not
+    /// track those tasks. Idempotent.
     /// Source: `Close` (`egress.go:185-219`).
     pub fn close_proxy(&self) {
         if self.inner.closed.swap(true, Ordering::SeqCst) {
             return;
         }
+        // Shut the listener socket down at the kernel
+        // level FIRST (see the ordering note above), so
+        // a dial racing task cleanup still refuses
+        // deterministically. Errors are ignored: the
+        // listener may already be gone.
+        let _ = nix::sys::socket::shutdown(
+            self.inner.listener_fd,
+            nix::sys::socket::Shutdown::Both,
+        );
         self.inner.shutdown.notify_waiters();
         // Abort live tunnels first: their copy tasks own
         // both ends, so aborting drops (closes) them.
@@ -358,15 +375,9 @@ impl EgressProxy {
         for h in handles {
             h.abort();
         }
-        // Abort the accept loop (drops the listener) and
-        // shut the listener socket down at the kernel
-        // level so a dial racing task cleanup still
-        // refuses deterministically.
+        // Abort the accept loop (drops the listener).
         if let Some(handle) = self.inner.accept_handle.lock().unwrap().take() {
             handle.abort();
-        }
-        unsafe {
-            libc::shutdown(self.inner.listener_fd, libc::SHUT_RDWR);
         }
     }
 }
@@ -598,6 +609,11 @@ fn plain_response(status: StatusCode, body: &'static str) -> Response<Full<Bytes
 }
 
 /// Rebuild `uri` without any userinfo in the authority.
+/// The fallback returns the original URI only if the
+/// rebuild fails — unreachable for parts taken from an
+/// already-parsed `Uri` (scheme, authority remainder,
+/// and path-and-query are all valid by construction),
+/// so the userinfo is stripped on every reachable path.
 fn strip_userinfo(uri: &http::Uri) -> http::Uri {
     let Some(authority) = uri.authority() else {
         return uri.clone();
