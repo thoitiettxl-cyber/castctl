@@ -15057,9 +15057,13 @@ fallthrough stub — kept from `dev-rust` at rebase.
 - [DEVIATION] Keeper check/status time fields render as `Z`
   (Rust `DateTime<Utc>`); Go echoes the stored local offset
   (`+07:00`). Instants equal.
-- [DEVIATION] Keeper check timing: Rust checker 20s/request
-  bound fails a dead-outbound tick at ~20s, not Go's full 90s
-  check timeout; exit code + stderr text still match Go.
+- [DEVIATION] Keeper check timing: Rust checker has a 20s/request
+  bound, but the wall-clock time for a dead-outbound tick is
+  UNMEASURED (review 3, F1): the backoff ladder (5m/15m/45m) plus
+  the 90s `CHECK_TIMEOUT` suggest ~90s like Go, not ~20s as this
+  line previously claimed — that number was an inference from the
+  per-request bound, with no Rust-side wall-time run behind it.
+  Exit code + stderr text still match Go.
   (N3, fix loop 2, documented not fixed.) The post-cancel
   await has no deadline of its own: after the 90s bound
   fires, `check_entries` awaits the tick to completion, so
