@@ -1,0 +1,25 @@
+{
+  "args": ["approvals"],
+  "gateway": {
+    "/approvals": {
+      "status": 200,
+      "result": {
+        "pending_approvals": [
+          {
+            "approval_id": "ap1",
+            "request_expires_at_ms": "123",
+            "decision_options": null
+          },
+          {
+            "approval_id": "ap2",
+            "display": {
+              "summary_title": "Mạng <&> Co",
+              "detail_rows": [{"label": "Host", "value": "h1"}, {"label": "Host", "value": "h2"}]
+            },
+            "decision_options": []
+          }
+        ]
+      }
+    }
+  }
+}

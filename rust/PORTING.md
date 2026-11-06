@@ -13135,3 +13135,907 @@ the build (above the 6G line, no cleaning needed);
 logs kept. Fingerprint verified against the pinned
 `~/workspace/tmp/cue-known_hosts`
 (`SHA256:6ExOBaFLBXhnN4GX3Qjh6DbdjJev2p7nR61IwERRhcs`).
+
+## M7b — Phase A CLI wiring, PR-1 (2026-11-06)
+
+Scope: wire 19 Phase A commands + `raw` from the `not ported yet`
+stub to the real gateway/HTTPS. Branch
+`feat/rust-m7b-cli-wiring`, base `dev-rust` 9fc93c5, rebased
+mid-work onto 6a399f7 (M-perf merge PR #66 — only `rust/perf/*`
+changed, no conflict), head 5329d48. Single writer, Phase 2
+(subagent-orchestration). Research spec:
+`~/workspace/tmp/castctl-rust-m7b-notes/r1-go-handlers.md`,
+`r2-rust-state.md`, `r3-cue-env.md`; plan
+`~/workspace/plans/active/castctl-rust-m7b.md` (D-M7b-1..8).
+
+### M7b.1 Command map
+
+Routing: `rust/castctl-cli/src/run.rs:578` `cmd_plain` →
+`M7B_COMMANDS` (`run.rs:611`, 19 names, not including
+`auto-approve`) → `run_network_command`; `auto-approve` is
+routed earlier in `cmd_plain` to `autoapprove::run_auto_approve`
+(no network). `dispatch` (`network.rs:1751`) returns
+`Result<CmdOut, FlowErr>`; `CmdOut { stdout, stderr, code }`
+exists so redeem (exit 1 silent after stdout) and download
+row-error (exit 3 silent after stdout) keep their Go
+stdout-then-error ordering — `run_network_command` appends
+stdout+stderr, then returns `FlowErr::Exit(code)` for code != 0.
+The old `invite` special-case branch in `cmd_plain` is removed.
+`history --download` stub and chat/send/watch stubs are kept.
+
+| Command | Go handler | Rust handler | Evidence |
+|---|---|---|---|
+| session-start | `internal/deliver/session.go:80` | `network.rs:931` `cmd_session_start` | fake 42-case harness |
+| session-rename | `internal/deliver/session.go:104` | `network.rs:963` `cmd_session_op` | fake |
+| session-pin | `internal/deliver/session.go:104` | `network.rs:963` | fake |
+| session-unpin | `internal/deliver/session.go:104` | `network.rs:963` | fake |
+| session-archive | `internal/deliver/session.go:104` | `network.rs:963` | fake |
+| session-unarchive | `internal/deliver/session.go:104` | `network.rs:963` | fake |
+| session-delete | `internal/deliver/session.go:104` | `network.rs:963` | fake |
+| stop | `internal/deliver/stop.go:26` | `network.rs:995` `cmd_stop` | fake |
+| seen | `internal/commands/read.go:991` | `network.rs:1020` `cmd_seen` | fake |
+| feed-react | `internal/commands/read.go:820` | `network.rs:1037` `cmd_feed_react` | fake |
+| idea-exec | `internal/commands/read.go:949` | `network.rs:1062` `cmd_idea_exec` | fake |
+| approvals | `internal/commands/wait.go:1230` | `network.rs:1171` `cmd_approvals` | fake + live |
+| approve | `internal/commands/wait.go:1295` | `network.rs:1262` `cmd_approve` | fake |
+| deny | `internal/commands/wait.go:1330` | `network.rs:1290` `cmd_deny` | fake |
+| invite | `internal/commands/read.go:195` | `network.rs:1357` `cmd_invite` | fake + live |
+| redeem | `internal/commands/read.go:276` | `network.rs:1394` `cmd_redeem` | fake |
+| wake | `internal/deliver/wake.go:89` | `network.rs:1458` `cmd_wake` | fake |
+| download | `internal/commands/read.go:535` | `network.rs:1725` `cmd_download` | fake + live (no-files path) |
+| auto-approve | `internal/commands/wait.go:1365` | `autoapprove.rs` `run_auto_approve` | live + binary-vs-binary temp config |
+| raw | `internal/commands/read.go:1011` | `network.rs:1790` `cmd_raw` | fake |
+
+New supporting code:
+
+- `rust/castctl-gateway/src/invite.rs` — `fetch_invite` /
+  `create_invite` / `redeem_invite_code` / `wake_vm` +
+  `*_base` variants (fake `http_base` seam), from
+  `internal/gateway/invite.go:30,61,98` and
+  `internal/gateway/wake.go:52`. Fake-HTTP unit tests
+  (tokio TcpListener, hand-rolled HTTP/1.1, request recording).
+- `rust/castctl-gateway/src/media.rs` — `media_path` from
+  `internal/gateway/media.go:47-91` (copied via
+  `castctl-telegram/src/turn.rs:282-360`; the M5b
+  case-insensitive scheme gate was NOT carried over — D5 was
+  fixed to Go's lowercase-only gate in fix loop 1).
+- `rust/castctl-shared/src/invite.rs` — `summarize_invite` +
+  ordered JSON render, from `internal/shared/invite.go:39`
+  (reads RAW API field names: `invite_state`, `code`,
+  `invite_link`, `max_uses`, `use_count`, `uses_remaining`,
+  `reward{title,body}`, `subtitle`, `share_text`,
+  `has_redeemed_invite_code`).
+- `rust/castctl-cli/src/approvals.rs` — local port of
+  `internal/approvals/approvals.go:55` `DescribeApproval` +
+  `OffersForever`/`OffersOnce` with nullable fields, plus
+  `go_float64_json` (Go `encoding/json` float rule) and the
+  structural stderr helpers from `wait.go:422-469`.
+  `castctl-telegram/src/approvals.rs` was NOT reused: it is
+  sourced from `internal/telegram/approvals.go` with a
+  non-nullable struct, and Go `approvalJSON` has pointer
+  fields (JSON null vs `""` matters for byte parity).
+- `rust/castctl-config/src/toggle.rs` — `set_auto_approve` /
+  `set_auto_allow_once`: ordered-JSON decode → mutate
+  `profiles.<name>.<key>` → `encode_ordered_json_indent(2)` +
+  `\n`, flock on `config.json.lock` (libc) + sha256 re-read
+  guard (sha2) + atomic temp+rename mode 0600, from
+  `internal/profile/profilecmd.go:552,590` and
+  `internal/profile/guard.go:183`. One `unsafe` call
+  (`libc::flock`) in castctl-config; `lib.rs` doc updated.
+  `profile.rs:114,158` `resolve_auto_approve` /
+  `resolve_auto_allow_once` word tables from
+  `internal/profile/autoapprove.go:37,66`.
+  `Cargo.toml`: `libc` + `sha2` promoted from workspace deps
+  (already in `Cargo.lock`; lock diff adds edges only, no new
+  crate — see `docs/provenance.md` §17).
+- `rust/castctl-cli/src/network.rs` — `ordered_body`,
+  `summarize_transport_error`, `write_merged_json`,
+  `marshal_json_indent`, `decode_json_number_loose`,
+  `save_resources` (`network.rs:1533`, from
+  `internal/shared/resources.go:267`), `run_driver_command`
+  (`network.rs:1861`), `render_flow_err` (`network.rs:1835`).
+- `rust/castctl-cli/src/runtime.rs` — `Runtime` is now `pub`
+  with pub fields + `http_base: String` (production =
+  `MUSE_AI_BASE`, driver = fake base) + `pub fn Runtime::new`.
+- Harness: `rust/parity/gateway_server/main.go` `serve-m7b`
+  mode (script `{gateway, http}` maps, `M7B <verb> <path>
+  <body>` full-body request log, `M7B SUMMARY requests=N`);
+  `rust/parity/m7b_driver/main.go` (Go driver, ~1174 lines);
+  `rust/castctl-cli/examples/m7b_driver.rs` (Rust driver);
+  `rust/parity/m7b_http_server.py` (Python stdlib fake HTTP
+  server, script `http` map + CannedAuth paths, `M7B-HTTP`
+  log); `rust/parity/gen_m7b_cases.py` (42 cases in
+  `rust/parity/m7b_cases/*.json`); `rust/parity/run_m7b_cases.sh`
+  (fresh gateway + HTTP server per side per case; compares
+  stdout+stderr+exit + gateway log + HTTP log + download trees;
+  download dir normalized to `DLDIR`).
+
+### M7b.2 Decisions (self-decide, recorded)
+
+1. **Ordered request bodies**: `Body::Bytes` with hand-built
+   compact JSON in Go struct order (values via
+   `escape_go_marshal_string`, Go `json.Marshal` string rules,
+   HTML ON), NOT castctl-config ordered `JsonValue`, because
+   `Body::Json(serde_json::Value)` sorts keys via BTreeMap.
+   Only session-start params actually differ from sorted order
+   (struct origin,lifecycle,title vs sorted
+   lifecycle,origin,title); rename/session-op/stop/decide/
+   feed-react/idea-exec sorted order coincides with Go
+   struct/map order. (D-M7b-3 refined.)
+2. **WithGateway-lease equivalence**: Go session-ops/stop/raw
+   use `WithGateway` (fresh lease); Rust uses shared-conn
+   `call_json`/`request`. Decided equivalent for single unary
+   calls (same `retry_call_with_safe` path; only connection
+   reuse differs, unobservable in request/response bytes).
+   Fake-server request logs confirm byte equality.
+3. **Approvals shaping**: port `internal/approvals/approvals.go`
+   locally with nullable fields (see §M7b.1); `expires_at_ms`
+   kept as a number via `go_float64_json` ('e' iff abs < 1e-6
+   or abs >= 1e21, else 'f' shortest, integer-valued < 1e21 as
+   decimal integer, `-0` → `-0`; integer branch uses `{:.0}`
+   because `f as i64` saturates above i64::MAX, e.g. 1e20).
+4. **Timeouts for HTTPS helpers**: effective Go bounds are
+   min(ctx, doHatch 20s) → 20s for invite/redeem, 15s for wake
+   (`WAKE_TIMEOUT`). Rust passes 20s/15s to `request_url`
+   directly.
+5. **Driver seam**: `Runtime` pub + `http_base` field +
+   `run_driver_command(spec, rt, p) -> (String stdout, String
+   stderr, i32 code)` rendering `FlowErr` like `run_inner`;
+   NO production CLI flag/env/config for the gateway host
+   (D-M7b-2).
+6. **auto-approve writer**: scoped targeted ordered-JSON edit
+   (flock+sha256 guard like Go `UpdateSingleConfig`) — built,
+   not deferred: it is small (toggle.rs, 359 lines incl.
+   tests). The earlier "preserves unknown fields" claim was
+   WRONG and is corrected here: Go's parser rejects unknown
+   keys too (top-level and inside profiles), so there is
+   nothing extra to preserve there; the real difference is
+   deviation D2 below.
+
+### M7b.3 Deviations (deliberate, with evidence)
+
+- **D1 — `raw --body` error text**: serde's error message vs
+  Go's decoder message differ (Go `invalid character 'b'
+  looking for beginning of object key string`, Rust `key must
+  be a string at line 1 column 2` — same exit 2). Fix loop 1
+  pinned it in the harness known-diff mode
+  (`rust/parity/known_diff/rt-raw-badbody.{go,rs}.err`): each
+  side's stderr is pinned against its own file instead of
+  compared side-to-side; stdout, exit, logs, and downloads
+  still compare byte-identical.
+- **D2 — auto-approve writer preserves input; Go
+  normalizes.** Go `LoadProfile` fills defaults and
+  `buildSingleFileOrdered` re-encodes from the loaded struct:
+  a missing `cookies_file` is materialized as
+  `<config-dir>/profiles/<name>/cookies.txt` and
+  `outbound: "direct"` is dropped (it is the default —
+  `internal/profile/config.go:480-487,579-608`). Rust keeps the
+  input bytes/key order and does not fill defaults. CLI output
+  is byte-identical (status/on/once/off all PASS
+  binary-vs-binary on temp configs); the resulting files are
+  semantically equivalent, verified live: Go reading the
+  Rust-written file prints status identical to Go reading its
+  own written file (`SEMANTIC_EQUIV_PASS`, `/tmp/m7b-live/`).
+  Matching Go's normalization would require porting the full
+  profile-encode rules — out of PR-1 scope and riskier than
+  preserving (never drops user data). Safe direction, kept.
+- **D3 — wake error wraps not reproduced**: Go wraps
+  `deliver: wake: fetch access token: %w` / `fetch session
+  info: %w` (`internal/deliver/wake.go:89`); typed errors
+  classify identically with or without wraps, so the wraps are
+  not observable in exit code / typed output.
+- **D4 — `stringifyID` fallback** [FIXED in fix loop 1]: Go
+  `stringifyID` falls back to `fmt.Sprintf("%v", v)`; Rust
+  now renders Go `%v` (`map[x:1]`, `[a b]`, `<nil>`, bools
+  `true`/`false` inside `%v` — unlike the top-level bool arm's
+  `True`/`False`) instead of compact JSON
+  (`network.rs: go_percent_v`). Regression:
+  `stringify_id_percent_v` + harness `rt-download-seq-obj`.
+- **D5 — `media_path` `is_http_url` deviation** [FIXED in fix
+  loop 1]: the scheme gate is now lowercase-only, matching Go
+  `internal/gateway/media.go:56` (`media.rs: is_http_url`).
+  The M5b telegram copy (`castctl-telegram/src/turn.rs:282-360`)
+  still carries the case-insensitive gate — out of this PR's
+  scope, not changed here. Regression: `media_path_literals`
+  (uppercase `HTTP://`/`HTTPS://`) + harness
+  `rt-download-http-upper`.
+- **D6 — Go driver WS URL token** [FIXED in fix loop 1,
+  wording corrected]: the token is the CANNED `HT-FAKE` from
+  `gatewaytest.CannedAuth`, not a real credential — "real"
+  meant "from the auth chain, not the literal placeholder".
+  Both drivers now interpolate it (`m7b_driver/main.go`,
+  `m7b_driver.rs`); the `%!(EXTRA string=HT-FAKE)` Sprintf
+  bug is fixed, and no `auth_token` string appears in harness
+  logs. The M7a "handshake 400" half (whether the literal
+  actually breaks the M7a Go driver's handshake) is
+  UNVERIFIED by this PR — the M7a `wait_driver` (Go + Rust)
+  still carries the literal; reported to parent, not fixed
+  here (out of scope).
+- **D7 — `writeMergedJSON` nested shape verified by probe**:
+  a temporary Go probe test (created, run, deleted 2026-11-06;
+  Go tree verified clean after) showed nested values render
+  with prefix `" "` on continuation lines only — Rust
+  `marshal_json_indent` matches exactly.
+
+### M7b.4 Gates (cue, 2026-11-06)
+
+- Baseline at 9fc93c5: `cargo test --workspace` = **765 passed,
+  0 failed** (log `/tmp/m7b-baseline-test.log`).
+- Final at 5329d48 (after rebase onto 6a399f7):
+  `cargo fmt --check` 0; `cargo build --workspace` 0;
+  `cargo test --workspace` = **786 passed, 0 failed**
+  (baseline 765 → +21 new tests; log
+  `/tmp/m7b-test-rebased.log`); `cargo clippy --workspace
+  --all-targets -- -D warnings` 0 (log
+  `/tmp/m7b-clippy-rebased.log`); `cargo build -p castctl-cli
+  --example m7b_driver` 0; `go test -run TestSPDXHeaders
+  -count=1 .` ok (SPDX_EXIT=0, run before the workspace
+  build). Full gate log `/tmp/m7b-gates-rebased.log`.
+- Fake-server harness: **42/42 PASS**
+  (`bash rust/parity/run_m7b_cases.sh /tmp/m7b-tier-a`,
+  out dir `/tmp/m7b-tier-a`). First full run was also 42/42
+  but 5 cases passed vacuously (see §M7b.7); after the
+  query-strip + dl-clean fixes the 5 now exercise real paths:
+  download-history exit 0 with `pic.jpg` 11 bytes, no warning;
+  download-history-warning exit 0 with `expected 99 bytes`
+  warning; download-nofiles exit 1 with the no-files message;
+  raw-history exit 0 printing the envelope; download-sandbox
+  exit 0 fresh (not skipped-exists).
+- Live (cue, profile `no.0`, golden Go
+  `/usr/local/bin/castctl` 0.9.0 vs Rust
+  `/tmp/m7b-target/debug/castctl-rs`, outputs under
+  `/tmp/m7b-live/`): approvals list PASS (exit 0,
+  `{"pending": []}`); invite read-only PASS (exit 0, real
+  code + `Uses left: 18 of 30` — value not reproduced here);
+  auto-approve status PASS (exit 0); download with a bogus
+  ref in a scratch dir PASS (exit 1, no-files message).
+  **46× `--help` byte comparison vs Go: 46/46 PASS**
+  (stdout+stderr+exit; files `/tmp/m7b-live/go-*.help`).
+- auto-approve binary-vs-binary (temp config dirs, no
+  network): status/on/once/off PASS after path
+  normalization (the `source` field embeds the config path);
+  on/once/off with an explicit `--profile no1` PASS
+  (exit 0, status JSON + resulting file, modulo D2).
+- `git diff --stat` scope: only `rust/`,
+  `docs/provenance.md`; `NOTICE` unchanged (no new dep);
+  Go tree untouched.
+
+### M7b.5 Deferred (do NOT wire in PR-1)
+
+- `chat` — REPL + stdin + `chat.json` + wait Runner.
+- `send` — default `--wait 90` needs the wait Runner.
+- `watch` — needs `subscribe_raw`, the same primitive as M7a
+  wait; implementing it here would duplicate M7a.
+All three keep the stub + a TODO comment naming the blocker.
+Do NOT touch `wait`/`fs` wiring or M7a crates.
+
+### M7b.6 Disk rule (Boss, 2026-11-05/06 — verbatim)
+
+- Keep `CARGO_TARGET_DIR` in `/tmp/<name>-target` — M7b's is
+  `/tmp/m7b-target`, correct.
+- After taking the final gate, delete own target
+  (`rm -rf /tmp/m7b-target`), keep logs.
+- If `df -h /` < 6G free, clean before building further and
+  report it (record df numbers in writer-report + PORTING
+  §M7b).
+- Never touch other sessions' active target dirs, especially
+  `/tmp/m6c-target`.
+
+Measured on cue 2026-11-06: 16G free at setup; `/` filled to
+100% once mid-session (`/tmp/m7b-target` had grown 8.6G →
+14G; `/tmp/m6c-target` 13G, `/root/v68-target` 10G,
+`/root/v66b-target` 1.1G — other milestones, NOT touched);
+`rm -rf /tmp/m7b-target` (mine; D-M7b-7 allows rm after
+gates; mid-work rm was the only in-scope reclaim) → 14G free.
+Later 4.1G free, Boss cleaned to 16G; during the final gates
+5.1G / 5.0G / 4.6G free (below the 6G threshold — reported
+here and in the writer-report); 19G free at the final gate
+run. Other large dirs observed, NOT touched:
+`/tmp/m6c-target` 13G, `/tmp/drhead-target` 9.4G,
+`/root/.cache/go-build` 16G (shared Go cache).
+Own target deleted after the final gate: `rm -rf
+/tmp/m7b-target` (logs kept under `/tmp/m7b-*.log`,
+`/tmp/m7b-tier-a/`, `/tmp/m7b-live/`).
+
+### M7b.7 Harness findings (bugs the harness caught, fixed in PR)
+
+- **Python HTTP server SIGTERM deadlock**: the signal
+  handler called `server.shutdown()` in the main thread,
+  which blocks until the serve loop notices — but the loop is
+  the interrupted frame below the handler, so the process
+  ignored SIGTERM forever. 268 orphan `m7b_http_server.py`
+  processes accumulated across harness runs (killed with
+  SIGKILL; `pkill -f` without the bracket trick also kills
+  its own shell — use `pkill -f "m7b_http_server[.]py"`).
+  Fix: handler raises `SystemExit(0)`; verified 0 orphans
+  after the final run.
+- **Gateway script lookup must strip the query string**:
+  GET-with-body calls arrive as `/chat/history?limit=50`
+  (`internal/gateway/calls.go:83` bodyToQuery); the serve-m7b
+  handler logs the full path+query but looks up the bare path.
+- **Harness must `rm -rf` download dirs per run**: stale
+  files turned download-sandbox into a skip-exists test.
+- **approveAll partial stderr lost on mid-loop failure**:
+  Go prints approveAll lines to stderr as the loop runs, so
+  they survive a mid-loop decide failure; Rust accumulated
+  stderr in a String returned only on success. Fix:
+  `approve_all(rt, decision, stderr: &mut String)` + both
+  callers render the FlowErr via `render_flow_err` and return
+  `Ok(CmdOut { stdout: "", stderr: partial + rendered, code })`.
+- **Go driver connect**: `muse.Connect(ctx, nil)` fails
+  (`no cookies at:...`) — pass explicit
+  `&conn.Config{CookiesFile, VMID: "vm-test"}`; silence the
+  Muse slog logger (`conn.Live` emits a timestamped `INFO
+  gateway connected seconds=...` line on stderr that can never
+  match Rust); Go driver wake needed `WakeVM: gateway.WakeVM`
+  (was nil → `deliver: wake helper not available`).
+- **HTTP script entries use `body` (verbatim string), never
+  `result`**: the Python server never re-serializes JSON, so
+  bytes match Go's exactly. `stages` (per-path request-count
+  staging, last repeats) implemented identically in both HTTP
+  handlers for invite `--create` (GET no-code → POST → GET
+  with-code).
+- **M7B-HTTP log split**: the Go driver's HTTP handler is
+  in-process, so its `M7B-HTTP` lines land in the driver's
+  stderr; the Rust side's land in the Python server's stderr.
+  The harness greps the Go driver's stderr into `.err`
+  (CLI output) + `.http.err` (request log) before comparing.
+- **Case fixture fields must be raw API names** for invite
+  (see §M7b.1 `summarize_invite`).
+
+### M7b.8 Chưa kiểm chứng
+
+- Live writes — never run on `no.0` by design (D-M7b-8):
+  session-*/stop/seen/feed-react/idea-exec/redeem/
+  invite --create/approve/deny/approvals --approve-all.
+  Fake-server evidence only.
+- Live download of a real file: only the no-files path ran
+  live; the real download path is covered by the fake server.
+- Live wake / live invite --create: fake-server only.
+- `castctl-rs --version` prints `castctl 0.9.0` without the
+  Go build hash/commit (`castctl 0.9.0 (1396697
+  2026-11-04T21:38:36Z)`) — observed, out of PR-1 scope, not
+  changed.
+- `raw --body` invalid-JSON error text (D1) — now pinned in
+  the harness known-diff mode (fix loop 1); see §M7b.9.
+
+### M7b.9 Fix loop 1 (round-1 reviews, 2026-11-06)
+
+Head `e1e3960` (8 commits on `feat/rust-m7b-cli-wiring`,
+base `dev-rust` `6a399f7` — verified unchanged, no rebase).
+(`42d1e45` in an earlier draft of this section was the
+pre-amend hash of the same docs commit; the head hash
+recorded here is the amended one.)
+Review verdicts at `6c4816d`: technical PASS-WITH-NITS,
+safety PASS-WITH-NITS, red-team FAIL (B1–B6). All 6
+BLOCKING fixed with a regression test each; technical
+N1–N4 fixed; safety N1–N5 addressed; red-team N1–N2 fixed;
+D1 pinned in the harness known-diff mode (target met).
+
+- **B1** `approved_line` counts title BYTES (`title.len()`,
+  Go `len`, `wait.go:374`), not runes. Test:
+  `approved_line_title_length_is_bytes` ("Mạng lưới" → 14).
+- **B2** stdout JSON does not HTML-escape `<>&` (new
+  `escape_stdout_string`, Go `writeJSON`
+  `SetEscapeHTML(false)`, `commands.go:411`): `approval_json`,
+  `approved_json`, auto-approve status, `save_row_to_json`.
+  Wire bodies and typed auth JSON keep
+  `escape_go_marshal_string`. Tests:
+  `approval_json_no_html_escape`,
+  `save_row_to_json_no_html_escape`,
+  `status_does_not_html_escape_path` + harness
+  `rt-approvals-weird`, `rt-download-htmlname`.
+- **B3** `media_path` failure inside `save_resources` is a
+  row error + continue (exit 3 when any row errors), not
+  exit 2 with no rows (`resources.go:267`). Harness
+  `rt-download-dotdot`, `rt-download-empty-sandbox`.
+- **B4** filesystem error text is Go-style: lowercase
+  `strerror` via shared `oserr` (`network.rs`
+  `io_error_text`, `toggle.rs` `io_error_text`),
+  `open <path>: <reason>` (cookies loader,
+  `cookies.go:38`), `mkdir <path>: <reason>` with
+  `create_dir_all` EEXIST-on-a-file mapped to ENOTDIR (Go
+  `MkdirAll`), `rename <old> <new>: <reason>` wrapped as Go
+  does (`save resources: rename <tmp>: rename <tmp> <dest>:
+  <reason>`). Full message closes Go's 182 exactly (was
+  135); verified live against the golden Go binary on the
+  same config (both `message_length=88` for a 6-char path).
+  Tests: `io_error_text_is_lowercase_strerror`,
+  `mkdir_error_text_maps_file_to_not_a_directory`,
+  `load_cookies_missing_file_go_path_error`,
+  `download_missing_cookies_is_typed_json_with_go_length`.
+- **B5** `stringifyID` fallback is Go `%v`
+  (`network.rs: go_percent_v`: `map[x:1]`, `[a b]`,
+  `<nil>`, bools `true`/`false` inside `%v`), not compact
+  JSON. Test `stringify_id_percent_v` + harness
+  `rt-download-seq-obj`. D4 closed.
+- **B6** `media_path` scheme gate is lowercase-only
+  (`media.go:56`); the M5b telegram copy
+  (`turn.rs:282-360`) still carries the case-insensitive
+  gate — out of scope, not changed. Test
+  `media_path_literals` (uppercase `HTTP://`/`HTTPS://`) +
+  harness `rt-download-http-upper`. D5 closed.
+- **N1** all ~25 wrong Go file:line citations corrected,
+  each verified against `git show 6a399f7` (not copied
+  blindly from the review); PORTING §M7b.1 Rust-side line
+  numbers re-grepped after the edits.
+- **N2** `TODO(chat/send/watch)` at the `run.rs` stub
+  fallthrough, one line each naming the blocker.
+- **N3** invite citations carry verified line numbers
+  (FetchInvite `internal/gateway/invite.go:30`,
+  CreateInvite `:61`, RedeemInviteCode `:98`,
+  filterRedeemFailureBody `:141`; WakeVM
+  `internal/gateway/wake.go:52`; SummarizeInvite
+  `internal/shared/invite.go:39`, InviteReward `:10`,
+  InviteSummary `:19`).
+- **N4** `detail_rows` comment reworded to "last row wins
+  (Go map assignment)".
+- **S-N1** `m7b_driver.rs` cookies file mode 0600 set
+  explicitly (was a wrong comment over `fs::write`).
+- **S-N2** config temp file: random suffix + `create_new`
+  (O_EXCL) + age-gated (>1h) stale cleanup (Go
+  `os.CreateTemp` + deferred `Remove`).
+- **S-N3** nested-call deadlock doc note in `toggle.rs`
+  (Go `guard.go:183`).
+- **S-N4** `read_config_bytes` stat-guarded vs FIFO
+  (`config.go:827`); test
+  `read_config_bytes_refuses_fifo_without_blocking`
+  (`libc::mkfifo` in the test only — the loop's one new
+  `unsafe`, test-only).
+- **S-N5 / RT-N1** both drivers interpolate the CANNED
+  `HT-FAKE` token in the WS URL (D6 reworded: not a real
+  credential); the Go driver's Sprintf arg-count bug (2
+  verbs, 3 args → `%!(EXTRA string=HT-FAKE)`) is fixed.
+  No `auth_token` string appears in harness logs
+  (re-grepped after the fix). The M7a "handshake 400" half
+  stays unverified — the M7a `wait_driver` still carries
+  the literal. (Fix loop 2 re-verified both lines by
+  sha256 — see §M7b.10 — after the round-2 technical
+  review wrongly called this fix "comment-only". The
+  reviewer was fooled by the display-redaction trap:
+  rendered text shows the fixed `%s` / `HT-FAKE` values
+  as the literal placeholder.)
+- **RT-N2** Go driver `classifyError` mirrors the auth
+  taxonomy (`classifyAuthType`, `commands.go:361/390`).
+  No harness case exercises it (the fake server always
+  handshakes; wake-401 is a normal result, not an auth
+  error — `doHatch` returns the status, `wake.go:62`).
+  The residual `GatewayError` corner (status -1 +
+  "VM unavailable" → `session_unavailable`, safety
+  round-2 R2-N2) is mirrored in the driver in fix loop 2
+  — see §M7b.10.
+- **D1** pinned in the harness known-diff mode
+  (`rust/parity/known_diff/rt-raw-badbody.{go,rs}.err`;
+  runner compares each side to its own file). All 27
+  red-team attack cases promoted to `m7b_cases/rt-*.json`
+  (26 byte-comparison + 1 known-diff).
+- **S-N6** the real invite code in
+  `/tmp/m7b-live/live-invite.{go,rs}.out` was deleted after
+  the gates (value never reproduced anywhere).
+- **S-N7** first-round aa-* runs (in `/tmp/m7b-live/`,
+  writer only described aa2-*): aa-status exit 0/0,
+  stdout identical modulo the embedded config path
+  (aa-go vs aa-rs dirs), stderr identical; aa-off/aa-on/
+  aa-once exit 2/2, stdout+stderr byte-identical
+  (`profile "default" does not exist in the single config
+  file` — the toggle write path requires the profile entry).
+- **S-N8/N9/N10** noted, no action: `Runtime` pub +
+  pub `http_base` is a confined driver seam (no production
+  flag/env/config sets it); `raw` echoes server bytes by
+  design (matches Go); cue disk 23G free at safety-review
+  time (17G–19G during this loop; dipped to 6.9G once
+  while other sessions built — above the 6G floor, no
+  cleaning needed; own target removed after the gates).
+
+Gates (cue, head `78c4511`):
+`cargo fmt --check` 0; `cargo build --workspace` 0;
+`cargo test --workspace` **796 passed, 0 failed**
+(baseline 786 → +10 new tests; logs
+`/tmp/m7b-fl1-test3.log`, `/tmp/m7b-fl1-fmt3.log`,
+`/tmp/m7b-fl1-build3.log`); `cargo clippy --workspace
+--all-targets -- -D warnings` 0
+(`/tmp/m7b-fl1-clippy3.log`); `go test -run
+TestSPDXHeaders -count=1 .` ok (`/tmp/m7b-fl1-spdx.log`).
+Fake-server harness: **69/69 PASS** (42 original + 26
+rt-* byte-comparison + 1 known-diff D1;
+`bash rust/parity/run_m7b_cases.sh /tmp/m7b-fl1-tier-a`,
+log `/tmp/m7b-fl1-harness.log`). Live re-verification
+(cue, profile `no.0`, golden Go 0.9.0 vs Rust
+`/tmp/m7b-target/debug/castctl-rs`, outputs under
+`/tmp/m7b-fl1-live/`): approvals list, invite read-only,
+auto-approve status, download no-files — 4/4
+byte-identical; 45/45 per-command `--help` + global
+`--help` byte-identical (46/46 as counted in PR-1; the
+check loop additionally covered 5 parenthetical words
+from the help text, also identical). `git diff --stat`
+vs `6c4816d`: only `rust/` (44 files, +1193/−181);
+`docs/provenance.md` unchanged (no scope change);
+`NOTICE` unchanged; Go tree untouched. No new `unsafe`
+in production code (only the test-only `mkfifo`); no
+`unwrap()`/`expect()` on external input (all added uses
+are in tests); no secrets in the diff (re-grepped; the
+only `AT-` match is the false positive inside
+"stat-guarded").
+
+Follow-ups found during fix loop 1 (NOT fixed, out of
+scope — for the parent to triage):
+- **F1** With no `default_profile` and no `"default"`
+  entry, Go errors (`profile "default" does not exist in
+  the single config file`) while Rust synthesizes a
+  `"default"` profile (`load_profile`, `config.rs:761`,
+  cookies at `<base>/cookies.txt`). Proven live: Go exit
+  2 with the error; Rust exit 2 with typed
+  `cookies_missing` `message_length=142` for the
+  synthesized path. Affects only configs that omit both;
+  every harness/test config sets `default_profile`
+  explicitly. Precise mechanism (round-2 technical
+  R2-N3, verified against Go `6a399f7`): the synthesis
+  itself MATCHES Go — `LoadProfile` synthesizes defaults
+  on both sides. The divergence is the missing gate at
+  gateway-connect time: Go's `identityForProfile`
+  (`internal/commands/runtime.go:165-177`) calls
+  `OutboundIdentityForConfig(single, prof.Name)`, which
+  errors (`internal/profile/identity.go:92`) when the
+  entry is missing; the Rust CLI has no equivalent gate
+  and proceeds to the cookies loader. The gate belongs
+  on the network runtime path ONLY, not in
+  `load_profile`/`resolve_active_profile` — Go's
+  `auto-approve status` does NOT error on this shape
+  (S-N7: aa-status exit 0). Parent decision (fix loop
+  2): NOT fixed — pre-existing M4b-era shared-runtime
+  behavior, rare trigger shape, fixing it changes
+  profile resolution for EVERY command and needs a
+  design decision. Recorded as a known limitation in
+  the PR body with this precise disclosure.
+- **F2** FIXED in fix loop 2 (see §M7b.10) — and bigger
+  than recorded here: a toggle write failure differs
+  not only in the `write config: ` wrap but in the EXIT
+  CODE (Go exit 1, Rust exit 2) and the `profile: `
+  prefix. Go's `writeFileAtomic` returns the raw
+  `*LinkError` (`rename <tmp> <path>: <reason>`);
+  the lock mkdir/open arms are raw too, only the flock
+  arm is wrapped. Proven live by red-team round 2
+  with an immutable config file (`chattr +i`).
+- **F3** NOT A DIVERGENCE (corrected in fix loop 2):
+  red-team round-2 live probe D2 shows both binaries
+  print `config path "…" is a directory, not a file`
+  WITH quotes, byte-identical. The plain-`{}` strings
+  in `toggle.rs:214/219` and `config.rs:615/620` never
+  reach the CLI on any constructible path (the load
+  fails first, through the quoting renderer); at most
+  a latent race-only inconsistency (file swapped for a
+  directory between load and the under-lock re-read).
+  No action; do not carry it as an open follow-up.
+
+### M7b.10 Fix loop 2 (round-2 reviews, 2026-11-06)
+
+Head TBD (commits on `feat/rust-m7b-cli-wiring`, base
+`dev-rust` `0233095` after the rebase below). Round-2
+verdicts at `e1e3960`: technical FAIL (1 BLOCKING),
+safety PASS-WITH-NITS, red-team FAIL (2 BLOCKING).
+All 3 BLOCKINGs fixed with a regression test each;
+technical N1–N2 + safety R2-N1/R2-N2 addressed; the
+14 red-team round-2 attack cases are now harness
+regression cases.
+
+- **Rebase** `6a399f7` → `0233095` (M6c merged as PR
+  #73) first, per the standing rule. One conflict:
+  `rust/castctl-shared/src/lib.rs` — M6c and M7b both
+  added a `pub mod` after `feed` (M6c `lenient_json`,
+  M7b `invite`); resolved by keeping both, alphabetical
+  (`invite`, `lenient_json`), with both `pub use`
+  blocks. No other conflicts. `docs/provenance.md`:
+  M6c took section 17 (tar + flate2), so the M7b
+  section was renumbered 17 → 18, then 18 → 19: M6b
+  already rebased ahead of M7b (branch
+  `feat/rust-m6b-webui` @ `d00e2a3`) and took §18
+  (bcrypt+blowfish) on its branch, so M7b takes the
+  next free number (§19) on the assumption M6b lands
+  first. If M7b merges before M6b, renumber back to
+  §18 at that rebase (one-line change). `Cargo.lock`:
+  the M7b diff is still edges only (`libc` + `sha2`
+  on `castctl-config`, no new crate).
+- **FL2-1 / RT-N1 — the round-2 technical R2-B1
+  "comment-only" claim was a FALSE POSITIVE.** The
+  fix-loop-1 driver fix was real; the reviewer (and
+  the parent's brief, which repeated the claim) was
+  fooled by the display-redaction trap: rendered text
+  shows the fixed `%s` / `HT-FAKE` values and the
+  literal placeholder identically, as the literal
+  itself. Proof by sha256 of the exact lines at
+  `2b0106d` (never by rendered text): Go driver
+  `rust/parity/m7b_driver/main.go:1178` hashes to the
+  `auth_token=%s` candidate (3 verbs, 3 args), not
+  the literal candidate; Rust driver
+  `rust/castctl-cli/examples/m7b_driver.rs:144`
+  hashes to the `HT-FAKE` candidate, not the literal
+  candidate. (The reviewer's "probe" reconstructed
+  the Sprintf call from the redacted rendering, so it
+  reproduced the bug from its own reconstruction, not
+  from the code.) What fix loop 2 actually changed
+  here is only the safety R2-N1 polish: the Rust
+  driver now passes the canned token as a format
+  argument instead of embedding it in the format
+  string — wire bytes unchanged. The PR-body D6
+  sentence ("both drivers now interpolate it (the Go
+  driver's Sprintf arg-count bug is fixed)") stands
+  as written.
+- **FL2-2 (red-team R2-B1)** rename onto a directory:
+  Go `os.Rename` Lstats the destination first and
+  returns EEXIST without the syscall; the raw kernel
+  rename returns EISDIR. New shared helpers in
+  `castctl-config/src/oserr.rs` (`open`/`write`/
+  `sync`/`rename`/`mkdir_error_text`, Go
+  `*PathError`/`*LinkError` shapes): `rename_error_text`
+  maps EISDIR → EEXIST only when the destination
+  Lstats as a directory (a symlink to a directory
+  does not map — Go's Lstat does not follow it);
+  `mkdir_error_text` maps EEXIST-on-a-file → ENOTDIR
+  (Go `MkdirAll`, probe E1). The download
+  rename/mkdir arms in `network.rs` use them; the
+  local `mkdir_error_text` is deleted. Tests:
+  `rename_error_text_maps_dir_dest_to_file_exists`
+  (empty + non-empty dir, file, missing, symlink),
+  `mkdir_write_sync_error_text_shapes`, plus the
+  reviewer's direct-driver probes E1/E2/E3 re-run on
+  cue (all IDENTICAL). Sibling legs verified not
+  regressed: `dir → file` ENOTDIR both sides,
+  `file → file` success.
+- **FL2-3 (red-team R2-B2)** toggle write errors are
+  RAW exit-1 errors, not exit-2 `profile:` errors:
+  Go's `writeFileAtomic` (`config.go:1634`) returns
+  raw `*PathError`/`*LinkError`, and `cmdAutoApprove`
+  (`wait.go:1365`) returns them raw → plain error,
+  exit 1. New `raw_io_error` (`errors.rs`, code 1,
+  kind `RawIo`, message verbatim) used by
+  `write_file_atomic` (`open`/`write`/`sync`/
+  `rename <tmp> <path>:`) and by the lock mkdir/open
+  arms (Go's `lockConfigDir` returns those raw too,
+  `guard.go:226`); only the flock arm stays wrapped
+  (`newConfigErrorf("lock config: %v")` → exit 2,
+  `profile: lock config: ...`, matching Go exactly).
+  `config_err` (`run.rs`) already maps `e.code`
+  generically, so code 1 flows through as exit 1.
+  Tests: `write_file_atomic_errors_are_raw_exit_1`
+  (rename onto a directory, temp-create in a missing
+  dir), `lock_open_error_is_raw_exit_1` (lock file is
+  a directory). The PORTING §M7b.9 F2 note understated
+  the gap (exit code + `profile:` prefix omitted);
+  corrected in §M7b.9 above.
+- **R2-N2 (safety)** `GatewayError` corner mirrored
+  in the Go driver: status -1 + "VM unavailable"
+  payload → typed `session_unavailable`, exit 2 (was
+  plain exit 3) — same rule as the Rust production
+  `classify_conn_error` (`network.rs`). No harness
+  case exercises it (fake server always handshakes).
+- **r2-* promotion:** all 14 red-team round-2 attack
+  cases (`r2-pv-*` %v edges, `r2-esc-u2028`,
+  `r2-media-*`, `r2-redeem-u2028`) copied verbatim
+  into `rust/parity/m7b_cases/`; harness total 83
+  (42 + 26 rt-* + 1 known-diff + 14 r2-*).
+  `gen_m7b_cases.py` notes they are hand-maintained.
+- **F1 (parent decision, NOT fixed):** pre-existing
+  M4b-era shared-runtime behavior; the precise
+  disclosure is in §M7b.9 above (synthesis matches
+  Go; the missing `identityForProfile` gate at
+  gateway-connect time is the gap; the gate belongs
+  on the network runtime path only). Fixing it
+  changes profile resolution for EVERY command and
+  needs a design decision.
+- **F3 (corrected):** not a divergence — see §M7b.9
+  above (red-team round-2 live probe D2).
+
+Gates (cue, code head `3692799` — docs-only commit
+follows, no code change after these gates):
+`go test -run TestSPDXHeaders` ok (run before any
+cargo build); `cargo fmt --check` 0; `cargo build
+--workspace` 0; `cargo test --workspace` 1020 passed,
+0 failed, 44 suites (1016 rebased baseline + 4 new
+fix-loop-2 tests); `cargo clippy --workspace
+--all-targets -- -D warnings` 0. Harness
+`run_m7b_cases.sh` 83/83 PASS (69 + 14 r2-*),
+stdout+stderr+exit + request bytes + download trees,
+Go vs Rust driver; no `auth_token` string in the
+harness logs. Direct-driver probes E1/E2/E3
+IDENTICAL (E2 after normalizing the probe's own
+`e2-go`/`e2-rs` dir prefixes). Live re-verification
+(profile `no.0`, read-only): 4/4 PASS (approvals,
+invite, auto-approve, download no-files); `--help`
+50/50 byte-identical (46 at the pre-rebase head;
+the rebased binary's global help lists 50 names).
+Live toggle probe (temp config, `chattr +i`):
+Go exit 1 and Rust exit 1, both `castctl: rename
+<tmp> <path>: operation not permitted` — the only
+difference is the tmp filename itself (Go
+`.tmp-<n>` vs Rust `.config.json.tmp.<pid>-<n>-0`),
+an inherent temp-name difference, not an error
+shape. Disk: transient dips to 3.4–3.6G during the
+full test run (other sessions' target dirs active);
+no build started below the 6G floor except the
+incremental driver builds; freed 2.3G of my own
+`debug/incremental` before clippy; 19–20G free at
+the end. `/tmp/m7b-target` removed after the final
+gate (logs kept).
+
+Rebase onto `dev-rust` b3fbe5a (M6b merge, PR #74), 2026-11-06, head
+1944200: 21 commits replayed; 1 conflict (commit ef2bf0f, the original
+docs commit) in `docs/provenance.md` + `rust/PORTING.md` — adjacent
+sections, resolved additively, both sides kept (M6b §M6b/§18 first, M7b
+after; provenance M7b takes §19, no renumber needed since M6b landed
+first as assumed). No code changed by the resolution (docs only).
+Stat vs b3fbe5a: 113 files, +9206/−100, only `rust/` +
+`docs/provenance.md`. Correction: the fix-loop-2 report's "+9016/−80
+vs 0233095" was measured at code head 3692799, before the docs commit
+8b331bb (+209/−20 = net +189); the true figure vs 0233095 was
++9205/−80. Gates at 1944200 on cue: SPDX ok (with
+`GOTOOLCHAIN=auto`; bare `go` 1.26.8 refuses go.mod 1.27.3);
+fmt/build/clippy 0; `cargo test --workspace` 1171 passed, 0 failed,
+46 suites (1016 + 151 M6b + 4 fix-loop-2, exact); harness 83/83;
+live `no.0` 4/4; `--help` 46/46 byte-identical (45 command names +
+global — the "50" in the fix-loop-2 report was a counting artifact of
+its livecheck script, which caught 5 extra tokens from the Commands
+header; both binaries list the same 45 names). Incident: the first
+full test run exited 101 on the KNOWN M6c flake
+`sweep_removes_only_dead_pid_dirs` (`castctl-pluginhost`, PORTING
+§M6c.11, fails ~1/3 runs, "own dir must survive"); it passed 3/3 on
+focused reruns and the full suite passed on re-run — no rebase
+breakage, no fix in scope. Disk: dipped to 5.4G during the first test
+run (other sessions' targets active); freed 1.6G of own
+`debug/incremental`, recovered to 20G free; `/tmp/m7b-target` removed
+after the final gate (logs kept at `/tmp/m7b-rb-*.log`).
+
+### M7b.11 Fix loop 3 (round-3 reviews, 2026-11-06) — THE LAST fix loop
+
+Head `28aefec` (4 commits on `feat/rust-m7b-cli-wiring`, base
+`dev-rust` `b3fbe5a` — verified unchanged by `git ls-remote` at
+the end of the loop; no rebase needed). Round-3 verdicts at
+`1cc9fc2`: technical PASS-WITH-NITS, safety PASS-WITH-NITS,
+red-team FAIL (2 BLOCKINGs). Both BLOCKINGs fixed with a
+regression test each; the 3 red-team round-3 attack cases are
+now harness regression cases (harness total 86).
+
+- **R3-B1 (red-team)** Go `encoding/json` DOES emit the
+  short escapes `\b`/`\f`; Rust emitted `\u0008`/`\u000c`
+  — one wrong belief in five sites. Verified against Go
+  1.27.3 source on cue (`encoding/json/encode.go`,
+  `appendString`: `case '\b'` :1012-1013, `case '\f'`
+  :1014-1015; the default comment reads "This encodes
+  bytes < 0x20 except for \b, \f, \n, \r and \t"), real
+  binaries via `od -c`, and harness cases C7/C11/C12.
+  Fix: `'\x08' → \b` and `'\x0C' → \f` arms added to all
+  five escapers — (a) `network.rs:102`
+  `escape_go_marshal_string` (wire bodies + typed auth
+  JSON); (b) `network.rs:137` `escape_stdout_string`
+  (stdout JSON); (c) `network.rs:304` `indent_json` — the
+  `\b → \u0008` / `\f → \u000c` translation arms at
+  :362-363 DELETED (serde_json already emits the correct
+  short forms; they are now passed through like `\n`,
+  via a `let` binding after clippy flagged the leftover
+  single-arm `match`); (d) `jsonvalue.rs:964`
+  `encode_go_string` (config-file writer, proven live via
+  toggle rewrite); (e) `resources.rs:358`
+  `escape_json_string` (M4b row serializers — code-proven
+  only, fixed the same way + a unit test). All five doc
+  comments fixed (they listed the short escapes as only
+  `"`, `\`, `\n`, `\r`, `\t`), plus the module doc at
+  `network.rs:48` and the belief comment at :300-301.
+  The pinning unit test `indent_json_cases` :2193-2197
+  PINS the wrong translation — rewritten to expect
+  `\b`/`\f` passthrough. Tests (all RED first on cue,
+  then GREEN): `escape_strings_use_short_backspace_formfeed`,
+  `test_encode_go_string_backspace_formfeed`,
+  `probe_json_string_escaping_backspace_formfeed`,
+  `indent_json_cases` (rewritten). Promoted cases:
+  `r3-esc-ctrl`, `r3-wire-ctrl`, `r3-raw-ctrl` (verbatim
+  from the reviewer, hand-maintained like rt-*/r2-*).
+- **R3-B2 (red-team)** `mkdir_error_text` mapped ALL
+  EEXIST to ENOTDIR and reported the full path. Go
+  `MkdirAll` (`os/path.go:19`): ENOTDIR only when
+  `Stat(path)` succeeds and the path is not a directory;
+  in every other EEXIST case (dangling symlink, symlink
+  loop) it returns EEXIST; and it reports the FAILING
+  COMPONENT. A Stat-conditioned mapping alone is NOT
+  enough (E12's raw error is ELOOP, E13's errno is right
+  but the path is wrong) — so Go's algorithm is ported
+  as shared `oserr::mkdir_all` (Stat fast path →
+  recursive parent creation via `mkdir_all_parent` →
+  `Mkdir` → Lstat check; error text
+  `mkdir <component>: <strerror>`), used by the
+  download mkdir arm (`network.rs`, was
+  `create_dir_all` + `mkdir_error_text`) and the toggle
+  lock arm (`toggle.rs:118`, Go `lockConfigDir` uses
+  `os.MkdirAll`, `guard.go:226-242`, verified at
+  `b3fbe5a`); `mkdir_error_text` deleted (no callers
+  left). Regression: unit test
+  `mkdir_all_matches_go_mkdir_all` (9 shapes, expected
+  strings are the verbatim outputs of the reviewer's
+  standalone Go probe `/tmp/m7b-r3redteam-mkdir.go` on
+  cue, same ext4 fs; order matters — dangling/loop
+  checked BEFORE the missing dir is created, since the
+  dangling symlink points at it) + direct-driver probes
+  E10 (loop), E11 (dangling), E12 (under loop), E13
+  (under file), all PROBE-PASS. Siblings verified not
+  regressed: E1 (mkdir-on-file), E3 (mkdir via
+  symlink-to-file), E2 (rename onto dir, identical
+  modulo the probe's own per-side dir prefix), success
+  shapes (missing dir, symlink→dir).
+- **R3-N1 (driver nit, NOT fixed)** the Go `m7b_driver`
+  accepts dash-leading positionals (`download -42`);
+  both real CLIs reject with exit 2 `unrecognized
+  argument: -4` (the Rust driver already matches via
+  `parser.rs:348`). Assessed NOT trivial: needs error
+  plumbing + pre-connect ordering + exact usage bytes
+  in the Go driver — a driver-only nit, both production
+  CLIs already agree. Recorded here and in the report
+  with the reason. The reviewer's `r3-pv-neg` case is
+  WITHDRAWN (reviewer's case bug) and was NOT promoted.
+- **Doc nits R3-N1/R3-N2:** PR-body draft figures
+  refreshed at the new head (base, diff-stat, gate
+  count, help count — measured, not copied); provenance
+  §19 header base corrected `0233095` → `b3fbe5a`.
+- **Gate incidents in this loop (honest record):** the
+  first gate run's SPDX check failed with exit 1 because
+  it was invoked from `rust/` ("no Go files") — my
+  invocation bug, not code; re-run from the repo root:
+  ok. `cargo fmt --check` failed on 2 hunks of the new
+  code (fixed by running `cargo fmt` on cue and syncing
+  the formatted files back). Clippy failed twice in
+  sequence: first `single_match` in `mkdir_all`
+  (`oserr.rs:108`, `match metadata { Ok, Err(_) => {} }`
+  → `if let`); then `match_single_binding` in
+  `indent_json` (`network.rs:368`, the single-arm
+  `match` left behind by deleting the `\b`/`\f` arms →
+  `let` binding) — the second appeared only after the
+  first was fixed, because clippy stops at the failed
+  dependency crate (`castctl-config` gates
+  `castctl-cli`). The harness failed once mid-run
+  (fl3b: 47/86, "gateway server for redeem-success-text-rs
+  never became READY"); the same server binary served
+  the R3 probes fine immediately after, and the harness
+  passed 86/86 on re-run — transient, cause not proven
+  (a concurrent milestone build was active; disk fell
+  to 13G during that run). Disk: the gate waiter held
+  the build 6×5 min, then 3×5 min, then 1×5 min for
+  another milestone's cargo (disk 20G → 4.7G → 15G
+  during the wait, recovering after the other session
+  cleaned); `/tmp/m7b-target` (13G) deleted after the
+  final gate, logs kept (`/tmp/m7b-fl3*.log`,
+  `/tmp/m7b-fl3b-*.log`, `/tmp/m7b-fl3c-*.log`),
+  37G free at the end.
+
+Gates (cue, code head `28aefec` — docs-only commit
+follows, no code change after these gates):
+`go test -run TestSPDXHeaders -count=1 .` ok (repo root,
+`GOTOOLCHAIN=auto`, re-run at the final head);
+`cargo fmt --check` 0; `cargo build --workspace` 0;
+`cargo test --workspace` 1174 passed, 0 failed, 46
+suites (1171 at `1cc9fc2` + 4 new tests − 1 removed
+pinning test: `escape_strings_use_short_backspace_formfeed`,
+`test_encode_go_string_backspace_formfeed`,
+`probe_json_string_escaping_backspace_formfeed`,
+`mkdir_all_matches_go_mkdir_all`; removed:
+`mkdir_error_text_maps_file_to_not_a_directory`);
+`cargo clippy --workspace --all-targets -- -D warnings`
+0. Harness `run_m7b_cases.sh` 86/86 PASS (83 + 3 r3-*),
+stdout+stderr+exit + request bytes + download trees,
+Go vs Rust driver; no `auth_token` string in the
+harness/probe logs (verified by `grep -c`, all 0).
+Direct-driver probes E1/E2/E3 IDENTICAL (E2 modulo the
+probe's own per-side dir prefix) + E4/E5/E6/E10/E11/E12/E13
+all PROBE-PASS. Live (cue, profile `no.0`, golden Go
+0.9.0): approvals list, invite read-only, auto-approve
+status, download no-files path — 4/4 byte-identical;
+`--help` 46/46 byte-identical (45 command names +
+global). Stat vs `b3fbe5a`: 118 files, +9451/−121 at code
+head `28aefec` (+9607/−121 at the docs head, docs
+included), only `rust/` + `docs/provenance.md`; Go tree untouched; no
+secrets in the diff; no new `unsafe` in fix loop 3
+(the `unsafe` lines in the `b3fbe5a` diff are the
+pre-existing flock/mkfifo calls); `unwrap()`/
+`expect()` only in `mod tests`. Stat reconciliation:
+the naive 9233 + 285 (loop-3 insertions vs `1cc9fc2`)
+= 9518 overcounts by 67 — those 67 lines are edits to
+lines the PR itself added, which still count as one
+insertion vs `b3fbe5a`; and `jsonvalue.rs` +
+`resources.rs` are first touched by this loop (+2
+files) alongside the 3 new case files (113 + 5 = 118).

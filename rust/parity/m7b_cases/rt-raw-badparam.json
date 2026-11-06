@@ -1,0 +1,4 @@
+{
+  "args": ["raw", "chat.history", "--param", "nokey"],
+  "gateway": {}
+}

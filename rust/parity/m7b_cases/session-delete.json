@@ -1,0 +1,14 @@
+{
+  "args": [
+    "session-delete",
+    "s-1"
+  ],
+  "gateway": {
+    "/session/delete": {
+      "status": 200,
+      "result": {
+        "ok": true
+      }
+    }
+  }
+}

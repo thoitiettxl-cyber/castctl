@@ -1,0 +1,14 @@
+{
+  "args": [
+    "seen",
+    "t-1"
+  ],
+  "gateway": {
+    "/api/chat/t-1/seen": {
+      "status": 200,
+      "result": {
+        "ok": true
+      }
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "args": [
+    "download",
+    "42"
+  ],
+  "gateway": {
+    "/chat/history": {
+      "status": 200,
+      "result": {
+        "chat_events": [
+          {
+            "seq": 42,
+            "payload": {
+              "message_id": "m-42",
+              "resources": [
+                {
+                  "path": "http://example.com/media/raw/pic.jpg?x=1#frag",
+                  "byte_len": 11
+                }
+              ]
+            }
+          }
+        ],
+        "has_more": false
+      }
+    },
+    "/media/raw/pic.jpg": {
+      "status": 200,
+      "raw_b64": "aGVsbG8tYnl0ZXM="
+    }
+  }
+}

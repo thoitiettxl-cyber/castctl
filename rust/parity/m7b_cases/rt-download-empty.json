@@ -1,0 +1,15 @@
+{
+  "args": ["download", "42"],
+  "gateway": {
+    "/chat/history": {
+      "status": 200,
+      "result": {
+        "chat_events": [
+          {"seq": 42, "payload": {"message_id": "m-42", "resources": [{"path": "sandbox://media/raw/empty.txt", "byte_len": 0}]}}
+        ],
+        "has_more": false
+      }
+    },
+    "/media/raw/empty.txt": {"status": 200, "raw_b64": ""}
+  }
+}

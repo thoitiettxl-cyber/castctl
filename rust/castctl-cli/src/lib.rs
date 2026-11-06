@@ -13,13 +13,18 @@
 //! `feed-prompt`, `goals`, `goal`, `ideas`, `idea`, `unread`)
 //! through the gateway (`network`) over the per-profile runtime
 //! (`runtime`), plus the M7a `wait` command (`wait`): the
-//! subscribe-driven wait over the same runtime. No network,
-//! gateway, browser, or migrate execution is wired for any
-//! other command.
+//! subscribe-driven wait over the same runtime. M7b wires the
+//! Phase A commands on top of the same path: session-*, stop,
+//! seen, feed-react, idea-exec, approvals/approve/deny, invite,
+//! redeem, wake, download, raw, plus `auto-approve` (config only,
+//! no network). `chat`, `send`, and `watch` stay stubbed
+//! (deferred to PR-2; see PORTING.md §M7b).
 //!
 //! No `unsafe`, no `unwrap()`/`expect()` on external input. Every
 //! public item cites its Go source at base `dev-rust` `85a8d5e`.
 
+pub mod approvals;
+pub mod autoapprove;
 pub mod help_texts;
 pub mod network;
 pub mod parser;

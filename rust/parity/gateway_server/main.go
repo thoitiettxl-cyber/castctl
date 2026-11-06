@@ -25,6 +25,16 @@
 //	          shared script file (JSON) is the determinism
 //	          contract: the Go wait_driver and the Rust
 //	          wait_driver example both dial this server.
+//	serve-m7b — start a scripted fake gateway for the M7b Rust
+//	          Phase A CLI wiring (rust/parity/m7b_cases/*.json):
+//	          canned responses per request path from the case
+//	          script, every request logged as
+//	          `M7B <verb> <path> <body>` (full body, no
+//	          truncation — Phase A bodies are small) to stderr.
+//	          The Go m7b_driver and the Rust m7b_driver example
+//	          both dial a server running the same script with
+//	          the same argv; their stdout/stderr/exit plus the
+//	          M7B request logs must be byte-identical.
 //	client    — connect the GO gateway client to a running server
 //	          (serve mode, or any gatewaytest server) and call
 //	          the methods given on the command line, printing one
@@ -41,11 +51,13 @@
 //	gateway_server serve
 //	gateway_server serve-e2e
 //	gateway_server serve-wait <script.json>
+//	gateway_server serve-m7b <script.json>
 //	gateway_server client <addr> <method> [method ...]
 package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -631,7 +643,7 @@ func runClient(addr string, methods []string) error {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: gateway_server serve | serve-e2e | serve-wait <script.json> | client <addr> <method> [method ...]")
+		fmt.Fprintln(os.Stderr, "usage: gateway_server serve | serve-e2e | serve-wait <script.json> | serve-m7b <script.json> | client <addr> <method> [method ...]")
 		os.Exit(2)
 	}
 	var err error
@@ -646,6 +658,12 @@ func main() {
 			os.Exit(2)
 		}
 		err = runServeWait(os.Args[2])
+	case "serve-m7b":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: gateway_server serve-m7b <script.json>")
+			os.Exit(2)
+		}
+		err = runServeM7b(os.Args[2])
 	case "client":
 		if len(os.Args) < 4 {
 			fmt.Fprintln(os.Stderr, "usage: gateway_server client <addr> <method> [method ...]")
@@ -660,4 +678,128 @@ func main() {
 		fmt.Fprintln(os.Stderr, "gateway_server:", err)
 		os.Exit(1)
 	}
+}
+
+// ----------------------------------------------------------------
+// serve-m7b: scripted canned responses for the M7b Rust Phase A
+// CLI wiring (rust/parity/run_m7b_cases.sh).
+// ----------------------------------------------------------------
+
+// m7bEntry is one canned gateway response, keyed by request
+// path in the case script. Exactly one of result / raw_b64 /
+// body selects the frame body:
+//
+//   - result: the frame is {"ok":true,"result":<result>}.
+//   - raw_b64: the frame is the base64-decoded bytes verbatim
+//     (media downloads: the client reads raw bytes).
+//   - body: the frame is the string verbatim (error envelopes
+//     and other exact-byte bodies).
+//
+// status defaults to 200. An entry with none of the three set
+// answers {"ok":true,"result":{}}.
+type m7bEntry struct {
+	Status int             `json:"status"`
+	Result json.RawMessage `json:"result"`
+	RawB64 string          `json:"raw_b64"`
+	Body   string          `json:"body"`
+}
+
+// m7bScript is the shared script file (JSON) consumed by the
+// serve-m7b handler and by the M7b fake HTTP server
+// (rust/parity/m7b_http_server.py, which serves the "http"
+// map). It is the determinism contract: the Go m7b_driver and
+// the Rust m7b_driver example both dial a server running this
+// script, with the same argv, and their outputs plus the M7B
+// request logs must be byte-identical.
+type m7bScript struct {
+	Gateway map[string]m7bEntry `json:"gateway"`
+	HTTP    map[string]m7bEntry `json:"http"`
+}
+
+type m7bState struct {
+	mu       sync.Mutex
+	script   *m7bScript
+	requests int
+}
+
+func m7bHandler(st *m7bState) gatewaytest.Handler {
+	return gatewaytest.HandlerFunc(func(req *pb.ApplicationRequest, service pb.ServiceType) gatewaytest.Response {
+		// Full request body, no truncation: Phase A bodies
+		// are small, and the log is the byte-parity evidence
+		// for request construction (D-M7b-3 ordered bodies).
+		fmt.Fprintf(os.Stderr, "M7B %s %s %s\n", req.Verb, req.Path, string(req.Body))
+		st.mu.Lock()
+		st.requests++
+		// GET calls carry their body as a query string
+		// (calls.go:83: bodyToQuery), so the lookup key is
+		// the path without the query; the log above keeps
+		// the full path+query as the byte evidence.
+		lookupPath := req.Path
+		if i := strings.Index(lookupPath, "?"); i >= 0 {
+			lookupPath = lookupPath[:i]
+		}
+		entry, ok := st.script.Gateway[lookupPath]
+		st.mu.Unlock()
+		status := 200
+		var frame []byte
+		switch {
+		case !ok:
+			status = 404
+			frame = []byte(`{"ok":false,"error":"m7b: no canned response for ` + req.Path + `"}`)
+		case entry.RawB64 != "":
+			raw, err := base64.StdEncoding.DecodeString(entry.RawB64)
+			if err != nil {
+				status = 500
+				frame = []byte(`{"ok":false,"error":"m7b: bad raw_b64"}`)
+				break
+			}
+			if entry.Status != 0 {
+				status = entry.Status
+			}
+			frame = raw
+		case entry.Body != "":
+			if entry.Status != 0 {
+				status = entry.Status
+			}
+			frame = []byte(entry.Body)
+		case entry.Result != nil:
+			if entry.Status != 0 {
+				status = entry.Status
+			}
+			frame = []byte(`{"ok":true,"result":` + string(entry.Result) + `}`)
+		default:
+			if entry.Status != 0 {
+				status = entry.Status
+			}
+			frame = []byte(`{"ok":true,"result":{}}`)
+		}
+		return gatewaytest.Response{Frames: []*pb.ServiceFrame{
+			gatewaytest.ResponseFrame(0, int32(status), frame, true),
+		}}
+	})
+}
+
+func runServeM7b(scriptPath string) error {
+	raw, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return fmt.Errorf("m7b script: %w", err)
+	}
+	var script m7bScript
+	if err := json.Unmarshal(raw, &script); err != nil {
+		return fmt.Errorf("m7b script %s: %w", scriptPath, err)
+	}
+	st := &m7bState{script: &script}
+	server, err := gatewaytest.NewServer(m7bHandler(st))
+	if err != nil {
+		return err
+	}
+	defer server.Close()
+	fmt.Printf("READY addr=%s\n", server.Addr())
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	<-stop
+	st.mu.Lock()
+	fmt.Fprintf(os.Stderr, "M7B SUMMARY requests=%d\n", st.requests)
+	st.mu.Unlock()
+	return nil
 }

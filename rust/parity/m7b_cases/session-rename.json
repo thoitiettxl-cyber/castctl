@@ -1,0 +1,15 @@
+{
+  "args": [
+    "session-rename",
+    "s-1",
+    "new title"
+  ],
+  "gateway": {
+    "/session/rename": {
+      "status": 200,
+      "result": {
+        "ok": true
+      }
+    }
+  }
+}

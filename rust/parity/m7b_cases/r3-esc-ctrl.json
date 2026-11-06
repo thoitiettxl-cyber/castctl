@@ -1,0 +1,21 @@
+{
+  "args": [
+    "approvals"
+  ],
+  "gateway": {
+    "/approvals": {
+      "status": 200,
+      "result": {
+        "pending_approvals": [
+          {
+            "approval_id": "ap1",
+            "display": {
+              "summary_title": "A\bB\fC\nD\rE\tF\u001fG"
+            },
+            "decision_options": []
+          }
+        ]
+      }
+    }
+  }
+}

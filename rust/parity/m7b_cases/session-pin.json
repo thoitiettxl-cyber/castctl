@@ -1,0 +1,14 @@
+{
+  "args": [
+    "session-pin",
+    "s-1"
+  ],
+  "gateway": {
+    "/session/pin": {
+      "status": 200,
+      "result": {
+        "ok": true
+      }
+    }
+  }
+}

@@ -38,8 +38,9 @@ use castctl_config::jsonvalue::{JsonValue, OrderedObject, decode_ordered_json};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CookieLoadError {
     /// The file could not be read. Message is
-    /// `gateway: read cookies file: <io error>` (a plain
-    /// error, NOT an AuthError — the connector wraps it).
+    /// `gateway: read cookies file: open <path>:
+    /// <strerror>` (a plain error, NOT an AuthError —
+    /// the connector wraps it).
     Read(String),
     /// The file could not be parsed. Message is the AuthError
     /// text `could not parse cookies file <path>`.
@@ -62,7 +63,11 @@ impl std::error::Error for CookieLoadError {}
 pub fn load_cookies(path: &str) -> Result<String, CookieLoadError> {
     match std::fs::read(path) {
         Err(e) => Err(CookieLoadError::Read(format!(
-            "gateway: read cookies file: {e}"
+            // Go `cookies.go:38` wraps the `*PathError`:
+            // `gateway: read cookies file: open <path>:
+            // no such file or directory`.
+            "gateway: read cookies file: {}",
+            castctl_config::oserr::open_error_text(path, &e)
         ))),
         // Go strings hold arbitrary bytes; a cookies file is
         // text, so invalid UTF-8 is replaced (U+FFFD) rather
@@ -204,6 +209,23 @@ pub fn escape_go_json_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_cookies_missing_file_go_path_error() {
+        // B4 regression (red-team C9/C10): Go
+        // `cookies.go:38` wraps the `*PathError` —
+        // `gateway: read cookies file: open <path>: no
+        // such file or directory` — not Rust's capitalized
+        // Display with ` (os error 2)`.
+        let err = load_cookies("/tmp/castctl-no-such-cookies.txt").unwrap_err();
+        assert_eq!(
+            err,
+            CookieLoadError::Read(
+                "gateway: read cookies file: open /tmp/castctl-no-such-cookies.txt: no such file or directory"
+                    .to_string()
+            )
+        );
+    }
 
     #[test]
     fn parse_cookies_order_and_python_scalars() {

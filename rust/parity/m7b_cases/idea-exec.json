@@ -1,0 +1,14 @@
+{
+  "args": [
+    "idea-exec",
+    "idea-1"
+  ],
+  "gateway": {
+    "/api/idea-cards/idea-1/execute": {
+      "status": 200,
+      "result": {
+        "ok": true
+      }
+    }
+  }
+}

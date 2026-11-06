@@ -1,0 +1,6 @@
+{
+  "args": ["session-start", "--title", "<Mạng & Co>"],
+  "gateway": {
+    "/session/start": {"status": 200, "result": {"session_id": "s-1", "title": "<Mạng & Co>"}}
+  }
+}

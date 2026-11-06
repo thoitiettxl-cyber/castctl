@@ -1,0 +1,6 @@
+{
+  "args": ["approvals"],
+  "gateway": {
+    "/approvals": {"status": 200, "result": [1, 2]}
+  }
+}

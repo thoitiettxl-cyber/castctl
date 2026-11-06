@@ -1,0 +1,12 @@
+{
+  "args": [
+    "redeem",
+    "BAD999"
+  ],
+  "http": {
+    "/api/hatch/invite-code/redeem": {
+      "status": 200,
+      "body": "{\"success\":false,\"reason\":\"invalid\",\"detail\":\"code expired\"}"
+    }
+  }
+}

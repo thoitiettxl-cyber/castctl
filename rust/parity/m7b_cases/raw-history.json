@@ -1,0 +1,21 @@
+{
+  "args": [
+    "raw",
+    "chat.history",
+    "--body",
+    "{\"limit\":5}"
+  ],
+  "gateway": {
+    "/chat/history": {
+      "status": 200,
+      "result": {
+        "messages": [
+          {
+            "role": "user",
+            "text": "hi"
+          }
+        ]
+      }
+    }
+  }
+}

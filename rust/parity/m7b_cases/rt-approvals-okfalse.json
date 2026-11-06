@@ -1,0 +1,6 @@
+{
+  "args": ["approvals"],
+  "gateway": {
+    "/approvals": {"status": 200, "body": "{\"ok\":false,\"error\":\"boom\"}"}
+  }
+}

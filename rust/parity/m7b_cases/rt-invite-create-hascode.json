@@ -1,0 +1,6 @@
+{
+  "args": ["invite", "--create"],
+  "http": {
+    "/api/hatch/invite": {"status": 200, "body": "{\"invite_state\": \"active\", \"code\": \"ABC123\", \"invite_link\": \"https://muse.ai/invite/ABC123\", \"max_uses\": 5, \"use_count\": 2, \"uses_remaining\": 3}"}
+  }
+}

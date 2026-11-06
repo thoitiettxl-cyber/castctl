@@ -114,6 +114,11 @@ impl GatewayConnector {
         let cookies = match load_cookies(cookies_file) {
             Ok(c) => c,
             Err(CookieLoadError::Read(m)) => {
+                // Go `connector.go:167`: `no cookies at %s:
+                // %v` — with the cookies-loader message
+                // above, the full text is `no cookies at
+                // <path>: gateway: read cookies file: open
+                // <path>: no such file or directory`.
                 return Err(TransportError::Auth {
                     message: format!("no cookies at {cookies_file}: {m}"),
                 });

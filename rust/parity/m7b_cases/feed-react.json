@@ -1,0 +1,14 @@
+{
+  "args": [
+    "feed-react",
+    "u-1"
+  ],
+  "gateway": {
+    "/api/feed/units/u-1/reaction": {
+      "status": 200,
+      "result": {
+        "ok": true
+      }
+    }
+  }
+}

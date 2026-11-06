@@ -1,0 +1,11 @@
+{
+  "args": [
+    "wake"
+  ],
+  "http": {
+    "/api/hatch/vm/wake": {
+      "status": 200,
+      "body": "{\"status\":\"waking\",\"vm_id\":\"vm-test\"}"
+    }
+  }
+}

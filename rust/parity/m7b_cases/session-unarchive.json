@@ -1,0 +1,14 @@
+{
+  "args": [
+    "session-unarchive",
+    "s-1"
+  ],
+  "gateway": {
+    "/session/unarchive": {
+      "status": 200,
+      "result": {
+        "ok": true
+      }
+    }
+  }
+}
