@@ -110,8 +110,7 @@ async fn substitute_server_address(
             server_name,
         } => {
             let mut name = server_name.clone();
-            let server =
-                substitute_address(server, Some(&mut name), bootstrap, deadline).await?;
+            let server = substitute_address(server, Some(&mut name), bootstrap, deadline).await?;
             Ok(DnsServerKind::Tls {
                 server,
                 server_port: *server_port,
@@ -124,8 +123,7 @@ async fn substitute_server_address(
             server_name,
         } => {
             let mut name = server_name.clone();
-            let server =
-                substitute_address(server, Some(&mut name), bootstrap, deadline).await?;
+            let server = substitute_address(server, Some(&mut name), bootstrap, deadline).await?;
             Ok(DnsServerKind::Https {
                 server,
                 server_port: *server_port,
@@ -385,8 +383,7 @@ mod tests {
             },
         ];
         let slow2 = Arc::clone(&slow);
-        let handle =
-            tokio::spawn(async move { substitute_bootstrap(&servers, &slow2).await });
+        let handle = tokio::spawn(async move { substitute_bootstrap(&servers, &slow2).await });
         tokio::time::advance(Duration::from_secs(10)).await;
         let err = handle
             .await

@@ -623,11 +623,9 @@ impl AutoApprover {
                 // (red-team F1, fix loop 1).
                 let shared: Arc<BoxError> = Arc::new(e);
                 for item in items {
-                    outcome.errors.push(Self::err_for_shared(
-                        item,
-                        "",
-                        Arc::clone(&shared),
-                    ));
+                    outcome
+                        .errors
+                        .push(Self::err_for_shared(item, "", Arc::clone(&shared)));
                 }
                 return outcome;
             }
@@ -652,8 +650,7 @@ impl AutoApprover {
                 // duplicate warning) — the fail-closed
                 // direction (safety NIT-1).
                 let already_warned = {
-                    let mut warned =
-                        self.warned.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut warned = self.warned.lock().unwrap_or_else(|e| e.into_inner());
                     let already = warned.get(&key).copied().unwrap_or(false);
                     if !already {
                         warned.insert(key, true);
@@ -678,10 +675,7 @@ impl AutoApprover {
                 // the id) — the fail-closed direction
                 // (safety NIT-1).
                 let claimed = {
-                    let mut decided = self
-                        .decided
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
+                    let mut decided = self.decided.lock().unwrap_or_else(|e| e.into_inner());
                     let claimed = decided.contains(id.as_str());
                     if !claimed {
                         decided.insert(id.clone());

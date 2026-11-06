@@ -609,11 +609,7 @@ impl Runner {
     /// `self.deadline` still exists for the derivation
     /// and the endgame paths that need it after `run`
     /// returns the local.
-    async fn subscribe_once(
-        &mut self,
-        cancel: &Cancel,
-        deadline: Instant,
-    ) -> Result<(), RunError> {
+    async fn subscribe_once(&mut self, cancel: &Cancel, deadline: Instant) -> Result<(), RunError> {
         let left = deadline
             .saturating_duration_since(Instant::now())
             .max(Duration::from_secs(1));
@@ -3312,12 +3308,20 @@ mod tests {
         // only. (Technical F1: `FeedRecord` was missing
         // from the port; fix loop 1 adds it.)
         let mut w = Waiter::new("");
-        assert!(feed_record(&mut w, None, b"{\"status\": \"completed\"").await.is_none());
-        assert!(feed_record(&mut w, None, b"42").await.is_none());
         assert!(
-            feed_record(&mut w, None, b"{\"event\": \"task.status\", \"payload\": \"junk\"}")
+            feed_record(&mut w, None, b"{\"status\": \"completed\"")
                 .await
                 .is_none()
+        );
+        assert!(feed_record(&mut w, None, b"42").await.is_none());
+        assert!(
+            feed_record(
+                &mut w,
+                None,
+                b"{\"event\": \"task.status\", \"payload\": \"junk\"}"
+            )
+            .await
+            .is_none()
         );
         assert!(
             feed_record(
