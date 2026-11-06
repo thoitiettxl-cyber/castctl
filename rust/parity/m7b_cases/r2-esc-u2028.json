@@ -1,0 +1,22 @@
+{
+  "args": [
+    "approvals"
+  ],
+  "gateway": {
+    "/approvals": {
+      "status": 200,
+      "result": {
+        "pending_approvals": [
+          {
+            "approval_id": "ap1",
+            "display": {
+              "summary_title": "Mạng X Y\u0001ZW",
+              "detail_rows": []
+            },
+            "decision_options": []
+          }
+        ]
+      }
+    }
+  }
+}

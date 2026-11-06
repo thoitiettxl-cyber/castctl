@@ -171,6 +171,18 @@ func classifyError(err error) (int, string) {
 	}
 	var gw *conn.GatewayError
 	if errors.As(err, &gw) {
+		// Go `classifyConnError` (`commands.go:361`): a
+		// GatewayError with status -1 whose payload says
+		// "VM unavailable" is the session endpoint
+		// answering without a vm_id — typed
+		// `session_unavailable`, exit 2, not the plain
+		// exit-3 path below. (No harness case exercises
+		// it: the fake gateway always handshakes.)
+		if gw.Status == -1 && strings.Contains(gw.Payload, "VM unavailable") {
+			msg := logging.SummarizeErr(err)
+			b, _ := json.Marshal(map[string]string{"type": "session_unavailable", "error": msg})
+			return 2, string(b)
+		}
 		return 3, "castctl: " + logging.SummarizeErr(err)
 	}
 	var reassembly *gateway.ReassemblySizeError

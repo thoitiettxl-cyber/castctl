@@ -11,10 +11,13 @@ m7b_http_server.py).
 The rt-*.json cases in m7b_cases/ are NOT generated here:
 they are the red-team round-1 attack cases, promoted
 verbatim as regression cases in fix loop 1 (B1–B6). The
+r2-*.json cases are the red-team round-2 attack cases,
+promoted verbatim in fix loop 2 (C1–C14: %v edge cases,
+stdout escaper, media scheme). The
 rt-raw-badbody case is a KNOWN DIFFERENCE (D1): its stderr
 is pinned per side in known_diff/ (see run_m7b_cases.sh),
 not compared side-to-side. Do not regenerate or delete
-the rt-* files; add new regression cases by hand.
+the rt-* / r2-* files; add new regression cases by hand.
 """
 import base64
 import json
