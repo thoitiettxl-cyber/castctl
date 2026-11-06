@@ -9754,9 +9754,10 @@ free — check `df -h /` first.
 ## M7a — Services port: wait Runner + subscribe, fsclient, approvals, deliver, logging, dns (2026-11-05/06)
 
 Branch `feat/rust-m7a-services`, base `dev-rust` @
-`6a399f7` (rebased 2026-11-06 from `1602b12`; upstream
-since then merged M6a PR #72 + perf PR #66 — see
-§M7a.1). Scope: Go `internal/wait` (Runner/history/clock +
+`b3fbe5a` (rebased 2026-11-06 from `0233095`; rebase
+chain `1602b12` → `6a399f7` → `0233095` → `b3fbe5a` —
+M6a PR #72 + perf PR #66, then M6c PR #73, then M6b
+PR #74 merged in turn — see §M7a.1). Scope: Go `internal/wait` (Runner/history/clock +
 `chat.subscribe` NDJSON) + `internal/fsclient` +
 `internal/approvals` + `internal/deliver` +
 `internal/logging` (unported remainder) +
@@ -9793,6 +9794,24 @@ approvals/fsclient/deliver/logging) — resolved by
 keeping both lists; `docs/provenance.md` and
 `rust/PORTING.md` merged clean. `git log` head after
 rebase: M7a commits only on top of `6a399f7`.
+Rebased again 2026-11-06 onto `dev-rust` `0233095`
+(M6c PR #73 merged): 27/29 commits replayed cleanly;
+only conflict was `rust/Cargo.lock` at the lock-regen
+commit — skipped (`git rebase --skip`) and the lock
+regenerated afterwards (`cargo generate-lockfile`,
++236/−3 on cue, purely additive). M6c touched no
+telegram/gateway/wait files, so the subscribe seam
+was unaffected.
+Rebased again 2026-11-06 onto `dev-rust` `b3fbe5a`
+(M6b PR #74 merged): 47 commits replayed; one
+content conflict, `rust/castctl-cli/Cargo.toml`
+(M6b added `castctl-webui`, M7a added `castctl-wait`
+in the same alphabetical block — kept both) plus the
+same `rust/Cargo.lock` regen-commit skip as the M6c
+rebase (lock regenerated after: +81/−3, 6 M7a crates
++ second itertools 0.13.0, 3 deletions are itertools
+version qualifications only). `git log` head after
+rebase: M7a commits only on top of `b3fbe5a`.
 
 Converge `open_stream`: exactly ONE
 `Gateway::open_stream` exists, at
@@ -9905,9 +9924,11 @@ Differences vs Go `SubscribeRaw`/`Runner`
 | `castctl-cli` (`src/wait.rs`) | `castctl wait` wiring (+ `send` stays stubbed) |
 
 `pluginabi` is NOT ported: M6c already has
-`rust/castctl-pluginhost/src/pluginabi.rs`
-(provisional until M6c commits) — boundary recorded
-here, not re-implemented.
+`rust/castctl-pluginhost/src/pluginabi.rs` (866 lines,
+COMMITTED in `dev-rust` — M6c PR #73 merged
+2026-11-06, head `8b271ee`, in base `b3fbe5a`).
+The boundary is FIRM, not provisional: M7a must not
+re-port it; the seam is the committed file.
 
 ## M7a.4 Deviations from Go (deliberate, with citations)
 
