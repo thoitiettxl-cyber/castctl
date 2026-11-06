@@ -802,19 +802,19 @@ fn factory_sink_redacts_singbox_lines() {
     let line = format!(
         "wireguard: setup failed: wss://gateway.example.invalid/v1/noise?vm_id={FIX_VMID}&auth_token={FIX_HATCH_TOKEN} private_key={FIX_WG_PRIV} public_key={FIX_WG_PUB}"
     );
-    let scan = |got: &str, where: &str| {
-        assert!(!got.is_empty(), "{where} capture empty: positive control failed");
+    let scan = |got: &str, loc: &str| {
+        assert!(!got.is_empty(), "{loc} capture empty: positive control failed");
         for v in [FIX_VMID, FIX_HATCH_TOKEN, FIX_WG_PRIV, FIX_WG_PUB] {
             assert!(
                 !got.contains(v),
-                "{where} capture contains fixture value {v:?}: {got:?}"
+                "{loc} capture contains fixture value {v:?}: {got:?}"
             );
         }
-        assert!(got.contains("[redacted]"), "{where} capture {got:?}, want a [redacted] marker");
+        assert!(got.contains("[redacted]"), "{loc} capture {got:?}, want a [redacted] marker");
         // WG public key: at most the 8-char prefix may survive.
         assert!(
             got.contains(&format!("public_key={}", &FIX_WG_PUB[..8])),
-            "{where} capture {got:?}, want the 8-char public-key prefix"
+            "{loc} capture {got:?}, want the 8-char public-key prefix"
         );
     };
 
