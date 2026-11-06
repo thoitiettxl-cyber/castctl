@@ -9988,8 +9988,22 @@ ABSENT; JSON canonical (keys sorted, numbers as literals via
 (differs by bcrypt salt), bcrypt hashes → `<BCRYPT>`,
 `/status` version stamp stripped then bare-compared,
 `go_version`/`singbox_version` presence+type only,
-`bundle_sha256` STRICT, screencast `reason` recorded
-verbatim (loose), `available` strict.
+`bundle_sha256` STRICT. Screencast `reason`/`available`:
+runs 1–4 compared `available` strictly and the `reason`
+only loosely (the harness's `screencast_loose` carve-out
+accepted any reason when `available` matched) — the
+§M6b.3/§M6b.10 text claiming the reason was "recorded
+verbatim" was WRONG: the reason strings appeared nowhere
+in PORTING or the parity logs, and the two sides' reasons
+differed in every run. Fix loop 3 (§M6b.12) removes the
+carve-out: case 17 is strict now, and case 17b (keeper
+entry present) is strict too. The verbatim strings are:
+Go (shipped binary, no `with_chromedp`) —
+`screencast unavailable in this build (rebuild with -tags
+with_chromedp)`; old Rust (keeper branch, wrong against
+this binary) — `no keeper entry for profile "muse01":
+add a "keeper" entry with a browser URL (see
+docs/config.md)`.
 
 Run 1 (2026-11-06): 47/52 identical. Run 2 (2026-11-06,
 after the fixes in §M6b.4): **52/52 identical**
@@ -10014,7 +10028,7 @@ after the fixes in §M6b.4): **52/52 identical**
 | 14-plugins | MATCH (200/200) | MATCH | MATCH |  |
 | 15-logs-disabled | MATCH (200/200) | MATCH | MATCH |  |
 | 16-keeper | MATCH (200/200) | MATCH | MATCH |  |
-| 17-screencast-status | MATCH (200/200) | MATCH | MATCH | reason differs (recorded verbatim), available matches |
+| 17-screencast-status | MATCH (200/200) | MATCH | MATCH | reason differs (loose carve-out; the "recorded verbatim" claim was false — see §M6b.12), available matches |
 | 18-chats-404 | MATCH (404/404) | MATCH | MATCH |  |
 | 19-chats-502 | MATCH (502/502) | MATCH | MATCH |  |
 | 20-outbounds | MATCH (200/200) | MATCH | MATCH |  |
@@ -10326,6 +10340,60 @@ on cue); logs `/tmp/proof-*.log` on cue.
   after the response; Go discards a bounded amount and
   may reuse the connection. Client-visible only as a
   reconnect on the next request.
+- HTTP/1.0 + Transfer-Encoding (red-team L3, recorded
+  residual, NOT "fixed"): Go IGNORES Transfer-Encoding
+  on HTTP/1.0 requests (`/home/hatch/.local/go/src/net/
+  http/transfer.go:646`, "Issue 12785; ignore
+  Transfer-Encoding on HTTP/1.0 requests") and runs the
+  handler; hyper rejects the request with 400
+  (`role.rs:263` / `decode.rs:262` →
+  `Parse::Header(TransferEncodingUnexpected)`). No hyper
+  knob exists to ignore TE on HTTP/1.0; the divergence
+  is a 400-vs-handler-run on a request modern clients
+  never send. Measured live in fix loop 3 (§M6b.12):
+  HTTP/1.0 + `Transfer-Encoding: chunked` to
+  `/api/v1/status` → Go 401 (handler runs, auth gate),
+  Rust 400.
+- [DEVIATION — residual] Head-size cap (red-team L5,
+  MEASURED in fix loop 3, §M6b.12): Go's `MaxHeaderBytes`
+  default (1 MiB; `internal/webui/server.go` sets no
+  explicit value) 431s a head just above 1 MiB — flip
+  measured in (1,052,557, 1,053,557] head bytes.
+  Hyper's `max_buf_size(1 MiB)` does NOT cap the head
+  at 1 MiB: it errors only when the head is still
+  INCOMPLETE and the buffered bytes reach max
+  (`hyper-1.8.1/src/proto/h1/io.rs:204`), and the read
+  strategy doubles from 8 KiB up to max, so one final
+  read of up to max can complete a head of nearly 2x
+  max; small recv()s can also fire the check early.
+  Measured Rust flip is a timing-dependent band,
+  roughly 1.3–2.0 MB (the same 1,500,057-byte head
+  answered 431, 401, 431 across three repeats; a
+  2,000,057-byte head answered 401 in one run and 431
+  in another). No `max_buf_size` value pins the
+  boundary to Go's: the achievable effective caps jump
+  from ≤1,040,384 to ≥1,564,672 (analysis from the
+  doubling schedule — reads 8 KiB…512 KiB sum
+  1,040,384, then one read of up to max), and Go's
+  ~1,053,000 sits in the gap. `max_buf_size(1 MiB)` is
+  KEPT (same nominal value as Go; everything below
+  1 MiB is deterministic-401 on both sides — parity
+  case 60 at 500 KiB stays deterministic; the
+  alternative M=512 KiB would make 0.5–1.0 MB heads
+  timing-dependent 431s where Go deterministically
+  accepts, a worse trade). The divergence window is
+  pathological heads above ~1.05 MB, bounded at ~2 MB
+  per connection, auth still applies.
+- Per-route body caps (red-team L2, FIXED in fix loop 3,
+  §M6b.12, not a live deviation): the transport read
+  used to enforce one 1 MiB+1 cap for every route and
+  reject 64 KiB routes only afterwards in
+  `decode_body_*` — a 900 KiB body to a 64 KiB route was
+  buffered whole first (Go's `MaxBytesReader` aborts at
+  64 KiB+1 during the read). The read now takes the
+  route's own cap (`route_body_cap`, 64 KiB or 1 MiB,
+  mirroring Go's `decodeBody`/`bodyJSON` call sites 1:1);
+  worst case is the route cap, not 1 MiB.
 - Screencast session strand (F-D6 / safety M-1, FIXED in
   `5db7ca9`, not a live deviation): the plain-HTTP
   `/screencast/ws` Ok branch (starter present) returned
@@ -10333,6 +10401,27 @@ on cue); logs `/tmp/proof-*.log` on cue.
   the profile Busy forever. The `ws_pre_upgrade`
   nil-starter path already released; only the Ok arm
   leaked. Dead in M6b (starter always None).
+- Screencast availability reason (safety M-1, FIXED in
+  fix loop 3, §M6b.12, not a live deviation): Go's
+  `webuiScreencastAvailable` checks
+  `keeper.CDPAvailable()` FIRST
+  (`internal/commands/webui.go:438-463`); the shipped Go
+  binary is built WITHOUT `with_chromedp` (verified from
+  the binary: `go version -m` reports
+  `-tags=with_utls,with_quic,with_wireguard,with_gvisor`),
+  so it ALWAYS returns `(false, "screencast unavailable
+  in this build (rebuild with -tags with_chromedp)")` —
+  the keeper branch is unreachable against this binary.
+  The old Rust code went straight to the keeper check and
+  returned `(true, "")` with a keeper entry (and the
+  keeper-based reason without one: `no keeper entry for
+  profile "<name>": add a "keeper" entry with a browser
+  URL (see docs/config.md)`). Rust now models the CDP
+  branch unconditionally (`screencast_availability`
+  returns `(false, <CDP message>)` always). Against a
+  hypothetical chromedp Go build the keeper message
+  would be right instead — the comparison target is the
+  shipped binary.
 - Uppercase-scheme origins (safety L-2, recorded, NOT
   "fixed"): `HTTP://127.0.0.1:3000` parses fine —
   `find("://")` matches the separator symbols — and the
@@ -10545,8 +10634,9 @@ phase p1: 01-shell 200/200 raw==; 02-status 200/200 canon==;
 11-telegram 200/200 raw==; 12-keeper-settings 200/200 canon==;
 13-webui-settings 200/200 canon==; 14-plugins 200/200 raw==;
 15-logs-disabled 200/200 raw==; 16-keeper 200/200 raw==;
-17-screencast-status 200/200 canon== (reason differs, recorded
-verbatim; available matches); 18-chats-404 404/404 raw==;
+17-screencast-status 200/200 canon== (reason differs —
+loose carve-out, NOT recorded verbatim anywhere;
+corrected in §M6b.12; available matches); 18-chats-404 404/404 raw==;
 19-chats-502 502/502 raw==; 20-outbounds 200/200 raw==;
 21-endpoints 200/200 raw==; 22-dns 200/200 canon==;
 23-status-405 405/405 raw==; 24-logs-405 405/405 raw==;
@@ -11027,3 +11117,273 @@ arriving via the new base). The 76/76 extended parity
 from §M6b.10 stands. `git diff --stat
 origin/dev-rust...HEAD`: 37 files, all in `rust/` +
 `NOTICE` + `docs/provenance.md`, zero `.go` files.
+
+### M6b.12 Fix loop 3 (2026-11-06, head `bdd515e`)
+
+Round-3 re-reviews (technical PASS-WITH-NITS, safety
+PASS-WITH-NITS, red-team PASS-WITH-NITS) of fix loop 2.
+This is the last loop — no round 4; anything left over
+is recorded here, not claimed fixed. Two code commits
+(`e777d3e` fixes + `bdd515e` rustfmt) plus this docs
+commit, all on `feat/rust-m6b-webui`, unpushed.
+
+#### Disposition table
+
+| Finding | Disposition | Commit | Verification |
+|---|---|---|---|
+| L1 / tech N-1 (LOW, docs) NOTICE bcrypt/blowfish refs still `§16` after the rebase renumber (§16 is now M6a keeper, §17 is bcrypt+blowfish) | FIXED both lines (`NOTICE:228,233` §16 → §17). CORRECTION to §M6b.11: its claim of "the one in-repo reference" (the `rust/Cargo.toml` bcrypt comment) was WRONG — grep found the two NOTICE lines as well; all three are now §17. The replayed commit message of `944c04b` still says "provenance §16" (historical text, not rewritten) | `e777d3e` | grep: no `§16` reference to bcrypt/blowfish remains in the diff (`docs/provenance.md` §17 is bcrypt+blowfish; §16 is M6a keeper) |
+| M-1 (safety MINOR) screencast availability/reason mismatch: Go checks `CDPAvailable()` FIRST, Rust went straight to the keeper check, so with a keeper entry Rust returned `(true, "")` while Go returns `(false, <CDP message>)` | FIXED by modelling the CDP branch: `screencast_availability` now always returns `(false, "screencast unavailable in this build (rebuild with -tags with_chromedp)")` — the exact Go string, verbatim. Verified from the binary first: `go version -m /usr/local/bin/castctl` reports `-tags=with_utls,with_quic,with_wireguard,with_gvisor` (NO `with_chromedp`), so the keeper branch is unreachable against the shipped binary. The false-premise comments ("cue Go binary is built WITH chromedp") are corrected in `screencast.rs` (fn doc + file header, which also drops the stale "no keeper crate yet"). Both reason strings are recorded verbatim in §M6b.3 (corrected) and §M6b.6 (new entry). The old keeper-based reason (`no keeper entry for profile "<name>": add a "keeper" entry with a browser URL (see docs/config.md)`) is the string Go returns only when CDP IS available — against a hypothetical chromedp Go build it would be right; the comparison target is the shipped binary | `e777d3e` | `screencast::tests::availability_always_cdp_unavailable` (asserts the CDP message with AND without a keeper entry); parity 17 (strict now) + new 17b (keeper entry present), both `raw== canon==` |
+| L2 (red-team LOW) per-route 64 KiB caps don't bound allocation — a 900 KiB body to a 64 KiB route was buffered whole by `read_capped_body` (transport cap 1 MiB+1) and only then rejected by `decode_body_json`; Go's `MaxBytesReader(64 KiB)` aborts at 64 KiB+1 during the read | FIXED (the preferred option, it was clean): `route_body_cap(method, path) -> Option<usize>` in `handlers.rs` mirrors `route_reads_body`'s arm set with Go's per-handler cap (64 KiB: POST /profiles, PATCH/DELETE /profiles/{name}, POST rename, POST /endpoints/import, PUT /settings/telegram, PUT /settings/webui, POST /chats/{profile}, POST send, POST op; 1 MiB: POST login/import, POST/PATCH outbounds, POST /outbounds/validate, POST/PATCH endpoints, PUT /config, POST /config/validate, PUT /dns, PUT /settings/keeper; `section_body` always 1 MiB); `route_reads_body` now delegates (`.is_some()`); `read_capped_body(body, cap)` takes the route cap in `dispatch_api`; `MAX_BODY_BYTES` deleted. Decision record ("Quy tắc quyết định"): the fix matches Go's observable behaviour (same 400, allocation bounded at the route cap) with no new risk — the alternative (record only) would have left a real 1 MiB allocation on 64 KiB routes | `e777d3e` | `server::tests::route_body_cap_table` (all 20 body routes + 3 no-cap routes); `routecap` fail-before proof (neuter → RED); parity 53 (900 KiB to PUT /api/v1/dns: 400/400, go RSS +164 KiB, rs RSS −640 KiB — inside the 512 KiB bound) |
+| L3 (red-team LOW) HTTP/1.0 + any Transfer-Encoding diverges — Go ignores TE on HTTP/1.0 and runs the handler; hyper auto-400s | RECORDED (one line in §M6b.6, no code change — no knob exists). Verified before writing, both sides: Go from stdlib source (`transfer.go:646`, "Issue 12785; ignore Transfer-Encoding on HTTP/1.0 requests") AND live (below); hyper from the trace in review3-redteam (P8) AND live (below) | (docs, this loop) | Live probe: HTTP/1.0 + `Transfer-Encoding: chunked` to `/api/v1/status` → Go 401 (handler runs, auth gate), Rust 400 |
+| L4 (red-team LOW, comment-only) `handle_hyper_inner` comment overstated the unread-body drain ("hyper closes the connection after the response, as Go does for unread bodies") | FIXED the comment: Go drains ≤256 KiB (`maxPostHandlerReadBytes`) and may reuse the connection; hyper does a single-poll drain then closes. The §M6b.6 record was already correct; only the code comment changed. (The same edit also updated the adjacent cap sentence, which said "1 MiB + 1" — now per-route.) | `e777d3e` | code comment at `server.rs` `handle_hyper_inner`; §M6b.6 bodyless-routes entry unchanged |
+| L5 (red-team LOW, [NEEDS-MEASUREMENT]) exact 1 MiB head boundary | MEASURED (below, four probe runs). The specified range shows NO divergence (both 401); the extended probe found a real one: Go flips deterministically at head ≈1,053,057; Rust flips in a timing-dependent band ~1.3–2.0 MB. Recorded as a [DEVIATION] in §M6b.6; `max_buf_size(1 MiB)` KEPT (same nominal value as Go; see the decision record there) | (docs, this loop) | `~/workspace/tmp/m6b-head-boundary.py` runs 1–4, logs `~/workspace/tmp/m6b-l5-l3.log` |
+| Safety N-2 (nit) `.expect("starter present (checked above)")` in the spawned WS task could strand the profile Busy on a panic | FIXED: let-else + `release()` + return. Unreachable in practice (`ws_pre_upgrade` 503s before the spawn when no starter is present), but a panic there can no longer strand the session | `e777d3e` | code at `screencast.rs` spawned task; `ws_pre_upgrade` 503 path unchanged |
+| Safety N-3 (nit) proof-11 script docstring still said "pre-dispatch read" | FIXED (`~/workspace/tmp/m6b-proof11.py:9`, outside the repo): "the deferred read, after the gates, stops at the route cap"; neuter note updated to the new mechanism (`read_capped_body(body, cap)` → `read_capped_body(body, 1 << 30)`) | — (script, not repo) | proof 11 re-run below (wired + neutered) |
+| Tech N-2/N-3 (draft-side) | Parent-side (PR draft); NOT invented in the repo | — | — |
+| Other round-3 nits | None left open: every round-3 finding is in this table | — | — |
+
+#### Corrections to earlier claims (this loop)
+
+- §M6b.11's "the one in-repo reference" (§16 → §17) was
+  wrong: `NOTICE:228,233` also said §16 for
+  bcrypt/blowfish. All three are §17 now (see L1).
+- §M6b.3/§M6b.10's "screencast `reason` recorded verbatim
+  (loose)" was wrong: the reason strings appeared
+  NOWHERE in PORTING or the parity logs, and the two
+  sides' reasons differed in every run (runs 1–4 counted
+  case 17 MATCH only under the `screencast_loose`
+  carve-out, which accepted any reason when `available`
+  matched). Corrected in §M6b.3 (normalisation sentence
+  + case-17 row) and §M6b.10 (run-4 line) above; the
+  verbatim strings are now actually written down in
+  §M6b.3/§M6b.6; the carve-out is REMOVED from the
+  driver (`m6b-parity.py`: `run_case` no longer takes
+  `screencast_loose`, case 17 is strict). The parity
+  claim is now exactly true: **78/78 identical, zero
+  loose cases** (see below).
+
+#### Gates at the final head (`bdd515e`, cue, `rustup run 1.99.1`, `CARGO_TARGET_DIR=/tmp/mea-m6b-fix3`, `CARGO_PROFILE_DEV_DEBUG=0`, `CARGO_PROFILE_DEV_INCREMENTAL=false`)
+
+```
+fmt exit=0
+build exit=0
+test exit=0        (916 passed, 0 failed, workspace-wide, 40 suites)
+clippy exit=0      (--workspace --all-targets -- -D warnings)
+```
+
+Before/after: 915 passed at `e981bea` (fix loop 2 head
++ rebase) → 916 at `bdd515e` (+1: `route_body_cap_table`;
+the availability test was replaced 1:1). Per-crate spot
+value: `castctl-webui` lib 150 passed (149 + the new
+table test). One fmt failure on the way: the first gates
+run at `e777d3e` exited fmt 1 (one match arm in
+`handlers.rs:330` needed single-line form); fixed in
+`bdd515e` ("style(webui): rustfmt the route_body_cap
+match arm") and all four gates re-run at the final
+head. Log `/tmp/mea-m6b-fix3b-gates.log` (cue) and
+local copy `~/workspace/tmp/m6b-fix3-gates.log`; the
+fmt-1 run's log is `/tmp/mea-m6b-fix3-gates.log` (cue).
+
+#### Extended parity (cue, final head `bdd515e`, Go `castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)` vs Rust `castctl-rs`)
+
+**78/78 identical** (0 DIFF), exit 0. The 76 cases from
+§M6b.10 reran unchanged (all MATCH); the 2 new cases:
+
+```
+17b-screencast-keeper: go=200 rs=200 raw== canon==
+52-rss-overcap:        go=400 rs=400 go rss +176 KiB, rs rss +400 KiB
+53-rss-dns-900k:       go=400 rs=400 go rss +164 KiB, rs rss +-640 KiB
+```
+
+Case 17 is now strict (`raw== canon==`, no carve-out).
+Case 53 is the L2 RSS case: a 900 KiB body to a 64 KiB
+route stays near the 64 KiB route cap on both sides
+(the Rust −640 KiB is allocator noise — RSS fell;
+the bound is < 512 KiB). Full table (driver:
+`~/workspace/tmp/m6b-parity.py`, log
+`~/workspace/tmp/m6b-parity5.log`):
+
+| case | status | headers | body | note |
+|---|---|---|---|---|
+| 01-shell | MATCH (200/200) | MATCH | MATCH |  |
+| 02-status | MATCH (200/200) | MATCH | MATCH |  |
+| 03-status-noauth | MATCH (401/401) | MATCH | MATCH |  |
+| 04-status-bad | MATCH (401/401) | MATCH | MATCH |  |
+| 05-status-basic | MATCH (401/401) | MATCH | MATCH |  |
+| 06-status-bare | MATCH (401/401) | MATCH | MATCH |  |
+| 07-config | MATCH (200/200) | MATCH | MATCH |  |
+| 08-profiles | MATCH (200/200) | MATCH | MATCH |  |
+| 09-profile-one | MATCH (200/200) | MATCH | MATCH |  |
+| 10-profile-404 | MATCH (404/404) | MATCH | MATCH |  |
+| 11-telegram | MATCH (200/200) | MATCH | MATCH |  |
+| 12-keeper-settings | MATCH (200/200) | MATCH | MATCH |  |
+| 13-webui-settings | MATCH (200/200) | MATCH | MATCH |  |
+| 14-plugins | MATCH (200/200) | MATCH | MATCH |  |
+| 15-logs-disabled | MATCH (200/200) | MATCH | MATCH |  |
+| 16-keeper | MATCH (200/200) | MATCH | MATCH |  |
+| 17-screencast-status | MATCH (200/200) | MATCH | MATCH |  |
+| 18-chats-404 | MATCH (404/404) | MATCH | MATCH |  |
+| 19-chats-502 | MATCH (502/502) | MATCH | MATCH |  |
+| 20-outbounds | MATCH (200/200) | MATCH | MATCH |  |
+| 21-endpoints | MATCH (200/200) | MATCH | MATCH |  |
+| 22-dns | MATCH (200/200) | MATCH | MATCH |  |
+| 23-status-405 | MATCH (405/405) | MATCH | MATCH |  |
+| 24-logs-405 | MATCH (405/405) | MATCH | MATCH |  |
+| 25-origin-403 | MATCH (403/403) | MATCH | MATCH |  |
+| 25b-origin-auth-first | MATCH (401/401) | MATCH | MATCH |  |
+| 26-validate-notjson | MATCH (200/200) | MATCH | MATCH |  |
+| 27-validate-badjson | MATCH (400/400) | MATCH | MATCH |  |
+| 27b-validate-unknown | MATCH (400/400) | MATCH | MATCH |  |
+| 28-unknown-api | MATCH (200/200) | MATCH | MATCH |  |
+| 28b-unknown-api-noauth | MATCH (401/401) | MATCH | MATCH |  |
+| 23b-profile-test | MATCH (501/501) | MATCH | MATCH |  |
+| 23c-outbound-test | MATCH (501/501) | MATCH | MATCH |  |
+| 15b-logs-seeded | MATCH (200/200) | MATCH | MATCH |  |
+| 29-uidir-shell | MATCH (200/200) | MATCH | MATCH |  |
+| 30-uidir-asset | MATCH (200/200) | MATCH | MATCH |  |
+| 31-uidir-traversal | MATCH (404/404) | MATCH | MATCH |  |
+| 31b-uidir-traversal-enc | MATCH (404/404) | MATCH | MATCH |  |
+| 31c-uidir-traversal-deep | MATCH (404/404) | MATCH | MATCH |  |
+| 32-uidir-hidden | MATCH (200/200) | MATCH | MATCH |  |
+| 33-uidir-missing | MATCH (200/200) | MATCH | MATCH |  |
+| 34-uidir-status | MATCH (200/200) | MATCH | MATCH |  |
+| RL-ratelimit | MATCH (0/0) | MATCH | MATCH |  |
+| RL-429-order | MATCH (0/0) | MATCH | MATCH | go order [2, 1, 0, 3], rs order [2, 1, 0, 3] |
+| 39-head-status | MATCH (405/405) | MATCH | MATCH |  |
+| 40-head-shell | MATCH (405/405) | MATCH | MATCH |  |
+| 41-enc-profile | MATCH (404/404) | MATCH | MATCH |  |
+| 42-enc-status | MATCH (200/200) | MATCH | MATCH |  |
+| 43-enc-main | MATCH (200/200) | MATCH | MATCH |  |
+| 44-enc-mount | MATCH (200/200) | MATCH | MATCH |  |
+| 45-unknown-post | MATCH (200/200) | MATCH | MATCH |  |
+| 46-unknown-head | MATCH (200/200) | MATCH | MATCH |  |
+| 47-invalid-escape | MATCH (400/400) | MATCH | MATCH |  |
+| 48-telegram-null | MATCH (200/200) | MATCH | MATCH |  |
+| 49-origin-empty | MATCH (200/200) | MATCH | MATCH |  |
+| 50-origin-mappedv6 | MATCH (200/200) | MATCH | MATCH |  |
+| 51-keeper-2 | MATCH (200/200) | MATCH | MATCH |  |
+| 17b-screencast-keeper | MATCH (200/200) | MATCH | MATCH |  |
+| 52-rss-overcap | MATCH (400/400) | MATCH | MATCH | go rss +176 KiB, rs rss +400 KiB |
+| 53-rss-dns-900k | MATCH (400/400) | MATCH | MATCH | go rss +164 KiB, rs rss +-640 KiB |
+| 54-token73 | MATCH (200/200) | MATCH | MATCH |  |
+| 55-token73-bad | MATCH (401/401) | MATCH | MATCH |  |
+| 56-overcap-noauth | MATCH (401/401) | MATCH | MATCH |  |
+| 57-overcap-bad-origin | MATCH (403/403) | MATCH | MATCH |  |
+| 58-overcap-good | MATCH (400/400) | MATCH | MATCH |  |
+| 59-head-101 | MATCH (200/200) | MATCH | MATCH |  |
+| 60-huge-header | MATCH (200/200) | MATCH | MATCH |  |
+| 61-slow-drip | MATCH (503/503) | MATCH | MATCH | go 503 in 30.1s, rs 503 in 30.2s |
+| 62-overcap-ratelimited | MATCH (429/429) | MATCH | MATCH |  |
+| 35-put-stale | MATCH (409/409) | MATCH | MATCH |  |
+| 36-put-noop | MATCH (200/200) | MATCH | MATCH |  |
+| 37-put-idle | MATCH (200/200) | MATCH | MATCH |  |
+| 37b-status-46800 | MATCH (200/200) | MATCH | MATCH |  |
+| 37c-file-diff | MATCH (0/0) | MATCH | MATCH |  |
+| 38-put-token | MATCH (200/200) | MATCH | MATCH |  |
+| 38b-old-token-401 | MATCH (401/401) | MATCH | MATCH |  |
+| 38c-new-token-200 | MATCH (200/200) | MATCH | MATCH |  |
+| 38d-file-diff | MATCH (0/0) | MATCH | MATCH |  |
+
+Summary: 78/78 cases fully identical (status + headers
++ canonical body).
+
+#### L5 head-boundary probe (cue, `~/workspace/tmp/m6b-head-boundary.py`, single `X-Pad` header of X bytes, no auth; head bytes = X + 57)
+
+Run 1 — the specified range (X = 1,048,560 / 1,048,575 /
+1,048,576 / 1,048,577 / 1,049,000): both sides 401 at
+every size — NO divergence in the specified range.
+(Note: run 1's printed head column was X+58, off by
+one; correct head is X+57, as printed in runs 2–4.)
+
+Run 2 — extended upward: Go flips between X=1,052,000
+(head 1,052,057 → 401) and X=1,056,000 (head 1,056,057
+→ 431); Rust still 401 at X=2,000,000 (head 2,000,057).
+
+Run 3 — bisection: Go flips between X=1,052,500 (401)
+and X=1,053,500 (431) — effective Go boundary in
+(1,052,557, 1,053,557] head bytes. Rust 431s at
+X=2,000,000 in this run (401 in run 2 — same size,
+different answer across runs).
+
+Run 4 — Rust band + stability (each size once, except
+X=1,500,000 and X=2,000,000 three times): X=1,300,000
+→ 401; X=1,400,000 → 431; X=1,500,000 → 431, 401, 431;
+X=1,600,000 → 401; X=1,700,000 → 431; X=1,800,000 →
+431; X=1,900,000 → 431; X=2,000,000 → 431, 431, 431.
+Go 431 at every size in this run.
+
+Mechanism (hyper 1.8.1 source, read on cue):
+`max_buf_size` only errors when the head is still
+INCOMPLETE and the buffered bytes reach max
+(`src/proto/h1/io.rs:204`, `if curr_len >= max`), and
+the read strategy doubles from 8 KiB up to max
+(`ReadStrategy::Adaptive`, `io.rs:367-425`), so one
+final read of up to max can complete a head of nearly
+2x max — while small recv()s can also fire the check
+early. Hence the Rust boundary is timing-dependent,
+not a number. Deterministic analysis from the doubling
+schedule: the achievable effective caps jump from
+≤1,040,384 to ≥1,564,672 (reads 8 KiB…512 KiB sum
+1,040,384, then one read of up to max), and Go's
+~1,053,000 sits in the gap — no `max_buf_size` value
+pins the boundary to Go's. Recorded as a [DEVIATION]
+in §M6b.6; `max_buf_size(1 MiB)` KEPT (same nominal
+value as Go's default; everything below 1 MiB is
+deterministic-401 on both sides).
+
+#### L3 live probe (cue, `~/workspace/tmp/m6b-http10-te.py`)
+
+HTTP/1.0 + `Transfer-Encoding: chunked` to
+`/api/v1/status`, no auth: Go 401 (handler runs, auth
+gate), Rust 400 (hyper rejects). Confirms the §M6b.6
+L3 residual live, not just from source.
+
+#### Fail-before proofs (cue, final head `bdd515e`, `~/workspace/tmp/m6b-proofs-fix3.sh`, `CARGO_TARGET_DIR=/tmp/mea-m6b-proofs3`)
+
+11/11 RED on neuter (exit 101 each), restore-ok each:
+auth-cost, auth-bytes, ratelimit, origin, contain,
+ordered, merge-r1, store-mode, store-lock, embed-hash,
+and the NEW routecap proof (neuter the 64 KiB route cap
+to 1 MiB → `route_body_cap_table` RED). Log
+`/tmp/mea-m6b-proofs3.log` (cue) and local copy
+`~/workspace/tmp/m6b-proofs3.log`.
+
+Proof 11 (RSS, `~/workspace/tmp/m6b-proof11.py`, 64 MiB
+POST to `/api/v1/config/validate`, VmHWM delta): wired
+status=400 delta **+6,868 KiB**; neutered (dispatch call
+`read_capped_body(body, cap)` → `read_capped_body(body,
+1 << 30)` in a scratch copy `/tmp/mea-m6b-fix3-neuter`,
+md5-verified, rebuilt, deleted afterwards) status=400
+delta **+71,952 KiB**. Prior runs for comparison: fix
+loop 2 wired +6,436 / neutered +71,600 KiB; round-3
+re-run wired +6,284 / neutered +72,244 KiB. The bound
+holds.
+
+Disk (Boss DISK RULE 2026-11-05/06): cue `/` was 26G
+free before the build (above the 6G line, no cleaning
+needed); 20G free after the final gate (the drop is
+concurrent sibling activity, not this task — this
+task's own targets were deleted: `/tmp/mea-m6b-fix3`,
+`/tmp/mea-m6b-proofs3`, `/tmp/mea-m6b-proof11-target`,
+`/tmp/mea-m6b-fix3-neuter`; only logs + the
+`/tmp/mea-m6b-fix3-src` tree remain on cue).
+Fingerprint: cue host key verified against the pinned
+`~/workspace/tmp/cue-known_hosts`
+(`SHA256:6ExOBaFLBXhnN4GX3Qjh6DbdjJev2p7nR61IwERRhcs`,
+`StrictHostKeyChecking=yes`).
+
+`git diff --stat origin/dev-rust...HEAD`: 38 files,
+all in `rust/` + `NOTICE` + `docs/provenance.md`, zero
+`.go` files.
+
+#### Remaining "Chưa kiểm chứng" (new in this loop)
+
+- Go's exact head-flip byte (only narrowed to a 1,000-byte
+  interval, (1,052,557, 1,053,557]).
+- The Rust head boundary is timing-dependent by
+  mechanism, not a single number — the ~1.3–2.0 MB band
+  is a measured characterisation, not a bound.
+- L3/L5 are single-request live observations each
+  (L5 repeated across 4 runs, 30+ probes); no
+  repeated-run statistics beyond the x3 repeats at
+  X=1,500,000 and X=2,000,000.
