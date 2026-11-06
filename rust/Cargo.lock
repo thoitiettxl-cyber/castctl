@@ -654,7 +654,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
 ]
-]
 
 [[package]]
 name = "cc"
