@@ -92,17 +92,21 @@ pub const READ_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 /// same status Go sends.
 pub const MAX_HEAD_BYTES: usize = 1024 * 1024;
 /// Maximum header count: Go has NO count limit, only the
-/// 1 MiB head-bytes cap. The shortest legal header line
-/// is 4 bytes (`a:\r\n` — empty value), so 1 MiB / 4 B =
-/// 262,144 headers is the count at which the byte cap
-/// always binds first; setting the knob there makes the
-/// count limit unreachable before the byte limit, exactly
-/// as in Go (fix loop 2, B3). Cost: hyper allocates the
-/// slot array per request (uninitialized heap memory,
-/// only parsed headers touched) — accepted for a
-/// loopback-only admin UI; the default (100) would 431 a
-/// request Go accepts.
-pub const MAX_HEADERS: usize = 262_144;
+/// 1 MiB head-bytes cap. Hyper's knob cannot express
+/// "no limit" for free: it allocates the header slot
+/// array per request and writes it, so the exact
+/// byte-cap-equivalent value (262,144 = 1 MiB / 4 B
+/// minimal header line) costs ~14 MB of touched memory
+/// on EVERY request — measured by proof 11 (VmHWM delta
+/// +18,904 KiB wired at 262,144 vs +4,624 KiB in fix
+/// loop 1 at the 100 default). 10,000 headers is the
+/// chosen bound: it covers ~50 KB+ of minimal header
+/// lines, far beyond any real client (browsers send
+/// ~15-30), at ~560 KB touched per request. Residual,
+/// recorded: a request with >10,000 headers inside
+/// 1 MiB gets hyper's automatic 431 where Go accepts —
+/// fail-closed, pathological input only.
+pub const MAX_HEADERS: usize = 10_000;
 /// Largest request body any route accepts (1 MiB cap).
 pub const MAX_BODY_BYTES: usize = 1024 * 1024 + 1;
 /// Go's net/http sniff buffer: bodies below this get an
@@ -504,15 +508,18 @@ impl Server {
                         // Framing knobs (fix loop 2, B3): Go's
                         // head cap is 1 MiB with no header-count
                         // limit (`MaxHeaderBytes` default); the
-                        // two builder knobs above reproduce it
-                        // as closely as hyper allows. Residuals
-                        // hyper cannot express: `Transfer-Encoding`
-                        // other than chunked is a hyper parse
-                        // error (automatic 400, no response body)
-                        // where Go answers 501, and a request
-                        // URI over 65534 bytes is hyper's
-                        // automatic 414 where Go has no URI cap
-                        // — both recorded in PORTING §M6b.6.
+                        // byte knob is set exactly, the count
+                        // knob to 10,000 (the exact equivalent
+                        // 262,144 costs ~14 MB touched per
+                        // request — measured, see MAX_HEADERS).
+                        // Residuals hyper cannot express:
+                        // `Transfer-Encoding` other than chunked
+                        // is a hyper parse error (automatic 400,
+                        // no response body) where Go answers
+                        // 501, and a request URI over 65534
+                        // bytes is hyper's automatic 414 where
+                        // Go has no URI cap — both recorded in
+                        // PORTING §M6b.6.
                         let _ = conn.await;
                     });
                 }
@@ -1599,6 +1606,37 @@ mod tests {
         handle.abort();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn more_than_max_headers_is_431() {
+        // Fix loop 2, B3 (recorded residual): MAX_HEADERS
+        // is 10,000, not Go's unbounded count — a request
+        // with 10,001 headers gets hyper's automatic 431
+        // where Go accepts. Fail-closed, pathological
+        // input only; pinned so the boundary is explicit.
+        let mut extra: Vec<(String, String)> = Vec::new();
+        for i in 0..10_001 {
+            extra.push((format!("X-Test-{i}"), "v".to_string()));
+        }
+        let extra_refs: Vec<(&str, &str)> = extra
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let (server, port, handle, dir) = start_live_server(LIVE_FIXTURE).await;
+        let resp = raw_request_full(
+            port,
+            "GET",
+            "/api/v1/status",
+            0,
+            Some("plain-token"),
+            &extra_refs,
+        )
+        .await;
+        server.request_shutdown();
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(resp.starts_with("HTTP/1.1 431"), "{resp}");
     }
 
     #[tokio::test]

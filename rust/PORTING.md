@@ -10176,10 +10176,12 @@ on cue); logs `/tmp/proof-*.log` on cue.
 - [DEVIATION] Go chat-job-store `create` (`chats.go`)
   loops forever when 33 jobs are already running (it only
   evicts finished jobs and never gives up); Rust breaks out
-  when nothing can be evicted, so a 33rd concurrent send
-  fails fast instead of hanging the request. Safer by the
-  decision rules (rule 2); no live difference observed —
-  the parity set never holds 33 running jobs.
+  when nothing can be evicted — and the 33rd job IS
+  created (202), so the store exceeds the cap. (Fix loop
+  2, red-team N1: the old wording "fails fast instead of
+  hanging" was wrong — nothing fails; the job succeeds.)
+  Safer by the decision rules (rule 2); no live difference
+  observed — the parity set never holds 33 running jobs.
 - [DEVIATION — approximation] Hyper has no idle-timeout
   knob, so Go's `http.Server{IdleTimeout: 120s}`
   (idle-BETWEEN-requests only, resets per response, never
@@ -10281,12 +10283,43 @@ on cue); logs `/tmp/proof-*.log` on cue.
   `Connection: close`; hyper always sends Content-Length
   (small body) and keeps the connection alive. Unfixable
   at the hyper layer; the body text matches.
-- [DEVIATION — edge] Hyper framing limits (F-B8):
-  hyper 1.8.1 allows max 100 headers and ~408 KB head
-  (→ 431); Go allows 1 MiB head bytes with no count
-  limit. Non-chunked `Transfer-Encoding: gzip`: Go 501,
-  hyper silently treats the body as length 0. Unfixable
-  at the hyper layer; recorded, not fixed.
+- [DEVIATION — edge] Hyper framing limits (F-B8, fixed
+  in loop 2, `e1dbc39` — the old "unfixable at the hyper
+  layer" record was wrong, red-team B3): hyper 1.8.1
+  `Builder::max_headers` (default 100) and
+  `Builder::max_buf_size` (default ~400 KiB) are now set
+  (`server.rs`): `MAX_HEAD_BYTES = 1 MiB` matches Go's
+  head cap exactly (stdlib `MaxHeaderBytes` default —
+  `internal/commands/webui.go` sets none), and
+  `MAX_HEADERS = 10,000` (see the cost trade below).
+  Pinned live by parity 59 (101 headers) and 60 (one
+  500 KiB header), and by unit test
+  `more_than_max_headers_is_431`. Cost trade (measured,
+  proof 11, §M6b.10): hyper allocates + writes the header
+  slot array per request, so the exact byte-cap-equivalent
+  count (262,144 = 1 MiB / 4 B minimal header line) costs
+  ~14 MB touched memory on EVERY request (VmHWM delta
+  +18,904 KiB wired vs +4,624 KiB in fix loop 1 at the
+  100 default). 10,000 headers covers ~50 KB+ of minimal
+  header lines — far beyond any real client — at ~560 KB
+  touched per request. Residual: a request with >10,000
+  headers inside 1 MiB gets hyper's automatic 431 where
+  Go accepts — fail-closed, pathological input only.
+  Two further residuals hyper cannot express, both
+  measured in §M6b.10:
+  (a) non-chunked `Transfer-Encoding` (e.g. gzip): Go
+  answers 501 (`Unsupported transfer encoding`, 29-byte
+  body, no Content-Length); hyper rejects it at parse
+  time with its automatic 400 (empty body, `Content-
+  Length: 0`) and the service never sees the request
+  (`proto/h1/role.rs:330-334` →
+  `Parse::Header(TransferEncodingInvalid)` →
+  `role.rs:463-481` `on_error` maps `Parse::Header(_)` to
+  400; no knob exists to change the status or to deliver
+  the request). (b) Request URI over 65534 bytes: hyper's
+  automatic 414 (`proto/h1/role.rs:34,172`
+  `MAX_URI_LEN = u16::MAX - 1`); Go has no URI cap, only
+  the 1 MiB head cap.
 - [DEVIATION — residual] Bodyless routes (R4): when a
   request carries a body on a route that needs none,
   Rust never reads it and hyper closes the connection
@@ -10418,7 +10451,7 @@ recorded here with its evidence. Commits are on
 | F-D4 log truncation race | Fixed: `read_full_or_eof` (Go `ReadAt` tolerates EOF, zero tail, full-length buffer) | `5c67148` | `read_full_or_eof_tolerates_truncation` (`eb6a3ab`) |
 | F-D5 U+FFFD maximal-subpart | Fixed: log tail uses `go_coerce_lossy` (per-byte) | `5c67148` | `go_coerce_lossy_is_per_byte` (`eb6a3ab`) |
 | F-C9 concurrent-save test sequential | Fixed (threads half): `concurrent_saves_have_exactly_one_winner`; cross-process half recorded unproven in §M6b.7 | `756859c` | threads test |
-| F-B8 hyper framing limits | Recorded as [DEVIATION] in §M6b.6 (unfixable at hyper layer) | — | — |
+| F-B8 hyper framing limits | Recorded as [DEVIATION] in §M6b.6 (unfixable at hyper layer) — SUPERSEDED in fix loop 2 (see §M6b.10): the knobs exist and are now set; only the TE-gzip 501 and long-URI 414 residuals remain | — | — |
 | F-D8 replies nil→null vs `[]` | Record verified accurate (§M6b.6); `note`/`approvals_count` follow-on recorded | — | — |
 | Safety N-1 `logs.rs` `.expect()` | Fixed: explicit `let Some(path) else return err_internal()` | `5c67148` | — |
 | N-2 dead `MintError::Random` | Fixed: variant + 500 arm removed (`fill_bytes` infallible) | `5c67148` | — |
