@@ -627,9 +627,7 @@ fn slog_bridge_filtering_and_redaction() {
         "gateway down",
         &[(
             "err",
-            SlogValue::error(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!(
+            SlogValue::error(std::io::Error::other(format!(
                     "dial wss://gateway.example.invalid/v1/noise?vm_id={FIX_VMID}&auth_token={FIX_HATCH_TOKEN}"
                 ),
             )),
@@ -641,9 +639,7 @@ fn slog_bridge_filtering_and_redaction() {
             ("what", SlogValue::from("fs.read")),
             (
                 "err",
-                SlogValue::error(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("down: hatch_sess={FIX_COOKIE_VAL}"),
+                SlogValue::error(std::io::Error::other(format!("down: hatch_sess={FIX_COOKIE_VAL}"),
                 )),
             ),
         ],
@@ -670,7 +666,7 @@ fn slog_bridge_filtering_and_redaction() {
         "slog-error-probe",
         &[(
             "err",
-            SlogValue::error(std::io::Error::new(std::io::ErrorKind::Other, "boom")),
+            SlogValue::error(std::io::Error::other("boom")),
         )],
     );
     sl.warn("slog-warn-probe", &[]);
@@ -1078,7 +1074,7 @@ fn summarize_err_cases() {
         summarize_err(Some(&conn_wrapped)),
         "conn: gateway status=500 body_length=52"
     );
-    let plain = std::io::Error::new(std::io::ErrorKind::Other, "connection refused");
+    let plain = std::io::Error::other("connection refused");
     assert_eq!(summarize_err(Some(&plain)), "connection refused");
     assert_eq!(summarize_err(None), "");
 }
@@ -1186,7 +1182,7 @@ fn slog_bridge_warn_summarizes_auth_error() {
 
 #[test]
 fn safe_err_for_level_trace_is_summary() {
-    let payload = format!("plain body words ALLOW5TRACE-9d2e41");
+    let payload = "plain body words ALLOW5TRACE-9d2e41".to_string();
     let gw = gateway_500(&payload);
     for level in [
         Level::TRACE,
@@ -1224,7 +1220,9 @@ fn safe_err_for_level_trace_is_summary() {
 #[test]
 fn resolve_log_settings_cases() {
     let config_with_log = |l: LogConfig| Some(l);
-    let cases: Vec<(&str, Option<LogConfig>, &str, bool, Option<LogConfig>, bool)> = vec![
+    type ResolveCase<'a> =
+        (&'a str, Option<LogConfig>, &'a str, bool, Option<LogConfig>, bool);
+    let cases: Vec<ResolveCase> = vec![
         (
             "absent block",
             None,
@@ -1445,15 +1443,13 @@ fn resolve_log_settings_cases() {
 
 #[test]
 fn wrap_err_redacts_display_but_keeps_source() {
-    let inner = std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("boom auth_token={FIX_HATCH_TOKEN}"),
+    let inner = std::io::Error::other(format!("boom auth_token={FIX_HATCH_TOKEN}"),
     );
     let wrapped = castctl_logging::wrap_error(inner);
     assert!(
         !wrapped.to_string().contains(FIX_HATCH_TOKEN),
         "wrapped Display carries the secret: {}",
-        wrapped.to_string()
+        wrapped
     );
     assert!(wrapped.to_string().contains("[redacted]"));
     assert!(
