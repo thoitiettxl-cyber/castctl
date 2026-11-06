@@ -535,7 +535,8 @@ func runServeWait(scriptPath string) error {
 	// into waitScript leaves HistoryStages and Subscribes
 	// empty, so every subscribe serves silence and no case
 	// can ever complete. A bare waitScript file is still
-	// accepted.
+	// accepted. When both are present the envelope wins
+	// (round-2 R2-4).
 	var envelope struct {
 		Script *waitScript `json:"script"`
 	}
@@ -546,6 +547,14 @@ func runServeWait(scriptPath string) error {
 		script = *envelope.Script
 	} else if err := json.Unmarshal(raw, &script); err != nil {
 		return fmt.Errorf("wait script %s: %w", scriptPath, err)
+	}
+	// An empty script (no stages AND no subscribes) is a
+	// broken case file, not a silent script: both drivers
+	// would time out identically and the harness would
+	// PASS a case that tests nothing (round-2 R2-4).
+	// Fail at load instead.
+	if len(script.HistoryStages) == 0 && len(script.Subscribes) == 0 {
+		return fmt.Errorf("wait script %s: empty script (no history_stages and no subscribes)", scriptPath)
 	}
 	// `historyStage()` picks the last stage with
 	// `from_call <= historyCalls`, so stages must be
