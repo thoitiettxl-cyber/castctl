@@ -10134,7 +10134,20 @@ re-port it; the seam is the committed file.
     `overlong_label_is_protocol_error`,
     `overlong_name_is_protocol_error`,
     `max_length_name_encodes` (255 octets, at the
-    limit).
+    limit). Round-2 R2-1 (LOW — FIXED in fix loop
+    2): `encode_name` also skipped empty labels,
+    so `"a..b"` encoded as `"a.b"`. Fixed: an
+    empty label is `DnsError::Protocol`, except
+    the root (`""` or `"."` → one zero octet),
+    matching Go miekg/dns `packDomainName`
+    (v1.1.72, msg.go: leading dot or two dots
+    back to back is `ErrRdata`). No charset check:
+    `packDomainName` copies label bytes verbatim,
+    so a space in a label is legal here —
+    `castctl-transport`'s `dns_encode_query` is
+    stricter than Go and is not copied. Tests:
+    `empty_label_is_protocol_error`,
+    `root_name_encodes`.
 29. `Fs::get` recursive writes server-supplied
     `rel` parts with no `..` check (safety F-2,
     LOW — ACCEPTED, no behaviour change): a

@@ -73,10 +73,12 @@ const MAX_LABEL_LEN: usize = 63;
 
 /// Encode one question (RD set, QDCOUNT 1). Names Go
 /// would reject are rejected here instead of emitting
-/// corrupt wire bytes: a label over 63 octets, or a
-/// name over 255 octets on the wire, is
-/// `DnsError::Protocol` (red-team F8, fix loop 1; Go
-/// validates via sing-box / miekg/dns before sending).
+/// corrupt wire bytes: a label over 63 octets, a name
+/// over 255 octets on the wire, or an empty label
+/// (`"a..b"`, `".a.b"`) is `DnsError::Protocol`
+/// (red-team F8, fix loop 1; round-2 R2-1 for the
+/// empty-label rule; Go validates via sing-box /
+/// miekg/dns before sending).
 /// The bound also keeps the query far below 64 KiB, so
 /// the 2-byte length prefix in `transport.rs` cannot
 /// wrap.
@@ -95,12 +97,35 @@ pub fn encode_query(id: u16, name: &str, qtype: u16) -> Result<Vec<u8>, DnsError
 }
 
 fn encode_name(out: &mut Vec<u8>, name: &str) -> Result<(), DnsError> {
+    // A name of only dots (`""` or `"."`) is the root:
+    // a single zero octet. Anything else with an empty
+    // label (`"a..b"`, `".a.b"`) is rejected, matching
+    // Go miekg/dns `packDomainName` (v1.1.72, msg.go):
+    // two dots back to back, or a leading dot other
+    // than the root, is `ErrRdata` (round-2 R2-1; the
+    // old code skipped empty labels, so `"a..b"`
+    // encoded as `"a.b"` — a lookup for a different
+    // name than the one requested).
+    // No charset check: `packDomainName` copies label
+    // bytes verbatim (its `default:` arm), so a space
+    // or other unusual byte is legal on the wire here.
+    // `castctl-transport`'s `dns_encode_query` is
+    // stricter (rejects chars outside `[A-Za-z0-9_-]`),
+    // but that is stricter than Go, so this encoder
+    // does not copy it.
+    let trimmed = name.trim_end_matches('.');
+    if trimmed.is_empty() {
+        out.push(0);
+        return Ok(());
+    }
     // Wire length: one length byte per label + the
     // labels + the root zero.
     let mut wire_len = 1;
-    for label in name.trim_end_matches('.').split('.') {
+    for label in trimmed.split('.') {
         if label.is_empty() {
-            continue;
+            return Err(DnsError::Protocol(
+                "DNS name contains an empty label".to_string(),
+            ));
         }
         if label.len() > MAX_LABEL_LEN {
             return Err(DnsError::Protocol(format!(
@@ -321,6 +346,39 @@ mod tests {
         let q = encode_query(1, &name, QTYPE_A).expect("255-octet name must encode");
         let msg = decode_message(&q).expect("query must decode");
         assert_eq!(msg.questions[0].name, name);
+    }
+
+    #[test]
+    fn empty_label_is_protocol_error() {
+        // Round-2 R2-1: an empty label used to be
+        // skipped, so "a..b" encoded as "a.b" — a
+        // lookup for a different name than requested.
+        // Go miekg/dns packDomainName (v1.1.72,
+        // msg.go) returns ErrRdata on two dots back
+        // to back, and on a leading dot other than
+        // the root.
+        assert!(matches!(
+            encode_query(1, "a..b", QTYPE_A),
+            Err(DnsError::Protocol(_))
+        ));
+        assert!(matches!(
+            encode_query(1, ".a.b", QTYPE_A),
+            Err(DnsError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn root_name_encodes() {
+        // "" and "." are the root: a single zero
+        // octet after the 12-byte header (the
+        // decoder joins zero labels into "").
+        for name in ["", "."] {
+            let q = encode_query(1, name, QTYPE_A).expect("root must encode");
+            assert_eq!(q.len(), 12 + 1 + 4);
+            assert_eq!(q[12], 0);
+            let msg = decode_message(&q).expect("query must decode");
+            assert_eq!(msg.questions[0].name, "");
+        }
     }
 
     #[test]
