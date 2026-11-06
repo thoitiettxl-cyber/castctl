@@ -13856,3 +13856,30 @@ incremental driver builds; freed 2.3G of my own
 `debug/incremental` before clippy; 19–20G free at
 the end. `/tmp/m7b-target` removed after the final
 gate (logs kept).
+
+Rebase onto `dev-rust` b3fbe5a (M6b merge, PR #74), 2026-11-06, head
+1944200: 21 commits replayed; 1 conflict (commit ef2bf0f, the original
+docs commit) in `docs/provenance.md` + `rust/PORTING.md` — adjacent
+sections, resolved additively, both sides kept (M6b §M6b/§18 first, M7b
+after; provenance M7b takes §19, no renumber needed since M6b landed
+first as assumed). No code changed by the resolution (docs only).
+Stat vs b3fbe5a: 113 files, +9206/−100, only `rust/` +
+`docs/provenance.md`. Correction: the fix-loop-2 report's "+9016/−80
+vs 0233095" was measured at code head 3692799, before the docs commit
+8b331bb (+209/−20 = net +189); the true figure vs 0233095 was
++9205/−80. Gates at 1944200 on cue: SPDX ok (with
+`GOTOOLCHAIN=auto`; bare `go` 1.26.8 refuses go.mod 1.27.3);
+fmt/build/clippy 0; `cargo test --workspace` 1171 passed, 0 failed,
+46 suites (1016 + 151 M6b + 4 fix-loop-2, exact); harness 83/83;
+live `no.0` 4/4; `--help` 46/46 byte-identical (45 command names +
+global — the "50" in the fix-loop-2 report was a counting artifact of
+its livecheck script, which caught 5 extra tokens from the Commands
+header; both binaries list the same 45 names). Incident: the first
+full test run exited 101 on the KNOWN M6c flake
+`sweep_removes_only_dead_pid_dirs` (`castctl-pluginhost`, PORTING
+§M6c.11, fails ~1/3 runs, "own dir must survive"); it passed 3/3 on
+focused reruns and the full suite passed on re-run — no rebase
+breakage, no fix in scope. Disk: dipped to 5.4G during the first test
+run (other sessions' targets active); freed 1.6G of own
+`debug/incremental`, recovered to 20G free; `/tmp/m7b-target` removed
+after the final gate (logs kept at `/tmp/m7b-rb-*.log`).
