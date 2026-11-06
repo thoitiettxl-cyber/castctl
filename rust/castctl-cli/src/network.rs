@@ -565,15 +565,26 @@ fn summarize_transport_error(err: &TransportError) -> String {
     }
 }
 
-/// Go `%v` of an `os` error prints the lowercase message
-/// (`permission denied`); Rust's `Display` appends
-/// ` (os error N)`. Strip that suffix so filesystem
-/// error text matches Go.
+/// Go `%v` of an `os` error prints the lowercase
+/// `syscall.Errno` text (`permission denied`, `no such
+/// file or directory`); Rust's `Display` capitalizes it
+/// and appends ` (os error N)`. Reuse the shared `oserr`
+/// table (`castctl-config`), which renders Go's lowercase
+/// text (unlisted errnos fall back to `os error <n>`).
 fn io_error_text(e: &std::io::Error) -> String {
-    let text = e.to_string();
-    match text.rfind(" (os error ") {
-        Some(idx) if text.ends_with(')') => text[..idx].to_string(),
-        _ => text,
+    castctl_config::oserr::os_message(e)
+}
+
+/// `create_dir_all` error text, Go `MkdirAll`-style:
+/// Rust reports EEXIST when a path component is a regular
+/// file, while Go's `MkdirAll` reports ENOTDIR (`mkdir
+/// <path>: not a directory` — red-team probe E1).
+fn mkdir_error_text(e: &std::io::Error) -> String {
+    if e.raw_os_error() == Some(17) {
+        // EEXIST from a file in the path: Go's error.
+        castctl_config::oserr::strerror(20)
+    } else {
+        io_error_text(e)
     }
 }
 
@@ -1609,7 +1620,7 @@ async fn save_resources(
             1,
             format!(
                 "save resources: create directory: mkdir {directory}: {}",
-                io_error_text(&e)
+                mkdir_error_text(&e)
             ),
         ));
     }
@@ -1640,7 +1651,16 @@ async fn save_resources(
         let resolved = match media_path(&r.path, variants_original) {
             Ok(p) => p,
             Err(e) => {
-                return Err(classify_conn_error(&e));
+                // Go `SaveResources` (`resources.go:267`)
+                // catches every DownloadFile failure —
+                // including a MediaPath ValidationError,
+                // which happens INSIDE DownloadFile — into
+                // the row's `error` field and continues;
+                // the command exits 3 when any row errors.
+                // Aborting here would exit 2 with no rows.
+                row.error = Some(summarize_transport_error(&e));
+                rows.push(row);
+                continue;
             }
         };
         let data = match rt.shared.live().await {
@@ -1674,7 +1694,13 @@ async fn save_resources(
         if let Err(e) = std::fs::rename(&tmp, &dest) {
             return Err(msg(
                 1,
-                format!("save resources: rename {tmp} {dest}: {}", io_error_text(&e)),
+                // Go `save resources: rename %s: %w` (tmp)
+                // where the error is a `*LinkError`:
+                // `rename <tmp> <dest>: <reason>`.
+                format!(
+                    "save resources: rename {tmp}: rename {tmp} {dest}: {}",
+                    io_error_text(&e)
+                ),
             ));
         }
         let size = data.len() as i64;
@@ -2212,6 +2238,95 @@ mod tests {
         assert!(out.contains("\"path\":\"sandbox://media/raw/a&b.jpg\""), "{out}");
         assert!(out.contains("\"file\":\"/tmp/dl/a&b.jpg\""), "{out}");
         assert!(!out.contains("\\u0026"), "{out}");
+    }
+
+    #[test]
+    fn io_error_text_is_lowercase_strerror() {
+        // B4 regression: Go `%v` on an os error is
+        // lowercase `syscall.Errno` text, never Rust's
+        // capitalized Display with ` (os error N)`.
+        assert_eq!(
+            io_error_text(&std::io::Error::from_raw_os_error(13)),
+            "permission denied"
+        );
+        assert_eq!(
+            io_error_text(&std::io::Error::from_raw_os_error(2)),
+            "no such file or directory"
+        );
+        assert_eq!(
+            io_error_text(&std::io::Error::from_raw_os_error(21)),
+            "is a directory"
+        );
+        assert_eq!(
+            io_error_text(&std::io::Error::other("custom boom")),
+            "custom boom"
+        );
+    }
+
+    #[test]
+    fn mkdir_error_text_maps_file_to_not_a_directory() {
+        // B4 regression (red-team probe E1): Rust
+        // `create_dir_all` reports EEXIST when a path
+        // component is a regular file; Go `MkdirAll`
+        // reports ENOTDIR (`mkdir <path>: not a
+        // directory`).
+        assert_eq!(
+            mkdir_error_text(&std::io::Error::from_raw_os_error(17)),
+            "not a directory"
+        );
+        assert_eq!(
+            mkdir_error_text(&std::io::Error::from_raw_os_error(13)),
+            "permission denied"
+        );
+    }
+
+    #[test]
+    fn download_missing_cookies_is_typed_json_with_go_length() {
+        // B4 regression (red-team C9/C10): the
+        // connector's missing-cookies message is `no
+        // cookies at <path>: gateway: read cookies file:
+        // open <path>: no such file or directory` —
+        // message_length 76 + 2*len(path) (Go: 182 for a
+        // 53-char path); the old text measured 135.
+        let cfg_dir = temp_home("dl-missing-cookies");
+        let outside = temp_home("dl-cookies-outside");
+        let cookies = outside.join("nope.txt");
+        let cookies_s = cookies.to_str().unwrap();
+        std::fs::write(
+            cfg_dir.join("config.json"),
+            format!(
+                "{{\"profiles\":{{\"no1\":{{\"outbound\":\"direct\",\"cookies_file\":{}}}}}}}",
+                serde_json::to_string(cookies_s).unwrap()
+            ),
+        )
+        .unwrap();
+        let out_dir = temp_home("dl-missing-cookies-out");
+        let (_home, map) = isolated_env();
+        let out = run_env(
+            &[
+                "--config",
+                cfg_dir.join("config.json").to_str().unwrap(),
+                "download",
+                "sandbox://media/raw/x.jpg",
+                "-o",
+                out_dir.to_str().unwrap(),
+            ],
+            map,
+        );
+        assert_eq!(out.code, 2, "stdout: {} stderr: {}", out.stdout, out.stderr);
+        let want_len = 76 + 2 * cookies_s.len();
+        assert!(
+            out.stderr.contains(&format!(
+                "\"error\":\"conn: auth_failed message_length={want_len}\""
+            )),
+            "stderr: {}",
+            out.stderr
+        );
+        assert!(
+            out.stderr.contains("\"type\":\"cookies_missing\""),
+            "stderr: {}",
+            out.stderr
+        );
     }
 
     #[test]

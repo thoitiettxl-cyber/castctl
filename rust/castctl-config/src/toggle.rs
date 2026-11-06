@@ -75,6 +75,15 @@ pub fn set_auto_allow_once(base_dir: &str, name: &str, value: bool) -> Result<()
 /// place, re-read to confirm nothing changed under the
 /// lock, and write atomically (temp + rename, mode
 /// 0600). Mirrors `UpdateSingleConfig` (`guard.go:183`).
+/// Nested calls deadlock: the flock is held for the whole
+/// update and `flock(LOCK_EX)` on an already-held lock
+/// blocks — Go documents the same for
+/// `UpdateSingleConfig` (`guard.go:183`: "update must not
+/// call SaveSingleConfig, ConfigState.Save, or
+/// UpdateSingleConfig itself (the lock is already held;
+/// nested calls deadlock)"). Rust relies on the flock
+/// alone (Go also takes the in-process `configWriteMu`);
+/// the flock serializes across threads and processes.
 fn update_single_profile_field(
     base_dir: &str,
     name: &str,
@@ -191,18 +200,90 @@ fn update_locked(
 
 /// Read `config.json` bytes, tolerating absence (Go
 /// `readRegularFile` returns nil bytes on `IsNotExist`).
-/// A directory in its place, or any other read error, is
-/// a `read config: …` error.
+/// The file is stat-guarded before opening
+/// (`config.go:827`): a FIFO, socket, or device at the
+/// path is refused without ever opening it, so a read can
+/// never block on a FIFO; a directory is refused the same
+/// way. A stat/read error is a `read config: …` error.
 fn read_config_bytes(path: &str) -> Result<Vec<u8>, ConfigError> {
+    match std::fs::metadata(path) {
+        Ok(md) => {
+            if !md.is_file() {
+                if md.is_dir() {
+                    return Err(config_errorf!(
+                        "read config: config path {} is a directory, not a file",
+                        go_quote(path)
+                    ));
+                }
+                return Err(config_errorf!(
+                    "read config: config path {} is not a regular file",
+                    go_quote(path)
+                ));
+            }
+        }
+        Err(e) if crate::oserr::is_not_exist(&e) => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(config_errorf!(
+                "read config: {}",
+                crate::oserr::stat_error_text(path, &e)
+            ));
+        }
+    }
     match std::fs::read(path) {
         Ok(data) => Ok(data),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => {
-            if Path::new(path).is_dir() {
-                Err(config_errorf!("read config: {} is a directory", path))
-            } else {
-                Err(config_errorf!("read config: {}", io_error_text(&e)))
-            }
+        Err(e) if crate::oserr::is_not_exist(&e) => Ok(Vec::new()),
+        Err(e) => Err(config_errorf!(
+            "read config: {}",
+            crate::oserr::open_error_text(path, &e)
+        )),
+    }
+}
+
+/// A per-process-unique temp suffix (pid + nanosecond
+/// clock + a counter): two writers in the same directory
+/// never share a temp name, and `create_new` (O_EXCL)
+/// refuses to truncate a pre-existing file. Mirrors Go
+/// `os.CreateTemp(dir, ".tmp-*")` (`config.go:1634`).
+fn temp_suffix() -> String {
+    static TEMP_COUNTER: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let n = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}-{}-{}", std::process::id(), nanos, n)
+}
+
+/// Remove temp files older than an hour left by crashed
+/// writers. Best-effort: every failure is ignored, and
+/// only the `.config.json.tmp.` prefix is touched. The
+/// age gate keeps a concurrent live writer's temp —
+/// always fresh — from ever being removed (Go removes
+/// only its own temp name, via a deferred `os.Remove`).
+fn remove_stale_temp_files(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(".config.json.tmp.") {
+            continue;
+        }
+        let Ok(md) = entry.metadata() else {
+            continue;
+        };
+        let Ok(mtime) = md.modified() else {
+            continue;
+        };
+        let Ok(age) = mtime.elapsed() else {
+            continue;
+        };
+        if age.as_secs() > 3600 {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
@@ -214,15 +295,24 @@ fn write_file_atomic(path: &str, data: &[u8]) -> Result<(), ConfigError> {
         .parent()
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| Path::new(".").to_path_buf());
-    let tmp = dir.join(format!(".config.json.tmp.{}", std::process::id()));
+    remove_stale_temp_files(&dir);
+    let (tmp, mut f) = loop {
+        let candidate = dir.join(format!(".config.json.tmp.{}", temp_suffix()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&candidate)
+        {
+            Ok(f) => break (candidate, f),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(config_errorf!("write config: {}", io_error_text(&e)));
+            }
+        }
+    };
     let write_result = (|| -> std::io::Result<()> {
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
         f.write_all(data)?;
         f.sync_all()?;
         Ok(())
@@ -250,15 +340,12 @@ fn sha256_hex(data: &[u8]) -> String {
 }
 
 /// Go `%v` of an `os` error prints the lowercase
-/// message (`permission denied`, `no such file or
-/// directory`); Rust's `Display` appends ` (os error N)`.
-/// Strip that suffix so config error text matches Go.
+/// `syscall.Errno` text (`permission denied`, `no such
+/// file or directory`); Rust's `Display` capitalizes it
+/// and appends ` (os error N)`. Reuse the shared `oserr`
+/// table, which renders Go's lowercase text.
 fn io_error_text(e: &std::io::Error) -> String {
-    let text = e.to_string();
-    match text.rfind(" (os error ") {
-        Some(idx) if text.ends_with(')') => text[..idx].to_string(),
-        _ => text,
-    }
+    crate::oserr::os_message(e)
 }
 
 #[cfg(test)]
@@ -350,10 +437,31 @@ mod tests {
     }
 
     #[test]
-    fn io_error_text_strips_os_error_suffix() {
+    fn io_error_text_is_lowercase_strerror() {
         let e = std::io::Error::from_raw_os_error(13);
-        assert_eq!(io_error_text(&e), "Permission denied");
+        assert_eq!(io_error_text(&e), "permission denied");
+        let e = std::io::Error::from_raw_os_error(2);
+        assert_eq!(io_error_text(&e), "no such file or directory");
         let e = std::io::Error::other("custom boom");
         assert_eq!(io_error_text(&e), "custom boom");
+    }
+
+    #[test]
+    fn read_config_bytes_refuses_fifo_without_blocking() {
+        // S-N4: a FIFO at the config path is refused by
+        // the stat guard before any open, so the read can
+        // never block waiting for a writer.
+        let dir = temp_dir("fifo");
+        let fifo = dir.join("config.json");
+        let cpath = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        let rc = unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "mkfifo failed");
+        let e = read_config_bytes(fifo.to_str().unwrap()).unwrap_err();
+        assert!(
+            e.message.contains("is not a regular file"),
+            "{}",
+            e.message
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
