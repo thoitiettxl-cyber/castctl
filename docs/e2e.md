@@ -444,7 +444,7 @@ section; shas are of files, never of secrets.
 |---|------|---------|
 | 1 | `webui serve` (21-request matrix + rate-limit + negatives) | **PASS** — 21/21 normalised (raw 18/21; the 3 raw diffs are exactly the rule-covered normalisations); rate-limit sequence identical; negative probes identical; both servers exit 130 on SIGINT |
 | 2 | `keeper run` (60 s + SIGTERM, sha256, `status`/`check`) | **PASS** (on the item's stated criteria) — 2 ticks `ok cookies_seen=10 wrote=true` both sides, SIGTERM wait 143 both, state/check/single-flight match, live files unchanged; plus one real bug found and fixed (tick ignored configured `cookies_file`, pre/post probe); the SIGINT divergence recorded at `9afa04c` is CLOSED at the rebased head — re-verified live at `acb2aa7`, Rust SIGINT exits 130 with the tick line flushed (see rebase note) |
-| 3 | `telegram run` (fake Bot API + 1 turn via fake gateway) | **FAIL (blocked)** — no stock-binary mechanism points either binary at a fake Bot API server or fake gateway (verified at binary level); the time-boxed hosts-redirect probe fails on both sides, at different layers; the 1-turn leg was not run. Root cause + proposal (mechanism A, Boss approval) below. No library harness was substituted for binary parity. |
+| 3 | `telegram run` (fake Bot API + 1 turn via fake gateway) | **PASS (library-level) + blocker documented** — no stock-binary mechanism points either binary at a fake Bot API server or fake gateway (verified at binary level); the time-boxed hosts-redirect probe fails on both sides, at different layers; the 1-turn leg was not run as a binary comparison. The library-level telegram evidence (M7c, `docs/e2e.md:302`) stands; the binary-level blocker is documented below. |
 
 ### Item 1 — `webui serve`: PASS (21/21 normalised, 18/21 raw)
 
@@ -586,7 +586,16 @@ evidence for that rule.) Fix (5 files, +18/−1, `rust/**` only): new
 `factory` sets it to `rt.profile.cookies_file`, test/example construction
 sites pass `""` (default behaviour unchanged). Post-fix probe: BOTH sides
 write the configured file (Go `→ 791ea91b…`, Rust `→ 419249af…`, defaults
-unchanged), state shas match their written files. NOT fixed here (recorded
+unchanged), state shas match their written files. RED→GREEN regression
+test added in the fix loop (Pi requires it in this PR):
+`case_18_tick_writes_configured_cookies_file`
+(`rust/castctl-keeper/tests/tick_table.rs`) — jar ONLY at a configured
+path, default file absent; PASS with the fix, FAIL with the fix neutered
+(`tick()` back to `""`: `assertion failed: r.wrote_cookies`,
+`tick_table.rs:566`, exit 101 — the neutered tick creates the default
+file instead, and `save_jar` reports `wrote=false` on first-time
+creation, S-10), PASS again after the fix is restored byte-identical;
+see Gates below for the three verbatim outputs. NOT fixed here (recorded
 follow-up): `LoginSession::run`/`finish`
 (`rust/castctl-keeper/src/login.rs:222,358`) pass `""` to `Store::new` too
 — same latent pattern on the re-login save path, unproven live (no
@@ -603,7 +612,7 @@ was recorded as a finding, not a run failure. PR #85 has since MERGED
 (`acb2aa7`); the rebase note below records the live re-verification
 at the new head (SIGINT exits 130, tick line flushed).
 
-### Item 3 — `telegram run`: FAIL (blocked — no binary redirection exists)
+### Item 3 — `telegram run`: PASS (library-level) + blocker documented
 
 What was verified at binary level (all on cue, fake token
 `123456:FAKE-TOKEN-…`, never a real token, never a real message):
@@ -620,6 +629,23 @@ What was verified at binary level (all on cue, fake token
   exit 1, `castctl: telegram: bot construction failed: error call getMe,
   unauthorized, Unauthorized` (Go and Rust, identical text) — a 401 only
   the real Bot API returns for `getMe`.
+- NEW (fix loop, 2026-11-06/07) — `telegram run` with a CORRUPT
+  `telegram-state.json` (`{not json`, temp config dir, fake token):
+  both sides exit 1 and proceed past the corrupt state to `getMe`; the
+  state file is left byte-identical (`{not json`) on both sides. Go
+  stderr (first run + retry 1):
+  `castctl: telegram: bot construction failed: error call getMe, error do
+  request for method getMe, Post "https://api.telegram.org/bot***/getMe":
+  context deadline exceeded` (~5.09 s); Go retry 2 then returned the
+  identical 401 (`error call getMe, unauthorized, Unauthorized`, 2.36 s)
+  — the two timeouts were a transient stall on the Go outbound path, not
+  a state-handling difference. Rust stderr (both runs):
+  `telegram state file corrupt; starting with fresh state (offset reset
+  to 0; stored chat mappings, watermarks, and runtime toggles discarded)`
+  followed by the identical 401. Reporting difference, recorded as a
+  finding: Rust prints an explicit corrupt-state notice; Go prints none
+  in its captured stdout/stderr. The state half of the probe behaves
+  identically (corrupt state never blocks startup on either side).
 
 What was probed and FAILED — mechanism B (hosts redirect + TLS fake +
 `SSL_CERT_FILE`), time-boxed per the task: `/etc/hosts`
@@ -647,21 +673,45 @@ was smoke-proven with curl (`--cacert` + `--resolve` → `getMe` 200).
   minutes, and its polls could only fail transiently (TLS verify against
   the test CA fails) with no message loss.
 
-Not run, and not substituted: the `/help` comparison (no redirection exists
-to run it through) and the 1-turn gateway leg. The gateway leg is not
-feasible in scope: it needs the same redirection for
+Not run as a binary comparison: the `/help` comparison (no redirection
+exists to run it through) and the 1-turn gateway leg. The gateway leg is
+not feasible in scope: it needs the same redirection for
 `hatch.metaaivm.com` + the muse.ai 3-step HTTPS auth chain (which runs
 before the wss dial) + canned auth, and the fake gateway
-(`gateway_server serve-e2e`) implements none of the auth chain. No library
-harness was substituted for binary parity — M7c already did library-level.
+(`gateway_server serve-e2e`) implements none of the auth chain.
 
-Root cause + proposal: the stock binaries expose no Bot API base-URL or
-gateway WS-URL override (config, flag, or env). The concrete proposal is
-mechanism A — a test-only env override in BOTH binaries (Bot API base URL
-+ gateway WS URL + canned-auth flag), honoured only when set. It needs Boss
-approval and a Go production-code change (`internal/**` is out of M7e
-scope), so item 3 is FAIL (blocked), not PASS, and no telegram binary
-parity is claimed from this run.
+Library-level PASS (the verdict's basis — M7c, `docs/e2e.md:302`): driver
+test `rust/castctl-telegram/tests/m7c_bot_e2e.rs` green (1 passed) vs a
+fake Bot API + the real Go gateway — getMe, 30-entry menu, streamed text
+turn, photo, auto-decide + button decide, inbound media, clean shutdown;
+Go comparison: 5/5 Go telegram tests PASS on cue. The menu is a 30-entry
+`setMyCommands` list (names + order, `rust/castctl-telegram/src/router.rs`
+`COMMAND_MENU`, asserted `menu.len() == 30` in the M7c test at
+`m7c_bot_e2e.rs:527`); the request shapes the binary leg would have
+compared are specified per method in the R3 brief
+(`r3-telegram.md` §2.1–§2.2, decoded-field comparison §3.2 — Go
+multipart vs Rust JSON, so raw bytes were never the criterion). Note on
+wording: no source claims "30/30 commands compared" — the evidence is a
+30-entry menu asserted on the Rust side plus the 5/5 Go telegram tests,
+and it is worded exactly that way here.
+
+Root cause + trust basis (mechanism A REJECTED — Pi's decision, acting
+for Boss with full authority, 2026-11-06): the stock binaries expose no
+Bot API base-URL or gateway WS-URL override (config, flag, or env), and
+no Go production-code change to add one will be made — mechanism A (a
+test-only env override in BOTH binaries) is rejected; there is no new
+seam in the Go binary under test. binary-level interception of
+api.telegram.org is impossible for the Rust build without changing its
+trust basis; the trust-basis difference is recorded in PORTING
+(webpki-roots vs Go system store). PORTING ground truth:
+`rust/PORTING.md:1634` — "webpki-only store means even a private CA
+trusted by the system would fail" — and
+`rust/castctl-transport/src/tls.rs:21-26,56-58` (`tls_client_config`
+builds roots from `webpki_roots` only, "No client auth, no native
+certs"). The TLS block is therefore a known limitation, not a bug to
+fix by changing Go. No telegram binary parity is claimed from this run;
+the verdict is PASS (library-level) + blocker documented — never FAIL,
+never full binary PASS.
 
 ### Gates (cue, `cargo +1.99.1`, `CARGO_TARGET_DIR=/tmp/m7e-target`, `PATH=/usr/local/go/bin`, `GOTOOLCHAIN=auto`)
 
@@ -682,6 +732,31 @@ parity is claimed from this run.
   `docs/provenance.md` change: no new upstream behaviour was ported.
 - Disk: `df -h /` checked before each build; `/tmp/m7e-target` deleted
   after the final gate (see below).
+
+### Fix-loop gates (cue, `cargo +1.99.1`, `CARGO_TARGET_DIR=/tmp/m7e-target`, 2026-11-06/07, head `a318206` on base `acb2aa7`, no rebase — `git ls-remote origin dev-rust` still `acb2aa7` at finish)
+
+- `cargo fmt --check`: exit 0. `cargo build --workspace`: exit 0.
+  `cargo test --workspace --no-fail-fast`: exit 0 — **1600 passed,
+  0 failed** (baseline 1599 at `acb2aa7`; delta +1 = exactly the new
+  `case_18` test; no flake this run, no isolated re-runs needed).
+  `cargo clippy --workspace --all-targets -- -D warnings`: exit 0.
+  Release binary rebuilt: `castctl 0.9.0 (a318206 2026-11-06T22:37:46Z)`,
+  37,038,792 B, sha256
+  `fa70d08c4b2a952ddc8e3ec7630aaa3adb28cbcb927559ce401832228c9be3e4`
+  (same sha as the pre-gate probe build — no source change between).
+- RED→GREEN verbatim (isolated `tick_table` runs on cue, same
+  commands): with the fix — `test case_18_tick_writes_configured_cookies_file ... ok`,
+  `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out`;
+  with the fix neutered (`tick()` back to `""`, cue copy only, restored
+  byte-identical afterwards) — `test case_18_tick_writes_configured_cookies_file ... FAILED`,
+  `thread 'case_18_tick_writes_configured_cookies_file' panicked at castctl-keeper/tests/tick_table.rs:566:5: assertion failed: r.wrote_cookies`,
+  `test result: FAILED. 0 passed; 1 failed`, exit 101; after restore —
+  `... ok`, `1 passed`, exit 0.
+- `git diff --stat origin/dev-rust`: 8 files, all allowed
+  (`docs/e2e.md` + 7 under `rust/**`). `/tmp/m7e-target` deleted after
+  the final gate; probe scratch (`/tmp/m7e-tg2*`) removed; live
+  cookies/config shas re-verified unchanged
+  (`aa667a83…` / `b748366c…`).
 
 ### Rebase onto `dev-rust` `acb2aa7` (PR #85 merged) — 2026-11-06/07
 
