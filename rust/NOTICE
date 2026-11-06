@@ -153,3 +153,52 @@ Linked dependencies (M3d: userspace WireGuard, called, not copied):
   licenses from `cargo metadata` on cue) is in
   docs/provenance.md §14. The Noise_IKpsk2 key schedule and
   the TCP state machine are NOT reimplemented in castctl code.
+
+Linked dependencies (M6c: update asset handling, called, not copied):
+- tar 0.4.46, from https://github.com/composefs/tar-rs,
+  pinned `=0.4.46` in the workspace (Cargo.lock checksum
+  3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840),
+  license MIT OR Apache-2.0. Used by crate `castctl-update`
+  (`src/extract.rs`) as the tar reader for the downloaded
+  release asset: `tar::Archive`, PAX/GNU-longname path
+  overrides via `Entry::path_bytes()`, 64-entry cap,
+  256 MiB cap, link/device members refuse anywhere.
+  No tar source code is copied into rust/.
+- flate2 1.1.10, from https://github.com/rust-lang/flate2-rs,
+  pinned `=1.1.10` in the workspace (Cargo.lock checksum
+  6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb),
+  license MIT OR Apache-2.0. Used by crate `castctl-update`
+  (`src/extract.rs`) as the gzip decoder for the downloaded
+  release asset: `flate2::read::MultiGzDecoder` (Go
+  `gzip.Reader` is multistream, so a second gzip member's
+  bytes reach the trailing scan and refuse). No flate2
+  source code is copied into rust/.
+  Transitive inventory for these two crates (versions +
+  licenses from `cargo metadata` on cue) is in
+  docs/provenance.md §16. Only the validation around them
+  (member selection, caps, trailing scan, digest) is castctl
+  code. The sha2 0.10.9 used for the asset digest was already
+  pinned/locked before M6c; M6c only promoted it to a workspace
+  dep. CORRECTION: sha2 IS duplicated in the resolve (0.10.9 +
+  0.11.1, both pre-existing at base 25a124e; 0.11.1 only via
+  honk-outbound) — the earlier "returns nothing" claim was wrong.
+  M6c's crates use the 0.10.9 line and introduce no new duplicate.
+- nix 0.31.3, from https://github.com/nix-rust/nix,
+  pinned `=0.31.3` in the workspace (fix loop 1),
+  license MIT. Used by crates `castctl-update`
+  (`src/lock.rs`: `fcntl::Flock`) and
+  `castctl-pluginhost` (`src/paths.rs`:
+  `unistd::getuid`, `sys::signal::kill`;
+  `src/egress.rs`: `sys::socket::shutdown`;
+  `src/run.rs`: `unistd::close`) as safe wrappers
+  replacing 4 `libc` unsafe blocks. Already in the
+  lock before fix loop 1 via boringtun (features
+  `time` + `user`, `default-features = false`);
+  the M6c crates enable the additional features
+  `fs` + `process` + `signal` + `socket` + `user`.
+  The `socket` feature pulls the lock-only
+  transitive memoffset 0.9.1 (MIT, depends only on autocfg (already in the lock)).
+  No nix source code is copied into rust/.
+  `serde_json` gained the `raw_value` feature
+  (fix loop 1, `pluginabi.rs` `RawValue`); no new
+  crate entered the tree for it.
