@@ -102,6 +102,7 @@ async fn main() {
         credentials_configured: false,
         base_dir: base.clone(),
         profile_name: "no.0".to_string(),
+        cookies_path: String::new(),
         checker,
         exporter,
         notifier: None,

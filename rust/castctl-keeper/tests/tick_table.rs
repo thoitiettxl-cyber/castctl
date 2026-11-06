@@ -118,6 +118,7 @@ impl Harness {
             credentials_configured: false,
             base_dir: self.base.to_str().unwrap().to_string(),
             profile_name: "no.0".to_string(),
+            cookies_path: String::new(),
             checker,
             exporter: None,
             notifier: None,

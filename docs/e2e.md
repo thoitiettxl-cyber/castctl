@@ -417,3 +417,273 @@ and no item re-measurement was needed beyond the confirmations below.
   Target + source deleted after the gate; cue left clean, no M7c
   processes or listeners.
 
+
+## Rust E2E results — binary level (M7e, base `dev-rust` `9afa04c`, 2026-11-06/07)
+
+M7c proved items 4/5/6 at library level because the CLI was still a stub.
+M7e re-proves three of them through the shipped `castctl-rs` binary itself,
+against the Go binary `castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)`, sha256
+`c8ea009e49c5bffce3c6b971db0f9f86948ab3904f478da33d43b6b60a9bc374`, on cue.
+Live profile `no.0`; Chrome CDP `127.0.0.1:9226` live throughout (never
+closed/opened/killed). Rust release binary built on cue with
+`cargo +1.99.1 build --release -p castctl-rs`,
+`CARGO_TARGET_DIR=/tmp/m7e-target`: items 1–2 and the pre-fix probe ran
+`8042ce24368ceee49b46b20315095f9c67a7fbc0526b9aa833c3eb64571e65e0`
+(37,034,792 B, `--version` → `castctl 0.9.0` unstamped); the post-fix probe
+and the final gates ran the fixed binary
+`3a890ff65730663f54575d01afba4fbd10e9c96c8384166da89d4bd0ae285f0c`.
+Toolchain note: a bare `cargo --version` on cue reads 1.97.1 (the rustup
+default), but the repo pins 1.99.1 in `rust/rust-toolchain.toml` and rustup
+has 1.99.1 installed — all M7e builds/gates used `cargo +1.99.1`.
+Full verbatim evidence: working notes in the M7e writer's run logs on cue
+(`/tmp/m7e-webui/`, `/tmp/m7e-keeper/`, `/tmp/m7e-tg/`); key outputs are
+quoted below. No token, cookie value, or key appears anywhere in this
+section; shas are of files, never of secrets.
+
+| # | Item | Verdict |
+|---|------|---------|
+| 1 | `webui serve` (21-request matrix + rate-limit + negatives) | **PASS** — 21/21 normalised (raw 18/21; the 3 raw diffs are exactly the rule-covered normalisations); rate-limit sequence identical; negative probes identical; both servers exit 130 on SIGINT |
+| 2 | `keeper run` (60 s + SIGTERM, sha256, `status`/`check`) | **PASS** (on the item's stated criteria) — 2 ticks `ok cookies_seen=10 wrote=true` both sides, SIGTERM wait 143 both, state/check/single-flight match, live files unchanged; plus one real bug found and fixed (tick ignored configured `cookies_file`, pre/post probe) and one known finding (Rust SIGINT swallowed; fix lives in PR #85, not M7e) |
+| 3 | `telegram run` (fake Bot API + 1 turn via fake gateway) | **FAIL (blocked)** — no stock-binary mechanism points either binary at a fake Bot API server or fake gateway (verified at binary level); the time-boxed hosts-redirect probe fails on both sides, at different layers; the 1-turn leg was not run. Root cause + proposal (mechanism A, Boss approval) below. No library harness was substituted for binary parity. |
+
+### Item 1 — `webui serve`: PASS (21/21 normalised, 18/21 raw)
+
+Method: r1 matrix, driver Python stdlib (`http.client`, no redirect
+following, verbatim paths). Two config copies of the live `no.0` config
+(mode 0600), each with `webui.listen` `127.0.0.1:18317` (Go) /
+`127.0.0.1:18318` (Rust), a fresh random test token per side, and
+`login_rate_limit {"attempts": 100, "window": "5m"}` for the matrix.
+Cookies never copied or read. Readiness: unauthenticated
+`GET /api/v1/status` until 401. Comparison per M6b/M7c rules: status exact;
+headers `Content-Type`/`Cache-Control`/`X-Content-Type-Options` exact
+(case-insensitive names), `Retry-After` only on 429,
+`Access-Control-Allow-*`/`Set-Cookie` must be absent, `Date`/`Connection`/
+`Content-Length` not compared; JSON bodies canonical (sorted keys, numbers
+as literals) with normalisations `go_version`/`singbox_version`
+(presence+type only), `listen_addr`/port/config-dir, bcrypt → `<BCRYPT>`,
+stored-file `sha256` presence+format (except strict `bundle_sha256`),
+`/status` `version` stamp stripped.
+
+| Row | Method + path | Go | Rust | Verdict (raw) |
+|---|---|---|---|---|
+| 1 | `GET /` | 200 | 200 | MATCH (shell byte-identical both sides and to `webui/dist/index.html`, sha256 `cd11d39afd03f48a8a96a576a03b2f2891963a1f56773ba2cf3745b4720c6cc7`) |
+| 2 | `GET /api/v1/status` (good token) | 200 | 200 | MATCH normalised / DIFF raw (see below) |
+| 3 | `GET /api/v1/status` (no token) | 401 | 401 | MATCH |
+| 4 | `GET /api/v1/status` (wrong token) | 401 | 401 | MATCH |
+| 5 | `GET /api/v1/status` (Basic) | 401 | 401 | MATCH |
+| 6 | `GET /api/v1/status` (bare `Bearer`) | 401 | 401 | MATCH |
+| 7 | `GET /api/v1/config` (good token) | 200 | 200 | MATCH normalised / DIFF raw (see below) |
+| 8 | `GET /api/v1/profiles` | 200 | 200 | MATCH |
+| 9 | `GET /api/v1/profiles/no.0` | 200 | 200 | MATCH normalised / DIFF raw (key order only) |
+| 10 | `GET /api/v1/profiles/nosuch` | 404 | 404 | MATCH |
+| 11 | `GET /api/v1/settings/telegram` | 200 | 200 | MATCH (`configured: false`, `masked: ""` — mask check SKIP per rule, copy has no `telegram` block) |
+| 12 | `GET /api/v1/logs` | 200 | 200 | MATCH (`disabled: true`, `entries: []`, `reason: "logging_disabled"`) |
+| 13 | `GET /api/v1/keeper` | 200 | 200 | MATCH (`[]`) |
+| 14 | `GET /api/v1/screencast/status` | 200 | 200 | MATCH (`available: false`, `reason` STRICT-identical: `screencast unavailable in this build (rebuild with -tags with_chromedp)`) |
+| 15 | `GET /api/v1/plugins` | 200 | 200 | MATCH (`available: false`, `plugins: []`) |
+| 16 | `GET /api/v1/chats/nosuch` | 404 | 404 | MATCH |
+| 17 | `GET /api/v1/chats/no.0/nosuch-session` | 502 | 502 | MATCH (`upstream_error` both sides — the live `no.0` profile behaves as the fixture did; a 501 would have been FAIL) |
+| 18 | `POST /api/v1/status` (no body) | 405 | 405 | MATCH (`method_not_allowed`) |
+| 19 | `GET /ui/../config.json` (`--path-as-is`) | 200 | 200 | MATCH (shell both sides — NOT traversal proof, per r1) |
+| 20 | `GET /api/v1/definitely-not-a-route` (good token) | 200 | 200 | MATCH (shell fallthrough) |
+| 20b | `GET /api/v1/definitely-not-a-route` (no token) | 401 | 401 | MATCH |
+
+The three raw diffs are exactly the rule-covered normalisations: row 2
+(`go_version` Go `go1.27.3` vs Rust `unknown`, `singbox_version` Go
+`v1.14.4` vs Rust `unknown`, `version` stamp
+`0.9.0 (1396697 2026-11-04T21:38:36Z)` vs unstamped `0.9.0`, listen port)
+— the `go_version`/`singbox_version` "unknown" divergence is REAL and is
+laundered by the presence+type normalisation, recorded explicitly as in
+M7c; row 7 (listen port + stored-file `sha256`, differing by bcrypt salt);
+row 9 (JSON key order only — canonical bodies identical, both 479 B).
+`bundle_sha256` is STRICT and identical:
+`cd11d39afd03f48a8a96a576a03b2f2891963a1f56773ba2cf3745b4720c6cc7`.
+`/status` counts on the real copy: `profile_count: 1`,
+`outbound_count: 0`, `endpoint_count: 0`, `default_profile: "no.0"`,
+`config_source: "single-file"`, `remote_exposure: false`,
+`session_idle_timeout_seconds: 43200` — identical both sides.
+
+Negative pre-checks (identical both sides, all exit 2): no `webui` block →
+`castctl: webui serve: no "webui" block in config.json: add one (see
+docs/config.md) or use the CLI`; no token →
+`castctl: webui serve: no token configured: add a "token" to the "webui"
+block`; non-loopback listen →
+`castctl: profile: "webui.listen" host must be loopback`.
+
+Rate-limit mini-run (separate servers, default limiter, ports
+18327/18328): after the readiness poll (which consumes 1 attempt), both
+sides `[(401, None)×4, (429, "300")×3]`, exit 130 on SIGINT — identical.
+
+Post-run: both servers exit 130 on SIGINT, ports 18317/18318 verified
+closed; live config sha unchanged (`b748366c…`), live cookies sha unchanged
+(`aa667a83…`); plaintext-token grep count 0 in both saved configs, stored
+token is bcrypt, mode 0600 both. Startup lines (both servers):
+`castctl: web UI listening on 127.0.0.1:18317 (loopback only, token auth)`
+and `…:18318 …` (Rust's line is flushed at exit — buffered CLI output —
+so readiness was polled via 401, not via the log line).
+
+### Item 2 — `keeper run`: PASS (with one bug fixed in M7e, one known finding)
+
+Method: r2 recipe. Fresh scratch dir per binary, live `no.0` entry copied
+with the `cookies_file` key DROPPED (see incident below) so the default
+`$T/profiles/no.0/cookies.txt` is used; one keeper entry
+(`tag: "no.0"`, `profile: "no.0"`, `browser: "http://127.0.0.1:9226"`,
+`interval: "30s"`, `wake_on_gateway_failure: false`); cookie copy of the
+live file (mode 0600). Run ≤60 s, then the planned signal.
+
+Clean re-run (run 2, after the driver fix):
+
+| Check | Go | Rust |
+|---|---|---|
+| `keeper run` 60 s, ticks | 2 ticks, `keeper: no.0 (no.0): ok cookies_seen=10 wrote=true next_delay=30s` (×2) | ticks ran (state proves ≥1 `ok` tick) but stdout 0 bytes — Rust buffers all tick lines until exit, so SIGTERM loses them (r2 prediction, confirmed live) |
+| Kill signal / wait status | SIGTERM → **143** | SIGINT at 60 s → **still alive after 10 s** (known bug, see finding below); then SIGTERM → **143** |
+| `keeper status` (after) | exit 0, `last_tick_outcome: "ok"` | exit 0, `last_tick_outcome: "ok"` (times render UTC `Z` vs Go `+07:00` — known, instants equal) |
+| `keeper check` (1 tick) | exit 0, `ok`, `cookies_seen: 10`, `wrote_cookies: true` | exit 0, `ok`, `cookies_seen: 10`, `wrote_cookies: true` |
+| Single-flight (2nd `run`, same dir, while 1st alive) | exit 2, `keeper entry "no.0" is already running (pid 3046906)` | exit 2, `keeper entry "no.0" is already running (pid 3047119)` |
+| Scratch cookies sha | `aa667a83…` → `0628ecd2…` (run) → `dcdd05d4…` (check); state `cookies_sha256` equals the file sha after each side's own check | `aa667a83…` → `5b352850…` (run) → `fa4624ec…` (check); state `cookies_sha256` equals the file sha after each side's own check |
+| Live files | config + cookies sha UNCHANGED (`b748366c…` / `aa667a83…`), live dir listing clean (no `session-state.json`, no `keeper-*.owner`, no `.bak`) | same |
+
+Sha reading: the two sides' new shas differ because every tick stamps
+`last_seen=now` into the rewritten jar — byte equality across runs at
+different times is impossible by construction. What matches identically:
+both changed on every tick (`wrote=true`), the cookie SET is identical
+(10 names; 8 expiries byte-identical; the 2 CDP-refreshed expiries
+`hatch_sess`/`hatch_vml` track tick time, Go `21:00:24Z`/`21:01:30Z` vs
+Rust `21:01:31Z`/`21:02:46Z`, deltas +67 s/+76 s ≈ the tick gap — the CDP
+export leg ran on both sides), and each side's state `cookies_sha256`
+equals its own written file. Go SIGINT probe (separate fresh scratch,
+15 s): wait status **130**, 1 tick line — Go's Ctrl-C path is correct.
+
+Incident — run 1 (VOID sha comparison, contained and repaired): the
+first driver copied the live entry VERBATIM, including its absolute
+`cookies_file` (`/root/.config/castctl/profiles/no.0/cookies.txt`). Go
+honours an absolute `cookies_file` outside the config dir, so its 4 ticks
+wrote the LIVE cookies file (sha `aa667a83…` → `e3b9775e…`, plus a
+`cookies.txt.bak` and a 0-byte `cookies.txt.lock` in the live dir). The
+live file was restored byte-for-byte from the untouched scratch copy
+(sha `aa667a83…`, 5300 B, Nov 6 15:19, dir listing diff empty) and the
+artifacts removed; the driver was fixed to drop `cookies_file` and item 2
+was re-run clean (run 2 above). Run 1's tick/exit/signal evidence stands;
+its sha comparison is void.
+
+Bug found and FIXED in M7e — tick ignores configured `cookies_file`:
+run 1 also proved a real Rust divergence: Go wrote the configured absolute
+path while Rust wrote the scratch DEFAULT path. Code ground truth: Rust
+`tick()` built `Store::new(&deps.base_dir, &deps.profile_name, "", …)`
+(`rust/castctl-keeper/src/tick.rs:301`, empty path → default) and `TickDeps`
+had no cookies-path field; Go's `saveJar` writes the store's resolved
+`cookiesPath` (`internal/keeper/tick.go:490-500`). Targeted probe
+(`keeper check` ×1 per side, absolute `cookies_file` pointing OUTSIDE the
+config dir): pre-fix Go wrote the configured file
+(`aa667a83…` → `45eb07e6…`, default unchanged) while Rust wrote the default
+(`aa667a83…` → `6a2ffd5f…`, configured file unchanged) — same `ok`,
+`cookies_seen=10`, `wrote=true` both sides, so the divergence is invisible
+in the check output and only the file shas expose it. (A first probe
+attempt with the configured file INSIDE the config dir correctly failed
+exit 2 on BOTH sides with the identical inside-dir message — bonus parity
+evidence for that rule.) Fix (5 files, +18/−1, `rust/**` only): new
+`TickDeps.cookies_path`, `tick()` passes it to `Store::new`, the CLI
+`factory` sets it to `rt.profile.cookies_file`, test/example construction
+sites pass `""` (default behaviour unchanged). Post-fix probe: BOTH sides
+write the configured file (Go `→ 791ea91b…`, Rust `→ 419249af…`, defaults
+unchanged), state shas match their written files. NOT fixed here (recorded
+follow-up): `LoginSession::run`/`finish`
+(`rust/castctl-keeper/src/login.rs:222,358`) pass `""` to `Store::new` too
+— same latent pattern on the re-login save path, unproven live (no
+credentials configured in any M7e test); proposal: same one-field
+threading, proven by a credentials-configured re-login run.
+
+Finding (not a run failure) — Rust SIGINT swallowed: `keeper run` at this
+base does not stop on SIGINT (alive after 10 s; the ctrl-C watcher cancels
+a child flag nothing reads, so the 130 arm is unreachable — r2 §6). The
+fix is commit `33055de`, carried by separate PR #85 (OPEN, cherry-pick,
+gates 1597/0) — NOT imported into M7e. Per r2 §3.3 this is recorded as a
+finding, not a run failure.
+
+### Item 3 — `telegram run`: FAIL (blocked — no binary redirection exists)
+
+What was verified at binary level (all on cue, fake token
+`123456:FAKE-TOKEN-…`, never a real token, never a real message):
+
+- Unknown telegram config key `api_url` is rejected IDENTICALLY, exit 2,
+  same message both sides:
+  `castctl: profile: unknown telegram config key "api_url"`.
+  There is no `api_url`/`base_url`/`server_url` field (r3 §0.1).
+- `telegram status` is byte-identical, exit 0, both sides
+  (`configured: true`, `profile: "muse01"`, `allowed_user_ids: 1`,
+  `auto_approve: true`, `auto_allow_once: false`, `token_valid: true`,
+  `owner_configured: true`) — the test config parses identically.
+- Stock binaries both dial the REAL `api.telegram.org`: fake token →
+  exit 1, `castctl: telegram: bot construction failed: error call getMe,
+  unauthorized, Unauthorized` (Go and Rust, identical text) — a 401 only
+  the real Bot API returns for `getMe`.
+
+What was probed and FAILED — mechanism B (hosts redirect + TLS fake +
+`SSL_CERT_FILE`), time-boxed per the task: `/etc/hosts`
+`127.0.0.1 api.telegram.org` + a TLS-terminating fake on 443 (cert SAN
+`api.telegram.org`, test CA) + `SSL_CERT_FILE=<test CA>`. The fake itself
+was smoke-proven with curl (`--cacert` + `--resolve` → `getMe` 200).
+- Go: never reaches the fake. A TCP listener on 443 saw NO CONNECTION in
+  15 s while Go still failed 401 Unauthorized (real API). The OS resolver
+  DOES return 127.0.0.1 (`getaddrinfo` → `127.0.0.1` only, nsswitch
+  `files dns`), so the Go outbound (sing-box/honk direct) resolves via its
+  own DNS path, bypassing `/etc/hosts`. The redirect dies at DNS;
+  `SSL_CERT_FILE` is never even tested on the Go side.
+- Rust: DNS honoured — the TCP probe ACCEPTed a connection from
+  127.0.0.1 with a TLS ClientHello carrying SNI `api.telegram.org`, ALPN
+  `http/1.1` — but the handshake fails:
+  `castctl: telegram: bot construction failed: transport error: conn:
+  connection down` (the numeric suffix varied, 17/39), fake HTTP log empty
+  (0 requests). Code ground truth: `tls_client_config` builds roots from
+  `webpki_roots` ONLY — "No client auth, no native certs"
+  (`rust/castctl-transport/src/tls.rs:21-26,56-58`) — so rustls ignores
+  `SSL_CERT_FILE` by construction. The redirect dies at TLS trust.
+- `/etc/hosts` was restored after each probe (`diff` vs backup empty;
+  `getent` back to the real IPv6 address). The live cue Telegram bot
+  (polling `api.telegram.org`) was never touched; redirect windows were
+  minutes, and its polls could only fail transiently (TLS verify against
+  the test CA fails) with no message loss.
+
+Not run, and not substituted: the `/help` comparison (no redirection exists
+to run it through) and the 1-turn gateway leg. The gateway leg is not
+feasible in scope: it needs the same redirection for
+`hatch.metaaivm.com` + the muse.ai 3-step HTTPS auth chain (which runs
+before the wss dial) + canned auth, and the fake gateway
+(`gateway_server serve-e2e`) implements none of the auth chain. No library
+harness was substituted for binary parity — M7c already did library-level.
+
+Root cause + proposal: the stock binaries expose no Bot API base-URL or
+gateway WS-URL override (config, flag, or env). The concrete proposal is
+mechanism A — a test-only env override in BOTH binaries (Bot API base URL
++ gateway WS URL + canned-auth flag), honoured only when set. It needs Boss
+approval and a Go production-code change (`internal/**` is out of M7e
+scope), so item 3 is FAIL (blocked), not PASS, and no telegram binary
+parity is claimed from this run.
+
+### Gates (cue, `cargo +1.99.1`, `CARGO_TARGET_DIR=/tmp/m7e-target`, `PATH=/usr/local/go/bin`, `GOTOOLCHAIN=auto`)
+
+- `cargo fmt --check`: exit 0 (one formatting fix applied by `cargo fmt`
+  to the long `Store::new` call in the fix, then re-checked clean).
+- `cargo build --workspace`: exit 0.
+- `cargo test --workspace --no-fail-fast`: exit 0 — **1595 passed, 0 failed**
+  (66 suites), exactly the 9afa04c baseline. One transient failure on the
+  FIRST full run: `castctl-update --test update_flow` 41 passed / 2 failed
+  (one named failure visible in the tail: `install_newer_version_end_to_end`;
+  the second name was cut off by the tail) — `rust/castctl-update/` is
+  untouched by this diff, and the target passed 43/43 in the full re-run
+  and 43/43 in 3 further isolated runs. Recorded as a flake under
+  full-workspace load, not a regression.
+- `cargo clippy --workspace --all-targets -- -D warnings`: exit 0.
+- `git diff --stat`: only allowed paths — 5 files under `rust/**` (+18/−1,
+  the `cookies_file` fix) + `docs/e2e.md` (this section). No `NOTICE` /
+  `docs/provenance.md` change: no new upstream behaviour was ported.
+- Disk: `df -h /` checked before each build; `/tmp/m7e-target` deleted
+  after the final gate (see below).
+
+### Cleanup on cue
+
+- Test webui servers (Go 18317 / Rust 18318, rate-limit 18327/18328) killed;
+  ports verified closed. Test keeper dirs and telegram fake/configs are
+  scratch under `/tmp/m7e-*` (no live files). Live `no.0` cookies/config
+  verified unchanged at the end of every item. `/etc/hosts` restored.
+  `/tmp/m7e-target` deleted after the final gate; `df -h /` verified after.
