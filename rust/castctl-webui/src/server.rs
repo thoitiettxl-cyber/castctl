@@ -180,13 +180,15 @@ pub fn forbidden_resp() -> Resp {
 
 /// Fixed 429 `rate_limited` / `too many failed login
 /// attempts` with `Retry-After` = window seconds. Go sets
-/// Retry-After BEFORE writeError's headers, so it is
-/// emitted first (Retry-After, Content-Type,
-/// Cache-Control, X-Content-Type-Options).
+/// Retry-After BEFORE writeError's headers in code, but
+/// net/http serializes headers sorted by key, so the wire
+/// order is Cache-Control, Content-Type, Retry-After,
+/// X-Content-Type-Options — `render_resp` sorts every
+/// response, so the insertion position here is inert.
 pub fn rate_limited_resp(window: Duration) -> Resp {
     let mut resp = error_resp(429, "rate_limited", "too many failed login attempts");
     resp.headers
-        .insert(0, ("Retry-After".to_string(), retry_after_seconds(window)));
+        .push(("Retry-After".to_string(), retry_after_seconds(window)));
     resp
 }
 
@@ -889,6 +891,18 @@ pub type RespBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 /// 1, R2): deleting it would send a body on HEAD
 /// responses.
 pub fn render_resp(method: &Method, resp: Resp) -> HyperResponse<RespBody> {
+    // Go's net/http serializes response headers SORTED by
+    // key (Header.writeSubset), regardless of the order
+    // the handler set them: writeError sets Content-Type,
+    // Cache-Control, X-Content-Type-Options (server.go)
+    // and the rate limiter sets Retry-After before that,
+    // yet the 429 goes out as Cache-Control, Content-Type,
+    // Retry-After, X-Content-Type-Options (parity run 3).
+    // hyper preserves insertion order, so sort here — the
+    // single funnel every Resp passes through.
+    let mut resp = resp;
+    resp.headers
+        .sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
     let mut builder = HyperResponse::builder()
         .status(StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
     let has_explicit_len = resp
