@@ -28,10 +28,12 @@
 //!   cargo run -p castctl-cli --example wait_driver -- \
 //!     --addr 127.0.0.1:PORT [--thread ID]
 //!     [--after-seq N] [--timeout SECONDS] [--json]
+//!     [--require-running]
 //!
 //! Defaults: --timeout 600 (the Runner clamps <=0 to
-//! 600), text mode unless --json. --after-seq is
-//! presence-tracked: absent means derive the boundary
+//! 600), text mode unless --json. --require-running is
+//! accepted and ignored (dead flag, case n5). --after-seq
+//! is presence-tracked: absent means derive the boundary
 //! from history, exactly like the CLI.
 //!
 //! No heartbeat is started (fixture runs are <=10 s;
@@ -183,6 +185,11 @@ fn parse_args() -> Result<Args, String> {
                 args.timeout_secs = v.parse().map_err(|_| "--timeout must be an integer")?;
             }
             "--json" => args.json = true,
+            // Accepted and ignored: castctl's wait defines
+            // --require-running as a dead flag (Phase 1
+            // finding); the driver mirrors that instead of
+            // failing arg parsing (case n5).
+            "--require-running" => {}
             other => return Err(format!("unknown argument {other}")),
         }
     }

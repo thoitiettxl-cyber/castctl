@@ -339,6 +339,10 @@ func run() int {
 	hasAfterSeq := false
 	timeout := flag.Int64("timeout", 600, "wait timeout in seconds")
 	jsonOut := flag.Bool("json", false, "print JSON instead of text")
+	// --require-running is accepted and ignored: castctl's wait
+	// defines it as a dead flag (Phase 1 finding), so the driver
+	// mirrors that instead of failing flag parsing.
+	flag.Bool("require-running", false, "accepted and ignored (dead flag)")
 	flag.Parse()
 	// Presence-track --after-seq: flag.NFlag/Visit only tells
 	// whether it was set on the command line.
@@ -382,7 +386,12 @@ func run() int {
 	)
 	muse := conn.New(connect)
 	ctx := context.Background()
-	gw, err := muse.Connect(ctx, nil)
+	// The connector reads the cookies file from the per-call
+	// conn.Config (gateway/connector.go: LoadCookies). A nil
+	// config falls back to the Muse's empty config, so the
+	// temp file created above would never be read and Connect
+	// fails "no cookies at : ...". Pass it explicitly.
+	gw, err := muse.Connect(ctx, &conn.Config{CookiesFile: cookiesFile})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "wait_driver: connect:", err)
 		return 1
