@@ -584,9 +584,9 @@ const READ_COMMANDS: [&str; 13] = [
 /// (PR-2), which run their own paths, and `auto-approve`,
 /// which resolves config + profile itself (no network).
 /// `history --download` is NOT in the network set: it is
-/// checked separately below and stubbed. `chat` and
-/// `watch` stay stubbed (deferred to PR-2; see PORTING.md
-/// §M7b).
+/// checked separately below and stubbed. `chat` stays
+/// stubbed (deferred to PR-2; see PORTING.md §M7b);
+/// `watch` is wired via `crate::watch` below.
 fn cmd_plain(
     ctx: &mut Ctx<'_>,
     g: &GlobalOpts,
@@ -604,6 +604,9 @@ fn cmd_plain(
     if spec.name == "send" {
         return crate::send::run_send_command(ctx, g, &p);
     }
+    if spec.name == "watch" {
+        return crate::watch::run_watch_command(ctx, g, &p);
+    }
     if spec.name == "auto-approve" {
         return crate::autoapprove::run_auto_approve(ctx, g, &p);
     }
@@ -619,9 +622,6 @@ fn cmd_plain(
     }
     // TODO(chat): deferred to PR-2 — needs the wait Runner
     // (REPL + stdin + chat.json) after M7a merges.
-    // TODO(watch): deferred to PR-2 — needs
-    // `subscribe_raw`, the same primitive as M7a wait;
-    // implementing it here would duplicate M7a.
     resolve_and_load(ctx, g, false)?;
     Err(stub(ctx))
 }

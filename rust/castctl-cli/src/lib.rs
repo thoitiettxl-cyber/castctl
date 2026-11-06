@@ -34,5 +34,6 @@ pub mod runtime;
 pub mod send;
 pub mod table;
 pub mod wait;
+pub mod watch;
 
 pub use run::{Outcome, VERSION, run};
