@@ -2578,15 +2578,10 @@ mod tests {
         // `waiter.go` `len(left) == 0`), so a single-A
         // event can never end as Approval — the earlier
         // port dropped B and timed out.
-        let sub = Arc::new(FakeSubscriber::new(vec![record_json(
-            &approval_ev(
-                vec![
-                    appr("A", &["allow_always"]),
-                    appr("B", &["allow_once"]),
-                ],
-                None,
-            ),
-        )]));
+        let sub = Arc::new(FakeSubscriber::new(vec![record_json(&approval_ev(
+            vec![appr("A", &["allow_always"]), appr("B", &["allow_once"])],
+            None,
+        ))]));
         let hist = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(100)])]));
         let decider: Arc<Decider> = Arc::new(|_a: &DescribedApproval, _d: &str| Ok(()));
         let approver = Arc::new(AutoApprover::new(Some(connect_ok(decider)), false));
@@ -3100,18 +3095,13 @@ mod tests {
             .settle_pending(&Cancel::new(), "idle")
             .await
             .expect("live settle must succeed");
-        assert_eq!(
-            runner2.waiter.result().expect("done").kind,
-            WaitKind::Done
-        );
+        assert_eq!(runner2.waiter.result().expect("done").kind, WaitKind::Done);
         // Failed path ("interrupted"): same shape, the
         // replayed-failed proof. Go sets the boundary
         // explicitly (200); the waiter needs after_seq
         // to match the latest user seq or
         // `accept_replayed_failed` refuses.
-        let hist3 = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(
-            200,
-        )])]));
+        let hist3 = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(200)])]));
         let sub3 = Arc::new(FakeSubscriber::new(vec![]));
         let mut runner3 = Runner::new(Config {
             after_seq: 200,
@@ -3135,9 +3125,7 @@ mod tests {
             runner3.waiter.ignored_terminal().is_some(),
             "ignored terminal must still be pending after a cancelled settle"
         );
-        let hist4 = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(
-            200,
-        )])]));
+        let hist4 = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(200)])]));
         let sub4 = Arc::new(FakeSubscriber::new(vec![]));
         let mut runner4 = Runner::new(Config {
             after_seq: 200,
