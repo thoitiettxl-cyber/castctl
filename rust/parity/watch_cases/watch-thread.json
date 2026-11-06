@@ -1,0 +1,17 @@
+{
+  "name": "watch-thread",
+  "args": [
+    "--thread",
+    "t1"
+  ],
+  "script": {
+    "subscribes": [
+      {
+        "frames": [
+          "{\"event\":\"agent.message\",\"seq\":1,\"payload\":{\"display_text\":\"hello world\"}}"
+        ],
+        "end_body": true
+      }
+    ]
+  }
+}

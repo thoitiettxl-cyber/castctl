@@ -1,0 +1,27 @@
+{
+  "name": "watch-n1",
+  "args": [
+    "--n",
+    "1"
+  ],
+  "script": {
+    "subscribes": [
+      {
+        "frames": [
+          "{\"event\":\"agent.message\",\"seq\":1,\"payload\":{\"display_text\":\"hello world\"}}",
+          "{\"event\":\"agent.message\",\"seq\":2,\"payload\":{\"status\":\"s\",\"text\":\"t\",\"display_text\":\"d\",\"activity_text\":\"a\",\"content\":\"c\"}}",
+          "{\"event\":\"agent.status\",\"seq\":3,\"payload\":{\"display_text\":\"working\"}}",
+          "{\"type\":\"agent.message\",\"seq\":4,\"payload\":{\"text\":\"hi\"}}",
+          "not-json",
+          "[1,2]",
+          "{}",
+          "{\"event\": \"agent.message\", \"seq\": 8, \"payload\": {\"display_text\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}}",
+          "{\"event\":\"agent.message\",\"seq\":9,\"payload\":{\"display_text\":\"\",\"content\":\"c\",\"text\":0,\"activity_text\":false,\"status\":null}}",
+          "{\"event\": \"a<b\", \"seq\": 9007199254740993, \"payload\": {\"display_text\": \"<a>&A\\bB\\fC\"}}",
+          "{\"event\":\"m\",\"seq\":11,\"payload\":{\"content\":[\"a<b\"]}}"
+        ],
+        "end_body": true
+      }
+    ]
+  }
+}

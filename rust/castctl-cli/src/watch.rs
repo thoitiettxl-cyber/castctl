@@ -27,17 +27,17 @@
 //! other command uses), so rows appear when the
 //! subscription ends, not live. The bytes are identical.
 //!
-//! Escaping trap (do NOT "fix" by reusing
-//! `castctl_fsclient::go_json_string`): that function
-//! renders `\b`/`\f` short forms, matching Go's CUSTOM
-//! `jsonvalue` encoder (fs rows). `printWatchRow` uses
-//! Go's stdlib `encoding/json` instead: `\x08` is
-//! `\u0008`, `\x0C` is `\u000c`, and `writeWatchField`
+//! Escaping trap (do NOT "fix" by rendering `\u0008`):
+//! Go's stdlib `encoding/json` uses the `\b`/`\f`
+//! short forms, exactly like `castctl_fsclient::
+//! go_json_string` (the fs custom encoder agrees with
+//! stdlib here). `printWatchRow` still needs the local
+//! `go_json_string_stdlib` below, not that function
+//! and not `serde_json::to_string`: `writeWatchField`
 //! (`json.Marshal`) HTML-escapes `<>&` while
 //! `marshalJSONLine` (`SetEscapeHTML(false)`, for
-//! event/seq) does not. The local `go_json_string_stdlib`
-//! below encodes exactly that, with an `html_escape`
-//! flag per call site.
+//! event/seq) does not, and neither reuse target
+//! carries that flag.
 //!
 //! No `unsafe`, no `unwrap()`/`expect()` on external input.
 
@@ -59,13 +59,18 @@ const WATCH_TEXT_KEYS: [&str; 5] = ["display_text", "content", "text", "activity
 
 /// Go `encoding/json` string escaping for one string
 /// (quoted, `"`-wrapped): `"` → `\"`, `\` → `\\`,
-/// `\n`/`\r`/`\t` short, every other control byte
-/// `< 0x20` → `\u00XX` (lowercase hex — so `\x08` is
-/// `\u0008`, NOT `\b`). With `html_escape`, `<`/`>`/`&`
-/// → `\u003c`/`\u003e`/`\u0026` and U+2028/U+2029 →
-/// `\u2028`/`\u2029` (Go's `json.Marshal`); without it
-/// they pass through raw (Go's `marshalJSONLine`,
-/// `SetEscapeHTML(false)`). 0x7F is never escaped.
+/// `\n`/`\r`/`\t`/`\b`/`\f` short (Go's stdlib DOES use
+/// the `\b`/`\f` short forms — the harness proved it
+/// against the first version of this function, which
+/// wrongly rendered `\u0008`/`\u000c`), every other
+/// control byte `< 0x20` → `\u00XX` (lowercase hex).
+/// With `html_escape`, `<`/`>`/`&` → `\u003c`/`\u003e`/
+/// `\u0026` and U+2028/U+2029 → `\u2028`/`\u2029` (Go's
+/// `json.Marshal`); without it they pass through raw
+/// (Go's `marshalJSONLine`, `SetEscapeHTML(false)`).
+/// 0x7F is never escaped. A local escaper (not
+/// `serde_json::to_string`, which never HTML-escapes)
+/// is needed for exactly that flag.
 #[must_use]
 pub fn go_json_string_stdlib(s: &str, html_escape: bool) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -77,6 +82,8 @@ pub fn go_json_string_stdlib(s: &str, html_escape: bool) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            '\x08' => out.push_str("\\b"),
+            '\x0c' => out.push_str("\\f"),
             c if (c as u32) < 0x20 => {
                 out.push_str(&format!("\\u{:04x}", c as u32));
             }
@@ -572,10 +579,12 @@ mod tests {
     }
 
     #[test]
-    fn control_escapes_are_stdlib_not_short() {
-        // Go's encoding/json renders \x08 as \u0008,
-        // NOT \b — the opposite of the fsclient custom
-        // encoder. \n and \t keep their short forms.
+    fn control_escapes_use_short_forms() {
+        // Go's encoding/json renders \x08 as \b and
+        // \x0C as \f (the first version of this file
+        // wrongly rendered \u0008/\u000c; the watch
+        // harness caught it). \n and \t keep their
+        // short forms too.
         let got = row(
             "{\"event\":\"m\",\"seq\":1,\"payload\":{\"display_text\":\"A\\u0008B\\u000cC\\nD\\tE\"}}",
             false,
@@ -583,12 +592,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             got,
-            "{\"event\":\"m\",\"seq\":1,\"display_text\":\"A\\u0008B\\u000cC\\nD\\tE\"}\n"
+            "{\"event\":\"m\",\"seq\":1,\"display_text\":\"A\\bB\\fC\\nD\\tE\"}\n"
         );
-        assert_eq!(
-            go_json_string_stdlib("A\x08B\x0cC", true),
-            "\"A\\u0008B\\u000cC\""
-        );
+        assert_eq!(go_json_string_stdlib("A\x08B\x0cC", true), "\"A\\bB\\fC\"");
         assert_eq!(
             go_json_string_stdlib("<>&", true),
             "\"\\u003c\\u003e\\u0026\""

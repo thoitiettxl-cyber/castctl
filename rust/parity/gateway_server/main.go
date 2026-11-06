@@ -539,6 +539,18 @@ func waitHandler(st *waitState) gatewaytest.Handler {
 			sub := st.nextSubscribe()
 			fmt.Fprintf(os.Stderr, "WAIT subscribe #%d delay_ms=%d frames=%d end_body=%v drop=%v\n",
 				call, sub.DelayMs, len(sub.Frames), sub.EndBody, sub.Drop)
+			var subBody map[string]any
+			var subSession string
+			var subCaps []any
+			if err := json.Unmarshal(req.Body, &subBody); err == nil {
+				if sid, ok := subBody["session_id"].(string); ok {
+					subSession = sid
+				}
+				if caps, ok := subBody["capabilities"].([]any); ok {
+					subCaps = caps
+				}
+			}
+			fmt.Fprintf(os.Stderr, "WAIT subscribe-body session_id=%q capabilities=%v\n", subSession, subCaps)
 			if sub.DelayMs > 0 {
 				time.Sleep(time.Duration(sub.DelayMs) * time.Millisecond)
 			}
