@@ -7758,18 +7758,24 @@ the crate API stays compatible with a later wiring
   conflicting/malformed duplicate refuses whole
   file, 0 entries refuses).
 - `elf.rs`: hand-rolled 64-byte header validation
-  (ET_EXEC/ET_DYN, EM_X86_64 62 / EM_AARCH64 183).
+  (ET_EXEC/ET_DYN, EM_X86_64 62 / EM_AARCH64 183,
+  `EI_VERSION` byte 6 must be 1 — fix loop 1, Go
+  `debug/elf` `elf/file.go:321-324`).
 - `extract.rs`: `MultiGzDecoder` + `tar::Archive`
   (gzip-magic peek, `'\x00'` typeflag also regular
   via raw header byte 156, effective name via
   `Entry::path_bytes()` for PAX/GNU-longname
-  overrides, trailing scan 32 KiB chunks, 64-entry
-  cap, 256 MiB cap, link/device members refuse
-  anywhere, duplicate refuses).
+  overrides, size via `entry.size()` (PAX-aware —
+  fix loop 1, red-team B7; the raw `header.size()`
+  ignored a PAX size override), trailing scan 32 KiB
+  chunks, 64-entry cap, 256 MiB cap, link/device
+  members refuse anywhere, duplicate refuses).
 - `lock.rs`: `acquire_update_lock` +
   `LockOutcome::{Held, AlreadyHeld}`; `flock`
-  `LOCK_EX|LOCK_NB` via direct `libc::flock`,
-  0600, never deleted, symlink refuses,
+  `LOCK_EX|LOCK_NB` via `nix::fcntl::Flock`
+  (fix loop 1 — the `libc::flock` unsafe block is
+  gone; EINTR retried by re-locking the returned
+  `File`), 0600, never deleted, symlink refuses,
   Lstat-vs-fstat identity re-check.
 - `replace.rs`: `open_for_sync_with` (ETXTBSY retry,
   200ms budget, 5ms doubling to 20ms max),
@@ -7777,13 +7783,30 @@ the crate API stays compatible with a later wiring
   EINVAL 22 / ENOTSUP 95 only), `run_exec_check`
   (empty env, `Dir` = file's parent, stdin null,
   stderr discarded, stdout piped, reader thread,
-  poll `try_wait` every 5ms; order: deadline →
+  poll `try_wait` every 5ms; the child is shared
+  as `Arc<Mutex<Child>>` so the reader kills it
+  the moment the buffer passes 64 KiB — fix loop
+  1, red-team B2; order: too-large → deadline →
   read error → len > 64 KiB → non-zero exit →
-  `check_version_output`), `check_version_output`.
+  `check_version_output`), `check_version_output`
+  (byte-level: prefix/space/tail checks on bytes,
+  only `ver_str` converted to str — fix loop 1,
+  red-team B1; invalid UTF-8 in the parenthetical
+  is accepted like Go).
 - `select.rs`: hand-rolled minimal URL parser
-  (`ParsedUrl`); `select_asset` +
+  (`ParsedUrl` with a `query` field and
+  `request_target()`; rejects bytes <0x20 / 0x7f /
+  space anywhere — fix loop 1, safety B1, Go
+  `url.Parse` `invalid control character in URL`;
+  scheme lowercased, host case PRESERVED (Go
+  `Hostname()` does not lowercase — probed on cue;
+  the redirect policy compares case-sensitively);
+  port empty or all-digits; IPv6 authority keeps
+  brackets); `select_asset` +
   `select_checksums_asset`, `validate_download_url`,
-  `decide`, `check_redirect_policy` (max 4 follows),
+  `decide` (missing release → error, never panic —
+  fix loop 1, safety F3), `check_redirect_policy`
+  (max 4 follows),
   `classify_transport_error`,
   `fallback_tag_from_location_path`,
   `flavour_from_cgo_settings`.
@@ -7791,16 +7814,31 @@ the crate API stays compatible with a later wiring
   `get_no_follow`); `StdFetcher` (std `TcpStream`,
   connect 10s, read/write timeouts; https via
   rustls `StreamOwned` + webpki roots, ALPN
-  `http/1.1`, handshake completed eagerly;
+  `http/1.1`, handshake completed eagerly, SNI
+  lowercased (DNS is case-insensitive; the
+  redirect policy compares hosts case-sensitively);
   HTTP/1.1 + Content-Length + chunked +
-  `Connection: close`; redirect loop;
+  `Connection: close`; redirect loop
+  (protocol-relative `//host/path`, query-only
+  `?q` keeping the path, fragment stripped —
+  fix loop 1); response head read with a TOTAL
+  30s header deadline (`RESPONSE_HEADER_TIMEOUT`,
+  fix loop 1, safety F2) and a 64 KiB head cap;
+  duplicate/conflicting or invalid Content-Length
+  refused (fix loop 1); `BodyReader` early EOF →
+  `UnexpectedEof` (fix loop 1, safety F7);
   `User-Agent: castctl/<version>`,
   `Accept: application/vnd.github+json` except the
-  download leg; never sends credentials; DNS
-  failure → `Dns`, rustls failure → `Tls`,
-  ECONNREFUSED/ECONNRESET via raw errno).
+  download leg AND `get_no_follow` (Go's
+  `fallbackTag` sets only `User-Agent` —
+  fix loop 1, technical F-f); never sends
+  credentials; DNS failure → `Dns`, rustls
+  failure → `Tls`, ECONNREFUSED/ECONNRESET via
+  raw errno).
   `fetch_bytes` (cap+1 → `too_large` with body_len
-  exactly cap+1) and `download_asset` (10 min,
+  exactly cap+1; TOTAL deadline from the timeout
+  param — fix loop 1, safety F2) and
+  `download_asset` (10 min TOTAL deadline,
   `Accept` deleted, size checks, stream+hash,
   fixed message `"update: download failed"`).
 - `run.rs`: `Deps{http_fetcher, executable,
@@ -7819,12 +7857,20 @@ the crate API stays compatible with a later wiring
   dry_run/install), `install` (lock held for the
   whole pipeline via guard; checksums → download
   to temp 0600 O_EXCL → digest compare → extract
-  to temp 2 → sync+close → remove asset temp →
+  to temp 2 → sync+close (close error → fixed
+  `"update: cannot close the extracted binary"`,
+  fix loop 1, safety F4) → remove asset temp →
   chmod = old `Perm()` BEFORE exec check → validateELF
   → exec check → re-hash pre-rename → fsync via
   `open_for_sync` → single rename → fsync dir;
   tolerable → silent success, other error →
   `Replaced=true` + `"durability"` error),
+  `ReleaseJson`/`AssetJson` null-tolerant
+  (explicit `null` → field default — fix loop 1,
+  red-team B5; Go code-2 paths preserved),
+  chmod/rename failure messages are fixed strings
+  (cause via `Unwrap`, not rendered — fix loop 1,
+  technical F-b),
   `dry_run` (5 output lines verbatim),
   `fetch_checksums` (404 → `"update: the release
   has no checksums file"`), `hash_file`,
@@ -7832,9 +7878,15 @@ the crate API stays compatible with a later wiring
   O_EXCL, time+pid suffix, 100 retries),
   `rate_limit_error`, crate-level `Mutex`
   mirroring Go's `updateMu`.
-- `tests/update_flow.rs`: 22 integration tests
+- `tests/update_flow.rs`: 36 integration tests
   (fake server + `rustc`-built fake binary +
-  e2e install).
+  e2e install; fix loop 1 added 14: flood+hang
+  exec check, release-JSON null fields ×4,
+  hostile tag/body, latest 404 + malformed JSON,
+  no-asset, userinfo URL, flavour no-plugin /
+  unknown, allow-prerelease / allow-downgrade,
+  explicit prerelease flag-false, dev-build
+  explicit, redirect loop).
 
 `castctl-pluginhost` (`src/`):
 
@@ -7848,7 +7900,11 @@ the crate API stays compatible with a later wiring
   `internal/pluginabi/pluginabi.go` (`ABI_VERSION
   = 1`, `SCHEMA_VERSION = 1`, `ENTRY_SYMBOL =
   "castctl_plugin_init"`, 8 method constants,
-  `Envelope`, `PluginError`, `Metadata`,
+  `Envelope` (`ok` defaults to false, `result` is
+  `Option<Box<serde_json::value::RawValue>>` —
+  fix loop 1, red-team B4, Go `json.RawMessage`
+  parity: explicit null → 4 bytes `null`, absent
+  → empty), `PluginError`, `Metadata`,
   `Capabilities`, `Command`, `Registration`,
   `Identity`, `Egress`, `RegisterRequest`,
   `validate_registration`, `valid_cookie_host`).
@@ -7856,13 +7912,20 @@ the crate API stays compatible with a later wiring
   refused BEFORE Clean; relative paths made
   absolute by cwd concatenation, NOT Join; Lstat
   EVERY component), `check_hardlink` (Nlink > 1
-  refuses), `check_shadow_dir_ownership`,
-  `pid_alive` (`kill(pid, 0)` nil or EPERM),
+  refuses), `check_shadow_dir_ownership` (uid via
+  `nix::unistd::getuid` — fix loop 1, the
+  `libc::getuid` unsafe block is gone),
+  `pid_alive` (`nix::sys::signal::kill(pid, None)`
+  — fix loop 1, the `libc::kill` unsafe block is
+  gone; nil or EPERM → alive),
   `open_plugin_source` (O_RDONLY|O_NOFOLLOW).
 - `discovery.rs`: `PluginFile`,
   `validate_plugin_id`
   (`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`),
   `plugin_extension` (`.so` / `.dylib` / `.dll`),
+  `goarch_name` (`x86` → `386`,
+  `powerpc64` → `ppc64` — fix loop 1, Go GOARCH
+  values; non-host arches untestable on this host),
   `file_from_path`, `compare_plugin_versions`
   (numeric segments, missing = 0, non-numeric →
   incomparable → lexical fallback),
@@ -7896,7 +7959,10 @@ the crate API stays compatible with a later wiring
   LE/BE, program + section headers, shstrtab,
   extended numbering); `max_required_glibc`,
   `version_string_table`,
-  `dynamic_strtab_range`, `scan_strtab_versions`,
+  `dynamic_strtab_range`, `scan_strtab_versions`
+  (display truncated at the largest char boundary
+  ≤64 — fix loop 1, red-team B3; Go `display[:64]`
+  is byte-exact),
   `parse_version_needs_count` (verbatim walk),
   `parse_version_needs`,
   `running_libc_version` (see §M6c.2 deviation
@@ -7919,7 +7985,12 @@ the crate API stays compatible with a later wiring
   rebuilt element-wise, null/bool/numbers
   unchanged, secret rule wins over header rule);
   `canonical_json` (Go `encoding/json`: sorted
-  keys, HTML escaping, float64 numbers),
+  keys, HTML escaping, float64 numbers;
+  `canonical_number` returns `Err` for a literal
+  outside the float64 range (`1e999`) — fix loop
+  1, technical F-g, Go `json.Unmarshal` refuses;
+  exponent renders one digit, `1.5e-7` not
+  `1.5e-07`, probed on cue),
   `stripped_outbound_hash`, `new_plugin_identity`.
 - `loader.rs`: STOPPED scope — documents the
   limit, exposes `LOADER_UNAVAILABLE_MESSAGE`,
@@ -7940,7 +8011,9 @@ the crate API stays compatible with a later wiring
   `register`/`reconfigure`, `quiesce`,
   `call`/`call_envelope`/`call_envelope_client`,
   `dispatch_host_call`, `short_err`,
-  `parse_envelope`, `is_error_envelope`) +
+  `parse_envelope` (result returned as raw bytes —
+  fix loop 1, red-team B4; `null` → 4 bytes,
+  absent → empty), `is_error_envelope`) +
   `FakeClient`/`FakeLoader`/`FakeEgress` ports of
   `internal/plugintest/fake.go` (in `mod tests`).
 - `egress.rs`: tokio + hyper 1.8 + hyper-util
@@ -7953,12 +8026,30 @@ the crate API stays compatible with a later wiring
   builder + `TokioTimer`, `SetCookieHosts`,
   `cookieAllowed`, auth gate 407 +
   `Proxy-Authenticate: Basic`, CONNECT tunnel,
-  close aborts tunnels).
+  close aborts tunnels; `close_proxy` shuts the
+  listener down via `nix::sys::socket::shutdown`
+  (fix loop 1 — the `libc::shutdown` unsafe block
+  is gone) IMMEDIATELY after setting `closed`,
+  BEFORE `notify_waiters` / aborting tunnels /
+  aborting the accept loop (fix loop 1, safety
+  F5: the old order let a new connection reuse
+  the fd between `closed` and `shutdown`).
 - `tests/egress.rs`: 12 integration tests ported
   from `egress_test.go`.
 
 Pins (workspace `Cargo.toml`, exact `=`):
 
+- NEW direct deps (fix loop 1): `nix =0.31.3`
+  (workspace, `default-features = false`,
+  features `fs` + `process` + `signal` +
+  `socket` + `user`; safe wrappers for the 4
+  former `unsafe` sites — `Flock`, `getuid`,
+  `kill`, `shutdown`; the `socket` feature pulls
+  the lock-only transitive `memoffset 0.9.1`,
+  MIT, 0 deps) and `serde_json` feature
+  `raw_value` (added to the existing
+  `arbitrary_precision`; no new crate). Both MIT
+  OR Apache-2.0; provenance §16.
 - NEW direct deps: `tar =0.4.46` (lock checksum
   `3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840`),
   `flate2 =1.1.10` (lock checksum
@@ -8030,10 +8121,14 @@ Pins (workspace `Cargo.toml`, exact `=`):
    by the socket read timeout, not a separate
    timer. Go: TLS handshake 10s
    (`newUpdateClient`).
-4. [DEVIATION] Envelope result is
-   `serde_json::Value`, not raw bytes: Go uses
-   `json.RawMessage`; Rust re-serialises with
-   sorted keys. Go: `Envelope`
+4. [DEVIATION — SUPERSEDED in fix loop 1] Envelope
+   result WAS `serde_json::Value`, not raw bytes:
+   Go uses `json.RawMessage`; Rust re-serialised
+   with sorted keys. FIXED: `result` is now
+   `Option<Box<serde_json::value::RawValue>>`
+   (`serde_json` feature `raw_value`); explicit
+   null → 4 bytes `null`, absent → empty; `ok`
+   has `#[serde(default)]`. Go: `Envelope`
    (`pluginabi.go`).
 5. [DEVIATION] `Deps` carries a boxed `Fetcher`
    + CGO settings pairs. Go carries
@@ -8058,10 +8153,20 @@ Pins (workspace `Cargo.toml`, exact `=`):
    streams; no limit is applied, matching Go's
    no-limit. Go: `serveForward` (`egress.go`).
 10. [DEVIATION] Egress listener close uses
-    `libc::shutdown` on the listener fd + aborts
-    the accept-loop task + aborts tracked tunnels:
-    tokio has no listener close. Go closes the
-    listener + server (`egress.go:Close`).
+    `nix::sys::socket::shutdown` on the listener fd
+    (fix loop 1 — was `libc::shutdown`, an unsafe
+    block; now a safe `nix` wrapper) + aborts the
+    accept-loop task + aborts tracked tunnels, and
+    the shutdown happens IMMEDIATELY after setting
+    `closed`, before `notify_waiters` (fix loop 1,
+    safety F5: the old order let a new connection
+    reuse the fd between `closed` and `shutdown`).
+    Residual, inherited from the design: an
+    in-flight non-CONNECT forward that already
+    passed the auth gate still completes after
+    `Close`; Go closes the active connections
+    too. Go closes the listener + server
+    (`egress.go:Close`).
     `TcpListener::from_std` requires
     `set_nonblocking(true)` first (tokio#7172).
 11. [DEVIATION] hyper `header_read_timeout`
@@ -8114,12 +8219,16 @@ Pins (workspace `Cargo.toml`, exact `=`):
     across lock releases the way Go holds a
     `*loadedPlugin`. Go: `Host` (`host.go:132-149`).
 18. [DEVIATION] Checksum errors never embed the
-    shadow path (Go wraps os errors carrying it;
-    this port drops the path-bearing cause), and
-    `read_regular_file` errors for the plugin file
-    omit the path (Go returns the raw os error
-    with path); manifest-read errors are the fixed
-    `"read plugin checksums manifest"`. Go:
+    shadow path in the OPEN/READ branches (Go wraps
+    os errors carrying it; this port drops the
+    path-bearing cause), and manifest-read errors
+    are the fixed `"read plugin checksums manifest"`.
+    CORRECTION (fix loop 1, technical F-j): the
+    "omit the path" wording is only true for the
+    open/read branches — the NOT-REGULAR branch of
+    `read_regular_file` DOES include the path
+    (`"file {path:?} is not a regular file"`,
+    `checksum.rs:220-240`). Go:
     `checksum.go`, `openErrorWithoutPath`.
 19. [DEVIATION] Identity invalid-UTF-8 JSON: Go
     replaces with U+FFFD and succeeds; Rust
@@ -8156,6 +8265,12 @@ Pins (workspace `Cargo.toml`, exact `=`):
     `origin_test.go`, `race_sharing_test.go`) are
     recorded as NOT PORTABLE under the current ABI
     with the exact reason, not silently dropped.
+    NOTE (fix loop 1): this deviation does NOT
+    cover the 4 production `unsafe` blocks the
+    reviewers flagged — those were safe-wrapper
+    migrations (`nix` 0.31.3), NOT loader FFI,
+    and are gone: `grep -rn unsafe` over both
+    crates' non-test src is 0 after fix loop 1.
 22. [DEVIATION] The DT_STRTAB overflow test uses
     checked arithmetic (`off.checked_add(strsz)`):
     the C-style `off + strsz < off` test would
@@ -8194,6 +8309,120 @@ Pins (workspace `Cargo.toml`, exact `=`):
     `castctl_log_redact::is_secret_key`
     (`redact_str.rs:192`). Go: `internal/redact/
     value.go`.
+
+28. [DEVIATION — fix loop 1] `parse_url` is
+    STRICTER than Go on space in the path: Go
+    `url.Parse` ACCEPTS `https://github.com/a b`
+    (the client percent-encodes it when sending;
+    probed on cue 2026-11-05) while Rust refuses
+    any space (and any byte <0x20 / 0x7f) anywhere
+    in the URL. The Rust port has no URL escaper,
+    so sending a raw space would corrupt the
+    request line — refusing is the safe choice.
+    Go: `net/url`.
+29. [DEVIATION — fix loop 1] Response-head cap
+    64 KiB: the Rust reader refuses a head larger
+    than 64 KiB; Go has no such cap (its
+    `bufio.Reader` grows). Recorded, not fixed:
+    a hostile server could send a multi-MB head
+    and Go would read it; Rust refuses. The cap
+    is a deliberate DoS bound.
+30. [DEVIATION — fix loop 1] `HyperUpstream` has
+    NO dial/read timeout: Go's update client has
+    dial 10s + response-header 30s
+    (`newUpdateClient`, `update.go:383-409`) and
+    the Rust `StdFetcher` now has both (safety
+    F2), but the egress hyper upstream dials with
+    no timeout. Unmeasured; a hung upstream
+    blocks that tunnel. Not fixed in this loop
+    (hyper timeout wiring needs a probe first).
+31. [DEVIATION — fix loop 1] gzip-magic peek is
+    2 bytes (`\x1f\x8b`): a file starting with
+    those 2 bytes but not a valid gzip stream is
+    refused by Rust as `"not a valid tar archive"`
+    while Go refuses as `"not a valid gzip
+    stream"`. Both refuse; only the message
+    differs. Go: `extract.go`.
+32. [DEVIATION — fix loop 1] `strip_userinfo`
+    builder fallback is UNREACHABLE: the fallback
+    branch (build a `Uri` without userinfo) only
+    runs if the builder fails on parts taken from
+    an already-parsed `Uri`; documented with a
+    comment, not restructured (egress.rs:618).
+33. [DEVIATION — fix loop 1] Non-UTF-8 paths
+    fail closed: `paths.rs` converts a path with
+    `to_string_lossy`, so a non-UTF-8 component
+    makes the subsequent `Lstat` fail and the
+    plugin refuses; Go proceeds with the raw
+    bytes. Latent: JSON config paths are UTF-8,
+    so this only bites a non-UTF-8 filesystem
+    path.
+34. [DEVIATION — fix loop 1] Shadow-dir symlink
+    residual, inherited from Go: the shadow dir
+    itself is created under a `pid-<pid>` dir
+    whose parent (`<tmp>/castctl-pluginhost`) is
+    not verified symlink-free on every use (safety
+    F10). Go has the same shape
+    (`shadow.go`); fixing it needs a design
+    decision (verify-on-every-use vs create-once).
+35. [DEVIATION — fix loop 1] `running_libc_version`
+    TOCTOU + `(deleted)` miss: it reads
+    `/proc/self/maps` and parses the libc file it
+    finds; a libc replaced between the maps read
+    and the parse, or a `(deleted)` entry, is not
+    handled (safety F8 + red-team note). Any
+    failure → error → fail-closed, so the worst
+    case is a false refusal, not a wrong accept.
+36. [DEVIATION — fix loop 1] TLS roots: rustls
+    uses the Mozilla webpki roots
+    (`webpki-roots`); Go uses the system roots
+    (safety F9). A corporate-MITM / private-CA
+    environment that works with Go may fail with
+    Rust. Needs a decision (system roots via
+    `rustls-native-certs` vs pinned Mozilla).
+37. [DEVIATION — SUPERSEDED in fix loop 1]
+    Redirect `//evil.com/x` was NOT resolved as
+    protocol-relative (it fell through to the
+    relative-merge branch). FIXED:
+    `resolve_redirect` now handles `//host/path`
+    (Go `ResolveReference`), `?q` (keeps path),
+    and strips the fragment.
+38. [DEVIATION — SUPERSEDED in fix loop 1]
+    `canonical_number` rendered an out-of-range
+    literal (`1e999`) as `"inf"`. FIXED: it now
+    returns `Err` (Go `json.Unmarshal` refuses).
+    The red-team note claiming Go renders
+    `1.5e-07` is WRONG — probed on cue
+    2026-11-05, Go renders `1.5e-7` and Rust
+    already matched.
+39. [DEVIATION — fix loop 1] Relative redirects:
+    Rust and Go refuse the same inputs but by
+    different paths (F11): Go resolves the
+    relative `Location` against the current URL
+    and then applies the policy; Rust resolves
+    then applies the same policy. Outcome
+    identical on every tested shape; the
+    difference is internal only.
+40. [DEVIATION — fix loop 1] Total/header
+    deadlines implemented: `fetch_bytes` (60s
+    metadata) and `download_asset` (10m asset)
+    now bound the WHOLE transfer, and the
+    response head has a TOTAL 30s deadline
+    (`RESPONSE_HEADER_TIMEOUT`, safety F2). The
+    mechanism is pinned by a scaled-down
+    deadline test (200ms vs a stalled server);
+    the 30s/60s/600s timings at live duration
+    are UNMEASURED (§M6c.5).
+41. [DEVIATION — fix loop 1] `create_temp_file`
+    suffix is time+pid (already in §M6c.1): Go
+    uses `os.CreateTemp` (random suffix); the
+    Rust O_EXCL retry loop (100×) makes the
+    collision window equivalent in practice, but
+    the suffix is predictable — a local attacker
+    who can guess (time, pid) could pre-create
+    the name; O_EXCL then fails the attempt and
+    the loop retries with a new suffix, so the
+    worst case is a retry, not an overwrite.
 
 Settled probes (2026-11-05, on cue):
 
@@ -8244,6 +8473,88 @@ Settled probes (2026-11-05, on cue):
   download failures are exactly
   `"update: download failed"`.
 
+Settled probes — fix loop 1 (2026-11-05, on cue):
+
+- Go `url.Parse` (`/tmp/m6c-fix1-probe/main.go`,
+  `PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=auto
+  go run`): `HTTPS://github.com/x` → scheme
+  `"https"` ACCEPT; `https://GITHUB.COM/x` → host
+  `"GITHUB.COM"` ACCEPT (host case preserved);
+  `https://github.com:abc/` → ERR `invalid port
+  ":abc" after host`; `https://github.com/a b`
+  → ACCEPT, path `"/a b"`; `https://github.com/a
+  \x7fb` → ERR `invalid control character in
+  URL`; `https://github.com:99999/` → ACCEPT;
+  CRLF → ERR; `ResolveReference("//evil.com/x")`
+  → `"https://evil.com/x"`; `"rel"` → merge dir;
+  `"?q=2"` → keep path, replace query.
+- Go `encoding/json` (same probe): Marshal
+  1.5e-7 → `{"a":1.5e-7}` (ONE exponent digit —
+  Rust already matched; the red-team note
+  claiming `"1.5e-07"` is wrong); 1e21 →
+  `{"a":1e+21}`; 1e-06 → `{"a":0.000001}`;
+  Unmarshal `{"a":1e999}` → err `json: cannot
+  unmarshal number 1e999 into Go value of type
+  float64`.
+- `serde_json` `RawValue` (scratch crate,
+  serde_json 1.0.145 + `arbitrary_precision` +
+  `raw_value`, offline): `#[serde(default)]` on
+  `ok` + custom `deserialize_with` for
+  `Option<Box<RawValue>>` gives: no-ok →
+  `ok=false`; `{"ok":true,"result":null}` →
+  `Some("null")` (4 bytes); absent → `None`;
+  object `{"b":1,"a":2}` → raw verbatim, key
+  order kept. `1e999 as_f64() = None` under
+  `arbitrary_precision` (not `Some(inf)`).
+- `nix` 0.31.3 API (registry source on cue):
+  `fcntl::Flock::lock(t, FlockArg) ->
+  Result<Flock<T>, (T, Errno)>`,
+  `FlockArg::LockExclusiveNonblock`,
+  `Flock<File>` unlocks on drop + `Deref` to
+  `File`, `Flock::lock` does NOT retry EINTR
+  (1 call); `unistd::getuid() -> Uid` (feature
+  `user`); `sys::signal::kill(pid: Pid, signal:
+  Into<Option<Signal>>)` (feature `signal`);
+  `sys::socket::shutdown(df: RawFd, how:
+  Shutdown)` (feature `socket`);
+  `unistd::close(fd: IntoRawFd)` (feature `fs`).
+  Features: `default = []`; `socket` pulls
+  `memoffset` (1 lock entry, 0 deps);
+  `memoffset` was NOT in the lock or the cue
+  registry cache before fix loop 1. Boringtun
+  enables nix with `["time", "user"]`,
+  `default-features = false`.
+- Go `internal/update/replace.go:322-323`:
+  the detached child SURVIVES a timeout kill
+  (residual, documented in the `run_exec_check`
+  comment); `:329-372` order is deadline → read
+  error → len > cap → waitErr →
+  `checkVersionOutput`, with `cancel()` the
+  moment `len(out) > max`; `:373-406`
+  `checkVersionOutput` scans bytes, `string(out)`
+  never validates UTF-8.
+- Go `internal/pluginhost/callbacks_test.go:16,52`:
+  level table (7 cases) + message ESC/NUL/newline
+  handling ported verbatim into
+  `dispatch_host_call_level_and_message_full`;
+  Go `host.go:899-954` `dispatchHostCall`
+  matches the Rust port line-for-line (level is
+  NOT stripped of control chars before the
+  allowlist check).
+- Go `internal/update/update.go:383-409`
+  `newUpdateClient` (dial 10s, keepalive 30s,
+  TLS handshake 10s, response-header 30s);
+  `:423-458` `checkRedirectPolicy` (host compare
+  case-sensitive; allowlist switch); `:858-...`
+  `fallbackTag` sets ONLY `User-Agent`, no
+  `Accept`; `:506` Accept only on the fetch leg,
+  `:520-521` download leg deletes Accept;
+  `:648-680` `selectLatest` refuses prerelease /
+  draft UNCONDITIONALLY (the allow flag only
+  matters in explicit/fallback modes, `:642`,
+  `:835`, `:848`); `:774-789`
+  `validateDownloadURL`.
+
 ## M6c.3 Reuse verification (read, not re-ported)
 
 - `castctl_log_redact::is_secret_key`
@@ -8270,6 +8581,17 @@ Settled probes (2026-11-05, on cue):
   deviation (M5a deviation 21) does NOT apply
   here: the update fetcher streams with its own
   256 MiB asset cap (`maxAssetBytes`).
+- `nix 0.31.3` (fix loop 1): already in the lock
+  via boringtun (`["time", "user"]`,
+  `default-features = false`); the M6c crates
+  enable the additional features `fs` +
+  `process` + `signal` + `socket` + `user` on
+  the workspace dep. `memoffset 0.9.1` is a NEW
+  lock-only transitive (pulled by the `socket`
+  feature; MIT, 0 deps) — no new direct crate
+  beyond `nix` itself. `serde_json` feature
+  `raw_value` was added to the existing dep
+  (no new crate) for `RawValue`.
 
 ## M6c.4 Gates (cue, 2026-11-05)
 
@@ -8339,6 +8661,15 @@ re-verification at `23db9f8`:
 - Egress HTTPS upstream: refuses by design (§M6c.2
   deviation 12); the Go wiring handles TLS via
   the profile outbound.
+- Header/total deadline TIMING at live duration
+  (30s header, 60s metadata, 10m asset —
+  §M6c.2 deviation 40): the mechanism is pinned
+  by a scaled-down test, but a 30s+ trickle
+  server was NOT run; a slow-but-legal server
+  near the boundary is unverified.
+- `HyperUpstream` dial/read timeout (§M6c.2
+  deviation 30): no timeout is set; a hung
+  upstream was NOT measured.
 - Egress `IdleTimeout` 120s behaviour: no hyper
   equivalent (§M6c.2 deviation 8).
 - `cargo tree -d` full duplicate list: only sha2
@@ -8457,6 +8788,169 @@ except 1 more `io_other_error` in
 `cargo fmt --check` 0, `cargo clippy --workspace
 --all-targets -- -D warnings` 0. No blanket
 allows were added; no criteria were lowered.
+
+## M6c.8 Fix loop 1 (2026-11-05) — Phase 3 round-1 BLOCKINGs
+
+All 10 BLOCKINGs fixed at the fix-loop-1 head
+(gates: see §M6c.4). No BLOCKING was dropped as a
+known limitation.
+
+- Safety B1 / technical F-c/F-d — `parse_url`
+  header injection: `select.rs` rejects any byte
+  <0x20 / 0x7f / space anywhere in the URL; host
+  case PRESERVED (Go `Hostname()` does not
+  lowercase — probed), scheme lowercased, port
+  empty-or-digits, IPv6 brackets kept,
+  `query` field + `request_target()`. Tests:
+  `parse_url_rejects_control_characters`,
+  `parse_url_port_validation_matches_go`,
+  `parse_url_case_matches_go`,
+  `parse_url_keeps_query`,
+  `ipv6_authority_keeps_brackets`.
+  [DEVIATION] 28: space in the path is stricter
+  than Go (no URL escaper in this port).
+- Safety B2 / technical B1 — 4 production
+  `unsafe` blocks → `nix` 0.31.3 safe wrappers:
+  `lock.rs` (`Flock`, EINTR retried),
+  `paths.rs` (`getuid`, `kill(pid, None)`),
+  `egress.rs` (`shutdown`, reordered before
+  `notify_waiters`). After the loop,
+  `grep -rn unsafe` over both crates' non-test
+  src is 0; no fallback was needed.
+- Red-team B1 — `check_version_output` UTF-8:
+  byte-level checks; only `ver_str` converted.
+  Tests: new 0xFF cases in
+  `check_version_output_table` (paren 0xFF
+  ACCEPT, version 0xFF refuse, 256/257-byte
+  boundary with 0xFF in the paren).
+- Red-team B2 — `run_exec_check` flood+hang:
+  child shared as `Arc<Mutex<Child>>`; the
+  reader kills it the moment the buffer passes
+  64 KiB; `too_large` checked before the
+  deadline. Test:
+  `exec_check_flood_then_hang_returns_too_large_fast`
+  (floodhang binary: 30×8192 bytes then hang;
+  asserts `too large` in <5s, not the 10s
+  timeout message). The false "observable
+  contract preserved" comment was replaced with
+  the real Go order + detached-child residual.
+- Red-team B3 — `scan_strtab_versions` panic:
+  truncate at the largest char boundary ≤64.
+  Test:
+  `scan_strtab_versions_multibyte_display_no_panic`
+  (`GLIBC_2.3` + 40× `é` + NUL; asserts refuse
+  and no U+FFFD).
+- Red-team B4 — envelope strictness:
+  `#[serde(default)]` on `ok`;
+  `result: Option<Box<RawValue>>` (serde_json
+  feature `raw_value`); `parse_envelope` returns
+  raw bytes. Tests:
+  `envelope_missing_ok_and_null_result_match_go`,
+  `parse_envelope_missing_ok_and_null_result`
+  (null → 4 bytes `null`, absent → empty, key
+  order kept). Deviation 4 SUPERSEDED.
+- Red-team B5 — release-JSON nulls: `null_default`
+  on every `ReleaseJson`/`AssetJson` field.
+  Test: `release_json_null_fields_take_go_code2_paths`
+  (assets null → code 2 no-match; draft null →
+  install OK; size null → code 2 no usable size;
+  tag null → code 2 not a valid version).
+- Red-team B6 — ELF `EI_VERSION`: require
+  `b[6] == 1`. Test: cases inside
+  `elf_rejections_match_go_messages` (0/99
+  refuse, 1 accepts).
+- Red-team B7 — PAX size: `entry.size()`
+  (PAX-aware); comment fixed (type still from
+  the header). Tests:
+  `extract_pax_size_override_accepted` (50/100,
+  100/50, control 50/50),
+  `extract_member_mode_ignored`.
+
+Non-blocking disposition (none dropped silently):
+
+- Safety F1 detached child: comment in
+  `run_exec_check` + deviation 10 residual.
+  F2 deadlines: header 30s TOTAL + fetch 60s
+  + asset 10m TOTAL implemented; mechanism
+  pinned by a 200ms scaled-down test; live
+  timing unverified (§M6c.5). F3 decide panic:
+  fixed (`decide_missing_release_errors_not_panics`).
+  F4/F-a close error: fixed via `nix::close`
+  (`"update: cannot close the extracted binary"`);
+  no injectable test (a close error on a real
+  `File` is not injectable through the public
+  seams) — code fix only. F5 close race: fixed
+  (shutdown immediately after `closed`) +
+  in-flight-forward residual in deviation 10.
+  F6 hostile tag/body: both tests added
+  (`hostile_latest_tag_refuses_without_echo`,
+  `hostile_api_error_body_never_leaks`).
+  F7/F-e short body: `BodyReader` returns
+  `UnexpectedEof` + tests.
+  F8 → deviation 35. F9 → deviation 36.
+  F10 → deviation 34. F11 → deviation 39
+  (same outcome, different internal path).
+- Technical F-a: F4 above. F-b: chmod/rename
+  messages are fixed strings now. F-c: port
+  validate + case probe + tests; the reviewer's
+  claim "Go refuses `HTTPS://` / uppercase host"
+  is WRONG per probe (Go parses both; only the
+  redirect policy refuses uppercase hosts).
+  F-d: query field + `request_target()` +
+  `resolve_redirect` keeps the query. F-e: F7
+  above. F-f: `get_no_follow` sends no `Accept`
+  now; the `download failed` vs Go `invalid
+  download URL` message nit is UNREACHABLE
+  (`select` validates the URL first) — recorded,
+  not fixed. F-g: `canonical_number` → `Result`
+  (1e999 refuses) + tests; exponent padding NOT
+  fixed — the probe proves Rust already matches
+  Go (`1.5e-7`), the red-team note was wrong.
+  F-h: `dispatch_host_call_level_and_message_full`
+  (full 7-level table + ESC/NUL/newline +
+  forged-line + secret-in-message). F-i: the
+  coverage table below. F-j: deviation 18
+  wording corrected. F-k:
+  `plugin_extension_table`.
+- Red-team notes: IPv6 brackets fixed + test;
+  gzip 2-byte hole → deviation 31 (message
+  only); select URL notes → B1/F-c/F-d; http
+  redirect/response notes → `//` + `?q` +
+  fragment fixed, Content-Length strict, short
+  body fixed, 64 KiB head cap → deviation 29,
+  timeouts → F2; run.rs close/chmod/rename
+  fixed, temp suffix → deviation 41; identity
+  exponent → probe refuted, not fixed; egress
+  `strip_userinfo` → comment (unreachable
+  fallback), close race fixed, HyperUpstream
+  timeout → deviation 30; compat `(deleted)` →
+  deviation 35; discovery GOARCH → mapping
+  fixed (`x86` → `386`, `powerpc64` → `ppc64`);
+  paths non-UTF-8 → deviation 33; doc nits →
+  deviation 18 wording fixed, IPv6 /
+  `replace.rs` / `extract.rs` comments fixed.
+
+Coverage table (technical F-i, §5.4 — 15 gaps,
+status after fix loop 1):
+
+| Go test | Status | Rust pin / reason |
+|---|---|---|
+| `TestInvalidRemoteTagRefuses` | FIXED | `hostile_latest_tag_refuses_without_echo` |
+| `TestAPIErrorRefuses` | FIXED | `latest_404_and_malformed_json_paths` (404 → code 2, malformed JSON → code 1) + `hostile_api_error_body_never_leaks` (500, marker never leaks) |
+| `TestNoAssetFailsClosed` | FIXED | `no_asset_fails_closed` |
+| `TestPrereleaseTagWithFlagFalseRefuses` (6 subtests) | PARTIAL | decide-level + latest existed; explicit flag-false `explicit_prerelease_flag_false_refuses`, explicit allow-ON `allow_prerelease_explicit_installs`; FALLBACK-mode prerelease run-level still untested (needs a 403 `/latest` + tags endpoint) |
+| `TestExtractMemberModeIgnored` | FIXED | `extract_member_mode_ignored` |
+| `TestExtractGnuTarRecordPaddingAccepted` | NOT PORTED | Needs a real GNU tar binary; zero-padding already pinned by `all_zero_trailing_data_accepted` |
+| `TestDownloadURLWithUserinfoRefuses` (run-level) | FIXED | `download_url_userinfo_refuses_before_any_request` (code 1, 0 asset request, 0 auth) |
+| `TestFlavourSelectsAsset` / `TestFlavourUnknownRefuses` (run-level) | FIXED | glibc select = `install_newer_version_end_to_end` (CGO_ENABLED=1); no-plugin `flavour_no_plugin_refuses_on_glibc_only_release`; unknown `flavour_unknown_refuses_closed` |
+| `TestPluginExtension` | FIXED | `plugin_extension_table` |
+| `TestStrippedOutboundHash` | FIXED | `stripped_outbound_hash_pins` (64 hex + stripped ≠ raw) |
+| 2 × `TestDispatchHostCall*` | FIXED | `dispatch_host_call_level_and_message_full` (full table, no thinning) |
+| `TestSweepKeepsLive` | FIXED | `sweep_removes_only_dead_pid_dirs` (stray-temp-in-own-dir assert added) |
+| `AllowDowngrade`→install, `AllowPrerelease`→install | FIXED | `allow_downgrade_installs`, `allow_prerelease_explicit_installs` |
+| Dev-build 3 modes | PARTIAL | latest existed; explicit `dev_build_explicit_version_refuses`; FALLBACK mode still untested (needs 403 `/latest` + tags) |
+| Redirect-loop run-level | FIXED | `redirect_loop_refuses_after_four_follows` (5 `/latest` hits) |
+
 ## Quy tắc quyết định (Boss, 2026-11-05 — standing)
 
 Applies to the whole Rust port, not just M4a. Decide

@@ -2151,6 +2151,25 @@ loader STOP (dlopen + C ABI, no safe Rust port) and
 the explicit "Chưa kiểm chứng" list (no live TLS
 handshake test; no real github.com download; no live
 plugin load).
+
+Fix loop 1 (2026-11-05, Phase 3 round-1 BLOCKINGs):
+`nix =0.31.3` became a direct workspace dep for the
+two M6c crates (`default-features = false`,
+features `fs` + `process` + `signal` + `socket` +
+`user`), <https://github.com/nix-rust/nix>, MIT —
+safe wrappers replacing the 4 `libc` unsafe blocks
+(`Flock`, `getuid`, `kill`, `shutdown`; `run.rs`
+also uses `unistd::close`). `nix` was already in
+the lock via boringtun (`["time", "user"]`), so the
+only NEW lock entry is the `socket`-feature
+transitive `memoffset 0.9.1` (MIT, 0 deps).
+`serde_json` gained the `raw_value` feature (for
+`pluginabi.rs` `RawValue`); no new crate entered
+the tree for it. Lock diff for fix loop 1: purely
+additive (memoffset 0.9.1 only) — verified on cue
+when the lock was regenerated (see `rust/PORTING.md`
+§M6c.4).
+
 ## Carried items (unresolved at the time of writing)
 
 - npm license check: not run — no license-checking tool present,

@@ -183,3 +183,22 @@ Linked dependencies (M6c: update asset handling, called, not copied):
   0.11.1, both pre-existing at base 25a124e; 0.11.1 only via
   honk-outbound) — the earlier "returns nothing" claim was wrong.
   M6c's crates use the 0.10.9 line and introduce no new duplicate.
+- nix 0.31.3, from https://github.com/nix-rust/nix,
+  pinned `=0.31.3` in the workspace (fix loop 1),
+  license MIT. Used by crates `castctl-update`
+  (`src/lock.rs`: `fcntl::Flock`) and
+  `castctl-pluginhost` (`src/paths.rs`:
+  `unistd::getuid`, `sys::signal::kill`;
+  `src/egress.rs`: `sys::socket::shutdown`;
+  `src/run.rs`: `unistd::close`) as safe wrappers
+  replacing 4 `libc` unsafe blocks. Already in the
+  lock before fix loop 1 via boringtun (features
+  `time` + `user`, `default-features = false`);
+  the M6c crates enable the additional features
+  `fs` + `process` + `signal` + `socket` + `user`.
+  The `socket` feature pulls the lock-only
+  transitive memoffset 0.9.1 (MIT, 0 deps).
+  No nix source code is copied into rust/.
+  `serde_json` gained the `raw_value` feature
+  (fix loop 1, `pluginabi.rs` `RawValue`); no new
+  crate entered the tree for it.
