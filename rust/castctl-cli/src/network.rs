@@ -365,12 +365,14 @@ pub(crate) fn indent_json(compact: &str) -> String {
                         break;
                     }
                     if sc == '\\' && i + 1 < n {
-                        match chars[i + 1] {
-                            e => {
-                                out.push('\\');
-                                out.push(e);
-                            }
-                        }
+                        // Pass the escape through verbatim
+                        // (serde_json already emits Go's short
+                        // forms \b \f \n \r \t — R3-B1; the old
+                        // \b/\f -> \u0008/\u000c translation
+                        // here was the bug).
+                        let e = chars[i + 1];
+                        out.push('\\');
+                        out.push(e);
                         i += 2;
                     } else if sc == '\u{2028}' {
                         out.push_str("\\u2028");
