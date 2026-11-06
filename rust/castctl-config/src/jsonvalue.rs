@@ -104,13 +104,30 @@ impl OrderedObject {
 
     /// Set `key` to `value`: new keys append at the end, existing
     /// keys keep their first position with the last value winning.
-    pub fn set(&mut self, key: String, value: JsonValue) {
+    /// The key is `impl Into<String>` so both `&str` literals
+    /// and owned `String`s call it without a `.to_string()` at
+    /// every site (the webui crate builds most objects from
+    /// string literals).
+    pub fn set(&mut self, key: impl Into<String>, value: JsonValue) {
+        let key = key.into();
         match self.keys.iter().position(|k| *k == key) {
             Some(i) => self.values[i] = value,
             None => {
                 self.keys.push(key);
                 self.values.push(value);
             }
+        }
+    }
+
+    /// Remove `key`, returning its value if it was present
+    /// (Go `orderedObject.delete`, `jsonvalue.go`).
+    pub fn remove(&mut self, key: &str) -> Option<JsonValue> {
+        match self.keys.iter().position(|k| k == key) {
+            Some(i) => {
+                self.keys.remove(i);
+                Some(self.values.remove(i))
+            }
+            None => None,
         }
     }
 

@@ -2169,20 +2169,33 @@ the tree for it. Lock diff for fix loop 1: purely
 additive (memoffset 0.9.1 only) — verified on cue
 when the lock was regenerated (see `rust/PORTING.md`
 §M6c.4).
+## 18. bcrypt + blowfish — LINKED (Rust artifact only, no copied code)
 
-## Carried items (unresolved at the time of writing)
+M6b (web UI port, crate `castctl-webui`,
+`rust/castctl-webui/src/`). Both are called as dependencies
+only; no bcrypt / blowfish source code is copied into
+`rust/`. Versions are exact pins in `rust/Cargo.toml` +
+`Cargo.lock` (verified on cue, 2026-11-06; licenses read
+from each crate's pinned `Cargo.toml` in the cue registry
+`/usr/local/cargo/registry/src/`).
 
-- npm license check: not run — no license-checking tool present,
-  no `node_modules`, no installs performed. The release PR owns
-  it. Until then, `webui/dist/index.html`'s bundled npm licenses
-  are unknown; only the forked source is covered.
-- Full indirect-dependency license inventory: not generated —
-  release PR's scope (needs a license-inventory tool).
-- String-level locale diff (fork vs upstream shared keys):
-  `[UNVERIFIED]` — only top-level key overlap was compared.
-- Upstream `handshake_client.go:423/:1095` line numbers cited in
-  `internal/outbound/isolation_test.go:29`: `[UNVERIFIED]`.
-- `wireguard_conf.go` / `dialer.go` contents and `generate.sh` /
-  `compile.go` contents: import/existence level only.
-- Python `wait.py` / `conn.py` / `chat.py` line-level citation
-  checks: not done; file-level correspondence only (§4).
+- bcrypt `=0.17.1` — MIT,
+  <https://github.com/Keats/rust-bcrypt>, lock checksum
+  `abaf6da45c74385272ddf00e1ac074c7d8a6c1a1dda376902bd6a427522a8b2c`.
+  Bearer-token hashing/verification (`auth.rs`:
+  `hash_token` / `verify_token`, cost 10 = Go
+  `bcrypt.DefaultCost`, 72-byte limit). Go side:
+  `golang.org/x/crypto/bcrypt` (`internal/webui/server.go`
+  `authorized`, `internal/commands/webui.go`
+  `hashWebUITokenOnStart`); the Go behaviour (cost 10,
+  72-byte limit, verify error → false) is the port's
+  ground truth, recorded in `rust/PORTING.md` §M6b.
+- blowfish `=0.9.1` — MIT OR Apache-2.0,
+  <https://github.com/RustCrypto/block-ciphers>, lock
+  checksum
+  `e412e2cd0f2b2d93e02543ceae7917b3c70331573df19ee046bcbc35e45e87d7`.
+  Transitive dependency of bcrypt (the Blowfish block
+  cipher); no castctl code imports it directly.
+- Already-locked crates promoted by M6b with no new NOTICE
+  entry: `sha2 =0.10.9` (bundle sha256), `libc` (flock),
+  `http-body =1.1.0`, `tokio-tungstenite =0.30.0`.

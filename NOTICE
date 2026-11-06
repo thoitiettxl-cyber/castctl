@@ -221,6 +221,16 @@ docs/provenance.md.
   artifact (crate castctl-gateway); the Stream/Sink
   traits and extension traits for the gateway WS halves.
   See docs/provenance.md §15.
+- bcrypt (Rust) v0.17.1 — MIT, from
+  github.com/Keats/rust-bcrypt, pinned `=0.17.1` in
+  rust/Cargo.toml. Linked ONLY into the Rust artifact
+  (crate castctl-webui); Bearer-token hashing/verification
+  at cost 10. See docs/provenance.md §18.
+- blowfish (Rust) v0.9.1 — MIT OR Apache-2.0, from
+  github.com/RustCrypto/block-ciphers, pinned `=0.9.1` in
+  rust/Cargo.toml. Transitive dependency of bcrypt; no
+  castctl code imports it directly. See
+  docs/provenance.md §18.
 
 (c) Studied only — no code taken
 
