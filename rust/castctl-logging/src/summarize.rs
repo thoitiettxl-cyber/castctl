@@ -81,7 +81,7 @@ pub fn summarize_err(err: Option<&(dyn Error + 'static)>) -> String {
         }
         cur = e.source();
     }
-    safe_string(err.to_string())
+    safe_string(&err.to_string())
 }
 
 /// `SafeErrForLevel` (`level.go:57-64`): under the loop-5

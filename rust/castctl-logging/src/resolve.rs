@@ -18,13 +18,11 @@
 //! resolved value is ever echoed in an error.
 
 use castctl_config::errors::{config_error, ConfigError};
-use castctl_config::log::{valid_log_level, LogConfig};
+use castctl_config::log::LogConfig;
 
 /// Re-export under the Go name for callers that think in
 /// `profile` terms.
-pub fn valid_log_level(s: &str) -> bool {
-    valid_log_level(s)
-}
+pub use castctl_config::log::valid_log_level;
 
 /// `ResolveLogSettings` (`log.go:167`): `single_log` is the
 /// parsed top-level `log` block (`None` = absent);

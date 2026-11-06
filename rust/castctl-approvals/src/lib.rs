@@ -379,7 +379,7 @@ impl fmt::Display for ApproveError {
 
 impl Error for ApproveError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(self.err.as_ref() as &(dyn Error + 'static))
+        Some(&**self.err)
     }
 }
 

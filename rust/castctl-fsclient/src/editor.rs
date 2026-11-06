@@ -67,11 +67,13 @@ pub fn split_editor_command(command: &str) -> Result<Vec<String>, FsError> {
     let runes: Vec<char> = command.chars().collect();
     let mut i = 0usize;
     // Flush the current word, if one was started.
+    // `mem::replace` reads and clears the flag in one
+    // step, so there is no dead store on the final flush
+    // (after the loop nothing reads the flag again).
     macro_rules! flush {
         () => {
-            if token_started {
+            if std::mem::replace(&mut token_started, false) {
                 words.push(std::mem::take(&mut cur));
-                token_started = false;
             }
         };
     }
