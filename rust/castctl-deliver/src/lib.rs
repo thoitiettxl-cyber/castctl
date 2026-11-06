@@ -56,7 +56,7 @@ pub use authexport::{EXPORT_GUIDANCE, ExportError, auth_export};
 pub use authlist::{AuthList, ProfileRow, format_auth_list, list_profiles};
 pub use session::{SessionOpKind, session_op, session_start};
 pub use stop::stop_turn;
-pub use wake::{WAKE_TIMEOUT, WakeDeps, WakeResult, WakeFn, wake};
+pub use wake::{WAKE_TIMEOUT, WakeDeps, WakeFn, WakeResult, wake};
 
 /// A boxed error.
 pub type BoxError = Box<dyn Error + Send + Sync>;
@@ -120,9 +120,7 @@ impl fmt::Display for DeliverError {
             DeliverError::Wrapped { context, source } => {
                 write!(f, "{context}: {source}")
             }
-            DeliverError::WakeUnavailable => {
-                f.write_str("deliver: wake helper not available")
-            }
+            DeliverError::WakeUnavailable => f.write_str("deliver: wake helper not available"),
         }
     }
 }
@@ -134,9 +132,7 @@ impl Error for DeliverError {
             DeliverError::Config(e) => Some(e),
             DeliverError::Io(e) => Some(e),
             DeliverError::Message(_) => None,
-            DeliverError::Wrapped { source, .. } => {
-                Some(source.as_ref() as &(dyn Error + 'static))
-            }
+            DeliverError::Wrapped { source, .. } => Some(source.as_ref() as &(dyn Error + 'static)),
             DeliverError::WakeUnavailable => None,
         }
     }

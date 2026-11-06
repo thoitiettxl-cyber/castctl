@@ -120,12 +120,42 @@ async fn session_start() {
 #[tokio::test]
 async fn session_op() {
     let cases: Vec<(SessionOpKind, &str, &str, &str)> = vec![
-        (SessionOpKind::Rename, "rename", "session.rename", r#"{"session_id":"s1","title":"New name"}"#),
-        (SessionOpKind::Pin, "pin", "session.pin", r#"{"method":"/api/session/pin","session_id":"s1"}"#),
-        (SessionOpKind::Unpin, "unpin", "session.unpin", r#"{"method":"/api/session/unpin","session_id":"s1"}"#),
-        (SessionOpKind::Archive, "archive", "session.archive", r#"{"method":"/api/session/archive","session_id":"s1"}"#),
-        (SessionOpKind::Unarchive, "unarchive", "session.unarchive", r#"{"method":"/api/session/unarchive","session_id":"s1"}"#),
-        (SessionOpKind::Delete, "delete", "session.delete", r#"{"method":"/api/session/delete","session_id":"s1"}"#),
+        (
+            SessionOpKind::Rename,
+            "rename",
+            "session.rename",
+            r#"{"session_id":"s1","title":"New name"}"#,
+        ),
+        (
+            SessionOpKind::Pin,
+            "pin",
+            "session.pin",
+            r#"{"method":"/api/session/pin","session_id":"s1"}"#,
+        ),
+        (
+            SessionOpKind::Unpin,
+            "unpin",
+            "session.unpin",
+            r#"{"method":"/api/session/unpin","session_id":"s1"}"#,
+        ),
+        (
+            SessionOpKind::Archive,
+            "archive",
+            "session.archive",
+            r#"{"method":"/api/session/archive","session_id":"s1"}"#,
+        ),
+        (
+            SessionOpKind::Unarchive,
+            "unarchive",
+            "session.unarchive",
+            r#"{"method":"/api/session/unarchive","session_id":"s1"}"#,
+        ),
+        (
+            SessionOpKind::Delete,
+            "delete",
+            "session.delete",
+            r#"{"method":"/api/session/delete","session_id":"s1"}"#,
+        ),
     ];
     for (kind, name, method, body) in cases {
         let fake = FakeGateway::new(json!({"ok": true}));
@@ -145,11 +175,13 @@ async fn session_op() {
             .await
             .is_err()
     );
-    assert_eq!(*fake.called.lock().unwrap(), 0, "unknown kind must make 0 gateway calls");
-    // nil gateway
-    assert!(
-        session_op(None, "pin", "s1", "").await.is_err()
+    assert_eq!(
+        *fake.called.lock().unwrap(),
+        0,
+        "unknown kind must make 0 gateway calls"
     );
+    // nil gateway
+    assert!(session_op(None, "pin", "s1", "").await.is_err());
 }
 
 #[tokio::test]
@@ -177,9 +209,7 @@ fn wake_timeout_value() {
 const FAKE_COOKIES: &str = "hatch_sess=FAKE; datr=FAKE";
 
 fn token_ok() -> Box<castctl_deliver::wake::FetchAccessTokenFn> {
-    Box::new(move |_client, _cookies| {
-        Box::pin(async move { Ok("fake-access-token".to_string()) })
-    })
+    Box::new(move |_client, _cookies| Box::pin(async move { Ok("fake-access-token".to_string()) }))
 }
 
 fn wake_ok(
@@ -204,18 +234,16 @@ async fn wake() {
     {
         let seen = Arc::new(Mutex::new((None, None, None)));
         let got = wake(WakeDeps {
-            client: Some(Arc::new(
-                castctl_transport::HttpClient::new(Arc::new(
-                    castctl_transport::DirectDialer::new(),
-                )),
-            )),
+            client: Some(Arc::new(castctl_transport::HttpClient::new(Arc::new(
+                castctl_transport::DirectDialer::new(),
+            )))),
             cookies: FAKE_COOKIES.to_string(),
             vm_id: "fake-vm-1".to_string(),
             fetch_access_token: Some(token_ok()),
             fetch_session_info: Some(Box::new(move |_client, _cookies| {
-                Box::pin(async move {
-                    panic!("FetchSessionInfo must not be called when VMID is set")
-                })
+                Box::pin(
+                    async move { panic!("FetchSessionInfo must not be called when VMID is set") },
+                )
             })),
             wake_vm: Some(wake_ok(Arc::clone(&seen), 202, json!({"woken": true}))),
         })
@@ -233,11 +261,9 @@ async fn wake() {
         let seen_vm = Arc::new(Mutex::new(String::new()));
         let seen_vm2 = Arc::clone(&seen_vm);
         let err = wake(WakeDeps {
-            client: Some(Arc::new(
-                castctl_transport::HttpClient::new(Arc::new(
-                    castctl_transport::DirectDialer::new(),
-                )),
-            )),
+            client: Some(Arc::new(castctl_transport::HttpClient::new(Arc::new(
+                castctl_transport::DirectDialer::new(),
+            )))),
             cookies: FAKE_COOKIES.to_string(),
             vm_id: String::new(),
             fetch_access_token: Some(token_ok()),
@@ -279,7 +305,10 @@ async fn wake() {
         })
         .await
         .unwrap_err();
-        assert!(!*called.lock().unwrap(), "wake helper was called despite a nil client");
+        assert!(
+            !*called.lock().unwrap(),
+            "wake helper was called despite a nil client"
+        );
         assert!(err.to_string().contains("nil http client"), "err = {err}");
     }
     // missing wake helper fails before network
@@ -287,11 +316,9 @@ async fn wake() {
         let fetch_called = Arc::new(Mutex::new(false));
         let fetch_called2 = Arc::clone(&fetch_called);
         let err = wake(WakeDeps {
-            client: Some(Arc::new(
-                castctl_transport::HttpClient::new(Arc::new(
-                    castctl_transport::DirectDialer::new(),
-                )),
-            )),
+            client: Some(Arc::new(castctl_transport::HttpClient::new(Arc::new(
+                castctl_transport::DirectDialer::new(),
+            )))),
             cookies: FAKE_COOKIES.to_string(),
             fetch_access_token: Some(Box::new(move |_c, _co| {
                 let fetch_called2 = Arc::clone(&fetch_called2);
@@ -308,18 +335,19 @@ async fn wake() {
             matches!(err, DeliverError::WakeUnavailable),
             "Wake(nil WakeVM): err = {err}, want WakeUnavailable"
         );
-        assert!(!*fetch_called.lock().unwrap(), "token fetch ran despite a missing wake helper");
+        assert!(
+            !*fetch_called.lock().unwrap(),
+            "token fetch ran despite a missing wake helper"
+        );
     }
     // token failure surfaces before session info, empty vm id
     {
         let session_called = Arc::new(Mutex::new(false));
         let session_called2 = Arc::clone(&session_called);
         let err = wake(WakeDeps {
-            client: Some(Arc::new(
-                castctl_transport::HttpClient::new(Arc::new(
-                    castctl_transport::DirectDialer::new(),
-                )),
-            )),
+            client: Some(Arc::new(castctl_transport::HttpClient::new(Arc::new(
+                castctl_transport::DirectDialer::new(),
+            )))),
             cookies: FAKE_COOKIES.to_string(),
             fetch_access_token: Some(Box::new(move |_c, _co| {
                 Box::pin(async move { Err(sentinel("fake token failure")) })
@@ -331,7 +359,11 @@ async fn wake() {
                     Err(sentinel("fake session failure"))
                 })
             })),
-            wake_vm: Some(wake_ok(Arc::new(Mutex::new((None, None, None))), 200, Value::Null)),
+            wake_vm: Some(wake_ok(
+                Arc::new(Mutex::new((None, None, None))),
+                200,
+                Value::Null,
+            )),
         })
         .await
         .unwrap_err();
@@ -343,16 +375,17 @@ async fn wake() {
             err.to_string().contains("fake token failure"),
             "err = {err}"
         );
-        assert!(!*session_called.lock().unwrap(), "FetchSessionInfo was called despite the token fetch failing");
+        assert!(
+            !*session_called.lock().unwrap(),
+            "FetchSessionInfo was called despite the token fetch failing"
+        );
     }
     // both fetches fail, token error surfaces
     {
         let err = wake(WakeDeps {
-            client: Some(Arc::new(
-                castctl_transport::HttpClient::new(Arc::new(
-                    castctl_transport::DirectDialer::new(),
-                )),
-            )),
+            client: Some(Arc::new(castctl_transport::HttpClient::new(Arc::new(
+                castctl_transport::DirectDialer::new(),
+            )))),
             cookies: FAKE_COOKIES.to_string(),
             fetch_access_token: Some(Box::new(move |_c, _co| {
                 Box::pin(async move { Err(sentinel("fake token failure")) })
@@ -360,7 +393,11 @@ async fn wake() {
             fetch_session_info: Some(Box::new(move |_c, _co| {
                 Box::pin(async move { Err(sentinel("fake session failure")) })
             })),
-            wake_vm: Some(wake_ok(Arc::new(Mutex::new((None, None, None))), 200, Value::Null)),
+            wake_vm: Some(wake_ok(
+                Arc::new(Mutex::new((None, None, None))),
+                200,
+                Value::Null,
+            )),
         })
         .await
         .unwrap_err();
@@ -373,17 +410,19 @@ async fn wake() {
     // token fetch error is wrapped
     {
         let err = wake(WakeDeps {
-            client: Some(Arc::new(
-                castctl_transport::HttpClient::new(Arc::new(
-                    castctl_transport::DirectDialer::new(),
-                )),
-            )),
+            client: Some(Arc::new(castctl_transport::HttpClient::new(Arc::new(
+                castctl_transport::DirectDialer::new(),
+            )))),
             cookies: FAKE_COOKIES.to_string(),
             vm_id: "fake-vm-1".to_string(),
             fetch_access_token: Some(Box::new(move |_c, _co| {
                 Box::pin(async move { Err(sentinel("fake auth failure")) })
             })),
-            wake_vm: Some(wake_ok(Arc::new(Mutex::new((None, None, None))), 200, Value::Null)),
+            wake_vm: Some(wake_ok(
+                Arc::new(Mutex::new((None, None, None))),
+                200,
+                Value::Null,
+            )),
         })
         .await
         .unwrap_err();
@@ -395,11 +434,9 @@ async fn wake() {
     // wake helper error is wrapped
     {
         let err = wake(WakeDeps {
-            client: Some(Arc::new(
-                castctl_transport::HttpClient::new(Arc::new(
-                    castctl_transport::DirectDialer::new(),
-                )),
-            )),
+            client: Some(Arc::new(castctl_transport::HttpClient::new(Arc::new(
+                castctl_transport::DirectDialer::new(),
+            )))),
             cookies: FAKE_COOKIES.to_string(),
             vm_id: "fake-vm-1".to_string(),
             fetch_access_token: Some(token_ok()),
@@ -429,10 +466,8 @@ fn temp_dir(tag: &str) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "castctl-deliver-{tag}-{}-{n}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("castctl-deliver-{tag}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -472,7 +507,12 @@ fn list_profiles() {
         ProfileRow {
             name: "work".to_string(),
             active: false,
-            dir: base.join("profiles").join("work").to_str().unwrap().to_string(),
+            dir: base
+                .join("profiles")
+                .join("work")
+                .to_str()
+                .unwrap()
+                .to_string(),
             exists: true,
             cookies: false,
             cookies_file: base
@@ -487,7 +527,12 @@ fn list_profiles() {
         ProfileRow {
             name: "ghost".to_string(),
             active: true,
-            dir: base.join("profiles").join("ghost").to_str().unwrap().to_string(),
+            dir: base
+                .join("profiles")
+                .join("ghost")
+                .to_str()
+                .unwrap()
+                .to_string(),
             exists: false,
             cookies: false,
             cookies_file: base
@@ -530,8 +575,7 @@ fn list_profiles_json_order() {
     let list = list_profiles(base.to_str().unwrap(), "default").unwrap();
     let raw = serde_json::to_string(&list).unwrap();
     let base_json = serde_json::to_string(&base.to_str().unwrap()).unwrap();
-    let cookies_json =
-        serde_json::to_string(&base.join("cookies.txt").to_str().unwrap()).unwrap();
+    let cookies_json = serde_json::to_string(&base.join("cookies.txt").to_str().unwrap()).unwrap();
     let want = format!(
         "{{\"active\":\"default\",\"profiles\":[{{\"name\":\"default\",\"active\":true,\"dir\":{base_json},\"exists\":true,\"cookies\":false,\"cookies_file\":{cookies_json},\"auto_approve\":\"off\"}}]}}"
     );

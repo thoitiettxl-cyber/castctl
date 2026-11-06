@@ -1058,10 +1058,7 @@ impl Gateway {
         let mut ended = false;
         let mut saw_frame = false;
         let mut loop_err: Option<TransportError> = None;
-        'outer: while !halted
-            && Instant::now() < deadline
-            && (records.len() as i64) < max_records
-        {
+        'outer: while !halted && Instant::now() < deadline && (records.len() as i64) < max_records {
             if handler.should_stop() {
                 halted = true;
                 break;

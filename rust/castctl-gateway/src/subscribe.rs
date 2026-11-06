@@ -98,10 +98,7 @@ pub trait SubscribeHandler: Send {
 
     /// Called with each record the moment it arrives.
     /// Return `true` to halt the subscription right there.
-    fn on_record(
-        &mut self,
-        record: &[u8],
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + '_>>;
+    fn on_record(&mut self, record: &[u8]) -> Pin<Box<dyn Future<Output = bool> + Send + '_>>;
 }
 
 /// Whether `b` is blank in Go's `bytes.TrimSpace` sense
@@ -161,10 +158,7 @@ impl SubscribeHandler for CollectHandler {
         self.opened = true;
     }
 
-    fn on_record(
-        &mut self,
-        record: &[u8],
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+    fn on_record(&mut self, record: &[u8]) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
         self.records.push(record.to_vec());
         let stop = match self.stop_after {
             Some(n) => self.records.len() >= n,

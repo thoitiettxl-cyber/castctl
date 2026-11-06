@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use castctl_log_redact::safe_string;
 
-use crate::factory::{Handle, Level, Logger, emit};
+use crate::factory::{emit, Handle, Level, Logger};
 use crate::safe_err_for_level;
 
 /// A slog level: Go's `slog.Level` is an integer
@@ -158,11 +158,12 @@ impl SlogLogger {
             return;
         }
         let mut full = safe_string(msg);
-        for (k, v) in self.attrs.iter().map(|(k, v)| (k.as_str(), v)).chain(
-            attrs
-                .iter()
-                .map(|(k, v)| (*k, v)),
-        ) {
+        for (k, v) in self
+            .attrs
+            .iter()
+            .map(|(k, v)| (k.as_str(), v))
+            .chain(attrs.iter().map(|(k, v)| (*k, v)))
+        {
             let mut key = k.to_string();
             for g in &self.groups {
                 key = format!("{g}.{key}");
@@ -196,11 +197,8 @@ impl SlogLogger {
     /// every record's attrs.
     pub fn with_attrs(&self, attrs: &[(&str, SlogValue)]) -> Self {
         let mut out = self.clone();
-        out.attrs.extend(
-            attrs
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.clone())),
-        );
+        out.attrs
+            .extend(attrs.iter().map(|(k, v)| (k.to_string(), v.clone())));
         out
     }
 

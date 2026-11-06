@@ -34,11 +34,11 @@ use castctl_transport::TransportError;
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
+use crate::Cancel;
 use crate::events::{decode_record, question_of, record_name};
 use crate::history::{
     HistoryError, HistoryReader, derive_boundary, history_replies, latest_user_seq,
 };
-use crate::Cancel;
 
 /// Timing defaults, verbatim from Go `runner.go:22-65`
 /// (seconds unless noted). All enforced on the monotonic
@@ -104,8 +104,11 @@ pub trait Subscriber: Send + Sync {
 /// `Cancel` is the run cancel; a dial that honors it
 /// ends promptly when the wait is cancelled.
 pub type DialFn = Arc<
-    dyn Fn(Cancel) -> Pin<Box<dyn Future<Output = Result<Option<Arc<dyn Subscriber>>, TransportError>> + Send>>
-        + Send
+    dyn Fn(
+            Cancel,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<Option<Arc<dyn Subscriber>>, TransportError>> + Send>,
+        > + Send
         + Sync,
 >;
 
@@ -471,8 +474,7 @@ impl Runner {
         if self.cfg.has_after_seq {
             self.after_seq = self.cfg.after_seq;
             self.boundary_known = true;
-            self.waiter
-                .set_boundary(self.after_seq, false, false);
+            self.waiter.set_boundary(self.after_seq, false, false);
         } else {
             // Boundary derivation runs under the wait
             // deadline: an unbounded derivation could
@@ -513,10 +515,7 @@ impl Runner {
             }
         }
         let mut attempt: u32 = 0;
-        while self.waiter.result().is_none()
-            && Instant::now() < deadline
-            && !self.user_stop()
-        {
+        while self.waiter.result().is_none() && Instant::now() < deadline && !self.user_stop() {
             if attempt > 0 {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
@@ -525,18 +524,13 @@ impl Runner {
                 let mut backoff = self.cfg.resub_pause;
                 if self.failures > 0 {
                     let shift = (self.failures - 1).min(5);
-                    backoff = self
-                        .cfg
-                        .resub_pause
-                        .saturating_mul(1u32 << shift);
+                    backoff = self.cfg.resub_pause.saturating_mul(1u32 << shift);
                 }
                 if backoff > remaining {
                     backoff = remaining;
                 }
                 self.sleep_cancel(&cancel, backoff).await?;
-                if self.waiter.result().is_some()
-                    || self.user_stop()
-                    || Instant::now() >= deadline
+                if self.waiter.result().is_some() || self.user_stop() || Instant::now() >= deadline
                 {
                     break;
                 }
@@ -556,19 +550,13 @@ impl Runner {
             // held, and the per-iteration throttle keeps a
             // record-fed attempt from being repeated at
             // this point in the same iteration.
-            if self.waiter.result().is_none()
-                && !self.settle_tried
-                && Instant::now() < deadline
-            {
+            if self.waiter.result().is_none() && !self.settle_tried && Instant::now() < deadline {
                 self.try_settle(&cancel).await?;
             }
             if let Some(e) = self.pending_err.take() {
                 return Err(e);
             }
-            if self.waiter.result().is_none()
-                && !self.user_stop()
-                && Instant::now() < deadline
-            {
+            if self.waiter.result().is_none() && !self.user_stop() && Instant::now() < deadline {
                 if let Some(ce) = self.cfg.check_every
                     && Instant::now().saturating_duration_since(self.last_check) >= ce
                 {
@@ -587,10 +575,7 @@ impl Runner {
     }
 
     fn user_stop(&self) -> bool {
-        self.cfg
-            .user_stop
-            .as_ref()
-            .is_some_and(|f| f())
+        self.cfg.user_stop.as_ref().is_some_and(|f| f())
     }
 
     /// Sleep for `d` on the monotonic clock, or until the
@@ -734,8 +719,7 @@ impl Runner {
         {
             return true;
         }
-        if self.online_armed
-            && now.saturating_duration_since(self.online_at) > DEFAULT_ONLINE_GRACE
+        if self.online_armed && now.saturating_duration_since(self.online_at) > DEFAULT_ONLINE_GRACE
         {
             self.online_armed = false;
             return true;
@@ -783,13 +767,8 @@ impl Runner {
             }
         }
         let p = payload(ev);
-        let activity = p
-            .get("activity_code")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let activity_present = p
-            .get("activity_code")
-            .is_some_and(|v| !v.is_null());
+        let activity = p.get("activity_code").and_then(Value::as_str).unwrap_or("");
+        let activity_present = p.get("activity_code").is_some_and(|v| !v.is_null());
         if name == "agent.status"
             && activity == "online"
             && self.waiter.seen_running()
@@ -1120,8 +1099,7 @@ impl Runner {
                 {
                     Ok((latest, found)) => {
                         if found
-                            && let Some(accepted) =
-                                self.waiter.accept_replayed_failed(Some(latest))
+                            && let Some(accepted) = self.waiter.accept_replayed_failed(Some(latest))
                         {
                             kind = WaitKind::Failed;
                             detail = accepted.detail.clone();
@@ -1405,10 +1383,7 @@ impl SubscribeHandler for RunnerHandler<'_> {
         self.runner.should_stop(&self.cancel)
     }
 
-    fn on_record(
-        &mut self,
-        record: &[u8],
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+    fn on_record(&mut self, record: &[u8]) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
         Box::pin(async move {
             if self.runner.waiter.result().is_some() {
                 return true;
@@ -1417,10 +1392,7 @@ impl SubscribeHandler for RunnerHandler<'_> {
                 return false;
             };
             let approver = self.runner.cfg.approver.clone();
-            self.runner
-                .waiter
-                .feed(&ev, approver.as_deref())
-                .await;
+            self.runner.waiter.feed(&ev, approver.as_deref()).await;
             if let Some(fatal) = self.runner.waiter.fatal_err() {
                 self.runner.pending_err = Some(RunError::ApproverFatal(fatal.clone()));
                 return true;
@@ -1461,10 +1433,7 @@ impl SubscribeHandler for CheckHandler {
         self.cancel.is_set()
     }
 
-    fn on_record(
-        &mut self,
-        record: &[u8],
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+    fn on_record(&mut self, record: &[u8]) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
         let ev = decode_record(record);
         let thread = self.thread.clone();
         let found = &mut self.found;
@@ -1668,7 +1637,8 @@ mod tests {
             _method: &str,
             opts: SubscribeOptions,
             handler: &mut dyn SubscribeHandler,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send + '_>>
+        {
             let is_check = opts.max_records == 50;
             if is_check {
                 *self.check_calls.lock().expect("lock") += 1;
@@ -1838,12 +1808,22 @@ mod tests {
         // holds the terminal; the settle read proves it
         // from history.
         let sub = Arc::new(FakeSubscriber::new(vec![record_json(&task_ev(
-            "completed", "R", "R", 180, None,
+            "completed",
+            "R",
+            "R",
+            180,
+            None,
         ))]));
         let hist = Arc::new(QueueHistory::new(vec![
             history_ok(vec![user_ev(100)]),
-            history_ok(vec![user_ev(100), asst(150, "completed", "settled reply", None)]),
-            history_ok(vec![user_ev(100), asst(150, "completed", "settled reply", None)]),
+            history_ok(vec![
+                user_ev(100),
+                asst(150, "completed", "settled reply", None),
+            ]),
+            history_ok(vec![
+                user_ev(100),
+                asst(150, "completed", "settled reply", None),
+            ]),
         ]));
         let res = run_runner(Config {
             timeout: StdDuration::from_secs(60),
@@ -1864,7 +1844,11 @@ mod tests {
         // seq, so the replayed failure is accepted — with
         // zero replies, like a cancelled turn.
         let sub = Arc::new(FakeSubscriber::new(vec![record_json(&task_ev(
-            "interrupted", "R", "R", 180, None,
+            "interrupted",
+            "R",
+            "R",
+            180,
+            None,
         ))]));
         let hist = Arc::new(QueueHistory::new(vec![
             history_ok(vec![user_ev(200)]),
@@ -2113,14 +2097,12 @@ mod tests {
         // epoch 1ms).
         let mut expired = appr("OLD", &["allow_always"]);
         expired["request_expires_at_ms"] = json!(1.0);
-        let first = Arc::new(FakeSubscriber::new(vec![record_json(
-            &approval_ev(vec![expired], None),
-        )]));
+        let first = Arc::new(FakeSubscriber::new(vec![record_json(&approval_ev(
+            vec![expired],
+            None,
+        ))]));
         let second = Arc::new(FakeSubscriber::new(vec![record_json(&approval_ev(
-            vec![
-                appr("A", &["allow_always"]),
-                appr("B", &["allow_once"]),
-            ],
+            vec![appr("A", &["allow_always"]), appr("B", &["allow_once"])],
             None,
         ))]));
         let hist = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(100)])]));
@@ -2168,7 +2150,11 @@ mod tests {
         .await;
         assert_eq!(res.kind, WaitKind::Done);
         assert_eq!(res.final_text, "checked");
-        assert!(sub.check_calls() >= 1, "check_calls = {}", sub.check_calls());
+        assert!(
+            sub.check_calls() >= 1,
+            "check_calls = {}",
+            sub.check_calls()
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -2198,7 +2184,10 @@ mod tests {
             err_resp(),
             err_resp(),
             err_resp(),
-            history_ok(vec![user_ev(300), asst(350, "completed", "ratcheted", None)]),
+            history_ok(vec![
+                user_ev(300),
+                asst(350, "completed", "ratcheted", None),
+            ]),
         ]));
         let res = run_runner(Config {
             timeout: StdDuration::from_secs(60),
@@ -2231,7 +2220,10 @@ mod tests {
             history_ok(vec![user_ev(100)]),
             history_ok(vec![user_ev(100)]),
             history_ok(vec![user_ev(100)]),
-            history_ok(vec![user_ev(100), asst(190, "completed", "late reply", None)]),
+            history_ok(vec![
+                user_ev(100),
+                asst(190, "completed", "late reply", None),
+            ]),
         ]));
         let res = run_runner(Config {
             timeout: StdDuration::from_secs(60),
@@ -2430,10 +2422,7 @@ mod tests {
         let cancel2 = Cancel::new();
         cancel2.set();
         let err = runner.settle_pending(&cancel2, "completed").await;
-        assert!(
-            matches!(err, Err(RunError::Cancelled)),
-            "err = {err:?}"
-        );
+        assert!(matches!(err, Err(RunError::Cancelled)), "err = {err:?}");
     }
 
     #[tokio::test(start_paused = true)]
@@ -2489,17 +2478,18 @@ mod tests {
         .await;
         assert_eq!(res.kind, WaitKind::Timeout);
         assert_eq!(res.exit_code, 124);
-        assert!(sub.check_calls() >= 1, "check_calls = {}", sub.check_calls());
+        assert!(
+            sub.check_calls() >= 1,
+            "check_calls = {}",
+            sub.check_calls()
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn runner_approval_status_uses_waiter_status() {
         let sub = Arc::new(FakeSubscriber::new(vec![
             record_json(&task_ev("running", "R", "R", 100, None)),
-            record_json(&approval_ev(
-                vec![appr("A", &["allow_always"])],
-                None,
-            )),
+            record_json(&approval_ev(vec![appr("A", &["allow_always"])], None)),
         ]));
         let hist = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(100)])]));
         let res = run_runner(Config {
@@ -2518,10 +2508,7 @@ mod tests {
     async fn runner_plumbs_auto_approve_records() {
         let sub = Arc::new(FakeSubscriber::new(vec![
             record_json(&task_ev("running", "R", "R", 100, None)),
-            record_json(&approval_ev(
-                vec![appr("A", &["allow_always"])],
-                None,
-            )),
+            record_json(&approval_ev(vec![appr("A", &["allow_always"])], None)),
         ]));
         let hist = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(100)])]));
         let decider: Arc<Decider> = Arc::new(|_a: &DescribedApproval, _d: &str| Ok(()));
@@ -2545,10 +2532,7 @@ mod tests {
     async fn runner_approver_auth_error_propagates() {
         let sub = Arc::new(FakeSubscriber::new(vec![
             record_json(&task_ev("running", "R", "R", 100, None)),
-            record_json(&approval_ev(
-                vec![appr("A", &["allow_always"])],
-                None,
-            )),
+            record_json(&approval_ev(vec![appr("A", &["allow_always"])], None)),
         ]));
         let hist = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(100)])]));
         let decider: Arc<Decider> = Arc::new(|_a: &DescribedApproval, _d: &str| {
@@ -2582,9 +2566,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn runner_nil_subscriber_is_transport_failure() {
         let hist = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(100)])]));
-        let dial: DialFn = Arc::new(|_cancel: &Cancel| {
-            Box::pin(async { Ok(None) })
-        });
+        let dial: DialFn = Arc::new(|_cancel: &Cancel| Box::pin(async { Ok(None) }));
         let res = run_runner(Config {
             timeout: StdDuration::from_secs(5),
             recheck_after: Some(StdDuration::from_secs(1)),
@@ -2604,9 +2586,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn runner_check_state_nil_subscriber() {
         let hist = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(100)])]));
-        let dial: DialFn = Arc::new(|_cancel: &Cancel| {
-            Box::pin(async { Ok(None) })
-        });
+        let dial: DialFn = Arc::new(|_cancel: &Cancel| Box::pin(async { Ok(None) }));
         let runner = Runner::new(Config {
             timeout: StdDuration::from_secs(5),
             recheck_after: Some(StdDuration::from_secs(1)),
@@ -2739,7 +2719,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn runner_finish_last_chance_proof_error_after_cancel_returns_ctx_err() {
         let sub = Arc::new(FakeSubscriber::new(vec![record_json(&task_ev(
-            "interrupted", "R", "R", 180, None,
+            "interrupted",
+            "R",
+            "R",
+            180,
+            None,
         ))]));
         let cancel = Cancel::new();
         let hist = Arc::new(CancelOnReadHistory {
@@ -2993,10 +2977,7 @@ mod tests {
         let cancel2 = Cancel::new();
         cancel2.set();
         let err = runner.settle_pending(&cancel2, "completed").await;
-        assert!(
-            matches!(err, Err(RunError::Cancelled)),
-            "err = {err:?}"
-        );
+        assert!(matches!(err, Err(RunError::Cancelled)), "err = {err:?}");
     }
 
     // -- wait_redesign_test.go (23 fns) --
@@ -3064,7 +3045,11 @@ mod tests {
         // with a held terminal (no running seen): the
         // result is a timeout, not an approval.
         let sub = Arc::new(FakeSubscriber::new(vec![record_json(&task_ev(
-            "completed", "R", "R", 180, None,
+            "completed",
+            "R",
+            "R",
+            180,
+            None,
         ))]));
         let err_resp = || HistoryResp {
             events: Vec::new(),
@@ -3129,7 +3114,10 @@ mod tests {
         let hist = Arc::new(QueueHistory::new(vec![
             history_ok(vec![user_ev(10)]),
             history_ok(vec![user_ev(10)]),
-            history_ok(vec![user_ev(10), asst(11, "completed", "main's reply", None)]),
+            history_ok(vec![
+                user_ev(10),
+                asst(11, "completed", "main's reply", None),
+            ]),
         ]));
         let res = run_runner(Config {
             timeout: StdDuration::from_secs(600),
@@ -3256,7 +3244,15 @@ mod tests {
         let widget = json!({"widget_id": "w1", "kind": "choice", "state": {}});
         let hist = Arc::new(QueueHistory::new(vec![
             history_ok(vec![user_ev(100)]),
-            history_ok(vec![user_ev(100), asst(150, "completed", "pick one", Some(json!({"widgets": [widget]})))]),
+            history_ok(vec![
+                user_ev(100),
+                asst(
+                    150,
+                    "completed",
+                    "pick one",
+                    Some(json!({"widgets": [widget]})),
+                ),
+            ]),
         ]));
         let res = run_runner(Config {
             timeout: StdDuration::from_secs(60),
@@ -3420,7 +3416,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn redesign_last_chance_proof_spends_no_read_when_boundary_unknown() {
         let mut sub = FakeSubscriber::new(vec![record_json(&task_ev(
-            "interrupted", "R", "R", 180, None,
+            "interrupted",
+            "R",
+            "R",
+            180,
+            None,
         ))]);
         sub.block = true;
         let sub = Arc::new(sub);
@@ -3650,7 +3650,12 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn redesign_t16_replies_from_history_only() {
         let sub = Arc::new(FakeSubscriber::new(vec![
-            record_json(&asst(150, "completed", "live text must never surface", None)),
+            record_json(&asst(
+                150,
+                "completed",
+                "live text must never surface",
+                None,
+            )),
             record_json(&json!({"event": "delta.text_append", "payload": {"text": "partial"}})),
             record_json(&task_ev("running", "R", "R", 120, None)),
             record_json(&task_ev("completed", "R", "R", 180, None)),
@@ -3888,7 +3893,15 @@ mod tests {
         ]);
         sub.block = true;
         let sub = Arc::new(sub);
-        let proof = history_ok(vec![user_ev(10), asst(11, "completed", "subagent-only text", Some(json!({"agent_id": "S", "root_agent_id": "R"})))]);
+        let proof = history_ok(vec![
+            user_ev(10),
+            asst(
+                11,
+                "completed",
+                "subagent-only text",
+                Some(json!({"agent_id": "S", "root_agent_id": "R"})),
+            ),
+        ]);
         let hist = Arc::new(QueueHistory::new(vec![proof.clone(), proof]));
         let res = run_runner(Config {
             timeout: StdDuration::from_secs(5),
@@ -3915,7 +3928,10 @@ mod tests {
         let sub = Arc::new(sub);
         let hist = Arc::new(QueueHistory::new(vec![
             history_ok(vec![user_ev(10)]),
-            history_ok(vec![user_ev(10), asst(11, "completed", "proof reply", None)]),
+            history_ok(vec![
+                user_ev(10),
+                asst(11, "completed", "proof reply", None),
+            ]),
             history_ok(vec![user_ev(10)]),
         ]));
         let res = run_runner(Config {
@@ -4016,7 +4032,10 @@ mod tests {
             history_ok(vec![user_ev(100)]),
             history_ok(vec![user_ev(100)]),
             err_history_resp(),
-            history_ok(vec![user_ev(100), asst(190, "completed", "late reply", None)]),
+            history_ok(vec![
+                user_ev(100),
+                asst(190, "completed", "late reply", None),
+            ]),
         ]));
         let res = run_runner(Config {
             timeout: StdDuration::from_secs(60),
@@ -4035,7 +4054,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn loop2_explicit_boundary_accepts_replayed_failed() {
         let sub = Arc::new(FakeSubscriber::new(vec![record_json(&task_ev(
-            "interrupted", "R", "R", 180, None,
+            "interrupted",
+            "R",
+            "R",
+            180,
+            None,
         ))]));
         let hist = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(200)])]));
         let res = run_runner(Config {
@@ -4054,7 +4077,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn loop2_interrupted_held_for_subagents_settles_failed() {
         let sub = Arc::new(FakeSubscriber::new(vec![record_json(&task_ev(
-            "interrupted", "R", "R", 180, Some(json!(2)),
+            "interrupted",
+            "R",
+            "R",
+            180,
+            Some(json!(2)),
         ))]));
         let hist = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(200)])]));
         let res = run_runner(Config {
@@ -4106,7 +4133,13 @@ mod tests {
     async fn loop2_flapping_terminals_do_not_storm_history() {
         let mut script = vec![record_json(&task_ev("running", "R", "R", 120, None))];
         for _ in 0..3 {
-            script.push(record_json(&task_ev("completed", "R", "R", 180, Some(json!(2)))));
+            script.push(record_json(&task_ev(
+                "completed",
+                "R",
+                "R",
+                180,
+                Some(json!(2)),
+            )));
             script.push(record_json(&task_ev("idle", "R", "R", 181, None)));
         }
         let sub = Arc::new(FakeSubscriber::new(script));
@@ -4442,7 +4475,10 @@ mod tests {
             "running-only records must end without terminal"
         );
         assert!(
-            !ended_without_terminal(&[running.clone(), completed.clone()], Some(&mut terminal_predicate())),
+            !ended_without_terminal(
+                &[running.clone(), completed.clone()],
+                Some(&mut terminal_predicate())
+            ),
             "DONE after running must count as a terminal"
         );
         assert!(
@@ -4450,11 +4486,17 @@ mod tests {
             "DONE before any running must not count as a terminal"
         );
         assert!(
-            ended_without_terminal(&[running.clone(), suspect.clone()], Some(&mut terminal_predicate())),
+            ended_without_terminal(
+                &[running.clone(), suspect.clone()],
+                Some(&mut terminal_predicate())
+            ),
             "suspect strings must not count as terminal"
         );
         assert!(
-            ended_without_terminal(&[running.clone(), foreign.clone()], Some(&mut terminal_predicate())),
+            ended_without_terminal(
+                &[running.clone(), foreign.clone()],
+                Some(&mut terminal_predicate())
+            ),
             "foreign-root DONE must not count as a terminal"
         );
         assert!(

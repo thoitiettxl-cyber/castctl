@@ -178,9 +178,13 @@ fn tcp_dns_options(port: u16) -> DnsOptions {
 }
 
 async fn new_client(opts: DnsOptions) -> Client {
-    Client::new(opts, Arc::new(TcpTransportFactory), ClientOptions::default())
-        .await
-        .expect("client construction must succeed")
+    Client::new(
+        opts,
+        Arc::new(TcpTransportFactory),
+        ClientOptions::default(),
+    )
+    .await
+    .expect("client construction must succeed")
 }
 
 #[tokio::test]
@@ -252,10 +256,7 @@ async fn client_nil_bootstrap_is_error() {
     )
     .await
     .expect_err("explicit nil bootstrap must fail");
-    assert_eq!(
-        err.to_string(),
-        "dns: bootstrap function must not be nil"
-    );
+    assert_eq!(err.to_string(), "dns: bootstrap function must not be nil");
 }
 
 #[tokio::test]
@@ -378,10 +379,7 @@ async fn client_lifecycle() {
     let server = FakeDnsServer::start().await;
     let client = new_client(tcp_dns_options(server.port())).await;
     client.start().await.expect("first Start");
-    assert!(
-        client.start().await.is_err(),
-        "second Start must fail"
-    );
+    assert!(client.start().await.is_err(), "second Start must fail");
     client.close().await.expect("Close");
     client.close().await.expect("second Close must succeed");
     assert!(

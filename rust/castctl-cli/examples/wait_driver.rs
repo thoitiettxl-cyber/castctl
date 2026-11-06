@@ -54,8 +54,7 @@ use castctl_telegram::wait::WaitKind;
 use castctl_transport::TransportError;
 use castctl_transport::routes::RouteTable;
 use castctl_wait::{
-    Cancel, Config, HistoryReader, RunError, Runner, WaitResult,
-    subscriber::shared_subscriber,
+    Cancel, Config, HistoryReader, RunError, Runner, WaitResult, subscriber::shared_subscriber,
 };
 use serde_json::Value as SerdeValue;
 
@@ -71,8 +70,7 @@ struct FakeConnector {
 impl Connector for FakeConnector {
     fn connect(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Arc<Gateway>, TransportError>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn Future<Output = Result<Arc<Gateway>, TransportError>> + Send + '_>> {
         let url = self.url.clone();
         let routes = Arc::clone(&self.routes);
         Box::pin(async move { dial_gateway(&url, routes).await })
@@ -100,10 +98,7 @@ impl HistoryReader for DriverHistory {
         let cancel = cancel.clone();
         Box::pin(async move {
             let mut body = serde_json::Map::new();
-            body.insert(
-                "limit".to_string(),
-                SerdeValue::Number(limit.into()),
-            );
+            body.insert("limit".to_string(), SerdeValue::Number(limit.into()));
             if !thread.is_empty() {
                 body.insert("session_id".to_string(), SerdeValue::String(thread));
             }
@@ -131,10 +126,7 @@ impl HistoryReader for DriverHistory {
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
-            let has_more = m
-                .get("has_more")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            let has_more = m.get("has_more").and_then(|v| v.as_bool()).unwrap_or(false);
             Ok((events, has_more))
         })
     }
@@ -221,10 +213,7 @@ async fn main() {
         "ws://{}/v1/noise?vm_id=vm-test&auth_token=<redacted>",
         args.addr
     );
-    let shared = Arc::new(SharedConn::new(Arc::new(FakeConnector {
-        url,
-        routes,
-    })));
+    let shared = Arc::new(SharedConn::new(Arc::new(FakeConnector { url, routes })));
     if let Err(e) = shared.live().await {
         eprintln!("wait_driver: connect: {e}");
         std::process::exit(1);
@@ -287,9 +276,7 @@ async fn main() {
                         RunError::HistoryRead(te) => summarize_err(Some(te)),
                         _ => "wait failed".to_string(),
                     };
-                    eprintln!(
-                        "wait_driver: wait: unexpected error ({summary}); reporting timeout"
-                    );
+                    eprintln!("wait_driver: wait: unexpected error ({summary}); reporting timeout");
                     // AfterSeq is the REQUESTED one (0 when
                     // absent), not the derived boundary —
                     // `executeWait` has no access to the

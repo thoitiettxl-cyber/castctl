@@ -189,15 +189,9 @@ impl HistoryReader for HistoryAdapter {
         let cancel = cancel.clone();
         Box::pin(async move {
             let mut body = serde_json::Map::new();
-            body.insert(
-                "limit".to_string(),
-                SerdeValue::Number(limit.into()),
-            );
+            body.insert("limit".to_string(), SerdeValue::Number(limit.into()));
             if !thread.is_empty() {
-                body.insert(
-                    "session_id".to_string(),
-                    SerdeValue::String(thread),
-                );
+                body.insert("session_id".to_string(), SerdeValue::String(thread));
             }
             let call = shared.call_json(
                 "chat.history",
@@ -223,10 +217,7 @@ impl HistoryReader for HistoryAdapter {
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
-            let has_more = m
-                .get("has_more")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            let has_more = m.get("has_more").and_then(|v| v.as_bool()).unwrap_or(false);
             Ok((events, has_more))
         })
     }
@@ -554,9 +545,7 @@ fn serde_to_ordered(v: &SerdeValue) -> JsonValue {
         SerdeValue::Bool(b) => JsonValue::Bool(*b),
         SerdeValue::Number(n) => JsonValue::Number(n.to_string()),
         SerdeValue::String(s) => JsonValue::Str(s.clone()),
-        SerdeValue::Array(items) => {
-            JsonValue::Array(items.iter().map(serde_to_ordered).collect())
-        }
+        SerdeValue::Array(items) => JsonValue::Array(items.iter().map(serde_to_ordered).collect()),
         SerdeValue::Object(map) => {
             let mut o = OrderedObject::new();
             for (k, val) in map {
@@ -642,9 +631,9 @@ fn approval_json(a: &TelegramApproval) -> JsonValue {
             "options",
             match &a.options {
                 None => JsonValue::Null,
-                Some(opts) => JsonValue::Array(
-                    opts.iter().map(|s| JsonValue::Str(s.clone())).collect(),
-                ),
+                Some(opts) => {
+                    JsonValue::Array(opts.iter().map(|s| JsonValue::Str(s.clone())).collect())
+                }
             },
         ),
     ])
@@ -719,12 +708,7 @@ pub fn to_wait_result_json(res: &WaitResult, auto_approve_enabled: bool) -> Json
     if auto_approve_enabled {
         pairs.push((
             "auto_approved",
-            JsonValue::Array(
-                res.auto_approved
-                    .iter()
-                    .map(approved_json)
-                    .collect(),
-            ),
+            JsonValue::Array(res.auto_approved.iter().map(approved_json).collect()),
         ));
     }
     if !res.auto_approve_errors.is_empty() {
@@ -802,11 +786,7 @@ fn widget_id_str(id: &SerdeValue) -> String {
 fn widget_options_str(options: &SerdeValue) -> String {
     match options {
         SerdeValue::Null => String::new(),
-        SerdeValue::Array(items) => items
-            .iter()
-            .map(go_sprint)
-            .collect::<Vec<_>>()
-            .join(" / "),
+        SerdeValue::Array(items) => items.iter().map(go_sprint).collect::<Vec<_>>().join(" / "),
         other => go_sprint(other),
     }
 }
@@ -897,22 +877,13 @@ pub(crate) fn run_wait_command(
         None
     };
     let getenv = ctx.getenv;
-    let mut profile = resolve_active_profile(&loc.config_dir, profile_flag, getenv)
-        .map_err(config_err)?;
-    ensure_node_id(
-        &mut profile,
-        lookup_env(ctx, "MUSE_NODE_ID"),
-    );
-    let approve_enabled = resolve_auto_approve(
-        &profile,
-        flag_approve,
-        lookup_env(ctx, "MUSE_AUTO_APPROVE"),
-    )?;
-    let allow_once = resolve_auto_allow_once(
-        &profile,
-        flag_once,
-        lookup_env(ctx, "MUSE_AUTO_ALLOW_ONCE"),
-    )?;
+    let mut profile =
+        resolve_active_profile(&loc.config_dir, profile_flag, getenv).map_err(config_err)?;
+    ensure_node_id(&mut profile, lookup_env(ctx, "MUSE_NODE_ID"));
+    let approve_enabled =
+        resolve_auto_approve(&profile, flag_approve, lookup_env(ctx, "MUSE_AUTO_APPROVE"))?;
+    let allow_once =
+        resolve_auto_allow_once(&profile, flag_once, lookup_env(ctx, "MUSE_AUTO_ALLOW_ONCE"))?;
     let tokio_rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -1103,10 +1074,7 @@ mod tests {
         }];
         res.note = "some note".to_string();
         let (stdout, stderr) = print_wait_text(&res);
-        assert_eq!(
-            stdout,
-            "[42] hello\n  ? widget 7: Proceed? [yes / no]\n"
-        );
+        assert_eq!(stdout, "[42] hello\n  ? widget 7: Proceed? [yes / no]\n");
         assert_eq!(stderr, "note: some note\n-- done (status=completed)\n");
     }
 
@@ -1132,7 +1100,10 @@ mod tests {
         assert_eq!(structural_approval_id(""), "[omitted]");
         assert_eq!(structural_approval_id("a b"), "[omitted]");
         assert_eq!(structural_approval_id("a".repeat(65).as_str()), "[omitted]");
-        assert_eq!(structural_approval_id("a".repeat(64).as_str()), "a".repeat(64));
+        assert_eq!(
+            structural_approval_id("a".repeat(64).as_str()),
+            "a".repeat(64)
+        );
         assert_eq!(structural_decision("allow_once"), "allow_once");
         assert_eq!(structural_decision("deny"), "[omitted]");
         assert_eq!(structural_kind("shell"), "shell");

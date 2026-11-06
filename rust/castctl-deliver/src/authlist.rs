@@ -60,9 +60,8 @@ pub struct AuthList {
 /// holding `config.json` and `profiles/`); `active` is the
 /// active profile name.
 pub fn list_profiles(base_dir: &str, active: &str) -> Result<AuthList, DeliverError> {
-    let mut names = discover_profile_names(base_dir).map_err(|e| {
-        DeliverError::wrap("deliver: list profiles", Box::new(e))
-    })?;
+    let mut names = discover_profile_names(base_dir)
+        .map_err(|e| DeliverError::wrap("deliver: list profiles", Box::new(e)))?;
     if !names.iter().any(|n| n == active) {
         names.push(active.to_string());
     }
@@ -102,11 +101,7 @@ fn has_cookies(cookies_file: &str) -> bool {
 /// `str(cfg.get("auto_approve") or "off").lower()`.
 fn auto_approve_value(v: &str) -> String {
     let v = v.trim().to_lowercase();
-    if v.is_empty() {
-        "off".to_string()
-    } else {
-        v
-    }
+    if v.is_empty() { "off".to_string() } else { v }
 }
 
 /// Render the text form of `auth list` (Go
@@ -143,4 +138,3 @@ pub fn format_auth_list(list: &AuthList) -> String {
     }
     out
 }
-

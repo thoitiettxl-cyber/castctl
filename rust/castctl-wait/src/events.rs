@@ -154,7 +154,8 @@ mod tests {
     /// the single test of the NDJSON trailing-data rule.
     #[test]
     fn decode_record_cases() {
-        let ev = decode_record(br#"{"event":"task.status","seq":120,"payload":{"status":"running"}}"#);
+        let ev =
+            decode_record(br#"{"event":"task.status","seq":120,"payload":{"status":"running"}}"#);
         assert!(ev.is_some(), "valid record = {ev:?}");
         let ev = ev.unwrap();
         assert_eq!(ev["event"], json!("task.status"));

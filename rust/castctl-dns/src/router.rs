@@ -55,11 +55,7 @@ impl SingleServerRouter {
 
     fn pick(&self) -> Option<Arc<dyn DnsTransport>> {
         if !self.final_tag.is_empty() {
-            if let Some(t) = self
-                .transports
-                .iter()
-                .find(|t| t.tag() == self.final_tag)
-            {
+            if let Some(t) = self.transports.iter().find(|t| t.tag() == self.final_tag) {
                 return Some(Arc::clone(t));
             }
         }

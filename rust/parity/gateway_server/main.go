@@ -365,9 +365,9 @@ func runServeE2E() error {
 //     silence: the server sends nothing and the client's idle
 //     timeout ends the batch.
 type waitScript struct {
-	Thread        string              `json:"thread"`
-	HistoryStages []waitHistoryStage  `json:"history_stages"`
-	Subscribes    []waitSubscribe     `json:"subscribes"`
+	Thread        string             `json:"thread"`
+	HistoryStages []waitHistoryStage `json:"history_stages"`
+	Subscribes    []waitSubscribe    `json:"subscribes"`
 }
 
 type waitHistoryStage struct {
@@ -491,7 +491,7 @@ func waitHandler(st *waitState) gatewaytest.Handler {
 				CloseAfter: sub.Drop,
 			}
 		default:
-			return handler()(req, service)
+			return handler().Handle(req, service)
 		}
 	})
 }

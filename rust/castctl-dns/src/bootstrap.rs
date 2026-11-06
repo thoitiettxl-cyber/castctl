@@ -82,7 +82,10 @@ async fn substitute_server_address(
     bootstrap: &BootstrapFn,
 ) -> Result<DnsServerKind, DnsError> {
     match kind {
-        DnsServerKind::Tcp { server, server_port } => {
+        DnsServerKind::Tcp {
+            server,
+            server_port,
+        } => {
             let server = substitute_address(server, None, bootstrap).await?;
             Ok(DnsServerKind::Tcp {
                 server,
@@ -117,9 +120,7 @@ async fn substitute_server_address(
         }
         // Types without an address field are returned
         // unchanged (Go `bootstrap.go:39-67` default).
-        DnsServerKind::Local | DnsServerKind::Hosts | DnsServerKind::FakeIp => {
-            Ok(kind.clone())
-        }
+        DnsServerKind::Local | DnsServerKind::Hosts | DnsServerKind::FakeIp => Ok(kind.clone()),
     }
 }
 

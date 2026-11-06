@@ -90,8 +90,7 @@ impl Client {
         let bootstrap = if options.bootstrap_set {
             options.bootstrap
         } else {
-            let default: BootstrapFn =
-                Arc::new(|host: String| Box::pin(default_bootstrap(host)));
+            let default: BootstrapFn = Arc::new(|host: String| Box::pin(default_bootstrap(host)));
             Some(default)
         };
         if opts.servers.is_empty() {
@@ -100,9 +99,7 @@ impl Client {
             ));
         }
         let Some(bootstrap) = bootstrap else {
-            return Err(DnsError::message(
-                "dns: bootstrap function must not be nil",
-            ));
+            return Err(DnsError::message("dns: bootstrap function must not be nil"));
         };
         let servers = substitute_bootstrap(&opts.servers, &bootstrap).await?;
         let mut transports: HashMap<String, Arc<dyn DnsTransport>> = HashMap::new();
@@ -116,11 +113,13 @@ impl Client {
                 },
                 kind: server.kind.clone(),
             };
-            let transport = factory.create(&tagged).map_err(|e| DnsError::CreateTransport {
-                kind: tagged.kind.type_name().to_string(),
-                tag: tagged.tag.clone(),
-                source: Box::new(e),
-            })?;
+            let transport = factory
+                .create(&tagged)
+                .map_err(|e| DnsError::CreateTransport {
+                    kind: tagged.kind.type_name().to_string(),
+                    tag: tagged.tag.clone(),
+                    source: Box::new(e),
+                })?;
             transports.insert(tagged.tag.clone(), Arc::clone(&transport));
             ordered.push(transport);
         }

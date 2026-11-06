@@ -181,7 +181,10 @@ pub fn describe_approval(a: &Value) -> DescribedApproval {
         .and_then(as_map);
     let payload = get(a, "payload").and_then(as_map);
     let mut rows: HashMap<&str, &Value> = HashMap::new();
-    if let Some(list) = display.and_then(|d| d.get("detail_rows")).and_then(Value::as_array) {
+    if let Some(list) = display
+        .and_then(|d| d.get("detail_rows"))
+        .and_then(Value::as_array)
+    {
         for r in list {
             if let Some(rm) = as_map(r) {
                 if let Some(label) = rm.get("label").and_then(Value::as_str) {
@@ -415,10 +418,7 @@ impl fmt::Debug for ApprovalResult {
             .field("handled", &self.handled)
             .field("approved", &self.approved)
             .field("errors", &self.errors)
-            .field(
-                "err",
-                &self.err.as_ref().map(|e| e.to_string()),
-            )
+            .field("err", &self.err.as_ref().map(|e| e.to_string()))
             .finish()
     }
 }
@@ -436,14 +436,8 @@ pub type Decider = dyn Fn(&DescribedApproval, &str) -> Result<(), BoxError> + Se
 /// plus a close function (Go `AutoApprover.connect`). The
 /// close function runs even when deciding fails, and is
 /// never called when `Connect` itself fails.
-pub type ConnectFn = dyn Fn() -> Result<
-    (
-        Box<Decider>,
-        Box<dyn FnOnce() + Send>,
-    ),
-    BoxError,
-> + Send
-+ Sync;
+pub type ConnectFn =
+    dyn Fn() -> Result<(Box<Decider>, Box<dyn FnOnce() + Send>), BoxError> + Send + Sync;
 
 /// Called after each successful decide with the approval
 /// id and decision (Go `AutoApprover.OnDecided`).
@@ -604,7 +598,9 @@ impl AutoApprover {
                 // cloned). Each record carries the same text.
                 let text = e.to_string();
                 for item in items {
-                    outcome.errors.push(Self::err_for(item, "", Box::from(text.clone())));
+                    outcome
+                        .errors
+                        .push(Self::err_for(item, "", Box::from(text.clone())));
                 }
                 return outcome;
             }
@@ -663,11 +659,7 @@ impl AutoApprover {
                 Ok(()) => {
                     outcome.approved.push(rec);
                     if let Some(id) = &item.approval_id {
-                        let cb = self
-                            .on_decided
-                            .lock()
-                            .ok()
-                            .and_then(|slot| slot.clone());
+                        let cb = self.on_decided.lock().ok().and_then(|slot| slot.clone());
                         if let Some(cb) = cb {
                             cb(id, &decision);
                         }
@@ -728,4 +720,3 @@ impl AutoApprover {
         })
     }
 }
-

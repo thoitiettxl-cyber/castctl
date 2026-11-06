@@ -28,9 +28,9 @@ mod slog;
 mod summarize;
 
 pub use factory::{
-    EmitFn, Handle, Level, LogError, Logger, Settings, emit, new_factory, open_log_file,
-    parse_level,
+    emit, new_factory, open_log_file, parse_level, EmitFn, Handle, Level, LogError, Logger,
+    Settings,
 };
 pub use resolve::{resolve_log_settings, valid_log_level};
 pub use slog::{SlogLevel, SlogLogger, SlogValue};
-pub use summarize::{RedactedError, safe_err_for_level, summarize_err, wrap_err, wrap_error};
+pub use summarize::{safe_err_for_level, summarize_err, wrap_err, wrap_error, RedactedError};

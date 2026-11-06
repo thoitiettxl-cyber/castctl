@@ -95,7 +95,9 @@ fn encode_name(out: &mut Vec<u8>, name: &str) {
 /// Decode one DNS message (query or response).
 pub fn decode_message(buf: &[u8]) -> Result<DnsMessage, DnsError> {
     if buf.len() < 12 {
-        return Err(DnsError::Protocol("message shorter than header".to_string()));
+        return Err(DnsError::Protocol(
+            "message shorter than header".to_string(),
+        ));
     }
     if buf.len() > MAX_MESSAGE {
         return Err(DnsError::Protocol("message too large".to_string()));
@@ -113,7 +115,11 @@ pub fn decode_message(buf: &[u8]) -> Result<DnsMessage, DnsError> {
         let name = r.name()?;
         let qtype = r.u16_at()?;
         let qclass = r.u16_at()?;
-        questions.push(Question { name, qtype, qclass });
+        questions.push(Question {
+            name,
+            qtype,
+            qclass,
+        });
     }
     let mut answers = Vec::with_capacity(ancount);
     for _ in 0..ancount {
@@ -170,7 +176,11 @@ impl<'a> Reader<'a> {
     }
 
     fn bytes(&mut self, n: usize) -> Result<&'a [u8], DnsError> {
-        if self.pos.checked_add(n).is_none_or(|end| end > self.buf.len()) {
+        if self
+            .pos
+            .checked_add(n)
+            .is_none_or(|end| end > self.buf.len())
+        {
             return Err(DnsError::Protocol("truncated message".to_string()));
         }
         let out = &self.buf[self.pos..self.pos + n];
@@ -213,9 +223,9 @@ impl<'a> Reader<'a> {
                 return Err(DnsError::Protocol("bad name label".to_string()));
             }
             let start = pos + 1;
-            let end = start.checked_add(len).ok_or_else(|| {
-                DnsError::Protocol("name label overflow".to_string())
-            })?;
+            let end = start
+                .checked_add(len)
+                .ok_or_else(|| DnsError::Protocol("name label overflow".to_string()))?;
             if end > self.buf.len() {
                 return Err(DnsError::Protocol("truncated label".to_string()));
             }

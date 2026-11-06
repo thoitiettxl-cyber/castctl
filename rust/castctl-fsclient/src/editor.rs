@@ -30,12 +30,7 @@ use crate::{FsError, python_repr};
 /// zero replaces none (but still errors when `old` is
 /// absent), and a positive count replaces at most that
 /// many, from the left.
-pub fn apply_replace(
-    text: &str,
-    old: &str,
-    new: &str,
-    count: i64,
-) -> Result<String, FsError> {
+pub fn apply_replace(text: &str, old: &str, new: &str, count: i64) -> Result<String, FsError> {
     if !text.contains(old) {
         return Err(FsError::msg(format!(
             "--replace: text not found: {}",
@@ -223,9 +218,8 @@ pub fn edit_in_editor_with_env(
     if editor.is_empty() {
         editor = "vi".to_string();
     }
-    let argv = split_editor_command(&editor).map_err(|e| {
-        FsError::msg(format!("fsclient: split editor command: {e}"))
-    })?;
+    let argv = split_editor_command(&editor)
+        .map_err(|e| FsError::msg(format!("fsclient: split editor command: {e}")))?;
     if argv.is_empty() {
         return Err(FsError::msg("fsclient: empty editor command"));
     }
@@ -248,8 +242,7 @@ fn run_editor(argv: &[String], tmp_path: &std::path::Path) -> Result<Vec<u8>, Fs
     // non-zero exit (or a missing editor binary) still
     // yields whatever the file holds afterwards.
     let _ = cmd.status();
-    std::fs::read(tmp_path)
-        .map_err(|e| FsError::msg(format!("fsclient: read temp file: {e}")))
+    std::fs::read(tmp_path).map_err(|e| FsError::msg(format!("fsclient: read temp file: {e}")))
 }
 
 /// Create a `castctl-edit-*<suffix>` temporary file
@@ -305,27 +298,15 @@ mod tests {
 
     #[test]
     fn apply_replace() {
-        assert_eq!(
-            apply_replace("a b a", "a", "c", -1).unwrap(),
-            "c b c"
-        );
-        assert_eq!(
-            apply_replace("a b a", "a", "c", 1).unwrap(),
-            "c b a"
-        );
-        assert_eq!(
-            apply_replace("a b a", "a", "c", 0).unwrap(),
-            "a b a"
-        );
+        assert_eq!(apply_replace("a b a", "a", "c", -1).unwrap(), "c b c");
+        assert_eq!(apply_replace("a b a", "a", "c", 1).unwrap(), "c b a");
+        assert_eq!(apply_replace("a b a", "a", "c", 0).unwrap(), "a b a");
         let err = apply_replace("abc", "z", "y", -1).unwrap_err();
         assert_eq!(err.to_string(), "--replace: text not found: 'z'");
         // count=0 still errors when old is absent: Python
         // checks membership before replacing.
         assert!(apply_replace("abc", "z", "y", 0).is_err());
-        assert_eq!(
-            apply_replace("aaa", "a", "b", 2).unwrap(),
-            "bba"
-        );
+        assert_eq!(apply_replace("aaa", "a", "b", 2).unwrap(), "bba");
     }
 
     #[test]
@@ -384,7 +365,11 @@ mod tests {
             .collect()
     }
 
-    fn edit_with(data: &[u8], suffix: &str, env: &HashMap<String, String>) -> Result<Vec<u8>, FsError> {
+    fn edit_with(
+        data: &[u8],
+        suffix: &str,
+        env: &HashMap<String, String>,
+    ) -> Result<Vec<u8>, FsError> {
         edit_in_editor_with_env(data, suffix, &|k: &str| env.get(k).cloned())
     }
 
@@ -438,10 +423,7 @@ mod tests {
             ("VISUAL", ""),
             ("EDITOR", &format!("{} --wait --extra", script.display())),
         ]);
-        assert_eq!(
-            edit_with(b"hello", ".md", &env).unwrap(),
-            b"helloEDITED"
-        );
+        assert_eq!(edit_with(b"hello", ".md", &env).unwrap(), b"helloEDITED");
         let recorded = std::fs::read_to_string(&sidecar).unwrap();
         assert!(
             recorded.ends_with(".md"),
@@ -454,7 +436,10 @@ mod tests {
         );
 
         // VISUAL beats EDITOR.
-        let env = env_map(&[("VISUAL", "true"), ("EDITOR", &script.display().to_string())]);
+        let env = env_map(&[
+            ("VISUAL", "true"),
+            ("EDITOR", &script.display().to_string()),
+        ]);
         assert_eq!(edit_with(b"hello", "", &env).unwrap(), b"hello");
 
         // quoted editor path with spaces.
@@ -466,7 +451,10 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&spaced, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let env = env_map(&[("VISUAL", ""), ("EDITOR", &format!("'{}'", spaced.display()))]);
+        let env = env_map(&[
+            ("VISUAL", ""),
+            ("EDITOR", &format!("'{}'", spaced.display())),
+        ]);
         assert_eq!(edit_with(b"hi", "", &env).unwrap(), b"hiEDITED");
 
         // unbalanced quote errors.

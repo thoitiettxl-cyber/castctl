@@ -88,9 +88,9 @@ impl DnsServerKind {
     #[must_use]
     pub fn server(&self) -> Option<&str> {
         match self {
-            Self::Tcp { server, .. }
-            | Self::Tls { server, .. }
-            | Self::Https { server, .. } => Some(server),
+            Self::Tcp { server, .. } | Self::Tls { server, .. } | Self::Https { server, .. } => {
+                Some(server)
+            }
             Self::Local | Self::Hosts | Self::FakeIp => None,
         }
     }

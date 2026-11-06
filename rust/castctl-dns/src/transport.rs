@@ -118,7 +118,12 @@ impl DnsTransport for TcpDnsTransport {
             for ans in &msg.answers {
                 match (ans.rtype, ans.rdata.len()) {
                     (QTYPE_A, 4) => {
-                        out.push(IpAddr::from([ans.rdata[0], ans.rdata[1], ans.rdata[2], ans.rdata[3]]));
+                        out.push(IpAddr::from([
+                            ans.rdata[0],
+                            ans.rdata[1],
+                            ans.rdata[2],
+                            ans.rdata[3],
+                        ]));
                     }
                     (QTYPE_AAAA, 16) => {
                         let mut b = [0u8; 16];
@@ -144,7 +149,10 @@ pub struct TcpTransportFactory;
 impl DnsTransportFactory for TcpTransportFactory {
     fn create(&self, server: &DnsServer) -> Result<Arc<dyn DnsTransport>, DnsError> {
         match &server.kind {
-            DnsServerKind::Tcp { server, server_port } => {
+            DnsServerKind::Tcp {
+                server,
+                server_port,
+            } => {
                 let ip: IpAddr = server.parse().map_err(|_| {
                     DnsError::Unsupported(format!(
                         "dns: server {server:?} is not an IP literal after bootstrap"

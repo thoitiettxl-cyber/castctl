@@ -27,10 +27,8 @@ fn temp_dir(tag: &str) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "castctl-fsclient-{tag}-{}-{n}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("castctl-fsclient-{tag}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -221,12 +219,13 @@ impl FsGateway for FakeGateway {
                     let data = base64::engine::general_purpose::STANDARD
                         .decode(encoded)
                         .map_err(|e| FsError::msg(e.to_string()))?;
-                    let append = body
-                        .get("append")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
+                    let append = body.get("append").and_then(Value::as_bool).unwrap_or(false);
                     if append {
-                        state.files.entry(p.clone()).or_default().extend_from_slice(&data);
+                        state
+                            .files
+                            .entry(p.clone())
+                            .or_default()
+                            .extend_from_slice(&data);
                     } else {
                         state.files.insert(p.clone(), data.clone());
                     }
@@ -291,19 +290,13 @@ impl FsGateway for FakeGateway {
                     }
                     if state.dirs.contains(&p) {
                         if !recursive {
-                            let has_child = state
-                                .files
-                                .keys()
-                                .any(|f| f.starts_with(&format!("{p}/")));
+                            let has_child =
+                                state.files.keys().any(|f| f.starts_with(&format!("{p}/")));
                             if has_child {
-                                return Err(FsError::msg(format!(
-                                    "directory not empty: {p}"
-                                )));
+                                return Err(FsError::msg(format!("directory not empty: {p}")));
                             }
                         }
-                        state
-                            .files
-                            .retain(|f, _| !f.starts_with(&format!("{p}/")));
+                        state.files.retain(|f, _| !f.starts_with(&format!("{p}/")));
                         state.dirs.remove(&p);
                         return Ok(json!({"path": format!("/{p}")}));
                     }
@@ -386,9 +379,7 @@ impl FsGateway for BadBase64Gateway {
         _body: Value,
         _timeout: Duration,
     ) -> Pin<Box<dyn Future<Output = Result<Value, FsError>> + Send + '_>> {
-        Box::pin(async move {
-            Ok(json!({"data_base64": "!!!not-base64!!!", "eof": true}))
-        })
+        Box::pin(async move { Ok(json!({"data_base64": "!!!not-base64!!!", "eof": true})) })
     }
 }
 
@@ -476,7 +467,13 @@ async fn fs_method_names_match_routes() {
     assert_eq!(
         methods,
         vec![
-            "fs.list", "fs.stat", "fs.read", "fs.search", "fs.write", "fs.mkdir", "fs.rename",
+            "fs.list",
+            "fs.stat",
+            "fs.read",
+            "fs.search",
+            "fs.write",
+            "fs.mkdir",
+            "fs.rename",
             "fs.delete"
         ]
     );
@@ -484,10 +481,7 @@ async fn fs_method_names_match_routes() {
 
 #[tokio::test]
 async fn fs_list_and_walk() {
-    let gw = FakeGateway::new(&[
-        ("config/home.yaml", b"x"),
-        ("memory/a/b.md", b"y"),
-    ]);
+    let gw = FakeGateway::new(&[("config/home.yaml", b"x"), ("memory/a/b.md", b"y")]);
     let f = new_fs(Arc::clone(&gw));
     let entries = f.list_dir("/").await.unwrap();
     let names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
@@ -549,7 +543,12 @@ async fn fs_chunked_read_and_write() {
     for c in gw2.calls() {
         if c.method == "fs.write" {
             ow2.push(c.body.get("overwrite").and_then(Value::as_bool).unwrap());
-            cp2.push(c.body.get("create_parent").and_then(Value::as_bool).unwrap());
+            cp2.push(
+                c.body
+                    .get("create_parent")
+                    .and_then(Value::as_bool)
+                    .unwrap(),
+            );
         }
     }
     assert_eq!(ow2, vec![false, true]);
@@ -630,10 +629,7 @@ async fn fs_put_skips_symlink_to_dir() {
 
 #[tokio::test]
 async fn fs_get_and_put_recursive() {
-    let gw = FakeGateway::new(&[
-        ("memory/a.md", b"A"),
-        ("memory/sub/b.md", b"B"),
-    ]);
+    let gw = FakeGateway::new(&[("memory/a.md", b"A"), ("memory/sub/b.md", b"B")]);
     let f = new_fs(Arc::clone(&gw));
     let dir = temp_dir("get-put");
     let got = f.get("memory", &dir, true).await.unwrap();
@@ -666,10 +662,7 @@ async fn fs_get_file_and_put_file() {
     assert_eq!(got, vec![exact.clone()]);
     // Put a single file; "directory" kind spelling is also accepted.
     gw.set_dir_kind("directory");
-    let res = f
-        .put(&exact, "remote/copy.txt", false, true)
-        .await
-        .unwrap();
+    let res = f.put(&exact, "remote/copy.txt", false, true).await.unwrap();
     assert_eq!(res.len(), 1);
     assert_eq!(res[0].path, "/remote/copy.txt");
     assert_eq!(res[0].bytes_written, 5);
@@ -692,7 +685,10 @@ async fn fs_move_delete_mkdir_stat_search() {
     f.move_path("a.txt", "newdir/a.txt", false, true)
         .await
         .unwrap();
-    assert!(gw.file("newdir/a.txt").is_some(), "move did not create newdir/a.txt");
+    assert!(
+        gw.file("newdir/a.txt").is_some(),
+        "move did not create newdir/a.txt"
+    );
     assert!(gw.file("a.txt").is_none(), "move left a.txt in fake");
     // Verify the move call body used fs.rename with source/destination.
     let rename_body = gw
@@ -787,9 +783,11 @@ fn write_result_json() {
 #[test]
 fn decode_entries_shapes() {
     // Missing entries key yields no entries.
-    assert!(decode_entries(&json!({"path": "/"}), "fs.list")
-        .unwrap()
-        .is_empty());
+    assert!(
+        decode_entries(&json!({"path": "/"}), "fs.list")
+            .unwrap()
+            .is_empty()
+    );
     // A non-object result is an error.
     assert!(decode_entries(&json!("junk"), "fs.list").is_err());
     // A non-object entry is an error.

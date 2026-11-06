@@ -77,7 +77,7 @@ pub mod transport;
 pub mod wire;
 
 pub use bootstrap::{BOOTSTRAP_TIMEOUT, BootstrapFn, default_bootstrap, substitute_bootstrap};
-pub use client::{LOOKUP_TIMEOUT, Client, ClientOptions};
+pub use client::{Client, ClientOptions, LOOKUP_TIMEOUT};
 pub use error::DnsError;
 pub use router::{DnsRouter, SingleServerRouter};
 pub use server::{DnsOptions, DnsServer, DnsServerKind, is_domain};

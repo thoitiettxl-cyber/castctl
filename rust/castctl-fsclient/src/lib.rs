@@ -442,9 +442,7 @@ pub fn decode_entries(result: &Value, method: &str) -> Result<Vec<Entry>, FsErro
         match decode_entry(item) {
             Ok(e) => entries.push(e),
             Err(e) => {
-                return Err(FsError::msg(format!(
-                    "fsclient: {method}: entry {i}: {e}"
-                )));
+                return Err(FsError::msg(format!("fsclient: {method}: entry {i}: {e}")));
             }
         }
     }
@@ -561,12 +559,7 @@ impl<G: FsGateway> Fs<G> {
     /// One `fs.*` call, returning its decoded object
     /// result (Go `FS.call`). A nil gateway, a non-object
     /// result, and a gateway error are all errors.
-    async fn call(
-        &self,
-        method: &str,
-        body: Value,
-        timeout: Duration,
-    ) -> Result<Value, FsError> {
+    async fn call(&self, method: &str, body: Value, timeout: Duration) -> Result<Value, FsError> {
         let gw = match &self.gw {
             Some(gw) => gw,
             None => return Err(FsError::msg("fsclient: nil gateway")),
@@ -587,11 +580,7 @@ impl<G: FsGateway> Fs<G> {
     pub async fn list_dir(&self, path: &str) -> Result<Vec<Entry>, FsError> {
         let p = norm(path)?;
         let result = self
-            .call(
-                "fs.list",
-                serde_json::json!({"path": p}),
-                CALL_TIMEOUT,
-            )
+            .call("fs.list", serde_json::json!({"path": p}), CALL_TIMEOUT)
             .await?;
         decode_entries(&result, "fs.list")
     }
@@ -649,11 +638,7 @@ impl<G: FsGateway> Fs<G> {
     /// stopping early once `max_bytes` bytes have been
     /// read. A `None` max reads to EOF; a non-positive max
     /// reads nothing and makes no call.
-    pub async fn read_file(
-        &self,
-        path: &str,
-        max_bytes: Option<i64>,
-    ) -> Result<Vec<u8>, FsError> {
+    pub async fn read_file(&self, path: &str, max_bytes: Option<i64>) -> Result<Vec<u8>, FsError> {
         let mut out: Vec<u8> = Vec::new();
         let mut off: i64 = 0;
         loop {
@@ -678,11 +663,7 @@ impl<G: FsGateway> Fs<G> {
     /// Search remote file names (Go `Search`): `fs.search`
     /// with `{name: {contains}}`, plus `"limit"` only when
     /// limit is positive.
-    pub async fn search(
-        &self,
-        contains: &str,
-        limit: i64,
-    ) -> Result<Vec<Entry>, FsError> {
+    pub async fn search(&self, contains: &str, limit: i64) -> Result<Vec<Entry>, FsError> {
         let mut body = serde_json::json!({"name": {"contains": contains}});
         if limit > 0 {
             if let Some(obj) = body.as_object_mut() {
@@ -1049,4 +1030,3 @@ fn collect_local_dir(
     }
     Ok(())
 }
-

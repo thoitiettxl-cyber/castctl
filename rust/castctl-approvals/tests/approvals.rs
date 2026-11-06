@@ -11,8 +11,8 @@
 use std::sync::{Arc, Mutex};
 
 use castctl_approvals::{
-    ApprovalResult, AutoApprover, BoxError, DescribedApproval, FOREVER, ONCE,
-    choose_auto_decision, describe_approval, offers_forever, offers_once,
+    ApprovalResult, AutoApprover, BoxError, DescribedApproval, FOREVER, ONCE, choose_auto_decision,
+    describe_approval, offers_forever, offers_once,
 };
 use castctl_transport::TransportError;
 use serde_json::json;
@@ -63,13 +63,10 @@ fn item(id: &str, options: &[&str]) -> DescribedApproval {
 /// decider. The decider is shared (`Arc`): `Connect` is
 /// `Fn`, called once per `Approve`, so it cannot move a
 /// `Box` out.
-fn connect_ok(
-    decide: Arc<castctl_approvals::Decider>,
-) -> Box<castctl_approvals::ConnectFn> {
+fn connect_ok(decide: Arc<castctl_approvals::Decider>) -> Box<castctl_approvals::ConnectFn> {
     Box::new(move || {
         let d = Arc::clone(&decide);
-        let decider: Box<castctl_approvals::Decider> =
-            Box::new(move |a, decision| d(a, decision));
+        let decider: Box<castctl_approvals::Decider> = Box::new(move |a, decision| d(a, decision));
         Ok((decider, Box::new(|| {}) as Box<dyn FnOnce() + Send>))
     })
 }
@@ -188,16 +185,79 @@ fn choose_auto_decision() {
     };
     let cases: Vec<(&str, DescribedApproval, bool, bool, &str, bool)> = vec![
         ("off", with_opts(&[FOREVER]), false, false, "", false),
-        ("forever offered", with_opts(&[FOREVER, ONCE]), true, false, FOREVER, true),
-        ("no options assumes forever", DescribedApproval::default(), true, false, FOREVER, true),
-        ("once only, fallback off", with_opts(&[ONCE]), true, false, "", false),
-        ("once only, fallback on", with_opts(&[ONCE]), true, true, ONCE, true),
-        ("forever wins over once", with_opts(&[ONCE, FOREVER]), true, true, FOREVER, true),
+        (
+            "forever offered",
+            with_opts(&[FOREVER, ONCE]),
+            true,
+            false,
+            FOREVER,
+            true,
+        ),
+        (
+            "no options assumes forever",
+            DescribedApproval::default(),
+            true,
+            false,
+            FOREVER,
+            true,
+        ),
+        (
+            "once only, fallback off",
+            with_opts(&[ONCE]),
+            true,
+            false,
+            "",
+            false,
+        ),
+        (
+            "once only, fallback on",
+            with_opts(&[ONCE]),
+            true,
+            true,
+            ONCE,
+            true,
+        ),
+        (
+            "forever wins over once",
+            with_opts(&[ONCE, FOREVER]),
+            true,
+            true,
+            FOREVER,
+            true,
+        ),
         ("deny only", with_opts(&["deny"]), true, true, "", false),
-        ("session never picked", with_opts(&["allow_session"]), true, true, "", false),
-        ("today never picked", with_opts(&["allow_today"]), true, true, "", false),
-        ("first option never picked blindly", with_opts(&["deny", "allow_session"]), true, true, "", false),
-        ("no options not turned into once", DescribedApproval::default(), true, true, FOREVER, true),
+        (
+            "session never picked",
+            with_opts(&["allow_session"]),
+            true,
+            true,
+            "",
+            false,
+        ),
+        (
+            "today never picked",
+            with_opts(&["allow_today"]),
+            true,
+            true,
+            "",
+            false,
+        ),
+        (
+            "first option never picked blindly",
+            with_opts(&["deny", "allow_session"]),
+            true,
+            true,
+            "",
+            false,
+        ),
+        (
+            "no options not turned into once",
+            DescribedApproval::default(),
+            true,
+            true,
+            FOREVER,
+            true,
+        ),
     ];
     for (name, d, auto, once, want, want_ok) in cases {
         let (got, ok) = choose_auto_decision(&d, auto, once);
@@ -233,7 +293,12 @@ fn auto_approver_decides_each_at_most_once() {
     assert_eq!(out.handled, vec!["a1".to_string()]);
     assert_eq!(out.approved.len(), 1);
     assert_eq!(out.approved[0].decision, FOREVER);
-    assert_eq!(out.errors.len(), 1, "want 1 skip error, got {:?}", out.errors);
+    assert_eq!(
+        out.errors.len(),
+        1,
+        "want 1 skip error, got {:?}",
+        out.errors
+    );
     assert_eq!(*calls.lock().unwrap(), vec!["a1".to_string()]);
     // Second call: a1 is already claimed and the a2 skip
     // warning fired once already: no re-decide, no new errors.
@@ -323,7 +388,11 @@ fn auto_approver_concurrent_same_id_decides_once() {
     let h2 = std::thread::spawn(move || a2.approve(std::slice::from_ref(&i2)));
     let _ = h1.join();
     let _ = h2.join();
-    assert_eq!(*calls.lock().unwrap(), 1, "concurrent decide calls must be 1");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        1,
+        "concurrent decide calls must be 1"
+    );
 }
 
 #[test]
@@ -369,8 +438,15 @@ fn auto_approver_failed_decide_claims_id() {
     let it = item("a1", &[FOREVER]);
     aa.approve(std::slice::from_ref(&it));
     let out = aa.approve(std::slice::from_ref(&it));
-    assert_eq!(*calls.lock().unwrap(), 1, "a failed decide still claims the id");
-    assert!(out.errors.is_empty(), "second Approve errs must be none (claimed)");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        1,
+        "a failed decide still claims the id"
+    );
+    assert!(
+        out.errors.is_empty(),
+        "second Approve errs must be none (claimed)"
+    );
 }
 
 #[test]
@@ -401,7 +477,10 @@ fn auto_approver_auth_error_propagates_and_stops() {
         false,
     ));
     let res2: ApprovalResult = aa2.as_approver()(&items);
-    assert!(res2.err_is_auth(), "connect-AuthError Err must be an AuthError");
+    assert!(
+        res2.err_is_auth(),
+        "connect-AuthError Err must be an AuthError"
+    );
 }
 
 #[test]
@@ -415,7 +494,11 @@ fn auto_approver_empty_id_claimed_once() {
     let aa = AutoApprover::new(Some(connect_ok(decide)), false);
     let it = item("", &[FOREVER]);
     let out = aa.approve(&[it.clone(), it]);
-    assert_eq!(*calls.lock().unwrap(), 1, "\"\" is a present id, claimed once");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        1,
+        "\"\" is a present id, claimed once"
+    );
     assert_eq!(out.handled, vec![String::new()]);
 }
 
@@ -451,7 +534,10 @@ fn described_approval_clone() {
     assert_eq!(orig.scope.as_deref(), Some("S"));
     assert_eq!(orig.why.as_deref(), Some("W"));
     assert_eq!(orig.expires_at_ms, Some(7.0));
-    assert_eq!(orig.options.as_deref(), Some(vec![FOREVER.to_string()].as_slice()));
+    assert_eq!(
+        orig.options.as_deref(),
+        Some(vec![FOREVER.to_string()].as_slice())
+    );
 }
 
 #[test]
@@ -479,16 +565,27 @@ fn auto_approver_warned_distinguishes_nil_and_empty_id() {
         ..Default::default()
     };
     let new_approver = || {
-        let decide: Arc<castctl_approvals::Decider> = Arc::new(move |a, _| {
-            panic!("decide must never run for a skipped approval: {a:?}")
-        });
+        let decide: Arc<castctl_approvals::Decider> =
+            Arc::new(move |a, _| panic!("decide must never run for a skipped approval: {a:?}"));
         AutoApprover::new(Some(connect_ok(decide)), false)
     };
     let cases: Vec<(&str, Vec<Vec<DescribedApproval>>)> = vec![
-        ("nil then empty in one call", vec![vec![nil_item.clone(), empty_item.clone()]]),
-        ("empty then nil in one call", vec![vec![empty_item.clone(), nil_item.clone()]]),
-        ("nil then empty across calls", vec![vec![nil_item.clone()], vec![empty_item.clone()]]),
-        ("empty then nil across calls", vec![vec![empty_item.clone()], vec![nil_item.clone()]]),
+        (
+            "nil then empty in one call",
+            vec![vec![nil_item.clone(), empty_item.clone()]],
+        ),
+        (
+            "empty then nil in one call",
+            vec![vec![empty_item.clone(), nil_item.clone()]],
+        ),
+        (
+            "nil then empty across calls",
+            vec![vec![nil_item.clone()], vec![empty_item.clone()]],
+        ),
+        (
+            "empty then nil across calls",
+            vec![vec![empty_item.clone()], vec![nil_item.clone()]],
+        ),
     ];
     for (name, calls) in cases {
         let aa = new_approver();

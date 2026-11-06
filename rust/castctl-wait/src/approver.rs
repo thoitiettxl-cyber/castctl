@@ -302,8 +302,7 @@ mod tests {
             .await;
         assert!(out.fatal.is_some(), "auth must be fatal");
         assert_eq!(
-            out.errors[0].summary,
-            "conn: auth_failed message_length=7",
+            out.errors[0].summary, "conn: auth_failed message_length=7",
             "Go SummarizeErr for AuthError: class + message length, no message bytes"
         );
         assert!(matches!(

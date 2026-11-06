@@ -230,7 +230,9 @@ pub async fn derive_boundary(
     for (i, &limit) in limits.iter().enumerate() {
         let (events, has_more) = match read_window(reader, limit, cancel, deadline).await {
             Ok(v) => v,
-            Err(e) if e.is_auth() || matches!(e, HistoryError::Cancelled | HistoryError::Deadline) => {
+            Err(e)
+                if e.is_auth() || matches!(e, HistoryError::Cancelled | HistoryError::Deadline) =>
+            {
                 return Err(e);
             }
             Err(_) => continue,

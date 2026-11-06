@@ -171,10 +171,7 @@ pub async fn wake(deps: WakeDeps) -> Result<WakeResult, DeliverError> {
         let info = fetch_session_info(Arc::clone(&client), deps.cookies.clone())
             .await
             .map_err(|e| {
-                DeliverError::wrap(
-                    "deliver: wake: fetch session info",
-                    Box::new(e) as BoxError,
-                )
+                DeliverError::wrap("deliver: wake: fetch session info", Box::new(e) as BoxError)
             })?;
         info.vm_id
     } else {
@@ -187,17 +184,14 @@ pub async fn wake(deps: WakeDeps) -> Result<WakeResult, DeliverError> {
         vm_id,
     );
     let (status, body) = match tokio::time::timeout(WAKE_TIMEOUT, fut).await {
-        Ok(result) => result.map_err(|e| {
-            DeliverError::wrap("deliver: wake", Box::new(e) as BoxError)
-        })?,
+        Ok(result) => {
+            result.map_err(|e| DeliverError::wrap("deliver: wake", Box::new(e) as BoxError))?
+        }
         Err(_) => {
             return Err(DeliverError::msg(
                 "deliver: wake: context deadline exceeded",
             ));
         }
     };
-    Ok(WakeResult {
-        status,
-        body,
-    })
+    Ok(WakeResult { status, body })
 }

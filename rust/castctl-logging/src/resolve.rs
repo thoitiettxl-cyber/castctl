@@ -17,8 +17,8 @@
 //! Precedence is CLI > config block > sing-box default. No
 //! resolved value is ever echoed in an error.
 
-use castctl_config::errors::{ConfigError, config_error};
-use castctl_config::log::{LogConfig, valid_log_level};
+use castctl_config::errors::{config_error, ConfigError};
+use castctl_config::log::{valid_log_level, LogConfig};
 
 /// Re-export under the Go name for callers that think in
 /// `profile` terms.
