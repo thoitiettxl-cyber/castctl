@@ -379,8 +379,18 @@ fn read_response_head_deadline(
                 }
             }
             Err(e) => {
+                // A blocking socket with `set_read_timeout`
+                // reports an expired read timeout as
+                // `WouldBlock` (EAGAIN), not `TimedOut` —
+                // `std::net::TcpStream::set_read_timeout`
+                // documents the `WouldBlock` kind. Mapping
+                // only `TimedOut` misclassified every real
+                // header timeout as `"transport"` (found by
+                // the failing deadline test, fix loop 1).
                 let kind = match e.kind() {
-                    std::io::ErrorKind::TimedOut => TransportErrorKind::Timeout,
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                        TransportErrorKind::Timeout
+                    }
                     _ => TransportErrorKind::Transport,
                 };
                 return Err(http_error_for(url, kind));
@@ -702,8 +712,13 @@ pub fn fetch_bytes(
                 }
             }
             Err(e) => {
+                // See `read_response_head_deadline`: a
+                // socket read timeout surfaces as
+                // `WouldBlock`, not `TimedOut`.
                 let kind = match e.kind() {
-                    std::io::ErrorKind::TimedOut => TransportErrorKind::Timeout,
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                        TransportErrorKind::Timeout
+                    }
                     _ => TransportErrorKind::Transport,
                 };
                 return Err(HttpError {
@@ -940,19 +955,25 @@ mod tests {
     /// Safety F2 (fix loop 1): the 30s response-header
     /// bound is a TOTAL deadline, not a per-read one —
     /// pinned here with a scaled-down deadline against
-    /// a server that sends nothing.
+    /// a server that sends nothing. The server holds
+    /// the connection open (it only sleeps); the
+    /// client's 300ms socket read timeout fires first
+    /// and surfaces as `WouldBlock`, which the
+    /// deadline path maps to `"timeout"`.
     #[test]
     fn response_head_deadline_times_out_on_stalled_server() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
+                // Hold the connection open past the
+                // deadline; send nothing.
                 std::thread::sleep(Duration::from_secs(2));
                 let _ = stream.write_all(b"");
             }
         });
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
         let url = parse_url("http://127.0.0.1/x").unwrap();
         let err =
             read_response_head_deadline(&mut stream, &url, Duration::from_millis(200)).unwrap_err();

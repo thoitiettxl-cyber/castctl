@@ -8752,6 +8752,28 @@ re-verification at `23db9f8`:
     aborts when the cue working tree has a dirty
     `rust/Cargo.lock` even if byte-identical —
     discard it first.
+13. Disk-full test run (fix loop 1, 2026-11-05):
+    cue hit 0 bytes (22M avail) mid-`cargo test`
+    — `/tmp/m6c-target` had grown 9.3G → 15G
+    from TWO generations of ~300MB test binaries
+    (06:03 stale + 07:27 current). The link of
+    `castctl-transport` died with `ld terminated
+    with signal 7 [Bus error]`. Fixed by deleting
+    only the stale 06:03 generation (846 files,
+    5.2G, `find -newermt`) + own probe scratch;
+    never touched other sessions' `/tmp` trees
+    (`/tmp/t72` 9.3G, `/tmp/perf-verify-target`,
+    `/tmp/mea-m6b-fix1`) or `/root/castctl`.
+14. Socket read timeout kind (fix loop 1): std
+    `TcpStream::set_read_timeout` reports an
+    expired read as `ErrorKind::WouldBlock`
+    (EAGAIN), NOT `TimedOut` — both io-error
+    mappings in `http.rs` (`read_response_head_deadline`,
+    `fetch_bytes`) mapped only `TimedOut`, so a
+    real header/body timeout classified as
+    `"transport"`. Fixed by mapping `WouldBlock`
+    → `Timeout` in both arms; the deadline test
+    pins it with a 300ms socket timeout.
 
 ## M6c.7 Fix loop 1 — clippy (2026-11-05)
 
@@ -8873,7 +8895,14 @@ Non-blocking disposition (none dropped silently):
   F2 deadlines: header 30s TOTAL + fetch 60s
   + asset 10m TOTAL implemented; mechanism
   pinned by a 200ms scaled-down test; live
-  timing unverified (§M6c.5). F3 decide panic:
+  timing unverified (§M6c.5). Found while
+  gating: a socket read timeout surfaces as
+  `WouldBlock` (EAGAIN), not `TimedOut`, so
+  both io-error mappings (`read_response_head_deadline`
+  + `fetch_bytes`) now map `WouldBlock` →
+  `"timeout"`; the deadline test's server must
+  hold the connection open (an early close
+  yields EOF → `"transport"`, correctly). F3 decide panic:
   fixed (`decide_missing_release_errors_not_panics`).
   F4/F-a close error: fixed via `nix::close`
   (`"update: cannot close the extracted binary"`);
