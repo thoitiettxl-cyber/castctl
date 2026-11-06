@@ -1,0 +1,1 @@
+castctl: outbound: create endpoint wireguard[wg-home-r0]: decode private key: illegal base64 data at input byte 4

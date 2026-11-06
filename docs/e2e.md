@@ -281,3 +281,139 @@ control itself at the end of every run.
 Nothing in this document claims any of the above as proven. Each is
 either SKIP with reason in the script or a manual step for the
 operator's live run.
+
+## Rust E2E results (M7c, base `dev-rust` `0173436`, 2026-11-06; fix loop 1)
+
+The Rust port was put through the same 9-item proof on cue against the
+Go binary (`castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)`, sha256
+`c8ea009e…`). Rust binary (fix loop 1): `/tmp/m7c-fl1-target/release/castctl-rs`,
+22,026,632 B, sha256 `729e9af5…`, `--version` → `castctl 0.9.0`
+(unstamped). Live profile `no.0`. Full verbatim evidence: local working
+notes (not published; raw captures beside them). Every claim below names
+its base: M7b PR-1 #76 is merged at this base (`0173436`), so 36 commands
+are wired; `telegram run`, `keeper run` and `update` are still CLI stubs
+in the Rust binary (exit 1, `castctl: not ported yet in the Rust port`).
+
+| # | Item | Verdict |
+|---|------|---------|
+| 1 | CLI surface (46 cmd `--help` + 34 sub `--help` + dispatch) | **PASS** (help) / status recorded — 82 stems, only `--version` stamp differs; 36 wired / 10 stub (live, isolated env); command total 46, not 47; M7b PR-2 commands (`fs`/`send`/`watch`/`chat`) marked chưa wire / PR-2 pending |
+| 2 | Live read-only (`no.0`, 18 labels) | **PASS** — 16/18 RAW-MATCH; 2 usage diffs = live drift fields only (`bonus_tokens.balance_units`, `topupBalance`), JSON-EQUAL after dropping exactly those; the normalisation is now calibrated by a Go×Go control (drift -24,139 / -23,496 over ~83 s, an order of magnitude larger than the Go-vs-Rust diffs) |
+| 3 | wait + subscribe | **PASS** (narrowed) — exit codes + shapes match Go, incl. the shared replies-exclusion quirk in the wait-before-send scenario; subscribe proven by a temporary `eprintln!` probe through `on_record` (15 lines, reverted after; `grep M7C-PROBE` returns 0 files in the current tree) — the probe proves the instrumented build's handler only; all three turns returned `replies: []` on both sides, so reply delivery is NOT proven by this item |
+| 4 | Telegram bot | **PASS (library level)** — CLI `telegram run` is a stub; driver test `rust/castctl-telegram/tests/m7c_bot_e2e.rs` green (1 passed) vs fake Bot API + real Go gateway; getMe, 30-entry menu, streamed text turn, photo, auto-decide + button decide, inbound media, clean shutdown; Go comparison: 5/5 Go telegram tests PASS on cue; resume leg repaired in fix loop 1 (strengthened assertion FAILED first at `after_seq` 42, then PASSED at `after_seq` 15 — the resume now delivers the completed reply; scope: resume of an already-completed turn, not a live post-decision continuation) |
+| 5 | Keeper | **PASS (library level)** — CLI `keeper run` is a stub; driver example `rust/castctl-keeper/examples/m7c_keeper_e2e.rs`, 2 ticks `ok`, `cookies_seen=10`, original `cookies.txt` byte-identical before/after (scratch copy only); Go `keeper check` on the same scratch copy matches exactly; the tick dials direct, which IS the profile-outbound path for `no.0` (no outbound configured; Go synthesises a direct outbound); CDP export leg proven in fix loop 1 with a seeded fake `hatch_sess` cookie (direct probe `exported=1`) after fixing the bootstrap's `Runtime.evaluate("self", returnByValue: true)` (-32000); transfer of a real session cookie remains unmeasured. `castctl-keeper` is not linked into any shipped binary, so this fix is library-level only (exercised by library tests/probe, not by the `castctl-rs` binary). The export→file write-back seam has never run end-to-end: the probe prints what `export()` returns and writes no file, and no driver tick has executed a successful export post-fix (pre-fix run RED `export_failed`; run2 stopped at `auth_error`, `exported=0`). |
+| 6 | WebUI | **PASS** — 21/21 request matrix MATCH normalised (raw 19/21; the 2 raw diffs are exactly the rule-covered normalisations; the verdict now rests on the smoke's fresh re-run matrix + the separate verdict file — fresh servers and fresh bcrypt salts, but the same plaintext tokens as the writer's run (tokens sha `5cafacd3…`), so a fresh re-run of the same inputs, not an independent run; the writer's original raw matrix file was lost, overwritten during the smoke tarball extraction, and can no longer be re-checked); rate-limit mini-run identical both sides; Rust reports `go_version`/`singbox_version` "unknown" — a real divergence laundered by the presence+type normalisation, recorded explicitly |
+| 7 | Plugin | **PASS** — echo `plugin check` byte-identical both sides; crash fixtures segfault in call/init: Go host DIES with a SIGSEGV dump (in-process loader), Rust host survives and reports `plugin crashed with signal 11` (subprocess worker), exit 2 both sides — **[DEVIATION]** deliberate architectural divergence in Rust's favour, not byte-parity with Go's crash behaviour |
+| 8 | Update | **FAIL (still a stub)** — `--check --json` flags do not exist in Go either (both sides reject identically, exit 2); Rust `update --dry-run` is a stub (exit 1) vs Go exit 0 `castctl is up to date: 0.9.0`; M7b PR-1 #76 merged but did NOT wire `update` (`cmd_update` still `Err(stub(ctx))` at `0173436`); crate-level unstamped refusal proven (`dev_build_refuses_before_network`, `dev_build_refuses_with_zero_requests`); all 43 `castctl-update` tests pass incl. `dry_run_writes_nothing` |
+| 9 | Perf (full-surface `castctl-rs`) | **PASS** — run11: stripped 21,552,104 B (0.448× Go, 2.23× smaller); startup band ~3.5–4.8× across methods (driver 3.55×/4.35×, hyperfine 4.44×/4.72×); RSS `--version` 6.312 MiB vs 47.742 MiB (Go high bimodal mode; low mode 30.37 MiB in run10); pure logic 2.1–6.8× faster; see `rust/perf/README.md` "Bảng số (run11)" |
+
+Gaps carried forward (not claimed as proven): item 8 real `--dry-run`
+comparison (`update` still a stub at `0173436` — needs PR-2 wiring);
+item 7 fuse behaviour at CLI level; item 6 traversal
+coverage weaker than M6b's encoded variants; item 5 transfer of a real
+session cookie via CDP export (fake-cookie transfer proven); item 3
+M7a's claimed reply-seq-26704 observation not reproduced on either side;
+item 3 reply delivery by wait; item 4 resume of a live post-decision
+continuation.
+
+### Rebase-2 (base `dev-rust` `2ae2f14`, 2026-11-06 — M7b PR-2 #78 + PR #79 merged)
+
+Rebased cleanly (`git rebase origin/dev-rust`, 6/6, zero conflicts; head
+`e864c7b`, diff 28 files, only `rust/**` + `docs/e2e.md`). Go tree
+unchanged between `0173436` and `2ae2f14` (empty diff on `internal/`,
+`cmd/`, `go.mod`), so the Go reference is still `castctl 0.9.0 (1396697
+2026-11-04T21:38:36Z)`, sha256 `c8ea009e…`. Rust release binary rebuilt on
+cue: 29,716,256 B, sha256 `d666c335…` (deleted after the run to free disk;
+captures kept locally, not published).
+
+- **Item 1 — PASS (help) / status updated.** 82 stems, only `--version`
+  differs (stamp); diff-out=1, diff-err=0, diff-code=0. Help-only stdout
+  sha256 identical both sides: `bc527db3…` — the same hash as fix loop 1,
+  so the help surface is unchanged across the rebase. `not ported yet`
+  lines in help: 0 both sides. Command total still **46** (Go
+  `commandOrder` recount at the new base), not 47. Dispatch (live,
+  isolated env, 46 probes + 3 extra): **40 wired / 1 partial (`auth`) / 5 stub top-level**
+  (`update`, `telegram`, `keeper`, `profile`, `config`; `auth` partial:
+  `list`/`import`/`status` stub, `export`/`login`/`observe-login` are
+  Go-faithful terminal behaviours, not stubs). PR-2 commands `chat`,
+  `send`, `watch`, `fs` are now wired (exit 2 `cookies_missing` in the
+  isolated env, no stub line) — the "PR-2 pending" label from fix loop 1
+  no longer applies to them. Static count still **10 `stub(ctx)`
+  call-sites** (`run.rs`: 618 `history --download` — the only allowed
+  stub; 626 `cmd_plain` fall-through — unreachable, all 37 plain commands
+  are covered by the wired branches 5 + 13 + 19; 804 `cmd_update`; 868 /
+  883 / 918 `auth list` / `import` / `status`; 1009 `cmd_profile`
+  fall-through — all profile subcommands; 1054 `config migrate`; 1097
+  `telegram`; 1147 `keeper`). Live probes cover 9 of the 10 call-sites
+  (all exit 1 with the stub line); only the unreachable 626 is
+  static-only.
+- **Item 8 — still FAIL (stub).** PR-2 did NOT wire `update`
+  (`cmd_update` still `Err(stub(ctx))`, `run.rs:801-806`); its scope was
+  `fs`/`send`/`watch`/`chat`. Re-verified live: Go `update --dry-run`
+  exit 0 `castctl is up to date: 0.9.0`; Rust `update --dry-run` exit 1
+  stub, binary sha256 unchanged before/after; `--check --json` rejected
+  identically both sides (exit 2). The flip now needs a dedicated wiring
+  change for `update` (no milestone owns it yet), not another merge.
+- **Gates (cue, `cargo +1.99.1`, `CARGO_TARGET_DIR=/tmp/m7c-rb2-target`,
+  deleted after): fmt 0; build 0; test 0 — 1471 passed, 0 failed
+  (66 suites; PR-2's 1470 + the M7c bot e2e's 1 test, `m7c_bot_e2e.rs`
+  `1 passed`); clippy `--all-targets -- -D warnings` 0.**
+- **Smoke re-run (no rebase regression):** item 2 subset (`status` /
+  `usage` / `threads` / `feed`, debug binary) all MATCH, exits 0/0;
+  item 3 idle control A: Go 124, Rust 124, stdout IDENTICAL; item 6
+  matrix 21/21 MATCH; item 7 `plugin check` echo byte-identical,
+  crashcall/crashinit exit 2 both sides, control echo-after exit 0.
+  Smoke used the debug binary (same code as the release binary used for
+  item 1) — behaviour smoke only, not a perf re-measurement.
+- **Incidents:** (1) the release build's SSH session broke after ~15 min
+  (broken pipe) — the build had already finished; binary verified by
+  sha256 on reconnect. (2) Disk fell to 4.2G free during the test gate
+  (concurrent M7d + PR-3 writer target dirs, 13G + growing); freed 1.2G
+  by deleting the release profile dir (binary already measured) and
+  finished the gate; target dir deleted after, cue back to 20G free.
+  (3) The item-6 script's `kill $PID` missed the webui servers (`$!`
+  was the `cd &&` subshell, not the server) — both servers (Go 18317,
+  Rust 18318) were killed by direct PID afterwards, ports verified
+  closed. (4) `/tmp/m7c-plugin/` fixtures were gone on cue — rebuilt
+  from source (`examples/plugin/echo`, `/tmp/m7c-crash-src/crashcall` /
+  `crashinit`) into `/tmp/m7c-rb2-plugin/`; echo sha256 `f80d065a…`,
+  crashcall `e1246664…`, crashinit `6dc4f2d6…`.
+
+### Rebase-3 (base `dev-rust` `3532d02`, 2026-11-06 — PR #80 docs-only `rust/README.md`)
+
+Rebased cleanly (`git rebase origin/dev-rust`, 7/7, zero conflicts; head
+`1266ceb`, diff 28 files, only `rust/**` + `docs/e2e.md`). PR #80 is
+docs-only (1 file `rust/README.md`, +83, no code — verified by
+`git log` + `git diff --stat 2ae2f14..3532d02`), so no M7c code changed
+and no item re-measurement was needed beyond the confirmations below.
+
+- **Item 1 — confirmed unchanged (spot-check, debug binary).** Static:
+  still 10 `stub(ctx)` call-sites in `run.rs` at the same lines as
+  rebase-2 (618, 626, 804, 868, 883, 918, 1009, 1054, 1097, 1147), so
+  dispatch stays **40 wired / 1 partial (`auth`) / 5 stub top-level**. Live spot-check (cue,
+  debug binary sha256 `c3ff2000…`): top-level `--help` stdout + stderr
+  byte-identical to Go; `--version` differs stamp-only (`castctl 0.9.0`
+  vs `castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)`); 9 subcommand
+  `--help` (`status`, `send`, `chat`, `watch`, `fs`, `profile`,
+  `telegram`, `keeper`, `update`) all exit 0; `not ported yet` lines in
+  help: 0.
+- **Item 8 — still FAIL (stub).** `cmd_update` still `Err(stub(ctx))`;
+  live: Rust `update --dry-run` exit 1 with the stub line on stderr, vs
+  Go exit 0 `up to date`. PR #80 touched no code, so no wiring change
+  was expected.
+- **Gates (cue, `cargo +1.99.1`, `CARGO_TARGET_DIR=/tmp/m7c-rb3-target`,
+  deleted after): fmt 0; build 0; test 0 — 1471 passed, 0 failed
+  (66 suites); clippy `--all-targets -- -D warnings` 0.**
+- **Incidents:** (1) My round-1 gates script used the default PATH `go`
+  (wrapper 1.26.8, `GOTOOLCHAIN=local`), so `loader_live` failed 22/22
+  (`go.mod requires go >= 1.27.3`) and `cargo test`'s default fail-fast
+  stopped the run at `castctl-pluginhost` (743 passed at that point) —
+  the same env mistake as the writer's fix-loop-1 incident, not a code
+  regression. Re-ran with the correct env (`PATH=/usr/local/go/bin`,
+  `GOTOOLCHAIN=auto`, `--no-fail-fast`): **1471 passed, 0 failed**,
+  identical to rebase-2. (2) Disk fell to 1.4G free (99%) during the
+  round-1 gate — my 17G target dir plus two other sessions' stale
+  13G + 17G target dirs; no other session's files were touched, and
+  disk recovered to 18G then 33G free as other sessions cleaned up.
+  Target + source deleted after the gate; cue left clean, no M7c
+  processes or listeners.
+

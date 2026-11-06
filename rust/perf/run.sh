@@ -1,6 +1,8 @@
 #!/bin/sh
 # M-perf-0 one-command rerun (on cue, from the repo root):
-#   sh rust/perf/run.sh [--skip-build] [--skip-item5]
+#   sh rust/perf/run.sh [--skip-build] [--skip-item5] [--skip-full]
+# --skip-full (M7c run11): skip the castctl-full legacy builds/columns;
+# run11 headline is go vs castctl-rs (full surface at this head).
 # Builds the Rust release binary (plain, then RUSTFLAGS=-C strip=symbols),
 # runs items 1-5, writes rust/perf/data/*.json + summary.json, prints the
 # summary table. Requires: cargo +1.99.1, Go (PATH=/usr/local/go/bin),

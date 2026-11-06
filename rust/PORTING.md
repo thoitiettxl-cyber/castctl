@@ -11489,6 +11489,129 @@ Rust thì nhanh hơn bao nhiêu" — câu trả lời thứ hai chỉ có ở it
 `md_to_html` (81% render chain), `split_text` collect `Vec<char>`, đo
 lại sau validation, item 5 đảo chiều lần nữa (caveat theo tải, không
 phải hotspot tối ưu), startup/binary đã đủ tốt, transport thật chưa đo.
+## Hiệu năng (run11, M7c — perf-final: `castctl-rs` full-surface vs Go)
+
+M7c đo lại toàn bộ bằng `rust/perf/run.sh --skip-full --skip-item5` trên cue, 2026-11-06,
+commit `e7a97d7` (dev-rust: M1..M7a + M6b + M6c-b đã merge; M7b chưa merge).
+**Đây là lần đầu headline là `castctl-rs` full-surface** — bot + keeper + webui + plugin +
+update đã link vào binary (caveat (7) ở mục run10 nay ĐÃ ĐÓNG: không còn "binary Rust chưa đủ
+bề mặt tính năng"). `rust-full` (`castctl-full`) không đo ở run11 (`--skip-full`, legacy reference
+only, lần cuối đo ở run10); item 5 không chạy lại (`--skip-item5`, transport không đổi từ run10 —
+trích run10: Rust 0.713 vs Go 0.782 ms/req, 0.91×). Số thô: `rust/perf/data/run11-summary.json`
++ `run11-*.json` (run10 giữ nguyên ở `data/run10-summary.json` + `summary.json`).
+
+**Caption (run11):** commit `e7a97d7fcf44f5ad99899ee9e0705a7f1efcf263` (2026-11-06T12:50:57Z).
+Build: `RUSTFLAGS="-C strip=symbols" CARGO_TARGET_DIR=/tmp/m7c-target cargo +1.99.1 build --release
+--locked -p castctl-rs` (target dir ấm từ build M7c cùng ngày — build_plain 0.4 s, build_stripped
+0.3 s, chỉ relink). sha256 (đầy đủ trong `run11-summary.json`): Go
+`c8ea009e49c5bffce3c6b971db0f9f86948ab3904f478da33d43b6b60a9bc374` (cùng binary run7–run10),
+Rust stripped `f68f1dd9a0c66998dba38eeb589a709f119c337d1f46169820dd04ba859ac62c` — **trùng sha với
+binary M7c build trước đó cùng ngày ở cùng checkout path** (tái lập sha theo pinned path, như run9/10),
+bench `5501f43228164f0bdc976f5af4b47cc9dbb3bcdc8f2201b6a87f3898985af72f` (3,245,824 B — khác run10
+`c8832c18…`, 3,178,400 B, vì `castctl-config` đã đổi từ `fbaa0d7` sang `e7a97d7`: M6a/M6b/M7a).
+Máy: cue, `Linux 6.18.38+ x86_64`, 8 × Xeon @ 2.50GHz, loadavg 1-phút 5.84 lúc bắt đầu, 5.61 giữa
+chừng, 5.86 sau item 4 (CAO hơn run10 0.98→5.46→1.69 — xem caveat tải dưới đây). Đĩa 9.40 GiB
+trống lúc bắt đầu, 9.31 GiB lúc kết thúc. Go 1.27.3, cargo/rustc 1.99.1. N=20 (startup/RSS,
+warmup 5); logic thuần N=5 (Go 1 process × 5 counts × 100 iters, Rust 5 process runs, adaptive K).
+
+| Mục | Go (full, median) | Rust `castctl-rs` full-surface (median) | Rust/Go |
+|---|---|---|---|
+| Binary stripped | 48,100,296 B (45.87 MiB) | **21,552,104 B (20.55 MiB)** | **0.448 (2.23× nhỏ hơn)** |
+| Binary chưa strip (Rust) | — | 28,239,056 B | 0.587 |
+| Startup `--version` | 7.701 ms (7.150–9.099) | **2.172 ms (1.916–3.082)** | **0.282 (3.55×)** |
+| Startup `--help` | 8.951 ms (7.978–10.833) | **2.056 ms (1.784–2.770)** | **0.230 (4.35×)** |
+| Peak RSS `--version` (GNU time) | 47.742 MiB (47.676–47.930) | **6.312 MiB (6.152–6.410)** | **0.132** |
+| Peak RSS `--help` (GNU time) | 43.861 MiB (43.672–43.988) | **6.205 MiB (6.078–6.305)** | **0.141** |
+| `status --config min` wall / RSS | 9.408 ms / 45.484 MiB | **3.104 ms / 8.494 MiB** | 0.330 / 0.187 |
+| `status --config large` wall / RSS | 38.546 ms / 49.482 MiB | **8.609 ms / 10.391 MiB** | 0.223 / 0.210 |
+| `status --config bad-JSON` wall / RSS | 8.488 ms / 44.234 MiB | **2.173 ms / 6.861 MiB** | 0.256 / 0.155 |
+| Parse config min (42 B) | 6,283 ns/iter | **2,507 ns/iter** | 0.40 (2.5×) |
+| Parse config large (32,246 B) | 7,701,068 ns/iter | **1,125,881 ns/iter** | 0.146 (6.8×) |
+| `MDToHTML` (51,560 B) | 5,693,248 ns/iter | **872,762 ns/iter** | 0.153 (6.5×) |
+| `SplitText` (51,560 B) | 551,307 ns/iter | **267,193 ns/iter** | 0.485 (2.1×) |
+| Render chain | 6,708,111 ns/iter | **1,076,972 ns/iter** | 0.161 (6.2×) |
+| 1 request SOCKS5 loopback | 0.782 ms/req (run10) | 0.713 ms/req (run10, harness) | 0.91 (trích run10) |
+
+First measured run, warmup=0, N=1 (không dùng làm kết luận): Go 10.557 ms / 47.930 MiB;
+Rust 3.793 ms / 6.434 MiB. Hyperfine 1.18.0 (N=20, median): `--version` Go 9.070 ms vs Rust
+2.043 ms (0.225); `--help` Go 9.291 ms vs Rust 1.970 ms (0.212) — driver vs hyperfine lệch
+3.8–17.8% ở median run11 (Go `--version` driver 7.701 vs hyperfine 9.070 ms — lệch 17.8%;
+mean lệch 27.4%: 7.766 vs 9.895 ms; Rust 2.172 vs 2.043 ms — 5.9–6.3%); tỉ lệ startup trích
+dạng dải liên phương pháp ~3.5–4.8× (driver 3.55×/4.35×; hyperfine 4.44×/4.72×).
+
+Kết luận: `castctl-rs` full-surface vẫn nhanh hơn Go ngoài sai số ở mọi mục (startup ~3.5–4.8×,
+RSS ~7× ở mode cao — xem caveat (2), logic thuần 2.1–6.8×), nhưng **tỉ lệ size xấu đi so với run10** (0.363 → 0.448):
+stripped 17,475,048 B → 21,552,104 B (+4,077,056 B, +23.3%). Đây KHÔNG phải regression —
+đó là bề mặt tính năng mới link vào (bot + keeper + webui + plugin + update, M5a/M6a/M6b/M6c-b/M7a);
+run10 đo binary thiếu các bề mặt đó. Từ run11, headline size là 0.448×, không phải 0.363×.
+Caveat: (1) tải run11 CAO hơn run10 (loadavg ~5.6–5.9 so với 0.98–5.46) nhưng Go `--version`
+median lại GIẢM (7.701 vs 10.051 ms) — tải không giải thích hết drift giữa các run; đừng trích
+tỉ lệ wall tuyệt đối mà không kèm loadavg; RSS vẫn là metric ổn định nhất. (2) RSS Go `--version`
+ở run11 là 47.74 MiB = **mode cao** của bimodal (run10: 30.37 MiB mode thấp; verify rerun: 47.7 MiB
+mode cao) — tỉ lệ RSS 0.132 là tỉ lệ ở mode cao; ở mode thấp Go tỉ lệ sẽ ~0.20 như run10 (0.204).
+(3) Caveat (2) của run10 vẫn đúng: Go làm nhiều việc hơn ở parse-large/render (validate outbound
+sâu, 52,163 allocs/op median; `MDToHTML` 4,855,638 B/op + 8,387 allocs/op median) còn Rust defer
+sing-box validation (D-M2-1) — đo lại sau khi Rust bổ sung validation. (4) Item 5 trích run10,
+không đo lại. (5) Honesty line như run10: Go dùng sing-box làm engine, Rust dùng honk-outbound;
+items 1–3 trả lời "binary Rust mang full stack đã port thì nặng bao nhiêu so với binary Go full",
+không trả lời "cùng engine viết bằng Rust thì nhanh hơn bao nhiêu" — câu trả lời thứ hai chỉ có ở
+item 4 (pure-logic, cùng thuật toán). Hotspot ưu tiên không đổi (xem `rust/perf/README.md`).
+
+### M7c rebase-2 onto `dev-rust` `2ae2f14` (M7b PR-2 #78 + PR #79 merged, 2026-11-06)
+
+Rebase clean 6/6, zero conflicts; head `e864c7b`; diff 28 files, only
+`rust/**` + `docs/e2e.md`; Go tree unchanged (`internal/`, `cmd/`,
+`go.mod` empty diff `0173436..2ae2f14`). Item 1 re-run (cue, release
+binary 29,716,256 B, sha256 `d666c335…`): 82 help stems, only
+`--version` differs (stamp); help-only sha256 identical both sides
+(`bc527db3…`, same as fix loop 1); `not ported yet` lines in help: 0.
+Dispatch is now **40 wired / 1 partial (`auth`) / 5 stub top-level** (`update`, `telegram`,
+`keeper`, `profile`, `config`; `auth` partial) — PR-2 wired `chat`,
+`send`, `watch`, `fs`. Static count still 10 `stub(ctx)` call-sites;
+live probes cover 9 of 10 (the 10th, `cmd_plain` fall-through, is
+unreachable). Item 8 stays FAIL: PR-2 did not wire `update` (scope was
+`fs`/`send`/`watch`/`chat`); Go `update --dry-run` exit 0 vs Rust
+exit 1 stub, binary sha256 unchanged. Gates at the new head (cue,
+`cargo +1.99.1`, `CARGO_TARGET_DIR=/tmp/m7c-rb2-target`, deleted
+after): fmt 0; build 0; test 0 — **1471 passed, 0 failed** (66 suites;
+PR-2's 1470 + M7c bot e2e's 1); clippy `--all-targets -- -D warnings`
+0. Smoke re-run (debug binary, same code): item 2 subset 4/4 MATCH,
+item 3 idle control Go 124 / Rust 124 stdout IDENTICAL, item 6 matrix
+21/21 MATCH, item 7 echo byte-identical + crash exits 2/2. Incidents:
+SSH broke mid-build (build had finished; binary verified by sha256);
+disk fell to 4.2G free during the test gate (concurrent M7d + PR-3
+target dirs) — 1.2G freed by deleting the release profile dir, gate
+finished, cue back to 20G free; the item-6 script's `kill $PID` missed
+the webui servers (`$!` was the `cd &&` subshell) — both killed by
+direct PID afterwards, ports verified closed; `/tmp/m7c-plugin/`
+fixtures were gone on cue and were rebuilt from source
+(echo `f80d065a…`).
+
+### M7c rebase-3 onto `dev-rust` `3532d02` (PR #80 docs-only `rust/README.md`, 2026-11-06)
+
+Rebase clean 7/7, zero conflicts; head `1266ceb`; diff 28 files, only
+`rust/**` + `docs/e2e.md`. PR #80 is docs-only (1 file, +83, no code),
+so no M7c code changed. Item 1 confirmed unchanged by spot-check (cue,
+debug binary sha256 `c3ff2000…`): still 10 `stub(ctx)` call-sites at the
+same `run.rs` lines, dispatch 40 wired / 1 partial (`auth`) / 5 stub; top-level `--help`
+byte-identical to Go, `--version` stamp-only, 9 subcommand `--help`
+exit 0, 0 `not ported yet` lines. Item 8 stays FAIL (`cmd_update`
+still `Err(stub(ctx))`; Rust `update --dry-run` exit 1 vs Go exit 0).
+Gates at the new head (cue, `cargo +1.99.1`,
+`CARGO_TARGET_DIR=/tmp/m7c-rb3-target`, deleted after): fmt 0; build 0;
+test 0 — **1471 passed, 0 failed** (66 suites); clippy
+`--all-targets -- -D warnings` 0. Incidents: round-1 gates used the
+default PATH `go` wrapper (1.26.8, `GOTOOLCHAIN=local`), so
+`loader_live` failed 22/22 (`go.mod requires go >= 1.27.3`) and
+`cargo test`'s default fail-fast stopped the run at
+`castctl-pluginhost` (743 passed) — my env mistake, same class as the
+writer's fix-loop-1 incident, not a regression; re-ran with the correct
+env (`PATH=/usr/local/go/bin`, `GOTOOLCHAIN=auto`, `--no-fail-fast`)
+→ 1471/0, identical to rebase-2. Disk fell to 1.4G free mid-gate (my
+17G target dir + two other sessions' stale 13G + 17G target dirs, none
+touched); recovered to 33G free after cleanups; cue left clean, no M7c
+processes or listeners.
+
 ## M6b — Web UI port (crate `castctl-webui`, 2026-11-05/06)
 
 Port of Go `internal/webui` (49 API routes + static shell +

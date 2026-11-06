@@ -1,0 +1,41 @@
+{
+  "label": "first-measured-run-go",
+  "argv": [
+    "/usr/local/bin/castctl",
+    "--version"
+  ],
+  "env_note": "inherited (HOME/XDG isolated by caller)",
+  "warmup": 0,
+  "rss_method": "GNU time -v (thin parent); wait4 ru_maxrss kept as maxrss_kib_raw for audit only",
+  "wall_ms": {
+    "n": 1,
+    "median": 10.557372,
+    "min": 10.557372,
+    "max": 10.557372,
+    "mean": 10.557372
+  },
+  "peak_rss_mib": {
+    "n": 1,
+    "median": 47.9296875,
+    "min": 47.9296875,
+    "max": 47.9296875,
+    "mean": 47.9296875
+  },
+  "exits": [
+    0
+  ],
+  "rss_exits": [
+    0
+  ],
+  "runs": [
+    {
+      "wall_ms": 10.557372,
+      "maxrss_kib": 49080,
+      "maxrss_kib_raw": 48700,
+      "exit": 0,
+      "rss_exit": 0,
+      "wait4": true,
+      "timeout": false
+    }
+  ]
+}

@@ -160,6 +160,12 @@ def measure(label, argv, runs=20, warmup=5):
 def main():
     skip_build = "--skip-build" in sys.argv
     skip_item5 = "--skip-item5" in sys.argv
+    skip_full = "--skip-full" in sys.argv
+    # M7c run11: --skip-full skips the castctl-full (legacy) builds and
+    # measurements. At this head castctl-rs IS the full surface (bot,
+    # keeper, webui, plugin, update linked), so run11's headline is
+    # go vs castctl-rs; castctl-full is legacy reference only, last
+    # measured in run10 (data/run10-summary.json).
     os.makedirs(DATA, exist_ok=True)
     summary = {"date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                "machine": {}, "items": {}, "notes": [], "marks": {}}
@@ -312,8 +318,7 @@ def main():
         return env
     _full_cmd = CARGO + ["build", "--release", "--locked", "--offline",
                          "--manifest-path", FULL_BIN_MANIFEST]
-    if not skip_build:
-        b3 = sh(_full_cmd, cwd=ROOT, env=_full_env(), timeout=3600)
+    if not skip_build and not skip_full:
         summary["build_full_plain"] = b3
         if b3["exit"] != 0:
             summary["notes"].append("full-bin plain build FAILED; see build_full_plain")
@@ -350,6 +355,9 @@ def main():
                                        "version": sh([RS_FULL_BIN, "--version"])["stdout"].strip()}
         for name, path in (("go", GO_BIN), ("rust", RS_BIN), ("rust-full", RS_FULL_BIN)):
             summary.setdefault("size_breakdown", {})[name] = sh(["size", "-A", path])["stdout"]
+    elif skip_full:
+        summary["rust_full_binary"] = {"legacy": "not measured in this run; last measured run10 (data/run10-summary.json)"}
+        summary["notes"].append("rust-full (castctl-full) NOT measured (--skip-full): legacy reference only; run11 headline is go vs castctl-rs (full surface)")
     else:
         if os.path.isfile(RS_FULL_BIN):
             summary["rust_full_binary"] = {"size_bytes": os.path.getsize(RS_FULL_BIN),
@@ -757,7 +765,7 @@ def main():
     # `proc-macro` crate type without `-Zdylib-lto`" on zeroize_derive
     # / serde_derive). The profile build writes to release-lto/, so it
     # never touches the headline binary in release/ — no restore step.
-    if not skip_build:
+    if not skip_build and not skip_full:
         try:
             b6 = sh(CARGO + ["build", "--profile", "release-lto", "--locked", "--offline",
                              "--manifest-path", FULL_BIN_MANIFEST],
