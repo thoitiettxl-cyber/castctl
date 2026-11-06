@@ -11462,11 +11462,12 @@ bcrypt 0.17.1, blowfish 0.9.1, tar 0.4.46, flate2
 (sha2, libc, bcrypt, blowfish, tar, flate2, nix, sha1).
 
 `git diff --stat origin/dev-rust...HEAD`: 37 files,
-+16,807/−21, all in `rust/` + `NOTICE` +
-`docs/provenance.md`, zero `.go` files — no SPDX check
-needed. (At the code head `e2a724a`, before this
-section's own gate record was committed, it was
-+16,741/−21; the +66 is this §M6b.13 text itself.)
++16,741/−21 at the code head `e2a724a`, all in `rust/`
++ `NOTICE` + `docs/provenance.md`, zero `.go` files —
+no SPDX check needed. (This §M6b.13 text itself adds
+lines on top of that number, so the live total is a
+few lines higher — the code-head figure is the stable
+one.)
 
 #### Gates at the rebased head `e2a724a` (cue, `rustup run 1.99.1`, `CARGO_TARGET_DIR=/tmp/mea-m6b-rebase2-target`, `CARGO_PROFILE_DEV_DEBUG=0`, `CARGO_PROFILE_DEV_INCREMENTAL=false`)
 
