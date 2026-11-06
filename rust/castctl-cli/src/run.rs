@@ -613,17 +613,23 @@ fn cmd_plain(
         return crate::autoapprove::run_auto_approve(ctx, g, &p);
     }
     if READ_COMMANDS.contains(&spec.name) {
-        if spec.name == "history" && !p.str("download").is_empty() {
-            resolve_and_load(ctx, g, false)?;
-            return Err(stub(ctx));
-        }
         return crate::network::run_network_command(ctx, g, spec, &p);
     }
     if M7B_COMMANDS.contains(&spec.name) {
         return crate::network::run_network_command(ctx, g, spec, &p);
     }
-    resolve_and_load(ctx, g, false)?;
-    Err(stub(ctx))
+    // Unreachable for every known command name: the names
+    // reaching `cmd_plain` are exactly `wait` / `send` /
+    // `watch` / `chat` / `auto-approve` + `READ_COMMANDS` +
+    // `M7B_COMMANDS` (proven by
+    // `test_cmd_plain_fallthrough_unreachable` below), and
+    // unknown names exit 2 in `command_spec` before dispatch.
+    // A defensive internal error, never a stub (M7b PR-3,
+    // R2 §6.1; PORTING §M7b.13).
+    Err(msg(
+        1,
+        format!("internal error: unhandled command {:?}", spec.name),
+    ))
 }
 
 /// The 19 M7b Phase A network commands (PR-1) plus `raw`
@@ -797,11 +803,19 @@ fn parse_auto_toggles(p: &Parsed) -> Result<(), FlowErr> {
 }
 
 /// `cmdUpdate` (`update.go:72`): parse + positionals, then NO
-/// config load (release downloads are public URLs). Stub.
+/// config load (release downloads are public URLs). Wired in
+/// M7b PR-3 (`crate::update`); Go has no `--check` flag —
+/// `--dry-run` is the check mode (D-M7b-PR3-7).
 fn cmd_update(ctx: &mut Ctx<'_>, spec: &CommandSpec, args: &[String]) -> Result<(), FlowErr> {
     let p = parse_or_help(ctx, spec, args)?;
     check_positionals(&p, &[]).map_err(usage_err)?;
-    Err(stub(ctx))
+    crate::update::run_update(
+        ctx,
+        p.bool("dry-run"),
+        &p.str("version"),
+        p.bool("allow-downgrade"),
+        p.bool("allow-prerelease"),
+    )
 }
 
 /// `cmdFS` (`fs.go:141`) + per-subcommand `fsParse` /
@@ -864,8 +878,8 @@ fn cmd_auth(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), Fl
         "list" => {
             let p = inline_parse(ctx, auth_sub_defs("list"), AUTH_LIST_HELP_TEXT, rest)?;
             check_positionals(&p, &[]).map_err(usage_err)?;
-            resolve_and_load(ctx, g, false)?;
-            Err(stub(ctx))
+            let loc = resolve_config(ctx, g, false)?;
+            crate::auth::run_auth_list(ctx, &loc, g, p.bool("json"))
         }
         "export" => {
             // No checkPositionals: extra positionals are silently
@@ -879,8 +893,13 @@ fn cmd_auth(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), Fl
         "import" => {
             let p = inline_parse(ctx, vec![], AUTH_IMPORT_HELP_TEXT, rest)?;
             check_positionals(&p, &[]).map_err(usage_err)?;
-            resolve_and_load(ctx, g, false)?;
-            Err(stub(ctx))
+            // Go reads stdin BEFORE config resolution
+            // (`authimport.go:67-81`); `fs write` reads stdin
+            // the same way (`run.rs`, `fs.go:584-596`).
+            let mut stdin_data = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::stdin(), &mut stdin_data)
+                .map_err(|e| msg(2, format!("read stdin: {e}")))?;
+            crate::auth::run_auth_import(ctx, g, &stdin_data)
         }
         "login" => {
             let p = inline_parse(ctx, auth_sub_defs("login"), AUTH_LOGIN_HELP_TEXT, rest)?;
@@ -914,8 +933,15 @@ fn cmd_auth(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), Fl
                     "auth status: --profile and --all are mutually exclusive",
                 ));
             }
-            resolve_and_load(ctx, g, false)?;
-            Err(stub(ctx))
+            let (loc, single) = resolve_and_load_single(ctx, g)?;
+            crate::auth::run_auth_status(
+                ctx,
+                &loc,
+                single.as_ref(),
+                g,
+                &profile_name,
+                p.bool("all"),
+            )
         }
         "observe-login" => {
             let p = inline_parse(
@@ -925,7 +951,16 @@ fn cmd_auth(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), Fl
                 rest,
             )?;
             check_positionals(&p, &[]).map_err(usage_err)?;
-            // Tag-off build (no with_chromedp).
+            // Tag-off build (no with_chromedp): Go checks
+            // `keeper.ReloginAvailable()` FIRST, before config
+            // (`authobserve.go`), and the shipped Go binary is
+            // built without the tag — the check fails there too,
+            // so this fixed exit-2 error IS the faithful port
+            // of the shipped build, not a stub (D-M7b-PR3-9).
+            // The Rust build has no chromedp tag at all, and
+            // the S2 loopback proxy has no Rust equivalent, so
+            // no feature could enable this path (PORTING
+            // §M7b.13).
             Err(msg(
                 2,
                 "auth observe-login is not available in this build: rebuild with -tags with_chromedp",
@@ -1051,7 +1086,15 @@ fn cmd_config(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), 
     }
     let allow_missing = p.bool("write") || !source_dir.is_empty();
     resolve_config(ctx, g, allow_missing)?;
-    Err(stub(ctx))
+    // D-M2-5: `config migrate` execution was DROPPED by
+    // decision — the migration never runs. Parse, positional,
+    // `--from`, and resolution checks above are kept; a
+    // parse-successful migrate is refused here instead of
+    // stubbing (M7b PR-3, R2 §6.2; PORTING §M7b.13).
+    Err(msg(
+        2,
+        "config migrate is not supported: legacy config migration was dropped by decision (D-M2-5)",
+    ))
 }
 
 /// `cmdTelegram` (`telegram.go:95`) + run/status takes-no-args.
@@ -1805,14 +1848,19 @@ mod tests {
         // Valid level, then a command: scan continues. With an
         // isolated HOME and no config file, RequirePresent does
         // NOT fail (non-explicit locations always pass) — the
-        // stub fires.
+        // command runs and `config migrate` is refused as
+        // dropped (D-M2-5).
         let (_home, map) = isolated_env();
         let out = run_env(
             &["--log-level", "warn", "config", "migrate", "--write"],
             map,
         );
-        assert_eq!(out.code, 1);
-        assert_eq!(out.stderr, STUB_LINE);
+        assert_eq!(out.code, 2);
+        assert!(
+            out.stderr.contains("config migrate is not supported"),
+            "{}",
+            out.stderr
+        );
     }
 
     #[test]
@@ -1929,16 +1977,20 @@ mod tests {
     }
 
     #[test]
-    fn test_stub_after_config_resolution() {
+    fn test_migrate_dropped_after_config_resolution() {
         // Non-explicit location, no config file: RequirePresent
-        // passes (Go: non-explicit always passes) — the stub
-        // fires with exit 1.
+        // passes (Go: non-explicit always passes) — but the
+        // migration is dropped (D-M2-5), so exit 2 with the
+        // dropped message, not the stub.
         let (_home, map) = isolated_env();
         let out = run_env(&["config", "migrate", "--write"], map);
-        assert_eq!(out.code, 1);
-        assert_eq!(out.stderr, STUB_LINE);
+        assert_eq!(out.code, 2);
+        assert_eq!(
+            out.stderr,
+            "castctl: config migrate is not supported: legacy config migration was dropped by decision (D-M2-5)\n"
+        );
         // Explicit location with a correct basename but a missing
-        // file: RequirePresent fails BEFORE the stub (exit 2).
+        // file: RequirePresent fails BEFORE the drop (exit 2).
         let home = temp_home("explicit-missing");
         let missing = home.join("config.json");
         let out = run_args(&["--config", missing.to_str().unwrap(), "status"]);
@@ -1948,7 +2000,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stub_fires_with_existing_config() {
+    fn test_migrate_dropped_with_existing_config() {
         let home = temp_home("stub");
         let cfg_dir = home.join(".config/castctl");
         std::fs::create_dir_all(&cfg_dir).unwrap();
@@ -1960,18 +2012,29 @@ mod tests {
             home.join(".config").to_str().unwrap().to_string(),
         );
         let out = run_env(&["config", "migrate", "--write"], map);
-        assert_eq!(out.code, 1);
+        assert_eq!(out.code, 2);
         assert_eq!(out.stdout, "");
-        assert_eq!(out.stderr, STUB_LINE);
+        assert!(
+            out.stderr.contains("config migrate is not supported"),
+            "{}",
+            out.stderr
+        );
     }
 
     #[test]
-    fn test_update_and_plugin_check_skip_config() {
-        // No config anywhere: update still stubs (no resolution).
+    fn test_update_invalid_version_no_network() {
+        // `update` loads no config (release downloads are public
+        // URLs): an invalid --version fails at version parse,
+        // before any fetch, with exit 2 — no network, no config.
         let (_home, map) = isolated_env();
-        let out = run_env(&["update", "--dry-run"], map.clone());
-        assert_eq!(out.code, 1);
-        assert_eq!(out.stderr, STUB_LINE);
+        let out = run_env(&["update", "--version", "bogus"], map.clone());
+        assert_eq!(out.code, 2);
+        assert!(
+            out.stderr.contains("invalid --version value"),
+            "{}",
+            out.stderr
+        );
+        assert!(out.stdout.is_empty());
         // `plugin check` is real now (M6c-b): a missing
         // file fails at the shadow gate with exit 2, not
         // the stub — no worker is spawned for it. The
@@ -2166,19 +2229,140 @@ mod tests {
     }
 
     #[test]
-    fn test_config_migrate_help_and_stub() {
+    fn test_config_migrate_help_and_dropped() {
         let out = run_args(&["config", "migrate", "--help"]);
         assert_eq!(out.stdout, CONFIG_MIGRATE_HELP_TEXT);
         assert_eq!(out.code, 0);
         let out = run_args(&["config", "--help"]);
         assert_eq!(out.stdout, CONFIG_HELP_TEXT);
         assert_eq!(out.code, 0);
-        // Parse-successful migrate stubs (D-M2-5), even with a
-        // missing config file when --write is given.
+        // Parse-successful migrate is dropped (D-M2-5), even
+        // with a missing config file when --write is given.
         let (_home, map) = isolated_env();
         let out = run_env(&["config", "migrate", "--write"], map);
-        assert_eq!(out.code, 1);
-        assert_eq!(out.stderr, STUB_LINE);
+        assert_eq!(out.code, 2);
+        assert!(
+            out.stderr.contains("config migrate is not supported"),
+            "{}",
+            out.stderr
+        );
+    }
+
+    #[test]
+    fn test_cmd_plain_fallthrough_unreachable() {
+        // The `cmd_plain` fallthrough (internal error) can only
+        // fire for a name in none of the handled sets. Every
+        // name that reaches `cmd_plain` — `COMMAND_ORDER`
+        // minus the 9 dedicated dispatch arms — must be
+        // covered exactly by the handled sets (R2 §6.1).
+        let dedicated = [
+            "fs", "auth", "profile", "config", "telegram", "keeper", "webui", "plugin", "update",
+        ];
+        let mut reaching: Vec<&str> = COMMAND_ORDER
+            .iter()
+            .copied()
+            .filter(|n| !dedicated.contains(n))
+            .collect();
+        let mut covered: Vec<&str> = vec!["wait", "send", "watch", "chat", "auto-approve"];
+        covered.extend(READ_COMMANDS.iter().copied());
+        covered.extend(M7B_COMMANDS.iter().copied());
+        reaching.sort_unstable();
+        covered.sort_unstable();
+        assert_eq!(reaching, covered);
+    }
+
+    #[test]
+    fn test_update_has_no_check_flag() {
+        // D-M7b-PR3-7: Go has no `--check` flag; `--dry-run`
+        // is the check mode. The parser must reject `--check`.
+        let out = run_args(&["update", "--check"]);
+        assert_eq!(out.code, 2);
+        assert!(out.stderr.contains("--check"), "{}", out.stderr);
+        assert!(out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_auth_list_no_config() {
+        // No config anywhere: the active profile synthesises
+        // as "default" (F1) and the list has one row, "not
+        // created" — exit 0, no stub.
+        let (home, map) = isolated_env();
+        let out = run_env(&["auth", "list"], map.clone());
+        assert_eq!(out.code, 0);
+        let dir = home.join(".config/castctl");
+        assert_eq!(
+            out.stdout,
+            format!("* default  not created  {}\n", dir.to_str().unwrap())
+        );
+        assert!(out.stderr.is_empty());
+        let out = run_env(&["auth", "list", "--json"], map);
+        assert_eq!(out.code, 0);
+        let expected = format!(
+            "{{\n  \"active\": \"default\",\n  \"profiles\": [\n    {{\n      \"name\": \"default\",\n      \"active\": true,\n      \"dir\": \"{}\",\n      \"exists\": false,\n      \"cookies\": false,\n      \"cookies_file\": \"{}/cookies.txt\",\n      \"auto_approve\": \"off\"\n    }}\n  ]\n}}\n",
+            dir.to_str().unwrap(),
+            dir.to_str().unwrap()
+        );
+        assert_eq!(out.stdout, expected);
+    }
+
+    #[test]
+    fn test_auth_status_no_config() {
+        let (_home, map) = isolated_env();
+        let out = run_env(&["auth", "status"], map);
+        assert_eq!(out.code, 2);
+        assert_eq!(out.stderr, "castctl: auth status: no config.json found\n");
+        assert!(out.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_auth_status_one_profile_ok() {
+        // Fixture: one profile with a jar cookies file whose
+        // hatch_sess expires in 2030 — status ok, headless
+        // unavailable for lack of a keeper entry.
+        let home = temp_home("auth-status");
+        let cfg_dir = home.join(".config/castctl");
+        let prof_dir = cfg_dir.join("profiles/no1");
+        std::fs::create_dir_all(&prof_dir).unwrap();
+        std::fs::write(cfg_dir.join("config.json"), "{\"profiles\":{\"no1\":{}}}").unwrap();
+        std::fs::write(
+            prof_dir.join("cookies.txt"),
+            ".muse.ai\tTRUE\t/\tTRUE\t1893456000\thatch_sess\tFAKE-SESSION\n",
+        )
+        .unwrap();
+        let mut map = HashMap::new();
+        map.insert("HOME".to_string(), home.to_str().unwrap().to_string());
+        map.insert(
+            "XDG_CONFIG_HOME".to_string(),
+            home.join(".config").to_str().unwrap().to_string(),
+        );
+        let out = run_env(&["auth", "status", "--profile", "no1"], map.clone());
+        assert_eq!(out.code, 0);
+        assert!(
+            out.stdout.contains("\"profile\": \"no1\""),
+            "{}",
+            out.stdout
+        );
+        assert!(out.stdout.contains("\"status\": \"ok\""), "{}", out.stdout);
+        assert!(
+            out.stdout.contains("\"driving_cookie\": \"hatch_sess\""),
+            "{}",
+            out.stdout
+        );
+        assert!(
+            out.stdout
+                .contains("\"headless_reason\": \"no_keeper_entry\""),
+            "{}",
+            out.stdout
+        );
+        assert!(out.stdout.contains("\"cookies_seen\": 1"), "{}", out.stdout);
+        assert!(out.stdout.contains("2030-01-01"), "{}", out.stdout);
+        // --all with a single configured profile prints the
+        // same single object, not an array (Go `len(out)==1`
+        // rule).
+        let out = run_env(&["auth", "status", "--all"], map);
+        assert_eq!(out.code, 0);
+        assert!(out.stdout.trim_start().starts_with('{'), "{}", out.stdout);
+        assert!(out.stdout.contains("\"status\": \"ok\""), "{}", out.stdout);
     }
 
     #[test]

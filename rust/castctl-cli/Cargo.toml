@@ -9,12 +9,19 @@ description = "Command table, flag parsing, help/usage rendering, and exit mappi
 [dependencies]
 castctl-approvals = { path = "../castctl-approvals" }
 castctl-config = { path = "../castctl-config" }
+# M7b PR-3: `auth list` renders `deliver`'s profile list.
+castctl-deliver = { path = "../castctl-deliver" }
 castctl-fsclient = { path = "../castctl-fsclient" }
 castctl-gateway = { path = "../castctl-gateway" }
+# M7b PR-3: `auth status` reads keeper expiry/state, `auth
+# import` writes through the keeper cookie lock + reset.
+castctl-keeper = { path = "../castctl-keeper" }
 castctl-logging = { path = "../castctl-logging" }
 castctl-shared = { path = "../castctl-shared" }
 castctl-telegram = { path = "../castctl-telegram" }
 castctl-transport = { path = "../castctl-transport" }
+# M7b PR-3: `update` runs the update crate.
+castctl-update = { path = "../castctl-update" }
 castctl-wait = { path = "../castctl-wait" }
 castctl-webui = { path = "../castctl-webui" }
 # M6c-b: `plugin check` runs the real Rust loader

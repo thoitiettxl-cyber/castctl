@@ -2320,6 +2320,39 @@ live, while a SIGINT inside the ~1 s startup window
 would exit 130 in Go and continue to the prompt in
 Rust — recorded as a known limit).
 
+## 22. M7b PR-3 CLI wiring (update + auth list/status/import + history --download) — no new upstream dependency
+
+M7b PR-3 (`rust/castctl-cli`, branch
+`feat/rust-m7b-pr3`, base `dev-rust` 2ae2f14) wires
+`update`, `auth list`, `auth status`, `auth import`,
+and `history --download` from the `not ported yet` stub
+to the repo's own Go handlers (`internal/commands/
+update.go`, `deliver.go` (`cmdAuthList`),
+`authstatus.go`, `authimport.go`, `read.go`
+(`cmdHistory`); `internal/update/` for the update
+pipeline; `internal/deliver/authlist.go`;
+`internal/keeper/` for expiry/state/contract; the
+`castctl-update`, `castctl-deliver`, and
+`castctl-keeper` Rust crates, all ported in earlier
+milestones).
+No third-party code was copied and no new crate entered
+`Cargo.lock` (the three crates are workspace members;
+the CLI only gains dependency edges). `NOTICE` needed
+no change (no new dep).
+Algorithm provenance and every deviation from the Go
+implementation are recorded in `rust/PORTING.md`
+§M7b.13 (notably: there is no Go `update --check` flag
+— Boss's "--check" is Go's `--dry-run`; Go has no
+rollback-restore step, only fail-before-rename; the
+build stamp comes from git instead of Go `-X` flags, so
+a dev build from a checkout IS stamped; `update`
+installs the published release asset, which today is
+the Go build; `auth observe-login` keeps the fixed
+tag-off error because the shipped Go binary is built
+without `with_chromedp`; `auth status` headless is
+computed against that shipped-binary model, never the
+keeper crate's `CDP_AVAILABLE`).
+
 ## Carried items (unresolved at the time of writing)
 
 - npm license check: not run — no license-checking tool present,

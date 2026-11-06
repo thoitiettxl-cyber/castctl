@@ -80,7 +80,7 @@ use crate::parser::Parsed;
 use crate::run::{Ctx, FlowErr, GlobalOpts, msg, msg_empty, resolve_and_load_single};
 use crate::runtime::{Runtime, build_runtime};
 use crate::table::CommandSpec;
-use castctl_config::jsonvalue::{JsonValue, OrderedObject};
+use castctl_config::jsonvalue::{JsonValue, OrderedObject, encode_ordered_json};
 use castctl_gateway::gateway::{Body, RequestOptions};
 
 /// One compact JSON line, Go `json.Marshal` on a
@@ -767,8 +767,104 @@ async fn cmd_threads(rt: &Runtime, p: &Parsed) -> Result<String, FlowErr> {
 /// `cmdHistory` (`read.go:440`): `--raw` prints the whole
 /// `chat.history` object, otherwise the filtered events.
 /// (`--download` is excluded: it stubs before this point.)
+/// `dedupResources` (`read.go:488`): resources across ALL
+/// events, first-seen by path. (Same loop as `cmd_download`'s
+/// inline dedup; factored out so `history --download` and
+/// `download` cannot drift apart.)
+fn dedup_resources(events: &[SerdeValue]) -> Vec<Resource> {
+    let mut res: Vec<Resource> = Vec::new();
+    for ev in events {
+        for r in event_resources(&from_serde(ev)) {
+            if !res.iter().any(|x| x.path == r.path) {
+                res.push(r);
+            }
+        }
+    }
+    res
+}
+
+/// Convert a gateway reply (`serde_json::Value`) to an
+/// ordered JSON value, preserving the map's sorted key order
+/// (Go marshals `map[string]any` sorted, so the serde
+/// `BTreeMap` order IS Go's order). Numbers keep their
+/// literal text.
+fn serde_to_ordered(v: &SerdeValue) -> JsonValue {
+    match v {
+        SerdeValue::Null => JsonValue::Null,
+        SerdeValue::Bool(b) => JsonValue::Bool(*b),
+        SerdeValue::Number(n) => JsonValue::Number(n.to_string()),
+        SerdeValue::String(s) => JsonValue::Str(s.clone()),
+        SerdeValue::Array(items) => JsonValue::Array(items.iter().map(serde_to_ordered).collect()),
+        SerdeValue::Object(map) => {
+            let mut o = OrderedObject::new();
+            for (k, val) in map {
+                o.set(k.clone(), serde_to_ordered(val));
+            }
+            JsonValue::Object(o)
+        }
+    }
+}
+
+/// Insert `key` into an ordered object at its sorted
+/// position (Go map keys sort; `OrderedObject::set` only
+/// appends). Replaces the value when the key already exists,
+/// keeping its position.
+fn insert_sorted_key(value: JsonValue, key: &str, insert: JsonValue) -> JsonValue {
+    let JsonValue::Object(obj) = value else {
+        return value;
+    };
+    let mut merged = OrderedObject::new();
+    let mut done = false;
+    for (k, v) in obj.iter() {
+        if !done && k.as_str() > key {
+            merged.set(key.to_string(), insert.clone());
+            done = true;
+        }
+        merged.set(k.clone(), v.clone());
+    }
+    if !done {
+        merged.set(key.to_string(), insert);
+    }
+    JsonValue::Object(merged)
+}
+
+/// `cmdHistory` (`read.go:440`): `historyResult`, then with
+/// `--download` save the deduped resources and attach the
+/// rows: non-raw prints `{"messages": ..., "downloads":
+/// ...}` (Go map marshal sorts keys), raw prints the full
+/// object with `downloads` inserted. Unlike `download`, a
+/// row error does NOT exit 3 (`read.go:440-485` has no such
+/// check — the download command's exit-3 rule is its own).
+/// Empty resources print `"downloads": []`. Wired in M7b
+/// PR-3 (was the only allowed stub).
 async fn cmd_history(rt: &Runtime, p: &Parsed) -> Result<String, FlowErr> {
     let (d, events) = history_result(rt, &p.str("thread"), p.int_val("limit")).await?;
+    if !p.str("download").is_empty() {
+        let rows = save_resources(rt, &dedup_resources(&events), &p.str("download"), false).await?;
+        if !p.bool("raw") {
+            let msgs = filter_events(&events);
+            let dl_items: Vec<String> = rows.iter().map(save_row_to_json).collect();
+            // Go: `map[string]any{"messages": msgs,
+            // "downloads": rows}` — keys sorted.
+            let text = format!(
+                "{{\"downloads\":{},\"messages\":{}}}",
+                rows_json(&dl_items),
+                rows_json(&msgs)
+            );
+            return Ok(write_json_text(&text));
+        }
+        // Raw: the full object with `downloads` inserted in
+        // sorted-key position. Rows keep Go's struct field
+        // order (`path`, `file`, `skipped`, `bytes`, `error`,
+        // `warning`), which a `serde_json::Value` (sorted
+        // keys) cannot represent — render through the ordered
+        // pipeline like `send` does.
+        let downloads = JsonValue::Array(rows.iter().map(save_row_json).collect());
+        let merged = insert_sorted_key(serde_to_ordered(&d), "downloads", downloads);
+        let compact = encode_ordered_json(&merged)
+            .map_err(|e| msg(1, format!("failed to serialize history result: {e}")))?;
+        return Ok(write_json_text(&compact));
+    }
     if p.bool("raw") {
         return write_json_serde(&d);
     }
@@ -1989,7 +2085,7 @@ pub async fn run_driver_command(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run::{Outcome, STUB_LINE, run};
+    use crate::run::{Outcome, run};
     use std::collections::HashMap;
 
     fn flow_render(e: &FlowErr) -> (i32, String) {
@@ -2533,10 +2629,16 @@ mod tests {
     }
 
     #[test]
-    fn history_download_stubs_exit_1() {
-        let dir = temp_home("download");
+    fn history_download_reaches_network_not_stub() {
+        // The stub is gone (M7b PR-3): with a config but no
+        // cookies, `history --download` reaches the network
+        // path and fails at the connector (exit 2, typed
+        // cookies_missing) — before any download is attempted
+        // and without creating the download dir.
+        let home = temp_home("download");
+        let dl = home.join("dl");
         std::fs::write(
-            dir.join("config.json"),
+            home.join("config.json"),
             r#"{"profiles":{"no1":{"outbound":"direct"}}}"#,
         )
         .unwrap();
@@ -2544,16 +2646,84 @@ mod tests {
         let out = run_env(
             &[
                 "--config",
-                dir.join("config.json").to_str().unwrap(),
+                home.join("config.json").to_str().unwrap(),
                 "history",
                 "--download",
-                "/tmp/dl",
+                dl.to_str().unwrap(),
             ],
             map,
         );
-        assert_eq!(out.code, 1);
-        assert_eq!(out.stderr, STUB_LINE);
+        assert_eq!(out.code, 2);
         assert!(out.stdout.is_empty());
+        assert!(
+            out.stderr.contains("\"type\":\"cookies_missing\""),
+            "{}",
+            out.stderr
+        );
+        assert!(!dl.exists());
+    }
+
+    #[test]
+    fn dedup_resources_first_seen_wins() {
+        let ev1: SerdeValue = serde_json::json!({"payload": {"resources": [{"path": "/media/raw/a.png"}, {"path": "/media/raw/b.png"}]}});
+        let ev2: SerdeValue = serde_json::json!({"payload": {"resources": [{"path": "/media/raw/a.png"}, {"path": "/media/raw/c.png"}]}});
+        let res = dedup_resources(&[ev1, ev2]);
+        let paths: Vec<&str> = res.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["/media/raw/a.png", "/media/raw/b.png", "/media/raw/c.png"]
+        );
+    }
+
+    #[test]
+    fn serde_to_ordered_keeps_sorted_keys_and_literals() {
+        // `json!` stores 1.50 as the float 1.5 (shortest
+        // literal); the converter keeps whatever literal the
+        // serde number carries, and `<` stays literal (Go
+        // `SetEscapeHTML(false)`).
+        let v: SerdeValue = serde_json::json!({"b": 1.5, "a": {"z": "x<y", "a": [true, null]}});
+        let ordered = serde_to_ordered(&v);
+        let compact = encode_ordered_json(&ordered).unwrap();
+        assert_eq!(compact, r#"{"a":{"a":[true,null],"z":"x<y"},"b":1.5}"#);
+    }
+
+    #[test]
+    fn insert_sorted_key_positions() {
+        let base: SerdeValue = serde_json::json!({"b": 1, "d": 2});
+        let merged = insert_sorted_key(
+            serde_to_ordered(&base),
+            "c",
+            JsonValue::Number("3".to_string()),
+        );
+        assert_eq!(
+            encode_ordered_json(&merged).unwrap(),
+            r#"{"b":1,"c":3,"d":2}"#
+        );
+        let merged = insert_sorted_key(
+            serde_to_ordered(&base),
+            "a",
+            JsonValue::Number("0".to_string()),
+        );
+        assert_eq!(
+            encode_ordered_json(&merged).unwrap(),
+            r#"{"a":0,"b":1,"d":2}"#
+        );
+        let merged = insert_sorted_key(
+            serde_to_ordered(&base),
+            "z",
+            JsonValue::Number("9".to_string()),
+        );
+        assert_eq!(
+            encode_ordered_json(&merged).unwrap(),
+            r#"{"b":1,"d":2,"z":9}"#
+        );
+        // Replacing keeps the position.
+        let merged = insert_sorted_key(
+            serde_to_ordered(&base),
+            "b",
+            JsonValue::Number("10".to_string()),
+        );
+        assert_eq!(encode_ordered_json(&merged).unwrap(), r#"{"b":10,"d":2}"#);
     }
 
     #[test]

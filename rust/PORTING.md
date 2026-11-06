@@ -14649,3 +14649,222 @@ twice with `ValueError: flush of closed file` — a
 driver bug: `p.stdin.close()` before `communicate()`;
 fixed by not closing stdin manually, re-run
 byte-identical.)
+
+### M7b.13 PR-3: update + auth list/status/import + history --download (2026-11-06)
+
+Scope per parent decisions D-M7b-PR3-1..11 (plan
+`~/workspace/plans/active/castctl-rust-m7b-pr3.md`):
+wire `update`, `auth list`, `auth status`, `auth import`,
+`auth observe-login` (real path — see the CDP story
+below), and `history --download`. Base `dev-rust`
+`2ae2f14` (PR #79 merged after the brief's `f388a7c`,
+standing rebase rule). New modules `castctl-cli/src/
+auth.rs` + `update.rs`, `castctl-cli/build.rs` (git
+stamps), `history --download` in `network::cmd_history`;
+CLI gains `castctl-deliver` / `castctl-keeper` /
+`castctl-update` deps (workspace members already in the
+lockfile — no new crate).
+
+- `update --check` DOES NOT EXIST (D-M7b-PR3-7): Go's
+  flags are only `--dry-run` / `--version` /
+  `--allow-downgrade` / `--allow-prerelease`
+  (`update.go:72`, `updateHelpText`; live-proven on cue:
+  Go rejects `--check` with exit 2 "unrecognized
+  argument"). Boss's "update --check" IS Go's
+  `--dry-run` mode. No `--check` flag is invented; the
+  parser rejects it (unit test
+  `test_update_has_no_check_flag`). The PR body states
+  the mapping.
+- Stamps (DEVIATION, recorded): Go stamps release builds
+  with `-X` flags (`main.commit`, `main.buildDate`); an
+  unstamped build refuses every `update` mode. There is
+  no Rust release-stamping step, so `castctl-cli/
+  build.rs` derives the stamp from git (`HEAD` +
+  commit date `%cI`); no git metadata yields EMPTY
+  stamps and the crate refuses exactly like Go's
+  unstamped build. Consequence: a dev build from a git
+  checkout IS stamped, where Go's dev builds refuse —
+  without a stamp the wired `update` would be dead code
+  in every dev build; git-derived stamps are the honest
+  equivalent (the binary reports its own source commit).
+- Flavour: `cfg!(target_env = "gnu")` → `CGO_ENABLED=1`
+  (the glibc release asset runs here), else `"0"`
+  (no-plugin asset). The CLI supplies `cgo_settings`
+  itself because a Rust binary has no Go build info.
+- KNOWN LIMITATION: `update` installs the published
+  release asset, which today is the Go build — the
+  release workflow (`.github/workflows/release.yaml`) is
+  Go-only; no Rust release asset exists.
+- Rollback correction (D-M7b-PR3-10, R1 finding 2): Go
+  has NO rollback-restore step — safety is
+  fail-before-rename (`replace.go:88-229`). The one
+  post-rename failure (directory fsync) returns an error
+  WITH the new binary in place (`dirSyncError`). The
+  mid-way failure test is therefore valid ONLY for
+  pre-rename errors; the PR-3 plan's "binary cũ nguyên
+  vẹn" expectation was corrected here, and the help text
+  already says so ("a directory-sync failure after a
+  successful rename returns an error with the new binary
+  in place (durability unproven)").
+- `update` CLI shape: `castctl-update::run()` prints only
+  on success paths (no-op line, dry-run report after
+  verification, install success line), so the CLI
+  captures its stdout into a buffer and flushes it into
+  `ctx.out.stdout` after `run()` returns; errors map via
+  `msg(e.code(), e.to_string())` (Go `errCode(ue.Code(),
+  ue)`).
+- `auth list` (Go `cmdAuthList`, `deliver.go:99`):
+  resolve config + active profile (global `--profile`
+  honoured, Go `resolveActive`) + `deliver::list_profiles`
+  + `format_auth_list` / `--json` via `write_json_serde`.
+- `auth status` (Go `cmdAuthStatus`, `authstatus.go:75`):
+  no config file → exit 2 `auth status: no config.json
+  found`; `--all` iterates `single.ProfileNames()`
+  (empty → exit 2); `--profile` must name a configured
+  profile; otherwise the active profile. Per profile:
+  keeper entry + `profile_paths` + `load_state`
+  (corrupt → fresh state, other read errors → exit 1) +
+  cookies path = the entry's `cookies_file`, falling
+  back to the default path when empty (and when the
+  profile was synthesised by `resolve_active_profile`,
+  the F1 "default" — same fallback) +
+  `cookie_expiry_metadata` (any error → exit 2
+  `auth status: profile %q cookies file is unreadable`)
+  + `derive_auth_status` with the entry's effective
+  `expiring_within` (default 72h). Output: one object
+  for a single profile, an array otherwise (Go
+  `len(out)==1` rule — `--all` with one profile prints
+  one object). Worst status wins the exit: 3 expired
+  (`castctl: auth status: session expired`), 1 expiring
+  (`castctl: auth status: session expiring`), else 0.
+  The credentials block needs no separate resolution
+  step: parse already enforces Go's `validateCredentials`
+  rules (`blocks.rs:549/556`); only presence is checked
+  (`has_credential_for_profile`, never a value).
+- CDP feature story (D-M7b-PR3-9, decides R2 Appendix
+  item 3): NO CLI `with_chromedp` feature. Evidence:
+  (a) M6b precedent (merged, Boss-accepted) —
+  `castctl-webui/src/screencast.rs::screencast_availability`
+  models the shipped binary unconditionally: the shipped
+  Go binary on cue is built WITHOUT `with_chromedp`
+  (`go version -m` reports
+  `-tags=with_utls,with_quic,with_wireguard,with_gvisor`),
+  so availability is ALWAYS `(false, <CDP message>)`.
+  (b) Cargo feature unification makes a CLI-level feature
+  unreliable in workspace builds (keeper-as-member enables
+  its default `chromedp` in `cargo test --workspace`
+  regardless of the CLI's `default-features = false`).
+  (c) The S2 loopback proxy (`outbound.NewLoopbackProxy`)
+  has NO Rust equivalent — even a chromedp-enabled build
+  would fail closed at the inbound step
+  (`ReloginError::Unavailable`). Consequences:
+  `auth observe-login` KEEPS the fixed tag-off exit-2
+  error at `run.rs` (already in Go's order: parse → help
+  → positionals → availability check → exit 2, before
+  config) — no code change, only this record + an
+  expanded comment. `auth status` computes headless with
+  `driverAvailable=false` (the shipped-binary model),
+  NEVER from the keeper's `CDP_AVAILABLE` (true in
+  workspace builds — consulting it would reproduce the
+  M6b M-1 bug). `headless_capability` is the pure Go gate
+  order (`authstatus.go:252-266`), unit-tested for every
+  branch, including the contract-before-credentials
+  precedence. The CLI is the first crate to depend on
+  `castctl-keeper`.
+- `auth import` (Go `cmdAuthImport`,
+  `authimport.go:51`): stdin is read BEFORE config
+  resolution (Go order); normalise (UTF-8 check,
+  CRLF/CR→`\n`, trim; BOM NOT stripped) → validate
+  (empty → `no cookies on stdin`; `parse_cookies_lenient`
+  fails → `could not parse cookies input`; no hatch pair
+  → `no hatch_sess cookie in input`; all exit 2, never
+  echoing input) → resolve config + active profile →
+  `lock_cookies_file` (5s `DEFAULT_LOCK_TIMEOUT`) +
+  `write_cookies_file` (atomic temp 0600 + `.bak` copy
+  0600 + rename; returns backup-taken) → lock released
+  → `reset_after_login` (tokio runtime, `RealClock`) →
+  JSON `{"ok": true, "profile", "cookies_file",
+  "backup"}`. Stored bytes are the normalised input
+  verbatim + `"\n"` (NOT re-serialised). The
+  `import_has_hatch_sess` port mirrors Go's dispatch
+  exactly (JSON → one-line → jar), including: the JSON
+  branch's strict single-value decode (Go decodes once
+  and requires the second decode to be `io.EOF` —
+  `{"hatch_sess":"x"}}` is UNDECIDED there, while the
+  shared `decode_ordered_json` accepts it under `More()`
+  semantics; the port uses `serde_json::from_str` as the
+  strict oracle); the non-empty-STRING-only JSON rule;
+  the `"cookies"` sub-object scoping; the first
+  qualifying one-line line deciding; comment/jar-row
+  exclusion from both the qualifying scan and the
+  fallback; the jar branch's column-6 check without
+  trimming. Unit tests pin each branch, including
+  duplicate JSON keys (last wins) and the trailing-brace
+  fallthrough.
+- `history --download` (Go `cmdHistory`,
+  `read.go:440`): `history_result` → deduped resources
+  (global first-seen by path, `dedupResources`,
+  `read.go:488`) → `save_resources(..., overwrite=false)`
+  → non-raw prints `{"downloads": rows, "messages":
+  msgs}` (keys sorted, Go map marshal); raw prints the
+  full object with `downloads` inserted in sorted-key
+  position. NO exit-3 check on row errors (unlike the
+  `download` command — the exit-3 rule is `download`'s
+  own). Raw rendering goes through the ordered pipeline
+  (`serde_to_ordered` + `insert_sorted_key` +
+  `encode_ordered_json`) because rows keep Go's struct
+  field order (`path`, `file`, `skipped`, `bytes`,
+  `error`, `warning`), which a `serde_json::Value`
+  (sorted keys) cannot represent.
+- Honest eliminations (R2 §6, in scope):
+  `cmd_plain` fallthrough → explicit internal error
+  (exit 1, `internal error: unhandled command %q`).
+  Proven unreachable for the 46 known names: the names
+  reaching `cmd_plain` are exactly `wait` / `send` /
+  `watch` / `chat` / `auto-approve` + `READ_COMMANDS`
+  (13) + `M7B_COMMANDS` (19) = 37, pinned by
+  `test_cmd_plain_fallthrough_unreachable`; unknown
+  names exit 2 in `command_spec` before dispatch.
+  `config migrate` → explicit dropped-by-decision error
+  (exit 2, `config migrate is not supported: ... (D-M2-5)`):
+  parse, positional, `--from`, and resolution checks are
+  kept; only the parse-successful execution is refused.
+- Remaining stubs after PR-3: `grep -c 'stub(ctx)'` = 3
+  (`profile` / `telegram` / `keeper`), each with a
+  technical reason (D-M7b-PR3-8; see below). Boss
+  approves by merging. Follow-ups (NOT wired, R2 §6):
+  `telegram status` (offline JSON report, trivially
+  wireable), `keeper check` (needs a status renderer),
+  `profile list` / `profile show` (trivially wireable;
+  `add`/`rm`/`set-*` need a new config-mutation API,
+  M2-owned). `telegram run` is BLOCKED on `Bot::new` +
+  `BotServices` + live gateway (M5b); `keeper run` is
+  BLOCKED on `TickDeps` (15 fields) + the tick loop
+  (M6a); `profile` add/rm/set-* are BLOCKED on the
+  missing config-write API.
+- `history --download` live test: empty path verified live
+  (main thread, 10 messages, `"downloads": []`, Go-vs-Rust
+  byte-identical stdout/stderr/exit, both download dirs empty;
+  `--raw` variant also byte-identical). Non-empty path (real file,
+  name + sha256 Go-vs-Rust): **chưa kiểm chứng** — no downloadable
+  file exists on any current thread; needs a new scratch thread + a
+  live turn asking Muse to attach a small test file, then Go
+  `history --download <dir>` vs Rust `history --download <dir>`
+  on that thread, comparing file name + sha256. Offline coverage:
+  the `download` path (`save_resources` + `download_file`) is
+  harness-covered (`download-history.json` etc.); the history
+  assembly (dedup + JSON shape) is unit-tested; the m7b harness has
+  no `history` route in either driver, so no scripted
+  `history --download` case exists.
+- Gates at head 2ae2f14+PR-3 (cue, 2026-11-06): SPDX ok; fmt 0;
+  build 0; test 1495/0 (65 suites, baseline 1470/0 → +25); clippy
+  `--all-targets` 0; harness m7b 121/121, send --wait 11/11, watch
+  5/5, wait 11/11; PR-3 harness 16/16; help 46/46 byte-identical;
+  live: update --dry-run identical (exit 0), auth list/status 5/5
+  identical, update apply v0.8.0 on a copy
+  (`castctl updated: 0.9.0 -> 0.8.0`), bogus version exit 2 both
+  sides with binary intact, history --download empty + raw
+  identical. (m7b needed 4 runs: the first 3 aborted on the
+  harness's 5s Python HTTP-server READY timeout while M7c's cargo
+  saturated the box; 0 case failures with the correct PR-2-era
+  drivers; the quiet-box run is 121/121.)
