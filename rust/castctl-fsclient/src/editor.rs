@@ -299,7 +299,7 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn apply_replace() {
+    fn apply_replace_cases() {
         assert_eq!(apply_replace("a b a", "a", "c", -1).unwrap(), "c b c");
         assert_eq!(apply_replace("a b a", "a", "c", 1).unwrap(), "c b a");
         assert_eq!(apply_replace("a b a", "a", "c", 0).unwrap(), "a b a");
@@ -312,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn split_editor_command() {
+    fn split_editor_command_cases() {
         let cases: Vec<(&str, Vec<&str>)> = vec![
             ("plain", vec!["vi"]),
             ("with args", vec!["code", "--wait"]),
@@ -407,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_in_editor() {
+    fn edit_in_editor_cases() {
         let dir = temp_dir("edit");
         let sidecar = dir.join("lastarg.txt");
         let script = editor_script(&dir, &sidecar);
@@ -471,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn fmt_size() {
+    fn fmt_size_cases() {
         let cases: Vec<(Option<i64>, &str)> = vec![
             (None, "-"),
             (Some(0), "0B"),
