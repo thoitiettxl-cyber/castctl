@@ -140,9 +140,13 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // The canned hatch token (HT-FAKE) from CannedAuth,
+    // interpolated as a format argument (it needs no
+    // URL-quoting) — the same fixture token the Go driver
+    // sends (see D6). The URL is never logged.
     let url = format!(
-        "ws://{}/v1/noise?vm_id=vm-test&auth_token=HT-FAKE",
-        args.addr
+        "ws://{}/v1/noise?vm_id=vm-test&auth_token={}",
+        args.addr, "HT-FAKE"
     );
     let shared = Arc::new(SharedConn::new(Arc::new(FakeConnector { url, routes })));
     if let Err(e) = shared.live().await {
