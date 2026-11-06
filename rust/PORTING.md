@@ -10371,9 +10371,16 @@ on cue); logs `/tmp/proof-*.log` on cue.
   (Q3); rename/delete of a keeper-referenced profile
   refusal source (Q5, likely `validateKeeper` in the
   saveGuarded re-parse — implemented in `validate.rs`).
-- Live screencast login: "chưa nối" (M6a keeper/Chrome
-  not wired; starter None; status/start report
-  unavailable).
+- Live screencast login: "chưa nối" (starter None;
+  status/start report unavailable). UPDATE after the
+  rebase onto `dev-rust 6a399f7`: the keeper crate now
+  EXISTS in Rust (`rust/castctl-keeper`, M6a merged as PR
+  #72, base `9fc93c5`) — but the webui still does not wire
+  it: no `castctl-webui` dependency on `castctl-keeper`,
+  no `ScreencastStarter`/`ScreencastAvailability` backed
+  by it, no live screencast probe. Wiring the keeper
+  screencast relay into the webui is future work beyond
+  M6b; nothing in this port claims otherwise.
 - Exact Go error-message texts for a few parse-error cases
   beyond the parity set (e.g. Go `encoding/json` vs
   serde_json texts); case 26 matched canonically, so the
@@ -10917,3 +10924,106 @@ header slot array, which is why `MAX_HEADERS` is 10,000
   101, restore-ok; proof 11 wired VmHWM +6,584 KiB on
   the re-run (vs +6,436 KiB recorded — run-to-run
   variance, both ~6.4 MB vs neutered +71,600 KiB).
+
+### M6b.11 Rebase onto dev-rust `6a399f7` (M6a + perf merged, 2026-11-06)
+
+Base moved `1602b12` → `6a399f7` while fix loop 2 was
+in re-review: M6a keeper merged as PR #72 (base
+`9fc93c5`) and perf merged as PR #66 (head `fe45d67`).
+Rebased with `git rebase origin/dev-rust` (no merge
+commit); all 38 M6b commits replayed, new head
+`cadb23f`. Two conflict stops, both inside the allowed
+scope, no file outside `rust/` + `NOTICE` +
+`docs/provenance.md` touched:
+
+- `rust/Cargo.toml` (first M6b commit `92d05ba`):
+  members list took both additions (`castctl-webui` +
+  `castctl-keeper`); workspace-deps block took both
+  blocks, deduplicated: M6a and M6b both promoted
+  `sha2 =0.10.9` and `libc =0.2.191` at identical
+  versions, so the M6b duplicates were dropped and the
+  comment now points at the M6a lines above. No version
+  changed.
+- `docs/provenance.md` + `rust/PORTING.md` (docs commit
+  `e392155`): both M6a and M6b had added a `## 16.`
+  section. Kept both, renumbered M6b's to `## 17.
+  bcrypt + blowfish` and updated the one in-repo
+  reference (`rust/Cargo.toml`: bcrypt comment,
+  `provenance.md §16` → `§17`). The commit message of
+  the replayed `944c04b` still says "provenance §16"
+  (historical text, not rewritten). PORTING.md: kept
+  HEAD's `## Hiệu năng (baseline) — M-perf-3` section
+  first, then the whole §M6b after it; no section
+  dropped on either side.
+- `rust/Cargo.lock` merged cleanly (only additions:
+  `castctl-keeper` package entries from M6a; M6b's
+  bcrypt/blowfish entries untouched).
+
+Screencast/keeper status after the rebase: the keeper
+crate now exists in Rust (`rust/castctl-keeper`, M6a),
+but `castctl-webui` has NO dependency on it and the
+screencast seams stay unbacked (starter `None`) —
+"chưa nối" stands; §M6b.7 updated accordingly, and the
+stale `castctl-webui/Cargo.toml` description ("until the
+keeper lands (M6a)") corrected to the same effect. No
+live screencast wiring was done or claimed.
+
+N1/N2 wording (round-2 red-team, flagged "still open"
+in the rebase brief): VERIFIED already correct
+in-repo — §M6b.6 states the 33rd job IS created (202)
+and §M6b.6 records the WS origin failure as gorilla
+403 bytes, NOT a silent close. The only remaining
+copies of the old lines are in the parent's PR draft
+outside the repo; the parent must correct the draft
+there. No file change was needed for either line.
+
+#### Gates at the rebased head (`cadb23f`, cue, `rustup run 1.99.1`, `CARGO_TARGET_DIR=/tmp/mea-m6b-rebase-target`, `CARGO_PROFILE_DEV_DEBUG=0`, `CARGO_PROFILE_DEV_INCREMENTAL=false`)
+
+```
+fmt exit=0
+build exit=0
+test exit=0        (915 passed, 0 failed, workspace-wide, 40 suites)
+clippy exit=0      (--workspace --all-targets -- -D warnings)
+```
+
+Before/after: 793 passed at `e79c220` (base `1602b12`)
+→ 915 at `cadb23f` (base `6a399f7`). The new baseline
+is explicit: base `1602b12` workspace = 643 tests; M6b
+added +150 (643 → 793); M6a added +122 (643 → 765 on
+its own rebased tree, §M6a gates); 643 + 150 + 122 =
+915, exactly the measured total. Per-crate spot
+values from the run: `castctl-webui` lib 149 passed
+(139 at fix loop 1 + 10 fix-loop-2 tests, unchanged
+by the rebase). Log `/tmp/mea-m6b-rebase-gates.log`
+(cue, kept) and local copy
+`~/workspace/tmp/m6b-rebase-gates.log`; full test log
+`/tmp/mea-m6b-rebase-test.log` (cue) and
+`~/workspace/tmp/m6b-rebase-test.log` (local).
+
+Disk (Boss DISK RULE 2026-11-05/06 + Boss message
+2026-11-05 20:47: target in `/tmp/<name>-target`,
+delete own target after the final gate, keep logs;
+`df < 6G` → clean first and report): cue `/` was 15G
+free before the build (above the 6G line, no cleaning
+needed); it fell to 5.1G during the gates and 4.7G at
+the end — the run's own target was only 1.9G and the
+repo copy 17M, so ~9G was consumed by concurrent
+sibling activity, not this task (no sibling dir was
+touched). After deleting the own target dir and the
+cue source copy, `/` recovered to 19G free (siblings
+also freed space in the meantime). Own scratch is
+gone; only the two log files remain on cue.
+Fingerprint: cue host key verified against the pinned
+`~/workspace/tmp/cue-known_hosts`
+(`SHA256:6ExOBaFLBXhnN4GX3Qjh6DbdjJev2p7nR61IwERRhcs`,
+`StrictHostKeyChecking=yes`).
+
+Parity: NOT re-run after this rebase — the rebase
+touched no webui code path (`git diff 376c41b
+cadb23f -- rust/castctl-webui/ rust/castctl-cli/` is
+empty; the only `rust/castctl-config/` changes are
+M6a's own `blocks.rs`/`config.rs`/`keeper.rs`/`lib.rs`
+arriving via the new base). The 76/76 extended parity
+from §M6b.10 stands. `git diff --stat
+origin/dev-rust...HEAD`: 37 files, all in `rust/` +
+`NOTICE` + `docs/provenance.md`, zero `.go` files.

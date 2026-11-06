@@ -8,7 +8,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Web UI HTTP server for the castctl Rust port (M6b): loopback-only, bcrypt Bearer auth, /api/v1 management API + embedded frontend shell, ported from internal/webui and internal/commands/webui.go. Screencast is seam-only until the keeper lands (M6a); chats are seam-only until a gateway runtime is wired."
+description = "Web UI HTTP server for the castctl Rust port (M6b): loopback-only, bcrypt Bearer auth, /api/v1 management API + embedded frontend shell, ported from internal/webui and internal/commands/webui.go. Screencast is seam-only (the keeper crate landed in M6a, but the webui does not wire it yet — see PORTING.md §M6b.7); chats are seam-only until a gateway runtime is wired."
 
 [dependencies]
 castctl-config = { path = "../castctl-config" }
