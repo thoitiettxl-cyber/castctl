@@ -10250,7 +10250,7 @@ contract), fresh server process per driver run
   at : ...`); the real CLI sets `WithConfig`
   (`commands/runtime.go:360,366`).
 
-## M7a.6 Gates (cue — all PASS 2026-11-06 at base `b3fbe5a`, branch head `afa7245`)
+## M7a.6 Gates (cue — all PASS 2026-11-06 at base `b3fbe5a`, branch head `b8e4c9a`)
 
 Rebase chain for the numbers below: gates were first
 measured at `0233095` (test r10/r11: 1198/0; clippy r18:
@@ -10328,6 +10328,66 @@ the numbers in this section are the re-run ones.
   errors exit 3 (`gateway status=400
   body_length=77`) before and after. Subscribe
   proof (gate (b)): PROVEN — see §M7a.7.
+
+- Fix loop 2 (round-2 reviews, branch head
+  `b8e4c9a`, same base `b3fbe5a`): SPDX PASS (exit
+  0, before any build), `cargo fmt --check` PASS
+  (exit 0), `cargo build --workspace` PASS (exit 0,
+  1m51s), `cargo test --workspace --no-fail-fast`
+  PASS (exit 0, r15): **1351 passed, 0 failed, 63
+  result lines** (log `/tmp/m7a-test-r15.log` on
+  cue; 1351 = 1349 + 2 new R2-1 tests
+  `empty_label_is_protocol_error`,
+  `root_name_encodes`, both ok; the 2 R2-5
+  precondition asserts are in the existing
+  settle-pending tests, both ok),
+  `cargo clippy --workspace --all-targets -- -D warnings`
+  PASS (exit 0, log `/tmp/m7a-clippy-fl2.log`),
+  Tier A run 6 **11/11 PASS** (log
+  `/tmp/m7a-tier-a6.log`, server counts identical
+  to run 5; the new R2-2 WAIT-lines diff is
+  non-vacuous — e2 has 3 WAIT lines per side,
+  identical). `gofmt -l` clean, `go vet` + `go
+  build` of both parity binaries OK.
+  - r13 flake (NOT a regression): the first full
+    run at the fix-loop-2 head failed once with
+    `shadow::tests::shadow_dir_is_0700`
+    (`castctl-pluginhost`, M6c code — no M7a file
+    involved), 1350 passed / 1 failed. Cause by
+    reading: the test and
+    `sweep_removes_only_dead_pid_dirs` share the
+    per-process `pid-<pid>` shadow dir, and only
+    the sweep test takes `SWEEP_TEST_MU`; the
+    shadow test cleans the dir while the sweep
+    test recreates it. Isolated re-run of the
+    pluginhost binary: 94/0; full re-runs r14 and
+    r15: 1351/0. Same race family as M6c's known
+    flakes (`sweep_removes_only_dead_pid_dirs`,
+    `hostile_latest_tag_refuses_without_echo`).
+    Not fixed: M6c test code, out of M7a scope.
+  - Clippy caught a real error in the first NIT-1
+    attempt (empty line after a doc comment when
+    the const was inserted below the struct docs);
+    fixed by moving the const above the struct
+    doc comment with a plain `//` comment
+    (amended into the NIT-1 commit).
+  - Negative controls re-run against the CURRENT
+    verdict (7 controls, script
+    `~/workspace/tmp/m7a-verdict-control-fl2.sh`,
+    verdict block verified verbatim, 55 lines):
+    a F3 counts-diverge, b F4 rs-watchdog-kill,
+    c F5 go-summary-missing, d F5 both-0-0 (dial),
+    e all-good PASS, f (NEW, R2-2) WAIT-lines
+    differ → FAIL `server-wait-lines-differ`,
+    g (NEW, R2-3) both-0-0 with `dial: false` →
+    PASS. R2-4 load probes on cue: empty envelope
+    and bare `{}` both fail at load (exit 1,
+    "empty script"); stages-only and
+    subscribes-only both reach READY.
+  - Tier B live and the subscribe probe were NOT
+    re-run: no fix-loop-2 change touches the live
+    path (R2-1 DNS encoder, R2-2/3/4 harness-only,
+    R2-5 tests-only, NIT-1 driver literal).
 
 ## M7a.7 Chưa kiểm chứng
 
