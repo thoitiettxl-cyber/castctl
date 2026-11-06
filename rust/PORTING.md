@@ -11565,7 +11565,7 @@ Rebase clean 6/6, zero conflicts; head `e864c7b`; diff 28 files, only
 binary 29,716,256 B, sha256 `d666c335…`): 82 help stems, only
 `--version` differs (stamp); help-only sha256 identical both sides
 (`bc527db3…`, same as fix loop 1); `not ported yet` lines in help: 0.
-Dispatch is now **40 wired / 5 stub top-level** (`update`, `telegram`,
+Dispatch is now **40 wired / 1 partial (`auth`) / 5 stub top-level** (`update`, `telegram`,
 `keeper`, `profile`, `config`; `auth` partial) — PR-2 wired `chat`,
 `send`, `watch`, `fs`. Static count still 10 `stub(ctx)` call-sites;
 live probes cover 9 of 10 (the 10th, `cmd_plain` fall-through, is
@@ -11593,13 +11593,13 @@ Rebase clean 7/7, zero conflicts; head `1266ceb`; diff 28 files, only
 `rust/**` + `docs/e2e.md`. PR #80 is docs-only (1 file, +83, no code),
 so no M7c code changed. Item 1 confirmed unchanged by spot-check (cue,
 debug binary sha256 `c3ff2000…`): still 10 `stub(ctx)` call-sites at the
-same `run.rs` lines, dispatch 40 wired / 5 stub; top-level `--help`
+same `run.rs` lines, dispatch 40 wired / 1 partial (`auth`) / 5 stub; top-level `--help`
 byte-identical to Go, `--version` stamp-only, 9 subcommand `--help`
 exit 0, 0 `not ported yet` lines. Item 8 stays FAIL (`cmd_update`
 still `Err(stub(ctx))`; Rust `update --dry-run` exit 1 vs Go exit 0).
 Gates at the new head (cue, `cargo +1.99.1`,
 `CARGO_TARGET_DIR=/tmp/m7c-rb3-target`, deleted after): fmt 0; build 0;
-test 0 — **1471 passed, 0 failed** (68 suites); clippy
+test 0 — **1471 passed, 0 failed** (66 suites); clippy
 `--all-targets -- -D warnings` 0. Incidents: round-1 gates used the
 default PATH `go` wrapper (1.26.8, `GOTOOLCHAIN=local`), so
 `loader_live` failed 22/22 (`go.mod requires go >= 1.27.3`) and

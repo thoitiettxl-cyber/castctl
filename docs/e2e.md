@@ -331,7 +331,7 @@ captures kept locally, not published).
   so the help surface is unchanged across the rebase. `not ported yet`
   lines in help: 0 both sides. Command total still **46** (Go
   `commandOrder` recount at the new base), not 47. Dispatch (live,
-  isolated env, 46 probes + 3 extra): **40 wired / 5 stub top-level**
+  isolated env, 46 probes + 3 extra): **40 wired / 1 partial (`auth`) / 5 stub top-level**
   (`update`, `telegram`, `keeper`, `profile`, `config`; `auth` partial:
   `list`/`import`/`status` stub, `export`/`login`/`observe-login` are
   Go-faithful terminal behaviours, not stubs). PR-2 commands `chat`,
@@ -389,7 +389,7 @@ and no item re-measurement was needed beyond the confirmations below.
 - **Item 1 — confirmed unchanged (spot-check, debug binary).** Static:
   still 10 `stub(ctx)` call-sites in `run.rs` at the same lines as
   rebase-2 (618, 626, 804, 868, 883, 918, 1009, 1054, 1097, 1147), so
-  dispatch stays **40 wired / 5 stub top-level**. Live spot-check (cue,
+  dispatch stays **40 wired / 1 partial (`auth`) / 5 stub top-level**. Live spot-check (cue,
   debug binary sha256 `c3ff2000…`): top-level `--help` stdout + stderr
   byte-identical to Go; `--version` differs stamp-only (`castctl 0.9.0`
   vs `castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)`); 9 subcommand
@@ -402,7 +402,7 @@ and no item re-measurement was needed beyond the confirmations below.
   was expected.
 - **Gates (cue, `cargo +1.99.1`, `CARGO_TARGET_DIR=/tmp/m7c-rb3-target`,
   deleted after): fmt 0; build 0; test 0 — 1471 passed, 0 failed
-  (68 suites); clippy `--all-targets -- -D warnings` 0.**
+  (66 suites); clippy `--all-targets -- -D warnings` 0.**
 - **Incidents:** (1) My round-1 gates script used the default PATH `go`
   (wrapper 1.26.8, `GOTOOLCHAIN=local`), so `loader_live` failed 22/22
   (`go.mod requires go >= 1.27.3`) and `cargo test`'s default fail-fast
