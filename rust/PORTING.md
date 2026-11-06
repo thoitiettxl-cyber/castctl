@@ -14332,3 +14332,54 @@ partial-line discard and the dead-gateway error path)
   case are both proven byte/behaviour-identical.
 - `--log-level trace` 0 bytes; `history --json`; F1
   (unchanged known limitation from PR-1).
+
+#### Fix loop 1 (round-1 review, 2026-11-06)
+
+Round-1 verdicts: technical PASS-WITH-NITS (N1–N6),
+safety PASS (0 BLOCKING, 0 new nits), red-team
+PASS-WITH-NITS (N-R1, N-R2). No BLOCKING. All 8 nits
+fixed in this loop (commits `8429bd8`, `97051f4`, and
+this commit for the record itself):
+
+- N5: `rust/parity/run_wait_cases.sh` was `-rw-r--r--`
+  while the other three harness scripts are `+x`
+  (pre-existing M7a mode, not introduced by PR-2);
+  `chmod +x` in the tree (mode 100755).
+- N6: this section cited `network.rs:404` for
+  `go_type_name`; measured `:405` — fixed.
+- N-R1 (harness gap, FIXED not recorded): the serve-wait
+  fixture logged only the stream-open count, so a
+  byte-level escaping difference in the `chat.stream`
+  request body was invisible to every harness. The
+  fixture now logs the raw body (`WAIT stream-body`);
+  each send case carries the expected body as a
+  hand-written literal (from Go `wait.go` deliverSend);
+  the runner diffs Go vs Rust logged bodies AND each
+  side against the literal. RED 0/8 with the old
+  fixture binary, GREEN 8/8 with the new one; both
+  sides log byte-identical bodies.
+- N4 (evidence): the watch live probe now has TWO runs'
+  artifacts (`/tmp/m7b-pr2-fl1-live/watch{1,2}.{go,rs}.*`):
+  both pairs 146 B, exit 0, empty stderr, same 3 event
+  types in order; only seqs differ (live data). The
+  "shape-identical twice" claim in the Gates paragraph
+  above is now backed by two artifact pairs.
+- N-R2/N2/N3/N1: report/draft-only (see the writer
+  report's Fix loop 1 section): the `fs edit` editor
+  path is disclosed in the PR draft's Known limitations;
+  the writer-report §7 file list now includes
+  `rust/PORTING.md`; the §6 md5 is re-measured
+  (`d349e4ba…`, both URL lines 85 bytes, md5-identical);
+  the PR draft diff-stat is measured at the final head
+  (see the draft).
+- Re-gate at head `97051f4` (code-final; this docs
+  commit changes no code): SPDX ok; fmt 0; build 0;
+  test **1439/0** (63 suites); clippy 0; harness m7b
+  **120/120**, send --wait **8/8**, watch **5/5**, wait
+  **11/11**; help **46/46**. (One transient failure
+  in the first full run: `hardlink_keeps_old_inode`
+  in castctl-update, "failed to fetch the checksums
+  file" from its local test server; focused rerun 3/3
+  PASS, full re-run 1439/0 — a flake, not a
+  regression; this loop's diff touches no
+  castctl-update code.)
