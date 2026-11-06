@@ -27,7 +27,7 @@ use castctl_config::config::{load_profile, resolve_active_profile};
 use castctl_config::{resolve_auto_allow_once, resolve_auto_approve};
 use castctl_config::{set_auto_allow_once, set_auto_approve};
 
-use crate::network::{escape_go_marshal_string, write_json_text};
+use crate::network::{escape_stdout_string, write_json_text};
 use crate::parser::Parsed;
 use crate::run::{Ctx, FlowErr, GlobalOpts, config_err, resolve_config};
 
@@ -99,14 +99,14 @@ pub(crate) fn run_auto_approve(
     };
     let mut out = String::from("{");
     out.push_str("\"auto_approve\":");
-    out.push_str(&escape_go_marshal_string(display));
+    out.push_str(&escape_stdout_string(display));
     out.push_str(",\"source\":");
-    out.push_str(&escape_go_marshal_string(&enabled.source));
+    out.push_str(&escape_stdout_string(&enabled.source));
     out.push_str(",\"config\":");
-    out.push_str(&escape_go_marshal_string(config_val));
+    out.push_str(&escape_stdout_string(config_val));
     out.push_str(",\"env\":");
     match &env_approve {
-        Some(v) => out.push_str(&escape_go_marshal_string(v)),
+        Some(v) => out.push_str(&escape_stdout_string(v)),
         None => out.push_str("null"),
     }
     out.push_str(",\"auto_allow_once\":");
@@ -116,7 +116,7 @@ pub(crate) fn run_auto_approve(
         "false"
     });
     out.push_str(",\"once_source\":");
-    out.push_str(&escape_go_marshal_string(&once_enabled.source));
+    out.push_str(&escape_stdout_string(&once_enabled.source));
     out.push_str(",\"once_config\":");
     out.push_str(if prof.auto_allow_once {
         "true"
@@ -125,7 +125,7 @@ pub(crate) fn run_auto_approve(
     });
     out.push_str(",\"once_env\":");
     match &env_once {
-        Some(v) => out.push_str(&escape_go_marshal_string(v)),
+        Some(v) => out.push_str(&escape_stdout_string(v)),
         None => out.push_str("null"),
     }
     out.push('}');
@@ -207,6 +207,28 @@ mod tests {
         assert!(
             out.stdout.contains("\"source\": \"config "),
             "{}",
+            out.stdout
+        );
+    }
+
+    #[test]
+    fn status_does_not_html_escape_path() {
+        // B2 regression: stdout JSON is Go `writeJSON`
+        // (`SetEscapeHTML(false)`) — a config path with `&`
+        // renders raw, never `\u0026`.
+        let dir = temp_home("amp&path");
+        write_config(
+            &dir,
+            "{\"default_profile\": \"no1\", \"profiles\": {\"no1\": {\"auto_approve\": \"off\"}}}",
+        );
+        let map = isolated_env(&temp_home("home-amp"));
+        let cfg = dir.join("config.json").to_str().unwrap().to_string();
+        let out = run_env(&["--config", &cfg, "auto-approve"], map);
+        assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+        assert!(out.stdout.contains("amp&path"), "{}", out.stdout);
+        assert!(
+            !out.stdout.contains("\\u0026"),
+            "stdout HTML-escaped &: {}",
             out.stdout
         );
     }

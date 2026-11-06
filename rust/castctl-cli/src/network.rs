@@ -124,6 +124,38 @@ pub(crate) fn escape_go_marshal_string(s: &str) -> String {
     out
 }
 
+/// Go `encoding/json` string escaping for CLI stdout JSON
+/// (`writeJSON`, `commands.go:411`: `SetEscapeHTML(false)`):
+/// identical to [`escape_go_marshal_string`] except `<` /
+/// `>` / `&` are emitted raw. U+2028/U+2029 stay escaped
+/// (Go escapes them even with HTML escaping off) and the
+/// other control characters keep their `\u00XX` form.
+/// Use this for every hand-built stdout JSON fragment
+/// (approval rows, auto-approve status, download rows);
+/// wire request bodies and typed auth JSON keep
+/// `escape_go_marshal_string` (Go `json.Marshal` there).
+pub(crate) fn escape_stdout_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// A typed auth failure: exit 2, one compact JSON line on
 /// stderr, no `castctl: ` prefix (Go `typedAuthError` /
 /// bare `AuthError` branch of `classifyError`, rendered by
@@ -1438,11 +1470,47 @@ async fn cmd_wake(rt: &Runtime) -> Result<CmdOut, FlowErr> {
     Ok(CmdOut::out(write_json_text(&out)))
 }
 
-/// Go `stringifyID` (`read.go:627`): nil → `""`, string
+/// Go `fmt.Sprintf("%v", v)` for a decoded JSON value
+/// (`internal/commands/read.go:621-640`, the `stringifyID`
+/// fallback): maps render as `map[k:v ...]` with keys in
+/// sorted order, slices as `[elem ...]` space-separated,
+/// strings as-is (no quotes), bools as `true`/`false`,
+/// null as `<nil>`, numbers as their literal. This is the
+/// `fmt` package's rendering, NOT JSON: a map value is
+/// never a JSON object string.
+fn go_percent_v(v: &SerdeValue) -> String {
+    match v {
+        SerdeValue::Null => "<nil>".to_string(),
+        SerdeValue::Bool(b) => {
+            if *b {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        }
+        SerdeValue::Number(n) => n.to_string(),
+        SerdeValue::String(s) => s.clone(),
+        SerdeValue::Array(items) => {
+            let parts: Vec<String> = items.iter().map(go_percent_v).collect();
+            format!("[{}]", parts.join(" "))
+        }
+        SerdeValue::Object(m) => {
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort();
+            let parts: Vec<String> = keys
+                .iter()
+                .map(|k| format!("{k}:{}", go_percent_v(&m[*k])))
+                .collect();
+            format!("map[{}]", parts.join(" "))
+        }
+    }
+}
+
+/// Go `stringifyID` (`read.go:621`): nil → `""`, string
 /// → itself, number → its literal, bool → `True` /
-/// `False`. Other JSON values fall back to the compact
-/// rendering (Go `%v` of a map/slice is Go syntax, which
-/// no id ever is; recorded approximation).
+/// `False`. Other JSON values fall back to Go `%v`
+/// ([`go_percent_v`]): a map id renders `map[x:1]`, a
+/// slice id `[a b]` — never compact JSON.
 fn stringify_id(v: Option<&SerdeValue>) -> String {
     match v {
         None | Some(SerdeValue::Null) => String::new(),
@@ -1455,7 +1523,7 @@ fn stringify_id(v: Option<&SerdeValue>) -> String {
                 "False".to_string()
             }
         }
-        Some(other) => serde_json::to_string(other).unwrap_or_default(),
+        Some(other) => go_percent_v(other),
     }
 }
 
@@ -1496,12 +1564,12 @@ struct SaveRow {
 fn save_row_to_json(row: &SaveRow) -> String {
     let mut out = String::from("{");
     out.push_str("\"path\":");
-    out.push_str(&escape_go_marshal_string(&row.path));
+    out.push_str(&escape_stdout_string(&row.path));
     out.push_str(",\"file\":");
-    out.push_str(&escape_go_marshal_string(&row.file));
+    out.push_str(&escape_stdout_string(&row.file));
     if let Some(skipped) = &row.skipped {
         out.push_str(",\"skipped\":");
-        out.push_str(&escape_go_marshal_string(skipped));
+        out.push_str(&escape_stdout_string(skipped));
     }
     if let Some(bytes) = row.bytes {
         out.push_str(",\"bytes\":");
@@ -1509,11 +1577,11 @@ fn save_row_to_json(row: &SaveRow) -> String {
     }
     if let Some(error) = &row.error {
         out.push_str(",\"error\":");
-        out.push_str(&escape_go_marshal_string(error));
+        out.push_str(&escape_stdout_string(error));
     }
     if let Some(warning) = &row.warning {
         out.push_str(",\"warning\":");
-        out.push_str(&escape_go_marshal_string(warning));
+        out.push_str(&escape_stdout_string(warning));
     }
     out.push('}');
     out
@@ -2125,6 +2193,67 @@ mod tests {
             write_json_serde(&v).unwrap(),
             "{\n  \"a\": {\n    \"b\": 2\n  },\n  \"z\": 1\n}\n"
         );
+    }
+
+    #[test]
+    fn save_row_to_json_no_html_escape() {
+        // B2 regression: download rows are stdout JSON
+        // (Go `writeJSON`, `SetEscapeHTML(false)`) — `&`
+        // in a path renders raw, never `\u0026`.
+        let row = SaveRow {
+            path: "sandbox://media/raw/a&b.jpg".to_string(),
+            file: "/tmp/dl/a&b.jpg".to_string(),
+            skipped: None,
+            bytes: Some(7),
+            error: None,
+            warning: None,
+        };
+        let out = save_row_to_json(&row);
+        assert!(out.contains("\"path\":\"sandbox://media/raw/a&b.jpg\""), "{out}");
+        assert!(out.contains("\"file\":\"/tmp/dl/a&b.jpg\""), "{out}");
+        assert!(!out.contains("\\u0026"), "{out}");
+    }
+
+    #[test]
+    fn stringify_id_percent_v() {
+        // B5 regression: the fallback is Go `%v`, not
+        // compact JSON — maps `map[k:v]` (sorted keys),
+        // slices `[a b]`, null `<nil>`, bools `true`/`false`
+        // (unlike the top-level bool arm's `True`/`False`).
+        assert_eq!(stringify_id(None), "");
+        assert_eq!(
+            stringify_id(Some(&serde_json::json!({"x": 1}))),
+            "map[x:1]"
+        );
+        assert_eq!(
+            stringify_id(Some(&serde_json::json!({"b": 2, "a": 1}))),
+            "map[a:1 b:2]"
+        );
+        assert_eq!(
+            stringify_id(Some(&serde_json::json!([1, "a", true]))),
+            "[1 a true]"
+        );
+        assert_eq!(
+            stringify_id(Some(&serde_json::json!({"a": {"b": 1}}))),
+            "map[a:map[b:1]]"
+        );
+        assert_eq!(
+            stringify_id(Some(&serde_json::json!({"x": null}))),
+            "map[x:<nil>]"
+        );
+        assert_eq!(
+            stringify_id(Some(&serde_json::json!({"x": "s"}))),
+            "map[x:s]"
+        );
+        assert_eq!(
+            stringify_id(Some(&serde_json::json!(true))),
+            "True"
+        );
+        assert_eq!(
+            stringify_id(Some(&serde_json::json!(false))),
+            "False"
+        );
+        assert_eq!(stringify_id(Some(&serde_json::json!(42))), "42");
     }
 
     #[test]

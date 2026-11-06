@@ -10,9 +10,10 @@
 //! `castctl-telegram/src/turn.rs:282-360` (`media_path`), so its
 //! helper set (`http_escaped_path`, `valid_escapes`,
 //! `valid_port`, `percent_decode`, `quote_python_bytes`) is
-//! reproduced here rather than re-derived; the M5b deviation
-//! (case-insensitive `http(s)://` scheme gate, see below) is
-//! carried over verbatim.
+//! reproduced here rather than re-derived. The M5b
+//! case-insensitive `http(s)://` scheme gate is NOT carried
+//! over: this crate follows Go's lowercase-only gate
+//! (`media.go:56`) — fix loop 1, B6.
 
 use castctl_transport::TransportError;
 
@@ -78,22 +79,17 @@ pub fn media_path(path: &str, variants_original: Option<&str>) -> Result<String,
     Ok(format!("/media/raw/{}", quote_python_bytes(&unquoted)))
 }
 
-/// Whether `s` is an http(s) URL: the scheme check is
-/// case-insensitive, so `HTTP://…` counts — a deliberate
-/// deviation from Go's `MediaPath` (`media.go:47-91`), whose
-/// prefix gate only accepts lowercase `http://` /
-/// `https://` and never calls `url.Parse` on an
-/// uppercase-scheme ref. (M5b review round 3, Safety N4.)
-/// Behaviour stays safe: the URL is still fully validated
-/// and the result is a `/media/raw/…` path.
+/// Whether `s` is an http(s) URL: Go `MediaPath`
+/// (`media.go:56`) only accepts the lowercase
+/// `http://` / `https://` prefixes; anything else (an
+/// uppercase scheme included) falls through to the
+/// relative-path branch. The M5b telegram port
+/// (`castctl-telegram/src/turn.rs:282-360`) still carries
+/// the case-insensitive gate — out of this PR's scope,
+/// recorded in PORTING.md §M7b (fix loop 1); do not copy
+/// it forward.
 fn is_http_url(s: &str) -> bool {
-    match s.find("://") {
-        Some(idx) => {
-            let scheme = &s[..idx];
-            scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
-        }
-        None => false,
-    }
+    s.starts_with("http://") || s.starts_with("https://")
 }
 
 /// The escaped path of an http(s) URL, Go `url.Parse` +
@@ -271,6 +267,19 @@ mod tests {
         assert_eq!(
             media_path("https://x.example/a/b.png?k=v", None).unwrap(),
             "/media/raw/a/b.png"
+        );
+        // B6 regression: an uppercase scheme is NOT an
+        // http(s) URL (Go `media.go:56` only accepts the
+        // lowercase prefixes) — it falls through to the
+        // relative-path branch, so the whole ref is quoted
+        // into the path, exactly as Go requests it.
+        assert_eq!(
+            media_path("HTTP://127.0.0.1:9/media/raw/x.jpg", None).unwrap(),
+            "/media/raw/HTTP%3A//127.0.0.1%3A9/media/raw/x.jpg"
+        );
+        assert_eq!(
+            media_path("HTTPS://x.example/a.png", None).unwrap(),
+            "/media/raw/HTTPS%3A//x.example/a.png"
         );
         // Bad inputs: length-only errors, never the ref.
         assert!(media_path("", None).is_err());

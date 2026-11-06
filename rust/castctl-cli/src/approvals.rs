@@ -24,7 +24,7 @@
 
 use castctl_shared::JsonValue;
 
-use crate::network::escape_go_marshal_string;
+use crate::network::escape_stdout_string;
 
 /// One pending approval, described for a human or an
 /// auto-approver. `None` fields mean the source had no
@@ -75,9 +75,9 @@ pub fn describe_approval(v: &JsonValue) -> DescribedApproval {
     let display = sub_map(get(m, "display"));
     let question = sub_map(get(&display, "permission_question"));
     let payload = sub_map(get(m, "payload"));
-    // detail_rows: label -> value, first label wins per
-    // map assignment (later rows overwrite earlier ones
-    // with the same label, as in Go).
+    // detail_rows: label -> value, last row wins (Go map
+    // assignment: later rows overwrite earlier ones with
+    // the same label, as in Go).
     let mut rows: std::collections::BTreeMap<String, JsonValue> = std::collections::BTreeMap::new();
     if let Some(JsonValue::Array(list)) = get(&display, "detail_rows") {
         for r in list {
@@ -134,7 +134,7 @@ fn map_get<'a>(
 }
 
 /// `subMap` is inlined in `describe_approval` above.
-/// `stringPtr` (`approvals.go:120`): the string when the
+/// `stringPtr` (`approvals.go:109`): the string when the
 /// value is a string (an empty string is still a present
 /// id), else `None`.
 fn string_ptr(v: Option<&JsonValue>) -> Option<String> {
@@ -144,7 +144,7 @@ fn string_ptr(v: Option<&JsonValue>) -> Option<String> {
     }
 }
 
-/// `firstString` (`approvals.go:130`): the first
+/// `firstString` (`approvals.go:119`): the first
 /// non-empty string among the values, else `None`.
 /// Non-string values are skipped.
 fn first_string(vs: &[Option<&JsonValue>]) -> Option<String> {
@@ -158,7 +158,7 @@ fn first_string(vs: &[Option<&JsonValue>]) -> Option<String> {
     None
 }
 
-/// `questionText` (`approvals.go:141`): the
+/// `questionText` (`approvals.go:130`): the
 /// `"{assistant}"` -> `"Muse"` replacement, `None` when
 /// the result is empty.
 fn question_text(v: Option<&JsonValue>) -> Option<String> {
@@ -173,7 +173,7 @@ fn question_text(v: Option<&JsonValue>) -> Option<String> {
     }
 }
 
-/// `expiresAtMS` (`approvals.go:148`): only numbers count
+/// `expiresAtMS` (`approvals.go:146`): only numbers count
 /// (a bool is an int in Python, so true counts as 1 and
 /// false as 0). A numeric string is not a number. A
 /// number literal that does not parse to a finite float64
@@ -191,7 +191,7 @@ fn expires_at_ms(v: Option<&JsonValue>) -> Option<f64> {
     }
 }
 
-/// `OffersForever` (`approvals.go:200`): the forever
+/// `OffersForever` (`approvals.go:215`): the forever
 /// choice. Approvals that list no options (older servers)
 /// are assumed to accept it.
 #[must_use]
@@ -202,7 +202,7 @@ pub fn offers_forever(d: &DescribedApproval) -> bool {
     }
 }
 
-/// `OffersOnce` (`approvals.go:211`): whether
+/// `OffersOnce` (`approvals.go:229`): whether
 /// `allow_once` is explicitly listed. False when no
 /// options are listed.
 #[must_use]
@@ -283,7 +283,7 @@ pub fn approval_json(d: &DescribedApproval) -> String {
             out.push('[');
             let parts: Vec<String> = options
                 .iter()
-                .map(|o| escape_go_marshal_string(o))
+                .map(|o| escape_stdout_string(o))
                 .collect();
             out.push_str(&parts.join(","));
             out.push(']');
@@ -323,7 +323,7 @@ pub fn approved_json(
 
 fn opt_string_json(v: &Option<String>) -> String {
     match v {
-        Some(s) => escape_go_marshal_string(s),
+        Some(s) => escape_stdout_string(s),
         None => "null".to_string(),
     }
 }
@@ -334,7 +334,7 @@ fn str_or_null_json(s: &str) -> String {
     if s.is_empty() {
         "null".to_string()
     } else {
-        escape_go_marshal_string(s)
+        escape_stdout_string(s)
     }
 }
 
@@ -359,7 +359,7 @@ pub fn structural_approval_id(id: &str) -> String {
     id.to_string()
 }
 
-/// `structuralDecision` (`wait.go:444`): the decision
+/// `structuralDecision` (`wait.go:463`): the decision
 /// when it is one of allow_always/allow_once/
 /// allow_session/allow_today, else `"[omitted]"`.
 #[must_use]
@@ -370,7 +370,7 @@ pub fn structural_decision(s: &str) -> String {
     }
 }
 
-/// `structuralKind` (`wait.go:448`): the kind when it is
+/// `structuralKind` (`wait.go:464`): the kind when it is
 /// one of browse/network_access/shell, else `"[omitted]"`.
 #[must_use]
 pub fn structural_kind(s: &str) -> String {
@@ -380,7 +380,7 @@ pub fn structural_kind(s: &str) -> String {
     }
 }
 
-/// `structuralScope` (`wait.go:456`): always
+/// `structuralScope` (`wait.go:469`): always
 /// `"[omitted]"` — scope has no finite enum set.
 #[must_use]
 pub fn structural_scope(_s: &str) -> &'static str {
@@ -388,7 +388,7 @@ pub fn structural_scope(_s: &str) -> &'static str {
 }
 
 /// The `approveAll` skipped line
-/// (`wait.go:1204`): `skipped <id>: no forever option
+/// (`wait.go:1198`): `skipped <id>: no forever option
 /// option_count=<N>`.
 #[must_use]
 pub fn skipped_line(d: &DescribedApproval) -> String {
@@ -399,9 +399,11 @@ pub fn skipped_line(d: &DescribedApproval) -> String {
     )
 }
 
-/// The `approveAll` approved line (`wait.go:1223`):
+/// The `approveAll` approved line (`wait.go:1209`):
 /// `approved <id> (<decision>): title_length=<N>
-/// [<kind> [omitted]]>`.
+/// [<kind> [omitted]]>`. `title_length` is the BYTE
+/// length of the title (Go `len`, `wait.go:374` comment);
+/// a rune count would undercount non-ASCII titles.
 #[must_use]
 pub fn approved_line(
     approval_id: &str,
@@ -414,7 +416,7 @@ pub fn approved_line(
         "approved {} ({}): title_length={} [{} {}]\n",
         structural_approval_id(approval_id),
         structural_decision(decision),
-        title.chars().count(),
+        title.len(),
         structural_kind(kind),
         structural_scope(scope)
     )
@@ -559,6 +561,44 @@ mod tests {
             approved_json("", "", "", "", "allow_once"),
             "{\"approval_id\":null,\"title\":null,\"kind\":null,\"scope\":null,\"decision\":\"allow_once\"}"
         );
+    }
+
+    #[test]
+    fn approved_line_title_length_is_bytes() {
+        // B1 regression: Go `title_length` is the BYTE
+        // length (`len`, `wait.go:374`). "Mạng lưới" is 9
+        // runes but 14 bytes; a rune count prints 9.
+        let line = approved_line(
+            "ap1",
+            "allow_always",
+            "Mạng lưới",
+            "network_access",
+            "x.com",
+        );
+        assert_eq!(
+            line,
+            "approved ap1 (allow_always): title_length=14 [network_access x.com]"
+        );
+    }
+
+    #[test]
+    fn approval_json_no_html_escape() {
+        // B2 regression: stdout JSON is Go `writeJSON`
+        // (`SetEscapeHTML(false)`) — `<`/`>`/`&` render raw.
+        let a = Approval {
+            id: "ap1".to_string(),
+            kind: Some("network_access".to_string()),
+            title: Some("Mạng <&> Co".to_string()),
+            body: Some("a <b> & c".to_string()),
+            expires_at: None,
+            options: vec!["<opt>".to_string()],
+            ..Default::default()
+        };
+        let out = approval_json(&a);
+        assert!(out.contains("\"title\":\"Mạng <&> Co\""), "{out}");
+        assert!(out.contains("\"body\":\"a <b> & c\""), "{out}");
+        assert!(out.contains("\"options\":[\"<opt>\"]"), "{out}");
+        assert!(!out.contains("\\u003c"), "{out}");
     }
 
     #[test]
