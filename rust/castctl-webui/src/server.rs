@@ -1011,7 +1011,16 @@ pub fn render_resp(method: &Method, resp: Resp) -> HyperResponse<RespBody> {
     }
     let body_bytes = Bytes::from(resp.body);
     if method == Method::HEAD {
-        if !has_explicit_len {
+        // Go net/http HEAD semantics: the body is
+        // suppressed, but the Content-Length the GET
+        // would have produced is kept ONLY when the
+        // body fits the 2048-byte sniff buffer (a small
+        // envelope answers HEAD with `Content-Length:
+        // 71`; the 964333-byte shell answers HEAD with
+        // NO Content-Length — measured live, fix loop 2
+        // N3). An explicit Content-Length (ui_dir assets)
+        // is always kept.
+        if !has_explicit_len && body_bytes.len() < GO_SNIFF_BUFFER {
             builder = builder.header("Content-Length", body_bytes.len().to_string());
         }
         return builder
@@ -1390,6 +1399,34 @@ mod tests {
         handle.abort();
         let _ = std::fs::remove_dir_all(&dir);
         resp
+    }
+
+    #[tokio::test]
+    async fn head_shell_has_no_content_length() {
+        // Fix loop 2, N3 (measured live): Go answers a
+        // HEAD on the 964333-byte shell with NO
+        // Content-Length; the old code always sent the
+        // explicit `964333`.
+        let resp = live_server_case("HEAD", "/api/v1/nope", 0).await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+        assert!(
+            !resp.to_ascii_lowercase().contains("content-length"),
+            "{resp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn head_small_envelope_keeps_content_length() {
+        // Fix loop 2, N3 (measured live): Go answers a
+        // HEAD on a small envelope (405, 71-byte body)
+        // WITH `Content-Length: 71` — the sniff-buffer
+        // rule applies to HEAD too.
+        let resp = live_server_case("HEAD", "/api/v1/status", 0).await;
+        assert!(resp.starts_with("HTTP/1.1 405"), "{resp}");
+        assert!(
+            resp.to_ascii_lowercase().contains("content-length: 71"),
+            "{resp}"
+        );
     }
 
     #[tokio::test]
