@@ -8403,16 +8403,31 @@ Pins (workspace `Cargo.toml`, exact `=`):
     then applies the same policy. Outcome
     identical on every tested shape; the
     difference is internal only.
-40. [DEVIATION — fix loop 1] Total/header
+40. [DEVIATION — fix loop 1; WORDING CORRECTED
+    in fix loop 2 (safety N1)] Total/header
     deadlines implemented: `fetch_bytes` (60s
     metadata) and `download_asset` (10m asset)
     now bound the WHOLE transfer, and the
-    response head has a TOTAL 30s deadline
-    (`RESPONSE_HEADER_TIMEOUT`, safety F2). The
-    mechanism is pinned by a scaled-down
-    deadline test (200ms vs a stalled server);
-    the 30s/60s/600s timings at live duration
-    are UNMEASURED (§M6c.5).
+    response head has a 30s deadline
+    (`RESPONSE_HEADER_TIMEOUT`, safety F2) — but
+    the 30s is NOT a total deadline against a
+    silent server: the elapsed check
+    (`read_response_head_deadline`,
+    `http.rs:356-400`) runs only BEFORE each
+    1-byte `read`, and one `read` on a silent
+    server blocks until the socket read timeout
+    (60s metadata / 600s asset). So a trickling
+    server (≥1 byte per read) hits the 30s
+    deadline, while a silent server's header
+    stall is bounded by the socket timeout
+    (60s/600s), not 30s. The 200ms
+    scaled-down test pins only the
+    WouldBlock→timeout mapping, NOT the
+    elapsed-check branch (that branch never runs
+    in the test: the `read` blocks 300ms, past
+    the 200ms deadline). The 30s/60s/600s
+    timings at live duration are UNMEASURED
+    (§M6c.5).
 41. [DEVIATION — fix loop 1] `create_temp_file`
     suffix is time+pid (already in §M6c.1): Go
     uses `os.CreateTemp` (random suffix); the
@@ -8423,6 +8438,56 @@ Pins (workspace `Cargo.toml`, exact `=`):
     the name; O_EXCL then fails the attempt and
     the loop retries with a new suffix, so the
     worst case is a retry, not an overwrite.
+42. [DEVIATION — SUPERSEDED in fix loop 2] The
+    fix-loop-1 `null_default` helper (serde
+    `deserialize_with` on every `ReleaseJson` /
+    `AssetJson` field) covered `null` only in
+    field position. It is GONE, replaced by one
+    unified lenient decode (see §M6c.9): the
+    shared byte-level parser
+    (`castctl-shared/src/lenient_json.rs`)
+    implements Go `encoding/json` leniency for
+    the envelope AND the release JSON — `null`
+    is a no-op at every position (field, array
+    element, whole document), duplicate keys
+    are last-wins, invalid UTF-8 in strings
+    coerces to U+FFFD (Go `utf8.DecodeRune`,
+    one U+FFFD per bad byte — NOT
+    `from_utf8_lossy`, which collapses a
+    truncated sequence to one U+FFFD where Go
+    yields two), and type errors still refuse.
+    The parser is iterative (explicit state +
+    container stack), never recursive, so
+    nesting to Go's depth 10000 is accepted
+    without stack risk. The envelope `result`
+    is kept as raw bytes (`DecodedEnvelope`,
+    `pluginabi.rs`) because
+    `serde_json::value::RawValue` cannot hold
+    invalid UTF-8 at all (its `.get()` is
+    `&str`); `Envelope` stays the outbound /
+    serialisation shape (valid UTF-8 only).
+    The B3 display now quotes raw bytes Go
+    `%q`-style (`compat.rs::go_quote_bytes`):
+    invalid bytes render as `\xNN`, never
+    U+FFFD. Printable is approximated by
+    `!c.is_control()` (Go `strconv.IsPrint`
+    also excludes unassigned/format runes;
+    the two agree on glibc-suffix bytes).
+43. [DEVIATION — fix loop 2] Lenient decode
+    covers ONLY the envelope and the release
+    JSON. The other `serde_json::from_slice`
+    decode sites in the pluginhost crate keep
+    serde strictness and still refuse duplicate
+    keys / invalid UTF-8 where Go accepts:
+    the `Registration` result bytes
+    (`host.rs:869`), the `HostLogRequest`
+    (`host.rs:1157`), the config fragment
+    (`host.rs:850`), and the identity JSON
+    value (`identity.rs:238`). Same root cause
+    as R2-B2/R2-B3, NOT fixed in this loop:
+    each needs its own typed lenient decoder
+    on the shared parser. Residual, recorded
+    — not silently dropped.
 
 Settled probes (2026-11-05, on cue):
 
@@ -8728,6 +8793,14 @@ head (log `/tmp/m6c-fix1-test5.log` on cue):
   was checked; pre-existing duplicates (e.g.
   `aead 0.5.2/0.6.1`) predate M6c and were not
   audited here.
+- Lenient-decode residual (§M6c.2 deviation 43):
+  the `Registration` result bytes, the
+  `HostLogRequest`, the config fragment and the
+  identity JSON still decode through
+  `serde_json::from_slice` (strict), where Go
+  accepts duplicates / invalid UTF-8. Recorded,
+  not silently dropped; each needs its own typed
+  lenient decoder on the shared parser.
 
 ## M6c.6 Findings while writing (fail-before proofs + fixes)
 
@@ -8943,7 +9016,13 @@ known limitation.
 Non-blocking disposition (none dropped silently):
 
 - Safety F1 detached child: comment in
-  `run_exec_check` + deviation 10 residual.
+  `run_exec_check` (`replace.rs:141-143`) +
+  settled probe in §M6c.3 (Go `replace.go:322-323`:
+  the detached child SURVIVES a timeout kill).
+  (CORRECTION in fix loop 2, safety N3 +
+  technical F-n1: the round-1 text cited
+  "deviation 10" here — deviation 10 is the
+  egress-close residual, not detached-child.)
   F2 deadlines: header 30s TOTAL + fetch 60s
   + asset 10m TOTAL implemented; mechanism
   pinned by a 200ms scaled-down test; live
@@ -9031,6 +9110,184 @@ status after fix loop 1):
 | `AllowDowngrade`→install, `AllowPrerelease`→install | FIXED | `allow_downgrade_installs`, `allow_prerelease_explicit_installs` |
 | Dev-build 3 modes | PARTIAL | latest existed; explicit `dev_build_explicit_version_refuses`; FALLBACK mode still untested (needs 403 `/latest` + tags) |
 | Redirect-loop run-level | FIXED | `redirect_loop_refuses_after_four_follows` (5 `/latest` hits) |
+
+## M6c.9 Fix loop 2 (2026-11-06) — Phase 3 round-2 BLOCKINGs
+
+All 3 round-2 BLOCKINGs (R2-B1/B2/B3) share one
+root cause — `serde` is stricter than Go's
+`encoding/json` — and are fixed with ONE unified
+lenient decode, not three patches. No BLOCKING
+was dropped as a known limitation.
+
+- R2-B1 — `null` in an `assets` element / whole
+  document: the fix-loop-1 `null_default` helper
+  is DELETED (deviation 42 SUPERSEDED). The
+  release JSON now decodes through the shared
+  lenient parser (`run.rs::decode_release` +
+  `decode_asset`): `null` is a no-op at every
+  position, duplicate keys are last-wins.
+  Tests: `release_json_null_element_and_document_take_go_paths`
+  (`[null]` → code 2 no-match; `[null, valid,
+  checksums]` → install OK with the new bytes;
+  body `null` → code 2 not-a-valid-version).
+  Two-sided probe (round-2 probe crate, rebuilt
+  at the new code + Go probe verbatim):
+  Rust `release-null/*` outputs now match the Go
+  unmarshal outcomes exactly (see the probe
+  table in the fix-loop-2 report).
+- R2-B2 — envelope with invalid UTF-8: decoded
+  through the shared lenient parser
+  (`pluginabi::decode_envelope`); strings
+  coerce to U+FFFD (Go `utf8.DecodeRune`, one
+  per bad byte — verified NOT `from_utf8_lossy`,
+  which collapses a truncated sequence to one
+  U+FFFD where Go yields two: pinned by
+  `invalid_utf8_coerces_to_fffd_go_style`),
+  while `result` keeps its raw bytes verbatim
+  (Go `json.RawMessage`) as `DecodedEnvelope.result:
+  Option<Vec<u8>>` — `Box<RawValue>` cannot hold
+  invalid UTF-8 at all (its `.get()` is `&str`),
+  so `Envelope` stays the outbound shape only.
+  Tests: `decode_envelope_lenient_matches_go`
+  (pluginabi) + `parse_envelope_lenient_matches_go`
+  (host): trigger (a) returns the 5 raw bytes
+  `"a\xffb"`; trigger (b) surfaces
+  `plugin "x": boom: m�` AND
+  `is_error_envelope` is `true` (was `false`).
+  The round-2 probe's `envelope-file` subcommand
+  still prints `DESER-ERR` for these inputs —
+  it deserialises `Envelope` via serde derive
+  directly, which is intentionally unchanged;
+  the lenient path is `parse_envelope` /
+  `is_error_envelope`, proven by the repo tests
+  above and by the probe's `is_error_envelope`
+  flip on trigger (b).
+- R2-B3 — duplicate keys: the same lenient
+  decode, last-wins at every level, for the
+  envelope AND the release/asset JSON. Tests:
+  `decode_envelope_lenient_matches_go` (dup
+  `ok` → false, dup `result` → `2`, dup `code`
+  inside `error` → last), `parse_envelope_lenient_matches_go`
+  (dup `result` → `b"2"`, dup `ok` → failed
+  envelope without an error, like Go),
+  `release_json_duplicate_keys_are_last_wins`
+  (dup `tag_name` → `v0.6.4` → code 2 no-match;
+  dup `draft` true→false → code 2 no-match).
+- Guardrail: type errors STILL refuse. The
+  lenient path maps `null` → default and
+  duplicates last-wins WITHOUT swallowing type
+  errors — Go's `cannot unmarshal` errors were
+  probed on cue 2026-11-06 (`1e3`/`1.0`/overflow
+  into `int64`, `1`/`"false"` into `bool`, `123`
+  into `string`, `"x"` into `bool` all refuse).
+  Tests: `release_json_type_errors_still_malformed`
+  (`"size": "x"`, `"tag_name": 123`, `"draft": 1`,
+  `assets: [123]` → all code 1 `malformed`),
+  `lenient_json::tests::type_errors_still_refuse`,
+  and the envelope type-error cases in
+  `decode_envelope_lenient_matches_go` /
+  `parse_envelope_lenient_matches_go`.
+- The shared parser
+  (`castctl-shared/src/lenient_json.rs`,
+  `Parsed`/`Kind`/`LenientError`): a byte-level
+  scanner (iterative `Expect` state machine +
+  explicit container stack — never recursive,
+  so nesting to Go's depth 10000 is accepted;
+  pinned by `deep_nesting_does_not_overflow`
+  at 200/1000 deep) + a Go-style lossy string
+  decoder. Both M6c crates now depend on
+  `castctl-shared` (path dep, already a
+  workspace member): lock diff vs `5d2ea45` is
+  purely additive, 2 insertions (the
+  `castctl-shared` edge in each crate), 0 new
+  packages, 0 version changes.
+- Safety N1: deviation 40 wording corrected —
+  the header stall on a silent server is the
+  socket timeout (60s/600s), not a 30s TOTAL;
+  the 200ms test pins only the WouldBlock→
+  timeout mapping, not the elapsed-check branch.
+- Safety N3 + technical F-n1: the §M6c.8 F1
+  cross-ref "deviation 10" was wrong (deviation
+  10 is the egress-close residual) — now cites
+  the `run_exec_check` comment
+  (`replace.rs:141-143`) + the §M6c.3 settled
+  probe.
+- Safety N2: `nix::shutdown` in `close_proxy`
+  (`egress.rs:365-366`) — the intent comment
+  ("Errors are ignored: the listener may already
+  be gone") was confirmed present; no change.
+- Red-team NB1: FIXED, not recorded as a
+  deviation. The B3 display now quotes raw
+  bytes Go `%q`-style (`compat.rs::go_quote_bytes`):
+  invalid bytes render as `\xNN`, never U+FFFD.
+  Test: `scan_strtab_versions_invalid_utf8_display_go_quote`
+  (40× `0xFF` and a lone `0xE2` lead byte → refuse,
+  message contains `\xff`/`\xe2`, no U+FFFD).
+  The printable check approximates Go
+  `strconv.IsPrint` via `!c.is_control()`
+  (see deviation 42).
+- Red-team NB3: SETTLED BY MEASUREMENT (was
+  speculation). Helper `flood_late` (sleep
+  9.995s, flood >64 KiB, hang), 20 runs per
+  side on the sandbox, absolute helper paths
+  (relative paths fail to spawn — the round-2
+  probe lesson): Rust 19× `too large` / 1×
+  `did not answer --version in time`; Go 19×
+  `too large` / 1× `did not answer --version
+  in time`. No systematic divergence: the race
+  window exists on both sides with the same
+  ~5% timeout outcome. Logs:
+  `/tmp/m6c-nb3-rust2.log`, `/tmp/m6c-nb3-go.log`.
+- Residual (deviation 43): lenient decode covers
+  ONLY the envelope and the release JSON. The
+  `Registration` result bytes (`host.rs:869`),
+  `HostLogRequest` (`host.rs:1157`), config
+  fragment (`host.rs:850`) and identity JSON
+  (`identity.rs:238`) still go through
+  `serde_json::from_slice` and refuse duplicates
+  / invalid UTF-8 where Go accepts. Same root
+  cause, recorded — each needs its own typed
+  lenient decoder on the shared parser.
+
+Fix-loop-2 gates (cue, 2026-11-06, toolchain
+1.99.1, `CARGO_TARGET_DIR=/tmp/m6c-target`),
+final head TBD (log `/tmp/m6c-fix2-gates.log`
+on cue; gate run 01:15:36–01:16:52Z):
+
+- `cargo fmt --check`: exit 0.
+- `cargo build --locked --workspace`: exit 0.
+- `cargo build --workspace`: exit 0.
+- `cargo test --workspace`: exit 0.
+  **777 passed, 0 failed** (39 suites) vs
+  **761 passed, 0 failed @5d2ea45** (baseline
+  568 @25a124e). Math: 568 + 160 (M6c) + 33
+  (fix loop 1) + 16 (fix loop 2) = 777.
+  Fix-loop-2 delta per suite: castctl-shared
+  lib 37 → 47 (+10 `lenient_json` tests),
+  castctl-pluginhost lib 86 → 89 (+3:
+  `decode_envelope_lenient_matches_go`,
+  `parse_envelope_lenient_matches_go`,
+  `scan_strtab_versions_invalid_utf8_display_go_quote`),
+  `tests/update_flow.rs` 36 → 39 (+3:
+  `release_json_null_element_and_document_take_go_paths`,
+  `release_json_duplicate_keys_are_last_wins`,
+  `release_json_type_errors_still_malformed`).
+- `cargo clippy --workspace --all-targets -- -D
+  warnings`: exit 0, 0 errors, 0 warnings.
+  (Two clippy failures found and fixed along
+  the way, both in the new code, no criteria
+  lowered: `match_overlapping_arm` in
+  `decode_string` + `same_item_push` in the
+  deep-nesting test, then `manual_map` in
+  `decode_envelope` + `doc_lazy_continuation`
+  in a test doc comment.)
+- `grep -rn "unsafe\s*{"` over the three
+  crates' non-test src: 0 hits; the remaining
+  `unsafe` mentions are doc comments only.
+- Lock diff vs `5d2ea45`: purely additive, **2
+  insertions, 0 deletions, 0 version changes**
+  (the `castctl-shared` edge in the two M6c
+  crates' dep lists).
 
 ## Quy tắc quyết định (Boss, 2026-11-05 — standing)
 
