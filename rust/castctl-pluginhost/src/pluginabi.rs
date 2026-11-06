@@ -39,20 +39,61 @@ pub const METHOD_HOST_LOG: &str = "host.log";
 
 /// The JSON value exchanged across the C ABI in both
 /// directions. Source: `pluginabi.go:86-90`.
-/// (`result` is `serde_json::Value` here; Go uses
-/// `json.RawMessage`. Both preserve the value; Value
-/// re-serialises with sorted keys, which is the canonical
-/// form the host uses everywhere else.)
+/// (`result` is `Box<serde_json::value::RawValue>` here;
+/// Go uses `json.RawMessage`: the raw bytes are
+/// preserved verbatim — key order, whitespace, and an
+/// explicit `null` (4 bytes) all survive, where a
+/// `serde_json::Value` would re-serialise with sorted
+/// keys and lose the null-vs-absent distinction.)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Envelope {
-    /// `ok`.
+    /// `ok` — missing means `false`, like Go's zero
+    /// value (`json.Unmarshal` leaves a missing field
+    /// at its zero value).
+    #[serde(default)]
     pub ok: bool,
-    /// `result`, omitted when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<serde_json::Value>,
+    /// `result`, omitted when absent. An explicit JSON
+    /// `null` deserialises to `Some(RawValue("null"))`,
+    /// NOT to `None`: the custom deserialiser runs for
+    /// every present field (absent fields take the
+    /// `#[serde(default)]` instead), and `RawValue`
+    /// captures `null` as 4 raw bytes.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_raw_result"
+    )]
+    pub result: Option<Box<serde_json::value::RawValue>>,
     /// `error`, omitted when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<PluginError>,
+}
+
+/// Deserialise a present `result` field as raw bytes.
+/// Present-but-`null` becomes `Some(RawValue("null"))`;
+/// only an absent field is `None` (via `#[serde(default)]`).
+fn deserialize_raw_result<'de, D>(
+    d: D,
+) -> Result<Option<Box<serde_json::value::RawValue>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Box::<serde_json::value::RawValue>::deserialize(d)?))
+}
+
+/// Build a raw JSON value from a serialisable value.
+/// Serialising a `serde_json::Value` cannot fail, so
+/// `to_raw_value` cannot fail either; the fallback only
+/// exists because the signature is infallible, and it
+/// parses the literal `"null"`, which is valid JSON by
+/// construction (`expect` on a literal, never on
+/// external input).
+#[must_use]
+pub fn raw_value(v: &serde_json::Value) -> Box<serde_json::value::RawValue> {
+    serde_json::value::to_raw_value(v).unwrap_or_else(|_| {
+        serde_json::value::RawValue::from_string("null".to_string())
+            .expect("literal null is valid JSON")
+    })
 }
 
 /// The failure half of an [`Envelope`].
@@ -452,10 +493,37 @@ mod tests {
         assert_eq!(back, env);
         let ok_env = Envelope {
             ok: true,
-            result: Some(serde_json::json!({"n": 1})),
+            result: Some(raw_value(&serde_json::json!({"n": 1}))),
             error: None,
         };
         let json = serde_json::to_string(&ok_env).unwrap();
         assert_eq!(json, r#"{"ok":true,"result":{"n":1}}"#);
+    }
+
+    /// Red-team B4 (fix loop 1): Go's `json.Unmarshal`
+    /// leaves a missing `ok` at its zero value (`false`)
+    /// and keeps `result` as raw bytes — including an
+    /// explicit `null` (4 bytes) and key order.
+    #[test]
+    fn envelope_missing_ok_and_null_result_match_go() {
+        // No `"ok"`: the plugin error survives (the old
+        // code failed with `missing field 'ok'`).
+        let env: Envelope =
+            serde_json::from_str(r#"{"error":{"code":"boom","message":"m"}}"#).unwrap();
+        assert!(!env.ok);
+        assert!(env.result.is_none());
+        assert_eq!(env.error.as_ref().unwrap().code, "boom");
+        // Explicit `"result":null`: 4 raw bytes, not absent.
+        let env: Envelope = serde_json::from_str(r#"{"ok":true,"result":null}"#).unwrap();
+        assert!(env.ok);
+        assert_eq!(env.result.as_ref().unwrap().get(), "null");
+        assert_eq!(env.result.as_ref().unwrap().get().as_bytes(), b"null");
+        // Absent `result`: still `None`.
+        let env: Envelope = serde_json::from_str(r#"{"ok":true}"#).unwrap();
+        assert!(env.result.is_none());
+        // Object result: raw bytes verbatim (key order kept).
+        let env: Envelope =
+            serde_json::from_str(r#"{"ok":true,"result":{"b":1,"a":2}}"#).unwrap();
+        assert_eq!(env.result.as_ref().unwrap().get(), r#"{"b":1,"a":2}"#);
     }
 }

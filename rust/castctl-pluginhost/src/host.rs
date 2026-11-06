@@ -1183,7 +1183,9 @@ impl Host {
         self.logf(&level, &message);
         let env = Envelope {
             ok: true,
-            result: Some(serde_json::Value::Object(serde_json::Map::new())),
+            result: Some(crate::pluginabi::raw_value(&serde_json::Value::Object(
+                serde_json::Map::new(),
+            ))),
             error: None,
         };
         serde_json::to_vec(&env).unwrap_or_default()
@@ -1202,7 +1204,9 @@ fn short_err(err: &PluginHostError) -> String {
 
 /// Decode one response envelope. A non-JSON or error
 /// envelope is an error; an ok envelope yields Result
-/// (empty when absent).
+/// (empty when absent, the 4 bytes `null` when the
+/// plugin sent an explicit JSON `null` — Go's
+/// `json.RawMessage` keeps both apart).
 /// Source: `parseEnvelope` (`host.go:860-880`).
 fn parse_envelope(response: &[u8], tag: &str) -> Result<Vec<u8>, PluginHostError> {
     let env: Envelope = serde_json::from_slice(response).map_err(|e| {
@@ -1221,8 +1225,7 @@ fn parse_envelope(response: &[u8], tag: &str) -> Result<Vec<u8>, PluginHostError
         )));
     }
     match env.result {
-        Some(v) => serde_json::to_vec(&v)
-            .map_err(|e| PluginHostError::failed(format!("cannot marshal envelope result: {e}"))),
+        Some(raw) => Ok(raw.get().as_bytes().to_vec()),
         None => Ok(Vec::new()),
     }
 }
@@ -1269,7 +1272,7 @@ mod tests {
         };
         let env = Envelope {
             ok: true,
-            result: Some(serde_json::to_value(reg).unwrap()),
+            result: Some(crate::pluginabi::raw_value(&serde_json::to_value(reg).unwrap())),
             error: None,
         };
         serde_json::to_vec(&env).unwrap()
@@ -1278,7 +1281,7 @@ mod tests {
     fn ok_response(result: serde_json::Value) -> Vec<u8> {
         let env = Envelope {
             ok: true,
-            result: Some(result),
+            result: Some(crate::pluginabi::raw_value(&result)),
             error: None,
         };
         serde_json::to_vec(&env).unwrap()
@@ -1845,7 +1848,7 @@ mod tests {
             };
             let env = serde_json::to_vec(&Envelope {
                 ok: true,
-                result: Some(serde_json::to_value(reg).unwrap()),
+                result: Some(crate::pluginabi::raw_value(&serde_json::to_value(reg).unwrap())),
                 error: None,
             })
             .unwrap();
@@ -2073,7 +2076,7 @@ mod tests {
         };
         let env = serde_json::to_vec(&Envelope {
             ok: true,
-            result: Some(serde_json::to_value(reg).unwrap()),
+            result: Some(crate::pluginabi::raw_value(&serde_json::to_value(reg).unwrap())),
             error: None,
         })
         .unwrap();
@@ -2394,7 +2397,7 @@ mod tests {
                 };
                 let env = Envelope {
                     ok: true,
-                    result: Some(serde_json::to_value(reg).unwrap()),
+                    result: Some(crate::pluginabi::raw_value(&serde_json::to_value(reg).unwrap())),
                     error: None,
                 };
                 return Ok(serde_json::to_vec(&env).unwrap());
@@ -2896,7 +2899,7 @@ mod tests {
         );
         let env: Envelope = serde_json::from_slice(&out).unwrap();
         assert!(env.ok);
-        assert_eq!(env.result, Some(serde_json::json!({})));
+        assert_eq!(env.result.as_ref().unwrap().get(), "{}");
         let guard = logs.lock().unwrap();
         assert_eq!(guard.len(), 1);
         assert_eq!(guard[0], "warn:hello world");
@@ -2911,6 +2914,136 @@ mod tests {
         assert_eq!(guard.len(), 2);
         assert_eq!(guard[1], "info:plugin log");
         h.close();
+    }
+
+    /// Port of `TestDispatchHostCallLevelSanitised` +
+    /// `TestDispatchHostCallMessageNoForgedLine`
+    /// (`callbacks_test.go:16,52`): the full 7-case level
+    /// table, the ESC/NUL/newline message case (no
+    /// `"[31m"` remnant), the forged-line message, and
+    /// the secret-in-message redaction. The old Rust
+    /// test pinned only 2 level cases (`"warning"` →
+    /// warn, `"bogus"` → info); the implementation
+    /// already matched Go line-for-line, this pins it.
+    #[test]
+    fn dispatch_host_call_level_and_message_full() {
+        let (loader, _clients) = fake_setup(&[]);
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let h = new_fake_host(Arc::clone(&loader), Arc::clone(&logs));
+        for (level, want) in [
+            ("info\nEVIL: forged", "info"),
+            ("warn\x1b[31m", "info"),
+            ("", "info"),
+            ("ERROR", "error"),
+            ("warning", "warn"),
+            ("bogus-level", "info"),
+            (" debug ", "debug"),
+        ] {
+            {
+                let mut guard = logs.lock().unwrap();
+                guard.clear();
+            }
+            let req = serde_json::to_vec(&serde_json::json!({
+                "level": level,
+                "message": "m",
+            }))
+            .unwrap();
+            h.dispatch_host_call(pluginabi::METHOD_HOST_LOG, &req);
+            let guard = logs.lock().unwrap();
+            assert_eq!(guard.len(), 1, "level {level:?}");
+            assert!(
+                guard[0].starts_with(&format!("{want}:")),
+                "level {level:?} -> {:?}, want {want}:",
+                guard[0]
+            );
+        }
+        // Message control chars (ESC, NUL, newline) are
+        // stripped or spaced: one host.log call must
+        // never forge a second log line, and an ESC-led
+        // CSI sequence leaves no "[31m" remnant.
+        {
+            let mut guard = logs.lock().unwrap();
+            guard.clear();
+        }
+        let req = serde_json::to_vec(&serde_json::json!({
+            "level": "info",
+            "message": "a\x1b[31mb\x00c\nd",
+        }))
+        .unwrap();
+        h.dispatch_host_call(pluginabi::METHOD_HOST_LOG, &req);
+        let guard = logs.lock().unwrap();
+        assert_eq!(guard.len(), 1);
+        assert!(!guard[0].contains('\x1b'), "ESC survived: {:?}", guard[0]);
+        assert!(!guard[0].contains('\x00'), "NUL survived: {:?}", guard[0]);
+        assert!(!guard[0].contains('\n'), "newline survived: {:?}", guard[0]);
+        assert!(!guard[0].contains("[31m"), "CSI remnant: {:?}", guard[0]);
+        drop(guard);
+        // A forged line inside the message stays on the
+        // host's one prefixed log line.
+        {
+            let mut guard = logs.lock().unwrap();
+            guard.clear();
+        }
+        let req = serde_json::to_vec(&serde_json::json!({
+            "level": "info",
+            "message": "MSG-LINE-1\nFORGED-LINE-9999\r\nFORGED-2\tescaped",
+        }))
+        .unwrap();
+        h.dispatch_host_call(pluginabi::METHOD_HOST_LOG, &req);
+        let guard = logs.lock().unwrap();
+        assert_eq!(guard.len(), 1);
+        assert!(!guard[0].contains('\n') && !guard[0].contains('\r'));
+        assert!(guard[0].contains("FORGED-LINE-9999"), "content lost: {:?}", guard[0]);
+        drop(guard);
+        // Secret-keyed shapes in the message are redacted
+        // like every other plugin-text surface.
+        {
+            let mut guard = logs.lock().unwrap();
+            guard.clear();
+        }
+        let req = serde_json::to_vec(&serde_json::json!({
+            "level": "info",
+            "message": r#"{"api_key":"abc123"}"#,
+        }))
+        .unwrap();
+        h.dispatch_host_call(pluginabi::METHOD_HOST_LOG, &req);
+        let guard = logs.lock().unwrap();
+        assert_eq!(guard.len(), 1);
+        assert!(!guard[0].contains("abc123"), "leak: {:?}", guard[0]);
+        drop(guard);
+        h.close();
+    }
+
+    /// Red-team B4 (fix loop 1): `parse_envelope` on a
+    /// plugin error WITHOUT `"ok"` surfaces the plugin
+    /// error (Go zero-values `ok` to false), and an
+    /// explicit `"result":null` yields the 4 bytes
+    /// `null` (Go `json.RawMessage`).
+    #[test]
+    fn parse_envelope_missing_ok_and_null_result() {
+        // No "ok" + error: plugin error, not "invalid envelope".
+        let err = parse_envelope(br#"{"error":{"code":"boom","message":"m"}}"#, "x")
+            .unwrap_err();
+        assert_eq!(err.to_string(), "plugin \"x\": boom: m");
+        assert!(!is_error_envelope(b"not json"));
+        assert!(is_error_envelope(
+            br#"{"error":{"code":"boom","message":"m"}}"#
+        ));
+        // Explicit null result: 4 bytes.
+        assert_eq!(
+            parse_envelope(br#"{"ok":true,"result":null}"#, "x").unwrap(),
+            b"null"
+        );
+        // Absent result: empty.
+        assert_eq!(
+            parse_envelope(br#"{"ok":true}"#, "x").unwrap(),
+            Vec::<u8>::new()
+        );
+        // Object result: raw bytes verbatim (key order kept).
+        assert_eq!(
+            parse_envelope(br#"{"ok":true,"result":{"b":1,"a":2}}"#, "x").unwrap(),
+            br#"{"b":1,"a":2}"#
+        );
     }
 
     #[test]

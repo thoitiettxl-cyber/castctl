@@ -86,11 +86,17 @@ pub fn goos_name() -> &'static str {
 }
 
 /// Map `std::env::consts::ARCH` to the Go GOARCH value.
+/// Rust's names differ from Go's on 32-bit x86 (`x86`
+/// → Go `386`) and 64-bit PowerPC (`powerpc64` → Go
+/// `ppc64`); the old code passed both through unchanged
+/// (red-team note, fix loop 1).
 #[must_use]
 pub fn goarch_name() -> &'static str {
     match std::env::consts::ARCH {
         "x86_64" => "amd64",
         "aarch64" => "arm64",
+        "x86" => "386",
+        "powerpc64" => "ppc64",
         other => other,
     }
 }
@@ -299,6 +305,17 @@ mod tests {
 
     fn touch(dir: &Path, name: &str) {
         std::fs::write(dir.join(name), b"x").unwrap();
+    }
+
+    /// Technical F-k (fix loop 1): `plugin_extension`
+    /// is a 3-line match (`.so` / `.dylib` / `.dll` by
+    /// GOOS, `discovery.go:44-68`) with no test pin.
+    #[test]
+    fn plugin_extension_table() {
+        assert_eq!(plugin_extension("linux"), ".so");
+        assert_eq!(plugin_extension("darwin"), ".dylib");
+        assert_eq!(plugin_extension("windows"), ".dll");
+        assert_eq!(plugin_extension("freebsd"), ".so");
     }
 
     #[test]

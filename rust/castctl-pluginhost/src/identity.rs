@@ -123,26 +123,33 @@ fn redact_headers(v: &Value) -> Value {
 /// redacted map: keys sorted, HTML-escaped
 /// (`<`/`>`/`&` as `\u003c`/`\u003e`/`\u0026`),
 /// U+2028/U+2029 escaped, numbers as float64 (Go
-/// unmarshals JSON numbers into `float64`).
-fn canonical_json(v: &Value) -> String {
+/// unmarshals JSON numbers into `float64`). A number
+/// outside the float64 range fails the whole hash, like
+/// Go's `json.Unmarshal` (`cannot unmarshal number
+/// 1e999 into Go value of type float64`, probed on cue
+/// 2026-11-05 — technical F-g, fix loop 1).
+fn canonical_json(v: &Value) -> Result<String, PluginHostError> {
     match v {
-        Value::Null => "null".to_string(),
-        Value::Bool(true) => "true".to_string(),
-        Value::Bool(false) => "false".to_string(),
+        Value::Null => Ok("null".to_string()),
+        Value::Bool(true) => Ok("true".to_string()),
+        Value::Bool(false) => Ok("false".to_string()),
         Value::Number(n) => canonical_number(n),
-        Value::String(s) => escape_go_string(s),
+        Value::String(s) => Ok(escape_go_string(s)),
         Value::Array(items) => {
-            let parts: Vec<String> = items.iter().map(canonical_json).collect();
-            format!("[{}]", parts.join(","))
+            let mut parts = Vec::with_capacity(items.len());
+            for item in items {
+                parts.push(canonical_json(item)?);
+            }
+            Ok(format!("[{}]", parts.join(",")))
         }
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
             keys.sort();
-            let parts: Vec<String> = keys
-                .iter()
-                .map(|k| format!("{}:{}", escape_go_string(k), canonical_json(&map[*k])))
-                .collect();
-            format!("{{{}}}", parts.join(","))
+            let mut parts = Vec::with_capacity(keys.len());
+            for k in keys {
+                parts.push(format!("{}:{}", escape_go_string(k), canonical_json(&map[k])?));
+            }
+            Ok(format!("{{{}}}", parts.join(",")))
         }
     }
 }
@@ -150,21 +157,30 @@ fn canonical_json(v: &Value) -> String {
 /// Go `encoding/json` float64 rendering: shortest
 /// digits, `e` format when `abs < 1e-6` or `abs >= 1e21`
 /// (and non-zero), `f` format otherwise; `1` renders
-/// as `"1"`, never `"1.0"`.
-fn canonical_number(n: &serde_json::Number) -> String {
+/// as `"1"`, never `"1.0"`. The exponent renders with
+/// ONE digit when it fits (`1.5e-7`, not `1.5e-07`):
+/// Go's `encoding/json` strips the leading zero
+/// (`encode.go` "clean up e-09 to e-9", probed on cue
+/// 2026-11-05 — the red-team note claiming `"1.5e-07"`
+/// is wrong; the Rust rendering already matched).
+fn canonical_number(n: &serde_json::Number) -> Result<String, PluginHostError> {
     // Go unmarshals every JSON number into float64, so
     // the literal spelling is lost: render the float64
     // value. `arbitrary_precision` keeps the literal in
-    // `Number`; `as_f64` recovers the float64 Go sees.
+    // `Number`; `as_f64` recovers the float64 Go sees —
+    // and returns `None` for a literal outside the
+    // float64 range (`1e999`), which Go refuses.
     let Some(f) = n.as_f64() else {
-        return n.to_string();
+        return Err(PluginHostError::failed(
+            "stripped outbound hash: invalid json: number out of float64 range",
+        ));
     };
     if f == 0.0 {
-        return if f.is_sign_negative() {
+        return Ok(if f.is_sign_negative() {
             "-0".to_string()
         } else {
             "0".to_string()
-        };
+        });
     }
     let abs = f.abs();
     if abs < 1e-6 || abs >= 1e21 {
@@ -174,13 +190,13 @@ fn canonical_number(n: &serde_json::Number) -> String {
         if let Some((mantissa, exp)) = sci.split_once('e') {
             let exp_val: i32 = exp.parse().unwrap_or(0);
             if exp_val >= 0 {
-                return format!("{mantissa}e+{exp_val}");
+                return Ok(format!("{mantissa}e+{exp_val}"));
             }
-            return format!("{mantissa}e{exp_val}");
+            return Ok(format!("{mantissa}e{exp_val}"));
         }
-        return sci;
+        return Ok(sci);
     }
-    format!("{f}")
+    Ok(format!("{f}"))
 }
 
 /// Go `encoding/json` string escaping with HTML
@@ -226,7 +242,7 @@ pub fn stripped_outbound_hash(raw: &[u8]) -> Result<String, PluginHostError> {
             ));
         }
     };
-    let canonical = canonical_json(&redact_value(&obj));
+    let canonical = canonical_json(&redact_value(&obj))?;
     Ok(hex::encode(Sha256::digest(canonical.as_bytes())))
 }
 
@@ -314,12 +330,51 @@ mod tests {
         let h2 = stripped_outbound_hash(br#"{"a":"x","b":1}"#).unwrap();
         assert_eq!(h1, h2);
         // Go float64 canonical form: 1e3 -> "1000".
-        assert_eq!(canonical_json(&serde_json::json!(1000.0)), "1000");
-        assert_eq!(canonical_json(&serde_json::json!(1.5)), "1.5");
+        assert_eq!(canonical_json(&serde_json::json!(1000.0)).unwrap(), "1000");
+        assert_eq!(canonical_json(&serde_json::json!(1.5)).unwrap(), "1.5");
+        // Go `encoding/json` exponent: one digit when it
+        // fits (probed on cue 2026-11-05).
+        assert_eq!(
+            canonical_json(&serde_json::json!(1.5e-7)).unwrap(),
+            "1.5e-7"
+        );
+        assert_eq!(
+            canonical_json(&serde_json::json!(1e21)).unwrap(),
+            "1e+21"
+        );
         // HTML escaping matches Go's Marshal default.
         assert_eq!(
-            canonical_json(&Value::String("a<b>&".to_string())),
+            canonical_json(&Value::String("a<b>&".to_string())).unwrap(),
             "\"a\\u003cb\\u003e\\u0026\""
         );
+    }
+
+    /// Technical F-g (fix loop 1): a number outside the
+    /// float64 range (`1e999`) refuses, like Go's
+    /// `json.Unmarshal` — the old code rendered `"inf"`.
+    #[test]
+    fn out_of_range_number_refuses() {
+        let err = stripped_outbound_hash(br#"{"a":1e999}"#).unwrap_err();
+        assert!(
+            err.to_string().contains("out of float64 range"),
+            "unexpected error: {err}"
+        );
+        // A finite large literal still hashes.
+        assert!(stripped_outbound_hash(br#"{"a":1e21}"#).is_ok());
+    }
+
+    /// Technical §5.4 gap (fix loop 1): the hash is
+    /// always 64 lowercase hex chars, and stripping is
+    /// real — the stripped hash differs from the SHA-256
+    /// of the raw (unstripped) bytes.
+    #[test]
+    fn stripped_outbound_hash_pins() {
+        let h = stripped_outbound_hash(br#"{"a":1}"#).unwrap();
+        assert_eq!(h.len(), 64);
+        assert!(h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        let raw = hex::encode(Sha256::digest(br#"{"password":"x","a":1}"#));
+        let stripped =
+            stripped_outbound_hash(br#"{"password":"x","a":1}"#).unwrap();
+        assert_ne!(stripped, raw);
     }
 }

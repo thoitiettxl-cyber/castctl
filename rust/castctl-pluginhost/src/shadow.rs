@@ -448,12 +448,21 @@ mod tests {
         let own = root.join(format!("pid-{}", std::process::id()));
         std::fs::create_dir_all(&own).unwrap();
         std::fs::write(own.join("keep.so"), b"x").unwrap();
+        // A stray temp file inside the own dir must
+        // survive too: the sweep removes whole
+        // dead-pid dirs, never files inside a live
+        // one (technical F-i, fix loop 1).
+        std::fs::write(own.join(".castctl-plugin-stray"), b"x").unwrap();
         // Non-pid dir must survive.
         let other = root.join("not-a-pid-dir");
         std::fs::create_dir_all(&other).unwrap();
         sweep_stale_shadow_dirs();
         assert!(!dead.exists(), "dead pid dir must be swept");
         assert!(own.join("keep.so").exists(), "own dir must survive");
+        assert!(
+            own.join(".castctl-plugin-stray").exists(),
+            "stray temp in own dir must survive"
+        );
         assert!(other.exists(), "non-pid dir must survive");
         let _ = std::fs::remove_dir_all(&own);
         let _ = std::fs::remove_dir_all(&other);
