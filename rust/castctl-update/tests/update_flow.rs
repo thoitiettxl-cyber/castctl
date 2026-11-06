@@ -1002,10 +1002,10 @@ fn exec_check_flood_then_hang_returns_too_large_fast() {
         elapsed < Duration::from_secs(5),
         "took {elapsed:?}, expected a fast too-large kill"
     );
-    // Exact Go message (`replace.go:334`).
+    // Exact Go message (`replace.go:356`).
     assert_eq!(
         err.to_string(),
-        "update: the downloaded binary produced too large output for --version"
+        "update: the downloaded binary --version output is too large"
     );
 }
 
@@ -1055,12 +1055,17 @@ fn release_json_null_fields_take_go_code2_paths() {
         {
             let mut s = server.state.lock().unwrap();
             let raw = String::from_utf8(s.release_json_override.take().unwrap()).unwrap();
+            // Longest placeholders first:
+            // "PLACEHOLDER_SUMS" is a prefix of
+            // "PLACEHOLDER_SUMS_SIZE", and
+            // "PLACEHOLDER" a prefix of both
+            // "PLACEHOLDER_SIZE" and the sums forms.
             let raw = raw
+                .replace("PLACEHOLDER_SUMS_SIZE", &sums_size.to_string())
                 .replace(
                     "PLACEHOLDER_SUMS",
                     &format!("{base}/download/checksums.txt"),
                 )
-                .replace("PLACEHOLDER_SUMS_SIZE", &sums_size.to_string())
                 .replace("PLACEHOLDER_SIZE", &asset_size.to_string())
                 .replace(
                     "PLACEHOLDER",
@@ -1298,8 +1303,10 @@ fn allow_downgrade_installs() {
 }
 
 /// Technical §5.4 gap (fix loop 1): a dev build
-/// (empty commit) with an explicit target version
-/// refuses with code 2 and makes no tags request.
+/// (empty commit AND empty build date — Go `run`
+/// step 1, `update.go:250-253`) with an explicit
+/// target version refuses with code 2 and makes no
+/// tags request.
 #[test]
 fn dev_build_explicit_version_refuses() {
     let work = tempfile::tempdir().unwrap();
@@ -1307,10 +1314,15 @@ fn dev_build_explicit_version_refuses() {
     let (_tmp, target) = make_target(work.path(), "0.6.3");
     let (mut opts, _out) = base_opts(&target, &server);
     opts.commit = String::new();
+    opts.build_date = String::new();
     opts.target_version = "0.6.4".to_string();
     let (_res, err) = run(opts);
     let err = err.expect_err("dev build + explicit must refuse");
     assert_eq!(err.code(), 2);
+    assert_eq!(
+        err.to_string(),
+        "update: cannot determine running version: this build was not stamped with commit and build date; refusing to guess the version"
+    );
     assert_eq!(
         server.count("/repos/thoitiettxl-cyber/castctl/releases/tags/v0.6.4"),
         0,
@@ -1377,9 +1389,10 @@ fn latest_404_and_malformed_json_paths() {
         let (_res, err) = run(opts);
         let err = err.expect_err("malformed JSON must refuse");
         assert_eq!(err.code(), 1);
+        // Exact Go message (`update.go:807`).
         assert_eq!(
             err.to_string(),
-            "update: failed to fetch release information"
+            "update: release information is malformed"
         );
     }
 }
