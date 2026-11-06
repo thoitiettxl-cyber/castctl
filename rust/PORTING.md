@@ -9753,8 +9753,9 @@ free — check `df -h /` first.
 ## M7a — Services port: wait Runner + subscribe, fsclient, approvals, deliver, logging, dns (2026-11-05/06)
 
 Branch `feat/rust-m7a-services`, base `dev-rust` @
-`1602b12` (PR #71 merged 2026-11-05T23:51:59Z).
-Scope: Go `internal/wait` (Runner/history/clock +
+`6a399f7` (rebased 2026-11-06 from `1602b12`; upstream
+since then merged M6a PR #72 + perf PR #66 — see
+§M7a.1). Scope: Go `internal/wait` (Runner/history/clock +
 `chat.subscribe` NDJSON) + `internal/fsclient` +
 `internal/approvals` + `internal/deliver` +
 `internal/logging` (unported remainder) +
@@ -9782,8 +9783,14 @@ Stacking: the branch was first stacked on M5b
 rebased onto merged `dev-rust` `1602b12` after PR #71
 merged — the rebase was clean, no conflicts, and the
 M5b commits dropped out (they are upstream now).
-`git log` head after rebase: M7a commits only on top
-of `1602b12`.
+Rebased again 2026-11-06 onto `dev-rust` `6a399f7`
+(M6a PR #72 + perf PR #66 merged since `1602b12`):
+one conflict, `rust/Cargo.toml` members list only
+(upstream added `castctl-keeper`, M7a added
+approvals/fsclient/deliver/logging) — resolved by
+keeping both lists; `docs/provenance.md` and
+`rust/PORTING.md` merged clean. `git log` head after
+rebase: M7a commits only on top of `6a399f7`.
 
 Converge `open_stream`: exactly ONE
 `Gateway::open_stream` exists, at
@@ -10103,12 +10110,18 @@ contract), fresh server process per driver run
   types, one `'a` lifetime for `on_record` /
   `subscribe_raw`, unused `Error as _` import);
   `castctl-cli` missing `castctl-telegram` dep.
-- `cargo test --workspace`: TBD (baseline at
-  `1602b12` TBD; M7a adds TBD tests). Blocked on
-  disk: free fell to 4.2G on cue (another milestone
-  building); own target cleaned, free back to 5.0G;
-  no test run until free recovers above 8G.
-- `cargo clippy --workspace --all-targets -- -D warnings`: TBD.
+- `cargo test --workspace`: TBD. Baseline at `6a399f7`
+  attempted 2026-11-06 (fresh clone `/tmp/m7a-baseline`,
+  `CARGO_TARGET_DIR=/tmp/m7a-baseline-target`): DIED on
+  disk-full — `cargo test` exit 101, `No space left on
+  device` compiling `castctl-keeper` (lib test); target
+  had reached 5.9G when `/` hit 100% (71M free). No
+  test count obtained; the 536-vs-568-vs-643 discrepancy
+  is STILL unresolved. Baseline clone + target deleted
+  after; free back to 5.9G. Full-workspace test needs
+  >5.9G peak — impossible until cue frees space (see
+  writer report §14).
+- `cargo clippy --workspace --all-targets -- -D warnings`: TBD (same disk block).
 - `cargo build -p castctl-cli --example wait_driver`: TBD.
 - Go: `gofmt -l` clean; `go build` gateway_server
   + wait_driver OK; `go test -run TestSPDXHeaders
