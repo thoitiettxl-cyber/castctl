@@ -8642,6 +8642,58 @@ re-verification at `23db9f8`:
   traversal/link/PAX/trailing-data; lock held +
   lock symlink refuse.
 
+Fix loop 1 gates (cue, 2026-11-05, toolchain
+1.99.1, `CARGO_TARGET_DIR=/tmp/m6c-target`),
+final head `803cfec4a` (11 commits on top of
+`838276e`, see `git log 838276e..803cfec4a`).
+All five gates exit 0 at the final head; the
+test count below is the full re-run at that
+head (log `/tmp/m6c-fix1-test5.log` on cue):
+
+- `cargo fmt --check`: exit 0.
+- `cargo build --locked --workspace`: exit 0.
+- `cargo build --workspace`: exit 0, 0 warnings.
+- `cargo test --workspace`: exit 0.
+  **761 passed, 0 failed** (39 suites) vs
+  **728 passed, 0 failed @838276e** (baseline
+  568 @25a124e). Math: 568 + 160 (M6c) + 33
+  (fix loop 1) = 761. Fix-loop-1 delta per
+  suite: castctl-update lib 47 → 59 (+12:
+  select 6, http 4, extract 2),
+  `tests/update_flow.rs` 22 → 36 (+14),
+  castctl-pluginhost lib 79 → 86 (+7:
+  pluginabi 1, host 2, identity 2, discovery 1,
+  compat 1), `tests/egress.rs` 12 unchanged.
+- `cargo clippy --workspace --all-targets -- -D
+  warnings`: exit 0, 0 errors, 0 warnings.
+- Lock diff vs `838276e`: purely additive, **12
+  insertions, 0 deletions, 0 version changes**
+  (memoffset 0.9.1 + `nix` added to the two M6c
+  crates' dep lists).
+- Gate history in this loop (all on cue): the
+  first build failed with 20 errors (RawValue
+  has no `PartialEq`/`Eq` — hand-written
+  `Envelope` equality; `run.rs` defines its own
+  `Result`, shadowing `std::result::Result` in
+  `null_default` — fixed at `9c61158`); the
+  first `cargo test` died linking
+  `castctl-transport` (`ld terminated with
+  signal 7 [Bus error]`) because cue disk hit
+  0 bytes (22M avail; stale 06:03 test-binary
+  generation, 846 files / 5.2G, deleted — see
+  §M6c.6 item 13); then 1 test failed
+  (`response_head_deadline` — socket timeouts
+  surface as `WouldBlock`, see §M6c.6 item 14);
+  then 4 `update_flow` tests failed on wrong
+  expected strings / a placeholder-order bug /
+  a dev-build test that only cleared `commit`
+  (all test-side, Go-verbatim messages confirmed
+  in `replace.go:356` and `update.go:807` —
+  fixed at `7b9810f`); then fmt 1 diff + clippy
+  2× `redundant_pattern_matching` (fixed at
+  `803cfec4a`). No criteria were lowered; no
+  blanket allows were added.
+
 ## M6c.5 Chưa kiểm chứng
 
 - Q6 live TLS test: a rustls client against a
