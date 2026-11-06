@@ -728,14 +728,29 @@ fn factory_concurrent_writes() {
 
 #[test]
 fn factory_refused_paths() {
+    use std::os::unix::fs::PermissionsExt;
     let buf = SharedBuf::default();
     let dir = temp_dir("refused");
     let config_path = dir.join("config.json");
     let cookie_path = dir.join("cookies.txt");
     let orig_config = "FIXTURE-CONFIG\n";
     let orig_cookie = "FIXTURE-COOKIE\n";
+    // Go writes these with os.WriteFile(..., 0o600)
+    // (factory_test.go:497,500); std::fs::write would
+    // leave 0644 under umask 022 and the 0o600 assertion
+    // below would fail before the factory is even called.
     std::fs::write(&config_path, orig_config).unwrap();
+    std::fs::set_permissions(
+        &config_path,
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
     std::fs::write(&cookie_path, orig_cookie).unwrap();
+    std::fs::set_permissions(
+        &cookie_path,
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
     let refused = vec![
         config_path.to_str().unwrap().to_string(),
         cookie_path.to_str().unwrap().to_string(),
@@ -886,13 +901,26 @@ fn factory_output_stdout() {
 
 #[test]
 fn factory_refused_paths_by_identity() {
+    use std::os::unix::fs::PermissionsExt;
     let dir = temp_dir("refused-id");
     let config_path = dir.join("config.json");
     let cookie_path = dir.join("cookies.txt");
     let orig_config = "FIXTURE-CONFIG\n";
     let orig_cookie = "FIXTURE-COOKIE\n";
+    // Same 0o600 setup as factory_refused_paths (Go
+    // factory_test.go:677,680); see the note there.
     std::fs::write(&config_path, orig_config).unwrap();
+    std::fs::set_permissions(
+        &config_path,
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
     std::fs::write(&cookie_path, orig_cookie).unwrap();
+    std::fs::set_permissions(
+        &cookie_path,
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
     let refused = vec![
         config_path.to_str().unwrap().to_string(),
         cookie_path.to_str().unwrap().to_string(),
