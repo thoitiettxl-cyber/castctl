@@ -631,9 +631,9 @@ fn golden_parity() {
         "argv-list length (D-M2-4 + F5 case + 4 decoder cases + 3 N7 wait-conflict cases 09a/09b/09c)"
     );
     verify_manifest(&cases);
-    // F9(c): the Rust --version output (unstripped) is exactly
-    // `castctl 0.9.0`, and the golden --version case agrees after
-    // the N2 stamp strip.
+    // F9(c): the Rust --version output is exactly
+    // `castctl 0.9.0` after the N2 stamp strip, and the
+    // golden --version case agrees after the same strip.
     assert_rust_version(&bin);
     let golden_dir = parity_dir().join("golden");
     let golden_files: Vec<String> = std::fs::read_dir(&golden_dir)
