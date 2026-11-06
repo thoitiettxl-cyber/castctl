@@ -10088,13 +10088,26 @@ contract), fresh server process per driver run
   (fresh server per driver run, PID kill, `cmp`
   on stdout/stderr/exit, PASS/FAIL table).
 
-## M7a.6 Gates (cue — TBD, filled after the runs)
+## M7a.6 Gates (cue — fmt + build PASS 2026-11-06; test/clippy/Tier A/Tier B pending, disk-blocked)
 
 - `cargo fmt --check`: PASS (exit 0, 2026-11-06,
-  after `cargo fmt` on cue + `where`-param fix).
-- `cargo build --workspace`: TBD.
+  after `cargo fmt` on cue + `where`-param fix +
+  brace-placement fix in `subscriber.rs`).
+- `cargo build --workspace`: PASS (exit 0,
+  2026-11-06, final incremental 8.72s). Fix rounds:
+  dns shadowing/rdata; resolve self-recursion,
+  `ApproveError` source coercion, `safe_string`,
+  editor flush; `summarize.rs:126` + deliver `Arc`;
+  7 `castctl-wait` errors (two `&**err.err` casts,
+  `Subscriber` impls moved from `Arc<T>` to the bare
+  types, one `'a` lifetime for `on_record` /
+  `subscribe_raw`, unused `Error as _` import);
+  `castctl-cli` missing `castctl-telegram` dep.
 - `cargo test --workspace`: TBD (baseline at
-  `1602b12` TBD; M7a adds TBD tests).
+  `1602b12` TBD; M7a adds TBD tests). Blocked on
+  disk: free fell to 4.2G on cue (another milestone
+  building); own target cleaned, free back to 5.0G;
+  no test run until free recovers above 8G.
 - `cargo clippy --workspace --all-targets -- -D warnings`: TBD.
 - `cargo build -p castctl-cli --example wait_driver`: TBD.
 - Go: `gofmt -l` clean; `go build` gateway_server
