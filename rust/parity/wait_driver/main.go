@@ -377,7 +377,7 @@ func run() int {
 		dialer,
 		gateway.WithWebSocketSecure(false),
 		gateway.WithWSURL(func(vmID, token string) string {
-			return fmt.Sprintf("ws://%s/v1/noise?vm_id=%s&auth_token=<redacted>", *addr, vmID, token)
+			return fmt.Sprintf("ws://%s/v1/noise?vm_id=%s&auth_token=%s", *addr, vmID, token)
 		}),
 	)
 	muse := conn.New(connect)

@@ -6,7 +6,7 @@
   "0",
   "--json"
  ],
- "name": "n4-timeout-zero-means-600",
+ "name": "n4-timeout-zero-accepted-json-done",
  "script": {
   "history_stages": [
    {

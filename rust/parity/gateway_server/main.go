@@ -52,6 +52,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -505,6 +506,13 @@ func runServeWait(scriptPath string) error {
 	if err := json.Unmarshal(raw, &script); err != nil {
 		return fmt.Errorf("wait script %s: %w", scriptPath, err)
 	}
+	// `historyStage()` picks the last stage with
+	// `from_call <= historyCalls`, so stages must be
+	// ordered by `from_call` — sort once at load time
+	// instead of trusting file order (red-team F12).
+	sort.SliceStable(script.HistoryStages, func(i, j int) bool {
+		return script.HistoryStages[i].FromCall < script.HistoryStages[j].FromCall
+	})
 	st := &waitState{script: &script}
 	server, err := gatewaytest.NewServer(waitHandler(st))
 	if err != nil {
