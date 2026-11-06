@@ -19,15 +19,20 @@
 // At most one live session per profile.
 //
 // M6b status ("chưa nối"): the Rust build has no chromedp
-// build tag and no keeper crate yet, so the starter seam is
-// ALWAYS nil. Start mints a token but the WebSocket then
-// 503s after consume — matching Go's nil-starter branch
-// order. Availability follows the with_chromedp Go branch
-// (the cue Go binary is built WITH chromedp): a keeper
-// entry with a browser URL for the profile means
-// available, anything else names the missing entry.
+// build tag, so the starter seam is ALWAYS nil (the keeper
+// crate exists since M6a but the webui does not wire it
+// yet). Start mints a token but the WebSocket then 503s
+// after consume — matching Go's nil-starter branch order.
+// Availability follows Go's NO-CDP branch: Go checks
+// `keeper.CDPAvailable()` FIRST, before loading the config
+// or looking at keeper entries, and the shipped Go binary
+// on cue is built WITHOUT with_chromedp (verified from the
+// binary itself with `go version -m`: tags
+// with_utls,with_quic,with_wireguard,with_gvisor) — so
+// availability is always `(false, <CDP message>)` in the
+// parity comparison, with or without a keeper entry.
 
-use crate::error::{ApiError, err_validation};
+use crate::error::ApiError;
 use crate::go_json::encode_go_json;
 use crate::origin::ws_origin_allowed;
 use crate::server::{Resp, envelope_resp, error_resp};
@@ -527,42 +532,40 @@ fn hex_encode(raw: &[u8]) -> String {
 
 // --- availability + handlers ----------------------------------
 
-fn no_keeper_entry_msg(profile_name: &str) -> String {
-    format!(
-        "no keeper entry for profile \"{}\": add a \"keeper\" entry with a browser URL (see docs/config.md)",
-        profile_name
-    )
-}
+/// The CDP-unavailable reason, verbatim from Go
+/// (`internal/commands/webui.go:438-463`,
+/// `webuiScreencastAvailable`).
+pub const CDP_UNAVAILABLE_REASON: &str =
+    "screencast unavailable in this build (rebuild with -tags with_chromedp)";
 
-/// `webuiScreencastAvailable` (Go internal/commands/webui.go,
-/// with_chromedp branch — the cue Go binary is built WITH
-/// chromedp): a keeper entry naming the profile with a
-/// browser URL means available; anything else names the
-/// missing entry. A config that cannot be loaded/parsed is
-/// an error (the status/start handlers render it as a 400
-/// with the safe message).
+/// `webuiScreencastAvailable` (Go `internal/commands/webui.go:438-463`):
+/// Go checks `keeper.CDPAvailable()` FIRST — false →
+/// `(false, <CDP message>)` — before loading the config or
+/// looking at keeper entries. The shipped Go binary on cue
+/// is built WITHOUT `with_chromedp` (verified from the binary
+/// itself: `go version -m` reports
+/// `-tags=with_utls,with_quic,with_wireguard,with_gvisor`),
+/// so in the parity comparison the keeper branch is
+/// unreachable and availability is ALWAYS `(false, <CDP
+/// message>)`, with or without a keeper entry. The Rust build
+/// has no chromedp tag at all, so the faithful port models
+/// the CDP branch unconditionally: the config and profile
+/// arguments are ignored (Go never reaches them in this
+/// build). Against a hypothetical chromedp Go build the
+/// keeper message would be right instead — the comparison
+/// target is the shipped binary.
+///
+/// The keeper-based reason the old code returned is recorded
+/// verbatim in PORTING.md §M6b.12 (it is the string Go returns
+/// only when CDP IS available): `no keeper entry for profile
+/// "muse01": add a "keeper" entry with a browser URL (see
+/// docs/config.md)`.
 pub fn screencast_availability(
-    config_dir: &Path,
-    load: &ConfigLoad,
-    profile_name: &str,
+    _config_dir: &Path,
+    _load: &ConfigLoad,
+    _profile_name: &str,
 ) -> Result<(bool, String), ApiError> {
-    if !load.state.found {
-        return Ok((false, "no config file".to_string()));
-    }
-    let (cfg, _) = parse_loaded(load, config_dir)?;
-    let entries = match &cfg.keeper_raw {
-        None => {
-            return Ok((false, no_keeper_entry_msg(profile_name)));
-        }
-        Some(raw) => crate::validate::parse_keeper_block(raw)
-            .map_err(|e| err_validation(crate::error::safe_message_str(&e.to_string())))?,
-    };
-    for entry in &entries {
-        if entry.profile == profile_name && !entry.browser.is_empty() {
-            return Ok((true, String::new()));
-        }
-    }
-    Ok((false, no_keeper_entry_msg(profile_name)))
+    Ok((false, CDP_UNAVAILABLE_REASON.to_string()))
 }
 
 /// GET /screencast/status: `?profile=` or the default
@@ -871,12 +874,17 @@ pub async fn handle_ws_upgrade(
         // the transport runner lands with M6a): run it, then
         // send the terminal report and close. A starter
         // failure is a failed outcome, never a crash.
-        let starter = server2
-            .deps
-            .screencast_starter
-            .as_ref()
-            .expect("starter present (checked above)")
-            .clone();
+        // N-2 (fix loop 3): never panic here — a panic
+        // would skip `sessions.release()` and strand the
+        // profile Busy. Unreachable in practice
+        // (`ws_pre_upgrade` 503s before the spawn when no
+        // starter is present), but release + return instead
+        // of assuming it.
+        let Some(starter) = server2.deps.screencast_starter.as_ref() else {
+            server2.sessions.release(&profile);
+            return;
+        };
+        let starter = starter.clone();
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| starter(&profile, &token)))
                 .unwrap_or_else(|_| LoginResult::failed());
@@ -996,21 +1004,32 @@ mod tests {
     }
 
     #[test]
-    fn availability_no_keeper_entry() {
-        let dir = std::env::temp_dir();
-        let load = ConfigLoad {
-            raw: b"{\"profiles\":{}}".to_vec(),
-            hash: String::new(),
-            state: crate::guarded::ConfigState {
-                found: true,
-                exists: true,
-                sha256: String::new(),
-                raw: b"{\"profiles\":{}}".to_vec(),
-                base_dir: dir.clone(),
-            },
-        };
-        let (avail, reason) = screencast_availability(&dir, &load, "muse01").unwrap();
-        assert!(!avail);
-        assert!(reason.contains("no keeper entry for profile \"muse01\""));
+    fn availability_always_cdp_unavailable() {
+        // M-1 (fix loop 3): Go checks CDPAvailable() FIRST,
+        // and the shipped binary has no with_chromedp, so
+        // availability is (false, <CDP message>) whether or
+        // not a keeper entry names the profile. The old
+        // keeper-based reason is wrong against this binary.
+        for raw in [
+            b"{\"profiles\":{}}".to_vec(),
+            b"{\"profiles\":{},\"keeper\":[{\"tag\":\"k\",\"profile\":\"muse01\",\"browser\":\"http://127.0.0.1:9222\"}]}"
+                .to_vec(),
+        ] {
+            let dir = std::env::temp_dir();
+            let load = ConfigLoad {
+                raw: raw.clone(),
+                hash: String::new(),
+                state: crate::guarded::ConfigState {
+                    found: true,
+                    exists: true,
+                    sha256: String::new(),
+                    raw,
+                    base_dir: dir.clone(),
+                },
+            };
+            let (avail, reason) = screencast_availability(&dir, &load, "muse01").unwrap();
+            assert!(!avail);
+            assert_eq!(reason, CDP_UNAVAILABLE_REASON);
+        }
     }
 }

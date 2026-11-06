@@ -107,8 +107,6 @@ pub const MAX_HEAD_BYTES: usize = 1024 * 1024;
 /// 1 MiB gets hyper's automatic 431 where Go accepts —
 /// fail-closed, pathological input only.
 pub const MAX_HEADERS: usize = 10_000;
-/// Largest request body any route accepts (1 MiB cap).
-pub const MAX_BODY_BYTES: usize = 1024 * 1024 + 1;
 /// Go's net/http sniff buffer: bodies below this get an
 /// automatic Content-Length; larger bodies go chunked.
 pub const GO_SNIFF_BUFFER: usize = 2048;
@@ -637,13 +635,17 @@ impl Server {
         // `server.go:642-643`). The old pre-dispatch read
         // answered 400 to an over-cap body before auth ever
         // ran (Go: 401/429/403); it also never fed the
-        // rate limiter. The cap itself is unchanged
-        // (1 MiB + 1, `read_capped_body`); only the order
-        // moved. A 405, an unknown path, a 501 stub and
-        // every GET never touch the body: the request
-        // stream is dropped unread (hyper closes the
-        // connection after the response, as Go does for
-        // unread bodies).
+        // rate limiter. The cap is per-route
+        // (`route_body_cap`, fix loop 3, L2): 64 KiB or
+        // 1 MiB, the same cap Go's `MaxBytesReader` enforces
+        // for that handler — only the order moved. A 405,
+        // an unknown path, a 501 stub and every GET never
+        // touch the body: the request stream is dropped
+        // unread (hyper closes the connection after the
+        // response; Go drains up to 256 KiB of an unread
+        // body and may reuse the connection instead —
+        // client-visible only as a reconnect, recorded in
+        // PORTING.md §M6b.6).
         let headers = parts.headers.clone();
         let resp = with_recover(self.dispatch(
             &method,
@@ -789,10 +791,10 @@ impl Server {
         // unregistered method: a known path answers 405
         // from the route table, an unknown path falls
         // through to the shell.
-        let reads_body = crate::handlers::route_reads_body(method, path);
+        let reads_body = crate::handlers::route_body_cap(method, path);
         let fut = async {
-            let body_bytes: Vec<u8> = if reads_body {
-                match read_capped_body(body).await {
+            let body_bytes: Vec<u8> = if let Some(cap) = reads_body {
+                match read_capped_body(body, cap).await {
                     Ok(b) => b,
                     Err(_) => {
                         return api_error_resp(&crate::error::err_validation(
@@ -954,22 +956,24 @@ where
     }
 }
 
-/// Read a request body frame by frame, stopping at
-/// `MAX_BODY_BYTES` (1 MiB + 1) WITHOUT allocating past
-/// it — Go's `http.MaxBytesReader` equivalent at the
-/// transport edge. Returns the bytes when the whole body
-/// fits, or an error (over-cap or transport) otherwise.
-/// Trailers are ignored, as Go's decoder ignores them.
-/// Called from `dispatch_api` AFTER the middleware gates
-/// and inside the 30s API timeout (fix loop 2, B1/B2):
+/// Read a request body frame by frame, stopping at `cap`
+/// WITHOUT allocating past it — Go's `http.MaxBytesReader`
+/// equivalent for one route's cap. The caller passes the
+/// route's cap (`handlers::route_body_cap`, fix loop 3, L2):
+/// 64 KiB or 1 MiB, the same cap Go's `decodeBody`/`bodyJSON`
+/// enforces for that handler. Returns the bytes when the
+/// whole body fits, or an error (over-cap or transport)
+/// otherwise. Trailers are ignored, as Go's decoder ignores
+/// them. Called from `dispatch_api` AFTER the middleware
+/// gates and inside the 30s API timeout (fix loop 2, B1/B2):
 /// the caller owns the timeout, this function owns only
 /// the cap.
-async fn read_capped_body(mut body: Incoming) -> Result<Vec<u8>, BodyRead> {
+async fn read_capped_body(mut body: Incoming, cap: usize) -> Result<Vec<u8>, BodyRead> {
     let mut buf: Vec<u8> = Vec::new();
     while let Some(frame) = body.frame().await {
         let frame = frame.map_err(|_| BodyRead::Transport)?;
         if let Ok(data) = frame.into_data() {
-            if buf.len() + data.len() > MAX_BODY_BYTES {
+            if buf.len() + data.len() > cap {
                 return Err(BodyRead::OverCap);
             }
             buf.extend_from_slice(&data);
@@ -1232,6 +1236,75 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn route_body_cap_table() {
+        // L2 (fix loop 3): the read cap is the route's own
+        // cap — the same number Go passes to decodeBody /
+        // bodyJSON in that handler. 64 KiB routes must not
+        // get the 1 MiB cap (a 900 KiB body would be held
+        // whole first), and 1 MiB routes must not get the
+        // 64 KiB cap (a 100 KiB config body must pass the
+        // read and reach the handler). Caps verified
+        // against Go: handlers.go:255,325,398,442 (64K),
+        // 715,846,918,1002,1147,1193,1311,1339,1386 (1M),
+        // 1505 (64K); chats.go:414,478,558 (64K);
+        // endpoints.go:48 (64K); sections.go:113 (1M),
+        // 272 (64K).
+        use hyper::Method;
+        let cap64 = [
+            (Method::POST, "/api/v1/profiles"),
+            (Method::PATCH, "/api/v1/profiles/main"),
+            (Method::DELETE, "/api/v1/profiles/main"),
+            (Method::POST, "/api/v1/profiles/main/rename"),
+            (Method::POST, "/api/v1/endpoints/import"),
+            (Method::PUT, "/api/v1/settings/telegram"),
+            (Method::PUT, "/api/v1/settings/webui"),
+            (Method::POST, "/api/v1/chats/main"),
+            (Method::POST, "/api/v1/chats/main/sess/send"),
+            (Method::POST, "/api/v1/chats/main/sess/op"),
+        ];
+        for (m, p) in cap64 {
+            assert_eq!(
+                crate::handlers::route_body_cap(&m, p),
+                Some(BODY_CAP_64K),
+                "{m} {p} must cap at 64 KiB"
+            );
+        }
+        let cap1m = [
+            (Method::POST, "/api/v1/profiles/main/login/import"),
+            (Method::POST, "/api/v1/outbounds"),
+            (Method::POST, "/api/v1/outbounds/validate"),
+            (Method::PATCH, "/api/v1/outbounds/tag"),
+            (Method::POST, "/api/v1/endpoints"),
+            (Method::PATCH, "/api/v1/endpoints/tag"),
+            (Method::PUT, "/api/v1/config"),
+            (Method::POST, "/api/v1/config/validate"),
+            (Method::PUT, "/api/v1/dns"),
+            (Method::PUT, "/api/v1/settings/keeper"),
+        ];
+        for (m, p) in cap1m {
+            assert_eq!(
+                crate::handlers::route_body_cap(&m, p),
+                Some(BODY_CAP_1M),
+                "{m} {p} must cap at 1 MiB"
+            );
+        }
+        // No-body routes have no cap at all.
+        assert_eq!(
+            crate::handlers::route_body_cap(&Method::GET, "/api/v1/status"),
+            None
+        );
+        assert_eq!(
+            crate::handlers::route_body_cap(&Method::POST, "/api/v1/nope"),
+            None
+        );
+        assert_eq!(
+            crate::handlers::route_body_cap(&Method::POST, "/api/v1/screencast/main/start"),
+            None
+        );
+    }
+
     /// Minimal valid config for the live-server tests: the
     /// webui block allows 100 failed attempts so the tests
     /// never trip the limiter.
@@ -1458,11 +1531,11 @@ mod tests {
         // not before them (fix loop 2, B1: the gates run
         // on headers first; only an authenticated,
         // same-origin caller reaches the capped read).
-        // (Neutering MAX_BODY_BYTES leaves this 400 in
-        // place via the per-handler 1 MiB cap, so this
-        // test pins the outcome, not the pre-dispatch cap
-        // itself — the cap is proven by the RSS proof in
-        // §M6b.9.)
+        // (Neutering the read cap leaves this 400 in
+        // place via the decode-stage cap, so this test
+        // pins the outcome, not the read cap itself —
+        // the read cap is proven by the RSS case in
+        // §M6b.12.)
         let resp = live_server_case("POST", "/api/v1/config/validate", 2 * 1024 * 1024).await;
         assert!(resp.starts_with("HTTP/1.1 400"), "{resp}");
         assert!(resp.contains("invalid JSON in request body"), "{resp}");

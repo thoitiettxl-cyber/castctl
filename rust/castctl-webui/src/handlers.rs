@@ -304,29 +304,54 @@ pub async fn route(
 /// decodes a 64 KiB body.) The segment patterns mirror
 /// `route()` exactly; keep the two in sync.
 pub fn route_reads_body(method: &hyper::Method, path: &str) -> bool {
+    route_body_cap(method, path).is_some()
+}
+
+/// The per-route body cap for (method, raw path): the
+/// `maxBytes` argument Go passes to `decodeBody`/`bodyJSON`
+/// in that handler (`internal/webui/server.go:643,661` and
+/// the call sites in `handlers.go`/`chats.go`/
+/// `endpoints.go`/`sections.go`), mirrored 1:1 from the
+/// `decode_body_*` call sites in this crate. `None` means
+/// the handler reads no body. The transport read enforces
+/// this cap DURING the read (fix loop 3, L2): Go's
+/// `MaxBytesReader` aborts at cap+1 while reading, so a
+/// 900 KiB body to a 64 KiB route never holds more than
+/// ~64 KiB; the old transport cap (1 MiB+1 for every route)
+/// buffered the whole 900 KiB first and only rejected it
+/// afterwards in `decode_body_*`. Same 400 either way —
+/// the difference is allocation only, proven by the RSS
+/// case in the parity harness. The segment patterns mirror
+/// `route()` and `route_reads_body` exactly; keep the three
+/// in sync.
+pub fn route_body_cap(method: &hyper::Method, path: &str) -> Option<usize> {
     use hyper::Method;
     let segs: Vec<&str> = path.split('/').collect();
     let rest: &[&str] = if segs.len() >= 3 { &segs[3..] } else { &[] };
     match rest {
-        ["profiles"] => *method == Method::POST,
-        ["profiles", _] => matches!(method, &Method::PATCH | &Method::DELETE),
-        ["profiles", _, "rename"] => *method == Method::POST,
-        ["profiles", _, "login", "import"] => *method == Method::POST,
-        ["outbounds"] => *method == Method::POST,
-        ["outbounds", "validate"] => *method == Method::POST,
-        ["outbounds", _] => *method == Method::PATCH,
-        ["endpoints"] => *method == Method::POST,
-        ["endpoints", "import"] => *method == Method::POST,
-        ["endpoints", _] => *method == Method::PATCH,
-        ["config"] => *method == Method::PUT,
-        ["config", "validate"] => *method == Method::POST,
-        ["dns"] => *method == Method::PUT,
-        ["settings", "telegram"] | ["settings", "keeper"] | ["settings", "webui"] => {
-            *method == Method::PUT
+        ["profiles"] if *method == Method::POST => Some(BODY_CAP_64K),
+        ["profiles", _] if matches!(method, &Method::PATCH | &Method::DELETE) => {
+            Some(BODY_CAP_64K)
         }
-        ["chats", _] => *method == Method::POST,
-        ["chats", _, _, "send"] | ["chats", _, _, "op"] => *method == Method::POST,
-        _ => false,
+        ["profiles", _, "rename"] if *method == Method::POST => Some(BODY_CAP_64K),
+        ["profiles", _, "login", "import"] if *method == Method::POST => Some(BODY_CAP_1M),
+        ["outbounds"] if *method == Method::POST => Some(BODY_CAP_1M),
+        ["outbounds", "validate"] if *method == Method::POST => Some(BODY_CAP_1M),
+        ["outbounds", _] if *method == Method::PATCH => Some(BODY_CAP_1M),
+        ["endpoints"] if *method == Method::POST => Some(BODY_CAP_1M),
+        ["endpoints", "import"] if *method == Method::POST => Some(BODY_CAP_64K),
+        ["endpoints", _] if *method == Method::PATCH => Some(BODY_CAP_1M),
+        ["config"] if *method == Method::PUT => Some(BODY_CAP_1M),
+        ["config", "validate"] if *method == Method::POST => Some(BODY_CAP_1M),
+        ["dns"] if *method == Method::PUT => Some(BODY_CAP_1M),
+        ["settings", "telegram"] if *method == Method::PUT => Some(BODY_CAP_64K),
+        ["settings", "keeper"] if *method == Method::PUT => Some(BODY_CAP_1M),
+        ["settings", "webui"] if *method == Method::PUT => Some(BODY_CAP_64K),
+        ["chats", _] if *method == Method::POST => Some(BODY_CAP_64K),
+        ["chats", _, _, "send"] | ["chats", _, _, "op"] if *method == Method::POST => {
+            Some(BODY_CAP_64K)
+        }
+        _ => None,
     }
 }
 

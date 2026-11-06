@@ -225,12 +225,12 @@ docs/provenance.md.
   github.com/Keats/rust-bcrypt, pinned `=0.17.1` in
   rust/Cargo.toml. Linked ONLY into the Rust artifact
   (crate castctl-webui); Bearer-token hashing/verification
-  at cost 10. See docs/provenance.md §16.
+  at cost 10. See docs/provenance.md §17.
 - blowfish (Rust) v0.9.1 — MIT OR Apache-2.0, from
   github.com/RustCrypto/block-ciphers, pinned `=0.9.1` in
   rust/Cargo.toml. Transitive dependency of bcrypt; no
   castctl code imports it directly. See
-  docs/provenance.md §16.
+  docs/provenance.md §17.
 
 (c) Studied only — no code taken
 
