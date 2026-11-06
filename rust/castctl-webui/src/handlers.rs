@@ -330,9 +330,7 @@ pub fn route_body_cap(method: &hyper::Method, path: &str) -> Option<usize> {
     let rest: &[&str] = if segs.len() >= 3 { &segs[3..] } else { &[] };
     match rest {
         ["profiles"] if *method == Method::POST => Some(BODY_CAP_64K),
-        ["profiles", _] if matches!(method, &Method::PATCH | &Method::DELETE) => {
-            Some(BODY_CAP_64K)
-        }
+        ["profiles", _] if matches!(method, &Method::PATCH | &Method::DELETE) => Some(BODY_CAP_64K),
         ["profiles", _, "rename"] if *method == Method::POST => Some(BODY_CAP_64K),
         ["profiles", _, "login", "import"] if *method == Method::POST => Some(BODY_CAP_1M),
         ["outbounds"] if *method == Method::POST => Some(BODY_CAP_1M),
