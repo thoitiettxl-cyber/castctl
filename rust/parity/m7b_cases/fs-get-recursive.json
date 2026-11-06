@@ -1,0 +1,37 @@
+{
+  "args": [
+    "fs",
+    "get",
+    "-r",
+    "dir"
+  ],
+  "gateway": {
+    "/fs/stat": {
+      "result": {
+        "type": "directory"
+      }
+    },
+    "/fs/list": {
+      "result": {
+        "entries": [
+          {
+            "name": "a.txt",
+            "type": "file",
+            "size": 6
+          },
+          {
+            "name": "b.txt",
+            "type": "file",
+            "size": 6
+          }
+        ]
+      }
+    },
+    "/fs/read": {
+      "result": {
+        "data_base64": "aGVsbG8K",
+        "eof": true
+      }
+    }
+  }
+}

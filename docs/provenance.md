@@ -2296,6 +2296,30 @@ auto-approve writer preserves the input file bytes while Go
 normalizes it on write — CLI output byte-identical,
 resulting file semantically equivalent, verified live).
 
+## 21. M7b PR-2 CLI wiring (chat + send + watch + fs) — no new upstream dependency
+
+M7b PR-2 (`rust/castctl-cli`, branch
+`feat/rust-m7b-pr2`, base `dev-rust` 0173436, PR #76 merged) wires `chat`, `send` (incl. `--wait`),
+`watch`, and `fs` from the `not ported yet` stub to
+the repo's own Go handlers (`internal/commands/
+chat.go`, `wait.go`, `read.go`, `fs.go`;
+`internal/deliver/session.go`, `authexport.go`;
+`internal/shared/event.go`; `internal/commands/
+telegram_fs.go` for the `..` traversal condition;
+`internal/gateway/calls.go` for `SubscribeRaw`).
+No third-party code was copied and no new crate entered
+`Cargo.lock`. `NOTICE` needed no change (no new dep).
+Algorithm provenance and every deviation from the Go
+implementation are recorded in `rust/PORTING.md`
+§M7b.12 (notably: the pre-collapse `..` reject is a
+new CLI-layer rule with no Go CLI precedent — the Go
+m7b_driver `fs` arm is its oracle; the dropped-
+connection stderr differs (D-watch-drop); Ctrl-C at
+the prompt and mid-turn are byte/behaviour-identical
+live, while a SIGINT inside the ~1 s startup window
+would exit 130 in Go and continue to the prompt in
+Rust — recorded as a known limit).
+
 ## Carried items (unresolved at the time of writing)
 
 - npm license check: not run — no license-checking tool present,

@@ -75,7 +75,7 @@ impl std::error::Error for MsgError {}
 /// `Env.lookupEnv` for this module (`Ctx::getenv` is
 /// private to `run.rs`; this mirrors it): the injected
 /// getter wins, else the process environment (lossy).
-fn lookup_env(ctx: &Ctx<'_>, key: &str) -> Option<String> {
+pub(crate) fn lookup_env(ctx: &Ctx<'_>, key: &str) -> Option<String> {
     match ctx.getenv {
         Some(getenv) => getenv(key),
         None => std::env::var_os(key).map(|v| v.to_string_lossy().into_owned()),
@@ -86,7 +86,7 @@ fn lookup_env(ctx: &Ctx<'_>, key: &str) -> Option<String> {
 /// 37-64`): per-call flag > `MUSE_AUTO_APPROVE` > config.
 /// Defaults off. An invalid env value is a config error
 /// (exit 2) echoing the raw value, Go `%q`.
-fn resolve_auto_approve(
+pub(crate) fn resolve_auto_approve(
     profile: &Profile,
     flag: Option<bool>,
     env: Option<String>,
@@ -111,7 +111,7 @@ fn resolve_auto_approve(
 /// `ResolveAutoAllowOnce` (`autoapprove.go:66-96`): per-call
 /// flag > `MUSE_AUTO_ALLOW_ONCE` > config (a bool, or an
 /// on/off word normalised at parse time). Defaults off.
-fn resolve_auto_allow_once(
+pub(crate) fn resolve_auto_allow_once(
     profile: &Profile,
     flag: Option<bool>,
     env: Option<String>,
@@ -148,7 +148,7 @@ fn resolve_auto_allow_once(
 /// `wait`/`send` keeps generating a fresh id per
 /// invocation until the persist lands. Recorded in
 /// PORTING.md §M7a.
-fn ensure_node_id(profile: &mut Profile, env: Option<String>) {
+pub(crate) fn ensure_node_id(profile: &mut Profile, env: Option<String>) {
     if !profile.node_id.is_empty() {
         return;
     }
@@ -323,7 +323,7 @@ fn wait_approver(
 /// line). An error is returned only for auth failures and
 /// cancellation — any other failure is reported as a
 /// timeout (exit 124), mirroring `_run_wait`'s catch-all.
-async fn execute_wait(
+pub(crate) async fn execute_wait(
     rt: &Runtime,
     profile: &Profile,
     thread: &str,

@@ -14039,3 +14039,490 @@ lines the PR itself added, which still count as one
 insertion vs `b3fbe5a`; and `jsonvalue.rs` +
 `resources.rs` are first touched by this loop (+2
 files) alongside the 3 new case files (113 + 5 = 118).
+
+### M7b.12 PR-2: chat + send + watch + fs (2026-11-06)
+
+Branch `feat/rust-m7b-pr2`; rebased onto `dev-rust`
+`0173436` (PR #76 merged 2026-11-06 — the PR-1 stack
+dropped out, only the 16 PR-2 commits replayed; see
+"Rebase onto 0173436" at the end of this section).
+PR targets `dev-rust` directly (no stacking).
+Scope per parent decisions D-M7b-PR2-1..7 (plan
+`~/workspace/plans/active/castctl-rust-m7b-pr2.md`):
+`chat`, `send` (incl. `--wait` via M7a's Runner),
+`watch`, `fs`. Out of scope: `wait`/`fs` transport
+(M7a crates used as-is), F1, `--log-level trace`,
+`history --json`.
+
+#### Rebase of the PR-1 branch (STEP 1, before any PR-2 code)
+
+`feat/rust-m7b-cli-wiring` `04d24fd` → `74eff05`
+(M7a merge), head `36c5443` (28 commits). Conflicts
+resolved per R2 §7.1: `lib.rs` doc comment (mentions
+BOTH wait and M7b commands), `run.rs` `cmd_plain`
+(merged order parse_auto_toggles → wait → auto-approve
+→ READ_COMMANDS → M7B_COMMANDS → TODOs → stub; the
+old invite stub branch dropped),
+`gateway_server/main.go` (4 spots, BOTH serve-wait and
+serve-m7b kept), `Cargo.lock` merged cleanly (no
+hand-merge; `libc` + `sha2 0.10.9` under
+castctl-config verified). One extra brace from the
+run.rs resolver script caught by inspection and fixed.
+`pub(crate) fn go_type_name` (`network.rs:405`)
+survives; provenance §19 stands (M7a took no numbered
+section). Re-gate of the rebased tree (before PR-2
+code): SPDX ok, fmt 0, build 0, test **1389/0** (new
+baseline at `74eff05`, 63 suites), clippy 0, harness
+**86/86**, live **4/4**, help **46/46**; the merged
+gateway_server serves BOTH serve-wait and serve-m7b.
+No rebase regression.
+
+#### fs (slices A–C, commits `d5f6b13`, `7726206`)
+
+All 12 subcommands via `castctl-fsclient`
+(`rust/castctl-cli/src/fs.rs`): `SharedFsGateway` over
+`Arc<SharedConn>`; `validate_fs` (positionals →
+`rm` `--yes` refusal → traversal reject → `norm`
+validation, all BEFORE config/gateway — fail-before,
+0 gateway calls); `fs get` MkdirAll FIRST via
+`castctl_config::oserr::mkdir_all`; `fs write` reads
+stdin BEFORE connecting; `fs edit` `--replace` pairs
+in order, failed replace → exit 2. `CmdOut` gained
+`stdout_bytes` + `CmdOut::bytes()` (for `fs cat
+--binary`); `run_driver_command` now returns
+`(Vec<u8>, String, i32)`.
+- Pre-collapse `..` reject (D-M7b-PR2-6/7): helper
+  `has_traversal` on the RAW user arg (exact Go
+  `fsHasTraversal`: trim, backslash→slash, strip ONE
+  `sandbox://`, split `/`, any part == `..`), BEFORE
+  `Norm` clamping, at every path-bearing positional
+  (`put` remote only — local never normed; `mv` BOTH
+  src and dst); `find` EXEMPT. Reject message
+  `castctl: path traversal not allowed`, exit 2, NEVER
+  echo the input path (the `⚠️` form is a
+  Telegram-send-string property; CLI stderr sentences
+  are plain `castctl: ...`). Unit tests: `../`, `..`,
+  `a/../b`, `sandbox://../x`, `..\\x` → reject;
+  `..hidden`/`...`/`..etc` → pass. The "symlink ra
+  ngoài" test pins the CLIENT boundary only (a bare
+  symlink-named component passes through un-resolved;
+  `Norm` is purely lexical, `fs.list` returns
+  name/type only) — the client cannot see a remote
+  symlink's target, so no client-side symlink-out
+  rejection exists; recorded here as a limit, not a
+  rejection.
+- `castctl-fsclient` `go_json_string` fix (R2 §9.1):
+  added the `\x08 → \b`, `\x0C → \f` arms + unit test
+  (same R3-B1 bug class; it renders fs rows from
+  server-controlled names). `gateway/cookies.rs:181`
+  and `keeper/jar.rs:685` left untouched (unconstructible
+  in practice — recorded here, not fixed).
+- Harness: **34/34** (`rust/parity/m7b_cases/fs-*.json`,
+  generator `rust/parity/gen_fs_cases.py`, re-run
+  reproduces the 34 files exactly). Fail-before PROVEN
+  by server logs: all 5 traversal cases `M7B SUMMARY
+  requests=0` on both sides; find-exempt shows exactly
+  1 `POST /fs/search` per side. The Go m7b_driver `fs`
+  arm is the ORACLE for the new reject (no Go CLI
+  precedent) — documented in the PR body.
+- Known gap (recorded, not fixed): `edit --replace`
+  on non-UTF8 content round-trips lossily via
+  `from_utf8_lossy`; local io errors render in Rust
+  form (`fs_err` maps Io/Other to `msg(1, ...)`),
+  dev-21 class.
+
+#### send (slices D–D2, commits `393c8b4`, `9f26fcf`)
+
+`deliverSend` + `--wait` via M7a's Runner
+(`rust/castctl-cli/src/send.rs`): copies the `wait`
+CLI chain steps 2–6 (execute_wait / wait_dial /
+HistoryAdapter / wait_approver → Runner::run) — NO
+rewritten wait mechanism, NO duplicated state machine.
+Key order verified from Go source (`wait.go:988-1026`):
+head, outcome, status, final_text, replies,
+approvals?, auto_approved?, auto_approve_errors?,
+widgets?, question?, needs_input_reason?, reply?,
+downloads?, download_error?, note? (question BEFORE
+needs_input_reason — reverse of wait order;
+`after_seq` + `final_read_failed` dropped; the
+timeout note always wins over the wait note).
+`--wait 0` = JSON + exit 0; no-ack = JSON + exit 5
+(silent); wait exit = `res.ExitCode` (0/2/4/124).
+`requireRunning` is a DEAD flag in Go (no deviation).
+Download step only when download != "" AND replies
+non-empty; history limit=30, dedup by path first-seen.
+- Harness: **8/8** (`rust/parity/run_send_wait_cases.sh`,
+  generator `rust/parity/gen_send_wait_cases.py`) via
+  the serve-wait fixture (stream/media arms added to
+  gateway_server: `/chat/stream` observed, `/media/raw/*`
+  returns fixed 11 bytes `hello-bytes`). Two
+  divergences caught and fixed: empty `downloads`
+  omitted (Go `omitempty`; Rust had emitted
+  `"downloads":[]`); the Go driver's no-ack note
+  computed the ack timeout as bare nanoseconds.
+  Stage model proven by the probe: from_call 1 empty,
+  3 ack user event, 5 ack+assistant.
+- No needs_input harness case (no wait case covers
+  needs_input either); the
+  question-before-needs_input_reason order is pinned
+  by the unit test
+  `build_send_json_needs_input_question_before_reason`.
+- 11 `send::` unit tests (10 in slice D + 1 regression
+  for the empty-downloads omission).
+
+#### watch (slices E–E2, commits `c23fb77`, `447f4f9`)
+
+Via `subscribe_raw` (`rust/castctl-cli/src/watch.rs`):
+body `{"capabilities": ["chat_cancel",
+"delta_stream"]}` + `session_id` iff `--thread`
+non-empty; `printWatchRow` includes EVERY truthy
+payload key in order display_text, content, text,
+activity_text, status (the R1-fix). Mid-subscription
+errors fold into `Ok(CmdOut{...})` so already-rendered
+rows survive (the approve-all pattern).
+- Harness: **5/5** (`rust/parity/run_watch_cases.sh`,
+  generator `rust/parity/gen_watch_cases.py`) via the
+  serve-wait fixture (subscribe-body log line added).
+  Two divergences caught: (1) `\b`/`\f` — the first
+  watch.rs wrongly rendered `\u0008`/`\u000c`; Go's
+  `encoding/json` DOES emit the short forms (harness
+  proved it; the writer's assumption was inverted).
+  (2) **D-watch-drop** (KNOWN DEVIATION, no harness
+  case — the D1 precedent): on a dropped connection,
+  rows + exit 1 match, but stderr differs — Go
+  `castctl: gateway: websocket closed (close_code=1006
+  reason_length=14)` vs Rust `castctl: conn: connection
+  error error_length=63` (the shared length-only
+  rendering per loop-5; the close code is lost in the
+  TransportError layer before watch ever sees it).
+  No watch-local fix exists; changing the shared
+  rendering is out of PR-2 scope.
+- Deliberate deviation (timing only): Go prints each
+  row the moment it arrives; this CLI buffers every
+  command's stdout in `Ctx` and prints at the end, so
+  rows appear when the subscription ends. Bytes
+  identical.
+- Escaper reuse refactor (commit `b0ad32b`): the local
+  `go_json_string_stdlib` replaced by the network
+  escapers (`escape_go_marshal_string` HTML ON for
+  field values, `escape_stdout_string` HTML OFF for
+  event/seq). This FIXED a real divergence the swap
+  exposed: Go escapes U+2028/U+2029 even with
+  `SetEscapeHTML(false)` (verified by a `go run`
+  probe), while the local escaper passed them through
+  raw when HTML was off — the unit test that pinned
+  the raw form now expects the escaped form. Watch
+  unit tests 14/14 + harness 5/5 after the swap.
+- 14 `watch::` unit tests.
+
+#### chat (slice F, commits `0a55f05`, `64e1a0e`)
+
+REPL (`rust/castctl-cli/src/chat.rs`): `runWaitNetwork`
+→ load `chat.json` → EAGER `Connect` (auth failure
+prints `Can't sign in to muse.ai: <summary>` + the
+`deliver.AuthExport` guidance to stdout, exit 2) →
+banner + `showHistory(3)` → loop → `\nBye.\n`.
+Slash commands `/help /chats /open /main /new
+/history /login /exit` (+ `/?`, `/quit`, bare
+`exit`/`quit`, case-insensitive); per-line errors:
+auth → `Your login expired. ...` and continue; else
+`Connection problem (<summary>). Reconnected; please
+try again.` + drop the connection, continue.
+`sendOne`: `deliverSend` (ack 30s) → `Muse is
+thinking...` → `executeWait` (300s, toggles resolved
+from env/profile, flag=None) → `\nMuse: <text>\n`
+per reply → tail (`printWaitTail`, summary=false) →
+timeout hint. No harness (drivers have no stdin) —
+evidence is 13 unit tests (state round-trip exact
+bytes, tail text, REPL scripted input incl. EOF
+partial-line discard and the dead-gateway error path)
++ the live probes below.
+- `chat_texts.rs`: `CHAT_HELP_TEXT` +
+  `EXPORT_GUIDANCE` GENERATED byte-exact from Go
+  (`rust/parity/gen_chat_texts.py`); never hand-edit.
+  (The `/login` `"Signed in."` branch is unreachable
+  — `AuthExport` always returns an `ExportError`.)
+- Seams: `call_map`/`call_json` → `pub(crate)`
+  (`network.rs`); the `session.start` body factored
+  into `session_start_call` (reused by `/new`;
+  `cmd_session_start` refactored onto it,
+  behaviour-preserving — the session-start harness
+  cases re-verify); `deliver_send` +
+  `flow_err_code`/`flow_err_text` → `pub(crate)`
+  (`send.rs`).
+- The 4 `run.rs` tests that asserted `chat` → stub
+  now assert the wired behaviour (lone `--` → chat →
+  eager-connect auth failure, exit 2) or use `config
+  migrate --write` (still stubbed) for the
+  stub-shape assertions.
+- Deliberate deviations (see the `chat.rs` module
+  doc): the REPL read blocks one tokio worker (Go
+  blocks its goroutine the same way); Ctrl-C cancels
+  the turn via a per-turn `Cancel` and breaks the
+  loop on the next line (Go ctx semantics); save-error
+  text is the Rust io form (dev-21 class);
+  out-of-range `updated_at_ms` maps to the epoch
+  (chrono has no `time.UnixMilli` overflow behaviour).
+- Clippy fixes found while gating chat (commit
+  `64e1a0e`, no behaviour change): `watch_async` pub
+  → `pub(crate)` (pre-existing `private_interfaces`
+  failure); `fs.rs` `run_fs_command` doc reworded (a
+  line starting with `+ profile` was parsed as a
+  Markdown list item, `doc_lazy_continuation`); the
+  m7b_driver example `eprint!` with a trailing
+  newline → `eprintln!`.
+
+#### Gates (cue, 2026-11-06, at head `b0ad32b`)
+
+- SPDX ok (before any cargo build); fmt 0; build 0;
+  test **1439/0** (63 suites);
+  clippy 0 (`--workspace --all-targets -- -D warnings`).
+- Harness: m7b **120/120** (86 + 34 fs), send --wait
+  **8/8**, watch **5/5**, wait **11/11** (regressions
+  with the final server binary).
+- Live (cue, profile `no.0`, golden Go 0.9.0):
+  `fs ls` byte-identical (476 B, exit 0); `fs cat
+  SOUL.md` byte-identical (1537 B, exit 0); `watch
+  --timeout 5` shape-identical twice (same 3 event
+  types in order — `model_lock.updated`,
+  `task.status`, `approvals.snapshot`; seqs differ,
+  live data); `send --wait` on a scratch thread
+  (shape-identical: same keys/order, same
+  outcome/status/final_text, reply text `probe-ok`
+  identical; `user_seq`/`message_id` differ — per-turn
+  server values); `chat` scripted no-turn REPL
+  byte-identical (1355 B, exit 0, incl. `/history`);
+  `chat` Ctrl-C at the prompt byte-identical (144 B,
+  exit 0, `/help` unprocessed, `\nBye.\n`); `chat`
+  Ctrl-C mid-turn behaviour-identical (same lines in
+  order, same exit 0 — the 99-byte diff is the shared
+  thread's history window advancing by the Go run's
+  own delivered user message, proven by diff).
+  `chat.json` restored after every probe (verified
+  by `cmp`).
+- `--help` 46/46 byte-identical (45 names + global).
+- Re-verified: no new `unsafe` in production; no
+  `unwrap()`/`expect()` on external input; diff vs
+  `74eff05` only `rust/` + `docs/provenance.md`
+  (PR-2 branch diff vs the rebased PR-1 branch shows
+  only PR-2 files); Go tree untouched; no secrets in
+  the diff; no `auth_token` string in harness logs
+  (verified by `grep -c` only — display redaction
+  renders `auth_token=<value>` as
+  `auth_token=<redacted>`).
+
+#### Chưa kiểm chứng / known limits
+
+- No needs_input harness case for `send --wait`
+  (unit test pins the field order only).
+- D-watch-drop (above): dropped-connection stderr
+  differs (close code lost in the TransportError
+  layer); out of PR-2 scope.
+- `fs edit --replace` on non-UTF8 content round-trips
+  lossily; `fs get` live-download of a real file not
+  run live (fake-server only); `fs` local io errors
+  render in Rust form (dev-21).
+- Client-side symlink-out rejection does not exist
+  (boundary pinned, §fs above); `fs get -r` keeps the
+  M7a dev-29 shape (parity, trusted server).
+- SIGINT inside the ~1 s startup window (during the
+  eager connect): Go exits 130 (`context.Canceled`
+  from `Connect`); the Rust eager connect has no
+  cancellation wired, so it would continue to the
+  prompt and break on the next line (exit 0). Edge
+  case, unprobed — the prompt case and the mid-turn
+  case are both proven byte/behaviour-identical.
+- `--log-level trace` 0 bytes; `history --json`; F1
+  (unchanged known limitation from PR-1).
+
+#### Fix loop 1 (round-1 review, 2026-11-06)
+
+Round-1 verdicts: technical PASS-WITH-NITS (N1–N6),
+safety PASS (0 BLOCKING, 0 new nits), red-team
+PASS-WITH-NITS (N-R1, N-R2). No BLOCKING. All 8 nits
+fixed in this loop (commits `8429bd8`, `97051f4`, and
+this commit for the record itself):
+
+- N5: `rust/parity/run_wait_cases.sh` was `-rw-r--r--`
+  while the other three harness scripts are `+x`
+  (pre-existing M7a mode, not introduced by PR-2);
+  `chmod +x` in the tree (mode 100755).
+- N6: this section cited `network.rs:404` for
+  `go_type_name`; measured `:405` — fixed.
+- N-R1 (harness gap, FIXED not recorded): the serve-wait
+  fixture logged only the stream-open count, so a
+  byte-level escaping difference in the `chat.stream`
+  request body was invisible to every harness. The
+  fixture now logs the raw body (`WAIT stream-body`);
+  each send case carries the expected body as a
+  hand-written literal (from Go `wait.go` deliverSend);
+  the runner diffs Go vs Rust logged bodies AND each
+  side against the literal. RED 0/8 with the old
+  fixture binary, GREEN 8/8 with the new one; both
+  sides log byte-identical bodies.
+- N4 (evidence): the watch live probe now has TWO runs'
+  artifacts (`/tmp/m7b-pr2-fl1-live/watch{1,2}.{go,rs}.*`):
+  both pairs 146 B, exit 0, empty stderr, same 3 event
+  types in order; only seqs differ (live data). The
+  "shape-identical twice" claim in the Gates paragraph
+  above is now backed by two artifact pairs.
+- N-R2/N2/N3/N1: report/draft-only (see the writer
+  report's Fix loop 1 section): the `fs edit` editor
+  path is disclosed in the PR draft's Known limitations;
+  the writer-report §7 file list now includes
+  `rust/PORTING.md`; the §6 md5 is re-measured
+  (`d349e4ba…`, both URL lines 85 bytes, md5-identical);
+  the PR draft diff-stat is measured at the final head
+  (see the draft).
+- Re-gate at head `97051f4` (code-final; this docs
+  commit changes no code): SPDX ok; fmt 0; build 0;
+  test **1439/0** (63 suites); clippy 0; harness m7b
+  **120/120**, send --wait **8/8**, watch **5/5**, wait
+  **11/11**; help **46/46**. (One transient failure
+  in the first full run: `hardlink_keeps_old_inode`
+  in castctl-update, "failed to fetch the checksums
+  file" from its local test server; focused rerun 3/3
+  PASS, full re-run 1439/0 — a flake, not a
+  regression; this loop's diff touches no
+  castctl-update code.)
+
+#### Fix loop 2 (round-2 review, 2026-11-06)
+
+Round-2 verdicts: technical PASS (0 BLOCKING, 0 new
+nits), safety PASS (0 BLOCKING, 0 new nits), red-team
+FAIL — 1 BLOCKING (B1) + 3 nits
+(N-R2R1/N-R2R2/N-R2R3). All four fixed in this loop
+(commits `07f2efa`, `250dcab`, and this commit for the
+record itself):
+
+- B1 (BLOCKING, FIXED — not recorded as a deviation):
+  Go `encoding/json` Marshal escapes `<>&` (HTML ON)
+  and U+2028/U+2029 in every request body; Rust sent
+  them raw. Probe evidence (pre-fix code, real
+  harness, fresh binaries): send case `send-weird2`
+  (text `a"b <c> d&e ünïcode ✓`) — Go logs
+  `a\"b \u003cc\u003e d\u0026e ünïcode ✓`, Rust logs the
+  raw `<c> d&e`; `send-u2028` (`a\u2028b\u2029c`) differs
+  the same way; both exit 0, stdout byte-identical —
+  zero functional effect, but a byte divergence in
+  exactly the dimension the N-R1 gate polices, with
+  extremely common input. The fs probe decided the
+  fix location: `fs ls 'a<b'` differs too (Go
+  `{"path":"a\u003cb"}` vs Rust `{"path":"a<b"}`) —
+  the gap is SYSTEMIC, every request body carrying
+  user text, so the fix belongs at the COMMON gateway
+  serialisation point, not in `send.rs`. New single
+  home `rust/castctl-shared/src/go_json.rs`:
+  `to_go_json_bytes` (recursive `serde_json::Value`
+  serialiser — keys sorted explicitly, HTML escaping
+  ON, U+2028/U+2029 escaped, numbers verbatim via
+  `arbitrary_precision`) + `escape_go_marshal_string`
+  / `escape_stdout_string` (moved verbatim from
+  `network.rs`, which now re-exports them). All three
+  gateway serialisation sites use it: `Body::encode`
+  Json arm (`gateway.rs:152`), `open_stream` (`:962`),
+  `subscribe_raw` body (`:1026`). `castctl-gateway`
+  newly depends on `castctl-shared` (no cycle: shared
+  depends only on regex/chrono/serde_json). 5 new unit
+  tests in `go_json.rs` (marshal escapes, stdout form,
+  stream-body bytes, key sort + number literals incl.
+  `1e3`, U+2028/U+2029). Permanent harness cases:
+  `send-weird2`, `send-u2028`, `send-newline` (see
+  N-R2R1) + `fs-ls-lt-path`. RED proven pre-fix (send
+  8 PASS + 3 FAIL, fs `<` FAIL); GREEN post-fix (send
+  **11/11**, m7b **121/121**; both sides log
+  byte-identical bodies — weird2
+  `\u003c\u003e \u0026`, u2028 `\u2028\u2029`, fs
+  `{"path":"a\u003cb"}`).
+  Adjacent, out of scope: `castctl-telegram`
+  `api.rs:455` still uses `serde_json::to_vec` (same
+  class, different server/crate — needs its own probe;
+  recorded here, not fixed). The gateway GET-query
+  path (`bodyToQuery`) is URL encoding, not JSON —
+  not part of B1.
+- N-R2R1 (harness, FIXED): all 4 runners used
+  `readarray` + `print(a)` — a `\n` in a case arg
+  split into 2 argv and the driver took only args[0].
+  All 4 runners now pass args NUL-separated
+  (`readarray -t -d ''`, generator writes each arg +
+  `\0`). CORRECTION to the round-1 claim: "send
+  newline/quote/unicode byte-identical" was VACUOUS
+  for the newline part — both sides sent only
+  `"line1"` (server logs prove it: `grep -c line2`
+  = 0 both sides); the content never went on the
+  wire. The quote/unicode part without newline is
+  proven by `send-weird2`. The new REAL newline case
+  `send-newline` (text `line1\nline2 "quoted"
+  ünïcode ✓`) proves the full text reaches the wire:
+  GREEN post-fix, `line2` appears 1× in both server
+  logs (pre-fix it was 0 both sides).
+- N-R2R2 (runner, FIXED): `run_send_wait_cases.sh`
+  `set -u` + unset `$expected_body` when dial=false
+  and the case fails → the script aborted instead of
+  reporting. `expected_body=""` is now initialised
+  before the `if [ "$dial" = true ]` block. Proof (a
+  scratch dial=false case + a stub Rust driver that
+  forces FAIL; scratch proof in `/tmp/nr2r2-proof/`,
+  not committed — no dial=false case exists in the
+  tree): the pre-fix copy aborts
+  (`run-prefix.sh: line 302: expected_body: unbound
+  variable`, no `tier-a:` summary); the fixed runner
+  prints `FAIL nr2r2-dialfalse ...`,
+  `--- expected stream-body (nr2r2-dialfalse): [] ---`,
+  `tier-a: pass=0 fail=1`, exit 1.
+- N-R2R3 (draft, FIXED): the PR draft's Known
+  limitations now lists the §9 item: `fs get`
+  MkdirAll failure modes beyond the covered path.
+- Re-gate at head `250dcab` (code-final; this docs
+  commit changes no code): SPDX ok; fmt 0; build 0;
+  test **1444/0** (63 suites); clippy 0; harness m7b
+  **121/121**, send --wait **11/11**, watch **5/5**, wait
+  **11/11**; help **46/46**. (Two environment/test
+  notes, neither a regression: the first full gate run
+  failed one new unit test — the `1e3` literal test,
+  because `json!` coerces `1e3` to f64 1000.0 at
+  construction; fixed by parsing the literal with
+  `from_str` — and the examples link step failed with
+  `ld terminated with signal 7 [Bus error]` when the
+  disk hit 100% (336M free); the run's own incremental
+  cache was deleted and the examples re-linked, exit
+  0. The full test suite was then re-run clean,
+  1444/0.))
+
+#### Rebase onto 0173436 (#76 merged, 2026-11-06)
+
+PR #76 merged -> `dev-rust` `0173436`. Rebased with
+`git rebase --onto origin/dev-rust 36c5443
+feat/rust-m7b-pr2`: the 16 PR-2 commits replayed
+cleanly, **zero conflicts**, PR-1 stack dropped out
+(patch-id skip); head `03f7808`, then one docs commit
+`edd064c` (provenance: PR-2 section 20 -> 21, base line
+-> `dev-rust` 0173436 — dev-rust already holds M7b
+as §20). Merge-base `0173436`; diff `0173436..edd064c`
+**88 files +9407/-180**, only `rust/` +
+`docs/provenance.md`; Go tree untouched. `Cargo.lock`
+diff vs `0173436`: exactly 2 lines (the
+`castctl-shared` edge for `castctl-gateway` and the
+`castctl-fsclient` edge for `castctl-cli` — no new
+crate entered the lockfile).
+Re-gate at head `edd064c` (cue): SPDX ok; fmt 0;
+build 0; test **1470/0** (65 suites — 1444 + M6c-b's
+26 loader tests); clippy 0; harness m7b **121/121**,
+send --wait **11/11**, watch **5/5**, wait **11/11**;
+help **46/46** byte-identical; live 4/4 (approvals /
+invite / auto-approve / download-nofiles) + fs ls
+478 B byte-identical + fs cat SOUL.md 1537 B
+byte-identical + watch shape-identical (same 3 event
+types in order) + send --wait scratch shape-identical
+(reply `probe-ok` both sides) + chat scripted REPL
+1355 B byte-identical + chat Ctrl-C at prompt 144 B
+byte-identical; `chat.json` restored after every
+probe (md5 verified). (Two environment notes, neither
+a regression: the first full test run died mid-suite
+at 1118 passed / 42 suites when the disk hit 100% —
+not a code failure; own incremental cache freed,
+re-run clean 1470/0. The Ctrl-C probe driver crashed
+twice with `ValueError: flush of closed file` — a
+driver bug: `p.stdin.close()` before `communicate()`;
+fixed by not closing stdin manually, re-run
+byte-identical.)

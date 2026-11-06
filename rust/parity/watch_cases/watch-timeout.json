@@ -1,0 +1,12 @@
+{
+  "name": "watch-timeout",
+  "args": [
+    "--timeout",
+    "1"
+  ],
+  "script": {
+    "subscribes": [
+      {}
+    ]
+  }
+}

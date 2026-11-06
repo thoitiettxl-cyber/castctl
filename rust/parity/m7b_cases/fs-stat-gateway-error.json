@@ -1,0 +1,13 @@
+{
+  "args": [
+    "fs",
+    "stat",
+    "a.txt"
+  ],
+  "gateway": {
+    "/fs/stat": {
+      "status": 500,
+      "body": "{\"ok\":false,\"error\":\"boom\"}"
+    }
+  }
+}

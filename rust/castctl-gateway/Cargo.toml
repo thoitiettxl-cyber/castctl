@@ -12,6 +12,11 @@ description = "Gateway transport for the castctl Rust port (M4a): WebSocket + No
 
 [dependencies]
 castctl-transport = { path = "../castctl-transport" }
+# M7b PR-2 fix loop 2 (B1): the Go-compatible JSON encoder
+# (castctl-shared::go_json) for request bodies — Go's
+# encoding/json escapes <>& and U+2028/U+2029, serde_json
+# does not. No new crate enters the tree.
+castctl-shared = { path = "../castctl-shared" }
 # M4b: order-preserving JSON (decode_ordered_json) for the
 # cookie-file parser only — the gateway uses the config
 # crate's JSON value model, never its config loading.

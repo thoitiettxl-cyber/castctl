@@ -1,0 +1,16 @@
+{
+  "args": [
+    "fs",
+    "cat",
+    "--binary",
+    "b.bin"
+  ],
+  "gateway": {
+    "/fs/read": {
+      "result": {
+        "data_base64": "YQBiCg==",
+        "eof": true
+      }
+    }
+  }
+}

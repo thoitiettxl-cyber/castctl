@@ -40,8 +40,8 @@ use crate::help_texts::*;
 use crate::parser::{ArgParser, Parsed, ParserError, check_positionals};
 use crate::table::{
     COMMAND_ORDER, CommandSpec, FS_SUBCOMMANDS, KEEPER_SUBCOMMANDS, PROFILE_SUBCOMMANDS,
-    PositionalSpec, TELEGRAM_SUBCOMMANDS, auth_sub_defs, command_spec, fs_defs,
-    fs_positional_names, keeper_sub_help, profile_sub_defs, profile_sub_help,
+    PositionalSpec, TELEGRAM_SUBCOMMANDS, auth_sub_defs, command_spec, fs_defs, keeper_sub_help,
+    profile_sub_defs, profile_sub_help,
 };
 
 /// The Rust `--version` payload (D-M2-7): the bare version, no
@@ -63,6 +63,11 @@ pub const EXPORT_GUIDANCE: &str = "cookie export is not available in this build:
 pub struct Outcome {
     /// Bytes written to stdout.
     pub stdout: String,
+    /// Raw bytes written to stdout (`fs cat --binary`:
+    /// arbitrary bytes cannot go through the `String`
+    /// above; no command emits both text and raw bytes,
+    /// so the binary writes text first, then these).
+    pub stdout_bytes: Vec<u8>,
     /// Bytes written to stderr.
     pub stderr: String,
     /// Process exit code.
@@ -120,8 +125,9 @@ pub(crate) fn msg_empty(code: i32) -> FlowErr {
 
 /// `usageErr` (`read.go:1075`): a positional error becomes
 /// `errCode(2, pe)` with NOTHING pre-printed, so `classifyError`
-/// prints exactly one line.
-fn usage_err(pe: ParserError) -> FlowErr {
+/// prints exactly one line. `pub(crate)` for the `fs` handler,
+/// which validates positionals in the same way.
+pub(crate) fn usage_err(pe: ParserError) -> FlowErr {
     msg(2, pe.0)
 }
 
@@ -574,13 +580,12 @@ const READ_COMMANDS: [&str; 13] = [
 /// `parseAutoToggles` for wait/send, then config-location
 /// resolution + config parse, then the stub — except the 13
 /// read-only commands (M4b) and the 19 M7b Phase A commands,
-/// which run the network path, `wait` (M7a), which runs the wait
-/// path, and `auto-approve`, which resolves config + profile
-/// itself (no network).
-/// `history --download` is NOT in the network set: it is
-/// checked separately below and stubbed. `chat`, `send`,
-/// and `watch` stay stubbed (deferred to PR-2; see PORTING.md
-/// §M7b).
+/// which run the network path, `wait` (M7a) and `send`,
+/// `watch` and `chat` (PR-2), which run their own paths,
+/// and `auto-approve`, which resolves config + profile
+/// itself (no network). `history --download` is NOT in
+/// the network set: it is checked separately below and
+/// stubbed.
 fn cmd_plain(
     ctx: &mut Ctx<'_>,
     g: &GlobalOpts,
@@ -595,6 +600,15 @@ fn cmd_plain(
     if spec.name == "wait" {
         return crate::wait::run_wait_command(ctx, g, &p);
     }
+    if spec.name == "send" {
+        return crate::send::run_send_command(ctx, g, &p);
+    }
+    if spec.name == "watch" {
+        return crate::watch::run_watch_command(ctx, g, &p);
+    }
+    if spec.name == "chat" {
+        return crate::chat::run_chat_command(ctx, g, &p);
+    }
     if spec.name == "auto-approve" {
         return crate::autoapprove::run_auto_approve(ctx, g, &p);
     }
@@ -608,13 +622,6 @@ fn cmd_plain(
     if M7B_COMMANDS.contains(&spec.name) {
         return crate::network::run_network_command(ctx, g, spec, &p);
     }
-    // TODO(chat): deferred to PR-2 — needs the wait Runner
-    // (REPL + stdin + chat.json) after M7a merges.
-    // TODO(send): deferred to PR-2 — the default `--wait
-    // 90` needs the wait Runner after M7a merges.
-    // TODO(watch): deferred to PR-2 — needs
-    // `subscribe_raw`, the same primitive as M7a wait;
-    // implementing it here would duplicate M7a.
     resolve_and_load(ctx, g, false)?;
     Err(stub(ctx))
 }
@@ -798,7 +805,9 @@ fn cmd_update(ctx: &mut Ctx<'_>, spec: &CommandSpec, args: &[String]) -> Result<
 }
 
 /// `cmdFS` (`fs.go:141`) + per-subcommand `fsParse` /
-/// `fsPositionals`, then config-location resolution, then stub.
+/// `validate_fs` (positionals, `rm` --yes, traversal
+/// reject, `norm`), then `run_fs_command` (config +
+/// runtime + `exec_fs`).
 fn cmd_fs(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), FlowErr> {
     if args.is_empty() {
         ctx.out
@@ -822,26 +831,18 @@ fn cmd_fs(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), Flow
         return Err(msg_empty(2));
     }
     let p = fs_parse(ctx, sub, rest)?;
-    match fs_positional_names(sub) {
-        Some(names) => {
-            check_positionals(&p, names).map_err(usage_err)?;
-        }
-        None => {
-            if p.positionals.len() > 1 {
-                return Err(usage_err(ParserError(format!(
-                    "unrecognized arguments: {}",
-                    p.positionals[1..].join(" ")
-                ))));
-            }
-        }
-    }
-    // `fs rm` refuses without --yes BEFORE config resolution
-    // (`fs.go:738`); note the message differs from `profile rm`.
-    if sub == "rm" && !p.bool("yes") {
-        return Err(msg(2, "refusing to delete without --yes"));
-    }
-    resolve_and_load(ctx, g, false)?;
-    Err(stub(ctx))
+    crate::fs::validate_fs(sub, &p)?;
+    // `fs write` reads stdin BEFORE connecting (Go
+    // `fs.go:584-596`: stdin is read before `runFS`).
+    let stdin_data = if sub == "write" {
+        let mut data = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut data)
+            .map_err(|e| msg(1, e.to_string()))?;
+        Some(data)
+    } else {
+        None
+    };
+    crate::fs::run_fs_command(ctx, g, sub, &p, stdin_data)
 }
 
 /// `cmdAuth` (`deliver.go:71`) + subcommand parsers.
@@ -1724,6 +1725,7 @@ mod tests {
             out,
             Outcome {
                 stdout: "castctl 0.9.0\n".to_string(),
+                stdout_bytes: Vec::new(),
                 stderr: String::new(),
                 code: 0
             }
@@ -1805,7 +1807,10 @@ mod tests {
         // NOT fail (non-explicit locations always pass) — the
         // stub fires.
         let (_home, map) = isolated_env();
-        let out = run_env(&["--log-level", "warn", "chat"], map);
+        let out = run_env(
+            &["--log-level", "warn", "config", "migrate", "--write"],
+            map,
+        );
         assert_eq!(out.code, 1);
         assert_eq!(out.stderr, STUB_LINE);
     }
@@ -1929,7 +1934,7 @@ mod tests {
         // passes (Go: non-explicit always passes) — the stub
         // fires with exit 1.
         let (_home, map) = isolated_env();
-        let out = run_env(&["chat"], map);
+        let out = run_env(&["config", "migrate", "--write"], map);
         assert_eq!(out.code, 1);
         assert_eq!(out.stderr, STUB_LINE);
         // Explicit location with a correct basename but a missing
@@ -1954,7 +1959,7 @@ mod tests {
             "XDG_CONFIG_HOME".to_string(),
             home.join(".config").to_str().unwrap().to_string(),
         );
-        let out = run_env(&["chat"], map);
+        let out = run_env(&["config", "migrate", "--write"], map);
         assert_eq!(out.code, 1);
         assert_eq!(out.stdout, "");
         assert_eq!(out.stderr, STUB_LINE);
@@ -2148,11 +2153,16 @@ mod tests {
         assert_eq!(out.code, 2);
         assert!(out.stderr.contains("invalid choice"));
         // Lone "--" -> chat -> config resolution passes for a
-        // non-explicit location -> stub.
+        // non-explicit location -> chat runs (wired in PR-2)
+        // and its eager connect fails: no cookies in the
+        // isolated HOME, so an auth failure, exit 2. The
+        // guidance goes to the real stdout (chat owns the
+        // terminal), not the captured ctx streams.
         let (_home, map) = isolated_env();
         let out = run_env(&["--"], map);
-        assert_eq!(out.code, 1);
-        assert_eq!(out.stderr, STUB_LINE);
+        assert_eq!(out.code, 2);
+        assert!(out.stderr.contains("auth_failed"));
+        assert!(out.stdout.is_empty());
     }
 
     #[test]

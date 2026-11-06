@@ -1,0 +1,16 @@
+{
+  "args": [
+    "fs",
+    "stat",
+    "a.txt"
+  ],
+  "gateway": {
+    "/fs/stat": {
+      "result": {
+        "type": "file",
+        "size": 12,
+        "modifiedAt": "2026-10-24T12:57:37"
+      }
+    }
+  }
+}

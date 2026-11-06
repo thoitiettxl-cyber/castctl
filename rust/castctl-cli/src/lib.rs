@@ -25,12 +25,17 @@
 
 pub mod approvals;
 pub mod autoapprove;
+pub mod chat;
+pub mod chat_texts;
+pub mod fs;
 pub mod help_texts;
 pub mod network;
 pub mod parser;
 pub mod run;
 pub mod runtime;
+pub mod send;
 pub mod table;
 pub mod wait;
+pub mod watch;
 
 pub use run::{Outcome, VERSION, run};

@@ -1,0 +1,14 @@
+{
+  "args": [
+    "fs",
+    "find",
+    "zzz"
+  ],
+  "gateway": {
+    "/fs/search": {
+      "result": {
+        "entries": []
+      }
+    }
+  }
+}

@@ -80,6 +80,7 @@ use crate::parser::Parsed;
 use crate::run::{Ctx, FlowErr, GlobalOpts, msg, msg_empty, resolve_and_load_single};
 use crate::runtime::{Runtime, build_runtime};
 use crate::table::CommandSpec;
+use castctl_config::jsonvalue::{JsonValue, OrderedObject};
 use castctl_gateway::gateway::{Body, RequestOptions};
 
 /// One compact JSON line, Go `json.Marshal` on a
@@ -94,73 +95,13 @@ pub(crate) fn typed_json(typ: &str, summary: &str) -> String {
     )
 }
 
-/// Go `encoding/json` string escaping with HTML escaping ON
-/// (the `json.Marshal` default used by `classifyError`'s typed
-/// branch and by request-body encoding): `"`/`\`/`\b`/`\f`/`\n`/
-/// `\r`/`\t` short escapes, `<`/`>`/`&` as `\u003c`/`\u003e`/
-/// `\u0026`, U+2028/U+2029 escaped, other control chars as
-/// `\u00XX`.
-pub(crate) fn escape_go_marshal_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\x08' => out.push_str("\\b"),
-            '\x0C' => out.push_str("\\f"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '<' => out.push_str("\\u003c"),
-            '>' => out.push_str("\\u003e"),
-            '&' => out.push_str("\\u0026"),
-            '\u{2028}' => out.push_str("\\u2028"),
-            '\u{2029}' => out.push_str("\\u2029"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// Go `encoding/json` string escaping for CLI stdout JSON
-/// (`writeJSON`, `commands.go:411`: `SetEscapeHTML(false)`):
-/// identical to [`escape_go_marshal_string`] except `<` /
-/// `>` / `&` are emitted raw. U+2028/U+2029 stay escaped
-/// (Go escapes them even with HTML escaping off) and the
-/// other control characters keep their `\u00XX` form
-/// (`\b`/`\f` are short escapes, as in the marshal form).
-/// Use this for every hand-built stdout JSON fragment
-/// (approval rows, auto-approve status, download rows);
-/// wire request bodies and typed auth JSON keep
-/// `escape_go_marshal_string` (Go `json.Marshal` there).
-pub(crate) fn escape_stdout_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\x08' => out.push_str("\\b"),
-            '\x0C' => out.push_str("\\f"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{2028}' => out.push_str("\\u2028"),
-            '\u{2029}' => out.push_str("\\u2029"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
+/// Go `encoding/json` string escapers, re-exported from the
+/// single home in `castctl_shared::go_json` (moved there verbatim
+/// in M7b PR-2 fix loop 2, B1 — the gateway's request-body
+/// encoder uses the same rules). All call sites keep using
+/// `crate::network::escape_go_marshal_string` /
+/// `escape_stdout_string` unchanged.
+pub(crate) use castctl_shared::go_json::{escape_go_marshal_string, escape_stdout_string};
 
 /// A typed auth failure: exit 2, one compact JSON line on
 /// stderr, no `castctl: ` prefix (Go `typedAuthError` /
@@ -415,7 +356,7 @@ pub(crate) fn go_type_name(v: &SerdeValue) -> &'static str {
 /// One gateway call through the shared connection, with
 /// `classifyConnError` applied (Go `callJSON` + `runNetwork`
 /// wrapping).
-async fn call_json(
+pub(crate) async fn call_json(
     rt: &Runtime,
     method: &str,
     opts: RequestOptions,
@@ -428,7 +369,11 @@ async fn call_json(
 
 /// `callJSON` + the object check (Go `callMap`): a
 /// non-object result is a plain error, exit 1.
-async fn call_map(rt: &Runtime, method: &str, opts: RequestOptions) -> Result<SerdeValue, FlowErr> {
+pub(crate) async fn call_map(
+    rt: &Runtime,
+    method: &str,
+    opts: RequestOptions,
+) -> Result<SerdeValue, FlowErr> {
     let v = call_json(rt, method, opts).await?;
     if v.is_object() {
         Ok(v)
@@ -490,6 +435,10 @@ async fn history_result(
 pub(crate) struct CmdOut {
     /// Bytes for stdout.
     pub stdout: String,
+    /// Raw bytes for stdout (`fs cat`: arbitrary bytes
+    /// cannot go through the `String` above). No command
+    /// emits both text and raw bytes.
+    pub stdout_bytes: Vec<u8>,
     /// Bytes for stderr (approveAll lines; on a mid-loop
     /// decide failure, those lines plus the rendered error
     /// text — see `render_flow_err`).
@@ -505,6 +454,7 @@ impl CmdOut {
             stdout,
             stderr: String::new(),
             code: 0,
+            ..Default::default()
         }
     }
 
@@ -516,7 +466,25 @@ impl CmdOut {
             stdout,
             stderr: String::new(),
             code,
+            ..Default::default()
         }
+    }
+
+    /// Raw stdout bytes only, exit 0 (`fs cat`).
+    pub(crate) fn bytes(stdout_bytes: Vec<u8>) -> Self {
+        Self {
+            stdout_bytes,
+            ..Default::default()
+        }
+    }
+
+    /// Stdout as bytes, text first then raw bytes (the
+    /// order the binary writes them; no command emits
+    /// both, so this is just the concatenation).
+    pub(crate) fn stdout_combined(&self) -> Vec<u8> {
+        let mut out = self.stdout.clone().into_bytes();
+        out.extend_from_slice(&self.stdout_bytes);
+        out
     }
 }
 
@@ -548,7 +516,7 @@ fn ordered_body(pairs: &[(&str, String)]) -> Body {
 /// go:297`): the allowlist summary only, never peer text.
 /// Auth and Cancelled never reach a row (they propagate);
 /// they are rendered here only for completeness.
-fn summarize_transport_error(err: &TransportError) -> String {
+pub(crate) fn summarize_transport_error(err: &TransportError) -> String {
     match err {
         TransportError::Auth { message } => auth_summary(message),
         TransportError::Gateway(summary) => gateway_error_text(summary),
@@ -922,21 +890,22 @@ async fn cmd_unread(rt: &Runtime) -> Result<String, FlowErr> {
 /// (`deliver/session.go:80`). The params object is struct
 /// order (origin, lifecycle, title), NOT sorted, so the
 /// body is hand-built. The reply is returned verbatim.
-async fn cmd_session_start(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
-    let title = if p.str_is_set("title") {
-        p.str("title")
-    } else {
-        String::new()
-    };
+/// The `session.start` call behind `cmd_session_start`,
+/// factored out for `chat`'s `/new` (`newChat`,
+/// `chat.go:264`): the same body (struct order origin,
+/// lifecycle, title-omitted-when-empty), the same call,
+/// the same reply. `title` is omitted when empty (Go
+/// `json:"title,omitempty"`).
+pub(crate) async fn session_start_call(rt: &Runtime, title: &str) -> Result<SerdeValue, FlowErr> {
     let mut body = String::from(
         "{\"method\":\"/api/session/start\",\"params\":{\"origin\":\"fresh\",\"lifecycle\":\"persistent\"",
     );
     if !title.is_empty() {
         body.push_str(",\"title\":");
-        body.push_str(&escape_go_marshal_string(&title));
+        body.push_str(&escape_go_marshal_string(title));
     }
     body.push_str("}}");
-    let v = call_json(
+    call_json(
         rt,
         "session.start",
         RequestOptions {
@@ -944,7 +913,16 @@ async fn cmd_session_start(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> 
             ..Default::default()
         },
     )
-    .await?;
+    .await
+}
+
+async fn cmd_session_start(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
+    let title = if p.str_is_set("title") {
+        p.str("title")
+    } else {
+        String::new()
+    };
+    let v = session_start_call(rt, &title).await?;
     Ok(CmdOut::out(write_json_serde(&v)?))
 }
 
@@ -1178,6 +1156,7 @@ async fn cmd_approvals(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
                     stdout: String::new(),
                     stderr,
                     code,
+                    ..Default::default()
                 });
             }
         }
@@ -1270,6 +1249,7 @@ async fn cmd_approve(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
                     stdout: String::new(),
                     stderr,
                     code,
+                    ..Default::default()
                 });
             }
         }
@@ -1278,7 +1258,6 @@ async fn cmd_approve(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
     let res = decide_approval(rt, &id, &decision).await?;
     Ok(CmdOut::out(write_json_serde(&res)?))
 }
-
 /// `cmdDeny` (`wait.go:1330`): decide `deny`, or
 /// `deny_always` with `--always`; passthrough.
 async fn cmd_deny(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
@@ -1551,7 +1530,7 @@ fn event_matches_ref(ev: &SerdeValue, ref_: &str) -> bool {
 /// skipped, bytes, error, warning; `None` fields are
 /// omitted (`omitempty`).
 #[derive(Debug, Clone, Default)]
-struct SaveRow {
+pub(crate) struct SaveRow {
     /// Resource path that was downloaded.
     path: String,
     /// Absolute local path saved to (or would-be, on failure).
@@ -1592,6 +1571,35 @@ fn save_row_to_json(row: &SaveRow) -> String {
     out
 }
 
+/// The `SaveRow` shape as an ordered JSON value (same
+/// field order and omission rules as `save_row_to_json`):
+/// `path`, `file`, `skipped?`, `bytes?`, `error?`,
+/// `warning?`. Used by `send`'s `downloads` array; the
+/// download command keeps the string form.
+pub(crate) fn save_row_json(row: &SaveRow) -> JsonValue {
+    let mut pairs: Vec<(&str, JsonValue)> = vec![
+        ("path", JsonValue::Str(row.path.clone())),
+        ("file", JsonValue::Str(row.file.clone())),
+    ];
+    if let Some(skipped) = &row.skipped {
+        pairs.push(("skipped", JsonValue::Str(skipped.clone())));
+    }
+    if let Some(bytes) = row.bytes {
+        pairs.push(("bytes", JsonValue::Number(bytes.to_string())));
+    }
+    if let Some(error) = &row.error {
+        pairs.push(("error", JsonValue::Str(error.clone())));
+    }
+    if let Some(warning) = &row.warning {
+        pairs.push(("warning", JsonValue::Str(warning.clone())));
+    }
+    let mut o = OrderedObject::new();
+    for (k, v) in pairs {
+        o.set(k.to_string(), v);
+    }
+    JsonValue::Object(o)
+}
+
 /// `SaveResources` (`internal/shared/resources.go:267`):
 /// mkdir the directory (0777), skip existing
 /// destinations unless overwrite, download each resource
@@ -1603,7 +1611,7 @@ fn save_row_to_json(row: &SaveRow) -> String {
 /// allowlist summary only); an auth failure or a
 /// cancelled context propagates, as does any local
 /// filesystem failure (`save resources: …`).
-async fn save_resources(
+pub(crate) async fn save_resources(
     rt: &Runtime,
     resources: &[Resource],
     directory: &str,
@@ -1909,6 +1917,7 @@ pub(crate) fn run_network_command(
         dispatch(spec, &runtime, p).await
     })?;
     ctx.out.stdout.push_str(&out.stdout);
+    ctx.out.stdout_bytes.extend_from_slice(&out.stdout_bytes);
     ctx.out.stderr.push_str(&out.stderr);
     if out.code != 0 {
         return Err(FlowErr::Exit(out.code));
@@ -1953,13 +1962,13 @@ pub async fn run_driver_command(
     spec: &CommandSpec,
     rt: &Runtime,
     p: &Parsed,
-) -> (String, String, i32) {
+) -> (Vec<u8>, String, i32) {
     match dispatch(spec, rt, p).await {
-        Ok(out) => (out.stdout, out.stderr, out.code),
-        Err(FlowErr::HelpShown) => (String::new(), String::new(), 0),
-        Err(FlowErr::Exit(code)) => (String::new(), String::new(), code),
+        Ok(out) => (out.stdout_combined(), out.stderr, out.code),
+        Err(FlowErr::HelpShown) => (Vec::new(), String::new(), 0),
+        Err(FlowErr::Exit(code)) => (Vec::new(), String::new(), code),
         Err(FlowErr::Verbatim { code, text }) => (
-            String::new(),
+            Vec::new(),
             if text.is_empty() {
                 String::new()
             } else {
@@ -1968,7 +1977,7 @@ pub async fn run_driver_command(
             code,
         ),
         Err(FlowErr::Msg { code, message }) => (
-            String::new(),
+            Vec::new(),
             message
                 .map(|m| format!("castctl: {m}\n"))
                 .unwrap_or_default(),

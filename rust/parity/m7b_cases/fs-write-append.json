@@ -1,0 +1,20 @@
+{
+  "args": [
+    "fs",
+    "write",
+    "--append",
+    "w.txt"
+  ],
+  "gateway": {
+    "/fs/read": {
+      "result": {
+        "data_base64": "b2xk",
+        "eof": true
+      }
+    },
+    "/fs/write": {
+      "result": {}
+    }
+  },
+  "stdin_b64": "IG1vcmUK"
+}

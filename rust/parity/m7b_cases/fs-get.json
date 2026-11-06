@@ -1,0 +1,21 @@
+{
+  "args": [
+    "fs",
+    "get",
+    "file.txt"
+  ],
+  "gateway": {
+    "/fs/stat": {
+      "result": {
+        "type": "file",
+        "size": 6
+      }
+    },
+    "/fs/read": {
+      "result": {
+        "data_base64": "aGVsbG8K",
+        "eof": true
+      }
+    }
+  }
+}

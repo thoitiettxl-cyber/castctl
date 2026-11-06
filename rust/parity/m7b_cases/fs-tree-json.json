@@ -1,0 +1,27 @@
+{
+  "args": [
+    "fs",
+    "tree",
+    "--json"
+  ],
+  "gateway": {
+    "/fs/list": {
+      "result": {
+        "entries": [
+          {
+            "name": "d",
+            "type": "directory",
+            "size": 4096,
+            "modifiedAt": "2026-10-24T12:57:37"
+          },
+          {
+            "name": "f.txt",
+            "type": "file",
+            "size": 5,
+            "modifiedAt": "2026-10-24T12:57:37"
+          }
+        ]
+      }
+    }
+  }
+}

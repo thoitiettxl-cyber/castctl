@@ -74,6 +74,7 @@ use crate::proto::{
     ServiceResponse, ServiceType, service_type,
 };
 use crate::subscribe::{SubscribeHandler, SubscribeOptions};
+use castctl_shared::go_json;
 use castctl_transport::error::{BodySummary, TransportError, validate_error_code};
 use castctl_transport::routes::{Route, RouteTable, Service, build_path};
 
@@ -120,9 +121,11 @@ pub enum Body {
     Bytes(Vec<u8>),
     /// Sent verbatim.
     Text(String),
-    /// JSON-encoded (object keys sort: `serde_json::Value`
-    /// without `preserve_order` is a `BTreeMap`, as in Go's
-    /// `json.Marshal` on a `map[string]any`).
+    /// JSON-encoded with Go `json.Marshal` escaping (HTML ON —
+    /// see `castctl_shared::go_json`; object keys sort:
+    /// `serde_json::Value` without `preserve_order` is a
+    /// `BTreeMap`, as in Go's `json.Marshal` on a
+    /// `map[string]any`).
     Json(JsonValue),
 }
 
@@ -140,21 +143,20 @@ impl std::fmt::Debug for Body {
 }
 
 impl Body {
-    /// Encode exactly as Go `encodeBody`; an unencodable value
-    /// is a caller-side `Validation` raised before anything is
-    /// sent (Go `jsonutil.go:83-87`).
+    /// Encode exactly as Go `encodeBody` (Go `jsonutil.go:83-87`):
+    /// a `Json` body is serialised with Go `json.Marshal`
+    /// escaping (HTML ON — `<`/`>`/`&` and U+2028/U+2029
+    /// escaped; see `castctl_shared::go_json`). `serde_json`
+    /// emits those characters raw, which differed byte-for-byte
+    /// from Go for any body carrying user text (M7b PR-2 fix
+    /// loop 2, B1). Encoding is infallible (any `JsonValue`
+    /// serialises); the `Result` is kept for the caller's `?`.
     pub fn encode(&self) -> Result<Option<Vec<u8>>, TransportError> {
         match self {
             Body::None => Ok(None),
             Body::Bytes(b) => Ok(Some(b.clone())),
             Body::Text(s) => Ok(Some(s.clone().into_bytes())),
-            Body::Json(v) => {
-                serde_json::to_vec(v)
-                    .map(Some)
-                    .map_err(|e| TransportError::Validation {
-                        message: format!("encode body: {e}"),
-                    })
-            }
+            Body::Json(v) => Ok(Some(go_json::to_go_json_bytes(v))),
         }
     }
 }
@@ -957,14 +959,11 @@ impl Gateway {
         method: &str,
         body: Option<JsonValue>,
     ) -> Result<i64, TransportError> {
-        let bytes = match body {
-            Some(v) => Some(
-                serde_json::to_vec(&v).map_err(|e| TransportError::Validation {
-                    message: format!("gateway: stream body is not JSON: {e}"),
-                })?,
-            ),
-            None => None,
-        };
+        // The body is serialised with Go `json.Marshal`
+        // escaping (HTML ON; see `castctl_shared::go_json`),
+        // not `serde_json::to_vec` (which emits `<>&` raw) —
+        // M7b PR-2 fix loop 2, B1.
+        let bytes = body.map(|v| go_json::to_go_json_bytes(&v));
         let (sid, _, _) = self.open(method, &[], bytes, &[], None, false).await?;
         Ok(sid)
     }
@@ -1021,14 +1020,11 @@ impl Gateway {
         } else {
             opts.overall_timeout
         };
-        let body = match opts.body {
-            Some(v) => Some(
-                serde_json::to_vec(&v).map_err(|e| TransportError::Validation {
-                    message: format!("gateway: subscribe body is not JSON: {e}"),
-                })?,
-            ),
-            None => None,
-        };
+        // The body is serialised with Go `json.Marshal`
+        // escaping (HTML ON; see `castctl_shared::go_json`),
+        // not `serde_json::to_vec` (which emits `<>&` raw) —
+        // M7b PR-2 fix loop 2, B1.
+        let body = opts.body.map(|v| go_json::to_go_json_bytes(&v));
         let (sid, _, rx) = self
             .open(
                 method,

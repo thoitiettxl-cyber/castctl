@@ -121,8 +121,34 @@ for case in $case_files; do
     [ -f "$case" ] || { echo "no such case: $case" >&2; exit 1; }
     name=$(basename "$case" .json)
     cp "$case" "$OUT/$name.case.json"
-    readarray -t ARGS < <(python3 -c "import json,sys; [print(a) for a in json.load(open(sys.argv[1]))['args']]" "$case")
+    # NUL-separated arg passing (fix loop 2, N-R2R1): the old
+    # `print(a)` form split any arg containing a newline into
+    # two argv elements, so a newline case silently tested only
+    # its first line. `readarray -d ''` (bash 4.4+) + NUL bytes
+    # carry each arg verbatim (argv cannot contain NUL anyway,
+    # so the delimiter is exact).
+    readarray -t -d '' ARGS < <(python3 -c "import json,sys; [sys.stdout.buffer.write((a + '\0').encode('utf-8')) for a in json.load(open(sys.argv[1]))['args']]" "$case")
     start=$(date +%s)
+
+    # PR-2: per-case seed files (`fs put`) + stdin bytes (`fs write`).
+    # "seed_files": {"name": "<base64>"} is decoded once into
+    # $OUT/$name.seed (read-only for both drivers); "__SEEDDIR__"
+    # in the case argv is replaced with that dir. "stdin_b64" is
+    # decoded to $OUT/$name.stdin and fed to both drivers' stdin
+    # (both drivers read the same bytes; without it, stdin is
+    # /dev/null). Neither key exists in the pre-PR-2 cases.
+    seed_json=$(python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get('seed_files') or {}))" "$case")
+    stdin_b64=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('stdin_b64') or '')" "$case")
+    stdin_file="/dev/null"
+    if [ "$seed_json" != "{}" ]; then
+        rm -rf "$OUT/$name.seed"; mkdir -p "$OUT/$name.seed"
+        python3 -c "import json,sys,base64,os; [open(os.path.join(sys.argv[2], k), 'wb').write(base64.b64decode(v)) for k, v in json.loads(sys.argv[1]).items()]" "$seed_json" "$OUT/$name.seed"
+        ARGS=("${ARGS[@]/__SEEDDIR__/$OUT/$name.seed}")
+    fi
+    if [ -n "$stdin_b64" ]; then
+        printf '%s' "$stdin_b64" | base64 -d > "$OUT/$name.stdin"
+        stdin_file="$OUT/$name.stdin"
+    fi
 
     # --- Go side ---
     # Fresh download dirs every run: a stale file from an
@@ -132,7 +158,7 @@ for case in $case_files; do
     mkdir -p "$OUT/$name.go.dl"
     read -r gw_pid gw_addr < <(start_gw "$case" "$name-go") || exit 1
     read -r http_pid http_addr < <(start_http "$case" "$name-go") || { stop_servers "$gw_pid"; exit 1; }
-    timeout 60 "$GO" --addr "$gw_addr" --script "$case" --download-dir "$OUT/$name.go.dl" "${ARGS[@]}" >"$OUT/$name.go.out" 2>"$OUT/$name.go.err.raw"
+    timeout 60 "$GO" --addr "$gw_addr" --script "$case" --download-dir "$OUT/$name.go.dl" "${ARGS[@]}" <"$stdin_file" >"$OUT/$name.go.out" 2>"$OUT/$name.go.err.raw"
     echo $? >"$OUT/$name.go.exit"
     stop_servers "$gw_pid" "$http_pid"
     # Split the Go driver's stderr: M7B-HTTP lines are the HTTP
@@ -146,7 +172,7 @@ for case in $case_files; do
     mkdir -p "$OUT/$name.rs.dl"
     read -r gw_pid gw_addr < <(start_gw "$case" "$name-rs") || exit 1
     read -r http_pid http_addr < <(start_http "$case" "$name-rs") || { stop_servers "$gw_pid"; exit 1; }
-    timeout 60 "$RS" --addr "$gw_addr" --http-addr "$http_addr" --download-dir "$OUT/$name.rs.dl" "${ARGS[@]}" >"$OUT/$name.rs.out" 2>"$OUT/$name.rs.err"
+    timeout 60 "$RS" --addr "$gw_addr" --http-addr "$http_addr" --download-dir "$OUT/$name.rs.dl" "${ARGS[@]}" <"$stdin_file" >"$OUT/$name.rs.out" 2>"$OUT/$name.rs.err"
     echo $? >"$OUT/$name.rs.exit"
     stop_servers "$gw_pid" "$http_pid"
     sed -i "s|$OUT/$name.rs.dl|DLDIR|g" "$OUT/$name.rs.out" "$OUT/$name.rs.err"

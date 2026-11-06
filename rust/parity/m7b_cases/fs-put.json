@@ -1,0 +1,16 @@
+{
+  "args": [
+    "fs",
+    "put",
+    "__SEEDDIR__/up.txt",
+    "remote.txt"
+  ],
+  "gateway": {
+    "/fs/write": {
+      "result": {}
+    }
+  },
+  "seed_files": {
+    "up.txt": "aGVsbG8gcHV0Cg=="
+  }
+}

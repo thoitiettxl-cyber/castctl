@@ -9,6 +9,7 @@ description = "Command table, flag parsing, help/usage rendering, and exit mappi
 [dependencies]
 castctl-approvals = { path = "../castctl-approvals" }
 castctl-config = { path = "../castctl-config" }
+castctl-fsclient = { path = "../castctl-fsclient" }
 castctl-gateway = { path = "../castctl-gateway" }
 castctl-logging = { path = "../castctl-logging" }
 castctl-shared = { path = "../castctl-shared" }

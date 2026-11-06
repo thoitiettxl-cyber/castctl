@@ -402,6 +402,8 @@ type waitState struct {
 	script         *waitScript
 	historyCalls   int
 	subscribeCalls int
+	streams        int
+	mediaGets      []string
 }
 
 // waitHistoryResult is the chat.history result object the
@@ -453,6 +455,37 @@ func waitHandler(st *waitState) gatewaytest.Handler {
 		path := req.Path
 		if i := strings.IndexByte(path, '?'); i >= 0 {
 			path = path[:i]
+		}
+		if path == "/chat/stream" {
+			// The stream open itself is answered by the
+			// canned default handler below (its {} result
+			// opens the stream); this arm only counts and
+			// logs it, so a fixture that never opens a
+			// stream cannot pass as a send turn.
+			st.mu.Lock()
+			st.streams++
+			st.mu.Unlock()
+			fmt.Fprintf(os.Stderr, "WAIT stream chat.stream\n")
+			// N-R1: log the raw request-body bytes too, so
+			// the harness can diff Go vs Rust byte-for-byte
+			// (the old line logged only the open count; an
+			// escaping difference in the sent text was
+			// invisible). The body is one compact JSON line.
+			fmt.Fprintf(os.Stderr, "WAIT stream-body %s\n", string(req.Body))
+			return handler().Handle(req, service)
+		}
+		if strings.HasPrefix(path, "/media/raw/") {
+			// Media bytes for send --download (and any
+			// future download step): fixed bytes, so the
+			// byte_len check in the case fixture is
+			// deterministic.
+			st.mu.Lock()
+			st.mediaGets = append(st.mediaGets, path)
+			st.mu.Unlock()
+			fmt.Fprintf(os.Stderr, "WAIT media %s\n", path)
+			return gatewaytest.Response{Frames: []*pb.ServiceFrame{
+				gatewaytest.ResponseFrame(0, 200, []byte("hello-bytes"), true),
+			}}
 		}
 		switch path {
 		case "/chat/history":
@@ -512,6 +545,18 @@ func waitHandler(st *waitState) gatewaytest.Handler {
 			sub := st.nextSubscribe()
 			fmt.Fprintf(os.Stderr, "WAIT subscribe #%d delay_ms=%d frames=%d end_body=%v drop=%v\n",
 				call, sub.DelayMs, len(sub.Frames), sub.EndBody, sub.Drop)
+			var subBody map[string]any
+			var subSession string
+			var subCaps []any
+			if err := json.Unmarshal(req.Body, &subBody); err == nil {
+				if sid, ok := subBody["session_id"].(string); ok {
+					subSession = sid
+				}
+				if caps, ok := subBody["capabilities"].([]any); ok {
+					subCaps = caps
+				}
+			}
+			fmt.Fprintf(os.Stderr, "WAIT subscribe-body session_id=%q capabilities=%v\n", subSession, subCaps)
 			if sub.DelayMs > 0 {
 				time.Sleep(time.Duration(sub.DelayMs) * time.Millisecond)
 			}
@@ -588,6 +633,8 @@ func runServeWait(scriptPath string) error {
 	st.mu.Lock()
 	fmt.Fprintf(os.Stderr, "WAIT SUMMARY history_calls=%d subscribes=%d\n",
 		st.historyCalls, st.subscribeCalls)
+	fmt.Fprintf(os.Stderr, "WAIT SUMMARY streams=%d media=%v\n",
+		st.streams, st.mediaGets)
 	st.mu.Unlock()
 	return nil
 }

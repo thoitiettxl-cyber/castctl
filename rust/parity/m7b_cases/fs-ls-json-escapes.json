@@ -1,0 +1,30 @@
+{
+  "args": [
+    "fs",
+    "ls",
+    "--json"
+  ],
+  "gateway": {
+    "/fs/list": {
+      "result": {
+        "entries": [
+          {
+            "name": "a\bb",
+            "type": "file",
+            "size": 1
+          },
+          {
+            "name": "c\fd",
+            "type": "file",
+            "size": 2
+          },
+          {
+            "name": "e<f>&g",
+            "type": "file",
+            "size": 3
+          }
+        ]
+      }
+    }
+  }
+}

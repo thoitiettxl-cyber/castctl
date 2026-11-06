@@ -1,0 +1,18 @@
+{
+  "args": [
+    "fs",
+    "edit",
+    "--replace",
+    "old",
+    "old",
+    "e.txt"
+  ],
+  "gateway": {
+    "/fs/read": {
+      "result": {
+        "data_base64": "b2xkIHRleHQK",
+        "eof": true
+      }
+    }
+  }
+}
