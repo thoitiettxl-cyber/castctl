@@ -7993,13 +7993,14 @@ the crate API stays compatible with a later wiring
   exponent renders one digit, `1.5e-7` not
   `1.5e-07`, probed on cue),
   `stripped_outbound_hash`, `new_plugin_identity`.
-- `loader.rs`: STOPPED scope — documents the
-  limit, exposes `LOADER_UNAVAILABLE_MESSAGE`,
-  `open_plugin` / `check_plugin` always
-  `Err(LoaderUnavailable)`; Options A/B/C.
-- `support.rs`: `support_value()` → `"0"`,
-  `support_plugins()` → false (see §M6c.2
-  deviation 7).
+- `loader.rs`: real worker loader (M6c-b) —
+  `WorkerLoader` (pre-load gates + worker
+  spawn), `open_plugin` / `check_plugin` real;
+  `LOADER_UNAVAILABLE_MESSAGE` kept for the
+  non-unix / `StoppedLoader` path only.
+- `support.rs`: `support_value()` → `"1"`,
+  `support_plugins()` → true on unix (see §M6c.2
+  deviation 7, flipped in M6c-b).
 - `host.rs`: `Client` trait, `ClientError::
   {Transport, Panicked}`, `Loader` trait,
   `StoppedLoader`, `EgressProxyHandle` trait,
@@ -8141,11 +8142,16 @@ Pins (workspace `Cargo.toml`, exact `=`):
    sends raw bytes via `json.RawMessage` for the
    plugin to reject. Go: `ApplyConfig` /
    `sendRegistration` (`host.go`).
-7. [DEVIATION] `support_value()` returns `"0"`.
+7. [DEVIATION — RESOLVED in M6c-b]
+   `support_value()` returns `"1"` on unix,
+   `"0"` elsewhere; `support_plugins()` matches.
    Go returns `"1"` on cgo builds
-   (`support.go`); a Rust binary cannot dlopen,
-   so `"0"` is the honest value (the Go `"0"`
-   applies to stub builds).
+   (`support.go`). The M6c `"0"` was the honest
+   value while the loader was STOPPED; the
+   worker loader (see §M6c-b) loads real `.so`
+   files on unix, so `"1"` is now the honest
+   value there. Non-unix stays `"0"` (no worker
+   loader; `StoppedLoader` still refuses).
 8. [DEVIATION] Egress `IdleTimeout` 120s has no
    direct hyper equivalent; not implemented. Go:
    `EgressProxy` (`egress.go`).
@@ -8243,35 +8249,72 @@ Pins (workspace `Cargo.toml`, exact `=`):
     (`"invalid download URL"`,
     `update.go:774-793`) for every refusal, and
     every caller only tests accept/refuse.
-21. [DEVIATION] LOADER — STOPPED SUB-SCOPE. The
-    Go loader is dlopen + C ABI
-    (`loader_unix.go:168`, NOT `plugin.Open` —
-    grep 0 hits), and a safe pure-Rust port is
-    impossible: unsafe FFI + a SIGSEGV/SIGBUS
-    signal guard around a bare `*char` method
-    (`callbacks_unix.go:208,223,244`), no safe
-    Rust equivalent, and the task forbids
-    `unsafe` outside libraries. `loader.rs`
-    documents the limit, exposes the typed
-    `LoaderUnavailable` error, and proposes
-    Options A/B/C from the Phase 1 report R2 §7
-    (A RECOMMENDED: keep the Go binary as plugin
-    host, Rust delegates `plugin check`; B
-    subprocess protocol v2; C small C shim /
-    `libloading` in a dedicated unsafe crate).
-    The 4 SKIP tests (2 SIGSEGV-guard +
-    1 `TestBoundedCStringLen` + 1 stub-loader)
-    stay SKIP with the reason recorded; the 12
-    dlopen harness tests (`loader_test.go`,
-    `origin_test.go`, `race_sharing_test.go`) are
-    recorded as NOT PORTABLE under the current ABI
-    with the exact reason, not silently dropped.
-    NOTE (fix loop 1): this deviation does NOT
-    cover the 4 production `unsafe` blocks the
-    reviewers flagged — those were safe-wrapper
-    migrations (`nix` 0.31.3), NOT loader FFI,
-    and are gone: `grep -rn unsafe` over both
-    crates' non-test src is 0 after fix loop 1.
+21. [DEVIATION — RESOLVED in M6c-b] LOADER —
+    real worker loader. The Go loader is dlopen
+    + C ABI (`loader_unix.go:168`, NOT
+    `plugin.Open` — grep 0 hits). The M6c claim
+    that "a safe pure-Rust port is impossible"
+    was wrong as stated: it was a safety choice
+    (no `unsafe` outside libraries), not an
+    impossibility — Go itself dlopens with
+    `unsafe`+cgo. The correct statement is: a
+    safe-only port is impossible; a port with
+    `unsafe` confined to one `ffi` module is
+    possible, and crash isolation of arbitrary
+    plugin code additionally requires a worker
+    process (see §M6c-b). The loader is
+    `libloading` 0.9.0 (`os::unix::Library::open`,
+    RTLD_NOW|RTLD_LOCAL) inside the worker only;
+    `unsafe` is confined to `src/ffi/` (see
+    `ffi/mod.rs` header, 8 clauses) under crate
+    `#![deny(unsafe_code)]`. The 4 SKIP tests
+    (2 SIGSEGV-guard + 1 `TestBoundedCStringLen`
+    + 1 stub-loader) stay SKIP with the reason
+    recorded; the 12 dlopen harness tests
+    (`loader_test.go`, `origin_test.go`,
+    `race_sharing_test.go`) are recorded as NOT
+    PORTABLE under the current ABI with the exact
+    reason, not silently dropped. NOTE (fix loop
+    1): this deviation does NOT cover the 4
+    production `unsafe` blocks the reviewers
+    flagged — those were safe-wrapper migrations
+    (`nix` 0.31.3), NOT loader FFI, and are
+    gone: `grep -rn unsafe` over both crates'
+    non-test src is 0 after fix loop 1.
+    Tradeoff (verbatim, R2 §3.5): "M6b isolates
+    plugin crashes in a subprocess worker
+    (Option A). This is deliberately stronger
+    than Go, whose signal guard covers only the
+    `host.log` method-name scan and whose host
+    dies on any other plugin fault
+    (docs/plugins.md, trusted in-process model).
+    The price is a new framed protocol (v2) and
+    one IPC round-trip per plugin call, plus
+    worker supervision; the in-process `sigsetjmp`
+    guard (Option B) was rejected because
+    `longjmp` skips Rust destructors (locks never
+    release), a fault inside `malloc` leaves the
+    allocator locked, faults on plugin threads
+    have no guard, and heap corruption survives
+    the jump — see R2 §3.3. `signal-hook` cannot
+    implement the guard (it forbids SIGSEGV);
+    `hw-exception` 0.1.0 was examined and not
+    adopted (stale, single release, same
+    soundness holes)."
+    (The sentence says "M6b" — R2's milestone
+    label; the work landed as M6c-b.)
+    [DEVIATION] Two deliberate departures from
+    Go in the worker loader, both fail-closed:
+    (a) a plugin method name with an interior
+    NUL is an error ("plugin method contains a
+    NUL byte"); Go truncates at the NUL.
+    (b) the host callback has NO signal guard
+    around the bounded 256-byte method scan
+    (B-narrow deferred, R2 §3.5): an unreadable
+    method pointer faults the worker and the
+    parent reports `PluginCrashed` — the
+    designed outcome, coarser than Go's error
+    envelope but already correct.
 22. [DEVIATION] The DT_STRTAB overflow test uses
     checked arithmetic (`off.checked_add(strsz)`):
     the C-style `off + strsz < off` test would
@@ -8811,10 +8854,10 @@ head (log `/tmp/m6c-fix1-test5.log` on cue):
   endpoint: verified against a fake/offline server
   only (fake release JSON + fake asset +
   checksums). No real network download was run.
-- Live plugin load: the loader is STOPPED (§M6c.2
-  deviation 21) — no dlopen, no real plugin was
-  ever loaded by the Rust code. Options A/B/C
-  await a Boss decision.
+- Live plugin load: RESOLVED in M6c-b — the
+  worker loader dlopens real plugins; 6 live
+  tests pass on cue (see §M6c-b, incl. the Go
+  byte comparison for echo).
 - Egress HTTPS upstream: refuses by design (§M6c.2
   deviation 12); the Go wiring handles TLS via
   the profile outbound.
@@ -9750,6 +9793,833 @@ per the Boss rule; gate logs kept on cue
 gated head `73f0df8` for parent verification.
 NOTE for the verifier: a rebuild needs ~13G
 free — check `df -h /` first.
+
+## M6c-b — Real `.so` plugin loader (Option A worker, 2026-11-06)
+
+Resolves §M6c.2 deviations 7 + 21 (both marked
+RESOLVED there). The M6c claim that "a safe
+pure-Rust port is impossible" was wrong as stated
+(see deviation 21): it was a safety choice, not
+an impossibility. Branch
+`feat/rust-m6c-b-plugin-loader`, base dev-rust
+`0233095`.
+
+### Method
+
+- One worker process per loaded plugin (Option A,
+  R2 §3.5). The worker is the same binary
+  re-executed under the hidden `__plugin-worker`
+  subcommand (dispatched in `castctl-rs`
+  `src/main.rs` before the CLI runs), or the
+  dedicated `castctl-plugin-worker` binary
+  (`castctl-pluginhost/src/bin/`, used by tests
+  via `CARGO_BIN_EXE_castctl-plugin-worker`).
+  Handshake token: 16 random bytes hex (32
+  chars), an accident-guard, not auth.
+- Framed protocol v2 over a Unix socketpair
+  passed as the child's stdin AND stdout (safe
+  std only: `OwnedFd` → `Stdio`, no `pre_exec`,
+  no fd-number passing, no `unsafe` in
+  `worker.rs`). Frames: 4-byte big-endian length
+  + JSON, 16 MiB cap (M5a precedent). Ops:
+  `open` / `call` / `shutdown` / `ping`, replies,
+  plus reverse `host_call` / `host_call_reply`.
+  DEADLOCK RULE: the parent multiplexes
+  `host_call` frames while a call is outstanding
+  (`transact` read loop); a parent that did
+  `write(call); read(reply)` would deadlock the
+  first time a plugin calls `host.log`.
+- FFI (`src/ffi/`, the ONLY module where
+  `unsafe` is allowed; crate
+  `#![deny(unsafe_code)]`, `ffi/mod.rs`
+  `#![allow(unsafe_code)]` + 8-clause header):
+  `libloading =0.9.0` exact pin,
+  `os::unix::Library::open` with
+  RTLD_NOW|RTLD_LOCAL (Go parity; the
+  cross-platform `Library::new` is RTLD_LAZY).
+  Init order is Go-exact: shadow copy →
+  manifest checksum on shadow bytes (gated on
+  `ManifestPath != ""`, Go `loader_unix.go:152`)
+  → glibc compat gate → `dlopen` → `dlsym`
+  (`castctl_plugin_init`) → host table + malloc'd
+  `u64` host ctx (id 1, leaked like Go) → init →
+  rc check (`"<symbol> returned <rc>"`) → ABI
+  exact check → completeness check. NEVER unload:
+  the `Library` sits in a `ManuallyDrop`, so
+  `dlclose` is structurally impossible.
+- Crash = EOF + `ExitStatusExt::signal()` →
+  `PluginCrashed{signal, detail}` (detail =
+  worker stderr tail, last 4 KiB, sanitised);
+  call timeout (30s) → SIGKILL + timeout error
+  (which now carries the worker stderr tail as a
+  diagnostic). After a crash the client is fused:
+  a second call replays the same crash error,
+  never a silent reload. A host callback from a
+  plugin background goroutine outside any
+  outstanding call is delivered late (on the next
+  call's read loop); dropped if the host closes
+  first (fix loop 1 correction: the old "not lost"
+  wording was wrong — no further call means no
+  delivery).
+- `plugin check` is wired to the real loader
+  (`castctl-cli` `cmd_plugin`: stage lines
+  `dlopen` / `init` / `register` / `provider.call`
+  / `shutdown`, log sink flushed at stage
+  boundaries, Go-exact `checkField` caps). The
+  stub is gone. `support_value()` → `"1"` /
+  `support_plugins()` → true on unix only.
+- Root-cause fix found by the live tests
+  (test 6, init case): `spawn_worker` held the
+  `std::process::Command` alive through the open
+  transact, and its `Stdio::from(OwnedFd)` fds
+  are the CHILD end of the socketpair — the
+  parent held the peer end open, so a worker
+  dying in `init` could never deliver EOF and
+  the load read as a 30s timeout instead of
+  `PluginCrashed`. Proven on cue with `ss`
+  (parent held the child end on two fds). Fix:
+  `drop(cmd)` immediately after `spawn()`.
+
+### Evidence (cue, 2026-11-06)
+
+- `tests/loader_live.rs`: 6/6 pass, serial
+  14.36s, parallel full-run 13.96s, no skips.
+  (1) real `examples/plugin/echo`:
+  `provider.call {"input":"ping"}` →
+  `{"payload":"echo:ping"}`; (2) ABI v2 + v0
+  refused, Go-exact strings; (3) init rc 7 →
+  `castctl_plugin_init returned 7`; (4) null
+  response → decode error + lying length →
+  `returned an oversize response` (worker
+  survives both, second call same clean error),
+  garbage pointer `0x1` → `plugin crashed with
+  signal 11`; (5) `host.log` mid-call delivered
+  (`("info", "hello from plugin")`) + echo
+  still returns (deadlock rule proven); (6)
+  segfault in call AND in init → `plugin crashed
+  with signal 11`, fused replay on second call.
+  Every test ends with a fresh echo control call
+  proving the host survived. echo.so:
+  `/tmp/m6cb-gates/echo.so`, sha256
+  `2b644cec068b8b0960f75a1229d7c758df3cf3d10e9615515df8ddf08613644b`.
+- Go comparison (same echo.so, Go castctl built
+  from the synced worktree): byte-identical
+  output, both exit 0 —
+  `dlopen: ok` / `init: ok` / `register: ok
+  schema=1 name=echo version=0.1.0
+  capabilities=provider` / `provider.call: ok
+  {"payload":"echo:ping"}` / `shutdown: ok`.
+- Gates (cue): baseline @0233095 verified
+  985 passed / 0 failed (fmt 0, build 0,
+  clippy 0); after: `cargo fmt --check` 0,
+  `cargo build --locked --workspace` 0,
+  `cargo test --locked --workspace` 992 passed /
+  0 failed (44→46 `test result` lines: +6
+  loader_live, +1 loader unit test
+  [`open_missing_file_fails_without_worker`;
+  pluginhost lib 94→95]; `Running` targets
+  32→34: the new loader_live suite + the new
+  castctl-plugin-worker bin unittest), `cargo
+  clippy --workspace --all-targets -- -D warnings` 0.
+- `grep -rn "unsafe" rust/castctl-pluginhost/src`
+  shows code-`unsafe` confined to `src/ffi/`
+  only (other hits are doc-comment mentions of
+  the word). `git diff --stat` scope: `rust/`,
+  `NOTICE`, `docs/provenance.md` only; Go main
+  untouched.
+- `cargo tree -i libloading`: 0.9.0 → only
+  `castctl-pluginhost` (→ `castctl-cli`,
+  `castctl-rs`); 0.8.9 → only the bindgen →
+  clang-sys chain (build-time, boring-sys). The
+  runtime loader uses exactly 0.9.0. See
+  `docs/provenance.md` §19.
+
+### Deviations from Go (deliberate, fail-closed)
+
+- A plugin method name with an interior NUL is
+  an error ("plugin method contains a NUL
+  byte"); Go truncates at the NUL.
+- No signal guard around the bounded 256-byte
+  `host.log` method scan (B-narrow deferred,
+  R2 §3.5): an unreadable method pointer faults
+  the worker; the parent reports `PluginCrashed`
+  (designed outcome, coarser than Go's error
+  envelope).
+- The per-transaction deadline is enforced INSIDE
+  every frame read *during a transact* (parent) and
+  every `host_call` round-trip read (worker) (fix
+  loop 1, B1; claim narrowed fix loop 2, technical
+  N2 — the worker main loop's idle wait still uses
+  the plain deadline-less `read_frame`: only the
+  trusted host writes parent frames, and a dead
+  parent there is covered by `PR_SET_PDEATHSIG`).
+  `transact` `poll`s the socket with the recomputed
+  remaining time before every chunk read, so a
+  trickling peer is killed at the deadline.
+  (Correction: the old "~2x the remaining deadline"
+  claim was false — `SO_RCVTIMEO` applies per `recv`
+  and `read_exact` restarts the window on every
+  partial read, so one frame could take ~16M x 30s.)
+- Timeout errors carry the worker stderr tail;
+  Go has no such diagnostic.
+
+### Chưa kiểm chứng / known limits
+
+- Live `plugin check` on a real plugin was run
+  manually on cue (Go vs Rust, byte-identical
+  above); fix loop 1 automated the comparison in
+  `live_plugin_check_matches_go` (echo only — a
+  plugin that never calls `host.log` and has no
+  command-only branch).
+- The 6 live tests are serialised inside their
+  binary (`LIVE_LOCK`): they share one
+  per-process shadow root and `Host::close`
+  removes that whole directory, so a test
+  closing its host while another is mid
+  `shadow_copy` fails the copy with "move shadow
+  plugin" (pre-existing race, R3). The
+  assertions are unchanged — scheduling only.
+- Same family, inside the lib test process:
+  `shadow_dir_is_0700` failed once in the final
+  gates run (its `!dir.exists()` assert after
+  `cleanup_shadow_dir()`): a concurrent
+  `shadow_copy` recreated the per-process dir
+  inside the cleanup-then-assert window. M6c
+  had added a `SWEEP_TEST_MU` lock for the sweep
+  test only, with a comment saying it must not
+  race "other tests' shadow copies" — but no
+  other test took it. M6c-b completes that
+  intent: one shared test-only lock
+  (`SHADOW_DIR_TEST_LOCK`, `shadow.rs`), taken
+  by every in-process toucher of the per-process
+  dir (`shadow_dir_is_0700`, the sweep test,
+  the symlink/hardlink test's `shadow_copy`
+  call, the loader missing-file test).
+  Assertions unchanged. Residual, pre-existing
+  and NOT changed by this branch: the ~35 host
+  tests' `Host::close()` calls also remove the
+  dir; a close landing between another test's
+  `shadow_dir()` and its mode check could still
+  flake — never observed in any run (baseline,
+  full2, final, all M6c gates).
+- Live GitHub API / live plugin load from a
+  real release: not run (same as M6c §M6c.5).
+- M6b (PR #74) merged first and took provenance
+  §18 (bcrypt); the libloading section was
+  renumbered §18 → §19 at the rebase onto
+  dev-rust `b3fbe5a` (fix loop 1).
+
+### Fix loop 1 (round-1 review, 2026-11-06)
+
+Base: rebased onto dev-rust `b3fbe5a` (M6b merged
+first) at fix-loop-1 start; see the rebase note
+above. All 7 red-team BLOCKINGs fixed, all 7 test
+gaps closed, plus the technical + safety nits
+(cheap ones fixed, the rest recorded here).
+Decisions on the red-team open questions, by the
+standing self-decide rule (live evidence first,
+else Go parity, else the safer option + record):
+B3 fuse at the Host level (yes); B4 fail `plugin
+check` on a shutdown crash (yes, exit 2); B6
+budget 1000 `host_call` frames / 4 MiB per
+transaction (chosen: 1000 round-trips is far past
+any legitimate plugin — `host.log` is a log line,
+not a data channel — and 4 MiB bounds the bytes
+even if each call carries a full 4 KiB message);
+B7 `pre_exec` exception (yes, behind the safe
+`ffi::set_parent_death_signal` wrapper — the only
+`pre_exec` in the codebase, `unsafe` confined to
+`ffi`); B5 cap kept at 16 MiB frames, documented
+with the measured effective payload cap below
+(not raised to Go's `i32::MAX`: the cap is the
+M5a precedent and the worker protocol's DoS
+bound); G4 automated in-tree (not manual-only).
+
+- B1 timeout evadable (red-team): the deadline is
+  now enforced INSIDE every frame read during a
+  transact (narrowed fix loop 2: not the worker
+  main loop's idle wait — see the deviation bullet
+  above).
+  `worker.rs` `read_frame_deadline` /
+  `read_exact_deadline` `poll` the socket with the
+  recomputed remaining time before every chunk
+  read and fail `WouldBlock` at the deadline
+  (mid-frame, mid-length-prefix included). The
+  worker-side `host_call` round-trip uses the same
+  treatment (`read_frame_fd_deadline`, raw-fd reads
+  through `ffi::poll_readable` / `ffi::read_fd` —
+  not the `StdinLock`, whose buffer would defeat
+  `poll`). `set_read_timeout` is gone from this
+  path (safety N4). The "~2x" claim is corrected
+  above. Proved by `live_slow_drip_timeout`
+  (1 MiB prefix + 1 byte/25s → timeout error in
+  ~30s, worker reaped).
+- B2 forged reply (red-team): `transact` accepts
+  a frame as the reply only when `op == "reply"`
+  AND the id matches the outstanding call; any
+  other op (other than `host_call`) or id mismatch
+  is a protocol violation (kill + fuse). Call ids
+  start at a random 64-bit value on both sides
+  (parent `next_id`, worker `HOST_CALL_ID`), so
+  an outstanding id is not guessable by a plugin
+  thread writing to fd 1. `worker_main` drops
+  unknown ops instead of answering them with a
+  reply-shaped error frame. Proved by
+  `live_forged_reply_rejected` (forged
+  `op:"reply"` + wrong id → `"unexpected frame"`,
+  and `op:"bogus"` + wrong id → `"non-reply
+  frame"`, both → protocol error, never the
+  forged bytes; fix loop 2 asserts the two
+  DISTINCT messages, so the op check and the id
+  check are pinned separately — the old test
+  asserted only their shared prefix. A correct-id
+  forgery is not constructible live: the id is a
+  random 64-bit value the plugin cannot observe.)
+- B3 host fuse (red-team):
+  `call_envelope_client` now fuses on a dead client
+  (fix loop 2, NB1 — see below): a `PluginCrashed`
+  transport error OR a `ClientDead` kill (timeout /
+  flood / protocol) fuses with the death as the
+  reason. The fix-loop-1 narrow rule (crash only;
+  "oversize, decode, and timeout errors do not
+  fuse") was WRONG for timeouts: a killed worker is
+  exactly as dead as a crashed one, and the narrow
+  rule let the next `apply_config` burn a doomed
+  reconfigure + rollback and fuse with the wrong
+  reason. The narrowness that survives is
+  worker-alive vs worker-dead: oversize, decode,
+  and other `Failed` errors (worker alive) still do
+  not fuse. The next `apply_config` with the same
+  tag+path then skips as `fused: …` without a doomed
+  reconfigure + rollback. Proved by
+  `live_crash_fuses_host` (`host.fused` carries
+  "signal 11", `host.loaded` is gone, re-apply
+  skips fused) and, for the kill arms, by
+  `live_timeout_kill_fuses_host`,
+  `live_host_call_flood`, `live_host_call_byte_bound`,
+  and `live_forged_reply_rejected` (all assert
+  `host.fused` + `host.loaded` is gone).
+- B4 shutdown crash (red-team): EOF during
+  shutdown is no longer success. `transact` lost
+  its `eof_ok` path; EOF reaps the child and
+  reports the crash, `WorkerClient::shutdown`
+  records it (`shutdown_crash`, surfaced via the
+  new `Client::shutdown_error` default trait
+  method), and `Host::close` collects it into
+  `Host::shutdown_errors()`. `plugin check`
+  prints `shutdown: crashed (signal N)` and exits
+  2 instead of `shutdown: ok`; `check_plugin`
+  fails the same way. Proved by
+  `live_shutdown_crash` (Host level + CLI level).
+- B5 oversize host request (red-team): `transact`
+  pre-checks the serialised frame size
+  (`frame_fits`) BEFORE writing and returns a
+  clean `Failed("plugin worker frame too large")`
+  without touching the worker — no SIGKILL, no
+  fuse, next small call succeeds. Mirror case
+  (tech N1 / safety N3): an oversized worker
+  reply is answered with a clean
+  `oversize_response` error frame (`write_reply`
+  now returns `io::Result`, so a failed reply
+  exits the worker loop instead of stalling for
+  the next frame). Effective decoded-payload cap,
+  measured: a `provider.call` frame is 64 bytes
+  of JSON overhead (1-digit id) to 83 bytes
+  (20-digit id) around the base64 payload, so the
+  cap is 12,582,864 down to 12,582,849 decoded
+  bytes (pinned by the `call_frame_overhead_is_pinned`
+  unit test). Proved by
+  `live_oversize_host_request` (12.5 MiB ok,
+  13 MiB clean size error, worker alive) and
+  `live_oversize_worker_reply` (~13 MiB payload →
+  oversize error in <10s, not a 30s timeout /
+  signal 9; fix loop 2: a follow-up small call on
+  the same client succeeds, proving the worker
+  survived). Fix loop 2: `Client::call` refuses an
+  over-cap request BEFORE base64-encoding it (exact
+  bound, computed from the frame overhead — no
+  transient ~4/3x allocation); `transact` writes
+  with a deadline and a single serialisation
+  (`write_frame_deadline`, red N2 / tech N10).
+- B6 host_call flood (red-team): at most 1000
+  `host_call` frames and 4 MiB of dispatched
+  callback request bytes per transaction; past
+  either bound the worker is killed and fused
+  with `"host callback flood"` — at the HOST level
+  too, since fix loop 2 (NB1: the fix-loop-1 PR
+  claim "killed and fused" was false at the Host
+  level for flood kills; the fuse now fires on the
+  typed `ClientDead`). Deliberate policy (fix loop
+  2, safety R2-N5): each `host.log` message is
+  capped at 4096 bytes, so the effective bound is
+  ~1000 log lines per call — far past any
+  legitimate plugin (`host.log` is a log line, not
+  a data channel). A verbose-but-legitimate plugin
+  emitting more than that in one `provider.call` is
+  killed and fused; that is the intended trade.
+  The dispatch itself runs on a helper thread
+  bounded by the transaction deadline (red N6: a
+  blocking log sink cannot hang the transact past
+  its deadline). The `plugin check` log sink is
+  capped independently at 64 KiB total between
+  stage flushes (`push_plugin_log_line`, one
+  truncation marker, unit-tested). Proved by
+  `live_host_call_flood` (100k `host.log` calls →
+  flood error, parent survives) and, for the byte
+  bound distinctly from the count bound (fix loop
+  2), by `live_host_call_byte_bound` (ONE 5 MiB
+  `host.log` → flood error + host fuse).
+- B7 orphan worker (red-team): the worker is
+  spawned with `PR_SET_PDEATHSIG` (SIGKILL) via
+  the safe wrapper `ffi::set_parent_death_signal`
+  (`ffi/pdeath.rs`; the fork/`prctl` race is
+  closed by a `getppid()` check in the child).
+  Proved by `live_parent_death_kills_worker`
+  (helper parent loads a hung plugin, is SIGKILLed
+  mid-call, worker dies within seconds).
+- G1 completeness: `live_incomplete_table_refused`
+  (init rc 0, `call` nil and `free_buffer` nil →
+  Go-exact "plugin function table is incomplete").
+- G2 missing symbol / corrupt `.so`:
+  `live_missing_symbol_and_corrupt_so` (no
+  `castctl_plugin_init` → "missing
+  castctl_plugin_init"; truncated echo.so → "read
+  plugin elf: truncated program header" from the
+  parent's glibc compat gate, before any worker
+  spawns — fix loop 2 pinned the exact string; the
+  old loose `"dlopen" OR "truncated"` assertion is
+  gone. No worker lingers after either).
+- G3 null+nonzero: test 4(a) now uses
+  `{ptr: nil, len: 5}` (the R2-mandated case; the
+  loader returns empty Ok, the Host refuses the
+  empty response as a decode error — pinned in
+  the test comment); the oversize path now has a
+  free-count assertion (register + 2 calls = 3
+  `free_buffer` invocations, counted by a marker
+  file).
+- G4 Go byte-parity: automated by
+  `live_plugin_check_matches_go` (builds the Go
+  `castctl` from `./cmd/castctl` and the Rust
+  `castctl-rs`, runs `plugin check` on the same
+  echo.so, diffs stdout + stderr + exit code).
+  Limit (recorded, not hidden): echo only — a
+  plugin that never calls `host.log` and has no
+  command-only branch. The manual cue log
+  (`/tmp/m6cb-gates/gocheck.log`) is now backup
+  evidence, not the only evidence.
+- G5 call-never-invoked: test 2 now uses a
+  marker-writing call body and asserts the marker
+  file does not exist after a refused load.
+- G6 test 5 shapes:
+  `live_host_callback_multi_background_register`
+  (3 `host.log` calls in one call, in order; one
+  from a background goroutine; one during
+  `open`/`register`) and
+  `live_host_callback_unsupported_method` (tech
+  N8: `host.auth.list` → rc 0 +
+  `unsupported_host_callback` envelope, call
+  still echoes).
+- G7 failed-init shutdown: implemented, not just
+  recorded — `ffi::open` invokes the plugin's
+  `shutdown` when init already filled it, on all
+  three failure paths (rc, ABI, completeness),
+  matching Go `closeAfterOpenFailure`. Proved by
+  `live_failed_init_calls_shutdown` (marker file
+  from `shutdown` after init rc 7).
+- Safety N2 lying length inside `i32::MAX`:
+  `ffi/mod.rs` rule #4 corrected to the real
+  guarantee (a smaller lying `len` faults the
+  worker and is reported as `PluginCrashed`, or
+  yields garbage the host refuses as an invalid
+  envelope — never a truncated read), and test
+  4(d) (`lyingsmall`: 16-byte allocation, len
+  1 MiB) asserts the call never succeeds and the
+  host survives. `ffi/call.rs` snapshots
+  `response.len` once (red N7).
+- Other nits fixed: `LOADER_UNAVAILABLE_MESSAGE`
+  reworded (tech N4 — no Go-binary delegation
+  exists; `error.rs` display + both pinned tests
+  updated in the same change);
+  `CASTCTL_PLUGIN_WORKER_BIN` validated (safety
+  N6: exists + is a file + executable bit, else
+  falls through to sibling/`current_exe`; code
+  comment states it is test-only);
+  `ffi/mod.rs` rule #8 narrowed (safety N7:
+  constants like `O_NOFOLLOW` excluded) and rule
+  #5 wording fixed (`ManuallyDrop`, not
+  `mem::forget` — red N1); `plugin check` FAIL
+  reason printed whole, uncapped (tech N3 —
+  Go-exact; the `register:` and provider.call
+  caps stay); `check_plugin` passes no `Host`
+  deadline, like the CLI (tech N9 — the 10s
+  timeout could abandon a transact that then
+  blocks `close`); `check_plugin`/`open_plugin`
+  documented as the tested public seam with no
+  production caller yet (red N4); `ping` deleted
+  (red N3 — dead op, parent never sent one);
+  stdout-corrupts-protocol hazard documented
+  (tech N12 — a plugin must not write to stdout);
+  "not lost" reworded (tech N13 / red N2);
+  nil-method hostcall deviation recorded below
+  (tech N5); PR draft "M6b" label fixed to
+  "M6c-b" (tech N11); vacuous test-3 assertion
+  deleted (tech N6).
+- Recorded as known limitations (not fixed):
+  `error_code` still classifies by message prefix
+  (red N10 — diagnostic-only, the message
+  carries the truth; a typed code from `ffi::open`
+  would change the error type across the crate);
+  the `SHADOW_DIR_TEST_LOCK` residual race (safety
+  N8 — the ~35 host tests' `Host::close()` calls
+  still remove the per-process dir without the
+  lock; never observed flaking, see the
+  pre-existing note above); a `Host::call` timeout
+  abandons the transact thread, so `Host::close`
+  can block until the worker transact ends (safety
+  N5 / red N8 — bounded by the 30s worker
+  transact; `check_plugin` no longer sets a Host
+  timeout, so the CLI path cannot hit it).
+- Deviations from Go added in fix loop 1
+  (deliberate, fail-closed):
+  - A nil `host_ctx`/`method` in `castctl_host_call`
+    returns 1 (delivery failed); Go yields an empty
+    method string, which `dispatchHostCall` then
+    rejects with an `unsupported_host_callback`
+    envelope delivered with rc 0 (tech N5).
+    Observable only to a plugin passing a null
+    method; fail-closed either way.
+  - The `plugin check` log sink is capped at 64 KiB
+    between stage flushes (B6); Go streams log
+    lines to stdout unboundedly.
+  - `Host::call` with a timeout abandons the
+    transact thread (pre-existing Go behaviour);
+    `close()` after a timed-out call may block up
+    to the remaining worker transact time (safety
+    N5).
+
+### Fix loop 2 (round-2 review, 2026-11-06)
+
+Base: dev-rust still `b3fbe5a` at fix-loop-2 start
+— no rebase. Round 2 found ONE new BLOCKING
+(NB1, confirmed by the technical + red-team
+reviewers) and 31 nits across the three reviews.
+No blame on the round-1 prescription: round 1
+prescribed exactly the narrow crash-only fuse, and
+fix loop 1 implemented it faithfully — the blind
+spot was in the prescription, not the
+implementation.
+
+- NB1 timeout/flood/protocol kills do not fuse
+  (technical + red-team): `kill_timeout` /
+  `kill_protocol` (`worker.rs`) set `inner.dead`
+  but returned a plain `Failed`, and
+  `call_envelope_client` fused only on
+  `is_crash()`. A hung plugin called with NO Host
+  deadline (`Host::call(..., None)` — the path
+  used by registration / reconfigure / quiesce via
+  `call_envelope`, `plugin check`, `check_plugin`)
+  timed out at the 30s worker transact, the worker
+  was SIGKILLed, but `host.fused(tag)` stayed
+  `None` and `host.loaded(tag)` stayed `Some`; the
+  next `apply_config` with the same tag+path burned
+  a doomed reconfigure + rollback against the dead
+  client and fused with the wrong reason
+  (`"reconfigure failed and rollback failed"`) —
+  the exact round-1 B3 observable, with the timeout
+  erased. Same for flood kills and protocol kills.
+  Fix: fuse on client-DEADNESS, not the error
+  variant. `kill_timeout` now returns the typed
+  `PluginHostError::ClientDead` (new variant,
+  `error.rs` — displayed exactly like a `Failed`,
+  so callers that only print the error see no
+  change), and `call_envelope_client` fuses on
+  `is_fatal_client_death()` (crash OR kill). No
+  message re-parsing; no broadening to all
+  `Failed` — oversize host request, oversize worker
+  reply, and decode errors stay `Failed` and
+  unfused (pinned by asserts in both oversize
+  tests). The PR draft's B6 claim ("killed and
+  fused") is now true at the Host level for flood
+  kills too. Proved by `live_timeout_kill_fuses_host`
+  (hung plugin + `Host::call(..., None)` → timeout
+  error in ~30s, `fused` carries "timed out",
+  `loaded` gone, no worker lingers, re-apply skips
+  as fused with the timeout reason and spawns no
+  worker) and by the new fuse asserts in
+  `live_host_call_flood`, `live_host_call_byte_bound`,
+  and `live_forged_reply_rejected`.
+- Safety R2-N1 stale doc: the `worker.rs` module doc
+  claimed `read_frame` "re-arms `SO_RCVTIMEO`" —
+  false since fix loop 1 (`poll`, no
+  `set_read_timeout` on the path) — reworded.
+- Safety R2-N2 / red-team N1 + N13
+  `poll_readable`: on `EINTR` the loop re-armed the
+  FULL timeout (a signal storm could stretch one
+  call past its deadline) — now recomputes the
+  remaining time from a deadline `Instant` on every
+  retry; `POLLERR`/`POLLHUP`/`POLLNVAL` without
+  `POLLIN` returned `Ok(false)` and was misread as
+  a timeout — now readable, so the caller attempts
+  the read and gets EOF / the real error (a crash,
+  not a timeout).
+- Safety R2-N4 `response.ptr` re-read 4x in
+  `ffi/call.rs`: snapshotted once alongside
+  `resp_len` (same TOCTOU class as the fix-loop-1
+  `len` snapshot).
+- Safety R2-N5 budget + dispatcher thread: the
+  ~1000-log-lines-per-call effective bound is now
+  recorded as deliberate policy (see the B6
+  paragraph above); the helper thread spawned per
+  `host_call` is not joined on timeout — it stays
+  parked in a blocking sink, but the client is
+  dead/fused afterwards, so at most one leaked
+  thread per loaded plugin (bounded by the number
+  of loads, not by flood volume).
+- Safety R2-N6 worker idle loop: the deadline-less
+  `read_frame` in `worker_main` is the idle wait
+  for the next parent frame, by design (only the
+  trusted host writes parent frames; a dead parent
+  is covered by `PR_SET_PDEATHSIG`) — documented,
+  no code change; the "every frame read" claim is
+  narrowed to transact + `host_call` round-trip
+  reads (technical N2, same fix).
+- Safety R2-N7 / R2-N8 swallowed reply-write
+  errors: the `open`-success arm now exits 1 on a
+  failed reply write (was `let _ =`, looping back
+  to a read that fails anyway); the `shutdown` arm
+  likewise returns 1; `answer_host_call` now
+  returns a typed error — dispatch timeout →
+  `kill_timeout`, reply-write failure → `reap_crash`
+  (was `let _ =`, leaving the worker waiting out
+  the dispatcher deadline).
+- Technical N1 B2 test: see the B2 paragraph above
+  (distinct messages asserted).
+- Technical N4 oversize-reply survival: the
+  `bigresp` plugin now answers `"small"` inputs
+  with a small envelope, and the test does a
+  follow-up small call after the oversize error.
+- Technical N5 / red-team N10 vacuous CLI tests:
+  `live_shutdown_crash` and
+  `live_plugin_check_matches_go` now PANIC when the
+  `castctl-rs` binary is absent (in a full workspace
+  build it always exists). A missing Go toolchain
+  still skips the plugin-build tests with a loud
+  `eprintln!` — pinned in the module doc.
+- Technical N7 stale `ping` in the `Frame` doc:
+  deleted (the op was deleted in fix loop 1).
+- Technical N6 / red-team N11 corrupt-`.so`
+  assertion: pinned exact — a 512-byte truncation
+  of echo.so fails in the parent's glibc compat
+  gate with `"read plugin elf: truncated program
+  header"` before any worker spawns (proven by the
+  `--nocapture` live run); the loose `"dlopen" OR
+  "truncated"` is gone.
+- Technical N9 / red-team N8 byte bound:
+  `live_host_call_byte_bound` (one 5 MiB `host.log`
+  → flood kill + host fuse, count bound untouched).
+- Technical N10 double-serialise: `transact` now
+  writes via `write_frame_deadline`, which
+  serialises once, checks the cap, and writes with
+  a deadline (below).
+- Red-team N2 write deadline: the parent's transact
+  write `poll`s for writability with the remaining
+  time before every chunk write (`poll_writable`,
+  `ffi/fd.rs`) and fails `WouldBlock` at the
+  deadline — a peer that stops draining while the
+  parent writes a ~16 MiB frame cannot hang the
+  transact past its deadline. The worker side keeps
+  plain `write_frame`: the worker writes only while
+  the parent is in a transact read loop draining the
+  socket, and a dead parent kills the worker via
+  `PR_SET_PDEATHSIG` (or surfaces as EPIPE, never a
+  block).
+- Red-team N3 wire visibility: call ids are
+  unguessable (random 64-bit start) but VISIBLE on
+  the shared fd — a plugin thread racing the
+  worker's own socket reads could steal a whole
+  parent frame, learn its id, and forge a reply the
+  parent would accept (op+id only, no
+  authentication). Recorded, not fixed: the threat
+  model is trusted plugins, not a sandbox, and a
+  real fix needs a separate protocol fd or per-frame
+  authentication (structural). In practice the race
+  usually just corrupts framing (partial steal →
+  `InvalidData` → worker exits 1 → parent
+  `reap_crash`, fail-closed).
+- Red-team N4 detach/replace swallow: `apply_config`
+  detach, reconfigure-failure, replacement-failure,
+  replacement-success, and `load_one` register-failure
+  paths now log a shutdown crash via
+  `log_shutdown_error` (warn) instead of swallowing
+  it — `Host::close` still collects them into
+  `shutdown_errors()`.
+- Red-team N5 ok-reply-then-crash: `shutdown` now
+  checks `try_wait` after a clean `shutdown` reply —
+  a worker that already exited by signal is recorded
+  as `shutdown_crash` instead of a clean shutdown.
+  (Only an already-exited child is checked: a
+  still-running child is killed below, and its
+  SIGKILL — ours — must never be reported as a
+  crash.)
+- Red-team N6 base64 before the size check:
+  `Client::call` now refuses an over-cap request
+  BEFORE encoding, with the exact bound computed
+  from the frame overhead (see the B5 paragraph).
+  The worker-side mirror (`Frame::response` encodes
+  before `frame_fits`) is unchanged — worker-
+  contained, recorded.
+- Red-team N9 mixed readers: audited — safe by
+  construction today (`WORKER_IO` serialises the
+  two readers; the parent never pipelines, so the
+  `StdinLock`'s read-ahead can only hold bytes of
+  the frame the main loop is itself consuming; the
+  dispatcher reads only while the main loop is
+  blocked in plugin code). Recorded in the
+  `worker.rs` module doc: any future pipelining
+  must give the two readers one shared read path
+  first.
+- Red-team N12 stale doc: `ffi/load.rs`
+  `LoadedPlugin::shutdown` no longer says "the
+  parent treats EOF on shutdown as success" (false
+  since fix loop 1, B4).
+- Safety N2 caveat (round 2): the PR draft's
+  "expecting PluginCrashed" overstated the
+  lyingsmall test — corrected in the PR draft: the
+  test asserts the call never succeeds and the host
+  survives (crash-vs-garbage-decode is
+  heap-dependent); the code and the PORTING text
+  were already accurate.
+- Recorded as known limitations (not fixed):
+  `PR_SET_PDEATHSIG` tracks the creating thread,
+  not the process (technical N8 — spawning runs on
+  long-lived threads today; if spawning ever moves
+  to a short-lived thread the worker would die
+  spuriously); a shutdown TIMEOUT prints the generic
+  `shutdown: crashed` stdout line in `plugin check`
+  (the stderr FAIL line carries the full timeout
+  text); the `>>>>>>>` marker in `rust/PORTING.md`
+  pre-exists in base `b3fbe5a` (line 11497 there,
+  quoted text about a marker) — not a rebase
+  leftover, left untouched.
+- Live tests: `tests/loader_live.rs` 20 → 22
+  (`live_timeout_kill_fuses_host`,
+  `live_host_call_byte_bound` new; the other 20
+  strengthened in place, none weakened).
+
+### Fix-loop-2 evidence (cue, 2026-11-06, final gates run 2)
+
+- Baseline at clean dev-rust `b3fbe5a` (re-verified
+  this loop, `/tmp/m6cb-gates/fl2-base.log`,
+  `/tmp/m6cb-gates/test-fl2-base.log`): fmt exit 0,
+  build exit 0, test **1159 passed / 0 failed**
+  (48 suites), clippy exit 0, loader_live 20/20 in
+  83.63s. (The first baseline test run failed 0/20
+  environmentally — plain `go` on cue is the
+  `/usr/local/bin/go` wrapper, `GOTOOLCHAIN=local`,
+  go1.26.8, and the worktree go.mod requires
+  >= 1.27.3; all cue gate runs export
+  `CASTCTL_TEST_GO=/usr/local/go/bin/go`, the real
+  binary with `GOTOOLCHAIN=auto`.)
+- Final gates run 1 (fix-loop-2 tree, before the
+  last fmt/doc fixes): fmt 1 (5 diffs), build 0,
+  test FAILED at castctl-update
+  (`install_newer_version_end_to_end` —
+  "cannot execute the downloaded binary"; passed in
+  baseline and 3/3 on retry, a transient flake, not
+  this diff — the crate is untouched by this branch;
+  1011 passed before the stop, suites after it never
+  ran), clippy 101 (6x `doc_lazy_continuation` in
+  the loader_live module doc: the rewording put
+  `+ C compiler` at a line start, which rustdoc
+  reads as a list marker). Both fixed; run 2 is the
+  final tree.
+- Final gates run 2 (fix-loop-2 tree, as-shipped):
+  fmt exit 0, build exit 0, test **1162 passed /
+  0 failed** (48 suites), clippy exit 0
+  (`/tmp/m6cb-gates/fl2-final2.log`,
+  `/tmp/m6cb-gates/test-fl2-final2.log`). Delta
+  +3: loader_live 20 → 22 (+2:
+  `live_timeout_kill_fuses_host`,
+  `live_host_call_byte_bound`), pluginhost lib 96 →
+  97 (+1: `error::tests::fatal_client_death_covers_kills_not_alive_failures`),
+  castctl-cli lib stays 71.
+- Live tests: `tests/loader_live.rs` **22/22**
+  in 111.65s in the parallel run
+  (`test-fl2-final2.log`) and 22/22 serial with
+  `--nocapture` (`/tmp/m6cb-gates/live-fl2-final.log`):
+  the 20 fix-loop-1 tests (all strengthened in
+  place where noted) + the 2 new fix-loop-2 tests.
+  NB1 verbatim: `hungfuse call: plugin call timed
+  out after 30.001342437s`, `hungfuse fused: plugin
+  call timed out`, `hungfuse re-apply: skipped:
+  fused: plugin call timed out`; byte bound
+  verbatim: `biglog call: host callback flood: too
+  many host calls in one transaction after
+  602.045233ms`, `biglog fused: host callback flood:
+  too many host calls in one transaction`.
+- Go comparison (automated in-tree):
+  `live_plugin_check_matches_go` — PASS (Go
+  `plugin check` vs Rust `castctl-rs plugin
+  check` on the same echo.so: stdout + stderr +
+  exit code identical).
+- `grep -rn "unsafe" rust/castctl-pluginhost/src`:
+  unchanged in shape — code-`unsafe` confined to
+  `src/ffi/` (6 files); the crate root keeps
+  `#![deny(unsafe_code)]`. New in this loop:
+  `ffi/fd.rs` gains `poll_writable` (one more
+  `unsafe` `poll` call site, same file, same
+  confinement).
+
+### Fix-loop-1 evidence (cue, 2026-11-06, final gates run 5)
+
+- Baseline at clean dev-rust `b3fbe5a`:
+  `cargo fmt --check` exit 0, `cargo build
+  --locked --workspace` exit 0, `cargo test
+  --locked --workspace` **1136 passed / 0 failed**
+  (46 suites), `cargo clippy --workspace
+  --all-targets -- -D warnings` exit 0
+  (`/tmp/m6cb-gates/base-fl1.log`,
+  `/tmp/m6cb-gates/test-base-fl1.log`).
+- Final gates (fix-loop-1 tree, run 5):
+  fmt exit 0, build exit 0, test **1159 passed /
+  0 failed** (48 suites), clippy exit 0
+  (`/tmp/m6cb-gates/fl1-final.log`,
+  `/tmp/m6cb-gates/test-fl1-final.log`). Delta
+  +23, all new tests: loader_live 0 → 20 (+20,
+  new file in this branch), pluginhost lib 94 →
+  96 (+2: `worker::tests::call_frame_overhead_is_pinned`
+  + `loader::tests::open_missing_file_fails_without_worker`;
+  plus one rename, `support_is_zero_without_loader` →
+  `support_matches_loader_capability`),
+  castctl-cli lib 70 → 71 (+1:
+  `run::tests::plugin_log_sink_is_bounded`; plus
+  one rename, `test_plugin_tag_validation_before_stub` →
+  `test_plugin_tag_validation_before_check`).
+- Live tests: `tests/loader_live.rs` **20/20**
+  in 78.54s (`/tmp/m6cb-gates/live-fl1-final.log`):
+  the original 6 + 14 new fix-loop-1 tests
+  (B1 drip, B2 forged reply, B3 fuse, B4
+  shutdown crash, B5 oversize host request +
+  oversize worker reply, B6 flood, B7 parent
+  death, G1 incomplete table, G2 missing symbol /
+  corrupt .so, G4 Go byte-parity, G6 multi /
+  background / register host.log + unsupported
+  method, G7 failed-init shutdown).
+- Go comparison (automated in-tree):
+  `live_plugin_check_matches_go` — PASS (Go
+  `plugin check` vs Rust `castctl-rs plugin
+  check` on the same echo.so: stdout + stderr +
+  exit code identical).
+- `grep -rn "unsafe" rust/castctl-pluginhost/src`:
+  48 lines, all either doc/comment mentions or
+  code-`unsafe` inside `src/ffi/` — the 33
+  code-`unsafe` sites (`unsafe {` / `unsafe fn`)
+  sit in exactly 6 files, all under `src/ffi/`
+  (`call.rs`, `fd.rs`, `hostcall.rs`, `load.rs`,
+  `pdeath.rs`, `types.rs`); the crate root keeps
+  `#![deny(unsafe_code)]`. (The floor's "exactly
+  1 module" is this confinement: one `ffi`
+  module holds every `unsafe` block.)
 
 ## M7a — Services port: wait Runner + subscribe, fsclient, approvals, deliver, logging, dns (2026-11-05/06)
 

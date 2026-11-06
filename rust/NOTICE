@@ -175,7 +175,7 @@ Linked dependencies (M6c: update asset handling, called, not copied):
   source code is copied into rust/.
   Transitive inventory for these two crates (versions +
   licenses from `cargo metadata` on cue) is in
-  docs/provenance.md §16. Only the validation around them
+  docs/provenance.md §17. Only the validation around them
   (member selection, caps, trailing scan, digest) is castctl
   code. The sha2 0.10.9 used for the asset digest was already
   pinned/locked before M6c; M6c only promoted it to a workspace
@@ -198,6 +198,22 @@ Linked dependencies (M6c: update asset handling, called, not copied):
   `fs` + `process` + `signal` + `socket` + `user`.
   The `socket` feature pulls the lock-only
   transitive memoffset 0.9.1 (MIT, depends only on autocfg (already in the lock)).
+- libloading 0.9.0, from https://github.com/nagisa/rust_libloading/,
+  pinned `=0.9.0` in the workspace (Cargo.lock checksum
+  754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60),
+  license ISC. Used by crate `castctl-pluginhost`
+  (`src/ffi/load.rs`) as the `dlopen`/`dlsym` primitive
+  for the worker-side loader:
+  `libloading::os::unix::Library::open` with
+  RTLD_NOW|RTLD_LOCAL (Go parity; the cross-platform
+  `Library::new` is RTLD_LAZY and is NOT used).
+  No libloading source code is copied into rust/.
+  Its only transitive is cfg-if 1.0.5 (MIT OR
+  Apache-2.0, already in the lock). The lock also
+  holds libloading 0.8.9 as a transitive of bindgen
+  (build-time only, for boring-sys); the runtime
+  loader uses exactly 0.9.0. Transitive inventory
+  is in docs/provenance.md §19.
   No nix source code is copied into rust/.
   `serde_json` gained the `raw_value` feature
   (fix loop 1, `pluginabi.rs` `RawValue`); no new
