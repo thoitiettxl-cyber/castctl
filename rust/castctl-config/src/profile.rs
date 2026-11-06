@@ -123,7 +123,7 @@ pub fn resolve_auto_approve(
         });
     }
     if let Some(env) = env {
-        let v = go_lower(&go_trim_space(env));
+        let v = go_lower(go_trim_space(env));
         return match v.as_str() {
             "always" | "on" | "1" | "true" | "yes" => Ok(ResolvedSetting {
                 enabled: true,
@@ -145,7 +145,7 @@ pub fn resolve_auto_approve(
             source: "config".to_string(),
         }),
         Some(cfg) => Ok(ResolvedSetting {
-            enabled: go_lower(&go_trim_space(&cfg.auto_approve)) == "always",
+            enabled: go_lower(go_trim_space(&cfg.auto_approve)) == "always",
             source: format!("config {}", cfg.config_file),
         }),
     }
@@ -167,7 +167,7 @@ pub fn resolve_auto_allow_once(
         });
     }
     if let Some(env) = env {
-        let v = go_lower(&go_trim_space(env));
+        let v = go_lower(go_trim_space(env));
         return match v.as_str() {
             "on" | "1" | "true" | "yes" | "always" => Ok(ResolvedSetting {
                 enabled: true,

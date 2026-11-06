@@ -419,7 +419,7 @@ pub async fn wake_vm_base(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use castctl_transport::{Dialer, DirectDialer};
+    use castctl_transport::DirectDialer;
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

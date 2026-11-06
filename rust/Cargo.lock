@@ -470,6 +470,10 @@ dependencies = [
 [[package]]
 name = "castctl-config"
 version = "0.1.0"
+dependencies = [
+ "libc",
+ "sha2 0.10.9",
+]
 
 [[package]]
 name = "castctl-deliver"

@@ -8,6 +8,15 @@
 //! `SetEscapeHTML(false)`), and the 13 read-only command
 //! handlers (`internal/commands/read.go`).
 //!
+//! M7b adds the Phase A write/unary commands (session-*,
+//! stop, seen, feed-react, idea-exec, approvals/approve/
+//! deny, invite, redeem, wake, download, raw) plus the
+//! driver seam `run_driver_command` (fake-server tests).
+//! Handlers return `CmdOut` (stdout + stderr + exit code)
+//! so the silent-exit commands (redeem exit 1, download
+//! row-error exit 3) and the approveAll stderr lines work
+//! through the same dispatch.
+//!
 //! Error rendering follows Go exactly, including the loop-6
 //! boundary: the typed JSON's `error` field is
 //! `logging.SummarizeErr` — the `LogSummary`, never message
@@ -44,19 +53,29 @@
 //!
 //! No `unsafe`, no `unwrap()`/`expect()` on external input.
 
+use std::time::Duration;
+
 use chrono::Local;
 
-use castctl_gateway::auth::fetch_session_info;
+use castctl_gateway::auth::{fetch_access_token_base, fetch_session_info, fetch_session_info_base};
+use castctl_gateway::invite::{
+    create_invite_base, fetch_invite_base, redeem_invite_code_base, wake_vm_base,
+};
+use castctl_gateway::media_path;
 use castctl_gateway::subscription::{SubscriptionOptions, fetch_subscription};
 use castctl_shared::{
-    event_row_to_json, feed_row_to_json, feed_rows, file_row_to_json, file_rows, fmt_event,
-    from_serde, goal_row_to_json, goal_rows, idea_row_to_json, idea_rows, local_abbr_now,
-    session_row_to_json, session_rows, status_summary_to_json, summarize_status, summarize_usage,
-    usage_lines, usage_summary_to_json,
+    JsonValue as SharedValue, Resource, event_resources, event_row_to_json, feed_row_to_json,
+    feed_rows, file_row_to_json, file_rows, fmt_event, from_serde, goal_row_to_json, goal_rows,
+    idea_row_to_json, idea_rows, invite_summary_to_json, local_abbr_now, local_name,
+    session_row_to_json, session_rows, status_summary_to_json, summarize_invite, summarize_status,
+    summarize_usage, usage_lines, usage_summary_to_json,
 };
-use castctl_transport::{BodySummary, TransportError};
+use castctl_transport::{BodySummary, RouteTable, TransportError};
 use serde_json::Value as SerdeValue;
 
+use crate::approvals::{
+    approval_json, approved_json, approved_line, describe_approval, offers_forever, skipped_line,
+};
 use crate::parser::Parsed;
 use crate::run::{Ctx, FlowErr, GlobalOpts, msg, msg_empty, resolve_and_load_single};
 use crate::runtime::{Runtime, build_runtime};
@@ -77,10 +96,10 @@ pub(crate) fn typed_json(typ: &str, summary: &str) -> String {
 
 /// Go `encoding/json` string escaping with HTML escaping ON
 /// (the `json.Marshal` default used by `classifyError`'s typed
-/// branch): `"`/`\`/`\n`/`\r`/`\t` short escapes, `<`/`>`/`&`
-/// as `\u003c`/`\u003e`/`\u0026`, U+2028/U+2029 escaped, other
-/// control chars as `\u00XX`.
-fn escape_go_marshal_string(s: &str) -> String {
+/// branch and by request-body encoding): `"`/`\`/`\n`/`\r`/`\t`
+/// short escapes, `<`/`>`/`&` as `\u003c`/`\u003e`/`\u0026`,
+/// U+2028/U+2029 escaped, other control chars as `\u00XX`.
+pub(crate) fn escape_go_marshal_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
@@ -419,6 +438,199 @@ async fn history_result(
     Ok((d, events))
 }
 
+/// One handler's output: stdout text, stderr text, and the
+/// exit code (0 for the normal path). Go handlers write
+/// stdout/stderr through `Env` and return an error for the
+/// exit code; the Rust dispatch collects the same three
+/// values so the silent-exit commands (redeem exit 1,
+/// download row-error exit 3) and the approveAll stderr
+/// lines flow through one return type. `run_network_command`
+/// appends both streams and turns a non-zero code into
+/// `FlowErr::Exit`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CmdOut {
+    /// Bytes for stdout.
+    pub stdout: String,
+    /// Bytes for stderr (approveAll lines only).
+    pub stderr: String,
+    /// Process exit code (0 = success).
+    pub code: i32,
+}
+
+impl CmdOut {
+    /// Stdout only, exit 0.
+    pub(crate) fn out(stdout: String) -> Self {
+        Self {
+            stdout,
+            stderr: String::new(),
+            code: 0,
+        }
+    }
+
+    /// Stdout with a non-zero exit code and no stderr
+    /// (redeem failure, download row error: Go's
+    /// `errCode(N, nil)` after printing).
+    pub(crate) fn code(stdout: String, code: i32) -> Self {
+        Self {
+            stdout,
+            stderr: String::new(),
+            code,
+        }
+    }
+}
+
+/// A request body in Go struct field order, built from
+/// ordered (key, JSON-fragment) pairs. Go marshals struct
+/// bodies in declaration order and map bodies in sorted
+/// key order; `Body::Json(serde_json::Value)` sorts keys,
+/// which matches the map cases but NOT the struct cases
+/// (session-start params: origin, lifecycle, title).
+/// Callers pass values already escaped with
+/// `escape_go_marshal_string` (Go `json.Marshal` string
+/// rules, HTML escaping ON) or raw JSON literals.
+fn ordered_body(pairs: &[(&str, String)]) -> Body {
+    let mut out = String::from("{");
+    for (i, (k, v)) in pairs.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&escape_go_marshal_string(k));
+        out.push(':');
+        out.push_str(v);
+    }
+    out.push('}');
+    Body::Bytes(out.into_bytes())
+}
+
+/// Go `logging.SummarizeErr` for the error kinds a
+/// download row can carry (`internal/shared/resources.
+/// go:297`): the allowlist summary only, never peer text.
+/// Auth and Cancelled never reach a row (they propagate);
+/// they are rendered here only for completeness.
+fn summarize_transport_error(err: &TransportError) -> String {
+    match err {
+        TransportError::Auth { message } => auth_summary(message),
+        TransportError::Gateway(summary) => gateway_error_text(summary),
+        TransportError::Timeout { message } => format!("conn: {message}"),
+        TransportError::Cancelled => String::new(),
+        TransportError::Validation { message } => format!("gateway: {message}"),
+        TransportError::ConnectionDown { message } => {
+            if message.is_empty() {
+                "conn: connection down".to_string()
+            } else {
+                format!("conn: connection down: {message}")
+            }
+        }
+        TransportError::ConnectionError { message } => {
+            format!("conn: connection error error_length={}", message.len())
+        }
+        TransportError::RedirectRefused => {
+            "redirect refused: redirects are not followed".to_string()
+        }
+        TransportError::Unsupported { .. } => err.to_string(),
+    }
+}
+
+/// Go `%v` of an `os` error prints the lowercase message
+/// (`permission denied`); Rust's `Display` appends
+/// ` (os error N)`. Strip that suffix so filesystem
+/// error text matches Go.
+fn io_error_text(e: &std::io::Error) -> String {
+    let text = e.to_string();
+    match text.rfind(" (os error ") {
+        Some(idx) if text.ends_with(')') => text[..idx].to_string(),
+        _ => text,
+    }
+}
+
+/// Go `filepath.Abs`: the lexical absolute path (cwd +
+/// clean, no filesystem access). `std::path::absolute`
+/// is not used: it keeps `.` components on some inputs,
+/// while Go's `Clean` removes them.
+fn abs_path(p: &str) -> String {
+    use std::path::{Component, Path, PathBuf};
+    let path = Path::new(p);
+    let joined: PathBuf = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => path.to_path_buf(),
+        }
+    };
+    let mut out = PathBuf::new();
+    for c in joined.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out.to_string_lossy().into_owned()
+}
+
+/// Go `writeMergedJSON` (`read.go:345`): `{"status":
+/// status, **body}` with status first and the body keys
+/// in sorted order (Go maps have no wire order). Each
+/// value is rendered with `marshalJSONIndent` (indent 2,
+/// prefix "  " on continuation lines — see
+/// `marshal_json_indent`).
+fn write_merged_json(status: i32, body: &serde_json::Map<String, SerdeValue>) -> String {
+    let mut out = String::from("{\n");
+    out.push_str(&format!("  \"status\": {status}"));
+    let mut keys: Vec<&String> = body.keys().collect();
+    keys.sort();
+    for k in keys {
+        let v = &body[k];
+        out.push_str(",\n  ");
+        out.push_str(&escape_go_marshal_string(k));
+        out.push_str(": ");
+        out.push_str(&marshal_json_indent(v));
+    }
+    out.push_str("\n}\n");
+    out
+}
+
+/// Go `marshalJSONIndent` (`read.go:368`): `json.Encoder`
+/// with `SetEscapeHTML(false)`, prefix `"  "`, indent
+/// `"  "`. The prefix lands on continuation lines only
+/// (never the first line), so: indent the compact value
+/// with `indent_json`, then prefix every line after the
+/// first with two spaces. Scalars stay single-line.
+fn marshal_json_indent(v: &SerdeValue) -> String {
+    let compact = match serde_json::to_string(v) {
+        Ok(s) => s,
+        Err(_) => return "null".to_string(),
+    };
+    let indented = indent_json(&compact);
+    let mut out = String::new();
+    for (i, line) in indented.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+            out.push_str("  ");
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+/// Go `decodeJSONNumber` (`commands.go:440`): decode the
+/// first JSON value, IGNORING trailing data (unlike the
+/// gateway's `decodeJSONValue`, which rejects it).
+/// DEVIATION (recorded in PORTING.md §M7b): the error
+/// text on malformed input is serde_json's, not Go's
+/// `encoding/json` text; fake tests use valid bodies.
+fn decode_json_number_loose(data: &[u8]) -> Result<SerdeValue, String> {
+    let mut stream = serde_json::Deserializer::from_slice(data).into_iter::<SerdeValue>();
+    match stream.next() {
+        Some(Ok(v)) => Ok(v),
+        Some(Err(e)) => Err(e.to_string()),
+        None => Err("unexpected end of JSON input".to_string()),
+    }
+}
+
 /// Go `eventHasText` (`read.go:465`): the payload's
 /// `display_text`/`content` is a non-empty string, or a
 /// present non-null non-`false` value of any other kind.
@@ -665,21 +877,880 @@ async fn cmd_unread(rt: &Runtime) -> Result<String, FlowErr> {
     write_json_serde(&v)
 }
 
-async fn dispatch(spec: &CommandSpec, rt: &Runtime, p: &Parsed) -> Result<String, FlowErr> {
+/// `cmdSessionStart` (`deliver.go:153`): `session.start`
+/// with `{"method":"/api/session/start","params":
+/// {"origin":"fresh","lifecycle":"persistent"[,"title"]}}`
+/// (`deliver/session.go:83`). The params object is struct
+/// order (origin, lifecycle, title), NOT sorted, so the
+/// body is hand-built. The reply is returned verbatim.
+async fn cmd_session_start(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
+    let title = if p.str_is_set("title") {
+        p.str("title")
+    } else {
+        String::new()
+    };
+    let mut body = String::from(
+        "{\"method\":\"/api/session/start\",\"params\":{\"origin\":\"fresh\",\"lifecycle\":\"persistent\"",
+    );
+    if !title.is_empty() {
+        body.push_str(",\"title\":");
+        body.push_str(&escape_go_marshal_string(&title));
+    }
+    body.push_str("}}");
+    let v = call_json(
+        rt,
+        "session.start",
+        RequestOptions {
+            body: Body::Bytes(body.into_bytes()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(CmdOut::out(write_json_serde(&v)?))
+}
+
+/// `cmdSessionOp` (`deliver.go:176`): rename sends
+/// `{"session_id","title"}`; every other kind sends
+/// `{"method":"/api/session/<kind>","session_id"}`
+/// (`deliver/session.go:103`). Both are struct order;
+/// the sorted `Body::Json` order coincides, but the
+/// ordered builder is used so the wire order is explicit.
+async fn cmd_session_op(rt: &Runtime, p: &Parsed, kind: &str) -> Result<CmdOut, FlowErr> {
+    let id = p.positionals.first().cloned().unwrap_or_default();
+    let body = if kind == "rename" {
+        let title = p.positionals.get(1).cloned().unwrap_or_default();
+        ordered_body(&[
+            ("session_id", escape_go_marshal_string(&id)),
+            ("title", escape_go_marshal_string(&title)),
+        ])
+    } else {
+        ordered_body(&[
+            (
+                "method",
+                escape_go_marshal_string(&format!("/api/session/{kind}")),
+            ),
+            ("session_id", escape_go_marshal_string(&id)),
+        ])
+    };
+    let v = call_json(
+        rt,
+        &format!("session.{kind}"),
+        RequestOptions {
+            body,
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(CmdOut::out(write_json_serde(&v)?))
+}
+
+/// `cmdStop` (`deliver.go:205`): `chat.cancel` with `{}`
+/// for the main chat or `{"session_id": thread}` for a
+/// side chat (`deliver/stop.go:29`).
+async fn cmd_stop(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
+    let thread = if p.str_is_set("thread") {
+        p.str("thread")
+    } else {
+        String::new()
+    };
+    let body = if thread.is_empty() {
+        Body::Bytes(b"{}".to_vec())
+    } else {
+        ordered_body(&[("session_id", escape_go_marshal_string(&thread))])
+    };
+    let v = call_json(
+        rt,
+        "chat.cancel",
+        RequestOptions {
+            body,
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(CmdOut::out(write_json_serde(&v)?))
+}
+
+/// `cmdSeen` (`read.go:991`): `chat.mark_seen` with path
+/// param `thread_id`, passthrough.
+async fn cmd_seen(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
+    let thread = p.positionals.first().cloned().unwrap_or_default();
+    let v = call_json(
+        rt,
+        "chat.mark_seen",
+        RequestOptions {
+            path_params: vec![("thread_id".to_string(), thread)],
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(CmdOut::out(write_json_serde(&v)?))
+}
+
+/// `cmdFeedReact` (`read.go:820`): `feed.unit.reaction`
+/// with path param `unit_id` and body `{"reaction"}`
+/// (default `"love"`), passthrough.
+async fn cmd_feed_react(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
+    let unit = p.positionals.first().cloned().unwrap_or_default();
+    let reaction = p
+        .positionals
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "love".to_string());
+    let v = call_json(
+        rt,
+        "feed.unit.reaction",
+        RequestOptions {
+            path_params: vec![("unit_id".to_string(), unit)],
+            body: ordered_body(&[("reaction", escape_go_marshal_string(&reaction))]),
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(CmdOut::out(write_json_serde(&v)?))
+}
+
+/// `cmdIdeaExec` (`read.go:949`): `api.idea-cards.
+/// execute` with path param `ideaCardId` and body
+/// `{"ideaCardId","mode":"full"[,"session_id"]}` — a Go
+/// map, so sorted key order (ideaCardId, mode,
+/// session_id). The id appears twice: path + body.
+async fn cmd_idea_exec(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
+    let id = p.positionals.first().cloned().unwrap_or_default();
+    let thread = p.str("thread");
+    let mut pairs: Vec<(&str, String)> = vec![
+        ("ideaCardId", escape_go_marshal_string(&id)),
+        ("mode", "\"full\"".to_string()),
+    ];
+    if !thread.is_empty() {
+        pairs.push(("session_id", escape_go_marshal_string(&thread)));
+    }
+    let v = call_json(
+        rt,
+        "api.idea-cards.execute",
+        RequestOptions {
+            path_params: vec![("ideaCardId".to_string(), id)],
+            body: ordered_body(&pairs),
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(CmdOut::out(write_json_serde(&v)?))
+}
+
+/// `pendingApprovals` (`wait.go:1147`): `egress.
+/// approvals` + the pending list (`pending_approvals`,
+/// falling back to `pending`). Python `or` semantics: an
+/// empty first list falls through to the fallback key; a
+/// non-list first value also falls through. A non-object
+/// result is a plain error, exit 1 (Go's `callMap` shape:
+/// `gateway: egress.approvals result is not an object:
+/// %T`).
+async fn pending_approvals(rt: &Runtime) -> Result<(SerdeValue, Vec<SerdeValue>), FlowErr> {
+    let v = call_map(rt, "egress.approvals", RequestOptions::default()).await?;
+    let pend = match v.get("pending_approvals").and_then(|x| x.as_array()) {
+        Some(list) if !list.is_empty() => list.clone(),
+        _ => match v.get("pending").and_then(|x| x.as_array()) {
+            Some(list) => list.clone(),
+            None => Vec::new(),
+        },
+    };
+    Ok((v, pend))
+}
+
+/// `decideApproval` (`wait.go:1184`): the one call
+/// behind approve, deny, approve --all and auto-approve.
+/// `egress.approval.decide` with path param
+/// `approval_id` and body `{"decision"}`. Never retried.
+async fn decide_approval(
+    rt: &Runtime,
+    approval_id: &str,
+    decision: &str,
+) -> Result<SerdeValue, FlowErr> {
+    call_json(
+        rt,
+        "egress.approval.decide",
+        RequestOptions {
+            path_params: vec![("approval_id".to_string(), approval_id.to_string())],
+            body: ordered_body(&[("decision", escape_go_marshal_string(decision))]),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// `approveAll` (`wait.go:1189`): decide every currently
+/// pending approval with `decision`, skipping approvals
+/// with no forever option when the decision is
+/// `allow_always`. One structural stderr line per
+/// approval (skipped / approved); the rows render as
+/// `approvedJSON` (empty fields → null). A decide error
+/// aborts the loop and propagates.
+async fn approve_all(rt: &Runtime, decision: &str) -> Result<(Vec<String>, String), FlowErr> {
+    let (_raw, pend) = pending_approvals(rt).await?;
+    let mut done: Vec<String> = Vec::new();
+    let mut stderr = String::new();
+    for item in &pend {
+        let d = describe_approval(&from_serde(item));
+        if decision == "allow_always" && !offers_forever(&d) {
+            stderr.push_str(&skipped_line(&d));
+            continue;
+        }
+        let id = d.approval_id.clone().unwrap_or_default();
+        decide_approval(rt, &id, decision).await?;
+        let title = d.title.clone().unwrap_or_default();
+        let kind = d.kind.clone().unwrap_or_default();
+        let scope = d.scope.clone().unwrap_or_default();
+        done.push(approved_json(&id, &title, &kind, &scope, decision));
+        stderr.push_str(&approved_line(&id, decision, &title, &kind, &scope));
+    }
+    Ok((done, stderr))
+}
+
+/// `{"approved": [...]}` (`wait.go:1240`,
+/// `approvedListJSON`): empty → `[]`, never null.
+fn approved_list_json(rows: &[String]) -> String {
+    format!("{{\"approved\":{}}}", rows_json(rows))
+}
+
+/// `cmdApprovals` (`wait.go:1248`): `--approve-all`
+/// decides everything with `allow_always` and prints the
+/// approved list; `--raw` prints the raw
+/// `egress.approvals` object; otherwise the described
+/// pending list, plus `recent` when `--recent` is given
+/// (recent key order: `recent_approvals` non-empty, else
+/// `recent`; the key is present even when the list is
+/// empty).
+async fn cmd_approvals(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
+    if p.bool("approve-all") {
+        let (done, stderr) = approve_all(rt, "allow_always").await?;
+        let mut out = CmdOut::out(write_json_text(&approved_list_json(&done)));
+        out.stderr = stderr;
+        return Ok(out);
+    }
+    let (raw, pend) = pending_approvals(rt).await?;
+    if p.bool("raw") {
+        return Ok(CmdOut::out(write_json_serde(&raw)?));
+    }
+    let items: Vec<String> = pend
+        .iter()
+        .map(|item| approval_json(&describe_approval(&from_serde(item))))
+        .collect();
+    let mut out = String::from("{\"pending\":");
+    out.push_str(&rows_json(&items));
+    if p.bool("recent") {
+        let recent = match raw.get("recent_approvals").and_then(|x| x.as_array()) {
+            Some(list) if !list.is_empty() => list.clone(),
+            _ => match raw.get("recent").and_then(|x| x.as_array()) {
+                Some(list) => list.clone(),
+                None => Vec::new(),
+            },
+        };
+        let mut rows: Vec<String> = Vec::new();
+        for item in &recent {
+            let d = describe_approval(&from_serde(item));
+            let decision = item
+                .as_object()
+                .and_then(|m| m.get("decision"))
+                .cloned()
+                .unwrap_or(SerdeValue::Null);
+            let mut row = approval_json(&d);
+            row.pop();
+            row.push_str(",\"decision\":");
+            row.push_str(&serde_json::to_string(&decision).unwrap_or_else(|_| "null".into()));
+            row.push('}');
+            rows.push(row);
+        }
+        out.push_str(",\"recent\":");
+        out.push_str(&rows_json(&rows));
+    }
+    out.push('}');
+    Ok(CmdOut::out(write_json_text(&out)))
+}
+
+/// `approveDecision` (`wait.go:1277`): at most one of
+/// once/session/today/always; the second reports the
+/// first as the conflicting argument. Default
+/// `allow_once`. (The positional checks already ran
+/// this validation in `run.rs`; the loop is repeated
+/// here because the handler needs the decision string.)
+fn approve_decision_str(p: &Parsed) -> Result<String, FlowErr> {
+    let mut seen: Option<&str> = None;
+    let mut decision = "allow_once".to_string();
+    for k in ["once", "session", "today", "always"] {
+        if p.bool(k) {
+            match seen {
+                Some(first) => {
+                    return Err(msg(
+                        2,
+                        format!("argument --{k}: not allowed with argument --{first}"),
+                    ));
+                }
+                None => {
+                    seen = Some(k);
+                    decision = format!("allow_{k}");
+                }
+            }
+        }
+    }
+    Ok(decision)
+}
+
+/// `cmdApprove` (`wait.go:1295`): `--all` decides
+/// everything (same loop as `approvals --approve-all`);
+/// otherwise one decide call, passthrough.
+async fn cmd_approve(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
+    let decision = approve_decision_str(p)?;
+    if p.bool("all") {
+        let (done, stderr) = approve_all(rt, &decision).await?;
+        let mut out = CmdOut::out(write_json_text(&approved_list_json(&done)));
+        out.stderr = stderr;
+        return Ok(out);
+    }
+    let id = p.positionals.first().cloned().unwrap_or_default();
+    let res = decide_approval(rt, &id, &decision).await?;
+    Ok(CmdOut::out(write_json_serde(&res)?))
+}
+
+/// `cmdDeny` (`wait.go:1330`): decide `deny`, or
+/// `deny_always` with `--always`; passthrough.
+async fn cmd_deny(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
+    let decision = if p.bool("always") {
+        "deny_always"
+    } else {
+        "deny"
+    };
+    let id = p.positionals.first().cloned().unwrap_or_default();
+    let res = decide_approval(rt, &id, decision).await?;
+    Ok(CmdOut::out(write_json_serde(&res)?))
+}
+
+/// `printInviteText` (`read.go:241`): the text form of
+/// an invite summary.
+fn print_invite_text(s: &castctl_shared::InviteSummary) -> String {
+    let mut out = String::new();
+    let code = s.code.as_deref().unwrap_or("");
+    if !code.is_empty() {
+        out.push_str(&format!("Invite code: {code}\n"));
+        let link = s.link.as_deref().unwrap_or("");
+        if !link.is_empty() {
+            out.push_str(&format!("Link: {link}\n"));
+        }
+        if let Some(remaining) = s.uses_remaining {
+            let mut extra = String::new();
+            if let Some(max) = s.max_uses {
+                extra = format!(" of {max}");
+            }
+            out.push_str(&format!("Uses left: {remaining}{extra}\n"));
+        }
+    } else {
+        let state = s.state.as_deref().unwrap_or("");
+        out.push_str(&format!(
+            "Invite code: none yet (state {state}). Open Invite friends in the muse.ai app once, or run `castctl invite --create`.\n"
+        ));
+    }
+    if let Some(reward) = &s.reward {
+        let mut parts: Vec<&str> = Vec::new();
+        if let Some(t) = reward.title.as_deref()
+            && !t.is_empty()
+        {
+            parts.push(t);
+        }
+        if let Some(b) = reward.body.as_deref()
+            && !b.is_empty()
+        {
+            parts.push(b);
+        }
+        if !parts.is_empty() {
+            out.push_str(&parts.join(" "));
+            out.push('\n');
+        }
+    }
+    if let Some(offer) = s.offer.as_deref()
+        && !offer.is_empty()
+    {
+        out.push_str(offer);
+        out.push('\n');
+    }
+    out
+}
+
+/// `cmdInvite` (`read.go:195`): cookies first, then
+/// `FetchInvite`; `--create` POSTs only when no code
+/// exists yet, then re-fetches. `--raw` prints the raw
+/// object; `--json` prints the summary; otherwise the
+/// text form. Plain HTTPS through the dialer, never the
+/// gateway connection.
+async fn cmd_invite(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
+    let cookies = rt.cookies()?;
+    let mut d = fetch_invite_base(&rt.http, &cookies, &rt.http_base)
+        .await
+        .map_err(|e| classify_conn_error(&e))?;
+    if p.bool("create") {
+        let code = d.get("code").and_then(|v| v.as_str()).unwrap_or("");
+        if code.is_empty() {
+            create_invite_base(&rt.http, &cookies, &rt.http_base)
+                .await
+                .map_err(|e| classify_conn_error(&e))?;
+            d = fetch_invite_base(&rt.http, &cookies, &rt.http_base)
+                .await
+                .map_err(|e| classify_conn_error(&e))?;
+        }
+    }
+    if p.bool("raw") {
+        return Ok(CmdOut::out(write_json_serde(&SerdeValue::Object(d))?));
+    }
+    let summary = summarize_invite(&from_serde(&SerdeValue::Object(d)));
+    if p.bool("json") {
+        return Ok(CmdOut::out(write_json_text(&invite_summary_to_json(
+            &summary,
+        ))));
+    }
+    Ok(CmdOut::out(print_invite_text(&summary)))
+}
+
+/// `cmdRedeem` (`read.go:276`): cookies first, then
+/// `RedeemInviteCode` (code validation happens inside,
+/// before any request). `--json` merges `{"status",
+/// **body}` (status first, body keys sorted; the failure
+/// path keeps only success/reason/detail). Text success
+/// prints `Redeemed: <redemptionStatus|"ok">`; text
+/// failure prints `Not redeemed (<reason>): <detail>`
+/// with trailing `:`/space trimmed. Failure exits 1,
+/// silently, after printing.
+async fn cmd_redeem(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
+    let code = p.positionals.first().cloned().unwrap_or_default();
+    let cookies = rt.cookies()?;
+    let (status, body) = redeem_invite_code_base(&rt.http, &cookies, &code, &rt.http_base)
+        .await
+        .map_err(|e| classify_conn_error(&e))?;
+    let body_map = body.as_object().cloned().unwrap_or_default();
+    let success = body_map
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if p.bool("json") {
+        let filtered = if success {
+            body_map
+        } else {
+            let mut out = serde_json::Map::new();
+            for k in ["success", "reason", "detail"] {
+                if let Some(v) = body_map.get(k) {
+                    out.insert(k.to_string(), v.clone());
+                }
+            }
+            out
+        };
+        let text = write_merged_json(status as i32, &filtered);
+        return Ok(if success {
+            CmdOut::out(text)
+        } else {
+            CmdOut::code(text, 1)
+        });
+    }
+    if success {
+        let redemption = body_map
+            .get("redemptionStatus")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let redemption = if redemption.is_empty() {
+            "ok"
+        } else {
+            redemption
+        };
+        return Ok(CmdOut::out(format!("Redeemed: {redemption}\n")));
+    }
+    let reason = body_map
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let detail = body_map
+        .get("detail")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let line = format!("Not redeemed ({reason}): {detail}");
+    let line = line.trim_end_matches([':', ' ']);
+    Ok(CmdOut::code(format!("{line}\n"), 1))
+}
+
+/// `cmdWake` (`deliver.go:228`, `deliver/wake.go:95`):
+/// cookies first, then `FetchAccessToken`, the vm id
+/// from the profile or `FetchSessionInfo`, then the wake
+/// POST (15s bound inside `WakeVM`). Renders
+/// `{"status","body"}` in struct order. Plain HTTPS
+/// through the dialer, never the gateway connection. The
+/// `deliver: wake: …` error wraps are not reproduced:
+/// typed errors classify identically with or without
+/// them, and the wrap text is never rendered.
+async fn cmd_wake(rt: &Runtime) -> Result<CmdOut, FlowErr> {
+    let cookies = rt.cookies()?;
+    let token = fetch_access_token_base(&rt.http, &cookies, &rt.http_base)
+        .await
+        .map_err(|e| classify_conn_error(&e))?;
+    let vm_id = if !rt.profile.vm_id.is_empty() {
+        rt.profile.vm_id.clone()
+    } else {
+        let info = fetch_session_info_base(&rt.http, &cookies, &rt.http_base)
+            .await
+            .map_err(|e| classify_conn_error(&e))?;
+        info.vm_id
+    };
+    let (status, body) = wake_vm_base(&rt.http, &cookies, &token, &vm_id, &rt.http_base)
+        .await
+        .map_err(|e| classify_conn_error(&e))?;
+    let body_compact =
+        serde_json::to_string(&body).map_err(|_| msg(1, "failed to serialize gateway response"))?;
+    let mut out = String::from("{\"status\":");
+    out.push_str(&status.to_string());
+    out.push_str(",\"body\":");
+    out.push_str(&body_compact);
+    out.push('}');
+    Ok(CmdOut::out(write_json_text(&out)))
+}
+
+/// Go `stringifyID` (`read.go:627`): nil → `""`, string
+/// → itself, number → its literal, bool → `True` /
+/// `False`. Other JSON values fall back to the compact
+/// rendering (Go `%v` of a map/slice is Go syntax, which
+/// no id ever is; recorded approximation).
+fn stringify_id(v: Option<&SerdeValue>) -> String {
+    match v {
+        None | Some(SerdeValue::Null) => String::new(),
+        Some(SerdeValue::String(s)) => s.clone(),
+        Some(SerdeValue::Number(n)) => n.to_string(),
+        Some(SerdeValue::Bool(b)) => {
+            if *b {
+                "True".to_string()
+            } else {
+                "False".to_string()
+            }
+        }
+        Some(other) => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+/// Go `eventMatchesRef` (`read.go:615`): any of the
+/// event's ids (`seq`, `payload.message_id`,
+/// `payload.id`, top-level `message_id`) equals the ref.
+fn event_matches_ref(ev: &SerdeValue, ref_: &str) -> bool {
+    let payload = ev.get("payload").and_then(|v| v.as_object());
+    let ids = [
+        stringify_id(ev.get("seq")),
+        stringify_id(payload.and_then(|m| m.get("message_id"))),
+        stringify_id(payload.and_then(|m| m.get("id"))),
+        stringify_id(ev.get("message_id")),
+    ];
+    ids.iter().any(|id| !id.is_empty() && id == ref_)
+}
+
+/// One `SaveResources` result row (`internal/shared/
+/// resources.go:230`, `SaveRow`): field order path, file,
+/// skipped, bytes, error, warning; `None` fields are
+/// omitted (`omitempty`).
+#[derive(Debug, Clone, Default)]
+struct SaveRow {
+    /// Resource path that was downloaded.
+    path: String,
+    /// Absolute local path saved to (or would-be, on failure).
+    file: String,
+    /// `"exists"` when the destination already existed.
+    skipped: Option<String>,
+    /// Existing size (skipped) or downloaded size (saved).
+    bytes: Option<i64>,
+    /// Download failure summary (row error).
+    error: Option<String>,
+    /// `expected <N> bytes` on a byte_len mismatch.
+    warning: Option<String>,
+}
+
+fn save_row_to_json(row: &SaveRow) -> String {
+    let mut out = String::from("{");
+    out.push_str("\"path\":");
+    out.push_str(&escape_go_marshal_string(&row.path));
+    out.push_str(",\"file\":");
+    out.push_str(&escape_go_marshal_string(&row.file));
+    if let Some(skipped) = &row.skipped {
+        out.push_str(",\"skipped\":");
+        out.push_str(&escape_go_marshal_string(skipped));
+    }
+    if let Some(bytes) = row.bytes {
+        out.push_str(",\"bytes\":");
+        out.push_str(&bytes.to_string());
+    }
+    if let Some(error) = &row.error {
+        out.push_str(",\"error\":");
+        out.push_str(&escape_go_marshal_string(error));
+    }
+    if let Some(warning) = &row.warning {
+        out.push_str(",\"warning\":");
+        out.push_str(&escape_go_marshal_string(warning));
+    }
+    out.push('}');
+    out
+}
+
+/// `SaveResources` (`internal/shared/resources.go:267`):
+/// mkdir the directory (0777), skip existing
+/// destinations unless overwrite, download each resource
+/// through the live gateway (`media_path` resolves
+/// `sandbox://` refs and the `variants.original`
+/// preference), write to a `.part` file (0666) and rename
+/// into place, warn on a `byte_len` mismatch. A download
+/// failure is captured in the row's error field (the
+/// allowlist summary only); an auth failure or a
+/// cancelled context propagates, as does any local
+/// filesystem failure (`save resources: …`).
+async fn save_resources(
+    rt: &Runtime,
+    resources: &[Resource],
+    directory: &str,
+    overwrite: bool,
+) -> Result<Vec<SaveRow>, FlowErr> {
+    if let Err(e) = std::fs::create_dir_all(directory) {
+        return Err(msg(
+            1,
+            format!(
+                "save resources: create directory: mkdir {directory}: {}",
+                io_error_text(&e)
+            ),
+        ));
+    }
+    let mut rows: Vec<SaveRow> = Vec::new();
+    for r in resources {
+        let dest = local_name(&r.path, directory);
+        let abs = abs_path(&dest);
+        let mut row = SaveRow {
+            path: r.path.clone(),
+            file: abs,
+            ..Default::default()
+        };
+        if let Ok(meta) = std::fs::metadata(&dest)
+            && !overwrite
+        {
+            row.skipped = Some("exists".to_string());
+            row.bytes = Some(meta.len() as i64);
+            rows.push(row);
+            continue;
+        }
+        let variants_original = match &r.variants {
+            Some(SharedValue::Object(m)) => match m.get("original") {
+                Some(SharedValue::Str(s)) => Some(s.as_str()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let resolved = match media_path(&r.path, variants_original) {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(classify_conn_error(&e));
+            }
+        };
+        let data = match rt.shared.live().await {
+            Ok(gw) => match gw.download_file(&resolved, Duration::from_secs(0)).await {
+                Ok(data) => data,
+                Err(e) => match e {
+                    TransportError::Cancelled | TransportError::Auth { .. } => {
+                        return Err(classify_conn_error(&e));
+                    }
+                    _ => {
+                        row.error = Some(summarize_transport_error(&e));
+                        rows.push(row);
+                        continue;
+                    }
+                },
+            },
+            Err(e) => {
+                return Err(classify_conn_error(&e));
+            }
+        };
+        let tmp = format!("{dest}.part");
+        if let Err(e) = std::fs::write(&tmp, &data) {
+            return Err(msg(
+                1,
+                format!(
+                    "save resources: write {tmp}: open {tmp}: {}",
+                    io_error_text(&e)
+                ),
+            ));
+        }
+        if let Err(e) = std::fs::rename(&tmp, &dest) {
+            return Err(msg(
+                1,
+                format!("save resources: rename {tmp} {dest}: {}", io_error_text(&e)),
+            ));
+        }
+        let size = data.len() as i64;
+        row.bytes = Some(size);
+        if let Some(expected) = r.byte_len
+            && expected != size
+        {
+            row.warning = Some(format!("expected {expected} bytes"));
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+/// `cmdDownload` (`read.go:535`): a `sandbox://` ref or
+/// a ref containing `/media/raw/` downloads directly;
+/// otherwise the ref is matched against the last N
+/// messages' events (`eventMatchesRef` + `EventResources`,
+/// deduped by path). No files → exit 1 with the message.
+/// Rows print as JSON; any row error exits 3, silently,
+/// after printing.
+async fn cmd_download(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
+    let ref_ = p.positionals.first().cloned().unwrap_or_default();
+    let output = if p.str_is_set("output") {
+        p.str("output")
+    } else {
+        ".".to_string()
+    };
+    let force = p.bool("force");
+    let resources: Vec<Resource> = if ref_.starts_with("sandbox://") || ref_.contains("/media/raw/")
+    {
+        vec![Resource {
+            path: ref_.clone(),
+            kind: String::new(),
+            mime: None,
+            byte_len: None,
+            label: None,
+            variants: None,
+        }]
+    } else {
+        let (_d, events) = history_result(rt, &p.str("thread"), p.int_val("limit")).await?;
+        let mut resources: Vec<Resource> = Vec::new();
+        for ev in &events {
+            if !event_matches_ref(ev, &ref_) {
+                continue;
+            }
+            for r in event_resources(&from_serde(ev)) {
+                if !resources.iter().any(|x| x.path == r.path) {
+                    resources.push(r);
+                }
+            }
+        }
+        if resources.is_empty() {
+            let thread = p.str("thread");
+            let where_ = if thread.is_empty() {
+                " of the main chat".to_string()
+            } else {
+                format!(" of thread {thread}")
+            };
+            return Err(msg(
+                1,
+                format!(
+                    "no files found for '{ref_}' in the last {} messages{where_} (try --thread / --limit)",
+                    p.int_val("limit")
+                ),
+            ));
+        }
+        resources
+    };
+    let rows = save_resources(rt, &resources, &output, force).await?;
+    let items: Vec<String> = rows.iter().map(save_row_to_json).collect();
+    let text = write_json_text(&rows_json(&items));
+    if rows.iter().any(|r| r.error.is_some()) {
+        Ok(CmdOut::code(text, 3))
+    } else {
+        Ok(CmdOut::out(text))
+    }
+}
+
+/// `cmdRaw` (`read.go:1010`): route-lookup first (exit 2
+/// on an unknown method, before any connection is
+/// opened), then `--body` JSON parse, then `--param` k=v
+/// checks. The raw reply bytes print as JSON when they
+/// parse (first value only, trailing data ignored — Go
+/// `decodeJSONNumber`), else as text. Empty reply →
+/// `{}`. Timeout defaults to 30s (table default).
+async fn cmd_raw(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
+    let method = p.positionals.first().cloned().unwrap_or_default();
+    let table = RouteTable::default_routes().map_err(|e| classify_error(&e))?;
+    if table.lookup_route(&method).is_none() {
+        return Err(msg(
+            2,
+            format!(
+                "unknown method '{method}' (see routes.json for the {} known methods)",
+                table.len()
+            ),
+        ));
+    }
+    let mut body = Body::None;
+    if !p.str("body").is_empty() {
+        let v = decode_json_number_loose(p.str("body").as_bytes())
+            .map_err(|e| msg(2, format!("invalid --body JSON: {e}")))?;
+        body = Body::Json(v);
+    }
+    let mut path_params: Vec<(String, String)> = Vec::new();
+    for kv in p.list("param") {
+        match kv.split_once('=') {
+            Some((k, v)) => path_params.push((k.to_string(), v.to_string())),
+            None => {
+                return Err(msg(2, format!("bad --param '{kv}': expected k=v")));
+            }
+        }
+    }
+    let timeout_secs = p.int_val("timeout");
+    let timeout = if timeout_secs > 0 {
+        Duration::from_secs(timeout_secs as u64)
+    } else {
+        Duration::ZERO
+    };
+    let data = rt
+        .shared
+        .request(
+            &method,
+            RequestOptions {
+                body,
+                path_params,
+                timeout,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| classify_conn_error(&e))?;
+    if data.is_empty() {
+        return Ok(CmdOut::out(write_json_text("{}")));
+    }
+    match decode_json_number_loose(&data) {
+        Ok(v) => Ok(CmdOut::out(write_json_serde(&v)?)),
+        Err(_) => Ok(CmdOut::out(format!("{}\n", String::from_utf8_lossy(&data)))),
+    }
+}
+
+async fn dispatch(spec: &CommandSpec, rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
     match spec.name {
-        "status" => cmd_status(rt).await,
-        "usage" => cmd_usage(rt, p).await,
-        "threads" => cmd_threads(rt, p).await,
-        "history" => cmd_history(rt, p).await,
-        "files" => cmd_files(rt, p).await,
-        "feed" => cmd_feed(rt, p).await,
-        "feed-status" => cmd_feed_status(rt).await,
-        "feed-prompt" => cmd_feed_prompt(rt).await,
-        "goals" => cmd_goals(rt).await,
-        "goal" => cmd_goal(rt, p).await,
-        "ideas" => cmd_ideas(rt).await,
-        "idea" => cmd_idea(rt, p).await,
-        "unread" => cmd_unread(rt).await,
+        "status" => cmd_status(rt).await.map(CmdOut::out),
+        "usage" => cmd_usage(rt, p).await.map(CmdOut::out),
+        "threads" => cmd_threads(rt, p).await.map(CmdOut::out),
+        "history" => cmd_history(rt, p).await.map(CmdOut::out),
+        "files" => cmd_files(rt, p).await.map(CmdOut::out),
+        "feed" => cmd_feed(rt, p).await.map(CmdOut::out),
+        "feed-status" => cmd_feed_status(rt).await.map(CmdOut::out),
+        "feed-prompt" => cmd_feed_prompt(rt).await.map(CmdOut::out),
+        "goals" => cmd_goals(rt).await.map(CmdOut::out),
+        "goal" => cmd_goal(rt, p).await.map(CmdOut::out),
+        "ideas" => cmd_ideas(rt).await.map(CmdOut::out),
+        "idea" => cmd_idea(rt, p).await.map(CmdOut::out),
+        "unread" => cmd_unread(rt).await.map(CmdOut::out),
+        "session-start" => cmd_session_start(rt, p).await,
+        "session-rename" => cmd_session_op(rt, p, "rename").await,
+        "session-pin" => cmd_session_op(rt, p, "pin").await,
+        "session-unpin" => cmd_session_op(rt, p, "unpin").await,
+        "session-archive" => cmd_session_op(rt, p, "archive").await,
+        "session-unarchive" => cmd_session_op(rt, p, "unarchive").await,
+        "session-delete" => cmd_session_op(rt, p, "delete").await,
+        "stop" => cmd_stop(rt, p).await,
+        "seen" => cmd_seen(rt, p).await,
+        "feed-react" => cmd_feed_react(rt, p).await,
+        "idea-exec" => cmd_idea_exec(rt, p).await,
+        "approvals" => cmd_approvals(rt, p).await,
+        "approve" => cmd_approve(rt, p).await,
+        "deny" => cmd_deny(rt, p).await,
+        "invite" => cmd_invite(rt, p).await,
+        "redeem" => cmd_redeem(rt, p).await,
+        "wake" => cmd_wake(rt).await,
+        "download" => cmd_download(rt, p).await,
+        "raw" => cmd_raw(rt, p).await,
         _ => Err(msg(
             1,
             format!("command {} is not a network command", spec.name),
@@ -687,11 +1758,13 @@ async fn dispatch(spec: &CommandSpec, rt: &Runtime, p: &Parsed) -> Result<String
     }
 }
 
-/// Run one read-only command: resolve config + parse (kept
-/// for the runtime builder), build the tokio runtime and the
-/// per-profile runtime, dispatch, and append the stdout text
-/// to the outcome. Errors surface as `FlowErr` (typed JSON
-/// via `Verbatim`, plain via `Msg`).
+/// Run one network command: resolve config + parse (kept
+/// for the runtime builder), build the tokio runtime and
+/// the per-profile runtime, dispatch, and append the
+/// stdout/stderr text to the outcome. A non-zero command
+/// code becomes `FlowErr::Exit` (silent, after the
+/// streams are appended). Errors surface as `FlowErr`
+/// (typed JSON via `Verbatim`, plain via `Msg`).
 pub(crate) fn run_network_command(
     ctx: &mut Ctx<'_>,
     g: &GlobalOpts,
@@ -713,8 +1786,47 @@ pub(crate) fn run_network_command(
         let runtime = build_runtime(&loc, single.as_ref(), profile_flag, getenv)?;
         dispatch(spec, &runtime, p).await
     })?;
-    ctx.out.stdout.push_str(&out);
+    ctx.out.stdout.push_str(&out.stdout);
+    ctx.out.stderr.push_str(&out.stderr);
+    if out.code != 0 {
+        return Err(FlowErr::Exit(out.code));
+    }
     Ok(())
+}
+
+/// The driver seam (M7b, D-M7b-2): run one command
+/// against an already-built runtime (a fake gateway /
+/// fake muse.ai base in tests) and return
+/// (stdout, stderr, exit code), rendering `FlowErr`
+/// exactly like `run_inner` does. Test-only: production
+/// never calls this, and no CLI flag/env/config selects
+/// a gateway host.
+pub async fn run_driver_command(
+    spec: &CommandSpec,
+    rt: &Runtime,
+    p: &Parsed,
+) -> (String, String, i32) {
+    match dispatch(spec, rt, p).await {
+        Ok(out) => (out.stdout, out.stderr, out.code),
+        Err(FlowErr::HelpShown) => (String::new(), String::new(), 0),
+        Err(FlowErr::Exit(code)) => (String::new(), String::new(), code),
+        Err(FlowErr::Verbatim { code, text }) => (
+            String::new(),
+            if text.is_empty() {
+                String::new()
+            } else {
+                format!("{text}\n")
+            },
+            code,
+        ),
+        Err(FlowErr::Msg { code, message }) => (
+            String::new(),
+            message
+                .map(|m| format!("castctl: {m}\n"))
+                .unwrap_or_default(),
+            code,
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1117,28 +2229,6 @@ mod tests {
                 "history",
                 "--download",
                 "/tmp/dl",
-            ],
-            map,
-        );
-        assert_eq!(out.code, 1);
-        assert_eq!(out.stderr, STUB_LINE);
-        assert!(out.stdout.is_empty());
-    }
-
-    #[test]
-    fn invite_stubs_exit_1() {
-        let dir = temp_home("invite");
-        std::fs::write(
-            dir.join("config.json"),
-            r#"{"profiles":{"no1":{"outbound":"direct"}}}"#,
-        )
-        .unwrap();
-        let (_home, map) = isolated_env();
-        let out = run_env(
-            &[
-                "--config",
-                dir.join("config.json").to_str().unwrap(),
-                "invite",
             ],
             map,
         );

@@ -38,6 +38,7 @@ use castctl_config::configlocation::Getenv;
 use castctl_config::jsonvalue::JsonValue as ConfigJsonValue;
 use castctl_config::profile::{OutboundKind, Profile};
 use castctl_gateway::Gateway;
+use castctl_gateway::auth::MUSE_AI_BASE;
 use castctl_gateway::connector::GatewayConnector;
 use castctl_gateway::shared::{Connector, SharedConn};
 use castctl_transport::{
@@ -53,7 +54,12 @@ use castctl_gateway::cookies::{CookieLoadError, load_cookies};
 /// the outbound dialer's HTTP client (all HTTPS in commands
 /// goes through it; `http.DefaultClient` is never used), and
 /// the shared gateway connection.
-pub(crate) struct Runtime {
+///
+/// Public (M7b, D-M7b-2) so the fake-server driver
+/// (`examples/m7b_driver.rs`) can build a runtime against a
+/// fake gateway connector and a fake muse.ai base; production
+/// builds it only through `build_runtime`.
+pub struct Runtime {
     /// The resolved active profile.
     pub profile: Profile,
     /// The dialer's HTTP client (HTTPS auth chain,
@@ -62,6 +68,10 @@ pub(crate) struct Runtime {
     /// The shared connection (retry across reconnects, no
     /// heartbeat — Go starts none for unary read commands).
     pub shared: Arc<SharedConn>,
+    /// Base URL for the plain-HTTPS muse.ai calls
+    /// (invite/redeem/wake): production `MUSE_AI_BASE`,
+    /// the fake server's base in the driver.
+    pub http_base: String,
 }
 
 /// Adapts `GatewayConnector` (whose `connect` takes the
@@ -215,7 +225,23 @@ pub(crate) fn build_runtime(
         profile,
         http,
         shared,
+        http_base: MUSE_AI_BASE.to_string(),
     })
+}
+
+impl Runtime {
+    /// Build a runtime from its parts (M7b driver seam):
+    /// the base is the production `MUSE_AI_BASE`; the
+    /// driver overwrites `http_base` with the fake
+    /// server's base after construction.
+    pub fn new(profile: Profile, http: HttpClient, shared: Arc<SharedConn>) -> Self {
+        Self {
+            profile,
+            http,
+            shared,
+            http_base: MUSE_AI_BASE.to_string(),
+        }
+    }
 }
 
 impl Runtime {

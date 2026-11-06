@@ -235,7 +235,10 @@ fn fs_parse(ctx: &mut Ctx<'_>, sub: &str, args: &[String]) -> Result<Parsed, Flo
 /// `resolveConfig` (`commands.go:982`): the `--config` empty check,
 /// location resolution (warnings printed first), the basename
 /// rule, and `RequirePresent` unless `allow_missing_create`.
-fn resolve_config(
+/// `pub(crate)` for the `auto-approve` handler (M7b), which
+/// resolves config itself instead of going through the
+/// network path.
+pub(crate) fn resolve_config(
     ctx: &mut Ctx<'_>,
     g: &GlobalOpts,
     allow_missing_create: bool,
@@ -568,12 +571,14 @@ const READ_COMMANDS: [&str; 13] = [
 /// A `parseOrHelp` command: parse, positional/manual checks,
 /// `parseAutoToggles` for wait/send, then config-location
 /// resolution + config parse, then the stub — except the 13
-/// read-only commands (M4b), which run the network path, `wait`
-/// (M7a), which runs the wait path, and the two excluded forms
-/// (`history --download`, which writes files, and `invite`, which
-/// can POST): those resolve + load and then take the M2 stub
-/// (exit 1, `STUB_LINE`), the same placement as every other
-/// stub — after parse/positionals, before any network call.
+/// read-only commands (M4b) and the 19 M7b Phase A commands,
+/// which run the network path, `wait` (M7a), which runs the wait
+/// path, and `auto-approve`, which resolves config + profile
+/// itself (no network).
+/// `history --download` is NOT in the network set: it is
+/// checked separately below and stubbed. `chat`, `send`,
+/// and `watch` stay stubbed (deferred to PR-2; see PORTING.md
+/// §M7b).
 fn cmd_plain(
     ctx: &mut Ctx<'_>,
     g: &GlobalOpts,
@@ -588,6 +593,9 @@ fn cmd_plain(
     if spec.name == "wait" {
         return crate::wait::run_wait_command(ctx, g, &p);
     }
+    if spec.name == "auto-approve" {
+        return crate::autoapprove::run_auto_approve(ctx, g, &p);
+    }
     if READ_COMMANDS.contains(&spec.name) {
         if spec.name == "history" && !p.str("download").is_empty() {
             resolve_and_load(ctx, g, false)?;
@@ -595,13 +603,39 @@ fn cmd_plain(
         }
         return crate::network::run_network_command(ctx, g, spec, &p);
     }
-    if spec.name == "invite" {
-        resolve_and_load(ctx, g, false)?;
-        return Err(stub(ctx));
+    if M7B_COMMANDS.contains(&spec.name) {
+        return crate::network::run_network_command(ctx, g, spec, &p);
     }
     resolve_and_load(ctx, g, false)?;
     Err(stub(ctx))
 }
+
+/// The 19 M7b Phase A network commands (PR-1) plus `raw`
+/// (the 20th attempt): wired to the real gateway/HTTPS
+/// through the network path. `auto-approve` is NOT here —
+/// it resolves config + profile itself (no network; see
+/// the branch above).
+const M7B_COMMANDS: [&str; 19] = [
+    "session-start",
+    "session-rename",
+    "session-pin",
+    "session-unpin",
+    "session-archive",
+    "session-unarchive",
+    "session-delete",
+    "stop",
+    "seen",
+    "feed-react",
+    "idea-exec",
+    "approvals",
+    "approve",
+    "deny",
+    "invite",
+    "redeem",
+    "wake",
+    "download",
+    "raw",
+];
 
 /// Positional/manual checks shared by `parseOrHelp` commands, in
 /// Go handler order (positionals before toggles/decision).

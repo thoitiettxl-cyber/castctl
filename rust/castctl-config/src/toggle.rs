@@ -107,6 +107,7 @@ fn update_single_profile_field(
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .mode(0o600)
         .open(&lock_path)
         .map_err(|e| config_errorf!("lock config: {}", io_error_text(&e)))?;
@@ -263,7 +264,6 @@ fn io_error_text(e: &std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jsonvalue::JsonValue;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -353,7 +353,7 @@ mod tests {
     fn io_error_text_strips_os_error_suffix() {
         let e = std::io::Error::from_raw_os_error(13);
         assert_eq!(io_error_text(&e), "Permission denied");
-        let e = std::io::Error::new(std::io::ErrorKind::Other, "custom boom");
+        let e = std::io::Error::other("custom boom");
         assert_eq!(io_error_text(&e), "custom boom");
     }
 }

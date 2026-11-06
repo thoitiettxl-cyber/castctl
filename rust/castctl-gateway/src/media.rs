@@ -32,7 +32,6 @@ use castctl_transport::TransportError;
 /// and the ref's byte length (loop 6, item 4): the ref is
 /// peer-controlled, so its text must never reach an error
 /// string.
-#[must_use]
 pub fn media_path(path: &str, variants_original: Option<&str>) -> Result<String, TransportError> {
     // `variants.original` wins over `path` whenever it is
     // non-empty (`media.go:80-91`).
