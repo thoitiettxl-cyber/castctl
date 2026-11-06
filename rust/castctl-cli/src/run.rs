@@ -551,7 +551,7 @@ fn run_inner(ctx: &mut Ctx<'_>, args: &[String]) -> Outcome {
 }
 
 /// The 13 read-only commands (M4b): they run the network path.
-/// `invite` is NOT here: it stays fully stubbed (it has
+/// `invite` is NOT here: it is wired via `M7B_COMMANDS` below (it has
 /// `--create`, a POST). `history --download` is NOT here either:
 /// it is checked separately below and stubbed.
 const READ_COMMANDS: [&str; 13] = [
