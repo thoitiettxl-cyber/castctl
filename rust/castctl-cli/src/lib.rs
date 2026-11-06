@@ -17,13 +17,17 @@
 //! Phase A commands on top of the same path: session-*, stop,
 //! seen, feed-react, idea-exec, approvals/approve/deny, invite,
 //! redeem, wake, download, raw, plus `auto-approve` (config only,
-//! no network). `chat`, `send`, and `watch` stay stubbed
-//! (deferred to PR-2; see PORTING.md §M7b).
+//! no network). PR-2 wired `chat`, `send`, and `watch` (plus
+//! `fs`). PR-3 wires `update` (`update`), `auth list` / `auth
+//! status` / `auth import` (`auth`), and `history --download`
+//! (`network::cmd_history`); `auth observe-login` stays the
+//! fixed tag-off error (see PORTING.md §M7b.13).
 //!
 //! No `unsafe`, no `unwrap()`/`expect()` on external input. Every
 //! public item cites its Go source at base `dev-rust` `85a8d5e`.
 
 pub mod approvals;
+pub mod auth;
 pub mod autoapprove;
 pub mod chat;
 pub mod chat_texts;
@@ -35,6 +39,7 @@ pub mod run;
 pub mod runtime;
 pub mod send;
 pub mod table;
+pub mod update;
 pub mod wait;
 pub mod watch;
 
