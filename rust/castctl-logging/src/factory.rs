@@ -86,7 +86,7 @@ impl Level {
             5 | 6 => 37,
             4 => 36,
             3 => 33,
-            0 | 1 | 2 => 31,
+            0..=2 => 31,
             _ => 37,
         }
     }
@@ -496,7 +496,6 @@ pub fn open_log_file(path: &str, refused: &[String]) -> Result<File, LogError> {
     let f = OpenOptions::new()
         .append(true)
         .create(true)
-        .write(true)
         .mode(0o600)
         .open(path)
         .map_err(LogError::OpenFailed)?;

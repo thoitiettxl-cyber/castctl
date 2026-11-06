@@ -1099,10 +1099,7 @@ impl Gateway {
                             // loop continues.
                         }
                     }
-                    loop {
-                        let Some(idx) = buf.iter().position(|b| *b == b'\n') else {
-                            break;
-                        };
+                    while let Some(idx) = buf.iter().position(|b| *b == b'\n') {
                         let line: Vec<u8> = buf.drain(..=idx).collect();
                         let line = &line[..line.len() - 1];
                         if is_blank_bytes(line) {

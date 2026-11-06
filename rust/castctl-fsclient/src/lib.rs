@@ -665,10 +665,10 @@ impl<G: FsGateway> Fs<G> {
     /// limit is positive.
     pub async fn search(&self, contains: &str, limit: i64) -> Result<Vec<Entry>, FsError> {
         let mut body = serde_json::json!({"name": {"contains": contains}});
-        if limit > 0 {
-            if let Some(obj) = body.as_object_mut() {
-                obj.insert("limit".to_string(), Value::from(limit));
-            }
+        if limit > 0
+            && let Some(obj) = body.as_object_mut()
+        {
+            obj.insert("limit".to_string(), Value::from(limit));
         }
         let result = self.call("fs.search", body, CALL_TIMEOUT).await?;
         decode_entries(&result, "fs.search")
@@ -872,10 +872,10 @@ impl<G: FsGateway> Fs<G> {
             return Ok(got);
         }
         let mut local = dest.to_path_buf();
-        if let Ok(meta) = std::fs::metadata(dest) {
-            if meta.is_dir() {
-                local = dest.join(&name);
-            }
+        if let Ok(meta) = std::fs::metadata(dest)
+            && meta.is_dir()
+        {
+            local = dest.join(&name);
         }
         let data = self.read_file(&p, None).await?;
         std::fs::write(&local, data)?;

@@ -133,10 +133,10 @@ fn str_field(v: &Value, key: &str) -> Option<String> {
 /// `firstString`).
 fn first_string(vs: &[Option<&Value>]) -> Option<String> {
     for v in vs {
-        if let Some(s) = v.and_then(Value::as_str) {
-            if !s.is_empty() {
-                return Some(s.to_string());
-            }
+        if let Some(s) = v.and_then(Value::as_str)
+            && !s.is_empty()
+        {
+            return Some(s.to_string());
         }
     }
     None
@@ -189,12 +189,11 @@ pub fn describe_approval(a: &Value) -> DescribedApproval {
         .and_then(Value::as_array)
     {
         for r in list {
-            if let Some(rm) = as_map(r) {
-                if let Some(label) = rm.get("label").and_then(Value::as_str) {
-                    if let Some(value) = rm.get("value") {
-                        rows.insert(label, value);
-                    }
-                }
+            if let Some(rm) = as_map(r)
+                && let Some(label) = rm.get("label").and_then(Value::as_str)
+                && let Some(value) = rm.get("value")
+            {
+                rows.insert(label, value);
             }
         }
     }
@@ -204,10 +203,9 @@ pub fn describe_approval(a: &Value) -> DescribedApproval {
             if let Some(kind) = as_map(o)
                 .and_then(|om| om.get("kind"))
                 .and_then(Value::as_str)
+                && !kind.is_empty()
             {
-                if !kind.is_empty() {
-                    options.push(kind.to_string());
-                }
+                options.push(kind.to_string());
             }
         }
     }
@@ -459,10 +457,10 @@ pub fn is_auth_error(err: &(dyn Error + 'static)) -> bool {
 pub fn find_auth_error(err: &(dyn Error + 'static)) -> Option<TransportError> {
     let mut current: Option<&(dyn Error + 'static)> = Some(err);
     while let Some(e) = current {
-        if let Some(te) = e.downcast_ref::<TransportError>() {
-            if matches!(te, TransportError::Auth { .. }) {
-                return Some(te.clone());
-            }
+        if let Some(te) = e.downcast_ref::<TransportError>()
+            && matches!(te, TransportError::Auth { .. })
+        {
+            return Some(te.clone());
         }
         current = e.source();
     }
