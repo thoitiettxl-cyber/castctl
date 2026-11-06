@@ -60,10 +60,17 @@ use castctl_wait::{
 };
 use serde_json::Value as SerdeValue;
 
+// Named fake token for the scripted server (round-2
+// safety NIT-1): the literal is a constant now so its
+// fakeness is verifiable by reading. The scripted
+// server accepts the canned auth; no real token is
+// ever in it.
+const FAKE_TOKEN: &str = "FAKE-TOKEN";
+
 /// Fake connector: dial the scripted server once per
-/// `connect()` with the literal fake token, exactly as
-/// the M4a `parity_client` example does. No real
-/// credentials are ever involved.
+/// `connect()` with the `FAKE_TOKEN` fake token,
+/// exactly as the M4a `parity_client` example does.
+/// No real credentials are ever involved.
 struct FakeConnector {
     url: String,
     routes: Arc<RouteTable>,
@@ -217,8 +224,8 @@ async fn main() {
         }
     };
     let url = format!(
-        "ws://{}/v1/noise?vm_id=vm-test&auth_token=<redacted>",
-        args.addr
+        "ws://{}/v1/noise?vm_id=vm-test&auth_token={}",
+        args.addr, FAKE_TOKEN
     );
     let shared = Arc::new(SharedConn::new(Arc::new(FakeConnector { url, routes })));
     if let Err(e) = shared.live().await {
