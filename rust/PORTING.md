@@ -8046,7 +8046,7 @@ Pins (workspace `Cargo.toml`, exact `=`):
   former `unsafe` sites — `Flock`, `getuid`,
   `kill`, `shutdown`; the `socket` feature pulls
   the lock-only transitive `memoffset 0.9.1`,
-  MIT, 0 deps) and `serde_json` feature
+  MIT, depends only on autocfg (already in the lock) and `serde_json` feature
   `raw_value` (added to the existing
   `arbitrary_precision`; no new crate). Both MIT
   OR Apache-2.0; provenance §16.
@@ -8519,7 +8519,7 @@ Settled probes — fix loop 1 (2026-11-05, on cue):
   Shutdown)` (feature `socket`);
   `unistd::close(fd: IntoRawFd)` (feature `fs`).
   Features: `default = []`; `socket` pulls
-  `memoffset` (1 lock entry, 0 deps);
+  `memoffset` (1 lock entry; depends only on autocfg, already in the lock);
   `memoffset` was NOT in the lock or the cue
   registry cache before fix loop 1. Boringtun
   enables nix with `["time", "user"]`,
@@ -8588,7 +8588,7 @@ Settled probes — fix loop 1 (2026-11-05, on cue):
   `process` + `signal` + `socket` + `user` on
   the workspace dep. `memoffset 0.9.1` is a NEW
   lock-only transitive (pulled by the `socket`
-  feature; MIT, 0 deps) — no new direct crate
+  feature; MIT, depends only on autocfg (already in the lock) — no new direct crate
   beyond `nix` itself. `serde_json` feature
   `raw_value` was added to the existing dep
   (no new crate) for `RawValue`.

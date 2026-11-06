@@ -197,7 +197,7 @@ Linked dependencies (M6c: update asset handling, called, not copied):
   the M6c crates enable the additional features
   `fs` + `process` + `signal` + `socket` + `user`.
   The `socket` feature pulls the lock-only
-  transitive memoffset 0.9.1 (MIT, 0 deps).
+  transitive memoffset 0.9.1 (MIT, depends only on autocfg (already in the lock).
   No nix source code is copied into rust/.
   `serde_json` gained the `raw_value` feature
   (fix loop 1, `pluginabi.rs` `RawValue`); no new

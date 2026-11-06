@@ -2162,7 +2162,7 @@ safe wrappers replacing the 4 `libc` unsafe blocks
 also uses `unistd::close`). `nix` was already in
 the lock via boringtun (`["time", "user"]`), so the
 only NEW lock entry is the `socket`-feature
-transitive `memoffset 0.9.1` (MIT, 0 deps).
+transitive `memoffset 0.9.1` (MIT, depends only on autocfg (already in the lock).
 `serde_json` gained the `raw_value` feature (for
 `pluginabi.rs` `RawValue`); no new crate entered
 the tree for it. Lock diff for fix loop 1: purely
