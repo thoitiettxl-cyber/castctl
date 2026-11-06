@@ -18,14 +18,18 @@
 //! random shadow names, load-time signature checks,
 //! and any sandbox promise.
 //!
-//! Trust boundary (BQ1, closed): plugins are trusted,
-//! first-party, in-process, with no sandbox. A native
-//! crash (segfault, Go runtime crash, `os.Exit`, memory
-//! corruption) in plugin code cannot be contained by
-//! this host; only host-adapter panics (recovered in
+//! Trust boundary (BQ1, closed, M6c-b update): plugins
+//! are trusted, first-party, with no sandbox — but they
+//! are NO LONGER in-process. Since M6c-b each plugin
+//! runs in its own worker process (see `loader.rs` /
+//! `worker.rs`): a native crash (segfault, Go runtime
+//! crash, `os.Exit`, memory corruption) in plugin code
+//! kills the worker and is reported as `PluginCrashed`,
+//! never the host. Host-adapter panics (recovered in
 //! the guarded call) and plugin-returned envelope errors
-//! are isolated. See `docs/plugins.md`
-//! "Native-panic limit".
+//! are isolated the same way as before. See
+//! `docs/plugins.md` "Native-panic limit" (Go's limit;
+//! the Rust worker is deliberately stronger).
 //!
 //! Rust adaptations (recorded in PORTING.md, M6c):
 //!
@@ -91,6 +95,13 @@ pub trait Client: Send + Sync {
     fn call(&self, method: &str, request: &[u8]) -> Result<Vec<u8>, ClientError>;
     /// Detach the client logically.
     fn shutdown(&self);
+    /// The shutdown failure recorded by `shutdown`,
+    /// if the worker died or timed out during plugin
+    /// `shutdown` (fix loop 1, B4). `None` by default:
+    /// only the worker client reports one.
+    fn shutdown_error(&self) -> Option<PluginHostError> {
+        None
+    }
 }
 
 /// A client-call failure.
@@ -119,7 +130,7 @@ impl std::fmt::Display for ClientError {
 }
 
 /// Opens a plugin file into a `Client`. The default
-/// loader is the STOPPED loader (see `loader.rs`).
+/// loader is the real worker loader (see `loader.rs`).
 /// Source: `Loader` (`host.go:64-67`).
 pub trait Loader: Send + Sync {
     /// Open `file` into a client. `host` is passed so
@@ -128,18 +139,27 @@ pub trait Loader: Send + Sync {
     fn open(&self, file: &PluginFile, host: &Host) -> Result<Arc<dyn Client>, PluginHostError>;
 }
 
-/// The STOPPED default loader: every open refuses with
-/// `LoaderUnavailable`.
+/// The explicit fallback loader: every open refuses
+/// with `LoaderUnavailable`. Used on platforms without
+/// a worker (non-unix) and when a caller explicitly
+/// wants no loading; it is NOT the default anymore (see
+/// `Host::new`: the default is the real worker loader).
 pub struct StoppedLoader;
 
 impl Loader for StoppedLoader {
-    fn open(&self, file: &PluginFile, _host: &Host) -> Result<Arc<dyn Client>, PluginHostError> {
-        // `open_plugin` always refuses (see `loader.rs`);
-        // the `?` propagates its `LoaderUnavailable`.
-        loader::open_plugin(&file.path)?;
+    fn open(&self, _file: &PluginFile, _host: &Host) -> Result<Arc<dyn Client>, PluginHostError> {
         Err(PluginHostError::LoaderUnavailable)
     }
 }
+
+/// A host-callback dispatcher: `method` + request bytes
+/// in, response envelope bytes out (`None` = delivery
+/// failed). The worker's `ffi` host callback calls one
+/// of these (via a socket round-trip to the parent); the
+/// parent's dispatcher is `Host::dispatch_host_call`
+/// with the host's log sink. Shared by `loader.rs` and
+/// `worker.rs` so both sides use one definition.
+pub type HostCallbackDispatcher = Arc<dyn Fn(&str, &[u8]) -> Option<Vec<u8>> + Send + Sync>;
 
 /// The running loopback egress proxy, behind a narrow
 /// trait so the host lifecycle stays testable without
@@ -239,8 +259,9 @@ type LogFn = Arc<dyn Fn(&str, &str) + Send + Sync>;
 /// Source: `Options` (`host.go:121-130`).
 #[derive(Default)]
 pub struct Options {
-    /// Overrides the default (STOPPED) loader; tests
-    /// use a fake. `None` means the default loader.
+    /// Overrides the default (real worker) loader;
+    /// tests use a fake. `None` means the default
+    /// loader (`WorkerLoader`; see `loader.rs`).
     pub loader: Option<Box<dyn Loader>>,
     /// Receives host.log callback entries and lifecycle
     /// warnings. It must not block: it may be called
@@ -342,6 +363,13 @@ pub struct Host {
     apply_mu: Mutex<()>,
     state: Mutex<HostState>,
     egress_mu: Mutex<Vec<Arc<dyn EgressProxyHandle>>>,
+    /// Shutdown failures recorded by the last
+    /// `close()`: `(tag, error)` pairs from clients
+    /// whose worker died or timed out during plugin
+    /// `shutdown` (fix loop 1, B4). `close()` clears
+    /// them first so a second close reports only its
+    /// own failures.
+    shutdown_errors: Mutex<Vec<(String, PluginHostError)>>,
 }
 
 /// Identifies one loaded plugin image for a guarded
@@ -361,7 +389,9 @@ impl Host {
     /// Source: `New` (`host.go:193-208`).
     #[must_use]
     pub fn new(opts: Options) -> Host {
-        let loader: Box<dyn Loader> = opts.loader.unwrap_or_else(|| Box::new(StoppedLoader));
+        let loader: Box<dyn Loader> = opts
+            .loader
+            .unwrap_or_else(|| Box::new(loader::WorkerLoader::new()));
         crate::shadow::sweep_stale_shadow_dirs();
         Host {
             loader,
@@ -373,6 +403,7 @@ impl Host {
                 next_gen: 0,
             }),
             egress_mu: Mutex::new(Vec::new()),
+            shutdown_errors: Mutex::new(Vec::new()),
         }
     }
 
@@ -455,6 +486,38 @@ impl Host {
         }
     }
 
+    /// Shutdown failures from the last `close()`:
+    /// `(tag, error)` pairs for clients whose worker
+    /// died or timed out during plugin `shutdown`
+    /// (fix loop 1, B4). Empty when every shutdown
+    /// was clean. `plugin check` fails on a non-empty
+    /// list instead of printing `shutdown: ok`.
+    #[must_use]
+    pub fn shutdown_errors(&self) -> Vec<(String, PluginHostError)> {
+        self.shutdown_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Log a shutdown failure for a client being
+    /// detached or replaced (fix loop 2, red-team
+    /// N4): `Host::close` collects these into
+    /// `shutdown_errors()`, but the detach/replace
+    /// paths used to swallow them entirely. A plugin
+    /// crashing in `shutdown` while being detached or
+    /// replaced is now visible in the host log instead
+    /// of invisible everywhere. (The report is
+    /// unchanged: the plugin is gone either way.)
+    fn log_shutdown_error(&self, tag: &str, client: &Arc<dyn Client>) {
+        if let Some(e) = client.shutdown_error() {
+            self.logf(
+                "warn",
+                &format!("plugin shutdown failed for tag {tag}: {e}"),
+            );
+        }
+    }
+
     /// Shut down every loaded plugin (detach only;
     /// images stay mapped), close adopted egress proxies
     /// (revoking their credentials), remove this
@@ -466,10 +529,10 @@ impl Host {
         let _apply = self.apply_mu.lock().unwrap_or_else(|e| e.into_inner());
         let (clients, proxies) = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let clients: Vec<Arc<dyn Client>> = state
+            let clients: Vec<(String, Arc<dyn Client>)> = state
                 .loaded
                 .values()
-                .map(|lp| Arc::clone(&lp.client))
+                .map(|lp| (lp.desired.tag.clone(), Arc::clone(&lp.client)))
                 .collect();
             state.loaded.clear();
             state.fused.clear();
@@ -478,8 +541,18 @@ impl Host {
             let proxies = std::mem::take(&mut *egresses);
             (clients, proxies)
         };
-        for c in clients {
-            c.shutdown();
+        {
+            let mut errs = self
+                .shutdown_errors
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            errs.clear();
+            for (tag, c) in &clients {
+                c.shutdown();
+                if let Some(e) = c.shutdown_error() {
+                    errs.push((tag.clone(), e));
+                }
+            }
         }
         for p in proxies {
             p.close();
@@ -526,7 +599,7 @@ impl Host {
             for tag in tags {
                 if !desired_by_tag.contains_key(&tag) {
                     if let Some(lp) = state.loaded.remove(&tag) {
-                        detached.push(lp.client);
+                        detached.push((tag.clone(), lp.client));
                         if let Some(e) = lp.egress {
                             detached_egress.push(e);
                         }
@@ -536,8 +609,9 @@ impl Host {
             }
             (detached, detached_egress)
         };
-        for c in detached {
+        for (tag, c) in detached {
             c.shutdown();
+            self.log_shutdown_error(&tag, &c);
         }
         for p in detached_egress {
             self.maybe_close_egress(&p);
@@ -594,6 +668,7 @@ impl Host {
                                 .loaded
                                 .remove(&d.tag);
                             existing.client.shutdown();
+                            self.log_shutdown_error(&d.tag, &existing.client);
                             if let Some(e) = &existing.egress {
                                 let e = Arc::clone(e);
                                 self.maybe_close_egress(&e);
@@ -644,6 +719,7 @@ impl Host {
                                 .loaded
                                 .remove(&d.tag);
                             existing.client.shutdown();
+                            self.log_shutdown_error(&d.tag, &existing.client);
                             if let Some(e) = &existing.egress {
                                 let e = Arc::clone(e);
                                 self.maybe_close_egress(&e);
@@ -669,6 +745,7 @@ impl Host {
                         // installing the replacement,
                         // outside the state lock.
                         existing.client.shutdown();
+                        self.log_shutdown_error(&d.tag, &existing.client);
                         {
                             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                             state.loaded.insert(d.tag.clone(), replacement);
@@ -827,6 +904,7 @@ impl Host {
         };
         if let Err(err) = self.register(&mut lp, d, false) {
             client.shutdown();
+            self.log_shutdown_error(&d.tag, &client);
             return Err(err);
         }
         Ok(lp)
@@ -1104,7 +1182,31 @@ impl Host {
         };
         match received {
             Ok(Outcome::Ok(bytes)) => parse_envelope(&bytes, target.tag),
-            Ok(Outcome::Transport(e)) => Err(e),
+            // Fix loop 1, B3 + fix loop 2, NB1: a dead
+            // client fuses at the HOST level too, with
+            // the death as the reason — not just at the
+            // `WorkerClient` level. Without this,
+            // `host.fused(tag)` stayed `None` and
+            // `host.loaded(tag)` stayed `Some` after a
+            // death, and the next `apply_config` with
+            // the same tag+path burned a doomed
+            // reconfigure + rollback against the dead
+            // client and fused with the wrong reason.
+            // The predicate is client-DEADNESS
+            // (`is_fatal_client_death`: crash OR kill),
+            // not the crash variant alone: fix loop 1
+            // fused only on `PluginCrashed`, so a
+            // timeout/flood/protocol kill (typed
+            // `ClientDead`) escaped the fuse. Narrow
+            // the same way: oversize, decode, and other
+            // `Failed` errors (worker alive) do not fuse.
+            Ok(Outcome::Transport(e)) => {
+                if e.is_fatal_client_death() {
+                    let reason = e.to_string();
+                    self.fuse(target.tag, &reason, target.path, target.generation);
+                }
+                Err(e)
+            }
             Ok(Outcome::Panicked(type_name)) => {
                 let reason = format!("{method} panic: {type_name}");
                 self.fuse(target.tag, &reason, target.path, target.generation);
@@ -1140,56 +1242,85 @@ impl Host {
     /// envelope.
     /// Source: `dispatchHostCall` (`host.go:899-954`).
     pub fn dispatch_host_call(&self, method: &str, request: &[u8]) -> Vec<u8> {
-        if method != pluginabi::METHOD_HOST_LOG {
+        dispatch_host_call_with(&self.log, method, request)
+    }
+
+    /// A `HostCallbackDispatcher` bound to this host's
+    /// log sink, for the worker loader: the parent side
+    /// of a reverse `host_call` frame calls this, never
+    /// the `Host` itself (the client outlives the
+    /// `Loader::open` call that created it, so it cannot
+    /// hold a `&Host`). The closure owns only the
+    /// cloned log sink.
+    #[must_use]
+    pub fn host_callback_dispatcher(&self) -> HostCallbackDispatcher {
+        let log = self.log.clone();
+        Arc::new(move |method: &str, request: &[u8]| {
+            Some(dispatch_host_call_with(&log, method, request))
+        })
+    }
+}
+
+/// Handle one reverse callback with an explicit log
+/// sink (the body of `Host::dispatch_host_call`, so the
+/// worker loader can reuse it without holding a
+/// `&Host`). The allowlist has exactly one method,
+/// `host.log`; everything else is rejected with an
+/// error envelope. The returned bytes are always an
+/// envelope.
+/// Source: `dispatchHostCall` (`host.go:899-954`).
+fn dispatch_host_call_with(log: &Option<LogFn>, method: &str, request: &[u8]) -> Vec<u8> {
+    if method != pluginabi::METHOD_HOST_LOG {
+        let env = pluginabi::new_error_envelope(
+            "unsupported_host_callback",
+            &format!("unsupported host callback {method}"),
+        );
+        return serde_json::to_vec(&env).unwrap_or_default();
+    }
+    #[derive(serde::Deserialize)]
+    struct HostLogRequest {
+        #[serde(default)]
+        level: String,
+        #[serde(default)]
+        message: String,
+    }
+    let req: HostLogRequest = match serde_json::from_slice(request) {
+        Ok(r) => r,
+        Err(e) => {
             let env = pluginabi::new_error_envelope(
-                "unsupported_host_callback",
-                &format!("unsupported host callback {method}"),
+                "invalid_host_log_request",
+                &format!("decode host log request: {e}"),
             );
             return serde_json::to_vec(&env).unwrap_or_default();
         }
-        #[derive(serde::Deserialize)]
-        struct HostLogRequest {
-            #[serde(default)]
-            level: String,
-            #[serde(default)]
-            message: String,
-        }
-        let req: HostLogRequest = match serde_json::from_slice(request) {
-            Ok(r) => r,
-            Err(e) => {
-                let env = pluginabi::new_error_envelope(
-                    "invalid_host_log_request",
-                    &format!("decode host log request: {e}"),
-                );
-                return serde_json::to_vec(&env).unwrap_or_default();
-            }
-        };
-        let mut message = req.message.trim().to_string();
-        if message.is_empty() {
-            message = "plugin log".to_string();
-        }
-        message = strip_control_chars(&message);
-        message = safe_plugin_text(&message);
-        // The level is an allowlist, not free text:
-        // unknown levels become "info".
-        let mut level = req.level.trim().to_ascii_lowercase();
-        match level.as_str() {
-            "info" | "warn" | "warning" | "error" | "debug" => {}
-            _ => level = "info".to_string(),
-        }
-        if level == "warning" {
-            level = "warn".to_string();
-        }
-        self.logf(&level, &message);
-        let env = Envelope {
-            ok: true,
-            result: Some(crate::pluginabi::raw_value(&serde_json::Value::Object(
-                serde_json::Map::new(),
-            ))),
-            error: None,
-        };
-        serde_json::to_vec(&env).unwrap_or_default()
+    };
+    let mut message = req.message.trim().to_string();
+    if message.is_empty() {
+        message = "plugin log".to_string();
     }
+    message = strip_control_chars(&message);
+    message = safe_plugin_text(&message);
+    // The level is an allowlist, not free text:
+    // unknown levels become "info".
+    let mut level = req.level.trim().to_ascii_lowercase();
+    match level.as_str() {
+        "info" | "warn" | "warning" | "error" | "debug" => {}
+        _ => level = "info".to_string(),
+    }
+    if level == "warning" {
+        level = "warn".to_string();
+    }
+    if let Some(log) = log {
+        log(&level, &message);
+    }
+    let env = Envelope {
+        ok: true,
+        result: Some(crate::pluginabi::raw_value(&serde_json::Value::Object(
+            serde_json::Map::new(),
+        ))),
+        error: None,
+    };
+    serde_json::to_vec(&env).unwrap_or_default()
 }
 
 /// Skip reasons are rendered output: strip control

@@ -26,6 +26,8 @@
 //! file (F5). The stub sits BEFORE active-profile resolution
 //! (D-M2-3).
 
+use std::sync::{Arc, Mutex};
+
 use castctl_config::blocks::valid_plugin_id;
 use castctl_config::config::{SingleConfig, load_single_config};
 use castctl_config::configlocation::{ConfigLocation, Getenv, resolve_config_location};
@@ -33,7 +35,6 @@ use castctl_config::errors::ConfigError;
 use castctl_config::gostr::{go_quote, go_trim_space};
 use castctl_config::log::valid_log_level;
 use std::path::Path;
-use std::sync::Arc;
 
 use crate::help_texts::*;
 use crate::parser::{ArgParser, Parsed, ParserError, check_positionals};
@@ -1426,9 +1427,215 @@ fn cmd_plugin(ctx: &mut Ctx<'_>, args: &[String]) -> Result<(), FlowErr> {
     if !valid_plugin_id(&tag) {
         return Err(msg(2, format!("plugin: invalid --tag {}", go_quote(&tag))));
     }
-    // No config resolution (probed Go exception): the loader
-    // would run next; the stub replaces it.
-    Err(stub(ctx))
+    let mut typ = p.str("type");
+    if typ.is_empty() {
+        typ = "check".to_string();
+    }
+    // No config resolution (probed Go exception): the
+    // loader runs next, through the real Rust loader.
+    let path = p.positionals[0].clone();
+    plugin_check(ctx, &tag, &typ, &path)
+}
+
+/// `cmdPluginCheck` (`plugincheck.go:61-147`): load one
+/// plugin through the real loader and run a single
+/// provider call against it. Prints one line per stage
+/// (dlopen, init, register, provider.call, shutdown),
+/// plus any host.log lines the plugin emits (printed as
+/// plugin log lines). It loads no config, starts no
+/// services, writes no config or cookies, and logs no
+/// secrets. Exit 0 when every stage passes, exit 2
+/// otherwise.
+fn plugin_check(ctx: &mut Ctx<'_>, tag: &str, typ: &str, path: &str) -> Result<(), FlowErr> {
+    use castctl_pluginhost::host::{Desired, Host, Options};
+    use castctl_pluginhost::pluginabi::METHOD_PROVIDER_CALL;
+    use castctl_pluginhost::text::truncate_runes;
+
+    // host.log lines are collected in arrival order and
+    // flushed before the next stage line, so they stay
+    // interleaved the way Go prints them. The sink is
+    // bounded (fix loop 1, B6): a plugin flooding
+    // `host.log` mid-call must not grow this String
+    // without bound — past the cap, lines are dropped
+    // and a single truncation marker is recorded.
+    let logs: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let logs_clone = Arc::clone(&logs);
+    let log_truncated: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+    let log_truncated_clone = Arc::clone(&log_truncated);
+    let host = Host::new(Options {
+        loader: None,
+        log: Some(Arc::new(move |level: &str, message: &str| {
+            let mut line = format!("plugin log [{level}]: {message}");
+            if line.len() > 4096 {
+                line = format!("{}…", truncate_runes(&line, 4096));
+            }
+            push_plugin_log_line(&logs_clone, &log_truncated_clone, &line);
+        })),
+    });
+    let mut desired = Desired::new(tag, typ, path);
+    desired.fragment = b"{}".to_vec();
+    let report = host.apply_config(vec![desired]);
+    // Flush any host.log lines from the load before the
+    // stage lines.
+    let drained = {
+        let mut sink = logs.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *sink)
+    };
+    ctx.out.stdout.push_str(&drained);
+    if let Some(skipped) = report.skipped.first() {
+        ctx.out.stderr.push_str(&format!(
+            "plugin check: FAIL {}: {}\n",
+            tag,
+            check_text_full(&skipped.reason)
+        ));
+        host.close();
+        return Err(msg_empty(2));
+    }
+    let Some(loaded) = host.loaded(tag) else {
+        ctx.out.stderr.push_str(&format!(
+            "plugin check: FAIL {tag}: loaded but not reported\n"
+        ));
+        host.close();
+        return Err(msg_empty(2));
+    };
+    ctx.out.stdout.push_str("dlopen: ok\n");
+    ctx.out.stdout.push_str("init: ok\n");
+    let mut caps: Vec<&str> = Vec::new();
+    if loaded.capabilities.provider {
+        caps.push("provider");
+    }
+    if loaded.capabilities.command_provider {
+        caps.push("command-provider");
+    }
+    ctx.out.stdout.push_str(&format!(
+        "register: ok schema={} name={} version={} capabilities={}\n",
+        loaded.schema_version,
+        check_text(&loaded.metadata.name, 200),
+        check_text(&loaded.metadata.version, 200),
+        caps.join(",")
+    ));
+    if !loaded.capabilities.provider {
+        // Command-only plugin: provider.call has no
+        // dispatch path and must not FAIL the check.
+        ctx.out
+            .stdout
+            .push_str("provider.call: skipped (command-only plugin)\n");
+        host.close();
+        return finish_shutdown(ctx, tag, &host);
+    }
+    let result = host.call(tag, METHOD_PROVIDER_CALL, b"{\"input\":\"ping\"}", None);
+    // Flush host.log lines from the provider call before
+    // its stage line.
+    let drained = {
+        let mut sink = logs.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *sink)
+    };
+    ctx.out.stdout.push_str(&drained);
+    host.close();
+    match result {
+        Ok(bytes) => {
+            ctx.out
+                .stdout
+                .push_str(&format!("provider.call: ok {}\n", compact_json(&bytes)));
+            finish_shutdown(ctx, tag, &host)
+        }
+        Err(e) => {
+            ctx.out.stderr.push_str(&format!(
+                "plugin check: FAIL {tag}: provider.call: {}\n",
+                check_text(&e.to_string(), 200)
+            ));
+            Err(msg_empty(2))
+        }
+    }
+}
+
+/// The `shutdown` stage line, after `Host::close`.
+/// A worker crash inside plugin `shutdown` (fix loop 1,
+/// B4) fails the check with a distinct line instead of
+/// printing `shutdown: ok` for a dead worker.
+fn finish_shutdown(
+    ctx: &mut Ctx<'_>,
+    tag: &str,
+    host: &castctl_pluginhost::host::Host,
+) -> Result<(), FlowErr> {
+    use castctl_pluginhost::error::PluginHostError;
+    if let Some((_, e)) = host.shutdown_errors().into_iter().next() {
+        let line = match &e {
+            PluginHostError::PluginCrashed {
+                signal: Some(sig), ..
+            } => format!("shutdown: crashed (signal {sig})"),
+            _ => "shutdown: crashed".to_string(),
+        };
+        ctx.out.stdout.push_str(&format!("{line}\n"));
+        ctx.out.stderr.push_str(&format!(
+            "plugin check: FAIL {tag}: shutdown: {}\n",
+            check_text_full(&e.to_string())
+        ));
+        return Err(msg_empty(2));
+    }
+    ctx.out.stdout.push_str("shutdown: ok\n");
+    Ok(())
+}
+
+/// Total `plugin check` log bytes kept between stage
+/// flushes (fix loop 1, B6). A flooding plugin's lines
+/// past this cap are dropped, never accumulated.
+const PLUGIN_CHECK_LOG_CAP: usize = 65536;
+
+/// Append one (already per-line capped) plugin log
+/// line to the sink, bounded by
+/// `PLUGIN_CHECK_LOG_CAP`. Past the cap the line is
+/// dropped and a single truncation marker is recorded.
+fn push_plugin_log_line(sink: &Arc<Mutex<String>>, truncated: &Arc<Mutex<bool>>, line: &str) {
+    let mut s = sink.lock().unwrap_or_else(|e| e.into_inner());
+    if s.len() + line.len() + 1 > PLUGIN_CHECK_LOG_CAP {
+        let mut t = truncated.lock().unwrap_or_else(|e| e.into_inner());
+        if !*t {
+            *t = true;
+            s.push_str("plugin log: … (truncated, log cap reached)\n");
+        }
+        return;
+    }
+    s.push_str(line);
+    s.push('\n');
+}
+
+/// `checkField` / `shortPluginCheckError`
+/// (`plugincheck.go`): strip control characters,
+/// redact secrets, cap at `max` bytes at a rune
+/// boundary with an explicit marker.
+fn check_text(s: &str, max: usize) -> String {
+    use castctl_pluginhost::text::{safe_plugin_text, strip_control_chars, truncate_runes};
+    let cleaned = safe_plugin_text(&strip_control_chars(s));
+    if cleaned.len() > max {
+        format!("{}…", truncate_runes(&cleaned, max))
+    } else {
+        cleaned
+    }
+}
+
+/// Like `check_text` with no length cap (fix loop 1,
+/// tech N3): the `plugin check: FAIL` reason is
+/// printed whole, like Go (`plugincheck.go` prints the
+/// skip reason uncapped). Only the `register:` line
+/// cap and the provider.call error cap are Go-exact.
+fn check_text_full(s: &str) -> String {
+    use castctl_pluginhost::text::{safe_plugin_text, strip_control_chars};
+    safe_plugin_text(&strip_control_chars(s))
+}
+
+/// `compactJSON` (`plugincheck.go`): re-marshal the
+/// result compactly (sorted keys, like Go's
+/// `json.Marshal`); unparsable input passes through
+/// trimmed and capped.
+fn compact_json(raw: &[u8]) -> String {
+    match serde_json::from_slice::<serde_json::Value>(raw) {
+        Ok(value) => match serde_json::to_string(&value) {
+            Ok(compact) => check_text(&compact, 4096),
+            Err(_) => check_text(&String::from_utf8_lossy(raw), 4096),
+        },
+        Err(_) => check_text(String::from_utf8_lossy(raw).trim(), 4096),
+    }
 }
 
 #[cfg(test)]
@@ -1717,9 +1924,61 @@ mod tests {
         let out = run_env(&["update", "--dry-run"], map.clone());
         assert_eq!(out.code, 1);
         assert_eq!(out.stderr, STUB_LINE);
+        // `plugin check` is real now (M6c-b): a missing
+        // file fails at the shadow gate with exit 2, not
+        // the stub — no worker is spawned for it. The
+        // reason carries the absolute path (cwd-joined),
+        // so only the invariant head and tail are pinned.
         let out = run_env(&["plugin", "check", "x.so"], map);
-        assert_eq!(out.code, 1);
-        assert_eq!(out.stderr, STUB_LINE);
+        assert_eq!(out.code, 2);
+        assert!(out.stdout.is_empty());
+        assert!(
+            out.stderr
+                .starts_with("plugin check: FAIL check: plugin path "),
+            "unexpected stderr: {}",
+            out.stderr
+        );
+        assert!(
+            out.stderr
+                .ends_with("x.so: No such file or directory (os error 2)\n"),
+            "unexpected stderr: {}",
+            out.stderr
+        );
+    }
+
+    #[test]
+    fn plugin_log_sink_is_bounded() {
+        // Fix loop 1, B6: the `plugin check` log sink
+        // never grows past the cap, however many lines
+        // a flooding plugin emits.
+        let sink: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let truncated: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+        let line = "x".repeat(4096);
+        for _ in 0..100 {
+            push_plugin_log_line(&sink, &truncated, &line);
+        }
+        let s = sink.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            s.len() <= PLUGIN_CHECK_LOG_CAP + 64,
+            "sink grew past the cap: {} bytes",
+            s.len()
+        );
+        assert!(
+            s.contains("truncated, log cap reached"),
+            "no truncation marker: {s:?}"
+        );
+        assert!(
+            *truncated.lock().unwrap_or_else(|e| e.into_inner()),
+            "truncated flag must be set"
+        );
+        // Short lines still land when there is room.
+        let sink2: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let truncated2: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+        push_plugin_log_line(&sink2, &truncated2, "hello");
+        assert_eq!(
+            sink2.lock().unwrap_or_else(|e| e.into_inner()).as_str(),
+            "hello\n"
+        );
     }
 
     #[test]
@@ -1815,7 +2074,7 @@ mod tests {
     }
 
     #[test]
-    fn test_plugin_tag_validation_before_stub() {
+    fn test_plugin_tag_validation_before_check() {
         let out = run_args(&["plugin", "check", "x.so", "--tag", "bad tag!"]);
         assert_eq!(out.code, 2);
         assert_eq!(out.stderr, "castctl: plugin: invalid --tag \"bad tag!\"\n");

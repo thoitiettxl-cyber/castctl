@@ -9,27 +9,29 @@
 //! (`SupportValue` / `SupportPlugins`).
 //!
 //! Go reports `"1"` on cgo unix/windows builds and
-//! `"0"` on stub builds. The Rust binary CANNOT dlopen
-//! (see `loader.rs`: the loader sub-scope is STOPPED),
-//! so it always reports `"0"` — the same value Go's
-//! stub loader reports on platforms without dynamic
-//! loading. This is a [DEVIATION] from the Go cgo value
-//! `"1"`, recorded in PORTING.md (M6c section) with the
-//! reason: the value describes the LOADER capability,
-//! and this binary has none.
+//! `"0"` on stub builds. The Rust binary loads plugins
+//! through the real worker loader on unix (see
+//! `loader.rs`: libloading inside a subprocess worker),
+//! so it reports `"1"` there — the same value Go's cgo
+//! loader reports. On non-unix platforms the worker
+//! loader is unavailable and the value stays `"0"`,
+//! like Go's stub loader. (M6c-b: this used to be a
+//! [DEVIATION] reporting `"0"` everywhere because the
+//! loader was STOPPED; the deviation is closed on unix
+//! by the real loader, see PORTING.md §M6c-b.)
 
-/// `"0"`: this binary cannot load dynamic-library
-/// plugins. See the module docs for the reason.
+/// `"1"` on unix (the worker loader is real),
+/// `"0"` elsewhere. See the module docs.
 #[must_use]
 pub const fn support_value() -> &'static str {
-    "0"
+    if cfg!(unix) { "1" } else { "0" }
 }
 
-/// Whether plugins are supported by this binary:
-/// always false while the loader is STOPPED.
+/// Whether plugins are supported by this binary: true
+/// on unix (the worker loader is real), false elsewhere.
 #[must_use]
 pub const fn support_plugins() -> bool {
-    false
+    cfg!(unix)
 }
 
 #[cfg(test)]
@@ -37,8 +39,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn support_is_zero_without_loader() {
-        assert_eq!(support_value(), "0");
-        assert!(!support_plugins());
+    fn support_matches_loader_capability() {
+        if cfg!(unix) {
+            assert_eq!(support_value(), "1");
+            assert!(support_plugins());
+        } else {
+            assert_eq!(support_value(), "0");
+            assert!(!support_plugins());
+        }
     }
 }
