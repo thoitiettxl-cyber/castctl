@@ -681,7 +681,12 @@ fn approve_error_json(e: &castctl_telegram::wait::ApproveError) -> JsonValue {
 /// final_read_failed?, note?, approvals?,
 /// auto_approved?, auto_approve_errors?, widgets?,
 /// needs_input_reason?, question?.
-fn to_wait_result_json(res: &WaitResult, auto_approve_enabled: bool) -> JsonValue {
+///
+/// Public for the Tier A parity driver
+/// (`examples/wait_driver.rs`), which renders the Runner
+/// result with the production code under test instead of a
+/// copy; the driver is the only external caller.
+pub fn to_wait_result_json(res: &WaitResult, auto_approve_enabled: bool) -> JsonValue {
     let mut pairs: Vec<(&str, JsonValue)> = vec![
         ("outcome", JsonValue::Str(res.outcome.clone())),
         ("status", str_or_null(&res.status)),
@@ -809,7 +814,10 @@ fn widget_options_str(options: &SerdeValue) -> String {
 /// `printWaitText` + `printWaitTail` (`wait.go`): replies
 /// and the tail to stdout, the note and the summary line
 /// to stderr. Returns `(stdout, stderr)`.
-fn print_wait_text(res: &WaitResult) -> (String, String) {
+///
+/// Public for the Tier A parity driver
+/// (`examples/wait_driver.rs`); see `to_wait_result_json`.
+pub fn print_wait_text(res: &WaitResult) -> (String, String) {
     let mut stdout = String::new();
     let mut stderr = String::new();
     for r in &res.replies {
