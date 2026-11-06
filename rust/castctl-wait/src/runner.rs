@@ -1506,22 +1506,33 @@ mod tests {
         json!({"event_name": "task.status", "seq": seq, "payload": p})
     }
 
+    // Go `waiter_test.go` `appr`: only the id plus
+    // `decision_options` (one `{"kind": o}` per option).
+    // The approver reads the forever option from
+    // `decision_options`; any other shape (title/question/
+    // `options`) is ignored by `describe_approval`.
     fn appr(id: &str, opts: &[&str]) -> Value {
-        json!({
-            "approval_id": id,
-            "title": format!("title {id}"),
-            "question": "q?",
-            "kind": "shell",
-            "options": opts,
-        })
+        let mut m = json!({"approval_id": id});
+        if !opts.is_empty() {
+            m["decision_options"] =
+                json!(opts.iter().map(|o| json!({"kind": o})).collect::<Vec<_>>());
+        }
+        m
     }
 
+    // Go `waiter_test.go` `approvalEv`: the event name is
+    // `"approvals.snapshot"` (key `"event"`). The
+    // waiter's `pending_approvals` only accepts names
+    // starting with `"approvals"`; `"egress.approvals"`
+    // is the gateway RPC method name, NOT an event name,
+    // and was silently ignored (all approval tests timed
+    // out with kind Timeout instead of Approval).
     fn approval_ev(pending: Vec<Value>, recent: Option<Vec<Value>>) -> Value {
         let mut p = json!({"pending_approvals": pending});
         if let Some(r) = recent {
             p["recent_approvals"] = serde_json::Value::Array(r);
         }
-        json!({"event_name": "egress.approvals", "payload": p})
+        json!({"event": "approvals.snapshot", "payload": p})
     }
 
     fn asst(seq: i64, status: &str, text: &str, extra: Option<Value>) -> Value {
@@ -2270,7 +2281,14 @@ mod tests {
         assert_eq!(res.kind, WaitKind::Done);
         assert_eq!(res.exit_code, 0);
         assert_eq!(res.final_text, "late reply");
-        assert_eq!(hist.calls(), 4);
+        // Five reads, not four: boundary derivation (1)
+        // + final read (1) + lag polls (2: empty, then
+        // the late reply) + endgame reconciliation
+        // `LatestUserSeq` (1, Go `runner.go:1107` —
+        // it runs whenever there is something to
+        // reconcile). Go's test asserts no count; the
+        // writer's 4 forgot the reconciliation read.
+        assert_eq!(hist.calls(), 5);
     }
 
     struct CancelPollHistory {
@@ -2430,9 +2448,14 @@ mod tests {
             user_ev(10),
             asst(11, "completed", "x", None),
         ])]));
+        // `settle_pending` never dials; the dial is only
+        // here because `Runner::new` requires one (Go
+        // `runner.go:294`).
+        let sub = Arc::new(FakeSubscriber::new(vec![]));
         let mut runner = Runner::new(Config {
             after_seq: 10,
             has_after_seq: true,
+            dial: Some(sub.dial()),
             history: Some(hist),
             ..Config::default()
         })
@@ -2687,6 +2710,11 @@ mod tests {
         // Go's negative (disabled) for RecheckAfter /
         // CheckEvery, `Duration::ZERO` is Go's 0
         // (default) for every duration.
+        // `Runner::new` requires Dial + History (Go
+        // `runner.go:294-298`); this test only constructs,
+        // so both are never-called dummies.
+        let sub = Arc::new(FakeSubscriber::new(vec![]));
+        let hist = Arc::new(QueueHistory::new(vec![history_ok(vec![])]));
         let runner = Runner::new(Config {
             timeout: StdDuration::ZERO,
             recheck_after: None,
@@ -2699,6 +2727,8 @@ mod tests {
             lag_poll: StdDuration::ZERO,
             settle_poll_interval: StdDuration::from_millis(1),
             history_limits: Vec::new(),
+            dial: Some(sub.dial()),
+            history: Some(hist),
             ..Config::default()
         })
         .expect("config");
@@ -2990,9 +3020,14 @@ mod tests {
             user_ev(10),
             asst(11, "completed", "x", None),
         ])]));
+        // `settle_pending` never dials; the dial is only
+        // here because `Runner::new` requires one (Go
+        // `runner.go:294`).
+        let sub = Arc::new(FakeSubscriber::new(vec![]));
         let mut runner = Runner::new(Config {
             after_seq: 10,
             has_after_seq: true,
+            dial: Some(sub.dial()),
             history: Some(hist),
             ..Config::default()
         })

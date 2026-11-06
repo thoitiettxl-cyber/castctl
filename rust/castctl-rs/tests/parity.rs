@@ -620,8 +620,8 @@ fn golden_parity() {
     let cases = load_cases();
     assert_eq!(
         cases.len(),
-        59,
-        "argv-list length (D-M2-4 + F5 case + 4 decoder cases)"
+        62,
+        "argv-list length (D-M2-4 + F5 case + 4 decoder cases + 3 N7 wait-conflict cases 09a/09b/09c)"
     );
     verify_manifest(&cases);
     // F9(c): the Rust --version output (unstripped) is exactly
