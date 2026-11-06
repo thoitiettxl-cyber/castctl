@@ -1126,6 +1126,224 @@ fn release_json_null_fields_take_go_code2_paths() {
     }
 }
 
+/// Fill a `release_json_override` template that uses
+/// the `PLACEHOLDER*` markers of the null-field tests:
+/// the server URLs and true sizes are only known after
+/// the server starts. Longest placeholders first:
+/// `PLACEHOLDER_SUMS` is a prefix of
+/// `PLACEHOLDER_SUMS_SIZE`, and `PLACEHOLDER` a prefix
+/// of both `PLACEHOLDER_SIZE` and the sums forms.
+fn set_release_override(server: &FakeServer, template: &str) {
+    let base = server.base();
+    let (asset_size, sums_size) = {
+        let s = server.state.lock().unwrap();
+        (s.asset_bytes.len(), s.checksums_bytes.len())
+    };
+    let raw = template
+        .replace("PLACEHOLDER_SUMS_SIZE", &sums_size.to_string())
+        .replace(
+            "PLACEHOLDER_SUMS",
+            &format!("{base}/download/checksums.txt"),
+        )
+        .replace("PLACEHOLDER_SIZE", &asset_size.to_string())
+        .replace(
+            "PLACEHOLDER",
+            &format!("{base}/download/castctl_0.6.4_linux_amd64.tar.gz"),
+        );
+    server.state.lock().unwrap().release_json_override = Some(raw.into_bytes());
+}
+
+/// Red-team R2-B1 (fix loop 2): `null` in an `assets`
+/// element and in the whole document take the Go
+/// code-2 / install paths, not code 1 `malformed`.
+#[test]
+fn release_json_null_element_and_document_take_go_paths() {
+    // assets: [null] -> 1 zero asset, no match (code 2).
+    {
+        let work = tempfile::tempdir().unwrap();
+        let (server, _new) = standard_server(work.path());
+        {
+            let mut s = server.state.lock().unwrap();
+            s.release_json_override = Some(
+                br#"{"tag_name":"v0.6.4","draft":false,"prerelease":false,"assets":[null]}"#
+                    .to_vec(),
+            );
+        }
+        let (_tmp, target) = make_target(work.path(), "0.6.3");
+        let (opts, _out) = base_opts(&target, &server);
+        let (_res, err) = run(opts);
+        let err = err.expect_err("null asset element must refuse");
+        assert_eq!(err.code(), 2);
+        assert_eq!(
+            err.to_string(),
+            "update: no release asset matches this platform and build flavour"
+        );
+    }
+    // assets: [null, valid, checksums] -> install OK
+    // (Go unmarshals the null element to the zero
+    // asset and `selectAsset` finds the valid one).
+    {
+        let work = tempfile::tempdir().unwrap();
+        let (server, new_bytes) = standard_server(work.path());
+        set_release_override(
+            &server,
+            r#"{"tag_name":"v0.6.4","draft":false,"prerelease":false,"assets":[null,{"name":"castctl_0.6.4_linux_amd64.tar.gz","browser_download_url":"PLACEHOLDER","size":PLACEHOLDER_SIZE,"state":"uploaded"},{"name":"checksums.txt","browser_download_url":"PLACEHOLDER_SUMS","size":PLACEHOLDER_SUMS_SIZE,"state":"uploaded"}]}"#,
+        );
+        let (_tmp, target) = make_target(work.path(), "0.6.3");
+        let (opts, _out) = base_opts(&target, &server);
+        let (res, err) = run(opts);
+        assert!(
+            err.is_ok(),
+            "null + valid assets must install: {:?}",
+            err.err()
+        );
+        assert!(res.replaced);
+        assert_eq!(std::fs::read(&target).unwrap(), new_bytes);
+    }
+    // Whole body `null` -> zero release -> empty tag
+    // -> code 2 "not a valid version" (Go
+    // `selectLatest`, `update.go:664`).
+    {
+        let work = tempfile::tempdir().unwrap();
+        let (server, _new) = standard_server(work.path());
+        {
+            let mut s = server.state.lock().unwrap();
+            s.release_json_override = Some(b"null".to_vec());
+        }
+        let (_tmp, target) = make_target(work.path(), "0.6.3");
+        let (opts, _out) = base_opts(&target, &server);
+        let (_res, err) = run(opts);
+        let err = err.expect_err("null body must refuse");
+        assert_eq!(err.code(), 2);
+        assert_eq!(
+            err.to_string(),
+            "update: the latest release tag is not a valid version"
+        );
+    }
+}
+
+/// Red-team R2-B3 (fix loop 2): duplicate keys in the
+/// release JSON are last-wins (Go), not code 1
+/// `malformed`.
+#[test]
+fn release_json_duplicate_keys_are_last_wins() {
+    // dup tag_name: bad first, good last -> continues
+    // to code 2 no-match (assets empty).
+    {
+        let work = tempfile::tempdir().unwrap();
+        let (server, _new) = standard_server(work.path());
+        {
+            let mut s = server.state.lock().unwrap();
+            s.release_json_override = Some(
+                br#"{"tag_name":"not-a-version!!","tag_name":"v0.6.4","draft":false,"prerelease":false,"assets":[]}"#.to_vec(),
+            );
+        }
+        let (_tmp, target) = make_target(work.path(), "0.6.3");
+        let (opts, _out) = base_opts(&target, &server);
+        let (_res, err) = run(opts);
+        let err = err.expect_err("dup tag must refuse");
+        assert_eq!(err.code(), 2);
+        assert_eq!(
+            err.to_string(),
+            "update: no release asset matches this platform and build flavour"
+        );
+    }
+    // dup draft: true first, false last -> continues
+    // to code 2 no-match.
+    {
+        let work = tempfile::tempdir().unwrap();
+        let (server, _new) = standard_server(work.path());
+        {
+            let mut s = server.state.lock().unwrap();
+            s.release_json_override = Some(
+                br#"{"tag_name":"v0.6.4","draft":true,"draft":false,"prerelease":false,"assets":[]}"#.to_vec(),
+            );
+        }
+        let (_tmp, target) = make_target(work.path(), "0.6.3");
+        let (opts, _out) = base_opts(&target, &server);
+        let (_res, err) = run(opts);
+        let err = err.expect_err("dup draft must refuse");
+        assert_eq!(err.code(), 2);
+        assert_eq!(
+            err.to_string(),
+            "update: no release asset matches this platform and build flavour"
+        );
+    }
+}
+
+/// Guardrail (fix loop 2): type errors STILL refuse
+/// with code 1 `malformed` — the lenient path maps
+/// `null` and last-wins duplicates, never wrong types
+/// (Go `cannot unmarshal` errors, probed on cue).
+#[test]
+fn release_json_type_errors_still_malformed() {
+    // "size": "x" -> code 1.
+    {
+        let work = tempfile::tempdir().unwrap();
+        let (server, _new) = standard_server(work.path());
+        set_release_override(
+            &server,
+            r#"{"tag_name":"v0.6.4","draft":false,"prerelease":false,"assets":[{"name":"castctl_0.6.4_linux_amd64.tar.gz","browser_download_url":"PLACEHOLDER","size":"x","state":"uploaded"},{"name":"checksums.txt","browser_download_url":"PLACEHOLDER_SUMS","size":PLACEHOLDER_SUMS_SIZE,"state":"uploaded"}]}"#,
+        );
+        let (_tmp, target) = make_target(work.path(), "0.6.3");
+        let (opts, _out) = base_opts(&target, &server);
+        let (_res, err) = run(opts);
+        let err = err.expect_err("string size must refuse");
+        assert_eq!(err.code(), 1);
+        assert_eq!(err.to_string(), "update: release information is malformed");
+    }
+    // "tag_name": 123 -> code 1.
+    {
+        let work = tempfile::tempdir().unwrap();
+        let (server, _new) = standard_server(work.path());
+        {
+            let mut s = server.state.lock().unwrap();
+            s.release_json_override =
+                Some(br#"{"tag_name":123,"draft":false,"prerelease":false,"assets":[]}"#.to_vec());
+        }
+        let (_tmp, target) = make_target(work.path(), "0.6.3");
+        let (opts, _out) = base_opts(&target, &server);
+        let (_res, err) = run(opts);
+        let err = err.expect_err("numeric tag must refuse");
+        assert_eq!(err.code(), 1);
+        assert_eq!(err.to_string(), "update: release information is malformed");
+    }
+    // "draft": 1 -> code 1.
+    {
+        let work = tempfile::tempdir().unwrap();
+        let (server, _new) = standard_server(work.path());
+        {
+            let mut s = server.state.lock().unwrap();
+            s.release_json_override =
+                Some(br#"{"tag_name":"v0.6.4","draft":1,"prerelease":false,"assets":[]}"#.to_vec());
+        }
+        let (_tmp, target) = make_target(work.path(), "0.6.3");
+        let (opts, _out) = base_opts(&target, &server);
+        let (_res, err) = run(opts);
+        let err = err.expect_err("numeric draft must refuse");
+        assert_eq!(err.code(), 1);
+        assert_eq!(err.to_string(), "update: release information is malformed");
+    }
+    // assets: [123] -> code 1 (not an object, not null).
+    {
+        let work = tempfile::tempdir().unwrap();
+        let (server, _new) = standard_server(work.path());
+        {
+            let mut s = server.state.lock().unwrap();
+            s.release_json_override = Some(
+                br#"{"tag_name":"v0.6.4","draft":false,"prerelease":false,"assets":[123]}"#
+                    .to_vec(),
+            );
+        }
+        let (_tmp, target) = make_target(work.path(), "0.6.3");
+        let (opts, _out) = base_opts(&target, &server);
+        let (_res, err) = run(opts);
+        let err = err.expect_err("numeric asset must refuse");
+        assert_eq!(err.code(), 1);
+        assert_eq!(err.to_string(), "update: release information is malformed");
+    }
+}
+
 /// Safety F6a (fix loop 1): a hostile latest tag that is
 /// not a version refuses with code 2 and the tag never
 /// appears in the error.

@@ -42,6 +42,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use castctl_shared::lenient_json::{Kind, Parsed};
+
 use crate::checksums::parse_checksums;
 use crate::elf::validate_elf_file;
 use crate::error::UpdateError;
@@ -213,52 +215,33 @@ impl Updater {
                 });
             }
         };
-        // `serde_json::from_slice` rejects trailing garbage
-        // after the object, like Go's `json.Unmarshal`;
-        // unknown fields are tolerated by default.
-        // `#[serde(default)]` alone only applies when a
-        // field is ABSENT; Go's `encoding/json` treats an
-        // explicit JSON `null` as a no-op too (keeps the
-        // zero value), so every field also maps `null` →
-        // default via `null_default` (red-team B5: a
-        // `null` field used to fail the whole decode as
-        // code-1 `malformed`, while Go continues to the
-        // code-2 paths).
-        fn null_default<'de, D, T>(d: D) -> std::result::Result<T, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-            T: serde::Deserialize<'de> + Default,
-        {
-            // Fully qualified: this module defines its
-            // own `Result` struct (the update outcome),
-            // which shadows `std::result::Result`, and
-            // `serde::Deserialize` is not imported here.
-            let opt = <Option<T> as serde::Deserialize>::deserialize(d)?;
-            Ok(opt.unwrap_or_default())
-        }
-        #[derive(serde::Deserialize)]
-        struct ReleaseJson {
-            #[serde(default, deserialize_with = "null_default")]
-            tag_name: String,
-            #[serde(default, deserialize_with = "null_default")]
-            draft: bool,
-            #[serde(default, deserialize_with = "null_default")]
-            prerelease: bool,
-            #[serde(default, deserialize_with = "null_default")]
-            assets: Vec<AssetJson>,
-        }
-        #[derive(serde::Deserialize)]
-        struct AssetJson {
-            #[serde(default, deserialize_with = "null_default")]
-            name: String,
-            #[serde(default, deserialize_with = "null_default")]
-            browser_download_url: String,
-            #[serde(default, deserialize_with = "null_default")]
-            size: i64,
-            #[serde(default, deserialize_with = "null_default")]
-            state: String,
-        }
-        let decoded: ReleaseJson = match serde_json::from_slice(&body) {
+        // The release JSON decodes with Go
+        // `encoding/json` leniency (fix loop 2,
+        // R2-B1/R2-B3), via the shared byte-level
+        // parser (`castctl_shared::lenient_json`) —
+        // NOT `serde_json::from_slice`, which is
+        // strict where Go is lenient:
+        //
+        // - an explicit JSON `null` is a no-op at
+        //   EVERY position: a field, an element of
+        //   `assets`, or the whole document (a
+        //   `null` body is the zero release, whose
+        //   empty tag then takes the code-2 path in
+        //   `selectLatest` — Go `update.go:664`);
+        // - duplicate keys are last-wins, at every
+        //   level (Go keeps the last occurrence);
+        // - invalid UTF-8 in strings coerces to
+        //   U+FFFD (Go `utf8.DecodeRune`);
+        // - type errors STILL refuse as code-1
+        //   `malformed` (`"size": "x"`,
+        //   `"tag_name": 123` — Go's `cannot
+        //   unmarshal` errors, probed on cue
+        //   2026-11-06), because every field decode
+        //   below requires its Go type.
+        //
+        // Trailing garbage after the value still
+        // refuses, like Go's `json.Unmarshal`.
+        let decoded = match decode_release(&body) {
             Ok(d) => d,
             Err(_) => {
                 return Err(FetchReleaseError {
@@ -267,21 +250,7 @@ impl Updater {
                 });
             }
         };
-        Ok(ReleaseInfo {
-            tag: decoded.tag_name,
-            draft: decoded.draft,
-            prerelease: decoded.prerelease,
-            assets: decoded
-                .assets
-                .into_iter()
-                .map(|a| crate::select::ReleaseAsset {
-                    name: a.name,
-                    url: a.browser_download_url,
-                    size: a.size,
-                    state: a.state,
-                })
-                .collect(),
-        })
+        Ok(decoded)
     }
 
     /// The 403 fallback for `/latest`: probe the public web
@@ -885,6 +854,108 @@ impl Result {
             replaced: false,
             dry_run: false,
         }
+    }
+}
+
+/// Decode a release body into [`ReleaseInfo`] with Go
+/// `encoding/json` leniency (fix loop 2, R2-B1/R2-B3):
+/// a whole-document `null` is the zero release, a
+/// `null` asset element is the zero asset, duplicate
+/// keys are last-wins, invalid UTF-8 in strings
+/// coerces to U+FFFD — and every type error refuses,
+/// so `fetch_release` still maps it to code-1
+/// `malformed`. See the comment in `fetch_release`.
+fn decode_release(body: &[u8]) -> std::result::Result<ReleaseInfo, String> {
+    let doc = Parsed::parse_document(body).map_err(|e| e.to_string())?;
+    if doc.is_null() {
+        return Ok(ReleaseInfo {
+            tag: String::new(),
+            draft: false,
+            prerelease: false,
+            assets: Vec::new(),
+        });
+    }
+    if doc.kind() != Kind::Object {
+        return Err("top-level value is not an object".to_string());
+    }
+    let tag = release_string_field(&doc, "tag_name")?;
+    let draft = release_bool_field(&doc, "draft")?;
+    let prerelease = release_bool_field(&doc, "prerelease")?;
+    let assets = match doc.field("assets").map_err(|e| e.to_string())? {
+        None => Vec::new(),
+        Some(v) if v.is_null() => Vec::new(),
+        Some(v) => {
+            let mut out = Vec::new();
+            for el in v.elements().map_err(|e| e.to_string())? {
+                out.push(decode_asset(&el)?);
+            }
+            out
+        }
+    };
+    Ok(ReleaseInfo {
+        tag,
+        draft,
+        prerelease,
+        assets,
+    })
+}
+
+/// Decode one asset element: `null` is the zero asset
+/// (Go no-ops it, so `[null, <valid>, ...]` still
+/// installs — R2-B1); anything else must be an object
+/// with Go-typed fields.
+fn decode_asset(el: &Parsed<'_>) -> std::result::Result<crate::select::ReleaseAsset, String> {
+    if el.is_null() {
+        return Ok(crate::select::ReleaseAsset {
+            name: String::new(),
+            url: String::new(),
+            size: 0,
+            state: String::new(),
+        });
+    }
+    if el.kind() != Kind::Object {
+        return Err("asset element is not an object".to_string());
+    }
+    Ok(crate::select::ReleaseAsset {
+        name: release_string_field(el, "name")?,
+        url: release_string_field(el, "browser_download_url")?,
+        size: release_i64_field(el, "size")?,
+        state: release_string_field(el, "state")?,
+    })
+}
+
+/// A string field of a leniently decoded release
+/// object: absent or `null` is `""` (Go zero value);
+/// a present string decodes lossily; anything else is
+/// a type error.
+fn release_string_field(obj: &Parsed<'_>, name: &str) -> std::result::Result<String, String> {
+    match obj.field(name).map_err(|e| e.to_string())? {
+        None => Ok(String::new()),
+        Some(v) if v.is_null() => Ok(String::new()),
+        Some(v) => v.as_str().map_err(|e| format!("field '{name}': {e}")),
+    }
+}
+
+/// A bool field of a leniently decoded release object:
+/// absent or `null` is `false`; anything else must be
+/// a bool literal.
+fn release_bool_field(obj: &Parsed<'_>, name: &str) -> std::result::Result<bool, String> {
+    match obj.field(name).map_err(|e| e.to_string())? {
+        None => Ok(false),
+        Some(v) if v.is_null() => Ok(false),
+        Some(v) => v.as_bool().map_err(|e| format!("field '{name}': {e}")),
+    }
+}
+
+/// An `i64` field of a leniently decoded release
+/// object: absent or `null` is `0`; a present number
+/// must be a plain integer literal (Go unmarshalling
+/// into `int64` refuses `1e3`/`1.0`/overflow).
+fn release_i64_field(obj: &Parsed<'_>, name: &str) -> std::result::Result<i64, String> {
+    match obj.field(name).map_err(|e| e.to_string())? {
+        None => Ok(0),
+        Some(v) if v.is_null() => Ok(0),
+        Some(v) => v.as_i64().map_err(|e| format!("field '{name}': {e}")),
     }
 }
 
