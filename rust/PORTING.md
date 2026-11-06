@@ -11556,6 +11556,37 @@ không đo lại. (5) Honesty line như run10: Go dùng sing-box làm engine, Ru
 items 1–3 trả lời "binary Rust mang full stack đã port thì nặng bao nhiêu so với binary Go full",
 không trả lời "cùng engine viết bằng Rust thì nhanh hơn bao nhiêu" — câu trả lời thứ hai chỉ có ở
 item 4 (pure-logic, cùng thuật toán). Hotspot ưu tiên không đổi (xem `rust/perf/README.md`).
+
+### M7c rebase-2 onto `dev-rust` `2ae2f14` (M7b PR-2 #78 + PR #79 merged, 2026-11-06)
+
+Rebase clean 6/6, zero conflicts; head `e864c7b`; diff 28 files, only
+`rust/**` + `docs/e2e.md`; Go tree unchanged (`internal/`, `cmd/`,
+`go.mod` empty diff `0173436..2ae2f14`). Item 1 re-run (cue, release
+binary 29,716,256 B, sha256 `d666c335…`): 82 help stems, only
+`--version` differs (stamp); help-only sha256 identical both sides
+(`bc527db3…`, same as fix loop 1); `not ported yet` lines in help: 0.
+Dispatch is now **40 wired / 5 stub top-level** (`update`, `telegram`,
+`keeper`, `profile`, `config`; `auth` partial) — PR-2 wired `chat`,
+`send`, `watch`, `fs`. Static count still 10 `stub(ctx)` call-sites;
+live probes cover 9 of 10 (the 10th, `cmd_plain` fall-through, is
+unreachable). Item 8 stays FAIL: PR-2 did not wire `update` (scope was
+`fs`/`send`/`watch`/`chat`); Go `update --dry-run` exit 0 vs Rust
+exit 1 stub, binary sha256 unchanged. Gates at the new head (cue,
+`cargo +1.99.1`, `CARGO_TARGET_DIR=/tmp/m7c-rb2-target`, deleted
+after): fmt 0; build 0; test 0 — **1471 passed, 0 failed** (66 suites;
+PR-2's 1470 + M7c bot e2e's 1); clippy `--all-targets -- -D warnings`
+0. Smoke re-run (debug binary, same code): item 2 subset 4/4 MATCH,
+item 3 idle control Go 124 / Rust 124 stdout IDENTICAL, item 6 matrix
+21/21 MATCH, item 7 echo byte-identical + crash exits 2/2. Incidents:
+SSH broke mid-build (build had finished; binary verified by sha256);
+disk fell to 4.2G free during the test gate (concurrent M7d + PR-3
+target dirs) — 1.2G freed by deleting the release profile dir, gate
+finished, cue back to 20G free; the item-6 script's `kill $PID` missed
+the webui servers (`$!` was the `cd &&` subshell) — both killed by
+direct PID afterwards, ports verified closed; `/tmp/m7c-plugin/`
+fixtures were gone on cue and were rebuilt from source
+(echo `f80d065a…`).
+
 ## M6b — Web UI port (crate `castctl-webui`, 2026-11-05/06)
 
 Port of Go `internal/webui` (49 API routes + static shell +

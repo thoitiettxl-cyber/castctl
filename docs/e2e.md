@@ -314,3 +314,66 @@ session cookie via CDP export (fake-cookie transfer proven); item 3
 M7a's claimed reply-seq-26704 observation not reproduced on either side;
 item 3 reply delivery by wait; item 4 resume of a live post-decision
 continuation.
+
+### Rebase-2 (base `dev-rust` `2ae2f14`, 2026-11-06 — M7b PR-2 #78 + PR #79 merged)
+
+Rebased cleanly (`git rebase origin/dev-rust`, 6/6, zero conflicts; head
+`e864c7b`, diff 28 files, only `rust/**` + `docs/e2e.md`). Go tree
+unchanged between `0173436` and `2ae2f14` (empty diff on `internal/`,
+`cmd/`, `go.mod`), so the Go reference is still `castctl 0.9.0 (1396697
+2026-11-04T21:38:36Z)`, sha256 `c8ea009e…`. Rust release binary rebuilt on
+cue: 29,716,256 B, sha256 `d666c335…` (deleted after the run to free disk;
+captures kept locally, not published).
+
+- **Item 1 — PASS (help) / status updated.** 82 stems, only `--version`
+  differs (stamp); diff-out=1, diff-err=0, diff-code=0. Help-only stdout
+  sha256 identical both sides: `bc527db3…` — the same hash as fix loop 1,
+  so the help surface is unchanged across the rebase. `not ported yet`
+  lines in help: 0 both sides. Command total still **46** (Go
+  `commandOrder` recount at the new base), not 47. Dispatch (live,
+  isolated env, 46 probes + 3 extra): **40 wired / 5 stub top-level**
+  (`update`, `telegram`, `keeper`, `profile`, `config`; `auth` partial:
+  `list`/`import`/`status` stub, `export`/`login`/`observe-login` are
+  Go-faithful terminal behaviours, not stubs). PR-2 commands `chat`,
+  `send`, `watch`, `fs` are now wired (exit 2 `cookies_missing` in the
+  isolated env, no stub line) — the "PR-2 pending" label from fix loop 1
+  no longer applies to them. Static count still **10 `stub(ctx)`
+  call-sites** (`run.rs`: 618 `history --download` — the only allowed
+  stub; 626 `cmd_plain` fall-through — unreachable, all 37 plain commands
+  are covered by the wired branches 5 + 13 + 19; 804 `cmd_update`; 868 /
+  883 / 918 `auth list` / `import` / `status`; 1009 `cmd_profile`
+  fall-through — all profile subcommands; 1054 `config migrate`; 1097
+  `telegram`; 1147 `keeper`). Live probes cover 9 of the 10 call-sites
+  (all exit 1 with the stub line); only the unreachable 626 is
+  static-only.
+- **Item 8 — still FAIL (stub).** PR-2 did NOT wire `update`
+  (`cmd_update` still `Err(stub(ctx))`, `run.rs:801-806`); its scope was
+  `fs`/`send`/`watch`/`chat`. Re-verified live: Go `update --dry-run`
+  exit 0 `castctl is up to date: 0.9.0`; Rust `update --dry-run` exit 1
+  stub, binary sha256 unchanged before/after; `--check --json` rejected
+  identically both sides (exit 2). The flip now needs a dedicated wiring
+  change for `update` (no milestone owns it yet), not another merge.
+- **Gates (cue, `cargo +1.99.1`, `CARGO_TARGET_DIR=/tmp/m7c-rb2-target`,
+  deleted after): fmt 0; build 0; test 0 — 1471 passed, 0 failed
+  (66 suites; PR-2's 1470 + the M7c bot e2e's 1 test, `m7c_bot_e2e.rs`
+  `1 passed`); clippy `--all-targets -- -D warnings` 0.**
+- **Smoke re-run (no rebase regression):** item 2 subset (`status` /
+  `usage` / `threads` / `feed`, debug binary) all MATCH, exits 0/0;
+  item 3 idle control A: Go 124, Rust 124, stdout IDENTICAL; item 6
+  matrix 21/21 MATCH; item 7 `plugin check` echo byte-identical,
+  crashcall/crashinit exit 2 both sides, control echo-after exit 0.
+  Smoke used the debug binary (same code as the release binary used for
+  item 1) — behaviour smoke only, not a perf re-measurement.
+- **Incidents:** (1) the release build's SSH session broke after ~15 min
+  (broken pipe) — the build had already finished; binary verified by
+  sha256 on reconnect. (2) Disk fell to 4.2G free during the test gate
+  (concurrent M7d + PR-3 writer target dirs, 13G + growing); freed 1.2G
+  by deleting the release profile dir (binary already measured) and
+  finished the gate; target dir deleted after, cue back to 20G free.
+  (3) The item-6 script's `kill $PID` missed the webui servers (`$!`
+  was the `cd &&` subshell, not the server) — both servers (Go 18317,
+  Rust 18318) were killed by direct PID afterwards, ports verified
+  closed. (4) `/tmp/m7c-plugin/` fixtures were gone on cue — rebuilt
+  from source (`examples/plugin/echo`, `/tmp/m7c-crash-src/crashcall` /
+  `crashinit`) into `/tmp/m7c-rb2-plugin/`; echo sha256 `f80d065a…`,
+  crashcall `e1246664…`, crashinit `6dc4f2d6…`.
