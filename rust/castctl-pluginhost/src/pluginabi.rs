@@ -12,6 +12,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use castctl_shared::lenient_json::{Kind, Parsed};
+
 use crate::error::PluginHostError;
 
 /// C ABI version. Must match exactly: a plugin reporting
@@ -94,6 +96,109 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(Some(Box::<serde_json::value::RawValue>::deserialize(d)?))
+}
+
+/// A leniently decoded [`Envelope`]: the same three
+/// fields, but `result` as raw bytes instead of
+/// `Box<RawValue>`.
+///
+/// The `Envelope` struct above cannot hold the R2-B2
+/// trigger: a `result` containing invalid UTF-8 bytes
+/// (`{"ok":true,"result":"a\xffb"}`) has no `&str`
+/// view, and `RawValue::get()` IS `&str` — there is
+/// no way to build a `RawValue` from non-UTF-8 bytes
+/// without `unsafe`, and `serde_json::from_slice`
+/// refuses the input before any visitor runs. Go's
+/// `json.RawMessage` is `[]byte` and holds the bytes
+/// verbatim, so the inbound decode path needs this
+/// byte-based shape; `Envelope` stays the outbound /
+/// serialisation shape (valid UTF-8 only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedEnvelope {
+    pub ok: bool,
+    pub result: Option<Vec<u8>>,
+    pub error: Option<PluginError>,
+}
+
+/// Decode one response envelope with Go
+/// `encoding/json` leniency (fix loop 2, R2-B2/R2-B3),
+/// via the shared byte-level parser
+/// (`castctl_shared::lenient_json`):
+///
+/// - a missing `ok` is `false`; an explicit `null`
+///   `ok` is `false` too (Go no-ops `null`);
+/// - a whole-document `null` decodes to the zero
+///   envelope (Go no-ops it);
+/// - duplicate keys are last-wins, at every level;
+/// - invalid UTF-8 in strings coerces to U+FFFD
+///   (Go `utf8.DecodeRune`), while `result` keeps
+///   its raw bytes verbatim (Go `json.RawMessage`);
+/// - type errors still refuse (`"ok": "x"`,
+///   `"error": {"code": 123}`), like Go's
+///   `cannot unmarshal` errors.
+///
+/// The error is a short message (byte offset + what
+/// was expected, never input bytes); callers prefix
+/// it with `invalid envelope`.
+pub fn decode_envelope(input: &[u8]) -> Result<DecodedEnvelope, String> {
+    let doc = Parsed::parse_document(input).map_err(|e| e.to_string())?;
+    if doc.is_null() {
+        return Ok(DecodedEnvelope {
+            ok: false,
+            result: None,
+            error: None,
+        });
+    }
+    if doc.kind() != Kind::Object {
+        return Err("top-level value is not an object".to_string());
+    }
+    let ok = match doc.field("ok").map_err(|e| e.to_string())? {
+        None => false,
+        Some(v) if v.is_null() => false,
+        Some(v) => v.as_bool().map_err(|e| format!("field 'ok': {e}"))?,
+    };
+    let result = doc
+        .field("result")
+        .map_err(|e| e.to_string())?
+        .map(|v| v.as_raw().to_vec());
+    let error = match doc.field("error").map_err(|e| e.to_string())? {
+        None => None,
+        Some(v) if v.is_null() => None,
+        Some(v) => {
+            if v.kind() != Kind::Object {
+                return Err("field 'error': expected an object".to_string());
+            }
+            Some(PluginError {
+                code: lenient_string_field(&v, "code")?,
+                message: lenient_string_field(&v, "message")?,
+                retryable: lenient_bool_field(&v, "retryable")?,
+            })
+        }
+    };
+    Ok(DecodedEnvelope { ok, result, error })
+}
+
+/// A string field of a leniently decoded object:
+/// absent or `null` is `""` (Go zero value); a
+/// present string decodes lossily; anything else is
+/// a type error.
+fn lenient_string_field(obj: &Parsed<'_>, name: &str) -> Result<String, String> {
+    match obj.field(name).map_err(|e| e.to_string())? {
+        None => Ok(String::new()),
+        Some(v) if v.is_null() => Ok(String::new()),
+        Some(v) => v.as_str().map_err(|e| format!("field '{name}': {e}")),
+    }
+}
+
+/// A bool field of a leniently decoded object:
+/// absent or `null` is `false`; anything else must
+/// be a bool literal.
+fn lenient_bool_field(obj: &Parsed<'_>, name: &str) -> Result<bool, String> {
+    match obj.field(name).map_err(|e| e.to_string())? {
+        None => Ok(false),
+        Some(v) if v.is_null() => Ok(false),
+        Some(v) => v.as_bool().map_err(|e| format!("field '{name}': {e}")),
+    }
 }
 
 /// Build a raw JSON value from a serialisable value.
@@ -513,6 +618,73 @@ mod tests {
         };
         let json = serde_json::to_string(&ok_env).unwrap();
         assert_eq!(json, r#"{"ok":true,"result":{"n":1}}"#);
+    }
+
+    /// Red-team R2-B2/R2-B3 (fix loop 2): the lenient
+    /// decode matches Go `encoding/json` where serde
+    /// derive refuses — invalid UTF-8 coerced (result
+    /// kept raw), duplicate keys last-wins, whole
+    /// document `null` and `ok: null` zero-valued.
+    /// Type errors still refuse.
+    #[test]
+    fn decode_envelope_lenient_matches_go() {
+        // R2-B2 (a): invalid UTF-8 in `result` — the raw
+        // bytes survive verbatim (Go `json.RawMessage`,
+        // 5 bytes incl. quotes); the string is NOT
+        // lossy-decoded here.
+        let env = decode_envelope(b"{\"ok\":true,\"result\":\"a\xffb\"}").unwrap();
+        assert!(env.ok);
+        assert_eq!(env.result.as_deref(), Some(b"\"a\xffb\"".as_slice()));
+        assert!(env.error.is_none());
+        // R2-B2 (b): invalid UTF-8 in the error message
+        // coerces to U+FFFD (Go `utf8.DecodeRune`).
+        let env =
+            decode_envelope(b"{\"ok\":false,\"error\":{\"code\":\"boom\",\"message\":\"m\xff\"}}")
+                .unwrap();
+        assert!(!env.ok);
+        assert_eq!(env.error.as_ref().unwrap().code, "boom");
+        assert_eq!(env.error.as_ref().unwrap().message, "m\u{FFFD}");
+        // R2-B3: duplicate `ok` — last wins (false).
+        let env = decode_envelope(br#"{"ok":true,"ok":false,"result":1}"#).unwrap();
+        assert!(!env.ok);
+        assert_eq!(env.result.as_deref(), Some(b"1".as_slice()));
+        assert!(env.error.is_none());
+        // R2-B3: duplicate `result` — last wins (2).
+        let env = decode_envelope(br#"{"ok":true,"result":1,"result":2}"#).unwrap();
+        assert!(env.ok);
+        assert_eq!(env.result.as_deref(), Some(b"2".as_slice()));
+        // Duplicate keys inside `error` — last wins.
+        let env =
+            decode_envelope(br#"{"ok":false,"error":{"code":"a","code":"boom","message":"m"}}"#)
+                .unwrap();
+        assert_eq!(env.error.as_ref().unwrap().code, "boom");
+        // Whole-document `null` and `ok: null` are the
+        // zero envelope (Go no-ops `null`).
+        let env = decode_envelope(b"null").unwrap();
+        assert!(!env.ok && env.result.is_none() && env.error.is_none());
+        let env = decode_envelope(br#"{"ok":null}"#).unwrap();
+        assert!(!env.ok && env.error.is_none());
+        // Explicit `result: null` stays 4 raw bytes.
+        let env = decode_envelope(br#"{"ok":true,"result":null}"#).unwrap();
+        assert_eq!(env.result.as_deref(), Some(b"null".as_slice()));
+        // An unknown field with invalid UTF-8 (and a
+        // duplicate of it) is skipped, not refused.
+        let env =
+            decode_envelope(b"{\"ok\":true,\"result\":1,\"zzz\":\"a\xff\",\"zzz\":2}").unwrap();
+        assert!(env.ok);
+        assert_eq!(env.result.as_deref(), Some(b"1".as_slice()));
+        // Type errors still refuse, like Go's
+        // `cannot unmarshal` errors.
+        for bad in [
+            &br#"{"ok":"x"}"#[..],
+            &br#"{"ok":1}"#[..],
+            &br#"{"ok":true,"error":{"code":123}}"#[..],
+            &br#"{"ok":true,"error":"boom"}"#[..],
+            &b"[1]"[..],
+            &b"{\"ok\":true,\"result\":1} trailing"[..],
+        ] {
+            assert!(decode_envelope(bad).is_err(), "must refuse {bad:?}");
+        }
     }
 
     /// Red-team B4 (fix loop 1): Go's `json.Unmarshal`

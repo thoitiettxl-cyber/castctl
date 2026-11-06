@@ -1207,9 +1207,17 @@ fn short_err(err: &PluginHostError) -> String {
 /// (empty when absent, the 4 bytes `null` when the
 /// plugin sent an explicit JSON `null` — Go's
 /// `json.RawMessage` keeps both apart).
+///
+/// Decoded with Go `encoding/json` leniency
+/// (`pluginabi::decode_envelope`, fix loop 2,
+/// R2-B2/R2-B3): invalid UTF-8 in strings coerces to
+/// U+FFFD while `result` keeps its raw bytes verbatim,
+/// duplicate keys are last-wins, and a whole-document
+/// `null` is the zero envelope. Type errors still
+/// refuse as `invalid envelope`.
 /// Source: `parseEnvelope` (`host.go:860-880`).
 fn parse_envelope(response: &[u8], tag: &str) -> Result<Vec<u8>, PluginHostError> {
-    let env: Envelope = serde_json::from_slice(response).map_err(|e| {
+    let env = crate::pluginabi::decode_envelope(response).map_err(|e| {
         PluginHostError::failed(format!("plugin {tag:?} returned invalid envelope: {e}"))
     })?;
     if !env.ok {
@@ -1224,19 +1232,19 @@ fn parse_envelope(response: &[u8], tag: &str) -> Result<Vec<u8>, PluginHostError
             "plugin {tag:?} returned a failed envelope without an error"
         )));
     }
-    match env.result {
-        Some(raw) => Ok(raw.get().as_bytes().to_vec()),
-        None => Ok(Vec::new()),
-    }
+    Ok(env.result.unwrap_or_default())
 }
 
 /// Whether bytes decode as a failed envelope. The
 /// loader uses it to distinguish a plugin error
-/// envelope from a transport failure.
+/// envelope from a transport failure. Decoded with
+/// the same leniency as `parse_envelope`, so an
+/// error envelope with invalid UTF-8 in its message
+/// still counts (fix loop 2, R2-B2 trigger (b)).
 /// Source: `isErrorEnvelope` (`host.go:883-890`).
 #[must_use]
 pub fn is_error_envelope(response: &[u8]) -> bool {
-    match serde_json::from_slice::<Envelope>(response) {
+    match crate::pluginabi::decode_envelope(response) {
         Ok(env) => !env.ok && env.error.is_some(),
         Err(_) => false,
     }
@@ -3055,6 +3063,67 @@ mod tests {
             parse_envelope(br#"{"ok":true,"result":{"b":1,"a":2}}"#, "x").unwrap(),
             br#"{"b":1,"a":2}"#
         );
+    }
+
+    /// Red-team R2-B2/R2-B3 (fix loop 2):
+    /// `parse_envelope` + `is_error_envelope` match Go
+    /// on the exact report triggers.
+    ///
+    /// Invalid UTF-8 coerces (the plugin error still
+    /// surfaces), duplicate keys are last-wins, and
+    /// type errors still refuse as `invalid envelope`.
+    #[test]
+    fn parse_envelope_lenient_matches_go() {
+        // R2-B2 (a): invalid UTF-8 in `result` — raw
+        // bytes returned verbatim (Go `json.RawMessage`).
+        assert_eq!(
+            parse_envelope(b"{\"ok\":true,\"result\":\"a\xffb\"}", "x").unwrap(),
+            b"\"a\xffb\""
+        );
+        // R2-B2 (b): invalid UTF-8 in the error message
+        // — the plugin error surfaces (Go coerces the
+        // message to `m�`), and the loader classifies
+        // it as a plugin error, not a transport failure.
+        let err = parse_envelope(
+            b"{\"ok\":false,\"error\":{\"code\":\"boom\",\"message\":\"m\xff\"}}",
+            "x",
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "plugin \"x\": boom: m\u{FFFD}");
+        assert!(is_error_envelope(
+            b"{\"ok\":false,\"error\":{\"code\":\"boom\",\"message\":\"m\xff\"}}"
+        ));
+        // R2-B3: duplicate `result` — last wins, ACCEPT.
+        assert_eq!(
+            parse_envelope(br#"{"ok":true,"result":1,"result":2}"#, "x").unwrap(),
+            b"2"
+        );
+        // R2-B3: duplicate `ok` — last wins (false), so
+        // a failed envelope without an error (both sides
+        // refuse here, Go with this message too).
+        let err = parse_envelope(br#"{"ok":true,"ok":false,"result":1}"#, "x").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "plugin \"x\" returned a failed envelope without an error"
+        );
+        assert!(!is_error_envelope(br#"{"ok":true,"ok":false,"result":1}"#));
+        // Whole-document `null` is the zero envelope:
+        // failed without an error (Go no-ops `null`).
+        let err = parse_envelope(b"null", "x").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "plugin \"x\" returned a failed envelope without an error"
+        );
+        // Type errors still refuse as `invalid envelope`.
+        for bad in [
+            &br#"{"ok":"x"}"#[..],
+            &br#"{"ok":true,"error":{"code":123}}"#[..],
+            &b"[1]"[..],
+        ] {
+            let err = parse_envelope(bad, "x").unwrap_err();
+            assert!(err.to_string().contains("invalid envelope"), "{err}");
+            assert!(!is_error_envelope(bad));
+        }
     }
 
     #[test]
