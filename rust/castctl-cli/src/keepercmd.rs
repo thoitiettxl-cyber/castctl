@@ -156,14 +156,24 @@ fn keeper_err(e: KeeperError) -> FlowErr {
 /// (`cmdKeeperCheck`: `firstSurfacedErr` returned
 /// through `classifyError`). The tick flattens the
 /// transport error into a `KeeperError::Other` message
-/// string, so the classification is by substring —
-/// an approximation of Go's typed classification,
-/// recorded in the module header. The gateway branch
-/// strips the tick's `check failed: ` prefix so the
-/// printed text is the gateway summary itself.
+/// string, so the classification is by substring — an
+/// approximation of Go's typed classification, recorded
+/// in the module header and in `PORTING.md` §M7d.3.
+/// The branch ORDER mirrors Go's `classifyError`
+/// (`commands.go:301-314`): `GatewayError` → 3 is
+/// checked BEFORE `TimeoutError` → 4, so a gateway
+/// summary that names a timeout (e.g. `; error=timeout`,
+/// always rendered with the `gateway error` marker by
+/// `BodySummary::render`) still exits 3. The gateway
+/// branch strips the tick's `check failed: ` prefix so
+/// the printed text is the gateway summary itself.
 fn keeper_check_error(e: &KeeperError) -> FlowErr {
     let text = e.to_string();
     let lower = text.to_ascii_lowercase();
+    if lower.contains("gateway error") {
+        let inner = text.strip_prefix("check failed: ").unwrap_or(&text);
+        return msg(3, inner);
+    }
     if lower.contains("timed out")
         || lower.contains("timeout")
         || lower.contains("deadline exceeded")
@@ -171,10 +181,6 @@ fn keeper_check_error(e: &KeeperError) -> FlowErr {
         // Go `*conn.TimeoutError` renders
         // `timeout: context deadline exceeded`.
         return msg(4, "timeout: context deadline exceeded");
-    }
-    if lower.contains("gateway error") {
-        let inner = text.strip_prefix("check failed: ").unwrap_or(&text);
-        return msg(3, inner);
     }
     msg(1, text)
 }
@@ -649,6 +655,33 @@ pub(crate) fn run_check(
     rt.block_on(check_entries(ctx, g, tag, profile))
 }
 
+/// Spawn the SIGINT watcher shared by `keeper check` and
+/// `keeper run`: when the `signal` future resolves, cancel
+/// the ROOT flag itself — never a child of it. Go
+/// `cmdKeeperRun` / `cmdKeeperCheck`
+/// (`internal/commands/keeper.go:650-654`, `:714-723`)
+/// return `ctx.Err()` after Run/tick, where `ctx` is the
+/// process signal context; cancelling the root is what
+/// makes the `root_cancel.cancelled()` arms and the
+/// `msg_empty(130)` returns live. Cancelling a child
+/// instead left them dead code (`CancelFlag::child`
+/// documents that cancelling the child does NOT cancel
+/// the parent, `castctl-keeper/src/clock.rs:61-64`), and
+/// the installed tokio signal handler replaces the
+/// default terminate disposition — so the pre-fix command
+/// ignored Ctrl-C entirely. The signal is a parameter so
+/// tests can inject a ready/pending future; production
+/// passes `tokio::signal::ctrl_c()`.
+fn spawn_ctrl_c_watcher(
+    cancel: CancelFlag,
+    signal: impl std::future::Future<Output = ()> + Send + 'static,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        signal.await;
+        cancel.cancel();
+    })
+}
+
 async fn check_entries(
     ctx: &mut Ctx<'_>,
     g: &GlobalOpts,
@@ -664,10 +697,8 @@ async fn check_entries(
     let base_dir = loc.config_dir.clone();
     let mut rts = KeeperRuntimes::new(loc, single, ctx.getenv);
     let root_cancel = CancelFlag::new();
-    let watcher_cancel = root_cancel.child();
-    tokio::spawn(async move {
+    spawn_ctrl_c_watcher(root_cancel.clone(), async {
         let _ = tokio::signal::ctrl_c().await;
-        watcher_cancel.cancel();
     });
     let mut worst = 0i32;
     let mut first_surfaced: Option<KeeperError> = None;
@@ -835,10 +866,8 @@ async fn run_entries_cmd(
     }
     let mut rts = KeeperRuntimes::new(loc, single, ctx.getenv);
     let root_cancel = CancelFlag::new();
-    let watcher_cancel = root_cancel.child();
-    tokio::spawn(async move {
+    spawn_ctrl_c_watcher(root_cancel.clone(), async {
         let _ = tokio::signal::ctrl_c().await;
-        watcher_cancel.cancel();
     });
     let out_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let mut handles = Vec::new();
@@ -1064,6 +1093,25 @@ mod tests {
             ))),
             "gateway error; body_length=12"
         );
+        // N2 (fix loop 1): a gateway error whose summary names
+        // a timeout must still exit 3. Go classifies by TYPE
+        // (`classifyError`, `commands.go:301-314`: GatewayError
+        // is checked BEFORE TimeoutError), so the gateway
+        // branch must win over the timeout substring. The
+        // `error=timeout` code is a realistic summary field
+        // (`BodySummary::render` appends `; error=…`).
+        assert_eq!(
+            flow_code(&keeper_check_error(&KeeperError::Other(
+                "check failed: gateway error; body_length=12; error=timeout".to_string()
+            ))),
+            3
+        );
+        assert_eq!(
+            flow_message(&keeper_check_error(&KeeperError::Other(
+                "check failed: gateway error; body_length=12; error=timeout".to_string()
+            ))),
+            "gateway error; body_length=12; error=timeout"
+        );
         assert_eq!(
             flow_code(&keeper_check_error(&KeeperError::Other(
                 "something else broke".to_string()
@@ -1074,6 +1122,52 @@ mod tests {
             flow_code(&keeper_check_error(&KeeperError::Config("bad".to_string()))),
             1
         );
+    }
+
+    /// B1 (fix loop 1): the SIGINT watcher must cancel
+    /// the ROOT flag, not a child of it. Go `cmdKeeperRun`
+    /// / `cmdKeeperCheck` (`keeper.go:650-654`, `:714-723`)
+    /// return `ctx.Err()` after Run/tick; the `ctx` is the
+    /// process signal context. The pre-fix watcher cancelled
+    /// a child flag nothing waited on (`CancelFlag::child`
+    /// documents that cancelling the child does NOT cancel
+    /// the parent, `castctl-keeper/src/clock.rs:61-64`), so
+    /// the `msg_empty(130)` arms were dead code. The signal
+    /// is injected as a future so the test is deterministic:
+    /// production passes `tokio::signal::ctrl_c()`, the test
+    /// passes an immediately-ready future.
+    #[test]
+    fn ctrl_c_watcher_cancels_root() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let root = CancelFlag::new();
+            let handle = spawn_ctrl_c_watcher(root.clone(), std::future::ready(()));
+            tokio::time::timeout(Duration::from_secs(5), root.cancelled())
+                .await
+                .expect("watcher must cancel the root flag");
+            assert!(root.is_cancelled());
+            let _ = handle.await;
+        });
+    }
+
+    /// The watcher must NOT cancel the root while the
+    /// signal is still pending.
+    #[test]
+    fn ctrl_c_watcher_pending_signal_does_not_cancel() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let root = CancelFlag::new();
+            let handle = spawn_ctrl_c_watcher(root.clone(), std::future::pending::<()>());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(!root.is_cancelled());
+            handle.abort();
+        });
     }
 
     #[test]

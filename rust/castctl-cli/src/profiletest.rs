@@ -1004,7 +1004,21 @@ async fn https_phase(rt: &Runtime) -> (HttpsPhase, Option<PhaseError>) {
             )
         }
         Err(_) => {
-            let text = "context deadline exceeded".to_string();
+            // N1 (fix loop 1): the outer timeout is the same
+            // deadline-exceeded failure Go's `doHatch` wraps
+            // as `gateway: GET muse.ai/api/session failed
+            // (class=timeout kind=deadline)`
+            // (`wrapTransportError`, `transport.go:47-49`;
+            // `transportOp`, `:68-74`; `classifyTransportError`
+            // maps `context.DeadlineExceeded` to
+            // ("timeout","deadline"), `:86-88`). Near-unreachable
+            // in practice — the inner `AUTH_TIMEOUT` (20s) fires
+            // first — and the INNER path's render
+            // (`conn: https request timed out`, via
+            // `summarize_transport_error`) still differs from
+            // Go; that remainder is recorded in PORTING §M7d.3.
+            let text =
+                "gateway: GET muse.ai/api/session failed (class=timeout kind=deadline)".to_string();
             (
                 HttpsPhase {
                     ok: false,
@@ -1085,7 +1099,22 @@ async fn egress_phase(rt: &Runtime) -> Result<String, String> {
             .request_tls(Method::GET, &target, "/", &[], None, EGRESS_TIMEOUT),
     )
     .await
-    .map_err(|_| "context deadline exceeded".to_string())?
+    // N1 (fix loop 1): the outer timeout is the same
+    // deadline-exceeded failure Go wraps as
+    // `egress check: GET api64.ipify.org failed
+    // (class=timeout kind=deadline)`
+    // (`wrapEgressTransportError`, `profilecmd.go:970-976`;
+    // `classifyEgressTransportError` maps
+    // `context.DeadlineExceeded` to ("timeout","deadline"),
+    // `profilecmd.go:987-988`). The inner path already
+    // renders exactly this string for a `Timeout`
+    // (`classify_egress_transport_error` above), so both
+    // arms now agree — before, the outer arm (created
+    // before the inner 15s timeout, so it almost always
+    // won the race) yielded the bare literal instead.
+    .map_err(|_| {
+        "egress check: GET api64.ipify.org failed (class=timeout kind=deadline)".to_string()
+    })?
     .map_err(|e| {
         let (class, kind) = classify_egress_transport_error(&e);
         format!("egress check: GET api64.ipify.org failed (class={class} kind={kind})")
