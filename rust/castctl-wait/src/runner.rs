@@ -2072,7 +2072,7 @@ mod tests {
             message: "expired".to_string(),
         });
         let hist = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(100)])]));
-        let runner = Runner::new(Config {
+        let mut runner = Runner::new(Config {
             timeout: StdDuration::from_secs(60),
             dial: Some(sub.dial()),
             history: Some(hist),
@@ -2104,7 +2104,7 @@ mod tests {
                 }),
             },
         ]));
-        let runner = Runner::new(Config {
+        let mut runner = Runner::new(Config {
             timeout: StdDuration::from_secs(120),
             dial: Some(sub.dial()),
             history: Some(hist),
@@ -2367,7 +2367,7 @@ mod tests {
             history_ok(vec![user_ev(100)]),
         ]));
         let cancel = Cancel::new();
-        let runner = Runner::new(Config {
+        let mut runner = Runner::new(Config {
             timeout: StdDuration::from_secs(60),
             lag_window: StdDuration::from_secs(2),
             lag_poll: StdDuration::from_millis(250),
@@ -2401,7 +2401,7 @@ mod tests {
             cancel: cancel.clone(),
             calls: StdMutex::new(0),
         });
-        let runner = Runner::new(Config {
+        let mut runner = Runner::new(Config {
             timeout: StdDuration::from_secs(120),
             lag_window: StdDuration::from_secs(2),
             lag_poll: StdDuration::from_millis(1),
@@ -2575,7 +2575,7 @@ mod tests {
         });
         let approver = Arc::new(AutoApprover::new(Some(connect_ok(decider)), false));
         let adapter = Arc::new(AutoApproverAdapter::new(&approver));
-        let runner = Runner::new(Config {
+        let mut runner = Runner::new(Config {
             dial: Some(sub.dial()),
             history: Some(hist),
             approver: Some(adapter),
@@ -2620,7 +2620,7 @@ mod tests {
     async fn runner_check_state_nil_subscriber() {
         let hist = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(100)])]));
         let dial: DialFn = Arc::new(|_cancel: Cancel| Box::pin(async { Ok(None) }));
-        let runner = Runner::new(Config {
+        let mut runner = Runner::new(Config {
             timeout: StdDuration::from_secs(5),
             recheck_after: Some(StdDuration::from_secs(1)),
             check_every: Some(StdDuration::from_secs(1)),
@@ -2732,7 +2732,7 @@ mod tests {
             err: None,
             calls: StdMutex::new(0),
         });
-        let runner = Runner::new(Config {
+        let mut runner = Runner::new(Config {
             timeout: StdDuration::from_secs(10),
             recheck_after: None,
             check_every: None,
@@ -2768,7 +2768,7 @@ mod tests {
             }),
             calls: StdMutex::new(0),
         });
-        let runner = Runner::new(Config {
+        let mut runner = Runner::new(Config {
             after_seq: 200,
             has_after_seq: true,
             timeout: StdDuration::from_secs(10),
@@ -2804,7 +2804,7 @@ mod tests {
             }),
             calls: StdMutex::new(0),
         });
-        let runner = Runner::new(Config {
+        let mut runner = Runner::new(Config {
             after_seq: 100,
             has_after_seq: true,
             timeout: StdDuration::from_secs(10),
@@ -2885,7 +2885,7 @@ mod tests {
                 calls: StdMutex::new(0),
                 extra_reads: StdMutex::new(0),
             });
-            let runner = Runner::new(Config {
+            let mut runner = Runner::new(Config {
                 after_seq: 100,
                 has_after_seq: true,
                 timeout: StdDuration::from_secs(120),
@@ -2947,7 +2947,7 @@ mod tests {
                     cancel2.set();
                 }
             });
-            let runner = Runner::new(Config {
+            let mut runner = Runner::new(Config {
                 after_seq: 100,
                 has_after_seq: true,
                 timeout: StdDuration::from_secs(60),
@@ -3580,7 +3580,7 @@ mod tests {
         let hist = Arc::new(BlockHistory {
             calls: StdMutex::new(0),
         });
-        let runner = Runner::new(Config {
+        let mut runner = Runner::new(Config {
             timeout: StdDuration::from_secs(10),
             final_read_floor: StdDuration::from_secs(1),
             dial: Some(sub.dial()),
@@ -3607,7 +3607,7 @@ mod tests {
             }),
         }));
         let sub = Arc::new(FakeSubscriber::new(vec![]));
-        let runner = Runner::new(Config {
+        let mut runner = Runner::new(Config {
             timeout: StdDuration::from_secs(60),
             dial: Some(sub.dial()),
             history: Some(hist.clone()),
@@ -3652,7 +3652,7 @@ mod tests {
                 ],
             ),
         );
-        let runner = Runner::new(Config {
+        let mut runner = Runner::new(Config {
             timeout: StdDuration::from_secs(60),
             dial: Some(sub.dial()),
             history: Some(hist.clone()),
@@ -3676,7 +3676,7 @@ mod tests {
             message: "expired".to_string(),
         });
         let hist = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(100)])]));
-        let runner = Runner::new(Config {
+        let mut runner = Runner::new(Config {
             timeout: StdDuration::from_secs(60),
             dial: Some(sub.dial()),
             history: Some(hist),
@@ -3710,7 +3710,7 @@ mod tests {
             None,
         ))]));
         let hist = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(100)])]));
-        let runner = Runner::new(Config {
+        let mut runner = Runner::new(Config {
             timeout: StdDuration::from_secs(60),
             dial: Some(sub.dial()),
             history: Some(hist),
@@ -4092,7 +4092,7 @@ mod tests {
                 }),
             },
         ]));
-        let runner = Runner::new(Config {
+        let mut runner = Runner::new(Config {
             timeout: StdDuration::from_secs(60),
             dial: Some(sub.dial()),
             history: Some(hist),
