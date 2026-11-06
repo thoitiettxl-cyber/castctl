@@ -11,6 +11,7 @@
 pub mod bridge;
 pub mod event;
 pub mod feed;
+pub mod go_json;
 pub mod invite;
 pub mod lenient_json;
 pub mod resources;
@@ -26,6 +27,7 @@ pub use feed::{
     FeedRow, GoalRow, IdeaRow, feed_row_to_json, feed_rows, goal_row_to_json, goal_rows,
     idea_row_to_json, idea_rows,
 };
+pub use go_json::{escape_go_marshal_string, escape_stdout_string, to_go_json_bytes};
 pub use invite::{InviteReward, InviteSummary, invite_summary_to_json, summarize_invite};
 pub use lenient_json::{
     FirstError, Kind, LenientError, Parsed, apply_bool_field, apply_i64_field, apply_raw_field,
