@@ -1522,6 +1522,8 @@ Lưu ý khi đối chiếu với bảng run11: head khác (`57fc7be` so với
 không so trực tiếp hai bảng mà không kèm head + recipe — ví dụ
 stripped ở đây (28,284,192 B) lớn hơn stripped run11 (21,552,104 B)
 dù head mới hơn; chênh lệch đó chưa được giải thích và không được
-dùng làm kết luận. Hướng vẫn nhất quán với run11: Rust nhỏ hơn và
-nhanh hơn Go ở cả ba hạng mục trên (tỉ lệ size stripped 0.588×,
-`--version` 0.222×, RSS `--help` 0.213×).
+dùng làm kết luận. Các tỉ lệ số học giữa hai bảng là size stripped
+0.588×, `--version` 0.222×, RSS `--help` 0.213× — ghi nhận như phép
+tính số học, không dùng làm kết luận về hướng hay độ lớn. (Fix loop 1:
+câu kết luận về hướng ở đây đã gỡ — mục này không re-measure, nên
+không rút kết luận hướng từ các tỉ lệ trên.)
