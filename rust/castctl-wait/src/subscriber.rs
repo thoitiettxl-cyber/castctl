@@ -25,7 +25,7 @@ use castctl_gateway::subscribe::{SubscribeHandler, SubscribeOptions};
 use castctl_gateway::{Gateway, SharedConn};
 use castctl_transport::TransportError;
 
-use crate::runner::Subscriber;
+use crate::runner::{SubscribeRawFuture, Subscriber};
 
 impl Subscriber for Gateway {
     fn subscribe_raw<'a>(
@@ -33,7 +33,7 @@ impl Subscriber for Gateway {
         method: &'a str,
         opts: SubscribeOptions,
         handler: &'a mut dyn SubscribeHandler,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send + 'a>> {
+    ) -> SubscribeRawFuture<'a'> {
         // Inherent `Gateway::subscribe_raw` takes
         // precedence over this trait method in
         // resolution; there is no recursion here.
@@ -54,7 +54,7 @@ impl Subscriber for SharedConn {
         method: &'a str,
         opts: SubscribeOptions,
         handler: &'a mut dyn SubscribeHandler,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send + 'a>> {
+    ) -> SubscribeRawFuture<'a'> {
         // Inherent `SharedConn::subscribe_raw` takes
         // precedence over this trait method in
         // resolution; there is no recursion here.

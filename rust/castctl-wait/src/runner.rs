@@ -76,6 +76,11 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 /// History-read budget floor (Go `historyCtx`).
 pub const HISTORY_READ_FLOOR: Duration = Duration::from_millis(100);
 
+/// The future returned by [`Subscriber::subscribe_raw`].
+pub type SubscribeRawFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send + 'a>,
+>;
+
 /// One subscribe-capable connection: the gateway narrowed
 /// to what the Runner uses (Go `runner.go` `Subscriber`).
 /// The Runner never dials: `Dial` supplies a fresh
@@ -93,7 +98,7 @@ pub trait Subscriber: Send + Sync {
         method: &'a str,
         opts: SubscribeOptions,
         handler: &'a mut dyn SubscribeHandler,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send + 'a>>;
+    ) -> SubscribeRawFuture<'a'>;
 
     /// Close after use. The Runner ignores the result
     /// (Go: `_ = sub.Close()`), but the interface keeps
@@ -104,6 +109,11 @@ pub trait Subscriber: Send + Sync {
 /// Dial supplies a fresh [`Subscriber`] per subscribe
 /// iteration (Go `Config.Dial`). `Ok(None)` is a nil
 /// Subscriber: a transport failure, never a panic. The
+/// The `on_event` callback type: every decoded stream
+/// record the Runner feeds to the `Waiter`, in arrival
+/// order, before the record's progress/settle handling.
+pub type OnEventFn = Arc<dyn Fn(&Value) + Send + Sync>;
+
 /// `Cancel` is the run cancel; a dial that honors it
 /// ends promptly when the wait is cancelled.
 pub type DialFn = Arc<
@@ -218,7 +228,7 @@ pub struct Config {
     /// the record's progress/settle handling. Must
     /// return quickly, must not block, must not panic,
     /// and must not call `Runner` methods.
-    pub on_event: Option<Arc<dyn Fn(&Value) + Send + Sync>>,
+    pub on_event: Option<OnEventFn>,
     /// Test-only hook, invoked synchronously immediately
     /// before the final guard in `finish`, with the run
     /// cancel. `None` in production.
@@ -396,15 +406,15 @@ impl Runner {
         if cfg.timeout.is_zero() {
             cfg.timeout = DEFAULT_TIMEOUT;
         }
-        if let Some(d) = cfg.recheck_after {
-            if d.is_zero() {
-                cfg.recheck_after = Some(DEFAULT_RECHECK_AFTER);
-            }
+        if let Some(d) = cfg.recheck_after
+            && d.is_zero()
+        {
+            cfg.recheck_after = Some(DEFAULT_RECHECK_AFTER);
         }
-        if let Some(d) = cfg.check_every {
-            if d.is_zero() {
-                cfg.check_every = Some(DEFAULT_CHECK_EVERY);
-            }
+        if let Some(d) = cfg.check_every
+            && d.is_zero()
+        {
+            cfg.check_every = Some(DEFAULT_CHECK_EVERY);
         }
         if cfg.state_check_budget.is_zero() {
             cfg.state_check_budget = DEFAULT_STATE_CHECK_BUDGET;
@@ -559,13 +569,14 @@ impl Runner {
             if let Some(e) = self.pending_err.take() {
                 return Err(e);
             }
-            if self.waiter.result().is_none() && !self.user_stop() && Instant::now() < deadline {
-                if let Some(ce) = self.cfg.check_every
-                    && Instant::now().saturating_duration_since(self.last_check) >= ce
-                {
-                    self.last_check = Instant::now();
-                    self.check_state(&cancel).await?;
-                }
+            if self.waiter.result().is_none()
+                && !self.user_stop()
+                && Instant::now() < deadline
+                && let Some(ce) = self.cfg.check_every
+                && Instant::now().saturating_duration_since(self.last_check) >= ce
+            {
+                self.last_check = Instant::now();
+                self.check_state(&cancel).await?;
             }
         }
         if let Some(e) = self.pending_err.take() {
@@ -644,9 +655,9 @@ impl Runner {
         // Close is awaited, not deferred: Go defers it so
         // a panic in `SubscribeRaw` cannot skip it, but a
         // `Subscriber` MUST NOT panic (contract), and an
-        // awaited close keeps the fake-subscriber `closed`
-        // counts deterministic in tests. A panic would
-        // unwind to the CLI boundary recover instead.
+        // awaited close keeps close ordering deterministic
+        // in tests. A panic would unwind to the CLI
+        // boundary recover instead.
         let opts = SubscribeOptions {
             body: Some(self.subscribe_body()),
             max_records: 1_000_000_000,
@@ -765,14 +776,13 @@ impl Runner {
     /// `noteProgress`).
     fn note_progress(&mut self, ev: &Value) {
         let name = record_name(ev);
-        if name.starts_with("delta.")
+        if (name.starts_with("delta.")
             || name.starts_with("task.")
             || name.starts_with("agent.")
-            || name.starts_with("message.")
+            || name.starts_with("message."))
+            && in_scope(ev, &self.cfg.thread)
         {
-            if in_scope(ev, &self.cfg.thread) {
-                self.last_progress = Instant::now();
-            }
+            self.last_progress = Instant::now();
         }
         let p = payload(ev);
         let activity = p.get("activity_code").and_then(Value::as_str).unwrap_or("");
@@ -950,10 +960,9 @@ impl Runner {
         if let Some(term) = self.waiter.ignored_terminal()
             && term == pending
             && self.waiter.result().is_none()
+            && self.waiter.settle(&replies).is_some()
         {
-            if self.waiter.settle(&replies).is_some() {
-                self.proof_replies = replies;
-            }
+            self.proof_replies = replies;
         }
         Ok(())
     }
@@ -1484,6 +1493,7 @@ impl SubscribeHandler for CheckHandler {
 mod tests {
     use super::*;
     use crate::AutoApproverAdapter;
+    use crate::history::HistoryReadFuture;
     use crate::history::tests::{HistoryResp, ScriptHistory, history_ok, user_ev};
     use castctl_approvals::{AutoApprover, Decider, DescribedApproval};
     use castctl_telegram::wait::replies_after;
@@ -1579,7 +1589,7 @@ mod tests {
             &self,
             _limit: usize,
             _cancel: &Cancel,
-        ) -> Pin<Box<dyn Future<Output = Result<(Vec<Value>, bool), TransportError>> + Send + '_>>
+        ) -> HistoryReadFuture<'_'>
         {
             let mut resps = self.resps.lock().expect("lock");
             *self.calls.lock().expect("lock") += 1;
@@ -1611,7 +1621,6 @@ mod tests {
         dial_err: StdMutex<Option<TransportError>>,
         calls: StdMutex<usize>,
         check_calls: StdMutex<usize>,
-        closed: StdMutex<usize>,
         loop_opts: StdMutex<Option<SubscribeOptions>>,
         check_opts: StdMutex<Option<SubscribeOptions>>,
     }
@@ -1627,7 +1636,6 @@ mod tests {
                 dial_err: StdMutex::new(None),
                 calls: StdMutex::new(0),
                 check_calls: StdMutex::new(0),
-                closed: StdMutex::new(0),
                 loop_opts: StdMutex::new(None),
                 check_opts: StdMutex::new(None),
             }
@@ -1637,9 +1645,6 @@ mod tests {
         }
         fn check_calls(&self) -> usize {
             *self.check_calls.lock().expect("lock")
-        }
-        fn closed(&self) -> usize {
-            *self.closed.lock().expect("lock")
         }
         fn dial(self: &Arc<Self>) -> DialFn {
             let sub = Arc::clone(self);
@@ -1681,7 +1686,7 @@ mod tests {
             _method: &'a str,
             opts: SubscribeOptions,
             handler: &'a mut dyn SubscribeHandler,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send + 'a>>
+        ) -> SubscribeRawFuture<'a'>
         {
             let is_check = opts.max_records == 50;
             if is_check {
@@ -1737,7 +1742,6 @@ mod tests {
         }
 
         fn close(&self) -> Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send + '_>> {
-            *self.closed.lock().expect("lock") += 1;
             Box::pin(async { Ok(()) })
         }
     }
@@ -2301,7 +2305,7 @@ mod tests {
             &self,
             _limit: usize,
             _cancel: &Cancel,
-        ) -> Pin<Box<dyn Future<Output = Result<(Vec<Value>, bool), TransportError>> + Send + '_>>
+        ) -> HistoryReadFuture<'_'>
         {
             let mut calls = self.calls.lock().expect("lock");
             *calls += 1;
@@ -2335,7 +2339,7 @@ mod tests {
             &self,
             _limit: usize,
             _cancel: &Cancel,
-        ) -> Pin<Box<dyn Future<Output = Result<(Vec<Value>, bool), TransportError>> + Send + '_>>
+        ) -> HistoryReadFuture<'_'>
         {
             let mut calls = self.calls.lock().expect("lock");
             *calls += 1;
@@ -2362,7 +2366,7 @@ mod tests {
             &self,
             _limit: usize,
             _cancel: &Cancel,
-        ) -> Pin<Box<dyn Future<Output = Result<(Vec<Value>, bool), TransportError>> + Send + '_>>
+        ) -> HistoryReadFuture<'_'>
         {
             *self.calls.lock().expect("lock") += 1;
             Box::pin(std::future::pending())
@@ -2888,7 +2892,7 @@ mod tests {
             &self,
             _limit: usize,
             _cancel: &Cancel,
-        ) -> Pin<Box<dyn Future<Output = Result<(Vec<Value>, bool), TransportError>> + Send + '_>>
+        ) -> HistoryReadFuture<'_'>
         {
             let mut calls = self.calls.lock().expect("lock");
             *calls += 1;
@@ -4649,9 +4653,13 @@ mod tests {
     // the Runner consumes a real gateway through
     // SubscribeRaw — is covered by gate (b) live proof.
 
+    /// The `pred` of [`ended_without_terminal`]: true
+    /// when the record is a terminal one.
+    type TerminalPred<'a> = Option<&'a mut dyn FnMut(&[u8]) -> bool>;
+
     fn ended_without_terminal(
         records: &[Vec<u8>],
-        pred: Option<&mut dyn FnMut(&[u8]) -> bool>,
+        pred: TerminalPred<'_>,
     ) -> bool {
         let Some(pred) = pred else {
             return true;
@@ -4694,7 +4702,7 @@ mod tests {
         let foreign = br#"{"event":"task.status","payload":{"status":"completed","root_agent_id":"R2","agent_id":"R2"}}"#.to_vec();
         let suspect = br#"{"event":"task.status","payload":{"status":"idle","root_agent_id":"R","agent_id":"R"}}"#.to_vec();
         assert!(
-            ended_without_terminal(&[running.clone()], Some(&mut terminal_predicate())),
+            ended_without_terminal(std::slice::from_ref(&running), Some(&mut terminal_predicate())),
             "running-only records must end without terminal"
         );
         assert!(
@@ -4705,7 +4713,7 @@ mod tests {
             "DONE after running must count as a terminal"
         );
         assert!(
-            ended_without_terminal(&[completed.clone()], Some(&mut terminal_predicate())),
+            ended_without_terminal(std::slice::from_ref(&completed), Some(&mut terminal_predicate())),
             "DONE before any running must not count as a terminal"
         );
         assert!(

@@ -44,13 +44,18 @@ use crate::Cancel;
 /// events beyond this window. The reader must honor
 /// `cancel`: when it is set, return promptly and never
 /// block past it (Go `history.go` deadline contract).
+/// The future returned by [`HistoryReader::read_history`].
+pub type HistoryReadFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<(Vec<Value>, bool), TransportError>> + Send + 'a>,
+>;
+
 pub trait HistoryReader: Send + Sync {
     /// Read one window of at most `limit` events.
     fn read_history(
         &self,
         limit: usize,
         cancel: &Cancel,
-    ) -> Pin<Box<dyn Future<Output = Result<(Vec<Value>, bool), TransportError>> + Send + '_>>;
+    ) -> HistoryReadFuture<'_>;
 }
 
 /// One history-read failure, classified for the caller.
@@ -493,7 +498,7 @@ pub(crate) mod tests {
             &self,
             limit: usize,
             _cancel: &Cancel,
-        ) -> Pin<Box<dyn Future<Output = Result<(Vec<Value>, bool), TransportError>> + Send + '_>>
+        ) -> HistoryReadFuture<'_'>
         {
             self.calls.lock().unwrap().push(limit);
             let resp = {
@@ -747,8 +752,7 @@ pub(crate) mod tests {
         });
         let err = derive_boundary(&h, &[200], &Cancel::new(), None)
             .await
-            .err()
-            .expect("AuthError must propagate");
+            .expect_err("AuthError must propagate");
         assert!(err.is_auth(), "err = {err}, want AuthError");
         assert_eq!(h.call_count(), 1, "no retry on a fatal error");
     }

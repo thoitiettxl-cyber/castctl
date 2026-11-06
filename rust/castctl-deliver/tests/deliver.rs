@@ -215,8 +215,13 @@ fn token_ok() -> Box<castctl_deliver::wake::FetchAccessTokenFn> {
     Box::new(move |_client, _cookies| Box::pin(async move { Ok("fake-access-token".to_string()) }))
 }
 
+/// What `wake_ok` records per call: (client, cookies,
+/// token) — the three values `Wake` receives, so a test
+/// can prove which identity the wake used.
+type WakeSeen = Arc<Mutex<(Option<String>, Option<String>, Option<String>)>>;
+
 fn wake_ok(
-    seen: Arc<Mutex<(Option<String>, Option<String>, Option<String>)>>,
+    seen: WakeSeen,
     status: i64,
     body: Value,
 ) -> Box<WakeFn> {
