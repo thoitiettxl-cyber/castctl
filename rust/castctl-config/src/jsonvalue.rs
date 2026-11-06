@@ -957,10 +957,10 @@ fn is_valid_number_literal(literal: &str) -> bool {
 }
 
 /// Go `encoding/json` string encoding with `SetEscapeHTML(false)`
-/// (`marshalScalar`, `jsonvalue.go:155`): `"`, `\`, `\n`, `\r`,
-/// `\t` escaped; other C0 controls as `\u00XX`; U+2028/U+2029
-/// escaped; invalid UTF-8 bytes become `\ufffd`; `<`, `>`, `&` and
-/// DEL stay literal.
+/// (`marshalScalar`, `jsonvalue.go:155`): `"`, `\`, `\b`, `\f`,
+/// `\n`, `\r`, `\t` escaped; other C0 controls as `\u00XX`;
+/// U+2028/U+2029 escaped; invalid UTF-8 bytes become `\ufffd`;
+/// `<`, `>`, `&` and DEL stay literal.
 fn encode_go_string(out: &mut String, s: &str) {
     out.push('"');
     let bytes = s.as_bytes();
@@ -976,6 +976,8 @@ fn encode_go_string(out: &mut String, s: &str) {
         match ch {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            '\x08' => out.push_str("\\b"),
+            '\x0C' => out.push_str("\\f"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
@@ -1189,6 +1191,17 @@ mod tests {
 
     fn decode_ok(input: &str) -> JsonValue {
         decode_ordered_json(input.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn test_encode_go_string_backspace_formfeed() {
+        // R3-B1 regression: Go `encoding/json` emits `\b` /
+        // `\f` short escapes (`appendString`,
+        // `encode.go:1012-1015`); `encode_go_string` wrongly
+        // rendered `\u0008` / `\u000c`.
+        let mut out = String::new();
+        encode_go_string(&mut out, "A\x08B\x0CC");
+        assert_eq!(out, "\"A\\bB\\fC\"");
     }
 
     /// The probed Go decode corpus: every case with its verbatim

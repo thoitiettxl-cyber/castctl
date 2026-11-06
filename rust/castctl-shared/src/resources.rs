@@ -348,7 +348,8 @@ fn clean_path(path: &str) -> String {
 }
 
 /// Escapes a string the way Go's `encoding/json` does:
-/// `"`/`\`/control chars, plus U+2028/U+2029 as `\u2028` /
+/// `"`/`\`/`\b`/`\f`/`\n`/`\r`/`\t` short escapes, other
+/// control chars as `\u00XX`, plus U+2028/U+2029 as `\u2028` /
 /// `\u2029`. `<`, `>`, `&` are escaped as `\u00XX` only when
 /// `escape_html` is true (Go's default); `writeJSON`
 /// (`commands.go:411`, `SetEscapeHTML(false)`) passes them
@@ -361,6 +362,8 @@ pub(crate) fn escape_json_string(s: &str, out: &mut String, escape_html: bool) {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            '\x08' => out.push_str("\\b"),
+            '\x0C' => out.push_str("\\f"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
@@ -913,5 +916,20 @@ mod tests {
             out, "\"\\u003ca\\u003e\\u0026\\u2028\\u2029\\u0001\u{7f}é\"",
             "json string escaping"
         );
+    }
+
+    // R3-B1 regression: Go `encoding/json` emits `\b` /
+    // `\f` short escapes (`appendString`,
+    // `encode.go:1012-1015`); `escape_json_string` wrongly
+    // rendered `\u0008` / `\u000c`. The short escapes are
+    // HTML-independent, so both modes agree.
+    #[test]
+    fn probe_json_string_escaping_backspace_formfeed() {
+        let mut out = String::new();
+        escape_json_string("A\x08B\x0CC", &mut out, true);
+        assert_eq!(out, "\"A\\bB\\fC\"");
+        let mut out = String::new();
+        escape_json_string("A\x08B\x0CC", &mut out, false);
+        assert_eq!(out, "\"A\\bB\\fC\"");
     }
 }

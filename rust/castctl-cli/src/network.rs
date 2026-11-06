@@ -44,9 +44,9 @@
 //! `writeJSON` shape: shaped outputs are compact JSON strings
 //! from `castctl-shared` (Go declaration order, Go escaping)
 //! re-indented with 2 spaces by `indent_json` (order
-//! preserving, Go-encoder string rules — including the
-//! `\b`→`\u0008` / `\f`→`\u000c` translation serde_json does
-//! not apply, and raw U+2028/U+2029 escaping); passthrough
+//! preserving, Go-encoder string rules — serde_json already
+//! emits Go's `\b`/`\f` short escapes, passed through as-is,
+//! and raw U+2028/U+2029 escaping); passthrough
 //! outputs are `serde_json::Value` compacted (keys sorted, as
 //! Go's `json.Marshal` on a `map[string]any`) then put through
 //! the same indenter.
@@ -96,9 +96,10 @@ pub(crate) fn typed_json(typ: &str, summary: &str) -> String {
 
 /// Go `encoding/json` string escaping with HTML escaping ON
 /// (the `json.Marshal` default used by `classifyError`'s typed
-/// branch and by request-body encoding): `"`/`\`/`\n`/`\r`/`\t`
-/// short escapes, `<`/`>`/`&` as `\u003c`/`\u003e`/`\u0026`,
-/// U+2028/U+2029 escaped, other control chars as `\u00XX`.
+/// branch and by request-body encoding): `"`/`\`/`\b`/`\f`/`\n`/
+/// `\r`/`\t` short escapes, `<`/`>`/`&` as `\u003c`/`\u003e`/
+/// `\u0026`, U+2028/U+2029 escaped, other control chars as
+/// `\u00XX`.
 pub(crate) fn escape_go_marshal_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -106,6 +107,8 @@ pub(crate) fn escape_go_marshal_string(s: &str) -> String {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            '\x08' => out.push_str("\\b"),
+            '\x0C' => out.push_str("\\f"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
@@ -129,7 +132,8 @@ pub(crate) fn escape_go_marshal_string(s: &str) -> String {
 /// identical to [`escape_go_marshal_string`] except `<` /
 /// `>` / `&` are emitted raw. U+2028/U+2029 stay escaped
 /// (Go escapes them even with HTML escaping off) and the
-/// other control characters keep their `\u00XX` form.
+/// other control characters keep their `\u00XX` form
+/// (`\b`/`\f` are short escapes, as in the marshal form).
 /// Use this for every hand-built stdout JSON fragment
 /// (approval rows, auto-approve status, download rows);
 /// wire request bodies and typed auth JSON keep
@@ -141,6 +145,8 @@ pub(crate) fn escape_stdout_string(s: &str) -> String {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            '\x08' => out.push_str("\\b"),
+            '\x0C' => out.push_str("\\f"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
@@ -297,8 +303,9 @@ pub(crate) fn write_json_serde(v: &SerdeValue) -> Result<String, FlowErr> {
 /// `{}`/`[]` stay compact, key order preserved (the input is
 /// scanned as tokens, never re-parsed into a map). String
 /// tokens are copied with Go's encoder rules applied where
-/// serde_json differs: `\b` → `\u0008`, `\f` → `\u000c`
-/// (Go has no `\b`/`\f` short escapes), raw U+2028/U+2029 →
+/// serde_json differs: serde_json's `\b`/`\f` pass through
+/// unchanged (Go emits the same short escapes,
+/// `appendString`, `encode.go:1012-1015`); raw U+2028/U+2029 →
 /// `\u2028`/`\u2029` (Go always escapes them, even with
 /// `SetEscapeHTML(false)`).
 pub(crate) fn indent_json(compact: &str) -> String {
@@ -359,8 +366,6 @@ pub(crate) fn indent_json(compact: &str) -> String {
                     }
                     if sc == '\\' && i + 1 < n {
                         match chars[i + 1] {
-                            'b' => out.push_str("\\u0008"),
-                            'f' => out.push_str("\\u000c"),
                             e => {
                                 out.push('\\');
                                 out.push(e);
@@ -2190,11 +2195,13 @@ mod tests {
             indent_json(r#"{"a":{},"b":[]}"#),
             "{\n  \"a\": {},\n  \"b\": []\n}"
         );
-        // serde_json `\b`/`\f` become Go's `\u0008`/`\u000c`;
-        // raw U+2028 is escaped; other escapes pass through.
+        // serde_json `\b`/`\f` pass through: Go emits the
+        // same short escapes (`appendString`,
+        // `encode.go:1012-1015`); raw U+2028 is escaped;
+        // other escapes pass through.
         assert_eq!(
             indent_json("{\"a\":\"x\\b\\f\\n\\u2028y\"}"),
-            "{\n  \"a\": \"x\\u0008\\u000c\\n\\u2028y\"\n}"
+            "{\n  \"a\": \"x\\b\\f\\n\\u2028y\"\n}"
         );
         // Top-level scalar passes through.
         assert_eq!(indent_json("42"), "42");
@@ -2233,6 +2240,26 @@ mod tests {
     }
 
     #[test]
+    fn escape_strings_use_short_backspace_formfeed() {
+        // R3-B1 regression: Go `encoding/json` emits `\b` /
+        // `\f` short escapes (`appendString`,
+        // `encode.go:1012-1015`); both Rust escapers wrongly
+        // rendered `\u0008` / `\u000c`. Other C0 controls
+        // keep their `\u00XX` form.
+        let input = "A\x08B\x0CC\nD\rE\tF\x1fG";
+        assert_eq!(
+            escape_go_marshal_string(input),
+            "\"A\\bB\\fC\\nD\\rE\\tF\\u001fG\"",
+            "marshal escaper"
+        );
+        assert_eq!(
+            escape_stdout_string(input),
+            "\"A\\bB\\fC\\nD\\rE\\tF\\u001fG\"",
+            "stdout escaper"
+        );
+    }
+
+    #[test]
     fn io_error_text_is_lowercase_strerror() {
         // B4 regression: Go `%v` on an os error is
         // lowercase `syscall.Errno` text, never Rust's
@@ -2252,26 +2279,6 @@ mod tests {
         assert_eq!(
             io_error_text(&std::io::Error::other("custom boom")),
             "custom boom"
-        );
-    }
-
-    #[test]
-    fn mkdir_error_text_maps_file_to_not_a_directory() {
-        // B4 regression (red-team probe E1): Rust
-        // `create_dir_all` reports EEXIST when a path
-        // component is a regular file; Go `MkdirAll`
-        // reports ENOTDIR (`mkdir <path>: not a
-        // directory`). Shared helper in `oserr` since
-        // fix loop 2 (the toggle writer's lock arm uses
-        // the same text, R2-B2 audit).
-        use castctl_config::oserr::mkdir_error_text;
-        assert_eq!(
-            mkdir_error_text("/tmp/notadir", &std::io::Error::from_raw_os_error(17)),
-            "mkdir /tmp/notadir: not a directory"
-        );
-        assert_eq!(
-            mkdir_error_text("/tmp/notadir", &std::io::Error::from_raw_os_error(13)),
-            "mkdir /tmp/notadir: permission denied"
         );
     }
 

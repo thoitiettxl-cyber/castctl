@@ -1,0 +1,15 @@
+{
+  "args": [
+    "raw",
+    "chat.history"
+  ],
+  "gateway": {
+    "/chat/history": {
+      "status": 200,
+      "result": {
+        "text": "A\bB\fC",
+        "n": 1
+      }
+    }
+  }
+}
