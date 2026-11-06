@@ -10214,47 +10214,137 @@ contract), fresh server process per driver run
   SUMMARY with at least one call (a server that
   died after READY prints no summary — the
   dead-server mask).
+- Fixture bugs found by probing the runs (all
+  fixture-only, fixed in `4388777`, Tier A run 4:
+  11/11 after): (a) `runServeWait` unmarshalled the
+  case file straight into `waitScript` while cases
+  nest the script under `"script"` — subscribes
+  were always empty; unwrap the envelope, bare
+  `waitScript` still accepted. (b) `Request()`
+  turns a GET body into a query string, so
+  `chat.history` arrives as
+  `/chat/history?limit=200` and the handler's
+  exact-match switch missed it, falling through to
+  the canned default handler (`{}` with no log
+  line) — match on the path without the query and
+  read `limit`/`session_id` from the query too.
+  (c) The Go driver created its `Muse` without
+  `WithConfig`: `Connect(cfg)` does not store cfg
+  (only `WithConfig`/`Reload` do), so `muse.Call`
+  — which Connects with nil — fell back to the
+  zero Config when the dead gateway had to reopen
+  (e3: finish's history read failed `no cookies
+  at : ...`); the real CLI sets `WithConfig`
+  (`commands/runtime.go:360,366`).
 
-## M7a.6 Gates (cue — fmt + build PASS 2026-11-06; test/clippy/Tier A/Tier B pending, disk-blocked)
+## M7a.6 Gates (cue — all PASS 2026-11-06 at base `b3fbe5a`, branch head `afa7245`)
 
-- `cargo fmt --check`: PASS (exit 0, 2026-11-06,
-  after `cargo fmt` on cue + `where`-param fix +
-  brace-placement fix in `subscriber.rs`).
-- `cargo build --workspace`: PASS (exit 0,
-  2026-11-06, final incremental 8.72s). Fix rounds:
-  dns shadowing/rdata; resolve self-recursion,
-  `ApproveError` source coercion, `safe_string`,
-  editor flush; `summarize.rs:126` + deliver `Arc`;
-  7 `castctl-wait` errors (two `&**err.err` casts,
-  `Subscriber` impls moved from `Arc<T>` to the bare
-  types, one `'a` lifetime for `on_record` /
-  `subscribe_raw`, unused `Error as _` import);
-  `castctl-cli` missing `castctl-telegram` dep.
-- `cargo test --workspace`: TBD. Baseline at `6a399f7`
-  attempted 2026-11-06 (fresh clone `/tmp/m7a-baseline`,
-  `CARGO_TARGET_DIR=/tmp/m7a-baseline-target`): DIED on
-  disk-full — `cargo test` exit 101, `No space left on
-  device` compiling `castctl-keeper` (lib test); target
-  had reached 5.9G when `/` hit 100% (71M free). No
-  test count obtained; the 536-vs-568-vs-643 discrepancy
-  is STILL unresolved. Baseline clone + target deleted
-  after; free back to 5.9G. Full-workspace test needs
-  >5.9G peak — impossible until cue frees space (see
-  writer report §14).
-- `cargo clippy --workspace --all-targets -- -D warnings`: TBD (same disk block).
-- `cargo build -p castctl-cli --example wait_driver`: TBD.
-- Go: `gofmt -l` clean; `go build` gateway_server
-  + wait_driver OK; `go test -run TestSPDXHeaders
-  -count=1 .` PASS.
-- Tier A goldens: TBD (N2–N5 + E1–E5 + E3-recover).
-- Tier B live: TBD (N6 + E5-live probe).
+Rebase chain for the numbers below: gates were first
+measured at `0233095` (test r10/r11: 1198/0; clippy r18:
+exit 0; Tier A run 4: 11/11), then `dev-rust` moved to
+`b3fbe5a` (M6b PR #74 merged) and the FULL gate was
+re-run at the new head (test r12, clippy post-rebase,
+Tier A run 5). The r10/r11 numbers are superseded;
+the numbers in this section are the re-run ones.
+
+- `go test -run TestSPDXHeaders -count=1 .` (cue,
+  BEFORE any workspace build): PASS (exit 0,
+  2026-11-06).
+- `cargo fmt --check`: PASS (exit 0, post-rebase).
+- `cargo build --workspace`: PASS (exit 0, 1m55s,
+  post-rebase).
+- `cargo test --workspace --no-fail-fast`: PASS
+  (exit 0, 2026-11-06, r12): **1349 passed, 0 failed,
+  63 result lines, 44 test binaries** (log
+  `/tmp/m7a-test-r12.log` on cue; the 63 result lines
+  are 44 binary runs + 19 doc-test runs — verified by
+  counting `Running` lines, not by carrying over the
+  r10/r11 count of 43). 1349 = 1198 (r11 at
+  `0233095`) + 151 (M6b's webui tests, exactly M6b's
+  reported 1136 − 985): the rebase added M6b's tests
+  and all of them pass; no M7a and no M6b regression.
+  (Earlier partial count 543/545 in r7 was fail-fast
+  truncation, not a real gap — see writer report §15.)
+- `cargo clippy --workspace --all-targets -- -D warnings`:
+  PASS (exit 0, 0 warnings/errors, 1m24s, post-rebase,
+  log `/tmp/m7a-clippy-post-rebase.log`). Clippy fix
+  history: 8 layers (r10–r18) — dns `collapsible_if` /
+  doc continuation, logging `manual_range_patterns` /
+  `io::Error::other` / `type_complexity`, approvals /
+  fsclient / gateway `collapsible_if`, deliver
+  `derivable_impls` (WakeDeps), wait
+  `type_complexity` aliases (`HistoryReadFuture`,
+  `SubscribeRawFuture`, `OnEventFn`, `TerminalPred`,
+  `WakeSeen`) + the stray-quote E0107 (regex wrote
+  `'a'` for lifetime `'a`, found by hex dump).
+- `cargo build -p castctl-cli --example wait_driver`:
+  PASS (exit 0).
+- Go fixture: `gofmt -l` clean; `go vet` + `go build`
+  gateway_server + wait_driver OK.
+- Tier A goldens (`rust/parity/run_wait_cases.sh`,
+  11 cases): **11/11 PASS, harness exit 0** (run 5,
+  `/tmp/m7a-tier-a5`, log `/tmp/m7a-tier-a5.log`).
+  Run history: run 1 0/11 (Go driver called
+  `muse.Connect(ctx, nil)` — connector reads
+  `CookiesFile` from per-call config, nil falls back
+  to the empty Muse config; fixed by passing
+  `&conn.Config{CookiesFile: ...}`); run 2 0/11
+  (stdout/exit/server counts identical, only the
+  non-deterministic slog "gateway connected" line
+  differed — fixed with a discard logger via
+  `conn.WithLogger`); run 3 10/11 (e3: Go exit 2
+  `auth_failed` vs Rust 124 — see §M7a.5); run 4
+  11/11 at `0233095`; run 5 11/11 at `b3fbe5a`.
+  Verdict rules F3/F4/F5 proven by negative controls
+  (all 5 controls trigger with exactly their reasons
+  after the dot→dash verdict fix).
+- Tier B live: **PASS 2026-11-06** (release binary
+  `cargo build --release -p castctl-rs`, exit 0, 3m22s,
+  `/tmp/m7a-target/release/castctl-rs`, `--version`
+  `castctl 0.9.0`): N6 idle wait + E5 nonexistent
+  thread, both void-free and byte-identical Go vs
+  Rust (evidence `/tmp/m7a-live/` on cue). N6:
+  `--after-seq 25756 --timeout 5 --json`, exit
+  124/124, stdout md5
+  `b8f545a02b05f2a304fb99fe580655e2` both, stderr
+  empty both, history `[23087, 25582, 25756]`
+  unmoved. E5: `--thread does-not-exist-123
+  --timeout 5 --json`, exit 124/124, stdout md5
+  `cb149c0246a62b87505c84d4fba563fe` both, stderr
+  empty both; direct `history` on the unknown thread
+  errors exit 3 (`gateway status=400
+  body_length=77`) before and after. Subscribe
+  proof (gate (b)): PROVEN — see §M7a.7.
 
 ## M7a.7 Chưa kiểm chứng
 
-- Subscribe proof (gate (b)): real Go gateway on
-  cue, 1 turn, log/trace proving Rust receives
-  events via subscribe, not history polls — or
-  "chưa kiểm chứng được" + rerun command.
+- Subscribe proof (gate (b)) — PROVEN 2026-11-06
+  (two real turns on the live gateway, side thread
+  `694803a6-7b89-4e9c-89a5-945872b5c3cf`, created via
+  REPL `/new`): turn 1 (Go `send "Say ok"`,
+  delivered `user_seq 26703`) observed by the clean
+  Rust release `wait` as Done/completed (exit 0);
+  turn 2 (delivered `user_seq 26712`) observed by
+  the instrumented release `wait` as Done/completed
+  with reply `ok` seq 26704 (boundary derived
+  26703). The instrumented run's stderr is the
+  literal trace — three records through
+  `RunnerHandler::on_record` (which runs ONLY for
+  subscribe-stream records; history reads never
+  pass through it):
+  `M7A-PROBE-SUBSCRIBE name=model_lock.updated
+  seq=29777`, `name=agent.status seq=29779`,
+  `name=task.status seq=29780`. The probe was a
+  temporary `eprintln!` (name + seq only, never
+  payload), REVERTED before commit — `git diff`
+  clean of it. The trace gap that forced the probe:
+  the Rust CLI emits ZERO log bytes at
+  `--log-level trace` (measured on `status` and on
+  the wait run; the Go binary emits 3906 bytes on
+  the same command — the flag is parsed/validated
+  but no logger is wired in `castctl-cli/src/run.rs`).
+  That is a Rust-CLI logging gap, not an M7a
+  blocker; recorded here, not fixed (out of scope).
 - `Handle::block_on` from inside `spawn_blocking`
   (CLI approver decide path) — unproven until cue
   compile + approval goldens run.
@@ -10263,11 +10353,6 @@ contract), fresh server process per driver run
 - The 15s WakeTimeout enforcement via
   `tokio::time::timeout` is untested at the 15s
   value (testing it would take 15s).
-- Live behaviour for a nonexistent thread (E5 live
-  variant): empty history →124 vs server error —
-  run once, record verbatim.
-- `cookies_file` relative vs absolute in both live
-  configs (determines Tier B cwd).
 - `egress.approval.decide` server-side idempotency
   — unproven; keep claim sets regardless.
 - Rust `SafeString` keeping exactly the 8-char
@@ -10277,6 +10362,19 @@ contract), fresh server process per driver run
 - M5b deviation (not M7a's to fix): Rust does not
   call settle in the poll loop → suspect terminal
   can hang until the 6h deadline.
+
+Resolved during Tier B (moved out of this list):
+- Live behaviour for a nonexistent thread (E5):
+  direct `history` on an unknown thread errors
+  (exit 3, `gateway status=400 body_length=77`);
+  `wait` on it gives exit 124 with
+  `final_read_failed=true` + note `could not read
+  the final replies; run `castctl wait` again` —
+  byte-identical Go vs Rust (md5
+  `cb149c0246a62b87505c84d4fba563fe`).
+- `cookies_file` is ABSOLUTE in the live config
+  (`/root/.config/castctl/profiles/no.0/cookies.txt`);
+  Tier B cwd is irrelevant.
 
 ## Quy tắc quyết định (Boss, 2026-11-05 — standing)
 
