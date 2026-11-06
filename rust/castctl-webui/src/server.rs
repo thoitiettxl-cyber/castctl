@@ -1511,10 +1511,15 @@ mod tests {
             Content-Length: 65536\r\n\
             Connection: close\r\n\r\n";
         stream.write_all(head.as_bytes()).await.expect("head");
-        stream
-            .write_all(&vec![b'x'; 1024])
-            .await
-            .expect("first KiB");
+        // Valid-but-incomplete JSON prefix (an unterminated
+        // string): the read must block on the missing rest,
+        // not fail fast on content — Go's decoder fails a
+        // garbage prefix at once (parity run 1: Go 400 in
+        // 0.1s), which proves nothing about the timeout.
+        let mut prefix = b"{\"content\": \"".to_vec();
+        prefix.extend(std::iter::repeat_n(b'a', 1011));
+        debug_assert_eq!(prefix.len(), 1024);
+        stream.write_all(&prefix).await.expect("first KiB");
         // No more bytes: the server must 503 at 30s.
         let mut resp = Vec::new();
         let _ = tokio::time::timeout(
