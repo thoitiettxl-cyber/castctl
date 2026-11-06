@@ -442,9 +442,9 @@ section; shas are of files, never of secrets.
 
 | # | Item | Verdict |
 |---|------|---------|
-| 1 | `webui serve` (21-request matrix + rate-limit + negatives) | **PASS** — 21/21 normalised (raw 18/21; the 3 raw diffs are exactly the rule-covered normalisations); rate-limit sequence identical; negative probes identical; both servers exit 130 on SIGINT |
-| 2 | `keeper run` (60 s + SIGTERM, sha256, `status`/`check`) | **PASS** (on the item's stated criteria) — 2 ticks `ok cookies_seen=10 wrote=true` both sides, SIGTERM wait 143 both, state/check/single-flight match, live files unchanged; plus one real bug found and fixed (tick ignored configured `cookies_file`, pre/post probe); the SIGINT divergence recorded at `9afa04c` is CLOSED at the rebased head — re-verified live at `acb2aa7`, Rust SIGINT exits 130 with the tick line flushed (see rebase note) |
-| 3 | `telegram run` (fake Bot API + 1 turn via fake gateway) | **PASS (library-level) + blocker documented** — no stock-binary mechanism points either binary at a fake Bot API server or fake gateway (verified at binary level); the time-boxed hosts-redirect probe fails on both sides, at different layers; the 1-turn leg was not run as a binary comparison. The library-level telegram evidence (M7c, `docs/e2e.md:302`) stands; the binary-level blocker is documented below. |
+| 1 | `webui serve` (21-request matrix + rate-limit + negatives) | **PASS** — 21/21 normalised (raw 18/21); the 3 raw diffs are exactly the rule-covered normalisations — 2 normalised fields (`go_version`, `singbox_version`, presence+type only) + `/status` version-stamp strip + listen-port normalisation + stored-file `sha256` presence+format + key-order-insensitive JSON compare (rule source: r1-webui.md §5); rate-limit sequence identical; negative probes identical; both servers exit 130 on SIGINT |
+| 2 | `keeper run` (60 s + SIGTERM, sha256, `status`/`check`) | **PASS** — Go 2 ticks `ok cookies_seen=10 wrote=true`; Rust ≥1 `ok` tick proven by state (tick count unrecoverable under SIGTERM — stdout 0 bytes), `keeper check` 1 tick `ok cookies_seen=10 wrote=true`; SIGTERM wait 143 both; what passed is the real-check set — `wrote=true` every tick, identical cookie sets (10 names), each side's state `cookies_sha256` equal to its own written file, `status`/`check`/single-flight match; cross-run byte-equality of `cookies.txt` is NOT claimed (unsatisfiable: every tick stamps `last_seen=now`); live files unchanged; plus one real bug found and fixed (tick ignored configured `cookies_file`, pre/post probe); the SIGINT divergence recorded at `9afa04c` is CLOSED at the rebased head — re-verified live at `acb2aa7`, Rust SIGINT exits 130 with the tick line flushed (see rebase note) |
+| 3 | `telegram run` (fake Bot API + 1 turn via fake gateway) | **PASS (library-level ONLY — no binary telegram parity) + blocker documented** — no stock-binary mechanism points either binary at a fake Bot API server or fake gateway (verified at binary level); the 1-turn leg was not run as a binary comparison. The library-level telegram evidence (M7c, `docs/e2e.md:302`) stands; the binary-level blocker is documented below. Fix loop 1 (F8 probe, 2026-11-07): the Go DNS leg IS closable — a top-level `dns` `hosts` mapping for `api.telegram.org` → `127.0.0.1` routes Go `telegram run` to the TLS fake (getMe 200 in the fake log); the blocker now rests SOLELY on the Rust TLS-trust leg (webpki roots only, `SSL_CERT_FILE` ignored). Binary comparison is still impossible; the verdict is unchanged. |
 
 ### Item 1 — `webui serve`: PASS (21/21 normalised, 18/21 raw)
 
@@ -454,7 +454,7 @@ following, verbatim paths). Two config copies of the live `no.0` config
 `127.0.0.1:18318` (Rust), a fresh random test token per side, and
 `login_rate_limit {"attempts": 100, "window": "5m"}` for the matrix.
 Cookies never copied or read. Readiness: unauthenticated
-`GET /api/v1/status` until 401. Comparison per M6b/M7c rules: status exact;
+`GET /api/v1/status` until 401. Comparison per M6b/M7c rules (rule source: r1-webui.md §5 — the full set actually applied is the 2 normalised fields `go_version`/`singbox_version` + `/status` version-stamp strip + listen-port normalisation + stored-file `sha256` presence+format + key-order-insensitive JSON compare; the summary-table headline now lists all of them): status exact;
 headers `Content-Type`/`Cache-Control`/`X-Content-Type-Options` exact
 (case-insensitive names), `Retry-After` only on 429,
 `Access-Control-Allow-*`/`Set-Cookie` must be absent, `Date`/`Connection`/
@@ -545,12 +545,15 @@ Clean re-run (run 2, after the driver fix):
 
 Sha reading: the two sides' new shas differ because every tick stamps
 `last_seen=now` into the rewritten jar — byte equality across runs at
-different times is impossible by construction. What matches identically:
+different times is impossible by construction. Cross-run byte-equality of
+`cookies.txt` is NOT claimed. What matches identically:
 both changed on every tick (`wrote=true`), the cookie SET is identical
 (10 names; 8 expiries byte-identical; the 2 CDP-refreshed expiries
-`hatch_sess`/`hatch_vml` track tick time, Go `21:00:24Z`/`21:01:30Z` vs
-Rust `21:01:31Z`/`21:02:46Z`, deltas +67 s/+76 s ≈ the tick gap — the CDP
-export leg ran on both sides), and each side's state `cookies_sha256`
+`hatch_sess`/`hatch_vml` track tick time, Go `21:00:24Z`/`21:00:54Z` vs
+Rust `21:01:31Z`/`21:02:31Z`, deltas +67 s/+97 s ≈ the tick gap — the CDP
+export leg ran on both sides; corrected in fix loop 1 from the quoted +76 s
+pair — the `21:01:30Z`/`21:02:46Z` values appear in no surviving log,
+re-parsed from `/tmp/m7e-keeper/run2.log` on cue), and each side's state `cookies_sha256`
 equals its own written file. Go SIGINT probe (separate fresh scratch,
 15 s): wait status **130**, 1 tick line — Go's Ctrl-C path is correct.
 
@@ -563,7 +566,11 @@ wrote the LIVE cookies file (sha `aa667a83…` → `e3b9775e…`, plus a
 live file was restored byte-for-byte from the untouched scratch copy
 (sha `aa667a83…`, 5300 B, Nov 6 15:19, dir listing diff empty) and the
 artifacts removed; the driver was fixed to drop `cookies_file` and item 2
-was re-run clean (run 2 above). Run 1's tick/exit/signal evidence stands;
+was re-run clean (run 2 above). Traceability limit (fix loop 1): the live
+file today matches the pre-run record on sha/size/mtime/listing, but the
+restore source file (the untouched scratch copy) no longer exists for
+re-hashing, so the restore chain rests on the writer's contemporaneous
+record — no independent pre-run hash exists. Run 1's tick/exit/signal evidence stands;
 its sha comparison is void.
 
 Bug found and FIXED in M7e — tick ignores configured `cookies_file`:
@@ -574,19 +581,27 @@ path while Rust wrote the scratch DEFAULT path. Code ground truth: Rust
 had no cookies-path field; Go's `saveJar` writes the store's resolved
 `cookiesPath` (`internal/keeper/tick.go:490-500`). Targeted probe
 (`keeper check` ×1 per side, absolute `cookies_file` pointing OUTSIDE the
-config dir): pre-fix Go wrote the configured file
-(`aa667a83…` → `45eb07e6…`, default unchanged) while Rust wrote the default
-(`aa667a83…` → `6a2ffd5f…`, configured file unchanged) — same `ok`,
+config dir): pre-fix Go wrote the configured file (default unchanged)
+while Rust wrote the default (configured file unchanged) — same `ok`,
 `cookies_seen=10`, `wrote=true` both sides, so the divergence is invisible
-in the check output and only the file shas expose it. (A first probe
+in the check output and only the file shas expose it. (Fix loop 1: the
+original pre-fix probe shas appear in no surviving cue artifact and are
+removed here; the divergence itself is independently established by run 1,
+the code ground truth, and the RED→GREEN `case_18`.) (A first probe
 attempt with the configured file INSIDE the config dir correctly failed
 exit 2 on BOTH sides with the identical inside-dir message — bonus parity
 evidence for that rule.) Fix (5 files, +18/−1, `rust/**` only): new
 `TickDeps.cookies_path`, `tick()` passes it to `Store::new`, the CLI
 `factory` sets it to `rt.profile.cookies_file`, test/example construction
 sites pass `""` (default behaviour unchanged). Post-fix probe: BOTH sides
-write the configured file (Go `→ 791ea91b…`, Rust `→ 419249af…`, defaults
-unchanged), state shas match their written files. RED→GREEN regression
+write the configured file (Go configured-after
+`727bbc7dce938ea8373f634b6a8526dbe09a63fe89f590a4cfad5281890dd44f`, Rust
+configured-after
+`c67967dfba88b1af74305fe78061ef54037594427655389e545029c2da414403`, both
+from `aa667a83…`, defaults never created), state shas match their written
+files. (Fix loop 1: these are the red-team probe-B shas at the final head,
+review3-redteam.md Check 2; the originally quoted post-fix shas appear in
+no surviving artifact and are removed.) RED→GREEN regression
 test added in the fix loop (Pi requires it in this PR):
 `case_18_tick_writes_configured_cookies_file`
 (`rust/castctl-keeper/tests/tick_table.rs`) — jar ONLY at a configured
@@ -600,7 +615,19 @@ follow-up): `LoginSession::run`/`finish`
 (`rust/castctl-keeper/src/login.rs:222,358`) pass `""` to `Store::new` too
 — same latent pattern on the re-login save path, unproven live (no
 credentials configured in any M7e test); proposal: same one-field
-threading, proven by a credentials-configured re-login run.
+threading, proven by a credentials-configured re-login run. The same `""`
+pattern also survives in the fix's own file — `tick.rs:1368`
+(`notify_stopped`) and `tick.rs:1406` (`reset_after_login`), both
+state-only (warn flag / stopped-flag reset; no jar read/write), taking the
+same `TickDeps` that now carries `cookies_path` yet ignoring it; impact is
+lock identity only — these paths lock the DEFAULT cookies file while the
+tick locks the configured one, and `lock_cookies_file` creates a stray
+`<default>.lock` in the profile dir when no default file exists.
+Follow-up acceptance criterion: after this fix, tick honours a configured
+`cookies_file` while re-login still writes the default, so a
+custom-`cookies_file` profile that re-logs in would split its jar across
+two files — the follow-up must thread the path through login AND the two
+`tick.rs` sites and prove no split.
 
 Finding (not a run failure) — Rust SIGINT swallowed [CLOSED at the
 rebased head, see rebase note]: `keeper run` at `9afa04c` does not stop
@@ -612,7 +639,7 @@ was recorded as a finding, not a run failure. PR #85 has since MERGED
 (`acb2aa7`); the rebase note below records the live re-verification
 at the new head (SIGINT exits 130, tick line flushed).
 
-### Item 3 — `telegram run`: PASS (library-level) + blocker documented
+### Item 3 — `telegram run`: PASS (library-level ONLY — no binary telegram parity) + blocker documented
 
 What was verified at binary level (all on cue, fake token
 `123456:FAKE-TOKEN-…`, never a real token, never a real message):
@@ -652,12 +679,14 @@ What was probed and FAILED — mechanism B (hosts redirect + TLS fake +
 `127.0.0.1 api.telegram.org` + a TLS-terminating fake on 443 (cert SAN
 `api.telegram.org`, test CA) + `SSL_CERT_FILE=<test CA>`. The fake itself
 was smoke-proven with curl (`--cacert` + `--resolve` → `getMe` 200).
-- Go: never reaches the fake. A TCP listener on 443 saw NO CONNECTION in
+- Go (via `/etc/hosts` only): never reaches the fake. A TCP listener on 443 saw NO CONNECTION in
   15 s while Go still failed 401 Unauthorized (real API). The OS resolver
   DOES return 127.0.0.1 (`getaddrinfo` → `127.0.0.1` only, nsswitch
   `files dns`), so the Go outbound (sing-box/honk direct) resolves via its
-  own DNS path, bypassing `/etc/hosts`. The redirect dies at DNS;
-  `SSL_CERT_FILE` is never even tested on the Go side.
+  own DNS path, bypassing `/etc/hosts`. The `/etc/hosts` redirect dies at DNS;
+  `SSL_CERT_FILE` is never even tested on the Go side. — Fix loop 1 (F8
+  probe, 2026-11-07): the sing-box `dns` `hosts` avenue was NOT tried in
+  mechanism B and IS closable on the Go side (see below).
 - Rust: DNS honoured — the TCP probe ACCEPTed a connection from
   127.0.0.1 with a TLS ClientHello carrying SNI `api.telegram.org`, ALPN
   `http/1.1` — but the handshake fails:
@@ -672,6 +701,34 @@ was smoke-proven with curl (`--cacert` + `--resolve` → `getMe` 200).
   (polling `api.telegram.org`) was never touched; redirect windows were
   minutes, and its polls could only fail transiently (TLS verify against
   the test CA fails) with no message loss.
+
+NEW (fix loop 1, 2026-11-07) — F8 probe: sing-box `dns` `hosts` mapping
+for Go. Temp config only (fake token `123456:FAKE-TOKEN-…`, never a real
+token): top-level `dns` section with a `hosts` server (`tag: hosts-map`,
+`predefined: {api.telegram.org: [127.0.0.1]}`), rule `{domain:
+[api.telegram.org], server: hosts-map}`, `final: local-dns`; the same TLS
+fake on 443 (cert SAN `api.telegram.org`, test CA) with
+`SSL_CERT_FILE=<test CA>`; `/etc/hosts` untouched (no `api.telegram.org`
+entry). Two config facts found while setting it up: a PER-PROFILE `dns`
+block CANNOT carry a `hosts` server — castctl's G2 validation demands a
+detour on every server in a profile block
+(`internal/profile/dns.go:570-572`) while sing-box rejects `detour` on a
+`hosts` server (`json: unknown field "detour"`); the TOP-LEVEL section
+accepts it (its validation only checks detours when present,
+`internal/profile/config.go:768-779`), so the probe used the top-level
+section (compat branch, with the deprecation warning on stderr). Result:
+Go REACHES the fake. Fake log: `getMe` ×1, `setMyCommands` ×1,
+`getUpdates` ×11279 (hot spin — the probe fake answered empty
+`getUpdates` instantly with no sleep; probe artifact, not a Go finding);
+Go stdout: `telegram: polling for profile "muse01" (1 allowed users);
+Ctrl-C to stop` — construction succeeded on the fake's getMe 200 and
+polling ran until the 40 s `timeout` ended the run. Go therefore trusts
+the test CA via `SSL_CERT_FILE` (system store) and honours the sing-box
+`hosts` mapping. The Go DNS leg is closable; the blocker now rests SOLELY
+on the Rust TLS-trust leg. Verbatim evidence: probe logs on cue,
+`/tmp/m7e-fix1-tg/fake.log`, `go-run.out`, `go-run.err`; live
+cookies/config unchanged after (sha `aa667a83…` / `b748366c…`),
+`/etc/hosts` untouched.
 
 Not run as a binary comparison: the `/help` comparison (no redirection
 exists to run it through) and the 1-turn gateway leg. The gateway leg is
@@ -700,18 +757,24 @@ for Boss with full authority, 2026-11-06): the stock binaries expose no
 Bot API base-URL or gateway WS-URL override (config, flag, or env), and
 no Go production-code change to add one will be made — mechanism A (a
 test-only env override in BOTH binaries) is rejected; there is no new
-seam in the Go binary under test. binary-level interception of
+seam in the Go binary under test. Binary-level interception of
 api.telegram.org is impossible for the Rust build without changing its
 trust basis; the trust-basis difference is recorded in PORTING
-(webpki-roots vs Go system store). PORTING ground truth:
-`rust/PORTING.md:1634` — "webpki-only store means even a private CA
-trusted by the system would fail" — and
-`rust/castctl-transport/src/tls.rs:21-26,56-58` (`tls_client_config`
-builds roots from `webpki_roots` only, "No client auth, no native
-certs"). The TLS block is therefore a known limitation, not a bug to
-fix by changing Go. No telegram binary parity is claimed from this run;
-the verdict is PASS (library-level) + blocker documented — never FAIL,
-never full binary PASS.
+(webpki-roots vs Go system store). Operative ground truth for the telegram
+client is `rust/castctl-transport/src/tls.rs:21-26,56-58`
+(`tls_client_config` builds roots from `webpki_roots` only, "No client
+auth, no native certs" — verified by direct read; the telegram production
+path uses it via `api.rs:181-189` → `HttpClient::request_tls`). PORTING
+`rust/PORTING.md:1634` records the same webpki-only principle generally,
+but it is about the honk/QUIC stack, not the telegram rustls client — it
+is cited here only as the earlier note of the same principle, not as the
+telegram ground truth. (Fix loop 1: the F8 probe closes the Go DNS leg —
+the Go side reaches the fake through the sing-box `dns` `hosts` mapping —
+so the blocker now rests SOLELY on the Rust TLS-trust leg above.) The TLS
+block is therefore a known limitation, not a bug to fix by changing Go.
+No telegram binary parity is claimed from this run; the verdict is PASS
+(library-level ONLY — no binary telegram parity) + blocker documented —
+never FAIL, never full binary PASS.
 
 ### Gates (cue, `cargo +1.99.1`, `CARGO_TARGET_DIR=/tmp/m7e-target`, `PATH=/usr/local/go/bin`, `GOTOOLCHAIN=auto`)
 
@@ -733,7 +796,16 @@ never full binary PASS.
 - Disk: `df -h /` checked before each build; `/tmp/m7e-target` deleted
   after the final gate (see below).
 
-### Fix-loop gates (cue, `cargo +1.99.1`, `CARGO_TARGET_DIR=/tmp/m7e-target`, 2026-11-06/07, head `a318206` on base `acb2aa7`, no rebase — `git ls-remote origin dev-rust` still `acb2aa7` at finish)
+### Fix-loop gates (cue, `cargo +1.99.1`, `CARGO_TARGET_DIR=/tmp/m7e-target`, 2026-11-06/07, working tree on `a318206` + uncommitted `case_18` — i.e. the tree committed as `b94895c` — on base `acb2aa7`, no rebase — `git ls-remote origin dev-rust` still `acb2aa7` at finish)
+
+> Attribution corrected in fix loop 1: the 1600-pass run below is
+> attributed here to the `b94895c` tree, NOT to commit `a318206` itself.
+> `case_18` did not exist at `a318206` (`git show
+> a318206:rust/castctl-keeper/tests/tick_table.rs | grep -c case_18` → 0;
+> the test was committed in `b94895c`, a child of `a318206`), so the run
+> must have been on the `a318206` working tree + the uncommitted test —
+> the `b94895c` tree. The release binary stamp still reads `a318206`
+> (built from that working tree); the counts are unchanged.
 
 - `cargo fmt --check`: exit 0. `cargo build --workspace`: exit 0.
   `cargo test --workspace --no-fail-fast`: exit 0 — **1600 passed,
