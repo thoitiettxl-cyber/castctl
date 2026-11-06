@@ -1,3 +1,7 @@
+// Copyright (c) 2026 muse-cli contributors
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GNU General Public License v3.0 only.
+
 // Jar round-trip + concurrent-write tests — mirrors
 // Go `TestTickConcurrentSerialised` and the jar
 // round-trip cases in `internal/profile/cookies_test.go`
