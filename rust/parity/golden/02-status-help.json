@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-z95k0obt/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-z95k0obt/xdg",
+    "HOME": "/tmp/castctl-golden-ldtypiw9/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-ldtypiw9/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-z95k0obt/work",
+  "cwd": "/tmp/castctl-golden-ldtypiw9/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl status\n\nShow the VM id, session count, unread counts and identity as JSON.\nNo options.\n",

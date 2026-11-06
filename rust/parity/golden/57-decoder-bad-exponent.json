@@ -7,13 +7,13 @@
     "status"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-nffpnec3/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-nffpnec3/xdg",
+    "HOME": "/tmp/castctl-golden-fjy5cgjc/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-fjy5cgjc/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-nffpnec3/work",
+  "cwd": "/tmp/castctl-golden-fjy5cgjc/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "",

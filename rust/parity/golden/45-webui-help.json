@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-8xptd9ad/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-8xptd9ad/xdg",
+    "HOME": "/tmp/castctl-golden-20vydb1i/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-20vydb1i/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-8xptd9ad/work",
+  "cwd": "/tmp/castctl-golden-20vydb1i/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl webui <subcommand> [options]\n\nWeb UI server: serve the castctl web UI (frontend + /api/v1)\non loopback only, with token auth. Requires a \"webui\" block in\nconfig.json (see docs/config.md); absent means no web UI.\n\nsubcommands:\n  serve     serve the web UI in the foreground until interrupted\n\nRun \"castctl webui serve --help\" for serve options.\n",

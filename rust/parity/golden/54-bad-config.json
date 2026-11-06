@@ -8,13 +8,13 @@
     "/nonexistent"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-5jdljpf0/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-5jdljpf0/xdg",
+    "HOME": "/tmp/castctl-golden-674o1yrm/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-674o1yrm/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-5jdljpf0/work",
+  "cwd": "/tmp/castctl-golden-674o1yrm/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "",

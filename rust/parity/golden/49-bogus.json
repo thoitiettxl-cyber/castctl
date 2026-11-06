@@ -7,13 +7,13 @@
     "bogus"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-_nchhu7o/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-_nchhu7o/xdg",
+    "HOME": "/tmp/castctl-golden-rxtvjj68/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-rxtvjj68/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-_nchhu7o/work",
+  "cwd": "/tmp/castctl-golden-rxtvjj68/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "",

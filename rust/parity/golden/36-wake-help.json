@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-fe8heo6v/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-fe8heo6v/xdg",
+    "HOME": "/tmp/castctl-golden-wwzf_4ot/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-wwzf_4ot/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-fe8heo6v/work",
+  "cwd": "/tmp/castctl-golden-wwzf_4ot/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl wake\n\nRequest a VM wake over plain HTTPS (no gateway connection). Prints\n{\"status\": N, \"body\": ...} as JSON. No options.\n",

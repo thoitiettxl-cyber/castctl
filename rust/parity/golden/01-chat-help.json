@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-3nxl_xg0/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-3nxl_xg0/xdg",
+    "HOME": "/tmp/castctl-golden-bzu0udns/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-bzu0udns/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-3nxl_xg0/work",
+  "cwd": "/tmp/castctl-golden-bzu0udns/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl chat\n\nInteractive chat (the default with no command). Type /help for\ncommands, /exit to quit.\n",

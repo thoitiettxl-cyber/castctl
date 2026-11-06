@@ -8,13 +8,13 @@
     "--help"
   ],
   "env": {
-    "HOME": "/tmp/castctl-golden-58dd5ri5/home",
-    "XDG_CONFIG_HOME": "/tmp/castctl-golden-58dd5ri5/xdg",
+    "HOME": "/tmp/castctl-golden-gaidb423/home",
+    "XDG_CONFIG_HOME": "/tmp/castctl-golden-gaidb423/xdg",
     "LC_ALL": "C",
     "TZ": "UTC",
     "PATH": "/usr/bin:/bin"
   },
-  "cwd": "/tmp/castctl-golden-58dd5ri5/work",
+  "cwd": "/tmp/castctl-golden-gaidb423/work",
   "stdin": "empty",
   "timeout_seconds": 10,
   "stdout": "usage: castctl deny ID [--always]\n\nDeny a pending request.\n\noptions:\n  --always       deny_always instead of deny.\n",
