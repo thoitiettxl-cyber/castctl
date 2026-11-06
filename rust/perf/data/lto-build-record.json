@@ -1,0 +1,78 @@
+{
+  "record": "LTO variant build record (M-perf-3; the run10 summary records the driver LTO build, exit 0)",
+  "source_commit": "fbaa0d7bff38748470e07e46927aaee62f4c06c7",
+  "host": "cue (Linux 6.18.38+ x86_64, 8 x Intel Xeon @ 2.50GHz)",
+  "command": "cargo +1.99.1 build --profile release-lto --locked --offline --manifest-path /tmp/castctl-rust-perf1/rust/perf/full-bin/Cargo.toml",
+  "start_utc_reconstructed": "2026-11-05T21:53:57Z",
+  "end_utc_reconstructed": "2026-11-05T21:58:15Z",
+  "duration_seconds": 257.6,
+  "timestamps_note": "Driver LTO start/end are RECONSTRUCTED from the run window (run.sh started 2026-11-05T21:45:03Z, total 801 s; LTO is the last build step, 257.6 s per summary.json build_full_lto.seconds). The driver does not record LTO timestamps; only the duration is exact.",
+  "target_dir": "/tmp/perf-full-target",
+  "binary": {
+    "path": "/tmp/perf-full-target/release-lto/castctl-full",
+    "size_bytes": 14137784,
+    "sha256": "3ff9948cbe39500dea7d6a065d268f259ed2b5749659aac9625e0c9cc5c1acf7",
+    "size_A_stdout": "/tmp/perf-full-target/release-lto/castctl-full  :\nsection                  size       addr\n.interp                    28        736\n.note.ABI-tag              32        764\n.note.gnu.build-id         36        796\n.dynsym                  4080        832\n.gnu.version              340       4912\n.gnu.version_r            496       5252\n.gnu.hash                  28       5752\n.dynstr                  2477       5780\n.rela.dyn              567792       8264\n.rela.plt                1560     576056\n.gcc_except_table      439492     577616\n.rodata               2069184    1019904\n.eh_frame_hdr          116588    3089088\n.eh_frame              862400    3205680\n.text                 9644252    4072192\n.init                      27   13716444\n.fini                      13   13716472\n.plt                     1056   13716496\n.tdata                    176   13721648\n.tbss                     368   13721824\n.fini_array                 8   13721824\n.init_array                16   13721832\n.data.rel.ro           412264   13721856\n.dynamic                  480   14134120\n.got                     3008   14134600\n.got.plt                  544   14137608\n.relro_padding           1240   14138152\n.tm_clone_table             0   14142248\n.data                    5176   14142272\n.bss                     5276   14147456\n.comment                  184          0\nTotal                14138621\n\n\n",
+    "sections": {
+      ".interp": 28,
+      ".note.ABI-tag": 32,
+      ".note.gnu.build-id": 36,
+      ".dynsym": 4080,
+      ".gnu.version": 340,
+      ".gnu.version_r": 496,
+      ".gnu.hash": 28,
+      ".dynstr": 2477,
+      ".rela.dyn": 567792,
+      ".rela.plt": 1560,
+      ".gcc_except_table": 439492,
+      ".rodata": 2069184,
+      ".eh_frame_hdr": 116588,
+      ".eh_frame": 862400,
+      ".text": 9644252,
+      ".init": 27,
+      ".fini": 13,
+      ".plt": 1056,
+      ".tdata": 176,
+      ".tbss": 368,
+      ".fini_array": 8,
+      ".init_array": 16,
+      ".data.rel.ro": 412264,
+      ".dynamic": 480,
+      ".got": 3008,
+      ".got.plt": 544,
+      ".relro_padding": 1240,
+      ".tm_clone_table": 0,
+      ".data": 5176,
+      ".bss": 5276,
+      ".comment": 184
+    },
+    "role": "full-keep LTO variant (profile release-lto, strip=symbols in profile)"
+  },
+  "version_check": {
+    "argv": [
+      "/tmp/perf-full-target/release-lto/castctl-full",
+      "--version"
+    ],
+    "exit": 0,
+    "stdout": "castctl 0.9.0\n",
+    "stderr": ""
+  },
+  "ratio_vs_go": 0.29392301452781083,
+  "shrink_vs_headline": 0.19097309489507552,
+  "text_shrink_vs_headline": 0.13301896053451523,
+  "driver_lto_note": "run10 driver LTO (build_full_lto) exited 0 after 257.6 s \u2014 no manual retry needed as the primary source. Contrast run9: driver LTO exited 101 after 207.3 s (target dir deleted mid-build by Boss's disk cleanup); the run9 LTO numbers came from a manual retry (315 s).",
+  "retention_note": "nm cannot run on the LTO binary (profile strips symbols); link retention is evidenced indirectly by .text size vs the no-keep .text plus the #[used] static mechanism (a linker cannot drop a function whose address sits in a retained static).",
+  "byte_reproduction_check": {
+    "record": "Second independent LTO build, same command, same target dir (rm -rf /tmp/perf-full-target/release-lto + rebuild, 2026-11-05 ~22:04-22:08Z; a safety copy of the driver binary was kept at /tmp/run10-lto-driver-copy before the rm -rf)",
+    "target_dir": "/tmp/perf-full-target",
+    "result": {
+      "size_bytes": 14137784,
+      "sha256": "3ff9948cbe39500dea7d6a065d268f259ed2b5749659aac9625e0c9cc5c1acf7",
+      "sha_match": true,
+      "text_bytes": 9644252
+    },
+    "duration_note": "Exact start/end echo of the rebuild was not retained (backgrounded session output lost); duration ~245 s reconstructed from the rebuilt binary's mtime (22:08 UTC) + command start (~22:04:05Z). The first rebuild attempt finished in 0.30 s because cargo reported fresh (nothing changed since the driver build) \u2014 that no-op does not count as a reproduction; the rm -rf rebuild above is the real second build.",
+    "conclusion": "LTO sha reproduces exactly across two independent builds at the pinned target dir.",
+    "run9_history": "Run9 LTO was 14,197,080 B, sha c985a9aa..., .text 9,695,132 B (record preserved in git history of this file)."
+  }
+}

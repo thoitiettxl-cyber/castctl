@@ -1,0 +1,19 @@
+# Standalone bench workspace (NOT a member of rust/Cargo.toml — perf0 scope
+# forbids editing it). Own [workspace] so cargo does not attach this crate
+# to the parent workspace; path deps resolve the crates' own workspace
+# (edition/license inheritance comes from rust/Cargo.toml via the crates).
+[package]
+name = "perf-bench"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "M-perf-0 pure-logic timing harness (stdlib only, no new deps)"
+
+[workspace]
+
+[dependencies]
+castctl-config = { path = "../../castctl-config" }
+castctl-tg-text = { path = "../../castctl-tg-text" }
+
+[profile.release]
+debug = false

@@ -1,0 +1,1819 @@
+{
+ "default_profile": "p000",
+ "profiles": {
+  "p000": {
+   "outbound": "proxy-sg-r0"
+  },
+  "p001": {
+   "outbound": "proxy-sg-r1"
+  },
+  "p002": {
+   "outbound": "proxy-sg-r2"
+  },
+  "p003": {
+   "outbound": "proxy-sg-r3"
+  },
+  "p004": {
+   "outbound": "proxy-sg-r4"
+  },
+  "p005": {
+   "outbound": "proxy-sg-r5"
+  },
+  "p006": {
+   "outbound": "proxy-sg-r6"
+  },
+  "p007": {
+   "outbound": "proxy-sg-r7"
+  },
+  "p008": {
+   "outbound": "proxy-sg-r8"
+  },
+  "p009": {
+   "outbound": "proxy-sg-r9"
+  },
+  "p010": {
+   "outbound": "proxy-sg-r0"
+  },
+  "p011": {
+   "outbound": "proxy-sg-r1"
+  },
+  "p012": {
+   "outbound": "proxy-sg-r2"
+  },
+  "p013": {
+   "outbound": "proxy-sg-r3"
+  },
+  "p014": {
+   "outbound": "proxy-sg-r4"
+  },
+  "p015": {
+   "outbound": "proxy-sg-r5"
+  },
+  "p016": {
+   "outbound": "proxy-sg-r6"
+  },
+  "p017": {
+   "outbound": "proxy-sg-r7"
+  },
+  "p018": {
+   "outbound": "proxy-sg-r8"
+  },
+  "p019": {
+   "outbound": "proxy-sg-r9"
+  },
+  "p020": {
+   "outbound": "proxy-sg-r0"
+  },
+  "p021": {
+   "outbound": "proxy-sg-r1"
+  },
+  "p022": {
+   "outbound": "proxy-sg-r2"
+  },
+  "p023": {
+   "outbound": "proxy-sg-r3"
+  },
+  "p024": {
+   "outbound": "proxy-sg-r4"
+  },
+  "p025": {
+   "outbound": "proxy-sg-r5"
+  },
+  "p026": {
+   "outbound": "proxy-sg-r6"
+  },
+  "p027": {
+   "outbound": "proxy-sg-r7"
+  },
+  "p028": {
+   "outbound": "proxy-sg-r8"
+  },
+  "p029": {
+   "outbound": "proxy-sg-r9"
+  },
+  "p030": {
+   "outbound": "proxy-sg-r0"
+  },
+  "p031": {
+   "outbound": "proxy-sg-r1"
+  },
+  "p032": {
+   "outbound": "proxy-sg-r2"
+  },
+  "p033": {
+   "outbound": "proxy-sg-r3"
+  },
+  "p034": {
+   "outbound": "proxy-sg-r4"
+  },
+  "p035": {
+   "outbound": "proxy-sg-r5"
+  },
+  "p036": {
+   "outbound": "proxy-sg-r6"
+  },
+  "p037": {
+   "outbound": "proxy-sg-r7"
+  },
+  "p038": {
+   "outbound": "proxy-sg-r8"
+  },
+  "p039": {
+   "outbound": "proxy-sg-r9"
+  },
+  "p040": {
+   "outbound": "proxy-sg-r0"
+  },
+  "p041": {
+   "outbound": "proxy-sg-r1"
+  },
+  "p042": {
+   "outbound": "proxy-sg-r2"
+  },
+  "p043": {
+   "outbound": "proxy-sg-r3"
+  },
+  "p044": {
+   "outbound": "proxy-sg-r4"
+  },
+  "p045": {
+   "outbound": "proxy-sg-r5"
+  },
+  "p046": {
+   "outbound": "proxy-sg-r6"
+  },
+  "p047": {
+   "outbound": "proxy-sg-r7"
+  },
+  "p048": {
+   "outbound": "proxy-sg-r8"
+  },
+  "p049": {
+   "outbound": "proxy-sg-r9"
+  }
+ },
+ "outbounds": [
+  {
+   "type": "socks",
+   "tag": "proxy-sg-r0",
+   "server": "127.0.0.1",
+   "server_port": 1080,
+   "version": "5",
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "http",
+   "tag": "http-1-r0",
+   "server": "127.0.0.1",
+   "server_port": 8080,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "shadowsocks",
+   "tag": "ss-1-r0",
+   "server": "203.0.113.10",
+   "server_port": 8388,
+   "method": "aes-256-gcm",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "vmess",
+   "tag": "vmess-1-r0",
+   "server": "203.0.113.11",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "security": "auto"
+  },
+  {
+   "type": "vless",
+   "tag": "vless-1-r0",
+   "server": "203.0.113.20",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "flow": "xtls-rprx-vision",
+   "tls": {
+    "enabled": true,
+    "server_name": "example.com",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    },
+    "reality": {
+     "enabled": true,
+     "public_key": "FAKE-PUB",
+     "short_id": "FAKE-SHORT"
+    }
+   }
+  },
+  {
+   "type": "trojan",
+   "tag": "trojan-1-r0",
+   "server": "203.0.113.12",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "hysteria2",
+   "tag": "hy2-1-r0",
+   "server": "203.0.113.13",
+   "server_port": 443,
+   "password": "FAKE-PW",
+   "obfs": {
+    "type": "salamander",
+    "password": "FAKE-OBFS"
+   }
+  },
+  {
+   "type": "tuic",
+   "tag": "tuic-1-r0",
+   "server": "203.0.113.14",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "anytls",
+   "tag": "anytls-1-r0",
+   "server": "203.0.113.15",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "ssh",
+   "tag": "ssh-1-r0",
+   "server": "203.0.113.16",
+   "server_port": 22,
+   "user": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "snell",
+   "tag": "snell-1-r0",
+   "server": "203.0.113.17",
+   "server_port": 8388,
+   "version": 4,
+   "psk": "FAKE-PSK"
+  },
+  {
+   "type": "shadowtls",
+   "tag": "stls-1-r0",
+   "server": "203.0.113.18",
+   "server_port": 443,
+   "version": 3,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "naive",
+   "tag": "naive-1-r0",
+   "server": "203.0.113.19",
+   "server_port": 443,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "direct",
+   "tag": "direct-1-r0"
+  },
+  {
+   "type": "tor",
+   "tag": "tor-1-r0"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r0"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r0",
+   "outbounds": [
+    "proxy-sg-r0",
+    "direct-1-r0"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r0",
+   "outbounds": [
+    "proxy-sg-r0"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
+  },
+  {
+   "type": "socks",
+   "tag": "proxy-sg-r1",
+   "server": "127.0.0.1",
+   "server_port": 1080,
+   "version": "5",
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "http",
+   "tag": "http-1-r1",
+   "server": "127.0.0.1",
+   "server_port": 8080,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "shadowsocks",
+   "tag": "ss-1-r1",
+   "server": "203.0.113.10",
+   "server_port": 8388,
+   "method": "aes-256-gcm",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "vmess",
+   "tag": "vmess-1-r1",
+   "server": "203.0.113.11",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "security": "auto"
+  },
+  {
+   "type": "vless",
+   "tag": "vless-1-r1",
+   "server": "203.0.113.20",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "flow": "xtls-rprx-vision",
+   "tls": {
+    "enabled": true,
+    "server_name": "example.com",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    },
+    "reality": {
+     "enabled": true,
+     "public_key": "FAKE-PUB",
+     "short_id": "FAKE-SHORT"
+    }
+   }
+  },
+  {
+   "type": "trojan",
+   "tag": "trojan-1-r1",
+   "server": "203.0.113.12",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "hysteria2",
+   "tag": "hy2-1-r1",
+   "server": "203.0.113.13",
+   "server_port": 443,
+   "password": "FAKE-PW",
+   "obfs": {
+    "type": "salamander",
+    "password": "FAKE-OBFS"
+   }
+  },
+  {
+   "type": "tuic",
+   "tag": "tuic-1-r1",
+   "server": "203.0.113.14",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "anytls",
+   "tag": "anytls-1-r1",
+   "server": "203.0.113.15",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "ssh",
+   "tag": "ssh-1-r1",
+   "server": "203.0.113.16",
+   "server_port": 22,
+   "user": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "snell",
+   "tag": "snell-1-r1",
+   "server": "203.0.113.17",
+   "server_port": 8388,
+   "version": 4,
+   "psk": "FAKE-PSK"
+  },
+  {
+   "type": "shadowtls",
+   "tag": "stls-1-r1",
+   "server": "203.0.113.18",
+   "server_port": 443,
+   "version": 3,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "naive",
+   "tag": "naive-1-r1",
+   "server": "203.0.113.19",
+   "server_port": 443,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "direct",
+   "tag": "direct-1-r1"
+  },
+  {
+   "type": "tor",
+   "tag": "tor-1-r1"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r1"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r1",
+   "outbounds": [
+    "proxy-sg-r1",
+    "direct-1-r1"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r1",
+   "outbounds": [
+    "proxy-sg-r1"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
+  },
+  {
+   "type": "socks",
+   "tag": "proxy-sg-r2",
+   "server": "127.0.0.1",
+   "server_port": 1080,
+   "version": "5",
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "http",
+   "tag": "http-1-r2",
+   "server": "127.0.0.1",
+   "server_port": 8080,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "shadowsocks",
+   "tag": "ss-1-r2",
+   "server": "203.0.113.10",
+   "server_port": 8388,
+   "method": "aes-256-gcm",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "vmess",
+   "tag": "vmess-1-r2",
+   "server": "203.0.113.11",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "security": "auto"
+  },
+  {
+   "type": "vless",
+   "tag": "vless-1-r2",
+   "server": "203.0.113.20",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "flow": "xtls-rprx-vision",
+   "tls": {
+    "enabled": true,
+    "server_name": "example.com",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    },
+    "reality": {
+     "enabled": true,
+     "public_key": "FAKE-PUB",
+     "short_id": "FAKE-SHORT"
+    }
+   }
+  },
+  {
+   "type": "trojan",
+   "tag": "trojan-1-r2",
+   "server": "203.0.113.12",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "hysteria2",
+   "tag": "hy2-1-r2",
+   "server": "203.0.113.13",
+   "server_port": 443,
+   "password": "FAKE-PW",
+   "obfs": {
+    "type": "salamander",
+    "password": "FAKE-OBFS"
+   }
+  },
+  {
+   "type": "tuic",
+   "tag": "tuic-1-r2",
+   "server": "203.0.113.14",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "anytls",
+   "tag": "anytls-1-r2",
+   "server": "203.0.113.15",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "ssh",
+   "tag": "ssh-1-r2",
+   "server": "203.0.113.16",
+   "server_port": 22,
+   "user": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "snell",
+   "tag": "snell-1-r2",
+   "server": "203.0.113.17",
+   "server_port": 8388,
+   "version": 4,
+   "psk": "FAKE-PSK"
+  },
+  {
+   "type": "shadowtls",
+   "tag": "stls-1-r2",
+   "server": "203.0.113.18",
+   "server_port": 443,
+   "version": 3,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "naive",
+   "tag": "naive-1-r2",
+   "server": "203.0.113.19",
+   "server_port": 443,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "direct",
+   "tag": "direct-1-r2"
+  },
+  {
+   "type": "tor",
+   "tag": "tor-1-r2"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r2"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r2",
+   "outbounds": [
+    "proxy-sg-r2",
+    "direct-1-r2"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r2",
+   "outbounds": [
+    "proxy-sg-r2"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
+  },
+  {
+   "type": "socks",
+   "tag": "proxy-sg-r3",
+   "server": "127.0.0.1",
+   "server_port": 1080,
+   "version": "5",
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "http",
+   "tag": "http-1-r3",
+   "server": "127.0.0.1",
+   "server_port": 8080,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "shadowsocks",
+   "tag": "ss-1-r3",
+   "server": "203.0.113.10",
+   "server_port": 8388,
+   "method": "aes-256-gcm",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "vmess",
+   "tag": "vmess-1-r3",
+   "server": "203.0.113.11",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "security": "auto"
+  },
+  {
+   "type": "vless",
+   "tag": "vless-1-r3",
+   "server": "203.0.113.20",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "flow": "xtls-rprx-vision",
+   "tls": {
+    "enabled": true,
+    "server_name": "example.com",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    },
+    "reality": {
+     "enabled": true,
+     "public_key": "FAKE-PUB",
+     "short_id": "FAKE-SHORT"
+    }
+   }
+  },
+  {
+   "type": "trojan",
+   "tag": "trojan-1-r3",
+   "server": "203.0.113.12",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "hysteria2",
+   "tag": "hy2-1-r3",
+   "server": "203.0.113.13",
+   "server_port": 443,
+   "password": "FAKE-PW",
+   "obfs": {
+    "type": "salamander",
+    "password": "FAKE-OBFS"
+   }
+  },
+  {
+   "type": "tuic",
+   "tag": "tuic-1-r3",
+   "server": "203.0.113.14",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "anytls",
+   "tag": "anytls-1-r3",
+   "server": "203.0.113.15",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "ssh",
+   "tag": "ssh-1-r3",
+   "server": "203.0.113.16",
+   "server_port": 22,
+   "user": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "snell",
+   "tag": "snell-1-r3",
+   "server": "203.0.113.17",
+   "server_port": 8388,
+   "version": 4,
+   "psk": "FAKE-PSK"
+  },
+  {
+   "type": "shadowtls",
+   "tag": "stls-1-r3",
+   "server": "203.0.113.18",
+   "server_port": 443,
+   "version": 3,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "naive",
+   "tag": "naive-1-r3",
+   "server": "203.0.113.19",
+   "server_port": 443,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "direct",
+   "tag": "direct-1-r3"
+  },
+  {
+   "type": "tor",
+   "tag": "tor-1-r3"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r3"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r3",
+   "outbounds": [
+    "proxy-sg-r3",
+    "direct-1-r3"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r3",
+   "outbounds": [
+    "proxy-sg-r3"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
+  },
+  {
+   "type": "socks",
+   "tag": "proxy-sg-r4",
+   "server": "127.0.0.1",
+   "server_port": 1080,
+   "version": "5",
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "http",
+   "tag": "http-1-r4",
+   "server": "127.0.0.1",
+   "server_port": 8080,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "shadowsocks",
+   "tag": "ss-1-r4",
+   "server": "203.0.113.10",
+   "server_port": 8388,
+   "method": "aes-256-gcm",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "vmess",
+   "tag": "vmess-1-r4",
+   "server": "203.0.113.11",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "security": "auto"
+  },
+  {
+   "type": "vless",
+   "tag": "vless-1-r4",
+   "server": "203.0.113.20",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "flow": "xtls-rprx-vision",
+   "tls": {
+    "enabled": true,
+    "server_name": "example.com",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    },
+    "reality": {
+     "enabled": true,
+     "public_key": "FAKE-PUB",
+     "short_id": "FAKE-SHORT"
+    }
+   }
+  },
+  {
+   "type": "trojan",
+   "tag": "trojan-1-r4",
+   "server": "203.0.113.12",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "hysteria2",
+   "tag": "hy2-1-r4",
+   "server": "203.0.113.13",
+   "server_port": 443,
+   "password": "FAKE-PW",
+   "obfs": {
+    "type": "salamander",
+    "password": "FAKE-OBFS"
+   }
+  },
+  {
+   "type": "tuic",
+   "tag": "tuic-1-r4",
+   "server": "203.0.113.14",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "anytls",
+   "tag": "anytls-1-r4",
+   "server": "203.0.113.15",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "ssh",
+   "tag": "ssh-1-r4",
+   "server": "203.0.113.16",
+   "server_port": 22,
+   "user": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "snell",
+   "tag": "snell-1-r4",
+   "server": "203.0.113.17",
+   "server_port": 8388,
+   "version": 4,
+   "psk": "FAKE-PSK"
+  },
+  {
+   "type": "shadowtls",
+   "tag": "stls-1-r4",
+   "server": "203.0.113.18",
+   "server_port": 443,
+   "version": 3,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "naive",
+   "tag": "naive-1-r4",
+   "server": "203.0.113.19",
+   "server_port": 443,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "direct",
+   "tag": "direct-1-r4"
+  },
+  {
+   "type": "tor",
+   "tag": "tor-1-r4"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r4"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r4",
+   "outbounds": [
+    "proxy-sg-r4",
+    "direct-1-r4"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r4",
+   "outbounds": [
+    "proxy-sg-r4"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
+  },
+  {
+   "type": "socks",
+   "tag": "proxy-sg-r5",
+   "server": "127.0.0.1",
+   "server_port": 1080,
+   "version": "5",
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "http",
+   "tag": "http-1-r5",
+   "server": "127.0.0.1",
+   "server_port": 8080,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "shadowsocks",
+   "tag": "ss-1-r5",
+   "server": "203.0.113.10",
+   "server_port": 8388,
+   "method": "aes-256-gcm",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "vmess",
+   "tag": "vmess-1-r5",
+   "server": "203.0.113.11",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "security": "auto"
+  },
+  {
+   "type": "vless",
+   "tag": "vless-1-r5",
+   "server": "203.0.113.20",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "flow": "xtls-rprx-vision",
+   "tls": {
+    "enabled": true,
+    "server_name": "example.com",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    },
+    "reality": {
+     "enabled": true,
+     "public_key": "FAKE-PUB",
+     "short_id": "FAKE-SHORT"
+    }
+   }
+  },
+  {
+   "type": "trojan",
+   "tag": "trojan-1-r5",
+   "server": "203.0.113.12",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "hysteria2",
+   "tag": "hy2-1-r5",
+   "server": "203.0.113.13",
+   "server_port": 443,
+   "password": "FAKE-PW",
+   "obfs": {
+    "type": "salamander",
+    "password": "FAKE-OBFS"
+   }
+  },
+  {
+   "type": "tuic",
+   "tag": "tuic-1-r5",
+   "server": "203.0.113.14",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "anytls",
+   "tag": "anytls-1-r5",
+   "server": "203.0.113.15",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "ssh",
+   "tag": "ssh-1-r5",
+   "server": "203.0.113.16",
+   "server_port": 22,
+   "user": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "snell",
+   "tag": "snell-1-r5",
+   "server": "203.0.113.17",
+   "server_port": 8388,
+   "version": 4,
+   "psk": "FAKE-PSK"
+  },
+  {
+   "type": "shadowtls",
+   "tag": "stls-1-r5",
+   "server": "203.0.113.18",
+   "server_port": 443,
+   "version": 3,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "naive",
+   "tag": "naive-1-r5",
+   "server": "203.0.113.19",
+   "server_port": 443,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "direct",
+   "tag": "direct-1-r5"
+  },
+  {
+   "type": "tor",
+   "tag": "tor-1-r5"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r5"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r5",
+   "outbounds": [
+    "proxy-sg-r5",
+    "direct-1-r5"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r5",
+   "outbounds": [
+    "proxy-sg-r5"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
+  },
+  {
+   "type": "socks",
+   "tag": "proxy-sg-r6",
+   "server": "127.0.0.1",
+   "server_port": 1080,
+   "version": "5",
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "http",
+   "tag": "http-1-r6",
+   "server": "127.0.0.1",
+   "server_port": 8080,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "shadowsocks",
+   "tag": "ss-1-r6",
+   "server": "203.0.113.10",
+   "server_port": 8388,
+   "method": "aes-256-gcm",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "vmess",
+   "tag": "vmess-1-r6",
+   "server": "203.0.113.11",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "security": "auto"
+  },
+  {
+   "type": "vless",
+   "tag": "vless-1-r6",
+   "server": "203.0.113.20",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "flow": "xtls-rprx-vision",
+   "tls": {
+    "enabled": true,
+    "server_name": "example.com",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    },
+    "reality": {
+     "enabled": true,
+     "public_key": "FAKE-PUB",
+     "short_id": "FAKE-SHORT"
+    }
+   }
+  },
+  {
+   "type": "trojan",
+   "tag": "trojan-1-r6",
+   "server": "203.0.113.12",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "hysteria2",
+   "tag": "hy2-1-r6",
+   "server": "203.0.113.13",
+   "server_port": 443,
+   "password": "FAKE-PW",
+   "obfs": {
+    "type": "salamander",
+    "password": "FAKE-OBFS"
+   }
+  },
+  {
+   "type": "tuic",
+   "tag": "tuic-1-r6",
+   "server": "203.0.113.14",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "anytls",
+   "tag": "anytls-1-r6",
+   "server": "203.0.113.15",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "ssh",
+   "tag": "ssh-1-r6",
+   "server": "203.0.113.16",
+   "server_port": 22,
+   "user": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "snell",
+   "tag": "snell-1-r6",
+   "server": "203.0.113.17",
+   "server_port": 8388,
+   "version": 4,
+   "psk": "FAKE-PSK"
+  },
+  {
+   "type": "shadowtls",
+   "tag": "stls-1-r6",
+   "server": "203.0.113.18",
+   "server_port": 443,
+   "version": 3,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "naive",
+   "tag": "naive-1-r6",
+   "server": "203.0.113.19",
+   "server_port": 443,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "direct",
+   "tag": "direct-1-r6"
+  },
+  {
+   "type": "tor",
+   "tag": "tor-1-r6"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r6"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r6",
+   "outbounds": [
+    "proxy-sg-r6",
+    "direct-1-r6"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r6",
+   "outbounds": [
+    "proxy-sg-r6"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
+  },
+  {
+   "type": "socks",
+   "tag": "proxy-sg-r7",
+   "server": "127.0.0.1",
+   "server_port": 1080,
+   "version": "5",
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "http",
+   "tag": "http-1-r7",
+   "server": "127.0.0.1",
+   "server_port": 8080,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "shadowsocks",
+   "tag": "ss-1-r7",
+   "server": "203.0.113.10",
+   "server_port": 8388,
+   "method": "aes-256-gcm",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "vmess",
+   "tag": "vmess-1-r7",
+   "server": "203.0.113.11",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "security": "auto"
+  },
+  {
+   "type": "vless",
+   "tag": "vless-1-r7",
+   "server": "203.0.113.20",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "flow": "xtls-rprx-vision",
+   "tls": {
+    "enabled": true,
+    "server_name": "example.com",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    },
+    "reality": {
+     "enabled": true,
+     "public_key": "FAKE-PUB",
+     "short_id": "FAKE-SHORT"
+    }
+   }
+  },
+  {
+   "type": "trojan",
+   "tag": "trojan-1-r7",
+   "server": "203.0.113.12",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "hysteria2",
+   "tag": "hy2-1-r7",
+   "server": "203.0.113.13",
+   "server_port": 443,
+   "password": "FAKE-PW",
+   "obfs": {
+    "type": "salamander",
+    "password": "FAKE-OBFS"
+   }
+  },
+  {
+   "type": "tuic",
+   "tag": "tuic-1-r7",
+   "server": "203.0.113.14",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "anytls",
+   "tag": "anytls-1-r7",
+   "server": "203.0.113.15",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "ssh",
+   "tag": "ssh-1-r7",
+   "server": "203.0.113.16",
+   "server_port": 22,
+   "user": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "snell",
+   "tag": "snell-1-r7",
+   "server": "203.0.113.17",
+   "server_port": 8388,
+   "version": 4,
+   "psk": "FAKE-PSK"
+  },
+  {
+   "type": "shadowtls",
+   "tag": "stls-1-r7",
+   "server": "203.0.113.18",
+   "server_port": 443,
+   "version": 3,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "naive",
+   "tag": "naive-1-r7",
+   "server": "203.0.113.19",
+   "server_port": 443,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "direct",
+   "tag": "direct-1-r7"
+  },
+  {
+   "type": "tor",
+   "tag": "tor-1-r7"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r7"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r7",
+   "outbounds": [
+    "proxy-sg-r7",
+    "direct-1-r7"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r7",
+   "outbounds": [
+    "proxy-sg-r7"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
+  },
+  {
+   "type": "socks",
+   "tag": "proxy-sg-r8",
+   "server": "127.0.0.1",
+   "server_port": 1080,
+   "version": "5",
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "http",
+   "tag": "http-1-r8",
+   "server": "127.0.0.1",
+   "server_port": 8080,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "shadowsocks",
+   "tag": "ss-1-r8",
+   "server": "203.0.113.10",
+   "server_port": 8388,
+   "method": "aes-256-gcm",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "vmess",
+   "tag": "vmess-1-r8",
+   "server": "203.0.113.11",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "security": "auto"
+  },
+  {
+   "type": "vless",
+   "tag": "vless-1-r8",
+   "server": "203.0.113.20",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "flow": "xtls-rprx-vision",
+   "tls": {
+    "enabled": true,
+    "server_name": "example.com",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    },
+    "reality": {
+     "enabled": true,
+     "public_key": "FAKE-PUB",
+     "short_id": "FAKE-SHORT"
+    }
+   }
+  },
+  {
+   "type": "trojan",
+   "tag": "trojan-1-r8",
+   "server": "203.0.113.12",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "hysteria2",
+   "tag": "hy2-1-r8",
+   "server": "203.0.113.13",
+   "server_port": 443,
+   "password": "FAKE-PW",
+   "obfs": {
+    "type": "salamander",
+    "password": "FAKE-OBFS"
+   }
+  },
+  {
+   "type": "tuic",
+   "tag": "tuic-1-r8",
+   "server": "203.0.113.14",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "anytls",
+   "tag": "anytls-1-r8",
+   "server": "203.0.113.15",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "ssh",
+   "tag": "ssh-1-r8",
+   "server": "203.0.113.16",
+   "server_port": 22,
+   "user": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "snell",
+   "tag": "snell-1-r8",
+   "server": "203.0.113.17",
+   "server_port": 8388,
+   "version": 4,
+   "psk": "FAKE-PSK"
+  },
+  {
+   "type": "shadowtls",
+   "tag": "stls-1-r8",
+   "server": "203.0.113.18",
+   "server_port": 443,
+   "version": 3,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "naive",
+   "tag": "naive-1-r8",
+   "server": "203.0.113.19",
+   "server_port": 443,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "direct",
+   "tag": "direct-1-r8"
+  },
+  {
+   "type": "tor",
+   "tag": "tor-1-r8"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r8"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r8",
+   "outbounds": [
+    "proxy-sg-r8",
+    "direct-1-r8"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r8",
+   "outbounds": [
+    "proxy-sg-r8"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
+  },
+  {
+   "type": "socks",
+   "tag": "proxy-sg-r9",
+   "server": "127.0.0.1",
+   "server_port": 1080,
+   "version": "5",
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "http",
+   "tag": "http-1-r9",
+   "server": "127.0.0.1",
+   "server_port": 8080,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "shadowsocks",
+   "tag": "ss-1-r9",
+   "server": "203.0.113.10",
+   "server_port": 8388,
+   "method": "aes-256-gcm",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "vmess",
+   "tag": "vmess-1-r9",
+   "server": "203.0.113.11",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "security": "auto"
+  },
+  {
+   "type": "vless",
+   "tag": "vless-1-r9",
+   "server": "203.0.113.20",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "flow": "xtls-rprx-vision",
+   "tls": {
+    "enabled": true,
+    "server_name": "example.com",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    },
+    "reality": {
+     "enabled": true,
+     "public_key": "FAKE-PUB",
+     "short_id": "FAKE-SHORT"
+    }
+   }
+  },
+  {
+   "type": "trojan",
+   "tag": "trojan-1-r9",
+   "server": "203.0.113.12",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "hysteria2",
+   "tag": "hy2-1-r9",
+   "server": "203.0.113.13",
+   "server_port": 443,
+   "password": "FAKE-PW",
+   "obfs": {
+    "type": "salamander",
+    "password": "FAKE-OBFS"
+   }
+  },
+  {
+   "type": "tuic",
+   "tag": "tuic-1-r9",
+   "server": "203.0.113.14",
+   "server_port": 443,
+   "uuid": "FAKE-UUID",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "anytls",
+   "tag": "anytls-1-r9",
+   "server": "203.0.113.15",
+   "server_port": 443,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "ssh",
+   "tag": "ssh-1-r9",
+   "server": "203.0.113.16",
+   "server_port": 22,
+   "user": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "snell",
+   "tag": "snell-1-r9",
+   "server": "203.0.113.17",
+   "server_port": 8388,
+   "version": 4,
+   "psk": "FAKE-PSK"
+  },
+  {
+   "type": "shadowtls",
+   "tag": "stls-1-r9",
+   "server": "203.0.113.18",
+   "server_port": 443,
+   "version": 3,
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "naive",
+   "tag": "naive-1-r9",
+   "server": "203.0.113.19",
+   "server_port": 443,
+   "username": "FAKE-USER",
+   "password": "FAKE-PW"
+  },
+  {
+   "type": "direct",
+   "tag": "direct-1-r9"
+  },
+  {
+   "type": "tor",
+   "tag": "tor-1-r9"
+  },
+  {
+   "type": "block",
+   "tag": "block-1-r9"
+  },
+  {
+   "type": "selector",
+   "tag": "sel-1-r9",
+   "outbounds": [
+    "proxy-sg-r9",
+    "direct-1-r9"
+   ]
+  },
+  {
+   "type": "urltest",
+   "tag": "ut-1-r9",
+   "outbounds": [
+    "proxy-sg-r9"
+   ],
+   "url": "https://example.com/",
+   "interval": "1m"
+  }
+ ],
+ "endpoints": [
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r0",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r1",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r2",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r3",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r4",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r5",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r6",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r7",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r8",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
+  },
+  {
+   "type": "wireguard",
+   "tag": "wg-home-r9",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "FAKE-PRIVKEY",
+   "peers": [
+    {
+     "address": "203.0.113.10",
+     "port": 51820,
+     "public_key": "FAKE-PUBKEY",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ]
+    }
+   ]
+  }
+ ]
+}

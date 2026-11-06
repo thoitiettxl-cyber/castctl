@@ -1,0 +1,456 @@
+{
+  "record": "nm symbol counts for the run10 rust-full binaries (M-perf-3 re-measure at fbaa0d7)",
+  "source_commit": "fbaa0d7bff38748470e07e46927aaee62f4c06c7",
+  "source_note": "Cue checkout /tmp/castctl-rust-perf1 at fbaa0d7 (tar-synced from the local clone; rebase onto origin/dev-rust 25a124e incl. M4c + M5a + PR #70 docs sweep). Run10 driver builds b1/b2 (shell) + b3/b4/b5 (full) in /tmp/perf-full-target (warm \u2014 run9 artifacts present, so b4 no-keep took 9.0 s vs run9's 217.8 s cold); extra plain no-keep build (2.81 s, --no-default-features, no RUSTFLAGS) kept as /tmp/perf2-nokeep-plain; headline restored by the Reproduce-check b5 relink (0.30 s), sha verified 851bb6b4. nm re-run twice on the run10 binaries (2026-11-05) and counts identical both times.",
+  "host": "cue (Linux 6.18.38+ x86_64, 8 x Intel Xeon @ 2.50GHz)",
+  "builds": {
+    "plain": {
+      "command": "cargo +1.99.1 build --release --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml",
+      "duration_seconds": 155.4,
+      "target_dir": "/tmp/perf-full-target"
+    },
+    "nokeep_strip": {
+      "command": "RUSTFLAGS=\"-C strip=symbols\" cargo +1.99.1 build --release --locked --offline --no-default-features --manifest-path rust/perf/full-bin/Cargo.toml",
+      "duration_seconds": 9.0,
+      "target_dir": "/tmp/perf-full-target"
+    },
+    "headline_strip": {
+      "command": "RUSTFLAGS=\"-C strip=symbols\" cargo +1.99.1 build --release --locked --offline --manifest-path rust/perf/full-bin/Cargo.toml",
+      "duration_seconds": 1.1,
+      "target_dir": "/tmp/perf-full-target"
+    }
+  },
+  "binaries": {
+    "full_keep_unstripped": {
+      "path": "/tmp/perf-full-target/release/castctl-full-plain",
+      "size_bytes": 23245712,
+      "sha256": "01c251f3f79f83ef82ab706d95097aa008ba6ca1ffad72865c32a4307271766f",
+      "size_A_stdout": "/tmp/perf-full-target/release/castctl-full-plain  :\nsection                  size       addr\n.interp                    28        736\n.note.ABI-tag              32        764\n.note.gnu.build-id         36        796\n.dynsym                  4104        832\n.gnu.version              342       4936\n.gnu.version_r            528       5280\n.gnu.hash                  28       5808\n.dynstr                  2513       5836\n.rela.dyn              925968       8352\n.rela.plt                1560     934320\n.gcc_except_table      978120     935880\n.rodata               2251848    1916928\n.eh_frame_hdr          188284    4168776\n.eh_frame             1287196    4357064\n.text                11123948    5648384\n.init                      27   16772332\n.fini                      13   16772360\n.plt                     1056   16772384\n.tdata                    240   16777536\n.tbss                     368   16777776\n.fini_array                 8   16777776\n.init_array                16   16777784\n.data.rel.ro           654752   16777824\n.dynamic                  496   17432576\n.got                    29720   17433072\n.got.plt                  544   17462792\n.relro_padding           2008   17463336\n.tm_clone_table             0   17467432\n.data                   17256   17467456\n.bss                     5356   17484736\n.comment                  184          0\nTotal                17476579\n\n\n",
+      "sections": {
+        ".interp": 28,
+        ".note.ABI-tag": 32,
+        ".note.gnu.build-id": 36,
+        ".dynsym": 4104,
+        ".gnu.version": 342,
+        ".gnu.version_r": 528,
+        ".gnu.hash": 28,
+        ".dynstr": 2513,
+        ".rela.dyn": 925968,
+        ".rela.plt": 1560,
+        ".gcc_except_table": 978120,
+        ".rodata": 2251848,
+        ".eh_frame_hdr": 188284,
+        ".eh_frame": 1287196,
+        ".text": 11123948,
+        ".init": 27,
+        ".fini": 13,
+        ".plt": 1056,
+        ".tdata": 240,
+        ".tbss": 368,
+        ".fini_array": 8,
+        ".init_array": 16,
+        ".data.rel.ro": 654752,
+        ".dynamic": 496,
+        ".got": 29720,
+        ".got.plt": 544,
+        ".relro_padding": 2008,
+        ".tm_clone_table": 0,
+        ".data": 17256,
+        ".bss": 5356,
+        ".comment": 184
+      },
+      "role": "full-keep unstripped (plain build, default features)"
+    },
+    "full_nokeep_unstripped": {
+      "path": "/tmp/perf2-nokeep-plain",
+      "size_bytes": 23200024,
+      "sha256": "23638365446282fb46afa2b7f94cd4fcca0e2bb114d54d1c8c5d75d0e6d4f846",
+      "size_A_stdout": "/tmp/perf2-nokeep-plain  :\nsection                  size       addr\n.interp                    28        736\n.note.ABI-tag              32        764\n.note.gnu.build-id         36        796\n.dynsym                  4104        832\n.gnu.version              342       4936\n.gnu.version_r            528       5280\n.gnu.hash                  28       5808\n.dynstr                  2513       5836\n.rela.dyn              925512       8352\n.rela.plt                1560     933864\n.gcc_except_table      976492     935424\n.rodata               2251856    1912832\n.eh_frame_hdr          187868    4164688\n.eh_frame             1282952    4352560\n.text                11098332    5639616\n.init                      27   16737948\n.fini                      13   16737976\n.plt                     1056   16738000\n.tdata                    240   16743152\n.tbss                     368   16743392\n.fini_array                 8   16743392\n.init_array                16   16743400\n.data.rel.ro           654400   16743424\n.dynamic                  496   17397824\n.got                    29696   17398320\n.got.plt                  544   17428016\n.relro_padding           4016   17428560\n.tm_clone_table             0   17432656\n.data                   17256   17432672\n.bss                     5356   17449952\n.comment                  184          0\nTotal                17445859\n\n\n",
+      "sections": {
+        ".interp": 28,
+        ".note.ABI-tag": 32,
+        ".note.gnu.build-id": 36,
+        ".dynsym": 4104,
+        ".gnu.version": 342,
+        ".gnu.version_r": 528,
+        ".gnu.hash": 28,
+        ".dynstr": 2513,
+        ".rela.dyn": 925512,
+        ".rela.plt": 1560,
+        ".gcc_except_table": 976492,
+        ".rodata": 2251856,
+        ".eh_frame_hdr": 187868,
+        ".eh_frame": 1282952,
+        ".text": 11098332,
+        ".init": 27,
+        ".fini": 13,
+        ".plt": 1056,
+        ".tdata": 240,
+        ".tbss": 368,
+        ".fini_array": 8,
+        ".init_array": 16,
+        ".data.rel.ro": 654400,
+        ".dynamic": 496,
+        ".got": 29696,
+        ".got.plt": 544,
+        ".relro_padding": 4016,
+        ".tm_clone_table": 0,
+        ".data": 17256,
+        ".bss": 5356,
+        ".comment": 184
+      },
+      "role": "full no-keep unstripped (extra plain build, --no-default-features, kept as /tmp/perf2-nokeep-plain; driver b4 output is stripped)"
+    },
+    "full_keep_stripped": {
+      "path": "/tmp/perf-full-target/release/castctl-full",
+      "size_bytes": 17475048,
+      "sha256": "851bb6b4d28afe9435db0766566ecc67a80e7561775670abc7a0c26d64073eb7",
+      "size_A_stdout": "/tmp/perf-full-target/release/castctl-full  :\nsection                  size       addr\n.interp                    28        736\n.note.ABI-tag              32        764\n.note.gnu.build-id         36        796\n.dynsym                  4104        832\n.gnu.version              342       4936\n.gnu.version_r            528       5280\n.gnu.hash                  28       5808\n.dynstr                  2513       5836\n.rela.dyn              925968       8352\n.rela.plt                1560     934320\n.gcc_except_table      978120     935880\n.rodata               2251848    1916928\n.eh_frame_hdr          188284    4168776\n.eh_frame             1287196    4357064\n.text                11123948    5648384\n.init                      27   16772332\n.fini                      13   16772360\n.plt                     1056   16772384\n.tdata                    240   16777536\n.tbss                     368   16777776\n.fini_array                 8   16777776\n.init_array                16   16777784\n.data.rel.ro           654752   16777824\n.dynamic                  496   17432576\n.got                    29720   17433072\n.got.plt                  544   17462792\n.relro_padding           2008   17463336\n.tm_clone_table             0   17467432\n.data                   17256   17467456\n.bss                     5356   17484736\n.comment                  184          0\nTotal                17476579\n\n\n",
+      "sections": {
+        ".interp": 28,
+        ".note.ABI-tag": 32,
+        ".note.gnu.build-id": 36,
+        ".dynsym": 4104,
+        ".gnu.version": 342,
+        ".gnu.version_r": 528,
+        ".gnu.hash": 28,
+        ".dynstr": 2513,
+        ".rela.dyn": 925968,
+        ".rela.plt": 1560,
+        ".gcc_except_table": 978120,
+        ".rodata": 2251848,
+        ".eh_frame_hdr": 188284,
+        ".eh_frame": 1287196,
+        ".text": 11123948,
+        ".init": 27,
+        ".fini": 13,
+        ".plt": 1056,
+        ".tdata": 240,
+        ".tbss": 368,
+        ".fini_array": 8,
+        ".init_array": 16,
+        ".data.rel.ro": 654752,
+        ".dynamic": 496,
+        ".got": 29720,
+        ".got.plt": 544,
+        ".relro_padding": 2008,
+        ".tm_clone_table": 0,
+        ".data": 17256,
+        ".bss": 5356,
+        ".comment": 184
+      },
+      "role": "full-keep stripped (RUSTFLAGS=-C strip=symbols, headline binary)"
+    },
+    "full_nokeep_stripped": {
+      "path": "/tmp/perf-full-target/release/castctl-full-nokeep",
+      "size_bytes": 17440264,
+      "sha256": "d4c800f91b5021f01d768702984b879210b79ad78ee49aabb5d923817bdf41b8",
+      "size_A_stdout": "/tmp/perf-full-target/release/castctl-full-nokeep  :\nsection                  size       addr\n.interp                    28        736\n.note.ABI-tag              32        764\n.note.gnu.build-id         36        796\n.dynsym                  4104        832\n.gnu.version              342       4936\n.gnu.version_r            528       5280\n.gnu.hash                  28       5808\n.dynstr                  2513       5836\n.rela.dyn              925512       8352\n.rela.plt                1560     933864\n.gcc_except_table      976492     935424\n.rodata               2251856    1912832\n.eh_frame_hdr          187868    4164688\n.eh_frame             1282952    4352560\n.text                11098332    5639616\n.init                      27   16737948\n.fini                      13   16737976\n.plt                     1056   16738000\n.tdata                    240   16743152\n.tbss                     368   16743392\n.fini_array                 8   16743392\n.init_array                16   16743400\n.data.rel.ro           654400   16743424\n.dynamic                  496   17397824\n.got                    29696   17398320\n.got.plt                  544   17428016\n.relro_padding           4016   17428560\n.tm_clone_table             0   17432656\n.data                   17256   17432672\n.bss                     5356   17449952\n.comment                  184          0\nTotal                17445859\n\n\n",
+      "sections": {
+        ".interp": 28,
+        ".note.ABI-tag": 32,
+        ".note.gnu.build-id": 36,
+        ".dynsym": 4104,
+        ".gnu.version": 342,
+        ".gnu.version_r": 528,
+        ".gnu.hash": 28,
+        ".dynstr": 2513,
+        ".rela.dyn": 925512,
+        ".rela.plt": 1560,
+        ".gcc_except_table": 976492,
+        ".rodata": 2251856,
+        ".eh_frame_hdr": 187868,
+        ".eh_frame": 1282952,
+        ".text": 11098332,
+        ".init": 27,
+        ".fini": 13,
+        ".plt": 1056,
+        ".tdata": 240,
+        ".tbss": 368,
+        ".fini_array": 8,
+        ".init_array": 16,
+        ".data.rel.ro": 654400,
+        ".dynamic": 496,
+        ".got": 29696,
+        ".got.plt": 544,
+        ".relro_padding": 4016,
+        ".tm_clone_table": 0,
+        ".data": 17256,
+        ".bss": 5356,
+        ".comment": 184
+      },
+      "role": "full no-keep stripped (RUSTFLAGS=-C strip=symbols, --no-default-features)"
+    },
+    "full_keep_plain_gnu_stripped": {
+      "path": "/tmp/perf-full-target/release/castctl-full-plain-gnu",
+      "size_bytes": 17475040,
+      "sha256": "d959f6bbf1fc1bcbc68dbad1b39acc404317b99c7284f0b3274901a8b130ff67",
+      "size_A_stdout": "/tmp/perf-full-target/release/castctl-full-plain-gnu  :\nsection                  size       addr\n.interp                    28        736\n.note.ABI-tag              32        764\n.note.gnu.build-id         36        796\n.dynsym                  4104        832\n.gnu.version              342       4936\n.gnu.version_r            528       5280\n.gnu.hash                  28       5808\n.dynstr                  2513       5836\n.rela.dyn              925968       8352\n.rela.plt                1560     934320\n.gcc_except_table      978120     935880\n.rodata               2251848    1916928\n.eh_frame_hdr          188284    4168776\n.eh_frame             1287196    4357064\n.text                11123948    5648384\n.init                      27   16772332\n.fini                      13   16772360\n.plt                     1056   16772384\n.tdata                    240   16777536\n.tbss                     368   16777776\n.fini_array                 8   16777776\n.init_array                16   16777784\n.data.rel.ro           654752   16777824\n.dynamic                  496   17432576\n.got                    29720   17433072\n.got.plt                  544   17462792\n.relro_padding           2008   17463336\n.tm_clone_table             0   17467432\n.data                   17256   17467456\n.bss                     5356   17484736\n.comment                  184          0\nTotal                17476579\n\n\n",
+      "sections": {
+        ".interp": 28,
+        ".note.ABI-tag": 32,
+        ".note.gnu.build-id": 36,
+        ".dynsym": 4104,
+        ".gnu.version": 342,
+        ".gnu.version_r": 528,
+        ".gnu.hash": 28,
+        ".dynstr": 2513,
+        ".rela.dyn": 925968,
+        ".rela.plt": 1560,
+        ".gcc_except_table": 978120,
+        ".rodata": 2251848,
+        ".eh_frame_hdr": 188284,
+        ".eh_frame": 1287196,
+        ".text": 11123948,
+        ".init": 27,
+        ".fini": 13,
+        ".plt": 1056,
+        ".tdata": 240,
+        ".tbss": 368,
+        ".fini_array": 8,
+        ".init_array": 16,
+        ".data.rel.ro": 654752,
+        ".dynamic": 496,
+        ".got": 29720,
+        ".got.plt": 544,
+        ".relro_padding": 2008,
+        ".tm_clone_table": 0,
+        ".data": 17256,
+        ".bss": 5356,
+        ".comment": 184
+      },
+      "role": "full-keep unstripped, GNU strip applied after build"
+    },
+    "shell_unstripped": {
+      "path": "/tmp/castctl-rust-perf1/rust/target/release/castctl-rs-plain",
+      "size_bytes": 23197360,
+      "sha256": "d1c9fbf7d5c7b51359ff4e494d8052cb50ab8f8a2838db0fcbc88f2a802609f9",
+      "size_A_stdout": "/tmp/castctl-rust-perf1/rust/target/release/castctl-rs-plain  :\nsection                  size       addr\n.interp                    28        736\n.note.ABI-tag              32        764\n.note.gnu.build-id         36        796\n.dynsym                  4104        832\n.gnu.version              342       4936\n.gnu.version_r            528       5280\n.gnu.hash                  28       5808\n.dynstr                  2513       5836\n.rela.dyn              925488       8352\n.rela.plt                1560     933840\n.gcc_except_table      976512     935400\n.rodata               2251856    1912832\n.eh_frame_hdr          187860    4164688\n.eh_frame             1282844    4352552\n.text                11098764    5639552\n.init                      27   16738316\n.fini                      13   16738344\n.plt                     1056   16738368\n.tdata                    240   16743520\n.tbss                     368   16743760\n.fini_array                 8   16743760\n.init_array                16   16743768\n.data.rel.ro           654368   16743808\n.dynamic                  496   17398176\n.got                    29704   17398672\n.got.plt                  544   17428376\n.relro_padding           3656   17428920\n.tm_clone_table             0   17433016\n.data                   17256   17433024\n.bss                     5356   17450304\n.comment                  184          0\nTotal                17445787\n\n\n",
+      "sections": {
+        ".interp": 28,
+        ".note.ABI-tag": 32,
+        ".note.gnu.build-id": 36,
+        ".dynsym": 4104,
+        ".gnu.version": 342,
+        ".gnu.version_r": 528,
+        ".gnu.hash": 28,
+        ".dynstr": 2513,
+        ".rela.dyn": 925488,
+        ".rela.plt": 1560,
+        ".gcc_except_table": 976512,
+        ".rodata": 2251856,
+        ".eh_frame_hdr": 187860,
+        ".eh_frame": 1282844,
+        ".text": 11098764,
+        ".init": 27,
+        ".fini": 13,
+        ".plt": 1056,
+        ".tdata": 240,
+        ".tbss": 368,
+        ".fini_array": 8,
+        ".init_array": 16,
+        ".data.rel.ro": 654368,
+        ".dynamic": 496,
+        ".got": 29704,
+        ".got.plt": 544,
+        ".relro_padding": 3656,
+        ".tm_clone_table": 0,
+        ".data": 17256,
+        ".bss": 5356,
+        ".comment": 184
+      },
+      "role": "shell unstripped (run10 driver b1 plain build)"
+    },
+    "shell_stripped": {
+      "path": "/tmp/castctl-rust-perf1/rust/target/release/castctl-rs",
+      "size_bytes": 17440616,
+      "sha256": "055263b9d96045e1afb8275f06a7895d0b15528afec2dcc153db7e6a60ae2050",
+      "size_A_stdout": "/tmp/castctl-rust-perf1/rust/target/release/castctl-rs  :\nsection                  size       addr\n.interp                    28        736\n.note.ABI-tag              32        764\n.note.gnu.build-id         36        796\n.dynsym                  4104        832\n.gnu.version              342       4936\n.gnu.version_r            528       5280\n.gnu.hash                  28       5808\n.dynstr                  2513       5836\n.rela.dyn              925488       8352\n.rela.plt                1560     933840\n.gcc_except_table      976512     935400\n.rodata               2251856    1912832\n.eh_frame_hdr          187860    4164688\n.eh_frame             1282844    4352552\n.text                11098764    5639552\n.init                      27   16738316\n.fini                      13   16738344\n.plt                     1056   16738368\n.tdata                    240   16743520\n.tbss                     368   16743760\n.fini_array                 8   16743760\n.init_array                16   16743768\n.data.rel.ro           654368   16743808\n.dynamic                  496   17398176\n.got                    29704   17398672\n.got.plt                  544   17428376\n.relro_padding           3656   17428920\n.tm_clone_table             0   17433016\n.data                   17256   17433024\n.bss                     5356   17450304\n.comment                  184          0\nTotal                17445787\n\n\n",
+      "sections": {
+        ".interp": 28,
+        ".note.ABI-tag": 32,
+        ".note.gnu.build-id": 36,
+        ".dynsym": 4104,
+        ".gnu.version": 342,
+        ".gnu.version_r": 528,
+        ".gnu.hash": 28,
+        ".dynstr": 2513,
+        ".rela.dyn": 925488,
+        ".rela.plt": 1560,
+        ".gcc_except_table": 976512,
+        ".rodata": 2251856,
+        ".eh_frame_hdr": 187860,
+        ".eh_frame": 1282844,
+        ".text": 11098764,
+        ".init": 27,
+        ".fini": 13,
+        ".plt": 1056,
+        ".tdata": 240,
+        ".tbss": 368,
+        ".fini_array": 8,
+        ".init_array": 16,
+        ".data.rel.ro": 654368,
+        ".dynamic": 496,
+        ".got": 29704,
+        ".got.plt": 544,
+        ".relro_padding": 3656,
+        ".tm_clone_table": 0,
+        ".data": 17256,
+        ".bss": 5356,
+        ".comment": 184
+      },
+      "role": "shell stripped (run10 driver b2, RUSTFLAGS=-C strip=symbols)"
+    }
+  },
+  "comparison_vs_run9": {
+    "full_keep_stripped_size_bytes": {
+      "run10": 17475048,
+      "run9": 17481032,
+      "delta_bytes": -5984,
+      "note": "M4c removed tokio-rustls from gateway; full binary 5,984 B smaller than run9"
+    },
+    "full_keep_stripped_sha256": {
+      "run10": "851bb6b4d28afe9435db0766566ecc67a80e7561775670abc7a0c26d64073eb7",
+      "run9": "b12911a545f530b837d375a0f07f167580e91e2206c2445b4d7e903ae13e002f",
+      "match": false
+    },
+    "shell_stripped_size_bytes": {
+      "run10": 17440616,
+      "run9": 17446696,
+      "delta_bytes": -6080,
+      "note": "shell 6,080 B smaller than run9 (M4c + M5a tree)"
+    },
+    "shell_stripped_sha256": {
+      "run10": "055263b9d96045e1afb8275f06a7895d0b15528afec2dcc153db7e6a60ae2050",
+      "run9": "95d9be12e608e1c8f7b660f97ab4edc993da5939730e3feb3b5094b617de2776",
+      "match": false
+    },
+    "full_keep_unstripped_size_bytes": {
+      "run10": 23245712,
+      "run9": 23255696,
+      "delta_bytes": -9984
+    },
+    "full_keep_text_bytes": {
+      "run10": 11123948,
+      "run9": 11129372,
+      "delta_bytes": -5424
+    },
+    "transport_symbols": {
+      "run10_keep": 823,
+      "run9_keep": 768,
+      "note": "M4c network.rs + M5a gateway changes added 55 transport symbols to the keep binary"
+    },
+    "hyper_symbols": {
+      "run10_keep": 536,
+      "run10_shell": 536,
+      "run10_nokeep": 536,
+      "run9_all": 537,
+      "note": "run10 hyper 536 in all three binaries (run9: 537) \u2014 gap still CLOSED (run8: 0); one fewer symbol, codegen difference, not investigated"
+    }
+  },
+  "sha_reproduction": {
+    "record": "Pinned-path sha reproduction for run10 (M-perf-3 re-measure at fbaa0d7)",
+    "target_dir": "/tmp/perf-full-target",
+    "checkout": "/tmp/castctl-rust-perf1",
+    "checks": {
+      "reproduce_check_verbatim": {
+        "result": "4 lines verbatim on the warm dir after run10: rev-parse fbaa0d7, relink 0.30 s, 17,475,048 B, sha 851bb6b4 \u2014 reproduces the table exactly. This is the official check."
+      },
+      "driver_b5": {
+        "result": "run10 driver b5 (stripped keep, 1.1 s): 17,475,048 B, sha 851bb6b4 \u2014 same as the reproduce relink."
+      },
+      "headline_restore": {
+        "result": "After the extra no-keep plain build overwrote /tmp/perf-full-target/release/castctl-full, the b5 rebuild (Reproduce-check lines) restored 17,475,048 B, sha 851bb6b4 exactly."
+      },
+      "alt_checkout_cold_warm": {
+        "result": "NOT re-probed for run10. Run9's (4c)/(4d) proofs stand: checkout path is a sha input (19 file!() absolute paths + 1 cargo metadata hash in the hatch.noise.rs include path); cold-vs-warm does not affect sha. Run10 numbers come from the pinned path only."
+      }
+    },
+    "conclusion": "Size 17,475,048 B is stable across the two run10 builds (driver b5 + reproduce relink). Sha reproduces ONLY from checkout /tmp/castctl-rust-perf1 + target dir /tmp/perf-full-target (2 independent runs at this head, same warm target dir). The run9 sha_reproduction record lives in git history of this file.",
+    "run9_history": "Run9 byte_reproduction_check (740e2dc, target dir /tmp/perf-full-target reproducing all four run9 shas) is preserved in git history of this file; this rewrite replaces it with the run10 record."
+  },
+  "nm": {
+    "method": "Count of `nm` output lines containing the substring (plain substring, not `castctl_transport::`, because Rust symbols are mangled); `nm` on a stripped binary returns empty, so only unstripped binaries are counted. Counts verified twice on the run10 binaries (2026-11-05, two consecutive nm runs on the same binaries) \u2014 identical both times.",
+    "full_keep_unstripped": {
+      "nm_command": "nm /tmp/perf-full-target/release/castctl-full-plain",
+      "nm_lines_total": 50906,
+      "substring_counts": {
+        "castctl_transport": 823,
+        "castctl_gateway": 737,
+        "honk_outbound": 9490,
+        "boringtun": 98,
+        "smoltcp": 185,
+        "tokio": 4471,
+        "prost": 50,
+        "tungstenite": 510,
+        "snow": 134,
+        "hyper": 536
+      },
+      "individual_symbol_counts": {
+        "dispatch_outbound": 2,
+        "ensure_tunnel": 1,
+        "KEEP_TIER2": 1,
+        "HonkDialer": 7,
+        "WireGuardDialer": 16,
+        "HttpClient": 114,
+        "RpcClient": 1,
+        "DownTracker": 1
+      }
+    },
+    "full_nokeep_unstripped": {
+      "nm_command": "nm /tmp/perf2-nokeep-plain",
+      "nm_lines_total": 50821,
+      "substring_counts": {
+        "castctl_transport": 815,
+        "castctl_gateway": 733,
+        "honk_outbound": 9488,
+        "boringtun": 98,
+        "smoltcp": 185,
+        "tokio": 4464,
+        "prost": 50,
+        "tungstenite": 510,
+        "snow": 129,
+        "hyper": 536
+      },
+      "individual_symbol_counts": {
+        "dispatch_outbound": 2,
+        "ensure_tunnel": 1,
+        "KEEP_TIER2": 0,
+        "HonkDialer": 7,
+        "WireGuardDialer": 15,
+        "HttpClient": 113,
+        "RpcClient": 0,
+        "DownTracker": 1
+      }
+    },
+    "shell_unstripped": {
+      "nm_command": "nm /tmp/castctl-rust-perf1/rust/target/release/castctl-rs-plain",
+      "nm_lines_total": 50813,
+      "substring_counts": {
+        "castctl_transport": 812,
+        "castctl_gateway": 733,
+        "honk_outbound": 9488,
+        "boringtun": 98,
+        "smoltcp": 185,
+        "tokio": 4461,
+        "prost": 50,
+        "tungstenite": 510,
+        "snow": 129,
+        "hyper": 536
+      },
+      "individual_symbol_counts": {
+        "dispatch_outbound": 2,
+        "ensure_tunnel": 1,
+        "KEEP_TIER2": 0,
+        "HonkDialer": 7,
+        "WireGuardDialer": 15,
+        "HttpClient": 113,
+        "RpcClient": 0,
+        "DownTracker": 1
+      }
+    }
+  },
+  "removed_prose_numbers": {
+    "note": "History from the fc250db record, kept: the probe-history figures 16,272,088 B (Tier-2-address-only build) and +543,384 B (#[used] static delta) printed in the fc250db README were REMOVED from the prose: they sum to 16,815,472 B, 4,096 B above the committed unstripped size, and no record of that intermediate build was retained. Only the mechanism claim remains (plain address-taking was proven eliminated in probe; the #[used] static retains)."
+  }
+}
