@@ -443,7 +443,7 @@ section; shas are of files, never of secrets.
 | # | Item | Verdict |
 |---|------|---------|
 | 1 | `webui serve` (21-request matrix + rate-limit + negatives) | **PASS** — 21/21 normalised (raw 18/21; the 3 raw diffs are exactly the rule-covered normalisations); rate-limit sequence identical; negative probes identical; both servers exit 130 on SIGINT |
-| 2 | `keeper run` (60 s + SIGTERM, sha256, `status`/`check`) | **PASS** (on the item's stated criteria) — 2 ticks `ok cookies_seen=10 wrote=true` both sides, SIGTERM wait 143 both, state/check/single-flight match, live files unchanged; plus one real bug found and fixed (tick ignored configured `cookies_file`, pre/post probe) and one known finding (Rust SIGINT swallowed; fix lives in PR #85, not M7e) |
+| 2 | `keeper run` (60 s + SIGTERM, sha256, `status`/`check`) | **PASS** (on the item's stated criteria) — 2 ticks `ok cookies_seen=10 wrote=true` both sides, SIGTERM wait 143 both, state/check/single-flight match, live files unchanged; plus one real bug found and fixed (tick ignored configured `cookies_file`, pre/post probe); the SIGINT divergence recorded at `9afa04c` is CLOSED at the rebased head — re-verified live at `acb2aa7`, Rust SIGINT exits 130 with the tick line flushed (see rebase note) |
 | 3 | `telegram run` (fake Bot API + 1 turn via fake gateway) | **FAIL (blocked)** — no stock-binary mechanism points either binary at a fake Bot API server or fake gateway (verified at binary level); the time-boxed hosts-redirect probe fails on both sides, at different layers; the 1-turn leg was not run. Root cause + proposal (mechanism A, Boss approval) below. No library harness was substituted for binary parity. |
 
 ### Item 1 — `webui serve`: PASS (21/21 normalised, 18/21 raw)
@@ -593,12 +593,15 @@ follow-up): `LoginSession::run`/`finish`
 credentials configured in any M7e test); proposal: same one-field
 threading, proven by a credentials-configured re-login run.
 
-Finding (not a run failure) — Rust SIGINT swallowed: `keeper run` at this
-base does not stop on SIGINT (alive after 10 s; the ctrl-C watcher cancels
-a child flag nothing reads, so the 130 arm is unreachable — r2 §6). The
-fix is commit `33055de`, carried by separate PR #85 (OPEN, cherry-pick,
-gates 1597/0) — NOT imported into M7e. Per r2 §3.3 this is recorded as a
-finding, not a run failure.
+Finding (not a run failure) — Rust SIGINT swallowed [CLOSED at the
+rebased head, see rebase note]: `keeper run` at `9afa04c` does not stop
+on SIGINT (alive after 10 s; the ctrl-C watcher cancels a child flag
+nothing reads, so the 130 arm is unreachable — r2 §6). The fix is
+commit `33055de`, carried by separate PR #85 (OPEN at the time,
+cherry-pick, gates 1597/0) — NOT imported into M7e. Per r2 §3.3 this
+was recorded as a finding, not a run failure. PR #85 has since MERGED
+(`acb2aa7`); the rebase note below records the live re-verification
+at the new head (SIGINT exits 130, tick line flushed).
 
 ### Item 3 — `telegram run`: FAIL (blocked — no binary redirection exists)
 
@@ -680,23 +683,53 @@ parity is claimed from this run.
 - Disk: `df -h /` checked before each build; `/tmp/m7e-target` deleted
   after the final gate (see below).
 
-### Rebase onto `dev-rust` `57fc7be` (PR #84 version stamp) — 2026-11-06/07
+### Rebase onto `dev-rust` `acb2aa7` (PR #85 merged) — 2026-11-06/07
 
-- Rebase clean, no conflicts: branch `feat/rust-m7e-binary-e2e` commit
-  `709262c` (writer's work, unchanged) on `57fc7be`, plus one
-  reconciliation commit `fb84734` (below). No forbidden file touched;
-  `git diff --stat origin/dev-rust`: 7 files, all allowed
-  (`docs/e2e.md` + 6 under `rust/**`). PR #85 NOT merged, its keeper
-  commit NOT imported.
+- Rebase in two steps, both onto the newest head at the time: first
+  onto `57fc7be` (PR #84, clean, no conflicts; writer's commit
+  `709262c`), then onto `acb2aa7` (PR #85 merged). The second rebase
+  had exactly one conflict, in `rust/castctl-rs/tests/parity.rs`:
+  the M7e reconciliation commit `fb84734` and PR #85's test-only
+  `d33920c` make the same functional change (strip the optional
+  `--version` stamp per D-M2-7) and their doc comments collided;
+  resolved to the merged upstream (`d33920c`) text, keeping only
+  M7e's `golden_parity()` comment fix (`ea0996f`, 3 lines). No
+  forbidden file touched; `git diff --stat origin/dev-rust`: 7 files,
+  all allowed (`docs/e2e.md` + 6 under `rust/**`). Nothing from PR
+  #85 was cherry-picked or imported by M7e — its contents arrive
+  via the base, which is the point of the rebase.
+- Intermediate `57fc7be` rounds (superseded by the `acb2aa7` rebase,
+  kept for the record): plain `57fc7be` fails `golden_parity` —
+  `--version stdout (unstripped)`: left
+  `"castctl 0.9.0 (709262c 2026-11-06T21:32:00Z)\n"` vs right
+  `"castctl 0.9.0\n"` (`parity.rs:599`); round-1 gates at `709262c`:
+  fmt 0, build 0, test 101 (1595 passed, 1 failed — only
+  `golden_parity`), clippy 0, release 0. Reconciliation `fb84734`
+  (test-only, same D-M2-7 strip as `d33920c`, re-applied in M7e
+  scope) brought round-2 gates at `fb84734` to **1596 passed, 0
+  failed** (1595 at `9afa04c` + 1 from PR #84's `version_string`
+  test). At the docs head `2e06fdd` one full run hit the known
+  `castctl-update` flake (`install_newer_version_end_to_end`,
+  `update: download failed`, same test the writer saw flake at
+  `9afa04c`; crate untouched by this diff); full re-run green
+  **1596/0** and 3/3 isolated runs green, 43/43 each.
+- Gates at the new head `8db72d8` (cue, `cargo +1.99.1`,
+  `CARGO_TARGET_DIR=/tmp/m7e-target`, `PATH=/usr/local/go/bin`,
+  `GOTOOLCHAIN=auto`): fmt 0, build 0,
+  `cargo test --workspace --no-fail-fast` 0 — **1599 passed, 0
+  failed** (1596 + 3 from PR #85's fix-loop tests), clippy 0,
+  release 0. No `castctl-update` flake in this round. Release binary
+  sha256 `b72788872a35e533169713989735394e83aac2e93a8ee2aef32758de6211f649`,
+  37,038,912 B, `--version` →
+  `castctl 0.9.0 (8db72d8 2026-11-06T22:23:00Z)`.
 - PR #84 changed Rust `--version` to render the git build stamp like Go
   (`rust/castctl-cli/src/run.rs` only). The new-head release binary
-  reports `castctl 0.9.0 (fb84734 2026-11-06T21:46:27Z)` (sha256
-  `86f5bc3b2a62d38ddd920a66eb54baaf7a4cd76cc7bfbf98b31db0689ad24f50`,
-  37,034,536 B) vs Go `castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)` —
-  same shape, so the CLI `--version` divergence recorded at `9afa04c`
-  is CLOSED. The `/status` `version` field is NOT stamped by #84
-  (`Server::new` still gets `version: VERSION.to_string()`, the bare
-  const), so the row-2 raw diff is unchanged.
+  reports `castctl 0.9.0 (8db72d8 2026-11-06T22:23:00Z)` vs Go
+  `castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)` — same shape, so the
+  CLI `--version` divergence recorded at `9afa04c` is CLOSED. The
+  `/status` `version` field is NOT stamped by #84 (`Server::new`
+  still gets `version: VERSION.to_string()`, the bare const), so the
+  row-2 raw diff is unchanged.
 - Focused row-2 re-run at the new head (Go 18337 / Rust 18338, fresh
   config copies, same method): Go `version:
   "0.9.0 (1396697 2026-11-04T21:38:36Z)"`, `go_version: "go1.27.3"`,
@@ -708,23 +741,24 @@ parity is claimed from this run.
   Row 2's verdict stands; no other matrix row is affected (the stamp
   touches only the CLI `--version` line and the already-stripped
   `/status` `version` field), so the full 21-row matrix was NOT re-run.
-- Reconciliation commit `fb84734` (test-only,
-  `rust/castctl-rs/tests/parity.rs`): plain `57fc7be` fails
-  `golden_parity` — `--version stdout (unstripped)`: left
-  `"castctl 0.9.0 (709262c 2026-11-06T21:32:00Z)\n"` vs right
-  `"castctl 0.9.0\n"` (`parity.rs:599`). The F9(c) unstripped
-  exact-match predates the stamp; fixed per the standing D-M2-7 rule by
-  stripping the optional stamp with the existing `strip_version_stamp`
-  helper (exit code 0 and empty stderr still asserted exactly). Same
-  approach as PR #85's test-only `d33920c`, re-applied here in M7e scope
-  rather than importing that commit. Round-1 gates at `709262c`: fmt 0,
-  build 0, test 101 (1595 passed, 1 failed — only `golden_parity`),
-  clippy 0, release 0.
-- Gates re-run at `fb84734` (cue, same toolchain/target dir): fmt 0,
-  build 0, `cargo test --workspace --no-fail-fast` 0 — **1596 passed, 0
-  failed** (1595 at `9afa04c` + 1 from PR #84's `version_string` test),
-  clippy 0, release 0. No `castctl-update` flake recurred in either
-  full run. `/tmp/m7e-target` deleted after the final gate; `df -h /`
+- SIGINT re-verification at the new head (focused probe only, Rust
+  binary `8db72d8`, same r2 §2–§3 recipe: fresh scratch dir, live
+  `no.0` entry minus `cookies_file`, one keeper entry, CDP 9226,
+  live cookies copied): `keeper status` exit 0 (`last_tick_outcome:
+  "never"`); `keeper run --profile no.0` pid 3855103, ≥1 tick proven
+  by the state file (`last_tick_outcome: "ok"`,
+  `last_checked_at: "2026-11-06T22:36:26.552104806Z"`,
+  `cookies_seen=10`, `wrote=true`); SIGINT → **exit 130**.
+  Stdout (66 bytes, flushed on the 130 path — unlike the SIGTERM
+  path at `9afa04c`, where stdout was 0 bytes):
+  `keeper: no.0 (no.0): ok cookies_seen=10 wrote=true next_delay=30s`;
+  stderr 0 bytes. Scratch cookies sha `aa667a83…` →
+  `f84c6908…`, state `cookies_sha256` equals the written file; live
+  config/cookies unchanged (`b748366c…` / `aa667a83…`). The 9afa04c
+  SIGINT finding is CLOSED: the Rust run now stops on SIGINT exactly
+  like Go. No other keeper row was re-run (the probe contradicts
+  none of the writer's other item-2 numbers).
+- `/tmp/m7e-target` deleted after the final gate; `df -h /`
   verified after.
 
 ### Cleanup on cue
