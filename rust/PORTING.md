@@ -11534,11 +11534,13 @@ warmup 5); logic thuần N=5 (Go 1 process × 5 counts × 100 iters, Rust 5 proc
 
 First measured run, warmup=0, N=1 (không dùng làm kết luận): Go 10.557 ms / 47.930 MiB;
 Rust 3.793 ms / 6.434 MiB. Hyperfine 1.18.0 (N=20, median): `--version` Go 9.070 ms vs Rust
-2.043 ms (0.225); `--help` Go 9.291 ms vs Rust 1.970 ms (0.212) — driver khớp hyperfine trong
-~6–15% ở run11 (Go `--version` driver 7.701 vs hyperfine 9.070 ms; Rust 2.172 vs 2.043 ms).
+2.043 ms (0.225); `--help` Go 9.291 ms vs Rust 1.970 ms (0.212) — driver vs hyperfine lệch
+3.8–17.8% ở median run11 (Go `--version` driver 7.701 vs hyperfine 9.070 ms — lệch 17.8%;
+mean lệch 27.4%: 7.766 vs 9.895 ms; Rust 2.172 vs 2.043 ms — 5.9–6.3%); tỉ lệ startup trích
+dạng dải liên phương pháp ~3.5–4.8× (driver 3.55×/4.35×; hyperfine 4.44×/4.72×).
 
-Kết luận: `castctl-rs` full-surface vẫn nhanh hơn Go ngoài sai số ở mọi mục (startup 3.5–4.4×,
-RSS ~7×, logic thuần 2.1–6.8×), nhưng **tỉ lệ size xấu đi so với run10** (0.363 → 0.448):
+Kết luận: `castctl-rs` full-surface vẫn nhanh hơn Go ngoài sai số ở mọi mục (startup ~3.5–4.8×,
+RSS ~7× ở mode cao — xem caveat (2), logic thuần 2.1–6.8×), nhưng **tỉ lệ size xấu đi so với run10** (0.363 → 0.448):
 stripped 17,475,048 B → 21,552,104 B (+4,077,056 B, +23.3%). Đây KHÔNG phải regression —
 đó là bề mặt tính năng mới link vào (bot + keeper + webui + plugin + update, M5a/M6a/M6b/M6c-b/M7a);
 run10 đo binary thiếu các bề mặt đó. Từ run11, headline size là 0.448×, không phải 0.363×.

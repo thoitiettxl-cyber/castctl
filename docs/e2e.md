@@ -282,34 +282,35 @@ Nothing in this document claims any of the above as proven. Each is
 either SKIP with reason in the script or a manual step for the
 operator's live run.
 
-## Rust E2E results (M7c, base `dev-rust` `e7a97d7`, 2026-11-06)
+## Rust E2E results (M7c, base `dev-rust` `0173436`, 2026-11-06; fix loop 1)
 
 The Rust port was put through the same 9-item proof on cue against the
 Go binary (`castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)`, sha256
-`c8ea009e…`). Rust binary: `/tmp/m7c-target/release/castctl-rs`,
-21,552,104 B, sha256 `f68f1dd9…`, `--version` → `castctl 0.9.0`
-(unstamped). Live profile `no.0`. Full verbatim evidence:
-`~/workspace/tmp/castctl-rust-m7c-notes/m7c-evidence.md` (+ raw
-captures under `m7c-caps/` next to it). Every claim below names its
-base: M7b is unmerged at this base, so `telegram run`, `keeper run`
-and `update` are still CLI stubs in the Rust binary (exit 1,
-`castctl: not ported yet in the Rust port`).
+`c8ea009e…`). Rust binary (fix loop 1): `/tmp/m7c-fl1-target/release/castctl-rs`,
+22,026,632 B, sha256 `729e9af5…`, `--version` → `castctl 0.9.0`
+(unstamped). Live profile `no.0`. Full verbatim evidence: local working
+notes (not published; raw captures beside them). Every claim below names
+its base: M7b PR-1 #76 is merged at this base (`0173436`), so 36 commands
+are wired; `telegram run`, `keeper run` and `update` are still CLI stubs
+in the Rust binary (exit 1, `castctl: not ported yet in the Rust port`).
 
 | # | Item | Verdict |
 |---|------|---------|
-| 1 | CLI surface (46 cmd `--help` + 34 sub `--help` + dispatch) | **PASS** (help) / status recorded — 81/82 stems identical; only `--version` stamp differs; 16 wired / 30 stub; 0 `not ported yet` lines in any `--help` capture |
-| 2 | Live read-only (`no.0`, 18 labels) | **PASS** — 16/18 RAW-MATCH; 2 usage diffs = live drift fields only (`bonus_tokens.balance_units`, `topupBalance`), JSON-EQUAL after dropping exactly those |
-| 3 | wait + subscribe | **PASS** — exit codes + shapes match Go, incl. the shared replies-exclusion quirk in the wait-before-send scenario; subscribe proven by a temporary `eprintln!` probe through `on_record` (15 lines, reverted after; `git status` clean) |
-| 4 | Telegram bot | **PASS (library level)** — CLI `telegram run` is a stub; driver test `rust/castctl-telegram/tests/m7c_bot_e2e.rs` green (1 passed) vs fake Bot API + real Go gateway; getMe, 30-entry menu, streamed text turn, photo, auto-decide + button decide, inbound media, clean shutdown; Go comparison: 5/5 Go telegram tests PASS on cue |
-| 5 | Keeper | **PASS (library level)** — CLI `keeper run` is a stub; driver example `rust/castctl-keeper/examples/m7c_keeper_e2e.rs`, 2 ticks `ok`, `cookies_seen=10`, original `cookies.txt` byte-identical before/after (scratch copy only); Go `keeper check` on the same scratch copy matches exactly |
-| 6 | WebUI | **PASS** — 21/21 request matrix MATCH (Go 18317 vs Rust 18318); rate-limit mini-run identical both sides |
-| 7 | Plugin | **PASS** — echo `plugin check` byte-identical both sides; crash fixtures segfault in call/init: Go host DIES with a SIGSEGV dump (in-process loader), Rust host survives and reports `plugin crashed with signal 11` (subprocess worker, deliberate divergence in Rust's favour), exit 2 both sides |
-| 8 | Update | **FAIL (blocked on M7b)** — `--check --json` flags do not exist in Go either (both sides reject identically, exit 2); Rust `update --dry-run` is a stub (exit 1) vs Go exit 0 `castctl is up to date: 0.9.0`; crate-level unstamped refusal proven (`dev_build_refuses_before_network`, `dev_build_refuses_with_zero_requests`) |
-| 9 | Perf (full-surface `castctl-rs`) | **PASS** — run11: stripped 21,552,104 B (0.448× Go, 2.23× smaller); `--version` 2.172 ms vs 7.701 ms; RSS `--version` 6.312 MiB vs 47.742 MiB (Go high bimodal mode); pure logic 2.1–6.8× faster; see `rust/perf/README.md` "Bảng số (run11)" |
+| 1 | CLI surface (46 cmd `--help` + 34 sub `--help` + dispatch) | **PASS** (help) / status recorded — 82 stems, only `--version` stamp differs; 36 wired / 10 stub (live, isolated env); command total 46, not 47; M7b PR-2 commands (`fs`/`send`/`watch`/`chat`) marked chưa wire / PR-2 pending |
+| 2 | Live read-only (`no.0`, 18 labels) | **PASS** — 16/18 RAW-MATCH; 2 usage diffs = live drift fields only (`bonus_tokens.balance_units`, `topupBalance`), JSON-EQUAL after dropping exactly those; the normalisation is now calibrated by a Go×Go control (drift -24,139 / -23,496 over ~83 s, an order of magnitude larger than the Go-vs-Rust diffs) |
+| 3 | wait + subscribe | **PASS** (narrowed) — exit codes + shapes match Go, incl. the shared replies-exclusion quirk in the wait-before-send scenario; subscribe proven by a temporary `eprintln!` probe through `on_record` (15 lines, reverted after; `grep M7C-PROBE` returns 0 files in the current tree) — the probe proves the instrumented build's handler only; all three turns returned `replies: []` on both sides, so reply delivery is NOT proven by this item |
+| 4 | Telegram bot | **PASS (library level)** — CLI `telegram run` is a stub; driver test `rust/castctl-telegram/tests/m7c_bot_e2e.rs` green (1 passed) vs fake Bot API + real Go gateway; getMe, 30-entry menu, streamed text turn, photo, auto-decide + button decide, inbound media, clean shutdown; Go comparison: 5/5 Go telegram tests PASS on cue; resume leg repaired in fix loop 1 (strengthened assertion FAILED first at `after_seq` 42, then PASSED at `after_seq` 15 — the resume now delivers the completed reply; scope: resume of an already-completed turn, not a live post-decision continuation) |
+| 5 | Keeper | **PASS (library level)** — CLI `keeper run` is a stub; driver example `rust/castctl-keeper/examples/m7c_keeper_e2e.rs`, 2 ticks `ok`, `cookies_seen=10`, original `cookies.txt` byte-identical before/after (scratch copy only); Go `keeper check` on the same scratch copy matches exactly; the tick dials direct, which IS the profile-outbound path for `no.0` (no outbound configured; Go synthesises a direct outbound); CDP export leg proven in fix loop 1 with a seeded fake `hatch_sess` cookie (direct probe `exported=1`) after fixing the bootstrap's `Runtime.evaluate("self", returnByValue: true)` (-32000); transfer of a real session cookie remains unmeasured |
+| 6 | WebUI | **PASS** — 21/21 request matrix MATCH normalised (raw 19/21; the 2 raw diffs are exactly the rule-covered normalisations; independent recompute + separate verdict file, raw matrix never edited); rate-limit mini-run identical both sides; Rust reports `go_version`/`singbox_version` "unknown" — a real divergence laundered by the presence+type normalisation, recorded explicitly |
+| 7 | Plugin | **PASS** — echo `plugin check` byte-identical both sides; crash fixtures segfault in call/init: Go host DIES with a SIGSEGV dump (in-process loader), Rust host survives and reports `plugin crashed with signal 11` (subprocess worker), exit 2 both sides — **[DEVIATION]** deliberate architectural divergence in Rust's favour, not byte-parity with Go's crash behaviour |
+| 8 | Update | **FAIL (still a stub)** — `--check --json` flags do not exist in Go either (both sides reject identically, exit 2); Rust `update --dry-run` is a stub (exit 1) vs Go exit 0 `castctl is up to date: 0.9.0`; M7b PR-1 #76 merged but did NOT wire `update` (`cmd_update` still `Err(stub(ctx))` at `0173436`); crate-level unstamped refusal proven (`dev_build_refuses_before_network`, `dev_build_refuses_with_zero_requests`); all 43 `castctl-update` tests pass incl. `dry_run_writes_nothing` |
+| 9 | Perf (full-surface `castctl-rs`) | **PASS** — run11: stripped 21,552,104 B (0.448× Go, 2.23× smaller); startup band ~3.5–4.8× across methods (driver 3.55×/4.35×, hyperfine 4.44×/4.72×); RSS `--version` 6.312 MiB vs 47.742 MiB (Go high bimodal mode; low mode 30.37 MiB in run10); pure logic 2.1–6.8× faster; see `rust/perf/README.md` "Bảng số (run11)" |
 
 Gaps carried forward (not claimed as proven): item 8 real `--dry-run`
-comparison (blocked on M7b wiring — re-run after M7b merges and M7c
-rebases); item 7 fuse behaviour at CLI level; item 6 traversal
-coverage weaker than M6b's encoded variants; item 5 CDP export leg
-never ran (`exported=0`: cheap chain returned ok); item 3 M7a's
-claimed reply-seq-26704 observation not reproduced on either side.
+comparison (`update` still a stub at `0173436` — needs PR-2 wiring);
+item 7 fuse behaviour at CLI level; item 6 traversal
+coverage weaker than M6b's encoded variants; item 5 transfer of a real
+session cookie via CDP export (fake-cookie transfer proven); item 3
+M7a's claimed reply-seq-26704 observation not reproduced on either side;
+item 3 reply delivery by wait; item 4 resume of a live post-decision
+continuation.

@@ -963,7 +963,8 @@ phân tích sâu hơn ở đây (không có breakdown theo symbol cho
 | First measured run, warmup=0, sau probe `--version` (KHÔNG cold, KHÔNG sau build), N=1 `--version` — **n=1, không dùng làm kết luận** | 10.557 | 3.793 | 0.359 |
 
 \* Tỉ lệ startup tuyệt đối là wall-clock (driver vs hyperfine lệch
-~6–15% ở run11, xem prose ngay dưới) — trích kèm caveat này; dùng RSS
+3.8–17.8% ở median run11, 27.4% ở mean Go `--version` — xem prose
+ngay dưới) — trích kèm caveat này; dùng RSS
 (§3) làm số ổn định. Xem prose ngay dưới.
 
 Đối chiếu hyperfine 1.18.0 (N=20, median, 2 lệnh trong MỘT invocation):
@@ -971,12 +972,17 @@ phân tích sâu hơn ở đây (không có breakdown theo symbol cho
 7.237, max 18.719; Rust mean 2.050, min 1.611, max 2.695);
 `--help` Go 9.291 ms vs Rust 1.970 ms (0.212; Go mean 9.311, min
 8.507, max 10.088; Rust mean 2.016, min 1.617, max 2.598).
-**Khớp loop Python ở run11 trong ~6–15%** (driver `--version` Go
-7.701 vs hyperfine 9.070 ms — driver thấp hơn 15%; Rust 2.172 vs
-2.043 ms — driver cao hơn 6%; `--help` Go 8.951 vs 9.291 ms, Rust
-2.056 vs 1.970 ms). Hướng kết luận không đổi (Rust vẫn nhanh hơn Go
-nhiều ở cả hai phương pháp); tỉ lệ startup tuyệt đối vẫn là
-wall-clock — trích kèm caveat này, và dùng RSS (§3) làm số ổn định.
+**Đối chiếu driver vs hyperfine ở run11: lệch 3.8–17.8% ở median —
+KHÔNG phải ~6–15% như bản trước viết sai** (driver `--version` Go
+7.701 vs hyperfine 9.070 ms — lệch 17.8% tính theo driver, 15.1%
+theo hyperfine; mean lệch 27.4%: 7.766 vs 9.895 ms; Rust 2.172 vs
+2.043 ms — lệch 5.9–6.3%; `--help` Go 8.951 vs 9.291 ms — 3.8%,
+Rust 2.056 vs 1.970 ms — 4.2–4.4%). Tỉ lệ startup trích dạng dải
+liên phương pháp **~3.5–4.8×** (driver 3.55×/4.35×; hyperfine
+4.44×/4.72×), không trích một số duy nhất. Hướng kết luận không đổi
+(Rust vẫn nhanh hơn Go nhiều ở cả hai phương pháp); tỉ lệ startup
+tuyệt đối vẫn là wall-clock — trích kèm caveat này, và dùng RSS (§3)
+làm số ổn định.
 Lưu ý hàng n=1: wall first-run ở run11 cao hơn median ở cả hai phía
 (Go 10.557 ms ≈ 1.4× median 7.701 ms; Rust 3.793 ms ≈ 1.7× median
 2.172 ms) — thấp hơn nhiều so với run10 (Go 5.9×, shell 8.1×), vì
@@ -1100,8 +1106,8 @@ outbound thật — item 5 đo harness, không phải honk/sing-box.
 
 - Rust `castctl-rs` full-surface **nhanh hơn Go rõ rệt, ngoài sai số**,
   ở: startup `--version` 2.172 ms vs 7.701 ms (0.282×, 3.55× nhanh hơn
-  — kèm caveat wall-clock ở §2: driver và hyperfine lệch ~6–15% ở
-  run11), `--help` 2.056 ms vs 8.951 ms (0.230×), RSS `--version`
+  — kèm caveat wall-clock ở §2: driver và hyperfine lệch 3.8–17.8% ở
+  median run11 (Go `--version` 17.8%, mean 27.4%)), `--help` 2.056 ms vs 8.951 ms (0.230×), RSS `--version`
   6.312 MiB vs 47.742 MiB (0.132× — tỉ lệ ở mode cao của Go; mode thấp
   sẽ ~0.20 như run10), parse config min/large/bad (wall 0.330/0.223/
   0.256×, RSS 0.187/0.210/0.155×). Các khoảng min/max không giao nhau
@@ -1340,8 +1346,8 @@ nhưng Go `--version` median GIẢM 10.051→7.701 ms (−23%) — ngược hư�
 mong đợi, chưa giải thích được (giống rerun độc lập: Go nhanh hơn
 23–27% dù tải cao gấp ~7×); Rust `--version` 2.405→2.172 ms (−10%).
 Tỉ lệ startup `castctl-rs`/Go 0.282 (run10 full/Go 0.238) — xấu đi
-một chút vì Go nhanh lại nhiều hơn Rust. Driver khớp hyperfine trong
-~6–15% ở run11 (run10: 9–29%). (c) §4: số Go ở 4 item lớn ổn định
+một chút vì Go nhanh lại nhiều hơn Rust. Driver vs hyperfine lệch
+3.8–17.8% ở median run11 (run10: 9–29%). (c) §4: số Go ở 4 item lớn ổn định
 trong ±3% so với run10 (parse-large 7.50→7.70 ms, MDToHTML 5.73→5.69
 ms, render 6.53→6.71 ms, split 544→551 µs); số Rust ổn định trong
 ±1% (parse-large −0.3%, md-to-html +1.3%, render +0.8%, split +2.0%,
@@ -1448,7 +1454,8 @@ không ổn định qua các session — xem §3.
   Go cũng drift −23…−27% ở rerun độc lập dưới tải cao hơn — chưa giải
   thích được; run11 lặp lại hiện tượng này (Go `--version` −23% so với
   run10 dù tải cao hơn); ở run10 driver khớp hyperfine trong 9–29%,
-  ở run11 trong ~6–15% — wall tuyệt đối 1–10 ms vẫn là wall-clock,
+  ở run11 lệch 3.8–17.8% ở median (Go `--version` 17.8%, mean 27.4%)
+  — wall tuyệt đối 1–10 ms vẫn là wall-clock,
   xem §2.
 - First measured run run10 (n=1): wall cao bất thường ở Go và shell so
   với median (Go 5.9×, shell 8.1×, full 1.5×) — cơ chế có thể là page
