@@ -9251,8 +9251,11 @@ was dropped as a known limitation.
 
 Fix-loop-2 gates (cue, 2026-11-06, toolchain
 1.99.1, `CARGO_TARGET_DIR=/tmp/m6c-target`),
-final head TBD (log `/tmp/m6c-fix2-gates.log`
-on cue; gate run 01:15:36–01:16:52Z):
+final head `0173843` (log
+`/tmp/m6c-fix2-gates-final.log` on cue; gate run
+01:17:30–01:18:43Z — the run covered this tree
+with only this paragraph unfilled, a docs-only
+delta; no code changed after the gate run):
 
 - `cargo fmt --check`: exit 0.
 - `cargo build --locked --workspace`: exit 0.
