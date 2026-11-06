@@ -10187,7 +10187,9 @@ on cue); logs `/tmp/proof-*.log` on cue.
   header read timeout (10s), which also bounds the wait
   for the next request's headers on a keep-alive
   connection. Residual: idle keep-alive connections are
-  cut at 10s, not 120s — stricter (fail-closed). The
+  cut at 10s, not 120s — stricter (fail-closed); measured
+  in §M6b.9 (Rust CLOSED at 15 s idle / CUT at 30 s
+  intervals; Go ALIVE / SURVIVED to 150 s). The
   previous code wrapped the whole connection in
   `timeout(IDLE_TIMEOUT, conn)` — a lifetime cap from
   accept that killed connections at 120s even mid-request
@@ -10268,11 +10270,11 @@ on cue); logs `/tmp/proof-*.log` on cue.
   exact → middleware chain runs, then shell fallthrough;
   known API path + wrong method → 405 (HEAD included:
   HEAD is never routed as GET); unknown API path + any
-  method → shell 200 after middleware (GET proven live;
-  POST/HEAD on unknown API paths UNVERIFIED — see
-  §M6b.7/§M6b.9); non-API non-GET → 405; non-API GET →
-  shell. Authenticated unknown `/api/v1/*` → 200 shell
-  (Go quirk, preserved, not "fixed").
+  method → shell 200 after middleware (GET, POST and
+  HEAD proven live in §M6b.9, parity 28/45/46); non-API
+  non-GET → 405; non-API GET → shell. Authenticated
+  unknown `/api/v1/*` → 200 shell (Go quirk, preserved,
+  not "fixed").
 - [DEVIATION — edge] Invalid-escape 400 (F-B6): the body
   is Go stdlib's `400 Bad Request` (fixed in loop 1), but
   the exact stdlib bytes carry no Content-Length and
@@ -10318,12 +10320,9 @@ on cue); logs `/tmp/proof-*.log` on cue.
   matched on the compared set (Content-Length only
   compared when bodies byte-identical).
 - Unknown API path + non-GET method (POST/HEAD
-  `/api/v1/nope`): §M6b.6 claimed "unknown API path + any
-  method → shell 200" from the GET case only; chi Mount
-  fallthrough for non-GET methods on unknown API paths is
-  NOT settled from source (no Go test pins it). Live probe
-  against the Go binary in §M6b.9 settles it; if Go 405s,
-  `route_api` Fallthrough must 405 non-GET methods.
+  `/api/v1/nope`): SETTLED in §M6b.9 (parity 45/46) — both
+  sides return the shell 200, so `route_api` Fallthrough
+  is correct as-is and no 405 is needed.
 - Cross-process flock exclusion (F-C9): the threads test
   proves in-process exclusion (exactly one winner);
   cross-process exclusion (two processes racing `save`)
@@ -10384,7 +10383,7 @@ against the Rust code; every flagged trap already matches:
   outbound's own tag, sort — matches `store.rs`
   `used_by_endpoint` exactly.
 
-### M6b.9 Fix loop 1 (2026-11-06, head TBD)
+### M6b.9 Fix loop 1 (2026-11-06, head `e8aa3ff`)
 
 All three Phase 3 reviews (technical, safety, red-team)
 re-read against Go source; every finding fixed in code or
@@ -10435,37 +10434,207 @@ recorded here with its evidence. Commits are on
 | duration `unwrap_or(0)` coercion | Fixed: checked int/frac parse, overflow → invalid-duration error (Go errors on overflow) | `5f8d0e4` | — |
 | R4 residual: bodyless-route connection reuse | Recorded in §M6b.6 (hyper closes; Go may reuse) | — | — |
 
-#### Gates at final head (TBD — cue runs after the last fix commit)
+Verification follow-ups (found while re-running the
+gates/parity, not in the three reviews): `11ad183`
+(`cargo fmt` on the new code); `cab3bd8` (5 fix-loop
+tests failed for test-side reasons + 6 clippy errors —
+see the Gates section); `252e7cd` (keeper fixture: Go
+validation forbids two entries sharing one profile);
+`7a5a75d` (N4 premise refuted live — Go sorts headers,
+`render_resp` now sorts; the 429 check's expectation
+was corrected with it); `e8aa3ff` (`sort_by_key`, clippy
+`unnecessary_sort_by`). Each is a separate commit so the
+review history stays readable.
 
-TBD: `cargo fmt --check`, `cargo build --workspace`,
-`cargo test --workspace` (before/after counts),
-`cargo clippy --workspace --all-targets -- -D warnings`
-— verbatim exit codes + counts land here.
+#### Gates at final head (`e8aa3ff`, cue run 7, 2026-11-06)
 
-#### Extended parity (TBD — cue runs after the last fix commit)
+`rustup run 1.99.1`, `CARGO_TARGET_DIR=/dev/shm/mea-m6b-fix1`
+(see the disk note below), `CARGO_PROFILE_DEV_DEBUG=0`,
+`CARGO_PROFILE_DEV_INCREMENTAL=false`:
 
-New cases vs run 2: HEAD on `/api/v1/status` and `/`;
-encoded paths (`%2F`, `%73tatus`, `%6dain`,
-`/api%2fv1/status`); keeper with ≥2 entries; over-cap
-body WITH RSS observation; 73-byte token; empty Origin;
-mapped-v6 origin; POST/HEAD `/api/v1/nope` (settles the
-unknown-API non-GET question); invalid-escape 400 body;
-PUT /settings/telegram `allowed_user_ids:null`; 429
-`Retry-After` order. Full table lands here; every row
-identical or a recorded [DEVIATION].
+```
+fmt exit=0
+build exit=0
+test exit=0        (783 passed, 0 failed, workspace-wide)
+clippy exit=0      (--workspace --all-targets -- -D warnings)
+```
 
-#### Idle probe (F-B5, TBD — cue)
+Before/after for the loop's own gate fixes (same four
+commands, same flags): run 2 at `7e2b243` — fmt exit=1
+(unformatted new code), build exit=0, test exit=101
+(778 passed, 5 failed), clippy exit=101 (6 errors:
+`too_many_arguments` x3, needless borrow, dead `tmp_path`
+init, empty line after doc comment). Run 3 at `cab3bd8`
+fixed the 5 tests and the 6 clippy errors (fmt 0, build 0,
+clippy 0, test 101 with 1 keeper-fixture failure left);
+run 4 at `252e7cd` fixed that failure (all four exit 0,
+783/0). Run 5 at `325da2a` added the header sort and
+passed everything except clippy (`sort_by` → clippy wants
+`sort_by_key`); run 6 at `e8aa3ff` failed on DISK, not
+code (see below); run 7 at the same head `e8aa3ff` is the
+clean record above.
 
-(a) idle 15 s then a request — closed (header read
-timeout applies between keep-alive requests) or alive?
-(b) requests every 30 s for 150 s — survives past the
-old 120 s lifetime cap? If (a) shows idle connections
-surviving >10 s, the header-read-timeout assumption is
-wrong and an activity-tracking IO watchdog for exact
-120 s idle semantics is required instead.
+Disk note (environmental, not code): cue `/` hit 100%
+during run 6 (`rustc-LLVM ERROR: IO failure on output
+stream: No space left on device`, build/test/clippy all
+101). The disk is shared with sibling sessions — the
+big holders (`/tmp/m6c-target` 15G, `/tmp/t72` 9.3G,
+`/root/v68-target` 10G, `/root/v66b-target` 1.1G) were all
+modified the same day and were NOT touched. Freed only
+my own partial target (`/tmp/mea-m6b-fix1`, 1.1G) and
+abandoned `/tmp/go-build*` dirs from Nov 3-4 (~0.35G);
+`/dev/shm` (7.9G free) took the target dir for run 7.
+`/` read 6.3G free after the cleanup (a sibling session
+had also freed space meanwhile).
 
-#### Fail-before proofs (TBD — cue re-run, 11/11)
+#### Extended parity (cue run 5, 2026-11-06, `e8aa3ff`)
 
-Re-run of `~/workspace/tmp/m6b-proofs.sh` (fixed seds +
-proof 11) at the final head; per-proof exit codes land
-here.
+Go `castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)` vs Rust
+`castctl-rs` built at the final head. **69/69 identical**
+(0 DIFF). `raw==` means byte-identical bodies; `canon==`
+means canonically equal JSON (key order / whitespace
+differ only). New cases vs run 2 are 39–55 + the two
+`RL-*` rows.
+
+```
+phase p1: 01-shell 200/200 raw==; 02-status 200/200 canon==;
+03-status-noauth 401/401 raw==; 04-status-bad 401/401 raw==;
+05-status-basic 401/401 raw==; 06-status-bare 401/401 raw==;
+07-config 200/200 canon==; 08-profiles 200/200 canon==;
+09-profile-one 200/200 canon==; 10-profile-404 404/404 raw==;
+11-telegram 200/200 raw==; 12-keeper-settings 200/200 canon==;
+13-webui-settings 200/200 canon==; 14-plugins 200/200 raw==;
+15-logs-disabled 200/200 raw==; 16-keeper 200/200 raw==;
+17-screencast-status 200/200 canon== (reason differs, recorded
+verbatim; available matches); 18-chats-404 404/404 raw==;
+19-chats-502 502/502 raw==; 20-outbounds 200/200 raw==;
+21-endpoints 200/200 raw==; 22-dns 200/200 canon==;
+23-status-405 405/405 raw==; 24-logs-405 405/405 raw==;
+25-origin-403 403/403 raw==; 25b-origin-auth-first 401/401 raw==;
+26-validate-notjson 200/200 raw==; 27-validate-badjson 400/400 raw==;
+27b-validate-unknown 400/400 raw==; 28-unknown-api 200/200 raw==;
+28b-unknown-api-noauth 401/401 raw==; 23b-profile-test 501/501 raw==;
+23c-outbound-test 501/501 raw==
+phase p1b: 15b-logs-seeded 200/200 raw==
+phase p3: 29-uidir-shell 200/200 raw==; 30-uidir-asset 200/200 raw==;
+31-uidir-traversal 404/404 raw==; 31b-uidir-traversal-enc 404/404 raw==;
+31c-uidir-traversal-deep 404/404 raw==; 32-uidir-hidden 404/404 raw==;
+33-uidir-missing 200/200 raw==; 34-uidir-status 200/200 canon==
+phase p4: RL-ratelimit identical sequences (4x401 then 3x429 '300'
+both sides); RL-429-order go [2,1,0,3] == rs [2,1,0,3]
+(Cache-Control, Content-Type, Retry-After,
+X-Content-Type-Options — the sorted order, see N4)
+phase p6: 39-head-status 405/405 raw==; 40-head-shell 405/405 raw==;
+41-enc-profile 404/404 raw==; 42-enc-status 200/200 raw==;
+43-enc-main 200/200 raw==; 44-enc-mount 200/200 raw==;
+45-unknown-post 200/200 raw==; 46-unknown-head 200/200 raw==;
+47-invalid-escape 400/400 raw==; 48-telegram-null 200/200 raw==;
+49-origin-empty 200/200 raw==; 50-origin-mappedv6 200/200 raw==;
+51-keeper-2 200/200 raw==; 52-rss-overcap 400/400,
+go RSS +192 KiB, rs RSS +80 KiB
+phase p6b: 54-token73 200/200 canon==; 55-token73-bad 401/401 raw==
+phase p5: 35-put-stale 409/409 canon==; 36-put-noop 200/200 canon==
+stable; 37-put-idle 200/200 canon==; 37b-status-46800 200/200 canon==;
+37c-file-diff identical modulo salt, mode 0600;
+38-put-token 200/200 canon==; 38b-old-token-401 401/401 raw==;
+38c-new-token-200 200/200 canon==; 38d-file-diff identical
+modulo salt, mode 0600
+Summary: 69/69 identical
+```
+
+Settled by this run: unknown API path + POST/HEAD →
+shell 200 on both sides (45/46 — the §M6b.6 claim
+"unknown API path + any method → shell 200" is now
+verified for all methods, not just GET); encoded static
+segments never match (`%73tatus` → shell, `%6dain` →
+shell, `/api%2fv1/status` → unauthenticated shell) and
+`a%2Fb` stays one param (404 both sides); HEAD is 405
+on API and non-API paths alike; the 429 wire order
+matches after the `render_resp` sort.
+
+Two harness bugs found and fixed during this run (not
+code bugs): (a) run 3's `check_429_order` required
+Retry-After first — the premise the live wire order
+refuted; it now checks Go == Rust wire order with all
+four headers present. (b) Run 3's phase-6 fixture was
+invalid (two keeper entries sharing one profile, entry
+"b" notifying telegram with no telegram block) — both
+servers refused to start, Go with the config-validation
+error and Rust with the fixed hash-on-start message
+(`load_config` rejects the same invalid config); the
+fixture now adds profile `muse02` + a telegram block,
+same rules as the keeper unit test. (c) Run 4's three
+DIFFs (42/43/44) were false: the bodies were byte-
+identical (`raw==`) but the harness tried to parse the
+HTML shell as JSON; those cases now pass
+`json_body=False`.
+
+#### Idle probe (F-B5, cue, 2026-11-06)
+
+Same script both sides (`m6b-idle.py`: one keep-alive
+connection; (a) idle 15 s then a request, (b) a request
+every 30 s for 150 s; unauthenticated `GET /api/v1/status`,
+401 proves the connection is alive):
+
+```
+Rust (e8aa3ff): (a) idle-15s: CLOSED (server cut the idle connection)
+                (b) 30s-interval-150s: CUT at t=30 (request 2/6: no response)
+Go   (0.9.0):   (a) idle-15s: ALIVE (status=401)
+                (b) 30s-interval-150s: SURVIVED (6/6, t=0..150)
+```
+
+So the header-read-timeout assumption is CONFIRMED (the
+10 s timeout does apply between keep-alive requests —
+(a) is CLOSED, not alive), but the residual is real and
+measured: Go keeps an idle connection 120 s, Rust cuts
+it at 10 s. DECISION (self-decide rule, live evidence):
+keep 10 s. Go's two knobs are `ReadHeaderTimeout: 10s`
+and `IdleTimeout: 120s` (`internal/commands/webui.go:
+232-236`); hyper has only one (`header_read_timeout`),
+so 10 s matches the initial-header read exactly and is
+stricter (fail-closed) on idle, while 120 s would match
+idle exactly but open the initial-header (slowloris)
+window 12x — a fail-open trade. Exact Go shape would
+need an activity-tracking IO watchdog (first request
+10 s, subsequent 120 s); not built, recorded here as
+the [DEVIATION] residual in §M6b.6. A browser/client
+reconnects transparently; only a client holding one
+connection with >10 s gaps observes the cut.
+
+#### Fail-before proofs (cue, 2026-11-06, `e8aa3ff`, 11/11)
+
+`m6b-proofs-fix1.sh` (adapted paths: repo
+`/tmp/mea-m6b-fix1-repo`, target `/dev/shm/mea-m6b-proofs`,
+`rustup run 1.99.1 cargo`; the `store-mode` sed line
+237→236 after the fix-loop edits shifted `guarded.rs`
+by one line). Each proof neuters ONE check and expects
+its pinning test to go RED, then restores (md5-verified):
+
+```
+auth-cost:   exit=101 (want !=0) fail_before_cost_is_ten restore-ok
+auth-bytes:  exit=101 (want !=0) token_length_limit_is_bytes restore-ok
+ratelimit:   exit=101 (want !=0) fail_before_rate_limit restore-ok
+origin:      exit=101 (want !=0) fail_before_origin_check restore-ok
+contain:     exit=101 (want !=0) fail_before_dotdot_escape restore-ok
+ordered:     exit=101 (want !=0) fail_before_stored_order restore-ok
+merge-r1:    exit=101 (want !=0) fail_before_r1_keep restore-ok
+store-mode:  exit=101 (want !=0) atomic_write_is_0600_and_renames restore-ok
+store-lock:  exit=101 (want !=0) fail_before_flock restore-ok
+embed-hash:  exit=101 (want !=0) bundle_hash_matches_measured_value restore-ok
+```
+
+Proof 11 (R4 body cap, RSS — `m6b-proof11.py`, VmHWM
+peak delta for one 64 MiB POST to
+`/api/v1/config/validate`): cap wired → 400,
+VmHWM +4,624 KiB; cap neutered (`MAX_BODY_BYTES` 1 MiB+1
+→ 1 GiB, rebuild) → 400, VmHWM +69,580 KiB (~68 MiB,
+the whole body buffered before dispatch); restored +
+rebuilt → 400, VmHWM +4,764 KiB, and `server.rs` md5
+matches the pre-proof value (`ac7c58b4…`). Status is 400
+in both cases (the per-handler 1 MiB cap still rejects),
+so only the peak memory distinguishes them — the
+pre-dispatch cap is the mechanism. (VmHWM, not
+RSS-after, is the discriminator: the body Vec is freed
+before the response is written, so RSS-after returns to
+baseline either way; parity case 52 measured the same
+wired side as RSS-after, go +192 KiB / rs +80 KiB.)
