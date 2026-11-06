@@ -85,9 +85,7 @@ pub fn sync_error_text(path: &str, e: &std::io::Error) -> String {
 /// when the destination Lstats as a directory (a symlink to a
 /// directory does not: Go's Lstat does not follow it).
 pub fn rename_error_text(old: &str, new: &str, e: &std::io::Error) -> String {
-    if e.raw_os_error() == Some(21)
-        && std::fs::symlink_metadata(new).is_ok_and(|m| m.is_dir())
-    {
+    if e.raw_os_error() == Some(21) && std::fs::symlink_metadata(new).is_ok_and(|m| m.is_dir()) {
         return format!("rename {old} {new}: {}", strerror(17));
     }
     format!("rename {old} {new}: {}", os_message(e))
@@ -135,8 +133,7 @@ mod tests {
         // red-team round-2 R2-B1. Both empty and non-empty
         // directories map; a symlink to a directory does
         // NOT (Go's Lstat does not follow it).
-        let dir = std::env::temp_dir()
-            .join(format!("castctl-oserr-rename-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("castctl-oserr-rename-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let dest = dir.join("pic.jpg");
         std::fs::create_dir_all(&dest).unwrap();

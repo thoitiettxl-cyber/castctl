@@ -329,15 +329,11 @@ fn write_file_atomic(path: &str, data: &[u8]) -> Result<(), ConfigError> {
         use std::io::Write;
         if let Err(e) = f.write_all(data) {
             let _ = std::fs::remove_file(&tmp);
-            return Err(raw_io_error(crate::oserr::write_error_text(
-                &tmp_s, &e,
-            )));
+            return Err(raw_io_error(crate::oserr::write_error_text(&tmp_s, &e)));
         }
         if let Err(e) = f.sync_all() {
             let _ = std::fs::remove_file(&tmp);
-            return Err(raw_io_error(crate::oserr::sync_error_text(
-                &tmp_s, &e,
-            )));
+            return Err(raw_io_error(crate::oserr::sync_error_text(&tmp_s, &e)));
         }
     }
     if let Err(e) = std::fs::rename(&tmp, path) {
@@ -463,9 +459,17 @@ mod tests {
         let e = write_file_atomic(target.to_str().unwrap(), b"{}\n").unwrap_err();
         assert_eq!(e.code, 1, "message: {}", e.message);
         assert!(e.message.starts_with("rename "), "message: {}", e.message);
-        assert!(e.message.ends_with(": file exists"), "message: {}", e.message);
+        assert!(
+            e.message.ends_with(": file exists"),
+            "message: {}",
+            e.message
+        );
         assert!(!e.message.contains("profile:"), "message: {}", e.message);
-        assert!(!e.message.contains("write config:"), "message: {}", e.message);
+        assert!(
+            !e.message.contains("write config:"),
+            "message: {}",
+            e.message
+        );
         // (b) Temp-create arm: the parent directory does
         // not exist.
         let missing = dir.join("nope").join("config.json");
@@ -498,9 +502,17 @@ mod tests {
         let e = set_auto_approve(dir.to_str().unwrap(), "no.0", "always").unwrap_err();
         assert_eq!(e.code, 1, "message: {}", e.message);
         assert!(e.message.starts_with("open "), "message: {}", e.message);
-        assert!(e.message.ends_with(": is a directory"), "message: {}", e.message);
+        assert!(
+            e.message.ends_with(": is a directory"),
+            "message: {}",
+            e.message
+        );
         assert!(!e.message.contains("profile:"), "message: {}", e.message);
-        assert!(!e.message.contains("lock config:"), "message: {}", e.message);
+        assert!(
+            !e.message.contains("lock config:"),
+            "message: {}",
+            e.message
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

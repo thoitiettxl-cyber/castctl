@@ -2266,17 +2266,11 @@ mod tests {
         // the same text, R2-B2 audit).
         use castctl_config::oserr::mkdir_error_text;
         assert_eq!(
-            mkdir_error_text(
-                "/tmp/notadir",
-                &std::io::Error::from_raw_os_error(17)
-            ),
+            mkdir_error_text("/tmp/notadir", &std::io::Error::from_raw_os_error(17)),
             "mkdir /tmp/notadir: not a directory"
         );
         assert_eq!(
-            mkdir_error_text(
-                "/tmp/notadir",
-                &std::io::Error::from_raw_os_error(13)
-            ),
+            mkdir_error_text("/tmp/notadir", &std::io::Error::from_raw_os_error(13)),
             "mkdir /tmp/notadir: permission denied"
         );
     }
