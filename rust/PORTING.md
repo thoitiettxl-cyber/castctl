@@ -11036,10 +11036,11 @@ scope, no file outside `rust/` + `NOTICE` +
   changed.
 - `docs/provenance.md` + `rust/PORTING.md` (docs commit
   `e392155`): both M6a and M6b had added a `## 16.`
-  section. Kept both, renumbered M6b's to `## 17.
-  bcrypt + blowfish` and updated the one in-repo
-  reference (`rust/Cargo.toml`: bcrypt comment,
-  `provenance.md §16` → `§17`). The commit message of
+  section. Kept both, renumbered M6b's bcrypt+blowfish
+  section to `## 17.` at the time (now `## 18.` — see
+  §M6b.13) and updated the one in-repo reference
+  (`rust/Cargo.toml`: bcrypt comment, `provenance.md
+  §16` → `§17` then, `§18` now). The commit message of
   the replayed `944c04b` still says "provenance §16"
   (historical text, not rewritten). PORTING.md: kept
   HEAD's `## Hiệu năng (baseline) — M-perf-3` section
@@ -11131,7 +11132,7 @@ commit, all on `feat/rust-m6b-webui`, unpushed.
 
 | Finding | Disposition | Commit | Verification |
 |---|---|---|---|
-| L1 / tech N-1 (LOW, docs) NOTICE bcrypt/blowfish refs still `§16` after the rebase renumber (§16 is now M6a keeper, §17 is bcrypt+blowfish) | FIXED both lines (`NOTICE:228,233` §16 → §17). CORRECTION to §M6b.11: its claim of "the one in-repo reference" (the `rust/Cargo.toml` bcrypt comment) was WRONG — grep found the two NOTICE lines as well; all three are now §17. The replayed commit message of `944c04b` still says "provenance §16" (historical text, not rewritten) | `e777d3e` | grep: no `§16` reference to bcrypt/blowfish remains in the diff (`docs/provenance.md` §17 is bcrypt+blowfish; §16 is M6a keeper) |
+| L1 / tech N-1 (LOW, docs) NOTICE bcrypt/blowfish refs still `§16` after the rebase renumber (§16 is now M6a keeper; bcrypt+blowfish was §17 then, §18 now — see §M6b.13) | FIXED both lines (`NOTICE:228,233` §16 → §17). CORRECTION to §M6b.11: its claim of "the one in-repo reference" (the `rust/Cargo.toml` bcrypt comment) was WRONG — grep found the two NOTICE lines as well; all three are now §18. The replayed commit message of `944c04b` still says "provenance §16" (historical text, not rewritten) | `e777d3e` | grep: no `§16` reference to bcrypt/blowfish remains in the diff (`docs/provenance.md` §18 is bcrypt+blowfish; §16 is M6a keeper) |
 | M-1 (safety MINOR) screencast availability/reason mismatch: Go checks `CDPAvailable()` FIRST, Rust went straight to the keeper check, so with a keeper entry Rust returned `(true, "")` while Go returns `(false, <CDP message>)` | FIXED by modelling the CDP branch: `screencast_availability` now always returns `(false, "screencast unavailable in this build (rebuild with -tags with_chromedp)")` — the exact Go string, verbatim. Verified from the binary first: `go version -m /usr/local/bin/castctl` reports `-tags=with_utls,with_quic,with_wireguard,with_gvisor` (NO `with_chromedp`), so the keeper branch is unreachable against the shipped binary. The false-premise comments ("cue Go binary is built WITH chromedp") are corrected in `screencast.rs` (fn doc + file header, which also drops the stale "no keeper crate yet"). Both reason strings are recorded verbatim in §M6b.3 (corrected) and §M6b.6 (new entry). The old keeper-based reason (`no keeper entry for profile "<name>": add a "keeper" entry with a browser URL (see docs/config.md)`) is the string Go returns only when CDP IS available — against a hypothetical chromedp Go build it would be right; the comparison target is the shipped binary | `e777d3e` | `screencast::tests::availability_always_cdp_unavailable` (asserts the CDP message with AND without a keeper entry); parity 17 (strict now) + new 17b (keeper entry present), both `raw== canon==` |
 | L2 (red-team LOW) per-route 64 KiB caps don't bound allocation — a 900 KiB body to a 64 KiB route was buffered whole by `read_capped_body` (transport cap 1 MiB+1) and only then rejected by `decode_body_json`; Go's `MaxBytesReader(64 KiB)` aborts at 64 KiB+1 during the read | FIXED (the preferred option, it was clean): `route_body_cap(method, path) -> Option<usize>` in `handlers.rs` mirrors `route_reads_body`'s arm set with Go's per-handler cap (64 KiB: POST /profiles, PATCH/DELETE /profiles/{name}, POST rename, POST /endpoints/import, PUT /settings/telegram, PUT /settings/webui, POST /chats/{profile}, POST send, POST op; 1 MiB: POST login/import, POST/PATCH outbounds, POST /outbounds/validate, POST/PATCH endpoints, PUT /config, POST /config/validate, PUT /dns, PUT /settings/keeper; `section_body` always 1 MiB); `route_reads_body` now delegates (`.is_some()`); `read_capped_body(body, cap)` takes the route cap in `dispatch_api`; `MAX_BODY_BYTES` deleted. Decision record ("Quy tắc quyết định"): the fix matches Go's observable behaviour (same 400, allocation bounded at the route cap) with no new risk — the alternative (record only) would have left a real 1 MiB allocation on 64 KiB routes | `e777d3e` | `server::tests::route_body_cap_table` (all 20 body routes + 3 no-cap routes); `routecap` fail-before proof (neuter → RED); parity 53 (900 KiB to PUT /api/v1/dns: 400/400, go RSS +164 KiB, rs RSS −640 KiB — inside the 512 KiB bound) |
 | L3 (red-team LOW) HTTP/1.0 + any Transfer-Encoding diverges — Go ignores TE on HTTP/1.0 and runs the handler; hyper auto-400s | RECORDED (one line in §M6b.6, no code change — no knob exists). Verified before writing, both sides: Go from stdlib source (`transfer.go:646`, "Issue 12785; ignore Transfer-Encoding on HTTP/1.0 requests") AND live (below); hyper from the trace in review3-redteam (P8) AND live (below) | (docs, this loop) | Live probe: HTTP/1.0 + `Transfer-Encoding: chunked` to `/api/v1/status` → Go 401 (handler runs, auth gate), Rust 400 |
@@ -11146,7 +11147,7 @@ commit, all on `feat/rust-m6b-webui`, unpushed.
 
 - §M6b.11's "the one in-repo reference" (§16 → §17) was
   wrong: `NOTICE:228,233` also said §16 for
-  bcrypt/blowfish. All three are §17 now (see L1).
+  bcrypt/blowfish. All three are §18 now (see L1; renumbered again in §M6b.13).
 - §M6b.3/§M6b.10's "screencast `reason` recorded verbatim
   (loose)" was wrong: the reason strings appeared
   NOWHERE in PORTING or the parity logs, and the two
@@ -11387,3 +11388,82 @@ all in `rust/` + `NOTICE` + `docs/provenance.md`, zero
   (L5 repeated across 4 runs, 30+ probes); no
   repeated-run statistics beyond the x3 repeats at
   X=1,500,000 and X=2,000,000.
+
+### M6b.13 Rebase onto dev-rust `0233095` (M6c merged as PR #73, 2026-11-06)
+
+Boss merged M6c (PR #73) first, so PR #74 went CONFLICTING.
+`git fetch origin` verified `origin/dev-rust =
+0233095a067b9fc8ad84b068cd17d1d7f3ab2193` (merge of PR #73)
+before the rebase. All 42 M6b commits replayed onto it, no
+commit skipped, no file outside `rust/` + `NOTICE` +
+`docs/provenance.md` touched. Overlap with M6c: exactly the
+4 files both diffs touched vs `6a399f7`
+(`docs/provenance.md`, `rust/Cargo.lock`,
+`rust/Cargo.toml`, `rust/PORTING.md`) — all in scope.
+
+Conflicts (3, all resolved keeping BOTH sides):
+
+- Commit `a9763f7`, `rust/Cargo.toml` — members: HEAD
+  (`castctl-update`, `castctl-pluginhost`) + ours
+  (`castctl-webui`); kept all three, webui after
+  pluginhost. Workspace deps: ours added a duplicate
+  `sha2 = "=0.10.9"` line — dropped (already promoted
+  once above in the M6c block, identical pin); kept
+  `bcrypt =0.17.1`, `blowfish =0.9.1`, `sha1 =0.11.0`
+  + comments. The M6b comment "sha2/libc lines promoted
+  above by M6a" is now stale (the lines live in the M6c
+  block) — corrected to "promoted above in the M6c
+  block" in this rebase.
+- Commit `e8460f1`, `rust/Cargo.lock` — one hunk: HEAD's
+  whole `[[package]] castctl-update` entry vs ours'
+  whole `[[package]] castctl-webui` entry; kept both,
+  alphabetical order (update first). The bcrypt /
+  blowfish package entries auto-merged.
+- Commit `944c04b`, `docs/provenance.md` — §17
+  COLLISION: HEAD (M6c) `## 17. tar + flate2` vs ours
+  `## 17. bcrypt + blowfish`. Kept both, each its own
+  section: M6c stays §17, M6b becomes `## 18. bcrypt +
+  blowfish`.
+
+Renumber chain (bcrypt+blowfish provenance section):
+`§16` (original M6b commit) → `§17` (first rebase onto
+`6a399f7`, §M6b.11) → `§18` (this rebase). Every live
+in-repo reference was renumbered in place: `NOTICE:228,
+233` and the `rust/Cargo.toml` bcrypt comment (§17 →
+§18); §M6b.11/§M6b.12's current-state claims ("all
+three are now §17", "`docs/provenance.md` §17 is
+bcrypt+blowfish") updated to §18 with a pointer here.
+The `§16 → §17` fragments that remain in §M6b.11 /
+§M6b.12 describe the edits that actually happened at
+the time (fix loop 3 really did change §16 to §17) and
+are kept as history — this section is the authority for
+the current numbering. M6c's own §17 references
+(§M6c.1 "provenance §17 (renumbered from §16...)" and
+§M6c.11) refer to tar+flate2 and were NOT touched.
+Verification: `grep` proves §17 = tar+flate2 only,
+§18 = bcrypt+blowfish only (headings `## 17.` /
+`## 18.` in `docs/provenance.md`); `NOTICE:228,233` +
+`rust/Cargo.toml:176` all say §18.
+
+`rust/PORTING.md` — kept BOTH §M6c (base) and §M6b
+sections, M6b after M6c; no section dropped on either
+side. `rust/Cargo.lock` — union, purely additive both
+ways: vs base `0233095` only `+bcrypt`, `+blowfish`,
+`+castctl-webui` (no removals, no version changes);
+vs old M6b head `325ba0f` only M6c's entries (`tar`,
+`flate2`, `castctl-update`, `castctl-pluginhost`,
+`adler2`, `filetime`, `memoffset`, `miniz_oxide`,
+`simd-adler32`, `xattr`, `zlib-rs`). Lock check:
+bcrypt 0.17.1, blowfish 0.9.1, tar 0.4.46, flate2
+1.1.10, `castctl-webui` / `castctl-update` /
+`castctl-pluginhost` all present; sha2 duplicated
+0.10.9 + 0.11.1 is pre-existing (documented in the M6c
+§17 note). Each workspace pin appears exactly once
+(sha2, libc, bcrypt, blowfish, tar, flate2, nix, sha1).
+
+`git diff --stat origin/dev-rust...HEAD`: 37 files,
++16,662/−21 (before this rebase's doc edits), all in
+`rust/` + `NOTICE` + `docs/provenance.md`, zero `.go`
+files — no SPDX check needed.
+
+#### Gates at the rebased head (cue, `rustup run 1.99.1`, to be filled after the run)

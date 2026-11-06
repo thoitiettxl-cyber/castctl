@@ -173,14 +173,14 @@ async-trait = "=0.1.92"
 # 0.3.4, zeroize 1.9.1). 0.19.x was rejected: it needs
 # base64 0.23 (a second base64 major; the workspace pins
 # =0.22.1). Pin measured on cue 2026-11-05; see
-# rust/PORTING.md §M6b and docs/provenance.md §17.
+# rust/PORTING.md §M6b and docs/provenance.md §18.
 bcrypt = "=0.17.1"
 blowfish = "=0.9.1"
 # M6b: SHA-256 (bundle hash, config-file hash) and flock
 # (guarded config save) use the sha2/libc lines promoted
-# above by M6a (same versions 0.10.9 / 0.2.191; do NOT pick
-# sha2 0.11.1, also in the lock — 0.10.9 is the
-# workspace-consistent line).
+# above in the M6c block (same versions 0.10.9 / 0.2.191;
+# do NOT pick sha2 0.11.1, also in the lock — 0.10.9 is
+# the workspace-consistent line).
 # M6b: SHA-1 for the screencast WebSocket handshake
 # (`Sec-WebSocket-Accept`, RFC 6455) — already in the lock
 # via tungstenite 0.30.0; promoting it adds no new crate.
