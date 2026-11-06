@@ -639,8 +639,9 @@ fn slog_bridge_filtering_and_redaction() {
             ("what", SlogValue::from("fs.read")),
             (
                 "err",
-                SlogValue::error(std::io::Error::other(format!("down: hatch_sess={FIX_COOKIE_VAL}"),
-                )),
+                SlogValue::error(std::io::Error::other(format!(
+                    "down: hatch_sess={FIX_COOKIE_VAL}"
+                ))),
             ),
         ],
     );
@@ -664,10 +665,7 @@ fn slog_bridge_filtering_and_redaction() {
     let sl = h.slog_logger("castctl");
     sl.error(
         "slog-error-probe",
-        &[(
-            "err",
-            SlogValue::error(std::io::Error::other("boom")),
-        )],
+        &[("err", SlogValue::error(std::io::Error::other("boom")))],
     );
     sl.warn("slog-warn-probe", &[]);
     h.close();
@@ -1220,8 +1218,14 @@ fn safe_err_for_level_trace_is_summary() {
 #[test]
 fn resolve_log_settings_cases() {
     let config_with_log = |l: LogConfig| Some(l);
-    type ResolveCase<'a> =
-        (&'a str, Option<LogConfig>, &'a str, bool, Option<LogConfig>, bool);
+    type ResolveCase<'a> = (
+        &'a str,
+        Option<LogConfig>,
+        &'a str,
+        bool,
+        Option<LogConfig>,
+        bool,
+    );
     let cases: Vec<ResolveCase> = vec![
         (
             "absent block",
@@ -1443,8 +1447,7 @@ fn resolve_log_settings_cases() {
 
 #[test]
 fn wrap_err_redacts_display_but_keeps_source() {
-    let inner = std::io::Error::other(format!("boom auth_token={FIX_HATCH_TOKEN}"),
-    );
+    let inner = std::io::Error::other(format!("boom auth_token={FIX_HATCH_TOKEN}"));
     let wrapped = castctl_logging::wrap_error(inner);
     assert!(
         !wrapped.to_string().contains(FIX_HATCH_TOKEN),
