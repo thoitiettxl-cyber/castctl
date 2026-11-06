@@ -208,8 +208,8 @@ async fn main() {
         }
         let sub = cmd_args[0].clone();
         if !castctl_cli::table::FS_SUBCOMMANDS.contains(&sub.as_str()) {
-            eprint!(
-                "castctl: argument subcommand: invalid choice: {} (choose from {})\n",
+            eprintln!(
+                "castctl: argument subcommand: invalid choice: {} (choose from {})",
                 go_quote(&sub),
                 castctl_cli::table::FS_SUBCOMMANDS.join(", ")
             );

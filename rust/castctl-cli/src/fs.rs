@@ -479,11 +479,13 @@ pub(crate) async fn exec_fs(
     }
 }
 
-/// Run one `fs` subcommand from the CLI: resolve config
-/// + profile (kept for the runtime builder), build the
-/// tokio runtime and the per-profile runtime, dispatch,
-/// and append the stdout/stderr text to the outcome —
-/// the `fs` mirror of `run_network_command`.
+/// Run one `fs` subcommand from the CLI: resolve the
+/// config and profile (kept for the runtime builder),
+/// build the tokio runtime and the per-profile runtime,
+/// dispatch, and append the stdout/stderr text to the
+/// outcome. This is the `fs` mirror of
+/// `run_network_command`.
+///
 /// `stdin_data` is the `fs write` stdin bytes (read
 /// before connecting by the caller).
 pub(crate) fn run_fs_command(

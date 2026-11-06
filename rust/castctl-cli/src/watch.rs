@@ -276,7 +276,7 @@ impl SubscribeHandler for WatchHandler {
 /// folded into `Ok(CmdOut{code, stderr})` instead of
 /// `Err`, the same pattern `render_flow_err`'s docs
 /// describe for approve-all's mid-loop lines.
-pub async fn watch_async(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
+pub(crate) async fn watch_async(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
     // Go passes the raw timeout straight through and
     // its SubscribeRaw defaults `<= 0` (10s idle /
     // 120s overall); Rust's `subscribe_raw` defaults
