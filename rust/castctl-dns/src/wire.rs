@@ -133,7 +133,7 @@ pub fn decode_message(buf: &[u8]) -> Result<DnsMessage, DnsError> {
             name,
             rtype,
             ttl,
-            rdata,
+            rdata: rdata.to_vec(),
         });
     }
     // Skip authority + additional sections (counts only;

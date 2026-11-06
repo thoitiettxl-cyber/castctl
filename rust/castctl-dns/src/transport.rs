@@ -150,12 +150,12 @@ impl DnsTransportFactory for TcpTransportFactory {
     fn create(&self, server: &DnsServer) -> Result<Arc<dyn DnsTransport>, DnsError> {
         match &server.kind {
             DnsServerKind::Tcp {
-                server,
+                server: address,
                 server_port,
             } => {
-                let ip: IpAddr = server.parse().map_err(|_| {
+                let ip: IpAddr = address.parse().map_err(|_| {
                     DnsError::Unsupported(format!(
-                        "dns: server {server:?} is not an IP literal after bootstrap"
+                        "dns: server {address:?} is not an IP literal after bootstrap"
                     ))
                 })?;
                 Ok(Arc::new(TcpDnsTransport::new(
