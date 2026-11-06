@@ -67,6 +67,44 @@ pub fn open_error_text(path: &str, e: &std::io::Error) -> String {
     format!("open {path}: {}", os_message(e))
 }
 
+/// Go `*PathError` text for writes: `write <path>: <strerror>`.
+pub fn write_error_text(path: &str, e: &std::io::Error) -> String {
+    format!("write {path}: {}", os_message(e))
+}
+
+/// Go `*PathError` text for syncs: `sync <path>: <strerror>`.
+pub fn sync_error_text(path: &str, e: &std::io::Error) -> String {
+    format!("sync {path}: {}", os_message(e))
+}
+
+/// Go `*LinkError` text for renames: `rename <old> <new>: <strerror>`.
+/// Go's `os.Rename` Lstats the destination first: when it is a
+/// directory it returns EEXIST ("file exists") without issuing the
+/// syscall, while the raw kernel rename returns EISDIR ("is a
+/// directory") — red-team round-2 R2-B1. The mapping fires only
+/// when the destination Lstats as a directory (a symlink to a
+/// directory does not: Go's Lstat does not follow it).
+pub fn rename_error_text(old: &str, new: &str, e: &std::io::Error) -> String {
+    if e.raw_os_error() == Some(21)
+        && std::fs::symlink_metadata(new).is_ok_and(|m| m.is_dir())
+    {
+        return format!("rename {old} {new}: {}", strerror(17));
+    }
+    format!("rename {old} {new}: {}", os_message(e))
+}
+
+/// Go `MkdirAll`-style error text: `mkdir <path>: <strerror>`.
+/// Rust's `create_dir_all` reports EEXIST when a path component
+/// is a regular file, while Go's `MkdirAll` reports ENOTDIR
+/// (`mkdir <path>: not a directory` — red-team probe E1).
+pub fn mkdir_error_text(path: &str, e: &std::io::Error) -> String {
+    if e.raw_os_error() == Some(17) {
+        format!("mkdir {path}: {}", strerror(20))
+    } else {
+        format!("mkdir {path}: {}", os_message(e))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +125,86 @@ mod tests {
         assert!(is_not_exist(&enoent));
         let enotdir = std::io::Error::from_raw_os_error(20);
         assert!(!is_not_exist(&enotdir));
+    }
+
+    #[test]
+    fn rename_error_text_maps_dir_dest_to_file_exists() {
+        // Go `os.Rename` Lstats the destination first: a
+        // directory destination is EEXIST ("file exists"),
+        // not the kernel's EISDIR ("is a directory") —
+        // red-team round-2 R2-B1. Both empty and non-empty
+        // directories map; a symlink to a directory does
+        // NOT (Go's Lstat does not follow it).
+        let dir = std::env::temp_dir()
+            .join(format!("castctl-oserr-rename-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("pic.jpg");
+        std::fs::create_dir_all(&dest).unwrap();
+        let e = std::io::Error::from_raw_os_error(21); // EISDIR
+        let dest_s = dest.to_str().unwrap();
+        assert_eq!(
+            rename_error_text("/tmp/x.part", dest_s, &e),
+            format!("rename /tmp/x.part {dest_s}: file exists")
+        );
+        std::fs::write(dest.join("inner.txt"), b"x").unwrap();
+        assert_eq!(
+            rename_error_text("/tmp/x.part", dest_s, &e),
+            format!("rename /tmp/x.part {dest_s}: file exists")
+        );
+        let file = dir.join("f.jpg");
+        std::fs::write(&file, b"x").unwrap();
+        let file_s = file.to_str().unwrap();
+        assert_eq!(
+            rename_error_text("/tmp/x.part", file_s, &e),
+            format!("rename /tmp/x.part {file_s}: is a directory")
+        );
+        let missing = dir.join("nope.jpg");
+        let missing_s = missing.to_str().unwrap();
+        assert_eq!(
+            rename_error_text("/tmp/x.part", missing_s, &e),
+            format!("rename /tmp/x.part {missing_s}: is a directory")
+        );
+        let link = dir.join("link.jpg");
+        std::os::unix::fs::symlink(&dest, &link).unwrap();
+        let link_s = link.to_str().unwrap();
+        assert_eq!(
+            rename_error_text("/tmp/x.part", link_s, &e),
+            format!("rename /tmp/x.part {link_s}: is a directory")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mkdir_write_sync_error_text_shapes() {
+        // Go `*PathError` shapes for the toggle writer
+        // (red-team round-2 R2-B2): open/write/sync/rename
+        // carry the op + path; mkdir maps EEXIST-on-a-file
+        // to ENOTDIR, as Go's `MkdirAll` does (probe E1).
+        let e = std::io::Error::from_raw_os_error(1); // EPERM
+        assert_eq!(
+            open_error_text("/tmp/x.tmp", &e),
+            "open /tmp/x.tmp: operation not permitted"
+        );
+        assert_eq!(
+            write_error_text("/tmp/x.tmp", &e),
+            "write /tmp/x.tmp: operation not permitted"
+        );
+        assert_eq!(
+            sync_error_text("/tmp/x.tmp", &e),
+            "sync /tmp/x.tmp: operation not permitted"
+        );
+        assert_eq!(
+            rename_error_text("/tmp/x.tmp", "/tmp/cfg", &e),
+            "rename /tmp/x.tmp /tmp/cfg: operation not permitted"
+        );
+        let eexist = std::io::Error::from_raw_os_error(17); // EEXIST
+        assert_eq!(
+            mkdir_error_text("/tmp/notadir", &eexist),
+            "mkdir /tmp/notadir: not a directory"
+        );
+        assert_eq!(
+            mkdir_error_text("/tmp/notadir", &e),
+            "mkdir /tmp/notadir: operation not permitted"
+        );
     }
 }

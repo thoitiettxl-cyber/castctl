@@ -575,19 +575,6 @@ fn io_error_text(e: &std::io::Error) -> String {
     castctl_config::oserr::os_message(e)
 }
 
-/// `create_dir_all` error text, Go `MkdirAll`-style:
-/// Rust reports EEXIST when a path component is a regular
-/// file, while Go's `MkdirAll` reports ENOTDIR (`mkdir
-/// <path>: not a directory` — red-team probe E1).
-fn mkdir_error_text(e: &std::io::Error) -> String {
-    if e.raw_os_error() == Some(17) {
-        // EEXIST from a file in the path: Go's error.
-        castctl_config::oserr::strerror(20)
-    } else {
-        io_error_text(e)
-    }
-}
-
 /// Go `filepath.Abs`: the lexical absolute path (cwd +
 /// clean, no filesystem access). `std::path::absolute`
 /// is not used: it keeps `.` components on some inputs,
@@ -1619,8 +1606,8 @@ async fn save_resources(
         return Err(msg(
             1,
             format!(
-                "save resources: create directory: mkdir {directory}: {}",
-                mkdir_error_text(&e)
+                "save resources: create directory: {}",
+                castctl_config::oserr::mkdir_error_text(directory, &e)
             ),
         ));
     }
@@ -1696,10 +1683,12 @@ async fn save_resources(
                 1,
                 // Go `save resources: rename %s: %w` (tmp)
                 // where the error is a `*LinkError`:
-                // `rename <tmp> <dest>: <reason>`.
+                // `rename <tmp> <dest>: <reason>` (with
+                // Go's `os.Rename` destination-is-a-
+                // directory → EEXIST pre-check, R2-B1).
                 format!(
-                    "save resources: rename {tmp}: rename {tmp} {dest}: {}",
-                    io_error_text(&e)
+                    "save resources: rename {tmp}: {}",
+                    castctl_config::oserr::rename_error_text(&tmp, &dest, &e)
                 ),
             ));
         }
@@ -2272,14 +2261,23 @@ mod tests {
         // `create_dir_all` reports EEXIST when a path
         // component is a regular file; Go `MkdirAll`
         // reports ENOTDIR (`mkdir <path>: not a
-        // directory`).
+        // directory`). Shared helper in `oserr` since
+        // fix loop 2 (the toggle writer's lock arm uses
+        // the same text, R2-B2 audit).
+        use castctl_config::oserr::mkdir_error_text;
         assert_eq!(
-            mkdir_error_text(&std::io::Error::from_raw_os_error(17)),
-            "not a directory"
+            mkdir_error_text(
+                "/tmp/notadir",
+                &std::io::Error::from_raw_os_error(17)
+            ),
+            "mkdir /tmp/notadir: not a directory"
         );
         assert_eq!(
-            mkdir_error_text(&std::io::Error::from_raw_os_error(13)),
-            "permission denied"
+            mkdir_error_text(
+                "/tmp/notadir",
+                &std::io::Error::from_raw_os_error(13)
+            ),
+            "mkdir /tmp/notadir: permission denied"
         );
     }
 
