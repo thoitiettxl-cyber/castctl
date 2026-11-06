@@ -1,0 +1,33 @@
+{
+  "args": [
+    "fs",
+    "ls",
+    "-l"
+  ],
+  "gateway": {
+    "/fs/list": {
+      "result": {
+        "entries": [
+          {
+            "name": "a.txt",
+            "type": "file",
+            "size": 12,
+            "modifiedAt": "2026-10-24T12:57:37"
+          },
+          {
+            "name": ".hidden",
+            "type": "file",
+            "size": 3,
+            "modifiedAt": "2026-10-24T12:57:37"
+          },
+          {
+            "name": "docs",
+            "type": "directory",
+            "size": 4096,
+            "modifiedAt": "2026-10-24T12:57:37"
+          }
+        ]
+      }
+    }
+  }
+}

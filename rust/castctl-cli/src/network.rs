@@ -490,6 +490,10 @@ async fn history_result(
 pub(crate) struct CmdOut {
     /// Bytes for stdout.
     pub stdout: String,
+    /// Raw bytes for stdout (`fs cat`: arbitrary bytes
+    /// cannot go through the `String` above). No command
+    /// emits both text and raw bytes.
+    pub stdout_bytes: Vec<u8>,
     /// Bytes for stderr (approveAll lines; on a mid-loop
     /// decide failure, those lines plus the rendered error
     /// text — see `render_flow_err`).
@@ -505,6 +509,7 @@ impl CmdOut {
             stdout,
             stderr: String::new(),
             code: 0,
+            ..Default::default()
         }
     }
 
@@ -516,7 +521,25 @@ impl CmdOut {
             stdout,
             stderr: String::new(),
             code,
+            ..Default::default()
         }
+    }
+
+    /// Raw stdout bytes only, exit 0 (`fs cat`).
+    pub(crate) fn bytes(stdout_bytes: Vec<u8>) -> Self {
+        Self {
+            stdout_bytes,
+            ..Default::default()
+        }
+    }
+
+    /// Stdout as bytes, text first then raw bytes (the
+    /// order the binary writes them; no command emits
+    /// both, so this is just the concatenation).
+    pub(crate) fn stdout_combined(&self) -> Vec<u8> {
+        let mut out = self.stdout.clone().into_bytes();
+        out.extend_from_slice(&self.stdout_bytes);
+        out
     }
 }
 
@@ -1178,6 +1201,7 @@ async fn cmd_approvals(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
                     stdout: String::new(),
                     stderr,
                     code,
+                    ..Default::default()
                 });
             }
         }
@@ -1270,6 +1294,7 @@ async fn cmd_approve(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
                     stdout: String::new(),
                     stderr,
                     code,
+                    ..Default::default()
                 });
             }
         }
@@ -1278,7 +1303,6 @@ async fn cmd_approve(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
     let res = decide_approval(rt, &id, &decision).await?;
     Ok(CmdOut::out(write_json_serde(&res)?))
 }
-
 /// `cmdDeny` (`wait.go:1330`): decide `deny`, or
 /// `deny_always` with `--always`; passthrough.
 async fn cmd_deny(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
@@ -1909,6 +1933,7 @@ pub(crate) fn run_network_command(
         dispatch(spec, &runtime, p).await
     })?;
     ctx.out.stdout.push_str(&out.stdout);
+    ctx.out.stdout_bytes.extend_from_slice(&out.stdout_bytes);
     ctx.out.stderr.push_str(&out.stderr);
     if out.code != 0 {
         return Err(FlowErr::Exit(out.code));
@@ -1953,13 +1978,13 @@ pub async fn run_driver_command(
     spec: &CommandSpec,
     rt: &Runtime,
     p: &Parsed,
-) -> (String, String, i32) {
+) -> (Vec<u8>, String, i32) {
     match dispatch(spec, rt, p).await {
-        Ok(out) => (out.stdout, out.stderr, out.code),
-        Err(FlowErr::HelpShown) => (String::new(), String::new(), 0),
-        Err(FlowErr::Exit(code)) => (String::new(), String::new(), code),
+        Ok(out) => (out.stdout_combined(), out.stderr, out.code),
+        Err(FlowErr::HelpShown) => (Vec::new(), String::new(), 0),
+        Err(FlowErr::Exit(code)) => (Vec::new(), String::new(), code),
         Err(FlowErr::Verbatim { code, text }) => (
-            String::new(),
+            Vec::new(),
             if text.is_empty() {
                 String::new()
             } else {
@@ -1968,7 +1993,7 @@ pub async fn run_driver_command(
             code,
         ),
         Err(FlowErr::Msg { code, message }) => (
-            String::new(),
+            Vec::new(),
             message
                 .map(|m| format!("castctl: {m}\n"))
                 .unwrap_or_default(),

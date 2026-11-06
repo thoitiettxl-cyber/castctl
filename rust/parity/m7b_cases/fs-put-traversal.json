@@ -1,0 +1,8 @@
+{
+  "args": [
+    "fs",
+    "put",
+    "local.txt",
+    "../remote.txt"
+  ]
+}

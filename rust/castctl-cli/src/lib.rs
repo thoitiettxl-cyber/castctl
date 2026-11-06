@@ -25,6 +25,7 @@
 
 pub mod approvals;
 pub mod autoapprove;
+pub mod fs;
 pub mod help_texts;
 pub mod network;
 pub mod parser;

@@ -453,6 +453,7 @@ version = "0.1.0"
 dependencies = [
  "castctl-approvals",
  "castctl-config",
+ "castctl-fsclient",
  "castctl-gateway",
  "castctl-logging",
  "castctl-pluginhost",

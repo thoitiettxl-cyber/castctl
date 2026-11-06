@@ -1,0 +1,15 @@
+{
+  "args": [
+    "fs",
+    "mv",
+    "a.txt",
+    "b.txt"
+  ],
+  "gateway": {
+    "/fs/rename": {
+      "result": {
+        "ok": true
+      }
+    }
+  }
+}

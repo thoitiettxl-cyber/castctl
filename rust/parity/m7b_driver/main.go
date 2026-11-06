@@ -47,6 +47,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -58,6 +59,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,6 +70,7 @@ import (
 	"github.com/thoitiettxl-cyber/castctl/internal/approvals"
 	"github.com/thoitiettxl-cyber/castctl/internal/conn"
 	"github.com/thoitiettxl-cyber/castctl/internal/deliver"
+	"github.com/thoitiettxl-cyber/castctl/internal/fsclient"
 	"github.com/thoitiettxl-cyber/castctl/internal/gateway"
 	"github.com/thoitiettxl-cyber/castctl/internal/gateway/gatewaytest"
 	"github.com/thoitiettxl-cyber/castctl/internal/logging"
@@ -256,6 +259,8 @@ type argv struct {
 	strsSet     map[string]bool
 	lists       map[string][]string
 	ints        map[string]int64
+	intsSet     map[string]bool
+	pairLists   map[string][][2]string
 }
 
 func parseArgv(args []string) *argv {
@@ -267,6 +272,8 @@ func parseArgv(args []string) *argv {
 		// Flag defaults from the command table (read.go:54,67):
 		// download --limit 50, raw --timeout 30.
 		ints: map[string]int64{"limit": 50, "timeout": 30},
+		intsSet: map[string]bool{},
+		pairLists: map[string][][2]string{},
 	}
 	i := 0
 	for i < len(args) {
@@ -285,7 +292,8 @@ func parseArgv(args []string) *argv {
 			}
 			switch name {
 			case "create", "json", "raw", "recent", "approve-all", "all",
-				"once", "session", "today", "always", "force":
+				"once", "session", "today", "always", "force",
+				"long", "binary", "recursive", "yes", "append", "no-clobber":
 				a.bools[name] = true
 			case "title", "thread", "output", "body", "reaction":
 				if !hasVal {
@@ -296,7 +304,7 @@ func parseArgv(args []string) *argv {
 				}
 				a.strs[name] = val
 				a.strsSet[name] = true
-			case "limit", "timeout":
+			case "limit", "timeout", "depth", "max-bytes":
 				if !hasVal {
 					if i < len(args) {
 						val = args[i]
@@ -308,6 +316,20 @@ func parseArgv(args []string) *argv {
 				}
 				a.strs[name] = val
 				a.strsSet[name] = true
+				a.intsSet[name] = true
+			case "replace":
+				// Pair-list flag (`fs edit --replace OLD NEW`,
+				// repeatable): consumes two values.
+				var old, new string
+				if i < len(args) {
+					old = args[i]
+					i++
+				}
+				if i < len(args) {
+					new = args[i]
+					i++
+				}
+				a.pairLists["replace"] = append(a.pairLists["replace"], [2]string{old, new})
 			case "param":
 				if !hasVal {
 					if i < len(args) {
@@ -332,6 +354,14 @@ func parseArgv(args []string) *argv {
 				}
 			case 'f':
 				a.bools["force"] = true
+			case 'l':
+				a.bools["long"] = true
+			case 'a':
+				a.bools["all"] = true
+			case 'r':
+				a.bools["recursive"] = true
+			case 'n':
+				a.bools["no-clobber"] = true
 			}
 			continue
 		}
@@ -344,6 +374,10 @@ func (a *argv) bool(name string) bool    { return a.bools[name] }
 func (a *argv) str(name string) string   { return a.strs[name] }
 func (a *argv) strSet(name string) bool  { return a.strsSet[name] }
 func (a *argv) intVal(name string) int64 { return a.ints[name] }
+func (a *argv) intIsSet(name string) bool {
+	return a.intsSet[name]
+}
+func (a *argv) pairs(name string) [][2]string { return a.pairLists[name] }
 
 // --- approvals shaping: verbatim copies from
 // internal/commands/wait.go (pendingApprovals,
@@ -1110,10 +1144,500 @@ func runCommand(ctx context.Context, gw conn.Gateway, httpClient *http.Client, c
 			return nil
 		}
 		return writeJSON(os.Stdout, v)
+	case "fs":
+		return runFSCommand(ctx, gw, a, downloadDir)
 	default:
 		return errCodef(2, "m7b_driver: unknown command %q", cmd)
 	}
 }
+
+// --- `fs` (PR-2): the Go side of the fs parity gate.
+// Mirrors `internal/commands/fs.go` (cmdFS + fsLs/fsTree/
+// fsStat/fsCat/fsGet/fsFind/fsPut/fsWrite/fsEdit/fsMkdir/
+// fsMv/fsRm) against the leased gateway, via
+// `fsclient.New(gw)` — the same library the Rust CLI
+// drives through `castctl-fsclient`.
+//
+// The pre-collapse `..` reject (D-M7b-PR2-6) has NO Go
+// CLI precedent: Go's CLI only clamps (`normOr2`), the
+// reject lives in Go's Telegram layer
+// (`internal/commands/telegram_fs.go:60-93`). This driver
+// is therefore the ORACLE for the new behaviour: it
+// implements the decided CLI sentence (`castctl: path
+// traversal not allowed`, exit 2, never echoing the
+// input) with the Telegram layer's `fsHasTraversal`
+// condition copied verbatim, so the harness pins both
+// sides to it. The decision record (not the Go CLI) is
+// the authority here; see PORTING.md §M7b.12.
+
+// fsHasTraversal, verbatim from
+// internal/commands/telegram_fs.go:60-70.
+func fsHasTraversal(raw string) bool {
+	s := strings.TrimSpace(raw)
+	s = strings.ReplaceAll(s, "\\", "/")
+	s = strings.TrimPrefix(s, "sandbox://")
+	for _, part := range strings.Split(s, "/") {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// normOr2 (`fs.go:254`): a Norm error is a validation
+// failure, exit 2.
+func fsNormOr2(p string) error {
+	_, err := fsclient.Norm(p)
+	if err != nil {
+		return errCode(2, err.Error())
+	}
+	return nil
+}
+
+// fsPositionals (`fs.go:273`): checkPositionals with the
+// `fs` prog name (the harness never feeds usage errors,
+// so this only guards the handler's indexing).
+func fsPositionals(a *argv, names []string) error {
+	if len(a.positionals) < len(names) {
+		missing := names[len(a.positionals):]
+		return errCodef(2, "the following arguments are required: %s", strings.Join(missing, ", "))
+	}
+	if len(a.positionals) > len(names) {
+		extra := a.positionals[len(names):]
+		return errCodef(2, "unrecognized arguments: %s", strings.Join(extra, " "))
+	}
+	return nil
+}
+
+// validateFSPaths: the traversal reject + `norm`
+// validation for one subcommand's path positionals, in
+// Go order (reject before `norm`, since `norm` would
+// clamp the `..` away). `find` is exempt (name
+// fragment); `put` checks the remote only.
+func validateFSPaths(sub string, a *argv) error {
+	var paths []string
+	switch sub {
+	case "ls", "tree", "stat", "cat", "get", "mkdir", "rm", "write", "edit":
+		if len(a.positionals) > 0 {
+			paths = []string{a.positionals[0]}
+		}
+	case "put":
+		if len(a.positionals) > 1 {
+			paths = []string{a.positionals[1]}
+		}
+	case "mv":
+		paths = a.positionals
+	}
+	for _, p := range paths {
+		if fsHasTraversal(p) {
+			return errCode(2, "path traversal not allowed")
+		}
+	}
+	for _, p := range paths {
+		if err := fsNormOr2(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func fsPad19(s string) string {
+	r := []rune(s)
+	if len(r) > 19 {
+		r = r[:19]
+	}
+	for len(r) < 19 {
+		r = append(r, ' ')
+	}
+	return string(r)
+}
+
+// writeTreeJSON (`fs.go:421`).
+func writeTreeJSON(w io.Writer, rows []fsclient.WalkEntry) error {
+	var b strings.Builder
+	b.WriteString("[\n")
+	for i, r := range rows {
+		entryJSON, err := json.Marshal(r.Entry)
+		if err != nil {
+			return err
+		}
+		pathJSON, err := json.Marshal(r.Rel)
+		if err != nil {
+			return err
+		}
+		if i > 0 {
+			b.WriteString(",\n")
+		}
+		b.WriteString("  {\"path\":")
+		b.Write(pathJSON)
+		if len(entryJSON) > 1 {
+			b.WriteString(",")
+			b.Write(entryJSON[1:])
+		} else {
+			b.WriteString("}")
+		}
+	}
+	if len(rows) > 0 {
+		b.WriteString("\n")
+	}
+	b.WriteString("]\n")
+	_, err := io.WriteString(w, b.String())
+	return err
+}
+
+// writeEditResult (`fs.go:670`).
+func writeEditResult(w io.Writer, r fsclient.WriteResult, changed bool) error {
+	var b strings.Builder
+	b.WriteString("{\n")
+	pathJSON, _ := json.Marshal(r.Path)
+	b.WriteString("  \"path\": ")
+	b.Write(pathJSON)
+	fmt.Fprintf(&b, ",\n  \"bytes_written\": %d", r.BytesWritten)
+	fmt.Fprintf(&b, ",\n  \"changed\": %v", changed)
+	b.WriteString("\n}\n")
+	_, err := io.WriteString(w, b.String())
+	return err
+}
+
+func runFSCommand(ctx context.Context, gw conn.Gateway, a *argv, downloadDir string) error {
+	if len(a.positionals) == 0 {
+		fmt.Fprintln(os.Stderr, "castctl: the following arguments are required: subcommand")
+		fmt.Fprint(os.Stderr, fsHelpText())
+		return errCode(2, "")
+	}
+	sub := a.positionals[0]
+	// The subcommand's own argv: positionals after the
+	// subcommand name, flags as parsed by parseArgv.
+	subArgv := &argv{
+		positionals: a.positionals[1:],
+		bools:       a.bools,
+		strs:        a.strs,
+		strsSet:     a.strsSet,
+		lists:       a.lists,
+		ints:        a.ints,
+		intsSet:     a.intsSet,
+		pairLists:   a.pairLists,
+	}
+	f := fsclient.New(gw)
+	switch sub {
+	case "ls":
+		if len(subArgv.positionals) > 1 {
+			return errCodef(2, "unrecognized arguments: %s", strings.Join(subArgv.positionals[1:], " "))
+		}
+		remotePath := ""
+		if len(subArgv.positionals) == 1 {
+			remotePath = subArgv.positionals[0]
+		}
+		if err := validateFSPaths("ls", subArgv); err != nil {
+			return err
+		}
+		ents, err := f.ListDir(ctx, remotePath)
+		if err != nil {
+			return err
+		}
+		if !subArgv.bool("all") {
+			filtered := ents[:0]
+			for _, e := range ents {
+				if !strings.HasPrefix(e.Name, ".") {
+					filtered = append(filtered, e)
+				}
+			}
+			ents = filtered
+		}
+		if subArgv.bool("json") {
+			if ents == nil {
+				ents = []fsclient.Entry{}
+			}
+			return writeJSON(os.Stdout, ents)
+		}
+		for _, e := range ents {
+			name := e.Name
+			if e.Type == "directory" {
+				name += "/"
+			}
+			if subArgv.bool("long") {
+				typeChar := '?'
+				if e.Type != "" {
+					typeChar = []rune(e.Type)[0]
+				}
+				fmt.Fprintf(os.Stdout, "%c %7s %-19s %s\n", typeChar, fsclient.FmtSize(e.Size), fsPad19(e.ModifiedAt), name)
+			} else {
+				fmt.Fprintln(os.Stdout, name)
+			}
+		}
+		return nil
+	case "tree":
+		if len(subArgv.positionals) > 1 {
+			return errCodef(2, "unrecognized arguments: %s", strings.Join(subArgv.positionals[1:], " "))
+		}
+		remotePath := ""
+		if len(subArgv.positionals) == 1 {
+			remotePath = subArgv.positionals[0]
+		}
+		if err := validateFSPaths("tree", subArgv); err != nil {
+			return err
+		}
+		depth := int(subArgv.intVal("depth"))
+		if !subArgv.intIsSet("depth") {
+			depth = 2
+		}
+		if depth < 0 {
+			depth = 0
+		}
+		rows, err := f.Walk(ctx, remotePath, depth)
+		if err != nil {
+			return err
+		}
+		filtered := rows[:0]
+		for _, r := range rows {
+			if subArgv.bool("all") {
+				filtered = append(filtered, r)
+				continue
+			}
+			dotted := false
+			for _, comp := range strings.Split(r.Rel, "/") {
+				if strings.HasPrefix(comp, ".") {
+					dotted = true
+					break
+				}
+			}
+			if !dotted {
+				filtered = append(filtered, r)
+			}
+		}
+		rows = filtered
+		if subArgv.bool("json") {
+			return writeTreeJSON(os.Stdout, rows)
+		}
+		header := remotePath
+		if header == "" {
+			header = "/"
+		}
+		fmt.Fprintln(os.Stdout, header)
+		for _, r := range rows {
+			name := r.Entry.Name
+			if r.Entry.Type == "directory" {
+				name += "/"
+			}
+			fmt.Fprintf(os.Stdout, "%s%s\n", strings.Repeat("  ", r.Level+1), name)
+		}
+		return nil
+	case "stat":
+		if err := fsPositionals(subArgv, []string{"path"}); err != nil {
+			return err
+		}
+		remotePath := subArgv.positionals[0]
+		if err := validateFSPaths("stat", subArgv); err != nil {
+			return err
+		}
+		st, err := f.Stat(ctx, remotePath)
+		if err != nil {
+			return err
+		}
+		return writeJSON(os.Stdout, st)
+	case "cat":
+		if err := fsPositionals(subArgv, []string{"path"}); err != nil {
+			return err
+		}
+		remotePath := subArgv.positionals[0]
+		if err := validateFSPaths("cat", subArgv); err != nil {
+			return err
+		}
+		var maxBytes *int64
+		if subArgv.intIsSet("max-bytes") {
+			v := subArgv.intVal("max-bytes")
+			maxBytes = &v
+		}
+		data, err := f.ReadFile(ctx, remotePath, maxBytes)
+		if err != nil {
+			return err
+		}
+		head := data
+		if len(head) > 8192 {
+			head = head[:8192]
+		}
+		if bytes.Contains(head, []byte{0}) && !subArgv.bool("binary") {
+			return errCodef(1, "%s: binary file (%d bytes); use `fs get` or --binary", remotePath, len(data))
+		}
+		_, err = os.Stdout.Write(data)
+		return err
+	case "get":
+		if err := fsPositionals(subArgv, []string{"path"}); err != nil {
+			return err
+		}
+		remotePath := subArgv.positionals[0]
+		if err := validateFSPaths("get", subArgv); err != nil {
+			return err
+		}
+		output := downloadDir
+		if subArgv.strSet("output") {
+			output = subArgv.str("output")
+		}
+		if err := os.MkdirAll(output, 0o777); err != nil {
+			return err
+		}
+		saved, err := f.Get(ctx, remotePath, output, subArgv.bool("recursive"))
+		if err != nil {
+			return err
+		}
+		if saved == nil {
+			saved = []string{}
+		}
+		return writeJSON(os.Stdout, map[string]any{"saved": saved})
+	case "find":
+		if err := fsPositionals(subArgv, []string{"name"}); err != nil {
+			return err
+		}
+		limit := int64(0)
+		if subArgv.intIsSet("limit") {
+			limit = subArgv.intVal("limit")
+		}
+		ents, err := f.Search(ctx, subArgv.positionals[0], limit)
+		if err != nil {
+			return err
+		}
+		if ents == nil {
+			ents = []fsclient.Entry{}
+		}
+		return writeJSON(os.Stdout, ents)
+	case "put":
+		if err := fsPositionals(subArgv, []string{"local", "remote"}); err != nil {
+			return err
+		}
+		local, remote := subArgv.positionals[0], subArgv.positionals[1]
+		if err := validateFSPaths("put", subArgv); err != nil {
+			return err
+		}
+		results, err := f.Put(ctx, local, remote, subArgv.bool("recursive"), !subArgv.bool("no-clobber"))
+		if err != nil {
+			return err
+		}
+		if results == nil {
+			results = []fsclient.WriteResult{}
+		}
+		return writeJSON(os.Stdout, results)
+	case "write":
+		if err := fsPositionals(subArgv, []string{"remote"}); err != nil {
+			return err
+		}
+		remote := subArgv.positionals[0]
+		if err := validateFSPaths("write", subArgv); err != nil {
+			return err
+		}
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return err
+		}
+		if subArgv.bool("append") {
+			old, err := f.ReadFile(ctx, remote, nil)
+			if err != nil {
+				return err
+			}
+			combined := append(old, data...)
+			r, err := f.WriteFile(ctx, remote, combined, true, true)
+			if err != nil {
+				return err
+			}
+			return writeJSON(os.Stdout, r)
+		}
+		r, err := f.WriteFile(ctx, remote, data, !subArgv.bool("no-clobber"), true)
+		if err != nil {
+			return err
+		}
+		return writeJSON(os.Stdout, r)
+	case "edit":
+		if err := fsPositionals(subArgv, []string{"remote"}); err != nil {
+			return err
+		}
+		remote := subArgv.positionals[0]
+		if err := validateFSPaths("edit", subArgv); err != nil {
+			return err
+		}
+		before, err := f.ReadFile(ctx, remote, nil)
+		if err != nil {
+			return err
+		}
+		var after []byte
+		if pairs := subArgv.pairs("replace"); len(pairs) > 0 {
+			text := string(before)
+			for _, pr := range pairs {
+				text, err = fsclient.ApplyReplace(text, pr[0], pr[1], -1)
+				if err != nil {
+					return errCode(2, err.Error())
+				}
+			}
+			after = []byte(text)
+		} else {
+			after, err = fsclient.EditInEditor(ctx, before, path.Ext(remote))
+			if err != nil {
+				return err
+			}
+		}
+		if bytes.Equal(after, before) {
+			return writeJSON(os.Stdout, map[string]any{"path": remote, "changed": false})
+		}
+		r, err := f.WriteFile(ctx, remote, after, true, true)
+		if err != nil {
+			return err
+		}
+		return writeEditResult(os.Stdout, r, true)
+	case "mkdir":
+		if err := fsPositionals(subArgv, []string{"path"}); err != nil {
+			return err
+		}
+		remotePath := subArgv.positionals[0]
+		if err := validateFSPaths("mkdir", subArgv); err != nil {
+			return err
+		}
+		r, err := f.Mkdir(ctx, remotePath, true)
+		if err != nil {
+			return err
+		}
+		return writeJSON(os.Stdout, r)
+	case "mv":
+		if err := fsPositionals(subArgv, []string{"src", "dst"}); err != nil {
+			return err
+		}
+		src, dst := subArgv.positionals[0], subArgv.positionals[1]
+		if err := validateFSPaths("mv", subArgv); err != nil {
+			return err
+		}
+		r, err := f.Move(ctx, src, dst, subArgv.bool("force"), true)
+		if err != nil {
+			return err
+		}
+		return writeJSON(os.Stdout, r)
+	case "rm":
+		if err := fsPositionals(subArgv, []string{"path"}); err != nil {
+			return err
+		}
+		if !subArgv.bool("yes") {
+			return errCodef(2, "refusing to delete without --yes")
+		}
+		remotePath := subArgv.positionals[0]
+		if err := validateFSPaths("rm", subArgv); err != nil {
+			return err
+		}
+		r, err := f.Delete(ctx, remotePath, subArgv.bool("recursive"))
+		if err != nil {
+			return err
+		}
+		return writeJSON(os.Stdout, r)
+	default:
+		fmt.Fprintf(os.Stderr, "castctl: argument subcommand: invalid choice: %q (choose from %s)\n", sub, strings.Join(fsSubcommands, ", "))
+		return errCode(2, "")
+	}
+}
+
+// fsHelpText: `fsHelpText` (`internal/commands/help.go:277`)
+// — the driver needs it for the no-args case. The full
+// text lives in the commands package; this copy is the
+// verbatim help the CLI prints.
+func fsHelpText() string {
+	return "usage: castctl fs <subcommand> [options]\n\nOperate on the Muse sandbox filesystem over the gateway.\n\nSubcommands: ls, tree, stat, cat, get, find, put, write, edit, mkdir,\nmv, rm. Run \"castctl fs <subcommand> --help\" for per-subcommand help.\n"
+}
+
+var fsSubcommands = []string{"ls", "tree", "stat", "cat", "get", "find", "put", "write", "edit", "mkdir", "mv", "rm"}
 
 func run() int {
 	addr := flag.String("addr", "", "fake gateway addr 127.0.0.1:PORT (required)")

@@ -34,10 +34,13 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use castctl_cli::fs::run_driver_fs;
+use castctl_cli::help_texts::FS_HELP_TEXT;
 use castctl_cli::network::run_driver_command;
 use castctl_cli::parser::ArgParser;
 use castctl_cli::runtime::Runtime;
-use castctl_cli::table::command_spec;
+use castctl_cli::table::{command_spec, fs_defs};
+use castctl_config::gostr::go_quote;
 use castctl_config::profile::Profile;
 use castctl_gateway::dial::dial_gateway;
 use castctl_gateway::shared::{Connector, SharedConn};
@@ -189,6 +192,75 @@ async fn main() {
         help_text: spec.help_text,
     };
     let mut help_out = String::new();
+    // `fs` has its own per-subcommand parser (`cmd_fs` in
+    // `run.rs`): the subcommand name selects the flag defs,
+    // and `fs write` reads stdin before connecting.
+    if cmd == "fs" {
+        if cmd_args.is_empty() {
+            eprint!("castctl: the following arguments are required: subcommand\n{FS_HELP_TEXT}");
+            let _ = std::fs::remove_file(&cookies_path);
+            std::process::exit(2);
+        }
+        if cmd_args[0] == "--help" || cmd_args[0] == "-h" {
+            print!("{FS_HELP_TEXT}");
+            let _ = std::fs::remove_file(&cookies_path);
+            std::process::exit(0);
+        }
+        let sub = cmd_args[0].clone();
+        if !castctl_cli::table::FS_SUBCOMMANDS.contains(&sub.as_str()) {
+            eprint!(
+                "castctl: argument subcommand: invalid choice: {} (choose from {})\n",
+                go_quote(&sub),
+                castctl_cli::table::FS_SUBCOMMANDS.join(", ")
+            );
+            let _ = std::fs::remove_file(&cookies_path);
+            std::process::exit(2);
+        }
+        let (defs, help_text) = fs_defs(&sub);
+        let sub_parser = ArgParser { defs, help_text };
+        let mut sub_help_out = String::new();
+        let sub_parsed = match sub_parser.parse(&cmd_args[1..], &mut sub_help_out) {
+            Ok(outcome) => {
+                if outcome.help_shown {
+                    print!("{sub_help_out}");
+                    let _ = std::fs::remove_file(&cookies_path);
+                    std::process::exit(0);
+                }
+                outcome.parsed
+            }
+            Err(e) => {
+                eprintln!("m7b_driver: parse: {}", e.0);
+                std::process::exit(2);
+            }
+        };
+        let stdin_data = if sub == "write" {
+            let mut data = Vec::new();
+            use std::io::Read;
+            if let Err(e) = std::io::stdin().read_to_end(&mut data) {
+                eprintln!("m7b_driver: stdin: {e}");
+                std::process::exit(1);
+            }
+            Some(data)
+        } else {
+            None
+        };
+        // Driver-only `fs get` default: the harness passes a
+        // fresh --download-dir per side; the CLI's -o/--output
+        // wins when the case argv sets it (same rule as the Go
+        // driver, and as `download` above).
+        let mut sub_parsed = sub_parsed;
+        if sub == "get" && !args.download_dir.is_empty() && !sub_parsed.str_is_set("output") {
+            sub_parsed
+                .strs
+                .push(("output".to_string(), args.download_dir.clone()));
+            sub_parsed.str_set.push("output".to_string());
+        }
+        let (stdout, stderr, code) = run_driver_fs(&rt, &sub, &sub_parsed, stdin_data).await;
+        let _ = std::io::stdout().write_all(&stdout);
+        eprint!("{stderr}");
+        let _ = std::fs::remove_file(&cookies_path);
+        std::process::exit(code);
+    }
     let mut parsed = match parser.parse(&cmd_args, &mut help_out) {
         Ok(outcome) => {
             if outcome.help_shown {
@@ -214,7 +286,7 @@ async fn main() {
     }
 
     let (stdout, stderr, code) = run_driver_command(&spec, &rt, &parsed).await;
-    print!("{stdout}");
+    let _ = std::io::stdout().write_all(&stdout);
     eprint!("{stderr}");
     let _ = std::fs::remove_file(&cookies_path);
     std::process::exit(code);

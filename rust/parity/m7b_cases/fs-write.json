@@ -1,0 +1,13 @@
+{
+  "args": [
+    "fs",
+    "write",
+    "w.txt"
+  ],
+  "gateway": {
+    "/fs/write": {
+      "result": {}
+    }
+  },
+  "stdin_b64": "aGVsbG8gd3JpdGUK"
+}

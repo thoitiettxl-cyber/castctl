@@ -40,8 +40,8 @@ use crate::help_texts::*;
 use crate::parser::{ArgParser, Parsed, ParserError, check_positionals};
 use crate::table::{
     COMMAND_ORDER, CommandSpec, FS_SUBCOMMANDS, KEEPER_SUBCOMMANDS, PROFILE_SUBCOMMANDS,
-    PositionalSpec, TELEGRAM_SUBCOMMANDS, auth_sub_defs, command_spec, fs_defs,
-    fs_positional_names, keeper_sub_help, profile_sub_defs, profile_sub_help,
+    PositionalSpec, TELEGRAM_SUBCOMMANDS, auth_sub_defs, command_spec, fs_defs, keeper_sub_help,
+    profile_sub_defs, profile_sub_help,
 };
 
 /// The Rust `--version` payload (D-M2-7): the bare version, no
@@ -63,6 +63,11 @@ pub const EXPORT_GUIDANCE: &str = "cookie export is not available in this build:
 pub struct Outcome {
     /// Bytes written to stdout.
     pub stdout: String,
+    /// Raw bytes written to stdout (`fs cat --binary`:
+    /// arbitrary bytes cannot go through the `String`
+    /// above; no command emits both text and raw bytes,
+    /// so the binary writes text first, then these).
+    pub stdout_bytes: Vec<u8>,
     /// Bytes written to stderr.
     pub stderr: String,
     /// Process exit code.
@@ -120,8 +125,9 @@ pub(crate) fn msg_empty(code: i32) -> FlowErr {
 
 /// `usageErr` (`read.go:1075`): a positional error becomes
 /// `errCode(2, pe)` with NOTHING pre-printed, so `classifyError`
-/// prints exactly one line.
-fn usage_err(pe: ParserError) -> FlowErr {
+/// prints exactly one line. `pub(crate)` for the `fs` handler,
+/// which validates positionals in the same way.
+pub(crate) fn usage_err(pe: ParserError) -> FlowErr {
     msg(2, pe.0)
 }
 
@@ -798,7 +804,9 @@ fn cmd_update(ctx: &mut Ctx<'_>, spec: &CommandSpec, args: &[String]) -> Result<
 }
 
 /// `cmdFS` (`fs.go:141`) + per-subcommand `fsParse` /
-/// `fsPositionals`, then config-location resolution, then stub.
+/// `validate_fs` (positionals, `rm` --yes, traversal
+/// reject, `norm`), then `run_fs_command` (config +
+/// runtime + `exec_fs`).
 fn cmd_fs(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), FlowErr> {
     if args.is_empty() {
         ctx.out
@@ -822,26 +830,18 @@ fn cmd_fs(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), Flow
         return Err(msg_empty(2));
     }
     let p = fs_parse(ctx, sub, rest)?;
-    match fs_positional_names(sub) {
-        Some(names) => {
-            check_positionals(&p, names).map_err(usage_err)?;
-        }
-        None => {
-            if p.positionals.len() > 1 {
-                return Err(usage_err(ParserError(format!(
-                    "unrecognized arguments: {}",
-                    p.positionals[1..].join(" ")
-                ))));
-            }
-        }
-    }
-    // `fs rm` refuses without --yes BEFORE config resolution
-    // (`fs.go:738`); note the message differs from `profile rm`.
-    if sub == "rm" && !p.bool("yes") {
-        return Err(msg(2, "refusing to delete without --yes"));
-    }
-    resolve_and_load(ctx, g, false)?;
-    Err(stub(ctx))
+    crate::fs::validate_fs(sub, &p)?;
+    // `fs write` reads stdin BEFORE connecting (Go
+    // `fs.go:584-596`: stdin is read before `runFS`).
+    let stdin_data = if sub == "write" {
+        let mut data = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut data)
+            .map_err(|e| msg(1, e.to_string()))?;
+        Some(data)
+    } else {
+        None
+    };
+    crate::fs::run_fs_command(ctx, g, sub, &p, stdin_data)
 }
 
 /// `cmdAuth` (`deliver.go:71`) + subcommand parsers.
@@ -1724,6 +1724,7 @@ mod tests {
             out,
             Outcome {
                 stdout: "castctl 0.9.0\n".to_string(),
+                stdout_bytes: Vec::new(),
                 stderr: String::new(),
                 code: 0
             }

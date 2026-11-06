@@ -38,6 +38,7 @@ fn main() {
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
     let _ = stdout.write_all(outcome.stdout.as_bytes());
+    let _ = stdout.write_all(&outcome.stdout_bytes);
     let _ = stdout.flush();
     let stderr = std::io::stderr();
     let mut stderr = stderr.lock();

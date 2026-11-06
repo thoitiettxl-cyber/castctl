@@ -1,0 +1,15 @@
+{
+  "args": [
+    "fs",
+    "cat",
+    "a.txt"
+  ],
+  "gateway": {
+    "/fs/read": {
+      "result": {
+        "data_base64": "aGVsbG8gZnMK",
+        "eof": true
+      }
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "args": [
+    "fs",
+    "mkdir",
+    "newdir"
+  ],
+  "gateway": {
+    "/fs/mkdir": {
+      "result": {
+        "path": "newdir",
+        "created": true
+      }
+    }
+  }
+}

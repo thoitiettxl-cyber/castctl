@@ -1,0 +1,15 @@
+{
+  "args": [
+    "fs",
+    "rm",
+    "--yes",
+    "a.txt"
+  ],
+  "gateway": {
+    "/fs/delete": {
+      "result": {
+        "deleted": true
+      }
+    }
+  }
+}

@@ -19,8 +19,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use castctl_fsclient::{
-    Entry, Fs, FsError, FsGateway, WriteResult, decode_entries, go_json_string, norm,
-    number_value,
+    Entry, Fs, FsError, FsGateway, WriteResult, decode_entries, go_json_string, norm, number_value,
 };
 use serde_json::{Value, json};
 
