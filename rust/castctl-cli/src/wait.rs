@@ -234,7 +234,7 @@ impl HistoryReader for HistoryAdapter {
 /// `SubscribeRaw` retries 3 attempts with a 250 ms pause,
 /// Go `internal/conn/shared.go:296-360`), NOT a fresh
 /// `Gateway` (single attempt, Go `internal/gateway/
-//// calls.go:261-384`). `Muse.Connect` returns a
+/// calls.go:261-384`). `Muse.Connect` returns a
 /// `SharedConn` lease whenever the live gateway is a
 /// `Leaser` (`internal/conn/conn.go:576-585`).
 fn wait_dial(shared: Arc<SharedConn>) -> DialFn {
