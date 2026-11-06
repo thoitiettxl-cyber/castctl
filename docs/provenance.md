@@ -2274,6 +2274,29 @@ and took §18 (bcrypt), so this section was
 renumbered §18 → §19 at the rebase onto dev-rust
 `b3fbe5a` (fix loop 1).
 
+## 20. M7b Phase A CLI wiring (PR-1) — no new upstream dependency
+
+M7b PR-1 (`rust/castctl-cli`, `rust/castctl-gateway`,
+`rust/castctl-shared`, `rust/castctl-config`, branch
+`feat/rust-m7b-cli-wiring`, base `dev-rust` 9fc93c5, head
+5329d48) wires 19 Phase A commands + `raw` from the `not
+ported yet` stub to the repo's own Go handlers
+(`internal/deliver/session.go`, `stop.go`, `wake.go`;
+`internal/commands/read.go`, `wait.go`; `internal/gateway/
+invite.go`, `wake.go`, `media.go`; `internal/shared/invite.go`,
+`resources.go`; `internal/profile/autoapprove.go`,
+`profilecmd.go`, `guard.go`; `internal/approvals/approvals.go`).
+No third-party code was copied and no new crate entered
+`Cargo.lock`: `libc` + `sha2` (castctl-config toggle writer)
+were already locked workspace dependencies — the lock diff
+adds edges only (verified: no new `name`/`version` lines).
+`NOTICE` needed no change (no new dep). Algorithm provenance
+and every deviation from the Go implementation are recorded
+in `rust/PORTING.md` §M7b (notably §M7b.3 D2: the Rust
+auto-approve writer preserves the input file bytes while Go
+normalizes it on write — CLI output byte-identical,
+resulting file semantically equivalent, verified live).
+
 ## Carried items (unresolved at the time of writing)
 
 - npm license check: not run — no license-checking tool present,

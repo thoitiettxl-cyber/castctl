@@ -13135,3 +13135,345 @@ the build (above the 6G line, no cleaning needed);
 logs kept. Fingerprint verified against the pinned
 `~/workspace/tmp/cue-known_hosts`
 (`SHA256:6ExOBaFLBXhnN4GX3Qjh6DbdjJev2p7nR61IwERRhcs`).
+
+## M7b — Phase A CLI wiring, PR-1 (2026-11-06)
+
+Scope: wire 19 Phase A commands + `raw` from the `not ported yet`
+stub to the real gateway/HTTPS. Branch
+`feat/rust-m7b-cli-wiring`, base `dev-rust` 9fc93c5, rebased
+mid-work onto 6a399f7 (M-perf merge PR #66 — only `rust/perf/*`
+changed, no conflict), head 5329d48. Single writer, Phase 2
+(subagent-orchestration). Research spec:
+`~/workspace/tmp/castctl-rust-m7b-notes/r1-go-handlers.md`,
+`r2-rust-state.md`, `r3-cue-env.md`; plan
+`~/workspace/plans/active/castctl-rust-m7b.md` (D-M7b-1..8).
+
+### M7b.1 Command map
+
+Routing: `rust/castctl-cli/src/run.rs:578` `cmd_plain` →
+`M7B_COMMANDS` (`run.rs:611`, 19 names, not including
+`auto-approve`) → `run_network_command`; `auto-approve` is
+routed earlier in `cmd_plain` to `autoapprove::run_auto_approve`
+(no network). `dispatch` (`network.rs:1751`) returns
+`Result<CmdOut, FlowErr>`; `CmdOut { stdout, stderr, code }`
+exists so redeem (exit 1 silent after stdout) and download
+row-error (exit 3 silent after stdout) keep their Go
+stdout-then-error ordering — `run_network_command` appends
+stdout+stderr, then returns `FlowErr::Exit(code)` for code != 0.
+The old `invite` special-case branch in `cmd_plain` is removed.
+`history --download` stub and chat/send/watch stubs are kept.
+
+| Command | Go handler | Rust handler | Evidence |
+|---|---|---|---|
+| session-start | `internal/deliver/session.go:83` | `network.rs:888` `cmd_session_start` | fake 42-case harness |
+| session-rename | `internal/deliver/session.go:103` | `network.rs:920` `cmd_session_op` | fake |
+| session-pin | `internal/deliver/session.go:103` | `network.rs:920` | fake |
+| session-unpin | `internal/deliver/session.go:103` | `network.rs:920` | fake |
+| session-archive | `internal/deliver/session.go:103` | `network.rs:920` | fake |
+| session-unarchive | `internal/deliver/session.go:103` | `network.rs:920` | fake |
+| session-delete | `internal/deliver/session.go:103` | `network.rs:920` | fake |
+| stop | `internal/deliver/stop.go:29` | `network.rs:952` `cmd_stop` | fake |
+| seen | `internal/commands/read.go:991` | `network.rs:977` `cmd_seen` | fake |
+| feed-react | `internal/commands/read.go:821` | `network.rs:994` `cmd_feed_react` | fake |
+| idea-exec | `internal/commands/read.go:950` | `network.rs:1019` `cmd_idea_exec` | fake |
+| approvals | `internal/commands/wait.go:1230` | `network.rs:1128` `cmd_approvals` | fake + live |
+| approve | `internal/commands/wait.go:1295` | `network.rs:1219` `cmd_approve` | fake |
+| deny | `internal/commands/wait.go:1330` | `network.rs:1247` `cmd_deny` | fake |
+| invite | `internal/commands/read.go:195` | `network.rs:1314` `cmd_invite` | fake + live |
+| redeem | `internal/commands/read.go:276` | `network.rs:1351` `cmd_redeem` | fake |
+| wake | `internal/deliver/wake.go:95` | `network.rs:1415` `cmd_wake` | fake |
+| download | `internal/commands/read.go:535` | `network.rs:1631` `cmd_download` | fake + live (no-files path) |
+| auto-approve | `internal/commands/wait.go:1365` | `autoapprove.rs` `run_auto_approve` | live + binary-vs-binary temp config |
+| raw | `internal/commands/read.go:1011` | `network.rs:1696` `cmd_raw` | fake |
+
+New supporting code:
+
+- `rust/castctl-gateway/src/invite.rs` — `fetch_invite` /
+  `create_invite` / `redeem_invite_code` / `wake_vm` +
+  `*_base` variants (fake `http_base` seam), from
+  `internal/gateway/invite.go:33,75,122` and
+  `internal/gateway/wake.go:52`. Fake-HTTP unit tests
+  (tokio TcpListener, hand-rolled HTTP/1.1, request recording).
+- `rust/castctl-gateway/src/media.rs` — `media_path` from
+  `internal/gateway/media.go:47-91` (copied via
+  `castctl-telegram/src/turn.rs:282-360`, see deviation D5).
+- `rust/castctl-shared/src/invite.rs` — `summarize_invite` +
+  ordered JSON render, from `internal/shared/invite.go:39`
+  (reads RAW API field names: `invite_state`, `code`,
+  `invite_link`, `max_uses`, `use_count`, `uses_remaining`,
+  `reward{title,body}`, `subtitle`, `share_text`,
+  `has_redeemed_invite_code`).
+- `rust/castctl-cli/src/approvals.rs` — local port of
+  `internal/approvals/approvals.go:55` `DescribeApproval` +
+  `OffersForever`/`OffersOnce` with nullable fields, plus
+  `go_float64_json` (Go `encoding/json` float rule) and the
+  structural stderr helpers from `wait.go:422-469`.
+  `castctl-telegram/src/approvals.rs` was NOT reused: it is
+  sourced from `internal/telegram/approvals.go` with a
+  non-nullable struct, and Go `approvalJSON` has pointer
+  fields (JSON null vs `""` matters for byte parity).
+- `rust/castctl-config/src/toggle.rs` — `set_auto_approve` /
+  `set_auto_allow_once`: ordered-JSON decode → mutate
+  `profiles.<name>.<key>` → `encode_ordered_json_indent(2)` +
+  `\n`, flock on `config.json.lock` (libc) + sha256 re-read
+  guard (sha2) + atomic temp+rename mode 0600, from
+  `internal/profile/profilecmd.go:552,590` and
+  `internal/profile/guard.go:183`. One `unsafe` call
+  (`libc::flock`) in castctl-config; `lib.rs` doc updated.
+  `profile.rs:114,158` `resolve_auto_approve` /
+  `resolve_auto_allow_once` word tables from
+  `internal/profile/autoapprove.go:37,66`.
+  `Cargo.toml`: `libc` + `sha2` promoted from workspace deps
+  (already in `Cargo.lock`; lock diff adds edges only, no new
+  crate — see `docs/provenance.md` §17).
+- `rust/castctl-cli/src/network.rs` — `ordered_body`,
+  `summarize_transport_error`, `write_merged_json`,
+  `marshal_json_indent`, `decode_json_number_loose`,
+  `save_resources` (`network.rs:1533`, from
+  `internal/shared/resources.go:267`), `run_driver_command`
+  (`network.rs:1861`), `render_flow_err` (`network.rs:1835`).
+- `rust/castctl-cli/src/runtime.rs` — `Runtime` is now `pub`
+  with pub fields + `http_base: String` (production =
+  `MUSE_AI_BASE`, driver = fake base) + `pub fn Runtime::new`.
+- Harness: `rust/parity/gateway_server/main.go` `serve-m7b`
+  mode (script `{gateway, http}` maps, `M7B <verb> <path>
+  <body>` full-body request log, `M7B SUMMARY requests=N`);
+  `rust/parity/m7b_driver/main.go` (Go driver, ~1174 lines);
+  `rust/castctl-cli/examples/m7b_driver.rs` (Rust driver);
+  `rust/parity/m7b_http_server.py` (Python stdlib fake HTTP
+  server, script `http` map + CannedAuth paths, `M7B-HTTP`
+  log); `rust/parity/gen_m7b_cases.py` (42 cases in
+  `rust/parity/m7b_cases/*.json`); `rust/parity/run_m7b_cases.sh`
+  (fresh gateway + HTTP server per side per case; compares
+  stdout+stderr+exit + gateway log + HTTP log + download trees;
+  download dir normalized to `DLDIR`).
+
+### M7b.2 Decisions (self-decide, recorded)
+
+1. **Ordered request bodies**: `Body::Bytes` with hand-built
+   compact JSON in Go struct order (values via
+   `escape_go_marshal_string`, Go `json.Marshal` string rules,
+   HTML ON), NOT castctl-config ordered `JsonValue`, because
+   `Body::Json(serde_json::Value)` sorts keys via BTreeMap.
+   Only session-start params actually differ from sorted order
+   (struct origin,lifecycle,title vs sorted
+   lifecycle,origin,title); rename/session-op/stop/decide/
+   feed-react/idea-exec sorted order coincides with Go
+   struct/map order. (D-M7b-3 refined.)
+2. **WithGateway-lease equivalence**: Go session-ops/stop/raw
+   use `WithGateway` (fresh lease); Rust uses shared-conn
+   `call_json`/`request`. Decided equivalent for single unary
+   calls (same `retry_call_with_safe` path; only connection
+   reuse differs, unobservable in request/response bytes).
+   Fake-server request logs confirm byte equality.
+3. **Approvals shaping**: port `internal/approvals/approvals.go`
+   locally with nullable fields (see §M7b.1); `expires_at_ms`
+   kept as a number via `go_float64_json` ('e' iff abs < 1e-6
+   or abs >= 1e21, else 'f' shortest, integer-valued < 1e21 as
+   decimal integer, `-0` → `-0`; integer branch uses `{:.0}`
+   because `f as i64` saturates above i64::MAX, e.g. 1e20).
+4. **Timeouts for HTTPS helpers**: effective Go bounds are
+   min(ctx, doHatch 20s) → 20s for invite/redeem, 15s for wake
+   (`WAKE_TIMEOUT`). Rust passes 20s/15s to `request_url`
+   directly.
+5. **Driver seam**: `Runtime` pub + `http_base` field +
+   `run_driver_command(spec, rt, p) -> (String stdout, String
+   stderr, i32 code)` rendering `FlowErr` like `run_inner`;
+   NO production CLI flag/env/config for the gateway host
+   (D-M7b-2).
+6. **auto-approve writer**: scoped targeted ordered-JSON edit
+   (flock+sha256 guard like Go `UpdateSingleConfig`) — built,
+   not deferred: it is small (toggle.rs, 359 lines incl.
+   tests). The earlier "preserves unknown fields" claim was
+   WRONG and is corrected here: Go's parser rejects unknown
+   keys too (top-level and inside profiles), so there is
+   nothing extra to preserve there; the real difference is
+   deviation D2 below.
+
+### M7b.3 Deviations (deliberate, with evidence)
+
+- **D1 — `raw --body` error text**: serde's error message vs
+  Go's decoder message differ. Recorded; fake tests use valid
+  `--body` only.
+- **D2 — auto-approve writer preserves input; Go
+  normalizes.** Go `LoadProfile` fills defaults and
+  `buildSingleFileOrdered` re-encodes from the loaded struct:
+  a missing `cookies_file` is materialized as
+  `<config-dir>/profiles/<name>/cookies.txt` and
+  `outbound: "direct"` is dropped (it is the default —
+  `internal/profile/config.go:480-487,579-608`). Rust keeps the
+  input bytes/key order and does not fill defaults. CLI output
+  is byte-identical (status/on/once/off all PASS
+  binary-vs-binary on temp configs); the resulting files are
+  semantically equivalent, verified live: Go reading the
+  Rust-written file prints status identical to Go reading its
+  own written file (`SEMANTIC_EQUIV_PASS`, `/tmp/m7b-live/`).
+  Matching Go's normalization would require porting the full
+  profile-encode rules — out of PR-1 scope and riskier than
+  preserving (never drops user data). Safe direction, kept.
+- **D3 — wake error wraps not reproduced**: Go wraps
+  `deliver: wake: fetch access token: %w` / `fetch session
+  info: %w` (`internal/deliver/wake.go:95`); typed errors
+  classify identically with or without wraps, so the wraps are
+  not observable in exit code / typed output.
+- **D4 — `stringifyID` fallback approximation**: Go
+  `stringifyID` covers nil/string/json.Number/int64/float64/
+  bool; Rust covers the same cases observed in fixtures; an
+  unlisted JSON type falls back to compact rendering.
+- **D5 — `media_path` `is_http_url` deviation carried from
+  M5b**: case-insensitive http(s) scheme gate (copied from
+  `castctl-telegram/src/turn.rs:282-360`, which deviates from
+  Go `internal/gateway/media.go:47-91` the same way).
+- **D6 — Go driver WS URL uses the REAL token; M7a drivers
+  carry the literal `auth_token=<redacted>`.** Gorilla sends
+  the raw `<`/`>` in the query and the Go server answers the
+  WS handshake 400, while the Rust client percent-encodes them
+  and connects — so the literal breaks the Go side only. The
+  M7a `wait_driver` (Go + Rust) carries the same latent bug;
+  reported to parent, not fixed here (out of scope).
+- **D7 — `writeMergedJSON` nested shape verified by probe**:
+  a temporary Go probe test (created, run, deleted 2026-11-06;
+  Go tree verified clean after) showed nested values render
+  with prefix `" "` on continuation lines only — Rust
+  `marshal_json_indent` matches exactly.
+
+### M7b.4 Gates (cue, 2026-11-06)
+
+- Baseline at 9fc93c5: `cargo test --workspace` = **765 passed,
+  0 failed** (log `/tmp/m7b-baseline-test.log`).
+- Final at 5329d48 (after rebase onto 6a399f7):
+  `cargo fmt --check` 0; `cargo build --workspace` 0;
+  `cargo test --workspace` = **786 passed, 0 failed**
+  (baseline 765 → +21 new tests; log
+  `/tmp/m7b-test-rebased.log`); `cargo clippy --workspace
+  --all-targets -- -D warnings` 0 (log
+  `/tmp/m7b-clippy-rebased.log`); `cargo build -p castctl-cli
+  --example m7b_driver` 0; `go test -run TestSPDXHeaders
+  -count=1 .` ok (SPDX_EXIT=0, run before the workspace
+  build). Full gate log `/tmp/m7b-gates-rebased.log`.
+- Fake-server harness: **42/42 PASS**
+  (`bash rust/parity/run_m7b_cases.sh /tmp/m7b-tier-a`,
+  out dir `/tmp/m7b-tier-a`). First full run was also 42/42
+  but 5 cases passed vacuously (see §M7b.7); after the
+  query-strip + dl-clean fixes the 5 now exercise real paths:
+  download-history exit 0 with `pic.jpg` 11 bytes, no warning;
+  download-history-warning exit 0 with `expected 99 bytes`
+  warning; download-nofiles exit 1 with the no-files message;
+  raw-history exit 0 printing the envelope; download-sandbox
+  exit 0 fresh (not skipped-exists).
+- Live (cue, profile `no.0`, golden Go
+  `/usr/local/bin/castctl` 0.9.0 vs Rust
+  `/tmp/m7b-target/debug/castctl-rs`, outputs under
+  `/tmp/m7b-live/`): approvals list PASS (exit 0,
+  `{"pending": []}`); invite read-only PASS (exit 0, real
+  code + `Uses left: 18 of 30` — value not reproduced here);
+  auto-approve status PASS (exit 0); download with a bogus
+  ref in a scratch dir PASS (exit 1, no-files message).
+  **46× `--help` byte comparison vs Go: 46/46 PASS**
+  (stdout+stderr+exit; files `/tmp/m7b-live/go-*.help`).
+- auto-approve binary-vs-binary (temp config dirs, no
+  network): status/on/once/off PASS after path
+  normalization (the `source` field embeds the config path);
+  on/once/off with an explicit `--profile no1` PASS
+  (exit 0, status JSON + resulting file, modulo D2).
+- `git diff --stat` scope: only `rust/`,
+  `docs/provenance.md`; `NOTICE` unchanged (no new dep);
+  Go tree untouched.
+
+### M7b.5 Deferred (do NOT wire in PR-1)
+
+- `chat` — REPL + stdin + `chat.json` + wait Runner.
+- `send` — default `--wait 90` needs the wait Runner.
+- `watch` — needs `subscribe_raw`, the same primitive as M7a
+  wait; implementing it here would duplicate M7a.
+All three keep the stub + a TODO comment naming the blocker.
+Do NOT touch `wait`/`fs` wiring or M7a crates.
+
+### M7b.6 Disk rule (Boss, 2026-11-05/06 — verbatim)
+
+- Keep `CARGO_TARGET_DIR` in `/tmp/<name>-target` — M7b's is
+  `/tmp/m7b-target`, correct.
+- After taking the final gate, delete own target
+  (`rm -rf /tmp/m7b-target`), keep logs.
+- If `df -h /` < 6G free, clean before building further and
+  report it (record df numbers in writer-report + PORTING
+  §M7b).
+- Never touch other sessions' active target dirs, especially
+  `/tmp/m6c-target`.
+
+Measured on cue 2026-11-06: 16G free at setup; `/` filled to
+100% once mid-session (`/tmp/m7b-target` had grown 8.6G →
+14G; `/tmp/m6c-target` 13G, `/root/v68-target` 10G,
+`/root/v66b-target` 1.1G — other milestones, NOT touched);
+`rm -rf /tmp/m7b-target` (mine; D-M7b-7 allows rm after
+gates; mid-work rm was the only in-scope reclaim) → 14G free.
+Later 4.1G free, Boss cleaned to 16G; during the final gates
+5.1G / 5.0G / 4.6G free (below the 6G threshold — reported
+here and in the writer-report); 19G free at the final gate
+run. Other large dirs observed, NOT touched:
+`/tmp/m6c-target` 13G, `/tmp/drhead-target` 9.4G,
+`/root/.cache/go-build` 16G (shared Go cache).
+Own target deleted after the final gate: `rm -rf
+/tmp/m7b-target` (logs kept under `/tmp/m7b-*.log`,
+`/tmp/m7b-tier-a/`, `/tmp/m7b-live/`).
+
+### M7b.7 Harness findings (bugs the harness caught, fixed in PR)
+
+- **Python HTTP server SIGTERM deadlock**: the signal
+  handler called `server.shutdown()` in the main thread,
+  which blocks until the serve loop notices — but the loop is
+  the interrupted frame below the handler, so the process
+  ignored SIGTERM forever. 268 orphan `m7b_http_server.py`
+  processes accumulated across harness runs (killed with
+  SIGKILL; `pkill -f` without the bracket trick also kills
+  its own shell — use `pkill -f "m7b_http_server[.]py"`).
+  Fix: handler raises `SystemExit(0)`; verified 0 orphans
+  after the final run.
+- **Gateway script lookup must strip the query string**:
+  GET-with-body calls arrive as `/chat/history?limit=50`
+  (`internal/gateway/calls.go:83` bodyToQuery); the serve-m7b
+  handler logs the full path+query but looks up the bare path.
+- **Harness must `rm -rf` download dirs per run**: stale
+  files turned download-sandbox into a skip-exists test.
+- **approveAll partial stderr lost on mid-loop failure**:
+  Go prints approveAll lines to stderr as the loop runs, so
+  they survive a mid-loop decide failure; Rust accumulated
+  stderr in a String returned only on success. Fix:
+  `approve_all(rt, decision, stderr: &mut String)` + both
+  callers render the FlowErr via `render_flow_err` and return
+  `Ok(CmdOut { stdout: "", stderr: partial + rendered, code })`.
+- **Go driver connect**: `muse.Connect(ctx, nil)` fails
+  (`no cookies at:...`) — pass explicit
+  `&conn.Config{CookiesFile, VMID: "vm-test"}`; silence the
+  Muse slog logger (`conn.Live` emits a timestamped `INFO
+  gateway connected seconds=...` line on stderr that can never
+  match Rust); Go driver wake needed `WakeVM: gateway.WakeVM`
+  (was nil → `deliver: wake helper not available`).
+- **HTTP script entries use `body` (verbatim string), never
+  `result`**: the Python server never re-serializes JSON, so
+  bytes match Go's exactly. `stages` (per-path request-count
+  staging, last repeats) implemented identically in both HTTP
+  handlers for invite `--create` (GET no-code → POST → GET
+  with-code).
+- **M7B-HTTP log split**: the Go driver's HTTP handler is
+  in-process, so its `M7B-HTTP` lines land in the driver's
+  stderr; the Rust side's land in the Python server's stderr.
+  The harness greps the Go driver's stderr into `.err`
+  (CLI output) + `.http.err` (request log) before comparing.
+- **Case fixture fields must be raw API names** for invite
+  (see §M7b.1 `summarize_invite`).
+
+### M7b.8 Chưa kiểm chứng
+
+- Live writes — never run on `no.0` by design (D-M7b-8):
+  session-*/stop/seen/feed-react/idea-exec/redeem/
+  invite --create/approve/deny/approvals --approve-all.
+  Fake-server evidence only.
+- Live download of a real file: only the no-files path ran
+  live; the real download path is covered by the fake server.
+- Live wake / live invite --create: fake-server only.
+- `castctl-rs --version` prints `castctl 0.9.0` without the
+  Go build hash/commit (`castctl 0.9.0 (1396697
+  2026-11-04T21:38:36Z)`) — observed, out of PR-1 scope, not
+  changed.
+- `raw --body` invalid-JSON error text (D1) — no fake case.
