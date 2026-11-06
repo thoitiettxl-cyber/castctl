@@ -312,7 +312,7 @@ fn write_frame(w: &mut impl Write, frame: &Frame) -> std::io::Result<()> {
     w.flush()
 }
 
-/// Write one frame on the parent side with a hard
+/// Write one frame on the parent side with a
 /// deadline (fix loop 2, red-team N2 + technical
 /// N10): serialises ONCE (the old `frame_fits` +
 /// `write_frame` pair serialised the frame twice —
@@ -321,9 +321,17 @@ fn write_frame(w: &mut impl Write, frame: &Frame) -> std::io::Result<()> {
 /// before writing anything, then `poll`s for
 /// writability with the remaining time before every
 /// chunk write and fails `WouldBlock` at the
-/// deadline — a peer that stops draining while the
-/// parent writes a ~16 MiB frame cannot hang the
-/// transact past its deadline. The worker side keeps
+/// deadline. NOTE (round-3 red-team R3-N1): the
+/// deadline bounds the polls, NOT a single blocking
+/// `write()` — `poll_writable` returning true means
+/// *some* space is free, but the socket is blocking,
+/// so one up-to-8 KiB `write()` can run past the
+/// deadline when the peer stops draining mid-write.
+/// Every such hang is still bounded by the 30s call
+/// timeout. Making the deadline hard is a one-line
+/// follow-up (`set_nonblocking(true)` on the parent
+/// socket + handling `WouldBlock` in the write loop),
+/// recorded in PORTING §M6c-b. The worker side keeps
 /// plain `write_frame`: the worker writes only while
 /// the parent is in a transact read loop draining the
 /// socket, and a dead parent kills the worker via

@@ -10621,6 +10621,36 @@ implementation.
   1 module" is this confinement: one `ffi`
   module holds every `unsafe` block.)
 
+### Rebase onto dev-rust `74eff05` + re-gate (parent, 2026-11-06)
+
+Base moved twice after fix loop 2: M6b merged
+(`b3fbe5a`), then M7a merged as PR #75
+(`74eff05`). Rebased onto `74eff05`, 2 conflicts,
+both in scope, resolved additively: `rust/Cargo.lock`
+(`castctl-cli` deps union: `castctl-logging` +
+`castctl-pluginhost`) and `rust/PORTING.md` (§M6c-b
++ §M7a both inserted at one anchor — keep-both in
+milestone order; each section byte-identical to its
+source side). `docs/provenance.md` §19 libloading
+kept (M7a added no numbered section).
+Re-gated on cue at head `ee14b52` (toolchain 1.99.1):
+fmt 0, build 0, test **1377 passed / 0 failed**
+(65 suites), clippy 0; `loader_live` **22/22**;
+base count at `74eff05` is 1351/0 per PR #75 body
+(writer r15 + parent re-run, both 1351/0 — NOT
+re-run by the rebase agent). Delta +26, same as
+fix loop 2 at the old base.
+Round-3 red-team R3-N1 (the `write_frame_deadline`
+"hard deadline" claim is false as implemented —
+one blocking `write()` can run past it) is fixed
+by narrowing the claim in the `worker.rs` doc
+comment in this same docs-only commit; the
+one-line code fix (`set_nonblocking(true)` on the
+parent socket) is a recorded follow-up, not done
+here. This commit is docs/comment-only on top of
+the gated code head `ee14b52`; no behaviour
+changes, so the gates at `ee14b52` stand.
+
 ## M7a — Services port: wait Runner + subscribe, fsclient, approvals, deliver, logging, dns (2026-11-05/06)
 
 Branch `feat/rust-m7a-services`, base `dev-rust` @
