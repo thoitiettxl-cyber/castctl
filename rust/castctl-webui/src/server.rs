@@ -901,8 +901,7 @@ pub fn render_resp(method: &Method, resp: Resp) -> HyperResponse<RespBody> {
     // hyper preserves insertion order, so sort here — the
     // single funnel every Resp passes through.
     let mut resp = resp;
-    resp.headers
-        .sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
+    resp.headers.sort_by_key(|(k, _)| k.to_ascii_lowercase());
     let mut builder = HyperResponse::builder()
         .status(StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
     let has_explicit_len = resp
