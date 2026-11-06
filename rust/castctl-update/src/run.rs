@@ -216,26 +216,42 @@ impl Updater {
         // `serde_json::from_slice` rejects trailing garbage
         // after the object, like Go's `json.Unmarshal`;
         // unknown fields are tolerated by default.
+        // `#[serde(default)]` alone only applies when a
+        // field is ABSENT; Go's `encoding/json` treats an
+        // explicit JSON `null` as a no-op too (keeps the
+        // zero value), so every field also maps `null` →
+        // default via `null_default` (red-team B5: a
+        // `null` field used to fail the whole decode as
+        // code-1 `malformed`, while Go continues to the
+        // code-2 paths).
+        fn null_default<'de, D, T>(d: D) -> Result<T, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+            T: serde::Deserialize<'de> + Default,
+        {
+            let opt = Option::<T>::deserialize(d)?;
+            Ok(opt.unwrap_or_default())
+        }
         #[derive(serde::Deserialize)]
         struct ReleaseJson {
-            #[serde(default)]
+            #[serde(default, deserialize_with = "null_default")]
             tag_name: String,
-            #[serde(default)]
+            #[serde(default, deserialize_with = "null_default")]
             draft: bool,
-            #[serde(default)]
+            #[serde(default, deserialize_with = "null_default")]
             prerelease: bool,
-            #[serde(default)]
+            #[serde(default, deserialize_with = "null_default")]
             assets: Vec<AssetJson>,
         }
         #[derive(serde::Deserialize)]
         struct AssetJson {
-            #[serde(default)]
+            #[serde(default, deserialize_with = "null_default")]
             name: String,
-            #[serde(default)]
+            #[serde(default, deserialize_with = "null_default")]
             browser_download_url: String,
-            #[serde(default)]
+            #[serde(default, deserialize_with = "null_default")]
             size: i64,
-            #[serde(default)]
+            #[serde(default, deserialize_with = "null_default")]
             state: String,
         }
         let decoded: ReleaseJson = match serde_json::from_slice(&body) {
@@ -646,7 +662,16 @@ impl Updater {
             extracted_tmp
                 .sync_all()
                 .map_err(|_| UpdateError::failure("update: cannot sync the extracted binary"))?;
-            drop(extracted_tmp);
+            // Close errors are reported, like Go's
+            // `replace.go:147-153` (`"update: cannot close
+            // the extracted binary"`): `drop` would swallow
+            // them. `into_raw_fd` + `nix::unistd::close`
+            // is the std-only way to observe a close error
+            // (the fd is closed either way on Linux).
+            use std::os::unix::io::IntoRawFd;
+            let fd = extracted_tmp.into_raw_fd();
+            nix::unistd::close(fd)
+                .map_err(|_| UpdateError::failure("update: cannot close the extracted binary"))?;
             Ok(hash)
         })();
         let extracted_hash = match extracted_hash {
@@ -665,13 +690,16 @@ impl Updater {
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(target_mode);
-            if let Err(e) = std::fs::set_permissions(&extracted_tmp_path, perms) {
+            if let Err(_) = std::fs::set_permissions(&extracted_tmp_path, perms) {
                 let _ = std::fs::remove_file(&extracted_tmp_path);
+                // Go uses a FIXED message here; the OS
+                // error is the cause (via `Unwrap`), never
+                // rendered (technical F-b, fix loop 1).
                 return (
                     Result::empty(),
-                    Err(UpdateError::failure(format!(
-                        "update: cannot set permissions on the new binary: {e}"
-                    ))),
+                    Err(UpdateError::failure(
+                        "update: cannot set permissions on the new binary",
+                    )),
                 );
             }
         }
@@ -729,13 +757,16 @@ impl Updater {
             .deps
             .rename_fn
             .unwrap_or(|a, b| std::fs::rename(a, b));
-        if let Err(e) = rename(&extracted_tmp_path, target) {
+        if let Err(_) = rename(&extracted_tmp_path, target) {
             let _ = std::fs::remove_file(&extracted_tmp_path);
+            // Go uses a FIXED message here; the OS error is
+            // the cause (via `Unwrap`), never rendered
+            // (technical F-b, fix loop 1).
             return (
                 Result::empty(),
-                Err(UpdateError::failure(format!(
-                    "update: cannot replace the running binary: {e}"
-                ))),
+                Err(UpdateError::failure(
+                    "update: cannot replace the running binary",
+                )),
             );
         }
         // The rename succeeded: the deferred Remove is now a

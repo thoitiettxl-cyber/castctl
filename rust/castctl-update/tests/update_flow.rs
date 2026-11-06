@@ -38,10 +38,20 @@ struct ServerState {
     tag: String,
     draft: bool,
     prerelease: bool,
+    /// Raw release JSON served verbatim for `/latest`
+    /// and `/tags/*` when set (null-field / hostile
+    /// tests bypass the field-built JSON).
+    release_json_override: Option<Vec<u8>>,
     /// Status for the `/latest` endpoint (200 or 403).
     latest_status: u16,
+    /// Body served with a non-200 `/latest` (hostile
+    /// API-error test).
+    latest_body: Vec<u8>,
     /// Status for the `/tags/*` endpoint.
     tags_status: u16,
+    /// Expected asset file name; empty means the
+    /// default `castctl_0.6.4_linux_amd64.tar.gz`.
+    asset_name: String,
     /// Asset bytes served at `/download/<asset-name>`.
     asset_bytes: Vec<u8>,
     /// Status for the asset download (200 or 404).
@@ -168,17 +178,22 @@ fn handle_conn(mut stream: TcpStream, state: Arc<Mutex<ServerState>>) {
             s.auth_seen += 1;
         }
         *s.counts.entry(path.clone()).or_insert(0) += 1;
+        let asset_suffix = format!("/{}", asset_name(&s));
         if path == "/repos/thoitiettxl-cyber/castctl/releases/latest" {
             if let Some(loc) = &s.redirect_location {
                 (302, Vec::new(), format!("Location: {loc}\r\n"))
             } else if s.latest_status != 200 {
-                (s.latest_status, Vec::new(), String::new())
+                (s.latest_status, s.latest_body.clone(), String::new())
+            } else if let Some(raw) = &s.release_json_override {
+                (200, raw.clone(), String::new())
             } else {
                 (200, release_json(&s, &stream), String::new())
             }
         } else if path.starts_with("/repos/thoitiettxl-cyber/castctl/releases/tags/") {
             if s.tags_status != 200 {
                 (s.tags_status, Vec::new(), String::new())
+            } else if let Some(raw) = &s.release_json_override {
+                (200, raw.clone(), String::new())
             } else {
                 (200, release_json(&s, &stream), String::new())
             }
@@ -188,7 +203,7 @@ fn handle_conn(mut stream: TcpStream, state: Arc<Mutex<ServerState>>) {
             } else {
                 (404, Vec::new(), String::new())
             }
-        } else if path.ends_with("/castctl_0.6.4_linux_amd64.tar.gz") {
+        } else if path.ends_with(asset_suffix.as_str()) {
             // `ends_with`: the fallback mode constructs
             // download URLs with the full repo path
             // (`/.../releases/download/<tag>/<asset>`, the
@@ -232,6 +247,16 @@ fn respond_chunked(mut stream: TcpStream, status: u16, body: &[u8]) {
     let _ = stream.flush();
 }
 
+/// The asset file name this server serves (the
+/// `asset_name` override, or the 0.6.4 default).
+fn asset_name(s: &ServerState) -> String {
+    if s.asset_name.is_empty() {
+        "castctl_0.6.4_linux_amd64.tar.gz".to_string()
+    } else {
+        s.asset_name.clone()
+    }
+}
+
 /// Release JSON with asset URLs pointing at this server.
 /// Sizes are the true served sizes: `downloadAsset`
 /// refuses when `Content-Length` disagrees with the
@@ -240,8 +265,9 @@ fn release_json(s: &ServerState, stream: &TcpStream) -> Vec<u8> {
     let base = format!("http://{}", stream.local_addr().unwrap());
     let asset_size = s.asset_bytes.len();
     let sums_size = s.checksums_bytes.len();
+    let name = asset_name(s);
     format!(
-        r#"{{"tag_name":"{}","draft":{},"prerelease":{},"assets":[{{"name":"castctl_0.6.4_linux_amd64.tar.gz","browser_download_url":"{base}/download/castctl_0.6.4_linux_amd64.tar.gz","size":{asset_size},"state":"uploaded"}},{{"name":"checksums.txt","browser_download_url":"{base}/download/checksums.txt","size":{sums_size},"state":"uploaded"}}]}}"#,
+        r#"{{"tag_name":"{}","draft":{},"prerelease":{},"assets":[{{"name":"{name}","browser_download_url":"{base}/download/{name}","size":{asset_size},"state":"uploaded"}},{{"name":"checksums.txt","browser_download_url":"{base}/download/checksums.txt","size":{sums_size},"state":"uploaded"}}]}}"#,
         s.tag, s.draft, s.prerelease
     )
     .into_bytes()
@@ -265,7 +291,7 @@ impl Write for SharedVec {
 }
 
 /// A fake binary: prints `castctl <version>` on `--version`.
-/// `mode`: "ok" | "hang" | "flood" | "exit1".
+/// `mode`: "ok" | "hang" | "flood" | "floodhang" | "exit1".
 fn fake_binary_source(version: &str, mode: &str) -> String {
     match mode {
         "hang" => {
@@ -275,6 +301,12 @@ fn fake_binary_source(version: &str, mode: &str) -> String {
         "flood" => format!(
             "fn main() {{ for _ in 0..200000 {{ print!(\"x\"); }} println!(); println!(\"castctl {version}\"); }}"
         ),
+        // Red-team B2 (fix loop 1): floods past the
+        // 64 KiB exec-check cap, then hangs forever.
+        "floodhang" => {
+            "fn main() { use std::io::Write; for _ in 0..30 { print!(\"{}\", \"x\".repeat(8192)); let _ = std::io::stdout().flush(); } std::thread::sleep(std::time::Duration::from_secs(3600)); }"
+                .to_string()
+        }
         "exit1" => "fn main() { std::process::exit(1); }".to_string(),
         _ => format!(
             "fn main() {{ let a: Vec<String> = std::env::args().collect(); if a.get(1).map(|s| s.as_str()) == Some(\"--version\") {{ println!(\"castctl {version}\"); }} }}"
@@ -397,17 +429,21 @@ fn dir_snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
     v
 }
 
-/// A standard 0.6.4 release server: asset = fake 0.6.4
-/// binary, checksums match. Returns (server, new bytes).
-fn standard_server(work: &Path) -> (FakeServer, Vec<u8>) {
-    let new_bin = build_fake_binary(work, "0.6.4", "ok");
+/// A release server for an arbitrary version: asset =
+/// fake binary of that version, checksums match.
+/// Returns (server, new bytes).
+fn server_for_version(work: &Path, version: &str, prerelease: bool) -> (FakeServer, Vec<u8>) {
+    let new_bin = build_fake_binary(work, version, "ok");
     let new_bytes = std::fs::read(&new_bin).unwrap();
     let asset = build_asset(&new_bytes);
     let digest = sha256_of(&asset);
+    let asset_name = format!("castctl_{version}_linux_amd64.tar.gz");
     let server = FakeServer::start(ServerState {
-        tag: "v0.6.4".to_string(),
+        tag: format!("v{version}"),
+        prerelease,
+        asset_name: asset_name.clone(),
         asset_bytes: asset,
-        checksums_bytes: checksums_txt("castctl_0.6.4_linux_amd64.tar.gz", &digest),
+        checksums_bytes: checksums_txt(&asset_name, &digest),
         latest_status: 200,
         tags_status: 200,
         asset_status: 200,
@@ -415,6 +451,12 @@ fn standard_server(work: &Path) -> (FakeServer, Vec<u8>) {
         ..ServerState::default()
     });
     (server, new_bytes)
+}
+
+/// A standard 0.6.4 release server: asset = fake 0.6.4
+/// binary, checksums match. Returns (server, new bytes).
+fn standard_server(work: &Path) -> (FakeServer, Vec<u8>) {
+    server_for_version(work, "0.6.4", false)
 }
 
 // ---------------------------------------------------------------- tests
@@ -940,5 +982,419 @@ fn explicit_version_installs() {
     assert_eq!(
         server.count("/repos/thoitiettxl-cyber/castctl/releases/tags/v0.6.4"),
         1
+    );
+}
+
+/// Red-team B2 (fix loop 1): a binary that floods past
+/// the 64 KiB exec-check cap and then hangs must fail
+/// fast with Go's `too large` message — not after the
+/// full 10s deadline with the timeout message.
+#[test]
+fn exec_check_flood_then_hang_returns_too_large_fast() {
+    let work = tempfile::tempdir().unwrap();
+    let want = parse_version("0.6.4").unwrap();
+    let floodhang = build_fake_binary(work.path(), "0.6.4", "floodhang");
+    let started = std::time::Instant::now();
+    let err = run_exec_check(&floodhang, &want, Duration::from_secs(10))
+        .expect_err("flood+hang must refuse");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "took {elapsed:?}, expected a fast too-large kill"
+    );
+    // Exact Go message (`replace.go:334`).
+    assert_eq!(
+        err.to_string(),
+        "update: the downloaded binary produced too large output for --version"
+    );
+}
+
+/// Red-team B5 (fix loop 1): explicit `null` fields in
+/// the release JSON take the Go code-2 paths, not code 1
+/// `malformed`. Each variant gets its own server.
+#[test]
+fn release_json_null_fields_take_go_code2_paths() {
+    // assets: null -> no asset matches (code 2).
+    {
+        let work = tempfile::tempdir().unwrap();
+        let (server, _new) = standard_server(work.path());
+        {
+            let mut s = server.state.lock().unwrap();
+            s.release_json_override = Some(
+                br#"{"tag_name":"v0.6.4","draft":false,"prerelease":false,"assets":null}"#.to_vec(),
+            );
+        }
+        let (_tmp, target) = make_target(work.path(), "0.6.3");
+        let (opts, _out) = base_opts(&target, &server);
+        let (_res, err) = run(opts);
+        let err = err.expect_err("null assets must refuse");
+        assert_eq!(err.code(), 2);
+        assert_eq!(
+            err.to_string(),
+            "update: no release asset matches this platform and build flavour"
+        );
+    }
+    // draft: null -> treated as false -> install OK.
+    {
+        let work = tempfile::tempdir().unwrap();
+        let (server, new_bytes) = standard_server(work.path());
+        {
+            let mut s = server.state.lock().unwrap();
+            s.release_json_override = Some(
+                br#"{"tag_name":"v0.6.4","draft":null,"prerelease":false,"assets":[{"name":"castctl_0.6.4_linux_amd64.tar.gz","browser_download_url":"PLACEHOLDER","size":PLACEHOLDER_SIZE,"state":"uploaded"},{"name":"checksums.txt","browser_download_url":"PLACEHOLDER_SUMS","size":PLACEHOLDER_SUMS_SIZE,"state":"uploaded"}]}"#.to_vec(),
+            );
+        }
+        // The override cannot know the server URLs and
+        // sizes before the server starts; rewrite the
+        // placeholders now.
+        let base = server.base();
+        let (asset_size, sums_size) = {
+            let s = server.state.lock().unwrap();
+            (s.asset_bytes.len(), s.checksums_bytes.len())
+        };
+        {
+            let mut s = server.state.lock().unwrap();
+            let raw = String::from_utf8(s.release_json_override.take().unwrap()).unwrap();
+            let raw = raw
+                .replace("PLACEHOLDER_SUMS", &format!("{base}/download/checksums.txt"))
+                .replace("PLACEHOLDER_SUMS_SIZE", &sums_size.to_string())
+                .replace("PLACEHOLDER_SIZE", &asset_size.to_string())
+                .replace("PLACEHOLDER", &format!("{base}/download/castctl_0.6.4_linux_amd64.tar.gz"));
+            s.release_json_override = Some(raw.into_bytes());
+        }
+        let (_tmp, target) = make_target(work.path(), "0.6.3");
+        let (opts, _out) = base_opts(&target, &server);
+        let (res, err) = run(opts);
+        assert!(err.is_ok(), "null draft must install: {:?}", err.err());
+        assert!(res.replaced);
+        assert_eq!(std::fs::read(&target).unwrap(), new_bytes);
+    }
+    // asset size: null -> no usable size (code 2).
+    {
+        let work = tempfile::tempdir().unwrap();
+        let (server, _new) = standard_server(work.path());
+        {
+            let mut s = server.state.lock().unwrap();
+            let base = server.base();
+            let sums_size = s.checksums_bytes.len();
+            s.release_json_override = Some(
+                format!(
+                    r#"{{"tag_name":"v0.6.4","draft":false,"prerelease":false,"assets":[{{"name":"castctl_0.6.4_linux_amd64.tar.gz","browser_download_url":"{base}/download/castctl_0.6.4_linux_amd64.tar.gz","size":null,"state":"uploaded"}},{{"name":"checksums.txt","browser_download_url":"{base}/download/checksums.txt","size":{sums_size},"state":"uploaded"}}]}}"#
+                )
+                .into_bytes(),
+            );
+        }
+        let (_tmp, target) = make_target(work.path(), "0.6.3");
+        let (opts, _out) = base_opts(&target, &server);
+        let (_res, err) = run(opts);
+        let err = err.expect_err("null size must refuse");
+        assert_eq!(err.code(), 2);
+        assert_eq!(
+            err.to_string(),
+            "update: the matching release asset has no usable size"
+        );
+    }
+    // tag_name: null -> not a valid version (code 2).
+    {
+        let work = tempfile::tempdir().unwrap();
+        let (server, _new) = standard_server(work.path());
+        {
+            let mut s = server.state.lock().unwrap();
+            s.release_json_override = Some(
+                br#"{"tag_name":null,"draft":false,"prerelease":false,"assets":[]}"#.to_vec(),
+            );
+        }
+        let (_tmp, target) = make_target(work.path(), "0.6.3");
+        let (opts, _out) = base_opts(&target, &server);
+        let (_res, err) = run(opts);
+        let err = err.expect_err("null tag must refuse");
+        assert_eq!(err.code(), 2);
+        assert_eq!(
+            err.to_string(),
+            "update: the latest release tag is not a valid version"
+        );
+    }
+}
+
+/// Safety F6a (fix loop 1): a hostile latest tag that is
+/// not a version refuses with code 2 and the tag never
+/// appears in the error.
+#[test]
+fn hostile_latest_tag_refuses_without_echo() {
+    let work = tempfile::tempdir().unwrap();
+    let (server, _new) = standard_server(work.path());
+    {
+        let mut s = server.state.lock().unwrap();
+        s.tag = "not-a-version!!".to_string();
+    }
+    let (_tmp, target) = make_target(work.path(), "0.6.3");
+    let (opts, _out) = base_opts(&target, &server);
+    let (_res, err) = run(opts);
+    let err = err.expect_err("hostile tag must refuse");
+    assert_eq!(err.code(), 2);
+    assert_eq!(
+        err.to_string(),
+        "update: the latest release tag is not a valid version"
+    );
+    assert!(!err.to_string().contains("not-a-version"));
+}
+
+/// Safety F6b (fix loop 1): a 500 API error whose body
+/// contains a marker never leaks the body into the
+/// error. Go's `fetchRelease` returns the transport
+/// error (code 1) without the body (`update.go:648`).
+#[test]
+fn hostile_api_error_body_never_leaks() {
+    let work = tempfile::tempdir().unwrap();
+    let (server, _new) = standard_server(work.path());
+    {
+        let mut s = server.state.lock().unwrap();
+        s.latest_status = 500;
+        s.latest_body = b"SECRET-MARKER-12345".to_vec();
+    }
+    let (_tmp, target) = make_target(work.path(), "0.6.3");
+    let (opts, _out) = base_opts(&target, &server);
+    let (_res, err) = run(opts);
+    let err = err.expect_err("500 must refuse");
+    assert_eq!(err.code(), 1);
+    assert!(
+        !err.to_string().contains("SECRET-MARKER-12345"),
+        "body leaked into error: {err}"
+    );
+}
+
+/// Technical §5.4 gap (fix loop 1): no asset at all
+/// fails closed with code 2, like Go's
+/// `TestNoAssetFailsClosed`.
+#[test]
+fn no_asset_fails_closed() {
+    let work = tempfile::tempdir().unwrap();
+    let (server, _new) = standard_server(work.path());
+    {
+        let mut s = server.state.lock().unwrap();
+        s.release_json_override = Some(
+            br#"{"tag_name":"v0.6.4","draft":false,"prerelease":false,"assets":[]}"#.to_vec(),
+        );
+    }
+    let (_tmp, target) = make_target(work.path(), "0.6.3");
+    let (opts, _out) = base_opts(&target, &server);
+    let (_res, err) = run(opts);
+    let err = err.expect_err("empty assets must refuse");
+    assert_eq!(err.code(), 2);
+    assert_eq!(
+        err.to_string(),
+        "update: no release asset matches this platform and build flavour"
+    );
+}
+
+/// Technical §5.4 gap (fix loop 1): the download URL of
+/// an asset carrying userinfo refuses at the run level
+/// (code 1), before any asset request — no credential
+/// ever reaches the wire.
+#[test]
+fn download_url_userinfo_refuses_before_any_request() {
+    let work = tempfile::tempdir().unwrap();
+    let (server, _new) = standard_server(work.path());
+    {
+        let mut s = server.state.lock().unwrap();
+        let base = server.base();
+        let host = base.trim_start_matches("http://");
+        let asset_size = s.asset_bytes.len();
+        let sums_size = s.checksums_bytes.len();
+        s.release_json_override = Some(
+            format!(
+                r#"{{"tag_name":"v0.6.4","draft":false,"prerelease":false,"assets":[{{"name":"castctl_0.6.4_linux_amd64.tar.gz","browser_download_url":"http://user:pass@{host}/download/castctl_0.6.4_linux_amd64.tar.gz","size":{asset_size},"state":"uploaded"}},{{"name":"checksums.txt","browser_download_url":"{base}/download/checksums.txt","size":{sums_size},"state":"uploaded"}}]}}"#
+            )
+            .into_bytes(),
+        );
+    }
+    let (_tmp, target) = make_target(work.path(), "0.6.3");
+    let (opts, _out) = base_opts(&target, &server);
+    let (_res, err) = run(opts);
+    let err = err.expect_err("userinfo URL must refuse");
+    assert_eq!(err.code(), 1);
+    assert_eq!(
+        server.count("/download/castctl_0.6.4_linux_amd64.tar.gz"),
+        0,
+        "no asset request must be made"
+    );
+    assert_eq!(server.auth_seen(), 0, "no credential must be sent");
+}
+
+/// Technical §5.4 gap (fix loop 1): a `no-plugin`
+/// build (CGO_ENABLED=0) finds no matching asset in a
+/// glibc-only release and refuses with code 2.
+#[test]
+fn flavour_no_plugin_refuses_on_glibc_only_release() {
+    let work = tempfile::tempdir().unwrap();
+    let (server, _new) = standard_server(work.path());
+    let (_tmp, target) = make_target(work.path(), "0.6.3");
+    let (mut opts, _out) = base_opts(&target, &server);
+    opts.deps.cgo_settings = Some(vec![("CGO_ENABLED".to_string(), "0".to_string())]);
+    let (_res, err) = run(opts);
+    let err = err.expect_err("no-plugin flavour must refuse");
+    assert_eq!(err.code(), 2);
+    assert_eq!(
+        err.to_string(),
+        "update: no release asset matches this platform and build flavour"
+    );
+}
+
+/// Technical §5.4 gap (fix loop 1): an unknown CGO
+/// value refuses closed with code 2, like Go's
+/// `flavourFromBuildInfo` returning `ok=false`.
+#[test]
+fn flavour_unknown_refuses_closed() {
+    let work = tempfile::tempdir().unwrap();
+    let (server, _new) = standard_server(work.path());
+    let (_tmp, target) = make_target(work.path(), "0.6.3");
+    let (mut opts, _out) = base_opts(&target, &server);
+    opts.deps.cgo_settings = Some(vec![("CGO_ENABLED".to_string(), "2".to_string())]);
+    let (_res, err) = run(opts);
+    let err = err.expect_err("unknown flavour must refuse");
+    assert_eq!(err.code(), 2);
+    assert_eq!(
+        err.to_string(),
+        "update: cannot determine build flavour (glibc or no-plugin); refusing to guess"
+    );
+}
+
+/// Technical §5.4 gap (fix loop 1): explicit-mode
+/// prerelease installs work when `--allow-prerelease`
+/// is set (Go `selectExplicit` honours the flag,
+/// `update.go:642`; latest mode still refuses
+/// prereleases unconditionally).
+#[test]
+fn allow_prerelease_explicit_installs() {
+    let work = tempfile::tempdir().unwrap();
+    let (server, new_bytes) = server_for_version(work.path(), "0.6.4-rc.1", true);
+    let (_tmp, target) = make_target(work.path(), "0.6.3");
+    let (mut opts, _out) = base_opts(&target, &server);
+    opts.target_version = "0.6.4-rc.1".to_string();
+    opts.allow_prerelease = true;
+    let (res, err) = run(opts);
+    assert!(err.is_ok(), "prerelease install failed: {:?}", err.err());
+    assert!(res.replaced);
+    assert_eq!(std::fs::read(&target).unwrap(), new_bytes);
+}
+
+/// Technical §5.4 gap (fix loop 1): a downgrade
+/// installs when `--allow-downgrade` is set.
+#[test]
+fn allow_downgrade_installs() {
+    let work = tempfile::tempdir().unwrap();
+    let (server, new_bytes) = server_for_version(work.path(), "0.6.2", false);
+    let (_tmp, target) = make_target(work.path(), "0.6.3");
+    let (mut opts, _out) = base_opts(&target, &server);
+    opts.allow_downgrade = true;
+    let (res, err) = run(opts);
+    assert!(err.is_ok(), "downgrade install failed: {:?}", err.err());
+    assert!(res.replaced);
+    assert_eq!(std::fs::read(&target).unwrap(), new_bytes);
+}
+
+/// Technical §5.4 gap (fix loop 1): a dev build
+/// (empty commit) with an explicit target version
+/// refuses with code 2 and makes no tags request.
+#[test]
+fn dev_build_explicit_version_refuses() {
+    let work = tempfile::tempdir().unwrap();
+    let (server, _new) = standard_server(work.path());
+    let (_tmp, target) = make_target(work.path(), "0.6.3");
+    let (mut opts, _out) = base_opts(&target, &server);
+    opts.commit = String::new();
+    opts.target_version = "0.6.4".to_string();
+    let (_res, err) = run(opts);
+    let err = err.expect_err("dev build + explicit must refuse");
+    assert_eq!(err.code(), 2);
+    assert_eq!(
+        server.count("/repos/thoitiettxl-cyber/castctl/releases/tags/v0.6.4"),
+        0,
+        "no tags request must be made"
+    );
+}
+
+/// Red-team http note (fix loop 1): a redirect loop
+/// refuses after 4 follows (5 `/latest` hits total)
+/// with code 1, never an infinite loop.
+#[test]
+fn redirect_loop_refuses_after_four_follows() {
+    let work = tempfile::tempdir().unwrap();
+    let (server, _new) = standard_server(work.path());
+    {
+        let mut s = server.state.lock().unwrap();
+        let base = server.base();
+        s.redirect_location = Some(format!("{base}/repos/thoitiettxl-cyber/castctl/releases/latest"));
+    }
+    let (_tmp, target) = make_target(work.path(), "0.6.3");
+    let (opts, _out) = base_opts(&target, &server);
+    let (_res, err) = run(opts);
+    let err = err.expect_err("redirect loop must refuse");
+    assert_eq!(err.code(), 1);
+    assert_eq!(
+        server.count("/repos/thoitiettxl-cyber/castctl/releases/latest"),
+        5,
+        "1 initial + 4 follows"
+    );
+}
+
+/// Technical §5.4 gap (fix loop 1): a 404 on
+/// `/latest` is code 2 `no release found` (Go
+/// `TestAPIErrorRefuses`); a malformed release JSON
+/// is code 1 `failed to fetch release information`
+/// (fetch error, body never echoed).
+#[test]
+fn latest_404_and_malformed_json_paths() {
+    {
+        let work = tempfile::tempdir().unwrap();
+        let (server, _new) = standard_server(work.path());
+        {
+            let mut s = server.state.lock().unwrap();
+            s.latest_status = 404;
+        }
+        let (_tmp, target) = make_target(work.path(), "0.6.3");
+        let (opts, _out) = base_opts(&target, &server);
+        let (_res, err) = run(opts);
+        let err = err.expect_err("latest 404 must refuse");
+        assert_eq!(err.code(), 2);
+        assert_eq!(err.to_string(), "update: no release found");
+    }
+    {
+        let work = tempfile::tempdir().unwrap();
+        let (server, _new) = standard_server(work.path());
+        {
+            let mut s = server.state.lock().unwrap();
+            s.release_json_override = Some(b"{not json".to_vec());
+        }
+        let (_tmp, target) = make_target(work.path(), "0.6.3");
+        let (opts, _out) = base_opts(&target, &server);
+        let (_res, err) = run(opts);
+        let err = err.expect_err("malformed JSON must refuse");
+        assert_eq!(err.code(), 1);
+        assert_eq!(
+            err.to_string(),
+            "update: failed to fetch release information"
+        );
+    }
+}
+
+/// Technical §5.4 gap (fix loop 1): explicit-mode
+/// prerelease with the flag OFF refuses with code 2
+/// (completes `TestPrereleaseTagWithFlagFalseRefuses`
+/// at run level; the allow-ON half is
+/// `allow_prerelease_explicit_installs`).
+#[test]
+fn explicit_prerelease_flag_false_refuses() {
+    let work = tempfile::tempdir().unwrap();
+    let (server, _new) = server_for_version(work.path(), "0.6.4-rc.1", true);
+    let (_tmp, target) = make_target(work.path(), "0.6.3");
+    let (mut opts, _out) = base_opts(&target, &server);
+    opts.target_version = "0.6.4-rc.1".to_string();
+    let (_res, err) = run(opts);
+    let err = err.expect_err("explicit prerelease without flag must refuse");
+    assert_eq!(err.code(), 2);
+    assert_eq!(
+        err.to_string(),
+        "update: the requested release is a prerelease; pass --allow-prerelease to install it"
     );
 }
