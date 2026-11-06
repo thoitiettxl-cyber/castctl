@@ -1,0 +1,252 @@
+{
+  "label": "item3-status-bad-go",
+  "argv": [
+    "/usr/local/bin/castctl",
+    "--config",
+    "/tmp/perf0-cfgbad-71iu1urs/config.json",
+    "status"
+  ],
+  "env_note": "inherited (HOME/XDG isolated by caller)",
+  "warmup": 5,
+  "rss_method": "GNU time -v (thin parent); wait4 ru_maxrss kept as maxrss_kib_raw for audit only",
+  "wall_ms": {
+    "n": 20,
+    "median": 8.488065,
+    "min": 7.753527,
+    "max": 10.009368,
+    "mean": 8.5152743
+  },
+  "peak_rss_mib": {
+    "n": 20,
+    "median": 44.234375,
+    "min": 43.984375,
+    "max": 44.359375,
+    "mean": 44.183984375
+  },
+  "exits": [
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2
+  ],
+  "rss_exits": [
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2
+  ],
+  "runs": [
+    {
+      "wall_ms": 8.509415,
+      "maxrss_kib": 45172,
+      "maxrss_kib_raw": 45424,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    },
+    {
+      "wall_ms": 8.084835,
+      "maxrss_kib": 45300,
+      "maxrss_kib_raw": 45300,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    },
+    {
+      "wall_ms": 8.996218,
+      "maxrss_kib": 45296,
+      "maxrss_kib_raw": 45232,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    },
+    {
+      "wall_ms": 10.009368,
+      "maxrss_kib": 45044,
+      "maxrss_kib_raw": 45044,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    },
+    {
+      "wall_ms": 7.912491,
+      "maxrss_kib": 45420,
+      "maxrss_kib_raw": 45300,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    },
+    {
+      "wall_ms": 7.93928,
+      "maxrss_kib": 45296,
+      "maxrss_kib_raw": 45296,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    },
+    {
+      "wall_ms": 8.462308,
+      "maxrss_kib": 45300,
+      "maxrss_kib_raw": 45172,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    },
+    {
+      "wall_ms": 8.699288,
+      "maxrss_kib": 45296,
+      "maxrss_kib_raw": 45364,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    },
+    {
+      "wall_ms": 9.41551,
+      "maxrss_kib": 45040,
+      "maxrss_kib_raw": 45300,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    },
+    {
+      "wall_ms": 8.561879,
+      "maxrss_kib": 45424,
+      "maxrss_kib_raw": 45040,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    },
+    {
+      "wall_ms": 8.466715,
+      "maxrss_kib": 45040,
+      "maxrss_kib_raw": 45040,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    },
+    {
+      "wall_ms": 8.808608,
+      "maxrss_kib": 45172,
+      "maxrss_kib_raw": 45044,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    },
+    {
+      "wall_ms": 8.684554,
+      "maxrss_kib": 45172,
+      "maxrss_kib_raw": 45040,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    },
+    {
+      "wall_ms": 9.219401,
+      "maxrss_kib": 45172,
+      "maxrss_kib_raw": 45044,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    },
+    {
+      "wall_ms": 8.596345,
+      "maxrss_kib": 45168,
+      "maxrss_kib_raw": 45300,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    },
+    {
+      "wall_ms": 8.06013,
+      "maxrss_kib": 45300,
+      "maxrss_kib_raw": 45300,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    },
+    {
+      "wall_ms": 7.864159,
+      "maxrss_kib": 45256,
+      "maxrss_kib_raw": 45168,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    },
+    {
+      "wall_ms": 7.753527,
+      "maxrss_kib": 45420,
+      "maxrss_kib_raw": 44976,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    },
+    {
+      "wall_ms": 7.839306,
+      "maxrss_kib": 45300,
+      "maxrss_kib_raw": 45044,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    },
+    {
+      "wall_ms": 8.422149,
+      "maxrss_kib": 45300,
+      "maxrss_kib_raw": 45040,
+      "exit": 2,
+      "rss_exit": 2,
+      "wait4": true,
+      "timeout": false
+    }
+  ]
+}
