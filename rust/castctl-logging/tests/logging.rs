@@ -53,10 +53,6 @@ impl SharedBuf {
         String::from_utf8_lossy(&b).into_owned()
     }
 
-    fn reset(&self) {
-        self.0.lock().unwrap().clear();
-    }
-
     fn len(&self) -> usize {
         self.0.lock().unwrap().len()
     }

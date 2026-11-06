@@ -1483,6 +1483,7 @@ impl SubscribeHandler for CheckHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AutoApproverAdapter;
     use crate::history::tests::{HistoryResp, ScriptHistory, history_ok, user_ev};
     use castctl_approvals::{AutoApprover, Decider, DescribedApproval};
     use castctl_telegram::wait::replies_after;
@@ -1518,7 +1519,7 @@ mod tests {
     fn approval_ev(pending: Vec<Value>, recent: Option<Vec<Value>>) -> Value {
         let mut p = json!({"pending_approvals": pending});
         if let Some(r) = recent {
-            p["recent_approvals"] = r;
+            p["recent_approvals"] = serde_json::Value::Array(r);
         }
         json!({"event_name": "egress.approvals", "payload": p})
     }
@@ -1631,7 +1632,7 @@ mod tests {
         }
         fn dial(self: &Arc<Self>) -> DialFn {
             let sub = Arc::clone(self);
-            Arc::new(move |_cancel: &Cancel| {
+            Arc::new(move |_cancel: Cancel| {
                 let sub = Arc::clone(&sub);
                 Box::pin(async move {
                     if let Some(e) = sub.dial_err.lock().expect("lock").clone() {
@@ -1647,7 +1648,7 @@ mod tests {
         /// `scripts` closure in `TestRunnerDecideNeverRetried`).
         fn dial_script(subs: Vec<Arc<FakeSubscriber>>) -> DialFn {
             let queue = Arc::new(StdMutex::new(VecDeque::from(subs)));
-            Arc::new(move |_cancel: &Cancel| {
+            Arc::new(move |_cancel: Cancel| {
                 let queue = Arc::clone(&queue);
                 Box::pin(async move {
                     let mut q = queue.lock().expect("lock");
@@ -1765,7 +1766,7 @@ mod tests {
     }
 
     async fn run_runner(cfg: Config) -> WaitResult {
-        let runner = Runner::new(cfg).expect("test config must build");
+        let mut runner = Runner::new(cfg).expect("test config must build");
         let cancel = Cancel::new();
         let handle = tokio::spawn(async move { runner.run(cancel).await });
         let outcome = drive(handle).await;
@@ -2020,7 +2021,7 @@ mod tests {
             recheck_after: Some(StdDuration::from_secs(20)),
             check_every: None,
             dial: Some(sub.dial()),
-            history: Some(Arc::clone(&hist)),
+            history: Some(Arc::clone(&hist) as Arc<dyn HistoryReader>),
             ..default_config()
         })
         .await;
@@ -2262,7 +2263,7 @@ mod tests {
             lag_window: StdDuration::from_secs(2),
             lag_poll: StdDuration::from_millis(250),
             dial: Some(sub.dial()),
-            history: Some(Arc::clone(&hist)),
+            history: Some(Arc::clone(&hist) as Arc<dyn HistoryReader>),
             ..default_config()
         })
         .await;
@@ -2430,7 +2431,7 @@ mod tests {
             asst(11, "completed", "x", None),
         ])]));
         let mut runner = Runner::new(Config {
-            after_seq: Some(10),
+            after_seq: 10,
             has_after_seq: true,
             history: Some(hist),
             ..Config::default()
@@ -2468,7 +2469,7 @@ mod tests {
             history_ok(vec![user_ev(200)]),
         ]));
         let res = run_runner(Config {
-            after_seq: Some(200),
+            after_seq: 200,
             has_after_seq: true,
             dial: Some(sub.dial()),
             history: Some(hist),
@@ -2598,7 +2599,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn runner_nil_subscriber_is_transport_failure() {
         let hist = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(100)])]));
-        let dial: DialFn = Arc::new(|_cancel: &Cancel| Box::pin(async { Ok(None) }));
+        let dial: DialFn = Arc::new(|_cancel: Cancel| Box::pin(async { Ok(None) }));
         let res = run_runner(Config {
             timeout: StdDuration::from_secs(5),
             recheck_after: Some(StdDuration::from_secs(1)),
@@ -2618,7 +2619,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn runner_check_state_nil_subscriber() {
         let hist = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(100)])]));
-        let dial: DialFn = Arc::new(|_cancel: &Cancel| Box::pin(async { Ok(None) }));
+        let dial: DialFn = Arc::new(|_cancel: Cancel| Box::pin(async { Ok(None) }));
         let runner = Runner::new(Config {
             timeout: StdDuration::from_secs(5),
             recheck_after: Some(StdDuration::from_secs(1)),
@@ -2768,7 +2769,7 @@ mod tests {
             calls: StdMutex::new(0),
         });
         let runner = Runner::new(Config {
-            after_seq: Some(200),
+            after_seq: 200,
             has_after_seq: true,
             timeout: StdDuration::from_secs(10),
             recheck_after: Some(StdDuration::from_secs(1)),
@@ -2804,7 +2805,7 @@ mod tests {
             calls: StdMutex::new(0),
         });
         let runner = Runner::new(Config {
-            after_seq: Some(100),
+            after_seq: 100,
             has_after_seq: true,
             timeout: StdDuration::from_secs(10),
             recheck_after: None,
@@ -2885,7 +2886,7 @@ mod tests {
                 extra_reads: StdMutex::new(0),
             });
             let runner = Runner::new(Config {
-                after_seq: Some(100),
+                after_seq: 100,
                 has_after_seq: true,
                 timeout: StdDuration::from_secs(120),
                 lag_window: StdDuration::from_secs(2),
@@ -2947,13 +2948,13 @@ mod tests {
                 }
             });
             let runner = Runner::new(Config {
-                after_seq: Some(100),
+                after_seq: 100,
                 has_after_seq: true,
                 timeout: StdDuration::from_secs(60),
                 recheck_after: None,
                 check_every: None,
                 dial: Some(sub.dial()),
-                history: Some(Arc::clone(&hist)),
+                history: Some(Arc::clone(&hist) as Arc<dyn HistoryReader>),
                 before_final_guard: Some(guard),
                 ..default_config()
             })
@@ -2990,7 +2991,7 @@ mod tests {
             asst(11, "completed", "x", None),
         ])]));
         let mut runner = Runner::new(Config {
-            after_seq: Some(10),
+            after_seq: 10,
             has_after_seq: true,
             history: Some(hist),
             ..Config::default()
@@ -3055,11 +3056,11 @@ mod tests {
             asst(11, "completed", "new", None),
         ])]));
         let res = run_runner(Config {
-            after_seq: Some(10),
+            after_seq: 10,
             has_after_seq: true,
             timeout: StdDuration::from_secs(60),
             dial: Some(sub.dial()),
-            history: Some(Arc::clone(&hist)),
+            history: Some(Arc::clone(&hist) as Arc<dyn HistoryReader>),
             ..default_config()
         })
         .await;
@@ -3156,7 +3157,7 @@ mod tests {
             recheck_after: Some(StdDuration::from_secs(20)),
             check_every: Some(StdDuration::from_secs(60)),
             dial: Some(sub.dial()),
-            history: Some(Arc::clone(&hist)),
+            history: Some(Arc::clone(&hist) as Arc<dyn HistoryReader>),
             ..default_config()
         })
         .await;
@@ -3187,7 +3188,7 @@ mod tests {
             recheck_after: Some(StdDuration::from_secs(20)),
             check_every: Some(StdDuration::from_secs(60)),
             dial: Some(sub.dial()),
-            history: Some(Arc::clone(&hist)),
+            history: Some(Arc::clone(&hist) as Arc<dyn HistoryReader>),
             ..default_config()
         })
         .await;
@@ -3220,7 +3221,7 @@ mod tests {
         );
         let res = run_runner(Config {
             timeout: StdDuration::from_secs(60),
-            after_seq: Some(10),
+            after_seq: 10,
             has_after_seq: true,
             history_limits: vec![200, 500, 1000],
             dial: Some(sub.dial()),
@@ -3254,7 +3255,7 @@ mod tests {
         let res = run_runner(Config {
             timeout: StdDuration::from_secs(60),
             dial: Some(sub.dial()),
-            history: Some(Arc::clone(&hist)),
+            history: Some(Arc::clone(&hist) as Arc<dyn HistoryReader>),
             ..default_config()
         })
         .await;
@@ -3484,7 +3485,7 @@ mod tests {
             recheck_after: None,
             check_every: None,
             dial: Some(sub.dial()),
-            history: Some(Arc::clone(&hist)),
+            history: Some(Arc::clone(&hist) as Arc<dyn HistoryReader>),
             ..default_config()
         })
         .await;
@@ -3530,7 +3531,7 @@ mod tests {
             recheck_after: None,
             check_every: None,
             dial: Some(sub.dial()),
-            history: Some(Arc::clone(&hist)),
+            history: Some(Arc::clone(&hist) as Arc<dyn HistoryReader>),
             ..default_config()
         })
         .await;
@@ -3559,7 +3560,7 @@ mod tests {
             recheck_after: Some(StdDuration::from_secs(20)),
             check_every: Some(StdDuration::from_secs(60)),
             dial: Some(sub.dial()),
-            history: Some(Arc::clone(&hist)),
+            history: Some(Arc::clone(&hist) as Arc<dyn HistoryReader>),
             ..default_config()
         })
         .await;
@@ -3992,7 +3993,7 @@ mod tests {
             timeout: StdDuration::from_secs(5),
             recheck_after: None,
             check_every: None,
-            after_seq: Some(10),
+            after_seq: 10,
             has_after_seq: true,
             dial: Some(sub.dial()),
             history: Some(hist),
@@ -4149,7 +4150,7 @@ mod tests {
         let res = run_runner(Config {
             timeout: StdDuration::from_secs(5),
             has_after_seq: true,
-            after_seq: Some(200),
+            after_seq: 200,
             dial: Some(sub.dial()),
             history: Some(hist),
             ..default_config()
@@ -4172,7 +4173,7 @@ mod tests {
         let res = run_runner(Config {
             timeout: StdDuration::from_secs(5),
             has_after_seq: true,
-            after_seq: Some(200),
+            after_seq: 200,
             dial: Some(sub.dial()),
             history: Some(hist),
             ..default_config()
@@ -4262,7 +4263,7 @@ mod tests {
             recheck_after: None,
             check_every: None,
             dial: Some(sub.dial()),
-            history: Some(Arc::clone(&hist)),
+            history: Some(Arc::clone(&hist) as Arc<dyn HistoryReader>),
             ..default_config()
         })
         .await;
@@ -4308,7 +4309,7 @@ mod tests {
         let mut runner = Runner::new(Config {
             timeout: StdDuration::from_secs(60),
             dial: Some(sub.dial()),
-            history: Some(Arc::clone(&hist)),
+            history: Some(Arc::clone(&hist) as Arc<dyn HistoryReader>),
             ..Config::default()
         })
         .expect("config");
@@ -4336,7 +4337,7 @@ mod tests {
         let dials: Arc<StdMutex<usize>> = Arc::new(StdMutex::new(0));
         let dials2 = Arc::clone(&dials);
         let sub = Arc::new(FakeSubscriber::new(vec![]));
-        let dial: DialFn = Arc::new(move |_cancel: &Cancel| {
+        let dial: DialFn = Arc::new(move |_cancel: Cancel| {
             let dials2 = Arc::clone(&dials2);
             let sub = Arc::clone(&sub);
             Box::pin(async move {

@@ -22,4 +22,8 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["time", "sync"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# "test-util" gates `Builder::start_paused` + `tokio::time::advance`,
+# used by the runner tests (`#[tokio::test(start_paused = true)]`).
+# Test-only: dev-dependency features do not leak into the
+# production build.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

@@ -10,4 +10,6 @@ description = "Profile DNS client ported from castctl's Go internal/dns (M7a, sc
 tokio = { workspace = true, features = ["time", "net"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net", "sync"] }
+# "test-util" gates `Builder::start_paused` + `tokio::time::advance`,
+# used by the bootstrap-budget test. Test-only (see castctl-wait).
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net", "sync", "test-util"] }

@@ -38,7 +38,10 @@ impl fmt::Display for SentinelError {
 impl Error for SentinelError {}
 
 fn sentinel(msg: &'static str) -> DeliverError {
-    DeliverError::Other(Arc::new(SentinelError(msg)))
+    // No `Other` variant exists: wrap the sentinel so
+    // `error_is` finds it through the source chain and
+    // the message stays in the Display text.
+    DeliverError::wrap(msg, Box::new(SentinelError(msg)))
 }
 
 /// A fake gateway that records the method and body of each
@@ -95,7 +98,7 @@ fn gw(gw: &Arc<FakeGateway>) -> Arc<dyn DeliverGateway> {
 }
 
 #[tokio::test]
-async fn session_start() {
+async fn session_start_cases() {
     // without title
     let fake = FakeGateway::new(json!({"session_id": "s1"}));
     let got = session_start(Some(&gw(&fake)), "").await.unwrap();
@@ -118,7 +121,7 @@ async fn session_start() {
 }
 
 #[tokio::test]
-async fn session_op() {
+async fn session_op_cases() {
     let cases: Vec<(SessionOpKind, &str, &str, &str)> = vec![
         (
             SessionOpKind::Rename,
@@ -185,7 +188,7 @@ async fn session_op() {
 }
 
 #[tokio::test]
-async fn stop_turn() {
+async fn stop_turn_cases() {
     // main chat
     let fake = FakeGateway::new(json!({"cancelled": true}));
     let got = stop_turn(Some(&gw(&fake)), "").await.unwrap();
@@ -229,7 +232,7 @@ fn wake_ok(
 }
 
 #[tokio::test]
-async fn wake() {
+async fn wake_cases() {
     // profile vm id, fake wake helper
     {
         let seen = Arc::new(Mutex::new((None, None, None)));
@@ -349,6 +352,7 @@ async fn wake() {
                 castctl_transport::DirectDialer::new(),
             )))),
             cookies: FAKE_COOKIES.to_string(),
+            vm_id: String::new(),
             fetch_access_token: Some(Box::new(move |_c, _co| {
                 Box::pin(async move { Err(sentinel("fake token failure")) })
             })),
@@ -387,6 +391,7 @@ async fn wake() {
                 castctl_transport::DirectDialer::new(),
             )))),
             cookies: FAKE_COOKIES.to_string(),
+            vm_id: String::new(),
             fetch_access_token: Some(Box::new(move |_c, _co| {
                 Box::pin(async move { Err(sentinel("fake token failure")) })
             })),
@@ -418,6 +423,8 @@ async fn wake() {
             fetch_access_token: Some(Box::new(move |_c, _co| {
                 Box::pin(async move { Err(sentinel("fake auth failure")) })
             })),
+            // vm_id is set, so session info is never fetched.
+            fetch_session_info: None,
             wake_vm: Some(wake_ok(
                 Arc::new(Mutex::new((None, None, None))),
                 200,
@@ -440,6 +447,8 @@ async fn wake() {
             cookies: FAKE_COOKIES.to_string(),
             vm_id: "fake-vm-1".to_string(),
             fetch_access_token: Some(token_ok()),
+            // vm_id is set, so session info is never fetched.
+            fetch_session_info: None,
             wake_vm: Some(Box::new(move |_c, _co, _t, _v| {
                 Box::pin(async move { Err(sentinel("fake wake failure")) })
             })),
@@ -474,7 +483,7 @@ fn temp_dir(tag: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn list_profiles() {
+fn list_profiles_cases() {
     let base = temp_dir("list");
     // Default profile: directory exists, non-empty cookies file,
     // single-file entry sets auto_approve always.
@@ -589,7 +598,7 @@ fn list_profiles_invalid_active() {
 }
 
 #[test]
-fn format_auth_list() {
+fn format_auth_list_cases() {
     let list = AuthList {
         active: "default".to_string(),
         profiles: vec![
@@ -639,7 +648,7 @@ fn format_auth_list_empty() {
 }
 
 #[test]
-fn auth_export() {
+fn auth_export_cases() {
     let err = auth_export().unwrap_err();
     assert!(!err.guidance.is_empty());
     assert!(

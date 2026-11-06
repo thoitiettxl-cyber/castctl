@@ -256,9 +256,9 @@ mod tests {
                         kind: String::new(),
                         scope: String::new(),
                         decision: String::new(),
-                        err: Arc::new(NoForeverError {
+                        err: Arc::new(Box::new(NoForeverError {
                             options: vec!["allow_once".to_string()],
-                        }),
+                        })),
                     });
                 }
             }
@@ -297,9 +297,9 @@ mod tests {
                 kind: String::new(),
                 scope: String::new(),
                 decision: String::new(),
-                err: Arc::new(TransportError::Auth {
+                err: Arc::new(Box::new(TransportError::Auth {
                     message: "expired".to_string(),
-                }),
+                })),
             });
             res.err = Some(Box::new(TransportError::Auth {
                 message: "expired".to_string(),
@@ -395,9 +395,9 @@ mod tests {
                 kind: String::new(),
                 scope: String::new(),
                 decision: String::new(),
-                err: Arc::new(WrappedNoForever(NoForeverError {
+                err: Arc::new(Box::new(WrappedNoForever(NoForeverError {
                     options: vec!["allow_once".to_string(), "deny".to_string()],
-                })),
+                }))),
             });
             res
         }));

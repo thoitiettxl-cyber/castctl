@@ -33,7 +33,6 @@ use tokio::sync::Mutex as TokioMutex;
 struct FakeDnsServer {
     addr: SocketAddr,
     queries: Arc<TokioMutex<usize>>,
-    questions: Arc<TokioMutex<Vec<String>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -62,7 +61,6 @@ impl FakeDnsServer {
         Self {
             addr,
             queries,
-            questions,
             task,
         }
     }

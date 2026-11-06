@@ -478,7 +478,7 @@ pub(crate) mod tests {
             }
         }
 
-        pub fn with(mut self, limit: usize, resps: Vec<HistoryResp>) -> Self {
+        pub fn with(self, limit: usize, resps: Vec<HistoryResp>) -> Self {
             self.by_limit.lock().unwrap().insert(limit, resps);
             self
         }
