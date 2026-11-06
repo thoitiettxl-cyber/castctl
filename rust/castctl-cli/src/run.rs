@@ -50,10 +50,6 @@ use crate::table::{
 /// stamped release version the golden binary reports.
 pub const VERSION: &str = "0.9.0";
 
-/// The fixed stub line (D-M2-3): exit 1, exactly one stderr line
-/// containing `not ported yet`, empty stdout, no argv echo.
-pub const STUB_LINE: &str = "castctl: not ported yet in the Rust port\n";
-
 /// `ExportGuidance` (`internal/deliver/authexport.go`): the fixed
 /// guidance `auth export` prints on stderr with exit 1. Verbatim.
 pub const EXPORT_GUIDANCE: &str = "cookie export is not available in this build: no automatic cookie extraction is implemented yet.\n\nLog in at https://muse.ai/ in your browser, leave the tab open, and run \"castctl auth export\" again after a cookie source exists.\n\nCopy the login by hand instead:\n  1. In your browser, open https://muse.ai/ and log in.\n  2. Open the browser developer tools and read the cookies for https://muse.ai/.\n  3. Write one line to the active profile's cookies.txt file:\n       hatch_sess=VALUE; other_name=other_value\n     hatch_sess is required. Separate cookies with \"; \".\n  4. Set the file mode to 600.\n  5. Run \"castctl status\" to check the login.\n\nNo file was written or changed.";
@@ -293,34 +289,6 @@ pub(crate) fn config_err(e: ConfigError) -> FlowErr {
     msg(e.code, e.message)
 }
 
-/// Parse the resolved single config (F5; Go `resolveActive` /
-/// `runWithProfile` → `LoadProfile` → `LoadSingleConfig`):
-/// every stub path that resolves config in Go also parses the
-/// file before resolving the active profile, so a bad config
-/// exits 2 here, before the stub. Profile resolution itself
-/// stays unimplemented in M2 — the `--profile nosuch`
-/// divergence stands. Callers that never resolve config in Go
-/// (`update`, `plugin check`, `auth export`, `config migrate`)
-/// must NOT call this. A legacy flat file (no `profiles`
-/// marker) parses as "not found" here, so it still stubs: Go's
-/// legacy-layout refusal is a remaining divergence (see
-/// PORTING.md §M2.8).
-fn load_resolved_config(loc: &ConfigLocation) -> Result<(), FlowErr> {
-    load_single_config(&loc.config_dir).map_err(config_err)?;
-    Ok(())
-}
-
-/// `resolve_config` + `load_resolved_config`: the full
-/// pre-profile gate for stub paths.
-fn resolve_and_load(
-    ctx: &mut Ctx<'_>,
-    g: &GlobalOpts,
-    allow_missing_create: bool,
-) -> Result<(), FlowErr> {
-    let loc = resolve_config(ctx, g, allow_missing_create)?;
-    load_resolved_config(&loc)
-}
-
 /// `resolve_config` + config parse, returning the parsed single
 /// config (M4b network path): the runtime builder needs the
 /// parsed config (outbounds/endpoints for tag dispatch), so
@@ -335,13 +303,6 @@ pub(crate) fn resolve_and_load_single(
     let loc = resolve_config(ctx, g, false)?;
     let (single, _found) = load_single_config(&loc.config_dir).map_err(config_err)?;
     Ok((loc, single))
-}
-
-/// The M2 stub (D-M2-3): exactly one fixed stderr line, empty
-/// stdout, exit 1.
-fn stub(ctx: &mut Ctx<'_>) -> FlowErr {
-    ctx.out.stderr.push_str(STUB_LINE);
-    msg_empty(1)
 }
 
 /// `scanGlobal` (`commands.go:865`): sequential pre-scan of flags
@@ -1015,7 +976,13 @@ fn cmd_profile(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(),
         "add" | "rm" => {
             check_positionals(&p, &["name"]).map_err(usage_err)?;
         }
-        "set-outbound" | "set-fingerprint" | "set-tls-engine" => {
+        "set-outbound" => {
+            // Go's positionals are ["name","file"]
+            // (`profilecmd.go:579`); the M2 stub named the
+            // second one "value" by mistake (R1 finding).
+            check_positionals(&p, &["name", "file"]).map_err(usage_err)?;
+        }
+        "set-fingerprint" | "set-tls-engine" => {
             check_positionals(&p, &["name", "value"]).map_err(usage_err)?;
         }
         _ => {}
@@ -1040,8 +1007,17 @@ fn cmd_profile(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(),
             "--outbound and --outbound-from-env are mutually exclusive",
         ));
     }
-    resolve_and_load(ctx, g, false)?;
-    Err(stub(ctx))
+    match sub {
+        "list" => crate::profilecmd::run_list(ctx, g),
+        "show" => crate::profilecmd::run_show(ctx, g, &p),
+        "add" => crate::profilecmd::run_add(ctx, g, &p),
+        "rm" => crate::profilecmd::run_rm(ctx, g, &p),
+        "set-outbound" => crate::profilecmd::run_set_outbound(ctx, g, &p),
+        "set-fingerprint" => crate::profilecmd::run_set_fingerprint(ctx, g, &p),
+        "set-tls-engine" => crate::profilecmd::run_set_tls_engine(ctx, g, &p),
+        "test" => crate::profiletest::run_test(ctx, g, &p),
+        _ => unreachable!("subcommand validated against PROFILE_SUBCOMMANDS above"),
+    }
 }
 
 /// `cmdConfig` / `cmdConfigMigrate` (`profilecmd.go:1093`).
@@ -1084,17 +1060,16 @@ fn cmd_config(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), 
             )));
         }
     }
-    let allow_missing = p.bool("write") || !source_dir.is_empty();
-    resolve_config(ctx, g, allow_missing)?;
-    // D-M2-5: `config migrate` execution was DROPPED by
-    // decision — the migration never runs. Parse, positional,
-    // `--from`, and resolution checks above are kept; a
-    // parse-successful migrate is refused here instead of
-    // stubbing (M7b PR-3, R2 §6.2; PORTING §M7b.13).
-    Err(msg(
-        2,
-        "config migrate is not supported: legacy config migration was dropped by decision (D-M2-5)",
-    ))
+    // The handler resolves the config itself
+    // (`write || source_dir != ""` is its
+    // `allowMissingCreate`); the dispatcher only
+    // absolutises `--from`, like Go's `filepath.Abs`.
+    let source = if source_dir.is_empty() {
+        String::new()
+    } else {
+        crate::profilecmd::absolutise_from(&source_dir)
+    };
+    crate::profilecmd::run_config_migrate(ctx, g, &source, p.bool("write"))
 }
 
 /// `cmdTelegram` (`telegram.go:95`) + run/status takes-no-args.
@@ -1136,8 +1111,11 @@ fn cmd_telegram(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<()
         ));
         return Err(msg_empty(2));
     }
-    resolve_and_load(ctx, g, false)?;
-    Err(stub(ctx))
+    match sub {
+        "run" => crate::telegramcmd::run_telegram(ctx, g),
+        "status" => crate::telegramcmd::run_status(ctx, g),
+        _ => unreachable!("subcommand validated against TELEGRAM_SUBCOMMANDS above"),
+    }
 }
 
 /// `cmdKeeper` (`keeper.go:116`) + `parseKeeperSelection`.
@@ -1186,8 +1164,12 @@ fn cmd_keeper(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), 
     if !tag.is_empty() && !profile.is_empty() {
         return Err(msg(2, "keeper: --tag and --profile are mutually exclusive"));
     }
-    resolve_and_load(ctx, g, false)?;
-    Err(stub(ctx))
+    match sub {
+        "run" => crate::keepercmd::run_keeper(ctx, g, &tag, &profile),
+        "check" => crate::keepercmd::run_check(ctx, g, &tag, &profile),
+        "status" => crate::keepercmd::run_status(ctx, g, &tag, &profile),
+        _ => unreachable!("subcommand validated against KEEPER_SUBCOMMANDS above"),
+    }
 }
 
 /// `cmdWebUI` (`webui.go:83`) + `cmdWebUIServe`.
@@ -1741,8 +1723,58 @@ mod tests {
         run(&argv, Some(&g))
     }
 
+    /// Parse a `config migrate` stdout result object.
+    fn migrate_result(out: &Outcome) -> castctl_config::jsonvalue::OrderedObject {
+        let v = castctl_config::jsonvalue::decode_ordered_json(out.stdout.as_bytes())
+            .unwrap_or_else(|e| panic!("migrate stdout is not JSON ({e}): {}", out.stdout));
+        match v {
+            castctl_config::jsonvalue::JsonValue::Object(o) => o,
+            _ => panic!("want migrate result object, got: {}", out.stdout),
+        }
+    }
+
+    /// An empty layout migrates to one synthesised `default`
+    /// legacy profile (Go `MigrateFrom`, verified live on
+    /// cue against the Go binary: same shape, `migrated:
+    /// true`, one `default`/`legacy` row).
+    fn assert_migrated_empty_layout(out: &Outcome) {
+        let obj = migrate_result(out);
+        assert_eq!(
+            obj.get("migrated"),
+            Some(&castctl_config::jsonvalue::JsonValue::Bool(true))
+        );
+        let profiles = match obj.get("profiles") {
+            Some(castctl_config::jsonvalue::JsonValue::Array(p)) => p,
+            _ => panic!("want profiles array, got: {}", out.stdout),
+        };
+        assert_eq!(profiles.len(), 1, "profiles: {profiles:?}");
+        let row = match &profiles[0] {
+            castctl_config::jsonvalue::JsonValue::Object(o) => o,
+            _ => panic!("want profile object"),
+        };
+        assert_eq!(
+            row.get("name"),
+            Some(&castctl_config::jsonvalue::JsonValue::Str("default".into()))
+        );
+        assert_eq!(
+            row.get("source"),
+            Some(&castctl_config::jsonvalue::JsonValue::Str("legacy".into()))
+        );
+    }
+
     fn temp_home(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("castctl-cli-{tag}-{}", std::process::id()));
+        // Unique per CALL, not per process: tests run in
+        // parallel threads of one binary (same pid), and
+        // wired commands (e.g. `config migrate --write`)
+        // CREATE files in the home — a pid-shared dir lets
+        // one test delete/migrate under another (the M7d
+        // parallel-run failure: exit 1 from a concurrent
+        // migrate on the same isolated home).
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("castctl-cli-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -1846,21 +1878,19 @@ mod tests {
             "castctl: argument --log-level: expected one argument\n"
         );
         // Valid level, then a command: scan continues. With an
-        // isolated HOME and no config file, RequirePresent does
-        // NOT fail (non-explicit locations always pass) — the
-        // command runs and `config migrate` is refused as
-        // dropped (D-M2-5).
+        // isolated HOME and no config file, `config migrate
+        // --write` is WIRED (M7d): it writes a single file
+        // with the synthesised default profile and reports
+        // `migrated: true`, exit 0 — Go's `MigrateFrom`
+        // returns a result with no error for an empty layout.
         let (_home, map) = isolated_env();
         let out = run_env(
             &["--log-level", "warn", "config", "migrate", "--write"],
             map,
         );
-        assert_eq!(out.code, 2);
-        assert!(
-            out.stderr.contains("config migrate is not supported"),
-            "{}",
-            out.stderr
-        );
+        assert_eq!(out.code, 0);
+        assert!(out.stderr.is_empty(), "stderr: {}", out.stderr);
+        assert_migrated_empty_layout(&out);
     }
 
     #[test]
@@ -1977,20 +2007,19 @@ mod tests {
     }
 
     #[test]
-    fn test_migrate_dropped_after_config_resolution() {
+    fn test_migrate_after_config_resolution() {
         // Non-explicit location, no config file: RequirePresent
-        // passes (Go: non-explicit always passes) — but the
-        // migration is dropped (D-M2-5), so exit 2 with the
-        // dropped message, not the stub.
+        // passes (Go: non-explicit always passes) — and
+        // `config migrate --write` is WIRED (M7d): it writes
+        // a single file with the synthesised default profile,
+        // exit 0 with a result JSON.
         let (_home, map) = isolated_env();
         let out = run_env(&["config", "migrate", "--write"], map);
-        assert_eq!(out.code, 2);
-        assert_eq!(
-            out.stderr,
-            "castctl: config migrate is not supported: legacy config migration was dropped by decision (D-M2-5)\n"
-        );
+        assert_eq!(out.code, 0);
+        assert!(out.stderr.is_empty(), "stderr: {}", out.stderr);
+        assert_migrated_empty_layout(&out);
         // Explicit location with a correct basename but a missing
-        // file: RequirePresent fails BEFORE the drop (exit 2).
+        // file: RequirePresent fails BEFORE the command runs (exit 2).
         let home = temp_home("explicit-missing");
         let missing = home.join("config.json");
         let out = run_args(&["--config", missing.to_str().unwrap(), "status"]);
@@ -2000,7 +2029,7 @@ mod tests {
     }
 
     #[test]
-    fn test_migrate_dropped_with_existing_config() {
+    fn test_migrate_writes_nothing_when_already_migrated() {
         let home = temp_home("stub");
         let cfg_dir = home.join(".config/castctl");
         std::fs::create_dir_all(&cfg_dir).unwrap();
@@ -2012,12 +2041,18 @@ mod tests {
             home.join(".config").to_str().unwrap().to_string(),
         );
         let out = run_env(&["config", "migrate", "--write"], map);
-        assert_eq!(out.code, 2);
-        assert_eq!(out.stdout, "");
-        assert!(
-            out.stderr.contains("config migrate is not supported"),
-            "{}",
-            out.stderr
+        assert_eq!(out.code, 0);
+        assert!(out.stderr.is_empty(), "stderr: {}", out.stderr);
+        let obj = migrate_result(&out);
+        assert_eq!(
+            obj.get("reason"),
+            Some(&castctl_config::jsonvalue::JsonValue::Str(
+                "already-migrated".into()
+            ))
+        );
+        assert_eq!(
+            obj.get("migrated"),
+            Some(&castctl_config::jsonvalue::JsonValue::Bool(false))
         );
     }
 
@@ -2229,23 +2264,22 @@ mod tests {
     }
 
     #[test]
-    fn test_config_migrate_help_and_dropped() {
+    fn test_config_migrate_help_and_wired() {
         let out = run_args(&["config", "migrate", "--help"]);
         assert_eq!(out.stdout, CONFIG_MIGRATE_HELP_TEXT);
         assert_eq!(out.code, 0);
         let out = run_args(&["config", "--help"]);
         assert_eq!(out.stdout, CONFIG_HELP_TEXT);
         assert_eq!(out.code, 0);
-        // Parse-successful migrate is dropped (D-M2-5), even
-        // with a missing config file when --write is given.
+        // Parse-successful migrate is WIRED (M7d): with no
+        // config file anywhere, --write creates a single file
+        // with the synthesised default profile and reports
+        // `migrated: true`, exit 0.
         let (_home, map) = isolated_env();
         let out = run_env(&["config", "migrate", "--write"], map);
-        assert_eq!(out.code, 2);
-        assert!(
-            out.stderr.contains("config migrate is not supported"),
-            "{}",
-            out.stderr
-        );
+        assert_eq!(out.code, 0);
+        assert!(out.stderr.is_empty(), "stderr: {}", out.stderr);
+        assert_migrated_empty_layout(&out);
     }
 
     #[test]

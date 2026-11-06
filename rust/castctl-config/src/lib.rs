@@ -19,6 +19,7 @@
 pub mod blocks;
 pub mod config;
 pub mod configlocation;
+pub mod dnsvalidate;
 pub mod errors;
 pub mod fingerprint;
 pub mod gopath;
@@ -26,12 +27,20 @@ pub mod gostr;
 pub mod jsonvalue;
 pub mod keeper;
 pub mod log;
+pub mod migrate;
 pub mod oserr;
 pub mod profile;
+pub mod profile_ops;
+pub mod redact;
+pub mod taggraph;
 pub mod telegram;
 pub mod toggle;
 
 pub use blocks::LoginCredential;
 pub use errors::{ConfigError, config_error};
 pub use profile::{ResolvedSetting, resolve_auto_allow_once, resolve_auto_approve};
-pub use toggle::{set_auto_allow_once, set_auto_approve};
+pub use toggle::{
+    ConfigLock, ConfigState, generate_node_id, load_config_state, lock_config_dir,
+    refuse_unmigrated, set_auto_allow_once, set_auto_approve, update_single_config,
+    write_single_config_locked,
+};
