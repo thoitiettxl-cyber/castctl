@@ -14066,7 +14066,7 @@ serve-m7b kept), `Cargo.lock` merged cleanly (no
 hand-merge; `libc` + `sha2 0.10.9` under
 castctl-config verified). One extra brace from the
 run.rs resolver script caught by inspection and fixed.
-`pub(crate) fn go_type_name` (`network.rs:404`)
+`pub(crate) fn go_type_name` (`network.rs:405`)
 survives; provenance §19 stands (M7a took no numbered
 section). Re-gate of the rebased tree (before PR-2
 code): SPDX ok, fmt 0, build 0, test **1389/0** (new
