@@ -12,6 +12,7 @@ castctl-config = { path = "../castctl-config" }
 castctl-gateway = { path = "../castctl-gateway" }
 castctl-logging = { path = "../castctl-logging" }
 castctl-shared = { path = "../castctl-shared" }
+castctl-telegram = { path = "../castctl-telegram" }
 castctl-transport = { path = "../castctl-transport" }
 castctl-wait = { path = "../castctl-wait" }
 castctl-webui = { path = "../castctl-webui" }
