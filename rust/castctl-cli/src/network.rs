@@ -416,7 +416,7 @@ pub(crate) fn go_type_name(v: &SerdeValue) -> &'static str {
 /// One gateway call through the shared connection, with
 /// `classifyConnError` applied (Go `callJSON` + `runNetwork`
 /// wrapping).
-async fn call_json(
+pub(crate) async fn call_json(
     rt: &Runtime,
     method: &str,
     opts: RequestOptions,
@@ -429,7 +429,11 @@ async fn call_json(
 
 /// `callJSON` + the object check (Go `callMap`): a
 /// non-object result is a plain error, exit 1.
-async fn call_map(rt: &Runtime, method: &str, opts: RequestOptions) -> Result<SerdeValue, FlowErr> {
+pub(crate) async fn call_map(
+    rt: &Runtime,
+    method: &str,
+    opts: RequestOptions,
+) -> Result<SerdeValue, FlowErr> {
     let v = call_json(rt, method, opts).await?;
     if v.is_object() {
         Ok(v)
@@ -946,21 +950,22 @@ async fn cmd_unread(rt: &Runtime) -> Result<String, FlowErr> {
 /// (`deliver/session.go:80`). The params object is struct
 /// order (origin, lifecycle, title), NOT sorted, so the
 /// body is hand-built. The reply is returned verbatim.
-async fn cmd_session_start(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
-    let title = if p.str_is_set("title") {
-        p.str("title")
-    } else {
-        String::new()
-    };
+/// The `session.start` call behind `cmd_session_start`,
+/// factored out for `chat`'s `/new` (`newChat`,
+/// `chat.go:264`): the same body (struct order origin,
+/// lifecycle, title-omitted-when-empty), the same call,
+/// the same reply. `title` is omitted when empty (Go
+/// `json:"title,omitempty"`).
+pub(crate) async fn session_start_call(rt: &Runtime, title: &str) -> Result<SerdeValue, FlowErr> {
     let mut body = String::from(
         "{\"method\":\"/api/session/start\",\"params\":{\"origin\":\"fresh\",\"lifecycle\":\"persistent\"",
     );
     if !title.is_empty() {
         body.push_str(",\"title\":");
-        body.push_str(&escape_go_marshal_string(&title));
+        body.push_str(&escape_go_marshal_string(title));
     }
     body.push_str("}}");
-    let v = call_json(
+    call_json(
         rt,
         "session.start",
         RequestOptions {
@@ -968,7 +973,16 @@ async fn cmd_session_start(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> 
             ..Default::default()
         },
     )
-    .await?;
+    .await
+}
+
+async fn cmd_session_start(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
+    let title = if p.str_is_set("title") {
+        p.str("title")
+    } else {
+        String::new()
+    };
+    let v = session_start_call(rt, &title).await?;
     Ok(CmdOut::out(write_json_serde(&v)?))
 }
 

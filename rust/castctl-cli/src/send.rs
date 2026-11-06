@@ -261,7 +261,7 @@ fn render_json(v: &JsonValue) -> Result<String, FlowErr> {
 
 /// The `FlowErr` code (all variants), for the download
 /// step's auth/cancel check.
-fn flow_err_code(e: &FlowErr) -> i32 {
+pub(crate) fn flow_err_code(e: &FlowErr) -> i32 {
     match e {
         FlowErr::HelpShown => 0,
         FlowErr::Exit(code) => *code,
@@ -272,7 +272,7 @@ fn flow_err_code(e: &FlowErr) -> i32 {
 
 /// The `FlowErr` message text (the already-short summary),
 /// for `download_error`.
-fn flow_err_text(e: &FlowErr) -> String {
+pub(crate) fn flow_err_text(e: &FlowErr) -> String {
     match e {
         FlowErr::Msg { message, .. } => message.clone().unwrap_or_default(),
         FlowErr::Verbatim { text, .. } => text.clone(),
@@ -331,7 +331,7 @@ async fn read_history_events(
 /// anything is sent. Returns `(user_seq, stream_id)`;
 /// `user_seq` is `None` when no ack arrived within
 /// `ack_timeout`.
-async fn deliver_send(
+pub(crate) async fn deliver_send(
     rt: &Runtime,
     profile: &Profile,
     text: &str,

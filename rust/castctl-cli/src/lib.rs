@@ -25,6 +25,8 @@
 
 pub mod approvals;
 pub mod autoapprove;
+pub mod chat;
+pub mod chat_texts;
 pub mod fs;
 pub mod help_texts;
 pub mod network;

@@ -580,13 +580,12 @@ const READ_COMMANDS: [&str; 13] = [
 /// `parseAutoToggles` for wait/send, then config-location
 /// resolution + config parse, then the stub — except the 13
 /// read-only commands (M4b) and the 19 M7b Phase A commands,
-/// which run the network path, `wait` (M7a) and `send`
-/// (PR-2), which run their own paths, and `auto-approve`,
-/// which resolves config + profile itself (no network).
-/// `history --download` is NOT in the network set: it is
-/// checked separately below and stubbed. `chat` stays
-/// stubbed (deferred to PR-2; see PORTING.md §M7b);
-/// `watch` is wired via `crate::watch` below.
+/// which run the network path, `wait` (M7a) and `send`,
+/// `watch` and `chat` (PR-2), which run their own paths,
+/// and `auto-approve`, which resolves config + profile
+/// itself (no network). `history --download` is NOT in
+/// the network set: it is checked separately below and
+/// stubbed.
 fn cmd_plain(
     ctx: &mut Ctx<'_>,
     g: &GlobalOpts,
@@ -607,6 +606,9 @@ fn cmd_plain(
     if spec.name == "watch" {
         return crate::watch::run_watch_command(ctx, g, &p);
     }
+    if spec.name == "chat" {
+        return crate::chat::run_chat_command(ctx, g, &p);
+    }
     if spec.name == "auto-approve" {
         return crate::autoapprove::run_auto_approve(ctx, g, &p);
     }
@@ -620,8 +622,6 @@ fn cmd_plain(
     if M7B_COMMANDS.contains(&spec.name) {
         return crate::network::run_network_command(ctx, g, spec, &p);
     }
-    // TODO(chat): deferred to PR-2 — needs the wait Runner
-    // (REPL + stdin + chat.json) after M7a merges.
     resolve_and_load(ctx, g, false)?;
     Err(stub(ctx))
 }
@@ -1807,7 +1807,10 @@ mod tests {
         // NOT fail (non-explicit locations always pass) — the
         // stub fires.
         let (_home, map) = isolated_env();
-        let out = run_env(&["--log-level", "warn", "chat"], map);
+        let out = run_env(
+            &["--log-level", "warn", "config", "migrate", "--write"],
+            map,
+        );
         assert_eq!(out.code, 1);
         assert_eq!(out.stderr, STUB_LINE);
     }
@@ -1931,7 +1934,7 @@ mod tests {
         // passes (Go: non-explicit always passes) — the stub
         // fires with exit 1.
         let (_home, map) = isolated_env();
-        let out = run_env(&["chat"], map);
+        let out = run_env(&["config", "migrate", "--write"], map);
         assert_eq!(out.code, 1);
         assert_eq!(out.stderr, STUB_LINE);
         // Explicit location with a correct basename but a missing
@@ -1956,7 +1959,7 @@ mod tests {
             "XDG_CONFIG_HOME".to_string(),
             home.join(".config").to_str().unwrap().to_string(),
         );
-        let out = run_env(&["chat"], map);
+        let out = run_env(&["config", "migrate", "--write"], map);
         assert_eq!(out.code, 1);
         assert_eq!(out.stdout, "");
         assert_eq!(out.stderr, STUB_LINE);
@@ -2150,11 +2153,16 @@ mod tests {
         assert_eq!(out.code, 2);
         assert!(out.stderr.contains("invalid choice"));
         // Lone "--" -> chat -> config resolution passes for a
-        // non-explicit location -> stub.
+        // non-explicit location -> chat runs (wired in PR-2)
+        // and its eager connect fails: no cookies in the
+        // isolated HOME, so an auth failure, exit 2. The
+        // guidance goes to the real stdout (chat owns the
+        // terminal), not the captured ctx streams.
         let (_home, map) = isolated_env();
         let out = run_env(&["--"], map);
-        assert_eq!(out.code, 1);
-        assert_eq!(out.stderr, STUB_LINE);
+        assert_eq!(out.code, 2);
+        assert!(out.stderr.contains("auth_failed"));
+        assert!(out.stdout.is_empty());
     }
 
     #[test]
