@@ -609,6 +609,51 @@ fn dynamic_strtab_range(elf: &Elf) -> Result<Vec<u8>, PluginHostError> {
     ))
 }
 
+/// Format raw bytes the way Go's `%q` formats a
+/// string (fix loop 2, red-team NB1): double-quoted,
+/// with `\"`, `\\`, `\n`, `\r`, `\t` escapes,
+/// printable runes as-is, and every other byte/rune
+/// escaped — invalid UTF-8 bytes as `\xNN`, NOT
+/// U+FFFD (the old code lossy-decoded the suffix
+/// first, so the message showed a replacement char
+/// where Go shows `\xff`).
+/// Source: `fmt.Errorf("... %q ...", display)`
+/// (`compat.go:318,324`).
+///
+/// Printable is approximated by `!c.is_control()`
+/// (Go `strconv.IsPrint` also excludes unassigned
+/// and format runes; a glibc suffix holds ASCII
+/// digits, dots, letters and multibyte letters,
+/// where the two agree).
+fn go_quote_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() + 2);
+    out.push('"');
+    let mut i = 0;
+    while i < bytes.len() {
+        let (c, size) = crate::text::decode_rune(&bytes[i..]);
+        if c == '\u{FFFD}' && size == 1 && bytes[i] >= 0x80 {
+            // Invalid byte: Go %q renders `\xNN`.
+            out.push_str(&format!("\\x{:02x}", bytes[i]));
+            i += 1;
+            continue;
+        }
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ if !c.is_control() => out.push(c),
+            _ if (c as u32) < 0x80 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            _ if (c as u32) < 0x10000 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            _ => out.push_str(&format!("\\U{:08x}", c as u32)),
+        }
+        i += size;
+    }
+    out.push('"');
+    out
+}
+
 /// The highest `GLIBC_x.y[.z]` version named by any
 /// string in `data`, searching for the `"GLIBC_"` prefix
 /// ANYWHERE in the bytes. A string whose suffix starts
@@ -651,28 +696,28 @@ pub fn scan_strtab_versions(data: &[u8]) -> Result<(GlibcVersion, bool), PluginH
             }
         }
         if malformed {
-            // Go slices bytes (`display[:64]`); Rust
-            // `String::truncate` PANICS when 64 is not a
-            // char boundary (hostile strtab, exit 101).
-            // Truncate at the largest char boundary ≤ 64
-            // instead — the displayed prefix is the same
-            // for ASCII and a strict prefix for multi-byte
-            // suffixes, and it never panics.
-            let mut display = suffix.clone();
-            if display.len() > 64 {
-                let mut n = 64;
-                while !display.is_char_boundary(n) {
-                    n -= 1;
-                }
-                display.truncate(n);
-            }
+            // Go slices bytes (`display[:64]`,
+            // `compat.go:318`) and formats with `%q`:
+            // invalid bytes render as `\xNN`, never as
+            // U+FFFD (red-team NB1, fix loop 2). The raw
+            // suffix bytes — not the lossy `String` — are
+            // quoted, so a split multi-byte tail escapes
+            // byte-wise exactly like Go's.
+            let raw = &rest[..end];
+            let display = go_quote_bytes(&raw[..raw.len().min(64)]);
             return Err(PluginHostError::failed(format!(
-                "unparseable glibc version string {display:?} in version string table: refusing to load"
+                "unparseable glibc version string {display} in version string table: refusing to load"
             )));
         }
         let v = parse_glibc_version(&suffix).map_err(|_| {
+            // Go formats the FULL suffix with `%q`
+            // (`compat.go:324`); the suffix here is
+            // ASCII digits and dots (anything else took
+            // the malformed branch), so quoting the raw
+            // bytes agrees with Go exactly.
             PluginHostError::failed(format!(
-                "unparseable glibc version string {suffix:?} in version string table: refusing to load"
+                "unparseable glibc version string {} in version string table: refusing to load",
+                go_quote_bytes(&rest[..end])
             ))
         })?;
         if !found || compare_glibc_version(v, max) > 0 {
@@ -1264,6 +1309,32 @@ mod tests {
         // (≤ 64 bytes, valid UTF-8, no replacement char
         // from a split pair).
         assert!(!err.to_string().contains('\u{FFFD}'));
+    }
+
+    /// Red-team NB1 (fix loop 2): invalid UTF-8 in the
+    /// suffix renders Go `%q`-style (`\xff` escapes),
+    /// not as U+FFFD — the message now quotes the raw
+    /// bytes instead of the lossy string.
+    #[test]
+    fn scan_strtab_versions_invalid_utf8_display_go_quote() {
+        for bad_tail in [vec![0xff; 40], vec![0xe2]] {
+            let mut data = b"GLIBC_2.3".to_vec();
+            data.extend_from_slice(&bad_tail);
+            data.push(0);
+            let err = scan_strtab_versions(&data).unwrap_err();
+            assert!(
+                err.to_string().contains("unparseable glibc version string"),
+                "unexpected error: {err}"
+            );
+            assert!(
+                err.to_string().contains(r"\xff") || err.to_string().contains(r"\xe2"),
+                "Go %q escape missing: {err}"
+            );
+            assert!(
+                !err.to_string().contains('\u{FFFD}'),
+                "U+FFFD leaked into display: {err}"
+            );
+        }
     }
 
     /// Port of `TestParseVersionNeedsStrtabBoundRedTeam`

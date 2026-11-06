@@ -94,7 +94,10 @@ pub fn safe_plugin_text(s: &str) -> String {
 /// Decode one rune from the front of `b`, Go
 /// `utf8.DecodeRuneInString` semantics: an invalid or
 /// truncated sequence decodes to U+FFFD consuming 1 byte.
-fn decode_rune(b: &[u8]) -> (char, usize) {
+/// `pub(crate)` so `compat::go_quote_bytes` can share
+/// the exact rule instead of re-implementing it.
+#[must_use]
+pub(crate) fn decode_rune(b: &[u8]) -> (char, usize) {
     if b.is_empty() {
         return ('\u{FFFD}', 0);
     }
