@@ -35,7 +35,7 @@
 //!   3. auto-approve decide of scripted approval `a1`
 //!      (toggles on): exactly one decide RPC.
 //!   4. button decide: a registered `decide` button for
-//!      `appr-1` (`allow_once`, resume triple s1/t/42)
+//!      `appr-1` (`allow_once`, resume triple s1/t/15)
 //!      tapped once via an enqueued `callback_query`
 //!      update, then tapped a second time: exactly one
 //!      confirm, exactly one `answerCallbackQuery` per tap
@@ -576,14 +576,14 @@ async fn m7c_bot_run_e2e() {
         "approval a1 was never decided (auto-approve did not run)"
     );
 
-    // Phase 4: button decide (appr-1, allow_once, resume s1/t/42).
+    // Phase 4: button decide (appr-1, allow_once, resume s1/t/15).
     let data = registry.register(CallbackEntry {
         action: "decide".to_string(),
         approval_id: "appr-1".to_string(),
         decision: "allow_once".to_string(),
         session_id: "s1".to_string(),
         title: "t".to_string(),
-        after_seq: Some(42),
+        after_seq: Some(15),
         ..CallbackEntry::default()
     });
     assert!(data.starts_with("c:"), "callback data must be a c: token");
@@ -669,15 +669,11 @@ async fn m7c_bot_run_e2e() {
         "buttons must be cleared exactly once even after the second tap"
     );
 
-    // The decide above carries a resume triple (s1/t/42):
+    // The decide above carries a resume triple (s1/t/15):
     // the runner starts a resume turn on chat 500. A resume
     // re-reads history after `after_seq` — it opens NO new
     // stream — and its first visible act is the
-    // "Muse is continuing…" bubble on chat 500. The scripted
-    // gateway log puts the completed assistant message at
-    // seq 40, i.e. NOT after 42, so the follow correctly
-    // delivers nothing more: assert the bubble (resume ran),
-    // not a final edit (none is due at this after_seq).
+    // "Muse is continuing…" bubble on chat 500.
     let resumed = wait_until(Instant::now() + Duration::from_secs(30), || {
         fake.send_texts_for_chat(500)
             .iter()
@@ -690,6 +686,37 @@ async fn m7c_bot_run_e2e() {
         fake.send_texts_for_chat(500)
     );
     eprintln!("M7C resume turn on chat 500 started (continuing bubble sent)");
+    // GREEN (fix loop 1, F4-1): the bubble alone proves
+    // nothing — a resume must DELIVER the completed reply
+    // onto chat 500 (final edit of the bubble). The
+    // previous version asserted only the bubble after the
+    // final-edit assertion timed out at 30 s; that was a
+    // post-failure weakening and is reverted here. The
+    // boundary is after_seq 15, i.e. BEFORE the running
+    // event (30) in the scripted gateway log (user 10,
+    // "Hel" 20, running 30, "lo" 40, assistant 50,
+    // approvals 60, completed 70): `Waiter::feed`
+    // (`wait.rs`, terminal needs `seen_running`) now sees
+    // the running event, so the terminal at 70 completes
+    // the follow and the final edit lands. At after_seq 42
+    // this assertion FAILED (RED, 32.97 s, delivered:
+    // false) because the running event was filtered out.
+    // Scope: this repairs resume of an already-completed
+    // turn (history re-read), not a live post-decision
+    // continuation — the turn was complete before the
+    // decide, and resume replays it.
+    let delivered = wait_until(Instant::now() + Duration::from_secs(30), || {
+        fake.edit_texts_for_chat(500)
+            .iter()
+            .any(|t| t.contains("Hello from Muse"))
+    })
+    .await;
+    assert!(
+        delivered,
+        "resume never delivered the completed reply to chat 500; edits to 500: {:?}",
+        fake.edit_texts_for_chat(500)
+    );
+    eprintln!("M7C resume turn on chat 500 delivered the completed reply");
 
     // Phase 5: inbound media via an enqueued photo update.
     let edits_before = fake.count_method("editMessageText");

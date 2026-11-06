@@ -26,11 +26,16 @@
 //!   `http://127.0.0.1:9301`): own Chrome CDP URL — never
 //!   the shared 9226.
 //!
-//! The checker dials direct (`DirectDialer`); the live Go
-//! path dials through the profile outbound — recorded here,
-//! not hidden. No notifier, no credentials, no relogin:
-//! on auth failure the tick must STOP and alert, never
-//! attempt a login.
+//! The checker dials direct (`DirectDialer`). For profile `no.0`
+//! this IS the profile-outbound path, not a bypass: the live
+//! config gives `no.0` no outbound, and Go synthesises a direct
+//! outbound for such profiles ("The synthesised direct tag
+//! (direct profiles' default, ...)", `internal/commands/runtime.go:264`).
+//! A profile WITH a non-direct outbound would need its honk /
+//! WireGuard dialer here instead — record that limit, do not
+//! generalise this driver beyond `no.0`. No notifier, no
+//! credentials, no relogin: on auth failure the tick must STOP
+//! and alert, never attempt a login.
 //!
 //! Exit 0 iff `ticks >= 2` and no panic; the caller
 //! scores outcome/stage/cookies_seen/wrote_cookies and

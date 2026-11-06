@@ -777,9 +777,16 @@ mod real {
         pub async fn bootstrap(&self) -> Result<(), CdpError> {
             let empty = || Value::Object(Default::default());
             self.call("Runtime.enable", empty()).await?;
+            // Liveness probe only: the result is discarded.
+            // NEVER set `returnByValue: true` here: serialising
+            // the window object fails with CDP -32000 ("Object
+            // reference chain is too long") on every page, which
+            // broke the whole bootstrap (and with it the keeper
+            // CDP export, M7c fix loop 1 item 5). Without it
+            // the call returns a reference and succeeds.
             self.call(
                 "Runtime.evaluate",
-                serde_json::json!({"expression": "self", "returnByValue": true}),
+                serde_json::json!({"expression": "self"}),
             )
             .await?;
             self.call("Log.enable", empty()).await?;
