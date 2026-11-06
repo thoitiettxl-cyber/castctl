@@ -80,8 +80,29 @@ pub const READ_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 /// knob; the per-request header read timeout (10s) is the
 /// closest correct form, so idle keep-alive connections
 /// are cut at 10s, not 120s (stricter, fail-closed —
-/// recorded in PORTING §M6b.6; probe in §M6b.9).
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// recorded in PORTING §M6b.6; probe in §M6b.9). (Fix
+/// loop 2: the old `IDLE_TIMEOUT` const is deleted — it
+/// described a removed wrapper, not a live mechanism.)
+/// Go `http.Server` default `MaxHeaderBytes`: 1 MiB.
+/// `http.Server` in `internal/commands/webui.go:232-236`
+/// sets no `MaxHeaderBytes`, so the stdlib default
+/// (1 MiB) applies; hyper's read buffer defaults to
+/// ~400 KiB, so the knob is set explicitly (fix loop 2,
+/// B3). A head past this → hyper's automatic 431, the
+/// same status Go sends.
+pub const MAX_HEAD_BYTES: usize = 1024 * 1024;
+/// Maximum header count: Go has NO count limit, only the
+/// 1 MiB head-bytes cap. The shortest legal header line
+/// is 4 bytes (`a:\r\n` — empty value), so 1 MiB / 4 B =
+/// 262,144 headers is the count at which the byte cap
+/// always binds first; setting the knob there makes the
+/// count limit unreachable before the byte limit, exactly
+/// as in Go (fix loop 2, B3). Cost: hyper allocates the
+/// slot array per request (uninitialized heap memory,
+/// only parsed headers touched) — accepted for a
+/// loopback-only admin UI; the default (100) would 431 a
+/// request Go accepts.
+pub const MAX_HEADERS: usize = 262_144;
 /// Largest request body any route accepts (1 MiB cap).
 pub const MAX_BODY_BYTES: usize = 1024 * 1024 + 1;
 /// Go's net/http sniff buffer: bodies below this get an
@@ -425,9 +446,10 @@ impl Server {
     /// Serve forever on `listen_addr` (already validated
     /// loopback-only by the command layer). Binds the
     /// socket, then accepts connections; each connection
-    /// runs `http1` with a 10s header-read timeout and a
-    /// 120s idle timeout approximation. Returns on bind
-    /// failure or on a fatal accept error.
+    /// runs `http1` with a 10s header-read timeout only
+    /// (no idle timeout — hyper has no idle knob; see
+    /// PORTING §M6b.6). Returns on bind failure or on a
+    /// fatal accept error.
     pub async fn serve(self: &Arc<Self>, listen_addr: &str) -> std::io::Result<()> {
         let listener = Self::bind(listen_addr).await?;
         self.serve_on(listener).await
@@ -452,6 +474,8 @@ impl Server {
                         });
                         let conn = http1::Builder::new()
                             .header_read_timeout(READ_HEADER_TIMEOUT)
+                            .max_headers(MAX_HEADERS)
+                            .max_buf_size(MAX_HEAD_BYTES)
                             .timer(hyper_util::rt::TokioTimer::new())
                             .serve_connection(io, service);
                         // No lifetime cap: Go's
@@ -460,11 +484,11 @@ impl Server {
                         // cuts a connection mid-request and
                         // resets after every response. The
                         // previous code wrapped the whole
-                        // connection in `timeout(IDLE_TIMEOUT,
-                        // conn)`, a lifetime cap from accept
-                        // that killed connections at 120s even
-                        // mid-request. Hyper has no idle knob;
-                        // the per-request header read timeout
+                        // connection in a 120s `timeout`, a
+                        // lifetime cap from accept that killed
+                        // connections at 120s even mid-request.
+                        // Hyper has no idle knob; the
+                        // per-request header read timeout
                         // (10s) also bounds the wait for the
                         // next request's headers on a keep-alive
                         // connection, so it is the closest
@@ -476,6 +500,19 @@ impl Server {
                         // is unaffected either way: the
                         // upgraded socket is detached from
                         // this connection.
+                        //
+                        // Framing knobs (fix loop 2, B3): Go's
+                        // head cap is 1 MiB with no header-count
+                        // limit (`MaxHeaderBytes` default); the
+                        // two builder knobs above reproduce it
+                        // as closely as hyper allows. Residuals
+                        // hyper cannot express: `Transfer-Encoding`
+                        // other than chunked is a hyper parse
+                        // error (automatic 400, no response body)
+                        // where Go answers 501, and a request
+                        // URI over 65534 bytes is hyper's
+                        // automatic 414 where Go has no URI cap
+                        // — both recorded in PORTING §M6b.6.
                         let _ = conn.await;
                     });
                 }
@@ -487,27 +524,61 @@ impl Server {
         Ok(())
     }
 
-    /// Hyper entry point: validate the path, read the body
-    /// only when the route needs one (capped at 1 MiB +
-    /// 1), dispatch, and render the [`Resp`] with Go's
-    /// Content-Length/chunked rule. A WS upgrade is
-    /// detected here and handed to the screencast module
-    /// before any body is read.
+    /// Hyper entry point: validate the path, run the
+    /// middleware gates on headers, read the body only
+    /// when the route needs one (capped at 1 MiB + 1,
+    /// inside the 30s API timeout), dispatch, and render
+    /// the [`Resp`] with Go's Content-Length/chunked rule.
+    /// A WS upgrade is detected here and handed to the
+    /// screencast module before any body is read.
+    ///
+    /// Panic cover (fix loop 2, safety N-3): Go's root
+    /// `recoverer` wraps the whole router, including
+    /// response rendering, so this outer `catch_unwind`
+    /// covers everything `with_recover` (dispatch only)
+    /// does not — the body read and `render_resp`. No
+    /// reachable trigger exists: `render_resp`'s three
+    /// `.expect()`s fire only on an invalid status or
+    /// header value, and every value it sees is a fixed
+    /// string, a numeric, or base64 (`http` 1.3.1
+    /// `Builder::header` records invalid values as
+    /// builder errors instead of panicking) — verified
+    /// against the crate source, not assumed. If one
+    /// ever fired, the fallback renders the fixed 500
+    /// envelope (status 500, fixed headers), which
+    /// cannot fail the same way.
     async fn handle_hyper(
         self: &Arc<Self>,
         req: Request<Incoming>,
         peer: SocketAddr,
     ) -> Result<HyperResponse<RespBody>, hyper::Error> {
         let method = req.method().clone();
-        let uri = req.uri().clone();
+        use futures_util::FutureExt;
+        match std::panic::AssertUnwindSafe(self.handle_hyper_inner(req, peer))
+            .catch_unwind()
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => Ok(render_resp(&method, internal_resp())),
+        }
+    }
+
+    async fn handle_hyper_inner(
+        self: &Arc<Self>,
+        req: Request<Incoming>,
+        peer: SocketAddr,
+    ) -> Result<HyperResponse<RespBody>, hyper::Error> {
+        let (parts, body) = req.into_parts();
+        let method = parts.method.clone();
+        let uri = parts.uri.clone();
         let path_raw = uri.path().to_string();
         // The WS upgrade is a chi route: it matches the RAW
         // path, so an encoded `/screencast%2fws` is NOT an
         // upgrade (it falls through to the shell instead).
         let is_ws_upgrade = method == Method::GET
             && path_raw == "/api/v1/screencast/ws"
-            && req
-                .headers()
+            && parts
+                .headers
                 .get("upgrade")
                 .and_then(|v| v.to_str().ok())
                 .map(|v| v.eq_ignore_ascii_case("websocket"))
@@ -517,6 +588,7 @@ impl Server {
             // including the WS handler: a panic is the
             // fixed 500, never a dropped connection.
             use futures_util::FutureExt;
+            let req = Request::from_parts(parts, body);
             return match std::panic::AssertUnwindSafe(self.handle_ws_upgrade(req, peer))
                 .catch_unwind()
                 .await
@@ -525,7 +597,6 @@ impl Server {
                 Err(_) => Ok(render_resp(&Method::GET, internal_resp())),
             };
         }
-        let headers = req.headers().clone();
         // Invalid escape: Go's stdlib 400s before any
         // handler — and before any body is read. The
         // stdlib body is the status text (`400 Bad
@@ -548,33 +619,25 @@ impl Server {
                 ));
             }
         };
-        // Body policy (Go parity): only handlers that
-        // decode a body read one — `route_reads_body`
-        // mirrors Go's `decodeBody`/`bodyJSON` call sites
-        // exactly. A 405, an unknown path, a 501 stub and
-        // every GET never touch the body: the request is
-        // dropped unread (hyper closes the connection after
-        // the response, as Go does for unread bodies). A
-        // body read is capped at `MAX_BODY_BYTES` (1 MiB +
-        // 1, the largest Go per-handler cap) WHILE reading,
-        // so an over-cap body is the fixed 400 before
-        // dispatch — and before auth. The per-handler caps
-        // (64 KiB / 1 MiB) still apply at decode time.
-        let body: Vec<u8> = if crate::handlers::route_reads_body(&method, &path_raw) {
-            match read_capped_body(req).await {
-                Ok(b) => b,
-                Err(_) => {
-                    return Ok(render_resp(
-                        &method,
-                        api_error_resp(&crate::error::err_validation(
-                            "invalid JSON in request body",
-                        )),
-                    ));
-                }
-            }
-        } else {
-            Vec::new()
-        };
+        // Body policy (Go parity, fix loop 2, B1): the body
+        // is NOT read here. The middleware gates
+        // (rate-limit → auth → Origin) run first, on
+        // headers alone, inside `dispatch_api`; the capped
+        // body read happens there, after the gates and
+        // inside the 30s API timeout — exactly Go's order
+        // (middleware in `server.go:258-276`, body read
+        // inside the handler via `MaxBytesReader`,
+        // `server.go:642-643`). The old pre-dispatch read
+        // answered 400 to an over-cap body before auth ever
+        // ran (Go: 401/429/403); it also never fed the
+        // rate limiter. The cap itself is unchanged
+        // (1 MiB + 1, `read_capped_body`); only the order
+        // moved. A 405, an unknown path, a 501 stub and
+        // every GET never touch the body: the request
+        // stream is dropped unread (hyper closes the
+        // connection after the response, as Go does for
+        // unread bodies).
+        let headers = parts.headers.clone();
         let resp = with_recover(self.dispatch(
             &method,
             &path_raw,
@@ -582,7 +645,7 @@ impl Server {
             &uri,
             &headers,
             peer,
-            &body,
+            body,
         ))
         .await;
         Ok(render_resp(&method, resp))
@@ -611,7 +674,7 @@ impl Server {
         uri: &hyper::Uri,
         headers: &hyper::HeaderMap,
         peer: SocketAddr,
-        body: &[u8],
+        body: Incoming,
     ) -> Resp {
         // The mount prefix is matched on the RAW path: an
         // encoded prefix (`/api%2fv1/...`) matches no mount
@@ -625,7 +688,10 @@ impl Server {
         // Non-API: GET → shell; anything else → 405.
         // HEAD is NOT mapped to GET (chi has no GetHead
         // opt-in installed; Go's own uidir_test pins HEAD
-        // → 405 for static paths).
+        // → 405 for static paths). The body stream is
+        // dropped unread on every non-API path: Go's
+        // static handler never reads a body either.
+        drop(body);
         if *method != Method::GET {
             return method_not_allowed_resp();
         }
@@ -637,7 +703,9 @@ impl Server {
     /// mount, including unknown ones (they fall through to
     /// the shell after the middleware). `path` is the raw
     /// path (routing); `path_decoded` is Go's `r.URL.Path`
-    /// (WS suffix check + shell fallthrough).
+    /// (WS suffix check + shell fallthrough). The body
+    /// stream arrives unread: it is read (capped) only
+    /// after the gates, inside the timeout — see below.
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_api(
         self: &Arc<Self>,
@@ -647,7 +715,7 @@ impl Server {
         uri: &hyper::Uri,
         headers: &hyper::HeaderMap,
         peer: SocketAddr,
-        body: &[u8],
+        body: Incoming,
     ) -> Resp {
         let (attempts, window) = self.login_limits();
         let client_key = host_part(&peer.to_string()).to_string();
@@ -699,11 +767,38 @@ impl Server {
                 return forbidden_resp();
             }
         }
-        // Timeout: 30s, WS excluded. HEAD flows as an
-        // ordinary unregistered method: a known path
-        // answers 405 from the route table, an unknown
-        // path falls through to the shell.
-        let fut = self.route_api(method, path, path_decoded, uri, headers, peer, body);
+        // Body + route under the 30s API timeout (fix
+        // loop 2, B1/B2): Go's `apiTimeout` wraps the
+        // handler INCLUDING `decodeBody`
+        // (`server.go:436-470`, `apiHandlerTimeout` 30s),
+        // so the capped body read runs here — after the
+        // gates above, inside the same budget as the
+        // handler. A slow-drip body (or a lying
+        // Content-Length) is therefore cut at 30s with
+        // the same 503 `timeout` envelope; before this
+        // fix the pre-dispatch read had no timeout at all
+        // (hyper's header-read timeout disarms once the
+        // head parses). HEAD flows as an ordinary
+        // unregistered method: a known path answers 405
+        // from the route table, an unknown path falls
+        // through to the shell.
+        let reads_body = crate::handlers::route_reads_body(method, path);
+        let fut = async {
+            let body_bytes: Vec<u8> = if reads_body {
+                match read_capped_body(body).await {
+                    Ok(b) => b,
+                    Err(_) => {
+                        return api_error_resp(&crate::error::err_validation(
+                            "invalid JSON in request body",
+                        ));
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            self.route_api(method, path, path_decoded, uri, headers, peer, &body_bytes)
+                .await
+        };
         if is_ws {
             fut.await
         } else {
@@ -858,8 +953,11 @@ where
 /// transport edge. Returns the bytes when the whole body
 /// fits, or an error (over-cap or transport) otherwise.
 /// Trailers are ignored, as Go's decoder ignores them.
-async fn read_capped_body(req: Request<Incoming>) -> Result<Vec<u8>, BodyRead> {
-    let mut body = req.into_body();
+/// Called from `dispatch_api` AFTER the middleware gates
+/// and inside the 30s API timeout (fix loop 2, B1/B2):
+/// the caller owns the timeout, this function owns only
+/// the cap.
+async fn read_capped_body(mut body: Incoming) -> Result<Vec<u8>, BodyRead> {
     let mut buf: Vec<u8> = Vec::new();
     while let Some(frame) = body.frame().await {
         let frame = frame.map_err(|_| BodyRead::Transport)?;
@@ -1137,6 +1235,26 @@ mod tests {
   "webui": {"listen": "127.0.0.1:18318", "token": "plain-token", "login_rate_limit": {"attempts": 100, "window": "5m"}}
 }"#;
 
+    /// Same fixture with a 1-attempt limiter, so one
+    /// failed login trips the rate limit (fix loop 2:
+    /// the over-cap → 429 pin needs a tripped limiter
+    /// without 100 bcrypt verifies).
+    const LIVE_FIXTURE_STRICT: &str = r#"{
+  "default_profile": "muse01",
+  "profiles": {
+    "muse01": {
+      "cookies_file": "profiles/muse01/cookies.txt",
+      "outbound": "proxy-eu",
+      "fingerprint": "chrome"
+    }
+  },
+  "outbounds": [
+    {"type": "trojan", "tag": "proxy-eu", "server": "203.0.113.10", "server_port": 443, "password": "SECRET-TROJAN"}
+  ],
+  "dns": {"servers": [{"tag": "dns1", "type": "tcp", "server": "127.0.0.1", "server_port": 5353}], "final": "dns1"},
+  "webui": {"listen": "127.0.0.1:18318", "token": "plain-token", "login_rate_limit": {"attempts": 1, "window": "5m"}}
+}"#;
+
     fn live_server(dir: &std::path::Path) -> Arc<Server> {
         let token_hash = crate::auth::hash_token("plain-token").expect("hash test token");
         Server::new(Deps {
@@ -1162,14 +1280,32 @@ mod tests {
     /// The write may break early (the server can 400/405
     /// while the client is still sending) — write errors
     /// are ignored, the response is what is asserted.
-    async fn raw_request(port: u16, method: &str, path: &str, body_len: usize) -> String {
+    /// `auth`: `Some("plain-token")` sends the valid
+    /// Bearer token, `Some(other)` sends that token,
+    /// `None` sends no Authorization header at all.
+    /// `extra`: additional head lines (e.g. Origin).
+    async fn raw_request_full(
+        port: u16,
+        method: &str,
+        path: &str,
+        body_len: usize,
+        auth: Option<&str>,
+        extra: &[(&str, &str)],
+    ) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .expect("connect");
-        let head = format!(
-            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer plain-token\r\nContent-Type: application/json\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n"
-        );
+        let mut head = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n");
+        if let Some(token) = auth {
+            head.push_str(&format!("Authorization: Bearer {token}\r\n"));
+        }
+        for (k, v) in extra {
+            head.push_str(&format!("{k}: {v}\r\n"));
+        }
+        head.push_str(&format!(
+            "Content-Type: application/json\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n"
+        ));
         let _ = stream.write_all(head.as_bytes()).await;
         let chunk = vec![b'x'; 65536];
         let mut remaining = body_len;
@@ -1185,7 +1321,22 @@ mod tests {
         String::from_utf8_lossy(&resp).into_owned()
     }
 
-    async fn live_server_case(method: &str, path: &str, body_len: usize) -> String {
+    async fn raw_request(port: u16, method: &str, path: &str, body_len: usize) -> String {
+        raw_request_full(port, method, path, body_len, Some("plain-token"), &[]).await
+    }
+
+    /// Start a live server on a scratch dir + port;
+    /// returns `(server, port, task, dir)`. The caller
+    /// shuts it down (`request_shutdown` + abort) and
+    /// removes the dir.
+    async fn start_live_server(
+        fixture: &str,
+    ) -> (
+        Arc<Server>,
+        u16,
+        tokio::task::JoinHandle<()>,
+        std::path::PathBuf,
+    ) {
         // Unique scratch dir per call: cargo runs the
         // live-server tests in parallel.
         static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -1193,7 +1344,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("m6b-server-live-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("config.json"), LIVE_FIXTURE).unwrap();
+        std::fs::write(dir.join("config.json"), fixture).unwrap();
         let server = live_server(&dir);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -1203,9 +1354,35 @@ mod tests {
         let handle = tokio::spawn(async move {
             let _ = srv.serve_on(listener).await;
         });
+        (server, port, handle, dir)
+    }
+
+    async fn live_server_case(method: &str, path: &str, body_len: usize) -> String {
+        let (server, port, handle, dir) = start_live_server(LIVE_FIXTURE).await;
         let resp = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             raw_request(port, method, path, body_len),
+        )
+        .await
+        .expect("request completes");
+        server.request_shutdown();
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+        resp
+    }
+
+    async fn live_server_case_full(
+        fixture: &str,
+        method: &str,
+        path: &str,
+        body_len: usize,
+        auth: Option<&str>,
+        extra: &[(&str, &str)],
+    ) -> String {
+        let (server, port, handle, dir) = start_live_server(fixture).await;
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            raw_request_full(port, method, path, body_len, auth, extra),
         )
         .await
         .expect("request completes");
@@ -1232,15 +1409,201 @@ mod tests {
 
     #[tokio::test]
     async fn over_cap_body_to_body_route_is_400() {
-        // R4: a 2 MiB body to a body-taking route is the
-        // fixed 400 before dispatch. (Neutering
-        // MAX_BODY_BYTES leaves this 400 in place via the
-        // per-handler 1 MiB cap, so this test pins the
-        // outcome, not the pre-dispatch cap itself — the
-        // cap is proven by the RSS proof in §M6b.9.)
+        // R4: a 2 MiB body to a body-taking route with a
+        // valid token is the fixed 400 — after the gates,
+        // not before them (fix loop 2, B1: the gates run
+        // on headers first; only an authenticated,
+        // same-origin caller reaches the capped read).
+        // (Neutering MAX_BODY_BYTES leaves this 400 in
+        // place via the per-handler 1 MiB cap, so this
+        // test pins the outcome, not the pre-dispatch cap
+        // itself — the cap is proven by the RSS proof in
+        // §M6b.9.)
         let resp = live_server_case("POST", "/api/v1/config/validate", 2 * 1024 * 1024).await;
         assert!(resp.starts_with("HTTP/1.1 400"), "{resp}");
         assert!(resp.contains("invalid JSON in request body"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn over_cap_body_without_token_is_401() {
+        // Fix loop 2, B1: the gates run before the body
+        // read, so an unauthenticated over-cap POST is
+        // Go's 401, not the 400 the old pre-dispatch read
+        // answered — and the attempt feeds the limiter's
+        // failure counter exactly as an under-cap 401
+        // does.
+        let resp = live_server_case_full(
+            LIVE_FIXTURE,
+            "POST",
+            "/api/v1/config/validate",
+            2 * 1024 * 1024,
+            None,
+            &[],
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 401"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn over_cap_body_with_bad_origin_is_403() {
+        // Fix loop 2, B1: same ordering for Origin — a
+        // valid token + cross-origin over-cap POST is
+        // Go's 403, not 400.
+        let resp = live_server_case_full(
+            LIVE_FIXTURE,
+            "POST",
+            "/api/v1/config/validate",
+            2 * 1024 * 1024,
+            Some("plain-token"),
+            &[("Origin", "https://evil.example")],
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 403"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn over_cap_body_when_rate_limited_is_429() {
+        // Fix loop 2, B1: a rate-limited client sending
+        // an over-cap body is Go's 429 — the limiter is
+        // consulted before any body byte is read. The
+        // strict fixture trips after one failed login.
+        let (server, port, handle, dir) = start_live_server(LIVE_FIXTURE_STRICT).await;
+        let bad =
+            raw_request_full(port, "GET", "/api/v1/status", 0, Some("wrong-token"), &[]).await;
+        assert!(bad.starts_with("HTTP/1.1 401"), "{bad}");
+        let resp = raw_request_full(
+            port,
+            "POST",
+            "/api/v1/config/validate",
+            2 * 1024 * 1024,
+            None,
+            &[],
+        )
+        .await;
+        server.request_shutdown();
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(resp.starts_with("HTTP/1.1 429"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn slow_drip_body_times_out_at_30s() {
+        // Fix loop 2, B2: a body that drips 1 KiB and
+        // then stalls is cut at the 30s API timeout with
+        // Go's 503 `timeout` envelope — not held forever.
+        // Real-time wait (31s): a paused-clock variant
+        // was tried and REJECTED — under
+        // `tokio::time::pause`, `advance(31s)` makes
+        // hyper close the connection with an empty
+        // response (measured: 0 bytes), while the same
+        // code in real time delivers the 503. The paused
+        // clock is not a faithful probe of hyper's timer
+        // interaction, so this test pays the 31s.
+        let (server, port, handle, dir) = start_live_server(LIVE_FIXTURE).await;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        let head = "POST /api/v1/config/validate HTTP/1.1\r\n\
+            Host: 127.0.0.1\r\n\
+            Authorization: Bearer plain-token\r\n\
+            Content-Type: application/json\r\n\
+            Content-Length: 65536\r\n\
+            Connection: close\r\n\r\n";
+        stream.write_all(head.as_bytes()).await.expect("head");
+        stream
+            .write_all(&vec![b'x'; 1024])
+            .await
+            .expect("first KiB");
+        // No more bytes: the server must 503 at 30s.
+        let mut resp = Vec::new();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            stream.read_to_end(&mut resp),
+        )
+        .await;
+        server.request_shutdown();
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+        let text = String::from_utf8_lossy(&resp).into_owned();
+        assert!(text.starts_with("HTTP/1.1 503"), "{text}");
+        assert!(text.contains("request timed out"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn many_headers_are_accepted() {
+        // Fix loop 2, B3: Go has no header-count limit
+        // (only the 1 MiB head cap); 101 headers must not
+        // 431 — the old hyper default (100) did.
+        let mut extra: Vec<(String, String)> = Vec::new();
+        for i in 0..101 {
+            extra.push((format!("X-Test-{i}"), "v".to_string()));
+        }
+        let extra_refs: Vec<(&str, &str)> = extra
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let (server, port, handle, dir) = start_live_server(LIVE_FIXTURE).await;
+        let resp = raw_request_full(
+            port,
+            "GET",
+            "/api/v1/status",
+            0,
+            Some("plain-token"),
+            &extra_refs,
+        )
+        .await;
+        server.request_shutdown();
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn huge_single_header_is_accepted() {
+        // Fix loop 2, B3: a single 500 KiB header is
+        // inside Go's 1 MiB head cap; the old hyper
+        // default read buffer (~400 KiB) 431'd it.
+        let big = "a".repeat(500 * 1024);
+        let resp = live_server_case_full(
+            LIVE_FIXTURE,
+            "GET",
+            "/api/v1/status",
+            0,
+            Some("plain-token"),
+            &[("X-Big", &big)],
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn transfer_encoding_gzip_is_hyper_400() {
+        // Fix loop 2, B3 (TE half): hyper rejects a
+        // non-chunked Transfer-Encoding at parse time
+        // with its automatic 400 — the service never sees
+        // the request, so Go's 501 cannot be emitted at
+        // this layer. Pinned as the recorded residual
+        // (PORTING §M6b.6), not as a match.
+        let (server, port, handle, dir) = start_live_server(LIVE_FIXTURE).await;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        let head = "POST /api/v1/config/validate HTTP/1.1\r\n\
+            Host: 127.0.0.1\r\n\
+            Authorization: Bearer plain-token\r\n\
+            Transfer-Encoding: gzip\r\n\
+            Content-Length: 5\r\n\
+            Connection: close\r\n\r\nhello";
+        stream.write_all(head.as_bytes()).await.expect("head");
+        let mut resp = Vec::new();
+        let _ = stream.read_to_end(&mut resp).await;
+        server.request_shutdown();
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+        let text = String::from_utf8_lossy(&resp).into_owned();
+        assert!(text.starts_with("HTTP/1.1 400"), "{text}");
     }
 
     #[tokio::test]

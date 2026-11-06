@@ -193,10 +193,22 @@ pub fn acquire_flock(base_dir: &Path) -> Result<std::fs::File, SaveError> {
     let file = opts.open(&lock_path).map_err(|_| SaveError::Internal)?;
     #[cfg(unix)]
     {
+        // Blocking exclusive flock, retrying on EINTR —
+        // Go's `flockExclusive` (`internal/profile/
+        // flock_unix.go:16-25`) retries the same way; a
+        // signal landing in the flock window must not fail
+        // a save with 500 where Go retries and succeeds
+        // (fix loop 2, red-team N5).
         use std::os::unix::io::AsRawFd;
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-        if rc != 0 {
-            return Err(SaveError::Internal);
+        loop {
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            if rc == 0 {
+                break;
+            }
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EINTR) {
+                return Err(SaveError::Internal);
+            }
         }
     }
     #[cfg(not(unix))]
