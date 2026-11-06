@@ -14868,3 +14868,29 @@ lockfile — no new crate).
   harness's 5s Python HTTP-server READY timeout while M7c's cargo
   saturated the box; 0 case failures with the correct PR-2-era
   drivers; the quiet-box run is 121/121.)
+
+- Rebase onto `dev-rust` `682df84` (2026-11-07, PR #81 M7c E2E
+  merged): `git rebase --onto origin/dev-rust 2ae2f14
+  feat/rust-m7b-pr3` — 1 commit replayed, zero conflicts;
+  provenance §22 needed no renumbering (dev-rust holds M7b as
+  §20, PR-2 as §21, PR-3 as §22); `Cargo.lock` identical 3-line
+  diff; `grep -c 'stub(ctx)'` still 3 (profile/telegram/keeper,
+  run.rs:1044/1140/1190). Re-gated at the rebased head `9caea7e`:
+  baseline at `682df84` measured 1471/0 (66 suites); final
+  1496/0 (66 suites, baseline + 25); SPDX ok, fmt 0, build 0,
+  clippy `--all-targets` 0; harnesses with freshly built drivers
+  (Go + Rust examples): m7b 121/121, send --wait 11/11, watch
+  5/5, wait 11/11, pr3 16/16; help 46/46 byte-identical; live
+  re-probes at the new head: update --dry-run identical (exit
+  0), update --check rejected identically (exit 2), auth
+  list/status 5/5 identical, chat.json md5 unchanged
+  (`8a141844c6c6a6e59bd003c07daaa0e5`). The live real-file
+  `history --download` (scratch thread `pr3-download-scratch`,
+  `pr3-test-file.txt`, sha256
+  `c631edeb5cda22b3bbc4f265e45b6ef52c08ff74a34ef85c5631cbfc39725c3e`)
+  was verified by the parallel live-download agent against the
+  writer's head `e899fc8` (identical code by rebase) — see the
+  writer report §4. Disk: M7d's full test run saturated cue
+  during the rebase (14G free at the worst point, 12G at the
+  final gate); builds waited per the disk rule; own target
+  deleted after the final gate (logs kept).
