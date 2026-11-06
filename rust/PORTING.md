@@ -13165,33 +13165,33 @@ The old `invite` special-case branch in `cmd_plain` is removed.
 
 | Command | Go handler | Rust handler | Evidence |
 |---|---|---|---|
-| session-start | `internal/deliver/session.go:83` | `network.rs:888` `cmd_session_start` | fake 42-case harness |
-| session-rename | `internal/deliver/session.go:103` | `network.rs:920` `cmd_session_op` | fake |
-| session-pin | `internal/deliver/session.go:103` | `network.rs:920` | fake |
-| session-unpin | `internal/deliver/session.go:103` | `network.rs:920` | fake |
-| session-archive | `internal/deliver/session.go:103` | `network.rs:920` | fake |
-| session-unarchive | `internal/deliver/session.go:103` | `network.rs:920` | fake |
-| session-delete | `internal/deliver/session.go:103` | `network.rs:920` | fake |
-| stop | `internal/deliver/stop.go:29` | `network.rs:952` `cmd_stop` | fake |
-| seen | `internal/commands/read.go:991` | `network.rs:977` `cmd_seen` | fake |
-| feed-react | `internal/commands/read.go:821` | `network.rs:994` `cmd_feed_react` | fake |
-| idea-exec | `internal/commands/read.go:950` | `network.rs:1019` `cmd_idea_exec` | fake |
-| approvals | `internal/commands/wait.go:1230` | `network.rs:1128` `cmd_approvals` | fake + live |
-| approve | `internal/commands/wait.go:1295` | `network.rs:1219` `cmd_approve` | fake |
-| deny | `internal/commands/wait.go:1330` | `network.rs:1247` `cmd_deny` | fake |
-| invite | `internal/commands/read.go:195` | `network.rs:1314` `cmd_invite` | fake + live |
-| redeem | `internal/commands/read.go:276` | `network.rs:1351` `cmd_redeem` | fake |
-| wake | `internal/deliver/wake.go:95` | `network.rs:1415` `cmd_wake` | fake |
-| download | `internal/commands/read.go:535` | `network.rs:1631` `cmd_download` | fake + live (no-files path) |
+| session-start | `internal/deliver/session.go:80` | `network.rs:931` `cmd_session_start` | fake 42-case harness |
+| session-rename | `internal/deliver/session.go:104` | `network.rs:963` `cmd_session_op` | fake |
+| session-pin | `internal/deliver/session.go:104` | `network.rs:963` | fake |
+| session-unpin | `internal/deliver/session.go:104` | `network.rs:963` | fake |
+| session-archive | `internal/deliver/session.go:104` | `network.rs:963` | fake |
+| session-unarchive | `internal/deliver/session.go:104` | `network.rs:963` | fake |
+| session-delete | `internal/deliver/session.go:104` | `network.rs:963` | fake |
+| stop | `internal/deliver/stop.go:26` | `network.rs:995` `cmd_stop` | fake |
+| seen | `internal/commands/read.go:991` | `network.rs:1020` `cmd_seen` | fake |
+| feed-react | `internal/commands/read.go:820` | `network.rs:1037` `cmd_feed_react` | fake |
+| idea-exec | `internal/commands/read.go:949` | `network.rs:1062` `cmd_idea_exec` | fake |
+| approvals | `internal/commands/wait.go:1230` | `network.rs:1171` `cmd_approvals` | fake + live |
+| approve | `internal/commands/wait.go:1295` | `network.rs:1262` `cmd_approve` | fake |
+| deny | `internal/commands/wait.go:1330` | `network.rs:1290` `cmd_deny` | fake |
+| invite | `internal/commands/read.go:195` | `network.rs:1357` `cmd_invite` | fake + live |
+| redeem | `internal/commands/read.go:276` | `network.rs:1394` `cmd_redeem` | fake |
+| wake | `internal/deliver/wake.go:89` | `network.rs:1458` `cmd_wake` | fake |
+| download | `internal/commands/read.go:535` | `network.rs:1725` `cmd_download` | fake + live (no-files path) |
 | auto-approve | `internal/commands/wait.go:1365` | `autoapprove.rs` `run_auto_approve` | live + binary-vs-binary temp config |
-| raw | `internal/commands/read.go:1011` | `network.rs:1696` `cmd_raw` | fake |
+| raw | `internal/commands/read.go:1011` | `network.rs:1790` `cmd_raw` | fake |
 
 New supporting code:
 
 - `rust/castctl-gateway/src/invite.rs` — `fetch_invite` /
   `create_invite` / `redeem_invite_code` / `wake_vm` +
   `*_base` variants (fake `http_base` seam), from
-  `internal/gateway/invite.go:33,75,122` and
+  `internal/gateway/invite.go:30,61,98` and
   `internal/gateway/wake.go:52`. Fake-HTTP unit tests
   (tokio TcpListener, hand-rolled HTTP/1.1, request recording).
 - `rust/castctl-gateway/src/media.rs` — `media_path` from
@@ -13313,7 +13313,7 @@ New supporting code:
   preserving (never drops user data). Safe direction, kept.
 - **D3 — wake error wraps not reproduced**: Go wraps
   `deliver: wake: fetch access token: %w` / `fetch session
-  info: %w` (`internal/deliver/wake.go:95`); typed errors
+  info: %w` (`internal/deliver/wake.go:89`); typed errors
   classify identically with or without wraps, so the wraps are
   not observable in exit code / typed output.
 - **D4 — `stringifyID` fallback approximation**: Go

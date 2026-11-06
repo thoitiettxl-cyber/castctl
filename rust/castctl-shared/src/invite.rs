@@ -4,7 +4,7 @@
 
 //! Invite summary shaping.
 //!
-//! Go source: `internal/shared/invite.go`
+//! Go source: `internal/shared/invite.go:39`
 //! (`InviteSummary`, `SummarizeInvite`).
 
 use crate::value::{JsonValue, as_map, bool_ptr_field, int_ptr_field, string_ptr_field};
@@ -12,7 +12,7 @@ use crate::value::{JsonValue, as_map, bool_ptr_field, int_ptr_field, string_ptr_
 /// The reward block of an invite summary: the reward's
 /// title and body, or absent entirely when the server
 /// carries no reward object.
-/// Source: `internal/shared/invite.go` (`InviteReward`).
+/// Source: `internal/shared/invite.go:10` (`InviteReward`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InviteReward {
     /// Reward title, when present and a string.
@@ -27,7 +27,7 @@ pub struct InviteReward {
 /// uses_remaining, reward, offer, share_text,
 /// redeemed_someone_elses_code. `None` fields render as
 /// JSON null.
-/// Source: `internal/shared/invite.go`
+/// Source: `internal/shared/invite.go:19`
 /// (`InviteSummary`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InviteSummary {
@@ -64,7 +64,7 @@ pub struct InviteSummary {
 /// server-provided value (including 0) always wins. A
 /// non-object reward yields a nil reward, exactly as
 /// Python's `isinstance` check does.
-/// Source: `internal/shared/invite.go`
+/// Source: `internal/shared/invite.go:39`
 /// (`SummarizeInvite`).
 #[must_use]
 pub fn summarize_invite(d: &JsonValue) -> InviteSummary {

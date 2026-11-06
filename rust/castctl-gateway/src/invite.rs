@@ -4,9 +4,10 @@
 
 //! Plain-HTTPS muse.ai invite / redeem / wake helpers.
 //!
-//! Go sources: `internal/gateway/invite.go` (`FetchInvite`,
-//! `CreateInvite`, `RedeemInviteCode`) and
-//! `internal/gateway/wake.go` (`WakeVM`). None of these go
+//! Go sources: `internal/gateway/invite.go:30`
+//! (`FetchInvite`), `:61` (`CreateInvite`), `:98`
+//! (`RedeemInviteCode`) and `internal/gateway/wake.go:52`
+//! (`WakeVM`). None of these go
 //! through the gateway/Noise connection: they use the
 //! dialer's HTTP client with the hatch headers, exactly as
 //! Go does. Every function has a `_base` variant taking an
@@ -322,7 +323,7 @@ pub async fn redeem_invite_code_base(
 /// `"[omitted]"`). A missing `reason` becomes the
 /// constant `"unknown"`; a missing `detail` stays
 /// missing.
-/// Source: `internal/gateway/invite.go`
+/// Source: `internal/gateway/invite.go:141`
 /// (`filterRedeemFailureBody`).
 fn filter_redeem_failure_body(
     m: &serde_json::Map<String, SerdeValue>,
@@ -366,7 +367,7 @@ fn filter_redeem_failure_body(
 /// empty, and otherwise the allowlist summary string
 /// (status/length/content-type) — never the raw response
 /// text.
-/// Source: `internal/gateway/wake.go` (`WakeVM`).
+/// Source: `internal/gateway/wake.go:52` (`WakeVM`).
 pub async fn wake_vm(
     client: &HttpClient,
     cookies: &str,

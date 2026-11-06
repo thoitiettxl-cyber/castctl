@@ -606,6 +606,13 @@ fn cmd_plain(
     if M7B_COMMANDS.contains(&spec.name) {
         return crate::network::run_network_command(ctx, g, spec, &p);
     }
+    // TODO(chat): deferred to PR-2 — needs the wait Runner
+    // (REPL + stdin + chat.json) after M7a merges.
+    // TODO(send): deferred to PR-2 — the default `--wait
+    // 90` needs the wait Runner after M7a merges.
+    // TODO(watch): deferred to PR-2 — needs
+    // `subscribe_raw`, the same primitive as M7a wait;
+    // implementing it here would duplicate M7a.
     resolve_and_load(ctx, g, false)?;
     Err(stub(ctx))
 }

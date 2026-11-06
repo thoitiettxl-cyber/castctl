@@ -616,7 +616,7 @@ fn abs_path(p: &str) -> String {
     out.to_string_lossy().into_owned()
 }
 
-/// Go `writeMergedJSON` (`read.go:345`): `{"status":
+/// Go `writeMergedJSON` (`read.go:348`): `{"status":
 /// status, **body}` with status first and the body keys
 /// in sorted order (Go maps have no wire order). Each
 /// value is rendered with `marshalJSONIndent` (indent 2,
@@ -638,7 +638,7 @@ fn write_merged_json(status: i32, body: &serde_json::Map<String, SerdeValue>) ->
     out
 }
 
-/// Go `marshalJSONIndent` (`read.go:368`): `json.Encoder`
+/// Go `marshalJSONIndent` (`read.go:372`): `json.Encoder`
 /// with `SetEscapeHTML(false)`, prefix `"  "`, indent
 /// `"  "`. The prefix lands on continuation lines only
 /// (never the first line), so: indent the compact value
@@ -676,7 +676,7 @@ fn decode_json_number_loose(data: &[u8]) -> Result<SerdeValue, String> {
     }
 }
 
-/// Go `eventHasText` (`read.go:465`): the payload's
+/// Go `eventHasText` (`read.go:419`): the payload's
 /// `display_text`/`content` is a non-empty string, or a
 /// present non-null non-`false` value of any other kind.
 /// NOTE the quirk: an EMPTY string still counts in the
@@ -925,7 +925,7 @@ async fn cmd_unread(rt: &Runtime) -> Result<String, FlowErr> {
 /// `cmdSessionStart` (`deliver.go:153`): `session.start`
 /// with `{"method":"/api/session/start","params":
 /// {"origin":"fresh","lifecycle":"persistent"[,"title"]}}`
-/// (`deliver/session.go:83`). The params object is struct
+/// (`deliver/session.go:80`). The params object is struct
 /// order (origin, lifecycle, title), NOT sorted, so the
 /// body is hand-built. The reply is returned verbatim.
 async fn cmd_session_start(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
@@ -957,7 +957,7 @@ async fn cmd_session_start(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> 
 /// `cmdSessionOp` (`deliver.go:176`): rename sends
 /// `{"session_id","title"}`; every other kind sends
 /// `{"method":"/api/session/<kind>","session_id"}`
-/// (`deliver/session.go:103`). Both are struct order;
+/// (`deliver/session.go:104`). Both are struct order;
 /// the sorted `Body::Json` order coincides, but the
 /// ordered builder is used so the wire order is explicit.
 async fn cmd_session_op(rt: &Runtime, p: &Parsed, kind: &str) -> Result<CmdOut, FlowErr> {
@@ -991,7 +991,7 @@ async fn cmd_session_op(rt: &Runtime, p: &Parsed, kind: &str) -> Result<CmdOut, 
 
 /// `cmdStop` (`deliver.go:205`): `chat.cancel` with `{}`
 /// for the main chat or `{"session_id": thread}` for a
-/// side chat (`deliver/stop.go:29`).
+/// side chat (`deliver/stop.go:26`).
 async fn cmd_stop(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
     let thread = if p.str_is_set("thread") {
         p.str("thread")
@@ -1102,7 +1102,7 @@ async fn pending_approvals(rt: &Runtime) -> Result<(SerdeValue, Vec<SerdeValue>)
     Ok((v, pend))
 }
 
-/// `decideApproval` (`wait.go:1184`): the one call
+/// `decideApproval` (`wait.go:1178`): the one call
 /// behind approve, deny, approve --all and auto-approve.
 /// `egress.approval.decide` with path param
 /// `approval_id` and body `{"decision"}`. Never retried.
@@ -1154,13 +1154,13 @@ async fn approve_all(
     Ok(done)
 }
 
-/// `{"approved": [...]}` (`wait.go:1240`,
+/// `{"approved": [...]}` (`wait.go:1226`,
 /// `approvedListJSON`): empty → `[]`, never null.
 fn approved_list_json(rows: &[String]) -> String {
     format!("{{\"approved\":{}}}", rows_json(rows))
 }
 
-/// `cmdApprovals` (`wait.go:1248`): `--approve-all`
+/// `cmdApprovals` (`wait.go:1230`): `--approve-all`
 /// decides everything with `allow_always` and prints the
 /// approved list; `--raw` prints the raw
 /// `egress.approvals` object; otherwise the described
@@ -1298,7 +1298,7 @@ async fn cmd_deny(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
     Ok(CmdOut::out(write_json_serde(&res)?))
 }
 
-/// `printInviteText` (`read.go:241`): the text form of
+/// `printInviteText` (`read.go:235`): the text form of
 /// an invite summary.
 fn print_invite_text(s: &castctl_shared::InviteSummary) -> String {
     let mut out = String::new();
@@ -1446,7 +1446,7 @@ async fn cmd_redeem(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
     Ok(CmdOut::code(format!("{line}\n"), 1))
 }
 
-/// `cmdWake` (`deliver.go:228`, `deliver/wake.go:95`):
+/// `cmdWake` (`deliver.go:228`, `deliver/wake.go:89`):
 /// cookies first, then `FetchAccessToken`, the vm id
 /// from the profile or `FetchSessionInfo`, then the wake
 /// POST (15s bound inside `WakeVM`). Renders
@@ -1538,7 +1538,7 @@ fn stringify_id(v: Option<&SerdeValue>) -> String {
     }
 }
 
-/// Go `eventMatchesRef` (`read.go:615`): any of the
+/// Go `eventMatchesRef` (`read.go:603`): any of the
 /// event's ids (`seq`, `payload.message_id`,
 /// `payload.id`, top-level `message_id`) equals the ref.
 fn event_matches_ref(ev: &SerdeValue, ref_: &str) -> bool {
@@ -1553,7 +1553,7 @@ fn event_matches_ref(ev: &SerdeValue, ref_: &str) -> bool {
 }
 
 /// One `SaveResources` result row (`internal/shared/
-/// resources.go:230`, `SaveRow`): field order path, file,
+/// resources.go:232`, `SaveRow`): field order path, file,
 /// skipped, bytes, error, warning; `None` fields are
 /// omitted (`omitempty`).
 #[derive(Debug, Clone, Default)]
@@ -1780,7 +1780,7 @@ async fn cmd_download(rt: &Runtime, p: &Parsed) -> Result<CmdOut, FlowErr> {
     }
 }
 
-/// `cmdRaw` (`read.go:1010`): route-lookup first (exit 2
+/// `cmdRaw` (`read.go:1011`): route-lookup first (exit 2
 /// on an unknown method, before any connection is
 /// opened), then `--body` JSON parse, then `--param` k=v
 /// checks. The raw reply bytes print as JSON when they
