@@ -740,17 +740,9 @@ fn factory_refused_paths() {
     // leave 0644 under umask 022 and the 0o600 assertion
     // below would fail before the factory is even called.
     std::fs::write(&config_path, orig_config).unwrap();
-    std::fs::set_permissions(
-        &config_path,
-        std::fs::Permissions::from_mode(0o600),
-    )
-    .unwrap();
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     std::fs::write(&cookie_path, orig_cookie).unwrap();
-    std::fs::set_permissions(
-        &cookie_path,
-        std::fs::Permissions::from_mode(0o600),
-    )
-    .unwrap();
+    std::fs::set_permissions(&cookie_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let refused = vec![
         config_path.to_str().unwrap().to_string(),
         cookie_path.to_str().unwrap().to_string(),
@@ -910,17 +902,9 @@ fn factory_refused_paths_by_identity() {
     // Same 0o600 setup as factory_refused_paths (Go
     // factory_test.go:677,680); see the note there.
     std::fs::write(&config_path, orig_config).unwrap();
-    std::fs::set_permissions(
-        &config_path,
-        std::fs::Permissions::from_mode(0o600),
-    )
-    .unwrap();
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     std::fs::write(&cookie_path, orig_cookie).unwrap();
-    std::fs::set_permissions(
-        &cookie_path,
-        std::fs::Permissions::from_mode(0o600),
-    )
-    .unwrap();
+    std::fs::set_permissions(&cookie_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let refused = vec![
         config_path.to_str().unwrap().to_string(),
         cookie_path.to_str().unwrap().to_string(),
