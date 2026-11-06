@@ -217,7 +217,14 @@ pub fn decide(
             noop: false,
         });
     }
-    let rel = rel.expect("primary mode always passes a release");
+    // Primary mode always passes a release; a caller
+    // that passes `None` with `fallback=false` gets an
+    // error, never a panic (`decide` is pub).
+    let Some(rel) = rel else {
+        return Err(UpdateError::failure(
+            "update: the release information is missing",
+        ));
+    };
     let asset = select_asset(rel, &asset_name)?;
     let checksums = select_checksums_asset(rel)?;
     Ok(Selection {
@@ -271,16 +278,28 @@ pub fn flavour_from_cgo_settings(settings: &[(String, String)]) -> Option<&'stat
 /// refused by the callers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedUrl {
-    /// Lowercased scheme (`"https"`, `"http"`, or other).
+    /// Lowercased scheme (`"https"`, `"http"`, or other) —
+    /// Go's `url.Parse` lowercases the scheme.
     pub scheme: String,
     /// Whether a `user@` userinfo part is present.
     pub has_userinfo: bool,
-    /// Host without port, lowercased (Go's `URL.Hostname()`).
+    /// Host without port, case PRESERVED: Go's
+    /// `URL.Hostname()` does not lowercase, and the
+    /// redirect policy compares hosts case-sensitively
+    /// (`update.go:442-448`) — an uppercase spelling of
+    /// an allowlisted host is refused by Go, so this
+    /// port must not lowercase it away. DNS lookup and
+    /// the TLS SNI lowercase separately at dial time
+    /// (DNS names are case-insensitive).
     pub host: String,
     /// Port as written, `""` when absent.
     pub port: String,
     /// Path as written (may be empty).
     pub path: String,
+    /// Query as written, without the leading `?`
+    /// (`""` when absent). Go sends the query
+    /// (`RawQuery`); the request line carries it.
+    pub query: String,
     /// The raw input, kept for error-free display only
     /// (never rendered into an error message).
     pub raw: String,
@@ -288,12 +307,39 @@ pub struct ParsedUrl {
 
 impl ParsedUrl {
     /// The host:port authority as written (no userinfo).
+    /// An IPv6 literal host gets its brackets back:
+    /// `parse_url` strips them for the loopback check,
+    /// but the wire `Host:` header needs them
+    /// (RFC 9112 §3.2.2 — `Host: ::1:PORT` without
+    /// brackets is malformed, even though Go's server
+    /// happens to accept it).
     #[must_use]
     pub fn authority(&self) -> String {
-        if self.port.is_empty() {
-            self.host.clone()
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
         } else {
-            format!("{}:{}", self.host, self.port)
+            self.host.clone()
+        };
+        if self.port.is_empty() {
+            host
+        } else {
+            format!("{host}:{}", self.port)
+        }
+    }
+
+    /// The request-target path: path plus query when
+    /// present (`/x?y=1`), `/` when both are empty.
+    #[must_use]
+    pub fn request_target(&self) -> String {
+        let path = if self.path.is_empty() {
+            "/".to_string()
+        } else {
+            self.path.clone()
+        };
+        if self.query.is_empty() {
+            path
+        } else {
+            format!("{path}?{}", self.query)
         }
     }
 }
@@ -304,7 +350,29 @@ impl ParsedUrl {
 /// shape of Go's `net/url.Parse` + `URL.Hostname()` /
 /// `URL.Port()` / `URL.User` as used by `validateDownloadURL`
 /// and `checkRedirectPolicy` (`internal/update/update.go:423-458,774-793`).
+///
+/// Control characters (`< 0x20`, `0x7f`) are refused
+/// anywhere in the raw URL, mirroring Go's
+/// `net/url: invalid control character in URL` (probed on
+/// cue 2026-11-05: CR/LF and DEL in path/authority refuse;
+/// see the `parse_url_rejects_control_characters` test).
+/// Space is refused too — stricter than Go, which accepts
+/// a space in the PATH (`url.Parse` succeeds, the client
+/// percent-encodes it on send). This port has no URL
+/// escaper: sending a raw space would corrupt the request
+/// line, so refusing is the safe choice ([DEVIATION] 28
+/// in PORTING.md §M6c.2).
 pub fn parse_url(raw: &str) -> Option<ParsedUrl> {
+    // Reject control bytes, DEL, and space before any
+    // splitting: they must never reach the request line
+    // or the `Host:` header (header injection via a
+    // hostile release JSON or redirect `Location`).
+    if raw
+        .bytes()
+        .any(|b| b < 0x20 || b == 0x7f || b == b' ')
+    {
+        return None;
+    }
     let (scheme, rest) = raw.split_once("://")?;
     if scheme.is_empty()
         || !scheme
@@ -327,10 +395,9 @@ pub fn parse_url(raw: &str) -> Option<ParsedUrl> {
     if hostport.is_empty() {
         return None;
     }
-    // Split host / port (IPv6 in brackets keeps its brackets
-    // in `host` for the loopback check, matching Go's
-    // `Hostname()` only for the bracketed form's inner part —
-    // see `is_loopback_host`).
+    // Split host / port. An IPv6 literal in brackets
+    // stores its inner part in `host` (no brackets);
+    // `authority()` adds them back for the wire.
     let (host, port) = if let Some(stripped) = hostport.strip_prefix('[') {
         let end = stripped.find(']')?;
         let host = &stripped[..end];
@@ -342,13 +409,28 @@ pub fn parse_url(raw: &str) -> Option<ParsedUrl> {
     } else {
         (hostport.to_string(), String::new())
     };
-    let path = after.split(['?', '#']).next().unwrap_or("").to_string();
+    // Go's `url.Parse` refuses a non-numeric port
+    // (`invalid port ":abc" after host`, probed on cue
+    // 2026-11-05); an empty port (`"h:"`) and any
+    // all-digit port (even > 65535, which fails later at
+    // dial, like Go) are accepted.
+    if !port.is_empty() && !port.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    // Split the remainder into path / query / fragment.
+    // The fragment never reaches the wire.
+    let after = after.split('#').next().unwrap_or("");
+    let (path, query) = match after.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (after, ""),
+    };
     Some(ParsedUrl {
         scheme: scheme.to_ascii_lowercase(),
         has_userinfo: userinfo,
-        host: host.to_ascii_lowercase(),
+        host,
         port,
-        path,
+        path: path.to_string(),
+        query: query.to_string(),
         raw: raw.to_string(),
     })
 }
@@ -892,5 +974,123 @@ mod tests {
         );
         assert_eq!(fallback_tag_from_location_path("/releases/latest"), None);
         assert_eq!(fallback_tag_from_location_path("/releases/tag/"), None);
+    }
+
+    /// Safety B1 (fix loop 1): `parse_url` refuses
+    /// control characters, DEL, and space anywhere in
+    /// the raw URL — Go refuses CR/LF/DEL with
+    /// `net/url: invalid control character in URL`
+    /// (probed on cue with `go run` 2026-11-05), so a
+    /// hostile release JSON or redirect `Location` can
+    /// never smuggle a header into the request line.
+    #[test]
+    fn parse_url_rejects_control_characters() {
+        for bad in [
+            "https://api.github.com/foo\r\nX-Injected: 1",
+            "https://api.github.com:443\r\nX: y/foo",
+            "https://github.com/a\tb",
+            "https://github.com/a\x7fb",
+            "https://github.com/a\x00b",
+            "https://github.com/a b",
+        ] {
+            assert!(parse_url(bad).is_none(), "{bad:?}");
+            assert!(!validate_download_url(bad), "{bad:?}");
+        }
+        // Clean URLs still parse.
+        assert!(parse_url("https://github.com/x/y").is_some());
+        assert!(parse_url("https://release-assets.githubusercontent.com/x").is_some());
+    }
+
+    /// Technical F-c (fix loop 1): port validation
+    /// matches Go's `url.Parse` (probed on cue
+    /// 2026-11-05): non-numeric refuses, empty and
+    /// all-digit ports accept (even > 65535, which
+    /// fails later at dial, like Go).
+    #[test]
+    fn parse_url_port_validation_matches_go() {
+        assert!(parse_url("https://github.com:abc/").is_none());
+        assert!(parse_url("https://github.com:80x/").is_none());
+        assert!(parse_url("https://github.com:443/x").is_some());
+        assert!(parse_url("https://github.com:99999/").is_some());
+        assert!(parse_url("https://h:/").is_some());
+        assert!(parse_url("https://[::1]:abc/x").is_none());
+        assert!(parse_url("https://[::1]:8080/x").is_some());
+    }
+
+    /// Technical F-c (fix loop 1): Go's `url.Parse`
+    /// lowercases the scheme but preserves host case
+    /// (probed on cue 2026-11-05: `HTTPS://…` parses
+    /// with scheme `"https"`; `GITHUB.COM` stays
+    /// `"GITHUB.COM"`). The redirect policy therefore
+    /// refuses an uppercase spelling of an allowlisted
+    /// host, exactly like Go's case-sensitive
+    /// comparison (`update.go:442-448`).
+    #[test]
+    fn parse_url_case_matches_go() {
+        let u = parse_url("HTTPS://github.com/x").unwrap();
+        assert_eq!(u.scheme, "https");
+        let u = parse_url("https://GITHUB.COM/x").unwrap();
+        assert_eq!(u.host, "GITHUB.COM");
+        // Uppercase allowlisted host: refused by the
+        // redirect policy (Go refuses it too).
+        let origin = parse_url("https://api.github.com/repos/x").unwrap();
+        let upper = parse_url("https://GITHUB.COM/x").unwrap();
+        assert_eq!(
+            check_redirect_policy(&upper, &[origin]),
+            Err(RedirectRefusal::Forbidden)
+        );
+    }
+
+    /// Technical F-d (fix loop 1): the query survives
+    /// parsing and rides the request target; Go sends
+    /// `RawQuery` (`url.Parse` probe, cue 2026-11-05).
+    #[test]
+    fn parse_url_keeps_query() {
+        let u = parse_url("https://github.com/x?y=1&z=2").unwrap();
+        assert_eq!(u.path, "/x");
+        assert_eq!(u.query, "y=1&z=2");
+        assert_eq!(u.request_target(), "/x?y=1&z=2");
+        let u = parse_url("https://github.com/x").unwrap();
+        assert_eq!(u.query, "");
+        assert_eq!(u.request_target(), "/x");
+        let u = parse_url("https://github.com").unwrap();
+        assert_eq!(u.request_target(), "/");
+    }
+
+    /// Red-team IPv6 note (fix loop 1): the bracketed
+    /// host is stored bare for the loopback check, but
+    /// `authority()` puts the brackets back, so the
+    /// wire `Host:` header is RFC 9112 well-formed.
+    #[test]
+    fn ipv6_authority_keeps_brackets() {
+        let u = parse_url("http://[::1]:8080/x").unwrap();
+        assert_eq!(u.host, "::1");
+        assert_eq!(u.authority(), "[::1]:8080");
+        assert!(is_loopback_host(&u.host));
+        let u = parse_url("http://[::1]/x").unwrap();
+        assert_eq!(u.authority(), "[::1]");
+    }
+
+    /// Safety F3 (fix loop 1): `decide(None, false)`
+    /// errors instead of panicking on the old `expect`.
+    #[test]
+    fn decide_missing_release_errors_not_panics() {
+        let current = parse_version("0.6.3").unwrap();
+        let target = parse_version("0.6.4").unwrap();
+        assert!(
+            decide(
+                &current,
+                target,
+                "v0.6.4".to_string(),
+                "glibc",
+                "amd64",
+                "https://github.com",
+                None,
+                false,
+                false,
+                false,
+            )
+            .is_err()
+        );
     }
 }

@@ -150,13 +150,12 @@ impl StdFetcher {
         timeout: Duration,
     ) -> Result<ResponseHead, HttpError> {
         let mut stream = Self::connect(url, timeout)?;
-        let path = if url.path.is_empty() {
-            "/".to_string()
-        } else {
-            url.path.clone()
-        };
+        // The request target carries the query when
+        // present (Go sends `RawQuery`); the path alone
+        // used to drop it (technical F-d, fix loop 1).
+        let target = url.request_target();
         let mut req = format!(
-            "GET {path} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {user_agent}\r\nConnection: close\r\n",
+            "GET {target} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {user_agent}\r\nConnection: close\r\n",
             url.authority()
         );
         if accept_api {
@@ -206,8 +205,14 @@ impl StdFetcher {
                     let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
                     let _ = stream.set_nodelay(true);
                     if url.scheme == "https" {
-                        let name = rustls::pki_types::ServerName::try_from(host.clone())
-                            .map_err(|_| http_error_for(url, TransportErrorKind::Tls))?;
+                        // DNS names are case-insensitive;
+                        // the SNI name is lowercased (the
+                        // stored host keeps its case for
+                        // the Go-exact redirect policy).
+                        let name = rustls::pki_types::ServerName::try_from(
+                            host.to_ascii_lowercase(),
+                        )
+                        .map_err(|_| http_error_for(url, TransportErrorKind::Tls))?;
                         let conn = rustls::ClientConnection::new(tls_client_config(), name)
                             .map_err(|_| http_error_for(url, TransportErrorKind::Tls))?;
                         let mut tls = rustls::StreamOwned::new(conn, stream);
@@ -295,10 +300,24 @@ fn http_error_status(
 /// counterpart: Go's `http.Client` resolves redirects
 /// internally (`net/http`); this is the Rust-side equivalent
 /// for the shapes a GitHub redirect can take.
+/// A `//host/path` Location is protocol-relative (Go's
+/// `ResolveReference` yields `scheme://host/path`) — it
+/// used to be read as an absolute path on the origin host
+/// (red-team note, fix loop 1). A `?query` Location keeps
+/// the current path and replaces the query, per RFC 3986.
+/// The fragment never reaches the wire.
 fn resolve_redirect(current: &ParsedUrl, location: &str) -> Option<ParsedUrl> {
     let location = location.trim();
     if location.is_empty() {
         return None;
+    }
+    let location = location.split('#').next().unwrap_or("");
+    if location.is_empty() {
+        return None;
+    }
+    if let Some(rest) = location.strip_prefix("//") {
+        let _ = rest;
+        return parse_url(&format!("{}:{location}", current.scheme));
     }
     if let Some(abs) = parse_url(location)
         && !abs.scheme.is_empty()
@@ -310,6 +329,10 @@ fn resolve_redirect(current: &ParsedUrl, location: &str) -> Option<ParsedUrl> {
         let _ = path;
         return parse_url(&format!("{base}{location}"));
     }
+    if let Some(query) = location.strip_prefix('?') {
+        let _ = query;
+        return parse_url(&format!("{base}{}{location}", current.path));
+    }
     // Relative: merge with the current directory.
     let dir = match current.path.rfind('/') {
         Some(i) => &current.path[..i + 1],
@@ -320,15 +343,31 @@ fn resolve_redirect(current: &ParsedUrl, location: &str) -> Option<ParsedUrl> {
 
 /// Read one HTTP response (status line + headers) from the
 /// stream. Returns `(status, content_length, chunked, location)`.
+/// The read is bounded by `RESPONSE_HEADER_TIMEOUT` (30s,
+/// Go's `ResponseHeaderTimeout`, `update.go:393`): the
+/// per-read socket timeout alone lets a trickle server
+/// stall past the bound (safety F2, fix loop 1).
 fn read_response_head(
     stream: &mut dyn ReadWrite,
     url: &ParsedUrl,
 ) -> Result<(u16, Option<u64>, bool, Option<String>), HttpError> {
+    read_response_head_deadline(stream, url, RESPONSE_HEADER_TIMEOUT)
+}
+
+fn read_response_head_deadline(
+    stream: &mut dyn ReadWrite,
+    url: &ParsedUrl,
+    header_timeout: std::time::Duration,
+) -> Result<(u16, Option<u64>, bool, Option<String>), HttpError> {
+    let head_start = std::time::Instant::now();
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     loop {
         if head.len() > 65536 {
             return Err(http_error_for(url, TransportErrorKind::Transport));
+        }
+        if head_start.elapsed() > header_timeout {
+            return Err(http_error_for(url, TransportErrorKind::Timeout));
         }
         match stream.read(&mut byte) {
             Ok(0) => {
@@ -369,7 +408,19 @@ fn read_response_head(
             let value = value.trim();
             match name.as_str() {
                 "content-length" => {
-                    content_length = value.parse().ok();
+                    // Go refuses a duplicate or invalid
+                    // Content-Length; the old code took
+                    // the last value and ignored parse
+                    // failures (red-team note, fix loop 1).
+                    let len: u64 = value.parse().map_err(|_| {
+                        http_error_for(url, TransportErrorKind::Transport)
+                    })?;
+                    if let Some(prev) = content_length
+                        && prev != len
+                    {
+                        return Err(http_error_for(url, TransportErrorKind::Transport));
+                    }
+                    content_length = Some(len);
                 }
                 "transfer-encoding" => {
                     if value.to_ascii_lowercase().contains("chunked") {
@@ -408,6 +459,17 @@ impl Read for BodyReader {
                 }
                 let want = (*remaining).min(buf.len() as u64) as usize;
                 let n = self.inner.read(&mut buf[..want])?;
+                if n == 0 {
+                    // EOF before the declared length: Go's
+                    // `io.ReadAll` reports unexpected EOF;
+                    // the old code returned `Ok(0)` and the
+                    // caller accepted a short body silently
+                    // (safety F7 / technical F-e, fix loop 1).
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "unexpected EOF",
+                    ));
+                }
                 *remaining -= n as u64;
                 Ok(n)
             }
@@ -429,6 +491,12 @@ impl Read for BodyReader {
                 }
                 let want = (*remaining).min(buf.len() as u64) as usize;
                 let n = self.inner.read(&mut buf[..want])?;
+                if n == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "unexpected EOF",
+                    ));
+                }
                 *remaining -= n as u64;
                 if *remaining == 0 {
                     // Consume the trailing CRLF.
@@ -546,8 +614,12 @@ impl Fetcher for StdFetcher {
             class: "request",
             body_len: 0,
         })?;
+        // Go's `fallbackTag` probe sets ONLY `User-Agent`
+        // (`update.go:878`); the old code sent the API
+        // `Accept` header here too (technical F-f nit,
+        // fix loop 1).
         let (status, _len, _chunked, location, _body) =
-            Self::request_once(&parsed, user_agent, true, timeout)?;
+            Self::request_once(&parsed, user_agent, false, timeout)?;
         Ok((status, location))
     }
 }
@@ -569,6 +641,7 @@ pub fn fetch_bytes(
         host: String::new(),
         port: String::new(),
         path: String::new(),
+        query: String::new(),
         raw: url.to_string(),
     });
     let mut resp = fetcher.get(url, user_agent, true, timeout)?;
@@ -596,7 +669,24 @@ pub fn fetch_bytes(
     }
     let mut body = Vec::new();
     let mut chunk = [0u8; 8192];
+    // Total deadline (safety F2, fix loop 1): Go's
+    // per-request context (60s metadata / 10m asset)
+    // bounds the WHOLE fetch; the per-read socket
+    // timeout alone lets a trickle server (1 byte per
+    // 59s) run past it. The 30s response-header bound
+    // is enforced separately in `read_response_head`.
+    let started = std::time::Instant::now();
     loop {
+        if started.elapsed() > timeout {
+            return Err(HttpError {
+                op: "GET",
+                host: parsed.host.clone(),
+                path: parsed.path.clone(),
+                status: resp.status,
+                class: "timeout",
+                body_len: body.len() as i64,
+            });
+        }
         match resp.body.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
@@ -683,7 +773,14 @@ pub fn download_asset<W: std::io::Write>(
     let mut hash = Sha256::new();
     let mut total: u64 = 0;
     let mut chunk = [0u8; 8192];
+    // Total deadline, like `fetch_bytes` above (safety
+    // F2, fix loop 1): Go's 10m asset context bounds the
+    // whole download, not each read.
+    let started = std::time::Instant::now();
     loop {
+        if started.elapsed() > ASSET_TIMEOUT {
+            return Err(UpdateError::failure("update: download failed"));
+        }
         match resp.body.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
@@ -715,4 +812,151 @@ pub fn download_asset<W: std::io::Write>(
         ));
     }
     Ok(hash.finalize().into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// In-memory `ReadWrite` for head/body-reader tests.
+    struct MemStream {
+        read: Cursor<Vec<u8>>,
+        written: Vec<u8>,
+    }
+
+    impl MemStream {
+        fn new(bytes: &[u8]) -> MemStream {
+            MemStream {
+                read: Cursor::new(bytes.to_vec()),
+                written: Vec::new(),
+            }
+        }
+    }
+
+    impl Read for MemStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.read.read(buf)
+        }
+    }
+
+    impl Write for MemStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl ReadWrite for MemStream {}
+
+    fn test_url() -> ParsedUrl {
+        parse_url("https://api.github.com/a/b").unwrap()
+    }
+
+    /// Red-team note (fix loop 1): `//host/path` is
+    /// protocol-relative (Go `ResolveReference`), `?q`
+    /// keeps the path and replaces the query, and the
+    /// fragment never reaches the wire.
+    #[test]
+    fn resolve_redirect_shapes() {
+        let current = test_url();
+        // Protocol-relative: new host, same scheme.
+        let next = resolve_redirect(&current, "//evil.com/x").unwrap();
+        assert_eq!(next.scheme, "https");
+        assert_eq!(next.host, "evil.com");
+        assert_eq!(next.path, "/x");
+        // Absolute path on the origin host.
+        let next = resolve_redirect(&current, "/abs/path").unwrap();
+        assert_eq!(next.host, "api.github.com");
+        assert_eq!(next.path, "/abs/path");
+        // Relative path merges with the directory.
+        let next = resolve_redirect(&current, "rel").unwrap();
+        assert_eq!(next.path, "/a/rel");
+        // Relative path with query.
+        let next = resolve_redirect(&current, "rel?q=1").unwrap();
+        assert_eq!(next.path, "/a/rel");
+        assert_eq!(next.query, "q=1");
+        // Query-only: keeps the path, replaces the query.
+        let next = resolve_redirect(&current, "?q=2").unwrap();
+        assert_eq!(next.path, "/a/b");
+        assert_eq!(next.query, "q=2");
+        // Fragment is stripped.
+        let next = resolve_redirect(&current, "/x#frag").unwrap();
+        assert_eq!(next.path, "/x");
+        assert_eq!(next.query, "");
+        assert!(resolve_redirect(&current, "").is_none());
+    }
+
+    /// Red-team note (fix loop 1): Go refuses a
+    /// duplicate or invalid `Content-Length`; identical
+    /// duplicates are accepted.
+    #[test]
+    fn response_head_content_length_strict() {
+        let url = test_url();
+        let head = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nContent-Length: 10\r\n\r\n";
+        let mut s = MemStream::new(head);
+        let (status, len, _, _) = read_response_head(&mut s, &url).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(len, Some(10));
+        let head = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nContent-Length: 20\r\n\r\n";
+        let mut s = MemStream::new(head);
+        assert!(read_response_head(&mut s, &url).is_err());
+        let head = b"HTTP/1.1 200 OK\r\nContent-Length: abc\r\n\r\n";
+        let mut s = MemStream::new(head);
+        assert!(read_response_head(&mut s, &url).is_err());
+    }
+
+    /// Safety F7 / technical F-e (fix loop 1): EOF
+    /// before the declared `Content-Length` (or
+    /// mid-chunk) is an unexpected-EOF error, not a
+    /// silent short body.
+    #[test]
+    fn body_reader_short_body_errors() {
+        let mut reader = BodyReader {
+            inner: Box::new(MemStream::new(b"0123456789")),
+            state: BodyState::Length(100),
+        };
+        let mut buf = [0u8; 64];
+        assert_eq!(reader.read(&mut buf).unwrap(), 10);
+        let err = reader.read(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+        // Chunked: EOF in the middle of a chunk.
+        let mut reader = BodyReader {
+            inner: Box::new(MemStream::new(b"01234")),
+            state: BodyState::Chunked {
+                remaining: 0,
+                done: false,
+            },
+        };
+        // First read consumes the chunk-size line "01234"
+        // as a hex size (0x01234 = 4660) then hits EOF.
+        let err = reader.read(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    /// Safety F2 (fix loop 1): the 30s response-header
+    /// bound is a TOTAL deadline, not a per-read one —
+    /// pinned here with a scaled-down deadline against
+    /// a server that sends nothing.
+    #[test]
+    fn response_head_deadline_times_out_on_stalled_server() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                std::thread::sleep(Duration::from_secs(2));
+                let _ = stream.write_all(b"");
+            }
+        });
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let url = parse_url("http://127.0.0.1/x").unwrap();
+        let err = read_response_head_deadline(&mut stream, &url, Duration::from_millis(200))
+            .unwrap_err();
+        assert_eq!(err.class, "timeout");
+    }
 }
