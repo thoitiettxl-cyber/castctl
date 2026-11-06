@@ -2291,6 +2291,12 @@ mod tests {
         // open <path>: no such file or directory` —
         // message_length 76 + 2*len(path) (Go: 182 for a
         // 53-char path); the old text measured 135.
+        // NOTE: `default_profile` must be set — without
+        // it Go errors (`profile "default" does not exist`)
+        // while Rust synthesizes a "default" profile whose
+        // cookies file is <cfgdir>/cookies.txt (a
+        // pre-existing load_profile divergence, out of
+        // this fix loop's scope; see PORTING §M7b.9).
         let cfg_dir = temp_home("dl-missing-cookies");
         let outside = temp_home("dl-cookies-outside");
         let cookies = outside.join("nope.txt");
@@ -2298,7 +2304,7 @@ mod tests {
         std::fs::write(
             cfg_dir.join("config.json"),
             format!(
-                "{{\"profiles\":{{\"no1\":{{\"outbound\":\"direct\",\"cookies_file\":{}}}}}}}",
+                "{{\"default_profile\":\"no1\",\"profiles\":{{\"no1\":{{\"outbound\":\"direct\",\"cookies_file\":{}}}}}}}",
                 serde_json::to_string(cookies_s).unwrap()
             ),
         )
@@ -2317,12 +2323,19 @@ mod tests {
             map,
         );
         assert_eq!(out.code, 2, "stdout: {} stderr: {}", out.stdout, out.stderr);
-        let want_len = 76 + 2 * cookies_s.len();
+        // Expected length from Go's verified message shape
+        // (not hand arithmetic): the full connector text
+        // with this test's path.
+        let expect_msg = format!(
+            "no cookies at {cookies_s}: gateway: read cookies file: open {cookies_s}: no such file or directory"
+        );
+        let want_len = expect_msg.len();
         assert!(
             out.stderr.contains(&format!(
                 "\"error\":\"conn: auth_failed message_length={want_len}\""
             )),
-            "stderr: {}",
+            "want_len={want_len} path_len={} stderr: {}",
+            cookies_s.len(),
             out.stderr
         );
         assert!(
