@@ -1390,10 +1390,7 @@ fn latest_404_and_malformed_json_paths() {
         let err = err.expect_err("malformed JSON must refuse");
         assert_eq!(err.code(), 1);
         // Exact Go message (`update.go:807`).
-        assert_eq!(
-            err.to_string(),
-            "update: release information is malformed"
-        );
+        assert_eq!(err.to_string(), "update: release information is malformed");
     }
 }
 

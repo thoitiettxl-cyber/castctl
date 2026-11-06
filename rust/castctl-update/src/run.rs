@@ -694,7 +694,7 @@ impl Updater {
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(target_mode);
-            if let Err(_) = std::fs::set_permissions(&extracted_tmp_path, perms) {
+            if std::fs::set_permissions(&extracted_tmp_path, perms).is_err() {
                 let _ = std::fs::remove_file(&extracted_tmp_path);
                 // Go uses a FIXED message here; the OS
                 // error is the cause (via `Unwrap`), never
@@ -761,7 +761,7 @@ impl Updater {
             .deps
             .rename_fn
             .unwrap_or(|a, b| std::fs::rename(a, b));
-        if let Err(_) = rename(&extracted_tmp_path, target) {
+        if rename(&extracted_tmp_path, target).is_err() {
             let _ = std::fs::remove_file(&extracted_tmp_path);
             // Go uses a FIXED message here; the OS error is
             // the cause (via `Unwrap`), never rendered
