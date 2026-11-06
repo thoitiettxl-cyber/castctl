@@ -680,6 +680,53 @@ parity is claimed from this run.
 - Disk: `df -h /` checked before each build; `/tmp/m7e-target` deleted
   after the final gate (see below).
 
+### Rebase onto `dev-rust` `57fc7be` (PR #84 version stamp) — 2026-11-06/07
+
+- Rebase clean, no conflicts: branch `feat/rust-m7e-binary-e2e` commit
+  `709262c` (writer's work, unchanged) on `57fc7be`, plus one
+  reconciliation commit `fb84734` (below). No forbidden file touched;
+  `git diff --stat origin/dev-rust`: 7 files, all allowed
+  (`docs/e2e.md` + 6 under `rust/**`). PR #85 NOT merged, its keeper
+  commit NOT imported.
+- PR #84 changed Rust `--version` to render the git build stamp like Go
+  (`rust/castctl-cli/src/run.rs` only). The new-head release binary
+  reports `castctl 0.9.0 (fb84734 2026-11-06T21:46:27Z)` (sha256
+  `86f5bc3b2a62d38ddd920a66eb54baaf7a4cd76cc7bfbf98b31db0689ad24f50`,
+  37,034,536 B) vs Go `castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)` —
+  same shape, so the CLI `--version` divergence recorded at `9afa04c`
+  is CLOSED. The `/status` `version` field is NOT stamped by #84
+  (`Server::new` still gets `version: VERSION.to_string()`, the bare
+  const), so the row-2 raw diff is unchanged.
+- Focused row-2 re-run at the new head (Go 18337 / Rust 18338, fresh
+  config copies, same method): Go `version:
+  "0.9.0 (1396697 2026-11-04T21:38:36Z)"`, `go_version: "go1.27.3"`,
+  `singbox_version: "v1.14.4"`; Rust `version: "0.9.0"`,
+  `go_version: "unknown"`, `singbox_version: "unknown"`; both 200,
+  raw bodies still differ, normalised comparison still MATCH (version
+  stamp stripped, go/singbox presence+type, listen port). Both servers
+  exit 130 on SIGINT, ports closed, live config/cookies unchanged.
+  Row 2's verdict stands; no other matrix row is affected (the stamp
+  touches only the CLI `--version` line and the already-stripped
+  `/status` `version` field), so the full 21-row matrix was NOT re-run.
+- Reconciliation commit `fb84734` (test-only,
+  `rust/castctl-rs/tests/parity.rs`): plain `57fc7be` fails
+  `golden_parity` — `--version stdout (unstripped)`: left
+  `"castctl 0.9.0 (709262c 2026-11-06T21:32:00Z)\n"` vs right
+  `"castctl 0.9.0\n"` (`parity.rs:599`). The F9(c) unstripped
+  exact-match predates the stamp; fixed per the standing D-M2-7 rule by
+  stripping the optional stamp with the existing `strip_version_stamp`
+  helper (exit code 0 and empty stderr still asserted exactly). Same
+  approach as PR #85's test-only `d33920c`, re-applied here in M7e scope
+  rather than importing that commit. Round-1 gates at `709262c`: fmt 0,
+  build 0, test 101 (1595 passed, 1 failed — only `golden_parity`),
+  clippy 0, release 0.
+- Gates re-run at `fb84734` (cue, same toolchain/target dir): fmt 0,
+  build 0, `cargo test --workspace --no-fail-fast` 0 — **1596 passed, 0
+  failed** (1595 at `9afa04c` + 1 from PR #84's `version_string` test),
+  clippy 0, release 0. No `castctl-update` flake recurred in either
+  full run. `/tmp/m7e-target` deleted after the final gate; `df -h /`
+  verified after.
+
 ### Cleanup on cue
 
 - Test webui servers (Go 18317 / Rust 18318, rate-limit 18327/18328) killed;
