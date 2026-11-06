@@ -1607,13 +1607,17 @@ async fn save_resources(
     directory: &str,
     overwrite: bool,
 ) -> Result<Vec<SaveRow>, FlowErr> {
-    if let Err(e) = std::fs::create_dir_all(directory) {
+    // Go `SaveResources` (`resources.go:232`) creates the
+    // output dir with `os.MkdirAll`: the Rust port is
+    // `mkdir_all` (Stat fast path → recurse parent →
+    // Mkdir → Lstat check), which reports the FAILING
+    // COMPONENT — not `create_dir_all`, whose EEXIST
+    // mapping was overbroad and reported the full path
+    // (red-team round-3 R3-B2, E10–E13).
+    if let Err(text) = castctl_config::oserr::mkdir_all(directory) {
         return Err(msg(
             1,
-            format!(
-                "save resources: create directory: {}",
-                castctl_config::oserr::mkdir_error_text(directory, &e)
-            ),
+            format!("save resources: create directory: {text}"),
         ));
     }
     let mut rows: Vec<SaveRow> = Vec::new();

@@ -107,15 +107,16 @@ fn update_single_profile_field(
             go_quote(name)
         ));
     }
-    // lockConfigDir (guard.go:226): mkdir the base dir,
-    // open the lock file (0600), flock exclusive. The
-    // mkdir/open arms return their errors RAW in Go (exit
-    // 1, `mkdir`/`open <path>: ...`); only the flock arm
-    // is wrapped (`newConfigErrorf("lock config: %v")` —
-    // exit 2, `profile: lock config: ...`). The Rust
-    // code mirrors that split (R2-B2 audit).
-    std::fs::create_dir_all(base_dir)
-        .map_err(|e| raw_io_error(crate::oserr::mkdir_error_text(base_dir, &e)))?;
+    // lockConfigDir (guard.go:226): mkdir the base dir
+    // (Go `os.MkdirAll`, ported as `oserr::mkdir_all` —
+    // same failing-component rule as the download mkdir
+    // arm, R3-B2), open the lock file (0600), flock
+    // exclusive. The mkdir/open arms return their errors
+    // RAW in Go (exit 1, `mkdir`/`open <path>: ...`); only
+    // the flock arm is wrapped (`newConfigErrorf("lock
+    // config: %v")` — exit 2, `profile: lock config:
+    // ...`). The Rust code mirrors that split (R2-B2 audit).
+    crate::oserr::mkdir_all(base_dir).map_err(raw_io_error)?;
     let lock_path = go_join(&[base_dir, "config.json.lock"]);
     let lock_file = std::fs::OpenOptions::new()
         .create(true)

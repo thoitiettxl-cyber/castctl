@@ -91,16 +91,67 @@ pub fn rename_error_text(old: &str, new: &str, e: &std::io::Error) -> String {
     format!("rename {old} {new}: {}", os_message(e))
 }
 
-/// Go `MkdirAll`-style error text: `mkdir <path>: <strerror>`.
-/// Rust's `create_dir_all` reports EEXIST when a path component
-/// is a regular file, while Go's `MkdirAll` reports ENOTDIR
-/// (`mkdir <path>: not a directory` — red-team probe E1).
-pub fn mkdir_error_text(path: &str, e: &std::io::Error) -> String {
-    if e.raw_os_error() == Some(17) {
-        format!("mkdir {path}: {}", strerror(20))
-    } else {
-        format!("mkdir {path}: {}", os_message(e))
+/// Go `os.MkdirAll` (`os/path.go:19`), ported exactly:
+/// Stat fast path (succeeds + dir → Ok; succeeds + not a
+/// dir → `mkdir <path>: not a directory`), else recurse
+/// into the parent and `Mkdir` the path, with an `Lstat`
+/// re-check on failure (a directory appearing meanwhile →
+/// Ok). The error text is the Go `*PathError` shape
+/// `mkdir <component>: <strerror>` where `<component>` is
+/// the FAILING component, not the full path: a dangling
+/// symlink or a symlink loop yields `file exists` (EEXIST)
+/// on the loop/dangling component, because `Mkdir` on an
+/// existing symlink returns EEXIST — red-team round-3 R3-B2
+/// (E10/E11/E12/E13). Returns `Ok(())` when the directory
+/// exists or was created, `Err(text)` otherwise.
+pub fn mkdir_all(path: &str) -> Result<(), String> {
+    match std::fs::metadata(path) {
+        Ok(m) => {
+            if m.is_dir() {
+                return Ok(());
+            }
+            return Err(format!("mkdir {path}: {}", strerror(20)));
+        }
+        Err(_) => {}
     }
+    let parent = mkdir_all_parent(path);
+    if !parent.is_empty() {
+        mkdir_all(parent)?;
+    }
+    match std::fs::create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Go double-checks that the directory doesn't
+            // exist (handles "foo/." and races): an Lstat
+            // success + dir swallows the Mkdir error.
+            if let Ok(m) = std::fs::symlink_metadata(path)
+                && m.is_dir()
+            {
+                return Ok(());
+            }
+            Err(format!("mkdir {path}: {}", os_message(&e)))
+        }
+    }
+}
+
+/// Go `MkdirAll`'s parent extraction (`os/path.go:36-44`):
+/// strip trailing separators, then cut at the last
+/// separator; no separator → "" (the slow path then skips
+/// the recursion, as Go's `len(parent) > len(VolumeName)`
+/// check does on Unix).
+fn mkdir_all_parent(path: &str) -> &str {
+    let bytes = path.as_bytes();
+    let mut i = bytes.len() as isize - 1;
+    while i >= 0 && bytes[i as usize] == b'/' {
+        i -= 1;
+    }
+    while i >= 0 && bytes[i as usize] != b'/' {
+        i -= 1;
+    }
+    if i < 0 {
+        i = 0;
+    }
+    &path[..i as usize]
 }
 
 #[cfg(test)]
@@ -175,8 +226,11 @@ mod tests {
     fn mkdir_write_sync_error_text_shapes() {
         // Go `*PathError` shapes for the toggle writer
         // (red-team round-2 R2-B2): open/write/sync/rename
-        // carry the op + path; mkdir maps EEXIST-on-a-file
-        // to ENOTDIR, as Go's `MkdirAll` does (probe E1).
+        // carry the op + path. (The mkdir shapes moved to
+        // `mkdir_all_matches_go_mkdir_all`: `mkdir_error_text`
+        // was deleted in fix loop 3 — it mapped ALL EEXIST
+        // to ENOTDIR, which is wrong for dangling symlinks
+        // and loops, R3-B2.)
         let e = std::io::Error::from_raw_os_error(1); // EPERM
         assert_eq!(
             open_error_text("/tmp/x.tmp", &e),
@@ -194,14 +248,67 @@ mod tests {
             rename_error_text("/tmp/x.tmp", "/tmp/cfg", &e),
             "rename /tmp/x.tmp /tmp/cfg: operation not permitted"
         );
-        let eexist = std::io::Error::from_raw_os_error(17); // EEXIST
+    }
+
+    #[test]
+    fn mkdir_all_matches_go_mkdir_all() {
+        // R3-B2 regression: Go `os.MkdirAll` (`os/path.go:19`)
+        // returns ENOTDIR only when `Stat(path)` succeeds and
+        // the path is not a directory; in every other EEXIST
+        // case it returns EEXIST, and it reports the FAILING
+        // COMPONENT, not the full path. Expected strings are
+        // the verbatim outputs of the standalone Go probe on
+        // cue (`/tmp/m7b-r3redteam-mkdir.go`, same ext4 fs).
+        // Order matters: the dangling/loop shapes must be
+        // checked BEFORE the missing dir is created (the
+        // dangling symlink points at it).
+        let base = std::env::temp_dir()
+            .join(format!("castctl-oserr-mkdirall-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let b = |p: &str| base.join(p);
+        std::fs::write(b("afile"), b"x").unwrap();
+        std::os::unix::fs::symlink(b("afile"), b("linkfile")).unwrap();
+        std::fs::create_dir_all(b("realdir")).unwrap();
+        std::os::unix::fs::symlink(b("realdir"), b("linkdir")).unwrap();
+        std::os::unix::fs::symlink(b("missing"), b("dangling")).unwrap();
+        std::os::unix::fs::symlink(b("loop"), b("loop")).unwrap();
+        let s = |p: &std::path::Path| p.to_str().unwrap().to_string();
+        let base_s = s(&base);
+        // File, symlink-to-file: ENOTDIR on the path itself.
         assert_eq!(
-            mkdir_error_text("/tmp/notadir", &eexist),
-            "mkdir /tmp/notadir: not a directory"
+            mkdir_all(&s(&b("afile"))),
+            Err(format!("mkdir {base_s}/afile: not a directory"))
         );
         assert_eq!(
-            mkdir_error_text("/tmp/notadir", &e),
-            "mkdir /tmp/notadir: operation not permitted"
+            mkdir_all(&s(&b("linkfile"))),
+            Err(format!("mkdir {base_s}/linkfile: not a directory"))
         );
+        // Symlink-to-dir: success, nothing created.
+        assert_eq!(mkdir_all(&s(&b("linkdir"))), Ok(()));
+        // Dangling symlink, loop: EEXIST on the path itself.
+        assert_eq!(
+            mkdir_all(&s(&b("dangling"))),
+            Err(format!("mkdir {base_s}/dangling: file exists"))
+        );
+        assert_eq!(
+            mkdir_all(&s(&b("loop"))),
+            Err(format!("mkdir {base_s}/loop: file exists"))
+        );
+        // Under a loop: EEXIST on the LOOP component.
+        assert_eq!(
+            mkdir_all(&s(&b("loop/sub"))),
+            Err(format!("mkdir {base_s}/loop: file exists"))
+        );
+        // Under a file: ENOTDIR on the FILE component.
+        assert_eq!(
+            mkdir_all(&s(&b("afile/sub"))),
+            Err(format!("mkdir {base_s}/afile: not a directory"))
+        );
+        // Missing: success, created (and under it too).
+        assert_eq!(mkdir_all(&s(&b("missing"))), Ok(()));
+        assert_eq!(mkdir_all(&s(&b("missing/sub"))), Ok(()));
+        assert!(b("missing/sub").is_dir());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
