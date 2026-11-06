@@ -33,7 +33,7 @@ impl Subscriber for Gateway {
         method: &'a str,
         opts: SubscribeOptions,
         handler: &'a mut dyn SubscribeHandler,
-    ) -> SubscribeRawFuture<'a'> {
+    ) -> SubscribeRawFuture<'a> {
         // Inherent `Gateway::subscribe_raw` takes
         // precedence over this trait method in
         // resolution; there is no recursion here.
@@ -54,7 +54,7 @@ impl Subscriber for SharedConn {
         method: &'a str,
         opts: SubscribeOptions,
         handler: &'a mut dyn SubscribeHandler,
-    ) -> SubscribeRawFuture<'a'> {
+    ) -> SubscribeRawFuture<'a> {
         // Inherent `SharedConn::subscribe_raw` takes
         // precedence over this trait method in
         // resolution; there is no recursion here.

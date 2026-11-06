@@ -498,7 +498,7 @@ pub(crate) mod tests {
             &self,
             limit: usize,
             _cancel: &Cancel,
-        ) -> HistoryReadFuture<'_'>
+        ) -> HistoryReadFuture<'_>
         {
             self.calls.lock().unwrap().push(limit);
             let resp = {

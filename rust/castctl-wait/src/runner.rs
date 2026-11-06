@@ -98,7 +98,7 @@ pub trait Subscriber: Send + Sync {
         method: &'a str,
         opts: SubscribeOptions,
         handler: &'a mut dyn SubscribeHandler,
-    ) -> SubscribeRawFuture<'a'>;
+    ) -> SubscribeRawFuture<'a>;
 
     /// Close after use. The Runner ignores the result
     /// (Go: `_ = sub.Close()`), but the interface keeps
@@ -1589,7 +1589,7 @@ mod tests {
             &self,
             _limit: usize,
             _cancel: &Cancel,
-        ) -> HistoryReadFuture<'_'>
+        ) -> HistoryReadFuture<'_>
         {
             let mut resps = self.resps.lock().expect("lock");
             *self.calls.lock().expect("lock") += 1;
@@ -1686,7 +1686,7 @@ mod tests {
             _method: &'a str,
             opts: SubscribeOptions,
             handler: &'a mut dyn SubscribeHandler,
-        ) -> SubscribeRawFuture<'a'>
+        ) -> SubscribeRawFuture<'a>
         {
             let is_check = opts.max_records == 50;
             if is_check {
@@ -2305,7 +2305,7 @@ mod tests {
             &self,
             _limit: usize,
             _cancel: &Cancel,
-        ) -> HistoryReadFuture<'_'>
+        ) -> HistoryReadFuture<'_>
         {
             let mut calls = self.calls.lock().expect("lock");
             *calls += 1;
@@ -2339,7 +2339,7 @@ mod tests {
             &self,
             _limit: usize,
             _cancel: &Cancel,
-        ) -> HistoryReadFuture<'_'>
+        ) -> HistoryReadFuture<'_>
         {
             let mut calls = self.calls.lock().expect("lock");
             *calls += 1;
@@ -2366,7 +2366,7 @@ mod tests {
             &self,
             _limit: usize,
             _cancel: &Cancel,
-        ) -> HistoryReadFuture<'_'>
+        ) -> HistoryReadFuture<'_>
         {
             *self.calls.lock().expect("lock") += 1;
             Box::pin(std::future::pending())
@@ -2892,7 +2892,7 @@ mod tests {
             &self,
             _limit: usize,
             _cancel: &Cancel,
-        ) -> HistoryReadFuture<'_'>
+        ) -> HistoryReadFuture<'_>
         {
             let mut calls = self.calls.lock().expect("lock");
             *calls += 1;
