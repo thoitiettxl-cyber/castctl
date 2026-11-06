@@ -103,8 +103,15 @@ pub fn extract_castctl<R: Read, W: std::io::Write>(
         // PAX/GNU-longname overrides, while
         // `Header::path_bytes` returns the raw header bytes
         // (a PAX-renamed `castctl` would otherwise slip
-        // through with its old name). Type and size still
-        // come from the header itself.
+        // through with its old name). The TYPE still comes
+        // from the header itself (PAX does not override
+        // the typeflag) — but the SIZE is the PAX-aware
+        // `Entry::size()`, NOT the raw `Header::size()`:
+        // Go's `archive/tar` applies the PAX `size` to
+        // `hdr.Size`, and `Entry::read` is bounded by
+        // that PAX size, so counting the raw size refused
+        // every archive where the two disagree
+        // (red-team B7, fix loop 1).
         let name = entry.path_bytes();
         if name.as_ref() == b"castctl" {
             if found {
@@ -118,9 +125,7 @@ pub fn extract_castctl<R: Read, W: std::io::Write>(
                     "update: the castctl archive member is not a regular file",
                 ));
             }
-            let size = header.size().map_err(|_| {
-                UpdateError::failure("update: the castctl archive member size is out of bounds")
-            })?;
+            let size = entry.size();
             if size > MAX_EXTRACTED_BYTES {
                 return Err(UpdateError::failure(
                     "update: the castctl archive member size is out of bounds",
@@ -400,6 +405,76 @@ mod tests {
             extract(&gz).unwrap_err().to_string(),
             "update: the downloaded archive has no castctl member"
         );
+    }
+
+    /// Red-team B7 (fix loop 1): a PAX `size` override
+    /// wins over the raw header size — Go's
+    /// `archive/tar` applies PAX to `hdr.Size`, and the
+    /// old code counted `Header::size()` (raw) while
+    /// reading PAX-bounded bytes, so both directions
+    /// refused. Crafted tars per the red-team report
+    /// (verified against Go's `extractCastctl` verbatim
+    /// there: ACCEPT 50 / 100 / 50).
+    #[test]
+    fn extract_pax_size_override_accepted() {
+        // One PAX record: "<len> size=<n>\n", where
+        // <len> counts itself (digits + space + kv +
+        // newline).
+        fn pax_size_record(size: u64) -> Vec<u8> {
+            let kv = format!("size={size}");
+            let mut digits = 1;
+            let mut len = kv.len() + 2 + digits;
+            while len.to_string().len() != digits {
+                digits = len.to_string().len();
+                len = kv.len() + 2 + digits;
+            }
+            format!("{len} {kv}\n").into_bytes()
+        }
+        for (pax_size, raw_size, data_len, fill) in [
+            (50u64, 100u64, 50usize, b'A'),
+            (100, 50, 100, b'B'),
+            (50, 50, 50, b'C'),
+        ] {
+            let data = vec![fill; data_len];
+            let pax_data = pax_size_record(pax_size);
+            let mut tar_bytes = Vec::new();
+            tar_bytes.extend_from_slice(&raw_header(
+                "castctl",
+                b'x',
+                pax_data.len() as u64,
+                b"pax",
+            ));
+            tar_bytes.extend_from_slice(&pad512(&pax_data));
+            tar_bytes.extend_from_slice(&raw_header("castctl", b'0', raw_size, b""));
+            tar_bytes.extend_from_slice(&pad512(&data));
+            tar_bytes.extend_from_slice(&[0u8; 1024]); // end blocks
+            let (out, _) = extract(&gzip_bytes(&tar_bytes)).unwrap();
+            assert_eq!(out, data, "pax={pax_size} raw={raw_size}");
+        }
+    }
+
+    /// Technical gap `TestExtractMemberModeIgnored`
+    /// (fix loop 1): archive member modes are ignored
+    /// by construction — the installed mode comes from
+    /// the old binary, never from the header.
+    #[test]
+    fn extract_member_mode_ignored() {
+        for mode in [0o000, 0o777] {
+            let mut tar_bytes = Vec::new();
+            {
+                let mut b = Builder::new(&mut tar_bytes);
+                let mut h = Header::new_gnu();
+                h.set_path("castctl").unwrap();
+                h.set_size(FAKE_ELF.len() as u64);
+                h.set_entry_type(EntryType::Regular);
+                h.set_mode(mode);
+                h.set_cksum();
+                b.append(&h, FAKE_ELF).unwrap();
+                b.finish().unwrap();
+            }
+            let (out, _) = extract(&gzip_bytes(&tar_bytes)).unwrap();
+            assert_eq!(out, FAKE_ELF, "mode {mode:o}");
+        }
     }
 
     /// A V7 `'\x00'` typeflag is a regular file too

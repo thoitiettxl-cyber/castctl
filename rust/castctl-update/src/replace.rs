@@ -130,10 +130,22 @@ pub fn run_exec_check(path: &Path, want: &Version, timeout: Duration) -> Result<
     // Read up to cap+1 bytes in a thread so a flooding child
     // cannot block the wait; the deadline is enforced by
     // polling `try_wait` (Go uses `CommandContext` + a pipe
-    // read; the observable contract — timeout message,
-    // too-large message, exit-status check, output check,
-    // in that order — is preserved).
+    // read). The child handle is shared with the reader
+    // thread: the moment the reader observes more than
+    // `MAX_EXEC_OUTPUT_BYTES`, it kills the child at once
+    // (Go's `cancel()` on `len(out) > maxExecOutputBytes`,
+    // `replace.go:344-346`) and records `too_large`, so a
+    // flood+hang child returns `too large` promptly instead
+    // of waiting out the whole timeout and reporting
+    // `did not answer in time` (red-team B2, fix loop 1).
+    // A child detached by the candidate binary survives
+    // the timeout kill (Go `replace.go:322-323`): that
+    // residual is shared with Go, not fixed here.
+    let child = std::sync::Arc::new(std::sync::Mutex::new(child));
+    let too_large = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (tx, rx) = std::sync::mpsc::channel();
+    let reader_child = std::sync::Arc::clone(&child);
+    let reader_too_large = std::sync::Arc::clone(&too_large);
     std::thread::spawn(move || {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 8192];
@@ -144,6 +156,13 @@ pub fn run_exec_check(path: &Path, want: &Version, timeout: Duration) -> Result<
                 Ok(n) => {
                     buf.extend_from_slice(&chunk[..n]);
                     if buf.len() > MAX_EXEC_OUTPUT_BYTES {
+                        // Kill promptly, like Go's cancel():
+                        // do not wait for the child to exit
+                        // on its own (it may hang forever).
+                        reader_too_large.store(true, std::sync::atomic::Ordering::SeqCst);
+                        if let Ok(mut child) = reader_child.lock() {
+                            let _ = child.kill();
+                        }
                         break;
                     }
                 }
@@ -157,12 +176,18 @@ pub fn run_exec_check(path: &Path, want: &Version, timeout: Duration) -> Result<
     });
     let deadline = Instant::now() + timeout;
     let status = loop {
-        match child.try_wait() {
+        let waited = child
+            .lock()
+            .map(|mut c| c.try_wait())
+            .unwrap_or(Err(std::io::Error::other("lock poisoned")));
+        match waited {
             Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    if let Ok(mut c) = child.lock() {
+                        let _ = c.kill();
+                        let _ = c.wait();
+                    }
                     break None;
                 }
                 std::thread::sleep(Duration::from_millis(5));
@@ -173,6 +198,15 @@ pub fn run_exec_check(path: &Path, want: &Version, timeout: Duration) -> Result<
     // Drain the reader thread's output (it ends when the
     // pipe closes, i.e. after the child exits or is killed).
     let (out, read_failed) = rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
+    // Go's order (`replace.go:347-372`): a cap overflow
+    // cancels the context, so `ctx.Err()` is `Canceled`,
+    // not `DeadlineExceeded` — `too large` wins over the
+    // timeout message whenever the reader saw the flood.
+    if too_large.load(std::sync::atomic::Ordering::SeqCst) || out.len() > MAX_EXEC_OUTPUT_BYTES {
+        return Err(UpdateError::failure(
+            "update: the downloaded binary --version output is too large",
+        ));
+    }
     let Some(status) = status else {
         return Err(UpdateError::failure(
             "update: the downloaded binary did not answer --version in time",
@@ -181,11 +215,6 @@ pub fn run_exec_check(path: &Path, want: &Version, timeout: Duration) -> Result<
     if read_failed {
         return Err(UpdateError::failure(
             "update: cannot read the downloaded binary --version output",
-        ));
-    }
-    if out.len() > MAX_EXEC_OUTPUT_BYTES {
-        return Err(UpdateError::failure(
-            "update: the downloaded binary --version output is too large",
         ));
     }
     if !status.success() {
@@ -205,6 +234,17 @@ pub fn run_exec_check(path: &Path, want: &Version, timeout: Duration) -> Result<
 ///
 /// Note (coordinator decision, R1 Q4): `castctl v0.6.4` is
 /// ACCEPTED, because `ParseVersion` strips the `v`.
+///
+/// The checks run on BYTES, not on a `str`: Go converts
+/// with `string(out)` without validating UTF-8, so an
+/// invalid-UTF-8 byte in the shape-only parenthetical is
+/// ACCEPTED (Go's control-byte scan only refuses
+/// `< 0x20` except `\n`, and `0x7f`). Only the version
+/// part is converted to `str` — and there invalid UTF-8
+/// refuses, matching Go, because `ParseVersion` fails on
+/// it. Do NOT use `from_utf8_lossy` on the whole string:
+/// it changes the length at the 256-byte boundary (Go
+/// measures byte length).
 pub fn check_version_output(out: &[u8], want: &Version) -> Result<(), UpdateError> {
     let fail =
         || UpdateError::failure("update: the downloaded binary does not report the target version");
@@ -213,22 +253,26 @@ pub fn check_version_output(out: &[u8], want: &Version) -> Result<(), UpdateErro
             return Err(fail());
         }
     }
-    let s = std::str::from_utf8(out).map_err(|_| fail())?;
-    let s = s.strip_suffix('\n').unwrap_or(s);
-    if s.contains('\n') || s.is_empty() || s.len() > 256 {
+    // Strip one trailing '\n', then require a single
+    // line of at most 256 BYTES.
+    let s = out.strip_suffix(b"\n").unwrap_or(out);
+    if s.contains(&b'\n') || s.is_empty() || s.len() > 256 {
         return Err(fail());
     }
-    let Some(rest) = s.strip_prefix("castctl ") else {
+    let Some(rest) = s.strip_prefix(b"castctl ") else {
         return Err(fail());
     };
-    let mut ver_str = rest;
-    if let Some(i) = rest.find(' ') {
-        ver_str = &rest[..i];
+    let mut ver_bytes = rest;
+    if let Some(i) = rest.iter().position(|&b| b == b' ') {
+        ver_bytes = &rest[..i];
         let tail = &rest[i..];
-        if !tail.starts_with(" (") || !tail.ends_with(')') {
+        if !tail.starts_with(b" (") || !tail.ends_with(b")") {
             return Err(fail());
         }
     }
+    // Only the version part becomes a `str`: invalid
+    // UTF-8 here refuses, like Go's `ParseVersion`.
+    let ver_str = std::str::from_utf8(ver_bytes).map_err(|_| fail())?;
     let got = parse_version(ver_str).map_err(|_| fail())?;
     if compare_versions(&got, want) != 0 {
         return Err(fail());
@@ -320,6 +364,15 @@ mod tests {
             (b"castctl 0.6.4+build\n", true),
             // Q4 (coordinator decision): `v`-prefix accepts.
             (b"castctl v0.6.4\n", true),
+            // Red-team B1 (fix loop 1): Go accepts invalid
+            // UTF-8 in the shape-only parenthetical
+            // (`string(out)` never validates UTF-8) but
+            // refuses it in the version part (`ParseVersion`
+            // fails). Both probed against Go verbatim.
+            (b"castctl 0.6.4 (\xff)\n", true),
+            (b"castctl 0.6.4 (caf\xe9)\n", true),
+            (b"castctl 0.6.4\xff\n", false),
+            (b"castctl 0.6.4 (\xff", false),
         ];
         for (out, want_ok) in cases {
             let got = check_version_output(out, &want()).is_ok();
@@ -330,6 +383,19 @@ mod tests {
         long.extend(std::iter::repeat_n(b'x', 300));
         long.push(b'\n');
         assert!(check_version_output(&long, &want()).is_err());
+        // The 256-byte boundary is measured in BYTES,
+        // even with invalid UTF-8 in the parenthetical:
+        // exactly 256 accepts, 257 refuses on length
+        // alone (the extra byte stays inside the parens,
+        // so shape still passes).
+        let mut edge = b"castctl 0.6.4 (".to_vec();
+        edge.extend(std::iter::repeat_n(0xff, 256 - edge.len() - 1));
+        edge.push(b')');
+        assert_eq!(edge.len(), 256);
+        assert!(check_version_output(&edge, &want()).is_ok());
+        edge.insert(edge.len() - 1, 0xff);
+        assert_eq!(edge.len(), 257);
+        assert!(check_version_output(&edge, &want()).is_err());
         // Every failure carries the same fixed message.
         let err = check_version_output(b"hello\n", &want()).unwrap_err();
         assert_eq!(

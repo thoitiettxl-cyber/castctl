@@ -651,9 +651,20 @@ pub fn scan_strtab_versions(data: &[u8]) -> Result<(GlibcVersion, bool), PluginH
             }
         }
         if malformed {
+            // Go slices bytes (`display[:64]`); Rust
+            // `String::truncate` PANICS when 64 is not a
+            // char boundary (hostile strtab, exit 101).
+            // Truncate at the largest char boundary ≤ 64
+            // instead — the displayed prefix is the same
+            // for ASCII and a strict prefix for multi-byte
+            // suffixes, and it never panics.
             let mut display = suffix.clone();
             if display.len() > 64 {
-                display.truncate(64);
+                let mut n = 64;
+                while !display.is_char_boundary(n) {
+                    n -= 1;
+                }
+                display.truncate(n);
             }
             return Err(PluginHostError::failed(format!(
                 "unparseable glibc version string {display:?} in version string table: refusing to load"
@@ -1229,6 +1240,30 @@ mod tests {
             parse_version_needs(&control, &strtab, false).unwrap(),
             "2.99"
         );
+    }
+
+    /// Red-team B3 (fix loop 1): the report's trigger —
+    /// strtab `GLIBC_2.3` + 40× `é` + NUL. The suffix
+    /// starts with a digit but contains non-digits, so
+    /// it is malformed and takes the display branch;
+    /// byte 64 falls inside an `é` pair, which made
+    /// `String::truncate(64)` PANIC (exit 101) before
+    /// the fix. Now it refuses with the unparseable
+    /// message, like Go's byte slice `display[:64]`.
+    #[test]
+    fn scan_strtab_versions_multibyte_display_no_panic() {
+        let mut data = b"GLIBC_2.3".to_vec();
+        data.extend("é".repeat(40).as_bytes());
+        data.push(0);
+        let err = scan_strtab_versions(&data).unwrap_err();
+        assert!(
+            err.to_string().contains("unparseable glibc version string"),
+            "unexpected error: {err}"
+        );
+        // The display is truncated at a char boundary
+        // (≤ 64 bytes, valid UTF-8, no replacement char
+        // from a split pair).
+        assert!(!err.to_string().contains('\u{FFFD}'));
     }
 
     /// Port of `TestParseVersionNeedsStrtabBoundRedTeam`
