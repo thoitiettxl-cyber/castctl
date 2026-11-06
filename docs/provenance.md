@@ -1774,6 +1774,28 @@ artifact's license:
   section + the root `NOTICE` honk entry close for the
   Rust/honk part (the M2 note in `rust/PORTING.md` §M2.5
   is history and is not rewritten).
+- M7a (2026-11-06, branch `feat/rust-m7a-services`,
+  base `dev-rust 1602b12`): closes two of the
+  deferrals above — streaming subscriptions
+  (`chat.subscribe`, Go `internal/gateway/calls.go`
+  `SubscribeRaw` + `internal/conn/shared.go`
+  `SubscribeRaw`) and the per-profile DNS router
+  (scoped: API + bootstrap + lifecycle over a TCP
+  transport; the sing-box router sits behind a stub
+  trait, and TLS/HTTPS/local/hosts/fakeip fail closed
+  at construction) — and ports
+  `internal/wait/runner.go`, `history.go`, `clock.go`
+  (the wait state machine itself was ported by M5b
+  into `rust/castctl-telegram/src/wait.rs`),
+  `internal/fsclient` (12 methods),
+  `internal/approvals` (`AutoApprover` +
+  `DescribedApproval`), `internal/deliver` (offline
+  library commands only), and the unported remainder
+  of `internal/logging`. No new upstream is
+  introduced, so no NOTICE entry is added. Deviations
+  (incl. the 23 dns tests that need the outbound
+  manager, and `send --wait` not wired) and the gate
+  numbers are recorded in `rust/PORTING.md` §M7a.
 
 Boss decision, quoted verbatim (applies to §13 and
 `rust/NOTICE`): artifact Rust là GPL-3.0-only vì link honk;

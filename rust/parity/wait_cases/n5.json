@@ -1,0 +1,49 @@
+{
+ "args": [
+  "--after-seq",
+  "10",
+  "--timeout",
+  "30",
+  "--json",
+  "--require-running"
+ ],
+ "name": "n5-require-running-noop",
+ "script": {
+  "history_stages": [
+   {
+    "events": [
+     {
+      "event_name": "message.user",
+      "payload": {
+       "display_text": "hi"
+      },
+      "seq": 10
+     },
+     {
+      "event_name": "message.assistant",
+      "payload": {
+       "display_text": "hello",
+       "status": "completed"
+      },
+      "seq": 11
+     }
+    ],
+    "from_call": 1,
+    "has_more": false
+   }
+  ],
+  "subscribes": [
+   {
+    "delay_ms": 0,
+    "drop": false,
+    "end_body": true,
+    "frames": [
+     "{\"event\":\"task.status\",\"seq\":11,\"payload\":{\"status\":\"running\",\"root_agent_id\":\"R\",\"agent_id\":\"R\"}}",
+     "{\"event_name\":\"message.assistant\",\"seq\":11,\"payload\":{\"status\":\"completed\",\"display_text\":\"hello\"}}",
+     "{\"event\":\"task.status\",\"seq\":12,\"payload\":{\"status\":\"completed\",\"root_agent_id\":\"R\",\"agent_id\":\"R\"}}"
+    ]
+   }
+  ],
+  "thread": ""
+ }
+}
