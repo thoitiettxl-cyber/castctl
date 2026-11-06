@@ -8,7 +8,7 @@
 //! The other 23 Go DNS test fns (integration, gate2,
 //! isolation, per-profile) need a Rust outbound manager
 //! + router first; they are recorded as unported in the
-//! writer report, not here.
+//!   writer report, not here.
 //!
 //! The fake server mirrors Go's: it answers the
 //! fake-only hostnames `gateway.test` and `proxy.test`
