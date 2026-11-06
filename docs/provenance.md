@@ -1775,7 +1775,8 @@ artifact's license:
   Rust/honk part (the M2 note in `rust/PORTING.md` §M2.5
   is history and is not rewritten).
 - M7a (2026-11-06, branch `feat/rust-m7a-services`,
-  base `dev-rust 1602b12`): closes two of the
+  base `dev-rust 6a399f7` — rebased from `1602b12`
+  after M6a PR #72 + perf PR #66 merged): closes two of the
   deferrals above — streaming subscriptions
   (`chat.subscribe`, Go `internal/gateway/calls.go`
   `SubscribeRaw` + `internal/conn/shared.go`
