@@ -496,6 +496,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "castctl-log-redact",
+ "castctl-shared",
  "hex",
  "http",
  "http-body-util",
@@ -588,6 +589,7 @@ dependencies = [
 name = "castctl-update"
 version = "0.1.0"
 dependencies = [
+ "castctl-shared",
  "flate2",
  "hex",
  "libc",

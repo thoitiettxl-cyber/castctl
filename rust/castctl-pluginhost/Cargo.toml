@@ -12,6 +12,7 @@ description = "Plugin host for the castctl Rust port (M6c): plugin ABI types, di
 
 [dependencies]
 castctl-log-redact = { path = "../castctl-log-redact" }
+castctl-shared = { path = "../castctl-shared" }
 sha2 = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
