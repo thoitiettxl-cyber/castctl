@@ -13883,3 +13883,159 @@ breakage, no fix in scope. Disk: dipped to 5.4G during the first test
 run (other sessions' targets active); freed 1.6G of own
 `debug/incremental`, recovered to 20G free; `/tmp/m7b-target` removed
 after the final gate (logs kept at `/tmp/m7b-rb-*.log`).
+
+### M7b.11 Fix loop 3 (round-3 reviews, 2026-11-06) — THE LAST fix loop
+
+Head `28aefec` (4 commits on `feat/rust-m7b-cli-wiring`, base
+`dev-rust` `b3fbe5a` — verified unchanged by `git ls-remote` at
+the end of the loop; no rebase needed). Round-3 verdicts at
+`1cc9fc2`: technical PASS-WITH-NITS, safety PASS-WITH-NITS,
+red-team FAIL (2 BLOCKINGs). Both BLOCKINGs fixed with a
+regression test each; the 3 red-team round-3 attack cases are
+now harness regression cases (harness total 86).
+
+- **R3-B1 (red-team)** Go `encoding/json` DOES emit the
+  short escapes `\b`/`\f`; Rust emitted `\u0008`/`\u000c`
+  — one wrong belief in five sites. Verified against Go
+  1.27.3 source on cue (`encoding/json/encode.go`,
+  `appendString`: `case '\b'` :1012-1013, `case '\f'`
+  :1014-1015; the default comment reads "This encodes
+  bytes < 0x20 except for \b, \f, \n, \r and \t"), real
+  binaries via `od -c`, and harness cases C7/C11/C12.
+  Fix: `'\x08' → \b` and `'\x0C' → \f` arms added to all
+  five escapers — (a) `network.rs:102`
+  `escape_go_marshal_string` (wire bodies + typed auth
+  JSON); (b) `network.rs:137` `escape_stdout_string`
+  (stdout JSON); (c) `network.rs:304` `indent_json` — the
+  `\b → \u0008` / `\f → \u000c` translation arms at
+  :362-363 DELETED (serde_json already emits the correct
+  short forms; they are now passed through like `\n`,
+  via a `let` binding after clippy flagged the leftover
+  single-arm `match`); (d) `jsonvalue.rs:964`
+  `encode_go_string` (config-file writer, proven live via
+  toggle rewrite); (e) `resources.rs:358`
+  `escape_json_string` (M4b row serializers — code-proven
+  only, fixed the same way + a unit test). All five doc
+  comments fixed (they listed the short escapes as only
+  `"`, `\`, `\n`, `\r`, `\t`), plus the module doc at
+  `network.rs:48` and the belief comment at :300-301.
+  The pinning unit test `indent_json_cases` :2193-2197
+  PINS the wrong translation — rewritten to expect
+  `\b`/`\f` passthrough. Tests (all RED first on cue,
+  then GREEN): `escape_strings_use_short_backspace_formfeed`,
+  `test_encode_go_string_backspace_formfeed`,
+  `probe_json_string_escaping_backspace_formfeed`,
+  `indent_json_cases` (rewritten). Promoted cases:
+  `r3-esc-ctrl`, `r3-wire-ctrl`, `r3-raw-ctrl` (verbatim
+  from the reviewer, hand-maintained like rt-*/r2-*).
+- **R3-B2 (red-team)** `mkdir_error_text` mapped ALL
+  EEXIST to ENOTDIR and reported the full path. Go
+  `MkdirAll` (`os/path.go:19`): ENOTDIR only when
+  `Stat(path)` succeeds and the path is not a directory;
+  in every other EEXIST case (dangling symlink, symlink
+  loop) it returns EEXIST; and it reports the FAILING
+  COMPONENT. A Stat-conditioned mapping alone is NOT
+  enough (E12's raw error is ELOOP, E13's errno is right
+  but the path is wrong) — so Go's algorithm is ported
+  as shared `oserr::mkdir_all` (Stat fast path →
+  recursive parent creation via `mkdir_all_parent` →
+  `Mkdir` → Lstat check; error text
+  `mkdir <component>: <strerror>`), used by the
+  download mkdir arm (`network.rs`, was
+  `create_dir_all` + `mkdir_error_text`) and the toggle
+  lock arm (`toggle.rs:118`, Go `lockConfigDir` uses
+  `os.MkdirAll`, `guard.go:226-242`, verified at
+  `b3fbe5a`); `mkdir_error_text` deleted (no callers
+  left). Regression: unit test
+  `mkdir_all_matches_go_mkdir_all` (9 shapes, expected
+  strings are the verbatim outputs of the reviewer's
+  standalone Go probe `/tmp/m7b-r3redteam-mkdir.go` on
+  cue, same ext4 fs; order matters — dangling/loop
+  checked BEFORE the missing dir is created, since the
+  dangling symlink points at it) + direct-driver probes
+  E10 (loop), E11 (dangling), E12 (under loop), E13
+  (under file), all PROBE-PASS. Siblings verified not
+  regressed: E1 (mkdir-on-file), E3 (mkdir via
+  symlink-to-file), E2 (rename onto dir, identical
+  modulo the probe's own per-side dir prefix), success
+  shapes (missing dir, symlink→dir).
+- **R3-N1 (driver nit, NOT fixed)** the Go `m7b_driver`
+  accepts dash-leading positionals (`download -42`);
+  both real CLIs reject with exit 2 `unrecognized
+  argument: -4` (the Rust driver already matches via
+  `parser.rs:348`). Assessed NOT trivial: needs error
+  plumbing + pre-connect ordering + exact usage bytes
+  in the Go driver — a driver-only nit, both production
+  CLIs already agree. Recorded here and in the report
+  with the reason. The reviewer's `r3-pv-neg` case is
+  WITHDRAWN (reviewer's case bug) and was NOT promoted.
+- **Doc nits R3-N1/R3-N2:** PR-body draft figures
+  refreshed at the new head (base, diff-stat, gate
+  count, help count — measured, not copied); provenance
+  §19 header base corrected `0233095` → `b3fbe5a`.
+- **Gate incidents in this loop (honest record):** the
+  first gate run's SPDX check failed with exit 1 because
+  it was invoked from `rust/` ("no Go files") — my
+  invocation bug, not code; re-run from the repo root:
+  ok. `cargo fmt --check` failed on 2 hunks of the new
+  code (fixed by running `cargo fmt` on cue and syncing
+  the formatted files back). Clippy failed twice in
+  sequence: first `single_match` in `mkdir_all`
+  (`oserr.rs:108`, `match metadata { Ok, Err(_) => {} }`
+  → `if let`); then `match_single_binding` in
+  `indent_json` (`network.rs:368`, the single-arm
+  `match` left behind by deleting the `\b`/`\f` arms →
+  `let` binding) — the second appeared only after the
+  first was fixed, because clippy stops at the failed
+  dependency crate (`castctl-config` gates
+  `castctl-cli`). The harness failed once mid-run
+  (fl3b: 47/86, "gateway server for redeem-success-text-rs
+  never became READY"); the same server binary served
+  the R3 probes fine immediately after, and the harness
+  passed 86/86 on re-run — transient, cause not proven
+  (a concurrent milestone build was active; disk fell
+  to 13G during that run). Disk: the gate waiter held
+  the build 6×5 min, then 3×5 min, then 1×5 min for
+  another milestone's cargo (disk 20G → 4.7G → 15G
+  during the wait, recovering after the other session
+  cleaned); `/tmp/m7b-target` (13G) deleted after the
+  final gate, logs kept (`/tmp/m7b-fl3*.log`,
+  `/tmp/m7b-fl3b-*.log`, `/tmp/m7b-fl3c-*.log`),
+  37G free at the end.
+
+Gates (cue, code head `28aefec` — docs-only commit
+follows, no code change after these gates):
+`go test -run TestSPDXHeaders -count=1 .` ok (repo root,
+`GOTOOLCHAIN=auto`, re-run at the final head);
+`cargo fmt --check` 0; `cargo build --workspace` 0;
+`cargo test --workspace` 1174 passed, 0 failed, 46
+suites (1171 at `1cc9fc2` + 4 new tests − 1 removed
+pinning test: `escape_strings_use_short_backspace_formfeed`,
+`test_encode_go_string_backspace_formfeed`,
+`probe_json_string_escaping_backspace_formfeed`,
+`mkdir_all_matches_go_mkdir_all`; removed:
+`mkdir_error_text_maps_file_to_not_a_directory`);
+`cargo clippy --workspace --all-targets -- -D warnings`
+0. Harness `run_m7b_cases.sh` 86/86 PASS (83 + 3 r3-*),
+stdout+stderr+exit + request bytes + download trees,
+Go vs Rust driver; no `auth_token` string in the
+harness/probe logs (verified by `grep -c`, all 0).
+Direct-driver probes E1/E2/E3 IDENTICAL (E2 modulo the
+probe's own per-side dir prefix) + E4/E5/E6/E10/E11/E12/E13
+all PROBE-PASS. Live (cue, profile `no.0`, golden Go
+0.9.0): approvals list, invite read-only, auto-approve
+status, download no-files path — 4/4 byte-identical;
+`--help` 46/46 byte-identical (45 command names +
+global). Stat vs `b3fbe5a`: 118 files, +9451/−121 at code
+head `28aefec` (+9607/−121 at the docs head, docs
+included), only `rust/` + `docs/provenance.md`; Go tree untouched; no
+secrets in the diff; no new `unsafe` in fix loop 3
+(the `unsafe` lines in the `b3fbe5a` diff are the
+pre-existing flock/mkfifo calls); `unwrap()`/
+`expect()` only in `mod tests`. Stat reconciliation:
+the naive 9233 + 285 (loop-3 insertions vs `1cc9fc2`)
+= 9518 overcounts by 67 — those 67 lines are edits to
+lines the PR itself added, which still count as one
+insertion vs `b3fbe5a`; and `jsonvalue.rs` +
+`resources.rs` are first touched by this loop (+2
+files) alongside the 3 new case files (113 + 5 = 118).
