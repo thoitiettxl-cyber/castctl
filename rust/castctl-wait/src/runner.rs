@@ -2460,6 +2460,14 @@ mod tests {
                 .waiter
                 .feed(&task_ev(status, "R", "R", 11, Some(json!(2))), None)
                 .await;
+            // Round-2 R2-5: Go's setup fails unless
+            // IgnoredTerminal() is the fed status after
+            // Feed (runner_test.go:662-665).
+            assert_eq!(
+                runner.waiter.ignored_terminal(),
+                Some(status),
+                "ignored terminal after Feed"
+            );
             let cancel = Cancel::new();
             cancel.set();
             let err = runner.settle_pending(&cancel, status).await;
@@ -3040,6 +3048,14 @@ mod tests {
             .waiter
             .feed(&task_ev("idle", "R", "R", 11, Some(json!(2))), None)
             .await;
+        // Round-2 R2-5: Go's setup fails unless
+        // IgnoredTerminal() is the fed status after
+        // Feed (runner_test.go:1420-1423).
+        assert_eq!(
+            runner.waiter.ignored_terminal(),
+            Some("idle"),
+            "ignored terminal after Feed"
+        );
         let cancel = Cancel::new();
         cancel.set();
         let err = runner.settle_pending(&cancel, "idle").await;
@@ -3068,6 +3084,11 @@ mod tests {
             .waiter
             .feed(&task_ev("idle", "R", "R", 11, Some(json!(2))), None)
             .await;
+        assert_eq!(
+            runner2.waiter.ignored_terminal(),
+            Some("idle"),
+            "ignored terminal after Feed"
+        );
         runner2
             .settle_pending(&Cancel::new(), "idle")
             .await
@@ -3093,6 +3114,11 @@ mod tests {
             .waiter
             .feed(&task_ev("interrupted", "R", "R", 11, Some(json!(2))), None)
             .await;
+        assert_eq!(
+            runner3.waiter.ignored_terminal(),
+            Some("interrupted"),
+            "ignored terminal after Feed"
+        );
         let cancel3 = Cancel::new();
         cancel3.set();
         let err3 = runner3.settle_pending(&cancel3, "interrupted").await;
@@ -3117,6 +3143,11 @@ mod tests {
             .waiter
             .feed(&task_ev("interrupted", "R", "R", 11, Some(json!(2))), None)
             .await;
+        assert_eq!(
+            runner4.waiter.ignored_terminal(),
+            Some("interrupted"),
+            "ignored terminal after Feed"
+        );
         runner4
             .settle_pending(&Cancel::new(), "interrupted")
             .await
