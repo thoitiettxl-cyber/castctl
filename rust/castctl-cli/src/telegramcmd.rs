@@ -386,7 +386,12 @@ async fn run_telegram_bot(ctx: &mut Ctx<'_>, g: &GlobalOpts) -> Result<(), FlowE
     tokio::spawn(async move {
         let _ = tokio::signal::ctrl_c().await;
         watch_clone.interrupted.store(true, Ordering::SeqCst);
-        if let Some(bot) = watch_clone.bot.lock().unwrap().as_ref() {
+        if let Some(bot) = watch_clone
+            .bot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
             bot.request_shutdown();
         }
     });
@@ -401,7 +406,7 @@ async fn run_telegram_bot(ctx: &mut Ctx<'_>, g: &GlobalOpts) -> Result<(), FlowE
     )
     .await
     .map_err(|e| bot_construction_error(&e))?;
-    *watch.bot.lock().unwrap() = Some(Arc::clone(&bot));
+    *watch.bot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&bot));
     if watch.interrupted.load(Ordering::SeqCst) {
         // SIGINT arrived during getMe: Go would return
         // ctx.Err() from Start.

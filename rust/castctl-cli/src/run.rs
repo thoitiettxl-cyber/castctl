@@ -3,8 +3,10 @@
 // Licensed under the GNU General Public License v3.0 only.
 
 //! Dispatch: `scanGlobal`, `resolveConfig`, the eight
-//! subcommand dispatchers, `classifyError`'s plain branch, and the
-//! M2 stub (D-M2-3).
+//! subcommand dispatchers, `classifyError`'s plain branch,
+//! and the wired command paths (M7b PR-3 + M7d; the M2 stub
+//! D-M2-3 was retired when the stub count reached 0, see
+//! PORTING §M7d).
 //!
 //! Sources at base `dev-rust` `85a8d5e`: `internal/commands/
 //! commands.go` (`runInner`, `scanGlobal`, `resolveConfig`,
@@ -18,13 +20,12 @@
 //! `wait.go` (`parseAutoToggles`, `approveDecision`,
 //! `cmdAutoApprove`), `deliver/authexport.go` (`ExportGuidance`).
 //!
-//! Only the offline surface is wired. Every command that would
-//! need the network, the gateway, a browser, or migrate execution
-//! ends in the stub (exit 1) after the checks Go performs before
-//! touching those: global scan, parse, positional checks,
+//! All commands in the dispatch table are wired (M7b PR-3 +
+//! M7d). The checks Go performs before touching the network
+//! still run first: global scan, parse, positional checks,
 //! config-location resolution, and parsing the resolved config
-//! file (F5). The stub sits BEFORE active-profile resolution
-//! (D-M2-3).
+//! file (F5). The M2 stub (D-M2-3) this paragraph used to
+//! describe was retired when the stub count reached 0.
 
 use std::sync::{Arc, Mutex};
 
@@ -575,14 +576,16 @@ const READ_COMMANDS: [&str; 13] = [
 
 /// A `parseOrHelp` command: parse, positional/manual checks,
 /// `parseAutoToggles` for wait/send, then config-location
-/// resolution + config parse, then the stub — except the 13
-/// read-only commands (M4b) and the 19 M7b Phase A commands,
-/// which run the network path, `wait` (M7a) and `send`,
-/// `watch` and `chat` (PR-2), which run their own paths,
-/// and `auto-approve`, which resolves config + profile
-/// itself (no network). `history --download` is NOT in
-/// the network set: it is checked separately below and
-/// stubbed.
+/// resolution + config parse, then the command's own path —
+/// the 13 read-only commands (M4b) and the 19 M7b Phase A
+/// commands run the network path, `wait` (M7a) and `send`,
+/// `watch` and `chat` (PR-2) run their own paths, and
+/// `auto-approve` resolves config + profile itself (no
+/// network). `history --download` is NOT in the network
+/// set: it is checked separately below and runs its own
+/// download path (PR-3). (The M2 stub this doc used to
+/// describe was retired at stub count 0; see PORTING
+/// §M7d.)
 fn cmd_plain(
     ctx: &mut Ctx<'_>,
     g: &GlobalOpts,

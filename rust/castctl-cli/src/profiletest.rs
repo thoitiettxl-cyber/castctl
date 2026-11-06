@@ -31,8 +31,13 @@
 //!   for that tag; the profile's own outbound (or its
 //!   synthesised direct tag) reuses the runtime dialer.
 //!   With no config file (`single == None`) Go builds
-//!   no DNS client at all, so the phase resolves through
-//!   the system resolver and reports no server/source.
+//!   no DNS client at all, so `Dialer.Resolve` fails
+//!   closed with `ErrNoResolver` (exit 2) and the phase
+//!   reports no server/source — it never touches the
+//!   system resolver (`internal/outbound/dialer.go:27`,
+//!   `:146-152`; fix loop 2 corrected the earlier
+//!   claim that the lookup fell back to the system
+//!   resolver).
 //! * HTTPS: `FetchSessionInfo` over the runtime HTTP
 //!   client; a missing/unparseable cookies file
 //!   substitutes as the phase error (typed auth →
@@ -559,8 +564,12 @@ async fn run_phases(
 /// Phase 1: resolve `muse.ai` and report the effective
 /// server/source (only when a single config exists —
 /// Go sets them only under `single != nil`). With no
-/// config file Go builds no DNS client, so the lookup
-/// goes through the system resolver.
+/// config file Go builds no DNS client, so `Dialer.Resolve`
+/// fails closed with `ErrNoResolver` (exit 2): the
+/// lookup never touches the system resolver
+/// (`internal/outbound/dialer.go:27,146-152`,
+/// `internal/commands/runtime.go:40-44`,
+/// `internal/commands/profilecmd.go:928-930`).
 async fn dns_lookup(
     rt: &Runtime,
     single: Option<&SingleConfig>,
@@ -568,8 +577,11 @@ async fn dns_lookup(
 ) -> Result<(Vec<String>, Option<String>, Option<String>), PhaseError> {
     let (addrs, server, source) = match resolved {
         None => {
-            let addrs = system_lookup("muse.ai").await?;
-            (addrs, None, None)
+            return Err(phase_err(
+                "outbound: no DNS resolver registered: refusing to resolve a domain without configured DNS: muse.ai"
+                    .to_string(),
+                2,
+            ));
         }
         Some(resolved) => {
             if resolved.servers.is_empty() {
@@ -944,11 +956,13 @@ fn extract_ips(msg: &castctl_dns::wire::DnsMessage, qtype: u16) -> Vec<String> {
         .collect()
 }
 
-/// The system resolver (`local` servers, and the whole
-/// phase when no config file exists — Go builds no DNS
-/// client then). The error text is an approximation: Go
-/// names the resolver address, which the Rust resolver
-/// does not expose.
+/// The system resolver, for `local` servers only
+/// (matching sing-box's local server type). The error
+/// text is an approximation: Go names the resolver
+/// address, which the Rust resolver does not expose.
+/// (The no-config arm used to call this too; it now
+/// fails closed with `ErrNoResolver` instead — see
+/// `dns_lookup`.)
 async fn system_lookup(domain: &str) -> Result<Vec<String>, PhaseError> {
     let addrs = tokio::time::timeout(
         DNS_QUERY_TIMEOUT,
@@ -1004,7 +1018,21 @@ async fn https_phase(rt: &Runtime) -> (HttpsPhase, Option<PhaseError>) {
             )
         }
         Err(_) => {
-            let text = "context deadline exceeded".to_string();
+            // N1 (fix loop 1): the outer timeout is the same
+            // deadline-exceeded failure Go's `doHatch` wraps
+            // as `gateway: GET muse.ai/api/session failed
+            // (class=timeout kind=deadline)`
+            // (`wrapTransportError`, `transport.go:47-49`;
+            // `transportOp`, `:68-74`; `classifyTransportError`
+            // maps `context.DeadlineExceeded` to
+            // ("timeout","deadline"), `:86-88`). Near-unreachable
+            // in practice — the inner `AUTH_TIMEOUT` (20s) fires
+            // first — and the INNER path's render
+            // (`conn: https request timed out`, via
+            // `summarize_transport_error`) still differs from
+            // Go; that remainder is recorded in PORTING §M7d.3.
+            let text =
+                "gateway: GET muse.ai/api/session failed (class=timeout kind=deadline)".to_string();
             (
                 HttpsPhase {
                     ok: false,
@@ -1085,7 +1113,22 @@ async fn egress_phase(rt: &Runtime) -> Result<String, String> {
             .request_tls(Method::GET, &target, "/", &[], None, EGRESS_TIMEOUT),
     )
     .await
-    .map_err(|_| "context deadline exceeded".to_string())?
+    // N1 (fix loop 1): the outer timeout is the same
+    // deadline-exceeded failure Go wraps as
+    // `egress check: GET api64.ipify.org failed
+    // (class=timeout kind=deadline)`
+    // (`wrapEgressTransportError`, `profilecmd.go:970-976`;
+    // `classifyEgressTransportError` maps
+    // `context.DeadlineExceeded` to ("timeout","deadline"),
+    // `profilecmd.go:987-988`). The inner path already
+    // renders exactly this string for a `Timeout`
+    // (`classify_egress_transport_error` above), so both
+    // arms now agree — before, the outer arm (created
+    // before the inner 15s timeout, so it almost always
+    // won the race) yielded the bare literal instead.
+    .map_err(|_| {
+        "egress check: GET api64.ipify.org failed (class=timeout kind=deadline)".to_string()
+    })?
     .map_err(|e| {
         let (class, kind) = classify_egress_transport_error(&e);
         format!("egress check: GET api64.ipify.org failed (class={class} kind={kind})")
@@ -1425,6 +1468,49 @@ mod tests {
         // server/source keys.
         assert!(!out.contains("\"server\""), "stdout: {out}");
         assert!(!out.contains("\"source\""), "stdout: {out}");
+        assert!(ctx.out.stderr.is_empty());
+    }
+
+    /// S1 (review 2, safety BLOCKING): with no config
+    /// file Go builds no DNS client and `Dialer.Resolve`
+    /// fails closed with `ErrNoResolver` (exit 2) — it
+    /// never touches the system resolver
+    /// (`internal/outbound/dialer.go:27,146-152`,
+    /// `internal/commands/runtime.go:40-44`,
+    /// `internal/commands/profilecmd.go:928-930`). The
+    /// config dir is pointed at an empty temp dir via
+    /// `XDG_CONFIG_HOME` (no `--config`, so
+    /// `RequirePresent` does not fire) and no config
+    /// file is written. The test asserts the Go error
+    /// text + exit 2, and that the run stops at the DNS
+    /// phase (no https/gateway phases).
+    #[test]
+    fn run_test_no_config_fails_closed_no_resolver() {
+        let dir = temp_dir("no-config");
+        let xdg = dir.to_str().unwrap().to_string();
+        let getenv = |k: &str| {
+            if k == "XDG_CONFIG_HOME" {
+                Some(xdg.clone())
+            } else {
+                None
+            }
+        };
+        let mut ctx = Ctx {
+            out: Outcome::default(),
+            getenv: Some(&getenv),
+        };
+        let g = GlobalOpts::default();
+        let err = run_test(&mut ctx, &g, &parsed(&[])).unwrap_err();
+        assert_eq!(flow_code(&err), 2);
+        let out = &ctx.out.stdout;
+        assert!(
+            out.contains("outbound: no DNS resolver registered: refusing to resolve a domain without configured DNS: muse.ai"),
+            "stdout: {out}"
+        );
+        assert!(out.contains("\"dns\""), "stdout: {out}");
+        assert!(out.contains("\"ok\": false"), "stdout: {out}");
+        assert!(!out.contains("\"https\""), "stdout: {out}");
+        assert!(!out.contains("\"gateway\""), "stdout: {out}");
         assert!(ctx.out.stderr.is_empty());
     }
 

@@ -419,6 +419,14 @@ pub struct Profile {
     pub dns_present: bool,
 }
 
+/// Debug marker for an identifier field: presence
+/// only, never the value — the same `"[redacted]"`
+/// convention the `TelegramConfig` Debug impl uses
+/// for its token.
+fn debug_id(value: &str) -> &'static str {
+    if value.is_empty() { "" } else { "[redacted]" }
+}
+
 impl std::fmt::Debug for Profile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Profile")
@@ -427,11 +435,19 @@ impl std::fmt::Debug for Profile {
             .field("config_file", &self.config_file)
             .field("cookies_file", &self.cookies_file)
             .field("chat_file", &self.chat_file)
-            .field("vm_id", &self.vm_id)
-            .field("node_id", &self.node_id)
+            // Identifiers, not values: `redact_profile`
+            // redacts exactly these three fields in
+            // user-facing output, so `Debug` must not
+            // print them raw either (fix loop 2, review
+            // 2 N4) — presence only, never the value.
+            .field("vm_id", &debug_id(&self.vm_id))
+            .field("node_id", &debug_id(&self.node_id))
             .field("auto_approve", &self.auto_approve)
             .field("auto_allow_once", &self.auto_allow_once)
-            .field("subscription_action_id", &self.subscription_action_id)
+            .field(
+                "subscription_action_id",
+                &debug_id(&self.subscription_action_id),
+            )
             .field("fingerprint", &self.fingerprint)
             .field("tls_engine", &self.tls_engine)
             .field("dns", &crate::jsonvalue::raw_debug_marker(&self.dns))

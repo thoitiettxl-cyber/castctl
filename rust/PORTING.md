@@ -15057,9 +15057,26 @@ fallthrough stub — kept from `dev-rust` at rebase.
 - [DEVIATION] Keeper check/status time fields render as `Z`
   (Rust `DateTime<Utc>`); Go echoes the stored local offset
   (`+07:00`). Instants equal.
-- [DEVIATION] Keeper check timing: Rust checker 20s/request
-  bound fails a dead-outbound tick at ~20s, not Go's full 90s
-  check timeout; exit code + stderr text still match Go.
+- [DEVIATION] Keeper check timing: Rust checker has a 20s/request
+  bound, but the wall-clock time for a dead-outbound tick is
+  UNMEASURED (review 3, F1): the backoff ladder (5m/15m/45m) plus
+  the 90s `CHECK_TIMEOUT` suggest ~90s like Go, not ~20s as this
+  line previously claimed — that number was an inference from the
+  per-request bound, with no Rust-side wall-time run behind it.
+  Exit code + stderr text still match Go.
+  (N3, fix loop 2, documented not fixed.) The post-cancel
+  await has no deadline of its own: after the 90s bound
+  fires, `check_entries` awaits the tick to completion, so
+  the wall clock can exceed 90s by up to one in-flight
+  phase (worst single phase: observe, 90s; checker
+  ~20s/request, CDP attach 10s, relogin match/cookie 30s
+  each). Go aborts everything at 90s via
+  `context.WithTimeout` (`internal/commands/keeper.go:714`).
+  Exit code is still 4. Bounding the await would need a
+  fabricated tick result to print the row (Go always prints
+  the real tick result), and making the tick abort
+  mid-request needs a transport-seam change — both out of
+  scope; the overrun is bounded, not unbounded.
 - [DEVIATION] Telegram bot core retries 5xx with the default
   ladder (`DEFAULT_5XX_BACKOFF`); Go's core has no 5xx retry
   (M5 deviation, pre-existing).
@@ -15073,6 +15090,77 @@ fallthrough stub — kept from `dev-rust` at rebase.
   `config_errorf!("generate node_id: {e}")` with the `profile: `
   prefix; Go returns the raw crypto/rand error. Practically
   unreachable path.
+- [DEVIATION] `keeper check` error classification is
+  substring-based (N2, fix loop 1): the tick flattens the
+  typed `TransportError` into a `KeeperError::Other`
+  string, so `keeper_check_error` matches on text. The
+  branch ORDER now mirrors Go's `classifyError`
+  (`commands.go:301-314`, GatewayError → 3 before
+  TimeoutError → 4), and every gateway error carries the
+  `gateway error` marker (`BodySummary::render` always
+  emits it), so the gateway-with-"timeout" collision is
+  closed; a non-gateway transport error whose message
+  contains "timeout" (e.g. a `ConnectionDown` dial
+  timeout) can still exit 4 where Go exits 1.
+- [DEVIATION] `keeper run` SIGINT during a hung tick
+  surfaces 130 only after the in-flight dial/request
+  attempt times out (B1 fix loop 1: ~6s observed with a
+  blackholed SOCKS handshake; the tick observes
+  cancellation between attempts, not mid-request). Go
+  aborts the request via its signal `ctx` and exits
+  promptly. `keeper check` IS prompt (the `select!` arm
+  fires on cancel regardless of the tick). Second-SIGINT
+  disposition (N2, fix loop 2, settled by code
+  reading, not live): a second SIGINT inside the window
+  is swallowed — the watcher is one-shot (its task ends
+  after the first signal) and tokio's installed Ctrl-C
+  handler drops signals while no listener is registered,
+  so there is nothing to force the exit; the process
+  still exits 130 when the in-flight request times out
+  (~6s). A force-exit on second SIGINT was considered
+  and rejected: it would skip the graceful flush +
+  single-flight release that fix loop 1 proved, for a
+  ~6s wait. SIGTERM/SIGKILL still terminate at once.
+- [DEVIATION] `profile test` timeout-path error texts
+  (N1, fix loop 1, partly fixed): the egress and HTTPS
+  OUTER timeout arms now render Go's wrapped texts
+  (`egress check: GET api64.ipify.org failed
+  (class=timeout kind=deadline)`; `gateway: GET
+  muse.ai/api/session failed (class=timeout
+  kind=deadline)`). Still bare literals: the DNS outer
+  arms (`lookup_via_server`, DoH/TCP/system query
+  timeouts) and the gateway-phase outer arm — Go's texts
+  there (sing-box resolver / connector connect) are
+  unprobed. The HTTPS INNER path also still renders
+  `conn: https request timed out` (via
+  `summarize_transport_error`) where Go renders the
+  wrapped text above; fixing that needs a per-call-site
+  render, out of this loop's scope.
+- [DEVIATION] Standalone `keeper run` tick lines are
+  buffered until exit (N3): `run_entries_cmd` collects
+  tick lines in `out_buf` and prints them after the
+  joins; Go prints each tick line live under a mutex
+  (`keeper.go:640-649`). Exit bytes match; liveness
+  differs. (The embedded-keeper case was already listed
+  above.)
+- [DEVIATION] `profile test` DNS rule evaluation is
+  domain-matchers-only (N4): a rule is evaluated only
+  when every matcher on it is a domain matcher
+  (`domain` / `domain_suffix` / `domain_keyword`); any
+  other matcher makes the rule unevaluable, so it is
+  skipped. Go resolves through the sing-box DNS router,
+  which evaluates all rule types. The reported `server`
+  field agrees (both use `servers[0]`); the queried
+  server — and therefore the addresses/failure — can
+  differ.
+- [DEVIATION] `telegram run` warning-line shapes are
+  plain text, not Go's slog lines (N6, cosmetic): a
+  `setMyCommands` failure prints
+  `telegram: setMyCommands failed: {}` and a corrupt
+  state file prints the plain `telegram state file
+  corrupt; …` line; Go reports both through its slog
+  logger with structured attrs. Warning-only; the CLI
+  buffers stderr anyway.
 
 ### M7d.4 Fix round — 19 test failures → 3 real code bugs (cue, 2026-11-06)
 
@@ -15194,3 +15282,115 @@ the tests (each fix cites the Go file:line or probe):
   (construction path now matches; poll path unprobed).
 - `telegram run` live polling with a real token (never
   with a fake token beyond getMe).
+
+### M7d.7 Fix loop 1 (review 1, 2026-11-06)
+
+Review 1 (technical) verdict BLOCKING on B1; fixed here
+in one commit on top of `6abf161` (PR #83 head). Test
+count 1595/0 → 1597/0 (66 suites; +2 watcher tests;
+the N2 case extends `check_error_mapping`, no new test
+count). Gates re-run on cue, all exit 0 — see the
+fix-loop report
+(`~/workspace/tmp/castctl-rust-m7d-notes/fixloop1-report.md`).
+
+- B1 — keeper Ctrl-C was broken (FIXED): `check_entries`
+  and `run_entries_cmd` spawned a watcher that cancelled
+  a CHILD flag nothing waited on, so the `msg_empty(130)`
+  arms were dead code. Both sites now call the shared
+  `spawn_ctrl_c_watcher(root_cancel.clone(),
+  tokio::signal::ctrl_c())`, which cancels the root
+  itself (Go `keeper.go:650-654`, `:714-723` return
+  `ctx.Err()`; `classifyError` maps `context.Canceled`
+  to 130). New tests `ctrl_c_watcher_cancels_root` /
+  `ctrl_c_watcher_pending_signal_does_not_cancel`
+  (`keepercmd.rs`, signal injected as a future);
+  mutation-checked: restoring the child-cancel body
+  makes the first test fail (5s timeout). Live on cue
+  (fake state, blackhole SOCKS, temp dirs): `keeper
+  check` SIGINT → 130 promptly (select arm); `keeper
+  run` SIGINT → 130 after the in-flight dial attempt
+  times out (~6s observed) — see the deviation in
+  §M7d.3. The PR-body parity row now cites the unit test
+  + live check instead of "timeout + SIGTERM".
+- N2 — keeper-check classification order (FIXED):
+  `keeper_check_error` now checks "gateway error"
+  BEFORE the timeout substrings, mirroring Go's
+  `classifyError` order (GatewayError → 3 before
+  TimeoutError → 4). Regression test: a gateway summary
+  with `; error=timeout` exits 3 (was 4). Still
+  substring-based; see §M7d.3.
+- N1 — profile-test timeout texts (PARTLY FIXED):
+  egress + HTTPS outer arms now render Go's wrapped
+  texts (see §M7d.3). DNS/gateway outer arms and the
+  HTTPS inner render remain bare/divergent; see §M7d.3.
+- N3/N4/N6 — documented in §M7d.3 (no code change).
+- N7 — stale M2 stub docs in `run.rs` fixed (module doc
+  + `cmd_plain` doc now describe the wired dispatch).
+
+### M7d.8 Fix loop 2 (review 2, 2026-11-06)
+
+Review 2 (safety) verdict BLOCKING on S1; fixed here
+in one commit on top of `8f269aa` (PR #85 head). Test
+count 1597/0 → 1598/0 (66 suites; +1 S1 test). Gates
+re-run on cue, all exit 0 — see the fix-loop report
+(`~/workspace/tmp/castctl-rust-m7d-notes/fixloop2-report.md`).
+
+- S1 — `profile test` with no config file resolved via
+  the system resolver (FIXED): `dns_lookup`'s `None` arm
+  now returns the Go `ErrNoResolver` text + exit 2,
+  matching Go byte-for-byte
+  (`internal/outbound/dialer.go:27,146-152`;
+  `internal/commands/runtime.go:40-44`;
+  `internal/commands/profilecmd.go:928-930`). The three
+  comments that justified the system-resolver fallback
+  (module doc, `dns_lookup` doc, `system_lookup` doc)
+  are corrected. New test
+  `run_test_no_config_fails_closed_no_resolver`
+  (`XDG_CONFIG_HOME` at an empty temp dir, no config
+  written): RED first (exit 3, DNS-OK via the system
+  resolver), GREEN after (exit 2 + Go text, 0.00s, no
+  network). Live on cue (M3, review 2): Go `profile
+  test` vs Rust `profile test` with no config — stdout
+  AND stderr byte-identical, both exit 2. This is a fix,
+  not a deviation: the behaviour now matches Go.
+- N1 — `Mutex::lock().unwrap()` ×2 in the telegram
+  SIGINT watcher (FIXED): both sites use
+  `.lock().unwrap_or_else(|e| e.into_inner())`. No
+  behaviour change. No `unwrap()` remains in production
+  code in the M7d diff (verified by grep; the rest are
+  in `#[cfg(test)]` modules or safe `unwrap_or*` forms).
+- N4 — `Profile` Debug printed `vm_id`/`node_id`/
+  `subscription_action_id` raw (FIXED): the three fields
+  now render `"[redacted]"` when present (empty stays
+  `""`), matching the token convention in the
+  `TelegramConfig` Debug impl. `SingleConfig` Debug
+  prints profiles through `Profile`'s impl, so it
+  inherits the redaction. No test depended on the raw
+  values (`test_debug_never_prints_secrets` asserts only
+  secret absence).
+- N2 — second SIGINT during the hung-tick window
+  (DOCUMENTED, no code): settled in §M7d.3 — swallowed
+  (one-shot watcher; tokio handler drops signals with
+  no listener); the process still exits 130 when the
+  in-flight request times out (~6s). Force-exit on
+  second SIGINT was considered and rejected (it would
+  skip the graceful flush + single-flight release that
+  fix loop 1 proved).
+- N3 — `keeper check` post-cancel await has no deadline
+  (DOCUMENTED, no code): quantified in §M7d.3 — wall
+  clock can exceed 90s by up to one in-flight phase
+  (worst: observe, 90s); exit code still 4. Bounding it
+  would need a fabricated tick result; making the tick
+  abort mid-request needs a transport-seam change.
+
+Full-suite flake (not a code issue):
+`install_newer_version_end_to_end` (`castctl-update`,
+fake server) failed once in the first full run (42
+passed / 1 failed in that suite), passed alone (2.26s)
+and passed in the full re-run (1598/0). None of this
+loop's files are in that crate's path.
+
+Note: `dev-rust` moved during this loop to `57fc7be`
+(PR #84, version stamp, `run.rs` only). PR #85 will
+need a rebase onto it; not done here (one commit on
+`feat/rust-m7d-fixloop1`, no push).

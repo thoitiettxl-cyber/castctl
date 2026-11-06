@@ -573,8 +573,15 @@ fn run_case(bin: &Path, argv: &[String], fixture: &str, root: &Path) -> RunOutpu
 }
 
 /// F9(c): run the Rust binary with `--version` in an isolated
-/// env and assert the UNSTRIPPED output is exactly
-/// `castctl 0.9.0` (no stamp, no extra output).
+/// env and assert the output is exactly `castctl 0.9.0` after
+/// the N2 stamp strip. The raw line carries ` (commit date)`
+/// in a git-checkout build: PR #84 renders `--version` with
+/// the git build stamp like Go, and `build.rs` derives that
+/// stamp from git, so a dev build IS stamped (documented
+/// deviation in `rust/castctl-cli/build.rs`). The strip is
+/// the D-M2-7 rule, the same `strip_version_stamp` helper
+/// the golden-cases loop uses; an unstamped build still
+/// prints the bare line and passes unchanged.
 fn assert_rust_version(bin: &Path) {
     let root = std::env::temp_dir().join(format!("castctl-parity-version-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -597,9 +604,9 @@ fn assert_rust_version(bin: &Path) {
     let _ = std::fs::remove_dir_all(&root);
     assert_eq!(out.status.code(), Some(0), "--version exit code");
     assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
+        strip_version_stamp(&String::from_utf8_lossy(&out.stdout)),
         EXPECTED_RUST_VERSION_LINE,
-        "--version stdout (unstripped)"
+        "--version stdout (stamp stripped per D-M2-7)"
     );
     assert!(
         out.stderr.is_empty(),
