@@ -67,6 +67,7 @@ pub type FetchSessionInfoFn = dyn Fn(
 /// header value resolved by the caller. `vm_id` is the
 /// profile's `vm_id`, or empty to resolve it via
 /// `FetchSessionInfo`, as Python does.
+#[derive(Default)]
 pub struct WakeDeps {
     /// The dialer's HTTP client (`None` = nil client).
     pub client: Option<Arc<HttpClient>>,
@@ -80,19 +81,6 @@ pub struct WakeDeps {
     pub fetch_session_info: Option<Box<FetchSessionInfoFn>>,
     /// The wake helper (`None` = not injected).
     pub wake_vm: Option<Box<WakeFn>>,
-}
-
-impl Default for WakeDeps {
-    fn default() -> Self {
-        WakeDeps {
-            client: None,
-            cookies: String::new(),
-            vm_id: String::new(),
-            fetch_access_token: None,
-            fetch_session_info: None,
-            wake_vm: None,
-        }
-    }
 }
 
 /// The `wake` output shape (Go `WakeResult`):
