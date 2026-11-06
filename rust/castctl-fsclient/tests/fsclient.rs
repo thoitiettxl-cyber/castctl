@@ -264,7 +264,7 @@ impl FsGateway for FakeGateway {
                             .filter(|(f, _)| f.starts_with(&format!("{src}/")))
                             .map(|(f, d)| (format!("{dst}{}", &f[src.len()..]), d.clone()))
                             .collect();
-                        for (old, _) in state
+                        for old in state
                             .files
                             .keys()
                             .filter(|f| f.starts_with(&format!("{src}/")))
@@ -388,7 +388,7 @@ fn new_fs(gw: Arc<FakeGateway>) -> Fs<FakeGateway> {
 }
 
 #[test]
-fn norm() {
+fn norm_cases() {
     let cases = [
         ("/", ""),
         ("", ""),

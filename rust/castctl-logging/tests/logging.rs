@@ -982,14 +982,19 @@ fn factory_refused_paths_by_identity() {
 #[test]
 fn factory_invalid_level_never_echoes() {
     let buf = SharedBuf::default();
-    let err = new_factory(
+    let err = match new_factory(
         Settings {
             level: "LOGFIX-LEVEL-9d2e41".to_string(),
             ..Default::default()
         },
         Some(Box::new(buf.clone())),
-    )
-    .unwrap_err();
+    ) {
+        // `Handle` has no `Debug` (its writer is a boxed
+        // `dyn Write`), so `Result::unwrap_err` cannot be
+        // used here; the match is the equivalent assertion.
+        Ok(_) => panic!("factory with an invalid level must fail"),
+        Err(e) => e,
+    };
     assert!(
         !err.to_string().contains("LOGFIX-LEVEL-9d2e41"),
         "factory error {err:?} echoes the supplied level value"
@@ -1033,7 +1038,7 @@ impl Error for OuterError {
 }
 
 #[test]
-fn summarize_err() {
+fn summarize_err_cases() {
     let gw = gateway_500(LEVEL_BODY_PAYLOAD);
     assert_eq!(
         summarize_err(Some(&gw)),
@@ -1071,7 +1076,7 @@ fn summarize_err() {
 }
 
 #[test]
-fn safe_err_for_level() {
+fn safe_err_for_level_cases() {
     let payload = format!(
         "{{\"token\": \"LOGFIX-LEVEL-83af10\"}} and {}",
         "tailword ".repeat(200)
@@ -1209,7 +1214,7 @@ fn safe_err_for_level_trace_is_summary() {
 // ---- profile/log_test.go: ResolveLogSettings ----
 
 #[test]
-fn resolve_log_settings() {
+fn resolve_log_settings_cases() {
     let config_with_log = |l: LogConfig| Some(l);
     let cases: Vec<(&str, Option<LogConfig>, &str, bool, Option<LogConfig>, bool)> = vec![
         (
@@ -1355,6 +1360,7 @@ fn resolve_log_settings() {
         (
             "config file output kept",
             config_with_log(LogConfig {
+                disabled: false,
                 level: "info".to_string(),
                 output: "/tmp/x.log".to_string(),
                 timestamp: true,
@@ -1362,6 +1368,7 @@ fn resolve_log_settings() {
             "",
             false,
             Some(LogConfig {
+                disabled: false,
                 level: "info".to_string(),
                 output: "/tmp/x.log".to_string(),
                 timestamp: true,

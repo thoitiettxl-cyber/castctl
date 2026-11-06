@@ -234,13 +234,19 @@ async fn client_no_system_fallback_for_localhost() {
 
 #[tokio::test]
 async fn client_no_servers_is_error() {
-    let err = Client::new(
+    // `Client` has no `Debug` (it holds `Arc<dyn ...>`
+    // trait objects), so `Result::expect_err` cannot be
+    // used here; the match is the equivalent assertion.
+    let err = match Client::new(
         DnsOptions::default(),
         Arc::new(TcpTransportFactory),
         ClientOptions::default(),
     )
     .await
-    .expect_err("New with no servers must fail");
+    {
+        Ok(_) => panic!("New with no servers must fail"),
+        Err(e) => e,
+    };
     assert_eq!(
         err.to_string(),
         "dns: no DNS servers configured: refusing to fall back to the system resolver"
@@ -249,13 +255,18 @@ async fn client_no_servers_is_error() {
 
 #[tokio::test]
 async fn client_nil_bootstrap_is_error() {
-    let err = Client::new(
+    // `Client` has no `Debug` — see
+    // `client_no_servers_is_error` above.
+    let err = match Client::new(
         tcp_dns_options(53),
         Arc::new(TcpTransportFactory),
         ClientOptions::default().with_bootstrap(None),
     )
     .await
-    .expect_err("explicit nil bootstrap must fail");
+    {
+        Ok(_) => panic!("explicit nil bootstrap must fail"),
+        Err(e) => e,
+    };
     assert_eq!(err.to_string(), "dns: bootstrap function must not be nil");
 }
 
