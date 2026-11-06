@@ -8438,56 +8438,95 @@ Pins (workspace `Cargo.toml`, exact `=`):
     the name; O_EXCL then fails the attempt and
     the loop retries with a new suffix, so the
     worst case is a retry, not an overwrite.
-42. [DEVIATION — SUPERSEDED in fix loop 2] The
-    fix-loop-1 `null_default` helper (serde
-    `deserialize_with` on every `ReleaseJson` /
-    `AssetJson` field) covered `null` only in
-    field position. It is GONE, replaced by one
-    unified lenient decode (see §M6c.9): the
-    shared byte-level parser
+42. [DEVIATION — SUPERSEDED in fix loop 2;
+    MODEL CORRECTED in fix loop 3] The fix-loop-1
+    `null_default` helper (serde `deserialize_with`
+    on every `ReleaseJson` / `AssetJson` field)
+    covered `null` only in field position. It is
+    GONE, replaced by one unified lenient decode
+    (see §M6c.9, rewritten in §M6c.10): the shared
+    byte-level parser
     (`castctl-shared/src/lenient_json.rs`)
-    implements Go `encoding/json` leniency for
-    the envelope AND the release JSON — `null`
-    is a no-op at every position (field, array
-    element, whole document), duplicate keys
-    are last-wins, invalid UTF-8 in strings
-    coerces to U+FFFD (Go `utf8.DecodeRune`,
-    one U+FFFD per bad byte — NOT
-    `from_utf8_lossy`, which collapses a
-    truncated sequence to one U+FFFD where Go
-    yields two), and type errors still refuse.
-    The parser is iterative (explicit state +
-    container stack), never recursive, so
-    nesting to Go's depth 10000 is accepted
-    without stack risk. The envelope `result`
-    is kept as raw bytes (`DecodedEnvelope`,
-    `pluginabi.rs`) because
-    `serde_json::value::RawValue` cannot hold
-    invalid UTF-8 at all (its `.get()` is
+    implements Go `encoding/json` leniency for the
+    envelope AND the release JSON. CORRECTION (fix
+    loop 3, phase-3 round-3 R3-B1/B2/B3/B4): the
+    fix-loop-2 model statement — "`null` is a no-op
+    at every position, duplicate keys are
+    last-wins" — is WRONG and is replaced by Go's
+    real sequential-apply model: occurrences apply
+    in document order; a key matches exact-first
+    then Unicode-fold (`foldName`: ASCII folds to
+    uppercase, Kelvin U+212A folds to `K`, long-s
+    U+017F folds to `S`); `null` is a no-op for
+    SCALAR fields (string / bool / int keep the
+    previously applied value) but RESETS pointer /
+    slice fields (`error`, `assets`) to nil /
+    empty; the FIRST type error on ANY occurrence
+    is saved (Go `saveError`) and refuses at the
+    end even when a later occurrence is valid; and
+    nesting is capped at depth 10000 inclusive (Go
+    `maxNestingDepth`), the 10001st container is
+    `exceeded max depth`. Invalid UTF-8 in strings
+    coerces to U+FFFD (Go `utf8.DecodeRune`, one
+    U+FFFD per bad byte — NOT `from_utf8_lossy`,
+    which collapses a truncated sequence to one
+    U+FFFD where Go yields two). The parser is
+    iterative (explicit state + container stack),
+    never recursive, so the depth cap is Go's, not
+    a stack guard. The envelope `result` is kept as
+    raw bytes (`DecodedEnvelope`, `pluginabi.rs`)
+    because `serde_json::value::RawValue` cannot
+    hold invalid UTF-8 at all (its `.get()` is
     `&str`); `Envelope` stays the outbound /
     serialisation shape (valid UTF-8 only).
-    The B3 display now quotes raw bytes Go
-    `%q`-style (`compat.rs::go_quote_bytes`):
-    invalid bytes render as `\xNN`, never
-    U+FFFD. Printable is approximated by
-    `!c.is_control()` (Go `strconv.IsPrint`
-    also excludes unassigned/format runes;
-    the two agree on glibc-suffix bytes).
-43. [DEVIATION — fix loop 2] Lenient decode
-    covers ONLY the envelope and the release
-    JSON. The other `serde_json::from_slice`
-    decode sites in the pluginhost crate keep
-    serde strictness and still refuse duplicate
-    keys / invalid UTF-8 where Go accepts:
-    the `Registration` result bytes
+43. [DEVIATION — fix loop 2; UPGRADED in fix loop
+    3] Lenient decode covers ONLY the envelope and
+    the release JSON. The other
+    `serde_json::from_slice` decode sites in the
+    pluginhost crate keep serde strictness and still
+    refuse duplicate keys / invalid UTF-8 where Go
+    accepts: the `Registration` result bytes
     (`host.rs:869`), the `HostLogRequest`
     (`host.rs:1157`), the config fragment
-    (`host.rs:850`), and the identity JSON
-    value (`identity.rs:238`). Same root cause
-    as R2-B2/R2-B3, NOT fixed in this loop:
-    each needs its own typed lenient decoder
-    on the shared parser. Residual, recorded
-    — not silently dropped.
+    (`host.rs:850`), and the identity JSON value
+    (`identity.rs:238`). Same root cause as
+    R2-B2/R2-B3, NOT fixed in this loop: each needs
+    its own typed lenient decoder on the shared
+    parser. UPGRADE (fix loop 3): the round-3
+    red-team probes CONFIRMED the four triggers
+    that will bite these sites the moment the
+    loader is wired — R3-B1 (fold-case keys:
+    `{"OK":true}`, `{"TAG_NAME":...}`,
+    `{"o\u{212a}":false}` refused today where Go
+    applies them), R3-B2 (`null` as the last
+    occurrence of a duplicated key: Go keeps the
+    scalar / resets the pointer or slice, serde
+    refuses or the strict path drops it), R3-B3 (a
+    type error on a NON-LAST occurrence: Go saves
+    it and refuses at the end, serde refuses only
+    on the last one — or refuses with `duplicate
+    field` before any value applies), R3-B4
+    (nesting past 10000: Go refuses `exceeded max
+    depth`, serde accepts). The sequential-apply
+    decoder built in fix loop 3
+    (`Parsed::match_fields` + `apply_*_field` +
+    `FirstError` in `lenient_json.rs`) is the shared
+    helper those four sites reuse when they are
+    migrated — a migration is one typed loop per
+    site, not a new parser. NOT migrated in this
+    loop: all four sites are not live (the loader
+    is STOPPED per deviation 21; `identity.rs:238`
+    has no caller in the tree), so this stays a
+    recorded known limitation, not a silent drop.
+44. [DEVIATION — fix loop 1; moved out of
+    deviation 42 in fix loop 3 (technical F-2)]
+    The B3 display quotes raw bytes Go `%q`-style
+    (`compat.rs::go_quote_bytes`): invalid bytes
+    render as `\xNN`, never U+FFFD. Printable is
+    approximated by `!c.is_control()` (Go
+    `strconv.IsPrint` also excludes
+    unassigned/format runes; the two agree on
+    glibc-suffix bytes).
 
 Settled probes (2026-11-05, on cue):
 
@@ -9291,6 +9330,175 @@ delta; no code changed after the gate run):
   insertions, 0 deletions, 0 version changes**
   (the `castctl-shared` edge in the two M6c
   crates' dep lists).
+
+## M6c.10 Fix loop 3 (2026-11-06) — Phase 3 round-3 BLOCKINGs (LAST loop)
+
+All 4 round-3 BLOCKINGs (R3-B1/B2/B3/B4) share one
+root cause — fix loop 2's model ("duplicate keys
+are last-wins, at every level" + "`null` is a no-op
+at every position", §M6c.9 and deviation 42) is NOT
+Go's model — and are fixed with ONE rewrite to Go's
+real sequential-apply model, not four patches.
+CORRECTION: §M6c.9's model statement is wrong (see
+deviation 42, rewritten here); the loop-2 code that
+implemented it (`Parsed::field`, last-wins) is
+DELETED. No BLOCKING was dropped as a known
+limitation; the deviation-43 sites stay recorded
+(see below).
+
+Go's real model, verified against the stdlib
+source on the sandbox (go1.27.3,
+`encoding/json/decode.go:object` +
+`literalStore` + `saveError`, `fold.go:foldName`,
+`scanner.go:pushParseState`/`maxNestingDepth`) and
+against the round-3 red-team's two-sided probes:
+
+- `object()`: for each key in document order,
+  `fields.byExactName[key]`, else
+  `fields.byFoldedName[foldName(key)]`, then
+  `d.value(subv)` applies it immediately;
+- `foldName`: ASCII letters fold to uppercase,
+  any other rune folds to the smallest rune in its
+  `unicode.SimpleFold` orbit (`foldRune`);
+- `literalStore` on `null`: only Interface /
+  Pointer / Map / Slice are zeroed; scalars are
+  untouched (no-op); `RawMessage` copies the raw
+  bytes via `UnmarshalJSON`, so literal `null`
+  stays 4 bytes;
+- `saveError`: the FIRST type error only, decoding
+  continues, `Unmarshal` returns it at the end;
+- `pushParseState`: each `{`/`[` pushes; error
+  `exceeded max depth` when the stack exceeds
+  10000 (inclusive).
+
+- R3-B1 — fold-match keys: `Parsed::match_fields`
+  resolves each key exact-first then fold
+  (`go_fold_name`, `lenient_json.rs`) across the
+  whole field set, in one pass. Tests:
+  `fold_match_is_go_foldname` (ASCII, Kelvin
+  U+212A → `K`, long-s U+017F → `S`, `ß` folds to
+  itself, exact-beats-fold, both dup orders),
+  `decode_envelope_fold_keys_match_go` +
+  `parse_envelope_sequential_apply_matches_go`
+  (envelope triggers incl. nested `error` object
+  and both `ok`/`OK` orders),
+  `release_json_fold_keys_match_go` (via `run()`:
+  `TAG_NAME` / `DRAFT` / `PRERELEASE` / `ASSETS`
+  / asset `NAME`+`BROWSER_DOWNLOAD_URL`+`SIZE`+
+  `STATE` / asset `STATE":"draft"` refuses /
+  asset `ſize` installs).
+- R3-B2 — `null` last: the `apply_*_field`
+  helpers no-op `null` on scalars and the typed
+  decoders reset pointer/slice fields on `null`
+  (`error` → `None`, `assets` → empty). Tests:
+  `sequential_apply_first_type_error_wins`
+  (null-last keeps the scalar),
+  `decode_envelope_null_last_keeps_scalars_resets_pointer`
+  (incl. the `error`-reset + null-first controls),
+  `parse_envelope_sequential_apply_matches_go`
+  (null-last `error` → failed-without-error,
+  `is_error_envelope == false`),
+  `release_json_null_last_keeps_scalars_resets_slice`
+  (via `run()`: tag/draft/prerelease/size/name
+  keep their values; `assets` null-last → code 2;
+  null-first controls install).
+- R3-B3 — first type error: `FirstError`
+  (`saveError`) records the first type error and
+  the decode refuses at the end even when a later
+  occurrence is valid; the struct keeps the later
+  value. Tests:
+  `sequential_apply_first_type_error_wins`
+  (slot keeps `v0.6.4`, decode errors),
+  `decode_envelope_first_type_error_still_refuses`
+  (incl. the `OK` × type-error interaction),
+  `parse_envelope_sequential_apply_matches_go`,
+  `release_json_first_type_error_still_malformed`
+  (via `run()`: all 6 triggers → code 1
+  `malformed`, incl. `tag 123 → null` which is
+  code 1, not code 2).
+- R3-B4 — depth cap 10000 inclusive: `value_span`
+  errors `exceeded max depth` when the container
+  stack exceeds 10000 (`lenient_json.rs`,
+  `MAX_NESTING_DEPTH`). Tests:
+  `deep_nesting_does_not_overflow` (extended with
+  the 9999/10000/10001 boundary for objects AND
+  arrays, NB-R3-5),
+  `decode_envelope_depth_cap_matches_go`
+  (`result` 9999 deep = total 10000 accepts,
+  10000 deep = total 10001 refuses),
+  `release_json_depth_cap_matches_go` (unknown
+  field 9999 deep → code 2, 10000 deep → code 1).
+- Shared helper (deviation 43): the sequential-
+  apply decoder is `Parsed::match_fields` +
+  `apply_str_field` / `apply_bool_field` /
+  `apply_i64_field` / `apply_raw_field` +
+  `FirstError`, all in `castctl-shared/src/
+  lenient_json.rs` and exported for the M6c
+  crates; `decode_envelope` / `decode_release` /
+  `decode_asset` / `decode_plugin_error` are one
+  typed loop each over `match_fields`. The 4
+  deviation-43 sites were NOT migrated in this
+  loop (not live: loader STOPPED, identity has no
+  caller) — recorded in deviation 43, not
+  silently dropped.
+- Side effects: NB-R3-2 (field()/fields() re-walk
+  perf) disappears — the decoders now do ONE
+  `match_fields` pass per object; the dead
+  `skip_ws` check is removed (technical F-3);
+  the duplicate-key-via-escape case is pinned
+  (technical F-4,
+  `sequential_occurrences_keep_document_order`);
+  NB-R3-1 (`go_quote_bytes` ≈ `strconv.IsPrint`)
+  stays as recorded (now deviation 44, moved out
+  of deviation 42 per technical F-2); NB-R3-3
+  (NB3 re-measure) stays NEEDS-MEASUREMENT as
+  recorded in §M6c.9 (settled 19/1 in loop 2,
+  recounted by two round-3 reviewers).
+- Round-2 test audit (required by the brief):
+  every round-2 regression test was re-read
+  against Go's sequential-apply model — NONE
+  needed its expectation corrected: all round-2
+  duplicate cases use valid-typed occurrences
+  (last-wins still holds), and all round-2 `null`
+  cases are single occurrences (null-alone is the
+  zero value under both models). The only
+  round-2 change is mechanical: `Parsed::field`
+  (last-wins lookup) is deleted, and the
+  `lenient_json` unit tests now go through
+  `match_fields` / the `apply_*_field` helpers
+  (test-only `last_occurrence` helper for the
+  valid-occurrences cases).
+
+Fix-loop-3 gates (cue, 2026-11-06, toolchain
+1.99.1, `CARGO_TARGET_DIR=/tmp/m6c-target`),
+final head TBD (log TBD on cue):
+
+- `cargo fmt --check`: exit TBD.
+- `cargo build --locked --workspace`: exit TBD.
+- `cargo build --workspace`: exit TBD.
+- `cargo test --workspace`: exit TBD.
+  **TBD passed, 0 failed** (TBD suites) vs
+  **777 passed, 0 failed @e7d7764** (baseline
+  568 @25a124e).
+- `cargo clippy --workspace --all-targets -- -D
+  warnings`: exit TBD.
+- `grep -rn "unsafe\s*{"` over the three
+  crates' non-test src: TBD hits.
+- `git diff --stat dev-rust...HEAD`: TBD (scope
+  only `rust/` + this file).
+
+Disk rule (Boss, 2026-11-05/06): cue `/` was
+cleaned by Boss to 16G free (was 4.1G, nearly
+full). `df -h /` runs before every build on cue;
+if < 6G free, clean only the writer's own
+scratch/target before building further — never
+another session's active target dir
+(`/tmp/m6b-target`, `/tmp/m7b-target`,
+`/tmp/m6c-baseline-target`, ...). After the final
+gate of this loop the writer's target dir
+(`/tmp/m6c-target`) is deleted; gate logs are
+kept. `df` readings during this loop: TBD.
+
 
 ## Quy tắc quyết định (Boss, 2026-11-05 — standing)
 
