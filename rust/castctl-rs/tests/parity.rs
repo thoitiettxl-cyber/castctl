@@ -21,8 +21,8 @@
 //! canonical stdout/stderr/exit-code form, written by the
 //! generator in the same command), asserts every golden's
 //! `generated_by` equals the exact golden-binary version string,
-//! and asserts the Rust `--version` output (unstripped) is
-//! exactly `castctl 0.9.0`.
+//! and asserts the Rust `--version` output is exactly
+//! `castctl 0.9.0` after the N2 stamp strip.
 
 use castctl_config::jsonvalue::{JsonValue, decode_ordered_json};
 use std::io::Read;
