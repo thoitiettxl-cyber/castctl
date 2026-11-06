@@ -10430,7 +10430,7 @@ recorded here with its evidence. Commits are on
 | R1 GET /keeper wrong document | Fixed: wrapper + sort by tag | `53b6ec7` | `keeper_view_wraps_and_sorts_by_tag`; parity keeper ≥2 entries |
 | R3 route on raw path | Fixed: dispatch/routes on raw path, decode only for serving | `b2ac8f4` | `hyper_uri_path_keeps_raw_encoding`; parity encoded paths |
 | R2 HEAD routed as GET | Fixed: HEAD→GET mapping removed; `render_resp` HEAD branch kept deliberately (Go net/http body suppression, not routing) | `f733641` | live HEAD parity rows |
-| R4/B1/B-1 unbounded body before auth | Fixed: pre-dispatch read capped at 1 MiB+1; no body read on bodyless routes. Correction found in verification: the original pinning test asserted 400 for an unknown path on the false premise that unknown paths read the body — they fall through to the shell 200 on both sides (Go parity), so the test now pins 200 there and pins the 400 on a body-taking route instead; the cap itself is proven by the RSS proof, not a status test | `0ead12c` (code) + test correction in this loop | `over_cap_body_to_unknown_api_path_falls_through`, `over_cap_body_to_body_route_is_400`, `over_cap_body_to_wrong_method_is_405`, `body_on_get_is_ignored`, RSS proof §M6b.9 |
+| R4/B1/B-1 unbounded body before auth | Fixed: pre-dispatch read capped at 1 MiB+1; no body read on bodyless routes. Correction found in verification: the original pinning test asserted 400 for an unknown path on the false premise that unknown paths read the body — they fall through to the shell 200 on both sides (Go parity), so the test now pins 200 there and pins the 400 on a body-taking route instead; the cap itself is proven by the RSS proof, not a status test — SUPERSEDED in fix loop 2 (see §M6b.10): the read now runs AFTER the gates, inside the 30s timeout; the cap itself is unchanged | `0ead12c` (code) + test correction in this loop | `over_cap_body_to_unknown_api_path_falls_through`, `over_cap_body_to_body_route_is_400`, `over_cap_body_to_wrong_method_is_405`, `body_on_get_is_ignored`, RSS proof §M6b.9 |
 | M2 no panic recoverer | Fixed: `with_recover` → fixed 500, mirroring Go recoverer | `349443d` | `recoverer_maps_panic_to_fixed_500`, `recoverer_passes_through_ok` |
 | F-C2/F-C7/F-C8 + tech M1 + safety L-1 temp/lock files | Fixed: random suffix + O_EXCL, mode 0600 at creation, temp removed on every error path; lock no truncate, no chmod-after-open | `756859c` | `atomic_write_never_follows_predictable_symlink`, `atomic_write_removes_temp_on_error`, `concurrent_saves_have_exactly_one_winner`; proofs 8/9 |
 | F-C3 serde boundary (depth/`1e999`/UTF-8) | Fixed: iterative hand byte-scanner (cap 10000, strict number grammar, per-byte strings) | `e080f67` | `body_value_accepts_deep_nesting`, `body_value_rejects_over_go_depth`, `body_value_keeps_out_of_range_float_literal`, `body_value_coerces_invalid_utf8`, `first_value_end_rejects_bad_json` |
@@ -10671,3 +10671,207 @@ RSS-after, is the discriminator: the body Vec is freed
 before the response is written, so RSS-after returns to
 baseline either way; parity case 52 measured the same
 wired side as RSS-after, go +192 KiB / rs +80 KiB.)
+
+### M6b.10 Fix loop 2 (2026-11-06, head `e79c220`)
+
+Round-2 re-reviews (technical PASS-WITH-NITS, safety
+PASS-WITH-NITS, red-team BLOCKING) of fix loop 1. The
+parent DECIDED the B1 disagreement in favour of the
+red-team fix (defer the capped read behind the gates)
+over the technical/safety "record only" advice — the
+fix keeps the memory bound AND matches Go's 401/429/403,
+so no deviation record was needed. Commits are on
+`feat/rust-m6b-webui`, unpushed. Supersedes the R4/B1/B-1
+row and the F-B8 row of §M6b.9 (both annotated there).
+
+#### Disposition table
+
+| Finding | Disposition | Commit | Verification |
+|---|---|---|---|
+| B1 (red-team BLOCKING; tech N-NEW1; safety L-3) over-cap body 400s before auth/rate-limit/Origin | FIXED by deferring, not removing: `handle_hyper` passes the unread `Incoming` stream through `dispatch` into `dispatch_api`, where rate-limit → auth → Origin run on headers first and the capped (1 MiB+1) read happens afterwards, inside the 30s timeout — Go's order (`server.go:258-276` middleware, `MaxBytesReader` in-handler `server.go:642-643`). The bound stays: proof 11 re-run below (wired +6,436 KiB vs neutered +71,600 KiB). No deviation record remains for the ordering | `e1dbc39` | `over_cap_body_without_token_is_401`, `over_cap_body_with_bad_origin_is_403`, `over_cap_body_when_rate_limited_is_429`; parity 56/57/58/62 (all MATCH) |
+| B2 (red-team BLOCKING) no timeout on the pre-dispatch body read | FIXED: the body read + route run inside one `tokio::time::timeout(API_TIMEOUT, …)` in `dispatch_api` (Go's `apiTimeout` wraps the handler INCLUDING `decodeBody`, `server.go:436-470`, 30s → 503 `timeout`). Slow-drip now 503s at ~30s on both sides | `e1dbc39` | `slow_drip_body_times_out_at_30s` (real-time 31s test); parity 61 (Go 503 in 30.1s, Rust 503 in 30.2s) |
+| B3 (red-team BLOCKING) F-B8 "unfixable at the hyper layer" is false | FIXED (knobs) + honestly recorded (residuals): `Builder::max_headers(10_000)` + `max_buf_size(1 MiB)` set in `serve_on`. The exact byte-cap-equivalent count (262,144) was tried first and REJECTED on measurement: it costs ~14 MB touched memory on EVERY request (proof 11 wired +18,904 KiB vs +4,624 KiB in loop 1); 10,000 covers ~50 KB+ of minimal header lines at ~560 KB. Residuals: >10,000 headers → hyper 431 where Go accepts (pinned by `more_than_max_headers_is_431`); TE-gzip 501 and long-URI 414 remain unfixable at the hyper layer (see §M6b.6) | `e1dbc39` + `e79c220` (10k bound) | `many_headers_are_accepted`, `huge_single_header_is_accepted`, `more_than_max_headers_is_431`, `transfer_encoding_gzip_is_hyper_400`; parity 59/60 |
+| N1 (red-team Low) "33-job fails fast" misstates the code | FIXED wording in §M6b.6 (this file) — the 33rd job IS created (202), the store exceeds the cap; nothing fails. The PR draft line lives outside the repo: the parent must correct it there (flagged in the handoff, not in a file) | (docs, this loop) | `chats.rs:393-401` (`create` breaks out of the evict loop and returns `Ok(job)`) |
+| N2 (red-team Low) draft WS-origin line stale | No file in the repo carries the draft line (§M6b.6 already records the gorilla 403 bytes correctly since loop 1); flagged in the handoff for the parent to correct the draft. No code change | — | §M6b.6 WS entry; `screencast.rs` gorilla bytes |
+| N-NEW2 + safety N-4 (nits) stale `serve()` doc + dead `IDLE_TIMEOUT` | FIXED: doc now says "10s header-read timeout only (no idle timeout)"; the const is deleted (its only remaining reference was the comment about the removed wrapper) | `e1dbc39` | grep: no `IDLE_TIMEOUT` remains in `rust/` |
+| Safety N-3 (nit) `render_resp` / `read_capped_body` outside `with_recover` | FIXED by coverage: `handle_hyper` is now an outer `catch_unwind` wrapper around `handle_hyper_inner` (which includes the body read — now inside `dispatch_api` — and `render_resp`); `with_recover` still covers `dispatch`. No reachable panic trigger: `http` 1.3.1 `Builder::header` records invalid values as builder errors instead of panicking, and every header value is a fixed string, a numeric, or base64 — verified against the crate source | `e1dbc39` | `recoverer_maps_panic_to_fixed_500`, `recoverer_passes_through_ok` (unchanged); code comment at `handle_hyper` |
+| Red-team N5 (nit) flock does not retry EINTR | FIXED: `acquire_flock` loops on `EINTR`, mirroring Go's `flockExclusive` (`internal/profile/flock_unix.go:16-25`) | `e1dbc39` | existing `fail_before_flock` proof (re-run, see below) |
+| N3/N4 (red-team Low) HEAD-shell Content-Length + Date/auto-CL wire order | MEASURED (raw captures, below). N3 FIXED in code: `render_resp` now sends an explicit Content-Length on HEAD only when the body fits the 2048-byte sniff buffer (Go sends CL 71 on a small HEAD envelope, none on the 964333-byte shell). N4 RECORDED: header-name case (Go canonical vs hyper lowercase) and Date/CL/Connection order differ; byte-identical wire is unreachable at the hyper layer (`http` normalizes names to lowercase) and the difference is semantically inert — the "69/69 identical (status + headers + …)" claim is corrected here to "status + compared headers (content-type / cache-control / x-content-type-options / retry-after on 429) + canonical body" | `ef78d44` (N3) | `head_shell_has_no_content_length`, `head_small_envelope_keeps_content_length`; raw captures below |
+| Other round-2 nits | `serve()` doc is N-NEW2 above; flock EINTR is N5 above. Nothing else left open from round 2 | — | — |
+
+#### Gates at final head (`e79c220`, cue, `rustup run 1.99.1`, `CARGO_TARGET_DIR=/dev/shm/mea-m6b-fix2`, `CARGO_PROFILE_DEV_DEBUG=0`, `CARGO_PROFILE_DEV_INCREMENTAL=false`)
+
+```
+fmt exit=0
+build exit=0
+test exit=0        (793 passed, 0 failed, workspace-wide, 36 suites)
+clippy exit=0      (--workspace --all-targets -- -D warnings)
+```
+
+Before/after: 783 passed at `5fac2f5` (fix loop 1) → 793 at
+`e79c220` (+10 webui tests: 3× over-cap gates, slow-drip,
+101 headers, 500 KiB header, TE-gzip pin, 2× HEAD
+Content-Length, >10,000 headers → 431). One transient
+environmental failure on the way: a full-workspace run at
+`ef78d44` exited 101 with `StorageFull` panics in
+`castctl-telegram`'s `bot_core` tests — cue `/` was 100%
+full at that moment (sibling targets `/tmp/m6c-target`
+13G + `/tmp/m7b-target` 14G, not touched); the rerun
+with `TMPDIR=/dev/shm/mea-m6b-tmp` and logs on `/dev/shm`
+passed 792/0, and the final-head rerun passed 793/0
+after `/` recovered to 14G free on its own. No code
+change was needed for that failure.
+
+#### Extended parity (cue, final head `e79c220`, Go `castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)` vs Rust `castctl-rs`)
+
+**76/76 identical** (0 DIFF), exit 0. The 69 cases from
+§M6b.9 reran unchanged (all MATCH); the 7 new cases:
+
+```
+56-overcap-noauth:       go=401 rs=401 raw==
+57-overcap-bad-origin:   go=403 rs=403 raw==
+58-overcap-good:         go=400 rs=400 raw==
+59-head-101:             go=200 rs=200 raw=!= canon==
+60-huge-header:          go=200 rs=200 raw=!= canon==
+61-slow-drip:            go=503 rs=503 (go 503 in 30.1s, rs 503 in 30.2s)
+62-overcap-ratelimited:  go=429 rs=429
+```
+
+Run 1 of this loop was 75/76: case 61 DIFFed (Go 400 in
+0.1s, Rust 503 in 30.3s) because the probe sent a garbage
+1 KiB prefix (`x` × 1024) — Go's decoder fails invalid
+JSON at once and never waits for the body. The probe was
+corrected (both the harness and the unit test) to a
+valid-but-incomplete JSON prefix (`{"content": "` +
+`a` × 1011, an unterminated string), on which Go's
+`Decode` blocks for the rest of the value and `apiTimeout`
+503s at 30s. Lesson recorded: a slow-drip probe must send
+a prefix the decoder blocks on, not garbage.
+
+Full log: `~/workspace/tmp/m6b-parity4.log` (local copy;
+cue copy `/tmp/mea-m6b-parity4.log`).
+
+#### Raw wire captures N3/N4/TE (cue, `m6b-rawcap-fix2.py`, same fixture/token both sides)
+
+N3 — `HEAD /api/v1/nope` (valid token, shell fallthrough,
+964333-byte body on GET):
+
+```
+Go:   HTTP/1.1 200 OK / Cache-Control: no-store / Content-Type: text/html; charset=utf-8 /
+      X-Content-Type-Options: nosniff / Date: ... / Connection: close   [NO Content-Length]
+Rust: HTTP/1.1 200 OK / cache-control: no-store / content-type: text/html; charset=utf-8 /
+      x-content-type-options: nosniff / connection: close / date: ...   [NO Content-Length after ef78d44]
+```
+
+Before the fix Rust sent `content-length: 964333` here.
+Control measurement (small HEAD envelope, `HEAD
+/api/v1/status` → 405, 71-byte body): Go sends
+`Content-Length: 71`, Rust sends `content-length: 71` —
+so the rule is the 2048-byte sniff buffer, applied to
+HEAD as well as GET.
+
+N4 — `GET /api/v1/status` (valid token, small 200):
+
+```
+Go:   Cache-Control, Content-Type, X-Content-Type-Options, Date, Content-Length, Connection: close
+Rust: cache-control, content-type, x-content-type-options, connection: close, content-length, date
+```
+
+Measured differences: (a) header-name case — Go
+canonical (`Content-Type`), hyper lowercase
+(`content-type`); the `http` crate normalizes names to
+lowercase, so Go's case is unreachable at this layer.
+(b) Order — Go writes the sorted header map, then
+`Date`, then auto `Content-Length`, then `Connection`;
+hyper writes the service headers (incl. `connection:
+close`), then auto `Content-Length`, then `date` last.
+Both are semantically inert (names case-insensitive,
+order insignificant to clients). The parity claim is
+therefore corrected (see the N3/N4 row above): the
+harness compares status + the compared-header set +
+canonical body — never raw wire order or case.
+
+TE — `POST /api/v1/config/validate`, `Transfer-Encoding: gzip`:
+
+```
+Go:   HTTP/1.1 501 Not Implemented / Content-Type: text/plain; charset=utf-8 /
+      Connection: close / [body 29 bytes: `Unsupported transfer encoding`, NO Content-Length]
+Rust: HTTP/1.1 400 Bad Request / connection: close / content-length: 0 / date: ... /
+      [body 0 bytes]
+```
+
+Hyper's automatic 400 (no service involvement) vs Go's
+501 is the recorded residual in §M6b.6; no code path in
+the service can see the request to answer differently.
+
+#### Fail-before proofs re-run (cue, `m6b-proofs-fix2.sh`, 10/10 + proof 11)
+
+Same script as fix loop 1 with the repo path updated
+(`/tmp/mea-m6b-fix2-src`) and the `store-mode` sed line
+236→248 (the EINTR edit shifted `guarded.rs`); the
+proof target reuses `/dev/shm/mea-m6b-fix2` (already
+built). Each proof neuters ONE check and expects its
+pinning test to go RED, then restores (md5-verified):
+
+```
+auth-cost:   exit=101 (want !=0) fail_before_cost_is_ten restore-ok
+auth-bytes:  exit=101 (want !=0) token_length_limit_is_bytes restore-ok
+ratelimit:   exit=101 (want !=0) fail_before_rate_limit restore-ok
+origin:      exit=101 (want !=0) fail_before_origin_check restore-ok
+contain:     exit=101 (want !=0) fail_before_dotdot_escape restore-ok
+ordered:     exit=101 (want !=0) fail_before_stored_order restore-ok
+merge-r1:    exit=101 (want !=0) fail_before_r1_keep restore-ok
+store-mode:  exit=101 (want !=0) atomic_write_is_0600_and_renames restore-ok
+store-lock:  exit=101 (want !=0) fail_before_flock restore-ok
+embed-hash:  exit=101 (want !=0) bundle_hash_matches_measured_value restore-ok
+```
+
+Proof 11 (R4 body cap, RSS — `m6b-proof11.py`, VmHWM
+peak delta for one 64 MiB POST to
+`/api/v1/config/validate`, valid token): cap wired
+(`MAX_BODY_BYTES` 1 MiB+1, `MAX_HEADERS` 10,000) → 400,
+VmHWM +6,436 KiB; cap neutered (`MAX_BODY_BYTES` 1 MiB+1
+→ 1 GiB, rebuild) → 400, VmHWM +71,600 KiB (~70 MiB,
+the whole body buffered before the handler); restored
+(`server.rs` md5 `2ddbad130d0a5691054df520b80a5b44`
+matches the pre-neuter value) + rebuilt → wired binary.
+Status is 400 in both cases (the per-handler 1 MiB cap
+still rejects), so only the peak memory distinguishes
+them. NOTE: the cap now runs inside `dispatch_api`
+after the gates, not pre-dispatch — the RSS
+discrimination is unchanged, but the old "pre-dispatch
+cap" wording in the proof script's docstring is stale.
+The 262,144-header variant was measured in between:
+wired +18,904 KiB — the ~14 MB is hyper's per-request
+header slot array, which is why `MAX_HEADERS` is 10,000
+(see §M6b.6).
+
+#### Chưa kiểm chứng (carried + new)
+
+- Round-2 items carried from §M6b.7 unchanged: F-C9
+  cross-process flock (threads half proven only); F-D2
+  live WS bytes (starter always None); F-A5 non-UTF8
+  Origin; M4 cookie import/restore `None`→501; F-B5 exact
+  120s idle; F-D7 ~155s ctx-ignoring-seam edge; live
+  chats with a real Muse session; live screencast login
+  ("chưa nối", M6a).
+- Paused-clock slow-drip: a `tokio::time::pause` +
+  `advance(31s)` variant of the B2 unit test was tried
+  and REJECTED — under the paused clock hyper closes the
+  connection with an empty response (measured: 0 bytes),
+  while the same code in real time delivers the 503
+  (30.65s). The paused clock is not a faithful probe of
+  hyper's timer interaction, so the test pays the 31s in
+  real time. Mechanism of the paused-clock close was not
+  isolated (hyper internal timer ordering) — recorded,
+  not chased.
+- Long-URI 414 residual (hyper `MAX_URI_LEN` 65534):
+  recorded from hyper source (`role.rs:34,172`), no live
+  probe run (needs a >64 KiB request line; the byte
+  outcome is forced by the source).
+- CI Go status: no PR exists yet for this branch, so no
+  CI run was available to check. `.github/**` untouched.
+- The PR-draft lines for N1 ("fails fast") and N2 (WS
+  origin "403-vs-silent-close") live outside the repo;
+  the parent must correct them in the draft — flagged in
+  the fix-loop-2 handoff.
