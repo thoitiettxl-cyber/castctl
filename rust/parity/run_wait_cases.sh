@@ -22,19 +22,30 @@
 # <case>-{go,rs}.server.{log,err}, and a PASS/FAIL table on
 # stdout. Exit 0 iff every case passes.
 #
-# Verdict per case (fix loop 1, red-team F3/F4/F5):
+# Verdict per case (fix loop 1, red-team F3/F4/F5;
+# fix loop 2, round-2 R2-2/R2-3):
 # stdout bytes + stderr bytes + exit code must match, AND
 # the two server logs must agree on the WAIT SUMMARY
 # counts (history_calls/subscribes) — a read-count
 # divergence is a behaviour difference even when the
-# outputs match — AND neither driver may have been killed
-# by the 60 s watchdog (a watchdog kill is a harness
-# timeout, never a legitimate wait 124: the two are
-# recorded separately, see `run_driver`), AND each
-# server must have printed its WAIT SUMMARY with at
-# least one call (a server that died after READY prints
-# no summary and saw no calls; both drivers failing
-# identically on it would otherwise PASS).
+# outputs match — AND the per-call WAIT log lines
+# (history call limit/session_id/events, subscribe
+# delay/frames/drop) must match line for line — the
+# SUMMARY counts alone cannot see a `limit`
+# derivation difference, because the handler returns
+# the whole stage regardless of limit — AND neither
+# driver may have been killed by the 60 s watchdog (a
+# watchdog kill is a harness timeout, never a
+# legitimate wait 124: the two are recorded
+# separately, see `run_driver`), AND each server must
+# have printed its WAIT SUMMARY with at least one call
+# (a server that died after READY prints no summary
+# and saw no calls; both drivers failing identically
+# on it would otherwise PASS). The >=1-call rule
+# applies only to cases that dial: a case with
+# `"dial": false` in its JSON (e.g. a parse-error-only
+# case) never reaches a server, so 0 0 is its correct
+# outcome.
 #
 # No `set -e`: driver exit 124 (timeout cases) is an EXPECTED
 # outcome, not a script failure. Setup failures exit 1.
@@ -129,10 +140,22 @@ summary_counts() {
     sed -n 's/^WAIT SUMMARY history_calls=\([0-9][0-9]*\) subscribes=\([0-9][0-9]*\)$/\1 \2/p' "$1" | tail -1
 }
 
+# wait_lines <server-err-file>: the per-call WAIT log
+# lines (history calls + subscribes), in order. No
+# timestamps exist on these lines, so they diff
+# directly (round-2 R2-2).
+wait_lines() {
+    grep -h '^WAIT history \|^WAIT subscribe ' "$1" || true
+}
+
 for case in "$CASES"/*.json; do
     name=$(basename "$case" .json)
     cp "$case" "$OUT/$name.case.json"
     readarray -t ARGS < <(python3 -c "import json,sys; [print(a) for a in json.load(open(sys.argv[1]))['args']]" "$case")
+    # "dial": false marks a case that never dials (e.g.
+    # parse-error-only); default true. The >=1-call
+    # rule is skipped for such cases (round-2 R2-3).
+    dial=$(python3 -c "import json,sys; print(str(json.load(open(sys.argv[1])).get('dial', True)).lower())" "$case")
     start=$(date +%s)
 
     read -r srv_pid addr < <(start_server "$case" "$name-go") || exit 1
@@ -167,11 +190,24 @@ for case in "$CASES"/*.json; do
     # SUMMARY; a live server the driver never reached
     # prints 0 0. Both used to PASS (identical
     # connection-refused failures on both sides).
+    # The >=1-call rule applies only when the case
+    # dials: a case with "dial": false in its JSON
+    # never reaches a server, so 0 0 is its correct
+    # outcome (round-2 R2-3).
     [ -n "$go_sum" ] || { ok=0; reason="$reason go-server-summary-missing;"; }
     [ -n "$rs_sum" ] || { ok=0; reason="$reason rs-server-summary-missing;"; }
-    [ "$go_sum" != "0 0" ] || { ok=0; reason="$reason go-server-saw-no-calls;"; }
-    [ "$rs_sum" != "0 0" ] || { ok=0; reason="$reason rs-server-saw-no-calls;"; }
+    if [ "$dial" = true ]; then
+        [ "$go_sum" != "0 0" ] || { ok=0; reason="$reason go-server-saw-no-calls;"; }
+        [ "$rs_sum" != "0 0" ] || { ok=0; reason="$reason rs-server-saw-no-calls;"; }
+    fi
     [ "$go_sum" = "$rs_sum" ] || { ok=0; reason="$reason server-counts go=[$go_sum] rs=[$rs_sum];"; }
+    # R2-2: the per-call WAIT lines must match too —
+    # a limit/session_id difference is invisible in
+    # the SUMMARY counts (the handler returns the
+    # whole stage regardless of limit).
+    go_wait=$(wait_lines "$OUT/$name-go.server.err")
+    rs_wait=$(wait_lines "$OUT/$name-rs.server.err")
+    [ "$go_wait" = "$rs_wait" ] || { ok=0; reason="$reason server-wait-lines-differ;"; }
     if [ "$ok" = 1 ]; then
         pass=$((pass + 1))
         echo "PASS $name (exit=$(cat "$OUT/$name-go.exit"), ${elapsed}s, server history_calls/subscribes=[$go_sum])"
@@ -184,6 +220,8 @@ for case in "$CASES"/*.json; do
         echo "--- stderr diff ($name) ---"
         diff "$OUT/$name-go.err" "$OUT/$name-rs.err" | head -20 || true
         echo "--- server summaries ($name): go=[$go_sum] rs=[$rs_sum] ---"
+        echo "--- server WAIT lines diff ($name) ---"
+        diff <(wait_lines "$OUT/$name-go.server.err") <(wait_lines "$OUT/$name-rs.server.err") | head -20 || true
     fi
 done
 
