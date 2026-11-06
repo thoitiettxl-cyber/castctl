@@ -8,7 +8,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Plugin host for the castctl Rust port (M6c): plugin ABI types, discovery, shadow copy, checksums, ELF/glibc compat gate, paths, text sanitising, identity, host lifecycle, egress proxy. The dlopen loader is intentionally NOT ported (see src/loader.rs). Ported from internal/pluginhost + internal/pluginabi."
+description = "Plugin host for the castctl Rust port (M6c + M6c-b): plugin ABI types, discovery, shadow copy, checksums, ELF/glibc compat gate, paths, text sanitising, identity, host lifecycle, egress proxy, and the real .so loader (libloading in a subprocess worker, see src/loader.rs). Ported from internal/pluginhost + internal/pluginabi."
 
 [dependencies]
 castctl-log-redact = { path = "../castctl-log-redact" }
@@ -27,6 +27,10 @@ rand = { workspace = true }
 base64 = { workspace = true }
 libc = { workspace = true }
 nix = { workspace = true }
+# M6c-b: dlopen/dlsym only, used inside the worker
+# process by `src/ffi/` (the single module where
+# `unsafe` is allowed). See the workspace pin comment.
+libloading = { workspace = true }
 # Production use (shadow_copy_to_dir builds its temp
 # file with tempfile::Builder): a regular dependency,
 # not a dev-dependency.

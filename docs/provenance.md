@@ -2223,3 +2223,70 @@ from each crate's pinned `Cargo.toml` in the cue registry
 - Already-locked crates promoted by M6b with no new NOTICE
   entry: `sha2 =0.10.9` (bundle sha256), `libc` (flock),
   `http-body =1.1.0`, `tokio-tungstenite =0.30.0`.
+
+## 19. libloading — LINKED (Rust artifact only, no copied code)
+
+M6c-b (real `.so` plugin loader, crate
+`castctl-pluginhost`, `rust/castctl-pluginhost/src/ffi/`).
+Called as a dependency only; no libloading source
+code is copied into `rust/`. Exact pin in
+`rust/Cargo.toml` + `Cargo.lock` (verified on cue,
+2026-11-06; license read from the crate's pinned
+`Cargo.toml` in the cue registry).
+
+- libloading `=0.9.0` — ISC,
+  <https://github.com/nagisa/rust_libloading/>, lock
+  checksum
+  `754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60`.
+  The `dlopen`/`dlsym` primitive for the worker-side
+  loader (`ffi/load.rs`:
+  `libloading::os::unix::Library::open` with
+  RTLD_NOW|RTLD_LOCAL — Go parity; the
+  cross-platform `Library::new` is RTLD_LAZY and is
+  NOT used). Only transitive: cfg-if `=1.0.5` — MIT
+  OR Apache-2.0 (already in the lock).
+- Duplication, recorded (not resolved): the lock
+  also holds libloading `0.8.9` (checksum
+  `d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55`),
+  as a transitive of bindgen → clang-sys (build-time
+  only, for boring-sys). `cargo tree -i
+  libloading@0.9.0` shows only `castctl-pluginhost`
+  (and through it `castctl-cli` + `castctl-rs`);
+  `cargo tree -i libloading@0.8.9` shows only the
+  bindgen chain. The runtime loader uses exactly
+  0.9.0; 0.8.9 never loads a plugin. (R2 §1.1
+  predicted a single 0.9.0 if the lock resolved
+  0.8.9 → 0.9.0; it did not — bindgen pins the
+  0.8 line. No action taken: the duplicate is
+  build-time-only.)
+
+What M6c-b takes from this crate (behaviour only, no
+code): `dlopen` with explicit flags + `dlsym` symbol
+lookup. Everything around it — the ABI structs, the
+init/ABI/completeness checks in Go order, the
+never-unload rule, the worker process + framed
+protocol v2, the crash reporting — is castctl code.
+The loader design, the rejected in-process guard,
+and the verbatim tradeoff are recorded in
+`rust/PORTING.md` §M6c-b (deviations 7 + 21
+resolved there). NOTE: M6b (PR #74) merged first
+and took §18 (bcrypt), so this section was
+renumbered §18 → §19 at the rebase onto dev-rust
+`b3fbe5a` (fix loop 1).
+
+## Carried items (unresolved at the time of writing)
+
+- npm license check: not run — no license-checking tool present,
+  no `node_modules`, no installs performed. The release PR owns
+  it. Until then, `webui/dist/index.html`'s bundled npm licenses
+  are unknown; only the forked source is covered.
+- Full indirect-dependency license inventory: not generated —
+  release PR's scope (needs a license-inventory tool).
+- String-level locale diff (fork vs upstream shared keys):
+  `[UNVERIFIED]` — only top-level key overlap was compared.
+- Upstream `handshake_client.go:423/:1095` line numbers cited in
+  `internal/outbound/isolation_test.go:29`: `[UNVERIFIED]`.
+- `wireguard_conf.go` / `dialer.go` contents and `generate.sh` /
+  `compile.go` contents: import/existence level only.
+- Python `wait.py` / `conn.py` / `chat.py` line-level citation
+  checks: not done; file-level correspondence only (§4).

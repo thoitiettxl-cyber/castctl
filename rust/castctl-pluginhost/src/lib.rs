@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Licensed under the GNU General Public License v3.0 only.
 
-//! Plugin host: pure layers ported from Go, loader STOPPED.
+#![deny(unsafe_code)]
+
+//! Plugin host: pure layers ported from Go, plus the
+//! real `.so` loader (M6c-b).
 //!
 //! Go sources: `internal/pluginhost/*` + `internal/pluginabi/pluginabi.go`
 //! (all at `dev-rust` `25a124e`). No Go code was changed.
@@ -21,20 +24,31 @@
 //! | `identity` | `identity.go` | JSON-value redactor + stripped outbound hash |
 //! | `host` | `host.go` | ApplyConfig / fuse / rollback / guarded call |
 //! | `egress` | `egress.go` | Loopback egress proxy (tokio/hyper) |
-//! | `loader` | `loader_unix.go` | STOPPED: `LoaderUnavailable`, Options A/B/C |
+//! | `loader` | `loader_unix.go` | Real loader: worker + `ffi` (M6c-b) |
+//! | `worker` | — (new) | Subprocess worker + framed protocol v2 |
+//! | `ffi` | `loader_unix.go` + `callbacks_unix.go` | dlopen/dlsym + C ABI (ONLY `unsafe` module) |
 //!
-//! The dlopen loader is NOT ported: Go loads plugins with
-//! `dlopen` + a C ABI (`loader_unix.go:168`) and guards the
-//! init call with a SIGSEGV/SIGBUS signal handler around a
-//! bare `*char` method (`callbacks_unix.go:208,223,244`).
-//! There is no safe pure-Rust equivalent, and this task
-//! forbids `unsafe` outside libraries. See `loader.rs`.
+//! The dlopen loader IS ported (M6c-b): Go loads plugins
+//! with `dlopen` + a C ABI (`loader_unix.go:168`) and
+//! guards the init call with a SIGSEGV/SIGBUS signal
+//! handler around a bare `*char` method
+//! (`callbacks_unix.go:208,223,244`). The Rust port
+//! confines the `unsafe` FFI to the single `ffi` module
+//! (see its header comment for the safety boundary) and
+//! runs it ONLY inside a subprocess worker, so a plugin
+//! crash kills the worker — never the host — and is
+//! reported as `PluginCrashed`. This is deliberately
+//! stronger than Go, whose guard covers only the
+//! `host.log` method-name scan and whose host dies on
+//! any other plugin fault. See `loader.rs` and
+//! PORTING.md §M6c-b.
 
 pub mod checksum;
 pub mod compat;
 pub mod discovery;
 pub mod egress;
 pub mod error;
+pub mod ffi;
 pub mod host;
 pub mod identity;
 pub mod loader;
@@ -43,3 +57,4 @@ pub mod pluginabi;
 pub mod shadow;
 pub mod support;
 pub mod text;
+pub mod worker;

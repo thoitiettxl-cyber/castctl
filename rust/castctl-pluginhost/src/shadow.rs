@@ -337,15 +337,27 @@ fn lexical_clean(path: &Path) -> PathBuf {
     out
 }
 
+/// Test-only lock serialising every test in this
+/// process that touches the per-process shadow
+/// directory (`<root>/pid-<pid>`): `shadow_dir()`,
+/// `shadow_copy()`, and `cleanup_shadow_dir()` (via
+/// `Host::close`) all share that one directory, so
+/// a test that creates it can recreate it inside
+/// another test's cleanup-then-assert window.
+/// Observed on cue, 2026-11-06 (M6c-b final
+/// gates): `shadow_dir_is_0700` failed its
+/// `!dir.exists()` assert because a concurrent
+/// `shadow_copy` recreated the dir after
+/// `cleanup_shadow_dir()` and before the assert.
+/// M6c added this lock for the sweep test only;
+/// M6c-b extends it to every in-process toucher.
+/// Production code never takes this lock.
+#[cfg(test)]
+pub(crate) static SHADOW_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// Serialise the sweep tests: they touch the real
-    /// shadow root (only dead-pid dirs), and must not race
-    /// each other or other tests' shadow copies.
-    static SWEEP_TEST_MU: Mutex<()> = Mutex::new(());
 
     fn plugin_file(dir: &Path, id: &str, bytes: &[u8]) -> PluginFile {
         let path = dir.join(format!("{id}.so"));
@@ -389,6 +401,11 @@ mod tests {
 
     #[test]
     fn shadow_copy_refuses_symlink_and_hardlink_and_traversal() {
+        // Calls `shadow_copy` (creates the own pid
+        // dir): take the shared shadow-dir lock.
+        let _guard = SHADOW_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("shadow");
         std::fs::create_dir(&dir).unwrap();
@@ -437,7 +454,12 @@ mod tests {
 
     #[test]
     fn sweep_removes_only_dead_pid_dirs() {
-        let _guard = SWEEP_TEST_MU.lock().unwrap();
+        // Creates + removes the own pid dir: take the
+        // shared shadow-dir lock (see
+        // `SHADOW_DIR_TEST_LOCK`).
+        let _guard = SHADOW_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let root = shadow_root();
         std::fs::create_dir_all(&root).unwrap();
         // Dead pid dir (a pid that cannot exist).
@@ -470,6 +492,14 @@ mod tests {
 
     #[test]
     fn shadow_dir_is_0700() {
+        // Creates, checks, then removes the own pid
+        // dir and asserts it is gone: take the shared
+        // shadow-dir lock for the whole body, or a
+        // concurrent `shadow_copy` recreates the dir
+        // inside the cleanup-then-assert window.
+        let _guard = SHADOW_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = shadow_dir().unwrap();
         #[cfg(unix)]
         {

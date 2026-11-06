@@ -16,6 +16,10 @@ castctl-telegram = { path = "../castctl-telegram" }
 castctl-transport = { path = "../castctl-transport" }
 castctl-wait = { path = "../castctl-wait" }
 castctl-webui = { path = "../castctl-webui" }
+# M6c-b: `plugin check` runs the real Rust loader
+# through `Host::apply_config` (see `run.rs`
+# `cmd_plugin`).
+castctl-pluginhost = { path = "../castctl-pluginhost" }
 chrono = { workspace = true }
 rand = { workspace = true }
 serde_json = { workspace = true }

@@ -9,3 +9,6 @@ description = "castctl Rust port binary (M2: offline CLI surface + not-ported-ye
 [dependencies]
 castctl-cli = { path = "../castctl-cli" }
 castctl-config = { path = "../castctl-config" }
+# M6c-b: hidden `__plugin-worker` subcommand (the
+# plugin worker mode; see `src/main.rs`).
+castctl-pluginhost = { path = "../castctl-pluginhost" }
