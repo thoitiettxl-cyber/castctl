@@ -846,10 +846,8 @@ mod tests {
         // F-D4: a file truncated between the size check
         // and the read yields a partial page, not a 500:
         // the buffer stays full-length with a zero tail.
-        let dir = std::env::temp_dir().join(format!(
-            "castctl-webui-logs-trunc-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("castctl-webui-logs-trunc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("app.log");
@@ -860,5 +858,4 @@ mod tests {
         assert_eq!(buf, b"abc\0\0\0\0\0");
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 }

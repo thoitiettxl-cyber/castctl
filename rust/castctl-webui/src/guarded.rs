@@ -344,7 +344,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-
     #[test]
     fn atomic_write_never_follows_predictable_symlink() {
         // F-C2: the old fixed name `.config.json.tmp.<pid>`

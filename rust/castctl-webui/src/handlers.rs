@@ -2008,11 +2008,11 @@ fn handle_put_telegram(server: &Server, body: &[u8]) -> Result<Resp, ApiError> {
             let profile = req_string(obj, "profile")?;
             let token = req_string(obj, "token")?;
             // Go decodes JSON null into a nil slice: `null` means
-    // absent (ids unchanged), not an error.
-    let ids_raw = match obj.get("allowed_user_ids") {
-        Some(JsonValue::Null) | None => None,
-        Some(v) => Some(v.clone()),
-    };
+            // absent (ids unchanged), not an error.
+            let ids_raw = match obj.get("allowed_user_ids") {
+                Some(JsonValue::Null) | None => None,
+                Some(v) => Some(v.clone()),
+            };
             let auto_approve = req_bool(obj, "auto_approve")?;
             let auto_allow_once = req_bool(obj, "auto_allow_once")?;
             Ok((profile, token, ids_raw, auto_approve, auto_allow_once))
@@ -2600,8 +2600,7 @@ mod tests {
         // browser, interval_seconds, notify, status}
         // sorted by tag — not bare Status objects in
         // config order. Two entries, stored out of order.
-        let dir = std::env::temp_dir()
-            .join(format!("m6b-handlers-keeper2-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("m6b-handlers-keeper2-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let fixture = FIXTURE.replacen(

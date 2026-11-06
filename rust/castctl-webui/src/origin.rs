@@ -329,10 +329,7 @@ mod tests {
     fn ipv6_request_host_with_port() {
         // F-A4: Go's SplitHostPort on the request Host:
         // [::1]:8317 compares as ::1.
-        assert!(api_origin_allowed(
-            Some("http://[::1]:3000"),
-            "[::1]:8317"
-        ));
+        assert!(api_origin_allowed(Some("http://[::1]:3000"), "[::1]:8317"));
         assert!(api_origin_allowed(
             Some("http://127.0.0.1:3000"),
             "127.0.0.1:8317"
@@ -356,10 +353,6 @@ mod tests {
             Some("HTTP://127.0.0.1:3000"),
             "127.0.0.1:8317"
         ));
-        assert!(api_origin_allowed(
-            Some("HTTP://[::1]:3000"),
-            "[::1]:8317"
-        ));
+        assert!(api_origin_allowed(Some("HTTP://[::1]:3000"), "[::1]:8317"));
     }
-
 }

@@ -127,10 +127,7 @@ pub fn first_value_end(data: &[u8]) -> Option<usize> {
                     i += 1;
                     expect = Expect::ValueOrEnd;
                 }
-                b']'
-                    if expect == Expect::ValueOrEnd
-                        && stack.last() == Some(&b'[') =>
-                {
+                b']' if expect == Expect::ValueOrEnd && stack.last() == Some(&b'[') => {
                     stack.pop();
                     i += 1;
                     match value_done(&stack) {
@@ -207,9 +204,7 @@ pub fn first_value_end(data: &[u8]) -> Option<usize> {
                     } else {
                         Expect::Value
                     };
-                } else if (open == b'{' && data[i] == b'}')
-                    || (open == b'[' && data[i] == b']')
-                {
+                } else if (open == b'{' && data[i] == b'}') || (open == b'[' && data[i] == b']') {
                     stack.pop();
                     i += 1;
                     match value_done(&stack) {
@@ -387,7 +382,6 @@ mod tests {
         assert_eq!(v, decode_ordered_json(b"{\"a\": [1, 2.5, \"x\"]}").unwrap());
     }
 
-
     #[test]
     fn body_value_accepts_deep_nesting() {
         // F-C3(a): Go allows nesting to depth 10000;
@@ -418,10 +412,7 @@ mod tests {
         let JsonValue::Object(obj) = &v else {
             panic!("expected object");
         };
-        assert_eq!(
-            obj.get("n"),
-            Some(&JsonValue::Number("1e999".to_string()))
-        );
+        assert_eq!(obj.get("n"), Some(&JsonValue::Number("1e999".to_string())));
     }
 
     #[test]
@@ -475,14 +466,10 @@ mod tests {
         // Rust's from_utf8_lossy gives ONE (maximal
         // subpart).
         assert_eq!(go_coerce_lossy(b"\xe2\x82"), "\u{fffd}\u{fffd}");
-        assert_eq!(
-            go_coerce_lossy(b"a\xffb"),
-            "a\u{fffd}b"
-        );
+        assert_eq!(go_coerce_lossy(b"a\xffb"), "a\u{fffd}b");
         assert_eq!(
             String::from_utf8_lossy(b"\xe2\x82").into_owned(),
             "\u{fffd}"
         );
     }
-
 }

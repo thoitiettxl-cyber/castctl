@@ -747,10 +747,7 @@ fn ws_handshake_error(status: u16, body: &[u8]) -> Resp {
                 "Content-Type".to_string(),
                 "text/plain; charset=utf-8".to_string(),
             ),
-            (
-                "X-Content-Type-Options".to_string(),
-                "nosniff".to_string(),
-            ),
+            ("X-Content-Type-Options".to_string(), "nosniff".to_string()),
         ],
         body: body.to_vec(),
     }
@@ -897,7 +894,6 @@ pub async fn handle_ws_upgrade(
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn plain_http_ws_releases_session() {

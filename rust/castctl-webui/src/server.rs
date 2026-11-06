@@ -185,10 +185,8 @@ pub fn forbidden_resp() -> Resp {
 /// Cache-Control, X-Content-Type-Options).
 pub fn rate_limited_resp(window: Duration) -> Resp {
     let mut resp = error_resp(429, "rate_limited", "too many failed login attempts");
-    resp.headers.insert(
-        0,
-        ("Retry-After".to_string(), retry_after_seconds(window)),
-    );
+    resp.headers
+        .insert(0, ("Retry-After".to_string(), retry_after_seconds(window)));
     resp
 }
 
@@ -575,9 +573,15 @@ impl Server {
         } else {
             Vec::new()
         };
-        let resp = with_recover(
-            self.dispatch(&method, &path_raw, &path_decoded, &uri, &headers, peer, &body),
-        )
+        let resp = with_recover(self.dispatch(
+            &method,
+            &path_raw,
+            &path_decoded,
+            &uri,
+            &headers,
+            peer,
+            &body,
+        ))
         .await;
         Ok(render_resp(&method, resp))
     }
@@ -727,9 +731,7 @@ impl Server {
         match crate::handlers::route(self, method, path, uri, headers, peer, body).await {
             crate::handlers::RouteOutcome::Handled(resp) => resp,
             crate::handlers::RouteOutcome::MethodNotAllowed => method_not_allowed_resp(),
-            crate::handlers::RouteOutcome::Fallthrough => {
-                self.serve_static(path_decoded, method)
-            }
+            crate::handlers::RouteOutcome::Fallthrough => self.serve_static(path_decoded, method),
         }
     }
 
@@ -954,10 +956,7 @@ where
     };
     let obj = fold_case_keys(obj);
     for key in obj.keys() {
-        if !allowed
-            .iter()
-            .any(|a| a.eq_ignore_ascii_case(key.as_str()))
-        {
+        if !allowed.iter().any(|a| a.eq_ignore_ascii_case(key.as_str())) {
             return Err(crate::error::err_validation("invalid JSON in request body"));
         }
     }
@@ -1178,10 +1177,7 @@ mod tests {
         // live-server tests in parallel.
         static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "m6b-server-live-{}-{n}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("m6b-server-live-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("config.json"), LIVE_FIXTURE).unwrap();
@@ -1263,7 +1259,8 @@ mod tests {
 
     #[tokio::test]
     async fn recoverer_passes_through_ok() {
-        let resp = with_recover(async { envelope_resp(200, JsonValue::Number("1".to_string())) }).await;
+        let resp =
+            with_recover(async { envelope_resp(200, JsonValue::Number("1".to_string())) }).await;
         assert_eq!(resp.status, 200);
     }
 
@@ -1293,5 +1290,4 @@ mod tests {
             .is_err()
         );
     }
-
 }

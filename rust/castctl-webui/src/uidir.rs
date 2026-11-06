@@ -239,10 +239,7 @@ pub fn serve_ui_dir(config_dir: &Path, ui_dir: &str, method: &str, path: &str) -
             ui_dir_content_type(resolved.to_str().unwrap_or("")).to_string(),
         ),
         ("Cache-Control".to_string(), "no-store".to_string()),
-        (
-            "X-Content-Type-Options".to_string(),
-            "nosniff".to_string(),
-        ),
+        ("X-Content-Type-Options".to_string(), "nosniff".to_string()),
         ("Content-Length".to_string(), data.len().to_string()),
     ];
     Resp {

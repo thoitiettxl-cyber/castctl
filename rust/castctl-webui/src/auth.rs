@@ -119,7 +119,6 @@ mod tests {
         assert!(hash.starts_with("$2b$10$"), "hash was {hash}");
     }
 
-
     #[test]
     fn verify_truncates_over_72_bytes() {
         // F-A1: Go's CompareHashAndPassword truncates a
