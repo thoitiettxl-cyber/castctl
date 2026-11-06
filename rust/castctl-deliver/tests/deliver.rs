@@ -220,11 +220,7 @@ fn token_ok() -> Box<castctl_deliver::wake::FetchAccessTokenFn> {
 /// can prove which identity the wake used.
 type WakeSeen = Arc<Mutex<(Option<String>, Option<String>, Option<String>)>>;
 
-fn wake_ok(
-    seen: WakeSeen,
-    status: i64,
-    body: Value,
-) -> Box<WakeFn> {
+fn wake_ok(seen: WakeSeen, status: i64, body: Value) -> Box<WakeFn> {
     Box::new(move |client, cookies, token, vm_id| {
         let seen = Arc::clone(&seen);
         let body = body.clone();

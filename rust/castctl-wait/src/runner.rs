@@ -77,9 +77,8 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 pub const HISTORY_READ_FLOOR: Duration = Duration::from_millis(100);
 
 /// The future returned by [`Subscriber::subscribe_raw`].
-pub type SubscribeRawFuture<'a> = Pin<
-    Box<dyn Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send + 'a>,
->;
+pub type SubscribeRawFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send + 'a>>;
 
 /// One subscribe-capable connection: the gateway narrowed
 /// to what the Runner uses (Go `runner.go` `Subscriber`).
@@ -1585,12 +1584,7 @@ mod tests {
     }
 
     impl HistoryReader for QueueHistory {
-        fn read_history(
-            &self,
-            _limit: usize,
-            _cancel: &Cancel,
-        ) -> HistoryReadFuture<'_>
-        {
+        fn read_history(&self, _limit: usize, _cancel: &Cancel) -> HistoryReadFuture<'_> {
             let mut resps = self.resps.lock().expect("lock");
             *self.calls.lock().expect("lock") += 1;
             let resp = if resps.len() > 1 {
@@ -1686,8 +1680,7 @@ mod tests {
             _method: &'a str,
             opts: SubscribeOptions,
             handler: &'a mut dyn SubscribeHandler,
-        ) -> SubscribeRawFuture<'a>
-        {
+        ) -> SubscribeRawFuture<'a> {
             let is_check = opts.max_records == 50;
             if is_check {
                 *self.check_calls.lock().expect("lock") += 1;
@@ -2301,12 +2294,7 @@ mod tests {
     }
 
     impl HistoryReader for CancelPollHistory {
-        fn read_history(
-            &self,
-            _limit: usize,
-            _cancel: &Cancel,
-        ) -> HistoryReadFuture<'_>
-        {
+        fn read_history(&self, _limit: usize, _cancel: &Cancel) -> HistoryReadFuture<'_> {
             let mut calls = self.calls.lock().expect("lock");
             *calls += 1;
             if *calls <= 2 {
@@ -2335,12 +2323,7 @@ mod tests {
     }
 
     impl HistoryReader for CancelOnReadHistory {
-        fn read_history(
-            &self,
-            _limit: usize,
-            _cancel: &Cancel,
-        ) -> HistoryReadFuture<'_>
-        {
+        fn read_history(&self, _limit: usize, _cancel: &Cancel) -> HistoryReadFuture<'_> {
             let mut calls = self.calls.lock().expect("lock");
             *calls += 1;
             if *calls == self.cancel_at {
@@ -2362,12 +2345,7 @@ mod tests {
     }
 
     impl HistoryReader for BlockHistory {
-        fn read_history(
-            &self,
-            _limit: usize,
-            _cancel: &Cancel,
-        ) -> HistoryReadFuture<'_>
-        {
+        fn read_history(&self, _limit: usize, _cancel: &Cancel) -> HistoryReadFuture<'_> {
             *self.calls.lock().expect("lock") += 1;
             Box::pin(std::future::pending())
         }
@@ -2888,12 +2866,7 @@ mod tests {
     }
 
     impl HistoryReader for LagReadHistory {
-        fn read_history(
-            &self,
-            _limit: usize,
-            _cancel: &Cancel,
-        ) -> HistoryReadFuture<'_>
-        {
+        fn read_history(&self, _limit: usize, _cancel: &Cancel) -> HistoryReadFuture<'_> {
             let mut calls = self.calls.lock().expect("lock");
             *calls += 1;
             match *calls {
@@ -4657,10 +4630,7 @@ mod tests {
     /// when the record is a terminal one.
     type TerminalPred<'a> = Option<&'a mut dyn FnMut(&[u8]) -> bool>;
 
-    fn ended_without_terminal(
-        records: &[Vec<u8>],
-        pred: TerminalPred<'_>,
-    ) -> bool {
+    fn ended_without_terminal(records: &[Vec<u8>], pred: TerminalPred<'_>) -> bool {
         let Some(pred) = pred else {
             return true;
         };
@@ -4702,7 +4672,10 @@ mod tests {
         let foreign = br#"{"event":"task.status","payload":{"status":"completed","root_agent_id":"R2","agent_id":"R2"}}"#.to_vec();
         let suspect = br#"{"event":"task.status","payload":{"status":"idle","root_agent_id":"R","agent_id":"R"}}"#.to_vec();
         assert!(
-            ended_without_terminal(std::slice::from_ref(&running), Some(&mut terminal_predicate())),
+            ended_without_terminal(
+                std::slice::from_ref(&running),
+                Some(&mut terminal_predicate())
+            ),
             "running-only records must end without terminal"
         );
         assert!(
@@ -4713,7 +4686,10 @@ mod tests {
             "DONE after running must count as a terminal"
         );
         assert!(
-            ended_without_terminal(std::slice::from_ref(&completed), Some(&mut terminal_predicate())),
+            ended_without_terminal(
+                std::slice::from_ref(&completed),
+                Some(&mut terminal_predicate())
+            ),
             "DONE before any running must not count as a terminal"
         );
         assert!(

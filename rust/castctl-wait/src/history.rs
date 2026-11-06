@@ -45,17 +45,12 @@ use crate::Cancel;
 /// `cancel`: when it is set, return promptly and never
 /// block past it (Go `history.go` deadline contract).
 /// The future returned by [`HistoryReader::read_history`].
-pub type HistoryReadFuture<'a> = Pin<
-    Box<dyn Future<Output = Result<(Vec<Value>, bool), TransportError>> + Send + 'a>,
->;
+pub type HistoryReadFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(Vec<Value>, bool), TransportError>> + Send + 'a>>;
 
 pub trait HistoryReader: Send + Sync {
     /// Read one window of at most `limit` events.
-    fn read_history(
-        &self,
-        limit: usize,
-        cancel: &Cancel,
-    ) -> HistoryReadFuture<'_>;
+    fn read_history(&self, limit: usize, cancel: &Cancel) -> HistoryReadFuture<'_>;
 }
 
 /// One history-read failure, classified for the caller.
@@ -494,12 +489,7 @@ pub(crate) mod tests {
     }
 
     impl HistoryReader for ScriptHistory {
-        fn read_history(
-            &self,
-            limit: usize,
-            _cancel: &Cancel,
-        ) -> HistoryReadFuture<'_>
-        {
+        fn read_history(&self, limit: usize, _cancel: &Cancel) -> HistoryReadFuture<'_> {
             self.calls.lock().unwrap().push(limit);
             let resp = {
                 let mut by_limit = self.by_limit.lock().unwrap();
