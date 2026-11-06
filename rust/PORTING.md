@@ -11587,6 +11587,31 @@ direct PID afterwards, ports verified closed; `/tmp/m7c-plugin/`
 fixtures were gone on cue and were rebuilt from source
 (echo `f80d065a…`).
 
+### M7c rebase-3 onto `dev-rust` `3532d02` (PR #80 docs-only `rust/README.md`, 2026-11-06)
+
+Rebase clean 7/7, zero conflicts; head `1266ceb`; diff 28 files, only
+`rust/**` + `docs/e2e.md`. PR #80 is docs-only (1 file, +83, no code),
+so no M7c code changed. Item 1 confirmed unchanged by spot-check (cue,
+debug binary sha256 `c3ff2000…`): still 10 `stub(ctx)` call-sites at the
+same `run.rs` lines, dispatch 40 wired / 5 stub; top-level `--help`
+byte-identical to Go, `--version` stamp-only, 9 subcommand `--help`
+exit 0, 0 `not ported yet` lines. Item 8 stays FAIL (`cmd_update`
+still `Err(stub(ctx))`; Rust `update --dry-run` exit 1 vs Go exit 0).
+Gates at the new head (cue, `cargo +1.99.1`,
+`CARGO_TARGET_DIR=/tmp/m7c-rb3-target`, deleted after): fmt 0; build 0;
+test 0 — **1471 passed, 0 failed** (68 suites); clippy
+`--all-targets -- -D warnings` 0. Incidents: round-1 gates used the
+default PATH `go` wrapper (1.26.8, `GOTOOLCHAIN=local`), so
+`loader_live` failed 22/22 (`go.mod requires go >= 1.27.3`) and
+`cargo test`'s default fail-fast stopped the run at
+`castctl-pluginhost` (743 passed) — my env mistake, same class as the
+writer's fix-loop-1 incident, not a regression; re-ran with the correct
+env (`PATH=/usr/local/go/bin`, `GOTOOLCHAIN=auto`, `--no-fail-fast`)
+→ 1471/0, identical to rebase-2. Disk fell to 1.4G free mid-gate (my
+17G target dir + two other sessions' stale 13G + 17G target dirs, none
+touched); recovered to 33G free after cleanups; cue left clean, no M7c
+processes or listeners.
+
 ## M6b — Web UI port (crate `castctl-webui`, 2026-11-05/06)
 
 Port of Go `internal/webui` (49 API routes + static shell +

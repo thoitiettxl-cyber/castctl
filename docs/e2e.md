@@ -377,3 +377,43 @@ captures kept locally, not published).
   from source (`examples/plugin/echo`, `/tmp/m7c-crash-src/crashcall` /
   `crashinit`) into `/tmp/m7c-rb2-plugin/`; echo sha256 `f80d065a…`,
   crashcall `e1246664…`, crashinit `6dc4f2d6…`.
+
+### Rebase-3 (base `dev-rust` `3532d02`, 2026-11-06 — PR #80 docs-only `rust/README.md`)
+
+Rebased cleanly (`git rebase origin/dev-rust`, 7/7, zero conflicts; head
+`1266ceb`, diff 28 files, only `rust/**` + `docs/e2e.md`). PR #80 is
+docs-only (1 file `rust/README.md`, +83, no code — verified by
+`git log` + `git diff --stat 2ae2f14..3532d02`), so no M7c code changed
+and no item re-measurement was needed beyond the confirmations below.
+
+- **Item 1 — confirmed unchanged (spot-check, debug binary).** Static:
+  still 10 `stub(ctx)` call-sites in `run.rs` at the same lines as
+  rebase-2 (618, 626, 804, 868, 883, 918, 1009, 1054, 1097, 1147), so
+  dispatch stays **40 wired / 5 stub top-level**. Live spot-check (cue,
+  debug binary sha256 `c3ff2000…`): top-level `--help` stdout + stderr
+  byte-identical to Go; `--version` differs stamp-only (`castctl 0.9.0`
+  vs `castctl 0.9.0 (1396697 2026-11-04T21:38:36Z)`); 9 subcommand
+  `--help` (`status`, `send`, `chat`, `watch`, `fs`, `profile`,
+  `telegram`, `keeper`, `update`) all exit 0; `not ported yet` lines in
+  help: 0.
+- **Item 8 — still FAIL (stub).** `cmd_update` still `Err(stub(ctx))`;
+  live: Rust `update --dry-run` exit 1 with the stub line on stderr, vs
+  Go exit 0 `up to date`. PR #80 touched no code, so no wiring change
+  was expected.
+- **Gates (cue, `cargo +1.99.1`, `CARGO_TARGET_DIR=/tmp/m7c-rb3-target`,
+  deleted after): fmt 0; build 0; test 0 — 1471 passed, 0 failed
+  (68 suites); clippy `--all-targets -- -D warnings` 0.**
+- **Incidents:** (1) My round-1 gates script used the default PATH `go`
+  (wrapper 1.26.8, `GOTOOLCHAIN=local`), so `loader_live` failed 22/22
+  (`go.mod requires go >= 1.27.3`) and `cargo test`'s default fail-fast
+  stopped the run at `castctl-pluginhost` (743 passed at that point) —
+  the same env mistake as the writer's fix-loop-1 incident, not a code
+  regression. Re-ran with the correct env (`PATH=/usr/local/go/bin`,
+  `GOTOOLCHAIN=auto`, `--no-fail-fast`): **1471 passed, 0 failed**,
+  identical to rebase-2. (2) Disk fell to 1.4G free (99%) during the
+  round-1 gate — my 17G target dir plus two other sessions' stale
+  13G + 17G target dirs; no other session's files were touched, and
+  disk recovered to 18G then 33G free as other sessions cleaned up.
+  Target + source deleted after the gate; cue left clean, no M7c
+  processes or listeners.
+
