@@ -361,10 +361,8 @@ impl EgressProxy {
         // a dial racing task cleanup still refuses
         // deterministically. Errors are ignored: the
         // listener may already be gone.
-        let _ = nix::sys::socket::shutdown(
-            self.inner.listener_fd,
-            nix::sys::socket::Shutdown::Both,
-        );
+        let _ =
+            nix::sys::socket::shutdown(self.inner.listener_fd, nix::sys::socket::Shutdown::Both);
         self.inner.shutdown.notify_waiters();
         // Abort live tunnels first: their copy tasks own
         // both ends, so aborting drops (closes) them.

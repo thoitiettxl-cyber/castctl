@@ -209,10 +209,9 @@ impl StdFetcher {
                         // the SNI name is lowercased (the
                         // stored host keeps its case for
                         // the Go-exact redirect policy).
-                        let name = rustls::pki_types::ServerName::try_from(
-                            host.to_ascii_lowercase(),
-                        )
-                        .map_err(|_| http_error_for(url, TransportErrorKind::Tls))?;
+                        let name =
+                            rustls::pki_types::ServerName::try_from(host.to_ascii_lowercase())
+                                .map_err(|_| http_error_for(url, TransportErrorKind::Tls))?;
                         let conn = rustls::ClientConnection::new(tls_client_config(), name)
                             .map_err(|_| http_error_for(url, TransportErrorKind::Tls))?;
                         let mut tls = rustls::StreamOwned::new(conn, stream);
@@ -412,9 +411,9 @@ fn read_response_head_deadline(
                     // Content-Length; the old code took
                     // the last value and ignored parse
                     // failures (red-team note, fix loop 1).
-                    let len: u64 = value.parse().map_err(|_| {
-                        http_error_for(url, TransportErrorKind::Transport)
-                    })?;
+                    let len: u64 = value
+                        .parse()
+                        .map_err(|_| http_error_for(url, TransportErrorKind::Transport))?;
                     if let Some(prev) = content_length
                         && prev != len
                     {
@@ -955,8 +954,8 @@ mod tests {
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
         let url = parse_url("http://127.0.0.1/x").unwrap();
-        let err = read_response_head_deadline(&mut stream, &url, Duration::from_millis(200))
-            .unwrap_err();
+        let err =
+            read_response_head_deadline(&mut stream, &url, Duration::from_millis(200)).unwrap_err();
         assert_eq!(err.class, "timeout");
     }
 }

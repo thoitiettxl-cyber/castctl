@@ -147,7 +147,11 @@ fn canonical_json(v: &Value) -> Result<String, PluginHostError> {
             keys.sort();
             let mut parts = Vec::with_capacity(keys.len());
             for k in keys {
-                parts.push(format!("{}:{}", escape_go_string(k), canonical_json(&map[k])?));
+                parts.push(format!(
+                    "{}:{}",
+                    escape_go_string(k),
+                    canonical_json(&map[k])?
+                ));
             }
             Ok(format!("{{{}}}", parts.join(",")))
         }
@@ -338,10 +342,7 @@ mod tests {
             canonical_json(&serde_json::json!(1.5e-7)).unwrap(),
             "1.5e-7"
         );
-        assert_eq!(
-            canonical_json(&serde_json::json!(1e21)).unwrap(),
-            "1e+21"
-        );
+        assert_eq!(canonical_json(&serde_json::json!(1e21)).unwrap(), "1e+21");
         // HTML escaping matches Go's Marshal default.
         assert_eq!(
             canonical_json(&Value::String("a<b>&".to_string())).unwrap(),
@@ -371,10 +372,12 @@ mod tests {
     fn stripped_outbound_hash_pins() {
         let h = stripped_outbound_hash(br#"{"a":1}"#).unwrap();
         assert_eq!(h.len(), 64);
-        assert!(h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert!(
+            h.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
         let raw = hex::encode(Sha256::digest(br#"{"password":"x","a":1}"#));
-        let stripped =
-            stripped_outbound_hash(br#"{"password":"x","a":1}"#).unwrap();
+        let stripped = stripped_outbound_hash(br#"{"password":"x","a":1}"#).unwrap();
         assert_ne!(stripped, raw);
     }
 }

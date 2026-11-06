@@ -1056,10 +1056,16 @@ fn release_json_null_fields_take_go_code2_paths() {
             let mut s = server.state.lock().unwrap();
             let raw = String::from_utf8(s.release_json_override.take().unwrap()).unwrap();
             let raw = raw
-                .replace("PLACEHOLDER_SUMS", &format!("{base}/download/checksums.txt"))
+                .replace(
+                    "PLACEHOLDER_SUMS",
+                    &format!("{base}/download/checksums.txt"),
+                )
                 .replace("PLACEHOLDER_SUMS_SIZE", &sums_size.to_string())
                 .replace("PLACEHOLDER_SIZE", &asset_size.to_string())
-                .replace("PLACEHOLDER", &format!("{base}/download/castctl_0.6.4_linux_amd64.tar.gz"));
+                .replace(
+                    "PLACEHOLDER",
+                    &format!("{base}/download/castctl_0.6.4_linux_amd64.tar.gz"),
+                );
             s.release_json_override = Some(raw.into_bytes());
         }
         let (_tmp, target) = make_target(work.path(), "0.6.3");
@@ -1100,9 +1106,8 @@ fn release_json_null_fields_take_go_code2_paths() {
         let (server, _new) = standard_server(work.path());
         {
             let mut s = server.state.lock().unwrap();
-            s.release_json_override = Some(
-                br#"{"tag_name":null,"draft":false,"prerelease":false,"assets":[]}"#.to_vec(),
-            );
+            s.release_json_override =
+                Some(br#"{"tag_name":null,"draft":false,"prerelease":false,"assets":[]}"#.to_vec());
         }
         let (_tmp, target) = make_target(work.path(), "0.6.3");
         let (opts, _out) = base_opts(&target, &server);
@@ -1172,9 +1177,8 @@ fn no_asset_fails_closed() {
     let (server, _new) = standard_server(work.path());
     {
         let mut s = server.state.lock().unwrap();
-        s.release_json_override = Some(
-            br#"{"tag_name":"v0.6.4","draft":false,"prerelease":false,"assets":[]}"#.to_vec(),
-        );
+        s.release_json_override =
+            Some(br#"{"tag_name":"v0.6.4","draft":false,"prerelease":false,"assets":[]}"#.to_vec());
     }
     let (_tmp, target) = make_target(work.path(), "0.6.3");
     let (opts, _out) = base_opts(&target, &server);
@@ -1324,7 +1328,9 @@ fn redirect_loop_refuses_after_four_follows() {
     {
         let mut s = server.state.lock().unwrap();
         let base = server.base();
-        s.redirect_location = Some(format!("{base}/repos/thoitiettxl-cyber/castctl/releases/latest"));
+        s.redirect_location = Some(format!(
+            "{base}/repos/thoitiettxl-cyber/castctl/releases/latest"
+        ));
     }
     let (_tmp, target) = make_target(work.path(), "0.6.3");
     let (opts, _out) = base_opts(&target, &server);

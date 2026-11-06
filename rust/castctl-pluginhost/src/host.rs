@@ -1272,7 +1272,9 @@ mod tests {
         };
         let env = Envelope {
             ok: true,
-            result: Some(crate::pluginabi::raw_value(&serde_json::to_value(reg).unwrap())),
+            result: Some(crate::pluginabi::raw_value(
+                &serde_json::to_value(reg).unwrap(),
+            )),
             error: None,
         };
         serde_json::to_vec(&env).unwrap()
@@ -1848,7 +1850,9 @@ mod tests {
             };
             let env = serde_json::to_vec(&Envelope {
                 ok: true,
-                result: Some(crate::pluginabi::raw_value(&serde_json::to_value(reg).unwrap())),
+                result: Some(crate::pluginabi::raw_value(
+                    &serde_json::to_value(reg).unwrap(),
+                )),
                 error: None,
             })
             .unwrap();
@@ -2076,7 +2080,9 @@ mod tests {
         };
         let env = serde_json::to_vec(&Envelope {
             ok: true,
-            result: Some(crate::pluginabi::raw_value(&serde_json::to_value(reg).unwrap())),
+            result: Some(crate::pluginabi::raw_value(
+                &serde_json::to_value(reg).unwrap(),
+            )),
             error: None,
         })
         .unwrap();
@@ -2397,7 +2403,9 @@ mod tests {
                 };
                 let env = Envelope {
                     ok: true,
-                    result: Some(crate::pluginabi::raw_value(&serde_json::to_value(reg).unwrap())),
+                    result: Some(crate::pluginabi::raw_value(
+                        &serde_json::to_value(reg).unwrap(),
+                    )),
                     error: None,
                 };
                 return Ok(serde_json::to_vec(&env).unwrap());
@@ -2993,7 +3001,11 @@ mod tests {
         let guard = logs.lock().unwrap();
         assert_eq!(guard.len(), 1);
         assert!(!guard[0].contains('\n') && !guard[0].contains('\r'));
-        assert!(guard[0].contains("FORGED-LINE-9999"), "content lost: {:?}", guard[0]);
+        assert!(
+            guard[0].contains("FORGED-LINE-9999"),
+            "content lost: {:?}",
+            guard[0]
+        );
         drop(guard);
         // Secret-keyed shapes in the message are redacted
         // like every other plugin-text surface.
@@ -3022,8 +3034,7 @@ mod tests {
     #[test]
     fn parse_envelope_missing_ok_and_null_result() {
         // No "ok" + error: plugin error, not "invalid envelope".
-        let err = parse_envelope(br#"{"error":{"code":"boom","message":"m"}}"#, "x")
-            .unwrap_err();
+        let err = parse_envelope(br#"{"error":{"code":"boom","message":"m"}}"#, "x").unwrap_err();
         assert_eq!(err.to_string(), "plugin \"x\": boom: m");
         assert!(!is_error_envelope(b"not json"));
         assert!(is_error_envelope(

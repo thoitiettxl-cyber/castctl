@@ -367,10 +367,7 @@ pub fn parse_url(raw: &str) -> Option<ParsedUrl> {
     // splitting: they must never reach the request line
     // or the `Host:` header (header injection via a
     // hostile release JSON or redirect `Location`).
-    if raw
-        .bytes()
-        .any(|b| b < 0x20 || b == 0x7f || b == b' ')
-    {
+    if raw.bytes().any(|b| b < 0x20 || b == 0x7f || b == b' ') {
         return None;
     }
     let (scheme, rest) = raw.split_once("://")?;

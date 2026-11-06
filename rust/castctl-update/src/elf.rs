@@ -192,11 +192,7 @@ mod tests {
             );
         }
         assert!(
-            validate_elf_bytes(
-                &header_version(EM_X86_64, ET_EXEC, ELFCLASS64, 1),
-                "amd64"
-            )
-            .is_ok()
+            validate_elf_bytes(&header_version(EM_X86_64, ET_EXEC, ELFCLASS64, 1), "amd64").is_ok()
         );
     }
 }

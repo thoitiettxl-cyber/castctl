@@ -78,8 +78,7 @@ impl PartialEq for Envelope {
     fn eq(&self, other: &Self) -> bool {
         self.ok == other.ok
             && self.error == other.error
-            && self.result.as_ref().map(|r| r.get())
-                == other.result.as_ref().map(|r| r.get())
+            && self.result.as_ref().map(|r| r.get()) == other.result.as_ref().map(|r| r.get())
     }
 }
 
@@ -538,8 +537,7 @@ mod tests {
         let env: Envelope = serde_json::from_str(r#"{"ok":true}"#).unwrap();
         assert!(env.result.is_none());
         // Object result: raw bytes verbatim (key order kept).
-        let env: Envelope =
-            serde_json::from_str(r#"{"ok":true,"result":{"b":1,"a":2}}"#).unwrap();
+        let env: Envelope = serde_json::from_str(r#"{"ok":true,"result":{"b":1,"a":2}}"#).unwrap();
         assert_eq!(env.result.as_ref().unwrap().get(), r#"{"b":1,"a":2}"#);
     }
 }
