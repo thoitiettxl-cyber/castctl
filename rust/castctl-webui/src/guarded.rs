@@ -225,7 +225,7 @@ pub fn write_file_atomic(path: &Path, data: &[u8]) -> Result<String, String> {
     // birthday bound makes a collision negligible, but the
     // loop is the correct shape — never fall back to
     // truncating an existing file).
-    use rand::Rng;
+    use rand::RngExt;
     let mut tmp_path = PathBuf::new();
     let mut last_err = String::new();
     for _ in 0..10 {

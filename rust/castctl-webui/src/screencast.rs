@@ -735,24 +735,6 @@ pub fn handle_screencast_ws_http(
     }
 }
 
-/// The WebSocket upgrade path (`handleScreencastWS` in Go),
-/// called by `server::handle_ws_upgrade` after the
-/// rate-limit check. Order mirrors Go exactly: session
-/// token first (missing → 401, unknown → 401, busy →
-/// 409), then the nil-starter gate (503, AFTER consume —
-/// the token is burned first), then the origin check
-/// inside the upgrade, then the starter with the 15-minute
-/// timeout and the terminal report.
-///
-/// In M6b the starter is always `None`, so the upgrade
-/// itself is unreachable from the CLI: `ws_pre_upgrade`
-/// returns the 503 before any handshake bytes are written.
-/// The upgrade half below exists so a future starter
-/// wiring has the full path: RFC 6455 handshake
-/// (`Sec-WebSocket-Accept`), the origin check at upgrade
-/// time, the starter run, the terminal report, and the
-/// session release when the socket closes.
-
 /// Gorilla `Upgrader.returnError` bytes (no custom
 /// `Error` set on Go's upgrader): `Sec-WebSocket-Version:
 /// 13` + `http.Error` (plain-text status text + "\n").
@@ -773,6 +755,24 @@ fn ws_handshake_error(status: u16, body: &[u8]) -> Resp {
         body: body.to_vec(),
     }
 }
+
+/// The WebSocket upgrade path (`handleScreencastWS` in Go),
+/// called by `server::handle_ws_upgrade` after the
+/// rate-limit check. Order mirrors Go exactly: session
+/// token first (missing → 401, unknown → 401, busy →
+/// 409), then the nil-starter gate (503, AFTER consume —
+/// the token is burned first), then the origin check
+/// inside the upgrade, then the starter with the 15-minute
+/// timeout and the terminal report.
+///
+/// In M6b the starter is always `None`, so the upgrade
+/// itself is unreachable from the CLI: `ws_pre_upgrade`
+/// returns the 503 before any handshake bytes are written.
+/// The upgrade half below exists so a future starter
+/// wiring has the full path: RFC 6455 handshake
+/// (`Sec-WebSocket-Accept`), the origin check at upgrade
+/// time, the starter run, the terminal report, and the
+/// session release when the socket closes.
 
 pub async fn handle_ws_upgrade(
     server: &std::sync::Arc<crate::server::Server>,

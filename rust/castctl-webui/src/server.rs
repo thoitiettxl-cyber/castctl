@@ -1132,7 +1132,7 @@ mod tests {
             version: "0.9.0".to_string(),
             listen_addr: "127.0.0.1:0".to_string(),
             token_hash,
-            has_token: <redacted>
+            has_token: true,
             bundle_sha256: crate::static_shell::bundle_sha256(),
             ui_dir: None,
             cookies_files: Vec::new(),
@@ -1207,15 +1207,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn over_cap_body_to_unknown_api_path_is_400() {
-        // R4 fail-before: with the cap wired, a 2 MiB body
-        // to an unknown API path is the fixed 400 BEFORE
-        // dispatch. With the cap removed (MAX_BODY_BYTES
-        // neutered huge), the body is read whole, dispatch
-        // falls through to the shell, and this test goes
-        // RED with 200 — that is the proof the cap, not
-        // the per-handler decode cap, is doing the work.
+    async fn over_cap_body_to_unknown_api_path_falls_through() {
+        // R4, corrected: an unknown API path never reads a
+        // body (`route_reads_body` is false), so a 2 MiB
+        // body falls through to the shell 200 — exactly as
+        // Go does (Go never reads the body for an unknown
+        // path either). The earlier version of this test
+        // asserted 400 on a false premise (that unknown
+        // paths read the body first); the pre-dispatch cap
+        // changes MEMORY, not status, for these paths, and
+        // is proven by the RSS proof in §M6b.9, not here.
         let resp = live_server_case("POST", "/api/v1/nope", 2 * 1024 * 1024).await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn over_cap_body_to_body_route_is_400() {
+        // R4: a 2 MiB body to a body-taking route is the
+        // fixed 400 before dispatch. (Neutering
+        // MAX_BODY_BYTES leaves this 400 in place via the
+        // per-handler 1 MiB cap, so this test pins the
+        // outcome, not the pre-dispatch cap itself — the
+        // cap is proven by the RSS proof in §M6b.9.)
+        let resp = live_server_case("POST", "/api/v1/config/validate", 2 * 1024 * 1024).await;
         assert!(resp.starts_with("HTTP/1.1 400"), "{resp}");
         assert!(resp.contains("invalid JSON in request body"), "{resp}");
     }

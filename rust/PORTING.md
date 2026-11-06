@@ -10152,12 +10152,24 @@ on cue); logs `/tmp/proof-*.log` on cue.
     → `bundle_hash_matches_measured_value` red
     (`static_shell.rs:72`). The byte-identical test compares
     `include_bytes!` output to the dist file on disk.
-11. body cap (fix loop 1, R4): `MAX_BODY_BYTES` 1 MiB+1 →
-    1 GiB → `over_cap_body_to_unknown_api_path_is_400` red
-    (`server.rs:86`). The proof script now verifies every
-    sed actually changed the file (md5 before/after) and
-    verifies every restore; a no-op sed aborts that proof
-    instead of silently passing (N3).
+11. body cap (fix loop 1, R4): NOT a status test — no
+    status distinguishes the pre-dispatch cap from the
+    per-handler caps, so neutering `MAX_BODY_BYTES` cannot
+    turn any status test red. The proof is the RSS
+    observation in §M6b.9: a 64 MiB body to a body-taking
+    route keeps VmRSS ~flat with the cap wired and grows
+    it by ~64 MiB with the cap neutered huge (rebuild each
+    way). The earlier status-test version of this proof
+    asserted 400 for an unknown path on the false premise
+    that unknown paths read the body; unknown paths fall
+    through to the shell 200 on both sides (pinned by
+    `over_cap_body_to_unknown_api_path_falls_through`),
+    and the 400 outcome on body-taking routes is pinned
+    by `over_cap_body_to_body_route_is_400`.
+    The proof script now verifies every sed actually
+    changed the file (md5 before/after) and verifies every
+    restore; a no-op sed aborts that proof instead of
+    silently passing (N3).
 
 ### M6b.6 Deviations and approximations (deliberate, with Go citations)
 
@@ -10179,7 +10191,7 @@ on cue); logs `/tmp/proof-*.log` on cue.
   previous code wrapped the whole connection in
   `timeout(IDLE_TIMEOUT, conn)` — a lifetime cap from
   accept that killed connections at 120s even mid-request
-  (F-B5, fixed in `ce1ced7`; live probe in §M6b.9).
+  (F-B5, fixed in `3dd0f00`; live probe in §M6b.9).
 - [DEVIATION — edge] `ChatSendResult.replies`: Go nil →
   `null` (no omitempty); Rust's empty `Vec` renders `[]`.
   Unreachable in M6b (no live send; the seam always
@@ -10191,7 +10203,7 @@ on cue); logs `/tmp/proof-*.log` on cue.
 - [DEVIATION — edge] Bare zoned IPv6 in a WireGuard conf
   (`fe80::1%eth0` without brackets): Go accepts, Rust
   rejects. `parse_wireguard_conf` edge, no parity case.
-- WS upgrade origin failure (F-D2, fixed in `168dcbb`):
+- WS upgrade origin failure (F-D2, fixed in `326947c`):
   Go writes 403 plain-text `Forbidden\n` (gorilla
   `Upgrader.returnError`: `Sec-WebSocket-Version: 13` +
   `http.Error`; verified in gorilla/websocket v1.5.3
@@ -10280,7 +10292,7 @@ on cue); logs `/tmp/proof-*.log` on cue.
   may reuse the connection. Client-visible only as a
   reconnect on the next request.
 - Screencast session strand (F-D6 / safety M-1, FIXED in
-  `a6f5501`, not a live deviation): the plain-HTTP
+  `5db7ca9`, not a live deviation): the plain-HTTP
   `/screencast/ws` Ok branch (starter present) returned
   503 without releasing the consumed session, leaving
   the profile Busy forever. The `ws_pre_upgrade`
@@ -10383,44 +10395,44 @@ recorded here with its evidence. Commits are on
 
 | Finding | Disposition | Commit | Verification |
 |---|---|---|---|
-| R1 GET /keeper wrong document | Fixed: wrapper + sort by tag | `1d6d042` | `keeper_view_wraps_and_sorts_by_tag`; parity keeper ≥2 entries |
-| R3 route on raw path | Fixed: dispatch/routes on raw path, decode only for serving | `5280597` | `hyper_uri_path_keeps_raw_encoding`; parity encoded paths |
-| R2 HEAD routed as GET | Fixed: HEAD→GET mapping removed; `render_resp` HEAD branch kept deliberately (Go net/http body suppression, not routing) | `176bf1c` | live HEAD parity rows |
-| R4/B1/B-1 unbounded body before auth | Fixed: pre-dispatch read capped at 1 MiB+1; no body read on bodyless routes | `6734517` | `over_cap_body_to_unknown_api_path_is_400` (+ fail-before proof 11), `over_cap_body_to_wrong_method_is_405`, `body_on_get_is_ignored` |
-| M2 no panic recoverer | Fixed: `with_recover` → fixed 500, mirroring Go recoverer | `fd70cea` | `recoverer_maps_panic_to_fixed_500`, `recoverer_passes_through_ok` |
-| F-C2/F-C7/F-C8 + tech M1 + safety L-1 temp/lock files | Fixed: random suffix + O_EXCL, mode 0600 at creation, temp removed on every error path; lock no truncate, no chmod-after-open | `0e36d2f` | `atomic_write_never_follows_predictable_symlink`, `atomic_write_removes_temp_on_error`, `concurrent_saves_have_exactly_one_winner`; proofs 8/9 |
-| F-C3 serde boundary (depth/`1e999`/UTF-8) | Fixed: iterative hand byte-scanner (cap 10000, strict number grammar, per-byte strings) | `54ffa44` | `body_value_accepts_deep_nesting`, `body_value_rejects_over_go_depth`, `body_value_keeps_out_of_range_float_literal`, `body_value_coerces_invalid_utf8`, `first_value_end_rejects_bad_json` |
-| F-C4 typed decode case-sensitive | Fixed: fold keys by ASCII-lowercase (first position, last wins) before allow-list + extractor | `54ffa44` | `decode_body_typed_is_case_insensitive` |
-| F-C5 `allowed_user_ids:null` → 400 | Fixed: null means absent (Go nil slice); audit found no other nullable request-body slice field | `54ffa44` | parity PUT /settings/telegram null ids |
-| F-B4 ui_dir duplicate Content-Type | Fixed: asset headers built directly (4 Go headers), not from `shell_headers()` | `a6f5501` | `asset_has_exactly_one_content_type` |
-| F-D6 + safety M-1 screencast session leak | Fixed: release on the plain-HTTP Ok arm; recorded in §M6b.6 as FIXED, not a live deviation | `a6f5501` | `plain_http_ws_releases_session` |
-| F-B5 idle timeout lifetime cap | Fixed: wrapper removed; hyper per-request header read timeout (10s) is the closest correct form; residual 10s-vs-120s recorded in §M6b.6 | `ce1ced7` | live idle probe (see below) |
-| F-A1 73-byte token | Fixed: `verify_token` pre-check deleted (Go truncates on verify; crate truncates identically); rejection stays in `hash_token`; doc comment corrected | `3966f66` | `verify_truncates_over_72_bytes`; parity 73-byte token |
-| F-A2 mapped-v6 loopback | Fixed: `to_ipv4_mapped().is_loopback()` (Go `To4()`) | `3966f66` | `mapped_v6_loopback_is_loopback`; parity mapped-v6 origin |
-| F-A3 empty Origin | Fixed at `dispatch_api` call site (empty = absent, Go short-circuit); `api_origin_allowed` unchanged | `3966f66` | parity empty Origin |
-| F-A4 IPv6 request host | Fixed: `split_host_port` mirroring Go `SplitHostPort` (incl. error → keep as-is) | `3966f66` | `ipv6_request_host_with_port` |
-| Safety L-2 uppercase-scheme origins | Recorded, not fixed: premise refuted — `HTTP://...` parses and the loopback rule applies; fail-closed either way | `3966f66` | `uppercase_scheme_origin_is_parsed` |
-| F-D2 WS origin failure | Fixed: gorilla `returnError` bytes (403 `Forbidden\n` + 3 headers); same shape for the two 400 branches (`Bad Request\n`) | `168dcbb` | live WS parity (starter None → unobservable in M6b) |
-| F-C6 config invalid UTF-8 | Fixed: `go_coerce_lossy` (per-byte FFFD) instead of strict `from_utf8` | `bc1f243` | (parity: stored config with invalid UTF-8 → 200) |
-| F-B6 invalid-escape 400 | Fixed body to `400 Bad Request`; residual (no Content-Length, `Connection: close`) recorded in §M6b.6 | `bc1f243` | parity invalid-escape row |
-| F-B7 ui_dir open-then-verify | Fixed: `File::open` + `f.metadata()` + read from the fd, asset + shell paths | `bc1f243` | existing uidir tests (asset content unchanged) |
-| F-D4 log truncation race | Fixed: `read_full_or_eof` (Go `ReadAt` tolerates EOF, zero tail, full-length buffer) | `bc1f243` | (unit test: truncated file → partial page, not 500 — TBD) |
-| F-D5 U+FFFD maximal-subpart | Fixed: log tail uses `go_coerce_lossy` (per-byte) | `bc1f243` | (unit test: truncated sequence → one FFFD per byte — TBD) |
-| F-C9 concurrent-save test sequential | Fixed (threads half): `concurrent_saves_have_exactly_one_winner`; cross-process half recorded unproven in §M6b.7 | `0e36d2f` | threads test |
+| R1 GET /keeper wrong document | Fixed: wrapper + sort by tag | `53b6ec7` | `keeper_view_wraps_and_sorts_by_tag`; parity keeper ≥2 entries |
+| R3 route on raw path | Fixed: dispatch/routes on raw path, decode only for serving | `b2ac8f4` | `hyper_uri_path_keeps_raw_encoding`; parity encoded paths |
+| R2 HEAD routed as GET | Fixed: HEAD→GET mapping removed; `render_resp` HEAD branch kept deliberately (Go net/http body suppression, not routing) | `f733641` | live HEAD parity rows |
+| R4/B1/B-1 unbounded body before auth | Fixed: pre-dispatch read capped at 1 MiB+1; no body read on bodyless routes. Correction found in verification: the original pinning test asserted 400 for an unknown path on the false premise that unknown paths read the body — they fall through to the shell 200 on both sides (Go parity), so the test now pins 200 there and pins the 400 on a body-taking route instead; the cap itself is proven by the RSS proof, not a status test | `0ead12c` (code) + test correction in this loop | `over_cap_body_to_unknown_api_path_falls_through`, `over_cap_body_to_body_route_is_400`, `over_cap_body_to_wrong_method_is_405`, `body_on_get_is_ignored`, RSS proof §M6b.9 |
+| M2 no panic recoverer | Fixed: `with_recover` → fixed 500, mirroring Go recoverer | `349443d` | `recoverer_maps_panic_to_fixed_500`, `recoverer_passes_through_ok` |
+| F-C2/F-C7/F-C8 + tech M1 + safety L-1 temp/lock files | Fixed: random suffix + O_EXCL, mode 0600 at creation, temp removed on every error path; lock no truncate, no chmod-after-open | `756859c` | `atomic_write_never_follows_predictable_symlink`, `atomic_write_removes_temp_on_error`, `concurrent_saves_have_exactly_one_winner`; proofs 8/9 |
+| F-C3 serde boundary (depth/`1e999`/UTF-8) | Fixed: iterative hand byte-scanner (cap 10000, strict number grammar, per-byte strings) | `e080f67` | `body_value_accepts_deep_nesting`, `body_value_rejects_over_go_depth`, `body_value_keeps_out_of_range_float_literal`, `body_value_coerces_invalid_utf8`, `first_value_end_rejects_bad_json` |
+| F-C4 typed decode case-sensitive | Fixed: fold keys by ASCII-lowercase (first position, last wins) before allow-list + extractor | `e080f67` | `decode_body_typed_is_case_insensitive` |
+| F-C5 `allowed_user_ids:null` → 400 | Fixed: null means absent (Go nil slice); audit found no other nullable request-body slice field | `e080f67` | parity PUT /settings/telegram null ids |
+| F-B4 ui_dir duplicate Content-Type | Fixed: asset headers built directly (4 Go headers), not from `shell_headers()` | `5db7ca9` | `asset_has_exactly_one_content_type` |
+| F-D6 + safety M-1 screencast session leak | Fixed: release on the plain-HTTP Ok arm; recorded in §M6b.6 as FIXED, not a live deviation | `5db7ca9` | `plain_http_ws_releases_session` |
+| F-B5 idle timeout lifetime cap | Fixed: wrapper removed; hyper per-request header read timeout (10s) is the closest correct form; residual 10s-vs-120s recorded in §M6b.6 | `3dd0f00` | live idle probe (see below) |
+| F-A1 73-byte token | Fixed: `verify_token` pre-check deleted (Go truncates on verify; crate truncates identically); rejection stays in `hash_token`; doc comment corrected | `96941ab` | `verify_truncates_over_72_bytes`; parity 73-byte token |
+| F-A2 mapped-v6 loopback | Fixed: `to_ipv4_mapped().is_loopback()` (Go `To4()`) | `96941ab` | `mapped_v6_loopback_is_loopback`; parity mapped-v6 origin |
+| F-A3 empty Origin | Fixed at `dispatch_api` call site (empty = absent, Go short-circuit); `api_origin_allowed` unchanged | `96941ab` | parity empty Origin |
+| F-A4 IPv6 request host | Fixed: `split_host_port` mirroring Go `SplitHostPort` (incl. error → keep as-is) | `96941ab` | `ipv6_request_host_with_port` |
+| Safety L-2 uppercase-scheme origins | Recorded, not fixed: premise refuted — `HTTP://...` parses and the loopback rule applies; fail-closed either way | `96941ab` | `uppercase_scheme_origin_is_parsed` |
+| F-D2 WS origin failure | Fixed: gorilla `returnError` bytes (403 `Forbidden\n` + 3 headers); same shape for the two 400 branches (`Bad Request\n`) | `326947c` | live WS parity (starter None → unobservable in M6b) |
+| F-C6 config invalid UTF-8 | Fixed: `go_coerce_lossy` (per-byte FFFD) instead of strict `from_utf8` | `5c67148` | (parity: stored config with invalid UTF-8 → 200) |
+| F-B6 invalid-escape 400 | Fixed body to `400 Bad Request`; residual (no Content-Length, `Connection: close`) recorded in §M6b.6 | `5c67148` | parity invalid-escape row |
+| F-B7 ui_dir open-then-verify | Fixed: `File::open` + `f.metadata()` + read from the fd, asset + shell paths | `5c67148` | existing uidir tests (asset content unchanged) |
+| F-D4 log truncation race | Fixed: `read_full_or_eof` (Go `ReadAt` tolerates EOF, zero tail, full-length buffer) | `5c67148` | `read_full_or_eof_tolerates_truncation` (`eb6a3ab`) |
+| F-D5 U+FFFD maximal-subpart | Fixed: log tail uses `go_coerce_lossy` (per-byte) | `5c67148` | `go_coerce_lossy_is_per_byte` (`eb6a3ab`) |
+| F-C9 concurrent-save test sequential | Fixed (threads half): `concurrent_saves_have_exactly_one_winner`; cross-process half recorded unproven in §M6b.7 | `756859c` | threads test |
 | F-B8 hyper framing limits | Recorded as [DEVIATION] in §M6b.6 (unfixable at hyper layer) | — | — |
 | F-D8 replies nil→null vs `[]` | Record verified accurate (§M6b.6); `note`/`approvals_count` follow-on recorded | — | — |
-| Safety N-1 `logs.rs` `.expect()` | Fixed: explicit `let Some(path) else return err_internal()` | `bc1f243` | — |
-| N-2 dead `MintError::Random` | Fixed: variant + 500 arm removed (`fill_bytes` infallible) | `bc1f243` | — |
-| Tech M3 stale run.rs comment | Fixed: chats are `Some(failing)` → 502, not `None` → 501 | `bc1f243` | — |
-| Tech M4 cookie import/restore `None` | Recorded: rationale at the wiring + §M6b.7 (no faithful failing stand-in) | `bc1f243` | — |
-| Tech N1 plugins comment | Fixed: Go uses `map[string]any` (sorted keys), not a struct | `2f61e6f` | — |
-| Tech N2 serve_on idle comment | Fixed with F-B5 rewrite | `ce1ced7` | — |
+| Safety N-1 `logs.rs` `.expect()` | Fixed: explicit `let Some(path) else return err_internal()` | `5c67148` | — |
+| N-2 dead `MintError::Random` | Fixed: variant + 500 arm removed (`fill_bytes` infallible) | `5c67148` | — |
+| Tech M3 stale run.rs comment | Fixed: chats are `Some(failing)` → 502, not `None` → 501 | `5c67148` | — |
+| Tech M4 cookie import/restore `None` | Recorded: rationale at the wiring + §M6b.7 (no faithful failing stand-in) | `5c67148` | — |
+| Tech N1 plugins comment | Fixed: Go uses `map[string]any` (sorted keys), not a struct | `5f8d0e4` | — |
+| Tech N2 serve_on idle comment | Fixed with F-B5 rewrite | `3dd0f00` | — |
 | Tech N3 proof script stale | Fixed: seds target `MAX_TOKEN_BYTES` / current `.mode(0o600)` lines; md5 before/after + restore verification; proof 11 added | — (script `~/workspace/tmp/m6b-proofs.sh`) | re-run 11/11 on cue |
-| Tech N4 429 `Retry-After` order | Fixed: inserted first (Go sets it before `writeError`) | `2f61e6f` | parity 429 header order |
-| Tech N5 plaintext token in scope | Fixed: `drop(token)` after `token_hash` (Go clears `single.WebUI.Token`) | `bc1f243` | — |
+| Tech N4 429 `Retry-After` order | Fixed: inserted first (Go sets it before `writeError`) | `5f8d0e4` | parity 429 header order |
+| Tech N5 plaintext token in scope | Fixed: `drop(token)` after `token_hash` (Go clears `single.WebUI.Token`) | `5c67148` | — |
 | Tech M5 "47 API routes" | Fixed: Go registers 49 (`server.go:258 routes()` counted); the draft file is untracked scratch — fix on disk only, not committed | — (untracked `research-go-webui.md`) | count: 49 `api.*` registrations |
-| static_shell stale `body_for_go_compat` | Fixed: reference is `render_resp` | `2f61e6f` | — |
-| duration `unwrap_or(0)` coercion | Fixed: checked int/frac parse, overflow → invalid-duration error (Go errors on overflow) | `2f61e6f` | — |
+| static_shell stale `body_for_go_compat` | Fixed: reference is `render_resp` | `5f8d0e4` | — |
+| duration `unwrap_or(0)` coercion | Fixed: checked int/frac parse, overflow → invalid-duration error (Go errors on overflow) | `5f8d0e4` | — |
 | R4 residual: bodyless-route connection reuse | Recorded in §M6b.6 (hyper closes; Go may reuse) | — | — |
 
 #### Gates at final head (TBD — cue runs after the last fix commit)
