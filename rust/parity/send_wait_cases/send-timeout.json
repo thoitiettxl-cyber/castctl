@@ -1,0 +1,41 @@
+{
+ "args": [
+  "--wait",
+  "2",
+  "--ack-timeout",
+  "5",
+  "hello"
+ ],
+ "name": "send-timeout",
+ "script": {
+  "history_stages": [
+   {
+    "events": [],
+    "from_call": 1,
+    "has_more": false
+   },
+   {
+    "events": [
+     {
+      "event_name": "message.user",
+      "payload": {
+       "display_text": "hello"
+      },
+      "seq": 5
+     }
+    ],
+    "from_call": 3,
+    "has_more": false
+   }
+  ],
+  "subscribes": [
+   {
+    "delay_ms": 0,
+    "drop": false,
+    "end_body": false,
+    "frames": []
+   }
+  ],
+  "thread": ""
+ }
+}

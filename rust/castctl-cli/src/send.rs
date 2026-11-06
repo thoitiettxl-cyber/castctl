@@ -209,7 +209,9 @@ fn build_send_json(
     if let Some(last) = res.replies.last() {
         pairs.push(("reply", send_reply_json(last)));
     }
-    if let Some(rows) = downloads {
+    if let Some(rows) = downloads
+        && !rows.is_empty()
+    {
         pairs.push(("downloads", JsonValue::Array(rows)));
     }
     if let Some(e) = download_error
@@ -427,6 +429,9 @@ async fn send_download_step(
     };
     let resources = dedup_resources(&events, user_seq);
     match save_resources(rt, &resources, dir, false).await {
+        // Go `sendWaitJSON.Downloads` is `omitempty`: an
+        // empty row list is omitted, not `"downloads":[]`.
+        Ok(rows) if rows.is_empty() => Ok((None, None)),
         Ok(rows) => Ok((Some(rows.iter().map(save_row_json).collect()), None)),
         Err(e) => {
             let code = flow_err_code(&e);
@@ -738,6 +743,27 @@ mod tests {
             "{s}"
         );
         assert!(!s.contains("\"reply\""), "{s}");
+    }
+
+    #[test]
+    fn build_send_json_empty_downloads_omitted() {
+        // Go `sendWaitJSON.Downloads` is `omitempty`: zero
+        // rows omit the key entirely (harness
+        // send-download-empty caught the Rust side
+        // emitting `"downloads":[]`).
+        let got = build_send_json(
+            true,
+            true,
+            7,
+            3,
+            &done_result(),
+            false,
+            90,
+            Some(vec![]),
+            None,
+        );
+        let s = compact(&got);
+        assert!(!s.contains("\"downloads\""), "{s}");
     }
 
     #[test]

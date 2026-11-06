@@ -402,6 +402,8 @@ type waitState struct {
 	script         *waitScript
 	historyCalls   int
 	subscribeCalls int
+	streams        int
+	mediaGets      []string
 }
 
 // waitHistoryResult is the chat.history result object the
@@ -453,6 +455,31 @@ func waitHandler(st *waitState) gatewaytest.Handler {
 		path := req.Path
 		if i := strings.IndexByte(path, '?'); i >= 0 {
 			path = path[:i]
+		}
+		if path == "/chat/stream" {
+			// The stream open itself is answered by the
+			// canned default handler below (its {} result
+			// opens the stream); this arm only counts and
+			// logs it, so a fixture that never opens a
+			// stream cannot pass as a send turn.
+			st.mu.Lock()
+			st.streams++
+			st.mu.Unlock()
+			fmt.Fprintf(os.Stderr, "WAIT stream chat.stream\n")
+			return handler().Handle(req, service)
+		}
+		if strings.HasPrefix(path, "/media/raw/") {
+			// Media bytes for send --download (and any
+			// future download step): fixed bytes, so the
+			// byte_len check in the case fixture is
+			// deterministic.
+			st.mu.Lock()
+			st.mediaGets = append(st.mediaGets, path)
+			st.mu.Unlock()
+			fmt.Fprintf(os.Stderr, "WAIT media %s\n", path)
+			return gatewaytest.Response{Frames: []*pb.ServiceFrame{
+				gatewaytest.ResponseFrame(0, 200, []byte("hello-bytes"), true),
+			}}
 		}
 		switch path {
 		case "/chat/history":
@@ -588,6 +615,8 @@ func runServeWait(scriptPath string) error {
 	st.mu.Lock()
 	fmt.Fprintf(os.Stderr, "WAIT SUMMARY history_calls=%d subscribes=%d\n",
 		st.historyCalls, st.subscribeCalls)
+	fmt.Fprintf(os.Stderr, "WAIT SUMMARY streams=%d media=%v\n",
+		st.streams, st.mediaGets)
 	st.mu.Unlock()
 	return nil
 }

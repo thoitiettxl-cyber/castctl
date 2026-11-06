@@ -1,0 +1,21 @@
+{
+ "args": [
+  "--wait",
+  "5",
+  "--ack-timeout",
+  "1",
+  "hello"
+ ],
+ "name": "send-no-ack",
+ "script": {
+  "history_stages": [
+   {
+    "events": [],
+    "from_call": 1,
+    "has_more": false
+   }
+  ],
+  "subscribes": [],
+  "thread": ""
+ }
+}

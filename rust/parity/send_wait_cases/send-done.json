@@ -1,0 +1,66 @@
+{
+ "args": [
+  "--wait",
+  "5",
+  "--ack-timeout",
+  "5",
+  "hello"
+ ],
+ "name": "send-done",
+ "script": {
+  "history_stages": [
+   {
+    "events": [],
+    "from_call": 1,
+    "has_more": false
+   },
+   {
+    "events": [
+     {
+      "event_name": "message.user",
+      "payload": {
+       "display_text": "hello"
+      },
+      "seq": 5
+     }
+    ],
+    "from_call": 3,
+    "has_more": false
+   },
+   {
+    "events": [
+     {
+      "event_name": "message.user",
+      "payload": {
+       "display_text": "hello"
+      },
+      "seq": 5
+     },
+     {
+      "event_name": "message.assistant",
+      "payload": {
+       "display_text": "Hello",
+       "status": "completed"
+      },
+      "seq": 6
+     }
+    ],
+    "from_call": 5,
+    "has_more": false
+   }
+  ],
+  "subscribes": [
+   {
+    "delay_ms": 0,
+    "drop": false,
+    "end_body": true,
+    "frames": [
+     "{\"event\":\"task.status\",\"seq\":6,\"payload\":{\"status\":\"running\",\"root_agent_id\":\"R\",\"agent_id\":\"R\"}}",
+     "{\"event_name\":\"message.assistant\",\"seq\":6,\"payload\":{\"status\":\"completed\",\"display_text\":\"Hello\"}}",
+     "{\"event\":\"task.status\",\"seq\":7,\"payload\":{\"status\":\"completed\",\"root_agent_id\":\"R\",\"agent_id\":\"R\"}}"
+    ]
+   }
+  ],
+  "thread": ""
+ }
+}
