@@ -11,8 +11,10 @@
 //! PORTING.md; the deferred blocks are stored raw and rendered
 //! verbatim.
 //!
-//! No `unsafe`, no `unwrap()`/`expect()` on external input. Every
-//! public item cites its Go source at base `dev-rust` `85a8d5e`.
+//! No `unwrap()`/`expect()` on external input. One `unsafe` call:
+//! `libc::flock` in `toggle.rs` (the inter-process config lock, which
+//! has no safe std equivalent). Every public item cites its Go source
+//! at base `dev-rust` `85a8d5e`.
 
 pub mod blocks;
 pub mod config;
@@ -27,6 +29,9 @@ pub mod log;
 pub mod oserr;
 pub mod profile;
 pub mod telegram;
+pub mod toggle;
 
 pub use blocks::LoginCredential;
 pub use errors::{ConfigError, config_error};
+pub use profile::{ResolvedSetting, resolve_auto_allow_once, resolve_auto_approve};
+pub use toggle::{set_auto_allow_once, set_auto_approve};

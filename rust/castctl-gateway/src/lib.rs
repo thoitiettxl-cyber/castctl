@@ -35,6 +35,8 @@ pub mod cookies;
 pub mod dial;
 pub mod framing;
 pub mod gateway;
+pub mod invite;
+pub mod media;
 pub mod noise;
 pub mod proto;
 pub mod shared;
@@ -55,6 +57,8 @@ pub use gateway::{
     Body, DEFAULT_DOWNLOAD_TIMEOUT, DEFAULT_PING_TIMEOUT, DEFAULT_REQUEST_TIMEOUT, Gateway,
     RequestOptions, WRITE_DEADLINE, uuid_v4,
 };
+pub use invite::{WAKE_TIMEOUT, create_invite, fetch_invite, redeem_invite_code, wake_vm};
+pub use media::media_path;
 pub use noise::{
     HANDSHAKE_TIMEOUT, InitiatorHandshake, MAX_NOISE_MESSAGE, NOISE_PARAMS, NoiseTransport,
     ResponderHandshake,

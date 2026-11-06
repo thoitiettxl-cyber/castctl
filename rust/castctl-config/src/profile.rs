@@ -13,6 +13,7 @@
 //! `ensureInlineTag`, `parseAutoAllowOnceValue`,
 //! `resolveCookiesFile`).
 
+use crate::config_errorf;
 use crate::configlocation::Getenv;
 use crate::errors::{ConfigError, config_error, invalid_profile_error};
 use crate::fingerprint::{
@@ -87,6 +88,111 @@ pub fn resolve_profile_name(flag: Option<&str>, getenv: Getenv<'_>) -> Result<St
         return validate_profile_name(go_trim_space(&env));
     }
     Ok(DEFAULT_PROFILE_NAME.to_string())
+}
+
+/// One toggle resolved with its source, so the caller can
+/// print it later (e.g. auto-approve status output).
+/// Source: `internal/profile/autoapprove.go:11`
+/// (`ResolvedSetting`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSetting {
+    /// Whether the toggle is on.
+    pub enabled: bool,
+    /// Where the value came from: `"flag"`,
+    /// `"env MUSE_AUTO_APPROVE"` / `"env MUSE_AUTO_ALLOW_ONCE"`,
+    /// or `"config <path>"`.
+    pub source: String,
+}
+
+/// `ResolveAutoApprove` (`autoapprove.go:37`): per-call
+/// flag > `MUSE_AUTO_APPROVE` > config. Defaults off.
+/// The env word tables are exact: on = always/on/1/true/
+/// yes; off = off/0/false/no/never/"" (empty counts as
+/// off). An unrecognised env word is a config error
+/// naming the raw env value. The config value counts only
+/// when it is exactly `"always"` (after lower+trim).
+pub fn resolve_auto_approve(
+    flag: Option<bool>,
+    env: Option<&str>,
+    cfg: Option<&Profile>,
+) -> Result<ResolvedSetting, ConfigError> {
+    if let Some(flag) = flag {
+        return Ok(ResolvedSetting {
+            enabled: flag,
+            source: "flag".to_string(),
+        });
+    }
+    if let Some(env) = env {
+        let v = go_lower(&go_trim_space(env));
+        return match v.as_str() {
+            "always" | "on" | "1" | "true" | "yes" => Ok(ResolvedSetting {
+                enabled: true,
+                source: "env MUSE_AUTO_APPROVE".to_string(),
+            }),
+            "off" | "0" | "false" | "no" | "never" | "" => Ok(ResolvedSetting {
+                enabled: false,
+                source: "env MUSE_AUTO_APPROVE".to_string(),
+            }),
+            _ => Err(config_errorf!(
+                "MUSE_AUTO_APPROVE must be always or off, not {}",
+                go_quote(env)
+            )),
+        };
+    }
+    match cfg {
+        None => Ok(ResolvedSetting {
+            enabled: false,
+            source: "config".to_string(),
+        }),
+        Some(cfg) => Ok(ResolvedSetting {
+            enabled: go_lower(&go_trim_space(&cfg.auto_approve)) == "always",
+            source: format!("config {}", cfg.config_file),
+        }),
+    }
+}
+
+/// `ResolveAutoAllowOnce` (`autoapprove.go:66`): per-call
+/// flag > `MUSE_AUTO_ALLOW_ONCE` > config. Defaults off.
+/// Env on = on/1/true/yes/always; off =
+/// off/0/false/no/never/"". The config value is a bool.
+pub fn resolve_auto_allow_once(
+    flag: Option<bool>,
+    env: Option<&str>,
+    cfg: Option<&Profile>,
+) -> Result<ResolvedSetting, ConfigError> {
+    if let Some(flag) = flag {
+        return Ok(ResolvedSetting {
+            enabled: flag,
+            source: "flag".to_string(),
+        });
+    }
+    if let Some(env) = env {
+        let v = go_lower(&go_trim_space(env));
+        return match v.as_str() {
+            "on" | "1" | "true" | "yes" | "always" => Ok(ResolvedSetting {
+                enabled: true,
+                source: "env MUSE_AUTO_ALLOW_ONCE".to_string(),
+            }),
+            "off" | "0" | "false" | "no" | "never" | "" => Ok(ResolvedSetting {
+                enabled: false,
+                source: "env MUSE_AUTO_ALLOW_ONCE".to_string(),
+            }),
+            _ => Err(config_errorf!(
+                "MUSE_AUTO_ALLOW_ONCE must be on or off, not {}",
+                go_quote(env)
+            )),
+        };
+    }
+    match cfg {
+        None => Ok(ResolvedSetting {
+            enabled: false,
+            source: "config".to_string(),
+        }),
+        Some(cfg) => Ok(ResolvedSetting {
+            enabled: cfg.auto_allow_once,
+            source: format!("config {}", cfg.config_file),
+        }),
+    }
 }
 
 /// `BaseDir` (`profile.go:80`): `Join(home, ".config", "castctl")`,
