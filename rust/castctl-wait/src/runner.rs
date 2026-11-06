@@ -2444,41 +2444,48 @@ mod tests {
 
     #[tokio::test]
     async fn runner_settle_pending_prefers_ctx_err() {
-        let hist = Arc::new(QueueHistory::new(vec![history_ok(vec![
-            user_ev(10),
-            asst(11, "completed", "x", None),
-        ])]));
-        // `settle_pending` never dials; the dial is only
-        // here because `Runner::new` requires one (Go
-        // `runner.go:294`).
-        let sub = Arc::new(FakeSubscriber::new(vec![]));
-        let mut runner = Runner::new(Config {
-            after_seq: 10,
-            has_after_seq: true,
-            dial: Some(sub.dial()),
-            history: Some(hist),
-            ..Config::default()
-        })
-        .expect("config");
-        let cancel = Cancel::new();
-        runner
-            .waiter
-            .feed(&task_ev("completed", "R", "R", 11, Some(json!(2))), None)
-            .await;
-        // Live baseline: a fresh context settles and the
-        // waiter returns Done.
-        runner
-            .settle_pending(&cancel, "completed")
-            .await
-            .expect("settle must succeed");
-        assert!(runner.waiter.result().is_some());
-        assert_eq!(runner.waiter.result().expect("done").kind, WaitKind::Done);
-        // Cancelled context: the same settle returns the
-        // cancellation, not a settle result.
-        let cancel2 = Cancel::new();
-        cancel2.set();
-        let err = runner.settle_pending(&cancel2, "completed").await;
-        assert!(matches!(err, Err(RunError::Cancelled)), "err = {err:?}");
+        // Go `TestRunnerSettlePendingPrefersCtxErr`: a
+        // non-conforming HistoryReader that returns a
+        // transport error after the context died must not
+        // mask the cancellation — `settle_pending`
+        // returns Cancelled, on both the replies path and
+        // the failed-terminal path. One FRESH runner per
+        // status: a second settle on the same runner
+        // would hit the interval gate (loop-2 F8) and
+        // return Ok, which is correct Go behaviour, not
+        // a ctx preference — the earlier port did a live
+        // settle first on one runner and failed exactly
+        // there.
+        for status in ["idle", "interrupted"] {
+            let err_resp = HistoryResp {
+                events: Vec::new(),
+                has_more: false,
+                err: Some(TransportError::ConnectionError {
+                    message: "transport down".to_string(),
+                }),
+            };
+            let hist = Arc::new(QueueHistory::new(vec![err_resp]));
+            let sub = Arc::new(FakeSubscriber::new(vec![]));
+            let mut runner = Runner::new(Config {
+                after_seq: 10,
+                has_after_seq: true,
+                dial: Some(sub.dial()),
+                history: Some(hist),
+                ..Config::default()
+            })
+            .expect("config");
+            runner
+                .waiter
+                .feed(&task_ev(status, "R", "R", 11, Some(json!(2))), None)
+                .await;
+            let cancel = Cancel::new();
+            cancel.set();
+            let err = runner.settle_pending(&cancel, status).await;
+            assert!(
+                matches!(err, Err(RunError::Cancelled)),
+                "{status}: err = {err:?} (ctx.Err() wins over the transport error)"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -2562,10 +2569,24 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn runner_plumbs_auto_approve_records() {
-        let sub = Arc::new(FakeSubscriber::new(vec![
-            record_json(&task_ev("running", "R", "R", 100, None)),
-            record_json(&approval_ev(vec![appr("A", &["allow_always"])], None)),
-        ]));
+        // Go `TestRunnerPlumbsAutoApproveRecords`: A decides
+        // A (forever); B offers only allow_once with the
+        // fallback off, so it is skipped. Both records land
+        // in the Result. B MUST be present: when every
+        // pending approval is handled, `feed_approvals`
+        // returns nil and the wait continues (Go
+        // `waiter.go` `len(left) == 0`), so a single-A
+        // event can never end as Approval — the earlier
+        // port dropped B and timed out.
+        let sub = Arc::new(FakeSubscriber::new(vec![record_json(
+            &approval_ev(
+                vec![
+                    appr("A", &["allow_always"]),
+                    appr("B", &["allow_once"]),
+                ],
+                None,
+            ),
+        )]));
         let hist = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(100)])]));
         let decider: Arc<Decider> = Arc::new(|_a: &DescribedApproval, _d: &str| Ok(()));
         let approver = Arc::new(AutoApprover::new(Some(connect_ok(decider)), false));
@@ -2582,6 +2603,8 @@ mod tests {
         assert_eq!(res.auto_approved.len(), 1);
         assert_eq!(res.auto_approved[0].approval_id, "A");
         assert_eq!(res.auto_approved[0].decision, "allow_always");
+        assert_eq!(res.auto_approve_errors.len(), 1);
+        assert_eq!(res.auto_approve_errors[0].approval_id, "B");
     }
 
     #[tokio::test(start_paused = true)]
@@ -3016,13 +3039,22 @@ mod tests {
 
     #[tokio::test]
     async fn runner_settle_pending_cancelled_success_returns_ctx_err() {
+        // Go `TestRunnerSettlePendingCancelledSuccessReturnsCtxErr`:
+        // `settle_pending` must return Cancelled with NO
+        // outcome applied when the context is cancelled,
+        // on both the replies path and the failed-terminal
+        // path. Each case uses a FRESH runner for the
+        // cancelled call and a second fresh runner for the
+        // live baseline — the earlier port did a live
+        // settle first on one runner, so the cancelled
+        // call hit the interval gate (loop-2 F8) and
+        // returned Ok.
+        // Replies path ("idle"): a successful proof under
+        // a pre-cancelled context settles nothing.
         let hist = Arc::new(QueueHistory::new(vec![history_ok(vec![
-            user_ev(10),
-            asst(11, "completed", "x", None),
+            user_ev(100),
+            asst(150, "completed", "settled", None),
         ])]));
-        // `settle_pending` never dials; the dial is only
-        // here because `Runner::new` requires one (Go
-        // `runner.go:294`).
         let sub = Arc::new(FakeSubscriber::new(vec![]));
         let mut runner = Runner::new(Config {
             after_seq: 10,
@@ -3032,20 +3064,102 @@ mod tests {
             ..Config::default()
         })
         .expect("config");
-        let cancel = Cancel::new();
         runner
             .waiter
-            .feed(&task_ev("completed", "R", "R", 11, Some(json!(2))), None)
+            .feed(&task_ev("idle", "R", "R", 11, Some(json!(2))), None)
             .await;
-        runner
-            .settle_pending(&cancel, "completed")
+        let cancel = Cancel::new();
+        cancel.set();
+        let err = runner.settle_pending(&cancel, "idle").await;
+        assert!(matches!(err, Err(RunError::Cancelled)), "err = {err:?}");
+        assert!(runner.waiter.result().is_none(), "no outcome after cancel");
+        assert!(
+            runner.waiter.ignored_terminal().is_some(),
+            "ignored terminal must still be pending after a cancelled settle"
+        );
+        // Live baseline: the same proof without
+        // cancellation still settles.
+        let hist2 = Arc::new(QueueHistory::new(vec![history_ok(vec![
+            user_ev(100),
+            asst(150, "completed", "settled", None),
+        ])]));
+        let sub2 = Arc::new(FakeSubscriber::new(vec![]));
+        let mut runner2 = Runner::new(Config {
+            after_seq: 10,
+            has_after_seq: true,
+            dial: Some(sub2.dial()),
+            history: Some(hist2),
+            ..Config::default()
+        })
+        .expect("config");
+        runner2
+            .waiter
+            .feed(&task_ev("idle", "R", "R", 11, Some(json!(2))), None)
+            .await;
+        runner2
+            .settle_pending(&Cancel::new(), "idle")
             .await
             .expect("live settle must succeed");
-        assert!(runner.waiter.result().is_some());
-        let cancel2 = Cancel::new();
-        cancel2.set();
-        let err = runner.settle_pending(&cancel2, "completed").await;
-        assert!(matches!(err, Err(RunError::Cancelled)), "err = {err:?}");
+        assert_eq!(
+            runner2.waiter.result().expect("done").kind,
+            WaitKind::Done
+        );
+        // Failed path ("interrupted"): same shape, the
+        // replayed-failed proof. Go sets the boundary
+        // explicitly (200); the waiter needs after_seq
+        // to match the latest user seq or
+        // `accept_replayed_failed` refuses.
+        let hist3 = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(
+            200,
+        )])]));
+        let sub3 = Arc::new(FakeSubscriber::new(vec![]));
+        let mut runner3 = Runner::new(Config {
+            after_seq: 200,
+            has_after_seq: true,
+            dial: Some(sub3.dial()),
+            history: Some(hist3),
+            ..Config::default()
+        })
+        .expect("config");
+        runner3.waiter.set_boundary(200, false, true);
+        runner3
+            .waiter
+            .feed(&task_ev("interrupted", "R", "R", 11, Some(json!(2))), None)
+            .await;
+        let cancel3 = Cancel::new();
+        cancel3.set();
+        let err3 = runner3.settle_pending(&cancel3, "interrupted").await;
+        assert!(matches!(err3, Err(RunError::Cancelled)), "err = {err3:?}");
+        assert!(runner3.waiter.result().is_none(), "no outcome after cancel");
+        assert!(
+            runner3.waiter.ignored_terminal().is_some(),
+            "ignored terminal must still be pending after a cancelled settle"
+        );
+        let hist4 = Arc::new(QueueHistory::new(vec![history_ok(vec![user_ev(
+            200,
+        )])]));
+        let sub4 = Arc::new(FakeSubscriber::new(vec![]));
+        let mut runner4 = Runner::new(Config {
+            after_seq: 200,
+            has_after_seq: true,
+            dial: Some(sub4.dial()),
+            history: Some(hist4),
+            ..Config::default()
+        })
+        .expect("config");
+        runner4.waiter.set_boundary(200, false, true);
+        runner4
+            .waiter
+            .feed(&task_ev("interrupted", "R", "R", 11, Some(json!(2))), None)
+            .await;
+        runner4
+            .settle_pending(&Cancel::new(), "interrupted")
+            .await
+            .expect("live settle must succeed");
+        assert_eq!(
+            runner4.waiter.result().expect("failed").kind,
+            WaitKind::Failed
+        );
     }
 
     // -- wait_redesign_test.go (23 fns) --
