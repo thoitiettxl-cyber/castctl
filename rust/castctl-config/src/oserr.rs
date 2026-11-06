@@ -105,14 +105,11 @@ pub fn rename_error_text(old: &str, new: &str, e: &std::io::Error) -> String {
 /// (E10/E11/E12/E13). Returns `Ok(())` when the directory
 /// exists or was created, `Err(text)` otherwise.
 pub fn mkdir_all(path: &str) -> Result<(), String> {
-    match std::fs::metadata(path) {
-        Ok(m) => {
-            if m.is_dir() {
-                return Ok(());
-            }
-            return Err(format!("mkdir {path}: {}", strerror(20)));
+    if let Ok(m) = std::fs::metadata(path) {
+        if m.is_dir() {
+            return Ok(());
         }
-        Err(_) => {}
+        return Err(format!("mkdir {path}: {}", strerror(20)));
     }
     let parent = mkdir_all_parent(path);
     if !parent.is_empty() {
@@ -262,8 +259,8 @@ mod tests {
         // Order matters: the dangling/loop shapes must be
         // checked BEFORE the missing dir is created (the
         // dangling symlink points at it).
-        let base = std::env::temp_dir()
-            .join(format!("castctl-oserr-mkdirall-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("castctl-oserr-mkdirall-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let b = |p: &str| base.join(p);

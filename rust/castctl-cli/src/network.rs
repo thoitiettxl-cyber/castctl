@@ -1615,10 +1615,7 @@ async fn save_resources(
     // mapping was overbroad and reported the full path
     // (red-team round-3 R3-B2, E10–E13).
     if let Err(text) = castctl_config::oserr::mkdir_all(directory) {
-        return Err(msg(
-            1,
-            format!("save resources: create directory: {text}"),
-        ));
+        return Err(msg(1, format!("save resources: create directory: {text}")));
     }
     let mut rows: Vec<SaveRow> = Vec::new();
     for r in resources {
