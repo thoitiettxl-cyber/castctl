@@ -574,7 +574,7 @@ mod tests {
         );
         assert_eq!(
             line,
-            "approved ap1 (allow_always): title_length=14 [network_access x.com]"
+            "approved ap1 (allow_always): title_length=14 [network_access [omitted]]\n"
         );
     }
 
