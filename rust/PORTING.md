@@ -9471,21 +9471,70 @@ against the round-3 red-team's two-sided probes:
 
 Fix-loop-3 gates (cue, 2026-11-06, toolchain
 1.99.1, `CARGO_TARGET_DIR=/tmp/m6c-target`),
-final head TBD (log TBD on cue):
+final head
+`cb9d69d8fe3afe3c59660f68793371ae65ee8b19`
+(clean checkout verified on cue: `git rev-parse
+HEAD` = the head above, `git status --short`
+empty; gate log `/tmp/m6c-fix3-gates.log`,
+test log `/tmp/m6c-fix3-test.log`,
+Go-probe log `/tmp/m6c-fix3-goprobe.log`):
 
-- `cargo fmt --check`: exit TBD.
-- `cargo build --locked --workspace`: exit TBD.
-- `cargo build --workspace`: exit TBD.
-- `cargo test --workspace`: exit TBD.
-  **TBD passed, 0 failed** (TBD suites) vs
-  **777 passed, 0 failed @e7d7764** (baseline
-  568 @25a124e).
+- `cargo fmt --check`: exit 0.
+- `cargo build --locked --workspace`: exit 0
+  (4.29s).
+- `cargo build --workspace`: exit 0 (0.37s).
+- `cargo test --workspace`: exit 0.
+  **788 passed, 0 failed** (39 test-result
+  lines across 28 distinct binaries;
+  `update_flow` appears 12×: 1 full run, 43
+  passed / 29.59s, plus 11 filtered 0-passed
+  runs; 0 `FAILED` lines) vs **777 passed, 0
+  failed @e7d7764** (baseline 568 @25a124e).
+  Net +11: 11 genuinely new tests (13 grep hits
+  in the gate log minus the
+  `duplicate_keys_are_last_wins` →
+  `sequential_occurrences_keep_document_order`
+  rename and the extended
+  `deep_nesting_does_not_overflow`).
+  Per-suite: `castctl-shared` lib 47 → 49 (+2),
+  `castctl-pluginhost` lib 89 → 94 (+5),
+  `update_flow` 39 → 43 (+4); `castctl-update`
+  lib 59 unchanged. (Pre-gate counts are
+  arithmetic from the +11 delta, not a re-run
+  at e7d7764.)
 - `cargo clippy --workspace --all-targets -- -D
-  warnings`: exit TBD.
-- `grep -rn "unsafe\s*{"` over the three
-  crates' non-test src: TBD hits.
-- `git diff --stat dev-rust...HEAD`: TBD (scope
-  only `rust/` + this file).
+  warnings`: exit 0.
+- `unsafe` mentions over the three crates'
+  non-test src: 8 hits, all in doc comments
+  (`timefmt.rs:35`, `lock.rs:27`, `lib.rs:31`,
+  `loader.rs:24,27,57,60`, `pluginabi.rs:112`);
+  0 `unsafe` blocks in non-test src.
+- `git diff --stat dev-rust...HEAD`: 36 files,
+  20614 insertions(+), 2 deletions(-) (whole
+  M6c branch); fix loop 3 alone
+  (`e7d7764...HEAD`): 7 files, 1330
+  insertions(+), 220 deletions(-) — scope only
+  `rust/` (incl. this file).
+
+Gate-run history in this loop: the first full
+run at `d7b9b17` failed 3 gates — `fmt --check`
+exit 1 (rustfmt 1.99.1 diffs in the 6 new
+files), `clippy` exit 101 (one
+`double_must_use` on `FirstError::into_result`),
+`cargo test` 787 passed / 1 failed
+(`install_newer_version_end_to_end`: spawn of
+the extracted binary failed). All three were
+fixed in `cb9d69d` (pure `cargo fmt` + drop the
+one `#[must_use]`); the e2e test is a flake, not
+a regression — it PASSED on an isolated re-run
+at the same head/code/target dir, its sibling
+install tests passed in the same failed run, and
+it passed again in the full run at `cb9d69d`
+(43/43 `update_flow`). Most plausible cause:
+transient disk pressure during the parallel run
+(df 15G → 12G across the gates, other sessions
+building); the spawn error mapping discards the
+errno, so this is not proven.
 
 Disk rule (Boss, 2026-11-05/06): cue `/` was
 cleaned by Boss to 16G free (was 4.1G, nearly
@@ -9497,7 +9546,26 @@ another session's active target dir
 `/tmp/m6c-baseline-target`, ...). After the final
 gate of this loop the writer's target dir
 (`/tmp/m6c-target`) is deleted; gate logs are
-kept. `df` readings during this loop: TBD.
+kept. `df` readings during this loop (free /
+use%): 11G / 86% → 3.8G / 95% → 71M / 100% →
+5.9G / 92% → 16G / 78% (after another session
+deleted `/tmp/m7b-target` 10G and
+`/tmp/m7a-baseline-target` 5.9G) → first gate
+run 15G / 80% → 12G / 85% → 4.9G / 94% →
+6.0G / 92% → 5.4G / 93% → 5.1G / 93% → 4.6G /
+94% → second (final) gate run 4.5G / 94% →
+5.0G / 93%. The re-run was done with df BELOW
+6G: the warm `/tmp/m6c-target` (13G) was KEPT
+on purpose — deleting it would have forced a
+from-scratch rebuild needing ~13G into ~5G free
+space, which cannot succeed; the re-run was
+incremental only (6 files, 3 crates). Nothing
+of other sessions was touched (`/tmp/m7b-target`
+9.0G, `/tmp/drhead-target` 9.4G at the time).
+NOTE for the verifier: the target dir is deleted
+after this loop, so a verification rebuild needs
+~13G free — check `df -h /` first (it was ~5G
+at loop end) and free space before rebuilding.
 
 
 ## Quy tắc quyết định (Boss, 2026-11-05 — standing)
