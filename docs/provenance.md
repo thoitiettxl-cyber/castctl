@@ -2278,8 +2278,7 @@ renumbered §18 → §19 at the rebase onto dev-rust
 
 M7b PR-1 (`rust/castctl-cli`, `rust/castctl-gateway`,
 `rust/castctl-shared`, `rust/castctl-config`, branch
-`feat/rust-m7b-cli-wiring`, base `dev-rust` 9fc93c5, head
-5329d48) wires 19 Phase A commands + `raw` from the `not
+`feat/rust-m7b-cli-wiring`, base `dev-rust` 0233095) wires 19 Phase A commands + `raw` from the `not
 ported yet` stub to the repo's own Go handlers
 (`internal/deliver/session.go`, `stop.go`, `wake.go`;
 `internal/commands/read.go`, `wait.go`; `internal/gateway/
