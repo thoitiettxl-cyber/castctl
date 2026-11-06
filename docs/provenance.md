@@ -2296,11 +2296,10 @@ auto-approve writer preserves the input file bytes while Go
 normalizes it on write — CLI output byte-identical,
 resulting file semantically equivalent, verified live).
 
-## 20. M7b PR-2 CLI wiring (chat + send + watch + fs) — no new upstream dependency
+## 21. M7b PR-2 CLI wiring (chat + send + watch + fs) — no new upstream dependency
 
 M7b PR-2 (`rust/castctl-cli`, branch
-`feat/rust-m7b-pr2`, base `dev-rust` 74eff05, stacked
-on PR #76) wires `chat`, `send` (incl. `--wait`),
+`feat/rust-m7b-pr2`, base `dev-rust` 0173436, PR #76 merged) wires `chat`, `send` (incl. `--wait`),
 `watch`, and `fs` from the `not ported yet` stub to
 the repo's own Go handlers (`internal/commands/
 chat.go`, `wait.go`, `read.go`, `fs.go`;
