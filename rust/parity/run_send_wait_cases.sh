@@ -35,7 +35,11 @@
 # line, AND each server must have opened at least one stream
 # (WAIT SUMMARY streams>=1: a send that never opens
 # chat.stream cannot pass as a send turn, even if both
-# drivers fail identically), AND neither driver may have been
+# drivers fail identically), AND the chat.stream request-body
+# bytes the fixture logged (WAIT stream-body) must match on
+# both sides AND equal the case file's stream_body literal
+# (round-1 N-R1: a byte-level escaping difference in the sent
+# text would otherwise be invisible), AND neither driver may have been
 # killed by the 60 s watchdog, AND each server must have
 # printed its WAIT SUMMARY with at least one call (a server
 # that died after READY prints no summary and saw no calls;
@@ -159,6 +163,13 @@ wait_lines() {
     grep -h '^WAIT history \|^WAIT subscribe \|^WAIT stream \|^WAIT media ' "$1" || true
 }
 
+# stream_body <server-err-file>: the chat.stream request-body
+# bytes the serve-wait fixture logged (one line per stream
+# open), or nothing when the fixture never logged one.
+stream_body() {
+    sed -n 's/^WAIT stream-body //p' "$1" || true
+}
+
 for case in "$CASES"/*.json; do
     name=$(basename "$case" .json)
     cp "$case" "$OUT/$name.case.json"
@@ -240,6 +251,18 @@ for case in "$CASES"/*.json; do
         [ "$go_streams" != "0" ] || { ok=0; reason="$reason go-server-opened-no-stream;"; }
         [ "$rs_streams" != "0" ] || { ok=0; reason="$reason rs-server-opened-no-stream;"; }
         [ "$go_streams" = "$rs_streams" ] || { ok=0; reason="$reason server-streams go=[$go_streams] rs=[$rs_streams];"; }
+        # N-R1: the stream request body must be byte-identical
+        # on both sides AND equal the expected literal in the
+        # case file (the serve-wait fixture logs the raw body
+        # bytes; the old fixture logged only the open count).
+        go_body=$(stream_body "$OUT/$name-go.server.err")
+        rs_body=$(stream_body "$OUT/$name-rs.server.err")
+        expected_body=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('stream_body',''))" "$case")
+        [ -n "$go_body" ] || { ok=0; reason="$reason go-server-stream-body-missing;"; }
+        [ -n "$rs_body" ] || { ok=0; reason="$reason rs-server-stream-body-missing;"; }
+        [ "$go_body" = "$rs_body" ] || { ok=0; reason="$reason server-stream-body-differ;"; }
+        [ "$go_body" = "$expected_body" ] || { ok=0; reason="$reason go-stream-body-mismatch-expected;"; }
+        [ "$rs_body" = "$expected_body" ] || { ok=0; reason="$reason rs-stream-body-mismatch-expected;"; }
     fi
     # Download cases: the two download trees must match
     # (file names + bytes).
@@ -264,6 +287,9 @@ for case in "$CASES"/*.json; do
         echo "--- server summaries ($name): go=[$go_sum] rs=[$rs_sum] streams go=[$go_streams] rs=[$rs_streams] ---"
         echo "--- server WAIT lines diff ($name) ---"
         diff <(wait_lines "$OUT/$name-go.server.err") <(wait_lines "$OUT/$name-rs.server.err") | head -20 || true
+        echo "--- server stream-body diff ($name) ---"
+        diff <(stream_body "$OUT/$name-go.server.err") <(stream_body "$OUT/$name-rs.server.err") | head -20 || true
+        echo "--- expected stream-body ($name): [$expected_body] ---"
         if [ "$has_dl" = 1 ]; then
             echo "--- download tree diff ($name) ---"
             cat "$OUT/$name.dl.diff" | head -20 || true

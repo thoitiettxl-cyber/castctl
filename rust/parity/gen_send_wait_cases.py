@@ -47,9 +47,23 @@ def done_subscribes():
     return [{"delay_ms": 0, "drop": False, "end_body": True, "frames": DONE_FRAMES}]
 
 
-def case(name, args, script):
+# Expected chat.stream request-body bytes, hand-written from the
+# Go source (internal/commands/wait.go deliverSend: params map
+# capabilities/items/node_id, session_id iff thread != ""; Go
+# json.Marshal sorts keys, compact, no spaces). Both drivers
+# use node_id "wait-driver". The harness
+# (run_send_wait_cases.sh) diffs the serve-wait-logged body
+# against this literal on each side. The text is "hello" in
+# every case, so HTML escaping (Go on, serde_json off) cannot
+# differ here -- the literal pins the bytes, the harness
+# proves it (round-1 N-R1).
+STREAM_BODY = '{"capabilities":{},"items":[{"text":"hello","type":"text"}],"node_id":"wait-driver"}'
+STREAM_BODY_THREAD = '{"capabilities":{},"items":[{"text":"hello","type":"text"}],"node_id":"wait-driver","session_id":"t1"}'
+
+
+def case(name, args, script, stream_body=STREAM_BODY):
     with open(os.path.join(OUT, name + ".json"), "w") as f:
-        json.dump({"args": args, "name": name, "script": script}, f, indent=1, sort_keys=True)
+        json.dump({"args": args, "name": name, "script": script, "stream_body": stream_body}, f, indent=1, sort_keys=True)
         f.write("\n")
 
 
@@ -95,6 +109,7 @@ case("send-download-empty", ["--wait", "5", "--ack-timeout", "5", "--download", 
 
 # 8. Threaded send: every history call carries session_id=t1.
 case("send-thread", ["--thread", "t1", "--wait", "5", "--ack-timeout", "5", "hello"],
-     {"history_stages": stages(ASST), "subscribes": done_subscribes(), "thread": "t1"})
+     {"history_stages": stages(ASST), "subscribes": done_subscribes(), "thread": "t1"},
+     STREAM_BODY_THREAD)
 
 print("wrote", len(os.listdir(OUT)), "cases in", OUT)

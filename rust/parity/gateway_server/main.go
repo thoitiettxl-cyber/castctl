@@ -466,6 +466,12 @@ func waitHandler(st *waitState) gatewaytest.Handler {
 			st.streams++
 			st.mu.Unlock()
 			fmt.Fprintf(os.Stderr, "WAIT stream chat.stream\n")
+			// N-R1: log the raw request-body bytes too, so
+			// the harness can diff Go vs Rust byte-for-byte
+			// (the old line logged only the open count; an
+			// escaping difference in the sent text was
+			// invisible). The body is one compact JSON line.
+			fmt.Fprintf(os.Stderr, "WAIT stream-body %s\n", string(req.Body))
 			return handler().Handle(req, service)
 		}
 		if strings.HasPrefix(path, "/media/raw/") {

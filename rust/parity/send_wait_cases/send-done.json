@@ -62,5 +62,6 @@
    }
   ],
   "thread": ""
- }
+ },
+ "stream_body": "{\"capabilities\":{},\"items\":[{\"text\":\"hello\",\"type\":\"text\"}],\"node_id\":\"wait-driver\"}"
 }
