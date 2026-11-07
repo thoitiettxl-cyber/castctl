@@ -10,7 +10,6 @@ members = [
     "castctl-gateway",
     "castctl-telegram",
     "castctl-update",
-    "castctl-pluginhost",
     "castctl-webui",
     "castctl-rs",
     "castctl-keeper",

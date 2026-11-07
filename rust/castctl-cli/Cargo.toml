@@ -33,10 +33,6 @@ castctl-transport = { path = "../castctl-transport" }
 castctl-update = { path = "../castctl-update" }
 castctl-wait = { path = "../castctl-wait" }
 castctl-webui = { path = "../castctl-webui" }
-# M6c-b: `plugin check` runs the real Rust loader
-# through `Host::apply_config` (see `run.rs`
-# `cmd_plugin`).
-castctl-pluginhost = { path = "../castctl-pluginhost" }
 bytes = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }

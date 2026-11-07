@@ -627,7 +627,9 @@ fn golden_parity() {
     let cases = load_cases();
     assert_eq!(
         cases.len(),
-        62,
+        61,
+        // 61: the Go argv list minus `46-plugin-help` (the plugin
+        // command is dropped from this build, `rust/AGENT-CLI-SCOPE.md`).
         "argv-list length (D-M2-4 + F5 case + 4 decoder cases + 3 N7 wait-conflict cases 09a/09b/09c)"
     );
     verify_manifest(&cases);

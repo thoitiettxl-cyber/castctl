@@ -338,13 +338,6 @@
     ]
   },
   {
-    "id": "46-plugin-help",
-    "argv": [
-      "plugin",
-      "--help"
-    ]
-  },
-  {
     "id": "47-version",
     "argv": [
       "--version"

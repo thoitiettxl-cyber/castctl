@@ -7,26 +7,15 @@
 //! (`os.Exit(commands.Run(...))`); signal handling (exit 130 on
 //! SIGINT) is NOT ported in M2 and is recorded in PORTING.md.
 //!
-//! Hidden subcommand `__plugin-worker` (M6c-b): the plugin
-//! worker mode. It is dispatched here, before the CLI
-//! runs, so it never appears in help output and the CLI
-//! parser never sees it. It takes exactly one argument,
-//! the handshake token (see `castctl_pluginhost::worker`).
+//! Scope (Boss decision 2026-11-07, `rust/AGENT-CLI-SCOPE.md`):
+//! this binary is the agent-facing CLI only. The plugin host was
+//! dropped together with `webui` and the telegram bot, so no
+//! `__plugin-worker` mode is dispatched here.
 
 use std::io::Write;
 
 fn main() {
-    // Hidden worker mode first: the parent loader
-    // re-execs this binary with `__plugin-worker
-    // <token>`; the worker speaks framed protocol v2 on
-    // stdin/stdout and exits with the worker's code.
     let os_args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    if os_args
-        .first()
-        .is_some_and(|a| a.to_string_lossy() == "__plugin-worker")
-    {
-        std::process::exit(castctl_pluginhost::worker::run_worker(&os_args));
-    }
     // argv[1..], lossy-converted: Go receives UTF-8 argv from the
     // OS on Unix; non-UTF8 bytes are a documented approximation
     // (PORTING.md).

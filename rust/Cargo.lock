@@ -462,7 +462,6 @@ dependencies = [
  "castctl-keeper",
  "castctl-log-redact",
  "castctl-logging",
- "castctl-pluginhost",
  "castctl-shared",
  "castctl-telegram",
  "castctl-transport",
@@ -588,36 +587,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "castctl-pluginhost"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "castctl-log-redact",
- "castctl-shared",
- "hex",
- "http",
- "http-body-util",
- "hyper",
- "hyper-util",
- "libc",
- "libloading 0.9.0",
- "nix",
- "rand",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "castctl-rs"
 version = "0.1.0"
 dependencies = [
  "castctl-cli",
  "castctl-config",
- "castctl-pluginhost",
 ]
 
 [[package]]
@@ -871,7 +845,7 @@ checksum = "157a8ba7b480713b56f4c09fd13fc3e0a22a5dfab8097ba61cbc5feef950788a"
 dependencies = [
  "glob",
  "libc",
- "libloading 0.8.9",
+ "libloading",
 ]
 
 [[package]]
@@ -1979,16 +1953,6 @@ name = "libloading"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
-dependencies = [
- "cfg-if",
- "windows-link",
-]
-
-[[package]]
-name = "libloading"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
 dependencies = [
  "cfg-if",
  "windows-link",

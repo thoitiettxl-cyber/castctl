@@ -678,20 +678,6 @@ token is used as-is. The token is never printed or logged.
 --profile is ignored: the server serves the whole single file.
 "#;
 
-pub const PLUGIN_CHECK_HELP_TEXT: &str = r#"usage: castctl plugin check <path> [--tag TAG] [--type TYPE]
-
-Load one plugin binary through the real plugin loader and run a
-single provider call against it. This is the on-device check
-run inside Droidspaces with the normal linux/arm64 castctl
-binary (see docs/plugins.md): it prints one line per
-stage (dlopen, init, register, provider.call, shutdown), plus
-any host.log lines the plugin emits (printed as plugin log lines).
-Command-only plugins skip the provider.call stage (it is
-printed as skipped, not failed). It loads no config, starts no
-services, writes no config or cookies, and logs no secrets.
-Exit 0 when every stage passes, exit 2 otherwise.
-"#;
-
 pub const FS_LS_HELP_TEXT: &str = r#"usage: castctl fs ls [PATH] [-l] [-a] [--json]
 
 List a folder (default: System Files root).

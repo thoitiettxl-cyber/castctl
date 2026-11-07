@@ -17,7 +17,7 @@ use crate::help_texts::*;
 use crate::parser::{FlagDef, FlagKind, bool_flag, int_flag, int_flag_no_def, str_flag};
 
 /// `commandOrder` (`commands.go:766`).
-pub const COMMAND_ORDER: [&str; 46] = [
+pub const COMMAND_ORDER: [&str; 45] = [
     "chat",
     "status",
     "usage",
@@ -63,7 +63,6 @@ pub const COMMAND_ORDER: [&str; 46] = [
     "keeper",
     "update",
     "webui",
-    "plugin",
 ];
 
 /// Positional-argument handling for a `parseOrHelp` command.
@@ -509,13 +508,6 @@ pub fn command_table() -> Vec<CommandSpec> {
             vec![],
             PositionalSpec::None,
         ),
-        spec(
-            "plugin",
-            PLUGIN_CHECK_HELP_TEXT,
-            "plugin check <path> [--tag TAG] [--type TYPE]",
-            vec![],
-            PositionalSpec::None,
-        ),
     ]
 }
 
@@ -759,15 +751,15 @@ mod tests {
     #[test]
     fn test_command_order_matches_go() {
         let table = command_table();
-        assert_eq!(table.len(), 46);
+        assert_eq!(table.len(), 45);
         let names: Vec<&str> = table.iter().map(|s| s.name).collect();
         assert_eq!(names, COMMAND_ORDER.to_vec());
     }
 
     #[test]
     fn test_global_help_lists_45_names() {
-        // globalHelpText lists 45 names (no plugin) while the
-        // invalid-choice message lists all 46: keep verbatim.
+        // globalHelpText lists the same 45 names as the
+        // invalid-choice message now that `plugin` is gone.
         assert!(!GLOBAL_HELP_TEXT.contains("plugin"));
         assert!(GLOBAL_HELP_TEXT.contains("webui"));
         assert!(GLOBAL_HELP_TEXT.ends_with('\n'));
@@ -804,14 +796,6 @@ mod tests {
         assert_eq!(
             command_spec("feed").unwrap().usage_line,
             "feed [--limit N] [--raw]"
-        );
-        assert_eq!(
-            command_spec("plugin").unwrap().usage_line,
-            "plugin check <path> [--tag TAG] [--type TYPE]"
-        );
-        assert_eq!(
-            command_spec("plugin").unwrap().help_text,
-            PLUGIN_CHECK_HELP_TEXT
         );
     }
 
