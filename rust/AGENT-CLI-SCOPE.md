@@ -99,18 +99,46 @@ deleting it before #94 lands makes that PR unmergeable. Delete it right after
 `castctl-keeper` + `castctl-shared`, so the keeper half survives the deletion;
 only its webui mirror becomes moot.
 
-## Open gaps in the kept surface (finish-the-logic backlog)
+## Kept surface: what is verified now (cue, 2026-11-07/08)
 
-Measured on cue 2026-11-07, Rust vs Go `0.9.0 (1396697 …)`, same live
-profile/config, three samples per side:
+| Area | Evidence |
+|---|---|
+| Read-only commands | 11/11 **byte-identical** to Go `0.9.0 (1396697 …)` on the live profile: `status`, `threads --all`, `history --limit 3`, `auth status`, `goals`, `ideas`, `unread`, `feed-status`, `files --limit 3`, `profile list`, `usage`. |
+| Write commands | `session-pin`, `session-unpin`, `session-rename`, `approvals` byte-identical to Go on the same live session; `seen` identical apart from its `seen_at_ms` timestamp (two runs, one second apart). |
+| Send + wait round trip | Live: `session-start` → `send … --wait 150 --text` exit 0, stdout `user_seq=29401 [29402] pong-from-castctl-rs`, stderr `-- done (status=completed)`. Reply delivery — the M7c gap — is **proven**. |
+| `update --dry-run` | Rust and Go both exit 0 with `castctl is up to date: 0.9.0` on a stamped build. |
+| Deterministic argv sweep | `TOTAL=101 DIFFS=0 skipped_live=9 skipped_dropped=8` — the 8 skips are the dropped commands plus the top-level `--help`. |
+| Gates | `cargo fmt --check` 0, `cargo clippy … -D warnings` 0, `cargo test --workspace` 55 suites / 1220 passed / 0 failed. |
 
-| Gap | Evidence | Note |
-|---|---|---|
-| `usage` is ~3.2x slow | Rust 42.3 / 43.2 / 39.9 / 57.0 s vs Go 12.9 / 13.9 / 13.3 s; same 876-byte answer byte-for-byte on both sides | **Root cause measured** (temporary probe, reverted): the server-action POST with the default action id (`4029ac…`) comes back non-`x-component`/non-200 after ~1.0 s, so `fetch_subscription` falls back to `find_action_id`, which costs 39–46 s: 547 chunk fetches (103 then 444, `CHUNK_POOL` 16 on both sides) at an effective ~81 ms/fetch ≈ 1.3 s wall per request. Go does the same two-round scan inside its 13 s total, so the gap is the **plain-HTTP request cost in `castctl-transport`**, not the scan logic. WS-based commands (`threads`, `goals`, `history`) are at parity, which narrows it to the plain-HTTP path: no connection reuse/pooling between requests. Next step: reuse the TLS connection (or a client pool) in `castctl-transport`, then re-measure `usage` against Go. |
-| `update` on an unstamped build | Rust exit 1 vs Go exit 0 for `--dry-run` | `PORTING.md` §M7b records it; decide whether to match or to document Rust-only behaviour. |
-| `wait` reply delivery | M7c recorded `replies: []` on both sides — narrows the claim | Needs a live turn where the reply actually arrives. |
+## `usage` — closed (was the only large gap)
 
-Everything else in the kept surface is live-parity verified: 11 read-only
-commands byte-identical to Go on cue (this round), 14 earlier, the keeper
-(tick, expiry, CDP re-export) byte-identical, and the deterministic 109-case
-argv sweep `DIFFS=0`.
+`usage` was 39–60 s against Go's 13 s. Three measured causes, all fixed in
+`bed453d`:
+
+1. **No connection pool** in `castctl-transport` (a documented M3
+   simplification): every one of the 547 chunk fetches dialled and
+   TLS-handshaked. `HttpClient` now keeps up to 16 idle sockets per
+   target, drops them after 90 s, never pools a `Connection: close` reply,
+   and retries once on a fresh socket when a pooled one is dead — only
+   when the request was never written (`hyper::Error::is_closed`), so no
+   POST is replayed.
+2. **No `Accept-Encoding: gzip`** where Go's transport adds it: the scan
+   pulled ~37 MB of JS instead of ~11 MB. Now advertised unless the caller
+   sets the header, decoded on the way out, header stripped like Go, and
+   the 16 MiB cap is enforced **after** decompression.
+3. **Batch-then-scan** in `find_action_id`: it fetched a 400-file batch
+   before looking for the action id. It now consumes fetches as a stream
+   and returns on the first match.
+
+Wall time on cue, live profile, `usage`: 41–47 s → 22–29 s → **10.0–18.0 s**
+(Go 12.9–26.1 s in the same windows), output byte-identical throughout.
+Covered by `castctl-transport/tests/http_pool.rs` (6 cases: reuse, close,
+idle-dead retry, gzip decode + header strip, caller header wins, gzip bomb).
+
+## Remaining work
+
+| Item | State |
+|---|---|
+| Delete `castctl-webui/` (still on disk, out of the workspace) | Blocked on PR #94: it edits `castctl-webui/src/keeper_status.rs` + `handlers.rs`. Its keeper-time fix itself lives in `castctl-keeper` + `castctl-shared`, so the keeper half survives the deletion. |
+| Keeper time rendering on this branch | This branch predates #94, so keeper state still renders UTC (`Z`) where Go writes the local offset. Merge/rebase #94 to close it; nothing else in the kept surface depends on it. |
+| `update` on an **unstamped** build | Rust exit 1 vs Go exit 0; stamped builds match (verified). Dev-only path — decide later whether to align. |
