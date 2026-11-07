@@ -2069,10 +2069,15 @@ pub(crate) fn render_flow_err(e: &FlowErr) -> (i32, String) {
 }
 /// against an already-built runtime (a fake gateway /
 /// fake muse.ai base in tests) and return
-/// (stdout, stderr, exit code), rendering `FlowErr`
-/// exactly like `run_inner` does. Test-only: production
+/// (stdout, stderr, exit code). Test-only: production
 /// never calls this, and no CLI flag/env/config selects
 /// a gateway host.
+///
+/// Dev/test-only seam: renders `FlowErr::Msg` raw, WITHOUT `safe_string`
+/// (unlike `render_flow_err` in `run_inner`, which redacts). Only the dev
+/// example `examples/m7b_driver.rs` calls it; the shipped `castctl-rs`
+/// binary never does. If this seam is ever wired into a shipped path,
+/// route its errors through `render_flow_err` instead.
 pub async fn run_driver_command(
     spec: &CommandSpec,
     rt: &Runtime,
