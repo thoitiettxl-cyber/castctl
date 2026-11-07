@@ -1501,3 +1501,29 @@ không ổn định qua các session — xem §3.
   rerun độc lập được commit ở
   `data/verify-rerun-summary.json`; run11 ở `data/run11-summary.json`
   + `run11-*.json`; chỉ run11 là baseline chính thức.
+
+## Cross-check của Pi ở head `57fc7be` (2026-11-06) — số đo độc lập, không re-measure
+
+Số dưới đây là **số đo của Pi** (cross-check độc lập), ở head
+`57fc7be` của `dev-rust` — **KHÔNG được đo lại ở `acb2aa7`** (head
+của M7e) trong đợt này, và không thay thế bảng run11. Bảng run11
+(commit `e7a97d7`) vẫn là baseline chính thức và được giữ nguyên
+làm lịch sử ở trên; mục này chỉ append thêm, không xoá hay sửa
+bất kỳ số cũ nào.
+
+| Hạng mục | Go | Rust `castctl-rs` | Ghi chú |
+|---|---|---|---|
+| Kích thước binary | 48,100,296 B (Pi chỉ cho một số Go; không có số Go chưa strip riêng) | chưa strip 37,022,864 B; stripped 28,284,192 B | Số Go trùng binary run7–run11 (48,100,296 B) |
+| `--version` median (N=20) | 9.56 ms | 2.12 ms | |
+| RSS `--help` | 30.5 MiB | 6.5 MiB | Go ở mode thấp của bimodal (run10: 30.37 MiB; mode cao 47.7 MiB, xem mục "Chưa kiểm chứng") |
+
+Lưu ý khi đối chiếu với bảng run11: head khác (`57fc7be` so với
+`e7a97d7`) và recipe build của Pi không được ghi lại ở đây, nên
+không so trực tiếp hai bảng mà không kèm head + recipe — ví dụ
+stripped ở đây (28,284,192 B) lớn hơn stripped run11 (21,552,104 B)
+dù head mới hơn; chênh lệch đó chưa được giải thích và không được
+dùng làm kết luận. Các tỉ lệ số học giữa hai bảng là size stripped
+0.588×, `--version` 0.222×, RSS `--help` 0.213× — ghi nhận như phép
+tính số học, không dùng làm kết luận về hướng hay độ lớn. (Fix loop 1:
+câu kết luận về hướng ở đây đã gỡ — mục này không re-measure, nên
+không rút kết luận hướng từ các tỉ lệ trên.)

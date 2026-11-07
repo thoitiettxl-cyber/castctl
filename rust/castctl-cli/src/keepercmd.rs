@@ -486,6 +486,7 @@ impl<'a> KeeperRuntimes<'a> {
             credentials_configured: !entry.credentials.is_empty(),
             base_dir: self.loc.config_dir.clone(),
             profile_name: entry.profile.clone(),
+            cookies_path: rt.profile.cookies_file.clone(),
             checker,
             exporter,
             notifier,

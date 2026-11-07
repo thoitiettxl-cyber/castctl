@@ -574,6 +574,7 @@ mod tests {
             credentials_configured: false,
             base_dir: String::new(),
             profile_name: String::new(),
+            cookies_path: String::new(),
             checker: Arc::new(CheckerFunc(|_| Box::pin(async { unreachable!() }))),
             exporter: None,
             notifier: None,

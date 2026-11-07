@@ -102,6 +102,14 @@ pub struct TickDeps {
     pub credentials_configured: bool,
     pub base_dir: String,
     pub profile_name: String,
+    /// The profile's resolved cookies file
+    /// (`Profile.cookies_file`, `config.go:798`): the tick reads and
+    /// writes the jar here. Empty means the profile default
+    /// (`Store::new` falls back to `profile_paths().cookies`).
+    /// M7e: was missing entirely, so the tick always used the
+    /// default path and ignored a configured `cookies_file`
+    /// (Go honours it) — proven live, see `docs/e2e.md` M7e item 2.
+    pub cookies_path: String,
     pub checker: Arc<dyn Checker>,
     pub exporter: Option<Arc<dyn Exporter>>,
     pub notifier: Option<Arc<dyn Notifier>>,
@@ -298,7 +306,12 @@ pub async fn tick(deps: &TickDeps, cancel: &CancelFlag) -> TickResult {
     let base = deps.interval;
     let mut corrupt_seen = false;
 
-    let store = match Store::new(&deps.base_dir, &deps.profile_name, "", deps.lock_timeout) {
+    let store = match Store::new(
+        &deps.base_dir,
+        &deps.profile_name,
+        &deps.cookies_path,
+        deps.lock_timeout,
+    ) {
         Ok(s) => s,
         Err(e) => return fail_result(OUTCOME_ERROR, "save", e, base, corrupt_seen),
     };
