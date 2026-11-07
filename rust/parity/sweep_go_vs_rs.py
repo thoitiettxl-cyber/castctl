@@ -19,7 +19,7 @@ with that file present.
 """
 import json, os, shutil, subprocess, sys
 
-GO = "/usr/local/bin/castctl"
+GO = os.environ.get("SWEEP_GO", "/usr/local/bin/castctl")
 RS = sys.argv[1] if len(sys.argv) > 1 else "/tmp/wv2-target/release/castctl-rs"
 ROOT = "/tmp/sweep"
 COOKIE = "/root/.config/castctl/profiles/no.0/cookies.txt"
@@ -155,8 +155,7 @@ LIVE = os.environ.get("SWEEP_LIVE") == "1"
 # lists 43 commands where Go lists 46. They are SKIPPED, not
 # tolerated as diffs: a diff count must stay 0 for the surface both
 # binaries still share.
-DROPPED_CMDS = {"webui", "telegram", "plugin"}
-DROPPED_ARGV = {("--help",), ("-h",)}
+from dropped import is_dropped
 
 
 def run(binary, cwd, argv, cfgpath=None):
@@ -200,7 +199,7 @@ def main():
     skipped = 0
     dropped = 0
     for argv in ARGS:
-        if argv and argv[0] in DROPPED_CMDS or tuple(argv) in DROPPED_ARGV:
+        if is_dropped(argv):
             dropped += 1
             continue
         if not LIVE and tuple(argv) in NET_ARGS:

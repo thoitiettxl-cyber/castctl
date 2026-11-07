@@ -21,7 +21,9 @@ times out counts as a diff unless both sides time out.
 """
 import json, os, shutil, subprocess, sys
 
-GO = "/usr/local/bin/castctl"
+from dropped import is_dropped
+
+GO = os.environ.get("SWEEP_GO", "/usr/local/bin/castctl")
 RS = sys.argv[1] if len(sys.argv) > 1 else "/tmp/sw-target/release/castctl-rs"
 D = "/tmp/sweep3"
 CFG = json.dumps({"default_profile": "a",
@@ -96,7 +98,11 @@ def run(binary, argv, side):
 def main():
     setup()
     total = diffs = 0
+    dropped = 0
     for argv in CASES:
+        if is_dropped(argv):
+            dropped += 1
+            continue
         total += 1
         cg, og, eg = run(GO, argv, "g")
         cr, orr, er = run(RS, argv, "r")
@@ -112,6 +118,6 @@ def main():
                 print("   out go=%r" % og[:300]); print("   out rs=%r" % orr[:300])
             if eg != er:
                 print("   err go=%r" % eg[:300]); print("   err rs=%r" % er[:300])
-    print("TOTAL=%d DIFFS=%d" % (total, diffs))
+    print("TOTAL=%d DIFFS=%d skipped_dropped=%d" % (total, diffs, dropped))
 
 main()

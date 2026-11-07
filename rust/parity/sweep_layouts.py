@@ -21,7 +21,9 @@ normalised away.
 """
 import json, os, shutil, subprocess, sys
 
-GO = "/usr/local/bin/castctl"
+from dropped import is_dropped
+
+GO = os.environ.get("SWEEP_GO", "/usr/local/bin/castctl")
 RS = sys.argv[1] if len(sys.argv) > 1 else "/tmp/sw-target/release/castctl-rs"
 ROOT = "/tmp/sweep2"
 
@@ -93,8 +95,12 @@ def run(binary, cwd, argv, cfgpath):
 def main():
     build()
     total = diffs = 0
+    dropped = 0
     for name in LAYOUTS:
         for argv in CMDS:
+            if is_dropped(argv):
+                dropped += 1
+                continue
             total += 1
             dg, dr = os.path.join(ROOT, name, "g"), os.path.join(ROOT, name, "r")
             cfg_g, cfg_r = os.path.join(dg, "config.json"), os.path.join(dr, "config.json")
@@ -117,6 +123,6 @@ def main():
                 if eg != er:
                     print("   err go=%r" % eg[:300])
                     print("   err rs=%r" % er[:300])
-    print("TOTAL=%d DIFFS=%d" % (total, diffs))
+    print("TOTAL=%d DIFFS=%d skipped_dropped=%d" % (total, diffs, dropped))
 
 main()
