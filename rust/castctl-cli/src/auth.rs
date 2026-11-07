@@ -82,19 +82,18 @@ pub(crate) fn run_auth_list(
 // auth status
 // ---------------------------------------------------------------------------
 
-/// The driver is NEVER available in this build: the shipped
-/// Go binary is built WITHOUT `with_chromedp` (verified from
-/// the binary itself), and the Rust build has no chromedp tag
-/// at all (M6b precedent, `castctl-webui/src/screencast.rs`).
-/// The keeper crate's `CDP_AVAILABLE` is `cfg!(feature =
-/// "chromedp")`, which is TRUE in workspace builds (keeper's
-/// default features) — consulting it would report headless
-/// available where Go reports `no_chromedp` (the M6b M-1
-/// bug). So the shipped-binary model is a constant `false`,
-/// and the S2 loopback proxy has no Rust equivalent anyway:
-/// even a chromedp-enabled build would fail closed at the
-/// inbound step. See PORTING §M7b.13.
-const DRIVER_AVAILABLE: bool = false;
+/// Whether this build has a headless re-login driver. Go asks
+/// `keeper.ReloginAvailable()`, which is the `with_chromedp`
+/// build tag; the Rust equivalent is
+/// `keeper::relogin_available()`, i.e. the keeper's
+/// `chromedp` feature — ON by default here since M7d gave the
+/// crate a real CDP exporter and re-login relay. M6b hardcoded
+/// `false` because the build then had no driver at all; that
+/// reason is gone, and a constant would now report
+/// `no_chromedp` for a build that can in fact drive Chrome.
+/// The parity reference is the tagged Go binary
+/// (`/tmp/castctl-chromedp`), which reports the real gate.
+const DRIVER_AVAILABLE: bool = castctl_keeper::relogin_available();
 
 /// The pure gate order behind `authHeadlessCapability`
 /// (`authstatus.go:252-266`), unit-testable for every
