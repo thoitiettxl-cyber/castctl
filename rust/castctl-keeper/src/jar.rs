@@ -27,7 +27,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 
 use crate::error::KeeperError;
 use crate::setcookie::ParsedCookie;
@@ -282,7 +282,7 @@ pub fn serialize_jar(cookies: &[StoredCookie]) -> Result<Vec<u8>, KeeperError> {
 pub fn effective_set_cookie(
     c: &ParsedCookie,
     req_url: &str,
-    received_at: DateTime<Utc>,
+    received_at: DateTime<FixedOffset>,
 ) -> CookieUpdate {
     let (req_host, req_path) = split_url_host_path(req_url);
     let domain = if let Some(d) = &c.domain {
@@ -421,26 +421,32 @@ pub fn replace_with_export(
     (kept, dropped)
 }
 
-/// Convert an epoch expiry to a `DateTime<Utc>` the way
-/// Go `time.Unix(sec, 0)` would: Go never panics on
-/// out-of-range seconds, but chrono's range is ±262,143
-/// years, so values outside it saturate to `MAX_UTC` /
-/// `MIN_UTC`. Ordering is preserved (a far-future expiry
-/// still sorts after every in-range one), and the
-/// expired/not-expired decision at any realistic `now`
-/// is unchanged: a far-future cookie is NOT treated as
-/// expired, a far-past one IS — exactly as Go decides.
-/// (F1: the previous `.expect("valid epoch")` panicked
-/// on a jar row with `expires=10^14` or `i64::MAX`,
-/// which `parse_jar` accepts.)
-pub fn epoch_to_datetime(expires: i64) -> DateTime<Utc> {
+/// Convert an epoch expiry to a `DateTime<FixedOffset>`
+/// the way Go `time.Unix(sec, 0).UTC()` would: Go never
+/// panics on out-of-range seconds, but chrono's range is
+/// ±262,143 years, so values outside it saturate to
+/// `MAX_UTC` / `MIN_UTC`. Ordering is preserved (a
+/// far-future expiry still sorts after every in-range
+/// one), and the expired/not-expired decision at any
+/// realistic `now` is unchanged: a far-future cookie is
+/// NOT treated as expired, a far-past one IS — exactly as
+/// Go decides. (F1: the previous `.expect("valid epoch")`
+/// panicked on a jar row with `expires=10^14` or
+/// `i64::MAX`, which `parse_jar` accepts.)
+///
+/// Fix loop 1, B6: the value is a UTC instant — offset
+/// zero, so it renders `Z` — but the TYPE keeps the
+/// stored offset, so a hand-edited non-`Z` expiry
+/// re-prints its offset like Go instead of normalising
+/// to `Z` (the old `DateTime<Utc>` type dropped it).
+pub fn epoch_to_datetime(expires: i64) -> DateTime<FixedOffset> {
     match Utc.timestamp_opt(expires, 0) {
-        chrono::LocalResult::Single(dt) => dt,
+        chrono::LocalResult::Single(dt) => dt.fixed_offset(),
         _ => {
             if expires > 0 {
-                DateTime::<Utc>::MAX_UTC
+                DateTime::<Utc>::MAX_UTC.fixed_offset()
             } else {
-                DateTime::<Utc>::MIN_UTC
+                DateTime::<Utc>::MIN_UTC.fixed_offset()
             }
         }
     }
@@ -449,7 +455,7 @@ pub fn epoch_to_datetime(expires: i64) -> DateTime<Utc> {
 /// Earliest non-session expiry in the set, or `None` when
 /// the set has no dated cookie (`jar.go:442-455`). Past
 /// expiries count.
-pub fn earliest_expiry(cookies: &[StoredCookie]) -> Option<DateTime<Utc>> {
+pub fn earliest_expiry(cookies: &[StoredCookie]) -> Option<DateTime<FixedOffset>> {
     cookies
         .iter()
         .filter(|c| !c.is_session())
@@ -458,7 +464,7 @@ pub fn earliest_expiry(cookies: &[StoredCookie]) -> Option<DateTime<Utc>> {
 }
 
 /// `earliest_expiry` over the filtered domains only.
-pub fn earliest_filtered_expiry(cookies: &[StoredCookie]) -> Option<DateTime<Utc>> {
+pub fn earliest_filtered_expiry(cookies: &[StoredCookie]) -> Option<DateTime<FixedOffset>> {
     earliest_expiry(
         &cookies
             .iter()
@@ -472,7 +478,7 @@ pub fn earliest_filtered_expiry(cookies: &[StoredCookie]) -> Option<DateTime<Utc
 /// `hatch_sess` when present with a non-session expiry, else
 /// the earliest dated cookie. Returns the cookie name and its
 /// expiry, or `("", None)` when no dated cookie exists.
-pub fn driving_cookie(cookies: &[StoredCookie]) -> (String, Option<DateTime<Utc>>) {
+pub fn driving_cookie(cookies: &[StoredCookie]) -> (String, Option<DateTime<FixedOffset>>) {
     for c in cookies {
         if c.name == "hatch_sess" && !c.is_session() {
             return (c.name.clone(), Some(epoch_to_datetime(c.expires)));
@@ -493,7 +499,7 @@ pub fn driving_cookie(cookies: &[StoredCookie]) -> (String, Option<DateTime<Utc>
 /// Build the Cookie request header from stored cookies:
 /// non-expired entries only (session cookies included),
 /// deterministic order, `name=value` pairs (`jar.go:476-490`).
-pub fn cookie_header(cookies: &[StoredCookie], now: DateTime<Utc>) -> String {
+pub fn cookie_header(cookies: &[StoredCookie], now: DateTime<FixedOffset>) -> String {
     let mut parts: Vec<String> = Vec::new();
     for c in cookies {
         if !c.is_session() && !epoch_to_datetime(c.expires).gt(&now) {
@@ -508,7 +514,11 @@ pub fn cookie_header(cookies: &[StoredCookie], now: DateTime<Utc>) -> String {
 /// Apply updates to a one-line Cookie header for the second
 /// chain step (`tick.go:103-122`). Domain/path do not matter
 /// for the wire header, only name=value pairs.
-pub fn merge_cookie_header(header: &str, updates: &[CookieUpdate], now: DateTime<Utc>) -> String {
+pub fn merge_cookie_header(
+    header: &str,
+    updates: &[CookieUpdate],
+    now: DateTime<FixedOffset>,
+) -> String {
     let mut stored: Vec<StoredCookie> = Vec::new();
     for pair in header.split(';') {
         let pair = pair.trim();
@@ -777,8 +787,21 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
-    fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(y, mo, d, h, mi, s).unwrap()
+    fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<FixedOffset> {
+        FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(y, mo, d, h, mi, s)
+            .unwrap()
+    }
+
+    /// The `now` argument (M7g): a `FixedOffset` instant
+    /// at the same wall clock as `utc(...)` (offset
+    /// `+00:00`, so the instant is unchanged).
+    fn now_at(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<FixedOffset> {
+        FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(y, mo, d, h, mi, s)
+            .unwrap()
     }
 
     fn cookie(name: &str, domain: &str, path: &str, expires: i64) -> StoredCookie {
@@ -861,24 +884,38 @@ mod tests {
                      .muse.ai\tTRUE\t/\tFALSE\t100000000000000\tother\tv-other\n";
         let parsed = parse_jar(input.as_bytes()).expect("parses");
         assert_eq!(parsed.len(), 2);
-        let now = utc(2026, 11, 5, 0, 0, 0);
-        assert_eq!(earliest_expiry(&parsed), Some(DateTime::<Utc>::MAX_UTC));
+        let now = now_at(2026, 11, 5, 0, 0, 0);
+        assert_eq!(
+            earliest_expiry(&parsed),
+            Some(DateTime::<Utc>::MAX_UTC.fixed_offset())
+        );
         let (name, exp) = driving_cookie(&parsed);
         assert_eq!(name, "hatch_sess");
-        assert_eq!(exp, Some(DateTime::<Utc>::MAX_UTC));
+        assert_eq!(exp, Some(DateTime::<Utc>::MAX_UTC.fixed_offset()));
         let header = cookie_header(&parsed, now);
         assert!(header.contains("hatch_sess="), "{header}");
         assert!(header.contains("other="), "{header}");
         // A far-past expiry saturates to MIN and counts
         // as expired (skipped from the header).
         let past = vec![cookie("old", ".muse.ai", "/", -100_000_000_000_000)];
-        assert_eq!(earliest_expiry(&past), Some(DateTime::<Utc>::MIN_UTC));
+        assert_eq!(
+            earliest_expiry(&past),
+            Some(DateTime::<Utc>::MIN_UTC.fixed_offset())
+        );
         assert_eq!(cookie_header(&past, now), "");
-        assert_eq!(epoch_to_datetime(i64::MAX), DateTime::<Utc>::MAX_UTC);
-        assert_eq!(epoch_to_datetime(i64::MIN), DateTime::<Utc>::MIN_UTC);
+        assert_eq!(
+            epoch_to_datetime(i64::MAX),
+            DateTime::<Utc>::MAX_UTC.fixed_offset()
+        );
+        assert_eq!(
+            epoch_to_datetime(i64::MIN),
+            DateTime::<Utc>::MIN_UTC.fixed_offset()
+        );
         assert_eq!(
             epoch_to_datetime(1_790_000_000),
-            Utc.with_ymd_and_hms(2026, 9, 21, 14, 13, 20).unwrap()
+            Utc.with_ymd_and_hms(2026, 9, 21, 14, 13, 20)
+                .unwrap()
+                .fixed_offset()
         );
     }
 
@@ -911,7 +948,7 @@ mod tests {
 
     #[test]
     fn effective_set_cookie_domain_path_expiry() {
-        let now = utc(2026, 11, 5, 0, 0, 0);
+        let now = now_at(2026, 11, 5, 0, 0, 0);
         // Domain attr present -> domain-scoped with dot added.
         let c = ParsedCookie {
             name: "hatch_sess".into(),
@@ -995,7 +1032,7 @@ mod tests {
         // SKIPPED by CookieHeader (fail-closed). (Max-Age =
         // 10^12 would NOT wrap negative: 10^21 mod 2^64 is
         // +3.9e18 ns.)
-        let now = utc(2026, 11, 5, 0, 0, 0);
+        let now = now_at(2026, 11, 5, 0, 0, 0);
         let c = ParsedCookie {
             name: "hatch_sess".into(),
             value: "v".into(),
@@ -1037,7 +1074,7 @@ mod tests {
 
     #[test]
     fn cookie_header_skips_expired_and_sorts() {
-        let now = utc(2026, 11, 5, 0, 0, 0);
+        let now = now_at(2026, 11, 5, 0, 0, 0);
         let cookies = vec![
             cookie("b", "muse.ai", "/", now.timestamp() + 60),
             cookie("a", "muse.ai", "/", now.timestamp() - 60),
@@ -1048,7 +1085,7 @@ mod tests {
 
     #[test]
     fn driving_cookie_prefers_hatch_sess() {
-        let now = utc(2026, 11, 5, 0, 0, 0);
+        let now = now_at(2026, 11, 5, 0, 0, 0);
         let cookies = vec![
             cookie("datr", "muse.ai", "/", now.timestamp() + 60),
             cookie("hatch_sess", ".muse.ai", "/", now.timestamp() + 3600),

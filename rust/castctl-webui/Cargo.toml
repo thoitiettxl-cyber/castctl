@@ -13,6 +13,10 @@ description = "Web UI HTTP server for the castctl Rust port (M6b): loopback-only
 [dependencies]
 castctl-config = { path = "../castctl-config" }
 castctl-log-redact = { path = "../castctl-log-redact" }
+# Fix loop 1, B1/B5: the shared Go-RFC3339Nano renderer
+# and TZif offset lookup (one implementation for the
+# keeper and webui render/parse sites).
+castctl-shared = { path = "../castctl-shared" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

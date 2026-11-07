@@ -33,7 +33,7 @@ use castctl_keeper::{
     cookie_expiry_metadata, default_login_contract, derive_auth_status, load_state,
     lock_cookies_file, parse_cookies_lenient, reset_after_login, write_cookies_file,
 };
-use chrono::{SecondsFormat, Utc};
+use chrono::Utc;
 
 use crate::network::write_json_text;
 use crate::run::{Ctx, FlowErr, GlobalOpts, config_err, msg, resolve_config};
@@ -214,7 +214,10 @@ fn auth_status_for_profile(
 /// (`authstatus.go:60-74`): field-declaration order,
 /// `omitempty` skips, `liveness_checked` always false (this
 /// command performs no live check). Times render as Go's
-/// `RFC3339Nano` (trailing zeros trimmed, `Z` for UTC).
+/// `RFC3339Nano` (trailing zeros trimmed, `Z` for UTC) via
+/// the shared `castctl_shared::timefmt::format_go_rfc3339_nano`
+/// helper (fix loop 1, B1: the old `AutoSi` render printed
+/// `.500` where Go prints `.5`).
 fn auth_status_json(st: &AuthStatus) -> JsonValue {
     let mut o = OrderedObject::new();
     o.set("profile", JsonValue::Str(st.profile.clone()));
@@ -226,13 +229,13 @@ fn auth_status_json(st: &AuthStatus) -> JsonValue {
     if let Some(exp) = st.driving_expiry {
         o.set(
             "driving_expiry",
-            JsonValue::Str(exp.to_rfc3339_opts(SecondsFormat::AutoSi, true)),
+            JsonValue::Str(castctl_shared::timefmt::format_go_rfc3339_nano(&exp)),
         );
     }
     if let Some(t) = st.last_checked_at {
         o.set(
             "last_checked_at",
-            JsonValue::Str(t.to_rfc3339_opts(SecondsFormat::AutoSi, true)),
+            JsonValue::Str(castctl_shared::timefmt::format_go_rfc3339_nano(&t)),
         );
     }
     o.set("keeper_stopped", JsonValue::Bool(st.keeper_stopped));
@@ -902,5 +905,52 @@ mod tests {
             );
         }
         assert!(!cookies.exists());
+    }
+
+    #[test]
+    fn auth_status_json_trims_trailing_zeros_like_go() {
+        // Fix loop 1, B1 (`auth status` render site): Go
+        // RFC3339Nano renders `.5` / `.12`, not `.500` /
+        // `.120` — for both the UTC driving expiry and the
+        // LOCAL last-checked time.
+        use chrono::{FixedOffset, TimeZone, Timelike};
+        let st = AuthStatus {
+            profile: "no.0".to_string(),
+            status: AuthStatusValue::Ok,
+            driving_cookie: "hatch_sess".to_string(),
+            driving_expiry: Some(
+                FixedOffset::east_opt(0)
+                    .unwrap()
+                    .with_ymd_and_hms(2026, 12, 5, 0, 0, 0)
+                    .unwrap()
+                    .with_nanosecond(500_000_000)
+                    .unwrap(),
+            ),
+            last_checked_at: Some(
+                FixedOffset::east_opt(7 * 3600)
+                    .unwrap()
+                    .with_ymd_and_hms(2026, 11, 7, 18, 33, 11)
+                    .unwrap()
+                    .with_nanosecond(120_000_000)
+                    .unwrap(),
+            ),
+            keeper_stopped: false,
+            keeper_stopped_reason: String::new(),
+            headless_available: true,
+            headless_reason: String::new(),
+            needs_action: false,
+            cookies_seen: 10,
+        };
+        let JsonValue::Object(o) = auth_status_json(&st) else {
+            panic!("object")
+        };
+        assert_eq!(
+            o.get("driving_expiry"),
+            Some(&JsonValue::Str("2026-12-05T00:00:00.5Z".to_string()))
+        );
+        assert_eq!(
+            o.get("last_checked_at"),
+            Some(&JsonValue::Str("2026-11-07T18:33:11.12+07:00".to_string()))
+        );
     }
 }

@@ -22,13 +22,21 @@ use castctl_keeper::relogin::ReloginDriver;
 use castctl_keeper::state::{SessionState, save_state};
 use castctl_keeper::tick::{GatewayProbe, TickDeps, tick};
 use castctl_transport::{BodySummary, TransportError};
-use chrono::{TimeZone, Utc};
+use chrono::{FixedOffset, TimeZone};
 
 const NOW: i64 = 1_792_000_000; // 2026-10-14T… fixed test time
 const HATCH_EXP: i64 = NOW + 30 * 24 * 3600; // 30 days out
 
-fn now() -> chrono::DateTime<Utc> {
-    Utc.timestamp_opt(NOW, 0).single().unwrap()
+/// The tick's fixed `now` (M7g): the same instant as the
+/// old UTC value, but at `+07:00` — the machine-local
+/// offset on cue — so the saved state must carry
+/// `+07:00`, not `+00:00`.
+fn now() -> chrono::DateTime<FixedOffset> {
+    FixedOffset::east_opt(7 * 3600)
+        .unwrap()
+        .timestamp_opt(NOW, 0)
+        .single()
+        .unwrap()
 }
 
 fn hatch(value: &str, expires: i64) -> StoredCookie {
@@ -256,6 +264,29 @@ async fn case_01_token_ok() {
     assert!(!r.recovered);
     assert_eq!(r.next_delay, Duration::from_secs(24 * 3600));
     assert_eq!(h.read_state().last_tick_outcome, "ok");
+}
+
+/// M7g: an ok tick writes `last/next_check_at` (and
+/// `last_seen`) with the clock's local offset (`+07:00`
+/// here) into `session-state.json` — the Go `time.Now()`
+/// marshal — never `+00:00`. The raw file text is
+/// asserted, not just the parsed value.
+#[tokio::test]
+async fn tick_writes_local_offset_state() {
+    let h = Harness::new("local-offset");
+    h.write_jar(&[hatch("v1", HATCH_EXP)]);
+    let deps = h.deps(script_checker(vec![ok_outcome()]));
+    let r = tick(&deps, &CancelFlag::new()).await;
+    assert_eq!(r.outcome, "ok");
+    let raw = std::fs::read_to_string(h.profile_dir().join("session-state.json")).unwrap();
+    assert!(
+        raw.contains("+07:00"),
+        "saved state must carry the local offset, got:\n{raw}"
+    );
+    assert!(
+        !raw.contains("+00:00"),
+        "saved state must not contain +00:00, got:\n{raw}"
+    );
 }
 
 #[tokio::test]

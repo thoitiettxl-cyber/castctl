@@ -15,7 +15,7 @@
 
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
 
 use crate::error::KeeperError;
 use crate::jar::driving_cookie;
@@ -58,8 +58,9 @@ pub struct AuthStatus {
     /// Driving cookie NAME only, `""` when unknown.
     pub driving_cookie: String,
     /// `None` when no dated cookie exists.
-    pub driving_expiry: Option<DateTime<Utc>>,
-    pub last_checked_at: Option<DateTime<Utc>>,
+    pub driving_expiry: Option<DateTime<FixedOffset>>,
+    /// Copied verbatim from state (LOCAL).
+    pub last_checked_at: Option<DateTime<FixedOffset>>,
     pub keeper_stopped: bool,
     pub keeper_stopped_reason: String,
     pub headless_available: bool,
@@ -80,7 +81,7 @@ pub struct AuthStatus {
 /// only, never its bytes.
 /// What [`cookie_expiry_metadata`] reports: (driving cookie
 /// name, driving expiry, cookies seen, file missing).
-pub type ExpiryMetadata = (String, Option<DateTime<Utc>>, usize, bool);
+pub type ExpiryMetadata = (String, Option<DateTime<FixedOffset>>, usize, bool);
 
 pub fn cookie_expiry_metadata(
     cookies_path: &str,
@@ -112,7 +113,7 @@ pub fn cookie_expiry_metadata(
 pub fn derive_auth_status(
     profile_name: &str,
     driving_name: &str,
-    driving_expiry: Option<DateTime<Utc>>,
+    driving_expiry: Option<DateTime<FixedOffset>>,
     cookies_seen: usize,
     file_missing: bool,
     st: Option<&SessionState>,
@@ -201,7 +202,7 @@ mod tests {
         let st = derive_auth_status(
             "no.0",
             "hatch_sess",
-            Some(now() + chrono::Duration::days(30)),
+            Some(now().fixed_offset() + chrono::Duration::days(30)),
             3,
             false,
             None,
@@ -219,7 +220,7 @@ mod tests {
         let within = derive_auth_status(
             "no.0",
             "hatch_sess",
-            Some(now() + chrono::Duration::hours(10)),
+            Some(now().fixed_offset() + chrono::Duration::hours(10)),
             3,
             false,
             None,
@@ -233,7 +234,7 @@ mod tests {
         let past = derive_auth_status(
             "no.0",
             "hatch_sess",
-            Some(now() - chrono::Duration::hours(1)),
+            Some(now().fixed_offset() - chrono::Duration::hours(1)),
             3,
             false,
             None,
@@ -268,7 +269,7 @@ mod tests {
         let stopped = derive_auth_status(
             "no.0",
             "hatch_sess",
-            Some(now() + chrono::Duration::days(30)),
+            Some(now().fixed_offset() + chrono::Duration::days(30)),
             3,
             false,
             Some(&st),
@@ -285,7 +286,7 @@ mod tests {
     fn state_driving_record_wins_when_file_has_none() {
         let mut st = SessionState::new();
         st.driving_cookie = "hatch_sess".to_string();
-        st.driving_expiry = Some(now() + chrono::Duration::hours(5));
+        st.driving_expiry = Some(now().fixed_offset() + chrono::Duration::hours(5));
         let out = derive_auth_status(
             "no.0",
             "",

@@ -16,8 +16,19 @@
 //!   `Checker`, `Exporter`, `ReloginDriver` and `Notifier`
 //!   are async traits, and cancellation is a [`CancelFlag`]
 //!   instead of a `context.Context`.
-//! - Times are `chrono::DateTime<Utc>`; durations are
-//!   `std::time::Duration`.
+//! - Times: local-origin keeper times
+//!   (`last/next_check_at`, `login_*`, `warned_at`,
+//!   `last_seen`, audit `started_at`) are
+//!   `chrono::DateTime<FixedOffset>` carrying the stored
+//!   offset (Go `time.Time` JSON semantics — M7g);
+//!   cookie-expiry times (`expires_at`,
+//!   `earliest_expiry`, `driving_expiry`) are
+//!   `chrono::DateTime<FixedOffset>` too since fix loop 1
+//!   (B6): the values are UTC instants (Go
+//!   `time.Unix(...).UTC()`, so they render `Z`), but the
+//!   type keeps a stored non-`Z` offset on re-print like
+//!   Go instead of normalising it away.
+//!   Durations are `std::time::Duration`.
 //! - Cookie VALUES never reach logs, errors, or state: error
 //!   types carry names, counts and kinds only (the
 //!   hand-written `Debug` impls enforce this).

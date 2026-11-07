@@ -14,7 +14,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset};
 
 use crate::clock::{CancelFlag, Clock};
 
@@ -108,8 +108,8 @@ impl Backoff {
 /// spinning.
 pub fn next_delay_after(
     base: Duration,
-    driving_expiry: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
+    driving_expiry: Option<DateTime<FixedOffset>>,
+    now: DateTime<FixedOffset>,
 ) -> Duration {
     let Some(expiry) = driving_expiry else {
         return base;
@@ -131,15 +131,27 @@ pub fn next_delay_after(
 mod tests {
     use super::*;
     use crate::clock::FakeClock;
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Utc};
 
-    fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(y, mo, d, h, mi, s).unwrap()
+    fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<FixedOffset> {
+        Utc.with_ymd_and_hms(y, mo, d, h, mi, s)
+            .unwrap()
+            .fixed_offset()
+    }
+
+    /// The tick's `now` (M7g): a `FixedOffset` instant at
+    /// the same wall clock as `utc(...)` (offset `+00:00`,
+    /// so the instant is unchanged).
+    fn now_at(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<FixedOffset> {
+        FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(y, mo, d, h, mi, s)
+            .unwrap()
     }
 
     #[test]
     fn ladder_exhausts_after_len_steps() {
-        let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(utc(2026, 11, 5, 0, 0, 0)));
+        let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(now_at(2026, 11, 5, 0, 0, 0)));
         // Fixed jitter u=0.5 -> factor 1.0: literal delays.
         let mut b = Backoff::with_ladder(
             clock,
@@ -154,7 +166,7 @@ mod tests {
 
     #[test]
     fn jitter_bounds_plus_minus_twenty_percent() {
-        let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(utc(2026, 11, 5, 0, 0, 0)));
+        let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(now_at(2026, 11, 5, 0, 0, 0)));
         // u=0 -> 0.8x; u=1 (exclusive in practice, boundary) -> 1.2x.
         let mut b0 = Backoff::with_ladder(
             Arc::clone(&clock),
@@ -169,7 +181,7 @@ mod tests {
 
     #[test]
     fn next_delay_after_adaptive() {
-        let now = utc(2026, 11, 5, 0, 0, 0);
+        let now = now_at(2026, 11, 5, 0, 0, 0);
         let base = Duration::from_secs(24 * 3600);
         // No driving expiry -> base.
         assert_eq!(next_delay_after(base, None, now), base);

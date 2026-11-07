@@ -46,7 +46,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use castctl_transport::TransportError;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset};
 
 use crate::backoff::{Backoff, next_delay_after};
 use crate::checker::{CheckOutcome, Checker};
@@ -248,7 +248,7 @@ fn save_tick_state(
 /// excluded from both checks: an expired cookie from an
 /// unrelated domain must never veto a valid re-export and
 /// sticky-stop the entry.
-pub fn validate_exported_set(merged: &[StoredCookie], now: DateTime<Utc>) -> bool {
+pub fn validate_exported_set(merged: &[StoredCookie], now: DateTime<FixedOffset>) -> bool {
     let mut has_hatch = false;
     let mut filtered: Vec<&StoredCookie> = Vec::new();
     for c in merged {
@@ -1017,7 +1017,7 @@ async fn try_relogin(
     deps: &TickDeps,
     driver: &dyn ReloginDriver,
     _snapshot_cookies: &[StoredCookie],
-    _now: DateTime<Utc>,
+    _now: DateTime<FixedOffset>,
 ) -> Result<(Vec<StoredCookie>, usize), TryReloginError> {
     let Some(provider) = &deps.credential_provider else {
         return Err(TryReloginError::Unavailable);

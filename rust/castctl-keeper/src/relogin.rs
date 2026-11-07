@@ -370,7 +370,7 @@ async fn snapshot_match(
 /// pre-write gate the tick applies to CDP exports
 /// (`relogin_chromedp.go:usableSession`): convert with
 /// `from_exported_cookie` and call `validate_exported_set`.
-fn usable_session(cookies: &[ExportedCookie], now: chrono::DateTime<chrono::Utc>) -> bool {
+fn usable_session(cookies: &[ExportedCookie], now: chrono::DateTime<chrono::FixedOffset>) -> bool {
     let stored: Vec<crate::jar::StoredCookie> = cookies.iter().map(from_exported_cookie).collect();
     crate::tick::validate_exported_set(&stored, now)
 }
@@ -760,7 +760,7 @@ impl RealReloginDriver {
     /// joined error; L4 succeed-empty → `(empty, nil)` =
     /// "no session cookie yet".
     async fn harvest(&self, ctx: &BrowserContext) -> Result<Vec<ExportedCookie>, ReloginError> {
-        let now = chrono::Utc::now();
+        let now = chrono::Local::now().fixed_offset();
         let mut first: Option<Vec<ExportedCookie>> = None;
         let mut l1_err = String::new();
         let mut l2_err = String::new();
