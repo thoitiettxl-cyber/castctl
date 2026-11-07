@@ -327,6 +327,26 @@ pub(crate) fn config_err(e: ConfigError) -> FlowErr {
 /// flat file (no `profiles` marker): the runtime builder's
 /// profile resolution refuses it with exit 2, as Go's
 /// `LoadProfile` does.
+/// Write to the real process stream right now, like Go's
+/// `fmt.Fprintf(os.Stdout, ...)` inside the keeper tick loop and the
+/// `webui serve` startup path. A long-running command must show its
+/// lines while it runs: the buffered `Outcome` only reaches the
+/// terminal when the process exits, which is invisible to
+/// `journalctl -f` and to anything waiting for the startup line.
+/// Write errors are ignored, as Go ignores them on these paths.
+pub(crate) fn write_live(to_stderr: bool, text: &str) {
+    use std::io::Write;
+    if to_stderr {
+        let mut e = std::io::stderr();
+        let _ = e.write_all(text.as_bytes());
+        let _ = e.flush();
+    } else {
+        let mut o = std::io::stdout();
+        let _ = o.write_all(text.as_bytes());
+        let _ = o.flush();
+    }
+}
+
 /// Go's `LoadSingleConfig` parses the typed `webui` block with the
 /// config directory at load time (`internal/profile/webui.go:274-287`,
 /// the tail of `ParseSingleConfig`), so a block that breaks a rule
@@ -1488,9 +1508,10 @@ fn serve_webui(ctx: &mut Ctx<'_>, loc: &ConfigLocation) -> Result<(), FlowErr> {
                 return (1, Some(format!("webui serve: listen {listen}: {e}")));
             }
         };
-        ctx.out.stderr.push_str(&format!(
-            "castctl: web UI listening on {listen} (loopback only, token auth)\n"
-        ));
+        write_live(
+            true,
+            &format!("castctl: web UI listening on {listen} (loopback only, token auth)\n"),
+        );
         let serve_fut = server.serve_on(listener);
         tokio::pin!(serve_fut);
         tokio::select! {
