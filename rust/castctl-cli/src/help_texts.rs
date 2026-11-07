@@ -49,7 +49,7 @@ self-update PR):
   ideas, idea, idea-exec, unread, seen, session-start,
   session-rename, session-pin, session-unpin, session-archive,
   session-unarchive, session-delete, stop, wake, raw, fs, auth,
-  profile, config, telegram, keeper, update, webui
+  profile, config, telegram, keeper, update
 
 Run "castctl <command> --help" for per-command help.
 
@@ -448,18 +448,6 @@ run prints one summary line per tick to stdout. check prints
 one JSON object per entry. status prints a JSON array.
 "#;
 
-pub const WEBUI_HELP_TEXT: &str = r#"usage: castctl webui <subcommand> [options]
-
-Web UI server: serve the castctl web UI (frontend + /api/v1)
-on loopback only, with token auth. Requires a "webui" block in
-config.json (see docs/config.md); absent means no web UI.
-
-subcommands:
-  serve     serve the web UI in the foreground until interrupted
-
-Run "castctl webui serve --help" for serve options.
-"#;
-
 pub const CONFIG_MIGRATE_HELP_TEXT: &str = r#"usage: castctl config migrate [--write] [--from <dir>]
 
 Migrate legacy per-profile config files into the single
@@ -662,20 +650,6 @@ pub const KEEPER_STATUS_HELP_TEXT: &str = r#"usage: castctl keeper status [--tag
 Show per-entry state from the state files only: no network, no
 browser contact. Exit 0 even when an entry is logged out or
 stopped. Prints a JSON array.
-"#;
-
-pub const WEBUI_SERVE_HELP_TEXT: &str = r#"usage: castctl webui serve
-
-Serve the web UI in the foreground until interrupted (Ctrl-C,
-exit 130). Listens on loopback only, with token auth.
-
-The "webui" block in config.json configures the listen address
-(default 127.0.0.1:8317 when the block has no "listen" key) and
-the "token". A plaintext token is hashed with bcrypt and
-written back into config.json on startup; an already-hashed
-token is used as-is. The token is never printed or logged.
-
---profile is ignored: the server serves the whole single file.
 "#;
 
 pub const FS_LS_HELP_TEXT: &str = r#"usage: castctl fs ls [PATH] [-l] [-a] [--json]

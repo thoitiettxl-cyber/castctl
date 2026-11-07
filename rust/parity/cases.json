@@ -331,13 +331,6 @@
     ]
   },
   {
-    "id": "45-webui-help",
-    "argv": [
-      "webui",
-      "--help"
-    ]
-  },
-  {
     "id": "47-version",
     "argv": [
       "--version"

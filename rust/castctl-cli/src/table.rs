@@ -17,7 +17,7 @@ use crate::help_texts::*;
 use crate::parser::{FlagDef, FlagKind, bool_flag, int_flag, int_flag_no_def, str_flag};
 
 /// `commandOrder` (`commands.go:766`).
-pub const COMMAND_ORDER: [&str; 45] = [
+pub const COMMAND_ORDER: [&str; 44] = [
     "chat",
     "status",
     "usage",
@@ -62,7 +62,6 @@ pub const COMMAND_ORDER: [&str; 45] = [
     "telegram",
     "keeper",
     "update",
-    "webui",
 ];
 
 /// Positional-argument handling for a `parseOrHelp` command.
@@ -501,13 +500,6 @@ pub fn command_table() -> Vec<CommandSpec> {
             ],
             PositionalSpec::Names(&[]),
         ),
-        spec(
-            "webui",
-            WEBUI_HELP_TEXT,
-            "webui <subcommand> [options]",
-            vec![],
-            PositionalSpec::None,
-        ),
     ]
 }
 
@@ -751,17 +743,18 @@ mod tests {
     #[test]
     fn test_command_order_matches_go() {
         let table = command_table();
-        assert_eq!(table.len(), 45);
+        assert_eq!(table.len(), 44);
         let names: Vec<&str> = table.iter().map(|s| s.name).collect();
         assert_eq!(names, COMMAND_ORDER.to_vec());
     }
 
     #[test]
-    fn test_global_help_lists_45_names() {
-        // globalHelpText lists the same 45 names as the
-        // invalid-choice message now that `plugin` is gone.
+    fn test_global_help_lists_44_names() {
+        // globalHelpText lists the same 44 names as the
+        // invalid-choice message now that `plugin` and `webui`
+        // are gone.
         assert!(!GLOBAL_HELP_TEXT.contains("plugin"));
-        assert!(GLOBAL_HELP_TEXT.contains("webui"));
+        assert!(!GLOBAL_HELP_TEXT.contains("webui"));
         assert!(GLOBAL_HELP_TEXT.ends_with('\n'));
         assert!(!GLOBAL_HELP_TEXT.ends_with("\n\n"));
     }

@@ -14,7 +14,7 @@
 //! `profilecmd.go` (`cmdProfile`, `profileParse`, `cmdConfig`,
 //! `cmdConfigMigrate`), `deliver.go` (`cmdAuth`), `keeper.go`
 //! (`cmdKeeper`, `parseKeeperSelection`), `telegram.go`
-//! (`cmdTelegram`), `webui.go` (`cmdWebUI`),
+//! (`cmdTelegram`),
 //! `authimport.go` / `authlogin.go` /
 //! `authstatus.go` / `authobserve.go`, `read.go` (`usageErr`),
 //! `wait.go` (`parseAutoToggles`, `approveDecision`,
@@ -33,8 +33,6 @@ use castctl_config::errors::ConfigError;
 use castctl_config::gostr::{go_quote, go_trim_space};
 use castctl_config::log::valid_log_level;
 use castctl_log_redact::safe_string;
-use std::path::Path;
-use std::sync::Arc;
 
 use crate::help_texts::*;
 use crate::parser::{ArgParser, Parsed, ParserError, check_positionals};
@@ -204,7 +202,7 @@ fn parse_or_help(
 }
 
 /// The inline-parser shape (`auth list`, `keeper` selection,
-/// `webui serve`, `config migrate`, profile
+/// `config migrate`, profile
 /// subcommands): parser errors print ONE line, then
 /// `classifyError` prints a second identical line.
 fn inline_parse(
@@ -337,8 +335,8 @@ pub fn live_output_written() -> bool {
 }
 
 /// Write to the real process stream right now, like Go's
-/// `fmt.Fprintf(os.Stdout, ...)` inside the keeper tick loop and the
-/// `webui serve` startup path. A long-running command must show its
+/// `fmt.Fprintf(os.Stdout, ...)` inside the keeper tick loop. A
+/// long-running command must show its
 /// lines while it runs: the buffered `Outcome` only reaches the
 /// terminal when the process exits, which is invisible to
 /// `journalctl -f` and to anything waiting for the startup line.
@@ -554,7 +552,6 @@ fn run_inner(ctx: &mut Ctx<'_>, args: &[String]) -> Outcome {
         "config" => cmd_config(ctx, &g, &cmd_args),
         "telegram" => cmd_telegram(ctx, &g, &cmd_args),
         "keeper" => cmd_keeper(ctx, &g, &cmd_args),
-        "webui" => cmd_webui(ctx, &g, &cmd_args),
         "update" => cmd_update(ctx, &spec, &cmd_args),
         _ => cmd_plain(ctx, &g, &spec, &cmd_args),
     };
@@ -1240,295 +1237,6 @@ fn cmd_keeper(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), 
     }
 }
 
-/// `cmdWebUI` (`webui.go:83`) + `cmdWebUIServe`.
-fn cmd_webui(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), FlowErr> {
-    if args.is_empty() {
-        ctx.out
-            .stderr
-            .push_str("castctl: the following arguments are required: subcommand\n");
-        ctx.out.stderr.push_str(WEBUI_HELP_TEXT);
-        return Err(msg_empty(2));
-    }
-    if args[0] == "--help" || args[0] == "-h" {
-        ctx.out.stdout.push_str(WEBUI_HELP_TEXT);
-        return Err(FlowErr::HelpShown);
-    }
-    if args[0] != "serve" {
-        ctx.out.stderr.push_str(&format!(
-            "castctl: argument subcommand: invalid choice: {} (choose from serve)\n",
-            go_quote(&args[0])
-        ));
-        ctx.out.stderr.push_str(WEBUI_HELP_TEXT);
-        return Err(msg_empty(2));
-    }
-    let p = inline_parse(ctx, vec![], WEBUI_SERVE_HELP_TEXT, &args[1..])?;
-    check_positionals(&p, &[]).map_err(usage_err)?;
-    let loc = resolve_config(ctx, g, false)?;
-    serve_webui(ctx, &loc)
-}
-
-/// `cmdWebUIServe` (`internal/commands/webui.go`): the
-/// pre-serve sequence — load → block check → ui_dir
-/// first → hash-on-start → bind → serve. Exit 2 config,
-/// 1 runtime, 130 interrupt.
-///
-/// Seams not yet wired ("chưa nối"): cookie import /
-/// restore are `None` (the handlers report 501) and the
-/// screencast starter is `None` (status/start report
-/// unavailable, never fake success). Live chats ARE wired
-/// — as a failing seam that reports 502 (see the `chats`
-/// wiring below); `None` would report 501, which no
-/// production Go server ever emits. The screencast
-/// availability seam is wired over the config file (keeper
-/// entry with a browser URL), matching the server's
-/// in-crate check.
-///
-/// NOTE: the startup line is pushed to `ctx.out.stderr`,
-/// which the CLI buffers until the process exits (M2
-/// architecture) — it does not appear live while the
-/// server runs.
-/// A chat seam with no Muse Runtime behind it: every call
-/// fails with [`ChatSeamError`], which the handlers map to
-/// the fixed 502 `upstream_error`. This is the M6b stand-in
-/// for Go's live gateway seam failing (no live session):
-/// list/history/start/op all 502, and send creates its job
-/// (202) whose worker then fails the same way. No chat text
-/// is ever served — there is none to serve.
-fn failing_chat_deps() -> castctl_webui::chats::ChatDeps {
-    use castctl_webui::chats::{ChatDeps, ChatSeamError};
-    fn fail<T>() -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<T, ChatSeamError>> + Send + 'static>,
-    > {
-        Box::pin(async move { Err(ChatSeamError) })
-    }
-    ChatDeps {
-        list_sessions: std::sync::Arc::new(|_, _| fail()),
-        get_history: std::sync::Arc::new(|_, _, _| fail()),
-        start_session: std::sync::Arc::new(|_, _| fail()),
-        session_op: std::sync::Arc::new(|_, _, _, _| fail()),
-        send_chat: std::sync::Arc::new(|_, _, _| fail()),
-    }
-}
-
-fn serve_webui(_ctx: &mut Ctx<'_>, loc: &ConfigLocation) -> Result<(), FlowErr> {
-    use castctl_config::jsonvalue::JsonValue;
-    use castctl_webui::auth::{hash_token, looks_like_bcrypt_hash};
-    use castctl_webui::config::{effective_listen, resolve_webui};
-    use castctl_webui::error::err_validation;
-    use castctl_webui::guarded::sha256_hex;
-    use castctl_webui::server::{Deps, NewServerError, Server};
-    use castctl_webui::store::{load_config, save_guarded};
-
-    let dir = Path::new(&loc.config_dir);
-    // Go's LoadSingleConfig: a bad config exits 2 here
-    // (config_err, `profile: ` prefix); a legacy flat file
-    // parses as "not found" → the no-config-file message.
-    let (single, found) = load_single_config(&loc.config_dir).map_err(config_err)?;
-    if !found {
-        return Err(msg(
-            2,
-            "webui serve: no config file: run \"castctl config migrate\" or create a config with a \"webui\" block first",
-        ));
-    }
-    let Some(single) = single else {
-        return Err(msg(
-            2,
-            "webui serve: no config file: run \"castctl config migrate\" or create a config with a \"webui\" block first",
-        ));
-    };
-    let block = resolve_webui(single.webui_raw.as_ref()).map_err(|e| msg(2, e))?;
-    let Some(block) = block else {
-        return Err(msg(
-            2,
-            "webui serve: no \"webui\" block in config.json: add one (see docs/config.md) or use the CLI",
-        ));
-    };
-    let listen = effective_listen(&block);
-    let token = block.token.clone();
-    if token.is_empty() {
-        return Err(msg(
-            2,
-            "webui serve: no token configured: add a \"token\" to the \"webui\" block",
-        ));
-    }
-    let mut cookies_files: Vec<String> = Vec::new();
-    for p in single.profiles.values() {
-        if !p.cookies_file.is_empty() {
-            cookies_files.push(p.cookies_file.clone());
-        }
-    }
-    // ui_dir FIRST: a present-but-broken value fails closed
-    // (exit 2) before any token write-back; only an absent
-    // key falls back to the embedded frontend.
-    let mut ui_dir: Option<String> = None;
-    let mut bundle_hash = castctl_webui::static_shell::bundle_sha256();
-    if !block.ui_dir.trim().is_empty() {
-        let root = castctl_webui::uidir::check_ui_dir(dir, block.ui_dir.trim(), &cookies_files)
-            .map_err(|e| msg(2, webui_uidir_msg(&e.to_string())))?;
-        let index = std::fs::read(root.join("index.html"))
-            .map_err(|_| msg(2, "webui serve: ui_dir has no readable index.html"))?;
-        bundle_hash = sha256_hex(&index);
-        ui_dir = Some(root.to_string_lossy().into_owned());
-    }
-    // Hash-on-start (fail closed): a plaintext block token
-    // is hashed and written back before serving; an
-    // already-hashed token is used as-is and the file is
-    // not touched (Go's early return in
-    // hashWebUITokenOnStart). Any write-back failure maps
-    // to the one fixed exit-2 message.
-    let token_hash = if looks_like_bcrypt_hash(&token) {
-        token.clone()
-    } else {
-        let load = load_config(dir).map_err(|_| {
-            msg(
-                2,
-                "webui serve: failed to hash and store the \"webui\" token",
-            )
-        })?;
-        let plaintext = token.clone();
-        let outcome = save_guarded(&load, dir, "", false, move |doc| {
-            let JsonValue::Object(doc_obj) = doc else {
-                return Err(err_validation("config document must be a JSON object"));
-            };
-            // No `get_mut` on OrderedObject: clone the block,
-            // mutate it, put it back (key order preserved).
-            let Some(JsonValue::Object(mut webui)) = doc_obj.get("webui").cloned() else {
-                return Err(err_validation("webui: no \"webui\" block"));
-            };
-            let current = match webui.get("token") {
-                Some(JsonValue::Str(t)) => t.clone(),
-                _ => String::new(),
-            };
-            if looks_like_bcrypt_hash(&current) {
-                // A concurrent writer hashed first: use the
-                // stored hash. The funnel still re-encodes
-                // and writes the file, values unchanged (as
-                // Go's UpdateSingleConfig does).
-                return Ok(());
-            }
-            if current != plaintext {
-                return Err(err_validation("webui: token changed during startup"));
-            }
-            let hash = hash_token(&plaintext).map_err(err_validation)?;
-            webui.set("token", JsonValue::Str(hash));
-            doc_obj.set("webui", JsonValue::Object(webui));
-            Ok(())
-        })
-        .map_err(|_| {
-            msg(
-                2,
-                "webui serve: failed to hash and store the \"webui\" token",
-            )
-        })?;
-        match outcome.webui_token {
-            Some(hash) => hash,
-            None => {
-                return Err(msg(
-                    2,
-                    "webui serve: failed to hash and store the \"webui\" token",
-                ));
-            }
-        }
-    };
-    // The plaintext token is dead after the hash is
-    // computed: drop it now (Go clears
-    // `single.WebUI.Token = ""`) so it does not linger in
-    // scope for the server's whole lifetime.
-    drop(token);
-    // Server construction: UIDirError → exit 2 (Go's
-    // errCodef(2, "webui serve: %v", uidErr) — the doubled
-    // "webui serve: webui: ..." prefix is Go's own text),
-    // any other construction failure → exit 1.
-    let avail_dir = dir.to_path_buf();
-    let screencast_available = Arc::new(move |profile: &str| {
-        let load = match load_config(&avail_dir) {
-            Ok(l) => l,
-            Err(e) => return (false, e.msg),
-        };
-        castctl_webui::screencast::screencast_availability(&avail_dir, &load, profile)
-            .unwrap_or_else(|e| (false, e.msg))
-    });
-    let server = Server::new(Deps {
-        config_dir: dir.to_path_buf(),
-        version: VERSION.to_string(),
-        listen_addr: listen.clone(),
-        token_hash,
-        has_token: true,
-        bundle_sha256: bundle_hash,
-        ui_dir,
-        cookies_files,
-        // Cookie import/restore stay None (501)
-        // deliberately, unlike chats: no faithful failing
-        // stand-in exists — a failing cookie seam would
-        // fabricate a 400 where the live Go server succeeds
-        // with 200 `saved: true` (the import path needs the
-        // real profile store, which lands with the keeper
-        // port). See PORTING §M6b.7.
-        import_cookies: None,
-        restore_cookies: None,
-        screencast_available: Some(screencast_available),
-        screencast_starter: None,
-        // Chats: no Muse Runtime exists in this build, but the
-        // production Go binary always wires a (live) chat seam,
-        // so the seam is present and every call fails closed
-        // with `upstream_error` (502) — exactly what the live
-        // Go server returns for a profile with no live session.
-        // Wiring None instead would report 501 `unavailable`
-        // (Go's nil-seam branch, reachable only in Go's unit
-        // tests), which no production Go server ever emits.
-        chats: Some(std::sync::Arc::new(failing_chat_deps())),
-    })
-    .map_err(|e| match e {
-        NewServerError::UIDir(m) => msg(2, format!("webui serve: {m}")),
-        NewServerError::Config(m) => msg(1, format!("webui serve: {m}")),
-    })?;
-    let tokio_rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| msg(1, format!("failed to start async runtime: {e}")))?;
-    let (code, err_text) = tokio_rt.block_on(async {
-        let listener = match Server::bind(&listen).await {
-            Ok(l) => l,
-            Err(e) => {
-                return (1, Some(format!("webui serve: listen {listen}: {e}")));
-            }
-        };
-        write_live(
-            true,
-            &format!("castctl: web UI listening on {listen} (loopback only, token auth)\n"),
-        );
-        let serve_fut = server.serve_on(listener);
-        tokio::pin!(serve_fut);
-        tokio::select! {
-            res = &mut serve_fut => match res {
-                Ok(()) => (0, None),
-                Err(e) => (1, Some(format!("webui serve: {e}"))),
-            },
-            _ = tokio::signal::ctrl_c() => {
-                server.request_shutdown();
-                match serve_fut.await {
-                    Ok(()) => (130, None),
-                    Err(e) => (1, Some(format!("webui serve: {e}"))),
-                }
-            }
-        }
-    });
-    match (code, err_text) {
-        (0, _) => Ok(()),
-        (130, _) => Err(msg_empty(130)),
-        (c, Some(text)) => Err(msg(c, text)),
-        (c, None) => Err(msg_empty(c)),
-    }
-}
-
-/// Go's `resolveWebUIUIDir` reports a broken ui_dir as
-/// "webui serve: <rule>"; the shared check reports the
-/// rule as "webui: <rule>". Drop the shared prefix so the
-/// startup failure reads exactly as Go's.
-fn webui_uidir_msg(m: &str) -> String {
-    format!("webui serve: {}", m.strip_prefix("webui: ").unwrap_or(m))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1843,20 +1551,13 @@ mod tests {
             out.stderr,
             format!("castctl: the following arguments are required: subcommand\n{FS_HELP_TEXT}")
         );
-        // Unknown subcommand: one line, no help (except webui).
+        // Unknown subcommand: one line, no help.
         let out = run_args(&["fs", "bogus"]);
         assert_eq!(
             out.stderr,
             "castctl: argument subcommand: invalid choice: \"bogus\" (choose from ls, tree, stat, cat, get, find, put, write, edit, mkdir, mv, rm)\n"
         );
         assert_eq!(out.code, 2);
-        let out = run_args(&["webui", "bogus"]);
-        assert_eq!(
-            out.stderr,
-            format!(
-                "castctl: argument subcommand: invalid choice: \"bogus\" (choose from serve)\n{WEBUI_HELP_TEXT}"
-            )
-        );
         // Dispatcher help: only exact --help/-h at args[0].
         let out = run_args(&["fs", "--help"]);
         assert_eq!(out.stdout, FS_HELP_TEXT);
@@ -2210,10 +1911,10 @@ mod tests {
         // The `cmd_plain` fallthrough (internal error) can only
         // fire for a name in none of the handled sets. Every
         // name that reaches `cmd_plain` — `COMMAND_ORDER`
-        // minus the 8 dedicated dispatch arms — must be
+        // minus the 7 dedicated dispatch arms — must be
         // covered exactly by the handled sets (R2 §6.1).
         let dedicated = [
-            "fs", "auth", "profile", "config", "telegram", "keeper", "webui", "update",
+            "fs", "auth", "profile", "config", "telegram", "keeper", "update",
         ];
         let mut reaching: Vec<&str> = COMMAND_ORDER
             .iter()
@@ -2413,50 +2114,5 @@ mod tests {
         );
         let out = run_args(&["fs", "edit", "a", "b"]);
         assert_eq!(out.stderr, "castctl: unrecognized arguments: b\n");
-    }
-
-    /// The M6b chat seam wired by `webui serve`: every call
-    /// fails closed, so the handlers report the fixed 502
-    /// `upstream_error` (the live Go binary's behaviour when
-    /// its gateway seam has no live session).
-    #[test]
-    fn test_failing_chat_deps_all_err() {
-        let deps = failing_chat_deps();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            assert!(
-                (deps.list_sessions)("muse01".to_string(), false)
-                    .await
-                    .is_err()
-            );
-            assert!(
-                (deps.get_history)("muse01".to_string(), "s1".to_string(), 50)
-                    .await
-                    .is_err()
-            );
-            assert!(
-                (deps.start_session)("muse01".to_string(), "t".to_string())
-                    .await
-                    .is_err()
-            );
-            assert!(
-                (deps.session_op)(
-                    "muse01".to_string(),
-                    "s1".to_string(),
-                    "pin".to_string(),
-                    String::new(),
-                )
-                .await
-                .is_err()
-            );
-            assert!(
-                (deps.send_chat)("muse01".to_string(), "s1".to_string(), "hi".to_string())
-                    .await
-                    .is_err()
-            );
-        });
     }
 }

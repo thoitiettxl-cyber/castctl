@@ -32,7 +32,6 @@ castctl-transport = { path = "../castctl-transport" }
 # M7b PR-3: `update` runs the update crate.
 castctl-update = { path = "../castctl-update" }
 castctl-wait = { path = "../castctl-wait" }
-castctl-webui = { path = "../castctl-webui" }
 bytes = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
