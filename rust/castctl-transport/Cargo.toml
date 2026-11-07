@@ -15,6 +15,7 @@ serde_json = { workspace = true }
 hyper = { workspace = true, features = ["client", "http1"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 http = { workspace = true }
+flate2 = { workspace = true }
 http-body-util = { workspace = true }
 bytes = { workspace = true }
 # M3d: boringtun (Noise/IK, no `device` feature — no TUN device)

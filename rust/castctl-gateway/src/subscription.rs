@@ -36,6 +36,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use castctl_transport::{HttpClient, TransportError};
+use futures_util::StreamExt;
 use http::Method;
 use regex::Regex;
 
@@ -249,12 +250,17 @@ pub async fn find_action_id(
         for p in &batch {
             seen.insert(p.clone());
         }
-        let texts = fetch_all(client, &base, &batch, &chunk_headers, CHUNK_POOL).await;
-        for text in &texts {
-            if let Some(caps) = pat.captures(text) {
+        // Streamed, not batch-at-a-time: the first chunk that
+        // carries the action id ends the scan, so a match near the
+        // front of a 400-file batch no longer pays for the rest of
+        // it. Measured on cue 2026-11-07: the batch order spent
+        // 48 s on 547 fetches where Go spent 12 s on the same set.
+        let mut stream = fetch_stream(client, &base, batch, &chunk_headers, CHUNK_POOL);
+        while let Some(text) = stream.next().await {
+            if let Some(caps) = pat.captures(&text) {
                 return Ok(caps[1].to_string());
             }
-            for c in chunk_ref_bare_pattern().find_iter(text) {
+            for c in chunk_ref_bare_pattern().find_iter(&text) {
                 let p = format!("/_next/{}", c.as_str());
                 if !seen.contains(&p) {
                     todo.insert(p);
@@ -394,18 +400,19 @@ async fn fetch_text(
     Ok(String::from_utf8_lossy(&data).into_owned())
 }
 
-/// Fetches paths (relative to `base`) with a worker pool of
-/// size `pool`, preserving batch order in the result.
-/// Failures yield `""`.
-async fn fetch_all(
-    client: &HttpClient,
-    base: &str,
-    paths: &[String],
-    headers: &[(String, String)],
+/// Fetches `paths` (relative to `base`) as a stream, at most
+/// `pool` in flight, preserving batch order. Failures yield `""`.
+fn fetch_stream<'a>(
+    client: &'a HttpClient,
+    base: &'a str,
+    paths: Vec<String>,
+    headers: &'a [(String, String)],
     pool: usize,
-) -> Vec<String> {
+) -> impl futures_util::Stream<Item = String> + 'a {
     use futures_util::stream::{self, StreamExt};
-    let futures = paths.iter().map(|p| {
+    // `buffered` (not `buffer_unordered`): batch order is preserved,
+    // like Go's indexed output, while `pool` fetches stay in flight.
+    let futures = paths.into_iter().map(move |p| {
         let url = format!("{base}{p}");
         let headers = headers.to_vec();
         async move {
@@ -414,9 +421,7 @@ async fn fetch_all(
                 .unwrap_or_default()
         }
     });
-    // `buffered` (not `buffer_unordered`): batch order is
-    // preserved in the result, like Go's indexed output.
-    stream::iter(futures).buffered(pool).collect().await
+    stream::iter(futures).buffered(pool)
 }
 
 /// The `createServerReference)("...",...,"<name>")` pattern
