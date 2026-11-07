@@ -12,7 +12,9 @@
 
 pub const GLOBAL_HELP_TEXT: &str = r#"usage: castctl [--profile NAME] [--config PATH] <command> [options]
 
-Drive your Muse personal agent from the terminal (Go port of muse-cli 0.6.1).
+Drive your Muse personal agent from the terminal. This build ships only the
+agent-facing CLI: the browser, chat-bot and extensibility surfaces are left
+out on purpose (see rust/AGENT-CLI-SCOPE.md).
 
 Global options:
   --profile NAME   profile to use: --profile flag, then CASTCTL_PROFILE,

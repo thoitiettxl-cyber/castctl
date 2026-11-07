@@ -113,7 +113,7 @@ Kept on purpose:
 | Keeper state, **write** path | Live tick (`keeper check`) on an expired jar + real CDP `127.0.0.1:9226`, Rust and Go on identical fixtures: both write `next_check_at`/`last_checked_at` with the local offset — `+07:00` with `TZ` unset, `-05:00` with `TZ=America/New_York` (Go's own `time.Local`). The old "Rust writes `Z`" gap is closed on this branch (it carries #94's `bcbaa98`). |
 | Keeper state, **read** path | `keeper status` on a state file mixing `Z` and `+07:00` timestamps: **byte-identical** to Go under `TZ` unset, `America/New_York`, `Asia/Tokyo`, `UTC`. |
 | Deterministic argv sweeps | `go_vs_rs 101/0`, `args 67/0`, `layouts 88/0`, `redaction 9/0` (`DIFFS=0`; skips are `skipped_live` + `skipped_dropped`). `layouts` caught the `auth status` `headless_reason` bug fixed in `5405c94`. |
-| Gates | `cargo fmt --check` 0; `cargo clippy --workspace --all-targets --release -- -D warnings` 0; `cargo test --workspace` 55 suites / **1253 passed / 0 failed**; release binary 31,337,160 B. |
+| Gates | `cargo fmt --check` 0; `cargo clippy --workspace --all-targets --release -- -D warnings` 0; `cargo test --workspace` 55 suites / **1253 passed / 0 failed**; release binary 31,337,184 B. |
 
 ## `usage` — closed (was the only large gap)
 
@@ -159,7 +159,7 @@ The backup ref `backup/agent-cli-before-94` holds the pre-#94 shape.
 |---|---|
 | Merge order for #94 vs this branch | A decision for the user; both orders verified locally. See "Branch topology". |
 | `update` on an **unstamped** build | Rust exit 1 vs Go exit 0; stamped builds match (verified). Dev-only path, no user-visible effect: the shipped binary is stamped. |
-| `--help` tagline | Still says "Go port of muse-cli 0.6.1", which no longer describes the artifact. Changing it means regenerating the `48-help` golden; left as a separate, deliberate change. |
+| ~~`--help` tagline~~ | Done: no longer claims "Go port of muse-cli 0.6.1"; it now names the artifact as the agent-facing CLI and points here. The `48-help` / `49-bogus` goldens and their manifest digests were regenerated; `table::test_global_help_lists_43_names` still forbids the three dropped names in the help text, so the wording avoids them. |
 
 ## Reproducing the gates on cue
 
