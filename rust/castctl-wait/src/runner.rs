@@ -23,13 +23,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use castctl_gateway::subscribe::{SubscribeHandler, SubscribeOptions};
-use castctl_telegram::Approval as TelegramApproval;
-use castctl_telegram::BotError;
-use castctl_telegram::wait::{
+use crate::Approval as TelegramApproval;
+use crate::BotError;
+use crate::wait::{
     ApproveError, ApprovedRecord, Outcome, Reply, WaitApprover, WaitKind, Waiter, exit_code,
     in_scope, is_failed_status, needs_input_reason, outcome_of, payload, task_status_info,
 };
+use castctl_gateway::subscribe::{SubscribeHandler, SubscribeOptions};
 use castctl_transport::TransportError;
 use serde_json::{Value, json};
 use tokio::time::Instant;
@@ -1494,8 +1494,8 @@ mod tests {
     use crate::AutoApproverAdapter;
     use crate::history::HistoryReadFuture;
     use crate::history::tests::{HistoryResp, ScriptHistory, history_ok, user_ev};
+    use crate::wait::replies_after;
     use castctl_approvals::{AutoApprover, Decider, DescribedApproval};
-    use castctl_telegram::wait::replies_after;
     use serde_json::json;
     use std::collections::VecDeque;
     use std::sync::Mutex as StdMutex;
@@ -3447,7 +3447,7 @@ mod tests {
 
     #[tokio::test]
     async fn feed_record_malformed_input_changes_no_state() {
-        use castctl_telegram::wait::Waiter;
+        use crate::wait::Waiter;
         // Port of Go `TestFeedTraceI` (`waiter_test.go`):
         // malformed input changes no state; a real
         // running record feeds and sets SeenRunning
@@ -3500,7 +3500,7 @@ mod tests {
 
     #[tokio::test]
     async fn redesign_t9_release_signals() {
-        use castctl_telegram::wait::{Reply, Waiter};
+        use crate::wait::{Reply, Waiter};
         let reply = |seq: i64| Reply {
             seq,
             message_id: String::new(),
@@ -4050,7 +4050,7 @@ mod tests {
 
     #[tokio::test]
     async fn loop2_settle_refuses_subagent_shaped_reply() {
-        use castctl_telegram::wait::Waiter;
+        use crate::wait::Waiter;
         let subagent_shaped = replies_after(
             &[asst(
                 11,
@@ -4330,7 +4330,7 @@ mod tests {
 
     #[tokio::test]
     async fn loop2_accept_replayed_failed_parity() {
-        use castctl_telegram::wait::Waiter;
+        use crate::wait::Waiter;
         // Explicit boundary accepts.
         let mut w = Waiter::new("");
         w.feed(&task_ev("interrupted", "R", "R", 0, None), None)
@@ -4509,7 +4509,7 @@ mod tests {
 
     #[test]
     fn loop2_user_ack_empty_text_never_acks() {
-        use castctl_telegram::wait::user_ack;
+        use crate::wait::user_ack;
         let events = vec![json!({
             "event_name": "message.user",
             "seq": 5,
@@ -4669,7 +4669,7 @@ mod tests {
     }
 
     fn terminal_predicate() -> impl FnMut(&[u8]) -> bool {
-        use castctl_telegram::wait::{is_done_status, is_failed_status, task_status_info};
+        use crate::wait::{is_done_status, is_failed_status, task_status_info};
         let mut seen_running = false;
         let mut root = String::new();
         move |rec: &[u8]| {

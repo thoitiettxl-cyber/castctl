@@ -51,10 +51,10 @@ use castctl_gateway::dial::dial_gateway;
 use castctl_gateway::gateway::{Body, Gateway, RequestOptions};
 use castctl_gateway::shared::{Connector, SharedConn};
 use castctl_logging::summarize_err;
-use castctl_telegram::BotError;
-use castctl_telegram::wait::WaitKind;
 use castctl_transport::TransportError;
 use castctl_transport::routes::RouteTable;
+use castctl_wait::BotError;
+use castctl_wait::wait::WaitKind;
 use castctl_wait::{
     Cancel, Config, HistoryReader, RunError, Runner, WaitResult, subscriber::shared_subscriber,
 };

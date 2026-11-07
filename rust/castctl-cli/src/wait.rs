@@ -36,10 +36,10 @@ use castctl_config::profile::Profile;
 use castctl_gateway::gateway::{Body, RequestOptions};
 use castctl_gateway::shared::SharedConn;
 use castctl_logging::summarize_err;
-use castctl_telegram::Approval as TelegramApproval;
-use castctl_telegram::BotError;
-use castctl_telegram::wait::{ApprovedRecord, Reply, WaitKind, Widget};
 use castctl_transport::TransportError;
+use castctl_wait::Approval as TelegramApproval;
+use castctl_wait::BotError;
+use castctl_wait::wait::{ApprovedRecord, Reply, WaitKind, Widget};
 use castctl_wait::{
     AutoApproverAdapter, Cancel, Config, DialFn, HistoryReader, RunError, Runner, WaitResult,
     subscriber::shared_subscriber,
@@ -654,7 +654,7 @@ fn approved_json(r: &ApprovedRecord) -> JsonValue {
 /// `approveErrorJSON` (`wait.go`): the `approvedJSON`
 /// fields plus `error` (the allowlist summary, always
 /// present).
-fn approve_error_json(e: &castctl_telegram::wait::ApproveError) -> JsonValue {
+fn approve_error_json(e: &castctl_wait::wait::ApproveError) -> JsonValue {
     obj(&[
         ("approval_id", str_or_null(&e.approval_id)),
         ("title", str_or_null(&e.title)),
@@ -921,7 +921,7 @@ pub(crate) fn run_wait_command(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use castctl_telegram::wait::{ApproveError, Widget};
+    use castctl_wait::wait::{ApproveError, Widget};
 
     fn approval(id: &str) -> TelegramApproval {
         TelegramApproval {

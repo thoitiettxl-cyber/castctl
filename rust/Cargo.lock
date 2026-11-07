@@ -440,7 +440,6 @@ dependencies = [
  "castctl-log-redact",
  "castctl-logging",
  "castctl-shared",
- "castctl-telegram",
  "castctl-transport",
  "castctl-update",
  "castctl-wait",
@@ -580,27 +579,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "castctl-telegram"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "castctl-approvals",
- "castctl-config",
- "castctl-gateway",
- "castctl-log-redact",
- "castctl-shared",
- "castctl-tg-files",
- "castctl-tg-text",
- "castctl-transport",
- "http",
- "rand",
- "regex",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "castctl-tg-files"
 version = "0.1.0"
 dependencies = [
@@ -660,10 +638,12 @@ version = "0.1.0"
 dependencies = [
  "castctl-approvals",
  "castctl-gateway",
+ "castctl-log-redact",
  "castctl-logging",
  "castctl-shared",
- "castctl-telegram",
+ "castctl-tg-text",
  "castctl-transport",
+ "regex",
  "serde",
  "serde_json",
  "tokio",

@@ -774,9 +774,9 @@ mod tests {
     use crate::network::typed;
     use crate::run::msg_empty;
     use castctl_gateway::shared::{Connector, SharedConn};
-    use castctl_telegram::Approval as TelegramApproval;
-    use castctl_telegram::wait::WaitKind;
     use castctl_transport::{Dialer, DirectDialer, HttpClient, TransportError};
+    use castctl_wait::Approval as TelegramApproval;
+    use castctl_wait::wait::WaitKind;
 
     /// A connector that never connects (the no-network
     /// branches must never call it).

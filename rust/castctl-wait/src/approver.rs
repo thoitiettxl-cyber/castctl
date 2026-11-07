@@ -34,12 +34,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::Approval as TelegramApproval;
+use crate::BotError;
+use crate::wait::{ApproveError, ApproveOutcome, ApprovedRecord, WaitApprover};
 use castctl_approvals::{
     ApprovalResult, Approver, AutoApprover, DescribedApproval, NoForeverError,
 };
-use castctl_telegram::Approval as TelegramApproval;
-use castctl_telegram::BotError;
-use castctl_telegram::wait::{ApproveError, ApproveOutcome, ApprovedRecord, WaitApprover};
 use castctl_transport::TransportError;
 
 /// A sync auto-approver behind the wait core's async

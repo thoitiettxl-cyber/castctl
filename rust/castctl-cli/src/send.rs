@@ -28,8 +28,8 @@ use castctl_gateway::gateway::{Body, RequestOptions};
 use castctl_gateway::shared::SharedConn;
 use castctl_shared::bridge::from_serde;
 use castctl_shared::resources::{Resource, event_resources};
-use castctl_telegram::wait::{Reply, user_ack};
 use castctl_transport::TransportError;
+use castctl_wait::wait::{Reply, user_ack};
 use castctl_wait::{Cancel, WaitResult};
 use serde_json::Value as SerdeValue;
 
@@ -647,7 +647,7 @@ pub async fn run_driver_send(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use castctl_telegram::wait::{Reply, WaitKind, Widget};
+    use castctl_wait::wait::{Reply, WaitKind, Widget};
     use serde_json::json;
 
     fn reply(seq: i64, message_id: &str, text: &str) -> Reply {

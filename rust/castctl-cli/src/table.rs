@@ -17,7 +17,7 @@ use crate::help_texts::*;
 use crate::parser::{FlagDef, FlagKind, bool_flag, int_flag, int_flag_no_def, str_flag};
 
 /// `commandOrder` (`commands.go:766`).
-pub const COMMAND_ORDER: [&str; 44] = [
+pub const COMMAND_ORDER: [&str; 43] = [
     "chat",
     "status",
     "usage",
@@ -59,7 +59,6 @@ pub const COMMAND_ORDER: [&str; 44] = [
     "auth",
     "profile",
     "config",
-    "telegram",
     "keeper",
     "update",
 ];
@@ -475,13 +474,6 @@ pub fn command_table() -> Vec<CommandSpec> {
             PositionalSpec::None,
         ),
         spec(
-            "telegram",
-            TELEGRAM_HELP_TEXT,
-            "telegram <subcommand> [options]",
-            vec![],
-            PositionalSpec::None,
-        ),
-        spec(
             "keeper",
             KEEPER_HELP_TEXT,
             "keeper <subcommand> [options]",
@@ -660,9 +652,6 @@ pub const PROFILE_SUBCOMMANDS: [&str; 8] = [
     "test",
 ];
 
-/// `telegramSubcommands` (`telegram.go:80`).
-pub const TELEGRAM_SUBCOMMANDS: [&str; 2] = ["run", "status"];
-
 /// `keeper` subcommands (`keeper.go`, `cmdKeeper`).
 pub const KEEPER_SUBCOMMANDS: [&str; 3] = ["run", "check", "status"];
 
@@ -743,18 +732,19 @@ mod tests {
     #[test]
     fn test_command_order_matches_go() {
         let table = command_table();
-        assert_eq!(table.len(), 44);
+        assert_eq!(table.len(), 43);
         let names: Vec<&str> = table.iter().map(|s| s.name).collect();
         assert_eq!(names, COMMAND_ORDER.to_vec());
     }
 
     #[test]
-    fn test_global_help_lists_44_names() {
-        // globalHelpText lists the same 44 names as the
-        // invalid-choice message now that `plugin` and `webui`
-        // are gone.
+    fn test_global_help_lists_43_names() {
+        // globalHelpText lists the same 43 names as the
+        // invalid-choice message now that `plugin`, `webui`
+        // and `telegram` are gone.
         assert!(!GLOBAL_HELP_TEXT.contains("plugin"));
         assert!(!GLOBAL_HELP_TEXT.contains("webui"));
+        assert!(!GLOBAL_HELP_TEXT.contains("telegram"));
         assert!(GLOBAL_HELP_TEXT.ends_with('\n'));
         assert!(!GLOBAL_HELP_TEXT.ends_with("\n\n"));
     }

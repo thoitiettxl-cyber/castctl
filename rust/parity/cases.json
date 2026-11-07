@@ -310,13 +310,6 @@
     ]
   },
   {
-    "id": "42-telegram-help",
-    "argv": [
-      "telegram",
-      "--help"
-    ]
-  },
-  {
     "id": "43-keeper-help",
     "argv": [
       "keeper",

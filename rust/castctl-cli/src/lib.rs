@@ -42,7 +42,6 @@ pub mod run;
 pub mod runtime;
 pub mod send;
 pub mod table;
-pub mod telegramcmd;
 pub mod update;
 pub mod wait;
 pub mod watch;

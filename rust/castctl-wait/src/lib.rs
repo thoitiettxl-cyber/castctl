@@ -54,13 +54,18 @@
 //!
 //! No `unsafe`, no `unwrap()`/`expect()` on external input.
 
+pub mod approvals;
 pub mod approver;
+pub mod error;
 pub mod events;
 pub mod history;
 pub mod runner;
 pub mod subscriber;
+pub mod wait;
 
+pub use approvals::{Approval, approval_text, choose_auto_decision, describe_approval};
 pub use approver::AutoApproverAdapter;
+pub use error::BotError;
 pub use events::{decode_record, question_of};
 pub use history::{
     HistoryError, HistoryReader, default_history_limits, derive_boundary, history_replies,

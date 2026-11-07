@@ -13,8 +13,7 @@
 //! `parseOrHelp`, `classifyError`), `fs.go` (`cmdFS`, `fsParse`),
 //! `profilecmd.go` (`cmdProfile`, `profileParse`, `cmdConfig`,
 //! `cmdConfigMigrate`), `deliver.go` (`cmdAuth`), `keeper.go`
-//! (`cmdKeeper`, `parseKeeperSelection`), `telegram.go`
-//! (`cmdTelegram`),
+//! (`cmdKeeper`, `parseKeeperSelection`),
 //! `authimport.go` / `authlogin.go` /
 //! `authstatus.go` / `authobserve.go`, `read.go` (`usageErr`),
 //! `wait.go` (`parseAutoToggles`, `approveDecision`,
@@ -38,8 +37,8 @@ use crate::help_texts::*;
 use crate::parser::{ArgParser, Parsed, ParserError, check_positionals};
 use crate::table::{
     COMMAND_ORDER, CommandSpec, FS_SUBCOMMANDS, KEEPER_SUBCOMMANDS, PROFILE_SUBCOMMANDS,
-    PositionalSpec, TELEGRAM_SUBCOMMANDS, auth_sub_defs, command_spec, fs_defs, keeper_sub_help,
-    profile_sub_defs, profile_sub_help,
+    PositionalSpec, auth_sub_defs, command_spec, fs_defs, keeper_sub_help, profile_sub_defs,
+    profile_sub_help,
 };
 
 /// The version number. Go keeps `Version`/`Commit`/`BuildDate` as
@@ -550,7 +549,6 @@ fn run_inner(ctx: &mut Ctx<'_>, args: &[String]) -> Outcome {
         "auth" => cmd_auth(ctx, &g, &cmd_args),
         "profile" => cmd_profile(ctx, &g, &cmd_args),
         "config" => cmd_config(ctx, &g, &cmd_args),
-        "telegram" => cmd_telegram(ctx, &g, &cmd_args),
         "keeper" => cmd_keeper(ctx, &g, &cmd_args),
         "update" => cmd_update(ctx, &spec, &cmd_args),
         _ => cmd_plain(ctx, &g, &spec, &cmd_args),
@@ -1135,52 +1133,6 @@ fn cmd_config(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), 
         crate::profilecmd::absolutise_from(&source_dir)
     };
     crate::profilecmd::run_config_migrate(ctx, g, &source, p.bool("write"))
-}
-
-/// `cmdTelegram` (`telegram.go:95`) + run/status takes-no-args.
-fn cmd_telegram(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), FlowErr> {
-    if args.is_empty() {
-        ctx.out
-            .stderr
-            .push_str("castctl: the following arguments are required: subcommand\n");
-        ctx.out.stderr.push_str(TELEGRAM_HELP_TEXT);
-        return Err(msg_empty(2));
-    }
-    if args[0] == "--help" || args[0] == "-h" {
-        ctx.out.stdout.push_str(TELEGRAM_HELP_TEXT);
-        return Err(FlowErr::HelpShown);
-    }
-    let sub = args[0].as_str();
-    let rest = &args[1..];
-    if !TELEGRAM_SUBCOMMANDS.contains(&sub) {
-        ctx.out.stderr.push_str(&format!(
-            "castctl: argument subcommand: invalid choice: {} (choose from {})\n",
-            go_quote(sub),
-            TELEGRAM_SUBCOMMANDS.join(", ")
-        ));
-        return Err(msg_empty(2));
-    }
-    let help_text = if sub == "run" {
-        TELEGRAM_RUN_HELP_TEXT
-    } else {
-        TELEGRAM_STATUS_HELP_TEXT
-    };
-    if !rest.is_empty() && (rest[0] == "--help" || rest[0] == "-h") {
-        ctx.out.stdout.push_str(help_text);
-        return Err(FlowErr::HelpShown);
-    }
-    if !rest.is_empty() {
-        ctx.out.stderr.push_str(&format!(
-            "castctl: telegram {sub} takes no arguments (got {})\n",
-            go_quote(&rest[0])
-        ));
-        return Err(msg_empty(2));
-    }
-    match sub {
-        "run" => crate::telegramcmd::run_telegram(ctx, g),
-        "status" => crate::telegramcmd::run_status(ctx, g),
-        _ => unreachable!("subcommand validated against TELEGRAM_SUBCOMMANDS above"),
-    }
 }
 
 /// `cmdKeeper` (`keeper.go:116`) + `parseKeeperSelection`.
@@ -1856,20 +1808,6 @@ mod tests {
     }
 
     #[test]
-    fn test_telegram_takes_no_args() {
-        let out = run_args(&["telegram", "run", "extra"]);
-        assert_eq!(out.code, 2);
-        assert_eq!(
-            out.stderr,
-            "castctl: telegram run takes no arguments (got \"extra\")\n"
-        );
-        assert!(out.stdout.is_empty());
-        let out = run_args(&["telegram", "status", "--help"]);
-        assert_eq!(out.stdout, TELEGRAM_STATUS_HELP_TEXT);
-        assert_eq!(out.code, 0);
-    }
-
-    #[test]
     fn test_dashdash_and_empty_token() {
         let out = run_args(&["--", "bogus"]);
         assert_eq!(out.code, 2);
@@ -1911,11 +1849,9 @@ mod tests {
         // The `cmd_plain` fallthrough (internal error) can only
         // fire for a name in none of the handled sets. Every
         // name that reaches `cmd_plain` — `COMMAND_ORDER`
-        // minus the 7 dedicated dispatch arms — must be
+        // minus the 6 dedicated dispatch arms — must be
         // covered exactly by the handled sets (R2 §6.1).
-        let dedicated = [
-            "fs", "auth", "profile", "config", "telegram", "keeper", "update",
-        ];
+        let dedicated = ["fs", "auth", "profile", "config", "keeper", "update"];
         let mut reaching: Vec<&str> = COMMAND_ORDER
             .iter()
             .copied()

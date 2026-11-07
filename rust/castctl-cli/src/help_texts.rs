@@ -40,16 +40,15 @@ Global options:
   --version        print "castctl <version>" and exit.
   --help, -h       print this help and exit.
 
-Commands (PR4 wired send, wait, approvals and the chat REPL;
-telegram run/status wired in the Telegram PR; update wired in the
-self-update PR):
+Commands (agent-facing CLI build; see rust/AGENT-CLI-SCOPE.md for
+the surfaces this build does not ship):
   chat, status, usage, invite, redeem, threads, history, send, wait,
   approvals, approve, auto-approve, deny, files, download,
   watch, feed, feed-status, feed-react, feed-prompt, goals, goal,
   ideas, idea, idea-exec, unread, seen, session-start,
   session-rename, session-pin, session-unpin, session-archive,
   session-unarchive, session-delete, stop, wake, raw, fs, auth,
-  profile, config, telegram, keeper, update
+  profile, config, keeper, update
 
 Run "castctl <command> --help" for per-command help.
 
@@ -403,21 +402,6 @@ Config maintenance. Subcommands: migrate. Run
 "castctl config <subcommand> --help" for per-subcommand help.
 "#;
 
-pub const TELEGRAM_HELP_TEXT: &str = r#"usage: castctl telegram <subcommand> [options]
-
-Telegram bot that operates your Muse, polling through the profile
-linked by the "telegram" block in config.json.
-
-subcommands:
-  run       poll the Bot API until interrupted (Ctrl-C).
-  status    show the telegram block configuration (offline).
-
-"run" serves the profile named by the block's "profile" field,
-never the active profile: --profile or CASTCTL_PROFILE naming a
-different profile is an error. Allowed users talk to Muse with
-plain messages; /help in the chat lists the bot commands.
-"#;
-
 pub const KEEPER_HELP_TEXT: &str = r#"usage: castctl keeper <subcommand> [options]
 
 Session keeper: watch profile cookies for expiry (cheap chain
@@ -607,20 +591,6 @@ closed immediately (no chat send, no session creation, no file
 writes). Timings are measured externally. Exit 4 on timeout, 2 on
 config failure, 3 on gateway failure. An egress-IP failure reports
 a null egress_ip plus a warning and is not fatal.
-"#;
-
-pub const TELEGRAM_RUN_HELP_TEXT: &str = r#"usage: castctl telegram run
-
-Poll the Telegram Bot API through the linked profile's outbound
-until interrupted. Requires a "telegram" block in config.json
-with a token and a non-empty allowed_user_ids allowlist.
-"#;
-
-pub const TELEGRAM_STATUS_HELP_TEXT: &str = r#"usage: castctl telegram status
-
-Show the "telegram" block configuration as JSON (offline: no
-network, no GetMe). The token value is never printed; only its
-shape validity is reported.
 "#;
 
 pub const KEEPER_RUN_HELP_TEXT: &str = r#"usage: castctl keeper run [--tag TAG | --profile NAME]

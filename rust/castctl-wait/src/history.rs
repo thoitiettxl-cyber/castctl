@@ -32,7 +32,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use castctl_telegram::wait::{replies_after, seq_of};
+use crate::wait::{replies_after, seq_of};
 use castctl_transport::TransportError;
 use serde_json::Value;
 use tokio::time::Instant;
@@ -335,8 +335,8 @@ pub async fn history_replies(
     after_seq: i64,
     cancel: &Cancel,
     budget: Duration,
-) -> Result<(Vec<castctl_telegram::wait::Reply>, bool), HistoryError> {
-    use castctl_telegram::wait::Reply;
+) -> Result<(Vec<crate::wait::Reply>, bool), HistoryError> {
+    use crate::wait::Reply;
     let mut merged: Vec<Reply> = Vec::new();
     let mut seen: std::collections::HashSet<(i64, String)> = std::collections::HashSet::new();
     let mut exhausted = false;
