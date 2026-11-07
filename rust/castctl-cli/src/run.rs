@@ -1324,7 +1324,7 @@ fn failing_chat_deps() -> castctl_webui::chats::ChatDeps {
     }
 }
 
-fn serve_webui(ctx: &mut Ctx<'_>, loc: &ConfigLocation) -> Result<(), FlowErr> {
+fn serve_webui(_ctx: &mut Ctx<'_>, loc: &ConfigLocation) -> Result<(), FlowErr> {
     use castctl_config::jsonvalue::JsonValue;
     use castctl_webui::auth::{hash_token, looks_like_bcrypt_hash};
     use castctl_webui::config::{effective_listen, resolve_webui};
