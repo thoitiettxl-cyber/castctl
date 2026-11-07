@@ -49,6 +49,23 @@ build `examples/plugin/echo` through `go`, so run them with
 GOTOOLCHAIN=auto PATH=/usr/local/go/bin:$PATH cargo test -p castctl-pluginhost --test loader_live
 ```
 
+## Differential sweeps (Go vs Rust)
+
+`parity/sweep_*.py` generate fixtures and argv combinations and compare
+the two binaries live, for surfaces a fixed case list cannot cover:
+config validation at load, layouts, argument parsing, `config migrate`
+write output, config/profile location resolution and the whole Web UI
+route table. Each script prints `TOTAL=`/`DIFFS=`; run one with the Rust
+binary as the only argument:
+
+```sh
+python3 parity/sweep_layouts.py target/release/castctl-rs
+```
+
+Recorded runs, case counts and the two deliberately unswept surfaces
+(Go's sing-box runtime log lines, generated identifiers/stamps) are in
+[`docs/differential-sweeps.md`](../docs/differential-sweeps.md).
+
 ## Parity harness (Go vs Rust)
 
 `parity/` compares the Rust CLI against the Go binary byte-for-byte:
