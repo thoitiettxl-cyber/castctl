@@ -98,6 +98,7 @@ pub(crate) struct KeeperSetup {
 pub(crate) fn keeper_config(ctx: &mut Ctx<'_>, g: &GlobalOpts) -> Result<KeeperSetup, FlowErr> {
     let loc = resolve_config(ctx, g, false)?;
     let (single, _found) = load_single_config(&loc.config_dir).map_err(config_err)?;
+    crate::run::validate_webui_at_load(&single, &loc.config_dir)?;
     let Some(single) = single else {
         return Err(msg(
             2,
@@ -523,6 +524,12 @@ impl<'a> KeeperRuntimes<'a> {
                 let Ok((fresh, _found)) = load_single_config(&base_dir) else {
                     return None;
                 };
+                // Go reloads through the same deep parse, so a
+                // block that breaks a `webui` rule makes the
+                // reload fail exactly like an unreadable file.
+                if crate::run::validate_webui_at_load(&fresh, &base_dir).is_err() {
+                    return None;
+                }
                 let fresh = fresh?;
                 fresh.credential_for_profile(&profile_name)
             });

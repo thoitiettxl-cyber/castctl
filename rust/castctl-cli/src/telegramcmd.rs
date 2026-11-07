@@ -76,6 +76,7 @@ pub(crate) fn resolve_telegram_block(
 ) -> Result<TelegramSetup, FlowErr> {
     let loc = resolve_config(ctx, g, false)?;
     let (single, _found) = load_single_config(&loc.config_dir).map_err(config_err)?;
+    crate::run::validate_webui_at_load(&single, &loc.config_dir)?;
     let Some(single) = single else {
         return Err(msg(
             2,

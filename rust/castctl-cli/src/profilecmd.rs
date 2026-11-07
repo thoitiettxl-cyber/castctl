@@ -102,6 +102,7 @@ pub(crate) fn explicit_profile_selected(ctx: &Ctx<'_>, g: &GlobalOpts, positiona
 /// `type`/`from` (tag graph), which `profile list` prints.
 pub(crate) fn load_single_validated(base_dir: &str) -> Result<Option<SingleConfig>, FlowErr> {
     let (single, _found) = load_single_config(base_dir).map_err(config_err)?;
+    crate::run::validate_webui_at_load(&single, base_dir)?;
     match single {
         None => Ok(None),
         Some(mut cfg) => {
