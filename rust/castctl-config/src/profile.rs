@@ -555,9 +555,11 @@ pub fn resolve_cookies_file(
 /// `parseProfileEntry` (`config.go:463`): unknown keys (including
 /// inline `cookies`/`cookie`) are rejected in file order first; then
 /// fields are checked in fixed code order. The per-profile `dns`
-/// block and inline `outbound` objects are stored raw (sing-box
-/// parsing deferred, D-M2-1); the outbound tag/type extraction for
-/// inline objects reads only the `tag`/`type` string fields.
+/// block is strict-parsed (sing-box `parseDNS`, wrapped once more
+/// by the profile name — the double `profile:` prefix Go
+/// produces); an inline `outbound` object is strict-parsed after
+/// `ensureInlineTag` (sing-box `parseOutbound`, error as-is, one
+/// prefix, no profile name). Both are stored raw afterwards.
 pub fn parse_profile_entry(
     name: &str,
     obj: &OrderedObject,
@@ -722,8 +724,16 @@ pub fn parse_profile_entry(
         p.tls_engine_present = true;
     }
     if let Some(v) = obj.get("dns") {
-        // Deferred: sing-box DNS parsing. The raw value is kept for
-        // rendering; only presence is recorded.
+        // Strict sing-box parse; the error is wrapped once more
+        // by the profile name (Go `parseProfileEntry`: `profile
+        // "<name>": %v` around the `parse dns:` error).
+        if let Some(text) = crate::singbox::dns_error_text(v) {
+            return Err(crate::config_errorf!(
+                "profile {}: profile: {}",
+                go_quote(name),
+                text
+            ));
+        }
         p.dns = Some(v.clone());
         p.dns_present = true;
     }
@@ -752,8 +762,12 @@ pub fn parse_profile_entry(
             }
             JsonValue::Object(obj) => {
                 let (tagged, tag) = ensure_inline_tag(obj, &format!("profile:{name}"))?;
-                // Type from the raw object, if a string; sing-box
-                // parsing (which validates it) is deferred.
+                // Strict sing-box parse of the tagged object (Go
+                // `parseProfileEntry` calls `parseOutbound` here);
+                // the error is returned as-is, one `profile: `
+                // prefix, no profile name.
+                crate::singbox::validate_outbound_strict(&JsonValue::Object(tagged.clone()))?;
+                // Type from the raw object, if a string.
                 let typ = match tagged.get("type") {
                     Some(JsonValue::Str(s)) => s.clone(),
                     _ => String::new(),

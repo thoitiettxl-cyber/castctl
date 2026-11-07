@@ -32,9 +32,12 @@ pub mod oserr;
 pub mod profile;
 pub mod profile_ops;
 pub mod redact;
+pub mod singbox;
+pub mod singbox_tables;
 pub mod taggraph;
 pub mod telegram;
 pub mod toggle;
+pub mod webui;
 
 pub use blocks::LoginCredential;
 pub use errors::{ConfigError, config_error};

@@ -22,6 +22,9 @@ castctl-gateway = { path = "../castctl-gateway" }
 # tag): Go release cannot re-export; this build can. See
 # PORTING.md §M7d.
 castctl-keeper = { path = "../castctl-keeper" }
+# M7f fix loop 1: the CLI error-render boundary applies Go's
+# `SafeString` to every rendered error line (`classifyError`).
+castctl-log-redact = { path = "../castctl-log-redact" }
 castctl-logging = { path = "../castctl-logging" }
 castctl-shared = { path = "../castctl-shared" }
 castctl-telegram = { path = "../castctl-telegram" }

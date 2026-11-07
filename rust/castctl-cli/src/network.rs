@@ -63,6 +63,7 @@ use castctl_gateway::invite::{
 };
 use castctl_gateway::media_path;
 use castctl_gateway::subscription::{SubscriptionOptions, fetch_subscription};
+use castctl_log_redact::safe_string;
 use castctl_shared::{
     JsonValue as SharedValue, Resource, event_resources, event_row_to_json, feed_row_to_json,
     feed_rows, file_row_to_json, file_rows, fmt_event, from_serde, goal_row_to_json, goal_rows,
@@ -107,10 +108,18 @@ pub(crate) use castctl_shared::go_json::{escape_go_marshal_string, escape_stdout
 /// stderr, no `castctl: ` prefix (Go `typedAuthError` /
 /// bare `AuthError` branch of `classifyError`, rendered by
 /// `runInner` with `Fprintln`).
+///
+/// The summary passes through `SafeString` BEFORE the JSON
+/// marshal, mirroring Go (`SummarizeErr` then marshal): Go
+/// marshals after redaction, so `<redacted>` becomes
+/// `\u003credacted\u003e` in the JSON. (M7f fix loop 1, B1.)
+/// In practice the callers pass allowlist summaries
+/// (`auth_summary`, `gateway_error_text`), so this is a
+/// no-op today; it closes the boundary for future callers.
 pub(crate) fn typed(typ: &str, summary: &str) -> FlowErr {
     FlowErr::Verbatim {
         code: 2,
-        text: typed_json(typ, summary),
+        text: typed_json(typ, &safe_string(summary)),
     }
 }
 
@@ -2021,8 +2030,18 @@ pub(crate) fn run_network_command(
     Ok(())
 }
 
-/// Render a `FlowErr` exactly as `run_inner` does
-/// (`run.rs`): the (exit code, stderr text) pair. Used by
+/// The single CLI error-render boundary, shared by `run_inner`
+/// (`run.rs`) and the approve-all handlers: renders a `FlowErr`
+/// exactly as Go `classifyError` + `runInner` render it.
+/// The `Msg` arm applies Go's `SafeString` to the error text
+/// (M7f fix loop 1, B1: the plain `cmdError` branch renders
+/// `"castctl: " + SummarizeErr`, and `SummarizeErr` is
+/// `SafeString` for non-body errors). The `Verbatim` arm is
+/// NOT redacted here: its only production constructor is
+/// `typed()`, which already `SafeString`s the summary before
+/// the JSON marshal (Go marshals after redaction). Pre-printed
+/// parser/usage lines never reach this function (Go's
+/// `parseOrHelp` prints those without `SafeString`). Used by
 /// the approve-all handlers, which must keep `approveAll`'s
 /// already-printed lines on stderr even when a later decide
 /// fails (Go prints those lines directly to stderr as the
@@ -2043,17 +2062,22 @@ pub(crate) fn render_flow_err(e: &FlowErr) -> (i32, String) {
             *code,
             message
                 .as_ref()
-                .map(|m| format!("castctl: {m}\n"))
+                .map(|m| format!("castctl: {}\n", safe_string(m)))
                 .unwrap_or_default(),
         ),
     }
 }
 /// against an already-built runtime (a fake gateway /
 /// fake muse.ai base in tests) and return
-/// (stdout, stderr, exit code), rendering `FlowErr`
-/// exactly like `run_inner` does. Test-only: production
+/// (stdout, stderr, exit code). Test-only: production
 /// never calls this, and no CLI flag/env/config selects
 /// a gateway host.
+///
+/// Dev/test-only seam: renders `FlowErr::Msg` raw, WITHOUT `safe_string`
+/// (unlike `render_flow_err` in `run_inner`, which redacts). Only the dev
+/// example `examples/m7b_driver.rs` calls it; the shipped `castctl-rs`
+/// binary never does. If this seam is ever wired into a shipped path,
+/// route its errors through `render_flow_err` instead.
 pub async fn run_driver_command(
     spec: &CommandSpec,
     rt: &Runtime,
@@ -2547,11 +2571,17 @@ mod tests {
     }
 
     #[test]
-    fn unknown_profile_is_typed_cookies_missing() {
-        // Go's LoadProfile synthesises SourceNone defaults
-        // for a ghost name (config.go:1205), so `status
-        // --profile nosuch` reaches the connector and fails
-        // on the missing cookies file — exit 2, typed JSON.
+    fn unknown_profile_fails_at_identity() {
+        // M7f hole 5: Go's `identityForProfile` rejects a
+        // ghost name when a single config exists
+        // (`identity.go:92`) BEFORE any dial, so `status
+        // --profile nosuch` fails with the identity error
+        // (exit 2), not with cookies_missing. (The old
+        // test expected cookies_missing — that was the
+        // pre-M7f Rust behaviour, contradicting Go; probed
+        // on cue 2026-11-07.) SourceNone synthesis
+        // (`config.go:1205`) applies only when there is NO
+        // single config — see `status_with_no_cookies_is_typed_json`.
         let dir = temp_home("unknown-profile");
         std::fs::write(
             dir.join("config.json"),
@@ -2571,20 +2601,10 @@ mod tests {
         );
         assert_eq!(out.code, 2);
         assert!(out.stdout.is_empty());
-        assert!(
-            out.stderr
-                .starts_with("{\"error\":\"conn: auth_failed message_length="),
-            "{}",
-            out.stderr
+        assert_eq!(
+            out.stderr,
+            "castctl: profile: profile \"nosuch\" does not exist in the single config file\n"
         );
-        assert!(
-            out.stderr.contains("\"type\":\"cookies_missing\""),
-            "{}",
-            out.stderr
-        );
-        // The cookies path is NOT in the output by design:
-        // the typed JSON carries only the Auth log summary
-        // (class + message length), never message bytes.
     }
 
     #[test]
@@ -2637,9 +2657,15 @@ mod tests {
         // and without creating the download dir.
         let home = temp_home("download");
         let dl = home.join("dl");
+        // `default_profile` must name a real entry: without
+        // it the resolved profile is the synthesised
+        // `default`, which Go's `identityForProfile`
+        // rejects before any dial (M7f hole 5a; probed on
+        // cue 2026-11-07). With `no1` selected, the run
+        // reaches the connector and fails on cookies.
         std::fs::write(
             home.join("config.json"),
-            r#"{"profiles":{"no1":{"outbound":"direct"}}}"#,
+            r#"{"default_profile":"no1","profiles":{"no1":{"outbound":"direct"}}}"#,
         )
         .unwrap();
         let (_home, map) = isolated_env();

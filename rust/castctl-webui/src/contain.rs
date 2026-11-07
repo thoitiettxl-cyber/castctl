@@ -145,28 +145,6 @@ pub fn clean_path(p: &Path) -> PathBuf {
     buf
 }
 
-/// Lexical overlap check used at webui-block parse time
-/// (`DirOverlaps` with absolutized paths; unresolvable
-/// relative path fails closed = overlap). Unlike
-/// [`dir_overlaps`], this does not touch the filesystem
-/// beyond absolutizing against the current directory.
-pub fn dir_overlaps_lexical(a: &Path, b: &Path) -> bool {
-    let ra = clean_path(&absolutize(a));
-    let rb = clean_path(&absolutize(b));
-    ra == rb || ra.starts_with(&rb) || rb.starts_with(&ra)
-}
-
-fn absolutize(p: &Path) -> PathBuf {
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        match std::env::current_dir() {
-            Ok(cwd) => cwd.join(p),
-            Err(_) => p.to_path_buf(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

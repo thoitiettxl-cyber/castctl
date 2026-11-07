@@ -460,6 +460,7 @@ dependencies = [
  "castctl-fsclient",
  "castctl-gateway",
  "castctl-keeper",
+ "castctl-log-redact",
  "castctl-logging",
  "castctl-pluginhost",
  "castctl-shared",

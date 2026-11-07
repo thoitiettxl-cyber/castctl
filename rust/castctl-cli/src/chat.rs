@@ -573,6 +573,11 @@ impl<'a> ChatSession<'a> {
                 self.show_history(n).await?;
             }
             "/login" => {
+                // Raw on purpose: Go prints the guidance to chat
+                // stdout (`chat.go:352`, `Fprintln(stdout,
+                // Guidance)`), NOT through `classifyError` — only
+                // the `auth export` stderr path is `SafeString`d
+                // (M7f fix loop 1, B1).
                 let _ = writeln!(self.output, "{EXPORT_GUIDANCE}");
             }
             _ => {

@@ -65,8 +65,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::config::{SingleConfig, encode_single_config, has_profiles_marker, parse_single_config};
 use crate::dnsvalidate::{
     default_detour_for_profile, parse_dns_block, reachable_tags_for_profile, validate_profile_dns,
-    validate_single_config, validate_wireguard_dns, validate_wireguard_private_keys,
-    wireguard_dns_for_profile,
+    validate_wireguard_dns, validate_wireguard_private_keys, wireguard_dns_for_profile,
 };
 use crate::errors::{ConfigError, config_error, refuse_error};
 use crate::fingerprint::{
@@ -862,9 +861,12 @@ fn read_existing_single(base_dir: &str) -> Result<ExistingSingle, ConfigError> {
             malformed: None,
         });
     }
-    let mut cfg = parse_single_config(&data, base_dir)?;
-    validate_single_config(&mut cfg)?;
-    validate_top_level_dns_shape(&cfg)?;
+    // The parse already runs the full tail (tag graph →
+    // profile DNS → WireGuard DNS → WireGuard keys →
+    // telegram → keeper → credentials → credential refs →
+    // plugins) plus the strict sing-box parse, so no
+    // second validation run is needed here.
+    let cfg = parse_single_config(&data, base_dir)?;
     Ok(ExistingSingle {
         cfg: Some(cfg),
         is_single: true,
@@ -872,15 +874,14 @@ fn read_existing_single(base_dir: &str) -> Result<ExistingSingle, ConfigError> {
     })
 }
 
-/// Light shape check for a top-level dns section
-/// ([DEVIATION], D-M2-1): Go's `parseDNS` validates the
-/// full sing-box DNS options; Rust keeps the section raw,
-/// so this checks only the shape distribution relies on
-/// (object; `servers` an array of objects with non-empty
-/// string `tag`/`type`; `final` a string when present).
-/// The error text is shaped like Go's
-/// `parse dns: ...` so distribution refusals quoting it
-/// read correctly after `stripErrorPrefix`.
+/// Light shape check for a top-level dns section, used
+/// only for hand-built distributed blocks (which never go
+/// through `parse_single_config`): object; `servers` an
+/// array of objects with non-empty string `tag`/`type`;
+/// `final` a string when present. The error text is shaped
+/// like Go's `parse dns: ...` so distribution refusals
+/// quoting it read correctly after `stripErrorPrefix`.
+/// (The load path uses the strict sing-box parse instead.)
 fn validate_top_level_dns_shape(cfg: &SingleConfig) -> Result<(), ConfigError> {
     let Some(raw) = &cfg.dns_raw else {
         return Ok(());
@@ -1941,10 +1942,11 @@ fn distribute_top_level_dns(
         validate_wireguard_dns(candidate)?;
         validate_wireguard_private_keys(candidate)?;
         // Full re-parse of the canonical encoding: the
-        // distributed file must load exactly as written.
+        // distributed file must load exactly as written
+        // (the parse runs the full tail, so no second
+        // validation run is needed).
         let encoded = encode_single_config(candidate)?;
-        let mut reparsed = parse_single_config(encoded.as_bytes(), base_dir)?;
-        validate_single_config(&mut reparsed)?;
+        parse_single_config(encoded.as_bytes(), base_dir)?;
         Ok(())
     };
     if let Err(e) = validate(candidate) {

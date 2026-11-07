@@ -35,6 +35,7 @@ use std::sync::Arc;
 use castctl_config::config::{SingleConfig, resolve_active_profile};
 use castctl_config::configlocation::ConfigLocation;
 use castctl_config::configlocation::Getenv;
+use castctl_config::dnsvalidate::outbound_identity_for_config;
 use castctl_config::jsonvalue::JsonValue as ConfigJsonValue;
 use castctl_config::profile::{OutboundKind, Profile};
 use castctl_gateway::Gateway;
@@ -236,6 +237,17 @@ pub(crate) fn build_runtime(
 ) -> Result<Runtime, FlowErr> {
     let profile =
         resolve_active_profile(&loc.config_dir, profile_flag, getenv).map_err(config_err)?;
+    // M7f hole 5: Go `identityForProfile` runs BEFORE any dial
+    // (`internal/commands/runtime.go:149`, `identity.go:86`):
+    // when a single config exists, the resolved profile must
+    // be an entry in it. A missing entry (no `default_profile`
+    // with a synthesised `default`, or a bare-directory
+    // profile with no single-file entry) fails here with
+    // exit 2 — never after a dial attempt. With no single
+    // config (SourceNone) there is nothing to check.
+    if let Some(single) = single {
+        outbound_identity_for_config(single, &profile.name).map_err(config_err)?;
+    }
     let dialer = build_dialer(single, &profile)?;
     let http = HttpClient::new(Arc::clone(&dialer));
     let connector = GatewayConnector::new(Arc::clone(&dialer));
@@ -392,6 +404,13 @@ mod tests {
         }
     }
 
+    fn msg_text(e: &FlowErr) -> String {
+        match e {
+            FlowErr::Msg { message, .. } => message.clone().unwrap_or_default(),
+            _ => panic!("want Msg, got {e:?}"),
+        }
+    }
+
     #[test]
     fn config_to_serde_round_trip() {
         let v = decode_ordered_json(
@@ -426,6 +445,10 @@ mod tests {
         assert!(build_dialer(single.as_ref(), &profile).is_ok());
     }
 
+    // M7f: the seam moved from dispatch to parse — Go rejects
+    // these configs in `ParseSingleConfig` (tag graph), so the
+    // load itself fails with exit 2 and the tag-graph message;
+    // the dialer is never reached.
     #[test]
     fn build_dialer_detour_is_exit_2() {
         let dir = temp_dir("detour");
@@ -433,22 +456,82 @@ mod tests {
             &dir,
             r#"{"profiles":{"no1":{"outbound":"t1"}},"outbounds":[{"tag":"t1","type":"direct","detour":"t2"}]}"#,
         );
-        let (single, profile) = load_fixture(&dir);
-        let err = build_dialer(single.as_ref(), &profile)
-            .err()
-            .expect("want dispatch error");
-        assert_eq!(flow_code(&err), 2);
+        let err = load_single_config(dir.to_str().unwrap()).unwrap_err();
+        assert_eq!(err.code, 2);
+        assert_eq!(
+            err.message,
+            "profile: outbound \"t1\": profile: dangling reference: detour \"t2\" does not exist"
+        );
     }
 
     #[test]
     fn build_dialer_unknown_tag_is_exit_2() {
         let dir = temp_dir("unknown-tag");
         write_config(&dir, r#"{"profiles":{"no1":{"outbound":"nope"}}}"#);
-        let (single, profile) = load_fixture(&dir);
-        let err = build_dialer(single.as_ref(), &profile)
+        let err = load_single_config(dir.to_str().unwrap()).unwrap_err();
+        assert_eq!(err.code, 2);
+        assert_eq!(
+            err.message,
+            "profile: profile \"no1\": outbound tag \"nope\" does not exist"
+        );
+    }
+
+    /// M7f hole 5a: the single file has profiles but no
+    /// `default_profile`, so `status`/`chat` resolve the
+    /// synthesised `default` profile — which is NOT in the
+    /// single file. Go fails in `identityForProfile`
+    /// BEFORE any dial (`profile "default" does not exist
+    /// in the single config file`); the old Rust code
+    /// dialled first and failed with `auth_failed`.
+    #[test]
+    fn build_runtime_m7f_missing_default_profile_fails_before_dial() {
+        let dir = temp_dir("m7f-hole5a");
+        write_config(&dir, r#"{"profiles":{"p1":{}}}"#);
+        let (single, _found) = load_single_config(dir.to_str().unwrap()).unwrap();
+        assert!(single.is_some());
+        let loc = ConfigLocation {
+            config_dir: dir.to_str().unwrap().to_string(),
+            config_file: dir.join("config.json").to_str().unwrap().to_string(),
+            explicit: true,
+            warnings: Vec::new(),
+        };
+        let err = build_runtime(&loc, single.as_ref(), None, None)
             .err()
-            .expect("want dispatch error");
+            .expect("want identity error, not a dial attempt");
         assert_eq!(flow_code(&err), 2);
+        assert_eq!(
+            msg_text(&err),
+            "profile: profile \"default\" does not exist in the single config file"
+        );
+    }
+
+    /// M7f hole 5b: `default_profile` names a profile
+    /// that exists only as a bare directory
+    /// (`profiles/p1/` with cookies, no single-file
+    /// entry). `profileExists` is true (bare dir counts),
+    /// so resolution succeeds — but the identity check
+    /// must still fail before any dial.
+    #[test]
+    fn build_runtime_m7f_bare_dir_profile_fails_before_dial() {
+        let dir = temp_dir("m7f-hole5b");
+        write_config(&dir, r#"{"default_profile":"p1","profiles":{}}"#);
+        std::fs::create_dir_all(dir.join("profiles/p1")).unwrap();
+        let (single, _found) = load_single_config(dir.to_str().unwrap()).unwrap();
+        assert!(single.is_some());
+        let loc = ConfigLocation {
+            config_dir: dir.to_str().unwrap().to_string(),
+            config_file: dir.join("config.json").to_str().unwrap().to_string(),
+            explicit: true,
+            warnings: Vec::new(),
+        };
+        let err = build_runtime(&loc, single.as_ref(), None, None)
+            .err()
+            .expect("want identity error, not a dial attempt");
+        assert_eq!(flow_code(&err), 2);
+        assert_eq!(
+            msg_text(&err),
+            "profile: profile \"p1\" does not exist in the single config file"
+        );
     }
 
     /// F4 (fix loop 1): a `Block` outbound BUILDS (Go builds

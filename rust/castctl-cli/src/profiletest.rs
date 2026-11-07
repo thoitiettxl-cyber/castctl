@@ -65,7 +65,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use castctl_config::config::{SingleConfig, load_profile, profile_exists};
+use castctl_config::config::{SingleConfig, load_profile, load_single_config, profile_exists};
 use castctl_config::dnsvalidate::{
     DnsServer, DnsSource, ResolvedDns, detour_chain, outbound_identity_for_config,
     resolve_profile_dns,
@@ -85,7 +85,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::network::{summarize_transport_error, write_json_text};
 use crate::parser::Parsed;
-use crate::profilecmd::{explicit_profile_selected, load_single_validated, resolve_active};
+use crate::profilecmd::{explicit_profile_selected, resolve_active};
 use crate::run::{Ctx, FlowErr, GlobalOpts, config_err, msg, msg_empty, resolve_config};
 use crate::runtime::{CookiesFailure, Runtime, build_runtime, dialer_for_tag};
 
@@ -409,7 +409,7 @@ pub(crate) fn run_test(ctx: &mut Ctx<'_>, g: &GlobalOpts, p: &Parsed) -> Result<
         Some(n) => (n.clone(), true),
         None => (active.name.clone(), false),
     };
-    let single = load_single_validated(&loc.config_dir)?;
+    let (single, _found) = load_single_config(&loc.config_dir).map_err(config_err)?;
     // Fail fast on an explicitly named profile that does
     // not exist, before LoadProfile can synthesise a
     // SourceNone default and the phases run against it.
@@ -441,7 +441,11 @@ pub(crate) fn run_test(ctx: &mut Ctx<'_>, g: &GlobalOpts, p: &Parsed) -> Result<
     };
     // The identity failure returns the error directly:
     // no JSON is printed (`return err`, not
-    // `finishProfileTest`).
+    // `finishProfileTest`). This duplicates the check inside
+    // `build_runtime` (M7f) on purpose: the runtime's check
+    // would route the same error through `result.errors`
+    // and print it as JSON, which is not the prelude's
+    // behaviour.
     let (tag, _hash) = identity_for_profile(&prof, single.as_ref())?;
     result.outbound_type = outbound_type_of(&prof);
     result.outbound_tag = tag.clone();

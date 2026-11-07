@@ -36,6 +36,7 @@ is compared byte-for-byte.
 | Date | Head | `sweep_layouts` | `sweep_args` | `sweep_migrate` | `sweep_location` | `sweep_webui_routes` | `sweep_go_vs_rs` |
 |---|---|---|---|---|---|---|---|
 | 2026-11-07 | `76518cb` (Rust binary built from that head) | 110/0 | 75/0 | 10/0 | 18/0 | 88/0 | 102/**7** |
+| 2026-11-07 | `7d072a1` (Rust binary built from that head) | 110/0 | 75/0 | 10/0 | 18/0 | 88/0 | 118/**0** |
 
 Format: cases/diffs. The seven `sweep_go_vs_rs` diffs at `76518cb` were
 real: the Rust build accepted five kinds of config that Go refuses
