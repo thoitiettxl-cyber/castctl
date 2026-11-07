@@ -1527,3 +1527,34 @@ dùng làm kết luận. Các tỉ lệ số học giữa hai bảng là size st
 tính số học, không dùng làm kết luận về hướng hay độ lớn. (Fix loop 1:
 câu kết luận về hướng ở đây đã gỡ — mục này không re-measure, nên
 không rút kết luận hướng từ các tỉ lệ trên.)
+
+## Số đo cuối cùng của Pi ở head hoàn thiện `845aa1d` (2026-11-07)
+
+Head `845aa1d` là head mà `stub(ctx)` = 0 và mọi mục E2E đã đóng
+(`dev-rust`, M1..M7e). Số dưới đây đo trên cue bằng
+`bash /tmp/finalcheck.sh` (clone sạch `--depth 1 --branch dev-rust`,
+`cargo build --release -p castctl-rs` với
+`CARGO_TARGET_DIR=/tmp/fg-target`, toolchain pin `1.99.1`), so cùng
+một máy, cùng profile `no.0`, N=20 cho `--version`.
+
+| Hạng mục | Go 0.9.0 (`1396697`) | Rust `castctl-rs` (`845aa1d`) | Tỉ lệ |
+|---|---|---|---|
+| Binary chưa strip | 48,100,296 B | 37,038,808 B | 0.770× |
+| Binary stripped | (không dùng — Go release strip sẵn) | 28,280,768 B | 0.588× |
+| `--version` median (N=20) | 8.32 ms | 2.07 ms | 0.249× |
+| RSS `--help` (max RSS) | 30.4 MiB | 6.5 MiB | 0.214× |
+
+Ghi chú:
+
+- Stripped 28.28 MB > stripped run11 (21.55 MB @ `e7a97d7`) vì
+  `castctl-rs` ở `e7a97d7` chưa link `castctl-keeper`,
+  `castctl-telegram`, `castctl-webui` (chúng chỉ tồn tại dưới dạng
+  crate + test); M7d nối `keeper`/`telegram`/`profile` vào dispatcher
+  nên binary lớn lên. Đây là mặt bằng có thêm tính năng, không phải
+  thoái hoá — so sánh đúng là cùng surface (Go full vs Rust full).
+- Go ở mode thấp của phân bố hai đỉnh cho RSS (30.4 MiB ở đây, run10
+  30.37 MiB; mode cao 47.7 MiB). Không dùng chênh lệch RSS làm kết
+  luận về hướng nếu chưa đo lại cả hai mode.
+- `--version` của Rust mang stamp riêng của nó
+  (`castctl 0.9.0 (845aa1d …)`), Go mang `(1396697 …)`: cùng khuôn
+  dạng, mỗi bên báo commit nguồn của mình (PR #84).
