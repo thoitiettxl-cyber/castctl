@@ -153,20 +153,6 @@ flate2 = "=1.1.10"
 # `signal`/`user` need only bitflags/cfg-if/libc).
 # Default features are off: nix's default is empty.
 nix = { version = "=0.31.3", default-features = false, features = ["fs", "process", "signal", "socket", "user"] }
-# M6c-b: libloading 0.9.0 is the ONLY new crate for the
-# real `.so` loader (used only inside the worker process,
-# `castctl-pluginhost/src/ffi/`). Exact pin after
-# measurement on cue (docs.rs 2026-11-06: 0.9.0 released
-# 2025-11-05, MSRV 1.88.0, below the workspace 1.98
-# floor). It was already in the lock as 0.8.9 (transitive
-# via bindgen -> clang-sys); promoting it to a direct dep
-# moves the lock to 0.9.0 — record the final `cargo tree`
-# in the PR. The loader uses ONLY the Unix platform API
-# (`os::unix::Library::open` with RTLD_NOW|RTLD_LOCAL,
-# Go parity); the cross-platform `Library::new` is
-# RTLD_LAZY and is NOT used. Default features (incl.
-# `std`).
-libloading = "=0.9.0"
 # reader/writer halves (tokio-tungstenite only re-exports the
 # concrete stream type; the traits must be direct deps).
 futures-core = "=0.3.34"
