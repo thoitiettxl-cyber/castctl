@@ -36,8 +36,10 @@ Crates that remain in the workspace and ship in the binary: `castctl-rs`,
 (the last two are text/attachment formatting used by `send`, `chat`, `wait`,
 not the bot runtime).
 
-Commands kept: everything except `webui`, `telegram`, `plugin` — 45 of Go's
-46 (`rust/castctl-cli/src/table.rs` `COMMAND_ORDER`).
+Commands kept: everything except `webui`, `telegram`, `plugin` — 43 of Go's
+46 (`rust/castctl-cli/src/table.rs` `COMMAND_ORDER`). None of the three
+survives anywhere in the tree: the commands, their crates, the plugin-host
+worker entry point and the `castctl-webui/` directory are all gone.
 
 ## Measured (cue, 2026-11-07, three slices on `feat/rust-agent-cli-only`)
 
@@ -92,12 +94,13 @@ Kept on purpose:
 4. **crate trees** — `45911d5`: `castctl-telegram` and
    `castctl-pluginhost` deleted (34,710 lines).
 
-Still to delete: `castctl-webui/` (left on disk, out of the workspace) —
-PR #94 edits `castctl-webui/src/keeper_status.rs` and `handlers.rs`, so
-deleting it before #94 lands makes that PR unmergeable. Delete it right after
-#94 merges. Note that #94's keeper-time fix itself lives in
-`castctl-keeper` + `castctl-shared`, so the keeper half survives the deletion;
-only its webui mirror becomes moot.
+5. **`castctl-webui/` tree** — deleted (29 files). It was held back while PR
+   #94 was open because #94 edited `castctl-webui/src/keeper_status.rs` and
+   `handlers.rs`; this branch now sits on #94's head, so #94's keeper-time
+   work is already included and its webui mirror is moot. Delete order for
+   the two branches: **either** #94 merges and this branch rebases onto
+   `dev-rust` (its webui hunks disappear with the tree) **or** this branch
+   merges first and #94 is closed as superseded.
 
 ## Kept surface: what is verified now (cue, 2026-11-07/08)
 
@@ -107,8 +110,10 @@ only its webui mirror becomes moot.
 | Write commands | `session-pin`, `session-unpin`, `session-rename`, `approvals` byte-identical to Go on the same live session; `seen` identical apart from its `seen_at_ms` timestamp (two runs, one second apart). |
 | Send + wait round trip | Live: `session-start` → `send … --wait 150 --text` exit 0, stdout `user_seq=29401 [29402] pong-from-castctl-rs`, stderr `-- done (status=completed)`. Reply delivery — the M7c gap — is **proven**. |
 | `update --dry-run` | Rust and Go both exit 0 with `castctl is up to date: 0.9.0` on a stamped build. |
-| Deterministic argv sweep | `TOTAL=101 DIFFS=0 skipped_live=9 skipped_dropped=8` — the 8 skips are the dropped commands plus the top-level `--help`. |
-| Gates | `cargo fmt --check` 0, `cargo clippy … -D warnings` 0, `cargo test --workspace` 55 suites / 1220 passed / 0 failed. |
+| Keeper state, **write** path | Live tick (`keeper check`) on an expired jar + real CDP `127.0.0.1:9226`, Rust and Go on identical fixtures: both write `next_check_at`/`last_checked_at` with the local offset — `+07:00` with `TZ` unset, `-05:00` with `TZ=America/New_York` (Go's own `time.Local`). The old "Rust writes `Z`" gap is closed on this branch (it carries #94's `bcbaa98`). |
+| Keeper state, **read** path | `keeper status` on a state file mixing `Z` and `+07:00` timestamps: **byte-identical** to Go under `TZ` unset, `America/New_York`, `Asia/Tokyo`, `UTC`. |
+| Deterministic argv sweeps | `go_vs_rs 101/0`, `args 67/0`, `layouts 88/0`, `redaction 9/0` (`DIFFS=0`; skips are `skipped_live` + `skipped_dropped`). `layouts` caught the `auth status` `headless_reason` bug fixed in `5405c94`. |
+| Gates | `cargo fmt --check` 0; `cargo clippy --workspace --all-targets --release -- -D warnings` 0; `cargo test --workspace` 55 suites / **1253 passed / 0 failed**; release binary 31,337,160 B. |
 
 ## `usage` — closed (was the only large gap)
 
@@ -135,10 +140,44 @@ Wall time on cue, live profile, `usage`: 41–47 s → 22–29 s → **10.0–18
 Covered by `castctl-transport/tests/http_pool.rs` (6 cases: reuse, close,
 idle-dead retry, gzip decode + header strip, caller header wins, gzip bomb).
 
+## Branch topology (read before merging)
+
+`feat/rust-agent-cli-only` is now built on **PR #94's head** (`2e31d35`,
+`feat/rust-m7g-keeper-times`), not on `dev-rust`. That is what makes the
+keeper-time parity above true on this branch. Two merge orders are valid:
+
+1. #94 first, then this branch rebases onto the new `dev-rust` (the #94
+   commits vanish from the diff, leaving the 11 scope/perf commits).
+2. This branch first — it then carries #94's commits and #94 is closed as
+   superseded.
+
+The backup ref `backup/agent-cli-before-94` holds the pre-#94 shape.
+
 ## Remaining work
 
 | Item | State |
 |---|---|
-| Delete `castctl-webui/` (still on disk, out of the workspace) | Blocked on PR #94: it edits `castctl-webui/src/keeper_status.rs` + `handlers.rs`. Its keeper-time fix itself lives in `castctl-keeper` + `castctl-shared`, so the keeper half survives the deletion. |
-| Keeper time rendering on this branch | This branch predates #94, so keeper state still renders UTC (`Z`) where Go writes the local offset. Merge/rebase #94 to close it; nothing else in the kept surface depends on it. |
-| `update` on an **unstamped** build | Rust exit 1 vs Go exit 0; stamped builds match (verified). Dev-only path — decide later whether to align. |
+| Merge order for #94 vs this branch | A decision for the user; both orders verified locally. See "Branch topology". |
+| `update` on an **unstamped** build | Rust exit 1 vs Go exit 0; stamped builds match (verified). Dev-only path, no user-visible effect: the shipped binary is stamped. |
+| `--help` tagline | Still says "Go port of muse-cli 0.6.1", which no longer describes the artifact. Changing it means regenerating the `48-help` golden; left as a separate, deliberate change. |
+
+## Reproducing the gates on cue
+
+The `dev`-profile clippy gate cannot build `boring-sys` (its vendored BoringSSL
+runs `third_party/benchmark`'s CMake in `Debug`, which fails with "Failed to
+determine the source files for the regular expression backend" — an upstream
+packaging problem, not our code; `libunwind-dev` is needed too and is now
+installed). Use the release profile, which is stricter anyway:
+
+```console
+$ cargo fmt --check
+$ cargo clippy --workspace --all-targets --release -- -D warnings
+$ cargo test --workspace
+```
+
+The sweeps need the real Go binary passed explicitly, because
+`/usr/local/bin/castctl` on the bench host is the Rust build:
+
+```console
+$ SWEEP_GO=/tmp/castctl-chromedp python3 parity/sweep_go_vs_rs.py "$PWD/target/release/castctl-rs"
+```
