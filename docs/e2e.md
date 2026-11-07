@@ -537,7 +537,7 @@ Clean re-run (run 2, after the driver fix):
 |---|---|---|
 | `keeper run` 60 s, ticks | 2 ticks, `keeper: no.0 (no.0): ok cookies_seen=10 wrote=true next_delay=30s` (×2) | ticks ran (state proves ≥1 `ok` tick) but stdout 0 bytes — Rust buffers all tick lines until exit, so SIGTERM loses them (r2 prediction, confirmed live) |
 | Kill signal / wait status | SIGTERM → **143** | SIGINT at 60 s → **still alive after 10 s** (known bug, see finding below); then SIGTERM → **143** |
-| `keeper status` (after) | exit 0, `last_tick_outcome: "ok"` | exit 0, `last_tick_outcome: "ok"` (times render UTC `Z` vs Go `+07:00` — known, instants equal) |
+| `keeper status` (after) | exit 0, `last_tick_outcome: "ok"` | exit 0, `last_tick_outcome: "ok"` (times render UTC `Z` vs Go `+07:00` — known, instants equal) [M7g fixed the render — Rust now matches Go; row kept as the M7e-era evidence] |
 | `keeper check` (1 tick) | exit 0, `ok`, `cookies_seen: 10`, `wrote_cookies: true` | exit 0, `ok`, `cookies_seen: 10`, `wrote_cookies: true` |
 | Single-flight (2nd `run`, same dir, while 1st alive) | exit 2, `keeper entry "no.0" is already running (pid 3046906)` | exit 2, `keeper entry "no.0" is already running (pid 3047119)` |
 | Scratch cookies sha | `aa667a83…` → `0628ecd2…` (run) → `dcdd05d4…` (check); state `cookies_sha256` equals the file sha after each side's own check | `aa667a83…` → `5b352850…` (run) → `fa4624ec…` (check); state `cookies_sha256` equals the file sha after each side's own check |
