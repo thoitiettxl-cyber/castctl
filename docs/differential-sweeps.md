@@ -19,6 +19,8 @@ report. Exit code is always 0; a non-zero `DIFFS` is the finding.
 | `sweep_migrate.py` | `config migrate --write`: resulting file tree compared byte-for-byte | 10 layouts | this doc |
 | `sweep_location.py` | config/profile location resolution (`--config`, `--profile`, XDG set/unset/relative, legacy flat file) | 18 | this doc |
 | `sweep_webui_routes.py` | every Web UI route × {Bearer, no token}, plus malformed methods/paths | 88 requests | this doc |
+| `sweep_profile_writes.py` | `profile add/rm/name/set-outbound/set-fingerprint/set-tls-engine`, `auto-approve`, `config migrate --write`: resulting file tree + mode compared | 16 | this doc |
+| `sweep_redaction.py` | a secret in an error position (wireguard `private_key`, shadowsocks/trojan/hysteria2 `password`, vless `uuid`, telegram `token`, `credentials`): stderr must match Go's `[redacted]` | 10 | this doc |
 
 Run them with the Rust binary as the single argument:
 
@@ -35,10 +37,19 @@ is compared byte-for-byte.
 
 | Date | Head | `sweep_layouts` | `sweep_args` | `sweep_migrate` | `sweep_location` | `sweep_webui_routes` | `sweep_go_vs_rs` |
 |---|---|---|---|---|---|---|---|
-| 2026-11-07 | `76518cb` (Rust binary built from that head) | 110/0 | 75/0 | 10/0 | 18/0 | 88/0 | 102/**7** |
+| 2026-11-07 | `76518cb` | 110/0 | 75/0 | 10/0 | 18/0 | 88/0 | 102/**7** |
+| 2026-11-07 | `8807310` (M7f PR head) | 110/0 | 75/0 | 10/0 | 18/0 | 88/0 | 118/0 |
+| 2026-11-07 | `8807310` — the two later sweeps | `sweep_profile_writes` 16/0 | `sweep_redaction` 10/0 | | | | |
 | 2026-11-07 | `7d072a1` (Rust binary built from that head) | 110/0 | 75/0 | 10/0 | 18/0 | 88/0 | 118/**0** |
 
-Format: cases/diffs. The seven `sweep_go_vs_rs` diffs at `76518cb` were
+Format: cases/diffs. `sweep_redaction` did not exist at `76518cb`; it was written after the M7f
+review found that the Rust CLI printed error lines raw while Go passes
+every line through `SafeString` (`private_key: 5` → `private_key:
+[redacted]`). At `76518cb` it reproduces **6 diffs** — five outbounds Go
+refuses and Rust accepted, plus the redaction difference itself; at
+`8807310` it is 10/0.
+
+The seven `sweep_go_vs_rs` diffs at `76518cb` were
 real: the Rust build accepted five kinds of config that Go refuses
 (`dns` not an object, unknown `dns` key, duplicate outbound tag, outbound
 without `type`, profile identity in a single config) and then ran — one
