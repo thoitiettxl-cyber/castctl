@@ -39,49 +39,78 @@ not the bot runtime).
 Commands kept: everything except `webui`, `telegram`, `plugin` — 45 of Go's
 46 (`rust/castctl-cli/src/table.rs` `COMMAND_ORDER`).
 
-## Measured (cue, this change only — the plugin slice)
+## Measured (cue, 2026-11-07, three slices on `feat/rust-agent-cli-only`)
 
-| Metric | Before | After |
-|---|---|---|
-| `castctl-rs` release binary | 37,549,240 B | 36,888,360 B (`-660,880 B`, `-1.76%`) |
-| `castctl-pluginhost` compiled | yes | no (out of the workspace) |
-| Command table | 46 | 45 |
-| Parity argv cases | 62 | 61 |
-| `cargo clippy -p castctl-cli -p castctl-rs --all-targets -- -D warnings` | — | exit 0 |
-| `cargo test -p castctl-cli -p castctl-rs` | — | 4 suites, 238 passed, 0 failed |
-| `cargo fmt --check` | — | exit 0 |
+Baseline = `dev-rust` `fd3eb1c` before any slice. Every number below was
+produced on cue, not on the Debian host.
 
-Rust dependency footprint before the removals (own dep-tree lines,
-`cargo tree -e normal`): `castctl-telegram` 344, `castctl-webui` 99,
-`castctl-pluginhost` 85, whole `castctl-rs` 213 unique.
-Release build baseline on cue: 186 s, 213 deps.
+| Metric | Baseline | After plugin | After webui | After telegram |
+|---|---|---|---|---|
+| `castctl-rs` release binary | 37,549,240 B | 36,888,360 B | 34,381,344 B | **31,336,448 B** |
+| Delta per slice | — | `-1.76%` | `-6.80%` | `-8.85%` |
+| Command table (`COMMAND_ORDER`) | 46 | 45 | 44 | **43** |
+| Parity argv cases | 62 | 61 | 60 | **59** |
+| Crates built | 20 | 19 | 18 | **17** |
 
-## Sequence
+Cumulative: **`-6,212,792 B`, `-16.55%`** of the release binary.
 
-1. **plugin** — done in this change (`feat/rust-agent-cli-only`).
-2. **webui** — needs one seam move first: `chat` uses
-   `castctl_webui::chats::ChatDeps` (`castctl-cli/src/run.rs::failing_chat_deps`),
-   so the chat seam must move to a kept crate before the `webui` command and
-   the `castctl-webui` dependency can go.
-3. **telegram bot** — needs one seam move first: `send`, `wait` and `chat`
-   use `castctl_telegram::wait::{Reply, WaitKind, Widget, ApproveError}` and
-   `castctl_telegram::Approval`, so the reply/approval model must move to a
-   kept crate (`castctl-wait` is the natural home) before the bot runtime goes.
+Gates on the final tree (`castctl-telegram` and `castctl-pluginhost` deleted,
+`castctl-webui` out of the workspace):
 
-Ordering constraint: PR #94 (`feat/rust-m7g-keeper-times`) edits
-`castctl-webui/src/keeper_status.rs`. Merge #94 **before** removing
-`castctl-webui`, otherwise the keeper-time fix has to be re-applied by hand.
+- `cargo fmt --check` exit 0.
+- `cargo clippy -p castctl-cli -p castctl-rs -p castctl-wait --all-targets -- -D warnings` exit 0.
+- `cargo test --workspace` — 54 suites, **1214 passed, 0 failed**. (Not
+  comparable with the pre-decision 66 suites / 1703 tests: the three dropped
+  crates took their own tests with them.)
+- Live parity of the kept surface with Go `0.9.0 (1396697 …)` on the same
+  live profile: `status`, `threads --all`, `history --limit 3`, `auth status`,
+  `goals`, `ideas`, `unread`, `feed-status`, `files --limit 3`,
+  `profile list`, `usage` — **11/11 byte-identical**.
+- Dropped commands: `castctl plugin check …`, `castctl webui serve`,
+  `castctl telegram run` each exit 2 with `invalid choice`, and the top-level
+  help lists 43 names.
+
+Kept on purpose:
+
+- the `webui` / `telegram` / `plugins` **config blocks** still parse — the
+  config file is shared with the Go binary;
+- the keeper's Telegram **notice sender** (`castctl-cli/src/keepercmd.rs`,
+  `api.telegram.org` over the profile outbound): keeper logic, never used the
+  bot crate;
+- `castctl-tg-text` / `castctl-tg-files`: message text and attachment
+  formatting used by `send`, `wait`, `chat`.
+
+## Sequence (done)
+
+1. **plugin** — `be10656` / `f1b6913` after rebase.
+2. **webui** — `82178f2` / `26df4a9`. No seam move was needed after all:
+   `castctl_webui::chats::ChatDeps` was only consumed by `serve_webui`
+   itself, so the whole command could go in one step.
+3. **telegram bot** — `33d9acf` / `462c654`. The reply/approval model
+   (`wait.rs`, `approvals.rs`, `error.rs`) moved into `castctl-wait`, which
+   the CLI already used; `send`/`wait`/`chat` kept their behaviour.
+4. **crate trees** — `45911d5`: `castctl-telegram` and
+   `castctl-pluginhost` deleted (34,710 lines).
+
+Still to delete: `castctl-webui/` (left on disk, out of the workspace) —
+PR #94 edits `castctl-webui/src/keeper_status.rs` and `handlers.rs`, so
+deleting it before #94 lands makes that PR unmergeable. Delete it right after
+#94 merges. Note that #94's keeper-time fix itself lives in
+`castctl-keeper` + `castctl-shared`, so the keeper half survives the deletion;
+only its webui mirror becomes moot.
 
 ## Open gaps in the kept surface (finish-the-logic backlog)
 
-Measured on cue 2026-11-07, Rust vs Go, same live profile/config:
+Measured on cue 2026-11-07, Rust vs Go `0.9.0 (1396697 …)`, same live
+profile/config, three samples per side:
 
 | Gap | Evidence | Note |
 |---|---|---|
-| `usage` is slow | 127.6 s / 88.4 s (Rust) vs 21.8 s / 28.0 s (Go); one 60 s timeout | The only agent-facing command with a large, reproducible gap. Investigate before anything cosmetic. |
+| `usage` is ~3x slow | Rust 43.2 s / 39.9 s / 57.0 s (and 60.2 s / 88.4 s / 127.6 s on older builds) vs Go 12.9 s / 13.9 s / 13.3 s | Same 876-byte answer byte-for-byte on both sides. A single `profile test` HTTPS phase is parity (1027 ms vs 1045 ms), so the TLS stack is not the cause. `fetch_subscription` makes ONE `call_action` POST; the suspect is that POST returning `result: None` in Rust (non-`x-component` body or an RSC parse miss) and the code then falling back to `find_action_id` (page + JS-chunk scan + a second POST). Next step: instrument the attempt count/time behind an env flag, confirm, then fix the cause rather than the symptom. |
 | `update` on an unstamped build | Rust exit 1 vs Go exit 0 for `--dry-run` | `PORTING.md` §M7b records it; decide whether to match or to document Rust-only behaviour. |
 | `wait` reply delivery | M7c recorded `replies: []` on both sides — narrows the claim | Needs a live turn where the reply actually arrives. |
 
-Everything else in the kept surface is live-parity verified: 14 read-only
-commands byte-identical to Go on cue, keeper (tick, expiry, CDP re-export)
-byte-identical, 109-case argv sweep `DIFFS=0`.
+Everything else in the kept surface is live-parity verified: 11 read-only
+commands byte-identical to Go on cue (this round), 14 earlier, the keeper
+(tick, expiry, CDP re-export) byte-identical, and the deterministic 109-case
+argv sweep `DIFFS=0`.
