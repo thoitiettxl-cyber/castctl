@@ -12,12 +12,14 @@
 //! `scanLegacyConfigFile`, `applyEnvFill`, `profileExists`).
 
 use crate::blocks::{
-    CredentialsBlock, PluginsBlock, check_endpoint_wireguard_system, check_webui_shape,
-    parse_credentials_block, parse_plugins_block, parse_wireguard_dns_map, validate_credentials,
-    validate_plugins,
+    CredentialsBlock, PluginsBlock, check_endpoint_wireguard_system, parse_credentials_block,
+    parse_plugins_block, parse_wireguard_dns_map, validate_credentials, validate_plugins,
 };
 use crate::config_errorf;
 use crate::configlocation::Getenv;
+use crate::dnsvalidate::{
+    validate_profile_dns, validate_wireguard_dns, validate_wireguard_private_keys,
+};
 use crate::errors::{ConfigError, config_error, legacy_layout_error};
 use crate::gopath::go_join;
 use crate::gostr::{go_lower, go_quote, go_trim_space};
@@ -35,6 +37,8 @@ use crate::profile::{
     DEFAULT_PROFILE_NAME, PROFILE_ENV, Profile, Source, discover_profile_names,
     parse_profile_entry, profile_paths, resolve_profile_name, validate_profile_name,
 };
+use crate::singbox::{validate_dns_strict, validate_endpoint_strict, validate_outbound_strict};
+use crate::taggraph::validate_tag_graph;
 use crate::telegram::{TelegramConfig, parse_telegram_block, validate_telegram};
 use std::collections::BTreeMap;
 
@@ -237,9 +241,13 @@ pub fn has_profiles_marker(data: &[u8]) -> Result<bool, ConfigError> {
 
 /// `ParseSingleConfig` (`config.go:221`): checks run in fixed order —
 /// top-level key scan (file order) → `default_profile` → `profiles`
-/// presence/shape → blocks in fixed order → profiles in file order →
-/// tail validation (G1, telegram, credentials, plugins; the
-/// sing-box tail checks are deferred, D-M2-1).
+/// presence/shape → blocks in fixed order (outbounds, endpoints,
+/// dns, wireguard_dns, log, telegram, keeper, webui, plugins,
+/// credentials) → profiles in file order → tail validation
+/// (validateTagGraph → G1 → validateProfileDNS →
+/// validateWireGuardDNS → validateWireGuardPrivateKeys →
+/// validateTelegram → validateKeeper → validateCredentials →
+/// validateCredentialRefs → validatePlugins).
 pub fn parse_single_config(data: &[u8], base_dir: &str) -> Result<SingleConfig, ConfigError> {
     let obj = decode_ordered_object(data)?;
     for k in obj.keys() {
@@ -281,10 +289,15 @@ pub fn parse_single_config(data: &[u8], base_dir: &str) -> Result<SingleConfig, 
             JsonValue::Array(arr) => arr,
             _ => return Err(config_error("\"outbounds\" must be an array")),
         };
-        // Deferred: sing-box parseOutbound + tag-presence check.
+        // Strict sing-box parse per element, in file order, then
+        // the tag check (Go checks the tag AFTER `parseOutbound`).
         // Elements are stored raw, verbatim.
         for elem in arr {
             let _ = raw_of(elem)?;
+            validate_outbound_strict(elem)?;
+            if element_tag(elem).is_empty() {
+                return Err(config_error("outbound in \"outbounds\" must have a tag"));
+            }
             cfg.outbounds_raw.push(elem.clone());
         }
     }
@@ -295,14 +308,20 @@ pub fn parse_single_config(data: &[u8], base_dir: &str) -> Result<SingleConfig, 
         };
         for elem in arr {
             let _ = raw_of(elem)?;
-            // Raw-field approximation of the wireguard-system check.
+            validate_endpoint_strict(elem)?;
+            if element_tag(elem).is_empty() {
+                return Err(config_error("endpoint in \"endpoints\" must have a tag"));
+            }
+            // The wireguard-system check runs AFTER the strict
+            // parse, so a non-bool `system` errors as a type
+            // error first (Go `config.go` order).
             check_endpoint_wireguard_system(elem)?;
             cfg.endpoints_raw.push(elem.clone());
         }
     }
     if let Some(v) = obj.get("dns") {
         let _ = raw_of(v)?;
-        // Deferred: sing-box parseDNS.
+        validate_dns_strict(v)?;
         cfg.dns_raw = Some(v.clone());
     }
     if let Some(v) = obj.get("wireguard_dns") {
@@ -327,7 +346,12 @@ pub fn parse_single_config(data: &[u8], base_dir: &str) -> Result<SingleConfig, 
     }
     if let Some(v) = obj.get("webui") {
         let _ = raw_of(v)?;
-        check_webui_shape(v)?;
+        // Deep parse (Go `parseWebUIBlock`): the block is
+        // validated at parse time, so every command fails
+        // closed on a bad block. The typed value is
+        // discarded; the webui crate re-parses `webui_raw`
+        // when serving.
+        crate::webui::parse_webui_block(v, base_dir)?;
         cfg.webui_raw = Some(v.clone());
     }
     if let Some(v) = obj.get("plugins") {
@@ -357,9 +381,12 @@ pub fn parse_single_config(data: &[u8], base_dir: &str) -> Result<SingleConfig, 
         cfg.profiles.insert(name.clone(), p);
     }
 
-    // Tail validation, in Go order. validateTagGraph,
-    // validateProfileDNS, validateWireGuardDNS, and
-    // validateWireGuardPrivateKeys are deferred (D-M2-1).
+    // Tail validation, in Go order (`config.go:421-454`):
+    // validateTagGraph → G1 → validateProfileDNS →
+    // validateWireGuardDNS → validateWireGuardPrivateKeys →
+    // validateTelegram → validateKeeper → validateCredentials →
+    // validateCredentialRefs → validatePlugins.
+    validate_tag_graph(&mut cfg)?;
     if cfg.dns_raw.is_some() {
         for name in cfg.profile_names() {
             let p = &cfg.profiles[&name];
@@ -371,6 +398,9 @@ pub fn parse_single_config(data: &[u8], base_dir: &str) -> Result<SingleConfig, 
             }
         }
     }
+    validate_profile_dns(&cfg)?;
+    validate_wireguard_dns(&cfg)?;
+    validate_wireguard_private_keys(&cfg)?;
     if let Some(tg) = &cfg.telegram {
         let tg = tg.clone();
         validate_telegram(&tg, |name| cfg.profiles.contains_key(name))?;
@@ -395,6 +425,19 @@ pub fn parse_single_config(data: &[u8], base_dir: &str) -> Result<SingleConfig, 
         validate_plugins(&plugins)?;
     }
     Ok(cfg)
+}
+
+/// The `tag` of one `outbounds`/`endpoints` element (empty when
+/// missing, non-string, or empty). Go reads the tag from the parsed
+/// struct, so a non-string tag already failed the strict parse.
+fn element_tag(elem: &JsonValue) -> &str {
+    match elem {
+        JsonValue::Object(o) => match o.get("tag") {
+            Some(JsonValue::Str(s)) => s.as_str(),
+            _ => "",
+        },
+        _ => "",
+    }
 }
 
 /// `buildSingleFileOrdered` (`config.go:1292`): fixed top-level
@@ -884,18 +927,23 @@ mod tests {
         // credentials): the hand-written Debug impls must not
         // print the token, the credential password, or the inline
         // outbound raw JSON.
+        // M7f: the inline outbound must be a VALID outbound —
+        // Go's `parseOutbound` rejects `wireguard` as an
+        // outbound (it belongs in `endpoints`), so the old
+        // wireguard fixture no longer parses. Trojan carries
+        // the same secret-in-raw-JSON property.
         let cfg = parse(&format!(
-            "{{\"profiles\":{{\"default\":{{\"outbound\":{{\"type\":\"wireguard\",\"private_key\":\"SECRET-PRIVATE-KEY\"}}}}}},\"credentials\":[{{\"tag\":\"c1\",\"profile\":\"default\",\"username\":\"alice\",\"password\":\"SECRET-PASSWORD\"}}],\"telegram\":{{\"profile\":\"default\",\"token\":\"{FAKE_TOKEN}\",\"allowed_user_ids\":[111]}}}}"
+            "{{\"profiles\":{{\"default\":{{\"outbound\":{{\"type\":\"trojan\",\"server\":\"127.0.0.1\",\"server_port\":443,\"password\":\"SECRET-TROJAN-PASSWORD\"}}}}}},\"credentials\":[{{\"tag\":\"c1\",\"profile\":\"default\",\"username\":\"alice\",\"password\":\"SECRET-PASSWORD\"}}],\"telegram\":{{\"profile\":\"default\",\"token\":\"{FAKE_TOKEN}\",\"allowed_user_ids\":[111]}}}}"
         ))
         .unwrap();
         let rendered = format!("{cfg:?}");
-        assert!(!rendered.contains("SECRET-PRIVATE-KEY"));
+        assert!(!rendered.contains("SECRET-TROJAN-PASSWORD"));
         assert!(!rendered.contains("SECRET-PASSWORD"));
         assert!(!rendered.contains(FAKE_TOKEN));
         assert!(rendered.contains("[redacted]"));
         // The parsed Profile's own Debug is redacted too.
         let rendered_profile = format!("{:?}", cfg.profiles["default"]);
-        assert!(!rendered_profile.contains("SECRET-PRIVATE-KEY"));
+        assert!(!rendered_profile.contains("SECRET-TROJAN-PASSWORD"));
     }
 
     #[test]
@@ -1040,6 +1088,154 @@ mod tests {
                 .unwrap_err()
                 .message,
             "profile: \"credentials\" must be an array of entries"
+        );
+    }
+
+    #[test]
+    fn test_m7f_dns_array_rejected() {
+        // Hole 1 (Go `parseDNS` via sing-box badjson):
+        // a non-object dns section is a parse error, exit 2.
+        assert_eq!(
+            parse("{\"profiles\":{},\"dns\":[]}").unwrap_err().message,
+            "profile: parse dns: json: cannot unmarshal array into Go value of type option.removedLegacyDNSOptions"
+        );
+    }
+
+    #[test]
+    fn test_m7f_dns_unknown_field() {
+        // Hole 2: unknown dns key, with the JSON path prefix.
+        assert_eq!(
+            parse("{\"profiles\":{},\"dns\":{\"bogus\":1}}")
+                .unwrap_err()
+                .message,
+            "profile: parse dns: bogus: json: unknown field \"bogus\""
+        );
+    }
+
+    #[test]
+    fn test_m7f_duplicate_outbound_tag() {
+        // Hole 3: the tag graph runs at parse time (Go
+        // `validateTagGraph`, `config.go:421`), not only on
+        // the `profile list` path.
+        assert_eq!(
+            parse("{\"profiles\":{},\"outbounds\":[{\"type\":\"direct\",\"tag\":\"a\"},{\"type\":\"direct\",\"tag\":\"a\"}]}")
+                .unwrap_err()
+                .message,
+            "profile: duplicate outbound tag \"a\" (already outbound)"
+        );
+    }
+
+    #[test]
+    fn test_m7f_outbound_missing_type() {
+        // Hole 4: sing-box dispatch rejects a missing
+        // outbound type, trailing space included (Go
+        // `unknown outbound type: ` with an empty type).
+        assert_eq!(
+            parse("{\"profiles\":{},\"outbounds\":[{\"tag\":\"a\"}]}")
+                .unwrap_err()
+                .message,
+            "profile: parse outbound: unknown outbound type: "
+        );
+    }
+
+    #[test]
+    fn test_m7f_outbound_missing_tag() {
+        assert_eq!(
+            parse("{\"profiles\":{},\"outbounds\":[{\"type\":\"socks\"}]}")
+                .unwrap_err()
+                .message,
+            "profile: outbound in \"outbounds\" must have a tag"
+        );
+    }
+
+    #[test]
+    fn test_m7f_outbound_wireguard_type_rejected() {
+        // Go `parseOutbound` rejects wireguard as an
+        // outbound AFTER the sing-box parse (no `parse
+        // outbound:` prefix on this message).
+        assert_eq!(
+            parse("{\"profiles\":{},\"outbounds\":[{\"type\":\"wireguard\",\"tag\":\"w\"}]}")
+                .unwrap_err()
+                .message,
+            "profile: outbound type \"wireguard\" is not an outbound; declare it in \"endpoints\" and reference its tag"
+        );
+    }
+
+    #[test]
+    fn test_m7f_endpoint_missing_tag() {
+        assert_eq!(
+            parse("{\"profiles\":{},\"endpoints\":[{\"type\":\"wireguard\"}]}")
+                .unwrap_err()
+                .message,
+            "profile: endpoint in \"endpoints\" must have a tag"
+        );
+    }
+
+    #[test]
+    fn test_m7f_profile_dns_unknown_field() {
+        // Per-profile dns is parsed with sing-box too, and
+        // the error carries BOTH prefixes (Go
+        // `parseProfileEntry`: `profile %q: %v` around the
+        // `parse dns:` error).
+        assert_eq!(
+            parse("{\"profiles\":{\"p1\":{\"dns\":{\"bogus\":1}}}}")
+                .unwrap_err()
+                .message,
+            "profile: profile \"p1\": profile: parse dns: bogus: json: unknown field \"bogus\""
+        );
+    }
+
+    #[test]
+    fn test_m7f_inline_outbound_missing_type() {
+        // An inline outbound object is parsed with
+        // sing-box; the error is returned as-is (ONE
+        // prefix, no profile name).
+        assert_eq!(
+            parse("{\"profiles\":{\"p1\":{\"outbound\":{\"server\":\"x\"}}}}")
+                .unwrap_err()
+                .message,
+            "profile: parse outbound: unknown outbound type: "
+        );
+    }
+
+    #[test]
+    fn test_m7f_webui_deep_listen() {
+        // Deep webui validation runs at parse time (Go
+        // `parseWebUIBlock` inside `ParseSingleConfig`),
+        // not only at `webui serve`.
+        assert_eq!(
+            parse("{\"profiles\":{},\"webui\":{\"listen\":\"0.0.0.0:8317\"}}")
+                .unwrap_err()
+                .message,
+            "profile: \"webui.listen\" host must be loopback"
+        );
+    }
+
+    #[test]
+    fn test_m7f_parse_error_beats_tail_error() {
+        // A sing-box parse error (outbounds phase) beats a
+        // tail error (duplicate tags) on the same file: Go
+        // stops at the first phase in `ParseSingleConfig`
+        // order.
+        assert_eq!(
+            parse("{\"profiles\":{},\"outbounds\":[{\"type\":\"bogus\",\"tag\":\"a\"},{\"type\":\"direct\",\"tag\":\"a\"},{\"type\":\"direct\",\"tag\":\"a\"}]}")
+                .unwrap_err()
+                .message,
+            "profile: parse outbound: unknown outbound type: bogus"
+        );
+    }
+
+    #[test]
+    fn test_m7f_tag_graph_beats_g1() {
+        // Tag graph runs BEFORE G1 coexistence (Go
+        // `config.go:421-427`): a dangling outbound tag
+        // and a per-profile + top-level dns clash together
+        // report the tag error.
+        assert_eq!(
+            parse("{\"profiles\":{\"p1\":{\"outbound\":\"ghost\",\"dns\":{}}},\"dns\":{}}")
+                .unwrap_err()
+                .message,
+            "profile: profile \"p1\": outbound tag \"ghost\" does not exist"
         );
     }
 

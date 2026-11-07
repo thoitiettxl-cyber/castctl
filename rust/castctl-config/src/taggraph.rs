@@ -309,18 +309,22 @@ mod tests {
 
     #[test]
     fn reserved_prefix_rejected_everywhere() {
-        let mut cfg = cfg_from(
-            r#"{"profiles":{"a":{}},"outbounds":[{"type":"direct","tag":"castctl-direct:a"}]}"#,
-        );
-        let e = validate_tag_graph(&mut cfg).unwrap_err();
+        // M7f: the tag graph runs inside `parse_single_config`,
+        // so the parse itself fails with the tag-graph message.
+        let e = crate::config::parse_single_config(
+            br#"{"profiles":{"a":{}},"outbounds":[{"type":"direct","tag":"castctl-direct:a"}]}"#,
+            "/tmp",
+        )
+        .unwrap_err();
         assert_eq!(
             e.message,
             "profile: tag \"castctl-direct:a\" (outbound) is reserved for castctl's synthesised direct outbounds (castctl-direct:<profile>); rename the tag"
         );
-        let mut cfg = cfg_from(
-            r#"{"profiles":{"a":{"outbound":{"type":"socks","tag":"castctl-direct:a","server":"127.0.0.1","server_port":1080}}}}"#,
-        );
-        let e = validate_tag_graph(&mut cfg).unwrap_err();
+        let e = crate::config::parse_single_config(
+            br#"{"profiles":{"a":{"outbound":{"type":"socks","tag":"castctl-direct:a","server":"127.0.0.1","server_port":1080}}}}"#,
+            "/tmp",
+        )
+        .unwrap_err();
         assert!(
             e.message.contains("inline outbound for profile a"),
             "message: {}",
@@ -330,52 +334,63 @@ mod tests {
 
     #[test]
     fn duplicates_and_dangling() {
-        let mut cfg = cfg_from(
-            r#"{"profiles":{"a":{}},"outbounds":[{"type":"direct","tag":"x"},{"type":"socks","tag":"x"}]}"#,
-        );
-        let e = validate_tag_graph(&mut cfg).unwrap_err();
+        // M7f: the tag graph runs inside `parse_single_config`;
+        // each fixture below fails the parse with the tag-graph
+        // message (the parse error IS the tag-graph error).
+        let e = crate::config::parse_single_config(
+            br#"{"profiles":{"a":{}},"outbounds":[{"type":"direct","tag":"x"},{"type":"socks","tag":"x"}]}"#,
+            "/tmp",
+        )
+        .unwrap_err();
         assert_eq!(
             e.message,
             "profile: duplicate outbound tag \"x\" (already outbound)"
         );
-        let mut cfg = cfg_from(r#"{"profiles":{"a":{"outbound":"ghost"}}}"#);
-        let e = validate_tag_graph(&mut cfg).unwrap_err();
+        let e = crate::config::parse_single_config(
+            br#"{"profiles":{"a":{"outbound":"ghost"}}}"#,
+            "/tmp",
+        )
+        .unwrap_err();
         assert_eq!(
             e.message,
             "profile: profile \"a\": outbound tag \"ghost\" does not exist"
         );
         // Detour dangles.
-        let mut cfg = cfg_from(
-            r#"{"profiles":{"a":{"outbound":"o1"}},"outbounds":[{"type":"socks","tag":"o1","server":"127.0.0.1","server_port":1080,"detour":"ghost"}]}"#,
-        );
-        let e = validate_tag_graph(&mut cfg).unwrap_err();
+        let e = crate::config::parse_single_config(
+            br#"{"profiles":{"a":{"outbound":"o1"}},"outbounds":[{"type":"socks","tag":"o1","server":"127.0.0.1","server_port":1080,"detour":"ghost"}]}"#,
+            "/tmp",
+        )
+        .unwrap_err();
         assert_eq!(
             e.message,
             "profile: outbound \"o1\": profile: dangling reference: detour \"ghost\" does not exist"
         );
         // Selector member dangles.
-        let mut cfg = cfg_from(
-            r#"{"profiles":{"a":{"outbound":"sel"}},"outbounds":[{"type":"selector","tag":"sel","outbounds":["ghost"]}]}"#,
-        );
-        let e = validate_tag_graph(&mut cfg).unwrap_err();
+        let e = crate::config::parse_single_config(
+            br#"{"profiles":{"a":{"outbound":"sel"}},"outbounds":[{"type":"selector","tag":"sel","outbounds":["ghost"]}]}"#,
+            "/tmp",
+        )
+        .unwrap_err();
         assert_eq!(
             e.message,
             "profile: outbound \"sel\": profile: dangling reference: outbound \"ghost\" does not exist"
         );
         // Endpoint detour dangles.
-        let mut cfg = cfg_from(
-            r#"{"profiles":{"a":{"outbound":"wg1"}},"endpoints":[{"type":"wireguard","tag":"wg1","detour":"ghost"}]}"#,
-        );
-        let e = validate_tag_graph(&mut cfg).unwrap_err();
+        let e = crate::config::parse_single_config(
+            br#"{"profiles":{"a":{"outbound":"wg1"}},"endpoints":[{"type":"wireguard","tag":"wg1","detour":"ghost"}]}"#,
+            "/tmp",
+        )
+        .unwrap_err();
         assert_eq!(
             e.message,
             "profile: endpoint \"wg1\": profile: dangling reference: detour \"ghost\" does not exist"
         );
         // DNS final dangles.
-        let mut cfg = cfg_from(
-            r#"{"profiles":{"a":{}},"dns":{"servers":[{"tag":"s1","type":"https","server":"1.1.1.1","server_port":443}],"final":"s2"}}"#,
-        );
-        let e = validate_tag_graph(&mut cfg).unwrap_err();
+        let e = crate::config::parse_single_config(
+            br#"{"profiles":{"a":{}},"dns":{"servers":[{"tag":"s1","type":"https","server":"1.1.1.1","server_port":443}],"final":"s2"}}"#,
+            "/tmp",
+        )
+        .unwrap_err();
         assert_eq!(
             e.message,
             "profile: dns final \"s2\" does not match any dns server tag"
@@ -402,10 +417,11 @@ mod tests {
             r#"{"profiles":{"a":{}},"dns":{"servers":[{"tag":"h","type":"hosts"},{"tag":"f","type":"fakeip"}],"final":"h"}}"#,
         );
         validate_tag_graph(&mut cfg).unwrap();
-        let mut cfg = cfg_from(
-            r#"{"profiles":{"a":{}},"dns":{"servers":[{"tag":"s1","type":"https","server":"1.1.1.1","server_port":443,"detour":"ghost"}],"final":"s1"}}"#,
-        );
-        let e = validate_tag_graph(&mut cfg).unwrap_err();
+        let e = crate::config::parse_single_config(
+            br#"{"profiles":{"a":{}},"dns":{"servers":[{"tag":"s1","type":"https","server":"1.1.1.1","server_port":443,"detour":"ghost"}],"final":"s1"}}"#,
+            "/tmp",
+        )
+        .unwrap_err();
         assert_eq!(
             e.message,
             "profile: dns server \"s1\": profile: dangling reference: detour \"ghost\" does not exist"

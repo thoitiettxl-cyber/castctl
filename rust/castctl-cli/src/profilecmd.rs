@@ -42,7 +42,6 @@ use castctl_config::config::{
     SingleConfig, load_profile, load_single_config, profile_exists, resolve_active_profile,
 };
 use castctl_config::configlocation::{ConfigLocation, config_lookup_env};
-use castctl_config::dnsvalidate::validate_single_config;
 use castctl_config::errors::ConfigError;
 use castctl_config::gopath::{go_clean, go_is_abs, go_join};
 use castctl_config::gostr::{go_quote, go_trim_space};
@@ -90,25 +89,6 @@ pub(crate) fn explicit_profile_selected(ctx: &Ctx<'_>, g: &GlobalOpts, positiona
     match config_lookup_env(ctx.getenv, PROFILE_ENV) {
         Some(v) => !go_trim_space(&v).is_empty(),
         None => false,
-    }
-}
-
-/// Load the single config plus the Go parse-time
-/// validation tail (`validate_single_config`: tag graph →
-/// profile DNS → WireGuard DNS → WireGuard keys). Go
-/// runs it at parse time; the Rust parser does not, so
-/// read paths run it explicitly before using the config.
-/// The validation also resolves each profile's outbound
-/// `type`/`from` (tag graph), which `profile list` prints.
-pub(crate) fn load_single_validated(base_dir: &str) -> Result<Option<SingleConfig>, FlowErr> {
-    let (single, _found) = load_single_config(base_dir).map_err(config_err)?;
-    crate::run::validate_webui_at_load(&single, base_dir)?;
-    match single {
-        None => Ok(None),
-        Some(mut cfg) => {
-            validate_single_config(&mut cfg).map_err(config_err)?;
-            Ok(Some(cfg))
-        }
     }
 }
 
@@ -178,10 +158,9 @@ fn profile_warnings(single: Option<&SingleConfig>, prof: &Profile) -> Vec<String
 }
 
 /// `tagDefined` (`profilecmd.go`): the tag names an entry
-/// in `outbounds` or `endpoints`. (Unreachable after
-/// `load_single_validated` — the tag graph already
-/// rejects dangling tags — but kept for fidelity: Go
-/// carries the same check.)
+/// in `outbounds` or `endpoints`. (Unreachable after the
+/// parse — the tag graph already rejects dangling tags —
+/// but kept for fidelity: Go carries the same check.)
 fn tag_defined(single: &SingleConfig, tag: &str) -> bool {
     let has = |entries: &[JsonValue]| {
         entries.iter().any(|e| {
@@ -207,7 +186,7 @@ fn json_bool(b: bool) -> JsonValue {
 pub(crate) fn run_list(ctx: &mut Ctx<'_>, g: &GlobalOpts) -> Result<(), FlowErr> {
     let loc = resolve_config(ctx, g, false)?;
     let active = resolve_active(ctx, g, &loc)?;
-    let single = load_single_validated(&loc.config_dir)?;
+    let (single, _found) = load_single_config(&loc.config_dir).map_err(config_err)?;
     let names = discover_profile_names(&loc.config_dir).map_err(config_err)?;
     let mut ordered: Vec<String> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
@@ -310,7 +289,7 @@ pub(crate) fn run_show(ctx: &mut Ctx<'_>, g: &GlobalOpts, p: &Parsed) -> Result<
         Some(n) => (n.clone(), true),
         None => (active.name.clone(), false),
     };
-    let single = load_single_validated(&loc.config_dir)?;
+    let (single, _found) = load_single_config(&loc.config_dir).map_err(config_err)?;
     if explicit_profile_selected(ctx, g, explicit)
         && !profile_exists(&loc.config_dir, &name, single.as_ref())
     {

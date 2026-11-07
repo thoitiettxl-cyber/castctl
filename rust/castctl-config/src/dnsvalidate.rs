@@ -1144,7 +1144,6 @@ pub fn outbound_identity_for_config(
 mod tests {
     use super::*;
     use crate::jsonvalue::decode_ordered_json;
-    use crate::taggraph::validate_tag_graph;
 
     fn cfg_from(json: &str) -> SingleConfig {
         crate::config::parse_single_config(json.as_bytes(), "/tmp").unwrap()
@@ -1185,8 +1184,10 @@ mod tests {
 
     #[test]
     fn global_compat_branch_warns() {
+        // M7f: the detour must be a real outbound (the tag graph
+        // runs in the parse); the profile uses it as its outbound.
         let cfg = cfg_from(
-            r#"{"profiles":{"a":{}},"dns":{"servers":[{"tag":"s1","type":"https","server":"1.1.1.1","server_port":443,"detour":"x"}],"final":"s1"}}"#,
+            r#"{"profiles":{"a":{"outbound":"d1"}},"outbounds":[{"type":"direct","tag":"d1"}],"dns":{"servers":[{"tag":"s1","type":"https","server":"1.1.1.1","server_port":443,"detour":"d1"}],"final":"s1"}}"#,
         );
         let p = prof(&cfg, "a");
         let r = resolve_profile_dns(&p, Some(&cfg)).unwrap();
@@ -1234,8 +1235,20 @@ mod tests {
             e.message
         );
         // Final naming local with no user-defined local: refuse.
-        let cfg = cfg_from(
-            r#"{"profiles":{"a":{"dns":{"servers":[{"tag":"s1","type":"https","server":"1.1.1.1","server_port":443}],"final":"local"}}}}"#,
+        // M7f: a config with `final: "local"` and no `local`
+        // server is rejected by the tag graph at parse time
+        // (`dns final "local" does not match any dns server tag
+        // in this profile's dns block`) — the same as Go — so
+        // this guard is exercised by mutating the parsed config
+        // in memory, bypassing the parse tail.
+        let mut cfg = cfg_from(
+            r#"{"profiles":{"a":{"outbound":"d1","dns":{"servers":[{"tag":"s1","type":"https","server":"1.1.1.1","server_port":443,"detour":"d1"}],"final":"s1"}}},"outbounds":[{"type":"direct","tag":"d1"}]}"#,
+        );
+        cfg.profiles.get_mut("a").unwrap().dns = Some(
+            decode_ordered_json(
+                br#"{"servers":[{"tag":"s1","type":"https","server":"1.1.1.1","server_port":443,"detour":"d1"}],"final":"local"}"#,
+            )
+            .unwrap(),
         );
         let p = prof(&cfg, "a");
         let e = resolve_profile_dns(&p, Some(&cfg)).unwrap_err();
@@ -1247,7 +1260,7 @@ mod tests {
         );
         // Non-local type tagged local: refuse.
         let cfg = cfg_from(
-            r#"{"profiles":{"a":{"dns":{"servers":[{"tag":"local","type":"https","server":"1.1.1.1","server_port":443}],"final":"local"}}}}"#,
+            r#"{"profiles":{"a":{"outbound":"d1","dns":{"servers":[{"tag":"local","type":"https","server":"1.1.1.1","server_port":443,"detour":"d1"}],"final":"local"}}},"outbounds":[{"type":"direct","tag":"d1"}]}"#,
         );
         let p = prof(&cfg, "a");
         let e = resolve_profile_dns(&p, Some(&cfg)).unwrap_err();
@@ -1257,8 +1270,20 @@ mod tests {
             e.message
         );
         // Clean user-defined local: reused, no synthesis.
-        let cfg = cfg_from(
-            r#"{"profiles":{"a":{"dns":{"servers":[{"tag":"local","type":"local"},{"tag":"s1","type":"https","server":"1.1.1.1","server_port":443}],"final":"s1"}}}}"#,
+        // M7f: a `local` server with a detour is refused by
+        // `ensureLocalBootstrapServer`, and one without a detour
+        // is refused by `validateProfileDNS` at parse time — the
+        // same contradiction exists in Go (`dns.go`), so this
+        // path is only reachable by mutating the parsed config
+        // in memory, bypassing the parse tail.
+        let mut cfg = cfg_from(
+            r#"{"profiles":{"a":{"outbound":"d1","dns":{"servers":[{"tag":"s1","type":"https","server":"1.1.1.1","server_port":443,"detour":"d1"}],"final":"s1"}}},"outbounds":[{"type":"direct","tag":"d1"}]}"#,
+        );
+        cfg.profiles.get_mut("a").unwrap().dns = Some(
+            decode_ordered_json(
+                br#"{"servers":[{"tag":"local","type":"local"},{"tag":"s1","type":"https","server":"1.1.1.1","server_port":443,"detour":"d1"}],"final":"s1"}"#,
+            )
+            .unwrap(),
         );
         let p = prof(&cfg, "a");
         let r = resolve_profile_dns(&p, Some(&cfg)).unwrap();
@@ -1268,24 +1293,26 @@ mod tests {
 
     #[test]
     fn validate_profile_dns_rules() {
-        // Detour missing.
-        let cfg = cfg_from(
-            r#"{"profiles":{"a":{"dns":{"servers":[{"tag":"s1","type":"https","server":"1.1.1.1","server_port":443}],"final":"s1"}}}}"#,
-        );
-        let e = validate_profile_dns(&cfg).unwrap_err();
+        // Detour missing. M7f: the tail runs inside the parse,
+        // so the parse itself fails with the profile-DNS message.
+        let e = crate::config::parse_single_config(
+            br#"{"profiles":{"a":{"dns":{"servers":[{"tag":"s1","type":"https","server":"1.1.1.1","server_port":443}],"final":"s1"}}}}"#,
+            "/tmp",
+        )
+        .unwrap_err();
         assert!(
             e.message.contains("has no detour"),
             "message: {}",
             e.message
         );
         // Detour unreachable (another profile's inline tag).
-        let mut cfg = cfg_from(
-            r#"{"profiles":{"a":{"dns":{"servers":[{"tag":"s1","type":"https","server":"1.1.1.1","server_port":443,"detour":"profile:b"}],"final":"s1"}},"b":{"outbound":{"type":"socks","tag":"profile:b","server":"127.0.0.1","server_port":1080}}}}"#,
-        );
         // Tag graph passes (inline tag exists); profile DNS
         // must refuse the foreign inline detour.
-        validate_tag_graph(&mut cfg).unwrap();
-        let e = validate_profile_dns(&cfg).unwrap_err();
+        let e = crate::config::parse_single_config(
+            br#"{"profiles":{"a":{"dns":{"servers":[{"tag":"s1","type":"https","server":"1.1.1.1","server_port":443,"detour":"profile:b"}],"final":"s1"}},"b":{"outbound":{"type":"socks","tag":"profile:b","server":"127.0.0.1","server_port":1080}}}}"#,
+            "/tmp",
+        )
+        .unwrap_err();
         assert!(
             e.message.contains("is not reachable"),
             "message: {}",
@@ -1296,18 +1323,26 @@ mod tests {
 
     #[test]
     fn validate_wireguard_dns_rules() {
-        let cfg = cfg_from(
-            r#"{"profiles":{"a":{"outbound":"wg1"}},"endpoints":[{"type":"wireguard","tag":"wg1"}],"wireguard_dns":{"ghost":["10.0.0.53"]}}"#,
-        );
-        let e = validate_wireguard_dns(&cfg).unwrap_err();
+        // M7f: the tail runs inside the parse, so the parse
+        // itself fails with the wireguard-DNS message.
+        let e = crate::config::parse_single_config(
+            br#"{"profiles":{"a":{"outbound":"wg1"}},"endpoints":[{"type":"wireguard","tag":"wg1"}],"wireguard_dns":{"ghost":["10.0.0.53"]}}"#,
+            "/tmp",
+        )
+        .unwrap_err();
         assert_eq!(
             e.message,
             "profile: wireguard_dns: endpoint tag \"ghost\" does not exist"
         );
-        let cfg = cfg_from(
-            r#"{"profiles":{"a":{"outbound":"wg1"}},"endpoints":[{"type":"socks","tag":"wg1"}],"wireguard_dns":{"wg1":["10.0.0.53"]}}"#,
-        );
-        let e = validate_wireguard_dns(&cfg).unwrap_err();
+        // A valid non-wireguard endpoint type (`socks` is not an
+        // endpoint type at all — the strict parse rejects it
+        // earlier — so use `tailscale` to keep testing the
+        // "not wireguard" branch).
+        let e = crate::config::parse_single_config(
+            br#"{"profiles":{"a":{"outbound":"wg1"}},"endpoints":[{"type":"tailscale","tag":"wg1"}],"wireguard_dns":{"wg1":["10.0.0.53"]}}"#,
+            "/tmp",
+        )
+        .unwrap_err();
         assert!(
             e.message.contains("not wireguard"),
             "message: {}",
@@ -1319,23 +1354,27 @@ mod tests {
     fn wireguard_private_key_sharing() {
         // Same key, two profiles, different tags: error
         // naming both profiles and both tags, never the key.
-        let cfg = cfg_from(
-            r#"{"profiles":{"a":{"outbound":"wg1"},"b":{"outbound":"wg2"}},"endpoints":[{"type":"wireguard","tag":"wg1","private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},{"type":"wireguard","tag":"wg2","private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}]}"#,
-        );
-        let e = validate_wireguard_private_keys(&cfg).unwrap_err();
+        // M7f: the tail runs inside the parse, so the parse
+        // itself fails with the key-sharing message.
+        let e = crate::config::parse_single_config(
+            br#"{"profiles":{"a":{"outbound":"wg1"},"b":{"outbound":"wg2"}},"endpoints":[{"type":"wireguard","tag":"wg1","private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},{"type":"wireguard","tag":"wg2","private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}]}"#,
+            "/tmp",
+        )
+        .unwrap_err();
         assert_eq!(
             e.message,
             "profile: wireguard private key shared by profiles \"a\" and \"b\" (endpoints \"wg1\" and \"wg2\"); each profile must use a distinct wireguard private key"
         );
         assert!(!e.message.contains("AAAA"), "message: {}", e.message);
         // Padding-bit variants decode to the same bytes.
-        let cfg = cfg_from(
-            r#"{"profiles":{"a":{"outbound":"wg1"},"b":{"outbound":"wg2"}},"endpoints":[{"type":"wireguard","tag":"wg1","private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},{"type":"wireguard","tag":"wg2","private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB="}]}"#,
-        );
+        let e = crate::config::parse_single_config(
+            br#"{"profiles":{"a":{"outbound":"wg1"},"b":{"outbound":"wg2"}},"endpoints":[{"type":"wireguard","tag":"wg1","private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},{"type":"wireguard","tag":"wg2","private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB="}]}"#,
+            "/tmp",
+        )
+        .unwrap_err();
         // Both decode to 32 zero bytes? "A...A=" vs "A...B=":
         // the last char differs in the padding bits; the
         // decoded bytes are both 32 zero bytes.
-        let e = validate_wireguard_private_keys(&cfg).unwrap_err();
         assert!(
             e.message.contains("shared by profiles"),
             "message: {}",
@@ -1349,10 +1388,11 @@ mod tests {
         // not two profiles). Verified live on cue: Go
         // `profile list` on this config exits 2 with the
         // same message.
-        let cfg = cfg_from(
-            r#"{"profiles":{"a":{"outbound":"wg1"},"b":{"outbound":"wg1"}},"endpoints":[{"type":"wireguard","tag":"wg1","private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}]}"#,
-        );
-        let e = validate_wireguard_private_keys(&cfg).unwrap_err();
+        let e = crate::config::parse_single_config(
+            br#"{"profiles":{"a":{"outbound":"wg1"},"b":{"outbound":"wg1"}},"endpoints":[{"type":"wireguard","tag":"wg1","private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}]}"#,
+            "/tmp",
+        )
+        .unwrap_err();
         assert_eq!(
             e.message,
             "profile: wireguard private key shared by profiles \"a\" and \"b\" (endpoints \"wg1\" and \"wg1\"); each profile must use a distinct wireguard private key"

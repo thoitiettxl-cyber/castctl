@@ -277,17 +277,6 @@ pub fn parse_wireguard_dns_map(
     Ok(out)
 }
 
-/// Shape check for the `webui` block: object only. Deeper validation
-/// (listen rule, token whitespace, `ui_dir` overlap) is deferred.
-///
-/// Source: `internal/profile/webui.go` (`parseWebUIBlock` head).
-pub fn check_webui_shape(value: &JsonValue) -> Result<(), ConfigError> {
-    match value {
-        JsonValue::Object(_) => Ok(()),
-        _ => Err(config_error("\"webui\" must be an object")),
-    }
-}
-
 /// `parsePluginsBlock` (`internal/profile/plugins.go:150`), tag/type
 /// presence and shape only: other keys are never inspected.
 pub fn parse_plugins_block(value: &JsonValue) -> Result<PluginsBlock, ConfigError> {

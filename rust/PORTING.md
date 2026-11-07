@@ -15394,3 +15394,534 @@ Note: `dev-rust` moved during this loop to `57fc7be`
 (PR #84, version stamp, `run.rs` only). PR #85 will
 need a rebase onto it; not done here (one commit on
 `feat/rust-m7d-fixloop1`, no push).
+## M7f — Load validation: Rust fail-closed like Go on every bad config (2026-11-07)
+
+Branch `feat/rust-m7f-load-validation`, base `dev-rust` `76518cb`
+(`76518cbe3f9691bc7fb9e06412f6b977591d7b8c`). Single writer, TDD
+RED→GREEN. No commit/push/PR by the writer (parent does that after
+Phase 3 review).
+
+### M7f.0 Baseline (cue, 2026-11-07, clean tree at 76518cb)
+
+- `cargo test --workspace` (with `CASTCTL_TEST_GO=/usr/local/go/bin/go`;
+  `/usr/local/bin/go` is a wrapper forcing `GOTOOLCHAIN=local`, which
+  breaks `loader_live` — see below): **1602 passed, 0 failed**
+  (66+ suites). The brief's "1602" was re-established, not trusted.
+- Baseline sweep (`/tmp/sweep.py`, 33 config cases × 2 argv +
+  44 argv on the ok config): **TOTAL=102, DIFFS=7** — the 7 map to
+  holes 1, 2, 4 (×2 argv) + hole 3 (only `keeper status`). Hole 5 is
+  invisible to the sweep (no `status`/`chat` argv yet).
+- `loader_live` 22/22 failure is ENVIRONMENTAL, not code: each test
+  panicked `go build echo failed: go: go.mod requires go >= 1.27.3
+  (running go 1.26.8; GOTOOLCHAIN=local)`. Root cause:
+  `/usr/local/bin/go` is a 74-byte shell wrapper (`export
+  GOTOOLCHAIN=local; exec /usr/local/go/bin/go "$@"`) installed
+  2026-10-23; `/usr/local/go/bin/go` is 1.26.8 but with
+  `GOTOOLCHAIN=auto` switches to cached 1.27.3. **All cue gate runs
+  must export `CASTCTL_TEST_GO=/usr/local/go/bin/go`.**
+- Baseline Rust binary kept on cue:
+  `/tmp/m7f-sweep/castctl-rs-76518cb`, sha256
+  `6b9f3a0d193a7874388edc788191d950b9fb1031ca614cb7d645dfe3384fdf06`.
+
+### M7f.1 The 5 holes (Pi's evidence, Go 0.9.0 vs Rust at 76518cb)
+
+1. `dns: []` — Go exit 2: `profile: parse dns: json: cannot unmarshal
+   array into Go value of type option.removedLegacyDNSOptions`. Rust 0.
+2. `dns: {"bogus": 1}` — Go exit 2: `profile: parse dns: bogus:
+   json: unknown field "bogus"`. Rust 0.
+3. `outbounds: [{"type":"direct","tag":"a"},{"type":"direct","tag":"a"}]`
+   — Go exit 2: `profile: duplicate outbound tag "a" (already
+   outbound)`. Rust 0 on keeper/runtime paths (`profile list` already
+   rejected it — the check existed, only on some paths).
+4. `outbounds: [{"tag":"a"}]` (missing `type`) — Go exit 2:
+   `profile: parse outbound: unknown outbound type: ` (trailing
+   space). Rust 0.
+5. (a) `{"profiles":{"p1":{}}}` no `default_profile`, argv
+   `status`/`chat`: Go exit 2 `profile "default" does not exist in
+   the single config file`; Rust exit 2 but AFTER dialing
+   (`{"error":"conn: auth_failed message_length=172",
+   "type":"cookies_missing"}`) — exit-code match is accidental.
+   (b) `{"default_profile":"p1","profiles":{}}` with bare dir
+   `profiles/p1/` present: Go exit 2 `profile "p1" does not exist
+   in the single config file` on `status`/`chat`; Rust exit 0,
+   enters chat UI. (c) `{"default_profile":"nope",
+   "profiles":{"p1":{}}}` bare `status`: both already exit 2 with
+   `profile: default_profile "nope" does not exist` — not a hole.
+
+### M7f.2 What was built
+
+- **Sing-box strict validator** (`rust/castctl-config/src/singbox.rs`,
+  ~3700 lines, GPL-3.0-only header; generated tables
+  `singbox_tables.rs` from `rust/parity/schema2.json` via
+  `rust/parity/gen_singbox_tables.py` — run the generator +
+  `cargo fmt` to regenerate (the generator output is not
+  formatted on its own); schema JSON is checked in under
+  `rust/parity/`). Schema provenance (fix loop 1):
+  `schema2.json` is a reflection dump of the sing-box v1.14.4
+  option registry (version per `go.mod`); the exact dump
+  command/tool and the sing-box checkout/commit used are
+  [NEEDS-MEASUREMENT] — the writer's scratch notes
+  (`~/workspace/tmp/castctl-rust-m7f-notes/singbox/`) hold
+  only copied Go sources, no dumper program or provenance
+  note. What IS known: the tables are reproducible via
+  generator + `cargo fmt` and were verified byte-identical by
+  two reviewers, and the red-team spot-verified the schema
+  against sing-box 1.14.4. See `rust/parity/README.md`.
+  The validator reproduces Go's `encoding/json` + contextjson-fork
+  + badjson decode semantics byte-for-byte for the error text:
+  struct/field paths (`Go struct field <Struct>.<Field> of type
+  <GoType>`), json paths (first simple key bare, `.key`,
+  `["key"]` Go-quoted, `[i]`), badjson `IsEmpty` filtering
+  (`{}`/`[]`/nested-all-empty dropped before strict decode),
+  `Listable[T]` paren errors `(single | array)`, custom-unmarshal
+  scalar types reporting inner type `string`, `TextUnmarshaler`
+  errors returned verbatim (no path) vs `ContextUnmarshaler`
+  errors saved (with path), `saveError` first-error-wins, and the
+  `1<<63` overflow thresholds of the sing `my_time.ParseDuration`
+  fork (incl. the `"d"` unit and the `-9223372036854775808ns` →
+  i64::MIN wrap). Netip (`ParseAddr`/`ParsePrefix`/`ParseAddrPort`)
+  and byte-unit tables (`unit`/`memory`/`network`) are ported from
+  the Go sources. DNS records: the miekg ZoneParser state machine
+  is ported for A/AAAA/CNAME/NS/PTR/MX/TXT/SOA/SRV (+ RFC3597 `\#`
+  form); other KNOWN types are accepted without deep rdata
+  validation; unknown types → `unknown RR type`; directives
+  (`$TTL` etc.) as a lone first token → `empty DNS record`
+  (see §M7f.4 for the scope decision).
+- **Wiring** (`parse_single_config`, `config.rs:243`): strict parse
+  in Go's order — outbounds → endpoints → dns → webui → profile
+  entries — then the tail in Go's order (`config.go:421-454`):
+  `validate_tag_graph` → G1 → `validate_profile_dns` →
+  `validate_wireguard_dns` → `validate_wireguard_private_keys` →
+  telegram → keeper → credentials → credential refs → plugins.
+  `load_single_validated` is DELETED (`profilecmd.rs`); its call
+  sites now use `load_single_config` directly. The redundant
+  `validate_single_config` calls in `toggle.rs:161`
+  (`read_config_state`) and `migrate.rs:829`
+  (`read_existing_single`) + `:1947` (re-parse closure) are deleted;
+  the `validate_single_config` fn itself stays (used by the
+  `migrate_detour_walk_shapes` idempotence tests) and
+  `validate_top_level_dns_shape` stays for hand-built distributed
+  blocks only (load path uses the strict sing-box parse).
+- **Webui deep validation** ported into the config crate
+  (`castctl-config/src/webui.rs`: `parseWebUIBlock` +
+  `validateWebUIListen` + `parseLoginRateLimitBlock` +
+  `DirOverlaps`, Go `webui.go:185-425`). It cannot live in the
+  webui crate: `castctl-config` does not depend on
+  `castctl-webui` (would be a cycle). The webui crate's
+  `parse_webui_block`/`validate_listen`/
+  `parse_login_rate_limit_block` now DELEGATE to the config
+  crate (types kept, all use sites unchanged). `check_webui_shape`
+  (shape-only) is deleted; `validate_webui_at_load` is deleted
+  from `run.rs` (373), `keepercmd.rs:101` + `:530`, `telegramcmd.rs:79`.
+  One divergence FIXED in the port: Rust's `IpAddr::is_loopback()`
+  is false for IPv4-mapped IPv6 (`::ffff:127.0.0.1`) while Go's
+  `net.ParseIP(...).IsLoopback()` is true (To4); the port uses
+  `ip.to_canonical().is_loopback()`.
+- **Identity in `build_runtime`** (`runtime.rs:231`): after
+  `resolve_active_profile`, when a single config exists,
+  `outbound_identity_for_config` (port of
+  `OutboundIdentityForConfig`, `identity.go:86-135`) runs BEFORE
+  `build_dialer` — i.e. before any dial. SourceNone (no single
+  config) skips the check and keeps running. This closes hole 5a
+  and 5b on every runtime path (`status`, `chat`, `history`,
+  …). The `profile test` prelude keeps its own explicit identity
+  call (same message): the prelude returns the error directly
+  with no JSON, while the runtime's check would route it through
+  `result.errors` — the duplication is intentional.
+- **Strict parse in `apply_set_endpoint` / `apply_set_outbound_object`**
+  (`profile_ops.rs`): Go's `applySetEndpoint` /
+  `applySetOutboundObject` call `parseEndpoint`/`parseOutbound`
+  before writing; Rust now calls `validate_endpoint_strict` /
+  `validate_outbound_strict` in exactly those spots. This closes
+  the [DEVIATION] noted in the module header.
+
+### M7f.3 Tail coverage table (R1's 169 checks, phases 0–F)
+
+Source: `~/workspace/tmp/castctl-rust-m7f-notes/r1-go-tail.md`.
+"Covered" means the Rust parse produces Go's exact message (and
+exit 2) on the violating fixture, verified by unit test, probe, or
+sweep. Order: first error wins in Go's code order; top-level and
+profile key scans are file order.
+
+- Phase 0 (file read: absent file → SourceNone/legacy; unreadable →
+  io error): covered (unchanged pre-M7f behaviour).
+- Phase A (JSON decode: malformed JSON, trailing data): covered
+  (`decode_ordered_object` errors already match Go).
+- Phase B (top-level shape: unknown keys, `default_profile` /
+  `profiles` types, `null` blocks): covered. `null` blocks give
+  Go's exact must-be messages (probed batch 13): `"outbounds"
+  must be an array`, `"log" must be an object`, `"keeper" must be
+  an array of entries`, `default_profile must be a string`, etc.
+- Phase C, block parses (fixed Go order):
+  - outbounds — covered (strict sing-box parse per element +
+    `outbound in "outbounds" must have a tag` after parse;
+    `wireguard` type rejected AFTER parse with the special
+    message, no `parse outbound:` prefix — probed batch 11).
+  - endpoints — covered (strict parse + `endpoint in "endpoints"
+    must have a tag` + wireguard `system:true` check after parse).
+  - dns — covered (strict parse incl. legacy `fakeip` check,
+    server/rule dispatch, record validation).
+  - wireguard_dns — covered (existing `parse_wireguard_dns_map`,
+    matches Go `parseWireGuardDNSMap`).
+  - log — covered (existing `parse_log_block`, incl. level enum).
+  - telegram — covered (existing `parse_telegram_block`).
+  - keeper — covered (existing `parse_keeper_block`, incl.
+    `parse_go_duration`).
+  - webui — covered (NEW port, §M7f.2).
+  - plugins — covered (existing `parse_plugins_block`).
+  - credentials — covered (existing `parse_credentials_block`).
+  - profile entries — covered (`parse_profile_entry` field order
+    matches Go; inline outbound strict-parsed after
+    `ensure_inline_tag`, error as-is with ONE prefix; per-profile
+    dns strict-parsed, wrapped `profile "<name>": profile: …`
+    with the DOUBLE prefix).
+- Phase D (profile entries, file order): covered (see above).
+- Phase E, tail validators (Go order `config.go:421-454`):
+  `validateTagGraph` → G1 → `validateProfileDNS` →
+  `validateWireGuardDNS` → `validateWireGuardPrivateKeys` →
+  `validateTelegram` → `validateKeeper` → `validateCredentials`
+  → `validateCredentialRefs` → `validatePlugins` — all covered;
+  all ten already existed in Rust and now run INSIDE
+  `parse_single_config` in Go's order (previously `load_single_validated`
+  ran the tail-4 AFTER the whole tail, so the order was wrong even
+  on "validated" paths).
+- Phase F (post-parse existence): `default_profile` existence
+  (`ResolveActiveProfile`, bare dir counts) covered (pre-existing);
+  explicit `--profile`/`CASTCTL_PROFILE` selection covered
+  (pre-existing); identity (`identityForProfile`) covered (NEW,
+  §M7f.2).
+
+Intentionally skipped (with reason):
+
+- **Legacy inbound fields check** (`Outbound.UnmarshalJSONContext`,
+  `option/outbound.go`): `legacy inbound fields are deprecated in
+  sing-box 1.11.0 and removed in sing-box 1.13.0, use rule actions
+  instead`. Empirical, not argued from the type graph: 150+ Go
+  probes (R1's 169 checks, phases 0–F) put `listen` /
+  `listen_port` / `udp_timeout` on every outbound type with zero
+  hits — the fields are `unknown field` errors on every outbound
+  type, and no outbound options type embeds `ListenOptions`.
+  (Schema grep agrees: only `OpenVPNServerEndpointOptions` has
+  such fields — it is an ENDPOINT, and the endpoint decoder
+  (`option/endpoint.go`) has NO such check.) Not implemented;
+  documented here.
+- **DNS record deep validation for exotic miekg types**: the state
+  machine + A/AAAA/CNAME/NS/PTR/MX/TXT/SOA/SRV are validated with
+  probed error shapes/columns; the 7 other KNOWN miekg types
+  (CAA, HTTPS/SVCB, NAPTR, DS, DNSKEY, TLSA, SSHFP) are accepted
+  without deep rdata validation; unknown types →
+  `unknown RR type`. Directives as a lone first token →
+  `empty DNS record` (no multi-line handling — `parseDNSRecord`
+  only ever sees the first record). Residual: those 7 types'
+  rdata corners and truncated-record corners (red-team F2:
+  Go exit 2, Rust exit 0 on garbage rdata for these types;
+  disclosed, out of proportion to fix — recorded only).
+- **Multi-violation ordering in map-iterating validators**:
+  `validateWireGuardDNS` and the inline/profile loops in
+  `validateTagGraph` iterate Go maps, so with ≥2 violations the
+  first error is nondeterministic per run (R1 §7.3). The checks
+  themselves are covered; no order tests are written on those
+  validators.
+
+### M7f.4 Decisions (self-decide, recorded)
+
+- D-M7f-1 (hole 5c bare dir): the sweep fixture copies Pi's test
+  cookie into `profiles/p1/cookies.txt`, so bare dir `profiles/p1/`
+  exists → `profileExists` is true in both Go and Rust → Go fails
+  at the identity check, Rust dialled. The fix is the identity
+  check in `build_runtime`, not a change to `profileExists`
+  (bare-dir counting is Go's behaviour, `config.go:1273-1296`).
+- D-M7f-2 (Go contradiction, `local` DNS servers):
+  `validateProfileDNS` requires a detour on EVERY per-profile
+  server including a `local`-type one, while
+  `ensureLocalBootstrapServer` refuses a `local` server WITH a
+  detour — the same contradiction exists in Go
+  (`dns.go:557-584` + `:291-303`). Both checks are ported
+  faithfully; the "clean user-defined local" path is only
+  reachable by mutating the parsed config in memory, bypassing
+  the parse tail. The `local_bootstrap_guards` tests document
+  this (cases 2 and 4 construct the config in memory).
+- D-M7f-3 (DNS record scope): see the intentionally-skipped entry
+  above — state machine + 9 types validated, other known types
+  accepted, directives → `empty DNS record`.
+- D-M7f-4 (legacy inbound fields): not implemented — see above.
+- D-M7f-5 (two CLI tests contradicted Go): `unknown_profile_is_typed_cookies_missing`
+  and `history_download_reaches_network_not_stub` expected
+  `cookies_missing` for a ghost/missing profile; Go probes on cue
+  2026-11-07 proved Go fails at identity first
+  (`profile "nosuch" does not exist in the single config file`;
+  `profile "default" does not exist in the single config file`,
+  exit 2, no download dir created). The first test was renamed to
+  `unknown_profile_fails_at_identity` and now asserts the identity
+  error byte-for-byte; the second keeps its intent (history
+  --download reaches the connector) by adding
+  `"default_profile":"no1"` to its fixture so identity passes.
+- D-M7f-6 (`test_debug_never_prints_secrets` fixture): the inline
+  `wireguard` outbound no longer parses (Go rejects wireguard as
+  an outbound); fixture changed to trojan
+  (`SECRET-TROJAN-PASSWORD`), which keeps the secret-in-raw-JSON
+  property the test asserts.
+- D-M7f-7 (profile test prelude): the explicit identity call is
+  kept (see §M7f.2) — removing it would change the error shape
+  (direct return, no JSON) to the runtime's JSON-wrapped shape.
+- D-M7f-8 (`auto-approve off` write serialization, pre-existing,
+  red-team F3): Go writes `cookies_file` as an absolute path and
+  adds `"auto_allow_once": false` to the profile entry when
+  writing the config back (335 bytes); Rust keeps the relative
+  `profiles/p1/cookies.txt` and omits the key (263 bytes).
+  Re-read equivalence holds (both forms are accepted by both
+  binaries; absent `auto_allow_once` = false). Cosmetic
+  file-byte difference, not behavioral; the write path is out
+  of M7f load-validation scope — recorded here, not fixed.
+
+### M7f.5 RED → GREEN (TDD, cue, 2026-11-07)
+
+- Config crate, 12 tests (`cargo test -p castctl-config
+  test_m7f`): **12 failed / 0 passed** before the fix (every test
+  panicked `called Result::unwrap_err() on an Ok value` — the
+  parse ACCEPTED every bad fixture), **12 passed / 0 failed**
+  after. Tests: `test_m7f_dns_array_rejected`,
+  `test_m7f_dns_unknown_field`, `test_m7f_duplicate_outbound_tag`,
+  `test_m7f_outbound_missing_type` (trailing space),
+  `test_m7f_outbound_missing_tag`,
+  `test_m7f_outbound_wireguard_type_rejected`,
+  `test_m7f_endpoint_missing_tag`,
+  `test_m7f_profile_dns_unknown_field`,
+  `test_m7f_inline_outbound_missing_type`,
+  `test_m7f_webui_deep_listen`,
+  `test_m7f_parse_error_beats_tail_error`,
+  `test_m7f_tag_graph_beats_g1`.
+- CLI crate, 2 tests (`cargo test -p castctl-cli --lib m7f`):
+  **2 failed / 0 passed** before, **2 passed / 0 failed** after:
+  `build_runtime_m7f_missing_default_profile_fails_before_dial`,
+  `build_runtime_m7f_bare_dir_profile_fails_before_dial`. Both
+  assert the `profile: …` stderr text, not just the exit code —
+  the old Rust code exited 2 AFTER dialing (`auth_failed`).
+- Sing-box validator unit tests: **38 passed / 0 failed**
+  (incl. the batch-14 first-token corners, probed against Go
+  0.9.0 on cue 2026-11-07: `bad owner name: "A" at line: 1:2`,
+  `"300"` at 1:4, `"IN"` at 1:3; lone `"A"` ok; `not a TTL:
+  "IN"` at 1:2; `unknown RR type: "\n"` at 1:20;
+  `expecting RR type or TTL, not this...: "\n"` at 1:16;
+  `"$TTL 300"` → `empty DNS record`).
+- Reworked tests (same messages, new seam): `taggraph.rs`
+  (3 tests now assert the parse error directly),
+  `dnsvalidate.rs` (profile-dns / WG-dns / WG-key tests),
+  `profile_ops.rs` (`set_outbound_paths` wireguard fixture
+  → valid endpoint shape — Go's `WireGuardEndpointOptions`
+  has NO `server`/`server_port` fields), `runtime.rs`
+  (`build_dialer_detour_is_exit_2` /
+  `build_dialer_unknown_tag_is_exit_2` now assert the load
+  error), `network.rs` (see D-M7f-5), `config.rs`
+  (`test_debug_never_prints_secrets`, see D-M7f-6).
+
+### M7f.6 Gates (cue, 2026-11-07, final head `cc6f5a3`)
+
+All gates were run twice: once at the pre-rebase head `76518cb` and
+again after the rebase onto `cc6f5a3` (see §M7f.8). Results below
+are the post-rebase run; the pre-rebase run gave the same numbers
+(test 1656/0, sweep 116/0, live 13/13 identical).
+
+- `cargo fmt --check`: 0 diff.
+- `cargo clippy --workspace --all-targets -- -D warnings`: 0 errors
+  (12 errors in `singbox.rs` found and fixed during the loop:
+  useless `format!`, redundant slicing, `?`-operator rewrites,
+  `is_multiple_of`, auto-deref, collapsed ifs/let-chains,
+  `assert_eq!(…, true)` in a test).
+- `cargo test --workspace` (with
+  `CASTCTL_TEST_GO=/usr/local/go/bin/go`): **66 suites, 1656
+  passed, 0 failed** (baseline at `76518cb` was 1602/0; +54 net
+  new tests). Includes `castctl-rs/tests/parity.rs` (2 passed):
+  the 59 golden cases, i.e. **46/46 `--help` byte-identical**
+  vs Go.
+- Release build: 0 errors (`Finished release profile`, 33s on
+  the rebase rebuild; binary stamped `castctl 0.9.0 (cc6f5a3
+  2026-11-07T11:35:26+07:00)`).
+- Live read-only parity (`/root/live-parity.py --rust
+  <release binary>`, profile `no.0`): **13/13 identical** (raw +
+  normalised + exit code). 11 commands exit 0 with identical
+  JSON; `goal` and `idea` (bare, missing required `id`) both
+  exit 2 with the identical `the following arguments are
+  required: id` error. The script prints `PASS 11 / FAIL 2`
+  because it only counts exit-0 rows as PASS — that is a
+  counting artifact of the script, not a behavioural
+  difference. (First live run hit a transient Go-side timeout:
+  Go `usage` hung 180s once; re-probed directly at 18s and the
+  re-run completed cleanly.)
+- `CARGO_TARGET_DIR=/tmp/m7f-writer-target`, deleted after the
+  final gate; `/` on cue kept > 6G (18G free at the last check;
+  the 15G baseline target dir and the 3.4G RED target dir were
+  deleted earlier in the session after their logs were saved).
+
+### M7f.7 Sweep
+
+- Script: `rust/parity/sweep_go_vs_rs.py` (copy of Pi's
+  `/tmp/sweep.py`, comparison logic unchanged) + hole-5 cases:
+  `hole5a_no_default`, `hole5b_bare_dir`,
+  `hole5c_dangling_default`, with `status`/`chat` argv ONLY on
+  fixtures expected to fail (never on a valid fixture).
+  `--profile p1` is only run where p1 is NOT in the single file
+  (hole5b); on hole5a/hole5c p1 IS in the single file, so an
+  explicit `--profile p1` would dial and is never run.
+- Baseline: TOTAL=102, DIFFS=7 (see §M7f.0).
+- After fix: **TOTAL=116, DIFFS=0** (102 baseline runs + 6
+  hole-5 `profile list` / `keeper status` runs + 8 hole-5
+  `status`/`chat` runs). Fix loop 1 adds the `red_privkey` B1
+  case (2 runs): **TOTAL=118, DIFFS=0** — see §M7f.9. The sweep script must be run with
+  stdin from `/dev/null`: bare `castctl` (empty argv) is the
+  chat REPL and blocks on stdin otherwise (first sweep run
+  timed out on the Go side for exactly this reason).
+- The five PR #90 sweeps were also re-run at the M7f head
+  (same release binary): `sweep_layouts` 110/0, `sweep_args`
+  75/0, `sweep_migrate` 10/0, `sweep_location` 18/0,
+  `sweep_webui_routes` 88/0.
+
+### M7f.8 Rebase onto dev-rust (Boss follow-up)
+
+Boss ordered a rebase onto `c4f0f5c` (PR #88, docs-only) before
+the PR. By the time the work finished, `origin/dev-rust` had
+advanced again to `cc6f5a3` (PR #90, differential sweeps,
+merged 2026-11-07 11:35), which CONTAINS `c4f0f5c`. Per the
+standing rule (rebase onto the new head, re-gate, don't stop)
+the branch was rebased onto `cc6f5a3` instead — this satisfies
+the Boss order (its target is an ancestor of the new head) and
+the standing rule. Method: `git stash push -u`, `git rebase
+origin/dev-rust` (fast-forward, no conflicts — the branch had
+no commits, only uncommitted work), `git stash pop` (clean,
+all 24 files back). PR #90 added 5 sweep scripts + `docs/
+differential-sweeps.md` + a `rust/README.md` section; it did
+NOT touch any file M7f edits, and it did not commit
+`sweep_go_vs_rs.py` (its commit message only records the
+102/7 baseline). All gates were re-run on the new head with
+identical results (see §M7f.6/§M7f.7). Final head:
+`cc6f5a3` (`cc6f5a3ac2796ec37ce9da31a736f6edab90363a`).
+
+Note for the PR (out of this task's scope, `rust/` +
+`PORTING.md` only): `docs/differential-sweeps.md` has a
+recorded-runs row for `76518cb` (102/**7**) and says the sweep
+is the M7f acceptance test (`DIFFS=0` at the M7f head). The
+M7f head's numbers for that table: `sweep_layouts` 110/0,
+`sweep_args` 75/0, `sweep_migrate` 10/0, `sweep_location`
+18/0, `sweep_webui_routes` 88/0, `sweep_go_vs_rs` **116/0**
+(116 cases, not 102 — the hole-5 cases were added). Whether
+to add that row (and the matching `docs/provenance.md` +
+`NOTICE` updates the repo AGENTS.md asks for) is for the
+parent to decide at PR time.
+
+### M7f.9 Fix loop 1 — B1 SafeString boundary + review nits (cue, 2026-11-07)
+
+Review round: red-team BLOCKING B1 (the ported `safe_string`
+existed but was never called on the CLI error path); technical
++ safety PASS-WITH-NITS. All fixes below are in the
+uncommitted diff at `cc6f5a3`; no commit/push/PR (parent).
+
+**B1 fix** — `safe_string` at the single CLI error-render
+boundary, mirroring Go `classifyError` (`commands.go:268-336`):
+
+- `render_flow_err` (`network.rs`) is now the single renderer
+  shared by the `run_inner` tail (`run.rs`) and the approve-all
+  handlers; its `Msg` arm renders
+  `castctl: {safe_string(m)}\n` (Go's plain-`cmdError` branch:
+  `"castctl: " + SummarizeErr`, and `SummarizeErr` is
+  `SafeString` for non-body errors). The `Verbatim` arm is NOT
+  redacted here: its only production constructor is `typed()`,
+  which `SafeString`s the summary BEFORE the JSON marshal
+  (Go marshals after redaction, so `<redacted>` becomes
+  `\u003credacted\u003e` in the JSON).
+- `auth export` guidance is `SafeString`d (Go's `ExportError`
+  branch): `hatch_sess=VALUE` → `hatch_sess=[redacted]`,
+  `other_name=other_value` untouched (probed on cue: exit 1,
+  stdout empty). The old `test_auth_export_guidance_exit_1`
+  asserted the raw guidance — it contradicted Go and now
+  asserts the redacted literal.
+- Left raw on purpose, with Go citations in the code:
+  pre-printed parser/usage lines and `castctl: warning:`
+  lines (Go's `parseOrHelp` / `commands.go:995` print those
+  without `SafeString`); chat `/login` + sign-in-failure
+  guidance (Go `Fprintln(stdout, Guidance)`,
+  `chat.go:352,428` — the guidance is chat output, not an
+  error). The sign-in summary (`chat.rs`) is allowlist-only
+  (`gateway_error_text` / empty), like `typed()`'s callers.
+
+**Port fix found by the differential probe** — the M1
+`safe_string` port was NOT exact in `url.rs` `parse_host`:
+it split the port at the FIRST `:` and rejected
+`socks5://user:s3cret@proxy.invalid:1080:` (trailing colon
+from `dial ...:1080: refused`), which Go accepts. Go 1.27.3
+`net/url.parseHost` (read from the toolchain source on cue,
+verified against the installed binary built with go1.27.3):
+port split at the first `:` — except with 2+ colons, where
+non-http(s) schemes use the LAST colon; `validOptionalPort`
+accepts an empty port; the scheme is lowercased at parse
+(`url.Scheme = strings.ToLower`), so `HTTP:` is strict like
+`http:`. Fixed in `url.rs` (`parse_host` is now
+scheme-aware) with regression cases in
+`probe_url_parse_serialize`. Known limit, recorded in the
+code: Go honours `GODEBUG=urlstrictcolons=0` (disables the
+http/https strict rule); the port always applies the default
+(strict) rule and does not read GODEBUG.
+
+**Differential verification** — 114-case corpus probed
+against Go 1.27.3's `SafeString` on cue (temp `cmd/m7fprobe`
+in a scratch clone, deleted after) vs the ported
+`safe_string` (temp integration test, deleted after):
+**DIFFS=0** after the fix (1 diff, then 2 more during the
+investigation — each fixed from Go source, never guessed).
+Corpus covers the 4 B1 exemplars, both negative controls,
+JSON/colon/equals/Basic/Bearer/URL/percent/cookie shapes,
+the token/key vocab boundary (`bearer_token` unredacted,
+`public_key: abc123456789` → `abc12345…`), and the
+`parseHost`/strict-colons/scheme-casing rules.
+
+**RED → GREEN (cue)** — 5 new CLI tests in `run.rs`
+(`m7f_fix1_b1_*`, `profile list`, Go-probed expected
+stderr, exit 2): **4 FAILED + 1 passed** (bearer control)
+before the fix (`private_key: json:` vs `[redacted]` in the
+assertion diff), **5 passed** after; `auth export` test
+passes with the redacted literal.
+
+**Nits closed** — §M7f.3 legacy-inbound justification
+rewritten to the empirical wording (150+ Go probes, zero
+hits); §M7f.3 DNS entry names the 7 non-deep-validated types
+(CAA, HTTPS/SVCB, NAPTR, DS, DNSKEY, TLSA, SSHFP); D-M7f-8
+records the pre-existing F3 `auto-approve off`
+write-serialization diff; `schema2.json` provenance in
+`rust/parity/README.md` + §M7f.2 (exact dump command
+[NEEDS-MEASUREMENT] — unrecoverable from the writer's
+scratch notes, which hold only copied Go sources);
+generator docstring + emitted tables header = generator +
+`cargo fmt` (regenerated tables: 1-line header diff only);
+sweep `run()` → `stdin=subprocess.DEVNULL`, docstring
+"offline" claim corrected (ARGS runs live reads,
+`seen abc` calls `chat.mark_seen`), cookie-copy note added;
+ONE new sweep case `red_privkey` (FAKE value only).
+
+**Gates (cue, 2026-11-07, head `cc6f5a3`, own
+`CARGO_TARGET_DIR=/tmp/m7f-fix1-target`, deleted after)** —
+`cargo fmt --check`: 0 (one width fix in a test, re-run
+green); `cargo clippy --workspace --all-targets -- -D
+warnings`: 0; `cargo test --workspace`
+(`CASTCTL_TEST_GO=/usr/local/go/bin/go`): **66 suites, 1661
+passed, 0 failed** (1656 baseline + 5 new B1 tests; the full
+suite ran on the pre-fmt-fix tree — the fmt fix is
+whitespace-only in one test, and the 5 B1 + auth-export
+tests were re-run green on the final tree); release build:
+0 (binary `castctl 0.9.0 (cc6f5a3 2026-11-07T11:35:26+07:00)`);
+`castctl-rs/tests/parity.rs`: `golden_parity` ok
+(**46/46 `--help` byte-identical**); sweep
+`parity/sweep_go_vs_rs.py`: **TOTAL=118, DIFFS=0** (116 + 2
+for `red_privkey`); live `/root/live-parity.py`:
+**13/13 identical** (11 exit-0 rows same/same; `goal`/`idea`
+exit 2/2 with the identical `arguments are required: id`
+error — the script prints `PASS 11 / FAIL 2` because it
+only counts exit-0 rows as PASS, a counting artifact; the
+first live run's Rust-side `usage` 180s timeout was a
+transient, the re-run completed cleanly); five PR #90
+sweeps: `sweep_migrate` 10/0, `sweep_args` 75/0,
+`sweep_layouts` 110/0, `sweep_location` 18/0,
+`sweep_webui_routes` 88/0. No prior gate regressed.
+
+Still open (disclosed, not fixed here): F2 exotic-DNS-rdata
+gap (§M7f.3, 7 types); the GODEBUG `urlstrictcolons=0`
+carve-out above; `docs/differential-sweeps.md` row for the
+PR (parent adds it at PR time).

@@ -35,6 +35,7 @@ use castctl_config::configlocation::{ConfigLocation, Getenv, resolve_config_loca
 use castctl_config::errors::ConfigError;
 use castctl_config::gostr::{go_quote, go_trim_space};
 use castctl_config::log::valid_log_level;
+use castctl_log_redact::safe_string;
 use std::path::Path;
 
 use crate::help_texts::*;
@@ -360,35 +361,12 @@ pub(crate) fn write_live(to_stderr: bool, text: &str) {
     }
 }
 
-/// Go's `LoadSingleConfig` parses the typed `webui` block with the
-/// config directory at load time (`internal/profile/webui.go:274-287`,
-/// the tail of `ParseSingleConfig`), so a block that breaks a rule
-/// (unknown key, listen not loopback, token empty, duration or limit
-/// floor, `ui_dir` overlap) fails EVERY command with exit 2 and the
-/// `profile: ` prefix — not only `webui serve`. The Rust config crate
-/// keeps the block raw and checks shape only, so the deep rule runs
-/// here, at the same point in the flow. `parse_webui_block` already
-/// prefixes each message with `profile: ` (Go's `newConfigError`), so
-/// the message passes through unchanged.
-pub(crate) fn validate_webui_at_load(
-    single: &Option<SingleConfig>,
-    base_dir: &str,
-) -> Result<(), FlowErr> {
-    let Some(raw) = single.as_ref().and_then(|c| c.webui_raw.as_ref()) else {
-        return Ok(());
-    };
-    castctl_webui::config::parse_webui_block(raw, std::path::Path::new(base_dir))
-        .map(|_| ())
-        .map_err(|e| msg(2, e))
-}
-
 pub(crate) fn resolve_and_load_single(
     ctx: &mut Ctx<'_>,
     g: &GlobalOpts,
 ) -> Result<(ConfigLocation, Option<SingleConfig>), FlowErr> {
     let loc = resolve_config(ctx, g, false)?;
     let (single, _found) = load_single_config(&loc.config_dir).map_err(config_err)?;
-    validate_webui_at_load(&single, &loc.config_dir)?;
     Ok((loc, single))
 }
 
@@ -587,24 +565,19 @@ fn run_inner(ctx: &mut Ctx<'_>, args: &[String]) -> Outcome {
         Ok(()) => {
             ctx.out.code = 0;
         }
-        Err(FlowErr::HelpShown) => {
-            ctx.out.code = 0;
-        }
-        Err(FlowErr::Exit(code)) => {
+        // The single CLI error-render boundary: every handler error
+        // is rendered through `render_flow_err`, which applies Go's
+        // `SafeString` to the error text — mirroring Go
+        // `classifyError` (`commands.go:268-336`), where the plain
+        // `cmdError` branch renders `"castctl: " + SummarizeErr`
+        // and the `ExportError` branch renders `SafeString`
+        // verbatim. Pre-printed parser/usage lines above are NOT
+        // redacted: Go's `parseOrHelp` prints those without
+        // `SafeString` too.
+        Err(e) => {
+            let (code, text) = crate::network::render_flow_err(&e);
             ctx.out.code = code;
-        }
-        Err(FlowErr::Verbatim { code, text }) => {
-            if !text.is_empty() {
-                ctx.out.stderr.push_str(&text);
-                ctx.out.stderr.push('\n');
-            }
-            ctx.out.code = code;
-        }
-        Err(FlowErr::Msg { code, message }) => {
-            if let Some(m) = message {
-                ctx.out.stderr.push_str(&format!("castctl: {m}\n"));
-            }
-            ctx.out.code = code;
+            ctx.out.stderr.push_str(&text);
         }
     }
     std::mem::take(&mut ctx.out)
@@ -940,9 +913,12 @@ fn cmd_auth(ctx: &mut Ctx<'_>, g: &GlobalOpts, args: &[String]) -> Result<(), Fl
         "export" => {
             // No checkPositionals: extra positionals are silently
             // ignored (Go quirk). No config resolution. The
-            // guidance prints on stderr with exit 1.
+            // guidance prints on stderr with exit 1 — through
+            // `SafeString`, like Go's `ExportError` branch of
+            // `classifyError` (M7f fix loop 1, B1: Go renders
+            // `hatch_sess=[redacted]`, probed on cue 2026-11-07).
             let _ = inline_parse(ctx, vec![], AUTH_EXPORT_HELP_TEXT, rest)?;
-            ctx.out.stderr.push_str(EXPORT_GUIDANCE);
+            ctx.out.stderr.push_str(&safe_string(EXPORT_GUIDANCE));
             ctx.out.stderr.push('\n');
             Err(FlowErr::Exit(1))
         }
@@ -1351,7 +1327,6 @@ fn serve_webui(_ctx: &mut Ctx<'_>, loc: &ConfigLocation) -> Result<(), FlowErr> 
     // (config_err, `profile: ` prefix); a legacy flat file
     // parses as "not found" → the no-config-file message.
     let (single, found) = load_single_config(&loc.config_dir).map_err(config_err)?;
-    validate_webui_at_load(&single, &loc.config_dir)?;
     if !found {
         return Err(msg(
             2,
@@ -2269,13 +2244,143 @@ mod tests {
 
     #[test]
     fn test_auth_export_guidance_exit_1() {
+        // M7f fix loop 1 (B1): Go renders the guidance through
+        // `SafeString` (`ExportError` branch of `classifyError`),
+        // so `hatch_sess=VALUE` becomes `hatch_sess=[redacted]`
+        // (probed on cue 2026-11-07, exit 1, stdout empty).
+        // `other_name=other_value` is untouched (not in the vocab).
+        // The old test asserted the raw guidance — that
+        // contradicted Go.
         let out = run_args(&["auth", "export"]);
         assert_eq!(out.code, 1);
-        assert_eq!(out.stderr, format!("{EXPORT_GUIDANCE}\n"));
+        assert_eq!(
+            out.stderr,
+            "cookie export is not available in this build: no automatic cookie extraction is implemented yet.\n\nLog in at https://muse.ai/ in your browser, leave the tab open, and run \"castctl auth export\" again after a cookie source exists.\n\nCopy the login by hand instead:\n  1. In your browser, open https://muse.ai/ and log in.\n  2. Open the browser developer tools and read the cookies for https://muse.ai/.\n  3. Write one line to the active profile's cookies.txt file:\n       hatch_sess=[redacted]; other_name=other_value\n     hatch_sess is required. Separate cookies with \"; \".\n  4. Set the file mode to 600.\n  5. Run \"castctl status\" to check the login.\n\nNo file was written or changed.\n"
+        );
         assert!(out.stdout.is_empty());
         // Extra positionals silently ignored (Go quirk).
         let out = run_args(&["auth", "export", "extra", "args"]);
         assert_eq!(out.code, 1);
+    }
+
+    /// M7f fix loop 1 (B1): run `profile list` against a single-config
+    /// fixture (sweep-style base profile + one bad block) with a fake
+    /// cookie file; the parse fails before any cookie read, so the
+    /// cookie content is irrelevant and the test is hermetic.
+    fn run_profile_list_with_cfg(tag: &str, cfg: &str) -> Outcome {
+        let dir = temp_home(tag);
+        std::fs::create_dir_all(dir.join("profiles/p1")).unwrap();
+        std::fs::write(dir.join("profiles/p1/cookies.txt"), "hatch_sess=FAKE\n").unwrap();
+        std::fs::write(dir.join("config.json"), cfg).unwrap();
+        let (_home, map) = isolated_env();
+        run_env(
+            &[
+                "--config",
+                dir.join("config.json").to_str().unwrap(),
+                "profile",
+                "list",
+            ],
+            map,
+        )
+    }
+
+    /// Sweep-style base profile shared by the B1 fixtures (same shape
+    /// as the Go probes on cue).
+    const B1_BASE: &str = r#"{"default_profile":"p1","profiles":{"p1":{"cookies_file":"profiles/p1/cookies.txt","node_id":"a4d787ca4a5a87d9","auto_approve":"always"}}}"#;
+
+    fn b1_cfg(extra: &str) -> String {
+        // Strip exactly ONE trailing `}` (the root close) so `extra`
+        // lands at the top level; `trim_end_matches` would eat all
+        // three trailing braces.
+        let mut base = B1_BASE[..B1_BASE.len() - 1].to_string();
+        base.push(',');
+        base.push_str(extra);
+        base.push('}');
+        base
+    }
+
+    #[test]
+    fn m7f_fix1_b1_private_key_redacted() {
+        // Go (probed on cue 2026-11-07, `profile list`, exit 2):
+        // `castctl: profile: parse outbound: private_key: [redacted]
+        // unknown field "private_key"` — Go renders every plain CLI
+        // error through `SafeString` (`classifyError` →
+        // `SummarizeErr`); Rust printed the raw `private_key: json:`.
+        let out = run_profile_list_with_cfg(
+            "m7f-red-privkey",
+            &b1_cfg(r#""outbounds":[{"type":"direct","tag":"d","private_key":5}]"#),
+        );
+        assert_eq!(out.code, 2);
+        assert!(out.stdout.is_empty());
+        assert_eq!(
+            out.stderr,
+            "castctl: profile: parse outbound: private_key: [redacted] unknown field \"private_key\"\n"
+        );
+    }
+
+    #[test]
+    fn m7f_fix1_b1_password_redacted() {
+        let out = run_profile_list_with_cfg(
+            "m7f-red-password",
+            &b1_cfg(
+                r#""outbounds":[{"type":"hysteria2","tag":"h","server":"example.com","server_port":443,"password":5}]"#,
+            ),
+        );
+        assert_eq!(out.code, 2);
+        assert!(out.stdout.is_empty());
+        assert_eq!(
+            out.stderr,
+            "castctl: profile: parse outbound: password: [redacted] cannot unmarshal number into Go struct field Hysteria2OutboundOptions.password of type string\n"
+        );
+    }
+
+    #[test]
+    fn m7f_fix1_b1_token_redacted() {
+        let out = run_profile_list_with_cfg(
+            "m7f-red-token",
+            &b1_cfg(r#""outbounds":[{"type":"direct","tag":"d","token":5}]"#),
+        );
+        assert_eq!(out.code, 2);
+        assert!(out.stdout.is_empty());
+        assert_eq!(
+            out.stderr,
+            "castctl: profile: parse outbound: token: [redacted] unknown field \"token\"\n"
+        );
+    }
+
+    #[test]
+    fn m7f_fix1_b1_dns_fragment_redacted() {
+        // The redacted token is not a secret at all (a docs anchor
+        // Go's backstop over-redacts), so only applying SafeString
+        // itself reproduces it — a validator-local "redact secret
+        // values" fix would not.
+        let out = run_profile_list_with_cfg(
+            "m7f-red-dns",
+            &b1_cfg(r#""dns":{"servers":[{"tag":"s","address":"1.1.1.1"}]}"#),
+        );
+        assert_eq!(out.code, 2);
+        assert!(out.stdout.is_empty());
+        assert_eq!(
+            out.stderr,
+            "castctl: profile: parse dns: servers[0]: legacy DNS server formats are deprecated in sing-box 1.12.0 and removed in sing-box 1.14.0, checkout migration: https://sing-box.sagernet.org/migration/#%5Bredacted%5D\n"
+        );
+    }
+
+    #[test]
+    fn m7f_fix1_b1_bearer_token_unredacted() {
+        // Negative control (probed on cue 2026-11-07): Go prints
+        // `bearer_token: json:` unredacted — the vocab has no
+        // `bearer_token` entry and it does not end in `_key`.
+        let out = run_profile_list_with_cfg(
+            "m7f-red-bearer",
+            &b1_cfg(r#""outbounds":[{"type":"direct","tag":"d","bearer_token":5}]"#),
+        );
+        assert_eq!(out.code, 2);
+        assert!(out.stdout.is_empty());
+        assert_eq!(
+            out.stderr,
+            "castctl: profile: parse outbound: bearer_token: json: unknown field \"bearer_token\"\n"
+        );
     }
 
     #[test]

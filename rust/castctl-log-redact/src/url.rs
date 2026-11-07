@@ -93,7 +93,13 @@ pub(crate) fn parse_url(raw: &str) -> Result<ParsedUrl, UrlParseError> {
             if !is_valid_scheme(cand) {
                 return Err(UrlParseError);
             }
-            scheme = cand.to_string();
+            // Go `net/url.parse` lowercases the scheme
+            // (`url.Scheme = strings.ToLower(url.Scheme)`) before
+            // `parseHost`, so the strict-colons scheme match sees the
+            // lowercase form and serialisation emits it lowercase.
+            // Scheme chars are ASCII-only (`is_valid_scheme`), so
+            // ASCII lowercasing equals Go's `strings.ToLower` here.
+            scheme = cand.to_ascii_lowercase();
             rest = &before_query[colon + 1..];
         }
     }
@@ -116,7 +122,7 @@ pub(crate) fn parse_url(raw: &str) -> Result<ParsedUrl, UrlParseError> {
             }
             None => authority,
         };
-        host = parse_host(hostport)?;
+        host = parse_host(hostport, &scheme)?;
     }
     // Path: validate escapes, keep decoded + raw forms.
     let path = unescape_bytes(path_raw.as_bytes())?;
@@ -140,6 +146,14 @@ pub(crate) fn parse_url(raw: &str) -> Result<ParsedUrl, UrlParseError> {
     })
 }
 
+/// Go `net/url.parseHost` strict-colons rule (go1.27): only the
+/// `http`/`https` schemes reject 2+ colons in the host. The scheme
+/// reaches `parseHost` lowercased (`parse` applies
+/// `strings.ToLower`), so the match is effectively case-insensitive.
+fn is_strict_colon_scheme(scheme: &str) -> bool {
+    scheme == "http" || scheme == "https"
+}
+
 fn is_valid_scheme(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
@@ -154,7 +168,7 @@ fn is_valid_scheme(s: &str) -> bool {
 /// address (plus an optional zone); unbracketed hosts must
 /// unescape cleanly to allowed characters, with a digits-only
 /// optional port.
-fn parse_host(hostport: &str) -> Result<String, UrlParseError> {
+fn parse_host(hostport: &str, scheme: &str) -> Result<String, UrlParseError> {
     if let Some(rest) = hostport.strip_prefix('[') {
         let close = rest.find(']').ok_or(UrlParseError)?;
         let inside = &rest[..close];
@@ -169,10 +183,29 @@ fn parse_host(hostport: &str) -> Result<String, UrlParseError> {
         }
         return Ok(hostport.to_string());
     }
-    // Unbracketed: split port at the first ':'; a second ':'
-    // lands in the port and fails the digits check.
-    let (host_part, port_part) = match hostport.find(':') {
-        Some(i) => (&hostport[..i], Some(&hostport[i + 1..])),
+    // Unbracketed: Go `net/url.parseHost` (go1.27) splits the port at
+    // the FIRST ':' — except with 2+ colons, where non-http(s) schemes
+    // use the LAST colon (go.dev/issue/75223, 78077: http/https keep
+    // the first colon, so the port check fails on the second colon).
+    // `validOptionalPort` accepts an empty port, so `host:` is valid.
+    // The scheme is lowercased by `parse` before `parseHost`, so
+    // `HTTP:` is strict too. (M7f fix loop 1: the old first-colon
+    // split rejected `socks5://user:s3cret@proxy.invalid:1080:`,
+    // which Go accepts; the fix-loop-1 differential corpus pins this.
+    // Known limit: Go honours `GODEBUG=urlstrictcolons=0`, which
+    // disables the http/https strict rule; this port always applies
+    // the default (strict) rule and does not read GODEBUG.)
+    let first = hostport.find(':');
+    let last = hostport.rfind(':');
+    let (host_part, port_part) = match first {
+        Some(i) => {
+            let split = if last != Some(i) && !is_strict_colon_scheme(scheme) {
+                last.unwrap()
+            } else {
+                i
+            };
+            (&hostport[..split], Some(&hostport[split + 1..]))
+        }
         None => (hostport, None),
     };
     if let Some(port) = port_part
@@ -658,6 +691,40 @@ mod probes {
                 Ok("https://example.com/a%252fb?x=[redacted]"),
             ),
             ("https://host:99999/x", Ok("https://host:99999/x")),
+            // M7f fix loop 1: Go `net/url.parseHost` splits the port
+            // at the FIRST ':' — except with 2+ colons, where
+            // non-http(s) schemes use the LAST colon, and
+            // `validOptionalPort` accepts an empty port (probed
+            // against Go 1.27.3 on cue 2026-11-07; the old
+            // first-colon split rejected
+            // `socks5://user:s3cret@proxy.invalid:1080:`).
+            // NOTE: `serialize_redacted` emits the userinfo marker
+            // as `%5Bredacted%5D` (Go `url.User("[redacted]")`
+            // serialisation); the full `safe_string` pipeline's
+            // pass 4 rewrites it to the literal `<redacted>` — so
+            // these expectations are `%5Bredacted%5D`, while the
+            // differential corpus (Go `SafeString` end-to-end)
+            // expects `<redacted>`.
+            (
+                "socks5://user:s3cret@proxy.invalid:1080:",
+                Ok("socks5://%5Bredacted%5D@proxy.invalid:1080:"),
+            ),
+            ("socks5://a:80:90/x", Ok("socks5://a:80:90/x")),
+            ("http://a:80:90/x", Err(())),
+            ("http://host:80:/x", Err(())),
+            ("http://host.example:/x", Ok("http://host.example:/x")),
+            ("http://[::1]:/x", Ok("http://[::1]:/x")),
+            ("http://[::1]:abc/x", Err(())),
+            // Scheme is lowercased by `parse` before `parseHost`
+            // (Go `url.Scheme = strings.ToLower(...)`), so `HTTP:`
+            // is strict like `http:`.
+            ("HTTP://a:80:90/x", Err(())),
+            ("Http://a:80:90/x", Err(())),
+            ("HTTP://example.com/x", Ok("http://example.com/x")),
+            (
+                "HTTP://user:pass@example.com/x?token=abc",
+                Ok("http://%5Bredacted%5D@example.com/x?token=[redacted]"),
+            ),
             ("https://example.com/%zz", Err(())),
             ("https://example.com/%2", Err(())),
             ("https://[::1/p?x=1", Err(())),

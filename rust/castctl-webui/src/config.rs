@@ -8,9 +8,11 @@
 //! `EffectiveListen`, `EffectiveSessionIdleTimeout`,
 //! `EffectiveLoginRateLimit`, `encodeWebUIBlock`).
 //!
-//! `castctl-config` only shape-checks the block (object);
-//! the typed validation is new code here. All error
-//! messages carry Go's `profile: ` prefix
+//! The parse is authoritative in `castctl-config`
+//! (`castctl_config::webui`): `parse_single_config` runs it
+//! at load time, so this crate delegates to it and converts
+//! the result into its own `WebUIConfig` type field by
+//! field. All error messages carry Go's `profile: ` prefix
 //! (`internal/profile/errors.go` `newConfigError`), because
 //! they surface verbatim in `stored config is invalid: ...`
 //! responses and in CLI exit-2 messages. Error texts name
@@ -22,8 +24,7 @@
 //! are rejected. Durations are nanosecond counts (`i64`);
 //! see [`crate::duration`].
 
-use crate::contain::dir_overlaps_lexical;
-use crate::duration::{HOUR_NS, MINUTE_NS, SECOND_NS, format_duration, parse_duration};
+use crate::duration::{HOUR_NS, MINUTE_NS, SECOND_NS, format_duration};
 use castctl_config::jsonvalue::JsonValue;
 use std::path::Path;
 
@@ -78,225 +79,48 @@ pub struct WebUIConfig {
     pub login_rate_limit: Option<LoginRateLimitConfig>,
 }
 
-fn config_error(msg: impl Into<String>) -> String {
-    format!("profile: {}", msg.into())
-}
-
 /// `validateWebUIListen`: the loopback-only listen rule.
-/// The value must be a bare host:port — not a URL, carrying
-/// no userinfo, query, or fragment — with a loopback host
-/// and an explicit port 1–65535. Returns the rule violated
-/// (never the supplied value).
+/// Delegates to the config crate (the parse-time authority);
+/// the rule text is returned unchanged.
 pub fn validate_listen(raw: &str) -> Result<(), String> {
-    let s = raw.trim();
-    if s.contains("://") {
-        return Err("must be a host:port, not a URL".to_string());
-    }
-    let (host, port_str) = split_host_port(s)
-        .ok_or_else(|| "must be a host:port with an explicit port".to_string())?;
-    if host.contains(['@', '/', '?', '#']) {
-        return Err("must not carry userinfo, a path, a query, or a fragment".to_string());
-    }
-    let port: i64 = match port_str.parse() {
-        Ok(p) => p,
-        Err(_) => return Err("port out of range".to_string()),
-    };
-    if !(1..=65535).contains(&port) {
-        return Err("port out of range".to_string());
-    }
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if !ip.is_loopback() {
-            return Err("host must be loopback".to_string());
-        }
-        return Ok(());
-    }
-    if !host.eq_ignore_ascii_case("localhost") {
-        return Err("host must be loopback".to_string());
-    }
-    Ok(())
-}
-
-/// Go `net.SplitHostPort` (host, port) or `None` on error:
-/// missing port, too many colons, unbalanced brackets.
-fn split_host_port(s: &str) -> Option<(&str, &str)> {
-    if let Some(bracketed) = s.strip_prefix('[') {
-        let close = bracketed.find(']')?;
-        let host = &bracketed[..close];
-        let rest = &bracketed[close + 1..];
-        let port = rest.strip_prefix(':')?;
-        if port.contains(':') {
-            return None;
-        }
-        return Some((host, port));
-    }
-    let (host, port) = s.split_once(':')?;
-
-    if port.contains(':') {
-        return None;
-    }
-    Some((host, port))
+    castctl_config::webui::validate_listen(raw)
 }
 
 /// Parse one `login_rate_limit` object
-/// (`parseLoginRateLimitBlock`). Unknown nested keys are
-/// rejected; wrong types and out-of-bound values are config
-/// errors.
+/// (`parseLoginRateLimitBlock`). Delegates to the config
+/// crate and converts the result field by field.
 pub fn parse_login_rate_limit_block(value: &JsonValue) -> Result<LoginRateLimitConfig, String> {
-    let JsonValue::Object(obj) = value else {
-        return Err(config_error("\"webui.login_rate_limit\" must be an object"));
-    };
-    let mut rl = LoginRateLimitConfig::default();
-    for (k, val) in obj.iter() {
-        match k.as_str() {
-            "attempts" => {
-                let JsonValue::Number(lit) = val else {
-                    return Err(config_error(
-                        "\"webui.login_rate_limit.attempts\" must be an integer",
-                    ));
-                };
-                let attempts: i64 = lit.parse().map_err(|_| {
-                    config_error(format!(
-                        "\"webui.login_rate_limit.attempts\" must be an integer from 1 to {MAX_LOGIN_RATE_LIMIT_ATTEMPTS}"
-                    ))
-                })?;
-                if !(1..=MAX_LOGIN_RATE_LIMIT_ATTEMPTS).contains(&attempts) {
-                    return Err(config_error(format!(
-                        "\"webui.login_rate_limit.attempts\" must be an integer from 1 to {MAX_LOGIN_RATE_LIMIT_ATTEMPTS}"
-                    )));
-                }
-                rl.attempts = attempts;
-                rl.attempts_set = true;
-            }
-            "window" => {
-                let JsonValue::Str(s) = val else {
-                    return Err(config_error(
-                        "\"webui.login_rate_limit.window\" must be a duration string",
-                    ));
-                };
-                if s.trim().is_empty() {
-                    return Err(config_error(
-                        "\"webui.login_rate_limit.window\" must not be empty",
-                    ));
-                }
-                let d = parse_duration(s).map_err(|_| {
-                    config_error(format!(
-                        "\"webui.login_rate_limit.window\" must be a duration string from {} to {}",
-                        format_duration(MIN_LOGIN_RATE_LIMIT_WINDOW_NS),
-                        format_duration(MAX_LOGIN_RATE_LIMIT_WINDOW_NS)
-                    ))
-                })?;
-                if !(MIN_LOGIN_RATE_LIMIT_WINDOW_NS..=MAX_LOGIN_RATE_LIMIT_WINDOW_NS).contains(&d) {
-                    return Err(config_error(format!(
-                        "\"webui.login_rate_limit.window\" must be a duration string from {} to {}",
-                        format_duration(MIN_LOGIN_RATE_LIMIT_WINDOW_NS),
-                        format_duration(MAX_LOGIN_RATE_LIMIT_WINDOW_NS)
-                    )));
-                }
-                rl.window_ns = d;
-                rl.window_set = true;
-            }
-            _ => {
-                return Err(config_error(format!(
-                    "unknown webui.login_rate_limit config key {k:?}"
-                )));
-            }
-        }
-    }
-    Ok(rl)
+    castctl_config::webui::parse_login_rate_limit_block(value)
+        .map(|rl| LoginRateLimitConfig {
+            attempts: rl.attempts,
+            attempts_set: rl.attempts_set,
+            window_ns: rl.window_ns,
+            window_set: rl.window_set,
+        })
+        .map_err(|e| e.message)
 }
 
 /// Parse a `webui` block value (`parseWebUIBlock`).
 /// `base_dir` is the config directory, for the lexical
 /// `ui_dir` overlap check (skipped when empty, mirroring
-/// Go's `baseDir != ""` guard).
+/// Go's `baseDir != ""` guard). Delegates to the config
+/// crate and converts the result field by field.
 pub fn parse_webui_block(value: &JsonValue, base_dir: &Path) -> Result<WebUIConfig, String> {
-    let JsonValue::Object(obj) = value else {
-        return Err(config_error("\"webui\" must be an object"));
-    };
-    let mut cfg = WebUIConfig::default();
-    for (k, val) in obj.iter() {
-        match k.as_str() {
-            "listen" => {
-                let JsonValue::Str(s) = val else {
-                    return Err(config_error("\"webui.listen\" must be a string"));
-                };
-                if s.trim().is_empty() {
-                    return Err(config_error("\"webui.listen\" must not be empty"));
-                }
-                validate_listen(s)
-                    .map_err(|rule| config_error(format!("\"webui.listen\" {rule}")))?;
-                cfg.listen = s.trim().to_string();
-            }
-            "token" => {
-                let JsonValue::Str(s) = val else {
-                    return Err(config_error("\"webui.token\" must be a string"));
-                };
-                if s.trim().is_empty() {
-                    return Err(config_error("\"webui.token\" must not be empty"));
-                }
-                if s.contains([' ', '\t', '\r', '\n']) {
-                    return Err(config_error("\"webui.token\" must not contain whitespace"));
-                }
-                cfg.token = s.clone();
-            }
-            "ui_dir" => {
-                let JsonValue::Str(s) = val else {
-                    return Err(config_error("\"webui.ui_dir\" must be a string"));
-                };
-                if s.trim().is_empty() {
-                    return Err(config_error("\"webui.ui_dir\" must not be empty"));
-                }
-                cfg.ui_dir = s.trim().to_string();
-            }
-            "session_idle_timeout" => {
-                let JsonValue::Str(s) = val else {
-                    return Err(config_error(
-                        "\"webui.session_idle_timeout\" must be a duration string",
-                    ));
-                };
-                if s.trim().is_empty() {
-                    return Err(config_error(
-                        "\"webui.session_idle_timeout\" must not be empty",
-                    ));
-                }
-                let d = parse_duration(s).map_err(|_| {
-                    config_error(format!(
-                        "\"webui.session_idle_timeout\" must be a duration string from {} to {}",
-                        format_duration(MIN_SESSION_IDLE_TIMEOUT_NS),
-                        format_duration(MAX_SESSION_IDLE_TIMEOUT_NS)
-                    ))
-                })?;
-                if !(MIN_SESSION_IDLE_TIMEOUT_NS..=MAX_SESSION_IDLE_TIMEOUT_NS).contains(&d) {
-                    return Err(config_error(format!(
-                        "\"webui.session_idle_timeout\" must be a duration string from {} to {}",
-                        format_duration(MIN_SESSION_IDLE_TIMEOUT_NS),
-                        format_duration(MAX_SESSION_IDLE_TIMEOUT_NS)
-                    )));
-                }
-                cfg.session_idle_timeout_ns = d;
-                cfg.session_idle_timeout_set = true;
-            }
-            "login_rate_limit" => {
-                cfg.login_rate_limit = Some(parse_login_rate_limit_block(val)?);
-            }
-            _ => {
-                return Err(config_error(format!("unknown webui config key {k:?}")));
-            }
-        }
-    }
-    if !cfg.ui_dir.is_empty() && !base_dir.as_os_str().is_empty() {
-        let resolved = if Path::new(&cfg.ui_dir).is_absolute() {
-            Path::new(&cfg.ui_dir).to_path_buf()
-        } else {
-            base_dir.join(&cfg.ui_dir)
-        };
-        if dir_overlaps_lexical(base_dir, &resolved) {
-            return Err(config_error(
-                "\"webui.ui_dir\" must not overlap the config directory",
-            ));
-        }
-    }
-    Ok(cfg)
+    castctl_config::webui::parse_webui_block(value, &base_dir.to_string_lossy())
+        .map(|cfg| WebUIConfig {
+            listen: cfg.listen,
+            token: cfg.token,
+            ui_dir: cfg.ui_dir,
+            session_idle_timeout_ns: cfg.session_idle_timeout_ns,
+            session_idle_timeout_set: cfg.session_idle_timeout_set,
+            login_rate_limit: cfg.login_rate_limit.map(|rl| LoginRateLimitConfig {
+                attempts: rl.attempts,
+                attempts_set: rl.attempts_set,
+                window_ns: rl.window_ns,
+                window_set: rl.window_set,
+            }),
+        })
+        .map_err(|e| e.message)
 }
 
 /// `ResolveWebUI`: re-check a parsed block (or a

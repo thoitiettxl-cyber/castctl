@@ -57,6 +57,26 @@ exactly `castctl 0.9.0`, asserts no leftover temp paths or stamps
 in the normalised outputs, and reports the first differing byte
 on mismatch.
 
+## `schema2.json` provenance (M7f)
+
+`rust/parity/schema2.json` is a reflection dump of the sing-box
+v1.14.4 option registry (version per the repo `go.mod`:
+`github.com/sagernet/sing-box v1.14.4`). It feeds
+`rust/parity/gen_singbox_tables.py`, which generates
+`rust/castctl-config/src/singbox_tables.rs` (the strict
+validator's field tables). To regenerate the tables: run the
+generator, then `cargo fmt` (the generator output is not
+formatted on its own), and check in the diff.
+
+The exact command/tool and the sing-box checkout/commit used
+to dump the schema are **[NEEDS-MEASUREMENT]**: the writer's
+scratch notes (`~/workspace/tmp/castctl-rust-m7f-notes/
+singbox/`) hold only copied Go sources, no dumper program or
+provenance note. What IS known: the tables are reproducible
+via generator + `cargo fmt` and were verified byte-identical
+by two reviewers, and the red-team spot-verified the schema
+against sing-box 1.14.4.
+
 ## Not covered
 
 The 34 subcommand `--help` cases (D-M2-6), any network behaviour,

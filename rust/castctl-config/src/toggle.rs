@@ -182,18 +182,17 @@ fn read_config_state(base_dir: &str) -> Result<(ConfigState, Vec<u8>), ConfigErr
     if !has_profiles_marker(&data)? {
         return Ok((state, data));
     }
-    let mut cfg = parse_single_config(&data, base_dir)?;
+    let cfg = parse_single_config(&data, base_dir)?;
     // Go `readConfigState` parses with `ParseSingleConfig`,
-    // which runs the FULL validation chain (tag graph →
-    // profile DNS → WireGuard DNS → WireGuard keys, plus
-    // the tail the Rust parser already runs). A config
-    // with a dangling tag or a bad DNS block therefore
-    // fails BEFORE any mutation closure runs — including
-    // AddProfile/RemoveProfile/SetOutbound — exactly as in
-    // Go. The closure's own re-validation (tag graph +
-    // WireGuard keys) still runs afterwards, mirroring
-    // Go's double validation.
-    crate::dnsvalidate::validate_single_config(&mut cfg)?;
+    // which runs the FULL validation chain (tag graph → G1
+    // → profile DNS → WireGuard DNS → WireGuard keys →
+    // telegram → keeper → credentials → credential refs →
+    // plugins). A config with a dangling tag or a bad DNS
+    // block therefore fails BEFORE any mutation closure
+    // runs — including AddProfile/RemoveProfile/SetOutbound
+    // — exactly as in Go. The closure's own re-validation
+    // (tag graph + WireGuard keys) still runs afterwards,
+    // mirroring Go's double validation.
     state.found = true;
     state.config = Some(cfg);
     Ok((state, data))

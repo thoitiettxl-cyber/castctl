@@ -24,18 +24,13 @@
 //! cookies file, or touches telegram/update files. A
 //! legacy layout is never written back to.
 //!
-//! [DEVIATION] `SetOutbound` cannot reproduce sing-box's
-//! `parseOutbound` / `parseEndpoint` (D-M2-1): the object
-//! is stored from its raw JSON after the structural checks
-//! Go does before parsing (wrapper rejection, `type`
-//! presence/shape, the WireGuard `system` refusal, the
-//! same-tag overwrite rules). An outbound object with an
-//! unknown `type`, or a socks object without a server, is
-//! therefore stored where Go would reject it at parse time
-//! — the same gap the config parser already carries, and
-//! the file is still rejected by Go on the next load. The
-//! tag-graph and WireGuard-key checks DO run at write
-//! time, exactly as in Go.
+//! M7f: `SetOutbound` runs sing-box's `parseOutbound` /
+//! `parseEndpoint` at write time, in Go's order
+//! (`profilecmd.go:431-501`): wrapper rejection and `type`
+//! presence/shape first, then the strict parse, then the
+//! WireGuard `system` refusal and the same-tag overwrite
+//! rules. The tag-graph and WireGuard-key checks run at
+//! write time too, exactly as in Go.
 
 use castctl_log_redact::redact_string;
 
@@ -379,6 +374,9 @@ fn apply_set_endpoint(
     obj: &OrderedObject,
 ) -> Result<(), ConfigError> {
     let (tagged, tag) = crate::profile::ensure_inline_tag(obj, &format!("profile:{}", p.name))?;
+    // Go `applySetEndpoint`: `parseEndpoint` runs before the
+    // `system` refusal.
+    crate::singbox::validate_endpoint_strict(&JsonValue::Object(tagged.clone()))?;
     if matches!(tagged.get("system"), Some(JsonValue::Bool(true))) {
         return Err(config_error(
             "wireguard endpoint \"system\": true is not supported; use userspace wireguard only",
@@ -405,8 +403,9 @@ fn apply_set_outbound_object(
         Some(JsonValue::Str(s)) => s.clone(),
         _ => String::new(),
     };
-    // [DEVIATION] Go parses through sing-box here
-    // (`parseOutbound`); see the module header.
+    // Go `applySetOutboundObject`: `parseOutbound` runs on the
+    // raw object first, before the tag branch.
+    crate::singbox::validate_outbound_strict(&JsonValue::Object(obj.clone()))?;
     if let Some(tag_val) = obj.get("tag") {
         match tag_val {
             JsonValue::Str(tag) if !tag.is_empty() => {
@@ -433,8 +432,10 @@ fn apply_set_outbound_object(
             }
         }
     }
-    // Untagged: inline, auto-tagged "profile:<name>".
+    // Untagged: inline, auto-tagged "profile:<name>"; Go
+    // re-parses the tagged object (`parseOutbound`).
     let (tagged, tag) = crate::profile::ensure_inline_tag(obj, &format!("profile:{}", p.name))?;
+    crate::singbox::validate_outbound_strict(&JsonValue::Object(tagged.clone()))?;
     p.outbound = OutboundRef {
         kind: OutboundKind::Inline,
         tag,
@@ -1207,10 +1208,14 @@ mod tests {
         assert_eq!(updated.outbound.typ, "socks");
         assert_eq!(updated.outbound.from, "outbound");
         // WireGuard (untagged): auto-tagged into endpoints.
+        // The endpoint shape is Go's `WireGuardEndpointOptions`:
+        // `address` + `peers`, never `server`/`server_port`
+        // (those are not endpoint fields — Go's `parseEndpoint`
+        // rejects them as unknown fields).
         let updated = set_outbound(
             dir.to_str().unwrap(),
             "no.0",
-            br#"{"type":"wireguard","private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","server":"10.0.0.1","server_port":51820}"#,
+            br#"{"type":"wireguard","private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","address":["10.0.0.2/32"],"peers":[{"address":"10.0.0.1","port":51820,"public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","allowed_ips":["0.0.0.0/0"]}]}"#,
         )
         .unwrap();
         assert_eq!(updated.outbound.kind, OutboundKind::Tag);
