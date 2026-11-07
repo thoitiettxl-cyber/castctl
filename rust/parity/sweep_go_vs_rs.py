@@ -149,6 +149,15 @@ NET_ARGS = {
 }
 LIVE = os.environ.get("SWEEP_LIVE") == "1"
 
+# argv that this build deliberately no longer implements: `webui`,
+# `telegram` and `plugin` are out of the agent-facing CLI
+# (rust/AGENT-CLI-SCOPE.md), and the top-level `--help` consequently
+# lists 43 commands where Go lists 46. They are SKIPPED, not
+# tolerated as diffs: a diff count must stay 0 for the surface both
+# binaries still share.
+DROPPED_CMDS = {"webui", "telegram", "plugin"}
+DROPPED_ARGV = {("--help",), ("-h",)}
+
 
 def run(binary, cwd, argv, cfgpath=None):
     full = [binary] + (["--config", cfgpath] if cfgpath else []) + argv
@@ -189,7 +198,11 @@ def main():
     # argv sweep on the ok config
     d = os.path.join(ROOT, "ok")
     skipped = 0
+    dropped = 0
     for argv in ARGS:
+        if argv and argv[0] in DROPPED_CMDS or tuple(argv) in DROPPED_ARGV:
+            dropped += 1
+            continue
         if not LIVE and tuple(argv) in NET_ARGS:
             skipped += 1
             continue
@@ -225,6 +238,7 @@ def main():
                     print("   out go=%r" % og[:160]); print("   out rs=%r" % orr[:160])
                 if eg != er:
                     print("   err go=%r" % eg[:160]); print("   err rs=%r" % er[:160])
-    print("TOTAL=%d DIFFS=%d skipped_live=%d" % (total, diffs, skipped))
+    print("TOTAL=%d DIFFS=%d skipped_live=%d skipped_dropped=%d"
+          % (total, diffs, skipped, dropped))
 
 main()
